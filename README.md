@@ -4,6 +4,17 @@ An agent focused virtual filesystem that exposes MCP servers and other things as
 
 ## macOS Setup
 
+### 0. Install Go 1.24
+
+The easiest way is the official Go installer:
+
+- Download and run the macOS pkg from https://go.dev/dl/
+- Restart your terminal and confirm:
+
+```bash
+go version
+```
+
 ### 1. Install FUSE-T
 
 ```bash
