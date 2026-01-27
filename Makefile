@@ -60,6 +60,17 @@ doctor:
 	@echo "=== Airstore Environment Check ==="
 	@echo ""
 	@echo "Tools:"
+	@printf "  go:        "; \
+		if command -v go >/dev/null 2>&1; then \
+			ver=$$(go version | sed -E 's/.*go([0-9]+\.[0-9]+).*/\1/'); \
+			if [ "$$(printf '%s\n' "$(GO_MIN_VERSION)" "$$ver" | sort -V | head -n1)" = "$(GO_MIN_VERSION)" ]; then \
+				echo "✓ ($$ver)"; \
+			else \
+				echo "✗ $$ver (need $(GO_MIN_VERSION)+)"; \
+			fi; \
+		else \
+			echo "✗ not found (need $(GO_MIN_VERSION)+)"; \
+		fi
 	@printf "  kubectl:   "; which kubectl >/dev/null 2>&1 && echo "✓" || echo "✗ not found"
 	@printf "  k3d:       "; which k3d >/dev/null 2>&1 && echo "✓" || echo "✗ not found"
 	@printf "  docker:    "; which docker >/dev/null 2>&1 && echo "✓" || echo "✗ not found"
@@ -106,10 +117,10 @@ clean:
 protocol:
 	@bash bin/gen_proto.sh
 
-fmt:
+fmt: check-go
 	go fmt ./...
 
-tidy:
+tidy: check-go
 	go mod tidy
 
 # ============================================================================
@@ -227,7 +238,7 @@ clean-all:
 	@k3d registry delete --all 2>/dev/null || true
 	@docker network prune -f 2>/dev/null || true
 
-.PHONY: check-go setup doctor build cli build-shim clean protocol fmt tidy \
+.PHONY: check-go setup doctor build cli shim clean protocol fmt tidy \
         test e2e e2e-check \
         k3d-up k3d-down k3d-rebuild use \
         gateway worker deploy undeploy restart \

@@ -68,9 +68,35 @@ k3d_up() {
   fi
 
   info "Creating cluster 'airstore'..."
+
+  # Clean up any stale resources from previous failed attempts
+  if docker network ls --format '{{.Name}}' | grep -q "^k3d-airstore$"; then
+    info "Cleaning up stale network 'k3d-airstore'..."
+    docker network rm k3d-airstore 2>/dev/null || true
+  fi
+  if docker volume ls --format '{{.Name}}' | grep -q "^k3d-airstore-images$"; then
+    info "Cleaning up stale volume 'k3d-airstore-images'..."
+    docker volume rm k3d-airstore-images 2>/dev/null || true
+  fi
   
-  # If registry already exists (from beta9), create cluster without registry
+  # If registry already exists, create cluster without registry creation
   if k3d registry list 2>/dev/null | grep -q "registry.localhost"; then
+    # Create k3s registries config to tell k3s where to find the registry
+    # Find the actual registry container name (could be k3d-registry.localhost or registry.localhost)
+    REGISTRY_CONTAINER=$(docker ps --filter "publish=5001" --format '{{.Names}}' | head -1)
+    if [ -z "$REGISTRY_CONTAINER" ]; then
+      REGISTRY_CONTAINER="k3d-registry.localhost"
+    fi
+    info "Using existing registry container: $REGISTRY_CONTAINER"
+    
+    REGISTRIES_CONFIG="$HOME/.airstore-k3d/registries.yaml"
+    cat > "$REGISTRIES_CONFIG" << EOF
+mirrors:
+  "registry.localhost:5000":
+    endpoint:
+      - "http://${REGISTRY_CONTAINER}:5000"
+EOF
+    
     # Create a temporary config without the registries block
     TMP_CONFIG=$(mktemp)
     awk '
@@ -81,16 +107,17 @@ k3d_up() {
       }
       {print}
     ' hack/k3d.yaml > "$TMP_CONFIG"
-
-    # Add registry use instead of create
-    cat >> "$TMP_CONFIG" << 'EOF'
-registries:
-  use:
-    - k3d-registry.localhost:5000
-EOF
     
-    k3d cluster create --config "$TMP_CONFIG"
+    # Create cluster with registry config volume mounted
+    k3d cluster create --config "$TMP_CONFIG" \
+      --volume "$REGISTRIES_CONFIG:/etc/rancher/k3s/registries.yaml@all"
     rm "$TMP_CONFIG"
+    
+    # Manually connect the existing registry to the cluster network
+    info "Connecting registry to cluster network..."
+    if ! docker network inspect k3d-airstore --format '{{range .Containers}}{{.Name}} {{end}}' | grep -q "$REGISTRY_CONTAINER"; then
+      docker network connect k3d-airstore "$REGISTRY_CONTAINER" 2>/dev/null || warn "Could not connect registry to network (may already be connected)"
+    fi
   else
     k3d cluster create --config hack/k3d.yaml
   fi
