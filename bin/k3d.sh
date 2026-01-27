@@ -43,6 +43,14 @@ k3d_up() {
   # Check if registry already exists (possibly shared with other k3d clusters)
   if k3d registry list 2>/dev/null | grep -q "registry.localhost"; then
     info "Registry 'registry.localhost' already exists. Reusing it."
+    # Ensure registry container exists and is running
+    if ! docker ps -a --format '{{.Names}}' | grep -q "^k3d-registry.localhost$"; then
+      warn "Registry container missing; skipping recreate."
+      warn "If cluster creation fails, run: k3d registry delete registry.localhost"
+    elif ! docker ps --format '{{.Names}}' | grep -q "^k3d-registry.localhost$"; then
+      info "Starting registry container..."
+      docker start k3d-registry.localhost >/dev/null
+    fi
   fi
 
   # Check if port 1994 is in use
@@ -63,11 +71,17 @@ k3d_up() {
   
   # If registry already exists (from beta9), create cluster without registry
   if k3d registry list 2>/dev/null | grep -q "registry.localhost"; then
-    # Create a temporary config without registry creation
+    # Create a temporary config without the registries block
     TMP_CONFIG=$(mktemp)
-    grep -v "create:" hack/k3d.yaml | grep -v "name: registry.localhost" | \
-      grep -v "hostPort:" | grep -v '\.airstore-k3d/registry' > "$TMP_CONFIG"
-    
+    awk '
+      /^registries:/ {skip=1; next}
+      skip {
+        if ($0 ~ /^[^[:space:]]/) {skip=0}
+        else {next}
+      }
+      {print}
+    ' hack/k3d.yaml > "$TMP_CONFIG"
+
     # Add registry use instead of create
     cat >> "$TMP_CONFIG" << 'EOF'
 registries:

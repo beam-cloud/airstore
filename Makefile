@@ -9,6 +9,31 @@ else
     BUILD_ENV := CGO_ENABLED=1
 endif
 
+# Go version requirement
+GO_MIN_VERSION := 1.24
+GO_CURRENT := $(shell go version 2>/dev/null | sed -E 's/.*go([0-9]+\.[0-9]+).*/\1/')
+
+.PHONY: check-go
+check-go:
+	@if ! command -v go >/dev/null 2>&1; then \
+		echo ""; \
+		echo "ERROR: Go is not installed."; \
+		echo ""; \
+		echo "Install Go $(GO_MIN_VERSION)+ from https://go.dev/dl/"; \
+		echo "See README.md for instructions."; \
+		echo ""; \
+		exit 1; \
+	fi
+	@if [ "$$(printf '%s\n' "$(GO_MIN_VERSION)" "$(GO_CURRENT)" | sort -V | head -n1)" != "$(GO_MIN_VERSION)" ]; then \
+		echo ""; \
+		echo "ERROR: Go $(GO_MIN_VERSION)+ required, but found $(GO_CURRENT)"; \
+		echo ""; \
+		echo "Install Go $(GO_MIN_VERSION)+ from https://go.dev/dl/"; \
+		echo "See README.md for instructions."; \
+		echo ""; \
+		exit 1; \
+	fi
+
 # ============================================================================
 # Quick Start
 # ============================================================================
@@ -49,18 +74,18 @@ doctor:
 # Build
 # ============================================================================
 
-build: shim
+build: check-go shim
 	go build -o bin/gateway ./cmd/gateway
 	go build -o bin/worker ./cmd/worker
 	go build -o bin/cli ./cmd/cli
 
-cli:
+cli: check-go
 	go build -o bin/cli ./cmd/cli
 
 SHIM_DIR := pkg/filesystem/vnode/embed/shims
 SHIM_SRC := ./cmd/tools/shim
 
-shim:
+shim: check-go
 	@mkdir -p $(SHIM_DIR)
 	@echo "Building shims..."
 	@GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o $(SHIM_DIR)/darwin_amd64 $(SHIM_SRC)
@@ -92,7 +117,7 @@ tidy:
 # ============================================================================
 
 # Unit tests (run locally, no cluster needed)
-test:
+test: check-go
 	$(BUILD_ENV) go test -v ./pkg/... -count=1
 
 # End-to-end tests (run against k3d cluster)
@@ -152,10 +177,10 @@ restart:
 # Development (local, no k8s)
 # ============================================================================
 
-dev-gateway:
+dev-gateway: check-go
 	go run ./cmd/gateway
 
-dev-worker:
+dev-worker: check-go
 	WORKER_ID=test-worker-1 GATEWAY_GRPC_ADDR=localhost:1993 go run ./cmd/worker
 
 # Okteto hot-reload
@@ -202,7 +227,7 @@ clean-all:
 	@k3d registry delete --all 2>/dev/null || true
 	@docker network prune -f 2>/dev/null || true
 
-.PHONY: setup doctor build cli build-shim clean protocol fmt tidy \
+.PHONY: check-go setup doctor build cli build-shim clean protocol fmt tidy \
         test e2e e2e-check \
         k3d-up k3d-down k3d-rebuild use \
         gateway worker deploy undeploy restart \
