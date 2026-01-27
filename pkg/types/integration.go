@@ -61,6 +61,30 @@ var integrations = map[ToolName]IntegrationMeta{
 		AuthType:    AuthOAuth,
 		Scope:       ScopeShared,
 	},
+	ToolGmail: {
+		Tool:        ToolGmail,
+		DisplayName: "Gmail",
+		Description: "Email access and management",
+		Icon:        "mail",
+		AuthType:    AuthOAuth,
+		Scope:       ScopePersonal,
+	},
+	ToolNotion: {
+		Tool:        ToolNotion,
+		DisplayName: "Notion",
+		Description: "Workspace pages and databases",
+		Icon:        "file-text",
+		AuthType:    AuthOAuth,
+		Scope:       ScopeShared,
+	},
+	ToolGDrive: {
+		Tool:        ToolGDrive,
+		DisplayName: "Google Drive",
+		Description: "Cloud file storage",
+		Icon:        "hard-drive",
+		AuthType:    AuthOAuth,
+		Scope:       ScopeShared,
+	},
 }
 
 // GetIntegrationMeta returns metadata for an integration

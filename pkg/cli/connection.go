@@ -31,11 +31,15 @@ var connectionAddCmd = &cobra.Command{
 
 Supported integration types:
   github    - GitHub (use --token with personal access token)
+  gmail     - Gmail (use --token with OAuth access token)
+  notion    - Notion (use --token with integration token)
+  gdrive    - Google Drive (use --token with OAuth access token)
   weather   - OpenWeatherMap (use --api-key)
   exa       - Exa AI search (use --api-key)
 
 Examples:
   cli connection add <ws> github --token ghp_xxxxxxxxxxxx
+  cli connection add <ws> notion --token secret_xxxxxxxxxxxx
   cli connection add <ws> weather --api-key abc123
   cli connection add <ws> github --token ghp_xxx --member <member_id>  # Personal connection`,
 	Args: cobra.ExactArgs(2),
@@ -53,12 +57,23 @@ Examples:
 			if !strings.HasPrefix(connToken, "ghp_") && !strings.HasPrefix(connToken, "github_pat_") {
 				fmt.Println("Warning: Token doesn't look like a GitHub PAT (expected ghp_* or github_pat_*)")
 			}
+		case "gmail", "gdrive":
+			if connToken == "" {
+				return fmt.Errorf("%s requires --token (OAuth access token)", integrationType)
+			}
+		case "notion":
+			if connToken == "" {
+				return fmt.Errorf("notion requires --token (integration token)")
+			}
+			if !strings.HasPrefix(connToken, "secret_") && !strings.HasPrefix(connToken, "ntn_") {
+				fmt.Println("Warning: Token doesn't look like a Notion integration token (expected secret_* or ntn_*)")
+			}
 		case "weather", "exa":
 			if connAPIKey == "" {
 				return fmt.Errorf("%s requires --api-key", integrationType)
 			}
 		default:
-			return fmt.Errorf("unknown integration type: %s", integrationType)
+			return fmt.Errorf("unknown integration type: %s\nSupported: github, gmail, notion, gdrive, weather, exa", integrationType)
 		}
 
 		client, err := getClient()

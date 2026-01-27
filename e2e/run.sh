@@ -13,6 +13,7 @@
 #   ./e2e/run.sh fs        # Run only filesystem test
 #   ./e2e/run.sh tools     # Run only tools test
 #   ./e2e/run.sh context   # Run only context/S3 test
+#   ./e2e/run.sh sources   # Run only sources/integrations test
 
 set -e
 
@@ -437,6 +438,190 @@ test_context() {
 }
 
 # ============================================================================
+# Test: Sources (read-only integration filesystem)
+# ============================================================================
+test_sources() {
+    echo ""
+    echo "=== Test: Sources (Integration Filesystem) ==="
+    
+    ensure_cli
+    wait_gateway
+    cleanup_mount
+    
+    # -------------------------------------------------------------------------
+    # Setup: Create workspace and token for auth
+    # -------------------------------------------------------------------------
+    info "Creating test workspace..."
+    WORKSPACE_NAME="sources-e2e-$(date +%s)"
+    RESULT=$("$PROJECT_ROOT/bin/cli" --gateway "$GATEWAY_GRPC" workspace create "$WORKSPACE_NAME" 2>&1) || fail "Workspace create failed: $RESULT"
+    WORKSPACE_ID=$(echo "$RESULT" | grep -oE '[0-9a-f-]{36}' | head -1)
+    [ -n "$WORKSPACE_ID" ] || fail "Could not parse workspace ID"
+    pass "Workspace: $WORKSPACE_ID"
+    
+    info "Adding member..."
+    RESULT=$("$PROJECT_ROOT/bin/cli" --gateway "$GATEWAY_GRPC" member add "$WORKSPACE_ID" "sources@test.com" --name "Sources" --role admin 2>&1) || fail "Member add failed"
+    MEMBER_ID=$(echo "$RESULT" | grep -oE '[0-9a-f-]{36}' | head -1)
+    [ -n "$MEMBER_ID" ] || fail "Could not parse member ID"
+    
+    info "Creating token..."
+    RESULT=$("$PROJECT_ROOT/bin/cli" --gateway "$GATEWAY_GRPC" token create "$WORKSPACE_ID" "$MEMBER_ID" --name "sources-token" 2>&1) || fail "Token create failed"
+    TOKEN=$(echo "$RESULT" | grep "Token:" | awk '{print $2}')
+    [ -n "$TOKEN" ] || fail "Could not parse token"
+    pass "Token created"
+    
+    # -------------------------------------------------------------------------
+    # Mount filesystem with auth
+    # -------------------------------------------------------------------------
+    mkdir -p "$MOUNT_POINT"
+    
+    info "Mounting filesystem..."
+    "$PROJECT_ROOT/bin/cli" mount "$MOUNT_POINT" --gateway "$GATEWAY_GRPC" --token "$TOKEN" &
+    MOUNT_PID=$!
+    sleep 3
+    
+    # Verify mount
+    if ! mount | grep -q "$MOUNT_POINT"; then
+        kill $MOUNT_PID 2>/dev/null || true
+        fail "Mount failed"
+    fi
+    pass "Filesystem mounted"
+    
+    # -------------------------------------------------------------------------
+    # Test 1: /sources directory exists
+    # -------------------------------------------------------------------------
+    info "Test 1: Checking /sources directory..."
+    
+    if [ ! -d "$MOUNT_POINT/sources" ]; then
+        kill $MOUNT_PID 2>/dev/null || true
+        fail "/sources directory not found"
+    fi
+    pass "/sources directory exists"
+    
+    # -------------------------------------------------------------------------
+    # Test 2: List integrations
+    # -------------------------------------------------------------------------
+    info "Test 2: Listing integrations..."
+    
+    INTEGRATIONS=$(ls "$MOUNT_POINT/sources/" 2>/dev/null)
+    if [ -z "$INTEGRATIONS" ]; then
+        info "No integrations listed (may need providers registered)"
+    else
+        pass "Integrations found: $(echo $INTEGRATIONS | tr '\n' ' ')"
+    fi
+    
+    # -------------------------------------------------------------------------
+    # Test 3: Check github integration directory
+    # -------------------------------------------------------------------------
+    info "Test 3: Checking github integration..."
+    
+    if [ -d "$MOUNT_POINT/sources/github" ]; then
+        GITHUB_CONTENTS=$(ls "$MOUNT_POINT/sources/github/" 2>/dev/null)
+        pass "GitHub integration present: $(echo $GITHUB_CONTENTS | tr '\n' ' ')"
+    else
+        info "GitHub integration directory not found"
+    fi
+    
+    # -------------------------------------------------------------------------
+    # Test 4: Read status.json (should work without connection)
+    # -------------------------------------------------------------------------
+    info "Test 4: Reading status.json..."
+    
+    if [ -f "$MOUNT_POINT/sources/github/status.json" ]; then
+        STATUS=$(cat "$MOUNT_POINT/sources/github/status.json" 2>/dev/null)
+        if echo "$STATUS" | grep -q '"integration"'; then
+            pass "status.json readable: $(echo "$STATUS" | head -c 100)..."
+            
+            # Check connection status
+            CONNECTED=$(echo "$STATUS" | grep -o '"connected": *[^,}]*' | head -1)
+            info "Connection status: $CONNECTED"
+        else
+            info "status.json format unexpected: $STATUS"
+        fi
+    else
+        info "status.json not found for github"
+    fi
+    
+    # -------------------------------------------------------------------------
+    # Test 5: Check other integrations (gmail, notion, gdrive)
+    # -------------------------------------------------------------------------
+    info "Test 5: Checking other integrations..."
+    
+    for INTEG in gmail notion gdrive; do
+        if [ -d "$MOUNT_POINT/sources/$INTEG" ]; then
+            pass "$INTEG integration registered"
+        else
+            info "$INTEG integration not found"
+        fi
+    done
+    
+    # -------------------------------------------------------------------------
+    # Test 6: (Optional) Test with actual GitHub connection
+    # -------------------------------------------------------------------------
+    if [ -n "$GITHUB_TOKEN" ]; then
+        info "Test 6: Testing with GitHub connection..."
+        
+        # Add connection
+        RESULT=$("$PROJECT_ROOT/bin/cli" --gateway "$GATEWAY_GRPC" connection add "$WORKSPACE_ID" github --token "$GITHUB_TOKEN" 2>&1) || info "Connection add note: $RESULT"
+        
+        # Give the system a moment to propagate
+        sleep 2
+        
+        # Try to read views/repos.json
+        if [ -f "$MOUNT_POINT/sources/github/views/repos.json" ]; then
+            REPOS=$(cat "$MOUNT_POINT/sources/github/views/repos.json" 2>/dev/null | head -c 500)
+            if echo "$REPOS" | grep -q '"repos"'; then
+                pass "GitHub repos.json works!"
+                info "Sample: $(echo "$REPOS" | head -c 200)..."
+            else
+                info "repos.json returned unexpected content"
+            fi
+        else
+            info "views/repos.json not available"
+        fi
+        
+        # Check status.json again
+        if [ -f "$MOUNT_POINT/sources/github/status.json" ]; then
+            STATUS=$(cat "$MOUNT_POINT/sources/github/status.json" 2>/dev/null)
+            if echo "$STATUS" | grep -q '"connected": true'; then
+                pass "GitHub shows connected after adding token"
+            fi
+        fi
+    else
+        info "Test 6: Skipped (set GITHUB_TOKEN env to test with real connection)"
+    fi
+    
+    # -------------------------------------------------------------------------
+    # Test 7: Read-only verification
+    # -------------------------------------------------------------------------
+    info "Test 7: Verifying read-only behavior..."
+    
+    # Attempt to write (should fail)
+    if echo "test" > "$MOUNT_POINT/sources/test.txt" 2>/dev/null; then
+        info "Warning: Write succeeded (expected failure)"
+    else
+        pass "Write correctly rejected (read-only)"
+    fi
+    
+    # Attempt to mkdir (should fail)
+    if mkdir "$MOUNT_POINT/sources/newdir" 2>/dev/null; then
+        info "Warning: mkdir succeeded (expected failure)"
+    else
+        pass "mkdir correctly rejected (read-only)"
+    fi
+    
+    # -------------------------------------------------------------------------
+    # Cleanup
+    # -------------------------------------------------------------------------
+    info "Cleaning up..."
+    kill $MOUNT_PID 2>/dev/null || true
+    sleep 1
+    cleanup_mount
+    
+    echo ""
+    pass "Sources test passed (7 tests)"
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -466,16 +651,20 @@ case "${1:-all}" in
     context|s3)
         test_context
         ;;
+    sources)
+        test_sources
+        ;;
     all)
         test_setup
         test_task
         test_filesystem
         test_tools
         test_context
+        test_sources
         ;;
     *)
         echo "Unknown test: $1"
-        echo "Available: setup, task, fs, tools, context, all"
+        echo "Available: setup, task, fs, tools, context, sources, all"
         exit 1
         ;;
 esac

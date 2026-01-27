@@ -16,6 +16,8 @@ import (
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 var (
@@ -30,7 +32,8 @@ var mountCmd = &cobra.Command{
 
 The filesystem provides:
   /tools/*           - Virtual tool binaries (github, weather, exa, etc.)
-  /.airstore/config - Configuration for tools
+  /sources/*         - Read-only integration sources (github, etc.)
+  /.airstore/config  - Configuration for tools
 
 This command blocks until the filesystem is unmounted (Ctrl+C).
 
@@ -137,6 +140,20 @@ Examples:
 
 		toolsNode := vnode.NewToolsVNode(effectiveGatewayAddr, shim)
 		fs.RegisterVNode(toolsNode)
+
+		// Create gRPC connection for sources vnode
+		sourcesConn, err := grpc.NewClient(
+			effectiveGatewayAddr,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		if err != nil {
+			if gw != nil {
+				gw.Shutdown()
+			}
+			return fmt.Errorf("failed to create sources connection: %w", err)
+		}
+		sourcesNode := vnode.NewSourcesVNodeGRPC(sourcesConn, authToken)
+		fs.RegisterVNode(sourcesNode)
 
 		if mountVerbose {
 			log.Debug().Str("platform", embed.Current().String()).Int("shim_bytes", len(shim)).Msg("vnodes registered")

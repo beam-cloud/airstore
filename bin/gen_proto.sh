@@ -79,5 +79,16 @@ protoc \
     --go-grpc_opt=paths=source_relative \
     ./proto/gateway.proto
 
+# Generate sources service
+protoc \
+    -I $PROTOC_INCLUDE_PATH \
+    -I ./googleapis \
+    -I ./proto \
+    --go_out=./proto \
+    --go_opt=paths=source_relative \
+    --go-grpc_out=./proto \
+    --go-grpc_opt=paths=source_relative \
+    ./proto/sources.proto
+
 echo "Proto generation complete!"
 

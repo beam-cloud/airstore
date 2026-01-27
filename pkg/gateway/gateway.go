@@ -22,6 +22,8 @@ import (
 	"github.com/beam-cloud/airstore/pkg/gateway/services"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/scheduler"
+	"github.com/beam-cloud/airstore/pkg/sources"
+	"github.com/beam-cloud/airstore/pkg/sources/providers"
 	"github.com/beam-cloud/airstore/pkg/tools"
 	_ "github.com/beam-cloud/airstore/pkg/tools/builtin" // self-registering tools
 	"github.com/beam-cloud/airstore/pkg/tools/clients"
@@ -42,9 +44,10 @@ type Gateway struct {
 	baseRouteGroup *echo.Group
 	rootRouteGroup *echo.Group
 
-	scheduler    *scheduler.Scheduler
-	toolRegistry *tools.Registry
-	mcpManager   *tools.MCPManager
+	scheduler      *scheduler.Scheduler
+	toolRegistry   *tools.Registry
+	sourceRegistry *sources.Registry
+	mcpManager     *tools.MCPManager
 }
 
 func NewGateway() (*Gateway, error) {
@@ -89,13 +92,14 @@ func NewGateway() (*Gateway, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	gateway := &Gateway{
-		Config:       config,
-		RedisClient:  redisClient,
-		BackendRepo:  backendRepo,
-		ctx:          ctx,
-		cancelFunc:   cancel,
-		toolRegistry: tools.NewRegistry(),
-		mcpManager:   tools.NewMCPManager(),
+		Config:         config,
+		RedisClient:    redisClient,
+		BackendRepo:    backendRepo,
+		ctx:            ctx,
+		cancelFunc:     cancel,
+		toolRegistry:   tools.NewRegistry(),
+		sourceRegistry: sources.NewRegistry(),
+		mcpManager:     tools.NewMCPManager(),
 	}
 
 	return gateway, nil
@@ -253,6 +257,14 @@ func (g *Gateway) registerServices() error {
 		pb.RegisterGatewayServiceServer(g.grpcServer, gatewayService)
 		log.Info().Msg("gateway service registered")
 	}
+
+	// Register source providers
+	g.initSources()
+
+	// Register sources gRPC service (read-only integration access)
+	sourceService := services.NewSourceService(g.sourceRegistry, g.BackendRepo)
+	pb.RegisterSourceServiceServer(g.grpcServer, sourceService)
+	log.Info().Int("providers", len(g.sourceRegistry.List())).Strs("available", g.sourceRegistry.List()).Msg("sources service registered")
 
 	// Register task and workspace APIs (requires Postgres)
 	if g.BackendRepo != nil {
@@ -426,6 +438,21 @@ func (g *Gateway) Scheduler() *scheduler.Scheduler {
 // ToolRegistry returns the tool registry for registering providers
 func (g *Gateway) ToolRegistry() *tools.Registry {
 	return g.toolRegistry
+}
+
+// SourceRegistry returns the source registry for registering providers
+func (g *Gateway) SourceRegistry() *sources.Registry {
+	return g.sourceRegistry
+}
+
+// initSources initializes source providers
+func (g *Gateway) initSources() {
+	// Register source providers (all use connection-based auth)
+	g.sourceRegistry.Register(providers.NewGitHubProvider())
+	g.sourceRegistry.Register(providers.NewGmailProvider())
+	g.sourceRegistry.Register(providers.NewNotionProvider())
+	g.sourceRegistry.Register(providers.NewGDriveProvider())
+	log.Debug().Strs("providers", g.sourceRegistry.List()).Msg("source providers registered")
 }
 
 // initTools initializes the tool system by loading schemas and registering clients

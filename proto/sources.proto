@@ -1,0 +1,85 @@
+syntax = "proto3";
+
+option go_package = "github.com/beam-cloud/airstore/proto";
+
+package sources;
+
+// SourceService provides read-only access to integration sources.
+// The workspace is determined by the auth token - paths are relative to /sources.
+service SourceService {
+  // Stat returns file/directory attributes for a source path
+  rpc Stat(SourceStatRequest) returns (SourceStatResponse);
+  
+  // ReadDir lists directory contents with enriched metadata
+  rpc ReadDir(SourceReadDirRequest) returns (SourceReadDirResponse);
+  
+  // Read reads file content from a source
+  rpc Read(SourceReadRequest) returns (SourceReadResponse);
+  
+  // Readlink reads a symbolic link target (for friendly aliases)
+  rpc Readlink(SourceReadlinkRequest) returns (SourceReadlinkResponse);
+}
+
+// SourceFileInfo contains file/directory metadata
+message SourceFileInfo {
+  int64 size = 1;
+  uint32 mode = 2;
+  int64 mtime = 3;  // Unix timestamp
+  bool is_dir = 4;
+  bool is_link = 5;
+}
+
+// SourceDirEntry represents a directory entry with full metadata
+message SourceDirEntry {
+  string name = 1;
+  uint32 mode = 2;
+  bool is_dir = 3;
+  int64 size = 4;
+  int64 mtime = 5;  // Unix timestamp
+}
+
+// Stat
+message SourceStatRequest {
+  string path = 1;  // Path relative to /sources (e.g., "github/views/repos.json")
+}
+
+message SourceStatResponse {
+  bool ok = 1;
+  string error = 2;
+  SourceFileInfo info = 3;
+}
+
+// ReadDir
+message SourceReadDirRequest {
+  string path = 1;
+}
+
+message SourceReadDirResponse {
+  bool ok = 1;
+  string error = 2;
+  repeated SourceDirEntry entries = 3;
+}
+
+// Read
+message SourceReadRequest {
+  string path = 1;
+  int64 offset = 2;
+  int64 length = 3;  // 0 means read to end
+}
+
+message SourceReadResponse {
+  bool ok = 1;
+  string error = 2;
+  bytes data = 3;
+}
+
+// Readlink
+message SourceReadlinkRequest {
+  string path = 1;
+}
+
+message SourceReadlinkResponse {
+  bool ok = 1;
+  string error = 2;
+  string target = 3;
+}

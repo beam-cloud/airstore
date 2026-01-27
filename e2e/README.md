@@ -17,6 +17,7 @@ make e2e
 ./e2e/run.sh fs       # FUSE filesystem mount
 ./e2e/run.sh tools    # Tool execution via filesystem
 ./e2e/run.sh context  # S3 context storage (LocalStack)
+./e2e/run.sh sources  # Integration sources (/sources)
 ```
 
 ## Tests
@@ -28,6 +29,7 @@ make e2e
 | `fs` | Mount FUSE filesystem, verify directories |
 | `tools` | Execute Wikipedia tool via filesystem |
 | `context` | S3 read/write via LocalStack |
+| `sources` | Read-only integration filesystem (GitHub, Gmail, Notion, etc.) |
 
 ## Requirements
 
@@ -44,6 +46,7 @@ make e2e
 | `S3_ENDPOINT` | `http://localhost:4566` | LocalStack S3 endpoint |
 | `S3_BUCKET` | `airstore-context` | Context storage bucket |
 | `MOUNT_POINT` | `/tmp/airstore-e2e` | Filesystem mount location |
+| `GITHUB_TOKEN` | (none) | GitHub PAT for sources test (optional) |
 
 ## Architecture
 
