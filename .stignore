@@ -1,0 +1,29 @@
+.git
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# vendor folders
+vendor
+
+# Test binary, built with go test -c
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# dlv binary
+__debug_bin
+
+# project folders
+.venv
+.k3d
+manifests
+tmp
+docker
+
+bin/worker
+bin/gateway
+bin/filesystem

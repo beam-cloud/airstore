@@ -1,0 +1,41 @@
+---
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: airstore
+image: docker.io/rancher/k3s:v1.31.5-k3s1
+servers: 1
+
+ports:
+# Gateway HTTP API (NodePort 30080)
+- port: 1994:30080
+  nodeFilters:
+  - loadbalancer
+# Gateway gRPC (NodePort 31993)
+- port: 1993:31993
+  nodeFilters:
+  - loadbalancer
+
+volumes:
+- volume: $PWD/manifests/k3d:k3s-manifests-custom
+  nodeFilters:
+  - server:0
+- volume: $HOME/.airstore-k3d/storage:k3s-storage
+  nodeFilters:
+  - servers:*
+
+registries:
+  create:
+    name: registry.localhost
+    host: "0.0.0.0"
+    hostPort: "5001"
+    volumes:
+    - $HOME/.airstore-k3d/registry:/var/lib/registry
+
+options:
+  k3d:
+    wait: true
+    timeout: "60s"
+  kubeconfig:
+    updateDefaultKubeconfig: true
+    switchCurrentContext: true

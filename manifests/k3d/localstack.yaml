@@ -1,0 +1,26 @@
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: localstack
+  namespace: airstore
+spec:
+  repo: https://localstack.github.io/helm-charts
+  chart: localstack
+  createNamespace: false
+  version: 0.6.5
+  valuesContent: |-
+    extraEnvVars:
+    - name: SERVICES
+      value: "s3"
+    enableStartupScripts: true
+    startupScriptContent: |
+      #!/bin/bash
+      awslocal s3 mb s3://airstore-images
+      awslocal s3 mb s3://airstore-context
+    persistence:
+      enabled: true
+      storageClass: local-path
+      accessModes:
+      - ReadWriteOnce
+      size: 10Gi
+

@@ -1,0 +1,44 @@
+name: wikipedia
+description: Look up encyclopedic knowledge from Wikipedia
+icon: book-open
+
+commands:
+  search:
+    description: Search for Wikipedia articles matching a query
+    params:
+      - name: query
+        type: string
+        required: true
+        position: 0
+        description: Search query to find Wikipedia articles
+
+      - name: limit
+        type: int
+        default: 10
+        short: -n
+        flag: --limit
+        description: Maximum number of results (1-50)
+
+  summary:
+    description: Get a brief summary of a Wikipedia article
+    params:
+      - name: title
+        type: string
+        required: true
+        position: 0
+        description: "Article title (e.g., 'Albert Einstein')"
+
+  article:
+    description: Get the full content of a Wikipedia article
+    params:
+      - name: title
+        type: string
+        required: true
+        position: 0
+        description: Article title to retrieve
+
+      - name: html
+        type: bool
+        default: false
+        flag: --html
+        description: Include HTML content in response

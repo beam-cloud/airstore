@@ -1,0 +1,71 @@
+name: exa
+description: Neural web search for real-time information and research
+icon: search
+
+commands:
+  search:
+    description: Search the web using neural search for relevant results
+    params:
+      - name: query
+        type: string
+        required: true
+        position: 0
+        description: Search query to find relevant web content
+
+      - name: num
+        type: int
+        default: 10
+        short: -n
+        flag: --num
+        description: "Number of results to return (1-20)"
+
+      - name: type
+        type: string
+        default: auto
+        short: -t
+        flag: --type
+        description: "Search type: auto, neural, or keyword"
+
+      - name: include
+        type: string
+        short: -i
+        flag: --include
+        description: "Comma-separated domains to include"
+
+      - name: exclude
+        type: string
+        short: -x
+        flag: --exclude
+        description: "Comma-separated domains to exclude"
+
+  research:
+    description: Deep research on a topic with summarized findings
+    params:
+      - name: query
+        type: string
+        required: true
+        position: 0
+        description: Research topic or question
+
+      - name: num
+        type: int
+        default: 5
+        short: -n
+        flag: --num
+        description: "Number of sources to analyze (1-10)"
+
+  contents:
+    description: Get the full text content of a URL
+    params:
+      - name: url
+        type: string
+        required: true
+        position: 0
+        description: URL to extract content from
+
+      - name: max
+        type: int
+        default: 10000
+        short: -m
+        flag: --max
+        description: "Maximum characters to return"

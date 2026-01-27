@@ -1,0 +1,334 @@
+package vnode
+
+import (
+	"context"
+	"io/fs"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	pb "github.com/beam-cloud/airstore/proto"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
+)
+
+const rpcTimeout = 30 * time.Second // Per-RPC timeout for context operations
+
+// ContextVNodeGRPC implements VirtualNode for S3-backed context storage.
+// It supports all read and write operations.
+type ContextVNodeGRPC struct {
+	client  pb.ContextServiceClient
+	token   string
+	cache   *MetadataCache
+	handles map[FileHandle]string
+	nextFH  FileHandle
+	mu      sync.Mutex
+}
+
+// NewContextVNodeGRPC creates a new context virtual node
+func NewContextVNodeGRPC(conn *grpc.ClientConn, token string) *ContextVNodeGRPC {
+	return &ContextVNodeGRPC{
+		client:  pb.NewContextServiceClient(conn),
+		token:   token,
+		cache:   NewMetadataCache(),
+		handles: make(map[FileHandle]string),
+		nextFH:  1,
+	}
+}
+
+// ctx returns a context with auth token and timeout for RPC calls
+func (c *ContextVNodeGRPC) ctx() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
+	if c.token != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+c.token)
+	}
+	return ctx, cancel
+}
+
+func (c *ContextVNodeGRPC) Prefix() string { return ContextPath }
+
+func (c *ContextVNodeGRPC) rel(path string) string {
+	return strings.TrimPrefix(strings.TrimPrefix(path, ContextPath), "/")
+}
+
+// Getattr returns file attributes with caching
+func (c *ContextVNodeGRPC) Getattr(path string) (*FileInfo, error) {
+	if c.cache.IsNegative(path) {
+		return nil, fs.ErrNotExist
+	}
+	if info := c.cache.GetInfo(path); info != nil {
+		return info, nil
+	}
+
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.client.Stat(ctx, &pb.ContextStatRequest{Path: c.rel(path)})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.Ok {
+		c.cache.SetNegative(path)
+		return nil, fs.ErrNotExist
+	}
+
+	info := c.toFileInfo(path, resp.Info)
+	c.cache.Set(path, info)
+	return info, nil
+}
+
+// Readdir returns directory entries, caching child metadata from enriched response
+func (c *ContextVNodeGRPC) Readdir(path string) ([]DirEntry, error) {
+	if cached := c.cache.Get(path); cached != nil && cached.Children != nil {
+		return cached.Children, nil
+	}
+
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.client.ReadDir(ctx, &pb.ContextReadDirRequest{Path: c.rel(path)})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.Ok {
+		return nil, fs.ErrNotExist
+	}
+
+	entries := make([]DirEntry, 0, len(resp.Entries))
+	childMeta := make(map[string]*FileInfo, len(resp.Entries))
+	now := time.Now()
+
+	for _, e := range resp.Entries {
+		// Skip macOS AppleDouble resource fork files (._*) in listings
+		if strings.HasPrefix(e.Name, "._") {
+			continue
+		}
+
+		childPath := path + "/" + e.Name
+		ino := PathIno(childPath)
+		entries = append(entries, DirEntry{Name: e.Name, Mode: e.Mode, Ino: ino})
+
+		mtime := now
+		if e.Mtime > 0 {
+			mtime = time.Unix(e.Mtime, 0)
+		}
+		childMeta[e.Name] = &FileInfo{
+			Ino: ino, Size: e.Size, Mode: e.Mode, Nlink: 1,
+			Uid: uint32(syscall.Getuid()), Gid: uint32(syscall.Getgid()),
+			Atime: now, Mtime: mtime, Ctime: mtime,
+		}
+	}
+
+	c.cache.SetWithChildren(path, entries, childMeta)
+	return entries, nil
+}
+
+// Open opens a file, using cache to avoid redundant Stat calls
+func (c *ContextVNodeGRPC) Open(path string, flags int) (FileHandle, error) {
+	// Check cache first to avoid unnecessary RPC
+	if c.cache.IsNegative(path) {
+		return 0, fs.ErrNotExist
+	}
+	if c.cache.GetInfo(path) != nil {
+		return c.allocHandle(c.rel(path)), nil
+	}
+
+	// Cache miss - verify file exists
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.client.Stat(ctx, &pb.ContextStatRequest{Path: c.rel(path)})
+	if err != nil {
+		return 0, err
+	}
+	if !resp.Ok {
+		c.cache.SetNegative(path)
+		return 0, fs.ErrNotExist
+	}
+
+	// Cache the result for future calls
+	c.cache.Set(path, c.toFileInfo(path, resp.Info))
+	return c.allocHandle(c.rel(path)), nil
+}
+
+// Read reads file data
+func (c *ContextVNodeGRPC) Read(path string, buf []byte, off int64, fh FileHandle) (int, error) {
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.client.Read(ctx, &pb.ContextReadRequest{
+		Path: c.rel(path), Offset: off, Length: int64(len(buf)),
+	})
+	if err != nil {
+		return 0, err
+	}
+	if !resp.Ok {
+		return 0, fs.ErrNotExist
+	}
+	return copy(buf, resp.Data), nil
+}
+
+// Create creates a new file
+func (c *ContextVNodeGRPC) Create(path string, flags int, mode uint32) (FileHandle, error) {
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.client.Create(ctx, &pb.ContextCreateRequest{Path: c.rel(path), Mode: mode})
+	if err != nil {
+		return 0, err
+	}
+	if !resp.Ok {
+		return 0, fs.ErrPermission
+	}
+	c.cache.Invalidate(path)
+	return c.allocHandle(c.rel(path)), nil
+}
+
+// Write writes file data
+func (c *ContextVNodeGRPC) Write(path string, buf []byte, off int64, fh FileHandle) (int, error) {
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.client.Write(ctx, &pb.ContextWriteRequest{
+		Path: c.rel(path), Data: buf, Offset: off,
+	})
+	if err != nil {
+		return 0, err
+	}
+	if !resp.Ok {
+		return 0, fs.ErrPermission
+	}
+	c.cache.Invalidate(path)
+	return int(resp.Written), nil
+}
+
+// Truncate changes file size
+func (c *ContextVNodeGRPC) Truncate(path string, size int64, fh FileHandle) error {
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.client.Truncate(ctx, &pb.ContextTruncateRequest{Path: c.rel(path), Size: size})
+	if err != nil {
+		return err
+	}
+	if !resp.Ok {
+		return fs.ErrPermission
+	}
+	c.cache.Invalidate(path)
+	return nil
+}
+
+// Mkdir creates a directory
+func (c *ContextVNodeGRPC) Mkdir(path string, mode uint32) error {
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.client.Mkdir(ctx, &pb.ContextMkdirRequest{Path: c.rel(path), Mode: mode})
+	if err != nil {
+		return err
+	}
+	if !resp.Ok {
+		return fs.ErrPermission
+	}
+	c.cache.Invalidate(path)
+	return nil
+}
+
+// Rmdir removes a directory
+func (c *ContextVNodeGRPC) Rmdir(path string) error {
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.client.Delete(ctx, &pb.ContextDeleteRequest{Path: c.rel(path)})
+	if err != nil {
+		return err
+	}
+	if !resp.Ok {
+		return fs.ErrPermission
+	}
+	c.cache.Invalidate(path)
+	return nil
+}
+
+// Unlink removes a file
+func (c *ContextVNodeGRPC) Unlink(path string) error {
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.client.Delete(ctx, &pb.ContextDeleteRequest{Path: c.rel(path)})
+	if err != nil {
+		return err
+	}
+	if !resp.Ok {
+		return fs.ErrPermission
+	}
+	c.cache.Invalidate(path)
+	return nil
+}
+
+// Fsync is a no-op (writes go directly to S3)
+func (c *ContextVNodeGRPC) Fsync(path string, fh FileHandle) error { return nil }
+
+// Symlink creates a symbolic link
+func (c *ContextVNodeGRPC) Symlink(target, linkPath string) error {
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.client.Symlink(ctx, &pb.ContextSymlinkRequest{Target: target, LinkPath: c.rel(linkPath)})
+	if err != nil {
+		return err
+	}
+	if !resp.Ok {
+		return fs.ErrPermission
+	}
+	c.cache.Invalidate(linkPath)
+	return nil
+}
+
+// Readlink reads symlink target
+func (c *ContextVNodeGRPC) Readlink(path string) (string, error) {
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.client.Readlink(ctx, &pb.ContextReadlinkRequest{Path: c.rel(path)})
+	if err != nil {
+		return "", err
+	}
+	if !resp.Ok {
+		return "", fs.ErrNotExist
+	}
+	return resp.Target, nil
+}
+
+// Release closes a file handle
+func (c *ContextVNodeGRPC) Release(path string, fh FileHandle) error {
+	c.mu.Lock()
+	delete(c.handles, fh)
+	c.mu.Unlock()
+	return nil
+}
+
+// helpers
+
+func (c *ContextVNodeGRPC) allocHandle(relPath string) FileHandle {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	fh := c.nextFH
+	c.nextFH++
+	c.handles[fh] = relPath
+	return fh
+}
+
+func (c *ContextVNodeGRPC) toFileInfo(path string, info *pb.FileInfo) *FileInfo {
+	now := time.Now()
+	mtime := now
+	if info.Mtime > 0 {
+		mtime = time.Unix(info.Mtime, 0)
+	}
+	return &FileInfo{
+		Ino: PathIno(path), Size: info.Size, Mode: info.Mode, Nlink: 1,
+		Uid: uint32(syscall.Getuid()), Gid: uint32(syscall.Getgid()),
+		Atime: now, Mtime: mtime, Ctime: mtime,
+	}
+}

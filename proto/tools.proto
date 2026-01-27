@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+option go_package = "github.com/beam-cloud/airstore/proto";
+
+package tools;
+
+service ToolService {
+  // ListTools returns all registered tools
+  rpc ListTools(ListToolsRequest) returns (ListToolsResponse);
+  
+  // GetToolHelp returns help/usage information for a tool
+  rpc GetToolHelp(GetToolHelpRequest) returns (GetToolHelpResponse);
+  
+  // ExecuteTool runs a tool and streams output back
+  rpc ExecuteTool(ExecuteToolRequest) returns (stream ExecuteToolResponse);
+}
+
+message ListToolsRequest {}
+
+message ToolInfo {
+  string name = 1;
+  string help = 2;
+}
+
+message ListToolsResponse {
+  bool ok = 1;
+  string error = 2;
+  repeated ToolInfo tools = 3;
+}
+
+message GetToolHelpRequest {
+  string name = 1;
+}
+
+message GetToolHelpResponse {
+  bool ok = 1;
+  string error = 2;
+  string help = 3;
+}
+
+message ExecuteToolRequest {
+  string name = 1;
+  repeated string args = 2;
+}
+
+message ExecuteToolResponse {
+  // Output stream type
+  enum StreamType {
+    STDOUT = 0;
+    STDERR = 1;
+  }
+  
+  StreamType stream = 1;
+  bytes data = 2;
+  
+  // Set when execution completes
+  bool done = 3;
+  int32 exit_code = 4;
+  string error = 5;
+}
+

@@ -1,0 +1,10 @@
+bin/gateway
+bin/worker
+bin/filesystem
+bin/cli
+tmp/*
+*.gob
+__pycache__
+*.tmp
+.secrets
+airstore.code-workspace

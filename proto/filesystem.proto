@@ -1,0 +1,157 @@
+syntax = "proto3";
+
+option go_package = "github.com/beam-cloud/airstore/proto";
+
+package filesystem;
+
+service FilesystemService {
+  // Directory Access Metadata
+  rpc GetDirectoryAccess(GetDirectoryAccessRequest) returns (GetDirectoryAccessResponse);
+  rpc SaveDirectoryAccess(SaveDirectoryAccessRequest) returns (SaveDirectoryAccessResponse);
+  
+  // Directory Content Metadata
+  rpc GetDirectoryContent(GetDirectoryContentRequest) returns (GetDirectoryContentResponse);
+  rpc SaveDirectoryContent(SaveDirectoryContentRequest) returns (SaveDirectoryContentResponse);
+  
+  // File Metadata
+  rpc GetFileMetadata(GetFileMetadataRequest) returns (GetFileMetadataResponse);
+  rpc SaveFileMetadata(SaveFileMetadataRequest) returns (SaveFileMetadataResponse);
+  
+  // Directory Operations
+  rpc ListDirectory(ListDirectoryRequest) returns (ListDirectoryResponse);
+  rpc RenameDirectory(RenameDirectoryRequest) returns (RenameDirectoryResponse);
+  rpc DeleteDirectory(DeleteDirectoryRequest) returns (DeleteDirectoryResponse);
+}
+
+// BackPointer for directory rename tracking
+message BackPointer {
+  string birth_parent_id = 1;
+  int32 name_version = 2;
+}
+
+// Directory Access Metadata
+message DirectoryAccessMetadata {
+  string pid = 1;
+  string id = 2;
+  uint32 permission = 3;
+  map<string, string> rename_list = 4;
+  BackPointer back_pointer = 5;
+}
+
+message GetDirectoryAccessRequest {
+  string pid = 1;
+  string name = 2;
+}
+
+message GetDirectoryAccessResponse {
+  bool ok = 1;
+  string error = 2;
+  DirectoryAccessMetadata metadata = 3;
+}
+
+message SaveDirectoryAccessRequest {
+  DirectoryAccessMetadata metadata = 1;
+}
+
+message SaveDirectoryAccessResponse {
+  bool ok = 1;
+  string error = 2;
+}
+
+// Directory Content Metadata
+message DirectoryContentMetadata {
+  string id = 1;
+  repeated string entry_list = 2;
+  map<string, int64> timestamps = 3; // Unix timestamps
+}
+
+message GetDirectoryContentRequest {
+  string id = 1;
+}
+
+message GetDirectoryContentResponse {
+  bool ok = 1;
+  string error = 2;
+  DirectoryContentMetadata metadata = 3;
+}
+
+message SaveDirectoryContentRequest {
+  DirectoryContentMetadata metadata = 1;
+}
+
+message SaveDirectoryContentResponse {
+  bool ok = 1;
+  string error = 2;
+}
+
+// File Metadata
+message FileMetadata {
+  string id = 1;
+  string pid = 2;
+  string name = 3;
+  bytes file_data = 4;
+}
+
+message GetFileMetadataRequest {
+  string pid = 1;
+  string name = 2;
+}
+
+message GetFileMetadataResponse {
+  bool ok = 1;
+  string error = 2;
+  FileMetadata metadata = 3;
+}
+
+message SaveFileMetadataRequest {
+  FileMetadata metadata = 1;
+}
+
+message SaveFileMetadataResponse {
+  bool ok = 1;
+  string error = 2;
+}
+
+// Directory Entry for listing
+message DirEntry {
+  string name = 1;
+  uint32 mode = 2;
+  uint64 ino = 3;
+}
+
+message ListDirectoryRequest {
+  string path = 1;
+}
+
+message ListDirectoryResponse {
+  bool ok = 1;
+  string error = 2;
+  repeated DirEntry entries = 3;
+}
+
+// Rename Directory
+message RenameDirectoryRequest {
+  string old_pid = 1;
+  string old_name = 2;
+  string new_pid = 3;
+  string new_name = 4;
+  int32 version = 5;
+}
+
+message RenameDirectoryResponse {
+  bool ok = 1;
+  string error = 2;
+}
+
+// Delete Directory
+message DeleteDirectoryRequest {
+  string parent_id = 1;
+  string name = 2;
+  int32 version = 3;
+}
+
+message DeleteDirectoryResponse {
+  bool ok = 1;
+  string error = 2;
+}
+

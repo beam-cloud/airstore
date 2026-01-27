@@ -1,0 +1,17 @@
+package types
+
+// ToolName is a type-safe tool identifier
+type ToolName string
+
+// Tool name constants - add new tools here
+const (
+	ToolWikipedia ToolName = "wikipedia"
+	ToolWeather   ToolName = "weather"
+	ToolExa       ToolName = "exa"
+	ToolGitHub    ToolName = "github"
+)
+
+// String returns the string representation
+func (t ToolName) String() string {
+	return string(t)
+}

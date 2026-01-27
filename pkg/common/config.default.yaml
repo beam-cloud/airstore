@@ -1,0 +1,113 @@
+# Airstore Gateway Configuration
+# Mode: "local" (no Redis/Postgres) or "remote" (full infrastructure)
+mode: remote
+
+clusterName: airstore
+debugMode: false
+prettyLogs: true
+
+# ----------------------------------------------------------------------------
+# Database (remote mode only)
+# ----------------------------------------------------------------------------
+database:
+  redis:
+    mode: single
+    addrs: [redis-master:6379]
+    enableTLS: false
+    dialTimeout: 3s
+  postgres:
+    host: postgres
+    port: 5432
+    user: airstore
+    password: airstore
+    database: airstore
+    sslMode: disable
+    maxOpenConns: 25
+    maxIdleConns: 5
+
+# ----------------------------------------------------------------------------
+# Storage
+# ----------------------------------------------------------------------------
+image:
+  s3:
+    bucket: airstore-images
+    region: us-east-1
+    endpoint: http://localstack:4566
+    accessKey: test
+    secretKey: test
+    forcePathStyle: true
+  cachePath: /var/lib/clip/cache
+  workPath: /var/lib/clip/work
+  mountPath: /var/lib/clip/mnt
+
+filesystem:
+  mountPoint: /tmp/airstore
+  # context: S3-backed /context folder (disabled by default)
+  #   bucket: my-bucket
+  #   region: us-east-1
+  #   endpoint: http://localhost:4566
+  #   accessKey: ...
+  #   secretKey: ...
+
+# ----------------------------------------------------------------------------
+# Gateway
+# ----------------------------------------------------------------------------
+gateway:
+  grpc:
+    port: 1993
+    maxRecvMsgSize: 16
+    maxSendMsgSize: 16
+  http:
+    host: 0.0.0.0
+    port: 1994
+    enablePrettyLogs: true
+    cors:
+      allowOrigins: ["*"]
+      allowHeaders: ["*"]
+      allowMethods: ["*"]
+  shutdownTimeout: 30s
+
+# ----------------------------------------------------------------------------
+# Scheduler (remote mode only)
+# ----------------------------------------------------------------------------
+scheduler:
+  enabled: false
+  gatewayServiceName: airstore-gateway
+  workerImage: registry.localhost:5000/airstore-worker:latest
+  workerNamespace: airstore
+  workerTTL: 1h
+  cleanupInterval: 1m
+  heartbeatInterval: 10s
+  heartbeatTimeout: 30s
+  defaultWorkerCpu: 1000
+  defaultWorkerMemory: 1024
+  pools:
+    default:
+      deploymentName: airstore-worker-default
+      namespace: airstore
+      minReplicas: 1
+      maxReplicas: 10
+      scaleDownDelay: 5m
+      workerCpu: 1000
+      workerMemory: 1024
+
+# ----------------------------------------------------------------------------
+# Tools - All tool configuration in one place
+# ----------------------------------------------------------------------------
+tools:
+  # Builtin integrations (API keys)
+  integrations:
+    weather:
+      apiKey: ""   # OpenWeatherMap
+    exa:
+      apiKey: ""   # Exa neural search
+    github:
+      enabled: false
+
+  # MCP servers - tools auto-exposed as /tools/<name>
+  # Example:
+  #   mcp:
+  #     filesystem:
+  #       command: npx
+  #       args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+  mcp: {}

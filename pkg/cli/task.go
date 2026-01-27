@@ -1,0 +1,330 @@
+package cli
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"strings"
+	"text/tabwriter"
+
+	"github.com/spf13/cobra"
+)
+
+var (
+	taskWorkspace  string
+	taskImage      string
+	taskEntrypoint string
+	taskEnv        []string
+)
+
+var taskCmd = &cobra.Command{
+	Use:   "task",
+	Short: "Manage tasks",
+	Long:  `Create, list, and manage tasks.`,
+}
+
+var taskCreateCmd = &cobra.Command{
+	Use:   "create",
+	Short: "Create a new task",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return createTask()
+	},
+}
+
+var taskListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List all tasks",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return listTasks()
+	},
+}
+
+var taskGetCmd = &cobra.Command{
+	Use:   "get <id>",
+	Short: "Get task details",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return getTask(args[0])
+	},
+}
+
+var taskDeleteCmd = &cobra.Command{
+	Use:   "delete <id>",
+	Short: "Delete a task",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return deleteTask(args[0])
+	},
+}
+
+func init() {
+	taskCreateCmd.Flags().StringVarP(&taskWorkspace, "workspace", "w", "", "Workspace name (required)")
+	taskCreateCmd.Flags().StringVarP(&taskImage, "image", "i", "", "Container image (required)")
+	taskCreateCmd.Flags().StringVarP(&taskEntrypoint, "entrypoint", "e", "", "Entrypoint command (comma-separated)")
+	taskCreateCmd.Flags().StringSliceVar(&taskEnv, "env", nil, "Environment variables (KEY=VALUE)")
+	taskCreateCmd.MarkFlagRequired("workspace")
+	taskCreateCmd.MarkFlagRequired("image")
+
+	taskListCmd.Flags().StringVarP(&taskWorkspace, "workspace", "w", "", "Filter by workspace name")
+
+	taskCmd.AddCommand(taskCreateCmd)
+	taskCmd.AddCommand(taskListCmd)
+	taskCmd.AddCommand(taskGetCmd)
+	taskCmd.AddCommand(taskDeleteCmd)
+}
+
+type taskResponse struct {
+	ID          string            `json:"id"`
+	WorkspaceID string            `json:"workspace_id"`
+	Status      string            `json:"status"`
+	Image       string            `json:"image"`
+	Entrypoint  []string          `json:"entrypoint"`
+	Env         map[string]string `json:"env"`
+	ExitCode    *int              `json:"exit_code,omitempty"`
+	Error       string            `json:"error,omitempty"`
+	CreatedAt   string            `json:"created_at"`
+	StartedAt   string            `json:"started_at,omitempty"`
+	FinishedAt  string            `json:"finished_at,omitempty"`
+}
+
+type apiResponse struct {
+	Success bool            `json:"success"`
+	Error   string          `json:"error,omitempty"`
+	Data    json.RawMessage `json:"data,omitempty"`
+}
+
+type taskWorkspaceResponse struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	CreatedAt string `json:"created_at"`
+}
+
+func httpGatewayAddr() string {
+	// Convert gRPC address to HTTP (task API still uses HTTP)
+	addr := gatewayAddr
+	if strings.HasPrefix(addr, "localhost:") {
+		parts := strings.Split(addr, ":")
+		if len(parts) == 2 {
+			// Assume HTTP API is on port 1994 if gRPC is 1993
+			return "http://localhost:1994"
+		}
+	}
+	return "http://" + addr
+}
+
+func createTask() error {
+	// Parse entrypoint
+	var entrypoint []string
+	if taskEntrypoint != "" {
+		entrypoint = strings.Split(taskEntrypoint, ",")
+		for i := range entrypoint {
+			entrypoint[i] = strings.TrimSpace(entrypoint[i])
+		}
+	}
+
+	// Parse env
+	env := make(map[string]string)
+	for _, e := range taskEnv {
+		parts := strings.SplitN(e, "=", 2)
+		if len(parts) == 2 {
+			env[parts[0]] = parts[1]
+		}
+	}
+
+	payload := map[string]interface{}{
+		"workspace_name": taskWorkspace,
+		"image":          taskImage,
+		"entrypoint":     entrypoint,
+		"env":            env,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	resp, err := http.Post(httpGatewayAddr()+"/api/v1/tasks", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to connect to gateway: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result apiResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if !result.Success {
+		return fmt.Errorf("failed to create task: %s", result.Error)
+	}
+
+	var task taskResponse
+	if err := json.Unmarshal(result.Data, &task); err != nil {
+		return fmt.Errorf("failed to parse task: %w", err)
+	}
+
+	fmt.Printf("Created task: %s\n", task.ID)
+	fmt.Printf("  Image:  %s\n", task.Image)
+	fmt.Printf("  Status: %s\n", task.Status)
+	return nil
+}
+
+func listTasks() error {
+	url := httpGatewayAddr() + "/api/v1/tasks"
+	if taskWorkspace != "" {
+		// Need to look up workspace ID first
+		wsResp, err := http.Get(httpGatewayAddr() + "/api/v1/workspaces")
+		if err != nil {
+			return fmt.Errorf("failed to connect to gateway: %w", err)
+		}
+		defer wsResp.Body.Close()
+
+		var wsResult apiResponse
+		if err := json.NewDecoder(wsResp.Body).Decode(&wsResult); err != nil {
+			return fmt.Errorf("failed to decode response: %w", err)
+		}
+
+		var workspaces []taskWorkspaceResponse
+		if err := json.Unmarshal(wsResult.Data, &workspaces); err != nil {
+			return fmt.Errorf("failed to parse workspaces: %w", err)
+		}
+
+		var wsID string
+		for _, ws := range workspaces {
+			if ws.Name == taskWorkspace {
+				wsID = ws.ID
+				break
+			}
+		}
+		if wsID == "" {
+			return fmt.Errorf("workspace not found: %s", taskWorkspace)
+		}
+		url += "?workspace_id=" + wsID
+	}
+
+	resp, err := http.Get(url)
+	if err != nil {
+		return fmt.Errorf("failed to connect to gateway: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result apiResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if !result.Success {
+		return fmt.Errorf("failed to list tasks: %s", result.Error)
+	}
+
+	var tasks []taskResponse
+	if err := json.Unmarshal(result.Data, &tasks); err != nil {
+		return fmt.Errorf("failed to parse tasks: %w", err)
+	}
+
+	if len(tasks) == 0 {
+		fmt.Println("No tasks found.")
+		return nil
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tSTATUS\tIMAGE\tCREATED\tEXIT CODE")
+	for _, t := range tasks {
+		exitCode := "-"
+		if t.ExitCode != nil {
+			exitCode = fmt.Sprintf("%d", *t.ExitCode)
+		}
+		// Truncate image for display
+		image := t.Image
+		if len(image) > 40 {
+			image = image[:37] + "..."
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", t.ID, t.Status, image, t.CreatedAt, exitCode)
+	}
+	w.Flush()
+
+	return nil
+}
+
+func getTask(id string) error {
+	resp, err := http.Get(httpGatewayAddr() + "/api/v1/tasks/" + id)
+	if err != nil {
+		return fmt.Errorf("failed to connect to gateway: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result apiResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if !result.Success {
+		return fmt.Errorf("task not found: %s", result.Error)
+	}
+
+	var task taskResponse
+	if err := json.Unmarshal(result.Data, &task); err != nil {
+		return fmt.Errorf("failed to parse task: %w", err)
+	}
+
+	fmt.Printf("ID:          %s\n", task.ID)
+	fmt.Printf("Workspace:   %s\n", task.WorkspaceID)
+	fmt.Printf("Status:      %s\n", task.Status)
+	fmt.Printf("Image:       %s\n", task.Image)
+	if len(task.Entrypoint) > 0 {
+		fmt.Printf("Entrypoint:  %v\n", task.Entrypoint)
+	}
+	if len(task.Env) > 0 {
+		fmt.Printf("Environment:\n")
+		for k, v := range task.Env {
+			fmt.Printf("  %s=%s\n", k, v)
+		}
+	}
+	if task.ExitCode != nil {
+		fmt.Printf("Exit Code:   %d\n", *task.ExitCode)
+	}
+	if task.Error != "" {
+		fmt.Printf("Error:       %s\n", task.Error)
+	}
+	fmt.Printf("Created At:  %s\n", task.CreatedAt)
+	if task.StartedAt != "" {
+		fmt.Printf("Started At:  %s\n", task.StartedAt)
+	}
+	if task.FinishedAt != "" {
+		fmt.Printf("Finished At: %s\n", task.FinishedAt)
+	}
+
+	return nil
+}
+
+func deleteTask(id string) error {
+	req, err := http.NewRequest("DELETE", httpGatewayAddr()+"/api/v1/tasks/"+id, nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to connect to gateway: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("task not found")
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	var result apiResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if !result.Success {
+		return fmt.Errorf("failed to delete task: %s", result.Error)
+	}
+
+	fmt.Printf("Task %s deleted.\n", id)
+	return nil
+}

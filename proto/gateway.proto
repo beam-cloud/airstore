@@ -1,0 +1,184 @@
+syntax = "proto3";
+
+option go_package = "github.com/beam-cloud/airstore/proto";
+
+package gateway;
+
+service GatewayService {
+  // Workspaces
+  rpc CreateWorkspace(CreateWorkspaceRequest) returns (WorkspaceResponse);
+  rpc ListWorkspaces(ListWorkspacesRequest) returns (ListWorkspacesResponse);
+  rpc GetWorkspace(GetWorkspaceRequest) returns (WorkspaceResponse);
+  rpc DeleteWorkspace(DeleteWorkspaceRequest) returns (DeleteResponse);
+
+  // Members
+  rpc AddMember(AddMemberRequest) returns (MemberResponse);
+  rpc ListMembers(ListMembersRequest) returns (ListMembersResponse);
+  rpc RemoveMember(RemoveMemberRequest) returns (DeleteResponse);
+
+  // Tokens
+  rpc CreateToken(CreateTokenRequest) returns (CreateTokenResponse);
+  rpc ListTokens(ListTokensRequest) returns (ListTokensResponse);
+  rpc RevokeToken(RevokeTokenRequest) returns (DeleteResponse);
+
+  // Connections
+  rpc AddConnection(AddConnectionRequest) returns (ConnectionResponse);
+  rpc ListConnections(ListConnectionsRequest) returns (ListConnectionsResponse);
+  rpc RemoveConnection(RemoveConnectionRequest) returns (DeleteResponse);
+}
+
+// Common
+message DeleteResponse {
+  bool ok = 1;
+  string error = 2;
+}
+
+// Workspace messages
+message CreateWorkspaceRequest {
+  string name = 1;
+}
+
+message ListWorkspacesRequest {}
+
+message GetWorkspaceRequest {
+  string id = 1;
+}
+
+message DeleteWorkspaceRequest {
+  string id = 1;
+}
+
+message Workspace {
+  string id = 1;
+  string name = 2;
+  string created_at = 3;
+  string updated_at = 4;
+}
+
+message WorkspaceResponse {
+  bool ok = 1;
+  string error = 2;
+  Workspace workspace = 3;
+}
+
+message ListWorkspacesResponse {
+  bool ok = 1;
+  string error = 2;
+  repeated Workspace workspaces = 3;
+}
+
+// Member messages
+message AddMemberRequest {
+  string workspace_id = 1;
+  string email = 2;
+  string name = 3;
+  string role = 4; // admin, member, viewer
+}
+
+message ListMembersRequest {
+  string workspace_id = 1;
+}
+
+message RemoveMemberRequest {
+  string id = 1;
+}
+
+message Member {
+  string id = 1;
+  string workspace_id = 2;
+  string email = 3;
+  string name = 4;
+  string role = 5;
+  string created_at = 6;
+}
+
+message MemberResponse {
+  bool ok = 1;
+  string error = 2;
+  Member member = 3;
+}
+
+message ListMembersResponse {
+  bool ok = 1;
+  string error = 2;
+  repeated Member members = 3;
+}
+
+// Token messages
+message CreateTokenRequest {
+  string workspace_id = 1;
+  string member_id = 2;
+  string name = 3;
+  int64 expires_in_seconds = 4; // 0 = no expiry
+}
+
+message ListTokensRequest {
+  string workspace_id = 1;
+}
+
+message RevokeTokenRequest {
+  string id = 1;
+}
+
+message Token {
+  string id = 1;
+  string member_id = 2;
+  string name = 3;
+  string expires_at = 4;
+  string created_at = 5;
+  string last_used_at = 6;
+}
+
+message CreateTokenResponse {
+  bool ok = 1;
+  string error = 2;
+  string token = 3; // Raw token, only returned on create
+  Token info = 4;
+}
+
+message ListTokensResponse {
+  bool ok = 1;
+  string error = 2;
+  repeated Token tokens = 3;
+}
+
+// Connection messages
+message AddConnectionRequest {
+  string workspace_id = 1;
+  string member_id = 2; // Empty = workspace-shared
+  string integration_type = 3; // github, weather, exa, etc.
+  string access_token = 4;
+  string api_key = 5;
+  string scope = 6;
+}
+
+message ListConnectionsRequest {
+  string workspace_id = 1;
+}
+
+message RemoveConnectionRequest {
+  string id = 1;
+}
+
+message Connection {
+  string id = 1;
+  string workspace_id = 2;
+  string member_id = 3;
+  string integration_type = 4;
+  string scope = 5;
+  bool is_shared = 6;
+  string created_at = 7;
+}
+
+message ConnectionResponse {
+  bool ok = 1;
+  string error = 2;
+  Connection connection = 3;
+}
+
+message ListConnectionsResponse {
+  bool ok = 1;
+  string error = 2;
+  repeated Connection connections = 3;
+}
+

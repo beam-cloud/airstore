@@ -1,0 +1,30 @@
+# Base stage - Go runtime for both dev and prod
+FROM golang:1.24-bookworm AS base
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+# Build stage - for development (has air for hot-reload)
+FROM base AS build
+
+RUN go install github.com/cosmtrek/air@v1.49.0
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+RUN CGO_ENABLED=0 GOOS=linux go build -o /usr/local/bin/gateway ./cmd/gateway
+
+# Final stage - for production (just the binary, but still has Go for okteto)
+FROM base AS final
+
+COPY --from=build /usr/local/bin/gateway /usr/local/bin/gateway
+COPY --from=build /go/bin/air /usr/local/bin/air
+
+EXPOSE 1994
+
+ENTRYPOINT ["/usr/local/bin/gateway"]

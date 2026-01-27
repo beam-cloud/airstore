@@ -1,0 +1,57 @@
+# Airstore Local Mode
+#
+# Start:  ./bin/cli mount /tmp/airstore --config config.local.yaml
+# Use:    /tmp/airstore/tools/<name> <command> [args...]
+
+mode: local
+debugMode: true
+prettyLogs: true
+
+gateway:
+  grpc:
+    port: 1993
+  http:
+    host: 127.0.0.1
+    port: 1994
+
+filesystem:
+  mountPoint: /tmp/airstore
+
+tools:
+  mcp:
+    # Filesystem - read/write files (add directories as args)
+    filesystem:
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp", "/"]
+
+    # Memory - knowledge graph storage
+    memory:
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-memory"]
+
+    # GitHub (set GITHUB_TOKEN env var)
+    # github:
+    #   command: npx
+    #   args: ["-y", "@modelcontextprotocol/server-github"]
+    #   env:
+    #     GITHUB_TOKEN: "${GITHUB_TOKEN}"
+
+    # Brave Search (set BRAVE_API_KEY env var)
+    # brave:
+    #   command: npx
+    #   args: ["-y", "@modelcontextprotocol/server-brave-search"]
+    #   env:
+    #     BRAVE_API_KEY: "${BRAVE_API_KEY}"
+
+    # Remote MCP server (HTTP/SSE transport)
+    # my-remote-server:
+    #   url: https://mcp.example.com/sse
+    #   auth:
+    #     token: "${MCP_API_KEY}"
+    #
+    # Remote server with custom headers
+    # another-remote:
+    #   url: https://api.example.com/mcp/sse
+    #   auth:
+    #     headers:
+    #       X-API-Key: "${EXAMPLE_API_KEY}"

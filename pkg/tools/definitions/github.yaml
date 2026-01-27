@@ -1,0 +1,142 @@
+name: github
+description: Interact with GitHub repositories, issues, and pull requests
+icon: github
+
+commands:
+  list-repos:
+    description: List repositories for a user or organization
+    params:
+      - name: owner
+        type: string
+        required: true
+        position: 0
+        description: "GitHub username or organization name"
+
+      - name: type
+        type: string
+        default: all
+        short: -t
+        flag: --type
+        description: "Repository type: all, owner, public, private, member"
+
+      - name: limit
+        type: int
+        default: 30
+        short: -n
+        flag: --limit
+        description: "Maximum number of repositories (1-100)"
+
+  get-repo:
+    description: Get detailed information about a repository
+    params:
+      - name: owner
+        type: string
+        required: true
+        position: 0
+        description: "Repository owner (username or org)"
+
+      - name: repo
+        type: string
+        required: true
+        position: 1
+        description: "Repository name"
+
+  list-prs:
+    description: List pull requests for a repository
+    params:
+      - name: owner
+        type: string
+        required: true
+        position: 0
+        description: "Repository owner"
+
+      - name: repo
+        type: string
+        required: true
+        position: 1
+        description: "Repository name"
+
+      - name: state
+        type: string
+        default: open
+        short: -s
+        flag: --state
+        description: "PR state: open, closed, or all"
+
+      - name: limit
+        type: int
+        default: 30
+        short: -n
+        flag: --limit
+        description: "Maximum number of PRs (1-100)"
+
+  get-pr:
+    description: Get detailed information about a pull request
+    params:
+      - name: owner
+        type: string
+        required: true
+        position: 0
+        description: "Repository owner"
+
+      - name: repo
+        type: string
+        required: true
+        position: 1
+        description: "Repository name"
+
+      - name: number
+        type: int
+        required: true
+        position: 2
+        description: "Pull request number"
+
+  list-issues:
+    description: List issues for a repository
+    params:
+      - name: owner
+        type: string
+        required: true
+        position: 0
+        description: "Repository owner"
+
+      - name: repo
+        type: string
+        required: true
+        position: 1
+        description: "Repository name"
+
+      - name: state
+        type: string
+        default: open
+        short: -s
+        flag: --state
+        description: "Issue state: open, closed, or all"
+
+      - name: limit
+        type: int
+        default: 30
+        short: -n
+        flag: --limit
+        description: "Maximum number of issues (1-100)"
+
+  get-issue:
+    description: Get detailed information about an issue
+    params:
+      - name: owner
+        type: string
+        required: true
+        position: 0
+        description: "Repository owner"
+
+      - name: repo
+        type: string
+        required: true
+        position: 1
+        description: "Repository name"
+
+      - name: number
+        type: int
+        required: true
+        position: 2
+        description: "Issue number"

@@ -1,0 +1,66 @@
+name: weather
+description: Get current weather conditions and forecasts for any location
+icon: cloud-sun
+
+commands:
+  current:
+    description: Get current weather conditions for a location
+    params:
+      - name: location
+        type: string
+        required: true
+        position: 0
+        description: "City name or coordinates (e.g., 'London', '40.7,-74.0')"
+
+      - name: units
+        type: string
+        default: metric
+        short: -u
+        flag: --units
+        description: "Units: metric (Celsius), imperial (Fahrenheit), standard (Kelvin)"
+
+  forecast:
+    description: Get 5-day weather forecast for a location
+    params:
+      - name: location
+        type: string
+        required: true
+        position: 0
+        description: "City name or coordinates"
+
+      - name: units
+        type: string
+        default: metric
+        short: -u
+        flag: --units
+        description: "Units: metric, imperial, or standard"
+
+      - name: days
+        type: int
+        default: 5
+        short: -d
+        flag: --days
+        description: "Number of forecast days (1-5)"
+
+  hourly:
+    description: Get hourly forecast for the next 48 hours
+    params:
+      - name: location
+        type: string
+        required: true
+        position: 0
+        description: "City name or coordinates"
+
+      - name: units
+        type: string
+        default: metric
+        short: -u
+        flag: --units
+        description: "Units: metric, imperial, or standard"
+
+      - name: hours
+        type: int
+        default: 24
+        short: -n
+        flag: --hours
+        description: "Number of hours to forecast (1-48)"

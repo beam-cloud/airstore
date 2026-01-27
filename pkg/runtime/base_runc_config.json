@@ -1,0 +1,194 @@
+{
+	"ociVersion": "1.1.0+dev",
+	"process": {
+		"terminal": false,
+		"user": {
+			"uid": 0,
+			"gid": 0
+		},
+		"args": [
+			"/bin/sh"
+		],
+		"env": [
+			"TERM=xterm",
+			"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+		],
+		"cwd": "/",
+		"capabilities": {
+			"bounding": [
+				"CAP_AUDIT_WRITE",
+				"CAP_KILL",
+				"CAP_NET_RAW",
+				"CAP_CHOWN",
+				"CAP_DAC_OVERRIDE",
+				"CAP_FSETID",
+				"CAP_FOWNER",
+				"CAP_SETGID",
+				"CAP_SETUID",
+				"CAP_SETFCAP",
+				"CAP_SYS_CHROOT",
+				"CAP_MKNOD"
+			],
+			"effective": [
+				"CAP_AUDIT_WRITE",
+				"CAP_KILL",
+				"CAP_NET_RAW",
+				"CAP_CHOWN",
+				"CAP_DAC_OVERRIDE",
+				"CAP_FSETID",
+				"CAP_FOWNER",
+				"CAP_SETGID",
+				"CAP_SETUID",
+				"CAP_SETFCAP",
+				"CAP_SYS_CHROOT",
+				"CAP_MKNOD"
+			],
+			"permitted": [
+				"CAP_AUDIT_WRITE",
+				"CAP_KILL",
+				"CAP_NET_RAW",
+				"CAP_CHOWN",
+				"CAP_DAC_OVERRIDE",
+				"CAP_FSETID",
+				"CAP_FOWNER",
+				"CAP_SETGID",
+				"CAP_SETUID",
+				"CAP_SETFCAP",
+				"CAP_SYS_CHROOT",
+				"CAP_MKNOD"
+			],
+			"ambient": []
+		},
+		"rlimits": [],
+		"noNewPrivileges": false
+	},
+	"root": {
+		"path": "rootfs",
+		"readonly": false
+	},
+	"hostname": "sandbox",
+	"mounts": [
+		{
+			"destination": "/proc",
+			"type": "proc",
+			"source": "proc",
+			"options": [
+				"rw",
+				"nosuid",
+				"noexec",
+				"nodev"
+			]
+		},
+		{
+			"destination": "/dev",
+			"type": "tmpfs",
+			"source": "tmpfs",
+			"options": [
+				"rw",
+				"nosuid",
+				"strictatime",
+				"mode=755",
+				"size=65536k"
+			]
+		},
+		{
+			"destination": "/dev/pts",
+			"type": "devpts",
+			"source": "devpts",
+			"options": [
+				"nosuid",
+				"noexec",
+				"newinstance",
+				"ptmxmode=0666",
+				"mode=0620",
+				"gid=5"
+			]
+		},
+		{
+			"destination": "/dev/shm",
+			"type": "tmpfs",
+			"source": "shm",
+			"options": [
+				"nosuid",
+				"noexec",
+				"nodev",
+				"mode=1777",
+				"size=65536k"
+			]
+		},
+		{
+			"destination": "/dev/mqueue",
+			"type": "mqueue",
+			"source": "mqueue",
+			"options": [
+				"nosuid",
+				"noexec",
+				"nodev"
+			]
+		},
+		{
+			"destination": "/sys",
+			"type": "sysfs",
+			"source": "sysfs",
+			"options": [
+				"rw",
+				"nosuid",
+				"noexec",
+				"nodev"
+			]
+		},
+		{
+			"destination": "/sys/fs/cgroup",
+			"type": "cgroup",
+			"source": "cgroup",
+			"options": [
+				"nosuid",
+				"noexec",
+				"nodev",
+				"relatime"
+			]
+		},
+		{
+			"destination": "/tmp",
+			"type": "tmpfs",
+			"source": "tmpfs",
+			"options": [
+				"nosuid",
+				"nodev",
+				"mode=1777"
+			]
+		}
+	],
+	"hooks": {},
+	"linux": {
+		"resources": {
+			"devices": [
+				{
+					"allow": false,
+					"access": "rwm"
+				}
+			]
+		},
+		"namespaces": [
+			{
+				"type": "mount"
+			},
+			{
+				"type": "network"
+			},
+			{
+				"type": "uts"
+			},
+			{
+				"type": "pid"
+			},
+			{
+				"type": "ipc"
+			},
+			{
+				"type": "cgroup"
+			}
+		]
+	}
+}
+
