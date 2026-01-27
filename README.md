@@ -1,6 +1,53 @@
-# Airstore
+# 💨 Airstore
 
-An agent focused virtual filesystem that exposes MCP servers and other things as executables.
+A virtual filesystem for agents. Turn MCP servers and custom tools into executables you can pipe together with bash.
+
+## What can you do with Airstore?
+
+* Use MCP tools as executable binaries
+* Pipe outputs between tools with unix commands
+* Share context across agents via object storage
+* Trigger background agents on filesystem events (coming soon)
+
+## How it works
+
+Airstore is a custom filesystem where each tool is a virtual file. It lets you chain tool calls using pure bash, without the hassle of dealing with APIs or MCP servers. For example:
+
+```
+luke@Lukes-MacBook-Pro tools % ls -lart /tmp/airstore/tools/
+total 4295007838
+drwxr-xr-x  2 luke  staff          0 Jan 26 20:19 ..
+drwxr-xr-x  2 luke  staff          0 Jan 26 20:19 .
+-rwxr-xr-x  1 luke  staff   10378242 Jan 26 20:19 github
+-rwxr-xr-x  1 luke  staff   10378242 Jan 26 20:19 wikipedia
+luke@Lukes-MacBook-Pro tools %
+```
+
+```
+luke@Lukes-MacBook-Pro tools % /tmp/airstore/tools/wikipedia search "something"
+{
+  "results": [
+    {
+      "title": "Something",
+      "page_id": 8041208,
+      "excerpt": "up something in Wiktionary, the free dictionary. Something may refer to: Something (concept) \u0026quot;Something\u0026quot;, an English indefinite pronoun Something (Chairlift)"
+    },
+    {
+      "title": "Something Something",
+      "page_id": 7077513,
+      "excerpt": "formerly known as Something Something... Unakkum Enakkum Something Something (2012 film), a 2012 Odia-language film Something Something 2 (2014), a sequel"
+    }
+  ]
+}
+```
+
+```
+luke@Lukes-MacBook-Pro ~ % /tmp/airstore/tools/wikipedia search "albert" | grep -i 'einstein'
+    "title": "Albert Einstein",
+    "excerpt": "Albert Einstein (14 March 1879 – 18 April 1955) was a German-born theoretical physicist best known for developing the theory of relativity. Einstein also"
+    "title": "Einstein family",
+    "excerpt": "The Einstein family is the family of physicist Albert Einstein (1879-1955). Einstein\u0026#039;s fourth-great-grandfather, Jakob Weil, was his oldest recorded relative"
+```
 
 ## macOS Setup
 
