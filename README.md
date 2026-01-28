@@ -19,7 +19,15 @@ We envision a world where your entire company can be represented as a POSIX file
 
 ## How it works
 
-Airstore is a custom filesystem where each tool is a virtual file. It lets you chain tool calls using pure bash, without the hassle of dealing with APIs or MCP servers. For example:
+Airstore is a custom filesystem where each tool is a virtual file. It lets you chain tool calls using pure bash, without the hassle of dealing with APIs or MCP servers. 
+
+**Mount your tools**
+
+```
+./bin/cli mount ~/airstore --config ./config.local.yaml
+```
+
+**Interact with them as local binaries**
 
 ```
 luke@Lukes-MacBook-Pro tools % ls -lart /tmp/airstore/tools/
@@ -28,7 +36,6 @@ drwxr-xr-x  2 luke  staff          0 Jan 26 20:19 ..
 drwxr-xr-x  2 luke  staff          0 Jan 26 20:19 .
 -rwxr-xr-x  1 luke  staff   10378242 Jan 26 20:19 github
 -rwxr-xr-x  1 luke  staff   10378242 Jan 26 20:19 wikipedia
-luke@Lukes-MacBook-Pro tools %
 ```
 
 ```
