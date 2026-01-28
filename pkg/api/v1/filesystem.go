@@ -27,6 +27,7 @@ type FilesystemGroup struct {
 	routerGroup    *echo.Group
 	backend        repository.BackendRepository
 	contextService *services.ContextService
+	sourceService  *services.SourceService
 	sourceRegistry *sources.Registry
 	toolRegistry   *tools.Registry
 }
@@ -36,6 +37,7 @@ func NewFilesystemGroup(
 	routerGroup *echo.Group,
 	backend repository.BackendRepository,
 	contextService *services.ContextService,
+	sourceService *services.SourceService,
 	sourceRegistry *sources.Registry,
 	toolRegistry *tools.Registry,
 ) *FilesystemGroup {
@@ -43,6 +45,7 @@ func NewFilesystemGroup(
 		routerGroup:    routerGroup,
 		backend:        backend,
 		contextService: contextService,
+		sourceService:  sourceService,
 		sourceRegistry: sourceRegistry,
 		toolRegistry:   toolRegistry,
 	}
@@ -55,12 +58,18 @@ func (g *FilesystemGroup) registerRoutes() {
 	g.routerGroup.GET("/stat", g.Stat)
 	g.routerGroup.GET("/read", g.Read)
 	g.routerGroup.GET("/tree", g.Tree)
+
+	// Tool settings endpoints
+	g.routerGroup.GET("/tools", g.ListToolSettings)
+	g.routerGroup.GET("/tools/:tool_name", g.GetToolSetting)
+	g.routerGroup.PUT("/tools/:tool_name", g.UpdateToolSetting)
 }
 
 // List returns directory contents as VirtualFile entries
 func (g *FilesystemGroup) List(c echo.Context) error {
 	ctx := c.Request().Context()
 	path := cleanPath(c.QueryParam("path"))
+	showHidden := c.QueryParam("show_hidden") == "true"
 
 	// Root directory - return virtual root folders
 	if path == "" || path == "/" {
@@ -80,7 +89,7 @@ func (g *FilesystemGroup) List(c echo.Context) error {
 	case "sources":
 		return g.listSources(c, ctx, relPath)
 	case "tools":
-		return g.listTools(c, ctx)
+		return g.listTools(c, ctx, showHidden)
 	default:
 		return ErrorResponse(c, http.StatusNotFound, "path not found")
 	}
@@ -90,6 +99,7 @@ func (g *FilesystemGroup) List(c echo.Context) error {
 func (g *FilesystemGroup) Stat(c echo.Context) error {
 	ctx := c.Request().Context()
 	path := cleanPath(c.QueryParam("path"))
+	showHidden := c.QueryParam("show_hidden") == "true"
 
 	// Root directory
 	if path == "" || path == "/" {
@@ -104,7 +114,7 @@ func (g *FilesystemGroup) Stat(c echo.Context) error {
 	case "sources":
 		return g.statSources(c, ctx, path, relPath)
 	case "tools":
-		return g.statTools(c, ctx, path, relPath)
+		return g.statTools(c, ctx, path, relPath, showHidden)
 	default:
 		return ErrorResponse(c, http.StatusNotFound, "path not found")
 	}
@@ -146,6 +156,7 @@ func (g *FilesystemGroup) Tree(c echo.Context) error {
 		maxKeys = 1000
 	}
 	continuationToken := c.QueryParam("continuation_token")
+	showHidden := c.QueryParam("show_hidden") == "true"
 
 	rootDir, relPath := splitRootPath(path)
 
@@ -160,7 +171,7 @@ func (g *FilesystemGroup) Tree(c echo.Context) error {
 		})
 	case "tools":
 		// Tools are flat - return same as list
-		entries := g.buildToolEntries(ctx)
+		entries := g.buildToolEntries(ctx, showHidden)
 		return SuccessResponse(c, types.VirtualFileTreeResponse{
 			Path:    path,
 			Entries: entries,
@@ -374,8 +385,58 @@ func (g *FilesystemGroup) listSources(c echo.Context, ctx context.Context, relPa
 		})
 	}
 
-	// For now, return the integration folders without deep listing
-	// Deep listing would require calling SourceService which needs gRPC auth context
+	// Use SourceService to list directory contents (it handles credentials & caching)
+	if g.sourceService != nil {
+		resp, err := g.sourceService.ReadDir(ctx, &pb.SourceReadDirRequest{
+			Path: relPath,
+		})
+		if err != nil {
+			log.Error().Err(err).Str("path", relPath).Msg("source readdir failed")
+			return ErrorResponse(c, http.StatusInternalServerError, "failed to list source directory")
+		}
+		if !resp.Ok {
+			log.Warn().Str("error", resp.Error).Str("path", relPath).Msg("source readdir returned error")
+			// Return empty list rather than error for better UX
+			return SuccessResponse(c, types.VirtualFileListResponse{
+				Path:    "/sources/" + relPath,
+				Entries: []types.VirtualFile{},
+			})
+		}
+
+		// Convert protobuf entries to VirtualFile
+		integration, _ := splitFirstPath(relPath)
+		entries := make([]types.VirtualFile, 0, len(resp.Entries))
+		for _, e := range resp.Entries {
+			entryPath := "/sources/" + relPath
+			if relPath != "" {
+				entryPath = "/sources/" + relPath + "/" + e.Name
+			} else {
+				entryPath = "/sources/" + e.Name
+			}
+			// Clean up double slashes
+			entryPath = cleanPath(entryPath)
+
+			vf := types.NewVirtualFile(
+				hashPath(entryPath),
+				e.Name,
+				entryPath,
+				types.VFTypeSource,
+			).WithFolder(e.IsDir).WithReadOnly(true).WithMetadata("provider", integration)
+
+			if e.Size > 0 {
+				vf = vf.WithSize(e.Size)
+			}
+
+			entries = append(entries, *vf)
+		}
+
+		return SuccessResponse(c, types.VirtualFileListResponse{
+			Path:    "/sources/" + relPath,
+			Entries: entries,
+		})
+	}
+
+	// Fallback: if no source service, return minimal entries
 	integration, subPath := splitFirstPath(relPath)
 
 	// Integration root
@@ -394,7 +455,7 @@ func (g *FilesystemGroup) listSources(c echo.Context, ctx context.Context, relPa
 		})
 	}
 
-	// Deep paths - return empty for now (would need gRPC context)
+	// Deep paths - return empty
 	return SuccessResponse(c, types.VirtualFileListResponse{
 		Path:    "/sources/" + relPath,
 		Entries: []types.VirtualFile{},
@@ -492,26 +553,58 @@ func (g *FilesystemGroup) buildSourceRootEntries(ctx context.Context) []types.Vi
 // Tools Service
 // ============================================================================
 
-func (g *FilesystemGroup) listTools(c echo.Context, ctx context.Context) error {
-	entries := g.buildToolEntries(ctx)
+func (g *FilesystemGroup) listTools(c echo.Context, ctx context.Context, showHidden bool) error {
+	entries := g.buildToolEntries(ctx, showHidden)
 	return SuccessResponse(c, types.VirtualFileListResponse{
 		Path:    "/tools",
 		Entries: entries,
 	})
 }
 
-func (g *FilesystemGroup) statTools(c echo.Context, ctx context.Context, fullPath, relPath string) error {
+func (g *FilesystemGroup) statTools(c echo.Context, ctx context.Context, fullPath, relPath string, showHidden bool) error {
+	// Get workspace ID from context for filtering
+	var workspaceId uint
+	if rc := auth.FromContext(ctx); rc != nil {
+		workspaceId = rc.WorkspaceId
+	}
+
+	// Get tool settings for this workspace
+	var settings *types.WorkspaceToolSettings
+	if workspaceId > 0 {
+		var err error
+		settings, err = g.backend.GetWorkspaceToolSettings(ctx, workspaceId)
+		if err != nil {
+			log.Warn().Err(err).Uint("workspace_id", workspaceId).Msg("failed to get tool settings")
+			settings = nil
+		}
+	}
+
 	// Root /tools
 	if relPath == "" {
+		// Count tools (all if showHidden, only enabled otherwise)
+		toolCount := 0
+		for _, name := range g.toolRegistry.List() {
+			isDisabled := settings != nil && settings.IsDisabled(name)
+			if showHidden || !isDisabled {
+				toolCount++
+			}
+		}
 		return SuccessResponse(c, types.NewRootFolder("tools", "/tools").
 			WithMetadata("description", "Available tools").
-			WithChildCount(len(g.toolRegistry.List())))
+			WithChildCount(toolCount))
 	}
 
 	// Specific tool
 	toolName := relPath
 	provider := g.toolRegistry.Get(toolName)
 	if provider == nil {
+		return ErrorResponse(c, http.StatusNotFound, "tool not found")
+	}
+
+	isDisabled := settings != nil && settings.IsDisabled(toolName)
+
+	// Check if tool is disabled - return not found unless showHidden is true
+	if isDisabled && !showHidden {
 		return ErrorResponse(c, http.StatusNotFound, "tool not found")
 	}
 
@@ -522,20 +615,46 @@ func (g *FilesystemGroup) statTools(c echo.Context, ctx context.Context, fullPat
 		types.VFTypeTool,
 	).WithFolder(false).WithReadOnly(true).
 		WithMetadata("description", provider.Help()).
-		WithMetadata("name", provider.Name())
+		WithMetadata("name", provider.Name()).
+		WithMetadata("enabled", !isDisabled).
+		WithMetadata("hidden", isDisabled)
 
 	return SuccessResponse(c, vf)
 }
 
-func (g *FilesystemGroup) buildToolEntries(ctx context.Context) []types.VirtualFile {
+func (g *FilesystemGroup) buildToolEntries(ctx context.Context, showHidden bool) []types.VirtualFile {
 	if g.toolRegistry == nil {
 		return []types.VirtualFile{}
+	}
+
+	// Get workspace ID from context for filtering
+	var workspaceId uint
+	if rc := auth.FromContext(ctx); rc != nil {
+		workspaceId = rc.WorkspaceId
+	}
+
+	// Get tool settings for this workspace
+	var settings *types.WorkspaceToolSettings
+	if workspaceId > 0 {
+		var err error
+		settings, err = g.backend.GetWorkspaceToolSettings(ctx, workspaceId)
+		if err != nil {
+			log.Warn().Err(err).Uint("workspace_id", workspaceId).Msg("failed to get tool settings, showing all tools")
+			settings = nil
+		}
 	}
 
 	names := g.toolRegistry.List()
 	entries := make([]types.VirtualFile, 0, len(names))
 
 	for _, name := range names {
+		isDisabled := settings != nil && settings.IsDisabled(name)
+
+		// Skip disabled tools unless showHidden is true
+		if isDisabled && !showHidden {
+			continue
+		}
+
 		provider := g.toolRegistry.Get(name)
 		if provider == nil {
 			continue
@@ -548,12 +667,151 @@ func (g *FilesystemGroup) buildToolEntries(ctx context.Context) []types.VirtualF
 			types.VFTypeTool,
 		).WithFolder(false).WithReadOnly(true).
 			WithMetadata("description", provider.Help()).
-			WithMetadata("name", provider.Name())
+			WithMetadata("name", provider.Name()).
+			WithMetadata("enabled", !isDisabled).
+			WithMetadata("hidden", isDisabled)
 
 		entries = append(entries, *vf)
 	}
 
 	return entries
+}
+
+// ============================================================================
+// Tool Settings API
+// ============================================================================
+
+// ToolSettingResponse represents a tool with its enabled state
+type ToolSettingResponse struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Enabled     bool   `json:"enabled"`
+}
+
+// UpdateToolSettingRequest represents a request to update tool settings
+type UpdateToolSettingRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
+// ListToolSettings returns all tools with their enabled/disabled state for the workspace
+func (g *FilesystemGroup) ListToolSettings(c echo.Context) error {
+	ctx := c.Request().Context()
+	logRequest(c, "list_tool_settings")
+
+	// Get workspace ID from auth context
+	rc := auth.FromContext(ctx)
+	if rc == nil {
+		return ErrorResponse(c, http.StatusUnauthorized, "unauthorized")
+	}
+
+	// Get tool settings for this workspace
+	settings, err := g.backend.GetWorkspaceToolSettings(ctx, rc.WorkspaceId)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to get tool settings")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to get tool settings")
+	}
+
+	// Build response with all tools and their state
+	names := g.toolRegistry.List()
+	tools := make([]ToolSettingResponse, 0, len(names))
+
+	for _, name := range names {
+		provider := g.toolRegistry.Get(name)
+		if provider == nil {
+			continue
+		}
+
+		tools = append(tools, ToolSettingResponse{
+			Name:        name,
+			Description: provider.Help(),
+			Enabled:     settings.IsEnabled(name),
+		})
+	}
+
+	return SuccessResponse(c, map[string]interface{}{
+		"tools": tools,
+	})
+}
+
+// GetToolSetting returns the setting for a specific tool
+func (g *FilesystemGroup) GetToolSetting(c echo.Context) error {
+	ctx := c.Request().Context()
+	toolName := c.Param("tool_name")
+	logRequest(c, "get_tool_setting")
+
+	// Get workspace ID from auth context
+	rc := auth.FromContext(ctx)
+	if rc == nil {
+		return ErrorResponse(c, http.StatusUnauthorized, "unauthorized")
+	}
+
+	// Check if tool exists
+	provider := g.toolRegistry.Get(toolName)
+	if provider == nil {
+		return ErrorResponse(c, http.StatusNotFound, "tool not found")
+	}
+
+	// Get tool setting
+	setting, err := g.backend.GetWorkspaceToolSetting(ctx, rc.WorkspaceId, toolName)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to get tool setting")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to get tool setting")
+	}
+
+	// Default to enabled if no setting exists
+	enabled := true
+	if setting != nil {
+		enabled = setting.Enabled
+	}
+
+	return SuccessResponse(c, ToolSettingResponse{
+		Name:        toolName,
+		Description: provider.Help(),
+		Enabled:     enabled,
+	})
+}
+
+// UpdateToolSetting updates the enabled/disabled state of a tool
+func (g *FilesystemGroup) UpdateToolSetting(c echo.Context) error {
+	ctx := c.Request().Context()
+	toolName := c.Param("tool_name")
+	logRequest(c, "update_tool_setting")
+
+	// Get workspace ID from auth context
+	rc := auth.FromContext(ctx)
+	if rc == nil {
+		return ErrorResponse(c, http.StatusUnauthorized, "unauthorized")
+	}
+
+	// Check if tool exists
+	provider := g.toolRegistry.Get(toolName)
+	if provider == nil {
+		return ErrorResponse(c, http.StatusNotFound, "tool not found")
+	}
+
+	// Parse request body
+	var req UpdateToolSettingRequest
+	if err := c.Bind(&req); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
+	}
+
+	// Update tool setting
+	if err := g.backend.SetWorkspaceToolSetting(ctx, rc.WorkspaceId, toolName, req.Enabled); err != nil {
+		log.Error().Err(err).Msg("failed to update tool setting")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to update tool setting")
+	}
+
+	log.Info().
+		Uint("workspace_id", rc.WorkspaceId).
+		Str("tool_name", toolName).
+		Bool("enabled", req.Enabled).
+		Msg("tool setting updated")
+
+	return SuccessResponse(c, ToolSettingResponse{
+		Name:        toolName,
+		Description: provider.Help(),
+		Enabled:     req.Enabled,
+	})
 }
 
 // ============================================================================

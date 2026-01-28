@@ -167,3 +167,121 @@ func (b *PostgresBackend) DeleteWorkspace(ctx context.Context, id uint) error {
 
 	return nil
 }
+
+// GetWorkspaceToolSettings returns all tool settings for a workspace as a lookup structure
+// Tools not in the database are considered enabled by default
+func (b *PostgresBackend) GetWorkspaceToolSettings(ctx context.Context, workspaceId uint) (*types.WorkspaceToolSettings, error) {
+	settings := types.NewWorkspaceToolSettings(workspaceId)
+
+	query := `
+		SELECT tool_name, enabled
+		FROM workspace_tool_setting
+		WHERE workspace_id = $1
+	`
+
+	rows, err := b.db.QueryContext(ctx, query, workspaceId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get workspace tool settings: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var toolName string
+		var enabled bool
+		if err := rows.Scan(&toolName, &enabled); err != nil {
+			return nil, fmt.Errorf("failed to scan tool setting: %w", err)
+		}
+		if !enabled {
+			settings.DisabledTools[toolName] = true
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating tool settings: %w", err)
+	}
+
+	return settings, nil
+}
+
+// GetWorkspaceToolSetting returns the setting for a specific tool in a workspace
+// Returns nil if no setting exists (tool is enabled by default)
+func (b *PostgresBackend) GetWorkspaceToolSetting(ctx context.Context, workspaceId uint, toolName string) (*types.WorkspaceToolSetting, error) {
+	query := `
+		SELECT id, workspace_id, tool_name, enabled, created_at, updated_at
+		FROM workspace_tool_setting
+		WHERE workspace_id = $1 AND tool_name = $2
+	`
+
+	setting := &types.WorkspaceToolSetting{}
+	err := b.db.QueryRowContext(ctx, query, workspaceId, toolName).Scan(
+		&setting.Id,
+		&setting.WorkspaceId,
+		&setting.ToolName,
+		&setting.Enabled,
+		&setting.CreatedAt,
+		&setting.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil // No setting means enabled by default
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get workspace tool setting: %w", err)
+	}
+
+	return setting, nil
+}
+
+// SetWorkspaceToolSetting creates or updates a tool setting for a workspace
+func (b *PostgresBackend) SetWorkspaceToolSetting(ctx context.Context, workspaceId uint, toolName string, enabled bool) error {
+	query := `
+		INSERT INTO workspace_tool_setting (workspace_id, tool_name, enabled, updated_at)
+		VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+		ON CONFLICT (workspace_id, tool_name) 
+		DO UPDATE SET enabled = $3, updated_at = CURRENT_TIMESTAMP
+	`
+
+	_, err := b.db.ExecContext(ctx, query, workspaceId, toolName, enabled)
+	if err != nil {
+		return fmt.Errorf("failed to set workspace tool setting: %w", err)
+	}
+
+	return nil
+}
+
+// ListWorkspaceToolSettings returns all tool settings for a workspace
+func (b *PostgresBackend) ListWorkspaceToolSettings(ctx context.Context, workspaceId uint) ([]types.WorkspaceToolSetting, error) {
+	query := `
+		SELECT id, workspace_id, tool_name, enabled, created_at, updated_at
+		FROM workspace_tool_setting
+		WHERE workspace_id = $1
+		ORDER BY tool_name
+	`
+
+	rows, err := b.db.QueryContext(ctx, query, workspaceId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list workspace tool settings: %w", err)
+	}
+	defer rows.Close()
+
+	var settings []types.WorkspaceToolSetting
+	for rows.Next() {
+		var setting types.WorkspaceToolSetting
+		if err := rows.Scan(
+			&setting.Id,
+			&setting.WorkspaceId,
+			&setting.ToolName,
+			&setting.Enabled,
+			&setting.CreatedAt,
+			&setting.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan tool setting: %w", err)
+		}
+		settings = append(settings, setting)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating tool settings: %w", err)
+	}
+
+	return settings, nil
+}

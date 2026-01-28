@@ -97,6 +97,12 @@ type BackendRepository interface {
 	ListWorkspaces(ctx context.Context) ([]*types.Workspace, error)
 	DeleteWorkspace(ctx context.Context, id uint) error
 
+	// Workspace Tool Settings
+	GetWorkspaceToolSettings(ctx context.Context, workspaceId uint) (*types.WorkspaceToolSettings, error)
+	GetWorkspaceToolSetting(ctx context.Context, workspaceId uint, toolName string) (*types.WorkspaceToolSetting, error)
+	SetWorkspaceToolSetting(ctx context.Context, workspaceId uint, toolName string, enabled bool) error
+	ListWorkspaceToolSettings(ctx context.Context, workspaceId uint) ([]types.WorkspaceToolSetting, error)
+
 	// Members
 	MemberRepository
 

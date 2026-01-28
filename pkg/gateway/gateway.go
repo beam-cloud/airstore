@@ -311,7 +311,7 @@ func (g *Gateway) registerServices() error {
 			AdminToken: g.Config.Gateway.AuthToken,
 			Backend:    g.BackendRepo,
 		}))
-		apiv1.NewFilesystemGroup(filesystemGroup, g.BackendRepo, g.contextService, g.sourceRegistry, g.toolRegistry)
+		apiv1.NewFilesystemGroup(filesystemGroup, g.BackendRepo, g.contextService, sourceService, g.sourceRegistry, g.toolRegistry)
 		log.Info().Msg("filesystem API registered at /api/v1/workspaces/:workspace_id/fs")
 
 		// Tasks API
