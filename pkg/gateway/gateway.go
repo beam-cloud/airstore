@@ -52,6 +52,9 @@ type Gateway struct {
 	sourceRegistry *sources.Registry
 	mcpManager     *tools.MCPManager
 
+	// Context service for S3-backed file storage
+	contextService *services.ContextService
+
 	// OAuth for workspace integrations
 	oauthStore  *oauth.Store
 	googleOAuth *oauth.GoogleClient
@@ -234,6 +237,7 @@ func (g *Gateway) registerServices() error {
 		if err != nil {
 			log.Warn().Err(err).Msg("failed to create context service - /context will not be available")
 		} else {
+			g.contextService = contextService
 			pb.RegisterContextServiceServer(g.grpcServer, contextService)
 			log.Info().Str("bucket", g.Config.Filesystem.Context.Bucket).Msg("context service registered")
 		}
@@ -300,6 +304,15 @@ func (g *Gateway) registerServices() error {
 
 		// Connections API (nested under workspaces)
 		apiv1.NewConnectionsGroup(workspacesGroup.Group("/:workspace_id/connections"), g.BackendRepo)
+
+		// Filesystem API (nested under workspaces, supports both admin and workspace tokens)
+		filesystemGroup := workspacesGroup.Group("/:workspace_id/fs")
+		filesystemGroup.Use(apiv1.NewFilesystemAuthMiddleware(apiv1.FilesystemAuthConfig{
+			AdminToken: g.Config.Gateway.AuthToken,
+			Backend:    g.BackendRepo,
+		}))
+		apiv1.NewFilesystemGroup(filesystemGroup, g.BackendRepo, g.contextService, g.sourceRegistry, g.toolRegistry)
+		log.Info().Msg("filesystem API registered at /api/v1/workspaces/:workspace_id/fs")
 
 		// Tasks API
 		apiv1.NewTasksGroup(g.baseRouteGroup.Group("/tasks"), g.BackendRepo, taskQueue)

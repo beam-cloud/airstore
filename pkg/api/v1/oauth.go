@@ -36,7 +36,7 @@ func NewOAuthGroup(g *echo.Group, store *oauth.Store, google *oauth.GoogleClient
 // CreateSessionRequest is the request body for POST /oauth/sessions
 type CreateSessionRequest struct {
 	IntegrationType string `json:"integration_type"`
-	ReturnTo        string `json:"return_to,omitempty"` // Optional relative URL to redirect after callback
+	ReturnTo        string `json:"return_to,omitempty"` // Optional URL to redirect after callback (relative path or full URL)
 }
 
 // CreateSessionResponse is the response for POST /oauth/sessions
@@ -67,8 +67,14 @@ func (og *OAuthGroup) CreateSession(c echo.Context) error {
 
 	var req CreateSessionRequest
 	if err := c.Bind(&req); err != nil {
+		log.Debug().Err(err).Msg("oauth session: failed to bind request")
 		return ErrorResponse(c, http.StatusBadRequest, "invalid request")
 	}
+
+	log.Debug().
+		Str("integration_type", req.IntegrationType).
+		Str("return_to", req.ReturnTo).
+		Msg("oauth session request")
 
 	if req.IntegrationType == "" {
 		return ErrorResponse(c, http.StatusBadRequest, "integration_type required")
@@ -84,9 +90,14 @@ func (og *OAuthGroup) CreateSession(c echo.Context) error {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "Google OAuth not configured")
 	}
 
-	// Validate return_to (must be relative path if provided)
-	if req.ReturnTo != "" && !strings.HasPrefix(req.ReturnTo, "/") {
-		return ErrorResponse(c, http.StatusBadRequest, "return_to must be a relative path")
+	// Validate return_to if provided (can be relative path or full URL)
+	if req.ReturnTo != "" {
+		// Must start with / (relative) or http:// or https:// (absolute)
+		if !strings.HasPrefix(req.ReturnTo, "/") &&
+			!strings.HasPrefix(req.ReturnTo, "http://") &&
+			!strings.HasPrefix(req.ReturnTo, "https://") {
+			return ErrorResponse(c, http.StatusBadRequest, "return_to must be a relative path or full URL")
+		}
 	}
 
 	// Create session
