@@ -31,6 +31,32 @@ var categoryQueries = map[string]string{
 	"important": "labelIds=IMPORTANT",
 }
 
+// gmailReadme is the README.md content for the Gmail integration
+const gmailReadme = `# Gmail Integration
+
+## Quick Start
+- ` + "`cat unread.json`" + ` - See all unread emails
+- ` + "`cat recent.json`" + ` - See 20 most recent emails
+- ` + "`cat status.json`" + ` - Check connection status
+
+## Structure
+- ` + "`messages/unread/`" + ` - Unread emails by sender
+- ` + "`messages/inbox/`" + ` - Inbox emails by sender
+- ` + "`messages/starred/`" + ` - Starred emails
+- ` + "`messages/sent/`" + ` - Sent emails
+- ` + "`messages/important/`" + ` - Important emails
+
+## Finding Emails
+- By sender: ` + "`ls messages/unread/`" + ` shows senders
+- By date: Folders sorted as ` + "`YYYY-MM-DD_Subject_id`" + `
+- Full email: ` + "`cat messages/unread/Sender/2026-01-29_Subject_id/body.txt`" + `
+
+## File Types
+- ` + "`meta.json`" + ` - Email metadata (from, to, subject, date)
+- ` + "`body.txt`" + ` - Plain text email body
+- ` + "`index.json`" + ` - Summary of all emails in a category
+`
+
 // GmailProvider implements sources.Provider for Gmail integration.
 // Structure: /sources/gmail/messages/{category}/{sender}/{subject}/
 type GmailProvider struct {
@@ -75,10 +101,18 @@ func (g *GmailProvider) Name() string {
 	return "gmail"
 }
 
+// checkAuth validates that credentials are present
+func checkAuth(pctx *sources.ProviderContext) error {
+	if pctx.Credentials == nil || pctx.Credentials.AccessToken == "" {
+		return sources.ErrNotConnected
+	}
+	return nil
+}
+
 // Stat returns file/directory attributes
 func (g *GmailProvider) Stat(ctx context.Context, pctx *sources.ProviderContext, path string) (*sources.FileInfo, error) {
-	if pctx.Credentials == nil || pctx.Credentials.AccessToken == "" {
-		return nil, sources.ErrNotConnected
+	if err := checkAuth(pctx); err != nil {
+		return nil, err
 	}
 
 	if path == "" {
@@ -88,6 +122,20 @@ func (g *GmailProvider) Stat(ctx context.Context, pctx *sources.ProviderContext,
 	parts := strings.Split(path, "/")
 
 	switch parts[0] {
+	case "README.md":
+		return sources.FileInfoFromBytes([]byte(gmailReadme)), nil
+	case "unread.json":
+		data, err := g.generateUnreadJSON(ctx, pctx)
+		if err != nil {
+			return nil, err
+		}
+		return sources.FileInfoFromBytes(data), nil
+	case "recent.json":
+		data, err := g.generateRecentJSON(ctx, pctx)
+		if err != nil {
+			return nil, err
+		}
+		return sources.FileInfoFromBytes(data), nil
 	case "messages":
 		return g.statMessages(ctx, pctx, parts[1:])
 	case "labels":
@@ -99,14 +147,18 @@ func (g *GmailProvider) Stat(ctx context.Context, pctx *sources.ProviderContext,
 
 // ReadDir lists directory contents
 func (g *GmailProvider) ReadDir(ctx context.Context, pctx *sources.ProviderContext, path string) ([]sources.DirEntry, error) {
-	if pctx.Credentials == nil || pctx.Credentials.AccessToken == "" {
-		return nil, sources.ErrNotConnected
+	if err := checkAuth(pctx); err != nil {
+		return nil, err
 	}
 
 	if path == "" {
+		// Root directory - use estimated sizes to avoid blocking on API calls
 		return []sources.DirEntry{
-			{Name: "messages", Mode: sources.ModeDir, IsDir: true, Mtime: sources.NowUnix()},
-			{Name: "labels", Mode: sources.ModeDir, IsDir: true, Mtime: sources.NowUnix()},
+			fileEntry("README.md", int64(len(gmailReadme))),
+			fileEntry("unread.json", 4096),
+			fileEntry("recent.json", 8192),
+			dirEntry("messages"),
+			dirEntry("labels"),
 		}, nil
 	}
 
@@ -124,13 +176,27 @@ func (g *GmailProvider) ReadDir(ctx context.Context, pctx *sources.ProviderConte
 
 // Read reads file content
 func (g *GmailProvider) Read(ctx context.Context, pctx *sources.ProviderContext, path string, offset, length int64) ([]byte, error) {
-	if pctx.Credentials == nil || pctx.Credentials.AccessToken == "" {
-		return nil, sources.ErrNotConnected
+	if err := checkAuth(pctx); err != nil {
+		return nil, err
 	}
 
 	parts := strings.Split(path, "/")
 
 	switch parts[0] {
+	case "README.md":
+		return sliceData([]byte(gmailReadme), offset, length), nil
+	case "unread.json":
+		data, err := g.generateUnreadJSON(ctx, pctx)
+		if err != nil {
+			return nil, err
+		}
+		return sliceData(data, offset, length), nil
+	case "recent.json":
+		data, err := g.generateRecentJSON(ctx, pctx)
+		if err != nil {
+			return nil, err
+		}
+		return sliceData(data, offset, length), nil
 	case "messages":
 		return g.readMessages(ctx, pctx, parts[1:], offset, length)
 	case "labels":
@@ -161,7 +227,15 @@ func (g *GmailProvider) statMessages(ctx context.Context, pctx *sources.Provider
 		}
 		return sources.DirInfo(), nil
 	case 2:
-		// /messages/{category}/{sender}
+		// /messages/{category}/{sender} OR /messages/{category}/index.json
+		category := parts[0]
+		if parts[1] == "index.json" {
+			data, err := g.generateCategoryIndexJSON(ctx, pctx, category)
+			if err != nil {
+				return nil, err
+			}
+			return sources.FileInfoFromBytes(data), nil
+		}
 		return sources.DirInfo(), nil
 	case 3:
 		// /messages/{category}/{sender}/{subject}
@@ -189,61 +263,45 @@ func (g *GmailProvider) statMessages(ctx context.Context, pctx *sources.Provider
 func (g *GmailProvider) readdirMessages(ctx context.Context, pctx *sources.ProviderContext, parts []string) ([]sources.DirEntry, error) {
 	switch len(parts) {
 	case 0:
-		// List categories: unread, inbox, starred, sent, important
+		// List categories
 		entries := make([]sources.DirEntry, len(gmailCategories))
 		for i, cat := range gmailCategories {
-			entries[i] = sources.DirEntry{
-				Name:  cat,
-				Mode:  sources.ModeDir,
-				IsDir: true,
-				Mtime: sources.NowUnix(),
-			}
+			entries[i] = dirEntry(cat)
 		}
 		return entries, nil
 
 	case 1:
-		// List senders in category
-		category := parts[0]
-		if !isValidCategory(category) {
-			return nil, sources.ErrNotFound
-		}
-		messages, err := g.getCategoryMessages(ctx, pctx, category)
+		// List senders in category (plus index.json)
+		messages, err := g.getValidatedCategoryMessages(ctx, pctx, parts[0])
 		if err != nil {
 			return nil, err
 		}
-		return g.listSenders(messages), nil
+		entries := []sources.DirEntry{fileEntry("index.json", 8192)}
+		entries = append(entries, g.listSenders(messages)...)
+		return entries, nil
 
 	case 2:
-		// List subjects from sender in category
-		category, senderFolder := parts[0], parts[1]
-		if !isValidCategory(category) {
-			return nil, sources.ErrNotFound
-		}
-		messages, err := g.getCategoryMessages(ctx, pctx, category)
+		// List subjects from sender
+		messages, err := g.getValidatedCategoryMessages(ctx, pctx, parts[0])
 		if err != nil {
 			return nil, err
 		}
-		return g.listSubjectsFromSender(messages, senderFolder), nil
+		return g.listSubjectsFromSender(messages, parts[1]), nil
 
 	case 3:
 		// List files in message: meta.json, body.txt
-		// We need to fetch file sizes for proper display
-		category, senderFolder, subjectFolder := parts[0], parts[1], parts[2]
-		msg, err := g.findMessage(ctx, pctx, category, senderFolder, subjectFolder)
+		msg, err := g.findMessage(ctx, pctx, parts[0], parts[1], parts[2])
 		if err != nil {
 			return nil, err
 		}
 		if msg == nil {
 			return nil, sources.ErrNotFound
 		}
-
-		// Fetch actual file data to get sizes
 		metaData, _ := g.getMessageFileData(ctx, pctx, msg.ID, "meta.json")
 		bodyData, _ := g.getMessageFileData(ctx, pctx, msg.ID, "body.txt")
-
 		return []sources.DirEntry{
-			{Name: "meta.json", Mode: sources.ModeFile, Size: int64(len(metaData)), Mtime: sources.NowUnix()},
-			{Name: "body.txt", Mode: sources.ModeFile, Size: int64(len(bodyData)), Mtime: sources.NowUnix()},
+			fileEntry("meta.json", int64(len(metaData))),
+			fileEntry("body.txt", int64(len(bodyData))),
 		}, nil
 
 	default:
@@ -252,6 +310,16 @@ func (g *GmailProvider) readdirMessages(ctx context.Context, pctx *sources.Provi
 }
 
 func (g *GmailProvider) readMessages(ctx context.Context, pctx *sources.ProviderContext, parts []string, offset, length int64) ([]byte, error) {
+	// Handle index.json at category level: /messages/{category}/index.json
+	if len(parts) == 2 && parts[1] == "index.json" {
+		category := parts[0]
+		data, err := g.generateCategoryIndexJSON(ctx, pctx, category)
+		if err != nil {
+			return nil, err
+		}
+		return sliceData(data, offset, length), nil
+	}
+
 	if len(parts) < 4 {
 		return nil, sources.ErrIsDir
 	}
@@ -292,9 +360,7 @@ func (g *GmailProvider) statLabels(ctx context.Context, pctx *sources.ProviderCo
 
 func (g *GmailProvider) readdirLabels(ctx context.Context, pctx *sources.ProviderContext, parts []string) ([]sources.DirEntry, error) {
 	if len(parts) == 0 {
-		return []sources.DirEntry{
-			{Name: "labels.json", Mode: sources.ModeFile, Mtime: sources.NowUnix()},
-		}, nil
+		return []sources.DirEntry{fileEntry("labels.json", 4096)}, nil
 	}
 	return nil, sources.ErrNotDir
 }
@@ -315,16 +381,29 @@ func (g *GmailProvider) readLabels(ctx context.Context, pctx *sources.ProviderCo
 
 // --- Message helpers ---
 
+const categoryCacheTTL = 10 * time.Minute // Cache Gmail data for 10 minutes
+
+// getValidatedCategoryMessages validates the category and returns cached/fetched messages
+func (g *GmailProvider) getValidatedCategoryMessages(ctx context.Context, pctx *sources.ProviderContext, category string) ([]gmailMessage, error) {
+	if !isValidCategory(category) {
+		return nil, sources.ErrNotFound
+	}
+	return g.getCategoryMessages(ctx, pctx, category)
+}
+
 func (g *GmailProvider) getCategoryMessages(ctx context.Context, pctx *sources.ProviderContext, category string) ([]gmailMessage, error) {
 	// Check cache
 	g.cacheMu.RLock()
-	if cached, ok := g.messageCache[category]; ok && time.Since(cached.fetchedAt) < 2*time.Minute {
+	if cached, ok := g.messageCache[category]; ok && time.Since(cached.fetchedAt) < categoryCacheTTL {
 		g.cacheMu.RUnlock()
 		return cached.messages, nil
 	}
 	g.cacheMu.RUnlock()
 
-	// Fetch from API
+	// Trigger background prefetch of all categories (only fetches uncached ones)
+	go g.prefetchAllCategories(pctx.Credentials.AccessToken)
+
+	// Fetch the requested category synchronously
 	token := pctx.Credentials.AccessToken
 	messages, err := g.fetchCategoryMessagesWithMeta(ctx, token, category)
 	if err != nil {
@@ -340,6 +419,42 @@ func (g *GmailProvider) getCategoryMessages(ctx context.Context, pctx *sources.P
 	g.cacheMu.Unlock()
 
 	return messages, nil
+}
+
+// prefetchAllCategories fetches all categories in parallel (background)
+func (g *GmailProvider) prefetchAllCategories(token string) {
+	var wg sync.WaitGroup
+	for _, cat := range gmailCategories {
+		// Skip if already cached
+		g.cacheMu.RLock()
+		cached, ok := g.messageCache[cat]
+		isFresh := ok && time.Since(cached.fetchedAt) < categoryCacheTTL
+		g.cacheMu.RUnlock()
+
+		if isFresh {
+			continue
+		}
+
+		wg.Add(1)
+		go func(category string) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			messages, err := g.fetchCategoryMessagesWithMeta(ctx, token, category)
+			if err != nil {
+				return // Silently fail background prefetch
+			}
+
+			g.cacheMu.Lock()
+			g.messageCache[category] = &categoryCache{
+				messages:  messages,
+				fetchedAt: time.Now(),
+			}
+			g.cacheMu.Unlock()
+		}(cat)
+	}
+	wg.Wait()
 }
 
 func (g *GmailProvider) fetchCategoryMessagesWithMeta(ctx context.Context, token, category string) ([]gmailMessage, error) {
@@ -434,16 +549,10 @@ func (g *GmailProvider) parseMessage(result map[string]any) gmailMessage {
 func (g *GmailProvider) listSenders(messages []gmailMessage) []sources.DirEntry {
 	seen := make(map[string]bool)
 	var entries []sources.DirEntry
-
 	for _, msg := range messages {
 		if msg.SenderFolder != "" && !seen[msg.SenderFolder] {
 			seen[msg.SenderFolder] = true
-			entries = append(entries, sources.DirEntry{
-				Name:  msg.SenderFolder,
-				Mode:  sources.ModeDir,
-				IsDir: true,
-				Mtime: sources.NowUnix(),
-			})
+			entries = append(entries, dirEntry(msg.SenderFolder))
 		}
 	}
 	return entries
@@ -451,15 +560,9 @@ func (g *GmailProvider) listSenders(messages []gmailMessage) []sources.DirEntry 
 
 func (g *GmailProvider) listSubjectsFromSender(messages []gmailMessage, senderFolder string) []sources.DirEntry {
 	var entries []sources.DirEntry
-
 	for _, msg := range messages {
 		if msg.SenderFolder == senderFolder {
-			entries = append(entries, sources.DirEntry{
-				Name:  msg.SubjectFolder,
-				Mode:  sources.ModeDir,
-				IsDir: true,
-				Mtime: sources.NowUnix(),
-			})
+			entries = append(entries, dirEntry(msg.SubjectFolder))
 		}
 	}
 	return entries
@@ -629,21 +732,18 @@ func isValidCategory(cat string) bool {
 }
 
 func getString(m map[string]any, key string) string {
-	if v, ok := m[key].(string); ok {
-		return v
-	}
-	return ""
+	v, _ := m[key].(string)
+	return v
 }
 
-// extractEmail extracts email address from "Name <email>" format
-func extractEmail(from string) string {
-	if idx := strings.Index(from, "<"); idx >= 0 {
-		end := strings.Index(from[idx:], ">")
-		if end > 0 {
-			return from[idx+1 : idx+end]
-		}
-	}
-	return from
+// dirEntry creates a directory DirEntry
+func dirEntry(name string) sources.DirEntry {
+	return sources.DirEntry{Name: name, Mode: sources.ModeDir, IsDir: true, Mtime: sources.NowUnix()}
+}
+
+// fileEntry creates a file DirEntry with estimated size
+func fileEntry(name string, size int64) sources.DirEntry {
+	return sources.DirEntry{Name: name, Mode: sources.ModeFile, Size: size, Mtime: sources.NowUnix()}
 }
 
 // extractSenderName extracts a clean sender name for folder display
@@ -654,23 +754,27 @@ func extractSenderName(from string) string {
 	// Try to extract name from "Name <email>" format
 	if idx := strings.Index(from, "<"); idx > 0 {
 		name := strings.TrimSpace(from[:idx])
-		// Remove quotes if present
-		name = strings.Trim(name, `"'`)
+		name = strings.Trim(name, `"'`) // Remove quotes if present
 		if name != "" {
 			return sanitizeFolderName(name)
 		}
 	}
 
+	// Extract email address from "Name <email>" or use as-is
+	email := from
+	if idx := strings.Index(from, "<"); idx >= 0 {
+		if end := strings.Index(from[idx:], ">"); end > 0 {
+			email = from[idx+1 : idx+end]
+		}
+	}
+
 	// Fall back to domain name from email
-	email := extractEmail(from)
 	if atIdx := strings.Index(email, "@"); atIdx > 0 {
 		domain := email[atIdx+1:]
-		// Extract base domain (e.g., "calendly" from "msg.calendly.com")
 		parts := strings.Split(domain, ".")
 		if len(parts) >= 2 {
 			// Use second-to-last part (the main domain name)
 			name := parts[len(parts)-2]
-			// Capitalize first letter
 			if len(name) > 0 {
 				return strings.ToUpper(name[:1]) + name[1:]
 			}
@@ -744,4 +848,96 @@ func truncateSubject(s string, maxLen int) string {
 		s = s[:maxLen]
 	}
 	return s
+}
+
+// --- Summary file generators ---
+
+// emailSummary is a simplified email representation for summary files
+type emailSummary struct {
+	ID      string `json:"id"`
+	From    string `json:"from"`
+	Subject string `json:"subject"`
+	Date    string `json:"date"`
+	Snippet string `json:"snippet"`
+	Path    string `json:"path"`
+}
+
+// toSummary converts a gmailMessage to emailSummary with the given category for path
+func (msg *gmailMessage) toSummary(category string) emailSummary {
+	return emailSummary{
+		ID:      msg.ID,
+		From:    msg.From,
+		Subject: msg.Subject,
+		Date:    parseEmailDate(msg.Date),
+		Snippet: msg.Snippet,
+		Path:    fmt.Sprintf("messages/%s/%s/%s", category, msg.SenderFolder, msg.SubjectFolder),
+	}
+}
+
+// generateUnreadJSON creates a summary of all unread emails
+func (g *GmailProvider) generateUnreadJSON(ctx context.Context, pctx *sources.ProviderContext) ([]byte, error) {
+	return g.generateCategorySummary(ctx, pctx, "unread", 0)
+}
+
+// generateRecentJSON creates a summary of the 20 most recent emails
+func (g *GmailProvider) generateRecentJSON(ctx context.Context, pctx *sources.ProviderContext) ([]byte, error) {
+	data, err := g.generateCategorySummary(ctx, pctx, "inbox", 20)
+	if err != nil {
+		return nil, err
+	}
+	// Replace category name for clarity
+	var result map[string]any
+	json.Unmarshal(data, &result)
+	result["category"] = "recent"
+	return jsonMarshal(result)
+}
+
+// generateCategoryIndexJSON creates a summary of all emails in a category (with senders list)
+func (g *GmailProvider) generateCategoryIndexJSON(ctx context.Context, pctx *sources.ProviderContext, category string) ([]byte, error) {
+	messages, err := g.getCategoryMessages(ctx, pctx, category)
+	if err != nil {
+		return nil, err
+	}
+
+	senderSet := make(map[string]bool)
+	emails := make([]emailSummary, 0, len(messages))
+	for i := range messages {
+		senderSet[messages[i].SenderFolder] = true
+		emails = append(emails, messages[i].toSummary(category))
+	}
+
+	senders := make([]string, 0, len(senderSet))
+	for s := range senderSet {
+		senders = append(senders, s)
+	}
+
+	return jsonMarshal(map[string]any{
+		"category": category,
+		"count":    len(emails),
+		"senders":  senders,
+		"emails":   emails,
+	})
+}
+
+// generateCategorySummary creates a JSON summary for a category with optional limit
+func (g *GmailProvider) generateCategorySummary(ctx context.Context, pctx *sources.ProviderContext, category string, limit int) ([]byte, error) {
+	messages, err := g.getCategoryMessages(ctx, pctx, category)
+	if err != nil {
+		return nil, err
+	}
+
+	if limit > 0 && len(messages) > limit {
+		messages = messages[:limit]
+	}
+
+	emails := make([]emailSummary, 0, len(messages))
+	for i := range messages {
+		emails = append(emails, messages[i].toSummary(category))
+	}
+
+	return jsonMarshal(map[string]any{
+		"category": category,
+		"count":    len(emails),
+		"emails":   emails,
+	})
 }
