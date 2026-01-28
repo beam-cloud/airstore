@@ -1,12 +1,20 @@
 # 💨 Airstore
 
-A virtual filesystem for agents. Turn MCP servers and custom tools into executables you can pipe together with bash.
+Airstore is a virtual filesystem for AI agents. 
 
-## What can you do with Airstore?
+## Why Airstore?
 
-* Use MCP tools as executable binaries
-* Pipe outputs between tools with unix commands
-* Share context across agents via object storage
+Agents perform best when they have access to a computer. But your tools, integrations, and context are scattered across external APIs and MCP servers.
+
+Airstore is a virtual filesystem that puts everything your agent needs (tools, context, and events) in a single folder on your computer. That folder is virtualized, so you can access it from anywhere.
+
+We envision a world where your entire company can be represented as a POSIX filesystem that any agent can interact with.
+
+### Features
+
+* Mount a complete agent environment as a local folder
+* Access MCP tools and integrations as executable binaries
+* Share context across agents and machines
 * Trigger background agents on filesystem events (coming soon)
 
 ## How it works
