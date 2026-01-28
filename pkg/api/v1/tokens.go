@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/repository"
+	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/labstack/echo/v4"
 )
 
@@ -22,14 +23,16 @@ func NewTokensGroup(g *echo.Group, backend repository.BackendRepository) *Tokens
 }
 
 type CreateTokenRequest struct {
-	MemberId  string `json:"member_id"`
+	MemberId  string `json:"member_id"`  // Optional if email is provided
+	Email     string `json:"email"`      // For auto-creating member
 	Name      string `json:"name"`
 	ExpiresIn int    `json:"expires_in"` // Seconds
 }
 
 type TokenCreatedResponse struct {
-	Token string      `json:"token"`
-	Info  interface{} `json:"info"`
+	Token    string      `json:"token"`
+	Info     interface{} `json:"info"`
+	MemberId string      `json:"member_id,omitempty"` // Returned when auto-created
 }
 
 func (tg *TokensGroup) Create(c echo.Context) error {
@@ -39,8 +42,8 @@ func (tg *TokensGroup) Create(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid request")
 	}
-	if req.MemberId == "" {
-		return ErrorResponse(c, http.StatusBadRequest, "member_id required")
+	if req.MemberId == "" && req.Email == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "member_id or email required")
 	}
 	if req.Name == "" {
 		req.Name = "API Token"
@@ -51,15 +54,28 @@ func (tg *TokensGroup) Create(c echo.Context) error {
 		return ErrorResponse(c, http.StatusNotFound, "workspace not found")
 	}
 
-	member, err := tg.backend.GetMember(c.Request().Context(), req.MemberId)
-	if err != nil {
-		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
-	}
-	if member == nil {
-		return ErrorResponse(c, http.StatusNotFound, "member not found")
-	}
-	if member.WorkspaceId != ws.Id {
-		return ErrorResponse(c, http.StatusBadRequest, "member not in workspace")
+	var member *types.WorkspaceMember
+	var autoCreatedMemberId string
+
+	if req.MemberId != "" {
+		// Use existing member
+		member, err = tg.backend.GetMember(c.Request().Context(), req.MemberId)
+		if err != nil {
+			return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+		}
+		if member == nil {
+			return ErrorResponse(c, http.StatusNotFound, "member not found")
+		}
+		if member.WorkspaceId != ws.Id {
+			return ErrorResponse(c, http.StatusBadRequest, "member not in workspace")
+		}
+	} else {
+		// Auto-create member with provided email
+		member, err = tg.backend.CreateMember(c.Request().Context(), ws.Id, req.Email, req.Email, types.RoleMember)
+		if err != nil {
+			return ErrorResponse(c, http.StatusInternalServerError, "failed to create member: "+err.Error())
+		}
+		autoCreatedMemberId = member.ExternalId
 	}
 
 	var expiresAt *time.Time
@@ -75,7 +91,7 @@ func (tg *TokensGroup) Create(c echo.Context) error {
 
 	return c.JSON(http.StatusCreated, Response{
 		Success: true,
-		Data:    TokenCreatedResponse{Token: raw, Info: token},
+		Data:    TokenCreatedResponse{Token: raw, Info: token, MemberId: autoCreatedMemberId},
 	})
 }
 
