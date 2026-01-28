@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
+	"github.com/beam-cloud/airstore/pkg/oauth"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/tools"
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -16,8 +17,9 @@ import (
 
 type ToolService struct {
 	pb.UnimplementedToolServiceServer
-	registry *tools.Registry
-	backend  repository.BackendRepository
+	registry    *tools.Registry
+	backend     repository.BackendRepository
+	googleOAuth *oauth.GoogleClient
 }
 
 func NewToolService(registry *tools.Registry) *ToolService {
@@ -26,6 +28,10 @@ func NewToolService(registry *tools.Registry) *ToolService {
 
 func NewToolServiceWithBackend(registry *tools.Registry, backend repository.BackendRepository) *ToolService {
 	return &ToolService{registry: registry, backend: backend}
+}
+
+func NewToolServiceWithOAuth(registry *tools.Registry, backend repository.BackendRepository, googleOAuth *oauth.GoogleClient) *ToolService {
+	return &ToolService{registry: registry, backend: backend, googleOAuth: googleOAuth}
 }
 
 func (s *ToolService) ListTools(ctx context.Context, req *pb.ListToolsRequest) (*pb.ListToolsResponse, error) {
@@ -126,6 +132,23 @@ func (s *ToolService) buildExecContext(ctx context.Context, toolName string) *to
 	if err != nil {
 		log.Warn().Str("tool", toolName).Err(err).Msg("credential decrypt failed")
 		return execCtx
+	}
+
+	// Check if Google OAuth token needs refresh
+	if oauth.IsGoogleIntegration(toolName) && oauth.NeedsRefresh(creds) && s.googleOAuth != nil {
+		refreshed, err := s.googleOAuth.Refresh(ctx, creds.RefreshToken)
+		if err != nil {
+			log.Warn().Str("tool", toolName).Err(err).Msg("token refresh failed")
+			// Continue with existing creds - they might still work
+		} else {
+			// Update stored credentials
+			if _, err := s.backend.SaveConnection(ctx, conn.WorkspaceId, conn.MemberId, toolName, refreshed, conn.Scope); err != nil {
+				log.Warn().Str("tool", toolName).Err(err).Msg("failed to persist refreshed token")
+			} else {
+				log.Debug().Str("tool", toolName).Msg("token refreshed successfully")
+			}
+			creds = refreshed
+		}
 	}
 
 	execCtx.Credentials = creds

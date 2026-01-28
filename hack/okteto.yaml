@@ -12,6 +12,7 @@ dev:
         go build -o /workspace/bin/worker /workspace/cmd/worker/main.go
       BUILD_BINARY_PATH: /workspace/bin/gateway
       REDIS_ADDR: redis-master:6379
+      CONFIG_PATH: /workspace/config.gw.yaml
     forward:
     - 1994:1994
     - 1993:1993

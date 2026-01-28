@@ -2,11 +2,14 @@ package providers
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/sources"
@@ -16,16 +19,55 @@ const (
 	gmailAPIBase = "https://gmail.googleapis.com/gmail/v1"
 )
 
+// Gmail categories (folders under /messages/)
+var gmailCategories = []string{"unread", "inbox", "starred", "sent", "important"}
+
+// categoryQueries maps category names to Gmail API query/label
+var categoryQueries = map[string]string{
+	"unread":    "q=is:unread",
+	"inbox":     "labelIds=INBOX",
+	"starred":   "labelIds=STARRED",
+	"sent":      "labelIds=SENT",
+	"important": "labelIds=IMPORTANT",
+}
+
 // GmailProvider implements sources.Provider for Gmail integration.
-// It exposes Gmail resources as a read-only filesystem under /sources/gmail/
+// Structure: /sources/gmail/messages/{category}/{sender}/{subject}/
 type GmailProvider struct {
 	httpClient *http.Client
+
+	// Cache for message metadata (keyed by category, holds messages with headers)
+	cacheMu      sync.RWMutex
+	messageCache map[string]*categoryCache
+}
+
+// categoryCache holds cached messages for a category
+type categoryCache struct {
+	messages  []gmailMessage
+	fetchedAt time.Time
+}
+
+// gmailMessage holds parsed message data for folder organization
+type gmailMessage struct {
+	ID       string
+	ThreadID string
+	From     string
+	To       string
+	Subject  string
+	Date     string
+	Snippet  string
+	Labels   []string
+
+	// Derived folder names
+	SenderFolder  string // sanitized sender email
+	SubjectFolder string // sanitized subject with ID suffix
 }
 
 // NewGmailProvider creates a new Gmail source provider
 func NewGmailProvider() *GmailProvider {
 	return &GmailProvider{
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		httpClient:   &http.Client{Timeout: 30 * time.Second},
+		messageCache: make(map[string]*categoryCache),
 	}
 }
 
@@ -46,10 +88,10 @@ func (g *GmailProvider) Stat(ctx context.Context, pctx *sources.ProviderContext,
 	parts := strings.Split(path, "/")
 
 	switch parts[0] {
-	case "views":
-		return g.statViews(ctx, pctx, parts[1:])
 	case "messages":
 		return g.statMessages(ctx, pctx, parts[1:])
+	case "labels":
+		return g.statLabels(ctx, pctx, parts[1:])
 	default:
 		return nil, sources.ErrNotFound
 	}
@@ -63,18 +105,18 @@ func (g *GmailProvider) ReadDir(ctx context.Context, pctx *sources.ProviderConte
 
 	if path == "" {
 		return []sources.DirEntry{
-			{Name: "views", Mode: sources.ModeDir, IsDir: true, Mtime: sources.NowUnix()},
 			{Name: "messages", Mode: sources.ModeDir, IsDir: true, Mtime: sources.NowUnix()},
+			{Name: "labels", Mode: sources.ModeDir, IsDir: true, Mtime: sources.NowUnix()},
 		}, nil
 	}
 
 	parts := strings.Split(path, "/")
 
 	switch parts[0] {
-	case "views":
-		return g.readdirViews(ctx, pctx, parts[1:])
 	case "messages":
 		return g.readdirMessages(ctx, pctx, parts[1:])
+	case "labels":
+		return g.readdirLabels(ctx, pctx, parts[1:])
 	default:
 		return nil, sources.ErrNotFound
 	}
@@ -89,10 +131,10 @@ func (g *GmailProvider) Read(ctx context.Context, pctx *sources.ProviderContext,
 	parts := strings.Split(path, "/")
 
 	switch parts[0] {
-	case "views":
-		return g.readViews(ctx, pctx, parts[1:], offset, length)
 	case "messages":
 		return g.readMessages(ctx, pctx, parts[1:], offset, length)
+	case "labels":
+		return g.readLabels(ctx, pctx, parts[1:], offset, length)
 	default:
 		return nil, sources.ErrNotFound
 	}
@@ -103,82 +145,38 @@ func (g *GmailProvider) Readlink(ctx context.Context, pctx *sources.ProviderCont
 	return "", sources.ErrNotFound
 }
 
-// --- Views ---
-// /views/unread.json - unread messages
-// /views/inbox.json - inbox messages
-// /views/labels.json - available labels
-
-func (g *GmailProvider) statViews(ctx context.Context, pctx *sources.ProviderContext, parts []string) (*sources.FileInfo, error) {
-	if len(parts) == 0 {
-		return sources.DirInfo(), nil
-	}
-
-	switch parts[0] {
-	case "unread.json", "inbox.json", "labels.json":
-		data, err := g.getViewData(ctx, pctx, parts[0])
-		if err != nil {
-			return nil, err
-		}
-		return sources.FileInfoFromBytes(data), nil
-	default:
-		return nil, sources.ErrNotFound
-	}
-}
-
-func (g *GmailProvider) readdirViews(ctx context.Context, pctx *sources.ProviderContext, parts []string) ([]sources.DirEntry, error) {
-	if len(parts) == 0 {
-		return []sources.DirEntry{
-			{Name: "unread.json", Mode: sources.ModeFile, Mtime: sources.NowUnix()},
-			{Name: "inbox.json", Mode: sources.ModeFile, Mtime: sources.NowUnix()},
-			{Name: "labels.json", Mode: sources.ModeFile, Mtime: sources.NowUnix()},
-		}, nil
-	}
-	return nil, sources.ErrNotDir
-}
-
-func (g *GmailProvider) readViews(ctx context.Context, pctx *sources.ProviderContext, parts []string, offset, length int64) ([]byte, error) {
-	if len(parts) == 0 {
-		return nil, sources.ErrIsDir
-	}
-
-	data, err := g.getViewData(ctx, pctx, parts[0])
-	if err != nil {
-		return nil, err
-	}
-
-	return sliceData(data, offset, length), nil
-}
-
-func (g *GmailProvider) getViewData(ctx context.Context, pctx *sources.ProviderContext, view string) ([]byte, error) {
-	token := pctx.Credentials.AccessToken
-
-	switch view {
-	case "unread.json":
-		return g.fetchUnread(ctx, token)
-	case "inbox.json":
-		return g.fetchInbox(ctx, token)
-	case "labels.json":
-		return g.fetchLabels(ctx, token)
-	default:
-		return nil, sources.ErrNotFound
-	}
-}
-
 // --- Messages ---
-// /messages/<msgid>/meta.json - message metadata
-// /messages/<msgid>/body.txt - plain text body
+// /messages/{category}/{sender}/{subject}/meta.json
+// /messages/{category}/{sender}/{subject}/body.txt
 
 func (g *GmailProvider) statMessages(ctx context.Context, pctx *sources.ProviderContext, parts []string) (*sources.FileInfo, error) {
 	switch len(parts) {
 	case 0:
+		// /messages/
 		return sources.DirInfo(), nil
 	case 1:
-		// /messages/<msgid> - directory
+		// /messages/{category}
+		if !isValidCategory(parts[0]) {
+			return nil, sources.ErrNotFound
+		}
 		return sources.DirInfo(), nil
 	case 2:
-		// /messages/<msgid>/<file>
-		msgId, file := parts[0], parts[1]
-		data, err := g.getMessageFile(ctx, pctx, msgId, file)
+		// /messages/{category}/{sender}
+		return sources.DirInfo(), nil
+	case 3:
+		// /messages/{category}/{sender}/{subject}
+		return sources.DirInfo(), nil
+	case 4:
+		// /messages/{category}/{sender}/{subject}/{file}
+		category, senderFolder, subjectFolder, file := parts[0], parts[1], parts[2], parts[3]
+		msg, err := g.findMessage(ctx, pctx, category, senderFolder, subjectFolder)
+		if err != nil {
+			return nil, err
+		}
+		if msg == nil {
+			return nil, sources.ErrNotFound
+		}
+		data, err := g.getMessageFileData(ctx, pctx, msg.ID, file)
 		if err != nil {
 			return nil, err
 		}
@@ -189,34 +187,63 @@ func (g *GmailProvider) statMessages(ctx context.Context, pctx *sources.Provider
 }
 
 func (g *GmailProvider) readdirMessages(ctx context.Context, pctx *sources.ProviderContext, parts []string) ([]sources.DirEntry, error) {
-	token := pctx.Credentials.AccessToken
-
 	switch len(parts) {
 	case 0:
-		// List recent message IDs
-		messages, err := g.fetchMessageList(ctx, token, 50)
-		if err != nil {
-			return nil, err
-		}
-
-		entries := make([]sources.DirEntry, 0, len(messages))
-		for _, msg := range messages {
-			if id, ok := msg["id"].(string); ok {
-				entries = append(entries, sources.DirEntry{
-					Name:  id,
-					Mode:  sources.ModeDir,
-					IsDir: true,
-					Mtime: sources.NowUnix(),
-				})
+		// List categories: unread, inbox, starred, sent, important
+		entries := make([]sources.DirEntry, len(gmailCategories))
+		for i, cat := range gmailCategories {
+			entries[i] = sources.DirEntry{
+				Name:  cat,
+				Mode:  sources.ModeDir,
+				IsDir: true,
+				Mtime: sources.NowUnix(),
 			}
 		}
 		return entries, nil
 
 	case 1:
-		// List files in a message
+		// List senders in category
+		category := parts[0]
+		if !isValidCategory(category) {
+			return nil, sources.ErrNotFound
+		}
+		messages, err := g.getCategoryMessages(ctx, pctx, category)
+		if err != nil {
+			return nil, err
+		}
+		return g.listSenders(messages), nil
+
+	case 2:
+		// List subjects from sender in category
+		category, senderFolder := parts[0], parts[1]
+		if !isValidCategory(category) {
+			return nil, sources.ErrNotFound
+		}
+		messages, err := g.getCategoryMessages(ctx, pctx, category)
+		if err != nil {
+			return nil, err
+		}
+		return g.listSubjectsFromSender(messages, senderFolder), nil
+
+	case 3:
+		// List files in message: meta.json, body.txt
+		// We need to fetch file sizes for proper display
+		category, senderFolder, subjectFolder := parts[0], parts[1], parts[2]
+		msg, err := g.findMessage(ctx, pctx, category, senderFolder, subjectFolder)
+		if err != nil {
+			return nil, err
+		}
+		if msg == nil {
+			return nil, sources.ErrNotFound
+		}
+
+		// Fetch actual file data to get sizes
+		metaData, _ := g.getMessageFileData(ctx, pctx, msg.ID, "meta.json")
+		bodyData, _ := g.getMessageFileData(ctx, pctx, msg.ID, "body.txt")
+
 		return []sources.DirEntry{
-			{Name: "meta.json", Mode: sources.ModeFile, Mtime: sources.NowUnix()},
-			{Name: "body.txt", Mode: sources.ModeFile, Mtime: sources.NowUnix()},
+			{Name: "meta.json", Mode: sources.ModeFile, Size: int64(len(metaData)), Mtime: sources.NowUnix()},
+			{Name: "body.txt", Mode: sources.ModeFile, Size: int64(len(bodyData)), Mtime: sources.NowUnix()},
 		}, nil
 
 	default:
@@ -225,12 +252,21 @@ func (g *GmailProvider) readdirMessages(ctx context.Context, pctx *sources.Provi
 }
 
 func (g *GmailProvider) readMessages(ctx context.Context, pctx *sources.ProviderContext, parts []string, offset, length int64) ([]byte, error) {
-	if len(parts) < 2 {
+	if len(parts) < 4 {
 		return nil, sources.ErrIsDir
 	}
 
-	msgId, file := parts[0], parts[1]
-	data, err := g.getMessageFile(ctx, pctx, msgId, file)
+	category, senderFolder, subjectFolder, file := parts[0], parts[1], parts[2], parts[3]
+
+	msg, err := g.findMessage(ctx, pctx, category, senderFolder, subjectFolder)
+	if err != nil {
+		return nil, err
+	}
+	if msg == nil {
+		return nil, sources.ErrNotFound
+	}
+
+	data, err := g.getMessageFileData(ctx, pctx, msg.ID, file)
 	if err != nil {
 		return nil, err
 	}
@@ -238,55 +274,226 @@ func (g *GmailProvider) readMessages(ctx context.Context, pctx *sources.Provider
 	return sliceData(data, offset, length), nil
 }
 
-func (g *GmailProvider) getMessageFile(ctx context.Context, pctx *sources.ProviderContext, msgId, file string) ([]byte, error) {
+// --- Labels ---
+
+func (g *GmailProvider) statLabels(ctx context.Context, pctx *sources.ProviderContext, parts []string) (*sources.FileInfo, error) {
+	if len(parts) == 0 {
+		return sources.DirInfo(), nil
+	}
+	if parts[0] == "labels.json" {
+		data, err := g.fetchLabels(ctx, pctx.Credentials.AccessToken)
+		if err != nil {
+			return nil, err
+		}
+		return sources.FileInfoFromBytes(data), nil
+	}
+	return nil, sources.ErrNotFound
+}
+
+func (g *GmailProvider) readdirLabels(ctx context.Context, pctx *sources.ProviderContext, parts []string) ([]sources.DirEntry, error) {
+	if len(parts) == 0 {
+		return []sources.DirEntry{
+			{Name: "labels.json", Mode: sources.ModeFile, Mtime: sources.NowUnix()},
+		}, nil
+	}
+	return nil, sources.ErrNotDir
+}
+
+func (g *GmailProvider) readLabels(ctx context.Context, pctx *sources.ProviderContext, parts []string, offset, length int64) ([]byte, error) {
+	if len(parts) == 0 {
+		return nil, sources.ErrIsDir
+	}
+	if parts[0] != "labels.json" {
+		return nil, sources.ErrNotFound
+	}
+	data, err := g.fetchLabels(ctx, pctx.Credentials.AccessToken)
+	if err != nil {
+		return nil, err
+	}
+	return sliceData(data, offset, length), nil
+}
+
+// --- Message helpers ---
+
+func (g *GmailProvider) getCategoryMessages(ctx context.Context, pctx *sources.ProviderContext, category string) ([]gmailMessage, error) {
+	// Check cache
+	g.cacheMu.RLock()
+	if cached, ok := g.messageCache[category]; ok && time.Since(cached.fetchedAt) < 2*time.Minute {
+		g.cacheMu.RUnlock()
+		return cached.messages, nil
+	}
+	g.cacheMu.RUnlock()
+
+	// Fetch from API
+	token := pctx.Credentials.AccessToken
+	messages, err := g.fetchCategoryMessagesWithMeta(ctx, token, category)
+	if err != nil {
+		return nil, err
+	}
+
+	// Update cache
+	g.cacheMu.Lock()
+	g.messageCache[category] = &categoryCache{
+		messages:  messages,
+		fetchedAt: time.Now(),
+	}
+	g.cacheMu.Unlock()
+
+	return messages, nil
+}
+
+func (g *GmailProvider) fetchCategoryMessagesWithMeta(ctx context.Context, token, category string) ([]gmailMessage, error) {
+	query := categoryQueries[category]
+	if query == "" {
+		return nil, sources.ErrNotFound
+	}
+
+	// Fetch message IDs
+	var listResult map[string]any
+	path := fmt.Sprintf("/users/me/messages?%s&maxResults=50", query)
+	if err := g.request(ctx, token, path, &listResult); err != nil {
+		return nil, err
+	}
+
+	rawMessages, _ := listResult["messages"].([]any)
+	if len(rawMessages) == 0 {
+		return nil, nil
+	}
+
+	// Fetch metadata for each message
+	messages := make([]gmailMessage, 0, len(rawMessages))
+	for _, m := range rawMessages {
+		msgMap, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		msgID, _ := msgMap["id"].(string)
+		if msgID == "" {
+			continue
+		}
+
+		// Fetch message metadata
+		var msgResult map[string]any
+		msgPath := fmt.Sprintf("/users/me/messages/%s?format=metadata", msgID)
+		if err := g.request(ctx, token, msgPath, &msgResult); err != nil {
+			continue // Skip failed messages
+		}
+
+		msg := g.parseMessage(msgResult)
+		messages = append(messages, msg)
+	}
+
+	return messages, nil
+}
+
+func (g *GmailProvider) parseMessage(result map[string]any) gmailMessage {
+	msg := gmailMessage{
+		ID:       getString(result, "id"),
+		ThreadID: getString(result, "threadId"),
+		Snippet:  getString(result, "snippet"),
+	}
+
+	// Parse labels
+	if labels, ok := result["labelIds"].([]any); ok {
+		for _, l := range labels {
+			if s, ok := l.(string); ok {
+				msg.Labels = append(msg.Labels, s)
+			}
+		}
+	}
+
+	// Extract headers
+	if payload, ok := result["payload"].(map[string]any); ok {
+		if hdrs, ok := payload["headers"].([]any); ok {
+			for _, h := range hdrs {
+				if hdr, ok := h.(map[string]any); ok {
+					name, _ := hdr["name"].(string)
+					value, _ := hdr["value"].(string)
+					switch name {
+					case "From":
+						msg.From = value
+					case "To":
+						msg.To = value
+					case "Subject":
+						msg.Subject = value
+					case "Date":
+						msg.Date = value
+					}
+				}
+			}
+		}
+	}
+
+	// Generate folder names
+	msg.SenderFolder = extractSenderName(msg.From)
+	msg.SubjectFolder = formatSubjectFolder(msg.Subject, msg.Date, msg.ID)
+
+	return msg
+}
+
+func (g *GmailProvider) listSenders(messages []gmailMessage) []sources.DirEntry {
+	seen := make(map[string]bool)
+	var entries []sources.DirEntry
+
+	for _, msg := range messages {
+		if msg.SenderFolder != "" && !seen[msg.SenderFolder] {
+			seen[msg.SenderFolder] = true
+			entries = append(entries, sources.DirEntry{
+				Name:  msg.SenderFolder,
+				Mode:  sources.ModeDir,
+				IsDir: true,
+				Mtime: sources.NowUnix(),
+			})
+		}
+	}
+	return entries
+}
+
+func (g *GmailProvider) listSubjectsFromSender(messages []gmailMessage, senderFolder string) []sources.DirEntry {
+	var entries []sources.DirEntry
+
+	for _, msg := range messages {
+		if msg.SenderFolder == senderFolder {
+			entries = append(entries, sources.DirEntry{
+				Name:  msg.SubjectFolder,
+				Mode:  sources.ModeDir,
+				IsDir: true,
+				Mtime: sources.NowUnix(),
+			})
+		}
+	}
+	return entries
+}
+
+func (g *GmailProvider) findMessage(ctx context.Context, pctx *sources.ProviderContext, category, senderFolder, subjectFolder string) (*gmailMessage, error) {
+	messages, err := g.getCategoryMessages(ctx, pctx, category)
+	if err != nil {
+		return nil, err
+	}
+
+	for i := range messages {
+		msg := &messages[i]
+		if msg.SenderFolder == senderFolder && msg.SubjectFolder == subjectFolder {
+			return msg, nil
+		}
+	}
+	return nil, nil
+}
+
+func (g *GmailProvider) getMessageFileData(ctx context.Context, pctx *sources.ProviderContext, msgID, file string) ([]byte, error) {
 	token := pctx.Credentials.AccessToken
 
 	switch file {
 	case "meta.json":
-		return g.fetchMessageMeta(ctx, token, msgId)
+		return g.fetchMessageMeta(ctx, token, msgID)
 	case "body.txt":
-		return g.fetchMessageBody(ctx, token, msgId)
+		return g.fetchMessageBody(ctx, token, msgID)
 	default:
 		return nil, sources.ErrNotFound
 	}
 }
 
 // --- API methods ---
-
-func (g *GmailProvider) fetchUnread(ctx context.Context, token string) ([]byte, error) {
-	var result map[string]any
-	if err := g.request(ctx, token, "/users/me/messages?q=is:unread&maxResults=50", &result); err != nil {
-		return nil, err
-	}
-
-	messages := result["messages"]
-	if messages == nil {
-		messages = []any{}
-	}
-
-	return jsonMarshal(map[string]any{
-		"unread":  messages,
-		"count":   len(messages.([]any)),
-		"query":   "is:unread",
-	})
-}
-
-func (g *GmailProvider) fetchInbox(ctx context.Context, token string) ([]byte, error) {
-	var result map[string]any
-	if err := g.request(ctx, token, "/users/me/messages?labelIds=INBOX&maxResults=50", &result); err != nil {
-		return nil, err
-	}
-
-	messages := result["messages"]
-	if messages == nil {
-		messages = []any{}
-	}
-
-	return jsonMarshal(map[string]any{
-		"inbox": messages,
-		"count": len(messages.([]any)),
-	})
-}
 
 func (g *GmailProvider) fetchLabels(ctx context.Context, token string) ([]byte, error) {
 	var result map[string]any
@@ -305,27 +512,6 @@ func (g *GmailProvider) fetchLabels(ctx context.Context, token string) ([]byte, 
 	})
 }
 
-func (g *GmailProvider) fetchMessageList(ctx context.Context, token string, maxResults int) ([]map[string]any, error) {
-	var result map[string]any
-	path := fmt.Sprintf("/users/me/messages?maxResults=%d", maxResults)
-	if err := g.request(ctx, token, path, &result); err != nil {
-		return nil, err
-	}
-
-	messages, ok := result["messages"].([]any)
-	if !ok {
-		return nil, nil
-	}
-
-	msgList := make([]map[string]any, 0, len(messages))
-	for _, m := range messages {
-		if msg, ok := m.(map[string]any); ok {
-			msgList = append(msgList, msg)
-		}
-	}
-	return msgList, nil
-}
-
 func (g *GmailProvider) fetchMessageMeta(ctx context.Context, token, msgId string) ([]byte, error) {
 	var result map[string]any
 	path := fmt.Sprintf("/users/me/messages/%s?format=metadata", msgId)
@@ -333,29 +519,17 @@ func (g *GmailProvider) fetchMessageMeta(ctx context.Context, token, msgId strin
 		return nil, err
 	}
 
-	// Extract headers
-	headers := make(map[string]string)
-	if payload, ok := result["payload"].(map[string]any); ok {
-		if hdrs, ok := payload["headers"].([]any); ok {
-			for _, h := range hdrs {
-				if hdr, ok := h.(map[string]any); ok {
-					name, _ := hdr["name"].(string)
-					value, _ := hdr["value"].(string)
-					headers[name] = value
-				}
-			}
-		}
-	}
+	msg := g.parseMessage(result)
 
 	return jsonMarshal(map[string]any{
-		"id":       result["id"],
-		"threadId": result["threadId"],
-		"labelIds": result["labelIds"],
-		"snippet":  result["snippet"],
-		"from":     headers["From"],
-		"to":       headers["To"],
-		"subject":  headers["Subject"],
-		"date":     headers["Date"],
+		"id":       msg.ID,
+		"threadId": msg.ThreadID,
+		"labelIds": msg.Labels,
+		"snippet":  msg.Snippet,
+		"from":     msg.From,
+		"to":       msg.To,
+		"subject":  msg.Subject,
+		"date":     msg.Date,
 	})
 }
 
@@ -366,7 +540,6 @@ func (g *GmailProvider) fetchMessageBody(ctx context.Context, token, msgId strin
 		return nil, err
 	}
 
-	// Try to extract plain text body
 	body := extractPlainTextBody(result)
 	if body == "" {
 		body = fmt.Sprintf("(no plain text body available)\n\nSnippet: %s", result["snippet"])
@@ -384,8 +557,8 @@ func extractPlainTextBody(msg map[string]any) string {
 	// Check if body is in payload.body
 	if body, ok := payload["body"].(map[string]any); ok {
 		if data, ok := body["data"].(string); ok && data != "" {
-			decoded, _ := decodeBase64URL(data)
-			return decoded
+			decoded, _ := base64.URLEncoding.DecodeString(data)
+			return string(decoded)
 		}
 	}
 
@@ -400,8 +573,8 @@ func extractPlainTextBody(msg map[string]any) string {
 			if mimeType == "text/plain" {
 				if body, ok := part["body"].(map[string]any); ok {
 					if data, ok := body["data"].(string); ok {
-						decoded, _ := decodeBase64URL(data)
-						return decoded
+						decoded, _ := base64.URLEncoding.DecodeString(data)
+						return string(decoded)
 					}
 				}
 			}
@@ -409,66 +582,6 @@ func extractPlainTextBody(msg map[string]any) string {
 	}
 
 	return ""
-}
-
-func decodeBase64URL(s string) (string, error) {
-	// Gmail uses URL-safe base64
-	s = strings.ReplaceAll(s, "-", "+")
-	s = strings.ReplaceAll(s, "_", "/")
-
-	// Add padding
-	switch len(s) % 4 {
-	case 2:
-		s += "=="
-	case 3:
-		s += "="
-	}
-
-	data := make([]byte, len(s))
-	n, err := decodeBase64(s, data)
-	if err != nil {
-		return "", err
-	}
-	return string(data[:n]), nil
-}
-
-func decodeBase64(s string, dst []byte) (int, error) {
-	// Simple base64 decode (standard library import avoided for simplicity)
-	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-	lookup := make(map[byte]int)
-	for i := range alphabet {
-		lookup[alphabet[i]] = i
-	}
-
-	n := 0
-	for i := 0; i < len(s); i += 4 {
-		var val int
-		for j := 0; j < 4 && i+j < len(s); j++ {
-			c := s[i+j]
-			if c == '=' {
-				continue
-			}
-			if v, ok := lookup[c]; ok {
-				val = val<<6 | v
-			}
-		}
-		if i+3 < len(s) && s[i+3] == '=' {
-			if s[i+2] == '=' {
-				dst[n] = byte(val >> 4)
-				n++
-			} else {
-				dst[n] = byte(val >> 10)
-				dst[n+1] = byte(val >> 2)
-				n += 2
-			}
-		} else {
-			dst[n] = byte(val >> 16)
-			dst[n+1] = byte(val >> 8)
-			dst[n+2] = byte(val)
-			n += 3
-		}
-	}
-	return n, nil
 }
 
 func (g *GmailProvider) request(ctx context.Context, token, path string, result any) error {
@@ -502,4 +615,133 @@ func (g *GmailProvider) request(ctx context.Context, token, path string, result 
 	}
 
 	return json.NewDecoder(resp.Body).Decode(result)
+}
+
+// --- Helpers ---
+
+func isValidCategory(cat string) bool {
+	for _, c := range gmailCategories {
+		if c == cat {
+			return true
+		}
+	}
+	return false
+}
+
+func getString(m map[string]any, key string) string {
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+// extractEmail extracts email address from "Name <email>" format
+func extractEmail(from string) string {
+	if idx := strings.Index(from, "<"); idx >= 0 {
+		end := strings.Index(from[idx:], ">")
+		if end > 0 {
+			return from[idx+1 : idx+end]
+		}
+	}
+	return from
+}
+
+// extractSenderName extracts a clean sender name for folder display
+// "Raymond Xu <ray@example.com>" -> "Raymond_Xu"
+// "noreply@calendly.com" -> "Calendly"
+// "KAYAK <kayak@msg.kayak.com>" -> "KAYAK"
+func extractSenderName(from string) string {
+	// Try to extract name from "Name <email>" format
+	if idx := strings.Index(from, "<"); idx > 0 {
+		name := strings.TrimSpace(from[:idx])
+		// Remove quotes if present
+		name = strings.Trim(name, `"'`)
+		if name != "" {
+			return sanitizeFolderName(name)
+		}
+	}
+
+	// Fall back to domain name from email
+	email := extractEmail(from)
+	if atIdx := strings.Index(email, "@"); atIdx > 0 {
+		domain := email[atIdx+1:]
+		// Extract base domain (e.g., "calendly" from "msg.calendly.com")
+		parts := strings.Split(domain, ".")
+		if len(parts) >= 2 {
+			// Use second-to-last part (the main domain name)
+			name := parts[len(parts)-2]
+			// Capitalize first letter
+			if len(name) > 0 {
+				return strings.ToUpper(name[:1]) + name[1:]
+			}
+		}
+	}
+	return sanitizeFolderName(email)
+}
+
+// parseEmailDate extracts YYYY-MM-DD from email Date header
+// Input: "Mon, 27 Jan 2026 14:30:00 -0500"
+// Output: "2026-01-27"
+func parseEmailDate(dateStr string) string {
+	// Common email date formats
+	formats := []string{
+		time.RFC1123Z,                        // "Mon, 02 Jan 2006 15:04:05 -0700"
+		time.RFC1123,                         // "Mon, 02 Jan 2006 15:04:05 MST"
+		"Mon, 2 Jan 2006 15:04:05 -0700",     // Single digit day
+		"Mon, 2 Jan 2006 15:04:05 MST",       // Single digit day with timezone name
+		"2 Jan 2006 15:04:05 -0700",          // No weekday
+		"Mon, 02 Jan 2006 15:04:05 -0700 (MST)", // With timezone name in parens
+	}
+
+	for _, format := range formats {
+		if t, err := time.Parse(format, dateStr); err == nil {
+			return t.Format("2006-01-02")
+		}
+	}
+
+	// If parsing fails, return today's date as fallback
+	return time.Now().Format("2006-01-02")
+}
+
+// formatSubjectFolder creates a date-first folder name for messages
+// Format: "2026-01-27_Meeting_reminder_abc12345"
+func formatSubjectFolder(subject, date, msgID string) string {
+	datePrefix := parseEmailDate(date)
+	subj := sanitizeFolderName(truncateSubject(subject, 30))
+
+	// Ensure we have at least 8 chars of message ID
+	idSuffix := msgID
+	if len(idSuffix) > 8 {
+		idSuffix = idSuffix[:8]
+	}
+
+	return fmt.Sprintf("%s_%s_%s", datePrefix, subj, idSuffix)
+}
+
+// sanitizeFolderName makes a string safe for use as a folder name
+var unsafeChars = regexp.MustCompile(`[/\\:*?"<>|@\s]`)
+
+func sanitizeFolderName(s string) string {
+	s = unsafeChars.ReplaceAllString(s, "_")
+	// Collapse multiple underscores
+	for strings.Contains(s, "__") {
+		s = strings.ReplaceAll(s, "__", "_")
+	}
+	s = strings.TrimSpace(s)
+	s = strings.Trim(s, "_")
+	if s == "" {
+		s = "_unknown_"
+	}
+	return s
+}
+
+func truncateSubject(s string, maxLen int) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		s = "no_subject"
+	}
+	if len(s) > maxLen {
+		s = s[:maxLen]
+	}
+	return s
 }

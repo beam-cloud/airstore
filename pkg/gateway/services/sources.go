@@ -6,6 +6,7 @@ import (
 	"syscall"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
+	"github.com/beam-cloud/airstore/pkg/oauth"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/sources"
 	pb "github.com/beam-cloud/airstore/proto"
@@ -19,6 +20,7 @@ type SourceService struct {
 	backend     repository.BackendRepository
 	cache       *sources.SourceCache
 	rateLimiter *sources.RateLimiter
+	googleOAuth *oauth.GoogleClient
 }
 
 // NewSourceService creates a new SourceService
@@ -28,6 +30,17 @@ func NewSourceService(registry *sources.Registry, backend repository.BackendRepo
 		backend:     backend,
 		cache:       sources.NewSourceCache(sources.DefaultCacheTTL, sources.DefaultCacheSize),
 		rateLimiter: sources.NewRateLimiter(sources.DefaultRateLimitConfig()),
+	}
+}
+
+// NewSourceServiceWithOAuth creates a SourceService with OAuth refresh support
+func NewSourceServiceWithOAuth(registry *sources.Registry, backend repository.BackendRepository, googleOAuth *oauth.GoogleClient) *SourceService {
+	return &SourceService{
+		registry:    registry,
+		backend:     backend,
+		cache:       sources.NewSourceCache(sources.DefaultCacheTTL, sources.DefaultCacheSize),
+		rateLimiter: sources.NewRateLimiter(sources.DefaultRateLimitConfig()),
+		googleOAuth: googleOAuth,
 	}
 }
 
@@ -82,6 +95,7 @@ func (s *SourceService) Stat(ctx context.Context, req *pb.SourceStatRequest) (*p
 		if connected && pctx.Credentials != nil {
 			scope = "shared" // TODO: detect personal vs shared
 		}
+		log.Debug().Str("integration", integration).Bool("connected", connected).Str("scope", scope).Msg("status.json stat")
 		data := sources.GenerateStatusJSON(integration, connected, scope, workspaceId)
 		return &pb.SourceStatResponse{
 			Ok: true,
@@ -174,9 +188,16 @@ func (s *SourceService) ReadDir(ctx context.Context, req *pb.SourceReadDirReques
 
 	// Handle root of integration (e.g., /sources/github)
 	if relPath == "" {
-		// Always show status.json
+		// Generate status.json to get its size
+		scope := ""
+		if connected && pctx.Credentials != nil {
+			scope = "shared"
+		}
+		statusData := sources.GenerateStatusJSON(integration, connected, scope, "")
+
+		// Always show status.json with correct size
 		entries := []*pb.SourceDirEntry{
-			{Name: "status.json", Mode: sources.ModeFile, Mtime: sources.NowUnix()},
+			{Name: "status.json", Mode: sources.ModeFile, Size: int64(len(statusData)), Mtime: sources.NowUnix()},
 		}
 
 		// If connected, also list the provider's root (with caching)
@@ -384,9 +405,11 @@ func (s *SourceService) providerContext(ctx context.Context) (*sources.ProviderC
 	rc := auth.FromContext(ctx)
 	if rc == nil {
 		// Allow unauthenticated access with empty context (for local mode)
+		log.Debug().Msg("providerContext: no auth context (unauthenticated)")
 		return &sources.ProviderContext{}, nil
 	}
 
+	log.Debug().Uint("workspace_id", rc.WorkspaceId).Uint("member_id", rc.MemberId).Msg("providerContext: authenticated request")
 	return &sources.ProviderContext{
 		WorkspaceId: rc.WorkspaceId,
 		MemberId:    rc.MemberId,
@@ -394,10 +417,18 @@ func (s *SourceService) providerContext(ctx context.Context) (*sources.ProviderC
 }
 
 // loadCredentials fetches integration credentials from the backend
+// and refreshes Google OAuth tokens if expired
 func (s *SourceService) loadCredentials(ctx context.Context, pctx *sources.ProviderContext, integration string) (*sources.ProviderContext, bool) {
-	if s.backend == nil || pctx.WorkspaceId == 0 {
+	if s.backend == nil {
+		log.Debug().Str("integration", integration).Msg("loadCredentials: no backend configured")
 		return pctx, false
 	}
+	if pctx.WorkspaceId == 0 {
+		log.Debug().Str("integration", integration).Msg("loadCredentials: no workspace ID in context (unauthenticated request)")
+		return pctx, false
+	}
+
+	log.Debug().Str("integration", integration).Uint("workspace_id", pctx.WorkspaceId).Msg("loadCredentials: looking up connection")
 
 	conn, err := s.backend.GetConnection(ctx, pctx.WorkspaceId, pctx.MemberId, integration)
 	if err != nil {
@@ -405,13 +436,33 @@ func (s *SourceService) loadCredentials(ctx context.Context, pctx *sources.Provi
 		return pctx, false
 	}
 	if conn == nil {
+		log.Debug().Str("integration", integration).Uint("workspace_id", pctx.WorkspaceId).Msg("loadCredentials: no connection found")
 		return pctx, false
 	}
+
+	log.Debug().Str("integration", integration).Str("connection_id", conn.ExternalId).Msg("loadCredentials: connection found")
 
 	creds, err := repository.DecryptCredentials(conn)
 	if err != nil {
 		log.Warn().Str("integration", integration).Err(err).Msg("credential decrypt failed")
 		return pctx, false
+	}
+
+	// Check if Google OAuth token needs refresh
+	if oauth.IsGoogleIntegration(integration) && oauth.NeedsRefresh(creds) && s.googleOAuth != nil {
+		refreshed, err := s.googleOAuth.Refresh(ctx, creds.RefreshToken)
+		if err != nil {
+			log.Warn().Str("integration", integration).Err(err).Msg("token refresh failed")
+			// Continue with existing creds - they might still work
+		} else {
+			// Update stored credentials
+			if _, err := s.backend.SaveConnection(ctx, conn.WorkspaceId, conn.MemberId, integration, refreshed, conn.Scope); err != nil {
+				log.Warn().Str("integration", integration).Err(err).Msg("failed to persist refreshed token")
+			} else {
+				log.Debug().Str("integration", integration).Msg("token refreshed successfully")
+			}
+			creds = refreshed
+		}
 	}
 
 	pctx.Credentials = creds

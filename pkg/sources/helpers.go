@@ -23,6 +23,12 @@ type StatusInfo struct {
 	Error       string `json:"error,omitempty"`
 }
 
+// oauthIntegrations lists integrations that use OAuth (gmail, gdrive)
+var oauthIntegrations = map[string]bool{
+	"gmail":  true,
+	"gdrive": true,
+}
+
 // GenerateStatusJSON creates the status.json content for an integration
 func GenerateStatusJSON(integration string, connected bool, scope string, workspaceId string) []byte {
 	status := StatusInfo{
@@ -32,7 +38,13 @@ func GenerateStatusJSON(integration string, connected bool, scope string, worksp
 	}
 
 	if !connected {
-		status.Hint = fmt.Sprintf("cli connection add %s %s --token <your-token>", workspaceId, integration)
+		if oauthIntegrations[integration] {
+			// OAuth integrations use 'connection connect' for browser-based auth
+			status.Hint = fmt.Sprintf("cli connection connect %s", integration)
+		} else {
+			// Token/API-key integrations use 'connection add'
+			status.Hint = fmt.Sprintf("cli connection add %s %s --token <your-token>", workspaceId, integration)
+		}
 	}
 
 	data, _ := json.MarshalIndent(status, "", "  ")

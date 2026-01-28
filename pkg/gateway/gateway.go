@@ -16,10 +16,12 @@ import (
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 
+	"github.com/beam-cloud/airstore/pkg/admin"
 	apiv1 "github.com/beam-cloud/airstore/pkg/api/v1"
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/gateway/services"
+	"github.com/beam-cloud/airstore/pkg/oauth"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/scheduler"
 	"github.com/beam-cloud/airstore/pkg/sources"
@@ -38,6 +40,7 @@ type Gateway struct {
 	BackendRepo *repository.PostgresBackend
 	httpServer  *http.Server
 	grpcServer  *grpc.Server
+	echo        *echo.Echo
 	ctx         context.Context
 	cancelFunc  context.CancelFunc
 
@@ -48,6 +51,10 @@ type Gateway struct {
 	toolRegistry   *tools.Registry
 	sourceRegistry *sources.Registry
 	mcpManager     *tools.MCPManager
+
+	// OAuth for workspace integrations
+	oauthStore  *oauth.Store
+	googleOAuth *oauth.GoogleClient
 }
 
 func NewGateway() (*Gateway, error) {
@@ -100,6 +107,8 @@ func NewGateway() (*Gateway, error) {
 		toolRegistry:   tools.NewRegistry(),
 		sourceRegistry: sources.NewRegistry(),
 		mcpManager:     tools.NewMCPManager(),
+		oauthStore:     oauth.NewStore(0), // Default TTL
+		googleOAuth:    oauth.NewGoogleClient(config.OAuth.Google),
 	}
 
 	return gateway, nil
@@ -148,6 +157,7 @@ func (g *Gateway) initHTTP() error {
 
 	e.Use(middleware.Recover())
 
+	g.echo = e
 	g.httpServer = &http.Server{
 		Addr:    fmt.Sprintf("%s:%d", g.Config.Gateway.HTTP.Host, g.Config.Gateway.HTTP.Port),
 		Handler: e,
@@ -241,9 +251,11 @@ func (g *Gateway) registerServices() error {
 		return fmt.Errorf("failed to initialize tools: %w", err)
 	}
 
-	// Register tools gRPC service (with backend for credential lookups)
+	// Register tools gRPC service (with backend for credential lookups and OAuth refresh)
 	var toolService *services.ToolService
-	if g.BackendRepo != nil {
+	if g.BackendRepo != nil && g.googleOAuth.IsConfigured() {
+		toolService = services.NewToolServiceWithOAuth(g.toolRegistry, g.BackendRepo, g.googleOAuth)
+	} else if g.BackendRepo != nil {
 		toolService = services.NewToolServiceWithBackend(g.toolRegistry, g.BackendRepo)
 	} else {
 		toolService = services.NewToolService(g.toolRegistry)
@@ -261,8 +273,13 @@ func (g *Gateway) registerServices() error {
 	// Register source providers
 	g.initSources()
 
-	// Register sources gRPC service (read-only integration access)
-	sourceService := services.NewSourceService(g.sourceRegistry, g.BackendRepo)
+	// Register sources gRPC service (read-only integration access with OAuth refresh)
+	var sourceService *services.SourceService
+	if g.BackendRepo != nil && g.googleOAuth.IsConfigured() {
+		sourceService = services.NewSourceServiceWithOAuth(g.sourceRegistry, g.BackendRepo, g.googleOAuth)
+	} else {
+		sourceService = services.NewSourceService(g.sourceRegistry, g.BackendRepo)
+	}
 	pb.RegisterSourceServiceServer(g.grpcServer, sourceService)
 	log.Info().Int("providers", len(g.sourceRegistry.List())).Strs("available", g.sourceRegistry.List()).Msg("sources service registered")
 
@@ -286,7 +303,18 @@ func (g *Gateway) registerServices() error {
 		// Tasks API
 		apiv1.NewTasksGroup(g.baseRouteGroup.Group("/tasks"), g.BackendRepo, taskQueue)
 
+		// OAuth API for workspace integrations (gmail, gdrive)
+		if g.googleOAuth.IsConfigured() {
+			apiv1.NewOAuthGroup(g.baseRouteGroup.Group("/oauth"), g.oauthStore, g.googleOAuth, g.BackendRepo)
+			log.Info().Msg("oauth API registered at /api/v1/oauth")
+		}
+
 		log.Info().Msg("workspace, members, tokens, connections, and tasks APIs registered")
+
+		// Register admin UI if enabled
+		if g.Config.Admin.Enabled {
+			admin.NewService(g.Config.Admin, g.BackendRepo).RegisterRoutes(g.echo)
+		}
 	}
 
 	return nil

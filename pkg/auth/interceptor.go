@@ -116,31 +116,40 @@ func (i *Interceptor) authenticate(ctx context.Context, md metadata.MD) (context
 	// No authorization header - try empty token (gateway auth)
 	if len(md["authorization"]) == 0 {
 		if valid, isGateway := i.validator.ValidateToken(""); valid {
+			log.Debug().Bool("is_gateway", isGateway).Msg("auth: no token, valid empty auth")
 			rc := &RequestContext{IsGatewayAuth: isGateway}
 			ctx = WithContext(ctx, rc)
 			ctx = context.WithValue(ctx, legacyAuthKey, &AuthInfo{Token: ""})
 			return ctx, true
 		}
+		log.Debug().Msg("auth: no token, empty auth invalid")
 		return ctx, false
 	}
 
 	token := strings.TrimPrefix(md["authorization"][0], "Bearer ")
+	tokenPreview := token
+	if len(tokenPreview) > 12 {
+		tokenPreview = tokenPreview[:12] + "..."
+	}
 	valid, isGateway := i.validator.ValidateToken(token)
 	if !valid {
-		log.Debug().Msg("auth: invalid token")
+		log.Debug().Str("token", tokenPreview).Msg("auth: invalid token")
 		return ctx, false
 	}
 
 	var rc *RequestContext
 	if isGateway {
+		log.Debug().Str("token", tokenPreview).Msg("auth: gateway token")
 		rc = &RequestContext{IsGatewayAuth: true}
 	} else {
 		result := i.validator.ValidateWorkspaceToken(ctx, token)
 		if result == nil {
 			// Token didn't match gateway and workspace validation failed
+			log.Debug().Str("token", tokenPreview).Msg("auth: workspace token validation failed")
 			return ctx, false
 		}
 
+		log.Debug().Str("token", tokenPreview).Uint("workspace_id", result.WorkspaceId).Str("workspace", result.WorkspaceExt).Msg("auth: workspace token validated")
 		rc = &RequestContext{
 			WorkspaceId:   result.WorkspaceId,
 			WorkspaceExt:  result.WorkspaceExt,

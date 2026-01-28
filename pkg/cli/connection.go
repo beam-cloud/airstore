@@ -1,11 +1,17 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/spf13/cobra"
@@ -172,6 +178,176 @@ var connectionRemoveCmd = &cobra.Command{
 	},
 }
 
+var connectionConnectCmd = &cobra.Command{
+	Use:   "connect <integration>",
+	Short: "Connect an OAuth integration via browser",
+	Long: `Connect an OAuth-based integration by opening a browser for authentication.
+
+The workspace is determined by your token (--token or AIRSTORE_TOKEN).
+
+Supported OAuth integrations:
+  gmail     - Gmail (read-only access)
+  gdrive    - Google Drive (read-only access)
+
+Examples:
+  cli connection connect gmail
+  cli connection connect gdrive
+  cli connection connect gmail --token <workspace-token>`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		integrationType := strings.ToLower(args[0])
+
+		// Validate integration type
+		switch integrationType {
+		case "gmail", "gdrive":
+			// OK - these use OAuth
+		default:
+			return fmt.Errorf("%s does not use OAuth - use 'connection add' with --token instead", integrationType)
+		}
+
+		if authToken == "" {
+			return fmt.Errorf("set AIRSTORE_TOKEN or use --token <workspace-token>")
+		}
+
+		// Create OAuth session via HTTP API
+		sessionResp, err := createOAuthSession(integrationType)
+		if err != nil {
+			return fmt.Errorf("failed to create OAuth session: %w", err)
+		}
+
+		fmt.Printf("Opening browser to connect %s...\n", integrationType)
+
+		// Open browser
+		if err := openBrowser(sessionResp.AuthorizeURL); err != nil {
+			fmt.Printf("Could not open browser automatically.\nPlease visit: %s\n", sessionResp.AuthorizeURL)
+		}
+
+		// Poll for completion
+		fmt.Println("Waiting for authorization...")
+		result, err := pollOAuthSession(sessionResp.SessionID, 5*time.Minute)
+		if err != nil {
+			return err
+		}
+
+		if result.Status == "error" {
+			return fmt.Errorf("connection failed: %s", result.Error)
+		}
+
+		fmt.Printf("Successfully connected %s!\n", integrationType)
+		return nil
+	},
+}
+
+// OAuth API types
+type oauthSessionRequest struct {
+	IntegrationType string `json:"integration_type"`
+}
+
+type oauthSessionResponse struct {
+	Success bool `json:"success"`
+	Data    struct {
+		SessionID    string `json:"session_id"`
+		AuthorizeURL string `json:"authorize_url"`
+	} `json:"data"`
+	Error string `json:"error,omitempty"`
+}
+
+type oauthStatusResponse struct {
+	Success bool `json:"success"`
+	Data    struct {
+		Status       string `json:"status"`
+		Error        string `json:"error,omitempty"`
+		ConnectionID string `json:"connection_id,omitempty"`
+	} `json:"data"`
+	Error string `json:"error,omitempty"`
+}
+
+func createOAuthSession(integrationType string) (*struct{ SessionID, AuthorizeURL string }, error) {
+	reqBody, _ := json.Marshal(oauthSessionRequest{IntegrationType: integrationType})
+
+	req, err := http.NewRequest("POST", gatewayHTTPAddr+"/api/v1/oauth/sessions", bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+authToken)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var result oauthSessionResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	if !result.Success {
+		return nil, fmt.Errorf("%s", result.Error)
+	}
+
+	return &struct{ SessionID, AuthorizeURL string }{
+		SessionID:    result.Data.SessionID,
+		AuthorizeURL: result.Data.AuthorizeURL,
+	}, nil
+}
+
+func pollOAuthSession(sessionID string, timeout time.Duration) (*struct{ Status, Error, ConnectionID string }, error) {
+	deadline := time.Now().Add(timeout)
+	pollInterval := 2 * time.Second
+
+	for time.Now().Before(deadline) {
+		req, err := http.NewRequest("GET", gatewayHTTPAddr+"/api/v1/oauth/sessions/"+sessionID, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		var result oauthStatusResponse
+		json.NewDecoder(resp.Body).Decode(&result)
+		resp.Body.Close()
+
+		if !result.Success {
+			return nil, fmt.Errorf("%s", result.Error)
+		}
+
+		status := result.Data.Status
+		if status == "complete" || status == "error" {
+			return &struct{ Status, Error, ConnectionID string }{
+				Status:       status,
+				Error:        result.Data.Error,
+				ConnectionID: result.Data.ConnectionID,
+			}, nil
+		}
+
+		// Still pending
+		time.Sleep(pollInterval)
+	}
+
+	return nil, fmt.Errorf("timeout waiting for authorization")
+}
+
+func openBrowser(url string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "linux":
+		cmd = exec.Command("xdg-open", url)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		return fmt.Errorf("unsupported platform")
+	}
+	return cmd.Start()
+}
+
 func init() {
 	connectionAddCmd.Flags().StringVar(&connToken, "token", "", "Access token (for OAuth integrations like GitHub)")
 	connectionAddCmd.Flags().StringVar(&connAPIKey, "api-key", "", "API key (for API key integrations)")
@@ -181,4 +357,5 @@ func init() {
 	connectionCmd.AddCommand(connectionAddCmd)
 	connectionCmd.AddCommand(connectionListCmd)
 	connectionCmd.AddCommand(connectionRemoveCmd)
+	connectionCmd.AddCommand(connectionConnectCmd)
 }
