@@ -287,8 +287,9 @@ func (g *Gateway) registerServices() error {
 	if g.BackendRepo != nil {
 		taskQueue := repository.NewRedisTaskQueue(g.RedisClient, "default")
 
-		// Workspaces API
+		// Workspaces API (protected by admin token)
 		workspacesGroup := g.baseRouteGroup.Group("/workspaces")
+		workspacesGroup.Use(g.requireAdminToken())
 		apiv1.NewWorkspacesGroup(workspacesGroup, g.BackendRepo)
 
 		// Members API (nested under workspaces)
@@ -471,6 +472,32 @@ func (g *Gateway) ToolRegistry() *tools.Registry {
 // SourceRegistry returns the source registry for registering providers
 func (g *Gateway) SourceRegistry() *sources.Registry {
 	return g.sourceRegistry
+}
+
+// requireAdminToken returns middleware that validates the admin token
+func (g *Gateway) requireAdminToken() echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			// Skip auth if no admin token is configured
+			if g.Config.Gateway.AuthToken == "" {
+				return next(c)
+			}
+
+			token := c.Request().Header.Get("Authorization")
+			expected := "Bearer " + g.Config.Gateway.AuthToken
+			if token == "" || token != expected {
+				log.Debug().
+					Str("path", c.Path()).
+					Str("token_present", fmt.Sprintf("%v", token != "")).
+					Msg("admin token validation failed")
+				return c.JSON(http.StatusUnauthorized, map[string]string{
+					"error":   "unauthorized",
+					"message": "admin token required",
+				})
+			}
+			return next(c)
+		}
+	}
 }
 
 // initSources initializes source providers

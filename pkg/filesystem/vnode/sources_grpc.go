@@ -53,7 +53,10 @@ func (s *SourcesVNodeGRPC) Getattr(path string) (*FileInfo, error) {
 		return nil, fs.ErrNotExist
 	}
 	if info := s.cache.GetInfo(path); info != nil {
-		return info, nil
+		// Size=0 indicates dynamic content - fetch real size via Stat
+		if info.Size > 0 {
+			return info, nil
+		}
 	}
 
 	ctx, cancel := s.ctx()

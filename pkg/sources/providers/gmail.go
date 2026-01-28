@@ -152,11 +152,11 @@ func (g *GmailProvider) ReadDir(ctx context.Context, pctx *sources.ProviderConte
 	}
 
 	if path == "" {
-		// Root directory - use estimated sizes to avoid blocking on API calls
+		// Root directory - return 0 for dynamic files to force stat lookup for real size
 		return []sources.DirEntry{
 			fileEntry("README.md", int64(len(gmailReadme))),
-			fileEntry("unread.json", 4096),
-			fileEntry("recent.json", 8192),
+			fileEntry("unread.json", 0),  // Dynamic - stat will return real size
+			fileEntry("recent.json", 0),  // Dynamic - stat will return real size
 			dirEntry("messages"),
 			dirEntry("labels"),
 		}, nil
@@ -276,7 +276,7 @@ func (g *GmailProvider) readdirMessages(ctx context.Context, pctx *sources.Provi
 		if err != nil {
 			return nil, err
 		}
-		entries := []sources.DirEntry{fileEntry("index.json", 8192)}
+		entries := []sources.DirEntry{fileEntry("index.json", 0)} // Stat returns real size
 		entries = append(entries, g.listSenders(messages)...)
 		return entries, nil
 
@@ -360,7 +360,7 @@ func (g *GmailProvider) statLabels(ctx context.Context, pctx *sources.ProviderCo
 
 func (g *GmailProvider) readdirLabels(ctx context.Context, pctx *sources.ProviderContext, parts []string) ([]sources.DirEntry, error) {
 	if len(parts) == 0 {
-		return []sources.DirEntry{fileEntry("labels.json", 4096)}, nil
+		return []sources.DirEntry{fileEntry("labels.json", 0)}, nil // Stat returns real size
 	}
 	return nil, sources.ErrNotDir
 }

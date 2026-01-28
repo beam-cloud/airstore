@@ -53,6 +53,8 @@ filesystem:
 # Gateway
 # ----------------------------------------------------------------------------
 gateway:
+  # Admin token for workspace API authentication (used by airstore-ui)
+  authToken: ""
   grpc:
     port: 1993
     maxRecvMsgSize: 16
