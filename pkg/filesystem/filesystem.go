@@ -155,29 +155,17 @@ func (f *Filesystem) Mount() error {
 
 func (f *Filesystem) Unmount() error {
 	f.mu.Lock()
-	if f.destroyed {
-		f.mu.Unlock()
-		return nil
-	}
+	host := f.host
+	destroyed := f.destroyed
 	f.mu.Unlock()
 
-	if f.host != nil {
-		// Try unmount with a timeout - FUSE-T SMB backend may hang
-		done := make(chan struct{})
-		go func() {
-			f.host.Unmount()
-			close(done)
-		}()
-
-		select {
-		case <-done:
-			// Unmount completed normally
-		case <-time.After(2 * time.Second):
-			// Unmount is hanging (common with FUSE-T SMB), force exit
-			log.Info().Msg("unmounted")
-			os.Exit(0)
-		}
+	if destroyed || host == nil {
+		return nil
 	}
+
+	// Note: host.Unmount may block depending on the FUSE backend.
+	// Callers that need a hard timeout should enforce it at a higher level (e.g., CLI).
+	_ = host.Unmount()
 	return nil
 }
 
@@ -210,11 +198,6 @@ func (f *Filesystem) Destroy() {
 			c.Cleanup()
 		}
 	}
-
-	// With FUSE-T SMB backend, the Mount() call may not return after Destroy().
-	// Force exit after cleanup to ensure the process terminates on Ctrl+C.
-	log.Info().Msg("unmounted")
-	os.Exit(0)
 }
 
 func (f *Filesystem) Statfs() (*StatInfo, error) {

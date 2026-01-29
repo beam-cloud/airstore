@@ -1,9 +1,12 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -162,53 +165,80 @@ Examples:
 			log.Debug().Str("platform", embed.Current().String()).Int("shim_bytes", len(shim)).Msg("vnodes registered")
 		}
 
-		// Track intentional shutdown via signal
-		shuttingDown := false
-
-		// Handle signals for clean unmount
-		sigChan := make(chan os.Signal, 1)
-		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-		go func() {
-			<-sigChan
-			shuttingDown = true
-			fs.Unmount()
-
-			if gw != nil {
-				gw.Shutdown()
-			}
-
-			// Force exit - Mount() may not return with FUSE-T SMB backend
-			log.Info().Msg("unmounted")
-			os.Exit(0)
-		}()
-
 		log.Info().Str("path", mountPoint).Str("gateway", effectiveGatewayAddr).Msg("filesystem mounted")
 		log.Info().Msg("press ctrl+c to unmount")
 
-		err = fs.Mount()
+		// Run the mount loop in the background so we can coordinate shutdown.
+		mountErrCh := make(chan error, 1)
+		go func() { mountErrCh <- fs.Mount() }()
 
-		// Clean shutdown via signal OR native FUSE layer handled it
-		if shuttingDown || fs.IsDestroyed() {
-			// Ensure gateway is shut down
+		// Handle signals for unmount (Ctrl+C).
+		sigChan := make(chan os.Signal, 2)
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+		defer signal.Stop(sigChan)
+
+		select {
+		case err = <-mountErrCh:
+			// Mount returned without an external signal.
+		case <-sigChan:
+			// Best-effort unmount.
 			if gw != nil {
-				gw.Shutdown()
+				// Shutdown in background; don't block Ctrl+C on gateway shutdown.
+				go gw.Shutdown()
 			}
+			// Run unmount asynchronously; some system tools can block.
+			go bestEffortUnmountMountPoint(mountPoint)
 
-			log.Info().Msg("unmounted")
-			return nil
+			// Wait briefly for Mount() to return; if it doesn't, force exit.
+			select {
+			case err = <-mountErrCh:
+				// Mount returned after unmount attempt.
+			case <-sigChan:
+				// Second Ctrl+C: hard exit.
+				os.Exit(1)
+			case <-time.After(3 * time.Second):
+				os.Exit(0)
+			}
 		}
 
-		// Actual mount failure
+		if gw != nil {
+			gw.Shutdown()
+		}
+
 		if err != nil {
-			if gw != nil {
-				gw.Shutdown()
-			}
 			return fmt.Errorf("mount failed: %w", err)
 		}
-
+		log.Info().Msg("unmounted")
 		return nil
 	},
+}
+
+func bestEffortUnmountMountPoint(mountPoint string) {
+	// On macOS with FUSE-T (especially SMB backend), cgofuse's internal signal handler
+	// can hang inside host.Unmount(). Use the OS unmount tools instead.
+	if runtime.GOOS != "darwin" {
+		return
+	}
+
+	// Try a small sequence of common unmount commands. Accept the first success.
+	cmds := [][]string{
+		{"diskutil", "unmount", "force", mountPoint},
+		{"diskutil", "unmount", mountPoint},
+		{"umount", mountPoint},
+		{"umount", "-f", mountPoint},
+	}
+
+	for _, args := range cmds {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		err := exec.CommandContext(ctx, args[0], args[1:]...).Run()
+		cancel()
+		if err == nil {
+			return
+		}
+		if mountVerbose {
+			log.Debug().Strs("cmd", args).Err(err).Msg("unmount attempt failed")
+		}
+	}
 }
 
 func init() {

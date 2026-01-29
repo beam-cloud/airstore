@@ -1160,12 +1160,6 @@ func NewFilesystemAuthMiddleware(cfg FilesystemAuthConfig) echo.MiddlewareFunc {
 			ctx := auth.WithContext(c.Request().Context(), rc)
 			c.SetRequest(c.Request().WithContext(ctx))
 
-			log.Debug().
-				Str("workspace_id", workspaceID).
-				Uint("workspace_internal_id", rc.WorkspaceId).
-				Bool("is_gateway_auth", rc.IsGatewayAuth).
-				Msg("filesystem auth validated")
-
 			return next(c)
 		}
 	}
