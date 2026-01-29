@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/sources"
+	"github.com/beam-cloud/airstore/pkg/types"
 )
 
 const (
@@ -32,7 +33,7 @@ func NewNotionProvider() *NotionProvider {
 }
 
 func (n *NotionProvider) Name() string {
-	return "notion"
+	return types.ToolNotion.String()
 }
 
 // Stat returns file/directory attributes

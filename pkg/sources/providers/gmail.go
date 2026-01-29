@@ -10,10 +10,26 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/sources"
+	"github.com/beam-cloud/airstore/pkg/types"
+	"github.com/rs/zerolog/log"
 )
+
+// API call counter for A/B testing
+var gmailAPICallCount int64
+
+// GetGmailAPICallCount returns the current API call count
+func GetGmailAPICallCount() int64 {
+	return atomic.LoadInt64(&gmailAPICallCount)
+}
+
+// ResetGmailAPICallCount resets the API call counter
+func ResetGmailAPICallCount() {
+	atomic.StoreInt64(&gmailAPICallCount, 0)
+}
 
 const (
 	gmailAPIBase = "https://gmail.googleapis.com/gmail/v1"
@@ -98,7 +114,7 @@ func NewGmailProvider() *GmailProvider {
 }
 
 func (g *GmailProvider) Name() string {
-	return "gmail"
+	return types.ToolGmail.String()
 }
 
 // checkAuth validates that credentials are present
@@ -210,6 +226,37 @@ func (g *GmailProvider) Read(ctx context.Context, pctx *sources.ProviderContext,
 func (g *GmailProvider) Readlink(ctx context.Context, pctx *sources.ProviderContext, path string) (string, error) {
 	return "", sources.ErrNotFound
 }
+
+// ============================================================================
+// detectCategory determines which category a message belongs to based on its labels
+func (g *GmailProvider) detectCategory(labels []string) string {
+	labelSet := make(map[string]bool)
+	for _, l := range labels {
+		labelSet[l] = true
+	}
+
+	// Check in order of specificity
+	if labelSet["UNREAD"] {
+		return "unread"
+	}
+	if labelSet["STARRED"] {
+		return "starred"
+	}
+	if labelSet["SENT"] {
+		return "sent"
+	}
+	if labelSet["IMPORTANT"] {
+		return "important"
+	}
+	if labelSet["INBOX"] {
+		return "inbox"
+	}
+
+	// Default to inbox
+	return "inbox"
+}
+
+// isGmailQueryOperator checks if a pattern looks like a Gmail query operator
 
 // --- Messages ---
 // /messages/{category}/{sender}/{subject}/meta.json
@@ -688,6 +735,10 @@ func extractPlainTextBody(msg map[string]any) string {
 }
 
 func (g *GmailProvider) request(ctx context.Context, token, path string, result any) error {
+	// Increment API call counter for A/B testing
+	count := atomic.AddInt64(&gmailAPICallCount, 1)
+	log.Debug().Int64("api_calls", count).Str("path", path).Msg("gmail API call")
+
 	url := gmailAPIBase + path
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {

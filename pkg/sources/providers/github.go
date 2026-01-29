@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/sources"
+	"github.com/beam-cloud/airstore/pkg/types"
 )
 
 const (
@@ -30,7 +31,7 @@ func NewGitHubProvider() *GitHubProvider {
 }
 
 func (g *GitHubProvider) Name() string {
-	return "github"
+	return types.ToolGitHub.String()
 }
 
 // Stat returns file/directory attributes
@@ -104,6 +105,15 @@ func (g *GitHubProvider) Read(ctx context.Context, pctx *sources.ProviderContext
 // Readlink is not supported for GitHub
 func (g *GitHubProvider) Readlink(ctx context.Context, pctx *sources.ProviderContext, path string) (string, error) {
 	return "", sources.ErrNotFound
+}
+
+// truncateSnippet truncates a string to maxLen characters
+func truncateSnippet(s string, maxLen int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
 }
 
 // --- Views ---

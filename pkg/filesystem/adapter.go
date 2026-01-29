@@ -13,7 +13,9 @@ type adapter struct {
 }
 
 func newAdapter(fs *Filesystem) *adapter {
-	return &adapter{fs: fs}
+	return &adapter{
+		fs: fs,
+	}
 }
 
 func (a *adapter) Init()    { a.fs.Init() }

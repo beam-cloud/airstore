@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/sources"
+	"github.com/beam-cloud/airstore/pkg/types"
 )
 
 const (
@@ -30,7 +31,7 @@ func NewGDriveProvider() *GDriveProvider {
 }
 
 func (g *GDriveProvider) Name() string {
-	return "gdrive"
+	return types.ToolGDrive.String()
 }
 
 // Stat returns file/directory attributes

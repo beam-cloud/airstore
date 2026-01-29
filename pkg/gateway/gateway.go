@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
@@ -21,6 +22,8 @@ import (
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/gateway/services"
+	"github.com/beam-cloud/airstore/pkg/index"
+	indexproviders "github.com/beam-cloud/airstore/pkg/index/providers"
 	"github.com/beam-cloud/airstore/pkg/oauth"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/scheduler"
@@ -58,6 +61,10 @@ type Gateway struct {
 	// OAuth for workspace integrations
 	oauthStore  *oauth.Store
 	googleOAuth *oauth.GoogleClient
+
+	// Index for fast grep/find on sources
+	indexStore           index.IndexStore
+	workspaceIndexSyncer *index.WorkspaceSyncer
 }
 
 func NewGateway() (*Gateway, error) {
@@ -277,6 +284,11 @@ func (g *Gateway) registerServices() error {
 	// Register source providers
 	g.initSources()
 
+	// Initialize index for fast grep/find on sources
+	if err := g.initIndex(); err != nil {
+		log.Warn().Err(err).Msg("failed to initialize index - grep/find may be slow")
+	}
+
 	// Register sources gRPC service (read-only integration access with OAuth refresh)
 	var sourceService *services.SourceService
 	if g.BackendRepo != nil && g.googleOAuth.IsConfigured() {
@@ -284,6 +296,12 @@ func (g *Gateway) registerServices() error {
 	} else {
 		sourceService = services.NewSourceService(g.sourceRegistry, g.BackendRepo)
 	}
+
+	// Wire up index store for fast reads (instant grep/find)
+	if g.indexStore != nil {
+		sourceService.SetIndexStore(g.indexStore)
+	}
+
 	pb.RegisterSourceServiceServer(g.grpcServer, sourceService)
 	log.Info().Int("providers", len(g.sourceRegistry.List())).Strs("available", g.sourceRegistry.List()).Msg("sources service registered")
 
@@ -458,6 +476,19 @@ func (g *Gateway) shutdown() {
 		})
 	}
 
+	// Stop index syncer and close store
+	if g.workspaceIndexSyncer != nil {
+		eg.Go(func() error {
+			g.workspaceIndexSyncer.Stop()
+			return nil
+		})
+	}
+	if g.indexStore != nil {
+		eg.Go(func() error {
+			return g.indexStore.Close()
+		})
+	}
+
 	g.cancelFunc()
 
 	if err := eg.Wait(); err != nil {
@@ -521,6 +552,103 @@ func (g *Gateway) initSources() {
 	g.sourceRegistry.Register(providers.NewNotionProvider())
 	g.sourceRegistry.Register(providers.NewGDriveProvider())
 	log.Debug().Strs("providers", g.sourceRegistry.List()).Msg("source providers registered")
+}
+
+// initIndex initializes the local index for fast grep/find on sources
+func (g *Gateway) initIndex() error {
+	if !g.Config.Index.Enabled {
+		log.Info().Msg("index disabled by config")
+		return nil
+	}
+
+	var store index.IndexStore
+	var err error
+
+	switch g.Config.Index.Store {
+	case "elasticsearch":
+		store, err = index.NewElasticsearchIndexStore(index.ElasticsearchConfig{
+			URL:       g.Config.Index.Elasticsearch.URL,
+			IndexName: g.Config.Index.Elasticsearch.IndexName,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to create elasticsearch index store: %w", err)
+		}
+		log.Info().
+			Str("url", g.Config.Index.Elasticsearch.URL).
+			Str("index", g.Config.Index.Elasticsearch.IndexName).
+			Msg("elasticsearch index store initialized")
+
+	case "sqlite", "":
+		// Default to SQLite
+		dbPath := g.Config.Index.SQLite.Path
+		if dbPath == "" {
+			dbPath = "/data/airstore/index.db"
+		}
+		store, err = index.NewSQLiteIndexStore(dbPath)
+		if err != nil {
+			return fmt.Errorf("failed to create sqlite index store: %w", err)
+		}
+		log.Info().Str("path", dbPath).Msg("sqlite index store initialized")
+
+	default:
+		return fmt.Errorf("unknown index store type: %s", g.Config.Index.Store)
+	}
+
+	g.indexStore = store
+
+	// Create provider registry with configured providers
+	registry := index.NewProviderRegistry()
+
+	// Only register providers that are in the config list
+	configuredProviders := make(map[string]bool)
+	for _, p := range g.Config.Index.Sync.Providers {
+		configuredProviders[p] = true
+	}
+
+	// Register index providers for sources only (not tools)
+	if configuredProviders[types.ToolGmail.String()] {
+		registry.Register(indexproviders.NewGmailIndexProvider())
+	}
+	if configuredProviders[types.ToolGDrive.String()] {
+		registry.Register(indexproviders.NewGDriveIndexProvider())
+	}
+	if configuredProviders[types.ToolNotion.String()] {
+		registry.Register(indexproviders.NewNotionIndexProvider())
+	}
+
+	// Log registered providers
+	providerNames := make([]string, 0)
+	for _, p := range registry.List() {
+		providerNames = append(providerNames, p.Integration())
+	}
+	log.Info().
+		Strs("providers", providerNames).
+		Msg("index providers registered")
+
+	// Create the workspace syncer if we have a backend
+	if g.BackendRepo != nil {
+		connProvider := index.NewPostgresConnectionProvider(g.BackendRepo)
+		g.workspaceIndexSyncer = index.NewWorkspaceSyncer(store, registry, connProvider)
+
+		// Configure sync interval from config
+		if g.Config.Index.Sync.Interval != "" {
+			interval, err := time.ParseDuration(g.Config.Index.Sync.Interval)
+			if err == nil {
+				g.workspaceIndexSyncer.SetConfig(index.SyncerConfig{
+					DefaultInterval: interval,
+					InitialDelay:    5 * time.Second,
+				})
+			}
+		}
+
+		// Start the workspace syncer
+		g.workspaceIndexSyncer.Start(g.ctx)
+		log.Info().Msg("workspace index syncer started")
+	} else {
+		log.Info().Msg("index syncer not started - no backend repository")
+	}
+
+	return nil
 }
 
 // initTools initializes the tool system by loading schemas and registering clients

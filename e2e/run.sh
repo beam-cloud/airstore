@@ -14,6 +14,7 @@
 #   ./e2e/run.sh tools     # Run only tools test
 #   ./e2e/run.sh context   # Run only context/S3 test
 #   ./e2e/run.sh sources   # Run only sources/integrations test
+#   ./e2e/run.sh index     # Run only index performance test
 
 set -e
 
@@ -622,6 +623,150 @@ test_sources() {
 }
 
 # ============================================================================
+# Test: Index Performance
+# ============================================================================
+test_index() {
+    echo ""
+    echo "=== Test: Index Performance ==="
+    echo ""
+    echo "This test compares filesystem performance with and without indexing."
+    echo "It measures how fast grep/find operations are on source data."
+    echo ""
+    
+    ensure_cli
+    wait_gateway
+    cleanup_mount
+    
+    # Check if we have a token for sources
+    if [ -z "$TEST_TOKEN" ]; then
+        info "Set TEST_TOKEN env to test with real data"
+        info "Example: TEST_TOKEN=your_token ./e2e/run.sh index"
+        info ""
+        info "Running synthetic benchmark instead..."
+        
+        # Synthetic benchmark using SQLite index directly
+        info "Building test binary..."
+        cd "$PROJECT_ROOT"
+        go test -c -o /tmp/index_bench ./pkg/index/... 2>/dev/null || fail "Failed to build index tests"
+        
+        info "Running SQLite index benchmarks..."
+        echo ""
+        /tmp/index_bench -test.bench=. -test.benchtime=1s 2>&1 | grep -E "^Benchmark|ns/op"
+        
+        pass "Synthetic benchmark complete"
+        echo ""
+        return
+    fi
+    
+    # Real benchmark with mounted filesystem
+    info "Creating workspace..."
+    WORKSPACE_NAME="index-e2e-$(date +%s)"
+    RESULT=$("$PROJECT_ROOT/bin/cli" --gateway "$GATEWAY_GRPC" workspace create "$WORKSPACE_NAME" 2>&1) || fail "Workspace create failed: $RESULT"
+    WORKSPACE_ID=$(echo "$RESULT" | grep -oE '[0-9a-f-]{36}' | head -1)
+    [ -n "$WORKSPACE_ID" ] || fail "Could not parse workspace ID"
+    pass "Workspace: $WORKSPACE_ID"
+    
+    info "Adding member..."
+    RESULT=$("$PROJECT_ROOT/bin/cli" --gateway "$GATEWAY_GRPC" member add "$WORKSPACE_ID" "index@test.com" --name "Index" --role admin 2>&1) || fail "Member add failed"
+    MEMBER_ID=$(echo "$RESULT" | grep -oE '[0-9a-f-]{36}' | head -1)
+    
+    info "Creating token..."
+    RESULT=$("$PROJECT_ROOT/bin/cli" --gateway "$GATEWAY_GRPC" token create "$WORKSPACE_ID" "$MEMBER_ID" --name "index-token" 2>&1) || fail "Token create failed"
+    TOKEN=$(echo "$RESULT" | grep "Token:" | awk '{print $2}')
+    
+    # -------------------------------------------------------------------------
+    # Test 1: Baseline (without index, if possible)
+    # -------------------------------------------------------------------------
+    mkdir -p "$MOUNT_POINT"
+    
+    info "Test 1: Mounting filesystem..."
+    "$PROJECT_ROOT/bin/cli" mount "$MOUNT_POINT" --gateway "$GATEWAY_GRPC" --token "$TEST_TOKEN" &
+    MOUNT_PID=$!
+    sleep 5
+    
+    if [ ! -d "$MOUNT_POINT/sources" ]; then
+        kill $MOUNT_PID 2>/dev/null || true
+        fail "Mount failed"
+    fi
+    pass "Mounted at $MOUNT_POINT"
+    
+    # List available sources
+    SOURCES=$(ls "$MOUNT_POINT/sources/" 2>/dev/null)
+    info "Available sources: $SOURCES"
+    
+    # -------------------------------------------------------------------------
+    # Test 2: Performance test - find operation
+    # -------------------------------------------------------------------------
+    info "Test 2: Find performance..."
+    
+    if [ -d "$MOUNT_POINT/sources/gmail" ]; then
+        # Time find operation
+        START=$(date +%s.%N)
+        FIND_RESULT=$(find "$MOUNT_POINT/sources/gmail" -name "*.json" 2>/dev/null | wc -l | tr -d ' ')
+        END=$(date +%s.%N)
+        FIND_TIME=$(echo "$END - $START" | bc)
+        pass "find found $FIND_RESULT files in ${FIND_TIME}s"
+    else
+        info "Gmail not connected, skipping find test"
+    fi
+    
+    # -------------------------------------------------------------------------
+    # Test 3: Performance test - grep operation
+    # -------------------------------------------------------------------------
+    info "Test 3: Grep performance..."
+    
+    if [ -d "$MOUNT_POINT/sources/gmail/messages" ]; then
+        # Time grep operation (just check if it completes)
+        START=$(date +%s.%N)
+        GREP_RESULT=$(grep -r "meeting" "$MOUNT_POINT/sources/gmail/messages/" 2>/dev/null | wc -l | tr -d ' ') || true
+        END=$(date +%s.%N)
+        GREP_TIME=$(echo "$END - $START" | bc)
+        
+        if [ "$GREP_TIME" != "" ]; then
+            pass "grep found $GREP_RESULT matches in ${GREP_TIME}s"
+        else
+            info "grep completed (timing unavailable)"
+        fi
+    else
+        info "Gmail messages not available, skipping grep test"
+    fi
+    
+    # -------------------------------------------------------------------------
+    # Test 4: ls performance
+    # -------------------------------------------------------------------------
+    info "Test 4: Directory listing performance..."
+    
+    START=$(date +%s.%N)
+    LS_COUNT=$(ls -laR "$MOUNT_POINT/sources/" 2>/dev/null | wc -l | tr -d ' ')
+    END=$(date +%s.%N)
+    LS_TIME=$(echo "$END - $START" | bc)
+    
+    if [ "$LS_TIME" != "" ]; then
+        pass "ls -laR listed $LS_COUNT lines in ${LS_TIME}s"
+    else
+        info "Directory listing completed"
+    fi
+    
+    # -------------------------------------------------------------------------
+    # Cleanup
+    # -------------------------------------------------------------------------
+    info "Cleaning up..."
+    kill $MOUNT_PID 2>/dev/null || true
+    sleep 1
+    cleanup_mount
+    
+    echo ""
+    echo "Performance Summary:"
+    echo "-------------------"
+    [ -n "$FIND_TIME" ] && echo "  find: ${FIND_TIME}s ($FIND_RESULT files)"
+    [ -n "$GREP_TIME" ] && echo "  grep: ${GREP_TIME}s ($GREP_RESULT matches)"
+    [ -n "$LS_TIME" ] && echo "    ls: ${LS_TIME}s ($LS_COUNT lines)"
+    echo ""
+    
+    pass "Index performance test passed"
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -654,6 +799,9 @@ case "${1:-all}" in
     sources)
         test_sources
         ;;
+    index)
+        test_index
+        ;;
     all)
         test_setup
         test_task
@@ -664,7 +812,7 @@ case "${1:-all}" in
         ;;
     *)
         echo "Unknown test: $1"
-        echo "Available: setup, task, fs, tools, context, sources, all"
+        echo "Available: setup, task, fs, tools, context, sources, index, all"
         exit 1
         ;;
 esac

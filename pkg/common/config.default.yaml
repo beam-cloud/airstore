@@ -113,3 +113,21 @@ tools:
   #       command: npx
   #       args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
   mcp: {}
+
+# ----------------------------------------------------------------------------
+# Index - Local index for fast grep/find on sources
+# ----------------------------------------------------------------------------
+index:
+  enabled: true
+  store: sqlite  # "sqlite" or "elasticsearch"
+  sqlite:
+    path: /data/airstore/index.db
+  elasticsearch:
+    url: http://localhost:9200
+    indexName: airstore
+  sync:
+    interval: 30s
+    providers:
+      - gmail
+      - gdrive
+      - notion

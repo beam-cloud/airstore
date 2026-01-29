@@ -25,6 +25,7 @@ type AppConfig struct {
 	Tools       ToolsConfig      `key:"tools" json:"tools"`
 	Admin       AdminConfig      `key:"admin" json:"admin"`
 	OAuth       IntegrationOAuth `key:"oauth" json:"oauth"` // OAuth for workspace integrations (gmail, gdrive)
+	Index       IndexConfig      `key:"index" json:"index"` // Local index for source data (enables fast grep/find)
 }
 
 // IsLocalMode returns true if running in local mode (no Redis/Postgres)
@@ -245,4 +246,35 @@ type IntegrationGoogleOAuth struct {
 	ClientID     string `key:"clientId" json:"client_id"`
 	ClientSecret string `key:"clientSecret" json:"client_secret"`
 	RedirectURL  string `key:"redirectUrl" json:"redirect_url"` // e.g., http://localhost:1994/api/v1/oauth/google/callback
+}
+
+// ----------------------------------------------------------------------------
+// Index Configuration (for source data indexing)
+// ----------------------------------------------------------------------------
+
+// IndexConfig configures the local index for source data.
+// When enabled, source data is synced to a local index for fast grep/find operations.
+type IndexConfig struct {
+	Enabled       bool                    `key:"enabled" json:"enabled"`
+	Store         string                  `key:"store" json:"store"` // "sqlite" or "elasticsearch"
+	SQLite        SQLiteIndexConfig       `key:"sqlite" json:"sqlite"`
+	Elasticsearch ElasticsearchIndexConfig `key:"elasticsearch" json:"elasticsearch"`
+	Sync          IndexSyncConfig         `key:"sync" json:"sync"`
+}
+
+// SQLiteIndexConfig configures the SQLite index store
+type SQLiteIndexConfig struct {
+	Path string `key:"path" json:"path"` // Path to SQLite database file
+}
+
+// ElasticsearchIndexConfig configures the Elasticsearch index store
+type ElasticsearchIndexConfig struct {
+	URL       string `key:"url" json:"url"`
+	IndexName string `key:"indexName" json:"index_name"`
+}
+
+// IndexSyncConfig configures the background index syncer
+type IndexSyncConfig struct {
+	Interval  string   `key:"interval" json:"interval"`   // Sync interval (e.g., "30s")
+	Providers []string `key:"providers" json:"providers"` // Source providers to sync (e.g., ["gmail", "gdrive"])
 }

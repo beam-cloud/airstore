@@ -8,5 +8,6 @@ resources:
 - redis.yaml
 - postgres.yaml
 - localstack.yaml
+- elasticsearch.yaml
 - gateway.yaml
 

@@ -152,8 +152,21 @@ Examples:
 			}
 			return fmt.Errorf("failed to create sources connection: %w", err)
 		}
+
+		// Create lazy local index - syncs on first access to each integration
+		var lazyIndex *LazyIndex
 		sourcesNode := vnode.NewSourcesVNodeGRPC(sourcesConn, authToken)
-		fs.RegisterVNode(sourcesNode)
+
+		lazyIndex, err = NewLazyIndex(sourcesConn, authToken)
+		if err != nil {
+			log.Warn().Err(err).Msg("failed to create local index - using gateway only")
+			fs.RegisterVNode(sourcesNode)
+		} else {
+			// Use lazy sources vnode - syncs on access
+			lazyNode := vnode.NewLazySourcesVNode(lazyIndex.Store(), sourcesNode, lazyIndex)
+			fs.RegisterVNode(lazyNode)
+			log.Info().Msg("lazy local index enabled - syncs on first access to each integration")
+		}
 
 		if mountVerbose {
 			log.Debug().Str("platform", embed.Current().String()).Int("shim_bytes", len(shim)).Msg("vnodes registered")
@@ -170,6 +183,11 @@ Examples:
 			<-sigChan
 			shuttingDown = true
 			fs.Unmount()
+
+			if lazyIndex != nil {
+				lazyIndex.Close()
+			}
+
 			if gw != nil {
 				gw.Shutdown()
 			}

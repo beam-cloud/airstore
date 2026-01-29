@@ -6,6 +6,7 @@ import (
 	"syscall"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
+	"github.com/beam-cloud/airstore/pkg/index"
 	"github.com/beam-cloud/airstore/pkg/oauth"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/sources"
@@ -16,11 +17,13 @@ import (
 // SourceService implements the gRPC SourceService for read-only integration access.
 type SourceService struct {
 	pb.UnimplementedSourceServiceServer
-	registry    *sources.Registry
-	backend     repository.BackendRepository
-	cache       *sources.SourceCache
-	rateLimiter *sources.RateLimiter
-	googleOAuth *oauth.GoogleClient
+	registry     *sources.Registry
+	backend      repository.BackendRepository
+	cache        *sources.SourceCache
+	rateLimiter  *sources.RateLimiter
+	googleOAuth  *oauth.GoogleClient
+	indexStore   index.IndexStore // Index store for fast reads (optional)
+	indexEnabled bool
 }
 
 // NewSourceService creates a new SourceService
@@ -41,6 +44,15 @@ func NewSourceServiceWithOAuth(registry *sources.Registry, backend repository.Ba
 		cache:       sources.NewSourceCache(sources.DefaultCacheTTL, sources.DefaultCacheSize),
 		rateLimiter: sources.NewRateLimiter(sources.DefaultRateLimitConfig()),
 		googleOAuth: googleOAuth,
+	}
+}
+
+// SetIndexStore configures the index store for fast reads
+func (s *SourceService) SetIndexStore(store index.IndexStore) {
+	s.indexStore = store
+	s.indexEnabled = store != nil
+	if s.indexEnabled {
+		log.Info().Msg("index store enabled for SourceService - reads will use local index")
 	}
 }
 
@@ -105,6 +117,44 @@ func (s *SourceService) Stat(ctx context.Context, req *pb.SourceStatRequest) (*p
 				Mtime: sources.NowUnix(),
 			},
 		}, nil
+	}
+
+	// Try index first if enabled
+	if s.indexEnabled && s.indexStore != nil {
+		entry, err := s.indexStore.GetByPath(ctx, relPath)
+		if err == nil && entry != nil {
+			log.Debug().Str("path", relPath).Msg("index hit - stat from local index")
+			mode := uint32(sources.ModeFile)
+			isDir := entry.IsDir()
+			if isDir {
+				mode = uint32(sources.ModeDir)
+			}
+			return &pb.SourceStatResponse{
+				Ok: true,
+				Info: &pb.SourceFileInfo{
+					Size:  entry.Size,
+					Mode:  mode,
+					Mtime: entry.ModTime.Unix(),
+					IsDir: isDir,
+				},
+			}, nil
+		}
+		// Also check if this is a virtual directory by looking for children
+		if err == nil && entry == nil {
+			entries, err := s.indexStore.List(ctx, integration, relPath)
+			if err == nil && len(entries) > 0 {
+				log.Debug().Str("path", relPath).Int("children", len(entries)).Msg("index hit - virtual dir from local index")
+				return &pb.SourceStatResponse{
+					Ok: true,
+					Info: &pb.SourceFileInfo{
+						Mode:  uint32(sources.ModeDir),
+						IsDir: true,
+						Mtime: sources.NowUnix(),
+					},
+				}, nil
+			}
+		}
+		log.Debug().Str("path", relPath).Msg("index miss - falling back to provider for stat")
 	}
 
 	// Check cache first
@@ -242,6 +292,42 @@ func (s *SourceService) ReadDir(ctx context.Context, req *pb.SourceReadDirReques
 		return &pb.SourceReadDirResponse{Ok: true, Entries: entries}, nil
 	}
 
+	// Try index first if enabled
+	if s.indexEnabled && s.indexStore != nil {
+		indexEntries, err := s.indexStore.List(ctx, integration, relPath)
+		if err == nil && len(indexEntries) > 0 {
+			log.Debug().Str("path", relPath).Int("count", len(indexEntries)).Msg("index hit - readdir from local index")
+
+			// Deduplicate entries (index may have multiple entries for same name)
+			seen := make(map[string]bool)
+			entries := make([]*pb.SourceDirEntry, 0, len(indexEntries))
+
+			for _, e := range indexEntries {
+				if seen[e.Name] {
+					continue
+				}
+				seen[e.Name] = true
+
+				mode := uint32(sources.ModeFile)
+				isDir := e.IsDir()
+				if isDir {
+					mode = uint32(sources.ModeDir)
+				}
+
+				entries = append(entries, &pb.SourceDirEntry{
+					Name:  e.Name,
+					Mode:  mode,
+					IsDir: isDir,
+					Size:  e.Size,
+					Mtime: e.ModTime.Unix(),
+				})
+			}
+
+			return &pb.SourceReadDirResponse{Ok: true, Entries: entries}, nil
+		}
+		log.Debug().Str("path", relPath).Msg("index miss - falling back to provider for readdir")
+	}
+
 	// Check cache first
 	cacheKey := sources.CacheKey(pctx.WorkspaceId, integration, relPath, "readdir")
 	if cachedEntries, ok := s.cache.GetEntries(cacheKey); ok {
@@ -327,6 +413,31 @@ func (s *SourceService) Read(ctx context.Context, req *pb.SourceReadRequest) (*p
 
 	if relPath == "" {
 		return &pb.SourceReadResponse{Ok: false, Error: "is a directory"}, nil
+	}
+
+	// Try index first if enabled - this provides instant reads for grep/find
+	if s.indexEnabled && s.indexStore != nil {
+		entry, err := s.indexStore.GetByPath(ctx, relPath)
+		if err == nil && entry != nil && entry.Body != "" {
+			log.Debug().Str("path", relPath).Msg("index hit - serving from local index")
+			data := []byte(entry.Body)
+
+			// Handle offset/length
+			if req.Offset >= int64(len(data)) {
+				return &pb.SourceReadResponse{Ok: true, Data: nil}, nil
+			}
+
+			end := int64(len(data))
+			if req.Length > 0 && req.Offset+req.Length < end {
+				end = req.Offset + req.Length
+			}
+
+			return &pb.SourceReadResponse{Ok: true, Data: data[req.Offset:end]}, nil
+		}
+		// Index miss - fall through to provider
+		if err == nil && entry == nil {
+			log.Debug().Str("path", relPath).Msg("index miss - falling back to provider")
+		}
 	}
 
 	// For reads at offset 0 with no length (full file), try cache first
@@ -515,3 +626,4 @@ func errorToCode(err error) int {
 	}
 	return int(syscall.EIO)
 }
+
