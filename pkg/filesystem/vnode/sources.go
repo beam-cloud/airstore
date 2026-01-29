@@ -432,7 +432,14 @@ func (v *SourcesVNode) readQueryFile(ctx context.Context, q *types.SmartQuery, b
 
 // readQueryResult reads a specific file from query results.
 func (v *SourcesVNode) readQueryResult(ctx context.Context, q *types.SmartQuery, filename string, buf []byte, off int64) (int, error) {
-	resp, err := v.client.ExecuteSmartQuery(ctx, &pb.ExecuteSmartQueryRequest{Path: q.Path, Filename: filename})
+	// Look up the result_id from cache for more reliable fetching
+	resultId := v.getResultIdFromCache(q.Path, filename)
+
+	resp, err := v.client.ExecuteSmartQuery(ctx, &pb.ExecuteSmartQueryRequest{
+		Path:     q.Path,
+		Filename: filename,
+		ResultId: resultId,
+	})
 	if err != nil || !resp.Ok || len(resp.FileData) == 0 {
 		return 0, fs.ErrNotExist
 	}
@@ -440,6 +447,18 @@ func (v *SourcesVNode) readQueryResult(ctx context.Context, q *types.SmartQuery,
 		return 0, nil
 	}
 	return copy(buf, resp.FileData[off:]), nil
+}
+
+// getResultIdFromCache looks up the result_id for a filename from the cached query results
+func (v *SourcesVNode) getResultIdFromCache(queryPath, filename string) string {
+	if cached := v.getCachedResults(queryPath); cached != nil {
+		for _, e := range cached {
+			if e.Name == filename && e.ResultId != "" {
+				return e.ResultId
+			}
+		}
+	}
+	return ""
 }
 
 // isSystemFile returns true if the filename is a system/metadata file that should be ignored.

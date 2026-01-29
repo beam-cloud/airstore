@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -101,9 +103,9 @@ func (c *DriveClient) Request(ctx context.Context, token, path string, result an
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("drive API error %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("drive API request failed (path=%s): %w", path, driveAPIError(resp.Status, resp.StatusCode, body))
 	}
 
 	return json.NewDecoder(resp.Body).Decode(result)
@@ -111,29 +113,51 @@ func (c *DriveClient) Request(ctx context.Context, token, path string, result an
 
 // ListFiles lists files from Drive
 func (c *DriveClient) ListFiles(ctx context.Context, token, query string, maxResults int) ([]*DriveFile, error) {
-	encodedQuery := url.QueryEscape(query)
-	path := fmt.Sprintf("/files?q=%s&pageSize=%d&orderBy=modifiedTime desc&fields=files(id,name,mimeType,size,modifiedTime,webViewLink,parents)", encodedQuery, maxResults)
-
-	var result map[string]any
-	if err := c.Request(ctx, token, path, &result); err != nil {
-		return nil, err
+	if maxResults <= 0 {
+		maxResults = 50
 	}
 
-	rawFiles, _ := result["files"].([]any)
-	files := make([]*DriveFile, 0, len(rawFiles))
+	fields := "nextPageToken,files(id,name,mimeType,size,modifiedTime,webViewLink,parents)"
+	includeAllDrives := true
 
-	for _, f := range rawFiles {
-		fileMap, ok := f.(map[string]any)
-		if !ok {
-			continue
+	files := make([]*DriveFile, 0, maxResults)
+	pageToken := ""
+	for len(files) < maxResults {
+		pageSize := maxResults - len(files)
+		if pageSize > 1000 {
+			pageSize = 1000
 		}
 
-		file := c.ParseFile(fileMap)
-		if file != nil {
-			files = append(files, file)
+		path := buildFilesListRequestURI(query, pageSize, "modifiedTime desc", fields, pageToken, includeAllDrives)
+
+		var result driveFileListResponse
+		if err := c.Request(ctx, token, path, &result); err != nil {
+			return nil, err
 		}
+
+		if len(result.Files) == 0 {
+			break
+		}
+
+		for _, fileMap := range result.Files {
+			file := c.ParseFile(fileMap)
+			if file != nil {
+				files = append(files, file)
+				if len(files) >= maxResults {
+					break
+				}
+			}
+		}
+
+		if result.NextPageToken == "" || len(files) >= maxResults {
+			break
+		}
+		pageToken = result.NextPageToken
 	}
 
+	if len(files) > maxResults {
+		files = files[:maxResults]
+	}
 	return files, nil
 }
 
@@ -201,9 +225,9 @@ func (c *DriveClient) DownloadFile(ctx context.Context, token, fileID string) ([
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("drive download error %d: %s", resp.StatusCode, string(body))
+		return nil, driveAPIError(resp.Status, resp.StatusCode, body)
 	}
 
 	return io.ReadAll(resp.Body)
@@ -211,7 +235,7 @@ func (c *DriveClient) DownloadFile(ctx context.Context, token, fileID string) ([
 
 // ExportGoogleDoc exports a Google Doc as text
 func (c *DriveClient) ExportGoogleDoc(ctx context.Context, token, fileID, mimeType string) ([]byte, error) {
-	url := fmt.Sprintf("%s/files/%s/export?mimeType=%s", DriveAPIBase, fileID, mimeType)
+	url := fmt.Sprintf("%s/files/%s/export?mimeType=%s", DriveAPIBase, fileID, url.QueryEscape(mimeType))
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -225,9 +249,9 @@ func (c *DriveClient) ExportGoogleDoc(ctx context.Context, token, fileID, mimeTy
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("drive export error %d: %s", resp.StatusCode, string(body))
+		return nil, driveAPIError(resp.Status, resp.StatusCode, body)
 	}
 
 	return io.ReadAll(resp.Body)
@@ -260,4 +284,69 @@ func (c *DriveClient) GetFileContent(ctx context.Context, token string, file *Dr
 
 	// Direct download
 	return c.DownloadFile(ctx, token, file.ID)
+}
+
+type driveFileListResponse struct {
+	Files            []map[string]any `json:"files"`
+	NextPageToken    string           `json:"nextPageToken"`
+	IncompleteSearch bool             `json:"incompleteSearch"`
+}
+
+func buildFilesListRequestURI(query string, pageSize int, orderBy, fields, pageToken string, includeAllDrives bool) string {
+	params := url.Values{}
+	if query != "" {
+		params.Set("q", query)
+	}
+	if pageSize > 0 {
+		params.Set("pageSize", strconv.Itoa(pageSize))
+	}
+	if orderBy != "" {
+		params.Set("orderBy", orderBy)
+	}
+	if fields != "" {
+		params.Set("fields", fields)
+	}
+	if pageToken != "" {
+		params.Set("pageToken", pageToken)
+	}
+
+	params.Set("spaces", "drive")
+	if includeAllDrives {
+		params.Set("corpora", "allDrives")
+		params.Set("includeItemsFromAllDrives", "true")
+		params.Set("supportsAllDrives", "true")
+	}
+
+	u := url.URL{
+		Path:     "/files",
+		RawQuery: params.Encode(),
+	}
+	return u.RequestURI()
+}
+
+func driveAPIError(status string, statusCode int, body []byte) error {
+	if msg := parseDriveAPIErrorMessage(body); msg != "" {
+		return fmt.Errorf("drive API: %s (HTTP %d)", msg, statusCode)
+	}
+
+	snippet := strings.TrimSpace(string(body))
+	if len(snippet) > 2048 {
+		snippet = snippet[:2048] + "..."
+	}
+	if snippet != "" {
+		return fmt.Errorf("drive API: %s - %s", status, snippet)
+	}
+	return fmt.Errorf("drive API: %s", status)
+}
+
+func parseDriveAPIErrorMessage(body []byte) string {
+	var apiErr struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &apiErr) == nil && apiErr.Error.Message != "" {
+		return apiErr.Error.Message
+	}
+	return ""
 }

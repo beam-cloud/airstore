@@ -84,7 +84,10 @@ function InferGmailQuery(name: string, guidance: string?) -> GmailQueryResult {
 function InferGDriveQuery(name: string, guidance: string?) -> GDriveQueryResult {
   client AnthropicClient
   prompt #"
-    Convert a folder/file name into a Google Drive search query.
+    Convert a folder/file name into a Google Drive files.list query (the `q` parameter).
+    
+    Output MUST be ONLY the query expression (no `q=`, no URL encoding).
+    It MUST be valid Drive query syntax.
     
     Drive query syntax:
     - name contains 'text'
@@ -95,37 +98,55 @@ function InferGDriveQuery(name: string, guidance: string?) -> GDriveQueryResult 
     - mimeType = 'application/vnd.google-apps.presentation'
     - mimeType contains 'image'
     - sharedWithMe = true
+    - 'me' in owners
     - 'email@example.com' in owners
     - 'email@example.com' in writers
+    - 'email@example.com' in readers
     - starred = true
     - trashed = false
     - modifiedTime > '2024-01-01T00:00:00'
+    - createdTime > '2024-01-01T00:00:00'
+    - 'FOLDER_ID' in parents
     
     Combine with: and, or, not
+    
+    IMPORTANT:
+    - Always include `trashed = false` unless the user explicitly asks for trash / deleted files.
+    - Prefer `fullText contains` for topic/keyword folders (it searches name + indexed content).
+      Use `name contains` when the intent is specifically filename-based.
+    - Use RFC3339 timestamps for createdTime/modifiedTime. Prefer including a timezone, e.g. '2026-01-22T00:00:00Z'.
     
     DEFAULTS:
     - limit: 50
     - filename_format: {name}_{id}
     
     Query examples:
-    - "recent" → modifiedTime > '2024-01-01T00:00:00'
-    - "shared" → sharedWithMe = true
-    - "pdfs" → mimeType = 'application/pdf'
-    - "documents" → mimeType = 'application/vnd.google-apps.document'
-    - "spreadsheets" → mimeType = 'application/vnd.google-apps.spreadsheet'
-    - "images" → mimeType contains 'image'
-    - "starred" → starred = true
+    - "recent" → trashed = false and modifiedTime > '2026-01-22T00:00:00Z'
+    - "shared" → trashed = false and sharedWithMe = true
+    - "my-docs" → trashed = false and 'me' in owners and mimeType = 'application/vnd.google-apps.document'
+    - "pdfs" → trashed = false and mimeType = 'application/pdf'
+    - "documents" → trashed = false and mimeType = 'application/vnd.google-apps.document'
+    - "spreadsheets" → trashed = false and mimeType = 'application/vnd.google-apps.spreadsheet'
+    - "presentations" → trashed = false and mimeType = 'application/vnd.google-apps.presentation'
+    - "images" → trashed = false and mimeType contains 'image/'
+    - "starred" → trashed = false and starred = true
+    - "college-docs" → trashed = false and (fullText contains 'college' or name contains 'college') and mimeType = 'application/vnd.google-apps.document'
+    - Guidance: "created in the past week" → use createdTime > '...'
+    - Guidance: "modified in the past week" → use modifiedTime > '...'
     
     Filename format: Choose a format that makes sense for the query intent.
-    Available placeholders: {id}, {name}, {date}, {created}, {ext}
+    Available placeholders: {id}, {name}, {date}, {created}, {mime_type}, {ext}
+    - {name} is the basename (no extension)
+    - {ext} is the extension (includes leading dot)
     - For documents: {name}_{id}
     - For dated files: {date}_{name}_{id}
+    - For created-time focused queries: {created}_{name}_{id}
     - Default: {name}_{id}
     
     Folder/file name: {{ name }}
     {% if guidance %}
     
-    Additional guidance from user: {{ guidance }}
+    Additional guidance: {{ guidance }}
     {% endif %}
     
     {{ ctx.output_format }}
@@ -218,6 +239,30 @@ test TestGDrivePdfs {
   functions [InferGDriveQuery]
   args {
     name "pdfs"
+    guidance null
+  }
+}
+
+test TestGDriveCollegeDocs {
+  functions [InferGDriveQuery]
+  args {
+    name "college docs"
+    guidance null
+  }
+}
+
+test TestGDriveRecentDocsWithGuidance {
+  functions [InferGDriveQuery]
+  args {
+    name "recent-docs"
+    guidance "any docs created in the past week"
+  }
+}
+
+test TestGDriveOwnedByMe {
+  functions [InferGDriveQuery]
+  args {
+    name "my docs"
     guidance null
   }
 }

@@ -319,10 +319,16 @@ func (g *GmailProvider) Search(ctx context.Context, pctx *sources.ProviderContex
 }
 
 // searchResultFilename generates a meaningful filename for a search result
-// Format: {date}_{subject_slug}_{id}.txt
+// Format: {date}_{from}_{subject}_{id}.txt
 func (g *GmailProvider) searchResultFilename(msg gmailMessage) string {
 	datePrefix := parseEmailDate(msg.Date)
-	subj := sanitizeFolderName(truncateSubject(msg.Subject, 40))
+	sender := extractSenderName(msg.From)
+	subj := sanitizeFolderName(truncateSubject(msg.Subject, 30))
+
+	// Truncate sender if too long
+	if len(sender) > 20 {
+		sender = sender[:20]
+	}
 
 	// Ensure we have at least 8 chars of message ID for uniqueness
 	idSuffix := msg.ID
@@ -330,7 +336,7 @@ func (g *GmailProvider) searchResultFilename(msg gmailMessage) string {
 		idSuffix = idSuffix[:8]
 	}
 
-	return fmt.Sprintf("%s_%s_%s.txt", datePrefix, subj, idSuffix)
+	return fmt.Sprintf("%s_%s_%s_%s.txt", datePrefix, sender, subj, idSuffix)
 }
 
 // parseEmailTimestamp converts email date string to Unix timestamp
@@ -1076,48 +1082,301 @@ func (g *GmailProvider) fetchMessageBody(ctx context.Context, token, msgId strin
 		return nil, err
 	}
 
-	body := extractPlainTextBody(result)
-	if body == "" {
-		body = fmt.Sprintf("(no plain text body available)\n\nSnippet: %s", result["snippet"])
-	}
-
-	return []byte(body), nil
+	// Build compiled message with headers + body
+	return g.buildCompiledMessage(ctx, token, msgId, result), nil
 }
 
-func extractPlainTextBody(msg map[string]any) string {
+// buildCompiledMessage creates a complete text representation of an email
+// including headers and body content for agent consumption
+func (g *GmailProvider) buildCompiledMessage(ctx context.Context, token, msgId string, msg map[string]any) []byte {
+	var sb strings.Builder
+
+	// Extract headers
+	headers := extractHeaders(msg)
+
+	// Write header block
+	sb.WriteString("=== EMAIL MESSAGE ===\n")
+	sb.WriteString(fmt.Sprintf("Message-ID: %s\n", msgId))
+	if threadId := getString(msg, "threadId"); threadId != "" {
+		sb.WriteString(fmt.Sprintf("Thread-ID: %s\n", threadId))
+	}
+	if headers["From"] != "" {
+		sb.WriteString(fmt.Sprintf("From: %s\n", headers["From"]))
+	}
+	if headers["To"] != "" {
+		sb.WriteString(fmt.Sprintf("To: %s\n", headers["To"]))
+	}
+	if headers["Cc"] != "" {
+		sb.WriteString(fmt.Sprintf("Cc: %s\n", headers["Cc"]))
+	}
+	if headers["Subject"] != "" {
+		sb.WriteString(fmt.Sprintf("Subject: %s\n", headers["Subject"]))
+	}
+	if headers["Date"] != "" {
+		sb.WriteString(fmt.Sprintf("Date: %s\n", headers["Date"]))
+	}
+
+	// Add labels if present
+	if labels, ok := msg["labelIds"].([]any); ok && len(labels) > 0 {
+		labelStrs := make([]string, 0, len(labels))
+		for _, l := range labels {
+			if s, ok := l.(string); ok {
+				labelStrs = append(labelStrs, s)
+			}
+		}
+		if len(labelStrs) > 0 {
+			sb.WriteString(fmt.Sprintf("Labels: %s\n", strings.Join(labelStrs, ", ")))
+		}
+	}
+
+	sb.WriteString("\n=== BODY ===\n\n")
+
+	// Extract body content
+	body := g.extractMessageBody(ctx, token, msgId, msg)
+	if body != "" {
+		sb.WriteString(body)
+	} else {
+		// Last resort: use snippet
+		if snippet := getString(msg, "snippet"); snippet != "" {
+			sb.WriteString("[Body could not be extracted. Snippet below]\n\n")
+			sb.WriteString(snippet)
+		} else {
+			sb.WriteString("[No message body available]")
+		}
+	}
+
+	return []byte(sb.String())
+}
+
+// extractHeaders extracts common email headers from a Gmail message
+func extractHeaders(msg map[string]any) map[string]string {
+	headers := make(map[string]string)
+
+	payload, ok := msg["payload"].(map[string]any)
+	if !ok {
+		return headers
+	}
+
+	hdrs, ok := payload["headers"].([]any)
+	if !ok {
+		return headers
+	}
+
+	for _, h := range hdrs {
+		hdr, ok := h.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := hdr["name"].(string)
+		value, _ := hdr["value"].(string)
+		switch name {
+		case "From", "To", "Cc", "Subject", "Date", "Reply-To":
+			headers[name] = value
+		}
+	}
+
+	return headers
+}
+
+// extractMessageBody extracts the body content from a Gmail message,
+// trying text/plain first, then falling back to text/html converted to text
+func (g *GmailProvider) extractMessageBody(ctx context.Context, token, msgId string, msg map[string]any) string {
 	payload, ok := msg["payload"].(map[string]any)
 	if !ok {
 		return ""
 	}
 
-	// Check if body is in payload.body
+	// Try to get text/plain first (recursively)
+	if plainText := extractMimePartRecursive(payload, "text/plain"); plainText != "" {
+		return normalizeWhitespace(plainText)
+	}
+
+	// Fall back to text/html converted to text
+	if htmlText := extractMimePartRecursive(payload, "text/html"); htmlText != "" {
+		return stripHTMLToText(htmlText)
+	}
+
+	// Check if there's a body directly on the payload
 	if body, ok := payload["body"].(map[string]any); ok {
-		if data, ok := body["data"].(string); ok && data != "" {
-			decoded, _ := base64.URLEncoding.DecodeString(data)
-			return string(decoded)
+		mimeType, _ := payload["mimeType"].(string)
+		if decoded := decodeBodyData(body); decoded != "" {
+			if strings.HasPrefix(mimeType, "text/html") {
+				return stripHTMLToText(decoded)
+			}
+			return normalizeWhitespace(decoded)
 		}
 	}
 
-	// Check parts for text/plain
-	if parts, ok := payload["parts"].([]any); ok {
+	return ""
+}
+
+// normalizeWhitespace cleans up excessive whitespace in plain text
+// while preserving paragraph structure
+func normalizeWhitespace(text string) string {
+	// Normalize line endings
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+
+	// Process line by line: trim each line, collapse consecutive empty lines
+	lines := strings.Split(text, "\n")
+	var result []string
+	lastWasEmpty := false
+	for _, line := range lines {
+		line = strings.TrimRight(line, " \t") // Trim trailing whitespace only
+		if strings.TrimSpace(line) == "" {
+			if !lastWasEmpty {
+				result = append(result, "")
+				lastWasEmpty = true
+			}
+			// Skip consecutive empty lines
+		} else {
+			result = append(result, line)
+			lastWasEmpty = false
+		}
+	}
+
+	return strings.TrimSpace(strings.Join(result, "\n"))
+}
+
+// extractMimePartRecursive recursively searches for a MIME part with the given type
+func extractMimePartRecursive(part map[string]any, targetMimeType string) string {
+	mimeType, _ := part["mimeType"].(string)
+
+	// Direct match
+	if mimeType == targetMimeType {
+		if body, ok := part["body"].(map[string]any); ok {
+			return decodeBodyData(body)
+		}
+	}
+
+	// Check for nested parts (multipart/*)
+	if parts, ok := part["parts"].([]any); ok {
+		// First pass: look for exact match at this level
 		for _, p := range parts {
-			part, ok := p.(map[string]any)
+			subPart, ok := p.(map[string]any)
 			if !ok {
 				continue
 			}
-			mimeType, _ := part["mimeType"].(string)
-			if mimeType == "text/plain" {
-				if body, ok := part["body"].(map[string]any); ok {
-					if data, ok := body["data"].(string); ok {
-						decoded, _ := base64.URLEncoding.DecodeString(data)
-						return string(decoded)
+			subMimeType, _ := subPart["mimeType"].(string)
+			if subMimeType == targetMimeType {
+				if body, ok := subPart["body"].(map[string]any); ok {
+					if decoded := decodeBodyData(body); decoded != "" {
+						return decoded
 					}
+				}
+			}
+		}
+
+		// Second pass: recurse into multipart containers
+		for _, p := range parts {
+			subPart, ok := p.(map[string]any)
+			if !ok {
+				continue
+			}
+			subMimeType, _ := subPart["mimeType"].(string)
+			if strings.HasPrefix(subMimeType, "multipart/") {
+				if result := extractMimePartRecursive(subPart, targetMimeType); result != "" {
+					return result
+				}
+			}
+		}
+
+		// Third pass: recurse into any part that has nested parts
+		for _, p := range parts {
+			subPart, ok := p.(map[string]any)
+			if !ok {
+				continue
+			}
+			if _, hasParts := subPart["parts"]; hasParts {
+				if result := extractMimePartRecursive(subPart, targetMimeType); result != "" {
+					return result
 				}
 			}
 		}
 	}
 
 	return ""
+}
+
+// decodeBodyData decodes the base64url-encoded body data from a Gmail message part
+func decodeBodyData(body map[string]any) string {
+	data, ok := body["data"].(string)
+	if !ok || data == "" {
+		return ""
+	}
+
+	// Gmail uses URL-safe base64 encoding, often without padding
+	// Try RawURLEncoding first (no padding), then URLEncoding (with padding)
+	decoded, err := base64.RawURLEncoding.DecodeString(data)
+	if err != nil {
+		// Try with standard URL encoding (has padding)
+		decoded, err = base64.URLEncoding.DecodeString(data)
+		if err != nil {
+			// Try adding padding and decode again
+			padded := data
+			switch len(data) % 4 {
+			case 2:
+				padded += "=="
+			case 3:
+				padded += "="
+			}
+			decoded, err = base64.URLEncoding.DecodeString(padded)
+			if err != nil {
+				log.Debug().Err(err).Msg("failed to decode gmail body data")
+				return ""
+			}
+		}
+	}
+
+	return string(decoded)
+}
+
+// stripHTMLToText converts HTML content to plain text
+func stripHTMLToText(html string) string {
+	// Remove script and style blocks entirely
+	scriptRegex := regexp.MustCompile(`(?is)<script[^>]*>.*?</script>`)
+	styleRegex := regexp.MustCompile(`(?is)<style[^>]*>.*?</style>`)
+	html = scriptRegex.ReplaceAllString(html, "")
+	html = styleRegex.ReplaceAllString(html, "")
+
+	// Convert block elements to paragraph markers
+	html = regexp.MustCompile(`(?i)<br\s*/?>`).ReplaceAllString(html, "\n")
+	html = regexp.MustCompile(`(?i)</p>|</div>|</tr>|</li>|</td>`).ReplaceAllString(html, "\n")
+	html = regexp.MustCompile(`(?i)</h[1-6]>`).ReplaceAllString(html, "\n")
+
+	// Remove all remaining HTML tags
+	tagRegex := regexp.MustCompile(`<[^>]*>`)
+	text := tagRegex.ReplaceAllString(html, "")
+
+	// Decode common HTML entities
+	text = strings.ReplaceAll(text, "&nbsp;", " ")
+	text = strings.ReplaceAll(text, "&amp;", "&")
+	text = strings.ReplaceAll(text, "&lt;", "<")
+	text = strings.ReplaceAll(text, "&gt;", ">")
+	text = strings.ReplaceAll(text, "&quot;", "\"")
+	text = strings.ReplaceAll(text, "&#39;", "'")
+	text = strings.ReplaceAll(text, "&apos;", "'")
+	text = strings.ReplaceAll(text, "&#160;", " ")
+
+	// Process line by line: trim each line, skip consecutive empty lines
+	lines := strings.Split(text, "\n")
+	var result []string
+	lastWasEmpty := false
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			if !lastWasEmpty {
+				result = append(result, "")
+				lastWasEmpty = true
+			}
+			// Skip consecutive empty lines
+		} else {
+			result = append(result, line)
+			lastWasEmpty = false
+		}
+	}
+
+	return strings.TrimSpace(strings.Join(result, "\n"))
 }
 
 func (g *GmailProvider) request(ctx context.Context, token, path string, result any) error {
@@ -1183,6 +1442,13 @@ func fileEntry(name string, size int64) sources.DirEntry {
 	return sources.DirEntry{Name: name, Mode: sources.ModeFile, Size: size, Mtime: sources.NowUnix()}
 }
 
+// noReplyPatterns are common patterns for automated/noreply addresses
+var noReplyPatterns = []string{
+	"noreply", "no-reply", "no_reply", "donotreply", "do-not-reply",
+	"notifications", "notification", "mailer", "mailer-daemon",
+	"postmaster", "bounce", "auto", "automated", "system",
+}
+
 // extractSenderName extracts a clean sender name for folder display
 // "Raymond Xu <ray@example.com>" -> "Raymond_Xu"
 // "noreply@calendly.com" -> "Calendly"
@@ -1192,7 +1458,7 @@ func extractSenderName(from string) string {
 	if idx := strings.Index(from, "<"); idx > 0 {
 		name := strings.TrimSpace(from[:idx])
 		name = strings.Trim(name, `"'`) // Remove quotes if present
-		if name != "" {
+		if name != "" && !isGenericSenderName(name) {
 			return sanitizeFolderName(name)
 		}
 	}
@@ -1204,10 +1470,41 @@ func extractSenderName(from string) string {
 			email = from[idx+1 : idx+end]
 		}
 	}
+	email = strings.TrimSpace(email)
 
-	// Fall back to domain name from email
+	// Parse the email address
 	if atIdx := strings.Index(email, "@"); atIdx > 0 {
+		localPart := email[:atIdx]
 		domain := email[atIdx+1:]
+
+		// Check if local part is a noreply/automated pattern
+		localLower := strings.ToLower(localPart)
+		isNoReply := false
+		for _, pattern := range noReplyPatterns {
+			if strings.Contains(localLower, pattern) {
+				isNoReply = true
+				break
+			}
+		}
+
+		// If it's a noreply address, use the domain name
+		if isNoReply {
+			parts := strings.Split(domain, ".")
+			if len(parts) >= 2 {
+				// Use second-to-last part (the main domain name)
+				name := parts[len(parts)-2]
+				if len(name) > 0 {
+					return strings.ToUpper(name[:1]) + name[1:]
+				}
+			}
+		}
+
+		// Otherwise, try using the local part if it looks like a name
+		if isLikelyPersonName(localPart) {
+			return sanitizeFolderName(localPart)
+		}
+
+		// Fall back to domain name
 		parts := strings.Split(domain, ".")
 		if len(parts) >= 2 {
 			// Use second-to-last part (the main domain name)
@@ -1217,7 +1514,58 @@ func extractSenderName(from string) string {
 			}
 		}
 	}
+
 	return sanitizeFolderName(email)
+}
+
+// isGenericSenderName checks if a display name is too generic to be useful
+func isGenericSenderName(name string) bool {
+	lower := strings.ToLower(name)
+	genericNames := []string{
+		"info", "support", "team", "admin", "contact", "hello",
+		"service", "customer", "help", "sales", "billing",
+	}
+	for _, g := range genericNames {
+		if lower == g {
+			return true
+		}
+	}
+	return false
+}
+
+// isLikelyPersonName checks if a local part looks like a person's name
+// (contains letters and possibly dots/underscores, not all numbers or generic)
+func isLikelyPersonName(localPart string) bool {
+	if len(localPart) < 2 {
+		return false
+	}
+
+	// Check if it's a noreply pattern
+	lower := strings.ToLower(localPart)
+	for _, pattern := range noReplyPatterns {
+		if strings.Contains(lower, pattern) {
+			return false
+		}
+	}
+
+	// Check if it looks like a name (has letters, possibly with dots)
+	hasLetter := false
+	hasDigit := false
+	for _, c := range localPart {
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' {
+			hasLetter = true
+		}
+		if c >= '0' && c <= '9' {
+			hasDigit = true
+		}
+	}
+
+	// If mostly digits, probably not a name
+	if hasDigit && !hasLetter {
+		return false
+	}
+
+	return hasLetter
 }
 
 // parseEmailDate extracts YYYY-MM-DD from email Date header

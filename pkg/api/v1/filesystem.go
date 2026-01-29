@@ -449,8 +449,18 @@ func (g *FilesystemGroup) listSources(c echo.Context, ctx context.Context, relPa
 				vf = vf.WithMetadata(types.MetaKeyGuidance, guidance)
 			}
 
+			// Add result_id for query result files (origin pointer for re-fetching)
+			if e.ResultId != "" {
+				vf = vf.WithMetadata("result_id", e.ResultId)
+				vf = vf.WithMetadata("query_path", types.SourcePath(relPath))
+			}
+
 			if e.Size > 0 {
 				vf = vf.WithSize(e.Size)
+			}
+			if e.Mtime > 0 {
+				t := time.Unix(e.Mtime, 0)
+				vf = vf.WithModifiedAt(t)
 			}
 
 			entries = append(entries, *vf)
@@ -551,8 +561,34 @@ func (g *FilesystemGroup) readSources(c echo.Context, ctx context.Context, relPa
 		return c.Blob(http.StatusOK, "application/json", data)
 	}
 
-	// Other source files would need gRPC context
-	return ErrorResponse(c, http.StatusNotImplemented, "source file reading requires workspace authentication")
+	// Use SourceService.Read for all other source files
+	if g.sourceService != nil {
+		resp, err := g.sourceService.Read(ctx, &pb.SourceReadRequest{
+			Path:   relPath,
+			Offset: offset,
+			Length: length,
+		})
+		if err != nil {
+			log.Error().Err(err).Str("path", relPath).Msg("source read failed")
+			return ErrorResponse(c, http.StatusInternalServerError, "failed to read source file")
+		}
+		if !resp.Ok {
+			if strings.Contains(resp.Error, "not found") {
+				return ErrorResponse(c, http.StatusNotFound, resp.Error)
+			}
+			return ErrorResponse(c, http.StatusBadRequest, resp.Error)
+		}
+
+		// Determine content type based on file extension
+		contentType := "text/plain; charset=utf-8"
+		if strings.HasSuffix(relPath, ".json") {
+			contentType = "application/json"
+		}
+
+		return c.Blob(http.StatusOK, contentType, resp.Data)
+	}
+
+	return ErrorResponse(c, http.StatusServiceUnavailable, "source service not available")
 }
 
 func (g *FilesystemGroup) buildSourceRootEntries(ctx context.Context) []types.VirtualFile {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -125,26 +126,18 @@ func (g *GDriveProvider) Search(ctx context.Context, pctx *sources.ProviderConte
 
 	token := pctx.Credentials.AccessToken
 
-	// Search for files
-	path := fmt.Sprintf("/files?q=%s&pageSize=%d&orderBy=modifiedTime desc&fields=files(id,name,mimeType,size,modifiedTime,webViewLink)",
-		url.QueryEscape(query), limit)
-
-	var result map[string]any
-	if err := g.request(ctx, token, path, &result); err != nil {
+	fields := "nextPageToken,incompleteSearch,files(id,name,mimeType,size,modifiedTime,webViewLink)"
+	files, err := g.listFilesPaged(ctx, token, query, limit, fields, true)
+	if err != nil {
 		return nil, err
 	}
-
-	files, _ := result["files"].([]any)
 	if len(files) == 0 {
 		return []sources.SearchResult{}, nil
 	}
 
 	results := make([]sources.SearchResult, 0, len(files))
 	for _, f := range files {
-		file, ok := f.(map[string]any)
-		if !ok {
-			continue
-		}
+		file := f
 
 		id, _ := file["id"].(string)
 		name, _ := file["name"].(string)
@@ -467,26 +460,15 @@ func (g *GDriveProvider) fetchStorage(ctx context.Context, token string) ([]byte
 }
 
 func (g *GDriveProvider) listFiles(ctx context.Context, token, query string, pageSize int) ([]map[string]any, error) {
-	path := fmt.Sprintf("/files?q=%s&pageSize=%d&orderBy=modifiedTime desc&fields=files(id,name,mimeType,size,modifiedTime,webViewLink,parents)",
-		url.QueryEscape(query), pageSize)
+	fields := "files(id,name,mimeType,size,modifiedTime,webViewLink,parents)"
+	path := g.buildFilesListPath(query, pageSize, "modifiedTime desc", fields, "", false)
 
-	var result map[string]any
+	var result driveFileListResponse
 	if err := g.request(ctx, token, path, &result); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("drive files.list failed (q=%q): %w", query, err)
 	}
 
-	files, ok := result["files"].([]any)
-	if !ok {
-		return nil, nil
-	}
-
-	fileList := make([]map[string]any, 0, len(files))
-	for _, f := range files {
-		if file, ok := f.(map[string]any); ok {
-			fileList = append(fileList, file)
-		}
-	}
-	return fileList, nil
+	return result.Files, nil
 }
 
 func (g *GDriveProvider) getFileMeta(ctx context.Context, token, fileId string) (map[string]any, error) {
@@ -554,7 +536,7 @@ func (g *GDriveProvider) downloadFile(ctx context.Context, token, fileId string,
 
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("drive API: %s - %s", resp.Status, string(body))
+		return nil, driveAPIError(resp.Status, resp.StatusCode, body)
 	}
 
 	// Read with limit
@@ -591,16 +573,7 @@ func (g *GDriveProvider) request(ctx context.Context, token, path string, result
 
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
-		var apiErr struct {
-			Error struct {
-				Message string `json:"message"`
-			} `json:"error"`
-		}
-		json.Unmarshal(body, &apiErr)
-		if apiErr.Error.Message != "" {
-			return fmt.Errorf("drive API: %s", apiErr.Error.Message)
-		}
-		return fmt.Errorf("drive API: %s", resp.Status)
+		return driveAPIError(resp.Status, resp.StatusCode, body)
 	}
 
 	return json.NewDecoder(resp.Body).Decode(result)
@@ -624,16 +597,11 @@ func (g *GDriveProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provide
 
 	token := pctx.Credentials.AccessToken
 
-	// Search for files
-	path := fmt.Sprintf("/files?q=%s&pageSize=%d&orderBy=modifiedTime desc&fields=files(id,name,mimeType,size,modifiedTime,createdTime,webViewLink)",
-		url.QueryEscape(spec.Query), limit)
-
-	var result map[string]any
-	if err := g.request(ctx, token, path, &result); err != nil {
+	fields := "nextPageToken,incompleteSearch,files(id,name,mimeType,size,modifiedTime,createdTime,webViewLink)"
+	files, err := g.listFilesPaged(ctx, token, spec.Query, limit, fields, true)
+	if err != nil {
 		return nil, err
 	}
-
-	files, _ := result["files"].([]any)
 	if len(files) == 0 {
 		return []sources.QueryResult{}, nil
 	}
@@ -645,13 +613,10 @@ func (g *GDriveProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provide
 
 	results := make([]sources.QueryResult, 0, len(files))
 	for _, f := range files {
-		file, ok := f.(map[string]any)
-		if !ok {
-			continue
-		}
+		file := f
 
 		id, _ := file["id"].(string)
-		name, _ := file["name"].(string)
+		fullName, _ := file["name"].(string)
 		mimeType, _ := file["mimeType"].(string)
 		sizeStr, _ := file["size"].(string)
 		modifiedTime, _ := file["modifiedTime"].(string)
@@ -677,31 +642,37 @@ func (g *GDriveProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provide
 			createdDate = t.Format("2006-01-02")
 		}
 
+		// Split name into basename + extension.
+		// NOTE: We store basename in metadata["name"] and extension in metadata["ext"] to avoid
+		// accidentally duplicating extensions when the filename format appends {id}.
+		baseName := fullName
+		nameExt := ""
+		if idx := strings.LastIndex(fullName, "."); idx > 0 {
+			baseName = fullName[:idx]
+			nameExt = fullName[idx:]
+		}
+
 		// Build metadata map
 		metadata := map[string]string{
 			"id":        id,
-			"name":      name,
+			"name":      baseName,
 			"mime_type": mimeType,
 			"date":      modDate,
 			"created":   createdDate,
 		}
 
 		// Determine extension based on mime type or existing extension
-		ext := ""
-		if idx := strings.LastIndex(name, "."); idx > 0 {
-			ext = name[idx:]
-		} else {
-			// Google Docs types
-			switch mimeType {
-			case "application/vnd.google-apps.document":
-				ext = ".txt"
-			case "application/vnd.google-apps.spreadsheet":
-				ext = ".csv"
-			case "application/vnd.google-apps.presentation":
-				ext = ".txt"
-			case "application/vnd.google-apps.folder":
-				ext = "" // folder, no extension
-			}
+		ext := nameExt
+		switch mimeType {
+		// Google Docs types: we export these to text/csv, so enforce the exported extension.
+		case "application/vnd.google-apps.document":
+			ext = ".txt"
+		case "application/vnd.google-apps.spreadsheet":
+			ext = ".csv"
+		case "application/vnd.google-apps.presentation":
+			ext = ".txt"
+		case "application/vnd.google-apps.folder":
+			ext = "" // folder, no extension
 		}
 		metadata["ext"] = ext
 
@@ -731,6 +702,8 @@ func (g *GDriveProvider) ReadResult(ctx context.Context, pctx *sources.ProviderC
 
 // FormatFilename generates a filename from metadata using a format template.
 // Supported placeholders: {id}, {name}, {date}, {created}, {mime_type}, {ext}
+// - {name} is the basename (no extension)
+// - {ext} is the extension (includes leading dot, e.g. ".pdf")
 // This implements the sources.QueryExecutor interface.
 func (g *GDriveProvider) FormatFilename(format string, metadata map[string]string) string {
 	if format == "" {
@@ -771,3 +744,108 @@ func (g *GDriveProvider) FormatFilename(format string, metadata map[string]strin
 
 // Compile-time interface check for QueryExecutor
 var _ sources.QueryExecutor = (*GDriveProvider)(nil)
+
+type driveFileListResponse struct {
+	Files            []map[string]any `json:"files"`
+	NextPageToken    string           `json:"nextPageToken"`
+	IncompleteSearch bool             `json:"incompleteSearch"`
+}
+
+func (g *GDriveProvider) buildFilesListPath(query string, pageSize int, orderBy, fields, pageToken string, includeAllDrives bool) string {
+	params := url.Values{}
+	if query != "" {
+		params.Set("q", query)
+	}
+	if pageSize > 0 {
+		params.Set("pageSize", strconv.Itoa(pageSize))
+	}
+	if orderBy != "" {
+		params.Set("orderBy", orderBy)
+	}
+	if fields != "" {
+		params.Set("fields", fields)
+	}
+	if pageToken != "" {
+		params.Set("pageToken", pageToken)
+	}
+
+	// Default Drive search space.
+	params.Set("spaces", "drive")
+
+	if includeAllDrives {
+		params.Set("corpora", "allDrives")
+		params.Set("includeItemsFromAllDrives", "true")
+		params.Set("supportsAllDrives", "true")
+	}
+
+	u := url.URL{
+		Path:     "/files",
+		RawQuery: params.Encode(),
+	}
+	return u.RequestURI()
+}
+
+func (g *GDriveProvider) listFilesPaged(ctx context.Context, token, query string, limit int, fields string, includeAllDrives bool) ([]map[string]any, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+
+	out := make([]map[string]any, 0, limit)
+	pageToken := ""
+	for len(out) < limit {
+		pageSize := limit - len(out)
+		if pageSize > 1000 {
+			pageSize = 1000
+		}
+
+		path := g.buildFilesListPath(query, pageSize, "modifiedTime desc", fields, pageToken, includeAllDrives)
+
+		var result driveFileListResponse
+		if err := g.request(ctx, token, path, &result); err != nil {
+			return nil, fmt.Errorf("drive files.list failed (q=%q, all_drives=%t): %w", query, includeAllDrives, err)
+		}
+
+		if len(result.Files) == 0 {
+			break
+		}
+		out = append(out, result.Files...)
+		if len(out) >= limit {
+			out = out[:limit]
+			break
+		}
+
+		if result.NextPageToken == "" {
+			break
+		}
+		pageToken = result.NextPageToken
+	}
+
+	return out, nil
+}
+
+func driveAPIError(status string, statusCode int, body []byte) error {
+	if msg := parseDriveAPIErrorMessage(body); msg != "" {
+		return fmt.Errorf("drive API: %s (HTTP %d)", msg, statusCode)
+	}
+
+	snippet := strings.TrimSpace(string(body))
+	if len(snippet) > 2048 {
+		snippet = snippet[:2048] + "..."
+	}
+	if snippet != "" {
+		return fmt.Errorf("drive API: %s - %s", status, snippet)
+	}
+	return fmt.Errorf("drive API: %s", status)
+}
+
+func parseDriveAPIErrorMessage(body []byte) string {
+	var apiErr struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &apiErr) == nil && apiErr.Error.Message != "" {
+		return apiErr.Error.Message
+	}
+	return ""
+}

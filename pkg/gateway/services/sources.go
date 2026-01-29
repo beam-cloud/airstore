@@ -794,7 +794,20 @@ func (s *SourceService) CreateSmartQuery(ctx context.Context, req *pb.CreateSmar
 // inferQuerySpec uses BAML to convert a folder name to a query spec
 func (s *SourceService) inferQuerySpec(ctx context.Context, integration, name, guidance string) (string, string, error) {
 	var guidancePtr *string
-	if guidance != "" {
+
+	// For time-relative guidance (e.g. "past week"), add a hidden UTC timestamp hint.
+	// IMPORTANT: We do not store this hint in the query's Guidance field; it's only passed to the LLM.
+	if integration == "gdrive" {
+		now := time.Now().UTC()
+		nowHint := fmt.Sprintf("Current time (UTC): %s\nCurrent date (UTC): %s", now.Format(time.RFC3339), now.Format("2006-01-02"))
+
+		g := strings.TrimSpace(guidance)
+		if g != "" {
+			g += "\n"
+		}
+		g += nowHint
+		guidancePtr = &g
+	} else if guidance != "" {
 		guidancePtr = &guidance
 	}
 

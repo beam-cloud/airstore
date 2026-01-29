@@ -189,6 +189,12 @@ func (c *GmailClient) ExtractPlainTextBody(msg map[string]any) string {
 	return ExtractPlainTextBody(msg)
 }
 
+// ExtractMessageBody extracts the best available text body from a Gmail message,
+// trying text/plain first, then falling back to text/html converted to plain text
+func (c *GmailClient) ExtractMessageBody(msg map[string]any) string {
+	return ExtractMessageBody(msg)
+}
+
 // DetectCategory determines the primary category for a message
 func (c *GmailClient) DetectCategory(labels []string) string {
 	return DetectCategory(labels)
@@ -201,59 +207,129 @@ func ExtractPlainTextBody(msg map[string]any) string {
 		return ""
 	}
 
-	// Check if body is in payload.body
+	// Try to get text/plain recursively
+	return extractMimePartRecursive(payload, "text/plain")
+}
+
+// ExtractMessageBody extracts the best available text body from a Gmail message,
+// trying text/plain first, then falling back to text/html converted to plain text
+func ExtractMessageBody(msg map[string]any) string {
+	payload, ok := msg["payload"].(map[string]any)
+	if !ok {
+		return ""
+	}
+
+	// Try text/plain first
+	if plainText := extractMimePartRecursive(payload, "text/plain"); plainText != "" {
+		return plainText
+	}
+
+	// Fall back to HTML converted to text
+	if htmlText := extractMimePartRecursive(payload, "text/html"); htmlText != "" {
+		return StripHTML(htmlText)
+	}
+
+	// Check if there's a body directly on the payload
 	if body, ok := payload["body"].(map[string]any); ok {
-		if data, ok := body["data"].(string); ok && data != "" {
-			decoded, _ := base64.URLEncoding.DecodeString(data)
-			return string(decoded)
+		mimeType, _ := payload["mimeType"].(string)
+		if decoded := decodeBodyData(body); decoded != "" {
+			if strings.HasPrefix(mimeType, "text/html") {
+				return StripHTML(decoded)
+			}
+			return decoded
 		}
 	}
 
-	// Check parts for text/plain
-	if parts, ok := payload["parts"].([]any); ok {
+	return ""
+}
+
+// extractMimePartRecursive recursively searches for a MIME part with the given type
+func extractMimePartRecursive(part map[string]any, targetMimeType string) string {
+	mimeType, _ := part["mimeType"].(string)
+
+	// Direct match
+	if mimeType == targetMimeType {
+		if body, ok := part["body"].(map[string]any); ok {
+			return decodeBodyData(body)
+		}
+	}
+
+	// Check for nested parts (multipart/*)
+	if parts, ok := part["parts"].([]any); ok {
+		// First pass: look for exact match at this level
 		for _, p := range parts {
-			part, ok := p.(map[string]any)
+			subPart, ok := p.(map[string]any)
 			if !ok {
 				continue
 			}
-			mimeType, _ := part["mimeType"].(string)
-			if mimeType == "text/plain" {
-				if body, ok := part["body"].(map[string]any); ok {
-					if data, ok := body["data"].(string); ok {
-						decoded, _ := base64.URLEncoding.DecodeString(data)
-						return string(decoded)
+			subMimeType, _ := subPart["mimeType"].(string)
+			if subMimeType == targetMimeType {
+				if body, ok := subPart["body"].(map[string]any); ok {
+					if decoded := decodeBodyData(body); decoded != "" {
+						return decoded
 					}
 				}
 			}
 		}
 
-		// Recursively check nested parts
+		// Second pass: recurse into multipart containers
 		for _, p := range parts {
-			part, ok := p.(map[string]any)
+			subPart, ok := p.(map[string]any)
 			if !ok {
 				continue
 			}
-			if nestedParts, ok := part["parts"].([]any); ok {
-				for _, np := range nestedParts {
-					nestedPart, ok := np.(map[string]any)
-					if !ok {
-						continue
-					}
-					mimeType, _ := nestedPart["mimeType"].(string)
-					if mimeType == "text/plain" {
-						if body, ok := nestedPart["body"].(map[string]any); ok {
-							if data, ok := body["data"].(string); ok {
-								decoded, _ := base64.URLEncoding.DecodeString(data)
-								return string(decoded)
-							}
-						}
-					}
+			subMimeType, _ := subPart["mimeType"].(string)
+			if strings.HasPrefix(subMimeType, "multipart/") {
+				if result := extractMimePartRecursive(subPart, targetMimeType); result != "" {
+					return result
+				}
+			}
+		}
+
+		// Third pass: recurse into any part that has nested parts
+		for _, p := range parts {
+			subPart, ok := p.(map[string]any)
+			if !ok {
+				continue
+			}
+			if _, hasParts := subPart["parts"]; hasParts {
+				if result := extractMimePartRecursive(subPart, targetMimeType); result != "" {
+					return result
 				}
 			}
 		}
 	}
 
 	return ""
+}
+
+// decodeBodyData decodes the base64url-encoded body data from a Gmail message part
+func decodeBodyData(body map[string]any) string {
+	data, ok := body["data"].(string)
+	if !ok || data == "" {
+		return ""
+	}
+
+	// Gmail uses URL-safe base64 encoding, often without padding
+	// Try RawURLEncoding first (no padding), then URLEncoding (with padding)
+	decoded, err := base64.RawURLEncoding.DecodeString(data)
+	if err != nil {
+		// Try with standard URL encoding (has padding)
+		decoded, err = base64.URLEncoding.DecodeString(data)
+		if err != nil {
+			// Try adding padding and decode again
+			padded := data
+			switch len(data) % 4 {
+			case 2:
+				padded += "=="
+			case 3:
+				padded += "="
+			}
+			decoded, _ = base64.URLEncoding.DecodeString(padded)
+		}
+	}
+
+	return string(decoded)
 }
 
 // DetectCategory determines the primary category for a message based on labels
@@ -273,13 +349,22 @@ func DetectCategory(labels []string) string {
 	return "inbox"
 }
 
+// noReplyPatterns are common patterns for automated/noreply addresses
+var noReplyPatterns = []string{
+	"noreply", "no-reply", "no_reply", "donotreply", "do-not-reply",
+	"notifications", "notification", "mailer", "mailer-daemon",
+	"postmaster", "bounce", "auto", "automated", "system",
+}
+
 // ExtractSenderName extracts a clean sender name from a From header
+// "noreply@calendly.com" -> "Calendly"
+// "KAYAK <kayak@msg.kayak.com>" -> "KAYAK"
 func ExtractSenderName(from string) string {
-	// Try to extract name before email
+	// Try to extract name from "Name <email>" format
 	if idx := strings.Index(from, "<"); idx > 0 {
 		name := strings.TrimSpace(from[:idx])
-		name = strings.Trim(name, "\"")
-		if name != "" {
+		name = strings.Trim(name, "\"'")
+		if name != "" && !isGenericSenderName(name) {
 			return SanitizeFolderName(name)
 		}
 	}
@@ -292,13 +377,96 @@ func ExtractSenderName(from string) string {
 			email = from[idx+1 : idx+end]
 		}
 	}
+	email = strings.TrimSpace(email)
 
-	// Use username part of email
-	if idx := strings.Index(email, "@"); idx > 0 {
-		return SanitizeFolderName(email[:idx])
+	// Parse the email address
+	if atIdx := strings.Index(email, "@"); atIdx > 0 {
+		localPart := email[:atIdx]
+		domain := email[atIdx+1:]
+
+		// Check if local part is a noreply/automated pattern
+		localLower := strings.ToLower(localPart)
+		isNoReply := false
+		for _, pattern := range noReplyPatterns {
+			if strings.Contains(localLower, pattern) {
+				isNoReply = true
+				break
+			}
+		}
+
+		// If it's a noreply address, use the domain name
+		if isNoReply {
+			parts := strings.Split(domain, ".")
+			if len(parts) >= 2 {
+				name := parts[len(parts)-2]
+				if len(name) > 0 {
+					return strings.ToUpper(name[:1]) + name[1:]
+				}
+			}
+		}
+
+		// Otherwise, try using the local part if it looks like a name
+		if isLikelyPersonName(localPart) {
+			return SanitizeFolderName(localPart)
+		}
+
+		// Fall back to domain name
+		parts := strings.Split(domain, ".")
+		if len(parts) >= 2 {
+			name := parts[len(parts)-2]
+			if len(name) > 0 {
+				return strings.ToUpper(name[:1]) + name[1:]
+			}
+		}
 	}
 
 	return SanitizeFolderName(email)
+}
+
+// isGenericSenderName checks if a display name is too generic to be useful
+func isGenericSenderName(name string) bool {
+	lower := strings.ToLower(name)
+	genericNames := []string{
+		"info", "support", "team", "admin", "contact", "hello",
+		"service", "customer", "help", "sales", "billing",
+	}
+	for _, g := range genericNames {
+		if lower == g {
+			return true
+		}
+	}
+	return false
+}
+
+// isLikelyPersonName checks if a local part looks like a person's name
+func isLikelyPersonName(localPart string) bool {
+	if len(localPart) < 2 {
+		return false
+	}
+
+	lower := strings.ToLower(localPart)
+	for _, pattern := range noReplyPatterns {
+		if strings.Contains(lower, pattern) {
+			return false
+		}
+	}
+
+	hasLetter := false
+	hasDigit := false
+	for _, c := range localPart {
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' {
+			hasLetter = true
+		}
+		if c >= '0' && c <= '9' {
+			hasDigit = true
+		}
+	}
+
+	if hasDigit && !hasLetter {
+		return false
+	}
+
+	return hasLetter
 }
 
 // FormatSubjectFolder creates a folder name from subject, date, and ID
