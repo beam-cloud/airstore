@@ -73,7 +73,7 @@ func TestSourcesVNode_Getattr_QueryMetaFileUsesQueryUpdatedAt(t *testing.T) {
 		t.Fatalf("expected query to be cached for %q (found=%v, cached_nil=%v, cache_len=%d)", queryPath, found, cached == nil, len(v.queries))
 	}
 
-	info, err := v.Getattr(queryPath + "/.query")
+	info, err := v.Getattr(queryPath + "/.query.as")
 	if err != nil {
 		t.Fatalf("Getattr returned error: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestSourcesVNode_Getattr_QueryMetaFileUsesQueryUpdatedAt(t *testing.T) {
 		t.Fatalf("Getattr returned nil info")
 	}
 	if got := info.Mtime.Unix(); got != updated.Unix() {
-		t.Fatalf("expected .query mtime=%d, got %d", updated.Unix(), got)
+		t.Fatalf("expected .query.as mtime=%d, got %d", updated.Unix(), got)
 	}
 }
 

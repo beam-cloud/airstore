@@ -1,6 +1,9 @@
 package types
 
-import "time"
+import (
+	"path"
+	"time"
+)
 
 // VirtualFileType represents the type of virtual file in the filesystem.
 // This determines UI behavior, available operations, and icon presentation.
@@ -20,6 +23,62 @@ const (
 	// VFTypeAgent VirtualFileType = "agent"
 	// VFTypeOutput VirtualFileType = "output"
 )
+
+// Root directory paths for the virtual filesystem
+const (
+	// PathRoot is the filesystem root
+	PathRoot = "/"
+	// PathContext is the context files root directory
+	PathContext = "/context"
+	// PathSources is the sources/integrations root directory
+	PathSources = "/sources"
+	// PathTools is the tools root directory
+	PathTools = "/tools"
+)
+
+// Root directory names (without leading slash)
+const (
+	DirNameContext = "context"
+	DirNameSources = "sources"
+	DirNameTools   = "tools"
+)
+
+// Metadata keys for VirtualFile.Metadata
+const (
+	MetaKeyProvider   = "provider"
+	MetaKeyExternalID = "external_id"
+	MetaKeyGuidance   = "guidance"
+	MetaKeyHidden     = "hidden"
+)
+
+// JoinPath safely joins path segments, ensuring clean paths
+func JoinPath(segments ...string) string {
+	return path.Clean(path.Join(segments...))
+}
+
+// SourcePath returns a path within the sources directory
+func SourcePath(subpath string) string {
+	if subpath == "" {
+		return PathSources
+	}
+	return JoinPath(PathSources, subpath)
+}
+
+// ContextPath returns a path within the context directory
+func ContextPath(subpath string) string {
+	if subpath == "" {
+		return PathContext
+	}
+	return JoinPath(PathContext, subpath)
+}
+
+// ToolsPath returns a path within the tools directory
+func ToolsPath(subpath string) string {
+	if subpath == "" {
+		return PathTools
+	}
+	return JoinPath(PathTools, subpath)
+}
 
 // VirtualFile represents a file or folder in the virtual filesystem.
 // It contains base metadata plus a Type field that determines available

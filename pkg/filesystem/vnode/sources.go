@@ -8,7 +8,7 @@
 //
 //	mkdir /sources/gmail/unread-emails    <- creates query via LLM inference
 //	ls /sources/gmail/unread-emails/      <- executes query, shows results
-//	cat /sources/gmail/unread-emails/.query <- shows query definition
+//	cat /sources/gmail/unread-emails/.query.as <- shows query definition
 //	cat /sources/gmail/unread-emails/msg.txt <- reads materialized result
 //
 // Structure:
@@ -16,7 +16,7 @@
 //	/sources/                            <- lists available integrations
 //	/sources/gmail/                      <- lists user-created queries only
 //	/sources/gmail/unread-emails/        <- query folder (mkdir creates)
-//	  .query                             <- query definition (JSON)
+//	  .query.as                          <- query definition (JSON)
 //	  2026-01-28_invoice_abc.txt         <- materialized search results
 package vnode
 
@@ -41,6 +41,8 @@ import (
 const sourcesTimeout = 30 * time.Second
 const resultsCacheTTL = 30 * time.Second // Cache query results to avoid repeated API calls
 
+const queryMetaName = ".query.as"
+
 // cachedQueryResult holds cached query execution results
 type cachedQueryResult struct {
 	entries   []*pb.SourceDirEntry
@@ -55,7 +57,7 @@ type cachedQuery struct {
 
 // SourcesVNode handles /sources/ - both native content and smart queries.
 type SourcesVNode struct {
-	ReadOnlyBase
+	SmartQueryBase
 	client pb.SourceServiceClient
 	token  string
 
@@ -129,8 +131,17 @@ func (v *SourcesVNode) Getattr(path string) (*FileInfo, error) {
 		return NewDirInfo(PathIno(path)), nil
 	}
 
-	// Is this a .query file inside a smart query folder?
-	if filepath.Base(path) == ".query" {
+	// status.json at integration root
+	if subpath == "status.json" {
+		resp, err := v.client.Stat(ctx, &pb.SourceStatRequest{Path: integration + "/status.json"})
+		if err != nil || resp == nil || !resp.Ok || resp.Info == nil {
+			return nil, fs.ErrNotExist
+		}
+		return v.protoToFileInfo(path, resp.Info), nil
+	}
+
+	// Is this a .query.as file inside a smart query folder?
+	if filepath.Base(path) == queryMetaName {
 		queryPath := filepath.Dir(path)
 		if q := v.getQuery(ctx, queryPath); q != nil {
 			data, _ := json.MarshalIndent(q, "", "  ")
@@ -143,12 +154,12 @@ func (v *SourcesVNode) Getattr(path string) (*FileInfo, error) {
 		return nil, fs.ErrNotExist
 	}
 
-	// Is this a .{name}.query file (sibling metadata for single-file queries)?
-	// Pattern: .all-receipts.json.query -> query for all-receipts.json
+	// Is this a .{name}.query.as file (sibling metadata for single-file queries)?
+	// Pattern: .all-receipts.json.query.as -> query for all-receipts.json
 	base := filepath.Base(path)
-	if strings.HasPrefix(base, ".") && strings.HasSuffix(base, ".query") {
-		// Extract the query filename: .all-receipts.json.query -> all-receipts.json
-		queryFileName := strings.TrimPrefix(strings.TrimSuffix(base, ".query"), ".")
+	if strings.HasPrefix(base, ".") && strings.HasSuffix(base, queryMetaName) {
+		// Extract the query filename: .all-receipts.json.query.as -> all-receipts.json
+		queryFileName := strings.TrimPrefix(strings.TrimSuffix(base, queryMetaName), ".")
 		queryPath := filepath.Join(filepath.Dir(path), queryFileName)
 		if q := v.getQuery(ctx, queryPath); q != nil && q.OutputFormat == types.SmartQueryOutputFile {
 			data, _ := json.MarshalIndent(q, "", "  ")
@@ -242,7 +253,7 @@ func (v *SourcesVNode) Readdir(path string) ([]DirEntry, error) {
 		log.Debug().Str("path", path).Msg("Readdir: no query found for path")
 	}
 
-	// /sources/{integration} - list ONLY filesystem queries
+	// /sources/{integration} - list status.json + smart queries
 	if subpath == "" {
 		log.Debug().Str("integration", integration).Msg("Readdir: listing integration queries")
 		return v.listIntegration(ctx, path, integration)
@@ -253,45 +264,25 @@ func (v *SourcesVNode) Readdir(path string) ([]DirEntry, error) {
 	return nil, fs.ErrNotExist
 }
 
-// listIntegration returns ONLY filesystem queries for an integration.
-// Native content (README.md, messages/, labels/, etc.) is no longer shown.
-// Users create queries via mkdir/touch to define what content they want to see.
+// listIntegration returns integration root entries: status.json + smart queries.
+// Native provider content (messages/, labels/, etc.) is not exposed directly.
 func (v *SourcesVNode) listIntegration(ctx context.Context, path, integration string) ([]DirEntry, error) {
-	var entries []DirEntry
-
-	// List filesystem queries ONLY - no native content
-	resp, _ := v.client.ListSmartQueries(ctx, &pb.ListSmartQueriesRequest{ParentPath: path})
-	if resp != nil && resp.Ok {
-		for _, q := range resp.Queries {
-			if q.OutputFormat == "file" {
-				// Single-file query: add the file and its .query metadata sibling
-				// e.g., all-receipts.json and .all-receipts.json.query
-				filename := q.Name
-				if q.FileExt != "" {
-					filename = q.Name + q.FileExt
-				}
-				entries = append(entries, DirEntry{
-					Name: filename,
-					Mode: syscall.S_IFREG | 0644,
-					Ino:  PathIno(q.Path),
-				})
-				// Add the hidden .query metadata file
-				entries = append(entries, DirEntry{
-					Name: "." + filename + ".query",
-					Mode: syscall.S_IFREG | 0444,
-					Ino:  PathIno(q.Path + ".query"),
-				})
-			} else {
-				// Folder query
-				entries = append(entries, DirEntry{
-					Name: q.Name,
-					Mode: syscall.S_IFDIR | 0755,
-					Ino:  PathIno(q.Path),
-				})
-			}
-		}
+	// Use gateway ReadDir so we include status.json and query entries consistently
+	resp, err := v.client.ReadDir(ctx, &pb.SourceReadDirRequest{Path: integration})
+	if err != nil || resp == nil || !resp.Ok {
+		return nil, nil
 	}
 
+	entries := make([]DirEntry, 0, len(resp.Entries))
+	for _, e := range resp.Entries {
+		entries = append(entries, DirEntry{
+			Name:  e.Name,
+			Mode:  e.Mode,
+			Ino:   PathIno(path + "/" + e.Name),
+			Size:  e.Size,
+			Mtime: e.Mtime,
+		})
+	}
 	return entries, nil
 }
 
@@ -317,8 +308,16 @@ func (v *SourcesVNode) listIntegrations(ctx context.Context) ([]DirEntry, error)
 func (v *SourcesVNode) executeQueryAsDir(ctx context.Context, q *types.SmartQuery) ([]DirEntry, error) {
 	log.Debug().Str("path", q.Path).Msg("executeQueryAsDir: starting")
 
-	// Always include the .query file
-	entries := []DirEntry{{Name: ".query", Mode: syscall.S_IFREG | 0444, Ino: PathIno(q.Path + "/.query"), Size: 0, Mtime: 0}}
+	// Always include the .query.as file
+	queryMeta, _ := json.MarshalIndent(q, "", "  ")
+	queryMtime := int64(smartQueryMtime(q).Unix())
+	entries := []DirEntry{{
+		Name:  queryMetaName,
+		Mode:  syscall.S_IFREG | 0444,
+		Ino:   PathIno(q.Path + "/" + queryMetaName),
+		Size:  int64(len(queryMeta)),
+		Mtime: queryMtime,
+	}}
 
 	// Check cache first
 	log.Debug().Str("path", q.Path).Msg("executeQueryAsDir: checking cache")
@@ -343,7 +342,7 @@ func (v *SourcesVNode) executeQueryAsDir(ctx context.Context, q *types.SmartQuer
 	log.Debug().Str("path", q.Path).Err(err).Msg("executeQueryAsDir: RPC returned")
 	if err != nil {
 		log.Warn().Err(err).Str("path", q.Path).Msg("executeQueryAsDir: query execution failed")
-		return entries, nil // Return just .query on failure
+		return entries, nil // Return just .query.as on failure
 	}
 	if !resp.Ok {
 		log.Warn().Str("path", q.Path).Str("error", resp.Error).Msg("executeQueryAsDir: query execution returned not ok")
@@ -377,8 +376,21 @@ func (v *SourcesVNode) Read(path string, buf []byte, off int64, fh FileHandle) (
 	ctx, cancel := v.ctx()
 	defer cancel()
 
-	// .query file inside a folder - return query definition
-	if filepath.Base(path) == ".query" {
+	// status.json at integration root
+	if integration, subpath := v.parsePath(path); integration != "" && subpath == "status.json" {
+		resp, err := v.client.Read(ctx, &pb.SourceReadRequest{
+			Path:   integration + "/status.json",
+			Offset: off,
+			Length: int64(len(buf)),
+		})
+		if err != nil || resp == nil || !resp.Ok {
+			return 0, fs.ErrNotExist
+		}
+		return copy(buf, resp.Data), nil
+	}
+
+	// .query.as file inside a folder - return query definition
+	if filepath.Base(path) == queryMetaName {
 		queryPath := filepath.Dir(path)
 		if q := v.getQuery(ctx, queryPath); q != nil {
 			data, _ := json.MarshalIndent(q, "", "  ")
@@ -390,11 +402,11 @@ func (v *SourcesVNode) Read(path string, buf []byte, off int64, fh FileHandle) (
 		return 0, fs.ErrNotExist
 	}
 
-	// .{name}.query file (sibling metadata for single-file queries)
+	// .{name}.query.as file (sibling metadata for single-file queries)
 	base := filepath.Base(path)
-	if strings.HasPrefix(base, ".") && strings.HasSuffix(base, ".query") {
-		// Extract the query filename: .all-receipts.json.query -> all-receipts.json
-		queryFileName := strings.TrimPrefix(strings.TrimSuffix(base, ".query"), ".")
+	if strings.HasPrefix(base, ".") && strings.HasSuffix(base, queryMetaName) {
+		// Extract the query filename: .all-receipts.json.query.as -> all-receipts.json
+		queryFileName := strings.TrimPrefix(strings.TrimSuffix(base, queryMetaName), ".")
 		queryPath := filepath.Join(filepath.Dir(path), queryFileName)
 		if q := v.getQuery(ctx, queryPath); q != nil && q.OutputFormat == types.SmartQueryOutputFile {
 			data, _ := json.MarshalIndent(q, "", "  ")
@@ -459,13 +471,16 @@ func isSystemFile(name string) bool {
 
 // Mkdir creates a smart query folder.
 func (v *SourcesVNode) Mkdir(path string, mode uint32) error {
+	path = filepath.Clean(path)
 	integration, subpath := v.parsePath(path)
 	if integration == "" || subpath == "" || strings.Contains(subpath, "/") {
+		log.Debug().Str("path", path).Str("integration", integration).Str("subpath", subpath).Msg("mkdir denied: invalid path")
 		return syscall.EPERM
 	}
 
 	// Ignore macOS system files
 	if isSystemFile(subpath) {
+		log.Debug().Str("path", path).Str("subpath", subpath).Msg("mkdir ignored: system file")
 		return syscall.EPERM
 	}
 
@@ -490,6 +505,7 @@ func (v *SourcesVNode) Mkdir(path string, mode uint32) error {
 
 // Create creates a smart query file.
 func (v *SourcesVNode) Create(path string, flags int, mode uint32) (FileHandle, error) {
+	path = filepath.Clean(path)
 	integration, subpath := v.parsePath(path)
 	if integration == "" || subpath == "" || strings.Contains(subpath, "/") {
 		return 0, syscall.EPERM

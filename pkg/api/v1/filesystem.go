@@ -63,6 +63,12 @@ func (g *FilesystemGroup) registerRoutes() {
 	g.routerGroup.GET("/tools", g.ListToolSettings)
 	g.routerGroup.GET("/tools/:tool_name", g.GetToolSetting)
 	g.routerGroup.PUT("/tools/:tool_name", g.UpdateToolSetting)
+
+	// Smart query endpoints
+	g.routerGroup.POST("/queries", g.CreateQuery)
+	g.routerGroup.GET("/queries", g.GetQuery)           // ?path=...
+	g.routerGroup.PUT("/queries/:id", g.UpdateQuery)    // :id = external_id
+	g.routerGroup.DELETE("/queries/:id", g.DeleteQuery) // :id = external_id
 }
 
 // List returns directory contents as VirtualFile entries
@@ -187,11 +193,11 @@ func (g *FilesystemGroup) Tree(c echo.Context) error {
 
 func (g *FilesystemGroup) listRootDirectories(ctx context.Context) []types.VirtualFile {
 	entries := []types.VirtualFile{
-		*types.NewRootFolder("context", "/context").
+		*types.NewRootFolder(types.DirNameContext, types.PathContext).
 			WithMetadata("description", "Workspace context files"),
-		*types.NewRootFolder("sources", "/sources").
+		*types.NewRootFolder(types.DirNameSources, types.PathSources).
 			WithMetadata("description", "Connected integrations"),
-		*types.NewRootFolder("tools", "/tools").
+		*types.NewRootFolder(types.DirNameTools, types.PathTools).
 			WithMetadata("description", "Available tools"),
 	}
 
@@ -231,7 +237,7 @@ func (g *FilesystemGroup) listContext(c echo.Context, ctx context.Context, relPa
 	}
 
 	return SuccessResponse(c, types.VirtualFileListResponse{
-		Path:    "/context/" + relPath,
+		Path:    types.ContextPath(relPath),
 		Entries: entries,
 	})
 }
@@ -243,7 +249,7 @@ func (g *FilesystemGroup) statContext(c echo.Context, ctx context.Context, fullP
 
 	// Root of context
 	if relPath == "" {
-		return SuccessResponse(c, types.NewRootFolder("context", "/context").
+		return SuccessResponse(c, types.NewRootFolder(types.DirNameContext, types.PathContext).
 			WithMetadata("description", "Workspace context files"))
 	}
 
@@ -310,7 +316,7 @@ func (g *FilesystemGroup) treeContext(c echo.Context, ctx context.Context, relPa
 
 	entries := make([]types.VirtualFile, 0, len(resp.Entries))
 	for _, e := range resp.Entries {
-		fullPath := "/context/" + e.Path
+		fullPath := types.ContextPath(e.Path)
 		isDir := e.Mode&uint32(syscall.S_IFDIR) != 0
 
 		vf := types.NewVirtualFile(hashPath(fullPath), pathName(e.Path), fullPath, types.VFTypeContext).
@@ -329,7 +335,7 @@ func (g *FilesystemGroup) treeContext(c echo.Context, ctx context.Context, relPa
 	}
 
 	result := types.VirtualFileTreeResponse{
-		Path:    "/context/" + relPath,
+		Path:    types.ContextPath(relPath),
 		Entries: entries,
 	}
 
@@ -350,11 +356,12 @@ func (g *FilesystemGroup) treeContext(c echo.Context, ctx context.Context, relPa
 }
 
 func (g *FilesystemGroup) contextEntryToVirtualFile(e *pb.ContextDirEntry, parentPath string) *types.VirtualFile {
-	fullPath := "/context"
+	var fullPath string
 	if parentPath != "" {
-		fullPath += "/" + parentPath
+		fullPath = types.ContextPath(types.JoinPath(parentPath, e.Name))
+	} else {
+		fullPath = types.ContextPath(e.Name)
 	}
-	fullPath += "/" + e.Name
 
 	vf := types.NewVirtualFile(hashPath(fullPath), e.Name, fullPath, types.VFTypeContext).
 		WithFolder(e.IsDir).
@@ -380,7 +387,7 @@ func (g *FilesystemGroup) listSources(c echo.Context, ctx context.Context, relPa
 	if relPath == "" {
 		entries := g.buildSourceRootEntries(ctx)
 		return SuccessResponse(c, types.VirtualFileListResponse{
-			Path:    "/sources",
+			Path:    types.PathSources,
 			Entries: entries,
 		})
 	}
@@ -398,30 +405,49 @@ func (g *FilesystemGroup) listSources(c echo.Context, ctx context.Context, relPa
 			log.Warn().Str("error", resp.Error).Str("path", relPath).Msg("source readdir returned error")
 			// Return empty list rather than error for better UX
 			return SuccessResponse(c, types.VirtualFileListResponse{
-				Path:    "/sources/" + relPath,
+				Path:    types.SourcePath(relPath),
 				Entries: []types.VirtualFile{},
 			})
 		}
 
-		// Convert protobuf entries to VirtualFile
+		// Build a map of query paths to external_ids for smart queries
+		// This allows us to include the external_id in VirtualFile metadata
+		queryExternalIds := make(map[string]string)
+		queryGuidance := make(map[string]string)
 		integration, _ := splitFirstPath(relPath)
+		parentPath := types.SourcePath(relPath)
+		if relPath == integration {
+			// Listing integration root - fetch all smart queries
+			queriesResp, err := g.sourceService.ListSmartQueries(ctx, &pb.ListSmartQueriesRequest{
+				ParentPath: parentPath,
+			})
+			if err == nil && queriesResp.Ok {
+				for _, q := range queriesResp.Queries {
+					queryExternalIds[q.Path] = q.ExternalId
+					queryGuidance[q.Path] = q.Guidance
+				}
+			}
+		}
+
+		// Convert protobuf entries to VirtualFile
 		entries := make([]types.VirtualFile, 0, len(resp.Entries))
 		for _, e := range resp.Entries {
-			entryPath := "/sources/" + relPath
-			if relPath != "" {
-				entryPath = "/sources/" + relPath + "/" + e.Name
-			} else {
-				entryPath = "/sources/" + e.Name
-			}
-			// Clean up double slashes
-			entryPath = cleanPath(entryPath)
+			entryPath := types.SourcePath(types.JoinPath(relPath, e.Name))
 
 			vf := types.NewVirtualFile(
 				hashPath(entryPath),
 				e.Name,
 				entryPath,
 				types.VFTypeSource,
-			).WithFolder(e.IsDir).WithReadOnly(true).WithMetadata("provider", integration)
+			).WithFolder(e.IsDir).WithReadOnly(true).WithMetadata(types.MetaKeyProvider, integration)
+
+			// Add external_id and guidance if this is a smart query
+			if extId, ok := queryExternalIds[entryPath]; ok {
+				vf = vf.WithMetadata(types.MetaKeyExternalID, extId)
+			}
+			if guidance, ok := queryGuidance[entryPath]; ok {
+				vf = vf.WithMetadata(types.MetaKeyGuidance, guidance)
+			}
 
 			if e.Size > 0 {
 				vf = vf.WithSize(e.Size)
@@ -431,7 +457,7 @@ func (g *FilesystemGroup) listSources(c echo.Context, ctx context.Context, relPa
 		}
 
 		return SuccessResponse(c, types.VirtualFileListResponse{
-			Path:    "/sources/" + relPath,
+			Path:    types.SourcePath(relPath),
 			Entries: entries,
 		})
 	}
@@ -441,23 +467,24 @@ func (g *FilesystemGroup) listSources(c echo.Context, ctx context.Context, relPa
 
 	// Integration root
 	if subPath == "" {
+		statusPath := types.SourcePath(types.JoinPath(integration, "status.json"))
 		entries := []types.VirtualFile{
 			*types.NewVirtualFile(
-				hashPath("/sources/"+integration+"/status.json"),
+				hashPath(statusPath),
 				"status.json",
-				"/sources/"+integration+"/status.json",
+				statusPath,
 				types.VFTypeSource,
-			).WithFolder(false).WithReadOnly(true).WithMetadata("provider", integration),
+			).WithFolder(false).WithReadOnly(true).WithMetadata(types.MetaKeyProvider, integration),
 		}
 		return SuccessResponse(c, types.VirtualFileListResponse{
-			Path:    "/sources/" + integration,
+			Path:    types.SourcePath(integration),
 			Entries: entries,
 		})
 	}
 
 	// Deep paths - return empty
 	return SuccessResponse(c, types.VirtualFileListResponse{
-		Path:    "/sources/" + relPath,
+		Path:    types.SourcePath(relPath),
 		Entries: []types.VirtualFile{},
 	})
 }
@@ -465,7 +492,7 @@ func (g *FilesystemGroup) listSources(c echo.Context, ctx context.Context, relPa
 func (g *FilesystemGroup) statSources(c echo.Context, ctx context.Context, fullPath, relPath string) error {
 	// Root /sources
 	if relPath == "" {
-		return SuccessResponse(c, types.NewRootFolder("sources", "/sources").
+		return SuccessResponse(c, types.NewRootFolder(types.DirNameSources, types.PathSources).
 			WithMetadata("description", "Connected integrations").
 			WithChildCount(len(g.sourceRegistry.List())))
 	}
@@ -484,7 +511,7 @@ func (g *FilesystemGroup) statSources(c echo.Context, ctx context.Context, fullP
 			integration,
 			fullPath,
 			types.VFTypeSource,
-		).WithFolder(true).WithReadOnly(true).WithMetadata("provider", integration)
+		).WithFolder(true).WithReadOnly(true).WithMetadata(types.MetaKeyProvider, integration)
 		return SuccessResponse(c, vf)
 	}
 
@@ -495,7 +522,7 @@ func (g *FilesystemGroup) statSources(c echo.Context, ctx context.Context, fullP
 			"status.json",
 			fullPath,
 			types.VFTypeSource,
-		).WithFolder(false).WithReadOnly(true).WithMetadata("provider", integration)
+		).WithFolder(false).WithReadOnly(true).WithMetadata(types.MetaKeyProvider, integration)
 		return SuccessResponse(c, vf)
 	}
 
@@ -505,7 +532,7 @@ func (g *FilesystemGroup) statSources(c echo.Context, ctx context.Context, fullP
 		pathName(subPath),
 		fullPath,
 		types.VFTypeSource,
-	).WithReadOnly(true).WithMetadata("provider", integration)
+	).WithReadOnly(true).WithMetadata(types.MetaKeyProvider, integration)
 	return SuccessResponse(c, vf)
 }
 
@@ -537,12 +564,13 @@ func (g *FilesystemGroup) buildSourceRootEntries(ctx context.Context) []types.Vi
 	entries := make([]types.VirtualFile, 0, len(integrations))
 
 	for _, name := range integrations {
+		entryPath := types.SourcePath(name)
 		vf := types.NewVirtualFile(
-			hashPath("/sources/"+name),
+			hashPath(entryPath),
 			name,
-			"/sources/"+name,
+			entryPath,
 			types.VFTypeSource,
-		).WithFolder(true).WithReadOnly(true).WithMetadata("provider", name)
+		).WithFolder(true).WithReadOnly(true).WithMetadata(types.MetaKeyProvider, name)
 		entries = append(entries, *vf)
 	}
 
@@ -556,7 +584,7 @@ func (g *FilesystemGroup) buildSourceRootEntries(ctx context.Context) []types.Vi
 func (g *FilesystemGroup) listTools(c echo.Context, ctx context.Context, showHidden bool) error {
 	entries := g.buildToolEntries(ctx, showHidden)
 	return SuccessResponse(c, types.VirtualFileListResponse{
-		Path:    "/tools",
+		Path:    types.PathTools,
 		Entries: entries,
 	})
 }
@@ -589,7 +617,7 @@ func (g *FilesystemGroup) statTools(c echo.Context, ctx context.Context, fullPat
 				toolCount++
 			}
 		}
-		return SuccessResponse(c, types.NewRootFolder("tools", "/tools").
+		return SuccessResponse(c, types.NewRootFolder(types.DirNameTools, types.PathTools).
 			WithMetadata("description", "Available tools").
 			WithChildCount(toolCount))
 	}
@@ -660,16 +688,17 @@ func (g *FilesystemGroup) buildToolEntries(ctx context.Context, showHidden bool)
 			continue
 		}
 
+		entryPath := types.ToolsPath(name)
 		vf := types.NewVirtualFile(
 			"tool-"+name,
 			name,
-			"/tools/"+name,
+			entryPath,
 			types.VFTypeTool,
 		).WithFolder(false).WithReadOnly(true).
 			WithMetadata("description", provider.Help()).
 			WithMetadata("name", provider.Name()).
 			WithMetadata("enabled", !isDisabled).
-			WithMetadata("hidden", isDisabled)
+			WithMetadata(types.MetaKeyHidden, isDisabled)
 
 		entries = append(entries, *vf)
 	}
@@ -812,6 +841,198 @@ func (g *FilesystemGroup) UpdateToolSetting(c echo.Context) error {
 		Description: provider.Help(),
 		Enabled:     req.Enabled,
 	})
+}
+
+// CreateQueryRequest represents a request to create a smart query
+type CreateQueryRequest struct {
+	Integration  string `json:"integration"`   // e.g., "gmail", "gdrive"
+	Name         string `json:"name"`          // Folder/file name
+	Guidance     string `json:"guidance"`      // Optional user guidance for LLM
+	OutputFormat string `json:"output_format"` // "folder" or "file"
+	FileExt      string `json:"file_ext"`      // For files: ".json", ".md"
+}
+
+// UpdateQueryRequest represents a request to update a smart query
+type UpdateQueryRequest struct {
+	Name     string `json:"name"`     // New name (optional)
+	Guidance string `json:"guidance"` // New guidance (optional)
+}
+
+// SmartQueryResponse represents a smart query in API responses
+type SmartQueryResponse struct {
+	ExternalID   string `json:"external_id"`
+	Integration  string `json:"integration"`
+	Path         string `json:"path"`
+	Name         string `json:"name"`
+	QuerySpec    string `json:"query_spec"`
+	Guidance     string `json:"guidance"`
+	OutputFormat string `json:"output_format"`
+	FileExt      string `json:"file_ext"`
+	CacheTTL     int    `json:"cache_ttl"`
+	CreatedAt    int64  `json:"created_at"`
+	UpdatedAt    int64  `json:"updated_at"`
+}
+
+// CreateQuery creates a new smart query via LLM inference
+func (g *FilesystemGroup) CreateQuery(c echo.Context) error {
+	ctx := c.Request().Context()
+	logRequest(c, "create_query")
+
+	if g.sourceService == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "source service not available")
+	}
+
+	var req CreateQueryRequest
+	if err := c.Bind(&req); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
+	}
+
+	if req.Integration == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "integration is required")
+	}
+	if req.Name == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "name is required")
+	}
+	if req.OutputFormat == "" {
+		req.OutputFormat = "folder"
+	}
+
+	resp, err := g.sourceService.CreateSmartQuery(ctx, &pb.CreateSmartQueryRequest{
+		Integration:  req.Integration,
+		Name:         req.Name,
+		Guidance:     req.Guidance,
+		OutputFormat: req.OutputFormat,
+		FileExt:      req.FileExt,
+	})
+	if err != nil {
+		log.Error().Err(err).Msg("failed to create smart query")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to create query")
+	}
+	if !resp.Ok {
+		return ErrorResponse(c, http.StatusBadRequest, resp.Error)
+	}
+
+	return SuccessResponse(c, protoQueryToResponse(resp.Query))
+}
+
+// GetQuery retrieves a smart query by path
+func (g *FilesystemGroup) GetQuery(c echo.Context) error {
+	ctx := c.Request().Context()
+	logRequest(c, "get_query")
+
+	if g.sourceService == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "source service not available")
+	}
+
+	path := c.QueryParam("path")
+	if path == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "path is required")
+	}
+
+	resp, err := g.sourceService.GetSmartQuery(ctx, &pb.GetSmartQueryRequest{
+		Path: path,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("path", path).Msg("failed to get smart query")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to get query")
+	}
+	if !resp.Ok {
+		return ErrorResponse(c, http.StatusBadRequest, resp.Error)
+	}
+	if resp.Query == nil {
+		return ErrorResponse(c, http.StatusNotFound, "query not found")
+	}
+
+	return SuccessResponse(c, protoQueryToResponse(resp.Query))
+}
+
+// UpdateQuery updates an existing smart query by external_id
+func (g *FilesystemGroup) UpdateQuery(c echo.Context) error {
+	ctx := c.Request().Context()
+	logRequest(c, "update_query")
+
+	if g.sourceService == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "source service not available")
+	}
+
+	externalId := c.Param("id")
+	if externalId == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "id is required")
+	}
+
+	var req UpdateQueryRequest
+	if err := c.Bind(&req); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
+	}
+
+	resp, err := g.sourceService.UpdateSmartQuery(ctx, &pb.UpdateSmartQueryRequest{
+		ExternalId: externalId,
+		Name:       req.Name,
+		Guidance:   req.Guidance,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("external_id", externalId).Msg("failed to update smart query")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to update query")
+	}
+	if !resp.Ok {
+		if strings.Contains(resp.Error, "not found") {
+			return ErrorResponse(c, http.StatusNotFound, resp.Error)
+		}
+		return ErrorResponse(c, http.StatusBadRequest, resp.Error)
+	}
+
+	return SuccessResponse(c, protoQueryToResponse(resp.Query))
+}
+
+// DeleteQuery removes a smart query by external_id
+func (g *FilesystemGroup) DeleteQuery(c echo.Context) error {
+	ctx := c.Request().Context()
+	logRequest(c, "delete_query")
+
+	if g.sourceService == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "source service not available")
+	}
+
+	externalId := c.Param("id")
+	if externalId == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "id is required")
+	}
+
+	resp, err := g.sourceService.DeleteSmartQuery(ctx, &pb.DeleteSmartQueryRequest{
+		ExternalId: externalId,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("external_id", externalId).Msg("failed to delete smart query")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to delete query")
+	}
+	if !resp.Ok {
+		if strings.Contains(resp.Error, "not found") {
+			return ErrorResponse(c, http.StatusNotFound, resp.Error)
+		}
+		return ErrorResponse(c, http.StatusBadRequest, resp.Error)
+	}
+
+	return SuccessResponse(c, map[string]bool{"deleted": true})
+}
+
+// protoQueryToResponse converts a pb.SmartQuery to SmartQueryResponse
+func protoQueryToResponse(q *pb.SmartQuery) *SmartQueryResponse {
+	if q == nil {
+		return nil
+	}
+	return &SmartQueryResponse{
+		ExternalID:   q.ExternalId,
+		Integration:  q.Integration,
+		Path:         q.Path,
+		Name:         q.Name,
+		QuerySpec:    q.QuerySpec,
+		Guidance:     q.Guidance,
+		OutputFormat: q.OutputFormat,
+		FileExt:      q.FileExt,
+		CacheTTL:     int(q.CacheTtl),
+		CreatedAt:    q.CreatedAt,
+		UpdatedAt:    q.UpdatedAt,
+	}
 }
 
 // ============================================================================

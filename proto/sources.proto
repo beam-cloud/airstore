@@ -30,8 +30,11 @@ service SourceService {
   // ListSmartQueries lists queries under a parent path
   rpc ListSmartQueries(ListSmartQueriesRequest) returns (ListSmartQueriesResponse);
   
-  // DeleteSmartQuery removes a query
+  // DeleteSmartQuery removes a query by external_id
   rpc DeleteSmartQuery(DeleteSmartQueryRequest) returns (DeleteSmartQueryResponse);
+
+  // UpdateSmartQuery updates an existing query's name/guidance
+  rpc UpdateSmartQuery(UpdateSmartQueryRequest) returns (UpdateSmartQueryResponse);
 
   // ExecuteSmartQuery runs a query and returns materialized results
   rpc ExecuteSmartQuery(ExecuteSmartQueryRequest) returns (ExecuteSmartQueryResponse);
@@ -156,14 +159,27 @@ message ListSmartQueriesResponse {
   repeated SmartQuery queries = 3;
 }
 
-// DeleteSmartQuery - removes a query
+// DeleteSmartQuery - removes a query by external_id
 message DeleteSmartQueryRequest {
-  string path = 1;
+  string external_id = 1;        // Stable query ID (from SmartQuery.external_id)
 }
 
 message DeleteSmartQueryResponse {
   bool ok = 1;
   string error = 2;
+}
+
+// UpdateSmartQuery - updates an existing query's name and/or guidance
+message UpdateSmartQueryRequest {
+  string external_id = 1;        // Stable query ID (from SmartQuery.external_id)
+  string name = 2;               // New name (optional, triggers rename + path update)
+  string guidance = 3;           // New guidance (triggers re-inference of query_spec)
+}
+
+message UpdateSmartQueryResponse {
+  bool ok = 1;
+  string error = 2;
+  SmartQuery query = 3;
 }
 
 // ExecuteSmartQuery - runs a query and returns results

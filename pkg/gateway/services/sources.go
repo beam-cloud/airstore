@@ -223,9 +223,9 @@ func (s *SourceService) ReadDir(ctx context.Context, req *pb.SourceReadDirReques
 		return s.readDirSmartQuery(ctx, pctx, query, connected)
 	}
 
-	// Check for .query metadata file
-	if strings.HasSuffix(relPath, ".query") {
-		// .query files are handled by Read, not ReadDir
+	// Check for .query.as metadata file
+	if strings.HasSuffix(relPath, ".query.as") {
+		// .query.as files are handled by Read, not ReadDir
 		return &pb.SourceReadDirResponse{Ok: false, Error: "not a directory"}, nil
 	}
 
@@ -300,7 +300,7 @@ func (s *SourceService) readDirIntegrationRoot(ctx context.Context, pctx *source
 			// Add hidden metadata file for single-file queries
 			queryMeta := s.generateQueryMetaJSON(q)
 			entries = append(entries, &pb.SourceDirEntry{
-				Name:  "." + filename + ".query",
+				Name:  "." + filename + ".query.as",
 				Mode:  sources.ModeFile | 0444, // Read-only
 				Size:  int64(len(queryMeta)),
 				Mtime: q.UpdatedAt.Unix(),
@@ -315,10 +315,10 @@ func (s *SourceService) readDirIntegrationRoot(ctx context.Context, pctx *source
 func (s *SourceService) readDirSmartQuery(ctx context.Context, pctx *sources.ProviderContext, query *types.FilesystemQuery, connected bool) (*pb.SourceReadDirResponse, error) {
 	entries := []*pb.SourceDirEntry{}
 
-	// Always include .query metadata file
+	// Always include .query.as metadata file
 	queryMeta := s.generateQueryMetaJSON(query)
 	entries = append(entries, &pb.SourceDirEntry{
-		Name:  ".query",
+		Name:  ".query.as",
 		Mode:  sources.ModeFile | 0444,
 		Size:  int64(len(queryMeta)),
 		Mtime: query.UpdatedAt.Unix(),
@@ -436,7 +436,7 @@ func (s *SourceService) getOrExecuteQuery(ctx context.Context, pctx *sources.Pro
 	return results, nil
 }
 
-// generateQueryMetaJSON creates the JSON content for a .query metadata file
+// generateQueryMetaJSON creates the JSON content for a .query.as metadata file
 func (s *SourceService) generateQueryMetaJSON(query *types.FilesystemQuery) []byte {
 	data, _ := json.MarshalIndent(map[string]interface{}{
 		"id":              query.Id,
@@ -495,12 +495,12 @@ func (s *SourceService) Read(ctx context.Context, req *pb.SourceReadRequest) (*p
 		return &pb.SourceReadResponse{Ok: false, Error: "is a directory"}, nil
 	}
 
-	// Handle .query metadata files
-	if relPath == ".query" || strings.HasSuffix(relPath, "/.query") {
+	// Handle .query.as metadata files
+	if relPath == ".query.as" || strings.HasSuffix(relPath, "/.query.as") {
 		// Get the parent query path
 		queryPath := "/sources/" + integration
-		if relPath != ".query" {
-			queryPath = "/sources/" + integration + "/" + strings.TrimSuffix(relPath, "/.query")
+		if relPath != ".query.as" {
+			queryPath = "/sources/" + integration + "/" + strings.TrimSuffix(relPath, "/.query.as")
 		}
 
 		query, err := s.fsStore.GetQuery(ctx, pctx.WorkspaceId, queryPath)
@@ -512,10 +512,10 @@ func (s *SourceService) Read(ctx context.Context, req *pb.SourceReadRequest) (*p
 		return readSlice(data, req.Offset, req.Length), nil
 	}
 
-	// Handle .{filename}.query metadata files for single-file queries
+	// Handle .{filename}.query.as metadata files for single-file queries
 	base := path.Base(relPath)
-	if strings.HasPrefix(base, ".") && strings.HasSuffix(base, ".query") {
-		filename := strings.TrimPrefix(strings.TrimSuffix(base, ".query"), ".")
+	if strings.HasPrefix(base, ".") && strings.HasSuffix(base, ".query.as") {
+		filename := strings.TrimPrefix(strings.TrimSuffix(base, ".query.as"), ".")
 		dir := path.Dir(relPath)
 		queryPath := "/sources/" + integration
 		if dir != "." && dir != "" {
@@ -871,23 +871,125 @@ func (s *SourceService) ListSmartQueries(ctx context.Context, req *pb.ListSmartQ
 	}, nil
 }
 
-// DeleteSmartQuery removes a smart query
+// DeleteSmartQuery removes a smart query by external_id
 func (s *SourceService) DeleteSmartQuery(ctx context.Context, req *pb.DeleteSmartQueryRequest) (*pb.DeleteSmartQueryResponse, error) {
 	if !auth.HasWorkspace(ctx) {
 		return &pb.DeleteSmartQueryResponse{Ok: false, Error: "unauthorized"}, nil
 	}
 
 	// Get the query first to verify it belongs to this workspace
-	query, err := s.fsStore.GetQuery(ctx, auth.WorkspaceId(ctx), req.Path)
+	query, err := s.fsStore.GetQueryByExternalId(ctx, req.ExternalId)
 	if err != nil || query == nil {
 		return &pb.DeleteSmartQueryResponse{Ok: false, Error: "query not found"}, nil
 	}
 
-	if err := s.fsStore.DeleteQuery(ctx, query.ExternalId); err != nil {
+	// Verify the query belongs to this workspace
+	if query.WorkspaceId != auth.WorkspaceId(ctx) {
+		return &pb.DeleteSmartQueryResponse{Ok: false, Error: "unauthorized"}, nil
+	}
+
+	// Invalidate cache for the query path before deletion
+	if err := s.fsStore.InvalidateQuery(ctx, query.WorkspaceId, query.Path); err != nil {
+		log.Warn().Err(err).Str("path", query.Path).Msg("failed to invalidate query cache")
+	}
+
+	if err := s.fsStore.DeleteQuery(ctx, req.ExternalId); err != nil {
 		return &pb.DeleteSmartQueryResponse{Ok: false, Error: err.Error()}, nil
 	}
 
+	log.Info().Str("external_id", req.ExternalId).Str("path", query.Path).Msg("deleted filesystem query")
 	return &pb.DeleteSmartQueryResponse{Ok: true}, nil
+}
+
+// UpdateSmartQuery updates an existing query's name and/or guidance
+func (s *SourceService) UpdateSmartQuery(ctx context.Context, req *pb.UpdateSmartQueryRequest) (*pb.UpdateSmartQueryResponse, error) {
+	if !auth.HasWorkspace(ctx) {
+		return &pb.UpdateSmartQueryResponse{Ok: false, Error: "unauthorized"}, nil
+	}
+	workspaceId := auth.WorkspaceId(ctx)
+
+	// Get the existing query by external_id
+	query, err := s.fsStore.GetQueryByExternalId(ctx, req.ExternalId)
+	if err != nil || query == nil {
+		return &pb.UpdateSmartQueryResponse{Ok: false, Error: "query not found"}, nil
+	}
+
+	// Verify the query belongs to this workspace
+	if query.WorkspaceId != workspaceId {
+		return &pb.UpdateSmartQueryResponse{Ok: false, Error: "unauthorized"}, nil
+	}
+
+	oldPath := query.Path
+	needsUpdate := false
+
+	// Update name and recalculate path if name changed
+	if req.Name != "" && req.Name != query.Name {
+		query.Name = req.Name
+		// Recalculate path: /sources/{integration}/{name}
+		query.Path = "/sources/" + query.Integration + "/" + req.Name
+		if query.FileExt != "" {
+			query.Path += query.FileExt
+		}
+		needsUpdate = true
+	}
+
+	// Re-run LLM inference if guidance changed
+	if req.Guidance != query.Guidance {
+		query.Guidance = req.Guidance
+
+		querySpec, filenameFormat, err := s.inferQuerySpec(ctx, query.Integration, query.Name, req.Guidance)
+		if err != nil {
+			log.Warn().Err(err).Str("name", query.Name).Str("integration", query.Integration).Msg("BAML inference failed during update")
+			return &pb.UpdateSmartQueryResponse{Ok: false, Error: "failed to regenerate query: " + err.Error()}, nil
+		}
+
+		spec := parseQuerySpec(query.Integration, querySpec)
+		if spec.Query == "" {
+			return &pb.UpdateSmartQueryResponse{Ok: false, Error: "invalid query spec from inference"}, nil
+		}
+
+		query.QuerySpec = querySpec
+		if filenameFormat != "" {
+			query.FilenameFormat = filenameFormat
+		}
+		needsUpdate = true
+	}
+
+	if !needsUpdate {
+		// Nothing to update
+		return &pb.UpdateSmartQueryResponse{
+			Ok:    true,
+			Query: filesystemQueryToProto(query),
+		}, nil
+	}
+
+	// Update the query in the store
+	if err := s.fsStore.UpdateQuery(ctx, query); err != nil {
+		log.Error().Err(err).Str("external_id", req.ExternalId).Msg("failed to update query")
+		return &pb.UpdateSmartQueryResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	// Invalidate cache for the old path (if path changed) and new path
+	if oldPath != query.Path {
+		if err := s.fsStore.InvalidateQuery(ctx, workspaceId, oldPath); err != nil {
+			log.Warn().Err(err).Str("path", oldPath).Msg("failed to invalidate old query cache")
+		}
+	}
+	if err := s.fsStore.InvalidateQuery(ctx, workspaceId, query.Path); err != nil {
+		log.Warn().Err(err).Str("path", query.Path).Msg("failed to invalidate query cache")
+	}
+
+	log.Info().
+		Str("external_id", req.ExternalId).
+		Str("old_path", oldPath).
+		Str("new_path", query.Path).
+		Str("name", query.Name).
+		Msg("updated filesystem query")
+
+	return &pb.UpdateSmartQueryResponse{
+		Ok:    true,
+		Query: filesystemQueryToProto(query),
+	}, nil
 }
 
 // ExecuteSmartQuery runs a query and returns materialized results
@@ -1053,6 +1155,12 @@ func smartQueryToProto(q *types.SmartQuery) *pb.SmartQuery {
 		CreatedAt:    q.CreatedAt.Unix(),
 		UpdatedAt:    q.UpdatedAt.Unix(),
 	}
+}
+
+// filesystemQueryToProto converts a types.FilesystemQuery to pb.SmartQuery
+// FilesystemQuery and SmartQuery are type aliases, so this is a convenience wrapper
+func filesystemQueryToProto(q *types.FilesystemQuery) *pb.SmartQuery {
+	return smartQueryToProto(q)
 }
 
 // cleanPath normalizes a path by removing leading/trailing slashes
