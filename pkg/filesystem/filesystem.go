@@ -29,9 +29,10 @@ type Filesystem struct {
 	rootID   string
 	verbose  bool
 
-	host    *fuse.FileSystemHost
-	mounted bool
-	mu      sync.Mutex
+	host      *fuse.FileSystemHost
+	mounted   bool
+	destroyed bool // Set when Destroy() is called by FUSE layer
+	mu        sync.Mutex
 }
 
 // LegacyMetadataEngine provides filesystem metadata operations via gRPC.
@@ -154,9 +155,28 @@ func (f *Filesystem) Mount() error {
 
 func (f *Filesystem) Unmount() error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.mounted && f.host != nil {
-		f.host.Unmount()
+	if f.destroyed {
+		f.mu.Unlock()
+		return nil
+	}
+	f.mu.Unlock()
+
+	if f.host != nil {
+		// Try unmount with a timeout - FUSE-T SMB backend may hang
+		done := make(chan struct{})
+		go func() {
+			f.host.Unmount()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			// Unmount completed normally
+		case <-time.After(2 * time.Second):
+			// Unmount is hanging (common with FUSE-T SMB), force exit
+			log.Info().Msg("unmounted")
+			os.Exit(0)
+		}
 	}
 	return nil
 }
@@ -167,6 +187,12 @@ func (f *Filesystem) IsMounted() bool {
 	return f.mounted
 }
 
+func (f *Filesystem) IsDestroyed() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.destroyed
+}
+
 func (f *Filesystem) logDebug(msg string) {
 	if f.verbose {
 		log.Debug().Msg(msg)
@@ -175,11 +201,20 @@ func (f *Filesystem) logDebug(msg string) {
 
 func (f *Filesystem) Init() error { return nil }
 func (f *Filesystem) Destroy() {
+	f.mu.Lock()
+	f.destroyed = true
+	f.mu.Unlock()
+
 	for _, vn := range f.vnodes.List() {
 		if c, ok := vn.(interface{ Cleanup() }); ok {
 			c.Cleanup()
 		}
 	}
+
+	// With FUSE-T SMB backend, the Mount() call may not return after Destroy().
+	// Force exit after cleanup to ensure the process terminates on Ctrl+C.
+	log.Info().Msg("unmounted")
+	os.Exit(0)
 }
 
 func (f *Filesystem) Statfs() (*StatInfo, error) {

@@ -111,7 +111,8 @@ func (v *SourcesVNode) parsePath(path string) (integration, subpath string) {
 
 // Getattr returns file/directory attributes.
 func (v *SourcesVNode) Getattr(path string) (*FileInfo, error) {
-	log.Debug().Str("path", path).Msg("SourcesVNode.Getattr called")
+	// Normalize path to match what Mkdir caches
+	path = filepath.Clean(path)
 
 	// /sources root
 	if path == SourcesPath {
@@ -119,6 +120,12 @@ func (v *SourcesVNode) Getattr(path string) (*FileInfo, error) {
 	}
 
 	integration, subpath := v.parsePath(path)
+
+	// Early return for macOS system files to avoid unnecessary cache/RPC lookups
+	if subpath != "" && isSystemFile(filepath.Base(subpath)) {
+		return nil, fs.ErrNotExist
+	}
+
 	ctx, cancel := v.ctx()
 	defer cancel()
 
@@ -225,42 +232,29 @@ func smartQueryMtime(q *types.SmartQuery) time.Time {
 
 // Readdir lists directory contents.
 func (v *SourcesVNode) Readdir(path string) ([]DirEntry, error) {
-	log.Debug().Str("path", path).Msg("SourcesVNode.Readdir called")
-
 	ctx, cancel := v.ctx()
 	defer cancel()
 
 	// /sources root - list available integrations
 	if path == SourcesPath {
-		log.Debug().Msg("Readdir: listing integrations")
 		return v.listIntegrations(ctx)
 	}
 
 	integration, subpath := v.parsePath(path)
-	log.Debug().Str("integration", integration).Str("subpath", subpath).Msg("Readdir: parsed path")
 
 	// Is this a smart query folder? Execute it.
-	log.Debug().Str("path", path).Msg("Readdir: checking if path is smart query")
-	q := v.getQuery(ctx, path)
-	if q != nil {
-		log.Debug().Str("path", path).Str("outputFormat", string(q.OutputFormat)).Str("querySpec", q.QuerySpec).Msg("Readdir: found query")
+	if q := v.getQuery(ctx, path); q != nil {
 		if q.OutputFormat == types.SmartQueryOutputFolder {
-			log.Debug().Str("path", path).Msg("Readdir: executing as folder query")
 			return v.executeQueryAsDir(ctx, q)
 		}
-		log.Debug().Str("path", path).Str("outputFormat", string(q.OutputFormat)).Msg("Readdir: query is not a folder type")
-	} else {
-		log.Debug().Str("path", path).Msg("Readdir: no query found for path")
 	}
 
 	// /sources/{integration} - list status.json + smart queries
 	if subpath == "" {
-		log.Debug().Str("integration", integration).Msg("Readdir: listing integration queries")
 		return v.listIntegration(ctx, path, integration)
 	}
 
 	// Paths inside an integration but not a query folder = not found
-	log.Debug().Str("path", path).Msg("Readdir: path not found")
 	return nil, fs.ErrNotExist
 }
 
@@ -306,8 +300,6 @@ func (v *SourcesVNode) listIntegrations(ctx context.Context) ([]DirEntry, error)
 
 // executeQueryAsDir executes a smart query and returns results as directory entries.
 func (v *SourcesVNode) executeQueryAsDir(ctx context.Context, q *types.SmartQuery) ([]DirEntry, error) {
-	log.Debug().Str("path", q.Path).Msg("executeQueryAsDir: starting")
-
 	// Always include the .query.as file
 	queryMeta, _ := json.MarshalIndent(q, "", "  ")
 	queryMtime := int64(smartQueryMtime(q).Unix())
@@ -320,10 +312,7 @@ func (v *SourcesVNode) executeQueryAsDir(ctx context.Context, q *types.SmartQuer
 	}}
 
 	// Check cache first
-	log.Debug().Str("path", q.Path).Msg("executeQueryAsDir: checking cache")
-	cached := v.getCachedResults(q.Path)
-	if cached != nil {
-		log.Debug().Str("path", q.Path).Int("count", len(cached)).Msg("executeQueryAsDir: using cached results")
+	if cached := v.getCachedResults(q.Path); cached != nil {
 		for _, e := range cached {
 			entries = append(entries, DirEntry{
 				Name:  e.Name,
@@ -337,20 +326,17 @@ func (v *SourcesVNode) executeQueryAsDir(ctx context.Context, q *types.SmartQuer
 	}
 
 	// Execute via gateway RPC
-	log.Debug().Str("path", q.Path).Msg("executeQueryAsDir: cache miss, calling ExecuteSmartQuery RPC")
 	resp, err := v.client.ExecuteSmartQuery(ctx, &pb.ExecuteSmartQueryRequest{Path: q.Path})
-	log.Debug().Str("path", q.Path).Err(err).Msg("executeQueryAsDir: RPC returned")
 	if err != nil {
-		log.Warn().Err(err).Str("path", q.Path).Msg("executeQueryAsDir: query execution failed")
+		log.Warn().Err(err).Str("path", q.Path).Msg("query execution failed")
 		return entries, nil // Return just .query.as on failure
 	}
 	if !resp.Ok {
-		log.Warn().Str("path", q.Path).Str("error", resp.Error).Msg("executeQueryAsDir: query execution returned not ok")
+		log.Warn().Str("path", q.Path).Str("error", resp.Error).Msg("query execution returned not ok")
 		return entries, nil
 	}
 
 	// Cache the results
-	log.Debug().Str("path", q.Path).Int("count", len(resp.Entries)).Msg("executeQueryAsDir: caching results")
 	v.setCachedResults(q.Path, resp.Entries)
 
 	for _, e := range resp.Entries {
@@ -362,7 +348,6 @@ func (v *SourcesVNode) executeQueryAsDir(ctx context.Context, q *types.SmartQuer
 			Mtime: e.Mtime,
 		})
 	}
-	log.Debug().Str("path", q.Path).Int("count", len(resp.Entries)).Msg("executeQueryAsDir: completed successfully")
 	return entries, nil
 }
 
@@ -499,6 +484,22 @@ func (v *SourcesVNode) Mkdir(path string, mode uint32) error {
 		return syscall.EIO
 	}
 
+	// Cache the newly created query so subsequent Getattr calls can find it immediately
+	query := &types.SmartQuery{
+		ExternalId:   resp.Query.ExternalId,
+		Integration:  resp.Query.Integration,
+		Path:         resp.Query.Path,
+		Name:         resp.Query.Name,
+		QuerySpec:    resp.Query.QuerySpec,
+		Guidance:     resp.Query.Guidance,
+		OutputFormat: types.SmartQueryOutputFormat(resp.Query.OutputFormat),
+		FileExt:      resp.Query.FileExt,
+		CacheTTL:     int(resp.Query.CacheTtl),
+		CreatedAt:    time.Unix(resp.Query.CreatedAt, 0),
+		UpdatedAt:    time.Unix(resp.Query.UpdatedAt, 0),
+	}
+	v.setCachedQuery(path, query)
+
 	log.Info().Str("path", path).Str("query", resp.Query.QuerySpec).Msg("created smart query")
 	return nil
 }
@@ -532,6 +533,22 @@ func (v *SourcesVNode) Create(path string, flags int, mode uint32) (FileHandle, 
 		return 0, syscall.EIO
 	}
 
+	// Cache the newly created query so subsequent Getattr calls can find it immediately
+	query := &types.SmartQuery{
+		ExternalId:   resp.Query.ExternalId,
+		Integration:  resp.Query.Integration,
+		Path:         resp.Query.Path,
+		Name:         resp.Query.Name,
+		QuerySpec:    resp.Query.QuerySpec,
+		Guidance:     resp.Query.Guidance,
+		OutputFormat: types.SmartQueryOutputFormat(resp.Query.OutputFormat),
+		FileExt:      resp.Query.FileExt,
+		CacheTTL:     int(resp.Query.CacheTtl),
+		CreatedAt:    time.Unix(resp.Query.CreatedAt, 0),
+		UpdatedAt:    time.Unix(resp.Query.UpdatedAt, 0),
+	}
+	v.setCachedQuery(path, query)
+
 	log.Info().Str("path", path).Str("query", resp.Query.QuerySpec).Msg("created smart query file")
 	return 0, nil
 }
@@ -547,19 +564,15 @@ func (v *SourcesVNode) Readlink(path string) (string, error) {
 func (v *SourcesVNode) getQuery(ctx context.Context, path string) *types.SmartQuery {
 	// Check cache first
 	if cached, found := v.getCachedQuery(path); found {
-		log.Debug().Str("path", path).Bool("isNil", cached == nil).Msg("getQuery: cache hit")
 		return cached
 	}
 
-	log.Debug().Str("path", path).Msg("getQuery: cache miss, calling RPC")
 	resp, err := v.client.GetSmartQuery(ctx, &pb.GetSmartQueryRequest{Path: path})
 	if err != nil {
-		log.Debug().Err(err).Str("path", path).Msg("getQuery: gRPC error")
 		return nil
 	}
 
 	if resp == nil || !resp.Ok || resp.Query == nil {
-		log.Debug().Str("path", path).Bool("respNil", resp == nil).Msg("getQuery: returned nil/not ok")
 		// Cache negative result too (path is not a query)
 		v.setCachedQuery(path, nil)
 		return nil
@@ -579,12 +592,6 @@ func (v *SourcesVNode) getQuery(ctx context.Context, path string) *types.SmartQu
 		UpdatedAt:    time.Unix(resp.Query.UpdatedAt, 0),
 	}
 
-	log.Debug().
-		Str("path", path).
-		Str("queryPath", resp.Query.Path).
-		Str("outputFormat", resp.Query.OutputFormat).
-		Str("convertedFormat", string(query.OutputFormat)).
-		Msg("getQuery: found query, caching")
 	v.setCachedQuery(path, query)
 	return query
 }
@@ -604,7 +611,6 @@ func (v *SourcesVNode) getQueryResultMeta(ctx context.Context, queryPath, filena
 	}
 
 	// Cache miss - execute query via RPC (should be cached on gateway side)
-	log.Debug().Str("path", queryPath).Str("filename", filename).Msg("getQueryResultMeta cache miss, calling RPC")
 	resp, err := v.client.ExecuteSmartQuery(ctx, &pb.ExecuteSmartQueryRequest{Path: queryPath})
 	if err != nil {
 		log.Warn().Err(err).Str("path", queryPath).Msg("getQueryResultMeta RPC failed")

@@ -177,6 +177,10 @@ Examples:
 			if gw != nil {
 				gw.Shutdown()
 			}
+
+			// Force exit - Mount() may not return with FUSE-T SMB backend
+			log.Info().Msg("unmounted")
+			os.Exit(0)
 		}()
 
 		log.Info().Str("path", mountPoint).Str("gateway", effectiveGatewayAddr).Msg("filesystem mounted")
@@ -184,8 +188,13 @@ Examples:
 
 		err = fs.Mount()
 
-		// Clean shutdown via signal - not an error
-		if shuttingDown {
+		// Clean shutdown via signal OR native FUSE layer handled it
+		if shuttingDown || fs.IsDestroyed() {
+			// Ensure gateway is shut down
+			if gw != nil {
+				gw.Shutdown()
+			}
+
 			log.Info().Msg("unmounted")
 			return nil
 		}
