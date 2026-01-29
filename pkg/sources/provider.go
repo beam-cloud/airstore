@@ -2,10 +2,14 @@ package sources
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"github.com/beam-cloud/airstore/pkg/types"
 )
+
+// ErrSearchNotSupported is returned when a provider doesn't support search
+var ErrSearchNotSupported = errors.New("search not supported")
 
 // FileInfo contains file/directory metadata
 type FileInfo struct {
@@ -25,11 +29,74 @@ type DirEntry struct {
 	Mtime int64
 }
 
+// SearchResult represents a single search result from a provider
+type SearchResult struct {
+	Name    string // filename for the result (e.g., "2026-01-28_invoice_abc123.txt")
+	Id      string // internal ID for fetching content (e.g., message ID, file ID)
+	Mode    uint32 // file mode
+	Size    int64  // file size if known, 0 otherwise
+	Mtime   int64  // modification time (Unix timestamp)
+	Preview string // optional preview/snippet of content
+}
+
 // ProviderContext contains workspace and credential info for provider operations
 type ProviderContext struct {
 	WorkspaceId uint
 	MemberId    uint
 	Credentials *types.IntegrationCredentials
+}
+
+// QuerySpec contains the parsed query specification from a FilesystemQuery.
+type QuerySpec struct {
+	Query          string // Provider-specific query string (e.g., "is:unread", "mimeType='application/pdf'")
+	Limit          int    // Maximum number of results
+	FilenameFormat string // Format template for generating filenames (e.g., "{date}_{subject}_{id}.txt")
+}
+
+// QueryResult represents a single result from executing a filesystem query.
+// This is used by QueryExecutor to return search results with metadata.
+type QueryResult struct {
+	ID       string            // Provider-specific ID (e.g., Gmail message ID, GDrive file ID)
+	Filename string            // Generated filename using FilenameFormat
+	Metadata map[string]string // Key-value metadata (date, subject, from, etc.)
+	Size     int64             // Content size in bytes (0 if unknown)
+	Mtime    int64             // Last modified time (Unix timestamp)
+}
+
+// QueryExecutor is an optional interface implemented by providers that support
+// filesystem query operations. This enables the smart query filesystem feature
+// where users create virtual folders/files that execute queries on access.
+type QueryExecutor interface {
+	// ExecuteQuery runs a query and returns results with generated filenames.
+	// The spec contains the provider-specific query string and filename format.
+	ExecuteQuery(ctx context.Context, pctx *ProviderContext, spec QuerySpec) ([]QueryResult, error)
+
+	// ReadResult fetches content for a specific result by its provider ID.
+	// This is called when a user reads a file from a smart query folder.
+	ReadResult(ctx context.Context, pctx *ProviderContext, resultID string) ([]byte, error)
+
+	// FormatFilename generates a filename from metadata using the format template.
+	// Supported placeholders vary by provider but typically include:
+	// - {id}: Unique identifier
+	// - {date}: Date in YYYY-MM-DD format
+	// - {subject}, {from}, {to}: Email-specific
+	// - {title}, {name}: Document-specific
+	// The result should be sanitized for filesystem use.
+	FormatFilename(format string, metadata map[string]string) string
+}
+
+// DefaultFilenameFormat returns a sensible default filename format for an integration.
+func DefaultFilenameFormat(integration string) string {
+	switch integration {
+	case "gmail":
+		return "{date}_{from}_{subject}_{id}.txt"
+	case "gdrive":
+		return "{name}_{id}"
+	case "notion":
+		return "{title}_{id}.md"
+	default:
+		return "{id}"
+	}
 }
 
 // Provider defines the interface for source integrations.
@@ -51,6 +118,11 @@ type Provider interface {
 
 	// Readlink reads a symbolic link target (optional, return empty string if not supported)
 	Readlink(ctx context.Context, pctx *ProviderContext, path string) (string, error)
+
+	// Search executes a provider-specific query and returns results
+	// The query format is provider-specific (e.g., Gmail search syntax, Drive query syntax)
+	// Returns ErrSearchNotSupported if the provider doesn't support search
+	Search(ctx context.Context, pctx *ProviderContext, query string, limit int) ([]SearchResult, error)
 }
 
 // Registry manages registered source providers

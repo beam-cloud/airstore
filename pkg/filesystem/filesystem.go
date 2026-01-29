@@ -21,10 +21,10 @@ type Config struct {
 	Verbose     bool
 }
 
-// Filesystem is a FUSE filesystem that connects to the gateway via gRPC
+// Filesystem is a FUSE filesystem that connects to the gateway via gRPC.
 type Filesystem struct {
 	config   Config
-	metadata MetadataEngine
+	metadata LegacyMetadataEngine
 	vnodes   *vnode.Registry
 	rootID   string
 	verbose  bool
@@ -34,8 +34,10 @@ type Filesystem struct {
 	mu      sync.Mutex
 }
 
-// MetadataEngine provides filesystem metadata operations via gRPC
-type MetadataEngine interface {
+// LegacyMetadataEngine provides filesystem metadata operations via gRPC.
+// This interface is for backward compatibility with the old FUSE implementation.
+// New code should use the path-based MetadataEngine interface.
+type LegacyMetadataEngine interface {
 	GetDirectoryContentMetadata(id string) (*DirectoryContentMetadata, error)
 	GetDirectoryAccessMetadata(pid, name string) (*DirectoryAccessMetadata, error)
 	GetFileMetadata(pid, name string) (*FileMetadata, error)
@@ -266,7 +268,7 @@ func (f *Filesystem) Readdir(path string) ([]DirEntry, error) {
 		}
 		entries := make([]DirEntry, len(vnEntries))
 		for i, e := range vnEntries {
-			entries[i] = DirEntry{Name: e.Name, Mode: e.Mode, Ino: e.Ino}
+			entries[i] = DirEntry{Name: e.Name, Mode: e.Mode, Ino: e.Ino, Size: e.Size, Mtime: e.Mtime}
 		}
 		return entries, nil
 	}

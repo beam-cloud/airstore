@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -109,6 +110,88 @@ func (g *GDriveProvider) Read(ctx context.Context, pctx *sources.ProviderContext
 // Readlink is not supported for Drive
 func (g *GDriveProvider) Readlink(ctx context.Context, pctx *sources.ProviderContext, path string) (string, error) {
 	return "", sources.ErrNotFound
+}
+
+// Search executes a Google Drive search query and returns results
+// The query uses Google Drive query syntax (e.g., "name contains 'invoice'", "mimeType='application/pdf'")
+func (g *GDriveProvider) Search(ctx context.Context, pctx *sources.ProviderContext, query string, limit int) ([]sources.SearchResult, error) {
+	if pctx.Credentials == nil || pctx.Credentials.AccessToken == "" {
+		return nil, sources.ErrNotConnected
+	}
+
+	if limit <= 0 {
+		limit = 50
+	}
+
+	token := pctx.Credentials.AccessToken
+
+	// Search for files
+	path := fmt.Sprintf("/files?q=%s&pageSize=%d&orderBy=modifiedTime desc&fields=files(id,name,mimeType,size,modifiedTime,webViewLink)",
+		url.QueryEscape(query), limit)
+
+	var result map[string]any
+	if err := g.request(ctx, token, path, &result); err != nil {
+		return nil, err
+	}
+
+	files, _ := result["files"].([]any)
+	if len(files) == 0 {
+		return []sources.SearchResult{}, nil
+	}
+
+	results := make([]sources.SearchResult, 0, len(files))
+	for _, f := range files {
+		file, ok := f.(map[string]any)
+		if !ok {
+			continue
+		}
+
+		id, _ := file["id"].(string)
+		name, _ := file["name"].(string)
+		mimeType, _ := file["mimeType"].(string)
+		size, _ := file["size"].(string)
+		modifiedTime, _ := file["modifiedTime"].(string)
+
+		// Determine if it's a folder
+		isDir := mimeType == "application/vnd.google-apps.folder"
+		var mode uint32 = sources.ModeFile
+		if isDir {
+			mode = sources.ModeDir
+		}
+
+		// Parse size
+		var sizeInt int64
+		fmt.Sscanf(size, "%d", &sizeInt)
+
+		// Parse modified time
+		mtime := sources.NowUnix()
+		if t, err := time.Parse(time.RFC3339, modifiedTime); err == nil {
+			mtime = t.Unix()
+		}
+
+		// Generate a unique filename (name may not be unique in Drive)
+		filename := name
+		if id != "" && len(id) >= 8 {
+			// Append short ID if there could be duplicates
+			ext := ""
+			if idx := strings.LastIndex(name, "."); idx > 0 {
+				ext = name[idx:]
+				name = name[:idx]
+			}
+			filename = fmt.Sprintf("%s_%s%s", name, id[:8], ext)
+		}
+
+		results = append(results, sources.SearchResult{
+			Name:    filename,
+			Id:      id,
+			Mode:    mode,
+			Size:    sizeInt,
+			Mtime:   mtime,
+			Preview: mimeType,
+		})
+	}
+
+	return results, nil
 }
 
 // --- Views ---
@@ -385,7 +468,7 @@ func (g *GDriveProvider) fetchStorage(ctx context.Context, token string) ([]byte
 
 func (g *GDriveProvider) listFiles(ctx context.Context, token, query string, pageSize int) ([]map[string]any, error) {
 	path := fmt.Sprintf("/files?q=%s&pageSize=%d&orderBy=modifiedTime desc&fields=files(id,name,mimeType,size,modifiedTime,webViewLink,parents)",
-		query, pageSize)
+		url.QueryEscape(query), pageSize)
 
 	var result map[string]any
 	if err := g.request(ctx, token, path, &result); err != nil {
@@ -522,3 +605,169 @@ func (g *GDriveProvider) request(ctx context.Context, token, path string, result
 
 	return json.NewDecoder(resp.Body).Decode(result)
 }
+
+// ============================================================================
+// QueryExecutor implementation
+// ============================================================================
+
+// ExecuteQuery runs a Google Drive search query and returns results with generated filenames.
+// This implements the sources.QueryExecutor interface for filesystem queries.
+func (g *GDriveProvider) ExecuteQuery(ctx context.Context, pctx *sources.ProviderContext, spec sources.QuerySpec) ([]sources.QueryResult, error) {
+	if pctx.Credentials == nil || pctx.Credentials.AccessToken == "" {
+		return nil, sources.ErrNotConnected
+	}
+
+	limit := spec.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+
+	token := pctx.Credentials.AccessToken
+
+	// Search for files
+	path := fmt.Sprintf("/files?q=%s&pageSize=%d&orderBy=modifiedTime desc&fields=files(id,name,mimeType,size,modifiedTime,createdTime,webViewLink)",
+		url.QueryEscape(spec.Query), limit)
+
+	var result map[string]any
+	if err := g.request(ctx, token, path, &result); err != nil {
+		return nil, err
+	}
+
+	files, _ := result["files"].([]any)
+	if len(files) == 0 {
+		return []sources.QueryResult{}, nil
+	}
+
+	filenameFormat := spec.FilenameFormat
+	if filenameFormat == "" {
+		filenameFormat = sources.DefaultFilenameFormat("gdrive")
+	}
+
+	results := make([]sources.QueryResult, 0, len(files))
+	for _, f := range files {
+		file, ok := f.(map[string]any)
+		if !ok {
+			continue
+		}
+
+		id, _ := file["id"].(string)
+		name, _ := file["name"].(string)
+		mimeType, _ := file["mimeType"].(string)
+		sizeStr, _ := file["size"].(string)
+		modifiedTime, _ := file["modifiedTime"].(string)
+		createdTime, _ := file["createdTime"].(string)
+
+		// Parse size
+		var size int64
+		fmt.Sscanf(sizeStr, "%d", &size)
+
+		// Parse modified time
+		mtime := sources.NowUnix()
+		if t, err := time.Parse(time.RFC3339, modifiedTime); err == nil {
+			mtime = t.Unix()
+		}
+
+		// Parse dates for metadata
+		modDate := ""
+		if t, err := time.Parse(time.RFC3339, modifiedTime); err == nil {
+			modDate = t.Format("2006-01-02")
+		}
+		createdDate := ""
+		if t, err := time.Parse(time.RFC3339, createdTime); err == nil {
+			createdDate = t.Format("2006-01-02")
+		}
+
+		// Build metadata map
+		metadata := map[string]string{
+			"id":        id,
+			"name":      name,
+			"mime_type": mimeType,
+			"date":      modDate,
+			"created":   createdDate,
+		}
+
+		// Determine extension based on mime type or existing extension
+		ext := ""
+		if idx := strings.LastIndex(name, "."); idx > 0 {
+			ext = name[idx:]
+		} else {
+			// Google Docs types
+			switch mimeType {
+			case "application/vnd.google-apps.document":
+				ext = ".txt"
+			case "application/vnd.google-apps.spreadsheet":
+				ext = ".csv"
+			case "application/vnd.google-apps.presentation":
+				ext = ".txt"
+			case "application/vnd.google-apps.folder":
+				ext = "" // folder, no extension
+			}
+		}
+		metadata["ext"] = ext
+
+		// Generate filename
+		filename := g.FormatFilename(filenameFormat, metadata)
+
+		results = append(results, sources.QueryResult{
+			ID:       id,
+			Filename: filename,
+			Metadata: metadata,
+			Size:     size,
+			Mtime:    mtime,
+		})
+	}
+
+	return results, nil
+}
+
+// ReadResult fetches the content of a Drive file by its file ID.
+// This implements the sources.QueryExecutor interface.
+func (g *GDriveProvider) ReadResult(ctx context.Context, pctx *sources.ProviderContext, resultID string) ([]byte, error) {
+	if pctx.Credentials == nil || pctx.Credentials.AccessToken == "" {
+		return nil, sources.ErrNotConnected
+	}
+	return g.downloadFile(ctx, pctx.Credentials.AccessToken, resultID, 0, 0)
+}
+
+// FormatFilename generates a filename from metadata using a format template.
+// Supported placeholders: {id}, {name}, {date}, {created}, {mime_type}, {ext}
+// This implements the sources.QueryExecutor interface.
+func (g *GDriveProvider) FormatFilename(format string, metadata map[string]string) string {
+	if format == "" {
+		format = "{name}_{id}"
+	}
+
+	result := format
+	for key, value := range metadata {
+		placeholder := "{" + key + "}"
+		// Sanitize the value for filesystem use
+		safeValue := sanitizeFolderName(value)
+		// Truncate long values (except id)
+		if key != "id" && len(safeValue) > 50 {
+			safeValue = safeValue[:50]
+		}
+		result = strings.ReplaceAll(result, placeholder, safeValue)
+	}
+
+	// If there's an extension in metadata, ensure it's appended
+	if ext, ok := metadata["ext"]; ok && ext != "" && !strings.HasSuffix(result, ext) {
+		// Only append if format didn't explicitly include it
+		if !strings.Contains(format, "{ext}") {
+			result += ext
+		}
+	}
+
+	// Ensure filename is not empty
+	if result == "" {
+		if id, ok := metadata["id"]; ok {
+			result = id
+		} else {
+			result = "unknown"
+		}
+	}
+
+	return result
+}
+
+// Compile-time interface check for QueryExecutor
+var _ sources.QueryExecutor = (*GDriveProvider)(nil)

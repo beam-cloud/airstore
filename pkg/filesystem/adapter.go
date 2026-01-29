@@ -3,6 +3,7 @@ package filesystem
 import (
 	"errors"
 	"syscall"
+	"time"
 
 	"github.com/winfsp/cgofuse/fuse"
 )
@@ -176,15 +177,25 @@ func (a *adapter) Readdir(path string, fill func(string, *fuse.Stat_t, int64) bo
 	}
 	fill("..", &dotdotStat, 0)
 
-	// Get entry stats
+	// Get entry stats - use embedded metadata when available to avoid N Getattr calls
 	for _, e := range entries {
 		var stat fuse.Stat_t
-		p := path + "/" + e.Name
-		if path == "/" {
-			p = "/" + e.Name
-		}
-		if info, err := a.fs.Getattr(p); err == nil {
-			fillStat(&stat, info)
+
+		// If entry has Size or Mtime, use it directly (avoids expensive Getattr call)
+		if e.Size > 0 || e.Mtime > 0 {
+			fillStatFromEntry(&stat, &e)
+		} else {
+			// Fall back to Getattr for entries without metadata
+			p := path + "/" + e.Name
+			if path == "/" {
+				p = "/" + e.Name
+			}
+			if info, err := a.fs.Getattr(p); err == nil {
+				fillStat(&stat, info)
+			} else {
+				// Getattr failed, use entry mode at least
+				fillStatFromEntry(&stat, &e)
+			}
 		}
 		if !fill(e.Name, &stat, 0) {
 			break
@@ -257,6 +268,35 @@ func fillStat(stat *fuse.Stat_t, info *FileInfo) {
 	stat.Blocks = (info.Size + 511) / 512
 	stat.Birthtim = fuse.NewTimespec(info.Ctime) // macOS
 	stat.Flags = 0                               // macOS
+}
+
+// fillStatFromEntry fills stat from a DirEntry, using embedded Size/Mtime when available.
+// This avoids expensive Getattr calls for each entry during directory listings.
+func fillStatFromEntry(stat *fuse.Stat_t, e *DirEntry) {
+	*stat = fuse.Stat_t{} // Zero all fields first
+	stat.Dev = 1
+	stat.Ino = e.Ino
+	stat.Mode = e.Mode
+	stat.Nlink = 1
+	stat.Uid = uint32(syscall.Getuid())
+	stat.Gid = uint32(syscall.Getgid())
+	stat.Rdev = 0
+	stat.Size = e.Size
+	stat.Blksize = 4096
+	stat.Blocks = (e.Size + 511) / 512
+	stat.Flags = 0 // macOS
+
+	// Use entry mtime if available, otherwise use current time
+	var mtime time.Time
+	if e.Mtime > 0 {
+		mtime = time.Unix(e.Mtime, 0)
+	} else {
+		mtime = time.Now()
+	}
+	stat.Atim = fuse.NewTimespec(mtime)
+	stat.Mtim = fuse.NewTimespec(mtime)
+	stat.Ctim = fuse.NewTimespec(mtime)
+	stat.Birthtim = fuse.NewTimespec(mtime) // macOS
 }
 
 func toErrno(err error) int {

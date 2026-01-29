@@ -767,6 +767,182 @@ test_index() {
 }
 
 # ============================================================================
+# Test: Smart Queries (dynamic folder/file creation)
+# ============================================================================
+test_smart_queries() {
+    echo ""
+    echo "=== Test: Smart Queries ==="
+    echo ""
+    echo "This test verifies the smart query filesystem:"
+    echo "  - mkdir /sources/gmail/unread-emails creates a query"
+    echo "  - ls shows query results from Gmail API"
+    echo ""
+    
+    ensure_cli
+    wait_gateway
+    cleanup_mount
+    
+    # Check if we have the test token
+    if [ -z "$TEST_TOKEN" ]; then
+        echo ""
+        info "This test requires a Gmail connection."
+        info "Set TEST_TOKEN to a token with Gmail connected."
+        info ""
+        info "Example:"
+        info "  TEST_TOKEN=your_token ./e2e/run.sh smart"
+        echo ""
+        pass "Skipped (no TEST_TOKEN)"
+        return
+    fi
+    
+    # -------------------------------------------------------------------------
+    # Mount filesystem with local mode (for smart queries)
+    # -------------------------------------------------------------------------
+    mkdir -p "$MOUNT_POINT"
+    
+    info "Mounting filesystem with smart queries..."
+    "$PROJECT_ROOT/bin/cli" mount "$MOUNT_POINT" \
+        --gateway "$GATEWAY_GRPC" \
+        --token "$TEST_TOKEN" \
+        --config "$PROJECT_ROOT/config.local.yaml" &
+    MOUNT_PID=$!
+    sleep 5
+    
+    # Verify mount
+    if ! mount | grep -q "$MOUNT_POINT"; then
+        kill $MOUNT_PID 2>/dev/null || true
+        fail "Mount failed"
+    fi
+    pass "Filesystem mounted"
+    
+    # -------------------------------------------------------------------------
+    # Test 1: Check /sources/gmail exists
+    # -------------------------------------------------------------------------
+    info "Test 1: Checking Gmail integration..."
+    
+    if [ ! -d "$MOUNT_POINT/sources/gmail" ]; then
+        kill $MOUNT_PID 2>/dev/null || true
+        fail "/sources/gmail not found"
+    fi
+    pass "/sources/gmail exists"
+    
+    # Check status.json to verify connection
+    if [ -f "$MOUNT_POINT/sources/gmail/status.json" ]; then
+        STATUS=$(cat "$MOUNT_POINT/sources/gmail/status.json" 2>/dev/null)
+        if echo "$STATUS" | grep -q '"connected": true'; then
+            pass "Gmail is connected"
+        else
+            info "Gmail status: $STATUS"
+            info "Gmail may not be connected - continuing anyway"
+        fi
+    fi
+    
+    # -------------------------------------------------------------------------
+    # Test 2: Create smart query folder
+    # -------------------------------------------------------------------------
+    info "Test 2: Creating smart query folder..."
+    
+    QUERY_NAME="unread-emails-$(date +%s)"
+    QUERY_PATH="$MOUNT_POINT/sources/gmail/$QUERY_NAME"
+    
+    if mkdir "$QUERY_PATH" 2>/dev/null; then
+        pass "Created smart query folder: $QUERY_NAME"
+    else
+        info "mkdir failed - smart queries may not be enabled"
+        info "Make sure config has index.enabled: true"
+        kill $MOUNT_PID 2>/dev/null || true
+        cleanup_mount
+        pass "Skipped (smart queries not enabled)"
+        return
+    fi
+    
+    # -------------------------------------------------------------------------
+    # Test 3: List query results
+    # -------------------------------------------------------------------------
+    info "Test 3: Listing query results..."
+    sleep 2  # Give it a moment to execute query
+    
+    RESULTS=$(ls "$QUERY_PATH" 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$RESULTS" -gt 0 ]; then
+        pass "Query returned $RESULTS results"
+        info "Sample files:"
+        ls "$QUERY_PATH" 2>/dev/null | head -5
+    else
+        info "Query returned 0 results (may be no unread emails)"
+    fi
+    
+    # -------------------------------------------------------------------------
+    # Test 4: Read email content
+    # -------------------------------------------------------------------------
+    info "Test 4: Reading email content..."
+    
+    FIRST_FILE=$(ls "$QUERY_PATH" 2>/dev/null | head -1)
+    if [ -n "$FIRST_FILE" ]; then
+        CONTENT=$(cat "$QUERY_PATH/$FIRST_FILE" 2>/dev/null | head -c 500)
+        if [ -n "$CONTENT" ]; then
+            pass "Read email content"
+            echo ""
+            echo "--- Email Preview ---"
+            echo "$CONTENT"
+            echo "..."
+            echo "--- End Preview ---"
+            echo ""
+        else
+            info "Could not read file content"
+        fi
+    else
+        info "No files to read"
+    fi
+    
+    # -------------------------------------------------------------------------
+    # Test 5: Create smart query file (single file output)
+    # -------------------------------------------------------------------------
+    info "Test 5: Creating smart query file..."
+    
+    QUERY_FILE="$MOUNT_POINT/sources/gmail/recent-emails-$(date +%s).json"
+    
+    if touch "$QUERY_FILE" 2>/dev/null; then
+        pass "Created smart query file"
+        
+        # Try to read it
+        sleep 2
+        if [ -f "$QUERY_FILE" ]; then
+            CONTENT=$(cat "$QUERY_FILE" 2>/dev/null | head -c 500)
+            if [ -n "$CONTENT" ]; then
+                pass "Query file has content"
+                info "Preview: ${CONTENT:0:200}..."
+            fi
+        fi
+    else
+        info "touch failed for query file"
+    fi
+    
+    # -------------------------------------------------------------------------
+    # Test 6: Different query types
+    # -------------------------------------------------------------------------
+    info "Test 6: Testing different query types..."
+    
+    for QUERY in "starred" "important" "from-noreply"; do
+        QPATH="$MOUNT_POINT/sources/gmail/$QUERY-$(date +%s)"
+        if mkdir "$QPATH" 2>/dev/null; then
+            QCOUNT=$(ls "$QPATH" 2>/dev/null | wc -l | tr -d ' ')
+            pass "$QUERY: $QCOUNT results"
+        fi
+    done
+    
+    # -------------------------------------------------------------------------
+    # Cleanup
+    # -------------------------------------------------------------------------
+    info "Cleaning up..."
+    kill $MOUNT_PID 2>/dev/null || true
+    sleep 1
+    cleanup_mount
+    
+    echo ""
+    pass "Smart queries test passed"
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -802,6 +978,9 @@ case "${1:-all}" in
     index)
         test_index
         ;;
+    smart|smart-queries)
+        test_smart_queries
+        ;;
     all)
         test_setup
         test_task
@@ -812,7 +991,7 @@ case "${1:-all}" in
         ;;
     *)
         echo "Unknown test: $1"
-        echo "Available: setup, task, fs, tools, context, sources, index, all"
+        echo "Available: setup, task, fs, tools, context, sources, index, smart, all"
         exit 1
         ;;
 esac

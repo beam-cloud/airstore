@@ -18,6 +18,23 @@ service SourceService {
   
   // Readlink reads a symbolic link target (for friendly aliases)
   rpc Readlink(SourceReadlinkRequest) returns (SourceReadlinkResponse);
+
+  // Smart query operations - create queries from folder names via LLM inference
+  
+  // CreateSmartQuery creates a new smart query (called on mkdir/touch)
+  rpc CreateSmartQuery(CreateSmartQueryRequest) returns (CreateSmartQueryResponse);
+  
+  // GetSmartQuery retrieves a query by its path
+  rpc GetSmartQuery(GetSmartQueryRequest) returns (GetSmartQueryResponse);
+  
+  // ListSmartQueries lists queries under a parent path
+  rpc ListSmartQueries(ListSmartQueriesRequest) returns (ListSmartQueriesResponse);
+  
+  // DeleteSmartQuery removes a query
+  rpc DeleteSmartQuery(DeleteSmartQueryRequest) returns (DeleteSmartQueryResponse);
+
+  // ExecuteSmartQuery runs a query and returns materialized results
+  rpc ExecuteSmartQuery(ExecuteSmartQueryRequest) returns (ExecuteSmartQueryResponse);
 }
 
 // SourceFileInfo contains file/directory metadata
@@ -35,7 +52,8 @@ message SourceDirEntry {
   uint32 mode = 2;
   bool is_dir = 3;
   int64 size = 4;
-  int64 mtime = 5;  // Unix timestamp
+  int64 mtime = 5;     // Unix timestamp
+  string result_id = 6; // Provider-specific ID for content retrieval (optional)
 }
 
 // Stat
@@ -82,4 +100,82 @@ message SourceReadlinkResponse {
   bool ok = 1;
   string error = 2;
   string target = 3;
+}
+
+// ==================== Smart Query Messages ====================
+
+// SmartQuery represents a stored query that materializes as filesystem content
+message SmartQuery {
+  string external_id = 1;
+  string integration = 2;      // "gmail", "gdrive", etc.
+  string path = 3;             // Full path: "/sources/gmail/unread-emails"
+  string name = 4;             // Folder/file name
+  string query_spec = 5;       // JSON query params from LLM
+  string guidance = 6;         // User-provided context for inference
+  string output_format = 7;    // "folder" or "file"
+  string file_ext = 8;         // For files: ".json", ".md"
+  int32 cache_ttl = 9;         // Seconds, 0 = always live
+  int64 created_at = 10;       // Unix timestamp
+  int64 updated_at = 11;
+}
+
+// CreateSmartQuery - creates a query from a folder/file name via LLM inference
+message CreateSmartQueryRequest {
+  string integration = 1;      // e.g., "gmail"
+  string name = 2;             // Folder name like "unread-emails"
+  string guidance = 3;         // Optional extra context for LLM
+  string output_format = 4;    // "folder" or "file"
+  string file_ext = 5;         // For files: ".json", ".md"
+}
+
+message CreateSmartQueryResponse {
+  bool ok = 1;
+  string error = 2;
+  SmartQuery query = 3;
+}
+
+// GetSmartQuery - retrieves a query by path
+message GetSmartQueryRequest {
+  string path = 1;             // Full path: "/sources/gmail/unread-emails"
+}
+
+message GetSmartQueryResponse {
+  bool ok = 1;
+  string error = 2;
+  SmartQuery query = 3;        // nil if not found
+}
+
+// ListSmartQueries - lists queries under a parent path
+message ListSmartQueriesRequest {
+  string parent_path = 1;      // e.g., "/sources/gmail"
+}
+
+message ListSmartQueriesResponse {
+  bool ok = 1;
+  string error = 2;
+  repeated SmartQuery queries = 3;
+}
+
+// DeleteSmartQuery - removes a query
+message DeleteSmartQueryRequest {
+  string path = 1;
+}
+
+message DeleteSmartQueryResponse {
+  bool ok = 1;
+  string error = 2;
+}
+
+// ExecuteSmartQuery - runs a query and returns results
+message ExecuteSmartQueryRequest {
+  string path = 1;             // Query path: "/sources/gmail/unread-emails"
+  string filename = 2;         // Optional: specific file to read from folder results
+  string result_id = 3;        // Optional: provider-specific ID for direct content retrieval
+}
+
+message ExecuteSmartQueryResponse {
+  bool ok = 1;
+  string error = 2;
+  repeated SourceDirEntry entries = 3;  // For folder mode: directory entries
+  bytes file_data = 4;                   // For file mode or specific filename: content
 }

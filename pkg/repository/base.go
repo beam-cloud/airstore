@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"database/sql"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -63,31 +64,8 @@ type IntegrationRepository interface {
 	DeleteConnection(ctx context.Context, externalId string) error
 }
 
-// FilesystemRepository manages filesystem metadata in Redis (cache layer)
-// S3 is the source of truth; this provides fast access for stat/listing operations
-type FilesystemRepository interface {
-	// Directory operations
-	GetDirMeta(ctx context.Context, path string) (*types.DirMeta, error)
-	SaveDirMeta(ctx context.Context, meta *types.DirMeta) error
-	DeleteDirMeta(ctx context.Context, path string) error
-	ListDir(ctx context.Context, path string) ([]types.DirEntry, error)
-
-	// File operations
-	GetFileMeta(ctx context.Context, path string) (*types.FileMeta, error)
-	SaveFileMeta(ctx context.Context, meta *types.FileMeta) error
-	DeleteFileMeta(ctx context.Context, path string) error
-
-	// Symlink operations
-	GetSymlink(ctx context.Context, path string) (string, error)
-	SaveSymlink(ctx context.Context, path, target string) error
-	DeleteSymlink(ctx context.Context, path string) error
-
-	// Cache management
-	Invalidate(ctx context.Context, path string) error
-	InvalidatePrefix(ctx context.Context, prefix string) error
-}
-
-// BackendRepository is the main Postgres repository for persistent data
+// BackendRepository is the main Postgres repository for persistent data.
+// For filesystem queries and metadata, use FilesystemStore instead.
 type BackendRepository interface {
 	// Workspaces
 	CreateWorkspace(ctx context.Context, name string) (*types.Workspace, error)
@@ -121,6 +99,9 @@ type BackendRepository interface {
 	SetTaskStarted(ctx context.Context, externalId string) error
 	SetTaskResult(ctx context.Context, externalId string, exitCode int, errorMsg string) error
 	DeleteTask(ctx context.Context, externalId string) error
+
+	// Database access
+	DB() *sql.DB
 
 	// Utilities
 	Ping(ctx context.Context) error

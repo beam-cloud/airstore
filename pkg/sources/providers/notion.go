@@ -113,6 +113,148 @@ func (n *NotionProvider) Readlink(ctx context.Context, pctx *sources.ProviderCon
 	return "", sources.ErrNotFound
 }
 
+// Search executes a Notion search query and returns results
+// The query is a plain text search term
+func (n *NotionProvider) Search(ctx context.Context, pctx *sources.ProviderContext, query string, limit int) ([]sources.SearchResult, error) {
+	if pctx.Credentials == nil || pctx.Credentials.AccessToken == "" {
+		return nil, sources.ErrNotConnected
+	}
+
+	if limit <= 0 {
+		limit = 50
+	}
+
+	token := pctx.Credentials.AccessToken
+
+	// Build search request body
+	body := map[string]any{
+		"query":     query,
+		"page_size": limit,
+		"sort": map[string]string{
+			"direction": "descending",
+			"timestamp": "last_edited_time",
+		},
+	}
+
+	bodyJSON, _ := json.Marshal(body)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", notionAPIBase+"/search", bytes.NewReader(bodyJSON))
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Notion-Version", notionAPIVersion)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := n.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("notion API error: %s - %s", resp.Status, string(respBody))
+	}
+
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	resultsRaw, _ := result["results"].([]any)
+	if len(resultsRaw) == 0 {
+		return []sources.SearchResult{}, nil
+	}
+
+	results := make([]sources.SearchResult, 0, len(resultsRaw))
+	for _, r := range resultsRaw {
+		item, ok := r.(map[string]any)
+		if !ok {
+			continue
+		}
+
+		id, _ := item["id"].(string)
+		objType, _ := item["object"].(string)
+		lastEdited, _ := item["last_edited_time"].(string)
+
+		// Get title from properties
+		title := "Untitled"
+		if props, ok := item["properties"].(map[string]any); ok {
+			if titleProp, ok := props["title"].(map[string]any); ok {
+				if titleArr, ok := titleProp["title"].([]any); ok && len(titleArr) > 0 {
+					if textObj, ok := titleArr[0].(map[string]any); ok {
+						if plainText, ok := textObj["plain_text"].(string); ok {
+							title = plainText
+						}
+					}
+				}
+			}
+			// Try Name property (common for databases)
+			if title == "Untitled" {
+				if nameProp, ok := props["Name"].(map[string]any); ok {
+					if titleArr, ok := nameProp["title"].([]any); ok && len(titleArr) > 0 {
+						if textObj, ok := titleArr[0].(map[string]any); ok {
+							if plainText, ok := textObj["plain_text"].(string); ok {
+								title = plainText
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Parse modified time
+		mtime := sources.NowUnix()
+		if t, err := time.Parse(time.RFC3339, lastEdited); err == nil {
+			mtime = t.Unix()
+		}
+
+		// Generate filename: sanitized title with ID suffix
+		safeTitle := sanitizeNotionTitle(title)
+		shortID := id
+		if len(shortID) > 8 {
+			shortID = shortID[:8]
+		}
+		filename := fmt.Sprintf("%s_%s.json", safeTitle, shortID)
+
+		results = append(results, sources.SearchResult{
+			Name:    filename,
+			Id:      id,
+			Mode:    sources.ModeFile,
+			Size:    0,
+			Mtime:   mtime,
+			Preview: objType + ": " + title,
+		})
+	}
+
+	return results, nil
+}
+
+// sanitizeNotionTitle makes a Notion page title safe for use as a filename
+func sanitizeNotionTitle(title string) string {
+	// Replace unsafe characters with underscores
+	unsafe := []string{"/", "\\", ":", "*", "?", "\"", "<", ">", "|", " "}
+	result := title
+	for _, char := range unsafe {
+		result = strings.ReplaceAll(result, char, "_")
+	}
+	// Collapse multiple underscores
+	for strings.Contains(result, "__") {
+		result = strings.ReplaceAll(result, "__", "_")
+	}
+	result = strings.Trim(result, "_")
+	if result == "" {
+		result = "untitled"
+	}
+	// Truncate if too long
+	if len(result) > 50 {
+		result = result[:50]
+	}
+	return result
+}
+
 // --- Pages ---
 // /pages/<pageid>.json - page properties
 // /pages/<pageid>.md - page content as markdown
@@ -639,3 +781,202 @@ func (n *NotionProvider) postRequest(ctx context.Context, token, path string, bo
 
 	return json.NewDecoder(resp.Body).Decode(result)
 }
+
+// ============================================================================
+// QueryExecutor implementation
+// ============================================================================
+
+// ExecuteQuery runs a Notion search query and returns results with generated filenames.
+// This implements the sources.QueryExecutor interface for filesystem queries.
+func (n *NotionProvider) ExecuteQuery(ctx context.Context, pctx *sources.ProviderContext, spec sources.QuerySpec) ([]sources.QueryResult, error) {
+	if pctx.Credentials == nil || pctx.Credentials.AccessToken == "" {
+		return nil, sources.ErrNotConnected
+	}
+
+	limit := spec.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+
+	token := pctx.Credentials.AccessToken
+
+	// Build search request body
+	body := map[string]any{
+		"query":     spec.Query,
+		"page_size": limit,
+		"sort": map[string]string{
+			"direction": "descending",
+			"timestamp": "last_edited_time",
+		},
+	}
+
+	bodyJSON, _ := json.Marshal(body)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", notionAPIBase+"/search", bytes.NewReader(bodyJSON))
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Notion-Version", notionAPIVersion)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := n.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("notion API error: %s - %s", resp.Status, string(respBody))
+	}
+
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	resultsRaw, _ := result["results"].([]any)
+	if len(resultsRaw) == 0 {
+		return []sources.QueryResult{}, nil
+	}
+
+	filenameFormat := spec.FilenameFormat
+	if filenameFormat == "" {
+		filenameFormat = sources.DefaultFilenameFormat("notion")
+	}
+
+	results := make([]sources.QueryResult, 0, len(resultsRaw))
+	for _, r := range resultsRaw {
+		item, ok := r.(map[string]any)
+		if !ok {
+			continue
+		}
+
+		id, _ := item["id"].(string)
+		objType, _ := item["object"].(string)
+		lastEdited, _ := item["last_edited_time"].(string)
+		createdTime, _ := item["created_time"].(string)
+
+		// Get title from properties
+		title := "Untitled"
+		if props, ok := item["properties"].(map[string]any); ok {
+			if titleProp, ok := props["title"].(map[string]any); ok {
+				if titleArr, ok := titleProp["title"].([]any); ok && len(titleArr) > 0 {
+					if textObj, ok := titleArr[0].(map[string]any); ok {
+						if plainText, ok := textObj["plain_text"].(string); ok {
+							title = plainText
+						}
+					}
+				}
+			}
+			// Try Name property (common for databases)
+			if title == "Untitled" {
+				if nameProp, ok := props["Name"].(map[string]any); ok {
+					if titleArr, ok := nameProp["title"].([]any); ok && len(titleArr) > 0 {
+						if textObj, ok := titleArr[0].(map[string]any); ok {
+							if plainText, ok := textObj["plain_text"].(string); ok {
+								title = plainText
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Parse modified time
+		mtime := sources.NowUnix()
+		if t, err := time.Parse(time.RFC3339, lastEdited); err == nil {
+			mtime = t.Unix()
+		}
+
+		// Parse dates for metadata
+		modDate := ""
+		if t, err := time.Parse(time.RFC3339, lastEdited); err == nil {
+			modDate = t.Format("2006-01-02")
+		}
+		createdDate := ""
+		if t, err := time.Parse(time.RFC3339, createdTime); err == nil {
+			createdDate = t.Format("2006-01-02")
+		}
+
+		// Build metadata map
+		metadata := map[string]string{
+			"id":      id,
+			"title":   title,
+			"type":    objType,
+			"date":    modDate,
+			"created": createdDate,
+		}
+
+		// Generate filename
+		filename := n.FormatFilename(filenameFormat, metadata)
+
+		results = append(results, sources.QueryResult{
+			ID:       id,
+			Filename: filename,
+			Metadata: metadata,
+			Size:     0, // Unknown until read
+			Mtime:    mtime,
+		})
+	}
+
+	return results, nil
+}
+
+// ReadResult fetches the content of a Notion page by its page ID.
+// Returns the page content as markdown.
+// This implements the sources.QueryExecutor interface.
+func (n *NotionProvider) ReadResult(ctx context.Context, pctx *sources.ProviderContext, resultID string) ([]byte, error) {
+	if pctx.Credentials == nil || pctx.Credentials.AccessToken == "" {
+		return nil, sources.ErrNotConnected
+	}
+
+	// Remove dashes if present to normalize, then add them back
+	cleanId := strings.ReplaceAll(resultID, "-", "")
+	if len(cleanId) == 32 {
+		resultID = fmt.Sprintf("%s-%s-%s-%s-%s", cleanId[0:8], cleanId[8:12], cleanId[12:16], cleanId[16:20], cleanId[20:32])
+	}
+
+	return n.fetchPageAsMarkdown(ctx, pctx.Credentials.AccessToken, resultID)
+}
+
+// FormatFilename generates a filename from metadata using a format template.
+// Supported placeholders: {id}, {title}, {type}, {date}, {created}
+// This implements the sources.QueryExecutor interface.
+func (n *NotionProvider) FormatFilename(format string, metadata map[string]string) string {
+	if format == "" {
+		format = "{title}_{id}.md"
+	}
+
+	result := format
+	for key, value := range metadata {
+		placeholder := "{" + key + "}"
+		// Sanitize the value for filesystem use
+		safeValue := sanitizeNotionTitle(value)
+		// Truncate long values (except id)
+		if key != "id" && len(safeValue) > 50 {
+			safeValue = safeValue[:50]
+		}
+		result = strings.ReplaceAll(result, placeholder, safeValue)
+	}
+
+	// Ensure filename is not empty
+	if result == "" || result == ".md" {
+		if id, ok := metadata["id"]; ok {
+			shortID := id
+			if len(shortID) > 8 {
+				shortID = shortID[:8]
+			}
+			result = shortID + ".md"
+		} else {
+			result = "unknown.md"
+		}
+	}
+
+	return result
+}
+
+// Compile-time interface check for QueryExecutor
+var _ sources.QueryExecutor = (*NotionProvider)(nil)

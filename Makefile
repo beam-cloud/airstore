@@ -117,6 +117,11 @@ clean:
 protocol:
 	@bash bin/gen_proto.sh
 
+baml:
+	@echo "Generating BAML client..."
+	@baml-cli generate --from pkg/sources/queries/baml_src
+	@goimports -w pkg/sources/queries/baml_client/
+
 fmt: check-go
 	go fmt ./...
 
@@ -238,7 +243,7 @@ clean-all:
 	@k3d registry delete --all 2>/dev/null || true
 	@docker network prune -f 2>/dev/null || true
 
-.PHONY: check-go setup doctor build cli shim clean protocol fmt tidy \
+.PHONY: check-go setup doctor build cli shim clean protocol baml fmt tidy \
         test e2e e2e-check \
         k3d-up k3d-down k3d-rebuild use \
         gateway worker deploy undeploy restart \

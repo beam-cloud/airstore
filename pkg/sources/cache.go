@@ -9,11 +9,9 @@ import (
 )
 
 const (
-	// DefaultCacheTTL is the default TTL for cached source data
-	DefaultCacheTTL = 30 * time.Second
+	DefaultCacheTTL  = 30 * time.Second // DefaultCacheTTL is the default TTL for cached source data
+	DefaultCacheSize = 10000            // DefaultCacheSize is the maximum number of cache entries
 
-	// DefaultCacheSize is the maximum number of cache entries
-	DefaultCacheSize = 10000
 )
 
 // CacheEntry holds a cached response with expiration
@@ -127,6 +125,17 @@ func (c *SourceCache) SetEntries(key string, entries []DirEntry) {
 	c.set(key, &CacheEntry{
 		Entries:   entries,
 		ExpiresAt: time.Now().Add(c.ttl),
+	})
+}
+
+// SetEntriesWithTTL caches directory entries with a custom TTL
+func (c *SourceCache) SetEntriesWithTTL(key string, entries []DirEntry, ttl time.Duration) {
+	if ttl <= 0 {
+		ttl = c.ttl
+	}
+	c.set(key, &CacheEntry{
+		Entries:   entries,
+		ExpiresAt: time.Now().Add(ttl),
 	})
 }
 

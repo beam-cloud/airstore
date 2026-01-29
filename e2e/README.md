@@ -30,6 +30,7 @@ make e2e
 | `tools` | Execute Wikipedia tool via filesystem |
 | `context` | S3 read/write via LocalStack |
 | `sources` | Read-only integration filesystem (GitHub, Gmail, Notion, etc.) |
+| `smart` | Smart query filesystem (mkdir creates Gmail queries, etc.) |
 
 ## Requirements
 

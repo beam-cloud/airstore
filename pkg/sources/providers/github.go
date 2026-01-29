@@ -107,13 +107,9 @@ func (g *GitHubProvider) Readlink(ctx context.Context, pctx *sources.ProviderCon
 	return "", sources.ErrNotFound
 }
 
-// truncateSnippet truncates a string to maxLen characters
-func truncateSnippet(s string, maxLen int) string {
-	s = strings.TrimSpace(s)
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
+// Search is not supported for GitHub (use the repository browser instead)
+func (g *GitHubProvider) Search(ctx context.Context, pctx *sources.ProviderContext, query string, limit int) ([]sources.SearchResult, error) {
+	return nil, sources.ErrSearchNotSupported
 }
 
 // --- Views ---
@@ -393,17 +389,17 @@ func (g *GitHubProvider) fetchRepoInfo(ctx context.Context, token, owner, repo s
 	}
 
 	return jsonMarshal(map[string]any{
-		"name":         result["name"],
-		"full_name":    result["full_name"],
-		"description":  result["description"],
-		"private":      result["private"],
-		"language":     result["language"],
-		"stars":        result["stargazers_count"],
-		"forks":        result["forks_count"],
-		"open_issues":  result["open_issues_count"],
+		"name":           result["name"],
+		"full_name":      result["full_name"],
+		"description":    result["description"],
+		"private":        result["private"],
+		"language":       result["language"],
+		"stars":          result["stargazers_count"],
+		"forks":          result["forks_count"],
+		"open_issues":    result["open_issues_count"],
 		"default_branch": result["default_branch"],
-		"url":          result["html_url"],
-		"clone_url":    result["clone_url"],
+		"url":            result["html_url"],
+		"clone_url":      result["clone_url"],
 	})
 }
 

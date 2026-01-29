@@ -19,10 +19,15 @@ import (
 const _ = grpc.SupportPackageIsVersion7
 
 const (
-	SourceService_Stat_FullMethodName     = "/sources.SourceService/Stat"
-	SourceService_ReadDir_FullMethodName  = "/sources.SourceService/ReadDir"
-	SourceService_Read_FullMethodName     = "/sources.SourceService/Read"
-	SourceService_Readlink_FullMethodName = "/sources.SourceService/Readlink"
+	SourceService_Stat_FullMethodName              = "/sources.SourceService/Stat"
+	SourceService_ReadDir_FullMethodName           = "/sources.SourceService/ReadDir"
+	SourceService_Read_FullMethodName              = "/sources.SourceService/Read"
+	SourceService_Readlink_FullMethodName          = "/sources.SourceService/Readlink"
+	SourceService_CreateSmartQuery_FullMethodName  = "/sources.SourceService/CreateSmartQuery"
+	SourceService_GetSmartQuery_FullMethodName     = "/sources.SourceService/GetSmartQuery"
+	SourceService_ListSmartQueries_FullMethodName  = "/sources.SourceService/ListSmartQueries"
+	SourceService_DeleteSmartQuery_FullMethodName  = "/sources.SourceService/DeleteSmartQuery"
+	SourceService_ExecuteSmartQuery_FullMethodName = "/sources.SourceService/ExecuteSmartQuery"
 )
 
 // SourceServiceClient is the client API for SourceService service.
@@ -37,6 +42,16 @@ type SourceServiceClient interface {
 	Read(ctx context.Context, in *SourceReadRequest, opts ...grpc.CallOption) (*SourceReadResponse, error)
 	// Readlink reads a symbolic link target (for friendly aliases)
 	Readlink(ctx context.Context, in *SourceReadlinkRequest, opts ...grpc.CallOption) (*SourceReadlinkResponse, error)
+	// CreateSmartQuery creates a new smart query (called on mkdir/touch)
+	CreateSmartQuery(ctx context.Context, in *CreateSmartQueryRequest, opts ...grpc.CallOption) (*CreateSmartQueryResponse, error)
+	// GetSmartQuery retrieves a query by its path
+	GetSmartQuery(ctx context.Context, in *GetSmartQueryRequest, opts ...grpc.CallOption) (*GetSmartQueryResponse, error)
+	// ListSmartQueries lists queries under a parent path
+	ListSmartQueries(ctx context.Context, in *ListSmartQueriesRequest, opts ...grpc.CallOption) (*ListSmartQueriesResponse, error)
+	// DeleteSmartQuery removes a query
+	DeleteSmartQuery(ctx context.Context, in *DeleteSmartQueryRequest, opts ...grpc.CallOption) (*DeleteSmartQueryResponse, error)
+	// ExecuteSmartQuery runs a query and returns materialized results
+	ExecuteSmartQuery(ctx context.Context, in *ExecuteSmartQueryRequest, opts ...grpc.CallOption) (*ExecuteSmartQueryResponse, error)
 }
 
 type sourceServiceClient struct {
@@ -83,6 +98,51 @@ func (c *sourceServiceClient) Readlink(ctx context.Context, in *SourceReadlinkRe
 	return out, nil
 }
 
+func (c *sourceServiceClient) CreateSmartQuery(ctx context.Context, in *CreateSmartQueryRequest, opts ...grpc.CallOption) (*CreateSmartQueryResponse, error) {
+	out := new(CreateSmartQueryResponse)
+	err := c.cc.Invoke(ctx, SourceService_CreateSmartQuery_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sourceServiceClient) GetSmartQuery(ctx context.Context, in *GetSmartQueryRequest, opts ...grpc.CallOption) (*GetSmartQueryResponse, error) {
+	out := new(GetSmartQueryResponse)
+	err := c.cc.Invoke(ctx, SourceService_GetSmartQuery_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sourceServiceClient) ListSmartQueries(ctx context.Context, in *ListSmartQueriesRequest, opts ...grpc.CallOption) (*ListSmartQueriesResponse, error) {
+	out := new(ListSmartQueriesResponse)
+	err := c.cc.Invoke(ctx, SourceService_ListSmartQueries_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sourceServiceClient) DeleteSmartQuery(ctx context.Context, in *DeleteSmartQueryRequest, opts ...grpc.CallOption) (*DeleteSmartQueryResponse, error) {
+	out := new(DeleteSmartQueryResponse)
+	err := c.cc.Invoke(ctx, SourceService_DeleteSmartQuery_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sourceServiceClient) ExecuteSmartQuery(ctx context.Context, in *ExecuteSmartQueryRequest, opts ...grpc.CallOption) (*ExecuteSmartQueryResponse, error) {
+	out := new(ExecuteSmartQueryResponse)
+	err := c.cc.Invoke(ctx, SourceService_ExecuteSmartQuery_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SourceServiceServer is the server API for SourceService service.
 // All implementations must embed UnimplementedSourceServiceServer
 // for forward compatibility
@@ -95,6 +155,16 @@ type SourceServiceServer interface {
 	Read(context.Context, *SourceReadRequest) (*SourceReadResponse, error)
 	// Readlink reads a symbolic link target (for friendly aliases)
 	Readlink(context.Context, *SourceReadlinkRequest) (*SourceReadlinkResponse, error)
+	// CreateSmartQuery creates a new smart query (called on mkdir/touch)
+	CreateSmartQuery(context.Context, *CreateSmartQueryRequest) (*CreateSmartQueryResponse, error)
+	// GetSmartQuery retrieves a query by its path
+	GetSmartQuery(context.Context, *GetSmartQueryRequest) (*GetSmartQueryResponse, error)
+	// ListSmartQueries lists queries under a parent path
+	ListSmartQueries(context.Context, *ListSmartQueriesRequest) (*ListSmartQueriesResponse, error)
+	// DeleteSmartQuery removes a query
+	DeleteSmartQuery(context.Context, *DeleteSmartQueryRequest) (*DeleteSmartQueryResponse, error)
+	// ExecuteSmartQuery runs a query and returns materialized results
+	ExecuteSmartQuery(context.Context, *ExecuteSmartQueryRequest) (*ExecuteSmartQueryResponse, error)
 	mustEmbedUnimplementedSourceServiceServer()
 }
 
@@ -113,6 +183,21 @@ func (UnimplementedSourceServiceServer) Read(context.Context, *SourceReadRequest
 }
 func (UnimplementedSourceServiceServer) Readlink(context.Context, *SourceReadlinkRequest) (*SourceReadlinkResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Readlink not implemented")
+}
+func (UnimplementedSourceServiceServer) CreateSmartQuery(context.Context, *CreateSmartQueryRequest) (*CreateSmartQueryResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CreateSmartQuery not implemented")
+}
+func (UnimplementedSourceServiceServer) GetSmartQuery(context.Context, *GetSmartQueryRequest) (*GetSmartQueryResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetSmartQuery not implemented")
+}
+func (UnimplementedSourceServiceServer) ListSmartQueries(context.Context, *ListSmartQueriesRequest) (*ListSmartQueriesResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListSmartQueries not implemented")
+}
+func (UnimplementedSourceServiceServer) DeleteSmartQuery(context.Context, *DeleteSmartQueryRequest) (*DeleteSmartQueryResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DeleteSmartQuery not implemented")
+}
+func (UnimplementedSourceServiceServer) ExecuteSmartQuery(context.Context, *ExecuteSmartQueryRequest) (*ExecuteSmartQueryResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ExecuteSmartQuery not implemented")
 }
 func (UnimplementedSourceServiceServer) mustEmbedUnimplementedSourceServiceServer() {}
 
@@ -199,6 +284,96 @@ func _SourceService_Readlink_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SourceService_CreateSmartQuery_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateSmartQueryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SourceServiceServer).CreateSmartQuery(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SourceService_CreateSmartQuery_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SourceServiceServer).CreateSmartQuery(ctx, req.(*CreateSmartQueryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SourceService_GetSmartQuery_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSmartQueryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SourceServiceServer).GetSmartQuery(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SourceService_GetSmartQuery_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SourceServiceServer).GetSmartQuery(ctx, req.(*GetSmartQueryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SourceService_ListSmartQueries_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListSmartQueriesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SourceServiceServer).ListSmartQueries(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SourceService_ListSmartQueries_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SourceServiceServer).ListSmartQueries(ctx, req.(*ListSmartQueriesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SourceService_DeleteSmartQuery_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteSmartQueryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SourceServiceServer).DeleteSmartQuery(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SourceService_DeleteSmartQuery_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SourceServiceServer).DeleteSmartQuery(ctx, req.(*DeleteSmartQueryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SourceService_ExecuteSmartQuery_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExecuteSmartQueryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SourceServiceServer).ExecuteSmartQuery(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SourceService_ExecuteSmartQuery_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SourceServiceServer).ExecuteSmartQuery(ctx, req.(*ExecuteSmartQueryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SourceService_ServiceDesc is the grpc.ServiceDesc for SourceService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -221,6 +396,26 @@ var SourceService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Readlink",
 			Handler:    _SourceService_Readlink_Handler,
+		},
+		{
+			MethodName: "CreateSmartQuery",
+			Handler:    _SourceService_CreateSmartQuery_Handler,
+		},
+		{
+			MethodName: "GetSmartQuery",
+			Handler:    _SourceService_GetSmartQuery_Handler,
+		},
+		{
+			MethodName: "ListSmartQueries",
+			Handler:    _SourceService_ListSmartQueries_Handler,
+		},
+		{
+			MethodName: "DeleteSmartQuery",
+			Handler:    _SourceService_DeleteSmartQuery_Handler,
+		},
+		{
+			MethodName: "ExecuteSmartQuery",
+			Handler:    _SourceService_ExecuteSmartQuery_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

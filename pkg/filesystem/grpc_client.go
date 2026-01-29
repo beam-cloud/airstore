@@ -3,6 +3,7 @@ package filesystem
 import (
 	"context"
 	"errors"
+	"syscall"
 	"time"
 
 	pb "github.com/beam-cloud/airstore/proto"
@@ -11,20 +12,20 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
-// GRPCConfig holds configuration for connecting to the gateway
+// GRPCConfig holds configuration for connecting to the gateway.
 type GRPCConfig struct {
 	GatewayAddr string
 	Token       string
 }
 
-// GRPCMetadataEngine implements MetadataEngine via gRPC to the gateway
+// GRPCMetadataEngine implements MetadataEngine and LegacyMetadataEngine via gRPC.
 type GRPCMetadataEngine struct {
 	conn   *grpc.ClientConn
 	client pb.FilesystemServiceClient
 	token  string
 }
 
-// NewGRPCMetadataEngine creates a new gRPC-based metadata engine
+// NewGRPCMetadataEngine creates a new gRPC-based metadata engine.
 func NewGRPCMetadataEngine(cfg GRPCConfig) (*GRPCMetadataEngine, error) {
 	conn, err := grpc.NewClient(
 		cfg.GatewayAddr,
@@ -49,11 +50,23 @@ func (m *GRPCMetadataEngine) ctx() context.Context {
 	return ctx
 }
 
+// Close closes the gRPC connection.
+func (m *GRPCMetadataEngine) Close() error {
+	return m.conn.Close()
+}
+
+// Conn returns the underlying gRPC connection for sharing with other services.
+func (m *GRPCMetadataEngine) Conn() *grpc.ClientConn {
+	return m.conn
+}
+
+// ===== LegacyMetadataEngine implementation =====
+// These methods provide backward compatibility with the old FUSE implementation.
+
 func (m *GRPCMetadataEngine) GetDirectoryAccessMetadata(pid, name string) (*DirectoryAccessMetadata, error) {
-	resp, err := m.client.GetDirectoryAccess(m.ctx(), &pb.GetDirectoryAccessRequest{
-		Pid:  pid,
-		Name: name,
-	})
+	path := buildPath(pid, name)
+
+	resp, err := m.client.Stat(m.ctx(), &pb.StatRequest{Path: path})
 	if err != nil {
 		return nil, err
 	}
@@ -61,40 +74,19 @@ func (m *GRPCMetadataEngine) GetDirectoryAccessMetadata(pid, name string) (*Dire
 		return nil, errors.New(resp.Error)
 	}
 
-	meta := &DirectoryAccessMetadata{
-		PID:        resp.Metadata.Pid,
-		ID:         resp.Metadata.Id,
-		Permission: resp.Metadata.Permission,
-		RenameList: resp.Metadata.RenameList,
-	}
-
-	if resp.Metadata.BackPointer != nil {
-		meta.BackPointer = &BackPointer{
-			BirthParentID: resp.Metadata.BackPointer.BirthParentId,
-			NameVersion:   int(resp.Metadata.BackPointer.NameVersion),
-		}
-	}
-
-	return meta, nil
+	return &DirectoryAccessMetadata{
+		PID:        pid,
+		ID:         path,
+		Permission: resp.Info.Mode,
+	}, nil
 }
 
 func (m *GRPCMetadataEngine) SaveDirectoryAccessMetadata(meta *DirectoryAccessMetadata) error {
-	pbMeta := &pb.DirectoryAccessMetadata{
-		Pid:        meta.PID,
-		Id:         meta.ID,
-		Permission: meta.Permission,
-		RenameList: meta.RenameList,
-	}
-
-	if meta.BackPointer != nil {
-		pbMeta.BackPointer = &pb.BackPointer{
-			BirthParentId: meta.BackPointer.BirthParentID,
-			NameVersion:   int32(meta.BackPointer.NameVersion),
-		}
-	}
-
-	resp, err := m.client.SaveDirectoryAccess(m.ctx(), &pb.SaveDirectoryAccessRequest{
-		Metadata: pbMeta,
+	path := buildPath(meta.PID, meta.ID)
+	
+	resp, err := m.client.Mkdir(m.ctx(), &pb.MkdirRequest{
+		Path: path,
+		Mode: meta.Permission,
 	})
 	if err != nil {
 		return err
@@ -106,9 +98,7 @@ func (m *GRPCMetadataEngine) SaveDirectoryAccessMetadata(meta *DirectoryAccessMe
 }
 
 func (m *GRPCMetadataEngine) GetDirectoryContentMetadata(id string) (*DirectoryContentMetadata, error) {
-	resp, err := m.client.GetDirectoryContent(m.ctx(), &pb.GetDirectoryContentRequest{
-		Id: id,
-	})
+	resp, err := m.client.ReadDir(m.ctx(), &pb.ReadDirRequest{Path: id})
 	if err != nil {
 		return nil, err
 	}
@@ -116,45 +106,31 @@ func (m *GRPCMetadataEngine) GetDirectoryContentMetadata(id string) (*DirectoryC
 		return nil, errors.New(resp.Error)
 	}
 
+	names := make([]string, len(resp.Entries))
 	timestamps := make(map[string]time.Time)
-	for k, v := range resp.Metadata.Timestamps {
-		timestamps[k] = time.Unix(v, 0)
+	for i, e := range resp.Entries {
+		names[i] = e.Name
+		if e.Mtime > 0 {
+			timestamps[e.Name] = time.Unix(e.Mtime, 0)
+		}
 	}
 
 	return &DirectoryContentMetadata{
-		Id:         resp.Metadata.Id,
-		EntryList:  resp.Metadata.EntryList,
+		Id:         id,
+		EntryList:  names,
 		Timestamps: timestamps,
 	}, nil
 }
 
 func (m *GRPCMetadataEngine) SaveDirectoryContentMetadata(meta *DirectoryContentMetadata) error {
-	timestamps := make(map[string]int64)
-	for k, v := range meta.Timestamps {
-		timestamps[k] = v.Unix()
-	}
-
-	resp, err := m.client.SaveDirectoryContent(m.ctx(), &pb.SaveDirectoryContentRequest{
-		Metadata: &pb.DirectoryContentMetadata{
-			Id:         meta.Id,
-			EntryList:  meta.EntryList,
-			Timestamps: timestamps,
-		},
-	})
-	if err != nil {
-		return err
-	}
-	if !resp.Ok {
-		return errors.New(resp.Error)
-	}
+	// No-op: directory contents are derived from actual entries
 	return nil
 }
 
 func (m *GRPCMetadataEngine) GetFileMetadata(pid, name string) (*FileMetadata, error) {
-	resp, err := m.client.GetFileMetadata(m.ctx(), &pb.GetFileMetadataRequest{
-		Pid:  pid,
-		Name: name,
-	})
+	path := buildPath(pid, name)
+
+	resp, err := m.client.Stat(m.ctx(), &pb.StatRequest{Path: path})
 	if err != nil {
 		return nil, err
 	}
@@ -163,21 +139,18 @@ func (m *GRPCMetadataEngine) GetFileMetadata(pid, name string) (*FileMetadata, e
 	}
 
 	return &FileMetadata{
-		ID:       resp.Metadata.Id,
-		PID:      resp.Metadata.Pid,
-		Name:     resp.Metadata.Name,
-		FileData: resp.Metadata.FileData,
+		ID:   path,
+		PID:  pid,
+		Name: name,
 	}, nil
 }
 
 func (m *GRPCMetadataEngine) SaveFileMetadata(meta *FileMetadata) error {
-	resp, err := m.client.SaveFileMetadata(m.ctx(), &pb.SaveFileMetadataRequest{
-		Metadata: &pb.FileMetadata{
-			Id:       meta.ID,
-			Pid:      meta.PID,
-			Name:     meta.Name,
-			FileData: meta.FileData,
-		},
+	path := buildPath(meta.PID, meta.Name)
+	
+	resp, err := m.client.Create(m.ctx(), &pb.CreateRequest{
+		Path: path,
+		Mode: syscall.S_IFREG | 0644,
 	})
 	if err != nil {
 		return err
@@ -189,27 +162,28 @@ func (m *GRPCMetadataEngine) SaveFileMetadata(meta *FileMetadata) error {
 }
 
 func (m *GRPCMetadataEngine) ListDirectory(path string) []DirEntry {
-	resp, err := m.client.ListDirectory(m.ctx(), &pb.ListDirectoryRequest{
-		Path: path,
-	})
+	resp, err := m.client.ReadDir(m.ctx(), &pb.ReadDirRequest{Path: path})
 	if err != nil || !resp.Ok {
 		return nil
 	}
 
 	entries := make([]DirEntry, len(resp.Entries))
 	for i, e := range resp.Entries {
-		entries[i] = DirEntry{Name: e.Name, Mode: e.Mode, Ino: e.Ino}
+		entries[i] = DirEntry{
+			Name: e.Name,
+			Mode: e.Mode,
+		}
 	}
 	return entries
 }
 
 func (m *GRPCMetadataEngine) RenameDirectory(oldPID, oldName, newPID, newName string, version int) error {
-	resp, err := m.client.RenameDirectory(m.ctx(), &pb.RenameDirectoryRequest{
-		OldPid:  oldPID,
-		OldName: oldName,
-		NewPid:  newPID,
-		NewName: newName,
-		Version: int32(version),
+	oldPath := buildPath(oldPID, oldName)
+	newPath := buildPath(newPID, newName)
+
+	resp, err := m.client.Rename(m.ctx(), &pb.RenameRequest{
+		OldPath: oldPath,
+		NewPath: newPath,
 	})
 	if err != nil {
 		return err
@@ -221,11 +195,9 @@ func (m *GRPCMetadataEngine) RenameDirectory(oldPID, oldName, newPID, newName st
 }
 
 func (m *GRPCMetadataEngine) DeleteDirectory(parentID, name string, version int) error {
-	resp, err := m.client.DeleteDirectory(m.ctx(), &pb.DeleteDirectoryRequest{
-		ParentId: parentID,
-		Name:     name,
-		Version:  int32(version),
-	})
+	path := buildPath(parentID, name)
+
+	resp, err := m.client.Remove(m.ctx(), &pb.RemoveRequest{Path: path})
 	if err != nil {
 		return err
 	}
@@ -235,11 +207,10 @@ func (m *GRPCMetadataEngine) DeleteDirectory(parentID, name string, version int)
 	return nil
 }
 
-func (m *GRPCMetadataEngine) Close() error {
-	return m.conn.Close()
-}
-
-// Conn returns the underlying gRPC connection for sharing with other services
-func (m *GRPCMetadataEngine) Conn() *grpc.ClientConn {
-	return m.conn
+// buildPath constructs a path from parent ID and name.
+func buildPath(pid, name string) string {
+	if pid == "" {
+		return "/" + name
+	}
+	return pid + "/" + name
 }

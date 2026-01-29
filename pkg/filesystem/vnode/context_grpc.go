@@ -47,6 +47,7 @@ func (c *ContextVNodeGRPC) ctx() (context.Context, context.CancelFunc) {
 }
 
 func (c *ContextVNodeGRPC) Prefix() string { return ContextPath }
+func (c *ContextVNodeGRPC) Type() VNodeType { return VNodeWritable }
 
 func (c *ContextVNodeGRPC) rel(path string) string {
 	return strings.TrimPrefix(strings.TrimPrefix(path, ContextPath), "/")

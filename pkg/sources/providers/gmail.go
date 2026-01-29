@@ -1,13 +1,19 @@
 package providers
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -91,14 +97,16 @@ type categoryCache struct {
 
 // gmailMessage holds parsed message data for folder organization
 type gmailMessage struct {
-	ID       string
-	ThreadID string
-	From     string
-	To       string
-	Subject  string
-	Date     string
-	Snippet  string
-	Labels   []string
+	ID           string
+	ThreadID     string
+	From         string
+	To           string
+	Subject      string
+	Date         string
+	InternalDate int64 // Unix timestamp in milliseconds (reliable, from Gmail API)
+	Snippet      string
+	Labels       []string
+	SizeEstimate int64 // Approximate size in bytes
 
 	// Derived folder names
 	SenderFolder  string // sanitized sender email
@@ -171,8 +179,8 @@ func (g *GmailProvider) ReadDir(ctx context.Context, pctx *sources.ProviderConte
 		// Root directory - return 0 for dynamic files to force stat lookup for real size
 		return []sources.DirEntry{
 			fileEntry("README.md", int64(len(gmailReadme))),
-			fileEntry("unread.json", 0),  // Dynamic - stat will return real size
-			fileEntry("recent.json", 0),  // Dynamic - stat will return real size
+			fileEntry("unread.json", 0), // Dynamic - stat will return real size
+			fileEntry("recent.json", 0), // Dynamic - stat will return real size
 			dirEntry("messages"),
 			dirEntry("labels"),
 		}, nil
@@ -226,6 +234,283 @@ func (g *GmailProvider) Read(ctx context.Context, pctx *sources.ProviderContext,
 func (g *GmailProvider) Readlink(ctx context.Context, pctx *sources.ProviderContext, path string) (string, error) {
 	return "", sources.ErrNotFound
 }
+
+// Search executes a Gmail search query and returns results
+// The query is passed directly to Gmail's search API (e.g., "is:unread", "from:john newer_than:7d")
+func (g *GmailProvider) Search(ctx context.Context, pctx *sources.ProviderContext, query string, limit int) ([]sources.SearchResult, error) {
+	if err := checkAuth(pctx); err != nil {
+		return nil, err
+	}
+
+	if limit <= 0 {
+		limit = 50
+	}
+
+	token := pctx.Credentials.AccessToken
+
+	// Fetch message IDs using the query
+	var listResult map[string]any
+	path := fmt.Sprintf("/users/me/messages?q=%s&maxResults=%d", url.QueryEscape(query), limit)
+	if err := g.request(ctx, token, path, &listResult); err != nil {
+		return nil, err
+	}
+
+	rawMessages, _ := listResult["messages"].([]any)
+	if len(rawMessages) == 0 {
+		return []sources.SearchResult{}, nil
+	}
+
+	// Collect message IDs
+	msgIDs := make([]string, 0, len(rawMessages))
+	for _, m := range rawMessages {
+		msgMap, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		msgID, _ := msgMap["id"].(string)
+		if msgID != "" {
+			msgIDs = append(msgIDs, msgID)
+		}
+	}
+
+	// Fetch metadata concurrently (with semaphore to limit parallelism)
+	const maxConcurrent = 10
+	sem := make(chan struct{}, maxConcurrent)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	results := make([]sources.SearchResult, 0, len(msgIDs))
+
+	for _, msgID := range msgIDs {
+		wg.Add(1)
+		sem <- struct{}{} // Acquire semaphore
+
+		go func(id string) {
+			defer wg.Done()
+			defer func() { <-sem }() // Release semaphore
+
+			// Fetch message metadata
+			var msgResult map[string]any
+			msgPath := fmt.Sprintf("/users/me/messages/%s?format=metadata", id)
+			if err := g.request(ctx, token, msgPath, &msgResult); err != nil {
+				return // Skip failed messages
+			}
+
+			msg := g.parseMessage(msgResult)
+
+			// Generate a meaningful filename: {date}_{subject}_{id}.txt
+			filename := g.searchResultFilename(msg)
+
+			mu.Lock()
+			results = append(results, sources.SearchResult{
+				Name:    filename,
+				Id:      id,
+				Mode:    sources.ModeFile,
+				Size:    0, // Unknown until read
+				Mtime:   getMessageTimestamp(msg),
+				Preview: msg.Snippet,
+			})
+			mu.Unlock()
+		}(msgID)
+	}
+
+	wg.Wait()
+	return results, nil
+}
+
+// searchResultFilename generates a meaningful filename for a search result
+// Format: {date}_{subject_slug}_{id}.txt
+func (g *GmailProvider) searchResultFilename(msg gmailMessage) string {
+	datePrefix := parseEmailDate(msg.Date)
+	subj := sanitizeFolderName(truncateSubject(msg.Subject, 40))
+
+	// Ensure we have at least 8 chars of message ID for uniqueness
+	idSuffix := msg.ID
+	if len(idSuffix) > 8 {
+		idSuffix = idSuffix[:8]
+	}
+
+	return fmt.Sprintf("%s_%s_%s.txt", datePrefix, subj, idSuffix)
+}
+
+// parseEmailTimestamp converts email date string to Unix timestamp
+// getMessageTimestamp returns the Unix timestamp for a message.
+// Prefers internalDate (reliable millisecond timestamp from Gmail API),
+// falls back to parsing the Date header if internalDate is not available.
+func getMessageTimestamp(msg gmailMessage) int64 {
+	// Prefer internalDate (milliseconds since epoch) - most reliable
+	if msg.InternalDate > 0 {
+		return msg.InternalDate / 1000 // Convert ms to seconds
+	}
+	// Fall back to parsing Date header
+	return parseEmailTimestamp(msg.Date)
+}
+
+func parseEmailTimestamp(dateStr string) int64 {
+	if dateStr == "" {
+		return time.Now().Unix()
+	}
+
+	formats := []string{
+		time.RFC1123Z,
+		time.RFC1123,
+		"Mon, 2 Jan 2006 15:04:05 -0700",
+		"Mon, 2 Jan 2006 15:04:05 MST",
+		"2 Jan 2006 15:04:05 -0700",
+		"Mon, 02 Jan 2006 15:04:05 -0700 (MST)",
+		"Mon, 2 Jan 2006 15:04:05 -0700 (MST)",
+		"2006-01-02T15:04:05Z",                 // ISO 8601
+		"2006-01-02T15:04:05-07:00",            // ISO 8601 with timezone
+		time.RFC3339,                           // Standard RFC3339
+		"Mon Jan 2 15:04:05 MST 2006",          // Another common format
+		"Mon Jan 02 15:04:05 MST 2006",         // Variant
+		"02 Jan 2006 15:04:05 -0700",           // Variant without day name
+	}
+
+	for _, format := range formats {
+		if t, err := time.Parse(format, dateStr); err == nil {
+			return t.Unix()
+		}
+	}
+
+	log.Debug().Str("date", dateStr).Msg("failed to parse email date, using current time")
+	return time.Now().Unix()
+}
+
+// ReadSearchResult reads the content of a search result by message ID
+func (g *GmailProvider) ReadSearchResult(ctx context.Context, pctx *sources.ProviderContext, messageID string) ([]byte, error) {
+	if err := checkAuth(pctx); err != nil {
+		return nil, err
+	}
+	return g.fetchMessageBody(ctx, pctx.Credentials.AccessToken, messageID)
+}
+
+// ============================================================================
+// QueryExecutor implementation
+// ============================================================================
+
+// ExecuteQuery runs a Gmail search query and returns results with generated filenames.
+// This implements the sources.QueryExecutor interface for filesystem queries.
+func (g *GmailProvider) ExecuteQuery(ctx context.Context, pctx *sources.ProviderContext, spec sources.QuerySpec) ([]sources.QueryResult, error) {
+	if err := checkAuth(pctx); err != nil {
+		return nil, err
+	}
+
+	limit := spec.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+
+	token := pctx.Credentials.AccessToken
+
+	// Fetch message IDs using the query
+	var listResult map[string]any
+	path := fmt.Sprintf("/users/me/messages?q=%s&maxResults=%d", url.QueryEscape(spec.Query), limit)
+	if err := g.request(ctx, token, path, &listResult); err != nil {
+		return nil, err
+	}
+
+	rawMessages, _ := listResult["messages"].([]any)
+	if len(rawMessages) == 0 {
+		return []sources.QueryResult{}, nil
+	}
+
+	// Collect message IDs
+	msgIDs := make([]string, 0, len(rawMessages))
+	for _, m := range rawMessages {
+		msgMap, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		msgID, _ := msgMap["id"].(string)
+		if msgID != "" {
+			msgIDs = append(msgIDs, msgID)
+		}
+	}
+
+	metadataResults, err := g.fetchMessagesMetadataBatch(ctx, token, msgIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]sources.QueryResult, 0, len(metadataResults))
+	filenameFormat := spec.FilenameFormat
+	if filenameFormat == "" {
+		filenameFormat = sources.DefaultFilenameFormat("gmail")
+	}
+
+	for _, msgResult := range metadataResults {
+		msg := g.parseMessage(msgResult)
+		if msg.ID == "" {
+			continue
+		}
+
+		metadata := map[string]string{
+			"id":      msg.ID,
+			"from":    extractSenderName(msg.From),
+			"to":      msg.To,
+			"subject": sanitizeFolderName(truncateSubject(msg.Subject, 40)),
+			"date":    parseEmailDate(msg.Date),
+			"snippet": msg.Snippet,
+		}
+
+		filename := g.FormatFilename(filenameFormat, metadata)
+
+		results = append(results, sources.QueryResult{
+			ID:       msg.ID,
+			Filename: filename,
+			Metadata: metadata,
+			Size:     msg.SizeEstimate,
+			Mtime:    getMessageTimestamp(msg),
+		})
+	}
+
+	return results, nil
+}
+
+// ReadResult fetches the content of an email by its message ID.
+// This implements the sources.QueryExecutor interface.
+func (g *GmailProvider) ReadResult(ctx context.Context, pctx *sources.ProviderContext, resultID string) ([]byte, error) {
+	if err := checkAuth(pctx); err != nil {
+		return nil, err
+	}
+	return g.fetchMessageBody(ctx, pctx.Credentials.AccessToken, resultID)
+}
+
+// FormatFilename generates a filename from metadata using a format template.
+// Supported placeholders: {id}, {date}, {from}, {to}, {subject}, {snippet}
+// This implements the sources.QueryExecutor interface.
+func (g *GmailProvider) FormatFilename(format string, metadata map[string]string) string {
+	if format == "" {
+		format = "{date}_{from}_{subject}_{id}.txt"
+	}
+
+	result := format
+	for key, value := range metadata {
+		placeholder := "{" + key + "}"
+		// Sanitize the value for filesystem use
+		safeValue := sanitizeFolderName(value)
+		// Truncate long values (except id)
+		if key != "id" && len(safeValue) > 40 {
+			safeValue = safeValue[:40]
+		}
+		result = strings.ReplaceAll(result, placeholder, safeValue)
+	}
+
+	// Ensure filename is not empty
+	if result == "" || result == ".txt" {
+		if id, ok := metadata["id"]; ok {
+			result = id + ".txt"
+		} else {
+			result = "unknown.txt"
+		}
+	}
+
+	return result
+}
+
+// Compile-time interface check for QueryExecutor
+var _ sources.QueryExecutor = (*GmailProvider)(nil)
 
 // ============================================================================
 // detectCategory determines which category a message belongs to based on its labels
@@ -555,6 +840,18 @@ func (g *GmailProvider) parseMessage(result map[string]any) gmailMessage {
 		Snippet:  getString(result, "snippet"),
 	}
 
+	// Parse sizeEstimate (Gmail API returns this at the message level)
+	if size, ok := result["sizeEstimate"].(float64); ok {
+		msg.SizeEstimate = int64(size)
+	}
+
+	// Parse internalDate - a reliable Unix timestamp in milliseconds
+	if internalDate, ok := result["internalDate"].(string); ok {
+		if ms, err := strconv.ParseInt(internalDate, 10, 64); err == nil {
+			msg.InternalDate = ms
+		}
+	}
+
 	// Parse labels
 	if labels, ok := result["labelIds"].([]any); ok {
 		for _, l := range labels {
@@ -681,6 +978,95 @@ func (g *GmailProvider) fetchMessageMeta(ctx context.Context, token, msgId strin
 		"subject":  msg.Subject,
 		"date":     msg.Date,
 	})
+}
+
+func (g *GmailProvider) fetchMessagesMetadataBatch(ctx context.Context, token string, msgIDs []string) ([]map[string]any, error) {
+	if len(msgIDs) == 0 {
+		return []map[string]any{}, nil
+	}
+
+	boundary := fmt.Sprintf("batch_%d", time.Now().UnixNano())
+	var body bytes.Buffer
+	for _, id := range msgIDs {
+		if id == "" {
+			continue
+		}
+		fmt.Fprintf(&body, "--%s\r\n", boundary)
+		body.WriteString("Content-Type: application/http\r\n")
+		body.WriteString("Content-Transfer-Encoding: binary\r\n\r\n")
+		fmt.Fprintf(&body, "GET /gmail/v1/users/me/messages/%s?format=metadata HTTP/1.1\r\n\r\n", id)
+	}
+	fmt.Fprintf(&body, "--%s--\r\n", boundary)
+
+	count := atomic.AddInt64(&gmailAPICallCount, 1)
+	log.Debug().Int64("api_calls", count).Str("path", "/batch/gmail/v1").Msg("gmail API call")
+
+	req, err := http.NewRequestWithContext(ctx, "POST", "https://gmail.googleapis.com/batch/gmail/v1", &body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "multipart/mixed; boundary="+boundary)
+
+	resp, err := g.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		var apiErr struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal(bodyBytes, &apiErr)
+		if apiErr.Error.Message != "" {
+			return nil, fmt.Errorf("gmail batch API: %s", apiErr.Error.Message)
+		}
+		return nil, fmt.Errorf("gmail batch API: %s", resp.Status)
+	}
+
+	contentType := resp.Header.Get("Content-Type")
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	if err != nil || !strings.HasPrefix(mediaType, "multipart/") {
+		return nil, fmt.Errorf("unexpected batch content type: %s", contentType)
+	}
+
+	reader := multipart.NewReader(resp.Body, params["boundary"])
+	results := make([]map[string]any, 0, len(msgIDs))
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		partBytes, err := io.ReadAll(part)
+		_ = part.Close()
+		if err != nil || len(partBytes) == 0 {
+			continue
+		}
+
+		respPart, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(partBytes)), &http.Request{Method: "GET"})
+		if err != nil {
+			continue
+		}
+		respBody, err := io.ReadAll(respPart.Body)
+		_ = respPart.Body.Close()
+		if err != nil || respPart.StatusCode >= 400 {
+			continue
+		}
+
+		var msg map[string]any
+		if err := json.Unmarshal(respBody, &msg); err == nil {
+			results = append(results, msg)
+		}
+	}
+
+	return results, nil
 }
 
 func (g *GmailProvider) fetchMessageBody(ctx context.Context, token, msgId string) ([]byte, error) {
@@ -840,11 +1226,11 @@ func extractSenderName(from string) string {
 func parseEmailDate(dateStr string) string {
 	// Common email date formats
 	formats := []string{
-		time.RFC1123Z,                        // "Mon, 02 Jan 2006 15:04:05 -0700"
-		time.RFC1123,                         // "Mon, 02 Jan 2006 15:04:05 MST"
-		"Mon, 2 Jan 2006 15:04:05 -0700",     // Single digit day
-		"Mon, 2 Jan 2006 15:04:05 MST",       // Single digit day with timezone name
-		"2 Jan 2006 15:04:05 -0700",          // No weekday
+		time.RFC1123Z,                           // "Mon, 02 Jan 2006 15:04:05 -0700"
+		time.RFC1123,                            // "Mon, 02 Jan 2006 15:04:05 MST"
+		"Mon, 2 Jan 2006 15:04:05 -0700",        // Single digit day
+		"Mon, 2 Jan 2006 15:04:05 MST",          // Single digit day with timezone name
+		"2 Jan 2006 15:04:05 -0700",             // No weekday
 		"Mon, 02 Jan 2006 15:04:05 -0700 (MST)", // With timezone name in parens
 	}
 
