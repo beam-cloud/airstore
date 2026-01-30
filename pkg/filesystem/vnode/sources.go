@@ -39,7 +39,7 @@ import (
 )
 
 const sourcesTimeout = 30 * time.Second
-const resultsCacheTTL = 30 * time.Second // Cache query results to avoid repeated API calls
+const resultsCacheTTL = 30 * time.Second           // Cache query results to avoid repeated API calls
 const backgroundRefreshInterval = 15 * time.Second // Background cache refresh interval
 
 const queryMetaName = ".query.as"
@@ -91,17 +91,33 @@ type SourcesVNode struct {
 	// Cache for stat metadata to avoid N+1 Getattr RPCs after Readdir
 	statsMu sync.RWMutex
 	stats   map[string]*cachedStat // full path -> cached stat
+
+	// Recently accessed directories for background refresh
+	recentDirsMu sync.RWMutex
+	recentDirs   map[string]time.Time // directory path -> last access time
+
+	// Background refresh control
+	stopRefresh chan struct{}
 }
 
 func NewSourcesVNode(conn *grpc.ClientConn, token string) *SourcesVNode {
-	return &SourcesVNode{
+	v := &SourcesVNode{
 		client:       pb.NewSourceServiceClient(conn),
 		token:        token,
 		results:      make(map[string]*cachedQueryResult),
 		queries:      make(map[string]*cachedQuery),
 		integrations: make(map[string]*cachedIntegration),
 		stats:        make(map[string]*cachedStat),
+		recentDirs:   make(map[string]time.Time),
+		stopRefresh:  make(chan struct{}),
 	}
+	go v.backgroundRefreshLoop()
+	return v
+}
+
+// Cleanup stops background goroutines. Called when filesystem is unmounted.
+func (v *SourcesVNode) Cleanup() {
+	close(v.stopRefresh)
 }
 
 func (v *SourcesVNode) Prefix() string { return SourcesPath }
@@ -313,6 +329,8 @@ func (v *SourcesVNode) Readdir(path string) ([]DirEntry, error) {
 // listIntegration returns integration root entries: status.json + smart queries.
 // Native provider content (messages/, labels/, etc.) is not exposed directly.
 func (v *SourcesVNode) listIntegration(ctx context.Context, path, integration string) ([]DirEntry, error) {
+	v.trackRecentDir(path) // Track for background refresh
+
 	// Use gateway ReadDir so we include status.json and query entries consistently
 	resp, err := v.client.ReadDir(ctx, &pb.SourceReadDirRequest{Path: integration})
 	if err != nil || resp == nil || !resp.Ok {
@@ -862,4 +880,106 @@ func (v *SourcesVNode) cacheStatFromEntry(path string, e *pb.SourceDirEntry) {
 	}
 
 	v.setCachedStat(path, info)
+}
+
+// Background refresh
+
+// trackRecentDir records a directory as recently accessed for background refresh
+func (v *SourcesVNode) trackRecentDir(path string) {
+	v.recentDirsMu.Lock()
+	v.recentDirs[path] = time.Now()
+	v.recentDirsMu.Unlock()
+}
+
+// getRecentDirs returns directories accessed in the last 2 minutes
+func (v *SourcesVNode) getRecentDirs() []string {
+	v.recentDirsMu.RLock()
+	defer v.recentDirsMu.RUnlock()
+
+	cutoff := time.Now().Add(-2 * time.Minute)
+	dirs := make([]string, 0, len(v.recentDirs))
+	for path, accessed := range v.recentDirs {
+		if accessed.After(cutoff) {
+			dirs = append(dirs, path)
+		}
+	}
+	return dirs
+}
+
+// cleanupOldRecentDirs removes directories not accessed recently
+func (v *SourcesVNode) cleanupOldRecentDirs() {
+	v.recentDirsMu.Lock()
+	defer v.recentDirsMu.Unlock()
+
+	cutoff := time.Now().Add(-5 * time.Minute)
+	for path, accessed := range v.recentDirs {
+		if accessed.Before(cutoff) {
+			delete(v.recentDirs, path)
+		}
+	}
+}
+
+// backgroundRefreshLoop periodically refreshes caches for frequently accessed paths
+func (v *SourcesVNode) backgroundRefreshLoop() {
+	ticker := time.NewTicker(backgroundRefreshInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-v.stopRefresh:
+			return
+		case <-ticker.C:
+			v.doBackgroundRefresh()
+		}
+	}
+}
+
+// doBackgroundRefresh refreshes integration list and recently accessed directories
+func (v *SourcesVNode) doBackgroundRefresh() {
+	ctx, cancel := v.ctx()
+	defer cancel()
+
+	// Always refresh integration list (cheap, high value)
+	v.refreshIntegrations(ctx)
+
+	// Refresh recently accessed directories
+	for _, path := range v.getRecentDirs() {
+		integration, subpath := v.parsePath(path)
+		if integration != "" && subpath == "" {
+			// This is an integration root like /sources/gmail
+			v.refreshIntegrationDir(ctx, path, integration)
+		}
+	}
+
+	// Cleanup old tracking data
+	v.cleanupOldRecentDirs()
+}
+
+// refreshIntegrations refreshes the integration list cache
+func (v *SourcesVNode) refreshIntegrations(ctx context.Context) {
+	resp, err := v.client.ReadDir(ctx, &pb.SourceReadDirRequest{Path: ""})
+	if err != nil || !resp.Ok {
+		return
+	}
+
+	for _, e := range resp.Entries {
+		if e.IsDir {
+			childPath := SourcesPath + "/" + e.Name
+			v.setCachedIntegration(e.Name, e.Mtime)
+			v.cacheStatFromEntry(childPath, e)
+		}
+	}
+}
+
+// refreshIntegrationDir refreshes the cache for an integration directory
+func (v *SourcesVNode) refreshIntegrationDir(ctx context.Context, path, integration string) {
+	resp, err := v.client.ReadDir(ctx, &pb.SourceReadDirRequest{Path: integration})
+	if err != nil || resp == nil || !resp.Ok {
+		return
+	}
+
+	for _, e := range resp.Entries {
+		childPath := path + "/" + e.Name
+		v.cacheStatFromEntry(childPath, e)
+	}
 }

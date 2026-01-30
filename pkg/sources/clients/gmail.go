@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/types"
-	"github.com/rs/zerolog/log"
 )
 
 const (
@@ -76,11 +75,7 @@ func (c *GmailClient) Integration() types.ToolName {
 	return types.ToolGmail
 }
 
-// Request makes a GET request to the Gmail API
 func (c *GmailClient) Request(ctx context.Context, token, path string, result any) error {
-	count := atomic.AddInt64(&gmailAPICallCount, 1)
-	log.Debug().Int64("api_calls", count).Str("path", path).Msg("gmail API call")
-
 	url := GmailAPIBase + path
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {

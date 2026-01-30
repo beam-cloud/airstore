@@ -1004,9 +1004,6 @@ func (g *GmailProvider) fetchMessagesMetadataBatch(ctx context.Context, token st
 	}
 	fmt.Fprintf(&body, "--%s--\r\n", boundary)
 
-	count := atomic.AddInt64(&gmailAPICallCount, 1)
-	log.Debug().Int64("api_calls", count).Str("path", "/batch/gmail/v1").Msg("gmail API call")
-
 	req, err := http.NewRequestWithContext(ctx, "POST", "https://gmail.googleapis.com/batch/gmail/v1", &body)
 	if err != nil {
 		return nil, err
@@ -1380,10 +1377,6 @@ func stripHTMLToText(html string) string {
 }
 
 func (g *GmailProvider) request(ctx context.Context, token, path string, result any) error {
-	// Increment API call counter for A/B testing
-	count := atomic.AddInt64(&gmailAPICallCount, 1)
-	log.Debug().Int64("api_calls", count).Str("path", path).Msg("gmail API call")
-
 	url := gmailAPIBase + path
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
