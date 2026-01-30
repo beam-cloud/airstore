@@ -11,7 +11,8 @@ dev:
         go build -o /workspace/bin/gateway /workspace/cmd/gateway/main.go
         go build -o /workspace/bin/worker /workspace/cmd/worker/main.go
       BUILD_BINARY_PATH: /workspace/bin/gateway
-      REDIS_ADDR: redis-master:6379
+      CONFIG_PATH: /workspace/config.gw.yaml
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
     forward:
     - 1994:1994
     - 1993:1993

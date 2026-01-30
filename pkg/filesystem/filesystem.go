@@ -21,21 +21,24 @@ type Config struct {
 	Verbose     bool
 }
 
-// Filesystem is a FUSE filesystem that connects to the gateway via gRPC
+// Filesystem is a FUSE filesystem that connects to the gateway via gRPC.
 type Filesystem struct {
 	config   Config
-	metadata MetadataEngine
+	metadata LegacyMetadataEngine
 	vnodes   *vnode.Registry
 	rootID   string
 	verbose  bool
 
-	host    *fuse.FileSystemHost
-	mounted bool
-	mu      sync.Mutex
+	host      *fuse.FileSystemHost
+	mounted   bool
+	destroyed bool // Set when Destroy() is called by FUSE layer
+	mu        sync.Mutex
 }
 
-// MetadataEngine provides filesystem metadata operations via gRPC
-type MetadataEngine interface {
+// LegacyMetadataEngine provides filesystem metadata operations via gRPC.
+// This interface is for backward compatibility with the old FUSE implementation.
+// New code should use the path-based MetadataEngine interface.
+type LegacyMetadataEngine interface {
 	GetDirectoryContentMetadata(id string) (*DirectoryContentMetadata, error)
 	GetDirectoryAccessMetadata(pid, name string) (*DirectoryAccessMetadata, error)
 	GetFileMetadata(pid, name string) (*FileMetadata, error)
@@ -152,10 +155,17 @@ func (f *Filesystem) Mount() error {
 
 func (f *Filesystem) Unmount() error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.mounted && f.host != nil {
-		f.host.Unmount()
+	host := f.host
+	destroyed := f.destroyed
+	f.mu.Unlock()
+
+	if destroyed || host == nil {
+		return nil
 	}
+
+	// Note: host.Unmount may block depending on the FUSE backend.
+	// Callers that need a hard timeout should enforce it at a higher level (e.g., CLI).
+	_ = host.Unmount()
 	return nil
 }
 
@@ -163,6 +173,12 @@ func (f *Filesystem) IsMounted() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.mounted
+}
+
+func (f *Filesystem) IsDestroyed() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.destroyed
 }
 
 func (f *Filesystem) logDebug(msg string) {
@@ -173,6 +189,10 @@ func (f *Filesystem) logDebug(msg string) {
 
 func (f *Filesystem) Init() error { return nil }
 func (f *Filesystem) Destroy() {
+	f.mu.Lock()
+	f.destroyed = true
+	f.mu.Unlock()
+
 	for _, vn := range f.vnodes.List() {
 		if c, ok := vn.(interface{ Cleanup() }); ok {
 			c.Cleanup()
@@ -266,7 +286,7 @@ func (f *Filesystem) Readdir(path string) ([]DirEntry, error) {
 		}
 		entries := make([]DirEntry, len(vnEntries))
 		for i, e := range vnEntries {
-			entries[i] = DirEntry{Name: e.Name, Mode: e.Mode, Ino: e.Ino}
+			entries[i] = DirEntry{Name: e.Name, Mode: e.Mode, Ino: e.Ino, Size: e.Size, Mtime: e.Mtime}
 		}
 		return entries, nil
 	}

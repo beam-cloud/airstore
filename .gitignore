@@ -8,3 +8,4 @@ __pycache__
 *.tmp
 .secrets
 airstore.code-workspace
+config.gw.yaml

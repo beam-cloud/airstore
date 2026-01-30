@@ -12,25 +12,6 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-var legacyAuthKey = "auth"
-
-// AuthInfo holds authentication information for a request (legacy)
-type AuthInfo struct {
-	Token string
-}
-
-// AuthInfoFromContext extracts AuthInfo from context (legacy)
-func AuthInfoFromContext(ctx context.Context) (*AuthInfo, bool) {
-	authInfo, ok := ctx.Value(legacyAuthKey).(*AuthInfo)
-	return authInfo, ok
-}
 
 // TokenValidator validates tokens and returns identity information
 type TokenValidator interface {
@@ -116,18 +97,22 @@ func (i *Interceptor) authenticate(ctx context.Context, md metadata.MD) (context
 	// No authorization header - try empty token (gateway auth)
 	if len(md["authorization"]) == 0 {
 		if valid, isGateway := i.validator.ValidateToken(""); valid {
+			log.Debug().Bool("is_gateway", isGateway).Msg("auth: no token, valid empty auth")
 			rc := &RequestContext{IsGatewayAuth: isGateway}
-			ctx = WithContext(ctx, rc)
-			ctx = context.WithValue(ctx, legacyAuthKey, &AuthInfo{Token: ""})
-			return ctx, true
+			return WithContext(ctx, rc), true
 		}
+		log.Debug().Msg("auth: no token, empty auth invalid")
 		return ctx, false
 	}
 
 	token := strings.TrimPrefix(md["authorization"][0], "Bearer ")
+	tokenPreview := token
+	if len(tokenPreview) > 12 {
+		tokenPreview = tokenPreview[:12] + "..."
+	}
 	valid, isGateway := i.validator.ValidateToken(token)
 	if !valid {
-		log.Debug().Msg("auth: invalid token")
+		log.Debug().Str("token", tokenPreview).Msg("auth: invalid token")
 		return ctx, false
 	}
 
@@ -137,7 +122,7 @@ func (i *Interceptor) authenticate(ctx context.Context, md metadata.MD) (context
 	} else {
 		result := i.validator.ValidateWorkspaceToken(ctx, token)
 		if result == nil {
-			// Token didn't match gateway and workspace validation failed
+			log.Debug().Str("token", tokenPreview).Msg("auth: workspace token validation failed")
 			return ctx, false
 		}
 
@@ -153,9 +138,7 @@ func (i *Interceptor) authenticate(ctx context.Context, md metadata.MD) (context
 		}
 	}
 
-	ctx = WithContext(ctx, rc)
-	ctx = context.WithValue(ctx, legacyAuthKey, &AuthInfo{Token: token})
-	return ctx, true
+	return WithContext(ctx, rc), true
 }
 
 // Unary returns a unary server interceptor for authentication

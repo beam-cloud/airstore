@@ -23,7 +23,7 @@ type CreateTaskRequest struct {
 }
 
 type TaskResponse struct {
-	ID          string            `json:"id"` // External ID for API
+	ExternalID  string            `json:"external_id"`
 	WorkspaceID string            `json:"workspace_id"`
 	Status      string            `json:"status"`
 	Image       string            `json:"image"`
@@ -219,7 +219,7 @@ func (g *TasksGroup) SetTaskResult(c echo.Context) error {
 
 func taskToResponse(t *types.Task, workspaceExternalId string) TaskResponse {
 	resp := TaskResponse{
-		ID:          t.ExternalId,
+		ExternalID:  t.ExternalId,
 		WorkspaceID: workspaceExternalId,
 		Status:      string(t.Status),
 		Image:       t.Image,

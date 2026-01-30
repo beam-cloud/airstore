@@ -18,10 +18,10 @@ type CreateWorkspaceRequest struct {
 }
 
 type WorkspaceResponse struct {
-	ID        string `json:"id"` // External ID for API
-	Name      string `json:"name"`
-	CreatedAt string `json:"created_at"`
-	UpdatedAt string `json:"updated_at"`
+	ExternalID string `json:"external_id"`
+	Name       string `json:"name"`
+	CreatedAt  string `json:"created_at"`
+	UpdatedAt  string `json:"updated_at"`
 }
 
 func NewWorkspacesGroup(routerGroup *echo.Group, backend repository.BackendRepository) *WorkspacesGroup {
@@ -114,9 +114,9 @@ func (g *WorkspacesGroup) DeleteWorkspace(c echo.Context) error {
 
 func workspaceToResponse(w *types.Workspace) WorkspaceResponse {
 	return WorkspaceResponse{
-		ID:        w.ExternalId,
-		Name:      w.Name,
-		CreatedAt: w.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
-		UpdatedAt: w.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		ExternalID: w.ExternalId,
+		Name:       w.Name,
+		CreatedAt:  w.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		UpdatedAt:  w.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
 	}
 }

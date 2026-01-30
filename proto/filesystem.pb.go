@@ -20,18 +20,24 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// BackPointer for directory rename tracking
-type BackPointer struct {
+// FileStat contains metadata about a file or directory.
+type FileStat struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	BirthParentId string `protobuf:"bytes,1,opt,name=birth_parent_id,json=birthParentId,proto3" json:"birth_parent_id,omitempty"`
-	NameVersion   int32  `protobuf:"varint,2,opt,name=name_version,json=nameVersion,proto3" json:"name_version,omitempty"`
+	Path          string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	Name          string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Size          int64  `protobuf:"varint,3,opt,name=size,proto3" json:"size,omitempty"`
+	Mode          uint32 `protobuf:"varint,4,opt,name=mode,proto3" json:"mode,omitempty"`
+	Mtime         int64  `protobuf:"varint,5,opt,name=mtime,proto3" json:"mtime,omitempty"` // Unix timestamp
+	IsDir         bool   `protobuf:"varint,6,opt,name=is_dir,json=isDir,proto3" json:"is_dir,omitempty"`
+	IsSymlink     bool   `protobuf:"varint,7,opt,name=is_symlink,json=isSymlink,proto3" json:"is_symlink,omitempty"`
+	SymlinkTarget string `protobuf:"bytes,8,opt,name=symlink_target,json=symlinkTarget,proto3" json:"symlink_target,omitempty"`
 }
 
-func (x *BackPointer) Reset() {
-	*x = BackPointer{}
+func (x *FileStat) Reset() {
+	*x = FileStat{}
 	if protoimpl.UnsafeEnabled {
 		mi := &file_filesystem_proto_msgTypes[0]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -39,13 +45,13 @@ func (x *BackPointer) Reset() {
 	}
 }
 
-func (x *BackPointer) String() string {
+func (x *FileStat) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*BackPointer) ProtoMessage() {}
+func (*FileStat) ProtoMessage() {}
 
-func (x *BackPointer) ProtoReflect() protoreflect.Message {
+func (x *FileStat) ProtoReflect() protoreflect.Message {
 	mi := &file_filesystem_proto_msgTypes[0]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -57,908 +63,84 @@ func (x *BackPointer) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use BackPointer.ProtoReflect.Descriptor instead.
-func (*BackPointer) Descriptor() ([]byte, []int) {
+// Deprecated: Use FileStat.ProtoReflect.Descriptor instead.
+func (*FileStat) Descriptor() ([]byte, []int) {
 	return file_filesystem_proto_rawDescGZIP(), []int{0}
 }
 
-func (x *BackPointer) GetBirthParentId() string {
+func (x *FileStat) GetPath() string {
 	if x != nil {
-		return x.BirthParentId
+		return x.Path
 	}
 	return ""
 }
 
-func (x *BackPointer) GetNameVersion() int32 {
+func (x *FileStat) GetName() string {
 	if x != nil {
-		return x.NameVersion
+		return x.Name
+	}
+	return ""
+}
+
+func (x *FileStat) GetSize() int64 {
+	if x != nil {
+		return x.Size
 	}
 	return 0
 }
 
-// Directory Access Metadata
-type DirectoryAccessMetadata struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Pid         string            `protobuf:"bytes,1,opt,name=pid,proto3" json:"pid,omitempty"`
-	Id          string            `protobuf:"bytes,2,opt,name=id,proto3" json:"id,omitempty"`
-	Permission  uint32            `protobuf:"varint,3,opt,name=permission,proto3" json:"permission,omitempty"`
-	RenameList  map[string]string `protobuf:"bytes,4,rep,name=rename_list,json=renameList,proto3" json:"rename_list,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
-	BackPointer *BackPointer      `protobuf:"bytes,5,opt,name=back_pointer,json=backPointer,proto3" json:"back_pointer,omitempty"`
-}
-
-func (x *DirectoryAccessMetadata) Reset() {
-	*x = DirectoryAccessMetadata{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_filesystem_proto_msgTypes[1]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *DirectoryAccessMetadata) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*DirectoryAccessMetadata) ProtoMessage() {}
-
-func (x *DirectoryAccessMetadata) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_proto_msgTypes[1]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use DirectoryAccessMetadata.ProtoReflect.Descriptor instead.
-func (*DirectoryAccessMetadata) Descriptor() ([]byte, []int) {
-	return file_filesystem_proto_rawDescGZIP(), []int{1}
-}
-
-func (x *DirectoryAccessMetadata) GetPid() string {
+func (x *FileStat) GetMode() uint32 {
 	if x != nil {
-		return x.Pid
-	}
-	return ""
-}
-
-func (x *DirectoryAccessMetadata) GetId() string {
-	if x != nil {
-		return x.Id
-	}
-	return ""
-}
-
-func (x *DirectoryAccessMetadata) GetPermission() uint32 {
-	if x != nil {
-		return x.Permission
+		return x.Mode
 	}
 	return 0
 }
 
-func (x *DirectoryAccessMetadata) GetRenameList() map[string]string {
+func (x *FileStat) GetMtime() int64 {
 	if x != nil {
-		return x.RenameList
+		return x.Mtime
 	}
-	return nil
+	return 0
 }
 
-func (x *DirectoryAccessMetadata) GetBackPointer() *BackPointer {
+func (x *FileStat) GetIsDir() bool {
 	if x != nil {
-		return x.BackPointer
-	}
-	return nil
-}
-
-type GetDirectoryAccessRequest struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Pid  string `protobuf:"bytes,1,opt,name=pid,proto3" json:"pid,omitempty"`
-	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-}
-
-func (x *GetDirectoryAccessRequest) Reset() {
-	*x = GetDirectoryAccessRequest{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_filesystem_proto_msgTypes[2]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *GetDirectoryAccessRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*GetDirectoryAccessRequest) ProtoMessage() {}
-
-func (x *GetDirectoryAccessRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_proto_msgTypes[2]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use GetDirectoryAccessRequest.ProtoReflect.Descriptor instead.
-func (*GetDirectoryAccessRequest) Descriptor() ([]byte, []int) {
-	return file_filesystem_proto_rawDescGZIP(), []int{2}
-}
-
-func (x *GetDirectoryAccessRequest) GetPid() string {
-	if x != nil {
-		return x.Pid
-	}
-	return ""
-}
-
-func (x *GetDirectoryAccessRequest) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-type GetDirectoryAccessResponse struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Ok       bool                     `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
-	Error    string                   `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
-	Metadata *DirectoryAccessMetadata `protobuf:"bytes,3,opt,name=metadata,proto3" json:"metadata,omitempty"`
-}
-
-func (x *GetDirectoryAccessResponse) Reset() {
-	*x = GetDirectoryAccessResponse{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_filesystem_proto_msgTypes[3]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *GetDirectoryAccessResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*GetDirectoryAccessResponse) ProtoMessage() {}
-
-func (x *GetDirectoryAccessResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_proto_msgTypes[3]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use GetDirectoryAccessResponse.ProtoReflect.Descriptor instead.
-func (*GetDirectoryAccessResponse) Descriptor() ([]byte, []int) {
-	return file_filesystem_proto_rawDescGZIP(), []int{3}
-}
-
-func (x *GetDirectoryAccessResponse) GetOk() bool {
-	if x != nil {
-		return x.Ok
+		return x.IsDir
 	}
 	return false
 }
 
-func (x *GetDirectoryAccessResponse) GetError() string {
+func (x *FileStat) GetIsSymlink() bool {
 	if x != nil {
-		return x.Error
-	}
-	return ""
-}
-
-func (x *GetDirectoryAccessResponse) GetMetadata() *DirectoryAccessMetadata {
-	if x != nil {
-		return x.Metadata
-	}
-	return nil
-}
-
-type SaveDirectoryAccessRequest struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Metadata *DirectoryAccessMetadata `protobuf:"bytes,1,opt,name=metadata,proto3" json:"metadata,omitempty"`
-}
-
-func (x *SaveDirectoryAccessRequest) Reset() {
-	*x = SaveDirectoryAccessRequest{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_filesystem_proto_msgTypes[4]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *SaveDirectoryAccessRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*SaveDirectoryAccessRequest) ProtoMessage() {}
-
-func (x *SaveDirectoryAccessRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_proto_msgTypes[4]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use SaveDirectoryAccessRequest.ProtoReflect.Descriptor instead.
-func (*SaveDirectoryAccessRequest) Descriptor() ([]byte, []int) {
-	return file_filesystem_proto_rawDescGZIP(), []int{4}
-}
-
-func (x *SaveDirectoryAccessRequest) GetMetadata() *DirectoryAccessMetadata {
-	if x != nil {
-		return x.Metadata
-	}
-	return nil
-}
-
-type SaveDirectoryAccessResponse struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Ok    bool   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
-	Error string `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
-}
-
-func (x *SaveDirectoryAccessResponse) Reset() {
-	*x = SaveDirectoryAccessResponse{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_filesystem_proto_msgTypes[5]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *SaveDirectoryAccessResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*SaveDirectoryAccessResponse) ProtoMessage() {}
-
-func (x *SaveDirectoryAccessResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_proto_msgTypes[5]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use SaveDirectoryAccessResponse.ProtoReflect.Descriptor instead.
-func (*SaveDirectoryAccessResponse) Descriptor() ([]byte, []int) {
-	return file_filesystem_proto_rawDescGZIP(), []int{5}
-}
-
-func (x *SaveDirectoryAccessResponse) GetOk() bool {
-	if x != nil {
-		return x.Ok
+		return x.IsSymlink
 	}
 	return false
 }
 
-func (x *SaveDirectoryAccessResponse) GetError() string {
+func (x *FileStat) GetSymlinkTarget() string {
 	if x != nil {
-		return x.Error
+		return x.SymlinkTarget
 	}
 	return ""
 }
 
-// Directory Content Metadata
-type DirectoryContentMetadata struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Id         string           `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	EntryList  []string         `protobuf:"bytes,2,rep,name=entry_list,json=entryList,proto3" json:"entry_list,omitempty"`
-	Timestamps map[string]int64 `protobuf:"bytes,3,rep,name=timestamps,proto3" json:"timestamps,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"varint,2,opt,name=value,proto3"` // Unix timestamps
-}
-
-func (x *DirectoryContentMetadata) Reset() {
-	*x = DirectoryContentMetadata{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_filesystem_proto_msgTypes[6]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *DirectoryContentMetadata) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*DirectoryContentMetadata) ProtoMessage() {}
-
-func (x *DirectoryContentMetadata) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_proto_msgTypes[6]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use DirectoryContentMetadata.ProtoReflect.Descriptor instead.
-func (*DirectoryContentMetadata) Descriptor() ([]byte, []int) {
-	return file_filesystem_proto_rawDescGZIP(), []int{6}
-}
-
-func (x *DirectoryContentMetadata) GetId() string {
-	if x != nil {
-		return x.Id
-	}
-	return ""
-}
-
-func (x *DirectoryContentMetadata) GetEntryList() []string {
-	if x != nil {
-		return x.EntryList
-	}
-	return nil
-}
-
-func (x *DirectoryContentMetadata) GetTimestamps() map[string]int64 {
-	if x != nil {
-		return x.Timestamps
-	}
-	return nil
-}
-
-type GetDirectoryContentRequest struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-}
-
-func (x *GetDirectoryContentRequest) Reset() {
-	*x = GetDirectoryContentRequest{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_filesystem_proto_msgTypes[7]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *GetDirectoryContentRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*GetDirectoryContentRequest) ProtoMessage() {}
-
-func (x *GetDirectoryContentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_proto_msgTypes[7]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use GetDirectoryContentRequest.ProtoReflect.Descriptor instead.
-func (*GetDirectoryContentRequest) Descriptor() ([]byte, []int) {
-	return file_filesystem_proto_rawDescGZIP(), []int{7}
-}
-
-func (x *GetDirectoryContentRequest) GetId() string {
-	if x != nil {
-		return x.Id
-	}
-	return ""
-}
-
-type GetDirectoryContentResponse struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Ok       bool                      `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
-	Error    string                    `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
-	Metadata *DirectoryContentMetadata `protobuf:"bytes,3,opt,name=metadata,proto3" json:"metadata,omitempty"`
-}
-
-func (x *GetDirectoryContentResponse) Reset() {
-	*x = GetDirectoryContentResponse{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_filesystem_proto_msgTypes[8]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *GetDirectoryContentResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*GetDirectoryContentResponse) ProtoMessage() {}
-
-func (x *GetDirectoryContentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_proto_msgTypes[8]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use GetDirectoryContentResponse.ProtoReflect.Descriptor instead.
-func (*GetDirectoryContentResponse) Descriptor() ([]byte, []int) {
-	return file_filesystem_proto_rawDescGZIP(), []int{8}
-}
-
-func (x *GetDirectoryContentResponse) GetOk() bool {
-	if x != nil {
-		return x.Ok
-	}
-	return false
-}
-
-func (x *GetDirectoryContentResponse) GetError() string {
-	if x != nil {
-		return x.Error
-	}
-	return ""
-}
-
-func (x *GetDirectoryContentResponse) GetMetadata() *DirectoryContentMetadata {
-	if x != nil {
-		return x.Metadata
-	}
-	return nil
-}
-
-type SaveDirectoryContentRequest struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Metadata *DirectoryContentMetadata `protobuf:"bytes,1,opt,name=metadata,proto3" json:"metadata,omitempty"`
-}
-
-func (x *SaveDirectoryContentRequest) Reset() {
-	*x = SaveDirectoryContentRequest{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_filesystem_proto_msgTypes[9]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *SaveDirectoryContentRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*SaveDirectoryContentRequest) ProtoMessage() {}
-
-func (x *SaveDirectoryContentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_proto_msgTypes[9]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use SaveDirectoryContentRequest.ProtoReflect.Descriptor instead.
-func (*SaveDirectoryContentRequest) Descriptor() ([]byte, []int) {
-	return file_filesystem_proto_rawDescGZIP(), []int{9}
-}
-
-func (x *SaveDirectoryContentRequest) GetMetadata() *DirectoryContentMetadata {
-	if x != nil {
-		return x.Metadata
-	}
-	return nil
-}
-
-type SaveDirectoryContentResponse struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Ok    bool   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
-	Error string `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
-}
-
-func (x *SaveDirectoryContentResponse) Reset() {
-	*x = SaveDirectoryContentResponse{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_filesystem_proto_msgTypes[10]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *SaveDirectoryContentResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*SaveDirectoryContentResponse) ProtoMessage() {}
-
-func (x *SaveDirectoryContentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_proto_msgTypes[10]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use SaveDirectoryContentResponse.ProtoReflect.Descriptor instead.
-func (*SaveDirectoryContentResponse) Descriptor() ([]byte, []int) {
-	return file_filesystem_proto_rawDescGZIP(), []int{10}
-}
-
-func (x *SaveDirectoryContentResponse) GetOk() bool {
-	if x != nil {
-		return x.Ok
-	}
-	return false
-}
-
-func (x *SaveDirectoryContentResponse) GetError() string {
-	if x != nil {
-		return x.Error
-	}
-	return ""
-}
-
-// File Metadata
-type FileMetadata struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Id       string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Pid      string `protobuf:"bytes,2,opt,name=pid,proto3" json:"pid,omitempty"`
-	Name     string `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
-	FileData []byte `protobuf:"bytes,4,opt,name=file_data,json=fileData,proto3" json:"file_data,omitempty"`
-}
-
-func (x *FileMetadata) Reset() {
-	*x = FileMetadata{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_filesystem_proto_msgTypes[11]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *FileMetadata) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*FileMetadata) ProtoMessage() {}
-
-func (x *FileMetadata) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_proto_msgTypes[11]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use FileMetadata.ProtoReflect.Descriptor instead.
-func (*FileMetadata) Descriptor() ([]byte, []int) {
-	return file_filesystem_proto_rawDescGZIP(), []int{11}
-}
-
-func (x *FileMetadata) GetId() string {
-	if x != nil {
-		return x.Id
-	}
-	return ""
-}
-
-func (x *FileMetadata) GetPid() string {
-	if x != nil {
-		return x.Pid
-	}
-	return ""
-}
-
-func (x *FileMetadata) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-func (x *FileMetadata) GetFileData() []byte {
-	if x != nil {
-		return x.FileData
-	}
-	return nil
-}
-
-type GetFileMetadataRequest struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Pid  string `protobuf:"bytes,1,opt,name=pid,proto3" json:"pid,omitempty"`
-	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-}
-
-func (x *GetFileMetadataRequest) Reset() {
-	*x = GetFileMetadataRequest{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_filesystem_proto_msgTypes[12]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *GetFileMetadataRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*GetFileMetadataRequest) ProtoMessage() {}
-
-func (x *GetFileMetadataRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_proto_msgTypes[12]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use GetFileMetadataRequest.ProtoReflect.Descriptor instead.
-func (*GetFileMetadataRequest) Descriptor() ([]byte, []int) {
-	return file_filesystem_proto_rawDescGZIP(), []int{12}
-}
-
-func (x *GetFileMetadataRequest) GetPid() string {
-	if x != nil {
-		return x.Pid
-	}
-	return ""
-}
-
-func (x *GetFileMetadataRequest) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-type GetFileMetadataResponse struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Ok       bool          `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
-	Error    string        `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
-	Metadata *FileMetadata `protobuf:"bytes,3,opt,name=metadata,proto3" json:"metadata,omitempty"`
-}
-
-func (x *GetFileMetadataResponse) Reset() {
-	*x = GetFileMetadataResponse{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_filesystem_proto_msgTypes[13]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *GetFileMetadataResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*GetFileMetadataResponse) ProtoMessage() {}
-
-func (x *GetFileMetadataResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_proto_msgTypes[13]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use GetFileMetadataResponse.ProtoReflect.Descriptor instead.
-func (*GetFileMetadataResponse) Descriptor() ([]byte, []int) {
-	return file_filesystem_proto_rawDescGZIP(), []int{13}
-}
-
-func (x *GetFileMetadataResponse) GetOk() bool {
-	if x != nil {
-		return x.Ok
-	}
-	return false
-}
-
-func (x *GetFileMetadataResponse) GetError() string {
-	if x != nil {
-		return x.Error
-	}
-	return ""
-}
-
-func (x *GetFileMetadataResponse) GetMetadata() *FileMetadata {
-	if x != nil {
-		return x.Metadata
-	}
-	return nil
-}
-
-type SaveFileMetadataRequest struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Metadata *FileMetadata `protobuf:"bytes,1,opt,name=metadata,proto3" json:"metadata,omitempty"`
-}
-
-func (x *SaveFileMetadataRequest) Reset() {
-	*x = SaveFileMetadataRequest{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_filesystem_proto_msgTypes[14]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *SaveFileMetadataRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*SaveFileMetadataRequest) ProtoMessage() {}
-
-func (x *SaveFileMetadataRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_proto_msgTypes[14]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use SaveFileMetadataRequest.ProtoReflect.Descriptor instead.
-func (*SaveFileMetadataRequest) Descriptor() ([]byte, []int) {
-	return file_filesystem_proto_rawDescGZIP(), []int{14}
-}
-
-func (x *SaveFileMetadataRequest) GetMetadata() *FileMetadata {
-	if x != nil {
-		return x.Metadata
-	}
-	return nil
-}
-
-type SaveFileMetadataResponse struct {
-	state         protoimpl.MessageState
-	sizeCache     protoimpl.SizeCache
-	unknownFields protoimpl.UnknownFields
-
-	Ok    bool   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
-	Error string `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
-}
-
-func (x *SaveFileMetadataResponse) Reset() {
-	*x = SaveFileMetadataResponse{}
-	if protoimpl.UnsafeEnabled {
-		mi := &file_filesystem_proto_msgTypes[15]
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		ms.StoreMessageInfo(mi)
-	}
-}
-
-func (x *SaveFileMetadataResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*SaveFileMetadataResponse) ProtoMessage() {}
-
-func (x *SaveFileMetadataResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_proto_msgTypes[15]
-	if protoimpl.UnsafeEnabled && x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use SaveFileMetadataResponse.ProtoReflect.Descriptor instead.
-func (*SaveFileMetadataResponse) Descriptor() ([]byte, []int) {
-	return file_filesystem_proto_rawDescGZIP(), []int{15}
-}
-
-func (x *SaveFileMetadataResponse) GetOk() bool {
-	if x != nil {
-		return x.Ok
-	}
-	return false
-}
-
-func (x *SaveFileMetadataResponse) GetError() string {
-	if x != nil {
-		return x.Error
-	}
-	return ""
-}
-
-// Directory Entry for listing
+// DirEntry represents an entry in a directory listing.
 type DirEntry struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Mode uint32 `protobuf:"varint,2,opt,name=mode,proto3" json:"mode,omitempty"`
-	Ino  uint64 `protobuf:"varint,3,opt,name=ino,proto3" json:"ino,omitempty"`
+	Name  string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Mode  uint32 `protobuf:"varint,2,opt,name=mode,proto3" json:"mode,omitempty"`
+	Size  int64  `protobuf:"varint,3,opt,name=size,proto3" json:"size,omitempty"`
+	Mtime int64  `protobuf:"varint,4,opt,name=mtime,proto3" json:"mtime,omitempty"`
+	IsDir bool   `protobuf:"varint,5,opt,name=is_dir,json=isDir,proto3" json:"is_dir,omitempty"`
 }
 
 func (x *DirEntry) Reset() {
 	*x = DirEntry{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_filesystem_proto_msgTypes[16]
+		mi := &file_filesystem_proto_msgTypes[1]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -971,7 +153,7 @@ func (x *DirEntry) String() string {
 func (*DirEntry) ProtoMessage() {}
 
 func (x *DirEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_proto_msgTypes[16]
+	mi := &file_filesystem_proto_msgTypes[1]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -984,7 +166,7 @@ func (x *DirEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DirEntry.ProtoReflect.Descriptor instead.
 func (*DirEntry) Descriptor() ([]byte, []int) {
-	return file_filesystem_proto_rawDescGZIP(), []int{16}
+	return file_filesystem_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *DirEntry) GetName() string {
@@ -1001,14 +183,29 @@ func (x *DirEntry) GetMode() uint32 {
 	return 0
 }
 
-func (x *DirEntry) GetIno() uint64 {
+func (x *DirEntry) GetSize() int64 {
 	if x != nil {
-		return x.Ino
+		return x.Size
 	}
 	return 0
 }
 
-type ListDirectoryRequest struct {
+func (x *DirEntry) GetMtime() int64 {
+	if x != nil {
+		return x.Mtime
+	}
+	return 0
+}
+
+func (x *DirEntry) GetIsDir() bool {
+	if x != nil {
+		return x.IsDir
+	}
+	return false
+}
+
+// Stat
+type StatRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
@@ -1016,23 +213,23 @@ type ListDirectoryRequest struct {
 	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
 }
 
-func (x *ListDirectoryRequest) Reset() {
-	*x = ListDirectoryRequest{}
+func (x *StatRequest) Reset() {
+	*x = StatRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_filesystem_proto_msgTypes[17]
+		mi := &file_filesystem_proto_msgTypes[2]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
 }
 
-func (x *ListDirectoryRequest) String() string {
+func (x *StatRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ListDirectoryRequest) ProtoMessage() {}
+func (*StatRequest) ProtoMessage() {}
 
-func (x *ListDirectoryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_proto_msgTypes[17]
+func (x *StatRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_filesystem_proto_msgTypes[2]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1043,19 +240,130 @@ func (x *ListDirectoryRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ListDirectoryRequest.ProtoReflect.Descriptor instead.
-func (*ListDirectoryRequest) Descriptor() ([]byte, []int) {
-	return file_filesystem_proto_rawDescGZIP(), []int{17}
+// Deprecated: Use StatRequest.ProtoReflect.Descriptor instead.
+func (*StatRequest) Descriptor() ([]byte, []int) {
+	return file_filesystem_proto_rawDescGZIP(), []int{2}
 }
 
-func (x *ListDirectoryRequest) GetPath() string {
+func (x *StatRequest) GetPath() string {
 	if x != nil {
 		return x.Path
 	}
 	return ""
 }
 
-type ListDirectoryResponse struct {
+type StatResponse struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Ok    bool      `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	Error string    `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
+	Info  *FileStat `protobuf:"bytes,3,opt,name=info,proto3" json:"info,omitempty"`
+}
+
+func (x *StatResponse) Reset() {
+	*x = StatResponse{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_filesystem_proto_msgTypes[3]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *StatResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StatResponse) ProtoMessage() {}
+
+func (x *StatResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_filesystem_proto_msgTypes[3]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StatResponse.ProtoReflect.Descriptor instead.
+func (*StatResponse) Descriptor() ([]byte, []int) {
+	return file_filesystem_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *StatResponse) GetOk() bool {
+	if x != nil {
+		return x.Ok
+	}
+	return false
+}
+
+func (x *StatResponse) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *StatResponse) GetInfo() *FileStat {
+	if x != nil {
+		return x.Info
+	}
+	return nil
+}
+
+// ReadDir
+type ReadDirRequest struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+}
+
+func (x *ReadDirRequest) Reset() {
+	*x = ReadDirRequest{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_filesystem_proto_msgTypes[4]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *ReadDirRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReadDirRequest) ProtoMessage() {}
+
+func (x *ReadDirRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_filesystem_proto_msgTypes[4]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReadDirRequest.ProtoReflect.Descriptor instead.
+func (*ReadDirRequest) Descriptor() ([]byte, []int) {
+	return file_filesystem_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *ReadDirRequest) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+type ReadDirResponse struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
@@ -1065,23 +373,23 @@ type ListDirectoryResponse struct {
 	Entries []*DirEntry `protobuf:"bytes,3,rep,name=entries,proto3" json:"entries,omitempty"`
 }
 
-func (x *ListDirectoryResponse) Reset() {
-	*x = ListDirectoryResponse{}
+func (x *ReadDirResponse) Reset() {
+	*x = ReadDirResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_filesystem_proto_msgTypes[18]
+		mi := &file_filesystem_proto_msgTypes[5]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
 }
 
-func (x *ListDirectoryResponse) String() string {
+func (x *ReadDirResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ListDirectoryResponse) ProtoMessage() {}
+func (*ReadDirResponse) ProtoMessage() {}
 
-func (x *ListDirectoryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_proto_msgTypes[18]
+func (x *ReadDirResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_filesystem_proto_msgTypes[5]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1092,62 +400,59 @@ func (x *ListDirectoryResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ListDirectoryResponse.ProtoReflect.Descriptor instead.
-func (*ListDirectoryResponse) Descriptor() ([]byte, []int) {
-	return file_filesystem_proto_rawDescGZIP(), []int{18}
+// Deprecated: Use ReadDirResponse.ProtoReflect.Descriptor instead.
+func (*ReadDirResponse) Descriptor() ([]byte, []int) {
+	return file_filesystem_proto_rawDescGZIP(), []int{5}
 }
 
-func (x *ListDirectoryResponse) GetOk() bool {
+func (x *ReadDirResponse) GetOk() bool {
 	if x != nil {
 		return x.Ok
 	}
 	return false
 }
 
-func (x *ListDirectoryResponse) GetError() string {
+func (x *ReadDirResponse) GetError() string {
 	if x != nil {
 		return x.Error
 	}
 	return ""
 }
 
-func (x *ListDirectoryResponse) GetEntries() []*DirEntry {
+func (x *ReadDirResponse) GetEntries() []*DirEntry {
 	if x != nil {
 		return x.Entries
 	}
 	return nil
 }
 
-// Rename Directory
-type RenameDirectoryRequest struct {
+// Mkdir
+type MkdirRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	OldPid  string `protobuf:"bytes,1,opt,name=old_pid,json=oldPid,proto3" json:"old_pid,omitempty"`
-	OldName string `protobuf:"bytes,2,opt,name=old_name,json=oldName,proto3" json:"old_name,omitempty"`
-	NewPid  string `protobuf:"bytes,3,opt,name=new_pid,json=newPid,proto3" json:"new_pid,omitempty"`
-	NewName string `protobuf:"bytes,4,opt,name=new_name,json=newName,proto3" json:"new_name,omitempty"`
-	Version int32  `protobuf:"varint,5,opt,name=version,proto3" json:"version,omitempty"`
+	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	Mode uint32 `protobuf:"varint,2,opt,name=mode,proto3" json:"mode,omitempty"`
 }
 
-func (x *RenameDirectoryRequest) Reset() {
-	*x = RenameDirectoryRequest{}
+func (x *MkdirRequest) Reset() {
+	*x = MkdirRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_filesystem_proto_msgTypes[19]
+		mi := &file_filesystem_proto_msgTypes[6]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
 }
 
-func (x *RenameDirectoryRequest) String() string {
+func (x *MkdirRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*RenameDirectoryRequest) ProtoMessage() {}
+func (*MkdirRequest) ProtoMessage() {}
 
-func (x *RenameDirectoryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_proto_msgTypes[19]
+func (x *MkdirRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_filesystem_proto_msgTypes[6]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1158,47 +463,26 @@ func (x *RenameDirectoryRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use RenameDirectoryRequest.ProtoReflect.Descriptor instead.
-func (*RenameDirectoryRequest) Descriptor() ([]byte, []int) {
-	return file_filesystem_proto_rawDescGZIP(), []int{19}
+// Deprecated: Use MkdirRequest.ProtoReflect.Descriptor instead.
+func (*MkdirRequest) Descriptor() ([]byte, []int) {
+	return file_filesystem_proto_rawDescGZIP(), []int{6}
 }
 
-func (x *RenameDirectoryRequest) GetOldPid() string {
+func (x *MkdirRequest) GetPath() string {
 	if x != nil {
-		return x.OldPid
+		return x.Path
 	}
 	return ""
 }
 
-func (x *RenameDirectoryRequest) GetOldName() string {
+func (x *MkdirRequest) GetMode() uint32 {
 	if x != nil {
-		return x.OldName
-	}
-	return ""
-}
-
-func (x *RenameDirectoryRequest) GetNewPid() string {
-	if x != nil {
-		return x.NewPid
-	}
-	return ""
-}
-
-func (x *RenameDirectoryRequest) GetNewName() string {
-	if x != nil {
-		return x.NewName
-	}
-	return ""
-}
-
-func (x *RenameDirectoryRequest) GetVersion() int32 {
-	if x != nil {
-		return x.Version
+		return x.Mode
 	}
 	return 0
 }
 
-type RenameDirectoryResponse struct {
+type MkdirResponse struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
@@ -1207,23 +491,23 @@ type RenameDirectoryResponse struct {
 	Error string `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
 }
 
-func (x *RenameDirectoryResponse) Reset() {
-	*x = RenameDirectoryResponse{}
+func (x *MkdirResponse) Reset() {
+	*x = MkdirResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_filesystem_proto_msgTypes[20]
+		mi := &file_filesystem_proto_msgTypes[7]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
 }
 
-func (x *RenameDirectoryResponse) String() string {
+func (x *MkdirResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*RenameDirectoryResponse) ProtoMessage() {}
+func (*MkdirResponse) ProtoMessage() {}
 
-func (x *RenameDirectoryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_proto_msgTypes[20]
+func (x *MkdirResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_filesystem_proto_msgTypes[7]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1234,53 +518,52 @@ func (x *RenameDirectoryResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use RenameDirectoryResponse.ProtoReflect.Descriptor instead.
-func (*RenameDirectoryResponse) Descriptor() ([]byte, []int) {
-	return file_filesystem_proto_rawDescGZIP(), []int{20}
+// Deprecated: Use MkdirResponse.ProtoReflect.Descriptor instead.
+func (*MkdirResponse) Descriptor() ([]byte, []int) {
+	return file_filesystem_proto_rawDescGZIP(), []int{7}
 }
 
-func (x *RenameDirectoryResponse) GetOk() bool {
+func (x *MkdirResponse) GetOk() bool {
 	if x != nil {
 		return x.Ok
 	}
 	return false
 }
 
-func (x *RenameDirectoryResponse) GetError() string {
+func (x *MkdirResponse) GetError() string {
 	if x != nil {
 		return x.Error
 	}
 	return ""
 }
 
-// Delete Directory
-type DeleteDirectoryRequest struct {
+// Create
+type CreateRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	ParentId string `protobuf:"bytes,1,opt,name=parent_id,json=parentId,proto3" json:"parent_id,omitempty"`
-	Name     string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	Version  int32  `protobuf:"varint,3,opt,name=version,proto3" json:"version,omitempty"`
+	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	Mode uint32 `protobuf:"varint,2,opt,name=mode,proto3" json:"mode,omitempty"`
 }
 
-func (x *DeleteDirectoryRequest) Reset() {
-	*x = DeleteDirectoryRequest{}
+func (x *CreateRequest) Reset() {
+	*x = CreateRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_filesystem_proto_msgTypes[21]
+		mi := &file_filesystem_proto_msgTypes[8]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
 }
 
-func (x *DeleteDirectoryRequest) String() string {
+func (x *CreateRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*DeleteDirectoryRequest) ProtoMessage() {}
+func (*CreateRequest) ProtoMessage() {}
 
-func (x *DeleteDirectoryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_proto_msgTypes[21]
+func (x *CreateRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_filesystem_proto_msgTypes[8]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1291,33 +574,26 @@ func (x *DeleteDirectoryRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use DeleteDirectoryRequest.ProtoReflect.Descriptor instead.
-func (*DeleteDirectoryRequest) Descriptor() ([]byte, []int) {
-	return file_filesystem_proto_rawDescGZIP(), []int{21}
+// Deprecated: Use CreateRequest.ProtoReflect.Descriptor instead.
+func (*CreateRequest) Descriptor() ([]byte, []int) {
+	return file_filesystem_proto_rawDescGZIP(), []int{8}
 }
 
-func (x *DeleteDirectoryRequest) GetParentId() string {
+func (x *CreateRequest) GetPath() string {
 	if x != nil {
-		return x.ParentId
+		return x.Path
 	}
 	return ""
 }
 
-func (x *DeleteDirectoryRequest) GetName() string {
+func (x *CreateRequest) GetMode() uint32 {
 	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-func (x *DeleteDirectoryRequest) GetVersion() int32 {
-	if x != nil {
-		return x.Version
+		return x.Mode
 	}
 	return 0
 }
 
-type DeleteDirectoryResponse struct {
+type CreateResponse struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
@@ -1326,23 +602,23 @@ type DeleteDirectoryResponse struct {
 	Error string `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
 }
 
-func (x *DeleteDirectoryResponse) Reset() {
-	*x = DeleteDirectoryResponse{}
+func (x *CreateResponse) Reset() {
+	*x = CreateResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_filesystem_proto_msgTypes[22]
+		mi := &file_filesystem_proto_msgTypes[9]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
 }
 
-func (x *DeleteDirectoryResponse) String() string {
+func (x *CreateResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*DeleteDirectoryResponse) ProtoMessage() {}
+func (*CreateResponse) ProtoMessage() {}
 
-func (x *DeleteDirectoryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_filesystem_proto_msgTypes[22]
+func (x *CreateResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_filesystem_proto_msgTypes[9]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1353,19 +629,344 @@ func (x *DeleteDirectoryResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use DeleteDirectoryResponse.ProtoReflect.Descriptor instead.
-func (*DeleteDirectoryResponse) Descriptor() ([]byte, []int) {
-	return file_filesystem_proto_rawDescGZIP(), []int{22}
+// Deprecated: Use CreateResponse.ProtoReflect.Descriptor instead.
+func (*CreateResponse) Descriptor() ([]byte, []int) {
+	return file_filesystem_proto_rawDescGZIP(), []int{9}
 }
 
-func (x *DeleteDirectoryResponse) GetOk() bool {
+func (x *CreateResponse) GetOk() bool {
 	if x != nil {
 		return x.Ok
 	}
 	return false
 }
 
-func (x *DeleteDirectoryResponse) GetError() string {
+func (x *CreateResponse) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+// Rename
+type RenameRequest struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	OldPath string `protobuf:"bytes,1,opt,name=old_path,json=oldPath,proto3" json:"old_path,omitempty"`
+	NewPath string `protobuf:"bytes,2,opt,name=new_path,json=newPath,proto3" json:"new_path,omitempty"`
+}
+
+func (x *RenameRequest) Reset() {
+	*x = RenameRequest{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_filesystem_proto_msgTypes[10]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *RenameRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RenameRequest) ProtoMessage() {}
+
+func (x *RenameRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_filesystem_proto_msgTypes[10]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RenameRequest.ProtoReflect.Descriptor instead.
+func (*RenameRequest) Descriptor() ([]byte, []int) {
+	return file_filesystem_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *RenameRequest) GetOldPath() string {
+	if x != nil {
+		return x.OldPath
+	}
+	return ""
+}
+
+func (x *RenameRequest) GetNewPath() string {
+	if x != nil {
+		return x.NewPath
+	}
+	return ""
+}
+
+type RenameResponse struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Ok    bool   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	Error string `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
+}
+
+func (x *RenameResponse) Reset() {
+	*x = RenameResponse{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_filesystem_proto_msgTypes[11]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *RenameResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RenameResponse) ProtoMessage() {}
+
+func (x *RenameResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_filesystem_proto_msgTypes[11]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RenameResponse.ProtoReflect.Descriptor instead.
+func (*RenameResponse) Descriptor() ([]byte, []int) {
+	return file_filesystem_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *RenameResponse) GetOk() bool {
+	if x != nil {
+		return x.Ok
+	}
+	return false
+}
+
+func (x *RenameResponse) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+// Remove
+type RemoveRequest struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+}
+
+func (x *RemoveRequest) Reset() {
+	*x = RemoveRequest{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_filesystem_proto_msgTypes[12]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *RemoveRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemoveRequest) ProtoMessage() {}
+
+func (x *RemoveRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_filesystem_proto_msgTypes[12]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemoveRequest.ProtoReflect.Descriptor instead.
+func (*RemoveRequest) Descriptor() ([]byte, []int) {
+	return file_filesystem_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *RemoveRequest) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+type RemoveResponse struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Ok    bool   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	Error string `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
+}
+
+func (x *RemoveResponse) Reset() {
+	*x = RemoveResponse{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_filesystem_proto_msgTypes[13]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *RemoveResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemoveResponse) ProtoMessage() {}
+
+func (x *RemoveResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_filesystem_proto_msgTypes[13]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemoveResponse.ProtoReflect.Descriptor instead.
+func (*RemoveResponse) Descriptor() ([]byte, []int) {
+	return file_filesystem_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *RemoveResponse) GetOk() bool {
+	if x != nil {
+		return x.Ok
+	}
+	return false
+}
+
+func (x *RemoveResponse) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+// Chmod
+type ChmodRequest struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	Mode uint32 `protobuf:"varint,2,opt,name=mode,proto3" json:"mode,omitempty"`
+}
+
+func (x *ChmodRequest) Reset() {
+	*x = ChmodRequest{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_filesystem_proto_msgTypes[14]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *ChmodRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChmodRequest) ProtoMessage() {}
+
+func (x *ChmodRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_filesystem_proto_msgTypes[14]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChmodRequest.ProtoReflect.Descriptor instead.
+func (*ChmodRequest) Descriptor() ([]byte, []int) {
+	return file_filesystem_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *ChmodRequest) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *ChmodRequest) GetMode() uint32 {
+	if x != nil {
+		return x.Mode
+	}
+	return 0
+}
+
+type ChmodResponse struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Ok    bool   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	Error string `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
+}
+
+func (x *ChmodResponse) Reset() {
+	*x = ChmodResponse{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_filesystem_proto_msgTypes[15]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *ChmodResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChmodResponse) ProtoMessage() {}
+
+func (x *ChmodResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_filesystem_proto_msgTypes[15]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChmodResponse.ProtoReflect.Descriptor instead.
+func (*ChmodResponse) Descriptor() ([]byte, []int) {
+	return file_filesystem_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *ChmodResponse) GetOk() bool {
+	if x != nil {
+		return x.Ok
+	}
+	return false
+}
+
+func (x *ChmodResponse) GetError() string {
 	if x != nil {
 		return x.Error
 	}
@@ -1376,214 +977,111 @@ var File_filesystem_proto protoreflect.FileDescriptor
 
 var file_filesystem_proto_rawDesc = []byte{
 	0x0a, 0x10, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x70, 0x72, 0x6f,
-	0x74, 0x6f, 0x12, 0x0a, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x22, 0x58,
-	0x0a, 0x0b, 0x42, 0x61, 0x63, 0x6b, 0x50, 0x6f, 0x69, 0x6e, 0x74, 0x65, 0x72, 0x12, 0x26, 0x0a,
-	0x0f, 0x62, 0x69, 0x72, 0x74, 0x68, 0x5f, 0x70, 0x61, 0x72, 0x65, 0x6e, 0x74, 0x5f, 0x69, 0x64,
-	0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x0d, 0x62, 0x69, 0x72, 0x74, 0x68, 0x50, 0x61, 0x72,
-	0x65, 0x6e, 0x74, 0x49, 0x64, 0x12, 0x21, 0x0a, 0x0c, 0x6e, 0x61, 0x6d, 0x65, 0x5f, 0x76, 0x65,
-	0x72, 0x73, 0x69, 0x6f, 0x6e, 0x18, 0x02, 0x20, 0x01, 0x28, 0x05, 0x52, 0x0b, 0x6e, 0x61, 0x6d,
-	0x65, 0x56, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x22, 0xac, 0x02, 0x0a, 0x17, 0x44, 0x69, 0x72,
-	0x65, 0x63, 0x74, 0x6f, 0x72, 0x79, 0x41, 0x63, 0x63, 0x65, 0x73, 0x73, 0x4d, 0x65, 0x74, 0x61,
-	0x64, 0x61, 0x74, 0x61, 0x12, 0x10, 0x0a, 0x03, 0x70, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28,
-	0x09, 0x52, 0x03, 0x70, 0x69, 0x64, 0x12, 0x0e, 0x0a, 0x02, 0x69, 0x64, 0x18, 0x02, 0x20, 0x01,
-	0x28, 0x09, 0x52, 0x02, 0x69, 0x64, 0x12, 0x1e, 0x0a, 0x0a, 0x70, 0x65, 0x72, 0x6d, 0x69, 0x73,
-	0x73, 0x69, 0x6f, 0x6e, 0x18, 0x03, 0x20, 0x01, 0x28, 0x0d, 0x52, 0x0a, 0x70, 0x65, 0x72, 0x6d,
-	0x69, 0x73, 0x73, 0x69, 0x6f, 0x6e, 0x12, 0x54, 0x0a, 0x0b, 0x72, 0x65, 0x6e, 0x61, 0x6d, 0x65,
-	0x5f, 0x6c, 0x69, 0x73, 0x74, 0x18, 0x04, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x33, 0x2e, 0x66, 0x69,
-	0x6c, 0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x44, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f,
-	0x72, 0x79, 0x41, 0x63, 0x63, 0x65, 0x73, 0x73, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61,
-	0x2e, 0x52, 0x65, 0x6e, 0x61, 0x6d, 0x65, 0x4c, 0x69, 0x73, 0x74, 0x45, 0x6e, 0x74, 0x72, 0x79,
-	0x52, 0x0a, 0x72, 0x65, 0x6e, 0x61, 0x6d, 0x65, 0x4c, 0x69, 0x73, 0x74, 0x12, 0x3a, 0x0a, 0x0c,
-	0x62, 0x61, 0x63, 0x6b, 0x5f, 0x70, 0x6f, 0x69, 0x6e, 0x74, 0x65, 0x72, 0x18, 0x05, 0x20, 0x01,
-	0x28, 0x0b, 0x32, 0x17, 0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e,
-	0x42, 0x61, 0x63, 0x6b, 0x50, 0x6f, 0x69, 0x6e, 0x74, 0x65, 0x72, 0x52, 0x0b, 0x62, 0x61, 0x63,
-	0x6b, 0x50, 0x6f, 0x69, 0x6e, 0x74, 0x65, 0x72, 0x1a, 0x3d, 0x0a, 0x0f, 0x52, 0x65, 0x6e, 0x61,
-	0x6d, 0x65, 0x4c, 0x69, 0x73, 0x74, 0x45, 0x6e, 0x74, 0x72, 0x79, 0x12, 0x10, 0x0a, 0x03, 0x6b,
-	0x65, 0x79, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x03, 0x6b, 0x65, 0x79, 0x12, 0x14, 0x0a,
-	0x05, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x76, 0x61,
-	0x6c, 0x75, 0x65, 0x3a, 0x02, 0x38, 0x01, 0x22, 0x41, 0x0a, 0x19, 0x47, 0x65, 0x74, 0x44, 0x69,
-	0x72, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x79, 0x41, 0x63, 0x63, 0x65, 0x73, 0x73, 0x52, 0x65, 0x71,
-	0x75, 0x65, 0x73, 0x74, 0x12, 0x10, 0x0a, 0x03, 0x70, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28,
-	0x09, 0x52, 0x03, 0x70, 0x69, 0x64, 0x12, 0x12, 0x0a, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x02,
-	0x20, 0x01, 0x28, 0x09, 0x52, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x22, 0x83, 0x01, 0x0a, 0x1a, 0x47,
-	0x65, 0x74, 0x44, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x79, 0x41, 0x63, 0x63, 0x65, 0x73,
-	0x73, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x0e, 0x0a, 0x02, 0x6f, 0x6b, 0x18,
-	0x01, 0x20, 0x01, 0x28, 0x08, 0x52, 0x02, 0x6f, 0x6b, 0x12, 0x14, 0x0a, 0x05, 0x65, 0x72, 0x72,
-	0x6f, 0x72, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x65, 0x72, 0x72, 0x6f, 0x72, 0x12,
-	0x3f, 0x0a, 0x08, 0x6d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x18, 0x03, 0x20, 0x01, 0x28,
-	0x0b, 0x32, 0x23, 0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x44,
-	0x69, 0x72, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x79, 0x41, 0x63, 0x63, 0x65, 0x73, 0x73, 0x4d, 0x65,
-	0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x52, 0x08, 0x6d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61,
-	0x22, 0x5d, 0x0a, 0x1a, 0x53, 0x61, 0x76, 0x65, 0x44, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f, 0x72,
-	0x79, 0x41, 0x63, 0x63, 0x65, 0x73, 0x73, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x3f,
-	0x0a, 0x08, 0x6d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x18, 0x01, 0x20, 0x01, 0x28, 0x0b,
-	0x32, 0x23, 0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x44, 0x69,
-	0x72, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x79, 0x41, 0x63, 0x63, 0x65, 0x73, 0x73, 0x4d, 0x65, 0x74,
-	0x61, 0x64, 0x61, 0x74, 0x61, 0x52, 0x08, 0x6d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x22,
-	0x43, 0x0a, 0x1b, 0x53, 0x61, 0x76, 0x65, 0x44, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x79,
-	0x41, 0x63, 0x63, 0x65, 0x73, 0x73, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x0e,
+	0x74, 0x6f, 0x12, 0x0a, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x22, 0xcd,
+	0x01, 0x0a, 0x08, 0x46, 0x69, 0x6c, 0x65, 0x53, 0x74, 0x61, 0x74, 0x12, 0x12, 0x0a, 0x04, 0x70,
+	0x61, 0x74, 0x68, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x04, 0x70, 0x61, 0x74, 0x68, 0x12,
+	0x12, 0x0a, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x04, 0x6e,
+	0x61, 0x6d, 0x65, 0x12, 0x12, 0x0a, 0x04, 0x73, 0x69, 0x7a, 0x65, 0x18, 0x03, 0x20, 0x01, 0x28,
+	0x03, 0x52, 0x04, 0x73, 0x69, 0x7a, 0x65, 0x12, 0x12, 0x0a, 0x04, 0x6d, 0x6f, 0x64, 0x65, 0x18,
+	0x04, 0x20, 0x01, 0x28, 0x0d, 0x52, 0x04, 0x6d, 0x6f, 0x64, 0x65, 0x12, 0x14, 0x0a, 0x05, 0x6d,
+	0x74, 0x69, 0x6d, 0x65, 0x18, 0x05, 0x20, 0x01, 0x28, 0x03, 0x52, 0x05, 0x6d, 0x74, 0x69, 0x6d,
+	0x65, 0x12, 0x15, 0x0a, 0x06, 0x69, 0x73, 0x5f, 0x64, 0x69, 0x72, 0x18, 0x06, 0x20, 0x01, 0x28,
+	0x08, 0x52, 0x05, 0x69, 0x73, 0x44, 0x69, 0x72, 0x12, 0x1d, 0x0a, 0x0a, 0x69, 0x73, 0x5f, 0x73,
+	0x79, 0x6d, 0x6c, 0x69, 0x6e, 0x6b, 0x18, 0x07, 0x20, 0x01, 0x28, 0x08, 0x52, 0x09, 0x69, 0x73,
+	0x53, 0x79, 0x6d, 0x6c, 0x69, 0x6e, 0x6b, 0x12, 0x25, 0x0a, 0x0e, 0x73, 0x79, 0x6d, 0x6c, 0x69,
+	0x6e, 0x6b, 0x5f, 0x74, 0x61, 0x72, 0x67, 0x65, 0x74, 0x18, 0x08, 0x20, 0x01, 0x28, 0x09, 0x52,
+	0x0d, 0x73, 0x79, 0x6d, 0x6c, 0x69, 0x6e, 0x6b, 0x54, 0x61, 0x72, 0x67, 0x65, 0x74, 0x22, 0x73,
+	0x0a, 0x08, 0x44, 0x69, 0x72, 0x45, 0x6e, 0x74, 0x72, 0x79, 0x12, 0x12, 0x0a, 0x04, 0x6e, 0x61,
+	0x6d, 0x65, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x12, 0x12,
+	0x0a, 0x04, 0x6d, 0x6f, 0x64, 0x65, 0x18, 0x02, 0x20, 0x01, 0x28, 0x0d, 0x52, 0x04, 0x6d, 0x6f,
+	0x64, 0x65, 0x12, 0x12, 0x0a, 0x04, 0x73, 0x69, 0x7a, 0x65, 0x18, 0x03, 0x20, 0x01, 0x28, 0x03,
+	0x52, 0x04, 0x73, 0x69, 0x7a, 0x65, 0x12, 0x14, 0x0a, 0x05, 0x6d, 0x74, 0x69, 0x6d, 0x65, 0x18,
+	0x04, 0x20, 0x01, 0x28, 0x03, 0x52, 0x05, 0x6d, 0x74, 0x69, 0x6d, 0x65, 0x12, 0x15, 0x0a, 0x06,
+	0x69, 0x73, 0x5f, 0x64, 0x69, 0x72, 0x18, 0x05, 0x20, 0x01, 0x28, 0x08, 0x52, 0x05, 0x69, 0x73,
+	0x44, 0x69, 0x72, 0x22, 0x21, 0x0a, 0x0b, 0x53, 0x74, 0x61, 0x74, 0x52, 0x65, 0x71, 0x75, 0x65,
+	0x73, 0x74, 0x12, 0x12, 0x0a, 0x04, 0x70, 0x61, 0x74, 0x68, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09,
+	0x52, 0x04, 0x70, 0x61, 0x74, 0x68, 0x22, 0x5e, 0x0a, 0x0c, 0x53, 0x74, 0x61, 0x74, 0x52, 0x65,
+	0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x0e, 0x0a, 0x02, 0x6f, 0x6b, 0x18, 0x01, 0x20, 0x01,
+	0x28, 0x08, 0x52, 0x02, 0x6f, 0x6b, 0x12, 0x14, 0x0a, 0x05, 0x65, 0x72, 0x72, 0x6f, 0x72, 0x18,
+	0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x65, 0x72, 0x72, 0x6f, 0x72, 0x12, 0x28, 0x0a, 0x04,
+	0x69, 0x6e, 0x66, 0x6f, 0x18, 0x03, 0x20, 0x01, 0x28, 0x0b, 0x32, 0x14, 0x2e, 0x66, 0x69, 0x6c,
+	0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x46, 0x69, 0x6c, 0x65, 0x53, 0x74, 0x61, 0x74,
+	0x52, 0x04, 0x69, 0x6e, 0x66, 0x6f, 0x22, 0x24, 0x0a, 0x0e, 0x52, 0x65, 0x61, 0x64, 0x44, 0x69,
+	0x72, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x12, 0x0a, 0x04, 0x70, 0x61, 0x74, 0x68,
+	0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x04, 0x70, 0x61, 0x74, 0x68, 0x22, 0x67, 0x0a, 0x0f,
+	0x52, 0x65, 0x61, 0x64, 0x44, 0x69, 0x72, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12,
+	0x0e, 0x0a, 0x02, 0x6f, 0x6b, 0x18, 0x01, 0x20, 0x01, 0x28, 0x08, 0x52, 0x02, 0x6f, 0x6b, 0x12,
+	0x14, 0x0a, 0x05, 0x65, 0x72, 0x72, 0x6f, 0x72, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05,
+	0x65, 0x72, 0x72, 0x6f, 0x72, 0x12, 0x2e, 0x0a, 0x07, 0x65, 0x6e, 0x74, 0x72, 0x69, 0x65, 0x73,
+	0x18, 0x03, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x14, 0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73,
+	0x74, 0x65, 0x6d, 0x2e, 0x44, 0x69, 0x72, 0x45, 0x6e, 0x74, 0x72, 0x79, 0x52, 0x07, 0x65, 0x6e,
+	0x74, 0x72, 0x69, 0x65, 0x73, 0x22, 0x36, 0x0a, 0x0c, 0x4d, 0x6b, 0x64, 0x69, 0x72, 0x52, 0x65,
+	0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x12, 0x0a, 0x04, 0x70, 0x61, 0x74, 0x68, 0x18, 0x01, 0x20,
+	0x01, 0x28, 0x09, 0x52, 0x04, 0x70, 0x61, 0x74, 0x68, 0x12, 0x12, 0x0a, 0x04, 0x6d, 0x6f, 0x64,
+	0x65, 0x18, 0x02, 0x20, 0x01, 0x28, 0x0d, 0x52, 0x04, 0x6d, 0x6f, 0x64, 0x65, 0x22, 0x35, 0x0a,
+	0x0d, 0x4d, 0x6b, 0x64, 0x69, 0x72, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x0e,
 	0x0a, 0x02, 0x6f, 0x6b, 0x18, 0x01, 0x20, 0x01, 0x28, 0x08, 0x52, 0x02, 0x6f, 0x6b, 0x12, 0x14,
 	0x0a, 0x05, 0x65, 0x72, 0x72, 0x6f, 0x72, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x65,
-	0x72, 0x72, 0x6f, 0x72, 0x22, 0xde, 0x01, 0x0a, 0x18, 0x44, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f,
-	0x72, 0x79, 0x43, 0x6f, 0x6e, 0x74, 0x65, 0x6e, 0x74, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74,
-	0x61, 0x12, 0x0e, 0x0a, 0x02, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x02, 0x69,
-	0x64, 0x12, 0x1d, 0x0a, 0x0a, 0x65, 0x6e, 0x74, 0x72, 0x79, 0x5f, 0x6c, 0x69, 0x73, 0x74, 0x18,
-	0x02, 0x20, 0x03, 0x28, 0x09, 0x52, 0x09, 0x65, 0x6e, 0x74, 0x72, 0x79, 0x4c, 0x69, 0x73, 0x74,
-	0x12, 0x54, 0x0a, 0x0a, 0x74, 0x69, 0x6d, 0x65, 0x73, 0x74, 0x61, 0x6d, 0x70, 0x73, 0x18, 0x03,
-	0x20, 0x03, 0x28, 0x0b, 0x32, 0x34, 0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73, 0x74, 0x65,
-	0x6d, 0x2e, 0x44, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x79, 0x43, 0x6f, 0x6e, 0x74, 0x65,
-	0x6e, 0x74, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x2e, 0x54, 0x69, 0x6d, 0x65, 0x73,
-	0x74, 0x61, 0x6d, 0x70, 0x73, 0x45, 0x6e, 0x74, 0x72, 0x79, 0x52, 0x0a, 0x74, 0x69, 0x6d, 0x65,
-	0x73, 0x74, 0x61, 0x6d, 0x70, 0x73, 0x1a, 0x3d, 0x0a, 0x0f, 0x54, 0x69, 0x6d, 0x65, 0x73, 0x74,
-	0x61, 0x6d, 0x70, 0x73, 0x45, 0x6e, 0x74, 0x72, 0x79, 0x12, 0x10, 0x0a, 0x03, 0x6b, 0x65, 0x79,
-	0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x03, 0x6b, 0x65, 0x79, 0x12, 0x14, 0x0a, 0x05, 0x76,
-	0x61, 0x6c, 0x75, 0x65, 0x18, 0x02, 0x20, 0x01, 0x28, 0x03, 0x52, 0x05, 0x76, 0x61, 0x6c, 0x75,
-	0x65, 0x3a, 0x02, 0x38, 0x01, 0x22, 0x2c, 0x0a, 0x1a, 0x47, 0x65, 0x74, 0x44, 0x69, 0x72, 0x65,
-	0x63, 0x74, 0x6f, 0x72, 0x79, 0x43, 0x6f, 0x6e, 0x74, 0x65, 0x6e, 0x74, 0x52, 0x65, 0x71, 0x75,
-	0x65, 0x73, 0x74, 0x12, 0x0e, 0x0a, 0x02, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52,
-	0x02, 0x69, 0x64, 0x22, 0x85, 0x01, 0x0a, 0x1b, 0x47, 0x65, 0x74, 0x44, 0x69, 0x72, 0x65, 0x63,
-	0x74, 0x6f, 0x72, 0x79, 0x43, 0x6f, 0x6e, 0x74, 0x65, 0x6e, 0x74, 0x52, 0x65, 0x73, 0x70, 0x6f,
-	0x6e, 0x73, 0x65, 0x12, 0x0e, 0x0a, 0x02, 0x6f, 0x6b, 0x18, 0x01, 0x20, 0x01, 0x28, 0x08, 0x52,
-	0x02, 0x6f, 0x6b, 0x12, 0x14, 0x0a, 0x05, 0x65, 0x72, 0x72, 0x6f, 0x72, 0x18, 0x02, 0x20, 0x01,
-	0x28, 0x09, 0x52, 0x05, 0x65, 0x72, 0x72, 0x6f, 0x72, 0x12, 0x40, 0x0a, 0x08, 0x6d, 0x65, 0x74,
-	0x61, 0x64, 0x61, 0x74, 0x61, 0x18, 0x03, 0x20, 0x01, 0x28, 0x0b, 0x32, 0x24, 0x2e, 0x66, 0x69,
-	0x6c, 0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x44, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f,
-	0x72, 0x79, 0x43, 0x6f, 0x6e, 0x74, 0x65, 0x6e, 0x74, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74,
-	0x61, 0x52, 0x08, 0x6d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x22, 0x5f, 0x0a, 0x1b, 0x53,
-	0x61, 0x76, 0x65, 0x44, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x79, 0x43, 0x6f, 0x6e, 0x74,
-	0x65, 0x6e, 0x74, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x40, 0x0a, 0x08, 0x6d, 0x65,
-	0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x18, 0x01, 0x20, 0x01, 0x28, 0x0b, 0x32, 0x24, 0x2e, 0x66,
-	0x69, 0x6c, 0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x44, 0x69, 0x72, 0x65, 0x63, 0x74,
-	0x6f, 0x72, 0x79, 0x43, 0x6f, 0x6e, 0x74, 0x65, 0x6e, 0x74, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61,
-	0x74, 0x61, 0x52, 0x08, 0x6d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x22, 0x44, 0x0a, 0x1c,
-	0x53, 0x61, 0x76, 0x65, 0x44, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x79, 0x43, 0x6f, 0x6e,
-	0x74, 0x65, 0x6e, 0x74, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x0e, 0x0a, 0x02,
-	0x6f, 0x6b, 0x18, 0x01, 0x20, 0x01, 0x28, 0x08, 0x52, 0x02, 0x6f, 0x6b, 0x12, 0x14, 0x0a, 0x05,
-	0x65, 0x72, 0x72, 0x6f, 0x72, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x65, 0x72, 0x72,
-	0x6f, 0x72, 0x22, 0x61, 0x0a, 0x0c, 0x46, 0x69, 0x6c, 0x65, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61,
-	0x74, 0x61, 0x12, 0x0e, 0x0a, 0x02, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x02,
-	0x69, 0x64, 0x12, 0x10, 0x0a, 0x03, 0x70, 0x69, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52,
-	0x03, 0x70, 0x69, 0x64, 0x12, 0x12, 0x0a, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x03, 0x20, 0x01,
-	0x28, 0x09, 0x52, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x12, 0x1b, 0x0a, 0x09, 0x66, 0x69, 0x6c, 0x65,
-	0x5f, 0x64, 0x61, 0x74, 0x61, 0x18, 0x04, 0x20, 0x01, 0x28, 0x0c, 0x52, 0x08, 0x66, 0x69, 0x6c,
-	0x65, 0x44, 0x61, 0x74, 0x61, 0x22, 0x3e, 0x0a, 0x16, 0x47, 0x65, 0x74, 0x46, 0x69, 0x6c, 0x65,
-	0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12,
-	0x10, 0x0a, 0x03, 0x70, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x03, 0x70, 0x69,
-	0x64, 0x12, 0x12, 0x0a, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52,
-	0x04, 0x6e, 0x61, 0x6d, 0x65, 0x22, 0x75, 0x0a, 0x17, 0x47, 0x65, 0x74, 0x46, 0x69, 0x6c, 0x65,
-	0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65,
-	0x12, 0x0e, 0x0a, 0x02, 0x6f, 0x6b, 0x18, 0x01, 0x20, 0x01, 0x28, 0x08, 0x52, 0x02, 0x6f, 0x6b,
-	0x12, 0x14, 0x0a, 0x05, 0x65, 0x72, 0x72, 0x6f, 0x72, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52,
-	0x05, 0x65, 0x72, 0x72, 0x6f, 0x72, 0x12, 0x34, 0x0a, 0x08, 0x6d, 0x65, 0x74, 0x61, 0x64, 0x61,
-	0x74, 0x61, 0x18, 0x03, 0x20, 0x01, 0x28, 0x0b, 0x32, 0x18, 0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73,
-	0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x46, 0x69, 0x6c, 0x65, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61,
-	0x74, 0x61, 0x52, 0x08, 0x6d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x22, 0x4f, 0x0a, 0x17,
-	0x53, 0x61, 0x76, 0x65, 0x46, 0x69, 0x6c, 0x65, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61,
-	0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x34, 0x0a, 0x08, 0x6d, 0x65, 0x74, 0x61, 0x64,
-	0x61, 0x74, 0x61, 0x18, 0x01, 0x20, 0x01, 0x28, 0x0b, 0x32, 0x18, 0x2e, 0x66, 0x69, 0x6c, 0x65,
-	0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x46, 0x69, 0x6c, 0x65, 0x4d, 0x65, 0x74, 0x61, 0x64,
-	0x61, 0x74, 0x61, 0x52, 0x08, 0x6d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x22, 0x40, 0x0a,
-	0x18, 0x53, 0x61, 0x76, 0x65, 0x46, 0x69, 0x6c, 0x65, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74,
-	0x61, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x0e, 0x0a, 0x02, 0x6f, 0x6b, 0x18,
-	0x01, 0x20, 0x01, 0x28, 0x08, 0x52, 0x02, 0x6f, 0x6b, 0x12, 0x14, 0x0a, 0x05, 0x65, 0x72, 0x72,
-	0x6f, 0x72, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x65, 0x72, 0x72, 0x6f, 0x72, 0x22,
-	0x44, 0x0a, 0x08, 0x44, 0x69, 0x72, 0x45, 0x6e, 0x74, 0x72, 0x79, 0x12, 0x12, 0x0a, 0x04, 0x6e,
-	0x61, 0x6d, 0x65, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x12,
-	0x12, 0x0a, 0x04, 0x6d, 0x6f, 0x64, 0x65, 0x18, 0x02, 0x20, 0x01, 0x28, 0x0d, 0x52, 0x04, 0x6d,
-	0x6f, 0x64, 0x65, 0x12, 0x10, 0x0a, 0x03, 0x69, 0x6e, 0x6f, 0x18, 0x03, 0x20, 0x01, 0x28, 0x04,
-	0x52, 0x03, 0x69, 0x6e, 0x6f, 0x22, 0x2a, 0x0a, 0x14, 0x4c, 0x69, 0x73, 0x74, 0x44, 0x69, 0x72,
-	0x65, 0x63, 0x74, 0x6f, 0x72, 0x79, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x12, 0x0a,
-	0x04, 0x70, 0x61, 0x74, 0x68, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x04, 0x70, 0x61, 0x74,
-	0x68, 0x22, 0x6d, 0x0a, 0x15, 0x4c, 0x69, 0x73, 0x74, 0x44, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f,
-	0x72, 0x79, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x0e, 0x0a, 0x02, 0x6f, 0x6b,
+	0x72, 0x72, 0x6f, 0x72, 0x22, 0x37, 0x0a, 0x0d, 0x43, 0x72, 0x65, 0x61, 0x74, 0x65, 0x52, 0x65,
+	0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x12, 0x0a, 0x04, 0x70, 0x61, 0x74, 0x68, 0x18, 0x01, 0x20,
+	0x01, 0x28, 0x09, 0x52, 0x04, 0x70, 0x61, 0x74, 0x68, 0x12, 0x12, 0x0a, 0x04, 0x6d, 0x6f, 0x64,
+	0x65, 0x18, 0x02, 0x20, 0x01, 0x28, 0x0d, 0x52, 0x04, 0x6d, 0x6f, 0x64, 0x65, 0x22, 0x36, 0x0a,
+	0x0e, 0x43, 0x72, 0x65, 0x61, 0x74, 0x65, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12,
+	0x0e, 0x0a, 0x02, 0x6f, 0x6b, 0x18, 0x01, 0x20, 0x01, 0x28, 0x08, 0x52, 0x02, 0x6f, 0x6b, 0x12,
+	0x14, 0x0a, 0x05, 0x65, 0x72, 0x72, 0x6f, 0x72, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05,
+	0x65, 0x72, 0x72, 0x6f, 0x72, 0x22, 0x45, 0x0a, 0x0d, 0x52, 0x65, 0x6e, 0x61, 0x6d, 0x65, 0x52,
+	0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x19, 0x0a, 0x08, 0x6f, 0x6c, 0x64, 0x5f, 0x70, 0x61,
+	0x74, 0x68, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x07, 0x6f, 0x6c, 0x64, 0x50, 0x61, 0x74,
+	0x68, 0x12, 0x19, 0x0a, 0x08, 0x6e, 0x65, 0x77, 0x5f, 0x70, 0x61, 0x74, 0x68, 0x18, 0x02, 0x20,
+	0x01, 0x28, 0x09, 0x52, 0x07, 0x6e, 0x65, 0x77, 0x50, 0x61, 0x74, 0x68, 0x22, 0x36, 0x0a, 0x0e,
+	0x52, 0x65, 0x6e, 0x61, 0x6d, 0x65, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x0e,
+	0x0a, 0x02, 0x6f, 0x6b, 0x18, 0x01, 0x20, 0x01, 0x28, 0x08, 0x52, 0x02, 0x6f, 0x6b, 0x12, 0x14,
+	0x0a, 0x05, 0x65, 0x72, 0x72, 0x6f, 0x72, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x65,
+	0x72, 0x72, 0x6f, 0x72, 0x22, 0x23, 0x0a, 0x0d, 0x52, 0x65, 0x6d, 0x6f, 0x76, 0x65, 0x52, 0x65,
+	0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x12, 0x0a, 0x04, 0x70, 0x61, 0x74, 0x68, 0x18, 0x01, 0x20,
+	0x01, 0x28, 0x09, 0x52, 0x04, 0x70, 0x61, 0x74, 0x68, 0x22, 0x36, 0x0a, 0x0e, 0x52, 0x65, 0x6d,
+	0x6f, 0x76, 0x65, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x0e, 0x0a, 0x02, 0x6f,
+	0x6b, 0x18, 0x01, 0x20, 0x01, 0x28, 0x08, 0x52, 0x02, 0x6f, 0x6b, 0x12, 0x14, 0x0a, 0x05, 0x65,
+	0x72, 0x72, 0x6f, 0x72, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x65, 0x72, 0x72, 0x6f,
+	0x72, 0x22, 0x36, 0x0a, 0x0c, 0x43, 0x68, 0x6d, 0x6f, 0x64, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73,
+	0x74, 0x12, 0x12, 0x0a, 0x04, 0x70, 0x61, 0x74, 0x68, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52,
+	0x04, 0x70, 0x61, 0x74, 0x68, 0x12, 0x12, 0x0a, 0x04, 0x6d, 0x6f, 0x64, 0x65, 0x18, 0x02, 0x20,
+	0x01, 0x28, 0x0d, 0x52, 0x04, 0x6d, 0x6f, 0x64, 0x65, 0x22, 0x35, 0x0a, 0x0d, 0x43, 0x68, 0x6d,
+	0x6f, 0x64, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x0e, 0x0a, 0x02, 0x6f, 0x6b,
 	0x18, 0x01, 0x20, 0x01, 0x28, 0x08, 0x52, 0x02, 0x6f, 0x6b, 0x12, 0x14, 0x0a, 0x05, 0x65, 0x72,
 	0x72, 0x6f, 0x72, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x65, 0x72, 0x72, 0x6f, 0x72,
-	0x12, 0x2e, 0x0a, 0x07, 0x65, 0x6e, 0x74, 0x72, 0x69, 0x65, 0x73, 0x18, 0x03, 0x20, 0x03, 0x28,
-	0x0b, 0x32, 0x14, 0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x44,
-	0x69, 0x72, 0x45, 0x6e, 0x74, 0x72, 0x79, 0x52, 0x07, 0x65, 0x6e, 0x74, 0x72, 0x69, 0x65, 0x73,
-	0x22, 0x9a, 0x01, 0x0a, 0x16, 0x52, 0x65, 0x6e, 0x61, 0x6d, 0x65, 0x44, 0x69, 0x72, 0x65, 0x63,
-	0x74, 0x6f, 0x72, 0x79, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x17, 0x0a, 0x07, 0x6f,
-	0x6c, 0x64, 0x5f, 0x70, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x06, 0x6f, 0x6c,
-	0x64, 0x50, 0x69, 0x64, 0x12, 0x19, 0x0a, 0x08, 0x6f, 0x6c, 0x64, 0x5f, 0x6e, 0x61, 0x6d, 0x65,
-	0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x07, 0x6f, 0x6c, 0x64, 0x4e, 0x61, 0x6d, 0x65, 0x12,
-	0x17, 0x0a, 0x07, 0x6e, 0x65, 0x77, 0x5f, 0x70, 0x69, 0x64, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09,
-	0x52, 0x06, 0x6e, 0x65, 0x77, 0x50, 0x69, 0x64, 0x12, 0x19, 0x0a, 0x08, 0x6e, 0x65, 0x77, 0x5f,
-	0x6e, 0x61, 0x6d, 0x65, 0x18, 0x04, 0x20, 0x01, 0x28, 0x09, 0x52, 0x07, 0x6e, 0x65, 0x77, 0x4e,
-	0x61, 0x6d, 0x65, 0x12, 0x18, 0x0a, 0x07, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x18, 0x05,
-	0x20, 0x01, 0x28, 0x05, 0x52, 0x07, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x22, 0x3f, 0x0a,
-	0x17, 0x52, 0x65, 0x6e, 0x61, 0x6d, 0x65, 0x44, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x79,
-	0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x0e, 0x0a, 0x02, 0x6f, 0x6b, 0x18, 0x01,
-	0x20, 0x01, 0x28, 0x08, 0x52, 0x02, 0x6f, 0x6b, 0x12, 0x14, 0x0a, 0x05, 0x65, 0x72, 0x72, 0x6f,
-	0x72, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x65, 0x72, 0x72, 0x6f, 0x72, 0x22, 0x63,
-	0x0a, 0x16, 0x44, 0x65, 0x6c, 0x65, 0x74, 0x65, 0x44, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f, 0x72,
-	0x79, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x1b, 0x0a, 0x09, 0x70, 0x61, 0x72, 0x65,
-	0x6e, 0x74, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x08, 0x70, 0x61, 0x72,
-	0x65, 0x6e, 0x74, 0x49, 0x64, 0x12, 0x12, 0x0a, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x02, 0x20,
-	0x01, 0x28, 0x09, 0x52, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x12, 0x18, 0x0a, 0x07, 0x76, 0x65, 0x72,
-	0x73, 0x69, 0x6f, 0x6e, 0x18, 0x03, 0x20, 0x01, 0x28, 0x05, 0x52, 0x07, 0x76, 0x65, 0x72, 0x73,
-	0x69, 0x6f, 0x6e, 0x22, 0x3f, 0x0a, 0x17, 0x44, 0x65, 0x6c, 0x65, 0x74, 0x65, 0x44, 0x69, 0x72,
-	0x65, 0x63, 0x74, 0x6f, 0x72, 0x79, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x0e,
-	0x0a, 0x02, 0x6f, 0x6b, 0x18, 0x01, 0x20, 0x01, 0x28, 0x08, 0x52, 0x02, 0x6f, 0x6b, 0x12, 0x14,
-	0x0a, 0x05, 0x65, 0x72, 0x72, 0x6f, 0x72, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x65,
-	0x72, 0x72, 0x6f, 0x72, 0x32, 0xfc, 0x06, 0x0a, 0x11, 0x46, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73,
-	0x74, 0x65, 0x6d, 0x53, 0x65, 0x72, 0x76, 0x69, 0x63, 0x65, 0x12, 0x63, 0x0a, 0x12, 0x47, 0x65,
-	0x74, 0x44, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x79, 0x41, 0x63, 0x63, 0x65, 0x73, 0x73,
-	0x12, 0x25, 0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x47, 0x65,
-	0x74, 0x44, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x79, 0x41, 0x63, 0x63, 0x65, 0x73, 0x73,
-	0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x26, 0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79,
-	0x73, 0x74, 0x65, 0x6d, 0x2e, 0x47, 0x65, 0x74, 0x44, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f, 0x72,
-	0x79, 0x41, 0x63, 0x63, 0x65, 0x73, 0x73, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12,
-	0x66, 0x0a, 0x13, 0x53, 0x61, 0x76, 0x65, 0x44, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x79,
-	0x41, 0x63, 0x63, 0x65, 0x73, 0x73, 0x12, 0x26, 0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73,
-	0x74, 0x65, 0x6d, 0x2e, 0x53, 0x61, 0x76, 0x65, 0x44, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f, 0x72,
-	0x79, 0x41, 0x63, 0x63, 0x65, 0x73, 0x73, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x27,
-	0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x53, 0x61, 0x76, 0x65,
-	0x44, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x79, 0x41, 0x63, 0x63, 0x65, 0x73, 0x73, 0x52,
-	0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x66, 0x0a, 0x13, 0x47, 0x65, 0x74, 0x44, 0x69,
-	0x72, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x79, 0x43, 0x6f, 0x6e, 0x74, 0x65, 0x6e, 0x74, 0x12, 0x26,
-	0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x47, 0x65, 0x74, 0x44,
-	0x69, 0x72, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x79, 0x43, 0x6f, 0x6e, 0x74, 0x65, 0x6e, 0x74, 0x52,
-	0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x27, 0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73,
-	0x74, 0x65, 0x6d, 0x2e, 0x47, 0x65, 0x74, 0x44, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x79,
-	0x43, 0x6f, 0x6e, 0x74, 0x65, 0x6e, 0x74, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12,
-	0x69, 0x0a, 0x14, 0x53, 0x61, 0x76, 0x65, 0x44, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x79,
-	0x43, 0x6f, 0x6e, 0x74, 0x65, 0x6e, 0x74, 0x12, 0x27, 0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79,
-	0x73, 0x74, 0x65, 0x6d, 0x2e, 0x53, 0x61, 0x76, 0x65, 0x44, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f,
-	0x72, 0x79, 0x43, 0x6f, 0x6e, 0x74, 0x65, 0x6e, 0x74, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74,
-	0x1a, 0x28, 0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x53, 0x61,
-	0x76, 0x65, 0x44, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x79, 0x43, 0x6f, 0x6e, 0x74, 0x65,
-	0x6e, 0x74, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x5a, 0x0a, 0x0f, 0x47, 0x65,
-	0x74, 0x46, 0x69, 0x6c, 0x65, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x12, 0x22, 0x2e,
-	0x66, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x47, 0x65, 0x74, 0x46, 0x69,
-	0x6c, 0x65, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73,
-	0x74, 0x1a, 0x23, 0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x47,
-	0x65, 0x74, 0x46, 0x69, 0x6c, 0x65, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x52, 0x65,
-	0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x5d, 0x0a, 0x10, 0x53, 0x61, 0x76, 0x65, 0x46, 0x69,
-	0x6c, 0x65, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x12, 0x23, 0x2e, 0x66, 0x69, 0x6c,
-	0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x53, 0x61, 0x76, 0x65, 0x46, 0x69, 0x6c, 0x65,
-	0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a,
-	0x24, 0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x53, 0x61, 0x76,
-	0x65, 0x46, 0x69, 0x6c, 0x65, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x52, 0x65, 0x73,
-	0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x54, 0x0a, 0x0d, 0x4c, 0x69, 0x73, 0x74, 0x44, 0x69, 0x72,
-	0x65, 0x63, 0x74, 0x6f, 0x72, 0x79, 0x12, 0x20, 0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73,
-	0x74, 0x65, 0x6d, 0x2e, 0x4c, 0x69, 0x73, 0x74, 0x44, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f, 0x72,
-	0x79, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x21, 0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73,
-	0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x4c, 0x69, 0x73, 0x74, 0x44, 0x69, 0x72, 0x65, 0x63, 0x74,
-	0x6f, 0x72, 0x79, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x5a, 0x0a, 0x0f, 0x52,
-	0x65, 0x6e, 0x61, 0x6d, 0x65, 0x44, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x79, 0x12, 0x22,
+	0x32, 0xd1, 0x03, 0x0a, 0x11, 0x46, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x53,
+	0x65, 0x72, 0x76, 0x69, 0x63, 0x65, 0x12, 0x39, 0x0a, 0x04, 0x53, 0x74, 0x61, 0x74, 0x12, 0x17,
+	0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x53, 0x74, 0x61, 0x74,
+	0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x18, 0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79,
+	0x73, 0x74, 0x65, 0x6d, 0x2e, 0x53, 0x74, 0x61, 0x74, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73,
+	0x65, 0x12, 0x42, 0x0a, 0x07, 0x52, 0x65, 0x61, 0x64, 0x44, 0x69, 0x72, 0x12, 0x1a, 0x2e, 0x66,
+	0x69, 0x6c, 0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x52, 0x65, 0x61, 0x64, 0x44, 0x69,
+	0x72, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x1b, 0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73,
+	0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x52, 0x65, 0x61, 0x64, 0x44, 0x69, 0x72, 0x52, 0x65, 0x73,
+	0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x3c, 0x0a, 0x05, 0x4d, 0x6b, 0x64, 0x69, 0x72, 0x12, 0x18,
+	0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x4d, 0x6b, 0x64, 0x69,
+	0x72, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x19, 0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73,
+	0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x4d, 0x6b, 0x64, 0x69, 0x72, 0x52, 0x65, 0x73, 0x70, 0x6f,
+	0x6e, 0x73, 0x65, 0x12, 0x3f, 0x0a, 0x06, 0x43, 0x72, 0x65, 0x61, 0x74, 0x65, 0x12, 0x19, 0x2e,
+	0x66, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x43, 0x72, 0x65, 0x61, 0x74,
+	0x65, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x1a, 0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73,
+	0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x43, 0x72, 0x65, 0x61, 0x74, 0x65, 0x52, 0x65, 0x73, 0x70,
+	0x6f, 0x6e, 0x73, 0x65, 0x12, 0x3f, 0x0a, 0x06, 0x52, 0x65, 0x6e, 0x61, 0x6d, 0x65, 0x12, 0x19,
 	0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x52, 0x65, 0x6e, 0x61,
-	0x6d, 0x65, 0x44, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x79, 0x52, 0x65, 0x71, 0x75, 0x65,
-	0x73, 0x74, 0x1a, 0x23, 0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e,
-	0x52, 0x65, 0x6e, 0x61, 0x6d, 0x65, 0x44, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x79, 0x52,
-	0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x5a, 0x0a, 0x0f, 0x44, 0x65, 0x6c, 0x65, 0x74,
-	0x65, 0x44, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x79, 0x12, 0x22, 0x2e, 0x66, 0x69, 0x6c,
-	0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x44, 0x65, 0x6c, 0x65, 0x74, 0x65, 0x44, 0x69,
-	0x72, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x79, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x23,
-	0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x44, 0x65, 0x6c, 0x65,
-	0x74, 0x65, 0x44, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x79, 0x52, 0x65, 0x73, 0x70, 0x6f,
-	0x6e, 0x73, 0x65, 0x42, 0x27, 0x5a, 0x25, 0x67, 0x69, 0x74, 0x68, 0x75, 0x62, 0x2e, 0x63, 0x6f,
-	0x6d, 0x2f, 0x62, 0x65, 0x61, 0x6d, 0x2d, 0x63, 0x6c, 0x6f, 0x75, 0x64, 0x2f, 0x73, 0x75, 0x62,
-	0x73, 0x74, 0x72, 0x61, 0x74, 0x65, 0x2f, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x62, 0x06, 0x70, 0x72,
+	0x6d, 0x65, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x1a, 0x2e, 0x66, 0x69, 0x6c, 0x65,
+	0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x52, 0x65, 0x6e, 0x61, 0x6d, 0x65, 0x52, 0x65, 0x73,
+	0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x3f, 0x0a, 0x06, 0x52, 0x65, 0x6d, 0x6f, 0x76, 0x65, 0x12,
+	0x19, 0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x52, 0x65, 0x6d,
+	0x6f, 0x76, 0x65, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x1a, 0x2e, 0x66, 0x69, 0x6c,
+	0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x52, 0x65, 0x6d, 0x6f, 0x76, 0x65, 0x52, 0x65,
+	0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x3c, 0x0a, 0x05, 0x43, 0x68, 0x6d, 0x6f, 0x64, 0x12,
+	0x18, 0x2e, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x43, 0x68, 0x6d,
+	0x6f, 0x64, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x19, 0x2e, 0x66, 0x69, 0x6c, 0x65,
+	0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x2e, 0x43, 0x68, 0x6d, 0x6f, 0x64, 0x52, 0x65, 0x73, 0x70,
+	0x6f, 0x6e, 0x73, 0x65, 0x42, 0x26, 0x5a, 0x24, 0x67, 0x69, 0x74, 0x68, 0x75, 0x62, 0x2e, 0x63,
+	0x6f, 0x6d, 0x2f, 0x62, 0x65, 0x61, 0x6d, 0x2d, 0x63, 0x6c, 0x6f, 0x75, 0x64, 0x2f, 0x61, 0x69,
+	0x72, 0x73, 0x74, 0x6f, 0x72, 0x65, 0x2f, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x62, 0x06, 0x70, 0x72,
 	0x6f, 0x74, 0x6f, 0x33,
 }
 
@@ -1599,68 +1097,47 @@ func file_filesystem_proto_rawDescGZIP() []byte {
 	return file_filesystem_proto_rawDescData
 }
 
-var file_filesystem_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
+var file_filesystem_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_filesystem_proto_goTypes = []interface{}{
-	(*BackPointer)(nil),                  // 0: filesystem.BackPointer
-	(*DirectoryAccessMetadata)(nil),      // 1: filesystem.DirectoryAccessMetadata
-	(*GetDirectoryAccessRequest)(nil),    // 2: filesystem.GetDirectoryAccessRequest
-	(*GetDirectoryAccessResponse)(nil),   // 3: filesystem.GetDirectoryAccessResponse
-	(*SaveDirectoryAccessRequest)(nil),   // 4: filesystem.SaveDirectoryAccessRequest
-	(*SaveDirectoryAccessResponse)(nil),  // 5: filesystem.SaveDirectoryAccessResponse
-	(*DirectoryContentMetadata)(nil),     // 6: filesystem.DirectoryContentMetadata
-	(*GetDirectoryContentRequest)(nil),   // 7: filesystem.GetDirectoryContentRequest
-	(*GetDirectoryContentResponse)(nil),  // 8: filesystem.GetDirectoryContentResponse
-	(*SaveDirectoryContentRequest)(nil),  // 9: filesystem.SaveDirectoryContentRequest
-	(*SaveDirectoryContentResponse)(nil), // 10: filesystem.SaveDirectoryContentResponse
-	(*FileMetadata)(nil),                 // 11: filesystem.FileMetadata
-	(*GetFileMetadataRequest)(nil),       // 12: filesystem.GetFileMetadataRequest
-	(*GetFileMetadataResponse)(nil),      // 13: filesystem.GetFileMetadataResponse
-	(*SaveFileMetadataRequest)(nil),      // 14: filesystem.SaveFileMetadataRequest
-	(*SaveFileMetadataResponse)(nil),     // 15: filesystem.SaveFileMetadataResponse
-	(*DirEntry)(nil),                     // 16: filesystem.DirEntry
-	(*ListDirectoryRequest)(nil),         // 17: filesystem.ListDirectoryRequest
-	(*ListDirectoryResponse)(nil),        // 18: filesystem.ListDirectoryResponse
-	(*RenameDirectoryRequest)(nil),       // 19: filesystem.RenameDirectoryRequest
-	(*RenameDirectoryResponse)(nil),      // 20: filesystem.RenameDirectoryResponse
-	(*DeleteDirectoryRequest)(nil),       // 21: filesystem.DeleteDirectoryRequest
-	(*DeleteDirectoryResponse)(nil),      // 22: filesystem.DeleteDirectoryResponse
-	nil,                                  // 23: filesystem.DirectoryAccessMetadata.RenameListEntry
-	nil,                                  // 24: filesystem.DirectoryContentMetadata.TimestampsEntry
+	(*FileStat)(nil),        // 0: filesystem.FileStat
+	(*DirEntry)(nil),        // 1: filesystem.DirEntry
+	(*StatRequest)(nil),     // 2: filesystem.StatRequest
+	(*StatResponse)(nil),    // 3: filesystem.StatResponse
+	(*ReadDirRequest)(nil),  // 4: filesystem.ReadDirRequest
+	(*ReadDirResponse)(nil), // 5: filesystem.ReadDirResponse
+	(*MkdirRequest)(nil),    // 6: filesystem.MkdirRequest
+	(*MkdirResponse)(nil),   // 7: filesystem.MkdirResponse
+	(*CreateRequest)(nil),   // 8: filesystem.CreateRequest
+	(*CreateResponse)(nil),  // 9: filesystem.CreateResponse
+	(*RenameRequest)(nil),   // 10: filesystem.RenameRequest
+	(*RenameResponse)(nil),  // 11: filesystem.RenameResponse
+	(*RemoveRequest)(nil),   // 12: filesystem.RemoveRequest
+	(*RemoveResponse)(nil),  // 13: filesystem.RemoveResponse
+	(*ChmodRequest)(nil),    // 14: filesystem.ChmodRequest
+	(*ChmodResponse)(nil),   // 15: filesystem.ChmodResponse
 }
 var file_filesystem_proto_depIdxs = []int32{
-	23, // 0: filesystem.DirectoryAccessMetadata.rename_list:type_name -> filesystem.DirectoryAccessMetadata.RenameListEntry
-	0,  // 1: filesystem.DirectoryAccessMetadata.back_pointer:type_name -> filesystem.BackPointer
-	1,  // 2: filesystem.GetDirectoryAccessResponse.metadata:type_name -> filesystem.DirectoryAccessMetadata
-	1,  // 3: filesystem.SaveDirectoryAccessRequest.metadata:type_name -> filesystem.DirectoryAccessMetadata
-	24, // 4: filesystem.DirectoryContentMetadata.timestamps:type_name -> filesystem.DirectoryContentMetadata.TimestampsEntry
-	6,  // 5: filesystem.GetDirectoryContentResponse.metadata:type_name -> filesystem.DirectoryContentMetadata
-	6,  // 6: filesystem.SaveDirectoryContentRequest.metadata:type_name -> filesystem.DirectoryContentMetadata
-	11, // 7: filesystem.GetFileMetadataResponse.metadata:type_name -> filesystem.FileMetadata
-	11, // 8: filesystem.SaveFileMetadataRequest.metadata:type_name -> filesystem.FileMetadata
-	16, // 9: filesystem.ListDirectoryResponse.entries:type_name -> filesystem.DirEntry
-	2,  // 10: filesystem.FilesystemService.GetDirectoryAccess:input_type -> filesystem.GetDirectoryAccessRequest
-	4,  // 11: filesystem.FilesystemService.SaveDirectoryAccess:input_type -> filesystem.SaveDirectoryAccessRequest
-	7,  // 12: filesystem.FilesystemService.GetDirectoryContent:input_type -> filesystem.GetDirectoryContentRequest
-	9,  // 13: filesystem.FilesystemService.SaveDirectoryContent:input_type -> filesystem.SaveDirectoryContentRequest
-	12, // 14: filesystem.FilesystemService.GetFileMetadata:input_type -> filesystem.GetFileMetadataRequest
-	14, // 15: filesystem.FilesystemService.SaveFileMetadata:input_type -> filesystem.SaveFileMetadataRequest
-	17, // 16: filesystem.FilesystemService.ListDirectory:input_type -> filesystem.ListDirectoryRequest
-	19, // 17: filesystem.FilesystemService.RenameDirectory:input_type -> filesystem.RenameDirectoryRequest
-	21, // 18: filesystem.FilesystemService.DeleteDirectory:input_type -> filesystem.DeleteDirectoryRequest
-	3,  // 19: filesystem.FilesystemService.GetDirectoryAccess:output_type -> filesystem.GetDirectoryAccessResponse
-	5,  // 20: filesystem.FilesystemService.SaveDirectoryAccess:output_type -> filesystem.SaveDirectoryAccessResponse
-	8,  // 21: filesystem.FilesystemService.GetDirectoryContent:output_type -> filesystem.GetDirectoryContentResponse
-	10, // 22: filesystem.FilesystemService.SaveDirectoryContent:output_type -> filesystem.SaveDirectoryContentResponse
-	13, // 23: filesystem.FilesystemService.GetFileMetadata:output_type -> filesystem.GetFileMetadataResponse
-	15, // 24: filesystem.FilesystemService.SaveFileMetadata:output_type -> filesystem.SaveFileMetadataResponse
-	18, // 25: filesystem.FilesystemService.ListDirectory:output_type -> filesystem.ListDirectoryResponse
-	20, // 26: filesystem.FilesystemService.RenameDirectory:output_type -> filesystem.RenameDirectoryResponse
-	22, // 27: filesystem.FilesystemService.DeleteDirectory:output_type -> filesystem.DeleteDirectoryResponse
-	19, // [19:28] is the sub-list for method output_type
-	10, // [10:19] is the sub-list for method input_type
-	10, // [10:10] is the sub-list for extension type_name
-	10, // [10:10] is the sub-list for extension extendee
-	0,  // [0:10] is the sub-list for field type_name
+	0,  // 0: filesystem.StatResponse.info:type_name -> filesystem.FileStat
+	1,  // 1: filesystem.ReadDirResponse.entries:type_name -> filesystem.DirEntry
+	2,  // 2: filesystem.FilesystemService.Stat:input_type -> filesystem.StatRequest
+	4,  // 3: filesystem.FilesystemService.ReadDir:input_type -> filesystem.ReadDirRequest
+	6,  // 4: filesystem.FilesystemService.Mkdir:input_type -> filesystem.MkdirRequest
+	8,  // 5: filesystem.FilesystemService.Create:input_type -> filesystem.CreateRequest
+	10, // 6: filesystem.FilesystemService.Rename:input_type -> filesystem.RenameRequest
+	12, // 7: filesystem.FilesystemService.Remove:input_type -> filesystem.RemoveRequest
+	14, // 8: filesystem.FilesystemService.Chmod:input_type -> filesystem.ChmodRequest
+	3,  // 9: filesystem.FilesystemService.Stat:output_type -> filesystem.StatResponse
+	5,  // 10: filesystem.FilesystemService.ReadDir:output_type -> filesystem.ReadDirResponse
+	7,  // 11: filesystem.FilesystemService.Mkdir:output_type -> filesystem.MkdirResponse
+	9,  // 12: filesystem.FilesystemService.Create:output_type -> filesystem.CreateResponse
+	11, // 13: filesystem.FilesystemService.Rename:output_type -> filesystem.RenameResponse
+	13, // 14: filesystem.FilesystemService.Remove:output_type -> filesystem.RemoveResponse
+	15, // 15: filesystem.FilesystemService.Chmod:output_type -> filesystem.ChmodResponse
+	9,  // [9:16] is the sub-list for method output_type
+	2,  // [2:9] is the sub-list for method input_type
+	2,  // [2:2] is the sub-list for extension type_name
+	2,  // [2:2] is the sub-list for extension extendee
+	0,  // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_filesystem_proto_init() }
@@ -1670,7 +1147,7 @@ func file_filesystem_proto_init() {
 	}
 	if !protoimpl.UnsafeEnabled {
 		file_filesystem_proto_msgTypes[0].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*BackPointer); i {
+			switch v := v.(*FileStat); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -1682,186 +1159,6 @@ func file_filesystem_proto_init() {
 			}
 		}
 		file_filesystem_proto_msgTypes[1].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*DirectoryAccessMetadata); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_filesystem_proto_msgTypes[2].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*GetDirectoryAccessRequest); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_filesystem_proto_msgTypes[3].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*GetDirectoryAccessResponse); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_filesystem_proto_msgTypes[4].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*SaveDirectoryAccessRequest); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_filesystem_proto_msgTypes[5].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*SaveDirectoryAccessResponse); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_filesystem_proto_msgTypes[6].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*DirectoryContentMetadata); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_filesystem_proto_msgTypes[7].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*GetDirectoryContentRequest); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_filesystem_proto_msgTypes[8].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*GetDirectoryContentResponse); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_filesystem_proto_msgTypes[9].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*SaveDirectoryContentRequest); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_filesystem_proto_msgTypes[10].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*SaveDirectoryContentResponse); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_filesystem_proto_msgTypes[11].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*FileMetadata); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_filesystem_proto_msgTypes[12].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*GetFileMetadataRequest); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_filesystem_proto_msgTypes[13].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*GetFileMetadataResponse); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_filesystem_proto_msgTypes[14].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*SaveFileMetadataRequest); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_filesystem_proto_msgTypes[15].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*SaveFileMetadataResponse); i {
-			case 0:
-				return &v.state
-			case 1:
-				return &v.sizeCache
-			case 2:
-				return &v.unknownFields
-			default:
-				return nil
-			}
-		}
-		file_filesystem_proto_msgTypes[16].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*DirEntry); i {
 			case 0:
 				return &v.state
@@ -1873,8 +1170,8 @@ func file_filesystem_proto_init() {
 				return nil
 			}
 		}
-		file_filesystem_proto_msgTypes[17].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*ListDirectoryRequest); i {
+		file_filesystem_proto_msgTypes[2].Exporter = func(v interface{}, i int) interface{} {
+			switch v := v.(*StatRequest); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -1885,8 +1182,8 @@ func file_filesystem_proto_init() {
 				return nil
 			}
 		}
-		file_filesystem_proto_msgTypes[18].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*ListDirectoryResponse); i {
+		file_filesystem_proto_msgTypes[3].Exporter = func(v interface{}, i int) interface{} {
+			switch v := v.(*StatResponse); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -1897,8 +1194,8 @@ func file_filesystem_proto_init() {
 				return nil
 			}
 		}
-		file_filesystem_proto_msgTypes[19].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*RenameDirectoryRequest); i {
+		file_filesystem_proto_msgTypes[4].Exporter = func(v interface{}, i int) interface{} {
+			switch v := v.(*ReadDirRequest); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -1909,8 +1206,8 @@ func file_filesystem_proto_init() {
 				return nil
 			}
 		}
-		file_filesystem_proto_msgTypes[20].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*RenameDirectoryResponse); i {
+		file_filesystem_proto_msgTypes[5].Exporter = func(v interface{}, i int) interface{} {
+			switch v := v.(*ReadDirResponse); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -1921,8 +1218,8 @@ func file_filesystem_proto_init() {
 				return nil
 			}
 		}
-		file_filesystem_proto_msgTypes[21].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*DeleteDirectoryRequest); i {
+		file_filesystem_proto_msgTypes[6].Exporter = func(v interface{}, i int) interface{} {
+			switch v := v.(*MkdirRequest); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -1933,8 +1230,104 @@ func file_filesystem_proto_init() {
 				return nil
 			}
 		}
-		file_filesystem_proto_msgTypes[22].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*DeleteDirectoryResponse); i {
+		file_filesystem_proto_msgTypes[7].Exporter = func(v interface{}, i int) interface{} {
+			switch v := v.(*MkdirResponse); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_filesystem_proto_msgTypes[8].Exporter = func(v interface{}, i int) interface{} {
+			switch v := v.(*CreateRequest); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_filesystem_proto_msgTypes[9].Exporter = func(v interface{}, i int) interface{} {
+			switch v := v.(*CreateResponse); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_filesystem_proto_msgTypes[10].Exporter = func(v interface{}, i int) interface{} {
+			switch v := v.(*RenameRequest); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_filesystem_proto_msgTypes[11].Exporter = func(v interface{}, i int) interface{} {
+			switch v := v.(*RenameResponse); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_filesystem_proto_msgTypes[12].Exporter = func(v interface{}, i int) interface{} {
+			switch v := v.(*RemoveRequest); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_filesystem_proto_msgTypes[13].Exporter = func(v interface{}, i int) interface{} {
+			switch v := v.(*RemoveResponse); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_filesystem_proto_msgTypes[14].Exporter = func(v interface{}, i int) interface{} {
+			switch v := v.(*ChmodRequest); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_filesystem_proto_msgTypes[15].Exporter = func(v interface{}, i int) interface{} {
+			switch v := v.(*ChmodResponse); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -1952,7 +1345,7 @@ func file_filesystem_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: file_filesystem_proto_rawDesc,
 			NumEnums:      0,
-			NumMessages:   25,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

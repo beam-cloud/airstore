@@ -1,0 +1,197 @@
+syntax = "proto3";
+
+option go_package = "github.com/beam-cloud/airstore/proto";
+
+package sources;
+
+// SourceService provides read-only access to integration sources.
+// The workspace is determined by the auth token - paths are relative to /sources.
+service SourceService {
+  // Stat returns file/directory attributes for a source path
+  rpc Stat(SourceStatRequest) returns (SourceStatResponse);
+  
+  // ReadDir lists directory contents with enriched metadata
+  rpc ReadDir(SourceReadDirRequest) returns (SourceReadDirResponse);
+  
+  // Read reads file content from a source
+  rpc Read(SourceReadRequest) returns (SourceReadResponse);
+  
+  // Readlink reads a symbolic link target (for friendly aliases)
+  rpc Readlink(SourceReadlinkRequest) returns (SourceReadlinkResponse);
+
+  // Smart query operations - create queries from folder names via LLM inference
+  
+  // CreateSmartQuery creates a new smart query (called on mkdir/touch)
+  rpc CreateSmartQuery(CreateSmartQueryRequest) returns (CreateSmartQueryResponse);
+  
+  // GetSmartQuery retrieves a query by its path
+  rpc GetSmartQuery(GetSmartQueryRequest) returns (GetSmartQueryResponse);
+  
+  // ListSmartQueries lists queries under a parent path
+  rpc ListSmartQueries(ListSmartQueriesRequest) returns (ListSmartQueriesResponse);
+  
+  // DeleteSmartQuery removes a query by external_id
+  rpc DeleteSmartQuery(DeleteSmartQueryRequest) returns (DeleteSmartQueryResponse);
+
+  // UpdateSmartQuery updates an existing query's name/guidance
+  rpc UpdateSmartQuery(UpdateSmartQueryRequest) returns (UpdateSmartQueryResponse);
+
+  // ExecuteSmartQuery runs a query and returns materialized results
+  rpc ExecuteSmartQuery(ExecuteSmartQueryRequest) returns (ExecuteSmartQueryResponse);
+}
+
+// SourceFileInfo contains file/directory metadata
+message SourceFileInfo {
+  int64 size = 1;
+  uint32 mode = 2;
+  int64 mtime = 3;  // Unix timestamp
+  bool is_dir = 4;
+  bool is_link = 5;
+}
+
+// SourceDirEntry represents a directory entry with full metadata
+message SourceDirEntry {
+  string name = 1;
+  uint32 mode = 2;
+  bool is_dir = 3;
+  int64 size = 4;
+  int64 mtime = 5;     // Unix timestamp
+  string result_id = 6; // Provider-specific ID for content retrieval (optional)
+}
+
+// Stat
+message SourceStatRequest {
+  string path = 1;  // Path relative to /sources (e.g., "github/views/repos.json")
+}
+
+message SourceStatResponse {
+  bool ok = 1;
+  string error = 2;
+  SourceFileInfo info = 3;
+}
+
+// ReadDir
+message SourceReadDirRequest {
+  string path = 1;
+}
+
+message SourceReadDirResponse {
+  bool ok = 1;
+  string error = 2;
+  repeated SourceDirEntry entries = 3;
+}
+
+// Read
+message SourceReadRequest {
+  string path = 1;
+  int64 offset = 2;
+  int64 length = 3;  // 0 means read to end
+}
+
+message SourceReadResponse {
+  bool ok = 1;
+  string error = 2;
+  bytes data = 3;
+}
+
+// Readlink
+message SourceReadlinkRequest {
+  string path = 1;
+}
+
+message SourceReadlinkResponse {
+  bool ok = 1;
+  string error = 2;
+  string target = 3;
+}
+
+// ==================== Smart Query Messages ====================
+
+// SmartQuery represents a stored query that materializes as filesystem content
+message SmartQuery {
+  string external_id = 1;
+  string integration = 2;      // "gmail", "gdrive", etc.
+  string path = 3;             // Full path: "/sources/gmail/unread-emails"
+  string name = 4;             // Folder/file name
+  string query_spec = 5;       // JSON query params from LLM
+  string guidance = 6;         // User-provided context for inference
+  string output_format = 7;    // "folder" or "file"
+  string file_ext = 8;         // For files: ".json", ".md"
+  int32 cache_ttl = 9;         // Seconds, 0 = always live
+  int64 created_at = 10;       // Unix timestamp
+  int64 updated_at = 11;
+}
+
+// CreateSmartQuery - creates a query from a folder/file name via LLM inference
+message CreateSmartQueryRequest {
+  string integration = 1;      // e.g., "gmail"
+  string name = 2;             // Folder name like "unread-emails"
+  string guidance = 3;         // Optional extra context for LLM
+  string output_format = 4;    // "folder" or "file"
+  string file_ext = 5;         // For files: ".json", ".md"
+}
+
+message CreateSmartQueryResponse {
+  bool ok = 1;
+  string error = 2;
+  SmartQuery query = 3;
+}
+
+// GetSmartQuery - retrieves a query by path
+message GetSmartQueryRequest {
+  string path = 1;             // Full path: "/sources/gmail/unread-emails"
+}
+
+message GetSmartQueryResponse {
+  bool ok = 1;
+  string error = 2;
+  SmartQuery query = 3;        // nil if not found
+}
+
+// ListSmartQueries - lists queries under a parent path
+message ListSmartQueriesRequest {
+  string parent_path = 1;      // e.g., "/sources/gmail"
+}
+
+message ListSmartQueriesResponse {
+  bool ok = 1;
+  string error = 2;
+  repeated SmartQuery queries = 3;
+}
+
+// DeleteSmartQuery - removes a query by external_id
+message DeleteSmartQueryRequest {
+  string external_id = 1;        // Stable query ID (from SmartQuery.external_id)
+}
+
+message DeleteSmartQueryResponse {
+  bool ok = 1;
+  string error = 2;
+}
+
+// UpdateSmartQuery - updates an existing query's name and/or guidance
+message UpdateSmartQueryRequest {
+  string external_id = 1;        // Stable query ID (from SmartQuery.external_id)
+  string name = 2;               // New name (optional, triggers rename + path update)
+  string guidance = 3;           // New guidance (triggers re-inference of query_spec)
+}
+
+message UpdateSmartQueryResponse {
+  bool ok = 1;
+  string error = 2;
+  SmartQuery query = 3;
+}
+
+// ExecuteSmartQuery - runs a query and returns results
+message ExecuteSmartQueryRequest {
+  string path = 1;             // Query path: "/sources/gmail/unread-emails"
+  string filename = 2;         // Optional: specific file to read from folder results
+  string result_id = 3;        // Optional: provider-specific ID for direct content retrieval
+}
+
+message ExecuteSmartQueryResponse {
+  bool ok = 1;
+  string error = 2;
+  repeated SourceDirEntry entries = 3;  // For folder mode: directory entries
+  bytes file_data = 4;                   // For file mode or specific filename: content
+}

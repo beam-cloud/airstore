@@ -45,7 +45,14 @@ func WithClientName(name string) func(*redis.UniversalOptions) {
 
 func NewRedisClient(config types.RedisConfig, options ...func(*redis.UniversalOptions)) (*RedisClient, error) {
 	opts := &redis.UniversalOptions{}
-	CopyStruct(&config, opts)
+	if err := CopyStruct(&config, opts); err != nil {
+		return nil, fmt.Errorf("failed to copy redis config: %w", err)
+	}
+
+	// Verify critical fields were copied correctly
+	if config.Password != "" && opts.Password == "" {
+		return nil, errors.New("redis password was not copied correctly from config")
+	}
 
 	for _, opt := range options {
 		opt(opts)

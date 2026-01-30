@@ -6,6 +6,18 @@ import (
 	"time"
 )
 
+// VNodeType defines the behavior category of a virtual node
+type VNodeType int
+
+const (
+	// VNodeReadOnly is for read-only paths like /tools/, /.airstore/
+	VNodeReadOnly VNodeType = iota
+	// VNodeSmartQuery is for /sources/{integration}/ - mkdir/touch creates smart queries
+	VNodeSmartQuery
+	// VNodeWritable is for fully writable paths like /context/
+	VNodeWritable
+)
+
 var (
 	ErrReadOnly     = syscall.EROFS
 	ErrNotSupported = syscall.ENOTSUP
@@ -22,24 +34,31 @@ type FileInfo struct {
 }
 
 type DirEntry struct {
-	Name string
-	Mode uint32
-	Ino  uint64
+	Name  string
+	Mode  uint32
+	Ino   uint64
+	Size  int64 // File size (0 for directories)
+	Mtime int64 // Unix timestamp (0 = use current time)
 }
 
 // VirtualNode handles a path prefix in the virtual filesystem.
-// Read-only implementations embed ReadOnlyBase.
+//
+// Write semantics by VNodeType:
+//   - VNodeReadOnly: All writes return ErrReadOnly (e.g., /tools/, /.airstore/)
+//   - VNodeSmartQuery: Mkdir/Create create smart queries, Write/Unlink/Rmdir not supported
+//   - VNodeWritable: Full read/write access (e.g., /context/)
 type VirtualNode interface {
 	Prefix() string
+	Type() VNodeType
 
-	// Read
+	// Read operations
 	Getattr(path string) (*FileInfo, error)
 	Readdir(path string) ([]DirEntry, error)
 	Open(path string, flags int) (FileHandle, error)
 	Read(path string, buf []byte, off int64, fh FileHandle) (int, error)
 	Readlink(path string) (string, error)
 
-	// Write
+	// Write operations (behavior depends on VNodeType)
 	Create(path string, flags int, mode uint32) (FileHandle, error)
 	Write(path string, buf []byte, off int64, fh FileHandle) (int, error)
 	Truncate(path string, size int64, fh FileHandle) error
@@ -54,18 +73,35 @@ type VirtualNode interface {
 }
 
 // ReadOnlyBase returns ErrReadOnly for all write operations.
+// Embed this in VNodes that don't support writes (e.g., /tools/).
 type ReadOnlyBase struct{}
 
-func (ReadOnlyBase) Create(string, int, uint32) (FileHandle, error)     { return 0, ErrReadOnly }
-func (ReadOnlyBase) Write(string, []byte, int64, FileHandle) (int, error) { return 0, ErrReadOnly }
-func (ReadOnlyBase) Truncate(string, int64, FileHandle) error            { return ErrReadOnly }
-func (ReadOnlyBase) Mkdir(string, uint32) error                          { return ErrReadOnly }
-func (ReadOnlyBase) Rmdir(string) error                                  { return ErrReadOnly }
-func (ReadOnlyBase) Unlink(string) error                                 { return ErrReadOnly }
-func (ReadOnlyBase) Symlink(string, string) error                        { return ErrReadOnly }
-func (ReadOnlyBase) Readlink(string) (string, error)                     { return "", ErrNotSupported }
-func (ReadOnlyBase) Release(string, FileHandle) error                    { return nil }
-func (ReadOnlyBase) Fsync(string, FileHandle) error                      { return nil }
+func (ReadOnlyBase) Type() VNodeType                                       { return VNodeReadOnly }
+func (ReadOnlyBase) Create(string, int, uint32) (FileHandle, error)        { return 0, ErrReadOnly }
+func (ReadOnlyBase) Write(string, []byte, int64, FileHandle) (int, error)  { return 0, ErrReadOnly }
+func (ReadOnlyBase) Truncate(string, int64, FileHandle) error              { return ErrReadOnly }
+func (ReadOnlyBase) Mkdir(string, uint32) error                            { return ErrReadOnly }
+func (ReadOnlyBase) Rmdir(string) error                                    { return ErrReadOnly }
+func (ReadOnlyBase) Unlink(string) error                                   { return ErrReadOnly }
+func (ReadOnlyBase) Symlink(string, string) error                          { return ErrReadOnly }
+func (ReadOnlyBase) Readlink(string) (string, error)                       { return "", ErrNotSupported }
+func (ReadOnlyBase) Release(string, FileHandle) error                      { return nil }
+func (ReadOnlyBase) Fsync(string, FileHandle) error                        { return nil }
+
+// SmartQueryBase provides default implementations for smart query VNodes.
+// Embed this in VNodes that support smart queries (e.g., /sources/).
+// Mkdir and Create should be overridden to create smart queries.
+type SmartQueryBase struct{}
+
+func (SmartQueryBase) Type() VNodeType                                       { return VNodeSmartQuery }
+func (SmartQueryBase) Write(string, []byte, int64, FileHandle) (int, error)  { return 0, ErrReadOnly }
+func (SmartQueryBase) Truncate(string, int64, FileHandle) error              { return ErrReadOnly }
+func (SmartQueryBase) Rmdir(string) error                                    { return ErrNotSupported }
+func (SmartQueryBase) Unlink(string) error                                   { return ErrNotSupported }
+func (SmartQueryBase) Symlink(string, string) error                          { return ErrNotSupported }
+func (SmartQueryBase) Readlink(string) (string, error)                       { return "", ErrNotSupported }
+func (SmartQueryBase) Release(string, FileHandle) error                      { return nil }
+func (SmartQueryBase) Fsync(string, FileHandle) error                        { return nil }
 
 // Registry matches paths to virtual nodes.
 type Registry struct {

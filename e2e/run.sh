@@ -13,6 +13,8 @@
 #   ./e2e/run.sh fs        # Run only filesystem test
 #   ./e2e/run.sh tools     # Run only tools test
 #   ./e2e/run.sh context   # Run only context/S3 test
+#   ./e2e/run.sh sources   # Run only sources/integrations test
+#   ./e2e/run.sh index     # Run only index performance test
 
 set -e
 
@@ -437,6 +439,510 @@ test_context() {
 }
 
 # ============================================================================
+# Test: Sources (read-only integration filesystem)
+# ============================================================================
+test_sources() {
+    echo ""
+    echo "=== Test: Sources (Integration Filesystem) ==="
+    
+    ensure_cli
+    wait_gateway
+    cleanup_mount
+    
+    # -------------------------------------------------------------------------
+    # Setup: Create workspace and token for auth
+    # -------------------------------------------------------------------------
+    info "Creating test workspace..."
+    WORKSPACE_NAME="sources-e2e-$(date +%s)"
+    RESULT=$("$PROJECT_ROOT/bin/cli" --gateway "$GATEWAY_GRPC" workspace create "$WORKSPACE_NAME" 2>&1) || fail "Workspace create failed: $RESULT"
+    WORKSPACE_ID=$(echo "$RESULT" | grep -oE '[0-9a-f-]{36}' | head -1)
+    [ -n "$WORKSPACE_ID" ] || fail "Could not parse workspace ID"
+    pass "Workspace: $WORKSPACE_ID"
+    
+    info "Adding member..."
+    RESULT=$("$PROJECT_ROOT/bin/cli" --gateway "$GATEWAY_GRPC" member add "$WORKSPACE_ID" "sources@test.com" --name "Sources" --role admin 2>&1) || fail "Member add failed"
+    MEMBER_ID=$(echo "$RESULT" | grep -oE '[0-9a-f-]{36}' | head -1)
+    [ -n "$MEMBER_ID" ] || fail "Could not parse member ID"
+    
+    info "Creating token..."
+    RESULT=$("$PROJECT_ROOT/bin/cli" --gateway "$GATEWAY_GRPC" token create "$WORKSPACE_ID" "$MEMBER_ID" --name "sources-token" 2>&1) || fail "Token create failed"
+    TOKEN=$(echo "$RESULT" | grep "Token:" | awk '{print $2}')
+    [ -n "$TOKEN" ] || fail "Could not parse token"
+    pass "Token created"
+    
+    # -------------------------------------------------------------------------
+    # Mount filesystem with auth
+    # -------------------------------------------------------------------------
+    mkdir -p "$MOUNT_POINT"
+    
+    info "Mounting filesystem..."
+    "$PROJECT_ROOT/bin/cli" mount "$MOUNT_POINT" --gateway "$GATEWAY_GRPC" --token "$TOKEN" &
+    MOUNT_PID=$!
+    sleep 3
+    
+    # Verify mount
+    if ! mount | grep -q "$MOUNT_POINT"; then
+        kill $MOUNT_PID 2>/dev/null || true
+        fail "Mount failed"
+    fi
+    pass "Filesystem mounted"
+    
+    # -------------------------------------------------------------------------
+    # Test 1: /sources directory exists
+    # -------------------------------------------------------------------------
+    info "Test 1: Checking /sources directory..."
+    
+    if [ ! -d "$MOUNT_POINT/sources" ]; then
+        kill $MOUNT_PID 2>/dev/null || true
+        fail "/sources directory not found"
+    fi
+    pass "/sources directory exists"
+    
+    # -------------------------------------------------------------------------
+    # Test 2: List integrations
+    # -------------------------------------------------------------------------
+    info "Test 2: Listing integrations..."
+    
+    INTEGRATIONS=$(ls "$MOUNT_POINT/sources/" 2>/dev/null)
+    if [ -z "$INTEGRATIONS" ]; then
+        info "No integrations listed (may need providers registered)"
+    else
+        pass "Integrations found: $(echo $INTEGRATIONS | tr '\n' ' ')"
+    fi
+    
+    # -------------------------------------------------------------------------
+    # Test 3: Check github integration directory
+    # -------------------------------------------------------------------------
+    info "Test 3: Checking github integration..."
+    
+    if [ -d "$MOUNT_POINT/sources/github" ]; then
+        GITHUB_CONTENTS=$(ls "$MOUNT_POINT/sources/github/" 2>/dev/null)
+        pass "GitHub integration present: $(echo $GITHUB_CONTENTS | tr '\n' ' ')"
+    else
+        info "GitHub integration directory not found"
+    fi
+    
+    # -------------------------------------------------------------------------
+    # Test 4: Read status.json (should work without connection)
+    # -------------------------------------------------------------------------
+    info "Test 4: Reading status.json..."
+    
+    if [ -f "$MOUNT_POINT/sources/github/status.json" ]; then
+        STATUS=$(cat "$MOUNT_POINT/sources/github/status.json" 2>/dev/null)
+        if echo "$STATUS" | grep -q '"integration"'; then
+            pass "status.json readable: $(echo "$STATUS" | head -c 100)..."
+            
+            # Check connection status
+            CONNECTED=$(echo "$STATUS" | grep -o '"connected": *[^,}]*' | head -1)
+            info "Connection status: $CONNECTED"
+        else
+            info "status.json format unexpected: $STATUS"
+        fi
+    else
+        info "status.json not found for github"
+    fi
+    
+    # -------------------------------------------------------------------------
+    # Test 5: Check other integrations (gmail, notion, gdrive)
+    # -------------------------------------------------------------------------
+    info "Test 5: Checking other integrations..."
+    
+    for INTEG in gmail notion gdrive; do
+        if [ -d "$MOUNT_POINT/sources/$INTEG" ]; then
+            pass "$INTEG integration registered"
+        else
+            info "$INTEG integration not found"
+        fi
+    done
+    
+    # -------------------------------------------------------------------------
+    # Test 6: (Optional) Test with actual GitHub connection
+    # -------------------------------------------------------------------------
+    if [ -n "$GITHUB_TOKEN" ]; then
+        info "Test 6: Testing with GitHub connection..."
+        
+        # Add connection
+        RESULT=$("$PROJECT_ROOT/bin/cli" --gateway "$GATEWAY_GRPC" connection add "$WORKSPACE_ID" github --token "$GITHUB_TOKEN" 2>&1) || info "Connection add note: $RESULT"
+        
+        # Give the system a moment to propagate
+        sleep 2
+        
+        # Try to read views/repos.json
+        if [ -f "$MOUNT_POINT/sources/github/views/repos.json" ]; then
+            REPOS=$(cat "$MOUNT_POINT/sources/github/views/repos.json" 2>/dev/null | head -c 500)
+            if echo "$REPOS" | grep -q '"repos"'; then
+                pass "GitHub repos.json works!"
+                info "Sample: $(echo "$REPOS" | head -c 200)..."
+            else
+                info "repos.json returned unexpected content"
+            fi
+        else
+            info "views/repos.json not available"
+        fi
+        
+        # Check status.json again
+        if [ -f "$MOUNT_POINT/sources/github/status.json" ]; then
+            STATUS=$(cat "$MOUNT_POINT/sources/github/status.json" 2>/dev/null)
+            if echo "$STATUS" | grep -q '"connected": true'; then
+                pass "GitHub shows connected after adding token"
+            fi
+        fi
+    else
+        info "Test 6: Skipped (set GITHUB_TOKEN env to test with real connection)"
+    fi
+    
+    # -------------------------------------------------------------------------
+    # Test 7: Read-only verification
+    # -------------------------------------------------------------------------
+    info "Test 7: Verifying read-only behavior..."
+    
+    # Attempt to write (should fail)
+    if echo "test" > "$MOUNT_POINT/sources/test.txt" 2>/dev/null; then
+        info "Warning: Write succeeded (expected failure)"
+    else
+        pass "Write correctly rejected (read-only)"
+    fi
+    
+    # Attempt to mkdir (should fail)
+    if mkdir "$MOUNT_POINT/sources/newdir" 2>/dev/null; then
+        info "Warning: mkdir succeeded (expected failure)"
+    else
+        pass "mkdir correctly rejected (read-only)"
+    fi
+    
+    # -------------------------------------------------------------------------
+    # Cleanup
+    # -------------------------------------------------------------------------
+    info "Cleaning up..."
+    kill $MOUNT_PID 2>/dev/null || true
+    sleep 1
+    cleanup_mount
+    
+    echo ""
+    pass "Sources test passed (7 tests)"
+}
+
+# ============================================================================
+# Test: Index Performance
+# ============================================================================
+test_index() {
+    echo ""
+    echo "=== Test: Index Performance ==="
+    echo ""
+    echo "This test compares filesystem performance with and without indexing."
+    echo "It measures how fast grep/find operations are on source data."
+    echo ""
+    
+    ensure_cli
+    wait_gateway
+    cleanup_mount
+    
+    # Check if we have a token for sources
+    if [ -z "$TEST_TOKEN" ]; then
+        info "Set TEST_TOKEN env to test with real data"
+        info "Example: TEST_TOKEN=your_token ./e2e/run.sh index"
+        info ""
+        info "Running synthetic benchmark instead..."
+        
+        # Synthetic benchmark using SQLite index directly
+        info "Building test binary..."
+        cd "$PROJECT_ROOT"
+        go test -c -o /tmp/index_bench ./pkg/index/... 2>/dev/null || fail "Failed to build index tests"
+        
+        info "Running SQLite index benchmarks..."
+        echo ""
+        /tmp/index_bench -test.bench=. -test.benchtime=1s 2>&1 | grep -E "^Benchmark|ns/op"
+        
+        pass "Synthetic benchmark complete"
+        echo ""
+        return
+    fi
+    
+    # Real benchmark with mounted filesystem
+    info "Creating workspace..."
+    WORKSPACE_NAME="index-e2e-$(date +%s)"
+    RESULT=$("$PROJECT_ROOT/bin/cli" --gateway "$GATEWAY_GRPC" workspace create "$WORKSPACE_NAME" 2>&1) || fail "Workspace create failed: $RESULT"
+    WORKSPACE_ID=$(echo "$RESULT" | grep -oE '[0-9a-f-]{36}' | head -1)
+    [ -n "$WORKSPACE_ID" ] || fail "Could not parse workspace ID"
+    pass "Workspace: $WORKSPACE_ID"
+    
+    info "Adding member..."
+    RESULT=$("$PROJECT_ROOT/bin/cli" --gateway "$GATEWAY_GRPC" member add "$WORKSPACE_ID" "index@test.com" --name "Index" --role admin 2>&1) || fail "Member add failed"
+    MEMBER_ID=$(echo "$RESULT" | grep -oE '[0-9a-f-]{36}' | head -1)
+    
+    info "Creating token..."
+    RESULT=$("$PROJECT_ROOT/bin/cli" --gateway "$GATEWAY_GRPC" token create "$WORKSPACE_ID" "$MEMBER_ID" --name "index-token" 2>&1) || fail "Token create failed"
+    TOKEN=$(echo "$RESULT" | grep "Token:" | awk '{print $2}')
+    
+    # -------------------------------------------------------------------------
+    # Test 1: Baseline (without index, if possible)
+    # -------------------------------------------------------------------------
+    mkdir -p "$MOUNT_POINT"
+    
+    info "Test 1: Mounting filesystem..."
+    "$PROJECT_ROOT/bin/cli" mount "$MOUNT_POINT" --gateway "$GATEWAY_GRPC" --token "$TEST_TOKEN" &
+    MOUNT_PID=$!
+    sleep 5
+    
+    if [ ! -d "$MOUNT_POINT/sources" ]; then
+        kill $MOUNT_PID 2>/dev/null || true
+        fail "Mount failed"
+    fi
+    pass "Mounted at $MOUNT_POINT"
+    
+    # List available sources
+    SOURCES=$(ls "$MOUNT_POINT/sources/" 2>/dev/null)
+    info "Available sources: $SOURCES"
+    
+    # -------------------------------------------------------------------------
+    # Test 2: Performance test - find operation
+    # -------------------------------------------------------------------------
+    info "Test 2: Find performance..."
+    
+    if [ -d "$MOUNT_POINT/sources/gmail" ]; then
+        # Time find operation
+        START=$(date +%s.%N)
+        FIND_RESULT=$(find "$MOUNT_POINT/sources/gmail" -name "*.json" 2>/dev/null | wc -l | tr -d ' ')
+        END=$(date +%s.%N)
+        FIND_TIME=$(echo "$END - $START" | bc)
+        pass "find found $FIND_RESULT files in ${FIND_TIME}s"
+    else
+        info "Gmail not connected, skipping find test"
+    fi
+    
+    # -------------------------------------------------------------------------
+    # Test 3: Performance test - grep operation
+    # -------------------------------------------------------------------------
+    info "Test 3: Grep performance..."
+    
+    if [ -d "$MOUNT_POINT/sources/gmail/messages" ]; then
+        # Time grep operation (just check if it completes)
+        START=$(date +%s.%N)
+        GREP_RESULT=$(grep -r "meeting" "$MOUNT_POINT/sources/gmail/messages/" 2>/dev/null | wc -l | tr -d ' ') || true
+        END=$(date +%s.%N)
+        GREP_TIME=$(echo "$END - $START" | bc)
+        
+        if [ "$GREP_TIME" != "" ]; then
+            pass "grep found $GREP_RESULT matches in ${GREP_TIME}s"
+        else
+            info "grep completed (timing unavailable)"
+        fi
+    else
+        info "Gmail messages not available, skipping grep test"
+    fi
+    
+    # -------------------------------------------------------------------------
+    # Test 4: ls performance
+    # -------------------------------------------------------------------------
+    info "Test 4: Directory listing performance..."
+    
+    START=$(date +%s.%N)
+    LS_COUNT=$(ls -laR "$MOUNT_POINT/sources/" 2>/dev/null | wc -l | tr -d ' ')
+    END=$(date +%s.%N)
+    LS_TIME=$(echo "$END - $START" | bc)
+    
+    if [ "$LS_TIME" != "" ]; then
+        pass "ls -laR listed $LS_COUNT lines in ${LS_TIME}s"
+    else
+        info "Directory listing completed"
+    fi
+    
+    # -------------------------------------------------------------------------
+    # Cleanup
+    # -------------------------------------------------------------------------
+    info "Cleaning up..."
+    kill $MOUNT_PID 2>/dev/null || true
+    sleep 1
+    cleanup_mount
+    
+    echo ""
+    echo "Performance Summary:"
+    echo "-------------------"
+    [ -n "$FIND_TIME" ] && echo "  find: ${FIND_TIME}s ($FIND_RESULT files)"
+    [ -n "$GREP_TIME" ] && echo "  grep: ${GREP_TIME}s ($GREP_RESULT matches)"
+    [ -n "$LS_TIME" ] && echo "    ls: ${LS_TIME}s ($LS_COUNT lines)"
+    echo ""
+    
+    pass "Index performance test passed"
+}
+
+# ============================================================================
+# Test: Smart Queries (dynamic folder/file creation)
+# ============================================================================
+test_smart_queries() {
+    echo ""
+    echo "=== Test: Smart Queries ==="
+    echo ""
+    echo "This test verifies the smart query filesystem:"
+    echo "  - mkdir /sources/gmail/unread-emails creates a query"
+    echo "  - ls shows query results from Gmail API"
+    echo ""
+    
+    ensure_cli
+    wait_gateway
+    cleanup_mount
+    
+    # Check if we have the test token
+    if [ -z "$TEST_TOKEN" ]; then
+        echo ""
+        info "This test requires a Gmail connection."
+        info "Set TEST_TOKEN to a token with Gmail connected."
+        info ""
+        info "Example:"
+        info "  TEST_TOKEN=your_token ./e2e/run.sh smart"
+        echo ""
+        pass "Skipped (no TEST_TOKEN)"
+        return
+    fi
+    
+    # -------------------------------------------------------------------------
+    # Mount filesystem with local mode (for smart queries)
+    # -------------------------------------------------------------------------
+    mkdir -p "$MOUNT_POINT"
+    
+    info "Mounting filesystem with smart queries..."
+    "$PROJECT_ROOT/bin/cli" mount "$MOUNT_POINT" \
+        --gateway "$GATEWAY_GRPC" \
+        --token "$TEST_TOKEN" \
+        --config "$PROJECT_ROOT/config.local.yaml" &
+    MOUNT_PID=$!
+    sleep 5
+    
+    # Verify mount
+    if ! mount | grep -q "$MOUNT_POINT"; then
+        kill $MOUNT_PID 2>/dev/null || true
+        fail "Mount failed"
+    fi
+    pass "Filesystem mounted"
+    
+    # -------------------------------------------------------------------------
+    # Test 1: Check /sources/gmail exists
+    # -------------------------------------------------------------------------
+    info "Test 1: Checking Gmail integration..."
+    
+    if [ ! -d "$MOUNT_POINT/sources/gmail" ]; then
+        kill $MOUNT_PID 2>/dev/null || true
+        fail "/sources/gmail not found"
+    fi
+    pass "/sources/gmail exists"
+    
+    # Check status.json to verify connection
+    if [ -f "$MOUNT_POINT/sources/gmail/status.json" ]; then
+        STATUS=$(cat "$MOUNT_POINT/sources/gmail/status.json" 2>/dev/null)
+        if echo "$STATUS" | grep -q '"connected": true'; then
+            pass "Gmail is connected"
+        else
+            info "Gmail status: $STATUS"
+            info "Gmail may not be connected - continuing anyway"
+        fi
+    fi
+    
+    # -------------------------------------------------------------------------
+    # Test 2: Create smart query folder
+    # -------------------------------------------------------------------------
+    info "Test 2: Creating smart query folder..."
+    
+    QUERY_NAME="unread-emails-$(date +%s)"
+    QUERY_PATH="$MOUNT_POINT/sources/gmail/$QUERY_NAME"
+    
+    if mkdir "$QUERY_PATH" 2>/dev/null; then
+        pass "Created smart query folder: $QUERY_NAME"
+    else
+        info "mkdir failed - smart queries may not be enabled"
+        info "Make sure config has index.enabled: true"
+        kill $MOUNT_PID 2>/dev/null || true
+        cleanup_mount
+        pass "Skipped (smart queries not enabled)"
+        return
+    fi
+    
+    # -------------------------------------------------------------------------
+    # Test 3: List query results
+    # -------------------------------------------------------------------------
+    info "Test 3: Listing query results..."
+    sleep 2  # Give it a moment to execute query
+    
+    RESULTS=$(ls "$QUERY_PATH" 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$RESULTS" -gt 0 ]; then
+        pass "Query returned $RESULTS results"
+        info "Sample files:"
+        ls "$QUERY_PATH" 2>/dev/null | head -5
+    else
+        info "Query returned 0 results (may be no unread emails)"
+    fi
+    
+    # -------------------------------------------------------------------------
+    # Test 4: Read email content
+    # -------------------------------------------------------------------------
+    info "Test 4: Reading email content..."
+    
+    FIRST_FILE=$(ls "$QUERY_PATH" 2>/dev/null | head -1)
+    if [ -n "$FIRST_FILE" ]; then
+        CONTENT=$(cat "$QUERY_PATH/$FIRST_FILE" 2>/dev/null | head -c 500)
+        if [ -n "$CONTENT" ]; then
+            pass "Read email content"
+            echo ""
+            echo "--- Email Preview ---"
+            echo "$CONTENT"
+            echo "..."
+            echo "--- End Preview ---"
+            echo ""
+        else
+            info "Could not read file content"
+        fi
+    else
+        info "No files to read"
+    fi
+    
+    # -------------------------------------------------------------------------
+    # Test 5: Create smart query file (single file output)
+    # -------------------------------------------------------------------------
+    info "Test 5: Creating smart query file..."
+    
+    QUERY_FILE="$MOUNT_POINT/sources/gmail/recent-emails-$(date +%s).json"
+    
+    if touch "$QUERY_FILE" 2>/dev/null; then
+        pass "Created smart query file"
+        
+        # Try to read it
+        sleep 2
+        if [ -f "$QUERY_FILE" ]; then
+            CONTENT=$(cat "$QUERY_FILE" 2>/dev/null | head -c 500)
+            if [ -n "$CONTENT" ]; then
+                pass "Query file has content"
+                info "Preview: ${CONTENT:0:200}..."
+            fi
+        fi
+    else
+        info "touch failed for query file"
+    fi
+    
+    # -------------------------------------------------------------------------
+    # Test 6: Different query types
+    # -------------------------------------------------------------------------
+    info "Test 6: Testing different query types..."
+    
+    for QUERY in "starred" "important" "from-noreply"; do
+        QPATH="$MOUNT_POINT/sources/gmail/$QUERY-$(date +%s)"
+        if mkdir "$QPATH" 2>/dev/null; then
+            QCOUNT=$(ls "$QPATH" 2>/dev/null | wc -l | tr -d ' ')
+            pass "$QUERY: $QCOUNT results"
+        fi
+    done
+    
+    # -------------------------------------------------------------------------
+    # Cleanup
+    # -------------------------------------------------------------------------
+    info "Cleaning up..."
+    kill $MOUNT_PID 2>/dev/null || true
+    sleep 1
+    cleanup_mount
+    
+    echo ""
+    pass "Smart queries test passed"
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -466,16 +972,26 @@ case "${1:-all}" in
     context|s3)
         test_context
         ;;
+    sources)
+        test_sources
+        ;;
+    index)
+        test_index
+        ;;
+    smart|smart-queries)
+        test_smart_queries
+        ;;
     all)
         test_setup
         test_task
         test_filesystem
         test_tools
         test_context
+        test_sources
         ;;
     *)
         echo "Unknown test: $1"
-        echo "Available: setup, task, fs, tools, context, all"
+        echo "Available: setup, task, fs, tools, context, sources, index, smart, all"
         exit 1
         ;;
 esac

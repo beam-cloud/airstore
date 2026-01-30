@@ -13,8 +13,10 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.51.2
 	github.com/beam-cloud/clip v0.0.0-20260126181811-a2a14fb37f70
 	github.com/beam-cloud/go-runc v0.0.0-20250911154456-bb45084abfe1
+	github.com/boundaryml/baml v0.218.1
 	github.com/bsm/redislock v0.9.4
 	github.com/go-viper/mapstructure/v2 v2.0.0
+	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/google/uuid v1.6.0
 	github.com/hanwen/go-fuse/v2 v2.9.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
@@ -25,6 +27,7 @@ require (
 	github.com/knadh/koanf/v2 v2.1.1
 	github.com/labstack/echo/v4 v4.11.4
 	github.com/lib/pq v1.10.9
+	github.com/mattn/go-sqlite3 v1.14.33
 	github.com/opencontainers/runtime-spec v1.3.0
 	github.com/pressly/goose/v3 v3.26.0
 	github.com/redis/go-redis/v9 v9.1.0
@@ -34,6 +37,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	github.com/winfsp/cgofuse v1.6.1-0.20250813110601-7d90b0992471
 	golang.org/x/crypto v0.45.0
+	golang.org/x/oauth2 v0.32.0
 	golang.org/x/sync v0.18.0
 	google.golang.org/grpc v1.78.0
 	google.golang.org/protobuf v1.36.10
@@ -44,6 +48,7 @@ require (
 )
 
 require (
+	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.6.1 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.15.2 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.3.2 // indirect
@@ -119,7 +124,6 @@ require (
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/net v0.47.0 // indirect
-	golang.org/x/oauth2 v0.32.0 // indirect
 	golang.org/x/sys v0.38.0 // indirect
 	golang.org/x/term v0.37.0 // indirect
 	golang.org/x/text v0.31.0 // indirect

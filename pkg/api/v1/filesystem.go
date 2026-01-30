@@ -1,0 +1,1240 @@
+package apiv1
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/beam-cloud/airstore/pkg/auth"
+	"github.com/beam-cloud/airstore/pkg/gateway/services"
+	"github.com/beam-cloud/airstore/pkg/repository"
+	"github.com/beam-cloud/airstore/pkg/sources"
+	"github.com/beam-cloud/airstore/pkg/tools"
+	"github.com/beam-cloud/airstore/pkg/types"
+	pb "github.com/beam-cloud/airstore/proto"
+	"github.com/labstack/echo/v4"
+	"github.com/rs/zerolog/log"
+)
+
+// FilesystemGroup handles filesystem API endpoints
+type FilesystemGroup struct {
+	routerGroup    *echo.Group
+	backend        repository.BackendRepository
+	contextService *services.ContextService
+	sourceService  *services.SourceService
+	sourceRegistry *sources.Registry
+	toolRegistry   *tools.Registry
+}
+
+// NewFilesystemGroup creates a new filesystem API group
+func NewFilesystemGroup(
+	routerGroup *echo.Group,
+	backend repository.BackendRepository,
+	contextService *services.ContextService,
+	sourceService *services.SourceService,
+	sourceRegistry *sources.Registry,
+	toolRegistry *tools.Registry,
+) *FilesystemGroup {
+	g := &FilesystemGroup{
+		routerGroup:    routerGroup,
+		backend:        backend,
+		contextService: contextService,
+		sourceService:  sourceService,
+		sourceRegistry: sourceRegistry,
+		toolRegistry:   toolRegistry,
+	}
+	g.registerRoutes()
+	return g
+}
+
+func (g *FilesystemGroup) registerRoutes() {
+	g.routerGroup.GET("/list", g.List)
+	g.routerGroup.GET("/stat", g.Stat)
+	g.routerGroup.GET("/read", g.Read)
+	g.routerGroup.GET("/tree", g.Tree)
+
+	// Tool settings endpoints
+	g.routerGroup.GET("/tools", g.ListToolSettings)
+	g.routerGroup.GET("/tools/:tool_name", g.GetToolSetting)
+	g.routerGroup.PUT("/tools/:tool_name", g.UpdateToolSetting)
+
+	// Smart query endpoints
+	g.routerGroup.POST("/queries", g.CreateQuery)
+	g.routerGroup.GET("/queries", g.GetQuery)           // ?path=...
+	g.routerGroup.PUT("/queries/:id", g.UpdateQuery)    // :id = external_id
+	g.routerGroup.DELETE("/queries/:id", g.DeleteQuery) // :id = external_id
+}
+
+// List returns directory contents as VirtualFile entries
+func (g *FilesystemGroup) List(c echo.Context) error {
+	ctx := c.Request().Context()
+	path := cleanPath(c.QueryParam("path"))
+	showHidden := c.QueryParam("show_hidden") == "true"
+
+	// Root directory - return virtual root folders
+	if path == "" || path == "/" {
+		entries := g.listRootDirectories(ctx)
+		return SuccessResponse(c, types.VirtualFileListResponse{
+			Path:    "/",
+			Entries: entries,
+		})
+	}
+
+	// Determine which service to route to
+	rootDir, relPath := splitRootPath(path)
+
+	switch rootDir {
+	case "context":
+		return g.listContext(c, ctx, relPath)
+	case "sources":
+		return g.listSources(c, ctx, relPath)
+	case "tools":
+		return g.listTools(c, ctx, showHidden)
+	default:
+		return ErrorResponse(c, http.StatusNotFound, "path not found")
+	}
+}
+
+// Stat returns file/directory info as VirtualFile
+func (g *FilesystemGroup) Stat(c echo.Context) error {
+	ctx := c.Request().Context()
+	path := cleanPath(c.QueryParam("path"))
+	showHidden := c.QueryParam("show_hidden") == "true"
+
+	// Root directory
+	if path == "" || path == "/" {
+		return SuccessResponse(c, types.NewRootFolder("", "/"))
+	}
+
+	rootDir, relPath := splitRootPath(path)
+
+	switch rootDir {
+	case "context":
+		return g.statContext(c, ctx, path, relPath)
+	case "sources":
+		return g.statSources(c, ctx, path, relPath)
+	case "tools":
+		return g.statTools(c, ctx, path, relPath, showHidden)
+	default:
+		return ErrorResponse(c, http.StatusNotFound, "path not found")
+	}
+}
+
+// Read returns file contents
+func (g *FilesystemGroup) Read(c echo.Context) error {
+	ctx := c.Request().Context()
+	path := cleanPath(c.QueryParam("path"))
+
+	if path == "" || path == "/" {
+		return ErrorResponse(c, http.StatusBadRequest, "cannot read directory")
+	}
+
+	rootDir, relPath := splitRootPath(path)
+
+	// Parse optional offset and length
+	offset, _ := strconv.ParseInt(c.QueryParam("offset"), 10, 64)
+	length, _ := strconv.ParseInt(c.QueryParam("length"), 10, 64)
+
+	switch rootDir {
+	case "context":
+		return g.readContext(c, ctx, relPath, offset, length)
+	case "sources":
+		return g.readSources(c, ctx, relPath, offset, length)
+	case "tools":
+		return ErrorResponse(c, http.StatusBadRequest, "tools are not readable as files")
+	default:
+		return ErrorResponse(c, http.StatusNotFound, "path not found")
+	}
+}
+
+// Tree returns a flat listing of a subtree
+func (g *FilesystemGroup) Tree(c echo.Context) error {
+	ctx := c.Request().Context()
+	path := cleanPath(c.QueryParam("path"))
+	maxKeys, _ := strconv.ParseInt(c.QueryParam("max_keys"), 10, 32)
+	if maxKeys <= 0 {
+		maxKeys = 1000
+	}
+	continuationToken := c.QueryParam("continuation_token")
+	showHidden := c.QueryParam("show_hidden") == "true"
+
+	rootDir, relPath := splitRootPath(path)
+
+	switch rootDir {
+	case "context":
+		return g.treeContext(c, ctx, relPath, int32(maxKeys), continuationToken)
+	case "sources":
+		// Sources don't support tree listing - return empty
+		return SuccessResponse(c, types.VirtualFileTreeResponse{
+			Path:    path,
+			Entries: []types.VirtualFile{},
+		})
+	case "tools":
+		// Tools are flat - return same as list
+		entries := g.buildToolEntries(ctx, showHidden)
+		return SuccessResponse(c, types.VirtualFileTreeResponse{
+			Path:    path,
+			Entries: entries,
+		})
+	default:
+		return ErrorResponse(c, http.StatusNotFound, "path not found")
+	}
+}
+
+// ============================================================================
+// Root Directory
+// ============================================================================
+
+func (g *FilesystemGroup) listRootDirectories(ctx context.Context) []types.VirtualFile {
+	entries := []types.VirtualFile{
+		*types.NewRootFolder(types.DirNameContext, types.PathContext).
+			WithMetadata("description", "Workspace context files"),
+		*types.NewRootFolder(types.DirNameSources, types.PathSources).
+			WithMetadata("description", "Connected integrations"),
+		*types.NewRootFolder(types.DirNameTools, types.PathTools).
+			WithMetadata("description", "Available tools"),
+	}
+
+	// Add child counts if possible
+	if g.toolRegistry != nil {
+		entries[2].ChildCount = len(g.toolRegistry.List())
+	}
+	if g.sourceRegistry != nil {
+		entries[1].ChildCount = len(g.sourceRegistry.List())
+	}
+
+	return entries
+}
+
+// ============================================================================
+// Context Service (S3-backed files)
+// ============================================================================
+
+func (g *FilesystemGroup) listContext(c echo.Context, ctx context.Context, relPath string) error {
+	if g.contextService == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "context service not available")
+	}
+
+	resp, err := g.contextService.ReadDir(ctx, &pb.ContextReadDirRequest{Path: relPath})
+	if err != nil {
+		log.Error().Err(err).Str("path", relPath).Msg("context ReadDir failed")
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+	if !resp.Ok {
+		return ErrorResponse(c, http.StatusNotFound, resp.Error)
+	}
+
+	entries := make([]types.VirtualFile, 0, len(resp.Entries))
+	for _, e := range resp.Entries {
+		vf := g.contextEntryToVirtualFile(e, relPath)
+		entries = append(entries, *vf)
+	}
+
+	return SuccessResponse(c, types.VirtualFileListResponse{
+		Path:    types.ContextPath(relPath),
+		Entries: entries,
+	})
+}
+
+func (g *FilesystemGroup) statContext(c echo.Context, ctx context.Context, fullPath, relPath string) error {
+	if g.contextService == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "context service not available")
+	}
+
+	// Root of context
+	if relPath == "" {
+		return SuccessResponse(c, types.NewRootFolder(types.DirNameContext, types.PathContext).
+			WithMetadata("description", "Workspace context files"))
+	}
+
+	resp, err := g.contextService.Stat(ctx, &pb.ContextStatRequest{Path: relPath})
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+	if !resp.Ok {
+		return ErrorResponse(c, http.StatusNotFound, resp.Error)
+	}
+
+	name := pathName(relPath)
+	vf := types.NewVirtualFile(hashPath(fullPath), name, fullPath, types.VFTypeContext).
+		WithFolder(resp.Info.IsDir).
+		WithSize(resp.Info.Size)
+
+	if resp.Info.Mtime > 0 {
+		t := time.Unix(resp.Info.Mtime, 0)
+		vf.WithModifiedAt(t)
+	}
+	if resp.Info.IsLink {
+		vf.IsSymlink = true
+	}
+
+	return SuccessResponse(c, vf)
+}
+
+func (g *FilesystemGroup) readContext(c echo.Context, ctx context.Context, relPath string, offset, length int64) error {
+	if g.contextService == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "context service not available")
+	}
+
+	resp, err := g.contextService.Read(ctx, &pb.ContextReadRequest{
+		Path:   relPath,
+		Offset: offset,
+		Length: length,
+	})
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+	if !resp.Ok {
+		return ErrorResponse(c, http.StatusNotFound, resp.Error)
+	}
+
+	return c.Blob(http.StatusOK, "application/octet-stream", resp.Data)
+}
+
+func (g *FilesystemGroup) treeContext(c echo.Context, ctx context.Context, relPath string, maxKeys int32, continuationToken string) error {
+	if g.contextService == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "context service not available")
+	}
+
+	resp, err := g.contextService.ListTree(ctx, &pb.ListTreeRequest{
+		Path:              relPath,
+		MaxKeys:           maxKeys,
+		ContinuationToken: continuationToken,
+	})
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+	if !resp.Ok {
+		return ErrorResponse(c, http.StatusNotFound, resp.Error)
+	}
+
+	entries := make([]types.VirtualFile, 0, len(resp.Entries))
+	for _, e := range resp.Entries {
+		fullPath := types.ContextPath(e.Path)
+		isDir := e.Mode&uint32(syscall.S_IFDIR) != 0
+
+		vf := types.NewVirtualFile(hashPath(fullPath), pathName(e.Path), fullPath, types.VFTypeContext).
+			WithFolder(isDir).
+			WithSize(e.Size)
+
+		if e.Mtime > 0 {
+			t := time.Unix(e.Mtime, 0)
+			vf.WithModifiedAt(t)
+		}
+		if e.Etag != "" {
+			vf.WithMetadata("etag", e.Etag)
+		}
+
+		entries = append(entries, *vf)
+	}
+
+	result := types.VirtualFileTreeResponse{
+		Path:    types.ContextPath(relPath),
+		Entries: entries,
+	}
+
+	// Add pagination info to response if truncated
+	if resp.Truncated && resp.NextToken != "" {
+		return c.JSON(http.StatusOK, Response{
+			Success: true,
+			Data: map[string]interface{}{
+				"path":               result.Path,
+				"entries":            result.Entries,
+				"truncated":          true,
+				"continuation_token": resp.NextToken,
+			},
+		})
+	}
+
+	return SuccessResponse(c, result)
+}
+
+func (g *FilesystemGroup) contextEntryToVirtualFile(e *pb.ContextDirEntry, parentPath string) *types.VirtualFile {
+	var fullPath string
+	if parentPath != "" {
+		fullPath = types.ContextPath(types.JoinPath(parentPath, e.Name))
+	} else {
+		fullPath = types.ContextPath(e.Name)
+	}
+
+	vf := types.NewVirtualFile(hashPath(fullPath), e.Name, fullPath, types.VFTypeContext).
+		WithFolder(e.IsDir).
+		WithSize(e.Size)
+
+	if e.Mtime > 0 {
+		t := time.Unix(e.Mtime, 0)
+		vf.WithModifiedAt(t)
+	}
+	if e.Etag != "" {
+		vf.WithMetadata("etag", e.Etag)
+	}
+
+	return vf
+}
+
+// ============================================================================
+// Sources Service (Integration files)
+// ============================================================================
+
+func (g *FilesystemGroup) listSources(c echo.Context, ctx context.Context, relPath string) error {
+	// Root /sources - list all integrations
+	if relPath == "" {
+		entries := g.buildSourceRootEntries(ctx)
+		return SuccessResponse(c, types.VirtualFileListResponse{
+			Path:    types.PathSources,
+			Entries: entries,
+		})
+	}
+
+	// Use SourceService to list directory contents (it handles credentials & caching)
+	if g.sourceService != nil {
+		resp, err := g.sourceService.ReadDir(ctx, &pb.SourceReadDirRequest{
+			Path: relPath,
+		})
+		if err != nil {
+			log.Error().Err(err).Str("path", relPath).Msg("source readdir failed")
+			return ErrorResponse(c, http.StatusInternalServerError, "failed to list source directory")
+		}
+		if !resp.Ok {
+			log.Warn().Str("error", resp.Error).Str("path", relPath).Msg("source readdir returned error")
+			// Return empty list rather than error for better UX
+			return SuccessResponse(c, types.VirtualFileListResponse{
+				Path:    types.SourcePath(relPath),
+				Entries: []types.VirtualFile{},
+			})
+		}
+
+		// Build a map of query paths to external_ids for smart queries
+		// This allows us to include the external_id in VirtualFile metadata
+		queryExternalIds := make(map[string]string)
+		queryGuidance := make(map[string]string)
+		integration, _ := splitFirstPath(relPath)
+		parentPath := types.SourcePath(relPath)
+		if relPath == integration {
+			// Listing integration root - fetch all smart queries
+			queriesResp, err := g.sourceService.ListSmartQueries(ctx, &pb.ListSmartQueriesRequest{
+				ParentPath: parentPath,
+			})
+			if err == nil && queriesResp.Ok {
+				for _, q := range queriesResp.Queries {
+					queryExternalIds[q.Path] = q.ExternalId
+					queryGuidance[q.Path] = q.Guidance
+				}
+			}
+		}
+
+		// Convert protobuf entries to VirtualFile
+		entries := make([]types.VirtualFile, 0, len(resp.Entries))
+		for _, e := range resp.Entries {
+			entryPath := types.SourcePath(types.JoinPath(relPath, e.Name))
+
+			vf := types.NewVirtualFile(
+				hashPath(entryPath),
+				e.Name,
+				entryPath,
+				types.VFTypeSource,
+			).WithFolder(e.IsDir).WithReadOnly(true).WithMetadata(types.MetaKeyProvider, integration)
+
+			// Add external_id and guidance if this is a smart query
+			if extId, ok := queryExternalIds[entryPath]; ok {
+				vf = vf.WithMetadata(types.MetaKeyExternalID, extId)
+			}
+			if guidance, ok := queryGuidance[entryPath]; ok {
+				vf = vf.WithMetadata(types.MetaKeyGuidance, guidance)
+			}
+
+			// Add result_id for query result files (origin pointer for re-fetching)
+			if e.ResultId != "" {
+				vf = vf.WithMetadata("result_id", e.ResultId)
+				vf = vf.WithMetadata("query_path", types.SourcePath(relPath))
+			}
+
+			if e.Size > 0 {
+				vf = vf.WithSize(e.Size)
+			}
+			if e.Mtime > 0 {
+				t := time.Unix(e.Mtime, 0)
+				vf = vf.WithModifiedAt(t)
+			}
+
+			entries = append(entries, *vf)
+		}
+
+		return SuccessResponse(c, types.VirtualFileListResponse{
+			Path:    types.SourcePath(relPath),
+			Entries: entries,
+		})
+	}
+
+	// Fallback: if no source service, return minimal entries
+	integration, subPath := splitFirstPath(relPath)
+
+	// Integration root
+	if subPath == "" {
+		statusPath := types.SourcePath(types.JoinPath(integration, "status.json"))
+		entries := []types.VirtualFile{
+			*types.NewVirtualFile(
+				hashPath(statusPath),
+				"status.json",
+				statusPath,
+				types.VFTypeSource,
+			).WithFolder(false).WithReadOnly(true).WithMetadata(types.MetaKeyProvider, integration),
+		}
+		return SuccessResponse(c, types.VirtualFileListResponse{
+			Path:    types.SourcePath(integration),
+			Entries: entries,
+		})
+	}
+
+	// Deep paths - return empty
+	return SuccessResponse(c, types.VirtualFileListResponse{
+		Path:    types.SourcePath(relPath),
+		Entries: []types.VirtualFile{},
+	})
+}
+
+func (g *FilesystemGroup) statSources(c echo.Context, ctx context.Context, fullPath, relPath string) error {
+	// Root /sources
+	if relPath == "" {
+		return SuccessResponse(c, types.NewRootFolder(types.DirNameSources, types.PathSources).
+			WithMetadata("description", "Connected integrations").
+			WithChildCount(len(g.sourceRegistry.List())))
+	}
+
+	integration, subPath := splitFirstPath(relPath)
+
+	// Check if integration exists
+	if g.sourceRegistry.Get(integration) == nil {
+		return ErrorResponse(c, http.StatusNotFound, "integration not found")
+	}
+
+	// Integration root
+	if subPath == "" {
+		vf := types.NewVirtualFile(
+			hashPath(fullPath),
+			integration,
+			fullPath,
+			types.VFTypeSource,
+		).WithFolder(true).WithReadOnly(true).WithMetadata(types.MetaKeyProvider, integration)
+		return SuccessResponse(c, vf)
+	}
+
+	// status.json
+	if subPath == "status.json" {
+		vf := types.NewVirtualFile(
+			hashPath(fullPath),
+			"status.json",
+			fullPath,
+			types.VFTypeSource,
+		).WithFolder(false).WithReadOnly(true).WithMetadata(types.MetaKeyProvider, integration)
+		return SuccessResponse(c, vf)
+	}
+
+	// Other paths - return generic source file
+	vf := types.NewVirtualFile(
+		hashPath(fullPath),
+		pathName(subPath),
+		fullPath,
+		types.VFTypeSource,
+	).WithReadOnly(true).WithMetadata(types.MetaKeyProvider, integration)
+	return SuccessResponse(c, vf)
+}
+
+func (g *FilesystemGroup) readSources(c echo.Context, ctx context.Context, relPath string, offset, length int64) error {
+	if relPath == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "cannot read directory")
+	}
+
+	integration, subPath := splitFirstPath(relPath)
+
+	// status.json - generate dynamically
+	if subPath == "status.json" {
+		// Check if integration is connected (would need auth context for full check)
+		connected := false // Default to not connected without auth context
+		data := sources.GenerateStatusJSON(integration, connected, "", "")
+		return c.Blob(http.StatusOK, "application/json", data)
+	}
+
+	// Use SourceService.Read for all other source files
+	if g.sourceService != nil {
+		resp, err := g.sourceService.Read(ctx, &pb.SourceReadRequest{
+			Path:   relPath,
+			Offset: offset,
+			Length: length,
+		})
+		if err != nil {
+			log.Error().Err(err).Str("path", relPath).Msg("source read failed")
+			return ErrorResponse(c, http.StatusInternalServerError, "failed to read source file")
+		}
+		if !resp.Ok {
+			if strings.Contains(resp.Error, "not found") {
+				return ErrorResponse(c, http.StatusNotFound, resp.Error)
+			}
+			return ErrorResponse(c, http.StatusBadRequest, resp.Error)
+		}
+
+		// Determine content type based on file extension
+		contentType := "text/plain; charset=utf-8"
+		if strings.HasSuffix(relPath, ".json") {
+			contentType = "application/json"
+		}
+
+		return c.Blob(http.StatusOK, contentType, resp.Data)
+	}
+
+	return ErrorResponse(c, http.StatusServiceUnavailable, "source service not available")
+}
+
+func (g *FilesystemGroup) buildSourceRootEntries(ctx context.Context) []types.VirtualFile {
+	if g.sourceRegistry == nil {
+		return []types.VirtualFile{}
+	}
+
+	integrations := g.sourceRegistry.List()
+	entries := make([]types.VirtualFile, 0, len(integrations))
+
+	for _, name := range integrations {
+		entryPath := types.SourcePath(name)
+		vf := types.NewVirtualFile(
+			hashPath(entryPath),
+			name,
+			entryPath,
+			types.VFTypeSource,
+		).WithFolder(true).WithReadOnly(true).WithMetadata(types.MetaKeyProvider, name)
+		entries = append(entries, *vf)
+	}
+
+	return entries
+}
+
+// ============================================================================
+// Tools Service
+// ============================================================================
+
+func (g *FilesystemGroup) listTools(c echo.Context, ctx context.Context, showHidden bool) error {
+	entries := g.buildToolEntries(ctx, showHidden)
+	return SuccessResponse(c, types.VirtualFileListResponse{
+		Path:    types.PathTools,
+		Entries: entries,
+	})
+}
+
+func (g *FilesystemGroup) statTools(c echo.Context, ctx context.Context, fullPath, relPath string, showHidden bool) error {
+	// Get workspace ID from context for filtering
+	var workspaceId uint
+	if rc := auth.FromContext(ctx); rc != nil {
+		workspaceId = rc.WorkspaceId
+	}
+
+	// Get tool settings for this workspace
+	var settings *types.WorkspaceToolSettings
+	if workspaceId > 0 {
+		var err error
+		settings, err = g.backend.GetWorkspaceToolSettings(ctx, workspaceId)
+		if err != nil {
+			log.Warn().Err(err).Uint("workspace_id", workspaceId).Msg("failed to get tool settings")
+			settings = nil
+		}
+	}
+
+	// Root /tools
+	if relPath == "" {
+		// Count tools (all if showHidden, only enabled otherwise)
+		toolCount := 0
+		for _, name := range g.toolRegistry.List() {
+			isDisabled := settings != nil && settings.IsDisabled(name)
+			if showHidden || !isDisabled {
+				toolCount++
+			}
+		}
+		return SuccessResponse(c, types.NewRootFolder(types.DirNameTools, types.PathTools).
+			WithMetadata("description", "Available tools").
+			WithChildCount(toolCount))
+	}
+
+	// Specific tool
+	toolName := relPath
+	provider := g.toolRegistry.Get(toolName)
+	if provider == nil {
+		return ErrorResponse(c, http.StatusNotFound, "tool not found")
+	}
+
+	isDisabled := settings != nil && settings.IsDisabled(toolName)
+
+	// Check if tool is disabled - return not found unless showHidden is true
+	if isDisabled && !showHidden {
+		return ErrorResponse(c, http.StatusNotFound, "tool not found")
+	}
+
+	vf := types.NewVirtualFile(
+		"tool-"+toolName,
+		toolName,
+		fullPath,
+		types.VFTypeTool,
+	).WithFolder(false).WithReadOnly(true).
+		WithMetadata("description", provider.Help()).
+		WithMetadata("name", provider.Name()).
+		WithMetadata("enabled", !isDisabled).
+		WithMetadata("hidden", isDisabled)
+
+	return SuccessResponse(c, vf)
+}
+
+func (g *FilesystemGroup) buildToolEntries(ctx context.Context, showHidden bool) []types.VirtualFile {
+	if g.toolRegistry == nil {
+		return []types.VirtualFile{}
+	}
+
+	// Get workspace ID from context for filtering
+	var workspaceId uint
+	if rc := auth.FromContext(ctx); rc != nil {
+		workspaceId = rc.WorkspaceId
+	}
+
+	// Get tool settings for this workspace
+	var settings *types.WorkspaceToolSettings
+	if workspaceId > 0 {
+		var err error
+		settings, err = g.backend.GetWorkspaceToolSettings(ctx, workspaceId)
+		if err != nil {
+			log.Warn().Err(err).Uint("workspace_id", workspaceId).Msg("failed to get tool settings, showing all tools")
+			settings = nil
+		}
+	}
+
+	names := g.toolRegistry.List()
+	entries := make([]types.VirtualFile, 0, len(names))
+
+	for _, name := range names {
+		isDisabled := settings != nil && settings.IsDisabled(name)
+
+		// Skip disabled tools unless showHidden is true
+		if isDisabled && !showHidden {
+			continue
+		}
+
+		provider := g.toolRegistry.Get(name)
+		if provider == nil {
+			continue
+		}
+
+		entryPath := types.ToolsPath(name)
+		vf := types.NewVirtualFile(
+			"tool-"+name,
+			name,
+			entryPath,
+			types.VFTypeTool,
+		).WithFolder(false).WithReadOnly(true).
+			WithMetadata("description", provider.Help()).
+			WithMetadata("name", provider.Name()).
+			WithMetadata("enabled", !isDisabled).
+			WithMetadata(types.MetaKeyHidden, isDisabled)
+
+		entries = append(entries, *vf)
+	}
+
+	return entries
+}
+
+// ============================================================================
+// Tool Settings API
+// ============================================================================
+
+// ToolSettingResponse represents a tool with its enabled state
+type ToolSettingResponse struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Enabled     bool   `json:"enabled"`
+}
+
+// UpdateToolSettingRequest represents a request to update tool settings
+type UpdateToolSettingRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
+// ListToolSettings returns all tools with their enabled/disabled state for the workspace
+func (g *FilesystemGroup) ListToolSettings(c echo.Context) error {
+	ctx := c.Request().Context()
+	logRequest(c, "list_tool_settings")
+
+	// Get workspace ID from auth context
+	rc := auth.FromContext(ctx)
+	if rc == nil {
+		return ErrorResponse(c, http.StatusUnauthorized, "unauthorized")
+	}
+
+	// Get tool settings for this workspace
+	settings, err := g.backend.GetWorkspaceToolSettings(ctx, rc.WorkspaceId)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to get tool settings")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to get tool settings")
+	}
+
+	// Build response with all tools and their state
+	names := g.toolRegistry.List()
+	tools := make([]ToolSettingResponse, 0, len(names))
+
+	for _, name := range names {
+		provider := g.toolRegistry.Get(name)
+		if provider == nil {
+			continue
+		}
+
+		tools = append(tools, ToolSettingResponse{
+			Name:        name,
+			Description: provider.Help(),
+			Enabled:     settings.IsEnabled(name),
+		})
+	}
+
+	return SuccessResponse(c, map[string]interface{}{
+		"tools": tools,
+	})
+}
+
+// GetToolSetting returns the setting for a specific tool
+func (g *FilesystemGroup) GetToolSetting(c echo.Context) error {
+	ctx := c.Request().Context()
+	toolName := c.Param("tool_name")
+	logRequest(c, "get_tool_setting")
+
+	// Get workspace ID from auth context
+	rc := auth.FromContext(ctx)
+	if rc == nil {
+		return ErrorResponse(c, http.StatusUnauthorized, "unauthorized")
+	}
+
+	// Check if tool exists
+	provider := g.toolRegistry.Get(toolName)
+	if provider == nil {
+		return ErrorResponse(c, http.StatusNotFound, "tool not found")
+	}
+
+	// Get tool setting
+	setting, err := g.backend.GetWorkspaceToolSetting(ctx, rc.WorkspaceId, toolName)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to get tool setting")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to get tool setting")
+	}
+
+	// Default to enabled if no setting exists
+	enabled := true
+	if setting != nil {
+		enabled = setting.Enabled
+	}
+
+	return SuccessResponse(c, ToolSettingResponse{
+		Name:        toolName,
+		Description: provider.Help(),
+		Enabled:     enabled,
+	})
+}
+
+// UpdateToolSetting updates the enabled/disabled state of a tool
+func (g *FilesystemGroup) UpdateToolSetting(c echo.Context) error {
+	ctx := c.Request().Context()
+	toolName := c.Param("tool_name")
+	logRequest(c, "update_tool_setting")
+
+	// Get workspace ID from auth context
+	rc := auth.FromContext(ctx)
+	if rc == nil {
+		return ErrorResponse(c, http.StatusUnauthorized, "unauthorized")
+	}
+
+	// Check if tool exists
+	provider := g.toolRegistry.Get(toolName)
+	if provider == nil {
+		return ErrorResponse(c, http.StatusNotFound, "tool not found")
+	}
+
+	// Parse request body
+	var req UpdateToolSettingRequest
+	if err := c.Bind(&req); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
+	}
+
+	// Update tool setting
+	if err := g.backend.SetWorkspaceToolSetting(ctx, rc.WorkspaceId, toolName, req.Enabled); err != nil {
+		log.Error().Err(err).Msg("failed to update tool setting")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to update tool setting")
+	}
+
+	log.Info().
+		Uint("workspace_id", rc.WorkspaceId).
+		Str("tool_name", toolName).
+		Bool("enabled", req.Enabled).
+		Msg("tool setting updated")
+
+	return SuccessResponse(c, ToolSettingResponse{
+		Name:        toolName,
+		Description: provider.Help(),
+		Enabled:     req.Enabled,
+	})
+}
+
+// CreateQueryRequest represents a request to create a smart query
+type CreateQueryRequest struct {
+	Integration  string `json:"integration"`   // e.g., "gmail", "gdrive"
+	Name         string `json:"name"`          // Folder/file name
+	Guidance     string `json:"guidance"`      // Optional user guidance for LLM
+	OutputFormat string `json:"output_format"` // "folder" or "file"
+	FileExt      string `json:"file_ext"`      // For files: ".json", ".md"
+}
+
+// UpdateQueryRequest represents a request to update a smart query
+type UpdateQueryRequest struct {
+	Name     string `json:"name"`     // New name (optional)
+	Guidance string `json:"guidance"` // New guidance (optional)
+}
+
+// SmartQueryResponse represents a smart query in API responses
+type SmartQueryResponse struct {
+	ExternalID   string `json:"external_id"`
+	Integration  string `json:"integration"`
+	Path         string `json:"path"`
+	Name         string `json:"name"`
+	QuerySpec    string `json:"query_spec"`
+	Guidance     string `json:"guidance"`
+	OutputFormat string `json:"output_format"`
+	FileExt      string `json:"file_ext"`
+	CacheTTL     int    `json:"cache_ttl"`
+	CreatedAt    int64  `json:"created_at"`
+	UpdatedAt    int64  `json:"updated_at"`
+}
+
+// CreateQuery creates a new smart query via LLM inference
+func (g *FilesystemGroup) CreateQuery(c echo.Context) error {
+	ctx := c.Request().Context()
+	logRequest(c, "create_query")
+
+	if g.sourceService == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "source service not available")
+	}
+
+	var req CreateQueryRequest
+	if err := c.Bind(&req); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
+	}
+
+	if req.Integration == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "integration is required")
+	}
+	if req.Name == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "name is required")
+	}
+	if req.OutputFormat == "" {
+		req.OutputFormat = "folder"
+	}
+
+	resp, err := g.sourceService.CreateSmartQuery(ctx, &pb.CreateSmartQueryRequest{
+		Integration:  req.Integration,
+		Name:         req.Name,
+		Guidance:     req.Guidance,
+		OutputFormat: req.OutputFormat,
+		FileExt:      req.FileExt,
+	})
+	if err != nil {
+		log.Error().Err(err).Msg("failed to create smart query")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to create query")
+	}
+	if !resp.Ok {
+		return ErrorResponse(c, http.StatusBadRequest, resp.Error)
+	}
+
+	return SuccessResponse(c, protoQueryToResponse(resp.Query))
+}
+
+// GetQuery retrieves a smart query by path
+func (g *FilesystemGroup) GetQuery(c echo.Context) error {
+	ctx := c.Request().Context()
+	logRequest(c, "get_query")
+
+	if g.sourceService == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "source service not available")
+	}
+
+	path := c.QueryParam("path")
+	if path == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "path is required")
+	}
+
+	resp, err := g.sourceService.GetSmartQuery(ctx, &pb.GetSmartQueryRequest{
+		Path: path,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("path", path).Msg("failed to get smart query")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to get query")
+	}
+	if !resp.Ok {
+		return ErrorResponse(c, http.StatusBadRequest, resp.Error)
+	}
+	if resp.Query == nil {
+		return ErrorResponse(c, http.StatusNotFound, "query not found")
+	}
+
+	return SuccessResponse(c, protoQueryToResponse(resp.Query))
+}
+
+// UpdateQuery updates an existing smart query by external_id
+func (g *FilesystemGroup) UpdateQuery(c echo.Context) error {
+	ctx := c.Request().Context()
+	logRequest(c, "update_query")
+
+	if g.sourceService == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "source service not available")
+	}
+
+	externalId := c.Param("id")
+	if externalId == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "id is required")
+	}
+
+	var req UpdateQueryRequest
+	if err := c.Bind(&req); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
+	}
+
+	resp, err := g.sourceService.UpdateSmartQuery(ctx, &pb.UpdateSmartQueryRequest{
+		ExternalId: externalId,
+		Name:       req.Name,
+		Guidance:   req.Guidance,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("external_id", externalId).Msg("failed to update smart query")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to update query")
+	}
+	if !resp.Ok {
+		if strings.Contains(resp.Error, "not found") {
+			return ErrorResponse(c, http.StatusNotFound, resp.Error)
+		}
+		return ErrorResponse(c, http.StatusBadRequest, resp.Error)
+	}
+
+	return SuccessResponse(c, protoQueryToResponse(resp.Query))
+}
+
+// DeleteQuery removes a smart query by external_id
+func (g *FilesystemGroup) DeleteQuery(c echo.Context) error {
+	ctx := c.Request().Context()
+	logRequest(c, "delete_query")
+
+	if g.sourceService == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "source service not available")
+	}
+
+	externalId := c.Param("id")
+	if externalId == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "id is required")
+	}
+
+	resp, err := g.sourceService.DeleteSmartQuery(ctx, &pb.DeleteSmartQueryRequest{
+		ExternalId: externalId,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("external_id", externalId).Msg("failed to delete smart query")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to delete query")
+	}
+	if !resp.Ok {
+		if strings.Contains(resp.Error, "not found") {
+			return ErrorResponse(c, http.StatusNotFound, resp.Error)
+		}
+		return ErrorResponse(c, http.StatusBadRequest, resp.Error)
+	}
+
+	return SuccessResponse(c, map[string]bool{"deleted": true})
+}
+
+// protoQueryToResponse converts a pb.SmartQuery to SmartQueryResponse
+func protoQueryToResponse(q *pb.SmartQuery) *SmartQueryResponse {
+	if q == nil {
+		return nil
+	}
+	return &SmartQueryResponse{
+		ExternalID:   q.ExternalId,
+		Integration:  q.Integration,
+		Path:         q.Path,
+		Name:         q.Name,
+		QuerySpec:    q.QuerySpec,
+		Guidance:     q.Guidance,
+		OutputFormat: q.OutputFormat,
+		FileExt:      q.FileExt,
+		CacheTTL:     int(q.CacheTtl),
+		CreatedAt:    q.CreatedAt,
+		UpdatedAt:    q.UpdatedAt,
+	}
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+// cleanPath removes leading/trailing slashes and normalizes the path
+func cleanPath(path string) string {
+	return strings.Trim(path, "/")
+}
+
+// splitRootPath splits a path into root directory and relative path
+// e.g., "context/foo/bar" -> ("context", "foo/bar")
+func splitRootPath(path string) (root, relPath string) {
+	path = cleanPath(path)
+	parts := strings.SplitN(path, "/", 2)
+	root = parts[0]
+	if len(parts) > 1 {
+		relPath = parts[1]
+	}
+	return
+}
+
+// splitFirstPath splits a path into first component and rest
+func splitFirstPath(path string) (first, rest string) {
+	parts := strings.SplitN(path, "/", 2)
+	first = parts[0]
+	if len(parts) > 1 {
+		rest = parts[1]
+	}
+	return
+}
+
+// pathName returns the last component of a path
+func pathName(path string) string {
+	if path == "" {
+		return ""
+	}
+	parts := strings.Split(strings.TrimSuffix(path, "/"), "/")
+	return parts[len(parts)-1]
+}
+
+// hashPath creates a stable ID from a path
+func hashPath(path string) string {
+	h := sha256.Sum256([]byte(path))
+	return hex.EncodeToString(h[:8])
+}
+
+// FilesystemAuthConfig holds auth configuration for the filesystem API
+type FilesystemAuthConfig struct {
+	AdminToken string
+	Backend    repository.BackendRepository
+}
+
+// NewFilesystemAuthMiddleware creates middleware that validates workspace access
+// It accepts both admin tokens and workspace tokens
+func NewFilesystemAuthMiddleware(cfg FilesystemAuthConfig) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			workspaceID := c.Param("workspace_id")
+			if workspaceID == "" {
+				return ErrorResponse(c, http.StatusBadRequest, "workspace_id required")
+			}
+
+			// Extract token from Authorization header
+			authHeader := c.Request().Header.Get("Authorization")
+			token := strings.TrimPrefix(authHeader, "Bearer ")
+
+			var rc *auth.RequestContext
+
+			// Check if it's an admin token
+			if cfg.AdminToken != "" && token == cfg.AdminToken {
+				// Admin token - get workspace from URL
+				workspace, err := cfg.Backend.GetWorkspaceByExternalId(c.Request().Context(), workspaceID)
+				if err != nil {
+					return ErrorResponse(c, http.StatusNotFound, "workspace not found")
+				}
+
+				rc = &auth.RequestContext{
+					WorkspaceId:   workspace.Id,
+					WorkspaceExt:  workspace.ExternalId,
+					WorkspaceName: workspace.Name,
+					IsGatewayAuth: true,
+				}
+			} else if token != "" && cfg.Backend != nil {
+				// Try as workspace token
+				result, err := cfg.Backend.ValidateToken(c.Request().Context(), token)
+				if err != nil || result == nil {
+					return ErrorResponse(c, http.StatusUnauthorized, "invalid token")
+				}
+
+				// Verify the token belongs to the requested workspace
+				if result.WorkspaceExt != workspaceID {
+					return ErrorResponse(c, http.StatusForbidden, "token does not have access to this workspace")
+				}
+
+				rc = &auth.RequestContext{
+					WorkspaceId:   result.WorkspaceId,
+					WorkspaceExt:  result.WorkspaceExt,
+					WorkspaceName: result.WorkspaceName,
+					MemberId:      result.MemberId,
+					MemberExt:     result.MemberExt,
+					MemberEmail:   result.MemberEmail,
+					MemberRole:    result.MemberRole,
+					IsGatewayAuth: false,
+				}
+			} else if cfg.AdminToken == "" {
+				// No admin token configured - allow unauthenticated access (local mode)
+				workspace, err := cfg.Backend.GetWorkspaceByExternalId(c.Request().Context(), workspaceID)
+				if err != nil {
+					return ErrorResponse(c, http.StatusNotFound, "workspace not found")
+				}
+
+				rc = &auth.RequestContext{
+					WorkspaceId:   workspace.Id,
+					WorkspaceExt:  workspace.ExternalId,
+					WorkspaceName: workspace.Name,
+					IsGatewayAuth: true,
+				}
+			} else {
+				return ErrorResponse(c, http.StatusUnauthorized, "authorization required")
+			}
+
+			// Add auth context to request
+			ctx := auth.WithContext(c.Request().Context(), rc)
+			c.SetRequest(c.Request().WithContext(ctx))
+
+			return next(c)
+		}
+	}
+}
+
+// logRequest logs the request details for debugging
+func logRequest(c echo.Context, operation string) {
+	log.Debug().
+		Str("operation", operation).
+		Str("path", c.QueryParam("path")).
+		Str("workspace_id", c.Param("workspace_id")).
+		Msg("filesystem API request")
+}
+
+// WithAuthContext is a helper to wrap handlers that need auth context
+func WithAuthContext(ctx context.Context, workspaceID string, workspaceExt string) context.Context {
+	rc := &auth.RequestContext{
+		WorkspaceExt:  workspaceExt,
+		IsGatewayAuth: true,
+	}
+	return auth.WithContext(ctx, rc)
+}
+
+// handleError converts service errors to HTTP responses
+func handleError(c echo.Context, err error, notFoundMsg string) error {
+	if err == nil {
+		return nil
+	}
+	errStr := err.Error()
+	if strings.Contains(errStr, "not found") || strings.Contains(errStr, "NoSuchKey") {
+		return ErrorResponse(c, http.StatusNotFound, notFoundMsg)
+	}
+	return ErrorResponse(c, http.StatusInternalServerError, errStr)
+}
+
+// validatePath ensures the path is valid and safe
+func validatePath(path string) error {
+	if strings.Contains(path, "..") {
+		return fmt.Errorf("invalid path: contains '..'")
+	}
+	return nil
+}

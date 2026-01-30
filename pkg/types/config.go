@@ -23,6 +23,8 @@ type AppConfig struct {
 	Gateway     GatewayConfig    `key:"gateway" json:"gateway"`
 	Scheduler   SchedulerConfig  `key:"scheduler" json:"scheduler"`
 	Tools       ToolsConfig      `key:"tools" json:"tools"`
+	Admin       AdminConfig      `key:"admin" json:"admin"`
+	OAuth       IntegrationOAuth `key:"oauth" json:"oauth"` // OAuth for workspace integrations (gmail, gdrive)
 }
 
 // IsLocalMode returns true if running in local mode (no Redis/Postgres)
@@ -203,3 +205,45 @@ type MCPAuthConfig struct {
 	// For remote: passed directly as HTTP headers
 	Headers map[string]string `key:"headers" json:"headers,omitempty"`
 }
+
+// ----------------------------------------------------------------------------
+// Admin UI Configuration
+// ----------------------------------------------------------------------------
+
+// AdminConfig configures the admin UI
+type AdminConfig struct {
+	Enabled     bool        `key:"enabled" json:"enabled"`
+	SessionKey  string      `key:"sessionKey" json:"session_key"` // Secret for JWT signing
+	OAuth       OAuthConfig `key:"oauth" json:"oauth"`
+}
+
+// OAuthConfig configures OAuth providers
+type OAuthConfig struct {
+	Google GoogleOAuthConfig `key:"google" json:"google"`
+}
+
+// GoogleOAuthConfig configures Google OAuth
+type GoogleOAuthConfig struct {
+	ClientID      string   `key:"clientId" json:"client_id"`
+	ClientSecret  string   `key:"clientSecret" json:"client_secret"`
+	RedirectURL   string   `key:"redirectUrl" json:"redirect_url"` // e.g., http://localhost:1994/auth/google/callback
+	AllowedEmails []string `key:"allowedEmails" json:"allowed_emails"` // Optional whitelist, empty = allow all
+}
+
+// ----------------------------------------------------------------------------
+// Integration OAuth Configuration (for workspace connections)
+// ----------------------------------------------------------------------------
+
+// IntegrationOAuth configures OAuth for workspace integrations (gmail, gdrive, etc.)
+// This is separate from admin.oauth which is for admin UI login only.
+type IntegrationOAuth struct {
+	Google IntegrationGoogleOAuth `key:"google" json:"google"`
+}
+
+// IntegrationGoogleOAuth configures Google OAuth for workspace integrations
+type IntegrationGoogleOAuth struct {
+	ClientID     string `key:"clientId" json:"client_id"`
+	ClientSecret string `key:"clientSecret" json:"client_secret"`
+	RedirectURL  string `key:"redirectUrl" json:"redirect_url"` // e.g., http://localhost:1994/api/v1/oauth/google/callback
+}
+

@@ -16,12 +16,16 @@ import (
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 
+	"github.com/beam-cloud/airstore/pkg/admin"
 	apiv1 "github.com/beam-cloud/airstore/pkg/api/v1"
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/gateway/services"
+	"github.com/beam-cloud/airstore/pkg/oauth"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/scheduler"
+	"github.com/beam-cloud/airstore/pkg/sources"
+	"github.com/beam-cloud/airstore/pkg/sources/providers"
 	"github.com/beam-cloud/airstore/pkg/tools"
 	_ "github.com/beam-cloud/airstore/pkg/tools/builtin" // self-registering tools
 	"github.com/beam-cloud/airstore/pkg/tools/clients"
@@ -36,15 +40,24 @@ type Gateway struct {
 	BackendRepo *repository.PostgresBackend
 	httpServer  *http.Server
 	grpcServer  *grpc.Server
+	echo        *echo.Echo
 	ctx         context.Context
 	cancelFunc  context.CancelFunc
 
 	baseRouteGroup *echo.Group
 	rootRouteGroup *echo.Group
 
-	scheduler    *scheduler.Scheduler
-	toolRegistry *tools.Registry
-	mcpManager   *tools.MCPManager
+	scheduler      *scheduler.Scheduler
+	toolRegistry   *tools.Registry
+	sourceRegistry *sources.Registry
+	mcpManager     *tools.MCPManager
+
+	// Context service for S3-backed file storage
+	contextService *services.ContextService
+
+	// OAuth for workspace integrations
+	oauthStore  *oauth.Store
+	googleOAuth *oauth.GoogleClient
 }
 
 func NewGateway() (*Gateway, error) {
@@ -89,13 +102,16 @@ func NewGateway() (*Gateway, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	gateway := &Gateway{
-		Config:       config,
-		RedisClient:  redisClient,
-		BackendRepo:  backendRepo,
-		ctx:          ctx,
-		cancelFunc:   cancel,
-		toolRegistry: tools.NewRegistry(),
-		mcpManager:   tools.NewMCPManager(),
+		Config:         config,
+		RedisClient:    redisClient,
+		BackendRepo:    backendRepo,
+		ctx:            ctx,
+		cancelFunc:     cancel,
+		toolRegistry:   tools.NewRegistry(),
+		sourceRegistry: sources.NewRegistry(),
+		mcpManager:     tools.NewMCPManager(),
+		oauthStore:     oauth.NewStore(0), // Default TTL
+		googleOAuth:    oauth.NewGoogleClient(config.OAuth.Google),
 	}
 
 	return gateway, nil
@@ -144,6 +160,7 @@ func (g *Gateway) initHTTP() error {
 
 	e.Use(middleware.Recover())
 
+	g.echo = e
 	g.httpServer = &http.Server{
 		Addr:    fmt.Sprintf("%s:%d", g.Config.Gateway.HTTP.Host, g.Config.Gateway.HTTP.Port),
 		Handler: e,
@@ -201,17 +218,17 @@ func (g *Gateway) registerServices() error {
 		log.Info().Msg("scheduler service registered")
 	}
 
-	// Register filesystem gRPC service (requires Redis, skip in local mode)
-	// Register filesystem service - use Redis in remote mode, memory in local mode
-	var filesystemRepo repository.FilesystemRepository
-	if g.RedisClient != nil {
-		filesystemRepo = repository.NewFilesystemRedisRepository(g.RedisClient)
-		log.Info().Msg("filesystem service registered (redis backend)")
+	// Register filesystem gRPC service
+	// Uses unified FilesystemStore: Postgres+Redis in remote mode, memory in local mode
+	var filesystemStore repository.FilesystemStore
+	if g.BackendRepo != nil && g.RedisClient != nil {
+		filesystemStore = repository.NewFilesystemStore(g.BackendRepo.DB(), g.RedisClient, nil)
+		log.Info().Msg("filesystem service registered (postgres+redis backend)")
 	} else {
-		filesystemRepo = repository.NewFilesystemMemoryRepository()
+		filesystemStore = repository.NewMemoryFilesystemStore()
 		log.Info().Msg("filesystem service registered (memory backend)")
 	}
-	filesystemService := services.NewFilesystemService(filesystemRepo)
+	filesystemService := services.NewFilesystemService(filesystemStore)
 	pb.RegisterFilesystemServiceServer(g.grpcServer, filesystemService)
 
 	// Register context gRPC service (S3-backed file storage)
@@ -220,6 +237,7 @@ func (g *Gateway) registerServices() error {
 		if err != nil {
 			log.Warn().Err(err).Msg("failed to create context service - /context will not be available")
 		} else {
+			g.contextService = contextService
 			pb.RegisterContextServiceServer(g.grpcServer, contextService)
 			log.Info().Str("bucket", g.Config.Filesystem.Context.Bucket).Msg("context service registered")
 		}
@@ -237,9 +255,11 @@ func (g *Gateway) registerServices() error {
 		return fmt.Errorf("failed to initialize tools: %w", err)
 	}
 
-	// Register tools gRPC service (with backend for credential lookups)
+	// Register tools gRPC service (with backend for credential lookups and OAuth refresh)
 	var toolService *services.ToolService
-	if g.BackendRepo != nil {
+	if g.BackendRepo != nil && g.googleOAuth.IsConfigured() {
+		toolService = services.NewToolServiceWithOAuth(g.toolRegistry, g.BackendRepo, g.googleOAuth)
+	} else if g.BackendRepo != nil {
 		toolService = services.NewToolServiceWithBackend(g.toolRegistry, g.BackendRepo)
 	} else {
 		toolService = services.NewToolService(g.toolRegistry)
@@ -254,12 +274,27 @@ func (g *Gateway) registerServices() error {
 		log.Info().Msg("gateway service registered")
 	}
 
+	// Register source providers
+	g.initSources()
+
+	// Register sources gRPC service (read-only integration access with OAuth refresh)
+	var sourceService *services.SourceService
+	if g.BackendRepo != nil && g.googleOAuth.IsConfigured() {
+		sourceService = services.NewSourceServiceWithOAuth(g.sourceRegistry, g.BackendRepo, filesystemStore, g.googleOAuth)
+	} else {
+		sourceService = services.NewSourceService(g.sourceRegistry, g.BackendRepo, filesystemStore)
+	}
+
+	pb.RegisterSourceServiceServer(g.grpcServer, sourceService)
+	log.Info().Int("providers", len(g.sourceRegistry.List())).Strs("available", g.sourceRegistry.List()).Msg("sources service registered")
+
 	// Register task and workspace APIs (requires Postgres)
 	if g.BackendRepo != nil {
 		taskQueue := repository.NewRedisTaskQueue(g.RedisClient, "default")
 
-		// Workspaces API
+		// Workspaces API (protected by admin token)
 		workspacesGroup := g.baseRouteGroup.Group("/workspaces")
+		workspacesGroup.Use(g.requireAdminToken())
 		apiv1.NewWorkspacesGroup(workspacesGroup, g.BackendRepo)
 
 		// Members API (nested under workspaces)
@@ -271,10 +306,30 @@ func (g *Gateway) registerServices() error {
 		// Connections API (nested under workspaces)
 		apiv1.NewConnectionsGroup(workspacesGroup.Group("/:workspace_id/connections"), g.BackendRepo)
 
+		// Filesystem API (nested under workspaces, supports both admin and workspace tokens)
+		filesystemGroup := workspacesGroup.Group("/:workspace_id/fs")
+		filesystemGroup.Use(apiv1.NewFilesystemAuthMiddleware(apiv1.FilesystemAuthConfig{
+			AdminToken: g.Config.Gateway.AuthToken,
+			Backend:    g.BackendRepo,
+		}))
+		apiv1.NewFilesystemGroup(filesystemGroup, g.BackendRepo, g.contextService, sourceService, g.sourceRegistry, g.toolRegistry)
+		log.Info().Msg("filesystem API registered at /api/v1/workspaces/:workspace_id/fs")
+
 		// Tasks API
 		apiv1.NewTasksGroup(g.baseRouteGroup.Group("/tasks"), g.BackendRepo, taskQueue)
 
+		// OAuth API for workspace integrations (gmail, gdrive)
+		if g.googleOAuth.IsConfigured() {
+			apiv1.NewOAuthGroup(g.baseRouteGroup.Group("/oauth"), g.oauthStore, g.googleOAuth, g.BackendRepo)
+			log.Info().Msg("oauth API registered at /api/v1/oauth")
+		}
+
 		log.Info().Msg("workspace, members, tokens, connections, and tasks APIs registered")
+
+		// Register admin UI if enabled
+		if g.Config.Admin.Enabled {
+			admin.NewService(g.Config.Admin, g.BackendRepo).RegisterRoutes(g.echo)
+		}
 	}
 
 	return nil
@@ -428,6 +483,47 @@ func (g *Gateway) ToolRegistry() *tools.Registry {
 	return g.toolRegistry
 }
 
+// SourceRegistry returns the source registry for registering providers
+func (g *Gateway) SourceRegistry() *sources.Registry {
+	return g.sourceRegistry
+}
+
+// requireAdminToken returns middleware that validates the admin token
+func (g *Gateway) requireAdminToken() echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			// Skip auth if no admin token is configured
+			if g.Config.Gateway.AuthToken == "" {
+				return next(c)
+			}
+
+			token := c.Request().Header.Get("Authorization")
+			expected := "Bearer " + g.Config.Gateway.AuthToken
+			if token == "" || token != expected {
+				log.Debug().
+					Str("path", c.Path()).
+					Str("token_present", fmt.Sprintf("%v", token != "")).
+					Msg("admin token validation failed")
+				return c.JSON(http.StatusUnauthorized, map[string]string{
+					"error":   "unauthorized",
+					"message": "admin token required",
+				})
+			}
+			return next(c)
+		}
+	}
+}
+
+// initSources initializes source providers
+func (g *Gateway) initSources() {
+	// Register source providers (all use connection-based auth)
+	g.sourceRegistry.Register(providers.NewGitHubProvider())
+	g.sourceRegistry.Register(providers.NewGmailProvider())
+	g.sourceRegistry.Register(providers.NewNotionProvider())
+	g.sourceRegistry.Register(providers.NewGDriveProvider())
+	log.Debug().Strs("providers", g.sourceRegistry.List()).Msg("source providers registered")
+}
+
 // initTools initializes the tool system by loading schemas and registering clients
 func (g *Gateway) initTools() error {
 	// Register self-registering tools first (from pkg/tools/builtin)
@@ -437,7 +533,7 @@ func (g *Gateway) initTools() error {
 		log.Debug().Str("tool", t.Name()).Msg("registered self-registering tool")
 	}
 
-	// Create client registry for legacy YAML-based tools
+	// Create client registry for YAML-based tools
 	clientRegistry := tools.NewClientRegistry()
 
 	// API key integrations (only register if configured)

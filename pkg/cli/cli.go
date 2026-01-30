@@ -8,8 +8,9 @@ import (
 )
 
 var (
-	gatewayAddr string
-	authToken   string
+	gatewayAddr     string
+	gatewayHTTPAddr string
+	authToken       string
 )
 
 var rootCmd = &cobra.Command{
@@ -20,6 +21,7 @@ var rootCmd = &cobra.Command{
 
 func init() {
 	rootCmd.PersistentFlags().StringVar(&gatewayAddr, "gateway", getEnv("AIRSTORE_GATEWAY", "localhost:1993"), "Gateway gRPC address")
+	rootCmd.PersistentFlags().StringVar(&gatewayHTTPAddr, "gateway-http", getEnv("AIRSTORE_GATEWAY_HTTP", "http://localhost:1994"), "Gateway HTTP address")
 	rootCmd.PersistentFlags().StringVar(&authToken, "token", getEnv("AIRSTORE_TOKEN", ""), "Authentication token")
 
 	rootCmd.AddCommand(workspaceCmd)

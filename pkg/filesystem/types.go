@@ -26,9 +26,11 @@ func (fi *FileInfo) IsRegular() bool { return fi.Mode&syscall.S_IFREG != 0 }
 func (fi *FileInfo) IsSymlink() bool { return fi.Mode&syscall.S_IFLNK != 0 }
 
 type DirEntry struct {
-	Name string
-	Mode uint32
-	Ino  uint64
+	Name  string
+	Mode  uint32
+	Ino   uint64
+	Size  int64 // File size (0 for directories)
+	Mtime int64 // Unix timestamp (0 = use current time)
 }
 
 type StatInfo struct {

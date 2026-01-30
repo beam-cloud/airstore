@@ -19,34 +19,33 @@ import (
 const _ = grpc.SupportPackageIsVersion7
 
 const (
-	FilesystemService_GetDirectoryAccess_FullMethodName   = "/filesystem.FilesystemService/GetDirectoryAccess"
-	FilesystemService_SaveDirectoryAccess_FullMethodName  = "/filesystem.FilesystemService/SaveDirectoryAccess"
-	FilesystemService_GetDirectoryContent_FullMethodName  = "/filesystem.FilesystemService/GetDirectoryContent"
-	FilesystemService_SaveDirectoryContent_FullMethodName = "/filesystem.FilesystemService/SaveDirectoryContent"
-	FilesystemService_GetFileMetadata_FullMethodName      = "/filesystem.FilesystemService/GetFileMetadata"
-	FilesystemService_SaveFileMetadata_FullMethodName     = "/filesystem.FilesystemService/SaveFileMetadata"
-	FilesystemService_ListDirectory_FullMethodName        = "/filesystem.FilesystemService/ListDirectory"
-	FilesystemService_RenameDirectory_FullMethodName      = "/filesystem.FilesystemService/RenameDirectory"
-	FilesystemService_DeleteDirectory_FullMethodName      = "/filesystem.FilesystemService/DeleteDirectory"
+	FilesystemService_Stat_FullMethodName    = "/filesystem.FilesystemService/Stat"
+	FilesystemService_ReadDir_FullMethodName = "/filesystem.FilesystemService/ReadDir"
+	FilesystemService_Mkdir_FullMethodName   = "/filesystem.FilesystemService/Mkdir"
+	FilesystemService_Create_FullMethodName  = "/filesystem.FilesystemService/Create"
+	FilesystemService_Rename_FullMethodName  = "/filesystem.FilesystemService/Rename"
+	FilesystemService_Remove_FullMethodName  = "/filesystem.FilesystemService/Remove"
+	FilesystemService_Chmod_FullMethodName   = "/filesystem.FilesystemService/Chmod"
 )
 
 // FilesystemServiceClient is the client API for FilesystemService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type FilesystemServiceClient interface {
-	// Directory Access Metadata
-	GetDirectoryAccess(ctx context.Context, in *GetDirectoryAccessRequest, opts ...grpc.CallOption) (*GetDirectoryAccessResponse, error)
-	SaveDirectoryAccess(ctx context.Context, in *SaveDirectoryAccessRequest, opts ...grpc.CallOption) (*SaveDirectoryAccessResponse, error)
-	// Directory Content Metadata
-	GetDirectoryContent(ctx context.Context, in *GetDirectoryContentRequest, opts ...grpc.CallOption) (*GetDirectoryContentResponse, error)
-	SaveDirectoryContent(ctx context.Context, in *SaveDirectoryContentRequest, opts ...grpc.CallOption) (*SaveDirectoryContentResponse, error)
-	// File Metadata
-	GetFileMetadata(ctx context.Context, in *GetFileMetadataRequest, opts ...grpc.CallOption) (*GetFileMetadataResponse, error)
-	SaveFileMetadata(ctx context.Context, in *SaveFileMetadataRequest, opts ...grpc.CallOption) (*SaveFileMetadataResponse, error)
-	// Directory Operations
-	ListDirectory(ctx context.Context, in *ListDirectoryRequest, opts ...grpc.CallOption) (*ListDirectoryResponse, error)
-	RenameDirectory(ctx context.Context, in *RenameDirectoryRequest, opts ...grpc.CallOption) (*RenameDirectoryResponse, error)
-	DeleteDirectory(ctx context.Context, in *DeleteDirectoryRequest, opts ...grpc.CallOption) (*DeleteDirectoryResponse, error)
+	// Stat returns metadata for a path (file or directory).
+	Stat(ctx context.Context, in *StatRequest, opts ...grpc.CallOption) (*StatResponse, error)
+	// ReadDir returns directory entries.
+	ReadDir(ctx context.Context, in *ReadDirRequest, opts ...grpc.CallOption) (*ReadDirResponse, error)
+	// Mkdir creates a directory.
+	Mkdir(ctx context.Context, in *MkdirRequest, opts ...grpc.CallOption) (*MkdirResponse, error)
+	// Create creates a file.
+	Create(ctx context.Context, in *CreateRequest, opts ...grpc.CallOption) (*CreateResponse, error)
+	// Rename renames a file or directory.
+	Rename(ctx context.Context, in *RenameRequest, opts ...grpc.CallOption) (*RenameResponse, error)
+	// Remove removes a file or directory.
+	Remove(ctx context.Context, in *RemoveRequest, opts ...grpc.CallOption) (*RemoveResponse, error)
+	// Chmod changes file permissions.
+	Chmod(ctx context.Context, in *ChmodRequest, opts ...grpc.CallOption) (*ChmodResponse, error)
 }
 
 type filesystemServiceClient struct {
@@ -57,81 +56,63 @@ func NewFilesystemServiceClient(cc grpc.ClientConnInterface) FilesystemServiceCl
 	return &filesystemServiceClient{cc}
 }
 
-func (c *filesystemServiceClient) GetDirectoryAccess(ctx context.Context, in *GetDirectoryAccessRequest, opts ...grpc.CallOption) (*GetDirectoryAccessResponse, error) {
-	out := new(GetDirectoryAccessResponse)
-	err := c.cc.Invoke(ctx, FilesystemService_GetDirectoryAccess_FullMethodName, in, out, opts...)
+func (c *filesystemServiceClient) Stat(ctx context.Context, in *StatRequest, opts ...grpc.CallOption) (*StatResponse, error) {
+	out := new(StatResponse)
+	err := c.cc.Invoke(ctx, FilesystemService_Stat_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *filesystemServiceClient) SaveDirectoryAccess(ctx context.Context, in *SaveDirectoryAccessRequest, opts ...grpc.CallOption) (*SaveDirectoryAccessResponse, error) {
-	out := new(SaveDirectoryAccessResponse)
-	err := c.cc.Invoke(ctx, FilesystemService_SaveDirectoryAccess_FullMethodName, in, out, opts...)
+func (c *filesystemServiceClient) ReadDir(ctx context.Context, in *ReadDirRequest, opts ...grpc.CallOption) (*ReadDirResponse, error) {
+	out := new(ReadDirResponse)
+	err := c.cc.Invoke(ctx, FilesystemService_ReadDir_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *filesystemServiceClient) GetDirectoryContent(ctx context.Context, in *GetDirectoryContentRequest, opts ...grpc.CallOption) (*GetDirectoryContentResponse, error) {
-	out := new(GetDirectoryContentResponse)
-	err := c.cc.Invoke(ctx, FilesystemService_GetDirectoryContent_FullMethodName, in, out, opts...)
+func (c *filesystemServiceClient) Mkdir(ctx context.Context, in *MkdirRequest, opts ...grpc.CallOption) (*MkdirResponse, error) {
+	out := new(MkdirResponse)
+	err := c.cc.Invoke(ctx, FilesystemService_Mkdir_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *filesystemServiceClient) SaveDirectoryContent(ctx context.Context, in *SaveDirectoryContentRequest, opts ...grpc.CallOption) (*SaveDirectoryContentResponse, error) {
-	out := new(SaveDirectoryContentResponse)
-	err := c.cc.Invoke(ctx, FilesystemService_SaveDirectoryContent_FullMethodName, in, out, opts...)
+func (c *filesystemServiceClient) Create(ctx context.Context, in *CreateRequest, opts ...grpc.CallOption) (*CreateResponse, error) {
+	out := new(CreateResponse)
+	err := c.cc.Invoke(ctx, FilesystemService_Create_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *filesystemServiceClient) GetFileMetadata(ctx context.Context, in *GetFileMetadataRequest, opts ...grpc.CallOption) (*GetFileMetadataResponse, error) {
-	out := new(GetFileMetadataResponse)
-	err := c.cc.Invoke(ctx, FilesystemService_GetFileMetadata_FullMethodName, in, out, opts...)
+func (c *filesystemServiceClient) Rename(ctx context.Context, in *RenameRequest, opts ...grpc.CallOption) (*RenameResponse, error) {
+	out := new(RenameResponse)
+	err := c.cc.Invoke(ctx, FilesystemService_Rename_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *filesystemServiceClient) SaveFileMetadata(ctx context.Context, in *SaveFileMetadataRequest, opts ...grpc.CallOption) (*SaveFileMetadataResponse, error) {
-	out := new(SaveFileMetadataResponse)
-	err := c.cc.Invoke(ctx, FilesystemService_SaveFileMetadata_FullMethodName, in, out, opts...)
+func (c *filesystemServiceClient) Remove(ctx context.Context, in *RemoveRequest, opts ...grpc.CallOption) (*RemoveResponse, error) {
+	out := new(RemoveResponse)
+	err := c.cc.Invoke(ctx, FilesystemService_Remove_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *filesystemServiceClient) ListDirectory(ctx context.Context, in *ListDirectoryRequest, opts ...grpc.CallOption) (*ListDirectoryResponse, error) {
-	out := new(ListDirectoryResponse)
-	err := c.cc.Invoke(ctx, FilesystemService_ListDirectory_FullMethodName, in, out, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *filesystemServiceClient) RenameDirectory(ctx context.Context, in *RenameDirectoryRequest, opts ...grpc.CallOption) (*RenameDirectoryResponse, error) {
-	out := new(RenameDirectoryResponse)
-	err := c.cc.Invoke(ctx, FilesystemService_RenameDirectory_FullMethodName, in, out, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *filesystemServiceClient) DeleteDirectory(ctx context.Context, in *DeleteDirectoryRequest, opts ...grpc.CallOption) (*DeleteDirectoryResponse, error) {
-	out := new(DeleteDirectoryResponse)
-	err := c.cc.Invoke(ctx, FilesystemService_DeleteDirectory_FullMethodName, in, out, opts...)
+func (c *filesystemServiceClient) Chmod(ctx context.Context, in *ChmodRequest, opts ...grpc.CallOption) (*ChmodResponse, error) {
+	out := new(ChmodResponse)
+	err := c.cc.Invoke(ctx, FilesystemService_Chmod_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -142,19 +123,20 @@ func (c *filesystemServiceClient) DeleteDirectory(ctx context.Context, in *Delet
 // All implementations must embed UnimplementedFilesystemServiceServer
 // for forward compatibility
 type FilesystemServiceServer interface {
-	// Directory Access Metadata
-	GetDirectoryAccess(context.Context, *GetDirectoryAccessRequest) (*GetDirectoryAccessResponse, error)
-	SaveDirectoryAccess(context.Context, *SaveDirectoryAccessRequest) (*SaveDirectoryAccessResponse, error)
-	// Directory Content Metadata
-	GetDirectoryContent(context.Context, *GetDirectoryContentRequest) (*GetDirectoryContentResponse, error)
-	SaveDirectoryContent(context.Context, *SaveDirectoryContentRequest) (*SaveDirectoryContentResponse, error)
-	// File Metadata
-	GetFileMetadata(context.Context, *GetFileMetadataRequest) (*GetFileMetadataResponse, error)
-	SaveFileMetadata(context.Context, *SaveFileMetadataRequest) (*SaveFileMetadataResponse, error)
-	// Directory Operations
-	ListDirectory(context.Context, *ListDirectoryRequest) (*ListDirectoryResponse, error)
-	RenameDirectory(context.Context, *RenameDirectoryRequest) (*RenameDirectoryResponse, error)
-	DeleteDirectory(context.Context, *DeleteDirectoryRequest) (*DeleteDirectoryResponse, error)
+	// Stat returns metadata for a path (file or directory).
+	Stat(context.Context, *StatRequest) (*StatResponse, error)
+	// ReadDir returns directory entries.
+	ReadDir(context.Context, *ReadDirRequest) (*ReadDirResponse, error)
+	// Mkdir creates a directory.
+	Mkdir(context.Context, *MkdirRequest) (*MkdirResponse, error)
+	// Create creates a file.
+	Create(context.Context, *CreateRequest) (*CreateResponse, error)
+	// Rename renames a file or directory.
+	Rename(context.Context, *RenameRequest) (*RenameResponse, error)
+	// Remove removes a file or directory.
+	Remove(context.Context, *RemoveRequest) (*RemoveResponse, error)
+	// Chmod changes file permissions.
+	Chmod(context.Context, *ChmodRequest) (*ChmodResponse, error)
 	mustEmbedUnimplementedFilesystemServiceServer()
 }
 
@@ -162,32 +144,26 @@ type FilesystemServiceServer interface {
 type UnimplementedFilesystemServiceServer struct {
 }
 
-func (UnimplementedFilesystemServiceServer) GetDirectoryAccess(context.Context, *GetDirectoryAccessRequest) (*GetDirectoryAccessResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method GetDirectoryAccess not implemented")
+func (UnimplementedFilesystemServiceServer) Stat(context.Context, *StatRequest) (*StatResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Stat not implemented")
 }
-func (UnimplementedFilesystemServiceServer) SaveDirectoryAccess(context.Context, *SaveDirectoryAccessRequest) (*SaveDirectoryAccessResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method SaveDirectoryAccess not implemented")
+func (UnimplementedFilesystemServiceServer) ReadDir(context.Context, *ReadDirRequest) (*ReadDirResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReadDir not implemented")
 }
-func (UnimplementedFilesystemServiceServer) GetDirectoryContent(context.Context, *GetDirectoryContentRequest) (*GetDirectoryContentResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method GetDirectoryContent not implemented")
+func (UnimplementedFilesystemServiceServer) Mkdir(context.Context, *MkdirRequest) (*MkdirResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Mkdir not implemented")
 }
-func (UnimplementedFilesystemServiceServer) SaveDirectoryContent(context.Context, *SaveDirectoryContentRequest) (*SaveDirectoryContentResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method SaveDirectoryContent not implemented")
+func (UnimplementedFilesystemServiceServer) Create(context.Context, *CreateRequest) (*CreateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Create not implemented")
 }
-func (UnimplementedFilesystemServiceServer) GetFileMetadata(context.Context, *GetFileMetadataRequest) (*GetFileMetadataResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method GetFileMetadata not implemented")
+func (UnimplementedFilesystemServiceServer) Rename(context.Context, *RenameRequest) (*RenameResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Rename not implemented")
 }
-func (UnimplementedFilesystemServiceServer) SaveFileMetadata(context.Context, *SaveFileMetadataRequest) (*SaveFileMetadataResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method SaveFileMetadata not implemented")
+func (UnimplementedFilesystemServiceServer) Remove(context.Context, *RemoveRequest) (*RemoveResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Remove not implemented")
 }
-func (UnimplementedFilesystemServiceServer) ListDirectory(context.Context, *ListDirectoryRequest) (*ListDirectoryResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method ListDirectory not implemented")
-}
-func (UnimplementedFilesystemServiceServer) RenameDirectory(context.Context, *RenameDirectoryRequest) (*RenameDirectoryResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method RenameDirectory not implemented")
-}
-func (UnimplementedFilesystemServiceServer) DeleteDirectory(context.Context, *DeleteDirectoryRequest) (*DeleteDirectoryResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method DeleteDirectory not implemented")
+func (UnimplementedFilesystemServiceServer) Chmod(context.Context, *ChmodRequest) (*ChmodResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Chmod not implemented")
 }
 func (UnimplementedFilesystemServiceServer) mustEmbedUnimplementedFilesystemServiceServer() {}
 
@@ -202,164 +178,128 @@ func RegisterFilesystemServiceServer(s grpc.ServiceRegistrar, srv FilesystemServ
 	s.RegisterService(&FilesystemService_ServiceDesc, srv)
 }
 
-func _FilesystemService_GetDirectoryAccess_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(GetDirectoryAccessRequest)
+func _FilesystemService_Stat_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StatRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(FilesystemServiceServer).GetDirectoryAccess(ctx, in)
+		return srv.(FilesystemServiceServer).Stat(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: FilesystemService_GetDirectoryAccess_FullMethodName,
+		FullMethod: FilesystemService_Stat_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(FilesystemServiceServer).GetDirectoryAccess(ctx, req.(*GetDirectoryAccessRequest))
+		return srv.(FilesystemServiceServer).Stat(ctx, req.(*StatRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _FilesystemService_SaveDirectoryAccess_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(SaveDirectoryAccessRequest)
+func _FilesystemService_ReadDir_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReadDirRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(FilesystemServiceServer).SaveDirectoryAccess(ctx, in)
+		return srv.(FilesystemServiceServer).ReadDir(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: FilesystemService_SaveDirectoryAccess_FullMethodName,
+		FullMethod: FilesystemService_ReadDir_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(FilesystemServiceServer).SaveDirectoryAccess(ctx, req.(*SaveDirectoryAccessRequest))
+		return srv.(FilesystemServiceServer).ReadDir(ctx, req.(*ReadDirRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _FilesystemService_GetDirectoryContent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(GetDirectoryContentRequest)
+func _FilesystemService_Mkdir_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MkdirRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(FilesystemServiceServer).GetDirectoryContent(ctx, in)
+		return srv.(FilesystemServiceServer).Mkdir(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: FilesystemService_GetDirectoryContent_FullMethodName,
+		FullMethod: FilesystemService_Mkdir_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(FilesystemServiceServer).GetDirectoryContent(ctx, req.(*GetDirectoryContentRequest))
+		return srv.(FilesystemServiceServer).Mkdir(ctx, req.(*MkdirRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _FilesystemService_SaveDirectoryContent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(SaveDirectoryContentRequest)
+func _FilesystemService_Create_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(FilesystemServiceServer).SaveDirectoryContent(ctx, in)
+		return srv.(FilesystemServiceServer).Create(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: FilesystemService_SaveDirectoryContent_FullMethodName,
+		FullMethod: FilesystemService_Create_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(FilesystemServiceServer).SaveDirectoryContent(ctx, req.(*SaveDirectoryContentRequest))
+		return srv.(FilesystemServiceServer).Create(ctx, req.(*CreateRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _FilesystemService_GetFileMetadata_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(GetFileMetadataRequest)
+func _FilesystemService_Rename_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RenameRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(FilesystemServiceServer).GetFileMetadata(ctx, in)
+		return srv.(FilesystemServiceServer).Rename(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: FilesystemService_GetFileMetadata_FullMethodName,
+		FullMethod: FilesystemService_Rename_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(FilesystemServiceServer).GetFileMetadata(ctx, req.(*GetFileMetadataRequest))
+		return srv.(FilesystemServiceServer).Rename(ctx, req.(*RenameRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _FilesystemService_SaveFileMetadata_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(SaveFileMetadataRequest)
+func _FilesystemService_Remove_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemoveRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(FilesystemServiceServer).SaveFileMetadata(ctx, in)
+		return srv.(FilesystemServiceServer).Remove(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: FilesystemService_SaveFileMetadata_FullMethodName,
+		FullMethod: FilesystemService_Remove_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(FilesystemServiceServer).SaveFileMetadata(ctx, req.(*SaveFileMetadataRequest))
+		return srv.(FilesystemServiceServer).Remove(ctx, req.(*RemoveRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _FilesystemService_ListDirectory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ListDirectoryRequest)
+func _FilesystemService_Chmod_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ChmodRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(FilesystemServiceServer).ListDirectory(ctx, in)
+		return srv.(FilesystemServiceServer).Chmod(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: FilesystemService_ListDirectory_FullMethodName,
+		FullMethod: FilesystemService_Chmod_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(FilesystemServiceServer).ListDirectory(ctx, req.(*ListDirectoryRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _FilesystemService_RenameDirectory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(RenameDirectoryRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(FilesystemServiceServer).RenameDirectory(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: FilesystemService_RenameDirectory_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(FilesystemServiceServer).RenameDirectory(ctx, req.(*RenameDirectoryRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _FilesystemService_DeleteDirectory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(DeleteDirectoryRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(FilesystemServiceServer).DeleteDirectory(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: FilesystemService_DeleteDirectory_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(FilesystemServiceServer).DeleteDirectory(ctx, req.(*DeleteDirectoryRequest))
+		return srv.(FilesystemServiceServer).Chmod(ctx, req.(*ChmodRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -372,40 +312,32 @@ var FilesystemService_ServiceDesc = grpc.ServiceDesc{
 	HandlerType: (*FilesystemServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "GetDirectoryAccess",
-			Handler:    _FilesystemService_GetDirectoryAccess_Handler,
+			MethodName: "Stat",
+			Handler:    _FilesystemService_Stat_Handler,
 		},
 		{
-			MethodName: "SaveDirectoryAccess",
-			Handler:    _FilesystemService_SaveDirectoryAccess_Handler,
+			MethodName: "ReadDir",
+			Handler:    _FilesystemService_ReadDir_Handler,
 		},
 		{
-			MethodName: "GetDirectoryContent",
-			Handler:    _FilesystemService_GetDirectoryContent_Handler,
+			MethodName: "Mkdir",
+			Handler:    _FilesystemService_Mkdir_Handler,
 		},
 		{
-			MethodName: "SaveDirectoryContent",
-			Handler:    _FilesystemService_SaveDirectoryContent_Handler,
+			MethodName: "Create",
+			Handler:    _FilesystemService_Create_Handler,
 		},
 		{
-			MethodName: "GetFileMetadata",
-			Handler:    _FilesystemService_GetFileMetadata_Handler,
+			MethodName: "Rename",
+			Handler:    _FilesystemService_Rename_Handler,
 		},
 		{
-			MethodName: "SaveFileMetadata",
-			Handler:    _FilesystemService_SaveFileMetadata_Handler,
+			MethodName: "Remove",
+			Handler:    _FilesystemService_Remove_Handler,
 		},
 		{
-			MethodName: "ListDirectory",
-			Handler:    _FilesystemService_ListDirectory_Handler,
-		},
-		{
-			MethodName: "RenameDirectory",
-			Handler:    _FilesystemService_RenameDirectory_Handler,
-		},
-		{
-			MethodName: "DeleteDirectory",
-			Handler:    _FilesystemService_DeleteDirectory_Handler,
+			MethodName: "Chmod",
+			Handler:    _FilesystemService_Chmod_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

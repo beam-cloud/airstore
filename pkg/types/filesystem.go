@@ -38,6 +38,8 @@ func (f *FileMeta) IsSymlink() bool {
 type DirEntry struct {
 	Name   string `json:"name"`
 	Mode   uint32 `json:"mode"`
+	Size   int64  `json:"size,omitempty"`
+	Mtime  int64  `json:"mtime,omitempty"` // Unix timestamp
 	IsLink bool   `json:"is_link,omitempty"`
 }
 

@@ -4,154 +4,124 @@ option go_package = "github.com/beam-cloud/airstore/proto";
 
 package filesystem;
 
+// FilesystemService provides filesystem metadata operations.
+// This service caches filesystem metadata for fast FUSE operations.
 service FilesystemService {
-  // Directory Access Metadata
-  rpc GetDirectoryAccess(GetDirectoryAccessRequest) returns (GetDirectoryAccessResponse);
-  rpc SaveDirectoryAccess(SaveDirectoryAccessRequest) returns (SaveDirectoryAccessResponse);
+  // Stat returns metadata for a path (file or directory).
+  rpc Stat(StatRequest) returns (StatResponse);
   
-  // Directory Content Metadata
-  rpc GetDirectoryContent(GetDirectoryContentRequest) returns (GetDirectoryContentResponse);
-  rpc SaveDirectoryContent(SaveDirectoryContentRequest) returns (SaveDirectoryContentResponse);
+  // ReadDir returns directory entries.
+  rpc ReadDir(ReadDirRequest) returns (ReadDirResponse);
   
-  // File Metadata
-  rpc GetFileMetadata(GetFileMetadataRequest) returns (GetFileMetadataResponse);
-  rpc SaveFileMetadata(SaveFileMetadataRequest) returns (SaveFileMetadataResponse);
+  // Mkdir creates a directory.
+  rpc Mkdir(MkdirRequest) returns (MkdirResponse);
   
-  // Directory Operations
-  rpc ListDirectory(ListDirectoryRequest) returns (ListDirectoryResponse);
-  rpc RenameDirectory(RenameDirectoryRequest) returns (RenameDirectoryResponse);
-  rpc DeleteDirectory(DeleteDirectoryRequest) returns (DeleteDirectoryResponse);
+  // Create creates a file.
+  rpc Create(CreateRequest) returns (CreateResponse);
+  
+  // Rename renames a file or directory.
+  rpc Rename(RenameRequest) returns (RenameResponse);
+  
+  // Remove removes a file or directory.
+  rpc Remove(RemoveRequest) returns (RemoveResponse);
+  
+  // Chmod changes file permissions.
+  rpc Chmod(ChmodRequest) returns (ChmodResponse);
 }
 
-// BackPointer for directory rename tracking
-message BackPointer {
-  string birth_parent_id = 1;
-  int32 name_version = 2;
-}
-
-// Directory Access Metadata
-message DirectoryAccessMetadata {
-  string pid = 1;
-  string id = 2;
-  uint32 permission = 3;
-  map<string, string> rename_list = 4;
-  BackPointer back_pointer = 5;
-}
-
-message GetDirectoryAccessRequest {
-  string pid = 1;
+// FileStat contains metadata about a file or directory.
+message FileStat {
+  string path = 1;
   string name = 2;
+  int64 size = 3;
+  uint32 mode = 4;
+  int64 mtime = 5;     // Unix timestamp
+  bool is_dir = 6;
+  bool is_symlink = 7;
+  string symlink_target = 8;
 }
 
-message GetDirectoryAccessResponse {
-  bool ok = 1;
-  string error = 2;
-  DirectoryAccessMetadata metadata = 3;
-}
-
-message SaveDirectoryAccessRequest {
-  DirectoryAccessMetadata metadata = 1;
-}
-
-message SaveDirectoryAccessResponse {
-  bool ok = 1;
-  string error = 2;
-}
-
-// Directory Content Metadata
-message DirectoryContentMetadata {
-  string id = 1;
-  repeated string entry_list = 2;
-  map<string, int64> timestamps = 3; // Unix timestamps
-}
-
-message GetDirectoryContentRequest {
-  string id = 1;
-}
-
-message GetDirectoryContentResponse {
-  bool ok = 1;
-  string error = 2;
-  DirectoryContentMetadata metadata = 3;
-}
-
-message SaveDirectoryContentRequest {
-  DirectoryContentMetadata metadata = 1;
-}
-
-message SaveDirectoryContentResponse {
-  bool ok = 1;
-  string error = 2;
-}
-
-// File Metadata
-message FileMetadata {
-  string id = 1;
-  string pid = 2;
-  string name = 3;
-  bytes file_data = 4;
-}
-
-message GetFileMetadataRequest {
-  string pid = 1;
-  string name = 2;
-}
-
-message GetFileMetadataResponse {
-  bool ok = 1;
-  string error = 2;
-  FileMetadata metadata = 3;
-}
-
-message SaveFileMetadataRequest {
-  FileMetadata metadata = 1;
-}
-
-message SaveFileMetadataResponse {
-  bool ok = 1;
-  string error = 2;
-}
-
-// Directory Entry for listing
+// DirEntry represents an entry in a directory listing.
 message DirEntry {
   string name = 1;
   uint32 mode = 2;
-  uint64 ino = 3;
+  int64 size = 3;
+  int64 mtime = 4;
+  bool is_dir = 5;
 }
 
-message ListDirectoryRequest {
+// Stat
+message StatRequest {
   string path = 1;
 }
 
-message ListDirectoryResponse {
+message StatResponse {
+  bool ok = 1;
+  string error = 2;
+  FileStat info = 3;
+}
+
+// ReadDir
+message ReadDirRequest {
+  string path = 1;
+}
+
+message ReadDirResponse {
   bool ok = 1;
   string error = 2;
   repeated DirEntry entries = 3;
 }
 
-// Rename Directory
-message RenameDirectoryRequest {
-  string old_pid = 1;
-  string old_name = 2;
-  string new_pid = 3;
-  string new_name = 4;
-  int32 version = 5;
+// Mkdir
+message MkdirRequest {
+  string path = 1;
+  uint32 mode = 2;
 }
 
-message RenameDirectoryResponse {
+message MkdirResponse {
   bool ok = 1;
   string error = 2;
 }
 
-// Delete Directory
-message DeleteDirectoryRequest {
-  string parent_id = 1;
-  string name = 2;
-  int32 version = 3;
+// Create
+message CreateRequest {
+  string path = 1;
+  uint32 mode = 2;
 }
 
-message DeleteDirectoryResponse {
+message CreateResponse {
   bool ok = 1;
   string error = 2;
 }
 
+// Rename
+message RenameRequest {
+  string old_path = 1;
+  string new_path = 2;
+}
+
+message RenameResponse {
+  bool ok = 1;
+  string error = 2;
+}
+
+// Remove
+message RemoveRequest {
+  string path = 1;
+}
+
+message RemoveResponse {
+  bool ok = 1;
+  string error = 2;
+}
+
+// Chmod
+message ChmodRequest {
+  string path = 1;
+  uint32 mode = 2;
+}
+
+message ChmodResponse {
+  bool ok = 1;
+  string error = 2;
+}

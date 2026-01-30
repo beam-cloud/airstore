@@ -9,6 +9,9 @@ const (
 	ToolWeather   ToolName = "weather"
 	ToolExa       ToolName = "exa"
 	ToolGitHub    ToolName = "github"
+	ToolGmail     ToolName = "gmail"
+	ToolNotion    ToolName = "notion"
+	ToolGDrive    ToolName = "gdrive"
 )
 
 // String returns the string representation

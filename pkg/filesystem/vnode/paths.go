@@ -19,4 +19,10 @@ const (
 
 	// ConfigFile is the virtual file containing gateway settings
 	ConfigFile = "/.airstore/config"
+
+	// SourcesPath is the virtual directory for integration sources
+	SourcesPath = "/sources"
+
+	// SourcesPathPrefix is the prefix for sources paths (with trailing slash)
+	SourcesPathPrefix = "/sources/"
 )
