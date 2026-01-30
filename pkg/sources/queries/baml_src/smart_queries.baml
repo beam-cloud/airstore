@@ -30,48 +30,120 @@ function InferGmailQuery(name: string, guidance: string?) -> GmailQueryResult {
   prompt #"
     Convert a folder/file name into a Gmail search query.
     
-    Gmail search operators:
-    - from:, to:, subject:, cc:, bcc:
-    - label:inbox, label:sent, label:draft, label:spam, label:trash
-    - is:unread, is:read, is:starred, is:important, is:snoozed
-    - has:attachment, has:drive, has:document, has:spreadsheet, has:youtube
-    - filename:pdf, filename:doc
-    - newer_than:1d, newer_than:7d, older_than:30d
-    - after:2024/01/01, before:2024/12/31
-    - category:primary, category:social, category:promotions, category:updates
-    - in:anywhere, in:inbox, in:sent
-    - larger:5M, smaller:1M
+    IMPORTANT: Gmail search is FUZZY by default!
+    - Bare words (no operator) search across subject, body, AND sender name/email
+    - Use bare words for most searches - they match everywhere!
+    - Gmail automatically handles plurals, common misspellings, and related terms
     
-    Combine with AND (space), OR, NOT (-), grouping ()
+    CRITICAL SYNTAX RULES:
+    - Multi-word operator values MUST be quoted: from:"summit health" NOT from:summit health
+    - Bare multi-word phrases should also be quoted: "lab results" NOT lab results
+    - Unquoted spaces mean AND: lab results = lab AND results (both must appear)
+    - Use OR to match alternatives: mychart OR "nyu langone" OR "summit health"
+    
+    Gmail search operators (use sparingly):
+    - from:"name or email" - matches sender (QUOTE multi-word values!)
+    - subject:"phrase" - matches subject line only
+    - has:attachment, filename:pdf
+    - is:unread, is:starred, is:important
+    - newer_than:1d, newer_than:7d, older_than:30d
+    
+    QUERY STRATEGY:
+    1. For topics → bare words or quoted phrases: "lab results" OR prescription OR appointment
+    2. For senders → from: with quotes for multi-word: from:mychart OR from:"nyu langone"
+    3. For mixed (topic + senders) → combine: mychart OR nyu OR "summit health" OR prescription
+       (bare words match sender names too, so you often don't need from:)
+    4. For health/medical emails → just use: medical OR health OR doctor OR appointment OR prescription OR "lab results"
     
     DEFAULTS:
     - limit: 50
     - filename_format: {date}_{from}_{subject}_{id}.txt
     
     Query examples:
-    - "unread" → is:unread
-    - "unread-emails" → is:unread
-    - "starred" → is:starred
+    - "invoices" → invoice
+    - "stripe-invoices" → invoice from:stripe
+    - "receipts" → receipt OR invoice OR order
+    - "meeting-notes" → meeting OR agenda OR "calendar invite"
+    - "flight-confirmation" → flight OR itinerary OR "boarding pass" OR airline
+    - "health-emails" → medical OR health OR doctor OR appointment OR mychart OR prescription
     - "from-john" → from:john
-    - "emails-from-jane" → from:jane
-    - "invoices" → subject:invoice OR label:invoice OR invoice
+    - "emails-from-acme-corp" → from:"acme corp" (QUOTED because multi-word)
+    - "unread" → is:unread
+    - "project-alpha" → "project alpha" (quoted phrase)
+    - "shipping" → shipping OR tracking OR delivery OR fedex OR ups
     - "recent" → newer_than:7d
-    - "today" → newer_than:1d
-    - "attachments" → has:attachment
-    - "pdfs" → has:attachment filename:pdf
     
-    Filename format: Choose a format that makes sense for the query intent.
-    Available placeholders: {id}, {date}, {from}, {to}, {subject}, {snippet}
-    - For invoices: {date}_invoice_{from}_{id}.txt
-    - For emails from someone: {date}_{subject}_{id}.txt
-    - For starred: {from}_{subject}_{id}.txt
-    - Default: {date}_{from}_{subject}_{id}.txt
+    Guidance examples:
+    - "anything from summit health, nyu, mychart, health related" 
+      → mychart OR nyu OR "summit health" OR medical OR appointment OR prescription
+      (Use bare words - they match sender names! No need for from: on each one)
+    
+    Filename format: {date}_{from}_{subject}_{id}.txt
     
     Folder/file name: {{ name }}
     {% if guidance %}
     
     Additional guidance from user: {{ guidance }}
     {% endif %}
+    
+    {{ ctx.output_format }}
+  "#
+}
+
+// -----------------------------------------------------------------------------
+// Gmail Query Evaluation and Refinement
+// -----------------------------------------------------------------------------
+
+class GmailQueryEvaluation {
+  is_satisfactory bool @description("True if results match user intent well enough")
+  refined_query string? @description("Improved Gmail query if not satisfactory, null if satisfactory")
+  reasoning string @description("Brief explanation of evaluation (1-2 sentences)")
+}
+
+function EvaluateGmailQueryResults(
+  original_guidance: string,
+  generated_query: string,
+  result_count: int,
+  sample_results: string
+) -> GmailQueryEvaluation {
+  client AnthropicClient
+  prompt #"
+    You are a STRICT evaluator checking if Gmail search results actually match what the user asked for.
+    Be critical - if results don't clearly match the user's intent, suggest a better query.
+    
+    USER'S REQUEST: {{ original_guidance }}
+    
+    CURRENT QUERY: {{ generated_query }}
+    
+    RESULTS: {{ result_count }} emails found
+    
+    SAMPLE RESULTS: {{ sample_results }}
+    
+    STRICT EVALUATION CHECKLIST:
+    
+    1. ZERO RESULTS = AUTOMATIC FAIL
+       - If result_count is 0, the query is broken. Mark as NOT satisfactory.
+       - Common cause: unquoted multi-word values like from:summit health (should be from:"summit health")
+    
+    2. CHECK EACH THING THE USER MENTIONED:
+       - If user mentioned specific senders (e.g., "mychart", "nyu", "summit health"):
+         → Are emails FROM these senders actually in the results?
+         → If user mentioned 3 senders but results only show 1, that's a problem.
+       - If user mentioned topics (e.g., "health", "medical", "appointments"):
+         → Do the subjects/snippets actually contain these words?
+         → Generic results that don't mention the topics = NOT satisfactory.
+    
+    3. LOOK FOR OBVIOUS MISMATCHES:
+       - Results about completely unrelated topics = NOT satisfactory
+       - Missing the main thing the user asked for = NOT satisfactory
+    
+    4. QUERY SYNTAX PROBLEMS TO FIX:
+       - from:summit health → from:"summit health" (MUST quote multi-word)
+       - Using too many operators when bare words would be better
+       - Not enough OR alternatives for fuzzy matching
+    
+    BE HARSH: If you're unsure whether results match, lean toward NOT satisfactory and suggest improvements.
+    Only mark satisfactory if the results CLEARLY match what the user asked for.
     
     {{ ctx.output_format }}
   "#
@@ -227,6 +299,62 @@ test TestGmailInvoices {
   }
 }
 
+test TestGmailMeetingNotes {
+  functions [InferGmailQuery]
+  args {
+    name "meeting-notes"
+    guidance null
+  }
+}
+
+test TestGmailFlightConfirmation {
+  functions [InferGmailQuery]
+  args {
+    name "flight-confirmations"
+    guidance null
+  }
+}
+
+test TestGmailReceipts {
+  functions [InferGmailQuery]
+  args {
+    name "receipts"
+    guidance null
+  }
+}
+
+test TestGmailProjectAlpha {
+  functions [InferGmailQuery]
+  args {
+    name "project-alpha-emails"
+    guidance null
+  }
+}
+
+test TestGmailShippingUpdates {
+  functions [InferGmailQuery]
+  args {
+    name "shipping-updates"
+    guidance null
+  }
+}
+
+test TestGmailHealthWithGuidance {
+  functions [InferGmailQuery]
+  args {
+    name "Medical Documents"
+    guidance "anything from: summit health, nyu, anything health related basically, mychart"
+  }
+}
+
+test TestGmailMultiWordSender {
+  functions [InferGmailQuery]
+  args {
+    name "acme-corp-emails"
+    guidance "from acme corp and related companies"
+  }
+}
+
 test TestGDriveShared {
   functions [InferGDriveQuery]
   args {
@@ -272,5 +400,25 @@ test TestNotionMeetings {
   args {
     name "meeting-notes"
     guidance null
+  }
+}
+
+test TestEvaluateGmailResults_NoResults {
+  functions [EvaluateGmailQueryResults]
+  args {
+    original_guidance "anything from summit health, nyu, mychart, health related"
+    generated_query "from:summit health OR from:nyu OR from:mychart"
+    result_count 0
+    sample_results "[]"
+  }
+}
+
+test TestEvaluateGmailResults_GoodResults {
+  functions [EvaluateGmailQueryResults]
+  args {
+    original_guidance "invoices from stripe"
+    generated_query "invoice from:stripe"
+    result_count 15
+    sample_results "[{\"from\":\"Stripe\",\"subject\":\"Your invoice from Acme Corp\",\"snippet\":\"Invoice #12345...\"},{\"from\":\"Stripe Billing\",\"subject\":\"Invoice for January\",\"snippet\":\"Amount due: $99\"}]"
   }
 }

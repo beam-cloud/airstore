@@ -74,6 +74,60 @@ func (c GDriveQueryResult) BamlTypeName() string {
 	return "GDriveQueryResult"
 }
 
+type GmailQueryEvaluation struct {
+	Is_satisfactory *bool   `json:"is_satisfactory"`
+	Refined_query   *string `json:"refined_query"`
+	Reasoning       *string `json:"reasoning"`
+}
+
+func (c *GmailQueryEvaluation) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_STREAM_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_STREAM_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "GmailQueryEvaluation" {
+		panic(fmt.Sprintf("expected GmailQueryEvaluation, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "is_satisfactory":
+			c.Is_satisfactory = baml.Decode(valueHolder).Interface().(*bool)
+
+		case "refined_query":
+			c.Refined_query = baml.Decode(valueHolder).Interface().(*string)
+
+		case "reasoning":
+			c.Reasoning = baml.Decode(valueHolder).Interface().(*string)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class GmailQueryEvaluation", key))
+
+		}
+	}
+
+}
+
+func (c GmailQueryEvaluation) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["is_satisfactory"] = c.Is_satisfactory
+
+	fields["refined_query"] = c.Refined_query
+
+	fields["reasoning"] = c.Reasoning
+
+	return baml.EncodeClass("GmailQueryEvaluation", fields, nil)
+}
+
+func (c GmailQueryEvaluation) BamlTypeName() string {
+	return "GmailQueryEvaluation"
+}
+
 type GmailQueryResult struct {
 	Gmail_query     *string `json:"gmail_query"`
 	Limit           *int64  `json:"limit"`

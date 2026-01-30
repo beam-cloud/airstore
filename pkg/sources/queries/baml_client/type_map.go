@@ -21,10 +21,12 @@ import (
 )
 
 var typeMap = map[string]reflect.Type{
-	"TYPES.GDriveQueryResult":        reflect.TypeOf(types.GDriveQueryResult{}),
-	"STREAM_TYPES.GDriveQueryResult": reflect.TypeOf(stream_types.GDriveQueryResult{}),
-	"TYPES.GmailQueryResult":         reflect.TypeOf(types.GmailQueryResult{}),
-	"STREAM_TYPES.GmailQueryResult":  reflect.TypeOf(stream_types.GmailQueryResult{}),
-	"TYPES.NotionQueryResult":        reflect.TypeOf(types.NotionQueryResult{}),
-	"STREAM_TYPES.NotionQueryResult": reflect.TypeOf(stream_types.NotionQueryResult{}),
+	"TYPES.GDriveQueryResult":           reflect.TypeOf(types.GDriveQueryResult{}),
+	"STREAM_TYPES.GDriveQueryResult":    reflect.TypeOf(stream_types.GDriveQueryResult{}),
+	"TYPES.GmailQueryEvaluation":        reflect.TypeOf(types.GmailQueryEvaluation{}),
+	"STREAM_TYPES.GmailQueryEvaluation": reflect.TypeOf(stream_types.GmailQueryEvaluation{}),
+	"TYPES.GmailQueryResult":            reflect.TypeOf(types.GmailQueryResult{}),
+	"STREAM_TYPES.GmailQueryResult":     reflect.TypeOf(stream_types.GmailQueryResult{}),
+	"TYPES.NotionQueryResult":           reflect.TypeOf(types.NotionQueryResult{}),
+	"STREAM_TYPES.NotionQueryResult":    reflect.TypeOf(stream_types.NotionQueryResult{}),
 }

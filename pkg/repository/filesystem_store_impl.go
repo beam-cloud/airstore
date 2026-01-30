@@ -292,7 +292,16 @@ func (s *filesystemStore) UpdateQuery(ctx context.Context, query *types.Filesyst
 	if s.isMemoryMode() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
+
 		if existing, ok := s.memQueries[query.ExternalId]; ok {
+			// If path changed, update the path index
+			if existing.Path != query.Path {
+				delete(s.memQueryPath, existing.Path)
+				s.memQueryPath[query.Path] = query.ExternalId
+			}
+
+			existing.Name = query.Name
+			existing.Path = query.Path
 			existing.QuerySpec = query.QuerySpec
 			existing.Guidance = query.Guidance
 			existing.OutputFormat = query.OutputFormat
@@ -307,11 +316,11 @@ func (s *filesystemStore) UpdateQuery(ctx context.Context, query *types.Filesyst
 
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE filesystem_queries SET
-			query_spec = $1, guidance = $2, output_format = $3, file_ext = $4, 
-			filename_format = $5, cache_ttl = $6, updated_at = $7, last_executed = $8
-		WHERE external_id = $9
-	`, query.QuerySpec, query.Guidance, query.OutputFormat, query.FileExt,
-		query.FilenameFormat, query.CacheTTL, query.UpdatedAt, query.LastExecuted, query.ExternalId)
+			name = $1, path = $2, query_spec = $3, guidance = $4, output_format = $5, 
+			file_ext = $6, filename_format = $7, cache_ttl = $8, updated_at = $9, last_executed = $10
+		WHERE external_id = $11
+	`, query.Name, query.Path, query.QuerySpec, query.Guidance, query.OutputFormat,
+		query.FileExt, query.FilenameFormat, query.CacheTTL, query.UpdatedAt, query.LastExecuted, query.ExternalId)
 	if err != nil {
 		return fmt.Errorf("update filesystem query: %w", err)
 	}

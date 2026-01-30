@@ -21,6 +21,80 @@ import (
 	baml "github.com/boundaryml/baml/engine/language_client_go/pkg"
 )
 
+func EvaluateGmailQueryResults(ctx context.Context, original_guidance string, generated_query string, result_count int64, sample_results string, opts ...CallOptionFunc) (types.GmailQueryEvaluation, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	// Resolve client option to clientRegistry (client takes precedence)
+	if callOpts.client != nil {
+		if callOpts.clientRegistry == nil {
+			callOpts.clientRegistry = baml.NewClientRegistry()
+		}
+		callOpts.clientRegistry.SetPrimaryClient(*callOpts.client)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"original_guidance": original_guidance, "generated_query": generated_query, "result_count": result_count, "sample_results": sample_results},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		panic(err)
+	}
+
+	if callOpts.onTick == nil {
+		result, err := bamlRuntime.CallFunction(ctx, "EvaluateGmailQueryResults", encoded, callOpts.onTick)
+		if err != nil {
+			return types.GmailQueryEvaluation{}, err
+		}
+
+		if result.Error != nil {
+			return types.GmailQueryEvaluation{}, result.Error
+		}
+
+		casted := (result.Data).(types.GmailQueryEvaluation)
+
+		return casted, nil
+	} else {
+		channel, err := bamlRuntime.CallFunctionStream(ctx, "EvaluateGmailQueryResults", encoded, callOpts.onTick)
+		if err != nil {
+			return types.GmailQueryEvaluation{}, err
+		}
+
+		for result := range channel {
+			if result.Error != nil {
+				return types.GmailQueryEvaluation{}, result.Error
+			}
+
+			if result.HasData {
+				return result.Data.(types.GmailQueryEvaluation), nil
+			}
+		}
+
+		return types.GmailQueryEvaluation{}, fmt.Errorf("No data returned from stream")
+	}
+}
+
 func InferGDriveQuery(ctx context.Context, name string, guidance *string, opts ...CallOptionFunc) (types.GDriveQueryResult, error) {
 
 	var callOpts callOption

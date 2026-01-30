@@ -29,6 +29,24 @@ type cachedCreds struct {
 	expiresAt time.Time
 }
 
+// gmailQuerySpec represents the JSON structure for a Gmail query specification
+type gmailQuerySpec struct {
+	GmailQuery     string `json:"gmail_query"`
+	Limit          int    `json:"limit"`
+	FilenameFormat string `json:"filename_format"`
+}
+
+// buildGmailQuerySpec creates a JSON query spec string for Gmail queries
+func buildGmailQuerySpec(query string, limit int, filenameFormat string) string {
+	spec := gmailQuerySpec{
+		GmailQuery:     query,
+		Limit:          limit,
+		FilenameFormat: filenameFormat,
+	}
+	data, _ := json.Marshal(spec)
+	return string(data)
+}
+
 // SourceService implements the gRPC SourceService for integration access.
 type SourceService struct {
 	pb.UnimplementedSourceServiceServer
@@ -764,6 +782,24 @@ func (s *SourceService) CreateSmartQuery(ctx context.Context, req *pb.CreateSmar
 		filenameFormat = sources.DefaultFilenameFormat(req.Integration)
 	}
 
+	// Iterative refinement: only for gmail with guidance
+	if req.Integration == "gmail" && req.Guidance != "" {
+		pctx, err := s.providerContext(ctx)
+		if err == nil {
+			pctx, connected := s.loadCredentials(ctx, pctx, req.Integration)
+			if connected {
+				refinedSpec, err := s.refineGmailQueryWithResults(ctx, pctx, req.Guidance, spec.Query)
+				if err != nil {
+					log.Warn().Err(err).Msg("query refinement failed, using initial query")
+				} else if refinedSpec != spec.Query {
+					log.Info().Str("original", spec.Query).Str("refined", refinedSpec).Msg("refined gmail query")
+					spec.Query = refinedSpec
+					querySpec = buildGmailQuerySpec(refinedSpec, spec.Limit, filenameFormat)
+				}
+			}
+		}
+	}
+
 	query := &types.FilesystemQuery{
 		WorkspaceId:    workspaceId,
 		Integration:    req.Integration,
@@ -839,6 +875,88 @@ func (s *SourceService) inferQuerySpec(ctx context.Context, integration, name, g
 	default:
 		return "", "", fmt.Errorf("unsupported integration: %s", integration)
 	}
+}
+
+// refineGmailQueryWithResults executes the query, evaluates results, and refines up to 2 times
+func (s *SourceService) refineGmailQueryWithResults(ctx context.Context, pctx *sources.ProviderContext, guidance, query string) (string, error) {
+	const maxIterations = 2
+
+	currentQuery := query
+	for i := 0; i < maxIterations; i++ {
+		results, err := s.executeQueryForEvaluation(ctx, pctx, "gmail", currentQuery, 20)
+		if err != nil {
+			return currentQuery, nil
+		}
+
+		sampleJSON := formatResultsForEvaluation(results)
+		eval, err := baml.EvaluateGmailQueryResults(ctx, guidance, currentQuery, int64(len(results)), sampleJSON)
+		if err != nil {
+			return currentQuery, nil
+		}
+
+		if eval.Is_satisfactory || eval.Refined_query == nil {
+			break
+		}
+
+		log.Info().
+			Str("reasoning", eval.Reasoning).
+			Str("old_query", currentQuery).
+			Str("new_query", *eval.Refined_query).
+			Int("iteration", i).
+			Msg("refining gmail query")
+
+		currentQuery = *eval.Refined_query
+	}
+
+	return currentQuery, nil
+}
+
+// executeQueryForEvaluation runs a lightweight query for evaluation purposes (no caching)
+func (s *SourceService) executeQueryForEvaluation(ctx context.Context, pctx *sources.ProviderContext, integration, query string, limit int) ([]sources.QueryResult, error) {
+	provider := s.registry.Get(integration)
+	if provider == nil {
+		return nil, fmt.Errorf("provider not found: %s", integration)
+	}
+
+	executor, ok := provider.(sources.QueryExecutor)
+	if !ok {
+		return nil, fmt.Errorf("provider does not support queries: %s", integration)
+	}
+
+	spec := sources.QuerySpec{
+		Query: query,
+		Limit: limit,
+	}
+
+	return executor.ExecuteQuery(ctx, pctx, spec)
+}
+
+// formatResultsForEvaluation converts query results to JSON for BAML evaluation
+func formatResultsForEvaluation(results []sources.QueryResult) string {
+	type sampleResult struct {
+		From    string `json:"from"`
+		Subject string `json:"subject"`
+		Snippet string `json:"snippet"`
+	}
+
+	// Take up to 10 sample results
+	maxSamples := 10
+	if len(results) < maxSamples {
+		maxSamples = len(results)
+	}
+
+	samples := make([]sampleResult, maxSamples)
+	for i := 0; i < maxSamples; i++ {
+		r := results[i]
+		samples[i] = sampleResult{
+			From:    r.Metadata["from"],
+			Subject: r.Metadata["subject"],
+			Snippet: r.Metadata["snippet"],
+		}
+	}
+
+	data, _ := json.Marshal(samples)
+	return string(data)
 }
 
 // GetSmartQuery retrieves a smart query by path

@@ -55,6 +55,46 @@ func (t *GDriveQueryResultClassView) Type() (baml.Type, error) {
 	return t.inner.Type()
 }
 
+type GmailQueryEvaluationClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *GmailQueryEvaluationClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *GmailQueryEvaluationClassView) PropertyIs_satisfactory() (ClassPropertyView, error) {
+	return t.inner.Property("is_satisfactory")
+}
+
+func (t *GmailQueryEvaluationClassView) PropertyRefined_query() (ClassPropertyView, error) {
+	return t.inner.Property("refined_query")
+}
+
+func (t *GmailQueryEvaluationClassView) PropertyReasoning() (ClassPropertyView, error) {
+	return t.inner.Property("reasoning")
+}
+
+func (t *TypeBuilder) GmailQueryEvaluation() (*GmailQueryEvaluationClassView, error) {
+	bld, err := t.inner.Class("GmailQueryEvaluation")
+	if err != nil {
+		return nil, err
+	}
+	return &GmailQueryEvaluationClassView{inner: bld}, nil
+}
+
+func (t *GmailQueryEvaluationClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
 type GmailQueryResultClassView struct {
 	inner baml.ClassBuilder
 }
