@@ -76,6 +76,8 @@ func (g *FilesystemGroup) registerRoutes() {
 	// Workspace tool provider CRUD endpoints
 	g.routerGroup.GET("/tools/providers", g.ListToolProviders)
 	g.routerGroup.POST("/tools/providers", g.CreateToolProvider)
+	g.routerGroup.GET("/tools/providers/:name", g.GetToolProvider)
+	g.routerGroup.PUT("/tools/providers/:name", g.UpdateToolProvider)
 	g.routerGroup.DELETE("/tools/providers/:name", g.DeleteToolProvider)
 
 	// Smart query endpoints
@@ -1239,6 +1241,124 @@ func (g *FilesystemGroup) CreateToolProvider(c echo.Context) error {
 	return c.JSON(http.StatusCreated, Response{
 		Success: true,
 		Data:    resp,
+	})
+}
+
+// GetToolProvider retrieves a workspace tool provider by name
+func (g *FilesystemGroup) GetToolProvider(c echo.Context) error {
+	ctx := c.Request().Context()
+	name := c.Param("name")
+	logRequest(c, "get_tool_provider")
+
+	// Get workspace ID from auth context
+	rc := auth.FromContext(ctx)
+	if rc == nil {
+		return ErrorResponse(c, http.StatusUnauthorized, "unauthorized")
+	}
+
+	// Get tool from database
+	wt, err := g.backend.GetWorkspaceToolByName(ctx, rc.WorkspaceId, name)
+	if err != nil {
+		if _, ok := err.(*types.ErrWorkspaceToolNotFound); ok {
+			return ErrorResponse(c, http.StatusNotFound, "tool provider not found")
+		}
+		log.Error().Err(err).Msg("failed to get workspace tool")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to get tool provider")
+	}
+
+	// Parse MCP config for response
+	cfg, _ := wt.GetMCPConfig()
+
+	resp := map[string]interface{}{
+		"external_id":   wt.ExternalId,
+		"name":          wt.Name,
+		"provider_type": string(wt.ProviderType),
+		"created_at":    wt.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		"updated_at":    wt.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
+	}
+
+	if cfg != nil {
+		// Return full config for editing (member already has write access to view)
+		resp["mcp"] = cfg
+	}
+
+	return c.JSON(http.StatusOK, Response{
+		Success: true,
+		Data:    resp,
+	})
+}
+
+// UpdateToolProvider updates a workspace tool provider's config
+func (g *FilesystemGroup) UpdateToolProvider(c echo.Context) error {
+	ctx := c.Request().Context()
+	name := c.Param("name")
+	logRequest(c, "update_tool_provider")
+
+	// Get workspace ID from auth context
+	rc := auth.FromContext(ctx)
+	if rc == nil {
+		return ErrorResponse(c, http.StatusUnauthorized, "unauthorized")
+	}
+
+	// Require write access
+	if !auth.CanWrite(ctx) {
+		return ErrorResponse(c, http.StatusForbidden, "insufficient permissions")
+	}
+
+	// Get existing tool
+	wt, err := g.backend.GetWorkspaceToolByName(ctx, rc.WorkspaceId, name)
+	if err != nil {
+		if _, ok := err.(*types.ErrWorkspaceToolNotFound); ok {
+			return ErrorResponse(c, http.StatusNotFound, "tool provider not found")
+		}
+		log.Error().Err(err).Msg("failed to get workspace tool")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to get tool provider")
+	}
+
+	// Parse request body
+	var req CreateToolProviderRequest
+	if err := c.Bind(&req); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
+	}
+
+	// Validate MCP config
+	if req.MCP == nil {
+		return ErrorResponse(c, http.StatusBadRequest, "mcp configuration is required")
+	}
+	if req.MCP.URL == "" && req.MCP.Command == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "mcp.url or mcp.command is required")
+	}
+
+	// Serialize new config
+	configJSON, err := json.Marshal(req.MCP)
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid mcp configuration")
+	}
+
+	// Invalidate resolver cache before update
+	if g.toolResolver != nil {
+		g.toolResolver.Invalidate(rc.WorkspaceId, name)
+	}
+
+	// Update in database
+	if err := g.backend.UpdateWorkspaceToolConfig(ctx, wt.Id, configJSON); err != nil {
+		log.Error().Err(err).Msg("failed to update workspace tool")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to update tool provider")
+	}
+
+	// Audit log
+	log.Info().
+		Uint("workspace_id", rc.WorkspaceId).
+		Uint("member_id", rc.MemberId).
+		Str("name", name).
+		Msg("audit: workspace tool provider updated")
+
+	return c.JSON(http.StatusOK, Response{
+		Success: true,
+		Data: map[string]interface{}{
+			"name":    name,
+			"message": "tool provider updated",
+		},
 	})
 }
 

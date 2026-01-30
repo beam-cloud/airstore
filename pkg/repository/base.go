@@ -73,6 +73,7 @@ type WorkspaceToolRepository interface {
 	GetWorkspaceToolByName(ctx context.Context, workspaceId uint, name string) (*types.WorkspaceTool, error)
 	ListWorkspaceTools(ctx context.Context, workspaceId uint) ([]*types.WorkspaceTool, error)
 	UpdateWorkspaceToolManifest(ctx context.Context, id uint, manifest json.RawMessage) error
+	UpdateWorkspaceToolConfig(ctx context.Context, id uint, config json.RawMessage) error
 	DeleteWorkspaceTool(ctx context.Context, id uint) error
 	DeleteWorkspaceToolByName(ctx context.Context, workspaceId uint, name string) error
 }

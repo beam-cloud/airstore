@@ -206,6 +206,31 @@ func (b *PostgresBackend) UpdateWorkspaceToolManifest(ctx context.Context, id ui
 	return nil
 }
 
+// UpdateWorkspaceToolConfig updates the config for a workspace tool
+func (b *PostgresBackend) UpdateWorkspaceToolConfig(ctx context.Context, id uint, config json.RawMessage) error {
+	query := `
+		UPDATE workspace_tool
+		SET config = $2, manifest = NULL, updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1
+	`
+
+	result, err := b.db.ExecContext(ctx, query, id, config)
+	if err != nil {
+		return fmt.Errorf("failed to update workspace tool config: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		return &types.ErrWorkspaceToolNotFound{ExternalId: fmt.Sprintf("%d", id)}
+	}
+
+	return nil
+}
+
 // DeleteWorkspaceTool removes a workspace tool by internal ID
 func (b *PostgresBackend) DeleteWorkspaceTool(ctx context.Context, id uint) error {
 	query := `DELETE FROM workspace_tool WHERE id = $1`
