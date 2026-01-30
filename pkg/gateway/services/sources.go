@@ -435,7 +435,6 @@ func (s *SourceService) readDirSmartQuery(ctx context.Context, pctx *sources.Pro
 	return &pb.SourceReadDirResponse{Ok: true, Entries: entries}, nil
 }
 
-// executeAndCacheQuery executes a smart query and caches the results
 func (s *SourceService) executeAndCacheQuery(ctx context.Context, pctx *sources.ProviderContext, query *types.FilesystemQuery) ([]repository.QueryResult, error) {
 	provider := s.registry.Get(query.Integration)
 	if provider == nil {
@@ -447,7 +446,6 @@ func (s *SourceService) executeAndCacheQuery(ctx context.Context, pctx *sources.
 		return nil, fmt.Errorf("provider does not support queries: %s", query.Integration)
 	}
 
-	// Parse query spec
 	spec := parseQuerySpec(query.Integration, query.QuerySpec)
 	if spec.Query == "" {
 		return nil, fmt.Errorf("empty query spec for %s", query.Integration)
@@ -458,49 +456,72 @@ func (s *SourceService) executeAndCacheQuery(ctx context.Context, pctx *sources.
 		Str("path", query.Path).
 		Str("query", spec.Query).
 		Int("limit", spec.Limit).
+		Int("max_results", spec.MaxResults).
 		Msg("executing provider query")
 
-	// Execute the query
-	queryResults, err := executor.ExecuteQuery(ctx, pctx, spec)
-	if err != nil {
-		return nil, fmt.Errorf("query execution failed: %w", err)
+	// Fetch all pages synchronously
+	var allResults []repository.QueryResult
+	seenIDs := make(map[string]bool)
+	pageNum := 0
+
+	for {
+		pageNum++
+		queryResp, err := executor.ExecuteQuery(ctx, pctx, spec)
+		if err != nil {
+			return nil, fmt.Errorf("query execution failed (page %d): %w", pageNum, err)
+		}
+
+		// Convert and dedupe
+		for _, qr := range queryResp.Results {
+			if qr.ID != "" && !seenIDs[qr.ID] {
+				seenIDs[qr.ID] = true
+				filename := qr.Filename
+				if filename == "" {
+					filename = executor.FormatFilename(spec.FilenameFormat, qr.Metadata)
+				}
+				allResults = append(allResults, repository.QueryResult{
+					ID:       qr.ID,
+					Filename: filename,
+					Metadata: qr.Metadata,
+					Size:     qr.Size,
+					Mtime:    qr.Mtime,
+				})
+			}
+		}
+
+		log.Debug().
+			Str("path", query.Path).
+			Int("page", pageNum).
+			Int("page_results", len(queryResp.Results)).
+			Int("total_unique", len(allResults)).
+			Bool("has_more", queryResp.HasMore).
+			Msg("fetched page")
+
+		// Stop if no more pages or hit max
+		if !queryResp.HasMore || queryResp.NextPageToken == "" || len(allResults) >= spec.MaxResults {
+			break
+		}
+		spec.PageToken = queryResp.NextPageToken
+	}
+
+	// Cap at max
+	if len(allResults) > spec.MaxResults {
+		allResults = allResults[:spec.MaxResults]
 	}
 
 	log.Info().
 		Str("integration", query.Integration).
 		Str("path", query.Path).
-		Int("results", len(queryResults)).
-		Msg("provider query complete")
-
-	// Convert to repository format
-	results := make([]repository.QueryResult, len(queryResults))
-	filenameFormat := query.FilenameFormat
-	if filenameFormat == "" {
-		filenameFormat = spec.FilenameFormat
-	}
-	if filenameFormat == "" {
-		filenameFormat = sources.DefaultFilenameFormat(query.Integration)
-	}
-	for i, qr := range queryResults {
-		filename := qr.Filename
-		if filename == "" {
-			filename = executor.FormatFilename(filenameFormat, qr.Metadata)
-		}
-		results[i] = repository.QueryResult{
-			ID:       qr.ID,
-			Filename: filename,
-			Metadata: qr.Metadata,
-			Size:     qr.Size,
-			Mtime:    qr.Mtime,
-		}
-	}
+		Int("total_results", len(allResults)).
+		Int("pages", pageNum).
+		Msg("query complete")
 
 	// Cache results
 	ttl := time.Duration(query.CacheTTL) * time.Second
 	if ttl == 0 {
-		ttl = 5 * time.Minute // Default TTL
+		ttl = 5 * time.Minute
 	}
-	if err := s.fsStore.StoreQueryResults(ctx, pctx.WorkspaceId, query.Path, results, ttl); err != nil {
+	if err := s.fsStore.StoreQueryResults(ctx, pctx.WorkspaceId, query.Path, allResults, ttl); err != nil {
 		log.Warn().Err(err).Str("path", query.Path).Msg("failed to cache query results")
 	}
 
@@ -511,7 +532,7 @@ func (s *SourceService) executeAndCacheQuery(ctx context.Context, pctx *sources.
 		log.Warn().Err(err).Str("path", query.Path).Msg("failed to update query timestamp")
 	}
 
-	return results, nil
+	return allResults, nil
 }
 
 func (s *SourceService) getOrExecuteQuery(ctx context.Context, pctx *sources.ProviderContext, query *types.FilesystemQuery) ([]repository.QueryResult, error) {
@@ -1010,7 +1031,11 @@ func (s *SourceService) executeQueryForEvaluation(ctx context.Context, pctx *sou
 		Limit: limit,
 	}
 
-	return executor.ExecuteQuery(ctx, pctx, spec)
+	resp, err := executor.ExecuteQuery(ctx, pctx, spec)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Results, nil
 }
 
 // formatResultsForEvaluation converts query results to JSON for BAML evaluation
@@ -1303,6 +1328,12 @@ func (s *SourceService) ExecuteSmartQuery(ctx context.Context, req *pb.ExecuteSm
 	return &pb.ExecuteSmartQueryResponse{Ok: true, Entries: entries}, nil
 }
 
+// Default pagination settings
+const (
+	defaultPageSize   = 50  // Default number of results per page
+	defaultMaxResults = 500 // Default max total results across all pages
+)
+
 // parseQuerySpec extracts the query string, limit, and filename format from a query spec JSON
 func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 	var spec struct {
@@ -1310,12 +1341,24 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 		GDriveQuery    string `json:"gdrive_query"`
 		NotionQuery    string `json:"notion_query"`
 		Limit          int    `json:"limit"`
+		MaxResults     int    `json:"max_results"`
 		FilenameFormat string `json:"filename_format"`
 	}
 
-	limit := 50
-	if json.Unmarshal([]byte(querySpec), &spec) == nil && spec.Limit > 0 {
-		limit = spec.Limit
+	limit := defaultPageSize
+	maxResults := defaultMaxResults
+	if json.Unmarshal([]byte(querySpec), &spec) == nil {
+		if spec.Limit > 0 {
+			limit = spec.Limit
+		}
+		if spec.MaxResults > 0 {
+			maxResults = spec.MaxResults
+		}
+	}
+
+	// Ensure maxResults doesn't exceed the hard limit
+	if maxResults > defaultMaxResults {
+		maxResults = defaultMaxResults
 	}
 
 	var query string
@@ -1336,6 +1379,7 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 	return sources.QuerySpec{
 		Query:          query,
 		Limit:          limit,
+		MaxResults:     maxResults,
 		FilenameFormat: filenameFormat,
 	}
 }

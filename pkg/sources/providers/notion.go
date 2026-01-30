@@ -653,10 +653,10 @@ func (n *NotionProvider) fetchDatabaseSchema(ctx context.Context, token, dbId st
 
 	// Extract relevant schema info
 	schema := map[string]any{
-		"id":             result["id"],
-		"title":          result["title"],
-		"properties":     result["properties"],
-		"created_time":   result["created_time"],
+		"id":               result["id"],
+		"title":            result["title"],
+		"properties":       result["properties"],
+		"created_time":     result["created_time"],
 		"last_edited_time": result["last_edited_time"],
 	}
 
@@ -686,9 +686,9 @@ func (n *NotionProvider) fetchRecentPages(ctx context.Context, token string) ([]
 	result := make([]map[string]any, 0, len(pages))
 	for _, p := range pages {
 		simplified := map[string]any{
-			"id":              p["id"],
-			"url":             p["url"],
-			"created_time":    p["created_time"],
+			"id":               p["id"],
+			"url":              p["url"],
+			"created_time":     p["created_time"],
 			"last_edited_time": p["last_edited_time"],
 		}
 
@@ -788,7 +788,8 @@ func (n *NotionProvider) postRequest(ctx context.Context, token, path string, bo
 
 // ExecuteQuery runs a Notion search query and returns results with generated filenames.
 // This implements the sources.QueryExecutor interface for filesystem queries.
-func (n *NotionProvider) ExecuteQuery(ctx context.Context, pctx *sources.ProviderContext, spec sources.QuerySpec) ([]sources.QueryResult, error) {
+// Supports pagination via spec.PageToken (Notion's start_cursor) for fetching subsequent pages.
+func (n *NotionProvider) ExecuteQuery(ctx context.Context, pctx *sources.ProviderContext, spec sources.QuerySpec) (*sources.QueryResponse, error) {
 	if pctx.Credentials == nil || pctx.Credentials.AccessToken == "" {
 		return nil, sources.ErrNotConnected
 	}
@@ -796,6 +797,11 @@ func (n *NotionProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provide
 	limit := spec.Limit
 	if limit <= 0 {
 		limit = 50
+	}
+
+	// Notion max page_size is 100
+	if limit > 100 {
+		limit = 100
 	}
 
 	token := pctx.Credentials.AccessToken
@@ -808,6 +814,11 @@ func (n *NotionProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provide
 			"direction": "descending",
 			"timestamp": "last_edited_time",
 		},
+	}
+
+	// Add start_cursor for pagination if provided
+	if spec.PageToken != "" {
+		body["start_cursor"] = spec.PageToken
 	}
 
 	bodyJSON, _ := json.Marshal(body)
@@ -837,9 +848,17 @@ func (n *NotionProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provide
 		return nil, err
 	}
 
+	// Extract pagination info from response
+	hasMore, _ := result["has_more"].(bool)
+	nextCursor, _ := result["next_cursor"].(string)
+
 	resultsRaw, _ := result["results"].([]any)
 	if len(resultsRaw) == 0 {
-		return []sources.QueryResult{}, nil
+		return &sources.QueryResponse{
+			Results:       []sources.QueryResult{},
+			NextPageToken: "",
+			HasMore:       false,
+		}, nil
 	}
 
 	filenameFormat := spec.FilenameFormat
@@ -922,7 +941,11 @@ func (n *NotionProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provide
 		})
 	}
 
-	return results, nil
+	return &sources.QueryResponse{
+		Results:       results,
+		NextPageToken: nextCursor,
+		HasMore:       hasMore,
+	}, nil
 }
 
 // ReadResult fetches the content of a Notion page by its page ID.

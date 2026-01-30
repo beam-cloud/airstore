@@ -49,8 +49,10 @@ type ProviderContext struct {
 // QuerySpec contains the parsed query specification from a FilesystemQuery.
 type QuerySpec struct {
 	Query          string // Provider-specific query string (e.g., "is:unread", "mimeType='application/pdf'")
-	Limit          int    // Maximum number of results
+	Limit          int    // Page size - number of results per page (default 50)
+	MaxResults     int    // Total cap on results across all pages (default 500)
 	FilenameFormat string // Format template for generating filenames (e.g., "{date}_{subject}_{id}.txt")
+	PageToken      string // Pagination token for fetching subsequent pages
 }
 
 // QueryResult represents a single result from executing a filesystem query.
@@ -63,13 +65,23 @@ type QueryResult struct {
 	Mtime    int64             // Last modified time (Unix timestamp)
 }
 
+// QueryResponse wraps query results with pagination metadata.
+// Providers return this to indicate whether more results are available.
+type QueryResponse struct {
+	Results       []QueryResult // Results for this page
+	NextPageToken string        // Token for fetching the next page (empty if no more pages)
+	HasMore       bool          // True if there are more results beyond this page
+}
+
 // QueryExecutor is an optional interface implemented by providers that support
 // filesystem query operations. This enables the smart query filesystem feature
 // where users create virtual folders/files that execute queries on access.
 type QueryExecutor interface {
-	// ExecuteQuery runs a query and returns results with generated filenames.
-	// The spec contains the provider-specific query string and filename format.
-	ExecuteQuery(ctx context.Context, pctx *ProviderContext, spec QuerySpec) ([]QueryResult, error)
+	// ExecuteQuery runs a query and returns results with pagination metadata.
+	// The spec contains the provider-specific query string, filename format,
+	// and optional PageToken for fetching subsequent pages.
+	// Returns a QueryResponse containing results and pagination info.
+	ExecuteQuery(ctx context.Context, pctx *ProviderContext, spec QuerySpec) (*QueryResponse, error)
 
 	// ReadResult fetches content for a specific result by its provider ID.
 	// This is called when a user reads a file from a smart query folder.

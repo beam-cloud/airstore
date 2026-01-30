@@ -585,7 +585,8 @@ func (g *GDriveProvider) request(ctx context.Context, token, path string, result
 
 // ExecuteQuery runs a Google Drive search query and returns results with generated filenames.
 // This implements the sources.QueryExecutor interface for filesystem queries.
-func (g *GDriveProvider) ExecuteQuery(ctx context.Context, pctx *sources.ProviderContext, spec sources.QuerySpec) ([]sources.QueryResult, error) {
+// Supports pagination via spec.PageToken for fetching subsequent pages.
+func (g *GDriveProvider) ExecuteQuery(ctx context.Context, pctx *sources.ProviderContext, spec sources.QuerySpec) (*sources.QueryResponse, error) {
 	if pctx.Credentials == nil || pctx.Credentials.AccessToken == "" {
 		return nil, sources.ErrNotConnected
 	}
@@ -597,13 +598,18 @@ func (g *GDriveProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provide
 
 	token := pctx.Credentials.AccessToken
 
+	// Fetch a single page of files with pagination support
 	fields := "nextPageToken,incompleteSearch,files(id,name,mimeType,size,modifiedTime,createdTime,webViewLink)"
-	files, err := g.listFilesPaged(ctx, token, spec.Query, limit, fields, true)
+	files, nextPageToken, err := g.listFilesPage(ctx, token, spec.Query, limit, fields, true, spec.PageToken)
 	if err != nil {
 		return nil, err
 	}
 	if len(files) == 0 {
-		return []sources.QueryResult{}, nil
+		return &sources.QueryResponse{
+			Results:       []sources.QueryResult{},
+			NextPageToken: "",
+			HasMore:       false,
+		}, nil
 	}
 
 	filenameFormat := spec.FilenameFormat
@@ -688,7 +694,11 @@ func (g *GDriveProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provide
 		})
 	}
 
-	return results, nil
+	return &sources.QueryResponse{
+		Results:       results,
+		NextPageToken: nextPageToken,
+		HasMore:       nextPageToken != "",
+	}, nil
 }
 
 // ReadResult fetches the content of a Drive file by its file ID.
@@ -827,6 +837,26 @@ func (g *GDriveProvider) listFilesPaged(ctx context.Context, token, query string
 	}
 
 	return out, nil
+}
+
+// listFilesPage fetches a single page of files and returns the next page token for pagination.
+// This is used by ExecuteQuery to support transparent pagination.
+func (g *GDriveProvider) listFilesPage(ctx context.Context, token, query string, limit int, fields string, includeAllDrives bool, pageToken string) ([]map[string]any, string, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+
+	path := g.buildFilesListPath(query, limit, "modifiedTime desc", fields, pageToken, includeAllDrives)
+
+	var result driveFileListResponse
+	if err := g.request(ctx, token, path, &result); err != nil {
+		return nil, "", fmt.Errorf("drive files.list failed (q=%q, all_drives=%t): %w", query, includeAllDrives, err)
+	}
+
+	return result.Files, result.NextPageToken, nil
 }
 
 func driveAPIError(status string, statusCode int, body []byte) error {

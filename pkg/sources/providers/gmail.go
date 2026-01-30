@@ -397,7 +397,8 @@ func (g *GmailProvider) ReadSearchResult(ctx context.Context, pctx *sources.Prov
 
 // ExecuteQuery runs a Gmail search query and returns results with generated filenames.
 // This implements the sources.QueryExecutor interface for filesystem queries.
-func (g *GmailProvider) ExecuteQuery(ctx context.Context, pctx *sources.ProviderContext, spec sources.QuerySpec) ([]sources.QueryResult, error) {
+// Supports pagination via spec.PageToken for fetching subsequent pages.
+func (g *GmailProvider) ExecuteQuery(ctx context.Context, pctx *sources.ProviderContext, spec sources.QuerySpec) (*sources.QueryResponse, error) {
 	if err := checkAuth(pctx); err != nil {
 		return nil, err
 	}
@@ -409,17 +410,29 @@ func (g *GmailProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provider
 
 	token := pctx.Credentials.AccessToken
 
+	// Build path with optional pageToken for pagination
+	path := fmt.Sprintf("/users/me/messages?q=%s&maxResults=%d", url.QueryEscape(spec.Query), limit)
+	if spec.PageToken != "" {
+		path += "&pageToken=" + url.QueryEscape(spec.PageToken)
+	}
+
 	// Fetch message IDs using the query
 	var listResult map[string]any
-	path := fmt.Sprintf("/users/me/messages?q=%s&maxResults=%d", url.QueryEscape(spec.Query), limit)
 	if err := g.request(ctx, token, path, &listResult); err != nil {
 		return nil, err
 	}
 
 	rawMessages, _ := listResult["messages"].([]any)
 	if len(rawMessages) == 0 {
-		return []sources.QueryResult{}, nil
+		return &sources.QueryResponse{
+			Results:       []sources.QueryResult{},
+			NextPageToken: "",
+			HasMore:       false,
+		}, nil
 	}
+
+	// Extract nextPageToken for pagination
+	nextPageToken, _ := listResult["nextPageToken"].(string)
 
 	// Collect message IDs
 	msgIDs := make([]string, 0, len(rawMessages))
@@ -471,7 +484,11 @@ func (g *GmailProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provider
 		})
 	}
 
-	return results, nil
+	return &sources.QueryResponse{
+		Results:       results,
+		NextPageToken: nextPageToken,
+		HasMore:       nextPageToken != "",
+	}, nil
 }
 
 // ReadResult fetches the content of an email by its message ID.
@@ -1037,8 +1054,11 @@ func (g *GmailProvider) fetchMessagesMetadataBatch(ctx context.Context, token st
 		return nil, fmt.Errorf("unexpected batch content type: %s", contentType)
 	}
 
+	// Parse batch response parts
 	reader := multipart.NewReader(resp.Body, params["boundary"])
 	results := make([]map[string]any, 0, len(msgIDs))
+	successIDs := make(map[string]bool)
+
 	for {
 		part, err := reader.NextPart()
 		if err == io.EOF {
@@ -1047,24 +1067,37 @@ func (g *GmailProvider) fetchMessagesMetadataBatch(ctx context.Context, token st
 		if err != nil {
 			return nil, err
 		}
-		partBytes, err := io.ReadAll(part)
-		_ = part.Close()
-		if err != nil || len(partBytes) == 0 {
+
+		partBytes, _ := io.ReadAll(part)
+		part.Close()
+		if len(partBytes) == 0 {
 			continue
 		}
 
 		respPart, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(partBytes)), &http.Request{Method: "GET"})
-		if err != nil {
-			continue
-		}
-		respBody, err := io.ReadAll(respPart.Body)
-		_ = respPart.Body.Close()
 		if err != nil || respPart.StatusCode >= 400 {
 			continue
 		}
 
+		respBody, _ := io.ReadAll(respPart.Body)
+		respPart.Body.Close()
+
 		var msg map[string]any
-		if err := json.Unmarshal(respBody, &msg); err == nil {
+		if json.Unmarshal(respBody, &msg) == nil {
+			if id, _ := msg["id"].(string); id != "" {
+				successIDs[id] = true
+				results = append(results, msg)
+			}
+		}
+	}
+
+	// Retry any messages that failed in the batch
+	for _, id := range msgIDs {
+		if successIDs[id] {
+			continue
+		}
+		var msg map[string]any
+		if g.request(ctx, token, fmt.Sprintf("/users/me/messages/%s?format=metadata", id), &msg) == nil {
 			results = append(results, msg)
 		}
 	}

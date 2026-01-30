@@ -410,7 +410,9 @@ func (g *FilesystemGroup) listSources(c echo.Context, ctx context.Context, relPa
 	}
 
 	// If refresh requested, force re-execute the smart query
-	if refresh && g.sourceService != nil {
+	// Only attempt refresh for paths that could be smart queries (integration/query-name)
+	// e.g., "gmail/unread-emails" not just "gmail"
+	if refresh && g.sourceService != nil && strings.Contains(relPath, "/") {
 		queryPath := types.SourcePath(relPath)
 		if _, err := g.sourceService.RefreshSmartQuery(ctx, queryPath); err != nil {
 			// Log but don't fail - might not be a smart query folder
