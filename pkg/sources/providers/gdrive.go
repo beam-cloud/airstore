@@ -713,11 +713,17 @@ func (g *GDriveProvider) FormatFilename(format string, metadata map[string]strin
 	result := format
 	for key, value := range metadata {
 		placeholder := "{" + key + "}"
-		// Sanitize the value for filesystem use
-		safeValue := sanitizeFolderName(value)
-		// Truncate long values (except id)
-		if key != "id" && len(safeValue) > 50 {
-			safeValue = safeValue[:50]
+		var safeValue string
+		if key == "ext" {
+			// Extensions are already validated, don't sanitize (preserve leading dot)
+			safeValue = value
+		} else {
+			// Sanitize the value for filesystem use
+			safeValue = sanitizeFolderName(value)
+			// Truncate long values (except id)
+			if key != "id" && len(safeValue) > 50 {
+				safeValue = safeValue[:50]
+			}
 		}
 		result = strings.ReplaceAll(result, placeholder, safeValue)
 	}

@@ -365,12 +365,12 @@ func parseEmailTimestamp(dateStr string) int64 {
 		"2 Jan 2006 15:04:05 -0700",
 		"Mon, 02 Jan 2006 15:04:05 -0700 (MST)",
 		"Mon, 2 Jan 2006 15:04:05 -0700 (MST)",
-		"2006-01-02T15:04:05Z",                 // ISO 8601
-		"2006-01-02T15:04:05-07:00",            // ISO 8601 with timezone
-		time.RFC3339,                           // Standard RFC3339
-		"Mon Jan 2 15:04:05 MST 2006",          // Another common format
-		"Mon Jan 02 15:04:05 MST 2006",         // Variant
-		"02 Jan 2006 15:04:05 -0700",           // Variant without day name
+		"2006-01-02T15:04:05Z",         // ISO 8601
+		"2006-01-02T15:04:05-07:00",    // ISO 8601 with timezone
+		time.RFC3339,                   // Standard RFC3339
+		"Mon Jan 2 15:04:05 MST 2006",  // Another common format
+		"Mon Jan 02 15:04:05 MST 2006", // Variant
+		"02 Jan 2006 15:04:05 -0700",   // Variant without day name
 	}
 
 	for _, format := range formats {
@@ -1607,21 +1607,11 @@ func formatSubjectFolder(subject, date, msgID string) string {
 	return fmt.Sprintf("%s_%s_%s", datePrefix, subj, idSuffix)
 }
 
-// sanitizeFolderName makes a string safe for use as a folder name
-var unsafeChars = regexp.MustCompile(`[/\\:*?"<>|@\s]`)
-
+// sanitizeFolderName makes a string safe for use as a folder name.
+// It delegates to the shared sources.SanitizeFilename which strips emojis
+// and non-ASCII characters for clean, agent-friendly filenames.
 func sanitizeFolderName(s string) string {
-	s = unsafeChars.ReplaceAllString(s, "_")
-	// Collapse multiple underscores
-	for strings.Contains(s, "__") {
-		s = strings.ReplaceAll(s, "__", "_")
-	}
-	s = strings.TrimSpace(s)
-	s = strings.Trim(s, "_")
-	if s == "" {
-		s = "_unknown_"
-	}
-	return s
+	return sources.SanitizeFilename(s)
 }
 
 func truncateSubject(s string, maxLen int) string {

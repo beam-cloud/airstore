@@ -3,8 +3,10 @@ package sources
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"syscall"
 	"time"
+	"unicode"
 )
 
 // Common file modes
@@ -96,3 +98,75 @@ var ErrNotDir = fmt.Errorf("not a directory")
 
 // ErrIsDir is returned when path is a directory but file was expected
 var ErrIsDir = fmt.Errorf("is a directory")
+
+// SanitizeFilename makes a string safe for use as a filename.
+// It removes emojis, non-ASCII characters, and filesystem-unsafe characters,
+// keeping only alphanumeric, underscores, hyphens, and dots.
+// This is the canonical sanitization function for all providers.
+func SanitizeFilename(s string) string {
+	if s == "" {
+		return "_unknown_"
+	}
+
+	var result strings.Builder
+	result.Grow(len(s))
+
+	prevUnderscore := false
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9':
+			// Keep alphanumeric ASCII
+			result.WriteRune(r)
+			prevUnderscore = false
+
+		case r == '-' || r == '.':
+			// Keep hyphens and dots as-is
+			result.WriteRune(r)
+			prevUnderscore = false
+
+		case r == '_':
+			// Keep underscores, but prevent doubles
+			if !prevUnderscore {
+				result.WriteRune('_')
+				prevUnderscore = true
+			}
+
+		case r == ' ' || r == '\t' || r == '\n' || r == '\r':
+			// Convert whitespace to underscore
+			if !prevUnderscore {
+				result.WriteRune('_')
+				prevUnderscore = true
+			}
+
+		case unicode.IsLetter(r):
+			// Non-ASCII letters: try to keep if they're "safe" Latin-like characters
+			// For now, replace with underscore to ensure ASCII-safe filenames
+			if !prevUnderscore {
+				result.WriteRune('_')
+				prevUnderscore = true
+			}
+
+		default:
+			// Drop everything else: emojis, symbols, control chars, etc.
+			// But add underscore to mark the gap (prevents word collision)
+			if !prevUnderscore && result.Len() > 0 {
+				result.WriteRune('_')
+				prevUnderscore = true
+			}
+		}
+	}
+
+	s = result.String()
+
+	// Trim leading/trailing underscores and dots
+	s = strings.Trim(s, "_.")
+
+	// Final safety check
+	if s == "" {
+		return "_unknown_"
+	}
+
+	return s
+}
