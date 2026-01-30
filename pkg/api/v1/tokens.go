@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/labstack/echo/v4"
@@ -23,10 +24,11 @@ func NewTokensGroup(g *echo.Group, backend repository.BackendRepository) *Tokens
 }
 
 type CreateTokenRequest struct {
-	MemberId  string `json:"member_id"`  // Optional if email is provided
-	Email     string `json:"email"`      // For auto-creating member
-	Name      string `json:"name"`
-	ExpiresIn int    `json:"expires_in"` // Seconds
+	MemberId  string          `json:"member_id"`  // Optional if email is provided
+	Email     string          `json:"email"`      // For auto-creating member
+	Name      string          `json:"name"`
+	ExpiresIn int             `json:"expires_in"` // Seconds
+	TokenType types.TokenType `json:"token_type"` // Optional, defaults to workspace_member
 }
 
 type TokenCreatedResponse struct {
@@ -36,6 +38,13 @@ type TokenCreatedResponse struct {
 }
 
 func (tg *TokensGroup) Create(c echo.Context) error {
+	ctx := c.Request().Context()
+
+	// Require admin role to create tokens
+	if !auth.IsAdmin(ctx) {
+		return ErrorResponse(c, http.StatusForbidden, "admin access required")
+	}
+
 	workspaceId := c.Param("workspace_id")
 
 	var req CreateTokenRequest
@@ -48,8 +57,11 @@ func (tg *TokensGroup) Create(c echo.Context) error {
 	if req.Name == "" {
 		req.Name = "API Token"
 	}
+	if req.TokenType == "" {
+		req.TokenType = types.TokenTypeWorkspaceMember
+	}
 
-	ws, err := tg.backend.GetWorkspaceByExternalId(c.Request().Context(), workspaceId)
+	ws, err := tg.backend.GetWorkspaceByExternalId(ctx, workspaceId)
 	if err != nil || ws == nil {
 		return ErrorResponse(c, http.StatusNotFound, "workspace not found")
 	}
@@ -59,7 +71,7 @@ func (tg *TokensGroup) Create(c echo.Context) error {
 
 	if req.MemberId != "" {
 		// Use existing member
-		member, err = tg.backend.GetMember(c.Request().Context(), req.MemberId)
+		member, err = tg.backend.GetMember(ctx, req.MemberId)
 		if err != nil {
 			return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 		}
@@ -71,7 +83,7 @@ func (tg *TokensGroup) Create(c echo.Context) error {
 		}
 	} else {
 		// Auto-create member with provided email
-		member, err = tg.backend.CreateMember(c.Request().Context(), ws.Id, req.Email, req.Email, types.RoleMember)
+		member, err = tg.backend.CreateMember(ctx, ws.Id, req.Email, req.Email, types.RoleMember)
 		if err != nil {
 			return ErrorResponse(c, http.StatusInternalServerError, "failed to create member: "+err.Error())
 		}
@@ -84,7 +96,7 @@ func (tg *TokensGroup) Create(c echo.Context) error {
 		expiresAt = &t
 	}
 
-	token, raw, err := tg.backend.CreateToken(c.Request().Context(), ws.Id, member.Id, req.Name, expiresAt)
+	token, raw, err := tg.backend.CreateToken(ctx, ws.Id, member.Id, req.Name, expiresAt, req.TokenType)
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
@@ -96,14 +108,21 @@ func (tg *TokensGroup) Create(c echo.Context) error {
 }
 
 func (tg *TokensGroup) List(c echo.Context) error {
+	ctx := c.Request().Context()
+
+	// Require admin role to list tokens
+	if !auth.IsAdmin(ctx) {
+		return ErrorResponse(c, http.StatusForbidden, "admin access required")
+	}
+
 	workspaceId := c.Param("workspace_id")
 
-	ws, err := tg.backend.GetWorkspaceByExternalId(c.Request().Context(), workspaceId)
+	ws, err := tg.backend.GetWorkspaceByExternalId(ctx, workspaceId)
 	if err != nil || ws == nil {
 		return ErrorResponse(c, http.StatusNotFound, "workspace not found")
 	}
 
-	tokens, err := tg.backend.ListTokens(c.Request().Context(), ws.Id)
+	tokens, err := tg.backend.ListTokens(ctx, ws.Id)
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
@@ -112,9 +131,16 @@ func (tg *TokensGroup) List(c echo.Context) error {
 }
 
 func (tg *TokensGroup) Revoke(c echo.Context) error {
+	ctx := c.Request().Context()
+
+	// Require admin role to revoke tokens
+	if !auth.IsAdmin(ctx) {
+		return ErrorResponse(c, http.StatusForbidden, "admin access required")
+	}
+
 	tokenId := c.Param("token_id")
 
-	if err := tg.backend.RevokeToken(c.Request().Context(), tokenId); err != nil {
+	if err := tg.backend.RevokeToken(ctx, tokenId); err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 

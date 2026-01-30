@@ -21,7 +21,7 @@ func generateToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-func (r *PostgresBackend) CreateToken(ctx context.Context, workspaceId, memberId uint, name string, expiresAt *time.Time) (*types.WorkspaceToken, string, error) {
+func (r *PostgresBackend) CreateToken(ctx context.Context, workspaceId, memberId uint, name string, expiresAt *time.Time, tokenType types.TokenType) (*types.WorkspaceToken, string, error) {
 	raw, err := generateToken()
 	if err != nil {
 		return nil, "", fmt.Errorf("generate token: %w", err)
@@ -32,15 +32,20 @@ func (r *PostgresBackend) CreateToken(ctx context.Context, workspaceId, memberId
 		return nil, "", fmt.Errorf("hash token: %w", err)
 	}
 
+	// Default to workspace_member if not specified
+	if tokenType == "" {
+		tokenType = types.TokenTypeWorkspaceMember
+	}
+
 	query := `
-		INSERT INTO workspace_token (workspace_id, member_id, token_hash, name, expires_at)
-		VALUES ($1, $2, $3, $4, $5)
-		RETURNING id, external_id, workspace_id, member_id, token_hash, name, expires_at, created_at, last_used_at
+		INSERT INTO workspace_token (workspace_id, member_id, token_hash, name, expires_at, token_type)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING id, external_id, workspace_id, member_id, token_type, token_hash, name, expires_at, created_at, last_used_at
 	`
 
 	var t types.WorkspaceToken
-	err = r.db.QueryRowContext(ctx, query, workspaceId, memberId, string(hash), name, expiresAt).Scan(
-		&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenHash, &t.Name, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt,
+	err = r.db.QueryRowContext(ctx, query, workspaceId, memberId, string(hash), name, expiresAt, tokenType).Scan(
+		&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.Name, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt,
 	)
 	if err != nil {
 		return nil, "", fmt.Errorf("create token: %w", err)
@@ -52,7 +57,7 @@ func (r *PostgresBackend) ValidateToken(ctx context.Context, rawToken string) (*
 	// Query all non-expired tokens with workspace and member info
 	query := `
 		SELECT 
-			t.id, t.token_hash, t.expires_at,
+			t.id, t.token_hash, t.expires_at, t.token_type,
 			w.id, w.external_id, w.name,
 			m.id, m.external_id, m.email, m.role
 		FROM workspace_token t
@@ -72,6 +77,7 @@ func (r *PostgresBackend) ValidateToken(ctx context.Context, rawToken string) (*
 			tokenId       uint
 			tokenHash     string
 			expiresAt     sql.NullTime
+			tokenType     types.TokenType
 			workspaceId   uint
 			workspaceExt  string
 			workspaceName string
@@ -82,7 +88,7 @@ func (r *PostgresBackend) ValidateToken(ctx context.Context, rawToken string) (*
 		)
 
 		if err := rows.Scan(
-			&tokenId, &tokenHash, &expiresAt,
+			&tokenId, &tokenHash, &expiresAt, &tokenType,
 			&workspaceId, &workspaceExt, &workspaceName,
 			&memberId, &memberExt, &memberEmail, &memberRole,
 		); err != nil {
@@ -114,6 +120,7 @@ func (r *PostgresBackend) ValidateToken(ctx context.Context, rawToken string) (*
 			MemberExt:     memberExt,
 			MemberEmail:   memberEmail,
 			MemberRole:    memberRole,
+			TokenType:     tokenType,
 		}, nil
 	}
 
@@ -122,13 +129,13 @@ func (r *PostgresBackend) ValidateToken(ctx context.Context, rawToken string) (*
 
 func (r *PostgresBackend) GetToken(ctx context.Context, externalId string) (*types.WorkspaceToken, error) {
 	query := `
-		SELECT id, external_id, workspace_id, member_id, token_hash, name, expires_at, created_at, last_used_at
+		SELECT id, external_id, workspace_id, member_id, token_type, token_hash, name, expires_at, created_at, last_used_at
 		FROM workspace_token WHERE external_id = $1
 	`
 
 	var t types.WorkspaceToken
 	err := r.db.QueryRowContext(ctx, query, externalId).Scan(
-		&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenHash, &t.Name, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt,
+		&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.Name, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -141,7 +148,7 @@ func (r *PostgresBackend) GetToken(ctx context.Context, externalId string) (*typ
 
 func (r *PostgresBackend) ListTokens(ctx context.Context, workspaceId uint) ([]types.WorkspaceToken, error) {
 	query := `
-		SELECT id, external_id, workspace_id, member_id, token_hash, name, expires_at, created_at, last_used_at
+		SELECT id, external_id, workspace_id, member_id, token_type, token_hash, name, expires_at, created_at, last_used_at
 		FROM workspace_token WHERE workspace_id = $1 ORDER BY created_at DESC
 	`
 
@@ -154,7 +161,7 @@ func (r *PostgresBackend) ListTokens(ctx context.Context, workspaceId uint) ([]t
 	var tokens []types.WorkspaceToken
 	for rows.Next() {
 		var t types.WorkspaceToken
-		if err := rows.Scan(&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenHash, &t.Name, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt); err != nil {
+		if err := rows.Scan(&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.Name, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt); err != nil {
 			return nil, fmt.Errorf("scan token: %w", err)
 		}
 		tokens = append(tokens, t)

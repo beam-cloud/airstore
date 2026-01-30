@@ -93,6 +93,25 @@ func (r *PostgresBackend) ListConnections(ctx context.Context, workspaceId uint)
 	return conns, rows.Err()
 }
 
+func (r *PostgresBackend) GetConnectionByExternalId(ctx context.Context, externalId string) (*types.IntegrationConnection, error) {
+	query := `
+		SELECT id, external_id, workspace_id, member_id, integration_type, credentials, scope, expires_at, created_at, updated_at
+		FROM integration_connection WHERE external_id = $1
+	`
+
+	var c types.IntegrationConnection
+	err := r.db.QueryRowContext(ctx, query, externalId).Scan(
+		&c.Id, &c.ExternalId, &c.WorkspaceId, &c.MemberId, &c.IntegrationType, &c.Credentials, &c.Scope, &c.ExpiresAt, &c.CreatedAt, &c.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get connection by external id: %w", err)
+	}
+	return &c, nil
+}
+
 func (r *PostgresBackend) DeleteConnection(ctx context.Context, externalId string) error {
 	query := `DELETE FROM integration_connection WHERE external_id = $1`
 	result, err := r.db.ExecContext(ctx, query, externalId)

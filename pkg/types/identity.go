@@ -11,6 +11,13 @@ const (
 	RoleViewer MemberRole = "viewer"
 )
 
+// TokenType represents the type of a workspace token
+type TokenType string
+
+const (
+	TokenTypeWorkspaceMember TokenType = "workspace_member"
+)
+
 // WorkspaceMember represents a user who belongs to a workspace
 type WorkspaceMember struct {
 	Id          uint       `db:"id" json:"id"`
@@ -29,6 +36,7 @@ type WorkspaceToken struct {
 	ExternalId  string     `db:"external_id" json:"external_id"`
 	WorkspaceId uint       `db:"workspace_id" json:"workspace_id"`
 	MemberId    uint       `db:"member_id" json:"member_id"`
+	TokenType   TokenType  `db:"token_type" json:"token_type"`
 	TokenHash   string     `db:"token_hash" json:"-"`
 	Name        string     `db:"name" json:"name"`
 	ExpiresAt   *time.Time `db:"expires_at" json:"expires_at,omitempty"`
@@ -73,4 +81,5 @@ type TokenValidationResult struct {
 	MemberExt     string
 	MemberEmail   string
 	MemberRole    MemberRole
+	TokenType     TokenType
 }

@@ -3,6 +3,7 @@ package apiv1
 import (
 	"net/http"
 
+	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/labstack/echo/v4"
@@ -35,6 +36,13 @@ type UpdateMemberRequest struct {
 }
 
 func (mg *MembersGroup) Create(c echo.Context) error {
+	ctx := c.Request().Context()
+
+	// Require admin role to create members
+	if !auth.IsAdmin(ctx) {
+		return ErrorResponse(c, http.StatusForbidden, "admin access required")
+	}
+
 	workspaceId := c.Param("workspace_id")
 
 	var req CreateMemberRequest
@@ -48,12 +56,12 @@ func (mg *MembersGroup) Create(c echo.Context) error {
 		req.Role = types.RoleMember
 	}
 
-	ws, err := mg.backend.GetWorkspaceByExternalId(c.Request().Context(), workspaceId)
+	ws, err := mg.backend.GetWorkspaceByExternalId(ctx, workspaceId)
 	if err != nil || ws == nil {
 		return ErrorResponse(c, http.StatusNotFound, "workspace not found")
 	}
 
-	member, err := mg.backend.CreateMember(c.Request().Context(), ws.Id, req.Email, req.Name, req.Role)
+	member, err := mg.backend.CreateMember(ctx, ws.Id, req.Email, req.Name, req.Role)
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
@@ -62,14 +70,21 @@ func (mg *MembersGroup) Create(c echo.Context) error {
 }
 
 func (mg *MembersGroup) List(c echo.Context) error {
+	ctx := c.Request().Context()
+
+	// Require admin role to list members
+	if !auth.IsAdmin(ctx) {
+		return ErrorResponse(c, http.StatusForbidden, "admin access required")
+	}
+
 	workspaceId := c.Param("workspace_id")
 
-	ws, err := mg.backend.GetWorkspaceByExternalId(c.Request().Context(), workspaceId)
+	ws, err := mg.backend.GetWorkspaceByExternalId(ctx, workspaceId)
 	if err != nil || ws == nil {
 		return ErrorResponse(c, http.StatusNotFound, "workspace not found")
 	}
 
-	members, err := mg.backend.ListMembers(c.Request().Context(), ws.Id)
+	members, err := mg.backend.ListMembers(ctx, ws.Id)
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
@@ -92,6 +107,13 @@ func (mg *MembersGroup) Get(c echo.Context) error {
 }
 
 func (mg *MembersGroup) Update(c echo.Context) error {
+	ctx := c.Request().Context()
+
+	// Require admin role to update members
+	if !auth.IsAdmin(ctx) {
+		return ErrorResponse(c, http.StatusForbidden, "admin access required")
+	}
+
 	memberId := c.Param("member_id")
 
 	var req UpdateMemberRequest
@@ -99,7 +121,7 @@ func (mg *MembersGroup) Update(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid request")
 	}
 
-	existing, err := mg.backend.GetMember(c.Request().Context(), memberId)
+	existing, err := mg.backend.GetMember(ctx, memberId)
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
@@ -116,7 +138,7 @@ func (mg *MembersGroup) Update(c echo.Context) error {
 		role = existing.Role
 	}
 
-	member, err := mg.backend.UpdateMember(c.Request().Context(), memberId, name, role)
+	member, err := mg.backend.UpdateMember(ctx, memberId, name, role)
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
@@ -125,9 +147,16 @@ func (mg *MembersGroup) Update(c echo.Context) error {
 }
 
 func (mg *MembersGroup) Delete(c echo.Context) error {
+	ctx := c.Request().Context()
+
+	// Require admin role to delete members
+	if !auth.IsAdmin(ctx) {
+		return ErrorResponse(c, http.StatusForbidden, "admin access required")
+	}
+
 	memberId := c.Param("member_id")
 
-	if err := mg.backend.DeleteMember(c.Request().Context(), memberId); err != nil {
+	if err := mg.backend.DeleteMember(ctx, memberId); err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 

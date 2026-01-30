@@ -292,26 +292,35 @@ func (g *Gateway) registerServices() error {
 	if g.BackendRepo != nil {
 		taskQueue := repository.NewRedisTaskQueue(g.RedisClient, "default")
 
-		// Workspaces API (protected by admin token)
-		workspacesGroup := g.baseRouteGroup.Group("/workspaces")
-		workspacesGroup.Use(g.requireAdminToken())
-		apiv1.NewWorkspacesGroup(workspacesGroup, g.BackendRepo)
+		// Workspace CRUD endpoints (admin-only)
+		workspacesAdminGroup := g.baseRouteGroup.Group("/workspaces")
+		workspacesAdminGroup.Use(g.requireAdminToken())
+		apiv1.NewWorkspacesGroup(workspacesAdminGroup, g.BackendRepo)
 
-		// Members API (nested under workspaces)
-		apiv1.NewMembersGroup(workspacesGroup.Group("/:workspace_id/members"), g.BackendRepo)
-
-		// Tokens API (nested under workspaces)
-		apiv1.NewTokensGroup(workspacesGroup.Group("/:workspace_id/tokens"), g.BackendRepo)
-
-		// Connections API (nested under workspaces)
-		apiv1.NewConnectionsGroup(workspacesGroup.Group("/:workspace_id/connections"), g.BackendRepo)
-
-		// Filesystem API (nested under workspaces, supports both admin and workspace tokens)
-		filesystemGroup := workspacesGroup.Group("/:workspace_id/fs")
-		filesystemGroup.Use(apiv1.NewFilesystemAuthMiddleware(apiv1.FilesystemAuthConfig{
+		// Workspace-scoped APIs (support both admin and member tokens)
+		workspaceAuthConfig := apiv1.WorkspaceAuthConfig{
 			AdminToken: g.Config.Gateway.AuthToken,
 			Backend:    g.BackendRepo,
-		}))
+		}
+
+		// Members API (nested under workspaces, workspace-scoped auth)
+		membersGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/members")
+		membersGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
+		apiv1.NewMembersGroup(membersGroup, g.BackendRepo)
+
+		// Tokens API (nested under workspaces, workspace-scoped auth)
+		tokensGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/tokens")
+		tokensGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
+		apiv1.NewTokensGroup(tokensGroup, g.BackendRepo)
+
+		// Connections API (nested under workspaces, workspace-scoped auth)
+		connectionsGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/connections")
+		connectionsGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
+		apiv1.NewConnectionsGroup(connectionsGroup, g.BackendRepo)
+
+		// Filesystem API (nested under workspaces, workspace-scoped auth)
+		filesystemGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/fs")
+		filesystemGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
 		apiv1.NewFilesystemGroup(filesystemGroup, g.BackendRepo, g.contextService, sourceService, g.sourceRegistry, g.toolRegistry)
 		log.Info().Msg("filesystem API registered at /api/v1/workspaces/:workspace_id/fs")
 

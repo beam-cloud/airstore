@@ -3,6 +3,7 @@ package apiv1
 import (
 	"net/http"
 
+	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/labstack/echo/v4"
@@ -32,6 +33,7 @@ type CreateConnectionRequest struct {
 }
 
 func (cg *ConnectionsGroup) Create(c echo.Context) error {
+	ctx := c.Request().Context()
 	workspaceId := c.Param("workspace_id")
 
 	var req CreateConnectionRequest
@@ -45,14 +47,15 @@ func (cg *ConnectionsGroup) Create(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, "access_token or api_key required")
 	}
 
-	ws, err := cg.backend.GetWorkspaceByExternalId(c.Request().Context(), workspaceId)
+	ws, err := cg.backend.GetWorkspaceByExternalId(ctx, workspaceId)
 	if err != nil || ws == nil {
 		return ErrorResponse(c, http.StatusNotFound, "workspace not found")
 	}
 
 	var memberId *uint
 	if req.MemberId != "" {
-		member, err := cg.backend.GetMember(c.Request().Context(), req.MemberId)
+		// Personal connection - require admin or self
+		member, err := cg.backend.GetMember(ctx, req.MemberId)
 		if err != nil {
 			return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 		}
@@ -62,7 +65,18 @@ func (cg *ConnectionsGroup) Create(c echo.Context) error {
 		if member.WorkspaceId != ws.Id {
 			return ErrorResponse(c, http.StatusBadRequest, "member not in workspace")
 		}
+
+		// Check authorization: admin can create for anyone, members only for themselves
+		if !auth.IsAdmin(ctx) && member.Id != auth.MemberId(ctx) {
+			return ErrorResponse(c, http.StatusForbidden, "cannot create connection for another member")
+		}
+
 		memberId = &member.Id
+	} else {
+		// Shared connection - require admin
+		if !auth.IsAdmin(ctx) {
+			return ErrorResponse(c, http.StatusForbidden, "admin access required for shared connections")
+		}
 	}
 
 	creds := &types.IntegrationCredentials{
@@ -72,7 +86,7 @@ func (cg *ConnectionsGroup) Create(c echo.Context) error {
 		Extra:        req.Extra,
 	}
 
-	conn, err := cg.backend.SaveConnection(c.Request().Context(), ws.Id, memberId, req.IntegrationType, creds, req.Scope)
+	conn, err := cg.backend.SaveConnection(ctx, ws.Id, memberId, req.IntegrationType, creds, req.Scope)
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
@@ -97,9 +111,31 @@ func (cg *ConnectionsGroup) List(c echo.Context) error {
 }
 
 func (cg *ConnectionsGroup) Delete(c echo.Context) error {
+	ctx := c.Request().Context()
 	connId := c.Param("connection_id")
 
-	if err := cg.backend.DeleteConnection(c.Request().Context(), connId); err != nil {
+	// Fetch connection to check permissions
+	conn, err := cg.backend.GetConnectionByExternalId(ctx, connId)
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+	if conn == nil {
+		return ErrorResponse(c, http.StatusNotFound, "connection not found")
+	}
+
+	// Check authorization: shared connections require admin, personal require admin or owner
+	if conn.IsShared() {
+		if !auth.IsAdmin(ctx) {
+			return ErrorResponse(c, http.StatusForbidden, "admin access required for shared connections")
+		}
+	} else {
+		// Personal connection
+		if !auth.IsAdmin(ctx) && *conn.MemberId != auth.MemberId(ctx) {
+			return ErrorResponse(c, http.StatusForbidden, "cannot delete another member's connection")
+		}
+	}
+
+	if err := cg.backend.DeleteConnection(ctx, connId); err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 

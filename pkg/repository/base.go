@@ -50,7 +50,7 @@ type MemberRepository interface {
 
 // TokenRepository manages workspace authentication tokens
 type TokenRepository interface {
-	CreateToken(ctx context.Context, workspaceId, memberId uint, name string, expiresAt *time.Time) (*types.WorkspaceToken, string, error)
+	CreateToken(ctx context.Context, workspaceId, memberId uint, name string, expiresAt *time.Time, tokenType types.TokenType) (*types.WorkspaceToken, string, error)
 	ValidateToken(ctx context.Context, rawToken string) (*types.TokenValidationResult, error)
 	GetToken(ctx context.Context, externalId string) (*types.WorkspaceToken, error)
 	ListTokens(ctx context.Context, workspaceId uint) ([]types.WorkspaceToken, error)
@@ -61,6 +61,7 @@ type TokenRepository interface {
 type IntegrationRepository interface {
 	SaveConnection(ctx context.Context, workspaceId uint, memberId *uint, integrationType string, creds *types.IntegrationCredentials, scope string) (*types.IntegrationConnection, error)
 	GetConnection(ctx context.Context, workspaceId uint, memberId uint, integrationType string) (*types.IntegrationConnection, error)
+	GetConnectionByExternalId(ctx context.Context, externalId string) (*types.IntegrationConnection, error)
 	ListConnections(ctx context.Context, workspaceId uint) ([]types.IntegrationConnection, error)
 	DeleteConnection(ctx context.Context, externalId string) error
 }

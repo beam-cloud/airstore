@@ -187,7 +187,7 @@ func (a *APIGroup) CreateToken(c echo.Context) error {
 		name = "Admin Token"
 	}
 
-	token, rawToken, err := a.backend.CreateToken(c.Request().Context(), workspace.Id, member.Id, name, nil)
+	token, rawToken, err := a.backend.CreateToken(c.Request().Context(), workspace.Id, member.Id, name, nil, types.TokenTypeWorkspaceMember)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
