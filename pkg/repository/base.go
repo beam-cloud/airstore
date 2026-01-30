@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -64,6 +65,18 @@ type IntegrationRepository interface {
 	DeleteConnection(ctx context.Context, externalId string) error
 }
 
+// WorkspaceToolRepository manages workspace-scoped tool providers
+type WorkspaceToolRepository interface {
+	CreateWorkspaceTool(ctx context.Context, workspaceId uint, createdByMemberId *uint, name string, providerType types.WorkspaceToolProviderType, config json.RawMessage, manifest json.RawMessage) (*types.WorkspaceTool, error)
+	GetWorkspaceTool(ctx context.Context, id uint) (*types.WorkspaceTool, error)
+	GetWorkspaceToolByExternalId(ctx context.Context, externalId string) (*types.WorkspaceTool, error)
+	GetWorkspaceToolByName(ctx context.Context, workspaceId uint, name string) (*types.WorkspaceTool, error)
+	ListWorkspaceTools(ctx context.Context, workspaceId uint) ([]*types.WorkspaceTool, error)
+	UpdateWorkspaceToolManifest(ctx context.Context, id uint, manifest json.RawMessage) error
+	DeleteWorkspaceTool(ctx context.Context, id uint) error
+	DeleteWorkspaceToolByName(ctx context.Context, workspaceId uint, name string) error
+}
+
 // BackendRepository is the main Postgres repository for persistent data.
 // For filesystem queries and metadata, use FilesystemStore instead.
 type BackendRepository interface {
@@ -89,6 +102,9 @@ type BackendRepository interface {
 
 	// Integrations
 	IntegrationRepository
+
+	// Workspace Tools
+	WorkspaceToolRepository
 
 	// Tasks
 	CreateTask(ctx context.Context, task *types.Task) error

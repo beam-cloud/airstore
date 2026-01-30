@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -30,6 +31,7 @@ type FilesystemGroup struct {
 	sourceService  *services.SourceService
 	sourceRegistry *sources.Registry
 	toolRegistry   *tools.Registry
+	toolResolver   *tools.WorkspaceToolResolver
 }
 
 // NewFilesystemGroup creates a new filesystem API group
@@ -41,6 +43,12 @@ func NewFilesystemGroup(
 	sourceRegistry *sources.Registry,
 	toolRegistry *tools.Registry,
 ) *FilesystemGroup {
+	// Create resolver for workspace-aware tool resolution
+	var resolver *tools.WorkspaceToolResolver
+	if backend != nil {
+		resolver = tools.NewWorkspaceToolResolver(toolRegistry, backend)
+	}
+
 	g := &FilesystemGroup{
 		routerGroup:    routerGroup,
 		backend:        backend,
@@ -48,6 +56,7 @@ func NewFilesystemGroup(
 		sourceService:  sourceService,
 		sourceRegistry: sourceRegistry,
 		toolRegistry:   toolRegistry,
+		toolResolver:   resolver,
 	}
 	g.registerRoutes()
 	return g
@@ -63,6 +72,11 @@ func (g *FilesystemGroup) registerRoutes() {
 	g.routerGroup.GET("/tools", g.ListToolSettings)
 	g.routerGroup.GET("/tools/:tool_name", g.GetToolSetting)
 	g.routerGroup.PUT("/tools/:tool_name", g.UpdateToolSetting)
+
+	// Workspace tool provider CRUD endpoints
+	g.routerGroup.GET("/tools/providers", g.ListToolProviders)
+	g.routerGroup.POST("/tools/providers", g.CreateToolProvider)
+	g.routerGroup.DELETE("/tools/providers/:name", g.DeleteToolProvider)
 
 	// Smart query endpoints
 	g.routerGroup.POST("/queries", g.CreateQuery)
@@ -626,6 +640,73 @@ func (g *FilesystemGroup) listTools(c echo.Context, ctx context.Context, showHid
 }
 
 func (g *FilesystemGroup) statTools(c echo.Context, ctx context.Context, fullPath, relPath string, showHidden bool) error {
+	// Root /tools
+	if relPath == "" {
+		// Count tools using resolver if available
+		toolCount := 0
+		if g.toolResolver != nil {
+			resolved, err := g.toolResolver.List(ctx)
+			if err == nil {
+				for _, t := range resolved {
+					if showHidden || t.Enabled {
+						toolCount++
+					}
+				}
+			}
+		} else if g.toolRegistry != nil {
+			toolCount = len(g.toolRegistry.List())
+		}
+		return SuccessResponse(c, types.NewRootFolder(types.DirNameTools, types.PathTools).
+			WithMetadata("description", "Available tools").
+			WithChildCount(toolCount))
+	}
+
+	// Specific tool - use resolver if available
+	toolName := relPath
+
+	if g.toolResolver != nil {
+		// Get all tools to find the one we need (includes enabled status)
+		resolved, err := g.toolResolver.List(ctx)
+		if err != nil {
+			log.Warn().Err(err).Str("tool", toolName).Msg("resolver list failed")
+			return ErrorResponse(c, http.StatusInternalServerError, "failed to list tools")
+		}
+
+		for _, t := range resolved {
+			if t.Name == toolName {
+				// Check if tool is disabled - return not found unless showHidden is true
+				if !t.Enabled && !showHidden {
+					return ErrorResponse(c, http.StatusNotFound, "tool not found")
+				}
+
+				vf := types.NewVirtualFile(
+					"tool-"+toolName,
+					toolName,
+					fullPath,
+					types.VFTypeTool,
+				).WithFolder(false).WithReadOnly(true).
+					WithMetadata("description", t.Help).
+					WithMetadata("name", t.Name).
+					WithMetadata("enabled", t.Enabled).
+					WithMetadata("hidden", !t.Enabled).
+					WithMetadata("origin", string(t.Origin))
+
+				if t.Origin == types.ToolOriginWorkspace && t.ExternalId != "" {
+					vf = vf.WithMetadata("workspace_tool_external_id", t.ExternalId)
+				}
+
+				return SuccessResponse(c, vf)
+			}
+		}
+		return ErrorResponse(c, http.StatusNotFound, "tool not found")
+	}
+
+	// Fallback to registry
+	provider := g.toolRegistry.Get(toolName)
+	if provider == nil {
+		return ErrorResponse(c, http.StatusNotFound, "tool not found")
+	}
+
 	// Get workspace ID from context for filtering
 	var workspaceId uint
 	if rc := auth.FromContext(ctx); rc != nil {
@@ -634,35 +715,13 @@ func (g *FilesystemGroup) statTools(c echo.Context, ctx context.Context, fullPat
 
 	// Get tool settings for this workspace
 	var settings *types.WorkspaceToolSettings
-	if workspaceId > 0 {
+	if workspaceId > 0 && g.backend != nil {
 		var err error
 		settings, err = g.backend.GetWorkspaceToolSettings(ctx, workspaceId)
 		if err != nil {
 			log.Warn().Err(err).Uint("workspace_id", workspaceId).Msg("failed to get tool settings")
 			settings = nil
 		}
-	}
-
-	// Root /tools
-	if relPath == "" {
-		// Count tools (all if showHidden, only enabled otherwise)
-		toolCount := 0
-		for _, name := range g.toolRegistry.List() {
-			isDisabled := settings != nil && settings.IsDisabled(name)
-			if showHidden || !isDisabled {
-				toolCount++
-			}
-		}
-		return SuccessResponse(c, types.NewRootFolder(types.DirNameTools, types.PathTools).
-			WithMetadata("description", "Available tools").
-			WithChildCount(toolCount))
-	}
-
-	// Specific tool
-	toolName := relPath
-	provider := g.toolRegistry.Get(toolName)
-	if provider == nil {
-		return ErrorResponse(c, http.StatusNotFound, "tool not found")
 	}
 
 	isDisabled := settings != nil && settings.IsDisabled(toolName)
@@ -681,12 +740,51 @@ func (g *FilesystemGroup) statTools(c echo.Context, ctx context.Context, fullPat
 		WithMetadata("description", provider.Help()).
 		WithMetadata("name", provider.Name()).
 		WithMetadata("enabled", !isDisabled).
-		WithMetadata("hidden", isDisabled)
+		WithMetadata("hidden", isDisabled).
+		WithMetadata("origin", string(types.ToolOriginGlobal))
 
 	return SuccessResponse(c, vf)
 }
 
 func (g *FilesystemGroup) buildToolEntries(ctx context.Context, showHidden bool) []types.VirtualFile {
+	// Use resolver if available (includes workspace tools)
+	if g.toolResolver != nil {
+		resolved, err := g.toolResolver.List(ctx)
+		if err != nil {
+			log.Warn().Err(err).Msg("resolver list failed, falling back to registry")
+		} else {
+			entries := make([]types.VirtualFile, 0, len(resolved))
+			for _, t := range resolved {
+				// Skip disabled tools unless showHidden is true
+				if !t.Enabled && !showHidden {
+					continue
+				}
+
+				entryPath := types.ToolsPath(t.Name)
+				vf := types.NewVirtualFile(
+					"tool-"+t.Name,
+					t.Name,
+					entryPath,
+					types.VFTypeTool,
+				).WithFolder(false).WithReadOnly(true).
+					WithMetadata("description", t.Help).
+					WithMetadata("name", t.Name).
+					WithMetadata("enabled", t.Enabled).
+					WithMetadata(types.MetaKeyHidden, !t.Enabled).
+					WithMetadata("origin", string(t.Origin))
+
+				// Add external_id for workspace tools (needed for delete operations)
+				if t.Origin == types.ToolOriginWorkspace && t.ExternalId != "" {
+					vf = vf.WithMetadata("workspace_tool_external_id", t.ExternalId)
+				}
+
+				entries = append(entries, *vf)
+			}
+			return entries
+		}
+	}
+
+	// Fallback to global registry only
 	if g.toolRegistry == nil {
 		return []types.VirtualFile{}
 	}
@@ -699,7 +797,7 @@ func (g *FilesystemGroup) buildToolEntries(ctx context.Context, showHidden bool)
 
 	// Get tool settings for this workspace
 	var settings *types.WorkspaceToolSettings
-	if workspaceId > 0 {
+	if workspaceId > 0 && g.backend != nil {
 		var err error
 		settings, err = g.backend.GetWorkspaceToolSettings(ctx, workspaceId)
 		if err != nil {
@@ -734,7 +832,8 @@ func (g *FilesystemGroup) buildToolEntries(ctx context.Context, showHidden bool)
 			WithMetadata("description", provider.Help()).
 			WithMetadata("name", provider.Name()).
 			WithMetadata("enabled", !isDisabled).
-			WithMetadata(types.MetaKeyHidden, isDisabled)
+			WithMetadata(types.MetaKeyHidden, isDisabled).
+			WithMetadata("origin", string(types.ToolOriginGlobal))
 
 		entries = append(entries, *vf)
 	}
@@ -751,6 +850,8 @@ type ToolSettingResponse struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	Enabled     bool   `json:"enabled"`
+	Origin      string `json:"origin,omitempty"`
+	ExternalId  string `json:"external_id,omitempty"`
 }
 
 // UpdateToolSettingRequest represents a request to update tool settings
@@ -769,7 +870,31 @@ func (g *FilesystemGroup) ListToolSettings(c echo.Context) error {
 		return ErrorResponse(c, http.StatusUnauthorized, "unauthorized")
 	}
 
-	// Get tool settings for this workspace
+	// Use resolver if available (includes workspace tools)
+	if g.toolResolver != nil {
+		resolved, err := g.toolResolver.List(ctx)
+		if err != nil {
+			log.Error().Err(err).Msg("failed to list tools via resolver")
+			return ErrorResponse(c, http.StatusInternalServerError, "failed to list tools")
+		}
+
+		toolSettings := make([]ToolSettingResponse, 0, len(resolved))
+		for _, t := range resolved {
+			toolSettings = append(toolSettings, ToolSettingResponse{
+				Name:        t.Name,
+				Description: t.Help,
+				Enabled:     t.Enabled,
+				Origin:      string(t.Origin),
+				ExternalId:  t.ExternalId,
+			})
+		}
+
+		return SuccessResponse(c, map[string]interface{}{
+			"tools": toolSettings,
+		})
+	}
+
+	// Fallback to registry only
 	settings, err := g.backend.GetWorkspaceToolSettings(ctx, rc.WorkspaceId)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to get tool settings")
@@ -778,7 +903,7 @@ func (g *FilesystemGroup) ListToolSettings(c echo.Context) error {
 
 	// Build response with all tools and their state
 	names := g.toolRegistry.List()
-	tools := make([]ToolSettingResponse, 0, len(names))
+	toolSettings := make([]ToolSettingResponse, 0, len(names))
 
 	for _, name := range names {
 		provider := g.toolRegistry.Get(name)
@@ -786,15 +911,16 @@ func (g *FilesystemGroup) ListToolSettings(c echo.Context) error {
 			continue
 		}
 
-		tools = append(tools, ToolSettingResponse{
+		toolSettings = append(toolSettings, ToolSettingResponse{
 			Name:        name,
 			Description: provider.Help(),
 			Enabled:     settings.IsEnabled(name),
+			Origin:      string(types.ToolOriginGlobal),
 		})
 	}
 
 	return SuccessResponse(c, map[string]interface{}{
-		"tools": tools,
+		"tools": toolSettings,
 	})
 }
 
@@ -810,7 +936,29 @@ func (g *FilesystemGroup) GetToolSetting(c echo.Context) error {
 		return ErrorResponse(c, http.StatusUnauthorized, "unauthorized")
 	}
 
-	// Check if tool exists
+	// Use resolver if available (includes workspace tools)
+	if g.toolResolver != nil {
+		resolved, err := g.toolResolver.List(ctx)
+		if err != nil {
+			log.Error().Err(err).Msg("failed to list tools via resolver")
+			return ErrorResponse(c, http.StatusInternalServerError, "failed to list tools")
+		}
+
+		for _, t := range resolved {
+			if t.Name == toolName {
+				return SuccessResponse(c, ToolSettingResponse{
+					Name:        t.Name,
+					Description: t.Help,
+					Enabled:     t.Enabled,
+					Origin:      string(t.Origin),
+					ExternalId:  t.ExternalId,
+				})
+			}
+		}
+		return ErrorResponse(c, http.StatusNotFound, "tool not found")
+	}
+
+	// Fallback: check if tool exists in registry
 	provider := g.toolRegistry.Get(toolName)
 	if provider == nil {
 		return ErrorResponse(c, http.StatusNotFound, "tool not found")
@@ -833,6 +981,7 @@ func (g *FilesystemGroup) GetToolSetting(c echo.Context) error {
 		Name:        toolName,
 		Description: provider.Help(),
 		Enabled:     enabled,
+		Origin:      string(types.ToolOriginGlobal),
 	})
 }
 
@@ -848,9 +997,36 @@ func (g *FilesystemGroup) UpdateToolSetting(c echo.Context) error {
 		return ErrorResponse(c, http.StatusUnauthorized, "unauthorized")
 	}
 
-	// Check if tool exists
-	provider := g.toolRegistry.Get(toolName)
-	if provider == nil {
+	// Check if tool exists using resolver or registry
+	var toolExists bool
+	var toolHelp string
+	var toolOrigin string
+
+	if g.toolResolver != nil {
+		if g.toolResolver.Has(ctx, toolName) {
+			toolExists = true
+			// Get help text
+			if g.toolResolver.IsGlobal(toolName) {
+				toolOrigin = string(types.ToolOriginGlobal)
+				if p := g.toolRegistry.Get(toolName); p != nil {
+					toolHelp = p.Help()
+				}
+			} else {
+				toolOrigin = string(types.ToolOriginWorkspace)
+				// For workspace tools, help will be minimal
+				toolHelp = "Workspace tool: " + toolName
+			}
+		}
+	} else {
+		provider := g.toolRegistry.Get(toolName)
+		if provider != nil {
+			toolExists = true
+			toolHelp = provider.Help()
+			toolOrigin = string(types.ToolOriginGlobal)
+		}
+	}
+
+	if !toolExists {
 		return ErrorResponse(c, http.StatusNotFound, "tool not found")
 	}
 
@@ -874,9 +1050,298 @@ func (g *FilesystemGroup) UpdateToolSetting(c echo.Context) error {
 
 	return SuccessResponse(c, ToolSettingResponse{
 		Name:        toolName,
-		Description: provider.Help(),
+		Description: toolHelp,
 		Enabled:     req.Enabled,
+		Origin:      toolOrigin,
 	})
+}
+
+// ============================================================================
+// Workspace Tool Provider API
+// ============================================================================
+
+// CreateToolProviderRequest represents a request to create a workspace tool provider
+type CreateToolProviderRequest struct {
+	Name           string                 `json:"name"`
+	ProviderType   string                 `json:"provider_type"` // "mcp"
+	MCP            *types.MCPServerConfig `json:"mcp,omitempty"`
+	SkipValidation bool                   `json:"skip_validation,omitempty"` // Skip connection validation
+}
+
+// ToolProviderResponse represents a workspace tool provider in API responses
+type ToolProviderResponse struct {
+	ExternalId   string `json:"external_id"`
+	Name         string `json:"name"`
+	ProviderType string `json:"provider_type"`
+	ToolCount    int    `json:"tool_count,omitempty"`
+	Warning      string `json:"warning,omitempty"` // Validation warning if any
+	CreatedAt    string `json:"created_at"`
+	UpdatedAt    string `json:"updated_at"`
+}
+
+// ListToolProviders returns all workspace-defined tool providers
+func (g *FilesystemGroup) ListToolProviders(c echo.Context) error {
+	ctx := c.Request().Context()
+	logRequest(c, "list_tool_providers")
+
+	// Get workspace ID from auth context
+	rc := auth.FromContext(ctx)
+	if rc == nil {
+		return ErrorResponse(c, http.StatusUnauthorized, "unauthorized")
+	}
+
+	// List workspace tools from database
+	workspaceTools, err := g.backend.ListWorkspaceTools(ctx, rc.WorkspaceId)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to list workspace tools")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to list tool providers")
+	}
+
+	providers := make([]ToolProviderResponse, 0, len(workspaceTools))
+	for _, wt := range workspaceTools {
+		providers = append(providers, ToolProviderResponse{
+			ExternalId:   wt.ExternalId,
+			Name:         wt.Name,
+			ProviderType: string(wt.ProviderType),
+			ToolCount:    getManifestToolCount(wt.Manifest),
+			CreatedAt:    wt.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+			UpdatedAt:    wt.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		})
+	}
+
+	return SuccessResponse(c, map[string]interface{}{
+		"providers": providers,
+	})
+}
+
+// CreateToolProvider creates a new workspace tool provider (MCP server)
+func (g *FilesystemGroup) CreateToolProvider(c echo.Context) error {
+	ctx := c.Request().Context()
+	logRequest(c, "create_tool_provider")
+
+	// Get workspace ID from auth context
+	rc := auth.FromContext(ctx)
+	if rc == nil {
+		return ErrorResponse(c, http.StatusUnauthorized, "unauthorized")
+	}
+
+	// Require admin or member role for creating tools
+	if !auth.CanWrite(ctx) {
+		return ErrorResponse(c, http.StatusForbidden, "insufficient permissions")
+	}
+
+	// Parse request body
+	var req CreateToolProviderRequest
+	if err := c.Bind(&req); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
+	}
+
+	// Validate request
+	if req.Name == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "name is required")
+	}
+	if strings.ContainsAny(req.Name, "/\\") {
+		return ErrorResponse(c, http.StatusBadRequest, "name cannot contain path separators")
+	}
+	if len(req.Name) > 100 {
+		return ErrorResponse(c, http.StatusBadRequest, "name is too long (max 100 characters)")
+	}
+	if req.ProviderType != "mcp" {
+		return ErrorResponse(c, http.StatusBadRequest, "provider_type must be 'mcp'")
+	}
+	if req.MCP == nil {
+		return ErrorResponse(c, http.StatusBadRequest, "mcp configuration is required")
+	}
+	if req.MCP.URL == "" && req.MCP.Command == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "mcp.url or mcp.command is required")
+	}
+
+	// Check if name conflicts with a global tool
+	if g.toolRegistry.Has(req.Name) {
+		return ErrorResponse(c, http.StatusConflict, "name conflicts with a global tool")
+	}
+
+	// Serialize config
+	configJSON, err := json.Marshal(req.MCP)
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid mcp configuration")
+	}
+
+	// Validate MCP connection and get manifest (unless skipped)
+	var manifest []byte
+	var toolCount int
+	var validationError string
+
+	if !req.SkipValidation {
+		manifest, toolCount, err = g.validateAndGetManifest(ctx, req.Name, req.MCP)
+		if err != nil {
+			log.Warn().Err(err).Str("name", req.Name).Msg("MCP validation failed")
+			validationError = err.Error()
+			// Don't fail - allow creation with warning
+		}
+	}
+
+	// Create workspace tool in database
+	var memberIdPtr *uint
+	if rc.MemberId > 0 {
+		memberIdPtr = &rc.MemberId
+	}
+
+	wt, err := g.backend.CreateWorkspaceTool(
+		ctx,
+		rc.WorkspaceId,
+		memberIdPtr,
+		req.Name,
+		types.ProviderTypeMCP,
+		configJSON,
+		manifest,
+	)
+	if err != nil {
+		if _, ok := err.(*types.ErrWorkspaceToolExists); ok {
+			return ErrorResponse(c, http.StatusConflict, "tool provider already exists")
+		}
+		log.Error().Err(err).Msg("failed to create workspace tool")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to create tool provider")
+	}
+
+	// Invalidate resolver cache for this workspace
+	if g.toolResolver != nil {
+		g.toolResolver.InvalidateWorkspace(rc.WorkspaceId)
+	}
+
+	// Audit log - tool provider creation
+	log.Info().
+		Uint("workspace_id", rc.WorkspaceId).
+		Uint("member_id", rc.MemberId).
+		Str("member_email", rc.MemberEmail).
+		Str("name", req.Name).
+		Str("provider_type", req.ProviderType).
+		Bool("is_remote", req.MCP.IsRemote()).
+		Int("tool_count", toolCount).
+		Bool("validation_skipped", req.SkipValidation).
+		Str("validation_error", validationError).
+		Msg("audit: workspace tool provider created")
+
+	resp := ToolProviderResponse{
+		ExternalId:   wt.ExternalId,
+		Name:         wt.Name,
+		ProviderType: string(wt.ProviderType),
+		ToolCount:    toolCount,
+		CreatedAt:    wt.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		UpdatedAt:    wt.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
+	}
+
+	// Add warning if validation failed
+	if validationError != "" {
+		resp.Warning = fmt.Sprintf("Connection validation failed: %s. The tool was created but may not work until the server is accessible.", validationError)
+	}
+
+	return c.JSON(http.StatusCreated, Response{
+		Success: true,
+		Data:    resp,
+	})
+}
+
+// DeleteToolProvider deletes a workspace tool provider
+func (g *FilesystemGroup) DeleteToolProvider(c echo.Context) error {
+	ctx := c.Request().Context()
+	name := c.Param("name")
+	logRequest(c, "delete_tool_provider")
+
+	// Get workspace ID from auth context
+	rc := auth.FromContext(ctx)
+	if rc == nil {
+		return ErrorResponse(c, http.StatusUnauthorized, "unauthorized")
+	}
+
+	// Require admin or member role for deleting tools
+	if !auth.CanWrite(ctx) {
+		return ErrorResponse(c, http.StatusForbidden, "insufficient permissions")
+	}
+
+	// Check if tool exists
+	_, err := g.backend.GetWorkspaceToolByName(ctx, rc.WorkspaceId, name)
+	if err != nil {
+		if _, ok := err.(*types.ErrWorkspaceToolNotFound); ok {
+			return ErrorResponse(c, http.StatusNotFound, "tool provider not found")
+		}
+		log.Error().Err(err).Msg("failed to get workspace tool")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to get tool provider")
+	}
+
+	// Invalidate resolver cache before deletion
+	if g.toolResolver != nil {
+		g.toolResolver.Invalidate(rc.WorkspaceId, name)
+	}
+
+	// Delete from database
+	if err := g.backend.DeleteWorkspaceToolByName(ctx, rc.WorkspaceId, name); err != nil {
+		if _, ok := err.(*types.ErrWorkspaceToolNotFound); ok {
+			return ErrorResponse(c, http.StatusNotFound, "tool provider not found")
+		}
+		log.Error().Err(err).Msg("failed to delete workspace tool")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to delete tool provider")
+	}
+
+	// Audit log - tool provider deletion
+	log.Info().
+		Uint("workspace_id", rc.WorkspaceId).
+		Uint("member_id", rc.MemberId).
+		Str("member_email", rc.MemberEmail).
+		Str("name", name).
+		Msg("audit: workspace tool provider deleted")
+
+	return SuccessResponse(c, nil)
+}
+
+// validateAndGetManifest validates an MCP server by connecting and listing tools
+func (g *FilesystemGroup) validateAndGetManifest(ctx context.Context, name string, cfg *types.MCPServerConfig) ([]byte, int, error) {
+	// Create a temporary client to validate
+	var client tools.MCPClient
+	if cfg.IsRemote() {
+		client = tools.NewMCPRemoteClient(name, *cfg)
+	} else {
+		client = tools.NewMCPStdioClient(name, *cfg)
+	}
+
+	// Start with timeout
+	startCtx, cancel := context.WithTimeout(ctx, tools.MCPInitTimeout)
+	defer cancel()
+
+	if err := client.Start(startCtx); err != nil {
+		return nil, 0, fmt.Errorf("failed to start: %w", err)
+	}
+	defer client.Close()
+
+	// List tools
+	toolList, err := client.ListTools(startCtx)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to list tools: %w", err)
+	}
+
+	// Serialize manifest
+	manifest, err := json.Marshal(map[string]interface{}{
+		"tools": toolList,
+	})
+	if err != nil {
+		return nil, len(toolList), nil
+	}
+
+	return manifest, len(toolList), nil
+}
+
+// getManifestToolCount extracts the tool count from a manifest
+func getManifestToolCount(manifest []byte) int {
+	if len(manifest) == 0 {
+		return 0
+	}
+	var m struct {
+		Tools []json.RawMessage `json:"tools"`
+	}
+	if err := json.Unmarshal(manifest, &m); err != nil {
+		return 0
+	}
+	return len(m.Tools)
 }
 
 // CreateQueryRequest represents a request to create a smart query

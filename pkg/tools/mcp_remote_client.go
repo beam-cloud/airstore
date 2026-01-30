@@ -15,21 +15,27 @@ import (
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/types"
-	"github.com/rs/zerolog/log"
 )
 
 // MCPRemoteClient manages communication with a remote MCP server via HTTP/SSE.
 // It implements the JSON-RPC 2.0 protocol used by MCP over HTTP transport.
+// Supports both SSE transport and Streamable HTTP transport.
 type MCPRemoteClient struct {
 	name       string
 	config     types.MCPServerConfig
 	httpClient *http.Client
 
-	// SSE connection
+	// Transport mode
+	useHTTPTransport bool // true = Streamable HTTP, false = SSE
+
+	// Session ID for Streamable HTTP transport
+	sessionId string
+
+	// SSE connection (only used for SSE transport)
 	sseResp   *http.Response
 	sseReader *bufio.Reader
 
-	// Message endpoint (discovered from SSE)
+	// Message endpoint (discovered from SSE, or same as URL for HTTP)
 	messageEndpoint string
 
 	reqID    atomic.Int64
@@ -62,17 +68,39 @@ func (c *MCPRemoteClient) Name() string {
 	return c.name
 }
 
-// Start connects to the remote MCP server via SSE and initializes the connection.
+// Start connects to the remote MCP server and initializes the connection.
+// Supports both SSE transport (default) and Streamable HTTP transport.
 func (c *MCPRemoteClient) Start(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	log.Debug().
-		Str("server", c.name).
-		Str("url", c.config.URL).
-		Msg("connecting to remote MCP server")
+	transport := c.config.GetTransport()
+	c.useHTTPTransport = transport == types.MCPTransportHTTP
 
-	// Connect to SSE endpoint
+	// For HTTP transport, use the URL directly as the message endpoint
+	if c.useHTTPTransport {
+		c.messageEndpoint = c.config.URL
+	} else {
+		// SSE transport: connect to SSE endpoint
+		if err := c.connectSSE(ctx); err != nil {
+			return err
+		}
+	}
+
+	// Initialize the connection (unlock for call)
+	c.mu.Unlock()
+	err := c.initialize(ctx)
+	c.mu.Lock()
+	if err != nil {
+		c.closeInternal()
+		return fmt.Errorf("initialize: %w", err)
+	}
+
+	return nil
+}
+
+// connectSSE establishes the SSE connection (for SSE transport)
+func (c *MCPRemoteClient) connectSSE(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, "GET", c.config.URL, nil)
 	if err != nil {
 		return fmt.Errorf("create SSE request: %w", err)
@@ -101,10 +129,6 @@ func (c *MCPRemoteClient) Start(ctx context.Context) error {
 	c.sseResp = resp
 	c.sseReader = bufio.NewReader(resp.Body)
 
-	log.Debug().
-		Str("server", c.name).
-		Msg("SSE connection established")
-
 	// Read the endpoint event to get message URL
 	if err := c.readEndpointEvent(ctx); err != nil {
 		c.sseResp.Body.Close()
@@ -114,17 +138,6 @@ func (c *MCPRemoteClient) Start(ctx context.Context) error {
 	// Start SSE reader goroutine
 	go c.readSSEEvents()
 
-	// Initialize the connection (unlock for call)
-	log.Debug().Str("server", c.name).Msg("sending MCP initialize request")
-	c.mu.Unlock()
-	err = c.initialize(ctx)
-	c.mu.Lock()
-	if err != nil {
-		c.closeInternal()
-		return fmt.Errorf("initialize: %w", err)
-	}
-
-	log.Debug().Str("server", c.name).Msg("remote MCP server initialized successfully")
 	return nil
 }
 
@@ -138,14 +151,12 @@ func (c *MCPRemoteClient) addAuthHeaders(req *http.Request) {
 	if c.config.Auth.Token != "" {
 		token := os.ExpandEnv(c.config.Auth.Token)
 		req.Header.Set("Authorization", "Bearer "+token)
-		log.Debug().Str("server", c.name).Msg("added bearer token auth")
 	}
 
 	// Custom headers
 	for name, value := range c.config.Auth.Headers {
 		expanded := os.ExpandEnv(value)
 		req.Header.Set(name, expanded)
-		log.Debug().Str("server", c.name).Str("header", name).Msg("added custom auth header")
 	}
 }
 
@@ -181,10 +192,6 @@ func (c *MCPRemoteClient) readEndpointEvent(ctx context.Context) error {
 				c.messageEndpoint = baseURL + c.messageEndpoint
 			}
 
-			log.Debug().
-				Str("server", c.name).
-				Str("endpoint", c.messageEndpoint).
-				Msg("received message endpoint")
 			return nil
 		}
 	}
@@ -234,12 +241,6 @@ func (c *MCPRemoteClient) readSSEEvents() {
 
 		event, data, err := c.readSSEEvent()
 		if err != nil {
-			if err != io.EOF {
-				log.Debug().
-					Str("server", c.name).
-					Err(err).
-					Msg("SSE read error")
-			}
 			return
 		}
 
@@ -247,11 +248,6 @@ func (c *MCPRemoteClient) readSSEEvents() {
 		if event == "message" {
 			var resp jsonRPCResponse
 			if err := json.Unmarshal([]byte(data), &resp); err != nil {
-				log.Debug().
-					Str("server", c.name).
-					Err(err).
-					Str("data", data).
-					Msg("failed to parse SSE message")
 				continue
 			}
 
@@ -350,7 +346,9 @@ func (c *MCPRemoteClient) ServerInfo() *MCPServerInfo {
 	return c.serverInfo
 }
 
-// call sends a JSON-RPC request via HTTP POST and waits for the response via SSE
+// call sends a JSON-RPC request via HTTP POST and waits for the response.
+// For SSE transport, the response comes via SSE stream.
+// For HTTP transport, the response comes directly in the HTTP response body.
 func (c *MCPRemoteClient) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	c.closedMu.RLock()
 	if c.closed {
@@ -368,6 +366,127 @@ func (c *MCPRemoteClient) call(ctx context.Context, method string, params any) (
 		Params:  params,
 	}
 
+	// Send request via HTTP POST
+	data, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.messageEndpoint, bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	c.addAuthHeaders(httpReq)
+
+	// For HTTP transport, get response directly from HTTP response body
+	if c.useHTTPTransport {
+		// Streamable HTTP requires accepting both JSON and SSE
+		httpReq.Header.Set("Accept", "application/json, text/event-stream")
+
+		// Include session ID if we have one (required after initialization)
+		if c.sessionId != "" {
+			httpReq.Header.Set("Mcp-Session-Id", c.sessionId)
+		}
+
+		return c.callHTTP(ctx, httpReq, method, id)
+	}
+
+	// For SSE transport, wait for response via SSE stream
+	return c.callSSE(ctx, httpReq, method, id)
+}
+
+// callHTTP sends request and reads response from HTTP body (Streamable HTTP transport)
+// The server may respond with application/json or text/event-stream depending on the request
+func (c *MCPRemoteClient) callHTTP(ctx context.Context, httpReq *http.Request, method string, id int64) (json.RawMessage, error) {
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("request failed: %s - %s", resp.Status, string(body))
+	}
+
+	// Capture session ID from response headers (set during initialization)
+	if sessionId := resp.Header.Get("Mcp-Session-Id"); sessionId != "" {
+		c.sessionId = sessionId
+	}
+
+	// Handle SSE response (streaming)
+	contentType := resp.Header.Get("Content-Type")
+	if strings.HasPrefix(contentType, "text/event-stream") {
+		return c.readSSEResponse(resp, method, id)
+	}
+
+	// Handle JSON response (simple)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	var rpcResp jsonRPCResponse
+	if err := json.Unmarshal(body, &rpcResp); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+
+	if rpcResp.Error != nil {
+		return nil, fmt.Errorf("RPC error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
+	}
+
+	return rpcResp.Result, nil
+}
+
+// readSSEResponse reads a JSON-RPC response from an SSE stream (for Streamable HTTP)
+func (c *MCPRemoteClient) readSSEResponse(resp *http.Response, method string, id int64) (json.RawMessage, error) {
+	reader := bufio.NewReader(resp.Body)
+
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				return nil, fmt.Errorf("unexpected end of SSE stream")
+			}
+			return nil, fmt.Errorf("read SSE: %w", err)
+		}
+
+		line = strings.TrimRight(line, "\r\n")
+
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, ":") {
+			continue
+		}
+
+		// Parse data lines
+		if strings.HasPrefix(line, "data:") {
+			data := strings.TrimPrefix(line, "data:")
+			data = strings.TrimSpace(data)
+
+			if data == "" {
+				continue
+			}
+
+			var rpcResp jsonRPCResponse
+			if err := json.Unmarshal([]byte(data), &rpcResp); err != nil {
+				continue
+			}
+
+			// Check if this is the response we're waiting for
+			if rpcResp.ID == id {
+				if rpcResp.Error != nil {
+					return nil, fmt.Errorf("RPC error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
+				}
+				return rpcResp.Result, nil
+			}
+		}
+	}
+}
+
+// callSSE sends request and waits for response via SSE stream
+func (c *MCPRemoteClient) callSSE(ctx context.Context, httpReq *http.Request, method string, id int64) (json.RawMessage, error) {
 	respChan := make(chan *jsonRPCResponse, 1)
 
 	c.mu.Lock()
@@ -379,27 +498,6 @@ func (c *MCPRemoteClient) call(ctx context.Context, method string, params any) (
 		delete(c.pending, id)
 		c.mu.Unlock()
 	}()
-
-	// Send request via HTTP POST
-	data, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
-	}
-
-	log.Debug().
-		Str("server", c.name).
-		Str("method", method).
-		Int64("id", id).
-		Str("endpoint", c.messageEndpoint).
-		Msg("sending MCP HTTP request")
-
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.messageEndpoint, bytes.NewReader(data))
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	c.addAuthHeaders(httpReq)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -414,30 +512,14 @@ func (c *MCPRemoteClient) call(ctx context.Context, method string, params any) (
 	// Wait for response via SSE
 	select {
 	case <-ctx.Done():
-		log.Debug().
-			Str("server", c.name).
-			Str("method", method).
-			Int64("id", id).
-			Msg("MCP request timed out waiting for response")
 		return nil, ctx.Err()
 	case rpcResp := <-respChan:
 		if rpcResp == nil {
 			return nil, fmt.Errorf("connection closed")
 		}
 		if rpcResp.Error != nil {
-			log.Debug().
-				Str("server", c.name).
-				Str("method", method).
-				Int("code", rpcResp.Error.Code).
-				Str("error", rpcResp.Error.Message).
-				Msg("MCP request returned error")
 			return nil, fmt.Errorf("RPC error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
 		}
-		log.Debug().
-			Str("server", c.name).
-			Str("method", method).
-			Int64("id", id).
-			Msg("MCP request completed")
 		return rpcResp.Result, nil
 	}
 }

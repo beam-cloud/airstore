@@ -142,7 +142,7 @@ Examples:
 		configNode := vnode.NewConfigVNode(effectiveGatewayAddr, authToken)
 		fs.RegisterVNode(configNode)
 
-		toolsNode := vnode.NewToolsVNode(effectiveGatewayAddr, shim)
+		toolsNode := vnode.NewToolsVNode(effectiveGatewayAddr, authToken, shim)
 		fs.RegisterVNode(toolsNode)
 
 		// Create gRPC connection for sources vnode

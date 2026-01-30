@@ -1,6 +1,7 @@
 package types
 
 import (
+	"strings"
 	"time"
 )
 
@@ -179,13 +180,30 @@ type MCPServerConfig struct {
 	// Remote (HTTP/SSE) server - connect to URL
 	URL string `key:"url" json:"url,omitempty"`
 
+	// Transport specifies the remote transport type: "sse" (default) or "http" (Streamable HTTP)
+	Transport string `key:"transport" json:"transport,omitempty"`
+
 	// Auth for both local (env vars) and remote (HTTP headers)
 	Auth *MCPAuthConfig `key:"auth" json:"auth,omitempty"`
 }
 
+// Transport type constants
+const (
+	MCPTransportSSE  = "sse"  // Server-Sent Events (default)
+	MCPTransportHTTP = "http" // Streamable HTTP
+)
+
 // IsRemote returns true if this is a remote HTTP/SSE server (URL is set)
 func (c MCPServerConfig) IsRemote() bool {
 	return c.URL != ""
+}
+
+// GetTransport returns the transport type, defaulting to SSE
+func (c MCPServerConfig) GetTransport() string {
+	if c.Transport == "" {
+		return MCPTransportSSE
+	}
+	return c.Transport
 }
 
 // MCPAuthConfig configures authentication for an MCP server.
@@ -204,6 +222,58 @@ type MCPAuthConfig struct {
 	// For stdio: passed as MCP_AUTH_HEADER_<NAME> env vars
 	// For remote: passed directly as HTTP headers
 	Headers map[string]string `key:"headers" json:"headers,omitempty"`
+}
+
+// Redact returns a copy of MCPAuthConfig with sensitive values redacted
+func (c *MCPAuthConfig) Redact() *MCPAuthConfig {
+	if c == nil {
+		return nil
+	}
+	redacted := &MCPAuthConfig{
+		TokenEnv: c.TokenEnv,
+	}
+	if c.Token != "" {
+		redacted.Token = "[REDACTED]"
+	}
+	if len(c.Headers) > 0 {
+		redacted.Headers = make(map[string]string, len(c.Headers))
+		for k := range c.Headers {
+			redacted.Headers[k] = "[REDACTED]"
+		}
+	}
+	return redacted
+}
+
+// RedactConfig returns a copy of MCPServerConfig with auth values redacted
+func (c *MCPServerConfig) RedactConfig() *MCPServerConfig {
+	if c == nil {
+		return nil
+	}
+	redacted := &MCPServerConfig{
+		Command:    c.Command,
+		Args:       c.Args,
+		WorkingDir: c.WorkingDir,
+		URL:        c.URL,
+	}
+	// Redact env vars that might contain secrets
+	if len(c.Env) > 0 {
+		redacted.Env = make(map[string]string, len(c.Env))
+		for k, v := range c.Env {
+			// Redact any env var that looks like a secret
+			lower := strings.ToLower(k)
+			if strings.Contains(lower, "key") ||
+				strings.Contains(lower, "secret") ||
+				strings.Contains(lower, "token") ||
+				strings.Contains(lower, "password") ||
+				strings.Contains(lower, "api") {
+				redacted.Env[k] = "[REDACTED]"
+			} else {
+				redacted.Env[k] = v
+			}
+		}
+	}
+	redacted.Auth = c.Auth.Redact()
+	return redacted
 }
 
 // ----------------------------------------------------------------------------

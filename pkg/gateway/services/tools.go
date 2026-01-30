@@ -18,6 +18,7 @@ import (
 type ToolService struct {
 	pb.UnimplementedToolServiceServer
 	registry    *tools.Registry
+	resolver    *tools.WorkspaceToolResolver
 	backend     repository.BackendRepository
 	googleOAuth *oauth.GoogleClient
 }
@@ -27,14 +28,36 @@ func NewToolService(registry *tools.Registry) *ToolService {
 }
 
 func NewToolServiceWithBackend(registry *tools.Registry, backend repository.BackendRepository) *ToolService {
-	return &ToolService{registry: registry, backend: backend}
+	resolver := tools.NewWorkspaceToolResolver(registry, backend)
+	return &ToolService{registry: registry, resolver: resolver, backend: backend}
 }
 
 func NewToolServiceWithOAuth(registry *tools.Registry, backend repository.BackendRepository, googleOAuth *oauth.GoogleClient) *ToolService {
-	return &ToolService{registry: registry, backend: backend, googleOAuth: googleOAuth}
+	resolver := tools.NewWorkspaceToolResolver(registry, backend)
+	return &ToolService{registry: registry, resolver: resolver, backend: backend, googleOAuth: googleOAuth}
+}
+
+// Resolver returns the workspace tool resolver for use by other components
+func (s *ToolService) Resolver() *tools.WorkspaceToolResolver {
+	return s.resolver
 }
 
 func (s *ToolService) ListTools(ctx context.Context, req *pb.ListToolsRequest) (*pb.ListToolsResponse, error) {
+	// Use resolver if available (includes workspace tools and respects disabled settings)
+	if s.resolver != nil {
+		resolved, err := s.resolver.ListEnabled(ctx)
+		if err != nil {
+			log.Warn().Err(err).Msg("resolver list failed, falling back to registry")
+		} else {
+			infos := make([]*pb.ToolInfo, 0, len(resolved))
+			for _, t := range resolved {
+				infos = append(infos, &pb.ToolInfo{Name: t.Name, Help: t.Help})
+			}
+			return &pb.ListToolsResponse{Ok: true, Tools: infos}, nil
+		}
+	}
+
+	// Fallback to global registry only
 	names := s.registry.List()
 	infos := make([]*pb.ToolInfo, 0, len(names))
 	for _, name := range names {
@@ -46,6 +69,20 @@ func (s *ToolService) ListTools(ctx context.Context, req *pb.ListToolsRequest) (
 }
 
 func (s *ToolService) GetToolHelp(ctx context.Context, req *pb.GetToolHelpRequest) (*pb.GetToolHelpResponse, error) {
+	// Use resolver if available
+	if s.resolver != nil {
+		p, err := s.resolver.Get(ctx, req.Name)
+		if err != nil {
+			log.Warn().Err(err).Str("tool", req.Name).Msg("resolver get failed")
+			return &pb.GetToolHelpResponse{Ok: false, Error: err.Error()}, nil
+		}
+		if p == nil {
+			return &pb.GetToolHelpResponse{Ok: false, Error: "tool not found or disabled"}, nil
+		}
+		return &pb.GetToolHelpResponse{Ok: true, Help: p.Help()}, nil
+	}
+
+	// Fallback to registry
 	p := s.registry.Get(req.Name)
 	if p == nil {
 		return &pb.GetToolHelpResponse{Ok: false, Error: "tool not found"}, nil
@@ -56,10 +93,26 @@ func (s *ToolService) GetToolHelp(ctx context.Context, req *pb.GetToolHelpReques
 func (s *ToolService) ExecuteTool(req *pb.ExecuteToolRequest, stream pb.ToolService_ExecuteToolServer) error {
 	ctx := stream.Context()
 
-	p := s.registry.Get(req.Name)
-	if p == nil {
-		log.Warn().Str("tool", req.Name).Msg("tool not found")
-		return stream.Send(&pb.ExecuteToolResponse{Done: true, ExitCode: 1, Error: "tool not found"})
+	// Use resolver if available (respects disabled settings and includes workspace tools)
+	var p tools.ToolProvider
+	if s.resolver != nil {
+		var err error
+		p, err = s.resolver.Get(ctx, req.Name)
+		if err != nil {
+			log.Warn().Err(err).Str("tool", req.Name).Msg("resolver get failed")
+			return stream.Send(&pb.ExecuteToolResponse{Done: true, ExitCode: 1, Error: err.Error()})
+		}
+		if p == nil {
+			log.Warn().Str("tool", req.Name).Msg("tool not found or disabled")
+			return stream.Send(&pb.ExecuteToolResponse{Done: true, ExitCode: 1, Error: "tool not found or disabled"})
+		}
+	} else {
+		// Fallback to registry
+		p = s.registry.Get(req.Name)
+		if p == nil {
+			log.Warn().Str("tool", req.Name).Msg("tool not found")
+			return stream.Send(&pb.ExecuteToolResponse{Done: true, ExitCode: 1, Error: "tool not found"})
+		}
 	}
 
 	execCtx := s.buildExecContext(ctx, req.Name)
