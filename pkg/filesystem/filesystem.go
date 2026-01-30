@@ -3,6 +3,7 @@ package filesystem
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -28,6 +29,7 @@ type Filesystem struct {
 	vnodes   *vnode.Registry
 	rootID   string
 	verbose  bool
+	trace    *FuseTrace
 
 	host      *fuse.FileSystemHost
 	mounted   bool
@@ -78,6 +80,7 @@ func NewFilesystem(cfg Config) (*Filesystem, error) {
 		metadata: metadata,
 		vnodes:   vnode.NewRegistry(),
 		rootID:   GenerateDirectoryID("", "/", 0),
+		trace:    newFuseTraceFromEnv(),
 	}
 
 	if err := fs.initRoot(); err != nil {
@@ -141,7 +144,17 @@ func (f *Filesystem) Mount() error {
 	f.mounted = true
 	f.mu.Unlock()
 
+	stopTrace := make(chan struct{})
+	if f.trace != nil {
+		log.Info().Str("mount", f.config.MountPoint).Msg("fuse trace enabled (AIRSTORE_FUSE_TRACE=1)")
+		go f.trace.reportLoop(stopTrace, f.config.MountPoint)
+	}
+
 	ok := f.host.Mount(f.config.MountPoint, opts)
+
+	if f.trace != nil {
+		close(stopTrace)
+	}
 
 	f.mu.Lock()
 	f.mounted = false
@@ -215,6 +228,13 @@ func (f *Filesystem) Statfs() (*StatInfo, error) {
 func (f *Filesystem) Getattr(path string) (*FileInfo, error) {
 	if path == "/" {
 		return f.rootInfo(), nil
+	}
+
+	// Fast-reject macOS system files (AppleDouble, .DS_Store, etc.)
+	// These are probed by Finder but don't exist - avoid slow RPC lookups.
+	name := filepath.Base(path)
+	if strings.HasPrefix(name, "._") || name == ".DS_Store" || name == ".Spotlight-V100" || name == ".Trashes" {
+		return nil, ErrNotFound
 	}
 
 	// Check for virtual node match

@@ -40,11 +40,18 @@ func (a *adapter) Statfs(path string, stat *fuse.Statfs_t) int {
 }
 
 func (a *adapter) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
+	start := time.Now()
 	info, err := a.fs.Getattr(path)
 	if err != nil {
+		if a.fs.trace != nil {
+			a.fs.trace.recordGetattr(path, time.Since(start), err)
+		}
 		return toErrno(err)
 	}
 	fillStat(stat, info)
+	if a.fs.trace != nil {
+		a.fs.trace.recordGetattr(path, time.Since(start), nil)
+	}
 	return 0
 }
 
@@ -57,7 +64,12 @@ func (a *adapter) Readlink(path string) (int, string) {
 }
 
 func (a *adapter) Mkdir(path string, mode uint32) int {
-	return toErrno(a.fs.Mkdir(path, mode))
+	start := time.Now()
+	err := a.fs.Mkdir(path, mode)
+	if a.fs.trace != nil {
+		a.fs.trace.recordMkdir(path, time.Since(start), err)
+	}
+	return toErrno(err)
 }
 
 func (a *adapter) Rmdir(path string) int {
@@ -102,33 +114,61 @@ func (a *adapter) Utimens(path string, tmsp []fuse.Timespec) int {
 }
 
 func (a *adapter) Open(path string, flags int) (int, uint64) {
+	start := time.Now()
 	fh, err := a.fs.Open(path, flags)
 	if err != nil {
+		if a.fs.trace != nil {
+			a.fs.trace.recordOpen(path, time.Since(start), err)
+		}
 		return toErrno(err), 0
+	}
+	if a.fs.trace != nil {
+		a.fs.trace.recordOpen(path, time.Since(start), nil)
 	}
 	return 0, uint64(fh)
 }
 
 func (a *adapter) Create(path string, flags int, mode uint32) (int, uint64) {
+	start := time.Now()
 	fh, err := a.fs.Create(path, flags, mode)
 	if err != nil {
+		if a.fs.trace != nil {
+			a.fs.trace.recordCreate(path, time.Since(start), err)
+		}
 		return toErrno(err), 0
+	}
+	if a.fs.trace != nil {
+		a.fs.trace.recordCreate(path, time.Since(start), nil)
 	}
 	return 0, uint64(fh)
 }
 
 func (a *adapter) Read(path string, buf []byte, off int64, fh uint64) int {
+	start := time.Now()
 	n, err := a.fs.Read(path, buf, off, FileHandle(fh))
 	if err != nil {
+		if a.fs.trace != nil {
+			a.fs.trace.recordRead(path, time.Since(start), err)
+		}
 		return toErrno(err)
+	}
+	if a.fs.trace != nil {
+		a.fs.trace.recordRead(path, time.Since(start), nil)
 	}
 	return n
 }
 
 func (a *adapter) Write(path string, buf []byte, off int64, fh uint64) int {
+	start := time.Now()
 	n, err := a.fs.Write(path, buf, off, FileHandle(fh))
 	if err != nil {
+		if a.fs.trace != nil {
+			a.fs.trace.recordWrite(path, time.Since(start), err)
+		}
 		return toErrno(err)
+	}
+	if a.fs.trace != nil {
+		a.fs.trace.recordWrite(path, time.Since(start), nil)
 	}
 	return n
 }
@@ -150,16 +190,27 @@ func (a *adapter) Fsync(path string, datasync bool, fh uint64) int {
 }
 
 func (a *adapter) Opendir(path string) (int, uint64) {
+	start := time.Now()
 	fh, err := a.fs.Opendir(path)
 	if err != nil {
+		if a.fs.trace != nil {
+			a.fs.trace.recordOpendir(path, time.Since(start), err)
+		}
 		return toErrno(err), 0
+	}
+	if a.fs.trace != nil {
+		a.fs.trace.recordOpendir(path, time.Since(start), nil)
 	}
 	return 0, uint64(fh)
 }
 
 func (a *adapter) Readdir(path string, fill func(string, *fuse.Stat_t, int64) bool, off int64, fh uint64) int {
+	start := time.Now()
 	entries, err := a.fs.Readdir(path)
 	if err != nil {
+		if a.fs.trace != nil {
+			a.fs.trace.recordReaddir(path, time.Since(start), err)
+		}
 		return toErrno(err)
 	}
 
@@ -200,6 +251,9 @@ func (a *adapter) Readdir(path string, fill func(string, *fuse.Stat_t, int64) bo
 		if !fill(e.Name, &stat, 0) {
 			break
 		}
+	}
+	if a.fs.trace != nil {
+		a.fs.trace.recordReaddir(path, time.Since(start), nil)
 	}
 	return 0
 }

@@ -11,9 +11,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/beam-cloud/clip/pkg/clip"
 	"github.com/beam-cloud/airstore/pkg/registry"
 	"github.com/beam-cloud/airstore/pkg/types"
+	"github.com/beam-cloud/clip/pkg/clip"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/rs/zerolog/log"
 )
@@ -298,10 +298,6 @@ func (m *CLIPImageManager) unmountLocked(imageID string, mount *clipMount) error
 	return err
 }
 
-// ============================================================================
-// Internal: Archive Management
-// ============================================================================
-
 func (m *CLIPImageManager) ensureArchive(ctx context.Context, imageRef, archivePath string) error {
 	imageID := imageIDFromRef(imageRef)
 
@@ -432,10 +428,6 @@ func waitForFileLock(ctx context.Context, file *os.File) error {
 	}
 }
 
-// ============================================================================
-// Internal: CLIP Operations
-// ============================================================================
-
 func (m *CLIPImageManager) convert(ctx context.Context, imageRef, outputPath string) error {
 	start := time.Now()
 
@@ -520,10 +512,6 @@ func verifyMount(mountPoint string, timeout time.Duration) error {
 	}
 	return fmt.Errorf("mount appears empty after %v", timeout)
 }
-
-// ============================================================================
-// Utilities
-// ============================================================================
 
 func fileExists(path string) bool {
 	_, err := os.Stat(path)

@@ -40,6 +40,7 @@ import (
 
 const sourcesTimeout = 30 * time.Second
 const resultsCacheTTL = 30 * time.Second // Cache query results to avoid repeated API calls
+const backgroundRefreshInterval = 15 * time.Second // Background cache refresh interval
 
 const queryMetaName = ".query.as"
 
@@ -52,6 +53,18 @@ type cachedQueryResult struct {
 // cachedQuery holds a cached query definition
 type cachedQuery struct {
 	query     *types.SmartQuery
+	expiresAt time.Time
+}
+
+// cachedIntegration holds cached integration metadata
+type cachedIntegration struct {
+	mtime     int64
+	expiresAt time.Time
+}
+
+// cachedStat holds cached stat metadata for a path
+type cachedStat struct {
+	info      *FileInfo
 	expiresAt time.Time
 }
 
@@ -70,14 +83,24 @@ type SourcesVNode struct {
 	// during Readdir->Getattr cycles
 	queriesMu sync.RWMutex
 	queries   map[string]*cachedQuery // path -> cached query definition
+
+	// Cache for integration list to avoid per-integration Stat RPCs
+	integrationsMu sync.RWMutex
+	integrations   map[string]*cachedIntegration // integration name -> cached mtime
+
+	// Cache for stat metadata to avoid N+1 Getattr RPCs after Readdir
+	statsMu sync.RWMutex
+	stats   map[string]*cachedStat // full path -> cached stat
 }
 
 func NewSourcesVNode(conn *grpc.ClientConn, token string) *SourcesVNode {
 	return &SourcesVNode{
-		client:  pb.NewSourceServiceClient(conn),
-		token:   token,
-		results: make(map[string]*cachedQueryResult),
-		queries: make(map[string]*cachedQuery),
+		client:       pb.NewSourceServiceClient(conn),
+		token:        token,
+		results:      make(map[string]*cachedQueryResult),
+		queries:      make(map[string]*cachedQuery),
+		integrations: make(map[string]*cachedIntegration),
+		stats:        make(map[string]*cachedStat),
 	}
 }
 
@@ -121,22 +144,51 @@ func (v *SourcesVNode) Getattr(path string) (*FileInfo, error) {
 
 	integration, subpath := v.parsePath(path)
 
-	// Early return for macOS system files to avoid unnecessary cache/RPC lookups
+	// Early return for macOS system files (AppleDouble, .DS_Store, etc.)
+	// This catches both integration-level (._gmail) and subpath-level (gmail/._foo)
+	if isSystemFile(integration) {
+		return nil, fs.ErrNotExist
+	}
 	if subpath != "" && isSystemFile(filepath.Base(subpath)) {
 		return nil, fs.ErrNotExist
 	}
 
-	ctx, cancel := v.ctx()
-	defer cancel()
+	// Fast path: check stat cache first
+	if info := v.getCachedStat(path); info != nil {
+		return info, nil
+	}
 
 	// /sources/{integration}
 	if subpath == "" {
+		// Fast path: check integration cache (populated by listIntegrations)
+		if cached := v.getCachedIntegration(integration); cached != nil {
+			info := NewDirInfo(PathIno(path))
+			if cached.mtime > 0 {
+				t := time.Unix(cached.mtime, 0)
+				info.Atime, info.Mtime, info.Ctime = t, t, t
+			}
+			return info, nil
+		}
+
+		// Fallback: RPC to gateway
+		ctx, cancel := v.ctx()
+		defer cancel()
 		resp, err := v.client.Stat(ctx, &pb.SourceStatRequest{Path: integration})
 		if err != nil || !resp.Ok {
 			return nil, fs.ErrNotExist
 		}
-		return NewDirInfo(PathIno(path)), nil
+		info := NewDirInfo(PathIno(path))
+		if resp.Info != nil && resp.Info.Mtime > 0 {
+			t := time.Unix(resp.Info.Mtime, 0)
+			info.Atime, info.Mtime, info.Ctime = t, t, t
+		}
+		// Cache for future calls
+		v.setCachedIntegration(integration, resp.Info.GetMtime())
+		return info, nil
 	}
+
+	ctx, cancel := v.ctx()
+	defer cancel()
 
 	// status.json at integration root
 	if subpath == "status.json" {
@@ -269,13 +321,18 @@ func (v *SourcesVNode) listIntegration(ctx context.Context, path, integration st
 
 	entries := make([]DirEntry, 0, len(resp.Entries))
 	for _, e := range resp.Entries {
+		childPath := path + "/" + e.Name
+		ino := PathIno(childPath)
 		entries = append(entries, DirEntry{
 			Name:  e.Name,
 			Mode:  e.Mode,
-			Ino:   PathIno(path + "/" + e.Name),
+			Ino:   ino,
 			Size:  e.Size,
 			Mtime: e.Mtime,
 		})
+
+		// Cache stat metadata to avoid N+1 Getattr RPCs after this Readdir
+		v.cacheStatFromEntry(childPath, e)
 	}
 	return entries, nil
 }
@@ -292,7 +349,19 @@ func (v *SourcesVNode) listIntegrations(ctx context.Context) ([]DirEntry, error)
 	for _, e := range resp.Entries {
 		// Only include directories (integrations like gmail, gdrive, etc.)
 		if e.IsDir {
-			entries = append(entries, DirEntry{Name: e.Name, Mode: e.Mode, Ino: PathIno(SourcesPath + "/" + e.Name)})
+			childPath := SourcesPath + "/" + e.Name
+			entries = append(entries, DirEntry{
+				Name:  e.Name,
+				Mode:  e.Mode,
+				Ino:   PathIno(childPath),
+				Mtime: e.Mtime,
+			})
+
+			// Cache integration metadata to avoid per-integration Stat RPCs
+			v.setCachedIntegration(e.Name, e.Mtime)
+
+			// Also cache as stat for Getattr
+			v.cacheStatFromEntry(childPath, e)
 		}
 	}
 	return entries, nil
@@ -723,4 +792,74 @@ func (v *SourcesVNode) setCachedQuery(path string, query *types.SmartQuery) {
 		query:     query,
 		expiresAt: time.Now().Add(resultsCacheTTL),
 	}
+}
+
+// Integration cache helpers
+
+func (v *SourcesVNode) getCachedIntegration(name string) *cachedIntegration {
+	v.integrationsMu.RLock()
+	defer v.integrationsMu.RUnlock()
+
+	if cached, ok := v.integrations[name]; ok && time.Now().Before(cached.expiresAt) {
+		return cached
+	}
+	return nil
+}
+
+func (v *SourcesVNode) setCachedIntegration(name string, mtime int64) {
+	v.integrationsMu.Lock()
+	defer v.integrationsMu.Unlock()
+
+	v.integrations[name] = &cachedIntegration{
+		mtime:     mtime,
+		expiresAt: time.Now().Add(resultsCacheTTL),
+	}
+}
+
+// Stat cache helpers
+
+func (v *SourcesVNode) getCachedStat(path string) *FileInfo {
+	v.statsMu.RLock()
+	defer v.statsMu.RUnlock()
+
+	if cached, ok := v.stats[path]; ok && time.Now().Before(cached.expiresAt) && cached.info != nil {
+		// Return a copy to avoid mutation
+		info := *cached.info
+		return &info
+	}
+	return nil
+}
+
+func (v *SourcesVNode) setCachedStat(path string, info *FileInfo) {
+	v.statsMu.Lock()
+	defer v.statsMu.Unlock()
+
+	v.stats[path] = &cachedStat{
+		info:      info,
+		expiresAt: time.Now().Add(resultsCacheTTL),
+	}
+}
+
+// cacheStatFromEntry creates and caches a FileInfo from a SourceDirEntry
+func (v *SourcesVNode) cacheStatFromEntry(path string, e *pb.SourceDirEntry) {
+	if e == nil {
+		return
+	}
+
+	ino := PathIno(path)
+	var info *FileInfo
+	if e.IsDir {
+		info = NewDirInfo(ino)
+	} else {
+		info = NewFileInfo(ino, e.Size, e.Mode&0777)
+	}
+	info.Mode = e.Mode
+	info.Size = e.Size
+
+	if e.Mtime > 0 {
+		t := time.Unix(e.Mtime, 0)
+		info.Atime, info.Mtime, info.Ctime = t, t, t
+	}
+
+	v.setCachedStat(path, info)
 }
