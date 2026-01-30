@@ -269,6 +269,12 @@ func (v *SourcesVNode) Getattr(path string) (*FileInfo, error) {
 	if q := v.getQuery(ctx, path); q != nil {
 		if q.OutputFormat == types.SmartQueryOutputFolder {
 			info := NewDirInfo(PathIno(path))
+			// Set Nlink based on cached results count for better UX
+			// Standard Unix convention: Nlink = 2 + subdirectory count
+			// For smart query folders, we use result count to show child items
+			if cached := v.getCachedResults(q.Path); cached != nil {
+				info.Nlink = uint32(2 + len(cached))
+			}
 			qt := smartQueryMtime(q)
 			info.Mtime = qt
 			info.Ctime = qt

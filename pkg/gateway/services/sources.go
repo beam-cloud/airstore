@@ -83,6 +83,59 @@ func NewSourceServiceWithOAuth(registry *sources.Registry, backend repository.Ba
 	}
 }
 
+// InvalidateQueryCache invalidates cached results for a query path.
+// Call this before ReadDir when refresh=true to force re-execution.
+func (s *SourceService) InvalidateQueryCache(ctx context.Context, workspaceId uint, queryPath string) error {
+	if s.fsStore == nil {
+		return nil
+	}
+	log.Info().Uint("workspace_id", workspaceId).Str("path", queryPath).Msg("invalidating query cache")
+	return s.fsStore.InvalidateQuery(ctx, workspaceId, queryPath)
+}
+
+// RefreshSmartQuery forces re-execution of a smart query, bypassing all caches.
+// Returns the fresh results from the provider (e.g., Gmail API).
+func (s *SourceService) RefreshSmartQuery(ctx context.Context, queryPath string) ([]repository.QueryResult, error) {
+	pctx, err := s.providerContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get provider context: %w", err)
+	}
+
+	// Look up the query definition
+	query, err := s.fsStore.GetQuery(ctx, pctx.WorkspaceId, queryPath)
+	if err != nil {
+		return nil, fmt.Errorf("query lookup failed: %w", err)
+	}
+	if query == nil {
+		return nil, fmt.Errorf("query not found: %s", queryPath)
+	}
+
+	// Load credentials
+	pctx, connected := s.loadCredentials(ctx, pctx, query.Integration)
+	if !connected {
+		return nil, fmt.Errorf("not connected to %s", query.Integration)
+	}
+
+	log.Info().
+		Str("path", queryPath).
+		Str("integration", query.Integration).
+		Str("query_spec", query.QuerySpec).
+		Msg("refreshing smart query - executing provider query")
+
+	// Execute the query fresh (this calls the Gmail/GDrive/etc API)
+	results, err := s.executeAndCacheQuery(ctx, pctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("query execution failed: %w", err)
+	}
+
+	log.Info().
+		Str("path", queryPath).
+		Int("results", len(results)).
+		Msg("smart query refresh complete")
+
+	return results, nil
+}
+
 // Stat returns file/directory attributes for a source path
 func (s *SourceService) Stat(ctx context.Context, req *pb.SourceStatRequest) (*pb.SourceStatResponse, error) {
 	pctx, err := s.providerContext(ctx)
@@ -263,6 +316,20 @@ func (s *SourceService) ReadDir(ctx context.Context, req *pb.SourceReadDirReques
 	return &pb.SourceReadDirResponse{Ok: true, Entries: []*pb.SourceDirEntry{}}, nil
 }
 
+// getQueryChildCount returns the number of children for a smart query folder.
+// Uses cached results if available, returns 1 (for .query.as) if not cached.
+func (s *SourceService) getQueryChildCount(ctx context.Context, workspaceId uint, queryPath string) int {
+	if s.fsStore == nil {
+		return 1 // At least .query.as file
+	}
+
+	results, err := s.fsStore.GetQueryResults(ctx, workspaceId, queryPath)
+	if err != nil || results == nil {
+		return 1 // At least .query.as file
+	}
+	return len(results) + 1 // Results + .query.as
+}
+
 // readDirIntegrationRoot returns entries for integration root: status.json + smart queries
 func (s *SourceService) readDirIntegrationRoot(ctx context.Context, pctx *sources.ProviderContext, integration string, connected bool) (*pb.SourceReadDirResponse, error) {
 	// Generate status.json to get its size
@@ -294,11 +361,13 @@ func (s *SourceService) readDirIntegrationRoot(ctx context.Context, pctx *source
 			}
 
 			if q.OutputFormat == types.QueryOutputFolder {
+				childCount := s.getQueryChildCount(ctx, pctx.WorkspaceId, q.Path)
 				entries = append(entries, &pb.SourceDirEntry{
-					Name:  name,
-					Mode:  sources.ModeDir,
-					IsDir: true,
-					Mtime: q.UpdatedAt.Unix(),
+					Name:       name,
+					Mode:       sources.ModeDir,
+					IsDir:      true,
+					Mtime:      q.UpdatedAt.Unix(),
+					ChildCount: int32(childCount),
 				})
 				continue
 			}
@@ -384,11 +453,24 @@ func (s *SourceService) executeAndCacheQuery(ctx context.Context, pctx *sources.
 		return nil, fmt.Errorf("empty query spec for %s", query.Integration)
 	}
 
+	log.Info().
+		Str("integration", query.Integration).
+		Str("path", query.Path).
+		Str("query", spec.Query).
+		Int("limit", spec.Limit).
+		Msg("executing provider query")
+
 	// Execute the query
 	queryResults, err := executor.ExecuteQuery(ctx, pctx, spec)
 	if err != nil {
 		return nil, fmt.Errorf("query execution failed: %w", err)
 	}
+
+	log.Info().
+		Str("integration", query.Integration).
+		Str("path", query.Path).
+		Int("results", len(queryResults)).
+		Msg("provider query complete")
 
 	// Convert to repository format
 	results := make([]repository.QueryResult, len(queryResults))

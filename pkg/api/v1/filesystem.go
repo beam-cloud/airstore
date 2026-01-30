@@ -92,6 +92,7 @@ func (g *FilesystemGroup) List(c echo.Context) error {
 	ctx := c.Request().Context()
 	path := cleanPath(c.QueryParam("path"))
 	showHidden := c.QueryParam("show_hidden") == "true"
+	refresh := c.QueryParam("refresh") == "true"
 
 	// Root directory - return virtual root folders
 	if path == "" || path == "/" {
@@ -109,7 +110,7 @@ func (g *FilesystemGroup) List(c echo.Context) error {
 	case "context":
 		return g.listContext(c, ctx, relPath)
 	case "sources":
-		return g.listSources(c, ctx, relPath)
+		return g.listSources(c, ctx, relPath, refresh)
 	case "tools":
 		return g.listTools(c, ctx, showHidden)
 	default:
@@ -398,7 +399,7 @@ func (g *FilesystemGroup) contextEntryToVirtualFile(e *pb.ContextDirEntry, paren
 // Sources Service (Integration files)
 // ============================================================================
 
-func (g *FilesystemGroup) listSources(c echo.Context, ctx context.Context, relPath string) error {
+func (g *FilesystemGroup) listSources(c echo.Context, ctx context.Context, relPath string, refresh bool) error {
 	// Root /sources - list all integrations
 	if relPath == "" {
 		entries := g.buildSourceRootEntries(ctx)
@@ -406,6 +407,15 @@ func (g *FilesystemGroup) listSources(c echo.Context, ctx context.Context, relPa
 			Path:    types.PathSources,
 			Entries: entries,
 		})
+	}
+
+	// If refresh requested, force re-execute the smart query
+	if refresh && g.sourceService != nil {
+		queryPath := types.SourcePath(relPath)
+		if _, err := g.sourceService.RefreshSmartQuery(ctx, queryPath); err != nil {
+			// Log but don't fail - might not be a smart query folder
+			log.Debug().Err(err).Str("path", queryPath).Msg("refresh: not a smart query or refresh failed")
+		}
 	}
 
 	// Use SourceService to list directory contents (it handles credentials & caching)
@@ -477,6 +487,9 @@ func (g *FilesystemGroup) listSources(c echo.Context, ctx context.Context, relPa
 			if e.Mtime > 0 {
 				t := time.Unix(e.Mtime, 0)
 				vf = vf.WithModifiedAt(t)
+			}
+			if e.IsDir && e.ChildCount > 0 {
+				vf = vf.WithChildCount(int(e.ChildCount))
 			}
 
 			entries = append(entries, *vf)

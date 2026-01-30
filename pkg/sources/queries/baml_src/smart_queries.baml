@@ -35,48 +35,61 @@ function InferGmailQuery(name: string, guidance: string?) -> GmailQueryResult {
     - Use bare words for most searches - they match everywhere!
     - Gmail automatically handles plurals, common misspellings, and related terms
     
+    CRITICAL: PREFER BARE WORDS OVER from: FOR FUZZY SENDER MATCHING!
+    - from:company only matches if that word appears exactly in sender name/email
+    - Bare words match sender, subject, AND body - much more flexible!
+    - Many companies use subdomains like noreply@mail.company.com - bare words catch these better
+    - ONLY use from: when you need STRICT sender matching (rare)
+    
     CRITICAL SYNTAX RULES:
     - Multi-word operator values MUST be quoted: from:"summit health" NOT from:summit health
     - Bare multi-word phrases should also be quoted: "lab results" NOT lab results
     - Unquoted spaces mean AND: lab results = lab AND results (both must appear)
     - Use OR to match alternatives: mychart OR "nyu langone" OR "summit health"
     
-    Gmail search operators (use sparingly):
-    - from:"name or email" - matches sender (QUOTE multi-word values!)
+    Gmail search operators (use sparingly - bare words are usually better!):
+    - from:"name or email" - STRICT sender match (avoid for fuzzy matching!)
     - subject:"phrase" - matches subject line only
     - has:attachment, filename:pdf
     - is:unread, is:starred, is:important
     - newer_than:1d, newer_than:7d, older_than:30d
     
     QUERY STRATEGY:
-    1. For topics → bare words or quoted phrases: "lab results" OR prescription OR appointment
-    2. For senders → from: with quotes for multi-word: from:mychart OR from:"nyu langone"
-    3. For mixed (topic + senders) → combine: mychart OR nyu OR "summit health" OR prescription
-       (bare words match sender names too, so you often don't need from:)
-    4. For health/medical emails → just use: medical OR health OR doctor OR appointment OR prescription OR "lab results"
+    1. For company/brand emails → USE BARE WORDS: nike OR adidas OR "north face"
+       (This finds emails FROM them, ABOUT them, or MENTIONING them - much better coverage!)
+    2. For topics → bare words or quoted phrases: "lab results" OR prescription OR appointment
+    3. For people → from:firstname works but bare word also good: john OR from:john
+    4. For mixed (topic + senders) → all bare words: mychart OR nyu OR "summit health" OR prescription
+    5. For health/medical → medical OR health OR doctor OR appointment OR mychart OR prescription
+    6. When in doubt → ADD MORE ORs with related terms, synonyms, and variations!
     
     DEFAULTS:
     - limit: 50
     - filename_format: {date}_{from}_{subject}_{id}.txt
     
     Query examples:
-    - "invoices" → invoice
-    - "stripe-invoices" → invoice from:stripe
-    - "receipts" → receipt OR invoice OR order
-    - "meeting-notes" → meeting OR agenda OR "calendar invite"
-    - "flight-confirmation" → flight OR itinerary OR "boarding pass" OR airline
-    - "health-emails" → medical OR health OR doctor OR appointment OR mychart OR prescription
-    - "from-john" → from:john
-    - "emails-from-acme-corp" → from:"acme corp" (QUOTED because multi-word)
+    - "invoices" → invoice OR receipt OR bill OR statement
+    - "stripe-invoices" → stripe invoice OR stripe receipt OR stripe payment
+    - "receipts" → receipt OR invoice OR order OR confirmation OR purchase
+    - "meeting-notes" → meeting OR agenda OR "calendar invite" OR standup OR sync
+    - "flight-confirmation" → flight OR itinerary OR "boarding pass" OR airline OR booking
+    - "health-emails" → medical OR health OR doctor OR appointment OR mychart OR prescription OR lab
+    - "from-john" → from:john (explicit "from" in name = use the operator)
+    - "emails-from-acme-corp" → from:"acme corp" (explicit "from" + multi-word = quoted operator)
     - "unread" → is:unread
     - "project-alpha" → "project alpha" (quoted phrase)
-    - "shipping" → shipping OR tracking OR delivery OR fedex OR ups
+    - "shipping" → shipping OR tracking OR delivery OR fedex OR ups OR usps OR package
     - "recent" → newer_than:7d
+    - "amazon-orders" → amazon order OR amazon shipment OR amazon delivery OR amazon purchase
+    - "uber-receipts" → uber receipt OR uber ride OR lyft receipt OR lyft ride
     
     Guidance examples:
+    - "from nike" → nike (bare word for fuzzy matching - catches nike.com, news@nike.com, etc.)
     - "anything from summit health, nyu, mychart, health related" 
-      → mychart OR nyu OR "summit health" OR medical OR appointment OR prescription
-      (Use bare words - they match sender names! No need for from: on each one)
+      → mychart OR nyu OR "summit health" OR medical OR appointment OR prescription OR lab
+      (Use bare words with lots of ORs - they match sender names AND content!)
+    - "strictly only emails where the sender is john@company.com" → from:john@company.com
+      (Use from: ONLY when user explicitly wants strict sender matching)
     
     Filename format: {date}_{from}_{subject}_{id}.txt
     
@@ -123,12 +136,15 @@ function EvaluateGmailQueryResults(
     
     1. ZERO RESULTS = AUTOMATIC FAIL
        - If result_count is 0, the query is broken. Mark as NOT satisfactory.
-       - Common cause: unquoted multi-word values like from:summit health (should be from:"summit health")
+       - Common causes:
+         * Unquoted multi-word values: from:summit health → from:"summit health"
+         * Using from: when bare word would match better (from:bonobos might miss noreply@e.bonobos.com)
     
     2. CHECK EACH THING THE USER MENTIONED:
-       - If user mentioned specific senders (e.g., "mychart", "nyu", "summit health"):
-         → Are emails FROM these senders actually in the results?
-         → If user mentioned 3 senders but results only show 1, that's a problem.
+       - If user mentioned specific senders/companies (e.g., "bonobos", "amazon", "stripe"):
+         → Are emails FROM or ABOUT these in the results?
+         → Note: bare words like "bonobos" are GOOD - they match sender, subject, AND body
+         → If from: operator fails, suggest using bare word instead for fuzzy matching
        - If user mentioned topics (e.g., "health", "medical", "appointments"):
          → Do the subjects/snippets actually contain these words?
          → Generic results that don't mention the topics = NOT satisfactory.
@@ -137,9 +153,10 @@ function EvaluateGmailQueryResults(
        - Results about completely unrelated topics = NOT satisfactory
        - Missing the main thing the user asked for = NOT satisfactory
     
-    4. QUERY SYNTAX PROBLEMS TO FIX:
+    4. QUERY IMPROVEMENTS TO SUGGEST:
+       - from:bonobos (0 results) → bonobos (bare word matches subdomains like e.bonobos.com)
        - from:summit health → from:"summit health" (MUST quote multi-word)
-       - Using too many operators when bare words would be better
+       - Using from: when company uses weird email domains → use bare word instead
        - Not enough OR alternatives for fuzzy matching
     
     BE HARSH: If you're unsure whether results match, lean toward NOT satisfactory and suggest improvements.
@@ -352,6 +369,22 @@ test TestGmailMultiWordSender {
   args {
     name "acme-corp-emails"
     guidance "from acme corp and related companies"
+  }
+}
+
+test TestGmailFuzzySenderNike {
+  functions [InferGmailQuery]
+  args {
+    name "nike-emails"
+    guidance "from nike"
+  }
+}
+
+test TestGmailFuzzySenderAmazon {
+  functions [InferGmailQuery]
+  args {
+    name "amazon-orders"
+    guidance null
   }
 }
 

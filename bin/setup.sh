@@ -64,5 +64,11 @@ echo "=> Installing k3d ${k3d_version}"
 curl -sSfL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | TAG=v${k3d_version} bash
 check_status
 
-success "Setup complete! Run 'make k3d-up' to create a local cluster."
+echo "=> Installing protobuf/gRPC tools"
+go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.31.0
+go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.3.0
+go install github.com/grpc-ecosystem/grpc-gateway/v2/protoc-gen-grpc-gateway@v2.27.1
+go install github.com/grpc-ecosystem/grpc-gateway/v2/protoc-gen-openapiv2@latest
+check_status
 
+success "Setup complete! Run 'make k3d-up' to create a local cluster."
