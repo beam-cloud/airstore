@@ -1296,10 +1296,7 @@ func (g *FilesystemGroup) buildTaskContent(ctx context.Context, task *types.Task
 		if err != nil {
 			log.Warn().Err(err).Str("task_id", task.ExternalId).Msg("failed to read task logs from S2")
 		} else {
-			for _, entry := range logs {
-				sb.WriteString(entry.Data)
-				sb.WriteString("\n")
-			}
+			sb.WriteString(streams.FormatLogs(logs))
 		}
 	}
 

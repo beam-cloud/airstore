@@ -10,21 +10,29 @@ import (
 
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
+	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/rs/zerolog/log"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 )
 
-const tasksCacheTTL = 10 * time.Second
+const tasksCacheTTL = 5 * time.Second
 
 // TasksVNode provides /tasks directory listing tasks as files.
 // Each task appears as a file named {task_id}.task
 // Reading the file returns the task logs.
 type TasksVNode struct {
 	ReadOnlyBase
+
+	// Direct backend access (gateway mode)
 	backend   repository.BackendRepository
 	taskQueue repository.TaskQueue
-	token     string
 
-	// Cache for task list to avoid repeated DB calls
+	// gRPC gateway access (CLI mode)
+	grpcConn *grpc.ClientConn
+	token    string
+
+	// Cache for task list
 	cacheMu     sync.RWMutex
 	cachedTasks []*types.Task
 	cacheExpiry time.Time
@@ -40,22 +48,42 @@ func NewTasksVNode(backend repository.BackendRepository, taskQueue repository.Ta
 	}
 }
 
-// NewEmptyTasksVNode creates a TasksVNode without database access.
-// This is used for CLI mounts where we don't have direct DB access.
-// Tasks will be shown as empty until we implement gRPC-based task listing.
-func NewEmptyTasksVNode() *TasksVNode {
-	return &TasksVNode{}
+// NewTasksVNodeGRPC creates a TasksVNode that fetches tasks via gRPC from the gateway.
+// Use this for CLI mounts where we don't have direct DB access.
+func NewTasksVNodeGRPC(conn *grpc.ClientConn, token string) *TasksVNode {
+	t := &TasksVNode{
+		grpcConn: conn,
+		token:    token,
+	}
+	// Pre-warm cache in background
+	go t.warmCache()
+	return t
+}
+
+// warmCache pre-fetches the task list to avoid cold start latency
+func (t *TasksVNode) warmCache() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	t.getTasks(ctx)
 }
 
 func (t *TasksVNode) Prefix() string { return TasksPath }
 
-// getWorkspaceId extracts workspace ID from token (simplified - in production, validate token)
+// grpcContext adds auth token to context for gRPC calls
+func (t *TasksVNode) grpcContext(ctx context.Context) context.Context {
+	if t.token != "" {
+		md := metadata.Pairs("authorization", "Bearer "+t.token)
+		ctx = metadata.NewOutgoingContext(ctx, md)
+	}
+	return ctx
+}
+
+// getWorkspaceId extracts workspace ID from token via backend validation
 func (t *TasksVNode) getWorkspaceId(ctx context.Context) (uint, error) {
 	if t.backend == nil {
 		return 0, fmt.Errorf("no backend configured")
 	}
 
-	// Validate token and get workspace
 	if t.token == "" {
 		return 0, fmt.Errorf("no token provided")
 	}
@@ -68,7 +96,7 @@ func (t *TasksVNode) getWorkspaceId(ctx context.Context) (uint, error) {
 	return result.WorkspaceId, nil
 }
 
-// getTasks returns cached tasks or fetches from DB
+// getTasks returns cached tasks or fetches fresh data
 func (t *TasksVNode) getTasks(ctx context.Context) ([]*types.Task, error) {
 	t.cacheMu.RLock()
 	if time.Now().Before(t.cacheExpiry) && t.cachedTasks != nil {
@@ -78,13 +106,24 @@ func (t *TasksVNode) getTasks(ctx context.Context) ([]*types.Task, error) {
 	}
 	t.cacheMu.RUnlock()
 
-	// Fetch from DB
-	workspaceId, err := t.getWorkspaceId(ctx)
-	if err != nil {
-		return nil, err
+	var tasks []*types.Task
+	var err error
+
+	if t.backend != nil {
+		// Direct DB access (gateway mode)
+		var workspaceId uint
+		workspaceId, err = t.getWorkspaceId(ctx)
+		if err != nil {
+			return nil, err
+		}
+		tasks, err = t.backend.ListTasks(ctx, workspaceId)
+	} else if t.grpcConn != nil {
+		// gRPC access (CLI mode)
+		tasks, err = t.fetchTasksGRPC(ctx)
+	} else {
+		return nil, fmt.Errorf("no backend or gateway configured")
 	}
 
-	tasks, err := t.backend.ListTasks(ctx, workspaceId)
 	if err != nil {
 		return nil, err
 	}
@@ -98,24 +137,126 @@ func (t *TasksVNode) getTasks(ctx context.Context) ([]*types.Task, error) {
 	return tasks, nil
 }
 
+// grpcClient returns a cached gRPC client
+func (t *TasksVNode) grpcClient() pb.GatewayServiceClient {
+	return pb.NewGatewayServiceClient(t.grpcConn)
+}
+
+// fetchTasksGRPC fetches tasks from the gateway via gRPC
+func (t *TasksVNode) fetchTasksGRPC(ctx context.Context) ([]*types.Task, error) {
+	resp, err := t.grpcClient().ListTasks(t.grpcContext(ctx), &pb.ListTasksRequest{})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.Ok {
+		return nil, fmt.Errorf("ListTasks failed: %s", resp.Error)
+	}
+
+	tasks := make([]*types.Task, len(resp.Tasks))
+	for i, pt := range resp.Tasks {
+		tasks[i] = pbToTask(pt)
+	}
+	return tasks, nil
+}
+
 // getTaskByName finds a task by its filename (e.g., "abc123.task")
+// Uses cached task list first for fast lookups during directory listing.
 func (t *TasksVNode) getTaskByName(ctx context.Context, name string) (*types.Task, error) {
-	// Extract task ID from filename
 	if !strings.HasSuffix(name, ".task") {
 		return nil, ErrNotFound
 	}
 	taskId := strings.TrimSuffix(name, ".task")
 
-	// Get from backend directly (faster than filtering list)
-	task, err := t.backend.GetTask(ctx, taskId)
-	if err != nil {
-		if _, ok := err.(*types.ErrTaskNotFound); ok {
-			return nil, ErrNotFound
+	// Check cache first - fast path for Getattr during ls
+	t.cacheMu.RLock()
+	if t.cachedTasks != nil && time.Now().Before(t.cacheExpiry) {
+		for _, task := range t.cachedTasks {
+			if task.ExternalId == taskId {
+				t.cacheMu.RUnlock()
+				return task, nil
+			}
 		}
-		return nil, err
+	}
+	t.cacheMu.RUnlock()
+
+	// Cache miss - fetch directly
+	if t.backend != nil {
+		task, err := t.backend.GetTask(ctx, taskId)
+		if err != nil {
+			if _, ok := err.(*types.ErrTaskNotFound); ok {
+				return nil, ErrNotFound
+			}
+			return nil, err
+		}
+		return task, nil
 	}
 
-	return task, nil
+	if t.grpcConn != nil {
+		return t.fetchTaskGRPC(ctx, taskId)
+	}
+
+	return nil, ErrNotFound
+}
+
+// fetchTaskGRPC fetches a single task from the gateway via gRPC
+func (t *TasksVNode) fetchTaskGRPC(ctx context.Context, taskId string) (*types.Task, error) {
+	resp, err := t.grpcClient().GetTask(t.grpcContext(ctx), &pb.GetTaskRequest{Id: taskId})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.Ok {
+		if resp.Error == "task not found" {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("GetTask failed: %s", resp.Error)
+	}
+	return pbToTask(resp.Task), nil
+}
+
+// fetchTaskLogsGRPC fetches task logs via gRPC
+func (t *TasksVNode) fetchTaskLogsGRPC(ctx context.Context, taskId string) string {
+	resp, err := t.grpcClient().GetTaskLogs(t.grpcContext(ctx), &pb.GetTaskLogsRequest{Id: taskId})
+	if err != nil || !resp.Ok {
+		return ""
+	}
+
+	var sb strings.Builder
+	for _, entry := range resp.Logs {
+		sb.WriteString(entry.Data)
+		sb.WriteByte('\n')
+	}
+	return sb.String()
+}
+
+// pbToTask converts a proto Task to a types.Task
+func pbToTask(pt *pb.Task) *types.Task {
+	task := &types.Task{
+		ExternalId: pt.Id,
+		Status:     types.TaskStatus(pt.Status),
+		Prompt:     pt.Prompt,
+		Image:      pt.Image,
+		Error:      pt.Error,
+	}
+	if pt.HasExitCode {
+		exitCode := int(pt.ExitCode)
+		task.ExitCode = &exitCode
+	}
+	if pt.CreatedAt != "" {
+		if t, err := time.Parse(time.RFC3339, pt.CreatedAt); err == nil {
+			task.CreatedAt = t
+		}
+	}
+	if pt.StartedAt != "" {
+		if t, err := time.Parse(time.RFC3339, pt.StartedAt); err == nil {
+			task.StartedAt = &t
+		}
+	}
+	if pt.FinishedAt != "" {
+		if t, err := time.Parse(time.RFC3339, pt.FinishedAt); err == nil {
+			task.FinishedAt = &t
+		}
+	}
+	return task
 }
 
 // taskFilename returns the filename for a task
@@ -231,18 +372,21 @@ func (t *TasksVNode) Read(path string, buf []byte, off int64, fh FileHandle) (in
 	if task.Error != "" {
 		content.WriteString(fmt.Sprintf("Error: %s\n", task.Error))
 	}
-	content.WriteString("\n--- Logs ---\n")
+	content.WriteString("\n--- Output ---\n")
 
-	// Get logs from Redis buffer
+	// Get logs - try taskQueue first (gateway mode), then gRPC (CLI mode)
 	if t.taskQueue != nil {
 		logs, err := t.taskQueue.GetLogBuffer(ctx, task.ExternalId)
 		if err == nil {
 			for _, logEntry := range logs {
-				// logEntry is JSON, extract data field
 				content.Write(logEntry)
 				content.WriteString("\n")
 			}
 		}
+	} else if t.grpcConn != nil {
+		// Fetch logs via gRPC
+		logs := t.fetchTaskLogsGRPC(ctx, task.ExternalId)
+		content.WriteString(logs)
 	}
 
 	data := []byte(content.String())

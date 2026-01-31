@@ -6,17 +6,19 @@ import (
 
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/repository"
+	"github.com/beam-cloud/airstore/pkg/streams"
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
 )
 
 type GatewayService struct {
 	pb.UnimplementedGatewayServiceServer
-	backend repository.BackendRepository
+	backend  repository.BackendRepository
+	s2Client *streams.S2Client
 }
 
-func NewGatewayService(backend repository.BackendRepository) *GatewayService {
-	return &GatewayService{backend: backend}
+func NewGatewayService(backend repository.BackendRepository, s2Client *streams.S2Client) *GatewayService {
+	return &GatewayService{backend: backend, s2Client: s2Client}
 }
 
 // requireGatewayAuth checks if the request is authenticated with the gateway/admin token
@@ -381,6 +383,81 @@ func (s *GatewayService) RemoveConnection(ctx context.Context, req *pb.RemoveCon
 	return &pb.DeleteResponse{Ok: true}, nil
 }
 
+// Tasks
+
+func (s *GatewayService) ListTasks(ctx context.Context, req *pb.ListTasksRequest) (*pb.ListTasksResponse, error) {
+	rc := auth.FromContext(ctx)
+	if rc == nil {
+		return &pb.ListTasksResponse{Ok: false, Error: "authentication required"}, nil
+	}
+
+	tasks, err := s.backend.ListTasks(ctx, rc.WorkspaceId)
+	if err != nil {
+		return &pb.ListTasksResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	pbTasks := make([]*pb.Task, 0, len(tasks))
+	for _, t := range tasks {
+		pbTasks = append(pbTasks, taskToPb(t))
+	}
+	return &pb.ListTasksResponse{Ok: true, Tasks: pbTasks}, nil
+}
+
+func (s *GatewayService) GetTask(ctx context.Context, req *pb.GetTaskRequest) (*pb.TaskResponse, error) {
+	rc := auth.FromContext(ctx)
+	if rc == nil {
+		return &pb.TaskResponse{Ok: false, Error: "authentication required"}, nil
+	}
+
+	task, err := s.backend.GetTask(ctx, req.Id)
+	if err != nil {
+		if _, ok := err.(*types.ErrTaskNotFound); ok {
+			return &pb.TaskResponse{Ok: false, Error: "task not found"}, nil
+		}
+		return &pb.TaskResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	return &pb.TaskResponse{Ok: true, Task: taskToPb(task)}, nil
+}
+
+func (s *GatewayService) GetTaskLogs(ctx context.Context, req *pb.GetTaskLogsRequest) (*pb.GetTaskLogsResponse, error) {
+	rc := auth.FromContext(ctx)
+	if rc == nil {
+		return &pb.GetTaskLogsResponse{Ok: false, Error: "authentication required"}, nil
+	}
+
+	// Verify task exists
+	_, err := s.backend.GetTask(ctx, req.Id)
+	if err != nil {
+		if _, ok := err.(*types.ErrTaskNotFound); ok {
+			return &pb.GetTaskLogsResponse{Ok: false, Error: "task not found"}, nil
+		}
+		return &pb.GetTaskLogsResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	// Fetch logs from S2
+	if s.s2Client == nil || !s.s2Client.Enabled() {
+		return &pb.GetTaskLogsResponse{Ok: true, Logs: []*pb.TaskLogEntry{}}, nil
+	}
+
+	logs, err := s.s2Client.ReadLogs(ctx, req.Id, 0)
+	if err != nil {
+		return &pb.GetTaskLogsResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	pbLogs := make([]*pb.TaskLogEntry, 0, len(logs))
+	for _, log := range logs {
+		pbLogs = append(pbLogs, &pb.TaskLogEntry{
+			TaskId:    log.TaskID,
+			Timestamp: log.Timestamp,
+			Stream:    log.Stream,
+			Data:      log.Data,
+		})
+	}
+
+	return &pb.GetTaskLogsResponse{Ok: true, Logs: pbLogs}, nil
+}
+
 // Helpers
 
 func workspaceToPb(ws *types.Workspace) *pb.Workspace {
@@ -429,4 +506,26 @@ func connectionToPb(c *types.IntegrationConnection, workspaceExtId string) *pb.C
 		CreatedAt:       c.CreatedAt.Format(time.RFC3339),
 	}
 	return conn
+}
+
+func taskToPb(t *types.Task) *pb.Task {
+	task := &pb.Task{
+		Id:        t.ExternalId,
+		Status:    string(t.Status),
+		Prompt:    t.Prompt,
+		Image:     t.Image,
+		Error:     t.Error,
+		CreatedAt: t.CreatedAt.Format(time.RFC3339),
+	}
+	if t.ExitCode != nil {
+		task.ExitCode = int32(*t.ExitCode)
+		task.HasExitCode = true
+	}
+	if t.StartedAt != nil {
+		task.StartedAt = t.StartedAt.Format(time.RFC3339)
+	}
+	if t.FinishedAt != nil {
+		task.FinishedAt = t.FinishedAt.Format(time.RFC3339)
+	}
+	return task
 }

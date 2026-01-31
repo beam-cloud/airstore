@@ -25,6 +25,11 @@ service GatewayService {
   rpc AddConnection(AddConnectionRequest) returns (ConnectionResponse);
   rpc ListConnections(ListConnectionsRequest) returns (ListConnectionsResponse);
   rpc RemoveConnection(RemoveConnectionRequest) returns (DeleteResponse);
+
+  // Tasks
+  rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
+  rpc GetTask(GetTaskRequest) returns (TaskResponse);
+  rpc GetTaskLogs(GetTaskLogsRequest) returns (GetTaskLogsResponse);
 }
 
 // Common
@@ -180,5 +185,54 @@ message ListConnectionsResponse {
   bool ok = 1;
   string error = 2;
   repeated Connection connections = 3;
+}
+
+// Task messages
+message Task {
+  string id = 1;
+  string status = 2;
+  string prompt = 3;
+  string image = 4;
+  int32 exit_code = 5;
+  bool has_exit_code = 6;
+  string error = 7;
+  string created_at = 8;
+  string started_at = 9;
+  string finished_at = 10;
+}
+
+message ListTasksRequest {}
+
+message ListTasksResponse {
+  bool ok = 1;
+  string error = 2;
+  repeated Task tasks = 3;
+}
+
+message GetTaskRequest {
+  string id = 1;
+}
+
+message TaskResponse {
+  bool ok = 1;
+  string error = 2;
+  Task task = 3;
+}
+
+message GetTaskLogsRequest {
+  string id = 1;
+}
+
+message TaskLogEntry {
+  string task_id = 1;
+  int64 timestamp = 2;
+  string stream = 3;
+  string data = 4;
+}
+
+message GetTaskLogsResponse {
+  bool ok = 1;
+  string error = 2;
+  repeated TaskLogEntry logs = 3;
 }
 

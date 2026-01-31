@@ -32,6 +32,9 @@ const (
 	GatewayService_AddConnection_FullMethodName    = "/gateway.GatewayService/AddConnection"
 	GatewayService_ListConnections_FullMethodName  = "/gateway.GatewayService/ListConnections"
 	GatewayService_RemoveConnection_FullMethodName = "/gateway.GatewayService/RemoveConnection"
+	GatewayService_ListTasks_FullMethodName        = "/gateway.GatewayService/ListTasks"
+	GatewayService_GetTask_FullMethodName          = "/gateway.GatewayService/GetTask"
+	GatewayService_GetTaskLogs_FullMethodName      = "/gateway.GatewayService/GetTaskLogs"
 )
 
 // GatewayServiceClient is the client API for GatewayService service.
@@ -55,6 +58,10 @@ type GatewayServiceClient interface {
 	AddConnection(ctx context.Context, in *AddConnectionRequest, opts ...grpc.CallOption) (*ConnectionResponse, error)
 	ListConnections(ctx context.Context, in *ListConnectionsRequest, opts ...grpc.CallOption) (*ListConnectionsResponse, error)
 	RemoveConnection(ctx context.Context, in *RemoveConnectionRequest, opts ...grpc.CallOption) (*DeleteResponse, error)
+	// Tasks
+	ListTasks(ctx context.Context, in *ListTasksRequest, opts ...grpc.CallOption) (*ListTasksResponse, error)
+	GetTask(ctx context.Context, in *GetTaskRequest, opts ...grpc.CallOption) (*TaskResponse, error)
+	GetTaskLogs(ctx context.Context, in *GetTaskLogsRequest, opts ...grpc.CallOption) (*GetTaskLogsResponse, error)
 }
 
 type gatewayServiceClient struct {
@@ -182,6 +189,33 @@ func (c *gatewayServiceClient) RemoveConnection(ctx context.Context, in *RemoveC
 	return out, nil
 }
 
+func (c *gatewayServiceClient) ListTasks(ctx context.Context, in *ListTasksRequest, opts ...grpc.CallOption) (*ListTasksResponse, error) {
+	out := new(ListTasksResponse)
+	err := c.cc.Invoke(ctx, GatewayService_ListTasks_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gatewayServiceClient) GetTask(ctx context.Context, in *GetTaskRequest, opts ...grpc.CallOption) (*TaskResponse, error) {
+	out := new(TaskResponse)
+	err := c.cc.Invoke(ctx, GatewayService_GetTask_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gatewayServiceClient) GetTaskLogs(ctx context.Context, in *GetTaskLogsRequest, opts ...grpc.CallOption) (*GetTaskLogsResponse, error) {
+	out := new(GetTaskLogsResponse)
+	err := c.cc.Invoke(ctx, GatewayService_GetTaskLogs_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // GatewayServiceServer is the server API for GatewayService service.
 // All implementations must embed UnimplementedGatewayServiceServer
 // for forward compatibility
@@ -203,6 +237,10 @@ type GatewayServiceServer interface {
 	AddConnection(context.Context, *AddConnectionRequest) (*ConnectionResponse, error)
 	ListConnections(context.Context, *ListConnectionsRequest) (*ListConnectionsResponse, error)
 	RemoveConnection(context.Context, *RemoveConnectionRequest) (*DeleteResponse, error)
+	// Tasks
+	ListTasks(context.Context, *ListTasksRequest) (*ListTasksResponse, error)
+	GetTask(context.Context, *GetTaskRequest) (*TaskResponse, error)
+	GetTaskLogs(context.Context, *GetTaskLogsRequest) (*GetTaskLogsResponse, error)
 	mustEmbedUnimplementedGatewayServiceServer()
 }
 
@@ -248,6 +286,15 @@ func (UnimplementedGatewayServiceServer) ListConnections(context.Context, *ListC
 }
 func (UnimplementedGatewayServiceServer) RemoveConnection(context.Context, *RemoveConnectionRequest) (*DeleteResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method RemoveConnection not implemented")
+}
+func (UnimplementedGatewayServiceServer) ListTasks(context.Context, *ListTasksRequest) (*ListTasksResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListTasks not implemented")
+}
+func (UnimplementedGatewayServiceServer) GetTask(context.Context, *GetTaskRequest) (*TaskResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetTask not implemented")
+}
+func (UnimplementedGatewayServiceServer) GetTaskLogs(context.Context, *GetTaskLogsRequest) (*GetTaskLogsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetTaskLogs not implemented")
 }
 func (UnimplementedGatewayServiceServer) mustEmbedUnimplementedGatewayServiceServer() {}
 
@@ -496,6 +543,60 @@ func _GatewayService_RemoveConnection_Handler(srv interface{}, ctx context.Conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _GatewayService_ListTasks_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListTasksRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServiceServer).ListTasks(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GatewayService_ListTasks_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServiceServer).ListTasks(ctx, req.(*ListTasksRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _GatewayService_GetTask_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetTaskRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServiceServer).GetTask(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GatewayService_GetTask_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServiceServer).GetTask(ctx, req.(*GetTaskRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _GatewayService_GetTaskLogs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetTaskLogsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServiceServer).GetTaskLogs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GatewayService_GetTaskLogs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServiceServer).GetTaskLogs(ctx, req.(*GetTaskLogsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // GatewayService_ServiceDesc is the grpc.ServiceDesc for GatewayService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -554,6 +655,18 @@ var GatewayService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RemoveConnection",
 			Handler:    _GatewayService_RemoveConnection_Handler,
+		},
+		{
+			MethodName: "ListTasks",
+			Handler:    _GatewayService_ListTasks_Handler,
+		},
+		{
+			MethodName: "GetTask",
+			Handler:    _GatewayService_GetTask_Handler,
+		},
+		{
+			MethodName: "GetTaskLogs",
+			Handler:    _GatewayService_GetTaskLogs_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

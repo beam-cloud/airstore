@@ -157,9 +157,9 @@ func (c *S2Client) AppendStatus(ctx context.Context, taskID, status string, exit
 
 // ReadRecord represents a record read from S2
 type ReadRecord struct {
-	SeqNum    int64           `json:"seq_num"`
-	Timestamp int64           `json:"timestamp"`
-	Body      json.RawMessage `json:"body"`
+	SeqNum    int64  `json:"seq_num"`
+	Timestamp int64  `json:"timestamp"`
+	Body      string `json:"body"` // S2 returns body as a JSON-encoded string
 }
 
 type readResponse struct {
@@ -217,11 +217,26 @@ func (c *S2Client) ReadLogs(ctx context.Context, taskID string, seqNum int64) ([
 	logs := make([]TaskLogEntry, 0, len(records))
 	for _, r := range records {
 		var entry TaskLogEntry
-		if err := json.Unmarshal(r.Body, &entry); err == nil {
+		// Body is a JSON-encoded string, unmarshal it
+		if err := json.Unmarshal([]byte(r.Body), &entry); err == nil {
 			logs = append(logs, entry)
 		}
 	}
 	return logs, nil
+}
+
+// FormatLogs converts log entries to plain text (one line per entry).
+// Used by filesystem and CLI for consistent output formatting.
+func FormatLogs(logs []TaskLogEntry) string {
+	if len(logs) == 0 {
+		return ""
+	}
+	var buf bytes.Buffer
+	for _, e := range logs {
+		buf.WriteString(e.Data)
+		buf.WriteByte('\n')
+	}
+	return buf.String()
 }
 
 func (c *S2Client) url(path string) string {

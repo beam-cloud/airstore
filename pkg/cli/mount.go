@@ -163,8 +163,8 @@ Examples:
 		// Register skills VNode - handles /skills/ with S3-backed storage via gRPC
 		fs.RegisterVNode(vnode.NewContextVNodeGRPC(sourcesConn, authToken))
 
-		// Register tasks VNode - empty placeholder for CLI mounts (no direct DB access)
-		fs.RegisterVNode(vnode.NewEmptyTasksVNode())
+		// Register tasks VNode - fetches tasks from gateway via gRPC
+		fs.RegisterVNode(vnode.NewTasksVNodeGRPC(sourcesConn, authToken))
 
 		// Register storage fallback - handles user-created folders and any unmatched S3 paths
 		fs.SetStorageFallback(vnode.NewStorageVNode(sourcesConn, authToken))

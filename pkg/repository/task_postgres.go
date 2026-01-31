@@ -138,6 +138,7 @@ func (b *PostgresBackend) scanTask(row *sql.Row) (*types.Task, error) {
 }
 
 // ListTasks returns all tasks for a workspace (0 = all workspaces)
+// Limited to 100 most recent tasks
 func (b *PostgresBackend) ListTasks(ctx context.Context, workspaceId uint) ([]*types.Task, error) {
 	query := `
 		SELECT id, external_id, workspace_id, created_by_member_id, status, prompt, image, entrypoint, env, 
@@ -145,6 +146,7 @@ func (b *PostgresBackend) ListTasks(ctx context.Context, workspaceId uint) ([]*t
 		FROM task
 		WHERE ($1 = 0 OR workspace_id = $1)
 		ORDER BY created_at DESC
+		LIMIT 100
 	`
 
 	rows, err := b.db.QueryContext(ctx, query, workspaceId)

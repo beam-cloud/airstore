@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/repository"
+	"github.com/beam-cloud/airstore/pkg/streams"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/labstack/echo/v4"
 )
@@ -15,6 +17,7 @@ type TasksGroup struct {
 	routerGroup *echo.Group
 	backend     repository.BackendRepository
 	taskQueue   repository.TaskQueue
+	s2Client    *streams.S2Client
 }
 
 type CreateTaskRequest struct {
@@ -45,11 +48,13 @@ func NewTasksGroup(
 	routerGroup *echo.Group,
 	backend repository.BackendRepository,
 	taskQueue repository.TaskQueue,
+	s2Client *streams.S2Client,
 ) *TasksGroup {
 	g := &TasksGroup{
 		routerGroup: routerGroup,
 		backend:     backend,
 		taskQueue:   taskQueue,
+		s2Client:    s2Client,
 	}
 	g.registerRoutes()
 	return g
@@ -267,12 +272,12 @@ func (g *TasksGroup) SetTaskResult(c echo.Context) error {
 	return SuccessResponse(c, nil)
 }
 
-// StreamLogs streams task logs via SSE (Server-Sent Events)
+// StreamLogs streams task logs via SSE from S2.
 func (g *TasksGroup) StreamLogs(c echo.Context) error {
-	externalId := c.Param("id")
+	taskID := c.Param("id")
+	ctx := c.Request().Context()
 
-	// Verify task exists
-	task, err := g.backend.GetTask(c.Request().Context(), externalId)
+	task, err := g.backend.GetTask(ctx, taskID)
 	if err != nil {
 		if _, ok := err.(*types.ErrTaskNotFound); ok {
 			return ErrorResponse(c, http.StatusNotFound, "task not found")
@@ -280,81 +285,106 @@ func (g *TasksGroup) StreamLogs(c echo.Context) error {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 
-	if g.taskQueue == nil {
-		return ErrorResponse(c, http.StatusServiceUnavailable, "log streaming not available")
+	if g.s2Client == nil || !g.s2Client.Enabled() {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "log streaming unavailable")
 	}
 
-	// Set SSE headers
-	c.Response().Header().Set("Content-Type", "text/event-stream")
-	c.Response().Header().Set("Cache-Control", "no-cache")
-	c.Response().Header().Set("Connection", "keep-alive")
-	c.Response().Header().Set("X-Accel-Buffering", "no")
-	c.Response().WriteHeader(http.StatusOK)
+	w := &sseWriter{c: c}
+	w.init()
 
-	ctx := c.Request().Context()
+	// Send buffered logs, track cursor for dedup
+	logs, _ := g.s2Client.ReadLogs(ctx, taskID, 0)
+	cursor := w.sendLogs(logs)
 
-	// Send buffered logs first (for late joiners)
-	bufferedLogs, err := g.taskQueue.GetLogBuffer(ctx, externalId)
-	if err == nil {
-		for _, logEntry := range bufferedLogs {
-			_, _ = c.Response().Write([]byte("data: "))
-			_, _ = c.Response().Write(logEntry)
-			_, _ = c.Response().Write([]byte("\n\n"))
-		}
-		c.Response().Flush()
-	}
-
-	// If task is already finished, send final status and close
-	if task.Status == types.TaskStatusComplete || task.Status == types.TaskStatusFailed || task.Status == types.TaskStatusCancelled {
-		statusEvent := map[string]interface{}{
-			"task_id":   task.ExternalId,
-			"status":    task.Status,
-			"exit_code": task.ExitCode,
-			"error":     task.Error,
-			"type":      "status",
-		}
-		statusData, _ := json.Marshal(statusEvent)
-		_, _ = c.Response().Write([]byte("data: "))
-		_, _ = c.Response().Write(statusData)
-		_, _ = c.Response().Write([]byte("\n\n"))
-		c.Response().Flush()
+	if task.IsTerminal() {
+		w.sendStatus(task)
 		return nil
 	}
 
-	// Subscribe to live logs
-	logChan, cleanup, err := g.taskQueue.SubscribeLogs(ctx, externalId)
-	if err != nil {
-		return ErrorResponse(c, http.StatusInternalServerError, "failed to subscribe to logs")
-	}
-	defer cleanup()
+	// Poll for new logs until done
+	tick := time.NewTicker(500 * time.Millisecond)
+	defer tick.Stop()
 
-	// Stream logs until context is cancelled or task completes
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case logEntry, ok := <-logChan:
-			if !ok {
-				return nil
-			}
-			_, _ = c.Response().Write([]byte("data: "))
-			_, _ = c.Response().Write(logEntry)
-			_, _ = c.Response().Write([]byte("\n\n"))
-			c.Response().Flush()
+		case <-tick.C:
+			logs, _ := g.s2Client.ReadLogs(ctx, taskID, 0)
+			cursor = w.sendLogsAfter(logs, cursor)
 
-			// Check if this is a terminal status event
-			var event map[string]interface{}
-			if json.Unmarshal(logEntry, &event) == nil {
-				if status, ok := event["status"].(string); ok {
-					if status == string(types.TaskStatusComplete) ||
-						status == string(types.TaskStatusFailed) ||
-						status == string(types.TaskStatusCancelled) {
-						return nil
-					}
-				}
+			if task, err = g.backend.GetTask(ctx, taskID); err == nil && task.IsTerminal() {
+				w.sendStatus(task)
+				return nil
 			}
 		}
 	}
+}
+
+// sseWriter handles SSE output formatting.
+type sseWriter struct {
+	c echo.Context
+}
+
+func (w *sseWriter) init() {
+	h := w.c.Response().Header()
+	h.Set("Content-Type", "text/event-stream")
+	h.Set("Cache-Control", "no-cache")
+	h.Set("Connection", "keep-alive")
+	h.Set("X-Accel-Buffering", "no")
+	w.c.Response().WriteHeader(http.StatusOK)
+}
+
+func (w *sseWriter) write(v any) {
+	data, _ := json.Marshal(v)
+	r := w.c.Response()
+	r.Write([]byte("data: "))
+	r.Write(data)
+	r.Write([]byte("\n\n"))
+}
+
+func (w *sseWriter) flush() {
+	w.c.Response().Flush()
+}
+
+func (w *sseWriter) sendLogs(logs []streams.TaskLogEntry) int64 {
+	var cursor int64
+	for _, e := range logs {
+		w.write(e)
+		if e.Timestamp > cursor {
+			cursor = e.Timestamp
+		}
+	}
+	if len(logs) > 0 {
+		w.flush()
+	}
+	return cursor
+}
+
+func (w *sseWriter) sendLogsAfter(logs []streams.TaskLogEntry, cursor int64) int64 {
+	dirty := false
+	for _, e := range logs {
+		if e.Timestamp > cursor {
+			w.write(e)
+			cursor = e.Timestamp
+			dirty = true
+		}
+	}
+	if dirty {
+		w.flush()
+	}
+	return cursor
+}
+
+func (w *sseWriter) sendStatus(task *types.Task) {
+	w.write(map[string]any{
+		"type":      "status",
+		"task_id":   task.ExternalId,
+		"status":    task.Status,
+		"exit_code": task.ExitCode,
+		"error":     task.Error,
+	})
+	w.flush()
 }
 
 func taskToResponse(t *types.Task, workspaceExternalId string) TaskResponse {

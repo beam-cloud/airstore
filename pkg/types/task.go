@@ -59,6 +59,13 @@ func (t *Task) IsClaudeCodeTask() bool {
 	return t.Prompt != ""
 }
 
+// IsTerminal returns true if the task is in a terminal state.
+func (t *Task) IsTerminal() bool {
+	return t.Status == TaskStatusComplete ||
+		t.Status == TaskStatusFailed ||
+		t.Status == TaskStatusCancelled
+}
+
 // ErrTaskNotFound is returned when a task cannot be found
 type ErrTaskNotFound struct {
 	ExternalId string
