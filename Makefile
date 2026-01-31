@@ -86,12 +86,9 @@ doctor:
 # ============================================================================
 
 build: check-go shim
-	go build -o bin/gateway ./cmd/gateway
-	go build -o bin/worker ./cmd/worker
-	go build -o bin/cli ./cmd/cli
-
-cli: check-go
-	go build -o bin/cli ./cmd/cli
+	$(BUILD_ENV) go build -o bin/gateway ./cmd/gateway
+	$(BUILD_ENV) go build -o bin/worker ./cmd/worker
+	$(BUILD_ENV) go build -o bin/airstore ./cmd/cli
 
 SHIM_DIR := pkg/filesystem/vnode/embed/shims
 SHIM_SRC := ./cmd/tools/shim
@@ -207,13 +204,40 @@ stop:
 	cd hack && okteto down --file okteto.yaml
 
 # ============================================================================
+# CLI Builds
+# ============================================================================
+
+# OSS build (default) - no login command
+cli: check-go
+	$(BUILD_ENV) go build -o bin/airstore ./cmd/cli
+
+# Managed build (includes login, points to airstore.ai)
+cli-managed: check-go
+	$(BUILD_ENV) go build -tags managed \
+		-ldflags "-X github.com/beam-cloud/airstore/pkg/cli.Release=true" \
+		-o bin/airstore ./cmd/cli
+
+# Dev managed build (includes login, points to local gateway for testing)
+cli-managed-dev: check-go
+	$(BUILD_ENV) go build -tags managed \
+		-o bin/airstore ./cmd/cli
+
+# Release build (managed + optimizations)
+VERSION ?= dev
+cli-release: check-go shim
+	$(BUILD_ENV) go build -tags managed \
+		-ldflags "-s -w -X github.com/beam-cloud/airstore/pkg/cli.Version=$(VERSION) \
+		          -X github.com/beam-cloud/airstore/pkg/cli.Release=true" \
+		-o bin/airstore ./cmd/cli
+
+# ============================================================================
 # Filesystem
 # ============================================================================
 
 MOUNT_POINT ?= /tmp/airstore
 
-fs: cli build-shim
-	./bin/cli mount $(MOUNT_POINT) --verbose
+fs: cli shim
+	./bin/airstore mount $(MOUNT_POINT) --verbose
 
 fs-unmount:
 	@umount $(MOUNT_POINT) 2>/dev/null || diskutil unmount $(MOUNT_POINT) 2>/dev/null || fusermount -u $(MOUNT_POINT) 2>/dev/null || true
@@ -243,7 +267,8 @@ clean-all:
 	@k3d registry delete --all 2>/dev/null || true
 	@docker network prune -f 2>/dev/null || true
 
-.PHONY: check-go setup doctor build cli shim clean protocol baml fmt tidy \
+.PHONY: check-go setup doctor build cli cli-managed cli-managed-dev cli-release \
+        shim clean protocol baml fmt tidy \
         test e2e e2e-check \
         k3d-up k3d-down k3d-rebuild use \
         gateway worker deploy undeploy restart \
