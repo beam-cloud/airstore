@@ -29,6 +29,11 @@ const (
 	PathTasks   = "/tasks"
 )
 
+// Source integration files
+const (
+	SourceStatusFile = "README.md" // Status and description file at integration root
+)
+
 // Reserved folders cannot be deleted. Virtual folders are not S3-backed.
 var (
 	ReservedFolders = map[string]struct{}{

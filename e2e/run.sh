@@ -523,23 +523,26 @@ test_sources() {
     fi
     
     # -------------------------------------------------------------------------
-    # Test 4: Read status.json (should work without connection)
+    # Test 4: Read README.md (should work without connection)
     # -------------------------------------------------------------------------
-    info "Test 4: Reading status.json..."
+    info "Test 4: Reading README.md..."
     
-    if [ -f "$MOUNT_POINT/sources/github/status.json" ]; then
-        STATUS=$(cat "$MOUNT_POINT/sources/github/status.json" 2>/dev/null)
-        if echo "$STATUS" | grep -q '"integration"'; then
-            pass "status.json readable: $(echo "$STATUS" | head -c 100)..."
+    if [ -f "$MOUNT_POINT/sources/github/README.md" ]; then
+        STATUS=$(cat "$MOUNT_POINT/sources/github/README.md" 2>/dev/null)
+        if echo "$STATUS" | grep -q '# GitHub'; then
+            pass "README.md readable: $(echo "$STATUS" | head -c 100)..."
             
             # Check connection status
-            CONNECTED=$(echo "$STATUS" | grep -o '"connected": *[^,}]*' | head -1)
-            info "Connection status: $CONNECTED"
+            if echo "$STATUS" | grep -q 'Connected | Yes'; then
+                info "Connection status: connected"
+            else
+                info "Connection status: not connected"
+            fi
         else
-            info "status.json format unexpected: $STATUS"
+            info "README.md format unexpected: $STATUS"
         fi
     else
-        info "status.json not found for github"
+        info "README.md not found for github"
     fi
     
     # -------------------------------------------------------------------------
@@ -580,10 +583,10 @@ test_sources() {
             info "views/repos.json not available"
         fi
         
-        # Check status.json again
-        if [ -f "$MOUNT_POINT/sources/github/status.json" ]; then
-            STATUS=$(cat "$MOUNT_POINT/sources/github/status.json" 2>/dev/null)
-            if echo "$STATUS" | grep -q '"connected": true'; then
+        # Check README.md again
+        if [ -f "$MOUNT_POINT/sources/github/README.md" ]; then
+            STATUS=$(cat "$MOUNT_POINT/sources/github/README.md" 2>/dev/null)
+            if echo "$STATUS" | grep -q 'Connected | Yes'; then
                 pass "GitHub shows connected after adding token"
             fi
         fi
@@ -826,13 +829,13 @@ test_smart_queries() {
     fi
     pass "/sources/gmail exists"
     
-    # Check status.json to verify connection
-    if [ -f "$MOUNT_POINT/sources/gmail/status.json" ]; then
-        STATUS=$(cat "$MOUNT_POINT/sources/gmail/status.json" 2>/dev/null)
-        if echo "$STATUS" | grep -q '"connected": true'; then
+    # Check README.md to verify connection
+    if [ -f "$MOUNT_POINT/sources/gmail/README.md" ]; then
+        STATUS=$(cat "$MOUNT_POINT/sources/gmail/README.md" 2>/dev/null)
+        if echo "$STATUS" | grep -q 'Connected | Yes'; then
             pass "Gmail is connected"
         else
-            info "Gmail status: $STATUS"
+            info "Gmail status: $(echo "$STATUS" | head -c 100)"
             info "Gmail may not be connected - continuing anyway"
         fi
     fi

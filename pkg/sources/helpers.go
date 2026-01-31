@@ -7,6 +7,8 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+
+	"github.com/beam-cloud/airstore/pkg/types"
 )
 
 // Common file modes
@@ -16,13 +18,14 @@ const (
 	ModeLink = syscall.S_IFLNK | 0777
 )
 
-// StatusInfo represents the status.json content for an integration
-type StatusInfo struct {
-	Integration string `json:"integration"`
-	Connected   bool   `json:"connected"`
-	Scope       string `json:"scope,omitempty"` // "shared" or "personal"
-	Hint        string `json:"hint,omitempty"`  // CLI hint when disconnected
-	Error       string `json:"error,omitempty"`
+// SourceStatus represents the status information for an integration
+type SourceStatus struct {
+	Integration string
+	DisplayName string
+	Description string
+	Connected   bool
+	Scope       string // "shared" or "personal"
+	Hint        string // CLI hint when disconnected
 }
 
 // oauthIntegrations lists integrations that use OAuth
@@ -34,26 +37,91 @@ var oauthIntegrations = map[string]bool{
 	"slack":  true,
 }
 
-// GenerateStatusJSON creates the status.json content for an integration
-func GenerateStatusJSON(integration string, connected bool, scope string, workspaceId string) []byte {
-	status := StatusInfo{
+// GenerateSourceReadme creates the README.md content for an integration
+func GenerateSourceReadme(integration string, connected bool, scope string, workspaceId string) []byte {
+	status := SourceStatus{
 		Integration: integration,
 		Connected:   connected,
 		Scope:       scope,
 	}
 
+	// Get integration metadata for display name and description
+	if meta, ok := types.GetIntegrationMeta(types.ToolName(integration)); ok {
+		status.DisplayName = meta.DisplayName
+		status.Description = meta.Description
+	} else {
+		// Fallback: capitalize the integration name
+		status.DisplayName = strings.Title(integration)
+		status.Description = fmt.Sprintf("%s integration", status.DisplayName)
+	}
+
+	// Generate CLI hint when disconnected
 	if !connected {
 		if oauthIntegrations[integration] {
 			// OAuth integrations use 'connection connect' for browser-based auth
-			status.Hint = fmt.Sprintf("cli connection connect %s", integration)
+			status.Hint = fmt.Sprintf("beta9 connection connect %s", integration)
 		} else {
 			// Token/API-key integrations use 'connection add'
-			status.Hint = fmt.Sprintf("cli connection add %s %s --token <your-token>", workspaceId, integration)
+			status.Hint = fmt.Sprintf("beta9 connection add %s %s --token <your-token>", workspaceId, integration)
 		}
 	}
 
-	data, _ := json.MarshalIndent(status, "", "  ")
-	return append(data, '\n')
+	return generateReadmeMarkdown(status)
+}
+
+// generateReadmeMarkdown creates the markdown content for the README
+func generateReadmeMarkdown(status SourceStatus) []byte {
+	var b strings.Builder
+
+	// Title
+	b.WriteString("# ")
+	b.WriteString(status.DisplayName)
+	b.WriteString("\n\n")
+
+	// Description
+	b.WriteString(status.Description)
+	b.WriteString("\n\n")
+
+	// Status section
+	b.WriteString("## Status\n\n")
+	b.WriteString("| Key | Value |\n")
+	b.WriteString("|-----|-------|\n")
+
+	// Connected status
+	connectedStr := "No"
+	if status.Connected {
+		connectedStr = "Yes"
+	}
+	b.WriteString("| Connected | ")
+	b.WriteString(connectedStr)
+	b.WriteString(" |\n")
+
+	// Scope (only show if connected)
+	if status.Connected && status.Scope != "" {
+		b.WriteString("| Scope | ")
+		b.WriteString(status.Scope)
+		b.WriteString(" |\n")
+	}
+
+	b.WriteString("\n")
+
+	// Getting started or connect hint
+	if status.Connected {
+		b.WriteString("## Getting Started\n\n")
+		b.WriteString("Create smart queries to access your data:\n\n")
+		b.WriteString("```bash\n")
+		b.WriteString(fmt.Sprintf("mkdir /sources/%s/my-query\n", status.Integration))
+		b.WriteString(fmt.Sprintf("ls /sources/%s/my-query/\n", status.Integration))
+		b.WriteString("```\n")
+	} else {
+		b.WriteString("## Connect\n\n")
+		b.WriteString("This integration is not connected. To connect, run:\n\n")
+		b.WriteString("```bash\n")
+		b.WriteString(status.Hint)
+		b.WriteString("\n```\n")
+	}
+
+	return []byte(b.String())
 }
 
 // GenerateErrorJSON creates a JSON error response

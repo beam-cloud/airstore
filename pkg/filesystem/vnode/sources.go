@@ -206,9 +206,9 @@ func (v *SourcesVNode) Getattr(path string) (*FileInfo, error) {
 	ctx, cancel := v.ctx()
 	defer cancel()
 
-	// status.json at integration root
-	if subpath == "status.json" {
-		resp, err := v.client.Stat(ctx, &pb.SourceStatRequest{Path: integration + "/status.json"})
+	// README.md at integration root
+	if subpath == types.SourceStatusFile {
+		resp, err := v.client.Stat(ctx, &pb.SourceStatRequest{Path: integration + "/" + types.SourceStatusFile})
 		if err != nil || resp == nil || !resp.Ok || resp.Info == nil {
 			return nil, fs.ErrNotExist
 		}
@@ -323,7 +323,7 @@ func (v *SourcesVNode) Readdir(path string) ([]DirEntry, error) {
 		}
 	}
 
-	// /sources/{integration} - list status.json + smart queries
+	// /sources/{integration} - list README.md + smart queries
 	if subpath == "" {
 		return v.listIntegration(ctx, path, integration)
 	}
@@ -332,12 +332,12 @@ func (v *SourcesVNode) Readdir(path string) ([]DirEntry, error) {
 	return nil, fs.ErrNotExist
 }
 
-// listIntegration returns integration root entries: status.json + smart queries.
+// listIntegration returns integration root entries: README.md + smart queries.
 // Native provider content (messages/, labels/, etc.) is not exposed directly.
 func (v *SourcesVNode) listIntegration(ctx context.Context, path, integration string) ([]DirEntry, error) {
 	v.trackRecentDir(path) // Track for background refresh
 
-	// Use gateway ReadDir so we include status.json and query entries consistently
+	// Use gateway ReadDir so we include README.md and query entries consistently
 	resp, err := v.client.ReadDir(ctx, &pb.SourceReadDirRequest{Path: integration})
 	if err != nil || resp == nil || !resp.Ok {
 		return nil, nil
@@ -454,10 +454,10 @@ func (v *SourcesVNode) Read(path string, buf []byte, off int64, fh FileHandle) (
 	ctx, cancel := v.ctx()
 	defer cancel()
 
-	// status.json at integration root
-	if integration, subpath := v.parsePath(path); integration != "" && subpath == "status.json" {
+	// README.md at integration root
+	if integration, subpath := v.parsePath(path); integration != "" && subpath == types.SourceStatusFile {
 		resp, err := v.client.Read(ctx, &pb.SourceReadRequest{
-			Path:   integration + "/status.json",
+			Path:   integration + "/" + types.SourceStatusFile,
 			Offset: off,
 			Length: int64(len(buf)),
 		})

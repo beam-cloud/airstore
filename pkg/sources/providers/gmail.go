@@ -59,7 +59,7 @@ const gmailReadme = `# Gmail Integration
 ## Quick Start
 - ` + "`cat unread.json`" + ` - See all unread emails
 - ` + "`cat recent.json`" + ` - See 20 most recent emails
-- ` + "`cat status.json`" + ` - Check connection status
+- ` + "`cat README.md`" + ` - Check connection status
 
 ## Structure
 - ` + "`messages/unread/`" + ` - Unread emails by sender

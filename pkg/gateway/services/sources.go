@@ -180,14 +180,14 @@ func (s *SourceService) Stat(ctx context.Context, req *pb.SourceStatRequest) (*p
 		}, nil
 	}
 
-	// Handle status.json specially (no caching needed, cheap to generate)
-	if relPath == "status.json" {
+	// Handle README.md specially (no caching needed, cheap to generate)
+	if relPath == types.SourceStatusFile {
 		workspaceId := ""
 		scope := ""
 		if connected && pctx.Credentials != nil {
 			scope = "shared" // TODO: detect personal vs shared
 		}
-		data := sources.GenerateStatusJSON(integration, connected, scope, workspaceId)
+		data := sources.GenerateSourceReadme(integration, connected, scope, workspaceId)
 		return &pb.SourceStatResponse{
 			Ok: true,
 			Info: &pb.SourceFileInfo{
@@ -277,7 +277,7 @@ func (s *SourceService) ReadDir(ctx context.Context, req *pb.SourceReadDirReques
 	// Get credentials for this integration
 	pctx, connected := s.loadCredentials(ctx, pctx, integration)
 
-	// Integration root (e.g., /sources/gmail) - show status.json + smart queries only
+	// Integration root (e.g., /sources/gmail) - show README.md + smart queries only
 	if relPath == "" {
 		return s.readDirIntegrationRoot(ctx, pctx, integration, connected)
 	}
@@ -330,17 +330,17 @@ func (s *SourceService) getQueryChildCount(ctx context.Context, workspaceId uint
 	return len(results) + 1 // Results + .query.as
 }
 
-// readDirIntegrationRoot returns entries for integration root: status.json + smart queries
+// readDirIntegrationRoot returns entries for integration root: README.md + smart queries
 func (s *SourceService) readDirIntegrationRoot(ctx context.Context, pctx *sources.ProviderContext, integration string, connected bool) (*pb.SourceReadDirResponse, error) {
-	// Generate status.json to get its size
+	// Generate README.md to get its size
 	scope := ""
 	if connected && pctx.Credentials != nil {
 		scope = "shared"
 	}
-	statusData := sources.GenerateStatusJSON(integration, connected, scope, "")
+	statusData := sources.GenerateSourceReadme(integration, connected, scope, "")
 
 	entries := []*pb.SourceDirEntry{
-		{Name: "status.json", Mode: sources.ModeFile, Size: int64(len(statusData)), Mtime: sources.NowUnix()},
+		{Name: types.SourceStatusFile, Mode: sources.ModeFile, Size: int64(len(statusData)), Mtime: sources.NowUnix()},
 	}
 
 	// List smart queries for this integration
@@ -602,13 +602,13 @@ func (s *SourceService) Read(ctx context.Context, req *pb.SourceReadRequest) (*p
 	// Get credentials for this integration
 	pctx, connected := s.loadCredentials(ctx, pctx, integration)
 
-	// Handle status.json
-	if relPath == "status.json" {
+	// Handle README.md
+	if relPath == types.SourceStatusFile {
 		scope := ""
 		if connected && pctx.Credentials != nil {
 			scope = "shared"
 		}
-		data := sources.GenerateStatusJSON(integration, connected, scope, "")
+		data := sources.GenerateSourceReadme(integration, connected, scope, "")
 		return readSlice(data, req.Offset, req.Length), nil
 	}
 

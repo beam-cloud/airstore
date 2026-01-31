@@ -762,11 +762,11 @@ func (g *FilesystemGroup) listSources(c echo.Context, ctx context.Context, relPa
 
 	// Integration root
 	if subPath == "" {
-		statusPath := types.SourcePath(types.JoinPath(integration, "status.json"))
+		statusPath := types.SourcePath(types.JoinPath(integration, types.SourceStatusFile))
 		entries := []types.VirtualFile{
 			*types.NewVirtualFile(
 				hashPath(statusPath),
-				"status.json",
+				types.SourceStatusFile,
 				statusPath,
 				types.VFTypeSource,
 			).WithFolder(false).WithReadOnly(true).WithMetadata(types.MetaKeyProvider, integration),
@@ -810,11 +810,11 @@ func (g *FilesystemGroup) statSources(c echo.Context, ctx context.Context, fullP
 		return SuccessResponse(c, vf)
 	}
 
-	// status.json
-	if subPath == "status.json" {
+	// README.md
+	if subPath == types.SourceStatusFile {
 		vf := types.NewVirtualFile(
 			hashPath(fullPath),
-			"status.json",
+			types.SourceStatusFile,
 			fullPath,
 			types.VFTypeSource,
 		).WithFolder(false).WithReadOnly(true).WithMetadata(types.MetaKeyProvider, integration)
@@ -838,8 +838,8 @@ func (g *FilesystemGroup) readSources(c echo.Context, ctx context.Context, relPa
 
 	integration, subPath := splitFirstPath(relPath)
 
-	// status.json - generate dynamically
-	if subPath == "status.json" {
+	// README.md - generate dynamically
+	if subPath == types.SourceStatusFile {
 		connected := false
 		scope := ""
 		workspaceId := ""
@@ -855,8 +855,8 @@ func (g *FilesystemGroup) readSources(c echo.Context, ctx context.Context, relPa
 			}
 		}
 
-		data := sources.GenerateStatusJSON(integration, connected, scope, workspaceId)
-		return c.Blob(http.StatusOK, "application/json", data)
+		data := sources.GenerateSourceReadme(integration, connected, scope, workspaceId)
+		return c.Blob(http.StatusOK, "text/markdown", data)
 	}
 
 	// Use SourceService.Read for all other source files
