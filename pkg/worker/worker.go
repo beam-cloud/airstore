@@ -101,7 +101,7 @@ func NewWorker() (*Worker, error) {
 		return nil, fmt.Errorf("failed to create redis client: %w", err)
 	}
 
-	// Create task queue
+	// Create task queue (for pulling tasks, not for logs)
 	taskQueue := repository.NewRedisTaskQueue(redisClient, poolName)
 
 	// Determine runtime type (default to gVisor for security)
@@ -110,7 +110,7 @@ func NewWorker() (*Worker, error) {
 		runtimeType = types.ContainerRuntimeGvisor.String()
 	}
 
-	// Create sandbox manager with CLIP image manager
+	// Create sandbox manager with CLIP image manager and S2 for logging
 	sandboxManager, err := NewSandboxManager(ctx, SandboxManagerConfig{
 		RuntimeType:      runtimeType,
 		WorkerID:         workerId,
@@ -121,7 +121,8 @@ func NewWorker() (*Worker, error) {
 		RuntimeConfig: runtime.Config{
 			Type: runtimeType,
 		},
-		TaskQueue: taskQueue, // For streaming task logs
+		S2Token: config.Streams.Token,
+		S2Basin: config.Streams.Basin,
 	})
 	if err != nil {
 		cancel()
