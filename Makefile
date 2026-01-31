@@ -207,6 +207,26 @@ stop:
 	cd hack && okteto down --file okteto.yaml
 
 # ============================================================================
+# Menu Bar App (macOS)
+# ============================================================================
+
+menubar: check-go
+	$(BUILD_ENV) go build -o bin/airstore-menubar ./cmd/menubar
+
+menubar-app: menubar
+	@echo "Assembling Airstore.app..."
+	@mkdir -p bin/Airstore.app/Contents/MacOS
+	@mkdir -p bin/Airstore.app/Contents/Resources
+	@cp bin/airstore-menubar bin/Airstore.app/Contents/MacOS/airstore-menubar
+	@cp cmd/menubar/Info.plist bin/Airstore.app/Contents/Info.plist
+	@codesign -s - --force bin/Airstore.app 2>/dev/null || true
+	@echo "Built bin/Airstore.app"
+
+menubar-install: menubar-app
+	@cp -R bin/Airstore.app /Applications/Airstore.app
+	@echo "Installed to /Applications/Airstore.app"
+
+# ============================================================================
 # Filesystem
 # ============================================================================
 
@@ -248,5 +268,6 @@ clean-all:
         k3d-up k3d-down k3d-rebuild use \
         gateway worker deploy undeploy restart \
         dev-gateway dev-worker start stop \
+        menubar menubar-app menubar-install \
         fs fs-unmount \
         logs logs-gateway redis redis-stop clean-cluster clean-all
