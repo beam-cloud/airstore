@@ -75,8 +75,8 @@ type ManagedSandbox struct {
 	Cancel        context.CancelFunc
 	RootfsCleanup func()                   // Cleanup function for the CLIP rootfs mount
 	Overlay       *common.ContainerOverlay // Overlay filesystem for writable layer
-	Output        *SandboxOutput           // Captured stdout/stderr (base output)
-	OutputWriter  io.Writer                // Custom output writer (if set, takes precedence)
+	OutputWriter  io.Writer                // Output destination (stdout/stderr combined)
+	OutputFlusher func()                   // Flush pending output on completion
 }
 
 // SandboxManagerConfig configures the SandboxManager
@@ -381,22 +381,21 @@ func (m *SandboxManager) Create(cfg types.SandboxConfig) (*types.SandboxState, e
 		CreatedAt: time.Now(),
 	}
 
-	// Store managed sandbox with cleanup functions and output capture
-	// Max output size: 1MB to prevent memory issues
+	// Store managed sandbox with cleanup functions
 	m.sandboxes[cfg.ID] = &ManagedSandbox{
 		Config:        cfg,
 		State:         state,
 		BundlePath:    bundlePath,
 		RootfsCleanup: cleanupRootfs,
 		Overlay:       overlay,
-		Output:        NewSandboxOutput(cfg.ID, 1<<20),
 	}
 
 	return &state, nil
 }
 
-// SetOutputWriter sets a custom output writer for a sandbox (must be called before Start)
-func (m *SandboxManager) SetOutputWriter(sandboxID string, output io.Writer) error {
+// SetOutput configures the output writer and flusher for a sandbox.
+// Must be called before Start.
+func (m *SandboxManager) SetOutput(sandboxID string, writer io.Writer, flusher func()) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -405,7 +404,8 @@ func (m *SandboxManager) SetOutputWriter(sandboxID string, output io.Writer) err
 		return fmt.Errorf("sandbox %s not found", sandboxID)
 	}
 
-	sandbox.OutputWriter = output
+	sandbox.OutputWriter = writer
+	sandbox.OutputFlusher = flusher
 	return nil
 }
 
@@ -433,13 +433,10 @@ func (m *SandboxManager) Start(sandboxID string) error {
 		Str("bundle_path", sandbox.BundlePath).
 		Msg("starting sandbox")
 
-	// Capture the output writer for the goroutine
-	// Use custom OutputWriter if set, otherwise use the default SandboxOutput
-	var outputWriter io.Writer
-	if sandbox.OutputWriter != nil {
-		outputWriter = sandbox.OutputWriter
-	} else {
-		outputWriter = sandbox.Output
+	// Use configured output writer, or discard if none set
+	outputWriter := sandbox.OutputWriter
+	if outputWriter == nil {
+		outputWriter = io.Discard
 	}
 
 	// Start the container in a goroutine
@@ -478,14 +475,6 @@ func (m *SandboxManager) Start(sandboxID string) error {
 			}
 		}
 		m.mu.Unlock()
-
-		// Log sandbox output (shows what the command printed)
-		m.mu.RLock()
-		sandboxOutput := m.sandboxes[sandboxID]
-		m.mu.RUnlock()
-		if sandboxOutput != nil && sandboxOutput.Output != nil && sandboxOutput.Output.Len() > 0 {
-			sandboxOutput.Output.Log("sandbox output")
-		}
 
 		log.Info().
 			Str("sandbox_id", sandboxID).
@@ -882,14 +871,13 @@ func (m *SandboxManager) RunTask(ctx context.Context, task types.Task) (*types.T
 	// Ensure cleanup
 	defer m.Delete(sandboxID, true)
 
-	// Set up streaming output - prefer S2, fall back to legacy task queue
-	var streamingOutput *StreamingOutput
-	if m.s2Client != nil && m.s2Client.Enabled() {
-		streamingOutput = NewStreamingOutput(ctx, task.ExternalId, NewS2LogPublisher(m.s2Client), 1<<20)
-		if err := m.SetOutputWriter(sandboxID, streamingOutput); err != nil {
-			log.Warn().Err(err).Str("task_id", task.ExternalId).Msg("failed to set streaming output")
-		}
-		log.Debug().Str("task_id", task.ExternalId).Msg("S2 log streaming enabled")
+	// Set up task output: S2 streams + worker console
+	taskOutput := NewTaskOutput(task.ExternalId, "stdout",
+		NewS2Writer(ctx, m.s2Client, task.ExternalId, "stdout"),
+		NewConsoleWriter(task.ExternalId, "stdout"),
+	)
+	if err := m.SetOutput(sandboxID, taskOutput, taskOutput.Flush); err != nil {
+		log.Warn().Err(err).Str("task_id", task.ExternalId).Msg("failed to set output")
 	}
 
 	// Publish starting status
@@ -933,9 +921,7 @@ func (m *SandboxManager) RunTask(ctx context.Context, task types.Task) (*types.T
 
 			if state.Status == types.SandboxStatusStopped || state.Status == types.SandboxStatusFailed {
 				// Flush any remaining output
-				if streamingOutput != nil {
-					streamingOutput.Flush()
-				}
+				taskOutput.Flush()
 
 				// Publish completion status
 				status := types.TaskStatusComplete
