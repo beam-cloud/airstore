@@ -8,9 +8,12 @@ import (
 
 const launchAgentLabel = "com.beam-cloud.airstore"
 
-func launchAgentPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "Library", "LaunchAgents", launchAgentLabel+".plist")
+func launchAgentPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get home directory: %w", err)
+	}
+	return filepath.Join(home, "Library", "LaunchAgents", launchAgentLabel+".plist"), nil
 }
 
 func appBinaryPath() string {
@@ -41,12 +44,18 @@ const plistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 
 // InstallLaunchAgent creates a LaunchAgent plist so the app starts at login.
 func InstallLaunchAgent() error {
-	path := launchAgentPath()
+	path, err := launchAgentPath()
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("failed to create LaunchAgents directory: %w", err)
 	}
 
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get home directory: %w", err)
+	}
 	logDir := filepath.Join(home, "Library", "Logs", "Airstore")
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		return fmt.Errorf("failed to create log directory: %w", err)
@@ -61,11 +70,19 @@ func InstallLaunchAgent() error {
 
 // UninstallLaunchAgent removes the LaunchAgent plist.
 func UninstallLaunchAgent() error {
-	return os.Remove(launchAgentPath())
+	path, err := launchAgentPath()
+	if err != nil {
+		return err
+	}
+	return os.Remove(path)
 }
 
 // IsLaunchAgentInstalled checks if the LaunchAgent plist exists.
 func IsLaunchAgentInstalled() bool {
-	_, err := os.Stat(launchAgentPath())
+	path, err := launchAgentPath()
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(path)
 	return err == nil
 }

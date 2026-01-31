@@ -249,6 +249,9 @@ func (m *MountManager) Stop() {
 		m.mu.Unlock()
 
 		if fs != nil {
+			// Primary unmount via FUSE layer (cross-platform)
+			fs.Unmount()
+			// OS-level fallback for edge cases (darwin-only)
 			go bestEffortUnmount(mountPoint)
 		}
 

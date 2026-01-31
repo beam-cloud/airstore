@@ -1,21 +1,21 @@
 package menubar
 
 import (
-	"github.com/beam-cloud/airstore/pkg/mount"
 	"fyne.io/systray"
+	"github.com/beam-cloud/airstore/pkg/mount"
 )
 
 // ui holds the systray menu items and updates them based on state changes.
 type ui struct {
 	app *App
 
-	mStatus   *systray.MenuItem
-	mGateway  *systray.MenuItem
-	mToggle   *systray.MenuItem
-	mOpen     *systray.MenuItem
-	mReload   *systray.MenuItem
-	mLogin    *systray.MenuItem
-	mQuit     *systray.MenuItem
+	mStatus  *systray.MenuItem
+	mGateway *systray.MenuItem
+	mToggle  *systray.MenuItem
+	mOpen    *systray.MenuItem
+	mReload  *systray.MenuItem
+	mLogin   *systray.MenuItem
+	mQuit    *systray.MenuItem
 }
 
 func newUI(app *App) *ui {

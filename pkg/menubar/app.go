@@ -10,9 +10,9 @@ import (
 
 // App wires a MountManager to the systray menu bar UI.
 type App struct {
-	prefs   Preferences
-	mgr     *mount.MountManager
-	ui      *ui
+	prefs    Preferences
+	mgr      *mount.MountManager
+	ui       *ui
 	quitting bool
 }
 
@@ -21,9 +21,9 @@ func NewApp(prefs Preferences) *App {
 	a := &App{prefs: prefs}
 
 	a.mgr = mount.NewMountManager(mount.Config{
-		MountPoint:  prefs.MountPoint,
-		ConfigPath:  prefs.ConfigPath,
-		Verbose:     false,
+		MountPoint: prefs.MountPoint,
+		ConfigPath: prefs.ConfigPath,
+		Verbose:    false,
 	}, a.onStateChange)
 
 	return a

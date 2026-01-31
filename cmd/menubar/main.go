@@ -6,10 +6,10 @@ import (
 	"os"
 	"runtime"
 
+	"fyne.io/systray"
 	"github.com/beam-cloud/airstore/pkg/menubar"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	"fyne.io/systray"
 )
 
 func main() {
