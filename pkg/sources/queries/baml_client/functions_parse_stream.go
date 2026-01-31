@@ -119,6 +119,53 @@ func (*parse_stream) InferGDriveQuery(text string, opts ...CallOptionFunc) (stre
 	return casted, nil
 }
 
+// / Parse version of InferGitHubQuery (Takes in string and returns stream_types.GitHubQueryResult)
+func (*parse_stream) InferGitHubQuery(text string, opts ...CallOptionFunc) (stream_types.GitHubQueryResult, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"text": text, "stream": true},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		// This should never happen. if it does, please file an issue at https://github.com/boundaryml/baml/issues
+		// and include the type of the args you're passing in.
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: InferGitHubQuery: %w", err)
+		panic(wrapped_err)
+	}
+
+	result, err := bamlRuntime.CallFunctionParse(context.Background(), "InferGitHubQuery", encoded)
+	if err != nil {
+		return stream_types.GitHubQueryResult{}, err
+	}
+
+	casted := (result).(stream_types.GitHubQueryResult)
+
+	return casted, nil
+}
+
 // / Parse version of InferGmailQuery (Takes in string and returns stream_types.GmailQueryResult)
 func (*parse_stream) InferGmailQuery(text string, opts ...CallOptionFunc) (stream_types.GmailQueryResult, error) {
 

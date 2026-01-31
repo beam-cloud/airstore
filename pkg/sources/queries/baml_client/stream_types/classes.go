@@ -74,6 +74,72 @@ func (c GDriveQueryResult) BamlTypeName() string {
 	return "GDriveQueryResult"
 }
 
+type GitHubQueryResult struct {
+	Github_query    *string `json:"github_query"`
+	Search_type     *string `json:"search_type"`
+	Content_type    *string `json:"content_type"`
+	Limit           *int64  `json:"limit"`
+	Filename_format *string `json:"filename_format"`
+}
+
+func (c *GitHubQueryResult) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_STREAM_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_STREAM_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "GitHubQueryResult" {
+		panic(fmt.Sprintf("expected GitHubQueryResult, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "github_query":
+			c.Github_query = baml.Decode(valueHolder).Interface().(*string)
+
+		case "search_type":
+			c.Search_type = baml.Decode(valueHolder).Interface().(*string)
+
+		case "content_type":
+			c.Content_type = baml.Decode(valueHolder).Interface().(*string)
+
+		case "limit":
+			c.Limit = baml.Decode(valueHolder).Interface().(*int64)
+
+		case "filename_format":
+			c.Filename_format = baml.Decode(valueHolder).Interface().(*string)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class GitHubQueryResult", key))
+
+		}
+	}
+
+}
+
+func (c GitHubQueryResult) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["github_query"] = c.Github_query
+
+	fields["search_type"] = c.Search_type
+
+	fields["content_type"] = c.Content_type
+
+	fields["limit"] = c.Limit
+
+	fields["filename_format"] = c.Filename_format
+
+	return baml.EncodeClass("GitHubQueryResult", fields, nil)
+}
+
+func (c GitHubQueryResult) BamlTypeName() string {
+	return "GitHubQueryResult"
+}
+
 type GmailQueryEvaluation struct {
 	Is_satisfactory *bool   `json:"is_satisfactory"`
 	Refined_query   *string `json:"refined_query"`

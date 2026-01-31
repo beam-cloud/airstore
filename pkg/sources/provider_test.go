@@ -135,6 +135,7 @@ func TestDefaultFilenameFormat(t *testing.T) {
 		{"gmail", "{date}_{from}_{subject}_{id}.txt"},
 		{"gdrive", "{name}_{id}"},
 		{"notion", "{title}_{id}.md"},
+		{"github", "{repo}_{type}_{number}_{id}.json"},
 		{"unknown", "{id}"},
 	}
 

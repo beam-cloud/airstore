@@ -102,10 +102,23 @@ type ImageConfig struct {
 	MountPath string   `key:"mountPath" json:"mount_path"`
 }
 
+// WorkspaceStorageConfig for per-workspace S3 buckets (bucket: {prefix}-{workspace_id})
+type WorkspaceStorageConfig struct {
+	DefaultBucketPrefix string `key:"defaultBucketPrefix" json:"default_bucket_prefix"`
+	DefaultAccessKey    string `key:"defaultAccessKey" json:"default_access_key"`
+	DefaultSecretKey    string `key:"defaultSecretKey" json:"default_secret_key"`
+	DefaultEndpointUrl  string `key:"defaultEndpointUrl" json:"default_endpoint_url"`
+	DefaultRegion       string `key:"defaultRegion" json:"default_region"`
+}
+
+func (c WorkspaceStorageConfig) IsConfigured() bool {
+	return c.DefaultBucketPrefix != "" && c.DefaultRegion != ""
+}
+
 type FilesystemConfig struct {
-	MountPoint string   `key:"mountPoint" json:"mount_point"`
-	Verbose    bool     `key:"verbose" json:"verbose"`
-	Context    S3Config `key:"context" json:"context"`
+	MountPoint       string                 `key:"mountPoint" json:"mount_point"`
+	Verbose          bool                   `key:"verbose" json:"verbose"`
+	WorkspaceStorage WorkspaceStorageConfig `key:"workspaceStorage" json:"workspace_storage"`
 }
 
 // ----------------------------------------------------------------------------
@@ -282,9 +295,9 @@ func (c *MCPServerConfig) RedactConfig() *MCPServerConfig {
 
 // AdminConfig configures the admin UI
 type AdminConfig struct {
-	Enabled     bool        `key:"enabled" json:"enabled"`
-	SessionKey  string      `key:"sessionKey" json:"session_key"` // Secret for JWT signing
-	OAuth       OAuthConfig `key:"oauth" json:"oauth"`
+	Enabled    bool        `key:"enabled" json:"enabled"`
+	SessionKey string      `key:"sessionKey" json:"session_key"` // Secret for JWT signing
+	OAuth      OAuthConfig `key:"oauth" json:"oauth"`
 }
 
 // OAuthConfig configures OAuth providers
@@ -296,7 +309,7 @@ type OAuthConfig struct {
 type GoogleOAuthConfig struct {
 	ClientID      string   `key:"clientId" json:"client_id"`
 	ClientSecret  string   `key:"clientSecret" json:"client_secret"`
-	RedirectURL   string   `key:"redirectUrl" json:"redirect_url"` // e.g., http://localhost:1994/auth/google/callback
+	RedirectURL   string   `key:"redirectUrl" json:"redirect_url"`     // e.g., http://localhost:1994/auth/google/callback
 	AllowedEmails []string `key:"allowedEmails" json:"allowed_emails"` // Optional whitelist, empty = allow all
 }
 
@@ -304,10 +317,13 @@ type GoogleOAuthConfig struct {
 // Integration OAuth Configuration (for workspace connections)
 // ----------------------------------------------------------------------------
 
-// IntegrationOAuth configures OAuth for workspace integrations (gmail, gdrive, etc.)
+// IntegrationOAuth configures OAuth for workspace integrations (gmail, gdrive, github, etc.)
 // This is separate from admin.oauth which is for admin UI login only.
 type IntegrationOAuth struct {
-	Google IntegrationGoogleOAuth `key:"google" json:"google"`
+	Google IntegrationGoogleOAuth  `key:"google" json:"google"`
+	GitHub IntegrationGitHubOAuth  `key:"github" json:"github"`
+	Notion IntegrationNotionOAuth  `key:"notion" json:"notion"`
+	Slack  IntegrationSlackOAuth   `key:"slack" json:"slack"`
 }
 
 // IntegrationGoogleOAuth configures Google OAuth for workspace integrations
@@ -317,3 +333,23 @@ type IntegrationGoogleOAuth struct {
 	RedirectURL  string `key:"redirectUrl" json:"redirect_url"` // e.g., http://localhost:1994/api/v1/oauth/google/callback
 }
 
+// IntegrationGitHubOAuth configures GitHub OAuth for workspace integrations
+type IntegrationGitHubOAuth struct {
+	ClientID     string `key:"clientId" json:"client_id"`
+	ClientSecret string `key:"clientSecret" json:"client_secret"`
+	RedirectURL  string `key:"redirectUrl" json:"redirect_url"` // e.g., http://localhost:1994/api/v1/oauth/github/callback
+}
+
+// IntegrationNotionOAuth configures Notion OAuth for workspace integrations
+type IntegrationNotionOAuth struct {
+	ClientID     string `key:"clientId" json:"client_id"`
+	ClientSecret string `key:"clientSecret" json:"client_secret"`
+	RedirectURL  string `key:"redirectUrl" json:"redirect_url"` // e.g., http://localhost:1994/api/v1/oauth/notion/callback
+}
+
+// IntegrationSlackOAuth configures Slack OAuth for workspace integrations
+type IntegrationSlackOAuth struct {
+	ClientID     string `key:"clientId" json:"client_id"`
+	ClientSecret string `key:"clientSecret" json:"client_secret"`
+	RedirectURL  string `key:"redirectUrl" json:"redirect_url"` // e.g., http://localhost:1994/api/v1/oauth/slack/callback
+}

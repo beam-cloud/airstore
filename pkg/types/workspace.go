@@ -1,6 +1,14 @@
 package types
 
-import "time"
+import (
+	"strings"
+	"time"
+)
+
+// WorkspaceBucketName returns the S3 bucket name: {prefix}-{workspaceExternalId}
+func WorkspaceBucketName(prefix, workspaceExternalId string) string {
+	return strings.ToLower(prefix + "-" + workspaceExternalId)
+}
 
 // Workspace represents a workspace that contains tasks
 type Workspace struct {

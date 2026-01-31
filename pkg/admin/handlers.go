@@ -3,20 +3,21 @@ package admin
 import (
 	"net/http"
 
+	"github.com/beam-cloud/airstore/pkg/clients"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/labstack/echo/v4"
+	"github.com/rs/zerolog/log"
 )
 
-// APIGroup handles admin API routes
 type APIGroup struct {
-	backend repository.BackendRepository
-	session *SessionManager
+	backend       repository.BackendRepository
+	session       *SessionManager
+	storageClient *clients.StorageClient
 }
 
-// NewAPIGroup creates and registers all API routes
-func NewAPIGroup(g *echo.Group, backend repository.BackendRepository, session *SessionManager) *APIGroup {
-	api := &APIGroup{backend: backend, session: session}
+func NewAPIGroup(g *echo.Group, backend repository.BackendRepository, session *SessionManager, storageClient *clients.StorageClient) *APIGroup {
+	api := &APIGroup{backend: backend, session: session, storageClient: storageClient}
 
 	g.GET("/user", api.GetCurrentUser)
 
@@ -63,6 +64,8 @@ func (a *APIGroup) ListWorkspaces(c echo.Context) error {
 }
 
 func (a *APIGroup) CreateWorkspace(c echo.Context) error {
+	ctx := c.Request().Context()
+
 	var req struct {
 		Name string `json:"name"`
 	}
@@ -73,10 +76,19 @@ func (a *APIGroup) CreateWorkspace(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "name required")
 	}
 
-	workspace, err := a.backend.CreateWorkspace(c.Request().Context(), req.Name)
+	// Create workspace in database
+	workspace, err := a.backend.CreateWorkspace(ctx, req.Name)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
+
+	// Create S3 bucket for workspace storage (non-fatal if fails)
+	if a.storageClient != nil {
+		if _, err := a.storageClient.CreateWorkspaceBucket(ctx, workspace.ExternalId); err != nil {
+			log.Error().Err(err).Str("workspace", workspace.ExternalId).Msg("bucket creation failed")
+		}
+	}
+
 	return c.JSON(http.StatusCreated, workspace)
 }
 

@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"net/http"
 
+	"github.com/beam-cloud/airstore/pkg/clients"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/labstack/echo/v4"
@@ -16,22 +17,25 @@ var staticFiles embed.FS
 
 // Service is the admin UI service
 type Service struct {
-	config  types.AdminConfig
-	backend repository.BackendRepository
-	session *SessionManager
-	oauth   *OAuthService
+	config        types.AdminConfig
+	backend       repository.BackendRepository
+	session       *SessionManager
+	oauth         *OAuthService
+	storageClient *clients.StorageClient
 }
 
-// NewService creates a new Admin service
-func NewService(config types.AdminConfig, backend repository.BackendRepository) *Service {
+// NewService creates a new Admin service.
+// storageClient can be nil if workspace storage is not configured.
+func NewService(config types.AdminConfig, backend repository.BackendRepository, storageClient *clients.StorageClient) *Service {
 	session := NewSessionManager(config.SessionKey)
 	oauth := NewOAuthService(config.OAuth.Google, session)
 
 	return &Service{
-		config:  config,
-		backend: backend,
-		session: session,
-		oauth:   oauth,
+		config:        config,
+		backend:       backend,
+		session:       session,
+		oauth:         oauth,
+		storageClient: storageClient,
 	}
 }
 
@@ -61,7 +65,7 @@ func (s *Service) RegisterRoutes(e *echo.Echo) {
 	protected.GET("/", s.handleDashboard)
 
 	// API routes
-	NewAPIGroup(protected.Group("/api"), s.backend, s.session)
+	NewAPIGroup(protected.Group("/api"), s.backend, s.session, s.storageClient)
 
 	log.Info().Msg("admin UI registered at /admin")
 }

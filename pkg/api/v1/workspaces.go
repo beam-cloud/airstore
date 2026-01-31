@@ -3,14 +3,17 @@ package apiv1
 import (
 	"net/http"
 
+	"github.com/beam-cloud/airstore/pkg/clients"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/labstack/echo/v4"
+	"github.com/rs/zerolog/log"
 )
 
 type WorkspacesGroup struct {
-	routerGroup *echo.Group
-	backend     repository.BackendRepository
+	routerGroup   *echo.Group
+	backend       repository.BackendRepository
+	storageClient *clients.StorageClient
 }
 
 type CreateWorkspaceRequest struct {
@@ -24,10 +27,13 @@ type WorkspaceResponse struct {
 	UpdatedAt  string `json:"updated_at"`
 }
 
-func NewWorkspacesGroup(routerGroup *echo.Group, backend repository.BackendRepository) *WorkspacesGroup {
+// NewWorkspacesGroup creates a new workspaces API group.
+// storageClient can be nil if workspace storage is not configured.
+func NewWorkspacesGroup(routerGroup *echo.Group, backend repository.BackendRepository, storageClient *clients.StorageClient) *WorkspacesGroup {
 	g := &WorkspacesGroup{
-		routerGroup: routerGroup,
-		backend:     backend,
+		routerGroup:   routerGroup,
+		backend:       backend,
+		storageClient: storageClient,
 	}
 	g.registerRoutes()
 	return g
@@ -40,8 +46,10 @@ func (g *WorkspacesGroup) registerRoutes() {
 	g.routerGroup.DELETE("/:id", g.DeleteWorkspace)
 }
 
-// CreateWorkspace creates a new workspace
+// CreateWorkspace creates a new workspace and its S3 storage bucket
 func (g *WorkspacesGroup) CreateWorkspace(c echo.Context) error {
+	ctx := c.Request().Context()
+
 	var req CreateWorkspaceRequest
 	if err := c.Bind(&req); err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
@@ -51,9 +59,28 @@ func (g *WorkspacesGroup) CreateWorkspace(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, "name is required")
 	}
 
-	workspace, err := g.backend.CreateWorkspace(c.Request().Context(), req.Name)
+	// Create workspace in database
+	workspace, err := g.backend.CreateWorkspace(ctx, req.Name)
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+
+	// Create S3 bucket for workspace storage
+	if g.storageClient != nil {
+		bucketName, err := g.storageClient.CreateWorkspaceBucket(ctx, workspace.ExternalId)
+		if err != nil {
+			// Log error but don't fail workspace creation - bucket can be created later
+			log.Error().
+				Err(err).
+				Str("workspace", workspace.ExternalId).
+				Str("bucket", bucketName).
+				Msg("failed to create workspace storage bucket")
+		} else {
+			log.Info().
+				Str("workspace", workspace.ExternalId).
+				Str("bucket", bucketName).
+				Msg("created workspace storage bucket")
+		}
 	}
 
 	return c.JSON(http.StatusCreated, Response{

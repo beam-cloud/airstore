@@ -13,22 +13,27 @@ import (
 
 // OAuthGroup handles OAuth endpoints for workspace integrations
 type OAuthGroup struct {
-	store   *oauth.Store
-	google  *oauth.GoogleClient
-	backend repository.BackendRepository
+	store    *oauth.Store
+	registry *oauth.Registry
+	backend  repository.BackendRepository
 }
 
 // NewOAuthGroup creates and registers OAuth routes
-func NewOAuthGroup(g *echo.Group, store *oauth.Store, google *oauth.GoogleClient, backend repository.BackendRepository) *OAuthGroup {
+func NewOAuthGroup(g *echo.Group, store *oauth.Store, registry *oauth.Registry, backend repository.BackendRepository) *OAuthGroup {
 	og := &OAuthGroup{
-		store:   store,
-		google:  google,
-		backend: backend,
+		store:    store,
+		registry: registry,
+		backend:  backend,
 	}
 
 	g.POST("/sessions", og.CreateSession)
 	g.GET("/sessions/:id", og.GetSession)
-	g.GET("/google/callback", og.GoogleCallback)
+
+	// Provider-specific callbacks
+	g.GET("/google/callback", og.ProviderCallback("google"))
+	g.GET("/github/callback", og.ProviderCallback("github"))
+	g.GET("/notion/callback", og.ProviderCallback("notion"))
+	g.GET("/slack/callback", og.ProviderCallback("slack"))
 
 	return og
 }
@@ -80,14 +85,15 @@ func (og *OAuthGroup) CreateSession(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, "integration_type required")
 	}
 
-	// Check if this integration uses Google OAuth
-	if !oauth.IsGoogleIntegration(req.IntegrationType) {
-		return ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("integration %s does not use OAuth (use 'connection add' instead)", req.IntegrationType))
+	// Get provider for this integration type
+	provider, err := og.registry.GetProviderForIntegration(req.IntegrationType)
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("integration %s does not use OAuth", req.IntegrationType))
 	}
 
-	// Check if Google OAuth is configured
-	if !og.google.IsConfigured() {
-		return ErrorResponse(c, http.StatusServiceUnavailable, "Google OAuth not configured")
+	// Check if provider is configured
+	if !provider.IsConfigured() {
+		return ErrorResponse(c, http.StatusServiceUnavailable, fmt.Sprintf("%s OAuth not configured", provider.Name()))
 	}
 
 	// Validate return_to if provided (can be relative path or full URL)
@@ -104,7 +110,7 @@ func (og *OAuthGroup) CreateSession(c echo.Context) error {
 	session := og.store.Create(result.WorkspaceId, result.WorkspaceExt, req.IntegrationType, req.ReturnTo)
 
 	// Generate authorize URL
-	authorizeURL, err := og.google.AuthorizeURL(session.State, req.IntegrationType)
+	authorizeURL, err := provider.AuthorizeURL(session.State, req.IntegrationType)
 	if err != nil {
 		og.store.Delete(session.ID)
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
@@ -114,6 +120,7 @@ func (og *OAuthGroup) CreateSession(c echo.Context) error {
 		Str("session_id", session.ID).
 		Str("workspace", result.WorkspaceExt).
 		Str("integration", req.IntegrationType).
+		Str("provider", provider.Name()).
 		Msg("oauth session created")
 
 	return c.JSON(http.StatusCreated, Response{
@@ -151,68 +158,84 @@ func (og *OAuthGroup) GetSession(c echo.Context) error {
 	})
 }
 
-// GoogleCallback handles the OAuth callback from Google
-func (og *OAuthGroup) GoogleCallback(c echo.Context) error {
-	state := c.QueryParam("state")
-	code := c.QueryParam("code")
-	errParam := c.QueryParam("error")
+// ProviderCallback returns a handler for OAuth callbacks from a specific provider
+func (og *OAuthGroup) ProviderCallback(providerName string) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		state := c.QueryParam("state")
+		code := c.QueryParam("code")
+		errParam := c.QueryParam("error")
 
-	// Find session by state
-	session := og.store.GetByState(state)
-	if session == nil {
-		return og.errorPage(c, "Invalid or expired OAuth session")
+		// Find session by state
+		session := og.store.GetByState(state)
+		if session == nil {
+			return og.errorPage(c, "Invalid or expired OAuth session")
+		}
+
+		// Get the provider for this integration
+		provider, err := og.registry.GetProviderForIntegration(session.IntegrationType)
+		if err != nil {
+			og.store.Fail(session.ID, err.Error())
+			return og.errorPage(c, "Provider not configured")
+		}
+
+		// Verify the callback is from the expected provider
+		if provider.Name() != providerName {
+			og.store.Fail(session.ID, "callback provider mismatch")
+			return og.errorPage(c, "Provider mismatch")
+		}
+
+		// Check for error from provider
+		if errParam != "" {
+			og.store.Fail(session.ID, providerName+" error: "+errParam)
+			return og.errorPage(c, fmt.Sprintf("%s authorization failed: %s", providerName, errParam))
+		}
+
+		if code == "" {
+			og.store.Fail(session.ID, "missing authorization code")
+			return og.errorPage(c, "Missing authorization code")
+		}
+
+		// Exchange code for tokens
+		creds, err := provider.Exchange(c.Request().Context(), code, session.IntegrationType)
+		if err != nil {
+			og.store.Fail(session.ID, err.Error())
+			log.Error().Err(err).Str("session_id", session.ID).Str("provider", providerName).Msg("oauth token exchange failed")
+			return og.errorPage(c, "Token exchange failed")
+		}
+
+		// Save connection (workspace-shared, member_id = nil)
+		conn, err := og.backend.SaveConnection(
+			c.Request().Context(),
+			session.WorkspaceID,
+			nil, // shared connection
+			session.IntegrationType,
+			creds,
+			"", // no explicit scope
+		)
+		if err != nil {
+			og.store.Fail(session.ID, err.Error())
+			log.Error().Err(err).Str("session_id", session.ID).Msg("failed to save connection")
+			return og.errorPage(c, "Failed to save connection")
+		}
+
+		// Mark session complete
+		og.store.Complete(session.ID, conn.ExternalId)
+
+		log.Info().
+			Str("session_id", session.ID).
+			Str("workspace", session.WorkspaceExt).
+			Str("integration", session.IntegrationType).
+			Str("provider", providerName).
+			Str("connection_id", conn.ExternalId).
+			Msg("oauth connection saved")
+
+		// Redirect if return_to was specified, otherwise show success page
+		if session.ReturnTo != "" {
+			return c.Redirect(http.StatusFound, session.ReturnTo)
+		}
+
+		return og.successPage(c, session.IntegrationType)
 	}
-
-	// Check for error from Google
-	if errParam != "" {
-		og.store.Fail(session.ID, "Google error: "+errParam)
-		return og.errorPage(c, "Google authorization failed: "+errParam)
-	}
-
-	if code == "" {
-		og.store.Fail(session.ID, "missing authorization code")
-		return og.errorPage(c, "Missing authorization code")
-	}
-
-	// Exchange code for tokens
-	creds, err := og.google.Exchange(c.Request().Context(), code, session.IntegrationType)
-	if err != nil {
-		og.store.Fail(session.ID, err.Error())
-		log.Error().Err(err).Str("session_id", session.ID).Msg("oauth token exchange failed")
-		return og.errorPage(c, "Token exchange failed")
-	}
-
-	// Save connection (workspace-shared, member_id = nil)
-	conn, err := og.backend.SaveConnection(
-		c.Request().Context(),
-		session.WorkspaceID,
-		nil, // shared connection
-		session.IntegrationType,
-		creds,
-		"", // no explicit scope
-	)
-	if err != nil {
-		og.store.Fail(session.ID, err.Error())
-		log.Error().Err(err).Str("session_id", session.ID).Msg("failed to save connection")
-		return og.errorPage(c, "Failed to save connection")
-	}
-
-	// Mark session complete
-	og.store.Complete(session.ID, conn.ExternalId)
-
-	log.Info().
-		Str("session_id", session.ID).
-		Str("workspace", session.WorkspaceExt).
-		Str("integration", session.IntegrationType).
-		Str("connection_id", conn.ExternalId).
-		Msg("oauth connection saved")
-
-	// Redirect if return_to was specified, otherwise show success page
-	if session.ReturnTo != "" {
-		return c.Redirect(http.StatusFound, session.ReturnTo)
-	}
-
-	return og.successPage(c, session.IntegrationType)
 }
 
 func (og *OAuthGroup) errorPage(c echo.Context, message string) error {

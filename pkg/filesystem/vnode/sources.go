@@ -708,6 +708,10 @@ func (v *SourcesVNode) getQuery(ctx context.Context, path string) *types.SmartQu
 	return query
 }
 
+// defaultUnknownFileSize is used when file size is unknown.
+// Must be large enough for FUSE to read all content (diffs can be several MB).
+const defaultUnknownFileSize = 10 * 1024 * 1024 // 10MB
+
 func (v *SourcesVNode) getQueryResultMeta(ctx context.Context, queryPath, filename string) (size int64, mtime int64, ok bool) {
 	// Check local cache first (populated by executeQueryAsDir during Readdir)
 	if cached := v.getCachedResults(queryPath); cached != nil {
@@ -715,7 +719,7 @@ func (v *SourcesVNode) getQueryResultMeta(ctx context.Context, queryPath, filena
 			if e.Name == filename {
 				size = e.Size
 				if size <= 0 {
-					size = 4096 // Default size - FUSE will read to get actual size
+					size = defaultUnknownFileSize
 				}
 				return size, e.Mtime, true
 			}
@@ -741,7 +745,7 @@ func (v *SourcesVNode) getQueryResultMeta(ctx context.Context, queryPath, filena
 		if e.Name == filename {
 			size = e.Size
 			if size <= 0 {
-				size = 4096 // Default size - FUSE will read to get actual size
+				size = defaultUnknownFileSize
 			}
 			return size, e.Mtime, true
 		}
@@ -755,7 +759,7 @@ func (v *SourcesVNode) getQueryResultMeta(ctx context.Context, queryPath, filena
 func (v *SourcesVNode) getQueryResultSize(ctx context.Context, queryPath, filename string) int64 {
 	size, _, ok := v.getQueryResultMeta(ctx, queryPath, filename)
 	if !ok || size <= 0 {
-		return 4096
+		return defaultUnknownFileSize
 	}
 	return size
 }

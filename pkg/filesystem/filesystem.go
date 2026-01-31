@@ -95,6 +95,11 @@ func (f *Filesystem) RegisterVNode(node vnode.VirtualNode) {
 	f.vnodes.Register(node)
 }
 
+// SetStorageFallback sets the fallback vnode for unmatched storage paths
+func (f *Filesystem) SetStorageFallback(node vnode.VirtualNode) {
+	f.vnodes.SetFallback(node)
+}
+
 func (f *Filesystem) initRoot() error {
 	if _, err := f.metadata.GetDirectoryAccessMetadata("", "/"); err != nil {
 		meta := &DirectoryAccessMetadata{
@@ -286,6 +291,16 @@ func (f *Filesystem) Getattr(path string) (*FileInfo, error) {
 		}, nil
 	}
 
+	// Try fallback storage for unmatched paths
+	if fb := f.vnodes.Fallback(); fb != nil {
+		if info, err := fb.Getattr(path); err == nil {
+			return &FileInfo{
+				Ino: info.Ino, Size: info.Size, Mode: info.Mode, Nlink: info.Nlink,
+				Uid: info.Uid, Gid: info.Gid, Atime: info.Atime, Mtime: info.Mtime, Ctime: info.Ctime,
+			}, nil
+		}
+	}
+
 	return nil, ErrNotFound
 }
 
@@ -313,29 +328,35 @@ func (f *Filesystem) Readdir(path string) ([]DirEntry, error) {
 
 	// For root, include virtual node directories
 	if path == "/" {
-		entries := f.readdirRoot()
-		return entries, nil
+		return f.readdirRoot(), nil
 	}
 
+	// Try storage fallback for unmatched paths
+	if fb := f.vnodes.Fallback(); fb != nil {
+		if vnEntries, err := fb.Readdir(path); err == nil {
+			entries := make([]DirEntry, len(vnEntries))
+			for i, e := range vnEntries {
+				entries[i] = DirEntry{Name: e.Name, Mode: e.Mode, Ino: e.Ino, Size: e.Size, Mtime: e.Mtime}
+			}
+			return entries, nil
+		}
+	}
+
+	// Fallback to local metadata
 	content, err := f.metadata.GetDirectoryContentMetadata(f.resolveDir(path))
 	if err != nil {
-		return nil, ErrIO
+		return nil, ErrNotFound
 	}
 
 	entries := make([]DirEntry, 0, len(content.EntryList))
 	for _, name := range content.EntryList {
 		entryPath := path + "/" + name
-		if path == "/" {
-			entryPath = "/" + name
-		}
-
 		mode := uint32(syscall.S_IFREG | 0644)
 		var ino uint64
 		if info, err := f.Getattr(entryPath); err == nil {
 			mode = info.Mode
 			ino = info.Ino
 		}
-
 		entries = append(entries, DirEntry{Name: name, Mode: mode, Ino: ino})
 	}
 
@@ -343,15 +364,29 @@ func (f *Filesystem) Readdir(path string) ([]DirEntry, error) {
 }
 
 func (f *Filesystem) readdirRoot() []DirEntry {
+	seen := make(map[string]bool)
 	entries := make([]DirEntry, 0)
 
-	// Add virtual node root directories (e.g., "tools")
+	// Add virtual node root directories (e.g., "tools", "sources", "skills", "tasks")
 	for _, vn := range f.vnodes.List() {
 		prefix := vn.Prefix()
 		name := strings.TrimPrefix(prefix, "/")
-		if name != "" && !strings.Contains(name, "/") {
+		if name != "" && !strings.Contains(name, "/") && !seen[name] {
 			if info, err := vn.Getattr(prefix); err == nil {
 				entries = append(entries, DirEntry{Name: name, Mode: info.Mode, Ino: info.Ino})
+				seen[name] = true
+			}
+		}
+	}
+
+	// Add user-created folders from storage fallback
+	if fb := f.vnodes.Fallback(); fb != nil {
+		if storageEntries, err := fb.Readdir("/"); err == nil {
+			for _, e := range storageEntries {
+				if !seen[e.Name] {
+					entries = append(entries, DirEntry{Name: e.Name, Mode: e.Mode, Ino: e.Ino})
+					seen[e.Name] = true
+				}
 			}
 		}
 	}
@@ -360,6 +395,9 @@ func (f *Filesystem) readdirRoot() []DirEntry {
 	content, err := f.metadata.GetDirectoryContentMetadata(f.rootID)
 	if err == nil {
 		for _, name := range content.EntryList {
+			if seen[name] {
+				continue
+			}
 			entryPath := "/" + name
 			mode := uint32(syscall.S_IFREG | 0644)
 			var ino uint64
@@ -377,8 +415,7 @@ func (f *Filesystem) readdirRoot() []DirEntry {
 func (f *Filesystem) Releasedir(path string, fh FileHandle) error { return nil }
 
 func (f *Filesystem) Open(path string, flags int) (FileHandle, error) {
-	// Check for virtual node match
-	if vn := f.vnodes.Match(path); vn != nil {
+	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
 		fh, err := vn.Open(path, flags)
 		return FileHandle(fh), err
 	}
@@ -390,8 +427,7 @@ func (f *Filesystem) Open(path string, flags int) (FileHandle, error) {
 }
 
 func (f *Filesystem) Read(path string, buf []byte, off int64, fh FileHandle) (int, error) {
-	// Check for virtual node match
-	if vn := f.vnodes.Match(path); vn != nil {
+	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
 		return vn.Read(path, buf, off, vnode.FileHandle(fh))
 	}
 
@@ -414,9 +450,9 @@ func (f *Filesystem) Release(path string, fh FileHandle) error {
 	return nil
 }
 
-// Write operations - delegate to vnodes, otherwise read-only
+// Write operations - delegate to vnodes or fallback storage
 func (f *Filesystem) Create(path string, flags int, mode uint32) (FileHandle, error) {
-	if vn := f.vnodes.Match(path); vn != nil {
+	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
 		fh, err := vn.Create(path, flags, mode)
 		return FileHandle(fh), err
 	}
@@ -424,58 +460,68 @@ func (f *Filesystem) Create(path string, flags int, mode uint32) (FileHandle, er
 }
 
 func (f *Filesystem) Write(path string, buf []byte, off int64, fh FileHandle) (int, error) {
-	if vn := f.vnodes.Match(path); vn != nil {
+	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
 		return vn.Write(path, buf, off, vnode.FileHandle(fh))
 	}
 	return 0, ErrReadOnly
 }
 
 func (f *Filesystem) Truncate(path string, size int64, fh FileHandle) error {
-	if vn := f.vnodes.Match(path); vn != nil {
+	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
 		return vn.Truncate(path, size, vnode.FileHandle(fh))
 	}
 	return ErrReadOnly
 }
 
 func (f *Filesystem) Mkdir(path string, mode uint32) error {
-	if vn := f.vnodes.Match(path); vn != nil {
+	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
 		return vn.Mkdir(path, mode)
 	}
 	return ErrReadOnly
 }
 
 func (f *Filesystem) Rmdir(path string) error {
-	if vn := f.vnodes.Match(path); vn != nil {
+	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
 		return vn.Rmdir(path)
 	}
 	return ErrReadOnly
 }
 
 func (f *Filesystem) Unlink(path string) error {
-	if vn := f.vnodes.Match(path); vn != nil {
+	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
 		return vn.Unlink(path)
 	}
 	return ErrReadOnly
 }
 
-func (f *Filesystem) Rename(oldpath, newpath string) error { return ErrReadOnly }
+func (f *Filesystem) Rename(oldpath, newpath string) error {
+	oldVN := f.vnodes.MatchOrFallback(oldpath)
+	newVN := f.vnodes.MatchOrFallback(newpath)
+	if oldVN == nil || newVN == nil {
+		return ErrReadOnly
+	}
+	if oldVN != newVN {
+		return ErrNotSupported
+	}
+	return oldVN.Rename(oldpath, newpath)
+}
 
 func (f *Filesystem) Chmod(path string, mode uint32) error {
-	if vn := f.vnodes.Match(path); vn != nil {
+	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
 		return nil // No-op for vnodes
 	}
 	return ErrReadOnly
 }
 
 func (f *Filesystem) Chown(path string, uid, gid uint32) error {
-	if vn := f.vnodes.Match(path); vn != nil {
+	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
 		return nil // No-op for vnodes
 	}
 	return ErrReadOnly
 }
 
 func (f *Filesystem) Utimens(path string, atime, mtime *int64) error {
-	if vn := f.vnodes.Match(path); vn != nil {
+	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
 		return nil // No-op for vnodes
 	}
 	return ErrReadOnly
@@ -506,6 +552,7 @@ func (f *Filesystem) Setxattr(path, name string, value []byte, flags int) error 
 	}
 	return ErrNotSupported
 }
+
 func (f *Filesystem) Removexattr(path, name string) error     { return ErrNotSupported }
 func (f *Filesystem) Listxattr(path string) ([]string, error) { return nil, nil }
 

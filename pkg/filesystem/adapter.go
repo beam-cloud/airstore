@@ -2,6 +2,7 @@ package filesystem
 
 import (
 	"errors"
+	"strings"
 	"syscall"
 	"time"
 
@@ -81,6 +82,11 @@ func (a *adapter) Unlink(path string) int {
 }
 
 func (a *adapter) Rename(oldpath, newpath string) int {
+	// FUSE-T SMB backend uses rename-to-hidden for delete operations.
+	// When we see a rename to .fuse_hidden*, treat it as a delete.
+	if strings.Contains(newpath, ".fuse_hidden") {
+		return toErrno(a.fs.Unlink(oldpath))
+	}
 	return toErrno(a.fs.Rename(oldpath, newpath))
 }
 

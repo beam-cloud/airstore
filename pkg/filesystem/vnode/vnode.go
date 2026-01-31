@@ -21,6 +21,7 @@ const (
 var (
 	ErrReadOnly     = syscall.EROFS
 	ErrNotSupported = syscall.ENOTSUP
+	ErrNotFound     = syscall.ENOENT
 )
 
 type FileHandle uint64
@@ -65,6 +66,7 @@ type VirtualNode interface {
 	Mkdir(path string, mode uint32) error
 	Rmdir(path string) error
 	Unlink(path string) error
+	Rename(oldpath, newpath string) error
 	Symlink(target, linkPath string) error
 
 	// Lifecycle
@@ -83,6 +85,7 @@ func (ReadOnlyBase) Truncate(string, int64, FileHandle) error              { ret
 func (ReadOnlyBase) Mkdir(string, uint32) error                            { return ErrReadOnly }
 func (ReadOnlyBase) Rmdir(string) error                                    { return ErrReadOnly }
 func (ReadOnlyBase) Unlink(string) error                                   { return ErrReadOnly }
+func (ReadOnlyBase) Rename(string, string) error                           { return ErrReadOnly }
 func (ReadOnlyBase) Symlink(string, string) error                          { return ErrReadOnly }
 func (ReadOnlyBase) Readlink(string) (string, error)                       { return "", ErrNotSupported }
 func (ReadOnlyBase) Release(string, FileHandle) error                      { return nil }
@@ -98,6 +101,7 @@ func (SmartQueryBase) Write(string, []byte, int64, FileHandle) (int, error)  { r
 func (SmartQueryBase) Truncate(string, int64, FileHandle) error              { return ErrReadOnly }
 func (SmartQueryBase) Rmdir(string) error                                    { return ErrNotSupported }
 func (SmartQueryBase) Unlink(string) error                                   { return ErrNotSupported }
+func (SmartQueryBase) Rename(string, string) error                           { return ErrNotSupported }
 func (SmartQueryBase) Symlink(string, string) error                          { return ErrNotSupported }
 func (SmartQueryBase) Readlink(string) (string, error)                       { return "", ErrNotSupported }
 func (SmartQueryBase) Release(string, FileHandle) error                      { return nil }
@@ -105,7 +109,8 @@ func (SmartQueryBase) Fsync(string, FileHandle) error                        { r
 
 // Registry matches paths to virtual nodes.
 type Registry struct {
-	nodes []VirtualNode
+	nodes    []VirtualNode
+	fallback VirtualNode // handles paths not matched by any node
 }
 
 func NewRegistry() *Registry {
@@ -116,6 +121,10 @@ func (r *Registry) Register(node VirtualNode) {
 	r.nodes = append(r.nodes, node)
 }
 
+func (r *Registry) SetFallback(node VirtualNode) {
+	r.fallback = node
+}
+
 func (r *Registry) Match(path string) VirtualNode {
 	for _, n := range r.nodes {
 		p := n.Prefix()
@@ -124,6 +133,17 @@ func (r *Registry) Match(path string) VirtualNode {
 		}
 	}
 	return nil
+}
+
+func (r *Registry) MatchOrFallback(path string) VirtualNode {
+	if vn := r.Match(path); vn != nil {
+		return vn
+	}
+	return r.fallback
+}
+
+func (r *Registry) Fallback() VirtualNode {
+	return r.fallback
 }
 
 func (r *Registry) List() []VirtualNode {

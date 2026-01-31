@@ -26,3 +26,12 @@ type NotionQuerySpec struct {
 	Limit          int    `json:"limit"`
 	FilenameFormat string `json:"filename_format"`
 }
+
+// GitHubQuerySpec is the output format for GitHub queries.
+type GitHubQuerySpec struct {
+	Query          string `json:"github_query"`
+	SearchType     string `json:"search_type"`  // "repos", "issues", or "prs"
+	ContentType    string `json:"content_type"` // "diff", "markdown", or "json"
+	Limit          int    `json:"limit"`
+	FilenameFormat string `json:"filename_format"`
+}

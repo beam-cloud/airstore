@@ -17,10 +17,10 @@ import (
 
 type ToolService struct {
 	pb.UnimplementedToolServiceServer
-	registry    *tools.Registry
-	resolver    *tools.WorkspaceToolResolver
-	backend     repository.BackendRepository
-	googleOAuth *oauth.GoogleClient
+	registry      *tools.Registry
+	resolver      *tools.WorkspaceToolResolver
+	backend       repository.BackendRepository
+	oauthRegistry *oauth.Registry
 }
 
 func NewToolService(registry *tools.Registry) *ToolService {
@@ -32,9 +32,9 @@ func NewToolServiceWithBackend(registry *tools.Registry, backend repository.Back
 	return &ToolService{registry: registry, resolver: resolver, backend: backend}
 }
 
-func NewToolServiceWithOAuth(registry *tools.Registry, backend repository.BackendRepository, googleOAuth *oauth.GoogleClient) *ToolService {
+func NewToolServiceWithOAuth(registry *tools.Registry, backend repository.BackendRepository, oauthRegistry *oauth.Registry) *ToolService {
 	resolver := tools.NewWorkspaceToolResolver(registry, backend)
-	return &ToolService{registry: registry, resolver: resolver, backend: backend, googleOAuth: googleOAuth}
+	return &ToolService{registry: registry, resolver: resolver, backend: backend, oauthRegistry: oauthRegistry}
 }
 
 // Resolver returns the workspace tool resolver for use by other components
@@ -187,20 +187,22 @@ func (s *ToolService) buildExecContext(ctx context.Context, toolName string) *to
 		return execCtx
 	}
 
-	// Check if Google OAuth token needs refresh
-	if oauth.IsGoogleIntegration(toolName) && oauth.NeedsRefresh(creds) && s.googleOAuth != nil {
-		refreshed, err := s.googleOAuth.Refresh(ctx, creds.RefreshToken)
-		if err != nil {
-			log.Warn().Str("tool", toolName).Err(err).Msg("token refresh failed")
-			// Continue with existing creds - they might still work
-		} else {
-			// Update stored credentials
-			if _, err := s.backend.SaveConnection(ctx, conn.WorkspaceId, conn.MemberId, toolName, refreshed, conn.Scope); err != nil {
-				log.Warn().Str("tool", toolName).Err(err).Msg("failed to persist refreshed token")
+	// Check if OAuth token needs refresh
+	if s.oauthRegistry != nil && oauth.NeedsRefresh(creds) {
+		if provider, err := s.oauthRegistry.GetProviderForIntegration(toolName); err == nil {
+			refreshed, err := provider.Refresh(ctx, creds.RefreshToken)
+			if err != nil {
+				log.Warn().Str("tool", toolName).Str("provider", provider.Name()).Err(err).Msg("token refresh failed")
+				// Continue with existing creds - they might still work
 			} else {
-				log.Debug().Str("tool", toolName).Msg("token refreshed successfully")
+				// Update stored credentials
+				if _, err := s.backend.SaveConnection(ctx, conn.WorkspaceId, conn.MemberId, toolName, refreshed, conn.Scope); err != nil {
+					log.Warn().Str("tool", toolName).Err(err).Msg("failed to persist refreshed token")
+				} else {
+					log.Debug().Str("tool", toolName).Str("provider", provider.Name()).Msg("token refreshed successfully")
+				}
+				creds = refreshed
 			}
-			creds = refreshed
 		}
 	}
 

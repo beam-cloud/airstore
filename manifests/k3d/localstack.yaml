@@ -15,8 +15,10 @@ spec:
     enableStartupScripts: true
     startupScriptContent: |
       #!/bin/bash
+      # Create the images bucket (used by worker image caching)
       awslocal s3 mb s3://airstore-images
-      awslocal s3 mb s3://airstore-context
+      # Note: Workspace storage buckets (workspace-{external_id}) are created
+      # dynamically when workspaces are created via the API
     persistence:
       enabled: true
       storageClass: local-path

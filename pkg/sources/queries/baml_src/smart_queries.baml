@@ -21,6 +21,14 @@ class NotionQueryResult {
   filename_format string @description("Template for result filenames. Use {id}, {title}, {date}. Example: {title}_{id}.md")
 }
 
+class GitHubQueryResult {
+  github_query string @description("GitHub search query using GitHub's search syntax")
+  search_type string @description("Type of search: 'repos', 'issues', or 'prs'")
+  content_type string @description("Content format: 'diff' for PR diffs, 'markdown' for issue/PR body, 'json' for metadata only. Default: 'markdown' for issues/prs, 'json' for repos")
+  limit int @description("Max results to return (default: 50)")
+  filename_format string @description("Template for result filenames. Use {id}, {repo}, {number}, {title}, {type}, {state}, {author}. Example: {number}_{title}.md")
+}
+
 // -----------------------------------------------------------------------------
 // Gmail Query Inference
 // -----------------------------------------------------------------------------
@@ -281,8 +289,110 @@ function InferNotionQuery(name: string, guidance: string?) -> NotionQueryResult 
 }
 
 // -----------------------------------------------------------------------------
+// GitHub Query Inference
+// -----------------------------------------------------------------------------
+
+function InferGitHubQuery(name: string, guidance: string?) -> GitHubQueryResult {
+  client AnthropicClient
+  prompt #"
+    Convert a folder/file name into a GitHub search query.
+    
+    GitHub Search supports three types:
+    1. **repos** - Search repositories
+    2. **issues** - Search issues
+    3. **prs** - Search pull requests
+    
+    SEARCH TYPE DETECTION:
+    - Names with "repo", "repository", "project", "fork" → search_type: "repos"
+    - Names with "issue", "bug", "task" → search_type: "issues"
+    - Names with "pr", "pull", "merge", "diff" → search_type: "prs"
+    - Default to "prs" for general repo activity queries
+    
+    CONTENT TYPE (determines file format and content):
+    - "diff" - For PRs: fetch the actual diff/patch (extension: .diff or .patch)
+    - "markdown" - For issues/PRs: fetch body + comments as markdown (extension: .md)
+    - "json" - Metadata only (extension: .json)
+    
+    Choose content_type based on intent:
+    - "show diffs", "code changes", "patches" → content_type: "diff"
+    - "read issues", "issue content", "pr description" → content_type: "markdown"
+    - "list repos", "metadata", "releases", "forks" → content_type: "json"
+    - Default: "markdown" for issues/prs, "json" for repos
+    
+    GITHUB SEARCH QUERY SYNTAX:
+    
+    For REPOSITORIES (search_type: "repos"):
+    - language:go, language:python
+    - stars:>100, forks:>10
+    - user:username, org:orgname
+    - topic:machine-learning
+    - Example: "language:go stars:>100"
+    
+    For ISSUES and PRs (search_type: "issues" or "prs"):
+    - repo:owner/name (REQUIRED for specific repo)
+    - is:open, is:closed
+    - author:username, assignee:username
+    - label:bug
+    - Example: "repo:beam-cloud/beta9 is:open"
+    
+    CRITICAL RULES:
+    1. For issues/PRs in a specific repo, ALWAYS include "repo:owner/name"
+    2. Extract repo names (e.g., "beta9-prs" → repo:beam-cloud/beta9)
+    3. DO NOT include "is:issue" or "is:pr" - added automatically
+    
+    FILENAME FORMAT:
+    Use readable names with the title. All files use .md or .json extensions for preview support.
+    Available placeholders: {number}, {title}, {repo}, {author}, {state}, {type}, {id}
+    
+    - For PRs with diffs: "{number}_{title}_diff.md" (diff is wrapped in markdown code block)
+    - For PRs/issues content: "{number}_{title}.md"
+    - For repos: "{name}.json"
+    - For metadata: "{number}_{title}.json"
+    
+    EXAMPLES:
+    - "open-prs-beta9" → search_type: "prs", content_type: "markdown", filename_format: "{number}_{title}.md"
+    - "beta9-diffs" → search_type: "prs", content_type: "diff", filename_format: "{number}_{title}_diff.md"
+    - "beta9-bugs" → search_type: "issues", content_type: "markdown", filename_format: "{number}_{title}.md"
+    - "go-cli-repos" → search_type: "repos", content_type: "json", filename_format: "{name}.json"
+    - "recent-releases" → search_type: "repos", content_type: "json", filename_format: "{name}.json"
+    
+    Folder/file name: {{ name }}
+    {% if guidance %}
+    
+    Additional guidance from user: {{ guidance }}
+    {% endif %}
+    
+    {{ ctx.output_format }}
+  "#
+}
+
+// -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
+
+test TestGitHubOpenPRs {
+  functions [InferGitHubQuery]
+  args {
+    name "open-prs-beta9"
+    guidance null
+  }
+}
+
+test TestGitHubIssues {
+  functions [InferGitHubQuery]
+  args {
+    name "beta9-bugs"
+    guidance "show open bugs in the beta9 repo"
+  }
+}
+
+test TestGitHubRepos {
+  functions [InferGitHubQuery]
+  args {
+    name "go-cli-tools"
+    guidance null
+  }
+}
 
 test TestGmailUnread {
   functions [InferGmailQuery]

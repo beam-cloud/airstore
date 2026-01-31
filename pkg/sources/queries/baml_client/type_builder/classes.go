@@ -55,6 +55,54 @@ func (t *GDriveQueryResultClassView) Type() (baml.Type, error) {
 	return t.inner.Type()
 }
 
+type GitHubQueryResultClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *GitHubQueryResultClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *GitHubQueryResultClassView) PropertyGithub_query() (ClassPropertyView, error) {
+	return t.inner.Property("github_query")
+}
+
+func (t *GitHubQueryResultClassView) PropertySearch_type() (ClassPropertyView, error) {
+	return t.inner.Property("search_type")
+}
+
+func (t *GitHubQueryResultClassView) PropertyContent_type() (ClassPropertyView, error) {
+	return t.inner.Property("content_type")
+}
+
+func (t *GitHubQueryResultClassView) PropertyLimit() (ClassPropertyView, error) {
+	return t.inner.Property("limit")
+}
+
+func (t *GitHubQueryResultClassView) PropertyFilename_format() (ClassPropertyView, error) {
+	return t.inner.Property("filename_format")
+}
+
+func (t *TypeBuilder) GitHubQueryResult() (*GitHubQueryResultClassView, error) {
+	bld, err := t.inner.Class("GitHubQueryResult")
+	if err != nil {
+		return nil, err
+	}
+	return &GitHubQueryResultClassView{inner: bld}, nil
+}
+
+func (t *GitHubQueryResultClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
 type GmailQueryEvaluationClassView struct {
 	inner baml.ClassBuilder
 }

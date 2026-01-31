@@ -4,8 +4,8 @@ option go_package = "github.com/beam-cloud/airstore/proto";
 
 package context;
 
-// ContextService provides S3-backed file storage for workspace context.
-// The workspace is determined by the auth token - paths are relative to /context.
+// ContextService provides S3-backed file storage (per-workspace buckets).
+// Name retained for wire compatibility; implementation is StorageService.
 service ContextService {
   // Stat returns file/directory attributes
   rpc Stat(ContextStatRequest) returns (ContextStatResponse);
@@ -44,28 +44,25 @@ service ContextService {
   rpc ListTree(ListTreeRequest) returns (ListTreeResponse);
 }
 
-// FileInfo contains file/directory metadata
 message FileInfo {
   int64 size = 1;
   uint32 mode = 2;
-  int64 mtime = 3;  // Unix timestamp
+  int64 mtime = 3;
   bool is_dir = 4;
   bool is_link = 5;
 }
 
-// DirEntry represents a directory entry with full metadata
 message ContextDirEntry {
   string name = 1;
   uint32 mode = 2;
   bool is_dir = 3;
-  int64 size = 4;      // From ListObjectsV2 - avoids separate HeadObject
-  int64 mtime = 5;     // From ListObjectsV2 - Unix timestamp
-  string etag = 6;     // From ListObjectsV2 - for cache validation
+  int64 size = 4;
+  int64 mtime = 5;
+  string etag = 6;
 }
 
-// Stat
 message ContextStatRequest {
-  string path = 1;  // Path relative to /context (e.g., "foo/bar.txt")
+  string path = 1;
 }
 
 message ContextStatResponse {
@@ -74,7 +71,6 @@ message ContextStatResponse {
   FileInfo info = 3;
 }
 
-// ReadDir
 message ContextReadDirRequest {
   string path = 1;
 }
@@ -85,11 +81,10 @@ message ContextReadDirResponse {
   repeated ContextDirEntry entries = 3;
 }
 
-// Read
 message ContextReadRequest {
   string path = 1;
   int64 offset = 2;
-  int64 length = 3;  // 0 means read to end
+  int64 length = 3;
 }
 
 message ContextReadResponse {
@@ -98,7 +93,6 @@ message ContextReadResponse {
   bytes data = 3;
 }
 
-// Write
 message ContextWriteRequest {
   string path = 1;
   bytes data = 2;
@@ -111,7 +105,6 @@ message ContextWriteResponse {
   int32 written = 3;
 }
 
-// Create
 message ContextCreateRequest {
   string path = 1;
   uint32 mode = 2;
@@ -122,7 +115,6 @@ message ContextCreateResponse {
   string error = 2;
 }
 
-// Delete
 message ContextDeleteRequest {
   string path = 1;
 }
@@ -132,7 +124,6 @@ message ContextDeleteResponse {
   string error = 2;
 }
 
-// Mkdir
 message ContextMkdirRequest {
   string path = 1;
   uint32 mode = 2;
@@ -143,7 +134,6 @@ message ContextMkdirResponse {
   string error = 2;
 }
 
-// Rename
 message ContextRenameRequest {
   string old_path = 1;
   string new_path = 2;
@@ -153,8 +143,6 @@ message ContextRenameResponse {
   bool ok = 1;
   string error = 2;
 }
-
-// Truncate
 message ContextTruncateRequest {
   string path = 1;
   int64 size = 2;
@@ -165,10 +153,9 @@ message ContextTruncateResponse {
   string error = 2;
 }
 
-// Symlink
 message ContextSymlinkRequest {
-  string target = 1;   // What the link points to
-  string link_path = 2; // The symlink path
+  string target = 1;
+  string link_path = 2;
 }
 
 message ContextSymlinkResponse {
@@ -176,7 +163,6 @@ message ContextSymlinkResponse {
   string error = 2;
 }
 
-// Readlink
 message ContextReadlinkRequest {
   string path = 1;
 }
@@ -187,26 +173,25 @@ message ContextReadlinkResponse {
   string target = 3;
 }
 
-// ListTree - efficient subtree listing for prefetching
 message ListTreeRequest {
-  string path = 1;                    // Root path to list from
-  int32 depth = 2;                    // Max depth (1 or 2, 0 = unlimited)
-  int32 max_keys = 3;                 // Pagination limit (default 1000)
-  string continuation_token = 4;      // For pagination
+  string path = 1;
+  int32 depth = 2;
+  int32 max_keys = 3;
+  string continuation_token = 4;
 }
 
 message ListTreeResponse {
   bool ok = 1;
   string error = 2;
   repeated TreeEntry entries = 3;
-  string next_token = 4;              // For pagination continuation
-  bool truncated = 5;                 // True if more results available
+  string next_token = 4;
+  bool truncated = 5;
 }
 
 message TreeEntry {
-  string path = 1;      // Relative path from request root
+  string path = 1;
   int64 size = 2;
-  int64 mtime = 3;      // Unix timestamp
-  uint32 mode = 4;      // File mode (S_IFDIR | 0755 for dirs, S_IFREG | 0644 for files)
-  string etag = 5;      // For cache validation
+  int64 mtime = 3;
+  uint32 mode = 4;
+  string etag = 5;
 }

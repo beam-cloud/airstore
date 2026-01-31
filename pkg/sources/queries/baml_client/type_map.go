@@ -23,6 +23,8 @@ import (
 var typeMap = map[string]reflect.Type{
 	"TYPES.GDriveQueryResult":           reflect.TypeOf(types.GDriveQueryResult{}),
 	"STREAM_TYPES.GDriveQueryResult":    reflect.TypeOf(stream_types.GDriveQueryResult{}),
+	"TYPES.GitHubQueryResult":           reflect.TypeOf(types.GitHubQueryResult{}),
+	"STREAM_TYPES.GitHubQueryResult":    reflect.TypeOf(stream_types.GitHubQueryResult{}),
 	"TYPES.GmailQueryEvaluation":        reflect.TypeOf(types.GmailQueryEvaluation{}),
 	"STREAM_TYPES.GmailQueryEvaluation": reflect.TypeOf(stream_types.GmailQueryEvaluation{}),
 	"TYPES.GmailQueryResult":            reflect.TypeOf(types.GmailQueryResult{}),

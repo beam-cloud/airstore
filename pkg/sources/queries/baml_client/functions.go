@@ -169,6 +169,80 @@ func InferGDriveQuery(ctx context.Context, name string, guidance *string, opts .
 	}
 }
 
+func InferGitHubQuery(ctx context.Context, name string, guidance *string, opts ...CallOptionFunc) (types.GitHubQueryResult, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	// Resolve client option to clientRegistry (client takes precedence)
+	if callOpts.client != nil {
+		if callOpts.clientRegistry == nil {
+			callOpts.clientRegistry = baml.NewClientRegistry()
+		}
+		callOpts.clientRegistry.SetPrimaryClient(*callOpts.client)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"name": name, "guidance": guidance},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		panic(err)
+	}
+
+	if callOpts.onTick == nil {
+		result, err := bamlRuntime.CallFunction(ctx, "InferGitHubQuery", encoded, callOpts.onTick)
+		if err != nil {
+			return types.GitHubQueryResult{}, err
+		}
+
+		if result.Error != nil {
+			return types.GitHubQueryResult{}, result.Error
+		}
+
+		casted := (result.Data).(types.GitHubQueryResult)
+
+		return casted, nil
+	} else {
+		channel, err := bamlRuntime.CallFunctionStream(ctx, "InferGitHubQuery", encoded, callOpts.onTick)
+		if err != nil {
+			return types.GitHubQueryResult{}, err
+		}
+
+		for result := range channel {
+			if result.Error != nil {
+				return types.GitHubQueryResult{}, result.Error
+			}
+
+			if result.HasData {
+				return result.Data.(types.GitHubQueryResult), nil
+			}
+		}
+
+		return types.GitHubQueryResult{}, fmt.Errorf("No data returned from stream")
+	}
+}
+
 func InferGmailQuery(ctx context.Context, name string, guidance *string, opts ...CallOptionFunc) (types.GmailQueryResult, error) {
 
 	var callOpts callOption

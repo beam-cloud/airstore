@@ -159,7 +159,15 @@ Examples:
 
 		// Register sources VNode - handles /sources/ with smart queries via gRPC
 		fs.RegisterVNode(vnode.NewSourcesVNode(sourcesConn, authToken))
-		log.Info().Msg("sources vnode registered")
+
+		// Register skills VNode - handles /skills/ with S3-backed storage via gRPC
+		fs.RegisterVNode(vnode.NewContextVNodeGRPC(sourcesConn, authToken))
+
+		// Register tasks VNode - read-only placeholder for task outputs
+		fs.RegisterVNode(vnode.NewTasksVNode())
+
+		// Register storage fallback - handles user-created folders and any unmatched S3 paths
+		fs.SetStorageFallback(vnode.NewStorageVNode(sourcesConn, authToken))
 
 		if mountVerbose {
 			log.Debug().Str("platform", embed.Current().String()).Int("shim_bytes", len(shim)).Msg("vnodes registered")

@@ -5,45 +5,57 @@ import (
 	"time"
 )
 
-// VirtualFileType represents the type of virtual file in the filesystem.
-// This determines UI behavior, available operations, and icon presentation.
+// VirtualFileType determines UI behavior and available operations
 type VirtualFileType string
 
 const (
-	// VFTypeContext represents user-uploaded context files (S3-backed)
-	VFTypeContext VirtualFileType = "context"
-	// VFTypeSource represents integration sources (github, gmail, etc)
-	VFTypeSource VirtualFileType = "source"
-	// VFTypeTool represents available tools
-	VFTypeTool VirtualFileType = "tool"
-	// VFTypeRoot represents virtual root directories
-	VFTypeRoot VirtualFileType = "root"
-
-	// Future types can be added here:
-	// VFTypeAgent VirtualFileType = "agent"
-	// VFTypeOutput VirtualFileType = "output"
+	VFTypeStorage VirtualFileType = "storage" // S3-backed files
+	VFTypeSource  VirtualFileType = "source"  // Integration sources (github, gmail, etc)
+	VFTypeTool    VirtualFileType = "tool"    // Available tools
+	VFTypeRoot    VirtualFileType = "root"    // Virtual root directories
 )
 
-// Root directory paths for the virtual filesystem
+// Directory names and paths
 const (
-	// PathRoot is the filesystem root
-	PathRoot = "/"
-	// PathContext is the context files root directory
-	PathContext = "/context"
-	// PathSources is the sources/integrations root directory
-	PathSources = "/sources"
-	// PathTools is the tools root directory
-	PathTools = "/tools"
-)
-
-// Root directory names (without leading slash)
-const (
-	DirNameContext = "context"
+	DirNameSkills  = "skills"
 	DirNameSources = "sources"
 	DirNameTools   = "tools"
+	DirNameTasks   = "tasks"
+
+	PathRoot    = "/"
+	PathSkills  = "/skills"
+	PathSources = "/sources"
+	PathTools   = "/tools"
+	PathTasks   = "/tasks"
 )
 
-// Metadata keys for VirtualFile.Metadata
+// Reserved folders cannot be deleted. Virtual folders are not S3-backed.
+var (
+	ReservedFolders = map[string]struct{}{
+		DirNameSkills:  {},
+		DirNameSources: {},
+		DirNameTools:   {},
+		DirNameTasks:   {},
+	}
+
+	VirtualFolders = map[string]struct{}{
+		DirNameSources: {},
+		DirNameTools:   {},
+		DirNameTasks:   {},
+	}
+)
+
+func IsReservedFolder(name string) bool {
+	_, ok := ReservedFolders[name]
+	return ok
+}
+
+func IsVirtualFolder(name string) bool {
+	_, ok := VirtualFolders[name]
+	return ok
+}
+
+// Metadata keys
 const (
 	MetaKeyProvider   = "provider"
 	MetaKeyExternalID = "external_id"
@@ -51,12 +63,11 @@ const (
 	MetaKeyHidden     = "hidden"
 )
 
-// JoinPath safely joins path segments, ensuring clean paths
+// Path helpers
 func JoinPath(segments ...string) string {
 	return path.Clean(path.Join(segments...))
 }
 
-// SourcePath returns a path within the sources directory
 func SourcePath(subpath string) string {
 	if subpath == "" {
 		return PathSources
@@ -64,15 +75,13 @@ func SourcePath(subpath string) string {
 	return JoinPath(PathSources, subpath)
 }
 
-// ContextPath returns a path within the context directory
-func ContextPath(subpath string) string {
+func SkillsPath(subpath string) string {
 	if subpath == "" {
-		return PathContext
+		return PathSkills
 	}
-	return JoinPath(PathContext, subpath)
+	return JoinPath(PathSkills, subpath)
 }
 
-// ToolsPath returns a path within the tools directory
 func ToolsPath(subpath string) string {
 	if subpath == "" {
 		return PathTools
@@ -80,9 +89,7 @@ func ToolsPath(subpath string) string {
 	return JoinPath(PathTools, subpath)
 }
 
-// VirtualFile represents a file or folder in the virtual filesystem.
-// It contains base metadata plus a Type field that determines available
-// operations and UI presentation.
+// VirtualFile represents a file or folder in the virtual filesystem
 type VirtualFile struct {
 	ID         string                 `json:"id"`
 	Name       string                 `json:"name"`
@@ -97,20 +104,17 @@ type VirtualFile struct {
 	Metadata   map[string]interface{} `json:"metadata,omitempty"`
 }
 
-// VirtualFileListResponse is the response for listing directory contents
 type VirtualFileListResponse struct {
 	Path    string        `json:"path"`
 	Entries []VirtualFile `json:"entries"`
 }
 
-// VirtualFileTreeResponse is the response for listing a directory tree
 type VirtualFileTreeResponse struct {
 	Path    string        `json:"path"`
 	Depth   int           `json:"depth"`
 	Entries []VirtualFile `json:"entries"`
 }
 
-// NewVirtualFile creates a new VirtualFile with the given parameters
 func NewVirtualFile(id, name, path string, fileType VirtualFileType) *VirtualFile {
 	return &VirtualFile{
 		ID:       id,
@@ -121,7 +125,6 @@ func NewVirtualFile(id, name, path string, fileType VirtualFileType) *VirtualFil
 	}
 }
 
-// NewRootFolder creates a virtual root folder
 func NewRootFolder(name, path string) *VirtualFile {
 	return &VirtualFile{
 		ID:       "root-" + name,
@@ -133,37 +136,17 @@ func NewRootFolder(name, path string) *VirtualFile {
 	}
 }
 
-// WithFolder marks the file as a folder
-func (f *VirtualFile) WithFolder(isFolder bool) *VirtualFile {
-	f.IsFolder = isFolder
-	return f
-}
+// Builder methods for fluent construction
+func (f *VirtualFile) WithFolder(v bool) *VirtualFile   { f.IsFolder = v; return f }
+func (f *VirtualFile) WithReadOnly(v bool) *VirtualFile { f.IsReadOnly = v; return f }
+func (f *VirtualFile) WithSize(v int64) *VirtualFile    { f.Size = v; return f }
+func (f *VirtualFile) WithChildCount(v int) *VirtualFile { f.ChildCount = v; return f }
 
-// WithReadOnly marks the file as read-only
-func (f *VirtualFile) WithReadOnly(readOnly bool) *VirtualFile {
-	f.IsReadOnly = readOnly
-	return f
-}
-
-// WithSize sets the file size
-func (f *VirtualFile) WithSize(size int64) *VirtualFile {
-	f.Size = size
-	return f
-}
-
-// WithModifiedAt sets the modification time
 func (f *VirtualFile) WithModifiedAt(t time.Time) *VirtualFile {
 	f.ModifiedAt = &t
 	return f
 }
 
-// WithChildCount sets the child count for folders
-func (f *VirtualFile) WithChildCount(count int) *VirtualFile {
-	f.ChildCount = count
-	return f
-}
-
-// WithMetadata adds metadata to the file
 func (f *VirtualFile) WithMetadata(key string, value interface{}) *VirtualFile {
 	if f.Metadata == nil {
 		f.Metadata = make(map[string]interface{})

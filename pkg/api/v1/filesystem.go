@@ -27,18 +27,19 @@ import (
 type FilesystemGroup struct {
 	routerGroup    *echo.Group
 	backend        repository.BackendRepository
-	contextService *services.ContextService
+	storageService *services.StorageService
 	sourceService  *services.SourceService
 	sourceRegistry *sources.Registry
 	toolRegistry   *tools.Registry
 	toolResolver   *tools.WorkspaceToolResolver
 }
 
-// NewFilesystemGroup creates a new filesystem API group
+// NewFilesystemGroup creates a new filesystem API group.
+// storageService handles all S3-backed paths (skills and user-created folders).
 func NewFilesystemGroup(
 	routerGroup *echo.Group,
 	backend repository.BackendRepository,
-	contextService *services.ContextService,
+	storageService *services.StorageService,
 	sourceService *services.SourceService,
 	sourceRegistry *sources.Registry,
 	toolRegistry *tools.Registry,
@@ -52,7 +53,7 @@ func NewFilesystemGroup(
 	g := &FilesystemGroup{
 		routerGroup:    routerGroup,
 		backend:        backend,
-		contextService: contextService,
+		storageService: storageService,
 		sourceService:  sourceService,
 		sourceRegistry: sourceRegistry,
 		toolRegistry:   toolRegistry,
@@ -67,6 +68,13 @@ func (g *FilesystemGroup) registerRoutes() {
 	g.routerGroup.GET("/stat", g.Stat)
 	g.routerGroup.GET("/read", g.Read)
 	g.routerGroup.GET("/tree", g.Tree)
+
+	// File operations with presigned URLs
+	g.routerGroup.POST("/upload-url", g.GetUploadURL)
+	g.routerGroup.GET("/download-url", g.GetDownloadURL)
+	g.routerGroup.POST("/upload-complete", g.NotifyUploadComplete)
+	g.routerGroup.DELETE("/delete", g.DeletePath)
+	g.routerGroup.POST("/mkdir", g.Mkdir)
 
 	// Tool settings endpoints
 	g.routerGroup.GET("/tools", g.ListToolSettings)
@@ -106,16 +114,20 @@ func (g *FilesystemGroup) List(c echo.Context) error {
 	// Determine which service to route to
 	rootDir, relPath := splitRootPath(path)
 
-	switch rootDir {
-	case "context":
-		return g.listContext(c, ctx, relPath)
-	case "sources":
-		return g.listSources(c, ctx, relPath, refresh)
-	case "tools":
-		return g.listTools(c, ctx, showHidden)
-	default:
-		return ErrorResponse(c, http.StatusNotFound, "path not found")
+	// Virtual folders have their own handlers
+	if types.IsVirtualFolder(rootDir) {
+		switch rootDir {
+		case "sources":
+			return g.listSources(c, ctx, relPath, refresh)
+		case "tools":
+			return g.listTools(c, ctx, showHidden)
+		case "tasks":
+			return g.listTasks(c, ctx, relPath)
+		}
 	}
+
+	// All other paths (skills, user-created folders) go to storage service
+	return g.listStorage(c, ctx, path)
 }
 
 // Stat returns file/directory info as VirtualFile
@@ -131,16 +143,20 @@ func (g *FilesystemGroup) Stat(c echo.Context) error {
 
 	rootDir, relPath := splitRootPath(path)
 
-	switch rootDir {
-	case "context":
-		return g.statContext(c, ctx, path, relPath)
-	case "sources":
-		return g.statSources(c, ctx, path, relPath)
-	case "tools":
-		return g.statTools(c, ctx, path, relPath, showHidden)
-	default:
-		return ErrorResponse(c, http.StatusNotFound, "path not found")
+	// Virtual folders have their own handlers
+	if types.IsVirtualFolder(rootDir) {
+		switch rootDir {
+		case "sources":
+			return g.statSources(c, ctx, path, relPath)
+		case "tools":
+			return g.statTools(c, ctx, path, relPath, showHidden)
+		case "tasks":
+			return g.statTasks(c, ctx, path, relPath)
+		}
 	}
+
+	// All other paths (skills, user-created folders) go to storage service
+	return g.statStorage(c, ctx, path)
 }
 
 // Read returns file contents
@@ -158,16 +174,20 @@ func (g *FilesystemGroup) Read(c echo.Context) error {
 	offset, _ := strconv.ParseInt(c.QueryParam("offset"), 10, 64)
 	length, _ := strconv.ParseInt(c.QueryParam("length"), 10, 64)
 
-	switch rootDir {
-	case "context":
-		return g.readContext(c, ctx, relPath, offset, length)
-	case "sources":
-		return g.readSources(c, ctx, relPath, offset, length)
-	case "tools":
-		return ErrorResponse(c, http.StatusBadRequest, "tools are not readable as files")
-	default:
-		return ErrorResponse(c, http.StatusNotFound, "path not found")
+	// Virtual folders have their own handlers
+	if types.IsVirtualFolder(rootDir) {
+		switch rootDir {
+		case "sources":
+			return g.readSources(c, ctx, relPath, offset, length)
+		case "tools":
+			return ErrorResponse(c, http.StatusBadRequest, "tools are not readable as files")
+		case "tasks":
+			return g.readTasks(c, ctx, relPath, offset, length)
+		}
 	}
+
+	// All other paths (skills, user-created folders) go to storage service
+	return g.readStorage(c, ctx, path, offset, length)
 }
 
 // Tree returns a flat listing of a subtree
@@ -181,27 +201,275 @@ func (g *FilesystemGroup) Tree(c echo.Context) error {
 	continuationToken := c.QueryParam("continuation_token")
 	showHidden := c.QueryParam("show_hidden") == "true"
 
-	rootDir, relPath := splitRootPath(path)
+	rootDir, _ := splitRootPath(path)
 
-	switch rootDir {
-	case "context":
-		return g.treeContext(c, ctx, relPath, int32(maxKeys), continuationToken)
-	case "sources":
-		// Sources don't support tree listing - return empty
-		return SuccessResponse(c, types.VirtualFileTreeResponse{
-			Path:    path,
-			Entries: []types.VirtualFile{},
-		})
-	case "tools":
-		// Tools are flat - return same as list
-		entries := g.buildToolEntries(ctx, showHidden)
-		return SuccessResponse(c, types.VirtualFileTreeResponse{
-			Path:    path,
-			Entries: entries,
-		})
-	default:
-		return ErrorResponse(c, http.StatusNotFound, "path not found")
+	// Virtual folders have their own handlers
+	if types.IsVirtualFolder(rootDir) {
+		switch rootDir {
+		case "sources":
+			// Sources don't support tree listing - return empty
+			return SuccessResponse(c, types.VirtualFileTreeResponse{
+				Path:    path,
+				Entries: []types.VirtualFile{},
+			})
+		case "tools":
+			// Tools are flat - return same as list
+			entries := g.buildToolEntries(ctx, showHidden)
+			return SuccessResponse(c, types.VirtualFileTreeResponse{
+				Path:    path,
+				Entries: entries,
+			})
+		case "tasks":
+			// Tasks are virtual - return empty for now (will be implemented with task service)
+			return SuccessResponse(c, types.VirtualFileTreeResponse{
+				Path:    path,
+				Entries: []types.VirtualFile{},
+			})
+		}
 	}
+
+	// All other paths (skills, user-created folders) go to storage service
+	return g.treeStorage(c, ctx, path, int32(maxKeys), continuationToken)
+}
+
+// ============================================================================
+// Presigned URL Operations
+// ============================================================================
+
+// UploadURLRequest represents a request to get a presigned upload URL
+type UploadURLRequest struct {
+	Path        string `json:"path"`
+	ContentType string `json:"content_type,omitempty"`
+}
+
+// UploadURLResponse contains the presigned upload URL and key
+type UploadURLResponse struct {
+	UploadURL string `json:"upload_url"`
+	Key       string `json:"key"`
+}
+
+// DownloadURLResponse contains the presigned download URL
+type DownloadURLResponse struct {
+	DownloadURL string `json:"download_url"`
+}
+
+// GetUploadURL returns a presigned URL for uploading a file
+func (g *FilesystemGroup) GetUploadURL(c echo.Context) error {
+	ctx := c.Request().Context()
+	logRequest(c, "get_upload_url")
+
+	if g.storageService == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "storage unavailable")
+	}
+
+	// Require write access
+	if !auth.CanWrite(ctx) {
+		return ErrorResponse(c, http.StatusForbidden, "insufficient permissions")
+	}
+
+	var req UploadURLRequest
+	if err := c.Bind(&req); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
+	}
+
+	if req.Path == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "path is required")
+	}
+
+	// Validate path
+	if err := validatePath(req.Path); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+	}
+
+	// Check if path is writable (not a virtual folder)
+	path := cleanPath(req.Path)
+	rootDir, _ := splitRootPath(path)
+	if types.IsVirtualFolder(rootDir) {
+		return ErrorResponse(c, http.StatusForbidden, "cannot upload to virtual folders")
+	}
+
+	// Generate presigned URL
+	uploadURL, key, err := g.storageService.GetUploadURL(ctx, req.Path, req.ContentType)
+	if err != nil {
+		log.Error().Err(err).Str("path", req.Path).Msg("failed to generate upload URL")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to generate upload URL")
+	}
+
+	return SuccessResponse(c, UploadURLResponse{
+		UploadURL: uploadURL,
+		Key:       key,
+	})
+}
+
+// GetDownloadURL returns a presigned URL for downloading a file
+func (g *FilesystemGroup) GetDownloadURL(c echo.Context) error {
+	ctx := c.Request().Context()
+	path := cleanPath(c.QueryParam("path"))
+	logRequest(c, "get_download_url")
+
+	if g.storageService == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "storage unavailable")
+	}
+
+	if path == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "path is required")
+	}
+
+	// Validate path
+	if err := validatePath(path); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+	}
+
+	// Check if this is a storage path (not a virtual folder that needs special handling)
+	rootDir, _ := splitRootPath(path)
+	if types.IsVirtualFolder(rootDir) {
+		return ErrorResponse(c, http.StatusBadRequest, "use /read for virtual folder content")
+	}
+
+	// Generate presigned URL
+	downloadURL, err := g.storageService.GetDownloadURL(ctx, path)
+	if err != nil {
+		log.Error().Err(err).Str("path", path).Msg("failed to generate download URL")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to generate download URL")
+	}
+
+	return SuccessResponse(c, DownloadURLResponse{
+		DownloadURL: downloadURL,
+	})
+}
+
+// NotifyUploadComplete invalidates caches after a file upload
+func (g *FilesystemGroup) NotifyUploadComplete(c echo.Context) error {
+	ctx := c.Request().Context()
+	logRequest(c, "notify_upload_complete")
+
+	if g.storageService == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "storage unavailable")
+	}
+
+	var req struct {
+		Path string `json:"path"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
+	}
+
+	if req.Path == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "path is required")
+	}
+
+	if err := g.storageService.NotifyUploadComplete(ctx, req.Path); err != nil {
+		log.Error().Err(err).Str("path", req.Path).Msg("failed to notify upload complete")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to notify upload complete")
+	}
+
+	return SuccessResponse(c, map[string]bool{"success": true})
+}
+
+// DeletePath deletes a file or empty directory
+func (g *FilesystemGroup) DeletePath(c echo.Context) error {
+	ctx := c.Request().Context()
+	path := cleanPath(c.QueryParam("path"))
+	logRequest(c, "delete_path")
+
+	if g.storageService == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "storage unavailable")
+	}
+
+	// Require write access
+	if !auth.CanWrite(ctx) {
+		return ErrorResponse(c, http.StatusForbidden, "insufficient permissions")
+	}
+
+	if path == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "path is required")
+	}
+
+	// Validate path
+	if err := validatePath(path); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+	}
+
+	// Check if path is writable (not a virtual folder)
+	rootDir, _ := splitRootPath(path)
+	if types.IsVirtualFolder(rootDir) {
+		return ErrorResponse(c, http.StatusForbidden, "cannot delete from virtual folders")
+	}
+
+	// Don't allow deleting reserved root folders
+	if !strings.Contains(path, "/") && types.IsReservedFolder(path) {
+		return ErrorResponse(c, http.StatusForbidden, "cannot delete reserved folders")
+	}
+
+	// Use storage service to delete
+	resp, err := g.storageService.Delete(ctx, &pb.ContextDeleteRequest{Path: path})
+	if err != nil {
+		log.Error().Err(err).Str("path", path).Msg("failed to delete path")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to delete")
+	}
+	if !resp.Ok {
+		return ErrorResponse(c, http.StatusBadRequest, resp.Error)
+	}
+
+	log.Info().Str("path", path).Msg("file/folder deleted")
+	return SuccessResponse(c, map[string]bool{"deleted": true})
+}
+
+// MkdirRequest represents a request to create a directory
+type MkdirRequest struct {
+	Path string `json:"path"`
+}
+
+// Mkdir creates a new directory
+func (g *FilesystemGroup) Mkdir(c echo.Context) error {
+	ctx := c.Request().Context()
+	logRequest(c, "mkdir")
+
+	if g.storageService == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "storage unavailable")
+	}
+
+	// Require write access
+	if !auth.CanWrite(ctx) {
+		return ErrorResponse(c, http.StatusForbidden, "insufficient permissions")
+	}
+
+	var req MkdirRequest
+	if err := c.Bind(&req); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
+	}
+
+	if req.Path == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "path is required")
+	}
+
+	// Validate path
+	if err := validatePath(req.Path); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+	}
+
+	// Check if path is writable (not a virtual folder)
+	path := cleanPath(req.Path)
+	rootDir, _ := splitRootPath(path)
+	if types.IsVirtualFolder(rootDir) {
+		return ErrorResponse(c, http.StatusForbidden, "cannot create folders in virtual folders")
+	}
+
+	// Use storage service to create directory
+	resp, err := g.storageService.Mkdir(ctx, &pb.ContextMkdirRequest{Path: path})
+	if err != nil {
+		log.Error().Err(err).Str("path", path).Msg("failed to create directory")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to create directory")
+	}
+	if !resp.Ok {
+		return ErrorResponse(c, http.StatusBadRequest, resp.Error)
+	}
+
+	log.Info().Str("path", path).Msg("directory created")
+	return SuccessResponse(c, map[string]interface{}{
+		"created": true,
+		"path":    path,
+	})
 }
 
 // ============================================================================
@@ -210,15 +478,12 @@ func (g *FilesystemGroup) Tree(c echo.Context) error {
 
 func (g *FilesystemGroup) listRootDirectories(ctx context.Context) []types.VirtualFile {
 	entries := []types.VirtualFile{
-		*types.NewRootFolder(types.DirNameContext, types.PathContext).
-			WithMetadata("description", "Workspace context files"),
-		*types.NewRootFolder(types.DirNameSources, types.PathSources).
-			WithMetadata("description", "Connected integrations"),
-		*types.NewRootFolder(types.DirNameTools, types.PathTools).
-			WithMetadata("description", "Available tools"),
+		*types.NewRootFolder(types.DirNameSkills, types.PathSkills),
+		*types.NewRootFolder(types.DirNameSources, types.PathSources),
+		*types.NewRootFolder(types.DirNameTools, types.PathTools),
+		*types.NewRootFolder(types.DirNameTasks, types.PathTasks),
 	}
 
-	// Add child counts if possible
 	if g.toolRegistry != nil {
 		entries[2].ChildCount = len(g.toolRegistry.List())
 	}
@@ -226,21 +491,33 @@ func (g *FilesystemGroup) listRootDirectories(ctx context.Context) []types.Virtu
 		entries[1].ChildCount = len(g.sourceRegistry.List())
 	}
 
+	// Add user-created top-level folders from storage
+	if g.storageService != nil {
+		resp, err := g.storageService.ReadDir(ctx, &pb.ContextReadDirRequest{Path: "/"})
+		if err == nil && resp.Ok {
+			for _, e := range resp.Entries {
+				if e.IsDir && !types.IsReservedFolder(e.Name) && !types.IsVirtualFolder(e.Name) {
+					entries = append(entries, *types.NewRootFolder(e.Name, "/"+e.Name))
+				}
+			}
+		}
+	}
+
 	return entries
 }
 
 // ============================================================================
-// Context Service (S3-backed files)
+// Storage (S3-backed: skills and user-created folders)
 // ============================================================================
 
-func (g *FilesystemGroup) listContext(c echo.Context, ctx context.Context, relPath string) error {
-	if g.contextService == nil {
-		return ErrorResponse(c, http.StatusServiceUnavailable, "context service not available")
+func (g *FilesystemGroup) listStorage(c echo.Context, ctx context.Context, path string) error {
+	if g.storageService == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "storage unavailable")
 	}
 
-	resp, err := g.contextService.ReadDir(ctx, &pb.ContextReadDirRequest{Path: relPath})
+	resp, err := g.storageService.ReadDir(ctx, &pb.ContextReadDirRequest{Path: strings.TrimPrefix(path, "/")})
 	if err != nil {
-		log.Error().Err(err).Str("path", relPath).Msg("context ReadDir failed")
+		log.Error().Err(err).Str("path", path).Msg("storage ReadDir failed")
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 	if !resp.Ok {
@@ -249,28 +526,31 @@ func (g *FilesystemGroup) listContext(c echo.Context, ctx context.Context, relPa
 
 	entries := make([]types.VirtualFile, 0, len(resp.Entries))
 	for _, e := range resp.Entries {
-		vf := g.contextEntryToVirtualFile(e, relPath)
-		entries = append(entries, *vf)
+		entries = append(entries, *g.storageEntryToVirtualFile(e, path))
 	}
 
 	return SuccessResponse(c, types.VirtualFileListResponse{
-		Path:    types.ContextPath(relPath),
+		Path:    path,
 		Entries: entries,
 	})
 }
 
-func (g *FilesystemGroup) statContext(c echo.Context, ctx context.Context, fullPath, relPath string) error {
-	if g.contextService == nil {
-		return ErrorResponse(c, http.StatusServiceUnavailable, "context service not available")
+func (g *FilesystemGroup) statStorage(c echo.Context, ctx context.Context, path string) error {
+	if g.storageService == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "storage service not available")
 	}
 
-	// Root of context
-	if relPath == "" {
-		return SuccessResponse(c, types.NewRootFolder(types.DirNameContext, types.PathContext).
-			WithMetadata("description", "Workspace context files"))
+	// Remove leading slash for storage service
+	storagePath := strings.TrimPrefix(path, "/")
+
+	// Check if this is a reserved root folder
+	rootDir, _ := splitRootPath(path)
+	if storagePath == "" || path == "/"+rootDir && types.IsReservedFolder(rootDir) {
+		return SuccessResponse(c, types.NewRootFolder(rootDir, path).
+			WithMetadata("description", "Workspace folder"))
 	}
 
-	resp, err := g.contextService.Stat(ctx, &pb.ContextStatRequest{Path: relPath})
+	resp, err := g.storageService.Stat(ctx, &pb.ContextStatRequest{Path: storagePath})
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
@@ -278,8 +558,8 @@ func (g *FilesystemGroup) statContext(c echo.Context, ctx context.Context, fullP
 		return ErrorResponse(c, http.StatusNotFound, resp.Error)
 	}
 
-	name := pathName(relPath)
-	vf := types.NewVirtualFile(hashPath(fullPath), name, fullPath, types.VFTypeContext).
+	name := pathName(path)
+	vf := types.NewVirtualFile(hashPath(path), name, path, types.VFTypeStorage).
 		WithFolder(resp.Info.IsDir).
 		WithSize(resp.Info.Size)
 
@@ -294,15 +574,13 @@ func (g *FilesystemGroup) statContext(c echo.Context, ctx context.Context, fullP
 	return SuccessResponse(c, vf)
 }
 
-func (g *FilesystemGroup) readContext(c echo.Context, ctx context.Context, relPath string, offset, length int64) error {
-	if g.contextService == nil {
-		return ErrorResponse(c, http.StatusServiceUnavailable, "context service not available")
+func (g *FilesystemGroup) readStorage(c echo.Context, ctx context.Context, path string, offset, length int64) error {
+	if g.storageService == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "storage unavailable")
 	}
 
-	resp, err := g.contextService.Read(ctx, &pb.ContextReadRequest{
-		Path:   relPath,
-		Offset: offset,
-		Length: length,
+	resp, err := g.storageService.Read(ctx, &pb.ContextReadRequest{
+		Path: strings.TrimPrefix(path, "/"), Offset: offset, Length: length,
 	})
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
@@ -310,19 +588,16 @@ func (g *FilesystemGroup) readContext(c echo.Context, ctx context.Context, relPa
 	if !resp.Ok {
 		return ErrorResponse(c, http.StatusNotFound, resp.Error)
 	}
-
 	return c.Blob(http.StatusOK, "application/octet-stream", resp.Data)
 }
 
-func (g *FilesystemGroup) treeContext(c echo.Context, ctx context.Context, relPath string, maxKeys int32, continuationToken string) error {
-	if g.contextService == nil {
-		return ErrorResponse(c, http.StatusServiceUnavailable, "context service not available")
+func (g *FilesystemGroup) treeStorage(c echo.Context, ctx context.Context, path string, maxKeys int32, token string) error {
+	if g.storageService == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "storage unavailable")
 	}
 
-	resp, err := g.contextService.ListTree(ctx, &pb.ListTreeRequest{
-		Path:              relPath,
-		MaxKeys:           maxKeys,
-		ContinuationToken: continuationToken,
+	resp, err := g.storageService.ListTree(ctx, &pb.ListTreeRequest{
+		Path: strings.TrimPrefix(path, "/"), MaxKeys: maxKeys, ContinuationToken: token,
 	})
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
@@ -333,65 +608,44 @@ func (g *FilesystemGroup) treeContext(c echo.Context, ctx context.Context, relPa
 
 	entries := make([]types.VirtualFile, 0, len(resp.Entries))
 	for _, e := range resp.Entries {
-		fullPath := types.ContextPath(e.Path)
+		fullPath := "/" + e.Path
 		isDir := e.Mode&uint32(syscall.S_IFDIR) != 0
-
-		vf := types.NewVirtualFile(hashPath(fullPath), pathName(e.Path), fullPath, types.VFTypeContext).
-			WithFolder(isDir).
-			WithSize(e.Size)
-
+		vf := types.NewVirtualFile(hashPath(fullPath), pathName(e.Path), fullPath, types.VFTypeStorage).
+			WithFolder(isDir).WithSize(e.Size)
 		if e.Mtime > 0 {
-			t := time.Unix(e.Mtime, 0)
-			vf.WithModifiedAt(t)
+			vf.WithModifiedAt(time.Unix(e.Mtime, 0))
 		}
 		if e.Etag != "" {
 			vf.WithMetadata("etag", e.Etag)
 		}
-
 		entries = append(entries, *vf)
 	}
 
-	result := types.VirtualFileTreeResponse{
-		Path:    types.ContextPath(relPath),
-		Entries: entries,
-	}
-
-	// Add pagination info to response if truncated
 	if resp.Truncated && resp.NextToken != "" {
 		return c.JSON(http.StatusOK, Response{
 			Success: true,
 			Data: map[string]interface{}{
-				"path":               result.Path,
-				"entries":            result.Entries,
-				"truncated":          true,
-				"continuation_token": resp.NextToken,
+				"path": path, "entries": entries, "truncated": true, "continuation_token": resp.NextToken,
 			},
 		})
 	}
-
-	return SuccessResponse(c, result)
+	return SuccessResponse(c, types.VirtualFileTreeResponse{Path: path, Entries: entries})
 }
 
-func (g *FilesystemGroup) contextEntryToVirtualFile(e *pb.ContextDirEntry, parentPath string) *types.VirtualFile {
-	var fullPath string
-	if parentPath != "" {
-		fullPath = types.ContextPath(types.JoinPath(parentPath, e.Name))
-	} else {
-		fullPath = types.ContextPath(e.Name)
+func (g *FilesystemGroup) storageEntryToVirtualFile(e *pb.ContextDirEntry, parentPath string) *types.VirtualFile {
+	fullPath := "/" + e.Name
+	if parentPath != "" && parentPath != "/" {
+		fullPath = parentPath + "/" + e.Name
 	}
 
-	vf := types.NewVirtualFile(hashPath(fullPath), e.Name, fullPath, types.VFTypeContext).
-		WithFolder(e.IsDir).
-		WithSize(e.Size)
-
+	vf := types.NewVirtualFile(hashPath(fullPath), e.Name, fullPath, types.VFTypeStorage).
+		WithFolder(e.IsDir).WithSize(e.Size)
 	if e.Mtime > 0 {
-		t := time.Unix(e.Mtime, 0)
-		vf.WithModifiedAt(t)
+		vf.WithModifiedAt(time.Unix(e.Mtime, 0))
 	}
 	if e.Etag != "" {
 		vf.WithMetadata("etag", e.Etag)
 	}
-
 	return vf
 }
 
@@ -586,9 +840,22 @@ func (g *FilesystemGroup) readSources(c echo.Context, ctx context.Context, relPa
 
 	// status.json - generate dynamically
 	if subPath == "status.json" {
-		// Check if integration is connected (would need auth context for full check)
-		connected := false // Default to not connected without auth context
-		data := sources.GenerateStatusJSON(integration, connected, "", "")
+		connected := false
+		scope := ""
+		workspaceId := ""
+
+		// Check if integration is connected by querying the database
+		if rc := auth.FromContext(ctx); rc != nil && rc.WorkspaceId > 0 && g.backend != nil {
+			conn, err := g.backend.GetConnection(ctx, rc.WorkspaceId, rc.MemberId, integration)
+			if err != nil {
+				log.Warn().Err(err).Str("integration", integration).Msg("connection lookup failed")
+			} else if conn != nil {
+				connected = true
+				scope = conn.Scope
+			}
+		}
+
+		data := sources.GenerateStatusJSON(integration, connected, scope, workspaceId)
 		return c.Blob(http.StatusOK, "application/json", data)
 	}
 
@@ -856,6 +1123,26 @@ func (g *FilesystemGroup) buildToolEntries(ctx context.Context, showHidden bool)
 	}
 
 	return entries
+}
+
+// ============================================================================
+// Tasks (Virtual - handled by task execution system, not S3)
+// ============================================================================
+
+func (g *FilesystemGroup) listTasks(c echo.Context, ctx context.Context, relPath string) error {
+	// TODO: integrate with task service
+	return SuccessResponse(c, types.VirtualFileListResponse{Path: types.PathTasks, Entries: []types.VirtualFile{}})
+}
+
+func (g *FilesystemGroup) statTasks(c echo.Context, ctx context.Context, fullPath, relPath string) error {
+	if relPath == "" {
+		return SuccessResponse(c, types.NewRootFolder(types.DirNameTasks, types.PathTasks).WithChildCount(0))
+	}
+	return ErrorResponse(c, http.StatusNotFound, "task not found")
+}
+
+func (g *FilesystemGroup) readTasks(c echo.Context, ctx context.Context, relPath string, offset, length int64) error {
+	return ErrorResponse(c, http.StatusNotFound, "task file not found")
 }
 
 // ============================================================================

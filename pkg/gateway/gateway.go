@@ -19,6 +19,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/admin"
 	apiv1 "github.com/beam-cloud/airstore/pkg/api/v1"
 	"github.com/beam-cloud/airstore/pkg/auth"
+	"github.com/beam-cloud/airstore/pkg/clients"
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/gateway/services"
 	"github.com/beam-cloud/airstore/pkg/oauth"
@@ -28,7 +29,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/sources/providers"
 	"github.com/beam-cloud/airstore/pkg/tools"
 	_ "github.com/beam-cloud/airstore/pkg/tools/builtin" // self-registering tools
-	"github.com/beam-cloud/airstore/pkg/tools/clients"
+	toolclients "github.com/beam-cloud/airstore/pkg/tools/clients"
 	"github.com/beam-cloud/airstore/pkg/tools/definitions"
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
@@ -52,12 +53,10 @@ type Gateway struct {
 	sourceRegistry *sources.Registry
 	mcpManager     *tools.MCPManager
 
-	// Context service for S3-backed file storage
-	contextService *services.ContextService
-
-	// OAuth for workspace integrations
-	oauthStore  *oauth.Store
-	googleOAuth *oauth.GoogleClient
+	storageService *services.StorageService
+	storageClient  *clients.StorageClient
+	oauthStore     *oauth.Store
+	oauthRegistry  *oauth.Registry
 }
 
 func NewGateway() (*Gateway, error) {
@@ -101,6 +100,39 @@ func NewGateway() (*Gateway, error) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+
+	// Initialize OAuth registry with all providers
+	oauthRegistry := oauth.NewRegistry()
+
+	// Register Google provider and its integrations
+	googleProvider := oauth.NewGoogleProvider(config.OAuth.Google)
+	oauthRegistry.Register(googleProvider)
+	if googleProvider.IsConfigured() {
+		oauthRegistry.RegisterIntegration("gmail", "google")
+		oauthRegistry.RegisterIntegration("gdrive", "google")
+	}
+
+	// Register GitHub provider and its integrations
+	githubProvider := oauth.NewGitHubProvider(config.OAuth.GitHub)
+	oauthRegistry.Register(githubProvider)
+	if githubProvider.IsConfigured() {
+		oauthRegistry.RegisterIntegration("github", "github")
+	}
+
+	// Register Notion provider and its integrations
+	notionProvider := oauth.NewNotionProvider(config.OAuth.Notion)
+	oauthRegistry.Register(notionProvider)
+	if notionProvider.IsConfigured() {
+		oauthRegistry.RegisterIntegration("notion", "notion")
+	}
+
+	// Register Slack provider and its integrations
+	slackProvider := oauth.NewSlackProvider(config.OAuth.Slack)
+	oauthRegistry.Register(slackProvider)
+	if slackProvider.IsConfigured() {
+		oauthRegistry.RegisterIntegration("slack", "slack")
+	}
+
 	gateway := &Gateway{
 		Config:         config,
 		RedisClient:    redisClient,
@@ -111,7 +143,7 @@ func NewGateway() (*Gateway, error) {
 		sourceRegistry: sources.NewRegistry(),
 		mcpManager:     tools.NewMCPManager(),
 		oauthStore:     oauth.NewStore(0), // Default TTL
-		googleOAuth:    oauth.NewGoogleClient(config.OAuth.Google),
+		oauthRegistry:  oauthRegistry,
 	}
 
 	return gateway, nil
@@ -231,15 +263,16 @@ func (g *Gateway) registerServices() error {
 	filesystemService := services.NewFilesystemService(filesystemStore)
 	pb.RegisterFilesystemServiceServer(g.grpcServer, filesystemService)
 
-	// Register context gRPC service (S3-backed file storage)
-	if g.Config.Filesystem.Context.Bucket != "" {
-		contextService, err := services.NewContextService(g.Config.Filesystem.Context)
-		if err != nil {
-			log.Warn().Err(err).Msg("failed to create context service - /context will not be available")
+	// Initialize workspace storage (per-workspace S3 buckets)
+	if g.Config.Filesystem.WorkspaceStorage.IsConfigured() {
+		if client, err := clients.NewStorageClient(g.ctx, g.Config.Filesystem.WorkspaceStorage); err != nil {
+			log.Warn().Err(err).Msg("storage client init failed")
+		} else if svc, err := services.NewStorageService(client); err != nil {
+			log.Warn().Err(err).Msg("storage service init failed")
 		} else {
-			g.contextService = contextService
-			pb.RegisterContextServiceServer(g.grpcServer, contextService)
-			log.Info().Str("bucket", g.Config.Filesystem.Context.Bucket).Msg("context service registered")
+			g.storageClient = client
+			g.storageService = svc
+			pb.RegisterContextServiceServer(g.grpcServer, svc)
 		}
 	}
 
@@ -257,8 +290,8 @@ func (g *Gateway) registerServices() error {
 
 	// Register tools gRPC service (with backend for credential lookups and OAuth refresh)
 	var toolService *services.ToolService
-	if g.BackendRepo != nil && g.googleOAuth.IsConfigured() {
-		toolService = services.NewToolServiceWithOAuth(g.toolRegistry, g.BackendRepo, g.googleOAuth)
+	if g.BackendRepo != nil && len(g.oauthRegistry.ListConfiguredProviders()) > 0 {
+		toolService = services.NewToolServiceWithOAuth(g.toolRegistry, g.BackendRepo, g.oauthRegistry)
 	} else if g.BackendRepo != nil {
 		toolService = services.NewToolServiceWithBackend(g.toolRegistry, g.BackendRepo)
 	} else {
@@ -279,8 +312,8 @@ func (g *Gateway) registerServices() error {
 
 	// Register sources gRPC service (read-only integration access with OAuth refresh)
 	var sourceService *services.SourceService
-	if g.BackendRepo != nil && g.googleOAuth.IsConfigured() {
-		sourceService = services.NewSourceServiceWithOAuth(g.sourceRegistry, g.BackendRepo, filesystemStore, g.googleOAuth)
+	if g.BackendRepo != nil && len(g.oauthRegistry.ListConfiguredProviders()) > 0 {
+		sourceService = services.NewSourceServiceWithOAuth(g.sourceRegistry, g.BackendRepo, filesystemStore, g.oauthRegistry)
 	} else {
 		sourceService = services.NewSourceService(g.sourceRegistry, g.BackendRepo, filesystemStore)
 	}
@@ -295,7 +328,7 @@ func (g *Gateway) registerServices() error {
 		// Workspace CRUD endpoints (admin-only)
 		workspacesAdminGroup := g.baseRouteGroup.Group("/workspaces")
 		workspacesAdminGroup.Use(g.requireAdminToken())
-		apiv1.NewWorkspacesGroup(workspacesAdminGroup, g.BackendRepo)
+		apiv1.NewWorkspacesGroup(workspacesAdminGroup, g.BackendRepo, g.storageClient)
 
 		// Workspace-scoped APIs (support both admin and member tokens)
 		workspaceAuthConfig := apiv1.WorkspaceAuthConfig{
@@ -321,23 +354,23 @@ func (g *Gateway) registerServices() error {
 		// Filesystem API (nested under workspaces, workspace-scoped auth)
 		filesystemGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/fs")
 		filesystemGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
-		apiv1.NewFilesystemGroup(filesystemGroup, g.BackendRepo, g.contextService, sourceService, g.sourceRegistry, g.toolRegistry)
+		apiv1.NewFilesystemGroup(filesystemGroup, g.BackendRepo, g.storageService, sourceService, g.sourceRegistry, g.toolRegistry)
 		log.Info().Msg("filesystem API registered at /api/v1/workspaces/:workspace_id/fs")
 
 		// Tasks API
 		apiv1.NewTasksGroup(g.baseRouteGroup.Group("/tasks"), g.BackendRepo, taskQueue)
 
-		// OAuth API for workspace integrations (gmail, gdrive)
-		if g.googleOAuth.IsConfigured() {
-			apiv1.NewOAuthGroup(g.baseRouteGroup.Group("/oauth"), g.oauthStore, g.googleOAuth, g.BackendRepo)
-			log.Info().Msg("oauth API registered at /api/v1/oauth")
+		// OAuth API for workspace integrations (gmail, gdrive, github, notion, slack)
+		if len(g.oauthRegistry.ListConfiguredProviders()) > 0 {
+			apiv1.NewOAuthGroup(g.baseRouteGroup.Group("/oauth"), g.oauthStore, g.oauthRegistry, g.BackendRepo)
+			log.Info().Strs("providers", g.oauthRegistry.ListConfiguredProviders()).Msg("oauth API registered at /api/v1/oauth")
 		}
 
 		log.Info().Msg("workspace, members, tokens, connections, and tasks APIs registered")
 
 		// Register admin UI if enabled
 		if g.Config.Admin.Enabled {
-			admin.NewService(g.Config.Admin, g.BackendRepo).RegisterRoutes(g.echo)
+			admin.NewService(g.Config.Admin, g.BackendRepo, g.storageClient).RegisterRoutes(g.echo)
 		}
 	}
 
@@ -547,17 +580,17 @@ func (g *Gateway) initTools() error {
 
 	// API key integrations (only register if configured)
 	if g.Config.Tools.Integrations.Weather.APIKey != "" {
-		clientRegistry.Register(clients.NewWeatherClient(g.Config.Tools.Integrations.Weather.APIKey))
+		clientRegistry.Register(toolclients.NewWeatherClient(g.Config.Tools.Integrations.Weather.APIKey))
 		log.Debug().Msg("weather integration enabled")
 	}
 
 	if g.Config.Tools.Integrations.Exa.APIKey != "" {
-		clientRegistry.Register(clients.NewExaClient(g.Config.Tools.Integrations.Exa.APIKey))
+		clientRegistry.Register(toolclients.NewExaClient(g.Config.Tools.Integrations.Exa.APIKey))
 		log.Debug().Msg("exa integration enabled")
 	}
 
 	// Connection-based integrations (always registered, credentials checked at runtime)
-	clientRegistry.Register(clients.NewGitHubClient())
+	clientRegistry.Register(toolclients.NewGitHubClient())
 	log.Debug().Msg("github integration registered (connection-based)")
 
 	// Load tool definitions from embedded YAML files

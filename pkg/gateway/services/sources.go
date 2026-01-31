@@ -50,14 +50,14 @@ func buildGmailQuerySpec(query string, limit int, filenameFormat string) string 
 // SourceService implements the gRPC SourceService for integration access.
 type SourceService struct {
 	pb.UnimplementedSourceServiceServer
-	registry    *sources.Registry
-	backend     repository.BackendRepository
-	fsStore     repository.FilesystemStore
-	cache       *sources.SourceCache
-	rateLimiter *sources.RateLimiter
-	googleOAuth *oauth.GoogleClient
-	credCache   sync.Map // map[string]*cachedCreds - caches credentials by "workspaceId:integration"
-	queryGroup  singleflight.Group
+	registry      *sources.Registry
+	backend       repository.BackendRepository
+	fsStore       repository.FilesystemStore
+	cache         *sources.SourceCache
+	rateLimiter   *sources.RateLimiter
+	oauthRegistry *oauth.Registry
+	credCache     sync.Map // map[string]*cachedCreds - caches credentials by "workspaceId:integration"
+	queryGroup    singleflight.Group
 }
 
 // NewSourceService creates a new SourceService.
@@ -72,14 +72,14 @@ func NewSourceService(registry *sources.Registry, backend repository.BackendRepo
 }
 
 // NewSourceServiceWithOAuth creates a SourceService with OAuth refresh support.
-func NewSourceServiceWithOAuth(registry *sources.Registry, backend repository.BackendRepository, fsStore repository.FilesystemStore, googleOAuth *oauth.GoogleClient) *SourceService {
+func NewSourceServiceWithOAuth(registry *sources.Registry, backend repository.BackendRepository, fsStore repository.FilesystemStore, oauthRegistry *oauth.Registry) *SourceService {
 	return &SourceService{
-		registry:    registry,
-		backend:     backend,
-		fsStore:     fsStore,
-		cache:       sources.NewSourceCache(sources.DefaultCacheTTL, sources.DefaultCacheSize),
-		rateLimiter: sources.NewRateLimiter(sources.DefaultRateLimitConfig()),
-		googleOAuth: googleOAuth,
+		registry:      registry,
+		backend:       backend,
+		fsStore:       fsStore,
+		cache:         sources.NewSourceCache(sources.DefaultCacheTTL, sources.DefaultCacheSize),
+		rateLimiter:   sources.NewRateLimiter(sources.DefaultRateLimitConfig()),
+		oauthRegistry: oauthRegistry,
 	}
 }
 
@@ -831,18 +831,20 @@ func (s *SourceService) loadCredentials(ctx context.Context, pctx *sources.Provi
 		return pctx, false
 	}
 
-	// Check if Google OAuth token needs refresh
-	if oauth.IsGoogleIntegration(integration) && oauth.NeedsRefresh(creds) && s.googleOAuth != nil {
-		refreshed, err := s.googleOAuth.Refresh(ctx, creds.RefreshToken)
-		if err != nil {
-			log.Warn().Str("integration", integration).Err(err).Msg("token refresh failed")
-			// Continue with existing creds - they might still work
-		} else {
-			// Update stored credentials
-			if _, err := s.backend.SaveConnection(ctx, conn.WorkspaceId, conn.MemberId, integration, refreshed, conn.Scope); err != nil {
-				log.Warn().Str("integration", integration).Err(err).Msg("failed to persist refreshed token")
+	// Check if OAuth token needs refresh
+	if s.oauthRegistry != nil && oauth.NeedsRefresh(creds) {
+		if provider, err := s.oauthRegistry.GetProviderForIntegration(integration); err == nil {
+			refreshed, err := provider.Refresh(ctx, creds.RefreshToken)
+			if err != nil {
+				log.Warn().Str("integration", integration).Str("provider", provider.Name()).Err(err).Msg("token refresh failed")
+				// Continue with existing creds - they might still work
+			} else {
+				// Update stored credentials
+				if _, err := s.backend.SaveConnection(ctx, conn.WorkspaceId, conn.MemberId, integration, refreshed, conn.Scope); err != nil {
+					log.Warn().Str("integration", integration).Err(err).Msg("failed to persist refreshed token")
+				}
+				creds = refreshed
 			}
-			creds = refreshed
 		}
 	}
 
@@ -969,6 +971,14 @@ func (s *SourceService) inferQuerySpec(ctx context.Context, integration, name, g
 
 	case "notion":
 		result, err := baml.InferNotionQuery(ctx, name, guidancePtr)
+		if err != nil {
+			return "", "", err
+		}
+		data, _ := json.Marshal(result)
+		return string(data), extractFilenameFormat(data), nil
+
+	case "github":
+		result, err := baml.InferGitHubQuery(ctx, name, guidancePtr)
 		if err != nil {
 			return "", "", err
 		}
@@ -1340,6 +1350,9 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 		GmailQuery     string `json:"gmail_query"`
 		GDriveQuery    string `json:"gdrive_query"`
 		NotionQuery    string `json:"notion_query"`
+		GitHubQuery    string `json:"github_query"`
+		SearchType     string `json:"search_type"`
+		ContentType    string `json:"content_type"`
 		Limit          int    `json:"limit"`
 		MaxResults     int    `json:"max_results"`
 		FilenameFormat string `json:"filename_format"`
@@ -1369,6 +1382,8 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 		query = spec.GDriveQuery
 	case "notion":
 		query = spec.NotionQuery
+	case "github":
+		query = spec.GitHubQuery
 	}
 
 	filenameFormat := spec.FilenameFormat
@@ -1376,11 +1391,21 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 		filenameFormat = sources.DefaultFilenameFormat(integration)
 	}
 
+	// Build metadata for provider-specific options
+	metadata := make(map[string]string)
+	if spec.SearchType != "" {
+		metadata["search_type"] = spec.SearchType
+	}
+	if spec.ContentType != "" {
+		metadata["content_type"] = spec.ContentType
+	}
+
 	return sources.QuerySpec{
 		Query:          query,
 		Limit:          limit,
 		MaxResults:     maxResults,
 		FilenameFormat: filenameFormat,
+		Metadata:       metadata,
 	}
 }
 

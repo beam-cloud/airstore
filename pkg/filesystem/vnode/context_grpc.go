@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -46,11 +47,12 @@ func (c *ContextVNodeGRPC) ctx() (context.Context, context.CancelFunc) {
 	return ctx, cancel
 }
 
-func (c *ContextVNodeGRPC) Prefix() string { return ContextPath }
+func (c *ContextVNodeGRPC) Prefix() string { return SkillsPath }
 func (c *ContextVNodeGRPC) Type() VNodeType { return VNodeWritable }
 
+// rel returns the storage path (leading slash stripped, keeps skills prefix)
 func (c *ContextVNodeGRPC) rel(path string) string {
-	return strings.TrimPrefix(strings.TrimPrefix(path, ContextPath), "/")
+	return strings.TrimPrefix(path, "/")
 }
 
 // Getattr returns file attributes with caching
@@ -101,8 +103,11 @@ func (c *ContextVNodeGRPC) Readdir(path string) ([]DirEntry, error) {
 	now := time.Now()
 
 	for _, e := range resp.Entries {
-		// Skip macOS AppleDouble resource fork files (._*) in listings
+		// Skip macOS AppleDouble files and reserved folders at skills root
 		if strings.HasPrefix(e.Name, "._") {
+			continue
+		}
+		if path == SkillsPath && types.IsReservedFolder(e.Name) {
 			continue
 		}
 
@@ -265,6 +270,27 @@ func (c *ContextVNodeGRPC) Unlink(path string) error {
 		return fs.ErrPermission
 	}
 	c.cache.Invalidate(path)
+	return nil
+}
+
+// Rename moves or renames a file or directory
+func (c *ContextVNodeGRPC) Rename(oldpath, newpath string) error {
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.client.Rename(ctx, &pb.ContextRenameRequest{
+		OldPath: c.rel(oldpath),
+		NewPath: c.rel(newpath),
+	})
+	if err != nil {
+		return err
+	}
+	if !resp.Ok {
+		return fs.ErrPermission
+	}
+
+	c.cache.Invalidate(oldpath)
+	c.cache.Invalidate(newpath)
 	return nil
 }
 

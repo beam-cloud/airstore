@@ -194,7 +194,7 @@ type ContextStatRequest struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"` // Path relative to /context (e.g., "foo/bar.txt")
+	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"` // Path within workspace storage (e.g., "skills/my-skill.md", "docs/readme.txt")
 }
 
 func (x *ContextStatRequest) Reset() {

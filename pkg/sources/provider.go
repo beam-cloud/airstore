@@ -48,11 +48,12 @@ type ProviderContext struct {
 
 // QuerySpec contains the parsed query specification from a FilesystemQuery.
 type QuerySpec struct {
-	Query          string // Provider-specific query string (e.g., "is:unread", "mimeType='application/pdf'")
-	Limit          int    // Page size - number of results per page (default 50)
-	MaxResults     int    // Total cap on results across all pages (default 500)
-	FilenameFormat string // Format template for generating filenames (e.g., "{date}_{subject}_{id}.txt")
-	PageToken      string // Pagination token for fetching subsequent pages
+	Query          string            // Provider-specific query string (e.g., "is:unread", "mimeType='application/pdf'")
+	Limit          int               // Page size - number of results per page (default 50)
+	MaxResults     int               // Total cap on results across all pages (default 500)
+	FilenameFormat string            // Format template for generating filenames (e.g., "{date}_{subject}_{id}.txt")
+	PageToken      string            // Pagination token for fetching subsequent pages
+	Metadata       map[string]string // Additional provider-specific metadata (e.g., content_type for GitHub)
 }
 
 // QueryResult represents a single result from executing a filesystem query.
@@ -106,6 +107,8 @@ func DefaultFilenameFormat(integration string) string {
 		return "{name}_{id}"
 	case "notion":
 		return "{title}_{id}.md"
+	case "github":
+		return "{repo}_{type}_{number}_{id}.json"
 	default:
 		return "{id}"
 	}

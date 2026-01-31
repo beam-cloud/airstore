@@ -25,10 +25,13 @@ type StatusInfo struct {
 	Error       string `json:"error,omitempty"`
 }
 
-// oauthIntegrations lists integrations that use OAuth (gmail, gdrive)
+// oauthIntegrations lists integrations that use OAuth
 var oauthIntegrations = map[string]bool{
 	"gmail":  true,
 	"gdrive": true,
+	"github": true,
+	"notion": true,
+	"slack":  true,
 }
 
 // GenerateStatusJSON creates the status.json content for an integration
