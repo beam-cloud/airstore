@@ -24,11 +24,6 @@ func newUI(app *App) *ui {
 	systray.SetIcon(iconDisconnected)
 	systray.SetTooltip("Airstore")
 
-	mTitle := systray.AddMenuItem("Airstore", "")
-	mTitle.Disable()
-
-	systray.AddSeparator()
-
 	u.mStatus = systray.AddMenuItem("Status: Not mounted", "")
 	u.mStatus.Disable()
 
@@ -49,6 +44,8 @@ func newUI(app *App) *ui {
 	systray.AddSeparator()
 
 	u.mQuit = systray.AddMenuItem("Quit Airstore", "Unmount and quit")
+
+	patchMenuPosition()
 
 	go u.eventLoop()
 
