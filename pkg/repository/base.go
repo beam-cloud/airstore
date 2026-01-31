@@ -36,6 +36,12 @@ type TaskQueue interface {
 	GetResult(ctx context.Context, taskID string) (*types.TaskResult, error)
 	Len(ctx context.Context) (int64, error)
 	InFlightCount(ctx context.Context) (int64, error)
+
+	// Log streaming
+	PublishLog(ctx context.Context, taskID string, stream string, data string) error
+	PublishStatus(ctx context.Context, taskID string, status types.TaskStatus, exitCode *int, errorMsg string) error
+	SubscribeLogs(ctx context.Context, taskID string) (<-chan []byte, func(), error)
+	GetLogBuffer(ctx context.Context, taskID string) ([][]byte, error)
 }
 
 // MemberRepository manages workspace members
@@ -116,6 +122,7 @@ type BackendRepository interface {
 	UpdateTaskStatus(ctx context.Context, externalId string, status types.TaskStatus) error
 	SetTaskStarted(ctx context.Context, externalId string) error
 	SetTaskResult(ctx context.Context, externalId string, exitCode int, errorMsg string) error
+	CancelTask(ctx context.Context, externalId string) error
 	DeleteTask(ctx context.Context, externalId string) error
 
 	// Database access

@@ -95,7 +95,6 @@ func NewWorker() (*Worker, error) {
 		return nil, fmt.Errorf("failed to create gateway client: %w", err)
 	}
 
-	// Create Redis client for task queue
 	redisClient, err := common.NewRedisClient(config.Database.Redis)
 	if err != nil {
 		cancel()
@@ -122,6 +121,7 @@ func NewWorker() (*Worker, error) {
 		RuntimeConfig: runtime.Config{
 			Type: runtimeType,
 		},
+		TaskQueue: taskQueue, // For streaming task logs
 	})
 	if err != nil {
 		cancel()

@@ -12,6 +12,7 @@ const (
 	VFTypeStorage VirtualFileType = "storage" // S3-backed files
 	VFTypeSource  VirtualFileType = "source"  // Integration sources (github, gmail, etc)
 	VFTypeTool    VirtualFileType = "tool"    // Available tools
+	VFTypeTask    VirtualFileType = "task"    // Running/completed tasks
 	VFTypeRoot    VirtualFileType = "root"    // Virtual root directories
 )
 

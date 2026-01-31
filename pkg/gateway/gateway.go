@@ -27,6 +27,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/scheduler"
 	"github.com/beam-cloud/airstore/pkg/sources"
 	"github.com/beam-cloud/airstore/pkg/sources/providers"
+	"github.com/beam-cloud/airstore/pkg/streams"
 	"github.com/beam-cloud/airstore/pkg/tools"
 	_ "github.com/beam-cloud/airstore/pkg/tools/builtin" // self-registering tools
 	toolclients "github.com/beam-cloud/airstore/pkg/tools/clients"
@@ -57,6 +58,7 @@ type Gateway struct {
 	storageClient  *clients.StorageClient
 	oauthStore     *oauth.Store
 	oauthRegistry  *oauth.Registry
+	s2Client       *streams.S2Client
 }
 
 func NewGateway() (*Gateway, error) {
@@ -133,6 +135,16 @@ func NewGateway() (*Gateway, error) {
 		oauthRegistry.RegisterIntegration("slack", "slack")
 	}
 
+	// Initialize S2 client for task log streaming if configured
+	var s2Client *streams.S2Client
+	if config.Streams.Token != "" && config.Streams.Basin != "" {
+		s2Client = streams.NewS2Client(streams.S2Config{
+			Token: config.Streams.Token,
+			Basin: config.Streams.Basin,
+		})
+		log.Info().Str("basin", config.Streams.Basin).Msg("S2 log streaming enabled")
+	}
+
 	gateway := &Gateway{
 		Config:         config,
 		RedisClient:    redisClient,
@@ -144,6 +156,7 @@ func NewGateway() (*Gateway, error) {
 		mcpManager:     tools.NewMCPManager(),
 		oauthStore:     oauth.NewStore(0), // Default TTL
 		oauthRegistry:  oauthRegistry,
+		s2Client:       s2Client,
 	}
 
 	return gateway, nil
@@ -354,7 +367,7 @@ func (g *Gateway) registerServices() error {
 		// Filesystem API (nested under workspaces, workspace-scoped auth)
 		filesystemGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/fs")
 		filesystemGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
-		apiv1.NewFilesystemGroup(filesystemGroup, g.BackendRepo, g.storageService, sourceService, g.sourceRegistry, g.toolRegistry)
+		apiv1.NewFilesystemGroup(filesystemGroup, g.BackendRepo, g.storageService, sourceService, g.sourceRegistry, g.toolRegistry, g.s2Client)
 		log.Info().Msg("filesystem API registered at /api/v1/workspaces/:workspace_id/fs")
 
 		// Tasks API

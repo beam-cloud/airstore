@@ -2,11 +2,38 @@ package worker
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"sync"
 
+	"github.com/beam-cloud/airstore/pkg/streams"
 	"github.com/rs/zerolog/log"
 )
+
+// LogPublisher is an interface for publishing task logs
+type LogPublisher interface {
+	PublishLog(ctx context.Context, taskID string, stream string, data string) error
+}
+
+// S2LogPublisher publishes logs to S2 streams
+type S2LogPublisher struct {
+	client *streams.S2Client
+}
+
+// NewS2LogPublisher creates a log publisher that writes to S2
+func NewS2LogPublisher(client *streams.S2Client) *S2LogPublisher {
+	return &S2LogPublisher{client: client}
+}
+
+// PublishLog implements LogPublisher
+func (p *S2LogPublisher) PublishLog(ctx context.Context, taskID, stream, data string) error {
+	return p.client.AppendLog(ctx, taskID, stream, data)
+}
+
+// PublishStatus publishes a status event to S2
+func (p *S2LogPublisher) PublishStatus(ctx context.Context, taskID, status string, exitCode *int, errorMsg string) error {
+	return p.client.AppendStatus(ctx, taskID, status, exitCode, errorMsg)
+}
 
 // SandboxOutput captures and manages sandbox stdout/stderr output.
 // It implements the runtime.OutputWriter interface.
@@ -140,5 +167,66 @@ func (o *SandboxOutput) LogSummary(maxLines int) {
 				Int("hidden", total-maxLines).
 				Msg("... truncated ...")
 		}
+	}
+}
+
+// StreamingOutput wraps SandboxOutput and also publishes logs to Redis for streaming
+type StreamingOutput struct {
+	*SandboxOutput
+	taskID       string
+	logPublisher LogPublisher
+	ctx          context.Context
+	lineBuf      bytes.Buffer
+}
+
+// NewStreamingOutput creates a new StreamingOutput that captures output and streams to Redis
+func NewStreamingOutput(ctx context.Context, taskID string, logPublisher LogPublisher, maxSize int) *StreamingOutput {
+	return &StreamingOutput{
+		SandboxOutput: NewSandboxOutput(taskID, maxSize),
+		taskID:        taskID,
+		logPublisher:  logPublisher,
+		ctx:           ctx,
+	}
+}
+
+// Write implements io.Writer - captures output and publishes complete lines to Redis
+func (o *StreamingOutput) Write(p []byte) (n int, err error) {
+	// Write to underlying buffer
+	n, err = o.SandboxOutput.Write(p)
+	if err != nil {
+		return n, err
+	}
+
+	// Buffer and publish complete lines
+	if o.logPublisher != nil {
+		o.lineBuf.Write(p)
+		for {
+			line, readErr := o.lineBuf.ReadString('\n')
+			if readErr != nil {
+				// Put incomplete line back in buffer
+				o.lineBuf.WriteString(line)
+				break
+			}
+			// Publish complete line (strip trailing newline)
+			line = strings.TrimSuffix(line, "\n")
+			if line != "" {
+				if pubErr := o.logPublisher.PublishLog(o.ctx, o.taskID, "stdout", line); pubErr != nil {
+					log.Warn().Err(pubErr).Str("task_id", o.taskID).Msg("failed to publish log")
+				}
+			}
+		}
+	}
+
+	return n, nil
+}
+
+// Flush publishes any remaining buffered output
+func (o *StreamingOutput) Flush() {
+	if o.logPublisher != nil && o.lineBuf.Len() > 0 {
+		remaining := o.lineBuf.String()
+		if remaining != "" {
+			_ = o.logPublisher.PublishLog(o.ctx, o.taskID, "stdout", remaining)
+		}
+		o.lineBuf.Reset()
 	}
 }

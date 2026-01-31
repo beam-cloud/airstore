@@ -25,7 +25,14 @@ type AppConfig struct {
 	Scheduler   SchedulerConfig  `key:"scheduler" json:"scheduler"`
 	Tools       ToolsConfig      `key:"tools" json:"tools"`
 	Admin       AdminConfig      `key:"admin" json:"admin"`
-	OAuth       IntegrationOAuth `key:"oauth" json:"oauth"` // OAuth for workspace integrations (gmail, gdrive)
+	OAuth       IntegrationOAuth `key:"oauth" json:"oauth"`     // OAuth for workspace integrations (gmail, gdrive)
+	Streams     StreamsConfig    `key:"streams" json:"streams"` // S2 stream configuration for task logs
+}
+
+// StreamsConfig configures S2 stream storage for task logs
+type StreamsConfig struct {
+	Token string `key:"token" json:"token"` // S2 API token
+	Basin string `key:"basin" json:"basin"` // S2 basin name (e.g., "airstore")
 }
 
 // IsLocalMode returns true if running in local mode (no Redis/Postgres)

@@ -2,6 +2,8 @@ package scheduler
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -29,51 +31,33 @@ const (
 	defaultWorkerCpu    = "500m"
 	defaultWorkerMemory = "512Mi"
 
-	// Labels
-	labelRole = "airstore.beam.cloud/role"
-	labelPool = "airstore.beam.cloud/pool"
+	// Labels and annotations
+	labelRole            = "airstore.beam.cloud/role"
+	labelPool            = "airstore.beam.cloud/pool"
+	annotationConfigHash = "airstore.beam.cloud/config-hash"
 )
 
 // PoolScalerConfig defines the configuration for a pool scaler
 type PoolScalerConfig struct {
-	// PoolName is the name of the pool
-	PoolName string
-
-	// DeploymentName is the K8s Deployment to scale
-	DeploymentName string
-
-	// Namespace is the K8s namespace
-	Namespace string
-
-	// MinReplicas is the minimum number of workers
-	MinReplicas int32
-
-	// MaxReplicas is the maximum number of workers
-	MaxReplicas int32
-
-	// ScaleDownDelay is how long queue must be empty before scaling down
-	ScaleDownDelay time.Duration
-
-	// ScalingInterval is how often to check queue depth
+	PoolName        string
+	DeploymentName  string
+	Namespace       string
+	MinReplicas     int32
+	MaxReplicas     int32
+	ScaleDownDelay  time.Duration
 	ScalingInterval time.Duration
 
-	// WorkerImage is the container image for workers
-	WorkerImage string
-
-	// WorkerCpu is the CPU request/limit for workers
-	WorkerCpu string
-
-	// WorkerMemory is the memory request/limit for workers
+	// Worker resources
+	WorkerImage  string
+	WorkerCpu    string
 	WorkerMemory string
 
-	// GatewayServiceName is the K8s service name for the gateway
+	// Gateway connection
 	GatewayServiceName string
+	GatewayPort        int
 
-	// GatewayPort is the HTTP port of the gateway
-	GatewayPort int
-
-	// RedisAddr is the Redis address for workers
-	RedisAddr string
+	// Full app config - passed to workers as CONFIG_JSON
+	AppConfig types.AppConfig
 }
 
 // PoolScaler monitors queue depth and scales a K8s Deployment
@@ -123,9 +107,6 @@ func NewPoolScaler(ctx context.Context, config PoolScalerConfig, taskQueue repos
 	if config.GatewayPort == 0 {
 		config.GatewayPort = 1994
 	}
-	if config.RedisAddr == "" {
-		config.RedisAddr = "redis-master:6379"
-	}
 
 	// Create K8s client
 	kubeConfig, err := rest.InClusterConfig()
@@ -149,18 +130,32 @@ func NewPoolScaler(ctx context.Context, config PoolScalerConfig, taskQueue repos
 	}, nil
 }
 
-// EnsureDeployment checks if the worker deployment exists and creates it if missing
+// EnsureDeployment checks if the worker deployment exists and creates/updates it
 func (s *PoolScaler) EnsureDeployment() error {
 	ctx := context.Background()
+	deployment := s.buildDeployment()
 
 	// Check if deployment already exists
-	_, err := s.kubeClient.AppsV1().Deployments(s.config.Namespace).Get(
+	existing, err := s.kubeClient.AppsV1().Deployments(s.config.Namespace).Get(
 		ctx, s.config.DeploymentName, metav1.GetOptions{})
 	if err == nil {
+		// Deployment exists - update it to ensure env vars are current
+		deployment.ResourceVersion = existing.ResourceVersion
+		// Preserve current replica count (don't reset to min)
+		if existing.Spec.Replicas != nil {
+			deployment.Spec.Replicas = existing.Spec.Replicas
+		}
+
+		_, err = s.kubeClient.AppsV1().Deployments(s.config.Namespace).Update(
+			ctx, deployment, metav1.UpdateOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to update worker deployment: %w", err)
+		}
+
 		log.Info().
 			Str("pool", s.config.PoolName).
 			Str("deployment", s.config.DeploymentName).
-			Msg("worker deployment already exists")
+			Msg("updated worker deployment")
 		return nil
 	}
 
@@ -169,8 +164,6 @@ func (s *PoolScaler) EnsureDeployment() error {
 	}
 
 	// Create the deployment
-	deployment := s.buildDeployment()
-
 	_, err = s.kubeClient.AppsV1().Deployments(s.config.Namespace).Create(
 		ctx, deployment, metav1.CreateOptions{})
 	if err != nil {
@@ -201,6 +194,9 @@ func (s *PoolScaler) buildDeployment() *appsv1.Deployment {
 	gatewayGRPCAddr := fmt.Sprintf("%s.%s.svc.cluster.local:1993",
 		s.config.GatewayServiceName, s.config.Namespace)
 
+	// Serialize config to JSON for workers
+	configJSON, configHash := s.serializeConfig()
+
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      s.config.DeploymentName,
@@ -215,6 +211,10 @@ func (s *PoolScaler) buildDeployment() *appsv1.Deployment {
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: labels,
+					Annotations: map[string]string{
+						// Config hash triggers rolling restart when config changes
+						annotationConfigHash: configHash,
+					},
 				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
@@ -240,16 +240,9 @@ func (s *PoolScaler) buildDeployment() *appsv1.Deployment {
 									Value: gatewayGRPCAddr,
 								},
 								{
-									Name:  "REDIS_ADDR",
-									Value: s.config.RedisAddr,
-								},
-								{
-									Name:  "CPU_LIMIT",
-									Value: s.config.WorkerCpu,
-								},
-								{
-									Name:  "MEMORY_LIMIT",
-									Value: s.config.WorkerMemory,
+									// Full config as JSON - worker loads via ConfigManager
+									Name:  "CONFIG_JSON",
+									Value: configJSON,
 								},
 							},
 							Resources: corev1.ResourceRequirements{
@@ -287,6 +280,17 @@ func (s *PoolScaler) buildDeployment() *appsv1.Deployment {
 			},
 		},
 	}
+}
+
+// serializeConfig serializes the AppConfig to JSON and returns the JSON string and a hash
+func (s *PoolScaler) serializeConfig() (string, string) {
+	data, err := json.Marshal(s.config.AppConfig)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to serialize config to JSON")
+		return "{}", ""
+	}
+	hash := fmt.Sprintf("%x", sha256.Sum256(data))[:16]
+	return string(data), hash
 }
 
 // boolPtr returns a pointer to a bool
