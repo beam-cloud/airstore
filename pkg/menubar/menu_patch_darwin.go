@@ -20,6 +20,10 @@ static void patchedShowMenu(id self, SEL _cmd) {
     Ivar statusItemIvar = class_getInstanceVariable([self class], "statusItem");
     Ivar menuIvar       = class_getInstanceVariable([self class], "menu");
 
+    if (!statusItemIvar || !menuIvar) {
+        return;
+    }
+
     NSStatusItem *statusItem = object_getIvar(self, statusItemIvar);
     NSMenu       *menu       = object_getIvar(self, menuIvar);
 

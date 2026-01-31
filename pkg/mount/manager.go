@@ -249,8 +249,17 @@ func (m *MountManager) Stop() {
 		m.mu.Unlock()
 
 		if fs != nil {
-			// Primary unmount via FUSE layer (cross-platform)
-			fs.Unmount()
+			// Run FUSE unmount with timeout to avoid blocking Stop()
+			unmountDone := make(chan struct{})
+			go func() {
+				fs.Unmount()
+				close(unmountDone)
+			}()
+			select {
+			case <-unmountDone:
+			case <-time.After(3 * time.Second):
+				log.Warn().Msg("fs.Unmount timed out, continuing cleanup")
+			}
 			// OS-level fallback for edge cases (darwin-only)
 			go bestEffortUnmount(mountPoint)
 		}
