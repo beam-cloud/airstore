@@ -128,7 +128,7 @@ func (p *WorkerPoolController) OnWorkerRegistered(workerId string) {
 
 // OnWorkerDeregistered is called when a worker deregisters
 func (p *WorkerPoolController) OnWorkerDeregistered(workerId string) {
-	log.Debug().
+	log.Info().
 		Str("pool_name", p.name).
 		Str("worker_id", workerId).
 		Msg("worker deregistered from pool")

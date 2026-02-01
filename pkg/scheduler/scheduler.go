@@ -149,9 +149,7 @@ func (s *Scheduler) ensureWorkerToken(poolName string) {
 
 	for _, t := range tokens {
 		if t.PoolName != nil && *t.PoolName == poolName {
-			log.Debug().Str("pool", poolName).Msg("worker token already exists")
 			// We don't have the raw token, can't use existing tokens
-			// TODO: store raw tokens in k8s secret instead
 			return
 		}
 	}
