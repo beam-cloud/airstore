@@ -24,7 +24,6 @@ type AppConfig struct {
 	Gateway     GatewayConfig    `key:"gateway" json:"gateway"`
 	Scheduler   SchedulerConfig  `key:"scheduler" json:"scheduler"`
 	Tools       ToolsConfig      `key:"tools" json:"tools"`
-	Admin       AdminConfig      `key:"admin" json:"admin"`
 	OAuth       IntegrationOAuth `key:"oauth" json:"oauth"`     // OAuth for workspace integrations (gmail, gdrive)
 	Streams     StreamsConfig    `key:"streams" json:"streams"` // S2 stream configuration for task logs
 }
@@ -294,30 +293,6 @@ func (c *MCPServerConfig) RedactConfig() *MCPServerConfig {
 	}
 	redacted.Auth = c.Auth.Redact()
 	return redacted
-}
-
-// ----------------------------------------------------------------------------
-// Admin UI Configuration
-// ----------------------------------------------------------------------------
-
-// AdminConfig configures the admin UI
-type AdminConfig struct {
-	Enabled    bool        `key:"enabled" json:"enabled"`
-	SessionKey string      `key:"sessionKey" json:"session_key"` // Secret for JWT signing
-	OAuth      OAuthConfig `key:"oauth" json:"oauth"`
-}
-
-// OAuthConfig configures OAuth providers
-type OAuthConfig struct {
-	Google GoogleOAuthConfig `key:"google" json:"google"`
-}
-
-// GoogleOAuthConfig configures Google OAuth
-type GoogleOAuthConfig struct {
-	ClientID      string   `key:"clientId" json:"client_id"`
-	ClientSecret  string   `key:"clientSecret" json:"client_secret"`
-	RedirectURL   string   `key:"redirectUrl" json:"redirect_url"`     // e.g., http://localhost:1994/auth/google/callback
-	AllowedEmails []string `key:"allowedEmails" json:"allowed_emails"` // Optional whitelist, empty = allow all
 }
 
 // ----------------------------------------------------------------------------

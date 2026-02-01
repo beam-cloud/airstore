@@ -16,7 +16,6 @@ import (
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 
-	"github.com/beam-cloud/airstore/pkg/admin"
 	apiv1 "github.com/beam-cloud/airstore/pkg/api/v1"
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/clients"
@@ -380,11 +379,6 @@ func (g *Gateway) registerServices() error {
 		}
 
 		log.Info().Msg("workspace, members, tokens, connections, and tasks APIs registered")
-
-		// Register admin UI if enabled
-		if g.Config.Admin.Enabled {
-			admin.NewService(g.Config.Admin, g.BackendRepo, g.storageClient).RegisterRoutes(g.echo)
-		}
 	}
 
 	return nil

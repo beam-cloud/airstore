@@ -18,18 +18,6 @@ gateway:
 filesystem:
   mountPoint: /tmp/airstore
 
-# Admin UI - enable to manage workspaces, connections, and tokens via web UI
-# Requires database (Postgres) - won't work in local mode without database config
-# admin:
-#   enabled: true
-#   sessionKey: "change-this-to-a-random-secret-key"
-#   oauth:
-#     google:
-#       clientId: "your-client-id.apps.googleusercontent.com"
-#       clientSecret: "GOCSPX-your-client-secret"
-#       redirectUrl: "http://localhost:1994/auth/google/callback"
-#       allowedEmails: []  # Empty = allow all, or specify ["user@gmail.com"]
-
 # OAuth for workspace integrations (gmail, gdrive)
 # Used by: cli connection connect <workspace_id> gmail|gdrive
 # oauth:
