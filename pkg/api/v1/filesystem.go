@@ -16,6 +16,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/gateway/services"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/sources"
+	"github.com/beam-cloud/airstore/pkg/streams"
 	"github.com/beam-cloud/airstore/pkg/tools"
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
@@ -32,6 +33,7 @@ type FilesystemGroup struct {
 	sourceRegistry *sources.Registry
 	toolRegistry   *tools.Registry
 	toolResolver   *tools.WorkspaceToolResolver
+	s2Client       *streams.S2Client
 }
 
 // NewFilesystemGroup creates a new filesystem API group.
@@ -43,6 +45,7 @@ func NewFilesystemGroup(
 	sourceService *services.SourceService,
 	sourceRegistry *sources.Registry,
 	toolRegistry *tools.Registry,
+	s2Client *streams.S2Client,
 ) *FilesystemGroup {
 	// Create resolver for workspace-aware tool resolution
 	var resolver *tools.WorkspaceToolResolver
@@ -58,6 +61,7 @@ func NewFilesystemGroup(
 		sourceRegistry: sourceRegistry,
 		toolRegistry:   toolRegistry,
 		toolResolver:   resolver,
+		s2Client:       s2Client,
 	}
 	g.registerRoutes()
 	return g
@@ -1126,23 +1130,177 @@ func (g *FilesystemGroup) buildToolEntries(ctx context.Context, showHidden bool)
 }
 
 // ============================================================================
-// Tasks (Virtual - handled by task execution system, not S3)
+// Tasks (Virtual - handled by task execution system, backed by database)
 // ============================================================================
 
 func (g *FilesystemGroup) listTasks(c echo.Context, ctx context.Context, relPath string) error {
-	// TODO: integrate with task service
-	return SuccessResponse(c, types.VirtualFileListResponse{Path: types.PathTasks, Entries: []types.VirtualFile{}})
+	// Get workspace from auth context
+	rc := auth.FromContext(ctx)
+	if rc == nil || rc.WorkspaceId == 0 {
+		return ErrorResponse(c, http.StatusUnauthorized, "authentication required")
+	}
+
+	// List tasks from database
+	tasks, err := g.backend.ListTasks(ctx, rc.WorkspaceId)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to list tasks")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to list tasks")
+	}
+
+	// Convert tasks to virtual files
+	entries := make([]types.VirtualFile, 0, len(tasks))
+	for _, task := range tasks {
+		vf := g.taskToVirtualFile(task)
+		entries = append(entries, *vf)
+	}
+
+	return SuccessResponse(c, types.VirtualFileListResponse{Path: types.PathTasks, Entries: entries})
 }
 
 func (g *FilesystemGroup) statTasks(c echo.Context, ctx context.Context, fullPath, relPath string) error {
+	// Root tasks folder
 	if relPath == "" {
-		return SuccessResponse(c, types.NewRootFolder(types.DirNameTasks, types.PathTasks).WithChildCount(0))
+		rc := auth.FromContext(ctx)
+		childCount := 0
+		if rc != nil && rc.WorkspaceId > 0 {
+			if tasks, err := g.backend.ListTasks(ctx, rc.WorkspaceId); err == nil {
+				childCount = len(tasks)
+			}
+		}
+		return SuccessResponse(c, types.NewRootFolder(types.DirNameTasks, types.PathTasks).WithChildCount(childCount))
 	}
-	return ErrorResponse(c, http.StatusNotFound, "task not found")
+
+	// Individual task file - extract task ID from filename
+	taskId := g.extractTaskId(relPath)
+	if taskId == "" {
+		return ErrorResponse(c, http.StatusNotFound, "task not found")
+	}
+
+	task, err := g.backend.GetTask(ctx, taskId)
+	if err != nil {
+		if _, ok := err.(*types.ErrTaskNotFound); ok {
+			return ErrorResponse(c, http.StatusNotFound, "task not found")
+		}
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+
+	return SuccessResponse(c, g.taskToVirtualFile(task))
 }
 
 func (g *FilesystemGroup) readTasks(c echo.Context, ctx context.Context, relPath string, offset, length int64) error {
-	return ErrorResponse(c, http.StatusNotFound, "task file not found")
+	// Extract task ID from filename
+	taskId := g.extractTaskId(relPath)
+	if taskId == "" {
+		return ErrorResponse(c, http.StatusNotFound, "task not found")
+	}
+
+	task, err := g.backend.GetTask(ctx, taskId)
+	if err != nil {
+		if _, ok := err.(*types.ErrTaskNotFound); ok {
+			return ErrorResponse(c, http.StatusNotFound, "task not found")
+		}
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+
+	// Build task content: task info header + logs
+	content := g.buildTaskContent(ctx, task)
+
+	// Handle range request
+	data := []byte(content)
+	if offset >= int64(len(data)) {
+		return c.Blob(http.StatusOK, "text/plain", []byte{})
+	}
+
+	end := int64(len(data))
+	if length > 0 && offset+length < end {
+		end = offset + length
+	}
+
+	return c.Blob(http.StatusOK, "text/plain", data[offset:end])
+}
+
+// taskToVirtualFile converts a Task to a VirtualFile for the filesystem API
+func (g *FilesystemGroup) taskToVirtualFile(task *types.Task) *types.VirtualFile {
+	name := task.ExternalId + ".task"
+	path := types.PathTasks + "/" + name
+
+	vf := types.NewVirtualFile(task.ExternalId, name, path, types.VFTypeTask)
+	vf.IsFolder = false
+	vf.IsReadOnly = true
+	vf.ModifiedAt = &task.CreatedAt
+
+	// Add task metadata
+	vf.WithMetadata("status", string(task.Status))
+	if task.Prompt != "" {
+		// Truncate prompt for metadata
+		prompt := task.Prompt
+		if len(prompt) > 100 {
+			prompt = prompt[:100] + "..."
+		}
+		vf.WithMetadata("prompt", prompt)
+	}
+	if task.ExitCode != nil {
+		vf.WithMetadata("exit_code", *task.ExitCode)
+	}
+	if task.Error != "" {
+		vf.WithMetadata("error", task.Error)
+	}
+
+	return vf
+}
+
+// extractTaskId extracts the task ID from a filename like "abc123.task"
+func (g *FilesystemGroup) extractTaskId(relPath string) string {
+	// Remove leading slash if present
+	relPath = strings.TrimPrefix(relPath, "/")
+
+	// Must end with .task
+	if !strings.HasSuffix(relPath, ".task") {
+		return ""
+	}
+
+	return strings.TrimSuffix(relPath, ".task")
+}
+
+// buildTaskContent builds the text content of a task file
+func (g *FilesystemGroup) buildTaskContent(ctx context.Context, task *types.Task) string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("Task: %s\n", task.ExternalId))
+	sb.WriteString(fmt.Sprintf("Status: %s\n", task.Status))
+
+	if task.Prompt != "" {
+		sb.WriteString(fmt.Sprintf("Prompt: %s\n", task.Prompt))
+	}
+
+	sb.WriteString(fmt.Sprintf("Created: %s\n", task.CreatedAt.Format(time.RFC3339)))
+
+	if task.StartedAt != nil {
+		sb.WriteString(fmt.Sprintf("Started: %s\n", task.StartedAt.Format(time.RFC3339)))
+	}
+	if task.FinishedAt != nil {
+		sb.WriteString(fmt.Sprintf("Finished: %s\n", task.FinishedAt.Format(time.RFC3339)))
+	}
+	if task.ExitCode != nil {
+		sb.WriteString(fmt.Sprintf("Exit Code: %d\n", *task.ExitCode))
+	}
+	if task.Error != "" {
+		sb.WriteString(fmt.Sprintf("Error: %s\n", task.Error))
+	}
+
+	sb.WriteString("\n--- Output ---\n")
+
+	// Read logs from S2 if available
+	if g.s2Client != nil && g.s2Client.Enabled() {
+		logs, err := g.s2Client.ReadLogs(ctx, task.ExternalId, 0)
+		if err != nil {
+			log.Warn().Err(err).Str("task_id", task.ExternalId).Msg("failed to read task logs from S2")
+		} else {
+			sb.WriteString(streams.FormatLogs(logs))
+		}
+	}
+
+	return sb.String()
 }
 
 // ============================================================================

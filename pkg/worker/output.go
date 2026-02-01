@@ -1,144 +1,192 @@
 package worker
 
 import (
-	"bytes"
+	"context"
+	"io"
+	"os"
 	"strings"
 	"sync"
 
+	"github.com/beam-cloud/airstore/pkg/streams"
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
 
-// SandboxOutput captures and manages sandbox stdout/stderr output.
-// It implements the runtime.OutputWriter interface.
-type SandboxOutput struct {
-	sandboxID string
-	buffer    bytes.Buffer
-	mu        sync.Mutex
-	maxSize   int // Maximum buffer size (0 = unlimited)
+// TaskOutput handles task stdout/stderr with multiple destinations.
+// Zero allocation for the common case of just writing.
+type TaskOutput struct {
+	taskID  string
+	stream  string // "stdout" or "stderr"
+	writers []io.Writer
+	lineBuf []byte
+	mu      sync.Mutex
 }
 
-// NewSandboxOutput creates a new SandboxOutput for the given sandbox ID.
-// maxSize limits the buffer size (0 = unlimited, recommended: 1MB = 1<<20)
-func NewSandboxOutput(sandboxID string, maxSize int) *SandboxOutput {
-	return &SandboxOutput{
-		sandboxID: sandboxID,
-		maxSize:   maxSize,
+// NewTaskOutput creates an output handler for a task stream.
+func NewTaskOutput(taskID, stream string, writers ...io.Writer) *TaskOutput {
+	return &TaskOutput{
+		taskID:  taskID,
+		stream:  stream,
+		writers: writers,
 	}
 }
 
-// Write implements io.Writer and runtime.OutputWriter
-func (o *SandboxOutput) Write(p []byte) (n int, err error) {
+// Write implements io.Writer. Buffers partial lines, flushes complete ones.
+func (o *TaskOutput) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	// Enforce max size by discarding oldest data if needed
-	if o.maxSize > 0 && o.buffer.Len()+len(p) > o.maxSize {
-		// Keep the most recent data
-		overflow := o.buffer.Len() + len(p) - o.maxSize
-		if overflow > o.buffer.Len() {
-			o.buffer.Reset()
-			// Truncate p to fit maxSize
-			if len(p) > o.maxSize {
-				p = p[len(p)-o.maxSize:]
-			}
-		} else {
-			// Discard oldest bytes
-			o.buffer.Next(overflow)
+	o.lineBuf = append(o.lineBuf, p...)
+
+	// Process complete lines
+	for {
+		idx := indexByte(o.lineBuf, '\n')
+		if idx < 0 {
+			break
+		}
+
+		line := string(o.lineBuf[:idx])
+		o.lineBuf = o.lineBuf[idx+1:]
+
+		if line != "" {
+			o.emit(line)
 		}
 	}
 
-	return o.buffer.Write(p)
+	return len(p), nil
 }
 
-// String returns all captured output as a string
-func (o *SandboxOutput) String() string {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	return o.buffer.String()
-}
-
-// Bytes returns all captured output as bytes
-func (o *SandboxOutput) Bytes() []byte {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	return o.buffer.Bytes()
-}
-
-// Lines returns the output split into lines
-func (o *SandboxOutput) Lines() []string {
+// Flush writes any remaining buffered content.
+func (o *TaskOutput) Flush() {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	s := o.buffer.String()
-	if s == "" {
-		return nil
-	}
-
-	lines := strings.Split(strings.TrimSuffix(s, "\n"), "\n")
-	return lines
-}
-
-// Len returns the current buffer length
-func (o *SandboxOutput) Len() int {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	return o.buffer.Len()
-}
-
-// Reset clears the buffer
-func (o *SandboxOutput) Reset() {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	o.buffer.Reset()
-}
-
-// Log writes the captured output to the logger with the given message.
-// Each line is logged separately for readability.
-func (o *SandboxOutput) Log(message string) {
-	lines := o.Lines()
-	if len(lines) == 0 {
-		return
-	}
-
-	// Log each line of output
-	for _, line := range lines {
-		if line == "" {
-			continue
-		}
-		log.Info().
-			Str("sandbox_id", o.sandboxID).
-			Str("output", line).
-			Msg(message)
+	if len(o.lineBuf) > 0 {
+		o.emit(string(o.lineBuf))
+		o.lineBuf = nil
 	}
 }
 
-// LogSummary logs a summary of the output, truncating if it exceeds maxLines
-func (o *SandboxOutput) LogSummary(maxLines int) {
-	lines := o.Lines()
-	if len(lines) == 0 {
-		return
+func (o *TaskOutput) emit(line string) {
+	for _, w := range o.writers {
+		w.Write([]byte(line))
 	}
+}
 
-	// Determine which lines to show
-	total := len(lines)
-	showAll := total <= maxLines
-	headCount, tailCount := maxLines/2, maxLines/2
-
-	for i, line := range lines {
-		if line == "" {
-			continue
-		}
-
-		if showAll || i < headCount || i >= total-tailCount {
-			log.Info().
-				Str("sandbox_id", o.sandboxID).
-				Str("output", line).
-				Msg("sandbox output")
-		} else if i == headCount {
-			log.Info().
-				Str("sandbox_id", o.sandboxID).
-				Int("hidden", total-maxLines).
-				Msg("... truncated ...")
+func indexByte(b []byte, c byte) int {
+	for i, v := range b {
+		if v == c {
+			return i
 		}
 	}
+	return -1
+}
+
+// --- Writers ---
+
+// ConsoleWriter writes task output to the worker's console with context.
+type ConsoleWriter struct {
+	taskID string
+	stream string
+	logger zerolog.Logger
+}
+
+// NewConsoleWriter creates a writer that logs to the worker console.
+func NewConsoleWriter(taskID, stream string) *ConsoleWriter {
+	return &ConsoleWriter{
+		taskID: taskID,
+		stream: stream,
+		logger: log.With().Str("task", taskID).Str("stream", stream).Logger(),
+	}
+}
+
+func (w *ConsoleWriter) Write(p []byte) (int, error) {
+	line := strings.TrimSpace(string(p))
+	if line != "" {
+		w.logger.Info().Msg(line)
+	}
+	return len(p), nil
+}
+
+// S2Writer writes task output to S2 streams.
+type S2Writer struct {
+	client *streams.S2Client
+	taskID string
+	stream string
+	ctx    context.Context
+}
+
+// NewS2Writer creates a writer that appends to S2.
+func NewS2Writer(ctx context.Context, client *streams.S2Client, taskID, stream string) *S2Writer {
+	return &S2Writer{
+		client: client,
+		taskID: taskID,
+		stream: stream,
+		ctx:    ctx,
+	}
+}
+
+func (w *S2Writer) Write(p []byte) (int, error) {
+	line := string(p)
+	if line != "" && w.client != nil && w.client.Enabled() {
+		if err := w.client.AppendLog(w.ctx, w.taskID, w.stream, line); err != nil {
+			log.Warn().Err(err).Str("task", w.taskID).Msg("s2 write failed")
+		}
+	}
+	return len(p), nil
+}
+
+// FileWriter writes to a file (useful for debugging).
+type FileWriter struct {
+	file *os.File
+}
+
+// NewFileWriter creates a writer that appends to a file.
+func NewFileWriter(path string) (*FileWriter, error) {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, err
+	}
+	return &FileWriter{file: f}, nil
+}
+
+func (w *FileWriter) Write(p []byte) (int, error) {
+	return w.file.Write(append(p, '\n'))
+}
+
+func (w *FileWriter) Close() error {
+	return w.file.Close()
+}
+
+// --- Factory ---
+
+// OutputConfig configures task output destinations.
+type OutputConfig struct {
+	TaskID   string
+	S2Client *streams.S2Client
+	Console  bool // Write to worker stdout
+}
+
+// NewOutputPair creates stdout and stderr writers for a task.
+func NewOutputPair(ctx context.Context, cfg OutputConfig) (stdout, stderr *TaskOutput) {
+	var stdoutWriters, stderrWriters []io.Writer
+
+	// S2 streams
+	if cfg.S2Client != nil && cfg.S2Client.Enabled() {
+		stdoutWriters = append(stdoutWriters, NewS2Writer(ctx, cfg.S2Client, cfg.TaskID, "stdout"))
+		stderrWriters = append(stderrWriters, NewS2Writer(ctx, cfg.S2Client, cfg.TaskID, "stderr"))
+	}
+
+	// Console output
+	if cfg.Console {
+		stdoutWriters = append(stdoutWriters, NewConsoleWriter(cfg.TaskID, "stdout"))
+		stderrWriters = append(stderrWriters, NewConsoleWriter(cfg.TaskID, "stderr"))
+	}
+
+	return NewTaskOutput(cfg.TaskID, "stdout", stdoutWriters...),
+		NewTaskOutput(cfg.TaskID, "stderr", stderrWriters...)
 }

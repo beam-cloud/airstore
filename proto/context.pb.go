@@ -20,7 +20,6 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// FileInfo contains file/directory metadata
 type FileInfo struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -28,7 +27,7 @@ type FileInfo struct {
 
 	Size   int64  `protobuf:"varint,1,opt,name=size,proto3" json:"size,omitempty"`
 	Mode   uint32 `protobuf:"varint,2,opt,name=mode,proto3" json:"mode,omitempty"`
-	Mtime  int64  `protobuf:"varint,3,opt,name=mtime,proto3" json:"mtime,omitempty"` // Unix timestamp
+	Mtime  int64  `protobuf:"varint,3,opt,name=mtime,proto3" json:"mtime,omitempty"`
 	IsDir  bool   `protobuf:"varint,4,opt,name=is_dir,json=isDir,proto3" json:"is_dir,omitempty"`
 	IsLink bool   `protobuf:"varint,5,opt,name=is_link,json=isLink,proto3" json:"is_link,omitempty"`
 }
@@ -100,7 +99,6 @@ func (x *FileInfo) GetIsLink() bool {
 	return false
 }
 
-// DirEntry represents a directory entry with full metadata
 type ContextDirEntry struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -109,9 +107,9 @@ type ContextDirEntry struct {
 	Name  string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	Mode  uint32 `protobuf:"varint,2,opt,name=mode,proto3" json:"mode,omitempty"`
 	IsDir bool   `protobuf:"varint,3,opt,name=is_dir,json=isDir,proto3" json:"is_dir,omitempty"`
-	Size  int64  `protobuf:"varint,4,opt,name=size,proto3" json:"size,omitempty"`   // From ListObjectsV2 - avoids separate HeadObject
-	Mtime int64  `protobuf:"varint,5,opt,name=mtime,proto3" json:"mtime,omitempty"` // From ListObjectsV2 - Unix timestamp
-	Etag  string `protobuf:"bytes,6,opt,name=etag,proto3" json:"etag,omitempty"`    // From ListObjectsV2 - for cache validation
+	Size  int64  `protobuf:"varint,4,opt,name=size,proto3" json:"size,omitempty"`
+	Mtime int64  `protobuf:"varint,5,opt,name=mtime,proto3" json:"mtime,omitempty"`
+	Etag  string `protobuf:"bytes,6,opt,name=etag,proto3" json:"etag,omitempty"`
 }
 
 func (x *ContextDirEntry) Reset() {
@@ -188,13 +186,12 @@ func (x *ContextDirEntry) GetEtag() string {
 	return ""
 }
 
-// Stat
 type ContextStatRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"` // Path within workspace storage (e.g., "skills/my-skill.md", "docs/readme.txt")
+	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
 }
 
 func (x *ContextStatRequest) Reset() {
@@ -299,7 +296,6 @@ func (x *ContextStatResponse) GetInfo() *FileInfo {
 	return nil
 }
 
-// ReadDir
 type ContextReadDirRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -410,7 +406,6 @@ func (x *ContextReadDirResponse) GetEntries() []*ContextDirEntry {
 	return nil
 }
 
-// Read
 type ContextReadRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -418,7 +413,7 @@ type ContextReadRequest struct {
 
 	Path   string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
 	Offset int64  `protobuf:"varint,2,opt,name=offset,proto3" json:"offset,omitempty"`
-	Length int64  `protobuf:"varint,3,opt,name=length,proto3" json:"length,omitempty"` // 0 means read to end
+	Length int64  `protobuf:"varint,3,opt,name=length,proto3" json:"length,omitempty"`
 }
 
 func (x *ContextReadRequest) Reset() {
@@ -537,7 +532,6 @@ func (x *ContextReadResponse) GetData() []byte {
 	return nil
 }
 
-// Write
 type ContextWriteRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -664,7 +658,6 @@ func (x *ContextWriteResponse) GetWritten() int32 {
 	return 0
 }
 
-// Create
 type ContextCreateRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -775,7 +768,6 @@ func (x *ContextCreateResponse) GetError() string {
 	return ""
 }
 
-// Delete
 type ContextDeleteRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -878,7 +870,6 @@ func (x *ContextDeleteResponse) GetError() string {
 	return ""
 }
 
-// Mkdir
 type ContextMkdirRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -989,7 +980,6 @@ func (x *ContextMkdirResponse) GetError() string {
 	return ""
 }
 
-// Rename
 type ContextRenameRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -1100,7 +1090,6 @@ func (x *ContextRenameResponse) GetError() string {
 	return ""
 }
 
-// Truncate
 type ContextTruncateRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -1211,14 +1200,13 @@ func (x *ContextTruncateResponse) GetError() string {
 	return ""
 }
 
-// Symlink
 type ContextSymlinkRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	Target   string `protobuf:"bytes,1,opt,name=target,proto3" json:"target,omitempty"`                     // What the link points to
-	LinkPath string `protobuf:"bytes,2,opt,name=link_path,json=linkPath,proto3" json:"link_path,omitempty"` // The symlink path
+	Target   string `protobuf:"bytes,1,opt,name=target,proto3" json:"target,omitempty"`
+	LinkPath string `protobuf:"bytes,2,opt,name=link_path,json=linkPath,proto3" json:"link_path,omitempty"`
 }
 
 func (x *ContextSymlinkRequest) Reset() {
@@ -1322,7 +1310,6 @@ func (x *ContextSymlinkResponse) GetError() string {
 	return ""
 }
 
-// Readlink
 type ContextReadlinkRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -1433,16 +1420,15 @@ func (x *ContextReadlinkResponse) GetTarget() string {
 	return ""
 }
 
-// ListTree - efficient subtree listing for prefetching
 type ListTreeRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	Path              string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`                                                    // Root path to list from
-	Depth             int32  `protobuf:"varint,2,opt,name=depth,proto3" json:"depth,omitempty"`                                                 // Max depth (1 or 2, 0 = unlimited)
-	MaxKeys           int32  `protobuf:"varint,3,opt,name=max_keys,json=maxKeys,proto3" json:"max_keys,omitempty"`                              // Pagination limit (default 1000)
-	ContinuationToken string `protobuf:"bytes,4,opt,name=continuation_token,json=continuationToken,proto3" json:"continuation_token,omitempty"` // For pagination
+	Path              string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	Depth             int32  `protobuf:"varint,2,opt,name=depth,proto3" json:"depth,omitempty"`
+	MaxKeys           int32  `protobuf:"varint,3,opt,name=max_keys,json=maxKeys,proto3" json:"max_keys,omitempty"`
+	ContinuationToken string `protobuf:"bytes,4,opt,name=continuation_token,json=continuationToken,proto3" json:"continuation_token,omitempty"`
 }
 
 func (x *ListTreeRequest) Reset() {
@@ -1513,8 +1499,8 @@ type ListTreeResponse struct {
 	Ok        bool         `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
 	Error     string       `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
 	Entries   []*TreeEntry `protobuf:"bytes,3,rep,name=entries,proto3" json:"entries,omitempty"`
-	NextToken string       `protobuf:"bytes,4,opt,name=next_token,json=nextToken,proto3" json:"next_token,omitempty"` // For pagination continuation
-	Truncated bool         `protobuf:"varint,5,opt,name=truncated,proto3" json:"truncated,omitempty"`                 // True if more results available
+	NextToken string       `protobuf:"bytes,4,opt,name=next_token,json=nextToken,proto3" json:"next_token,omitempty"`
+	Truncated bool         `protobuf:"varint,5,opt,name=truncated,proto3" json:"truncated,omitempty"`
 }
 
 func (x *ListTreeResponse) Reset() {
@@ -1589,11 +1575,11 @@ type TreeEntry struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	Path  string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"` // Relative path from request root
+	Path  string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
 	Size  int64  `protobuf:"varint,2,opt,name=size,proto3" json:"size,omitempty"`
-	Mtime int64  `protobuf:"varint,3,opt,name=mtime,proto3" json:"mtime,omitempty"` // Unix timestamp
-	Mode  uint32 `protobuf:"varint,4,opt,name=mode,proto3" json:"mode,omitempty"`   // File mode (S_IFDIR | 0755 for dirs, S_IFREG | 0644 for files)
-	Etag  string `protobuf:"bytes,5,opt,name=etag,proto3" json:"etag,omitempty"`    // For cache validation
+	Mtime int64  `protobuf:"varint,3,opt,name=mtime,proto3" json:"mtime,omitempty"`
+	Mode  uint32 `protobuf:"varint,4,opt,name=mode,proto3" json:"mode,omitempty"`
+	Etag  string `protobuf:"bytes,5,opt,name=etag,proto3" json:"etag,omitempty"`
 }
 
 func (x *TreeEntry) Reset() {

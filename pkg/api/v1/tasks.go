@@ -1,9 +1,14 @@
 package apiv1
 
 import (
+	"encoding/json"
 	"net/http"
+	"strings"
+	"time"
 
+	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/repository"
+	"github.com/beam-cloud/airstore/pkg/streams"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/labstack/echo/v4"
 )
@@ -12,12 +17,14 @@ type TasksGroup struct {
 	routerGroup *echo.Group
 	backend     repository.BackendRepository
 	taskQueue   repository.TaskQueue
+	s2Client    *streams.S2Client
 }
 
 type CreateTaskRequest struct {
 	WorkspaceID   string            `json:"workspace_id"`   // External workspace ID
 	WorkspaceName string            `json:"workspace_name"` // Or workspace name
-	Image         string            `json:"image" validate:"required"`
+	Prompt        string            `json:"prompt"`         // Claude Code prompt (auto-sets image)
+	Image         string            `json:"image"`          // Container image (optional if prompt provided)
 	Entrypoint    []string          `json:"entrypoint"`
 	Env           map[string]string `json:"env"`
 }
@@ -26,6 +33,7 @@ type TaskResponse struct {
 	ExternalID  string            `json:"external_id"`
 	WorkspaceID string            `json:"workspace_id"`
 	Status      string            `json:"status"`
+	Prompt      string            `json:"prompt,omitempty"`
 	Image       string            `json:"image"`
 	Entrypoint  []string          `json:"entrypoint"`
 	Env         map[string]string `json:"env"`
@@ -40,11 +48,13 @@ func NewTasksGroup(
 	routerGroup *echo.Group,
 	backend repository.BackendRepository,
 	taskQueue repository.TaskQueue,
+	s2Client *streams.S2Client,
 ) *TasksGroup {
 	g := &TasksGroup{
 		routerGroup: routerGroup,
 		backend:     backend,
 		taskQueue:   taskQueue,
+		s2Client:    s2Client,
 	}
 	g.registerRoutes()
 	return g
@@ -55,18 +65,41 @@ func (g *TasksGroup) registerRoutes() {
 	g.routerGroup.GET("", g.ListTasks)
 	g.routerGroup.GET("/:id", g.GetTask)
 	g.routerGroup.DELETE("/:id", g.DeleteTask)
+	g.routerGroup.POST("/:id/cancel", g.CancelTask)
 	g.routerGroup.PATCH("/:id/result", g.SetTaskResult)
+	g.routerGroup.GET("/:id/logs/stream", g.StreamLogs)
 }
 
 // CreateTask creates a new task and queues it for execution
 func (g *TasksGroup) CreateTask(c echo.Context) error {
+	ctx := c.Request().Context()
+
 	var req CreateTaskRequest
 	if err := c.Bind(&req); err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
 	}
 
+	// If prompt is provided, this is a Claude Code task - auto-set image
+	if req.Prompt != "" {
+		req.Image = types.ClaudeCodeImage
+	}
+
 	if req.Image == "" {
-		return ErrorResponse(c, http.StatusBadRequest, "image is required")
+		return ErrorResponse(c, http.StatusBadRequest, "image or prompt is required")
+	}
+
+	// Get member info from auth context
+	rc := auth.FromContext(ctx)
+	var createdByMemberId *uint
+	if rc != nil && rc.MemberId > 0 {
+		createdByMemberId = &rc.MemberId
+	}
+
+	// Extract auth token for passing to container (for filesystem mounting)
+	var memberToken string
+	authHeader := c.Request().Header.Get("Authorization")
+	if strings.HasPrefix(authHeader, "Bearer ") {
+		memberToken = strings.TrimPrefix(authHeader, "Bearer ")
 	}
 
 	// Resolve workspace
@@ -74,9 +107,9 @@ func (g *TasksGroup) CreateTask(c echo.Context) error {
 	var err error
 
 	if req.WorkspaceID != "" {
-		workspace, err = g.backend.GetWorkspaceByExternalId(c.Request().Context(), req.WorkspaceID)
+		workspace, err = g.backend.GetWorkspaceByExternalId(ctx, req.WorkspaceID)
 	} else if req.WorkspaceName != "" {
-		workspace, err = g.backend.GetWorkspaceByName(c.Request().Context(), req.WorkspaceName)
+		workspace, err = g.backend.GetWorkspaceByName(ctx, req.WorkspaceName)
 	} else {
 		return ErrorResponse(c, http.StatusBadRequest, "workspace_id or workspace_name is required")
 	}
@@ -89,11 +122,14 @@ func (g *TasksGroup) CreateTask(c echo.Context) error {
 	}
 
 	task := &types.Task{
-		WorkspaceId: workspace.Id,
-		Status:      types.TaskStatusPending,
-		Image:       req.Image,
-		Entrypoint:  req.Entrypoint,
-		Env:         req.Env,
+		WorkspaceId:       workspace.Id,
+		CreatedByMemberId: createdByMemberId,
+		MemberToken:       memberToken,
+		Status:            types.TaskStatusPending,
+		Prompt:            req.Prompt,
+		Image:             req.Image,
+		Entrypoint:        req.Entrypoint,
+		Env:               req.Env,
 	}
 
 	if task.Env == nil {
@@ -104,13 +140,13 @@ func (g *TasksGroup) CreateTask(c echo.Context) error {
 	}
 
 	// Save to Postgres
-	if err := g.backend.CreateTask(c.Request().Context(), task); err != nil {
+	if err := g.backend.CreateTask(ctx, task); err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 
 	// Push to Redis queue for worker to pick up
 	if g.taskQueue != nil {
-		if err := g.taskQueue.Push(c.Request().Context(), task); err != nil {
+		if err := g.taskQueue.Push(ctx, task); err != nil {
 			// Log but don't fail - task is saved, can be retried
 			c.Logger().Errorf("failed to push task to queue: %v", err)
 		}
@@ -193,6 +229,25 @@ func (g *TasksGroup) DeleteTask(c echo.Context) error {
 	return SuccessResponse(c, nil)
 }
 
+// CancelTask cancels a pending or running task
+func (g *TasksGroup) CancelTask(c echo.Context) error {
+	externalId := c.Param("id")
+
+	if err := g.backend.CancelTask(c.Request().Context(), externalId); err != nil {
+		if _, ok := err.(*types.ErrTaskNotFound); ok {
+			return ErrorResponse(c, http.StatusNotFound, "task not found")
+		}
+		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+	}
+
+	// Publish cancellation event so workers can stop
+	if g.taskQueue != nil {
+		_ = g.taskQueue.PublishStatus(c.Request().Context(), externalId, types.TaskStatusCancelled, nil, "task cancelled by user")
+	}
+
+	return SuccessResponse(c, map[string]string{"status": "cancelled"})
+}
+
 // SetTaskResult is called by workers to report task completion
 type SetTaskResultRequest struct {
 	ExitCode int    `json:"exit_code"`
@@ -217,11 +272,127 @@ func (g *TasksGroup) SetTaskResult(c echo.Context) error {
 	return SuccessResponse(c, nil)
 }
 
+// StreamLogs streams task logs via SSE from S2.
+func (g *TasksGroup) StreamLogs(c echo.Context) error {
+	taskID := c.Param("id")
+	ctx := c.Request().Context()
+
+	task, err := g.backend.GetTask(ctx, taskID)
+	if err != nil {
+		if _, ok := err.(*types.ErrTaskNotFound); ok {
+			return ErrorResponse(c, http.StatusNotFound, "task not found")
+		}
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+
+	if g.s2Client == nil || !g.s2Client.Enabled() {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "log streaming unavailable")
+	}
+
+	w := &sseWriter{c: c}
+	w.init()
+
+	// Send buffered logs, track cursor for dedup
+	logs, _ := g.s2Client.ReadLogs(ctx, taskID, 0)
+	cursor := w.sendLogs(logs)
+
+	if task.IsTerminal() {
+		w.sendStatus(task)
+		return nil
+	}
+
+	// Poll for new logs until done
+	tick := time.NewTicker(500 * time.Millisecond)
+	defer tick.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-tick.C:
+			logs, _ := g.s2Client.ReadLogs(ctx, taskID, 0)
+			cursor = w.sendLogsAfter(logs, cursor)
+
+			if task, err = g.backend.GetTask(ctx, taskID); err == nil && task.IsTerminal() {
+				w.sendStatus(task)
+				return nil
+			}
+		}
+	}
+}
+
+// sseWriter handles SSE output formatting.
+type sseWriter struct {
+	c echo.Context
+}
+
+func (w *sseWriter) init() {
+	h := w.c.Response().Header()
+	h.Set("Content-Type", "text/event-stream")
+	h.Set("Cache-Control", "no-cache")
+	h.Set("Connection", "keep-alive")
+	h.Set("X-Accel-Buffering", "no")
+	w.c.Response().WriteHeader(http.StatusOK)
+}
+
+func (w *sseWriter) write(v any) {
+	data, _ := json.Marshal(v)
+	r := w.c.Response()
+	r.Write([]byte("data: "))
+	r.Write(data)
+	r.Write([]byte("\n\n"))
+}
+
+func (w *sseWriter) flush() {
+	w.c.Response().Flush()
+}
+
+func (w *sseWriter) sendLogs(logs []streams.TaskLogEntry) int64 {
+	var cursor int64
+	for _, e := range logs {
+		w.write(e)
+		if e.Timestamp > cursor {
+			cursor = e.Timestamp
+		}
+	}
+	if len(logs) > 0 {
+		w.flush()
+	}
+	return cursor
+}
+
+func (w *sseWriter) sendLogsAfter(logs []streams.TaskLogEntry, cursor int64) int64 {
+	dirty := false
+	for _, e := range logs {
+		if e.Timestamp > cursor {
+			w.write(e)
+			cursor = e.Timestamp
+			dirty = true
+		}
+	}
+	if dirty {
+		w.flush()
+	}
+	return cursor
+}
+
+func (w *sseWriter) sendStatus(task *types.Task) {
+	w.write(map[string]any{
+		"type":      "status",
+		"task_id":   task.ExternalId,
+		"status":    task.Status,
+		"exit_code": task.ExitCode,
+		"error":     task.Error,
+	})
+	w.flush()
+}
+
 func taskToResponse(t *types.Task, workspaceExternalId string) TaskResponse {
 	resp := TaskResponse{
 		ExternalID:  t.ExternalId,
 		WorkspaceID: workspaceExternalId,
 		Status:      string(t.Status),
+		Prompt:      t.Prompt,
 		Image:       t.Image,
 		Entrypoint:  t.Entrypoint,
 		Env:         t.Env,

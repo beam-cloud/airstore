@@ -2,6 +2,9 @@ package types
 
 import "time"
 
+// ClaudeCodeImage is the hardcoded image for Claude Code tasks
+const ClaudeCodeImage = "ghcr.io/beam-cloud/claude-code:latest"
+
 // Task represents a unit of work to be executed in a sandbox
 type Task struct {
 	// Id is the internal ID for joins
@@ -13,8 +16,18 @@ type Task struct {
 	// WorkspaceId is the internal workspace ID (for joins)
 	WorkspaceId uint `json:"workspace_id" db:"workspace_id"`
 
+	// CreatedByMemberId is the member who created this task (for token auth)
+	CreatedByMemberId *uint `json:"created_by_member_id,omitempty" db:"created_by_member_id"`
+
+	// MemberToken is the workspace token to use for filesystem access
+	// This is NOT stored in the database - it's set at creation time and passed to workers
+	MemberToken string `json:"member_token,omitempty" db:"-"`
+
 	// Status is the current task status
 	Status TaskStatus `json:"status" db:"status"`
+
+	// Prompt is the Claude Code prompt (if this is a Claude Code task)
+	Prompt string `json:"prompt,omitempty" db:"prompt"`
 
 	// Image is the container image to use
 	Image string `json:"image" db:"image"`
@@ -39,6 +52,18 @@ type Task struct {
 
 	// FinishedAt is when the task finished
 	FinishedAt *time.Time `json:"finished_at,omitempty" db:"finished_at"`
+}
+
+// IsClaudeCodeTask returns true if this task has a prompt (Claude Code task)
+func (t *Task) IsClaudeCodeTask() bool {
+	return t.Prompt != ""
+}
+
+// IsTerminal returns true if the task is in a terminal state.
+func (t *Task) IsTerminal() bool {
+	return t.Status == TaskStatusComplete ||
+		t.Status == TaskStatusFailed ||
+		t.Status == TaskStatusCancelled
 }
 
 // ErrTaskNotFound is returned when a task cannot be found

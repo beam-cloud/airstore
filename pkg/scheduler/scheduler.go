@@ -76,121 +76,89 @@ func (s *Scheduler) Start() error {
 
 // initializePools creates pool controllers from config
 func (s *Scheduler) initializePools() error {
+	// Initialize configured pools
 	for poolName, poolConfig := range s.config.Scheduler.Pools {
-		log.Info().
-			Str("pool_name", poolName).
-			Str("deployment", poolConfig.DeploymentName).
-			Int32("min_replicas", poolConfig.MinReplicas).
-			Int32("max_replicas", poolConfig.MaxReplicas).
-			Msg("initializing worker pool")
-
-		// Create pool controller for monitoring
-		controller := NewWorkerPoolController(
-			s.ctx,
-			poolName,
-			poolConfig,
-			s.config,
-			s.workerRepo,
-		)
-		s.pools[poolName] = controller
-
-		// Create task queue for this pool
-		taskQueue := repository.NewRedisTaskQueue(s.redisClient, poolName)
-		if s.taskQueue == nil {
-			s.taskQueue = taskQueue // Use first queue as default
-		}
-
-		// Create pool scaler with deployment config
-		scalerConfig := PoolScalerConfig{
-			PoolName:           poolName,
-			DeploymentName:     poolConfig.DeploymentName,
-			Namespace:          poolConfig.Namespace,
-			MinReplicas:        poolConfig.MinReplicas,
-			MaxReplicas:        poolConfig.MaxReplicas,
-			ScaleDownDelay:     poolConfig.ScaleDownDelay,
-			ScalingInterval:    defaultScalingInterval,
-			WorkerImage:        poolConfig.WorkerImage,
-			WorkerCpu:          poolConfig.Cpu,
-			WorkerMemory:       poolConfig.Memory,
-			GatewayServiceName: s.config.Scheduler.GatewayServiceName,
-			GatewayPort:        s.config.Gateway.HTTP.Port,
-			RedisAddr:          s.getRedisAddr(),
-		}
-
-		scaler, err := NewPoolScaler(s.ctx, scalerConfig, taskQueue)
-		if err != nil {
-			log.Warn().Err(err).Str("pool_name", poolName).Msg("failed to create pool scaler (not in k8s?)")
-		} else {
-			// Ensure the deployment exists before starting the scaler
-			if err := scaler.EnsureDeployment(); err != nil {
-				log.Error().Err(err).Str("pool_name", poolName).Msg("failed to ensure worker deployment")
-			}
-			s.scalers[poolName] = scaler
-			go scaler.Start()
-		}
+		s.initializePool(poolName, poolConfig)
 	}
 
 	// Create a default pool if no pools are configured
 	if len(s.pools) == 0 {
 		log.Info().Msg("no pools configured, creating default pool")
-
-		defaultConfig := types.WorkerPoolConfig{
+		s.initializePool("default", types.WorkerPoolConfig{
 			Namespace:      "airstore",
 			MinReplicas:    1,
 			MaxReplicas:    10,
 			ScaleDownDelay: 5 * time.Minute,
-		}
-
-		controller := NewWorkerPoolController(
-			s.ctx,
-			"default",
-			defaultConfig,
-			s.config,
-			s.workerRepo,
-		)
-		s.pools["default"] = controller
-
-		// Create task queue for default pool
-		taskQueue := repository.NewRedisTaskQueue(s.redisClient, "default")
-		s.taskQueue = taskQueue
-
-		// Create pool scaler with deployment config
-		scalerConfig := PoolScalerConfig{
-			PoolName:           "default",
-			DeploymentName:     defaultConfig.DeploymentName,
-			Namespace:          defaultConfig.Namespace,
-			MinReplicas:        defaultConfig.MinReplicas,
-			MaxReplicas:        defaultConfig.MaxReplicas,
-			ScaleDownDelay:     defaultConfig.ScaleDownDelay,
-			ScalingInterval:    defaultScalingInterval,
-			WorkerImage:        s.config.Scheduler.WorkerImage,
-			GatewayServiceName: s.config.Scheduler.GatewayServiceName,
-			GatewayPort:        s.config.Gateway.HTTP.Port,
-			RedisAddr:          s.getRedisAddr(),
-		}
-
-		scaler, err := NewPoolScaler(s.ctx, scalerConfig, taskQueue)
-		if err != nil {
-			log.Warn().Err(err).Msg("failed to create default pool scaler (not in k8s?)")
-		} else {
-			// Ensure the deployment exists before starting the scaler
-			if err := scaler.EnsureDeployment(); err != nil {
-				log.Error().Err(err).Msg("failed to ensure default worker deployment")
-			}
-			s.scalers["default"] = scaler
-			go scaler.Start()
-		}
+			WorkerImage:    s.config.Scheduler.WorkerImage,
+		})
 	}
 
 	return nil
 }
 
-// getRedisAddr returns the Redis address for workers
-func (s *Scheduler) getRedisAddr() string {
-	if len(s.config.Database.Redis.Addrs) > 0 {
-		return s.config.Database.Redis.Addrs[0]
+// initializePool creates a pool controller, task queue, and scaler for a single pool
+func (s *Scheduler) initializePool(poolName string, poolConfig types.WorkerPoolConfig) {
+	log.Info().
+		Str("pool_name", poolName).
+		Str("deployment", poolConfig.DeploymentName).
+		Int32("min_replicas", poolConfig.MinReplicas).
+		Int32("max_replicas", poolConfig.MaxReplicas).
+		Msg("initializing worker pool")
+
+	// Create pool controller for monitoring
+	s.pools[poolName] = NewWorkerPoolController(
+		s.ctx,
+		poolName,
+		poolConfig,
+		s.config,
+		s.workerRepo,
+	)
+
+	// Create task queue for this pool
+	taskQueue := repository.NewRedisTaskQueue(s.redisClient, poolName)
+	if s.taskQueue == nil {
+		s.taskQueue = taskQueue
 	}
-	return "redis-master:6379"
+
+	// Create and start pool scaler
+	s.initializeScaler(poolName, poolConfig, taskQueue)
+}
+
+// initializeScaler creates and starts a pool scaler
+func (s *Scheduler) initializeScaler(poolName string, poolConfig types.WorkerPoolConfig, taskQueue repository.TaskQueue) {
+	scalerConfig := s.buildScalerConfig(poolName, poolConfig)
+
+	scaler, err := NewPoolScaler(s.ctx, scalerConfig, taskQueue)
+	if err != nil {
+		log.Warn().Err(err).Str("pool_name", poolName).Msg("failed to create pool scaler (not in k8s?)")
+		return
+	}
+
+	if err := scaler.EnsureDeployment(); err != nil {
+		log.Error().Err(err).Str("pool_name", poolName).Msg("failed to ensure worker deployment")
+	}
+
+	s.scalers[poolName] = scaler
+	go scaler.Start()
+}
+
+// buildScalerConfig creates a PoolScalerConfig from pool configuration
+func (s *Scheduler) buildScalerConfig(poolName string, poolConfig types.WorkerPoolConfig) PoolScalerConfig {
+	return PoolScalerConfig{
+		PoolName:           poolName,
+		DeploymentName:     poolConfig.DeploymentName,
+		Namespace:          poolConfig.Namespace,
+		MinReplicas:        poolConfig.MinReplicas,
+		MaxReplicas:        poolConfig.MaxReplicas,
+		ScaleDownDelay:     poolConfig.ScaleDownDelay,
+		ScalingInterval:    defaultScalingInterval,
+		WorkerImage:        poolConfig.WorkerImage,
+		WorkerCpu:          poolConfig.Cpu,
+		WorkerMemory:       poolConfig.Memory,
+		GatewayServiceName: s.config.Scheduler.GatewayServiceName,
+		GatewayPort:        s.config.Gateway.HTTP.Port,
+		AppConfig:          s.config, // Full config passed to workers as CONFIG_JSON
+	}
 }
 
 // Stop gracefully stops the scheduler

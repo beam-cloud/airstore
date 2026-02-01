@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -18,6 +20,8 @@ var (
 	taskImage      string
 	taskEntrypoint string
 	taskEnv        []string
+	taskPrompt     string
+	taskFollow     bool
 )
 
 var taskCmd = &cobra.Command{
@@ -60,26 +64,55 @@ var taskDeleteCmd = &cobra.Command{
 	},
 }
 
+var taskLogsCmd = &cobra.Command{
+	Use:   "logs <id>",
+	Short: "Stream task logs",
+	Long:  `Stream logs from a running or completed task. Use -f to follow logs in real-time.`,
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return streamTaskLogs(args[0], taskFollow)
+	},
+}
+
+var taskRunCmd = &cobra.Command{
+	Use:   "run",
+	Short: "Run a Claude Code task",
+	Long:  `Create and run a Claude Code task with the given prompt. Streams logs in real-time.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runClaudeCodeTask()
+	},
+}
+
 func init() {
 	taskCreateCmd.Flags().StringVarP(&taskWorkspace, "workspace", "w", "", "Workspace name (required)")
-	taskCreateCmd.Flags().StringVarP(&taskImage, "image", "i", "", "Container image (required)")
+	taskCreateCmd.Flags().StringVarP(&taskImage, "image", "i", "", "Container image (optional if prompt provided)")
+	taskCreateCmd.Flags().StringVarP(&taskPrompt, "prompt", "p", "", "Claude Code prompt (auto-sets image)")
 	taskCreateCmd.Flags().StringVarP(&taskEntrypoint, "entrypoint", "e", "", "Entrypoint command (comma-separated)")
 	taskCreateCmd.Flags().StringSliceVar(&taskEnv, "env", nil, "Environment variables (KEY=VALUE)")
 	taskCreateCmd.MarkFlagRequired("workspace")
-	taskCreateCmd.MarkFlagRequired("image")
 
 	taskListCmd.Flags().StringVarP(&taskWorkspace, "workspace", "w", "", "Filter by workspace name")
+
+	taskLogsCmd.Flags().BoolVarP(&taskFollow, "follow", "f", false, "Follow logs in real-time")
+
+	taskRunCmd.Flags().StringVarP(&taskWorkspace, "workspace", "w", "", "Workspace name (required)")
+	taskRunCmd.Flags().StringVarP(&taskPrompt, "prompt", "p", "", "Claude Code prompt (required)")
+	taskRunCmd.MarkFlagRequired("workspace")
+	taskRunCmd.MarkFlagRequired("prompt")
 
 	taskCmd.AddCommand(taskCreateCmd)
 	taskCmd.AddCommand(taskListCmd)
 	taskCmd.AddCommand(taskGetCmd)
 	taskCmd.AddCommand(taskDeleteCmd)
+	taskCmd.AddCommand(taskLogsCmd)
+	taskCmd.AddCommand(taskRunCmd)
 }
 
 type taskResponse struct {
-	ID          string            `json:"id"`
+	ID          string            `json:"external_id"`
 	WorkspaceID string            `json:"workspace_id"`
 	Status      string            `json:"status"`
+	Prompt      string            `json:"prompt,omitempty"`
 	Image       string            `json:"image"`
 	Entrypoint  []string          `json:"entrypoint"`
 	Env         map[string]string `json:"env"`
@@ -116,6 +149,11 @@ func httpGatewayAddr() string {
 }
 
 func createTask() error {
+	// Validate - either prompt or image must be provided
+	if taskPrompt == "" && taskImage == "" {
+		return fmt.Errorf("either --prompt or --image is required")
+	}
+
 	// Parse entrypoint
 	var entrypoint []string
 	if taskEntrypoint != "" {
@@ -137,6 +175,7 @@ func createTask() error {
 	payload := map[string]interface{}{
 		"workspace_name": taskWorkspace,
 		"image":          taskImage,
+		"prompt":         taskPrompt,
 		"entrypoint":     entrypoint,
 		"env":            env,
 	}
@@ -166,9 +205,19 @@ func createTask() error {
 	}
 
 	fmt.Printf("Created task: %s\n", task.ID)
+	if task.Prompt != "" {
+		fmt.Printf("  Prompt: %s\n", truncate(task.Prompt, 50))
+	}
 	fmt.Printf("  Image:  %s\n", task.Image)
 	fmt.Printf("  Status: %s\n", task.Status)
 	return nil
+}
+
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
 }
 
 func listTasks() error {
@@ -327,4 +376,130 @@ func deleteTask(id string) error {
 
 	fmt.Printf("Task %s deleted.\n", id)
 	return nil
+}
+
+// streamTaskLogs streams logs from a task via SSE
+func streamTaskLogs(id string, follow bool) error {
+	url := httpGatewayAddr() + "/api/v1/tasks/" + id + "/logs/stream"
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Cache-Control", "no-cache")
+
+	client := &http.Client{
+		Timeout: 0, // No timeout for streaming
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to connect to gateway: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("task not found")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("error: %s", string(body))
+	}
+
+	// Read SSE events
+	reader := bufio.NewReader(resp.Body)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+
+		data := strings.TrimPrefix(line, "data: ")
+		var event map[string]interface{}
+		if err := json.Unmarshal([]byte(data), &event); err != nil {
+			continue
+		}
+
+		// Check if it's a log entry or status event
+		if logData, ok := event["data"].(string); ok {
+			// Log entry
+			stream := "stdout"
+			if s, ok := event["stream"].(string); ok {
+				stream = s
+			}
+			if stream == "stderr" {
+				fmt.Fprintf(os.Stderr, "%s\n", logData)
+			} else {
+				fmt.Println(logData)
+			}
+		} else if status, ok := event["status"].(string); ok {
+			// Status event
+			if status == "complete" || status == "failed" || status == "cancelled" {
+				if !follow {
+					return nil
+				}
+				fmt.Fprintf(os.Stderr, "\n[Task %s]\n", status)
+				if errMsg, ok := event["error"].(string); ok && errMsg != "" {
+					fmt.Fprintf(os.Stderr, "Error: %s\n", errMsg)
+				}
+				if exitCode, ok := event["exit_code"].(float64); ok {
+					fmt.Fprintf(os.Stderr, "Exit code: %d\n", int(exitCode))
+				}
+				return nil
+			}
+		}
+	}
+}
+
+// runClaudeCodeTask creates a Claude Code task and streams logs
+func runClaudeCodeTask() error {
+	// Create the task with the prompt
+	payload := map[string]interface{}{
+		"workspace_name": taskWorkspace,
+		"prompt":         taskPrompt,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	resp, err := http.Post(httpGatewayAddr()+"/api/v1/tasks", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to connect to gateway: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result apiResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if !result.Success {
+		return fmt.Errorf("failed to create task: %s", result.Error)
+	}
+
+	var task taskResponse
+	if err := json.Unmarshal(result.Data, &task); err != nil {
+		return fmt.Errorf("failed to parse task: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Created task: %s\n", task.ID)
+	fmt.Fprintf(os.Stderr, "Prompt: %s\n", truncate(task.Prompt, 50))
+	fmt.Fprintf(os.Stderr, "Streaming logs...\n\n")
+
+	// Small delay to let the task start
+	time.Sleep(500 * time.Millisecond)
+
+	// Stream logs
+	return streamTaskLogs(task.ID, true)
 }
