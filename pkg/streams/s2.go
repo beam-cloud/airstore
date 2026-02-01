@@ -207,22 +207,29 @@ func (c *S2Client) Read(ctx context.Context, stream string, seqNum int64, count 
 	return result.Records, nil
 }
 
-// ReadLogs reads log entries for a task
-func (c *S2Client) ReadLogs(ctx context.Context, taskID string, seqNum int64) ([]TaskLogEntry, error) {
+// ReadLogs reads log entries for a task.
+// Returns the logs, the next sequence number for pagination, and any error.
+// Pass nextSeqNum to subsequent calls to fetch logs beyond the first page.
+func (c *S2Client) ReadLogs(ctx context.Context, taskID string, seqNum int64) ([]TaskLogEntry, int64, error) {
 	records, err := c.Read(ctx, Streams.TaskLogs(taskID), seqNum, 1000)
 	if err != nil {
-		return nil, err
+		return nil, seqNum, err
 	}
 
 	logs := make([]TaskLogEntry, 0, len(records))
+	nextSeqNum := seqNum
 	for _, r := range records {
 		var entry TaskLogEntry
 		// Body is a JSON-encoded string, unmarshal it
 		if err := json.Unmarshal([]byte(r.Body), &entry); err == nil {
 			logs = append(logs, entry)
 		}
+		// Track the next sequence number (last seen + 1)
+		if r.SeqNum >= nextSeqNum {
+			nextSeqNum = r.SeqNum + 1
+		}
 	}
-	return logs, nil
+	return logs, nextSeqNum, nil
 }
 
 // FormatLogs converts log entries to plain text (one line per entry).

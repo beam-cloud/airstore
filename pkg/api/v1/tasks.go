@@ -240,11 +240,6 @@ func (g *TasksGroup) CancelTask(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, err.Error())
 	}
 
-	// Publish cancellation event so workers can stop
-	if g.taskQueue != nil {
-		_ = g.taskQueue.PublishStatus(c.Request().Context(), externalId, types.TaskStatusCancelled, nil, "task cancelled by user")
-	}
-
 	return SuccessResponse(c, map[string]string{"status": "cancelled"})
 }
 
@@ -292,8 +287,8 @@ func (g *TasksGroup) StreamLogs(c echo.Context) error {
 	w := &sseWriter{c: c}
 	w.init()
 
-	// Send buffered logs, track cursor for dedup
-	logs, _ := g.s2Client.ReadLogs(ctx, taskID, 0)
+	// Send buffered logs, track cursor for dedup and seqNum for pagination
+	logs, seqNum, _ := g.s2Client.ReadLogs(ctx, taskID, 0)
 	cursor := w.sendLogs(logs)
 
 	if task.IsTerminal() {
@@ -310,7 +305,7 @@ func (g *TasksGroup) StreamLogs(c echo.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-tick.C:
-			logs, _ := g.s2Client.ReadLogs(ctx, taskID, 0)
+			logs, seqNum, _ = g.s2Client.ReadLogs(ctx, taskID, seqNum)
 			cursor = w.sendLogsAfter(logs, cursor)
 
 			if task, err = g.backend.GetTask(ctx, taskID); err == nil && task.IsTerminal() {
