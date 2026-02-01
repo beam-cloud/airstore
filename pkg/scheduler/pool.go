@@ -120,7 +120,7 @@ func (p *WorkerPoolController) GetWorkers() ([]*types.Worker, error) {
 
 // OnWorkerRegistered is called when a worker registers with the gateway
 func (p *WorkerPoolController) OnWorkerRegistered(workerId string) {
-	log.Debug().
+	log.Info().
 		Str("pool_name", p.name).
 		Str("worker_id", workerId).
 		Msg("worker registered in pool")

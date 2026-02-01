@@ -61,7 +61,6 @@ func (i *GRPCInterceptor) authenticate(ctx context.Context) (context.Context, er
 	}
 
 	if info != nil {
-		log.Debug().Str("type", string(info.TokenType)).Msg("auth: validated")
 		return WithAuthInfo(ctx, info), nil
 	}
 
