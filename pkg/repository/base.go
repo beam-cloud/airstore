@@ -36,6 +36,12 @@ type TaskQueue interface {
 	GetResult(ctx context.Context, taskID string) (*types.TaskResult, error)
 	Len(ctx context.Context) (int64, error)
 	InFlightCount(ctx context.Context) (int64, error)
+
+	// Log streaming
+	PublishLog(ctx context.Context, taskID string, stream string, data string) error
+	PublishStatus(ctx context.Context, taskID string, status types.TaskStatus, exitCode *int, errorMsg string) error
+	SubscribeLogs(ctx context.Context, taskID string) (<-chan []byte, func(), error)
+	GetLogBuffer(ctx context.Context, taskID string) ([][]byte, error)
 }
 
 // MemberRepository manages workspace members
