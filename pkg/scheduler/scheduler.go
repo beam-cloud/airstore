@@ -19,6 +19,7 @@ type Scheduler struct {
 	config      types.AppConfig
 	redisClient *common.RedisClient
 	workerRepo  repository.WorkerRepository
+	backendRepo repository.BackendRepository
 	taskQueue   repository.TaskQueue
 
 	// Pool controllers (for monitoring)
@@ -27,24 +28,29 @@ type Scheduler struct {
 	// Pool scalers (for autoscaling)
 	scalers map[string]*PoolScaler
 
+	// Worker tokens per pool (raw token strings)
+	workerTokens map[string]string
+
 	mu      sync.RWMutex
 	running bool
 }
 
 // NewScheduler creates a new Scheduler instance
-func NewScheduler(ctx context.Context, config types.AppConfig, redisClient *common.RedisClient) (*Scheduler, error) {
+func NewScheduler(ctx context.Context, config types.AppConfig, redisClient *common.RedisClient, backendRepo repository.BackendRepository) (*Scheduler, error) {
 	ctx, cancel := context.WithCancel(ctx)
 
 	workerRepo := repository.NewWorkerRedisRepository(redisClient)
 
 	scheduler := &Scheduler{
-		ctx:         ctx,
-		cancel:      cancel,
-		config:      config,
-		redisClient: redisClient,
-		workerRepo:  workerRepo,
-		pools:       make(map[string]*WorkerPoolController),
-		scalers:     make(map[string]*PoolScaler),
+		ctx:          ctx,
+		cancel:       cancel,
+		config:       config,
+		redisClient:  redisClient,
+		workerRepo:   workerRepo,
+		backendRepo:  backendRepo,
+		pools:        make(map[string]*WorkerPoolController),
+		scalers:      make(map[string]*PoolScaler),
+		workerTokens: make(map[string]string),
 	}
 
 	return scheduler, nil
@@ -105,6 +111,9 @@ func (s *Scheduler) initializePool(poolName string, poolConfig types.WorkerPoolC
 		Int32("max_replicas", poolConfig.MaxReplicas).
 		Msg("initializing worker pool")
 
+	// Ensure worker token exists for this pool
+	s.ensureWorkerToken(poolName)
+
 	// Create pool controller for monitoring
 	s.pools[poolName] = NewWorkerPoolController(
 		s.ctx,
@@ -122,6 +131,41 @@ func (s *Scheduler) initializePool(poolName string, poolConfig types.WorkerPoolC
 
 	// Create and start pool scaler
 	s.initializeScaler(poolName, poolConfig, taskQueue)
+}
+
+// ensureWorkerToken creates a worker token for the pool if one doesn't exist
+func (s *Scheduler) ensureWorkerToken(poolName string) {
+	if s.backendRepo == nil {
+		log.Debug().Str("pool", poolName).Msg("no backend repo, skipping worker token provisioning")
+		return
+	}
+
+	// Check if a token already exists for this pool
+	tokens, err := s.backendRepo.ListWorkerTokens(s.ctx)
+	if err != nil {
+		log.Error().Err(err).Str("pool", poolName).Msg("failed to list worker tokens")
+		return
+	}
+
+	for _, t := range tokens {
+		if t.PoolName != nil && *t.PoolName == poolName {
+			log.Debug().Str("pool", poolName).Msg("worker token already exists")
+			// We don't have the raw token, can't use existing tokens
+			// TODO: store raw tokens in k8s secret instead
+			return
+		}
+	}
+
+	// Create new worker token for this pool
+	tokenName := fmt.Sprintf("pool-%s", poolName)
+	_, rawToken, err := s.backendRepo.CreateWorkerToken(s.ctx, tokenName, &poolName, nil)
+	if err != nil {
+		log.Error().Err(err).Str("pool", poolName).Msg("failed to create worker token")
+		return
+	}
+
+	s.workerTokens[poolName] = rawToken
+	log.Info().Str("pool", poolName).Msg("created worker token for pool")
 }
 
 // initializeScaler creates and starts a pool scaler
@@ -157,7 +201,8 @@ func (s *Scheduler) buildScalerConfig(poolName string, poolConfig types.WorkerPo
 		WorkerMemory:       poolConfig.Memory,
 		GatewayServiceName: s.config.Scheduler.GatewayServiceName,
 		GatewayPort:        s.config.Gateway.HTTP.Port,
-		AppConfig:          s.config, // Full config passed to workers as CONFIG_JSON
+		WorkerToken:        s.workerTokens[poolName],
+		AppConfig:          s.config,
 	}
 }
 

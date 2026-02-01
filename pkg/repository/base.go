@@ -54,13 +54,21 @@ type MemberRepository interface {
 	DeleteMember(ctx context.Context, externalId string) error
 }
 
-// TokenRepository manages workspace authentication tokens
+// TokenRepository manages authentication tokens
 type TokenRepository interface {
-	CreateToken(ctx context.Context, workspaceId, memberId uint, name string, expiresAt *time.Time, tokenType types.TokenType) (*types.WorkspaceToken, string, error)
-	ValidateToken(ctx context.Context, rawToken string) (*types.TokenValidationResult, error)
-	GetToken(ctx context.Context, externalId string) (*types.WorkspaceToken, error)
-	ListTokens(ctx context.Context, workspaceId uint) ([]types.WorkspaceToken, error)
+	// Workspace member tokens
+	CreateToken(ctx context.Context, workspaceId, memberId uint, name string, expiresAt *time.Time, tokenType types.TokenType) (*types.Token, string, error)
+	GetToken(ctx context.Context, externalId string) (*types.Token, error)
+	ListTokens(ctx context.Context, workspaceId uint) ([]types.Token, error)
 	RevokeToken(ctx context.Context, externalId string) error
+
+	// Worker tokens (cluster-level)
+	CreateWorkerToken(ctx context.Context, name string, poolName *string, expiresAt *time.Time) (*types.Token, string, error)
+	ListWorkerTokens(ctx context.Context) ([]types.Token, error)
+
+	// Validation
+	ValidateToken(ctx context.Context, rawToken string) (*types.TokenValidationResult, error)
+	AuthorizeToken(ctx context.Context, rawToken string) (*types.AuthInfo, error)
 }
 
 // IntegrationRepository manages integration connections

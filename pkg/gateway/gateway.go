@@ -204,6 +204,17 @@ func (g *Gateway) initHTTP() error {
 
 	e.Use(middleware.Recover())
 
+	// Create validator for HTTP auth middleware
+	var validator auth.TokenValidator
+	if g.BackendRepo != nil {
+		validator = auth.NewCompositeValidator(g.Config.Gateway.AuthToken, g.BackendRepo)
+	} else {
+		validator = auth.NewStaticValidator(g.Config.Gateway.AuthToken)
+	}
+
+	// Add HTTP auth middleware (validates tokens, allows pass-through)
+	e.Use(auth.HTTPMiddleware(validator))
+
 	g.echo = e
 	g.httpServer = &http.Server{
 		Addr:    fmt.Sprintf("%s:%d", g.Config.Gateway.HTTP.Host, g.Config.Gateway.HTTP.Port),
@@ -221,14 +232,14 @@ func (g *Gateway) initHTTP() error {
 
 func (g *Gateway) initGRPC() error {
 	// Create token validator
-	// Use CompositeValidator if we have a database backend (for workspace tokens)
+	// Use CompositeValidator if we have a database backend (for workspace/worker tokens)
 	var validator auth.TokenValidator
 	if g.BackendRepo != nil {
 		validator = auth.NewCompositeValidator(g.Config.Gateway.AuthToken, g.BackendRepo)
 	} else {
 		validator = auth.NewStaticValidator(g.Config.Gateway.AuthToken)
 	}
-	authInterceptor := auth.NewInterceptor(validator)
+	authInterceptor := auth.NewGRPCInterceptor(validator)
 
 	serverOptions := []grpc.ServerOption{
 		grpc.UnaryInterceptor(authInterceptor.Unary()),
@@ -244,7 +255,7 @@ func (g *Gateway) initGRPC() error {
 func (g *Gateway) registerServices() error {
 	// Initialize scheduler (requires Redis, skip in local mode)
 	if g.Config.Scheduler.Enabled && g.RedisClient != nil {
-		sched, err := scheduler.NewScheduler(g.ctx, g.Config, g.RedisClient)
+		sched, err := scheduler.NewScheduler(g.ctx, g.Config, g.RedisClient, g.BackendRepo)
 		if err != nil {
 			return fmt.Errorf("failed to create scheduler: %w", err)
 		}
@@ -337,10 +348,16 @@ func (g *Gateway) registerServices() error {
 	if g.BackendRepo != nil {
 		taskQueue := repository.NewRedisTaskQueue(g.RedisClient, "default")
 
-		// Workspace CRUD endpoints (admin-only)
+		// Workspace CRUD endpoints (cluster admin only)
 		workspacesAdminGroup := g.baseRouteGroup.Group("/workspaces")
-		workspacesAdminGroup.Use(g.requireAdminToken())
+		workspacesAdminGroup.Use(auth.RequireClusterAdminMiddleware())
 		apiv1.NewWorkspacesGroup(workspacesAdminGroup, g.BackendRepo, g.storageClient)
+
+		// Worker tokens API (cluster admin only)
+		workerTokensGroup := g.baseRouteGroup.Group("/worker-tokens")
+		workerTokensGroup.Use(auth.RequireClusterAdminMiddleware())
+		apiv1.NewWorkerTokensGroup(workerTokensGroup, g.BackendRepo)
+		log.Info().Msg("worker tokens API registered at /api/v1/worker-tokens")
 
 		// Workspace-scoped APIs (support both admin and member tokens)
 		workspaceAuthConfig := apiv1.WorkspaceAuthConfig{
@@ -535,32 +552,6 @@ func (g *Gateway) ToolRegistry() *tools.Registry {
 // SourceRegistry returns the source registry for registering providers
 func (g *Gateway) SourceRegistry() *sources.Registry {
 	return g.sourceRegistry
-}
-
-// requireAdminToken returns middleware that validates the admin token
-func (g *Gateway) requireAdminToken() echo.MiddlewareFunc {
-	return func(next echo.HandlerFunc) echo.HandlerFunc {
-		return func(c echo.Context) error {
-			// Skip auth if no admin token is configured
-			if g.Config.Gateway.AuthToken == "" {
-				return next(c)
-			}
-
-			token := c.Request().Header.Get("Authorization")
-			expected := "Bearer " + g.Config.Gateway.AuthToken
-			if token == "" || token != expected {
-				log.Debug().
-					Str("path", c.Path()).
-					Str("token_present", fmt.Sprintf("%v", token != "")).
-					Msg("admin token validation failed")
-				return c.JSON(http.StatusUnauthorized, map[string]string{
-					"error":   "unauthorized",
-					"message": "admin token required",
-				})
-			}
-			return next(c)
-		}
-	}
 }
 
 // initSources initializes source providers

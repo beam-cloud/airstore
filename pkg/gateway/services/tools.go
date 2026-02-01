@@ -149,20 +149,22 @@ func (s *ToolService) ExecuteTool(req *pb.ExecuteToolRequest, stream pb.ToolServ
 }
 
 func (s *ToolService) buildExecContext(ctx context.Context, toolName string) *tools.ExecutionContext {
-	rc := auth.FromContext(ctx)
-	if rc == nil {
+	if !auth.IsAuthenticated(ctx) {
 		return nil
 	}
 
+	workspaceId := auth.WorkspaceId(ctx)
+	memberId := auth.MemberId(ctx)
+
 	execCtx := &tools.ExecutionContext{
-		WorkspaceId:   rc.WorkspaceId,
-		WorkspaceName: rc.WorkspaceName,
-		MemberId:      rc.MemberId,
-		MemberEmail:   rc.MemberEmail,
+		WorkspaceId:   workspaceId,
+		WorkspaceName: auth.WorkspaceName(ctx),
+		MemberId:      memberId,
+		MemberEmail:   auth.MemberEmail(ctx),
 	}
 
 	// No backend or workspace - return basic context
-	if s.backend == nil || rc.WorkspaceId == 0 {
+	if s.backend == nil || workspaceId == 0 {
 		return execCtx
 	}
 
@@ -172,7 +174,7 @@ func (s *ToolService) buildExecContext(ctx context.Context, toolName string) *to
 	}
 
 	// Look up credentials (personal > shared)
-	conn, err := s.backend.GetConnection(ctx, rc.WorkspaceId, rc.MemberId, toolName)
+	conn, err := s.backend.GetConnection(ctx, workspaceId, memberId, toolName)
 	if err != nil {
 		log.Warn().Str("tool", toolName).Err(err).Msg("connection lookup failed")
 		return execCtx

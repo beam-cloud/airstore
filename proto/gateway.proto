@@ -16,10 +16,14 @@ service GatewayService {
   rpc ListMembers(ListMembersRequest) returns (ListMembersResponse);
   rpc RemoveMember(RemoveMemberRequest) returns (DeleteResponse);
 
-  // Tokens
+  // Tokens (workspace-scoped)
   rpc CreateToken(CreateTokenRequest) returns (CreateTokenResponse);
   rpc ListTokens(ListTokensRequest) returns (ListTokensResponse);
   rpc RevokeToken(RevokeTokenRequest) returns (DeleteResponse);
+
+  // Worker Tokens (cluster-level)
+  rpc CreateWorkerToken(CreateWorkerTokenRequest) returns (CreateTokenResponse);
+  rpc ListWorkerTokens(ListWorkerTokensRequest) returns (ListTokensResponse);
 
   // Connections
   rpc AddConnection(AddConnectionRequest) returns (ConnectionResponse);
@@ -127,11 +131,24 @@ message RevokeTokenRequest {
 
 message Token {
   string id = 1;
-  string member_id = 2;
-  string name = 3;
-  string expires_at = 4;
-  string created_at = 5;
-  string last_used_at = 6;
+  string name = 2;
+  string token_type = 3;        // "workspace_member" or "worker"
+  string member_id = 4;         // Set for workspace_member tokens
+  string pool_name = 5;         // Set for worker tokens (optional)
+  string expires_at = 6;
+  string created_at = 7;
+  string last_used_at = 8;
+}
+
+// Worker token messages
+message CreateWorkerTokenRequest {
+  string name = 1;
+  string pool_name = 2;          // Optional, empty = all pools
+  int64 expires_in_seconds = 3;  // 0 = no expiry
+}
+
+message ListWorkerTokensRequest {
+  // No parameters - lists all worker tokens
 }
 
 message CreateTokenResponse {

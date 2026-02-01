@@ -89,10 +89,10 @@ func (g *TasksGroup) CreateTask(c echo.Context) error {
 	}
 
 	// Get member info from auth context
-	rc := auth.FromContext(ctx)
 	var createdByMemberId *uint
-	if rc != nil && rc.MemberId > 0 {
-		createdByMemberId = &rc.MemberId
+	memberId := auth.MemberId(ctx)
+	if memberId > 0 {
+		createdByMemberId = &memberId
 	}
 
 	// Extract auth token for passing to container (for filesystem mounting)

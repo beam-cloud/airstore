@@ -6,18 +6,17 @@ import (
 
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/repository"
+	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/labstack/echo/v4"
 )
 
-// WorkspaceAuthConfig holds auth configuration for workspace-scoped APIs
+// WorkspaceAuthConfig for workspace-scoped API routes.
 type WorkspaceAuthConfig struct {
 	AdminToken string
 	Backend    repository.BackendRepository
 }
 
-// NewWorkspaceAuthMiddleware creates middleware that validates workspace access.
-// It accepts both admin tokens (gateway token) and workspace member tokens.
-// The auth context is stored in the request context for downstream handlers.
+// NewWorkspaceAuthMiddleware validates workspace access for admin and member tokens.
 func NewWorkspaceAuthMiddleware(cfg WorkspaceAuthConfig) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
@@ -26,76 +25,54 @@ func NewWorkspaceAuthMiddleware(cfg WorkspaceAuthConfig) echo.MiddlewareFunc {
 				return ErrorResponse(c, http.StatusBadRequest, "workspace_id required")
 			}
 
-			// Extract token from Authorization header
-			authHeader := c.Request().Header.Get("Authorization")
-			token := strings.TrimPrefix(authHeader, "Bearer ")
+			ctx := c.Request().Context()
+			token := strings.TrimPrefix(c.Request().Header.Get("Authorization"), "Bearer ")
 
-			var rc *auth.RequestContext
+			var info *types.AuthInfo
 
-			// Check if it's an admin token
-			if cfg.AdminToken != "" && token == cfg.AdminToken {
-				// Admin token - get workspace from URL
-				workspace, err := cfg.Backend.GetWorkspaceByExternalId(c.Request().Context(), workspaceID)
-				if err != nil || workspace == nil {
+			switch {
+			case cfg.AdminToken != "" && token == cfg.AdminToken:
+				ws, err := cfg.Backend.GetWorkspaceByExternalId(ctx, workspaceID)
+				if err != nil || ws == nil {
 					return ErrorResponse(c, http.StatusNotFound, "workspace not found")
 				}
-
-				rc = &auth.RequestContext{
-					WorkspaceId:   workspace.Id,
-					WorkspaceExt:  workspace.ExternalId,
-					WorkspaceName: workspace.Name,
-					IsGatewayAuth: true,
+				info = &types.AuthInfo{
+					TokenType: types.TokenTypeClusterAdmin,
+					Workspace: &types.WorkspaceInfo{Id: ws.Id, ExternalId: ws.ExternalId, Name: ws.Name},
 				}
-			} else if token != "" && cfg.Backend != nil {
-				// Try as workspace token
-				result, err := cfg.Backend.ValidateToken(c.Request().Context(), token)
-				if err != nil || result == nil {
+
+			case token != "" && cfg.Backend != nil:
+				var err error
+				info, err = cfg.Backend.AuthorizeToken(ctx, token)
+				if err != nil || info == nil {
 					return ErrorResponse(c, http.StatusUnauthorized, "invalid token")
 				}
-
-				// Verify the token belongs to the requested workspace
-				if result.WorkspaceExt != workspaceID {
+				if info.Workspace == nil || info.Workspace.ExternalId != workspaceID {
 					return ErrorResponse(c, http.StatusForbidden, "token does not have access to this workspace")
 				}
 
-				rc = &auth.RequestContext{
-					WorkspaceId:   result.WorkspaceId,
-					WorkspaceExt:  result.WorkspaceExt,
-					WorkspaceName: result.WorkspaceName,
-					MemberId:      result.MemberId,
-					MemberExt:     result.MemberExt,
-					MemberEmail:   result.MemberEmail,
-					MemberRole:    result.MemberRole,
-					IsGatewayAuth: false,
-				}
-			} else if cfg.AdminToken == "" {
-				// No admin token configured - allow unauthenticated access (local mode)
-				workspace, err := cfg.Backend.GetWorkspaceByExternalId(c.Request().Context(), workspaceID)
-				if err != nil || workspace == nil {
+			case cfg.AdminToken == "":
+				ws, err := cfg.Backend.GetWorkspaceByExternalId(ctx, workspaceID)
+				if err != nil || ws == nil {
 					return ErrorResponse(c, http.StatusNotFound, "workspace not found")
 				}
-
-				rc = &auth.RequestContext{
-					WorkspaceId:   workspace.Id,
-					WorkspaceExt:  workspace.ExternalId,
-					WorkspaceName: workspace.Name,
-					IsGatewayAuth: true,
+				info = &types.AuthInfo{
+					TokenType: types.TokenTypeClusterAdmin,
+					Workspace: &types.WorkspaceInfo{Id: ws.Id, ExternalId: ws.ExternalId, Name: ws.Name},
 				}
-			} else {
+
+			default:
 				return ErrorResponse(c, http.StatusUnauthorized, "authorization required")
 			}
 
-			// Add auth context to request
-			ctx := auth.WithContext(c.Request().Context(), rc)
+			ctx = auth.WithAuthInfo(ctx, info)
 			c.SetRequest(c.Request().WithContext(ctx))
-
 			return next(c)
 		}
 	}
 }
 
-// RequireAdmin returns middleware that requires admin role or gateway auth.
-// Must be used after WorkspaceAuthMiddleware.
+// RequireAdmin middleware requires admin role or cluster admin.
 func RequireAdmin() echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {

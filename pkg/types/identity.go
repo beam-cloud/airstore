@@ -11,12 +11,7 @@ const (
 	RoleViewer MemberRole = "viewer"
 )
 
-// TokenType represents the type of a workspace token
-type TokenType string
-
-const (
-	TokenTypeWorkspaceMember TokenType = "workspace_member"
-)
+// Note: TokenType constants are defined in auth.go
 
 // WorkspaceMember represents a user who belongs to a workspace
 type WorkspaceMember struct {
@@ -30,15 +25,18 @@ type WorkspaceMember struct {
 	UpdatedAt   time.Time  `db:"updated_at" json:"updated_at"`
 }
 
-// WorkspaceToken represents an authentication token that maps to a workspace and member
-type WorkspaceToken struct {
+// Token represents an authentication token
+// For workspace_member tokens: WorkspaceId and MemberId are set
+// For worker tokens: WorkspaceId and MemberId are nil, PoolName may be set
+type Token struct {
 	Id          uint       `db:"id" json:"id"`
 	ExternalId  string     `db:"external_id" json:"external_id"`
-	WorkspaceId uint       `db:"workspace_id" json:"workspace_id"`
-	MemberId    uint       `db:"member_id" json:"member_id"`
+	WorkspaceId *uint      `db:"workspace_id" json:"workspace_id,omitempty"`
+	MemberId    *uint      `db:"member_id" json:"member_id,omitempty"`
 	TokenType   TokenType  `db:"token_type" json:"token_type"`
 	TokenHash   string     `db:"token_hash" json:"-"`
 	Name        string     `db:"name" json:"name"`
+	PoolName    *string    `db:"pool_name" json:"pool_name,omitempty"`
 	ExpiresAt   *time.Time `db:"expires_at" json:"expires_at,omitempty"`
 	CreatedAt   time.Time  `db:"created_at" json:"created_at"`
 	LastUsedAt  *time.Time `db:"last_used_at" json:"last_used_at,omitempty"`
@@ -72,8 +70,9 @@ type IntegrationCredentials struct {
 	Extra        map[string]string `json:"extra,omitempty"`
 }
 
-// TokenValidationResult is returned when validating a workspace token
+// TokenValidationResult is returned when validating a token
 type TokenValidationResult struct {
+	// Workspace fields (set for workspace_member tokens)
 	WorkspaceId   uint
 	WorkspaceExt  string
 	WorkspaceName string
@@ -81,5 +80,10 @@ type TokenValidationResult struct {
 	MemberExt     string
 	MemberEmail   string
 	MemberRole    MemberRole
-	TokenType     TokenType
+
+	// Worker fields (set for worker tokens)
+	PoolName string
+
+	// Common
+	TokenType TokenType
 }

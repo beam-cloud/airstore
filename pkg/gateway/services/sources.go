@@ -781,15 +781,15 @@ func (s *SourceService) Readlink(ctx context.Context, req *pb.SourceReadlinkRequ
 
 // providerContext creates a ProviderContext from the gRPC context
 func (s *SourceService) providerContext(ctx context.Context) (*sources.ProviderContext, error) {
-	rc := auth.FromContext(ctx)
+	rc := auth.AuthInfoFromContext(ctx)
 	if rc == nil {
 		// Allow unauthenticated access with empty context (for local mode)
 		return &sources.ProviderContext{}, nil
 	}
 
 	return &sources.ProviderContext{
-		WorkspaceId: rc.WorkspaceId,
-		MemberId:    rc.MemberId,
+		WorkspaceId: auth.WorkspaceId(ctx),
+		MemberId:    auth.MemberId(ctx),
 	}, nil
 }
 
@@ -860,7 +860,7 @@ func (s *SourceService) loadCredentials(ctx context.Context, pctx *sources.Provi
 
 // CreateSmartQuery creates a new smart query via LLM inference
 func (s *SourceService) CreateSmartQuery(ctx context.Context, req *pb.CreateSmartQueryRequest) (*pb.CreateSmartQueryResponse, error) {
-	if !auth.HasWorkspace(ctx) {
+	if !auth.IsAuthenticated(ctx) {
 		return &pb.CreateSmartQueryResponse{Ok: false, Error: "unauthorized"}, nil
 	}
 	workspaceId := auth.WorkspaceId(ctx)
@@ -1078,7 +1078,7 @@ func formatResultsForEvaluation(results []sources.QueryResult) string {
 
 // GetSmartQuery retrieves a smart query by path
 func (s *SourceService) GetSmartQuery(ctx context.Context, req *pb.GetSmartQueryRequest) (*pb.GetSmartQueryResponse, error) {
-	if !auth.HasWorkspace(ctx) {
+	if !auth.IsAuthenticated(ctx) {
 		return &pb.GetSmartQueryResponse{Ok: false, Error: "unauthorized"}, nil
 	}
 
@@ -1099,7 +1099,7 @@ func (s *SourceService) GetSmartQuery(ctx context.Context, req *pb.GetSmartQuery
 
 // ListSmartQueries lists queries under a parent path
 func (s *SourceService) ListSmartQueries(ctx context.Context, req *pb.ListSmartQueriesRequest) (*pb.ListSmartQueriesResponse, error) {
-	if !auth.HasWorkspace(ctx) {
+	if !auth.IsAuthenticated(ctx) {
 		return &pb.ListSmartQueriesResponse{Ok: false, Error: "unauthorized"}, nil
 	}
 
@@ -1121,7 +1121,7 @@ func (s *SourceService) ListSmartQueries(ctx context.Context, req *pb.ListSmartQ
 
 // DeleteSmartQuery removes a smart query by external_id
 func (s *SourceService) DeleteSmartQuery(ctx context.Context, req *pb.DeleteSmartQueryRequest) (*pb.DeleteSmartQueryResponse, error) {
-	if !auth.HasWorkspace(ctx) {
+	if !auth.IsAuthenticated(ctx) {
 		return &pb.DeleteSmartQueryResponse{Ok: false, Error: "unauthorized"}, nil
 	}
 
@@ -1151,7 +1151,7 @@ func (s *SourceService) DeleteSmartQuery(ctx context.Context, req *pb.DeleteSmar
 
 // UpdateSmartQuery updates an existing query's name and/or guidance
 func (s *SourceService) UpdateSmartQuery(ctx context.Context, req *pb.UpdateSmartQueryRequest) (*pb.UpdateSmartQueryResponse, error) {
-	if !auth.HasWorkspace(ctx) {
+	if !auth.IsAuthenticated(ctx) {
 		return &pb.UpdateSmartQueryResponse{Ok: false, Error: "unauthorized"}, nil
 	}
 	workspaceId := auth.WorkspaceId(ctx)
@@ -1242,7 +1242,7 @@ func (s *SourceService) UpdateSmartQuery(ctx context.Context, req *pb.UpdateSmar
 
 // ExecuteSmartQuery runs a query and returns materialized results
 func (s *SourceService) ExecuteSmartQuery(ctx context.Context, req *pb.ExecuteSmartQueryRequest) (*pb.ExecuteSmartQueryResponse, error) {
-	if !auth.HasWorkspace(ctx) {
+	if !auth.IsAuthenticated(ctx) {
 		return &pb.ExecuteSmartQueryResponse{Ok: false, Error: "unauthorized"}, nil
 	}
 

@@ -56,6 +56,9 @@ type PoolScalerConfig struct {
 	GatewayServiceName string
 	GatewayPort        int
 
+	// Worker authentication token
+	WorkerToken string
+
 	// Full app config - passed to workers as CONFIG_JSON
 	AppConfig types.AppConfig
 }
@@ -238,6 +241,10 @@ func (s *PoolScaler) buildDeployment() *appsv1.Deployment {
 								{
 									Name:  "GATEWAY_GRPC_ADDR",
 									Value: gatewayGRPCAddr,
+								},
+								{
+									Name:  "AIRSTORE_TOKEN",
+									Value: s.config.WorkerToken,
 								},
 								{
 									// Full config as JSON - worker loads via ConfigManager

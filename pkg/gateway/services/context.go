@@ -67,13 +67,13 @@ func (s *ContextService) withTimeout(ctx context.Context) (context.Context, cont
 }
 
 func (s *ContextService) key(ctx context.Context, path string) (string, error) {
-	rc := auth.FromContext(ctx)
+	rc := auth.AuthInfoFromContext(ctx)
 	if rc == nil {
 		return "", fmt.Errorf("no auth context")
 	}
-	prefix := rc.WorkspaceExt
+	prefix := auth.WorkspaceExtId(ctx)
 	if prefix == "" {
-		if rc.IsGatewayAuth {
+		if rc.IsClusterAdmin() {
 			prefix = "_gateway"
 		} else {
 			return "", fmt.Errorf("no workspace in context")

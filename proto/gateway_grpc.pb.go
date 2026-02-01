@@ -19,22 +19,24 @@ import (
 const _ = grpc.SupportPackageIsVersion7
 
 const (
-	GatewayService_CreateWorkspace_FullMethodName  = "/gateway.GatewayService/CreateWorkspace"
-	GatewayService_ListWorkspaces_FullMethodName   = "/gateway.GatewayService/ListWorkspaces"
-	GatewayService_GetWorkspace_FullMethodName     = "/gateway.GatewayService/GetWorkspace"
-	GatewayService_DeleteWorkspace_FullMethodName  = "/gateway.GatewayService/DeleteWorkspace"
-	GatewayService_AddMember_FullMethodName        = "/gateway.GatewayService/AddMember"
-	GatewayService_ListMembers_FullMethodName      = "/gateway.GatewayService/ListMembers"
-	GatewayService_RemoveMember_FullMethodName     = "/gateway.GatewayService/RemoveMember"
-	GatewayService_CreateToken_FullMethodName      = "/gateway.GatewayService/CreateToken"
-	GatewayService_ListTokens_FullMethodName       = "/gateway.GatewayService/ListTokens"
-	GatewayService_RevokeToken_FullMethodName      = "/gateway.GatewayService/RevokeToken"
-	GatewayService_AddConnection_FullMethodName    = "/gateway.GatewayService/AddConnection"
-	GatewayService_ListConnections_FullMethodName  = "/gateway.GatewayService/ListConnections"
-	GatewayService_RemoveConnection_FullMethodName = "/gateway.GatewayService/RemoveConnection"
-	GatewayService_ListTasks_FullMethodName        = "/gateway.GatewayService/ListTasks"
-	GatewayService_GetTask_FullMethodName          = "/gateway.GatewayService/GetTask"
-	GatewayService_GetTaskLogs_FullMethodName      = "/gateway.GatewayService/GetTaskLogs"
+	GatewayService_CreateWorkspace_FullMethodName   = "/gateway.GatewayService/CreateWorkspace"
+	GatewayService_ListWorkspaces_FullMethodName    = "/gateway.GatewayService/ListWorkspaces"
+	GatewayService_GetWorkspace_FullMethodName      = "/gateway.GatewayService/GetWorkspace"
+	GatewayService_DeleteWorkspace_FullMethodName   = "/gateway.GatewayService/DeleteWorkspace"
+	GatewayService_AddMember_FullMethodName         = "/gateway.GatewayService/AddMember"
+	GatewayService_ListMembers_FullMethodName       = "/gateway.GatewayService/ListMembers"
+	GatewayService_RemoveMember_FullMethodName      = "/gateway.GatewayService/RemoveMember"
+	GatewayService_CreateToken_FullMethodName       = "/gateway.GatewayService/CreateToken"
+	GatewayService_ListTokens_FullMethodName        = "/gateway.GatewayService/ListTokens"
+	GatewayService_RevokeToken_FullMethodName       = "/gateway.GatewayService/RevokeToken"
+	GatewayService_CreateWorkerToken_FullMethodName = "/gateway.GatewayService/CreateWorkerToken"
+	GatewayService_ListWorkerTokens_FullMethodName  = "/gateway.GatewayService/ListWorkerTokens"
+	GatewayService_AddConnection_FullMethodName     = "/gateway.GatewayService/AddConnection"
+	GatewayService_ListConnections_FullMethodName   = "/gateway.GatewayService/ListConnections"
+	GatewayService_RemoveConnection_FullMethodName  = "/gateway.GatewayService/RemoveConnection"
+	GatewayService_ListTasks_FullMethodName         = "/gateway.GatewayService/ListTasks"
+	GatewayService_GetTask_FullMethodName           = "/gateway.GatewayService/GetTask"
+	GatewayService_GetTaskLogs_FullMethodName       = "/gateway.GatewayService/GetTaskLogs"
 )
 
 // GatewayServiceClient is the client API for GatewayService service.
@@ -50,10 +52,13 @@ type GatewayServiceClient interface {
 	AddMember(ctx context.Context, in *AddMemberRequest, opts ...grpc.CallOption) (*MemberResponse, error)
 	ListMembers(ctx context.Context, in *ListMembersRequest, opts ...grpc.CallOption) (*ListMembersResponse, error)
 	RemoveMember(ctx context.Context, in *RemoveMemberRequest, opts ...grpc.CallOption) (*DeleteResponse, error)
-	// Tokens
+	// Tokens (workspace-scoped)
 	CreateToken(ctx context.Context, in *CreateTokenRequest, opts ...grpc.CallOption) (*CreateTokenResponse, error)
 	ListTokens(ctx context.Context, in *ListTokensRequest, opts ...grpc.CallOption) (*ListTokensResponse, error)
 	RevokeToken(ctx context.Context, in *RevokeTokenRequest, opts ...grpc.CallOption) (*DeleteResponse, error)
+	// Worker Tokens (cluster-level)
+	CreateWorkerToken(ctx context.Context, in *CreateWorkerTokenRequest, opts ...grpc.CallOption) (*CreateTokenResponse, error)
+	ListWorkerTokens(ctx context.Context, in *ListWorkerTokensRequest, opts ...grpc.CallOption) (*ListTokensResponse, error)
 	// Connections
 	AddConnection(ctx context.Context, in *AddConnectionRequest, opts ...grpc.CallOption) (*ConnectionResponse, error)
 	ListConnections(ctx context.Context, in *ListConnectionsRequest, opts ...grpc.CallOption) (*ListConnectionsResponse, error)
@@ -162,6 +167,24 @@ func (c *gatewayServiceClient) RevokeToken(ctx context.Context, in *RevokeTokenR
 	return out, nil
 }
 
+func (c *gatewayServiceClient) CreateWorkerToken(ctx context.Context, in *CreateWorkerTokenRequest, opts ...grpc.CallOption) (*CreateTokenResponse, error) {
+	out := new(CreateTokenResponse)
+	err := c.cc.Invoke(ctx, GatewayService_CreateWorkerToken_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gatewayServiceClient) ListWorkerTokens(ctx context.Context, in *ListWorkerTokensRequest, opts ...grpc.CallOption) (*ListTokensResponse, error) {
+	out := new(ListTokensResponse)
+	err := c.cc.Invoke(ctx, GatewayService_ListWorkerTokens_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *gatewayServiceClient) AddConnection(ctx context.Context, in *AddConnectionRequest, opts ...grpc.CallOption) (*ConnectionResponse, error) {
 	out := new(ConnectionResponse)
 	err := c.cc.Invoke(ctx, GatewayService_AddConnection_FullMethodName, in, out, opts...)
@@ -229,10 +252,13 @@ type GatewayServiceServer interface {
 	AddMember(context.Context, *AddMemberRequest) (*MemberResponse, error)
 	ListMembers(context.Context, *ListMembersRequest) (*ListMembersResponse, error)
 	RemoveMember(context.Context, *RemoveMemberRequest) (*DeleteResponse, error)
-	// Tokens
+	// Tokens (workspace-scoped)
 	CreateToken(context.Context, *CreateTokenRequest) (*CreateTokenResponse, error)
 	ListTokens(context.Context, *ListTokensRequest) (*ListTokensResponse, error)
 	RevokeToken(context.Context, *RevokeTokenRequest) (*DeleteResponse, error)
+	// Worker Tokens (cluster-level)
+	CreateWorkerToken(context.Context, *CreateWorkerTokenRequest) (*CreateTokenResponse, error)
+	ListWorkerTokens(context.Context, *ListWorkerTokensRequest) (*ListTokensResponse, error)
 	// Connections
 	AddConnection(context.Context, *AddConnectionRequest) (*ConnectionResponse, error)
 	ListConnections(context.Context, *ListConnectionsRequest) (*ListConnectionsResponse, error)
@@ -277,6 +303,12 @@ func (UnimplementedGatewayServiceServer) ListTokens(context.Context, *ListTokens
 }
 func (UnimplementedGatewayServiceServer) RevokeToken(context.Context, *RevokeTokenRequest) (*DeleteResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method RevokeToken not implemented")
+}
+func (UnimplementedGatewayServiceServer) CreateWorkerToken(context.Context, *CreateWorkerTokenRequest) (*CreateTokenResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CreateWorkerToken not implemented")
+}
+func (UnimplementedGatewayServiceServer) ListWorkerTokens(context.Context, *ListWorkerTokensRequest) (*ListTokensResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListWorkerTokens not implemented")
 }
 func (UnimplementedGatewayServiceServer) AddConnection(context.Context, *AddConnectionRequest) (*ConnectionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method AddConnection not implemented")
@@ -489,6 +521,42 @@ func _GatewayService_RevokeToken_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _GatewayService_CreateWorkerToken_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateWorkerTokenRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServiceServer).CreateWorkerToken(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GatewayService_CreateWorkerToken_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServiceServer).CreateWorkerToken(ctx, req.(*CreateWorkerTokenRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _GatewayService_ListWorkerTokens_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListWorkerTokensRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServiceServer).ListWorkerTokens(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GatewayService_ListWorkerTokens_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServiceServer).ListWorkerTokens(ctx, req.(*ListWorkerTokensRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _GatewayService_AddConnection_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(AddConnectionRequest)
 	if err := dec(in); err != nil {
@@ -643,6 +711,14 @@ var GatewayService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RevokeToken",
 			Handler:    _GatewayService_RevokeToken_Handler,
+		},
+		{
+			MethodName: "CreateWorkerToken",
+			Handler:    _GatewayService_CreateWorkerToken_Handler,
+		},
+		{
+			MethodName: "ListWorkerTokens",
+			Handler:    _GatewayService_ListWorkerTokens_Handler,
 		},
 		{
 			MethodName: "AddConnection",

@@ -10,42 +10,37 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
+// TokensGroup handles workspace-scoped token management.
 type TokensGroup struct {
-	g       *echo.Group
 	backend repository.BackendRepository
 }
 
 func NewTokensGroup(g *echo.Group, backend repository.BackendRepository) *TokensGroup {
-	tg := &TokensGroup{g: g, backend: backend}
-	tg.g.POST("", tg.Create)
-	tg.g.GET("", tg.List)
-	tg.g.DELETE("/:token_id", tg.Revoke)
+	tg := &TokensGroup{backend: backend}
+	g.POST("", tg.Create)
+	g.GET("", tg.List)
+	g.DELETE("/:token_id", tg.Revoke)
 	return tg
 }
 
 type CreateTokenRequest struct {
-	MemberId  string          `json:"member_id"`  // Optional if email is provided
-	Email     string          `json:"email"`      // For auto-creating member
-	Name      string          `json:"name"`
-	ExpiresIn int             `json:"expires_in"` // Seconds
-	TokenType types.TokenType `json:"token_type"` // Optional, defaults to workspace_member
+	MemberId  string `json:"member_id"`
+	Email     string `json:"email"`
+	Name      string `json:"name"`
+	ExpiresIn int    `json:"expires_in"`
 }
 
-type TokenCreatedResponse struct {
+type TokenResponse struct {
 	Token    string      `json:"token"`
 	Info     interface{} `json:"info"`
-	MemberId string      `json:"member_id,omitempty"` // Returned when auto-created
+	MemberId string      `json:"member_id,omitempty"`
 }
 
 func (tg *TokensGroup) Create(c echo.Context) error {
 	ctx := c.Request().Context()
-
-	// Require admin role to create tokens
 	if !auth.IsAdmin(ctx) {
 		return ErrorResponse(c, http.StatusForbidden, "admin access required")
 	}
-
-	workspaceId := c.Param("workspace_id")
 
 	var req CreateTokenRequest
 	if err := c.Bind(&req); err != nil {
@@ -57,37 +52,29 @@ func (tg *TokensGroup) Create(c echo.Context) error {
 	if req.Name == "" {
 		req.Name = "API Token"
 	}
-	if req.TokenType == "" {
-		req.TokenType = types.TokenTypeWorkspaceMember
-	}
 
-	ws, err := tg.backend.GetWorkspaceByExternalId(ctx, workspaceId)
+	ws, err := tg.backend.GetWorkspaceByExternalId(ctx, c.Param("workspace_id"))
 	if err != nil || ws == nil {
 		return ErrorResponse(c, http.StatusNotFound, "workspace not found")
 	}
 
 	var member *types.WorkspaceMember
-	var autoCreatedMemberId string
+	var autoCreatedId string
 
 	if req.MemberId != "" {
-		// Use existing member
 		member, err = tg.backend.GetMember(ctx, req.MemberId)
-		if err != nil {
-			return ErrorResponse(c, http.StatusInternalServerError, err.Error())
-		}
-		if member == nil {
+		if err != nil || member == nil {
 			return ErrorResponse(c, http.StatusNotFound, "member not found")
 		}
 		if member.WorkspaceId != ws.Id {
 			return ErrorResponse(c, http.StatusBadRequest, "member not in workspace")
 		}
 	} else {
-		// Auto-create member with provided email
 		member, err = tg.backend.CreateMember(ctx, ws.Id, req.Email, req.Email, types.RoleMember)
 		if err != nil {
-			return ErrorResponse(c, http.StatusInternalServerError, "failed to create member: "+err.Error())
+			return ErrorResponse(c, http.StatusInternalServerError, "failed to create member")
 		}
-		autoCreatedMemberId = member.ExternalId
+		autoCreatedId = member.ExternalId
 	}
 
 	var expiresAt *time.Time
@@ -96,28 +83,24 @@ func (tg *TokensGroup) Create(c echo.Context) error {
 		expiresAt = &t
 	}
 
-	token, raw, err := tg.backend.CreateToken(ctx, ws.Id, member.Id, req.Name, expiresAt, req.TokenType)
+	token, raw, err := tg.backend.CreateToken(ctx, ws.Id, member.Id, req.Name, expiresAt, types.TokenTypeWorkspaceMember)
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 
 	return c.JSON(http.StatusCreated, Response{
 		Success: true,
-		Data:    TokenCreatedResponse{Token: raw, Info: token, MemberId: autoCreatedMemberId},
+		Data:    TokenResponse{Token: raw, Info: token, MemberId: autoCreatedId},
 	})
 }
 
 func (tg *TokensGroup) List(c echo.Context) error {
 	ctx := c.Request().Context()
-
-	// Require admin role to list tokens
 	if !auth.IsAdmin(ctx) {
 		return ErrorResponse(c, http.StatusForbidden, "admin access required")
 	}
 
-	workspaceId := c.Param("workspace_id")
-
-	ws, err := tg.backend.GetWorkspaceByExternalId(ctx, workspaceId)
+	ws, err := tg.backend.GetWorkspaceByExternalId(ctx, c.Param("workspace_id"))
 	if err != nil || ws == nil {
 		return ErrorResponse(c, http.StatusNotFound, "workspace not found")
 	}
@@ -131,18 +114,71 @@ func (tg *TokensGroup) List(c echo.Context) error {
 }
 
 func (tg *TokensGroup) Revoke(c echo.Context) error {
-	ctx := c.Request().Context()
-
-	// Require admin role to revoke tokens
-	if !auth.IsAdmin(ctx) {
+	if !auth.IsAdmin(c.Request().Context()) {
 		return ErrorResponse(c, http.StatusForbidden, "admin access required")
 	}
+	if err := tg.backend.RevokeToken(c.Request().Context(), c.Param("token_id")); err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+	return c.JSON(http.StatusOK, Response{Success: true})
+}
 
-	tokenId := c.Param("token_id")
+// WorkerTokensGroup handles cluster-level worker tokens (admin only).
+type WorkerTokensGroup struct {
+	backend repository.BackendRepository
+}
 
-	if err := tg.backend.RevokeToken(ctx, tokenId); err != nil {
+func NewWorkerTokensGroup(g *echo.Group, backend repository.BackendRepository) *WorkerTokensGroup {
+	wt := &WorkerTokensGroup{backend: backend}
+	g.GET("", wt.List)
+	g.POST("", wt.Create)
+	g.DELETE("/:token_id", wt.Revoke)
+	return wt
+}
+
+type CreateWorkerTokenRequest struct {
+	Name      string  `json:"name"`
+	PoolName  *string `json:"pool_name,omitempty"`
+	ExpiresIn int     `json:"expires_in"`
+}
+
+func (wt *WorkerTokensGroup) List(c echo.Context) error {
+	tokens, err := wt.backend.ListWorkerTokens(c.Request().Context())
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+	return c.JSON(http.StatusOK, Response{Success: true, Data: tokens})
+}
+
+func (wt *WorkerTokensGroup) Create(c echo.Context) error {
+	var req CreateWorkerTokenRequest
+	if err := c.Bind(&req); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request")
+	}
+	if req.Name == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "name required")
+	}
+
+	var expiresAt *time.Time
+	if req.ExpiresIn > 0 {
+		t := time.Now().Add(time.Duration(req.ExpiresIn) * time.Second)
+		expiresAt = &t
+	}
+
+	token, raw, err := wt.backend.CreateWorkerToken(c.Request().Context(), req.Name, req.PoolName, expiresAt)
+	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 
+	return c.JSON(http.StatusCreated, Response{
+		Success: true,
+		Data:    TokenResponse{Token: raw, Info: token},
+	})
+}
+
+func (wt *WorkerTokensGroup) Revoke(c echo.Context) error {
+	if err := wt.backend.RevokeToken(c.Request().Context(), c.Param("token_id")); err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
 	return c.JSON(http.StatusOK, Response{Success: true})
 }

@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	defaultDialTimeout   = 10 * time.Second
-	defaultRequestTimout = 30 * time.Second
+	defaultDialTimeout    = 10 * time.Second
+	defaultRequestTimeout = 30 * time.Second
 )
 
 // GatewayClient is a gRPC client for communicating with the gateway
@@ -64,8 +64,7 @@ func (c *GatewayClient) withAuth(ctx context.Context) context.Context {
 
 // withTimeout creates a context with default timeout and auth
 func (c *GatewayClient) withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
-	ctx = c.withAuth(ctx)
-	return context.WithTimeout(ctx, defaultRequestTimout)
+	return context.WithTimeout(c.withAuth(ctx), defaultRequestTimeout)
 }
 
 // RegisterWorkerRequest is the request for registering a worker

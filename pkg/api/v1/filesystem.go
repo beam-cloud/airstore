@@ -849,8 +849,10 @@ func (g *FilesystemGroup) readSources(c echo.Context, ctx context.Context, relPa
 		workspaceId := ""
 
 		// Check if integration is connected by querying the database
-		if rc := auth.FromContext(ctx); rc != nil && rc.WorkspaceId > 0 && g.backend != nil {
-			conn, err := g.backend.GetConnection(ctx, rc.WorkspaceId, rc.MemberId, integration)
+		wsId := auth.WorkspaceId(ctx)
+		memId := auth.MemberId(ctx)
+		if wsId > 0 && g.backend != nil {
+			conn, err := g.backend.GetConnection(ctx, wsId, memId, integration)
 			if err != nil {
 				log.Warn().Err(err).Str("integration", integration).Msg("connection lookup failed")
 			} else if conn != nil {
@@ -996,10 +998,7 @@ func (g *FilesystemGroup) statTools(c echo.Context, ctx context.Context, fullPat
 	}
 
 	// Get workspace ID from context for filtering
-	var workspaceId uint
-	if rc := auth.FromContext(ctx); rc != nil {
-		workspaceId = rc.WorkspaceId
-	}
+	workspaceId := auth.WorkspaceId(ctx)
 
 	// Get tool settings for this workspace
 	var settings *types.WorkspaceToolSettings
@@ -1078,10 +1077,7 @@ func (g *FilesystemGroup) buildToolEntries(ctx context.Context, showHidden bool)
 	}
 
 	// Get workspace ID from context for filtering
-	var workspaceId uint
-	if rc := auth.FromContext(ctx); rc != nil {
-		workspaceId = rc.WorkspaceId
-	}
+	workspaceId := auth.WorkspaceId(ctx)
 
 	// Get tool settings for this workspace
 	var settings *types.WorkspaceToolSettings
@@ -1135,13 +1131,13 @@ func (g *FilesystemGroup) buildToolEntries(ctx context.Context, showHidden bool)
 
 func (g *FilesystemGroup) listTasks(c echo.Context, ctx context.Context, relPath string) error {
 	// Get workspace from auth context
-	rc := auth.FromContext(ctx)
-	if rc == nil || rc.WorkspaceId == 0 {
+	workspaceId := auth.WorkspaceId(ctx)
+	if workspaceId == 0 {
 		return ErrorResponse(c, http.StatusUnauthorized, "authentication required")
 	}
 
 	// List tasks from database
-	tasks, err := g.backend.ListTasks(ctx, rc.WorkspaceId)
+	tasks, err := g.backend.ListTasks(ctx, workspaceId)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to list tasks")
 		return ErrorResponse(c, http.StatusInternalServerError, "failed to list tasks")
@@ -1158,12 +1154,13 @@ func (g *FilesystemGroup) listTasks(c echo.Context, ctx context.Context, relPath
 }
 
 func (g *FilesystemGroup) statTasks(c echo.Context, ctx context.Context, fullPath, relPath string) error {
+	workspaceId := auth.WorkspaceId(ctx)
+
 	// Root tasks folder
 	if relPath == "" {
-		rc := auth.FromContext(ctx)
 		childCount := 0
-		if rc != nil && rc.WorkspaceId > 0 {
-			if tasks, err := g.backend.ListTasks(ctx, rc.WorkspaceId); err == nil {
+		if workspaceId > 0 {
+			if tasks, err := g.backend.ListTasks(ctx, workspaceId); err == nil {
 				childCount = len(tasks)
 			}
 		}
@@ -1185,8 +1182,7 @@ func (g *FilesystemGroup) statTasks(c echo.Context, ctx context.Context, fullPat
 	}
 
 	// Verify task belongs to caller's workspace
-	rc := auth.FromContext(ctx)
-	if rc == nil || rc.WorkspaceId == 0 || task.WorkspaceId != rc.WorkspaceId {
+	if workspaceId == 0 || task.WorkspaceId != workspaceId {
 		return ErrorResponse(c, http.StatusNotFound, "task not found")
 	}
 
@@ -1209,8 +1205,8 @@ func (g *FilesystemGroup) readTasks(c echo.Context, ctx context.Context, relPath
 	}
 
 	// Verify task belongs to caller's workspace
-	rc := auth.FromContext(ctx)
-	if rc == nil || rc.WorkspaceId == 0 || task.WorkspaceId != rc.WorkspaceId {
+	workspaceId := auth.WorkspaceId(ctx)
+	if workspaceId == 0 || task.WorkspaceId != workspaceId {
 		return ErrorResponse(c, http.StatusNotFound, "task not found")
 	}
 
@@ -1339,10 +1335,10 @@ func (g *FilesystemGroup) ListToolSettings(c echo.Context) error {
 	logRequest(c, "list_tool_settings")
 
 	// Get workspace ID from auth context
-	rc := auth.FromContext(ctx)
-	if rc == nil {
+	if !auth.IsAuthenticated(ctx) {
 		return ErrorResponse(c, http.StatusUnauthorized, "unauthorized")
 	}
+	workspaceId := auth.WorkspaceId(ctx)
 
 	// Use resolver if available (includes workspace tools)
 	if g.toolResolver != nil {
@@ -1369,7 +1365,7 @@ func (g *FilesystemGroup) ListToolSettings(c echo.Context) error {
 	}
 
 	// Fallback to registry only
-	settings, err := g.backend.GetWorkspaceToolSettings(ctx, rc.WorkspaceId)
+	settings, err := g.backend.GetWorkspaceToolSettings(ctx, workspaceId)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to get tool settings")
 		return ErrorResponse(c, http.StatusInternalServerError, "failed to get tool settings")
@@ -1405,10 +1401,10 @@ func (g *FilesystemGroup) GetToolSetting(c echo.Context) error {
 	logRequest(c, "get_tool_setting")
 
 	// Get workspace ID from auth context
-	rc := auth.FromContext(ctx)
-	if rc == nil {
+	if !auth.IsAuthenticated(ctx) {
 		return ErrorResponse(c, http.StatusUnauthorized, "unauthorized")
 	}
+	workspaceId := auth.WorkspaceId(ctx)
 
 	// Use resolver if available (includes workspace tools)
 	if g.toolResolver != nil {
@@ -1439,7 +1435,7 @@ func (g *FilesystemGroup) GetToolSetting(c echo.Context) error {
 	}
 
 	// Get tool setting
-	setting, err := g.backend.GetWorkspaceToolSetting(ctx, rc.WorkspaceId, toolName)
+	setting, err := g.backend.GetWorkspaceToolSetting(ctx, workspaceId, toolName)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to get tool setting")
 		return ErrorResponse(c, http.StatusInternalServerError, "failed to get tool setting")
@@ -1466,10 +1462,10 @@ func (g *FilesystemGroup) UpdateToolSetting(c echo.Context) error {
 	logRequest(c, "update_tool_setting")
 
 	// Get workspace ID from auth context
-	rc := auth.FromContext(ctx)
-	if rc == nil {
+	if !auth.IsAuthenticated(ctx) {
 		return ErrorResponse(c, http.StatusUnauthorized, "unauthorized")
 	}
+	workspaceId := auth.WorkspaceId(ctx)
 
 	// Check if tool exists using resolver or registry
 	var toolExists bool
@@ -1511,13 +1507,13 @@ func (g *FilesystemGroup) UpdateToolSetting(c echo.Context) error {
 	}
 
 	// Update tool setting
-	if err := g.backend.SetWorkspaceToolSetting(ctx, rc.WorkspaceId, toolName, req.Enabled); err != nil {
+	if err := g.backend.SetWorkspaceToolSetting(ctx, workspaceId, toolName, req.Enabled); err != nil {
 		log.Error().Err(err).Msg("failed to update tool setting")
 		return ErrorResponse(c, http.StatusInternalServerError, "failed to update tool setting")
 	}
 
 	log.Info().
-		Uint("workspace_id", rc.WorkspaceId).
+		Uint("workspace_id", workspaceId).
 		Str("tool_name", toolName).
 		Bool("enabled", req.Enabled).
 		Msg("tool setting updated")
@@ -1559,13 +1555,13 @@ func (g *FilesystemGroup) ListToolProviders(c echo.Context) error {
 	logRequest(c, "list_tool_providers")
 
 	// Get workspace ID from auth context
-	rc := auth.FromContext(ctx)
-	if rc == nil {
+	if !auth.IsAuthenticated(ctx) {
 		return ErrorResponse(c, http.StatusUnauthorized, "unauthorized")
 	}
+	workspaceId := auth.WorkspaceId(ctx)
 
 	// List workspace tools from database
-	workspaceTools, err := g.backend.ListWorkspaceTools(ctx, rc.WorkspaceId)
+	workspaceTools, err := g.backend.ListWorkspaceTools(ctx, workspaceId)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to list workspace tools")
 		return ErrorResponse(c, http.StatusInternalServerError, "failed to list tool providers")
@@ -1594,10 +1590,12 @@ func (g *FilesystemGroup) CreateToolProvider(c echo.Context) error {
 	logRequest(c, "create_tool_provider")
 
 	// Get workspace ID from auth context
-	rc := auth.FromContext(ctx)
-	if rc == nil {
+	if !auth.IsAuthenticated(ctx) {
 		return ErrorResponse(c, http.StatusUnauthorized, "unauthorized")
 	}
+	workspaceId := auth.WorkspaceId(ctx)
+	memberId := auth.MemberId(ctx)
+	memberEmail := auth.MemberEmail(ctx)
 
 	// Require admin or member role for creating tools
 	if !auth.CanWrite(ctx) {
@@ -1657,13 +1655,13 @@ func (g *FilesystemGroup) CreateToolProvider(c echo.Context) error {
 
 	// Create workspace tool in database
 	var memberIdPtr *uint
-	if rc.MemberId > 0 {
-		memberIdPtr = &rc.MemberId
+	if memberId > 0 {
+		memberIdPtr = &memberId
 	}
 
 	wt, err := g.backend.CreateWorkspaceTool(
 		ctx,
-		rc.WorkspaceId,
+		workspaceId,
 		memberIdPtr,
 		req.Name,
 		types.ProviderTypeMCP,
@@ -1680,14 +1678,14 @@ func (g *FilesystemGroup) CreateToolProvider(c echo.Context) error {
 
 	// Invalidate resolver cache for this workspace
 	if g.toolResolver != nil {
-		g.toolResolver.InvalidateWorkspace(rc.WorkspaceId)
+		g.toolResolver.InvalidateWorkspace(workspaceId)
 	}
 
 	// Audit log - tool provider creation
 	log.Info().
-		Uint("workspace_id", rc.WorkspaceId).
-		Uint("member_id", rc.MemberId).
-		Str("member_email", rc.MemberEmail).
+		Uint("workspace_id", workspaceId).
+		Uint("member_id", memberId).
+		Str("member_email", memberEmail).
 		Str("name", req.Name).
 		Str("provider_type", req.ProviderType).
 		Bool("is_remote", req.MCP.IsRemote()).
@@ -1723,13 +1721,13 @@ func (g *FilesystemGroup) GetToolProvider(c echo.Context) error {
 	logRequest(c, "get_tool_provider")
 
 	// Get workspace ID from auth context
-	rc := auth.FromContext(ctx)
-	if rc == nil {
+	if !auth.IsAuthenticated(ctx) {
 		return ErrorResponse(c, http.StatusUnauthorized, "unauthorized")
 	}
+	workspaceId := auth.WorkspaceId(ctx)
 
 	// Get tool from database
-	wt, err := g.backend.GetWorkspaceToolByName(ctx, rc.WorkspaceId, name)
+	wt, err := g.backend.GetWorkspaceToolByName(ctx, workspaceId, name)
 	if err != nil {
 		if _, ok := err.(*types.ErrWorkspaceToolNotFound); ok {
 			return ErrorResponse(c, http.StatusNotFound, "tool provider not found")
@@ -1767,10 +1765,11 @@ func (g *FilesystemGroup) UpdateToolProvider(c echo.Context) error {
 	logRequest(c, "update_tool_provider")
 
 	// Get workspace ID from auth context
-	rc := auth.FromContext(ctx)
-	if rc == nil {
+	if !auth.IsAuthenticated(ctx) {
 		return ErrorResponse(c, http.StatusUnauthorized, "unauthorized")
 	}
+	workspaceId := auth.WorkspaceId(ctx)
+	memberId := auth.MemberId(ctx)
 
 	// Require write access
 	if !auth.CanWrite(ctx) {
@@ -1778,7 +1777,7 @@ func (g *FilesystemGroup) UpdateToolProvider(c echo.Context) error {
 	}
 
 	// Get existing tool
-	wt, err := g.backend.GetWorkspaceToolByName(ctx, rc.WorkspaceId, name)
+	wt, err := g.backend.GetWorkspaceToolByName(ctx, workspaceId, name)
 	if err != nil {
 		if _, ok := err.(*types.ErrWorkspaceToolNotFound); ok {
 			return ErrorResponse(c, http.StatusNotFound, "tool provider not found")
@@ -1809,7 +1808,7 @@ func (g *FilesystemGroup) UpdateToolProvider(c echo.Context) error {
 
 	// Invalidate resolver cache before update
 	if g.toolResolver != nil {
-		g.toolResolver.Invalidate(rc.WorkspaceId, name)
+		g.toolResolver.Invalidate(workspaceId, name)
 	}
 
 	// Update in database
@@ -1820,8 +1819,8 @@ func (g *FilesystemGroup) UpdateToolProvider(c echo.Context) error {
 
 	// Audit log
 	log.Info().
-		Uint("workspace_id", rc.WorkspaceId).
-		Uint("member_id", rc.MemberId).
+		Uint("workspace_id", workspaceId).
+		Uint("member_id", memberId).
 		Str("name", name).
 		Msg("audit: workspace tool provider updated")
 
@@ -1841,10 +1840,12 @@ func (g *FilesystemGroup) DeleteToolProvider(c echo.Context) error {
 	logRequest(c, "delete_tool_provider")
 
 	// Get workspace ID from auth context
-	rc := auth.FromContext(ctx)
-	if rc == nil {
+	if !auth.IsAuthenticated(ctx) {
 		return ErrorResponse(c, http.StatusUnauthorized, "unauthorized")
 	}
+	workspaceId := auth.WorkspaceId(ctx)
+	memberId := auth.MemberId(ctx)
+	memberEmail := auth.MemberEmail(ctx)
 
 	// Require admin or member role for deleting tools
 	if !auth.CanWrite(ctx) {
@@ -1852,7 +1853,7 @@ func (g *FilesystemGroup) DeleteToolProvider(c echo.Context) error {
 	}
 
 	// Check if tool exists
-	_, err := g.backend.GetWorkspaceToolByName(ctx, rc.WorkspaceId, name)
+	_, err := g.backend.GetWorkspaceToolByName(ctx, workspaceId, name)
 	if err != nil {
 		if _, ok := err.(*types.ErrWorkspaceToolNotFound); ok {
 			return ErrorResponse(c, http.StatusNotFound, "tool provider not found")
@@ -1863,11 +1864,11 @@ func (g *FilesystemGroup) DeleteToolProvider(c echo.Context) error {
 
 	// Invalidate resolver cache before deletion
 	if g.toolResolver != nil {
-		g.toolResolver.Invalidate(rc.WorkspaceId, name)
+		g.toolResolver.Invalidate(workspaceId, name)
 	}
 
 	// Delete from database
-	if err := g.backend.DeleteWorkspaceToolByName(ctx, rc.WorkspaceId, name); err != nil {
+	if err := g.backend.DeleteWorkspaceToolByName(ctx, workspaceId, name); err != nil {
 		if _, ok := err.(*types.ErrWorkspaceToolNotFound); ok {
 			return ErrorResponse(c, http.StatusNotFound, "tool provider not found")
 		}
@@ -1877,9 +1878,9 @@ func (g *FilesystemGroup) DeleteToolProvider(c echo.Context) error {
 
 	// Audit log - tool provider deletion
 	log.Info().
-		Uint("workspace_id", rc.WorkspaceId).
-		Uint("member_id", rc.MemberId).
-		Str("member_email", rc.MemberEmail).
+		Uint("workspace_id", workspaceId).
+		Uint("member_id", memberId).
+		Str("member_email", memberEmail).
 		Str("name", name).
 		Msg("audit: workspace tool provider deleted")
 
@@ -2190,67 +2191,66 @@ func NewFilesystemAuthMiddleware(cfg FilesystemAuthConfig) echo.MiddlewareFunc {
 				return ErrorResponse(c, http.StatusBadRequest, "workspace_id required")
 			}
 
+			ctx := c.Request().Context()
+
 			// Extract token from Authorization header
 			authHeader := c.Request().Header.Get("Authorization")
 			token := strings.TrimPrefix(authHeader, "Bearer ")
 
-			var rc *auth.RequestContext
+			var info *types.AuthInfo
 
 			// Check if it's an admin token
 			if cfg.AdminToken != "" && token == cfg.AdminToken {
 				// Admin token - get workspace from URL
-				workspace, err := cfg.Backend.GetWorkspaceByExternalId(c.Request().Context(), workspaceID)
+				workspace, err := cfg.Backend.GetWorkspaceByExternalId(ctx, workspaceID)
 				if err != nil {
 					return ErrorResponse(c, http.StatusNotFound, "workspace not found")
 				}
 
-				rc = &auth.RequestContext{
-					WorkspaceId:   workspace.Id,
-					WorkspaceExt:  workspace.ExternalId,
-					WorkspaceName: workspace.Name,
-					IsGatewayAuth: true,
+				info = &types.AuthInfo{
+					TokenType: types.TokenTypeClusterAdmin,
+					Workspace: &types.WorkspaceInfo{
+						Id:         workspace.Id,
+						ExternalId: workspace.ExternalId,
+						Name:       workspace.Name,
+					},
 				}
 			} else if token != "" && cfg.Backend != nil {
 				// Try as workspace token
-				result, err := cfg.Backend.ValidateToken(c.Request().Context(), token)
-				if err != nil || result == nil {
+				info, err := cfg.Backend.AuthorizeToken(ctx, token)
+				if err != nil || info == nil {
 					return ErrorResponse(c, http.StatusUnauthorized, "invalid token")
 				}
 
 				// Verify the token belongs to the requested workspace
-				if result.WorkspaceExt != workspaceID {
+				if info.Workspace == nil || info.Workspace.ExternalId != workspaceID {
 					return ErrorResponse(c, http.StatusForbidden, "token does not have access to this workspace")
 				}
 
-				rc = &auth.RequestContext{
-					WorkspaceId:   result.WorkspaceId,
-					WorkspaceExt:  result.WorkspaceExt,
-					WorkspaceName: result.WorkspaceName,
-					MemberId:      result.MemberId,
-					MemberExt:     result.MemberExt,
-					MemberEmail:   result.MemberEmail,
-					MemberRole:    result.MemberRole,
-					IsGatewayAuth: false,
-				}
+				ctx = auth.WithAuthInfo(ctx, info)
+				c.SetRequest(c.Request().WithContext(ctx))
+				return next(c)
 			} else if cfg.AdminToken == "" {
 				// No admin token configured - allow unauthenticated access (local mode)
-				workspace, err := cfg.Backend.GetWorkspaceByExternalId(c.Request().Context(), workspaceID)
+				workspace, err := cfg.Backend.GetWorkspaceByExternalId(ctx, workspaceID)
 				if err != nil {
 					return ErrorResponse(c, http.StatusNotFound, "workspace not found")
 				}
 
-				rc = &auth.RequestContext{
-					WorkspaceId:   workspace.Id,
-					WorkspaceExt:  workspace.ExternalId,
-					WorkspaceName: workspace.Name,
-					IsGatewayAuth: true,
+				info = &types.AuthInfo{
+					TokenType: types.TokenTypeClusterAdmin,
+					Workspace: &types.WorkspaceInfo{
+						Id:         workspace.Id,
+						ExternalId: workspace.ExternalId,
+						Name:       workspace.Name,
+					},
 				}
 			} else {
 				return ErrorResponse(c, http.StatusUnauthorized, "authorization required")
 			}
 
 			// Add auth context to request
-			ctx := auth.WithContext(c.Request().Context(), rc)
+			ctx = auth.WithAuthInfo(ctx, info)
 			c.SetRequest(c.Request().WithContext(ctx))
 
 			return next(c)
@@ -2269,11 +2269,13 @@ func logRequest(c echo.Context, operation string) {
 
 // WithAuthContext is a helper to wrap handlers that need auth context
 func WithAuthContext(ctx context.Context, workspaceID string, workspaceExt string) context.Context {
-	rc := &auth.RequestContext{
-		WorkspaceExt:  workspaceExt,
-		IsGatewayAuth: true,
+	info := &types.AuthInfo{
+		TokenType: types.TokenTypeClusterAdmin,
+		Workspace: &types.WorkspaceInfo{
+			ExternalId: workspaceExt,
+		},
 	}
-	return auth.WithContext(ctx, rc)
+	return auth.WithAuthInfo(ctx, info)
 }
 
 // handleError converts service errors to HTTP responses

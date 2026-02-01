@@ -46,17 +46,18 @@ func NewStorageService(client *clients.StorageClient) (*StorageService, error) {
 }
 
 func (s *StorageService) bucket(ctx context.Context) (string, error) {
-	rc := auth.FromContext(ctx)
+	rc := auth.AuthInfoFromContext(ctx)
 	if rc == nil {
 		return "", fmt.Errorf("no auth context")
 	}
-	if rc.WorkspaceExt == "" {
-		if rc.IsGatewayAuth {
+	wsExt := auth.WorkspaceExtId(ctx)
+	if wsExt == "" {
+		if rc.IsClusterAdmin() {
 			return s.client.WorkspaceBucketName("_gateway"), nil
 		}
 		return "", fmt.Errorf("no workspace")
 	}
-	return s.client.WorkspaceBucketName(rc.WorkspaceExt), nil
+	return s.client.WorkspaceBucketName(wsExt), nil
 }
 
 func (s *StorageService) key(path string) string {

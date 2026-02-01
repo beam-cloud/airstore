@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
@@ -21,54 +22,11 @@ func NewGatewayService(backend repository.BackendRepository, s2Client *streams.S
 	return &GatewayService{backend: backend, s2Client: s2Client}
 }
 
-// requireGatewayAuth checks if the request is authenticated with the gateway/admin token
-func requireGatewayAuth(ctx context.Context) error {
-	rc := auth.FromContext(ctx)
-	if rc == nil || !rc.IsGatewayAuth {
-		return &authError{message: "admin access required"}
-	}
-	return nil
-}
-
-// requireWorkspaceAccess checks if the request has access to the specified workspace
-func requireWorkspaceAccess(ctx context.Context, workspaceExtId string) error {
-	rc := auth.FromContext(ctx)
-	if rc == nil {
-		return &authError{message: "authentication required"}
-	}
-	// Gateway token can access any workspace
-	if rc.IsGatewayAuth {
-		return nil
-	}
-	// Workspace token must match the workspace
-	if rc.WorkspaceExt != workspaceExtId {
-		return &authError{message: "token does not have access to this workspace"}
-	}
-	return nil
-}
-
-// requireAdminRole checks if the request has admin role within the workspace
-func requireAdminRole(ctx context.Context) error {
-	if !auth.IsAdmin(ctx) {
-		return &authError{message: "admin access required"}
-	}
-	return nil
-}
-
-// authError is a simple error type for authorization failures
-type authError struct {
-	message string
-}
-
-func (e *authError) Error() string {
-	return e.message
-}
-
 // Workspaces
 
 func (s *GatewayService) CreateWorkspace(ctx context.Context, req *pb.CreateWorkspaceRequest) (*pb.WorkspaceResponse, error) {
 	// Workspace creation requires gateway/admin auth
-	if err := requireGatewayAuth(ctx); err != nil {
+	if err := auth.RequireClusterAdmin(ctx); err != nil {
 		return &pb.WorkspaceResponse{Ok: false, Error: err.Error()}, nil
 	}
 
@@ -81,7 +39,7 @@ func (s *GatewayService) CreateWorkspace(ctx context.Context, req *pb.CreateWork
 
 func (s *GatewayService) ListWorkspaces(ctx context.Context, req *pb.ListWorkspacesRequest) (*pb.ListWorkspacesResponse, error) {
 	// Listing all workspaces requires gateway/admin auth
-	if err := requireGatewayAuth(ctx); err != nil {
+	if err := auth.RequireClusterAdmin(ctx); err != nil {
 		return &pb.ListWorkspacesResponse{Ok: false, Error: err.Error()}, nil
 	}
 
@@ -99,7 +57,7 @@ func (s *GatewayService) ListWorkspaces(ctx context.Context, req *pb.ListWorkspa
 
 func (s *GatewayService) GetWorkspace(ctx context.Context, req *pb.GetWorkspaceRequest) (*pb.WorkspaceResponse, error) {
 	// Getting a workspace requires gateway auth or workspace token for that workspace
-	if err := requireWorkspaceAccess(ctx, req.Id); err != nil {
+	if err := auth.RequireWorkspaceAccess(ctx, req.Id); err != nil {
 		return &pb.WorkspaceResponse{Ok: false, Error: err.Error()}, nil
 	}
 
@@ -115,7 +73,7 @@ func (s *GatewayService) GetWorkspace(ctx context.Context, req *pb.GetWorkspaceR
 
 func (s *GatewayService) DeleteWorkspace(ctx context.Context, req *pb.DeleteWorkspaceRequest) (*pb.DeleteResponse, error) {
 	// Workspace deletion requires gateway/admin auth
-	if err := requireGatewayAuth(ctx); err != nil {
+	if err := auth.RequireClusterAdmin(ctx); err != nil {
 		return &pb.DeleteResponse{Ok: false, Error: err.Error()}, nil
 	}
 
@@ -133,10 +91,10 @@ func (s *GatewayService) DeleteWorkspace(ctx context.Context, req *pb.DeleteWork
 
 func (s *GatewayService) AddMember(ctx context.Context, req *pb.AddMemberRequest) (*pb.MemberResponse, error) {
 	// Adding members requires workspace access + admin role
-	if err := requireWorkspaceAccess(ctx, req.WorkspaceId); err != nil {
+	if err := auth.RequireWorkspaceAccess(ctx, req.WorkspaceId); err != nil {
 		return &pb.MemberResponse{Ok: false, Error: err.Error()}, nil
 	}
-	if err := requireAdminRole(ctx); err != nil {
+	if err := auth.RequireAdmin(ctx); err != nil {
 		return &pb.MemberResponse{Ok: false, Error: err.Error()}, nil
 	}
 
@@ -159,10 +117,10 @@ func (s *GatewayService) AddMember(ctx context.Context, req *pb.AddMemberRequest
 
 func (s *GatewayService) ListMembers(ctx context.Context, req *pb.ListMembersRequest) (*pb.ListMembersResponse, error) {
 	// Listing members requires workspace access + admin role
-	if err := requireWorkspaceAccess(ctx, req.WorkspaceId); err != nil {
+	if err := auth.RequireWorkspaceAccess(ctx, req.WorkspaceId); err != nil {
 		return &pb.ListMembersResponse{Ok: false, Error: err.Error()}, nil
 	}
-	if err := requireAdminRole(ctx); err != nil {
+	if err := auth.RequireAdmin(ctx); err != nil {
 		return &pb.ListMembersResponse{Ok: false, Error: err.Error()}, nil
 	}
 
@@ -187,7 +145,7 @@ func (s *GatewayService) RemoveMember(ctx context.Context, req *pb.RemoveMemberR
 	// Removing members requires admin role
 	// Note: We can't verify workspace access here since we only have the member ID
 	// The admin check ensures only admins can remove members
-	if err := requireAdminRole(ctx); err != nil {
+	if err := auth.RequireAdmin(ctx); err != nil {
 		return &pb.DeleteResponse{Ok: false, Error: err.Error()}, nil
 	}
 
@@ -201,10 +159,10 @@ func (s *GatewayService) RemoveMember(ctx context.Context, req *pb.RemoveMemberR
 
 func (s *GatewayService) CreateToken(ctx context.Context, req *pb.CreateTokenRequest) (*pb.CreateTokenResponse, error) {
 	// Creating tokens requires workspace access + admin role
-	if err := requireWorkspaceAccess(ctx, req.WorkspaceId); err != nil {
+	if err := auth.RequireWorkspaceAccess(ctx, req.WorkspaceId); err != nil {
 		return &pb.CreateTokenResponse{Ok: false, Error: err.Error()}, nil
 	}
-	if err := requireAdminRole(ctx); err != nil {
+	if err := auth.RequireAdmin(ctx); err != nil {
 		return &pb.CreateTokenResponse{Ok: false, Error: err.Error()}, nil
 	}
 
@@ -246,10 +204,10 @@ func (s *GatewayService) CreateToken(ctx context.Context, req *pb.CreateTokenReq
 
 func (s *GatewayService) ListTokens(ctx context.Context, req *pb.ListTokensRequest) (*pb.ListTokensResponse, error) {
 	// Listing tokens requires workspace access + admin role
-	if err := requireWorkspaceAccess(ctx, req.WorkspaceId); err != nil {
+	if err := auth.RequireWorkspaceAccess(ctx, req.WorkspaceId); err != nil {
 		return &pb.ListTokensResponse{Ok: false, Error: err.Error()}, nil
 	}
-	if err := requireAdminRole(ctx); err != nil {
+	if err := auth.RequireAdmin(ctx); err != nil {
 		return &pb.ListTokensResponse{Ok: false, Error: err.Error()}, nil
 	}
 
@@ -272,7 +230,7 @@ func (s *GatewayService) ListTokens(ctx context.Context, req *pb.ListTokensReque
 
 func (s *GatewayService) RevokeToken(ctx context.Context, req *pb.RevokeTokenRequest) (*pb.DeleteResponse, error) {
 	// Revoking tokens requires admin role
-	if err := requireAdminRole(ctx); err != nil {
+	if err := auth.RequireAdmin(ctx); err != nil {
 		return &pb.DeleteResponse{Ok: false, Error: err.Error()}, nil
 	}
 
@@ -282,11 +240,60 @@ func (s *GatewayService) RevokeToken(ctx context.Context, req *pb.RevokeTokenReq
 	return &pb.DeleteResponse{Ok: true}, nil
 }
 
+// Worker Tokens (cluster-level)
+
+func (s *GatewayService) CreateWorkerToken(ctx context.Context, req *pb.CreateWorkerTokenRequest) (*pb.CreateTokenResponse, error) {
+	// Worker tokens require gateway auth (admin token)
+	if err := auth.RequireClusterAdmin(ctx); err != nil {
+		return &pb.CreateTokenResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	var expiresAt *time.Time
+	if req.ExpiresInSeconds > 0 {
+		t := time.Now().Add(time.Duration(req.ExpiresInSeconds) * time.Second)
+		expiresAt = &t
+	}
+
+	var poolName *string
+	if req.PoolName != "" {
+		poolName = &req.PoolName
+	}
+
+	token, raw, err := s.backend.CreateWorkerToken(ctx, req.Name, poolName, expiresAt)
+	if err != nil {
+		return &pb.CreateTokenResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	return &pb.CreateTokenResponse{
+		Ok:    true,
+		Token: raw,
+		Info:  tokenToPb(token),
+	}, nil
+}
+
+func (s *GatewayService) ListWorkerTokens(ctx context.Context, req *pb.ListWorkerTokensRequest) (*pb.ListTokensResponse, error) {
+	// Worker tokens require gateway auth (admin token)
+	if err := auth.RequireClusterAdmin(ctx); err != nil {
+		return &pb.ListTokensResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	tokens, err := s.backend.ListWorkerTokens(ctx)
+	if err != nil {
+		return &pb.ListTokensResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	pbTokens := make([]*pb.Token, 0, len(tokens))
+	for _, t := range tokens {
+		pbTokens = append(pbTokens, tokenToPb(&t))
+	}
+	return &pb.ListTokensResponse{Ok: true, Tokens: pbTokens}, nil
+}
+
 // Connections
 
 func (s *GatewayService) AddConnection(ctx context.Context, req *pb.AddConnectionRequest) (*pb.ConnectionResponse, error) {
 	// Adding connections requires workspace access
-	if err := requireWorkspaceAccess(ctx, req.WorkspaceId); err != nil {
+	if err := auth.RequireWorkspaceAccess(ctx, req.WorkspaceId); err != nil {
 		return &pb.ConnectionResponse{Ok: false, Error: err.Error()}, nil
 	}
 
@@ -314,7 +321,7 @@ func (s *GatewayService) AddConnection(ctx context.Context, req *pb.AddConnectio
 		memberId = &member.Id
 	} else {
 		// Shared connection - require admin
-		if err := requireAdminRole(ctx); err != nil {
+		if err := auth.RequireAdmin(ctx); err != nil {
 			return &pb.ConnectionResponse{Ok: false, Error: "admin access required for shared connections"}, nil
 		}
 	}
@@ -334,7 +341,7 @@ func (s *GatewayService) AddConnection(ctx context.Context, req *pb.AddConnectio
 
 func (s *GatewayService) ListConnections(ctx context.Context, req *pb.ListConnectionsRequest) (*pb.ListConnectionsResponse, error) {
 	// Listing connections requires workspace access
-	if err := requireWorkspaceAccess(ctx, req.WorkspaceId); err != nil {
+	if err := auth.RequireWorkspaceAccess(ctx, req.WorkspaceId); err != nil {
 		return &pb.ListConnectionsResponse{Ok: false, Error: err.Error()}, nil
 	}
 
@@ -386,12 +393,12 @@ func (s *GatewayService) RemoveConnection(ctx context.Context, req *pb.RemoveCon
 // Tasks
 
 func (s *GatewayService) ListTasks(ctx context.Context, req *pb.ListTasksRequest) (*pb.ListTasksResponse, error) {
-	rc := auth.FromContext(ctx)
-	if rc == nil {
+	workspaceId := auth.WorkspaceId(ctx)
+	if workspaceId == 0 {
 		return &pb.ListTasksResponse{Ok: false, Error: "authentication required"}, nil
 	}
 
-	tasks, err := s.backend.ListTasks(ctx, rc.WorkspaceId)
+	tasks, err := s.backend.ListTasks(ctx, workspaceId)
 	if err != nil {
 		return &pb.ListTasksResponse{Ok: false, Error: err.Error()}, nil
 	}
@@ -404,7 +411,7 @@ func (s *GatewayService) ListTasks(ctx context.Context, req *pb.ListTasksRequest
 }
 
 func (s *GatewayService) GetTask(ctx context.Context, req *pb.GetTaskRequest) (*pb.TaskResponse, error) {
-	rc := auth.FromContext(ctx)
+	rc := auth.AuthInfoFromContext(ctx)
 	if rc == nil {
 		return &pb.TaskResponse{Ok: false, Error: "authentication required"}, nil
 	}
@@ -421,7 +428,7 @@ func (s *GatewayService) GetTask(ctx context.Context, req *pb.GetTaskRequest) (*
 }
 
 func (s *GatewayService) GetTaskLogs(ctx context.Context, req *pb.GetTaskLogsRequest) (*pb.GetTaskLogsResponse, error) {
-	rc := auth.FromContext(ctx)
+	rc := auth.AuthInfoFromContext(ctx)
 	if rc == nil {
 		return &pb.GetTaskLogsResponse{Ok: false, Error: "authentication required"}, nil
 	}
@@ -480,12 +487,20 @@ func memberToPb(m *types.WorkspaceMember, workspaceExtId string) *pb.Member {
 	}
 }
 
-func tokenToPb(t *types.WorkspaceToken) *pb.Token {
+func tokenToPb(t *types.Token) *pb.Token {
 	token := &pb.Token{
 		Id:        t.ExternalId,
-		MemberId:  t.ExternalId, // Proto uses external ID
 		Name:      t.Name,
+		TokenType: string(t.TokenType),
 		CreatedAt: t.CreatedAt.Format(time.RFC3339),
+	}
+	if t.MemberId != nil {
+		// For workspace member tokens, we'd need to look up the external ID
+		// For now, just use the internal ID as a string
+		token.MemberId = fmt.Sprintf("%d", *t.MemberId)
+	}
+	if t.PoolName != nil {
+		token.PoolName = *t.PoolName
 	}
 	if t.ExpiresAt != nil {
 		token.ExpiresAt = t.ExpiresAt.Format(time.RFC3339)

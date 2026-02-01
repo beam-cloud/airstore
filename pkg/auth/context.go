@@ -2,80 +2,143 @@ package auth
 
 import (
 	"context"
+	"errors"
 
 	"github.com/beam-cloud/airstore/pkg/types"
 )
 
 type ctxKey int
 
-const requestCtxKey ctxKey = iota
+const authInfoKey ctxKey = iota
 
-// RequestContext contains identity information for authenticated requests
-type RequestContext struct {
-	WorkspaceId   uint
-	WorkspaceExt  string
-	WorkspaceName string
-	MemberId      uint
-	MemberExt     string
-	MemberEmail   string
-	MemberRole    types.MemberRole
-	IsGatewayAuth bool // True if authenticated with gateway token (admin access)
+var (
+	ErrAuthRequired     = errors.New("authentication required")
+	ErrAdminRequired    = errors.New("admin access required")
+	ErrForbidden        = errors.New("access denied")
+	ErrWorkerRequired   = errors.New("worker token required")
+)
+
+// Context operations
+
+func WithAuthInfo(ctx context.Context, info *types.AuthInfo) context.Context {
+	return context.WithValue(ctx, authInfoKey, info)
 }
 
-// WithContext adds a RequestContext to the context
-func WithContext(ctx context.Context, rc *RequestContext) context.Context {
-	return context.WithValue(ctx, requestCtxKey, rc)
+func AuthInfoFromContext(ctx context.Context) *types.AuthInfo {
+	info, _ := ctx.Value(authInfoKey).(*types.AuthInfo)
+	return info
 }
 
-// FromContext extracts the RequestContext from the context
-func FromContext(ctx context.Context) *RequestContext {
-	rc, _ := ctx.Value(requestCtxKey).(*RequestContext)
-	return rc
+// Authorization checks (return error if not authorized)
+
+func RequireAuth(ctx context.Context) error {
+	if AuthInfoFromContext(ctx) == nil {
+		return ErrAuthRequired
+	}
+	return nil
 }
 
-// IsAuthenticated returns true if the context has valid auth
-func IsAuthenticated(ctx context.Context) bool {
-	rc := FromContext(ctx)
-	return rc != nil && (rc.WorkspaceId > 0 || rc.IsGatewayAuth)
+func RequireClusterAdmin(ctx context.Context) error {
+	info := AuthInfoFromContext(ctx)
+	if info == nil || !info.IsClusterAdmin() {
+		return ErrAdminRequired
+	}
+	return nil
 }
 
-// HasWorkspace returns true if the context has workspace identity
-func HasWorkspace(ctx context.Context) bool {
-	rc := FromContext(ctx)
-	return rc != nil && rc.WorkspaceId > 0
+func RequireAdmin(ctx context.Context) error {
+	info := AuthInfoFromContext(ctx)
+	if info == nil || !info.IsAdmin() {
+		return ErrAdminRequired
+	}
+	return nil
 }
 
-// WorkspaceId returns the workspace ID from context
+func RequireWorkspaceAccess(ctx context.Context, workspaceExtId string) error {
+	info := AuthInfoFromContext(ctx)
+	if info == nil {
+		return ErrAuthRequired
+	}
+	if !info.HasWorkspaceAccess(workspaceExtId) {
+		return ErrForbidden
+	}
+	return nil
+}
+
+func RequireWorker(ctx context.Context) error {
+	info := AuthInfoFromContext(ctx)
+	if info == nil || !info.IsWorker() {
+		return ErrWorkerRequired
+	}
+	return nil
+}
+
+func RequireWorkerForPool(ctx context.Context, poolName string) error {
+	info := AuthInfoFromContext(ctx)
+	if info == nil || !info.IsWorker() {
+		return ErrWorkerRequired
+	}
+	if !info.CanAccessPool(poolName) {
+		return ErrForbidden
+	}
+	return nil
+}
+
+// Boolean checks
+
+func IsAuthenticated(ctx context.Context) bool { return AuthInfoFromContext(ctx) != nil }
+func IsClusterAdmin(ctx context.Context) bool  { i := AuthInfoFromContext(ctx); return i != nil && i.IsClusterAdmin() }
+func IsAdmin(ctx context.Context) bool         { i := AuthInfoFromContext(ctx); return i != nil && i.IsAdmin() }
+func IsWorker(ctx context.Context) bool        { i := AuthInfoFromContext(ctx); return i != nil && i.IsWorker() }
+func CanWrite(ctx context.Context) bool        { i := AuthInfoFromContext(ctx); return i != nil && i.CanWrite() }
+
+// Field accessors
+
 func WorkspaceId(ctx context.Context) uint {
-	if rc := FromContext(ctx); rc != nil {
-		return rc.WorkspaceId
+	if i := AuthInfoFromContext(ctx); i != nil && i.Workspace != nil {
+		return i.Workspace.Id
 	}
 	return 0
 }
 
-// MemberId returns the member ID from context
-func MemberId(ctx context.Context) uint {
-	if rc := FromContext(ctx); rc != nil {
-		return rc.MemberId
-	}
-	return 0
-}
-
-// MemberRole returns the member role from context
-func MemberRole(ctx context.Context) types.MemberRole {
-	if rc := FromContext(ctx); rc != nil {
-		return rc.MemberRole
+func WorkspaceExtId(ctx context.Context) string {
+	if i := AuthInfoFromContext(ctx); i != nil && i.Workspace != nil {
+		return i.Workspace.ExternalId
 	}
 	return ""
 }
 
-// IsAdmin returns true if the member has admin role
-func IsAdmin(ctx context.Context) bool {
-	return MemberRole(ctx) == types.RoleAdmin || FromContext(ctx).IsGatewayAuth
+func WorkspaceName(ctx context.Context) string {
+	if i := AuthInfoFromContext(ctx); i != nil && i.Workspace != nil {
+		return i.Workspace.Name
+	}
+	return ""
 }
 
-// CanWrite returns true if the member can write
-func CanWrite(ctx context.Context) bool {
-	role := MemberRole(ctx)
-	return role == types.RoleAdmin || role == types.RoleMember || FromContext(ctx).IsGatewayAuth
+func MemberId(ctx context.Context) uint {
+	if i := AuthInfoFromContext(ctx); i != nil && i.Member != nil {
+		return i.Member.Id
+	}
+	return 0
+}
+
+func MemberEmail(ctx context.Context) string {
+	if i := AuthInfoFromContext(ctx); i != nil && i.Member != nil {
+		return i.Member.Email
+	}
+	return ""
+}
+
+func MemberRole(ctx context.Context) types.MemberRole {
+	if i := AuthInfoFromContext(ctx); i != nil && i.Member != nil {
+		return i.Member.Role
+	}
+	return ""
+}
+
+func PoolName(ctx context.Context) string {
+	if i := AuthInfoFromContext(ctx); i != nil && i.Worker != nil {
+		return i.Worker.PoolName
+	}
+	return ""
 }

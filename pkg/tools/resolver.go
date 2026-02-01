@@ -52,11 +52,7 @@ func NewWorkspaceToolResolver(globalRegistry *Registry, backend BackendRepositor
 // List returns all tools available to the workspace (global + workspace-specific),
 // filtered by workspace tool settings
 func (r *WorkspaceToolResolver) List(ctx context.Context) ([]types.ResolvedTool, error) {
-	rc := auth.FromContext(ctx)
-	workspaceId := uint(0)
-	if rc != nil {
-		workspaceId = rc.WorkspaceId
-	}
+	workspaceId := auth.WorkspaceId(ctx)
 
 	// Get tool settings for filtering
 	var settings *types.WorkspaceToolSettings
@@ -136,11 +132,7 @@ func (r *WorkspaceToolResolver) ListEnabled(ctx context.Context) ([]types.Resolv
 // Get returns a ToolProvider for the given tool name, checking both global
 // and workspace-specific tools. Returns nil if disabled or not found.
 func (r *WorkspaceToolResolver) Get(ctx context.Context, name string) (ToolProvider, error) {
-	rc := auth.FromContext(ctx)
-	workspaceId := uint(0)
-	if rc != nil {
-		workspaceId = rc.WorkspaceId
-	}
+	workspaceId := auth.WorkspaceId(ctx)
 
 	// Check if disabled
 	if workspaceId > 0 && r.backend != nil {
@@ -180,12 +172,12 @@ func (r *WorkspaceToolResolver) Has(ctx context.Context, name string) bool {
 		return true
 	}
 
-	rc := auth.FromContext(ctx)
-	if rc == nil || rc.WorkspaceId == 0 || r.backend == nil {
+	workspaceId := auth.WorkspaceId(ctx)
+	if workspaceId == 0 || r.backend == nil {
 		return false
 	}
 
-	_, err := r.backend.GetWorkspaceToolByName(ctx, rc.WorkspaceId, name)
+	_, err := r.backend.GetWorkspaceToolByName(ctx, workspaceId, name)
 	return err == nil
 }
 
