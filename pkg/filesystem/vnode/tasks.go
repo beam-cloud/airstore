@@ -25,8 +25,7 @@ type TasksVNode struct {
 	ReadOnlyBase
 
 	// Direct backend access (gateway mode)
-	backend   repository.BackendRepository
-	taskQueue repository.TaskQueue
+	backend repository.BackendRepository
 
 	// gRPC gateway access (CLI mode)
 	grpcConn *grpc.ClientConn
@@ -39,12 +38,11 @@ type TasksVNode struct {
 }
 
 // NewTasksVNode creates a TasksVNode with database access for task listing.
-// Use this when the backend and taskQueue are available (e.g., in gateway).
-func NewTasksVNode(backend repository.BackendRepository, taskQueue repository.TaskQueue, token string) *TasksVNode {
+// Use this when the backend is available (e.g., in gateway).
+func NewTasksVNode(backend repository.BackendRepository, token string) *TasksVNode {
 	return &TasksVNode{
-		backend:   backend,
-		taskQueue: taskQueue,
-		token:     token,
+		backend: backend,
+		token:   token,
 	}
 }
 
@@ -179,8 +177,14 @@ func (t *TasksVNode) getTaskByName(ctx context.Context, name string) (*types.Tas
 	}
 	t.cacheMu.RUnlock()
 
-	// Cache miss - fetch directly
+	// Cache miss - fetch directly with workspace validation
 	if t.backend != nil {
+		// Get workspace ID from token
+		workspaceId, err := t.getWorkspaceId(ctx)
+		if err != nil {
+			return nil, ErrNotFound
+		}
+
 		task, err := t.backend.GetTask(ctx, taskId)
 		if err != nil {
 			if _, ok := err.(*types.ErrTaskNotFound); ok {
@@ -188,6 +192,12 @@ func (t *TasksVNode) getTaskByName(ctx context.Context, name string) (*types.Tas
 			}
 			return nil, err
 		}
+
+		// Verify task belongs to caller's workspace
+		if task.WorkspaceId != workspaceId {
+			return nil, ErrNotFound
+		}
+
 		return task, nil
 	}
 
@@ -374,19 +384,12 @@ func (t *TasksVNode) Read(path string, buf []byte, off int64, fh FileHandle) (in
 	}
 	content.WriteString("\n--- Output ---\n")
 
-	// Get logs - try taskQueue first (gateway mode), then gRPC (CLI mode)
-	if t.taskQueue != nil {
-		logs, err := t.taskQueue.GetLogBuffer(ctx, task.ExternalId)
-		if err == nil {
-			for _, logEntry := range logs {
-				content.Write(logEntry)
-				content.WriteString("\n")
-			}
-		}
-	} else if t.grpcConn != nil {
-		// Fetch logs via gRPC
+	// Get logs via gRPC (reads from S2)
+	if t.grpcConn != nil {
 		logs := t.fetchTaskLogsGRPC(ctx, task.ExternalId)
 		content.WriteString(logs)
+	} else {
+		content.WriteString("(logs available via API)\n")
 	}
 
 	data := []byte(content.String())

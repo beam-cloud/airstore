@@ -440,7 +440,7 @@ func (s *GatewayService) GetTaskLogs(ctx context.Context, req *pb.GetTaskLogsReq
 		return &pb.GetTaskLogsResponse{Ok: true, Logs: []*pb.TaskLogEntry{}}, nil
 	}
 
-	logs, err := s.s2Client.ReadLogs(ctx, req.Id, 0)
+	logs, _, err := s.s2Client.ReadLogs(ctx, req.Id, 0)
 	if err != nil {
 		return &pb.GetTaskLogsResponse{Ok: false, Error: err.Error()}, nil
 	}

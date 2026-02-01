@@ -1184,6 +1184,12 @@ func (g *FilesystemGroup) statTasks(c echo.Context, ctx context.Context, fullPat
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 
+	// Verify task belongs to caller's workspace
+	rc := auth.FromContext(ctx)
+	if rc == nil || rc.WorkspaceId == 0 || task.WorkspaceId != rc.WorkspaceId {
+		return ErrorResponse(c, http.StatusNotFound, "task not found")
+	}
+
 	return SuccessResponse(c, g.taskToVirtualFile(task))
 }
 
@@ -1200,6 +1206,12 @@ func (g *FilesystemGroup) readTasks(c echo.Context, ctx context.Context, relPath
 			return ErrorResponse(c, http.StatusNotFound, "task not found")
 		}
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+
+	// Verify task belongs to caller's workspace
+	rc := auth.FromContext(ctx)
+	if rc == nil || rc.WorkspaceId == 0 || task.WorkspaceId != rc.WorkspaceId {
+		return ErrorResponse(c, http.StatusNotFound, "task not found")
 	}
 
 	// Build task content: task info header + logs
@@ -1292,7 +1304,7 @@ func (g *FilesystemGroup) buildTaskContent(ctx context.Context, task *types.Task
 
 	// Read logs from S2 if available
 	if g.s2Client != nil && g.s2Client.Enabled() {
-		logs, err := g.s2Client.ReadLogs(ctx, task.ExternalId, 0)
+		logs, _, err := g.s2Client.ReadLogs(ctx, task.ExternalId, 0)
 		if err != nil {
 			log.Warn().Err(err).Str("task_id", task.ExternalId).Msg("failed to read task logs from S2")
 		} else {
