@@ -12,6 +12,8 @@ config:
   clusterName: airstore
   debugMode: false
   prettyLogs: false
+  scheduler:
+    workerImage: public.ecr.aws/n4e0e1y0/airstore-worker:latest
 
 images:
   gateway:

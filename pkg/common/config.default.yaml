@@ -76,7 +76,7 @@ gateway:
 scheduler:
   enabled: false
   gatewayServiceName: airstore-gateway
-  workerImage: registry.localhost:5000/airstore-worker:latest
+  workerImage: public.ecr.aws/n4e0e1y0/airstore-worker:latest
   workerNamespace: airstore
   workerTTL: 1h
   cleanupInterval: 1m

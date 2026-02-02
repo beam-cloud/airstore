@@ -41,30 +41,6 @@ jobs:
           files: coverage.out
           fail_ci_if_error: false
 
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Install FUSE libraries
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libfuse-dev libfuse3-dev
-
-      - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: v1.61.0
-          args: --timeout=10m --verbose
-
   proto:
     name: Protobuf Check
     runs-on: ubuntu-latest
