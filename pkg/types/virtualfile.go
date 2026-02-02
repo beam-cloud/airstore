@@ -9,7 +9,8 @@ import (
 type VirtualFileType string
 
 const (
-	VFTypeStorage VirtualFileType = "storage" // S3-backed files
+	VFTypeContext VirtualFileType = "context" // S3-backed writable storage (skills, user files)
+	VFTypeStorage VirtualFileType = "storage" // S3-backed storage files (alias for context)
 	VFTypeSource  VirtualFileType = "source"  // Integration sources (github, gmail, etc)
 	VFTypeTool    VirtualFileType = "tool"    // Available tools
 	VFTypeTask    VirtualFileType = "task"    // Running/completed tasks

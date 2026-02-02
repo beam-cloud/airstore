@@ -3,8 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"os"
-	"text/tabwriter"
 	"time"
 
 	pb "github.com/beam-cloud/airstore/proto"
@@ -26,40 +24,63 @@ var tokenCreateCmd = &cobra.Command{
 	Short: "Create an API token for a member",
 	Args:  cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		client, err := getClient()
-		if err != nil {
-			return err
-		}
-		defer client.Close()
+		var client *Client
+		var resp *pb.CreateTokenResponse
 
 		var expiresInSeconds int64
 		if tokenExpires != "" {
 			duration, err := time.ParseDuration(tokenExpires)
 			if err != nil {
-				return fmt.Errorf("invalid expires duration: %w", err)
+				PrintErrorMsg(fmt.Sprintf("Invalid expires duration: %s", err.Error()))
+				return nil
 			}
 			expiresInSeconds = int64(duration.Seconds())
 		}
 
-		resp, err := client.Gateway.CreateToken(context.Background(), &pb.CreateTokenRequest{
-			WorkspaceId:      args[0],
-			MemberId:         args[1],
-			Name:             tokenName,
-			ExpiresInSeconds: expiresInSeconds,
-		})
-		if err != nil {
+		err := RunSpinnerWithResult("Creating token...", func() error {
+			var err error
+			client, err = getClient()
+			if err != nil {
+				return err
+			}
+
+			resp, err = client.Gateway.CreateToken(context.Background(), &pb.CreateTokenRequest{
+				WorkspaceId:      args[0],
+				MemberId:         args[1],
+				Name:             tokenName,
+				ExpiresInSeconds: expiresInSeconds,
+			})
 			return err
-		}
-		if !resp.Ok {
-			return fmt.Errorf("%s", resp.Error)
+		})
+
+		if client != nil {
+			defer client.Close()
 		}
 
-		fmt.Printf("Token: %s\n", resp.Token)
-		fmt.Printf("Name:  %s\n", resp.Info.Name)
-		if resp.Info.ExpiresAt != "" {
-			fmt.Printf("Expires: %s\n", resp.Info.ExpiresAt)
+		if err != nil {
+			PrintError(err)
+			return nil
 		}
-		fmt.Println("\nSave this token! It won't be shown again.")
+		if !resp.Ok {
+			PrintErrorMsg(resp.Error)
+			return nil
+		}
+
+		PrintSuccess("Token created")
+		PrintNewline()
+
+		// Show the token prominently - it's a one-time display
+		fmt.Printf("  %s\n", BoldStyle.Render("Token:"))
+		fmt.Printf("  %s\n", CodeStyle.Render(resp.Token))
+		PrintNewline()
+
+		PrintKeyValue("Name", resp.Info.Name)
+		if resp.Info.ExpiresAt != "" {
+			PrintKeyValue("Expires", FormatRelativeTime(resp.Info.ExpiresAt))
+		}
+		PrintNewline()
+
+		PrintWarning("Save this token! It won't be shown again.")
 		return nil
 	},
 }
@@ -71,7 +92,8 @@ var tokenListCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		client, err := getClient()
 		if err != nil {
-			return err
+			PrintError(err)
+			return nil
 		}
 		defer client.Close()
 
@@ -79,31 +101,42 @@ var tokenListCmd = &cobra.Command{
 			WorkspaceId: args[0],
 		})
 		if err != nil {
-			return err
+			PrintError(err)
+			return nil
 		}
 		if !resp.Ok {
-			return fmt.Errorf("%s", resp.Error)
-		}
-
-		if len(resp.Tokens) == 0 {
-			fmt.Println("No tokens found.")
+			PrintErrorMsg(resp.Error)
 			return nil
 		}
 
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "ID\tNAME\tEXPIRES\tLAST USED")
+		// JSON output
+		if PrintJSON(resp.Tokens) {
+			return nil
+		}
+
+		if len(resp.Tokens) == 0 {
+			PrintInfo("No tokens found")
+			PrintHint("Create one with: airstore token create <workspace_id> <member_id>")
+			return nil
+		}
+
+		PrintHeader("Tokens")
+
+		table := NewTable("ID", "NAME", "EXPIRES", "LAST USED")
 		for _, t := range resp.Tokens {
 			expires := "-"
 			if t.ExpiresAt != "" {
-				expires = t.ExpiresAt
+				expires = FormatRelativeTime(t.ExpiresAt)
 			}
 			lastUsed := "-"
 			if t.LastUsedAt != "" {
-				lastUsed = t.LastUsedAt
+				lastUsed = FormatRelativeTime(t.LastUsedAt)
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", t.Id, t.Name, expires, lastUsed)
+			table.AddRow(t.Id, t.Name, expires, lastUsed)
 		}
-		w.Flush()
+		table.Print()
+		PrintNewline()
+
 		return nil
 	},
 }
@@ -113,23 +146,36 @@ var tokenRevokeCmd = &cobra.Command{
 	Short: "Revoke a token",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		client, err := getClient()
-		if err != nil {
-			return err
-		}
-		defer client.Close()
+		var client *Client
+		var resp *pb.DeleteResponse
 
-		resp, err := client.Gateway.RevokeToken(context.Background(), &pb.RevokeTokenRequest{
-			Id: args[0],
-		})
-		if err != nil {
+		err := RunSpinnerWithResult("Revoking token...", func() error {
+			var err error
+			client, err = getClient()
+			if err != nil {
+				return err
+			}
+
+			resp, err = client.Gateway.RevokeToken(context.Background(), &pb.RevokeTokenRequest{
+				Id: args[0],
+			})
 			return err
+		})
+
+		if client != nil {
+			defer client.Close()
+		}
+
+		if err != nil {
+			PrintError(err)
+			return nil
 		}
 		if !resp.Ok {
-			return fmt.Errorf("%s", resp.Error)
+			PrintErrorMsg(resp.Error)
+			return nil
 		}
 
-		fmt.Printf("Token %s revoked.\n", args[0])
+		PrintSuccessf("Token %s revoked", CodeStyle.Render(args[0]))
 		return nil
 	},
 }

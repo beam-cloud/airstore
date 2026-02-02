@@ -14,7 +14,7 @@ const (
 	VNodeReadOnly VNodeType = iota
 	// VNodeSmartQuery is for /sources/{integration}/ - mkdir/touch creates smart queries
 	VNodeSmartQuery
-	// VNodeWritable is for fully writable paths like /context/
+	// VNodeWritable is for fully writable paths like /skills/
 	VNodeWritable
 )
 
@@ -47,7 +47,7 @@ type DirEntry struct {
 // Write semantics by VNodeType:
 //   - VNodeReadOnly: All writes return ErrReadOnly (e.g., /tools/, /.airstore/)
 //   - VNodeSmartQuery: Mkdir/Create create smart queries, Write/Unlink/Rmdir not supported
-//   - VNodeWritable: Full read/write access (e.g., /context/)
+//   - VNodeWritable: Full read/write access (e.g., /skills/)
 type VirtualNode interface {
 	Prefix() string
 	Type() VNodeType

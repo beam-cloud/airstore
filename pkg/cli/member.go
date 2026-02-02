@@ -2,9 +2,6 @@ package cli
 
 import (
 	"context"
-	"fmt"
-	"os"
-	"text/tabwriter"
 
 	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/spf13/cobra"
@@ -25,27 +22,43 @@ var memberAddCmd = &cobra.Command{
 	Short: "Add a member to a workspace",
 	Args:  cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		client, err := getClient()
-		if err != nil {
-			return err
-		}
-		defer client.Close()
+		var client *Client
+		var resp *pb.MemberResponse
 
-		resp, err := client.Gateway.AddMember(context.Background(), &pb.AddMemberRequest{
-			WorkspaceId: args[0],
-			Email:       args[1],
-			Name:        memberName,
-			Role:        memberRole,
-		})
-		if err != nil {
+		err := RunSpinnerWithResult("Adding member...", func() error {
+			var err error
+			client, err = getClient()
+			if err != nil {
+				return err
+			}
+
+			resp, err = client.Gateway.AddMember(context.Background(), &pb.AddMemberRequest{
+				WorkspaceId: args[0],
+				Email:       args[1],
+				Name:        memberName,
+				Role:        memberRole,
+			})
 			return err
+		})
+
+		if client != nil {
+			defer client.Close()
+		}
+
+		if err != nil {
+			PrintError(err)
+			return nil
 		}
 		if !resp.Ok {
-			return fmt.Errorf("%s", resp.Error)
+			PrintErrorMsg(resp.Error)
+			return nil
 		}
 
-		fmt.Printf("Member: %s (%s)\n", resp.Member.Email, resp.Member.Id)
-		fmt.Printf("Role:   %s\n", resp.Member.Role)
+		PrintSuccess("Member added")
+		PrintNewline()
+		PrintKeyValue("Email", resp.Member.Email)
+		PrintKeyValue("ID", resp.Member.Id)
+		PrintKeyValue("Role", resp.Member.Role)
 		return nil
 	},
 }
@@ -57,7 +70,8 @@ var memberListCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		client, err := getClient()
 		if err != nil {
-			return err
+			PrintError(err)
+			return nil
 		}
 		defer client.Close()
 
@@ -65,23 +79,34 @@ var memberListCmd = &cobra.Command{
 			WorkspaceId: args[0],
 		})
 		if err != nil {
-			return err
+			PrintError(err)
+			return nil
 		}
 		if !resp.Ok {
-			return fmt.Errorf("%s", resp.Error)
-		}
-
-		if len(resp.Members) == 0 {
-			fmt.Println("No members found.")
+			PrintErrorMsg(resp.Error)
 			return nil
 		}
 
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "ID\tEMAIL\tNAME\tROLE")
-		for _, m := range resp.Members {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", m.Id, m.Email, m.Name, m.Role)
+		// JSON output
+		if PrintJSON(resp.Members) {
+			return nil
 		}
-		w.Flush()
+
+		if len(resp.Members) == 0 {
+			PrintInfo("No members found")
+			PrintHint("Add one with: airstore member add <workspace_id> <email>")
+			return nil
+		}
+
+		PrintHeader("Members")
+
+		table := NewTable("ID", "EMAIL", "NAME", "ROLE")
+		for _, m := range resp.Members {
+			table.AddRow(m.Id, m.Email, m.Name, m.Role)
+		}
+		table.Print()
+		PrintNewline()
+
 		return nil
 	},
 }
@@ -91,23 +116,36 @@ var memberRemoveCmd = &cobra.Command{
 	Short: "Remove a member",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		client, err := getClient()
-		if err != nil {
-			return err
-		}
-		defer client.Close()
+		var client *Client
+		var resp *pb.DeleteResponse
 
-		resp, err := client.Gateway.RemoveMember(context.Background(), &pb.RemoveMemberRequest{
-			Id: args[0],
-		})
-		if err != nil {
+		err := RunSpinnerWithResult("Removing member...", func() error {
+			var err error
+			client, err = getClient()
+			if err != nil {
+				return err
+			}
+
+			resp, err = client.Gateway.RemoveMember(context.Background(), &pb.RemoveMemberRequest{
+				Id: args[0],
+			})
 			return err
+		})
+
+		if client != nil {
+			defer client.Close()
+		}
+
+		if err != nil {
+			PrintError(err)
+			return nil
 		}
 		if !resp.Ok {
-			return fmt.Errorf("%s", resp.Error)
+			PrintErrorMsg(resp.Error)
+			return nil
 		}
 
-		fmt.Printf("Member %s removed.\n", args[0])
+		PrintSuccessf("Member %s removed", CodeStyle.Render(args[0]))
 		return nil
 	},
 }

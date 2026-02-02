@@ -2,9 +2,6 @@ package cli
 
 import (
 	"context"
-	"fmt"
-	"os"
-	"text/tabwriter"
 
 	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/spf13/cobra"
@@ -20,23 +17,39 @@ var workspaceCreateCmd = &cobra.Command{
 	Short: "Create a new workspace",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		client, err := getClient()
-		if err != nil {
-			return err
-		}
-		defer client.Close()
+		var client *Client
+		var resp *pb.WorkspaceResponse
 
-		resp, err := client.Gateway.CreateWorkspace(context.Background(), &pb.CreateWorkspaceRequest{
-			Name: args[0],
-		})
-		if err != nil {
+		err := RunSpinnerWithResult("Creating workspace...", func() error {
+			var err error
+			client, err = getClient()
+			if err != nil {
+				return err
+			}
+
+			resp, err = client.Gateway.CreateWorkspace(context.Background(), &pb.CreateWorkspaceRequest{
+				Name: args[0],
+			})
 			return err
+		})
+
+		if client != nil {
+			defer client.Close()
+		}
+
+		if err != nil {
+			PrintError(err)
+			return nil
 		}
 		if !resp.Ok {
-			return fmt.Errorf("%s", resp.Error)
+			PrintErrorMsg(resp.Error)
+			return nil
 		}
 
-		fmt.Printf("Workspace: %s (%s)\n", resp.Workspace.Name, resp.Workspace.Id)
+		PrintSuccess("Workspace created")
+		PrintNewline()
+		PrintKeyValue("Name", resp.Workspace.Name)
+		PrintKeyValue("ID", resp.Workspace.Id)
 		return nil
 	},
 }
@@ -47,29 +60,41 @@ var workspaceListCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		client, err := getClient()
 		if err != nil {
-			return err
+			PrintError(err)
+			return nil
 		}
 		defer client.Close()
 
 		resp, err := client.Gateway.ListWorkspaces(context.Background(), &pb.ListWorkspacesRequest{})
 		if err != nil {
-			return err
+			PrintError(err)
+			return nil
 		}
 		if !resp.Ok {
-			return fmt.Errorf("%s", resp.Error)
-		}
-
-		if len(resp.Workspaces) == 0 {
-			fmt.Println("No workspaces found.")
+			PrintErrorMsg(resp.Error)
 			return nil
 		}
 
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "ID\tNAME\tCREATED")
-		for _, ws := range resp.Workspaces {
-			fmt.Fprintf(w, "%s\t%s\t%s\n", ws.Id, ws.Name, ws.CreatedAt)
+		// JSON output
+		if PrintJSON(resp.Workspaces) {
+			return nil
 		}
-		w.Flush()
+
+		if len(resp.Workspaces) == 0 {
+			PrintInfo("No workspaces found")
+			PrintHint("Create one with: airstore workspace create <name>")
+			return nil
+		}
+
+		PrintHeader("Workspaces")
+
+		table := NewTable("ID", "NAME", "CREATED")
+		for _, ws := range resp.Workspaces {
+			table.AddRow(ws.Id, ws.Name, FormatRelativeTime(ws.CreatedAt))
+		}
+		table.Print()
+		PrintNewline()
+
 		return nil
 	},
 }
@@ -81,7 +106,8 @@ var workspaceGetCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		client, err := getClient()
 		if err != nil {
-			return err
+			PrintError(err)
+			return nil
 		}
 		defer client.Close()
 
@@ -89,15 +115,25 @@ var workspaceGetCmd = &cobra.Command{
 			Id: args[0],
 		})
 		if err != nil {
-			return err
+			PrintError(err)
+			return nil
 		}
 		if !resp.Ok {
-			return fmt.Errorf("%s", resp.Error)
+			PrintErrorMsg(resp.Error)
+			return nil
 		}
 
-		fmt.Printf("ID:      %s\n", resp.Workspace.Id)
-		fmt.Printf("Name:    %s\n", resp.Workspace.Name)
-		fmt.Printf("Created: %s\n", resp.Workspace.CreatedAt)
+		// JSON output
+		if PrintJSON(resp.Workspace) {
+			return nil
+		}
+
+		PrintNewline()
+		PrintKeyValue("ID", resp.Workspace.Id)
+		PrintKeyValue("Name", resp.Workspace.Name)
+		PrintKeyValue("Created", FormatRelativeTime(resp.Workspace.CreatedAt))
+		PrintNewline()
+
 		return nil
 	},
 }
@@ -107,23 +143,36 @@ var workspaceDeleteCmd = &cobra.Command{
 	Short: "Delete a workspace",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		client, err := getClient()
-		if err != nil {
-			return err
-		}
-		defer client.Close()
+		var client *Client
+		var resp *pb.DeleteResponse
 
-		resp, err := client.Gateway.DeleteWorkspace(context.Background(), &pb.DeleteWorkspaceRequest{
-			Id: args[0],
-		})
-		if err != nil {
+		err := RunSpinnerWithResult("Deleting workspace...", func() error {
+			var err error
+			client, err = getClient()
+			if err != nil {
+				return err
+			}
+
+			resp, err = client.Gateway.DeleteWorkspace(context.Background(), &pb.DeleteWorkspaceRequest{
+				Id: args[0],
+			})
 			return err
+		})
+
+		if client != nil {
+			defer client.Close()
+		}
+
+		if err != nil {
+			PrintError(err)
+			return nil
 		}
 		if !resp.Ok {
-			return fmt.Errorf("%s", resp.Error)
+			PrintErrorMsg(resp.Error)
+			return nil
 		}
 
-		fmt.Printf("Workspace %s deleted.\n", args[0])
+		PrintSuccessf("Workspace %s deleted", CodeStyle.Render(args[0]))
 		return nil
 	},
 }

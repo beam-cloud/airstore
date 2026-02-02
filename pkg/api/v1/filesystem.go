@@ -563,7 +563,7 @@ func (g *FilesystemGroup) statStorage(c echo.Context, ctx context.Context, path 
 	}
 
 	name := pathName(path)
-	vf := types.NewVirtualFile(hashPath(path), name, path, types.VFTypeStorage).
+	vf := types.NewVirtualFile(hashPath(path), name, path, types.VFTypeContext).
 		WithFolder(resp.Info.IsDir).
 		WithSize(resp.Info.Size)
 
@@ -614,7 +614,7 @@ func (g *FilesystemGroup) treeStorage(c echo.Context, ctx context.Context, path 
 	for _, e := range resp.Entries {
 		fullPath := "/" + e.Path
 		isDir := e.Mode&uint32(syscall.S_IFDIR) != 0
-		vf := types.NewVirtualFile(hashPath(fullPath), pathName(e.Path), fullPath, types.VFTypeStorage).
+		vf := types.NewVirtualFile(hashPath(fullPath), pathName(e.Path), fullPath, types.VFTypeContext).
 			WithFolder(isDir).WithSize(e.Size)
 		if e.Mtime > 0 {
 			vf.WithModifiedAt(time.Unix(e.Mtime, 0))
@@ -642,7 +642,7 @@ func (g *FilesystemGroup) storageEntryToVirtualFile(e *pb.ContextDirEntry, paren
 		fullPath = parentPath + "/" + e.Name
 	}
 
-	vf := types.NewVirtualFile(hashPath(fullPath), e.Name, fullPath, types.VFTypeStorage).
+	vf := types.NewVirtualFile(hashPath(fullPath), e.Name, fullPath, types.VFTypeContext).
 		WithFolder(e.IsDir).WithSize(e.Size)
 	if e.Mtime > 0 {
 		vf.WithModifiedAt(time.Unix(e.Mtime, 0))

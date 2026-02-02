@@ -21,14 +21,15 @@ jobs:
     timeout-minutes: 15
 
     strategy:
+      fail-fast: false
       matrix:
         platform:
-          # macos-latest is ARM64, macos-13 is Intel
+          # macos-latest is ARM64, macos-15-intel is x64
           - os: macos-latest
             goos: darwin
             goarch: arm64
             target_alt: darwin-arm64
-          - os: macos-13
+          - os: macos-15-intel
             goos: darwin
             goarch: amd64
             target_alt: darwin-amd64
@@ -36,7 +37,10 @@ jobs:
             goos: linux
             goarch: amd64
             target_alt: linux-amd64
-          # linux-arm64 not supported: BAML's CGO library doesn't have ARM64 bindings
+          - os: ubuntu-24.04-arm64
+            goos: linux
+            goarch: arm64
+            target_alt: linux-arm64
 
     runs-on: ${{ matrix.platform.os }}
     steps:

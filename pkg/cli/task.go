@@ -9,9 +9,9 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"text/tabwriter"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 )
 
@@ -151,7 +151,8 @@ func httpGatewayAddr() string {
 func createTask() error {
 	// Validate - either prompt or image must be provided
 	if taskPrompt == "" && taskImage == "" {
-		return fmt.Errorf("either --prompt or --image is required")
+		PrintErrorMsg("Either --prompt or --image is required")
+		return nil
 	}
 
 	// Parse entrypoint
@@ -181,43 +182,51 @@ func createTask() error {
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return err
-	}
-
-	resp, err := http.Post(httpGatewayAddr()+"/api/v1/tasks", "application/json", bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("failed to connect to gateway: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var result apiResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	if !result.Success {
-		return fmt.Errorf("failed to create task: %s", result.Error)
+		PrintError(err)
+		return nil
 	}
 
 	var task taskResponse
-	if err := json.Unmarshal(result.Data, &task); err != nil {
-		return fmt.Errorf("failed to parse task: %w", err)
+
+	err = RunSpinnerWithResult("Creating task...", func() error {
+		resp, err := http.Post(httpGatewayAddr()+"/api/v1/tasks", "application/json", bytes.NewReader(body))
+		if err != nil {
+			return fmt.Errorf("failed to connect to gateway: %w", err)
+		}
+		defer resp.Body.Close()
+
+		var result apiResponse
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return fmt.Errorf("failed to decode response: %w", err)
+		}
+
+		if !result.Success {
+			return fmt.Errorf("%s", result.Error)
+		}
+
+		if err := json.Unmarshal(result.Data, &task); err != nil {
+			return fmt.Errorf("failed to parse task: %w", err)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		PrintError(err)
+		return nil
 	}
 
-	fmt.Printf("Created task: %s\n", task.ID)
+	PrintSuccess("Task created")
+	PrintNewline()
+	PrintKeyValue("ID", task.ID)
 	if task.Prompt != "" {
-		fmt.Printf("  Prompt: %s\n", truncate(task.Prompt, 50))
+		PrintKeyValue("Prompt", Truncate(task.Prompt, 50))
 	}
-	fmt.Printf("  Image:  %s\n", task.Image)
-	fmt.Printf("  Status: %s\n", task.Status)
-	return nil
-}
+	PrintKeyValue("Image", Truncate(task.Image, 50))
+	PrintKeyValueStyled("Status", task.Status, statusStyle(task.Status))
+	PrintNewline()
 
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
+	return nil
 }
 
 func listTasks() error {
@@ -226,18 +235,21 @@ func listTasks() error {
 		// Need to look up workspace ID first
 		wsResp, err := http.Get(httpGatewayAddr() + "/api/v1/workspaces")
 		if err != nil {
-			return fmt.Errorf("failed to connect to gateway: %w", err)
+			PrintError(fmt.Errorf("failed to connect to gateway: %w", err))
+			return nil
 		}
 		defer wsResp.Body.Close()
 
 		var wsResult apiResponse
 		if err := json.NewDecoder(wsResp.Body).Decode(&wsResult); err != nil {
-			return fmt.Errorf("failed to decode response: %w", err)
+			PrintError(fmt.Errorf("failed to decode response: %w", err))
+			return nil
 		}
 
 		var workspaces []taskWorkspaceResponse
 		if err := json.Unmarshal(wsResult.Data, &workspaces); err != nil {
-			return fmt.Errorf("failed to parse workspaces: %w", err)
+			PrintError(fmt.Errorf("failed to parse workspaces: %w", err))
+			return nil
 		}
 
 		var wsID string
@@ -248,51 +260,60 @@ func listTasks() error {
 			}
 		}
 		if wsID == "" {
-			return fmt.Errorf("workspace not found: %s", taskWorkspace)
+			PrintErrorMsg(fmt.Sprintf("Workspace not found: %s", taskWorkspace))
+			return nil
 		}
 		url += "?workspace_id=" + wsID
 	}
 
 	resp, err := http.Get(url)
 	if err != nil {
-		return fmt.Errorf("failed to connect to gateway: %w", err)
+		PrintError(fmt.Errorf("failed to connect to gateway: %w", err))
+		return nil
 	}
 	defer resp.Body.Close()
 
 	var result apiResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("failed to decode response: %w", err)
+		PrintError(fmt.Errorf("failed to decode response: %w", err))
+		return nil
 	}
 
 	if !result.Success {
-		return fmt.Errorf("failed to list tasks: %s", result.Error)
+		PrintErrorMsg(result.Error)
+		return nil
 	}
 
 	var tasks []taskResponse
 	if err := json.Unmarshal(result.Data, &tasks); err != nil {
-		return fmt.Errorf("failed to parse tasks: %w", err)
-	}
-
-	if len(tasks) == 0 {
-		fmt.Println("No tasks found.")
+		PrintError(fmt.Errorf("failed to parse tasks: %w", err))
 		return nil
 	}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tSTATUS\tIMAGE\tCREATED\tEXIT CODE")
+	// JSON output
+	if PrintJSON(tasks) {
+		return nil
+	}
+
+	if len(tasks) == 0 {
+		PrintInfo("No tasks found")
+		PrintHint("Create one with: airstore task create --workspace <name> --prompt \"...\"")
+		return nil
+	}
+
+	PrintHeader("Tasks")
+
+	table := NewTable("ID", "STATUS", "IMAGE", "CREATED", "EXIT")
 	for _, t := range tasks {
 		exitCode := "-"
 		if t.ExitCode != nil {
 			exitCode = fmt.Sprintf("%d", *t.ExitCode)
 		}
-		// Truncate image for display
-		image := t.Image
-		if len(image) > 40 {
-			image = image[:37] + "..."
-		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", t.ID, t.Status, image, t.CreatedAt, exitCode)
+		image := Truncate(t.Image, 35)
+		table.AddRow(t.ID, t.Status, image, FormatRelativeTime(t.CreatedAt), exitCode)
 	}
-	w.Flush()
+	table.Print()
+	PrintNewline()
 
 	return nil
 }
@@ -300,81 +321,112 @@ func listTasks() error {
 func getTask(id string) error {
 	resp, err := http.Get(httpGatewayAddr() + "/api/v1/tasks/" + id)
 	if err != nil {
-		return fmt.Errorf("failed to connect to gateway: %w", err)
+		PrintError(fmt.Errorf("failed to connect to gateway: %w", err))
+		return nil
 	}
 	defer resp.Body.Close()
 
 	var result apiResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("failed to decode response: %w", err)
+		PrintError(fmt.Errorf("failed to decode response: %w", err))
+		return nil
 	}
 
 	if !result.Success {
-		return fmt.Errorf("task not found: %s", result.Error)
+		PrintErrorMsg(fmt.Sprintf("Task not found: %s", result.Error))
+		return nil
 	}
 
 	var task taskResponse
 	if err := json.Unmarshal(result.Data, &task); err != nil {
-		return fmt.Errorf("failed to parse task: %w", err)
+		PrintError(fmt.Errorf("failed to parse task: %w", err))
+		return nil
 	}
 
-	fmt.Printf("ID:          %s\n", task.ID)
-	fmt.Printf("Workspace:   %s\n", task.WorkspaceID)
-	fmt.Printf("Status:      %s\n", task.Status)
-	fmt.Printf("Image:       %s\n", task.Image)
-	if len(task.Entrypoint) > 0 {
-		fmt.Printf("Entrypoint:  %v\n", task.Entrypoint)
+	// JSON output
+	if PrintJSON(task) {
+		return nil
 	}
+
+	PrintNewline()
+	PrintKeyValue("ID", task.ID)
+	PrintKeyValue("Workspace", task.WorkspaceID)
+	PrintKeyValueStyled("Status", task.Status, statusStyle(task.Status))
+	PrintKeyValue("Image", task.Image)
+
+	if len(task.Entrypoint) > 0 {
+		PrintKeyValue("Entrypoint", strings.Join(task.Entrypoint, " "))
+	}
+
 	if len(task.Env) > 0 {
-		fmt.Printf("Environment:\n")
+		PrintNewline()
+		fmt.Printf("  %s\n", DimStyle.Render("Environment:"))
 		for k, v := range task.Env {
-			fmt.Printf("  %s=%s\n", k, v)
+			fmt.Printf("    %s=%s\n", k, v)
 		}
 	}
+
 	if task.ExitCode != nil {
-		fmt.Printf("Exit Code:   %d\n", *task.ExitCode)
+		exitStyle := SuccessStyle
+		if *task.ExitCode != 0 {
+			exitStyle = ErrorStyle
+		}
+		PrintKeyValueStyled("Exit Code", fmt.Sprintf("%d", *task.ExitCode), exitStyle)
 	}
+
 	if task.Error != "" {
-		fmt.Printf("Error:       %s\n", task.Error)
+		PrintKeyValueStyled("Error", task.Error, ErrorStyle)
 	}
-	fmt.Printf("Created At:  %s\n", task.CreatedAt)
+
+	PrintNewline()
+	PrintKeyValue("Created", FormatRelativeTime(task.CreatedAt))
 	if task.StartedAt != "" {
-		fmt.Printf("Started At:  %s\n", task.StartedAt)
+		PrintKeyValue("Started", FormatRelativeTime(task.StartedAt))
 	}
 	if task.FinishedAt != "" {
-		fmt.Printf("Finished At: %s\n", task.FinishedAt)
+		PrintKeyValue("Finished", FormatRelativeTime(task.FinishedAt))
 	}
+	PrintNewline()
 
 	return nil
 }
 
 func deleteTask(id string) error {
-	req, err := http.NewRequest("DELETE", httpGatewayAddr()+"/api/v1/tasks/"+id, nil)
+	err := RunSpinnerWithResult("Deleting task...", func() error {
+		req, err := http.NewRequest("DELETE", httpGatewayAddr()+"/api/v1/tasks/"+id, nil)
+		if err != nil {
+			return err
+		}
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("failed to connect to gateway: %w", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusNotFound {
+			return fmt.Errorf("task not found")
+		}
+
+		body, _ := io.ReadAll(resp.Body)
+		var result apiResponse
+		if err := json.Unmarshal(body, &result); err != nil {
+			return fmt.Errorf("failed to decode response: %w", err)
+		}
+
+		if !result.Success {
+			return fmt.Errorf("%s", result.Error)
+		}
+
+		return nil
+	})
+
 	if err != nil {
-		return err
+		PrintError(err)
+		return nil
 	}
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to connect to gateway: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("task not found")
-	}
-
-	body, _ := io.ReadAll(resp.Body)
-	var result apiResponse
-	if err := json.Unmarshal(body, &result); err != nil {
-		return fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	if !result.Success {
-		return fmt.Errorf("failed to delete task: %s", result.Error)
-	}
-
-	fmt.Printf("Task %s deleted.\n", id)
+	PrintSuccessf("Task %s deleted", CodeStyle.Render(id))
 	return nil
 }
 
@@ -384,7 +436,8 @@ func streamTaskLogs(id string, follow bool) error {
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return err
+		PrintError(err)
+		return nil
 	}
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Cache-Control", "no-cache")
@@ -395,17 +448,20 @@ func streamTaskLogs(id string, follow bool) error {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to connect to gateway: %w", err)
+		PrintError(fmt.Errorf("failed to connect to gateway: %w", err))
+		return nil
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("task not found")
+		PrintErrorMsg("Task not found")
+		return nil
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("error: %s", string(body))
+		PrintErrorMsg(string(body))
+		return nil
 	}
 
 	// Read SSE events
@@ -448,12 +504,21 @@ func streamTaskLogs(id string, follow bool) error {
 				if !follow {
 					return nil
 				}
-				fmt.Fprintf(os.Stderr, "\n[Task %s]\n", status)
+				PrintNewline()
+				if status == "complete" {
+					PrintSuccess(fmt.Sprintf("Task %s", status))
+				} else {
+					PrintErrorMsg(fmt.Sprintf("Task %s", status))
+				}
 				if errMsg, ok := event["error"].(string); ok && errMsg != "" {
-					fmt.Fprintf(os.Stderr, "Error: %s\n", errMsg)
+					PrintKeyValueStyled("Error", errMsg, ErrorStyle)
 				}
 				if exitCode, ok := event["exit_code"].(float64); ok {
-					fmt.Fprintf(os.Stderr, "Exit code: %d\n", int(exitCode))
+					exitStyle := SuccessStyle
+					if int(exitCode) != 0 {
+						exitStyle = ErrorStyle
+					}
+					PrintKeyValueStyled("Exit code", fmt.Sprintf("%d", int(exitCode)), exitStyle)
 				}
 				return nil
 			}
@@ -470,36 +535,67 @@ func runClaudeCodeTask() error {
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return err
-	}
-
-	resp, err := http.Post(httpGatewayAddr()+"/api/v1/tasks", "application/json", bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("failed to connect to gateway: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var result apiResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	if !result.Success {
-		return fmt.Errorf("failed to create task: %s", result.Error)
+		PrintError(err)
+		return nil
 	}
 
 	var task taskResponse
-	if err := json.Unmarshal(result.Data, &task); err != nil {
-		return fmt.Errorf("failed to parse task: %w", err)
+
+	err = RunSpinnerWithResult("Creating task...", func() error {
+		resp, err := http.Post(httpGatewayAddr()+"/api/v1/tasks", "application/json", bytes.NewReader(body))
+		if err != nil {
+			return fmt.Errorf("failed to connect to gateway: %w", err)
+		}
+		defer resp.Body.Close()
+
+		var result apiResponse
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return fmt.Errorf("failed to decode response: %w", err)
+		}
+
+		if !result.Success {
+			return fmt.Errorf("%s", result.Error)
+		}
+
+		if err := json.Unmarshal(result.Data, &task); err != nil {
+			return fmt.Errorf("failed to parse task: %w", err)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		PrintError(err)
+		return nil
 	}
 
-	fmt.Fprintf(os.Stderr, "Created task: %s\n", task.ID)
-	fmt.Fprintf(os.Stderr, "Prompt: %s\n", truncate(task.Prompt, 50))
-	fmt.Fprintf(os.Stderr, "Streaming logs...\n\n")
+	PrintSuccess("Task created")
+	PrintKeyValue("ID", task.ID)
+	PrintKeyValue("Prompt", Truncate(task.Prompt, 60))
+	PrintNewline()
+	fmt.Printf("  %s\n\n", DimStyle.Render("Streaming logs..."))
 
 	// Small delay to let the task start
 	time.Sleep(500 * time.Millisecond)
 
 	// Stream logs
 	return streamTaskLogs(task.ID, true)
+}
+
+// statusStyle returns the appropriate style for a task status
+func statusStyle(status string) lipgloss.Style {
+	switch strings.ToLower(status) {
+	case "running":
+		return InfoStyle
+	case "complete", "completed", "success":
+		return SuccessStyle
+	case "failed", "error":
+		return ErrorStyle
+	case "pending", "queued":
+		return WarningStyle
+	case "cancelled":
+		return DimStyle
+	default:
+		return DimStyle
+	}
 }
