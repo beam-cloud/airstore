@@ -19,8 +19,6 @@ jobs:
     if: (github.event_name == 'release' && startsWith(github.ref_name, 'cli-')) || inputs.app_version != ''
     name: build (${{ matrix.platform.target_alt }})
     timeout-minutes: 10
-    outputs:
-      app_version: ${{ steps.set-build-info.outputs.app_version }}
 
     strategy:
       matrix:
@@ -93,22 +91,3 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload ${GITHUB_REF_NAME} "${{ steps.prepare-artifact.outputs.tar_file_path }}"
-
-  formula:
-    if: github.event_name == 'release' && startsWith(github.ref_name, 'cli-')
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Send update formula event
-        uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ secrets.DISPATCH_TO_HOMEBREW_BEAM_GH_TOKEN }}
-          repository: beam-cloud/homebrew-beam
-          event-type: update-formula
-          client-payload: |-
-            {
-              "name": "Airstore",
-              "version": "${{ needs.build.outputs.app_version }}",
-              "tag": "${{ github.ref_name }}",
-              "repo": "${{ github.repository }}"
-            }
