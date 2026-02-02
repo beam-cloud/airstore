@@ -10,7 +10,7 @@ import (
 // Build information (injected at compile time via ldflags)
 var (
 	Version = "dev"
-	Release = false // true in release builds, controls logging defaults
+	Release = "false" // "true" in release builds, controls logging defaults
 )
 
 var (
@@ -44,7 +44,7 @@ func init() {
 // configureLogging sets up logging defaults based on build type
 func configureLogging() {
 	if os.Getenv("BAML_LOG") == "" {
-		if Release {
+		if Release == "true" {
 			os.Setenv("BAML_LOG", "off")
 		} else {
 			os.Setenv("BAML_LOG", "info")
