@@ -68,16 +68,21 @@ jobs:
           cache: true
 
       - name: Install protoc
+        env:
+          PROTOC_VERSION: "25.1"  # Corresponds to protoc v4.25.1
         run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+          curl -sSfL "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip" -o protoc.zip
+          sudo unzip -o protoc.zip -d /usr/local bin/protoc
+          sudo unzip -o protoc.zip -d /usr/local 'include/*'
+          rm protoc.zip
+          protoc --version
           go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.31.0
           go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.3.0
 
       - name: Generate protobuf
         run: bash bin/gen_proto.sh
 
-      - name: Check for changes
+      - name: Check for changes 
         run: |
           if [[ -n $(git status --porcelain proto/) ]]; then
             echo "Protobuf files are out of sync. Run 'make protocol' and commit the changes."
