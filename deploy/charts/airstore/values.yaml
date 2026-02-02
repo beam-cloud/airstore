@@ -1,0 +1,121 @@
+# -- See the common values.yaml for all the options you can set.
+# https://github.com/bjw-s/helm-charts/blob/common-2.5.0/charts/library/common/values.yaml
+global:
+  labels: {}
+  annotations: {}
+  nameOverride: airstore
+
+# -- Airstore's configuration.
+# https://github.com/beam-cloud/airstore/blob/main/pkg/common/config.default.yaml
+config:
+  mode: remote
+  clusterName: airstore
+  debugMode: false
+  prettyLogs: false
+
+images:
+  gateway:
+    repository: public.ecr.aws/n4e0e1y0/airstore-gateway
+    tag:        # Defaults to chart's app version
+    pullPolicy: # Defaults to IfNotPresent
+
+controllers:
+  gateway:
+    annotations: {}
+    labels: {}
+    replicas: 1
+    strategy: Recreate # Can be Recreate or RollingUpdate
+    rollingUpdate:
+      unavailable:
+      surge:
+    initContainers:
+      wait-on-backends:
+        image:
+          repository: busybox
+          tag: 1.37.0
+        command:
+        - sh
+        - -c
+        - |
+          until nc -z postgresql 5432; do echo "Waiting on PostgreSQL..."; sleep 2; done;
+          until nc -z redis-master 6379; do echo "Waiting on Redis..."; sleep 2; done;
+          echo "All systems ready!"
+
+persistence:
+  images:
+    enabled: false
+
+service:
+  gateway:
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port: "9090"
+    labels: {}
+    ports:
+      grpc:
+        port: 1993
+        targetPort: 1993
+        protocol: TCP
+      http:
+        primary: true
+        port: 1994
+        targetPort: 1994
+        protocol: TCP
+      metrics:
+        port: 9090
+        targetPort: 9090
+        protocol: TCP
+    type: ClusterIP
+
+ingress:
+  gateway:
+    enabled: false
+    annotations: {}
+    labels: {}
+
+serviceAccount:
+  create: true
+  name: airstore
+  annotations: {}
+  labels: {}
+
+# -- Needed by Gateway (disabled by default for production - use external services)
+redis:
+  enabled: false
+  nameOverride: redis
+  fullnameOverride: redis
+  architecture: standalone
+  auth:
+    enabled: false
+  master:
+    configuration: |
+      activedefrag yes
+      notify-keyspace-events AKE
+    persistence:
+      size: 1Gi
+
+# -- Needed by Gateway (disabled by default for production - use external services)
+postgresql:
+  enabled: false
+  nameOverride: postgresql
+  fullnameOverride: postgresql
+  global:
+    postgresql:
+      auth:
+        username: airstore
+        password: airstore
+        database: airstore
+  primary:
+    extendedConfiguration: |
+      max_connections=400
+      shared_buffers='400MB'
+  volumePermissions:
+    enabled: true
+  persistence:
+    enabled: true
+    size: 1Gi
+
+# -- Used to add any custom manifests
+manifests:
+  resources: []
+  templates: []

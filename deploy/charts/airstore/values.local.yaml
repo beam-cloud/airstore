@@ -1,0 +1,47 @@
+# Local development values
+# Usage: helm install airstore ./deploy/charts/airstore -f ./deploy/charts/airstore/values.local.yaml
+
+images:
+  gateway:
+    repository: registry.localhost:5000/airstore-gateway
+    pullPolicy: Always
+
+controllers:
+  gateway:
+    initContainers:
+      wait-on-backends:
+        command:
+        - sh
+        - -c
+        - |
+          until nc -z postgresql 5432; do echo "Waiting on PostgreSQL..."; sleep 2; done;
+          until nc -z redis-master 6379; do echo "Waiting on Redis..."; sleep 2; done;
+          echo "All systems ready!"
+
+service:
+  gateway:
+    type: LoadBalancer
+
+# Enable local dependencies
+redis:
+  enabled: true
+
+postgresql:
+  enabled: true
+
+config:
+  mode: remote
+  debugMode: true
+  prettyLogs: true
+  database:
+    redis:
+      mode: single
+      addrs: ["redis-master:6379"]
+      enableTLS: false
+    postgres:
+      host: postgresql
+      port: 5432
+      user: airstore
+      password: airstore
+      database: airstore
+      sslMode: disable
