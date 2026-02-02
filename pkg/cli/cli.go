@@ -7,6 +7,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// Build information (injected at compile time via ldflags)
+var (
+	Version = "dev"
+	Release = false // true in release builds, controls logging defaults
+)
+
 var (
 	gatewayAddr     string
 	gatewayHTTPAddr string
@@ -14,12 +20,15 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "cli",
-	Short: "Airstore CLI",
-	Long:  `Command-line interface for managing workspaces, members, tokens, integrations, and mounting the filesystem.`,
+	Use:     "airstore",
+	Short:   "Airstore CLI",
+	Long:    `Command-line interface for managing workspaces, members, tokens, integrations, and mounting the filesystem.`,
+	Version: Version,
 }
 
 func init() {
+	configureLogging()
+
 	rootCmd.PersistentFlags().StringVar(&gatewayAddr, "gateway", getEnv("AIRSTORE_GATEWAY", "localhost:1993"), "Gateway gRPC address")
 	rootCmd.PersistentFlags().StringVar(&gatewayHTTPAddr, "gateway-http", getEnv("AIRSTORE_GATEWAY_HTTP", "http://localhost:1994"), "Gateway HTTP address")
 	rootCmd.PersistentFlags().StringVar(&authToken, "token", getEnv("AIRSTORE_TOKEN", ""), "Authentication token")
@@ -30,6 +39,17 @@ func init() {
 	rootCmd.AddCommand(connectionCmd)
 	rootCmd.AddCommand(taskCmd)
 	rootCmd.AddCommand(mountCmd)
+}
+
+// configureLogging sets up logging defaults based on build type
+func configureLogging() {
+	if os.Getenv("BAML_LOG") == "" {
+		if Release {
+			os.Setenv("BAML_LOG", "off")
+		} else {
+			os.Setenv("BAML_LOG", "info")
+		}
+	}
 }
 
 // Execute runs the CLI
