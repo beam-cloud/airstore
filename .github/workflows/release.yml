@@ -1,0 +1,248 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (e.g., 0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: write
+  actions: write
+
+jobs:
+  # Extract version from tag or input
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Extract version
+        id: version
+        run: |
+          if [[ ! -z "${{ inputs.version }}" ]]; then
+            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            # Strip 'v' prefix from tag
+            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          fi
+
+  # Build CLI binaries for all platforms
+  cli:
+    needs: prepare
+    name: cli (${{ matrix.platform.target_alt }})
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            target_alt: darwin-arm64
+          - os: macos-15-intel
+            goos: darwin
+            goarch: amd64
+            target_alt: darwin-amd64
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            target_alt: linux-amd64
+          - os: ubuntu-24.04-arm64
+            goos: linux
+            goarch: arm64
+            target_alt: linux-arm64
+
+    runs-on: ${{ matrix.platform.os }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install FUSE libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse-dev libfuse3-dev
+
+      - name: Install FUSE libraries (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install macfuse
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.platform.goos }}
+          GOARCH: ${{ matrix.platform.goarch }}
+          CGO_ENABLED: 1
+        run: |
+          go build -ldflags="-s -w \
+            -X github.com/beam-cloud/airstore/pkg/cli.Version=${{ needs.prepare.outputs.version }} \
+            -X github.com/beam-cloud/airstore/pkg/cli.Release=true" \
+            -o airstore ./cmd/cli
+
+      - name: Prepare artifact
+        env:
+          GZIP: "-9"
+        run: |
+          tar -cvzf airstore-${{ needs.prepare.outputs.version }}-${{ matrix.platform.target_alt }}.tar.gz airstore
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: airstore-${{ needs.prepare.outputs.version }}-${{ matrix.platform.target_alt }}
+          path: airstore-${{ needs.prepare.outputs.version }}-${{ matrix.platform.target_alt }}.tar.gz
+          if-no-files-found: error
+
+  # Build and push Gateway Docker image
+  gateway:
+    needs: prepare
+    runs-on: ubuntu-latest
+    environment: Release
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_GITHUB }}
+          aws-region: us-east-1
+
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+        id: login-ecr
+        with:
+          registry-type: public
+          mask-password: 'true'
+
+      - name: Build and push gateway image
+        uses: docker/build-push-action@v5
+        with:
+          file: ./docker/Dockerfile.gateway
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/n4e0e1y0/airstore-gateway:${{ needs.prepare.outputs.version }}
+            ${{ steps.login-ecr.outputs.registry }}/n4e0e1y0/airstore-gateway:latest
+          target: final
+          platforms: linux/amd64
+
+  # Build and push Worker Docker image
+  worker:
+    needs: prepare
+    runs-on: ubuntu-latest
+    environment: Release
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_GITHUB }}
+          aws-region: us-east-1
+
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+        id: login-ecr
+        with:
+          registry-type: public
+          mask-password: 'true'
+
+      - name: Build and push worker image
+        uses: docker/build-push-action@v5
+        with:
+          file: ./docker/Dockerfile.worker
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/n4e0e1y0/airstore-worker:${{ needs.prepare.outputs.version }}
+            ${{ steps.login-ecr.outputs.registry }}/n4e0e1y0/airstore-worker:latest
+          target: final
+          platforms: linux/amd64
+
+  # Package and push Helm chart
+  helm:
+    needs: [prepare, gateway]
+    runs-on: ubuntu-latest
+    environment: Release
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.14.3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_GITHUB }}
+          aws-region: us-east-1
+
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+        id: login-ecr
+        with:
+          registry-type: public
+          mask-password: 'true'
+
+      - name: Package and push Helm chart
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          REGISTRY_ALIAS: n4e0e1y0
+          REPOSITORY: airstore-chart
+        run: |
+          cd deploy/charts
+          helm dependency update ./airstore
+          helm package ./airstore --version ${{ needs.prepare.outputs.version }} --app-version ${{ needs.prepare.outputs.version }}
+          helm push $REPOSITORY-${{ needs.prepare.outputs.version }}.tgz oci://$REGISTRY/$REGISTRY_ALIAS
+
+  # Create GitHub release and upload CLI artifacts
+  release:
+    needs: [prepare, cli, gateway, worker, helm]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all CLI artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: airstore-${{ needs.prepare.outputs.version }}-*
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          # Create release if triggered by tag
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            gh release create "v${VERSION}" \
+              --repo "${{ github.repository }}" \
+              --title "v${VERSION}" \
+              --generate-notes \
+              airstore-*.tar.gz
+          else
+            # For workflow_dispatch, create release manually
+            gh release create "v${VERSION}" \
+              --repo "${{ github.repository }}" \
+              --title "v${VERSION}" \
+              --notes "Release v${VERSION}" \
+              airstore-*.tar.gz
+          fi
