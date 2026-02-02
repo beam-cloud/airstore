@@ -24,7 +24,11 @@ jobs:
           cache: true
 
       - name: Install dependencies
-        run: go mod download
+        run: |
+          # Install FUSE dev libraries (required for cgofuse compilation)
+          sudo apt-get update
+          sudo apt-get install -y libfuse-dev libfuse3-dev
+          go mod download
 
       - name: Run tests
         run: |
@@ -50,12 +54,16 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Install FUSE libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse-dev libfuse3-dev
+
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v4
         with:
           version: latest
-          # Skip filesystem package - requires FUSE headers
-          args: --timeout=5m --skip-dirs=pkg/filesystem
+          args: --timeout=5m
 
   proto:
     name: Protobuf Check
