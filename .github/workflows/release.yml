@@ -222,23 +222,23 @@ jobs:
           pattern: airstore-${{ needs.prepare.outputs.version }}-*
           merge-multiple: true
 
-      - name: Create GitHub Release
+      - name: Upload to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          # Create release if triggered by tag
-          if [[ "${{ github.event_name }}" == "push" ]]; then
+          # Check if release already exists
+          if gh release view "v${VERSION}" --repo "${{ github.repository }}" > /dev/null 2>&1; then
+            echo "Release v${VERSION} exists, uploading artifacts..."
+            gh release upload "v${VERSION}" \
+              --repo "${{ github.repository }}" \
+              --clobber \
+              airstore-*.tar.gz
+          else
+            echo "Creating release v${VERSION}..."
             gh release create "v${VERSION}" \
               --repo "${{ github.repository }}" \
               --title "v${VERSION}" \
               --generate-notes \
-              airstore-*.tar.gz
-          else
-            # For workflow_dispatch, create release manually
-            gh release create "v${VERSION}" \
-              --repo "${{ github.repository }}" \
-              --title "v${VERSION}" \
-              --notes "Release v${VERSION}" \
               airstore-*.tar.gz
           fi
