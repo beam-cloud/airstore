@@ -19,9 +19,6 @@ type WorkerPoolConfig struct {
 	// ScaleDownDelay is how long queue must be empty before scaling down
 	ScaleDownDelay time.Duration `key:"scaleDownDelay" json:"scale_down_delay"`
 
-	// WorkerImage is the container image for workers (uses default if empty)
-	WorkerImage string `key:"workerImage" json:"worker_image"`
-
 	// Cpu is the CPU request/limit for workers (e.g., "500m", "1")
 	Cpu string `key:"cpu" json:"cpu"`
 

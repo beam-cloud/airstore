@@ -95,7 +95,6 @@ func (s *Scheduler) initializePools() error {
 			MinReplicas:    1,
 			MaxReplicas:    10,
 			ScaleDownDelay: 5 * time.Minute,
-			WorkerImage:    s.config.Scheduler.WorkerImage,
 		})
 	}
 
@@ -194,7 +193,7 @@ func (s *Scheduler) buildScalerConfig(poolName string, poolConfig types.WorkerPo
 		MaxReplicas:        poolConfig.MaxReplicas,
 		ScaleDownDelay:     poolConfig.ScaleDownDelay,
 		ScalingInterval:    defaultScalingInterval,
-		WorkerImage:        poolConfig.WorkerImage,
+		WorkerImage:        s.config.Scheduler.WorkerImage,
 		WorkerCpu:          poolConfig.Cpu,
 		WorkerMemory:       poolConfig.Memory,
 		GatewayServiceName: s.config.Scheduler.GatewayServiceName,
