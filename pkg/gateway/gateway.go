@@ -561,7 +561,8 @@ func (g *Gateway) initSources() {
 	g.sourceRegistry.Register(providers.NewGmailProvider())
 	g.sourceRegistry.Register(providers.NewNotionProvider())
 	g.sourceRegistry.Register(providers.NewGDriveProvider())
-	log.Debug().Strs("providers", g.sourceRegistry.List()).Msg("source providers registered")
+	
+	log.Info().Strs("providers", g.sourceRegistry.List()).Msg("source providers registered")
 }
 
 // initTools initializes the tool system by loading schemas and registering clients

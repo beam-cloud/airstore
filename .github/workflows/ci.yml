@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install dependencies
+        run: |
+          # Install FUSE dev libraries (required for cgofuse compilation)
+          sudo apt-get update
+          sudo apt-get install -y libfuse-dev libfuse3-dev
+          go mod download
+
+      - name: Run tests
+        run: |
+          # Skip filesystem package - requires FUSE headers and privileged access
+          go test -v -race -coverprofile=coverage.out $(go list ./pkg/... | grep -v '/filesystem')
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.out
+          fail_ci_if_error: false
+
+  proto:
+    name: Protobuf Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install protoc
+        env:
+          PROTOC_VERSION: "25.1"  # Corresponds to protoc v4.25.1
+        run: |
+          curl -sSfL "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip" -o protoc.zip
+          sudo unzip -o protoc.zip -d /usr/local bin/protoc
+          sudo unzip -o protoc.zip -d /usr/local 'include/*'
+          rm protoc.zip
+          protoc --version
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.31.0
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.3.0
+
+      - name: Generate protobuf
+        run: bash bin/gen_proto.sh
+
+      - name: Check for changes 
+        run: |
+          if [[ -n $(git status --porcelain proto/) ]]; then
+            echo "Protobuf files are out of sync. Run 'make protocol' and commit the changes."
+            git diff proto/
+            exit 1
+          fi
