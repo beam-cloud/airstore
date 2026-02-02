@@ -252,9 +252,14 @@ func (g *Gateway) initGRPC() error {
 
 	g.grpcServer = grpc.NewServer(serverOptions...)
 
-	healthServer := health.NewServer()
-	grpc_health_v1.RegisterHealthServer(g.grpcServer, healthServer)
-	healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
+	// Register health service
+	hs := health.NewServer()
+	hs.Resume()
+	go func() {
+		<-g.ctx.Done()
+		hs.Shutdown()
+	}()
+	grpc_health_v1.RegisterHealthServer(g.grpcServer, hs)
 
 	return nil
 }
