@@ -54,10 +54,6 @@ jobs:
             goos: linux
             goarch: amd64
             target_alt: linux-amd64
-          - os: ubuntu-24.04-arm64
-            goos: linux
-            goarch: arm64
-            target_alt: linux-arm64
 
     runs-on: ${{ matrix.platform.os }}
     steps:
