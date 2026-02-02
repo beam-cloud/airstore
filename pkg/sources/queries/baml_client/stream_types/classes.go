@@ -248,6 +248,66 @@ func (c GmailQueryResult) BamlTypeName() string {
 	return "GmailQueryResult"
 }
 
+type LinearQueryResult struct {
+	Linear_query    *string `json:"linear_query"`
+	Search_type     *string `json:"search_type"`
+	Limit           *int64  `json:"limit"`
+	Filename_format *string `json:"filename_format"`
+}
+
+func (c *LinearQueryResult) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_STREAM_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_STREAM_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "LinearQueryResult" {
+		panic(fmt.Sprintf("expected LinearQueryResult, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "linear_query":
+			c.Linear_query = baml.Decode(valueHolder).Interface().(*string)
+
+		case "search_type":
+			c.Search_type = baml.Decode(valueHolder).Interface().(*string)
+
+		case "limit":
+			c.Limit = baml.Decode(valueHolder).Interface().(*int64)
+
+		case "filename_format":
+			c.Filename_format = baml.Decode(valueHolder).Interface().(*string)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class LinearQueryResult", key))
+
+		}
+	}
+
+}
+
+func (c LinearQueryResult) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["linear_query"] = c.Linear_query
+
+	fields["search_type"] = c.Search_type
+
+	fields["limit"] = c.Limit
+
+	fields["filename_format"] = c.Filename_format
+
+	return baml.EncodeClass("LinearQueryResult", fields, nil)
+}
+
+func (c LinearQueryResult) BamlTypeName() string {
+	return "LinearQueryResult"
+}
+
 type NotionQueryResult struct {
 	Notion_query    *string `json:"notion_query"`
 	Limit           *int64  `json:"limit"`
@@ -300,4 +360,58 @@ func (c NotionQueryResult) Encode() (*cffi.HostValue, error) {
 
 func (c NotionQueryResult) BamlTypeName() string {
 	return "NotionQueryResult"
+}
+
+type SlackQueryResult struct {
+	Slack_query     *string `json:"slack_query"`
+	Limit           *int64  `json:"limit"`
+	Filename_format *string `json:"filename_format"`
+}
+
+func (c *SlackQueryResult) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_STREAM_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_STREAM_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "SlackQueryResult" {
+		panic(fmt.Sprintf("expected SlackQueryResult, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "slack_query":
+			c.Slack_query = baml.Decode(valueHolder).Interface().(*string)
+
+		case "limit":
+			c.Limit = baml.Decode(valueHolder).Interface().(*int64)
+
+		case "filename_format":
+			c.Filename_format = baml.Decode(valueHolder).Interface().(*string)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class SlackQueryResult", key))
+
+		}
+	}
+
+}
+
+func (c SlackQueryResult) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["slack_query"] = c.Slack_query
+
+	fields["limit"] = c.Limit
+
+	fields["filename_format"] = c.Filename_format
+
+	return baml.EncodeClass("SlackQueryResult", fields, nil)
+}
+
+func (c SlackQueryResult) BamlTypeName() string {
+	return "SlackQueryResult"
 }

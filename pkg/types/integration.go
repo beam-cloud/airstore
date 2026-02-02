@@ -85,6 +85,22 @@ var integrations = map[ToolName]IntegrationMeta{
 		AuthType:    AuthOAuth,
 		Scope:       ScopeShared,
 	},
+	ToolSlack: {
+		Tool:        ToolSlack,
+		DisplayName: "Slack",
+		Description: "Channels, messages, and files",
+		Icon:        "slack",
+		AuthType:    AuthOAuth,
+		Scope:       ScopeShared,
+	},
+	ToolLinear: {
+		Tool:        ToolLinear,
+		DisplayName: "Linear",
+		Description: "Issues, projects, and team workflows",
+		Icon:        "square-kanban",
+		AuthType:    AuthOAuth,
+		Scope:       ScopeShared,
+	},
 }
 
 // GetIntegrationMeta returns metadata for an integration

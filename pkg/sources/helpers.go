@@ -35,6 +35,7 @@ var oauthIntegrations = map[string]bool{
 	"github": true,
 	"notion": true,
 	"slack":  true,
+	"linear": true,
 }
 
 // GenerateSourceReadme creates the README.md content for an integration
@@ -82,6 +83,9 @@ func generateReadmeMarkdown(status SourceStatus) []byte {
 	b.WriteString(status.Description)
 	b.WriteString("\n\n")
 
+	// Horizontal rule for visual separation
+	b.WriteString("---\n\n")
+
 	// Status section
 	b.WriteString("## Status\n\n")
 	b.WriteString("| Key | Value |\n")
@@ -105,6 +109,9 @@ func generateReadmeMarkdown(status SourceStatus) []byte {
 
 	b.WriteString("\n")
 
+	// Horizontal rule before next section
+	b.WriteString("---\n\n")
+
 	// Getting started or connect hint
 	if status.Connected {
 		b.WriteString("## Getting Started\n\n")
@@ -112,7 +119,9 @@ func generateReadmeMarkdown(status SourceStatus) []byte {
 		b.WriteString("```bash\n")
 		b.WriteString(fmt.Sprintf("mkdir /sources/%s/my-query\n", status.Integration))
 		b.WriteString(fmt.Sprintf("ls /sources/%s/my-query/\n", status.Integration))
-		b.WriteString("```\n")
+		b.WriteString("```\n\n")
+		// Helpful tip
+		b.WriteString("> **Tip:** Use `ls` to explore available data and `cat` to read files.\n")
 	} else {
 		b.WriteString("## Connect\n\n")
 		b.WriteString("This integration is not connected. To connect, run:\n\n")

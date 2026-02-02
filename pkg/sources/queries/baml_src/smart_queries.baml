@@ -22,11 +22,24 @@ class NotionQueryResult {
 }
 
 class GitHubQueryResult {
-  github_query string @description("GitHub search query using GitHub's search syntax")
-  search_type string @description("Type of search: 'repos', 'issues', or 'prs'")
-  content_type string @description("Content format: 'diff' for PR diffs, 'markdown' for issue/PR body, 'json' for metadata only. Default: 'markdown' for issues/prs, 'json' for repos")
+  github_query string @description("GitHub query - format depends on search_type")
+  search_type string @description("Type: repos, issues, prs, commits, releases, workflows, files, branches")
+  content_type string @description("Format: markdown (default), diff (PRs/commits), json (metadata), raw (files)")
+  limit int @description("Max results (default: 50)")
+  filename_format string @description("Filename template with placeholders like {number}, {title}, {sha}, {name}, {path}")
+}
+
+class SlackQueryResult {
+  slack_query string @description("Slack search query using Slack's search syntax")
   limit int @description("Max results to return (default: 50)")
-  filename_format string @description("Template for result filenames. Use {id}, {repo}, {number}, {title}, {type}, {state}, {author}. Example: {number}_{title}.md")
+  filename_format string @description("Template for result filenames. Use {id}, {channel}, {user}, {date}, {text}. Example: {date}_{channel}_{user}_{id}.txt")
+}
+
+class LinearQueryResult {
+  linear_query string @description("Linear issue filter query using Linear's filter syntax")
+  search_type string @description("Type of search: 'issues' or 'projects'. Default: 'issues'")
+  limit int @description("Max results to return (default: 50)")
+  filename_format string @description("Template for result filenames. Use {id}, {identifier}, {title}, {state}, {assignee}, {team}, {priority}, {date}. Example: {identifier}_{title}.md")
 }
 
 // -----------------------------------------------------------------------------
@@ -289,77 +302,263 @@ function InferNotionQuery(name: string, guidance: string?) -> NotionQueryResult 
 }
 
 // -----------------------------------------------------------------------------
+// Slack Query Inference
+// -----------------------------------------------------------------------------
+
+function InferSlackQuery(name: string, guidance: string?) -> SlackQueryResult {
+  client AnthropicClient
+  prompt #"
+    Convert a folder/file name into a Slack search query.
+    
+    Slack search supports various operators for finding messages across channels.
+    The query should find relevant messages based on the folder name intent.
+    
+    SLACK SEARCH OPERATORS:
+    - in:#channel-name - messages in a specific channel
+    - in:@username - direct messages with a user
+    - from:@username - messages from a specific user
+    - from:me - messages you sent
+    - to:me - messages sent to you (DMs)
+    - has:link - messages containing links
+    - has:reaction - messages with reactions
+    - has:star - starred messages
+    - has:pin - pinned messages
+    - before:YYYY-MM-DD - messages before a date
+    - after:YYYY-MM-DD - messages after a date
+    - during:month - messages from a specific month (e.g., during:january)
+    - on:YYYY-MM-DD - messages on a specific date
+    - is:saved - saved messages
+    
+    QUERY STRATEGY:
+    1. For channel-specific queries → use in:#channel
+    2. For user-specific queries → use from:@user
+    3. For topic searches → use keywords directly
+    4. For time-based queries → use before:, after:, during:, on:
+    5. For content type → use has:link, has:reaction, etc.
+    6. Combine operators with spaces (implicit AND) or OR
+    
+    DEFAULTS:
+    - limit: 50
+    - filename_format: {date}_{channel}_{user}_{id}.txt
+    
+    Query examples:
+    - "engineering-updates" → in:#engineering OR in:#engineering-updates
+    - "team-announcements" → in:#announcements OR in:#general announcement
+    - "from-ceo" → from:@ceo OR from:@founder
+    - "recent-links" → has:link after:2026-01-01
+    - "pinned-messages" → has:pin
+    - "design-feedback" → in:#design feedback OR in:#design-reviews
+    - "standup-notes" → standup OR "daily standup" OR in:#standup
+    - "customer-issues" → in:#support OR in:#customer-success issue OR bug
+    - "product-discussions" → in:#product OR product roadmap OR feature
+    - "onboarding" → onboarding OR "new hire" OR welcome
+    - "decisions" → decision OR decided OR "we will" OR approved
+    - "action-items" → "action item" OR TODO OR "follow up" OR assigned
+    
+    Filename format: Choose a format that makes sense for the query intent.
+    Available placeholders: {id}, {channel}, {user}, {date}, {text}
+    - For channel messages: {date}_{channel}_{user}_{id}.txt
+    - For user messages: {date}_{user}_{channel}_{id}.txt
+    - Default: {date}_{channel}_{user}_{id}.txt
+    
+    Folder/file name: {{ name }}
+    {% if guidance %}
+    
+    Additional guidance from user: {{ guidance }}
+    {% endif %}
+    
+    {{ ctx.output_format }}
+  "#
+}
+
+// -----------------------------------------------------------------------------
+// Linear Query Inference
+// -----------------------------------------------------------------------------
+
+function InferLinearQuery(name: string, guidance: string?) -> LinearQueryResult {
+  client AnthropicClient
+  prompt #"
+    Convert natural language into a Linear search query.
+    
+    CORE PRINCIPLE: Text search is powerful - use it liberally. Only add filters when intent is unambiguous.
+    
+    SYNTAX:
+    - Plain text: searches title + description (very flexible, use this a lot!)
+    - assignee:name | assignee:me - who it's assigned to
+    - state:backlog | state:todo | state:"in progress" | state:done | state:canceled
+    - priority:1 (urgent) | priority:2 (high) | priority:3 (medium) | priority:4 (low)  
+    - label:name - filter by label
+    - team:KEY - filter by team key
+    - creator:name - who created it
+    - OR - combine alternatives (use generously!)
+    
+    STRATEGY - Think about what the user ACTUALLY wants:
+    
+    1. TOPIC/FEATURE searches → mostly text search
+       "checkout bugs" → checkout bug
+       "api performance" → api performance
+       "mobile crashes" → mobile crash
+       "auth issues" → auth authentication login
+       
+    2. PERSON searches → assignee filter + text backup
+       "john's tickets" → assignee:john OR john
+       "sarah jones work" → assignee:sarah OR assignee:jones OR sarah OR jones
+       "assigned to mike" → assignee:mike
+       
+    3. STATUS/PRIORITY searches → filters
+       "my open issues" → assignee:me state:todo OR state:"in progress"
+       "urgent bugs" → priority:1 bug
+       "blocked tickets" → blocked OR blocking
+       "stuff in review" → review
+       
+    4. PROJECT/CUSTOMER searches → text search (names vary!)
+       "acme corp" → acme OR "acme corp"
+       "q1 roadmap" → q1 roadmap
+       "enterprise features" → enterprise
+       
+    5. VAGUE/BROAD searches → text search with synonyms
+       "tech debt" → "tech debt" OR refactor OR cleanup
+       "security" → security vulnerability
+       "onboarding" → onboarding OR "getting started" OR setup
+    
+    KEY RULES:
+    - When in doubt, use text search - it's flexible
+    - Use OR generously to catch variations  
+    - For multi-word names: assignee:first OR assignee:last (never the full name)
+    - Add synonyms for common concepts
+    - Don't over-filter - better to return more results than miss things
+    
+    SEARCH TYPE: "issues" (default) or "projects" (only if explicitly asking for projects list)
+    DEFAULTS: limit=50, filename_format={identifier}_{title}.md
+    
+    Folder/file name: {{ name }}
+    {% if guidance %}
+    Additional guidance: {{ guidance }}
+    {% endif %}
+    
+    {{ ctx.output_format }}
+  "#
+}
+
+// -----------------------------------------------------------------------------
 // GitHub Query Inference
 // -----------------------------------------------------------------------------
 
 function InferGitHubQuery(name: string, guidance: string?) -> GitHubQueryResult {
   client AnthropicClient
   prompt #"
-    Convert a folder/file name into a GitHub search query.
+    Convert natural language into a GitHub query. Think about what an agent would need.
     
-    GitHub Search supports three types:
-    1. **repos** - Search repositories
-    2. **issues** - Search issues
-    3. **prs** - Search pull requests
+    ═══════════════════════════════════════════════════════════════════════════════
+    SEARCH TYPES & QUERY FORMATS
+    ═══════════════════════════════════════════════════════════════════════════════
     
-    SEARCH TYPE DETECTION:
-    - Names with "repo", "repository", "project", "fork" → search_type: "repos"
-    - Names with "issue", "bug", "task" → search_type: "issues"
-    - Names with "pr", "pull", "merge", "diff" → search_type: "prs"
-    - Default to "prs" for general repo activity queries
+    1. REPOS (search_type: "repos")
+       Listing: list:org/ORGNAME or list:user/USERNAME [type:private|public]
+       Search:  language:go stars:>100 topic:ml org:company
+       
+       Examples:
+       - "beam-cloud repos" → list:org/beam-cloud
+       - "private repos in acme" → list:org/acme type:private
+       - "popular go projects" → language:go stars:>1000
+       
+    2. ISSUES (search_type: "issues")  
+       Query: repo:owner/name [is:open|closed] [label:X] [assignee:X] [author:X]
+       
+       Examples:
+       - "open bugs in beta9" → repo:beam-cloud/beta9 is:open label:bug
+       - "my issues" → assignee:@me is:open
+       - "security issues in react" → repo:facebook/react label:security
+       
+    3. PULL REQUESTS (search_type: "prs")
+       Query: repo:owner/name [is:open|closed|merged] [author:X] [review:approved]
+       
+       Examples:
+       - "open PRs in beta9" → repo:beam-cloud/beta9 is:open
+       - "merged PRs this week" → repo:owner/repo is:merged merged:>2026-01-26
+       - "PRs needing review" → repo:owner/repo is:open review:none
+       
+    4. COMMITS (search_type: "commits")
+       Query: repo:owner/name [branch:X] [author:X] [since:DATE] [path:X]
+       
+       Examples:
+       - "recent commits in beta9" → repo:beam-cloud/beta9
+       - "commits to main this week" → repo:owner/repo branch:main since:2026-01-26
+       - "john's commits" → repo:owner/repo author:john
+       - "changes to src/api" → repo:owner/repo path:src/api
+       
+    5. RELEASES (search_type: "releases")
+       Query: repo:owner/name [latest] [prerelease:true|false]
+       
+       Examples:
+       - "beta9 releases" → repo:beam-cloud/beta9
+       - "latest release of kubernetes" → repo:kubernetes/kubernetes latest
+       - "stable releases only" → repo:owner/repo prerelease:false
+       
+    6. WORKFLOW RUNS (search_type: "workflows")
+       Query: repo:owner/name [status:success|failure|in_progress] [branch:X] [event:push|pr]
+       
+       Examples:
+       - "failed CI in beta9" → repo:beam-cloud/beta9 status:failure
+       - "recent builds" → repo:owner/repo
+       - "PR checks" → repo:owner/repo event:pull_request
+       
+    7. FILES (search_type: "files")
+       Query: repo:owner/name path:PATH [ref:branch|tag|sha]
+       
+       Examples:
+       - "beta9 readme" → repo:beam-cloud/beta9 path:README.md
+       - "package.json in react" → repo:facebook/react path:package.json
+       - "config files" → repo:owner/repo path:*.yaml ref:main
+       - "src directory" → repo:owner/repo path:src/
+       
+    8. BRANCHES (search_type: "branches")
+       Query: repo:owner/name [protected:true|false]
+       
+       Examples:
+       - "beta9 branches" → repo:beam-cloud/beta9
+       - "protected branches" → repo:owner/repo protected:true
     
-    CONTENT TYPE (determines file format and content):
-    - "diff" - For PRs: fetch the actual diff/patch (extension: .diff or .patch)
-    - "markdown" - For issues/PRs: fetch body + comments as markdown (extension: .md)
-    - "json" - Metadata only (extension: .json)
+    ═══════════════════════════════════════════════════════════════════════════════
+    CONTENT TYPES (how to format the content)
+    ═══════════════════════════════════════════════════════════════════════════════
     
-    Choose content_type based on intent:
-    - "show diffs", "code changes", "patches" → content_type: "diff"
-    - "read issues", "issue content", "pr description" → content_type: "markdown"
-    - "list repos", "metadata", "releases", "forks" → content_type: "json"
-    - Default: "markdown" for issues/prs, "json" for repos
+    - "markdown" (default) - Rich formatted content, best for agents to read
+    - "diff" - Code changes (for PRs/commits)
+    - "json" - Structured metadata
+    - "raw" - Unprocessed file content (for files)
     
-    GITHUB SEARCH QUERY SYNTAX:
+    ═══════════════════════════════════════════════════════════════════════════════
+    FILENAME FORMATS (use appropriate placeholders)
+    ═══════════════════════════════════════════════════════════════════════════════
     
-    For REPOSITORIES (search_type: "repos"):
-    - language:go, language:python
-    - stars:>100, forks:>10
-    - user:username, org:orgname
-    - topic:machine-learning
-    - Example: "language:go stars:>100"
+    Repos:     {name}.md or {full_name}.json
+    Issues:    {number}_{title}.md
+    PRs:       {number}_{title}.md or {number}_{title}_diff.md
+    Commits:   {sha_short}_{message}.md
+    Releases:  {tag}_{name}.md
+    Workflows: {id}_{name}_{status}.md
+    Files:     {path} (preserve original path/name)
+    Branches:  {name}.md
     
-    For ISSUES and PRs (search_type: "issues" or "prs"):
-    - repo:owner/name (REQUIRED for specific repo)
-    - is:open, is:closed
-    - author:username, assignee:username
-    - label:bug
-    - Example: "repo:beam-cloud/beta9 is:open"
+    ═══════════════════════════════════════════════════════════════════════════════
+    SMART DETECTION
+    ═══════════════════════════════════════════════════════════════════════════════
     
-    CRITICAL RULES:
-    1. For issues/PRs in a specific repo, ALWAYS include "repo:owner/name"
-    2. Extract repo names (e.g., "beta9-prs" → repo:beam-cloud/beta9)
-    3. DO NOT include "is:issue" or "is:pr" - added automatically
-    
-    FILENAME FORMAT:
-    Use readable names with the title. All files use .md or .json extensions for preview support.
-    Available placeholders: {number}, {title}, {repo}, {author}, {state}, {type}, {id}
-    
-    - For PRs with diffs: "{number}_{title}_diff.md" (diff is wrapped in markdown code block)
-    - For PRs/issues content: "{number}_{title}.md"
-    - For repos: "{name}.json"
-    - For metadata: "{number}_{title}.json"
-    
-    EXAMPLES:
-    - "open-prs-beta9" → search_type: "prs", content_type: "markdown", filename_format: "{number}_{title}.md"
-    - "beta9-diffs" → search_type: "prs", content_type: "diff", filename_format: "{number}_{title}_diff.md"
-    - "beta9-bugs" → search_type: "issues", content_type: "markdown", filename_format: "{number}_{title}.md"
-    - "go-cli-repos" → search_type: "repos", content_type: "json", filename_format: "{name}.json"
-    - "recent-releases" → search_type: "repos", content_type: "json", filename_format: "{name}.json"
+    Detect intent from keywords:
+    - "repos/repositories/projects" in org/user → repos listing
+    - "prs/pulls/pull requests/merge requests" → prs
+    - "issues/bugs/tickets/tasks" → issues
+    - "commits/history/changes/log" → commits  
+    - "releases/versions/tags" → releases
+    - "ci/cd/builds/workflows/actions/checks" → workflows
+    - "readme/config/file/code" → files
+    - "branches" → branches
+    - "diff/patch/changes" → content_type: diff
     
     Folder/file name: {{ name }}
     {% if guidance %}
-    
-    Additional guidance from user: {{ guidance }}
+    Additional guidance: {{ guidance }}
     {% endif %}
     
     {{ ctx.output_format }}
@@ -563,5 +762,85 @@ test TestEvaluateGmailResults_GoodResults {
     generated_query "invoice from:stripe"
     result_count 15
     sample_results "[{\"from\":\"Stripe\",\"subject\":\"Your invoice from Acme Corp\",\"snippet\":\"Invoice #12345...\"},{\"from\":\"Stripe Billing\",\"subject\":\"Invoice for January\",\"snippet\":\"Amount due: $99\"}]"
+  }
+}
+
+test TestSlackEngineering {
+  functions [InferSlackQuery]
+  args {
+    name "engineering-updates"
+    guidance null
+  }
+}
+
+test TestSlackFromCEO {
+  functions [InferSlackQuery]
+  args {
+    name "from-ceo"
+    guidance "messages from our CEO"
+  }
+}
+
+test TestSlackRecentLinks {
+  functions [InferSlackQuery]
+  args {
+    name "recent-links"
+    guidance null
+  }
+}
+
+test TestSlackStandups {
+  functions [InferSlackQuery]
+  args {
+    name "standup-notes"
+    guidance null
+  }
+}
+
+test TestSlackDecisions {
+  functions [InferSlackQuery]
+  args {
+    name "team-decisions"
+    guidance "important decisions made by the team"
+  }
+}
+
+test TestLinearMyIssues {
+  functions [InferLinearQuery]
+  args {
+    name "my-issues"
+    guidance null
+  }
+}
+
+test TestLinearMyBugs {
+  functions [InferLinearQuery]
+  args {
+    name "my-bugs"
+    guidance "bugs assigned to me"
+  }
+}
+
+test TestLinearUrgent {
+  functions [InferLinearQuery]
+  args {
+    name "urgent-issues"
+    guidance null
+  }
+}
+
+test TestLinearTeamBacklog {
+  functions [InferLinearQuery]
+  args {
+    name "eng-backlog"
+    guidance "engineering team backlog"
+  }
+}
+
+test TestLinearInProgress {
+  functions [InferLinearQuery]
+  args {
+    name "in-progress"
+    guidance null
   }
 }

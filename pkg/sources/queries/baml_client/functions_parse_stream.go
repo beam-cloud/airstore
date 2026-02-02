@@ -213,6 +213,53 @@ func (*parse_stream) InferGmailQuery(text string, opts ...CallOptionFunc) (strea
 	return casted, nil
 }
 
+// / Parse version of InferLinearQuery (Takes in string and returns stream_types.LinearQueryResult)
+func (*parse_stream) InferLinearQuery(text string, opts ...CallOptionFunc) (stream_types.LinearQueryResult, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"text": text, "stream": true},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		// This should never happen. if it does, please file an issue at https://github.com/boundaryml/baml/issues
+		// and include the type of the args you're passing in.
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: InferLinearQuery: %w", err)
+		panic(wrapped_err)
+	}
+
+	result, err := bamlRuntime.CallFunctionParse(context.Background(), "InferLinearQuery", encoded)
+	if err != nil {
+		return stream_types.LinearQueryResult{}, err
+	}
+
+	casted := (result).(stream_types.LinearQueryResult)
+
+	return casted, nil
+}
+
 // / Parse version of InferNotionQuery (Takes in string and returns stream_types.NotionQueryResult)
 func (*parse_stream) InferNotionQuery(text string, opts ...CallOptionFunc) (stream_types.NotionQueryResult, error) {
 
@@ -256,6 +303,53 @@ func (*parse_stream) InferNotionQuery(text string, opts ...CallOptionFunc) (stre
 	}
 
 	casted := (result).(stream_types.NotionQueryResult)
+
+	return casted, nil
+}
+
+// / Parse version of InferSlackQuery (Takes in string and returns stream_types.SlackQueryResult)
+func (*parse_stream) InferSlackQuery(text string, opts ...CallOptionFunc) (stream_types.SlackQueryResult, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"text": text, "stream": true},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		// This should never happen. if it does, please file an issue at https://github.com/boundaryml/baml/issues
+		// and include the type of the args you're passing in.
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: InferSlackQuery: %w", err)
+		panic(wrapped_err)
+	}
+
+	result, err := bamlRuntime.CallFunctionParse(context.Background(), "InferSlackQuery", encoded)
+	if err != nil {
+		return stream_types.SlackQueryResult{}, err
+	}
+
+	casted := (result).(stream_types.SlackQueryResult)
 
 	return casted, nil
 }

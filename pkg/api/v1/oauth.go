@@ -34,6 +34,7 @@ func NewOAuthGroup(g *echo.Group, store *oauth.Store, registry *oauth.Registry, 
 	g.GET("/github/callback", og.ProviderCallback("github"))
 	g.GET("/notion/callback", og.ProviderCallback("notion"))
 	g.GET("/slack/callback", og.ProviderCallback("slack"))
+	g.GET("/linear/callback", og.ProviderCallback("linear"))
 
 	return og
 }

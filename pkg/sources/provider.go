@@ -109,6 +109,10 @@ func DefaultFilenameFormat(integration string) string {
 		return "{title}_{id}.md"
 	case "github":
 		return "{repo}_{type}_{number}_{id}.json"
+	case "slack":
+		return "{date}_{channel}_{user}_{id}.txt"
+	case "linear":
+		return "{identifier}_{title}.md"
 	default:
 		return "{id}"
 	}

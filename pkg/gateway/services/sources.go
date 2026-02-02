@@ -985,6 +985,22 @@ func (s *SourceService) inferQuerySpec(ctx context.Context, integration, name, g
 		data, _ := json.Marshal(result)
 		return string(data), extractFilenameFormat(data), nil
 
+	case "slack":
+		result, err := baml.InferSlackQuery(ctx, name, guidancePtr)
+		if err != nil {
+			return "", "", err
+		}
+		data, _ := json.Marshal(result)
+		return string(data), extractFilenameFormat(data), nil
+
+	case "linear":
+		result, err := baml.InferLinearQuery(ctx, name, guidancePtr)
+		if err != nil {
+			return "", "", err
+		}
+		data, _ := json.Marshal(result)
+		return string(data), extractFilenameFormat(data), nil
+
 	default:
 		return "", "", fmt.Errorf("unsupported integration: %s", integration)
 	}
@@ -1351,6 +1367,8 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 		GDriveQuery    string `json:"gdrive_query"`
 		NotionQuery    string `json:"notion_query"`
 		GitHubQuery    string `json:"github_query"`
+		SlackQuery     string `json:"slack_query"`
+		LinearQuery    string `json:"linear_query"`
 		SearchType     string `json:"search_type"`
 		ContentType    string `json:"content_type"`
 		Limit          int    `json:"limit"`
@@ -1384,6 +1402,10 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 		query = spec.NotionQuery
 	case "github":
 		query = spec.GitHubQuery
+	case "slack":
+		query = spec.SlackQuery
+	case "linear":
+		query = spec.LinearQuery
 	}
 
 	filenameFormat := spec.FilenameFormat

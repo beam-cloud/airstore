@@ -306,6 +306,7 @@ type IntegrationOAuth struct {
 	GitHub IntegrationGitHubOAuth  `key:"github" json:"github"`
 	Notion IntegrationNotionOAuth  `key:"notion" json:"notion"`
 	Slack  IntegrationSlackOAuth   `key:"slack" json:"slack"`
+	Linear IntegrationLinearOAuth  `key:"linear" json:"linear"`
 }
 
 // IntegrationGoogleOAuth configures Google OAuth for workspace integrations
@@ -334,4 +335,11 @@ type IntegrationSlackOAuth struct {
 	ClientID     string `key:"clientId" json:"client_id"`
 	ClientSecret string `key:"clientSecret" json:"client_secret"`
 	RedirectURL  string `key:"redirectUrl" json:"redirect_url"` // e.g., http://localhost:1994/api/v1/oauth/slack/callback
+}
+
+// IntegrationLinearOAuth configures Linear OAuth for workspace integrations
+type IntegrationLinearOAuth struct {
+	ClientID     string `key:"clientId" json:"client_id"`
+	ClientSecret string `key:"clientSecret" json:"client_secret"`
+	RedirectURL  string `key:"redirectUrl" json:"redirect_url"` // e.g., http://localhost:1994/api/v1/oauth/linear/callback
 }

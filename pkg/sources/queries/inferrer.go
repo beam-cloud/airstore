@@ -35,3 +35,18 @@ type GitHubQuerySpec struct {
 	Limit          int    `json:"limit"`
 	FilenameFormat string `json:"filename_format"`
 }
+
+// SlackQuerySpec is the output format for Slack queries.
+type SlackQuerySpec struct {
+	Query          string `json:"slack_query"`
+	Limit          int    `json:"limit"`
+	FilenameFormat string `json:"filename_format"`
+}
+
+// LinearQuerySpec is the output format for Linear queries.
+type LinearQuerySpec struct {
+	Query          string `json:"linear_query"`
+	SearchType     string `json:"search_type"` // "issues" or "projects"
+	Limit          int    `json:"limit"`
+	FilenameFormat string `json:"filename_format"`
+}

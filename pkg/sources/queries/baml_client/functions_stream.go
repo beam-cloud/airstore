@@ -338,6 +338,80 @@ func (*stream) InferGmailQuery(ctx context.Context, name string, guidance *strin
 	return channel, nil
 }
 
+// / Streaming version of InferLinearQuery
+func (*stream) InferLinearQuery(ctx context.Context, name string, guidance *string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.LinearQueryResult, types.LinearQueryResult], error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"name": name, "guidance": guidance},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		// This should never happen. if it does, please file an issue at https://github.com/boundaryml/baml/issues
+		// and include the type of the args you're passing in.
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: InferLinearQuery: %w", err)
+		panic(wrapped_err)
+	}
+
+	internal_channel, err := bamlRuntime.CallFunctionStream(ctx, "InferLinearQuery", encoded, callOpts.onTick)
+	if err != nil {
+		return nil, err
+	}
+
+	channel := make(chan StreamValue[stream_types.LinearQueryResult, types.LinearQueryResult])
+	go func() {
+		for result := range internal_channel {
+			if result.Error != nil {
+				channel <- StreamValue[stream_types.LinearQueryResult, types.LinearQueryResult]{
+					IsError: true,
+					Error:   result.Error,
+				}
+				close(channel)
+				return
+			}
+			if result.HasData {
+				data := (result.Data).(types.LinearQueryResult)
+				channel <- StreamValue[stream_types.LinearQueryResult, types.LinearQueryResult]{
+					IsFinal:  true,
+					as_final: &data,
+				}
+			} else {
+				data := (result.StreamData).(stream_types.LinearQueryResult)
+				channel <- StreamValue[stream_types.LinearQueryResult, types.LinearQueryResult]{
+					IsFinal:   false,
+					as_stream: &data,
+				}
+			}
+		}
+
+		// when internal_channel is closed, close the output too
+		close(channel)
+	}()
+	return channel, nil
+}
+
 // / Streaming version of InferNotionQuery
 func (*stream) InferNotionQuery(ctx context.Context, name string, guidance *string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.NotionQueryResult, types.NotionQueryResult], error) {
 
@@ -400,6 +474,80 @@ func (*stream) InferNotionQuery(ctx context.Context, name string, guidance *stri
 			} else {
 				data := (result.StreamData).(stream_types.NotionQueryResult)
 				channel <- StreamValue[stream_types.NotionQueryResult, types.NotionQueryResult]{
+					IsFinal:   false,
+					as_stream: &data,
+				}
+			}
+		}
+
+		// when internal_channel is closed, close the output too
+		close(channel)
+	}()
+	return channel, nil
+}
+
+// / Streaming version of InferSlackQuery
+func (*stream) InferSlackQuery(ctx context.Context, name string, guidance *string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.SlackQueryResult, types.SlackQueryResult], error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"name": name, "guidance": guidance},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		// This should never happen. if it does, please file an issue at https://github.com/boundaryml/baml/issues
+		// and include the type of the args you're passing in.
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: InferSlackQuery: %w", err)
+		panic(wrapped_err)
+	}
+
+	internal_channel, err := bamlRuntime.CallFunctionStream(ctx, "InferSlackQuery", encoded, callOpts.onTick)
+	if err != nil {
+		return nil, err
+	}
+
+	channel := make(chan StreamValue[stream_types.SlackQueryResult, types.SlackQueryResult])
+	go func() {
+		for result := range internal_channel {
+			if result.Error != nil {
+				channel <- StreamValue[stream_types.SlackQueryResult, types.SlackQueryResult]{
+					IsError: true,
+					Error:   result.Error,
+				}
+				close(channel)
+				return
+			}
+			if result.HasData {
+				data := (result.Data).(types.SlackQueryResult)
+				channel <- StreamValue[stream_types.SlackQueryResult, types.SlackQueryResult]{
+					IsFinal:  true,
+					as_final: &data,
+				}
+			} else {
+				data := (result.StreamData).(stream_types.SlackQueryResult)
+				channel <- StreamValue[stream_types.SlackQueryResult, types.SlackQueryResult]{
 					IsFinal:   false,
 					as_stream: &data,
 				}

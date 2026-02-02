@@ -559,50 +559,114 @@ func (n *NotionProvider) fetchPage(ctx context.Context, token, pageId string) ([
 }
 
 func (n *NotionProvider) fetchPageAsMarkdown(ctx context.Context, token, pageId string) ([]byte, error) {
-	// Fetch page properties for title
+	// Fetch page properties for title and metadata
 	var page map[string]any
 	if err := n.request(ctx, token, "/pages/"+pageId, &page); err != nil {
 		return nil, err
 	}
 
-	// Fetch blocks
-	var blocksResult map[string]any
-	if err := n.request(ctx, token, "/blocks/"+pageId+"/children?page_size=100", &blocksResult); err != nil {
-		return nil, err
+	// Fetch ALL blocks with pagination
+	allBlocks := make([]map[string]any, 0)
+	cursor := ""
+	for {
+		url := "/blocks/" + pageId + "/children?page_size=100"
+		if cursor != "" {
+			url += "&start_cursor=" + cursor
+		}
+
+		var blocksResult map[string]any
+		if err := n.request(ctx, token, url, &blocksResult); err != nil {
+			return nil, err
+		}
+
+		// Collect blocks
+		if results, ok := blocksResult["results"].([]any); ok {
+			for _, r := range results {
+				if block, ok := r.(map[string]any); ok {
+					allBlocks = append(allBlocks, block)
+				}
+			}
+		}
+
+		// Check for more pages
+		hasMore, _ := blocksResult["has_more"].(bool)
+		if !hasMore {
+			break
+		}
+		nextCursor, _ := blocksResult["next_cursor"].(string)
+		if nextCursor == "" {
+			break
+		}
+		cursor = nextCursor
 	}
 
 	// Build markdown
 	var md strings.Builder
 
+	// Page metadata header
+	createdTime, _ := page["created_time"].(string)
+	lastEdited, _ := page["last_edited_time"].(string)
+	pageURL, _ := page["url"].(string)
+
 	// Title
+	title := "Untitled"
 	if props, ok := page["properties"].(map[string]any); ok {
-		if title, ok := props["title"].(map[string]any); ok {
-			if titleArr, ok := title["title"].([]any); ok && len(titleArr) > 0 {
+		if titleProp, ok := props["title"].(map[string]any); ok {
+			if titleArr, ok := titleProp["title"].([]any); ok && len(titleArr) > 0 {
 				if titleObj, ok := titleArr[0].(map[string]any); ok {
 					if text, ok := titleObj["plain_text"].(string); ok {
-						md.WriteString("# " + text + "\n\n")
+						title = text
+					}
+				}
+			}
+		}
+		// Try Name property
+		if title == "Untitled" {
+			if nameProp, ok := props["Name"].(map[string]any); ok {
+				if titleArr, ok := nameProp["title"].([]any); ok && len(titleArr) > 0 {
+					if titleObj, ok := titleArr[0].(map[string]any); ok {
+						if text, ok := titleObj["plain_text"].(string); ok {
+							title = text
+						}
 					}
 				}
 			}
 		}
 	}
 
-	// Blocks to markdown
-	if results, ok := blocksResult["results"].([]any); ok {
-		for _, r := range results {
-			block, ok := r.(map[string]any)
-			if !ok {
-				continue
+	md.WriteString("# " + title + "\n\n")
+
+	// Metadata section
+	if createdTime != "" || lastEdited != "" || pageURL != "" {
+		if createdTime != "" {
+			if t, err := time.Parse(time.RFC3339, createdTime); err == nil {
+				md.WriteString(fmt.Sprintf("**Created:** %s\n", t.Format("2006-01-02 15:04")))
 			}
-			md.WriteString(blockToMarkdown(block))
 		}
+		if lastEdited != "" {
+			if t, err := time.Parse(time.RFC3339, lastEdited); err == nil {
+				md.WriteString(fmt.Sprintf("**Last edited:** %s\n", t.Format("2006-01-02 15:04")))
+			}
+		}
+		if pageURL != "" {
+			md.WriteString(fmt.Sprintf("**URL:** %s\n", pageURL))
+		}
+		md.WriteString("\n---\n\n")
+	}
+
+	// Blocks to markdown
+	for _, block := range allBlocks {
+		md.WriteString(n.blockToMarkdown(ctx, token, block, 0))
 	}
 
 	return []byte(md.String()), nil
 }
 
-func blockToMarkdown(block map[string]any) string {
+// blockToMarkdown converts a Notion block to markdown, recursively handling children
+func (n *NotionProvider) blockToMarkdown(ctx context.Context, token string, block map[string]any, depth int) string {
 	blockType, _ := block["type"].(string)
+	blockId, _ := block["id"].(string)
+	hasChildren, _ := block["has_children"].(bool)
 
 	getText := func(key string) string {
 		if content, ok := block[key].(map[string]any); ok {
@@ -621,28 +685,162 @@ func blockToMarkdown(block map[string]any) string {
 		return ""
 	}
 
+	indent := strings.Repeat("  ", depth)
+	var result strings.Builder
+
 	switch blockType {
 	case "paragraph":
-		return getText("paragraph") + "\n\n"
+		text := getText("paragraph")
+		if text != "" {
+			result.WriteString(indent + text + "\n\n")
+		}
 	case "heading_1":
-		return "# " + getText("heading_1") + "\n\n"
+		result.WriteString(indent + "# " + getText("heading_1") + "\n\n")
 	case "heading_2":
-		return "## " + getText("heading_2") + "\n\n"
+		result.WriteString(indent + "## " + getText("heading_2") + "\n\n")
 	case "heading_3":
-		return "### " + getText("heading_3") + "\n\n"
+		result.WriteString(indent + "### " + getText("heading_3") + "\n\n")
 	case "bulleted_list_item":
-		return "- " + getText("bulleted_list_item") + "\n"
+		result.WriteString(indent + "- " + getText("bulleted_list_item") + "\n")
 	case "numbered_list_item":
-		return "1. " + getText("numbered_list_item") + "\n"
+		result.WriteString(indent + "1. " + getText("numbered_list_item") + "\n")
+	case "to_do":
+		checked := false
+		if content, ok := block["to_do"].(map[string]any); ok {
+			checked, _ = content["checked"].(bool)
+		}
+		checkbox := "[ ]"
+		if checked {
+			checkbox = "[x]"
+		}
+		result.WriteString(indent + "- " + checkbox + " " + getText("to_do") + "\n")
+	case "toggle":
+		result.WriteString(indent + "<details>\n")
+		result.WriteString(indent + "<summary>" + getText("toggle") + "</summary>\n\n")
 	case "code":
-		return "```\n" + getText("code") + "\n```\n\n"
+		lang := ""
+		if content, ok := block["code"].(map[string]any); ok {
+			lang, _ = content["language"].(string)
+		}
+		result.WriteString(indent + "```" + lang + "\n")
+		result.WriteString(getText("code") + "\n")
+		result.WriteString(indent + "```\n\n")
 	case "quote":
-		return "> " + getText("quote") + "\n\n"
+		result.WriteString(indent + "> " + getText("quote") + "\n\n")
+	case "callout":
+		icon := ""
+		if content, ok := block["callout"].(map[string]any); ok {
+			if iconObj, ok := content["icon"].(map[string]any); ok {
+				if emoji, ok := iconObj["emoji"].(string); ok {
+					icon = emoji + " "
+				}
+			}
+		}
+		result.WriteString(indent + "> " + icon + getText("callout") + "\n\n")
 	case "divider":
-		return "---\n\n"
-	default:
-		return ""
+		result.WriteString(indent + "---\n\n")
+	case "table_of_contents":
+		result.WriteString(indent + "[Table of Contents]\n\n")
+	case "child_page":
+		if content, ok := block["child_page"].(map[string]any); ok {
+			if childTitle, ok := content["title"].(string); ok {
+				result.WriteString(indent + "📄 **" + childTitle + "**\n\n")
+			}
+		}
+	case "child_database":
+		if content, ok := block["child_database"].(map[string]any); ok {
+			if dbTitle, ok := content["title"].(string); ok {
+				result.WriteString(indent + "📊 **" + dbTitle + "**\n\n")
+			}
+		}
+	case "image":
+		if content, ok := block["image"].(map[string]any); ok {
+			url := ""
+			if file, ok := content["file"].(map[string]any); ok {
+				url, _ = file["url"].(string)
+			} else if external, ok := content["external"].(map[string]any); ok {
+				url, _ = external["url"].(string)
+			}
+			caption := ""
+			if captionArr, ok := content["caption"].([]any); ok && len(captionArr) > 0 {
+				if captionObj, ok := captionArr[0].(map[string]any); ok {
+					caption, _ = captionObj["plain_text"].(string)
+				}
+			}
+			if url != "" {
+				result.WriteString(indent + fmt.Sprintf("![%s](%s)\n\n", caption, url))
+			}
+		}
+	case "bookmark":
+		if content, ok := block["bookmark"].(map[string]any); ok {
+			if url, ok := content["url"].(string); ok {
+				result.WriteString(indent + fmt.Sprintf("🔗 [%s](%s)\n\n", url, url))
+			}
+		}
+	case "link_preview":
+		if content, ok := block["link_preview"].(map[string]any); ok {
+			if url, ok := content["url"].(string); ok {
+				result.WriteString(indent + fmt.Sprintf("🔗 %s\n\n", url))
+			}
+		}
+	case "equation":
+		if content, ok := block["equation"].(map[string]any); ok {
+			if expr, ok := content["expression"].(string); ok {
+				result.WriteString(indent + fmt.Sprintf("$$%s$$\n\n", expr))
+			}
+		}
 	}
+
+	// Fetch and render children if present
+	if hasChildren && blockId != "" {
+		children := n.fetchBlockChildren(ctx, token, blockId)
+		for _, child := range children {
+			result.WriteString(n.blockToMarkdown(ctx, token, child, depth+1))
+		}
+		if blockType == "toggle" {
+			result.WriteString(indent + "</details>\n\n")
+		}
+	}
+
+	return result.String()
+}
+
+// fetchBlockChildren fetches all children of a block with pagination
+func (n *NotionProvider) fetchBlockChildren(ctx context.Context, token, blockId string) []map[string]any {
+	children := make([]map[string]any, 0)
+	cursor := ""
+
+	for {
+		url := "/blocks/" + blockId + "/children?page_size=100"
+		if cursor != "" {
+			url += "&start_cursor=" + cursor
+		}
+
+		var result map[string]any
+		if err := n.request(ctx, token, url, &result); err != nil {
+			break
+		}
+
+		if results, ok := result["results"].([]any); ok {
+			for _, r := range results {
+				if block, ok := r.(map[string]any); ok {
+					children = append(children, block)
+				}
+			}
+		}
+
+		hasMore, _ := result["has_more"].(bool)
+		if !hasMore {
+			break
+		}
+		nextCursor, _ := result["next_cursor"].(string)
+		if nextCursor == "" {
+			break
+		}
+		cursor = nextCursor
+	}
+
+	return children
 }
 
 func (n *NotionProvider) fetchDatabaseSchema(ctx context.Context, token, dbId string) ([]byte, error) {
@@ -932,11 +1130,15 @@ func (n *NotionProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provide
 		// Generate filename
 		filename := n.FormatFilename(filenameFormat, metadata)
 
+		// Use generous estimate for listings - actual size determined on Stat/Read
+		// This keeps ExecuteQuery fast (no extra API calls per result)
+		estimatedSize := int64(1 * 1024 * 1024) // 1MB
+
 		results = append(results, sources.QueryResult{
 			ID:       id,
 			Filename: filename,
 			Metadata: metadata,
-			Size:     0, // Unknown until read
+			Size:     estimatedSize,
 			Mtime:    mtime,
 		})
 	}

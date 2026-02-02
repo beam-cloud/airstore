@@ -136,6 +136,13 @@ func NewGateway() (*Gateway, error) {
 		oauthRegistry.RegisterIntegration("slack", "slack")
 	}
 
+	// Register Linear provider and its integrations
+	linearProvider := oauth.NewLinearProvider(config.OAuth.Linear)
+	oauthRegistry.Register(linearProvider)
+	if linearProvider.IsConfigured() {
+		oauthRegistry.RegisterIntegration("linear", "linear")
+	}
+
 	// Initialize S2 client for task log streaming if configured
 	var s2Client *streams.S2Client
 	if config.Streams.Token != "" && config.Streams.Basin != "" {
@@ -573,7 +580,9 @@ func (g *Gateway) initSources() {
 	g.sourceRegistry.Register(providers.NewGmailProvider())
 	g.sourceRegistry.Register(providers.NewNotionProvider())
 	g.sourceRegistry.Register(providers.NewGDriveProvider())
-	
+	g.sourceRegistry.Register(providers.NewSlackProvider())
+	g.sourceRegistry.Register(providers.NewLinearProvider())
+
 	log.Info().Strs("providers", g.sourceRegistry.List()).Msg("source providers registered")
 }
 

@@ -317,6 +317,80 @@ func InferGmailQuery(ctx context.Context, name string, guidance *string, opts ..
 	}
 }
 
+func InferLinearQuery(ctx context.Context, name string, guidance *string, opts ...CallOptionFunc) (types.LinearQueryResult, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	// Resolve client option to clientRegistry (client takes precedence)
+	if callOpts.client != nil {
+		if callOpts.clientRegistry == nil {
+			callOpts.clientRegistry = baml.NewClientRegistry()
+		}
+		callOpts.clientRegistry.SetPrimaryClient(*callOpts.client)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"name": name, "guidance": guidance},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		panic(err)
+	}
+
+	if callOpts.onTick == nil {
+		result, err := bamlRuntime.CallFunction(ctx, "InferLinearQuery", encoded, callOpts.onTick)
+		if err != nil {
+			return types.LinearQueryResult{}, err
+		}
+
+		if result.Error != nil {
+			return types.LinearQueryResult{}, result.Error
+		}
+
+		casted := (result.Data).(types.LinearQueryResult)
+
+		return casted, nil
+	} else {
+		channel, err := bamlRuntime.CallFunctionStream(ctx, "InferLinearQuery", encoded, callOpts.onTick)
+		if err != nil {
+			return types.LinearQueryResult{}, err
+		}
+
+		for result := range channel {
+			if result.Error != nil {
+				return types.LinearQueryResult{}, result.Error
+			}
+
+			if result.HasData {
+				return result.Data.(types.LinearQueryResult), nil
+			}
+		}
+
+		return types.LinearQueryResult{}, fmt.Errorf("No data returned from stream")
+	}
+}
+
 func InferNotionQuery(ctx context.Context, name string, guidance *string, opts ...CallOptionFunc) (types.NotionQueryResult, error) {
 
 	var callOpts callOption
@@ -388,5 +462,79 @@ func InferNotionQuery(ctx context.Context, name string, guidance *string, opts .
 		}
 
 		return types.NotionQueryResult{}, fmt.Errorf("No data returned from stream")
+	}
+}
+
+func InferSlackQuery(ctx context.Context, name string, guidance *string, opts ...CallOptionFunc) (types.SlackQueryResult, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	// Resolve client option to clientRegistry (client takes precedence)
+	if callOpts.client != nil {
+		if callOpts.clientRegistry == nil {
+			callOpts.clientRegistry = baml.NewClientRegistry()
+		}
+		callOpts.clientRegistry.SetPrimaryClient(*callOpts.client)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"name": name, "guidance": guidance},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		panic(err)
+	}
+
+	if callOpts.onTick == nil {
+		result, err := bamlRuntime.CallFunction(ctx, "InferSlackQuery", encoded, callOpts.onTick)
+		if err != nil {
+			return types.SlackQueryResult{}, err
+		}
+
+		if result.Error != nil {
+			return types.SlackQueryResult{}, result.Error
+		}
+
+		casted := (result.Data).(types.SlackQueryResult)
+
+		return casted, nil
+	} else {
+		channel, err := bamlRuntime.CallFunctionStream(ctx, "InferSlackQuery", encoded, callOpts.onTick)
+		if err != nil {
+			return types.SlackQueryResult{}, err
+		}
+
+		for result := range channel {
+			if result.Error != nil {
+				return types.SlackQueryResult{}, result.Error
+			}
+
+			if result.HasData {
+				return result.Data.(types.SlackQueryResult), nil
+			}
+		}
+
+		return types.SlackQueryResult{}, fmt.Errorf("No data returned from stream")
 	}
 }

@@ -29,6 +29,10 @@ var typeMap = map[string]reflect.Type{
 	"STREAM_TYPES.GmailQueryEvaluation": reflect.TypeOf(stream_types.GmailQueryEvaluation{}),
 	"TYPES.GmailQueryResult":            reflect.TypeOf(types.GmailQueryResult{}),
 	"STREAM_TYPES.GmailQueryResult":     reflect.TypeOf(stream_types.GmailQueryResult{}),
+	"TYPES.LinearQueryResult":           reflect.TypeOf(types.LinearQueryResult{}),
+	"STREAM_TYPES.LinearQueryResult":    reflect.TypeOf(stream_types.LinearQueryResult{}),
 	"TYPES.NotionQueryResult":           reflect.TypeOf(types.NotionQueryResult{}),
 	"STREAM_TYPES.NotionQueryResult":    reflect.TypeOf(stream_types.NotionQueryResult{}),
+	"TYPES.SlackQueryResult":            reflect.TypeOf(types.SlackQueryResult{}),
+	"STREAM_TYPES.SlackQueryResult":     reflect.TypeOf(stream_types.SlackQueryResult{}),
 }

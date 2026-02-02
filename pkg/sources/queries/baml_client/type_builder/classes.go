@@ -183,6 +183,50 @@ func (t *GmailQueryResultClassView) Type() (baml.Type, error) {
 	return t.inner.Type()
 }
 
+type LinearQueryResultClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *LinearQueryResultClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *LinearQueryResultClassView) PropertyLinear_query() (ClassPropertyView, error) {
+	return t.inner.Property("linear_query")
+}
+
+func (t *LinearQueryResultClassView) PropertySearch_type() (ClassPropertyView, error) {
+	return t.inner.Property("search_type")
+}
+
+func (t *LinearQueryResultClassView) PropertyLimit() (ClassPropertyView, error) {
+	return t.inner.Property("limit")
+}
+
+func (t *LinearQueryResultClassView) PropertyFilename_format() (ClassPropertyView, error) {
+	return t.inner.Property("filename_format")
+}
+
+func (t *TypeBuilder) LinearQueryResult() (*LinearQueryResultClassView, error) {
+	bld, err := t.inner.Class("LinearQueryResult")
+	if err != nil {
+		return nil, err
+	}
+	return &LinearQueryResultClassView{inner: bld}, nil
+}
+
+func (t *LinearQueryResultClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
 type NotionQueryResultClassView struct {
 	inner baml.ClassBuilder
 }
@@ -220,5 +264,45 @@ func (t *TypeBuilder) NotionQueryResult() (*NotionQueryResultClassView, error) {
 }
 
 func (t *NotionQueryResultClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
+type SlackQueryResultClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *SlackQueryResultClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *SlackQueryResultClassView) PropertySlack_query() (ClassPropertyView, error) {
+	return t.inner.Property("slack_query")
+}
+
+func (t *SlackQueryResultClassView) PropertyLimit() (ClassPropertyView, error) {
+	return t.inner.Property("limit")
+}
+
+func (t *SlackQueryResultClassView) PropertyFilename_format() (ClassPropertyView, error) {
+	return t.inner.Property("filename_format")
+}
+
+func (t *TypeBuilder) SlackQueryResult() (*SlackQueryResultClassView, error) {
+	bld, err := t.inner.Class("SlackQueryResult")
+	if err != nil {
+		return nil, err
+	}
+	return &SlackQueryResultClassView{inner: bld}, nil
+}
+
+func (t *SlackQueryResultClassView) Type() (baml.Type, error) {
 	return t.inner.Type()
 }

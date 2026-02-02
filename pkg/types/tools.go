@@ -12,6 +12,8 @@ const (
 	ToolGmail     ToolName = "gmail"
 	ToolNotion    ToolName = "notion"
 	ToolGDrive    ToolName = "gdrive"
+	ToolSlack     ToolName = "slack"
+	ToolLinear    ToolName = "linear"
 )
 
 // String returns the string representation
