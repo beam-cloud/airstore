@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
@@ -211,6 +212,16 @@ func (s *PoolScaler) buildDeployment() *appsv1.Deployment {
 			Selector: &metav1.LabelSelector{
 				MatchLabels: labels,
 			},
+			// Rolling update strategy for graceful deployments
+			// maxUnavailable: 0 ensures no workers are killed until new ones are ready
+			// maxSurge: 1 allows one new worker to start before old ones drain
+			Strategy: appsv1.DeploymentStrategy{
+				Type: appsv1.RollingUpdateDeploymentStrategyType,
+				RollingUpdate: &appsv1.RollingUpdateDeployment{
+					MaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 0},
+					MaxSurge:       &intstr.IntOrString{Type: intstr.Int, IntVal: 1},
+				},
+			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: labels,
@@ -220,6 +231,8 @@ func (s *PoolScaler) buildDeployment() *appsv1.Deployment {
 					},
 				},
 				Spec: corev1.PodSpec{
+					// Allow workers time to drain running tasks before being killed
+					TerminationGracePeriodSeconds: int64Ptr(int64(s.config.AppConfig.Scheduler.WorkerShutdownTimeout.Seconds()) + 30),
 					Containers: []corev1.Container{
 						{
 							Name:            "worker",
@@ -303,6 +316,11 @@ func (s *PoolScaler) serializeConfig() (string, string) {
 // boolPtr returns a pointer to a bool
 func boolPtr(b bool) *bool {
 	return &b
+}
+
+// int64Ptr returns a pointer to an int64
+func int64Ptr(i int64) *int64 {
+	return &i
 }
 
 // Start begins the scaling loop

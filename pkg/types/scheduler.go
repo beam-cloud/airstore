@@ -39,17 +39,18 @@ type WorkerJobOpts struct {
 
 // SchedulerConfig holds scheduler-specific configuration
 type SchedulerConfig struct {
-	Enabled             bool                        `key:"enabled" json:"enabled"`
-	GatewayServiceName  string                      `key:"gatewayServiceName" json:"gateway_service_name"`
-	WorkerImage         string                      `key:"workerImage" json:"worker_image"`
-	WorkerNamespace     string                      `key:"workerNamespace" json:"worker_namespace"`
-	WorkerTTL           time.Duration               `key:"workerTTL" json:"worker_ttl"`
-	CleanupInterval     time.Duration               `key:"cleanupInterval" json:"cleanup_interval"`
-	HeartbeatInterval   time.Duration               `key:"heartbeatInterval" json:"heartbeat_interval"`
-	HeartbeatTimeout    time.Duration               `key:"heartbeatTimeout" json:"heartbeat_timeout"`
-	DefaultWorkerCpu    int64                       `key:"defaultWorkerCpu" json:"default_worker_cpu"`
-	DefaultWorkerMemory int64                       `key:"defaultWorkerMemory" json:"default_worker_memory"`
-	Pools               map[string]WorkerPoolConfig `key:"pools" json:"pools"`
+	Enabled               bool                        `key:"enabled" json:"enabled"`
+	GatewayServiceName    string                      `key:"gatewayServiceName" json:"gateway_service_name"`
+	WorkerImage           string                      `key:"workerImage" json:"worker_image"`
+	WorkerNamespace       string                      `key:"workerNamespace" json:"worker_namespace"`
+	WorkerTTL             time.Duration               `key:"workerTTL" json:"worker_ttl"`
+	WorkerShutdownTimeout time.Duration               `key:"workerShutdownTimeout" json:"worker_shutdown_timeout"` // Time to wait for tasks during graceful shutdown
+	CleanupInterval       time.Duration               `key:"cleanupInterval" json:"cleanup_interval"`
+	HeartbeatInterval     time.Duration               `key:"heartbeatInterval" json:"heartbeat_interval"`
+	HeartbeatTimeout      time.Duration               `key:"heartbeatTimeout" json:"heartbeat_timeout"`
+	DefaultWorkerCpu      int64                       `key:"defaultWorkerCpu" json:"default_worker_cpu"`
+	DefaultWorkerMemory   int64                       `key:"defaultWorkerMemory" json:"default_worker_memory"`
+	Pools                 map[string]WorkerPoolConfig `key:"pools" json:"pools"`
 }
 
 // Worker TTL constant

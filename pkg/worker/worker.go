@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -39,6 +41,11 @@ type Worker struct {
 	cancel          context.CancelFunc
 	taskQueue       repository.TaskQueue
 	sandboxManager  *SandboxManager
+
+	// Graceful shutdown
+	draining        atomic.Bool    // True when shutdown initiated, stops accepting new tasks
+	activeTasks     sync.WaitGroup // Tracks running tasks for graceful drain
+	shutdownTimeout time.Duration  // Max time to wait for tasks to complete
 }
 
 // NewWorker creates a new Worker instance
@@ -129,6 +136,12 @@ func NewWorker() (*Worker, error) {
 		return nil, fmt.Errorf("failed to create sandbox manager: %w", err)
 	}
 
+	// Get shutdown timeout from config, default to 5 minutes
+	shutdownTimeout := config.Scheduler.WorkerShutdownTimeout
+	if shutdownTimeout == 0 {
+		shutdownTimeout = 5 * time.Minute
+	}
+
 	worker := &Worker{
 		workerId:        workerId,
 		poolName:        poolName,
@@ -142,6 +155,7 @@ func NewWorker() (*Worker, error) {
 		cancel:          cancel,
 		taskQueue:       taskQueue,
 		sandboxManager:  sandboxManager,
+		shutdownTimeout: shutdownTimeout,
 	}
 
 	return worker, nil
@@ -179,6 +193,12 @@ func (w *Worker) taskLoop() {
 	log.Info().Str("worker_id", w.workerId).Msg("starting task loop")
 
 	for {
+		// Check if draining - stop accepting new tasks
+		if w.draining.Load() {
+			log.Info().Str("worker_id", w.workerId).Msg("worker draining, stopping task loop")
+			return
+		}
+
 		select {
 		case <-w.ctx.Done():
 			log.Info().Str("worker_id", w.workerId).Msg("task loop stopped")
@@ -189,6 +209,11 @@ func (w *Worker) taskLoop() {
 		// Pop task from queue (blocks up to 5 seconds)
 		task, err := w.taskQueue.Pop(w.ctx, w.workerId)
 		if err != nil {
+			// Check draining again after pop timeout
+			if w.draining.Load() {
+				log.Info().Str("worker_id", w.workerId).Msg("worker draining, stopping task loop")
+				return
+			}
 			log.Warn().Err(err).Str("worker_id", w.workerId).Msg("failed to pop task")
 			time.Sleep(1 * time.Second)
 			continue
@@ -199,6 +224,9 @@ func (w *Worker) taskLoop() {
 			continue
 		}
 
+		// Track active task for graceful shutdown
+		w.activeTasks.Add(1)
+
 		log.Info().
 			Str("worker_id", w.workerId).
 			Str("task_id", task.ExternalId).
@@ -207,6 +235,10 @@ func (w *Worker) taskLoop() {
 
 		// Execute the task in a sandbox
 		result, err := w.sandboxManager.RunTask(w.ctx, *task)
+
+		// Task complete (success or failure), decrement active count
+		w.activeTasks.Done()
+
 		if err != nil {
 			log.Error().Err(err).
 				Str("worker_id", w.workerId).
@@ -313,28 +345,52 @@ func (w *Worker) listenForShutdown() {
 
 // shutdown gracefully shuts down the worker
 func (w *Worker) shutdown() error {
-	log.Info().Str("worker_id", w.workerId).Msg("worker shutting down")
+	log.Info().
+		Str("worker_id", w.workerId).
+		Dur("timeout", w.shutdownTimeout).
+		Msg("worker shutting down, draining tasks")
 
-	// Cancel context to stop loops
+	// Set draining flag - task loop will stop accepting new tasks
+	w.draining.Store(true)
+
+	// Update status to draining so gateway knows not to send more tasks
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := w.gatewayClient.UpdateStatus(ctx, w.workerId, types.WorkerStatusDraining); err != nil {
+		log.Warn().Err(err).Msg("failed to update status to draining")
+	}
+	cancel()
+
+	// Wait for running tasks to complete with timeout
+	done := make(chan struct{})
+	go func() {
+		w.activeTasks.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		log.Info().Str("worker_id", w.workerId).Msg("all tasks completed, shutting down cleanly")
+	case <-time.After(w.shutdownTimeout):
+		log.Warn().
+			Str("worker_id", w.workerId).
+			Dur("timeout", w.shutdownTimeout).
+			Msg("shutdown timeout reached, force closing remaining tasks")
+	}
+
+	// Cancel context to stop any remaining loops
 	w.cancel()
 
-	// Close sandbox manager (stops all sandboxes)
+	// Close sandbox manager (cleanup)
 	if w.sandboxManager != nil {
 		if err := w.sandboxManager.Close(); err != nil {
 			log.Warn().Err(err).Msg("failed to close sandbox manager")
 		}
 	}
 
-	// Create a timeout context for deregistration
-	ctx, cancel := context.WithTimeout(context.Background(), defaultShutdownTimeout)
+	// Deregister from gateway
+	ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Update status to draining
-	if err := w.gatewayClient.UpdateStatus(ctx, w.workerId, types.WorkerStatusDraining); err != nil {
-		log.Warn().Err(err).Msg("failed to update status to draining")
-	}
-
-	// Deregister from gateway
 	if err := w.gatewayClient.Deregister(ctx, w.workerId); err != nil {
 		log.Warn().Err(err).Msg("failed to deregister from gateway")
 	} else {
