@@ -15,6 +15,8 @@ import (
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	"google.golang.org/grpc/health/grpc_health_v1"
 
 	apiv1 "github.com/beam-cloud/airstore/pkg/api/v1"
 	"github.com/beam-cloud/airstore/pkg/auth"
@@ -249,6 +251,11 @@ func (g *Gateway) initGRPC() error {
 	}
 
 	g.grpcServer = grpc.NewServer(serverOptions...)
+
+	healthServer := health.NewServer()
+	grpc_health_v1.RegisterHealthServer(g.grpcServer, healthServer)
+	healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
+
 	return nil
 }
 
