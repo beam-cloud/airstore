@@ -11,7 +11,19 @@ import (
 // Build information (injected at compile time via ldflags)
 var (
 	Version = "dev"
-	Release = "false" // "true" in release builds, controls logging defaults
+	Release = "false" // "true" in release builds
+)
+
+// Production endpoints (used in release builds)
+const (
+	prodGatewayGRPC = "gateway.airstore.ai:443"
+	prodGatewayHTTP = "https://api.airstore.ai"
+)
+
+// Local endpoints (used in dev builds or embedded mode)
+const (
+	localGatewayGRPC = "localhost:1993"
+	localGatewayHTTP = "http://localhost:1994"
 )
 
 var (
@@ -20,6 +32,22 @@ var (
 	authToken       string
 	jsonOutput      bool
 )
+
+// defaultGRPCAddr returns the default gRPC endpoint based on build type
+func defaultGRPCAddr() string {
+	if Release == "true" {
+		return prodGatewayGRPC
+	}
+	return localGatewayGRPC
+}
+
+// defaultHTTPAddr returns the default HTTP endpoint based on build type
+func defaultHTTPAddr() string {
+	if Release == "true" {
+		return prodGatewayHTTP
+	}
+	return localGatewayHTTP
+}
 
 // Custom help template with styled output
 var helpTemplate = `{{with .Long}}{{. | trim}}
@@ -60,10 +88,10 @@ func init() {
 	// Version template
 	rootCmd.SetVersionTemplate(fmt.Sprintf("  %s version %s\n", BrandStyle.Render("airstore"), Version))
 
-	rootCmd.PersistentFlags().StringVar(&gatewayAddr, "gateway", getEnv("AIRSTORE_GATEWAY", "localhost:1993"), "Gateway gRPC address")
-	rootCmd.PersistentFlags().StringVar(&gatewayHTTPAddr, "gateway-http", getEnv("AIRSTORE_GATEWAY_HTTP", "http://localhost:1994"), "Gateway HTTP address")
+	rootCmd.PersistentFlags().StringVar(&gatewayAddr, "gateway", getEnv("AIRSTORE_GATEWAY", defaultGRPCAddr()), "Gateway gRPC address")
+	rootCmd.PersistentFlags().StringVar(&gatewayHTTPAddr, "gateway-http", getEnv("AIRSTORE_GATEWAY_HTTP", defaultHTTPAddr()), "Gateway HTTP address")
 	rootCmd.PersistentFlags().StringVar(&authToken, "token", getEnv("AIRSTORE_TOKEN", ""), "Authentication token")
-	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format (for scripting)")
+	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 
 	rootCmd.AddCommand(workspaceCmd)
 	rootCmd.AddCommand(memberCmd)

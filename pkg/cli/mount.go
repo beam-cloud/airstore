@@ -21,7 +21,6 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 var (
@@ -185,7 +184,7 @@ Examples:
 		// Create gRPC connection for sources vnode
 		sourcesConn, err := grpc.NewClient(
 			effectiveGatewayAddr,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithTransportCredentials(TransportCredentials(effectiveGatewayAddr)),
 		)
 		if err != nil {
 			if gw != nil {

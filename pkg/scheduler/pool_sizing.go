@@ -307,8 +307,12 @@ func boolPtr(b bool) *bool {
 
 // Start begins the scaling loop
 func (s *PoolScaler) Start() {
-	ticker := time.NewTicker(s.config.ScalingInterval)
-	defer ticker.Stop()
+	scaleTicker := time.NewTicker(s.config.ScalingInterval)
+	defer scaleTicker.Stop()
+
+	// Reconciliation ticker - periodically ensure deployment matches desired state
+	reconcileTicker := time.NewTicker(1 * time.Minute)
+	defer reconcileTicker.Stop()
 
 	log.Info().
 		Str("pool", s.config.PoolName).
@@ -323,8 +327,13 @@ func (s *PoolScaler) Start() {
 		case <-s.ctx.Done():
 			log.Info().Str("pool", s.config.PoolName).Msg("pool scaler stopped")
 			return
-		case <-ticker.C:
+		case <-scaleTicker.C:
 			s.tick()
+		case <-reconcileTicker.C:
+			// Periodically reconcile deployment to handle config drift (e.g., image updates)
+			if err := s.EnsureDeployment(); err != nil {
+				log.Warn().Err(err).Str("pool", s.config.PoolName).Msg("reconciliation failed")
+			}
 		}
 	}
 }
@@ -346,6 +355,14 @@ func (s *PoolScaler) tick() {
 	// Get current replica count
 	currentReplicas, err := s.getDeploymentReplicas()
 	if err != nil {
+		// If deployment doesn't exist, recreate it
+		if errors.IsNotFound(err) {
+			log.Warn().Str("pool", s.config.PoolName).Msg("deployment not found, recreating")
+			if err := s.EnsureDeployment(); err != nil {
+				log.Error().Err(err).Str("pool", s.config.PoolName).Msg("failed to recreate deployment")
+			}
+			return
+		}
 		log.Warn().Err(err).Str("pool", s.config.PoolName).Msg("failed to get deployment replicas")
 		return
 	}
