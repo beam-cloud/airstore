@@ -133,7 +133,7 @@ func (g *FilesystemGroup) List(c echo.Context) error {
 	}
 
 	// All other paths (skills, user-created folders) go to storage service
-	return g.listStorage(c, ctx, path)
+	return g.listStorage(c, ctx, path, refresh)
 }
 
 // Stat returns file/directory info as VirtualFile
@@ -667,12 +667,19 @@ func (g *FilesystemGroup) listRootDirectories(ctx context.Context) []types.Virtu
 // Storage (S3-backed: skills and user-created folders)
 // ============================================================================
 
-func (g *FilesystemGroup) listStorage(c echo.Context, ctx context.Context, path string) error {
+func (g *FilesystemGroup) listStorage(c echo.Context, ctx context.Context, path string, refresh bool) error {
 	if g.storageService == nil {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "storage unavailable")
 	}
 
-	resp, err := g.storageService.ReadDir(ctx, &pb.ContextReadDirRequest{Path: strings.TrimPrefix(path, "/")})
+	storagePath := strings.TrimPrefix(path, "/")
+
+	// If refresh requested, invalidate the cache first to ensure fresh data
+	if refresh {
+		g.storageService.InvalidateCache(ctx, storagePath)
+	}
+
+	resp, err := g.storageService.ReadDir(ctx, &pb.ContextReadDirRequest{Path: storagePath})
 	if err != nil {
 		log.Error().Err(err).Str("path", path).Msg("storage ReadDir failed")
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())

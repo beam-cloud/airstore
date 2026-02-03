@@ -60,6 +60,7 @@ type Gateway struct {
 	oauthStore     *oauth.Store
 	oauthRegistry  *oauth.Registry
 	s2Client       *streams.S2Client
+	eventBus       *common.EventBus
 }
 
 func NewGateway() (*Gateway, error) {
@@ -305,11 +306,17 @@ func (g *Gateway) registerServices() error {
 	filesystemService := services.NewFilesystemService(filesystemStore)
 	pb.RegisterFilesystemServiceServer(g.grpcServer, filesystemService)
 
+	// Initialize event bus for cross-replica cache invalidation
+	if g.RedisClient != nil {
+		g.eventBus = common.NewEventBus(g.ctx, g.RedisClient)
+		go g.eventBus.Start()
+	}
+
 	// Initialize workspace storage (per-workspace S3 buckets)
 	if g.Config.Filesystem.WorkspaceStorage.IsConfigured() {
 		if client, err := clients.NewStorageClient(g.ctx, g.Config.Filesystem.WorkspaceStorage); err != nil {
 			log.Warn().Err(err).Msg("storage client init failed")
-		} else if svc, err := services.NewStorageService(client); err != nil {
+		} else if svc, err := services.NewStorageService(client, g.eventBus); err != nil {
 			log.Warn().Err(err).Msg("storage service init failed")
 		} else {
 			g.storageClient = client

@@ -15,6 +15,7 @@ import (
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/clients"
+	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/rs/zerolog/log"
@@ -31,19 +32,33 @@ const (
 // StorageService provides S3-backed file storage with per-workspace buckets
 type StorageService struct {
 	pb.UnimplementedContextServiceServer
-	client *clients.StorageClient
-	cache  *metadataCache
+	client   *clients.StorageClient
+	cache    *metadataCache
+	eventBus *common.EventBus
 }
 
-func NewStorageService(client *clients.StorageClient) (*StorageService, error) {
+func NewStorageService(client *clients.StorageClient, eventBus *common.EventBus) (*StorageService, error) {
 	if client == nil {
 		return nil, fmt.Errorf("storage client required")
 	}
+
+	s := &StorageService{
+		client:   client,
+		cache:    newMetadataCache(cacheTTL, cacheMaxEntries),
+		eventBus: eventBus,
+	}
+
+	// Subscribe to cache invalidations from other replicas
+	if eventBus != nil {
+		eventBus.On(common.EventCacheInvalidate, func(e common.Event) {
+			if key, ok := e.Data["key"].(string); ok {
+				s.cache.invalidateByKey(key)
+			}
+		})
+	}
+
 	log.Info().Str("prefix", client.Config().DefaultBucketPrefix).Msg("storage service ready")
-	return &StorageService{
-		client: client,
-		cache:  newMetadataCache(cacheTTL, cacheMaxEntries),
-	}, nil
+	return s, nil
 }
 
 func (s *StorageService) bucket(ctx context.Context) (string, error) {
@@ -662,12 +677,31 @@ func (s *StorageService) readFile(ctx context.Context, bucket, key string) ([]by
 }
 
 func (s *StorageService) invalidate(bucket, key string) {
+	// Invalidate locally
 	s.cache.invalidate(bucket, key)
 	if idx := strings.LastIndex(key, "/"); idx > 0 {
 		s.cache.invalidate(bucket, key[:idx])
 	} else {
 		s.cache.invalidate(bucket, "")
 	}
+
+	// Broadcast to other replicas
+	if s.eventBus != nil {
+		s.eventBus.Emit(common.Event{
+			Type: common.EventCacheInvalidate,
+			Data: map[string]any{"key": bucket + ":" + key},
+		})
+	}
+}
+
+// InvalidateCache clears the cache for a path (used when client requests fresh data)
+func (s *StorageService) InvalidateCache(ctx context.Context, path string) {
+	bucket, err := s.bucket(ctx)
+	if err != nil {
+		return
+	}
+	key := s.key(path)
+	s.invalidate(bucket, key)
 }
 
 func dirInfo() *pb.FileInfo {
@@ -769,6 +803,19 @@ func (c *metadataCache) set(key string, entry *cacheEntry) {
 
 func (c *metadataCache) invalidate(bucket, path string) {
 	prefix := bucket + ":" + path + ":"
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k := range c.entries {
+		if strings.HasPrefix(k, prefix) {
+			delete(c.entries, k)
+		}
+	}
+}
+
+// invalidateByKey invalidates all cache entries matching a bucket:path prefix
+// Used for cross-replica invalidation via event bus
+func (c *metadataCache) invalidateByKey(key string) {
+	prefix := key + ":"
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for k := range c.entries {
