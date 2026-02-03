@@ -15,7 +15,6 @@ import (
 	"golang.org/x/oauth2/google"
 )
 
-// googleIntegrationScopes maps integration types to their required Google OAuth scopes
 var googleIntegrationScopes = map[string][]string{
 	"gmail": {
 		"https://www.googleapis.com/auth/gmail.readonly",
@@ -25,15 +24,7 @@ var googleIntegrationScopes = map[string][]string{
 	},
 }
 
-// IsGoogleIntegration returns true if the integration uses Google OAuth
-// Deprecated: Use Registry.IsOAuthIntegration instead
-func IsGoogleIntegration(integrationType string) bool {
-	_, ok := googleIntegrationScopes[integrationType]
-	return ok
-}
-
-// GoogleProvider handles Google OAuth operations for workspace integrations
-// Implements the Provider interface
+// GoogleProvider handles Google OAuth operations.
 type GoogleProvider struct {
 	clientID     string
 	clientSecret string
@@ -41,10 +32,8 @@ type GoogleProvider struct {
 	httpClient   *http.Client
 }
 
-// Ensure GoogleProvider implements Provider interface
 var _ Provider = (*GoogleProvider)(nil)
 
-// NewGoogleProvider creates a new Google OAuth provider from config
 func NewGoogleProvider(cfg types.IntegrationGoogleOAuth) *GoogleProvider {
 	return &GoogleProvider{
 		clientID:     cfg.ClientID,
@@ -54,29 +43,22 @@ func NewGoogleProvider(cfg types.IntegrationGoogleOAuth) *GoogleProvider {
 	}
 }
 
-// NewGoogleClient creates a new Google OAuth client from config
-// Deprecated: Use NewGoogleProvider instead
-func NewGoogleClient(cfg types.IntegrationGoogleOAuth) *GoogleProvider {
-	return NewGoogleProvider(cfg)
-}
-
-// Name returns the provider name
 func (g *GoogleProvider) Name() string {
 	return "google"
 }
 
-// IsConfigured returns true if Google OAuth is configured
 func (g *GoogleProvider) IsConfigured() bool {
 	return g.clientID != "" && g.clientSecret != "" && g.redirectURL != ""
 }
 
-// SupportsIntegration returns true if this provider handles the given integration type
-func (g *GoogleProvider) SupportsIntegration(integrationType string) bool {
-	_, ok := googleIntegrationScopes[integrationType]
-	return ok
+func (g *GoogleProvider) Integrations() []string {
+	integrations := make([]string, 0, len(googleIntegrationScopes))
+	for k := range googleIntegrationScopes {
+		integrations = append(integrations, k)
+	}
+	return integrations
 }
 
-// AuthorizeURL generates the Google OAuth authorization URL for an integration
 func (g *GoogleProvider) AuthorizeURL(state, integrationType string) (string, error) {
 	scopes, ok := googleIntegrationScopes[integrationType]
 	if !ok {
@@ -85,15 +67,12 @@ func (g *GoogleProvider) AuthorizeURL(state, integrationType string) (string, er
 
 	cfg := g.oauthConfig(scopes)
 
-	// Request offline access to get refresh token, and always prompt for consent
-	// to ensure we get a refresh token even if user previously authorized
 	return cfg.AuthCodeURL(state,
 		oauth2.AccessTypeOffline,
 		oauth2.SetAuthURLParam("prompt", "consent select_account"),
 	), nil
 }
 
-// Exchange exchanges an authorization code for tokens
 func (g *GoogleProvider) Exchange(ctx context.Context, code, integrationType string) (*types.IntegrationCredentials, error) {
 	scopes, ok := googleIntegrationScopes[integrationType]
 	if !ok {
@@ -119,13 +98,11 @@ func (g *GoogleProvider) Exchange(ctx context.Context, code, integrationType str
 	return creds, nil
 }
 
-// Refresh refreshes an access token using a refresh token
 func (g *GoogleProvider) Refresh(ctx context.Context, refreshToken string) (*types.IntegrationCredentials, error) {
 	if refreshToken == "" {
 		return nil, fmt.Errorf("no refresh token")
 	}
 
-	// Use token endpoint directly for refresh
 	data := url.Values{
 		"client_id":     {g.clientID},
 		"client_secret": {g.clientSecret},
@@ -149,14 +126,12 @@ func (g *GoogleProvider) Refresh(ctx context.Context, refreshToken string) (*typ
 		return nil, fmt.Errorf("refresh failed: status %d", resp.StatusCode)
 	}
 
-	// Parse response manually to handle Google's format
 	var result struct {
 		AccessToken string `json:"access_token"`
 		ExpiresIn   int    `json:"expires_in"`
-		TokenType   string `json:"token_type"`
 	}
 
-	if err := decodeJSON(resp.Body, &result); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("parse response: %w", err)
 	}
 
@@ -164,21 +139,9 @@ func (g *GoogleProvider) Refresh(ctx context.Context, refreshToken string) (*typ
 
 	return &types.IntegrationCredentials{
 		AccessToken:  result.AccessToken,
-		RefreshToken: refreshToken, // Keep the same refresh token
+		RefreshToken: refreshToken,
 		ExpiresAt:    &expiry,
 	}, nil
-}
-
-// NeedsRefresh returns true if credentials are expired or about to expire
-func NeedsRefresh(creds *types.IntegrationCredentials) bool {
-	if creds == nil || creds.RefreshToken == "" {
-		return false
-	}
-	if creds.ExpiresAt == nil {
-		return false
-	}
-	// Refresh if expires within 5 minutes
-	return time.Until(*creds.ExpiresAt) < 5*time.Minute
 }
 
 func (g *GoogleProvider) oauthConfig(scopes []string) *oauth2.Config {
@@ -191,7 +154,15 @@ func (g *GoogleProvider) oauthConfig(scopes []string) *oauth2.Config {
 	}
 }
 
-// decodeJSON decodes JSON from a reader
+// NeedsRefresh returns true if credentials are expired or about to expire.
+func NeedsRefresh(creds *types.IntegrationCredentials) bool {
+	if creds == nil || creds.RefreshToken == "" || creds.ExpiresAt == nil {
+		return false
+	}
+	return time.Until(*creds.ExpiresAt) < 5*time.Minute
+}
+
+// decodeJSON decodes JSON from a reader.
 func decodeJSON(r io.Reader, v interface{}) error {
 	return json.NewDecoder(r).Decode(v)
 }

@@ -12,7 +12,6 @@ import (
 	"golang.org/x/oauth2/slack"
 )
 
-// slackIntegrationScopes maps integration types to their required Slack OAuth scopes
 var slackIntegrationScopes = map[string][]string{
 	"slack": {
 		"channels:read",
@@ -23,8 +22,7 @@ var slackIntegrationScopes = map[string][]string{
 	},
 }
 
-// SlackProvider handles Slack OAuth operations for workspace integrations
-// Implements the Provider interface
+// SlackProvider handles Slack OAuth operations.
 type SlackProvider struct {
 	clientID     string
 	clientSecret string
@@ -32,10 +30,8 @@ type SlackProvider struct {
 	httpClient   *http.Client
 }
 
-// Ensure SlackProvider implements Provider interface
 var _ Provider = (*SlackProvider)(nil)
 
-// NewSlackProvider creates a new Slack OAuth provider from config
 func NewSlackProvider(cfg types.IntegrationSlackOAuth) *SlackProvider {
 	return &SlackProvider{
 		clientID:     cfg.ClientID,
@@ -45,30 +41,28 @@ func NewSlackProvider(cfg types.IntegrationSlackOAuth) *SlackProvider {
 	}
 }
 
-// Name returns the provider name
 func (s *SlackProvider) Name() string {
 	return "slack"
 }
 
-// IsConfigured returns true if Slack OAuth is configured
 func (s *SlackProvider) IsConfigured() bool {
 	return s.clientID != "" && s.clientSecret != "" && s.redirectURL != ""
 }
 
-// SupportsIntegration returns true if this provider handles the given integration type
-func (s *SlackProvider) SupportsIntegration(integrationType string) bool {
-	_, ok := slackIntegrationScopes[integrationType]
-	return ok
+func (s *SlackProvider) Integrations() []string {
+	integrations := make([]string, 0, len(slackIntegrationScopes))
+	for k := range slackIntegrationScopes {
+		integrations = append(integrations, k)
+	}
+	return integrations
 }
 
-// AuthorizeURL generates the Slack OAuth authorization URL for an integration
 func (s *SlackProvider) AuthorizeURL(state, integrationType string) (string, error) {
 	scopes, ok := slackIntegrationScopes[integrationType]
 	if !ok {
 		return "", fmt.Errorf("unsupported integration: %s", integrationType)
 	}
 
-	// Slack uses user_scope for user tokens (not bot tokens)
 	params := url.Values{
 		"client_id":    {s.clientID},
 		"redirect_uri": {s.redirectURL},
@@ -79,13 +73,7 @@ func (s *SlackProvider) AuthorizeURL(state, integrationType string) (string, err
 	return slack.Endpoint.AuthURL + "?" + params.Encode(), nil
 }
 
-// Exchange exchanges an authorization code for tokens
 func (s *SlackProvider) Exchange(ctx context.Context, code, integrationType string) (*types.IntegrationCredentials, error) {
-	if _, ok := slackIntegrationScopes[integrationType]; !ok {
-		return nil, fmt.Errorf("unsupported integration: %s", integrationType)
-	}
-
-	// Slack token exchange
 	data := url.Values{
 		"client_id":     {s.clientID},
 		"client_secret": {s.clientSecret},
@@ -114,9 +102,6 @@ func (s *SlackProvider) Exchange(ctx context.Context, code, integrationType stri
 		OK          bool   `json:"ok"`
 		Error       string `json:"error"`
 		AccessToken string `json:"access_token"`
-		TokenType   string `json:"token_type"`
-		Scope       string `json:"scope"`
-		BotUserID   string `json:"bot_user_id"`
 		AppID       string `json:"app_id"`
 		Team        struct {
 			ID   string `json:"id"`
@@ -124,9 +109,7 @@ func (s *SlackProvider) Exchange(ctx context.Context, code, integrationType stri
 		} `json:"team"`
 		AuthedUser struct {
 			ID          string `json:"id"`
-			Scope       string `json:"scope"`
 			AccessToken string `json:"access_token"`
-			TokenType   string `json:"token_type"`
 		} `json:"authed_user"`
 	}
 
@@ -138,14 +121,12 @@ func (s *SlackProvider) Exchange(ctx context.Context, code, integrationType stri
 		return nil, fmt.Errorf("slack error: %s", result.Error)
 	}
 
-	// Use the user token (not bot token) for user-level access
 	accessToken := result.AuthedUser.AccessToken
 	if accessToken == "" {
 		accessToken = result.AccessToken
 	}
 
-	// Slack tokens don't expire by default
-	creds := &types.IntegrationCredentials{
+	return &types.IntegrationCredentials{
 		AccessToken: accessToken,
 		Extra: map[string]string{
 			"team_id":   result.Team.ID,
@@ -153,19 +134,14 @@ func (s *SlackProvider) Exchange(ctx context.Context, code, integrationType stri
 			"user_id":   result.AuthedUser.ID,
 			"app_id":    result.AppID,
 		},
-	}
-
-	return creds, nil
+	}, nil
 }
 
-// Refresh refreshes an access token using a refresh token
-// Note: Slack user tokens don't typically expire
 func (s *SlackProvider) Refresh(ctx context.Context, refreshToken string) (*types.IntegrationCredentials, error) {
 	if refreshToken == "" {
 		return nil, fmt.Errorf("no refresh token")
 	}
 
-	// Slack token rotation (if enabled)
 	data := url.Values{
 		"client_id":     {s.clientID},
 		"client_secret": {s.clientSecret},
@@ -196,7 +172,6 @@ func (s *SlackProvider) Refresh(ctx context.Context, refreshToken string) (*type
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
 		ExpiresIn    int    `json:"expires_in"`
-		TokenType    string `json:"token_type"`
 	}
 
 	if err := decodeJSON(resp.Body, &result); err != nil {

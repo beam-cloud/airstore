@@ -13,7 +13,6 @@ import (
 	"golang.org/x/oauth2/github"
 )
 
-// githubIntegrationScopes maps integration types to their required GitHub OAuth scopes
 var githubIntegrationScopes = map[string][]string{
 	"github": {
 		"repo",
@@ -21,8 +20,7 @@ var githubIntegrationScopes = map[string][]string{
 	},
 }
 
-// GitHubProvider handles GitHub OAuth operations for workspace integrations
-// Implements the Provider interface
+// GitHubProvider handles GitHub OAuth operations.
 type GitHubProvider struct {
 	clientID     string
 	clientSecret string
@@ -30,10 +28,8 @@ type GitHubProvider struct {
 	httpClient   *http.Client
 }
 
-// Ensure GitHubProvider implements Provider interface
 var _ Provider = (*GitHubProvider)(nil)
 
-// NewGitHubProvider creates a new GitHub OAuth provider from config
 func NewGitHubProvider(cfg types.IntegrationGitHubOAuth) *GitHubProvider {
 	return &GitHubProvider{
 		clientID:     cfg.ClientID,
@@ -43,23 +39,22 @@ func NewGitHubProvider(cfg types.IntegrationGitHubOAuth) *GitHubProvider {
 	}
 }
 
-// Name returns the provider name
 func (g *GitHubProvider) Name() string {
 	return "github"
 }
 
-// IsConfigured returns true if GitHub OAuth is configured
 func (g *GitHubProvider) IsConfigured() bool {
 	return g.clientID != "" && g.clientSecret != "" && g.redirectURL != ""
 }
 
-// SupportsIntegration returns true if this provider handles the given integration type
-func (g *GitHubProvider) SupportsIntegration(integrationType string) bool {
-	_, ok := githubIntegrationScopes[integrationType]
-	return ok
+func (g *GitHubProvider) Integrations() []string {
+	integrations := make([]string, 0, len(githubIntegrationScopes))
+	for k := range githubIntegrationScopes {
+		integrations = append(integrations, k)
+	}
+	return integrations
 }
 
-// AuthorizeURL generates the GitHub OAuth authorization URL for an integration
 func (g *GitHubProvider) AuthorizeURL(state, integrationType string) (string, error) {
 	scopes, ok := githubIntegrationScopes[integrationType]
 	if !ok {
@@ -67,11 +62,9 @@ func (g *GitHubProvider) AuthorizeURL(state, integrationType string) (string, er
 	}
 
 	cfg := g.oauthConfig(scopes)
-
 	return cfg.AuthCodeURL(state), nil
 }
 
-// Exchange exchanges an authorization code for tokens
 func (g *GitHubProvider) Exchange(ctx context.Context, code, integrationType string) (*types.IntegrationCredentials, error) {
 	scopes, ok := githubIntegrationScopes[integrationType]
 	if !ok {
@@ -90,7 +83,6 @@ func (g *GitHubProvider) Exchange(ctx context.Context, code, integrationType str
 		RefreshToken: token.RefreshToken,
 	}
 
-	// GitHub tokens don't expire by default, but we handle it if they do
 	if !token.Expiry.IsZero() {
 		creds.ExpiresAt = &token.Expiry
 	}
@@ -98,14 +90,11 @@ func (g *GitHubProvider) Exchange(ctx context.Context, code, integrationType str
 	return creds, nil
 }
 
-// Refresh refreshes an access token using a refresh token
-// Note: GitHub personal access tokens don't expire, but GitHub Apps use refresh tokens
 func (g *GitHubProvider) Refresh(ctx context.Context, refreshToken string) (*types.IntegrationCredentials, error) {
 	if refreshToken == "" {
 		return nil, fmt.Errorf("no refresh token")
 	}
 
-	// Use token endpoint directly for refresh
 	data := url.Values{
 		"client_id":     {g.clientID},
 		"client_secret": {g.clientSecret},
@@ -134,7 +123,6 @@ func (g *GitHubProvider) Refresh(ctx context.Context, refreshToken string) (*typ
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
 		ExpiresIn    int    `json:"expires_in"`
-		TokenType    string `json:"token_type"`
 	}
 
 	if err := decodeJSON(resp.Body, &result); err != nil {
