@@ -26,17 +26,17 @@ var slackIntegrationScopes = map[string][]string{
 type SlackProvider struct {
 	clientID     string
 	clientSecret string
-	redirectURL  string
+	callbackURL  string
 	httpClient   *http.Client
 }
 
 var _ Provider = (*SlackProvider)(nil)
 
-func NewSlackProvider(cfg types.IntegrationSlackOAuth) *SlackProvider {
+func NewSlackProvider(creds types.ProviderOAuthCredentials, callbackURL string) *SlackProvider {
 	return &SlackProvider{
-		clientID:     cfg.ClientID,
-		clientSecret: cfg.ClientSecret,
-		redirectURL:  cfg.RedirectURL,
+		clientID:     creds.ClientID,
+		clientSecret: creds.ClientSecret,
+		callbackURL:  callbackURL,
 		httpClient:   &http.Client{Timeout: 30 * time.Second},
 	}
 }
@@ -46,7 +46,7 @@ func (s *SlackProvider) Name() string {
 }
 
 func (s *SlackProvider) IsConfigured() bool {
-	return s.clientID != "" && s.clientSecret != "" && s.redirectURL != ""
+	return s.clientID != "" && s.clientSecret != "" && s.callbackURL != ""
 }
 
 func (s *SlackProvider) Integrations() []string {
@@ -65,7 +65,7 @@ func (s *SlackProvider) AuthorizeURL(state, integrationType string) (string, err
 
 	params := url.Values{
 		"client_id":    {s.clientID},
-		"redirect_uri": {s.redirectURL},
+		"redirect_uri": {s.callbackURL},
 		"state":        {state},
 		"user_scope":   {strings.Join(scopes, ",")},
 	}
@@ -78,7 +78,7 @@ func (s *SlackProvider) Exchange(ctx context.Context, code, integrationType stri
 		"client_id":     {s.clientID},
 		"client_secret": {s.clientSecret},
 		"code":          {code},
-		"redirect_uri":  {s.redirectURL},
+		"redirect_uri":  {s.callbackURL},
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", slack.Endpoint.TokenURL, strings.NewReader(data.Encode()))

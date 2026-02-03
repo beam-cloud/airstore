@@ -107,11 +107,12 @@ func NewGateway() (*Gateway, error) {
 
 	// Initialize OAuth registry - providers self-register their integrations
 	oauthRegistry := oauth.NewRegistry()
-	oauthRegistry.Register(oauth.NewGoogleProvider(config.OAuth.Google))
-	oauthRegistry.Register(oauth.NewGitHubProvider(config.OAuth.GitHub))
-	oauthRegistry.Register(oauth.NewNotionProvider(config.OAuth.Notion))
-	oauthRegistry.Register(oauth.NewSlackProvider(config.OAuth.Slack))
-	oauthRegistry.Register(oauth.NewLinearProvider(config.OAuth.Linear))
+	callbackURL := config.OAuth.CallbackURL
+	oauthRegistry.Register(oauth.NewGoogleProvider(config.OAuth.Google, callbackURL))
+	oauthRegistry.Register(oauth.NewGitHubProvider(config.OAuth.GitHub, callbackURL))
+	oauthRegistry.Register(oauth.NewNotionProvider(config.OAuth.Notion, callbackURL))
+	oauthRegistry.Register(oauth.NewSlackProvider(config.OAuth.Slack, callbackURL))
+	oauthRegistry.Register(oauth.NewLinearProvider(config.OAuth.Linear, callbackURL))
 
 	// Initialize S2 client for task log streaming if configured
 	var s2Client *streams.S2Client
@@ -385,9 +386,11 @@ func (g *Gateway) registerServices() error {
 		apiv1.NewTasksGroup(g.baseRouteGroup.Group("/tasks"), g.BackendRepo, taskQueue, g.s2Client)
 
 		// OAuth API for workspace integrations (gmail, gdrive, github, notion, slack)
-		if len(g.oauthRegistry.ListConfiguredProviders()) > 0 {
-			apiv1.NewOAuthGroup(g.baseRouteGroup.Group("/oauth"), g.oauthStore, g.oauthRegistry, g.BackendRepo)
-			log.Info().Strs("providers", g.oauthRegistry.ListConfiguredProviders()).Msg("oauth API registered at /api/v1/oauth")
+		apiv1.NewOAuthGroup(g.baseRouteGroup.Group("/oauth"), g.oauthStore, g.oauthRegistry, g.BackendRepo)
+		if providers := g.oauthRegistry.ListConfiguredProviders(); len(providers) > 0 {
+			log.Info().Strs("providers", providers).Msg("oauth API registered at /api/v1/oauth")
+		} else {
+			log.Warn().Msg("oauth API registered but no providers configured (set oauth.callbackUrl and provider credentials)")
 		}
 
 		log.Info().Msg("workspace, members, tokens, connections, and tasks APIs registered")

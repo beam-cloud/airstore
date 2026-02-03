@@ -30,17 +30,17 @@ var linearIntegrationScopes = map[string][]string{
 type LinearProvider struct {
 	clientID     string
 	clientSecret string
-	redirectURL  string
+	callbackURL  string
 	httpClient   *http.Client
 }
 
 var _ Provider = (*LinearProvider)(nil)
 
-func NewLinearProvider(cfg types.IntegrationLinearOAuth) *LinearProvider {
+func NewLinearProvider(creds types.ProviderOAuthCredentials, callbackURL string) *LinearProvider {
 	return &LinearProvider{
-		clientID:     cfg.ClientID,
-		clientSecret: cfg.ClientSecret,
-		redirectURL:  cfg.RedirectURL,
+		clientID:     creds.ClientID,
+		clientSecret: creds.ClientSecret,
+		callbackURL:  callbackURL,
 		httpClient:   &http.Client{Timeout: 30 * time.Second},
 	}
 }
@@ -50,7 +50,7 @@ func (l *LinearProvider) Name() string {
 }
 
 func (l *LinearProvider) IsConfigured() bool {
-	return l.clientID != "" && l.clientSecret != "" && l.redirectURL != ""
+	return l.clientID != "" && l.clientSecret != "" && l.callbackURL != ""
 }
 
 func (l *LinearProvider) Integrations() []string {
@@ -69,7 +69,7 @@ func (l *LinearProvider) AuthorizeURL(state, integrationType string) (string, er
 
 	params := url.Values{
 		"client_id":     {l.clientID},
-		"redirect_uri":  {l.redirectURL},
+		"redirect_uri":  {l.callbackURL},
 		"response_type": {"code"},
 		"scope":         {strings.Join(scopes, ",")},
 		"state":         {state},
@@ -84,7 +84,7 @@ func (l *LinearProvider) Exchange(ctx context.Context, code, integrationType str
 		"client_id":     {l.clientID},
 		"client_secret": {l.clientSecret},
 		"code":          {code},
-		"redirect_uri":  {l.redirectURL},
+		"redirect_uri":  {l.callbackURL},
 		"grant_type":    {"authorization_code"},
 	}
 

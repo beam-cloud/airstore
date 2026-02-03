@@ -24,17 +24,17 @@ var notionIntegrations = []string{"notion"}
 type NotionProvider struct {
 	clientID     string
 	clientSecret string
-	redirectURL  string
+	callbackURL  string
 	httpClient   *http.Client
 }
 
 var _ Provider = (*NotionProvider)(nil)
 
-func NewNotionProvider(cfg types.IntegrationNotionOAuth) *NotionProvider {
+func NewNotionProvider(creds types.ProviderOAuthCredentials, callbackURL string) *NotionProvider {
 	return &NotionProvider{
-		clientID:     cfg.ClientID,
-		clientSecret: cfg.ClientSecret,
-		redirectURL:  cfg.RedirectURL,
+		clientID:     creds.ClientID,
+		clientSecret: creds.ClientSecret,
+		callbackURL:  callbackURL,
 		httpClient:   &http.Client{Timeout: 30 * time.Second},
 	}
 }
@@ -44,7 +44,7 @@ func (n *NotionProvider) Name() string {
 }
 
 func (n *NotionProvider) IsConfigured() bool {
-	return n.clientID != "" && n.clientSecret != "" && n.redirectURL != ""
+	return n.clientID != "" && n.clientSecret != "" && n.callbackURL != ""
 }
 
 func (n *NotionProvider) Integrations() []string {
@@ -54,7 +54,7 @@ func (n *NotionProvider) Integrations() []string {
 func (n *NotionProvider) AuthorizeURL(state, integrationType string) (string, error) {
 	params := url.Values{
 		"client_id":     {n.clientID},
-		"redirect_uri":  {n.redirectURL},
+		"redirect_uri":  {n.callbackURL},
 		"response_type": {"code"},
 		"owner":         {"user"},
 		"state":         {state},
@@ -67,7 +67,7 @@ func (n *NotionProvider) Exchange(ctx context.Context, code, integrationType str
 	data := url.Values{
 		"grant_type":   {"authorization_code"},
 		"code":         {code},
-		"redirect_uri": {n.redirectURL},
+		"redirect_uri": {n.callbackURL},
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", notionEndpoint.TokenURL, strings.NewReader(data.Encode()))

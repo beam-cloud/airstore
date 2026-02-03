@@ -24,17 +24,17 @@ var githubIntegrationScopes = map[string][]string{
 type GitHubProvider struct {
 	clientID     string
 	clientSecret string
-	redirectURL  string
+	callbackURL  string
 	httpClient   *http.Client
 }
 
 var _ Provider = (*GitHubProvider)(nil)
 
-func NewGitHubProvider(cfg types.IntegrationGitHubOAuth) *GitHubProvider {
+func NewGitHubProvider(creds types.ProviderOAuthCredentials, callbackURL string) *GitHubProvider {
 	return &GitHubProvider{
-		clientID:     cfg.ClientID,
-		clientSecret: cfg.ClientSecret,
-		redirectURL:  cfg.RedirectURL,
+		clientID:     creds.ClientID,
+		clientSecret: creds.ClientSecret,
+		callbackURL:  callbackURL,
 		httpClient:   &http.Client{Timeout: 30 * time.Second},
 	}
 }
@@ -44,7 +44,7 @@ func (g *GitHubProvider) Name() string {
 }
 
 func (g *GitHubProvider) IsConfigured() bool {
-	return g.clientID != "" && g.clientSecret != "" && g.redirectURL != ""
+	return g.clientID != "" && g.clientSecret != "" && g.callbackURL != ""
 }
 
 func (g *GitHubProvider) Integrations() []string {
@@ -146,7 +146,7 @@ func (g *GitHubProvider) oauthConfig(scopes []string) *oauth2.Config {
 	return &oauth2.Config{
 		ClientID:     g.clientID,
 		ClientSecret: g.clientSecret,
-		RedirectURL:  g.redirectURL,
+		RedirectURL:  g.callbackURL,
 		Scopes:       scopes,
 		Endpoint:     github.Endpoint,
 	}

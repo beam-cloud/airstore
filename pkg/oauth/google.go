@@ -28,17 +28,17 @@ var googleIntegrationScopes = map[string][]string{
 type GoogleProvider struct {
 	clientID     string
 	clientSecret string
-	redirectURL  string
+	callbackURL  string
 	httpClient   *http.Client
 }
 
 var _ Provider = (*GoogleProvider)(nil)
 
-func NewGoogleProvider(cfg types.IntegrationGoogleOAuth) *GoogleProvider {
+func NewGoogleProvider(creds types.ProviderOAuthCredentials, callbackURL string) *GoogleProvider {
 	return &GoogleProvider{
-		clientID:     cfg.ClientID,
-		clientSecret: cfg.ClientSecret,
-		redirectURL:  cfg.RedirectURL,
+		clientID:     creds.ClientID,
+		clientSecret: creds.ClientSecret,
+		callbackURL:  callbackURL,
 		httpClient:   &http.Client{Timeout: 30 * time.Second},
 	}
 }
@@ -48,7 +48,7 @@ func (g *GoogleProvider) Name() string {
 }
 
 func (g *GoogleProvider) IsConfigured() bool {
-	return g.clientID != "" && g.clientSecret != "" && g.redirectURL != ""
+	return g.clientID != "" && g.clientSecret != "" && g.callbackURL != ""
 }
 
 func (g *GoogleProvider) Integrations() []string {
@@ -148,7 +148,7 @@ func (g *GoogleProvider) oauthConfig(scopes []string) *oauth2.Config {
 	return &oauth2.Config{
 		ClientID:     g.clientID,
 		ClientSecret: g.clientSecret,
-		RedirectURL:  g.redirectURL,
+		RedirectURL:  g.callbackURL,
 		Scopes:       scopes,
 		Endpoint:     google.Endpoint,
 	}

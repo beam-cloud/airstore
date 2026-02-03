@@ -308,44 +308,16 @@ func (c *MCPServerConfig) RedactConfig() *MCPServerConfig {
 // IntegrationOAuth configures OAuth for workspace integrations (gmail, gdrive, github, etc.)
 // This is separate from admin.oauth which is for admin UI login only.
 type IntegrationOAuth struct {
-	Google IntegrationGoogleOAuth  `key:"google" json:"google"`
-	GitHub IntegrationGitHubOAuth  `key:"github" json:"github"`
-	Notion IntegrationNotionOAuth  `key:"notion" json:"notion"`
-	Slack  IntegrationSlackOAuth   `key:"slack" json:"slack"`
-	Linear IntegrationLinearOAuth  `key:"linear" json:"linear"`
+	CallbackURL string                  `key:"callbackUrl" json:"callback_url"` // e.g., https://api.airstore.ai/api/v1/oauth/callback
+	Google      ProviderOAuthCredentials `key:"google" json:"google"`
+	GitHub      ProviderOAuthCredentials `key:"github" json:"github"`
+	Notion      ProviderOAuthCredentials `key:"notion" json:"notion"`
+	Slack       ProviderOAuthCredentials `key:"slack" json:"slack"`
+	Linear      ProviderOAuthCredentials `key:"linear" json:"linear"`
 }
 
-// IntegrationGoogleOAuth configures Google OAuth for workspace integrations
-type IntegrationGoogleOAuth struct {
+// ProviderOAuthCredentials contains client credentials for an OAuth provider.
+type ProviderOAuthCredentials struct {
 	ClientID     string `key:"clientId" json:"client_id"`
 	ClientSecret string `key:"clientSecret" json:"client_secret"`
-	RedirectURL  string `key:"redirectUrl" json:"redirect_url"` // e.g., http://localhost:1994/api/v1/oauth/google/callback
-}
-
-// IntegrationGitHubOAuth configures GitHub OAuth for workspace integrations
-type IntegrationGitHubOAuth struct {
-	ClientID     string `key:"clientId" json:"client_id"`
-	ClientSecret string `key:"clientSecret" json:"client_secret"`
-	RedirectURL  string `key:"redirectUrl" json:"redirect_url"` // e.g., http://localhost:1994/api/v1/oauth/github/callback
-}
-
-// IntegrationNotionOAuth configures Notion OAuth for workspace integrations
-type IntegrationNotionOAuth struct {
-	ClientID     string `key:"clientId" json:"client_id"`
-	ClientSecret string `key:"clientSecret" json:"client_secret"`
-	RedirectURL  string `key:"redirectUrl" json:"redirect_url"` // e.g., http://localhost:1994/api/v1/oauth/notion/callback
-}
-
-// IntegrationSlackOAuth configures Slack OAuth for workspace integrations
-type IntegrationSlackOAuth struct {
-	ClientID     string `key:"clientId" json:"client_id"`
-	ClientSecret string `key:"clientSecret" json:"client_secret"`
-	RedirectURL  string `key:"redirectUrl" json:"redirect_url"` // e.g., http://localhost:1994/api/v1/oauth/slack/callback
-}
-
-// IntegrationLinearOAuth configures Linear OAuth for workspace integrations
-type IntegrationLinearOAuth struct {
-	ClientID     string `key:"clientId" json:"client_id"`
-	ClientSecret string `key:"clientSecret" json:"client_secret"`
-	RedirectURL  string `key:"redirectUrl" json:"redirect_url"` // e.g., http://localhost:1994/api/v1/oauth/linear/callback
 }
