@@ -105,44 +105,13 @@ func NewGateway() (*Gateway, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Initialize OAuth registry with all providers
+	// Initialize OAuth registry - providers self-register their integrations
 	oauthRegistry := oauth.NewRegistry()
-
-	// Register Google provider and its integrations
-	googleProvider := oauth.NewGoogleProvider(config.OAuth.Google)
-	oauthRegistry.Register(googleProvider)
-	if googleProvider.IsConfigured() {
-		oauthRegistry.RegisterIntegration("gmail", "google")
-		oauthRegistry.RegisterIntegration("gdrive", "google")
-	}
-
-	// Register GitHub provider and its integrations
-	githubProvider := oauth.NewGitHubProvider(config.OAuth.GitHub)
-	oauthRegistry.Register(githubProvider)
-	if githubProvider.IsConfigured() {
-		oauthRegistry.RegisterIntegration("github", "github")
-	}
-
-	// Register Notion provider and its integrations
-	notionProvider := oauth.NewNotionProvider(config.OAuth.Notion)
-	oauthRegistry.Register(notionProvider)
-	if notionProvider.IsConfigured() {
-		oauthRegistry.RegisterIntegration("notion", "notion")
-	}
-
-	// Register Slack provider and its integrations
-	slackProvider := oauth.NewSlackProvider(config.OAuth.Slack)
-	oauthRegistry.Register(slackProvider)
-	if slackProvider.IsConfigured() {
-		oauthRegistry.RegisterIntegration("slack", "slack")
-	}
-
-	// Register Linear provider and its integrations
-	linearProvider := oauth.NewLinearProvider(config.OAuth.Linear)
-	oauthRegistry.Register(linearProvider)
-	if linearProvider.IsConfigured() {
-		oauthRegistry.RegisterIntegration("linear", "linear")
-	}
+	oauthRegistry.Register(oauth.NewGoogleProvider(config.OAuth.Google))
+	oauthRegistry.Register(oauth.NewGitHubProvider(config.OAuth.GitHub))
+	oauthRegistry.Register(oauth.NewNotionProvider(config.OAuth.Notion))
+	oauthRegistry.Register(oauth.NewSlackProvider(config.OAuth.Slack))
+	oauthRegistry.Register(oauth.NewLinearProvider(config.OAuth.Linear))
 
 	// Initialize S2 client for task log streaming if configured
 	var s2Client *streams.S2Client
@@ -163,7 +132,7 @@ func NewGateway() (*Gateway, error) {
 		toolRegistry:   tools.NewRegistry(),
 		sourceRegistry: sources.NewRegistry(),
 		mcpManager:     tools.NewMCPManager(),
-		oauthStore:     oauth.NewStore(0), // Default TTL
+		oauthStore:     oauth.NewStore(redisClient, 0),
 		oauthRegistry:  oauthRegistry,
 		s2Client:       s2Client,
 	}

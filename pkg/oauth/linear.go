@@ -12,13 +12,11 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// Linear OAuth endpoints
 var linearEndpoint = oauth2.Endpoint{
 	AuthURL:  "https://linear.app/oauth/authorize",
 	TokenURL: "https://api.linear.app/oauth/token",
 }
 
-// linearIntegrationScopes maps integration types to their required Linear OAuth scopes
 var linearIntegrationScopes = map[string][]string{
 	"linear": {
 		"read",
@@ -28,8 +26,7 @@ var linearIntegrationScopes = map[string][]string{
 	},
 }
 
-// LinearProvider handles Linear OAuth operations for workspace integrations
-// Implements the Provider interface
+// LinearProvider handles Linear OAuth operations.
 type LinearProvider struct {
 	clientID     string
 	clientSecret string
@@ -37,10 +34,8 @@ type LinearProvider struct {
 	httpClient   *http.Client
 }
 
-// Ensure LinearProvider implements Provider interface
 var _ Provider = (*LinearProvider)(nil)
 
-// NewLinearProvider creates a new Linear OAuth provider from config
 func NewLinearProvider(cfg types.IntegrationLinearOAuth) *LinearProvider {
 	return &LinearProvider{
 		clientID:     cfg.ClientID,
@@ -50,30 +45,28 @@ func NewLinearProvider(cfg types.IntegrationLinearOAuth) *LinearProvider {
 	}
 }
 
-// Name returns the provider name
 func (l *LinearProvider) Name() string {
 	return "linear"
 }
 
-// IsConfigured returns true if Linear OAuth is configured
 func (l *LinearProvider) IsConfigured() bool {
 	return l.clientID != "" && l.clientSecret != "" && l.redirectURL != ""
 }
 
-// SupportsIntegration returns true if this provider handles the given integration type
-func (l *LinearProvider) SupportsIntegration(integrationType string) bool {
-	_, ok := linearIntegrationScopes[integrationType]
-	return ok
+func (l *LinearProvider) Integrations() []string {
+	integrations := make([]string, 0, len(linearIntegrationScopes))
+	for k := range linearIntegrationScopes {
+		integrations = append(integrations, k)
+	}
+	return integrations
 }
 
-// AuthorizeURL generates the Linear OAuth authorization URL for an integration
 func (l *LinearProvider) AuthorizeURL(state, integrationType string) (string, error) {
 	scopes, ok := linearIntegrationScopes[integrationType]
 	if !ok {
 		return "", fmt.Errorf("unsupported integration: %s", integrationType)
 	}
 
-	// Linear uses comma-separated scopes
 	params := url.Values{
 		"client_id":     {l.clientID},
 		"redirect_uri":  {l.redirectURL},
@@ -86,13 +79,7 @@ func (l *LinearProvider) AuthorizeURL(state, integrationType string) (string, er
 	return linearEndpoint.AuthURL + "?" + params.Encode(), nil
 }
 
-// Exchange exchanges an authorization code for tokens
 func (l *LinearProvider) Exchange(ctx context.Context, code, integrationType string) (*types.IntegrationCredentials, error) {
-	if _, ok := linearIntegrationScopes[integrationType]; !ok {
-		return nil, fmt.Errorf("unsupported integration: %s", integrationType)
-	}
-
-	// Linear token exchange
 	data := url.Values{
 		"client_id":     {l.clientID},
 		"client_secret": {l.clientSecret},
@@ -119,10 +106,8 @@ func (l *LinearProvider) Exchange(ctx context.Context, code, integrationType str
 	}
 
 	var result struct {
-		AccessToken  string `json:"access_token"`
-		TokenType    string `json:"token_type"`
-		ExpiresIn    int    `json:"expires_in"`
-		Scope        string `json:"scope"`
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int    `json:"expires_in"`
 	}
 
 	if err := decodeJSON(resp.Body, &result); err != nil {
@@ -133,7 +118,6 @@ func (l *LinearProvider) Exchange(ctx context.Context, code, integrationType str
 		AccessToken: result.AccessToken,
 	}
 
-	// Linear tokens expire (typically 10 years, but we track it)
 	if result.ExpiresIn > 0 {
 		expiry := time.Now().Add(time.Duration(result.ExpiresIn) * time.Second)
 		creds.ExpiresAt = &expiry
@@ -142,9 +126,6 @@ func (l *LinearProvider) Exchange(ctx context.Context, code, integrationType str
 	return creds, nil
 }
 
-// Refresh refreshes an access token using a refresh token
-// Note: Linear access tokens are long-lived and don't use refresh tokens
 func (l *LinearProvider) Refresh(ctx context.Context, refreshToken string) (*types.IntegrationCredentials, error) {
-	// Linear doesn't use refresh tokens - tokens are long-lived
 	return nil, fmt.Errorf("linear tokens do not support refresh")
 }
