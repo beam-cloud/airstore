@@ -117,6 +117,7 @@ message ContextCreateResponse {
 
 message ContextDeleteRequest {
   string path = 1;
+  bool recursive = 2;  // If true, delete all contents under the path (for directories)
 }
 
 message ContextDeleteResponse {

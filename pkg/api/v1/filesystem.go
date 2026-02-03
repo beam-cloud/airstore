@@ -522,10 +522,11 @@ func (g *FilesystemGroup) NotifyUploadComplete(c echo.Context) error {
 	return SuccessResponse(c, map[string]bool{"success": true})
 }
 
-// DeletePath deletes a file or empty directory
+// DeletePath deletes a file or directory (optionally recursive for directories)
 func (g *FilesystemGroup) DeletePath(c echo.Context) error {
 	ctx := c.Request().Context()
 	path := cleanPath(c.QueryParam("path"))
+	recursive := c.QueryParam("recursive") == "true"
 	logRequest(c, "delete_path")
 
 	if g.storageService == nil {
@@ -558,16 +559,16 @@ func (g *FilesystemGroup) DeletePath(c echo.Context) error {
 	}
 
 	// Use storage service to delete
-	resp, err := g.storageService.Delete(ctx, &pb.ContextDeleteRequest{Path: path})
+	resp, err := g.storageService.Delete(ctx, &pb.ContextDeleteRequest{Path: path, Recursive: recursive})
 	if err != nil {
-		log.Error().Err(err).Str("path", path).Msg("failed to delete path")
+		log.Error().Err(err).Str("path", path).Bool("recursive", recursive).Msg("failed to delete path")
 		return ErrorResponse(c, http.StatusInternalServerError, "failed to delete")
 	}
 	if !resp.Ok {
 		return ErrorResponse(c, http.StatusBadRequest, resp.Error)
 	}
 
-	log.Info().Str("path", path).Msg("file/folder deleted")
+	log.Info().Str("path", path).Bool("recursive", recursive).Msg("file/folder deleted")
 	return SuccessResponse(c, map[string]bool{"deleted": true})
 }
 

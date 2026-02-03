@@ -12,6 +12,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/clients"
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -288,28 +289,93 @@ func (s *StorageService) Create(ctx context.Context, req *pb.ContextCreateReques
 	return &pb.ContextCreateResponse{Ok: true}, nil
 }
 
+func deleteErr(msg string) *pb.ContextDeleteResponse {
+	return &pb.ContextDeleteResponse{Ok: false, Error: msg}
+}
+
+// deletePrefix removes all objects under a prefix in batches of 1000
+func (s *StorageService) deletePrefix(ctx context.Context, bucket, prefix string) error {
+	s3c := s.client.S3Client()
+	var token *string
+
+	for {
+		listCtx, cancel := s.timeout(ctx)
+		input := &s3.ListObjectsV2Input{
+			Bucket:            &bucket,
+			Prefix:            &prefix,
+			MaxKeys:           aws.Int32(1000),
+			ContinuationToken: token,
+		}
+
+		resp, err := s3c.ListObjectsV2(listCtx, input)
+		cancel()
+		if err != nil {
+			return err
+		}
+
+		if len(resp.Contents) == 0 {
+			if !aws.ToBool(resp.IsTruncated) {
+				return nil
+			}
+			token = resp.NextContinuationToken
+			continue
+		}
+
+		objects := make([]s3types.ObjectIdentifier, len(resp.Contents))
+		for i, obj := range resp.Contents {
+			objects[i] = s3types.ObjectIdentifier{Key: obj.Key}
+		}
+
+		delCtx, cancel := s.timeout(ctx)
+		_, err = s3c.DeleteObjects(delCtx, &s3.DeleteObjectsInput{
+			Bucket: &bucket,
+			Delete: &s3types.Delete{Objects: objects, Quiet: aws.Bool(true)},
+		})
+		cancel()
+		if err != nil {
+			return err
+		}
+
+		for _, obj := range resp.Contents {
+			s.invalidate(bucket, aws.ToString(obj.Key))
+		}
+
+		if !aws.ToBool(resp.IsTruncated) {
+			return nil
+		}
+		token = resp.NextContinuationToken
+	}
+}
+
 // Delete removes a file or directory
 func (s *StorageService) Delete(ctx context.Context, req *pb.ContextDeleteRequest) (*pb.ContextDeleteResponse, error) {
 	path := strings.TrimPrefix(req.Path, "/")
 	if path != "" && !strings.Contains(path, "/") && types.IsReservedFolder(path) {
-		return &pb.ContextDeleteResponse{Ok: false, Error: "cannot delete reserved folder"}, nil
+		return deleteErr("cannot delete reserved folder"), nil
 	}
 
 	bucket, err := s.bucket(ctx)
 	if err != nil {
-		return &pb.ContextDeleteResponse{Ok: false, Error: err.Error()}, nil
+		return deleteErr(err.Error()), nil
+	}
+
+	key := s.key(req.Path)
+
+	if req.Recursive {
+		prefix := key + "/"
+		if key == "" {
+			prefix = ""
+		}
+		if err := s.deletePrefix(ctx, bucket, prefix); err != nil {
+			return deleteErr(err.Error()), nil
+		}
 	}
 
 	ctx, cancel := s.timeout(ctx)
 	defer cancel()
 
-	key := s.key(req.Path)
 	s3c := s.client.S3Client()
-
-	if _, err := s3c.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &bucket, Key: &key}); err != nil {
-		return &pb.ContextDeleteResponse{Ok: false, Error: err.Error()}, nil
-	}
-	// Also try to delete directory marker
+	s3c.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &bucket, Key: &key})
 	s3c.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &bucket, Key: aws.String(key + "/")})
 
 	s.invalidate(bucket, key)
