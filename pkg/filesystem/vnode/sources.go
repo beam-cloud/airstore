@@ -39,7 +39,8 @@ import (
 )
 
 const sourcesTimeout = 30 * time.Second
-const resultsCacheTTL = 30 * time.Second           // Cache query results to avoid repeated API calls
+const resultsCacheTTL = 45 * time.Second           // Cache query results to avoid repeated API calls (max staleness)
+const resultsCacheRefreshAge = 30 * time.Second    // Trigger background refresh when cache older than this
 const backgroundRefreshInterval = 15 * time.Second // Background cache refresh interval
 
 const queryMetaName = ".query.as"
@@ -48,6 +49,7 @@ const queryMetaName = ".query.as"
 type cachedQueryResult struct {
 	entries   []*pb.SourceDirEntry
 	expiresAt time.Time
+	cachedAt  time.Time // When this entry was cached (for refresh triggering)
 }
 
 // cachedQuery holds a cached query definition
@@ -777,15 +779,35 @@ func (v *SourcesVNode) protoToFileInfo(path string, info *pb.SourceFileInfo) *Fi
 	}
 }
 
-// getCachedResults retrieves cached query results if still valid
+// getCachedResults retrieves cached query results if still valid.
+// If the cache is older than resultsCacheRefreshAge, triggers a background refresh
+// while still returning the cached data (stale-while-revalidate pattern).
 func (v *SourcesVNode) getCachedResults(queryPath string) []*pb.SourceDirEntry {
 	v.resultsMu.RLock()
 	defer v.resultsMu.RUnlock()
 
 	if cached, ok := v.results[queryPath]; ok && time.Now().Before(cached.expiresAt) {
+		// If cache is older than refresh threshold, trigger background refresh
+		// This ensures new entries appear within ~45s + kernel timeout (1s) = 46s < 60s
+		if time.Since(cached.cachedAt) > resultsCacheRefreshAge {
+			go v.triggerQueryRefresh(queryPath)
+		}
 		return cached.entries
 	}
 	return nil
+}
+
+// triggerQueryRefresh refreshes the query results in the background
+func (v *SourcesVNode) triggerQueryRefresh(queryPath string) {
+	ctx, cancel := v.ctx()
+	defer cancel()
+
+	resp, err := v.client.ExecuteSmartQuery(ctx, &pb.ExecuteSmartQueryRequest{Path: queryPath})
+	if err != nil || !resp.Ok {
+		return
+	}
+
+	v.setCachedResults(queryPath, resp.Entries)
 }
 
 // setCachedResults stores query results in the cache
@@ -793,9 +815,11 @@ func (v *SourcesVNode) setCachedResults(queryPath string, entries []*pb.SourceDi
 	v.resultsMu.Lock()
 	defer v.resultsMu.Unlock()
 
+	now := time.Now()
 	v.results[queryPath] = &cachedQueryResult{
 		entries:   entries,
-		expiresAt: time.Now().Add(resultsCacheTTL),
+		expiresAt: now.Add(resultsCacheTTL),
+		cachedAt:  now,
 	}
 }
 

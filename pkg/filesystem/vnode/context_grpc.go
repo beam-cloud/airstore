@@ -2,6 +2,7 @@ package vnode
 
 import (
 	"context"
+	"errors"
 	"io/fs"
 	"strings"
 	"sync"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
+	"github.com/winfsp/cgofuse/fuse"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 )
@@ -22,7 +24,10 @@ type ContextVNodeGRPC struct {
 	client  pb.ContextServiceClient
 	token   string
 	cache   *MetadataCache
-	handles map[FileHandle]string
+	content *ContentCache
+	handles map[FileHandle]*handleState
+	writeMu sync.Mutex
+	writes  map[string]map[FileHandle]*handleState
 	nextFH  FileHandle
 	mu      sync.Mutex
 }
@@ -33,7 +38,9 @@ func NewContextVNodeGRPC(conn *grpc.ClientConn, token string) *ContextVNodeGRPC 
 		client:  pb.NewContextServiceClient(conn),
 		token:   token,
 		cache:   NewMetadataCache(),
-		handles: make(map[FileHandle]string),
+		content: NewContentCache(),
+		handles: make(map[FileHandle]*handleState),
+		writes:  make(map[string]map[FileHandle]*handleState),
 		nextFH:  1,
 	}
 }
@@ -57,6 +64,11 @@ func (c *ContextVNodeGRPC) rel(path string) string {
 
 // Getattr returns file attributes with caching
 func (c *ContextVNodeGRPC) Getattr(path string) (*FileInfo, error) {
+	// Treat AppleDouble files as zero-length placeholders.
+	if isAppleDoublePath(path) {
+		return NewFileInfo(PathIno(path), 0, 0644), nil
+	}
+
 	if c.cache.IsNegative(path) {
 		return nil, fs.ErrNotExist
 	}
@@ -130,14 +142,47 @@ func (c *ContextVNodeGRPC) Readdir(path string) ([]DirEntry, error) {
 	return entries, nil
 }
 
-// Open opens a file, using cache to avoid redundant Stat calls
+// Open opens a file, using cache to avoid redundant Stat calls.
+// On macOS, some paths use Open with O_CREAT instead of Create, so we handle that here.
 func (c *ContextVNodeGRPC) Open(path string, flags int) (FileHandle, error) {
+	// Allow AppleDouble files to open without backend.
+	if isAppleDoublePath(path) {
+		return c.allocHandle("__appledouble__" + path), nil
+	}
+
+	if flags&fuse.O_CREAT != 0 {
+		fh, err := c.openExisting(path)
+		if err == nil {
+			if flags&fuse.O_TRUNC != 0 {
+				_ = c.Truncate(path, 0, fh)
+			}
+			return fh, nil
+		}
+		if errors.Is(err, fs.ErrNotExist) {
+			// Default file mode when created via Open(O_CREAT)
+			return c.Create(path, flags, 0644)
+		}
+		return 0, err
+	}
+
+	fh, err := c.openExisting(path)
+	if err != nil {
+		return 0, err
+	}
+	if flags&fuse.O_TRUNC != 0 {
+		_ = c.Truncate(path, 0, fh)
+	}
+	return fh, nil
+}
+
+// openExisting opens an existing file and caches its metadata.
+func (c *ContextVNodeGRPC) openExisting(path string) (FileHandle, error) {
 	// Check cache first to avoid unnecessary RPC
 	if c.cache.IsNegative(path) {
 		return 0, fs.ErrNotExist
 	}
 	if c.cache.GetInfo(path) != nil {
-		return c.allocHandle(c.rel(path)), nil
+		return c.allocHandle(path), nil
 	}
 
 	// Cache miss - verify file exists
@@ -155,28 +200,74 @@ func (c *ContextVNodeGRPC) Open(path string, flags int) (FileHandle, error) {
 
 	// Cache the result for future calls
 	c.cache.Set(path, c.toFileInfo(path, resp.Info))
-	return c.allocHandle(c.rel(path)), nil
+	return c.allocHandle(path), nil
 }
 
 // Read reads file data
 func (c *ContextVNodeGRPC) Read(path string, buf []byte, off int64, fh FileHandle) (int, error) {
-	ctx, cancel := c.ctx()
-	defer cancel()
+	// AppleDouble files are empty.
+	if isAppleDoublePath(path) {
+		return 0, nil
+	}
 
-	resp, err := c.client.Read(ctx, &pb.ContextReadRequest{
-		Path: c.rel(path), Offset: off, Length: int64(len(buf)),
-	})
+	if err := c.flushWritesForPath(path); err != nil {
+		return 0, err
+	}
+
+	state := c.getHandleState(fh)
+	if state != nil {
+		if data, ok, err := c.consumePrefetch(path, off, state); err != nil {
+			return 0, err
+		} else if ok {
+			n := copy(buf, data)
+			c.recordRead(state, path, off, n)
+			return n, nil
+		}
+	}
+
+	// Small file cache (mtime validated)
+	if info, ok := c.maybeStatSmall(path); ok && info.Size <= smallFileMaxSize && info.Mtime != 0 {
+		if data, ok := c.content.Get(path, info.Mtime); ok {
+			if off >= int64(len(data)) {
+				return 0, nil
+			}
+			n := copy(buf, data[off:])
+			c.recordRead(state, path, off, n)
+			return n, nil
+		}
+
+		data, err := c.readRange(path, 0, info.Size)
+		if err != nil {
+			return 0, err
+		}
+		c.content.Set(path, data, info.Mtime)
+		if off >= int64(len(data)) {
+			return 0, nil
+		}
+		n := copy(buf, data[off:])
+		c.recordRead(state, path, off, n)
+		return n, nil
+	}
+
+	// Regular read
+	data, err := c.readRange(path, off, int64(len(buf)))
 	if err != nil {
 		return 0, err
 	}
-	if !resp.Ok {
-		return 0, fs.ErrNotExist
-	}
-	return copy(buf, resp.Data), nil
+	n := copy(buf, data)
+	c.recordRead(state, path, off, n)
+	return n, nil
 }
 
 // Create creates a new file
 func (c *ContextVNodeGRPC) Create(path string, flags int, mode uint32) (FileHandle, error) {
+	// Silently accept AppleDouble files (._*) without creating them on backend.
+	// These are used by macOS to store extended attributes/resource forks.
+	// We pretend they're created successfully but discard all data.
+	if isAppleDoublePath(path) {
+		return c.allocHandle("__appledouble__" + path), nil
+	}
+
 	ctx, cancel := c.ctx()
 	defer cancel()
 
@@ -188,29 +279,90 @@ func (c *ContextVNodeGRPC) Create(path string, flags int, mode uint32) (FileHand
 		return 0, fs.ErrPermission
 	}
 	c.cache.Invalidate(path)
-	return c.allocHandle(c.rel(path)), nil
+	return c.allocHandle(path), nil
 }
 
 // Write writes file data
 func (c *ContextVNodeGRPC) Write(path string, buf []byte, off int64, fh FileHandle) (int, error) {
-	ctx, cancel := c.ctx()
-	defer cancel()
+	// Silently discard writes to AppleDouble files
+	if isAppleDoublePath(path) {
+		return len(buf), nil // Pretend write succeeded
+	}
 
-	resp, err := c.client.Write(ctx, &pb.ContextWriteRequest{
-		Path: c.rel(path), Data: buf, Offset: off,
-	})
-	if err != nil {
+	state := c.getHandleState(fh)
+	if state == nil {
+		if err := c.writeRange(path, off, buf); err != nil {
+			return 0, err
+		}
+		return len(buf), nil
+	}
+
+	state.mu.Lock()
+	if state.closed {
+		state.mu.Unlock()
+		return 0, fs.ErrInvalid
+	}
+
+	if len(state.writeBuf) == 0 {
+		if len(buf) >= writeBufferMax {
+			state.mu.Unlock()
+			if err := c.writeRange(path, off, buf); err != nil {
+				return 0, err
+			}
+			return len(buf), nil
+		}
+		state.writeOff = off
+		state.writeBuf = make([]byte, len(buf))
+		copy(state.writeBuf, buf)
+		state.mu.Unlock()
+		return len(buf), nil
+	}
+
+	if off == state.writeOff+int64(len(state.writeBuf)) && len(state.writeBuf)+len(buf) <= writeBufferMax {
+		state.writeBuf = append(state.writeBuf, buf...)
+		state.mu.Unlock()
+		return len(buf), nil
+	}
+
+	data := append([]byte(nil), state.writeBuf...)
+	writeOff := state.writeOff
+	state.writeBuf = nil
+	state.mu.Unlock()
+
+	if err := c.writeRange(path, writeOff, data); err != nil {
 		return 0, err
 	}
-	if !resp.Ok {
-		return 0, fs.ErrPermission
+
+	if len(buf) >= writeBufferMax {
+		if err := c.writeRange(path, off, buf); err != nil {
+			return 0, err
+		}
+		return len(buf), nil
 	}
-	c.cache.Invalidate(path)
-	return int(resp.Written), nil
+
+	state.mu.Lock()
+	if state.closed {
+		state.mu.Unlock()
+		return 0, fs.ErrInvalid
+	}
+	state.writeOff = off
+	state.writeBuf = make([]byte, len(buf))
+	copy(state.writeBuf, buf)
+	state.mu.Unlock()
+	return len(buf), nil
 }
 
 // Truncate changes file size
 func (c *ContextVNodeGRPC) Truncate(path string, size int64, fh FileHandle) error {
+	// AppleDouble files are discarded.
+	if isAppleDoublePath(path) {
+		return nil
+	}
+
+	if err := c.flushWritesForPath(path); err != nil {
+		return err
+	}
+
 	ctx, cancel := c.ctx()
 	defer cancel()
 
@@ -259,6 +411,10 @@ func (c *ContextVNodeGRPC) Rmdir(path string) error {
 
 // Unlink removes a file
 func (c *ContextVNodeGRPC) Unlink(path string) error {
+	if isAppleDoublePath(path) {
+		return nil
+	}
+
 	ctx, cancel := c.ctx()
 	defer cancel()
 
@@ -275,6 +431,10 @@ func (c *ContextVNodeGRPC) Unlink(path string) error {
 
 // Rename moves or renames a file or directory
 func (c *ContextVNodeGRPC) Rename(oldpath, newpath string) error {
+	if isAppleDoublePath(oldpath) || isAppleDoublePath(newpath) {
+		return nil
+	}
+
 	ctx, cancel := c.ctx()
 	defer cancel()
 
@@ -295,7 +455,12 @@ func (c *ContextVNodeGRPC) Rename(oldpath, newpath string) error {
 }
 
 // Fsync is a no-op (writes go directly to S3)
-func (c *ContextVNodeGRPC) Fsync(path string, fh FileHandle) error { return nil }
+func (c *ContextVNodeGRPC) Fsync(path string, fh FileHandle) error {
+	if state := c.getHandleState(fh); state != nil {
+		return c.flushWriteBuffer(path, state)
+	}
+	return nil
+}
 
 // Symlink creates a symbolic link
 func (c *ContextVNodeGRPC) Symlink(target, linkPath string) error {
@@ -331,20 +496,228 @@ func (c *ContextVNodeGRPC) Readlink(path string) (string, error) {
 // Release closes a file handle
 func (c *ContextVNodeGRPC) Release(path string, fh FileHandle) error {
 	c.mu.Lock()
-	delete(c.handles, fh)
+	if state, ok := c.handles[fh]; ok {
+		c.mu.Unlock()
+		_ = c.flushWriteBuffer(path, state)
+		c.mu.Lock()
+		state.mu.Lock()
+		state.closed = true
+		state.prefetch = nil
+		state.mu.Unlock()
+		delete(c.handles, fh)
+		c.writeMu.Lock()
+		if m, ok := c.writes[state.path]; ok {
+			delete(m, fh)
+			if len(m) == 0 {
+				delete(c.writes, state.path)
+			}
+		}
+		c.writeMu.Unlock()
+	}
 	c.mu.Unlock()
 	return nil
 }
 
 // helpers
 
-func (c *ContextVNodeGRPC) allocHandle(relPath string) FileHandle {
+func (c *ContextVNodeGRPC) allocHandle(path string) FileHandle {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	fh := c.nextFH
 	c.nextFH++
-	c.handles[fh] = relPath
+	state := &handleState{path: path}
+	c.handles[fh] = state
+
+	c.writeMu.Lock()
+	if _, ok := c.writes[path]; !ok {
+		c.writes[path] = make(map[FileHandle]*handleState)
+	}
+	c.writes[path][fh] = state
+	c.writeMu.Unlock()
+
 	return fh
+}
+
+func (c *ContextVNodeGRPC) getHandleState(fh FileHandle) *handleState {
+	c.mu.Lock()
+	state := c.handles[fh]
+	c.mu.Unlock()
+	return state
+}
+
+func (c *ContextVNodeGRPC) statInfo(path string) (*pb.FileInfo, error) {
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.client.Stat(ctx, &pb.ContextStatRequest{Path: c.rel(path)})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.Ok {
+		return nil, fs.ErrNotExist
+	}
+	return resp.Info, nil
+}
+
+// maybeStatSmall returns fresh stat info if the file might be small enough to cache.
+func (c *ContextVNodeGRPC) maybeStatSmall(path string) (*pb.FileInfo, bool) {
+	if info := c.cache.GetInfo(path); info != nil && info.Size > smallFileMaxSize {
+		return nil, false
+	}
+	info, err := c.statInfo(path)
+	if err != nil {
+		return nil, false
+	}
+	c.cache.Set(path, c.toFileInfo(path, info))
+	return info, true
+}
+
+func (c *ContextVNodeGRPC) readRange(path string, off int64, length int64) ([]byte, error) {
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.client.Read(ctx, &pb.ContextReadRequest{
+		Path: c.rel(path), Offset: off, Length: length,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.Ok {
+		return nil, fs.ErrNotExist
+	}
+	return resp.Data, nil
+}
+
+func (c *ContextVNodeGRPC) writeRange(path string, off int64, data []byte) error {
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	resp, err := c.client.Write(ctx, &pb.ContextWriteRequest{
+		Path: c.rel(path), Data: data, Offset: off,
+	})
+	if err != nil {
+		return err
+	}
+	if !resp.Ok {
+		return fs.ErrPermission
+	}
+	c.cache.Invalidate(path)
+	return nil
+}
+
+func (c *ContextVNodeGRPC) recordRead(state *handleState, path string, off int64, n int) {
+	if state == nil || n <= 0 {
+		return
+	}
+
+	state.mu.Lock()
+	sequential := state.lastSize > 0 && state.lastOff+int64(state.lastSize) == off
+	state.lastOff = off
+	state.lastSize = n
+
+	if !sequential || state.prefetch != nil || state.closed {
+		state.mu.Unlock()
+		return
+	}
+
+	nextOff := off + int64(n)
+	pf := &prefetchState{offset: nextOff, ready: make(chan struct{})}
+	state.prefetch = pf
+	state.mu.Unlock()
+
+	prefetchSize := int64(n)
+	if prefetchSize < prefetchChunkSize {
+		prefetchSize = prefetchChunkSize
+	}
+	go c.doPrefetch(path, pf, prefetchSize)
+}
+
+func (c *ContextVNodeGRPC) doPrefetch(path string, pf *prefetchState, length int64) {
+	info, err := c.statInfo(path)
+	if err != nil {
+		pf.err = err
+		close(pf.ready)
+		return
+	}
+	if info.Mtime == 0 {
+		// Can't validate freshness without mtime; skip prefetch.
+		close(pf.ready)
+		return
+	}
+	pf.mtime = info.Mtime
+
+	data, err := c.readRange(path, pf.offset, length)
+	if err != nil {
+		pf.err = err
+		close(pf.ready)
+		return
+	}
+	pf.data = data
+	close(pf.ready)
+}
+
+func (c *ContextVNodeGRPC) consumePrefetch(path string, off int64, state *handleState) ([]byte, bool, error) {
+	state.mu.Lock()
+	pf := state.prefetch
+	if pf == nil || pf.offset != off || state.closed {
+		state.mu.Unlock()
+		return nil, false, nil
+	}
+	state.mu.Unlock()
+
+	<-pf.ready
+
+	state.mu.Lock()
+	if state.prefetch != pf {
+		state.mu.Unlock()
+		return nil, false, nil
+	}
+	state.prefetch = nil
+	state.mu.Unlock()
+
+	if pf.err != nil || pf.mtime == 0 {
+		return nil, false, pf.err
+	}
+
+	info, err := c.statInfo(path)
+	if err != nil {
+		return nil, false, err
+	}
+	if info.Mtime != pf.mtime {
+		return nil, false, nil
+	}
+	return pf.data, true, nil
+}
+
+func (c *ContextVNodeGRPC) flushWriteBuffer(path string, state *handleState) error {
+	state.mu.Lock()
+	if state.closed || len(state.writeBuf) == 0 {
+		state.mu.Unlock()
+		return nil
+	}
+	data := append([]byte(nil), state.writeBuf...)
+	writeOff := state.writeOff
+	state.writeBuf = nil
+	state.mu.Unlock()
+
+	return c.writeRange(path, writeOff, data)
+}
+
+func (c *ContextVNodeGRPC) flushWritesForPath(path string) error {
+	c.writeMu.Lock()
+	entries := c.writes[path]
+	states := make([]*handleState, 0, len(entries))
+	for _, state := range entries {
+		states = append(states, state)
+	}
+	c.writeMu.Unlock()
+
+	for _, state := range states {
+		if err := c.flushWriteBuffer(path, state); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *ContextVNodeGRPC) toFileInfo(path string, info *pb.FileInfo) *FileInfo {

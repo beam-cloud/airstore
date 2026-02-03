@@ -235,11 +235,13 @@ func (f *Filesystem) Getattr(path string) (*FileInfo, error) {
 		return f.rootInfo(), nil
 	}
 
-	// Fast-reject macOS system files (AppleDouble, .DS_Store, etc.)
-	// These are probed by Finder but don't exist - avoid slow RPC lookups.
+	// Fast path for macOS system files to avoid slow RPC lookups.
 	name := filepath.Base(path)
-	if strings.HasPrefix(name, "._") || name == ".DS_Store" || name == ".Spotlight-V100" || name == ".Trashes" {
+	if isMacSystemName(name) {
 		return nil, ErrNotFound
+	}
+	if isAppleDoubleName(name) || isMacResourceName(name) {
+		return macPlaceholderInfo(path), nil
 	}
 
 	// Check for virtual node match
@@ -544,16 +546,16 @@ func (f *Filesystem) Symlink(target, newpath string) error {
 	return ErrNotSupported
 }
 
-func (f *Filesystem) Getxattr(path, name string) ([]byte, error) { return nil, ErrNoAttr }
+// Getxattr returns empty data for all xattrs (we do not store them).
+func (f *Filesystem) Getxattr(path, name string) ([]byte, error) { return []byte{}, nil }
 
+// Setxattr silently accepts and discards extended attributes.
 func (f *Filesystem) Setxattr(path, name string, value []byte, flags int) error {
-	if vn := f.vnodes.Match(path); vn != nil {
-		return nil // No-op for vnodes
-	}
-	return ErrNotSupported
+	return nil
 }
 
-func (f *Filesystem) Removexattr(path, name string) error     { return ErrNotSupported }
+// Removexattr silently succeeds since we don't store xattrs.
+func (f *Filesystem) Removexattr(path, name string) error     { return nil }
 func (f *Filesystem) Listxattr(path string) ([]string, error) { return nil, nil }
 
 // Flush and Fsync
