@@ -122,6 +122,11 @@ type VirtualFileTreeResponse struct {
 	Entries []VirtualFile `json:"entries"`
 }
 
+type VirtualFileSearchResponse struct {
+	Query   string        `json:"query"`
+	Results []VirtualFile `json:"results"`
+}
+
 func NewVirtualFile(id, name, path string, fileType VirtualFileType) *VirtualFile {
 	return &VirtualFile{
 		ID:       id,

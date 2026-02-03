@@ -2,13 +2,11 @@ package cli
 
 import (
 	"context"
-	"crypto/tls"
-	"strings"
 
+	"github.com/beam-cloud/airstore/pkg/common"
 	pb "github.com/beam-cloud/airstore/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -22,7 +20,7 @@ type Client struct {
 // NewClient creates a new gRPC client
 func NewClient(addr, token string) (*Client, error) {
 	opts := []grpc.DialOption{
-		grpc.WithTransportCredentials(TransportCredentials(addr)),
+		grpc.WithTransportCredentials(common.TransportCredentials(addr)),
 	}
 
 	if token != "" {
@@ -43,17 +41,15 @@ func NewClient(addr, token string) (*Client, error) {
 }
 
 // TransportCredentials returns TLS or insecure credentials based on the address.
-// Uses TLS for port 443 or airstore.ai domains, insecure otherwise.
+// Delegates to common.TransportCredentials for consistent TLS detection.
 func TransportCredentials(addr string) credentials.TransportCredentials {
-	if NeedsTLS(addr) {
-		return credentials.NewTLS(&tls.Config{})
-	}
-	return insecure.NewCredentials()
+	return common.TransportCredentials(addr)
 }
 
-// NeedsTLS returns true if the address requires TLS (port 443 or airstore.ai domain)
+// NeedsTLS returns true if the address requires TLS.
+// Delegates to common.NeedsTLS for consistent TLS detection.
 func NeedsTLS(addr string) bool {
-	return strings.HasSuffix(addr, ":443") || strings.Contains(addr, ".airstore.ai")
+	return common.NeedsTLS(addr)
 }
 
 // Close closes the gRPC connection

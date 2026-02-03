@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -72,6 +73,7 @@ func (g *FilesystemGroup) registerRoutes() {
 	g.routerGroup.GET("/stat", g.Stat)
 	g.routerGroup.GET("/read", g.Read)
 	g.routerGroup.GET("/tree", g.Tree)
+	g.routerGroup.GET("/search", g.Search)
 
 	// File operations with presigned URLs
 	g.routerGroup.POST("/upload-url", g.GetUploadURL)
@@ -236,9 +238,159 @@ func (g *FilesystemGroup) Tree(c echo.Context) error {
 	return g.treeStorage(c, ctx, path, int32(maxKeys), continuationToken)
 }
 
-// ============================================================================
-// Presigned URL Operations
-// ============================================================================
+// Search performs filename search across the workspace
+func (g *FilesystemGroup) Search(c echo.Context) error {
+	ctx := c.Request().Context()
+	query := c.QueryParam("q")
+	limitStr := c.QueryParam("limit")
+	showHidden := c.QueryParam("show_hidden") == "true"
+
+	limit := 50
+	if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 100 {
+		limit = l
+	}
+
+	if query == "" {
+		return SuccessResponse(c, types.VirtualFileSearchResponse{
+			Query:   query,
+			Results: []types.VirtualFile{},
+		})
+	}
+
+	queryLower := strings.ToLower(query)
+	var results []types.VirtualFile
+
+	// Helper to check if name matches query (fuzzy match)
+	matchScore := func(name, path string) int {
+		nameLower := strings.ToLower(name)
+		pathLower := strings.ToLower(path)
+
+		// Exact match
+		if nameLower == queryLower {
+			return 100
+		}
+		// Starts with query
+		if strings.HasPrefix(nameLower, queryLower) {
+			return 80
+		}
+		// Contains query in name
+		if strings.Contains(nameLower, queryLower) {
+			return 60
+		}
+		// Contains query in path
+		if strings.Contains(pathLower, queryLower) {
+			return 40
+		}
+		// Fuzzy match - all characters appear in order
+		patternIdx := 0
+		for _, char := range nameLower {
+			if patternIdx < len(queryLower) && byte(char) == queryLower[patternIdx] {
+				patternIdx++
+			}
+		}
+		if patternIdx == len(queryLower) {
+			return 20
+		}
+		return 0
+	}
+
+	type scoredResult struct {
+		score int
+		file  types.VirtualFile
+	}
+	var scored []scoredResult
+
+	// Search storage (skills and user folders)
+	if g.storageService != nil {
+		resp, err := g.storageService.ListTree(ctx, &pb.ListTreeRequest{
+			Path:    "",
+			MaxKeys: 5000,
+		})
+		if err == nil && resp.Ok {
+			for _, e := range resp.Entries {
+				fullPath := "/" + e.Path
+				name := pathName(e.Path)
+				if score := matchScore(name, fullPath); score > 0 {
+					isDir := e.Mode&uint32(syscall.S_IFDIR) != 0
+					vf := types.NewVirtualFile(hashPath(fullPath), name, fullPath, types.VFTypeContext).
+						WithFolder(isDir).WithSize(e.Size)
+					if e.Mtime > 0 {
+						vf.WithModifiedAt(time.Unix(e.Mtime, 0))
+					}
+					scored = append(scored, scoredResult{score: score, file: *vf})
+				}
+			}
+		}
+	}
+
+	// Search tools
+	toolEntries := g.buildToolEntries(ctx, showHidden)
+	for _, vf := range toolEntries {
+		if score := matchScore(vf.Name, vf.Path); score > 0 {
+			scored = append(scored, scoredResult{score: score, file: vf})
+		}
+	}
+
+	// Search sources (integrations, smart query folders, and their contents)
+	if g.sourceService != nil {
+		// Helper to add a source entry if it matches
+		addSourceEntry := func(name, path string, isDir bool, size int64) {
+			if score := matchScore(name, path); score > 0 {
+				vf := types.NewVirtualFile(hashPath(path), name, path, types.VFTypeSource).
+					WithFolder(isDir).WithReadOnly(true)
+				if size > 0 {
+					vf.WithSize(size)
+				}
+				scored = append(scored, scoredResult{score: score, file: *vf})
+			}
+		}
+
+		// Helper to search a directory recursively (up to maxDepth)
+		var searchSourceDir func(path string, depth int)
+		searchSourceDir = func(path string, depth int) {
+			if depth > 2 { // integration -> smart query folder -> files
+				return
+			}
+			resp, err := g.sourceService.ReadDir(ctx, &pb.SourceReadDirRequest{Path: path})
+			if err != nil || !resp.Ok {
+				return
+			}
+			for _, e := range resp.Entries {
+				entryPath := types.SourcePath(types.JoinPath(path, e.Name))
+				addSourceEntry(e.Name, entryPath, e.IsDir, e.Size)
+				if e.IsDir {
+					searchSourceDir(types.JoinPath(path, e.Name), depth+1)
+				}
+			}
+		}
+
+		// Search each integration
+		for _, vf := range g.buildSourceRootEntries(ctx) {
+			addSourceEntry(vf.Name, vf.Path, true, 0)
+			searchSourceDir(vf.Name, 0)
+		}
+	}
+
+	// Sort by score descending, then name ascending
+	sort.Slice(scored, func(i, j int) bool {
+		if scored[i].score != scored[j].score {
+			return scored[i].score > scored[j].score
+		}
+		return scored[i].file.Name < scored[j].file.Name
+	})
+
+	// Take top results
+	for i := 0; i < len(scored) && i < limit; i++ {
+		results = append(results, scored[i].file)
+	}
+
+	return SuccessResponse(c, types.VirtualFileSearchResponse{
+		Query:   query,
+		Results: results,
+	})
+}
+
+
 
 // UploadURLRequest represents a request to get a presigned upload URL
 type UploadURLRequest struct {

@@ -8,9 +8,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/beam-cloud/airstore/pkg/common"
 	pb "github.com/beam-cloud/airstore/proto"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -224,7 +224,7 @@ func (t *ToolsVNode) fetchTools() []string {
 
 	conn, err := grpc.NewClient(
 		t.gatewayAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithTransportCredentials(common.TransportCredentials(t.gatewayAddr)),
 	)
 	if err != nil {
 		return nil

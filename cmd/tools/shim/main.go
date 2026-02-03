@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/beam-cloud/airstore/pkg/common"
 	pb "github.com/beam-cloud/airstore/proto"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 const rpcTimeout = 30 * time.Second
@@ -83,7 +83,7 @@ func loadConfig() *Config {
 
 func connect(cfg *Config) (*grpc.ClientConn, error) {
 	opts := []grpc.DialOption{
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithTransportCredentials(common.TransportCredentials(cfg.GatewayAddr)),
 	}
 
 	if cfg.Token != "" {

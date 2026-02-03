@@ -6,9 +6,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/beam-cloud/airstore/pkg/common"
 	pb "github.com/beam-cloud/airstore/proto"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -29,7 +29,7 @@ type GRPCMetadataEngine struct {
 func NewGRPCMetadataEngine(cfg GRPCConfig) (*GRPCMetadataEngine, error) {
 	conn, err := grpc.NewClient(
 		cfg.GatewayAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithTransportCredentials(common.TransportCredentials(cfg.GatewayAddr)),
 	)
 	if err != nil {
 		return nil, err
