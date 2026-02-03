@@ -128,8 +128,9 @@ func NewWorker() (*Worker, error) {
 		RuntimeConfig: runtime.Config{
 			Type: runtimeType,
 		},
-		S2Token: config.Streams.Token,
-		S2Basin: config.Streams.Basin,
+		S2Token:         config.Streams.Token,
+		S2Basin:         config.Streams.Basin,
+		AnthropicAPIKey: config.Anthropic.APIKey,
 	})
 	if err != nil {
 		cancel()

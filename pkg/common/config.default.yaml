@@ -6,9 +6,7 @@ clusterName: airstore
 debugMode: false
 prettyLogs: true
 
-# ----------------------------------------------------------------------------
 # Database (remote mode only)
-# ----------------------------------------------------------------------------
 database:
   redis:
     mode: single
@@ -25,9 +23,7 @@ database:
     maxOpenConns: 25
     maxIdleConns: 5
 
-# ----------------------------------------------------------------------------
 # Storage
-# ----------------------------------------------------------------------------
 image:
   s3:
     bucket: airstore-images
@@ -50,9 +46,7 @@ filesystem:
     defaultEndpointUrl: http://localstack:4566
     defaultRegion: us-east-1
 
-# ----------------------------------------------------------------------------
 # Gateway
-# ----------------------------------------------------------------------------
 gateway:
   # Admin token for workspace API authentication (used by airstore-ui)
   authToken: ""
@@ -70,9 +64,7 @@ gateway:
       allowMethods: ["*"]
   shutdownTimeout: 30s
 
-# ----------------------------------------------------------------------------
 # Scheduler (remote mode only)
-# ----------------------------------------------------------------------------
 scheduler:
   enabled: false
   gatewayServiceName: airstore-gateway
@@ -95,9 +87,7 @@ scheduler:
       workerCpu: 1000
       workerMemory: 1024
 
-# ----------------------------------------------------------------------------
-# Tools - All tool configuration in one place
-# ----------------------------------------------------------------------------
+# Tools - All built-in tool configuration
 tools:
   # Builtin integrations (API keys)
   integrations:
@@ -115,3 +105,7 @@ tools:
   #       command: npx
   #       args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
   mcp: {}
+
+# Anthropic (for BAML inference and Claude Code tasks)
+anthropic:
+  apiKey: ""

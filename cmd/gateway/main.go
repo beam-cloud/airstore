@@ -22,6 +22,12 @@ func main() {
 		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stdout})
 	}
 
+	// Set ANTHROPIC_API_KEY from config for BAML inference
+	// This must happen before gateway.NewGateway() which imports the BAML package
+	if config.Anthropic.APIKey != "" {
+		os.Setenv("ANTHROPIC_API_KEY", config.Anthropic.APIKey)
+	}
+
 	gw, err := gateway.NewGateway()
 	if err != nil {
 		log.Fatal().Err(err).Msg("error creating gateway service")

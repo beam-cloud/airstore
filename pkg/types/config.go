@@ -26,6 +26,12 @@ type AppConfig struct {
 	Tools       ToolsConfig      `key:"tools" json:"tools"`
 	OAuth       IntegrationOAuth `key:"oauth" json:"oauth"`     // OAuth for workspace integrations (gmail, gdrive)
 	Streams     StreamsConfig    `key:"streams" json:"streams"` // S2 stream configuration for task logs
+	Anthropic   AnthropicConfig  `key:"anthropic" json:"anthropic"`
+}
+
+// AnthropicConfig configures Anthropic API access for BAML inference and Claude Code tasks
+type AnthropicConfig struct {
+	APIKey string `key:"apiKey" json:"api_key"`
 }
 
 // StreamsConfig configures S2 stream storage for task logs

@@ -12,7 +12,6 @@ dev:
         go build -o /workspace/bin/worker /workspace/cmd/worker/main.go
       BUILD_BINARY_PATH: /workspace/bin/gateway
       CONFIG_PATH: /workspace/config.gw.yaml
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
     forward:
     - 1994:1994
     - 1993:1993

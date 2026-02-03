@@ -35,6 +35,9 @@ type SandboxConfig struct {
 
 	// EnableFilesystem enables FUSE filesystem mounts
 	EnableFilesystem bool
+
+	// AnthropicAPIKey for Claude Code tasks (from config, not env var)
+	AnthropicAPIKey string
 }
 
 // SandboxManager manages the lifecycle of sandboxes on a worker
@@ -97,6 +100,9 @@ type SandboxManagerConfig struct {
 	// S2 configuration for log streaming
 	S2Token string
 	S2Basin string
+
+	// Anthropic API key for Claude Code tasks (from config)
+	AnthropicAPIKey string
 }
 
 // NewSandboxManager creates a new SandboxManager
@@ -189,6 +195,7 @@ func NewSandboxManager(ctx context.Context, cfg SandboxManagerConfig) (*SandboxM
 			GatewayGRPCAddr:  cfg.GatewayGRPCAddr,
 			AuthToken:        cfg.AuthToken,
 			EnableFilesystem: cfg.EnableFilesystem,
+			AnthropicAPIKey:  cfg.AnthropicAPIKey,
 		},
 		runtime:      rt,
 		sandboxes:    make(map[string]*ManagedSandbox),
@@ -809,9 +816,9 @@ func (m *SandboxManager) RunTask(ctx context.Context, task types.Task) (*types.T
 			"-p", task.Prompt,
 		}
 
-		// Inject ANTHROPIC_API_KEY from worker environment
-		if apiKey := os.Getenv("ANTHROPIC_API_KEY"); apiKey != "" {
-			env["ANTHROPIC_API_KEY"] = apiKey
+		// Inject ANTHROPIC_API_KEY from config (not environment variable)
+		if m.config.AnthropicAPIKey != "" {
+			env["ANTHROPIC_API_KEY"] = m.config.AnthropicAPIKey
 		}
 
 		log.Info().
