@@ -106,6 +106,31 @@ func (a *adapter) Chown(path string, uid, gid uint32) int {
 	return toErrno(a.fs.Chown(path, uid, gid))
 }
 
+// Access checks file access permissions. We always return success to allow
+// operations like `cp` on macOS to work properly with fcopyfile.
+func (a *adapter) Access(path string, mask uint32) int {
+	// Check if file exists first
+	if _, err := a.fs.Getattr(path); err != nil {
+		return toErrno(err)
+	}
+	return 0 // Allow all access to existing files
+}
+
+// Chflags handles BSD file flags (macOS). We silently accept and ignore them.
+func (a *adapter) Chflags(path string, flags uint32) int {
+	return 0 // Accept and discard
+}
+
+// Setcrtime sets file creation time (macOS). We silently accept and ignore.
+func (a *adapter) Setcrtime(path string, tmsp fuse.Timespec) int {
+	return 0 // Accept and discard
+}
+
+// Setchgtime sets file change time (macOS). We silently accept and ignore.
+func (a *adapter) Setchgtime(path string, tmsp fuse.Timespec) int {
+	return 0 // Accept and discard
+}
+
 func (a *adapter) Utimens(path string, tmsp []fuse.Timespec) int {
 	var atime, mtime *int64
 	if len(tmsp) >= 1 {

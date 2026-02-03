@@ -160,6 +160,9 @@ func (t *TasksVNode) fetchTasksGRPC(ctx context.Context) ([]*types.Task, error) 
 // getTaskByName finds a task by its filename (e.g., "abc123.task")
 // Uses cached task list first for fast lookups during directory listing.
 func (t *TasksVNode) getTaskByName(ctx context.Context, name string) (*types.Task, error) {
+	if isAppleDoublePath(name) {
+		return nil, ErrNotFound
+	}
 	if !strings.HasSuffix(name, ".task") {
 		return nil, ErrNotFound
 	}
@@ -286,6 +289,9 @@ func (t *TasksVNode) Getattr(path string) (*FileInfo, error) {
 	if rel == "" || strings.Contains(rel, "/") {
 		return nil, ErrNotFound
 	}
+	if isAppleDoublePath(rel) {
+		return NewFileInfo(PathIno(path), 0, 0644), nil
+	}
 
 	task, err := t.getTaskByName(ctx, rel)
 	if err != nil {
@@ -338,6 +344,9 @@ func (t *TasksVNode) Open(path string, flags int) (FileHandle, error) {
 	if rel == "" || strings.Contains(rel, "/") {
 		return 0, ErrNotFound
 	}
+	if isAppleDoublePath(rel) {
+		return FileHandle(PathIno(path)), nil
+	}
 
 	// Verify task exists
 	_, err := t.getTaskByName(ctx, rel)
@@ -355,6 +364,9 @@ func (t *TasksVNode) Read(path string, buf []byte, off int64, fh FileHandle) (in
 	rel := strings.TrimPrefix(path, TasksPath+"/")
 	if rel == "" {
 		return 0, ErrNotFound
+	}
+	if isAppleDoublePath(rel) {
+		return 0, nil
 	}
 
 	task, err := t.getTaskByName(ctx, rel)

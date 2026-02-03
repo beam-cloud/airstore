@@ -9,6 +9,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/common"
 	pb "github.com/beam-cloud/airstore/proto"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -27,9 +28,19 @@ type GRPCMetadataEngine struct {
 
 // NewGRPCMetadataEngine creates a new gRPC-based metadata engine.
 func NewGRPCMetadataEngine(cfg GRPCConfig) (*GRPCMetadataEngine, error) {
+	// Keepalive parameters to maintain connection health and detect failures quickly.
+	// This reduces latency by keeping connections alive and avoiding reconnection overhead.
+	// Note: Time must be >= server's MinTime (often 5 minutes) to avoid ENHANCE_YOUR_CALM.
+	keepaliveParams := keepalive.ClientParameters{
+		Time:                60 * time.Second, // Send pings every 60s if no activity
+		Timeout:             10 * time.Second, // Wait 10s for ping ack before assuming dead
+		PermitWithoutStream: true,             // Send pings even without active streams
+	}
+
 	conn, err := grpc.NewClient(
 		cfg.GatewayAddr,
 		grpc.WithTransportCredentials(common.TransportCredentials(cfg.GatewayAddr)),
+		grpc.WithKeepaliveParams(keepaliveParams),
 	)
 	if err != nil {
 		return nil, err
