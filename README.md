@@ -1,108 +1,193 @@
-# 💨 Airstore
+# Airstore
 
-Airstore is a virtual filesystem for AI agents. 
+**Run Claude Code on all your data.**
 
-## Why Airstore?
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/beam-cloud/airstore)](https://github.com/beam-cloud/airstore/stargazers)
 
-Agents perform best when they have access to a computer. But your tools, integrations, and context are scattered across external APIs and MCP servers.
+[Website](https://airstore.dev) · [Docs](https://docs.airstore.ai) · [Demo Video](https://youtube.com/...) · [Discord](https://discord.gg/...)
 
-Airstore is a virtual filesystem that puts everything your agent needs (tools, context, and events) in a single folder on your computer. That folder is virtualized, so you can access it from anywhere.
+---
 
-We envision a world where your entire company can be represented as a POSIX filesystem that any agent can interact with.
+## What is Airstore?
 
-### Features
+Airstore turns your integrations into a filesystem. Connect Gmail, GitHub, Linear — then describe what you need in plain English. Results appear as files that Claude Code can read.
 
-* Mount a complete agent environment as a local folder
-* Access MCP tools and integrations as executable binaries
-* Share context across agents and machines
-* Trigger background agents on filesystem events (coming soon)
+⭐ If this is useful, [give us a star](https://github.com/beam-cloud/airstore)
+
+## Why files?
+
+Claude Code already knows how to read files, search directories, and work with file contents. By turning your integrations into files, Claude can use the same tools it uses for code, for your data.
+
+Smart folders also let you scope exactly what Claude can access. Instead of granting access to your entire inbox, create a folder with just "invoices from last week."
+
+## Features
+
+- **Smart folders** - Natural language queries that materialize as folders of files
+- **Integrations** - Connect GitHub, Gmail, Google Drive, Linear, Notion, Slack
+- **Tools** - MCP servers exposed as executable binaries
+- **Team workspaces** - Share integrations and smart folders across your team
+- **Local mode** - Run entirely on your own infrastructure
+
+## Quick Start
+
+### 1. Sign up
+
+Go to [app.airstore.ai](https://app.airstore.ai) and create an account.
+
+### 2. Connect a service
+
+In the dashboard, go to **Settings → Integrations** and connect a service (GitHub, Gmail, Drive, and more.).
+
+### 3. Create a smart folder
+
+Click **New Smart Folder** and describe what you want in natural language:
+
+- "Open PRs in acme/api that need review"
+- "Invoices I received in email last week"
+- "High priority issues in the current sprint"
+
+### 4. Install the CLI
+
+```bash
+curl -sSL https://airstore.dev/install.sh | sh
+```
+
+### 5. Mount the filesystem
+
+Create a token in **Settings → Tokens**, then mount:
+
+```bash
+airstore mount ~/airstore --token YOUR_TOKEN_HERE
+```
+
+Your smart folders are now available as local directories:
+
+```bash
+ls ~/airstore/gmail/invoices/
+# stripe-invoice-jan-28.eml
+# aws-invoice-jan-25.eml
+# digitalocean-jan-22.eml
+```
+
+```bash
+cat ~/airstore/gmail/invoices/stripe-invoice-jan-28.eml
+
+From: billing@stripe.com
+Subject: Your invoice from Stripe
+Date: Jan 28, 2025
+
+Amount: $249.00
+Status: Paid
+```
+
+### 6. Use with Claude Code
+
+```bash
+cd ~/airstore
+claude
+```
+
+Ask Claude to work with your data:
+
+- "Summarize these invoices and tell me the total"
+- "Which invoices are unpaid?"
+- "Extract vendor names and amounts into a CSV"
 
 ## How it works
 
-Airstore is a custom filesystem where each tool is a virtual file. It lets you chain tool calls using pure bash, without the hassle of dealing with APIs or MCP servers. 
-
-**Mount your tools**
-
 ```
-./bin/cli mount ~/airstore --config ./config.local.yaml
-```
-
-**Interact with them as local binaries**
-
-```
-luke@Lukes-MacBook-Pro tools % ls -lart /tmp/airstore/tools/
-total 4295007838
-drwxr-xr-x  2 luke  staff          0 Jan 26 20:19 ..
-drwxr-xr-x  2 luke  staff          0 Jan 26 20:19 .
--rwxr-xr-x  1 luke  staff   10378242 Jan 26 20:19 github
--rwxr-xr-x  1 luke  staff   10378242 Jan 26 20:19 wikipedia
+~/airstore/
+├── linear/
+│   └── design-issues/     # Smart folder
+├── github/
+│   └── open-prs/          # Smart folder
+├── gmail/
+│   └── invoices/          # Smart folder
+└── tools/
+    ├── github             # MCP tool executable
+    ├── linear             # MCP tool executable
+    └── gmail              # MCP tool executable
 ```
 
-```
-luke@Lukes-MacBook-Pro tools % /tmp/airstore/tools/wikipedia search "something"
-{
-  "results": [
-    {
-      "title": "Something",
-      "page_id": 8041208,
-      "excerpt": "up something in Wiktionary, the free dictionary. Something may refer to: Something (concept) \u0026quot;Something\u0026quot;, an English indefinite pronoun Something (Chairlift)"
-    },
-    {
-      "title": "Something Something",
-      "page_id": 7077513,
-      "excerpt": "formerly known as Something Something... Unakkum Enakkum Something Something (2012 film), a 2012 Odia-language film Something Something 2 (2014), a sequel"
-    }
-  ]
-}
-```
+**Smart folders** contain data from your integrations, materialized as files. They sync automatically in the background.
 
-```
-luke@Lukes-MacBook-Pro ~ % /tmp/airstore/tools/wikipedia search "albert" | grep -i 'einstein'
-    "title": "Albert Einstein",
-    "excerpt": "Albert Einstein (14 March 1879 – 18 April 1955) was a German-born theoretical physicist best known for developing the theory of relativity. Einstein also"
-    "title": "Einstein family",
-    "excerpt": "The Einstein family is the family of physicist Albert Einstein (1879-1955). Einstein\u0026#039;s fourth-great-grandfather, Jakob Weil, was his oldest recorded relative"
-```
-
-## macOS Setup
-
-### 0. Install Go 1.24
-
-The easiest way is the official Go installer:
-
-- Download and run the macOS pkg from https://go.dev/dl/
-- Restart your terminal and confirm:
+**Tools** are MCP servers exposed as executables that let you take actions:
 
 ```bash
-go version
+~/airstore/tools/github create-issue --repo=acme/api --title="Bug fix needed"
 ```
 
-### 1. Install FUSE-T
+Tools output JSON and can be piped together with standard Unix tools:
 
 ```bash
+~/airstore/tools/wikipedia search "albert" | grep -i 'einstein'
+```
+
+## Installation
+
+The install script handles everything:
+
+```bash
+curl -sSL https://airstore.dev/install.sh | sh
+```
+
+This automatically:
+- Downloads the correct binary for your platform (macOS/Linux, Intel/ARM)
+- Installs FUSE dependencies
+- Configures permissions
+
+Verify the installation:
+
+```bash
+airstore --version
+```
+
+### System requirements
+
+| Platform | Status |
+|----------|--------|
+| macOS (Apple Silicon) | Supported |
+| macOS (Intel) | Supported |
+| Linux (x86_64) | Supported |
+| Linux (ARM64) | Supported |
+| Windows | Coming soon |
+
+---
+
+<details>
+<summary><strong>Local Mode (Self-Hosted)</strong></summary>
+
+For development or self-hosted deployments, you can run Airstore entirely on your own infrastructure with your own MCP servers.
+
+### Prerequisites
+
+**FUSE** (required):
+
+```bash
+# macOS
 brew install fuse-t
+
+# Ubuntu/Debian
+sudo apt install fuse3
 ```
 
-### 2. Install Node.js (for npx)
+**Node.js** (for npx-based MCP servers):
 
 ```bash
+# macOS
 brew install node
+
+# Ubuntu/Debian
+sudo apt install nodejs npm
 ```
 
-### 3. Build the CLI
+### Configuration
 
-```bash
-make build
-```
-
-### 4. Configure MCP Servers
-
-Edit `config.local.yaml` to add your MCP servers:
+Create a `config.local.yaml` file:
 
 ```yaml
 mode: local
-debugMode: true
-prettyLogs: true
 
 gateway:
   grpc:
@@ -113,17 +198,18 @@ gateway:
 
 tools:
   mcp:
-    # Filesystem access
     filesystem:
       command: npx
       args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp", "/Users"]
 
-    # Memory/knowledge graph
     memory:
       command: npx
       args: ["-y", "@modelcontextprotocol/server-memory"]
 
-    # GitHub (set GITHUB_TOKEN env var)
+    wikipedia:
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-wikipedia"]
+
     github:
       command: npx
       args: ["-y", "@modelcontextprotocol/server-github"]
@@ -131,28 +217,56 @@ tools:
         GITHUB_TOKEN: "${GITHUB_TOKEN}"
 ```
 
-### 5. Mount
+### Mount locally
 
 ```bash
-./bin/cli mount /tmp/airstore --config config.local.yaml
+airstore mount ~/airstore --config config.local.yaml
 ```
 
-### 6. Use
-
-Each registered tool (and any registered MCP servers) become virtual executables in `<MOUNT_PATH>/tools/`:
+Your tools are now available:
 
 ```bash
-# List available tools
-ls /tmp/airstore/tools/
+ls ~/airstore/tools/
+# filesystem  memory  wikipedia  github
 
-# Use filesystem server
-/tmp/airstore/tools/filesystem list_directory /tmp
+# Search Wikipedia
+~/airstore/tools/wikipedia search "artificial intelligence"
 
-# Use memory server  
-/tmp/airstore/tools/memory create_entities '[{"name": "test", "type": "note"}]'
+# List files
+~/airstore/tools/filesystem list_directory /tmp
 
 # Get help for any tool
-/tmp/airstore/tools/filesystem --help
+~/airstore/tools/filesystem --help
 ```
 
-Press `Ctrl+C` to unmount.
+### Building from source
+
+```bash
+git clone https://github.com/beam-cloud/airstore
+cd airstore
+make build
+./bin/cli mount ~/airstore --config config.local.yaml
+```
+
+</details>
+
+---
+
+## Documentation
+
+Full documentation at [docs.airstore.ai](https://docs.airstore.ai):
+
+- [Quickstart](https://docs.airstore.ai/quickstart) - Get running in 5 minutes
+- [Smart Folders](https://docs.airstore.ai/concepts/smart-folders) - Create dynamic data views
+- [Tools](https://docs.airstore.ai/concepts/tools) - Run MCP tools as CLI commands
+- [CLI Reference](https://docs.airstore.ai/reference/cli) - Full command documentation
+
+## Contributing
+
+PRs welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+Join our [Discord](https://discord.gg/...) to discuss ideas and get help.
+
+## License
+
+AGPL 3.0 License - see [LICENSE](LICENSE) for details.
