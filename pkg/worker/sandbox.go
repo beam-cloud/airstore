@@ -13,7 +13,6 @@ import (
 
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/runtime"
-	"github.com/beam-cloud/airstore/pkg/streams"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/rs/zerolog/log"
@@ -21,36 +20,26 @@ import (
 
 // SandboxConfig holds configuration for the sandbox manager
 type SandboxConfig struct {
-	// Paths configuration
-	Paths types.WorkerPaths
+	Paths            types.WorkerPaths // Paths configuration
+	WorkerID         string            // WorkerID is the unique ID of this worker
+	GatewayGRPCAddr  string            // GatewayGRPCAddr is the gateway gRPC address
+	AuthToken        string            // AuthToken is the worker's authentication token (fallback)
+	EnableFilesystem bool              // EnableFilesystem enables FUSE filesystem mounts
+	AnthropicAPIKey  string            // AnthropicAPIKey for Claude Code tasks (from config, not env var)
 
-	// WorkerID is the unique ID of this worker
-	WorkerID string
-
-	// GatewayGRPCAddr is the gateway gRPC address
-	GatewayGRPCAddr string
-
-	// AuthToken is the worker's authentication token (fallback)
-	AuthToken string
-
-	// EnableFilesystem enables FUSE filesystem mounts
-	EnableFilesystem bool
-
-	// AnthropicAPIKey for Claude Code tasks (from config, not env var)
-	AnthropicAPIKey string
 }
 
 // SandboxManager manages the lifecycle of sandboxes on a worker
 type SandboxManager struct {
-	config       SandboxConfig
-	runtime      runtime.Runtime
-	sandboxes    map[string]*ManagedSandbox
-	mu           sync.RWMutex
-	ctx          context.Context
-	cancel       context.CancelFunc
-	mountManager *MountManager
-	s2Client     *streams.S2Client
-	imageManager ImageManager
+	config        SandboxConfig
+	runtime       runtime.Runtime
+	sandboxes     map[string]*ManagedSandbox
+	mu            sync.RWMutex
+	ctx           context.Context
+	cancel        context.CancelFunc
+	mountManager  *MountManager
+	s2Client      *common.S2Client
+	imageManager  ImageManager
 	filesystemCmd *exec.Cmd
 }
 
@@ -168,9 +157,9 @@ func NewSandboxManager(ctx context.Context, cfg SandboxManagerConfig) (*SandboxM
 	}
 
 	// Create S2 client for log streaming (if configured)
-	var s2Client *streams.S2Client
+	var s2Client *common.S2Client
 	if cfg.S2Token != "" && cfg.S2Basin != "" {
-		s2Client = streams.NewS2Client(streams.S2Config{
+		s2Client = common.NewS2Client(common.S2Config{
 			Token: cfg.S2Token,
 			Basin: cfg.S2Basin,
 		})

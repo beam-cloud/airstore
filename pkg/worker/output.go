@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/beam-cloud/airstore/pkg/streams"
+	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
@@ -114,14 +114,14 @@ func (w *ConsoleWriter) Write(p []byte) (int, error) {
 
 // S2Writer writes task output to S2 streams.
 type S2Writer struct {
-	client *streams.S2Client
+	client *common.S2Client
 	taskID string
 	stream string
 	ctx    context.Context
 }
 
 // NewS2Writer creates a writer that appends to S2.
-func NewS2Writer(ctx context.Context, client *streams.S2Client, taskID, stream string) *S2Writer {
+func NewS2Writer(ctx context.Context, client *common.S2Client, taskID, stream string) *S2Writer {
 	return &S2Writer{
 		client: client,
 		taskID: taskID,
@@ -167,7 +167,7 @@ func (w *FileWriter) Close() error {
 // OutputConfig configures task output destinations.
 type OutputConfig struct {
 	TaskID   string
-	S2Client *streams.S2Client
+	S2Client *common.S2Client
 	Console  bool // Write to worker stdout
 }
 

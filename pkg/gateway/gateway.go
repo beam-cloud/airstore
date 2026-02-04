@@ -28,7 +28,6 @@ import (
 	"github.com/beam-cloud/airstore/pkg/scheduler"
 	"github.com/beam-cloud/airstore/pkg/sources"
 	"github.com/beam-cloud/airstore/pkg/sources/providers"
-	"github.com/beam-cloud/airstore/pkg/streams"
 	"github.com/beam-cloud/airstore/pkg/tools"
 	_ "github.com/beam-cloud/airstore/pkg/tools/builtin" // self-registering tools
 	toolclients "github.com/beam-cloud/airstore/pkg/tools/clients"
@@ -59,7 +58,7 @@ type Gateway struct {
 	storageClient  *clients.StorageClient
 	oauthStore     *oauth.Store
 	oauthRegistry  *oauth.Registry
-	s2Client       *streams.S2Client
+	s2Client       *common.S2Client
 	eventBus       *common.EventBus
 }
 
@@ -115,9 +114,9 @@ func NewGateway() (*Gateway, error) {
 	oauthRegistry.Register(oauth.NewLinearProvider(config.OAuth.Linear, callbackURL))
 
 	// Initialize S2 client for task log streaming if configured
-	var s2Client *streams.S2Client
+	var s2Client *common.S2Client
 	if config.Streams.Token != "" && config.Streams.Basin != "" {
-		s2Client = streams.NewS2Client(streams.S2Config{
+		s2Client = common.NewS2Client(common.S2Config{
 			Token: config.Streams.Token,
 			Basin: config.Streams.Basin,
 		})

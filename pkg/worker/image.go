@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/beam-cloud/airstore/pkg/registry"
+	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/beam-cloud/clip/pkg/clip"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -47,7 +47,7 @@ type ImageManager interface {
 // It manages FUSE mounts with reference counting for efficient image reuse.
 type CLIPImageManager struct {
 	config   types.ImageConfig
-	registry *registry.ImageRegistry // S3 registry for archive storage
+	registry *common.ImageRegistry // S3 registry for archive storage
 
 	// Mount tracking with reference counting
 	mounts   map[string]*clipMount
@@ -78,10 +78,10 @@ func NewImageManager(config types.ImageConfig) (ImageManager, error) {
 	clip.SetLogLevel("info")
 
 	// Initialize S3 registry for archive storage
-	var reg *registry.ImageRegistry
+	var reg *common.ImageRegistry
 	if config.S3.Bucket != "" {
 		var err error
-		reg, err = registry.NewImageRegistry(registry.Config{
+		reg, err = common.NewImageRegistry(common.Config{
 			Bucket:         config.S3.Bucket,
 			Region:         config.S3.Region,
 			Endpoint:       config.S3.Endpoint,

@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
+	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/repository"
-	"github.com/beam-cloud/airstore/pkg/streams"
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
 )
@@ -15,10 +15,10 @@ import (
 type GatewayService struct {
 	pb.UnimplementedGatewayServiceServer
 	backend  repository.BackendRepository
-	s2Client *streams.S2Client
+	s2Client *common.S2Client
 }
 
-func NewGatewayService(backend repository.BackendRepository, s2Client *streams.S2Client) *GatewayService {
+func NewGatewayService(backend repository.BackendRepository, s2Client *common.S2Client) *GatewayService {
 	return &GatewayService{backend: backend, s2Client: s2Client}
 }
 
