@@ -24,7 +24,7 @@ type Config struct {
 func DefaultConfig() Config {
 	home, _ := os.UserHomeDir()
 	return Config{
-		MountPoint:  filepath.Join(home, "Airstore"),
+		MountPoint:  filepath.Join(home, "Desktop", "Airstore"),
 		ConfigPath:  "",
 		GatewayAddr: defaultGateway(),
 		AutoMount:   true,
