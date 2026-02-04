@@ -22,12 +22,13 @@ type TasksGroup struct {
 }
 
 type CreateTaskRequest struct {
-	WorkspaceID   string            `json:"workspace_id"`   // External workspace ID
-	WorkspaceName string            `json:"workspace_name"` // Or workspace name
-	Prompt        string            `json:"prompt"`         // Claude Code prompt (auto-sets image)
-	Image         string            `json:"image"`          // Container image (optional if prompt provided)
-	Entrypoint    []string          `json:"entrypoint"`
-	Env           map[string]string `json:"env"`
+	WorkspaceID   string               `json:"workspace_id"`   // External workspace ID
+	WorkspaceName string               `json:"workspace_name"` // Or workspace name
+	Prompt        string               `json:"prompt"`         // Claude Code prompt (auto-sets image)
+	Image         string               `json:"image"`          // Container image (optional if prompt provided)
+	Entrypoint    []string             `json:"entrypoint"`
+	Env           map[string]string    `json:"env"`
+	Resources     *types.TaskResources `json:"resources,omitempty"` // CPU/Memory/GPU (uses defaults if nil)
 }
 
 type TaskResponse struct {
@@ -133,6 +134,7 @@ func (g *TasksGroup) CreateTask(c echo.Context) error {
 		Image:             req.Image,
 		Entrypoint:        req.Entrypoint,
 		Env:               req.Env,
+		Resources:         req.Resources,
 	}
 
 	if task.Env == nil {

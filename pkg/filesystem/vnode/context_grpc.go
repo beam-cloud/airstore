@@ -6,7 +6,6 @@ import (
 	"io/fs"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -54,7 +53,7 @@ func (c *ContextVNodeGRPC) ctx() (context.Context, context.CancelFunc) {
 	return ctx, cancel
 }
 
-func (c *ContextVNodeGRPC) Prefix() string { return SkillsPath }
+func (c *ContextVNodeGRPC) Prefix() string  { return SkillsPath }
 func (c *ContextVNodeGRPC) Type() VNodeType { return VNodeWritable }
 
 // rel returns the storage path (leading slash stripped, keeps skills prefix)
@@ -64,11 +63,17 @@ func (c *ContextVNodeGRPC) rel(path string) string {
 
 // Getattr returns file attributes with caching
 func (c *ContextVNodeGRPC) Getattr(path string) (*FileInfo, error) {
-	// Treat AppleDouble files as zero-length placeholders.
+	// Vnode root always exists (virtual directory, no RPC needed)
+	if path == c.Prefix() {
+		return NewDirInfo(PathIno(path)), nil
+	}
+
+	// AppleDouble files are zero-length placeholders
 	if isAppleDoublePath(path) {
 		return NewFileInfo(PathIno(path), 0, 0644), nil
 	}
 
+	// Check caches
 	if c.cache.IsNegative(path) {
 		return nil, fs.ErrNotExist
 	}
@@ -76,6 +81,7 @@ func (c *ContextVNodeGRPC) Getattr(path string) (*FileInfo, error) {
 		return info, nil
 	}
 
+	// RPC to backend for actual files/subdirectories
 	ctx, cancel := c.ctx()
 	defer cancel()
 
@@ -133,7 +139,7 @@ func (c *ContextVNodeGRPC) Readdir(path string) ([]DirEntry, error) {
 		}
 		childMeta[e.Name] = &FileInfo{
 			Ino: ino, Size: e.Size, Mode: e.Mode, Nlink: 1,
-			Uid: uint32(syscall.Getuid()), Gid: uint32(syscall.Getgid()),
+			Uid: Owner.Uid, Gid: Owner.Gid,
 			Atime: now, Mtime: mtime, Ctime: mtime,
 		}
 	}
@@ -728,7 +734,7 @@ func (c *ContextVNodeGRPC) toFileInfo(path string, info *pb.FileInfo) *FileInfo 
 	}
 	return &FileInfo{
 		Ino: PathIno(path), Size: info.Size, Mode: info.Mode, Nlink: 1,
-		Uid: uint32(syscall.Getuid()), Gid: uint32(syscall.Getgid()),
+		Uid: Owner.Uid, Gid: Owner.Gid,
 		Atime: now, Mtime: mtime, Ctime: mtime,
 	}
 }

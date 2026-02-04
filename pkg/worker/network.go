@@ -28,7 +28,7 @@ const (
 	vethContPrefix = "as_vc_"
 )
 
-// NetworkManager handles container networking with NAT.
+// NetworkManager handles container networking with dual-stack NAT.
 // IP allocation is coordinated via gRPC with the gateway.
 type NetworkManager struct {
 	ctx      context.Context
@@ -36,6 +36,7 @@ type NetworkManager struct {
 	client   *gateway.GatewayClient
 	extIface netlink.Link
 	ipt      *iptables.IPTables
+	ipt6     *iptables.IPTables // nil if IPv6 not available
 	mu       sync.Mutex
 }
 
@@ -45,9 +46,25 @@ func NewNetworkManager(ctx context.Context, workerID string, client *gateway.Gat
 		return nil, fmt.Errorf("default interface: %w", err)
 	}
 
-	ipt, err := iptables.New(iptables.IPFamily(iptables.ProtocolIPv4))
+	// Detect iptables mode (nftables vs legacy)
+	ipv4Path, ipv6Path := detectIptablesMode()
+
+	ipt, err := iptables.New(iptables.Path(ipv4Path), iptables.IPFamily(iptables.ProtocolIPv4))
 	if err != nil {
 		return nil, fmt.Errorf("iptables: %w", err)
+	}
+
+	// Initialize ip6tables for IPv6 support (graceful fallback)
+	var ipt6 *iptables.IPTables
+	ipt6, err = iptables.New(iptables.Path(ipv6Path), iptables.IPFamily(iptables.ProtocolIPv6))
+	if err != nil {
+		log.Warn().Err(err).Msg("IPv6 iptables init failed, falling back to IPv4 only")
+	} else {
+		// Verify NAT table is accessible
+		if _, err := ipt6.List("nat", "POSTROUTING"); err != nil {
+			log.Warn().Err(err).Msg("IPv6 NAT table not available, falling back to IPv4 only")
+			ipt6 = nil
+		}
 	}
 
 	m := &NetworkManager{
@@ -56,14 +73,45 @@ func NewNetworkManager(ctx context.Context, workerID string, client *gateway.Gat
 		client:   client,
 		extIface: extIface,
 		ipt:      ipt,
+		ipt6:     ipt6,
 	}
 
 	if err := m.ensureBridge(); err != nil {
 		return nil, fmt.Errorf("bridge setup: %w", err)
 	}
 
-	log.Info().Str("bridge", bridgeName).Str("subnet", types.DefaultSubnet).Msg("network ready")
+	ipv6Status := "disabled"
+	if ipt6 != nil {
+		ipv6Status = "enabled"
+	}
+	log.Info().
+		Str("bridge", bridgeName).
+		Str("subnet_v4", types.DefaultSubnet).
+		Str("subnet_v6", types.DefaultSubnetIPv6).
+		Str("ipv6", ipv6Status).
+		Msg("network ready")
 	return m, nil
+}
+
+// detectIptablesMode returns paths for iptables/ip6tables based on host config.
+func detectIptablesMode() (ipv4Path, ipv6Path string) {
+	// Check if nftables is in use by looking for KUBE-FORWARD chain
+	iptNft, err := iptables.New(iptables.IPFamily(iptables.ProtocolIPv4), iptables.Path("/usr/sbin/iptables-nft"))
+	if err == nil {
+		if exists, _ := iptNft.ChainExists("filter", "KUBE-FORWARD"); exists {
+			return "/usr/sbin/iptables-nft", "/usr/sbin/ip6tables-nft"
+		}
+	}
+
+	iptLegacy, err := iptables.New(iptables.IPFamily(iptables.ProtocolIPv4), iptables.Path("/usr/sbin/iptables-legacy"))
+	if err == nil {
+		if exists, _ := iptLegacy.ChainExists("filter", "KUBE-FORWARD"); exists {
+			return "/usr/sbin/iptables-legacy", "/usr/sbin/ip6tables-legacy"
+		}
+	}
+
+	// Default
+	return "/usr/sbin/iptables", "/usr/sbin/ip6tables"
 }
 
 // Setup creates network namespace and veth pair for a sandbox.
@@ -202,19 +250,39 @@ func (m *NetworkManager) ensureBridge() error {
 		return err
 	}
 
-	// Assign gateway IP to bridge
-	addr := &netlink.Addr{IPNet: &net.IPNet{
+	// Assign IPv4 gateway to bridge
+	addrV4 := &netlink.Addr{IPNet: &net.IPNet{
 		IP:   net.ParseIP(types.DefaultGateway),
 		Mask: net.CIDRMask(types.DefaultPrefixLen, 32),
 	}}
-	if err := netlink.AddrAdd(br, addr); err != nil && err != unix.EEXIST {
+	if err := netlink.AddrAdd(br, addrV4); err != nil && err != unix.EEXIST {
 		return err
 	}
 
-	// NAT outbound traffic
+	// Assign IPv6 gateway to bridge (if supported)
+	if m.ipt6 != nil {
+		_, ipv6Net, _ := net.ParseCIDR(types.DefaultSubnetIPv6)
+		addrV6 := &netlink.Addr{IPNet: &net.IPNet{
+			IP:   net.ParseIP(types.DefaultGatewayIPv6),
+			Mask: ipv6Net.Mask,
+		}}
+		if err := netlink.AddrAdd(br, addrV6); err != nil && err != unix.EEXIST {
+			log.Warn().Err(err).Msg("failed to add IPv6 address to bridge")
+		}
+	}
+
 	extName := m.extIface.Attrs().Name
+
+	// IPv4 NAT
 	if err := m.ipt.AppendUnique("nat", "POSTROUTING", "-s", types.DefaultSubnet, "-o", extName, "-j", "MASQUERADE"); err != nil {
 		return err
+	}
+
+	// IPv6 NAT (if supported)
+	if m.ipt6 != nil {
+		if err := m.ipt6.AppendUnique("nat", "POSTROUTING", "-s", types.DefaultSubnetIPv6, "-o", extName, "-j", "MASQUERADE"); err != nil {
+			log.Warn().Err(err).Msg("failed to add IPv6 NAT rule")
+		}
 	}
 
 	// Allow forwarding

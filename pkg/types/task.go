@@ -35,6 +35,9 @@ type Task struct {
 	// Env is environment variables for the task
 	Env map[string]string `json:"env" db:"env"`
 
+	// Resources specifies resource requirements (optional - uses defaults if nil)
+	Resources *TaskResources `json:"resources,omitempty" db:"-"`
+
 	// ExitCode is the exit code when complete
 	ExitCode *int `json:"exit_code,omitempty" db:"exit_code"`
 
@@ -72,16 +75,26 @@ func (e *ErrTaskNotFound) Error() string {
 	return "task not found: " + e.ExternalId
 }
 
-// TaskResources specifies resource requirements for a task
+// TaskResources specifies resource requirements.
+// Flow: API → Task.Resources → SandboxConfig.Resources → OCI spec limits
 type TaskResources struct {
-	// CPU in millicores (e.g., 1000 = 1 CPU)
-	CPU int64 `json:"cpu"`
+	CPU    int64 `json:"cpu"`    // millicores (1000 = 1 CPU)
+	Memory int64 `json:"memory"` // bytes
+	GPU    int   `json:"gpu"`    // count
+}
 
-	// Memory in bytes
-	Memory int64 `json:"memory"`
+// Default resource limits (applied when Task.Resources is nil)
+const (
+	DefaultTaskCPU    int64 = 2000    // 2 CPUs
+	DefaultTaskMemory int64 = 2 << 30 // 2 GiB
+)
 
-	// GPU count (0 = no GPU)
-	GPU int `json:"gpu"`
+// GetResources returns resources with defaults applied.
+func (t *Task) GetResources() TaskResources {
+	if t.Resources != nil {
+		return *t.Resources
+	}
+	return TaskResources{CPU: DefaultTaskCPU, Memory: DefaultTaskMemory}
 }
 
 // TaskStatus represents the current status of a task

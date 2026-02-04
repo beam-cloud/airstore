@@ -20,6 +20,8 @@ type Config struct {
 	GatewayAddr string
 	Token       string
 	Verbose     bool
+	Uid         uint32 // File owner uid (0 = use platform default)
+	Gid         uint32 // File owner gid (0 = use platform default)
 }
 
 // Filesystem is a FUSE filesystem that connects to the gateway via gRPC.
@@ -61,6 +63,9 @@ func NewFilesystem(cfg Config) (*Filesystem, error) {
 	if cfg.GatewayAddr == "" {
 		cfg.GatewayAddr = "localhost:1993"
 	}
+
+	// Initialize file ownership (default=current user, worker sets env for sandbox)
+	vnode.InitOwner(cfg.Uid, cfg.Gid)
 
 	metadata, err := NewGRPCMetadataEngine(GRPCConfig{
 		GatewayAddr: cfg.GatewayAddr,
@@ -271,8 +276,8 @@ func (f *Filesystem) Getattr(path string) (*FileInfo, error) {
 			Ino:   hashToIno(meta.ID),
 			Mode:  meta.Permission,
 			Nlink: 2,
-			Uid:   uint32(syscall.Getuid()),
-			Gid:   uint32(syscall.Getgid()),
+			Uid:   vnode.Owner.Uid,
+			Gid:   vnode.Owner.Gid,
 			Atime: time.Now(),
 			Mtime: time.Now(),
 			Ctime: time.Now(),
@@ -285,8 +290,8 @@ func (f *Filesystem) Getattr(path string) (*FileInfo, error) {
 			Size:  int64(len(meta.FileData)),
 			Mode:  syscall.S_IFREG | 0644,
 			Nlink: 1,
-			Uid:   uint32(syscall.Getuid()),
-			Gid:   uint32(syscall.Getgid()),
+			Uid:   vnode.Owner.Uid,
+			Gid:   vnode.Owner.Gid,
 			Atime: time.Now(),
 			Mtime: time.Now(),
 			Ctime: time.Now(),
@@ -573,8 +578,8 @@ func (f *Filesystem) rootInfo() *FileInfo {
 		Ino:   1,
 		Mode:  syscall.S_IFDIR | 0755,
 		Nlink: 2,
-		Uid:   uint32(syscall.Getuid()),
-		Gid:   uint32(syscall.Getgid()),
+		Uid:   vnode.Owner.Uid,
+		Gid:   vnode.Owner.Gid,
 		Atime: time.Now(),
 		Mtime: time.Now(),
 		Ctime: time.Now(),
