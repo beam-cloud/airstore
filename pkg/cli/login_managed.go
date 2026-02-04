@@ -76,7 +76,7 @@ Your credentials are stored in ~/.airstore/credentials.`,
 		fmt.Print("  Waiting for authorization")
 
 		// Poll for authorization
-		interval := max(auth.Interval, 5)
+		interval := max(auth.Interval, 2)
 		deadline := time.Now().Add(time.Duration(auth.ExpiresIn) * time.Second)
 
 		for time.Now().Before(deadline) {
