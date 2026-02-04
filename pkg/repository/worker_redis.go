@@ -169,11 +169,6 @@ func (r *WorkerRedisRepository) loadWorker(ctx context.Context, key string) (*ty
 	return w, nil
 }
 
-// ----------------------------------------------------------------------------
-// IP allocation
-// ----------------------------------------------------------------------------
-
-
 func (r *WorkerRedisRepository) AllocateIP(ctx context.Context, sandboxID, workerID string) (*types.IPAllocation, error) {
 	lockKey := common.Keys.NetworkIPLock()
 	poolKey := common.Keys.NetworkIPPool()
