@@ -156,7 +156,7 @@ func newFileInfo(ino uint64, size int64, mode uint32, nlink uint32) *FileInfo {
 	now := time.Now()
 	return &FileInfo{
 		Ino: ino, Size: size, Mode: mode, Nlink: nlink,
-		Uid: uint32(syscall.Getuid()), Gid: uint32(syscall.Getgid()),
+		Uid: Owner.Uid, Gid: Owner.Gid,
 		Atime: now, Mtime: now, Ctime: now,
 	}
 }

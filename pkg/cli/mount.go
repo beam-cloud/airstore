@@ -28,6 +28,8 @@ import (
 var (
 	mountVerbose bool
 	configPath   string
+	mountUID     uint32
+	mountGID     uint32
 )
 
 var mountCmd = &cobra.Command{
@@ -38,7 +40,7 @@ var mountCmd = &cobra.Command{
 Examples:
   airstore mount ~/airstore
   airstore mount /tmp/airstore --gateway localhost:1993
-  airstore mount /tmp/airstore --config config.local.yaml`,
+  airstore mount /tmp/airstore --uid 1000 --gid 1000`,
 	Args: cobra.ExactArgs(1),
 	RunE: runMount,
 }
@@ -46,6 +48,8 @@ Examples:
 func init() {
 	mountCmd.Flags().BoolVarP(&mountVerbose, "verbose", "v", false, "Verbose logging")
 	mountCmd.Flags().StringVarP(&configPath, "config", "c", "", "Config file (for local mode)")
+	mountCmd.Flags().Uint32Var(&mountUID, "uid", 0, "File owner UID (0 = current user)")
+	mountCmd.Flags().Uint32Var(&mountGID, "gid", 0, "File owner GID (0 = current user)")
 	rootCmd.AddCommand(mountCmd)
 }
 
@@ -108,6 +112,8 @@ func runMount(cmd *cobra.Command, args []string) error {
 			GatewayAddr: effectiveGateway,
 			Token:       authToken,
 			Verbose:     mountVerbose,
+			Uid:         mountUID,
+			Gid:         mountGID,
 		})
 		if err != nil {
 			return err

@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/rs/zerolog/log"
 )
 
@@ -97,11 +98,13 @@ func (m *MountManager) Mount(ctx context.Context, taskID, token string) (string,
 	// Create cancellable context for the mount process
 	mountCtx, cancel := context.WithCancel(ctx)
 
-	// Start FUSE mount process
+	// Start FUSE mount process with sandbox user ownership
 	cmd := exec.CommandContext(mountCtx, m.config.CLIBinary, "mount",
 		mountPath,
 		"--gateway", m.config.GatewayAddr,
 		"--token", token,
+		"--uid", fmt.Sprintf("%d", types.SandboxUserUID),
+		"--gid", fmt.Sprintf("%d", types.SandboxUserGID),
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

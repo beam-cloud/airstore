@@ -20,6 +20,7 @@ type AppConfig struct {
 	ClusterName string           `key:"clusterName" json:"cluster_name"`
 	Database    DatabaseConfig   `key:"database" json:"database"`
 	Image       ImageConfig      `key:"image" json:"image"`
+	Sandbox     SandboxSettings  `key:"sandbox" json:"sandbox"`
 	Filesystem  FilesystemConfig `key:"filesystem" json:"filesystem"`
 	Gateway     GatewayConfig    `key:"gateway" json:"gateway"`
 	Scheduler   SchedulerConfig  `key:"scheduler" json:"scheduler"`
@@ -112,6 +113,23 @@ type ImageConfig struct {
 	CachePath string   `key:"cachePath" json:"cache_path"`
 	WorkPath  string   `key:"workPath" json:"work_path"`
 	MountPath string   `key:"mountPath" json:"mount_path"`
+}
+
+// SandboxSettings configures the task sandbox/container runtime defaults
+type SandboxSettings struct {
+	// DefaultImage is the container image used for Claude Code tasks
+	DefaultImage string `key:"defaultImage" json:"default_image"`
+}
+
+// DefaultSandboxImage is the fallback image if not configured
+const DefaultSandboxImage = "public.ecr.aws/n4e0e1y0/airstore-default-sandbox:latest"
+
+// GetDefaultImage returns the configured default image or the fallback
+func (c SandboxSettings) GetDefaultImage() string {
+	if c.DefaultImage != "" {
+		return c.DefaultImage
+	}
+	return DefaultSandboxImage
 }
 
 // WorkspaceStorageConfig for per-workspace S3 buckets (bucket: {prefix}-{workspace_id})
@@ -308,7 +326,7 @@ func (c *MCPServerConfig) RedactConfig() *MCPServerConfig {
 // IntegrationOAuth configures OAuth for workspace integrations (gmail, gdrive, github, etc.)
 // This is separate from admin.oauth which is for admin UI login only.
 type IntegrationOAuth struct {
-	CallbackURL string                  `key:"callbackUrl" json:"callback_url"` // e.g., https://api.airstore.ai/api/v1/oauth/callback
+	CallbackURL string                   `key:"callbackUrl" json:"callback_url"` // e.g., https://api.airstore.ai/api/v1/oauth/callback
 	Google      ProviderOAuthCredentials `key:"google" json:"google"`
 	GitHub      ProviderOAuthCredentials `key:"github" json:"github"`
 	Notion      ProviderOAuthCredentials `key:"notion" json:"notion"`

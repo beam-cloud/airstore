@@ -78,6 +78,7 @@ WORKDIR /workspace
 # - libfuse2: Required for cgofuse (airstore-fs uses cgofuse which requires libfuse2)
 # - fuse3/libfuse3-3: Required for CLIP FUSE mounts
 # - runc: Fallback container runtime
+# - iptables/iproute2: Required for container networking (NAT, bridges, veth)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
@@ -85,6 +86,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fuse3 \
     libfuse3-3 \
     runc \
+    iptables \
+    iproute2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install CRIU for checkpoint/restore

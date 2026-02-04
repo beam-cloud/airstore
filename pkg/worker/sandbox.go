@@ -12,210 +12,202 @@ import (
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/common"
+	"github.com/beam-cloud/airstore/pkg/gateway"
 	"github.com/beam-cloud/airstore/pkg/runtime"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/rs/zerolog/log"
 )
 
-// SandboxConfig holds configuration for the sandbox manager
-type SandboxConfig struct {
-	Paths            types.WorkerPaths // Paths configuration
-	WorkerID         string            // WorkerID is the unique ID of this worker
-	GatewayGRPCAddr  string            // GatewayGRPCAddr is the gateway gRPC address
-	AuthToken        string            // AuthToken is the worker's authentication token (fallback)
-	EnableFilesystem bool              // EnableFilesystem enables FUSE filesystem mounts
-	AnthropicAPIKey  string            // AnthropicAPIKey for Claude Code tasks (from config, not env var)
-
-}
-
-// SandboxManager manages the lifecycle of sandboxes on a worker
+// SandboxManager manages the lifecycle of sandboxes on a worker.
 type SandboxManager struct {
-	config        SandboxConfig
-	runtime       runtime.Runtime
-	sandboxes     map[string]*ManagedSandbox
-	mu            sync.RWMutex
-	ctx           context.Context
-	cancel        context.CancelFunc
-	mountManager  *MountManager
-	s2Client      *common.S2Client
-	imageManager  ImageManager
-	filesystemCmd *exec.Cmd
+	// Configuration
+	paths           types.WorkerPaths
+	workerID        string
+	gatewayAddr     string
+	authToken       string
+	anthropicAPIKey string
+	enableFS        bool
+
+	// Components
+	runtime      runtime.Runtime
+	imageManager ImageManager
+	mountManager *MountManager
+	network      *NetworkManager
+	s2           *common.S2Client
+
+	// State
+	sandboxes map[string]*Sandbox
+	mu        sync.RWMutex
+	ctx       context.Context
+	cancel    context.CancelFunc
+	fsCmd     *exec.Cmd
 }
 
-// Config accessors for cleaner code
-func (m *SandboxManager) bundleDir() string        { return m.config.Paths.BundleDir }
-func (m *SandboxManager) stateDir() string         { return m.config.Paths.StateDir }
-func (m *SandboxManager) filesystemBinary() string { return m.config.Paths.CLIBinary }
-func (m *SandboxManager) workerMount() string      { return m.config.Paths.WorkerMount }
-func (m *SandboxManager) gatewayGRPCAddr() string  { return m.config.GatewayGRPCAddr }
-func (m *SandboxManager) authToken() string        { return m.config.AuthToken }
-func (m *SandboxManager) enableFilesystem() bool   { return m.config.EnableFilesystem }
-
-// publishStatus publishes a task status update to S2
-func (m *SandboxManager) publishStatus(ctx context.Context, taskID string, status types.TaskStatus, exitCode *int, errMsg string) {
-	if m.s2Client != nil && m.s2Client.Enabled() {
-		_ = m.s2Client.AppendStatus(ctx, taskID, string(status), exitCode, errMsg)
-	}
+// Sandbox represents a running sandbox with its resources.
+type Sandbox struct {
+	Config  types.SandboxConfig
+	State   types.SandboxState
+	Bundle  string
+	Cancel  context.CancelFunc
+	Overlay *common.ContainerOverlay
+	Rootfs  func() // cleanup function
+	Output  io.Writer
+	Flush   func()
 }
 
-// ManagedSandbox represents a sandbox being managed
-type ManagedSandbox struct {
-	Config        types.SandboxConfig
-	State         types.SandboxState
-	BundlePath    string
-	Cancel        context.CancelFunc
-	RootfsCleanup func()                   // Cleanup function for the CLIP rootfs mount
-	Overlay       *common.ContainerOverlay // Overlay filesystem for writable layer
-	OutputWriter  io.Writer                // Output destination (stdout/stderr combined)
-	OutputFlusher func()                   // Flush pending output on completion
-}
+// Config for creating a SandboxManager.
+type Config struct {
+	// Paths
+	BundleDir   string
+	StateDir    string
+	MountDir    string
+	WorkerMount string
+	CLIBinary   string
 
-// SandboxManagerConfig configures the SandboxManager
-type SandboxManagerConfig struct {
-	RuntimeType      string // "runc" or "gvisor"
-	BundleDir        string
-	StateDir         string
-	MountDir         string // Directory for per-task FUSE mounts
-	WorkerMount      string // Global worker FUSE mount path
-	WorkerID         string
-	GatewayGRPCAddr  string            // gRPC address for gateway (e.g., "airstore-gateway:1993")
-	AuthToken        string            // Token for authenticating with gateway
-	FilesystemBinary string            // Path to filesystem binary on host
-	EnableFilesystem bool              // Whether to mount the airstore filesystem
-	ImageConfig      types.ImageConfig // Image management configuration (CLIP + S3)
-	RuntimeConfig    runtime.Config
+	// Identity
+	WorkerID string
 
-	// S2 configuration for log streaming
+	// Gateway
+	GatewayAddr   string
+	AuthToken     string
+	GatewayClient *gateway.GatewayClient
+
+	// Features
+	EnableFilesystem bool
+	EnableNetwork    bool
+
+	// Runtime
+	RuntimeType   string
+	RuntimeConfig runtime.Config
+	ImageConfig   types.ImageConfig
+
+	// Streaming
 	S2Token string
 	S2Basin string
 
-	// Anthropic API key for Claude Code tasks (from config)
+	// API keys
 	AnthropicAPIKey string
 }
 
-// NewSandboxManager creates a new SandboxManager
-func NewSandboxManager(ctx context.Context, cfg SandboxManagerConfig) (*SandboxManager, error) {
-	// Apply defaults from types.WorkerPaths
+func NewSandboxManager(ctx context.Context, cfg Config) (*SandboxManager, error) {
 	defaults := types.DefaultWorkerPaths()
-	if cfg.BundleDir == "" {
-		cfg.BundleDir = defaults.BundleDir
-	}
-	if cfg.StateDir == "" {
-		cfg.StateDir = defaults.StateDir
-	}
-	if cfg.MountDir == "" {
-		cfg.MountDir = defaults.MountDir
-	}
-	if cfg.FilesystemBinary == "" {
-		cfg.FilesystemBinary = defaults.CLIBinary
-	}
-	if cfg.RuntimeType == "" {
-		cfg.RuntimeType = types.ContainerRuntimeGvisor.String()
+	paths := types.WorkerPaths{
+		BundleDir:   coalesce(cfg.BundleDir, defaults.BundleDir),
+		StateDir:    coalesce(cfg.StateDir, defaults.StateDir),
+		MountDir:    coalesce(cfg.MountDir, defaults.MountDir),
+		WorkerMount: coalesce(cfg.WorkerMount, defaults.WorkerMount),
+		CLIBinary:   coalesce(cfg.CLIBinary, defaults.CLIBinary),
 	}
 
-	// Create directories
-	for _, dir := range []string{cfg.BundleDir, cfg.StateDir, cfg.MountDir} {
+	// Ensure directories exist
+	for _, dir := range []string{paths.BundleDir, paths.StateDir, paths.MountDir} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
-			return nil, fmt.Errorf("failed to create directory %s: %w", dir, err)
+			return nil, fmt.Errorf("mkdir %s: %w", dir, err)
 		}
 	}
 
-	// Create runtime
+	// Runtime
+	runtimeType := coalesce(cfg.RuntimeType, types.ContainerRuntimeGvisor.String())
 	runtimeCfg := cfg.RuntimeConfig
 	if runtimeCfg.Type == "" {
-		runtimeCfg.Type = cfg.RuntimeType
+		runtimeCfg.Type = runtimeType
 	}
-
 	rt, err := runtime.New(runtimeCfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create runtime: %w", err)
+		return nil, fmt.Errorf("runtime: %w", err)
 	}
 
 	managerCtx, cancel := context.WithCancel(ctx)
 
-	// Create CLIP image manager (required for container image handling)
-	imageManager, err := NewImageManager(cfg.ImageConfig)
+	// Image manager
+	imgMgr, err := NewImageManager(cfg.ImageConfig)
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("failed to create image manager: %w", err)
+		return nil, fmt.Errorf("image manager: %w", err)
 	}
 
-	// Create mount manager for per-task FUSE mounts
-	var mountManager *MountManager
+	// Mount manager (optional)
+	var mountMgr *MountManager
 	if cfg.EnableFilesystem {
-		mountManager, err = NewMountManager(MountConfig{
-			MountDir:          cfg.MountDir,
-			CLIBinary:         cfg.FilesystemBinary,
-			GatewayAddr:       cfg.GatewayGRPCAddr,
+		mountMgr, err = NewMountManager(MountConfig{
+			MountDir:          paths.MountDir,
+			CLIBinary:         paths.CLIBinary,
+			GatewayAddr:       cfg.GatewayAddr,
 			MountReadyTimeout: 5 * time.Second,
 		})
 		if err != nil {
 			cancel()
-			return nil, fmt.Errorf("failed to create mount manager: %w", err)
+			return nil, fmt.Errorf("mount manager: %w", err)
 		}
 	}
 
-	// Create S2 client for log streaming (if configured)
-	var s2Client *common.S2Client
+	// Network manager (optional)
+	var netMgr *NetworkManager
+	if cfg.EnableNetwork && cfg.GatewayClient != nil {
+		netMgr, err = NewNetworkManager(managerCtx, cfg.WorkerID, cfg.GatewayClient)
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("network manager: %w", err)
+		}
+	}
+
+	// S2 client (optional)
+	var s2 *common.S2Client
 	if cfg.S2Token != "" && cfg.S2Basin != "" {
-		s2Client = common.NewS2Client(common.S2Config{
-			Token: cfg.S2Token,
-			Basin: cfg.S2Basin,
-		})
-		log.Info().Str("basin", cfg.S2Basin).Msg("S2 log streaming enabled")
+		s2 = common.NewS2Client(common.S2Config{Token: cfg.S2Token, Basin: cfg.S2Basin})
+		log.Info().Str("basin", cfg.S2Basin).Msg("S2 streaming enabled")
 	}
 
-	// Apply WorkerMount default
-	if cfg.WorkerMount == "" {
-		cfg.WorkerMount = defaults.WorkerMount
-	}
+	return &SandboxManager{
+		paths:           paths,
+		workerID:        cfg.WorkerID,
+		gatewayAddr:     cfg.GatewayAddr,
+		authToken:       cfg.AuthToken,
+		anthropicAPIKey: cfg.AnthropicAPIKey,
+		enableFS:        cfg.EnableFilesystem,
+		runtime:         rt,
+		imageManager:    imgMgr,
+		mountManager:    mountMgr,
+		network:         netMgr,
+		s2:              s2,
+		sandboxes:       make(map[string]*Sandbox),
+		ctx:             managerCtx,
+		cancel:          cancel,
+	}, nil
+}
 
-	sm := &SandboxManager{
-		config: SandboxConfig{
-			Paths: types.WorkerPaths{
-				BundleDir:   cfg.BundleDir,
-				StateDir:    cfg.StateDir,
-				MountDir:    cfg.MountDir,
-				CLIBinary:   cfg.FilesystemBinary,
-				WorkerMount: cfg.WorkerMount,
-			},
-			WorkerID:         cfg.WorkerID,
-			GatewayGRPCAddr:  cfg.GatewayGRPCAddr,
-			AuthToken:        cfg.AuthToken,
-			EnableFilesystem: cfg.EnableFilesystem,
-			AnthropicAPIKey:  cfg.AnthropicAPIKey,
-		},
-		runtime:      rt,
-		sandboxes:    make(map[string]*ManagedSandbox),
-		ctx:          managerCtx,
-		cancel:       cancel,
-		mountManager: mountManager,
-		s2Client:     s2Client,
-		imageManager: imageManager,
+func coalesce(a, b string) string {
+	if a != "" {
+		return a
 	}
+	return b
+}
 
-	return sm, nil
+func (m *SandboxManager) publishStatus(ctx context.Context, taskID string, status types.TaskStatus, exitCode *int, errMsg string) {
+	if m.s2 != nil && m.s2.Enabled() {
+		m.s2.AppendStatus(ctx, taskID, string(status), exitCode, errMsg)
+	}
 }
 
 // startFilesystem starts the filesystem FUSE mount on the worker
 func (m *SandboxManager) startFilesystem() error {
 	// Check if binary exists
-	if _, err := os.Stat(m.filesystemBinary()); os.IsNotExist(err) {
-		return fmt.Errorf("filesystem binary not found at %s", m.filesystemBinary())
+	if _, err := os.Stat(m.paths.CLIBinary); os.IsNotExist(err) {
+		return fmt.Errorf("filesystem binary not found at %s", m.paths.CLIBinary)
 	}
 
 	// Create mount directory
-	if err := os.MkdirAll(m.workerMount(), 0755); err != nil {
+	if err := os.MkdirAll(m.paths.WorkerMount, 0755); err != nil {
 		return fmt.Errorf("failed to create filesystem mount dir: %w", err)
 	}
 
 	// Build command: cli mount <path> --gateway <addr> --token <token>
-	args := []string{"mount", m.workerMount(), "--gateway", m.gatewayGRPCAddr()}
-	if m.authToken() != "" {
-		args = append(args, "--token", m.authToken())
+	args := []string{"mount", m.paths.WorkerMount, "--gateway", m.gatewayAddr}
+	if m.authToken != "" {
+		args = append(args, "--token", m.authToken)
 	}
-	cmd := exec.CommandContext(m.ctx, m.filesystemBinary(), args...)
+	cmd := exec.CommandContext(m.ctx, m.paths.CLIBinary, args...)
 
 	// Capture stdout/stderr for debugging
 	stdout, _ := cmd.StdoutPipe()
@@ -225,11 +217,11 @@ func (m *SandboxManager) startFilesystem() error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start filesystem: %w", err)
 	}
-	m.filesystemCmd = cmd
+	m.fsCmd = cmd
 
 	log.Info().
-		Str("mount", m.workerMount()).
-		Str("gateway", m.gatewayGRPCAddr()).
+		Str("mount", m.paths.WorkerMount).
+		Str("gateway", m.gatewayAddr).
 		Int("pid", cmd.Process.Pid).
 		Msg("started cli mount on worker")
 
@@ -283,7 +275,7 @@ func (m *SandboxManager) startFilesystem() error {
 			return fmt.Errorf("cli mount exited unexpectedly with code 0")
 		case <-ticker.C:
 			// Check if mount has files
-			entries, err := os.ReadDir(m.workerMount())
+			entries, err := os.ReadDir(m.paths.WorkerMount)
 			if err == nil && len(entries) > 0 {
 				log.Info().
 					Int("files", len(entries)).
@@ -317,7 +309,7 @@ func (m *SandboxManager) Create(cfg types.SandboxConfig) (*types.SandboxState, e
 	}
 
 	// Create bundle directory
-	bundlePath := filepath.Join(m.bundleDir(), cfg.ID)
+	bundlePath := filepath.Join(m.paths.BundleDir, cfg.ID)
 	if err := os.MkdirAll(bundlePath, 0755); err != nil {
 		cleanupRootfs()
 		return nil, fmt.Errorf("failed to create bundle dir: %w", err)
@@ -325,7 +317,7 @@ func (m *SandboxManager) Create(cfg types.SandboxConfig) (*types.SandboxState, e
 
 	// Create overlay filesystem on top of CLIP FUSE mount
 	// This provides a writable layer while keeping the base image read-only
-	overlay := common.NewContainerOverlay(cfg.ID, rootfsPath, m.stateDir())
+	overlay := common.NewContainerOverlay(cfg.ID, rootfsPath, m.paths.StateDir)
 	if err := overlay.Setup(); err != nil {
 		cleanupRootfs()
 		os.RemoveAll(bundlePath)
@@ -352,6 +344,19 @@ func (m *SandboxManager) Create(cfg types.SandboxConfig) (*types.SandboxState, e
 		return nil, fmt.Errorf("failed to prepare spec: %w", err)
 	}
 
+	// Set up container networking (NAT for internet access)
+	var containerIP string
+	if m.network != nil {
+		ip, err := m.network.Setup(cfg.ID, spec)
+		if err != nil {
+			overlay.Cleanup()
+			cleanupRootfs()
+			os.RemoveAll(bundlePath)
+			return nil, fmt.Errorf("failed to setup network: %w", err)
+		}
+		containerIP = ip
+	}
+
 	// Write config.json
 	configPath := filepath.Join(bundlePath, "config.json")
 	configData, err := json.MarshalIndent(spec, "", "  ")
@@ -370,20 +375,21 @@ func (m *SandboxManager) Create(cfg types.SandboxConfig) (*types.SandboxState, e
 
 	// Create sandbox state
 	state := types.SandboxState{
-		ID:        cfg.ID,
-		Status:    types.SandboxStatusCreating,
-		PID:       0,
-		ExitCode:  -1,
-		CreatedAt: time.Now(),
+		ID:          cfg.ID,
+		Status:      types.SandboxStatusCreating,
+		PID:         0,
+		ExitCode:    -1,
+		ContainerIP: containerIP,
+		CreatedAt:   time.Now(),
 	}
 
 	// Store managed sandbox with cleanup functions
-	m.sandboxes[cfg.ID] = &ManagedSandbox{
-		Config:        cfg,
-		State:         state,
-		BundlePath:    bundlePath,
-		RootfsCleanup: cleanupRootfs,
-		Overlay:       overlay,
+	m.sandboxes[cfg.ID] = &Sandbox{
+		Config:  cfg,
+		State:   state,
+		Bundle:  bundlePath,
+		Rootfs:  cleanupRootfs,
+		Overlay: overlay,
 	}
 
 	return &state, nil
@@ -400,8 +406,8 @@ func (m *SandboxManager) SetOutput(sandboxID string, writer io.Writer, flusher f
 		return fmt.Errorf("sandbox %s not found", sandboxID)
 	}
 
-	sandbox.OutputWriter = writer
-	sandbox.OutputFlusher = flusher
+	sandbox.Output = writer
+	sandbox.Flush = flusher
 	return nil
 }
 
@@ -426,11 +432,11 @@ func (m *SandboxManager) Start(sandboxID string) error {
 
 	log.Info().
 		Str("sandbox_id", sandboxID).
-		Str("bundle_path", sandbox.BundlePath).
+		Str("bundle_path", sandbox.Bundle).
 		Msg("starting sandbox")
 
 	// Use configured output writer, or discard if none set
-	outputWriter := sandbox.OutputWriter
+	outputWriter := sandbox.Output
 	if outputWriter == nil {
 		outputWriter = io.Discard
 	}
@@ -444,7 +450,7 @@ func (m *SandboxManager) Start(sandboxID string) error {
 		}
 
 		// Run the container (blocks until exit)
-		exitCode, err := m.runtime.Run(sandboxCtx, sandboxID, sandbox.BundlePath, opts)
+		exitCode, err := m.runtime.Run(sandboxCtx, sandboxID, sandbox.Bundle, opts)
 
 		// Wait for PID notification
 		select {
@@ -551,9 +557,9 @@ func (m *SandboxManager) Delete(sandboxID string, force bool) error {
 	}
 
 	// Clean up bundle directory
-	if sandbox.BundlePath != "" {
-		if err := os.RemoveAll(sandbox.BundlePath); err != nil {
-			log.Warn().Err(err).Str("path", sandbox.BundlePath).Msg("failed to remove bundle")
+	if sandbox.Bundle != "" {
+		if err := os.RemoveAll(sandbox.Bundle); err != nil {
+			log.Warn().Err(err).Str("path", sandbox.Bundle).Msg("failed to remove bundle")
 		}
 	}
 
@@ -565,8 +571,15 @@ func (m *SandboxManager) Delete(sandboxID string, force bool) error {
 	}
 
 	// Clean up CLIP rootfs mount
-	if sandbox.RootfsCleanup != nil {
-		sandbox.RootfsCleanup()
+	if sandbox.Rootfs != nil {
+		sandbox.Rootfs()
+	}
+
+	// Tear down container networking
+	if m.network != nil {
+		if err := m.network.TearDown(sandboxID); err != nil {
+			log.Warn().Err(err).Str("sandbox_id", sandboxID).Msg("failed to teardown network")
+		}
 	}
 
 	// Remove from managed sandboxes
@@ -657,6 +670,10 @@ func (m *SandboxManager) generateSpec(cfg types.SandboxConfig, rootfsPath string
 		Readonly: false,
 	}
 
+	// Set user identity from constants (single source of truth)
+	spec.Process.User.UID = types.SandboxUserUID
+	spec.Process.User.GID = types.SandboxUserGID
+
 	// Set entrypoint
 	if len(cfg.Entrypoint) > 0 {
 		spec.Process.Args = cfg.Entrypoint
@@ -674,32 +691,26 @@ func (m *SandboxManager) generateSpec(cfg types.SandboxConfig, rootfsPath string
 
 	// Add gateway connection info to environment
 	log.Debug().
-		Str("gateway_addr", m.gatewayGRPCAddr()).
+		Str("gateway_addr", m.gatewayAddr).
 		Str("workspace_id", cfg.WorkspaceID).
 		Msg("setting sandbox environment for filesystem")
 	spec.Process.Env = append(spec.Process.Env,
-		fmt.Sprintf("GATEWAY_ADDR=%s", m.gatewayGRPCAddr()),
+		fmt.Sprintf("GATEWAY_ADDR=%s", m.gatewayAddr),
 		fmt.Sprintf("WORKSPACE_ID=%s", cfg.WorkspaceID),
 	)
 
 	// Add auth token if available (for filesystem to authenticate with gateway)
 	// Only add worker's auth token if task doesn't have its own member token
-	if m.authToken() != "" && cfg.Env["AIRSTORE_TOKEN"] == "" {
+	if m.authToken != "" && cfg.Env["AIRSTORE_TOKEN"] == "" {
 		spec.Process.Env = append(spec.Process.Env,
-			fmt.Sprintf("AIRSTORE_TOKEN=%s", m.authToken()),
+			fmt.Sprintf("AIRSTORE_TOKEN=%s", m.authToken),
 		)
 	}
 
 	// Add filesystem mount (bind mount from FUSE mount)
-	// Priority: 1) task-specific mount (from _TASK_MOUNT_SOURCE), 2) worker's global mount
-	if taskMountSource := cfg.Env["_TASK_MOUNT_SOURCE"]; taskMountSource != "" {
-		delete(cfg.Env, "_TASK_MOUNT_SOURCE") // Don't pass internal env to container
-		if err := m.addFilesystemMountFrom(&spec, taskMountSource); err != nil {
-			log.Warn().Err(err).Str("source", taskMountSource).Msg("failed to add task filesystem mount")
-		}
-	} else if m.enableFilesystem() {
-		if err := m.addFilesystemMountFrom(&spec, m.workerMount()); err != nil {
-			log.Warn().Err(err).Msg("failed to add filesystem mount, continuing without it")
+	if cfg.FilesystemMount != "" {
+		if err := m.addFilesystemMount(&spec, cfg.FilesystemMount); err != nil {
+			log.Warn().Err(err).Str("source", cfg.FilesystemMount).Msg("failed to add filesystem mount")
 		}
 	}
 
@@ -746,12 +757,19 @@ func (m *SandboxManager) generateSpec(cfg types.SandboxConfig, rootfsPath string
 	// Set hostname to sandbox ID
 	spec.Hostname = cfg.ID
 
+	// Add DNS configuration (resolv.conf is created in Dockerfile.worker with nameserver 8.8.8.8)
+	spec.Mounts = append(spec.Mounts, specs.Mount{
+		Destination: "/etc/resolv.conf",
+		Type:        "none",
+		Source:      "/workspace/etc/resolv.conf",
+		Options:     []string{"ro", "rbind", "rprivate", "nosuid", "noexec", "nodev"},
+	})
+
 	return &spec, nil
 }
 
-// addFilesystemMountFrom bind-mounts a FUSE mount into the sandbox at /workspace.
-// The source can be either the worker's global mount or a task-specific mount.
-func (m *SandboxManager) addFilesystemMountFrom(spec *specs.Spec, source string) error {
+// addFilesystemMount bind-mounts a FUSE filesystem into the sandbox at /workspace.
+func (m *SandboxManager) addFilesystemMount(spec *specs.Spec, source string) error {
 	// Verify the mount exists and has files
 	entries, err := os.ReadDir(source)
 	if err != nil {
@@ -783,79 +801,92 @@ func ptrInt64(v int64) *int64 {
 	return &v
 }
 
-// RunTask creates and runs a sandbox for a task, returning when complete
-func (m *SandboxManager) RunTask(ctx context.Context, task types.Task) (*types.TaskResult, error) {
-	sandboxID := fmt.Sprintf("task-%s", task.ExternalId)
-
-	// Prepare task configuration
-	entrypoint := task.Entrypoint
-	env := task.Env
-	if env == nil {
-		env = make(map[string]string)
+// buildEntrypoint constructs the entrypoint for a task.
+// For Claude Code tasks, wraps the prompt in the CLI invocation.
+func (m *SandboxManager) buildEntrypoint(task types.Task, env map[string]string) []string {
+	if !task.IsClaudeCodeTask() {
+		return task.Entrypoint
 	}
 
-	// Handle Claude Code tasks
-	if task.IsClaudeCodeTask() {
-		// Set up Claude Code entrypoint with the prompt
-		// Claude Code CLI: claude --print --output-format stream-json -p "prompt"
-		entrypoint = []string{
-			"claude",
-			"--print",
-			"--output-format", "stream-json",
-			"-p", task.Prompt,
-		}
-
-		// Inject ANTHROPIC_API_KEY from config (not environment variable)
-		if m.config.AnthropicAPIKey != "" {
-			env["ANTHROPIC_API_KEY"] = m.config.AnthropicAPIKey
-		}
-
-		log.Info().
-			Str("task_id", task.ExternalId).
-			Str("prompt", task.Prompt[:min(50, len(task.Prompt))]).
-			Msg("running claude code task")
+	// Inject Anthropic API key for Claude Code
+	if m.anthropicAPIKey != "" {
+		env["ANTHROPIC_API_KEY"] = m.anthropicAPIKey
 	}
 
-	// Mount filesystem with task's member token using MountManager
-	var taskMountSource string
+	log.Info().
+		Str("task_id", task.ExternalId).
+		Str("prompt", task.Prompt[:min(50, len(task.Prompt))]).
+		Msg("running claude code task")
+
+	// Claude Code CLI: non-interactive, streaming JSON output
+	return []string{
+		"claude",
+		"--print",
+		"--verbose",
+		"--output-format", "stream-json",
+		"--dangerously-skip-permissions",
+		"-p", task.Prompt,
+	}
+}
+
+// mountFilesystem sets up the filesystem mount for a task.
+// Prefers task-specific mount with member token, falls back to worker global mount.
+func (m *SandboxManager) mountFilesystem(ctx context.Context, task types.Task) string {
+	// Try task-specific mount with member token
 	if task.MemberToken != "" && m.mountManager != nil {
 		mountPath, err := m.mountManager.Mount(ctx, task.ExternalId, task.MemberToken)
 		if err != nil {
 			log.Warn().Err(err).Str("task_id", task.ExternalId).Msg("failed to create task mount")
 		} else {
-			taskMountSource = mountPath
+			log.Debug().Str("task_id", task.ExternalId).Msg("mounted filesystem with task token")
+			return mountPath
 		}
-	} else if m.enableFilesystem() {
-		// Fall back to worker's global mount
-		taskMountSource = m.workerMount()
 	}
 
-	// Cleanup mount when done
-	defer func() {
-		if m.mountManager != nil {
-			m.mountManager.Unmount(task.ExternalId)
-		}
-	}()
+	// Fall back to worker's global mount
+	if m.enableFS {
+		log.Debug().Str("task_id", task.ExternalId).Msg("using worker global mount")
+		return m.paths.WorkerMount
+	}
 
-	// Create sandbox config from task with defaults
+	return ""
+}
+
+// cleanupMount removes the task-specific mount if one was created.
+func (m *SandboxManager) cleanupMount(taskID string) {
+	if m.mountManager != nil {
+		m.mountManager.Unmount(taskID)
+	}
+}
+
+// RunTask creates and runs a sandbox for a task, returning when complete
+func (m *SandboxManager) RunTask(ctx context.Context, task types.Task) (*types.TaskResult, error) {
+	sandboxID := fmt.Sprintf("task-%s", task.ExternalId)
+
+	// Initialize env map
+	env := task.Env
+	if env == nil {
+		env = make(map[string]string)
+	}
+
+	// Build entrypoint
+	entrypoint := m.buildEntrypoint(task, env)
+
+	// Mount filesystem for task
+	taskMountSource := m.mountFilesystem(ctx, task)
+	defer m.cleanupMount(task.ExternalId)
+
+	// Build sandbox config
 	cfg := types.SandboxConfig{
-		ID:          sandboxID,
-		WorkspaceID: fmt.Sprintf("%d", task.WorkspaceId),
-		Image:       task.Image,
-		Runtime:     types.ContainerRuntimeGvisor, // Default to gVisor
-		Entrypoint:  entrypoint,
-		Env:         env,
-		WorkingDir:  types.ContainerWorkDir,
-		Resources: types.SandboxResources{
-			CPU:    2000,       // 2 CPUs for Claude Code
-			Memory: 2048 << 20, // 2GB memory for Claude Code
-			GPU:    0,
-		},
-	}
-
-	// Store task mount source for use in Create()
-	if taskMountSource != "" {
-		cfg.Env["_TASK_MOUNT_SOURCE"] = taskMountSource
+		ID:              sandboxID,
+		WorkspaceID:     fmt.Sprintf("%d", task.WorkspaceId),
+		Image:           task.Image,
+		Runtime:         types.ContainerRuntimeGvisor,
+		Entrypoint:      entrypoint,
+		Env:             env,
+		WorkingDir:      types.ContainerWorkDir,
+		FilesystemMount: taskMountSource,
+		Resources:       task.GetResources(),
 	}
 
 	// Create the sandbox
@@ -869,7 +900,7 @@ func (m *SandboxManager) RunTask(ctx context.Context, task types.Task) (*types.T
 
 	// Set up task output: S2 streams + worker console
 	taskOutput := NewTaskOutput(task.ExternalId, "stdout",
-		NewS2Writer(ctx, m.s2Client, task.ExternalId, "stdout"),
+		NewS2Writer(ctx, m.s2, task.ExternalId, "stdout"),
 		NewConsoleWriter(task.ExternalId, "stdout"),
 	)
 	if err := m.SetOutput(sandboxID, taskOutput, taskOutput.Flush); err != nil {
@@ -887,16 +918,13 @@ func (m *SandboxManager) RunTask(ctx context.Context, task types.Task) (*types.T
 
 	startTime := time.Now()
 
-	// Wait for completion (use parent context - no per-task timeout for now)
-	waitCtx := ctx
-
 	// Poll for completion
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-waitCtx.Done():
+		case <-ctx.Done():
 			// Timeout or cancellation
 			m.Stop(sandboxID, true)
 			exitCode := -1

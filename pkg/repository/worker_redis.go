@@ -10,13 +10,12 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// WorkerRedisRepository is a Redis-backed implementation of WorkerRepository
+// WorkerRedisRepository implements WorkerRepository using Redis.
 type WorkerRedisRepository struct {
 	rdb  *common.RedisClient
 	lock *common.RedisLock
 }
 
-// NewWorkerRedisRepository creates a new WorkerRedisRepository
 func NewWorkerRedisRepository(rdb *common.RedisClient) WorkerRepository {
 	return &WorkerRedisRepository{
 		rdb:  rdb,
@@ -24,209 +23,226 @@ func NewWorkerRedisRepository(rdb *common.RedisClient) WorkerRepository {
 	}
 }
 
-// AddWorker registers a new worker
-func (r *WorkerRedisRepository) AddWorker(ctx context.Context, worker *types.Worker) error {
-	lockKey := common.Keys.SchedulerWorkerLock(worker.ID)
+func (r *WorkerRedisRepository) AddWorker(ctx context.Context, w *types.Worker) error {
+	lockKey := common.Keys.SchedulerWorkerLock(w.ID)
 	if err := r.lock.Acquire(ctx, lockKey, common.RedisLockOptions{TtlS: 10, Retries: 3}); err != nil {
-		return fmt.Errorf("failed to acquire lock: %w", err)
+		return fmt.Errorf("lock: %w", err)
 	}
 	defer r.lock.Release(lockKey)
 
-	stateKey := common.Keys.SchedulerWorkerState(worker.ID)
+	stateKey := common.Keys.SchedulerWorkerState(w.ID)
 	indexKey := common.Keys.SchedulerWorkerIndex()
 
-	// Add worker state key to index
 	if err := r.rdb.SAdd(ctx, indexKey, stateKey).Err(); err != nil {
-		return fmt.Errorf("failed to add worker to index: %w", err)
+		return fmt.Errorf("index: %w", err)
 	}
 
-	// Set worker state
 	if err := r.rdb.HSet(ctx, stateKey,
-		"id", worker.ID,
-		"status", string(worker.Status),
-		"pool_name", worker.PoolName,
-		"hostname", worker.Hostname,
-		"cpu", worker.Cpu,
-		"memory", worker.Memory,
-		"last_seen_at", worker.LastSeenAt.Unix(),
-		"registered_at", worker.RegisteredAt.Unix(),
-		"version", worker.Version,
+		"id", w.ID,
+		"status", string(w.Status),
+		"pool_name", w.PoolName,
+		"hostname", w.Hostname,
+		"cpu", w.Cpu,
+		"memory", w.Memory,
+		"last_seen_at", w.LastSeenAt.Unix(),
+		"registered_at", w.RegisteredAt.Unix(),
+		"version", w.Version,
 	).Err(); err != nil {
-		return fmt.Errorf("failed to set worker state: %w", err)
+		return fmt.Errorf("state: %w", err)
 	}
 
-	// Set TTL on worker state
-	if err := r.rdb.Expire(ctx, stateKey, types.WorkerStateTTL).Err(); err != nil {
-		return fmt.Errorf("failed to set worker TTL: %w", err)
-	}
-
-	return nil
+	return r.rdb.Expire(ctx, stateKey, types.WorkerStateTTL).Err()
 }
 
-// RemoveWorker unregisters a worker
-func (r *WorkerRedisRepository) RemoveWorker(ctx context.Context, workerId string) error {
-	lockKey := common.Keys.SchedulerWorkerLock(workerId)
+func (r *WorkerRedisRepository) RemoveWorker(ctx context.Context, id string) error {
+	lockKey := common.Keys.SchedulerWorkerLock(id)
 	if err := r.lock.Acquire(ctx, lockKey, common.RedisLockOptions{TtlS: 10, Retries: 3}); err != nil {
-		return fmt.Errorf("failed to acquire lock: %w", err)
+		return fmt.Errorf("lock: %w", err)
 	}
 	defer r.lock.Release(lockKey)
 
-	stateKey := common.Keys.SchedulerWorkerState(workerId)
+	stateKey := common.Keys.SchedulerWorkerState(id)
 	indexKey := common.Keys.SchedulerWorkerIndex()
 
-	// Remove from index
-	if err := r.rdb.SRem(ctx, indexKey, stateKey).Err(); err != nil {
-		return fmt.Errorf("failed to remove worker from index: %w", err)
-	}
-
-	// Delete worker state
-	if err := r.rdb.Del(ctx, stateKey).Err(); err != nil {
-		return fmt.Errorf("failed to delete worker state: %w", err)
-	}
-
-	return nil
+	r.rdb.SRem(ctx, indexKey, stateKey)
+	return r.rdb.Del(ctx, stateKey).Err()
 }
 
-// GetWorker retrieves a worker by ID
-func (r *WorkerRedisRepository) GetWorker(ctx context.Context, workerId string) (*types.Worker, error) {
-	stateKey := common.Keys.SchedulerWorkerState(workerId)
-	return r.getWorkerFromKey(ctx, stateKey)
+func (r *WorkerRedisRepository) GetWorker(ctx context.Context, id string) (*types.Worker, error) {
+	return r.loadWorker(ctx, common.Keys.SchedulerWorkerState(id))
 }
 
-// GetAllWorkers retrieves all registered workers
 func (r *WorkerRedisRepository) GetAllWorkers(ctx context.Context) ([]*types.Worker, error) {
 	indexKey := common.Keys.SchedulerWorkerIndex()
-
-	stateKeys, err := r.rdb.SMembers(ctx, indexKey).Result()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get worker index: %w", err)
-	}
-
-	workers := make([]*types.Worker, 0, len(stateKeys))
-	for _, stateKey := range stateKeys {
-		worker, err := r.getWorkerFromKey(ctx, stateKey)
-		if err != nil {
-			// Worker might have expired, remove from index
-			r.rdb.SRem(ctx, indexKey, stateKey)
-			continue
-		}
-		workers = append(workers, worker)
-	}
-
-	return workers, nil
-}
-
-// GetAvailableWorkers retrieves all workers with status "available"
-func (r *WorkerRedisRepository) GetAvailableWorkers(ctx context.Context) ([]*types.Worker, error) {
-	workers, err := r.GetAllWorkers(ctx)
+	keys, err := r.rdb.SMembers(ctx, indexKey).Result()
 	if err != nil {
 		return nil, err
 	}
 
-	available := make([]*types.Worker, 0)
-	for _, w := range workers {
-		if w.Status == types.WorkerStatusAvailable {
-			available = append(available, w)
+	workers := make([]*types.Worker, 0, len(keys))
+	for _, key := range keys {
+		w, err := r.loadWorker(ctx, key)
+		if err != nil {
+			r.rdb.SRem(ctx, indexKey, key) // cleanup stale
+			continue
 		}
+		workers = append(workers, w)
 	}
-
-	return available, nil
+	return workers, nil
 }
 
-// UpdateWorkerStatus updates a worker's status
-func (r *WorkerRedisRepository) UpdateWorkerStatus(ctx context.Context, workerId string, status types.WorkerStatus) error {
-	lockKey := common.Keys.SchedulerWorkerLock(workerId)
+func (r *WorkerRedisRepository) GetAvailableWorkers(ctx context.Context) ([]*types.Worker, error) {
+	all, err := r.GetAllWorkers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*types.Worker, 0)
+	for _, w := range all {
+		if w.Status == types.WorkerStatusAvailable {
+			out = append(out, w)
+		}
+	}
+	return out, nil
+}
+
+func (r *WorkerRedisRepository) UpdateWorkerStatus(ctx context.Context, id string, status types.WorkerStatus) error {
+	lockKey := common.Keys.SchedulerWorkerLock(id)
 	if err := r.lock.Acquire(ctx, lockKey, common.RedisLockOptions{TtlS: 10, Retries: 3}); err != nil {
-		return fmt.Errorf("failed to acquire lock: %w", err)
+		return fmt.Errorf("lock: %w", err)
 	}
 	defer r.lock.Release(lockKey)
 
-	stateKey := common.Keys.SchedulerWorkerState(workerId)
-
-	// Check if worker exists
+	stateKey := common.Keys.SchedulerWorkerState(id)
 	exists, err := r.rdb.Exists(ctx, stateKey).Result()
 	if err != nil {
-		return fmt.Errorf("failed to check worker existence: %w", err)
+		return err
 	}
 	if exists == 0 {
-		return &types.MetadataNotFoundError{Key: workerId}
+		return &types.MetadataNotFoundError{Key: id}
 	}
 
-	// Update status and last_seen_at
 	if err := r.rdb.HSet(ctx, stateKey,
 		"status", string(status),
 		"last_seen_at", time.Now().Unix(),
 	).Err(); err != nil {
-		return fmt.Errorf("failed to update worker status: %w", err)
+		return err
 	}
 
-	// Refresh TTL
-	if err := r.rdb.Expire(ctx, stateKey, types.WorkerStateTTL).Err(); err != nil {
-		return fmt.Errorf("failed to refresh worker TTL: %w", err)
-	}
-
-	return nil
+	return r.rdb.Expire(ctx, stateKey, types.WorkerStateTTL).Err()
 }
 
-// SetWorkerKeepAlive refreshes the worker's TTL (heartbeat)
-func (r *WorkerRedisRepository) SetWorkerKeepAlive(ctx context.Context, workerId string) error {
-	stateKey := common.Keys.SchedulerWorkerState(workerId)
-
-	// Update last_seen_at
+func (r *WorkerRedisRepository) SetWorkerKeepAlive(ctx context.Context, id string) error {
+	stateKey := common.Keys.SchedulerWorkerState(id)
 	if err := r.rdb.HSet(ctx, stateKey, "last_seen_at", time.Now().Unix()).Err(); err != nil {
-		return fmt.Errorf("failed to update last_seen_at: %w", err)
+		return err
 	}
-
-	// Refresh TTL
-	if err := r.rdb.Expire(ctx, stateKey, types.WorkerStateTTL).Err(); err != nil {
-		return fmt.Errorf("failed to refresh worker TTL: %w", err)
-	}
-
-	return nil
+	return r.rdb.Expire(ctx, stateKey, types.WorkerStateTTL).Err()
 }
 
-// getWorkerFromKey retrieves a worker from a Redis hash key
-func (r *WorkerRedisRepository) getWorkerFromKey(ctx context.Context, stateKey string) (*types.Worker, error) {
-	result, err := r.rdb.HGetAll(ctx, stateKey).Result()
+func (r *WorkerRedisRepository) loadWorker(ctx context.Context, key string) (*types.Worker, error) {
+	data, err := r.rdb.HGetAll(ctx, key).Result()
 	if err != nil {
 		if err == redis.Nil {
-			return nil, &types.MetadataNotFoundError{Key: stateKey}
+			return nil, &types.MetadataNotFoundError{Key: key}
 		}
-		return nil, fmt.Errorf("failed to get worker state: %w", err)
+		return nil, err
+	}
+	if len(data) == 0 {
+		return nil, &types.MetadataNotFoundError{Key: key}
 	}
 
-	if len(result) == 0 {
-		return nil, &types.MetadataNotFoundError{Key: stateKey}
+	w := &types.Worker{
+		ID:       data["id"],
+		Status:   types.WorkerStatus(data["status"]),
+		PoolName: data["pool_name"],
+		Hostname: data["hostname"],
+		Version:  data["version"],
 	}
-
-	worker := &types.Worker{
-		ID:       result["id"],
-		Status:   types.WorkerStatus(result["status"]),
-		PoolName: result["pool_name"],
-		Hostname: result["hostname"],
-		Version:  result["version"],
+	w.Cpu, _ = parseInt64(data["cpu"])
+	w.Memory, _ = parseInt64(data["memory"])
+	if ts, _ := parseInt64(data["last_seen_at"]); ts > 0 {
+		w.LastSeenAt = time.Unix(ts, 0)
 	}
-
-	// Parse numeric fields
-	if cpu, err := parseInt64(result["cpu"]); err == nil {
-		worker.Cpu = cpu
+	if ts, _ := parseInt64(data["registered_at"]); ts > 0 {
+		w.RegisteredAt = time.Unix(ts, 0)
 	}
-	if memory, err := parseInt64(result["memory"]); err == nil {
-		worker.Memory = memory
-	}
-
-	// Parse timestamps
-	if lastSeenAt, err := parseInt64(result["last_seen_at"]); err == nil {
-		worker.LastSeenAt = time.Unix(lastSeenAt, 0)
-	}
-	if registeredAt, err := parseInt64(result["registered_at"]); err == nil {
-		worker.RegisteredAt = time.Unix(registeredAt, 0)
-	}
-
-	return worker, nil
+	return w, nil
 }
 
-// parseInt64 parses a string to int64, returning 0 on error
+func (r *WorkerRedisRepository) AllocateIP(ctx context.Context, sandboxID, workerID string) (*types.IPAllocation, error) {
+	lockKey := common.Keys.NetworkIPLock()
+	poolKey := common.Keys.NetworkIPPool()
+	mapKey := common.Keys.NetworkIPMap()
+
+	if err := r.lock.Acquire(ctx, lockKey, common.RedisLockOptions{TtlS: 10, Retries: 5}); err != nil {
+		return nil, fmt.Errorf("lock: %w", err)
+	}
+	defer r.lock.Release(lockKey)
+
+	// Idempotent: return existing allocation
+	if ip, err := r.rdb.HGet(ctx, mapKey, sandboxID).Result(); err == nil && ip != "" {
+		return &types.IPAllocation{
+			IP:        ip,
+			Gateway:   types.DefaultGateway,
+			PrefixLen: types.DefaultPrefixLen,
+		}, nil
+	}
+
+	// Find available IP in subnet
+	allocated, _ := r.rdb.SMembers(ctx, poolKey).Result()
+	used := make(map[string]bool, len(allocated))
+	for _, ip := range allocated {
+		used[ip] = true
+	}
+
+	var ip string
+	for i := 2; i < 255; i++ { // .0 = network, .1 = gateway, .255 = broadcast
+		candidate := fmt.Sprintf("%s.%d", types.DefaultSubnetPrefix, i)
+		if !used[candidate] {
+			ip = candidate
+			break
+		}
+	}
+	if ip == "" {
+		return nil, fmt.Errorf("ip pool exhausted")
+	}
+
+	pipe := r.rdb.Pipeline()
+	pipe.SAdd(ctx, poolKey, ip)
+	pipe.HSet(ctx, mapKey, sandboxID, ip)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return nil, fmt.Errorf("store: %w", err)
+	}
+
+	return &types.IPAllocation{
+		IP:        ip,
+		Gateway:   types.DefaultGateway,
+		PrefixLen: types.DefaultPrefixLen,
+	}, nil
+}
+
+func (r *WorkerRedisRepository) ReleaseIP(ctx context.Context, sandboxID string) error {
+	poolKey := common.Keys.NetworkIPPool()
+	mapKey := common.Keys.NetworkIPMap()
+
+	ip, err := r.rdb.HGet(ctx, mapKey, sandboxID).Result()
+	if err != nil {
+		return nil // already released
+	}
+
+	pipe := r.rdb.Pipeline()
+	pipe.SRem(ctx, poolKey, ip)
+	pipe.HDel(ctx, mapKey, sandboxID)
+	_, err = pipe.Exec(ctx)
+	return err
+}
+
+func (r *WorkerRedisRepository) GetSandboxIP(ctx context.Context, sandboxID string) (string, bool) {
+	mapKey := common.Keys.NetworkIPMap()
+	ip, err := r.rdb.HGet(ctx, mapKey, sandboxID).Result()
+	return ip, err == nil && ip != ""
+}
+
 func parseInt64(s string) (int64, error) {
 	if s == "" {
 		return 0, nil

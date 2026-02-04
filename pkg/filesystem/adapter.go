@@ -6,6 +6,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/beam-cloud/airstore/pkg/filesystem/vnode"
 	"github.com/winfsp/cgofuse/fuse"
 )
 
@@ -363,8 +364,8 @@ func fillStatFromEntry(stat *fuse.Stat_t, e *DirEntry) {
 	stat.Ino = e.Ino
 	stat.Mode = e.Mode
 	stat.Nlink = 1
-	stat.Uid = uint32(syscall.Getuid())
-	stat.Gid = uint32(syscall.Getgid())
+	stat.Uid = vnode.Owner.Uid
+	stat.Gid = vnode.Owner.Gid
 	stat.Rdev = 0
 	stat.Size = e.Size
 	stat.Blksize = 4096

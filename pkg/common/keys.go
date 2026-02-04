@@ -24,6 +24,11 @@ var (
 	// Gateway keys
 	gatewayPrefix   string = "gateway"
 	gatewayInitLock string = "gateway:init:%s:lock" // name
+
+	// Network keys
+	networkIPLock   string = "network:ip:lock"
+	networkIPPool   string = "network:pool"
+	networkIPMap    string = "network:mapping"
 )
 
 var Keys = &redisKeys{}
@@ -88,4 +93,17 @@ func (rk *redisKeys) GatewayPrefix() string {
 
 func (rk *redisKeys) GatewayInitLock(name string) string {
 	return fmt.Sprintf(gatewayInitLock, name)
+}
+
+// Network keys
+func (rk *redisKeys) NetworkIPLock() string {
+	return networkIPLock
+}
+
+func (rk *redisKeys) NetworkIPPool() string {
+	return networkIPPool
+}
+
+func (rk *redisKeys) NetworkIPMap() string {
+	return networkIPMap
 }

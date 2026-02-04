@@ -13,14 +13,16 @@ import (
 
 type WorkerService struct {
 	pb.UnimplementedWorkerServiceServer
-	scheduler *scheduler.Scheduler
-	backend   *repository.PostgresBackend
+	scheduler  *scheduler.Scheduler
+	backend    *repository.PostgresBackend
+	workerRepo repository.WorkerRepository
 }
 
-func NewWorkerService(sched *scheduler.Scheduler, backend *repository.PostgresBackend) *WorkerService {
+func NewWorkerService(sched *scheduler.Scheduler, backend *repository.PostgresBackend, workerRepo repository.WorkerRepository) *WorkerService {
 	return &WorkerService{
-		scheduler: sched,
-		backend:   backend,
+		scheduler:  sched,
+		backend:    backend,
+		workerRepo: workerRepo,
 	}
 }
 
@@ -134,4 +136,33 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 	}
 
 	return &pb.SetTaskResultResponse{}, nil
+}
+
+func (s *WorkerService) AllocateIP(ctx context.Context, req *pb.AllocateIPRequest) (*pb.AllocateIPResponse, error) {
+	if s.workerRepo == nil {
+		return nil, status.Errorf(codes.Unavailable, "IP allocation not available")
+	}
+
+	alloc, err := s.workerRepo.AllocateIP(ctx, req.SandboxId, req.WorkerId)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to allocate IP: %v", err)
+	}
+
+	return &pb.AllocateIPResponse{
+		Ip:        alloc.IP,
+		Gateway:   alloc.Gateway,
+		PrefixLen: int32(alloc.PrefixLen),
+	}, nil
+}
+
+func (s *WorkerService) ReleaseIP(ctx context.Context, req *pb.ReleaseIPRequest) (*pb.ReleaseIPResponse, error) {
+	if s.workerRepo == nil {
+		return nil, status.Errorf(codes.Unavailable, "IP allocation not available")
+	}
+
+	if err := s.workerRepo.ReleaseIP(ctx, req.SandboxId); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to release IP: %v", err)
+	}
+
+	return &pb.ReleaseIPResponse{}, nil
 }

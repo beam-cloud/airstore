@@ -6,7 +6,6 @@ import (
 	"io/fs"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -156,7 +155,7 @@ func (s *StorageVNode) Readdir(path string) ([]DirEntry, error) {
 		}
 		childMeta[e.Name] = &FileInfo{
 			Ino: ino, Size: e.Size, Mode: e.Mode, Nlink: 1,
-			Uid: uint32(syscall.Getuid()), Gid: uint32(syscall.Getgid()),
+			Uid: Owner.Uid, Gid: Owner.Gid,
 			Atime: now, Mtime: mtime, Ctime: mtime,
 		}
 	}
@@ -761,7 +760,7 @@ func (s *StorageVNode) toFileInfo(path string, info *pb.FileInfo) *FileInfo {
 	}
 	return &FileInfo{
 		Ino: PathIno(path), Size: info.Size, Mode: info.Mode, Nlink: 1,
-		Uid: uint32(syscall.Getuid()), Gid: uint32(syscall.Getgid()),
+		Uid: Owner.Uid, Gid: Owner.Gid,
 		Atime: now, Mtime: mtime, Ctime: mtime,
 	}
 }
@@ -857,7 +856,7 @@ func (s *StorageVNode) doBackgroundWarmup() {
 			}
 			childMeta[e.Name] = &FileInfo{
 				Ino: ino, Size: e.Size, Mode: e.Mode, Nlink: 1,
-				Uid: uint32(syscall.Getuid()), Gid: uint32(syscall.Getgid()),
+				Uid: Owner.Uid, Gid: Owner.Gid,
 				Atime: now, Mtime: mtime, Ctime: mtime,
 			}
 		}

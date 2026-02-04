@@ -14,19 +14,21 @@ import (
 )
 
 type TasksGroup struct {
-	routerGroup *echo.Group
-	backend     repository.BackendRepository
-	taskQueue   repository.TaskQueue
-	s2Client    *common.S2Client
+	routerGroup  *echo.Group
+	backend      repository.BackendRepository
+	taskQueue    repository.TaskQueue
+	s2Client     *common.S2Client
+	defaultImage string
 }
 
 type CreateTaskRequest struct {
-	WorkspaceID   string            `json:"workspace_id"`   // External workspace ID
-	WorkspaceName string            `json:"workspace_name"` // Or workspace name
-	Prompt        string            `json:"prompt"`         // Claude Code prompt (auto-sets image)
-	Image         string            `json:"image"`          // Container image (optional if prompt provided)
-	Entrypoint    []string          `json:"entrypoint"`
-	Env           map[string]string `json:"env"`
+	WorkspaceID   string               `json:"workspace_id"`   // External workspace ID
+	WorkspaceName string               `json:"workspace_name"` // Or workspace name
+	Prompt        string               `json:"prompt"`         // Claude Code prompt (auto-sets image)
+	Image         string               `json:"image"`          // Container image (optional if prompt provided)
+	Entrypoint    []string             `json:"entrypoint"`
+	Env           map[string]string    `json:"env"`
+	Resources     *types.TaskResources `json:"resources,omitempty"` // CPU/Memory/GPU (uses defaults if nil)
 }
 
 type TaskResponse struct {
@@ -49,12 +51,14 @@ func NewTasksGroup(
 	backend repository.BackendRepository,
 	taskQueue repository.TaskQueue,
 	s2Client *common.S2Client,
+	defaultImage string,
 ) *TasksGroup {
 	g := &TasksGroup{
-		routerGroup: routerGroup,
-		backend:     backend,
-		taskQueue:   taskQueue,
-		s2Client:    s2Client,
+		routerGroup:  routerGroup,
+		backend:      backend,
+		taskQueue:    taskQueue,
+		s2Client:     s2Client,
+		defaultImage: defaultImage,
 	}
 	g.registerRoutes()
 	return g
@@ -79,9 +83,9 @@ func (g *TasksGroup) CreateTask(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
 	}
 
-	// If prompt is provided, this is a Claude Code task - auto-set image
+	// If prompt is provided, this is a Claude Code task - use default sandbox image
 	if req.Prompt != "" {
-		req.Image = types.ClaudeCodeImage
+		req.Image = g.defaultImage
 	}
 
 	if req.Image == "" {
@@ -130,6 +134,7 @@ func (g *TasksGroup) CreateTask(c echo.Context) error {
 		Image:             req.Image,
 		Entrypoint:        req.Entrypoint,
 		Env:               req.Env,
+		Resources:         req.Resources,
 	}
 
 	if task.Env == nil {

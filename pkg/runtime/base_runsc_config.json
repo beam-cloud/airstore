@@ -3,17 +3,19 @@
 	"process": {
 		"terminal": false,
 		"user": {
-			"uid": 0,
-			"gid": 0
+			"uid": 1000,
+			"gid": 1000
 		},
 		"args": [
 			"/bin/sh"
 		],
 		"env": [
 			"TERM=xterm",
-			"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+			"PATH=/home/sandbox/.npm-global/bin:/home/sandbox/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+			"HOME=/home/sandbox",
+			"USER=sandbox"
 		],
-		"cwd": "/",
+		"cwd": "/workspace",
 		"capabilities": {
 			"bounding": [
 				"CAP_AUDIT_WRITE",

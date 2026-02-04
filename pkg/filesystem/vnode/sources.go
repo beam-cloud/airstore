@@ -774,7 +774,7 @@ func (v *SourcesVNode) protoToFileInfo(path string, info *pb.SourceFileInfo) *Fi
 	}
 	return &FileInfo{
 		Ino: PathIno(path), Size: info.Size, Mode: info.Mode, Nlink: 1,
-		Uid: uint32(syscall.Getuid()), Gid: uint32(syscall.Getgid()),
+		Uid: Owner.Uid, Gid: Owner.Gid,
 		Atime: now, Mtime: mtime, Ctime: mtime,
 	}
 }

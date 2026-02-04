@@ -26,25 +26,16 @@ type SandboxConfig struct {
 	WorkingDir string `json:"working_dir"`
 
 	// Resources specifies resource limits for the sandbox
-	Resources SandboxResources `json:"resources"`
+	Resources TaskResources `json:"resources"`
 
 	// Mounts specifies additional mounts for the sandbox
 	Mounts []SandboxMount `json:"mounts"`
 
 	// Network specifies network configuration
 	Network SandboxNetwork `json:"network"`
-}
 
-// SandboxResources specifies resource limits for a sandbox
-type SandboxResources struct {
-	// CPU limit in millicores (e.g., 1000 = 1 CPU)
-	CPU int64 `json:"cpu"`
-
-	// Memory limit in bytes
-	Memory int64 `json:"memory"`
-
-	// GPU count (0 = no GPU)
-	GPU int `json:"gpu"`
+	// FilesystemMount is the host path to bind-mount at /workspace (optional)
+	FilesystemMount string `json:"-"`
 }
 
 // SandboxMount specifies a mount point for a sandbox
@@ -99,6 +90,9 @@ type SandboxState struct {
 	// Error contains error message if failed
 	Error string `json:"error,omitempty"`
 
+	// ContainerIP is the container's IP address (for routing)
+	ContainerIP string `json:"container_ip,omitempty"`
+
 	// CreatedAt is when the sandbox was created
 	CreatedAt time.Time `json:"created_at"`
 
@@ -108,3 +102,38 @@ type SandboxState struct {
 	// FinishedAt is when the sandbox stopped
 	FinishedAt time.Time `json:"finished_at,omitempty"`
 }
+
+// IPAllocation represents an allocated IP for a sandbox
+type IPAllocation struct {
+	IP        string `json:"ip"`
+	Gateway   string `json:"gateway"`
+	PrefixLen int    `json:"prefix_len"`
+}
+
+// Default network settings for container bridge (dual-stack IPv4/IPv6).
+// TODO: Make configurable via worker config to avoid conflicts with:
+//   - K8s clusters using overlapping pod/service CIDR
+//   - Cloud VPCs with overlapping ranges
+const (
+	// IPv4 - using 10.200.x.x to avoid common conflicts
+	DefaultSubnet       = "10.200.0.0/24"
+	DefaultSubnetPrefix = "10.200.0"
+	DefaultGateway      = "10.200.0.1"
+	DefaultPrefixLen    = 24
+
+	// IPv6 - ULA prefix (fd00::/8 is for private use)
+	DefaultSubnetIPv6  = "fd00:a1b2::/64"
+	DefaultGatewayIPv6 = "fd00:a1b2::1"
+)
+
+// Sandbox user identity
+// These constants are used by:
+//   - pkg/worker/sandbox.go: sets OCI spec Process.User.UID/GID
+//   - pkg/worker/mount.go: passes --uid/--gid to FUSE mount
+//
+// The Dockerfile.sandbox must create a user with matching uid/gid.
+// The base_*_config.json files contain placeholder values that get overwritten.
+const (
+	SandboxUserUID = 1000
+	SandboxUserGID = 1000
+)

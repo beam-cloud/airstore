@@ -26,6 +26,8 @@ const (
 	WorkerService_GetWorker_FullMethodName      = "/worker.WorkerService/GetWorker"
 	WorkerService_ListWorkers_FullMethodName    = "/worker.WorkerService/ListWorkers"
 	WorkerService_SetTaskResult_FullMethodName  = "/worker.WorkerService/SetTaskResult"
+	WorkerService_AllocateIP_FullMethodName     = "/worker.WorkerService/AllocateIP"
+	WorkerService_ReleaseIP_FullMethodName      = "/worker.WorkerService/ReleaseIP"
 )
 
 // WorkerServiceClient is the client API for WorkerService service.
@@ -41,6 +43,9 @@ type WorkerServiceClient interface {
 	ListWorkers(ctx context.Context, in *ListWorkersRequest, opts ...grpc.CallOption) (*ListWorkersResponse, error)
 	// Task results
 	SetTaskResult(ctx context.Context, in *SetTaskResultRequest, opts ...grpc.CallOption) (*SetTaskResultResponse, error)
+	// Network/IP management for sandboxes
+	AllocateIP(ctx context.Context, in *AllocateIPRequest, opts ...grpc.CallOption) (*AllocateIPResponse, error)
+	ReleaseIP(ctx context.Context, in *ReleaseIPRequest, opts ...grpc.CallOption) (*ReleaseIPResponse, error)
 }
 
 type workerServiceClient struct {
@@ -114,6 +119,24 @@ func (c *workerServiceClient) SetTaskResult(ctx context.Context, in *SetTaskResu
 	return out, nil
 }
 
+func (c *workerServiceClient) AllocateIP(ctx context.Context, in *AllocateIPRequest, opts ...grpc.CallOption) (*AllocateIPResponse, error) {
+	out := new(AllocateIPResponse)
+	err := c.cc.Invoke(ctx, WorkerService_AllocateIP_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workerServiceClient) ReleaseIP(ctx context.Context, in *ReleaseIPRequest, opts ...grpc.CallOption) (*ReleaseIPResponse, error) {
+	out := new(ReleaseIPResponse)
+	err := c.cc.Invoke(ctx, WorkerService_ReleaseIP_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // WorkerServiceServer is the server API for WorkerService service.
 // All implementations must embed UnimplementedWorkerServiceServer
 // for forward compatibility
@@ -127,6 +150,9 @@ type WorkerServiceServer interface {
 	ListWorkers(context.Context, *ListWorkersRequest) (*ListWorkersResponse, error)
 	// Task results
 	SetTaskResult(context.Context, *SetTaskResultRequest) (*SetTaskResultResponse, error)
+	// Network/IP management for sandboxes
+	AllocateIP(context.Context, *AllocateIPRequest) (*AllocateIPResponse, error)
+	ReleaseIP(context.Context, *ReleaseIPRequest) (*ReleaseIPResponse, error)
 	mustEmbedUnimplementedWorkerServiceServer()
 }
 
@@ -154,6 +180,12 @@ func (UnimplementedWorkerServiceServer) ListWorkers(context.Context, *ListWorker
 }
 func (UnimplementedWorkerServiceServer) SetTaskResult(context.Context, *SetTaskResultRequest) (*SetTaskResultResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SetTaskResult not implemented")
+}
+func (UnimplementedWorkerServiceServer) AllocateIP(context.Context, *AllocateIPRequest) (*AllocateIPResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AllocateIP not implemented")
+}
+func (UnimplementedWorkerServiceServer) ReleaseIP(context.Context, *ReleaseIPRequest) (*ReleaseIPResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReleaseIP not implemented")
 }
 func (UnimplementedWorkerServiceServer) mustEmbedUnimplementedWorkerServiceServer() {}
 
@@ -294,6 +326,42 @@ func _WorkerService_SetTaskResult_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _WorkerService_AllocateIP_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AllocateIPRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkerServiceServer).AllocateIP(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkerService_AllocateIP_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkerServiceServer).AllocateIP(ctx, req.(*AllocateIPRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _WorkerService_ReleaseIP_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReleaseIPRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkerServiceServer).ReleaseIP(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkerService_ReleaseIP_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkerServiceServer).ReleaseIP(ctx, req.(*ReleaseIPRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // WorkerService_ServiceDesc is the grpc.ServiceDesc for WorkerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -328,6 +396,14 @@ var WorkerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SetTaskResult",
 			Handler:    _WorkerService_SetTaskResult_Handler,
+		},
+		{
+			MethodName: "AllocateIP",
+			Handler:    _WorkerService_AllocateIP_Handler,
+		},
+		{
+			MethodName: "ReleaseIP",
+			Handler:    _WorkerService_ReleaseIP_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
