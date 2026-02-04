@@ -14,10 +14,11 @@ import (
 )
 
 type TasksGroup struct {
-	routerGroup *echo.Group
-	backend     repository.BackendRepository
-	taskQueue   repository.TaskQueue
-	s2Client    *common.S2Client
+	routerGroup  *echo.Group
+	backend      repository.BackendRepository
+	taskQueue    repository.TaskQueue
+	s2Client     *common.S2Client
+	defaultImage string
 }
 
 type CreateTaskRequest struct {
@@ -49,12 +50,14 @@ func NewTasksGroup(
 	backend repository.BackendRepository,
 	taskQueue repository.TaskQueue,
 	s2Client *common.S2Client,
+	defaultImage string,
 ) *TasksGroup {
 	g := &TasksGroup{
-		routerGroup: routerGroup,
-		backend:     backend,
-		taskQueue:   taskQueue,
-		s2Client:    s2Client,
+		routerGroup:  routerGroup,
+		backend:      backend,
+		taskQueue:    taskQueue,
+		s2Client:     s2Client,
+		defaultImage: defaultImage,
 	}
 	g.registerRoutes()
 	return g
@@ -79,9 +82,9 @@ func (g *TasksGroup) CreateTask(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
 	}
 
-	// If prompt is provided, this is a Claude Code task - auto-set image
+	// If prompt is provided, this is a Claude Code task - use default sandbox image
 	if req.Prompt != "" {
-		req.Image = types.ClaudeCodeImage
+		req.Image = g.defaultImage
 	}
 
 	if req.Image == "" {

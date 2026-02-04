@@ -18,6 +18,7 @@ require (
 	github.com/bsm/redislock v0.9.4
 	github.com/charmbracelet/huh/spinner v0.0.0-20260202112050-cf338358ac5c
 	github.com/charmbracelet/lipgloss v1.1.0
+	github.com/coreos/go-iptables v0.8.0
 	github.com/go-viper/mapstructure/v2 v2.0.0
 	github.com/google/uuid v1.6.0
 	github.com/hanwen/go-fuse/v2 v2.9.0
@@ -36,10 +37,13 @@ require (
 	github.com/shirou/gopsutil/v4 v4.25.12
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
+	github.com/vishvananda/netlink v1.3.1
+	github.com/vishvananda/netns v0.0.5
 	github.com/winfsp/cgofuse v1.6.1-0.20250813110601-7d90b0992471
 	golang.org/x/crypto v0.45.0
 	golang.org/x/oauth2 v0.32.0
 	golang.org/x/sync v0.18.0
+	golang.org/x/sys v0.38.0
 	google.golang.org/grpc v1.78.0
 	google.golang.org/protobuf v1.36.10
 	gopkg.in/yaml.v3 v3.0.1
@@ -142,7 +146,6 @@ require (
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/net v0.47.0 // indirect
-	golang.org/x/sys v0.38.0 // indirect
 	golang.org/x/term v0.37.0 // indirect
 	golang.org/x/text v0.31.0 // indirect
 	golang.org/x/time v0.12.0 // indirect

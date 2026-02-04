@@ -99,6 +99,9 @@ type SandboxState struct {
 	// Error contains error message if failed
 	Error string `json:"error,omitempty"`
 
+	// ContainerIP is the container's IP address (for routing)
+	ContainerIP string `json:"container_ip,omitempty"`
+
 	// CreatedAt is when the sandbox was created
 	CreatedAt time.Time `json:"created_at"`
 
@@ -108,3 +111,18 @@ type SandboxState struct {
 	// FinishedAt is when the sandbox stopped
 	FinishedAt time.Time `json:"finished_at,omitempty"`
 }
+
+// IPAllocation represents an allocated IP for a sandbox
+type IPAllocation struct {
+	IP        string `json:"ip"`
+	Gateway   string `json:"gateway"`
+	PrefixLen int    `json:"prefix_len"`
+}
+
+// Default network settings
+const (
+	DefaultSubnet       = "10.88.0.0/24"
+	DefaultSubnetPrefix = "10.88.0"
+	DefaultGateway      = "10.88.0.1"
+	DefaultPrefixLen    = 24
+)

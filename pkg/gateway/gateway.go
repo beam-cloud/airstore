@@ -292,7 +292,7 @@ func (g *Gateway) registerServices() error {
 
 	// Register worker gRPC service (for worker-to-gateway communication)
 	if g.scheduler != nil {
-		workerService := services.NewWorkerService(g.scheduler, g.BackendRepo)
+		workerService := services.NewWorkerService(g.scheduler, g.BackendRepo, g.scheduler.WorkerRepo())
 		pb.RegisterWorkerServiceServer(g.grpcServer, workerService)
 		log.Info().Msg("worker service registered")
 	}
@@ -378,7 +378,7 @@ func (g *Gateway) registerServices() error {
 		log.Info().Msg("filesystem API registered at /api/v1/workspaces/:workspace_id/fs")
 
 		// Tasks API
-		apiv1.NewTasksGroup(g.baseRouteGroup.Group("/tasks"), g.BackendRepo, taskQueue, g.s2Client)
+		apiv1.NewTasksGroup(g.baseRouteGroup.Group("/tasks"), g.BackendRepo, taskQueue, g.s2Client, g.Config.Sandbox.GetDefaultImage())
 
 		// OAuth API for workspace integrations (gmail, gdrive, github, notion, slack)
 		apiv1.NewOAuthGroup(g.baseRouteGroup.Group("/oauth"), g.oauthStore, g.oauthRegistry, g.BackendRepo)

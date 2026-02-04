@@ -2,9 +2,6 @@ package types
 
 import "time"
 
-// ClaudeCodeImage is the hardcoded image for Claude Code tasks
-const ClaudeCodeImage = "ghcr.io/beam-cloud/claude-code:latest"
-
 // Task represents a unit of work to be executed in a sandbox
 type Task struct {
 	// Id is the internal ID for joins

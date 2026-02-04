@@ -36,6 +36,10 @@ image:
   workPath: /var/lib/clip/work
   mountPath: /var/lib/clip/mnt
 
+# Sandbox configuration for task execution
+sandbox:
+  defaultImage: public.ecr.aws/n4e0e1y0/airstore-default-sandbox:latest
+
 filesystem:
   mountPoint: /tmp/airstore
   # Per-workspace S3 storage (bucket created per workspace: {prefix}-{external_id})

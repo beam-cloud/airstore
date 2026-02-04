@@ -117,20 +117,20 @@ func NewWorker() (*Worker, error) {
 		runtimeType = types.ContainerRuntimeGvisor.String()
 	}
 
-	// Create sandbox manager with CLIP image manager and S2 for logging
-	sandboxManager, err := NewSandboxManager(ctx, SandboxManagerConfig{
-		RuntimeType:      runtimeType,
+	// Create sandbox manager
+	sandboxManager, err := NewSandboxManager(ctx, Config{
 		WorkerID:         workerId,
-		GatewayGRPCAddr:  gatewayGRPCAddr,
+		GatewayAddr:      gatewayGRPCAddr,
 		AuthToken:        authToken,
+		GatewayClient:    gatewayClient,
 		EnableFilesystem: true,
+		EnableNetwork:    true,
+		RuntimeType:      runtimeType,
+		RuntimeConfig:    runtime.Config{Type: runtimeType},
 		ImageConfig:      config.Image,
-		RuntimeConfig: runtime.Config{
-			Type: runtimeType,
-		},
-		S2Token:         config.Streams.Token,
-		S2Basin:         config.Streams.Basin,
-		AnthropicAPIKey: config.Anthropic.APIKey,
+		S2Token:          config.Streams.Token,
+		S2Basin:          config.Streams.Basin,
+		AnthropicAPIKey:  config.Anthropic.APIKey,
 	})
 	if err != nil {
 		cancel()

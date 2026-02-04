@@ -197,6 +197,41 @@ func (c *GatewayClient) SetTaskResult(ctx context.Context, taskID string, exitCo
 	return nil
 }
 
+// AllocateIP requests an IP allocation for a sandbox from the gateway
+func (c *GatewayClient) AllocateIP(ctx context.Context, sandboxID, workerID string) (*types.IPAllocation, error) {
+	ctx, cancel := c.withTimeout(ctx)
+	defer cancel()
+
+	resp, err := c.client.AllocateIP(ctx, &pb.AllocateIPRequest{
+		SandboxId: sandboxID,
+		WorkerId:  workerID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("allocate IP failed: %w", err)
+	}
+
+	return &types.IPAllocation{
+		IP:        resp.Ip,
+		Gateway:   resp.Gateway,
+		PrefixLen: int(resp.PrefixLen),
+	}, nil
+}
+
+// ReleaseIP releases an IP allocation for a sandbox
+func (c *GatewayClient) ReleaseIP(ctx context.Context, sandboxID string) error {
+	ctx, cancel := c.withTimeout(ctx)
+	defer cancel()
+
+	_, err := c.client.ReleaseIP(ctx, &pb.ReleaseIPRequest{
+		SandboxId: sandboxID,
+	})
+	if err != nil {
+		return fmt.Errorf("release IP failed: %w", err)
+	}
+
+	return nil
+}
+
 // isNotFound checks if the error is a gRPC NotFound status
 func isNotFound(err error) bool {
 	if st, ok := status.FromError(err); ok {

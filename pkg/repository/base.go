@@ -18,6 +18,9 @@ type WorkerRepository interface {
 	RemoveWorker(ctx context.Context, workerId string) error
 	SetWorkerKeepAlive(ctx context.Context, workerId string) error
 	UpdateWorkerStatus(ctx context.Context, workerId string, status types.WorkerStatus) error
+	AllocateIP(ctx context.Context, sandboxID, workerID string) (*types.IPAllocation, error)
+	ReleaseIP(ctx context.Context, sandboxID string) error
+	GetSandboxIP(ctx context.Context, sandboxID string) (string, bool)
 }
 
 // WorkerPoolRepository manages worker pool state in Redis
