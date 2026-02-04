@@ -11,6 +11,7 @@ service WorkerService {
   rpc UpdateStatus(UpdateStatusRequest) returns (UpdateStatusResponse);
   rpc Deregister(DeregisterRequest) returns (DeregisterResponse);
   rpc GetWorker(GetWorkerRequest) returns (GetWorkerResponse);
+  rpc ListWorkers(ListWorkersRequest) returns (ListWorkersResponse);
   
   // Task results
   rpc SetTaskResult(SetTaskResultRequest) returns (SetTaskResultResponse);
@@ -66,6 +67,13 @@ message GetWorkerResponse {
   int64 last_seen_at = 7;
   int64 registered_at = 8;
   string version = 9;
+}
+
+// List workers
+message ListWorkersRequest {}
+
+message ListWorkersResponse {
+  repeated GetWorkerResponse workers = 1;
 }
 
 // Task result reporting

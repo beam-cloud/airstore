@@ -94,6 +94,33 @@ func (s *WorkerService) GetWorker(ctx context.Context, req *pb.GetWorkerRequest)
 	}, nil
 }
 
+func (s *WorkerService) ListWorkers(ctx context.Context, req *pb.ListWorkersRequest) (*pb.ListWorkersResponse, error) {
+	workers, err := s.scheduler.GetWorkers(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to list workers: %v", err)
+	}
+
+	response := &pb.ListWorkersResponse{
+		Workers: make([]*pb.GetWorkerResponse, 0, len(workers)),
+	}
+
+	for _, worker := range workers {
+		response.Workers = append(response.Workers, &pb.GetWorkerResponse{
+			Id:           worker.ID,
+			Status:       string(worker.Status),
+			PoolName:     worker.PoolName,
+			Hostname:     worker.Hostname,
+			Cpu:          worker.Cpu,
+			Memory:       worker.Memory,
+			LastSeenAt:   worker.LastSeenAt.Unix(),
+			RegisteredAt: worker.RegisteredAt.Unix(),
+			Version:      worker.Version,
+		})
+	}
+
+	return response, nil
+}
+
 func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResultRequest) (*pb.SetTaskResultResponse, error) {
 	if s.backend == nil {
 		return nil, status.Errorf(codes.Unavailable, "task persistence not available")

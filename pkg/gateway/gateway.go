@@ -255,11 +255,7 @@ func (g *Gateway) registerServices() error {
 			return fmt.Errorf("failed to start scheduler: %w", err)
 		}
 
-		// Register scheduler HTTP service
-		schedulerService := scheduler.NewSchedulerService(g.scheduler)
-		schedulerService.RegisterRoutes(g.baseRouteGroup.Group("/scheduler"))
-
-		log.Info().Msg("scheduler service registered")
+		log.Info().Msg("scheduler started")
 	}
 
 	// Register filesystem gRPC service
