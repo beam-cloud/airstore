@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
+	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/repository"
-	"github.com/beam-cloud/airstore/pkg/streams"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/labstack/echo/v4"
 )
@@ -17,7 +17,7 @@ type TasksGroup struct {
 	routerGroup *echo.Group
 	backend     repository.BackendRepository
 	taskQueue   repository.TaskQueue
-	s2Client    *streams.S2Client
+	s2Client    *common.S2Client
 }
 
 type CreateTaskRequest struct {
@@ -48,7 +48,7 @@ func NewTasksGroup(
 	routerGroup *echo.Group,
 	backend repository.BackendRepository,
 	taskQueue repository.TaskQueue,
-	s2Client *streams.S2Client,
+	s2Client *common.S2Client,
 ) *TasksGroup {
 	g := &TasksGroup{
 		routerGroup: routerGroup,
@@ -342,7 +342,7 @@ func (w *sseWriter) flush() {
 	w.c.Response().Flush()
 }
 
-func (w *sseWriter) sendLogs(logs []streams.TaskLogEntry) int64 {
+func (w *sseWriter) sendLogs(logs []common.TaskLogEntry) int64 {
 	var cursor int64
 	for _, e := range logs {
 		w.write(e)
@@ -356,7 +356,7 @@ func (w *sseWriter) sendLogs(logs []streams.TaskLogEntry) int64 {
 	return cursor
 }
 
-func (w *sseWriter) sendLogsAfter(logs []streams.TaskLogEntry, cursor int64) int64 {
+func (w *sseWriter) sendLogsAfter(logs []common.TaskLogEntry, cursor int64) int64 {
 	dirty := false
 	for _, e := range logs {
 		if e.Timestamp > cursor {

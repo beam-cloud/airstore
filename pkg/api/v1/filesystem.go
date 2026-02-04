@@ -14,10 +14,10 @@ import (
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
+	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/gateway/services"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/sources"
-	"github.com/beam-cloud/airstore/pkg/streams"
 	"github.com/beam-cloud/airstore/pkg/tools"
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
@@ -34,7 +34,7 @@ type FilesystemGroup struct {
 	sourceRegistry *sources.Registry
 	toolRegistry   *tools.Registry
 	toolResolver   *tools.WorkspaceToolResolver
-	s2Client       *streams.S2Client
+	s2Client       *common.S2Client
 }
 
 // NewFilesystemGroup creates a new filesystem API group.
@@ -46,7 +46,7 @@ func NewFilesystemGroup(
 	sourceService *services.SourceService,
 	sourceRegistry *sources.Registry,
 	toolRegistry *tools.Registry,
-	s2Client *streams.S2Client,
+	s2Client *common.S2Client,
 ) *FilesystemGroup {
 	// Create resolver for workspace-aware tool resolution
 	var resolver *tools.WorkspaceToolResolver
@@ -389,8 +389,6 @@ func (g *FilesystemGroup) Search(c echo.Context) error {
 		Results: results,
 	})
 }
-
-
 
 // UploadURLRequest represents a request to get a presigned upload URL
 type UploadURLRequest struct {
@@ -1464,7 +1462,7 @@ func (g *FilesystemGroup) buildTaskContent(ctx context.Context, task *types.Task
 		if err != nil {
 			log.Warn().Err(err).Str("task_id", task.ExternalId).Msg("failed to read task logs from S2")
 		} else {
-			sb.WriteString(streams.FormatLogs(logs))
+			sb.WriteString(common.FormatLogs(logs))
 		}
 	}
 

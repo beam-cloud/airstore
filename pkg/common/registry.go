@@ -1,5 +1,4 @@
-// Package registry provides storage for CLIP image archives.
-package registry
+package common
 
 import (
 	"context"
