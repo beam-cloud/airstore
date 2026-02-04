@@ -7,6 +7,7 @@ import (
 	"runtime"
 
 	"fyne.io/systray"
+	"github.com/beam-cloud/airstore/pkg/cli"
 )
 
 var mLogin *systray.MenuItem
@@ -27,5 +28,5 @@ func handleManagedClick() {
 	if runtime.GOOS == "darwin" {
 		cmd = "open"
 	}
-	exec.Command(cmd, "https://airstore.ai/login").Start()
+	exec.Command(cmd, cli.DashboardURL()+"/login").Start()
 }
