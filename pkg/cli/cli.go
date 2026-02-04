@@ -17,6 +17,7 @@ var (
 // Endpoints - edit these to change where the CLI points
 const (
 	prodDashboard   = "https://airstore.ai"
+	prodAPI         = "https://internal-api.airstore.ai"
 	prodGatewayGRPC = "gateway.airstore.ai:443"
 	prodGatewayHTTP = "https://api.airstore.ai"
 
@@ -44,7 +45,7 @@ func DashboardURL() string {
 // APIURL returns the backend API URL based on build type
 func APIURL() string {
 	if Release == "true" {
-		return prodDashboard // API served from same domain in prod
+		return prodAPI
 	}
 	return localAPI
 }
