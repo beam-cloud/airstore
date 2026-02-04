@@ -16,7 +16,7 @@ var (
 
 // Endpoints - edit these to change where the CLI points
 const (
-	prodDashboard   = "https://airstore.ai"
+	prodDashboard   = "https://app.airstore.ai"
 	prodAPI         = "https://internal-api.airstore.ai"
 	prodGatewayGRPC = "gateway.airstore.ai:443"
 	prodGatewayHTTP = "https://api.airstore.ai"
