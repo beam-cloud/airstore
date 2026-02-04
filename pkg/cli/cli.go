@@ -14,14 +14,14 @@ var (
 	Release = "false" // "true" in release builds
 )
 
-// Production endpoints (used in release builds)
+// Endpoints - edit these to change where the CLI points
 const (
+	prodDashboard   = "https://airstore.ai"
 	prodGatewayGRPC = "gateway.airstore.ai:443"
 	prodGatewayHTTP = "https://api.airstore.ai"
-)
 
-// Local endpoints (used in dev builds or embedded mode)
-const (
+	localDashboard   = "http://localhost:3001"
+	localAPI         = "http://localhost:8113"
 	localGatewayGRPC = "localhost:1993"
 	localGatewayHTTP = "http://localhost:1994"
 )
@@ -33,7 +33,22 @@ var (
 	jsonOutput      bool
 )
 
-// defaultGRPCAddr returns the default gRPC endpoint based on build type
+// DashboardURL returns the dashboard URL based on build type
+func DashboardURL() string {
+	if Release == "true" {
+		return prodDashboard
+	}
+	return localDashboard
+}
+
+// APIURL returns the backend API URL based on build type
+func APIURL() string {
+	if Release == "true" {
+		return prodDashboard // API served from same domain in prod
+	}
+	return localAPI
+}
+
 func defaultGRPCAddr() string {
 	if Release == "true" {
 		return prodGatewayGRPC
@@ -41,7 +56,6 @@ func defaultGRPCAddr() string {
 	return localGatewayGRPC
 }
 
-// defaultHTTPAddr returns the default HTTP endpoint based on build type
 func defaultHTTPAddr() string {
 	if Release == "true" {
 		return prodGatewayHTTP
@@ -76,8 +90,12 @@ Mount a virtual filesystem that provides tools, integrations, and context
 for AI agents to interact with the world.`,
 	Version: Version,
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
-		// Set JSON output mode based on flag
 		SetJSONOutput(jsonOutput)
+
+		// Auto-load credentials if no token provided
+		if authToken == "" {
+			authToken = LoadCredentials()
+		}
 	},
 }
 
