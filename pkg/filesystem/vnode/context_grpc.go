@@ -31,7 +31,7 @@ type ContextVNodeGRPC struct {
 	mu      sync.Mutex
 }
 
-// NewContextVNodeGRPC creates a new context virtual node
+// NewContextVNodeGRPC creates a new context virtual node.
 func NewContextVNodeGRPC(conn *grpc.ClientConn, token string) *ContextVNodeGRPC {
 	return &ContextVNodeGRPC{
 		client:  pb.NewContextServiceClient(conn),
@@ -137,9 +137,10 @@ func (c *ContextVNodeGRPC) Readdir(path string) ([]DirEntry, error) {
 		if e.Mtime > 0 {
 			mtime = time.Unix(e.Mtime, 0)
 		}
+		uid, gid := GetOwner()
 		childMeta[e.Name] = &FileInfo{
 			Ino: ino, Size: e.Size, Mode: e.Mode, Nlink: 1,
-			Uid: Owner.Uid, Gid: Owner.Gid,
+			Uid: uid, Gid: gid,
 			Atime: now, Mtime: mtime, Ctime: mtime,
 		}
 	}
@@ -732,9 +733,10 @@ func (c *ContextVNodeGRPC) toFileInfo(path string, info *pb.FileInfo) *FileInfo 
 	if info.Mtime > 0 {
 		mtime = time.Unix(info.Mtime, 0)
 	}
+	uid, gid := GetOwner()
 	return &FileInfo{
 		Ino: PathIno(path), Size: info.Size, Mode: info.Mode, Nlink: 1,
-		Uid: Owner.Uid, Gid: Owner.Gid,
+		Uid: uid, Gid: gid,
 		Atime: now, Mtime: mtime, Ctime: mtime,
 	}
 }

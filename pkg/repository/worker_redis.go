@@ -64,8 +64,11 @@ func (r *WorkerRedisRepository) RemoveWorker(ctx context.Context, id string) err
 	stateKey := common.Keys.SchedulerWorkerState(id)
 	indexKey := common.Keys.SchedulerWorkerIndex()
 
-	r.rdb.SRem(ctx, indexKey, stateKey)
-	return r.rdb.Del(ctx, stateKey).Err()
+	pipe := r.rdb.Pipeline()
+	pipe.SRem(ctx, indexKey, stateKey)
+	pipe.Del(ctx, stateKey)
+	_, err := pipe.Exec(ctx)
+	return err
 }
 
 func (r *WorkerRedisRepository) GetWorker(ctx context.Context, id string) (*types.Worker, error) {

@@ -102,6 +102,7 @@ type SourcesVNode struct {
 	stopRefresh chan struct{}
 }
 
+// NewSourcesVNode creates a new SourcesVNode.
 func NewSourcesVNode(conn *grpc.ClientConn, token string) *SourcesVNode {
 	v := &SourcesVNode{
 		client:       pb.NewSourceServiceClient(conn),
@@ -772,9 +773,10 @@ func (v *SourcesVNode) protoToFileInfo(path string, info *pb.SourceFileInfo) *Fi
 	if info.Mtime > 0 {
 		mtime = time.Unix(info.Mtime, 0)
 	}
+	uid, gid := GetOwner()
 	return &FileInfo{
 		Ino: PathIno(path), Size: info.Size, Mode: info.Mode, Nlink: 1,
-		Uid: Owner.Uid, Gid: Owner.Gid,
+		Uid: uid, Gid: gid,
 		Atime: now, Mtime: mtime, Ctime: mtime,
 	}
 }

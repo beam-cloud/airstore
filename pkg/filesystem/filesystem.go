@@ -20,8 +20,8 @@ type Config struct {
 	GatewayAddr string
 	Token       string
 	Verbose     bool
-	Uid         uint32 // File owner uid (0 = use platform default)
-	Gid         uint32 // File owner gid (0 = use platform default)
+	Uid         *uint32 // File owner uid (nil = use current user, 0 = root)
+	Gid         *uint32 // File owner gid (nil = use current user, 0 = root)
 }
 
 // Filesystem is a FUSE filesystem that connects to the gateway via gRPC.
@@ -64,7 +64,7 @@ func NewFilesystem(cfg Config) (*Filesystem, error) {
 		cfg.GatewayAddr = "localhost:1993"
 	}
 
-	// Initialize file ownership (default=current user, worker sets env for sandbox)
+	// Initialize global owner config (thread-safe)
 	vnode.InitOwner(cfg.Uid, cfg.Gid)
 
 	metadata, err := NewGRPCMetadataEngine(GRPCConfig{
@@ -271,13 +271,14 @@ func (f *Filesystem) Getattr(path string) (*FileInfo, error) {
 	parent, name := splitPath(path)
 	parentID := f.resolveDir(parent)
 
+	uid, gid := vnode.GetOwner()
 	if meta, err := f.metadata.GetDirectoryAccessMetadata(parentID, name); err == nil {
 		return &FileInfo{
 			Ino:   hashToIno(meta.ID),
 			Mode:  meta.Permission,
 			Nlink: 2,
-			Uid:   vnode.Owner.Uid,
-			Gid:   vnode.Owner.Gid,
+			Uid:   uid,
+			Gid:   gid,
 			Atime: time.Now(),
 			Mtime: time.Now(),
 			Ctime: time.Now(),
@@ -290,8 +291,8 @@ func (f *Filesystem) Getattr(path string) (*FileInfo, error) {
 			Size:  int64(len(meta.FileData)),
 			Mode:  syscall.S_IFREG | 0644,
 			Nlink: 1,
-			Uid:   vnode.Owner.Uid,
-			Gid:   vnode.Owner.Gid,
+			Uid:   uid,
+			Gid:   gid,
 			Atime: time.Now(),
 			Mtime: time.Now(),
 			Ctime: time.Now(),
@@ -574,12 +575,13 @@ func (f *Filesystem) Fsync(path string, datasync bool, fh FileHandle) error {
 }
 
 func (f *Filesystem) rootInfo() *FileInfo {
+	uid, gid := vnode.GetOwner()
 	return &FileInfo{
 		Ino:   1,
 		Mode:  syscall.S_IFDIR | 0755,
 		Nlink: 2,
-		Uid:   vnode.Owner.Uid,
-		Gid:   vnode.Owner.Gid,
+		Uid:   uid,
+		Gid:   gid,
 		Atime: time.Now(),
 		Mtime: time.Now(),
 		Ctime: time.Now(),

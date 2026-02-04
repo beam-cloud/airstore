@@ -92,6 +92,11 @@ func (g *TasksGroup) CreateTask(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, "image or prompt is required")
 	}
 
+	// Validate resource limits
+	if err := req.Resources.Validate(); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+	}
+
 	// Get member info from auth context
 	var createdByMemberId *uint
 	memberId := auth.MemberId(ctx)

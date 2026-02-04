@@ -266,7 +266,7 @@ func (a *adapter) Readdir(path string, fill func(string, *fuse.Stat_t, int64) bo
 
 		// If entry has Size or Mtime, use it directly (avoids expensive Getattr call)
 		if e.Size > 0 || e.Mtime > 0 {
-			fillStatFromEntry(&stat, &e)
+			a.fillStatFromEntry(&stat, &e)
 		} else {
 			// Fall back to Getattr for entries without metadata
 			p := path + "/" + e.Name
@@ -277,7 +277,7 @@ func (a *adapter) Readdir(path string, fill func(string, *fuse.Stat_t, int64) bo
 				fillStat(&stat, info)
 			} else {
 				// Getattr failed, use entry mode at least
-				fillStatFromEntry(&stat, &e)
+				a.fillStatFromEntry(&stat, &e)
 			}
 		}
 		if !fill(e.Name, &stat, 0) {
@@ -358,14 +358,15 @@ func fillStat(stat *fuse.Stat_t, info *FileInfo) {
 
 // fillStatFromEntry fills stat from a DirEntry, using embedded Size/Mtime when available.
 // This avoids expensive Getattr calls for each entry during directory listings.
-func fillStatFromEntry(stat *fuse.Stat_t, e *DirEntry) {
+func (a *adapter) fillStatFromEntry(stat *fuse.Stat_t, e *DirEntry) {
 	*stat = fuse.Stat_t{} // Zero all fields first
+	uid, gid := vnode.GetOwner()
 	stat.Dev = 1
 	stat.Ino = e.Ino
 	stat.Mode = e.Mode
 	stat.Nlink = 1
-	stat.Uid = vnode.Owner.Uid
-	stat.Gid = vnode.Owner.Gid
+	stat.Uid = uid
+	stat.Gid = gid
 	stat.Rdev = 0
 	stat.Size = e.Size
 	stat.Blksize = 4096

@@ -153,10 +153,11 @@ func (r *Registry) List() []VirtualNode {
 // FileInfo constructors
 
 func newFileInfo(ino uint64, size int64, mode uint32, nlink uint32) *FileInfo {
+	uid, gid := GetOwner()
 	now := time.Now()
 	return &FileInfo{
 		Ino: ino, Size: size, Mode: mode, Nlink: nlink,
-		Uid: Owner.Uid, Gid: Owner.Gid,
+		Uid: uid, Gid: gid,
 		Atime: now, Mtime: now, Ctime: now,
 	}
 }

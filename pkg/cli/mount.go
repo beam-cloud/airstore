@@ -48,8 +48,8 @@ Examples:
 func init() {
 	mountCmd.Flags().BoolVarP(&mountVerbose, "verbose", "v", false, "Verbose logging")
 	mountCmd.Flags().StringVarP(&configPath, "config", "c", "", "Config file (for local mode)")
-	mountCmd.Flags().Uint32Var(&mountUID, "uid", 0, "File owner UID (0 = current user)")
-	mountCmd.Flags().Uint32Var(&mountGID, "gid", 0, "File owner GID (0 = current user)")
+	mountCmd.Flags().Uint32Var(&mountUID, "uid", 0, "File owner UID (default: current user)")
+	mountCmd.Flags().Uint32Var(&mountGID, "gid", 0, "File owner GID (default: current user)")
 	rootCmd.AddCommand(mountCmd)
 }
 
@@ -105,6 +105,15 @@ func runMount(cmd *cobra.Command, args []string) error {
 	var fs *filesystem.Filesystem
 	var conn *grpc.ClientConn
 
+	// Convert UID/GID: nil means use current user, pointer means explicit value
+	var uidPtr, gidPtr *uint32
+	if cmd.Flags().Changed("uid") {
+		uidPtr = &mountUID
+	}
+	if cmd.Flags().Changed("gid") {
+		gidPtr = &mountGID
+	}
+
 	err := withSpinner("Connecting...", func() error {
 		var err error
 		fs, err = filesystem.NewFilesystem(filesystem.Config{
@@ -112,8 +121,8 @@ func runMount(cmd *cobra.Command, args []string) error {
 			GatewayAddr: effectiveGateway,
 			Token:       authToken,
 			Verbose:     mountVerbose,
-			Uid:         mountUID,
-			Gid:         mountGID,
+			Uid:         uidPtr,
+			Gid:         gidPtr,
 		})
 		if err != nil {
 			return err

@@ -1,6 +1,9 @@
 package types
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // Task represents a unit of work to be executed in a sandbox
 type Task struct {
@@ -88,6 +91,40 @@ const (
 	DefaultTaskCPU    int64 = 2000    // 2 CPUs
 	DefaultTaskMemory int64 = 2 << 30 // 2 GiB
 )
+
+// Maximum resource limits for validation
+const (
+	MaxTaskCPU    int64 = 32000      // 32 CPUs
+	MaxTaskMemory int64 = 128 << 30  // 128 GiB
+	MaxTaskGPU    int   = 8          // 8 GPUs
+)
+
+// Validate checks that resource values are within acceptable bounds.
+// Returns an error describing the first invalid field found.
+func (r *TaskResources) Validate() error {
+	if r == nil {
+		return nil // nil means use defaults
+	}
+	if r.CPU < 0 {
+		return fmt.Errorf("cpu must be non-negative, got %d", r.CPU)
+	}
+	if r.CPU > MaxTaskCPU {
+		return fmt.Errorf("cpu exceeds maximum of %d millicores, got %d", MaxTaskCPU, r.CPU)
+	}
+	if r.Memory < 0 {
+		return fmt.Errorf("memory must be non-negative, got %d", r.Memory)
+	}
+	if r.Memory > MaxTaskMemory {
+		return fmt.Errorf("memory exceeds maximum of %d bytes, got %d", MaxTaskMemory, r.Memory)
+	}
+	if r.GPU < 0 {
+		return fmt.Errorf("gpu must be non-negative, got %d", r.GPU)
+	}
+	if r.GPU > MaxTaskGPU {
+		return fmt.Errorf("gpu exceeds maximum of %d, got %d", MaxTaskGPU, r.GPU)
+	}
+	return nil
+}
 
 // GetResources returns resources with defaults applied.
 func (t *Task) GetResources() TaskResources {

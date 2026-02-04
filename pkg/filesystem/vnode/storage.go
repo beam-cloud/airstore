@@ -38,6 +38,7 @@ type StorageVNode struct {
 	stopWarmup   chan struct{}
 }
 
+// NewStorageVNode creates a new StorageVNode.
 func NewStorageVNode(conn *grpc.ClientConn, token string) *StorageVNode {
 	s := &StorageVNode{
 		client:     pb.NewContextServiceClient(conn),
@@ -153,9 +154,10 @@ func (s *StorageVNode) Readdir(path string) ([]DirEntry, error) {
 		if e.Mtime > 0 {
 			mtime = time.Unix(e.Mtime, 0)
 		}
+		uid, gid := GetOwner()
 		childMeta[e.Name] = &FileInfo{
 			Ino: ino, Size: e.Size, Mode: e.Mode, Nlink: 1,
-			Uid: Owner.Uid, Gid: Owner.Gid,
+			Uid: uid, Gid: gid,
 			Atime: now, Mtime: mtime, Ctime: mtime,
 		}
 	}
@@ -758,9 +760,10 @@ func (s *StorageVNode) toFileInfo(path string, info *pb.FileInfo) *FileInfo {
 	if info.Mtime > 0 {
 		mtime = time.Unix(info.Mtime, 0)
 	}
+	uid, gid := GetOwner()
 	return &FileInfo{
 		Ino: PathIno(path), Size: info.Size, Mode: info.Mode, Nlink: 1,
-		Uid: Owner.Uid, Gid: Owner.Gid,
+		Uid: uid, Gid: gid,
 		Atime: now, Mtime: mtime, Ctime: mtime,
 	}
 }
@@ -854,9 +857,10 @@ func (s *StorageVNode) doBackgroundWarmup() {
 			if e.Mtime > 0 {
 				mtime = time.Unix(e.Mtime, 0)
 			}
+			uid, gid := GetOwner()
 			childMeta[e.Name] = &FileInfo{
 				Ino: ino, Size: e.Size, Mode: e.Mode, Nlink: 1,
-				Uid: Owner.Uid, Gid: Owner.Gid,
+				Uid: uid, Gid: gid,
 				Atime: now, Mtime: mtime, Ctime: mtime,
 			}
 		}

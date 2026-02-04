@@ -4,6 +4,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/beam-cloud/airstore/pkg/filesystem/vnode"
 )
 
 func isMacSystemName(name string) bool {
@@ -37,14 +39,15 @@ func isMacResourceName(name string) bool {
 }
 
 func macPlaceholderInfo(path string) *FileInfo {
+	uid, gid := vnode.GetOwner()
 	now := time.Now()
 	return &FileInfo{
 		Ino:   hashToIno(path),
 		Size:  0,
 		Mode:  syscall.S_IFREG | 0644,
 		Nlink: 1,
-		Uid:   uint32(syscall.Getuid()),
-		Gid:   uint32(syscall.Getgid()),
+		Uid:   uid,
+		Gid:   gid,
 		Atime: now,
 		Mtime: now,
 		Ctime: now,
