@@ -5,7 +5,7 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/beam-cloud/airstore)](https://github.com/beam-cloud/airstore/stargazers)
 
-[Website](https://airstore.dev) · [Docs](https://docs.airstore.ai) · [Demo Video](https://youtube.com/...) · [Discord](https://discord.gg/...)
+[Website](https://airstore.ai) · [Docs](https://docs.airstore.ai) · [Demo Video](https://youtu.be/rWJo4wJe4wY) · [Discord](https://discord.gg/6y5UUsXpqt)
 
 ---
 
@@ -265,7 +265,7 @@ Full documentation at [docs.airstore.ai](https://docs.airstore.ai):
 
 PRs welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-Join our [Discord](https://discord.gg/...) to discuss ideas and get help.
+Join our [Discord](https://discord.gg/6y5UUsXpqt) to discuss ideas and get help.
 
 ## License
 
