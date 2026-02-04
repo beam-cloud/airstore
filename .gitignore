@@ -2,10 +2,13 @@ bin/gateway
 bin/worker
 bin/filesystem
 bin/cli
+bin/airstore
 tmp/*
+cli
 *.gob
 __pycache__
 *.tmp
 .secrets
 airstore.code-workspace
 config.gw.yaml
+.DS_Store
