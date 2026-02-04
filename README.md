@@ -1,6 +1,6 @@
 # Airstore
 
-**Give Claude Code or OpenClaw the context it needs**
+**The filesystem for AI agents**
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/beam-cloud/airstore)](https://github.com/beam-cloud/airstore/stargazers)
