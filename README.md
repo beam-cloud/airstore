@@ -1,6 +1,6 @@
 # Airstore
 
-**Run Claude Code on all your data.**
+**Give Claude Code or OpenClaw the context it needs**
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/beam-cloud/airstore)](https://github.com/beam-cloud/airstore/stargazers)
@@ -11,7 +11,7 @@
 
 ## What is Airstore?
 
-Airstore turns your integrations into a filesystem. Connect Gmail, GitHub, Linear — then describe what you need in plain English. Results appear as files that Claude Code can read.
+Airstore adds any source of data into a virtual filesystem. Connect Gmail, GitHub, Linear — then describe what you need in plain English. Results appear as files that Claude Code can read.
 
 ⭐ If this is useful, [give us a star](https://github.com/beam-cloud/airstore)
 
@@ -35,7 +35,7 @@ Smart folders also let you scope exactly what Claude can access. Instead of gran
 
 Go to [app.airstore.ai](https://app.airstore.ai) and create an account.
 
-### 2. Connect a service
+### 2. Connect an Integration
 
 In the dashboard, go to **Settings → Integrations** and connect a service (GitHub, Gmail, Drive, and more.).
 
