@@ -116,7 +116,6 @@ func init() {
 	rootCmd.AddCommand(tokenCmd)
 	rootCmd.AddCommand(connectionCmd)
 	rootCmd.AddCommand(taskCmd)
-	rootCmd.AddCommand(mountCmd)
 }
 
 // Execute runs the CLI

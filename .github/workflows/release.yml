@@ -83,7 +83,7 @@ jobs:
           GOARCH: ${{ matrix.platform.goarch }}
           CGO_ENABLED: 1
         run: |
-          go build -ldflags="-s -w \
+          go build -tags managed -ldflags="-s -w \
             -X github.com/beam-cloud/airstore/pkg/cli.Version=${{ needs.prepare.outputs.version }} \
             -X github.com/beam-cloud/airstore/pkg/cli.Release=true" \
             -o airstore ./cmd/cli
