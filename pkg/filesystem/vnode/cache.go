@@ -11,7 +11,7 @@ import (
 const (
 	cacheSize        = 10000
 	cacheTTL         = 60 * time.Second // S3 metadata is stable; longer TTL reduces API calls
-	negativeCacheTTL = 5 * time.Second  // Missing files may appear soon
+	negativeCacheTTL = 10 * time.Second // Missing files may appear soon
 
 	contentCacheEntries = 1024
 	contentCacheTTL     = 2 * time.Minute

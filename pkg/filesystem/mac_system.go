@@ -12,7 +12,10 @@ func isMacSystemName(name string) bool {
 	}
 	switch name {
 	case ".DS_Store", ".Spotlight-V100", ".Trashes", ".fseventsd", ".TemporaryItems", ".VolumeIcon.icns",
-		".hidden", "DCIM", ".metadata_never_index_unless_rootfs", ".metadata_never_index", ".metadata_direct_scope_only":
+		".hidden", "DCIM", ".metadata_never_index_unless_rootfs", ".metadata_never_index", ".metadata_direct_scope_only",
+		".git", ".gitignore", ".gitmodules", ".gitattributes", "HEAD", ".hg", ".svn",
+		".tool-versions", ".node-version", ".ruby-version", ".python-version", ".nvmrc",
+		".envrc", ".env":
 		return true
 	default:
 		return false
