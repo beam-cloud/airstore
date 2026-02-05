@@ -25,7 +25,7 @@ type Hook struct {
 	Schedule          string      `json:"schedule,omitempty" db:"schedule"` // Cron expression (future)
 	Active            bool        `json:"active" db:"active"`
 	CreatedByMemberId *uint       `json:"created_by_member_id,omitempty" db:"created_by_member_id"`
-	TokenId           uint        `json:"-" db:"token_id"`          // FK to token table, lifecycle tied to hook
+	TokenId           *uint       `json:"-" db:"token_id"`          // FK to token used at creation (for validity checks)
 	EncryptedToken    []byte      `json:"-" db:"encrypted_token"`   // Encrypted raw token for task execution
 	CreatedAt         time.Time   `json:"created_at" db:"created_at"`
 	UpdatedAt         time.Time   `json:"updated_at" db:"updated_at"`

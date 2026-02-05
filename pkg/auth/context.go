@@ -122,6 +122,13 @@ func MemberId(ctx context.Context) uint {
 	return 0
 }
 
+func TokenId(ctx context.Context) uint {
+	if i := AuthInfoFromContext(ctx); i != nil {
+		return i.TokenId
+	}
+	return 0
+}
+
 func MemberEmail(ctx context.Context) string {
 	if i := AuthInfoFromContext(ctx); i != nil && i.Member != nil {
 		return i.Member.Email

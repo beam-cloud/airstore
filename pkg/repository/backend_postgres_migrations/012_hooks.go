@@ -29,7 +29,7 @@ func upHooks(tx *sql.Tx) error {
 			schedule TEXT NOT NULL DEFAULT '',
 			active BOOLEAN NOT NULL DEFAULT true,
 			created_by_member_id INTEGER REFERENCES workspace_member(id) ON DELETE SET NULL,
-			token_id INTEGER NOT NULL REFERENCES token(id) ON DELETE CASCADE,
+			token_id INTEGER REFERENCES token(id) ON DELETE SET NULL,
 			encrypted_token BYTEA NOT NULL DEFAULT '',
 			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP

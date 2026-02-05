@@ -12,6 +12,7 @@ import (
 
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/common"
+	"github.com/beam-cloud/airstore/pkg/hooks"
 	"github.com/beam-cloud/airstore/pkg/oauth"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/sources"
@@ -549,7 +550,7 @@ func (s *SourceService) executeAndCacheQuery(ctx context.Context, pctx *sources.
 		}
 		if newIDs, err := s.seenTracker.Diff(ctx, seenKey, ids); err == nil && len(newIDs) > 0 {
 			s.hookStream.Emit(ctx, map[string]any{
-				"event":        "source.change",
+				"event":        hooks.EventSourceChange,
 				"workspace_id": fmt.Sprintf("%d", pctx.WorkspaceId),
 				"path":         query.Path,
 				"integration":  query.Integration,

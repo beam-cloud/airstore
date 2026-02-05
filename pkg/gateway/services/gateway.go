@@ -3,23 +3,28 @@ package services
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/common"
+	"github.com/beam-cloud/airstore/pkg/hooks"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
+	"google.golang.org/grpc/metadata"
 )
 
 type GatewayService struct {
 	pb.UnimplementedGatewayServiceServer
 	backend  repository.BackendRepository
+	fsStore  repository.FilesystemStore
 	s2Client *common.S2Client
+	eventBus *common.EventBus
 }
 
-func NewGatewayService(backend repository.BackendRepository, s2Client *common.S2Client) *GatewayService {
-	return &GatewayService{backend: backend, s2Client: s2Client}
+func NewGatewayService(backend repository.BackendRepository, s2Client *common.S2Client, fsStore repository.FilesystemStore, eventBus *common.EventBus) *GatewayService {
+	return &GatewayService{backend: backend, s2Client: s2Client, fsStore: fsStore, eventBus: eventBus}
 }
 
 // Workspaces
@@ -543,4 +548,188 @@ func taskToPb(t *types.Task) *pb.Task {
 		task.FinishedAt = t.FinishedAt.Format(time.RFC3339)
 	}
 	return task
+}
+
+// Hooks
+
+func (s *GatewayService) CreateHook(ctx context.Context, req *pb.CreateHookRequest) (*pb.HookResponse, error) {
+	ws, err := s.resolveWorkspace(ctx, req.WorkspaceId)
+	if err != nil {
+		return &pb.HookResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	rawToken := extractRawToken(ctx)
+	if rawToken == "" {
+		return &pb.HookResponse{Ok: false, Error: "authentication token required"}, nil
+	}
+	encryptedToken, err := hooks.EncryptToken(rawToken)
+	if err != nil {
+		return &pb.HookResponse{Ok: false, Error: "failed to store token"}, nil
+	}
+
+	trigger := types.HookTrigger(req.Trigger)
+	if trigger == "" {
+		trigger = types.HookTriggerOnCreate
+	}
+
+	hook := &types.Hook{
+		WorkspaceId:       ws.Id,
+		Path:              req.Path,
+		Prompt:            req.Prompt,
+		Trigger:           trigger,
+		Active:            true,
+		CreatedByMemberId: ptrIfNonZero(auth.MemberId(ctx)),
+		TokenId:           ptrIfNonZero(auth.TokenId(ctx)),
+		EncryptedToken:    encryptedToken,
+	}
+
+	created, err := s.fsStore.CreateHook(ctx, hook)
+	if err != nil {
+		return &pb.HookResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	s.invalidateHookCache(ws.Id)
+	return &pb.HookResponse{Ok: true, Hook: hookToPb(created, ws.ExternalId)}, nil
+}
+
+func (s *GatewayService) ListHooks(ctx context.Context, req *pb.ListHooksRequest) (*pb.ListHooksResponse, error) {
+	ws, err := s.resolveWorkspace(ctx, req.WorkspaceId)
+	if err != nil {
+		return &pb.ListHooksResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	hks, err := s.fsStore.ListHooks(ctx, ws.Id)
+	if err != nil {
+		return &pb.ListHooksResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	pbHooks := make([]*pb.Hook, 0, len(hks))
+	for _, h := range hks {
+		pbHooks = append(pbHooks, hookToPb(h, ws.ExternalId))
+	}
+	return &pb.ListHooksResponse{Ok: true, Hooks: pbHooks}, nil
+}
+
+func (s *GatewayService) GetHook(ctx context.Context, req *pb.GetHookRequest) (*pb.HookResponse, error) {
+	hook, ws, err := s.resolveHook(ctx, req.Id)
+	if err != nil {
+		return &pb.HookResponse{Ok: false, Error: err.Error()}, nil
+	}
+	return &pb.HookResponse{Ok: true, Hook: hookToPb(hook, ws.ExternalId)}, nil
+}
+
+func (s *GatewayService) UpdateHook(ctx context.Context, req *pb.UpdateHookRequest) (*pb.HookResponse, error) {
+	hook, ws, err := s.resolveHook(ctx, req.Id)
+	if err != nil {
+		return &pb.HookResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	if req.Prompt != "" {
+		hook.Prompt = req.Prompt
+	}
+	if req.Trigger != "" {
+		hook.Trigger = types.HookTrigger(req.Trigger)
+	}
+	hook.Active = req.Active
+
+	if err := s.fsStore.UpdateHook(ctx, hook); err != nil {
+		return &pb.HookResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	s.invalidateHookCache(hook.WorkspaceId)
+	return &pb.HookResponse{Ok: true, Hook: hookToPb(hook, ws.ExternalId)}, nil
+}
+
+func (s *GatewayService) DeleteHook(ctx context.Context, req *pb.DeleteHookRequest) (*pb.DeleteResponse, error) {
+	hook, _, err := s.resolveHook(ctx, req.Id)
+	if err != nil {
+		return &pb.DeleteResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	if err := s.fsStore.DeleteHook(ctx, req.Id); err != nil {
+		return &pb.DeleteResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	s.invalidateHookCache(hook.WorkspaceId)
+	return &pb.DeleteResponse{Ok: true}, nil
+}
+
+// resolveWorkspace validates access and returns the workspace, or an error.
+func (s *GatewayService) resolveWorkspace(ctx context.Context, workspaceExtId string) (*types.Workspace, error) {
+	if err := auth.RequireWorkspaceAccess(ctx, workspaceExtId); err != nil {
+		return nil, err
+	}
+	ws, err := s.backend.GetWorkspaceByExternalId(ctx, workspaceExtId)
+	if err != nil {
+		return nil, fmt.Errorf("workspace not found")
+	}
+	if ws == nil {
+		return nil, fmt.Errorf("workspace not found")
+	}
+	return ws, nil
+}
+
+// resolveHook looks up a hook by external ID, validates workspace access, and returns both.
+func (s *GatewayService) resolveHook(ctx context.Context, hookExtId string) (*types.Hook, *types.Workspace, error) {
+	hook, err := s.fsStore.GetHook(ctx, hookExtId)
+	if err != nil {
+		return nil, nil, err
+	}
+	if hook == nil {
+		return nil, nil, fmt.Errorf("hook not found")
+	}
+	ws, err := s.backend.GetWorkspace(ctx, hook.WorkspaceId)
+	if err != nil || ws == nil {
+		return nil, nil, fmt.Errorf("workspace not found")
+	}
+	if err := auth.RequireWorkspaceAccess(ctx, ws.ExternalId); err != nil {
+		return nil, nil, err
+	}
+	return hook, ws, nil
+}
+
+// extractRawToken gets the raw bearer token from gRPC metadata.
+func extractRawToken(ctx context.Context) string {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return ""
+	}
+	vals := md.Get("authorization")
+	if len(vals) == 0 {
+		return ""
+	}
+	return strings.TrimPrefix(vals[0], "Bearer ")
+}
+
+func (s *GatewayService) invalidateHookCache(workspaceId uint) {
+	if s.eventBus == nil {
+		return
+	}
+	s.eventBus.Emit(common.Event{
+		Type: common.EventCacheInvalidate,
+		Data: map[string]any{
+			"scope":        "hooks",
+			"workspace_id": workspaceId,
+		},
+	})
+}
+
+func hookToPb(h *types.Hook, workspaceExternalId string) *pb.Hook {
+	return &pb.Hook{
+		Id:          h.ExternalId,
+		WorkspaceId: workspaceExternalId,
+		Path:        h.Path,
+		Prompt:      h.Prompt,
+		Trigger:     string(h.Trigger),
+		Active:      h.Active,
+		CreatedAt:   h.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:   h.UpdatedAt.Format(time.RFC3339),
+	}
+}
+
+func ptrIfNonZero(v uint) *uint {
+	if v == 0 {
+		return nil
+	}
+	return &v
 }

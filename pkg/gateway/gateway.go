@@ -23,6 +23,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/clients"
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/gateway/services"
+	"github.com/beam-cloud/airstore/pkg/hooks"
 	"github.com/beam-cloud/airstore/pkg/oauth"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/scheduler"
@@ -339,7 +340,7 @@ func (g *Gateway) registerServices() error {
 
 	// Register gateway gRPC service (workspace/member/token/connection/task management)
 	if g.BackendRepo != nil {
-		gatewayService := services.NewGatewayService(g.BackendRepo, g.s2Client)
+		gatewayService := services.NewGatewayService(g.BackendRepo, g.s2Client, filesystemStore, g.eventBus)
 		pb.RegisterGatewayServiceServer(g.grpcServer, gatewayService)
 		log.Info().Msg("gateway service registered")
 	}
@@ -423,7 +424,7 @@ func (g *Gateway) registerServices() error {
 
 		// Hook evaluator + stream consumer
 		if hookStream != nil && g.RedisClient != nil {
-			evaluator := services.NewHookEvaluator(filesystemStore, taskFactory, g.RedisClient)
+			evaluator := hooks.NewEvaluator(filesystemStore, taskFactory, g.RedisClient)
 
 			// Cross-replica hook cache invalidation via EventBus
 			if g.eventBus != nil {
@@ -432,9 +433,8 @@ func (g *Gateway) registerServices() error {
 					if scope != "hooks" {
 						return
 					}
-					// workspace_id comes through as float64 from JSON
-					if wsId, ok := e.Data["workspace_id"].(float64); ok {
-						evaluator.InvalidateCache(uint(wsId))
+					if wsId := hooks.ParseUint(e.Data["workspace_id"]); wsId > 0 {
+						evaluator.InvalidateCache(wsId)
 					}
 				})
 			}

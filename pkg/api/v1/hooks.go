@@ -1,13 +1,13 @@
 package apiv1
 
 import (
-	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/common"
+	"github.com/beam-cloud/airstore/pkg/hooks"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/labstack/echo/v4"
@@ -76,23 +76,26 @@ func (hg *HooksGroup) Create(c echo.Context) error {
 		return ErrorResponse(c, http.StatusNotFound, "workspace not found")
 	}
 
-	// Create a dedicated long-lived token for this hook
+	// Capture the caller's raw token from the Authorization header
 	memberId := auth.MemberId(ctx)
 	var createdByMemberId *uint
 	if memberId > 0 {
 		createdByMemberId = &memberId
 	}
 
-	tokenName := "hook:" + req.Path
-	token, rawToken, err := hg.backend.CreateToken(ctx, ws.Id, memberId, tokenName, nil, types.TokenTypeWorkspaceMember)
-	if err != nil {
-		return ErrorResponse(c, http.StatusInternalServerError, "failed to create hook token: "+err.Error())
+	rawToken := strings.TrimPrefix(c.Request().Header.Get("Authorization"), "Bearer ")
+	if rawToken == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "authentication token required")
 	}
 
-	// Encrypt the raw token for storage
-	encryptedToken, err := json.Marshal(rawToken)
+	encryptedToken, err := hooks.EncryptToken(rawToken)
 	if err != nil {
-		return ErrorResponse(c, http.StatusInternalServerError, "failed to encrypt token")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to store token")
+	}
+
+	var tokenId *uint
+	if tid := auth.TokenId(ctx); tid > 0 {
+		tokenId = &tid
 	}
 
 	hook := &types.Hook{
@@ -102,14 +105,12 @@ func (hg *HooksGroup) Create(c echo.Context) error {
 		Trigger:           req.Trigger,
 		Active:            true,
 		CreatedByMemberId: createdByMemberId,
-		TokenId:           token.Id,
+		TokenId:           tokenId,
 		EncryptedToken:    encryptedToken,
 	}
 
 	created, err := hg.fsStore.CreateHook(ctx, hook)
 	if err != nil {
-		// Cleanup: revoke the token if hook creation fails
-		hg.backend.RevokeToken(ctx, token.ExternalId)
 		if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
 			return ErrorResponse(c, http.StatusConflict, "hook already exists for this path and trigger")
 		}
@@ -223,15 +224,8 @@ func (hg *HooksGroup) Delete(c echo.Context) error {
 		return ErrorResponse(c, http.StatusNotFound, "hook not found")
 	}
 
-	// Delete hook first
 	if err := hg.fsStore.DeleteHook(ctx, hookId); err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
-	}
-
-	// Revoke the dedicated token (best effort)
-	if hook.TokenId > 0 {
-		token, _ := hg.backend.GetToken(ctx, "") // We need external_id, look it up
-		_ = token                                  // Token cleanup via cascade in DB
 	}
 
 	hg.invalidateHookCache(hook.WorkspaceId)

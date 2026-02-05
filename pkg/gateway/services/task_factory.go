@@ -81,3 +81,14 @@ func (f *TaskFactory) Create(ctx context.Context, p TaskParams) (*types.Task, er
 
 	return task, nil
 }
+
+// CreateTask implements hooks.TaskCreator for the HookEvaluator.
+func (f *TaskFactory) CreateTask(ctx context.Context, workspaceId uint, createdByMemberId *uint, memberToken, prompt string) error {
+	_, err := f.Create(ctx, TaskParams{
+		WorkspaceId:       workspaceId,
+		CreatedByMemberId: createdByMemberId,
+		MemberToken:       memberToken,
+		Prompt:            prompt,
+	})
+	return err
+}

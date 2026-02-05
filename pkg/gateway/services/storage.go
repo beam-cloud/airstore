@@ -16,6 +16,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/clients"
 	"github.com/beam-cloud/airstore/pkg/common"
+	"github.com/beam-cloud/airstore/pkg/hooks"
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/rs/zerolog/log"
@@ -302,7 +303,7 @@ func (s *StorageService) Write(ctx context.Context, req *pb.ContextWriteRequest)
 	}
 
 	s.invalidate(bucket, key)
-	s.emitHookEvent(ctx, "fs.write", req.Path)
+	s.emitHookEvent(ctx, hooks.EventFsWrite, req.Path)
 	return &pb.ContextWriteResponse{Ok: true, Written: int32(len(req.Data))}, nil
 }
 
@@ -325,7 +326,7 @@ func (s *StorageService) Create(ctx context.Context, req *pb.ContextCreateReques
 	}
 
 	s.invalidate(bucket, key)
-	s.emitHookEvent(ctx, "fs.create", req.Path)
+	s.emitHookEvent(ctx, hooks.EventFsCreate, req.Path)
 	return &pb.ContextCreateResponse{Ok: true}, nil
 }
 
@@ -687,7 +688,7 @@ func (s *StorageService) NotifyUploadComplete(ctx context.Context, path string) 
 
 	key := s.key(path)
 	s.invalidate(bucket, key)
-	s.emitHookEvent(ctx, "fs.create", path)
+	s.emitHookEvent(ctx, hooks.EventFsCreate, path)
 	return nil
 }
 
