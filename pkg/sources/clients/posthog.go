@@ -116,6 +116,12 @@ func (c *PostHogClient) doRequestFullURL(ctx context.Context, fullURL string, ou
 func fetchAllPages[T any](ctx context.Context, c *PostHogClient, initialPath string) ([]T, error) {
 	var allResults []T
 
+	// Parse base URL once before the loop (invariant)
+	baseURLParsed, err := url.Parse(c.baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid base URL: %w", err)
+	}
+
 	// First request uses the path-based method
 	nextURL := c.baseURL + initialPath
 	for nextURL != "" {
@@ -130,16 +136,14 @@ func fetchAllPages[T any](ctx context.Context, c *PostHogClient, initialPath str
 			break
 		}
 		// Validate that Next URL belongs to expected host to prevent API key leakage
-		baseURLParsed, err := url.Parse(c.baseURL)
-		if err != nil {
-			return nil, fmt.Errorf("invalid base URL: %w", err)
-		}
 		nextURLParsed, err := url.Parse(*page.Next)
 		if err != nil {
 			return nil, fmt.Errorf("invalid pagination URL: %w", err)
 		}
-		if nextURLParsed.Host != baseURLParsed.Host {
-			return nil, fmt.Errorf("pagination URL host %q does not match expected host %q", nextURLParsed.Host, baseURLParsed.Host)
+		// Compare scheme and hostname (not Host, which includes port)
+		// This prevents protocol downgrades (https→http) and cross-origin leaks
+		if nextURLParsed.Scheme != baseURLParsed.Scheme || nextURLParsed.Hostname() != baseURLParsed.Hostname() {
+			return nil, fmt.Errorf("pagination URL %q does not match expected origin %q", *page.Next, c.baseURL)
 		}
 		nextURL = *page.Next
 	}
