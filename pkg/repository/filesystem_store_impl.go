@@ -56,6 +56,7 @@ type filesystemStore struct {
 	memListings  map[string][]types.DirEntry
 	memResults   map[string][]QueryResult // cacheKey -> results
 	memContent   map[string][]byte        // cacheKey -> content
+	memHooks     map[string]*types.Hook   // by external_id
 }
 
 // NewFilesystemStore creates a unified filesystem store.
@@ -74,6 +75,7 @@ func NewFilesystemStore(db *sql.DB, redis *common.RedisClient, elastic Elasticse
 		memListings:  make(map[string][]types.DirEntry),
 		memResults:   make(map[string][]QueryResult),
 		memContent:   make(map[string][]byte),
+		memHooks:     make(map[string]*types.Hook),
 	}
 }
 
@@ -868,6 +870,150 @@ func (c *elasticsearchHTTPClient) Delete(ctx context.Context, index, docID strin
 }
 
 func (c *elasticsearchHTTPClient) DeleteByQuery(ctx context.Context, index string, query map[string]interface{}) error {
+	return nil
+}
+
+// ===== Hooks =====
+
+func (s *filesystemStore) CreateHook(ctx context.Context, hook *types.Hook) (*types.Hook, error) {
+	hook.ExternalId = uuid.New().String()
+	hook.CreatedAt = time.Now()
+	hook.UpdatedAt = time.Now()
+	if hook.Trigger == "" {
+		hook.Trigger = types.HookTriggerOnCreate
+	}
+
+	if s.isMemoryMode() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		hook.Id = uint(len(s.memHooks) + 1)
+		s.memHooks[hook.ExternalId] = hook
+		return hook, nil
+	}
+
+	err := s.db.QueryRowContext(ctx, `
+		INSERT INTO filesystem_hooks (external_id, workspace_id, path, prompt, trigger, schedule, active, created_by_member_id, token_id, encrypted_token, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		RETURNING id
+	`, hook.ExternalId, hook.WorkspaceId, hook.Path, hook.Prompt, hook.Trigger,
+		hook.Schedule, hook.Active, hook.CreatedByMemberId, hook.TokenId, hook.EncryptedToken,
+		hook.CreatedAt, hook.UpdatedAt).Scan(&hook.Id)
+	if err != nil {
+		return nil, fmt.Errorf("create hook: %w", err)
+	}
+
+	return hook, nil
+}
+
+func (s *filesystemStore) GetHook(ctx context.Context, externalId string) (*types.Hook, error) {
+	if s.isMemoryMode() {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		h, ok := s.memHooks[externalId]
+		if !ok {
+			return nil, nil
+		}
+		return h, nil
+	}
+
+	h := &types.Hook{}
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, external_id, workspace_id, path, prompt, trigger, schedule, active,
+		       created_by_member_id, token_id, encrypted_token, created_at, updated_at
+		FROM filesystem_hooks WHERE external_id = $1
+	`, externalId).Scan(
+		&h.Id, &h.ExternalId, &h.WorkspaceId, &h.Path, &h.Prompt, &h.Trigger,
+		&h.Schedule, &h.Active, &h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
+		&h.CreatedAt, &h.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get hook: %w", err)
+	}
+	return h, nil
+}
+
+func (s *filesystemStore) ListHooks(ctx context.Context, workspaceId uint) ([]*types.Hook, error) {
+	if s.isMemoryMode() {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		var hooks []*types.Hook
+		for _, h := range s.memHooks {
+			if h.WorkspaceId == workspaceId {
+				hooks = append(hooks, h)
+			}
+		}
+		return hooks, nil
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, external_id, workspace_id, path, prompt, trigger, schedule, active,
+		       created_by_member_id, token_id, encrypted_token, created_at, updated_at
+		FROM filesystem_hooks WHERE workspace_id = $1
+		ORDER BY created_at
+	`, workspaceId)
+	if err != nil {
+		return nil, fmt.Errorf("list hooks: %w", err)
+	}
+	defer rows.Close()
+
+	var hooks []*types.Hook
+	for rows.Next() {
+		h := &types.Hook{}
+		err := rows.Scan(
+			&h.Id, &h.ExternalId, &h.WorkspaceId, &h.Path, &h.Prompt, &h.Trigger,
+			&h.Schedule, &h.Active, &h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
+			&h.CreatedAt, &h.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scan hook: %w", err)
+		}
+		hooks = append(hooks, h)
+	}
+	return hooks, rows.Err()
+}
+
+func (s *filesystemStore) UpdateHook(ctx context.Context, hook *types.Hook) error {
+	hook.UpdatedAt = time.Now()
+
+	if s.isMemoryMode() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if existing, ok := s.memHooks[hook.ExternalId]; ok {
+			existing.Prompt = hook.Prompt
+			existing.Trigger = hook.Trigger
+			existing.Schedule = hook.Schedule
+			existing.Active = hook.Active
+			existing.UpdatedAt = hook.UpdatedAt
+		}
+		return nil
+	}
+
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE filesystem_hooks SET
+			prompt = $1, trigger = $2, schedule = $3, active = $4, updated_at = $5
+		WHERE external_id = $6
+	`, hook.Prompt, hook.Trigger, hook.Schedule, hook.Active, hook.UpdatedAt, hook.ExternalId)
+	if err != nil {
+		return fmt.Errorf("update hook: %w", err)
+	}
+	return nil
+}
+
+func (s *filesystemStore) DeleteHook(ctx context.Context, externalId string) error {
+	if s.isMemoryMode() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		delete(s.memHooks, externalId)
+		return nil
+	}
+
+	_, err := s.db.ExecContext(ctx, `DELETE FROM filesystem_hooks WHERE external_id = $1`, externalId)
+	if err != nil {
+		return fmt.Errorf("delete hook: %w", err)
+	}
 	return nil
 }
 

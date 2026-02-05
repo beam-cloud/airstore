@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
+	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/oauth"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/sources"
@@ -58,22 +59,41 @@ type SourceService struct {
 	oauthRegistry *oauth.Registry
 	credCache     sync.Map // map[string]*cachedCreds - caches credentials by "workspaceId:integration"
 	queryGroup    singleflight.Group
+	hookStream    *common.EventStream  // optional: for emitting source change events
+	seenTracker   *common.SeenTracker  // optional: for detecting new query results
+}
+
+// SourceServiceOption configures optional dependencies on SourceService.
+type SourceServiceOption func(*SourceService)
+
+// WithHookStream sets the event stream for hook event emission.
+func WithHookStream(stream *common.EventStream) SourceServiceOption {
+	return func(s *SourceService) { s.hookStream = stream }
+}
+
+// WithSeenTracker sets the seen tracker for change detection.
+func WithSeenTracker(tracker *common.SeenTracker) SourceServiceOption {
+	return func(s *SourceService) { s.seenTracker = tracker }
 }
 
 // NewSourceService creates a new SourceService.
-func NewSourceService(registry *sources.Registry, backend repository.BackendRepository, fsStore repository.FilesystemStore) *SourceService {
-	return &SourceService{
+func NewSourceService(registry *sources.Registry, backend repository.BackendRepository, fsStore repository.FilesystemStore, opts ...SourceServiceOption) *SourceService {
+	s := &SourceService{
 		registry:    registry,
 		backend:     backend,
 		fsStore:     fsStore,
 		cache:       sources.NewSourceCache(sources.DefaultCacheTTL, sources.DefaultCacheSize),
 		rateLimiter: sources.NewRateLimiter(sources.DefaultRateLimitConfig()),
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // NewSourceServiceWithOAuth creates a SourceService with OAuth refresh support.
-func NewSourceServiceWithOAuth(registry *sources.Registry, backend repository.BackendRepository, fsStore repository.FilesystemStore, oauthRegistry *oauth.Registry) *SourceService {
-	return &SourceService{
+func NewSourceServiceWithOAuth(registry *sources.Registry, backend repository.BackendRepository, fsStore repository.FilesystemStore, oauthRegistry *oauth.Registry, opts ...SourceServiceOption) *SourceService {
+	s := &SourceService{
 		registry:      registry,
 		backend:       backend,
 		fsStore:       fsStore,
@@ -81,6 +101,10 @@ func NewSourceServiceWithOAuth(registry *sources.Registry, backend repository.Ba
 		rateLimiter:   sources.NewRateLimiter(sources.DefaultRateLimitConfig()),
 		oauthRegistry: oauthRegistry,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // InvalidateQueryCache invalidates cached results for a query path.
@@ -515,6 +539,28 @@ func (s *SourceService) executeAndCacheQuery(ctx context.Context, pctx *sources.
 		Int("total_results", len(allResults)).
 		Int("pages", pageNum).
 		Msg("query complete")
+
+	// Detect new results for hook triggers
+	if s.seenTracker != nil && s.hookStream != nil && len(allResults) > 0 {
+		seenKey := common.Keys.HookSeen(pctx.WorkspaceId, types.GeneratePathID(query.Path))
+		ids := make([]string, len(allResults))
+		for i, r := range allResults {
+			ids[i] = r.ID
+		}
+		if newIDs, err := s.seenTracker.Diff(ctx, seenKey, ids); err == nil && len(newIDs) > 0 {
+			s.hookStream.Emit(ctx, map[string]any{
+				"event":        "source.change",
+				"workspace_id": fmt.Sprintf("%d", pctx.WorkspaceId),
+				"path":         query.Path,
+				"integration":  query.Integration,
+				"new_count":    fmt.Sprintf("%d", len(newIDs)),
+			})
+			log.Debug().
+				Str("path", query.Path).
+				Int("new_results", len(newIDs)).
+				Msg("source change detected")
+		}
+	}
 
 	// Cache results
 	ttl := time.Duration(query.CacheTTL) * time.Second

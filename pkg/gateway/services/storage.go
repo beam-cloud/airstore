@@ -32,9 +32,10 @@ const (
 // StorageService provides S3-backed file storage with per-workspace buckets
 type StorageService struct {
 	pb.UnimplementedContextServiceServer
-	client   *clients.StorageClient
-	cache    *metadataCache
-	eventBus *common.EventBus
+	client     *clients.StorageClient
+	cache      *metadataCache
+	eventBus   *common.EventBus
+	hookStream *common.EventStream
 }
 
 func NewStorageService(client *clients.StorageClient, eventBus *common.EventBus) (*StorageService, error) {
@@ -59,6 +60,28 @@ func NewStorageService(client *clients.StorageClient, eventBus *common.EventBus)
 
 	log.Info().Str("prefix", client.Config().DefaultBucketPrefix).Msg("storage service ready")
 	return s, nil
+}
+
+// SetHookStream sets the event stream for hook event emission.
+func (s *StorageService) SetHookStream(stream *common.EventStream) {
+	s.hookStream = stream
+}
+
+// emitHookEvent sends a filesystem event to the hook event stream.
+func (s *StorageService) emitHookEvent(ctx context.Context, eventType string, path string) {
+	if s.hookStream == nil {
+		return
+	}
+	wsId := auth.WorkspaceId(ctx)
+	if wsId == 0 {
+		return
+	}
+	s.hookStream.Emit(ctx, map[string]any{
+		"event":            eventType,
+		"workspace_id":     fmt.Sprintf("%d", wsId),
+		"workspace_ext_id": auth.WorkspaceExtId(ctx),
+		"path":             path,
+	})
 }
 
 func (s *StorageService) bucket(ctx context.Context) (string, error) {
@@ -279,6 +302,7 @@ func (s *StorageService) Write(ctx context.Context, req *pb.ContextWriteRequest)
 	}
 
 	s.invalidate(bucket, key)
+	s.emitHookEvent(ctx, "fs.write", req.Path)
 	return &pb.ContextWriteResponse{Ok: true, Written: int32(len(req.Data))}, nil
 }
 
@@ -301,6 +325,7 @@ func (s *StorageService) Create(ctx context.Context, req *pb.ContextCreateReques
 	}
 
 	s.invalidate(bucket, key)
+	s.emitHookEvent(ctx, "fs.create", req.Path)
 	return &pb.ContextCreateResponse{Ok: true}, nil
 }
 
@@ -662,6 +687,7 @@ func (s *StorageService) NotifyUploadComplete(ctx context.Context, path string) 
 
 	key := s.key(path)
 	s.invalidate(bucket, key)
+	s.emitHookEvent(ctx, "fs.create", path)
 	return nil
 }
 

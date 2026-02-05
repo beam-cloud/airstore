@@ -26,9 +26,15 @@ var (
 	gatewayInitLock string = "gateway:init:%s:lock" // name
 
 	// Network keys
-	networkIPLock   string = "network:ip:lock"
-	networkIPPool   string = "network:pool"
-	networkIPMap    string = "network:mapping"
+	networkIPLock string = "network:ip:lock"
+	networkIPPool string = "network:pool"
+	networkIPMap  string = "network:mapping"
+
+	// Hook keys
+	hookPrefix   string = "hook"
+	hookStream   string = "hook:events"
+	hookSeen     string = "hook:seen:%d:%s"     // workspaceId, pathHash
+	hookCooldown string = "hook:cooldown:%s"    // hookExternalId
 )
 
 var Keys = &redisKeys{}
@@ -106,4 +112,21 @@ func (rk *redisKeys) NetworkIPPool() string {
 
 func (rk *redisKeys) NetworkIPMap() string {
 	return networkIPMap
+}
+
+// Hook keys
+func (rk *redisKeys) HookPrefix() string {
+	return hookPrefix
+}
+
+func (rk *redisKeys) HookStream() string {
+	return hookStream
+}
+
+func (rk *redisKeys) HookSeen(workspaceId uint, pathHash string) string {
+	return fmt.Sprintf(hookSeen, workspaceId, pathHash)
+}
+
+func (rk *redisKeys) HookCooldown(hookExternalId string) string {
+	return fmt.Sprintf(hookCooldown, hookExternalId)
 }

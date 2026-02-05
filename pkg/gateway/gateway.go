@@ -277,6 +277,25 @@ func (g *Gateway) registerServices() error {
 		go g.eventBus.Start()
 	}
 
+	// Initialize hook event stream (Redis Streams, exactly-once delivery)
+	var hookStream *common.EventStream
+	if g.RedisClient != nil {
+		hostname, _ := os.Hostname()
+		consumer := fmt.Sprintf("gw-%s-%d", hostname, os.Getpid())
+		hookStream = common.NewEventStream(
+			g.RedisClient,
+			common.Keys.HookStream(),
+			"hook-evaluators",
+			consumer,
+		)
+	}
+
+	// Initialize seen tracker for source change detection
+	var seenTracker *common.SeenTracker
+	if g.RedisClient != nil {
+		seenTracker = common.NewSeenTracker(g.RedisClient)
+	}
+
 	// Initialize workspace storage (per-workspace S3 buckets)
 	if g.Config.Filesystem.WorkspaceStorage.IsConfigured() {
 		if client, err := clients.NewStorageClient(g.ctx, g.Config.Filesystem.WorkspaceStorage); err != nil {
@@ -286,6 +305,10 @@ func (g *Gateway) registerServices() error {
 		} else {
 			g.storageClient = client
 			g.storageService = svc
+			// Wire hook event stream into storage service
+			if hookStream != nil {
+				svc.SetHookStream(hookStream)
+			}
 			pb.RegisterContextServiceServer(g.grpcServer, svc)
 		}
 	}
@@ -325,11 +348,20 @@ func (g *Gateway) registerServices() error {
 	g.initSources()
 
 	// Register sources gRPC service (read-only integration access with OAuth refresh)
+	// Pass hook stream and seen tracker as optional deps for change detection
+	var hookOpts []services.SourceServiceOption
+	if hookStream != nil {
+		hookOpts = append(hookOpts, services.WithHookStream(hookStream))
+	}
+	if seenTracker != nil {
+		hookOpts = append(hookOpts, services.WithSeenTracker(seenTracker))
+	}
+
 	var sourceService *services.SourceService
 	if g.BackendRepo != nil && len(g.oauthRegistry.ListConfiguredProviders()) > 0 {
-		sourceService = services.NewSourceServiceWithOAuth(g.sourceRegistry, g.BackendRepo, filesystemStore, g.oauthRegistry)
+		sourceService = services.NewSourceServiceWithOAuth(g.sourceRegistry, g.BackendRepo, filesystemStore, g.oauthRegistry, hookOpts...)
 	} else {
-		sourceService = services.NewSourceService(g.sourceRegistry, g.BackendRepo, filesystemStore)
+		sourceService = services.NewSourceService(g.sourceRegistry, g.BackendRepo, filesystemStore, hookOpts...)
 	}
 
 	pb.RegisterSourceServiceServer(g.grpcServer, sourceService)
@@ -338,6 +370,9 @@ func (g *Gateway) registerServices() error {
 	// Register task and workspace APIs (requires Postgres)
 	if g.BackendRepo != nil {
 		taskQueue := repository.NewRedisTaskQueue(g.RedisClient, "default")
+
+		// Task factory (shared between HTTP API and hook evaluator)
+		taskFactory := services.NewTaskFactory(g.BackendRepo, taskQueue, g.Config.Sandbox.GetDefaultImage())
 
 		// Workspace CRUD endpoints (cluster admin only)
 		workspacesAdminGroup := g.baseRouteGroup.Group("/workspaces")
@@ -371,6 +406,12 @@ func (g *Gateway) registerServices() error {
 		connectionsGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
 		apiv1.NewConnectionsGroup(connectionsGroup, g.BackendRepo)
 
+		// Hooks API (nested under workspaces, workspace-scoped auth)
+		hooksGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/hooks")
+		hooksGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
+		apiv1.NewHooksGroup(hooksGroup, g.BackendRepo, filesystemStore, g.eventBus)
+		log.Info().Msg("hooks API registered at /api/v1/workspaces/:workspace_id/hooks")
+
 		// Filesystem API (nested under workspaces, workspace-scoped auth)
 		filesystemGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/fs")
 		filesystemGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
@@ -380,6 +421,29 @@ func (g *Gateway) registerServices() error {
 		// Tasks API
 		apiv1.NewTasksGroup(g.baseRouteGroup.Group("/tasks"), g.BackendRepo, taskQueue, g.s2Client, g.Config.Sandbox.GetDefaultImage())
 
+		// Hook evaluator + stream consumer
+		if hookStream != nil && g.RedisClient != nil {
+			evaluator := services.NewHookEvaluator(filesystemStore, taskFactory, g.RedisClient)
+
+			// Cross-replica hook cache invalidation via EventBus
+			if g.eventBus != nil {
+				g.eventBus.On(common.EventCacheInvalidate, func(e common.Event) {
+					scope, _ := e.Data["scope"].(string)
+					if scope != "hooks" {
+						return
+					}
+					// workspace_id comes through as float64 from JSON
+					if wsId, ok := e.Data["workspace_id"].(float64); ok {
+						evaluator.InvalidateCache(uint(wsId))
+					}
+				})
+			}
+
+			// Start stream consumer (runs in goroutine, blocks until ctx done)
+			go hookStream.Consume(g.ctx, evaluator.Handle)
+			log.Info().Msg("hook evaluator started")
+		}
+
 		// OAuth API for workspace integrations (gmail, gdrive, github, notion, slack)
 		apiv1.NewOAuthGroup(g.baseRouteGroup.Group("/oauth"), g.oauthStore, g.oauthRegistry, g.BackendRepo)
 		if providers := g.oauthRegistry.ListConfiguredProviders(); len(providers) > 0 {
@@ -388,7 +452,7 @@ func (g *Gateway) registerServices() error {
 			log.Warn().Msg("oauth API registered but no providers configured (set oauth.callbackUrl and provider credentials)")
 		}
 
-		log.Info().Msg("workspace, members, tokens, connections, and tasks APIs registered")
+		log.Info().Msg("workspace, members, tokens, connections, hooks, and tasks APIs registered")
 	}
 
 	return nil
