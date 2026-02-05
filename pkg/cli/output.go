@@ -51,9 +51,14 @@ func PrintSuccessWithValue(msg, value string) {
 	fmt.Printf("  %s %-40s %s\n", symbol, msg, DimStyle.Render(value))
 }
 
-// PrintError prints an error message with a red X
+// PrintError prints a formatted error with suggestions for gRPC errors.
 func PrintError(err error) {
-	fmt.Printf("  %s %s\n", ErrorStyle.Render(SymbolError), ErrorStyle.Render(err.Error()))
+	msg := FormatError(err)
+	fmt.Printf("  %s %s\n", ErrorStyle.Render(SymbolError), ErrorStyle.Render(msg))
+	if suggestions := GetErrorSuggestions(err); len(suggestions) > 0 {
+		fmt.Println()
+		PrintSuggestions("Try:", suggestions)
+	}
 }
 
 // PrintErrorMsg prints a simple error message string
@@ -166,16 +171,14 @@ func (t *Table) Print() {
 	// Print headers
 	fmt.Print("  ")
 	for i, h := range t.Headers {
-		style := TableHeaderStyle.Width(t.Widths[i] + 2)
-		fmt.Print(style.Render(h))
+		fmt.Print(TableHeaderStyle.Render(fmt.Sprintf("%-*s", t.Widths[i]+2, h)))
 	}
 	fmt.Println()
 
 	// Print separator
 	fmt.Print("  ")
 	for i := range t.Headers {
-		separator := strings.Repeat("─", t.Widths[i])
-		fmt.Print(DimStyle.Render(separator), "  ")
+		fmt.Print(DimStyle.Render(strings.Repeat("─", t.Widths[i])), "  ")
 	}
 	fmt.Println()
 
@@ -183,8 +186,7 @@ func (t *Table) Print() {
 	for _, row := range t.Rows {
 		fmt.Print("  ")
 		for i, cell := range row {
-			style := TableCellStyle.Width(t.Widths[i] + 2)
-			fmt.Print(style.Render(cell))
+			fmt.Print(TableCellStyle.Render(fmt.Sprintf("%-*s", t.Widths[i]+2, cell)))
 		}
 		fmt.Println()
 	}

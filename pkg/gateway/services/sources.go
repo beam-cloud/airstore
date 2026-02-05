@@ -60,16 +60,16 @@ type SourceService struct {
 	oauthRegistry *oauth.Registry
 	credCache     sync.Map // map[string]*cachedCreds - caches credentials by "workspaceId:integration"
 	queryGroup    singleflight.Group
-	hookStream    *common.EventStream  // optional: for emitting source change events
+	hookStream    common.EventEmitter   // optional: for emitting source change events
 	seenTracker   *hooks.SeenTracker   // optional: for detecting new query results
 }
 
 // SourceServiceOption configures optional dependencies on SourceService.
 type SourceServiceOption func(*SourceService)
 
-// WithHookStream sets the event stream for hook event emission.
-func WithHookStream(stream *common.EventStream) SourceServiceOption {
-	return func(s *SourceService) { s.hookStream = stream }
+// WithHookStream sets the event emitter for hook event emission.
+func WithHookStream(emitter common.EventEmitter) SourceServiceOption {
+	return func(s *SourceService) { s.hookStream = emitter }
 }
 
 // WithSeenTracker sets the seen tracker for change detection.

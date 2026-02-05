@@ -278,20 +278,27 @@ func (g *Gateway) registerServices() error {
 		go g.eventBus.Start()
 	}
 
-	// Initialize hook event stream (Redis Streams, exactly-once delivery)
-	var hookStream *common.EventStream
+	// Initialize hook event emitter.
+	// Redis mode: EventStream (reliable, exactly-once via consumer groups).
+	// Local mode: LocalEventEmitter (direct in-process dispatch).
+	var hookEmitter common.EventEmitter
+	var hookStreamConsumer *common.EventStream
 	if g.RedisClient != nil {
 		hostname, _ := os.Hostname()
 		consumer := fmt.Sprintf("gw-%s-%d", hostname, os.Getpid())
-		hookStream = common.NewEventStream(
+		stream := common.NewEventStream(
 			g.RedisClient,
 			common.Keys.HookStream(),
 			"hook-evaluators",
 			consumer,
 		)
+		hookEmitter = stream
+		hookStreamConsumer = stream
+	} else {
+		hookEmitter = common.NewLocalEventEmitter()
 	}
 
-	// Initialize seen tracker for source change detection
+	// Initialize seen tracker for source change detection (Redis only)
 	var seenTracker *hooks.SeenTracker
 	if g.RedisClient != nil {
 		seenTracker = hooks.NewSeenTracker(g.RedisClient)
@@ -306,10 +313,7 @@ func (g *Gateway) registerServices() error {
 		} else {
 			g.storageClient = client
 			g.storageService = svc
-			// Wire hook event stream into storage service
-			if hookStream != nil {
-				svc.SetHookStream(hookStream)
-			}
+			svc.SetHookStream(hookEmitter)
 			pb.RegisterContextServiceServer(g.grpcServer, svc)
 		}
 	}
@@ -351,8 +355,8 @@ func (g *Gateway) registerServices() error {
 	// Register sources gRPC service (read-only integration access with OAuth refresh)
 	// Pass hook stream and seen tracker as optional deps for change detection
 	var hookOpts []services.SourceServiceOption
-	if hookStream != nil {
-		hookOpts = append(hookOpts, services.WithHookStream(hookStream))
+	if hookEmitter != nil {
+		hookOpts = append(hookOpts, services.WithHookStream(hookEmitter))
 	}
 	if seenTracker != nil {
 		hookOpts = append(hookOpts, services.WithSeenTracker(seenTracker))
@@ -422,26 +426,30 @@ func (g *Gateway) registerServices() error {
 		// Tasks API
 		apiv1.NewTasksGroup(g.baseRouteGroup.Group("/tasks"), g.BackendRepo, taskQueue, g.s2Client, g.Config.Sandbox.GetDefaultImage())
 
-		// Hook evaluator + stream consumer
-		if hookStream != nil && g.RedisClient != nil {
-			evaluator := hooks.NewEvaluator(filesystemStore, taskFactory, g.RedisClient)
+		// Hook evaluator
+		evaluator := hooks.NewEvaluator(filesystemStore, taskFactory, g.RedisClient)
+
+		if hookStreamConsumer != nil {
+			// Redis mode: consume from stream (exactly-once across replicas)
+			go hookStreamConsumer.Consume(g.ctx, evaluator.Handle)
+			log.Info().Msg("hook evaluator started (redis stream)")
 
 			// Cross-replica hook cache invalidation via EventBus
 			if g.eventBus != nil {
 				g.eventBus.On(common.EventCacheInvalidate, func(e common.Event) {
-					scope, _ := e.Data["scope"].(string)
-					if scope != "hooks" {
-						return
-					}
-					if wsId := hooks.ParseUint(e.Data["workspace_id"]); wsId > 0 {
-						evaluator.InvalidateCache(wsId)
+					if scope, _ := e.Data["scope"].(string); scope == "hooks" {
+						if wsId := hooks.ParseUint(e.Data["workspace_id"]); wsId > 0 {
+							evaluator.InvalidateCache(wsId)
+						}
 					}
 				})
 			}
-
-			// Start stream consumer (runs in goroutine, blocks until ctx done)
-			go hookStream.Consume(g.ctx, evaluator.Handle)
-			log.Info().Msg("hook evaluator started")
+		} else if local, ok := hookEmitter.(*common.LocalEventEmitter); ok {
+			// Local mode: wire handler directly
+			local.SetHandler(evaluator.Handle)
+			log.Info().Msg("hook evaluator started (local)")
+		} else {
+			log.Warn().Msg("hook evaluator not started: no event emitter available")
 		}
 
 		// OAuth API for workspace integrations (gmail, gdrive, github, notion, slack)

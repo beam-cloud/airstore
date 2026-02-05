@@ -36,7 +36,7 @@ type StorageService struct {
 	client     *clients.StorageClient
 	cache      *metadataCache
 	eventBus   *common.EventBus
-	hookStream *common.EventStream
+	hookStream common.EventEmitter
 }
 
 func NewStorageService(client *clients.StorageClient, eventBus *common.EventBus) (*StorageService, error) {
@@ -63,9 +63,9 @@ func NewStorageService(client *clients.StorageClient, eventBus *common.EventBus)
 	return s, nil
 }
 
-// SetHookStream sets the event stream for hook event emission.
-func (s *StorageService) SetHookStream(stream *common.EventStream) {
-	s.hookStream = stream
+// SetHookStream sets the event emitter for hook event emission.
+func (s *StorageService) SetHookStream(emitter common.EventEmitter) {
+	s.hookStream = emitter
 }
 
 // emitHookEvent sends a filesystem event to the hook event stream.
@@ -77,6 +77,7 @@ func (s *StorageService) emitHookEvent(ctx context.Context, eventType string, pa
 	if wsId == 0 {
 		return
 	}
+	log.Debug().Str("event", eventType).Str("path", path).Uint("workspace", wsId).Msg("hook event emitted")
 	s.hookStream.Emit(ctx, map[string]any{
 		"event":            eventType,
 		"workspace_id":     fmt.Sprintf("%d", wsId),

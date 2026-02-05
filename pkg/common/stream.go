@@ -2,11 +2,18 @@ package common
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog/log"
 )
+
+// EventEmitter is the interface for emitting hook events.
+// Implemented by EventStream (Redis) and LocalEventEmitter (in-process).
+type EventEmitter interface {
+	Emit(ctx context.Context, data map[string]any) error
+}
 
 // EventStream provides reliable, exactly-once event delivery using Redis Streams.
 // Unlike EventBus (pub/sub, fire-and-forget to all replicas), EventStream uses
@@ -105,4 +112,29 @@ func (s *EventStream) Consume(ctx context.Context, handler func(id string, data 
 			}
 		}
 	}
+}
+
+// LocalEventEmitter calls the handler directly in-process. No Redis required.
+// Used in local mode where there's only one gateway instance.
+type LocalEventEmitter struct {
+	handler func(id string, data map[string]any)
+	seq     uint64
+}
+
+func NewLocalEventEmitter() *LocalEventEmitter {
+	return &LocalEventEmitter{}
+}
+
+// SetHandler sets the function called on each Emit. Must be called before Emit.
+func (e *LocalEventEmitter) SetHandler(handler func(id string, data map[string]any)) {
+	e.handler = handler
+}
+
+func (e *LocalEventEmitter) Emit(_ context.Context, data map[string]any) error {
+	if e.handler == nil {
+		return nil
+	}
+	e.seq++
+	go e.handler(fmt.Sprintf("local-%d", e.seq), data)
+	return nil
 }

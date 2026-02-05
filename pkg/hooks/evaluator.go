@@ -59,6 +59,8 @@ func (e *Evaluator) Handle(id string, data map[string]any) {
 		return
 	}
 
+	log.Debug().Str("id", id).Str("event", eventType).Uint("workspace", wsId).Str("path", path).Msg("hook event received")
+
 	switch eventType {
 	case EventFsCreate:
 		e.fireHooks(wsId, path, types.HookTriggerOnCreate, data)
@@ -82,6 +84,7 @@ func (e *Evaluator) fireHooks(wsId uint, path string, trigger types.HookTrigger,
 	defer cancel()
 
 	hooks := e.cache.Match(ctx, wsId, path, trigger)
+	log.Debug().Uint("workspace", wsId).Str("path", path).Str("trigger", string(trigger)).Int("matched", len(hooks)).Msg("hook match")
 	if len(hooks) == 0 {
 		return
 	}
@@ -93,24 +96,32 @@ func (e *Evaluator) fireHooks(wsId uint, path string, trigger types.HookTrigger,
 			continue
 		}
 
-		cooldownKey := common.Keys.HookCooldown(h.ExternalId)
-		set, err := e.rdb.SetNX(ctx, cooldownKey, "1", 5*time.Minute).Result()
-		if err != nil || !set {
-			log.Debug().Str("hook", h.ExternalId).Str("path", path).Msg("hook on cooldown, skipping")
-			continue
+		// Per-hook cooldown (requires Redis; skipped in local mode)
+		cooldownKey := ""
+		if e.rdb != nil {
+			cooldownKey = common.Keys.HookCooldown(h.ExternalId)
+			set, err := e.rdb.SetNX(ctx, cooldownKey, "1", 5*time.Minute).Result()
+			if err != nil || !set {
+				log.Debug().Str("hook", h.ExternalId).Str("path", path).Msg("hook on cooldown, skipping")
+				continue
+			}
 		}
 
 		token, err := DecryptToken(h.EncryptedToken)
 		if err != nil {
 			log.Warn().Err(err).Str("hook", h.ExternalId).Msg("failed to decrypt hook token")
-			e.rdb.Del(ctx, cooldownKey)
+			if e.rdb != nil && cooldownKey != "" {
+				e.rdb.Del(ctx, cooldownKey)
+			}
 			continue
 		}
 
 		prompt := BuildPrompt(h.Prompt, trigger, data)
 		if err := e.creator.CreateTask(ctx, h.WorkspaceId, h.CreatedByMemberId, token, prompt); err != nil {
 			log.Warn().Err(err).Str("hook", h.ExternalId).Msg("failed to create task from hook")
-			e.rdb.Del(ctx, cooldownKey)
+			if e.rdb != nil && cooldownKey != "" {
+				e.rdb.Del(ctx, cooldownKey)
+			}
 			continue
 		}
 
