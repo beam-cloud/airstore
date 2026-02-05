@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
+	"net/url"
 	"time"
 )
 
@@ -117,10 +117,10 @@ func fetchAllPages[T any](ctx context.Context, c *PostHogClient, initialPath str
 	var allResults []T
 
 	// First request uses the path-based method
-	url := c.baseURL + initialPath
-	for url != "" {
+	nextURL := c.baseURL + initialPath
+	for nextURL != "" {
 		var page paginatedResponse[T]
-		if err := c.doRequestFullURL(ctx, url, &page); err != nil {
+		if err := c.doRequestFullURL(ctx, nextURL, &page); err != nil {
 			return nil, err
 		}
 
@@ -130,10 +130,18 @@ func fetchAllPages[T any](ctx context.Context, c *PostHogClient, initialPath str
 			break
 		}
 		// Validate that Next URL belongs to expected host to prevent API key leakage
-		if !strings.HasPrefix(*page.Next, c.baseURL) {
-			return nil, fmt.Errorf("pagination URL %q does not match expected host %q", *page.Next, c.baseURL)
+		baseURLParsed, err := url.Parse(c.baseURL)
+		if err != nil {
+			return nil, fmt.Errorf("invalid base URL: %w", err)
 		}
-		url = *page.Next
+		nextURLParsed, err := url.Parse(*page.Next)
+		if err != nil {
+			return nil, fmt.Errorf("invalid pagination URL: %w", err)
+		}
+		if nextURLParsed.Host != baseURLParsed.Host {
+			return nil, fmt.Errorf("pagination URL host %q does not match expected host %q", nextURLParsed.Host, baseURLParsed.Host)
+		}
+		nextURL = *page.Next
 	}
 
 	return allResults, nil
