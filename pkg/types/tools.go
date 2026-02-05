@@ -14,6 +14,7 @@ const (
 	ToolGDrive    ToolName = "gdrive"
 	ToolSlack     ToolName = "slack"
 	ToolLinear    ToolName = "linear"
+	ToolPostHog  ToolName = "posthog"
 )
 
 // String returns the string representation

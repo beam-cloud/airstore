@@ -8,18 +8,20 @@ import (
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/repository"
+	"github.com/beam-cloud/airstore/pkg/sources"
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
 )
 
 type GatewayService struct {
 	pb.UnimplementedGatewayServiceServer
-	backend  repository.BackendRepository
-	s2Client *common.S2Client
+	backend        repository.BackendRepository
+	s2Client       *common.S2Client
+	sourceRegistry *sources.Registry
 }
 
-func NewGatewayService(backend repository.BackendRepository, s2Client *common.S2Client) *GatewayService {
-	return &GatewayService{backend: backend, s2Client: s2Client}
+func NewGatewayService(backend repository.BackendRepository, s2Client *common.S2Client, sourceRegistry *sources.Registry) *GatewayService {
+	return &GatewayService{backend: backend, s2Client: s2Client, sourceRegistry: sourceRegistry}
 }
 
 // Workspaces
@@ -329,6 +331,18 @@ func (s *GatewayService) AddConnection(ctx context.Context, req *pb.AddConnectio
 	creds := &types.IntegrationCredentials{
 		AccessToken: req.AccessToken,
 		APIKey:      req.ApiKey,
+		Extra:       req.Extra,
+	}
+
+	// Validate credentials if the provider supports it
+	if s.sourceRegistry != nil {
+		if provider := s.sourceRegistry.Get(req.IntegrationType); provider != nil {
+			if v, ok := provider.(sources.CredentialValidator); ok {
+				if err := v.ValidateCredentials(ctx, creds); err != nil {
+					return &pb.ConnectionResponse{Ok: false, Error: "invalid credentials: " + err.Error()}, nil
+				}
+			}
+		}
 	}
 
 	conn, err := s.backend.SaveConnection(ctx, ws.Id, memberId, req.IntegrationType, creds, req.Scope)

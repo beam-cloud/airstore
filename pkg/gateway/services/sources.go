@@ -312,7 +312,26 @@ func (s *SourceService) ReadDir(ctx context.Context, req *pb.SourceReadDirReques
 		return &pb.SourceReadDirResponse{Ok: true, Entries: []*pb.SourceDirEntry{}}, nil
 	}
 
-	// Unknown path - return empty
+	// Unknown path — if provider is NativeBrowsable, delegate to it
+	if nb, ok := provider.(sources.NativeBrowsable); ok && nb.IsNativeBrowsable() && connected {
+		nativeEntries, err := provider.ReadDir(ctx, pctx, relPath)
+		if err != nil {
+			return &pb.SourceReadDirResponse{Ok: true, Entries: []*pb.SourceDirEntry{}}, nil
+		}
+		pbEntries := make([]*pb.SourceDirEntry, 0, len(nativeEntries))
+		for _, e := range nativeEntries {
+			pbEntries = append(pbEntries, &pb.SourceDirEntry{
+				Name:  e.Name,
+				Mode:  e.Mode,
+				IsDir: e.IsDir,
+				Size:  e.Size,
+				Mtime: e.Mtime,
+			})
+		}
+		return &pb.SourceReadDirResponse{Ok: true, Entries: pbEntries}, nil
+	}
+
+	// Not native browsable — return empty
 	return &pb.SourceReadDirResponse{Ok: true, Entries: []*pb.SourceDirEntry{}}, nil
 }
 
@@ -392,6 +411,32 @@ func (s *SourceService) readDirIntegrationRoot(ctx context.Context, pctx *source
 				Size:  int64(len(queryMeta)),
 				Mtime: q.UpdatedAt.Unix(),
 			})
+		}
+	}
+
+	// If provider is NativeBrowsable, merge native root entries
+	provider := s.registry.Get(integration)
+	if provider != nil && connected {
+		if nb, ok := provider.(sources.NativeBrowsable); ok && nb.IsNativeBrowsable() {
+			nativeEntries, err := provider.ReadDir(ctx, pctx, "")
+			if err == nil {
+				// Build set of existing names to skip duplicates
+				existing := make(map[string]bool, len(entries))
+				for _, e := range entries {
+					existing[e.Name] = true
+				}
+				for _, ne := range nativeEntries {
+					if !existing[ne.Name] {
+						entries = append(entries, &pb.SourceDirEntry{
+							Name:  ne.Name,
+							Mode:  ne.Mode,
+							IsDir: ne.IsDir,
+							Size:  ne.Size,
+							Mtime: ne.Mtime,
+						})
+					}
+				}
+			}
 		}
 	}
 
@@ -661,7 +706,14 @@ func (s *SourceService) Read(ctx context.Context, req *pb.SourceReadRequest) (*p
 		return s.readSmartQueryResult(ctx, pctx, queryPath, filename, req.Offset, req.Length)
 	}
 
-	// Not a smart query result - return not found
+	// Not a smart query result — if provider is NativeBrowsable, delegate to it
+	if nb, ok := provider.(sources.NativeBrowsable); ok && nb.IsNativeBrowsable() && connected {
+		data, err := provider.Read(ctx, pctx, relPath, req.Offset, req.Length)
+		if err == nil {
+			return &pb.SourceReadResponse{Ok: true, Data: data}, nil
+		}
+	}
+
 	return &pb.SourceReadResponse{Ok: false, Error: "file not found"}, nil
 }
 

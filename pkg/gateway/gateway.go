@@ -316,7 +316,7 @@ func (g *Gateway) registerServices() error {
 
 	// Register gateway gRPC service (workspace/member/token/connection/task management)
 	if g.BackendRepo != nil {
-		gatewayService := services.NewGatewayService(g.BackendRepo, g.s2Client)
+		gatewayService := services.NewGatewayService(g.BackendRepo, g.s2Client, g.sourceRegistry)
 		pb.RegisterGatewayServiceServer(g.grpcServer, gatewayService)
 		log.Info().Msg("gateway service registered")
 	}
@@ -369,7 +369,7 @@ func (g *Gateway) registerServices() error {
 		// Connections API (nested under workspaces, workspace-scoped auth)
 		connectionsGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/connections")
 		connectionsGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
-		apiv1.NewConnectionsGroup(connectionsGroup, g.BackendRepo)
+		apiv1.NewConnectionsGroup(connectionsGroup, g.BackendRepo, g.sourceRegistry)
 
 		// Filesystem API (nested under workspaces, workspace-scoped auth)
 		filesystemGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/fs")
@@ -556,6 +556,7 @@ func (g *Gateway) initSources() {
 	g.sourceRegistry.Register(providers.NewGDriveProvider())
 	g.sourceRegistry.Register(providers.NewSlackProvider())
 	g.sourceRegistry.Register(providers.NewLinearProvider())
+	g.sourceRegistry.Register(providers.NewPostHogProvider())
 
 	log.Info().Strs("providers", g.sourceRegistry.List()).Msg("source providers registered")
 }
