@@ -100,7 +100,9 @@ func (s *EventStream) Consume(ctx context.Context, handler func(id string, data 
 				data[k] = v
 			}
 			handler(msg.ID, data)
-			s.rdb.XAck(ctx, s.stream, s.group, msg.ID)
+			if err := s.rdb.XAck(ctx, s.stream, s.group, msg.ID).Err(); err != nil {
+				log.Warn().Err(err).Str("stream", s.stream).Str("id", msg.ID).Msg("stream: ack failed")
+			}
 		}
 	}
 }

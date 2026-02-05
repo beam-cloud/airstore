@@ -1,19 +1,19 @@
-package common
+package hooks
 
 import (
 	"context"
 
+	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/redis/go-redis/v9"
 )
 
-// SeenTracker tracks set membership and returns what's new.
-// Knows nothing about hooks, workspaces, or queries -- just operates on
-// a Redis key and a set of strings.
+// SeenTracker tracks which query result IDs have been observed, so the
+// hook evaluator can detect new results and fire on_change hooks.
 type SeenTracker struct {
-	rdb *RedisClient
+	rdb *common.RedisClient
 }
 
-func NewSeenTracker(rdb *RedisClient) *SeenTracker {
+func NewSeenTracker(rdb *common.RedisClient) *SeenTracker {
 	return &SeenTracker{rdb: rdb}
 }
 
@@ -25,7 +25,6 @@ func (t *SeenTracker) Diff(ctx context.Context, key string, current []string) ([
 		return nil, nil
 	}
 
-	// Pipeline: read old set, then replace atomically
 	pipe := t.rdb.Pipeline()
 	oldCmd := pipe.SMembers(ctx, key)
 	pipe.Del(ctx, key)
@@ -41,7 +40,7 @@ func (t *SeenTracker) Diff(ctx context.Context, key string, current []string) ([
 
 	old := oldCmd.Val()
 	if len(old) == 0 {
-		return nil, nil // first execution: populate only, don't report everything as new
+		return nil, nil
 	}
 
 	oldSet := make(map[string]struct{}, len(old))

@@ -630,7 +630,9 @@ func (s *GatewayService) UpdateHook(ctx context.Context, req *pb.UpdateHookReque
 	if req.Trigger != "" {
 		hook.Trigger = types.HookTrigger(req.Trigger)
 	}
-	hook.Active = req.Active
+	if req.HasActive {
+		hook.Active = req.Active
+	}
 
 	if err := s.fsStore.UpdateHook(ctx, hook); err != nil {
 		return &pb.HookResponse{Ok: false, Error: err.Error()}, nil

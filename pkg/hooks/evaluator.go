@@ -10,6 +10,7 @@ import (
 
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/repository"
+
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/rs/zerolog/log"
 )
@@ -32,7 +33,7 @@ type TaskCreator interface {
 type Evaluator struct {
 	cache    *hookCache
 	creator  TaskCreator
-	debounce *common.Debouncer
+	debounce *debouncer
 	rdb      *common.RedisClient
 }
 
@@ -44,7 +45,7 @@ func NewEvaluator(store repository.FilesystemStore, creator TaskCreator, rdb *co
 			store: store,
 		},
 		creator:  creator,
-		debounce: common.NewDebouncer(2 * time.Second),
+		debounce: newDebouncer(2 * time.Second),
 		rdb:      rdb,
 	}
 }
@@ -62,7 +63,7 @@ func (e *Evaluator) Handle(id string, data map[string]any) {
 	case EventFsCreate:
 		e.fireHooks(wsId, path, types.HookTriggerOnCreate, data)
 	case EventFsWrite:
-		e.debounce.Call(fmt.Sprintf("%d:%s", wsId, path), func() {
+		e.debounce.call(fmt.Sprintf("%d:%s", wsId, path), func() {
 			e.fireHooks(wsId, path, types.HookTriggerOnWrite, data)
 		})
 	case EventSourceChange:

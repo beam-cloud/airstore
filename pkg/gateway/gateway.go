@@ -292,9 +292,9 @@ func (g *Gateway) registerServices() error {
 	}
 
 	// Initialize seen tracker for source change detection
-	var seenTracker *common.SeenTracker
+	var seenTracker *hooks.SeenTracker
 	if g.RedisClient != nil {
-		seenTracker = common.NewSeenTracker(g.RedisClient)
+		seenTracker = hooks.NewSeenTracker(g.RedisClient)
 	}
 
 	// Initialize workspace storage (per-workspace S3 buckets)

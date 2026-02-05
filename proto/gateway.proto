@@ -292,6 +292,7 @@ message UpdateHookRequest {
   string prompt = 2;
   string trigger = 3;
   bool active = 4;
+  bool has_active = 5;
 }
 
 message DeleteHookRequest {

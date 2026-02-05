@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -945,6 +946,9 @@ func (s *filesystemStore) ListHooks(ctx context.Context, workspaceId uint) ([]*t
 				hooks = append(hooks, h)
 			}
 		}
+		sort.Slice(hooks, func(i, j int) bool {
+			return hooks[i].CreatedAt.Before(hooks[j].CreatedAt)
+		})
 		return hooks, nil
 	}
 
