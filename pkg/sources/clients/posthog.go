@@ -6,10 +6,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
 const defaultPostHogHost = "https://app.posthog.com"
+
+// ErrResourceNotFound is returned when a PostHog resource doesn't exist (HTTP 404).
+var ErrResourceNotFound = fmt.Errorf("resource not found")
 
 // PostHogClient is an HTTP client for the PostHog REST API.
 type PostHogClient struct {
@@ -76,28 +80,7 @@ type paginatedResponse[T any] struct {
 
 // doRequest executes an authenticated GET request and decodes the response into out.
 func (c *PostHogClient) doRequest(ctx context.Context, path string, out any) error {
-	url := c.baseURL + path
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("PostHog API error %d: %s", resp.StatusCode, string(body))
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		return fmt.Errorf("decode response: %w", err)
-	}
-	return nil
+	return c.doRequestFullURL(ctx, c.baseURL+path, out)
 }
 
 // doRequestFullURL executes an authenticated GET request using a full URL (not a path).
@@ -117,6 +100,9 @@ func (c *PostHogClient) doRequestFullURL(ctx context.Context, fullURL string, ou
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		if resp.StatusCode == http.StatusNotFound {
+			return ErrResourceNotFound
+		}
 		return fmt.Errorf("PostHog API error %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -142,6 +128,10 @@ func fetchAllPages[T any](ctx context.Context, c *PostHogClient, initialPath str
 
 		if page.Next == nil {
 			break
+		}
+		// Validate that Next URL belongs to expected host to prevent API key leakage
+		if !strings.HasPrefix(*page.Next, c.baseURL) {
+			return nil, fmt.Errorf("pagination URL %q does not match expected host %q", *page.Next, c.baseURL)
 		}
 		url = *page.Next
 	}
@@ -202,7 +192,7 @@ func (c *PostHogClient) GetInsightByShortID(ctx context.Context, projectID int, 
 		return nil, err
 	}
 	if len(resp.Results) == 0 {
-		return nil, fmt.Errorf("insight not found: %s", shortID)
+		return nil, ErrResourceNotFound
 	}
 	return &resp.Results[0], nil
 }

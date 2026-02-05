@@ -3,6 +3,7 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -339,7 +340,10 @@ func (p *PostHogProvider) readInsight(ctx context.Context, client *clients.PostH
 
 	insight, err := client.GetInsightByShortID(ctx, projectID, shortID)
 	if err != nil {
-		return nil, sources.ErrNotFound
+		if errors.Is(err, clients.ErrResourceNotFound) {
+			return nil, sources.ErrNotFound
+		}
+		return nil, err
 	}
 	return jsonMarshalIndent(insight)
 }
@@ -358,7 +362,10 @@ func (p *PostHogProvider) readCohort(ctx context.Context, client *clients.PostHo
 
 	cohort, err := client.GetCohort(ctx, projectID, cohortID)
 	if err != nil {
-		return nil, sources.ErrNotFound
+		if errors.Is(err, clients.ErrResourceNotFound) {
+			return nil, sources.ErrNotFound
+		}
+		return nil, err
 	}
 	return jsonMarshalIndent(cohort)
 }
