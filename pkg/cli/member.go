@@ -18,9 +18,9 @@ var memberCmd = &cobra.Command{
 }
 
 var memberAddCmd = &cobra.Command{
-	Use:   "add <workspace_id> <email>",
-	Short: "Add a member to a workspace",
-	Args:  cobra.ExactArgs(2),
+	Use:   "add <email>",
+	Short: "Add a member to your workspace",
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var client *Client
 		var resp *pb.MemberResponse
@@ -33,10 +33,9 @@ var memberAddCmd = &cobra.Command{
 			}
 
 			resp, err = client.Gateway.AddMember(context.Background(), &pb.AddMemberRequest{
-				WorkspaceId: args[0],
-				Email:       args[1],
-				Name:        memberName,
-				Role:        memberRole,
+				Email: args[0],
+				Name:  memberName,
+				Role:  memberRole,
 			})
 			return err
 		})
@@ -64,9 +63,8 @@ var memberAddCmd = &cobra.Command{
 }
 
 var memberListCmd = &cobra.Command{
-	Use:   "list <workspace_id>",
-	Short: "List members in a workspace",
-	Args:  cobra.ExactArgs(1),
+	Use:   "list",
+	Short: "List members in your workspace",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		client, err := getClient()
 		if err != nil {
@@ -75,9 +73,7 @@ var memberListCmd = &cobra.Command{
 		}
 		defer client.Close()
 
-		resp, err := client.Gateway.ListMembers(context.Background(), &pb.ListMembersRequest{
-			WorkspaceId: args[0],
-		})
+		resp, err := client.Gateway.ListMembers(context.Background(), &pb.ListMembersRequest{})
 		if err != nil {
 			PrintError(err)
 			return nil
@@ -94,7 +90,7 @@ var memberListCmd = &cobra.Command{
 
 		if len(resp.Members) == 0 {
 			PrintInfo("No members found")
-			PrintHint("Add one with: airstore member add <workspace_id> <email>")
+			PrintHint("Add one with: airstore member add <email>")
 			return nil
 		}
 

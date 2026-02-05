@@ -95,17 +95,12 @@ func (s *GatewayService) DeleteWorkspace(ctx context.Context, req *pb.DeleteWork
 // Members
 
 func (s *GatewayService) AddMember(ctx context.Context, req *pb.AddMemberRequest) (*pb.MemberResponse, error) {
-	// Adding members requires workspace access + admin role
-	if err := auth.RequireWorkspaceAccess(ctx, req.WorkspaceId); err != nil {
+	ws, err := s.resolveWorkspace(ctx, req.WorkspaceId)
+	if err != nil {
 		return &pb.MemberResponse{Ok: false, Error: err.Error()}, nil
 	}
 	if err := auth.RequireAdmin(ctx); err != nil {
 		return &pb.MemberResponse{Ok: false, Error: err.Error()}, nil
-	}
-
-	ws, err := s.backend.GetWorkspaceByExternalId(ctx, req.WorkspaceId)
-	if err != nil || ws == nil {
-		return &pb.MemberResponse{Ok: false, Error: "workspace not found"}, nil
 	}
 
 	role := types.MemberRole(req.Role)
@@ -121,17 +116,12 @@ func (s *GatewayService) AddMember(ctx context.Context, req *pb.AddMemberRequest
 }
 
 func (s *GatewayService) ListMembers(ctx context.Context, req *pb.ListMembersRequest) (*pb.ListMembersResponse, error) {
-	// Listing members requires workspace access + admin role
-	if err := auth.RequireWorkspaceAccess(ctx, req.WorkspaceId); err != nil {
+	ws, err := s.resolveWorkspace(ctx, req.WorkspaceId)
+	if err != nil {
 		return &pb.ListMembersResponse{Ok: false, Error: err.Error()}, nil
 	}
 	if err := auth.RequireAdmin(ctx); err != nil {
 		return &pb.ListMembersResponse{Ok: false, Error: err.Error()}, nil
-	}
-
-	ws, err := s.backend.GetWorkspaceByExternalId(ctx, req.WorkspaceId)
-	if err != nil || ws == nil {
-		return &pb.ListMembersResponse{Ok: false, Error: "workspace not found"}, nil
 	}
 
 	members, err := s.backend.ListMembers(ctx, ws.Id)
@@ -163,17 +153,12 @@ func (s *GatewayService) RemoveMember(ctx context.Context, req *pb.RemoveMemberR
 // Tokens
 
 func (s *GatewayService) CreateToken(ctx context.Context, req *pb.CreateTokenRequest) (*pb.CreateTokenResponse, error) {
-	// Creating tokens requires workspace access + admin role
-	if err := auth.RequireWorkspaceAccess(ctx, req.WorkspaceId); err != nil {
+	ws, err := s.resolveWorkspace(ctx, req.WorkspaceId)
+	if err != nil {
 		return &pb.CreateTokenResponse{Ok: false, Error: err.Error()}, nil
 	}
 	if err := auth.RequireAdmin(ctx); err != nil {
 		return &pb.CreateTokenResponse{Ok: false, Error: err.Error()}, nil
-	}
-
-	ws, err := s.backend.GetWorkspaceByExternalId(ctx, req.WorkspaceId)
-	if err != nil || ws == nil {
-		return &pb.CreateTokenResponse{Ok: false, Error: "workspace not found"}, nil
 	}
 
 	member, err := s.backend.GetMember(ctx, req.MemberId)
@@ -208,17 +193,12 @@ func (s *GatewayService) CreateToken(ctx context.Context, req *pb.CreateTokenReq
 }
 
 func (s *GatewayService) ListTokens(ctx context.Context, req *pb.ListTokensRequest) (*pb.ListTokensResponse, error) {
-	// Listing tokens requires workspace access + admin role
-	if err := auth.RequireWorkspaceAccess(ctx, req.WorkspaceId); err != nil {
+	ws, err := s.resolveWorkspace(ctx, req.WorkspaceId)
+	if err != nil {
 		return &pb.ListTokensResponse{Ok: false, Error: err.Error()}, nil
 	}
 	if err := auth.RequireAdmin(ctx); err != nil {
 		return &pb.ListTokensResponse{Ok: false, Error: err.Error()}, nil
-	}
-
-	ws, err := s.backend.GetWorkspaceByExternalId(ctx, req.WorkspaceId)
-	if err != nil || ws == nil {
-		return &pb.ListTokensResponse{Ok: false, Error: "workspace not found"}, nil
 	}
 
 	tokens, err := s.backend.ListTokens(ctx, ws.Id)
@@ -297,14 +277,9 @@ func (s *GatewayService) ListWorkerTokens(ctx context.Context, req *pb.ListWorke
 // Connections
 
 func (s *GatewayService) AddConnection(ctx context.Context, req *pb.AddConnectionRequest) (*pb.ConnectionResponse, error) {
-	// Adding connections requires workspace access
-	if err := auth.RequireWorkspaceAccess(ctx, req.WorkspaceId); err != nil {
+	ws, err := s.resolveWorkspace(ctx, req.WorkspaceId)
+	if err != nil {
 		return &pb.ConnectionResponse{Ok: false, Error: err.Error()}, nil
-	}
-
-	ws, err := s.backend.GetWorkspaceByExternalId(ctx, req.WorkspaceId)
-	if err != nil || ws == nil {
-		return &pb.ConnectionResponse{Ok: false, Error: "workspace not found"}, nil
 	}
 
 	var memberId *uint
@@ -345,14 +320,9 @@ func (s *GatewayService) AddConnection(ctx context.Context, req *pb.AddConnectio
 }
 
 func (s *GatewayService) ListConnections(ctx context.Context, req *pb.ListConnectionsRequest) (*pb.ListConnectionsResponse, error) {
-	// Listing connections requires workspace access
-	if err := auth.RequireWorkspaceAccess(ctx, req.WorkspaceId); err != nil {
+	ws, err := s.resolveWorkspace(ctx, req.WorkspaceId)
+	if err != nil {
 		return &pb.ListConnectionsResponse{Ok: false, Error: err.Error()}, nil
-	}
-
-	ws, err := s.backend.GetWorkspaceByExternalId(ctx, req.WorkspaceId)
-	if err != nil || ws == nil {
-		return &pb.ListConnectionsResponse{Ok: false, Error: "workspace not found"}, nil
 	}
 
 	conns, err := s.backend.ListConnections(ctx, ws.Id)
@@ -656,16 +626,15 @@ func (s *GatewayService) DeleteHook(ctx context.Context, req *pb.DeleteHookReque
 	return &pb.DeleteResponse{Ok: true}, nil
 }
 
-// resolveWorkspace validates access and returns the workspace, or an error.
+// resolveWorkspace resolves the workspace from an explicit ID or the caller's token,
+// validates access, and returns the workspace.
 func (s *GatewayService) resolveWorkspace(ctx context.Context, workspaceExtId string) (*types.Workspace, error) {
-	if err := auth.RequireWorkspaceAccess(ctx, workspaceExtId); err != nil {
+	wsExtId, err := auth.ResolveWorkspaceExtId(ctx, workspaceExtId)
+	if err != nil {
 		return nil, err
 	}
-	ws, err := s.backend.GetWorkspaceByExternalId(ctx, workspaceExtId)
-	if err != nil {
-		return nil, fmt.Errorf("workspace not found")
-	}
-	if ws == nil {
+	ws, err := s.backend.GetWorkspaceByExternalId(ctx, wsExtId)
+	if err != nil || ws == nil {
 		return nil, fmt.Errorf("workspace not found")
 	}
 	return ws, nil
