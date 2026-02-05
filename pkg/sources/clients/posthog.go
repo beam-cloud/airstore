@@ -39,9 +39,9 @@ type PostHogProject struct {
 
 // PostHogEvent represents a PostHog event.
 type PostHogEvent struct {
-	ID         string                 `json:"id"`
-	Event      string                 `json:"event"`
-	Timestamp  string                 `json:"timestamp"`
+	ID         string         `json:"id"`
+	Event      string         `json:"event"`
+	Timestamp  string         `json:"timestamp"`
 	Properties map[string]any `json:"properties"`
 }
 
@@ -68,6 +68,12 @@ type PostHogCohort struct {
 	Count int    `json:"count"`
 }
 
+// paginatedResponse represents PostHog's paginated API response structure.
+type paginatedResponse[T any] struct {
+	Results []T     `json:"results"`
+	Next    *string `json:"next"`
+}
+
 // doRequest executes an authenticated GET request and decodes the response into out.
 func (c *PostHogClient) doRequest(ctx context.Context, path string, out any) error {
 	url := c.baseURL + path
@@ -92,6 +98,55 @@ func (c *PostHogClient) doRequest(ctx context.Context, path string, out any) err
 		return fmt.Errorf("decode response: %w", err)
 	}
 	return nil
+}
+
+// doRequestFullURL executes an authenticated GET request using a full URL (not a path).
+// This is needed for pagination since PostHog's "next" field contains complete URLs.
+func (c *PostHogClient) doRequestFullURL(ctx context.Context, fullURL string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("PostHog API error %d: %s", resp.StatusCode, string(body))
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+	return nil
+}
+
+// fetchAllPages fetches all pages of a paginated PostHog API endpoint.
+func fetchAllPages[T any](ctx context.Context, c *PostHogClient, initialPath string) ([]T, error) {
+	var allResults []T
+
+	// First request uses the path-based method
+	url := c.baseURL + initialPath
+	for url != "" {
+		var page paginatedResponse[T]
+		if err := c.doRequestFullURL(ctx, url, &page); err != nil {
+			return nil, err
+		}
+
+		allResults = append(allResults, page.Results...)
+
+		if page.Next == nil {
+			break
+		}
+		url = *page.Next
+	}
+
+	return allResults, nil
 }
 
 // ListProjects returns all projects (teams) accessible with the API key.
@@ -122,36 +177,43 @@ func (c *PostHogClient) ListEvents(ctx context.Context, projectID, limit int) ([
 
 // ListFeatureFlags returns all feature flags for a project.
 func (c *PostHogClient) ListFeatureFlags(ctx context.Context, projectID int) ([]PostHogFeatureFlag, error) {
-	var resp struct {
-		Results []PostHogFeatureFlag `json:"results"`
-	}
 	path := fmt.Sprintf("/api/projects/%d/feature_flags/?limit=200", projectID)
-	if err := c.doRequest(ctx, path, &resp); err != nil {
-		return nil, err
-	}
-	return resp.Results, nil
+	return fetchAllPages[PostHogFeatureFlag](ctx, c, path)
 }
 
 // ListInsights returns all insights (saved queries) for a project.
 func (c *PostHogClient) ListInsights(ctx context.Context, projectID int) ([]PostHogInsight, error) {
-	var resp struct {
-		Results []PostHogInsight `json:"results"`
-	}
 	path := fmt.Sprintf("/api/projects/%d/insights/?limit=200", projectID)
-	if err := c.doRequest(ctx, path, &resp); err != nil {
-		return nil, err
-	}
-	return resp.Results, nil
+	return fetchAllPages[PostHogInsight](ctx, c, path)
 }
 
 // ListCohorts returns all cohorts for a project.
 func (c *PostHogClient) ListCohorts(ctx context.Context, projectID int) ([]PostHogCohort, error) {
-	var resp struct {
-		Results []PostHogCohort `json:"results"`
-	}
 	path := fmt.Sprintf("/api/projects/%d/cohorts/?limit=200", projectID)
+	return fetchAllPages[PostHogCohort](ctx, c, path)
+}
+
+// GetInsightByShortID retrieves an insight by short_id using the API filter.
+// Uses: GET /api/projects/{id}/insights/?short_id={shortID}&limit=1
+func (c *PostHogClient) GetInsightByShortID(ctx context.Context, projectID int, shortID string) (*PostHogInsight, error) {
+	path := fmt.Sprintf("/api/projects/%d/insights/?short_id=%s&limit=1", projectID, shortID)
+	var resp paginatedResponse[PostHogInsight]
 	if err := c.doRequest(ctx, path, &resp); err != nil {
 		return nil, err
 	}
-	return resp.Results, nil
+	if len(resp.Results) == 0 {
+		return nil, fmt.Errorf("insight not found: %s", shortID)
+	}
+	return &resp.Results[0], nil
+}
+
+// GetCohort retrieves a cohort by numeric ID.
+// Uses: GET /api/projects/{id}/cohorts/{cohortID}/
+func (c *PostHogClient) GetCohort(ctx context.Context, projectID, cohortID int) (*PostHogCohort, error) {
+	path := fmt.Sprintf("/api/projects/%d/cohorts/%d/", projectID, cohortID)
+	var cohort PostHogCohort
+	if err := c.doRequest(ctx, path, &cohort); err != nil {
+		return nil, err
+	}
+	return &cohort, nil
 }

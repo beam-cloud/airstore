@@ -314,10 +314,28 @@ func (s *SourceService) ReadDir(ctx context.Context, req *pb.SourceReadDirReques
 
 	// Unknown path — if provider is NativeBrowsable, delegate to it
 	if nb, ok := provider.(sources.NativeBrowsable); ok && nb.IsNativeBrowsable() && connected {
-		nativeEntries, err := provider.ReadDir(ctx, pctx, relPath)
-		if err != nil {
-			return &pb.SourceReadDirResponse{Ok: true, Entries: []*pb.SourceDirEntry{}}, nil
+		// Check cache first
+		cacheKey := sources.CacheKey(pctx.WorkspaceId, integration, relPath, "readdir")
+		nativeEntries, cacheHit := s.cache.GetEntries(cacheKey)
+
+		if !cacheHit {
+			// Rate limit check
+			if err := s.rateLimiter.Wait(ctx, pctx.WorkspaceId, integration); err != nil {
+				return &pb.SourceReadDirResponse{Ok: false, Error: "rate limited"}, nil
+			}
+
+			// Use singleflight to coalesce concurrent requests
+			result, err := s.cache.DoOnce(cacheKey, func() (any, error) {
+				return provider.ReadDir(ctx, pctx, relPath)
+			})
+			if err != nil {
+				return &pb.SourceReadDirResponse{Ok: true, Entries: []*pb.SourceDirEntry{}}, nil
+			}
+			nativeEntries = result.([]sources.DirEntry)
+			// Cache the result
+			s.cache.SetEntries(cacheKey, nativeEntries)
 		}
+
 		pbEntries := make([]*pb.SourceDirEntry, 0, len(nativeEntries))
 		for _, e := range nativeEntries {
 			pbEntries = append(pbEntries, &pb.SourceDirEntry{
@@ -418,8 +436,26 @@ func (s *SourceService) readDirIntegrationRoot(ctx context.Context, pctx *source
 	provider := s.registry.Get(integration)
 	if provider != nil && connected {
 		if nb, ok := provider.(sources.NativeBrowsable); ok && nb.IsNativeBrowsable() {
-			nativeEntries, err := provider.ReadDir(ctx, pctx, "")
-			if err == nil {
+			// Check cache first
+			cacheKey := sources.CacheKey(pctx.WorkspaceId, integration, "", "readdir")
+			nativeEntries, cacheHit := s.cache.GetEntries(cacheKey)
+
+			if !cacheHit {
+				// Rate limit check
+				if err := s.rateLimiter.Wait(ctx, pctx.WorkspaceId, integration); err == nil {
+					// Use singleflight to coalesce concurrent requests
+					result, err := s.cache.DoOnce(cacheKey, func() (any, error) {
+						return provider.ReadDir(ctx, pctx, "")
+					})
+					if err == nil {
+						nativeEntries = result.([]sources.DirEntry)
+						// Cache the result
+						s.cache.SetEntries(cacheKey, nativeEntries)
+					}
+				}
+			}
+
+			if len(nativeEntries) > 0 {
 				// Build set of existing names to skip duplicates
 				existing := make(map[string]bool, len(entries))
 				for _, e := range entries {
@@ -708,10 +744,16 @@ func (s *SourceService) Read(ctx context.Context, req *pb.SourceReadRequest) (*p
 
 	// Not a smart query result — if provider is NativeBrowsable, delegate to it
 	if nb, ok := provider.(sources.NativeBrowsable); ok && nb.IsNativeBrowsable() && connected {
-		data, err := provider.Read(ctx, pctx, relPath, req.Offset, req.Length)
-		if err == nil {
-			return &pb.SourceReadResponse{Ok: true, Data: data}, nil
+		// Rate limit check
+		if err := s.rateLimiter.Wait(ctx, pctx.WorkspaceId, integration); err != nil {
+			return &pb.SourceReadResponse{Ok: false, Error: "rate limited"}, nil
 		}
+
+		data, err := provider.Read(ctx, pctx, relPath, req.Offset, req.Length)
+		if err != nil {
+			return &pb.SourceReadResponse{Ok: false, Error: err.Error()}, nil
+		}
+		return &pb.SourceReadResponse{Ok: true, Data: data}, nil
 	}
 
 	return &pb.SourceReadResponse{Ok: false, Error: "file not found"}, nil

@@ -269,10 +269,7 @@ func (p *PostHogProvider) listInsights(ctx context.Context, client *clients.Post
 	}
 	entries := make([]sources.DirEntry, 0, len(insights))
 	for _, ins := range insights {
-		safeName := sources.SanitizeFilename(ins.Name)
-		if len(safeName) > 50 {
-			safeName = safeName[:50]
-		}
+		safeName := sanitizeAndTruncate(ins.Name)
 		name := fmt.Sprintf("%s_%s.json", ins.ShortID, safeName)
 		entries = append(entries, sources.DirEntry{
 			Name:  name,
@@ -290,10 +287,7 @@ func (p *PostHogProvider) listCohorts(ctx context.Context, client *clients.PostH
 	}
 	entries := make([]sources.DirEntry, 0, len(cohorts))
 	for _, co := range cohorts {
-		safeName := sources.SanitizeFilename(co.Name)
-		if len(safeName) > 50 {
-			safeName = safeName[:50]
-		}
+		safeName := sanitizeAndTruncate(co.Name)
 		name := fmt.Sprintf("%d_%s.json", co.ID, safeName)
 		entries = append(entries, sources.DirEntry{
 			Name:  name,
@@ -336,49 +330,43 @@ func (p *PostHogProvider) readFeatureFlag(ctx context.Context, client *clients.P
 
 func (p *PostHogProvider) readInsight(ctx context.Context, client *clients.PostHogClient, projectID int, filename string) ([]byte, error) {
 	name := strings.TrimSuffix(filename, ".json")
-	insights, err := client.ListInsights(ctx, projectID)
+	// Extract shortID from filename prefix (format: {shortID}_{name}.json)
+	idx := strings.Index(name, "_")
+	if idx < 0 {
+		return nil, sources.ErrNotFound
+	}
+	shortID := name[:idx]
+
+	insight, err := client.GetInsightByShortID(ctx, projectID, shortID)
 	if err != nil {
-		return nil, err
+		return nil, sources.ErrNotFound
 	}
-	for _, ins := range insights {
-		safeName := sources.SanitizeFilename(ins.Name)
-		if len(safeName) > 50 {
-			safeName = safeName[:50]
-		}
-		expected := fmt.Sprintf("%s_%s", ins.ShortID, safeName)
-		if expected == name {
-			return jsonMarshalIndent(ins)
-		}
-	}
-	return nil, sources.ErrNotFound
+	return jsonMarshalIndent(insight)
 }
 
 func (p *PostHogProvider) readCohort(ctx context.Context, client *clients.PostHogClient, projectID int, filename string) ([]byte, error) {
 	name := strings.TrimSuffix(filename, ".json")
-	cohorts, err := client.ListCohorts(ctx, projectID)
+	// Extract cohort ID from filename prefix (format: {id}_{name}.json)
+	idx := strings.Index(name, "_")
+	if idx < 0 {
+		return nil, sources.ErrNotFound
+	}
+	cohortID, err := strconv.Atoi(name[:idx])
 	if err != nil {
-		return nil, err
+		return nil, sources.ErrNotFound
 	}
-	for _, co := range cohorts {
-		safeName := sources.SanitizeFilename(co.Name)
-		if len(safeName) > 50 {
-			safeName = safeName[:50]
-		}
-		expected := fmt.Sprintf("%d_%s", co.ID, safeName)
-		if expected == name {
-			return jsonMarshalIndent(co)
-		}
+
+	cohort, err := client.GetCohort(ctx, projectID, cohortID)
+	if err != nil {
+		return nil, sources.ErrNotFound
 	}
-	return nil, sources.ErrNotFound
+	return jsonMarshalIndent(cohort)
 }
 
 // --- Helpers ---
 
 func posthogProjectDirName(proj clients.PostHogProject) string {
-	safeName := sources.SanitizeFilename(proj.Name)
-	if len(safeName) > 50 {
-		safeName = safeName[:50]
-	}
+	safeName := sanitizeAndTruncate(proj.Name)
 	return fmt.Sprintf("%d_%s", proj.ID, safeName)
 }
 
@@ -407,4 +395,12 @@ func sliceBytes(data []byte, offset, length int64) []byte {
 		end = offset + length
 	}
 	return data[offset:end]
+}
+
+func sanitizeAndTruncate(name string) string {
+	safe := sources.SanitizeFilename(name)
+	if len(safe) > 50 {
+		return safe[:50]
+	}
+	return safe
 }
