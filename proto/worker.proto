@@ -13,7 +13,8 @@ service WorkerService {
   rpc GetWorker(GetWorkerRequest) returns (GetWorkerResponse);
   rpc ListWorkers(ListWorkersRequest) returns (ListWorkersResponse);
   
-  // Task results
+  // Task lifecycle
+  rpc SetTaskStarted(SetTaskStartedRequest) returns (SetTaskStartedResponse);
   rpc SetTaskResult(SetTaskResultRequest) returns (SetTaskResultResponse);
 
   // Network/IP management for sandboxes
@@ -81,6 +82,12 @@ message ListWorkersResponse {
 }
 
 // Task result reporting
+message SetTaskStartedRequest {
+  string task_id = 1;
+}
+
+message SetTaskStartedResponse {}
+
 message SetTaskResultRequest {
   string task_id = 1;
   int32 exit_code = 2;

@@ -72,6 +72,10 @@ type IntegrationCredentials struct {
 
 // TokenValidationResult is returned when validating a token
 type TokenValidationResult struct {
+	// Common
+	TokenType TokenType
+	TokenId   uint // Internal ID of the matched token
+
 	// Workspace fields (set for workspace_member tokens)
 	WorkspaceId   uint
 	WorkspaceExt  string
@@ -83,7 +87,4 @@ type TokenValidationResult struct {
 
 	// Worker fields (set for worker tokens)
 	PoolName string
-
-	// Common
-	TokenType TokenType
 }

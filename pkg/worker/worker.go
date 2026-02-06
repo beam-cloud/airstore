@@ -234,6 +234,12 @@ func (w *Worker) taskLoop() {
 			Uint("workspace_id", task.WorkspaceId).
 			Msg("received task")
 
+		// Mark as running
+		// Log but don't abort -- the task is already dequeued and must run
+		if err := w.gatewayClient.SetTaskStarted(w.ctx, task.ExternalId); err != nil {
+			log.Warn().Err(err).Str("task_id", task.ExternalId).Msg("failed to mark task as started")
+		}
+
 		// Execute the task in a sandbox
 		result, err := w.sandboxManager.RunTask(w.ctx, *task)
 
@@ -241,38 +247,31 @@ func (w *Worker) taskLoop() {
 		w.activeTasks.Done()
 
 		if err != nil {
-			log.Error().Err(err).
-				Str("worker_id", w.workerId).
-				Str("task_id", task.ExternalId).
-				Msg("task execution failed")
-
-			// Mark task as failed
-			w.taskQueue.Fail(w.ctx, task.ExternalId, err)
-			continue
+			log.Error().Err(err).Str("task_id", task.ExternalId).Msg("task execution failed")
+			result = &types.TaskResult{ID: task.ExternalId, ExitCode: -1, Error: err.Error()}
 		}
 
-		// Mark task as complete in Redis queue
-		if err := w.taskQueue.Complete(w.ctx, task.ExternalId, result); err != nil {
-			log.Warn().Err(err).Str("task_id", task.ExternalId).Msg("failed to complete task in queue")
-		}
-
-		// Report result to gateway (persists to Postgres)
-		if err := w.reportTaskResult(task.ExternalId, result); err != nil {
-			log.Warn().Err(err).Str("task_id", task.ExternalId).Msg("failed to report task result to gateway")
-		}
-
-		log.Info().
-			Str("worker_id", w.workerId).
-			Str("task_id", task.ExternalId).
-			Int("exit_code", result.ExitCode).
-			Dur("duration", result.Duration).
-			Msg("task completed")
+		w.finishTask(task.ExternalId, result)
 	}
 }
 
-// reportTaskResult reports the task result to the gateway for persistence
-func (w *Worker) reportTaskResult(taskID string, result *types.TaskResult) error {
-	return w.gatewayClient.SetTaskResult(w.ctx, taskID, result.ExitCode, result.Error)
+// finishTask records the result in Redis and Postgres. Single path for both success and failure.
+func (w *Worker) finishTask(taskID string, result *types.TaskResult) {
+	var qErr error
+	if result.ExitCode == 0 && result.Error == "" {
+		qErr = w.taskQueue.Complete(w.ctx, taskID, result)
+	} else {
+		qErr = w.taskQueue.Fail(w.ctx, taskID, fmt.Errorf("%s", result.Error))
+	}
+	if qErr != nil {
+		log.Warn().Err(qErr).Str("task_id", taskID).Msg("failed to update task queue")
+	}
+
+	if err := w.gatewayClient.SetTaskResult(w.ctx, taskID, result.ExitCode, result.Error); err != nil {
+		log.Warn().Err(err).Str("task_id", taskID).Msg("failed to report result to gateway")
+	}
+
+	log.Info().Str("task_id", taskID).Int("exit_code", result.ExitCode).Msg("task finished")
 }
 
 // register registers the worker with the gateway

@@ -25,6 +25,7 @@ const (
 	WorkerService_Deregister_FullMethodName     = "/worker.WorkerService/Deregister"
 	WorkerService_GetWorker_FullMethodName      = "/worker.WorkerService/GetWorker"
 	WorkerService_ListWorkers_FullMethodName    = "/worker.WorkerService/ListWorkers"
+	WorkerService_SetTaskStarted_FullMethodName = "/worker.WorkerService/SetTaskStarted"
 	WorkerService_SetTaskResult_FullMethodName  = "/worker.WorkerService/SetTaskResult"
 	WorkerService_AllocateIP_FullMethodName     = "/worker.WorkerService/AllocateIP"
 	WorkerService_ReleaseIP_FullMethodName      = "/worker.WorkerService/ReleaseIP"
@@ -41,7 +42,8 @@ type WorkerServiceClient interface {
 	Deregister(ctx context.Context, in *DeregisterRequest, opts ...grpc.CallOption) (*DeregisterResponse, error)
 	GetWorker(ctx context.Context, in *GetWorkerRequest, opts ...grpc.CallOption) (*GetWorkerResponse, error)
 	ListWorkers(ctx context.Context, in *ListWorkersRequest, opts ...grpc.CallOption) (*ListWorkersResponse, error)
-	// Task results
+	// Task lifecycle
+	SetTaskStarted(ctx context.Context, in *SetTaskStartedRequest, opts ...grpc.CallOption) (*SetTaskStartedResponse, error)
 	SetTaskResult(ctx context.Context, in *SetTaskResultRequest, opts ...grpc.CallOption) (*SetTaskResultResponse, error)
 	// Network/IP management for sandboxes
 	AllocateIP(ctx context.Context, in *AllocateIPRequest, opts ...grpc.CallOption) (*AllocateIPResponse, error)
@@ -110,6 +112,15 @@ func (c *workerServiceClient) ListWorkers(ctx context.Context, in *ListWorkersRe
 	return out, nil
 }
 
+func (c *workerServiceClient) SetTaskStarted(ctx context.Context, in *SetTaskStartedRequest, opts ...grpc.CallOption) (*SetTaskStartedResponse, error) {
+	out := new(SetTaskStartedResponse)
+	err := c.cc.Invoke(ctx, WorkerService_SetTaskStarted_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *workerServiceClient) SetTaskResult(ctx context.Context, in *SetTaskResultRequest, opts ...grpc.CallOption) (*SetTaskResultResponse, error) {
 	out := new(SetTaskResultResponse)
 	err := c.cc.Invoke(ctx, WorkerService_SetTaskResult_FullMethodName, in, out, opts...)
@@ -148,7 +159,8 @@ type WorkerServiceServer interface {
 	Deregister(context.Context, *DeregisterRequest) (*DeregisterResponse, error)
 	GetWorker(context.Context, *GetWorkerRequest) (*GetWorkerResponse, error)
 	ListWorkers(context.Context, *ListWorkersRequest) (*ListWorkersResponse, error)
-	// Task results
+	// Task lifecycle
+	SetTaskStarted(context.Context, *SetTaskStartedRequest) (*SetTaskStartedResponse, error)
 	SetTaskResult(context.Context, *SetTaskResultRequest) (*SetTaskResultResponse, error)
 	// Network/IP management for sandboxes
 	AllocateIP(context.Context, *AllocateIPRequest) (*AllocateIPResponse, error)
@@ -177,6 +189,9 @@ func (UnimplementedWorkerServiceServer) GetWorker(context.Context, *GetWorkerReq
 }
 func (UnimplementedWorkerServiceServer) ListWorkers(context.Context, *ListWorkersRequest) (*ListWorkersResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListWorkers not implemented")
+}
+func (UnimplementedWorkerServiceServer) SetTaskStarted(context.Context, *SetTaskStartedRequest) (*SetTaskStartedResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetTaskStarted not implemented")
 }
 func (UnimplementedWorkerServiceServer) SetTaskResult(context.Context, *SetTaskResultRequest) (*SetTaskResultResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SetTaskResult not implemented")
@@ -308,6 +323,24 @@ func _WorkerService_ListWorkers_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _WorkerService_SetTaskStarted_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetTaskStartedRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkerServiceServer).SetTaskStarted(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkerService_SetTaskStarted_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkerServiceServer).SetTaskStarted(ctx, req.(*SetTaskStartedRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _WorkerService_SetTaskResult_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SetTaskResultRequest)
 	if err := dec(in); err != nil {
@@ -392,6 +425,10 @@ var WorkerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListWorkers",
 			Handler:    _WorkerService_ListWorkers_Handler,
+		},
+		{
+			MethodName: "SetTaskStarted",
+			Handler:    _WorkerService_SetTaskStarted_Handler,
 		},
 		{
 			MethodName: "SetTaskResult",

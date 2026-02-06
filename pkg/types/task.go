@@ -41,6 +41,11 @@ type Task struct {
 	// Resources specifies resource requirements (optional - uses defaults if nil)
 	Resources *TaskResources `json:"resources,omitempty" db:"-"`
 
+	// Hook-triggered task fields (nil/defaults for manual tasks)
+	HookId      *uint `json:"hook_id,omitempty" db:"hook_id"`   // nil = manual, non-nil = hook-triggered
+	Attempt     int   `json:"attempt" db:"attempt"`              // 1-based attempt number
+	MaxAttempts int   `json:"max_attempts" db:"max_attempts"`    // default 1 (manual), 3 (hook)
+
 	// ExitCode is the exit code when complete
 	ExitCode *int `json:"exit_code,omitempty" db:"exit_code"`
 

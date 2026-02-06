@@ -56,8 +56,8 @@ func init() {
 func runMount(cmd *cobra.Command, args []string) error {
 	mountPoint := args[0]
 
-	// Suppress logs unless verbose
-	if !mountVerbose {
+	// Suppress logs unless verbose or FUSE trace is enabled
+	if !mountVerbose && os.Getenv("AIRSTORE_FUSE_TRACE") == "" {
 		log.Logger = zerolog.New(io.Discard)
 	}
 

@@ -66,13 +66,9 @@ var (
 	// Table styles
 	TableHeaderStyle = lipgloss.NewStyle().
 				Bold(true).
-				Foreground(ColorSubtle).
-				BorderStyle(lipgloss.NormalBorder()).
-				BorderBottom(true).
-				BorderForeground(ColorSubtle)
+				Foreground(ColorSubtle)
 
-	TableCellStyle = lipgloss.NewStyle().
-			PaddingRight(2)
+	TableCellStyle = lipgloss.NewStyle()
 
 	// Section styles
 	SectionTitleStyle = lipgloss.NewStyle().

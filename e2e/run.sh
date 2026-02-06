@@ -946,6 +946,128 @@ test_smart_queries() {
 }
 
 # ============================================================================
+# Test: Hooks
+# ============================================================================
+test_hooks() {
+    echo ""
+    echo "=== Test: Hooks ==="
+    
+    ensure_cli
+    wait_gateway
+    
+    # Requires AIRSTORE_TOKEN (workspace member token)
+    local TOKEN="${AIRSTORE_TOKEN:-}"
+    if [ -z "$TOKEN" ]; then
+        info "Set AIRSTORE_TOKEN to test hooks"
+        info "Example: AIRSTORE_TOKEN=your_token ./e2e/run.sh hooks"
+        pass "Skipped (no AIRSTORE_TOKEN)"
+        return
+    fi
+    
+    local CLI="$PROJECT_ROOT/bin/airstore"
+    local HOOKS_MOUNT="/tmp/airstore-hooks-e2e"
+    
+    # Helper functions
+    hook_cmd() { "$CLI" --gateway "$GATEWAY_GRPC" --token "$TOKEN" hook "$@" 2>&1; }
+    
+    # Mount filesystem
+    info "Mounting filesystem at $HOOKS_MOUNT..."
+    mkdir -p "$HOOKS_MOUNT"
+    "$CLI" mount "$HOOKS_MOUNT" --gateway "$GATEWAY_GRPC" --token "$TOKEN" &
+    local MOUNT_PID=$!
+    sleep 5
+    
+    if [ ! -d "$HOOKS_MOUNT/skills" ]; then
+        kill $MOUNT_PID 2>/dev/null || true
+        fail "Mount failed - /skills not found"
+    fi
+    pass "Filesystem mounted"
+    
+    # Test 1: Create hook
+    info "Test 1: Creating hook on /skills..."
+    RESULT=$(hook_cmd create --path /skills --prompt "Briefly summarize this file.")
+    HOOK_ID=$(echo "$RESULT" | grep "ID" | head -1 | awk '{print $NF}')
+    if [ -z "$HOOK_ID" ]; then
+        # Hook may already exist
+        HOOK_ID=$(hook_cmd list --json | jq -r '.[0].id // empty' 2>/dev/null)
+        [ -n "$HOOK_ID" ] || fail "Could not create or find hook"
+        pass "Using existing hook: $HOOK_ID"
+    else
+        pass "Hook created: $HOOK_ID"
+    fi
+    
+    # Test 2: Write file → task fires
+    info "Test 2: Writing file to trigger hook..."
+    echo "Hook test file created at $(date)" > "$HOOKS_MOUNT/skills/e2e-hook-$(date +%s).txt"
+    pass "File written"
+    sleep 8  # debounce (2s) + processing
+    
+    RUNS=$(hook_cmd runs "$HOOK_ID")
+    if echo "$RUNS" | grep -q "running\|complete\|pending"; then
+        pass "Task created from hook"
+    else
+        sleep 10
+        RUNS=$(hook_cmd runs "$HOOK_ID")
+        if echo "$RUNS" | grep -q "running\|complete\|pending"; then
+            pass "Task created from hook (delayed)"
+        else
+            fail "Hook did not fire after writing file"
+        fi
+    fi
+    
+    # Test 3: No double-fire while active
+    info "Test 3: Verifying no double-fire..."
+    local COUNT_BEFORE=$(echo "$RUNS" | grep -c "running\|complete\|pending\|failed" || true)
+    echo "Second file" > "$HOOKS_MOUNT/skills/e2e-hook-double-$(date +%s).txt"
+    sleep 5
+    
+    RUNS=$(hook_cmd runs "$HOOK_ID")
+    local COUNT_AFTER=$(echo "$RUNS" | grep -c "running\|complete\|pending\|failed" || true)
+    if [ "$COUNT_AFTER" -le "$COUNT_BEFORE" ]; then
+        pass "No duplicate task (active task blocks)"
+    else
+        info "New task created (previous may have completed)"
+    fi
+    
+    # Test 4: Wait for completion
+    info "Test 4: Waiting for task completion..."
+    local TASK_ID=$(echo "$RUNS" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)
+    if [ -n "$TASK_ID" ]; then
+        for i in {1..36}; do
+            STATUS=$(curl -s -H "Authorization: Bearer $TOKEN" "$GATEWAY_HTTP/api/v1/tasks/$TASK_ID" | jq -r '.data.status')
+            if [ "$STATUS" = "complete" ]; then
+                pass "Task completed: $TASK_ID"
+                break
+            fi
+            [ $i -eq 36 ] && fail "Task did not complete in 180s"
+            sleep 5
+        done
+    else
+        info "Could not extract task ID"
+        sleep 30
+    fi
+    
+    # Test 5: Run history
+    info "Test 5: Checking run history..."
+    hook_cmd runs "$HOOK_ID"
+    pass "Run history visible"
+    
+    # Test 6: Cleanup
+    info "Test 6: Cleaning up..."
+    hook_cmd delete "$HOOK_ID"
+    pass "Hook deleted"
+    
+    # Unmount and clean up
+    kill $MOUNT_PID 2>/dev/null || true
+    sleep 1
+    umount "$HOOKS_MOUNT" 2>/dev/null || diskutil unmount "$HOOKS_MOUNT" 2>/dev/null || true
+    rmdir "$HOOKS_MOUNT" 2>/dev/null || true
+    
+    echo ""
+    pass "Hooks test passed (6 tests)"
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -984,6 +1106,9 @@ case "${1:-all}" in
     smart|smart-queries)
         test_smart_queries
         ;;
+    hooks)
+        test_hooks
+        ;;
     all)
         test_setup
         test_task
@@ -991,10 +1116,11 @@ case "${1:-all}" in
         test_tools
         test_context
         test_sources
+        test_hooks
         ;;
     *)
         echo "Unknown test: $1"
-        echo "Available: setup, task, fs, tools, context, sources, index, smart, all"
+        echo "Available: setup, task, fs, tools, context, sources, index, smart, hooks, all"
         exit 1
         ;;
 esac

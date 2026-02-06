@@ -3,25 +3,34 @@ package services
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/common"
+	"github.com/beam-cloud/airstore/pkg/hooks"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/sources"
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
+	"google.golang.org/grpc/metadata"
 )
 
 type GatewayService struct {
 	pb.UnimplementedGatewayServiceServer
-	backend        repository.BackendRepository
-	s2Client       *common.S2Client
-	sourceRegistry *sources.Registry
+	backend  repository.BackendRepository
+	fsStore  repository.FilesystemStore
+	s2Client *common.S2Client
+	hooksSvc *hooks.Service
 }
 
-func NewGatewayService(backend repository.BackendRepository, s2Client *common.S2Client, sourceRegistry *sources.Registry) *GatewayService {
-	return &GatewayService{backend: backend, s2Client: s2Client, sourceRegistry: sourceRegistry}
+func NewGatewayService(backend repository.BackendRepository, s2Client *common.S2Client, fsStore repository.FilesystemStore, eventBus *common.EventBus) *GatewayService {
+	return &GatewayService{
+		backend:  backend,
+		s2Client: s2Client,
+		fsStore:  fsStore,
+		hooksSvc: &hooks.Service{Store: fsStore, Backend: backend, EventBus: eventBus},
+	}
 }
 
 // Workspaces
@@ -92,17 +101,12 @@ func (s *GatewayService) DeleteWorkspace(ctx context.Context, req *pb.DeleteWork
 // Members
 
 func (s *GatewayService) AddMember(ctx context.Context, req *pb.AddMemberRequest) (*pb.MemberResponse, error) {
-	// Adding members requires workspace access + admin role
-	if err := auth.RequireWorkspaceAccess(ctx, req.WorkspaceId); err != nil {
+	ws, err := s.resolveWorkspace(ctx, req.WorkspaceId)
+	if err != nil {
 		return &pb.MemberResponse{Ok: false, Error: err.Error()}, nil
 	}
 	if err := auth.RequireAdmin(ctx); err != nil {
 		return &pb.MemberResponse{Ok: false, Error: err.Error()}, nil
-	}
-
-	ws, err := s.backend.GetWorkspaceByExternalId(ctx, req.WorkspaceId)
-	if err != nil || ws == nil {
-		return &pb.MemberResponse{Ok: false, Error: "workspace not found"}, nil
 	}
 
 	role := types.MemberRole(req.Role)
@@ -118,17 +122,12 @@ func (s *GatewayService) AddMember(ctx context.Context, req *pb.AddMemberRequest
 }
 
 func (s *GatewayService) ListMembers(ctx context.Context, req *pb.ListMembersRequest) (*pb.ListMembersResponse, error) {
-	// Listing members requires workspace access + admin role
-	if err := auth.RequireWorkspaceAccess(ctx, req.WorkspaceId); err != nil {
+	ws, err := s.resolveWorkspace(ctx, req.WorkspaceId)
+	if err != nil {
 		return &pb.ListMembersResponse{Ok: false, Error: err.Error()}, nil
 	}
 	if err := auth.RequireAdmin(ctx); err != nil {
 		return &pb.ListMembersResponse{Ok: false, Error: err.Error()}, nil
-	}
-
-	ws, err := s.backend.GetWorkspaceByExternalId(ctx, req.WorkspaceId)
-	if err != nil || ws == nil {
-		return &pb.ListMembersResponse{Ok: false, Error: "workspace not found"}, nil
 	}
 
 	members, err := s.backend.ListMembers(ctx, ws.Id)
@@ -160,17 +159,12 @@ func (s *GatewayService) RemoveMember(ctx context.Context, req *pb.RemoveMemberR
 // Tokens
 
 func (s *GatewayService) CreateToken(ctx context.Context, req *pb.CreateTokenRequest) (*pb.CreateTokenResponse, error) {
-	// Creating tokens requires workspace access + admin role
-	if err := auth.RequireWorkspaceAccess(ctx, req.WorkspaceId); err != nil {
+	ws, err := s.resolveWorkspace(ctx, req.WorkspaceId)
+	if err != nil {
 		return &pb.CreateTokenResponse{Ok: false, Error: err.Error()}, nil
 	}
 	if err := auth.RequireAdmin(ctx); err != nil {
 		return &pb.CreateTokenResponse{Ok: false, Error: err.Error()}, nil
-	}
-
-	ws, err := s.backend.GetWorkspaceByExternalId(ctx, req.WorkspaceId)
-	if err != nil || ws == nil {
-		return &pb.CreateTokenResponse{Ok: false, Error: "workspace not found"}, nil
 	}
 
 	member, err := s.backend.GetMember(ctx, req.MemberId)
@@ -205,17 +199,12 @@ func (s *GatewayService) CreateToken(ctx context.Context, req *pb.CreateTokenReq
 }
 
 func (s *GatewayService) ListTokens(ctx context.Context, req *pb.ListTokensRequest) (*pb.ListTokensResponse, error) {
-	// Listing tokens requires workspace access + admin role
-	if err := auth.RequireWorkspaceAccess(ctx, req.WorkspaceId); err != nil {
+	ws, err := s.resolveWorkspace(ctx, req.WorkspaceId)
+	if err != nil {
 		return &pb.ListTokensResponse{Ok: false, Error: err.Error()}, nil
 	}
 	if err := auth.RequireAdmin(ctx); err != nil {
 		return &pb.ListTokensResponse{Ok: false, Error: err.Error()}, nil
-	}
-
-	ws, err := s.backend.GetWorkspaceByExternalId(ctx, req.WorkspaceId)
-	if err != nil || ws == nil {
-		return &pb.ListTokensResponse{Ok: false, Error: "workspace not found"}, nil
 	}
 
 	tokens, err := s.backend.ListTokens(ctx, ws.Id)
@@ -294,14 +283,9 @@ func (s *GatewayService) ListWorkerTokens(ctx context.Context, req *pb.ListWorke
 // Connections
 
 func (s *GatewayService) AddConnection(ctx context.Context, req *pb.AddConnectionRequest) (*pb.ConnectionResponse, error) {
-	// Adding connections requires workspace access
-	if err := auth.RequireWorkspaceAccess(ctx, req.WorkspaceId); err != nil {
+	ws, err := s.resolveWorkspace(ctx, req.WorkspaceId)
+	if err != nil {
 		return &pb.ConnectionResponse{Ok: false, Error: err.Error()}, nil
-	}
-
-	ws, err := s.backend.GetWorkspaceByExternalId(ctx, req.WorkspaceId)
-	if err != nil || ws == nil {
-		return &pb.ConnectionResponse{Ok: false, Error: "workspace not found"}, nil
 	}
 
 	var memberId *uint
@@ -354,14 +338,9 @@ func (s *GatewayService) AddConnection(ctx context.Context, req *pb.AddConnectio
 }
 
 func (s *GatewayService) ListConnections(ctx context.Context, req *pb.ListConnectionsRequest) (*pb.ListConnectionsResponse, error) {
-	// Listing connections requires workspace access
-	if err := auth.RequireWorkspaceAccess(ctx, req.WorkspaceId); err != nil {
+	ws, err := s.resolveWorkspace(ctx, req.WorkspaceId)
+	if err != nil {
 		return &pb.ListConnectionsResponse{Ok: false, Error: err.Error()}, nil
-	}
-
-	ws, err := s.backend.GetWorkspaceByExternalId(ctx, req.WorkspaceId)
-	if err != nil || ws == nil {
-		return &pb.ListConnectionsResponse{Ok: false, Error: "workspace not found"}, nil
 	}
 
 	conns, err := s.backend.ListConnections(ctx, ws.Id)
@@ -557,4 +536,186 @@ func taskToPb(t *types.Task) *pb.Task {
 		task.FinishedAt = t.FinishedAt.Format(time.RFC3339)
 	}
 	return task
+}
+
+// Hooks
+
+func (s *GatewayService) CreateHook(ctx context.Context, req *pb.CreateHookRequest) (*pb.HookResponse, error) {
+	ws, err := s.resolveWorkspace(ctx, req.WorkspaceId)
+	if err != nil {
+		return &pb.HookResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	rawToken := extractRawToken(ctx)
+	if rawToken == "" {
+		return &pb.HookResponse{Ok: false, Error: "authentication token required"}, nil
+	}
+
+	hook, err := s.hooksSvc.Create(ctx, ws.Id,
+		ptrIfNonZero(auth.MemberId(ctx)),
+		ptrIfNonZero(auth.TokenId(ctx)),
+		rawToken, req.Path, req.Prompt)
+	if err != nil {
+		return &pb.HookResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	return &pb.HookResponse{Ok: true, Hook: hookToPb(hook, ws.ExternalId)}, nil
+}
+
+func (s *GatewayService) ListHooks(ctx context.Context, req *pb.ListHooksRequest) (*pb.ListHooksResponse, error) {
+	ws, err := s.resolveWorkspace(ctx, req.WorkspaceId)
+	if err != nil {
+		return &pb.ListHooksResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	hks, err := s.hooksSvc.List(ctx, ws.Id)
+	if err != nil {
+		return &pb.ListHooksResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	pbHooks := make([]*pb.Hook, 0, len(hks))
+	for _, h := range hks {
+		pbHooks = append(pbHooks, hookToPb(h, ws.ExternalId))
+	}
+	return &pb.ListHooksResponse{Ok: true, Hooks: pbHooks}, nil
+}
+
+func (s *GatewayService) GetHook(ctx context.Context, req *pb.GetHookRequest) (*pb.HookResponse, error) {
+	hook, ws, err := s.resolveHook(ctx, req.Id)
+	if err != nil {
+		return &pb.HookResponse{Ok: false, Error: err.Error()}, nil
+	}
+	return &pb.HookResponse{Ok: true, Hook: hookToPb(hook, ws.ExternalId)}, nil
+}
+
+func (s *GatewayService) UpdateHook(ctx context.Context, req *pb.UpdateHookRequest) (*pb.HookResponse, error) {
+	// Validate access
+	if _, _, err := s.resolveHook(ctx, req.Id); err != nil {
+		return &pb.HookResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	var prompt *string
+	if req.Prompt != "" {
+		prompt = &req.Prompt
+	}
+	var active *bool
+	if req.HasActive {
+		active = &req.Active
+	}
+
+	hook, err := s.hooksSvc.Update(ctx, req.Id, prompt, active)
+	if err != nil {
+		return &pb.HookResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	wsExt := ""
+	if ws, _ := s.backend.GetWorkspace(ctx, hook.WorkspaceId); ws != nil {
+		wsExt = ws.ExternalId
+	}
+	return &pb.HookResponse{Ok: true, Hook: hookToPb(hook, wsExt)}, nil
+}
+
+func (s *GatewayService) DeleteHook(ctx context.Context, req *pb.DeleteHookRequest) (*pb.DeleteResponse, error) {
+	if _, _, err := s.resolveHook(ctx, req.Id); err != nil {
+		return &pb.DeleteResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	if err := s.hooksSvc.Delete(ctx, req.Id); err != nil {
+		return &pb.DeleteResponse{Ok: false, Error: err.Error()}, nil
+	}
+	return &pb.DeleteResponse{Ok: true}, nil
+}
+
+// resolveWorkspace resolves the workspace from an explicit ID or the caller's token,
+// validates access, and returns the workspace.
+func (s *GatewayService) resolveWorkspace(ctx context.Context, workspaceExtId string) (*types.Workspace, error) {
+	wsExtId, err := auth.ResolveWorkspaceExtId(ctx, workspaceExtId)
+	if err != nil {
+		return nil, err
+	}
+	ws, err := s.backend.GetWorkspaceByExternalId(ctx, wsExtId)
+	if err != nil || ws == nil {
+		return nil, fmt.Errorf("workspace not found")
+	}
+	return ws, nil
+}
+
+// resolveHook looks up a hook by external ID, validates workspace access, and returns both.
+func (s *GatewayService) resolveHook(ctx context.Context, hookExtId string) (*types.Hook, *types.Workspace, error) {
+	hook, err := s.fsStore.GetHook(ctx, hookExtId)
+	if err != nil {
+		return nil, nil, err
+	}
+	if hook == nil {
+		return nil, nil, fmt.Errorf("hook not found")
+	}
+	ws, err := s.backend.GetWorkspace(ctx, hook.WorkspaceId)
+	if err != nil || ws == nil {
+		return nil, nil, fmt.Errorf("workspace not found")
+	}
+	if err := auth.RequireWorkspaceAccess(ctx, ws.ExternalId); err != nil {
+		return nil, nil, err
+	}
+	return hook, ws, nil
+}
+
+// extractRawToken gets the raw bearer token from gRPC metadata.
+func extractRawToken(ctx context.Context) string {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return ""
+	}
+	vals := md.Get("authorization")
+	if len(vals) == 0 {
+		return ""
+	}
+	return strings.TrimPrefix(vals[0], "Bearer ")
+}
+
+func hookToPb(h *types.Hook, workspaceExternalId string) *pb.Hook {
+	return &pb.Hook{
+		Id:          h.ExternalId,
+		WorkspaceId: workspaceExternalId,
+		Path:        h.Path,
+		Prompt:      h.Prompt,
+		Active:      h.Active,
+		CreatedAt:   h.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:   h.UpdatedAt.Format(time.RFC3339),
+	}
+}
+
+func (s *GatewayService) ListHookRuns(ctx context.Context, req *pb.ListHookRunsRequest) (*pb.ListHookRunsResponse, error) {
+	hook, _, err := s.resolveHook(ctx, req.HookId)
+	if err != nil {
+		return &pb.ListHookRunsResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	tasks, err := s.hooksSvc.ListRuns(ctx, hook.Id)
+	if err != nil {
+		return &pb.ListHookRunsResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	runs := make([]*pb.HookRun, 0, len(tasks))
+	for _, t := range tasks {
+		run := &pb.HookRun{
+			TaskId:      t.ExternalId,
+			Status:      string(t.Status),
+			Attempt:     int32(t.Attempt),
+			MaxAttempts: int32(t.MaxAttempts),
+			Error:       t.Error,
+			CreatedAt:   t.CreatedAt.Format(time.RFC3339),
+		}
+		if t.FinishedAt != nil {
+			run.FinishedAt = t.FinishedAt.Format(time.RFC3339)
+		}
+		runs = append(runs, run)
+	}
+	return &pb.ListHookRunsResponse{Ok: true, Runs: runs}, nil
+}
+
+func ptrIfNonZero(v uint) *uint {
+	if v == 0 {
+		return nil
+	}
+	return &v
 }

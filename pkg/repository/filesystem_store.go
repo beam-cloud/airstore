@@ -111,6 +111,31 @@ type FilesystemStore interface {
 	// DeleteSymlink removes a symlink.
 	DeleteSymlink(ctx context.Context, path string) error
 
+	// ===== Source Polling =====
+
+	// GetWatchedSourceQueries returns stale source queries that have active hooks watching their path.
+	GetWatchedSourceQueries(ctx context.Context, staleAfter time.Duration, limit int) ([]*types.FilesystemQuery, error)
+
+	// ===== Hooks =====
+
+	// CreateHook stores a new hook definition.
+	CreateHook(ctx context.Context, hook *types.Hook) (*types.Hook, error)
+
+	// GetHook retrieves a hook by external ID.
+	GetHook(ctx context.Context, externalId string) (*types.Hook, error)
+
+	// GetHookById retrieves a hook by internal ID.
+	GetHookById(ctx context.Context, id uint) (*types.Hook, error)
+
+	// ListHooks returns all hooks for a workspace.
+	ListHooks(ctx context.Context, workspaceId uint) ([]*types.Hook, error)
+
+	// UpdateHook updates an existing hook.
+	UpdateHook(ctx context.Context, hook *types.Hook) error
+
+	// DeleteHook removes a hook by external ID.
+	DeleteHook(ctx context.Context, externalId string) error
+
 	// ===== Cache Invalidation =====
 
 	// InvalidatePath removes a specific path from all caches.

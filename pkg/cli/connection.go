@@ -29,9 +29,9 @@ var connectionCmd = &cobra.Command{
 }
 
 var connectionAddCmd = &cobra.Command{
-	Use:   "add <workspace_id> <type>",
+	Use:   "add <type>",
 	Short: "Add an integration connection",
-	Long: `Add an integration connection to a workspace.
+	Long: `Add an integration connection to your workspace.
 
 Supported integration types:
   github    - GitHub (use --token with personal access token)
@@ -43,14 +43,13 @@ Supported integration types:
   posthog   - PostHog analytics (use --api-key with personal API key)
 
 Examples:
-  airstore connection add <ws> github --token ghp_xxxxxxxxxxxx
-  airstore connection add <ws> notion --token secret_xxxxxxxxxxxx
-  airstore connection add <ws> weather --api-key abc123
-  airstore connection add <ws> github --token ghp_xxx --member <member_id>  # Personal connection`,
-	Args: cobra.ExactArgs(2),
+  airstore connection add github --token ghp_xxxxxxxxxxxx
+  airstore connection add notion --token secret_xxxxxxxxxxxx
+  airstore connection add weather --api-key abc123
+  airstore connection add github --token ghp_xxx --member <member_id>  # Personal connection`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		workspaceId := args[0]
-		integrationType := strings.ToLower(args[1])
+		integrationType := strings.ToLower(args[0])
 
 		// Validate integration type
 		switch integrationType {
@@ -98,7 +97,6 @@ Examples:
 			}
 
 			resp, err = client.Gateway.AddConnection(context.Background(), &pb.AddConnectionRequest{
-				WorkspaceId:     workspaceId,
 				MemberId:        connMember,
 				IntegrationType: integrationType,
 				AccessToken:     connToken,
@@ -136,9 +134,8 @@ Examples:
 }
 
 var connectionListCmd = &cobra.Command{
-	Use:   "list <workspace_id>",
-	Short: "List connections in a workspace",
-	Args:  cobra.ExactArgs(1),
+	Use:   "list",
+	Short: "List connections in your workspace",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		client, err := getClient()
 		if err != nil {
@@ -147,9 +144,7 @@ var connectionListCmd = &cobra.Command{
 		}
 		defer client.Close()
 
-		resp, err := client.Gateway.ListConnections(context.Background(), &pb.ListConnectionsRequest{
-			WorkspaceId: args[0],
-		})
+		resp, err := client.Gateway.ListConnections(context.Background(), &pb.ListConnectionsRequest{})
 		if err != nil {
 			PrintError(err)
 			return nil
@@ -166,7 +161,7 @@ var connectionListCmd = &cobra.Command{
 
 		if len(resp.Connections) == 0 {
 			PrintInfo("No connections found")
-			PrintHint("Add one with: airstore connection add <workspace_id> <type> --token <token>")
+			PrintHint("Add one with: airstore connection add <type> --token <token>")
 			return nil
 		}
 

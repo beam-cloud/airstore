@@ -18,6 +18,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 )
 
 type Config struct {
@@ -183,7 +184,14 @@ func (m *MountManager) createFilesystem(addr string) (*filesystem.Filesystem, *g
 		return nil, nil, fmt.Errorf("load shim: %w", err)
 	}
 
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(common.TransportCredentials(addr)))
+	conn, err := grpc.NewClient(addr,
+		grpc.WithTransportCredentials(common.TransportCredentials(addr)),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:                30 * time.Second, // Ping every 30s if idle — detects dead connections after sleep/wake
+			Timeout:             10 * time.Second, // Wait 10s for ping ack before marking connection dead
+			PermitWithoutStream: true,             // Send pings even when no RPCs are in flight
+		}),
+	)
 	if err != nil {
 		return nil, nil, err
 	}

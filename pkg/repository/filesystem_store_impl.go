@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -15,16 +16,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const (
-	// Redis key prefixes
-	keyFsDirMeta     = "airstore:fs:dir:%s"   // path hash
-	keyFsFileMeta    = "airstore:fs:file:%s"  // path hash
-	keyFsSymlink     = "airstore:fs:link:%s"  // path hash
-	keyFsDirChildren = "airstore:fs:ls:%s"    // path hash
-	keyQueryResults  = "airstore:qr:%d:%s"    // workspace_id, path hash
-	keyResultContent = "airstore:rc:%d:%s:%s" // workspace_id, path hash, result_id
-	defaultCacheTTL  = 30 * time.Second
-)
+const defaultCacheTTL = 30 * time.Second
 
 // ElasticsearchClient is an optional interface for Elasticsearch operations.
 type ElasticsearchClient interface {
@@ -56,6 +48,7 @@ type filesystemStore struct {
 	memListings  map[string][]types.DirEntry
 	memResults   map[string][]QueryResult // cacheKey -> results
 	memContent   map[string][]byte        // cacheKey -> content
+	memHooks     map[string]*types.Hook   // by external_id
 }
 
 // NewFilesystemStore creates a unified filesystem store.
@@ -74,6 +67,7 @@ func NewFilesystemStore(db *sql.DB, redis *common.RedisClient, elastic Elasticse
 		memListings:  make(map[string][]types.DirEntry),
 		memResults:   make(map[string][]QueryResult),
 		memContent:   make(map[string][]byte),
+		memHooks:     make(map[string]*types.Hook),
 	}
 }
 
@@ -91,15 +85,6 @@ func NewMemoryFilesystemStore() FilesystemStore {
 
 func (s *filesystemStore) isMemoryMode() bool {
 	return s.db == nil
-}
-
-func (s *filesystemStore) redisKey(format string, args ...interface{}) string {
-	for i, arg := range args {
-		if path, ok := arg.(string); ok && strings.HasPrefix(path, "/") {
-			args[i] = types.GeneratePathID(path)
-		}
-	}
-	return fmt.Sprintf(format, args...)
 }
 
 func (s *filesystemStore) elasticIndex(workspaceId uint) string {
@@ -360,7 +345,7 @@ func (s *filesystemStore) GetQueryResults(ctx context.Context, workspaceId uint,
 	}
 
 	// Try Redis cache first
-	cacheKey := s.redisKey(keyQueryResults, workspaceId, queryPath)
+	cacheKey := common.Keys.FsQueryResult(workspaceId, queryPath)
 	data, err := s.redis.Get(ctx, cacheKey).Bytes()
 	if err == nil {
 		var results []QueryResult
@@ -414,7 +399,7 @@ func (s *filesystemStore) StoreQueryResults(ctx context.Context, workspaceId uin
 	}
 
 	// Store in Redis cache
-	cacheKey := s.redisKey(keyQueryResults, workspaceId, queryPath)
+	cacheKey := common.Keys.FsQueryResult(workspaceId, queryPath)
 	data, err := json.Marshal(results)
 	if err != nil {
 		return fmt.Errorf("marshal query results: %w", err)
@@ -462,7 +447,7 @@ func (s *filesystemStore) GetResultContent(ctx context.Context, workspaceId uint
 	}
 
 	// Try Redis cache first
-	cacheKey := s.redisKey(keyResultContent, workspaceId, queryPath, resultID)
+	cacheKey := common.Keys.FsResultBody(workspaceId, queryPath, resultID)
 	data, err := s.redis.Get(ctx, cacheKey).Bytes()
 	if err == nil {
 		return data, nil
@@ -489,7 +474,7 @@ func (s *filesystemStore) StoreResultContent(ctx context.Context, workspaceId ui
 	}
 
 	// Cache in Redis
-	cacheKey := s.redisKey(keyResultContent, workspaceId, queryPath, resultID)
+	cacheKey := common.Keys.FsResultBody(workspaceId, queryPath, resultID)
 	contentTTL := s.ttl * 10 // Longer TTL for content
 	if err := s.redis.Set(ctx, cacheKey, content, contentTTL).Err(); err != nil {
 		// Log but don't fail
@@ -585,7 +570,7 @@ func (s *filesystemStore) GetFileMeta(ctx context.Context, path string) (*types.
 		return s.memFiles[path], nil
 	}
 
-	key := s.redisKey(keyFsFileMeta, path)
+	key := common.Keys.FsFileMeta(path)
 	data, err := s.redis.Get(ctx, key).Bytes()
 	if err == redis.Nil {
 		return nil, nil
@@ -608,7 +593,7 @@ func (s *filesystemStore) GetDirMeta(ctx context.Context, path string) (*types.D
 		return s.memDirs[path], nil
 	}
 
-	key := s.redisKey(keyFsDirMeta, path)
+	key := common.Keys.FsDirMeta(path)
 	data, err := s.redis.Get(ctx, key).Bytes()
 	if err == redis.Nil {
 		return nil, nil
@@ -632,7 +617,7 @@ func (s *filesystemStore) SaveFileMeta(ctx context.Context, meta *types.FileMeta
 		return nil
 	}
 
-	key := s.redisKey(keyFsFileMeta, meta.Path)
+	key := common.Keys.FsFileMeta(meta.Path)
 	data, err := json.Marshal(meta)
 	if err != nil {
 		return err
@@ -648,7 +633,7 @@ func (s *filesystemStore) SaveDirMeta(ctx context.Context, meta *types.DirMeta) 
 		return nil
 	}
 
-	key := s.redisKey(keyFsDirMeta, meta.Path)
+	key := common.Keys.FsDirMeta(meta.Path)
 	data, err := json.Marshal(meta)
 	if err != nil {
 		return err
@@ -664,7 +649,7 @@ func (s *filesystemStore) DeleteFileMeta(ctx context.Context, path string) error
 		return nil
 	}
 
-	return s.redis.Del(ctx, s.redisKey(keyFsFileMeta, path)).Err()
+	return s.redis.Del(ctx, common.Keys.FsFileMeta(path)).Err()
 }
 
 func (s *filesystemStore) DeleteDirMeta(ctx context.Context, path string) error {
@@ -675,7 +660,7 @@ func (s *filesystemStore) DeleteDirMeta(ctx context.Context, path string) error 
 		return nil
 	}
 
-	return s.redis.Del(ctx, s.redisKey(keyFsDirMeta, path)).Err()
+	return s.redis.Del(ctx, common.Keys.FsDirMeta(path)).Err()
 }
 
 func (s *filesystemStore) ListDir(ctx context.Context, path string) ([]types.DirEntry, error) {
@@ -685,7 +670,7 @@ func (s *filesystemStore) ListDir(ctx context.Context, path string) ([]types.Dir
 		return s.memListings[path], nil
 	}
 
-	key := s.redisKey(keyFsDirChildren, path)
+	key := common.Keys.FsDirChildren(path)
 	data, err := s.redis.Get(ctx, key).Bytes()
 	if err == redis.Nil {
 		return nil, nil
@@ -709,7 +694,7 @@ func (s *filesystemStore) SaveDirListing(ctx context.Context, path string, entri
 		return nil
 	}
 
-	key := s.redisKey(keyFsDirChildren, path)
+	key := common.Keys.FsDirChildren(path)
 	data, err := json.Marshal(entries)
 	if err != nil {
 		return err
@@ -726,7 +711,7 @@ func (s *filesystemStore) GetSymlink(ctx context.Context, path string) (string, 
 		return s.memSymlinks[path], nil
 	}
 
-	target, err := s.redis.Get(ctx, s.redisKey(keyFsSymlink, path)).Result()
+	target, err := s.redis.Get(ctx, common.Keys.FsSymlink(path)).Result()
 	if err == redis.Nil {
 		return "", nil
 	}
@@ -741,7 +726,7 @@ func (s *filesystemStore) SaveSymlink(ctx context.Context, path, target string) 
 		return nil
 	}
 
-	return s.redis.Set(ctx, s.redisKey(keyFsSymlink, path), target, s.ttl).Err()
+	return s.redis.Set(ctx, common.Keys.FsSymlink(path), target, s.ttl).Err()
 }
 
 func (s *filesystemStore) DeleteSymlink(ctx context.Context, path string) error {
@@ -752,7 +737,7 @@ func (s *filesystemStore) DeleteSymlink(ctx context.Context, path string) error 
 		return nil
 	}
 
-	return s.redis.Del(ctx, s.redisKey(keyFsSymlink, path)).Err()
+	return s.redis.Del(ctx, common.Keys.FsSymlink(path)).Err()
 }
 
 // ===== Cache Invalidation =====
@@ -769,10 +754,10 @@ func (s *filesystemStore) InvalidatePath(ctx context.Context, path string) error
 	}
 
 	keys := []string{
-		s.redisKey(keyFsDirMeta, path),
-		s.redisKey(keyFsFileMeta, path),
-		s.redisKey(keyFsSymlink, path),
-		s.redisKey(keyFsDirChildren, path),
+		common.Keys.FsDirMeta(path),
+		common.Keys.FsFileMeta(path),
+		common.Keys.FsSymlink(path),
+		common.Keys.FsDirChildren(path),
 	}
 	return s.redis.Del(ctx, keys...).Err()
 }
@@ -788,7 +773,7 @@ func (s *filesystemStore) InvalidatePrefix(ctx context.Context, prefix string) e
 	}
 
 	parent := parentPath(prefix)
-	return s.redis.Del(ctx, s.redisKey(keyFsDirChildren, parent)).Err()
+	return s.redis.Del(ctx, common.Keys.FsDirChildren(parent)).Err()
 }
 
 func (s *filesystemStore) InvalidateQuery(ctx context.Context, workspaceId uint, queryPath string) error {
@@ -808,7 +793,7 @@ func (s *filesystemStore) InvalidateQuery(ctx context.Context, workspaceId uint,
 	}
 
 	// Invalidate Redis cache
-	pattern := s.redisKey(keyQueryResults, workspaceId, queryPath)
+	pattern := common.Keys.FsQueryResult(workspaceId, queryPath)
 	if err := s.redis.Del(ctx, pattern).Err(); err != nil {
 		// Log but continue
 	}
@@ -868,6 +853,229 @@ func (c *elasticsearchHTTPClient) Delete(ctx context.Context, index, docID strin
 }
 
 func (c *elasticsearchHTTPClient) DeleteByQuery(ctx context.Context, index string, query map[string]interface{}) error {
+	return nil
+}
+
+// ===== Source Polling =====
+
+func (s *filesystemStore) GetWatchedSourceQueries(ctx context.Context, staleAfter time.Duration, limit int) ([]*types.FilesystemQuery, error) {
+	if s.isMemoryMode() {
+		return nil, nil // not supported in memory mode
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT q.id, q.external_id, q.workspace_id, q.integration, q.path, q.name,
+		       q.query_spec, q.guidance, q.output_format, q.file_ext, q.filename_format,
+		       q.cache_ttl, q.created_at, q.updated_at, q.last_executed
+		FROM filesystem_queries q
+		JOIN filesystem_hooks h
+		  ON h.workspace_id = q.workspace_id
+		  AND h.active = true
+		  AND (q.path = h.path OR q.path LIKE replace(replace(h.path, '%', '\%'), '_', '\_') || '/%')
+		WHERE q.last_executed IS NULL
+		   OR q.last_executed < NOW() - $1::interval
+		ORDER BY q.last_executed ASC NULLS FIRST
+		LIMIT $2
+	`, fmt.Sprintf("%d seconds", int(staleAfter.Seconds())), limit)
+	if err != nil {
+		return nil, fmt.Errorf("get watched source queries: %w", err)
+	}
+	defer rows.Close()
+
+	var queries []*types.FilesystemQuery
+	for rows.Next() {
+		q := &types.FilesystemQuery{}
+		var lastExecuted sql.NullTime
+		var filenameFormat sql.NullString
+		if err := rows.Scan(
+			&q.Id, &q.ExternalId, &q.WorkspaceId, &q.Integration,
+			&q.Path, &q.Name, &q.QuerySpec, &q.Guidance,
+			&q.OutputFormat, &q.FileExt, &filenameFormat, &q.CacheTTL,
+			&q.CreatedAt, &q.UpdatedAt, &lastExecuted,
+		); err != nil {
+			return nil, fmt.Errorf("scan watched query: %w", err)
+		}
+		if lastExecuted.Valid {
+			q.LastExecuted = &lastExecuted.Time
+		}
+		if filenameFormat.Valid {
+			q.FilenameFormat = filenameFormat.String
+		}
+		queries = append(queries, q)
+	}
+	return queries, rows.Err()
+}
+
+// ===== Hooks =====
+
+func (s *filesystemStore) CreateHook(ctx context.Context, hook *types.Hook) (*types.Hook, error) {
+	hook.ExternalId = uuid.New().String()
+	hook.CreatedAt = time.Now()
+	hook.UpdatedAt = time.Now()
+
+	if s.isMemoryMode() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		hook.Id = uint(len(s.memHooks) + 1)
+		s.memHooks[hook.ExternalId] = hook
+		return hook, nil
+	}
+
+	err := s.db.QueryRowContext(ctx, `
+		INSERT INTO filesystem_hooks (external_id, workspace_id, path, prompt, active, created_by_member_id, token_id, encrypted_token, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		RETURNING id
+	`, hook.ExternalId, hook.WorkspaceId, hook.Path, hook.Prompt,
+		hook.Active, hook.CreatedByMemberId, hook.TokenId, hook.EncryptedToken,
+		hook.CreatedAt, hook.UpdatedAt).Scan(&hook.Id)
+	if err != nil {
+		return nil, fmt.Errorf("create hook: %w", err)
+	}
+
+	return hook, nil
+}
+
+func (s *filesystemStore) GetHook(ctx context.Context, externalId string) (*types.Hook, error) {
+	if s.isMemoryMode() {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		h, ok := s.memHooks[externalId]
+		if !ok {
+			return nil, nil
+		}
+		return h, nil
+	}
+
+	h := &types.Hook{}
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, external_id, workspace_id, path, prompt, active,
+		       created_by_member_id, token_id, encrypted_token, created_at, updated_at
+		FROM filesystem_hooks WHERE external_id = $1
+	`, externalId).Scan(
+		&h.Id, &h.ExternalId, &h.WorkspaceId, &h.Path, &h.Prompt,
+		&h.Active, &h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
+		&h.CreatedAt, &h.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get hook: %w", err)
+	}
+	return h, nil
+}
+
+func (s *filesystemStore) GetHookById(ctx context.Context, id uint) (*types.Hook, error) {
+	if s.isMemoryMode() {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		for _, h := range s.memHooks {
+			if h.Id == id {
+				return h, nil
+			}
+		}
+		return nil, nil
+	}
+
+	h := &types.Hook{}
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, external_id, workspace_id, path, prompt, active,
+		       created_by_member_id, token_id, encrypted_token, created_at, updated_at
+		FROM filesystem_hooks WHERE id = $1
+	`, id).Scan(
+		&h.Id, &h.ExternalId, &h.WorkspaceId, &h.Path, &h.Prompt,
+		&h.Active, &h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
+		&h.CreatedAt, &h.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get hook by id: %w", err)
+	}
+	return h, nil
+}
+
+func (s *filesystemStore) ListHooks(ctx context.Context, workspaceId uint) ([]*types.Hook, error) {
+	if s.isMemoryMode() {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		var hooks []*types.Hook
+		for _, h := range s.memHooks {
+			if h.WorkspaceId == workspaceId {
+				hooks = append(hooks, h)
+			}
+		}
+		sort.Slice(hooks, func(i, j int) bool {
+			return hooks[i].CreatedAt.Before(hooks[j].CreatedAt)
+		})
+		return hooks, nil
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, external_id, workspace_id, path, prompt, active,
+		       created_by_member_id, token_id, encrypted_token, created_at, updated_at
+		FROM filesystem_hooks WHERE workspace_id = $1
+		ORDER BY created_at
+	`, workspaceId)
+	if err != nil {
+		return nil, fmt.Errorf("list hooks: %w", err)
+	}
+	defer rows.Close()
+
+	var hooks []*types.Hook
+	for rows.Next() {
+		h := &types.Hook{}
+		err := rows.Scan(
+			&h.Id, &h.ExternalId, &h.WorkspaceId, &h.Path, &h.Prompt,
+			&h.Active, &h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
+			&h.CreatedAt, &h.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scan hook: %w", err)
+		}
+		hooks = append(hooks, h)
+	}
+	return hooks, rows.Err()
+}
+
+func (s *filesystemStore) UpdateHook(ctx context.Context, hook *types.Hook) error {
+	hook.UpdatedAt = time.Now()
+
+	if s.isMemoryMode() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if existing, ok := s.memHooks[hook.ExternalId]; ok {
+			existing.Prompt = hook.Prompt
+			existing.Active = hook.Active
+			existing.UpdatedAt = hook.UpdatedAt
+		}
+		return nil
+	}
+
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE filesystem_hooks SET
+			prompt = $1, active = $2, updated_at = $3
+		WHERE external_id = $4
+	`, hook.Prompt, hook.Active, hook.UpdatedAt, hook.ExternalId)
+	if err != nil {
+		return fmt.Errorf("update hook: %w", err)
+	}
+	return nil
+}
+
+func (s *filesystemStore) DeleteHook(ctx context.Context, externalId string) error {
+	if s.isMemoryMode() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		delete(s.memHooks, externalId)
+		return nil
+	}
+
+	_, err := s.db.ExecContext(ctx, `DELETE FROM filesystem_hooks WHERE external_id = $1`, externalId)
+	if err != nil {
+		return fmt.Errorf("delete hook: %w", err)
+	}
 	return nil
 }
 
