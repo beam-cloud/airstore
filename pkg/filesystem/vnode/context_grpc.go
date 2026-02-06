@@ -552,31 +552,39 @@ func (c *ContextVNodeGRPC) Readlink(path string) (string, error) {
 // Release closes a file handle
 func (c *ContextVNodeGRPC) Release(path string, fh FileHandle) error {
 	c.mu.Lock()
-	if state, ok := c.handles[fh]; ok {
+	state, ok := c.handles[fh]
+	if !ok {
 		c.mu.Unlock()
-		// Drain handleState into asyncWriter, then force-upload to S3.
-		// Release MUST be synchronous: after close() returns, data must be
-		// on S3 because the FUSE-T SMB layer caches based on what was
-		// persisted, and subsequent reads could bypass our dirty buffer.
-		c.flushWriteBuffer(path, state)
-		_ = c.asyncWriter.ForceFlush(path)
-		c.mu.Lock()
-		state.mu.Lock()
-		state.closed = true
-		state.prefetch = nil
-		state.mu.Unlock()
-		delete(c.handles, fh)
-		c.writeMu.Lock()
-		if m, ok := c.writes[state.path]; ok {
-			delete(m, fh)
-			if len(m) == 0 {
-				delete(c.writes, state.path)
-			}
-		}
-		c.writeMu.Unlock()
+		return nil
 	}
 	c.mu.Unlock()
-	return nil
+
+	// Drain handleState into asyncWriter, then force-upload to S3.
+	// Release MUST be synchronous: after close() returns, data must be
+	// on S3 because the FUSE-T SMB layer caches based on what was
+	// persisted, and subsequent reads could bypass our dirty buffer.
+	c.flushWriteBuffer(path, state)
+	flushErr := c.asyncWriter.ForceFlush(path)
+
+	// Always clean up the handle, even if flush failed.
+	c.mu.Lock()
+	state.mu.Lock()
+	state.closed = true
+	state.prefetch = nil
+	state.mu.Unlock()
+	delete(c.handles, fh)
+	c.mu.Unlock()
+
+	c.writeMu.Lock()
+	if m, ok := c.writes[state.path]; ok {
+		delete(m, fh)
+		if len(m) == 0 {
+			delete(c.writes, state.path)
+		}
+	}
+	c.writeMu.Unlock()
+
+	return flushErr
 }
 
 // helpers

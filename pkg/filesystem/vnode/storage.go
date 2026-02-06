@@ -558,31 +558,39 @@ func (s *StorageVNode) Readlink(path string) (string, error) {
 
 func (s *StorageVNode) Release(path string, fh FileHandle) error {
 	s.mu.Lock()
-	if state, ok := s.handles[fh]; ok {
+	state, ok := s.handles[fh]
+	if !ok {
 		s.mu.Unlock()
-		// Drain handleState into asyncWriter, then force-upload to S3.
-		// Release MUST be synchronous: after close() returns, data must be
-		// on S3 because the FUSE-T SMB layer caches based on what was
-		// persisted, and subsequent reads could bypass our dirty buffer.
-		s.flushWriteBuffer(path, state)
-		_ = s.asyncWriter.ForceFlush(path)
-		s.mu.Lock()
-		state.mu.Lock()
-		state.closed = true
-		state.prefetch = nil
-		state.mu.Unlock()
-		delete(s.handles, fh)
-		s.writeMu.Lock()
-		if m, ok := s.writes[state.path]; ok {
-			delete(m, fh)
-			if len(m) == 0 {
-				delete(s.writes, state.path)
-			}
-		}
-		s.writeMu.Unlock()
+		return nil
 	}
 	s.mu.Unlock()
-	return nil
+
+	// Drain handleState into asyncWriter, then force-upload to S3.
+	// Release MUST be synchronous: after close() returns, data must be
+	// on S3 because the FUSE-T SMB layer caches based on what was
+	// persisted, and subsequent reads could bypass our dirty buffer.
+	s.flushWriteBuffer(path, state)
+	flushErr := s.asyncWriter.ForceFlush(path)
+
+	// Always clean up the handle, even if flush failed.
+	s.mu.Lock()
+	state.mu.Lock()
+	state.closed = true
+	state.prefetch = nil
+	state.mu.Unlock()
+	delete(s.handles, fh)
+	s.mu.Unlock()
+
+	s.writeMu.Lock()
+	if m, ok := s.writes[state.path]; ok {
+		delete(m, fh)
+		if len(m) == 0 {
+			delete(s.writes, state.path)
+		}
+	}
+	s.writeMu.Unlock()
+
+	return flushErr
 }
 
 func (s *StorageVNode) Fsync(path string, fh FileHandle) error {

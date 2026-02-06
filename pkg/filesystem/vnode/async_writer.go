@@ -12,6 +12,10 @@ const (
 	asyncDebounce = 500 * time.Millisecond
 	// asyncMaxDelay caps how long writes can be buffered even with continuous updates.
 	asyncMaxDelay = 2 * time.Second
+	// asyncMaxRetries is how many times a failed async write is retried before
+	// the data is dropped and an error is logged. Prevents infinite retry loops
+	// when the backend is permanently unavailable.
+	asyncMaxRetries = 5
 )
 
 // WriteFn uploads data to the backend (gRPC → S3). Called asynchronously.
@@ -32,6 +36,7 @@ type pendingWrite struct {
 	timer     *time.Timer // debounce timer
 	firstTime time.Time   // when first enqueued in this cycle (for max delay cap)
 	flushDone chan error   // non-nil while an upload is in flight; receives result
+	retries   int         // number of consecutive failed upload attempts
 }
 
 // NewAsyncWriter creates a new async writer that calls fn for uploads.
@@ -221,20 +226,30 @@ func (aw *AsyncWriter) doFlush(path string) {
 
 	if pw.data != nil {
 		// New data was enqueued during upload — schedule another flush.
+		// Reset retry counter since the data changed.
+		pw.retries = 0
 		pw.firstTime = time.Now()
 		pw.timer = time.AfterFunc(asyncDebounce, func() {
 			aw.doFlush(path)
 		})
 	} else if err != nil {
-		// Upload failed and no new data replaced it — put the data back
-		// so it can be retried rather than silently lost.
-		log.Warn().Err(err).Str("path", path).Msg("async write failed, will retry")
-		pw.data = data
-		pw.off = off
-		pw.firstTime = time.Now()
-		pw.timer = time.AfterFunc(asyncDebounce, func() {
-			aw.doFlush(path)
-		})
+		pw.retries++
+		if pw.retries >= asyncMaxRetries {
+			// Give up after too many failures to avoid infinite retry loops.
+			log.Error().Err(err).Str("path", path).Int("retries", pw.retries).
+				Msg("async write failed permanently, data dropped")
+			delete(aw.pending, path)
+		} else {
+			// Put the data back for retry.
+			log.Warn().Err(err).Str("path", path).Int("retry", pw.retries).
+				Msg("async write failed, will retry")
+			pw.data = data
+			pw.off = off
+			pw.firstTime = time.Now()
+			pw.timer = time.AfterFunc(asyncDebounce, func() {
+				aw.doFlush(path)
+			})
+		}
 	} else {
 		delete(aw.pending, path)
 	}
