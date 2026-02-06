@@ -220,7 +220,9 @@ func (s *SourceService) RefreshQuery(ctx context.Context, query *types.Filesyste
 		}
 
 		if emitted {
-			s.seenTracker.Commit(ctx, seenKey, ids)
+			if err := s.seenTracker.Commit(ctx, seenKey, ids); err != nil {
+				log.Warn().Err(err).Str("path", query.Path).Msg("seen tracker commit failed, next poll may re-fire")
+			}
 		}
 	}
 

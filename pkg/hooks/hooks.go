@@ -185,20 +185,28 @@ func enrichPrompt(base, event string, data map[string]any) string {
 	integration, _ := data["integration"].(string)
 	newCount, _ := data["new_count"].(string)
 
+	// Use relative paths — the airstore filesystem is mounted at the working
+	// directory (/workspace). Absolute paths like /sources/... don't exist
+	// inside the container; only workspace-relative paths work.
+	relPath := strings.TrimPrefix(path, "/")
+
 	var line string
 	switch event {
 	case EventFsCreate:
-		line = "Event: new file created at " + path
+		line = "Event: new file created at " + relPath +
+			"\n\nThe file is in your working directory at: " + relPath
 	case EventFsWrite:
-		line = "Event: file changed at " + path
+		line = "Event: file changed at " + relPath +
+			"\n\nThe file is in your working directory at: " + relPath
 	case EventFsDelete:
-		line = "Event: file deleted at " + path
+		line = "Event: file deleted at " + relPath
 	case EventSourceChange:
-		line = "Event: " + newCount + " new result(s) in " + path
+		line = "Event: " + newCount + " new result(s) in " + relPath + "/"
 		if integration != "" {
 			line += " (source: " + integration + ")"
 		}
-		line += "\n\nThe new content is available at the path above in your mounted filesystem. Read the files there to see what's new."
+		line += "\n\nThe new content is in your working directory at: " + relPath + "/" +
+			"\nList and read the files there to see what changed."
 	}
 
 	if line == "" {

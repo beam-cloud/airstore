@@ -248,7 +248,8 @@ func TestEngine_Submit_PromptEnrichment(t *testing.T) {
 		t.Fatalf("expected 1 task after debounce, got %d", creator.count())
 	}
 	task := creator.last()
-	if task.Prompt != "do stuff\n\nEvent: file changed at /skills/report.md" {
+	expected := "do stuff\n\nEvent: file changed at skills/report.md\n\nThe file is in your working directory at: skills/report.md"
+	if task.Prompt != expected {
 		t.Errorf("unexpected prompt: %s", task.Prompt)
 	}
 }

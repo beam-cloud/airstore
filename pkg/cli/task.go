@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -323,7 +324,7 @@ func getTaskLogs(id string) error {
 	}
 
 	for _, entry := range resp.Logs {
-		fmt.Println(entry.Data)
+		fmt.Fprintln(streamWriter(entry.Stream), entry.Data)
 	}
 
 	return nil
@@ -411,6 +412,14 @@ func runClaudeCodeTask() error {
 			}
 		}
 	}
+}
+
+// streamWriter returns the appropriate output writer for a log stream.
+func streamWriter(stream string) *os.File {
+	if stream == "stderr" {
+		return os.Stderr
+	}
+	return os.Stdout
 }
 
 // statusStyle returns the appropriate style for a task status

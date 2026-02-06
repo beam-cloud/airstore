@@ -325,9 +325,15 @@ func (b *PostgresBackend) SetTaskResult(ctx context.Context, externalId string, 
 // MarkTaskRetried sets attempt = max_attempts on a failed task so the retry
 // poller no longer picks it up. Called before creating the retry task.
 func (b *PostgresBackend) MarkTaskRetried(ctx context.Context, externalId string) error {
-	_, err := b.db.ExecContext(ctx,
+	result, err := b.db.ExecContext(ctx,
 		`UPDATE task SET attempt = max_attempts WHERE external_id = $1`, externalId)
-	return err
+	if err != nil {
+		return fmt.Errorf("mark task retried: %w", err)
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		return &types.ErrTaskNotFound{ExternalId: externalId}
+	}
+	return nil
 }
 
 // DeleteTask removes a task by external ID

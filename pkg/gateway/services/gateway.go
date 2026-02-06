@@ -442,15 +442,24 @@ func (s *GatewayService) CreateTask(ctx context.Context, req *pb.CreateTaskReque
 }
 
 func (s *GatewayService) DeleteTask(ctx context.Context, req *pb.DeleteTaskRequest) (*pb.DeleteResponse, error) {
-	rc := auth.AuthInfoFromContext(ctx)
-	if rc == nil {
+	workspaceId := auth.WorkspaceId(ctx)
+	if workspaceId == 0 {
 		return &pb.DeleteResponse{Ok: false, Error: "authentication required"}, nil
 	}
 
-	if err := s.backend.DeleteTask(ctx, req.Id); err != nil {
+	// Verify the task belongs to the caller's workspace before deleting.
+	task, err := s.backend.GetTask(ctx, req.Id)
+	if err != nil {
 		if _, ok := err.(*types.ErrTaskNotFound); ok {
 			return &pb.DeleteResponse{Ok: false, Error: "task not found"}, nil
 		}
+		return &pb.DeleteResponse{Ok: false, Error: err.Error()}, nil
+	}
+	if task.WorkspaceId != workspaceId {
+		return &pb.DeleteResponse{Ok: false, Error: "task not found"}, nil
+	}
+
+	if err := s.backend.DeleteTask(ctx, req.Id); err != nil {
 		return &pb.DeleteResponse{Ok: false, Error: err.Error()}, nil
 	}
 	return &pb.DeleteResponse{Ok: true}, nil
