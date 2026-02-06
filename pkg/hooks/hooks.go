@@ -151,7 +151,7 @@ func (eng *Engine) reapStuck(ctx context.Context) {
 	}
 }
 
-// retryFailed creates new attempts for failed hook tasks that haven't exhausted retries.
+// retryFailed creates new attempts for failed hook tasks.
 func (eng *Engine) retryFailed(ctx context.Context) {
 	tasks, err := eng.backend.GetRetryableTasks(ctx)
 	if err != nil || len(tasks) == 0 {
@@ -159,28 +159,31 @@ func (eng *Engine) retryFailed(ctx context.Context) {
 	}
 	now := time.Now()
 	for _, t := range tasks {
-		if t.FinishedAt == nil || t.HookId == nil {
-			continue
-		}
-		if now.Before(t.FinishedAt.Add(retryDelay(t.Attempt))) {
-			continue
-		}
-		if eng.hasRunningTask(ctx, *t.HookId) {
-			continue
-		}
-		hook, err := eng.store.GetHookById(ctx, *t.HookId)
-		if err != nil || hook == nil {
-			continue
-		}
-		token, err := DecodeToken(hook.EncryptedToken)
-		if err != nil {
-			continue
-		}
-		next := t.Attempt + 1
-		log.Info().Str("hook", hook.ExternalId).Int("attempt", next).Msg("retrying")
-		eng.creator.CreateTask(ctx, t.WorkspaceId, t.CreatedByMemberId, token, t.Prompt,
-			*t.HookId, next, t.MaxAttempts)
+		eng.maybeRetry(ctx, t, now)
 	}
+}
+
+func (eng *Engine) maybeRetry(ctx context.Context, t *types.Task, now time.Time) {
+	if t.FinishedAt == nil || t.HookId == nil || t.Attempt >= t.MaxAttempts || now.Before(t.FinishedAt.Add(retryDelay(t.Attempt))) {
+		return
+	}
+	if eng.hasRunningTask(ctx, *t.HookId) {
+		return
+	}
+	hook, err := eng.store.GetHookById(ctx, *t.HookId)
+	if err != nil || hook == nil {
+		return
+	}
+	token, err := DecodeToken(hook.EncryptedToken)
+	if err != nil {
+		return
+	}
+	next := t.Attempt + 1
+	if err := eng.creator.CreateTask(ctx, t.WorkspaceId, t.CreatedByMemberId, token, t.Prompt,
+		*t.HookId, next, t.MaxAttempts); err != nil {
+		return // unique constraint prevents duplicate attempts across replicas
+	}
+	log.Info().Str("hook", hook.ExternalId).Int("attempt", next).Msg("retrying")
 }
 
 func (eng *Engine) hasRunningTask(ctx context.Context, hookId uint) bool {
@@ -304,14 +307,21 @@ func (c *hookCache) invalidate(wsId uint) {
 }
 
 func (c *hookCache) load(ctx context.Context, wsId uint) []*types.Hook {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Double-check: another goroutine may have loaded while we waited for the lock.
+	if hooks, ok := c.hooks[wsId]; ok {
+		return hooks
+	}
+
 	hooks, err := c.store.ListHooks(ctx, wsId)
 	if err != nil {
 		log.Warn().Err(err).Uint("ws", wsId).Msg("hook cache load failed")
 		return nil
 	}
-	c.mu.Lock()
+
 	c.hooks[wsId] = hooks
-	c.mu.Unlock()
 	return hooks
 }
 

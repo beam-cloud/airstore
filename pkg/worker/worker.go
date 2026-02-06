@@ -251,10 +251,14 @@ func (w *Worker) taskLoop() {
 
 // finishTask records the result in Redis and Postgres. Single path for both success and failure.
 func (w *Worker) finishTask(taskID string, result *types.TaskResult) {
+	var qErr error
 	if result.ExitCode == 0 && result.Error == "" {
-		w.taskQueue.Complete(w.ctx, taskID, result)
+		qErr = w.taskQueue.Complete(w.ctx, taskID, result)
 	} else {
-		w.taskQueue.Fail(w.ctx, taskID, fmt.Errorf("%s", result.Error))
+		qErr = w.taskQueue.Fail(w.ctx, taskID, fmt.Errorf("%s", result.Error))
+	}
+	if qErr != nil {
+		log.Warn().Err(qErr).Str("task_id", taskID).Msg("failed to update task queue")
 	}
 
 	if err := w.gatewayClient.SetTaskResult(w.ctx, taskID, result.ExitCode, result.Error); err != nil {

@@ -689,15 +689,11 @@ func hookToPb(h *types.Hook, workspaceExternalId string) *pb.Hook {
 }
 
 func (s *GatewayService) ListHookRuns(ctx context.Context, req *pb.ListHookRunsRequest) (*pb.ListHookRunsResponse, error) {
-	hook, err := s.fsStore.GetHook(ctx, req.HookId)
+	hook, _, err := s.resolveHook(ctx, req.HookId)
 	if err != nil {
 		return &pb.ListHookRunsResponse{Ok: false, Error: err.Error()}, nil
 	}
-	if hook == nil {
-		return &pb.ListHookRunsResponse{Ok: false, Error: "hook not found"}, nil
-	}
 
-	// Get tasks for this hook
 	tasks, err := s.backend.ListTasksByHook(ctx, hook.Id)
 	if err != nil {
 		return &pb.ListHookRunsResponse{Ok: false, Error: err.Error()}, nil

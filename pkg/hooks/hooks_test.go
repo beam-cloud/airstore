@@ -402,17 +402,15 @@ func TestEngine_Poll_DeadLetterAfterMaxAttempts(t *testing.T) {
 		FinishedAt:  &finished,
 	}
 
-	// In reality GetRetryableTasks filters attempt < max_attempts,
-	// so this wouldn't be returned. But if it somehow is, poll should still skip it.
+	// Even if SQL leaks a max-attempt task, the engine should not retry it.
 	backend := &mockBackend{retryableTasks: []*types.Task{failedTask}}
 	eng := NewEngine(store, creator, backend)
 
 	eng.Poll(context.Background())
 
-	// The task has attempt >= max_attempts, retry attempt would be 4 > 3.
-	// The SQL filter should prevent this, but the poll code creates attempt+1
-	// which would be 4. The creator still gets called in this mock (SQL isn't filtering).
-	// This test documents the behavior -- the real guard is in SQL WHERE attempt < max_attempts.
+	if creator.count() != 0 {
+		t.Fatalf("expected 0 retries (max attempts exhausted), got %d", creator.count())
+	}
 }
 
 func TestRetryDelay(t *testing.T) {
