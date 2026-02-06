@@ -20,20 +20,21 @@ const rpcTimeout = 30 * time.Second // Per-RPC timeout for context operations
 // ContextVNodeGRPC implements VirtualNode for S3-backed context storage.
 // It supports all read and write operations.
 type ContextVNodeGRPC struct {
-	client  pb.ContextServiceClient
-	token   string
-	cache   *MetadataCache
-	content *ContentCache
-	handles map[FileHandle]*handleState
-	writeMu sync.Mutex
-	writes  map[string]map[FileHandle]*handleState
-	nextFH  FileHandle
-	mu      sync.Mutex
+	client      pb.ContextServiceClient
+	token       string
+	cache       *MetadataCache
+	content     *ContentCache
+	asyncWriter *AsyncWriter
+	handles     map[FileHandle]*handleState
+	writeMu     sync.Mutex
+	writes      map[string]map[FileHandle]*handleState
+	nextFH      FileHandle
+	mu          sync.Mutex
 }
 
 // NewContextVNodeGRPC creates a new context virtual node.
 func NewContextVNodeGRPC(conn *grpc.ClientConn, token string) *ContextVNodeGRPC {
-	return &ContextVNodeGRPC{
+	c := &ContextVNodeGRPC{
 		client:  pb.NewContextServiceClient(conn),
 		token:   token,
 		cache:   NewMetadataCache(),
@@ -42,6 +43,8 @@ func NewContextVNodeGRPC(conn *grpc.ClientConn, token string) *ContextVNodeGRPC 
 		writes:  make(map[string]map[FileHandle]*handleState),
 		nextFH:  1,
 	}
+	c.asyncWriter = NewAsyncWriter(c.writeRange)
+	return c
 }
 
 // ctx returns a context with auth token and timeout for RPC calls
@@ -71,6 +74,18 @@ func (c *ContextVNodeGRPC) Getattr(path string) (*FileInfo, error) {
 	// AppleDouble files are zero-length placeholders
 	if isAppleDoublePath(path) {
 		return NewFileInfo(PathIno(path), 0, 0644), nil
+	}
+
+	// If we have dirty data in the async writer, report its size.
+	// This ensures editors see the correct size after Truncate+Write
+	// before the data is uploaded to S3.
+	if data, _, ok := c.asyncWriter.Get(path); ok {
+		uid, gid := GetOwner()
+		return &FileInfo{
+			Ino: PathIno(path), Size: int64(len(data)),
+			Mode: 0100644, Nlink: 1, Uid: uid, Gid: gid,
+			Atime: time.Now(), Mtime: time.Now(), Ctime: time.Now(),
+		}, nil
 	}
 
 	// Check caches
@@ -217,8 +232,23 @@ func (c *ContextVNodeGRPC) Read(path string, buf []byte, off int64, fh FileHandl
 		return 0, nil
 	}
 
-	if err := c.flushWritesForPath(path); err != nil {
-		return 0, err
+	// Drain handleState buffers into asyncWriter (non-blocking).
+	c.enqueueWritesForPath(path)
+
+	// Serve from dirty buffer if the asyncWriter has pending data covering this range.
+	if data, dataOff, ok := c.asyncWriter.Get(path); ok {
+		dataEnd := dataOff + int64(len(data))
+		if off >= dataOff && off < dataEnd {
+			n := copy(buf, data[off-dataOff:])
+			return n, nil
+		}
+		if off >= dataEnd {
+			return 0, nil // EOF — file was truncated/rewritten
+		}
+		// Read is before the dirty range; force flush and fall through to S3.
+		if err := c.asyncWriter.ForceFlush(path); err != nil {
+			return 0, err
+		}
 	}
 
 	state := c.getHandleState(fh)
@@ -298,6 +328,7 @@ func (c *ContextVNodeGRPC) Write(path string, buf []byte, off int64, fh FileHand
 
 	state := c.getHandleState(fh)
 	if state == nil {
+		// No file handle — write directly (synchronous).
 		if err := c.writeRange(path, off, buf); err != nil {
 			return 0, err
 		}
@@ -310,6 +341,7 @@ func (c *ContextVNodeGRPC) Write(path string, buf []byte, off int64, fh FileHand
 		return 0, fs.ErrInvalid
 	}
 
+	// Empty buffer: start buffering or write directly if too large.
 	if len(state.writeBuf) == 0 {
 		if len(buf) >= writeBufferMax {
 			state.mu.Unlock()
@@ -325,12 +357,17 @@ func (c *ContextVNodeGRPC) Write(path string, buf []byte, off int64, fh FileHand
 		return len(buf), nil
 	}
 
+	// Contiguous and fits: append to existing buffer.
 	if off == state.writeOff+int64(len(state.writeBuf)) && len(state.writeBuf)+len(buf) <= writeBufferMax {
 		state.writeBuf = append(state.writeBuf, buf...)
 		state.mu.Unlock()
 		return len(buf), nil
 	}
 
+	// Buffer overflow or non-contiguous: flush old buffer synchronously.
+	// We use synchronous writeRange here (not Enqueue) because the asyncWriter
+	// stores only ONE (offset, data) pair per path — sequential Enqueue calls
+	// at different offsets would clobber each other.
 	data := append([]byte(nil), state.writeBuf...)
 	writeOff := state.writeOff
 	state.writeBuf = nil
@@ -366,7 +403,19 @@ func (c *ContextVNodeGRPC) Truncate(path string, size int64, fh FileHandle) erro
 		return nil
 	}
 
-	if err := c.flushWritesForPath(path); err != nil {
+	if size == 0 {
+		// Mark file as empty without starting a debounce timer. The real
+		// content arrives via the next Write -> flushWriteBuffer -> Enqueue
+		// (which starts the timer). This avoids the race where the timer
+		// fires and uploads empty content before the Write data arrives.
+		c.enqueueWritesForPath(path)
+		c.asyncWriter.EnqueueNoTimer(path, 0, []byte{})
+		c.cache.Invalidate(path)
+		return nil
+	}
+
+	// Non-zero truncate is rare; keep it synchronous.
+	if err := c.asyncWriter.ForceFlush(path); err != nil {
 		return err
 	}
 
@@ -461,12 +510,12 @@ func (c *ContextVNodeGRPC) Rename(oldpath, newpath string) error {
 	return nil
 }
 
-// Fsync is a no-op (writes go directly to S3)
+// Fsync forces all pending writes to be uploaded to S3.
 func (c *ContextVNodeGRPC) Fsync(path string, fh FileHandle) error {
 	if state := c.getHandleState(fh); state != nil {
-		return c.flushWriteBuffer(path, state)
+		c.flushWriteBuffer(path, state)
 	}
-	return nil
+	return c.asyncWriter.ForceFlush(path)
 }
 
 // Symlink creates a symbolic link
@@ -505,7 +554,12 @@ func (c *ContextVNodeGRPC) Release(path string, fh FileHandle) error {
 	c.mu.Lock()
 	if state, ok := c.handles[fh]; ok {
 		c.mu.Unlock()
-		_ = c.flushWriteBuffer(path, state)
+		// Drain handleState into asyncWriter, then force-upload to S3.
+		// Release MUST be synchronous: after close() returns, data must be
+		// on S3 because the FUSE-T SMB layer caches based on what was
+		// persisted, and subsequent reads could bypass our dirty buffer.
+		c.flushWriteBuffer(path, state)
+		_ = c.asyncWriter.ForceFlush(path)
 		c.mu.Lock()
 		state.mu.Lock()
 		state.closed = true
@@ -696,21 +750,22 @@ func (c *ContextVNodeGRPC) consumePrefetch(path string, off int64, state *handle
 	return pf.data, true, nil
 }
 
-func (c *ContextVNodeGRPC) flushWriteBuffer(path string, state *handleState) error {
+func (c *ContextVNodeGRPC) flushWriteBuffer(path string, state *handleState) {
 	state.mu.Lock()
 	if state.closed || len(state.writeBuf) == 0 {
 		state.mu.Unlock()
-		return nil
+		return
 	}
 	data := append([]byte(nil), state.writeBuf...)
 	writeOff := state.writeOff
 	state.writeBuf = nil
 	state.mu.Unlock()
 
-	return c.writeRange(path, writeOff, data)
+	c.asyncWriter.Enqueue(path, writeOff, data)
 }
 
-func (c *ContextVNodeGRPC) flushWritesForPath(path string) error {
+// enqueueWritesForPath drains handleState write buffers into the asyncWriter (non-blocking).
+func (c *ContextVNodeGRPC) enqueueWritesForPath(path string) {
 	c.writeMu.Lock()
 	entries := c.writes[path]
 	states := make([]*handleState, 0, len(entries))
@@ -720,11 +775,13 @@ func (c *ContextVNodeGRPC) flushWritesForPath(path string) error {
 	c.writeMu.Unlock()
 
 	for _, state := range states {
-		if err := c.flushWriteBuffer(path, state); err != nil {
-			return err
-		}
+		c.flushWriteBuffer(path, state)
 	}
-	return nil
+}
+
+// Cleanup flushes all pending async writes. Called when filesystem is unmounted.
+func (c *ContextVNodeGRPC) Cleanup() {
+	c.asyncWriter.Cleanup()
 }
 
 func (c *ContextVNodeGRPC) toFileInfo(path string, info *pb.FileInfo) *FileInfo {
