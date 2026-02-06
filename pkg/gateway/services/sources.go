@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -528,7 +529,7 @@ func (s *SourceService) executeAndCacheQuery(ctx context.Context, pctx *sources.
 	}
 
 	spec := parseQuerySpec(query.Integration, query.QuerySpec)
-	if spec.Query == "" {
+	if spec.Query == "" && query.Integration != "posthog" {
 		return nil, fmt.Errorf("empty query spec for %s", query.Integration)
 	}
 
@@ -971,7 +972,7 @@ func (s *SourceService) CreateSmartQuery(ctx context.Context, req *pb.CreateSmar
 	}
 
 	spec := parseQuerySpec(req.Integration, querySpec)
-	if spec.Query == "" {
+	if spec.Query == "" && req.Integration != "posthog" {
 		return &pb.CreateSmartQueryResponse{Ok: false, Error: "invalid query spec from inference"}, nil
 	}
 	if filenameFormat == "" {
@@ -1089,6 +1090,14 @@ func (s *SourceService) inferQuerySpec(ctx context.Context, integration, name, g
 
 	case "linear":
 		result, err := baml.InferLinearQuery(ctx, name, guidancePtr)
+		if err != nil {
+			return "", "", err
+		}
+		data, _ := json.Marshal(result)
+		return string(data), extractFilenameFormat(data), nil
+
+	case "posthog":
+		result, err := baml.InferPostHogQuery(ctx, name, guidancePtr)
 		if err != nil {
 			return "", "", err
 		}
@@ -1302,7 +1311,7 @@ func (s *SourceService) UpdateSmartQuery(ctx context.Context, req *pb.UpdateSmar
 		}
 
 		spec := parseQuerySpec(query.Integration, querySpec)
-		if spec.Query == "" {
+		if spec.Query == "" && query.Integration != "posthog" {
 			return &pb.UpdateSmartQueryResponse{Ok: false, Error: "invalid query spec from inference"}, nil
 		}
 
@@ -1463,8 +1472,10 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 		GitHubQuery    string `json:"github_query"`
 		SlackQuery     string `json:"slack_query"`
 		LinearQuery    string `json:"linear_query"`
+		PostHogQuery   string `json:"posthog_query"`
 		SearchType     string `json:"search_type"`
 		ContentType    string `json:"content_type"`
+		ProjectID      int    `json:"project_id"`
 		Limit          int    `json:"limit"`
 		MaxResults     int    `json:"max_results"`
 		FilenameFormat string `json:"filename_format"`
@@ -1500,6 +1511,8 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 		query = spec.SlackQuery
 	case "linear":
 		query = spec.LinearQuery
+	case "posthog":
+		query = spec.PostHogQuery
 	}
 
 	filenameFormat := spec.FilenameFormat
@@ -1514,6 +1527,9 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 	}
 	if spec.ContentType != "" {
 		metadata["content_type"] = spec.ContentType
+	}
+	if spec.ProjectID > 0 {
+		metadata["project_id"] = strconv.Itoa(spec.ProjectID)
 	}
 
 	return sources.QuerySpec{

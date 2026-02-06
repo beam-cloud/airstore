@@ -113,6 +113,8 @@ func DefaultFilenameFormat(integration string) string {
 		return "{date}_{channel}_{user}_{id}.txt"
 	case "linear":
 		return "{identifier}_{title}.md"
+	case "posthog":
+		return "{id}.json"
 	default:
 		return "{id}"
 	}

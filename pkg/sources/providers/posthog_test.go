@@ -32,6 +32,9 @@ func TestPostHogProvider_InterfaceCompliance(t *testing.T) {
 
 	// Verify CredentialValidator interface
 	var _ sources.CredentialValidator = p
+
+	// Verify QueryExecutor interface
+	var _ sources.QueryExecutor = p
 }
 
 func TestPostHogProvider_CheckAuth(t *testing.T) {
@@ -144,6 +147,139 @@ func TestPostHogParseProjectID(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPostHogProvider_FormatFilename(t *testing.T) {
+	p := NewPostHogProvider()
+
+	tests := []struct {
+		name     string
+		format   string
+		metadata map[string]string
+		expected string
+	}{
+		{
+			name:   "feature flag format",
+			format: "{key}_{id}.json",
+			metadata: map[string]string{
+				"id":  "42",
+				"key": "beta-feature",
+			},
+			expected: "beta-feature_42.json",
+		},
+		{
+			name:   "event format",
+			format: "{date}_{event}_{id}.json",
+			metadata: map[string]string{
+				"id":    "abc123",
+				"event": "$pageview",
+				"date":  "2026-01-15",
+			},
+			expected: "2026-01-15_pageview_abc123.json",
+		},
+		{
+			name:   "empty format defaults to id.json",
+			format: "",
+			metadata: map[string]string{
+				"id": "99",
+			},
+			expected: "99.json",
+		},
+		{
+			name:   "truncation of long name",
+			format: "{name}_{id}.json",
+			metadata: map[string]string{
+				"id":   "1",
+				"name": "This is a very long name that should be truncated to forty characters exactly here",
+			},
+			expected: "This_is_a_very_long_name_that_should_be__1.json",
+		},
+		{
+			name:   "insight format",
+			format: "{name}_{id}.json",
+			metadata: map[string]string{
+				"id":   "7",
+				"name": "Weekly Retention",
+			},
+			expected: "Weekly_Retention_7.json",
+		},
+		{
+			name:   "cohort format",
+			format: "{name}_{id}.json",
+			metadata: map[string]string{
+				"id":   "5",
+				"name": "Beta Users",
+			},
+			expected: "Beta_Users_5.json",
+		},
+		{
+			name:   "no extension added when present",
+			format: "{id}.json",
+			metadata: map[string]string{
+				"id": "123",
+			},
+			expected: "123.json",
+		},
+		{
+			name:   "extension added when missing",
+			format: "{id}",
+			metadata: map[string]string{
+				"id": "456",
+			},
+			expected: "456.json",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := p.FormatFilename(tt.format, tt.metadata)
+			assert.Equal(t, tt.expected, got)
+		})
+	}
+}
+
+func TestPostHogProvider_CompositeResultID(t *testing.T) {
+	// Test that ReadResult correctly rejects invalid composite IDs
+	p := NewPostHogProvider()
+	ctx := context.Background()
+	pctx := &sources.ProviderContext{
+		Credentials: &types.IntegrationCredentials{APIKey: "phx_test"},
+	}
+
+	t.Run("invalid format - no colons", func(t *testing.T) {
+		_, err := p.ReadResult(ctx, pctx, "invalid")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid result ID format")
+	})
+
+	t.Run("invalid format - one colon", func(t *testing.T) {
+		_, err := p.ReadResult(ctx, pctx, "123:flags")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid result ID format")
+	})
+
+	t.Run("invalid project ID", func(t *testing.T) {
+		_, err := p.ReadResult(ctx, pctx, "abc:feature-flags:42")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid project ID")
+	})
+
+	t.Run("unknown resource type", func(t *testing.T) {
+		_, err := p.ReadResult(ctx, pctx, "123:unknown:42")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "unknown resource type")
+	})
+}
+
+func TestPostHogProvider_ExecuteQueryAuth(t *testing.T) {
+	p := NewPostHogProvider()
+	ctx := context.Background()
+
+	t.Run("no credentials", func(t *testing.T) {
+		pctx := &sources.ProviderContext{}
+		_, err := p.ExecuteQuery(ctx, pctx, sources.QuerySpec{Query: "test"})
+		assert.ErrorIs(t, err, sources.ErrNotConnected)
+	})
 }
 
 func TestSliceBytes(t *testing.T) {

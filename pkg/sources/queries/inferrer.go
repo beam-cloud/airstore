@@ -50,3 +50,12 @@ type LinearQuerySpec struct {
 	Limit          int    `json:"limit"`
 	FilenameFormat string `json:"filename_format"`
 }
+
+// PostHogQuerySpec is the output format for PostHog queries.
+type PostHogQuerySpec struct {
+	Query          string `json:"posthog_query"`
+	SearchType     string `json:"search_type"` // "events", "feature-flags", "insights", "cohorts"
+	ProjectID      int    `json:"project_id"`  // 0 = first available project
+	Limit          int    `json:"limit"`
+	FilenameFormat string `json:"filename_format"`
+}

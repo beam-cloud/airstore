@@ -219,3 +219,54 @@ func (c *PostHogClient) GetCohort(ctx context.Context, projectID, cohortID int) 
 	}
 	return &cohort, nil
 }
+
+// GetFeatureFlag retrieves a feature flag by numeric ID.
+// Uses: GET /api/projects/{id}/feature_flags/{flagID}/
+func (c *PostHogClient) GetFeatureFlag(ctx context.Context, projectID, flagID int) (*PostHogFeatureFlag, error) {
+	path := fmt.Sprintf("/api/projects/%d/feature_flags/%d/", projectID, flagID)
+	var flag PostHogFeatureFlag
+	if err := c.doRequest(ctx, path, &flag); err != nil {
+		return nil, err
+	}
+	return &flag, nil
+}
+
+// SearchFeatureFlags searches feature flags by name/key.
+// Uses: GET /api/projects/{id}/feature_flags/?search={search}&limit=200
+func (c *PostHogClient) SearchFeatureFlags(ctx context.Context, projectID int, search string) ([]PostHogFeatureFlag, error) {
+	path := fmt.Sprintf("/api/projects/%d/feature_flags/?search=%s&limit=200", projectID, url.QueryEscape(search))
+	return fetchAllPages[PostHogFeatureFlag](ctx, c, path)
+}
+
+// SearchInsights searches insights by name.
+// Uses: GET /api/projects/{id}/insights/?search={search}&limit=200
+func (c *PostHogClient) SearchInsights(ctx context.Context, projectID int, search string) ([]PostHogInsight, error) {
+	path := fmt.Sprintf("/api/projects/%d/insights/?search=%s&limit=200", projectID, url.QueryEscape(search))
+	return fetchAllPages[PostHogInsight](ctx, c, path)
+}
+
+// SearchCohorts searches cohorts by name.
+// Uses: GET /api/projects/{id}/cohorts/?search={search}&limit=200
+func (c *PostHogClient) SearchCohorts(ctx context.Context, projectID int, search string) ([]PostHogCohort, error) {
+	path := fmt.Sprintf("/api/projects/%d/cohorts/?search=%s&limit=200", projectID, url.QueryEscape(search))
+	return fetchAllPages[PostHogCohort](ctx, c, path)
+}
+
+// SearchEvents searches events, optionally filtered by event name.
+// If eventName is empty, returns recent events. Uses: GET /api/projects/{id}/events/
+func (c *PostHogClient) SearchEvents(ctx context.Context, projectID int, eventName string, limit int) ([]PostHogEvent, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	path := fmt.Sprintf("/api/projects/%d/events/?limit=%d", projectID, limit)
+	if eventName != "" {
+		path += "&event=" + url.QueryEscape(eventName)
+	}
+	var resp struct {
+		Results []PostHogEvent `json:"results"`
+	}
+	if err := c.doRequest(ctx, path, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Results, nil
+}

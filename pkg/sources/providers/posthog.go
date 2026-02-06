@@ -227,6 +227,293 @@ func (p *PostHogProvider) Search(_ context.Context, _ *sources.ProviderContext, 
 	return nil, sources.ErrSearchNotSupported
 }
 
+// Compile-time interface assertion for QueryExecutor
+var _ sources.QueryExecutor = (*PostHogProvider)(nil)
+
+// ExecuteQuery runs a PostHog search query and returns results.
+// Implements the sources.QueryExecutor interface for smart folder queries.
+func (p *PostHogProvider) ExecuteQuery(ctx context.Context, pctx *sources.ProviderContext, spec sources.QuerySpec) (*sources.QueryResponse, error) {
+	if err := p.checkAuth(pctx); err != nil {
+		return nil, err
+	}
+
+	client := p.newClient(pctx.Credentials)
+
+	// Resolve project ID
+	projectID := 0
+	if pidStr, ok := spec.Metadata["project_id"]; ok {
+		if pid, err := strconv.Atoi(pidStr); err == nil && pid > 0 {
+			projectID = pid
+		}
+	}
+	if projectID == 0 {
+		projects, err := client.ListProjects(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list projects: %w", err)
+		}
+		if len(projects) == 0 {
+			return &sources.QueryResponse{Results: []sources.QueryResult{}}, nil
+		}
+		projectID = projects[0].ID
+	}
+
+	limit := spec.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	searchType := spec.Metadata["search_type"]
+	filenameFormat := spec.FilenameFormat
+	if filenameFormat == "" {
+		filenameFormat = sources.DefaultFilenameFormat("posthog")
+	}
+
+	switch searchType {
+	case "feature-flags":
+		return p.executeFeatureFlagQuery(ctx, client, projectID, spec.Query, filenameFormat)
+	case "insights":
+		return p.executeInsightQuery(ctx, client, projectID, spec.Query, filenameFormat)
+	case "cohorts":
+		return p.executeCohortQuery(ctx, client, projectID, spec.Query, filenameFormat)
+	default:
+		return p.executeEventQuery(ctx, client, projectID, spec.Query, limit, filenameFormat)
+	}
+}
+
+func (p *PostHogProvider) executeFeatureFlagQuery(ctx context.Context, client *clients.PostHogClient, projectID int, query, filenameFormat string) (*sources.QueryResponse, error) {
+	var flags []clients.PostHogFeatureFlag
+	var err error
+	if query != "" {
+		flags, err = client.SearchFeatureFlags(ctx, projectID, query)
+	} else {
+		flags, err = client.ListFeatureFlags(ctx, projectID)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]sources.QueryResult, 0, len(flags))
+	for _, f := range flags {
+		metadata := map[string]string{
+			"id":     strconv.Itoa(f.ID),
+			"key":    f.Key,
+			"name":   f.Name,
+			"active": strconv.FormatBool(f.Active),
+		}
+		results = append(results, sources.QueryResult{
+			ID:       fmt.Sprintf("%d:feature-flags:%d", projectID, f.ID),
+			Filename: p.FormatFilename(filenameFormat, metadata),
+			Metadata: metadata,
+			Mtime:    sources.NowUnix(),
+		})
+	}
+
+	return &sources.QueryResponse{Results: results}, nil
+}
+
+func (p *PostHogProvider) executeInsightQuery(ctx context.Context, client *clients.PostHogClient, projectID int, query, filenameFormat string) (*sources.QueryResponse, error) {
+	var insights []clients.PostHogInsight
+	var err error
+	if query != "" {
+		insights, err = client.SearchInsights(ctx, projectID, query)
+	} else {
+		insights, err = client.ListInsights(ctx, projectID)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]sources.QueryResult, 0, len(insights))
+	for _, ins := range insights {
+		metadata := map[string]string{
+			"id":       strconv.Itoa(ins.ID),
+			"short_id": ins.ShortID,
+			"name":     ins.Name,
+		}
+		results = append(results, sources.QueryResult{
+			ID:       fmt.Sprintf("%d:insights:%s", projectID, ins.ShortID),
+			Filename: p.FormatFilename(filenameFormat, metadata),
+			Metadata: metadata,
+			Mtime:    sources.NowUnix(),
+		})
+	}
+
+	return &sources.QueryResponse{Results: results}, nil
+}
+
+func (p *PostHogProvider) executeCohortQuery(ctx context.Context, client *clients.PostHogClient, projectID int, query, filenameFormat string) (*sources.QueryResponse, error) {
+	var cohorts []clients.PostHogCohort
+	var err error
+	if query != "" {
+		cohorts, err = client.SearchCohorts(ctx, projectID, query)
+	} else {
+		cohorts, err = client.ListCohorts(ctx, projectID)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]sources.QueryResult, 0, len(cohorts))
+	for _, co := range cohorts {
+		metadata := map[string]string{
+			"id":    strconv.Itoa(co.ID),
+			"name":  co.Name,
+			"count": strconv.Itoa(co.Count),
+		}
+		results = append(results, sources.QueryResult{
+			ID:       fmt.Sprintf("%d:cohorts:%d", projectID, co.ID),
+			Filename: p.FormatFilename(filenameFormat, metadata),
+			Metadata: metadata,
+			Mtime:    sources.NowUnix(),
+		})
+	}
+
+	return &sources.QueryResponse{Results: results}, nil
+}
+
+func (p *PostHogProvider) executeEventQuery(ctx context.Context, client *clients.PostHogClient, projectID int, query string, limit int, filenameFormat string) (*sources.QueryResponse, error) {
+	events, err := client.SearchEvents(ctx, projectID, query, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]sources.QueryResult, 0, len(events))
+	for _, ev := range events {
+		date := ""
+		if ev.Timestamp != "" && len(ev.Timestamp) >= 10 {
+			date = ev.Timestamp[:10]
+		}
+		metadata := map[string]string{
+			"id":    ev.ID,
+			"event": ev.Event,
+			"date":  date,
+		}
+		results = append(results, sources.QueryResult{
+			ID:       fmt.Sprintf("%d:events:%s", projectID, ev.ID),
+			Filename: p.FormatFilename(filenameFormat, metadata),
+			Metadata: metadata,
+			Mtime:    sources.NowUnix(),
+		})
+	}
+
+	return &sources.QueryResponse{Results: results}, nil
+}
+
+// ReadResult fetches content for a specific PostHog resource by its composite ID.
+// Composite ID format: "{projectID}:{resourceType}:{resourceID}"
+func (p *PostHogProvider) ReadResult(ctx context.Context, pctx *sources.ProviderContext, resultID string) ([]byte, error) {
+	if err := p.checkAuth(pctx); err != nil {
+		return nil, err
+	}
+
+	parts := strings.SplitN(resultID, ":", 3)
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("invalid result ID format: %s", resultID)
+	}
+
+	projectID, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return nil, fmt.Errorf("invalid project ID in result ID: %s", resultID)
+	}
+	resourceType := parts[1]
+	resourceID := parts[2]
+
+	client := p.newClient(pctx.Credentials)
+
+	switch resourceType {
+	case "feature-flags":
+		flagID, err := strconv.Atoi(resourceID)
+		if err != nil {
+			return nil, fmt.Errorf("invalid flag ID: %s", resourceID)
+		}
+		flag, err := client.GetFeatureFlag(ctx, projectID, flagID)
+		if err != nil {
+			if errors.Is(err, clients.ErrResourceNotFound) {
+				return nil, sources.ErrNotFound
+			}
+			return nil, err
+		}
+		return jsonMarshalIndent(flag)
+
+	case "insights":
+		insight, err := client.GetInsightByShortID(ctx, projectID, resourceID)
+		if err != nil {
+			if errors.Is(err, clients.ErrResourceNotFound) {
+				return nil, sources.ErrNotFound
+			}
+			return nil, err
+		}
+		return jsonMarshalIndent(insight)
+
+	case "cohorts":
+		cohortID, err := strconv.Atoi(resourceID)
+		if err != nil {
+			return nil, fmt.Errorf("invalid cohort ID: %s", resourceID)
+		}
+		cohort, err := client.GetCohort(ctx, projectID, cohortID)
+		if err != nil {
+			if errors.Is(err, clients.ErrResourceNotFound) {
+				return nil, sources.ErrNotFound
+			}
+			return nil, err
+		}
+		return jsonMarshalIndent(cohort)
+
+	case "events":
+		// No single-event GET endpoint; search and match by ID
+		events, err := client.SearchEvents(ctx, projectID, "", 100)
+		if err != nil {
+			return nil, err
+		}
+		for _, ev := range events {
+			if ev.ID == resourceID {
+				return jsonMarshalIndent(ev)
+			}
+		}
+		return nil, sources.ErrNotFound
+
+	default:
+		return nil, fmt.Errorf("unknown resource type: %s", resourceType)
+	}
+}
+
+// FormatFilename generates a filename from metadata using a format template.
+// Supported placeholders: {id}, {key}, {name}, {event}, {date}, {short_id}, {active}, {count}
+func (p *PostHogProvider) FormatFilename(format string, metadata map[string]string) string {
+	if format == "" {
+		format = "{id}.json"
+	}
+
+	result := format
+	for key, value := range metadata {
+		placeholder := "{" + key + "}"
+		safeValue := sources.SanitizeFilename(value)
+		// Truncate long values (except id, short_id)
+		if key != "id" && key != "short_id" && len(safeValue) > 40 {
+			safeValue = safeValue[:40]
+		}
+		result = strings.ReplaceAll(result, placeholder, safeValue)
+	}
+
+	// Ensure .json extension
+	if !strings.Contains(result, ".") {
+		result += ".json"
+	}
+
+	if result == "" || result == ".json" {
+		if id, ok := metadata["id"]; ok {
+			result = id + ".json"
+		} else {
+			result = "result.json"
+		}
+	}
+
+	return result
+}
+
 // --- ReadDir helpers ---
 
 func (p *PostHogProvider) listEvents(ctx context.Context, client *clients.PostHogClient, projectID int) ([]sources.DirEntry, error) {
