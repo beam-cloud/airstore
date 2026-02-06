@@ -3,6 +3,7 @@ package common
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -134,7 +135,7 @@ func (e *LocalEventEmitter) Emit(_ context.Context, data map[string]any) error {
 	if e.handler == nil {
 		return nil
 	}
-	e.seq++
-	go e.handler(fmt.Sprintf("local-%d", e.seq), data)
+	id := atomic.AddUint64(&e.seq, 1)
+	go e.handler(fmt.Sprintf("local-%d", id), data)
 	return nil
 }
