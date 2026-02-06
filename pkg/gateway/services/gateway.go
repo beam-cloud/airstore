@@ -17,10 +17,12 @@ import (
 
 type GatewayService struct {
 	pb.UnimplementedGatewayServiceServer
-	backend  repository.BackendRepository
-	fsStore  repository.FilesystemStore
-	s2Client *common.S2Client
-	hooksSvc *hooks.Service
+	backend      repository.BackendRepository
+	fsStore      repository.FilesystemStore
+	s2Client     *common.S2Client
+	hooksSvc     *hooks.Service
+	taskQueue    repository.TaskQueue
+	defaultImage string
 }
 
 func NewGatewayService(backend repository.BackendRepository, s2Client *common.S2Client, fsStore repository.FilesystemStore, eventBus *common.EventBus) *GatewayService {
@@ -30,6 +32,13 @@ func NewGatewayService(backend repository.BackendRepository, s2Client *common.S2
 		fsStore:  fsStore,
 		hooksSvc: &hooks.Service{Store: fsStore, Backend: backend, EventBus: eventBus},
 	}
+}
+
+// SetTaskQueue wires the task queue and default image for CreateTask.
+// Called after the queue is initialized during gateway startup.
+func (s *GatewayService) SetTaskQueue(queue repository.TaskQueue, defaultImage string) {
+	s.taskQueue = queue
+	s.defaultImage = defaultImage
 }
 
 // Workspaces
@@ -371,6 +380,90 @@ func (s *GatewayService) RemoveConnection(ctx context.Context, req *pb.RemoveCon
 }
 
 // Tasks
+
+func (s *GatewayService) CreateTask(ctx context.Context, req *pb.CreateTaskRequest) (*pb.TaskResponse, error) {
+	workspaceId := auth.WorkspaceId(ctx)
+	if workspaceId == 0 {
+		return &pb.TaskResponse{Ok: false, Error: "authentication required"}, nil
+	}
+
+	image := req.Image
+	if req.Prompt != "" && image == "" {
+		image = s.defaultImage
+	}
+	if image == "" {
+		return &pb.TaskResponse{Ok: false, Error: "image or prompt is required"}, nil
+	}
+
+	// Get member info and token from auth context
+	var createdByMemberId *uint
+	memberId := auth.MemberId(ctx)
+	if memberId > 0 {
+		createdByMemberId = &memberId
+	}
+
+	// Extract auth token from gRPC metadata for passing to container
+	var memberToken string
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		if vals := md.Get("authorization"); len(vals) > 0 {
+			memberToken = strings.TrimPrefix(vals[0], "Bearer ")
+		}
+	}
+
+	env := req.Env
+	if env == nil {
+		env = make(map[string]string)
+	}
+	entrypoint := req.Entrypoint
+	if entrypoint == nil {
+		entrypoint = []string{}
+	}
+
+	task := &types.Task{
+		WorkspaceId:       workspaceId,
+		CreatedByMemberId: createdByMemberId,
+		MemberToken:       memberToken,
+		Status:            types.TaskStatusPending,
+		Prompt:            req.Prompt,
+		Image:             image,
+		Entrypoint:        entrypoint,
+		Env:               env,
+	}
+
+	if err := s.backend.CreateTask(ctx, task); err != nil {
+		return &pb.TaskResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	if s.taskQueue != nil {
+		_ = s.taskQueue.Push(ctx, task)
+	}
+
+	return &pb.TaskResponse{Ok: true, Task: taskToPb(task)}, nil
+}
+
+func (s *GatewayService) DeleteTask(ctx context.Context, req *pb.DeleteTaskRequest) (*pb.DeleteResponse, error) {
+	workspaceId := auth.WorkspaceId(ctx)
+	if workspaceId == 0 {
+		return &pb.DeleteResponse{Ok: false, Error: "authentication required"}, nil
+	}
+
+	// Verify the task belongs to the caller's workspace before deleting.
+	task, err := s.backend.GetTask(ctx, req.Id)
+	if err != nil {
+		if _, ok := err.(*types.ErrTaskNotFound); ok {
+			return &pb.DeleteResponse{Ok: false, Error: "task not found"}, nil
+		}
+		return &pb.DeleteResponse{Ok: false, Error: err.Error()}, nil
+	}
+	if task.WorkspaceId != workspaceId {
+		return &pb.DeleteResponse{Ok: false, Error: "task not found"}, nil
+	}
+
+	if err := s.backend.DeleteTask(ctx, req.Id); err != nil {
+		return &pb.DeleteResponse{Ok: false, Error: err.Error()}, nil
+	}
+	return &pb.DeleteResponse{Ok: true}, nil
+}
 
 func (s *GatewayService) ListTasks(ctx context.Context, req *pb.ListTasksRequest) (*pb.ListTasksResponse, error) {
 	workspaceId := auth.WorkspaceId(ctx)

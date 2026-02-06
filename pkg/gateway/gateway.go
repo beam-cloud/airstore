@@ -344,8 +344,9 @@ func (g *Gateway) registerServices() error {
 	log.Info().Msg("tools service registered")
 
 	// Register gateway gRPC service (workspace/member/token/connection/task management)
+	var gatewayService *services.GatewayService
 	if g.BackendRepo != nil {
-		gatewayService := services.NewGatewayService(g.BackendRepo, g.s2Client, filesystemStore, g.eventBus)
+		gatewayService = services.NewGatewayService(g.BackendRepo, g.s2Client, filesystemStore, g.eventBus)
 		pb.RegisterGatewayServiceServer(g.grpcServer, gatewayService)
 		log.Info().Msg("gateway service registered")
 	}
@@ -376,6 +377,11 @@ func (g *Gateway) registerServices() error {
 	// Register task and workspace APIs (requires Postgres)
 	if g.BackendRepo != nil {
 		taskQueue := repository.NewRedisTaskQueue(g.RedisClient, "default")
+
+		// Wire task queue into the gRPC gateway service for CreateTask/DeleteTask
+		if gatewayService != nil {
+			gatewayService.SetTaskQueue(taskQueue, g.Config.Sandbox.GetDefaultImage())
+		}
 
 		// Task factory (shared between HTTP API and hook evaluator)
 		taskFactory := tasks.NewFactory(g.BackendRepo, taskQueue, g.Config.Sandbox.GetDefaultImage())
