@@ -871,7 +871,7 @@ func (s *filesystemStore) GetWatchedSourceQueries(ctx context.Context, staleAfte
 		JOIN filesystem_hooks h
 		  ON h.workspace_id = q.workspace_id
 		  AND h.active = true
-		  AND (q.path = h.path OR q.path LIKE h.path || '/%')
+		  AND (q.path = h.path OR q.path LIKE replace(replace(h.path, '%', '\%'), '_', '\_') || '/%')
 		WHERE q.last_executed IS NULL
 		   OR q.last_executed < NOW() - $1::interval
 		ORDER BY q.last_executed ASC NULLS FIRST

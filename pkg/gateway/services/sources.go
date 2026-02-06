@@ -60,8 +60,8 @@ type SourceService struct {
 	oauthRegistry *oauth.Registry
 	credCache     sync.Map // map[string]*cachedCreds - caches credentials by "workspaceId:integration"
 	queryGroup    singleflight.Group
-	hookStream    common.EventEmitter   // optional: for emitting source change events
-	seenTracker   *hooks.SeenTracker   // optional: for detecting new query results
+	hookStream    common.EventEmitter // optional: for emitting source change events
+	seenTracker   *hooks.SeenTracker  // optional: for detecting new query results
 }
 
 // SourceServiceOption configures optional dependencies on SourceService.
@@ -165,7 +165,11 @@ func (s *SourceService) RefreshSmartQuery(ctx context.Context, queryPath string)
 // Satisfies hooks.QueryRefresher.
 func (s *SourceService) RefreshQuery(ctx context.Context, query *types.FilesystemQuery) error {
 	pctx := &sources.ProviderContext{WorkspaceId: query.WorkspaceId}
-	pctx, _ = s.loadCredentials(ctx, pctx, query.Integration)
+	pctx, connected := s.loadCredentials(ctx, pctx, query.Integration)
+	if !connected {
+		return fmt.Errorf("not connected to %s (workspace %d)", query.Integration, query.WorkspaceId)
+	}
+
 	_, err := s.executeAndCacheQuery(ctx, pctx, query)
 	return err
 }
@@ -550,25 +554,42 @@ func (s *SourceService) executeAndCacheQuery(ctx context.Context, pctx *sources.
 		Int("pages", pageNum).
 		Msg("query complete")
 
-	// Detect new results for hook triggers
+	// Detect new results for hook triggers.
+	// Two-phase: Compare (read-only) → Emit → Commit (advance the set).
+	// Only commits the seen set after successful emission, so a failed emit
+	// doesn't silently swallow new results.
 	if s.seenTracker != nil && s.hookStream != nil && len(allResults) > 0 {
 		seenKey := common.Keys.HookSeen(pctx.WorkspaceId, types.GeneratePathID(query.Path))
 		ids := make([]string, len(allResults))
 		for i, r := range allResults {
 			ids[i] = r.ID
 		}
-		if newIDs, err := s.seenTracker.Diff(ctx, seenKey, ids); err == nil && len(newIDs) > 0 {
-			s.hookStream.Emit(ctx, map[string]any{
+
+		newIDs, _ := s.seenTracker.Compare(ctx, seenKey, ids)
+		emitted := false
+
+		if len(newIDs) > 0 {
+			if err := s.hookStream.Emit(ctx, map[string]any{
 				"event":        hooks.EventSourceChange,
 				"workspace_id": fmt.Sprintf("%d", pctx.WorkspaceId),
 				"path":         query.Path,
 				"integration":  query.Integration,
 				"new_count":    fmt.Sprintf("%d", len(newIDs)),
-			})
-			log.Debug().
-				Str("path", query.Path).
-				Int("new_results", len(newIDs)).
-				Msg("source change detected")
+			}); err == nil {
+				emitted = true
+				log.Debug().
+					Str("path", query.Path).
+					Int("new_results", len(newIDs)).
+					Msg("source change detected")
+			} else {
+				log.Warn().Err(err).Str("path", query.Path).Msg("failed to emit source change event, will retry next poll")
+			}
+		} else {
+			emitted = true // no new IDs, safe to advance
+		}
+
+		if emitted {
+			s.seenTracker.Commit(ctx, seenKey, ids)
 		}
 	}
 

@@ -2,12 +2,18 @@ package hooks
 
 import (
 	"context"
+	"time"
 
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/redis/go-redis/v9"
 )
 
+const seenKeyTTL = 24 * time.Hour
+
 // SeenTracker detects new query result IDs by diffing against the previous set.
+// Usage: Compare (read-only) → act on new IDs → Commit (update stored set).
+// This two-phase approach ensures the stored set only advances after the caller
+// has successfully processed the new IDs.
 type SeenTracker struct {
 	rdb *common.RedisClient
 }
@@ -16,28 +22,20 @@ func NewSeenTracker(rdb *common.RedisClient) *SeenTracker {
 	return &SeenTracker{rdb: rdb}
 }
 
-// Diff returns IDs in current that weren't in the previous set at key.
-// Replaces the stored set with current (pipelined, not strictly atomic).
-// Returns nil on first call to avoid a false-positive flood.
-func (t *SeenTracker) Diff(ctx context.Context, key string, current []string) ([]string, error) {
+// Compare returns IDs in current that weren't in the previous set at key.
+// Does NOT modify the stored set -- call Commit after successful processing.
+// Returns nil on first call (empty stored set) to avoid a false-positive flood.
+func (t *SeenTracker) Compare(ctx context.Context, key string, current []string) ([]string, error) {
 	if len(current) == 0 {
 		return nil, nil
 	}
 
-	pipe := t.rdb.Pipeline()
-	oldCmd := pipe.SMembers(ctx, key)
-	pipe.Del(ctx, key)
-	args := make([]any, len(current))
-	for i, id := range current {
-		args[i] = id
-	}
-	pipe.SAdd(ctx, key, args...)
-
-	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+	old, err := t.rdb.SMembers(ctx, key).Result()
+	if err != nil && err != redis.Nil {
 		return nil, err
 	}
 
-	old := oldCmd.Val()
+	// First call: no previous set. Return nil to avoid flooding.
 	if len(old) == 0 {
 		return nil, nil
 	}
@@ -53,5 +51,45 @@ func (t *SeenTracker) Diff(ctx context.Context, key string, current []string) ([
 			newIDs = append(newIDs, id)
 		}
 	}
+	return newIDs, nil
+}
+
+// Commit replaces the stored set with current and refreshes the TTL.
+// Call only after the caller has successfully acted on the new IDs from Compare.
+func (t *SeenTracker) Commit(ctx context.Context, key string, current []string) error {
+	if len(current) == 0 {
+		return nil
+	}
+
+	pipe := t.rdb.Pipeline()
+	pipe.Del(ctx, key)
+
+	args := make([]any, len(current))
+	for i, id := range current {
+		args[i] = id
+	}
+	pipe.SAdd(ctx, key, args...)
+	pipe.Expire(ctx, key, seenKeyTTL)
+
+	_, err := pipe.Exec(ctx)
+	if err != nil && err != redis.Nil {
+		return err
+	}
+	return nil
+}
+
+// Diff is a convenience that combines Compare + Commit in one call.
+// Use Compare + Commit separately when you need to confirm delivery before advancing.
+func (t *SeenTracker) Diff(ctx context.Context, key string, current []string) ([]string, error) {
+	newIDs, err := t.Compare(ctx, key, current)
+	if err != nil {
+		return nil, err
+	}
+
+	// Always commit (even if no new IDs) to refresh TTL and update the set.
+	if err := t.Commit(ctx, key, current); err != nil {
+		return nil, err
+	}
+
 	return newIDs, nil
 }
