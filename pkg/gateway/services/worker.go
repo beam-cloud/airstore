@@ -123,6 +123,16 @@ func (s *WorkerService) ListWorkers(ctx context.Context, req *pb.ListWorkersRequ
 	return response, nil
 }
 
+func (s *WorkerService) SetTaskStarted(ctx context.Context, req *pb.SetTaskStartedRequest) (*pb.SetTaskStartedResponse, error) {
+	if s.backend == nil {
+		return nil, status.Errorf(codes.Unavailable, "task persistence not available")
+	}
+	if err := s.backend.SetTaskStarted(ctx, req.TaskId); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to set task started: %v", err)
+	}
+	return &pb.SetTaskStartedResponse{}, nil
+}
+
 func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResultRequest) (*pb.SetTaskResultResponse, error) {
 	if s.backend == nil {
 		return nil, status.Errorf(codes.Unavailable, "task persistence not available")

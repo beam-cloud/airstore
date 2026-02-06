@@ -149,6 +149,8 @@ func (r *PostgresBackend) validateMemberToken(ctx context.Context, rawToken stri
 		}(tokenId)
 
 		return &types.TokenValidationResult{
+			TokenType:     tokenType,
+			TokenId:       tokenId,
 			WorkspaceId:   workspaceId,
 			WorkspaceExt:  workspaceExt,
 			WorkspaceName: workspaceName,
@@ -156,7 +158,6 @@ func (r *PostgresBackend) validateMemberToken(ctx context.Context, rawToken stri
 			MemberExt:     memberExt,
 			MemberEmail:   memberEmail,
 			MemberRole:    memberRole,
-			TokenType:     tokenType,
 		}, nil
 	}
 
@@ -205,6 +206,7 @@ func (r *PostgresBackend) validateWorkerToken(ctx context.Context, rawToken stri
 
 		result := &types.TokenValidationResult{
 			TokenType: types.TokenTypeWorker,
+			TokenId:   tokenId,
 		}
 		if poolName.Valid {
 			result.PoolName = poolName.String
@@ -228,6 +230,7 @@ func (r *PostgresBackend) AuthorizeToken(ctx context.Context, rawToken string) (
 	// Convert TokenValidationResult to AuthInfo
 	info := &types.AuthInfo{
 		TokenType: result.TokenType,
+		TokenId:   result.TokenId,
 	}
 
 	if result.TokenType == types.TokenTypeWorkspaceMember {

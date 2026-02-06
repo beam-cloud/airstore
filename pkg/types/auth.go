@@ -12,6 +12,7 @@ const (
 // AuthInfo contains identity information for authenticated requests.
 type AuthInfo struct {
 	TokenType TokenType
+	TokenId   uint // Internal ID of the token used for authentication
 	Workspace *WorkspaceInfo
 	Member    *MemberInfo
 	Worker    *WorkerInfo

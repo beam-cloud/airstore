@@ -20,9 +20,9 @@ var tokenCmd = &cobra.Command{
 }
 
 var tokenCreateCmd = &cobra.Command{
-	Use:   "create <workspace_id> <member_id>",
+	Use:   "create <member_id>",
 	Short: "Create an API token for a member",
-	Args:  cobra.ExactArgs(2),
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var client *Client
 		var resp *pb.CreateTokenResponse
@@ -45,8 +45,7 @@ var tokenCreateCmd = &cobra.Command{
 			}
 
 			resp, err = client.Gateway.CreateToken(context.Background(), &pb.CreateTokenRequest{
-				WorkspaceId:      args[0],
-				MemberId:         args[1],
+				MemberId:         args[0],
 				Name:             tokenName,
 				ExpiresInSeconds: expiresInSeconds,
 			})
@@ -86,9 +85,8 @@ var tokenCreateCmd = &cobra.Command{
 }
 
 var tokenListCmd = &cobra.Command{
-	Use:   "list <workspace_id>",
-	Short: "List tokens in a workspace",
-	Args:  cobra.ExactArgs(1),
+	Use:   "list",
+	Short: "List tokens in your workspace",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		client, err := getClient()
 		if err != nil {
@@ -97,9 +95,7 @@ var tokenListCmd = &cobra.Command{
 		}
 		defer client.Close()
 
-		resp, err := client.Gateway.ListTokens(context.Background(), &pb.ListTokensRequest{
-			WorkspaceId: args[0],
-		})
+		resp, err := client.Gateway.ListTokens(context.Background(), &pb.ListTokensRequest{})
 		if err != nil {
 			PrintError(err)
 			return nil
@@ -116,7 +112,7 @@ var tokenListCmd = &cobra.Command{
 
 		if len(resp.Tokens) == 0 {
 			PrintInfo("No tokens found")
-			PrintHint("Create one with: airstore token create <workspace_id> <member_id>")
+			PrintHint("Create one with: airstore token create <member_id>")
 			return nil
 		}
 

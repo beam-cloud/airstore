@@ -16,6 +16,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/clients"
 	"github.com/beam-cloud/airstore/pkg/common"
+	"github.com/beam-cloud/airstore/pkg/hooks"
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/rs/zerolog/log"
@@ -32,9 +33,10 @@ const (
 // StorageService provides S3-backed file storage with per-workspace buckets
 type StorageService struct {
 	pb.UnimplementedContextServiceServer
-	client   *clients.StorageClient
-	cache    *metadataCache
-	eventBus *common.EventBus
+	client     *clients.StorageClient
+	cache      *metadataCache
+	eventBus   *common.EventBus
+	hookStream common.EventEmitter
 }
 
 func NewStorageService(client *clients.StorageClient, eventBus *common.EventBus) (*StorageService, error) {
@@ -61,11 +63,39 @@ func NewStorageService(client *clients.StorageClient, eventBus *common.EventBus)
 	return s, nil
 }
 
+// SetHookStream sets the event emitter for hook event emission.
+func (s *StorageService) SetHookStream(emitter common.EventEmitter) {
+	s.hookStream = emitter
+}
+
+// emitHookEvent sends a filesystem event to the hook event stream.
+func (s *StorageService) emitHookEvent(ctx context.Context, eventType string, path string) {
+	if s.hookStream == nil {
+		return
+	}
+
+	wsId := auth.WorkspaceId(ctx)
+	if wsId == 0 {
+		return
+	}
+
+	path = hooks.NormalizePath(path)
+
+	log.Debug().Str("event", eventType).Str("path", path).Uint("workspace", wsId).Msg("hook event emitted")
+	s.hookStream.Emit(ctx, map[string]any{
+		"event":            eventType,
+		"workspace_id":     fmt.Sprintf("%d", wsId),
+		"workspace_ext_id": auth.WorkspaceExtId(ctx),
+		"path":             path,
+	})
+}
+
 func (s *StorageService) bucket(ctx context.Context) (string, error) {
 	rc := auth.AuthInfoFromContext(ctx)
 	if rc == nil {
 		return "", fmt.Errorf("no auth context")
 	}
+
 	wsExt := auth.WorkspaceExtId(ctx)
 	if wsExt == "" {
 		if rc.IsClusterAdmin() {
@@ -73,6 +103,7 @@ func (s *StorageService) bucket(ctx context.Context) (string, error) {
 		}
 		return "", fmt.Errorf("no workspace")
 	}
+
 	return s.client.WorkspaceBucketName(wsExt), nil
 }
 
@@ -279,6 +310,7 @@ func (s *StorageService) Write(ctx context.Context, req *pb.ContextWriteRequest)
 	}
 
 	s.invalidate(bucket, key)
+	s.emitHookEvent(ctx, hooks.EventFsWrite, req.Path)
 	return &pb.ContextWriteResponse{Ok: true, Written: int32(len(req.Data))}, nil
 }
 
@@ -301,6 +333,10 @@ func (s *StorageService) Create(ctx context.Context, req *pb.ContextCreateReques
 	}
 
 	s.invalidate(bucket, key)
+
+	// Don't emit fs.create here -- this creates an empty file.
+	// Content arrives via Write() which emits fs.write (debounced).
+	// on_create hooks fire on debounced writes, not empty creates.
 	return &pb.ContextCreateResponse{Ok: true}, nil
 }
 
@@ -394,6 +430,7 @@ func (s *StorageService) Delete(ctx context.Context, req *pb.ContextDeleteReques
 	s3c.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &bucket, Key: aws.String(key + "/")})
 
 	s.invalidate(bucket, key)
+	s.emitHookEvent(ctx, hooks.EventFsDelete, req.Path)
 	return &pb.ContextDeleteResponse{Ok: true}, nil
 }
 
@@ -662,6 +699,7 @@ func (s *StorageService) NotifyUploadComplete(ctx context.Context, path string) 
 
 	key := s.key(path)
 	s.invalidate(bucket, key)
+	s.emitHookEvent(ctx, hooks.EventFsCreate, path)
 	return nil
 }
 
@@ -720,8 +758,12 @@ func fileInfo(resp *s3.HeadObjectOutput) *pb.FileInfo {
 	}
 }
 
-func statOk(info *pb.FileInfo) *pb.ContextStatResponse  { return &pb.ContextStatResponse{Ok: true, Info: info} }
-func statErr(err error) *pb.ContextStatResponse         { return &pb.ContextStatResponse{Ok: false, Error: err.Error()} }
+func statOk(info *pb.FileInfo) *pb.ContextStatResponse {
+	return &pb.ContextStatResponse{Ok: true, Info: info}
+}
+func statErr(err error) *pb.ContextStatResponse {
+	return &pb.ContextStatResponse{Ok: false, Error: err.Error()}
+}
 
 // isHiddenFile returns true for files that should be hidden from listings
 func isHiddenFile(name string) bool {

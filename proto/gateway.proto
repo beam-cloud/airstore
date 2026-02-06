@@ -34,6 +34,14 @@ service GatewayService {
   rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
   rpc GetTask(GetTaskRequest) returns (TaskResponse);
   rpc GetTaskLogs(GetTaskLogsRequest) returns (GetTaskLogsResponse);
+
+  // Hooks
+  rpc CreateHook(CreateHookRequest) returns (HookResponse);
+  rpc ListHooks(ListHooksRequest) returns (ListHooksResponse);
+  rpc GetHook(GetHookRequest) returns (HookResponse);
+  rpc UpdateHook(UpdateHookRequest) returns (HookResponse);
+  rpc DeleteHook(DeleteHookRequest) returns (DeleteResponse);
+  rpc ListHookRuns(ListHookRunsRequest) returns (ListHookRunsResponse);
 }
 
 // Common
@@ -251,5 +259,73 @@ message GetTaskLogsResponse {
   bool ok = 1;
   string error = 2;
   repeated TaskLogEntry logs = 3;
+}
+
+// Hook messages
+message Hook {
+  string id = 1;
+  string workspace_id = 2;
+  string path = 3;
+  string prompt = 4;
+  bool active = 5;
+  string created_at = 6;
+  string updated_at = 7;
+}
+
+message CreateHookRequest {
+  string workspace_id = 1;
+  string path = 2;
+  string prompt = 3;
+}
+
+message ListHooksRequest {
+  string workspace_id = 1;
+}
+
+message GetHookRequest {
+  string id = 1;
+}
+
+message UpdateHookRequest {
+  string id = 1;
+  string prompt = 2;
+  bool active = 3;
+  bool has_active = 4;
+}
+
+message DeleteHookRequest {
+  string id = 1;
+}
+
+message HookResponse {
+  bool ok = 1;
+  string error = 2;
+  Hook hook = 3;
+}
+
+message ListHooksResponse {
+  bool ok = 1;
+  string error = 2;
+  repeated Hook hooks = 3;
+}
+
+message ListHookRunsRequest {
+  string hook_id = 1;  // hook external ID
+}
+
+message HookRun {
+  string task_id = 1;
+  string status = 2;
+  int32 attempt = 3;
+  int32 max_attempts = 4;
+  string error = 5;
+  string created_at = 6;
+  string finished_at = 7;
+}
+
+message ListHookRunsResponse {
+  bool ok = 1;
+  string error = 2;
+  repeated HookRun runs = 3;
 }
 
