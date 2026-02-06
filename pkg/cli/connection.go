@@ -40,6 +40,7 @@ Supported integration types:
   gdrive    - Google Drive (use --token with OAuth access token)
   weather   - OpenWeatherMap (use --api-key)
   exa       - Exa AI search (use --api-key)
+  posthog   - PostHog analytics (use --api-key with personal API key)
 
 Examples:
   airstore connection add <ws> github --token ghp_xxxxxxxxxxxx
@@ -75,14 +76,14 @@ Examples:
 			if !strings.HasPrefix(connToken, "secret_") && !strings.HasPrefix(connToken, "ntn_") {
 				PrintWarning("Token doesn't look like a Notion integration token (expected secret_* or ntn_*)")
 			}
-		case "weather", "exa":
+		case "weather", "exa", "posthog":
 			if connAPIKey == "" {
 				PrintErrorMsg(fmt.Sprintf("%s requires --api-key", integrationType))
 				return nil
 			}
 		default:
 			PrintErrorMsg(fmt.Sprintf("Unknown integration type: %s", integrationType))
-			PrintHint("Supported: github, gmail, notion, gdrive, weather, exa")
+			PrintHint("Supported: github, gmail, notion, gdrive, weather, exa, posthog")
 			return nil
 		}
 
