@@ -72,7 +72,7 @@ func (s *StorageVNode) ctx() (context.Context, context.CancelFunc) {
 }
 
 // Prefix returns empty - this is a fallback handler
-func (s *StorageVNode) Prefix() string    { return "" }
+func (s *StorageVNode) Prefix() string  { return "" }
 func (s *StorageVNode) Type() VNodeType { return VNodeWritable }
 
 // rel returns the storage path (leading slash stripped)
@@ -93,13 +93,8 @@ func (s *StorageVNode) Getattr(path string) (*FileInfo, error) {
 	// If we have dirty data in the async writer, report its size.
 	// This ensures editors see the correct size after Truncate+Write
 	// before the data is uploaded to S3.
-	if data, _, ok := s.asyncWriter.Get(path); ok {
-		uid, gid := GetOwner()
-		return &FileInfo{
-			Ino: PathIno(path), Size: int64(len(data)),
-			Mode: 0100644, Nlink: 1, Uid: uid, Gid: gid,
-			Atime: time.Now(), Mtime: time.Now(), Ctime: time.Now(),
-		}, nil
+	if info := s.asyncWriter.DirtyFileInfo(path, s.cachedMode(path)); info != nil {
+		return info, nil
 	}
 
 	if s.cache.IsNegative(path) {
@@ -818,6 +813,14 @@ func (s *StorageVNode) invalidateParent(path string) {
 	}
 
 	s.cache.InvalidateChild(parentPath, childName)
+}
+
+// cachedMode returns the file mode from the metadata cache, or 0 if not cached.
+func (s *StorageVNode) cachedMode(path string) uint32 {
+	if info := s.cache.GetInfo(path); info != nil {
+		return info.Mode
+	}
+	return 0
 }
 
 func (s *StorageVNode) toFileInfo(path string, info *pb.FileInfo) *FileInfo {

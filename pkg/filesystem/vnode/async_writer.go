@@ -125,6 +125,31 @@ func (aw *AsyncWriter) EnqueueNoTimer(path string, off int64, data []byte) {
 	}
 }
 
+// DirtyFileInfo returns a FileInfo reflecting pending dirty data for a path.
+// If fallbackMode is 0, defaults to S_IFREG|0644. Used by Getattr to report
+// the correct size for files that have been written but not yet uploaded.
+func (aw *AsyncWriter) DirtyFileInfo(path string, fallbackMode uint32) *FileInfo {
+	aw.mu.Lock()
+	pw := aw.pending[path]
+	if pw == nil || pw.data == nil {
+		aw.mu.Unlock()
+		return nil
+	}
+	size := int64(len(pw.data))
+	aw.mu.Unlock()
+
+	if fallbackMode == 0 {
+		fallbackMode = 0100644 // S_IFREG | 0644
+	}
+	uid, gid := GetOwner()
+	now := time.Now()
+	return &FileInfo{
+		Ino: PathIno(path), Size: size,
+		Mode: fallbackMode, Nlink: 1, Uid: uid, Gid: gid,
+		Atime: now, Mtime: now, Ctime: now,
+	}
+}
+
 // Get returns the pending (dirty) data for a path, if any.
 // Used by Read to serve data that hasn't been uploaded yet.
 func (aw *AsyncWriter) Get(path string) (data []byte, off int64, ok bool) {
