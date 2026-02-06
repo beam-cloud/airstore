@@ -251,19 +251,52 @@ func (v *SourcesVNode) Getattr(path string) (*FileInfo, error) {
 	// Is this inside a smart query folder? (materialized result)
 	parentPath := filepath.Dir(path)
 	if q := v.getQuery(ctx, parentPath); q != nil && q.OutputFormat == types.SmartQueryOutputFolder {
-		filename := filepath.Base(path)
-		size, mtime, ok := v.getQueryResultMetaCached(q.Path, filename)
-		if !ok {
-			size = listingPlaceholderSize // Use placeholder if not cached
+		// If the file is already open, use the accurate size from cached content.
+		if data, ok := v.getOpenContent(path); ok {
+			info := NewFileInfo(PathIno(path), int64(len(data)), 0644)
+			_, mtime, _ := v.getQueryResultMetaCached(q.Path, filepath.Base(path))
+			if mtime > 0 {
+				t := time.Unix(mtime, 0)
+				info.Mtime = t
+				info.Ctime = t
+			}
+			return info, nil
 		}
+
+		// Not open yet. Eagerly fetch the content to get the accurate size.
+		// Without this, the FUSE-T SMB layer caches the stale readdir size
+		// and pads reads with null bytes. This fetch is cached by Open/Read.
+		filename := filepath.Base(path)
+		data, err := func() ([]byte, error) {
+			if v.client == nil {
+				return nil, fs.ErrNotExist // test mode
+			}
+			return v.fetchQueryResultContent(ctx, q, filename)
+		}()
+		if err == nil && data != nil {
+			fh := v.addOpenContent(path, data)
+			v.cacheOpenStat(path, int64(len(data)), 0, time.Time{})
+			// Release immediately — we just needed the size. The content
+			// stays cached until the ref count reaches zero.
+			v.releaseOpenContent(fh)
+			info := NewFileInfo(PathIno(path), int64(len(data)), 0644)
+			_, mtime, _ := v.getQueryResultMetaCached(q.Path, filename)
+			if mtime > 0 {
+				t := time.Unix(mtime, 0)
+				info.Mtime = t
+				info.Ctime = t
+			}
+			return info, nil
+		}
+
+		// Fallback: use readdir cache size (may have null bytes on first read)
+		size, mtime, _ := v.getQueryResultMetaCached(q.Path, filename)
 		info := NewFileInfo(PathIno(path), size, 0644)
 		if mtime > 0 {
 			t := time.Unix(mtime, 0)
 			info.Mtime = t
 			info.Ctime = t
 		}
-		// If file is open, use accurate size from cached content
-		v.applyOpenContentSize(path, info)
 		return info, nil
 	}
 
@@ -410,13 +443,20 @@ func (v *SourcesVNode) executeQueryAsDir(ctx context.Context, q *types.SmartQuer
 	// Check cache first
 	if cached := v.getCachedResults(q.Path); cached != nil {
 		for _, e := range cached {
+			childPath := q.Path + "/" + e.Name
 			entries = append(entries, DirEntry{
 				Name:  e.Name,
 				Mode:  e.Mode,
-				Ino:   PathIno(q.Path + "/" + e.Name),
+				Ino:   PathIno(childPath),
 				Size:  listingSize(e.Size),
 				Mtime: e.Mtime,
 			})
+			// Only cache stat for directories. File sizes from readdir may be
+			// stale (gateway caches from last execution). For files, the eager
+			// fetch in Getattr gets the accurate size on first access.
+			if e.IsDir {
+				v.cacheStatFromEntry(childPath, e)
+			}
 		}
 		return entries, nil
 	}
@@ -436,13 +476,19 @@ func (v *SourcesVNode) executeQueryAsDir(ctx context.Context, q *types.SmartQuer
 	v.setCachedResults(q.Path, resp.Entries)
 
 	for _, e := range resp.Entries {
+		childPath := q.Path + "/" + e.Name
 		entries = append(entries, DirEntry{
 			Name:  e.Name,
 			Mode:  e.Mode,
-			Ino:   PathIno(q.Path + "/" + e.Name),
+			Ino:   PathIno(childPath),
 			Size:  listingSize(e.Size),
 			Mtime: e.Mtime,
 		})
+		// Only cache stat for directories. File sizes from readdir may be
+		// stale. For files, the eager fetch in Getattr gets the accurate size.
+		if e.IsDir {
+			v.cacheStatFromEntry(childPath, e)
+		}
 	}
 	return entries, nil
 }
@@ -648,9 +694,8 @@ func (v *SourcesVNode) getQueryResultMetaCached(queryPath, filename string) (siz
 	for _, e := range cached {
 		if e.Name == filename {
 			size = e.Size
-			if size <= 0 {
-				size = listingPlaceholderSize // Use small placeholder when size unknown
-			}
+			// Keep size as 0 when unknown; kernel reads until EOF.
+			// A non-zero placeholder causes null bytes or truncation.
 			return size, e.Mtime, true
 		}
 	}
@@ -764,8 +809,20 @@ func isSystemFile(name string) bool {
 	if strings.HasPrefix(name, "._") {
 		return true // macOS AppleDouble extended attributes
 	}
-	if name == ".DS_Store" || name == ".Spotlight-V100" || name == ".Trashes" {
+	if strings.HasPrefix(name, ".fuse_hidden") {
+		return true // FUSE-T deferred deletes
+	}
+	switch name {
+	case ".DS_Store", ".Spotlight-V100", ".Trashes", ".fseventsd", ".TemporaryItems":
 		return true // macOS system files
+	case ".git", ".gitignore", ".gitmodules", ".gitattributes", ".hg", ".svn":
+		return true // VCS (never in a query-based filesystem)
+	case ".rgignore", ".ignore", "libinfo.dylib",
+		".eslintrc", ".eslintrc.json", ".eslintrc.js",
+		".prettierrc", ".prettierrc.json",
+		".editorconfig", ".clang-format", ".clang-tidy",
+		".envrc", ".env", ".tool-versions", ".node-version", ".ruby-version", ".python-version", ".nvmrc":
+		return true // Tool probes (never in a query-based filesystem)
 	}
 	return false
 }

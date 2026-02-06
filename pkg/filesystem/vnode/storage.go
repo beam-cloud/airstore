@@ -22,20 +22,21 @@ const storageWarmupMaxAge = 5 * time.Minute    // Max age for tracking warm dire
 // StorageVNode handles S3-backed storage for any path via gRPC.
 // Used as a fallback for paths not matched by specific vnodes.
 type StorageVNode struct {
-	client  pb.ContextServiceClient
-	token   string
-	cache   *MetadataCache
-	content *ContentCache
-	handles map[FileHandle]*handleState
-	writeMu sync.Mutex
-	writes  map[string]map[FileHandle]*handleState
-	nextFH  FileHandle
-	mu      sync.Mutex
+	client      pb.ContextServiceClient
+	token       string
+	cache       *MetadataCache
+	content     *ContentCache
+	asyncWriter *AsyncWriter
+	handles     map[FileHandle]*handleState
+	writeMu     sync.Mutex
+	writes      map[string]map[FileHandle]*handleState
+	nextFH      FileHandle
+	mu          sync.Mutex
 
 	// Background warmup for frequently accessed directories
-	warmupDirs   map[string]time.Time // path -> last access time
-	warmupMu     sync.Mutex
-	stopWarmup   chan struct{}
+	warmupDirs map[string]time.Time // path -> last access time
+	warmupMu   sync.Mutex
+	stopWarmup chan struct{}
 }
 
 // NewStorageVNode creates a new StorageVNode.
@@ -51,13 +52,15 @@ func NewStorageVNode(conn *grpc.ClientConn, token string) *StorageVNode {
 		warmupDirs: make(map[string]time.Time),
 		stopWarmup: make(chan struct{}),
 	}
+	s.asyncWriter = NewAsyncWriter(s.writeRange)
 	go s.backgroundWarmupLoop()
 	return s
 }
 
-// Cleanup stops background goroutines. Called when filesystem is unmounted.
+// Cleanup stops background goroutines and flushes pending writes. Called when filesystem is unmounted.
 func (s *StorageVNode) Cleanup() {
 	close(s.stopWarmup)
+	s.asyncWriter.Cleanup()
 }
 
 func (s *StorageVNode) ctx() (context.Context, context.CancelFunc) {
@@ -85,6 +88,18 @@ func (s *StorageVNode) Getattr(path string) (*FileInfo, error) {
 	// Treat AppleDouble files as zero-length placeholders.
 	if isAppleDoublePath(path) {
 		return NewFileInfo(PathIno(path), 0, 0644), nil
+	}
+
+	// If we have dirty data in the async writer, report its size.
+	// This ensures editors see the correct size after Truncate+Write
+	// before the data is uploaded to S3.
+	if data, _, ok := s.asyncWriter.Get(path); ok {
+		uid, gid := GetOwner()
+		return &FileInfo{
+			Ino: PathIno(path), Size: int64(len(data)),
+			Mode: 0100644, Nlink: 1, Uid: uid, Gid: gid,
+			Atime: time.Now(), Mtime: time.Now(), Ctime: time.Now(),
+		}, nil
 	}
 
 	if s.cache.IsNegative(path) {
@@ -226,8 +241,23 @@ func (s *StorageVNode) Read(path string, buf []byte, off int64, fh FileHandle) (
 		return 0, nil
 	}
 
-	if err := s.flushWritesForPath(path); err != nil {
-		return 0, err
+	// Drain handleState buffers into asyncWriter (non-blocking).
+	s.enqueueWritesForPath(path)
+
+	// Serve from dirty buffer if the asyncWriter has pending data covering this range.
+	if data, dataOff, ok := s.asyncWriter.Get(path); ok {
+		dataEnd := dataOff + int64(len(data))
+		if off >= dataOff && off < dataEnd {
+			n := copy(buf, data[off-dataOff:])
+			return n, nil
+		}
+		if off >= dataEnd {
+			return 0, nil // EOF — file was truncated/rewritten
+		}
+		// Read is before the dirty range; force flush and fall through to S3.
+		if err := s.asyncWriter.ForceFlush(path); err != nil {
+			return 0, err
+		}
 	}
 
 	state := s.getHandleState(fh)
@@ -306,6 +336,7 @@ func (s *StorageVNode) Write(path string, buf []byte, off int64, fh FileHandle) 
 
 	state := s.getHandleState(fh)
 	if state == nil {
+		// No file handle — write directly (synchronous).
 		if err := s.writeRange(path, off, buf); err != nil {
 			return 0, err
 		}
@@ -318,6 +349,7 @@ func (s *StorageVNode) Write(path string, buf []byte, off int64, fh FileHandle) 
 		return 0, fs.ErrInvalid
 	}
 
+	// Empty buffer: start buffering or write directly if too large.
 	if len(state.writeBuf) == 0 {
 		if len(buf) >= writeBufferMax {
 			state.mu.Unlock()
@@ -333,12 +365,17 @@ func (s *StorageVNode) Write(path string, buf []byte, off int64, fh FileHandle) 
 		return len(buf), nil
 	}
 
+	// Contiguous and fits: append to existing buffer.
 	if off == state.writeOff+int64(len(state.writeBuf)) && len(state.writeBuf)+len(buf) <= writeBufferMax {
 		state.writeBuf = append(state.writeBuf, buf...)
 		state.mu.Unlock()
 		return len(buf), nil
 	}
 
+	// Buffer overflow or non-contiguous: flush old buffer synchronously,
+	// then start fresh. We use synchronous writeRange here (not Enqueue)
+	// because the asyncWriter stores only ONE (offset, data) pair per path —
+	// sequential Enqueue calls at different offsets would clobber each other.
 	data := append([]byte(nil), state.writeBuf...)
 	writeOff := state.writeOff
 	state.writeBuf = nil
@@ -373,7 +410,19 @@ func (s *StorageVNode) Truncate(path string, size int64, fh FileHandle) error {
 		return nil
 	}
 
-	if err := s.flushWritesForPath(path); err != nil {
+	if size == 0 {
+		// Mark file as empty without starting a debounce timer. The real
+		// content arrives via the next Write -> flushWriteBuffer -> Enqueue
+		// (which starts the timer). This avoids the race where the timer
+		// fires and uploads empty content before the Write data arrives.
+		s.enqueueWritesForPath(path)
+		s.asyncWriter.EnqueueNoTimer(path, 0, []byte{})
+		s.cache.Invalidate(path)
+		return nil
+	}
+
+	// Non-zero truncate is rare; keep it synchronous.
+	if err := s.asyncWriter.ForceFlush(path); err != nil {
 		return err
 	}
 
@@ -509,33 +558,46 @@ func (s *StorageVNode) Readlink(path string) (string, error) {
 
 func (s *StorageVNode) Release(path string, fh FileHandle) error {
 	s.mu.Lock()
-	if state, ok := s.handles[fh]; ok {
+	state, ok := s.handles[fh]
+	if !ok {
 		s.mu.Unlock()
-		_ = s.flushWriteBuffer(path, state)
-		s.mu.Lock()
-		state.mu.Lock()
-		state.closed = true
-		state.prefetch = nil
-		state.mu.Unlock()
-		delete(s.handles, fh)
-		s.writeMu.Lock()
-		if m, ok := s.writes[state.path]; ok {
-			delete(m, fh)
-			if len(m) == 0 {
-				delete(s.writes, state.path)
-			}
-		}
-		s.writeMu.Unlock()
+		return nil
 	}
 	s.mu.Unlock()
-	return nil
+
+	// Drain handleState into asyncWriter, then force-upload to S3.
+	// Release MUST be synchronous: after close() returns, data must be
+	// on S3 because the FUSE-T SMB layer caches based on what was
+	// persisted, and subsequent reads could bypass our dirty buffer.
+	s.flushWriteBuffer(path, state)
+	flushErr := s.asyncWriter.ForceFlush(path)
+
+	// Always clean up the handle, even if flush failed.
+	s.mu.Lock()
+	state.mu.Lock()
+	state.closed = true
+	state.prefetch = nil
+	state.mu.Unlock()
+	delete(s.handles, fh)
+	s.mu.Unlock()
+
+	s.writeMu.Lock()
+	if m, ok := s.writes[state.path]; ok {
+		delete(m, fh)
+		if len(m) == 0 {
+			delete(s.writes, state.path)
+		}
+	}
+	s.writeMu.Unlock()
+
+	return flushErr
 }
 
 func (s *StorageVNode) Fsync(path string, fh FileHandle) error {
 	if state := s.getHandleState(fh); state != nil {
-		return s.flushWriteBuffer(path, state)
+		s.flushWriteBuffer(path, state)
 	}
-	return nil
+	return s.asyncWriter.ForceFlush(path)
 }
 
 // helpers
@@ -709,21 +771,22 @@ func (s *StorageVNode) consumePrefetch(path string, off int64, state *handleStat
 	return pf.data, true, nil
 }
 
-func (s *StorageVNode) flushWriteBuffer(path string, state *handleState) error {
+func (s *StorageVNode) flushWriteBuffer(path string, state *handleState) {
 	state.mu.Lock()
 	if state.closed || len(state.writeBuf) == 0 {
 		state.mu.Unlock()
-		return nil
+		return
 	}
 	data := append([]byte(nil), state.writeBuf...)
 	writeOff := state.writeOff
 	state.writeBuf = nil
 	state.mu.Unlock()
 
-	return s.writeRange(path, writeOff, data)
+	s.asyncWriter.Enqueue(path, writeOff, data)
 }
 
-func (s *StorageVNode) flushWritesForPath(path string) error {
+// enqueueWritesForPath drains handleState write buffers into the asyncWriter (non-blocking).
+func (s *StorageVNode) enqueueWritesForPath(path string) {
 	s.writeMu.Lock()
 	entries := s.writes[path]
 	states := make([]*handleState, 0, len(entries))
@@ -733,11 +796,8 @@ func (s *StorageVNode) flushWritesForPath(path string) error {
 	s.writeMu.Unlock()
 
 	for _, state := range states {
-		if err := s.flushWriteBuffer(path, state); err != nil {
-			return err
-		}
+		s.flushWriteBuffer(path, state)
 	}
-	return nil
 }
 
 // invalidateParent invalidates only the specific child entry from its parent's cache,

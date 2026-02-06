@@ -10,8 +10,26 @@ import (
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/filesystem/vnode"
+	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/rs/zerolog/log"
 	"github.com/winfsp/cgofuse/fuse"
+)
+
+const (
+	// dirChildrenSize is the max number of directories whose child name sets we cache.
+	dirChildrenSize = 1000
+	// dirChildrenTTL is how long readdir-informed child sets are valid.
+	// Write operations (Create, Mkdir, etc.) invalidate the cache immediately.
+	// For externally created files, this is the max staleness before they appear.
+	// 2 minutes: long enough to survive between editor scan cycles (Cursor rescans
+	// every ~30-60s), short enough for external changes to appear promptly.
+	dirChildrenTTL = 2 * time.Minute
+
+	// negativeCacheSize is the max number of "file does not exist" entries.
+	negativeCacheSize = 10000
+	// negativeCacheTTL is how long a negative lookup result is cached.
+	// Write operations invalidate affected paths immediately.
+	negativeCacheTTL = 30 * time.Second
 )
 
 // Config configures the filesystem mount
@@ -32,6 +50,18 @@ type Filesystem struct {
 	rootID   string
 	verbose  bool
 	trace    *FuseTrace
+
+	// dirChildren caches the set of child names returned by Readdir for each
+	// directory path. Getattr checks this before making any RPCs: if the parent
+	// was recently listed and the requested name isn't in the set, we return
+	// ENOENT instantly. This eliminates the vast majority of slow lookups caused
+	// by tools (e.g., Claude Code) probing for config files at every level.
+	dirChildren *expirable.LRU[string, map[string]struct{}]
+
+	// negativeCache is a fallback for paths whose parent was never readdir'd.
+	// When Getattr reaches the end without finding a file, it caches the path
+	// here so repeat lookups return ENOENT without RPCs.
+	negativeCache *expirable.LRU[string, struct{}]
 
 	host      *fuse.FileSystemHost
 	mounted   bool
@@ -80,12 +110,14 @@ func NewFilesystem(cfg Config) (*Filesystem, error) {
 	}
 
 	fs := &Filesystem{
-		config:   cfg,
-		verbose:  cfg.Verbose,
-		metadata: metadata,
-		vnodes:   vnode.NewRegistry(),
-		rootID:   GenerateDirectoryID("", "/", 0),
-		trace:    newFuseTraceFromEnv(),
+		config:        cfg,
+		verbose:       cfg.Verbose,
+		metadata:      metadata,
+		vnodes:        vnode.NewRegistry(),
+		rootID:        GenerateDirectoryID("", "/", 0),
+		trace:         newFuseTraceFromEnv(),
+		dirChildren:   expirable.NewLRU[string, map[string]struct{}](dirChildrenSize, nil, dirChildrenTTL),
+		negativeCache: expirable.NewLRU[string, struct{}](negativeCacheSize, nil, negativeCacheTTL),
 	}
 
 	if err := fs.initRoot(); err != nil {
@@ -249,7 +281,23 @@ func (f *Filesystem) Getattr(path string) (*FileInfo, error) {
 		return macPlaceholderInfo(path), nil
 	}
 
-	// Check for virtual node match
+	// Readdir-informed negative lookup: if the parent was recently listed and
+	// this name wasn't in the result set, the file doesn't exist. This is the
+	// fast path that eliminates RPCs for the common pattern of readdir followed
+	// by getattr probes (e.g., Claude Code checking for .claude, CLAUDE.md, etc.).
+	if children, ok := f.dirChildren.Get(filepath.Dir(path)); ok {
+		if _, exists := children[name]; !exists {
+			return nil, ErrNotFound
+		}
+	}
+
+	// Simple negative cache: prevents repeat slow RPCs for paths whose parent
+	// was never readdir'd (e.g., direct deep path access).
+	if _, ok := f.negativeCache.Get(path); ok {
+		return nil, ErrNotFound
+	}
+
+	// Check for virtual node match (e.g., /sources/*, /skills/*, /tools/*)
 	if vn := f.vnodes.Match(path); vn != nil {
 		info, err := vn.Getattr(path)
 		if err != nil {
@@ -268,6 +316,20 @@ func (f *Filesystem) Getattr(path string) (*FileInfo, error) {
 		}, nil
 	}
 
+	// Check fallback storage (S3-backed) BEFORE legacy metadata.
+	// The fallback has a warm cache from readdir, so this is typically instant
+	// for files that were recently listed. Legacy metadata is only for backward
+	// compatibility and should not block the fast path.
+	if fb := f.vnodes.Fallback(); fb != nil {
+		if info, err := fb.Getattr(path); err == nil {
+			return &FileInfo{
+				Ino: info.Ino, Size: info.Size, Mode: info.Mode, Nlink: info.Nlink,
+				Uid: info.Uid, Gid: info.Gid, Atime: info.Atime, Mtime: info.Mtime, Ctime: info.Ctime,
+			}, nil
+		}
+	}
+
+	// Legacy metadata (backward compat — only reached if fallback storage misses)
 	parent, name := splitPath(path)
 	parentID := f.resolveDir(parent)
 
@@ -299,16 +361,8 @@ func (f *Filesystem) Getattr(path string) (*FileInfo, error) {
 		}, nil
 	}
 
-	// Try fallback storage for unmatched paths
-	if fb := f.vnodes.Fallback(); fb != nil {
-		if info, err := fb.Getattr(path); err == nil {
-			return &FileInfo{
-				Ino: info.Ino, Size: info.Size, Mode: info.Mode, Nlink: info.Nlink,
-				Uid: info.Uid, Gid: info.Gid, Atime: info.Atime, Mtime: info.Mtime, Ctime: info.Ctime,
-			}, nil
-		}
-	}
-
+	// Cache the miss so repeat lookups are instant.
+	f.negativeCache.Add(path, struct{}{})
 	return nil, ErrNotFound
 }
 
@@ -331,12 +385,15 @@ func (f *Filesystem) Readdir(path string) ([]DirEntry, error) {
 		for i, e := range vnEntries {
 			entries[i] = DirEntry{Name: e.Name, Mode: e.Mode, Ino: e.Ino, Size: e.Size, Mtime: e.Mtime}
 		}
+		f.cacheDirChildren(path, entries)
 		return entries, nil
 	}
 
 	// For root, include virtual node directories
 	if path == "/" {
-		return f.readdirRoot(), nil
+		entries := f.readdirRoot()
+		f.cacheDirChildren(path, entries)
+		return entries, nil
 	}
 
 	// Try storage fallback for unmatched paths
@@ -346,6 +403,7 @@ func (f *Filesystem) Readdir(path string) ([]DirEntry, error) {
 			for i, e := range vnEntries {
 				entries[i] = DirEntry{Name: e.Name, Mode: e.Mode, Ino: e.Ino, Size: e.Size, Mtime: e.Mtime}
 			}
+			f.cacheDirChildren(path, entries)
 			return entries, nil
 		}
 	}
@@ -368,7 +426,18 @@ func (f *Filesystem) Readdir(path string) ([]DirEntry, error) {
 		entries = append(entries, DirEntry{Name: name, Mode: mode, Ino: ino})
 	}
 
+	f.cacheDirChildren(path, entries)
 	return entries, nil
+}
+
+// cacheDirChildren stores the set of child names from a readdir result.
+// Subsequent Getattr calls for names NOT in this set return ENOENT instantly.
+func (f *Filesystem) cacheDirChildren(path string, entries []DirEntry) {
+	names := make(map[string]struct{}, len(entries))
+	for _, e := range entries {
+		names[e.Name] = struct{}{}
+	}
+	f.dirChildren.Add(path, names)
 }
 
 func (f *Filesystem) readdirRoot() []DirEntry {
@@ -452,16 +521,33 @@ func (f *Filesystem) Read(path string, buf []byte, off int64, fh FileHandle) (in
 }
 
 func (f *Filesystem) Release(path string, fh FileHandle) error {
-	if vn := f.vnodes.Match(path); vn != nil {
+	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
 		return vn.Release(path, vnode.FileHandle(fh))
 	}
 	return nil
+}
+
+// onFileCreated invalidates caches when a new file or directory is created.
+func (f *Filesystem) onFileCreated(path string) {
+	f.negativeCache.Remove(path)
+	// Invalidate parent's children cache so the next readdir repopulates it.
+	f.dirChildren.Remove(filepath.Dir(path))
+}
+
+// onFileRemoved updates caches when a file or directory is deleted.
+func (f *Filesystem) onFileRemoved(path string) {
+	f.negativeCache.Add(path, struct{}{})
+	// Invalidate parent's children cache so the next readdir repopulates it.
+	f.dirChildren.Remove(filepath.Dir(path))
 }
 
 // Write operations - delegate to vnodes or fallback storage
 func (f *Filesystem) Create(path string, flags int, mode uint32) (FileHandle, error) {
 	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
 		fh, err := vn.Create(path, flags, mode)
+		if err == nil {
+			f.onFileCreated(path)
+		}
 		return FileHandle(fh), err
 	}
 	return 0, ErrReadOnly
@@ -483,21 +569,33 @@ func (f *Filesystem) Truncate(path string, size int64, fh FileHandle) error {
 
 func (f *Filesystem) Mkdir(path string, mode uint32) error {
 	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
-		return vn.Mkdir(path, mode)
+		if err := vn.Mkdir(path, mode); err != nil {
+			return err
+		}
+		f.onFileCreated(path)
+		return nil
 	}
 	return ErrReadOnly
 }
 
 func (f *Filesystem) Rmdir(path string) error {
 	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
-		return vn.Rmdir(path)
+		if err := vn.Rmdir(path); err != nil {
+			return err
+		}
+		f.onFileRemoved(path)
+		return nil
 	}
 	return ErrReadOnly
 }
 
 func (f *Filesystem) Unlink(path string) error {
 	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
-		return vn.Unlink(path)
+		if err := vn.Unlink(path); err != nil {
+			return err
+		}
+		f.onFileRemoved(path)
+		return nil
 	}
 	return ErrReadOnly
 }
@@ -511,7 +609,12 @@ func (f *Filesystem) Rename(oldpath, newpath string) error {
 	if oldVN != newVN {
 		return ErrNotSupported
 	}
-	return oldVN.Rename(oldpath, newpath)
+	if err := oldVN.Rename(oldpath, newpath); err != nil {
+		return err
+	}
+	f.onFileRemoved(oldpath)
+	f.onFileCreated(newpath)
+	return nil
 }
 
 func (f *Filesystem) Chmod(path string, mode uint32) error {
@@ -537,7 +640,7 @@ func (f *Filesystem) Utimens(path string, atime, mtime *int64) error {
 
 // Symlink operations
 func (f *Filesystem) Readlink(path string) (string, error) {
-	if vn := f.vnodes.Match(path); vn != nil {
+	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
 		return vn.Readlink(path)
 	}
 	return "", ErrNotSupported
@@ -546,7 +649,7 @@ func (f *Filesystem) Readlink(path string) (string, error) {
 func (f *Filesystem) Link(oldpath, newpath string) error { return ErrNotSupported }
 
 func (f *Filesystem) Symlink(target, newpath string) error {
-	if vn := f.vnodes.Match(newpath); vn != nil {
+	if vn := f.vnodes.MatchOrFallback(newpath); vn != nil {
 		return vn.Symlink(target, newpath)
 	}
 	return ErrNotSupported
@@ -565,10 +668,18 @@ func (f *Filesystem) Removexattr(path, name string) error     { return nil }
 func (f *Filesystem) Listxattr(path string) ([]string, error) { return nil, nil }
 
 // Flush and Fsync
+//
+// Flush is called on every close() of a file descriptor. We intentionally
+// do NOT force-sync to S3 here — that would block every close() for ~300ms.
+// Data safety is ensured by:
+//   - Release (last fd close): ForceFlush to S3
+//   - Fsync (explicit sync): ForceFlush to S3
+//   - AsyncWriter debounce timer: uploads within 500ms
+//   - Read path: serves dirty data from asyncWriter memory
 func (f *Filesystem) Flush(path string, fh FileHandle) error { return nil }
 
 func (f *Filesystem) Fsync(path string, datasync bool, fh FileHandle) error {
-	if vn := f.vnodes.Match(path); vn != nil {
+	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
 		return vn.Fsync(path, vnode.FileHandle(fh))
 	}
 	return nil
