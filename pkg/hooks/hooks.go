@@ -157,6 +157,12 @@ func (eng *Engine) Poll(ctx context.Context) {
 		}
 
 		next := t.Attempt + 1
+
+		// Mark the original task as exhausted BEFORE creating the retry.
+		// Without this, the retry poller picks up the same failed task
+		// on every tick and creates infinite duplicate retries.
+		eng.backend.MarkTaskRetried(ctx, t.ExternalId)
+
 		if err := eng.creator.CreateTask(ctx, t.WorkspaceId, t.CreatedByMemberId, token, t.Prompt,
 			*t.HookId, next, t.MaxAttempts); err != nil {
 			continue

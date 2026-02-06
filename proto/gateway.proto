@@ -31,8 +31,10 @@ service GatewayService {
   rpc RemoveConnection(RemoveConnectionRequest) returns (DeleteResponse);
 
   // Tasks
+  rpc CreateTask(CreateTaskRequest) returns (TaskResponse);
   rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
   rpc GetTask(GetTaskRequest) returns (TaskResponse);
+  rpc DeleteTask(DeleteTaskRequest) returns (DeleteResponse);
   rpc GetTaskLogs(GetTaskLogsRequest) returns (GetTaskLogsResponse);
 
   // Hooks
@@ -224,6 +226,17 @@ message Task {
   string created_at = 8;
   string started_at = 9;
   string finished_at = 10;
+}
+
+message CreateTaskRequest {
+  string prompt = 1;
+  string image = 2;
+  repeated string entrypoint = 3;
+  map<string, string> env = 4;
+}
+
+message DeleteTaskRequest {
+  string id = 1;
 }
 
 message ListTasksRequest {}

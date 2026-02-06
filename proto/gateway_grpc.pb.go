@@ -34,8 +34,10 @@ const (
 	GatewayService_AddConnection_FullMethodName     = "/gateway.GatewayService/AddConnection"
 	GatewayService_ListConnections_FullMethodName   = "/gateway.GatewayService/ListConnections"
 	GatewayService_RemoveConnection_FullMethodName  = "/gateway.GatewayService/RemoveConnection"
+	GatewayService_CreateTask_FullMethodName        = "/gateway.GatewayService/CreateTask"
 	GatewayService_ListTasks_FullMethodName         = "/gateway.GatewayService/ListTasks"
 	GatewayService_GetTask_FullMethodName           = "/gateway.GatewayService/GetTask"
+	GatewayService_DeleteTask_FullMethodName        = "/gateway.GatewayService/DeleteTask"
 	GatewayService_GetTaskLogs_FullMethodName       = "/gateway.GatewayService/GetTaskLogs"
 	GatewayService_CreateHook_FullMethodName        = "/gateway.GatewayService/CreateHook"
 	GatewayService_ListHooks_FullMethodName         = "/gateway.GatewayService/ListHooks"
@@ -70,8 +72,10 @@ type GatewayServiceClient interface {
 	ListConnections(ctx context.Context, in *ListConnectionsRequest, opts ...grpc.CallOption) (*ListConnectionsResponse, error)
 	RemoveConnection(ctx context.Context, in *RemoveConnectionRequest, opts ...grpc.CallOption) (*DeleteResponse, error)
 	// Tasks
+	CreateTask(ctx context.Context, in *CreateTaskRequest, opts ...grpc.CallOption) (*TaskResponse, error)
 	ListTasks(ctx context.Context, in *ListTasksRequest, opts ...grpc.CallOption) (*ListTasksResponse, error)
 	GetTask(ctx context.Context, in *GetTaskRequest, opts ...grpc.CallOption) (*TaskResponse, error)
+	DeleteTask(ctx context.Context, in *DeleteTaskRequest, opts ...grpc.CallOption) (*DeleteResponse, error)
 	GetTaskLogs(ctx context.Context, in *GetTaskLogsRequest, opts ...grpc.CallOption) (*GetTaskLogsResponse, error)
 	// Hooks
 	CreateHook(ctx context.Context, in *CreateHookRequest, opts ...grpc.CallOption) (*HookResponse, error)
@@ -225,6 +229,15 @@ func (c *gatewayServiceClient) RemoveConnection(ctx context.Context, in *RemoveC
 	return out, nil
 }
 
+func (c *gatewayServiceClient) CreateTask(ctx context.Context, in *CreateTaskRequest, opts ...grpc.CallOption) (*TaskResponse, error) {
+	out := new(TaskResponse)
+	err := c.cc.Invoke(ctx, GatewayService_CreateTask_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *gatewayServiceClient) ListTasks(ctx context.Context, in *ListTasksRequest, opts ...grpc.CallOption) (*ListTasksResponse, error) {
 	out := new(ListTasksResponse)
 	err := c.cc.Invoke(ctx, GatewayService_ListTasks_FullMethodName, in, out, opts...)
@@ -237,6 +250,15 @@ func (c *gatewayServiceClient) ListTasks(ctx context.Context, in *ListTasksReque
 func (c *gatewayServiceClient) GetTask(ctx context.Context, in *GetTaskRequest, opts ...grpc.CallOption) (*TaskResponse, error) {
 	out := new(TaskResponse)
 	err := c.cc.Invoke(ctx, GatewayService_GetTask_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gatewayServiceClient) DeleteTask(ctx context.Context, in *DeleteTaskRequest, opts ...grpc.CallOption) (*DeleteResponse, error) {
+	out := new(DeleteResponse)
+	err := c.cc.Invoke(ctx, GatewayService_DeleteTask_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -331,8 +353,10 @@ type GatewayServiceServer interface {
 	ListConnections(context.Context, *ListConnectionsRequest) (*ListConnectionsResponse, error)
 	RemoveConnection(context.Context, *RemoveConnectionRequest) (*DeleteResponse, error)
 	// Tasks
+	CreateTask(context.Context, *CreateTaskRequest) (*TaskResponse, error)
 	ListTasks(context.Context, *ListTasksRequest) (*ListTasksResponse, error)
 	GetTask(context.Context, *GetTaskRequest) (*TaskResponse, error)
+	DeleteTask(context.Context, *DeleteTaskRequest) (*DeleteResponse, error)
 	GetTaskLogs(context.Context, *GetTaskLogsRequest) (*GetTaskLogsResponse, error)
 	// Hooks
 	CreateHook(context.Context, *CreateHookRequest) (*HookResponse, error)
@@ -393,11 +417,17 @@ func (UnimplementedGatewayServiceServer) ListConnections(context.Context, *ListC
 func (UnimplementedGatewayServiceServer) RemoveConnection(context.Context, *RemoveConnectionRequest) (*DeleteResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method RemoveConnection not implemented")
 }
+func (UnimplementedGatewayServiceServer) CreateTask(context.Context, *CreateTaskRequest) (*TaskResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CreateTask not implemented")
+}
 func (UnimplementedGatewayServiceServer) ListTasks(context.Context, *ListTasksRequest) (*ListTasksResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListTasks not implemented")
 }
 func (UnimplementedGatewayServiceServer) GetTask(context.Context, *GetTaskRequest) (*TaskResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetTask not implemented")
+}
+func (UnimplementedGatewayServiceServer) DeleteTask(context.Context, *DeleteTaskRequest) (*DeleteResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DeleteTask not implemented")
 }
 func (UnimplementedGatewayServiceServer) GetTaskLogs(context.Context, *GetTaskLogsRequest) (*GetTaskLogsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetTaskLogs not implemented")
@@ -703,6 +733,24 @@ func _GatewayService_RemoveConnection_Handler(srv interface{}, ctx context.Conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _GatewayService_CreateTask_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateTaskRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServiceServer).CreateTask(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GatewayService_CreateTask_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServiceServer).CreateTask(ctx, req.(*CreateTaskRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _GatewayService_ListTasks_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListTasksRequest)
 	if err := dec(in); err != nil {
@@ -735,6 +783,24 @@ func _GatewayService_GetTask_Handler(srv interface{}, ctx context.Context, dec f
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(GatewayServiceServer).GetTask(ctx, req.(*GetTaskRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _GatewayService_DeleteTask_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteTaskRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServiceServer).DeleteTask(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GatewayService_DeleteTask_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServiceServer).DeleteTask(ctx, req.(*DeleteTaskRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -933,12 +999,20 @@ var GatewayService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _GatewayService_RemoveConnection_Handler,
 		},
 		{
+			MethodName: "CreateTask",
+			Handler:    _GatewayService_CreateTask_Handler,
+		},
+		{
 			MethodName: "ListTasks",
 			Handler:    _GatewayService_ListTasks_Handler,
 		},
 		{
 			MethodName: "GetTask",
 			Handler:    _GatewayService_GetTask_Handler,
+		},
+		{
+			MethodName: "DeleteTask",
+			Handler:    _GatewayService_DeleteTask_Handler,
 		},
 		{
 			MethodName: "GetTaskLogs",

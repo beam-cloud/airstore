@@ -86,6 +86,10 @@ func (m *mockBackend) SetTaskResult(_ context.Context, _ string, _ int, _ string
 	return nil
 }
 
+func (m *mockBackend) MarkTaskRetried(_ context.Context, _ string) error {
+	return nil
+}
+
 func (m *mockBackend) setRetryable(tasks []*types.Task) {
 	m.mu.Lock()
 	m.retryableTasks = tasks

@@ -161,7 +161,9 @@ func (s *SourceService) RefreshSmartQuery(ctx context.Context, queryPath string)
 	return results, nil
 }
 
-// RefreshQuery re-executes a query without auth context (for background polling).
+// RefreshQuery re-executes a query and emits hook events if new results are found.
+// ONLY called by the source poller — never by user browsing or task filesystem reads.
+// This prevents a feedback loop where hook-triggered tasks re-trigger hooks.
 // Satisfies hooks.QueryRefresher.
 func (s *SourceService) RefreshQuery(ctx context.Context, query *types.FilesystemQuery) error {
 	pctx := &sources.ProviderContext{WorkspaceId: query.WorkspaceId}
@@ -170,8 +172,59 @@ func (s *SourceService) RefreshQuery(ctx context.Context, query *types.Filesyste
 		return fmt.Errorf("not connected to %s (workspace %d)", query.Integration, query.WorkspaceId)
 	}
 
-	_, err := s.executeAndCacheQuery(ctx, pctx, query)
-	return err
+	results, err := s.executeAndCacheQuery(ctx, pctx, query)
+	if err != nil {
+		return err
+	}
+
+	// Detect new results for hook triggers.
+	// Two-phase: Compare (read-only) → Emit → Commit (advance the set).
+	if s.seenTracker != nil && s.hookStream != nil && len(results) > 0 {
+		seenKey := common.Keys.HookSeen(pctx.WorkspaceId, types.GeneratePathID(query.Path))
+		ids := make([]string, len(results))
+		for i, r := range results {
+			ids[i] = r.ID
+		}
+
+		newIDs, compareErr := s.seenTracker.Compare(ctx, seenKey, ids)
+		emitted := false
+
+		if compareErr != nil {
+			log.Warn().Err(compareErr).Str("path", query.Path).Msg("seen tracker compare failed, skipping commit")
+		} else if len(newIDs) > 0 {
+			// Cooldown: only one emission per path per 5 minutes across all replicas.
+			cooldownKey := seenKey + ":cooldown"
+			acquired, _ := s.seenTracker.TrySetCooldown(ctx, cooldownKey, 5*time.Minute)
+			if acquired {
+				if emitErr := s.hookStream.Emit(ctx, map[string]any{
+					"event":        hooks.EventSourceChange,
+					"workspace_id": fmt.Sprintf("%d", pctx.WorkspaceId),
+					"path":         query.Path,
+					"integration":  query.Integration,
+					"new_count":    fmt.Sprintf("%d", len(newIDs)),
+				}); emitErr == nil {
+					emitted = true
+					log.Info().
+						Str("path", query.Path).
+						Int("new_results", len(newIDs)).
+						Msg("source change detected, hook event emitted")
+				} else {
+					log.Warn().Err(emitErr).Str("path", query.Path).Msg("failed to emit source change event")
+				}
+			} else {
+				emitted = true
+				log.Debug().Str("path", query.Path).Msg("source change detected but cooldown active, skipping emit")
+			}
+		} else {
+			emitted = true // no new IDs, safe to advance
+		}
+
+		if emitted {
+			s.seenTracker.Commit(ctx, seenKey, ids)
+		}
+	}
+
+	return nil
 }
 
 // Stat returns file/directory attributes for a source path
@@ -554,48 +607,10 @@ func (s *SourceService) executeAndCacheQuery(ctx context.Context, pctx *sources.
 		Int("pages", pageNum).
 		Msg("query complete")
 
-	// Detect new results for hook triggers.
-	// Two-phase: Compare (read-only) → Emit → Commit (advance the set).
-	// Only commits the seen set after successful emission, so a failed emit
-	// doesn't silently swallow new results.
-	if s.seenTracker != nil && s.hookStream != nil && len(allResults) > 0 {
-		seenKey := common.Keys.HookSeen(pctx.WorkspaceId, types.GeneratePathID(query.Path))
-		ids := make([]string, len(allResults))
-		for i, r := range allResults {
-			ids[i] = r.ID
-		}
-
-		newIDs, compareErr := s.seenTracker.Compare(ctx, seenKey, ids)
-		emitted := false
-
-		if compareErr != nil {
-			// Don't commit — we couldn't determine what's new vs seen.
-			// Next poll will retry the comparison.
-			log.Warn().Err(compareErr).Str("path", query.Path).Msg("seen tracker compare failed, skipping commit")
-		} else if len(newIDs) > 0 {
-			if err := s.hookStream.Emit(ctx, map[string]any{
-				"event":        hooks.EventSourceChange,
-				"workspace_id": fmt.Sprintf("%d", pctx.WorkspaceId),
-				"path":         query.Path,
-				"integration":  query.Integration,
-				"new_count":    fmt.Sprintf("%d", len(newIDs)),
-			}); err == nil {
-				emitted = true
-				log.Debug().
-					Str("path", query.Path).
-					Int("new_results", len(newIDs)).
-					Msg("source change detected")
-			} else {
-				log.Warn().Err(err).Str("path", query.Path).Msg("failed to emit source change event, will retry next poll")
-			}
-		} else {
-			emitted = true // no new IDs, safe to advance
-		}
-
-		if emitted {
-			s.seenTracker.Commit(ctx, seenKey, ids)
-		}
-	}
+	// Note: hook event detection is NOT done here. It's done in RefreshQuery
+	// (called only by the source poller). This prevents a feedback loop where
+	// a hook-triggered task reads the filesystem, which re-executes the query,
+	// which detects "new" results, which fires another hook, ad infinitum.
 
 	// Cache results
 	ttl := time.Duration(query.CacheTTL) * time.Second

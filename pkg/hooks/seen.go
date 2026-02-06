@@ -80,6 +80,13 @@ func (t *SeenTracker) Commit(ctx context.Context, key string, current []string) 
 	return nil
 }
 
+// TrySetCooldown attempts to set a cooldown key via SETNX. Returns true if
+// the key was set (no active cooldown), false if a cooldown is already active.
+// Used to prevent duplicate event emissions from multiple gateway replicas.
+func (t *SeenTracker) TrySetCooldown(ctx context.Context, key string, ttl time.Duration) (bool, error) {
+	return t.rdb.SetNX(ctx, key, "1", ttl).Result()
+}
+
 // Diff is a convenience that combines Compare + Commit in one call.
 // Use Compare + Commit separately when you need to confirm delivery before advancing.
 func (t *SeenTracker) Diff(ctx context.Context, key string, current []string) ([]string, error) {
