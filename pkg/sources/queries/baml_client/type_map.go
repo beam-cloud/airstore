@@ -33,6 +33,8 @@ var typeMap = map[string]reflect.Type{
 	"STREAM_TYPES.LinearQueryResult":    reflect.TypeOf(stream_types.LinearQueryResult{}),
 	"TYPES.NotionQueryResult":           reflect.TypeOf(types.NotionQueryResult{}),
 	"STREAM_TYPES.NotionQueryResult":    reflect.TypeOf(stream_types.NotionQueryResult{}),
+	"TYPES.PostHogQueryResult":          reflect.TypeOf(types.PostHogQueryResult{}),
+	"STREAM_TYPES.PostHogQueryResult":   reflect.TypeOf(stream_types.PostHogQueryResult{}),
 	"TYPES.SlackQueryResult":            reflect.TypeOf(types.SlackQueryResult{}),
 	"STREAM_TYPES.SlackQueryResult":     reflect.TypeOf(stream_types.SlackQueryResult{}),
 }

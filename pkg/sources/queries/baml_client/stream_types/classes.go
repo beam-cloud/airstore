@@ -362,6 +362,72 @@ func (c NotionQueryResult) BamlTypeName() string {
 	return "NotionQueryResult"
 }
 
+type PostHogQueryResult struct {
+	Posthog_query   *string `json:"posthog_query"`
+	Search_type     *string `json:"search_type"`
+	Project_id      *int64  `json:"project_id"`
+	Limit           *int64  `json:"limit"`
+	Filename_format *string `json:"filename_format"`
+}
+
+func (c *PostHogQueryResult) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_STREAM_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_STREAM_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "PostHogQueryResult" {
+		panic(fmt.Sprintf("expected PostHogQueryResult, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "posthog_query":
+			c.Posthog_query = baml.Decode(valueHolder).Interface().(*string)
+
+		case "search_type":
+			c.Search_type = baml.Decode(valueHolder).Interface().(*string)
+
+		case "project_id":
+			c.Project_id = baml.Decode(valueHolder).Interface().(*int64)
+
+		case "limit":
+			c.Limit = baml.Decode(valueHolder).Interface().(*int64)
+
+		case "filename_format":
+			c.Filename_format = baml.Decode(valueHolder).Interface().(*string)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class PostHogQueryResult", key))
+
+		}
+	}
+
+}
+
+func (c PostHogQueryResult) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["posthog_query"] = c.Posthog_query
+
+	fields["search_type"] = c.Search_type
+
+	fields["project_id"] = c.Project_id
+
+	fields["limit"] = c.Limit
+
+	fields["filename_format"] = c.Filename_format
+
+	return baml.EncodeClass("PostHogQueryResult", fields, nil)
+}
+
+func (c PostHogQueryResult) BamlTypeName() string {
+	return "PostHogQueryResult"
+}
+
 type SlackQueryResult struct {
 	Slack_query     *string `json:"slack_query"`
 	Limit           *int64  `json:"limit"`

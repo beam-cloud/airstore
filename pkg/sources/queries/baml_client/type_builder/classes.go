@@ -267,6 +267,54 @@ func (t *NotionQueryResultClassView) Type() (baml.Type, error) {
 	return t.inner.Type()
 }
 
+type PostHogQueryResultClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *PostHogQueryResultClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *PostHogQueryResultClassView) PropertyPosthog_query() (ClassPropertyView, error) {
+	return t.inner.Property("posthog_query")
+}
+
+func (t *PostHogQueryResultClassView) PropertySearch_type() (ClassPropertyView, error) {
+	return t.inner.Property("search_type")
+}
+
+func (t *PostHogQueryResultClassView) PropertyProject_id() (ClassPropertyView, error) {
+	return t.inner.Property("project_id")
+}
+
+func (t *PostHogQueryResultClassView) PropertyLimit() (ClassPropertyView, error) {
+	return t.inner.Property("limit")
+}
+
+func (t *PostHogQueryResultClassView) PropertyFilename_format() (ClassPropertyView, error) {
+	return t.inner.Property("filename_format")
+}
+
+func (t *TypeBuilder) PostHogQueryResult() (*PostHogQueryResultClassView, error) {
+	bld, err := t.inner.Class("PostHogQueryResult")
+	if err != nil {
+		return nil, err
+	}
+	return &PostHogQueryResultClassView{inner: bld}, nil
+}
+
+func (t *PostHogQueryResultClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
 type SlackQueryResultClassView struct {
 	inner baml.ClassBuilder
 }

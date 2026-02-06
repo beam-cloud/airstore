@@ -180,6 +180,7 @@ message AddConnectionRequest {
   string access_token = 4;
   string api_key = 5;
   string scope = 6;
+  map<string, string> extra = 7; // Additional provider-specific data (e.g., host URL)
 }
 
 message ListConnectionsRequest {
