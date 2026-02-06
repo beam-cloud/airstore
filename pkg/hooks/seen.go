@@ -57,8 +57,10 @@ func (t *SeenTracker) Compare(ctx context.Context, key string, current []string)
 // Commit replaces the stored set with current and refreshes the TTL.
 // Call only after the caller has successfully acted on the new IDs from Compare.
 func (t *SeenTracker) Commit(ctx context.Context, key string, current []string) error {
+	// Zero results: clear the stored set so stale IDs don't suppress
+	// future events when results reappear.
 	if len(current) == 0 {
-		return nil
+		return t.rdb.Del(ctx, key).Err()
 	}
 
 	pipe := t.rdb.Pipeline()
