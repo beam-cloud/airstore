@@ -28,13 +28,14 @@ const (
 )
 
 const (
-	defaultMaxAttempts = 3
-	debounceDelay      = 2 * time.Second
-	pollInterval       = 30 * time.Second
-	baseRetryDelay     = 10 * time.Second
-	retryMultiplier    = 3.0
-	maxRetryDelay      = 5 * time.Minute
-	stuckTaskTimeout   = 10 * time.Minute
+	defaultMaxAttempts  = 3
+	debounceDelay       = 2 * time.Second
+	pollInterval        = 30 * time.Second
+	baseRetryDelay      = 10 * time.Second
+	retryMultiplier     = 3.0
+	maxRetryDelay       = 5 * time.Minute
+	stuckPendingTimeout = 2 * time.Minute  // pending/scheduled: never started
+	stuckRunningTimeout = 10 * time.Minute // running: started but no result
 )
 
 // TaskCreator abstracts task creation (avoids import cycle with services/).
@@ -99,19 +100,17 @@ func (eng *Engine) submit(ctx context.Context, h *types.Hook, event string, data
 	if h.TokenId == nil {
 		return
 	}
-	if eng.hasRunningTask(ctx, h.Id) {
-		return
-	}
 	token, err := DecodeToken(h.EncryptedToken)
 	if err != nil {
 		log.Warn().Err(err).Str("hook", h.ExternalId).Msg("bad token")
 		return
 	}
 	prompt := enrichPrompt(h.Prompt, event, data)
+	// The DB unique constraint (idx_task_hook_one_active) is the sole guard.
+	// If a task is already active for this hook, the insert fails. That's fine.
 	if err := eng.creator.CreateTask(ctx, h.WorkspaceId, h.CreatedByMemberId, token, prompt,
 		h.Id, 1, defaultMaxAttempts); err != nil {
-		log.Warn().Err(err).Str("hook", h.ExternalId).Msg("submit failed")
-		return
+		return // constraint rejection or real error -- either way, nothing to do
 	}
 	log.Info().Str("hook", h.ExternalId).Str("event", event).Msg("hook fired")
 }
@@ -141,12 +140,18 @@ func (eng *Engine) Poll(ctx context.Context) {
 
 // reapStuck marks hook tasks stuck in pending/running for too long as failed.
 func (eng *Engine) reapStuck(ctx context.Context) {
-	tasks, err := eng.backend.GetStuckHookTasks(ctx, stuckTaskTimeout)
+	eng.reapByTimeout(ctx, stuckPendingTimeout) // Pending tasks that never started get a short leash.
+	eng.reapByTimeout(ctx, stuckRunningTimeout) // Running tasks get more time (the agent might be working).
+
+}
+
+func (eng *Engine) reapByTimeout(ctx context.Context, timeout time.Duration) {
+	tasks, err := eng.backend.GetStuckHookTasks(ctx, timeout)
 	if err != nil || len(tasks) == 0 {
 		return
 	}
 	for _, t := range tasks {
-		log.Warn().Str("task", t.ExternalId).Str("status", string(t.Status)).Msg("reaping stuck task")
+		log.Warn().Str("task", t.ExternalId).Str("status", string(t.Status)).Dur("age", timeout).Msg("reaping stuck task")
 		eng.backend.SetTaskResult(ctx, t.ExternalId, -1, "stuck: no response from worker")
 	}
 }

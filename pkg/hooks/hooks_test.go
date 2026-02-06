@@ -185,17 +185,19 @@ func TestEngine_Submit_CreatesTask(t *testing.T) {
 	}
 }
 
-func TestEngine_Submit_SkipsWhenActive(t *testing.T) {
+func TestEngine_Submit_ConstraintRejectsDuplicate(t *testing.T) {
 	hook := makeHook(1, 10, "/skills", "analyze")
 	store := &mockStore{hooks: []*types.Hook{hook}}
-	creator := &mockCreator{}
-	backend := &mockBackend{activeTask: &types.Task{Id: 99, Status: types.TaskStatusRunning}}
+	// Simulate the DB unique constraint rejecting the insert
+	creator := &mockCreator{err: fmt.Errorf("pq: duplicate key value violates unique constraint")}
+	backend := &mockBackend{}
 	eng := NewEngine(store, creator, backend)
 
 	eng.Handle("1", makeEvent(EventFsCreate, "/skills/test.txt", 10))
 
+	// CreateTask was called but rejected by constraint -- no task created
 	if creator.count() != 0 {
-		t.Fatalf("expected 0 tasks (active task exists), got %d", creator.count())
+		t.Fatalf("expected 0 tasks (constraint rejected), got %d", creator.count())
 	}
 }
 

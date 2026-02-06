@@ -234,6 +234,9 @@ func (w *Worker) taskLoop() {
 			Uint("workspace_id", task.WorkspaceId).
 			Msg("received task")
 
+		// Mark as running in Postgres (sets started_at)
+		w.gatewayClient.SetTaskStarted(w.ctx, task.ExternalId)
+
 		// Execute the task in a sandbox
 		result, err := w.sandboxManager.RunTask(w.ctx, *task)
 

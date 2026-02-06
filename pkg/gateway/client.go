@@ -180,6 +180,13 @@ func (c *GatewayClient) GetWorker(ctx context.Context, workerId string) (*types.
 	}, nil
 }
 
+// SetTaskStarted marks a task as running in Postgres.
+func (c *GatewayClient) SetTaskStarted(ctx context.Context, taskID string) {
+	ctx, cancel := c.withTimeout(ctx)
+	defer cancel()
+	c.client.SetTaskStarted(ctx, &pb.SetTaskStartedRequest{TaskId: taskID})
+}
+
 // SetTaskResult reports the result of a task to the gateway
 func (c *GatewayClient) SetTaskResult(ctx context.Context, taskID string, exitCode int, errorMsg string) error {
 	ctx, cancel := c.withTimeout(ctx)
