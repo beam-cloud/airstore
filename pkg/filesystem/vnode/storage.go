@@ -502,6 +502,12 @@ func (s *StorageVNode) Rename(oldpath, newpath string) error {
 		return nil
 	}
 
+	// Flush any dirty data for the old path before renaming.
+	// The writes map is keyed by path; after rename, reads on the new path
+	// would miss dirty data still keyed under the old path.
+	s.enqueueWritesForPath(oldpath)
+	_ = s.asyncWriter.ForceFlush(oldpath)
+
 	ctx, cancel := s.ctx()
 	defer cancel()
 
