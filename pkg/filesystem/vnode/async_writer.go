@@ -135,7 +135,7 @@ func (aw *AsyncWriter) DirtyFileInfo(path string, fallbackMode uint32) *FileInfo
 		aw.mu.Unlock()
 		return nil
 	}
-	size := int64(len(pw.data))
+	size := pw.off + int64(len(pw.data))
 	aw.mu.Unlock()
 
 	if fallbackMode == 0 {
