@@ -463,17 +463,14 @@ func (p *PostHogProvider) ReadResult(ctx context.Context, pctx *sources.Provider
 		return jsonMarshalIndent(cohort)
 
 	case "events":
-		// No single-event GET endpoint; search and match by ID
-		events, err := client.SearchEvents(ctx, projectID, "", 100)
+		event, err := client.GetEvent(ctx, projectID, resourceID)
 		if err != nil {
+			if errors.Is(err, clients.ErrResourceNotFound) {
+				return nil, sources.ErrNotFound
+			}
 			return nil, err
 		}
-		for _, ev := range events {
-			if ev.ID == resourceID {
-				return jsonMarshalIndent(ev)
-			}
-		}
-		return nil, sources.ErrNotFound
+		return jsonMarshalIndent(event)
 
 	default:
 		return nil, fmt.Errorf("unknown resource type: %s", resourceType)
@@ -590,16 +587,14 @@ func (p *PostHogProvider) listCohorts(ctx context.Context, client *clients.PostH
 
 func (p *PostHogProvider) readEvent(ctx context.Context, client *clients.PostHogClient, projectID int, filename string) ([]byte, error) {
 	id := strings.TrimSuffix(filename, ".json")
-	events, err := client.ListEvents(ctx, projectID, 100)
+	event, err := client.GetEvent(ctx, projectID, id)
 	if err != nil {
+		if errors.Is(err, clients.ErrResourceNotFound) {
+			return nil, sources.ErrNotFound
+		}
 		return nil, err
 	}
-	for _, ev := range events {
-		if sources.SanitizeFilename(ev.ID) == id {
-			return jsonMarshalIndent(ev)
-		}
-	}
-	return nil, sources.ErrNotFound
+	return jsonMarshalIndent(event)
 }
 
 func (p *PostHogProvider) readFeatureFlag(ctx context.Context, client *clients.PostHogClient, projectID int, filename string) ([]byte, error) {

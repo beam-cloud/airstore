@@ -231,6 +231,17 @@ func (c *PostHogClient) GetFeatureFlag(ctx context.Context, projectID, flagID in
 	return &flag, nil
 }
 
+// GetEvent retrieves a single event by its UUID.
+// Uses: GET /api/projects/{id}/events/{eventID}/
+func (c *PostHogClient) GetEvent(ctx context.Context, projectID int, eventID string) (*PostHogEvent, error) {
+	path := fmt.Sprintf("/api/projects/%d/events/%s/", projectID, url.QueryEscape(eventID))
+	var event PostHogEvent
+	if err := c.doRequest(ctx, path, &event); err != nil {
+		return nil, err
+	}
+	return &event, nil
+}
+
 // SearchFeatureFlags searches feature flags by name/key.
 // Uses: GET /api/projects/{id}/feature_flags/?search={search}&limit=200
 func (c *PostHogClient) SearchFeatureFlags(ctx context.Context, projectID int, search string) ([]PostHogFeatureFlag, error) {
