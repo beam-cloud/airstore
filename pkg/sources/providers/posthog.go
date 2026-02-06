@@ -587,14 +587,16 @@ func (p *PostHogProvider) listCohorts(ctx context.Context, client *clients.PostH
 
 func (p *PostHogProvider) readEvent(ctx context.Context, client *clients.PostHogClient, projectID int, filename string) ([]byte, error) {
 	id := strings.TrimSuffix(filename, ".json")
-	event, err := client.GetEvent(ctx, projectID, id)
+	events, err := client.ListEvents(ctx, projectID, 100)
 	if err != nil {
-		if errors.Is(err, clients.ErrResourceNotFound) {
-			return nil, sources.ErrNotFound
-		}
 		return nil, err
 	}
-	return jsonMarshalIndent(event)
+	for _, ev := range events {
+		if sources.SanitizeFilename(ev.ID) == id {
+			return jsonMarshalIndent(ev)
+		}
+	}
+	return nil, sources.ErrNotFound
 }
 
 func (p *PostHogProvider) readFeatureFlag(ctx context.Context, client *clients.PostHogClient, projectID int, filename string) ([]byte, error) {
