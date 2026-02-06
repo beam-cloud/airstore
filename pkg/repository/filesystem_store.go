@@ -111,6 +111,11 @@ type FilesystemStore interface {
 	// DeleteSymlink removes a symlink.
 	DeleteSymlink(ctx context.Context, path string) error
 
+	// ===== Source Polling =====
+
+	// GetWatchedSourceQueries returns stale source queries that have active hooks watching their path.
+	GetWatchedSourceQueries(ctx context.Context, staleAfter time.Duration, limit int) ([]*types.FilesystemQuery, error)
+
 	// ===== Hooks =====
 
 	// CreateHook stores a new hook definition.

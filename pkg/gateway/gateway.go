@@ -451,6 +451,12 @@ func (g *Gateway) registerServices() error {
 			log.Warn().Msg("hook engine not started: no event emitter")
 		}
 
+		// Source poller: refreshes watched source queries so hooks fire on new results
+		if g.RedisClient != nil {
+			sourcePoller := hooks.NewSourcePoller(filesystemStore, sourceService, g.RedisClient)
+			go sourcePoller.Start(g.ctx)
+		}
+
 		// OAuth API for workspace integrations (gmail, gdrive, github, notion, slack)
 		apiv1.NewOAuthGroup(g.baseRouteGroup.Group("/oauth"), g.oauthStore, g.oauthRegistry, g.BackendRepo)
 		if providers := g.oauthRegistry.ListConfiguredProviders(); len(providers) > 0 {

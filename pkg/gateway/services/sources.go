@@ -161,6 +161,15 @@ func (s *SourceService) RefreshSmartQuery(ctx context.Context, queryPath string)
 	return results, nil
 }
 
+// RefreshQuery re-executes a query without auth context (for background polling).
+// Satisfies hooks.QueryRefresher.
+func (s *SourceService) RefreshQuery(ctx context.Context, query *types.FilesystemQuery) error {
+	pctx := &sources.ProviderContext{WorkspaceId: query.WorkspaceId}
+	pctx, _ = s.loadCredentials(ctx, pctx, query.Integration)
+	_, err := s.executeAndCacheQuery(ctx, pctx, query)
+	return err
+}
+
 // Stat returns file/directory attributes for a source path
 func (s *SourceService) Stat(ctx context.Context, req *pb.SourceStatRequest) (*pb.SourceStatResponse, error) {
 	pctx, err := s.providerContext(ctx)

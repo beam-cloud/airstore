@@ -1,12 +1,24 @@
 package common
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/beam-cloud/airstore/pkg/types"
+)
 
 var (
-	// Filesystem metadata keys
+	// Filesystem VNode metadata keys (used by FUSE layer)
 	filesystemDirAccess  string = "filesystem:dir:access:%s:%s" // pid, name
 	filesystemDirContent string = "filesystem:dir:content:%s"   // id
 	filesystemFile       string = "filesystem:file:%s:%s"       // pid, name
+
+	// Filesystem store cache keys (used by FilesystemStore)
+	fsDirMeta     string = "airstore:fs:dir:%s"   // pathHash
+	fsFileMeta    string = "airstore:fs:file:%s"  // pathHash
+	fsSymlink     string = "airstore:fs:link:%s"  // pathHash
+	fsDirChildren string = "airstore:fs:ls:%s"    // pathHash
+	fsQueryResult string = "airstore:qr:%d:%s"    // workspaceId, pathHash
+	fsResultBody  string = "airstore:rc:%d:%s:%s" // workspaceId, pathHash, resultId
 
 	// Session keys
 	sessionState string = "session:state:%s" // sessionId
@@ -30,6 +42,7 @@ var (
 	hookStream        string = "hook:events"
 	hookConsumerGroup string = "hook-evaluators"
 	hookSeen          string = "hook:seen:%d:%s" // workspaceId, pathHash
+	hookPollLock      string = "hook:poll:%s"    // queryExternalId
 )
 
 var Keys = &redisKeys{}
@@ -48,6 +61,32 @@ func (rk *redisKeys) FilesystemDirContent(id string) string {
 
 func (rk *redisKeys) FilesystemFile(pid, name string) string {
 	return fmt.Sprintf(filesystemFile, pid, name)
+}
+
+// Filesystem store cache keys (path args are auto-hashed)
+
+func (rk *redisKeys) FsDirMeta(path string) string {
+	return fmt.Sprintf(fsDirMeta, types.GeneratePathID(path))
+}
+
+func (rk *redisKeys) FsFileMeta(path string) string {
+	return fmt.Sprintf(fsFileMeta, types.GeneratePathID(path))
+}
+
+func (rk *redisKeys) FsSymlink(path string) string {
+	return fmt.Sprintf(fsSymlink, types.GeneratePathID(path))
+}
+
+func (rk *redisKeys) FsDirChildren(path string) string {
+	return fmt.Sprintf(fsDirChildren, types.GeneratePathID(path))
+}
+
+func (rk *redisKeys) FsQueryResult(workspaceId uint, path string) string {
+	return fmt.Sprintf(fsQueryResult, workspaceId, types.GeneratePathID(path))
+}
+
+func (rk *redisKeys) FsResultBody(workspaceId uint, path, resultId string) string {
+	return fmt.Sprintf(fsResultBody, workspaceId, types.GeneratePathID(path), resultId)
 }
 
 // Session keys
@@ -110,4 +149,8 @@ func (rk *redisKeys) HookConsumerGroup() string {
 
 func (rk *redisKeys) HookSeen(workspaceId uint, pathHash string) string {
 	return fmt.Sprintf(hookSeen, workspaceId, pathHash)
+}
+
+func (rk *redisKeys) HookPollLock(queryExtId string) string {
+	return fmt.Sprintf(hookPollLock, queryExtId)
 }
