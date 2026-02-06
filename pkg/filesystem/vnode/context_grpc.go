@@ -79,13 +79,8 @@ func (c *ContextVNodeGRPC) Getattr(path string) (*FileInfo, error) {
 	// If we have dirty data in the async writer, report its size.
 	// This ensures editors see the correct size after Truncate+Write
 	// before the data is uploaded to S3.
-	if data, _, ok := c.asyncWriter.Get(path); ok {
-		uid, gid := GetOwner()
-		return &FileInfo{
-			Ino: PathIno(path), Size: int64(len(data)),
-			Mode: 0100644, Nlink: 1, Uid: uid, Gid: gid,
-			Atime: time.Now(), Mtime: time.Now(), Ctime: time.Now(),
-		}, nil
+	if info := c.asyncWriter.DirtyFileInfo(path, c.cachedMode(path)); info != nil {
+		return info, nil
 	}
 
 	// Check caches
@@ -796,6 +791,14 @@ func (c *ContextVNodeGRPC) enqueueWritesForPath(path string) {
 // Cleanup flushes all pending async writes. Called when filesystem is unmounted.
 func (c *ContextVNodeGRPC) Cleanup() {
 	c.asyncWriter.Cleanup()
+}
+
+// cachedMode returns the file mode from the metadata cache, or 0 if not cached.
+func (c *ContextVNodeGRPC) cachedMode(path string) uint32 {
+	if info := c.cache.GetInfo(path); info != nil {
+		return info.Mode
+	}
+	return 0
 }
 
 func (c *ContextVNodeGRPC) toFileInfo(path string, info *pb.FileInfo) *FileInfo {
