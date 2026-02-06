@@ -1,4 +1,4 @@
-// Package hooks watches filesystem paths and spawns tasks when things change
+// Package hooks watches filesystem paths and spawns tasks when things change.
 package hooks
 
 import (
@@ -59,16 +59,20 @@ func (eng *Engine) Handle(id string, data map[string]any) {
 	event, _ := data["event"].(string)
 	wsId := ParseUint(data["workspace_id"])
 	path, _ := data["path"].(string)
+
 	if wsId == 0 || path == "" {
 		return
 	}
+
 	fire := func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+
 		for _, h := range eng.cache.match(ctx, wsId, path) {
 			eng.submit(ctx, h, event, data)
 		}
 	}
+
 	if event == EventFsWrite {
 		eng.debounce.call(fmt.Sprintf("%d:%s", wsId, path), fire)
 	} else {
@@ -82,23 +86,28 @@ func (eng *Engine) submit(ctx context.Context, h *types.Hook, event string, data
 	if h.TokenId == nil {
 		return
 	}
+
 	token, err := DecodeToken(h.EncryptedToken)
 	if err != nil {
 		return
 	}
+
 	prompt := enrichPrompt(h.Prompt, event, data)
 	if err := eng.creator.CreateTask(ctx, h.WorkspaceId, h.CreatedByMemberId, token, prompt,
 		h.Id, 1, maxAttempts); err != nil {
 		return // DB constraint rejects duplicates -- expected
 	}
+
 	log.Info().Str("hook", h.ExternalId).Str("event", event).Msg("hook fired")
 }
 
 // Start runs the retry poller. Call as a goroutine.
 func (eng *Engine) Start(ctx context.Context) {
 	log.Info().Msg("hook poller started")
+
 	t := time.NewTicker(pollInterval)
 	defer t.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -111,6 +120,7 @@ func (eng *Engine) Start(ctx context.Context) {
 
 // Poll reaps stuck tasks and retries failed ones. Exported for testing.
 func (eng *Engine) Poll(ctx context.Context) {
+	// Reap tasks stuck in pending/running
 	for _, timeout := range []time.Duration{stuckPending, stuckRunning} {
 		if tasks, err := eng.backend.GetStuckHookTasks(ctx, timeout); err == nil {
 			for _, t := range tasks {
@@ -119,31 +129,39 @@ func (eng *Engine) Poll(ctx context.Context) {
 			}
 		}
 	}
+
+	// Retry failed tasks with backoff
 	tasks, err := eng.backend.GetRetryableTasks(ctx)
 	if err != nil {
 		return
 	}
+
 	now := time.Now()
 	for _, t := range tasks {
 		if t.FinishedAt == nil || t.HookId == nil || t.Attempt >= t.MaxAttempts {
 			continue
 		}
+
 		if now.Before(t.FinishedAt.Add(retryDelay(t.Attempt))) {
 			continue
 		}
+
 		hook, err := eng.store.GetHookById(ctx, *t.HookId)
 		if err != nil || hook == nil {
 			continue
 		}
+
 		token, _ := DecodeToken(hook.EncryptedToken)
 		if token == "" {
 			continue
 		}
+
 		next := t.Attempt + 1
 		if err := eng.creator.CreateTask(ctx, t.WorkspaceId, t.CreatedByMemberId, token, t.Prompt,
 			*t.HookId, next, t.MaxAttempts); err != nil {
 			continue
 		}
+
 		log.Info().Str("hook", hook.ExternalId).Int("attempt", next).Msg("retrying")
 	}
 }
@@ -158,6 +176,7 @@ func retryDelay(attempt int) time.Duration {
 
 func enrichPrompt(base, event string, data map[string]any) string {
 	path, _ := data["path"].(string)
+
 	var line string
 	switch event {
 	case EventFsCreate:
@@ -169,6 +188,7 @@ func enrichPrompt(base, event string, data map[string]any) string {
 	case EventSourceChange:
 		line = "Event: new results in " + path
 	}
+
 	if line == "" {
 		return base
 	}
@@ -183,6 +203,7 @@ func DecodeToken(stored []byte) (string, error) {
 	if len(stored) == 0 {
 		return "", fmt.Errorf("empty token")
 	}
+
 	var s string
 	if err := json.Unmarshal(stored, &s); err != nil {
 		return "", err
@@ -232,9 +253,11 @@ func (c *hookCache) match(ctx context.Context, wsId uint, path string) []*types.
 	c.mu.RLock()
 	hooks, ok := c.hooks[wsId]
 	c.mu.RUnlock()
+
 	if !ok {
 		hooks = c.load(ctx, wsId)
 	}
+
 	var out []*types.Hook
 	for _, h := range hooks {
 		if h.Active && (path == h.Path || strings.HasPrefix(path, h.Path+"/")) {
@@ -253,9 +276,11 @@ func (c *hookCache) invalidate(wsId uint) {
 func (c *hookCache) load(ctx context.Context, wsId uint) []*types.Hook {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	if hooks, ok := c.hooks[wsId]; ok {
 		return hooks
 	}
+
 	hooks, _ := c.store.ListHooks(ctx, wsId)
 	c.hooks[wsId] = hooks
 	return hooks
@@ -277,6 +302,7 @@ type debounceEntry struct {
 func (d *debouncer) call(key string, fn func()) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+
 	e, ok := d.state[key]
 	if ok {
 		e.timer.Stop()
@@ -285,6 +311,7 @@ func (d *debouncer) call(key string, fn func()) {
 		e = &debounceEntry{}
 		d.state[key] = e
 	}
+
 	gen := e.gen
 	e.timer = time.AfterFunc(d.delay, func() {
 		d.mu.Lock()

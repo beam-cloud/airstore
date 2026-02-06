@@ -415,7 +415,8 @@ func (g *Gateway) registerServices() error {
 		// Hooks API (nested under workspaces, workspace-scoped auth)
 		hooksGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/hooks")
 		hooksGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
-		apiv1.NewHooksGroup(hooksGroup, g.BackendRepo, filesystemStore, g.eventBus)
+		hooksSvc := &hooks.Service{Store: filesystemStore, Backend: g.BackendRepo, EventBus: g.eventBus}
+		apiv1.NewHooksGroup(hooksGroup, g.BackendRepo, hooksSvc)
 		log.Info().Msg("hooks API registered at /api/v1/workspaces/:workspace_id/hooks")
 
 		// Filesystem API (nested under workspaces, workspace-scoped auth)

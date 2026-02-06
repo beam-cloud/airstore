@@ -897,9 +897,6 @@ func (s *filesystemStore) CreateHook(ctx context.Context, hook *types.Hook) (*ty
 		hook.Active, hook.CreatedByMemberId, hook.TokenId, hook.EncryptedToken,
 		hook.CreatedAt, hook.UpdatedAt).Scan(&hook.Id)
 	if err != nil {
-		if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
-			return nil, fmt.Errorf("a hook already exists on %s", hook.Path)
-		}
 		return nil, fmt.Errorf("create hook: %w", err)
 	}
 

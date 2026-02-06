@@ -20,11 +20,16 @@ type GatewayService struct {
 	backend  repository.BackendRepository
 	fsStore  repository.FilesystemStore
 	s2Client *common.S2Client
-	eventBus *common.EventBus
+	hooksSvc *hooks.Service
 }
 
 func NewGatewayService(backend repository.BackendRepository, s2Client *common.S2Client, fsStore repository.FilesystemStore, eventBus *common.EventBus) *GatewayService {
-	return &GatewayService{backend: backend, s2Client: s2Client, fsStore: fsStore, eventBus: eventBus}
+	return &GatewayService{
+		backend:  backend,
+		s2Client: s2Client,
+		fsStore:  fsStore,
+		hooksSvc: &hooks.Service{Store: fsStore, Backend: backend, EventBus: eventBus},
+	}
 }
 
 // Workspaces
@@ -532,28 +537,16 @@ func (s *GatewayService) CreateHook(ctx context.Context, req *pb.CreateHookReque
 	if rawToken == "" {
 		return &pb.HookResponse{Ok: false, Error: "authentication token required"}, nil
 	}
-	encryptedToken, err := hooks.EncodeToken(rawToken)
-	if err != nil {
-		return &pb.HookResponse{Ok: false, Error: "failed to store token"}, nil
-	}
 
-	hook := &types.Hook{
-		WorkspaceId:       ws.Id,
-		Path:              hooks.NormalizePath(req.Path),
-		Prompt:            req.Prompt,
-		Active:            true,
-		CreatedByMemberId: ptrIfNonZero(auth.MemberId(ctx)),
-		TokenId:           ptrIfNonZero(auth.TokenId(ctx)),
-		EncryptedToken:    encryptedToken,
-	}
-
-	created, err := s.fsStore.CreateHook(ctx, hook)
+	hook, err := s.hooksSvc.Create(ctx, ws.Id,
+		ptrIfNonZero(auth.MemberId(ctx)),
+		ptrIfNonZero(auth.TokenId(ctx)),
+		rawToken, req.Path, req.Prompt)
 	if err != nil {
 		return &pb.HookResponse{Ok: false, Error: err.Error()}, nil
 	}
 
-	s.invalidateHookCache(ws.Id)
-	return &pb.HookResponse{Ok: true, Hook: hookToPb(created, ws.ExternalId)}, nil
+	return &pb.HookResponse{Ok: true, Hook: hookToPb(hook, ws.ExternalId)}, nil
 }
 
 func (s *GatewayService) ListHooks(ctx context.Context, req *pb.ListHooksRequest) (*pb.ListHooksResponse, error) {
@@ -562,7 +555,7 @@ func (s *GatewayService) ListHooks(ctx context.Context, req *pb.ListHooksRequest
 		return &pb.ListHooksResponse{Ok: false, Error: err.Error()}, nil
 	}
 
-	hks, err := s.fsStore.ListHooks(ctx, ws.Id)
+	hks, err := s.hooksSvc.List(ctx, ws.Id)
 	if err != nil {
 		return &pb.ListHooksResponse{Ok: false, Error: err.Error()}, nil
 	}
@@ -583,37 +576,40 @@ func (s *GatewayService) GetHook(ctx context.Context, req *pb.GetHookRequest) (*
 }
 
 func (s *GatewayService) UpdateHook(ctx context.Context, req *pb.UpdateHookRequest) (*pb.HookResponse, error) {
-	hook, ws, err := s.resolveHook(ctx, req.Id)
+	// Validate access
+	if _, _, err := s.resolveHook(ctx, req.Id); err != nil {
+		return &pb.HookResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	var prompt *string
+	if req.Prompt != "" {
+		prompt = &req.Prompt
+	}
+	var active *bool
+	if req.HasActive {
+		active = &req.Active
+	}
+
+	hook, err := s.hooksSvc.Update(ctx, req.Id, prompt, active)
 	if err != nil {
 		return &pb.HookResponse{Ok: false, Error: err.Error()}, nil
 	}
 
-	if req.Prompt != "" {
-		hook.Prompt = req.Prompt
+	wsExt := ""
+	if ws, _ := s.backend.GetWorkspace(ctx, hook.WorkspaceId); ws != nil {
+		wsExt = ws.ExternalId
 	}
-	if req.HasActive {
-		hook.Active = req.Active
-	}
-
-	if err := s.fsStore.UpdateHook(ctx, hook); err != nil {
-		return &pb.HookResponse{Ok: false, Error: err.Error()}, nil
-	}
-
-	s.invalidateHookCache(hook.WorkspaceId)
-	return &pb.HookResponse{Ok: true, Hook: hookToPb(hook, ws.ExternalId)}, nil
+	return &pb.HookResponse{Ok: true, Hook: hookToPb(hook, wsExt)}, nil
 }
 
 func (s *GatewayService) DeleteHook(ctx context.Context, req *pb.DeleteHookRequest) (*pb.DeleteResponse, error) {
-	hook, _, err := s.resolveHook(ctx, req.Id)
-	if err != nil {
+	if _, _, err := s.resolveHook(ctx, req.Id); err != nil {
 		return &pb.DeleteResponse{Ok: false, Error: err.Error()}, nil
 	}
 
-	if err := s.fsStore.DeleteHook(ctx, req.Id); err != nil {
+	if err := s.hooksSvc.Delete(ctx, req.Id); err != nil {
 		return &pb.DeleteResponse{Ok: false, Error: err.Error()}, nil
 	}
-
-	s.invalidateHookCache(hook.WorkspaceId)
 	return &pb.DeleteResponse{Ok: true}, nil
 }
 
@@ -663,19 +659,6 @@ func extractRawToken(ctx context.Context) string {
 	return strings.TrimPrefix(vals[0], "Bearer ")
 }
 
-func (s *GatewayService) invalidateHookCache(workspaceId uint) {
-	if s.eventBus == nil {
-		return
-	}
-	s.eventBus.Emit(common.Event{
-		Type: common.EventCacheInvalidate,
-		Data: map[string]any{
-			"scope":        "hooks",
-			"workspace_id": workspaceId,
-		},
-	})
-}
-
 func hookToPb(h *types.Hook, workspaceExternalId string) *pb.Hook {
 	return &pb.Hook{
 		Id:          h.ExternalId,
@@ -694,7 +677,7 @@ func (s *GatewayService) ListHookRuns(ctx context.Context, req *pb.ListHookRunsR
 		return &pb.ListHookRunsResponse{Ok: false, Error: err.Error()}, nil
 	}
 
-	tasks, err := s.backend.ListTasksByHook(ctx, hook.Id)
+	tasks, err := s.hooksSvc.ListRuns(ctx, hook.Id)
 	if err != nil {
 		return &pb.ListHookRunsResponse{Ok: false, Error: err.Error()}, nil
 	}
