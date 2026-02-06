@@ -135,7 +135,6 @@ type BackendRepository interface {
 	SetTaskResult(ctx context.Context, externalId string, exitCode int, errorMsg string) error
 	CancelTask(ctx context.Context, externalId string) error
 	DeleteTask(ctx context.Context, externalId string) error
-	GetActiveHookTask(ctx context.Context, hookId uint) (*types.Task, error)
 	GetRetryableTasks(ctx context.Context) ([]*types.Task, error)
 	GetStuckHookTasks(ctx context.Context, timeout time.Duration) ([]*types.Task, error)
 	ListTasksByHook(ctx context.Context, hookId uint) ([]*types.Task, error)

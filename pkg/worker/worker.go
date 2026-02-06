@@ -234,8 +234,11 @@ func (w *Worker) taskLoop() {
 			Uint("workspace_id", task.WorkspaceId).
 			Msg("received task")
 
-		// Mark as running in Postgres (sets started_at)
-		w.gatewayClient.SetTaskStarted(w.ctx, task.ExternalId)
+		// Mark as running
+		// Log but don't abort -- the task is already dequeued and must run
+		if err := w.gatewayClient.SetTaskStarted(w.ctx, task.ExternalId); err != nil {
+			log.Warn().Err(err).Str("task_id", task.ExternalId).Msg("failed to mark task as started")
+		}
 
 		// Execute the task in a sandbox
 		result, err := w.sandboxManager.RunTask(w.ctx, *task)

@@ -382,26 +382,6 @@ func (b *PostgresBackend) CancelTask(ctx context.Context, externalId string) err
 	return nil
 }
 
-// GetActiveHookTask returns a non-terminal task for a hook, or nil.
-func (b *PostgresBackend) GetActiveHookTask(ctx context.Context, hookId uint) (*types.Task, error) {
-	query := `
-		SELECT id, external_id, workspace_id, created_by_member_id, status, prompt, image, entrypoint, env,
-		       exit_code, error, created_at, started_at, finished_at,
-		       hook_id, attempt, max_attempts
-		FROM task
-		WHERE hook_id = $1 AND status NOT IN ('complete', 'failed', 'cancelled')
-		LIMIT 1
-	`
-	task, err := b.scanTask(b.db.QueryRowContext(ctx, query, hookId))
-	if err != nil {
-		if _, ok := err.(*types.ErrTaskNotFound); ok {
-			return nil, nil
-		}
-		return nil, err
-	}
-	return task, nil
-}
-
 // GetRetryableTasks returns failed hook-triggered tasks eligible for retry.
 // A task is retryable if: hook_id set, status=failed, attempt < max_attempts,
 // and enough time has passed since finished_at (exponential backoff).

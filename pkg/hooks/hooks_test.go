@@ -62,15 +62,8 @@ func (m *mockCreator) last() mockTask {
 type mockBackend struct {
 	repository.BackendRepository // embed to satisfy interface
 	mu                           sync.Mutex
-	activeTask                   *types.Task
 	retryableTasks               []*types.Task
 	tasksByHook                  []*types.Task
-}
-
-func (m *mockBackend) GetActiveHookTask(_ context.Context, hookId uint) (*types.Task, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.activeTask, nil
 }
 
 func (m *mockBackend) GetRetryableTasks(_ context.Context) ([]*types.Task, error) {
@@ -91,12 +84,6 @@ func (m *mockBackend) GetStuckHookTasks(_ context.Context, _ time.Duration) ([]*
 
 func (m *mockBackend) SetTaskResult(_ context.Context, _ string, _ int, _ string) error {
 	return nil
-}
-
-func (m *mockBackend) setActive(t *types.Task) {
-	m.mu.Lock()
-	m.activeTask = t
-	m.mu.Unlock()
 }
 
 func (m *mockBackend) setRetryable(tasks []*types.Task) {
@@ -230,7 +217,6 @@ func TestEngine_Submit_PathMatching(t *testing.T) {
 	}
 
 	// Should NOT match: different path
-	backend.setActive(nil) // reset
 	eng.Handle("2", makeEvent(EventFsCreate, "/inbox/doc.pdf", 10))
 	if creator.count() != 1 {
 		t.Fatalf("expected no match for /inbox/doc.pdf, got %d tasks", creator.count())
