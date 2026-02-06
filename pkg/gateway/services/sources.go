@@ -565,10 +565,14 @@ func (s *SourceService) executeAndCacheQuery(ctx context.Context, pctx *sources.
 			ids[i] = r.ID
 		}
 
-		newIDs, _ := s.seenTracker.Compare(ctx, seenKey, ids)
+		newIDs, compareErr := s.seenTracker.Compare(ctx, seenKey, ids)
 		emitted := false
 
-		if len(newIDs) > 0 {
+		if compareErr != nil {
+			// Don't commit — we couldn't determine what's new vs seen.
+			// Next poll will retry the comparison.
+			log.Warn().Err(compareErr).Str("path", query.Path).Msg("seen tracker compare failed, skipping commit")
+		} else if len(newIDs) > 0 {
 			if err := s.hookStream.Emit(ctx, map[string]any{
 				"event":        hooks.EventSourceChange,
 				"workspace_id": fmt.Sprintf("%d", pctx.WorkspaceId),
