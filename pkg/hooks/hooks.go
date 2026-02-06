@@ -176,17 +176,23 @@ func retryDelay(attempt int) time.Duration {
 
 func enrichPrompt(base, event string, data map[string]any) string {
 	path, _ := data["path"].(string)
+	integration, _ := data["integration"].(string)
+	newCount, _ := data["new_count"].(string)
 
 	var line string
 	switch event {
 	case EventFsCreate:
-		line = "Event: new file at " + path
+		line = "Event: new file created at " + path
 	case EventFsWrite:
 		line = "Event: file changed at " + path
 	case EventFsDelete:
 		line = "Event: file deleted at " + path
 	case EventSourceChange:
-		line = "Event: new results in " + path
+		line = "Event: " + newCount + " new result(s) in " + path
+		if integration != "" {
+			line += " (source: " + integration + ")"
+		}
+		line += "\n\nThe new content is available at the path above in your mounted filesystem. Read the files there to see what's new."
 	}
 
 	if line == "" {
@@ -194,8 +200,6 @@ func enrichPrompt(base, event string, data map[string]any) string {
 	}
 	return base + "\n\n" + line
 }
-
-// Token encode/decode (JSON for now, TODO: real encryption)
 
 func EncodeToken(raw string) ([]byte, error) { return json.Marshal(raw) }
 
