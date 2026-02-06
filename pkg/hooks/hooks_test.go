@@ -177,8 +177,8 @@ func TestEngine_Submit_CreatesTask(t *testing.T) {
 	if task.Attempt != 1 {
 		t.Errorf("expected attempt=1, got %d", task.Attempt)
 	}
-	if task.MaxAttempts != defaultMaxAttempts {
-		t.Errorf("expected max_attempts=%d, got %d", defaultMaxAttempts, task.MaxAttempts)
+	if task.MaxAttempts != maxAttempts {
+		t.Errorf("expected max_attempts=%d, got %d", maxAttempts, task.MaxAttempts)
 	}
 	if task.Token != "test-token" {
 		t.Errorf("expected token=test-token, got %s", task.Token)
@@ -354,7 +354,6 @@ func TestEngine_Poll_SkipsWhenActiveTaskExists(t *testing.T) {
 	hookId := uint(1)
 	hook := makeHook(hookId, 10, "/skills", "analyze")
 	store := &mockStore{hooks: []*types.Hook{hook}}
-	creator := &mockCreator{}
 
 	finished := time.Now().Add(-1 * time.Minute)
 	failedTask := &types.Task{
@@ -369,17 +368,15 @@ func TestEngine_Poll_SkipsWhenActiveTaskExists(t *testing.T) {
 		FinishedAt:  &finished,
 	}
 
-	// There's already an active (running) task for this hook
-	backend := &mockBackend{
-		retryableTasks: []*types.Task{failedTask},
-		activeTask:     &types.Task{Id: 100, Status: types.TaskStatusRunning},
-	}
+	// DB constraint rejects retry when active task exists
+	creator := &mockCreator{err: fmt.Errorf("pq: duplicate key value violates unique constraint")}
+	backend := &mockBackend{retryableTasks: []*types.Task{failedTask}}
 	eng := NewEngine(store, creator, backend)
 
 	eng.Poll(context.Background())
 
 	if creator.count() != 0 {
-		t.Fatalf("expected 0 retries (active task exists), got %d", creator.count())
+		t.Fatalf("expected 0 retries (constraint rejected), got %d", creator.count())
 	}
 }
 
