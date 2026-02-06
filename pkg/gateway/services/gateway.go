@@ -688,6 +688,39 @@ func hookToPb(h *types.Hook, workspaceExternalId string) *pb.Hook {
 	}
 }
 
+func (s *GatewayService) ListHookRuns(ctx context.Context, req *pb.ListHookRunsRequest) (*pb.ListHookRunsResponse, error) {
+	hook, err := s.fsStore.GetHook(ctx, req.HookId)
+	if err != nil {
+		return &pb.ListHookRunsResponse{Ok: false, Error: err.Error()}, nil
+	}
+	if hook == nil {
+		return &pb.ListHookRunsResponse{Ok: false, Error: "hook not found"}, nil
+	}
+
+	// Get tasks for this hook
+	tasks, err := s.backend.ListTasksByHook(ctx, hook.Id)
+	if err != nil {
+		return &pb.ListHookRunsResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	runs := make([]*pb.HookRun, 0, len(tasks))
+	for _, t := range tasks {
+		run := &pb.HookRun{
+			TaskId:      t.ExternalId,
+			Status:      string(t.Status),
+			Attempt:     int32(t.Attempt),
+			MaxAttempts: int32(t.MaxAttempts),
+			Error:       t.Error,
+			CreatedAt:   t.CreatedAt.Format(time.RFC3339),
+		}
+		if t.FinishedAt != nil {
+			run.FinishedAt = t.FinishedAt.Format(time.RFC3339)
+		}
+		runs = append(runs, run)
+	}
+	return &pb.ListHookRunsResponse{Ok: true, Runs: runs}, nil
+}
+
 func ptrIfNonZero(v uint) *uint {
 	if v == 0 {
 		return nil

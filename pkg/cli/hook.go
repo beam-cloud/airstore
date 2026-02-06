@@ -285,6 +285,61 @@ func updateHookActive(hookId string, active bool) error {
 	return nil
 }
 
+var hookRunsCmd = &cobra.Command{
+	Use:   "runs <hook_id>",
+	Short: "Show task runs triggered by a hook",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		client, err := getClient()
+		if err != nil {
+			PrintError(err)
+			return nil
+		}
+		defer client.Close()
+
+		resp, err := client.Gateway.ListHookRuns(context.Background(), &pb.ListHookRunsRequest{
+			HookId: args[0],
+		})
+		if err != nil {
+			PrintError(err)
+			return nil
+		}
+		if !resp.Ok {
+			PrintErrorMsg(resp.Error)
+			return nil
+		}
+
+		if PrintJSON(resp.Runs) {
+			return nil
+		}
+
+		if len(resp.Runs) == 0 {
+			PrintInfo("No runs yet")
+			return nil
+		}
+
+		PrintHeader("Hook Runs")
+
+		table := NewTable("TASK", "STATUS", "ATTEMPT", "ERROR", "CREATED", "FINISHED")
+		for _, r := range resp.Runs {
+			attempt := fmt.Sprintf("%d/%d", r.Attempt, r.MaxAttempts)
+			errMsg := r.Error
+			if len(errMsg) > 30 {
+				errMsg = errMsg[:30] + "..."
+			}
+			finished := "-"
+			if r.FinishedAt != "" {
+				finished = FormatRelativeTime(r.FinishedAt)
+			}
+			table.AddRow(r.TaskId, r.Status, attempt, errMsg, FormatRelativeTime(r.CreatedAt), finished)
+		}
+		table.Print()
+		PrintNewline()
+
+		return nil
+	},
+}
+
 func init() {
 	hookCreateCmd.Flags().String("path", "", "Filesystem path to watch (required)")
 	hookCreateCmd.Flags().StringVar(&hookPrompt, "prompt", "", "Task prompt (required)")
@@ -295,4 +350,5 @@ func init() {
 	hookCmd.AddCommand(hookDeleteCmd)
 	hookCmd.AddCommand(hookPauseCmd)
 	hookCmd.AddCommand(hookResumeCmd)
+	hookCmd.AddCommand(hookRunsCmd)
 }

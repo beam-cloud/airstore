@@ -119,6 +119,9 @@ type FilesystemStore interface {
 	// GetHook retrieves a hook by external ID.
 	GetHook(ctx context.Context, externalId string) (*types.Hook, error)
 
+	// GetHookById retrieves a hook by internal ID.
+	GetHookById(ctx context.Context, id uint) (*types.Hook, error)
+
 	// ListHooks returns all hooks for a workspace.
 	ListHooks(ctx context.Context, workspaceId uint) ([]*types.Hook, error)
 

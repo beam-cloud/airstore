@@ -31,10 +31,10 @@ var (
 	networkIPMap  string = "network:mapping"
 
 	// Hook keys
-	hookPrefix   string = "hook"
-	hookStream   string = "hook:events"
-	hookSeen     string = "hook:seen:%d:%s"     // workspaceId, pathHash
-	hookCooldown string = "hook:cooldown:%s"    // hookExternalId
+	hookPrefix        string = "hook"
+	hookStream        string = "hook:events"
+	hookConsumerGroup string = "hook-evaluators"
+	hookSeen          string = "hook:seen:%d:%s" // workspaceId, pathHash
 )
 
 var Keys = &redisKeys{}
@@ -123,10 +123,11 @@ func (rk *redisKeys) HookStream() string {
 	return hookStream
 }
 
+func (rk *redisKeys) HookConsumerGroup() string {
+	return hookConsumerGroup
+}
+
 func (rk *redisKeys) HookSeen(workspaceId uint, pathHash string) string {
 	return fmt.Sprintf(hookSeen, workspaceId, pathHash)
 }
 
-func (rk *redisKeys) HookCooldown(hookExternalId string) string {
-	return fmt.Sprintf(hookCooldown, hookExternalId)
-}

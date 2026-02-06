@@ -936,6 +936,37 @@ func (s *filesystemStore) GetHook(ctx context.Context, externalId string) (*type
 	return h, nil
 }
 
+func (s *filesystemStore) GetHookById(ctx context.Context, id uint) (*types.Hook, error) {
+	if s.isMemoryMode() {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		for _, h := range s.memHooks {
+			if h.Id == id {
+				return h, nil
+			}
+		}
+		return nil, nil
+	}
+
+	h := &types.Hook{}
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, external_id, workspace_id, path, prompt, active,
+		       created_by_member_id, token_id, encrypted_token, created_at, updated_at
+		FROM filesystem_hooks WHERE id = $1
+	`, id).Scan(
+		&h.Id, &h.ExternalId, &h.WorkspaceId, &h.Path, &h.Prompt,
+		&h.Active, &h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
+		&h.CreatedAt, &h.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get hook by id: %w", err)
+	}
+	return h, nil
+}
+
 func (s *filesystemStore) ListHooks(ctx context.Context, workspaceId uint) ([]*types.Hook, error) {
 	if s.isMemoryMode() {
 		s.mu.RLock()

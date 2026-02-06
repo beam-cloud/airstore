@@ -430,6 +430,7 @@ func (s *StorageService) Delete(ctx context.Context, req *pb.ContextDeleteReques
 	s3c.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &bucket, Key: aws.String(key + "/")})
 
 	s.invalidate(bucket, key)
+	s.emitHookEvent(ctx, hooks.EventFsDelete, req.Path)
 	return &pb.ContextDeleteResponse{Ok: true}, nil
 }
 

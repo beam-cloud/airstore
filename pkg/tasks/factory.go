@@ -1,4 +1,4 @@
-package services
+package tasks
 
 import (
 	"context"
@@ -9,25 +9,19 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// TaskFactory encapsulates task creation logic shared between the HTTP API
-// and the HookEvaluator. Both call Create() with the same semantics.
-type TaskFactory struct {
+// Factory creates tasks, saves to Postgres, and pushes to the queue.
+type Factory struct {
 	backend repository.BackendRepository
 	queue   repository.TaskQueue
 	image   string // default sandbox image for Claude Code tasks
 }
 
-// NewTaskFactory creates a factory for building and queuing tasks.
-func NewTaskFactory(backend repository.BackendRepository, queue repository.TaskQueue, defaultImage string) *TaskFactory {
-	return &TaskFactory{
-		backend: backend,
-		queue:   queue,
-		image:   defaultImage,
-	}
+func NewFactory(backend repository.BackendRepository, queue repository.TaskQueue, defaultImage string) *Factory {
+	return &Factory{backend: backend, queue: queue, image: defaultImage}
 }
 
-// TaskParams describes a task to create.
-type TaskParams struct {
+// Params describes a task to create.
+type Params struct {
 	WorkspaceId       uint
 	CreatedByMemberId *uint
 	MemberToken       string
@@ -36,10 +30,13 @@ type TaskParams struct {
 	Entrypoint        []string
 	Env               map[string]string
 	Resources         *types.TaskResources
+	HookId            *uint
+	Attempt           int
+	MaxAttempts       int
 }
 
 // Create builds a task, saves it to Postgres, and pushes it to the queue.
-func (f *TaskFactory) Create(ctx context.Context, p TaskParams) (*types.Task, error) {
+func (f *Factory) Create(ctx context.Context, p Params) (*types.Task, error) {
 	image := p.Image
 	if image == "" && p.Prompt != "" {
 		image = f.image
@@ -67,6 +64,9 @@ func (f *TaskFactory) Create(ctx context.Context, p TaskParams) (*types.Task, er
 		Entrypoint:        entrypoint,
 		Env:               env,
 		Resources:         p.Resources,
+		HookId:            p.HookId,
+		Attempt:           p.Attempt,
+		MaxAttempts:       p.MaxAttempts,
 	}
 
 	if err := f.backend.CreateTask(ctx, task); err != nil {
@@ -75,20 +75,27 @@ func (f *TaskFactory) Create(ctx context.Context, p TaskParams) (*types.Task, er
 
 	if f.queue != nil {
 		if err := f.queue.Push(ctx, task); err != nil {
-			log.Warn().Err(err).Str("task", task.ExternalId).Msg("task factory: failed to push to queue")
+			log.Warn().Err(err).Str("task", task.ExternalId).Msg("task factory: queue push failed")
 		}
 	}
 
 	return task, nil
 }
 
-// CreateTask implements hooks.TaskCreator for the HookEvaluator.
-func (f *TaskFactory) CreateTask(ctx context.Context, workspaceId uint, createdByMemberId *uint, memberToken, prompt string) error {
-	_, err := f.Create(ctx, TaskParams{
+// CreateTask implements hooks.TaskCreator.
+func (f *Factory) CreateTask(ctx context.Context, workspaceId uint, createdByMemberId *uint, memberToken, prompt string, hookId uint, attempt, maxAttempts int) error {
+	var hid *uint
+	if hookId > 0 {
+		hid = &hookId
+	}
+	_, err := f.Create(ctx, Params{
 		WorkspaceId:       workspaceId,
 		CreatedByMemberId: createdByMemberId,
 		MemberToken:       memberToken,
 		Prompt:            prompt,
+		HookId:            hid,
+		Attempt:           attempt,
+		MaxAttempts:       maxAttempts,
 	})
 	return err
 }

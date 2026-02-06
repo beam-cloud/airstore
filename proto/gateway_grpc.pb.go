@@ -42,6 +42,7 @@ const (
 	GatewayService_GetHook_FullMethodName           = "/gateway.GatewayService/GetHook"
 	GatewayService_UpdateHook_FullMethodName        = "/gateway.GatewayService/UpdateHook"
 	GatewayService_DeleteHook_FullMethodName        = "/gateway.GatewayService/DeleteHook"
+	GatewayService_ListHookRuns_FullMethodName      = "/gateway.GatewayService/ListHookRuns"
 )
 
 // GatewayServiceClient is the client API for GatewayService service.
@@ -78,6 +79,7 @@ type GatewayServiceClient interface {
 	GetHook(ctx context.Context, in *GetHookRequest, opts ...grpc.CallOption) (*HookResponse, error)
 	UpdateHook(ctx context.Context, in *UpdateHookRequest, opts ...grpc.CallOption) (*HookResponse, error)
 	DeleteHook(ctx context.Context, in *DeleteHookRequest, opts ...grpc.CallOption) (*DeleteResponse, error)
+	ListHookRuns(ctx context.Context, in *ListHookRunsRequest, opts ...grpc.CallOption) (*ListHookRunsResponse, error)
 }
 
 type gatewayServiceClient struct {
@@ -295,6 +297,15 @@ func (c *gatewayServiceClient) DeleteHook(ctx context.Context, in *DeleteHookReq
 	return out, nil
 }
 
+func (c *gatewayServiceClient) ListHookRuns(ctx context.Context, in *ListHookRunsRequest, opts ...grpc.CallOption) (*ListHookRunsResponse, error) {
+	out := new(ListHookRunsResponse)
+	err := c.cc.Invoke(ctx, GatewayService_ListHookRuns_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // GatewayServiceServer is the server API for GatewayService service.
 // All implementations must embed UnimplementedGatewayServiceServer
 // for forward compatibility
@@ -329,6 +340,7 @@ type GatewayServiceServer interface {
 	GetHook(context.Context, *GetHookRequest) (*HookResponse, error)
 	UpdateHook(context.Context, *UpdateHookRequest) (*HookResponse, error)
 	DeleteHook(context.Context, *DeleteHookRequest) (*DeleteResponse, error)
+	ListHookRuns(context.Context, *ListHookRunsRequest) (*ListHookRunsResponse, error)
 	mustEmbedUnimplementedGatewayServiceServer()
 }
 
@@ -404,6 +416,9 @@ func (UnimplementedGatewayServiceServer) UpdateHook(context.Context, *UpdateHook
 }
 func (UnimplementedGatewayServiceServer) DeleteHook(context.Context, *DeleteHookRequest) (*DeleteResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method DeleteHook not implemented")
+}
+func (UnimplementedGatewayServiceServer) ListHookRuns(context.Context, *ListHookRunsRequest) (*ListHookRunsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListHookRuns not implemented")
 }
 func (UnimplementedGatewayServiceServer) mustEmbedUnimplementedGatewayServiceServer() {}
 
@@ -832,6 +847,24 @@ func _GatewayService_DeleteHook_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _GatewayService_ListHookRuns_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListHookRunsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServiceServer).ListHookRuns(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GatewayService_ListHookRuns_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServiceServer).ListHookRuns(ctx, req.(*ListHookRunsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // GatewayService_ServiceDesc is the grpc.ServiceDesc for GatewayService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -930,6 +963,10 @@ var GatewayService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteHook",
 			Handler:    _GatewayService_DeleteHook_Handler,
+		},
+		{
+			MethodName: "ListHookRuns",
+			Handler:    _GatewayService_ListHookRuns_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

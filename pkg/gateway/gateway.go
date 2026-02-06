@@ -25,6 +25,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/gateway/services"
 	"github.com/beam-cloud/airstore/pkg/hooks"
 	"github.com/beam-cloud/airstore/pkg/oauth"
+	"github.com/beam-cloud/airstore/pkg/tasks"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/scheduler"
 	"github.com/beam-cloud/airstore/pkg/sources"
@@ -289,7 +290,7 @@ func (g *Gateway) registerServices() error {
 		stream := common.NewEventStream(
 			g.RedisClient,
 			common.Keys.HookStream(),
-			"hook-evaluators",
+			common.Keys.HookConsumerGroup(),
 			consumer,
 		)
 		hookEmitter = stream
@@ -377,7 +378,7 @@ func (g *Gateway) registerServices() error {
 		taskQueue := repository.NewRedisTaskQueue(g.RedisClient, "default")
 
 		// Task factory (shared between HTTP API and hook evaluator)
-		taskFactory := services.NewTaskFactory(g.BackendRepo, taskQueue, g.Config.Sandbox.GetDefaultImage())
+		taskFactory := tasks.NewFactory(g.BackendRepo, taskQueue, g.Config.Sandbox.GetDefaultImage())
 
 		// Workspace CRUD endpoints (cluster admin only)
 		workspacesAdminGroup := g.baseRouteGroup.Group("/workspaces")
@@ -426,30 +427,27 @@ func (g *Gateway) registerServices() error {
 		// Tasks API
 		apiv1.NewTasksGroup(g.baseRouteGroup.Group("/tasks"), g.BackendRepo, taskQueue, g.s2Client, g.Config.Sandbox.GetDefaultImage())
 
-		// Hook evaluator
-		evaluator := hooks.NewEvaluator(filesystemStore, taskFactory, g.RedisClient)
+		// Hook engine: matches events → hooks → tasks, polls for retries
+		engine := hooks.NewEngine(filesystemStore, taskFactory, g.BackendRepo)
+		go engine.Start(g.ctx)
 
 		if hookStreamConsumer != nil {
-			// Redis mode: consume from stream (exactly-once across replicas)
-			go hookStreamConsumer.Consume(g.ctx, evaluator.Handle)
-			log.Info().Msg("hook evaluator started (redis stream)")
-
-			// Cross-replica hook cache invalidation via EventBus
+			go hookStreamConsumer.Consume(g.ctx, engine.Handle)
+			log.Info().Msg("hook engine started (redis stream)")
 			if g.eventBus != nil {
 				g.eventBus.On(common.EventCacheInvalidate, func(e common.Event) {
 					if scope, _ := e.Data["scope"].(string); scope == "hooks" {
 						if wsId := hooks.ParseUint(e.Data["workspace_id"]); wsId > 0 {
-							evaluator.InvalidateCache(wsId)
+							engine.InvalidateCache(wsId)
 						}
 					}
 				})
 			}
 		} else if local, ok := hookEmitter.(*common.LocalEventEmitter); ok {
-			// Local mode: wire handler directly
-			local.SetHandler(evaluator.Handle)
-			log.Info().Msg("hook evaluator started (local)")
+			local.SetHandler(engine.Handle)
+			log.Info().Msg("hook engine started (local)")
 		} else {
-			log.Warn().Msg("hook evaluator not started: no event emitter available")
+			log.Warn().Msg("hook engine not started: no event emitter")
 		}
 
 		// OAuth API for workspace integrations (gmail, gdrive, github, notion, slack)
