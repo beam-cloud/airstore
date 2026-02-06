@@ -47,18 +47,20 @@ Click **New Smart Folder** and describe what you want in natural language:
 - "Invoices I received in email last week"
 - "High priority issues in the current sprint"
 
-### 4. Install the CLI
+### 4. Install the CLI and Login
 
 ```bash
-curl -sSL https://airstore.dev/install.sh | sh
+curl -sSL https://airstore.ai/install.sh | sh
+```
+
+```
+airstore login
 ```
 
 ### 5. Mount the filesystem
 
-Create a token in **Settings → Tokens**, then mount:
-
 ```bash
-airstore mount ~/airstore --token YOUR_TOKEN_HERE
+airstore mount ~/airstore 
 ```
 
 Your smart folders are now available as local directories:
