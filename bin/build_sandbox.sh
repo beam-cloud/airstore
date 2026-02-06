@@ -14,13 +14,12 @@ echo "==> Authenticating with AWS ECR Public..."
 aws ecr-public get-login-password --region us-east-1 | \
     docker login --username AWS --password-stdin public.ecr.aws/n4e0e1y0
 
-echo "==> Building sandbox image..."
-docker build -t airstore-default-sandbox:${TAG} -f docker/Dockerfile.sandbox .
+echo "==> Building and pushing multi-arch sandbox image (amd64 + arm64)..."
+docker buildx build \
+    --platform linux/amd64,linux/arm64 \
+    -t ${REPO}:${TAG} \
+    -f docker/Dockerfile.sandbox \
+    --push \
+    .
 
-echo "==> Tagging image..."
-docker tag airstore-default-sandbox:${TAG} ${REPO}:${TAG}
-
-echo "==> Pushing to ${REPO}:${TAG}..."
-docker push ${REPO}:${TAG}
-
-echo "==> Done! Image pushed to ${REPO}:${TAG}"
+echo "==> Done! Image pushed to ${REPO}:${TAG} (amd64 + arm64)"

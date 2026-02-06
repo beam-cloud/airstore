@@ -62,6 +62,7 @@ func (p *SourcePoller) Poll(ctx context.Context) {
 	}
 
 	if len(queries) == 0 {
+		log.Debug().Msg("source poller: no stale watched queries")
 		return
 	}
 
