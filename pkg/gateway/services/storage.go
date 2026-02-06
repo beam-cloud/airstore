@@ -73,10 +73,14 @@ func (s *StorageService) emitHookEvent(ctx context.Context, eventType string, pa
 	if s.hookStream == nil {
 		return
 	}
+
 	wsId := auth.WorkspaceId(ctx)
 	if wsId == 0 {
 		return
 	}
+
+	path = hooks.NormalizePath(path)
+
 	log.Debug().Str("event", eventType).Str("path", path).Uint("workspace", wsId).Msg("hook event emitted")
 	s.hookStream.Emit(ctx, map[string]any{
 		"event":            eventType,
@@ -91,6 +95,7 @@ func (s *StorageService) bucket(ctx context.Context) (string, error) {
 	if rc == nil {
 		return "", fmt.Errorf("no auth context")
 	}
+
 	wsExt := auth.WorkspaceExtId(ctx)
 	if wsExt == "" {
 		if rc.IsClusterAdmin() {
@@ -98,6 +103,7 @@ func (s *StorageService) bucket(ctx context.Context) (string, error) {
 		}
 		return "", fmt.Errorf("no workspace")
 	}
+
 	return s.client.WorkspaceBucketName(wsExt), nil
 }
 
@@ -327,7 +333,10 @@ func (s *StorageService) Create(ctx context.Context, req *pb.ContextCreateReques
 	}
 
 	s.invalidate(bucket, key)
-	s.emitHookEvent(ctx, hooks.EventFsCreate, req.Path)
+
+	// Don't emit fs.create here -- this creates an empty file.
+	// Content arrives via Write() which emits fs.write (debounced).
+	// on_create hooks fire on debounced writes, not empty creates.
 	return &pb.ContextCreateResponse{Ok: true}, nil
 }
 
@@ -748,8 +757,12 @@ func fileInfo(resp *s3.HeadObjectOutput) *pb.FileInfo {
 	}
 }
 
-func statOk(info *pb.FileInfo) *pb.ContextStatResponse  { return &pb.ContextStatResponse{Ok: true, Info: info} }
-func statErr(err error) *pb.ContextStatResponse         { return &pb.ContextStatResponse{Ok: false, Error: err.Error()} }
+func statOk(info *pb.FileInfo) *pb.ContextStatResponse {
+	return &pb.ContextStatResponse{Ok: true, Info: info}
+}
+func statErr(err error) *pb.ContextStatResponse {
+	return &pb.ContextStatResponse{Ok: false, Error: err.Error()}
+}
 
 // isHiddenFile returns true for files that should be hidden from listings
 func isHiddenFile(name string) bool {

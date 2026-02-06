@@ -266,17 +266,15 @@ message Hook {
   string workspace_id = 2;
   string path = 3;
   string prompt = 4;
-  string trigger = 5;   // on_create, on_write, on_change, on_schedule
-  bool active = 6;
-  string created_at = 7;
-  string updated_at = 8;
+  bool active = 5;
+  string created_at = 6;
+  string updated_at = 7;
 }
 
 message CreateHookRequest {
   string workspace_id = 1;
   string path = 2;
   string prompt = 3;
-  string trigger = 4;  // on_create, on_write, on_change
 }
 
 message ListHooksRequest {
@@ -290,9 +288,8 @@ message GetHookRequest {
 message UpdateHookRequest {
   string id = 1;
   string prompt = 2;
-  string trigger = 3;
-  bool active = 4;
-  bool has_active = 5;
+  bool active = 3;
+  bool has_active = 4;
 }
 
 message DeleteHookRequest {

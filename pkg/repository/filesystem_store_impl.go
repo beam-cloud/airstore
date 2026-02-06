@@ -880,9 +880,6 @@ func (s *filesystemStore) CreateHook(ctx context.Context, hook *types.Hook) (*ty
 	hook.ExternalId = uuid.New().String()
 	hook.CreatedAt = time.Now()
 	hook.UpdatedAt = time.Now()
-	if hook.Trigger == "" {
-		hook.Trigger = types.HookTriggerOnCreate
-	}
 
 	if s.isMemoryMode() {
 		s.mu.Lock()
@@ -893,13 +890,16 @@ func (s *filesystemStore) CreateHook(ctx context.Context, hook *types.Hook) (*ty
 	}
 
 	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO filesystem_hooks (external_id, workspace_id, path, prompt, trigger, schedule, active, created_by_member_id, token_id, encrypted_token, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		INSERT INTO filesystem_hooks (external_id, workspace_id, path, prompt, active, created_by_member_id, token_id, encrypted_token, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		RETURNING id
-	`, hook.ExternalId, hook.WorkspaceId, hook.Path, hook.Prompt, hook.Trigger,
-		hook.Schedule, hook.Active, hook.CreatedByMemberId, hook.TokenId, hook.EncryptedToken,
+	`, hook.ExternalId, hook.WorkspaceId, hook.Path, hook.Prompt,
+		hook.Active, hook.CreatedByMemberId, hook.TokenId, hook.EncryptedToken,
 		hook.CreatedAt, hook.UpdatedAt).Scan(&hook.Id)
 	if err != nil {
+		if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
+			return nil, fmt.Errorf("a hook already exists on %s", hook.Path)
+		}
 		return nil, fmt.Errorf("create hook: %w", err)
 	}
 
@@ -919,12 +919,12 @@ func (s *filesystemStore) GetHook(ctx context.Context, externalId string) (*type
 
 	h := &types.Hook{}
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, external_id, workspace_id, path, prompt, trigger, schedule, active,
+		SELECT id, external_id, workspace_id, path, prompt, active,
 		       created_by_member_id, token_id, encrypted_token, created_at, updated_at
 		FROM filesystem_hooks WHERE external_id = $1
 	`, externalId).Scan(
-		&h.Id, &h.ExternalId, &h.WorkspaceId, &h.Path, &h.Prompt, &h.Trigger,
-		&h.Schedule, &h.Active, &h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
+		&h.Id, &h.ExternalId, &h.WorkspaceId, &h.Path, &h.Prompt,
+		&h.Active, &h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
 		&h.CreatedAt, &h.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -953,7 +953,7 @@ func (s *filesystemStore) ListHooks(ctx context.Context, workspaceId uint) ([]*t
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, external_id, workspace_id, path, prompt, trigger, schedule, active,
+		SELECT id, external_id, workspace_id, path, prompt, active,
 		       created_by_member_id, token_id, encrypted_token, created_at, updated_at
 		FROM filesystem_hooks WHERE workspace_id = $1
 		ORDER BY created_at
@@ -967,8 +967,8 @@ func (s *filesystemStore) ListHooks(ctx context.Context, workspaceId uint) ([]*t
 	for rows.Next() {
 		h := &types.Hook{}
 		err := rows.Scan(
-			&h.Id, &h.ExternalId, &h.WorkspaceId, &h.Path, &h.Prompt, &h.Trigger,
-			&h.Schedule, &h.Active, &h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
+			&h.Id, &h.ExternalId, &h.WorkspaceId, &h.Path, &h.Prompt,
+			&h.Active, &h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
 			&h.CreatedAt, &h.UpdatedAt,
 		)
 		if err != nil {
@@ -987,8 +987,6 @@ func (s *filesystemStore) UpdateHook(ctx context.Context, hook *types.Hook) erro
 		defer s.mu.Unlock()
 		if existing, ok := s.memHooks[hook.ExternalId]; ok {
 			existing.Prompt = hook.Prompt
-			existing.Trigger = hook.Trigger
-			existing.Schedule = hook.Schedule
 			existing.Active = hook.Active
 			existing.UpdatedAt = hook.UpdatedAt
 		}
@@ -997,9 +995,9 @@ func (s *filesystemStore) UpdateHook(ctx context.Context, hook *types.Hook) erro
 
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE filesystem_hooks SET
-			prompt = $1, trigger = $2, schedule = $3, active = $4, updated_at = $5
-		WHERE external_id = $6
-	`, hook.Prompt, hook.Trigger, hook.Schedule, hook.Active, hook.UpdatedAt, hook.ExternalId)
+			prompt = $1, active = $2, updated_at = $3
+		WHERE external_id = $4
+	`, hook.Prompt, hook.Active, hook.UpdatedAt, hook.ExternalId)
 	if err != nil {
 		return fmt.Errorf("update hook: %w", err)
 	}

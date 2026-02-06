@@ -532,21 +532,15 @@ func (s *GatewayService) CreateHook(ctx context.Context, req *pb.CreateHookReque
 	if rawToken == "" {
 		return &pb.HookResponse{Ok: false, Error: "authentication token required"}, nil
 	}
-	encryptedToken, err := hooks.EncryptToken(rawToken)
+	encryptedToken, err := hooks.EncodeToken(rawToken)
 	if err != nil {
 		return &pb.HookResponse{Ok: false, Error: "failed to store token"}, nil
 	}
 
-	trigger := types.HookTrigger(req.Trigger)
-	if trigger == "" {
-		trigger = types.HookTriggerOnCreate
-	}
-
 	hook := &types.Hook{
 		WorkspaceId:       ws.Id,
-		Path:              req.Path,
+		Path:              hooks.NormalizePath(req.Path),
 		Prompt:            req.Prompt,
-		Trigger:           trigger,
 		Active:            true,
 		CreatedByMemberId: ptrIfNonZero(auth.MemberId(ctx)),
 		TokenId:           ptrIfNonZero(auth.TokenId(ctx)),
@@ -596,9 +590,6 @@ func (s *GatewayService) UpdateHook(ctx context.Context, req *pb.UpdateHookReque
 
 	if req.Prompt != "" {
 		hook.Prompt = req.Prompt
-	}
-	if req.Trigger != "" {
-		hook.Trigger = types.HookTrigger(req.Trigger)
 	}
 	if req.HasActive {
 		hook.Active = req.Active
@@ -691,7 +682,6 @@ func hookToPb(h *types.Hook, workspaceExternalId string) *pb.Hook {
 		WorkspaceId: workspaceExternalId,
 		Path:        h.Path,
 		Prompt:      h.Prompt,
-		Trigger:     string(h.Trigger),
 		Active:      h.Active,
 		CreatedAt:   h.CreatedAt.Format(time.RFC3339),
 		UpdatedAt:   h.UpdatedAt.Format(time.RFC3339),

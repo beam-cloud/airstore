@@ -33,15 +33,13 @@ func NewHooksGroup(g *echo.Group, backend repository.BackendRepository, fsStore 
 }
 
 type CreateHookRequest struct {
-	Path    string            `json:"path"`
-	Prompt  string            `json:"prompt"`
-	Trigger types.HookTrigger `json:"trigger"`
+	Path   string `json:"path"`
+	Prompt string `json:"prompt"`
 }
 
 type UpdateHookRequest struct {
-	Prompt  *string            `json:"prompt,omitempty"`
-	Trigger *types.HookTrigger `json:"trigger,omitempty"`
-	Active  *bool              `json:"active,omitempty"`
+	Prompt *string `json:"prompt,omitempty"`
+	Active *bool   `json:"active,omitempty"`
 }
 
 type HookResponse struct {
@@ -49,7 +47,6 @@ type HookResponse struct {
 	WorkspaceID string `json:"workspace_id"`
 	Path        string `json:"path"`
 	Prompt      string `json:"prompt"`
-	Trigger     string `json:"trigger"`
 	Active      bool   `json:"active"`
 	CreatedAt   string `json:"created_at"`
 	UpdatedAt   string `json:"updated_at"`
@@ -66,9 +63,6 @@ func (hg *HooksGroup) Create(c echo.Context) error {
 	}
 	if req.Path == "" {
 		return ErrorResponse(c, http.StatusBadRequest, "path required")
-	}
-	if req.Trigger == "" {
-		req.Trigger = types.HookTriggerOnCreate
 	}
 
 	ws, err := hg.backend.GetWorkspaceByExternalId(ctx, workspaceId)
@@ -88,7 +82,7 @@ func (hg *HooksGroup) Create(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, "authentication token required")
 	}
 
-	encryptedToken, err := hooks.EncryptToken(rawToken)
+	encryptedToken, err := hooks.EncodeToken(rawToken)
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, "failed to store token")
 	}
@@ -100,9 +94,8 @@ func (hg *HooksGroup) Create(c echo.Context) error {
 
 	hook := &types.Hook{
 		WorkspaceId:       ws.Id,
-		Path:              req.Path,
+		Path:              hooks.NormalizePath(req.Path),
 		Prompt:            req.Prompt,
-		Trigger:           req.Trigger,
 		Active:            true,
 		CreatedByMemberId: createdByMemberId,
 		TokenId:           tokenId,
@@ -112,7 +105,7 @@ func (hg *HooksGroup) Create(c echo.Context) error {
 	created, err := hg.fsStore.CreateHook(ctx, hook)
 	if err != nil {
 		if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
-			return ErrorResponse(c, http.StatusConflict, "hook already exists for this path and trigger")
+			return ErrorResponse(c, http.StatusConflict, "hook already exists for this path")
 		}
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
@@ -169,7 +162,7 @@ func (hg *HooksGroup) Get(c echo.Context) error {
 	return SuccessResponse(c, hookToResponse(hook, wsExt))
 }
 
-// Update modifies a hook's prompt, trigger, or active status.
+// Update modifies a hook's prompt or active status.
 func (hg *HooksGroup) Update(c echo.Context) error {
 	ctx := c.Request().Context()
 	hookId := c.Param("id")
@@ -189,9 +182,6 @@ func (hg *HooksGroup) Update(c echo.Context) error {
 
 	if req.Prompt != nil {
 		hook.Prompt = *req.Prompt
-	}
-	if req.Trigger != nil {
-		hook.Trigger = *req.Trigger
 	}
 	if req.Active != nil {
 		hook.Active = *req.Active
@@ -253,7 +243,6 @@ func hookToResponse(h *types.Hook, workspaceExternalId string) HookResponse {
 		WorkspaceID: workspaceExternalId,
 		Path:        h.Path,
 		Prompt:      h.Prompt,
-		Trigger:     string(h.Trigger),
 		Active:      h.Active,
 		CreatedAt:   h.CreatedAt.Format(time.RFC3339),
 		UpdatedAt:   h.UpdatedAt.Format(time.RFC3339),
