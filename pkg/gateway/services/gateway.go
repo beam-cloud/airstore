@@ -18,18 +18,20 @@ import (
 
 type GatewayService struct {
 	pb.UnimplementedGatewayServiceServer
-	backend  repository.BackendRepository
-	fsStore  repository.FilesystemStore
-	s2Client *common.S2Client
-	hooksSvc *hooks.Service
+	backend        repository.BackendRepository
+	fsStore        repository.FilesystemStore
+	s2Client       *common.S2Client
+	hooksSvc       *hooks.Service
+	sourceRegistry *sources.Registry
 }
 
-func NewGatewayService(backend repository.BackendRepository, s2Client *common.S2Client, fsStore repository.FilesystemStore, eventBus *common.EventBus) *GatewayService {
+func NewGatewayService(backend repository.BackendRepository, s2Client *common.S2Client, fsStore repository.FilesystemStore, eventBus *common.EventBus, sourceRegistry *sources.Registry) *GatewayService {
 	return &GatewayService{
-		backend:  backend,
-		s2Client: s2Client,
-		fsStore:  fsStore,
-		hooksSvc: &hooks.Service{Store: fsStore, Backend: backend, EventBus: eventBus},
+		backend:        backend,
+		s2Client:       s2Client,
+		fsStore:        fsStore,
+		hooksSvc:       &hooks.Service{Store: fsStore, Backend: backend, EventBus: eventBus},
+		sourceRegistry: sourceRegistry,
 	}
 }
 
