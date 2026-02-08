@@ -50,7 +50,7 @@ Click **New Smart Folder** and describe what you want in natural language:
 ### 4. Install the CLI and Login
 
 ```bash
-curl -sSL https://airstore.ai/install.sh | sh
+curl -fsSL https://get.airstore.ai | sh
 ```
 
 ```
@@ -131,7 +131,7 @@ Tools output JSON and can be piped together with standard Unix tools:
 The install script handles everything:
 
 ```bash
-curl -sSL https://airstore.ai/install.sh | sh
+curl -fsSL https://get.airstore.ai | sh
 ```
 
 This automatically:
