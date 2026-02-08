@@ -131,7 +131,7 @@ Tools output JSON and can be piped together with standard Unix tools:
 The install script handles everything:
 
 ```bash
-curl -sSL https://airstore.dev/install.sh | sh
+curl -sSL https://airstore.ai/install.sh | sh
 ```
 
 This automatically:
