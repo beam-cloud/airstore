@@ -81,6 +81,7 @@ func (g *FilesystemGroup) registerRoutes() {
 	g.routerGroup.POST("/upload-complete", g.NotifyUploadComplete)
 	g.routerGroup.DELETE("/delete", g.DeletePath)
 	g.routerGroup.POST("/mkdir", g.Mkdir)
+	g.routerGroup.POST("/rename", g.RenamePath)
 
 	// Tool settings endpoints
 	g.routerGroup.GET("/tools", g.ListToolSettings)
@@ -112,6 +113,11 @@ func (g *FilesystemGroup) List(c echo.Context) error {
 
 	// Root directory - return virtual root folders
 	if path == "" || path == "/" {
+		// If refresh requested, invalidate root cache first
+		if refresh && g.storageService != nil {
+			g.storageService.InvalidateCache(ctx, "/")
+			g.storageService.InvalidateCache(ctx, "")
+		}
 		entries := g.listRootDirectories(ctx)
 		return SuccessResponse(c, types.VirtualFileListResponse{
 			Path:    "/",
@@ -125,16 +131,16 @@ func (g *FilesystemGroup) List(c echo.Context) error {
 	// Virtual folders have their own handlers
 	if types.IsVirtualFolder(rootDir) {
 		switch rootDir {
-		case "sources":
+		case types.DirNameSources:
 			return g.listSources(c, ctx, relPath, refresh)
-		case "tools":
+		case types.DirNameTools:
 			return g.listTools(c, ctx, showHidden)
-		case "tasks":
+		case types.DirNameTasks:
 			return g.listTasks(c, ctx, relPath)
 		}
 	}
 
-	// All other paths (skills, user-created folders) go to storage service
+	// All other paths (Skills, Memory, user-created folders) go to storage service
 	return g.listStorage(c, ctx, path, refresh)
 }
 
@@ -154,16 +160,16 @@ func (g *FilesystemGroup) Stat(c echo.Context) error {
 	// Virtual folders have their own handlers
 	if types.IsVirtualFolder(rootDir) {
 		switch rootDir {
-		case "sources":
+		case types.DirNameSources:
 			return g.statSources(c, ctx, path, relPath)
-		case "tools":
+		case types.DirNameTools:
 			return g.statTools(c, ctx, path, relPath, showHidden)
-		case "tasks":
+		case types.DirNameTasks:
 			return g.statTasks(c, ctx, path, relPath)
 		}
 	}
 
-	// All other paths (skills, user-created folders) go to storage service
+	// All other paths (Skills, Memory, user-created folders) go to storage service
 	return g.statStorage(c, ctx, path)
 }
 
@@ -185,16 +191,16 @@ func (g *FilesystemGroup) Read(c echo.Context) error {
 	// Virtual folders have their own handlers
 	if types.IsVirtualFolder(rootDir) {
 		switch rootDir {
-		case "sources":
+		case types.DirNameSources:
 			return g.readSources(c, ctx, relPath, offset, length)
-		case "tools":
+		case types.DirNameTools:
 			return ErrorResponse(c, http.StatusBadRequest, "tools are not readable as files")
-		case "tasks":
+		case types.DirNameTasks:
 			return g.readTasks(c, ctx, relPath, offset, length)
 		}
 	}
 
-	// All other paths (skills, user-created folders) go to storage service
+	// All other paths (Skills, Memory, user-created folders) go to storage service
 	return g.readStorage(c, ctx, path, offset, length)
 }
 
@@ -214,20 +220,20 @@ func (g *FilesystemGroup) Tree(c echo.Context) error {
 	// Virtual folders have their own handlers
 	if types.IsVirtualFolder(rootDir) {
 		switch rootDir {
-		case "sources":
+		case types.DirNameSources:
 			// Sources don't support tree listing - return empty
 			return SuccessResponse(c, types.VirtualFileTreeResponse{
 				Path:    path,
 				Entries: []types.VirtualFile{},
 			})
-		case "tools":
+		case types.DirNameTools:
 			// Tools are flat - return same as list
 			entries := g.buildToolEntries(ctx, showHidden)
 			return SuccessResponse(c, types.VirtualFileTreeResponse{
 				Path:    path,
 				Entries: entries,
 			})
-		case "tasks":
+		case types.DirNameTasks:
 			// Tasks are virtual - return empty for now (will be implemented with task service)
 			return SuccessResponse(c, types.VirtualFileTreeResponse{
 				Path:    path,
@@ -236,7 +242,7 @@ func (g *FilesystemGroup) Tree(c echo.Context) error {
 		}
 	}
 
-	// All other paths (skills, user-created folders) go to storage service
+	// All other paths (Skills, Memory, user-created folders) go to storage service
 	return g.treeStorage(c, ctx, path, int32(maxKeys), continuationToken)
 }
 
@@ -629,6 +635,100 @@ func (g *FilesystemGroup) Mkdir(c echo.Context) error {
 	})
 }
 
+// RenameRequest represents a request to rename or move a file/directory
+type RenameRequest struct {
+	OldPath string `json:"old_path"`
+	NewPath string `json:"new_path"`
+}
+
+// RenamePath renames or moves a file or directory
+func (g *FilesystemGroup) RenamePath(c echo.Context) error {
+	ctx := c.Request().Context()
+	logRequest(c, "rename_path")
+
+	if g.storageService == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "storage unavailable")
+	}
+
+	// Require write access
+	if !auth.CanWrite(ctx) {
+		return ErrorResponse(c, http.StatusForbidden, "insufficient permissions")
+	}
+
+	var req RenameRequest
+	if err := c.Bind(&req); err != nil {
+		log.Error().Err(err).Msg("rename: failed to bind request body")
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
+	}
+
+	if req.OldPath == "" || req.NewPath == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "old_path and new_path are required")
+	}
+
+	oldPath := cleanPath(req.OldPath)
+	newPath := cleanPath(req.NewPath)
+
+	if oldPath == newPath {
+		return SuccessResponse(c, map[string]interface{}{
+			"renamed":  true,
+			"old_path": oldPath,
+			"new_path": newPath,
+		})
+	}
+
+	// Check that source path is not in a virtual (non-storage) folder
+	oldRoot, _ := splitRootPath(oldPath)
+	if types.IsVirtualFolder(oldRoot) {
+		return ErrorResponse(c, http.StatusForbidden, "cannot rename items in virtual folders")
+	}
+
+	// Don't allow renaming reserved root folders themselves (Skills, Sources, etc.)
+	if !strings.Contains(oldPath, "/") && types.IsReservedFolder(oldPath) {
+		return ErrorResponse(c, http.StatusForbidden, "cannot rename reserved folders")
+	}
+
+	// Check that destination is not in a virtual folder
+	newRoot, _ := splitRootPath(newPath)
+	if types.IsVirtualFolder(newRoot) {
+		return ErrorResponse(c, http.StatusForbidden, "cannot move items to virtual folders")
+	}
+
+	// Use storage service to rename
+	resp, err := g.storageService.Rename(ctx, &pb.ContextRenameRequest{
+		OldPath: oldPath,
+		NewPath: newPath,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("old_path", oldPath).Str("new_path", newPath).Msg("failed to rename path")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to rename")
+	}
+	if !resp.Ok {
+		log.Error().Str("old_path", oldPath).Str("new_path", newPath).Str("error", resp.Error).Msg("rename returned error")
+		return ErrorResponse(c, http.StatusInternalServerError, resp.Error)
+	}
+
+	// Invalidate caches for old path, new path, and their parent directories
+	g.storageService.InvalidateCache(ctx, oldPath)
+	g.storageService.InvalidateCache(ctx, newPath)
+	// Invalidate parent directories
+	if idx := strings.LastIndex(oldPath, "/"); idx > 0 {
+		g.storageService.InvalidateCache(ctx, oldPath[:idx])
+	}
+	if idx := strings.LastIndex(newPath, "/"); idx > 0 {
+		g.storageService.InvalidateCache(ctx, newPath[:idx])
+	}
+	// Always invalidate root for top-level renames
+	g.storageService.InvalidateCache(ctx, "/")
+	g.storageService.InvalidateCache(ctx, "")
+
+	log.Info().Str("old_path", oldPath).Str("new_path", newPath).Msg("file/folder renamed")
+	return SuccessResponse(c, map[string]interface{}{
+		"renamed":  true,
+		"old_path": oldPath,
+		"new_path": newPath,
+	})
+}
+
 // ============================================================================
 // Root Directory
 // ============================================================================
@@ -639,6 +739,7 @@ func (g *FilesystemGroup) listRootDirectories(ctx context.Context) []types.Virtu
 		*types.NewRootFolder(types.DirNameSources, types.PathSources),
 		*types.NewRootFolder(types.DirNameTools, types.PathTools),
 		*types.NewRootFolder(types.DirNameTasks, types.PathTasks),
+		*types.NewRootFolder(types.DirNameMemory, types.PathMemory),
 	}
 
 	if g.toolRegistry != nil {

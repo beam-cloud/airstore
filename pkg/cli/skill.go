@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/beam-cloud/airstore/pkg/skills"
+	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/spf13/cobra"
 )
@@ -526,9 +527,9 @@ var skillListCmd = &cobra.Command{
 
 		ctx := context.Background()
 
-		// List /skills/ directory via context service
+		// List /Skills/ directory via context service
 		listResp, err := client.Context.ReadDir(ctx, &pb.ContextReadDirRequest{
-			Path: "/skills",
+			Path: types.PathSkills,
 		})
 		if err != nil {
 			PrintError(err)

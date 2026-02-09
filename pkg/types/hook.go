@@ -3,8 +3,8 @@ package types
 import "time"
 
 // Hook is metadata on a filesystem path that creates tasks when something
-// changes at that path. A hook on "/skills" fires when files are created
-// or modified there. A hook on "/sources/gmail/inbox" fires when new
+// changes at that path. A hook on "/Skills" fires when files are created
+// or modified there. A hook on "/Sources/gmail/inbox" fires when new
 // query results appear. The event type (create, modify, source change)
 // is passed as context in the task prompt -- not as a filter.
 type Hook struct {

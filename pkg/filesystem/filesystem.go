@@ -444,7 +444,7 @@ func (f *Filesystem) readdirRoot() []DirEntry {
 	seen := make(map[string]bool)
 	entries := make([]DirEntry, 0)
 
-	// Add virtual node root directories (e.g., "tools", "sources", "skills", "tasks")
+	// Add virtual node root directories (e.g., "Tools", "Sources", "Skills", "Tasks", "Memory")
 	for _, vn := range f.vnodes.List() {
 		prefix := vn.Prefix()
 		name := strings.TrimPrefix(prefix, "/")
