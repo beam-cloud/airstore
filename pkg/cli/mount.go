@@ -145,7 +145,6 @@ func runMount(cmd *cobra.Command, args []string) error {
 		fs.RegisterVNode(vnode.NewToolsVNode(effectiveGateway, authToken, shim))
 		fs.RegisterVNode(vnode.NewSourcesVNode(conn, authToken))
 		fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, authToken))  // /skills
-		fs.RegisterVNode(vnode.NewTasksVNodeGRPC(conn, authToken))    // /tasks
 		fs.SetStorageFallback(vnode.NewStorageVNode(conn, authToken)) // user folders
 
 		return nil
@@ -238,7 +237,7 @@ func printMountStatus(mount, gateway, mode string) {
 		{"/tools/*", "Tool binaries"},
 		{"/sources/*", "Integration data"},
 		{"/skills/*", "Skills and context"},
-		{"/tasks/*", "Active tasks"},
+		{"/tasks/*", "Task files"},
 	}
 	for _, p := range paths {
 		fmt.Printf("    %s  %s\n", CodeStyle.Render(fmt.Sprintf("%-14s", p.path)), DimStyle.Render(p.desc))

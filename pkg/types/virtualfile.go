@@ -48,7 +48,6 @@ var (
 	VirtualFolders = map[string]struct{}{
 		DirNameSources: {},
 		DirNameTools:   {},
-		DirNameTasks:   {},
 	}
 )
 

@@ -6,8 +6,6 @@ const (
 	ToolsPathPrefix   = "/tools/"
 	SkillsPath        = "/skills"
 	SkillsPathPrefix  = "/skills/"
-	TasksPath         = "/tasks"
-	TasksPathPrefix   = "/tasks/"
 	SourcesPath       = "/sources"
 	SourcesPathPrefix = "/sources/"
 	ConfigDir         = "/.airstore"
