@@ -136,7 +136,19 @@ func (s *filesystemStore) GetQuery(ctx context.Context, workspaceId uint, path s
 		s.mu.RLock()
 		defer s.mu.RUnlock()
 
+		// Try exact match first, then case-insensitive
 		extId, exists := s.memQueryPath[path]
+		if !exists {
+			// Case-insensitive fallback
+			pathLower := strings.ToLower(path)
+			for p, id := range s.memQueryPath {
+				if strings.ToLower(p) == pathLower {
+					extId = id
+					exists = true
+					break
+				}
+			}
+		}
 		if !exists {
 			return nil, nil
 		}
@@ -151,9 +163,10 @@ func (s *filesystemStore) GetQuery(ctx context.Context, workspaceId uint, path s
 	var lastExecuted sql.NullTime
 	var filenameFormat sql.NullString
 
+	// Use ILIKE for case-insensitive path matching (handles old lowercase paths)
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, external_id, workspace_id, integration, path, name, query_spec, guidance, output_format, file_ext, filename_format, cache_ttl, created_at, updated_at, last_executed
-		FROM filesystem_queries WHERE workspace_id = $1 AND path = $2
+		FROM filesystem_queries WHERE workspace_id = $1 AND LOWER(path) = LOWER($2)
 	`, workspaceId, path).Scan(
 		&query.Id, &query.ExternalId, &query.WorkspaceId, &query.Integration,
 		&query.Path, &query.Name, &query.QuerySpec, &query.Guidance,
@@ -890,6 +903,7 @@ func (s *filesystemStore) GetWatchedSourceQueries(ctx context.Context, staleAfte
 		return nil, nil // not supported in memory mode
 	}
 
+	// Use ILIKE for case-insensitive path matching (handles old lowercase paths)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT DISTINCT q.id, q.external_id, q.workspace_id, q.integration, q.path, q.name,
 		       q.query_spec, q.guidance, q.output_format, q.file_ext, q.filename_format,
@@ -898,7 +912,7 @@ func (s *filesystemStore) GetWatchedSourceQueries(ctx context.Context, staleAfte
 		JOIN filesystem_hooks h
 		  ON h.workspace_id = q.workspace_id
 		  AND h.active = true
-		  AND (q.path = h.path OR q.path LIKE replace(replace(h.path, '%', '\%'), '_', '\_') || '/%')
+		  AND (LOWER(q.path) = LOWER(h.path) OR LOWER(q.path) LIKE LOWER(replace(replace(h.path, '%', '\%'), '_', '\_') || '/%'))
 		WHERE q.last_executed IS NULL
 		   OR q.last_executed < NOW() - $1::interval
 		ORDER BY q.last_executed ASC NULLS FIRST
