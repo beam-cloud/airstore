@@ -10,13 +10,28 @@ func WorkspaceBucketName(prefix, workspaceExternalId string) string {
 	return strings.ToLower(prefix + "-" + workspaceExternalId)
 }
 
+// WorkspaceVisibility controls public/private access
+type WorkspaceVisibility string
+
+const (
+	VisibilityPrivate WorkspaceVisibility = "private"
+	VisibilityPublic  WorkspaceVisibility = "public"
+)
+
 // Workspace represents a workspace that contains tasks
 type Workspace struct {
-	Id         uint      `json:"id" db:"id"`                   // Internal ID for joins
-	ExternalId string    `json:"external_id" db:"external_id"` // External UUID for API
-	Name       string    `json:"name" db:"name"`
-	CreatedAt  time.Time `json:"created_at" db:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at" db:"updated_at"`
+	Id         uint                `json:"id" db:"id"`                   // Internal ID for joins
+	ExternalId string              `json:"external_id" db:"external_id"` // External UUID for API
+	Name       string              `json:"name" db:"name"`
+	Visibility WorkspaceVisibility `json:"visibility" db:"visibility"`
+	Slug       *string             `json:"slug,omitempty" db:"slug"` // Unique vanity slug for public access
+	CreatedAt  time.Time           `json:"created_at" db:"created_at"`
+	UpdatedAt  time.Time           `json:"updated_at" db:"updated_at"`
+}
+
+// IsPublic returns true if the workspace is publicly visible.
+func (w *Workspace) IsPublic() bool {
+	return w.Visibility == VisibilityPublic
 }
 
 // ErrWorkspaceNotFound is returned when a workspace cannot be found

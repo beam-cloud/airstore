@@ -15,6 +15,7 @@ type Client struct {
 	conn    *grpc.ClientConn
 	Gateway pb.GatewayServiceClient
 	Tools   pb.ToolServiceClient
+	Context pb.ContextServiceClient
 }
 
 // NewClient creates a new gRPC client
@@ -37,6 +38,7 @@ func NewClient(addr, token string) (*Client, error) {
 		conn:    conn,
 		Gateway: pb.NewGatewayServiceClient(conn),
 		Tools:   pb.NewToolServiceClient(conn),
+		Context: pb.NewContextServiceClient(conn),
 	}, nil
 }
 

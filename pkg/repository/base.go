@@ -104,8 +104,11 @@ type BackendRepository interface {
 	GetWorkspace(ctx context.Context, id uint) (*types.Workspace, error)
 	GetWorkspaceByExternalId(ctx context.Context, externalId string) (*types.Workspace, error)
 	GetWorkspaceByName(ctx context.Context, name string) (*types.Workspace, error)
+	GetWorkspaceBySlug(ctx context.Context, slug string) (*types.Workspace, error)
 	ListWorkspaces(ctx context.Context) ([]*types.Workspace, error)
 	DeleteWorkspace(ctx context.Context, id uint) error
+	SetWorkspaceVisibility(ctx context.Context, id uint, visibility types.WorkspaceVisibility) error
+	SetWorkspaceSlug(ctx context.Context, id uint, slug string) error
 
 	// Workspace Tool Settings
 	GetWorkspaceToolSettings(ctx context.Context, workspaceId uint) (*types.WorkspaceToolSettings, error)
