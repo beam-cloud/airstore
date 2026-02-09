@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/repository"
+	"github.com/beam-cloud/airstore/pkg/skills"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/rs/zerolog/log"
 )
@@ -37,21 +38,30 @@ type TaskCreator interface {
 	CreateTask(ctx context.Context, wsId uint, memberId *uint, token, prompt string, hookId uint, attempt, max int) error
 }
 
-type Engine struct {
-	cache    hookCache
-	creator  TaskCreator
-	backend  repository.BackendRepository
-	store    repository.FilesystemStore
-	debounce debouncer
+// SkillReader reads skill content from workspace storage.
+type SkillReader interface {
+	// ReadSkillContent reads the SKILL.md file for a skill path (e.g., /skills/email-triage).
+	// Returns the full content of the SKILL.md file.
+	ReadSkillContent(ctx context.Context, workspaceId uint, skillPath string) (string, error)
 }
 
-func NewEngine(store repository.FilesystemStore, creator TaskCreator, backend repository.BackendRepository) *Engine {
+type Engine struct {
+	cache       hookCache
+	creator     TaskCreator
+	backend     repository.BackendRepository
+	store       repository.FilesystemStore
+	skillReader SkillReader
+	debounce    debouncer
+}
+
+func NewEngine(store repository.FilesystemStore, creator TaskCreator, backend repository.BackendRepository, skillReader SkillReader) *Engine {
 	return &Engine{
-		cache:    hookCache{hooks: make(map[uint][]*types.Hook), store: store},
-		creator:  creator,
-		backend:  backend,
-		store:    store,
-		debounce: debouncer{delay: debounceDelay, state: make(map[string]*debounceEntry)},
+		cache:       hookCache{hooks: make(map[uint][]*types.Hook), store: store},
+		creator:     creator,
+		backend:     backend,
+		store:       store,
+		skillReader: skillReader,
+		debounce:    debouncer{delay: debounceDelay, state: make(map[string]*debounceEntry)},
 	}
 }
 
@@ -92,13 +102,33 @@ func (eng *Engine) submit(ctx context.Context, h *types.Hook, event string, data
 		return
 	}
 
-	prompt := enrichPrompt(h.Prompt, event, data)
+	// Build the prompt from skill content + optional additional prompt
+	basePrompt := h.Prompt
+	if h.SkillPath != "" && eng.skillReader != nil {
+		skillContent, err := eng.skillReader.ReadSkillContent(ctx, h.WorkspaceId, h.SkillPath)
+		if err != nil {
+			log.Warn().Err(err).Str("skill_path", h.SkillPath).Msg("failed to read skill content")
+		} else {
+			// Extract instructions from SKILL.md (after frontmatter)
+			instructions := skills.ExtractInstructions([]byte(skillContent))
+			if instructions != "" {
+				if h.Prompt != "" {
+					// Skill instructions + additional prompt
+					basePrompt = instructions + "\n\n" + h.Prompt
+				} else {
+					basePrompt = instructions
+				}
+			}
+		}
+	}
+
+	prompt := enrichPrompt(basePrompt, event, data)
 	if err := eng.creator.CreateTask(ctx, h.WorkspaceId, h.CreatedByMemberId, token, prompt,
 		h.Id, 1, maxAttempts); err != nil {
 		return // DB constraint rejects duplicates -- expected
 	}
 
-	log.Info().Str("hook", h.ExternalId).Str("event", event).Msg("hook fired")
+	log.Info().Str("hook", h.ExternalId).Str("event", event).Str("skill_path", h.SkillPath).Msg("hook fired")
 }
 
 // Start runs the retry poller. Call as a goroutine.

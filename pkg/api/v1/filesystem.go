@@ -97,6 +97,8 @@ func (g *FilesystemGroup) registerRoutes() {
 	// Smart query endpoints
 	g.routerGroup.POST("/queries", g.CreateQuery)
 	g.routerGroup.GET("/queries", g.GetQuery)           // ?path=...
+	g.routerGroup.GET("/queries/list", g.ListQueries)   // List all queries
+	g.routerGroup.GET("/queries/count", g.CountQueries) // Count queries in workspace
 	g.routerGroup.PUT("/queries/:id", g.UpdateQuery)    // :id = external_id
 	g.routerGroup.DELETE("/queries/:id", g.DeleteQuery) // :id = external_id
 }
@@ -2196,6 +2198,62 @@ func (g *FilesystemGroup) GetQuery(c echo.Context) error {
 	}
 
 	return SuccessResponse(c, protoQueryToResponse(resp.Query))
+}
+
+// ListQueries lists all smart queries in the workspace
+func (g *FilesystemGroup) ListQueries(c echo.Context) error {
+	ctx := c.Request().Context()
+	logRequest(c, "list_queries")
+
+	if g.sourceService == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "source service not available")
+	}
+
+	// List all queries (empty parent path = all queries)
+	resp, err := g.sourceService.ListSmartQueries(ctx, &pb.ListSmartQueriesRequest{
+		ParentPath: "",
+	})
+	if err != nil {
+		log.Error().Err(err).Msg("failed to list smart queries")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to list queries")
+	}
+	if !resp.Ok {
+		return ErrorResponse(c, http.StatusBadRequest, resp.Error)
+	}
+
+	queries := make([]*SmartQueryResponse, 0, len(resp.Queries))
+	for _, q := range resp.Queries {
+		queries = append(queries, protoQueryToResponse(q))
+	}
+
+	return SuccessResponse(c, map[string]interface{}{
+		"queries": queries,
+		"count":   len(queries),
+	})
+}
+
+// CountQueries returns the count of smart queries in the workspace
+func (g *FilesystemGroup) CountQueries(c echo.Context) error {
+	ctx := c.Request().Context()
+	logRequest(c, "count_queries")
+
+	workspaceId := auth.WorkspaceId(ctx)
+	if workspaceId == 0 || g.backend == nil {
+		return SuccessResponse(c, map[string]interface{}{"count": 0})
+	}
+
+	// Direct query to filesystem_queries table
+	var count int
+	err := g.backend.DB().QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM filesystem_queries WHERE workspace_id = $1`,
+		workspaceId,
+	).Scan(&count)
+	if err != nil {
+		log.Error().Err(err).Uint("workspace_id", workspaceId).Msg("failed to count queries")
+		return SuccessResponse(c, map[string]interface{}{"count": 0})
+	}
+
+	return SuccessResponse(c, map[string]interface{}{"count": count})
 }
 
 // UpdateQuery updates an existing smart query by external_id

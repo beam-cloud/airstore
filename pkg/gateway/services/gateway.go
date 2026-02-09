@@ -634,7 +634,7 @@ func (s *GatewayService) CreateHook(ctx context.Context, req *pb.CreateHookReque
 	hook, err := s.hooksSvc.Create(ctx, ws.Id,
 		ptrIfNonZero(auth.MemberId(ctx)),
 		ptrIfNonZero(auth.TokenId(ctx)),
-		rawToken, req.Path, req.Prompt)
+		rawToken, req.Path, req.Prompt, req.SkillPath)
 	if err != nil {
 		return &pb.HookResponse{Ok: false, Error: err.Error()}, nil
 	}
@@ -682,8 +682,12 @@ func (s *GatewayService) UpdateHook(ctx context.Context, req *pb.UpdateHookReque
 	if req.HasActive {
 		active = &req.Active
 	}
+	var skillPath *string
+	if req.HasSkillPath {
+		skillPath = &req.SkillPath
+	}
 
-	hook, err := s.hooksSvc.Update(ctx, req.Id, prompt, active)
+	hook, err := s.hooksSvc.Update(ctx, req.Id, prompt, active, skillPath)
 	if err != nil {
 		return &pb.HookResponse{Ok: false, Error: err.Error()}, nil
 	}
@@ -758,6 +762,7 @@ func hookToPb(h *types.Hook, workspaceExternalId string) *pb.Hook {
 		WorkspaceId: workspaceExternalId,
 		Path:        h.Path,
 		Prompt:      h.Prompt,
+		SkillPath:   h.SkillPath,
 		Active:      h.Active,
 		CreatedAt:   h.CreatedAt.Format(time.RFC3339),
 		UpdatedAt:   h.UpdatedAt.Format(time.RFC3339),

@@ -1,16 +1,19 @@
 package cli
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/beam-cloud/airstore/pkg/skills"
-	"github.com/beam-cloud/airstore/pkg/skills/builtins"
 	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/spf13/cobra"
 )
@@ -20,63 +23,142 @@ var skillCmd = &cobra.Command{
 	Short: "Install and manage skills",
 	Long: `Install, list, and manage skills that give your agent new capabilities.
 
-A skill is a folder with a SKILL.md file that declares what data sources the
-skill needs, when it should trigger, and where it writes output. Installing
-a skill automatically connects required sources and creates triggers.
+A skill is a folder with a SKILL.md file following the Agent Skills spec
+(https://agentskills.io/specification). Skills are passive knowledge that
+agents can use. Hooks trigger skills to run automatically.
+
+Skills can be installed from:
+  - A public Airstore workspace: airstore://beam/email-triage
+  - A GitHub repo path: github.com/beam-cloud/skills/email-triage
+  - A local directory: ./my-skill/
 
 Examples:
-  airstore skill install ./email-triage/
+  airstore skill install airstore://beam/email-triage
+  airstore skill install github.com/user/repo/skill-name
+  airstore skill install ./local-skill/
   airstore skill list
   airstore skill info email-triage
-  airstore skill uninstall email-triage
-  airstore skill run email-triage`,
+  airstore skill uninstall email-triage`,
+}
+
+// SkillSource represents where a skill is being installed from.
+type SkillSource int
+
+const (
+	SourceLocal SkillSource = iota
+	SourceAirstore
+	SourceGitHub
+)
+
+// ParseSkillSource determines the source type and parses the reference.
+func ParseSkillSource(ref string) (source SkillSource, slug, path string, err error) {
+	// airstore://slug/path/to/skill
+	if strings.HasPrefix(ref, "airstore://") {
+		rest := strings.TrimPrefix(ref, "airstore://")
+		parts := strings.SplitN(rest, "/", 2)
+		if len(parts) == 0 || parts[0] == "" {
+			return 0, "", "", fmt.Errorf("invalid airstore:// URI: missing slug")
+		}
+		slug = parts[0]
+		if len(parts) > 1 {
+			path = parts[1]
+		}
+		return SourceAirstore, slug, path, nil
+	}
+
+	// github.com/owner/repo/path/to/skill
+	if strings.HasPrefix(ref, "github.com/") {
+		rest := strings.TrimPrefix(ref, "github.com/")
+		parts := strings.SplitN(rest, "/", 3)
+		if len(parts) < 2 {
+			return 0, "", "", fmt.Errorf("invalid GitHub reference: need github.com/owner/repo[/path]")
+		}
+		// slug = "owner/repo", path = optional subpath
+		slug = parts[0] + "/" + parts[1]
+		if len(parts) > 2 {
+			path = parts[2]
+		}
+		return SourceGitHub, slug, path, nil
+	}
+
+	// Local path
+	return SourceLocal, "", ref, nil
 }
 
 var skillInstallCmd = &cobra.Command{
-	Use:   "install <name|path>",
-	Short: "Install a skill (built-in name or local directory)",
-	Long: `Install a skill by name (built-in) or from a local directory with a SKILL.md.
+	Use:   "install <source>",
+	Short: "Install a skill from URL or local path",
+	Long: `Install a skill from a public workspace, GitHub, or local directory.
 
-Built-in skills: email-triage, slack-actions, pr-reviewer, issue-triage
+Sources:
+  airstore://slug/skill-name    Install from a public Airstore workspace
+  github.com/owner/repo/path    Install from a GitHub repository  
+  ./path/to/skill               Install from a local directory
 
 Examples:
-  airstore skill install email-triage
+  airstore skill install airstore://beam/email-triage
+  airstore skill install github.com/beam-cloud/skills/email-triage
   airstore skill install ./my-custom-skill/`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		nameOrPath := args[0]
+		ref := args[0]
+
+		source, slug, path, err := ParseSkillSource(ref)
+		if err != nil {
+			PrintErrorMsg(err.Error())
+			return nil
+		}
 
 		var manifest *skills.SkillManifest
-		var content string
 		var skillName string
-		var builtinFiles map[string][]byte // non-nil if installing a builtin
+		var skillFiles map[string][]byte
 
-		// Check if it's a built-in skill first
-		if bs, err := builtins.Get(nameOrPath); err == nil {
-			manifest = bs.Manifest
-			content = bs.Content
-			skillName = bs.Name
-			builtinFiles, _ = builtins.ExtractFiles(bs.Name)
-		} else {
-			// Try as a local path
-			skillMDPath, err := skills.FindSkillMD(nameOrPath)
+		switch source {
+		case SourceAirstore:
+			skillName = filepath.Base(path)
+			if skillName == "" || skillName == "." {
+				PrintErrorMsg("airstore:// URI must include skill path, e.g. airstore://beam/email-triage")
+				return nil
+			}
+			skillFiles, manifest, _, err = fetchFromAirstore(slug, path)
 			if err != nil {
 				PrintErrorMsg(err.Error())
 				return nil
 			}
 
-			manifest, content, err = skills.ParseFile(skillMDPath)
+		case SourceGitHub:
+			skillName = filepath.Base(path)
+			if skillName == "" || skillName == "." {
+				// Use repo name as skill name
+				parts := strings.Split(slug, "/")
+				skillName = parts[len(parts)-1]
+			}
+			skillFiles, manifest, _, err = fetchFromGitHub(slug, path)
 			if err != nil {
 				PrintErrorMsg(err.Error())
 				return nil
 			}
-			skillName = skills.SkillNameFromPath(nameOrPath)
+
+		case SourceLocal:
+			skillMDPath, err := skills.FindSkillMD(path)
+			if err != nil {
+				PrintErrorMsg(err.Error())
+				return nil
+			}
+			manifest, _, err = skills.ParseFile(skillMDPath)
+			if err != nil {
+				PrintErrorMsg(err.Error())
+				return nil
+			}
+			skillName = skills.SkillNameFromPath(path)
+			// For local, we upload directly from filesystem
 		}
+
 		PrintNewline()
 		PrintHeader(fmt.Sprintf("Installing %s", manifest.Name))
 		PrintNewline()
 
-		// 2. Connect to gateway
+		// Connect to gateway
 		client, err := getClient()
 		if err != nil {
 			PrintError(err)
@@ -86,8 +168,11 @@ Examples:
 
 		ctx := context.Background()
 
-		// 3. Check required sources
-		if len(manifest.Needs) > 0 {
+		// Extract Airstore-specific metadata
+		am := manifest.AirstoreMetadata()
+
+		// Check required sources
+		if len(am.Needs) > 0 {
 			connResp, err := client.Gateway.ListConnections(ctx, &pb.ListConnectionsRequest{})
 			if err != nil {
 				PrintError(err)
@@ -103,23 +188,22 @@ Examples:
 				connected[c.IntegrationType] = true
 			}
 
-			for _, need := range manifest.Needs {
+			for _, need := range am.Needs {
 				if connected[need] {
 					PrintSuccessf("  %s connected", need)
 				} else {
 					PrintWarning(fmt.Sprintf("  %s not connected", need))
 					PrintHint(fmt.Sprintf("Connect it with: airstore connection add %s", need))
-					PrintHint("Or connect it in the UI at https://airstore.ai")
 				}
 			}
 			PrintNewline()
 		}
 
-		// 4. Upload skill files to /skills/{name}/
-		if builtinFiles != nil {
-			err = uploadBuiltinSkillFiles(ctx, client, skillName, builtinFiles)
+		// Upload skill files
+		if skillFiles != nil {
+			err = uploadSkillFilesFromMap(ctx, client, skillName, skillFiles)
 		} else {
-			err = uploadSkillFiles(ctx, client, nameOrPath, skillName)
+			err = uploadSkillFiles(ctx, client, path, skillName)
 		}
 		if err != nil {
 			PrintError(fmt.Errorf("uploading skill files: %w", err))
@@ -127,39 +211,8 @@ Examples:
 		}
 		PrintSuccessf("  Skill files uploaded to /skills/%s/", skillName)
 
-		// 5. Create triggers (hooks)
-		prompt := skills.BuildPrompt(manifest, content)
-		var hookIds []string
-
-		for _, trigger := range manifest.Triggers {
-			var resp *pb.HookResponse
-			err := RunSpinnerWithResult("  Creating trigger...", func() error {
-				var err error
-				resp, err = client.Gateway.CreateHook(ctx, &pb.CreateHookRequest{
-					Path:   trigger.Path,
-					Prompt: prompt,
-				})
-				return err
-			})
-			if err != nil {
-				PrintError(err)
-				return nil
-			}
-			if !resp.Ok {
-				// If hook already exists on this path, that's ok
-				if strings.Contains(resp.Error, "already exists") {
-					PrintWarning(fmt.Sprintf("  Trigger on %s already exists, skipping", trigger.Path))
-					continue
-				}
-				PrintErrorMsg(resp.Error)
-				return nil
-			}
-			hookIds = append(hookIds, resp.Hook.Id)
-			PrintSuccessf("  Trigger: %s on %s", trigger.On, trigger.Path)
-		}
-
-		// 6. Create output directories
-		for _, writePath := range manifest.Writes {
+		// Create output directories
+		for _, writePath := range am.Writes {
 			_, err := client.Context.Mkdir(ctx, &pb.ContextMkdirRequest{
 				Path: writePath,
 				Mode: 0755,
@@ -170,12 +223,12 @@ Examples:
 			PrintSuccessf("  Output: %s", writePath)
 		}
 
-		// 7. Write installed metadata to the skill dir in the workspace
+		// Write installed metadata
 		meta := &skills.InstalledSkill{
 			Name:        manifest.Name,
 			Description: manifest.Description,
-			Needs:       manifest.Needs,
-			HookIds:     hookIds,
+			Needs:       am.Needs,
+			Source:      ref,
 		}
 		metaBytes, _ := json.MarshalIndent(meta, "", "  ")
 		writeFileToWorkspace(ctx, client, fmt.Sprintf("/skills/%s/%s", skillName, skills.InstalledMetaFile), metaBytes)
@@ -184,16 +237,280 @@ Examples:
 		PrintSuccessf("%s installed", manifest.Name)
 		PrintNewline()
 
-		if len(manifest.Writes) > 0 {
-			PrintHint(fmt.Sprintf("View output: ls ~/airstore%s", manifest.Writes[0]))
+		if len(am.Writes) > 0 {
+			PrintHint(fmt.Sprintf("View output: ls ~/airstore%s", am.Writes[0]))
 		}
-		if len(manifest.Triggers) > 0 {
-			PrintInfo("Triggers are active. Your agent will run when new data arrives.")
-		}
+		PrintHint("Create a hook to trigger this skill automatically:")
+		PrintHint(fmt.Sprintf("  airstore hook create --path /sources/<source> --prompt \"Use the %s skill\"", skillName))
 		PrintNewline()
 
 		return nil
 	},
+}
+
+// fetchFromAirstore fetches a skill from a public Airstore workspace.
+func fetchFromAirstore(slug, skillPath string) (files map[string][]byte, manifest *skills.SkillManifest, content string, err error) {
+	baseURL := gatewayHTTPAddr
+
+	// First, fetch SKILL.md to parse manifest
+	skillMDPath := skillPath
+	if !strings.HasSuffix(skillMDPath, "/SKILL.md") {
+		skillMDPath = strings.TrimSuffix(skillMDPath, "/") + "/SKILL.md"
+	}
+
+	skillMDURL := fmt.Sprintf("%s/r/%s/%s", baseURL, slug, skillMDPath)
+	resp, err := http.Get(skillMDURL)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("fetching SKILL.md: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil, "", fmt.Errorf("skill not found at airstore://%s/%s", slug, skillPath)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, "", fmt.Errorf("server returned %d for SKILL.md", resp.StatusCode)
+	}
+
+	skillMDBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("reading SKILL.md: %w", err)
+	}
+
+	manifest, err = skills.Parse(skillMDBytes)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("parsing SKILL.md: %w", err)
+	}
+	content = string(skillMDBytes)
+
+	// List the skill directory to get all files
+	listURL := fmt.Sprintf("%s/api/v1/public/%s/list?path=/%s", baseURL, slug, strings.TrimPrefix(skillPath, "/"))
+	listResp, err := http.Get(listURL)
+	if err != nil {
+		// If list fails, just include SKILL.md
+		files = map[string][]byte{"SKILL.md": skillMDBytes}
+		return files, manifest, content, nil
+	}
+	defer listResp.Body.Close()
+
+	if listResp.StatusCode != http.StatusOK {
+		files = map[string][]byte{"SKILL.md": skillMDBytes}
+		return files, manifest, content, nil
+	}
+
+	var listData struct {
+		Entries []struct {
+			Name  string `json:"name"`
+			IsDir bool   `json:"is_dir"`
+		} `json:"entries"`
+	}
+	if err := json.NewDecoder(listResp.Body).Decode(&listData); err != nil {
+		files = map[string][]byte{"SKILL.md": skillMDBytes}
+		return files, manifest, content, nil
+	}
+
+	// Fetch all files in the directory
+	files = make(map[string][]byte)
+	basePath := strings.TrimSuffix(skillPath, "/")
+
+	for _, entry := range listData.Entries {
+		if entry.IsDir {
+			continue // Skip subdirectories for now
+		}
+		fileURL := fmt.Sprintf("%s/r/%s/%s/%s", baseURL, slug, basePath, entry.Name)
+		fileResp, err := http.Get(fileURL)
+		if err != nil {
+			continue
+		}
+		fileBytes, _ := io.ReadAll(fileResp.Body)
+		fileResp.Body.Close()
+		files[entry.Name] = fileBytes
+	}
+
+	// Ensure SKILL.md is included
+	if _, ok := files["SKILL.md"]; !ok {
+		files["SKILL.md"] = skillMDBytes
+	}
+
+	return files, manifest, content, nil
+}
+
+// fetchFromGitHub fetches a skill from a GitHub repository.
+func fetchFromGitHub(repo, subPath string) (files map[string][]byte, manifest *skills.SkillManifest, content string, err error) {
+	// Use GitHub's tarball API to download the repo
+	// Format: https://api.github.com/repos/{owner}/{repo}/tarball/{ref}
+	tarballURL := fmt.Sprintf("https://api.github.com/repos/%s/tarball/main", repo)
+
+	req, err := http.NewRequest("GET", tarballURL, nil)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("fetching GitHub repo: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil, "", fmt.Errorf("GitHub repo not found: %s", repo)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, "", fmt.Errorf("GitHub returned %d", resp.StatusCode)
+	}
+
+	// Parse the gzipped tarball
+	gzr, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("decompressing tarball: %w", err)
+	}
+	defer gzr.Close()
+
+	tr := tar.NewReader(gzr)
+	files = make(map[string][]byte)
+
+	// GitHub tarballs have a top-level directory like "owner-repo-sha/"
+	// We need to strip that and optionally filter by subPath
+	var topDir string
+
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, nil, "", fmt.Errorf("reading tarball: %w", err)
+		}
+
+		// Get the path, stripping the top-level directory
+		name := header.Name
+		parts := strings.SplitN(name, "/", 2)
+		if len(parts) < 2 {
+			if topDir == "" && strings.HasSuffix(name, "/") {
+				topDir = strings.TrimSuffix(name, "/")
+			}
+			continue
+		}
+
+		relativePath := parts[1]
+
+		// If subPath is specified, only include files under that path
+		if subPath != "" {
+			if !strings.HasPrefix(relativePath, subPath) && !strings.HasPrefix(relativePath, subPath+"/") {
+				continue
+			}
+			// Strip the subPath prefix
+			relativePath = strings.TrimPrefix(relativePath, subPath)
+			relativePath = strings.TrimPrefix(relativePath, "/")
+		}
+
+		if relativePath == "" {
+			continue
+		}
+
+		// Skip directories
+		if header.Typeflag == tar.TypeDir {
+			continue
+		}
+
+		// Read file content
+		data, err := io.ReadAll(tr)
+		if err != nil {
+			continue
+		}
+
+		files[relativePath] = data
+	}
+
+	// Parse SKILL.md
+	skillMDBytes, ok := files["SKILL.md"]
+	if !ok {
+		return nil, nil, "", fmt.Errorf("SKILL.md not found in repo")
+	}
+
+	manifest, err = skills.Parse(skillMDBytes)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("parsing SKILL.md: %w", err)
+	}
+	content = string(skillMDBytes)
+
+	return files, manifest, content, nil
+}
+
+// uploadSkillFilesFromMap uploads skill files from a map to /skills/{name}/.
+func uploadSkillFilesFromMap(ctx context.Context, client *Client, skillName string, files map[string][]byte) error {
+	// Create the skill directory first
+	client.Context.Mkdir(ctx, &pb.ContextMkdirRequest{
+		Path: fmt.Sprintf("/skills/%s", skillName),
+		Mode: 0755,
+	})
+
+	for relPath, data := range files {
+		remotePath := fmt.Sprintf("/skills/%s/%s", skillName, relPath)
+
+		// Create parent dirs if needed
+		dir := filepath.Dir(remotePath)
+		if dir != fmt.Sprintf("/skills/%s", skillName) {
+			client.Context.Mkdir(ctx, &pb.ContextMkdirRequest{Path: dir, Mode: 0755})
+		}
+
+		if err := writeFileToWorkspace(ctx, client, remotePath, data); err != nil {
+			return fmt.Errorf("writing %s: %w", relPath, err)
+		}
+	}
+	return nil
+}
+
+// uploadSkillFiles copies all files from a local directory to /skills/{name}/ in the workspace.
+func uploadSkillFiles(ctx context.Context, client *Client, srcDir, skillName string) error {
+	// Create the skill directory first
+	client.Context.Mkdir(ctx, &pb.ContextMkdirRequest{
+		Path: fmt.Sprintf("/skills/%s", skillName),
+		Mode: 0755,
+	})
+
+	return filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Get relative path
+		relPath, err := filepath.Rel(srcDir, path)
+		if err != nil {
+			return err
+		}
+		if relPath == "." {
+			return nil
+		}
+
+		remotePath := fmt.Sprintf("/skills/%s/%s", skillName, relPath)
+
+		if d.IsDir() {
+			client.Context.Mkdir(ctx, &pb.ContextMkdirRequest{Path: remotePath, Mode: 0755})
+			return nil
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+
+		return writeFileToWorkspace(ctx, client, remotePath, data)
+	})
+}
+
+// writeFileToWorkspace writes content to a path in the workspace using the context service.
+func writeFileToWorkspace(ctx context.Context, client *Client, path string, content []byte) error {
+	// Create the file first
+	client.Context.Create(ctx, &pb.ContextCreateRequest{Path: path, Mode: 0644})
+
+	// Then write content
+	_, err := client.Context.Write(ctx, &pb.ContextWriteRequest{
+		Path: path,
+		Data: content,
+	})
+	return err
 }
 
 var skillListCmd = &cobra.Command{
@@ -218,9 +535,8 @@ var skillListCmd = &cobra.Command{
 			return nil
 		}
 		if !listResp.Ok {
-			// If /skills doesn't exist yet, that's ok
 			PrintInfo("No skills installed")
-			PrintHint("Install one with: airstore skill install <path>")
+			PrintHint("Install one with: airstore skill install <source>")
 			return nil
 		}
 
@@ -233,7 +549,7 @@ var skillListCmd = &cobra.Command{
 
 		if len(dirs) == 0 {
 			PrintInfo("No skills installed")
-			PrintHint("Install one with: airstore skill install <path>")
+			PrintHint("Install one with: airstore skill install <source>")
 			return nil
 		}
 
@@ -249,12 +565,12 @@ var skillListCmd = &cobra.Command{
 		PrintNewline()
 		PrintHeader("Installed Skills")
 
-		table := NewTable("NAME", "DESCRIPTION", "SOURCES", "STATUS")
+		table := NewTable("NAME", "DESCRIPTION", "SOURCE", "STATUS")
 		for _, entry := range dirs {
 			name := entry.Name
 			description := ""
+			source := "local"
 			status := "active"
-			sourcesStr := ""
 
 			// Try to read installed metadata
 			metaResp, err := client.Context.Read(ctx, &pb.ContextReadRequest{
@@ -264,24 +580,23 @@ var skillListCmd = &cobra.Command{
 				var meta skills.InstalledSkill
 				if json.Unmarshal(metaResp.Data, &meta) == nil {
 					description = meta.Description
-					sources := make([]string, 0, len(meta.Needs))
+					if meta.Source != "" {
+						source = meta.Source
+					}
 					allConnected := true
 					for _, need := range meta.Needs {
-						if connected[need] {
-							sources = append(sources, need)
-						} else {
-							sources = append(sources, need+" (missing)")
+						if !connected[need] {
 							allConnected = false
+							break
 						}
 					}
-					sourcesStr = strings.Join(sources, ", ")
 					if !allConnected {
 						status = "needs setup"
 					}
 				}
 			}
 
-			table.AddRow(name, Truncate(description, 40), sourcesStr, status)
+			table.AddRow(name, Truncate(description, 30), Truncate(source, 35), status)
 		}
 		table.Print()
 		PrintNewline()
@@ -342,16 +657,24 @@ var skillInfoCmd = &cobra.Command{
 			}
 		}
 
+		am := manifest.AirstoreMetadata()
+
 		PrintNewline()
 		PrintKeyValue("Name", manifest.Name)
 		if manifest.Description != "" {
 			PrintKeyValue("Description", manifest.Description)
 		}
+		if manifest.License != "" {
+			PrintKeyValue("License", manifest.License)
+		}
+		if meta != nil && meta.Source != "" {
+			PrintKeyValue("Source", meta.Source)
+		}
 		PrintNewline()
 
-		if len(manifest.Needs) > 0 {
-			PrintHeader("Sources")
-			for _, need := range manifest.Needs {
+		if len(am.Needs) > 0 {
+			PrintHeader("Required Sources")
+			for _, need := range am.Needs {
 				if connected[need] {
 					PrintSuccessf("  %s (connected)", need)
 				} else {
@@ -361,26 +684,10 @@ var skillInfoCmd = &cobra.Command{
 			PrintNewline()
 		}
 
-		if len(manifest.Triggers) > 0 {
-			PrintHeader("Triggers")
-			for _, t := range manifest.Triggers {
-				fmt.Printf("  %s on %s\n", t.On, t.Path)
-			}
-			PrintNewline()
-		}
-
-		if len(manifest.Writes) > 0 {
+		if len(am.Writes) > 0 {
 			PrintHeader("Output Paths")
-			for _, w := range manifest.Writes {
+			for _, w := range am.Writes {
 				fmt.Printf("  %s\n", w)
-			}
-			PrintNewline()
-		}
-
-		if meta != nil && len(meta.HookIds) > 0 {
-			PrintHeader("Hook IDs")
-			for _, id := range meta.HookIds {
-				fmt.Printf("  %s\n", id)
 			}
 			PrintNewline()
 		}
@@ -391,7 +698,7 @@ var skillInfoCmd = &cobra.Command{
 
 var skillUninstallCmd = &cobra.Command{
 	Use:   "uninstall <name>",
-	Short: "Uninstall a skill and remove its triggers",
+	Short: "Uninstall a skill",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		skillName := args[0]
@@ -406,33 +713,17 @@ var skillUninstallCmd = &cobra.Command{
 
 		ctx := context.Background()
 
-		// Read installed metadata to find hooks to delete
-		metaResp, err := client.Context.Read(ctx, &pb.ContextReadRequest{
-			Path: fmt.Sprintf("/skills/%s/%s", skillName, skills.InstalledMetaFile),
-		})
-		if err == nil && metaResp.Ok {
-			var meta skills.InstalledSkill
-			if json.Unmarshal(metaResp.Data, &meta) == nil {
-				// Delete hooks created by this skill
-				for _, hookId := range meta.HookIds {
-					resp, err := client.Gateway.DeleteHook(ctx, &pb.DeleteHookRequest{Id: hookId})
-					if err == nil && resp.Ok {
-						PrintSuccessf("  Trigger %s removed", hookId)
-					}
-				}
-
-				// Optionally delete output dirs
-				if !keepMemory {
-					skillResp, err := client.Context.Read(ctx, &pb.ContextReadRequest{
-						Path: fmt.Sprintf("/skills/%s/SKILL.md", skillName),
-					})
-					if err == nil && skillResp.Ok {
-						manifest, err := skills.Parse(skillResp.Data)
-						if err == nil {
-							for _, w := range manifest.Writes {
-								client.Context.Delete(ctx, &pb.ContextDeleteRequest{Path: w, Recursive: true})
-							}
-						}
+		// Optionally delete output dirs
+		if !keepMemory {
+			skillResp, err := client.Context.Read(ctx, &pb.ContextReadRequest{
+				Path: fmt.Sprintf("/skills/%s/SKILL.md", skillName),
+			})
+			if err == nil && skillResp.Ok {
+				manifest, err := skills.Parse(skillResp.Data)
+				if err == nil {
+					am := manifest.AirstoreMetadata()
+					for _, w := range am.Writes {
+						client.Context.Delete(ctx, &pb.ContextDeleteRequest{Path: w, Recursive: true})
 					}
 				}
 			}
@@ -517,104 +808,24 @@ var skillRunCmd = &cobra.Command{
 	},
 }
 
-// uploadBuiltinSkillFiles uploads embedded built-in skill files to /skills/{name}/ in the workspace.
-func uploadBuiltinSkillFiles(ctx context.Context, client *Client, skillName string, files map[string][]byte) error {
-	// Create the skill directory first
-	client.Context.Mkdir(ctx, &pb.ContextMkdirRequest{
-		Path: fmt.Sprintf("/skills/%s", skillName),
-		Mode: 0755,
-	})
+var skillSearchCmd = &cobra.Command{
+	Use:   "search [query]",
+	Short: "Search for skills in public workspaces",
+	Long: `Search for skills shared by the community.
 
-	for relPath, data := range files {
-		remotePath := fmt.Sprintf("/skills/%s/%s", skillName, relPath)
+Browse official skills at: airstore.ai/w/beam
 
-		// Create parent dirs if needed
-		dir := filepath.Dir(remotePath)
-		if dir != fmt.Sprintf("/skills/%s", skillName) {
-			client.Context.Mkdir(ctx, &pb.ContextMkdirRequest{Path: dir, Mode: 0755})
-		}
-
-		if err := writeFileToWorkspace(ctx, client, remotePath, data); err != nil {
-			return fmt.Errorf("writing %s: %w", relPath, err)
-		}
-	}
-	return nil
-}
-
-// uploadSkillFiles copies all files from a local directory to /skills/{name}/ in the workspace.
-func uploadSkillFiles(ctx context.Context, client *Client, srcDir, skillName string) error {
-	// Create the skill directory first
-	client.Context.Mkdir(ctx, &pb.ContextMkdirRequest{
-		Path: fmt.Sprintf("/skills/%s", skillName),
-		Mode: 0755,
-	})
-
-	return filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		// Get relative path
-		relPath, err := filepath.Rel(srcDir, path)
-		if err != nil {
-			return err
-		}
-		if relPath == "." {
-			return nil
-		}
-
-		remotePath := fmt.Sprintf("/skills/%s/%s", skillName, relPath)
-
-		if d.IsDir() {
-			client.Context.Mkdir(ctx, &pb.ContextMkdirRequest{Path: remotePath, Mode: 0755})
-			return nil
-		}
-
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-
-		return writeFileToWorkspace(ctx, client, remotePath, data)
-	})
-}
-
-// writeFileToWorkspace writes content to a path in the workspace using the context service.
-func writeFileToWorkspace(ctx context.Context, client *Client, path string, content []byte) error {
-	// Create the file first
-	client.Context.Create(ctx, &pb.ContextCreateRequest{Path: path, Mode: 0644})
-
-	// Then write content
-	_, err := client.Context.Write(ctx, &pb.ContextWriteRequest{
-		Path: path,
-		Data: content,
-	})
-	return err
-}
-
-var skillCatalogCmd = &cobra.Command{
-	Use:   "catalog",
-	Short: "List available built-in skills",
+Examples:
+  airstore skill search email
+  airstore skill search github`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		available, err := builtins.List()
-		if err != nil {
-			PrintError(err)
-			return nil
-		}
-
 		PrintNewline()
-		PrintHeader("Available Skills")
-
-		table := NewTable("NAME", "DESCRIPTION", "NEEDS")
-		for _, bs := range available {
-			needs := strings.Join(bs.Manifest.Needs, ", ")
-			table.AddRow(bs.Name, bs.Manifest.Description, needs)
-		}
-		table.Print()
+		PrintInfo("Browse official skills at: https://airstore.ai/w/beam")
 		PrintNewline()
-		PrintHint("Install with: airstore skill install <name>")
+		PrintInfo("Install skills with:")
+		fmt.Println("  airstore skill install airstore://beam/email-triage")
+		fmt.Println("  airstore skill install github.com/user/repo/skill-name")
 		PrintNewline()
-
 		return nil
 	},
 }
@@ -627,5 +838,5 @@ func init() {
 	skillCmd.AddCommand(skillInfoCmd)
 	skillCmd.AddCommand(skillUninstallCmd)
 	skillCmd.AddCommand(skillRunCmd)
-	skillCmd.AddCommand(skillCatalogCmd)
+	skillCmd.AddCommand(skillSearchCmd)
 }

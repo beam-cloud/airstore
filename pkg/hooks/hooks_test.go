@@ -154,7 +154,7 @@ func TestEngine_Submit_CreatesTask(t *testing.T) {
 	store := &mockStore{hooks: []*types.Hook{hook}}
 	creator := &mockCreator{}
 	backend := &mockBackend{}
-	eng := NewEngine(store, creator, backend)
+	eng := NewEngine(store, creator, backend, nil)
 
 	eng.Handle("1", makeEvent(EventFsCreate, "/skills/test.txt", 10))
 
@@ -182,7 +182,7 @@ func TestEngine_Submit_ConstraintRejectsDuplicate(t *testing.T) {
 	// Simulate the DB unique constraint rejecting the insert
 	creator := &mockCreator{err: fmt.Errorf("pq: duplicate key value violates unique constraint")}
 	backend := &mockBackend{}
-	eng := NewEngine(store, creator, backend)
+	eng := NewEngine(store, creator, backend, nil)
 
 	eng.Handle("1", makeEvent(EventFsCreate, "/skills/test.txt", 10))
 
@@ -198,7 +198,7 @@ func TestEngine_Submit_SkipsRevokedToken(t *testing.T) {
 	store := &mockStore{hooks: []*types.Hook{hook}}
 	creator := &mockCreator{}
 	backend := &mockBackend{}
-	eng := NewEngine(store, creator, backend)
+	eng := NewEngine(store, creator, backend, nil)
 
 	eng.Handle("1", makeEvent(EventFsCreate, "/skills/test.txt", 10))
 
@@ -212,7 +212,7 @@ func TestEngine_Submit_PathMatching(t *testing.T) {
 	store := &mockStore{hooks: []*types.Hook{hook}}
 	creator := &mockCreator{}
 	backend := &mockBackend{}
-	eng := NewEngine(store, creator, backend)
+	eng := NewEngine(store, creator, backend, nil)
 
 	// Should match: file under /skills
 	eng.Handle("1", makeEvent(EventFsCreate, "/skills/test.txt", 10))
@@ -238,7 +238,7 @@ func TestEngine_Submit_PromptEnrichment(t *testing.T) {
 	store := &mockStore{hooks: []*types.Hook{hook}}
 	creator := &mockCreator{}
 	backend := &mockBackend{}
-	eng := NewEngine(store, creator, backend)
+	eng := NewEngine(store, creator, backend, nil)
 
 	eng.Handle("1", makeEvent(EventFsWrite, "/skills/report.md", 10))
 	// Debounced -- wait for it
@@ -259,7 +259,7 @@ func TestEngine_Debounce_CoalescesWrites(t *testing.T) {
 	store := &mockStore{hooks: []*types.Hook{hook}}
 	creator := &mockCreator{}
 	backend := &mockBackend{}
-	eng := NewEngine(store, creator, backend)
+	eng := NewEngine(store, creator, backend, nil)
 
 	// Rapid writes to same path
 	for i := 0; i < 10; i++ {
@@ -295,7 +295,7 @@ func TestEngine_Poll_RetriesFailedTask(t *testing.T) {
 	}
 
 	backend := &mockBackend{retryableTasks: []*types.Task{failedTask}}
-	eng := NewEngine(store, creator, backend)
+	eng := NewEngine(store, creator, backend, nil)
 
 	eng.Poll(context.Background())
 
@@ -332,7 +332,7 @@ func TestEngine_Poll_RespectsBackoff(t *testing.T) {
 	}
 
 	backend := &mockBackend{retryableTasks: []*types.Task{failedTask}}
-	eng := NewEngine(store, creator, backend)
+	eng := NewEngine(store, creator, backend, nil)
 
 	eng.Poll(context.Background())
 
@@ -362,7 +362,7 @@ func TestEngine_Poll_SkipsWhenActiveTaskExists(t *testing.T) {
 	// DB constraint rejects retry when active task exists
 	creator := &mockCreator{err: fmt.Errorf("pq: duplicate key value violates unique constraint")}
 	backend := &mockBackend{retryableTasks: []*types.Task{failedTask}}
-	eng := NewEngine(store, creator, backend)
+	eng := NewEngine(store, creator, backend, nil)
 
 	eng.Poll(context.Background())
 
@@ -394,7 +394,7 @@ func TestEngine_Poll_DeadLetterAfterMaxAttempts(t *testing.T) {
 
 	// Even if SQL leaks a max-attempt task, the engine should not retry it.
 	backend := &mockBackend{retryableTasks: []*types.Task{failedTask}}
-	eng := NewEngine(store, creator, backend)
+	eng := NewEngine(store, creator, backend, nil)
 
 	eng.Poll(context.Background())
 
@@ -487,5 +487,45 @@ func TestDecodeToken_Empty(t *testing.T) {
 	_, err = DecodeToken([]byte{})
 	if err == nil {
 		t.Error("expected error for empty token")
+	}
+}
+
+func TestValidateHookPath(t *testing.T) {
+	tests := []struct {
+		path    string
+		wantErr bool
+	}{
+		// Blocked system root directories
+		{"/tasks", true},
+		{"/tasks/", true},
+		{"/tools", true},
+		{"/skills", true},
+		{"/sources", true},
+		{"/sources/", true},
+
+		// Root-level source folders - blocked
+		{"/sources/gdrive", true},
+		{"/sources/gdrive/", true},
+		{"/sources/github", true},
+		{"/sources/gmail", true},
+		{"/sources/gmail/", true},
+
+		// Smart query folders under sources - allowed
+		{"/sources/gdrive/invoices", false},
+		{"/sources/gdrive/invoices/", false},
+		{"/sources/gmail/new unread emails", false},
+		{"/sources/gmail/my-query", false},
+
+		// Top-level query paths - allowed
+		{"/emails", false},
+		{"/my-query", false},
+		{"/invoices", false},
+	}
+
+	for _, tt := range tests {
+		err := ValidateHookPath(tt.path)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("ValidateHookPath(%q) error = %v, wantErr = %v", tt.path, err, tt.wantErr)
+		}
 	}
 }

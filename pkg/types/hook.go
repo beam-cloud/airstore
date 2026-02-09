@@ -13,6 +13,7 @@ type Hook struct {
 	WorkspaceId       uint      `json:"workspace_id" db:"workspace_id"`
 	Path              string    `json:"path" db:"path"`
 	Prompt            string    `json:"prompt" db:"prompt"`
+	SkillPath         string    `json:"skill_path" db:"skill_path"`
 	Active            bool      `json:"active" db:"active"`
 	CreatedByMemberId *uint     `json:"created_by_member_id,omitempty" db:"created_by_member_id"`
 	TokenId           *uint     `json:"-" db:"token_id"`
