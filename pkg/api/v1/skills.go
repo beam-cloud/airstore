@@ -46,7 +46,7 @@ func (sg *SkillsGroup) List(c echo.Context) error {
 
 	// Collect unique skill names from SKILL.md keys
 	seen := make(map[string]bool)
-	var result []SkillInfo
+	result := make([]SkillInfo, 0)
 
 	for _, obj := range output.Contents {
 		if obj.Key == nil {
