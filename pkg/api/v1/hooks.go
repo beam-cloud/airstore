@@ -46,15 +46,30 @@ func (hg *HooksGroup) Create(c echo.Context) error {
 		return ErrorResponse(c, http.StatusNotFound, "workspace not found")
 	}
 
+	// Resolve the token to store on the hook.
+	// For member auth: use the caller's token directly.
+	// For admin auth: the cluster admin token is a static secret that
+	// workers can't use for filesystem mounts, so we auto-provision a
+	// workspace service token instead.
+	tokenId := ptrUint(auth.TokenId(ctx))
+	memberId := ptrUint(auth.MemberId(ctx))
 	rawToken := strings.TrimPrefix(c.Request().Header.Get("Authorization"), "Bearer ")
+
+	if tokenId == nil {
+		// Admin auth — provision a workspace service token
+		svcToken, svcRaw, err := hg.backend.EnsureWorkspaceServiceToken(ctx, ws.Id)
+		if err != nil {
+			return ErrorResponse(c, http.StatusInternalServerError, "failed to provision workspace token: "+err.Error())
+		}
+		tokenId = &svcToken.Id
+		rawToken = svcRaw
+	}
+
 	if rawToken == "" {
 		return ErrorResponse(c, http.StatusBadRequest, "authentication token required")
 	}
 
-	hook, err := hg.svc.Create(ctx, ws.Id,
-		ptrUint(auth.MemberId(ctx)),
-		ptrUint(auth.TokenId(ctx)),
-		rawToken, req.Path, req.Prompt, req.SkillPath)
+	hook, err := hg.svc.Create(ctx, ws.Id, memberId, tokenId, rawToken, req.Path, req.Prompt, req.SkillPath)
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}

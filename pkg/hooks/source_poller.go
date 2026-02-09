@@ -3,6 +3,7 @@ package hooks
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/common"
@@ -12,10 +13,10 @@ import (
 )
 
 const (
-	sourcePollTick     = 60 * time.Second
-	sourcePollStale    = 5 * time.Minute
-	sourcePollBatch    = 50
-	sourcePollWorkers  = 5
+	sourcePollTick    = 30 * time.Second // how often the poller checks for stale queries
+	sourcePollStale   = 2 * time.Minute  // query is stale if not executed in this window
+	sourcePollBatch   = 50               // max queries per poll cycle
+	sourcePollWorkers = 5                // concurrent refresh workers
 )
 
 // QueryRefresher executes a source query and emits change events.
@@ -66,16 +67,18 @@ func (p *SourcePoller) Poll(ctx context.Context) {
 		return
 	}
 
-	log.Debug().Int("count", len(queries)).Msg("source poller: refreshing watched queries")
+	log.Info().Int("stale_queries", len(queries)).Msg("source poller: poll cycle starting")
 
 	sem := make(chan struct{}, sourcePollWorkers)
 	var wg sync.WaitGroup
+	var refreshed, locked, failed atomic.Int32
 
 	for _, q := range queries {
 		// Distributed lock: only one replica refreshes this query per interval.
 		lockKey := common.Keys.HookPollLock(q.ExternalId)
 		acquired, err := p.rdb.SetNX(ctx, lockKey, "1", sourcePollStale).Result()
 		if err != nil || !acquired {
+			locked.Add(1)
 			continue
 		}
 
@@ -90,13 +93,22 @@ func (p *SourcePoller) Poll(ctx context.Context) {
 			defer cancel()
 
 			if err := p.refresher.RefreshQuery(rctx, query); err != nil {
+				failed.Add(1)
 				log.Warn().Err(err).
 					Str("path", query.Path).
 					Str("integration", query.Integration).
 					Msg("source poller: refresh failed")
+			} else {
+				refreshed.Add(1)
 			}
 		}(q)
 	}
 
 	wg.Wait()
+
+	log.Info().
+		Int32("refreshed", refreshed.Load()).
+		Int32("already_locked", locked.Load()).
+		Int32("failed", failed.Load()).
+		Msg("source poller: poll cycle complete")
 }

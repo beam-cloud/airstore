@@ -81,14 +81,57 @@ func (r *PostgresBackend) CreateWorkerToken(ctx context.Context, name string, po
 	return &t, raw, nil
 }
 
+// CreateWorkspaceServiceToken creates a workspace-scoped service token (no member).
+// Used for hooks and other automated workspace operations.
+func (r *PostgresBackend) CreateWorkspaceServiceToken(ctx context.Context, workspaceId uint, name string) (*types.Token, string, error) {
+	raw, err := generateToken()
+	if err != nil {
+		return nil, "", fmt.Errorf("generate token: %w", err)
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(raw), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, "", fmt.Errorf("hash token: %w", err)
+	}
+
+	query := `
+		INSERT INTO token (workspace_id, member_id, token_hash, name, expires_at, token_type)
+		VALUES ($1, NULL, $2, $3, NULL, 'workspace_service')
+		RETURNING id, external_id, workspace_id, member_id, token_type, token_hash, name, pool_name, expires_at, created_at, last_used_at
+	`
+
+	var t types.Token
+	err = r.db.QueryRowContext(ctx, query, workspaceId, string(hash), name).Scan(
+		&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.Name, &t.PoolName, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt,
+	)
+	if err != nil {
+		return nil, "", fmt.Errorf("create workspace service token: %w", err)
+	}
+	return &t, raw, nil
+}
+
+// EnsureWorkspaceServiceToken returns an existing workspace service token or creates one.
+// Returns the token record and the raw token string.
+// Note: if a service token already exists, we create a new one because
+// bcrypt hashes are one-way — we can't recover the raw token from an existing record.
+func (r *PostgresBackend) EnsureWorkspaceServiceToken(ctx context.Context, workspaceId uint) (*types.Token, string, error) {
+	return r.CreateWorkspaceServiceToken(ctx, workspaceId, "hooks")
+}
+
 func (r *PostgresBackend) ValidateToken(ctx context.Context, rawToken string) (*types.TokenValidationResult, error) {
-	// First, try to validate as a workspace token (has workspace_id and member_id)
+	// Try workspace member tokens (has workspace_id and member_id)
 	result, err := r.validateMemberToken(ctx, rawToken)
 	if err == nil && result != nil {
 		return result, nil
 	}
 
-	// Try to validate as a worker token (no workspace_id or member_id)
+	// Try workspace service tokens (has workspace_id, no member_id)
+	result, err = r.validateServiceToken(ctx, rawToken)
+	if err == nil && result != nil {
+		return result, nil
+	}
+
+	// Try worker tokens (cluster-level, no workspace_id or member_id)
 	return r.validateWorkerToken(ctx, rawToken)
 }
 
@@ -164,6 +207,67 @@ func (r *PostgresBackend) validateMemberToken(ctx context.Context, rawToken stri
 	return nil, fmt.Errorf("invalid token")
 }
 
+// validateServiceToken validates workspace service tokens (workspace-scoped, no member).
+func (r *PostgresBackend) validateServiceToken(ctx context.Context, rawToken string) (*types.TokenValidationResult, error) {
+	query := `
+		SELECT
+			t.id, t.token_hash, t.expires_at,
+			w.id, w.external_id, w.name
+		FROM token t
+		JOIN workspace w ON t.workspace_id = w.id
+		WHERE (t.expires_at IS NULL OR t.expires_at > CURRENT_TIMESTAMP)
+		  AND t.token_type = 'workspace_service'
+	`
+
+	rows, err := r.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("query service tokens: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			tokenId       uint
+			tokenHash     string
+			expiresAt     sql.NullTime
+			workspaceId   uint
+			workspaceExt  string
+			workspaceName string
+		)
+
+		if err := rows.Scan(
+			&tokenId, &tokenHash, &expiresAt,
+			&workspaceId, &workspaceExt, &workspaceName,
+		); err != nil {
+			return nil, fmt.Errorf("scan service token: %w", err)
+		}
+
+		if bcrypt.CompareHashAndPassword([]byte(tokenHash), []byte(rawToken)) != nil {
+			continue
+		}
+
+		if expiresAt.Valid && expiresAt.Time.Before(time.Now()) {
+			return nil, fmt.Errorf("token expired")
+		}
+
+		go func(id uint) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			r.db.ExecContext(ctx, `UPDATE token SET last_used_at = CURRENT_TIMESTAMP WHERE id = $1`, id)
+		}(tokenId)
+
+		return &types.TokenValidationResult{
+			TokenType:     types.TokenTypeWorkspaceService,
+			TokenId:       tokenId,
+			WorkspaceId:   workspaceId,
+			WorkspaceExt:  workspaceExt,
+			WorkspaceName: workspaceName,
+		}, nil
+	}
+
+	return nil, fmt.Errorf("invalid token")
+}
+
 func (r *PostgresBackend) validateWorkerToken(ctx context.Context, rawToken string) (*types.TokenValidationResult, error) {
 	query := `
 		SELECT t.id, t.token_hash, t.expires_at, t.pool_name
@@ -233,7 +337,8 @@ func (r *PostgresBackend) AuthorizeToken(ctx context.Context, rawToken string) (
 		TokenId:   result.TokenId,
 	}
 
-	if result.TokenType == types.TokenTypeWorkspaceMember {
+	switch result.TokenType {
+	case types.TokenTypeWorkspaceMember:
 		info.Workspace = &types.WorkspaceInfo{
 			Id:         result.WorkspaceId,
 			ExternalId: result.WorkspaceExt,
@@ -245,7 +350,14 @@ func (r *PostgresBackend) AuthorizeToken(ctx context.Context, rawToken string) (
 			Email:      result.MemberEmail,
 			Role:       result.MemberRole,
 		}
-	} else if result.TokenType == types.TokenTypeWorker {
+	case types.TokenTypeWorkspaceService:
+		info.Workspace = &types.WorkspaceInfo{
+			Id:         result.WorkspaceId,
+			ExternalId: result.WorkspaceExt,
+			Name:       result.WorkspaceName,
+		}
+		// No member info — service tokens are workspace-scoped, not member-scoped.
+	case types.TokenTypeWorker:
 		info.Worker = &types.WorkerInfo{
 			PoolName: result.PoolName,
 		}

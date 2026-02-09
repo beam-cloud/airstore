@@ -7,6 +7,7 @@ const (
 	TokenTypeClusterAdmin    TokenType = "cluster_admin"
 	TokenTypeWorkspaceMember TokenType = "workspace_member"
 	TokenTypeWorker          TokenType = "worker"
+	TokenTypeWorkspaceService TokenType = "workspace_service"
 )
 
 // AuthInfo contains identity information for authenticated requests.
@@ -43,6 +44,10 @@ func (a *AuthInfo) IsWorkspaceMember() bool {
 	return a != nil && a.TokenType == TokenTypeWorkspaceMember && a.Workspace != nil
 }
 
+func (a *AuthInfo) IsWorkspaceService() bool {
+	return a != nil && a.TokenType == TokenTypeWorkspaceService && a.Workspace != nil
+}
+
 func (a *AuthInfo) IsWorker() bool {
 	return a != nil && a.TokenType == TokenTypeWorker
 }
@@ -52,6 +57,9 @@ func (a *AuthInfo) HasWorkspaceAccess(workspaceExtId string) bool {
 		return false
 	}
 	if a.IsClusterAdmin() {
+		return true
+	}
+	if a.IsWorkspaceService() && a.Workspace.ExternalId == workspaceExtId {
 		return true
 	}
 	return a.IsWorkspaceMember() && a.Workspace.ExternalId == workspaceExtId
@@ -73,6 +81,9 @@ func (a *AuthInfo) CanWrite() bool {
 	}
 	if a.IsClusterAdmin() {
 		return true
+	}
+	if a.IsWorkspaceService() {
+		return true // service tokens have full workspace write access
 	}
 	if a.IsWorkspaceMember() && a.Member != nil {
 		return a.Member.Role == RoleAdmin || a.Member.Role == RoleMember

@@ -179,6 +179,10 @@ func (s *SourceService) RefreshQuery(ctx context.Context, query *types.Filesyste
 
 	// Detect new results for hook triggers.
 	// Two-phase: Compare (read-only) → Emit → Commit (advance the set).
+	// The distributed lock in SourcePoller already ensures only one replica
+	// refreshes a given query per interval. The consumer group ensures
+	// exactly-once delivery. The DB unique constraint rejects duplicate tasks.
+	// So we don't need a cooldown — just emit on new IDs and commit on success.
 	if s.seenTracker != nil && s.hookStream != nil && len(results) > 0 {
 		seenKey := common.Keys.HookSeen(pctx.WorkspaceId, types.GeneratePathID(query.Path))
 		ids := make([]string, len(results))
@@ -187,42 +191,36 @@ func (s *SourceService) RefreshQuery(ctx context.Context, query *types.Filesyste
 		}
 
 		newIDs, compareErr := s.seenTracker.Compare(ctx, seenKey, ids)
-		emitted := false
 
 		if compareErr != nil {
 			log.Warn().Err(compareErr).Str("path", query.Path).Msg("seen tracker compare failed, skipping commit")
-		} else if len(newIDs) > 0 {
-			// Cooldown: only one emission per path per 5 minutes across all replicas.
-			cooldownKey := seenKey + ":cooldown"
-			acquired, _ := s.seenTracker.TrySetCooldown(ctx, cooldownKey, 5*time.Minute)
-			if acquired {
-				if emitErr := s.hookStream.Emit(ctx, map[string]any{
-					"event":        hooks.EventSourceChange,
-					"workspace_id": fmt.Sprintf("%d", pctx.WorkspaceId),
-					"path":         query.Path,
-					"integration":  query.Integration,
-					"new_count":    fmt.Sprintf("%d", len(newIDs)),
-				}); emitErr == nil {
-					emitted = true
-					log.Info().
-						Str("path", query.Path).
-						Int("new_results", len(newIDs)).
-						Msg("source change detected, hook event emitted")
-				} else {
-					log.Warn().Err(emitErr).Str("path", query.Path).Msg("failed to emit source change event")
-				}
-			} else {
-				emitted = true
-				log.Debug().Str("path", query.Path).Msg("source change detected but cooldown active, skipping emit")
-			}
-		} else {
-			emitted = true // no new IDs, safe to advance
+			return nil
 		}
 
-		if emitted {
-			if err := s.seenTracker.Commit(ctx, seenKey, ids); err != nil {
-				log.Warn().Err(err).Str("path", query.Path).Msg("seen tracker commit failed, next poll may re-fire")
+		if len(newIDs) > 0 {
+			if emitErr := s.hookStream.Emit(ctx, map[string]any{
+				"event":        hooks.EventSourceChange,
+				"workspace_id": fmt.Sprintf("%d", pctx.WorkspaceId),
+				"path":         query.Path,
+				"integration":  query.Integration,
+				"new_count":    fmt.Sprintf("%d", len(newIDs)),
+				"new_items":    strings.Join(newIDs, ", "),
+			}); emitErr != nil {
+				log.Error().Err(emitErr).Str("path", query.Path).Int("new_results", len(newIDs)).
+					Msg("failed to emit source change event, will retry next poll")
+				return nil // don't commit — two-phase: retry on next poll
 			}
+			log.Info().
+				Str("path", query.Path).
+				Str("integration", query.Integration).
+				Int("new_results", len(newIDs)).
+				Msg("source change detected, hook event emitted")
+		}
+
+		// Commit: advance the seen set. Safe because either we emitted
+		// successfully or there were no new IDs (just refreshing the baseline).
+		if err := s.seenTracker.Commit(ctx, seenKey, ids); err != nil {
+			log.Warn().Err(err).Str("path", query.Path).Msg("seen tracker commit failed, next poll may re-fire")
 		}
 	}
 

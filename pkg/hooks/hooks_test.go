@@ -3,11 +3,13 @@ package hooks
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/repository"
+	"github.com/beam-cloud/airstore/pkg/skills"
 	"github.com/beam-cloud/airstore/pkg/types"
 )
 
@@ -248,9 +250,10 @@ func TestEngine_Submit_PromptEnrichment(t *testing.T) {
 		t.Fatalf("expected 1 task after debounce, got %d", creator.count())
 	}
 	task := creator.last()
-	expected := "do stuff\n\nEvent: file changed at skills/report.md\n\nThe file is in your working directory at: skills/report.md"
+	// New structured prompt: trigger first, then user prompt
+	expected := "## Trigger\n\nA file was modified at `skills/report.md`.\nRead the updated content from: `skills/report.md`\n\ndo stuff"
 	if task.Prompt != expected {
-		t.Errorf("unexpected prompt: %s", task.Prompt)
+		t.Errorf("unexpected prompt:\ngot:  %q\nwant: %q", task.Prompt, expected)
 	}
 }
 
@@ -487,6 +490,241 @@ func TestDecodeToken_Empty(t *testing.T) {
 	_, err = DecodeToken([]byte{})
 	if err == nil {
 		t.Error("expected error for empty token")
+	}
+}
+
+// --- Mock SkillReader ---
+
+type mockSkillReader struct {
+	content string
+	err     error
+}
+
+func (m *mockSkillReader) ReadSkillContent(_ context.Context, _ uint, _ string) (string, error) {
+	if m.err != nil {
+		return "", m.err
+	}
+	return m.content, nil
+}
+
+// --- Prompt construction tests ---
+
+func TestBuildTriggerContext_FsCreate(t *testing.T) {
+	data := makeEvent(EventFsCreate, "/inbox/doc.pdf", 10)
+	got := buildTriggerContext(EventFsCreate, data)
+	want := "## Trigger\n\nA new file was created at `inbox/doc.pdf`.\nRead it from your working directory: `inbox/doc.pdf`"
+	if got != want {
+		t.Errorf("buildTriggerContext(FsCreate):\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestBuildTriggerContext_SourceChange(t *testing.T) {
+	data := map[string]any{
+		"event":        EventSourceChange,
+		"workspace_id": "10",
+		"path":         "/sources/gmail/inbox",
+		"integration":  "gmail",
+		"new_count":    "3",
+		"new_items":    "msg-1, msg-2, msg-3",
+	}
+	got := buildTriggerContext(EventSourceChange, data)
+
+	if !strings.Contains(got, "Source: **gmail**") {
+		t.Errorf("expected integration in trigger, got: %s", got)
+	}
+	if !strings.Contains(got, "3 new item(s)") {
+		t.Errorf("expected new count in trigger, got: %s", got)
+	}
+	if !strings.Contains(got, "New items: msg-1, msg-2, msg-3") {
+		t.Errorf("expected new items in trigger, got: %s", got)
+	}
+}
+
+func TestBuildTriggerContext_SourceChangeWithoutItems(t *testing.T) {
+	data := map[string]any{
+		"event":        EventSourceChange,
+		"workspace_id": "10",
+		"path":         "/sources/gmail/inbox",
+		"integration":  "gmail",
+		"new_count":    "5",
+	}
+	got := buildTriggerContext(EventSourceChange, data)
+
+	if strings.Contains(got, "New items:") {
+		t.Errorf("should not contain 'New items:' when no items, got: %s", got)
+	}
+}
+
+func TestBuildTriggerContext_UnknownEvent(t *testing.T) {
+	data := makeEvent("unknown.event", "/some/path", 10)
+	got := buildTriggerContext("unknown.event", data)
+	if got != "" {
+		t.Errorf("expected empty string for unknown event, got: %q", got)
+	}
+}
+
+func TestBuildSkillContext_NilMeta(t *testing.T) {
+	got := buildSkillContext(nil, nil)
+	if got != "" {
+		t.Errorf("expected empty for nil meta, got: %q", got)
+	}
+}
+
+func TestBuildSkillContext_MismatchedIntegration(t *testing.T) {
+	meta := &skills.AirstoreSkillMeta{Needs: []string{"gmail"}}
+	data := map[string]any{"integration": "gdrive"}
+	got := buildSkillContext(meta, data)
+
+	if !strings.Contains(got, "designed for gmail") {
+		t.Errorf("expected mismatch warning, got: %q", got)
+	}
+	if !strings.Contains(got, "triggered by gdrive") {
+		t.Errorf("expected triggered-by info, got: %q", got)
+	}
+}
+
+func TestBuildSkillContext_MatchedIntegration(t *testing.T) {
+	meta := &skills.AirstoreSkillMeta{Needs: []string{"gmail"}}
+	data := map[string]any{"integration": "gmail"}
+	got := buildSkillContext(meta, data)
+
+	if strings.Contains(got, "designed for") {
+		t.Errorf("should not warn when integration matches, got: %q", got)
+	}
+}
+
+func TestBuildSkillContext_WritePaths(t *testing.T) {
+	meta := &skills.AirstoreSkillMeta{Writes: []string{"/memory/email-triage/", "/reports/"}}
+	data := map[string]any{}
+	got := buildSkillContext(meta, data)
+
+	if !strings.Contains(got, "Write output to:") {
+		t.Errorf("expected write paths, got: %q", got)
+	}
+	if !strings.Contains(got, "`memory/email-triage/`") {
+		t.Errorf("expected relative path, got: %q", got)
+	}
+}
+
+func TestBuildPrompt_FullStructure(t *testing.T) {
+	skillContent := `---
+name: email-triage
+description: Categorize emails by urgency.
+metadata:
+  airstore:
+    needs:
+      - gmail
+    writes:
+      - /memory/email-triage/
+---
+
+Read all new emails and categorize them by urgency.
+`
+	reader := &mockSkillReader{content: skillContent}
+	hook := makeHook(1, 10, "/sources/gmail/inbox", "Also flag anything from VIPs.")
+	hook.SkillPath = "/skills/email-triage"
+	store := &mockStore{hooks: []*types.Hook{hook}}
+	creator := &mockCreator{}
+	backend := &mockBackend{}
+	eng := NewEngine(store, creator, backend, reader)
+
+	data := map[string]any{
+		"event":        EventSourceChange,
+		"workspace_id": "10",
+		"path":         "/sources/gmail/inbox",
+		"integration":  "gmail",
+		"new_count":    "2",
+		"new_items":    "msg-a, msg-b",
+	}
+
+	ctx := context.Background()
+	prompt := eng.buildPrompt(ctx, hook, EventSourceChange, data)
+
+	// Section 1: Trigger context
+	if !strings.Contains(prompt, "## Trigger") {
+		t.Error("prompt missing trigger section")
+	}
+	if !strings.Contains(prompt, "2 new item(s)") {
+		t.Error("prompt missing new count")
+	}
+	if !strings.Contains(prompt, "New items: msg-a, msg-b") {
+		t.Error("prompt missing new items")
+	}
+
+	// Section 2: Skill instructions
+	if !strings.Contains(prompt, "Read all new emails and categorize them by urgency.") {
+		t.Error("prompt missing skill instructions")
+	}
+
+	// Section 3: Skill context (write paths)
+	if !strings.Contains(prompt, "Write output to:") {
+		t.Error("prompt missing write paths from skill metadata")
+	}
+
+	// Section 4: Additional user prompt
+	if !strings.Contains(prompt, "Also flag anything from VIPs.") {
+		t.Error("prompt missing additional user prompt")
+	}
+
+	// Verify order: trigger comes before skill instructions
+	triggerIdx := strings.Index(prompt, "## Trigger")
+	skillIdx := strings.Index(prompt, "Read all new emails")
+	userIdx := strings.Index(prompt, "Also flag anything")
+	if triggerIdx >= skillIdx {
+		t.Error("trigger should come before skill instructions")
+	}
+	if skillIdx >= userIdx {
+		t.Error("skill instructions should come before user prompt")
+	}
+}
+
+func TestBuildPrompt_NoSkill(t *testing.T) {
+	hook := makeHook(1, 10, "/inbox", "process these files")
+	store := &mockStore{hooks: []*types.Hook{hook}}
+	creator := &mockCreator{}
+	backend := &mockBackend{}
+	eng := NewEngine(store, creator, backend, nil)
+
+	data := makeEvent(EventFsCreate, "/inbox/report.pdf", 10)
+	ctx := context.Background()
+	prompt := eng.buildPrompt(ctx, hook, EventFsCreate, data)
+
+	if !strings.Contains(prompt, "## Trigger") {
+		t.Error("prompt missing trigger section")
+	}
+	if !strings.Contains(prompt, "process these files") {
+		t.Error("prompt missing user prompt")
+	}
+}
+
+func TestBuildPrompt_SkillOnly_NoAdditionalPrompt(t *testing.T) {
+	skillContent := `---
+name: summarizer
+description: Summarize documents.
+---
+
+Summarize the document concisely.
+`
+	reader := &mockSkillReader{content: skillContent}
+	hook := makeHook(1, 10, "/inbox", "")
+	hook.SkillPath = "/skills/summarizer"
+	store := &mockStore{hooks: []*types.Hook{hook}}
+	creator := &mockCreator{}
+	backend := &mockBackend{}
+	eng := NewEngine(store, creator, backend, reader)
+
+	data := makeEvent(EventFsCreate, "/inbox/report.pdf", 10)
+	ctx := context.Background()
+	prompt := eng.buildPrompt(ctx, hook, EventFsCreate, data)
+
+	if !strings.Contains(prompt, "Summarize the document concisely.") {
+		t.Error("prompt missing skill instructions")
+	}
+	// With empty user prompt, it should still have trigger + skill but no trailing empty section
+	parts := strings.Split(prompt, "\n\n")
+	lastPart := parts[len(parts)-1]
+	if lastPart == "" {
+		t.Error("prompt should not end with empty section")
 	}
 }
 

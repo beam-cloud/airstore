@@ -70,7 +70,10 @@ func (eng *Engine) Handle(id string, data map[string]any) {
 	wsId := ParseUint(data["workspace_id"])
 	path, _ := data["path"].(string)
 
-	if wsId == 0 || path == "" {
+	if wsId == 0 || path == "" || event == "" {
+		log.Warn().Str("id", id).Str("event", event).Str("path", path).
+			Interface("workspace_id", data["workspace_id"]).
+			Msg("hook engine: dropping malformed event")
 		return
 	}
 
@@ -78,7 +81,14 @@ func (eng *Engine) Handle(id string, data map[string]any) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		for _, h := range eng.cache.match(ctx, wsId, path) {
+		hooks := eng.cache.match(ctx, wsId, path)
+		if len(hooks) == 0 {
+			log.Debug().Str("event", event).Str("path", path).Uint("workspace_id", wsId).
+				Msg("hook engine: no matching hooks")
+			return
+		}
+
+		for _, h := range hooks {
 			eng.submit(ctx, h, event, data)
 		}
 	}
@@ -94,41 +104,75 @@ func (eng *Engine) InvalidateCache(wsId uint) { eng.cache.invalidate(wsId) }
 
 func (eng *Engine) submit(ctx context.Context, h *types.Hook, event string, data map[string]any) {
 	if h.TokenId == nil {
+		log.Warn().Str("hook", h.ExternalId).Msg("hook has no token, skipping (re-create hook to fix)")
 		return
 	}
 
 	token, err := DecodeToken(h.EncryptedToken)
-	if err != nil {
+	if err != nil || token == "" {
+		log.Warn().Err(err).Str("hook", h.ExternalId).Msg("hook token invalid, skipping")
 		return
 	}
 
-	// Build the prompt from skill content + optional additional prompt
-	basePrompt := h.Prompt
-	if h.SkillPath != "" && eng.skillReader != nil {
-		skillContent, err := eng.skillReader.ReadSkillContent(ctx, h.WorkspaceId, h.SkillPath)
-		if err != nil {
-			log.Warn().Err(err).Str("skill_path", h.SkillPath).Msg("failed to read skill content")
-		} else {
-			// Extract instructions from SKILL.md (after frontmatter)
-			instructions := skills.ExtractInstructions([]byte(skillContent))
-			if instructions != "" {
-				if h.Prompt != "" {
-					// Skill instructions + additional prompt
-					basePrompt = instructions + "\n\n" + h.Prompt
-				} else {
-					basePrompt = instructions
-				}
-			}
-		}
-	}
-
-	prompt := enrichPrompt(basePrompt, event, data)
+	prompt := eng.buildPrompt(ctx, h, event, data)
 	if err := eng.creator.CreateTask(ctx, h.WorkspaceId, h.CreatedByMemberId, token, prompt,
 		h.Id, 1, maxAttempts); err != nil {
 		return // DB constraint rejects duplicates -- expected
 	}
 
 	log.Info().Str("hook", h.ExternalId).Str("event", event).Str("skill_path", h.SkillPath).Msg("hook fired")
+}
+
+// buildPrompt constructs a structured prompt for the Claude Code task.
+//
+// The prompt has three clearly separated sections:
+//   1. Trigger context  – what happened (event type, path, integration, items)
+//   2. Skill instructions – from SKILL.md (if a skill is attached)
+//   3. Additional context – user-provided extra instructions on the hook
+//
+// This structure gives Claude a clear "situation → instructions → extra context"
+// flow so it knows what triggered the task before reading what to do about it.
+func (eng *Engine) buildPrompt(ctx context.Context, h *types.Hook, event string, data map[string]any) string {
+	var sections []string
+
+	// --- Section 1: Trigger context ---
+	trigger := buildTriggerContext(event, data)
+	if trigger != "" {
+		sections = append(sections, trigger)
+	}
+
+	// --- Section 2: Skill instructions (if any) ---
+	var skillMeta *skills.AirstoreSkillMeta
+	if h.SkillPath != "" && eng.skillReader != nil {
+		skillContent, err := eng.skillReader.ReadSkillContent(ctx, h.WorkspaceId, h.SkillPath)
+		if err != nil {
+			log.Warn().Err(err).Str("skill_path", h.SkillPath).Msg("failed to read skill content")
+		} else {
+			// Parse manifest for metadata (needs/writes)
+			manifest, parseErr := skills.Parse([]byte(skillContent))
+			if parseErr == nil {
+				skillMeta = manifest.AirstoreMetadata()
+			}
+
+			// Extract the instruction body (everything after frontmatter)
+			instructions := skills.ExtractInstructions([]byte(skillContent))
+			if instructions != "" {
+				sections = append(sections, instructions)
+			}
+		}
+	}
+
+	// --- Section 3: Integration/skill context ---
+	if meta := buildSkillContext(skillMeta, data); meta != "" {
+		sections = append(sections, meta)
+	}
+
+	// --- Section 4: Additional user-provided prompt ---
+	if h.Prompt != "" {
+		sections = append(sections, h.Prompt)
+	}
+
+	return strings.Join(sections, "\n\n")
 }
 
 // Start runs the retry poller. Call as a goroutine.
@@ -210,39 +254,103 @@ func retryDelay(attempt int) time.Duration {
 	return d
 }
 
-func enrichPrompt(base, event string, data map[string]any) string {
+// buildTriggerContext constructs the "what happened" section of the prompt.
+// This is always the first thing Claude sees so it understands the trigger.
+func buildTriggerContext(event string, data map[string]any) string {
 	path, _ := data["path"].(string)
 	integration, _ := data["integration"].(string)
 	newCount, _ := data["new_count"].(string)
+	newItems, _ := data["new_items"].(string)
 
 	// Use relative paths — the airstore filesystem is mounted at the working
 	// directory (/workspace). Absolute paths like /sources/... don't exist
 	// inside the container; only workspace-relative paths work.
 	relPath := strings.TrimPrefix(path, "/")
 
-	var line string
+	var b strings.Builder
+
 	switch event {
 	case EventFsCreate:
-		line = "Event: new file created at " + relPath +
-			"\n\nThe file is in your working directory at: " + relPath
+		b.WriteString("## Trigger\n\n")
+		b.WriteString("A new file was created at `" + relPath + "`.\n")
+		b.WriteString("Read it from your working directory: `" + relPath + "`")
+
 	case EventFsWrite:
-		line = "Event: file changed at " + relPath +
-			"\n\nThe file is in your working directory at: " + relPath
+		b.WriteString("## Trigger\n\n")
+		b.WriteString("A file was modified at `" + relPath + "`.\n")
+		b.WriteString("Read the updated content from: `" + relPath + "`")
+
 	case EventFsDelete:
-		line = "Event: file deleted at " + relPath
+		b.WriteString("## Trigger\n\n")
+		b.WriteString("A file was deleted at `" + relPath + "`.")
+
 	case EventSourceChange:
-		line = "Event: " + newCount + " new result(s) in " + relPath + "/"
+		b.WriteString("## Trigger\n\n")
 		if integration != "" {
-			line += " (source: " + integration + ")"
+			b.WriteString("Source: **" + integration + "**\n")
 		}
-		line += "\n\nThe new content is in your working directory at: " + relPath + "/" +
-			"\nList and read the files there to see what changed."
+		b.WriteString(newCount + " new item(s) appeared in `" + relPath + "/`.\n")
+		b.WriteString("The new content is in your working directory at: `" + relPath + "/`\n")
+		b.WriteString("List and read the files there to see what changed.")
+
+		// Include item IDs if the source poller provided them
+		if newItems != "" {
+			b.WriteString("\n\nNew items: " + newItems)
+		}
+
+	default:
+		return ""
 	}
 
-	if line == "" {
+	return b.String()
+}
+
+// buildSkillContext adds integration/output path hints from the skill's metadata.
+// This helps Claude understand which integrations are relevant and where to write output.
+func buildSkillContext(meta *skills.AirstoreSkillMeta, data map[string]any) string {
+	if meta == nil {
+		return ""
+	}
+
+	var parts []string
+
+	if len(meta.Needs) > 0 {
+		integration, _ := data["integration"].(string)
+		matched := false
+		for _, need := range meta.Needs {
+			if need == integration {
+				matched = true
+				break
+			}
+		}
+		if !matched && integration != "" {
+			parts = append(parts, "Note: this skill is designed for "+strings.Join(meta.Needs, ", ")+
+				" but was triggered by "+integration+". Adapt accordingly.")
+		}
+	}
+
+	if len(meta.Writes) > 0 {
+		relPaths := make([]string, len(meta.Writes))
+		for i, w := range meta.Writes {
+			relPaths[i] = "`" + strings.TrimPrefix(w, "/") + "`"
+		}
+		parts = append(parts, "Write output to: "+strings.Join(relPaths, ", "))
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "\n")
+}
+
+// enrichPrompt is kept for backward compatibility with existing tests.
+// New code should use buildPrompt instead.
+func enrichPrompt(base, event string, data map[string]any) string {
+	trigger := buildTriggerContext(event, data)
+	if trigger == "" {
 		return base
 	}
-	return base + "\n\n" + line
+	return trigger + "\n\n" + base
 }
 
 func EncodeToken(raw string) ([]byte, error) { return json.Marshal(raw) }
