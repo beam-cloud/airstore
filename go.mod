@@ -4,6 +4,8 @@ go 1.24.0
 
 toolchain go1.24.12
 
+replace fyne.io/systray => ./third_party/systray
+
 require (
 	fyne.io/systray v1.12.0
 	github.com/alicebob/miniredis/v2 v2.36.1
