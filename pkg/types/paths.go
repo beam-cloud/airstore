@@ -11,24 +11,29 @@ func SystemPaths() []string {
 }
 
 // IsSystemRootPath returns true if the path is a system root directory.
+// Comparison is case-insensitive to handle paths from different sources.
 func IsSystemRootPath(p string) bool {
 	p = strings.TrimSuffix(p, "/")
+	pLower := strings.ToLower(p)
 	for _, sys := range SystemPaths() {
-		if p == sys {
+		if pLower == strings.ToLower(sys) {
 			return true
 		}
 	}
 	return false
 }
 
-// IsRootLevelSource returns true if path is a root-level source like /sources/gmail
-// but not a nested path like /sources/gmail/query.
+// IsRootLevelSource returns true if path is a root-level source like /Sources/gmail
+// but not a nested path like /Sources/gmail/query.
+// Comparison is case-insensitive to handle paths from different sources.
 func IsRootLevelSource(p string) bool {
 	p = strings.TrimSuffix(p, "/")
-	if !strings.HasPrefix(p, PathSources+"/") {
+	pLower := strings.ToLower(p)
+	sourcesPrefix := strings.ToLower(PathSources) + "/"
+	if !strings.HasPrefix(pLower, sourcesPrefix) {
 		return false
 	}
-	rest := strings.TrimPrefix(p, PathSources+"/")
+	rest := pLower[len(sourcesPrefix):]
 	// Root-level source has no slash in the rest (e.g., "gmail")
 	// Nested has at least one slash (e.g., "gmail/my-query")
 	return rest != "" && !strings.Contains(rest, "/")

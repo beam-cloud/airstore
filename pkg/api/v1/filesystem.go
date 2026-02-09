@@ -959,6 +959,7 @@ func (g *FilesystemGroup) listSources(c echo.Context, ctx context.Context, relPa
 
 		// Build a map of query paths to external_ids for smart queries
 		// This allows us to include the external_id in VirtualFile metadata
+		// Use lowercase keys for case-insensitive matching (database may have old lowercase paths)
 		queryExternalIds := make(map[string]string)
 		queryGuidance := make(map[string]string)
 		integration, _ := splitFirstPath(relPath)
@@ -970,8 +971,9 @@ func (g *FilesystemGroup) listSources(c echo.Context, ctx context.Context, relPa
 			})
 			if err == nil && queriesResp.Ok {
 				for _, q := range queriesResp.Queries {
-					queryExternalIds[q.Path] = q.ExternalId
-					queryGuidance[q.Path] = q.Guidance
+					// Use lowercase keys to handle both old (lowercase) and new (uppercase) paths
+					queryExternalIds[strings.ToLower(q.Path)] = q.ExternalId
+					queryGuidance[strings.ToLower(q.Path)] = q.Guidance
 				}
 			}
 		}
@@ -989,10 +991,12 @@ func (g *FilesystemGroup) listSources(c echo.Context, ctx context.Context, relPa
 			).WithFolder(e.IsDir).WithReadOnly(true).WithMetadata(types.MetaKeyProvider, integration)
 
 			// Add external_id and guidance if this is a smart query
-			if extId, ok := queryExternalIds[entryPath]; ok {
+			// Use lowercase for lookup to match how we stored them (case-insensitive)
+			entryPathLower := strings.ToLower(entryPath)
+			if extId, ok := queryExternalIds[entryPathLower]; ok {
 				vf = vf.WithMetadata(types.MetaKeyExternalID, extId)
 			}
-			if guidance, ok := queryGuidance[entryPath]; ok {
+			if guidance, ok := queryGuidance[entryPathLower]; ok {
 				vf = vf.WithMetadata(types.MetaKeyGuidance, guidance)
 			}
 

@@ -217,12 +217,13 @@ func (s *filesystemStore) ListQueries(ctx context.Context, workspaceId uint, par
 		s.mu.RLock()
 		defer s.mu.RUnlock()
 
-		prefix := parentPath + "/"
+		// Use lowercase for case-insensitive matching
+		prefixLower := strings.ToLower(parentPath) + "/"
 		var queries []*types.FilesystemQuery
 		for _, q := range s.memQueries {
-			if q.WorkspaceId == workspaceId && strings.HasPrefix(q.Path, prefix) {
+			if q.WorkspaceId == workspaceId && strings.HasPrefix(strings.ToLower(q.Path), prefixLower) {
 				// Ensure it's a direct child (no additional /)
-				rel := strings.TrimPrefix(q.Path, prefix)
+				rel := strings.ToLower(q.Path)[len(prefixLower):]
 				if !strings.Contains(rel, "/") {
 					queries = append(queries, q)
 				}
@@ -231,13 +232,14 @@ func (s *filesystemStore) ListQueries(ctx context.Context, workspaceId uint, par
 		return queries, nil
 	}
 
+	// Use ILIKE for case-insensitive matching (handles old lowercase paths)
 	pattern := parentPath + "/%"
 	excludePattern := parentPath + "/%/%"
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, external_id, workspace_id, integration, path, name, query_spec, guidance, output_format, file_ext, filename_format, cache_ttl, created_at, updated_at, last_executed
 		FROM filesystem_queries 
-		WHERE workspace_id = $1 AND path LIKE $2 AND path NOT LIKE $3
+		WHERE workspace_id = $1 AND path ILIKE $2 AND path NOT ILIKE $3
 		ORDER BY name
 	`, workspaceId, pattern, excludePattern)
 	if err != nil {
