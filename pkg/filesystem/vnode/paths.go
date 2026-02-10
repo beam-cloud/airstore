@@ -1,15 +1,18 @@
 package vnode
 
-// Reserved paths in the virtual filesystem
+import "github.com/beam-cloud/airstore/pkg/types"
+
+// Re-export path constants from types for backward compatibility.
+// New code should import from types directly.
 const (
-	ToolsPath         = "/tools"
-	ToolsPathPrefix   = "/tools/"
-	SkillsPath        = "/skills"
-	SkillsPathPrefix  = "/skills/"
-	TasksPath         = "/tasks"
-	TasksPathPrefix   = "/tasks/"
-	SourcesPath       = "/sources"
-	SourcesPathPrefix = "/sources/"
+	ToolsPath         = types.PathTools
+	ToolsPathPrefix   = types.PathTools + "/"
+	SkillsPath        = types.PathSkills
+	SkillsPathPrefix  = types.PathSkills + "/"
+	TasksPath         = types.PathTasks
+	TasksPathPrefix   = types.PathTasks + "/"
+	SourcesPath       = types.PathSources
+	SourcesPathPrefix = types.PathSources + "/"
 	ConfigDir         = "/.airstore"
 	ConfigFile        = "/.airstore/config"
 )

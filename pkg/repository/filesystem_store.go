@@ -44,6 +44,9 @@ type FilesystemStore interface {
 	// ListQueries returns all queries under a parent path.
 	ListQueries(ctx context.Context, workspaceId uint, parentPath string) ([]*types.FilesystemQuery, error)
 
+	// CountQueries returns the count of queries in a workspace.
+	CountQueries(ctx context.Context, workspaceId uint) (int, error)
+
 	// UpdateQuery updates an existing query definition.
 	UpdateQuery(ctx context.Context, query *types.FilesystemQuery) error
 

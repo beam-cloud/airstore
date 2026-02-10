@@ -19,16 +19,18 @@ const (
 
 // Directory names and paths
 const (
-	DirNameSkills  = "skills"
-	DirNameSources = "sources"
-	DirNameTools   = "tools"
-	DirNameTasks   = "tasks"
+	DirNameSkills  = "Skills"
+	DirNameSources = "Sources"
+	DirNameTools   = "Tools"
+	DirNameTasks   = "Tasks"
+	DirNameMemory  = "Memory"
 
 	PathRoot    = "/"
-	PathSkills  = "/skills"
-	PathSources = "/sources"
-	PathTools   = "/tools"
-	PathTasks   = "/tasks"
+	PathSkills  = "/Skills"
+	PathSources = "/Sources"
+	PathTools   = "/Tools"
+	PathTasks   = "/Tasks"
+	PathMemory  = "/Memory"
 )
 
 // Source integration files
@@ -43,6 +45,7 @@ var (
 		DirNameSources: {},
 		DirNameTools:   {},
 		DirNameTasks:   {},
+		DirNameMemory:  {},
 	}
 
 	VirtualFolders = map[string]struct{}{
@@ -94,6 +97,13 @@ func ToolsPath(subpath string) string {
 		return PathTools
 	}
 	return JoinPath(PathTools, subpath)
+}
+
+func MemoryPath(subpath string) string {
+	if subpath == "" {
+		return PathMemory
+	}
+	return JoinPath(PathMemory, subpath)
 }
 
 // VirtualFile represents a file or folder in the virtual filesystem

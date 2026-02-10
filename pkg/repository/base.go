@@ -69,6 +69,10 @@ type TokenRepository interface {
 	CreateWorkerToken(ctx context.Context, name string, poolName *string, expiresAt *time.Time) (*types.Token, string, error)
 	ListWorkerTokens(ctx context.Context) ([]types.Token, error)
 
+	// Workspace service tokens (workspace-scoped, no member)
+	CreateWorkspaceServiceToken(ctx context.Context, workspaceId uint, name string) (*types.Token, string, error)
+	EnsureWorkspaceServiceToken(ctx context.Context, workspaceId uint) (*types.Token, string, error)
+
 	// Validation
 	ValidateToken(ctx context.Context, rawToken string) (*types.TokenValidationResult, error)
 	AuthorizeToken(ctx context.Context, rawToken string) (*types.AuthInfo, error)
@@ -135,6 +139,7 @@ type BackendRepository interface {
 	SetTaskResult(ctx context.Context, externalId string, exitCode int, errorMsg string) error
 	CancelTask(ctx context.Context, externalId string) error
 	DeleteTask(ctx context.Context, externalId string) error
+	MarkTaskRetried(ctx context.Context, externalId string) error
 	GetRetryableTasks(ctx context.Context) ([]*types.Task, error)
 	GetStuckHookTasks(ctx context.Context, timeout time.Duration) ([]*types.Task, error)
 	ListTasksByHook(ctx context.Context, hookId uint) ([]*types.Task, error)

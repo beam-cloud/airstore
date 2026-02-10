@@ -162,7 +162,9 @@ func (s *SourceService) RefreshSmartQuery(ctx context.Context, queryPath string)
 	return results, nil
 }
 
-// RefreshQuery re-executes a query without auth context (for background polling).
+// RefreshQuery re-executes a query and emits hook events if new results are found.
+// ONLY called by the source poller — never by user browsing or task filesystem reads.
+// This prevents a feedback loop where hook-triggered tasks re-trigger hooks.
 // Satisfies hooks.QueryRefresher.
 func (s *SourceService) RefreshQuery(ctx context.Context, query *types.FilesystemQuery) error {
 	pctx := &sources.ProviderContext{WorkspaceId: query.WorkspaceId}
@@ -171,8 +173,59 @@ func (s *SourceService) RefreshQuery(ctx context.Context, query *types.Filesyste
 		return fmt.Errorf("not connected to %s (workspace %d)", query.Integration, query.WorkspaceId)
 	}
 
-	_, err := s.executeAndCacheQuery(ctx, pctx, query)
-	return err
+	results, err := s.executeAndCacheQuery(ctx, pctx, query)
+	if err != nil {
+		return err
+	}
+
+	// Detect new results for hook triggers.
+	// Two-phase: Compare (read-only) → Emit → Commit (advance the set).
+	// The distributed lock in SourcePoller already ensures only one replica
+	// refreshes a given query per interval. The consumer group ensures
+	// exactly-once delivery. The DB unique constraint rejects duplicate tasks.
+	// So we don't need a cooldown — just emit on new IDs and commit on success.
+	if s.seenTracker != nil && s.hookStream != nil && len(results) > 0 {
+		seenKey := common.Keys.HookSeen(pctx.WorkspaceId, types.GeneratePathID(query.Path))
+		ids := make([]string, len(results))
+		for i, r := range results {
+			ids[i] = r.ID
+		}
+
+		newIDs, compareErr := s.seenTracker.Compare(ctx, seenKey, ids)
+
+		if compareErr != nil {
+			log.Warn().Err(compareErr).Str("path", query.Path).Msg("seen tracker compare failed, skipping commit")
+			return nil
+		}
+
+		if len(newIDs) > 0 {
+			if emitErr := s.hookStream.Emit(ctx, map[string]any{
+				"event":        hooks.EventSourceChange,
+				"workspace_id": fmt.Sprintf("%d", pctx.WorkspaceId),
+				"path":         query.Path,
+				"integration":  query.Integration,
+				"new_count":    fmt.Sprintf("%d", len(newIDs)),
+				"new_items":    strings.Join(newIDs, ", "),
+			}); emitErr != nil {
+				log.Error().Err(emitErr).Str("path", query.Path).Int("new_results", len(newIDs)).
+					Msg("failed to emit source change event, will retry next poll")
+				return nil // don't commit — two-phase: retry on next poll
+			}
+			log.Info().
+				Str("path", query.Path).
+				Str("integration", query.Integration).
+				Int("new_results", len(newIDs)).
+				Msg("source change detected, hook event emitted")
+		}
+
+		// Commit: advance the seen set. Safe because either we emitted
+		// successfully or there were no new IDs (just refreshing the baseline).
+		if err := s.seenTracker.Commit(ctx, seenKey, ids); err != nil {
+			log.Warn().Err(err).Str("path", query.Path).Msg("seen tracker commit failed, next poll may re-fire")
+		}
+	}
+
+	return nil
 }
 
 // Stat returns file/directory attributes for a source path
@@ -322,7 +375,7 @@ func (s *SourceService) ReadDir(ctx context.Context, req *pb.SourceReadDirReques
 	}
 
 	// Check if this path is a smart query
-	queryPath := "/sources/" + path
+	queryPath := types.PathSources + "/" + path
 	query, err := s.fsStore.GetQuery(ctx, pctx.WorkspaceId, queryPath)
 	if err != nil {
 		log.Debug().Err(err).Str("path", queryPath).Msg("query lookup error")
@@ -340,9 +393,9 @@ func (s *SourceService) ReadDir(ctx context.Context, req *pb.SourceReadDirReques
 	}
 
 	// For any other path, check if parent is a smart query
-	parentPath := "/sources/" + integration
+	parentPath := types.PathSources + "/" + integration
 	if idx := strings.LastIndex(relPath, "/"); idx > 0 {
-		parentPath = "/sources/" + integration + "/" + relPath[:idx]
+		parentPath = types.PathSources + "/" + integration + "/" + relPath[:idx]
 	}
 
 	parentQuery, _ := s.fsStore.GetQuery(ctx, pctx.WorkspaceId, parentPath)
@@ -420,7 +473,7 @@ func (s *SourceService) readDirIntegrationRoot(ctx context.Context, pctx *source
 	}
 
 	// List smart queries for this integration
-	parentPath := "/sources/" + integration
+	parentPath := types.PathSources + "/" + integration
 	queries, err := s.fsStore.ListQueries(ctx, pctx.WorkspaceId, parentPath)
 	if err != nil {
 		log.Warn().Err(err).Str("path", parentPath).Msg("failed to list smart queries")
@@ -636,48 +689,10 @@ func (s *SourceService) executeAndCacheQuery(ctx context.Context, pctx *sources.
 		Int("pages", pageNum).
 		Msg("query complete")
 
-	// Detect new results for hook triggers.
-	// Two-phase: Compare (read-only) → Emit → Commit (advance the set).
-	// Only commits the seen set after successful emission, so a failed emit
-	// doesn't silently swallow new results.
-	if s.seenTracker != nil && s.hookStream != nil && len(allResults) > 0 {
-		seenKey := common.Keys.HookSeen(pctx.WorkspaceId, types.GeneratePathID(query.Path))
-		ids := make([]string, len(allResults))
-		for i, r := range allResults {
-			ids[i] = r.ID
-		}
-
-		newIDs, compareErr := s.seenTracker.Compare(ctx, seenKey, ids)
-		emitted := false
-
-		if compareErr != nil {
-			// Don't commit — we couldn't determine what's new vs seen.
-			// Next poll will retry the comparison.
-			log.Warn().Err(compareErr).Str("path", query.Path).Msg("seen tracker compare failed, skipping commit")
-		} else if len(newIDs) > 0 {
-			if err := s.hookStream.Emit(ctx, map[string]any{
-				"event":        hooks.EventSourceChange,
-				"workspace_id": fmt.Sprintf("%d", pctx.WorkspaceId),
-				"path":         query.Path,
-				"integration":  query.Integration,
-				"new_count":    fmt.Sprintf("%d", len(newIDs)),
-			}); err == nil {
-				emitted = true
-				log.Debug().
-					Str("path", query.Path).
-					Int("new_results", len(newIDs)).
-					Msg("source change detected")
-			} else {
-				log.Warn().Err(err).Str("path", query.Path).Msg("failed to emit source change event, will retry next poll")
-			}
-		} else {
-			emitted = true // no new IDs, safe to advance
-		}
-
-		if emitted {
-			s.seenTracker.Commit(ctx, seenKey, ids)
-		}
-	}
+	// Note: hook event detection is NOT done here. It's done in RefreshQuery
+	// (called only by the source poller). This prevents a feedback loop where
+	// a hook-triggered task reads the filesystem, which re-executes the query,
+	// which detects "new" results, which fires another hook, ad infinitum.
 
 	// Cache results
 	ttl := time.Duration(query.CacheTTL) * time.Second
@@ -782,9 +797,9 @@ func (s *SourceService) Read(ctx context.Context, req *pb.SourceReadRequest) (*p
 	// Handle .query.as metadata files
 	if relPath == ".query.as" || strings.HasSuffix(relPath, "/.query.as") {
 		// Get the parent query path
-		queryPath := "/sources/" + integration
+		queryPath := types.PathSources + "/" + integration
 		if relPath != ".query.as" {
-			queryPath = "/sources/" + integration + "/" + strings.TrimSuffix(relPath, "/.query.as")
+			queryPath = types.PathSources + "/" + integration + "/" + strings.TrimSuffix(relPath, "/.query.as")
 		}
 
 		query, err := s.fsStore.GetQuery(ctx, pctx.WorkspaceId, queryPath)
@@ -801,7 +816,7 @@ func (s *SourceService) Read(ctx context.Context, req *pb.SourceReadRequest) (*p
 	if strings.HasPrefix(base, ".") && strings.HasSuffix(base, ".query.as") {
 		filename := strings.TrimPrefix(strings.TrimSuffix(base, ".query.as"), ".")
 		dir := path.Dir(relPath)
-		queryPath := "/sources/" + integration
+		queryPath := types.PathSources + "/" + integration
 		if dir != "." && dir != "" {
 			queryPath += "/" + dir
 		}
@@ -847,7 +862,7 @@ func (s *SourceService) findQueryAndFilename(ctx context.Context, workspaceId ui
 	parts := strings.Split(relPath, "/")
 
 	for i := len(parts) - 1; i > 0; i-- {
-		parentPath := "/sources/" + integration + "/" + strings.Join(parts[:i], "/")
+		parentPath := types.PathSources + "/" + integration + "/" + strings.Join(parts[:i], "/")
 		query, err := s.fsStore.GetQuery(ctx, workspaceId, parentPath)
 		if err == nil && query != nil && query.OutputFormat == types.QueryOutputFolder {
 			filename := strings.Join(parts[i:], "/")
@@ -857,9 +872,9 @@ func (s *SourceService) findQueryAndFilename(ctx context.Context, workspaceId ui
 
 	// Check if the direct parent is a query
 	if len(parts) >= 1 {
-		parentPath := "/sources/" + integration + "/" + strings.Join(parts[:len(parts)-1], "/")
+		parentPath := types.PathSources + "/" + integration + "/" + strings.Join(parts[:len(parts)-1], "/")
 		if len(parts) == 1 {
-			parentPath = "/sources/" + integration
+			parentPath = types.PathSources + "/" + integration
 		}
 		query, err := s.fsStore.GetQuery(ctx, workspaceId, parentPath)
 		if err == nil && query != nil && query.OutputFormat == types.QueryOutputFolder {
@@ -1041,7 +1056,7 @@ func (s *SourceService) CreateSmartQuery(ctx context.Context, req *pb.CreateSmar
 	}
 	workspaceId := auth.WorkspaceId(ctx)
 
-	path := "/sources/" + req.Integration + "/" + req.Name
+	path := types.PathSources + "/" + req.Integration + "/" + req.Name
 	if req.FileExt != "" {
 		path += req.FileExt
 	}
@@ -1374,7 +1389,7 @@ func (s *SourceService) UpdateSmartQuery(ctx context.Context, req *pb.UpdateSmar
 	if req.Name != "" && req.Name != query.Name {
 		query.Name = req.Name
 		// Recalculate path: /sources/{integration}/{name}
-		query.Path = "/sources/" + query.Integration + "/" + req.Name
+		query.Path = types.PathSources + "/" + query.Integration + "/" + req.Name
 		if query.FileExt != "" {
 			query.Path += query.FileExt
 		}

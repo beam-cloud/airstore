@@ -18,11 +18,13 @@ import (
 
 type GatewayService struct {
 	pb.UnimplementedGatewayServiceServer
-	backend        repository.BackendRepository
-	fsStore        repository.FilesystemStore
-	s2Client       *common.S2Client
-	hooksSvc       *hooks.Service
+	backend      repository.BackendRepository
+	fsStore      repository.FilesystemStore
+	s2Client     *common.S2Client
+	hooksSvc     *hooks.Service
+	taskQueue    repository.TaskQueue
 	sourceRegistry *sources.Registry
+	defaultImage string
 }
 
 func NewGatewayService(backend repository.BackendRepository, s2Client *common.S2Client, fsStore repository.FilesystemStore, eventBus *common.EventBus, sourceRegistry *sources.Registry) *GatewayService {
@@ -33,6 +35,13 @@ func NewGatewayService(backend repository.BackendRepository, s2Client *common.S2
 		hooksSvc:       &hooks.Service{Store: fsStore, Backend: backend, EventBus: eventBus},
 		sourceRegistry: sourceRegistry,
 	}
+}
+
+// SetTaskQueue wires the task queue and default image for CreateTask.
+// Called after the queue is initialized during gateway startup.
+func (s *GatewayService) SetTaskQueue(queue repository.TaskQueue, defaultImage string) {
+	s.taskQueue = queue
+	s.defaultImage = defaultImage
 }
 
 // Workspaces
@@ -387,6 +396,90 @@ func (s *GatewayService) RemoveConnection(ctx context.Context, req *pb.RemoveCon
 
 // Tasks
 
+func (s *GatewayService) CreateTask(ctx context.Context, req *pb.CreateTaskRequest) (*pb.TaskResponse, error) {
+	workspaceId := auth.WorkspaceId(ctx)
+	if workspaceId == 0 {
+		return &pb.TaskResponse{Ok: false, Error: "authentication required"}, nil
+	}
+
+	image := req.Image
+	if req.Prompt != "" && image == "" {
+		image = s.defaultImage
+	}
+	if image == "" {
+		return &pb.TaskResponse{Ok: false, Error: "image or prompt is required"}, nil
+	}
+
+	// Get member info and token from auth context
+	var createdByMemberId *uint
+	memberId := auth.MemberId(ctx)
+	if memberId > 0 {
+		createdByMemberId = &memberId
+	}
+
+	// Extract auth token from gRPC metadata for passing to container
+	var memberToken string
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		if vals := md.Get("authorization"); len(vals) > 0 {
+			memberToken = strings.TrimPrefix(vals[0], "Bearer ")
+		}
+	}
+
+	env := req.Env
+	if env == nil {
+		env = make(map[string]string)
+	}
+	entrypoint := req.Entrypoint
+	if entrypoint == nil {
+		entrypoint = []string{}
+	}
+
+	task := &types.Task{
+		WorkspaceId:       workspaceId,
+		CreatedByMemberId: createdByMemberId,
+		MemberToken:       memberToken,
+		Status:            types.TaskStatusPending,
+		Prompt:            req.Prompt,
+		Image:             image,
+		Entrypoint:        entrypoint,
+		Env:               env,
+	}
+
+	if err := s.backend.CreateTask(ctx, task); err != nil {
+		return &pb.TaskResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	if s.taskQueue != nil {
+		_ = s.taskQueue.Push(ctx, task)
+	}
+
+	return &pb.TaskResponse{Ok: true, Task: taskToPb(task)}, nil
+}
+
+func (s *GatewayService) DeleteTask(ctx context.Context, req *pb.DeleteTaskRequest) (*pb.DeleteResponse, error) {
+	workspaceId := auth.WorkspaceId(ctx)
+	if workspaceId == 0 {
+		return &pb.DeleteResponse{Ok: false, Error: "authentication required"}, nil
+	}
+
+	// Verify the task belongs to the caller's workspace before deleting.
+	task, err := s.backend.GetTask(ctx, req.Id)
+	if err != nil {
+		if _, ok := err.(*types.ErrTaskNotFound); ok {
+			return &pb.DeleteResponse{Ok: false, Error: "task not found"}, nil
+		}
+		return &pb.DeleteResponse{Ok: false, Error: err.Error()}, nil
+	}
+	if task.WorkspaceId != workspaceId {
+		return &pb.DeleteResponse{Ok: false, Error: "task not found"}, nil
+	}
+
+	if err := s.backend.DeleteTask(ctx, req.Id); err != nil {
+		return &pb.DeleteResponse{Ok: false, Error: err.Error()}, nil
+	}
+	return &pb.DeleteResponse{Ok: true}, nil
+}
+
 func (s *GatewayService) ListTasks(ctx context.Context, req *pb.ListTasksRequest) (*pb.ListTasksResponse, error) {
 	workspaceId := auth.WorkspaceId(ctx)
 	if workspaceId == 0 {
@@ -548,15 +641,26 @@ func (s *GatewayService) CreateHook(ctx context.Context, req *pb.CreateHookReque
 		return &pb.HookResponse{Ok: false, Error: err.Error()}, nil
 	}
 
+	tokenId := ptrIfNonZero(auth.TokenId(ctx))
+	memberId := ptrIfNonZero(auth.MemberId(ctx))
 	rawToken := extractRawToken(ctx)
+
+	// Admin auth: provision a workspace service token instead of using
+	// the cluster admin secret (which workers can't use for FS mounts).
+	if tokenId == nil {
+		svcToken, svcRaw, err := s.backend.EnsureWorkspaceServiceToken(ctx, ws.Id)
+		if err != nil {
+			return &pb.HookResponse{Ok: false, Error: "failed to provision workspace token: " + err.Error()}, nil
+		}
+		tokenId = &svcToken.Id
+		rawToken = svcRaw
+	}
+
 	if rawToken == "" {
 		return &pb.HookResponse{Ok: false, Error: "authentication token required"}, nil
 	}
 
-	hook, err := s.hooksSvc.Create(ctx, ws.Id,
-		ptrIfNonZero(auth.MemberId(ctx)),
-		ptrIfNonZero(auth.TokenId(ctx)),
-		rawToken, req.Path, req.Prompt)
+	hook, err := s.hooksSvc.Create(ctx, ws.Id, memberId, tokenId, rawToken, req.Path, req.Prompt, req.SkillPath)
 	if err != nil {
 		return &pb.HookResponse{Ok: false, Error: err.Error()}, nil
 	}
@@ -604,8 +708,12 @@ func (s *GatewayService) UpdateHook(ctx context.Context, req *pb.UpdateHookReque
 	if req.HasActive {
 		active = &req.Active
 	}
+	var skillPath *string
+	if req.HasSkillPath {
+		skillPath = &req.SkillPath
+	}
 
-	hook, err := s.hooksSvc.Update(ctx, req.Id, prompt, active)
+	hook, err := s.hooksSvc.Update(ctx, req.Id, prompt, active, skillPath)
 	if err != nil {
 		return &pb.HookResponse{Ok: false, Error: err.Error()}, nil
 	}
@@ -680,6 +788,7 @@ func hookToPb(h *types.Hook, workspaceExternalId string) *pb.Hook {
 		WorkspaceId: workspaceExternalId,
 		Path:        h.Path,
 		Prompt:      h.Prompt,
+		SkillPath:   h.SkillPath,
 		Active:      h.Active,
 		CreatedAt:   h.CreatedAt.Format(time.RFC3339),
 		UpdatedAt:   h.UpdatedAt.Format(time.RFC3339),

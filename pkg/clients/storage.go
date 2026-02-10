@@ -34,6 +34,11 @@ type StorageClient struct {
 	cfg           types.WorkspaceStorageConfig
 }
 
+// BucketPrefix returns the configured bucket name prefix.
+func (c *StorageClient) BucketPrefix() string {
+	return c.cfg.DefaultBucketPrefix
+}
+
 func NewStorageClient(ctx context.Context, cfg types.WorkspaceStorageConfig) (*StorageClient, error) {
 	opts := []func(*config.LoadOptions) error{
 		config.WithRegion(cfg.DefaultRegion),

@@ -144,9 +144,10 @@ func runMount(cmd *cobra.Command, args []string) error {
 		fs.RegisterVNode(vnode.NewConfigVNode(effectiveGateway, authToken))
 		fs.RegisterVNode(vnode.NewToolsVNode(effectiveGateway, authToken, shim))
 		fs.RegisterVNode(vnode.NewSourcesVNode(conn, authToken))
-		fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, authToken))  // /skills
-		fs.RegisterVNode(vnode.NewTasksVNodeGRPC(conn, authToken))    // /tasks
-		fs.SetStorageFallback(vnode.NewStorageVNode(conn, authToken)) // user folders
+		fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, authToken, types.PathSkills))  // /Skills
+		fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, authToken, types.PathMemory))  // /Memory
+		fs.RegisterVNode(vnode.NewTasksVNodeGRPC(conn, authToken))                      // /Tasks
+		fs.SetStorageFallback(vnode.NewStorageVNode(conn, authToken))                   // user folders
 
 		return nil
 	})
@@ -235,10 +236,11 @@ func printMountStatus(mount, gateway, mode string) {
 	fmt.Println()
 	fmt.Printf("  %s\n", DimStyle.Render("Available paths:"))
 	paths := []struct{ path, desc string }{
-		{"/tools/*", "Tool binaries"},
-		{"/sources/*", "Integration data"},
-		{"/skills/*", "Skills and context"},
-		{"/tasks/*", "Active tasks"},
+		{types.PathTools + "/*", "Tool binaries"},
+		{types.PathSources + "/*", "Integration data"},
+		{types.PathSkills + "/*", "Skills and context"},
+		{types.PathTasks + "/*", "Active tasks"},
+		{types.PathMemory + "/*", "Agent memory"},
 	}
 	for _, p := range paths {
 		fmt.Printf("    %s  %s\n", CodeStyle.Render(fmt.Sprintf("%-14s", p.path)), DimStyle.Render(p.desc))

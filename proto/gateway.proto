@@ -31,8 +31,10 @@ service GatewayService {
   rpc RemoveConnection(RemoveConnectionRequest) returns (DeleteResponse);
 
   // Tasks
+  rpc CreateTask(CreateTaskRequest) returns (TaskResponse);
   rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
   rpc GetTask(GetTaskRequest) returns (TaskResponse);
+  rpc DeleteTask(DeleteTaskRequest) returns (DeleteResponse);
   rpc GetTaskLogs(GetTaskLogsRequest) returns (GetTaskLogsResponse);
 
   // Hooks
@@ -227,6 +229,17 @@ message Task {
   string finished_at = 10;
 }
 
+message CreateTaskRequest {
+  string prompt = 1;
+  string image = 2;
+  repeated string entrypoint = 3;
+  map<string, string> env = 4;
+}
+
+message DeleteTaskRequest {
+  string id = 1;
+}
+
 message ListTasksRequest {}
 
 message ListTasksResponse {
@@ -271,12 +284,14 @@ message Hook {
   bool active = 5;
   string created_at = 6;
   string updated_at = 7;
+  string skill_path = 8;
 }
 
 message CreateHookRequest {
   string workspace_id = 1;
   string path = 2;
   string prompt = 3;
+  string skill_path = 4;
 }
 
 message ListHooksRequest {
@@ -292,6 +307,8 @@ message UpdateHookRequest {
   string prompt = 2;
   bool active = 3;
   bool has_active = 4;
+  string skill_path = 5;
+  bool has_skill_path = 6;
 }
 
 message DeleteHookRequest {

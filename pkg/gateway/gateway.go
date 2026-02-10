@@ -344,6 +344,7 @@ func (g *Gateway) registerServices() error {
 	log.Info().Msg("tools service registered")
 
 	// Register gateway gRPC service (workspace/member/token/connection/task management)
+	var gatewayService *services.GatewayService
 	if g.BackendRepo != nil {
 		gatewayService := services.NewGatewayService(g.BackendRepo, g.s2Client, filesystemStore, g.eventBus, g.sourceRegistry)
 		pb.RegisterGatewayServiceServer(g.grpcServer, gatewayService)
@@ -376,6 +377,11 @@ func (g *Gateway) registerServices() error {
 	// Register task and workspace APIs (requires Postgres)
 	if g.BackendRepo != nil {
 		taskQueue := repository.NewRedisTaskQueue(g.RedisClient, "default")
+
+		// Wire task queue into the gRPC gateway service for CreateTask/DeleteTask
+		if gatewayService != nil {
+			gatewayService.SetTaskQueue(taskQueue, g.Config.Sandbox.GetDefaultImage())
+		}
 
 		// Task factory (shared between HTTP API and hook evaluator)
 		taskFactory := tasks.NewFactory(g.BackendRepo, taskQueue, g.Config.Sandbox.GetDefaultImage())
@@ -419,6 +425,14 @@ func (g *Gateway) registerServices() error {
 		apiv1.NewHooksGroup(hooksGroup, g.BackendRepo, hooksSvc)
 		log.Info().Msg("hooks API registered at /api/v1/workspaces/:workspace_id/hooks")
 
+		// Skills API (nested under workspaces, workspace-scoped auth)
+		if g.storageClient != nil {
+			skillsGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/skills")
+			skillsGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
+			apiv1.NewSkillsGroup(skillsGroup, g.BackendRepo, g.storageClient)
+			log.Info().Msg("skills API registered at /api/v1/workspaces/:workspace_id/skills")
+		}
+
 		// Filesystem API (nested under workspaces, workspace-scoped auth)
 		filesystemGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/fs")
 		filesystemGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
@@ -429,7 +443,11 @@ func (g *Gateway) registerServices() error {
 		apiv1.NewTasksGroup(g.baseRouteGroup.Group("/tasks"), g.BackendRepo, taskQueue, g.s2Client, g.Config.Sandbox.GetDefaultImage())
 
 		// Hook engine: matches events → hooks → tasks, polls for retries
-		engine := hooks.NewEngine(filesystemStore, taskFactory, g.BackendRepo)
+		var skillReader hooks.SkillReader
+		if g.storageClient != nil {
+			skillReader = hooks.NewStorageSkillReader(g.storageClient, g.BackendRepo)
+		}
+		engine := hooks.NewEngine(filesystemStore, taskFactory, g.BackendRepo, skillReader)
 		go engine.Start(g.ctx)
 
 		if hookStreamConsumer != nil {
