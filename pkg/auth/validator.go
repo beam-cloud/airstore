@@ -2,6 +2,9 @@ package auth
 
 import (
 	"context"
+	"time"
+
+	expirable "github.com/hashicorp/golang-lru/v2/expirable"
 
 	"github.com/beam-cloud/airstore/pkg/types"
 )
@@ -11,14 +14,25 @@ type TokenAuthorizer interface {
 	AuthorizeToken(ctx context.Context, rawToken string) (*types.AuthInfo, error)
 }
 
+const (
+	tokenCacheSize = 4096            // max cached tokens
+	tokenCacheTTL  = 5 * time.Minute // cache entries expire after 5 minutes
+)
+
 // CompositeValidator checks cluster admin token first, then database tokens.
+// Includes an in-memory LRU cache to avoid hitting Postgres + bcrypt on every request.
 type CompositeValidator struct {
 	clusterToken string
 	authorizer   TokenAuthorizer
+	cache        *expirable.LRU[string, *types.AuthInfo]
 }
 
 func NewCompositeValidator(clusterToken string, authorizer TokenAuthorizer) *CompositeValidator {
-	return &CompositeValidator{clusterToken: clusterToken, authorizer: authorizer}
+	return &CompositeValidator{
+		clusterToken: clusterToken,
+		authorizer:   authorizer,
+		cache:        expirable.NewLRU[string, *types.AuthInfo](tokenCacheSize, nil, tokenCacheTTL),
+	}
 }
 
 func (v *CompositeValidator) ValidateClusterToken(token string) bool {
@@ -29,7 +43,22 @@ func (v *CompositeValidator) ValidateToken(ctx context.Context, token string) (*
 	if v.authorizer == nil {
 		return nil, nil
 	}
-	return v.authorizer.AuthorizeToken(ctx, token)
+
+	// Check cache first — avoids Postgres query + O(n) bcrypt comparisons
+	if info, ok := v.cache.Get(token); ok {
+		return info, nil
+	}
+
+	info, err := v.authorizer.AuthorizeToken(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+
+	if info != nil {
+		v.cache.Add(token, info)
+	}
+
+	return info, nil
 }
 
 // StaticValidator only checks cluster admin token (no database).

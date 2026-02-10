@@ -9,14 +9,18 @@ import (
 	"os/signal"
 	"syscall"
 
+	"time"
+
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/errgroup"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/keepalive"
 
 	apiv1 "github.com/beam-cloud/airstore/pkg/api/v1"
 	"github.com/beam-cloud/airstore/pkg/auth"
@@ -227,6 +231,17 @@ func (g *Gateway) initGRPC() error {
 		grpc.StreamInterceptor(authInterceptor.Stream()),
 		grpc.MaxRecvMsgSize(g.Config.Gateway.GRPC.MaxRecvMsgSize * 1024 * 1024),
 		grpc.MaxSendMsgSize(g.Config.Gateway.GRPC.MaxSendMsgSize * 1024 * 1024),
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			MaxConnectionIdle:     15 * time.Minute, // close idle connections to reclaim resources
+			MaxConnectionAge:      30 * time.Minute, // force reconnect to rebalance across replicas
+			MaxConnectionAgeGrace: 10 * time.Second, // grace period for in-flight RPCs
+			Time:                  60 * time.Second, // ping idle clients every 60s
+			Timeout:               10 * time.Second, // wait 10s for ping ack
+		}),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             30 * time.Second, // minimum time between client pings
+			PermitWithoutStream: true,             // allow pings without active streams (FUSE mounts)
+		}),
 	}
 
 	g.grpcServer = grpc.NewServer(serverOptions...)

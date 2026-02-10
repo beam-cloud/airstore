@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/beam-cloud/airstore/pkg/types"
 )
@@ -35,7 +36,7 @@ type WikipediaClient struct {
 // NewWikipediaClient creates a new Wikipedia client
 func NewWikipediaClient() *WikipediaClient {
 	return &WikipediaClient{
-		httpClient: &http.Client{},
+		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 }
 

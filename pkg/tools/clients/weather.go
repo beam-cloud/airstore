@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/beam-cloud/airstore/pkg/types"
 )
@@ -32,7 +33,7 @@ type WeatherClient struct {
 // NewWeatherClient creates a new Weather client
 func NewWeatherClient(apiKey string) *WeatherClient {
 	return &WeatherClient{
-		httpClient: &http.Client{},
+		httpClient: &http.Client{Timeout: 30 * time.Second},
 		apiKey:     apiKey,
 	}
 }

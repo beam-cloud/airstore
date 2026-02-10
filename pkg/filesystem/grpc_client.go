@@ -56,12 +56,12 @@ func NewGRPCMetadataEngine(cfg GRPCConfig) (*GRPCMetadataEngine, error) {
 	}, nil
 }
 
-func (m *GRPCMetadataEngine) ctx() context.Context {
-	ctx := context.Background()
+func (m *GRPCMetadataEngine) ctx() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	if m.bearerToken != "" {
 		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", m.bearerToken)
 	}
-	return ctx
+	return ctx, cancel
 }
 
 // Close closes the gRPC connection.
@@ -80,7 +80,9 @@ func (m *GRPCMetadataEngine) Conn() *grpc.ClientConn {
 func (m *GRPCMetadataEngine) GetDirectoryAccessMetadata(pid, name string) (*DirectoryAccessMetadata, error) {
 	path := buildPath(pid, name)
 
-	resp, err := m.client.Stat(m.ctx(), &pb.StatRequest{Path: path})
+	ctx, cancel := m.ctx()
+	defer cancel()
+	resp, err := m.client.Stat(ctx, &pb.StatRequest{Path: path})
 	if err != nil {
 		return nil, err
 	}
@@ -97,8 +99,10 @@ func (m *GRPCMetadataEngine) GetDirectoryAccessMetadata(pid, name string) (*Dire
 
 func (m *GRPCMetadataEngine) SaveDirectoryAccessMetadata(meta *DirectoryAccessMetadata) error {
 	path := buildPath(meta.PID, meta.ID)
-	
-	resp, err := m.client.Mkdir(m.ctx(), &pb.MkdirRequest{
+
+	ctx, cancel := m.ctx()
+	defer cancel()
+	resp, err := m.client.Mkdir(ctx, &pb.MkdirRequest{
 		Path: path,
 		Mode: meta.Permission,
 	})
@@ -112,7 +116,9 @@ func (m *GRPCMetadataEngine) SaveDirectoryAccessMetadata(meta *DirectoryAccessMe
 }
 
 func (m *GRPCMetadataEngine) GetDirectoryContentMetadata(id string) (*DirectoryContentMetadata, error) {
-	resp, err := m.client.ReadDir(m.ctx(), &pb.ReadDirRequest{Path: id})
+	ctx, cancel := m.ctx()
+	defer cancel()
+	resp, err := m.client.ReadDir(ctx, &pb.ReadDirRequest{Path: id})
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +150,9 @@ func (m *GRPCMetadataEngine) SaveDirectoryContentMetadata(meta *DirectoryContent
 func (m *GRPCMetadataEngine) GetFileMetadata(pid, name string) (*FileMetadata, error) {
 	path := buildPath(pid, name)
 
-	resp, err := m.client.Stat(m.ctx(), &pb.StatRequest{Path: path})
+	ctx, cancel := m.ctx()
+	defer cancel()
+	resp, err := m.client.Stat(ctx, &pb.StatRequest{Path: path})
 	if err != nil {
 		return nil, err
 	}
@@ -161,8 +169,10 @@ func (m *GRPCMetadataEngine) GetFileMetadata(pid, name string) (*FileMetadata, e
 
 func (m *GRPCMetadataEngine) SaveFileMetadata(meta *FileMetadata) error {
 	path := buildPath(meta.PID, meta.Name)
-	
-	resp, err := m.client.Create(m.ctx(), &pb.CreateRequest{
+
+	ctx, cancel := m.ctx()
+	defer cancel()
+	resp, err := m.client.Create(ctx, &pb.CreateRequest{
 		Path: path,
 		Mode: syscall.S_IFREG | 0644,
 	})
@@ -176,7 +186,9 @@ func (m *GRPCMetadataEngine) SaveFileMetadata(meta *FileMetadata) error {
 }
 
 func (m *GRPCMetadataEngine) ListDirectory(path string) []DirEntry {
-	resp, err := m.client.ReadDir(m.ctx(), &pb.ReadDirRequest{Path: path})
+	ctx, cancel := m.ctx()
+	defer cancel()
+	resp, err := m.client.ReadDir(ctx, &pb.ReadDirRequest{Path: path})
 	if err != nil || !resp.Ok {
 		return nil
 	}
@@ -195,7 +207,9 @@ func (m *GRPCMetadataEngine) RenameDirectory(oldPID, oldName, newPID, newName st
 	oldPath := buildPath(oldPID, oldName)
 	newPath := buildPath(newPID, newName)
 
-	resp, err := m.client.Rename(m.ctx(), &pb.RenameRequest{
+	ctx, cancel := m.ctx()
+	defer cancel()
+	resp, err := m.client.Rename(ctx, &pb.RenameRequest{
 		OldPath: oldPath,
 		NewPath: newPath,
 	})
@@ -211,7 +225,9 @@ func (m *GRPCMetadataEngine) RenameDirectory(oldPID, oldName, newPID, newName st
 func (m *GRPCMetadataEngine) DeleteDirectory(parentID, name string, version int) error {
 	path := buildPath(parentID, name)
 
-	resp, err := m.client.Remove(m.ctx(), &pb.RemoveRequest{Path: path})
+	ctx, cancel := m.ctx()
+	defer cancel()
+	resp, err := m.client.Remove(ctx, &pb.RemoveRequest{Path: path})
 	if err != nil {
 		return err
 	}

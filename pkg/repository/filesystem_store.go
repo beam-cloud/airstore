@@ -79,6 +79,10 @@ type FilesystemStore interface {
 
 	// ===== Filesystem Metadata =====
 
+	// StatPath retrieves directory, file, and symlink metadata in a single round-trip.
+	// Returns (dirMeta, fileMeta, symlinkTarget, error). At most one of the three will be non-zero.
+	StatPath(ctx context.Context, path string) (*types.DirMeta, *types.FileMeta, string, error)
+
 	// GetFileMeta retrieves file metadata.
 	GetFileMeta(ctx context.Context, path string) (*types.FileMeta, error)
 

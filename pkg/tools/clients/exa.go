@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/beam-cloud/airstore/pkg/types"
 )
@@ -31,7 +32,7 @@ type ExaClient struct {
 // NewExaClient creates a new Exa client
 func NewExaClient(apiKey string) *ExaClient {
 	return &ExaClient{
-		httpClient: &http.Client{},
+		httpClient: &http.Client{Timeout: 30 * time.Second},
 		apiKey:     apiKey,
 	}
 }
