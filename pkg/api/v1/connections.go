@@ -5,17 +5,19 @@ import (
 
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/repository"
+	"github.com/beam-cloud/airstore/pkg/sources"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/labstack/echo/v4"
 )
 
 type ConnectionsGroup struct {
-	g       *echo.Group
-	backend repository.BackendRepository
+	g              *echo.Group
+	backend        repository.BackendRepository
+	sourceRegistry *sources.Registry
 }
 
-func NewConnectionsGroup(g *echo.Group, backend repository.BackendRepository) *ConnectionsGroup {
-	cg := &ConnectionsGroup{g: g, backend: backend}
+func NewConnectionsGroup(g *echo.Group, backend repository.BackendRepository, sourceRegistry *sources.Registry) *ConnectionsGroup {
+	cg := &ConnectionsGroup{g: g, backend: backend, sourceRegistry: sourceRegistry}
 	cg.g.POST("", cg.Create)
 	cg.g.GET("", cg.List)
 	cg.g.DELETE("/:connection_id", cg.Delete)
@@ -84,6 +86,17 @@ func (cg *ConnectionsGroup) Create(c echo.Context) error {
 		RefreshToken: req.RefreshToken,
 		APIKey:       req.APIKey,
 		Extra:        req.Extra,
+	}
+
+	// Validate credentials if the provider supports it
+	if cg.sourceRegistry != nil {
+		if provider := cg.sourceRegistry.Get(req.IntegrationType); provider != nil {
+			if v, ok := provider.(sources.CredentialValidator); ok {
+				if err := v.ValidateCredentials(ctx, creds); err != nil {
+					return ErrorResponse(c, http.StatusBadRequest, "invalid credentials: "+err.Error())
+				}
+			}
+		}
 	}
 
 	conn, err := cg.backend.SaveConnection(ctx, ws.Id, memberId, req.IntegrationType, creds, req.Scope)

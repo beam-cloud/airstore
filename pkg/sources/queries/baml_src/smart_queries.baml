@@ -42,6 +42,72 @@ class LinearQueryResult {
   filename_format string @description("Template for result filenames. Use {id}, {identifier}, {title}, {state}, {assignee}, {team}, {priority}, {date}. Example: {identifier}_{title}.md")
 }
 
+class PostHogQueryResult {
+  posthog_query string @description("Search query string for PostHog API")
+  search_type string @description("Type of search: 'events', 'feature-flags', 'insights', 'cohorts'")
+  project_id int @description("PostHog project ID to search in. Use 0 to auto-select the first available project.")
+  limit int @description("Max results to return (default: 50)")
+  filename_format string @description("Template for result filenames. Placeholders vary by search_type.")
+}
+
+// -----------------------------------------------------------------------------
+// PostHog Query Inference
+// -----------------------------------------------------------------------------
+
+function InferPostHogQuery(name: string, guidance: string?) -> PostHogQueryResult {
+  client AnthropicClient
+  prompt #"
+    Convert a folder/file name into a PostHog query.
+
+    SEARCH TYPES:
+    1. feature-flags — Feature flags (toggles). Use when name contains: flag, toggle, feature, rollout, experiment
+    2. insights — Saved queries, funnels, retention, trends. Use when name contains: insight, funnel, retention, trend, dashboard, chart, analytics
+    3. cohorts — User segments/groups. Use when name contains: cohort, segment, group, users, audience
+    4. events — Raw event data (default). Use when name contains: event, pageview, click, action, or nothing specific
+
+    POSTHOG STANDARD EVENTS (start with $):
+    $pageview, $pageleave, $autocapture, $screen, $exception, $rageclick, $web_vitals
+
+    QUERY FORMAT:
+    - For events: the event name to filter on (e.g., "$pageview", "signup", "purchase"). Empty string = all recent events.
+    - For feature-flags/insights/cohorts: a search term to filter by name/key (e.g., "beta", "onboarding", "retention").
+
+    ACTIVE FLAGS:
+    If the name implies "active" or "enabled" flags (e.g., "active-feature-flags", "enabled-flags"), set search_type to "feature-flags" and use a broad query (empty or relevant keyword). The provider will filter for active=true.
+
+    DEFAULTS:
+    - project_id: 0 (auto-select first project)
+    - limit: 50
+
+    FILENAME FORMATS by search_type:
+    - events: {date}_{event}_{id}.json
+    - feature-flags: {key}_{id}.json
+    - insights: {name}_{id}.json
+    - cohorts: {name}_{id}.json
+
+    Query examples:
+    - "active-feature-flags" → search_type: feature-flags, query: "" (all flags, provider filters active)
+    - "pageview-events" → search_type: events, query: "$pageview"
+    - "error-events" → search_type: events, query: "$exception"
+    - "retention-insights" → search_type: insights, query: "retention"
+    - "beta-users" → search_type: cohorts, query: "beta"
+    - "signup-funnel" → search_type: insights, query: "signup funnel"
+    - "recent-events" → search_type: events, query: ""
+    - "experiment-flags" → search_type: feature-flags, query: "experiment"
+    - "rage-clicks" → search_type: events, query: "$rageclick"
+    - "web-vitals" → search_type: events, query: "$web_vitals"
+    - "onboarding-cohort" → search_type: cohorts, query: "onboarding"
+
+    Folder/file name: {{ name }}
+    {% if guidance %}
+
+    Additional guidance from user: {{ guidance }}
+    {% endif %}
+
+    {{ ctx.output_format }}
+  "#
+}
+
 // -----------------------------------------------------------------------------
 // Gmail Query Inference
 // -----------------------------------------------------------------------------
@@ -841,6 +907,54 @@ test TestLinearInProgress {
   functions [InferLinearQuery]
   args {
     name "in-progress"
+    guidance null
+  }
+}
+
+test TestPostHogActiveFlags {
+  functions [InferPostHogQuery]
+  args {
+    name "active-feature-flags"
+    guidance null
+  }
+}
+
+test TestPostHogPageviewEvents {
+  functions [InferPostHogQuery]
+  args {
+    name "pageview-events"
+    guidance null
+  }
+}
+
+test TestPostHogRetentionInsights {
+  functions [InferPostHogQuery]
+  args {
+    name "retention-insights"
+    guidance null
+  }
+}
+
+test TestPostHogBetaUsers {
+  functions [InferPostHogQuery]
+  args {
+    name "beta-users"
+    guidance null
+  }
+}
+
+test TestPostHogErrorEvents {
+  functions [InferPostHogQuery]
+  args {
+    name "error-events"
+    guidance "exception and error events from the past week"
+  }
+}
+
+test TestPostHogSignupFunnel {
+  functions [InferPostHogQuery]
+  args {
+    name "signup-funnel"
     guidance null
   }
 }

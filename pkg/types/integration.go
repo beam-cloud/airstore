@@ -101,6 +101,14 @@ var integrations = map[ToolName]IntegrationMeta{
 		AuthType:    AuthOAuth,
 		Scope:       ScopeShared,
 	},
+	ToolPostHog: {
+		Tool:        ToolPostHog,
+		DisplayName: "PostHog",
+		Description: "Product analytics and feature flags",
+		Icon:        "bar-chart",
+		AuthType:    AuthAPIKey,
+		Scope:       ScopeShared,
+	},
 }
 
 // GetIntegrationMeta returns metadata for an integration

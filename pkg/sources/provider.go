@@ -113,9 +113,23 @@ func DefaultFilenameFormat(integration string) string {
 		return "{date}_{channel}_{user}_{id}.txt"
 	case "linear":
 		return "{identifier}_{title}.md"
+	case "posthog":
+		return "{id}.json"
 	default:
 		return "{id}"
 	}
+}
+
+// CredentialValidator is optionally implemented by providers that can validate
+// credentials at connection creation time.
+type CredentialValidator interface {
+	ValidateCredentials(ctx context.Context, creds *types.IntegrationCredentials) error
+}
+
+// NativeBrowsable is optionally implemented by providers that expose a native
+// file tree alongside smart queries.
+type NativeBrowsable interface {
+	IsNativeBrowsable() bool
 }
 
 // Provider defines the interface for source integrations.

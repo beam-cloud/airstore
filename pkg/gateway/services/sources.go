@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -403,7 +404,44 @@ func (s *SourceService) ReadDir(ctx context.Context, req *pb.SourceReadDirReques
 		return &pb.SourceReadDirResponse{Ok: true, Entries: []*pb.SourceDirEntry{}}, nil
 	}
 
-	// Unknown path - return empty
+	// Unknown path — if provider is NativeBrowsable, delegate to it
+	if nb, ok := provider.(sources.NativeBrowsable); ok && nb.IsNativeBrowsable() && connected {
+		// Check cache first
+		cacheKey := sources.CacheKey(pctx.WorkspaceId, integration, relPath, "readdir")
+		nativeEntries, cacheHit := s.cache.GetEntries(cacheKey)
+
+		if !cacheHit {
+			// Rate limit check
+			if err := s.rateLimiter.Wait(ctx, pctx.WorkspaceId, integration); err != nil {
+				return &pb.SourceReadDirResponse{Ok: false, Error: "rate limited"}, nil
+			}
+
+			// Use singleflight to coalesce concurrent requests
+			result, err := s.cache.DoOnce(cacheKey, func() (any, error) {
+				return provider.ReadDir(ctx, pctx, relPath)
+			})
+			if err != nil {
+				return &pb.SourceReadDirResponse{Ok: true, Entries: []*pb.SourceDirEntry{}}, nil
+			}
+			nativeEntries = result.([]sources.DirEntry)
+			// Cache the result
+			s.cache.SetEntries(cacheKey, nativeEntries)
+		}
+
+		pbEntries := make([]*pb.SourceDirEntry, 0, len(nativeEntries))
+		for _, e := range nativeEntries {
+			pbEntries = append(pbEntries, &pb.SourceDirEntry{
+				Name:  e.Name,
+				Mode:  e.Mode,
+				IsDir: e.IsDir,
+				Size:  e.Size,
+				Mtime: e.Mtime,
+			})
+		}
+		return &pb.SourceReadDirResponse{Ok: true, Entries: pbEntries}, nil
+	}
+
+	// Not native browsable — return empty
 	return &pb.SourceReadDirResponse{Ok: true, Entries: []*pb.SourceDirEntry{}}, nil
 }
 
@@ -486,6 +524,50 @@ func (s *SourceService) readDirIntegrationRoot(ctx context.Context, pctx *source
 		}
 	}
 
+	// If provider is NativeBrowsable, merge native root entries
+	provider := s.registry.Get(integration)
+	if provider != nil && connected {
+		if nb, ok := provider.(sources.NativeBrowsable); ok && nb.IsNativeBrowsable() {
+			// Check cache first
+			cacheKey := sources.CacheKey(pctx.WorkspaceId, integration, "", "readdir")
+			nativeEntries, cacheHit := s.cache.GetEntries(cacheKey)
+
+			if !cacheHit {
+				// Rate limit check
+				if err := s.rateLimiter.Wait(ctx, pctx.WorkspaceId, integration); err == nil {
+					// Use singleflight to coalesce concurrent requests
+					result, err := s.cache.DoOnce(cacheKey, func() (any, error) {
+						return provider.ReadDir(ctx, pctx, "")
+					})
+					if err == nil {
+						nativeEntries = result.([]sources.DirEntry)
+						// Cache the result
+						s.cache.SetEntries(cacheKey, nativeEntries)
+					}
+				}
+			}
+
+			if len(nativeEntries) > 0 {
+				// Build set of existing names to skip duplicates
+				existing := make(map[string]bool, len(entries))
+				for _, e := range entries {
+					existing[e.Name] = true
+				}
+				for _, ne := range nativeEntries {
+					if !existing[ne.Name] {
+						entries = append(entries, &pb.SourceDirEntry{
+							Name:  ne.Name,
+							Mode:  ne.Mode,
+							IsDir: ne.IsDir,
+							Size:  ne.Size,
+							Mtime: ne.Mtime,
+						})
+					}
+				}
+			}
+		}
+	}
+
 	return &pb.SourceReadDirResponse{Ok: true, Entries: entries}, nil
 }
 
@@ -538,7 +620,7 @@ func (s *SourceService) executeAndCacheQuery(ctx context.Context, pctx *sources.
 	}
 
 	spec := parseQuerySpec(query.Integration, query.QuerySpec)
-	if spec.Query == "" {
+	if spec.Query == "" && query.Integration != "posthog" {
 		return nil, fmt.Errorf("empty query spec for %s", query.Integration)
 	}
 
@@ -757,7 +839,20 @@ func (s *SourceService) Read(ctx context.Context, req *pb.SourceReadRequest) (*p
 		return s.readSmartQueryResult(ctx, pctx, queryPath, filename, req.Offset, req.Length)
 	}
 
-	// Not a smart query result - return not found
+	// Not a smart query result — if provider is NativeBrowsable, delegate to it
+	if nb, ok := provider.(sources.NativeBrowsable); ok && nb.IsNativeBrowsable() && connected {
+		// Rate limit check
+		if err := s.rateLimiter.Wait(ctx, pctx.WorkspaceId, integration); err != nil {
+			return &pb.SourceReadResponse{Ok: false, Error: "rate limited"}, nil
+		}
+
+		data, err := provider.Read(ctx, pctx, relPath, req.Offset, req.Length)
+		if err != nil {
+			return &pb.SourceReadResponse{Ok: false, Error: err.Error()}, nil
+		}
+		return &pb.SourceReadResponse{Ok: true, Data: data}, nil
+	}
+
 	return &pb.SourceReadResponse{Ok: false, Error: "file not found"}, nil
 }
 
@@ -973,7 +1068,7 @@ func (s *SourceService) CreateSmartQuery(ctx context.Context, req *pb.CreateSmar
 	}
 
 	spec := parseQuerySpec(req.Integration, querySpec)
-	if spec.Query == "" {
+	if spec.Query == "" && req.Integration != "posthog" {
 		return &pb.CreateSmartQueryResponse{Ok: false, Error: "invalid query spec from inference"}, nil
 	}
 	if filenameFormat == "" {
@@ -1091,6 +1186,14 @@ func (s *SourceService) inferQuerySpec(ctx context.Context, integration, name, g
 
 	case "linear":
 		result, err := baml.InferLinearQuery(ctx, name, guidancePtr)
+		if err != nil {
+			return "", "", err
+		}
+		data, _ := json.Marshal(result)
+		return string(data), extractFilenameFormat(data), nil
+
+	case "posthog":
+		result, err := baml.InferPostHogQuery(ctx, name, guidancePtr)
 		if err != nil {
 			return "", "", err
 		}
@@ -1304,7 +1407,7 @@ func (s *SourceService) UpdateSmartQuery(ctx context.Context, req *pb.UpdateSmar
 		}
 
 		spec := parseQuerySpec(query.Integration, querySpec)
-		if spec.Query == "" {
+		if spec.Query == "" && query.Integration != "posthog" {
 			return &pb.UpdateSmartQueryResponse{Ok: false, Error: "invalid query spec from inference"}, nil
 		}
 
@@ -1465,8 +1568,10 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 		GitHubQuery    string `json:"github_query"`
 		SlackQuery     string `json:"slack_query"`
 		LinearQuery    string `json:"linear_query"`
+		PostHogQuery   string `json:"posthog_query"`
 		SearchType     string `json:"search_type"`
 		ContentType    string `json:"content_type"`
+		ProjectID      int    `json:"project_id"`
 		Limit          int    `json:"limit"`
 		MaxResults     int    `json:"max_results"`
 		FilenameFormat string `json:"filename_format"`
@@ -1502,6 +1607,8 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 		query = spec.SlackQuery
 	case "linear":
 		query = spec.LinearQuery
+	case "posthog":
+		query = spec.PostHogQuery
 	}
 
 	filenameFormat := spec.FilenameFormat
@@ -1516,6 +1623,9 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 	}
 	if spec.ContentType != "" {
 		metadata["content_type"] = spec.ContentType
+	}
+	if spec.ProjectID > 0 {
+		metadata["project_id"] = strconv.Itoa(spec.ProjectID)
 	}
 
 	return sources.QuerySpec{
