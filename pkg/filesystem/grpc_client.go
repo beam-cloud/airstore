@@ -21,9 +21,10 @@ type GRPCConfig struct {
 
 // GRPCMetadataEngine implements MetadataEngine and LegacyMetadataEngine via gRPC.
 type GRPCMetadataEngine struct {
-	conn   *grpc.ClientConn
-	client pb.FilesystemServiceClient
-	token  string
+	conn        *grpc.ClientConn
+	client      pb.FilesystemServiceClient
+	token       string
+	bearerToken string // precomputed "Bearer " + token
 }
 
 // NewGRPCMetadataEngine creates a new gRPC-based metadata engine.
@@ -47,16 +48,17 @@ func NewGRPCMetadataEngine(cfg GRPCConfig) (*GRPCMetadataEngine, error) {
 	}
 
 	return &GRPCMetadataEngine{
-		conn:   conn,
-		client: pb.NewFilesystemServiceClient(conn),
-		token:  cfg.Token,
+		conn:        conn,
+		client:      pb.NewFilesystemServiceClient(conn),
+		token:       cfg.Token,
+		bearerToken: "Bearer " + cfg.Token,
 	}, nil
 }
 
 func (m *GRPCMetadataEngine) ctx() context.Context {
 	ctx := context.Background()
-	if m.token != "" {
-		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+m.token)
+	if m.bearerToken != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", m.bearerToken)
 	}
 	return ctx
 }

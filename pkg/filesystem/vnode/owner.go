@@ -1,45 +1,42 @@
 package vnode
 
 import (
-	"sync"
+	"sync/atomic"
 	"syscall"
 )
 
-var ownerMu sync.RWMutex
-
-// Owner holds the uid/gid for all filesystem entries.
-// Access through GetOwner() for thread-safe reads.
-// Initialized to current user by default; override with InitOwner().
-var Owner struct{ Uid, Gid uint32 }
+// ownerPacked stores uid in high 32 bits, gid in low 32 bits.
+// Single atomic load/store — zero lock overhead on the hot path.
+var ownerPacked atomic.Uint64
 
 func init() {
 	// Default to current user so tests and code that doesn't call
 	// InitOwner() still get sensible ownership (not root).
-	Owner.Uid = uint32(syscall.Getuid())
-	Owner.Gid = uint32(syscall.Getgid())
+	storeOwner(uint32(syscall.Getuid()), uint32(syscall.Getgid()))
+}
+
+func storeOwner(uid, gid uint32) {
+	ownerPacked.Store(uint64(uid)<<32 | uint64(gid))
 }
 
 // InitOwner sets file ownership for this mount (thread-safe).
 // If uid/gid are nil, defaults to the current user.
 // To explicitly set root ownership, pass pointers to 0.
 func InitOwner(uid, gid *uint32) {
-	ownerMu.Lock()
-	defer ownerMu.Unlock()
+	u := uint32(syscall.Getuid())
+	g := uint32(syscall.Getgid())
 	if uid != nil {
-		Owner.Uid = *uid
-	} else {
-		Owner.Uid = uint32(syscall.Getuid())
+		u = *uid
 	}
 	if gid != nil {
-		Owner.Gid = *gid
-	} else {
-		Owner.Gid = uint32(syscall.Getgid())
+		g = *gid
 	}
+	storeOwner(u, g)
 }
 
-// GetOwner returns the current owner uid/gid (thread-safe).
+// GetOwner returns the current owner uid/gid.
+// Uses a single atomic load — no locks, no contention.
 func GetOwner() (uid, gid uint32) {
-	ownerMu.RLock()
-	defer ownerMu.RUnlock()
-	return Owner.Uid, Owner.Gid
+	v := ownerPacked.Load()
+	return uint32(v >> 32), uint32(v)
 }

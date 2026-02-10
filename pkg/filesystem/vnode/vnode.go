@@ -107,9 +107,17 @@ func (SmartQueryBase) Readlink(string) (string, error)                       { r
 func (SmartQueryBase) Release(string, FileHandle) error                      { return nil }
 func (SmartQueryBase) Fsync(string, FileHandle) error                        { return nil }
 
+// registeredNode pairs a VirtualNode with its precomputed prefix strings
+// so Match() never allocates.
+type registeredNode struct {
+	node      VirtualNode
+	prefix    string // e.g. "/sources"
+	prefixDir string // e.g. "/sources/" — precomputed for HasPrefix check
+}
+
 // Registry matches paths to virtual nodes.
 type Registry struct {
-	nodes    []VirtualNode
+	nodes    []registeredNode
 	fallback VirtualNode // handles paths not matched by any node
 }
 
@@ -118,18 +126,25 @@ func NewRegistry() *Registry {
 }
 
 func (r *Registry) Register(node VirtualNode) {
-	r.nodes = append(r.nodes, node)
+	p := node.Prefix()
+	r.nodes = append(r.nodes, registeredNode{
+		node:      node,
+		prefix:    p,
+		prefixDir: p + "/",
+	})
 }
 
 func (r *Registry) SetFallback(node VirtualNode) {
 	r.fallback = node
 }
 
+// Match returns the VirtualNode whose prefix matches path, or nil.
+// Zero allocations — prefixes are precomputed at registration time.
 func (r *Registry) Match(path string) VirtualNode {
-	for _, n := range r.nodes {
-		p := n.Prefix()
-		if path == p || strings.HasPrefix(path, p+"/") {
-			return n
+	for i := range r.nodes {
+		rn := &r.nodes[i]
+		if path == rn.prefix || strings.HasPrefix(path, rn.prefixDir) {
+			return rn.node
 		}
 	}
 	return nil
@@ -147,7 +162,11 @@ func (r *Registry) Fallback() VirtualNode {
 }
 
 func (r *Registry) List() []VirtualNode {
-	return r.nodes
+	out := make([]VirtualNode, len(r.nodes))
+	for i := range r.nodes {
+		out[i] = r.nodes[i].node
+	}
+	return out
 }
 
 // FileInfo constructors

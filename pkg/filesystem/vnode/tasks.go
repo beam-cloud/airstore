@@ -28,8 +28,9 @@ type TasksVNode struct {
 	backend repository.BackendRepository
 
 	// gRPC gateway access (CLI mode)
-	grpcConn *grpc.ClientConn
-	token    string
+	grpcConn    *grpc.ClientConn
+	token       string
+	bearerToken string // precomputed "Bearer " + token
 
 	// Cache for task list
 	cacheMu     sync.RWMutex
@@ -50,8 +51,9 @@ func NewTasksVNode(backend repository.BackendRepository, token string) *TasksVNo
 // Use this for CLI mounts where we don't have direct DB access.
 func NewTasksVNodeGRPC(conn *grpc.ClientConn, token string) *TasksVNode {
 	t := &TasksVNode{
-		grpcConn: conn,
-		token:    token,
+		grpcConn:    conn,
+		token:       token,
+		bearerToken: "Bearer " + token,
 	}
 	// Pre-warm cache in background
 	go t.warmCache()
@@ -69,8 +71,8 @@ func (t *TasksVNode) Prefix() string { return TasksPath }
 
 // grpcContext adds auth token to context for gRPC calls
 func (t *TasksVNode) grpcContext(ctx context.Context) context.Context {
-	if t.token != "" {
-		md := metadata.Pairs("authorization", "Bearer "+t.token)
+	if t.bearerToken != "" {
+		md := metadata.Pairs("authorization", t.bearerToken)
 		ctx = metadata.NewOutgoingContext(ctx, md)
 	}
 	return ctx
