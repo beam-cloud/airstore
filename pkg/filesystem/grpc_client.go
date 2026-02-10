@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/common"
+	"github.com/beam-cloud/airstore/pkg/filesystem/vnode"
 	pb "github.com/beam-cloud/airstore/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
@@ -24,7 +25,7 @@ type GRPCMetadataEngine struct {
 	conn        *grpc.ClientConn
 	client      pb.FilesystemServiceClient
 	token       string
-	bearerToken string // precomputed "Bearer " + token
+	bearerToken string // precomputed auth header value
 }
 
 // NewGRPCMetadataEngine creates a new gRPC-based metadata engine.
@@ -51,7 +52,7 @@ func NewGRPCMetadataEngine(cfg GRPCConfig) (*GRPCMetadataEngine, error) {
 		conn:        conn,
 		client:      pb.NewFilesystemServiceClient(conn),
 		token:       cfg.Token,
-		bearerToken: "Bearer " + cfg.Token,
+		bearerToken: vnode.BearerToken(cfg.Token),
 	}, nil
 }
 

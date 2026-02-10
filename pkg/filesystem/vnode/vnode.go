@@ -206,3 +206,12 @@ func PathIno(path string) uint64 {
 	}
 	return h
 }
+
+// BearerToken returns a precomputed "Bearer <token>" string for gRPC auth metadata.
+// If token is empty, returns empty (caller should skip attaching metadata).
+func BearerToken(token string) string {
+	if token == "" {
+		return ""
+	}
+	return "Bearer " + token
+}

@@ -81,7 +81,7 @@ type SourcesVNode struct {
 	SmartQueryBase
 	client      pb.SourceServiceClient
 	token       string
-	bearerToken string // precomputed "Bearer " + token
+	bearerToken string // precomputed auth header value
 
 	// Cache for query results to avoid repeated ExecuteSmartQuery calls
 	// during Readdir->Getattr cycles
@@ -120,7 +120,7 @@ func NewSourcesVNode(conn *grpc.ClientConn, token string) *SourcesVNode {
 	v := &SourcesVNode{
 		client:       pb.NewSourceServiceClient(conn),
 		token:        token,
-		bearerToken:  "Bearer " + token,
+		bearerToken:  BearerToken(token),
 		results:      make(map[string]*cachedQueryResult),
 		queries:      make(map[string]*cachedQuery),
 		integrations: make(map[string]*cachedIntegration),

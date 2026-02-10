@@ -27,7 +27,7 @@ type ToolsVNode struct {
 
 	gatewayAddr string
 	token       string // Auth token for gRPC calls
-	bearerToken string // precomputed "Bearer " + token
+	bearerToken string // precomputed auth header value
 	shim        []byte          // shim binary served via FUSE
 	modTime     time.Time       // stable timestamps for getattr
 
@@ -46,7 +46,7 @@ func NewToolsVNode(gatewayAddr string, token string, shimBinary []byte) *ToolsVN
 	t := &ToolsVNode{
 		gatewayAddr:  gatewayAddr,
 		token:        token,
-		bearerToken:  "Bearer " + token,
+		bearerToken:  BearerToken(token),
 		shim:         shimBinary,
 		modTime:      modTime,
 		tools:        []string{},

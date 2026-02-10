@@ -30,7 +30,7 @@ type TasksVNode struct {
 	// gRPC gateway access (CLI mode)
 	grpcConn    *grpc.ClientConn
 	token       string
-	bearerToken string // precomputed "Bearer " + token
+	bearerToken string // precomputed auth header value
 
 	// Cache for task list
 	cacheMu     sync.RWMutex
@@ -53,7 +53,7 @@ func NewTasksVNodeGRPC(conn *grpc.ClientConn, token string) *TasksVNode {
 	t := &TasksVNode{
 		grpcConn:    conn,
 		token:       token,
-		bearerToken: "Bearer " + token,
+		bearerToken: BearerToken(token),
 	}
 	// Pre-warm cache in background
 	go t.warmCache()

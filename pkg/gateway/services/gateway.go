@@ -18,13 +18,14 @@ import (
 
 type GatewayService struct {
 	pb.UnimplementedGatewayServiceServer
-	backend      repository.BackendRepository
-	fsStore      repository.FilesystemStore
-	s2Client     *common.S2Client
-	hooksSvc     *hooks.Service
-	taskQueue    repository.TaskQueue
+	backend        repository.BackendRepository
+	fsStore        repository.FilesystemStore
+	s2Client       *common.S2Client
+	hooksSvc       *hooks.Service
+	taskQueue      repository.TaskQueue
 	sourceRegistry *sources.Registry
-	defaultImage string
+	sourceService  *SourceService
+	defaultImage   string
 }
 
 func NewGatewayService(backend repository.BackendRepository, s2Client *common.S2Client, fsStore repository.FilesystemStore, eventBus *common.EventBus, sourceRegistry *sources.Registry) *GatewayService {
@@ -42,6 +43,12 @@ func NewGatewayService(backend repository.BackendRepository, s2Client *common.S2
 func (s *GatewayService) SetTaskQueue(queue repository.TaskQueue, defaultImage string) {
 	s.taskQueue = queue
 	s.defaultImage = defaultImage
+}
+
+// SetSourceService injects the SourceService so that connection mutations
+// (add/remove) can invalidate the connected-integrations cache immediately.
+func (s *GatewayService) SetSourceService(svc *SourceService) {
+	s.sourceService = svc
 }
 
 // Workspaces
@@ -345,6 +352,10 @@ func (s *GatewayService) AddConnection(ctx context.Context, req *pb.AddConnectio
 		return &pb.ConnectionResponse{Ok: false, Error: err.Error()}, nil
 	}
 
+	if s.sourceService != nil {
+		s.sourceService.InvalidateConnectionCache(ws.Id)
+	}
+
 	return &pb.ConnectionResponse{Ok: true, Connection: connectionToPb(conn, ws.ExternalId)}, nil
 }
 
@@ -391,6 +402,11 @@ func (s *GatewayService) RemoveConnection(ctx context.Context, req *pb.RemoveCon
 	if err := s.backend.DeleteConnection(ctx, req.Id); err != nil {
 		return &pb.DeleteResponse{Ok: false, Error: err.Error()}, nil
 	}
+
+	if s.sourceService != nil {
+		s.sourceService.InvalidateConnectionCache(conn.WorkspaceId)
+	}
+
 	return &pb.DeleteResponse{Ok: true}, nil
 }
 

@@ -381,6 +381,7 @@ func (g *Gateway) registerServices() error {
 		// Wire task queue into the gRPC gateway service for CreateTask/DeleteTask
 		if gatewayService != nil {
 			gatewayService.SetTaskQueue(taskQueue, g.Config.Sandbox.GetDefaultImage())
+			gatewayService.SetSourceService(sourceService)
 		}
 
 		// Task factory (shared between HTTP API and hook evaluator)

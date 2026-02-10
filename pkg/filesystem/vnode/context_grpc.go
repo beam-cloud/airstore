@@ -23,7 +23,7 @@ const rpcTimeout = 30 * time.Second // Per-RPC timeout for context operations
 type ContextVNodeGRPC struct {
 	client      pb.ContextServiceClient
 	token       string
-	bearerToken string // precomputed "Bearer " + token
+	bearerToken string // precomputed auth header value
 	prefix      string
 	cache       *MetadataCache
 	content     *ContentCache
@@ -41,7 +41,7 @@ func NewContextVNodeGRPC(conn *grpc.ClientConn, token string, prefix string) *Co
 	c := &ContextVNodeGRPC{
 		client:      pb.NewContextServiceClient(conn),
 		token:       token,
-		bearerToken: "Bearer " + token,
+		bearerToken: BearerToken(token),
 		prefix:      prefix,
 		cache:   NewMetadataCache(),
 		content: NewContentCache(),
