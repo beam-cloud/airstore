@@ -9,9 +9,9 @@ func TestManifestKey(t *testing.T) {
 		name string
 		want string
 	}{
-		{"email-triage", "Skills/email-triage/SKILL.md"},
-		{"test", "Skills/test/SKILL.md"},
-		{"my-skill", "Skills/my-skill/SKILL.md"},
+		{"email-triage", "skills/email-triage/SKILL.md"},
+		{"test", "skills/test/SKILL.md"},
+		{"my-skill", "skills/my-skill/SKILL.md"},
 	}
 
 	for _, tt := range tests {
@@ -28,19 +28,19 @@ func TestPathToName(t *testing.T) {
 		want string
 	}{
 		// Valid paths
-		{"/Skills/email-triage", "email-triage"},
-		{"/Skills/test", "test"},
-		{"Skills/my-skill", "my-skill"}, // without leading slash
-		{"/Skills/foo", "foo"},
+		{"/skills/email-triage", "email-triage"},
+		{"/skills/test", "test"},
+		{"skills/my-skill", "my-skill"}, // without leading slash
+		{"/skills/foo", "foo"},
 
 		// Invalid paths - should return empty
-		{"/Skills/nested/path", ""},      // nested not allowed
-		{"/Sources/gmail", ""},           // wrong prefix
-		{"/Tools/something", ""},         // wrong prefix
-		{"/Skills/", ""},                 // no name
-		{"/Skills", ""},                  // no trailing name
-		{"random", ""},                   // no prefix
-		{"", ""},                         // empty
+		{"/skills/nested/path", ""}, // nested not allowed
+		{"/sources/gmail", ""},      // wrong prefix
+		{"/tools/something", ""},    // wrong prefix
+		{"/skills/", ""},            // no name
+		{"/skills", ""},             // no trailing name
+		{"random", ""},              // no prefix
+		{"", ""},                    // empty
 	}
 
 	for _, tt := range tests {
@@ -56,9 +56,9 @@ func TestNameToPath(t *testing.T) {
 		name string
 		want string
 	}{
-		{"email-triage", "/Skills/email-triage"},
-		{"test", "/Skills/test"},
-		{"my-skill", "/Skills/my-skill"},
+		{"email-triage", "/skills/email-triage"},
+		{"test", "/skills/test"},
+		{"my-skill", "/skills/my-skill"},
 	}
 
 	for _, tt := range tests {
@@ -75,20 +75,20 @@ func TestKeyToName(t *testing.T) {
 		want string
 	}{
 		// Valid keys
-		{"Skills/email-triage/SKILL.md", "email-triage"},
-		{"Skills/test/SKILL.md", "test"},
-		{"Skills/my-skill/SKILL.md", "my-skill"},
+		{"skills/email-triage/SKILL.md", "email-triage"},
+		{"skills/test/SKILL.md", "test"},
+		{"skills/my-skill/SKILL.md", "my-skill"},
 
 		// Invalid keys - should return empty
-		{"Skills/nested/path/SKILL.md", ""},   // nested directory
-		{"Skills/test/other.txt", ""},         // wrong filename
-		{"Skills/test/skill.md", ""},          // wrong case
-		{"other/test/SKILL.md", ""},           // wrong prefix
-		{"Skills/SKILL.md", ""},               // no skill name
-		{"SKILL.md", ""},                      // no path
-		{"", ""},                              // empty
-		{"Skills/test/", ""},                  // no filename
-		{"Skills/test", ""},                   // no manifest
+		{"skills/nested/path/SKILL.md", ""}, // nested directory
+		{"skills/test/other.txt", ""},       // wrong filename
+		{"skills/test/skill.md", ""},        // wrong case
+		{"other/test/SKILL.md", ""},         // wrong prefix
+		{"skills/SKILL.md", ""},             // no skill name
+		{"SKILL.md", ""},                    // no path
+		{"", ""},                            // empty
+		{"skills/test/", ""},                // no filename
+		{"skills/test", ""},                 // no manifest
 	}
 
 	for _, tt := range tests {
@@ -144,8 +144,8 @@ func TestRoundTrip(t *testing.T) {
 
 // TestConstants verifies the constants are what we expect
 func TestConstants(t *testing.T) {
-	if Dir != "Skills" {
-		t.Errorf("Dir = %q, want %q", Dir, "Skills")
+	if Dir != "skills" {
+		t.Errorf("Dir = %q, want %q", Dir, "skills")
 	}
 	if ManifestFile != "SKILL.md" {
 		t.Errorf("ManifestFile = %q, want %q", ManifestFile, "SKILL.md")

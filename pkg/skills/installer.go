@@ -16,12 +16,12 @@ const (
 	InstalledMetaFile = ".installed.json"   // install state file
 )
 
-// ManifestKey returns the S3 key for a skill's manifest: "Skills/{name}/SKILL.md"
+// ManifestKey returns the S3 key for a skill's manifest: "skills/{name}/SKILL.md"
 func ManifestKey(name string) string {
 	return Dir + "/" + name + "/" + ManifestFile
 }
 
-// PathToName extracts skill name from an airstore path like "/Skills/email-triage".
+// PathToName extracts skill name from an airstore path like "/skills/email-triage".
 func PathToName(path string) string {
 	path = strings.TrimPrefix(path, "/")
 	if !strings.HasPrefix(path, Dir+"/") {
@@ -34,12 +34,12 @@ func PathToName(path string) string {
 	return name
 }
 
-// NameToPath converts a skill name to airstore path: "/Skills/{name}"
+// NameToPath converts a skill name to airstore path: "/skills/{name}"
 func NameToPath(name string) string {
 	return "/" + Dir + "/" + name
 }
 
-// KeyToName extracts skill name from S3 key like "Skills/email-triage/SKILL.md".
+// KeyToName extracts skill name from S3 key like "skills/email-triage/SKILL.md".
 func KeyToName(key string) string {
 	if !strings.HasSuffix(key, "/"+ManifestFile) {
 		return ""
