@@ -10,114 +10,79 @@ import (
 
 // Workspace methods on PostgresBackend
 
+const workspaceCols = `id, external_id, name, created_at, updated_at`
+
+func scanWorkspace(row interface{ Scan(dest ...any) error }) (*types.Workspace, error) {
+	ws := &types.Workspace{}
+	err := row.Scan(
+		&ws.Id,
+		&ws.ExternalId,
+		&ws.Name,
+		&ws.CreatedAt,
+		&ws.UpdatedAt,
+	)
+	return ws, err
+}
+
 // CreateWorkspace creates a new workspace
 func (b *PostgresBackend) CreateWorkspace(ctx context.Context, name string) (*types.Workspace, error) {
 	query := `
 		INSERT INTO workspace (name)
 		VALUES ($1)
-		RETURNING id, external_id, name, created_at, updated_at
-	`
+		RETURNING ` + workspaceCols
 
-	workspace := &types.Workspace{}
-	err := b.db.QueryRowContext(ctx, query, name).Scan(
-		&workspace.Id,
-		&workspace.ExternalId,
-		&workspace.Name,
-		&workspace.CreatedAt,
-		&workspace.UpdatedAt,
-	)
+	ws, err := scanWorkspace(b.db.QueryRowContext(ctx, query, name))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create workspace: %w", err)
 	}
-
-	return workspace, nil
+	return ws, nil
 }
 
 // GetWorkspace retrieves a workspace by internal ID
 func (b *PostgresBackend) GetWorkspace(ctx context.Context, id uint) (*types.Workspace, error) {
-	query := `
-		SELECT id, external_id, name, created_at, updated_at
-		FROM workspace
-		WHERE id = $1
-	`
+	query := `SELECT ` + workspaceCols + ` FROM workspace WHERE id = $1`
 
-	workspace := &types.Workspace{}
-	err := b.db.QueryRowContext(ctx, query, id).Scan(
-		&workspace.Id,
-		&workspace.ExternalId,
-		&workspace.Name,
-		&workspace.CreatedAt,
-		&workspace.UpdatedAt,
-	)
+	ws, err := scanWorkspace(b.db.QueryRowContext(ctx, query, id))
 	if err == sql.ErrNoRows {
 		return nil, &types.ErrWorkspaceNotFound{ExternalId: fmt.Sprintf("%d", id)}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get workspace: %w", err)
 	}
-
-	return workspace, nil
+	return ws, nil
 }
 
 // GetWorkspaceByExternalId retrieves a workspace by external UUID
 func (b *PostgresBackend) GetWorkspaceByExternalId(ctx context.Context, externalId string) (*types.Workspace, error) {
-	query := `
-		SELECT id, external_id, name, created_at, updated_at
-		FROM workspace
-		WHERE external_id = $1
-	`
+	query := `SELECT ` + workspaceCols + ` FROM workspace WHERE external_id = $1`
 
-	workspace := &types.Workspace{}
-	err := b.db.QueryRowContext(ctx, query, externalId).Scan(
-		&workspace.Id,
-		&workspace.ExternalId,
-		&workspace.Name,
-		&workspace.CreatedAt,
-		&workspace.UpdatedAt,
-	)
+	ws, err := scanWorkspace(b.db.QueryRowContext(ctx, query, externalId))
 	if err == sql.ErrNoRows {
 		return nil, &types.ErrWorkspaceNotFound{ExternalId: externalId}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get workspace by external id: %w", err)
 	}
-
-	return workspace, nil
+	return ws, nil
 }
 
 // GetWorkspaceByName retrieves a workspace by name
 func (b *PostgresBackend) GetWorkspaceByName(ctx context.Context, name string) (*types.Workspace, error) {
-	query := `
-		SELECT id, external_id, name, created_at, updated_at
-		FROM workspace
-		WHERE name = $1
-	`
+	query := `SELECT ` + workspaceCols + ` FROM workspace WHERE name = $1`
 
-	workspace := &types.Workspace{}
-	err := b.db.QueryRowContext(ctx, query, name).Scan(
-		&workspace.Id,
-		&workspace.ExternalId,
-		&workspace.Name,
-		&workspace.CreatedAt,
-		&workspace.UpdatedAt,
-	)
+	ws, err := scanWorkspace(b.db.QueryRowContext(ctx, query, name))
 	if err == sql.ErrNoRows {
 		return nil, &types.ErrWorkspaceNotFound{Name: name}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get workspace by name: %w", err)
 	}
-
-	return workspace, nil
+	return ws, nil
 }
 
 // ListWorkspaces returns all workspaces
 func (b *PostgresBackend) ListWorkspaces(ctx context.Context) ([]*types.Workspace, error) {
-	query := `
-		SELECT id, external_id, name, created_at, updated_at
-		FROM workspace
-		ORDER BY created_at DESC
-	`
+	query := `SELECT ` + workspaceCols + ` FROM workspace ORDER BY created_at DESC`
 
 	rows, err := b.db.QueryContext(ctx, query)
 	if err != nil {
@@ -127,17 +92,11 @@ func (b *PostgresBackend) ListWorkspaces(ctx context.Context) ([]*types.Workspac
 
 	var workspaces []*types.Workspace
 	for rows.Next() {
-		workspace := &types.Workspace{}
-		if err := rows.Scan(
-			&workspace.Id,
-			&workspace.ExternalId,
-			&workspace.Name,
-			&workspace.CreatedAt,
-			&workspace.UpdatedAt,
-		); err != nil {
+		ws, err := scanWorkspace(rows)
+		if err != nil {
 			return nil, fmt.Errorf("failed to scan workspace: %w", err)
 		}
-		workspaces = append(workspaces, workspace)
+		workspaces = append(workspaces, ws)
 	}
 
 	if err := rows.Err(); err != nil {

@@ -33,8 +33,9 @@ func (hg *HooksGroup) Create(c echo.Context) error {
 	ctx := c.Request().Context()
 
 	var req struct {
-		Path   string `json:"path"`
-		Prompt string `json:"prompt"`
+		Path      string `json:"path"`
+		Prompt    string `json:"prompt"`
+		SkillPath string `json:"skill_path"`
 	}
 	if err := c.Bind(&req); err != nil || req.Path == "" {
 		return ErrorResponse(c, http.StatusBadRequest, "path required")
@@ -45,15 +46,30 @@ func (hg *HooksGroup) Create(c echo.Context) error {
 		return ErrorResponse(c, http.StatusNotFound, "workspace not found")
 	}
 
+	// Resolve the token to store on the hook.
+	// For member auth: use the caller's token directly.
+	// For admin auth: the cluster admin token is a static secret that
+	// workers can't use for filesystem mounts, so we auto-provision a
+	// workspace service token instead.
+	tokenId := ptrUint(auth.TokenId(ctx))
+	memberId := ptrUint(auth.MemberId(ctx))
 	rawToken := strings.TrimPrefix(c.Request().Header.Get("Authorization"), "Bearer ")
+
+	if tokenId == nil {
+		// Admin auth — provision a workspace service token
+		svcToken, svcRaw, err := hg.backend.EnsureWorkspaceServiceToken(ctx, ws.Id)
+		if err != nil {
+			return ErrorResponse(c, http.StatusInternalServerError, "failed to provision workspace token: "+err.Error())
+		}
+		tokenId = &svcToken.Id
+		rawToken = svcRaw
+	}
+
 	if rawToken == "" {
 		return ErrorResponse(c, http.StatusBadRequest, "authentication token required")
 	}
 
-	hook, err := hg.svc.Create(ctx, ws.Id,
-		ptrUint(auth.MemberId(ctx)),
-		ptrUint(auth.TokenId(ctx)),
-		rawToken, req.Path, req.Prompt)
+	hook, err := hg.svc.Create(ctx, ws.Id, memberId, tokenId, rawToken, req.Path, req.Prompt, req.SkillPath)
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
@@ -93,14 +109,15 @@ func (hg *HooksGroup) Get(c echo.Context) error {
 
 func (hg *HooksGroup) Update(c echo.Context) error {
 	var req struct {
-		Prompt *string `json:"prompt,omitempty"`
-		Active *bool   `json:"active,omitempty"`
+		Prompt    *string `json:"prompt,omitempty"`
+		Active    *bool   `json:"active,omitempty"`
+		SkillPath *string `json:"skill_path,omitempty"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid request")
 	}
 
-	hook, err := hg.svc.Update(c.Request().Context(), c.Param("id"), req.Prompt, req.Active)
+	hook, err := hg.svc.Update(c.Request().Context(), c.Param("id"), req.Prompt, req.Active, req.SkillPath)
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
@@ -129,6 +146,7 @@ type hookResp struct {
 	WorkspaceID string `json:"workspace_id"`
 	Path        string `json:"path"`
 	Prompt      string `json:"prompt"`
+	SkillPath   string `json:"skill_path"`
 	Active      bool   `json:"active"`
 	CreatedAt   string `json:"created_at"`
 	UpdatedAt   string `json:"updated_at"`
@@ -140,6 +158,7 @@ func hookJSON(h *types.Hook, wsExt string) hookResp {
 		WorkspaceID: wsExt,
 		Path:        h.Path,
 		Prompt:      h.Prompt,
+		SkillPath:   h.SkillPath,
 		Active:      h.Active,
 		CreatedAt:   h.CreatedAt.Format(time.RFC3339),
 		UpdatedAt:   h.UpdatedAt.Format(time.RFC3339),

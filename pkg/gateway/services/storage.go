@@ -465,16 +465,37 @@ func (s *StorageService) Rename(ctx context.Context, req *pb.ContextRenameReques
 		return &pb.ContextRenameResponse{Ok: false, Error: err.Error()}, nil
 	}
 
+	oldKey, newKey := s.key(req.OldPath), s.key(req.NewPath)
+
+	// First try as a single file
+	copied, err := s.renameSingleObject(ctx, bucket, oldKey, newKey)
+	if err != nil {
+		// If single file copy failed, try as a directory (prefix rename)
+		dirErr := s.renamePrefix(ctx, bucket, oldKey, newKey)
+		if dirErr != nil {
+			return &pb.ContextRenameResponse{Ok: false, Error: fmt.Sprintf("rename failed: %v", err)}, nil
+		}
+		return &pb.ContextRenameResponse{Ok: true}, nil
+	}
+
+	if copied {
+		s.invalidate(bucket, oldKey)
+		s.invalidate(bucket, newKey)
+	}
+	return &pb.ContextRenameResponse{Ok: true}, nil
+}
+
+// renameSingleObject copies a single S3 object and deletes the original.
+// Returns (true, nil) on success, (false, err) if the object doesn't exist or copy fails.
+func (s *StorageService) renameSingleObject(ctx context.Context, bucket, oldKey, newKey string) (bool, error) {
 	ctx, cancel := s.timeout(ctx)
 	defer cancel()
 
-	oldKey, newKey := s.key(req.OldPath), s.key(req.NewPath)
-
-	_, err = s.client.S3Client().CopyObject(ctx, &s3.CopyObjectInput{
+	_, err := s.client.S3Client().CopyObject(ctx, &s3.CopyObjectInput{
 		Bucket: &bucket, Key: &newKey, CopySource: aws.String(bucket + "/" + oldKey),
 	})
 	if err != nil {
-		return &pb.ContextRenameResponse{Ok: false, Error: err.Error()}, nil
+		return false, err
 	}
 
 	if _, err := s.client.S3Client().DeleteObject(ctx, &s3.DeleteObjectInput{
@@ -483,9 +504,63 @@ func (s *StorageService) Rename(ctx context.Context, req *pb.ContextRenameReques
 		log.Warn().Err(err).Str("key", oldKey).Msg("rename: delete old failed")
 	}
 
-	s.invalidate(bucket, oldKey)
-	s.invalidate(bucket, newKey)
-	return &pb.ContextRenameResponse{Ok: true}, nil
+	return true, nil
+}
+
+// renamePrefix renames all objects under an S3 prefix (directory rename).
+func (s *StorageService) renamePrefix(ctx context.Context, bucket, oldPrefix, newPrefix string) error {
+	// Ensure prefixes end with /
+	if oldPrefix != "" && oldPrefix[len(oldPrefix)-1] != '/' {
+		oldPrefix += "/"
+	}
+	if newPrefix != "" && newPrefix[len(newPrefix)-1] != '/' {
+		newPrefix += "/"
+	}
+
+	listCtx, listCancel := s.timeout(ctx)
+	defer listCancel()
+
+	resp, err := s.client.S3Client().ListObjectsV2(listCtx, &s3.ListObjectsV2Input{
+		Bucket: &bucket, Prefix: &oldPrefix,
+	})
+	if err != nil {
+		return fmt.Errorf("list objects: %w", err)
+	}
+	if len(resp.Contents) == 0 {
+		return fmt.Errorf("no objects found under prefix %q", oldPrefix)
+	}
+
+	for _, obj := range resp.Contents {
+		if obj.Key == nil {
+			continue
+		}
+		oldObjKey := *obj.Key
+		suffix := strings.TrimPrefix(oldObjKey, oldPrefix)
+		newObjKey := newPrefix + suffix
+
+		copyCtx, copyCancel := s.timeout(ctx)
+		_, copyErr := s.client.S3Client().CopyObject(copyCtx, &s3.CopyObjectInput{
+			Bucket: &bucket, Key: &newObjKey, CopySource: aws.String(bucket + "/" + oldObjKey),
+		})
+		copyCancel()
+		if copyErr != nil {
+			return fmt.Errorf("copy %s -> %s: %w", oldObjKey, newObjKey, copyErr)
+		}
+
+		delCtx, delCancel := s.timeout(ctx)
+		_, delErr := s.client.S3Client().DeleteObject(delCtx, &s3.DeleteObjectInput{
+			Bucket: &bucket, Key: &oldObjKey,
+		})
+		delCancel()
+		if delErr != nil {
+			log.Warn().Err(delErr).Str("key", oldObjKey).Msg("rename prefix: delete old failed")
+		}
+
+		s.invalidate(bucket, oldObjKey)
+		s.invalidate(bucket, newObjKey)
+	}
+
+	return nil
 }
 
 // Truncate changes file size

@@ -118,6 +118,7 @@ func init() {
 	rootCmd.AddCommand(connectionCmd)
 	rootCmd.AddCommand(taskCmd)
 	rootCmd.AddCommand(hookCmd)
+	rootCmd.AddCommand(skillCmd)
 }
 
 // Execute runs the CLI

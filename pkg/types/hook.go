@@ -3,8 +3,8 @@ package types
 import "time"
 
 // Hook is metadata on a filesystem path that creates tasks when something
-// changes at that path. A hook on "/skills" fires when files are created
-// or modified there. A hook on "/sources/gmail/inbox" fires when new
+// changes at that path. A hook on "/Skills" fires when files are created
+// or modified there. A hook on "/Sources/gmail/inbox" fires when new
 // query results appear. The event type (create, modify, source change)
 // is passed as context in the task prompt -- not as a filter.
 type Hook struct {
@@ -13,6 +13,7 @@ type Hook struct {
 	WorkspaceId       uint      `json:"workspace_id" db:"workspace_id"`
 	Path              string    `json:"path" db:"path"`
 	Prompt            string    `json:"prompt" db:"prompt"`
+	SkillPath         string    `json:"skill_path" db:"skill_path"`
 	Active            bool      `json:"active" db:"active"`
 	CreatedByMemberId *uint     `json:"created_by_member_id,omitempty" db:"created_by_member_id"`
 	TokenId           *uint     `json:"-" db:"token_id"`
