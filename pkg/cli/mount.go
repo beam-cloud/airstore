@@ -236,10 +236,11 @@ func printMountStatus(mount, gateway, mode string) {
 	fmt.Println()
 	fmt.Printf("  %s\n", DimStyle.Render("Available paths:"))
 	paths := []struct{ path, desc string }{
-		{"/tools/*", "Tool binaries"},
-		{"/sources/*", "Integration data"},
-		{"/skills/*", "Skills and context"},
-		{"/tasks/*", "Active tasks"},
+		{types.PathTools + "/*", "Tool binaries"},
+		{types.PathSources + "/*", "Integration data"},
+		{types.PathSkills + "/*", "Skills and context"},
+		{types.PathTasks + "/*", "Active tasks"},
+		{types.PathMemory + "/*", "Agent memory"},
 	}
 	for _, p := range paths {
 		fmt.Printf("    %s  %s\n", CodeStyle.Render(fmt.Sprintf("%-14s", p.path)), DimStyle.Render(p.desc))

@@ -210,7 +210,7 @@ Examples:
 			PrintError(fmt.Errorf("uploading skill files: %w", err))
 			return nil
 		}
-		PrintSuccessf("  Skill files uploaded to /skills/%s/", skillName)
+		PrintSuccessf("  Skill files uploaded to %s/%s/", types.PathSkills, skillName)
 
 		// Create output directories
 		for _, writePath := range am.Writes {
@@ -232,7 +232,7 @@ Examples:
 			Source:      ref,
 		}
 		metaBytes, _ := json.MarshalIndent(meta, "", "  ")
-		writeFileToWorkspace(ctx, client, fmt.Sprintf("/skills/%s/%s", skillName, skills.InstalledMetaFile), metaBytes)
+		writeFileToWorkspace(ctx, client, fmt.Sprintf("%s/%s/%s", types.PathSkills, skillName, skills.InstalledMetaFile), metaBytes)
 
 		PrintNewline()
 		PrintSuccessf("%s installed", manifest.Name)
@@ -242,7 +242,7 @@ Examples:
 			PrintHint(fmt.Sprintf("View output: ls ~/airstore%s", am.Writes[0]))
 		}
 		PrintHint("Create a hook to trigger this skill automatically:")
-		PrintHint(fmt.Sprintf("  airstore hook create --path /sources/<source> --prompt \"Use the %s skill\"", skillName))
+		PrintHint(fmt.Sprintf("  airstore hook create --path %s/<source> --prompt \"Use the %s skill\"", types.PathSources, skillName))
 		PrintNewline()
 
 		return nil
@@ -439,20 +439,21 @@ func fetchFromGitHub(repo, subPath string) (files map[string][]byte, manifest *s
 	return files, manifest, content, nil
 }
 
-// uploadSkillFilesFromMap uploads skill files from a map to /skills/{name}/.
+// uploadSkillFilesFromMap uploads skill files from a map to /Skills/{name}/.
 func uploadSkillFilesFromMap(ctx context.Context, client *Client, skillName string, files map[string][]byte) error {
+	skillDir := fmt.Sprintf("%s/%s", types.PathSkills, skillName)
 	// Create the skill directory first
 	client.Context.Mkdir(ctx, &pb.ContextMkdirRequest{
-		Path: fmt.Sprintf("/skills/%s", skillName),
+		Path: skillDir,
 		Mode: 0755,
 	})
 
 	for relPath, data := range files {
-		remotePath := fmt.Sprintf("/skills/%s/%s", skillName, relPath)
+		remotePath := fmt.Sprintf("%s/%s/%s", types.PathSkills, skillName, relPath)
 
 		// Create parent dirs if needed
 		dir := filepath.Dir(remotePath)
-		if dir != fmt.Sprintf("/skills/%s", skillName) {
+		if dir != skillDir {
 			client.Context.Mkdir(ctx, &pb.ContextMkdirRequest{Path: dir, Mode: 0755})
 		}
 
@@ -463,11 +464,12 @@ func uploadSkillFilesFromMap(ctx context.Context, client *Client, skillName stri
 	return nil
 }
 
-// uploadSkillFiles copies all files from a local directory to /skills/{name}/ in the workspace.
+// uploadSkillFiles copies all files from a local directory to /Skills/{name}/ in the workspace.
 func uploadSkillFiles(ctx context.Context, client *Client, srcDir, skillName string) error {
+	skillDir := fmt.Sprintf("%s/%s", types.PathSkills, skillName)
 	// Create the skill directory first
 	client.Context.Mkdir(ctx, &pb.ContextMkdirRequest{
-		Path: fmt.Sprintf("/skills/%s", skillName),
+		Path: skillDir,
 		Mode: 0755,
 	})
 
@@ -485,7 +487,7 @@ func uploadSkillFiles(ctx context.Context, client *Client, srcDir, skillName str
 			return nil
 		}
 
-		remotePath := fmt.Sprintf("/skills/%s/%s", skillName, relPath)
+		remotePath := fmt.Sprintf("%s/%s/%s", types.PathSkills, skillName, relPath)
 
 		if d.IsDir() {
 			client.Context.Mkdir(ctx, &pb.ContextMkdirRequest{Path: remotePath, Mode: 0755})
@@ -575,7 +577,7 @@ var skillListCmd = &cobra.Command{
 
 			// Try to read installed metadata
 			metaResp, err := client.Context.Read(ctx, &pb.ContextReadRequest{
-				Path: fmt.Sprintf("/skills/%s/%s", name, skills.InstalledMetaFile),
+				Path: fmt.Sprintf("%s/%s/%s", types.PathSkills, name, skills.InstalledMetaFile),
 			})
 			if err == nil && metaResp.Ok {
 				var meta skills.InstalledSkill
@@ -624,7 +626,7 @@ var skillInfoCmd = &cobra.Command{
 
 		// Read SKILL.md
 		skillResp, err := client.Context.Read(ctx, &pb.ContextReadRequest{
-			Path: fmt.Sprintf("/skills/%s/SKILL.md", skillName),
+			Path: fmt.Sprintf("%s/%s/SKILL.md", types.PathSkills, skillName),
 		})
 		if err != nil || !skillResp.Ok {
 			PrintErrorMsg(fmt.Sprintf("skill %q not found", skillName))
@@ -639,7 +641,7 @@ var skillInfoCmd = &cobra.Command{
 
 		// Read installed metadata
 		metaResp, err := client.Context.Read(ctx, &pb.ContextReadRequest{
-			Path: fmt.Sprintf("/skills/%s/%s", skillName, skills.InstalledMetaFile),
+			Path: fmt.Sprintf("%s/%s/%s", types.PathSkills, skillName, skills.InstalledMetaFile),
 		})
 		var meta *skills.InstalledSkill
 		if err == nil && metaResp.Ok {
@@ -717,7 +719,7 @@ var skillUninstallCmd = &cobra.Command{
 		// Optionally delete output dirs
 		if !keepMemory {
 			skillResp, err := client.Context.Read(ctx, &pb.ContextReadRequest{
-				Path: fmt.Sprintf("/skills/%s/SKILL.md", skillName),
+				Path: fmt.Sprintf("%s/%s/SKILL.md", types.PathSkills, skillName),
 			})
 			if err == nil && skillResp.Ok {
 				manifest, err := skills.Parse(skillResp.Data)
@@ -733,7 +735,7 @@ var skillUninstallCmd = &cobra.Command{
 		// Delete skill directory
 		err = RunSpinnerWithResult("Removing skill...", func() error {
 			_, err := client.Context.Delete(ctx, &pb.ContextDeleteRequest{
-				Path:      fmt.Sprintf("/skills/%s", skillName),
+				Path:      fmt.Sprintf("%s/%s", types.PathSkills, skillName),
 				Recursive: true,
 			})
 			return err
@@ -770,7 +772,7 @@ var skillRunCmd = &cobra.Command{
 
 		// Read SKILL.md for the prompt
 		skillResp, err := client.Context.Read(ctx, &pb.ContextReadRequest{
-			Path: fmt.Sprintf("/skills/%s/SKILL.md", skillName),
+			Path: fmt.Sprintf("%s/%s/SKILL.md", types.PathSkills, skillName),
 		})
 		if err != nil || !skillResp.Ok {
 			PrintErrorMsg(fmt.Sprintf("skill %q not found", skillName))

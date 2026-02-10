@@ -430,10 +430,10 @@ func TestNormalizePath(t *testing.T) {
 	tests := []struct {
 		in, want string
 	}{
-		{"/Skills", "/Skills"},
-		{"Skills", "/Skills"},
-		{"/skills/", "/Skills"},
-		{"skills/", "/Skills"},
+		{types.PathSkills, types.PathSkills},
+		{types.DirNameSkills, types.PathSkills},
+		{"/skills/", "/skills"}, // NormalizePath only trims slash, doesn't change case
+		{"skills/", "/skills"},
 		{"/", "/"},
 		{"", "/"},
 	}
@@ -621,8 +621,8 @@ metadata:
 Read all new emails and categorize them by urgency.
 `
 	reader := &mockSkillReader{content: skillContent}
-	hook := makeHook(1, 10, "/sources/gmail/inbox", "Also flag anything from VIPs.")
-	hook.SkillPath = "/skills/email-triage"
+	hook := makeHook(1, 10, "/Sources/gmail/inbox", "Also flag anything from VIPs.")
+	hook.SkillPath = "/Skills/email-triage"
 	store := &mockStore{hooks: []*types.Hook{hook}}
 	creator := &mockCreator{}
 	backend := &mockBackend{}
@@ -707,7 +707,7 @@ Summarize the document concisely.
 `
 	reader := &mockSkillReader{content: skillContent}
 	hook := makeHook(1, 10, "/inbox", "")
-	hook.SkillPath = "/skills/summarizer"
+	hook.SkillPath = types.PathSkills + "/summarizer"
 	store := &mockStore{hooks: []*types.Hook{hook}}
 	creator := &mockCreator{}
 	backend := &mockBackend{}
@@ -733,25 +733,26 @@ func TestValidateHookPath(t *testing.T) {
 		path    string
 		wantErr bool
 	}{
-		// Blocked system root directories
-		{"/Tasks", true},
-		{"/tasks/", true},
-		{"/Tools", true},
-		{"/Skills", true},
-		{"/Sources", true},
-		{"/sources/", true},
+		// Blocked system root directories (testing both cases)
+		{types.PathTasks, true},
+		{"/tasks/", true}, // lowercase also blocked (case-insensitive)
+		{types.PathTools, true},
+		{types.PathSkills, true},
+		{types.PathSources, true},
+		{"/sources/", true}, // lowercase also blocked (case-insensitive)
+		{types.PathMemory, true},
 
-		// Root-level source folders - blocked
-		{"/sources/gdrive", true},
+		// Root-level source folders - blocked (testing case-insensitive)
+		{types.PathSources + "/gdrive", true},
 		{"/sources/gdrive/", true},
-		{"/sources/github", true},
-		{"/sources/gmail", true},
+		{types.PathSources + "/github", true},
+		{types.PathSources + "/gmail", true},
 		{"/sources/gmail/", true},
 
 		// Smart query folders under sources - allowed
-		{"/sources/gdrive/invoices", false},
+		{types.PathSources + "/gdrive/invoices", false},
 		{"/sources/gdrive/invoices/", false},
-		{"/sources/gmail/new unread emails", false},
+		{types.PathSources + "/gmail/new unread emails", false},
 		{"/sources/gmail/my-query", false},
 
 		// Top-level query paths - allowed

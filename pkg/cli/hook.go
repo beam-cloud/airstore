@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/beam-cloud/airstore/pkg/skills"
+	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/spf13/cobra"
 )
@@ -116,16 +117,17 @@ Examples:
 
 // resolveSkillPath resolves a skill path to an airstore path.
 // For local paths (starting with . or /), it imports the skill first.
-// For airstore paths (/skills/...), it validates the skill exists.
+// For airstore paths (/Skills/...), it validates the skill exists.
 func resolveSkillPath(client *Client, skill string) (string, error) {
+	skillsPrefix := types.PathSkills + "/"
 	// Check if it's a local path
-	if strings.HasPrefix(skill, ".") || (strings.HasPrefix(skill, "/") && !strings.HasPrefix(skill, "/skills/")) {
+	if strings.HasPrefix(skill, ".") || (strings.HasPrefix(skill, "/") && !strings.HasPrefix(strings.ToLower(skill), strings.ToLower(skillsPrefix))) {
 		return importLocalSkill(client, skill)
 	}
 
-	// It's an airstore path - validate it starts with /skills/
-	if !strings.HasPrefix(skill, "/skills/") {
-		return "", fmt.Errorf("skill path must start with /skills/ or be a local path")
+	// It's an airstore path - validate it starts with /Skills/ (case-insensitive)
+	if !strings.HasPrefix(strings.ToLower(skill), strings.ToLower(skillsPrefix)) {
+		return "", fmt.Errorf("skill path must start with %s or be a local path", skillsPrefix)
 	}
 
 	// TODO: Validate the skill exists via API
@@ -157,7 +159,7 @@ func importLocalSkill(client *Client, localPath string) (string, error) {
 	}
 
 	// The skill name from the manifest determines the target path
-	targetPath := "/skills/" + manifest.Name
+	targetPath := types.PathSkills + "/" + manifest.Name
 
 	// Upload the skill directory using the existing uploadSkillFiles function
 	ctx := context.Background()

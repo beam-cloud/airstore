@@ -374,7 +374,7 @@ func (s *SourceService) ReadDir(ctx context.Context, req *pb.SourceReadDirReques
 	}
 
 	// Check if this path is a smart query
-	queryPath := "/sources/" + path
+	queryPath := types.PathSources + "/" + path
 	query, err := s.fsStore.GetQuery(ctx, pctx.WorkspaceId, queryPath)
 	if err != nil {
 		log.Debug().Err(err).Str("path", queryPath).Msg("query lookup error")
@@ -392,9 +392,9 @@ func (s *SourceService) ReadDir(ctx context.Context, req *pb.SourceReadDirReques
 	}
 
 	// For any other path, check if parent is a smart query
-	parentPath := "/sources/" + integration
+	parentPath := types.PathSources + "/" + integration
 	if idx := strings.LastIndex(relPath, "/"); idx > 0 {
-		parentPath = "/sources/" + integration + "/" + relPath[:idx]
+		parentPath = types.PathSources + "/" + integration + "/" + relPath[:idx]
 	}
 
 	parentQuery, _ := s.fsStore.GetQuery(ctx, pctx.WorkspaceId, parentPath)
@@ -435,7 +435,7 @@ func (s *SourceService) readDirIntegrationRoot(ctx context.Context, pctx *source
 	}
 
 	// List smart queries for this integration
-	parentPath := "/sources/" + integration
+	parentPath := types.PathSources + "/" + integration
 	queries, err := s.fsStore.ListQueries(ctx, pctx.WorkspaceId, parentPath)
 	if err != nil {
 		log.Warn().Err(err).Str("path", parentPath).Msg("failed to list smart queries")
@@ -715,9 +715,9 @@ func (s *SourceService) Read(ctx context.Context, req *pb.SourceReadRequest) (*p
 	// Handle .query.as metadata files
 	if relPath == ".query.as" || strings.HasSuffix(relPath, "/.query.as") {
 		// Get the parent query path
-		queryPath := "/sources/" + integration
+		queryPath := types.PathSources + "/" + integration
 		if relPath != ".query.as" {
-			queryPath = "/sources/" + integration + "/" + strings.TrimSuffix(relPath, "/.query.as")
+			queryPath = types.PathSources + "/" + integration + "/" + strings.TrimSuffix(relPath, "/.query.as")
 		}
 
 		query, err := s.fsStore.GetQuery(ctx, pctx.WorkspaceId, queryPath)
@@ -734,7 +734,7 @@ func (s *SourceService) Read(ctx context.Context, req *pb.SourceReadRequest) (*p
 	if strings.HasPrefix(base, ".") && strings.HasSuffix(base, ".query.as") {
 		filename := strings.TrimPrefix(strings.TrimSuffix(base, ".query.as"), ".")
 		dir := path.Dir(relPath)
-		queryPath := "/sources/" + integration
+		queryPath := types.PathSources + "/" + integration
 		if dir != "." && dir != "" {
 			queryPath += "/" + dir
 		}
@@ -767,7 +767,7 @@ func (s *SourceService) findQueryAndFilename(ctx context.Context, workspaceId ui
 	parts := strings.Split(relPath, "/")
 
 	for i := len(parts) - 1; i > 0; i-- {
-		parentPath := "/sources/" + integration + "/" + strings.Join(parts[:i], "/")
+		parentPath := types.PathSources + "/" + integration + "/" + strings.Join(parts[:i], "/")
 		query, err := s.fsStore.GetQuery(ctx, workspaceId, parentPath)
 		if err == nil && query != nil && query.OutputFormat == types.QueryOutputFolder {
 			filename := strings.Join(parts[i:], "/")
@@ -777,9 +777,9 @@ func (s *SourceService) findQueryAndFilename(ctx context.Context, workspaceId ui
 
 	// Check if the direct parent is a query
 	if len(parts) >= 1 {
-		parentPath := "/sources/" + integration + "/" + strings.Join(parts[:len(parts)-1], "/")
+		parentPath := types.PathSources + "/" + integration + "/" + strings.Join(parts[:len(parts)-1], "/")
 		if len(parts) == 1 {
-			parentPath = "/sources/" + integration
+			parentPath = types.PathSources + "/" + integration
 		}
 		query, err := s.fsStore.GetQuery(ctx, workspaceId, parentPath)
 		if err == nil && query != nil && query.OutputFormat == types.QueryOutputFolder {
@@ -961,7 +961,7 @@ func (s *SourceService) CreateSmartQuery(ctx context.Context, req *pb.CreateSmar
 	}
 	workspaceId := auth.WorkspaceId(ctx)
 
-	path := "/sources/" + req.Integration + "/" + req.Name
+	path := types.PathSources + "/" + req.Integration + "/" + req.Name
 	if req.FileExt != "" {
 		path += req.FileExt
 	}
@@ -1286,7 +1286,7 @@ func (s *SourceService) UpdateSmartQuery(ctx context.Context, req *pb.UpdateSmar
 	if req.Name != "" && req.Name != query.Name {
 		query.Name = req.Name
 		// Recalculate path: /sources/{integration}/{name}
-		query.Path = "/sources/" + query.Integration + "/" + req.Name
+		query.Path = types.PathSources + "/" + query.Integration + "/" + req.Name
 		if query.FileExt != "" {
 			query.Path += query.FileExt
 		}
