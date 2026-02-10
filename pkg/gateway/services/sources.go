@@ -25,10 +25,17 @@ import (
 )
 
 const credCacheTTL = 5 * time.Minute // Cache credentials for 5 minutes
+const connCacheTTL = 10 * time.Second // Cache connected integration set briefly
 
 // cachedCreds holds cached credentials with expiration
 type cachedCreds struct {
 	creds     *types.IntegrationCredentials
+	expiresAt time.Time
+}
+
+// cachedConnSet holds the set of connected integration names for a workspace.
+type cachedConnSet struct {
+	set       map[string]bool
 	expiresAt time.Time
 }
 
@@ -60,6 +67,7 @@ type SourceService struct {
 	rateLimiter   *sources.RateLimiter
 	oauthRegistry *oauth.Registry
 	credCache     sync.Map // map[string]*cachedCreds - caches credentials by "workspaceId:integration"
+	connCache     sync.Map // map[uint]*cachedConnSet - caches connected integrations by workspace
 	queryGroup    singleflight.Group
 	hookStream    common.EventEmitter // optional: for emitting source change events
 	seenTracker   *hooks.SeenTracker  // optional: for detecting new query results
@@ -257,6 +265,10 @@ func (s *SourceService) Stat(ctx context.Context, req *pb.SourceStatRequest) (*p
 		return &pb.SourceStatResponse{Ok: false, Error: "integration not found"}, nil
 	}
 
+	if !s.isIntegrationVisible(ctx, pctx.WorkspaceId, integration) {
+		return &pb.SourceStatResponse{Ok: false, Error: "integration not connected"}, nil
+	}
+
 	// Get credentials for this integration
 	pctx, connected := s.loadCredentials(ctx, pctx, integration)
 
@@ -344,10 +356,15 @@ func (s *SourceService) ReadDir(ctx context.Context, req *pb.SourceReadDirReques
 
 	path := cleanPath(req.Path)
 
-	// Root /sources directory - list all integrations
+	// Root /sources directory - list only connected integrations
 	if path == "" {
-		entries := make([]*pb.SourceDirEntry, 0, len(s.registry.List()))
-		for _, name := range s.registry.List() {
+		connected := s.connectedIntegrations(ctx, pctx.WorkspaceId)
+		allNames := s.registry.List()
+		entries := make([]*pb.SourceDirEntry, 0, len(allNames))
+		for _, name := range allNames {
+			if connected != nil && !connected[name] {
+				continue // integration not connected — hide it
+			}
 			entries = append(entries, &pb.SourceDirEntry{
 				Name:  name,
 				Mode:  sources.ModeDir,
@@ -364,6 +381,10 @@ func (s *SourceService) ReadDir(ctx context.Context, req *pb.SourceReadDirReques
 	provider := s.registry.Get(integration)
 	if provider == nil {
 		return &pb.SourceReadDirResponse{Ok: false, Error: "integration not found"}, nil
+	}
+
+	if !s.isIntegrationVisible(ctx, pctx.WorkspaceId, integration) {
+		return &pb.SourceReadDirResponse{Ok: false, Error: "integration not connected"}, nil
 	}
 
 	// Get credentials for this integration
@@ -777,6 +798,10 @@ func (s *SourceService) Read(ctx context.Context, req *pb.SourceReadRequest) (*p
 		return &pb.SourceReadResponse{Ok: false, Error: "integration not found"}, nil
 	}
 
+	if !s.isIntegrationVisible(ctx, pctx.WorkspaceId, integration) {
+		return &pb.SourceReadResponse{Ok: false, Error: "integration not connected"}, nil
+	}
+
 	// Get credentials for this integration
 	pctx, connected := s.loadCredentials(ctx, pctx, integration)
 
@@ -982,6 +1007,57 @@ func (s *SourceService) providerContext(ctx context.Context) (*sources.ProviderC
 		WorkspaceId: auth.WorkspaceId(ctx),
 		MemberId:    auth.MemberId(ctx),
 	}, nil
+}
+
+// connectedIntegrations returns the set of integration types that have active
+// connections for the given workspace.  Results are cached briefly to avoid
+// hitting the DB on every readdir.  Returns nil when filtering is not possible
+// (no backend, no workspace) — callers should treat nil as "show everything".
+func (s *SourceService) connectedIntegrations(ctx context.Context, workspaceId uint) map[string]bool {
+	if s.backend == nil || workspaceId == 0 {
+		return nil // local mode or no workspace — show all
+	}
+
+	// Check cache
+	if v, ok := s.connCache.Load(workspaceId); ok {
+		cc := v.(*cachedConnSet)
+		if time.Now().Before(cc.expiresAt) {
+			return cc.set
+		}
+		s.connCache.Delete(workspaceId)
+	}
+
+	conns, err := s.backend.ListConnections(ctx, workspaceId)
+	if err != nil {
+		log.Warn().Err(err).Uint("workspace", workspaceId).Msg("failed to list connections for source filtering")
+		return nil // on error, don't hide anything
+	}
+
+	set := make(map[string]bool, len(conns))
+	for _, c := range conns {
+		set[c.IntegrationType] = true
+	}
+
+	s.connCache.Store(workspaceId, &cachedConnSet{
+		set:       set,
+		expiresAt: time.Now().Add(connCacheTTL),
+	})
+	return set
+}
+
+// InvalidateConnectionCache evicts the cached connected-integrations set for a
+// workspace. Call this when connections are added or removed so that subsequent
+// ReadDir/Stat/Read calls reflect the change immediately.
+func (s *SourceService) InvalidateConnectionCache(workspaceId uint) {
+	s.connCache.Delete(workspaceId)
+}
+
+// isIntegrationVisible returns true if the integration should be visible for
+// the given workspace.  Returns true when filtering is not possible (no
+// backend, no workspace, error) to avoid accidentally hiding integrations.
+func (s *SourceService) isIntegrationVisible(ctx context.Context, workspaceId uint, integration string) bool {
+	connSet := s.connectedIntegrations(ctx, workspaceId)
+	return connSet == nil || connSet[integration]
 }
 
 // loadCredentials fetches integration credentials from the backend (with caching)

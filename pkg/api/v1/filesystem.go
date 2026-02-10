@@ -745,7 +745,13 @@ func (g *FilesystemGroup) listRootDirectories(ctx context.Context) []types.Virtu
 	if g.toolRegistry != nil {
 		entries[2].ChildCount = len(g.toolRegistry.List())
 	}
-	if g.sourceRegistry != nil {
+	// Use SourceService to get connected count (not total registered)
+	if g.sourceService != nil {
+		resp, err := g.sourceService.ReadDir(ctx, &pb.SourceReadDirRequest{Path: ""})
+		if err == nil && resp.Ok {
+			entries[1].ChildCount = len(resp.Entries)
+		}
+	} else if g.sourceRegistry != nil {
 		entries[1].ChildCount = len(g.sourceRegistry.List())
 	}
 
@@ -1054,17 +1060,34 @@ func (g *FilesystemGroup) listSources(c echo.Context, ctx context.Context, relPa
 }
 
 func (g *FilesystemGroup) statSources(c echo.Context, ctx context.Context, fullPath, relPath string) error {
-	// Root /sources
+	// Root /sources — count only connected integrations
 	if relPath == "" {
+		childCount := 0
+		if g.sourceService != nil {
+			resp, err := g.sourceService.ReadDir(ctx, &pb.SourceReadDirRequest{Path: ""})
+			if err == nil && resp.Ok {
+				childCount = len(resp.Entries)
+			}
+		} else if g.sourceRegistry != nil {
+			childCount = len(g.sourceRegistry.List())
+		}
 		return SuccessResponse(c, types.NewRootFolder(types.DirNameSources, types.PathSources).
 			WithMetadata("description", "Connected integrations").
-			WithChildCount(len(g.sourceRegistry.List())))
+			WithChildCount(childCount))
 	}
 
 	integration, subPath := splitFirstPath(relPath)
 
-	// Check if integration exists
-	if g.sourceRegistry.Get(integration) == nil {
+	// Delegate to SourceService which handles connection visibility
+	if g.sourceService != nil {
+		resp, err := g.sourceService.Stat(ctx, &pb.SourceStatRequest{Path: relPath})
+		if err != nil {
+			return ErrorResponse(c, http.StatusInternalServerError, "stat failed")
+		}
+		if !resp.Ok {
+			return ErrorResponse(c, http.StatusNotFound, resp.Error)
+		}
+	} else if g.sourceRegistry != nil && g.sourceRegistry.Get(integration) == nil {
 		return ErrorResponse(c, http.StatusNotFound, "integration not found")
 	}
 
@@ -1161,13 +1184,35 @@ func (g *FilesystemGroup) readSources(c echo.Context, ctx context.Context, relPa
 }
 
 func (g *FilesystemGroup) buildSourceRootEntries(ctx context.Context) []types.VirtualFile {
+	// Use SourceService.ReadDir which filters to only connected integrations
+	if g.sourceService != nil {
+		resp, err := g.sourceService.ReadDir(ctx, &pb.SourceReadDirRequest{Path: ""})
+		if err == nil && resp.Ok {
+			entries := make([]types.VirtualFile, 0, len(resp.Entries))
+			for _, e := range resp.Entries {
+				if !e.IsDir {
+					continue
+				}
+				entryPath := types.SourcePath(e.Name)
+				vf := types.NewVirtualFile(
+					hashPath(entryPath),
+					e.Name,
+					entryPath,
+					types.VFTypeSource,
+				).WithFolder(true).WithReadOnly(true).WithMetadata(types.MetaKeyProvider, e.Name)
+				entries = append(entries, *vf)
+			}
+			return entries
+		}
+		log.Warn().Err(err).Msg("failed to list connected sources, falling back to registry")
+	}
+
+	// Fallback: list all registered integrations (no backend or error)
 	if g.sourceRegistry == nil {
 		return []types.VirtualFile{}
 	}
-
 	integrations := g.sourceRegistry.List()
 	entries := make([]types.VirtualFile, 0, len(integrations))
-
 	for _, name := range integrations {
 		entryPath := types.SourcePath(name)
 		vf := types.NewVirtualFile(
@@ -1178,7 +1223,6 @@ func (g *FilesystemGroup) buildSourceRootEntries(ctx context.Context) []types.Vi
 		).WithFolder(true).WithReadOnly(true).WithMetadata(types.MetaKeyProvider, name)
 		entries = append(entries, *vf)
 	}
-
 	return entries
 }
 

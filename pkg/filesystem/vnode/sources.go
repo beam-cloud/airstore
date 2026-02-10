@@ -79,8 +79,9 @@ type cachedContent struct {
 // SourcesVNode handles /sources/ - both native content and smart queries.
 type SourcesVNode struct {
 	SmartQueryBase
-	client pb.SourceServiceClient
-	token  string
+	client      pb.SourceServiceClient
+	token       string
+	bearerToken string // precomputed auth header value
 
 	// Cache for query results to avoid repeated ExecuteSmartQuery calls
 	// during Readdir->Getattr cycles
@@ -119,6 +120,7 @@ func NewSourcesVNode(conn *grpc.ClientConn, token string) *SourcesVNode {
 	v := &SourcesVNode{
 		client:       pb.NewSourceServiceClient(conn),
 		token:        token,
+		bearerToken:  BearerToken(token),
 		results:      make(map[string]*cachedQueryResult),
 		queries:      make(map[string]*cachedQuery),
 		integrations: make(map[string]*cachedIntegration),
@@ -142,8 +144,8 @@ func (v *SourcesVNode) Prefix() string { return SourcesPath }
 
 func (v *SourcesVNode) ctx() (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(context.Background(), sourcesTimeout)
-	if v.token != "" {
-		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+v.token)
+	if v.bearerToken != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", v.bearerToken)
 	}
 	return ctx, cancel
 }
@@ -263,33 +265,11 @@ func (v *SourcesVNode) Getattr(path string) (*FileInfo, error) {
 			return info, nil
 		}
 
-		// Not open yet. Eagerly fetch the content to get the accurate size.
-		// Without this, the FUSE-T SMB layer caches the stale readdir size
-		// and pads reads with null bytes. This fetch is cached by Open/Read.
+		// Use the size from the readdir cache (populated by executeQueryAsDir).
+		// Content is only fetched lazily when the file is actually opened/read.
+		// The size here comes from the query execution results and is accurate
+		// for the cached query run. If size is 0, the kernel reads until EOF.
 		filename := filepath.Base(path)
-		data, err := func() ([]byte, error) {
-			if v.client == nil {
-				return nil, fs.ErrNotExist // test mode
-			}
-			return v.fetchQueryResultContent(ctx, q, filename)
-		}()
-		if err == nil && data != nil {
-			fh := v.addOpenContent(path, data)
-			v.cacheOpenStat(path, int64(len(data)), 0, time.Time{})
-			// Release immediately — we just needed the size. The content
-			// stays cached until the ref count reaches zero.
-			v.releaseOpenContent(fh)
-			info := NewFileInfo(PathIno(path), int64(len(data)), 0644)
-			_, mtime, _ := v.getQueryResultMetaCached(q.Path, filename)
-			if mtime > 0 {
-				t := time.Unix(mtime, 0)
-				info.Mtime = t
-				info.Ctime = t
-			}
-			return info, nil
-		}
-
-		// Fallback: use readdir cache size (may have null bytes on first read)
 		size, mtime, _ := v.getQueryResultMetaCached(q.Path, filename)
 		info := NewFileInfo(PathIno(path), size, 0644)
 		if mtime > 0 {
@@ -451,12 +431,11 @@ func (v *SourcesVNode) executeQueryAsDir(ctx context.Context, q *types.SmartQuer
 				Size:  listingSize(e.Size),
 				Mtime: e.Mtime,
 			})
-			// Only cache stat for directories. File sizes from readdir may be
-			// stale (gateway caches from last execution). For files, the eager
-			// fetch in Getattr gets the accurate size on first access.
-			if e.IsDir {
-				v.cacheStatFromEntry(childPath, e)
-			}
+			// Cache stat for all entries (files and directories) so that
+			// subsequent Getattr calls during ls -l are served from cache
+			// instead of eagerly fetching content. The size may be stale
+			// but is corrected when the file is actually opened/read.
+			v.cacheStatFromEntry(childPath, e)
 		}
 		return entries, nil
 	}
@@ -484,11 +463,8 @@ func (v *SourcesVNode) executeQueryAsDir(ctx context.Context, q *types.SmartQuer
 			Size:  listingSize(e.Size),
 			Mtime: e.Mtime,
 		})
-		// Only cache stat for directories. File sizes from readdir may be
-		// stale. For files, the eager fetch in Getattr gets the accurate size.
-		if e.IsDir {
-			v.cacheStatFromEntry(childPath, e)
-		}
+		// Cache stat for all entries so Getattr is served from cache.
+		v.cacheStatFromEntry(childPath, e)
 	}
 	return entries, nil
 }

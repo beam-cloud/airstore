@@ -8,12 +8,17 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/beam-cloud/airstore/pkg/filesystem/vnode"
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/rs/zerolog/log"
 	"github.com/winfsp/cgofuse/fuse"
 )
+
+// Compile-time assertion: vnode.FileInfo and FileInfo must have identical size.
+// If the types ever diverge, this will cause a compilation error.
+var _ [unsafe.Sizeof(FileInfo{})]byte = [unsafe.Sizeof(vnode.FileInfo{})]byte{}
 
 const (
 	// dirChildrenSize is the max number of directories whose child name sets we cache.
@@ -272,8 +277,13 @@ func (f *Filesystem) Getattr(path string) (*FileInfo, error) {
 		return f.rootInfo(), nil
 	}
 
+	// Extract basename via manual index scan — avoids filepath.Base allocation.
+	name := path
+	if i := strings.LastIndexByte(path, '/'); i >= 0 {
+		name = path[i+1:]
+	}
+
 	// Fast path for macOS system files to avoid slow RPC lookups.
-	name := filepath.Base(path)
 	if isMacSystemName(name) {
 		return nil, ErrNotFound
 	}
@@ -281,11 +291,17 @@ func (f *Filesystem) Getattr(path string) (*FileInfo, error) {
 		return macPlaceholderInfo(path), nil
 	}
 
+	// Extract parent dir via index — avoids filepath.Dir allocation.
+	dir := "/"
+	if i := strings.LastIndexByte(path, '/'); i > 0 {
+		dir = path[:i]
+	}
+
 	// Readdir-informed negative lookup: if the parent was recently listed and
 	// this name wasn't in the result set, the file doesn't exist. This is the
 	// fast path that eliminates RPCs for the common pattern of readdir followed
 	// by getattr probes (e.g., Claude Code checking for .claude, CLAUDE.md, etc.).
-	if children, ok := f.dirChildren.Get(filepath.Dir(path)); ok {
+	if children, ok := f.dirChildren.Get(dir); ok {
 		if _, exists := children[name]; !exists {
 			return nil, ErrNotFound
 		}
@@ -297,43 +313,31 @@ func (f *Filesystem) Getattr(path string) (*FileInfo, error) {
 		return nil, ErrNotFound
 	}
 
-	// Check for virtual node match (e.g., /sources/*, /skills/*, /tools/*)
+	// Check for virtual node match (e.g., /sources/*, /skills/*, /tools/*).
+	// VNode Getattr returns *vnode.FileInfo which has identical layout — return
+	// directly to avoid a copy.
 	if vn := f.vnodes.Match(path); vn != nil {
 		info, err := vn.Getattr(path)
 		if err != nil {
 			return nil, err
 		}
-		return &FileInfo{
-			Ino:   info.Ino,
-			Size:  info.Size,
-			Mode:  info.Mode,
-			Nlink: info.Nlink,
-			Uid:   info.Uid,
-			Gid:   info.Gid,
-			Atime: info.Atime,
-			Mtime: info.Mtime,
-			Ctime: info.Ctime,
-		}, nil
+		return (*FileInfo)(info), nil
 	}
 
 	// Check fallback storage (S3-backed) BEFORE legacy metadata.
 	// The fallback has a warm cache from readdir, so this is typically instant
-	// for files that were recently listed. Legacy metadata is only for backward
-	// compatibility and should not block the fast path.
+	// for files that were recently listed.
 	if fb := f.vnodes.Fallback(); fb != nil {
 		if info, err := fb.Getattr(path); err == nil {
-			return &FileInfo{
-				Ino: info.Ino, Size: info.Size, Mode: info.Mode, Nlink: info.Nlink,
-				Uid: info.Uid, Gid: info.Gid, Atime: info.Atime, Mtime: info.Mtime, Ctime: info.Ctime,
-			}, nil
+			return (*FileInfo)(info), nil
 		}
 	}
 
 	// Legacy metadata (backward compat — only reached if fallback storage misses)
-	parent, name := splitPath(path)
-	parentID := f.resolveDir(parent)
+	parentID := f.resolveDir(dir)
 
 	uid, gid := vnode.GetOwner()
+	now := time.Now()
 	if meta, err := f.metadata.GetDirectoryAccessMetadata(parentID, name); err == nil {
 		return &FileInfo{
 			Ino:   hashToIno(meta.ID),
@@ -341,9 +345,9 @@ func (f *Filesystem) Getattr(path string) (*FileInfo, error) {
 			Nlink: 2,
 			Uid:   uid,
 			Gid:   gid,
-			Atime: time.Now(),
-			Mtime: time.Now(),
-			Ctime: time.Now(),
+			Atime: now,
+			Mtime: now,
+			Ctime: now,
 		}, nil
 	}
 
@@ -355,9 +359,9 @@ func (f *Filesystem) Getattr(path string) (*FileInfo, error) {
 			Nlink: 1,
 			Uid:   uid,
 			Gid:   gid,
-			Atime: time.Now(),
-			Mtime: time.Now(),
-			Ctime: time.Now(),
+			Atime: now,
+			Mtime: now,
+			Ctime: now,
 		}, nil
 	}
 

@@ -24,6 +24,7 @@ const storageWarmupMaxAge = 5 * time.Minute    // Max age for tracking warm dire
 type StorageVNode struct {
 	client      pb.ContextServiceClient
 	token       string
+	bearerToken string // precomputed auth header value
 	cache       *MetadataCache
 	content     *ContentCache
 	asyncWriter *AsyncWriter
@@ -42,8 +43,9 @@ type StorageVNode struct {
 // NewStorageVNode creates a new StorageVNode.
 func NewStorageVNode(conn *grpc.ClientConn, token string) *StorageVNode {
 	s := &StorageVNode{
-		client:     pb.NewContextServiceClient(conn),
-		token:      token,
+		client:      pb.NewContextServiceClient(conn),
+		token:       token,
+		bearerToken: BearerToken(token),
 		cache:      NewMetadataCache(),
 		content:    NewContentCache(),
 		handles:    make(map[FileHandle]*handleState),
@@ -65,8 +67,8 @@ func (s *StorageVNode) Cleanup() {
 
 func (s *StorageVNode) ctx() (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(context.Background(), storageRPCTimeout)
-	if s.token != "" {
-		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+s.token)
+	if s.bearerToken != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", s.bearerToken)
 	}
 	return ctx, cancel
 }

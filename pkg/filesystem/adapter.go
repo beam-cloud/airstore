@@ -42,7 +42,10 @@ func (a *adapter) Statfs(path string, stat *fuse.Statfs_t) int {
 }
 
 func (a *adapter) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
-	start := time.Now()
+	var start time.Time
+	if a.fs.trace != nil {
+		start = time.Now()
+	}
 	info, err := a.fs.Getattr(path)
 	if err != nil {
 		if a.fs.trace != nil {
@@ -66,7 +69,10 @@ func (a *adapter) Readlink(path string) (int, string) {
 }
 
 func (a *adapter) Mkdir(path string, mode uint32) int {
-	start := time.Now()
+	var start time.Time
+	if a.fs.trace != nil {
+		start = time.Now()
+	}
 	err := a.fs.Mkdir(path, mode)
 	if a.fs.trace != nil {
 		a.fs.trace.recordMkdir(path, time.Since(start), err)
@@ -146,7 +152,10 @@ func (a *adapter) Utimens(path string, tmsp []fuse.Timespec) int {
 }
 
 func (a *adapter) Open(path string, flags int) (int, uint64) {
-	start := time.Now()
+	var start time.Time
+	if a.fs.trace != nil {
+		start = time.Now()
+	}
 	fh, err := a.fs.Open(path, flags)
 	if err != nil {
 		if a.fs.trace != nil {
@@ -161,7 +170,10 @@ func (a *adapter) Open(path string, flags int) (int, uint64) {
 }
 
 func (a *adapter) Create(path string, flags int, mode uint32) (int, uint64) {
-	start := time.Now()
+	var start time.Time
+	if a.fs.trace != nil {
+		start = time.Now()
+	}
 	fh, err := a.fs.Create(path, flags, mode)
 	if err != nil {
 		if a.fs.trace != nil {
@@ -176,7 +188,10 @@ func (a *adapter) Create(path string, flags int, mode uint32) (int, uint64) {
 }
 
 func (a *adapter) Read(path string, buf []byte, off int64, fh uint64) int {
-	start := time.Now()
+	var start time.Time
+	if a.fs.trace != nil {
+		start = time.Now()
+	}
 	n, err := a.fs.Read(path, buf, off, FileHandle(fh))
 	if err != nil {
 		if a.fs.trace != nil {
@@ -191,7 +206,10 @@ func (a *adapter) Read(path string, buf []byte, off int64, fh uint64) int {
 }
 
 func (a *adapter) Write(path string, buf []byte, off int64, fh uint64) int {
-	start := time.Now()
+	var start time.Time
+	if a.fs.trace != nil {
+		start = time.Now()
+	}
 	n, err := a.fs.Write(path, buf, off, FileHandle(fh))
 	if err != nil {
 		if a.fs.trace != nil {
@@ -222,7 +240,10 @@ func (a *adapter) Fsync(path string, datasync bool, fh uint64) int {
 }
 
 func (a *adapter) Opendir(path string) (int, uint64) {
-	start := time.Now()
+	var start time.Time
+	if a.fs.trace != nil {
+		start = time.Now()
+	}
 	fh, err := a.fs.Opendir(path)
 	if err != nil {
 		if a.fs.trace != nil {
@@ -237,7 +258,10 @@ func (a *adapter) Opendir(path string) (int, uint64) {
 }
 
 func (a *adapter) Readdir(path string, fill func(string, *fuse.Stat_t, int64) bool, off int64, fh uint64) int {
-	start := time.Now()
+	var start time.Time
+	if a.fs.trace != nil {
+		start = time.Now()
+	}
 	entries, err := a.fs.Readdir(path)
 	if err != nil {
 		if a.fs.trace != nil {
@@ -246,29 +270,31 @@ func (a *adapter) Readdir(path string, fill func(string, *fuse.Stat_t, int64) bo
 		return toErrno(err)
 	}
 
-	// Get . stat
+	// Batch-compute values used per entry to avoid repeated syscalls/atomics.
+	uid, gid := vnode.GetOwner()
+	now := time.Now()
+	nowSpec := fuse.NewTimespec(now)
+
+	// "." — use a synthetic dir stat instead of a full Getattr roundtrip.
 	var dotStat fuse.Stat_t
-	if info, err := a.fs.Getattr(path); err == nil {
-		fillStat(&dotStat, info)
-	}
+	fillDirStat(&dotStat, vnode.PathIno(path), uid, gid, nowSpec)
 	fill(".", &dotStat, 0)
 
-	// Get .. stat
+	// ".." — use parent path inode; avoids a full Getattr.
 	var dotdotStat fuse.Stat_t
-	if info, err := a.fs.Getattr(parentPath(path)); err == nil {
-		fillStat(&dotdotStat, info)
-	}
+	fillDirStat(&dotdotStat, vnode.PathIno(parentPath(path)), uid, gid, nowSpec)
 	fill("..", &dotdotStat, 0)
 
-	// Get entry stats - use embedded metadata when available to avoid N Getattr calls
-	for _, e := range entries {
+	// Fill entry stats. When Mode is set (the common case for all vnodes),
+	// we use the embedded metadata directly — zero Getattr calls.
+	for i := range entries {
+		e := &entries[i]
 		var stat fuse.Stat_t
 
-		// If entry has Size or Mtime, use it directly (avoids expensive Getattr call)
-		if e.Size > 0 || e.Mtime > 0 {
-			a.fillStatFromEntry(&stat, &e)
+		if e.Mode != 0 {
+			fillStatFromDirEntry(&stat, e, uid, gid, nowSpec)
 		} else {
-			// Fall back to Getattr for entries without metadata
+			// Fallback: no metadata — must call Getattr (rare/legacy path).
 			p := path + "/" + e.Name
 			if path == "/" {
 				p = "/" + e.Name
@@ -276,8 +302,7 @@ func (a *adapter) Readdir(path string, fill func(string, *fuse.Stat_t, int64) bo
 			if info, err := a.fs.Getattr(p); err == nil {
 				fillStat(&stat, info)
 			} else {
-				// Getattr failed, use entry mode at least
-				a.fillStatFromEntry(&stat, &e)
+				fillStatFromDirEntry(&stat, e, uid, gid, nowSpec)
 			}
 		}
 		if !fill(e.Name, &stat, 0) {
@@ -338,52 +363,67 @@ func (a *adapter) Listxattr(path string, fill func(string) bool) int {
 }
 
 func fillStat(stat *fuse.Stat_t, info *FileInfo) {
-	*stat = fuse.Stat_t{} // Zero all fields first
+	*stat = fuse.Stat_t{}
 	stat.Dev = 1
 	stat.Ino = info.Ino
 	stat.Mode = info.Mode
 	stat.Nlink = info.Nlink
 	stat.Uid = info.Uid
 	stat.Gid = info.Gid
-	stat.Rdev = 0
 	stat.Size = info.Size
-	stat.Atim = fuse.NewTimespec(info.Atime)
-	stat.Mtim = fuse.NewTimespec(info.Mtime)
-	stat.Ctim = fuse.NewTimespec(info.Ctime)
 	stat.Blksize = 4096
 	stat.Blocks = (info.Size + 511) / 512
-	stat.Birthtim = fuse.NewTimespec(info.Ctime) // macOS
-	stat.Flags = 0                               // macOS
+	atim := fuse.NewTimespec(info.Atime)
+	mtim := fuse.NewTimespec(info.Mtime)
+	ctim := fuse.NewTimespec(info.Ctime)
+	stat.Atim = atim
+	stat.Mtim = mtim
+	stat.Ctim = ctim
+	stat.Birthtim = ctim // macOS
 }
 
-// fillStatFromEntry fills stat from a DirEntry, using embedded Size/Mtime when available.
-// This avoids expensive Getattr calls for each entry during directory listings.
-func (a *adapter) fillStatFromEntry(stat *fuse.Stat_t, e *DirEntry) {
-	*stat = fuse.Stat_t{} // Zero all fields first
-	uid, gid := vnode.GetOwner()
+// fillStatFromDirEntry fills a fuse.Stat_t from a DirEntry using pre-computed
+// uid/gid and time. Called in a tight loop during Readdir — zero allocations,
+// zero syscalls, zero atomic loads per entry.
+func fillStatFromDirEntry(stat *fuse.Stat_t, e *DirEntry, uid, gid uint32, fallbackTime fuse.Timespec) {
+	*stat = fuse.Stat_t{}
 	stat.Dev = 1
 	stat.Ino = e.Ino
 	stat.Mode = e.Mode
 	stat.Nlink = 1
 	stat.Uid = uid
 	stat.Gid = gid
-	stat.Rdev = 0
 	stat.Size = e.Size
 	stat.Blksize = 4096
 	stat.Blocks = (e.Size + 511) / 512
-	stat.Flags = 0 // macOS
 
-	// Use entry mtime if available, otherwise use current time
-	var mtime time.Time
+	var ts fuse.Timespec
 	if e.Mtime > 0 {
-		mtime = time.Unix(e.Mtime, 0)
+		ts = fuse.Timespec{Sec: e.Mtime}
 	} else {
-		mtime = time.Now()
+		ts = fallbackTime
 	}
-	stat.Atim = fuse.NewTimespec(mtime)
-	stat.Mtim = fuse.NewTimespec(mtime)
-	stat.Ctim = fuse.NewTimespec(mtime)
-	stat.Birthtim = fuse.NewTimespec(mtime) // macOS
+	stat.Atim = ts
+	stat.Mtim = ts
+	stat.Ctim = ts
+	stat.Birthtim = ts // macOS
+}
+
+// fillDirStat fills a minimal directory stat for "." and ".." entries.
+// Avoids a full Getattr roundtrip.
+func fillDirStat(stat *fuse.Stat_t, ino uint64, uid, gid uint32, ts fuse.Timespec) {
+	*stat = fuse.Stat_t{}
+	stat.Dev = 1
+	stat.Ino = ino
+	stat.Mode = syscall.S_IFDIR | 0755
+	stat.Nlink = 2
+	stat.Uid = uid
+	stat.Gid = gid
+	stat.Blksize = 4096
+	stat.Atim = ts
+	stat.Mtim = ts
+	stat.Ctim = ts
+	stat.Birthtim = ts
 }
 
 func toErrno(err error) int {

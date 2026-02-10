@@ -23,6 +23,7 @@ const rpcTimeout = 30 * time.Second // Per-RPC timeout for context operations
 type ContextVNodeGRPC struct {
 	client      pb.ContextServiceClient
 	token       string
+	bearerToken string // precomputed auth header value
 	prefix      string
 	cache       *MetadataCache
 	content     *ContentCache
@@ -38,9 +39,10 @@ type ContextVNodeGRPC struct {
 // The prefix determines the mount path (e.g., types.PathSkills, types.PathMemory).
 func NewContextVNodeGRPC(conn *grpc.ClientConn, token string, prefix string) *ContextVNodeGRPC {
 	c := &ContextVNodeGRPC{
-		client:  pb.NewContextServiceClient(conn),
-		token:   token,
-		prefix:  prefix,
+		client:      pb.NewContextServiceClient(conn),
+		token:       token,
+		bearerToken: BearerToken(token),
+		prefix:      prefix,
 		cache:   NewMetadataCache(),
 		content: NewContentCache(),
 		handles: make(map[FileHandle]*handleState),
@@ -54,8 +56,8 @@ func NewContextVNodeGRPC(conn *grpc.ClientConn, token string, prefix string) *Co
 // ctx returns a context with auth token and timeout for RPC calls
 func (c *ContextVNodeGRPC) ctx() (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
-	if c.token != "" {
-		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+c.token)
+	if c.bearerToken != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", c.bearerToken)
 	}
 	return ctx, cancel
 }
