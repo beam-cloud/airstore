@@ -6,12 +6,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/beam-cloud/airstore/pkg/types"
 )
 
 const (
-	Dir               = "Skills"          // S3 prefix (no leading slash)
-	ManifestFile      = "SKILL.md"        // manifest filename
-	InstalledMetaFile = ".installed.json" // install state file
+	Dir               = types.DirNameSkills // S3 prefix (no leading slash)
+	ManifestFile      = "SKILL.md"          // manifest filename
+	InstalledMetaFile = ".installed.json"   // install state file
 )
 
 // ManifestKey returns the S3 key for a skill's manifest: "Skills/{name}/SKILL.md"
