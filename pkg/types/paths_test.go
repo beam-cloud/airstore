@@ -10,20 +10,20 @@ func TestIsSystemRootPath(t *testing.T) {
 		want bool
 	}{
 		// System roots - should return true
-		{"/Tasks", true},
-		{"/Tasks/", true},
-		{"/Tools", true},
-		{"/Tools/", true},
-		{"/Skills", true},
-		{"/Skills/", true},
-		{"/Sources", true},
-		{"/Sources/", true},
+		{"/tasks", true},
+		{"/tasks/", true},
+		{"/tools", true},
+		{"/tools/", true},
+		{"/skills", true},
+		{"/skills/", true},
+		{"/sources", true},
+		{"/sources/", true},
 
 		// Not system roots - should return false
-		{"/Tasks/something", false},
-		{"/Tools/my-tool", false},
-		{"/Skills/my-skill", false},
-		{"/Sources/gmail", false},
+		{"/tasks/something", false},
+		{"/tools/my-tool", false},
+		{"/skills/my-skill", false},
+		{"/sources/gmail", false},
 		{"/my-query", false},
 		{"/", false},
 		{"", false},
@@ -43,18 +43,18 @@ func TestIsRootLevelSource(t *testing.T) {
 		want bool
 	}{
 		// Root-level sources - should return true
-		{"/Sources/gmail", true},
-		{"/Sources/gmail/", true},
-		{"/Sources/github", true},
-		{"/Sources/gdrive", true},
+		{"/sources/gmail", true},
+		{"/sources/gmail/", true},
+		{"/sources/github", true},
+		{"/sources/gdrive", true},
 
 		// Not root-level sources - should return false
-		{"/Sources", false},
-		{"/Sources/", false},
-		{"/Sources/gmail/inbox", false},
-		{"/Sources/gmail/my-query", false},
-		{"/Sources/gdrive/folder/subfolder", false},
-		{"/Tools/something", false},
+		{"/sources", false},
+		{"/sources/", false},
+		{"/sources/gmail/inbox", false},
+		{"/sources/gmail/my-query", false},
+		{"/sources/gdrive/folder/subfolder", false},
+		{"/tools/something", false},
 		{"/my-query", false},
 		{"", false},
 	}
@@ -73,19 +73,19 @@ func TestIsHookablePath(t *testing.T) {
 		want bool
 	}{
 		// Not hookable - system roots
-		{"/Tasks", false},
-		{"/Tools", false},
-		{"/Skills", false},
-		{"/Sources", false},
+		{"/tasks", false},
+		{"/tools", false},
+		{"/skills", false},
+		{"/sources", false},
 
 		// Not hookable - root-level sources
-		{"/Sources/gmail", false},
-		{"/Sources/github", false},
+		{"/sources/gmail", false},
+		{"/sources/github", false},
 
 		// Hookable - smart query folders under sources
-		{"/Sources/gmail/inbox", true},
-		{"/Sources/gmail/new unread emails", true},
-		{"/Sources/gdrive/my-folder", true},
+		{"/sources/gmail/inbox", true},
+		{"/sources/gmail/new unread emails", true},
+		{"/sources/gdrive/my-folder", true},
 
 		// Hookable - top-level queries
 		{"/my-emails", true},
@@ -107,11 +107,11 @@ func TestSystemPaths(t *testing.T) {
 	}
 
 	expected := map[string]bool{
-		"/Tasks":   true,
-		"/Tools":   true,
-		"/Skills":  true,
-		"/Sources": true,
-		"/Memory":  true,
+		"/tasks":   true,
+		"/tools":   true,
+		"/skills":  true,
+		"/sources": true,
+		"/memory":  true,
 	}
 
 	for _, p := range paths {
@@ -123,19 +123,19 @@ func TestSystemPaths(t *testing.T) {
 
 func TestPathConstants(t *testing.T) {
 	// Verify constants are what we expect (defined in virtualfile.go)
-	if PathTools != "/Tools" {
-		t.Errorf("PathTools = %q, want %q", PathTools, "/Tools")
+	if PathTools != "/tools" {
+		t.Errorf("PathTools = %q, want %q", PathTools, "/tools")
 	}
-	if PathSkills != "/Skills" {
-		t.Errorf("PathSkills = %q, want %q", PathSkills, "/Skills")
+	if PathSkills != "/skills" {
+		t.Errorf("PathSkills = %q, want %q", PathSkills, "/skills")
 	}
-	if PathTasks != "/Tasks" {
-		t.Errorf("PathTasks = %q, want %q", PathTasks, "/Tasks")
+	if PathTasks != "/tasks" {
+		t.Errorf("PathTasks = %q, want %q", PathTasks, "/tasks")
 	}
-	if PathSources != "/Sources" {
-		t.Errorf("PathSources = %q, want %q", PathSources, "/Sources")
+	if PathSources != "/sources" {
+		t.Errorf("PathSources = %q, want %q", PathSources, "/sources")
 	}
-	if PathMemory != "/Memory" {
-		t.Errorf("PathMemory = %q, want %q", PathMemory, "/Memory")
+	if PathMemory != "/memory" {
+		t.Errorf("PathMemory = %q, want %q", PathMemory, "/memory")
 	}
 }

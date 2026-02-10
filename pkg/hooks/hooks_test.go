@@ -152,7 +152,7 @@ func makeEvent(event, path string, wsId uint) map[string]any {
 // --- Tests ---
 
 func TestEngine_Submit_CreatesTask(t *testing.T) {
-	hook := makeHook(1, 10, "/Skills", "analyze files")
+	hook := makeHook(1, 10, "/skills", "analyze files")
 	store := &mockStore{hooks: []*types.Hook{hook}}
 	creator := &mockCreator{}
 	backend := &mockBackend{}
@@ -179,7 +179,7 @@ func TestEngine_Submit_CreatesTask(t *testing.T) {
 }
 
 func TestEngine_Submit_ConstraintRejectsDuplicate(t *testing.T) {
-	hook := makeHook(1, 10, "/Skills", "analyze")
+	hook := makeHook(1, 10, "/skills", "analyze")
 	store := &mockStore{hooks: []*types.Hook{hook}}
 	// Simulate the DB unique constraint rejecting the insert
 	creator := &mockCreator{err: fmt.Errorf("pq: duplicate key value violates unique constraint")}
@@ -195,7 +195,7 @@ func TestEngine_Submit_ConstraintRejectsDuplicate(t *testing.T) {
 }
 
 func TestEngine_Submit_SkipsRevokedToken(t *testing.T) {
-	hook := makeHook(1, 10, "/Skills", "analyze")
+	hook := makeHook(1, 10, "/skills", "analyze")
 	hook.TokenId = nil // revoked
 	store := &mockStore{hooks: []*types.Hook{hook}}
 	creator := &mockCreator{}
@@ -210,7 +210,7 @@ func TestEngine_Submit_SkipsRevokedToken(t *testing.T) {
 }
 
 func TestEngine_Submit_PathMatching(t *testing.T) {
-	hook := makeHook(1, 10, "/Skills", "analyze")
+	hook := makeHook(1, 10, "/skills", "analyze")
 	store := &mockStore{hooks: []*types.Hook{hook}}
 	creator := &mockCreator{}
 	backend := &mockBackend{}
@@ -236,7 +236,7 @@ func TestEngine_Submit_PathMatching(t *testing.T) {
 }
 
 func TestEngine_Submit_PromptEnrichment(t *testing.T) {
-	hook := makeHook(1, 10, "/Skills", "do stuff")
+	hook := makeHook(1, 10, "/skills", "do stuff")
 	store := &mockStore{hooks: []*types.Hook{hook}}
 	creator := &mockCreator{}
 	backend := &mockBackend{}
@@ -258,7 +258,7 @@ func TestEngine_Submit_PromptEnrichment(t *testing.T) {
 }
 
 func TestEngine_Debounce_CoalescesWrites(t *testing.T) {
-	hook := makeHook(1, 10, "/Skills", "analyze")
+	hook := makeHook(1, 10, "/skills", "analyze")
 	store := &mockStore{hooks: []*types.Hook{hook}}
 	creator := &mockCreator{}
 	backend := &mockBackend{}
@@ -280,7 +280,7 @@ func TestEngine_Debounce_CoalescesWrites(t *testing.T) {
 
 func TestEngine_Poll_RetriesFailedTask(t *testing.T) {
 	hookId := uint(1)
-	hook := makeHook(hookId, 10, "/Skills", "analyze")
+	hook := makeHook(hookId, 10, "/skills", "analyze")
 	store := &mockStore{hooks: []*types.Hook{hook}}
 	creator := &mockCreator{}
 
@@ -316,7 +316,7 @@ func TestEngine_Poll_RetriesFailedTask(t *testing.T) {
 
 func TestEngine_Poll_RespectsBackoff(t *testing.T) {
 	hookId := uint(1)
-	hook := makeHook(hookId, 10, "/Skills", "analyze")
+	hook := makeHook(hookId, 10, "/skills", "analyze")
 	store := &mockStore{hooks: []*types.Hook{hook}}
 	creator := &mockCreator{}
 
@@ -346,7 +346,7 @@ func TestEngine_Poll_RespectsBackoff(t *testing.T) {
 
 func TestEngine_Poll_SkipsWhenActiveTaskExists(t *testing.T) {
 	hookId := uint(1)
-	hook := makeHook(hookId, 10, "/Skills", "analyze")
+	hook := makeHook(hookId, 10, "/skills", "analyze")
 	store := &mockStore{hooks: []*types.Hook{hook}}
 
 	finished := time.Now().Add(-1 * time.Minute)
@@ -376,7 +376,7 @@ func TestEngine_Poll_SkipsWhenActiveTaskExists(t *testing.T) {
 
 func TestEngine_Poll_DeadLetterAfterMaxAttempts(t *testing.T) {
 	hookId := uint(1)
-	hook := makeHook(hookId, 10, "/Skills", "analyze")
+	hook := makeHook(hookId, 10, "/skills", "analyze")
 	store := &mockStore{hooks: []*types.Hook{hook}}
 	creator := &mockCreator{}
 
@@ -621,8 +621,8 @@ metadata:
 Read all new emails and categorize them by urgency.
 `
 	reader := &mockSkillReader{content: skillContent}
-	hook := makeHook(1, 10, "/Sources/gmail/inbox", "Also flag anything from VIPs.")
-	hook.SkillPath = "/Skills/email-triage"
+	hook := makeHook(1, 10, "/sources/gmail/inbox", "Also flag anything from VIPs.")
+	hook.SkillPath = "/skills/email-triage"
 	store := &mockStore{hooks: []*types.Hook{hook}}
 	creator := &mockCreator{}
 	backend := &mockBackend{}

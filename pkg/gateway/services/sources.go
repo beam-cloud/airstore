@@ -1582,6 +1582,11 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 	if json.Unmarshal([]byte(querySpec), &spec) == nil {
 		if spec.Limit > 0 {
 			limit = spec.Limit
+			// If no explicit max_results, use limit as the total cap too
+			// This ensures "last email" (limit: 1) returns only 1 result
+			if spec.MaxResults == 0 {
+				maxResults = spec.Limit
+			}
 		}
 		if spec.MaxResults > 0 {
 			maxResults = spec.MaxResults

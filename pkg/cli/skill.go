@@ -19,6 +19,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const (
+	// maxSkillFileSize is the maximum size for individual files in a skill (10MB).
+	// This prevents memory exhaustion from malicious tarballs.
+	maxSkillFileSize = 10 * 1024 * 1024
+	// maxSkillTotalSize is the maximum total size for all files in a skill (50MB).
+	maxSkillTotalSize = 50 * 1024 * 1024
+)
+
 var skillCmd = &cobra.Command{
 	Use:   "skill",
 	Short: "Install and manage skills",
@@ -256,6 +264,7 @@ func fetchFromGitHub(repo, subPath string) (files map[string][]byte, manifest *s
 	// GitHub tarballs have a top-level directory like "owner-repo-sha/"
 	// We need to strip that and optionally filter by subPath
 	var topDir string
+	var totalSize int64
 
 	for {
 		header, err := tr.Next()
@@ -292,15 +301,40 @@ func fetchFromGitHub(repo, subPath string) (files map[string][]byte, manifest *s
 			continue
 		}
 
+		// Zip-slip protection: sanitize the path and ensure it doesn't escape
+		// the intended directory by using filepath.Clean and checking for path traversal
+		relativePath = filepath.Clean(relativePath)
+		if strings.HasPrefix(relativePath, "..") || filepath.IsAbs(relativePath) {
+			// Skip paths that attempt to escape the base directory
+			continue
+		}
+
 		// Skip directories
 		if header.Typeflag == tar.TypeDir {
 			continue
 		}
 
-		// Read file content
-		data, err := io.ReadAll(tr)
+		// Size limit protection: reject files that exceed the maximum size
+		// to prevent memory exhaustion from malicious tarballs
+		if header.Size > maxSkillFileSize {
+			return nil, nil, "", fmt.Errorf("file %q exceeds maximum size (%d bytes > %d bytes)", relativePath, header.Size, maxSkillFileSize)
+		}
+
+		// Read file content with a size limit as a safety net
+		// (in case header.Size is spoofed to be smaller than actual content)
+		limitedReader := io.LimitReader(tr, maxSkillFileSize+1)
+		data, err := io.ReadAll(limitedReader)
 		if err != nil {
 			continue
+		}
+		if int64(len(data)) > maxSkillFileSize {
+			return nil, nil, "", fmt.Errorf("file %q exceeds maximum size", relativePath)
+		}
+
+		// Track total size to prevent memory exhaustion from many small files
+		totalSize += int64(len(data))
+		if totalSize > maxSkillTotalSize {
+			return nil, nil, "", fmt.Errorf("skill total size exceeds maximum (%d bytes)", maxSkillTotalSize)
 		}
 
 		files[relativePath] = data

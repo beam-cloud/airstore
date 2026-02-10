@@ -19,18 +19,18 @@ const (
 
 // Directory names and paths
 const (
-	DirNameSkills  = "Skills"
-	DirNameSources = "Sources"
-	DirNameTools   = "Tools"
-	DirNameTasks   = "Tasks"
-	DirNameMemory  = "Memory"
+	DirNameSkills  = "skills"
+	DirNameSources = "sources"
+	DirNameTools   = "tools"
+	DirNameTasks   = "tasks"
+	DirNameMemory  = "memory"
 
 	PathRoot    = "/"
-	PathSkills  = "/Skills"
-	PathSources = "/Sources"
-	PathTools   = "/Tools"
-	PathTasks   = "/Tasks"
-	PathMemory  = "/Memory"
+	PathSkills  = "/skills"
+	PathSources = "/sources"
+	PathTools   = "/tools"
+	PathTasks   = "/tasks"
+	PathMemory  = "/memory"
 )
 
 // Source integration files
@@ -159,9 +159,9 @@ func NewRootFolder(name, path string) *VirtualFile {
 }
 
 // Builder methods for fluent construction
-func (f *VirtualFile) WithFolder(v bool) *VirtualFile   { f.IsFolder = v; return f }
-func (f *VirtualFile) WithReadOnly(v bool) *VirtualFile { f.IsReadOnly = v; return f }
-func (f *VirtualFile) WithSize(v int64) *VirtualFile    { f.Size = v; return f }
+func (f *VirtualFile) WithFolder(v bool) *VirtualFile    { f.IsFolder = v; return f }
+func (f *VirtualFile) WithReadOnly(v bool) *VirtualFile  { f.IsReadOnly = v; return f }
+func (f *VirtualFile) WithSize(v int64) *VirtualFile     { f.Size = v; return f }
 func (f *VirtualFile) WithChildCount(v int) *VirtualFile { f.ChildCount = v; return f }
 
 func (f *VirtualFile) WithModifiedAt(t time.Time) *VirtualFile {

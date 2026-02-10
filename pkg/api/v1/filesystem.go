@@ -140,7 +140,7 @@ func (g *FilesystemGroup) List(c echo.Context) error {
 		}
 	}
 
-	// All other paths (Skills, Memory, user-created folders) go to storage service
+	// All other paths (skills, memory, user-created folders) go to storage service
 	return g.listStorage(c, ctx, path, refresh)
 }
 
@@ -169,7 +169,7 @@ func (g *FilesystemGroup) Stat(c echo.Context) error {
 		}
 	}
 
-	// All other paths (Skills, Memory, user-created folders) go to storage service
+	// All other paths (skills, memory, user-created folders) go to storage service
 	return g.statStorage(c, ctx, path)
 }
 
@@ -200,7 +200,7 @@ func (g *FilesystemGroup) Read(c echo.Context) error {
 		}
 	}
 
-	// All other paths (Skills, Memory, user-created folders) go to storage service
+	// All other paths (skills, memory, user-created folders) go to storage service
 	return g.readStorage(c, ctx, path, offset, length)
 }
 
@@ -242,7 +242,7 @@ func (g *FilesystemGroup) Tree(c echo.Context) error {
 		}
 	}
 
-	// All other paths (Skills, Memory, user-created folders) go to storage service
+	// All other paths (skills, memory, user-created folders) go to storage service
 	return g.treeStorage(c, ctx, path, int32(maxKeys), continuationToken)
 }
 
@@ -308,7 +308,7 @@ func (g *FilesystemGroup) Search(c echo.Context) error {
 	}
 	var scored []scoredResult
 
-	// Search storage (skills and user folders)
+	// Search storage (skills, memory and user folders)
 	if g.storageService != nil {
 		resp, err := g.storageService.ListTree(ctx, &pb.ListTreeRequest{
 			Path:    "",
@@ -682,7 +682,7 @@ func (g *FilesystemGroup) RenamePath(c echo.Context) error {
 		return ErrorResponse(c, http.StatusForbidden, "cannot rename items in virtual folders")
 	}
 
-	// Don't allow renaming reserved root folders themselves (Skills, Sources, etc.)
+	// Don't allow renaming reserved root folders themselves (skills, sources, etc.)
 	if !strings.Contains(oldPath, "/") && types.IsReservedFolder(oldPath) {
 		return ErrorResponse(c, http.StatusForbidden, "cannot rename reserved folders")
 	}

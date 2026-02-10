@@ -19,7 +19,7 @@ const rpcTimeout = 30 * time.Second // Per-RPC timeout for context operations
 
 // ContextVNodeGRPC implements VirtualNode for S3-backed context storage.
 // It supports all read and write operations. The prefix determines the
-// mount path (e.g., "/Skills", "/Memory").
+// mount path (e.g., "/skills", "/memory").
 type ContextVNodeGRPC struct {
 	client      pb.ContextServiceClient
 	token       string
