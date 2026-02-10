@@ -4,7 +4,7 @@ go 1.24.0
 
 toolchain go1.24.12
 
-replace fyne.io/systray => ./third_party/systray
+replace fyne.io/systray => github.com/fyne-io/systray v1.12.1-0.20260116214250-81f8e1a496f9
 
 require (
 	fyne.io/systray v1.12.0
@@ -22,6 +22,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/coreos/go-iptables v0.8.0
 	github.com/go-viper/mapstructure/v2 v2.0.0
+	github.com/godbus/dbus/v5 v5.1.0
 	github.com/google/uuid v1.6.0
 	github.com/hanwen/go-fuse/v2 v2.9.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
@@ -95,7 +96,6 @@ require (
 	github.com/go-openapi/jsonpointer v0.19.6 // indirect
 	github.com/go-openapi/jsonreference v0.20.2 // indirect
 	github.com/go-openapi/swag v0.22.3 // indirect
-	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/gofrs/flock v0.8.1 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang-jwt/jwt v3.2.2+incompatible // indirect
