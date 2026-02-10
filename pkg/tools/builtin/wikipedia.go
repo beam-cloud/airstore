@@ -9,12 +9,13 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/beam-cloud/airstore/pkg/tools"
 )
 
 func init() {
-	tools.RegisterTool(&WikipediaTool{httpClient: &http.Client{}})
+	tools.RegisterTool(&WikipediaTool{httpClient: &http.Client{Timeout: 30 * time.Second}})
 }
 
 const (

@@ -603,6 +603,53 @@ func (s *filesystemStore) IndexContent(ctx context.Context, workspaceId uint, qu
 
 // ===== Filesystem Metadata =====
 
+func (s *filesystemStore) StatPath(ctx context.Context, path string) (*types.DirMeta, *types.FileMeta, string, error) {
+	if s.isMemoryMode() {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		if dm := s.memDirs[path]; dm != nil {
+			return dm, nil, "", nil
+		}
+		if fm := s.memFiles[path]; fm != nil {
+			return nil, fm, "", nil
+		}
+		if target := s.memSymlinks[path]; target != "" {
+			return nil, nil, target, nil
+		}
+		return nil, nil, "", nil
+	}
+
+	// Pipeline all three lookups into a single Redis round-trip
+	pipe := s.redis.Pipeline()
+	dirCmd := pipe.Get(ctx, common.Keys.FsDirMeta(path))
+	fileCmd := pipe.Get(ctx, common.Keys.FsFileMeta(path))
+	symlinkCmd := pipe.Get(ctx, common.Keys.FsSymlink(path))
+	_, _ = pipe.Exec(ctx) // individual errors checked per command
+
+	// Check directory
+	if data, err := dirCmd.Bytes(); err == nil {
+		var meta types.DirMeta
+		if err := json.Unmarshal(data, &meta); err == nil {
+			return &meta, nil, "", nil
+		}
+	}
+
+	// Check file
+	if data, err := fileCmd.Bytes(); err == nil {
+		var meta types.FileMeta
+		if err := json.Unmarshal(data, &meta); err == nil {
+			return nil, &meta, "", nil
+		}
+	}
+
+	// Check symlink
+	if target, err := symlinkCmd.Result(); err == nil && target != "" {
+		return nil, nil, target, nil
+	}
+
+	return nil, nil, "", nil
+}
+
 func (s *filesystemStore) GetFileMeta(ctx context.Context, path string) (*types.FileMeta, error) {
 	if s.isMemoryMode() {
 		s.mu.RLock()

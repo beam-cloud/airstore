@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"sync"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog/log"
@@ -78,12 +79,37 @@ func (eb *EventBus) Start() {
 }
 
 func (eb *EventBus) listen() {
+	const (
+		minBackoff   = time.Second
+		maxBackoff   = 30 * time.Second
+		resetAfter   = 60 * time.Second // reset backoff after a stable connection
+	)
+
+	backoff := minBackoff
+
 	for {
 		if eb.ctx.Err() != nil {
 			return
 		}
+
+		start := time.Now()
 		msgs, errs := eb.rdb.Subscribe(eb.ctx, eb.channel)
 		eb.recv(msgs, errs)
+
+		// If the subscription was stable for a while, reset backoff
+		if time.Since(start) >= resetAfter {
+			backoff = minBackoff
+		}
+
+		// Back off before reconnecting to avoid tight loop on persistent errors
+		log.Warn().Str("channel", eb.channel).Dur("backoff", backoff).Msg("eventbus subscription ended, reconnecting")
+		select {
+		case <-eb.ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+
+		backoff = min(backoff*2, maxBackoff)
 	}
 }
 

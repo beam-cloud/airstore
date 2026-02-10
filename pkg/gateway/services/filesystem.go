@@ -24,14 +24,15 @@ func NewFilesystemService(store repository.FilesystemStore) *FilesystemService {
 }
 
 // Stat returns metadata for a path.
+// Uses pipelined Redis lookup (single round-trip for dir + file + symlink).
 func (s *FilesystemService) Stat(ctx context.Context, req *pb.StatRequest) (*pb.StatResponse, error) {
 	path := cleanFsPath(req.Path)
 
-	// Try as directory first
-	dirMeta, err := s.store.GetDirMeta(ctx, path)
+	dirMeta, fileMeta, symlinkTarget, err := s.store.StatPath(ctx, path)
 	if err != nil {
 		return &pb.StatResponse{Ok: false, Error: err.Error()}, nil
 	}
+
 	if dirMeta != nil {
 		return &pb.StatResponse{
 			Ok: true,
@@ -45,11 +46,6 @@ func (s *FilesystemService) Stat(ctx context.Context, req *pb.StatRequest) (*pb.
 		}, nil
 	}
 
-	// Try as file
-	fileMeta, err := s.store.GetFileMeta(ctx, path)
-	if err != nil {
-		return &pb.StatResponse{Ok: false, Error: err.Error()}, nil
-	}
 	if fileMeta != nil {
 		return &pb.StatResponse{
 			Ok: true,
@@ -64,12 +60,7 @@ func (s *FilesystemService) Stat(ctx context.Context, req *pb.StatRequest) (*pb.
 		}, nil
 	}
 
-	// Try as symlink
-	target, err := s.store.GetSymlink(ctx, path)
-	if err != nil {
-		return &pb.StatResponse{Ok: false, Error: err.Error()}, nil
-	}
-	if target != "" {
+	if symlinkTarget != "" {
 		return &pb.StatResponse{
 			Ok: true,
 			Info: &pb.FileStat{
@@ -77,7 +68,7 @@ func (s *FilesystemService) Stat(ctx context.Context, req *pb.StatRequest) (*pb.
 				Name:          pathName(path),
 				Mode:          syscall.S_IFLNK | 0777,
 				IsSymlink:     true,
-				SymlinkTarget: target,
+				SymlinkTarget: symlinkTarget,
 			},
 		}, nil
 	}
