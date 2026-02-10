@@ -18,10 +18,12 @@ import (
 const rpcTimeout = 30 * time.Second // Per-RPC timeout for context operations
 
 // ContextVNodeGRPC implements VirtualNode for S3-backed context storage.
-// It supports all read and write operations.
+// It supports all read and write operations. The prefix determines the
+// mount path (e.g., "/skills", "/memory").
 type ContextVNodeGRPC struct {
 	client      pb.ContextServiceClient
 	token       string
+	prefix      string
 	cache       *MetadataCache
 	content     *ContentCache
 	asyncWriter *AsyncWriter
@@ -32,11 +34,13 @@ type ContextVNodeGRPC struct {
 	mu          sync.Mutex
 }
 
-// NewContextVNodeGRPC creates a new context virtual node.
-func NewContextVNodeGRPC(conn *grpc.ClientConn, token string) *ContextVNodeGRPC {
+// NewContextVNodeGRPC creates a new context virtual node with the given prefix.
+// The prefix determines the mount path (e.g., types.PathSkills, types.PathMemory).
+func NewContextVNodeGRPC(conn *grpc.ClientConn, token string, prefix string) *ContextVNodeGRPC {
 	c := &ContextVNodeGRPC{
 		client:  pb.NewContextServiceClient(conn),
 		token:   token,
+		prefix:  prefix,
 		cache:   NewMetadataCache(),
 		content: NewContentCache(),
 		handles: make(map[FileHandle]*handleState),
@@ -56,7 +60,7 @@ func (c *ContextVNodeGRPC) ctx() (context.Context, context.CancelFunc) {
 	return ctx, cancel
 }
 
-func (c *ContextVNodeGRPC) Prefix() string  { return SkillsPath }
+func (c *ContextVNodeGRPC) Prefix() string  { return c.prefix }
 func (c *ContextVNodeGRPC) Type() VNodeType { return VNodeWritable }
 
 // rel returns the storage path (leading slash stripped, keeps skills prefix)
@@ -135,7 +139,7 @@ func (c *ContextVNodeGRPC) Readdir(path string) ([]DirEntry, error) {
 		if strings.HasPrefix(e.Name, "._") {
 			continue
 		}
-		if path == SkillsPath && types.IsReservedFolder(e.Name) {
+		if path == c.prefix && types.IsReservedFolder(e.Name) {
 			continue
 		}
 

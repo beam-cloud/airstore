@@ -182,6 +182,7 @@ message AddConnectionRequest {
   string access_token = 4;
   string api_key = 5;
   string scope = 6;
+  map<string, string> extra = 7; // Additional provider-specific data (e.g., host URL)
 }
 
 message ListConnectionsRequest {
@@ -283,12 +284,14 @@ message Hook {
   bool active = 5;
   string created_at = 6;
   string updated_at = 7;
+  string skill_path = 8;
 }
 
 message CreateHookRequest {
   string workspace_id = 1;
   string path = 2;
   string prompt = 3;
+  string skill_path = 4;
 }
 
 message ListHooksRequest {
@@ -304,6 +307,8 @@ message UpdateHookRequest {
   string prompt = 2;
   bool active = 3;
   bool has_active = 4;
+  string skill_path = 5;
+  bool has_skill_path = 6;
 }
 
 message DeleteHookRequest {

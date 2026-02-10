@@ -17,7 +17,13 @@ type Service struct {
 	EventBus *common.EventBus
 }
 
-func (s *Service) Create(ctx context.Context, wsId uint, memberId, tokenId *uint, rawToken, path, prompt string) (*types.Hook, error) {
+func (s *Service) Create(ctx context.Context, wsId uint, memberId, tokenId *uint, rawToken, path, prompt, skillPath string) (*types.Hook, error) {
+	path = NormalizePath(path)
+
+	if err := ValidateHookPath(path); err != nil {
+		return nil, err
+	}
+
 	encrypted, err := EncodeToken(rawToken)
 	if err != nil {
 		return nil, fmt.Errorf("failed to store token")
@@ -25,8 +31,9 @@ func (s *Service) Create(ctx context.Context, wsId uint, memberId, tokenId *uint
 
 	hook := &types.Hook{
 		WorkspaceId:       wsId,
-		Path:              NormalizePath(path),
+		Path:              path,
 		Prompt:            prompt,
+		SkillPath:         skillPath,
 		Active:            true,
 		CreatedByMemberId: memberId,
 		TokenId:           tokenId,
@@ -45,6 +52,27 @@ func (s *Service) Create(ctx context.Context, wsId uint, memberId, tokenId *uint
 	return created, nil
 }
 
+// ValidateHookPath checks if a path is valid for hook creation.
+// This is a basic sanity check blocking obvious invalid paths.
+// The real validation (checking for external_id) happens on the frontend.
+//
+// Hooks cannot be attached to:
+//   - System root directories (/tasks, /tools, /skills, /sources)
+//   - Root-level source folders (/sources/gmail, /sources/github)
+//
+// Hooks CAN be attached to:
+//   - Smart query folders under sources (/sources/gmail/my-query)
+//   - Top-level query folders (/my-emails)
+func ValidateHookPath(path string) error {
+	if types.IsSystemRootPath(path) {
+		return fmt.Errorf("cannot add hook to %s", path)
+	}
+	if types.IsRootLevelSource(path) {
+		return fmt.Errorf("cannot add hook to root-level source %s; use a smart query folder instead", path)
+	}
+	return nil
+}
+
 func (s *Service) List(ctx context.Context, wsId uint) ([]*types.Hook, error) {
 	return s.Store.ListHooks(ctx, wsId)
 }
@@ -60,7 +88,7 @@ func (s *Service) Get(ctx context.Context, externalId string) (*types.Hook, erro
 	return hook, nil
 }
 
-func (s *Service) Update(ctx context.Context, externalId string, prompt *string, active *bool) (*types.Hook, error) {
+func (s *Service) Update(ctx context.Context, externalId string, prompt *string, active *bool, skillPath *string) (*types.Hook, error) {
 	hook, err := s.Get(ctx, externalId)
 	if err != nil {
 		return nil, err
@@ -71,6 +99,9 @@ func (s *Service) Update(ctx context.Context, externalId string, prompt *string,
 	}
 	if active != nil {
 		hook.Active = *active
+	}
+	if skillPath != nil {
+		hook.SkillPath = *skillPath
 	}
 
 	if err := s.Store.UpdateHook(ctx, hook); err != nil {

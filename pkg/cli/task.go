@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
@@ -13,27 +12,10 @@ import (
 	pb "github.com/beam-cloud/airstore/proto"
 )
 
-var (
-	taskWorkspace  string
-	taskImage      string
-	taskEntrypoint string
-	taskEnv        []string
-	taskPrompt     string
-	taskFollow     bool
-)
-
 var taskCmd = &cobra.Command{
 	Use:   "task",
 	Short: "Manage tasks",
-	Long:  `Create, list, and manage tasks.`,
-}
-
-var taskCreateCmd = &cobra.Command{
-	Use:   "create",
-	Short: "Create a new task",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return createTask()
-	},
+	Long:  `List and manage tasks created by hooks.`,
 }
 
 var taskListCmd = &cobra.Command{
@@ -72,98 +54,11 @@ var taskLogsCmd = &cobra.Command{
 	},
 }
 
-var taskRunCmd = &cobra.Command{
-	Use:   "run",
-	Short: "Run a Claude Code task",
-	Long:  `Create and run a Claude Code task with the given prompt. Polls for completion and prints logs.`,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return runClaudeCodeTask()
-	},
-}
-
 func init() {
-	taskCreateCmd.Flags().StringVarP(&taskImage, "image", "i", "", "Container image (optional if prompt provided)")
-	taskCreateCmd.Flags().StringVarP(&taskPrompt, "prompt", "p", "", "Claude Code prompt (auto-sets image)")
-	taskCreateCmd.Flags().StringVarP(&taskEntrypoint, "entrypoint", "e", "", "Entrypoint command (comma-separated)")
-	taskCreateCmd.Flags().StringSliceVar(&taskEnv, "env", nil, "Environment variables (KEY=VALUE)")
-
-	taskRunCmd.Flags().StringVarP(&taskPrompt, "prompt", "p", "", "Claude Code prompt (required)")
-	taskRunCmd.MarkFlagRequired("prompt")
-
-	taskCmd.AddCommand(taskCreateCmd)
 	taskCmd.AddCommand(taskListCmd)
 	taskCmd.AddCommand(taskGetCmd)
 	taskCmd.AddCommand(taskDeleteCmd)
 	taskCmd.AddCommand(taskLogsCmd)
-	taskCmd.AddCommand(taskRunCmd)
-}
-
-func createTask() error {
-	if taskPrompt == "" && taskImage == "" {
-		PrintErrorMsg("Either --prompt or --image is required")
-		return nil
-	}
-
-	var entrypoint []string
-	if taskEntrypoint != "" {
-		entrypoint = strings.Split(taskEntrypoint, ",")
-		for i := range entrypoint {
-			entrypoint[i] = strings.TrimSpace(entrypoint[i])
-		}
-	}
-
-	env := make(map[string]string)
-	for _, e := range taskEnv {
-		parts := strings.SplitN(e, "=", 2)
-		if len(parts) == 2 {
-			env[parts[0]] = parts[1]
-		}
-	}
-
-	var client *Client
-	var resp *pb.TaskResponse
-
-	err := RunSpinnerWithResult("Creating task...", func() error {
-		var err error
-		client, err = getClient()
-		if err != nil {
-			return err
-		}
-
-		resp, err = client.Gateway.CreateTask(context.Background(), &pb.CreateTaskRequest{
-			Prompt:     taskPrompt,
-			Image:      taskImage,
-			Entrypoint: entrypoint,
-			Env:        env,
-		})
-		return err
-	})
-
-	if client != nil {
-		defer client.Close()
-	}
-
-	if err != nil {
-		PrintError(err)
-		return nil
-	}
-	if !resp.Ok {
-		PrintErrorMsg(resp.Error)
-		return nil
-	}
-
-	t := resp.Task
-	PrintSuccess("Task created")
-	PrintNewline()
-	PrintKeyValue("ID", t.Id)
-	if t.Prompt != "" {
-		PrintKeyValue("Prompt", Truncate(t.Prompt, 50))
-	}
-	PrintKeyValue("Image", Truncate(t.Image, 50))
-	PrintKeyValueStyled("Status", t.Status, statusStyle(t.Status))
-	PrintNewline()
-
-	return nil
 }
 
 func listTasks() error {
@@ -190,7 +85,7 @@ func listTasks() error {
 
 	if len(resp.Tasks) == 0 {
 		PrintInfo("No tasks found")
-		PrintHint("Create one with: airstore task create --prompt \"...\"")
+		PrintHint("Tasks are created automatically when hooks trigger on file changes")
 		return nil
 	}
 
@@ -328,90 +223,6 @@ func getTaskLogs(id string) error {
 	}
 
 	return nil
-}
-
-// runClaudeCodeTask creates a Claude Code task and polls for logs
-func runClaudeCodeTask() error {
-	var client *Client
-	var taskResp *pb.TaskResponse
-
-	err := RunSpinnerWithResult("Creating task...", func() error {
-		var err error
-		client, err = getClient()
-		if err != nil {
-			return err
-		}
-
-		taskResp, err = client.Gateway.CreateTask(context.Background(), &pb.CreateTaskRequest{
-			Prompt: taskPrompt,
-		})
-		return err
-	})
-
-	if client != nil {
-		defer client.Close()
-	}
-
-	if err != nil {
-		PrintError(err)
-		return nil
-	}
-	if !taskResp.Ok {
-		PrintErrorMsg(taskResp.Error)
-		return nil
-	}
-
-	t := taskResp.Task
-	PrintSuccess("Task created")
-	PrintKeyValue("ID", t.Id)
-	PrintKeyValue("Prompt", Truncate(t.Prompt, 60))
-	PrintNewline()
-	fmt.Printf("  %s\n\n", DimStyle.Render("Polling for logs..."))
-
-	// Poll for completion
-	lastLogCount := 0
-	for {
-		time.Sleep(2 * time.Second)
-
-		// Check task status
-		statusResp, err := client.Gateway.GetTask(context.Background(), &pb.GetTaskRequest{Id: t.Id})
-		if err != nil {
-			continue
-		}
-
-		// Fetch logs
-		logsResp, err := client.Gateway.GetTaskLogs(context.Background(), &pb.GetTaskLogsRequest{Id: t.Id})
-		if err == nil && logsResp.Ok {
-			for i := lastLogCount; i < len(logsResp.Logs); i++ {
-				fmt.Println(logsResp.Logs[i].Data)
-			}
-			lastLogCount = len(logsResp.Logs)
-		}
-
-		// Check if done
-		if statusResp != nil && statusResp.Ok {
-			status := strings.ToLower(statusResp.Task.Status)
-			if status == "complete" || status == "completed" || status == "failed" || status == "cancelled" || status == "error" {
-				PrintNewline()
-				if status == "complete" || status == "completed" {
-					PrintSuccess(fmt.Sprintf("Task %s", status))
-				} else {
-					PrintErrorMsg(fmt.Sprintf("Task %s", status))
-				}
-				if statusResp.Task.Error != "" {
-					PrintKeyValueStyled("Error", statusResp.Task.Error, ErrorStyle)
-				}
-				if statusResp.Task.HasExitCode {
-					exitStyle := SuccessStyle
-					if statusResp.Task.ExitCode != 0 {
-						exitStyle = ErrorStyle
-					}
-					PrintKeyValueStyled("Exit code", fmt.Sprintf("%d", statusResp.Task.ExitCode), exitStyle)
-				}
-				return nil
-			}
-		}
-	}
 }
 
 // streamWriter returns the appropriate output writer for a log stream.

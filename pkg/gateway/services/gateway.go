@@ -10,6 +10,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/hooks"
 	"github.com/beam-cloud/airstore/pkg/repository"
+	"github.com/beam-cloud/airstore/pkg/sources"
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
 	"google.golang.org/grpc/metadata"
@@ -22,15 +23,17 @@ type GatewayService struct {
 	s2Client     *common.S2Client
 	hooksSvc     *hooks.Service
 	taskQueue    repository.TaskQueue
+	sourceRegistry *sources.Registry
 	defaultImage string
 }
 
-func NewGatewayService(backend repository.BackendRepository, s2Client *common.S2Client, fsStore repository.FilesystemStore, eventBus *common.EventBus) *GatewayService {
+func NewGatewayService(backend repository.BackendRepository, s2Client *common.S2Client, fsStore repository.FilesystemStore, eventBus *common.EventBus, sourceRegistry *sources.Registry) *GatewayService {
 	return &GatewayService{
-		backend:  backend,
-		s2Client: s2Client,
-		fsStore:  fsStore,
-		hooksSvc: &hooks.Service{Store: fsStore, Backend: backend, EventBus: eventBus},
+		backend:        backend,
+		s2Client:       s2Client,
+		fsStore:        fsStore,
+		hooksSvc:       &hooks.Service{Store: fsStore, Backend: backend, EventBus: eventBus},
+		sourceRegistry: sourceRegistry,
 	}
 }
 
@@ -323,6 +326,18 @@ func (s *GatewayService) AddConnection(ctx context.Context, req *pb.AddConnectio
 	creds := &types.IntegrationCredentials{
 		AccessToken: req.AccessToken,
 		APIKey:      req.ApiKey,
+		Extra:       req.Extra,
+	}
+
+	// Validate credentials if the provider supports it
+	if s.sourceRegistry != nil {
+		if provider := s.sourceRegistry.Get(req.IntegrationType); provider != nil {
+			if v, ok := provider.(sources.CredentialValidator); ok {
+				if err := v.ValidateCredentials(ctx, creds); err != nil {
+					return &pb.ConnectionResponse{Ok: false, Error: "invalid credentials: " + err.Error()}, nil
+				}
+			}
+		}
 	}
 
 	conn, err := s.backend.SaveConnection(ctx, ws.Id, memberId, req.IntegrationType, creds, req.Scope)
@@ -626,15 +641,26 @@ func (s *GatewayService) CreateHook(ctx context.Context, req *pb.CreateHookReque
 		return &pb.HookResponse{Ok: false, Error: err.Error()}, nil
 	}
 
+	tokenId := ptrIfNonZero(auth.TokenId(ctx))
+	memberId := ptrIfNonZero(auth.MemberId(ctx))
 	rawToken := extractRawToken(ctx)
+
+	// Admin auth: provision a workspace service token instead of using
+	// the cluster admin secret (which workers can't use for FS mounts).
+	if tokenId == nil {
+		svcToken, svcRaw, err := s.backend.EnsureWorkspaceServiceToken(ctx, ws.Id)
+		if err != nil {
+			return &pb.HookResponse{Ok: false, Error: "failed to provision workspace token: " + err.Error()}, nil
+		}
+		tokenId = &svcToken.Id
+		rawToken = svcRaw
+	}
+
 	if rawToken == "" {
 		return &pb.HookResponse{Ok: false, Error: "authentication token required"}, nil
 	}
 
-	hook, err := s.hooksSvc.Create(ctx, ws.Id,
-		ptrIfNonZero(auth.MemberId(ctx)),
-		ptrIfNonZero(auth.TokenId(ctx)),
-		rawToken, req.Path, req.Prompt)
+	hook, err := s.hooksSvc.Create(ctx, ws.Id, memberId, tokenId, rawToken, req.Path, req.Prompt, req.SkillPath)
 	if err != nil {
 		return &pb.HookResponse{Ok: false, Error: err.Error()}, nil
 	}
@@ -682,8 +708,12 @@ func (s *GatewayService) UpdateHook(ctx context.Context, req *pb.UpdateHookReque
 	if req.HasActive {
 		active = &req.Active
 	}
+	var skillPath *string
+	if req.HasSkillPath {
+		skillPath = &req.SkillPath
+	}
 
-	hook, err := s.hooksSvc.Update(ctx, req.Id, prompt, active)
+	hook, err := s.hooksSvc.Update(ctx, req.Id, prompt, active, skillPath)
 	if err != nil {
 		return &pb.HookResponse{Ok: false, Error: err.Error()}, nil
 	}
@@ -758,6 +788,7 @@ func hookToPb(h *types.Hook, workspaceExternalId string) *pb.Hook {
 		WorkspaceId: workspaceExternalId,
 		Path:        h.Path,
 		Prompt:      h.Prompt,
+		SkillPath:   h.SkillPath,
 		Active:      h.Active,
 		CreatedAt:   h.CreatedAt.Format(time.RFC3339),
 		UpdatedAt:   h.UpdatedAt.Format(time.RFC3339),

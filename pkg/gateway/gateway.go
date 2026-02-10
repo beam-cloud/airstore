@@ -25,11 +25,11 @@ import (
 	"github.com/beam-cloud/airstore/pkg/gateway/services"
 	"github.com/beam-cloud/airstore/pkg/hooks"
 	"github.com/beam-cloud/airstore/pkg/oauth"
-	"github.com/beam-cloud/airstore/pkg/tasks"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/scheduler"
 	"github.com/beam-cloud/airstore/pkg/sources"
 	"github.com/beam-cloud/airstore/pkg/sources/providers"
+	"github.com/beam-cloud/airstore/pkg/tasks"
 	"github.com/beam-cloud/airstore/pkg/tools"
 	_ "github.com/beam-cloud/airstore/pkg/tools/builtin" // self-registering tools
 	toolclients "github.com/beam-cloud/airstore/pkg/tools/clients"
@@ -346,7 +346,7 @@ func (g *Gateway) registerServices() error {
 	// Register gateway gRPC service (workspace/member/token/connection/task management)
 	var gatewayService *services.GatewayService
 	if g.BackendRepo != nil {
-		gatewayService = services.NewGatewayService(g.BackendRepo, g.s2Client, filesystemStore, g.eventBus)
+		gatewayService := services.NewGatewayService(g.BackendRepo, g.s2Client, filesystemStore, g.eventBus, g.sourceRegistry)
 		pb.RegisterGatewayServiceServer(g.grpcServer, gatewayService)
 		log.Info().Msg("gateway service registered")
 	}
@@ -416,7 +416,7 @@ func (g *Gateway) registerServices() error {
 		// Connections API (nested under workspaces, workspace-scoped auth)
 		connectionsGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/connections")
 		connectionsGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
-		apiv1.NewConnectionsGroup(connectionsGroup, g.BackendRepo)
+		apiv1.NewConnectionsGroup(connectionsGroup, g.BackendRepo, g.sourceRegistry)
 
 		// Hooks API (nested under workspaces, workspace-scoped auth)
 		hooksGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/hooks")
@@ -424,6 +424,14 @@ func (g *Gateway) registerServices() error {
 		hooksSvc := &hooks.Service{Store: filesystemStore, Backend: g.BackendRepo, EventBus: g.eventBus}
 		apiv1.NewHooksGroup(hooksGroup, g.BackendRepo, hooksSvc)
 		log.Info().Msg("hooks API registered at /api/v1/workspaces/:workspace_id/hooks")
+
+		// Skills API (nested under workspaces, workspace-scoped auth)
+		if g.storageClient != nil {
+			skillsGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/skills")
+			skillsGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
+			apiv1.NewSkillsGroup(skillsGroup, g.BackendRepo, g.storageClient)
+			log.Info().Msg("skills API registered at /api/v1/workspaces/:workspace_id/skills")
+		}
 
 		// Filesystem API (nested under workspaces, workspace-scoped auth)
 		filesystemGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/fs")
@@ -435,7 +443,11 @@ func (g *Gateway) registerServices() error {
 		apiv1.NewTasksGroup(g.baseRouteGroup.Group("/tasks"), g.BackendRepo, taskQueue, g.s2Client, g.Config.Sandbox.GetDefaultImage())
 
 		// Hook engine: matches events → hooks → tasks, polls for retries
-		engine := hooks.NewEngine(filesystemStore, taskFactory, g.BackendRepo)
+		var skillReader hooks.SkillReader
+		if g.storageClient != nil {
+			skillReader = hooks.NewStorageSkillReader(g.storageClient, g.BackendRepo)
+		}
+		engine := hooks.NewEngine(filesystemStore, taskFactory, g.BackendRepo, skillReader)
 		go engine.Start(g.ctx)
 
 		if hookStreamConsumer != nil {
@@ -639,6 +651,7 @@ func (g *Gateway) initSources() {
 	g.sourceRegistry.Register(providers.NewGDriveProvider())
 	g.sourceRegistry.Register(providers.NewSlackProvider())
 	g.sourceRegistry.Register(providers.NewLinearProvider())
+	g.sourceRegistry.Register(providers.NewPostHogProvider())
 
 	log.Info().Strs("providers", g.sourceRegistry.List()).Msg("source providers registered")
 }

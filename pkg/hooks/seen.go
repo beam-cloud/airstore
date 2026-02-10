@@ -6,6 +6,7 @@ import (
 
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/redis/go-redis/v9"
+	"github.com/rs/zerolog/log"
 )
 
 const seenKeyTTL = 24 * time.Hour
@@ -24,7 +25,8 @@ func NewSeenTracker(rdb *common.RedisClient) *SeenTracker {
 
 // Compare returns IDs in current that weren't in the previous set at key.
 // Does NOT modify the stored set -- call Commit after successful processing.
-// Returns nil on first call (empty stored set) to avoid a false-positive flood.
+// Returns nil on first call (empty stored set) to seed the baseline without
+// triggering a flood of events for pre-existing results.
 func (t *SeenTracker) Compare(ctx context.Context, key string, current []string) ([]string, error) {
 	if len(current) == 0 {
 		return nil, nil
@@ -35,8 +37,11 @@ func (t *SeenTracker) Compare(ctx context.Context, key string, current []string)
 		return nil, err
 	}
 
-	// First call: no previous set. Return nil to avoid flooding.
+	// First call: no previous set. Seed the baseline — the caller should
+	// Commit() to store these IDs, and future polls will detect changes.
 	if len(old) == 0 {
+		log.Debug().Str("key", key).Int("current", len(current)).
+			Msg("seen tracker: first call, seeding baseline")
 		return nil, nil
 	}
 
@@ -51,6 +56,9 @@ func (t *SeenTracker) Compare(ctx context.Context, key string, current []string)
 			newIDs = append(newIDs, id)
 		}
 	}
+
+	log.Debug().Str("key", key).Int("previous", len(old)).Int("current", len(current)).Int("new", len(newIDs)).
+		Msg("seen tracker: compare complete")
 	return newIDs, nil
 }
 
@@ -78,27 +86,4 @@ func (t *SeenTracker) Commit(ctx context.Context, key string, current []string) 
 		return err
 	}
 	return nil
-}
-
-// TrySetCooldown attempts to set a cooldown key via SETNX. Returns true if
-// the key was set (no active cooldown), false if a cooldown is already active.
-// Used to prevent duplicate event emissions from multiple gateway replicas.
-func (t *SeenTracker) TrySetCooldown(ctx context.Context, key string, ttl time.Duration) (bool, error) {
-	return t.rdb.SetNX(ctx, key, "1", ttl).Result()
-}
-
-// Diff is a convenience that combines Compare + Commit in one call.
-// Use Compare + Commit separately when you need to confirm delivery before advancing.
-func (t *SeenTracker) Diff(ctx context.Context, key string, current []string) ([]string, error) {
-	newIDs, err := t.Compare(ctx, key, current)
-	if err != nil {
-		return nil, err
-	}
-
-	// Always commit (even if no new IDs) to refresh TTL and update the set.
-	if err := t.Commit(ctx, key, current); err != nil {
-		return nil, err
-	}
-
-	return newIDs, nil
 }

@@ -136,7 +136,19 @@ func (s *filesystemStore) GetQuery(ctx context.Context, workspaceId uint, path s
 		s.mu.RLock()
 		defer s.mu.RUnlock()
 
+		// Try exact match first, then case-insensitive
 		extId, exists := s.memQueryPath[path]
+		if !exists {
+			// Case-insensitive fallback
+			pathLower := strings.ToLower(path)
+			for p, id := range s.memQueryPath {
+				if strings.ToLower(p) == pathLower {
+					extId = id
+					exists = true
+					break
+				}
+			}
+		}
 		if !exists {
 			return nil, nil
 		}
@@ -151,9 +163,10 @@ func (s *filesystemStore) GetQuery(ctx context.Context, workspaceId uint, path s
 	var lastExecuted sql.NullTime
 	var filenameFormat sql.NullString
 
+	// Use ILIKE for case-insensitive path matching (handles old lowercase paths)
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, external_id, workspace_id, integration, path, name, query_spec, guidance, output_format, file_ext, filename_format, cache_ttl, created_at, updated_at, last_executed
-		FROM filesystem_queries WHERE workspace_id = $1 AND path = $2
+		FROM filesystem_queries WHERE workspace_id = $1 AND LOWER(path) = LOWER($2)
 	`, workspaceId, path).Scan(
 		&query.Id, &query.ExternalId, &query.WorkspaceId, &query.Integration,
 		&query.Path, &query.Name, &query.QuerySpec, &query.Guidance,
@@ -217,12 +230,13 @@ func (s *filesystemStore) ListQueries(ctx context.Context, workspaceId uint, par
 		s.mu.RLock()
 		defer s.mu.RUnlock()
 
-		prefix := parentPath + "/"
+		// Use lowercase for case-insensitive matching
+		prefixLower := strings.ToLower(parentPath) + "/"
 		var queries []*types.FilesystemQuery
 		for _, q := range s.memQueries {
-			if q.WorkspaceId == workspaceId && strings.HasPrefix(q.Path, prefix) {
+			if q.WorkspaceId == workspaceId && strings.HasPrefix(strings.ToLower(q.Path), prefixLower) {
 				// Ensure it's a direct child (no additional /)
-				rel := strings.TrimPrefix(q.Path, prefix)
+				rel := strings.ToLower(q.Path)[len(prefixLower):]
 				if !strings.Contains(rel, "/") {
 					queries = append(queries, q)
 				}
@@ -231,13 +245,14 @@ func (s *filesystemStore) ListQueries(ctx context.Context, workspaceId uint, par
 		return queries, nil
 	}
 
+	// Use ILIKE for case-insensitive matching (handles old lowercase paths)
 	pattern := parentPath + "/%"
 	excludePattern := parentPath + "/%/%"
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, external_id, workspace_id, integration, path, name, query_spec, guidance, output_format, file_ext, filename_format, cache_ttl, created_at, updated_at, last_executed
 		FROM filesystem_queries 
-		WHERE workspace_id = $1 AND path LIKE $2 AND path NOT LIKE $3
+		WHERE workspace_id = $1 AND path ILIKE $2 AND path NOT ILIKE $3
 		ORDER BY name
 	`, workspaceId, pattern, excludePattern)
 	if err != nil {
@@ -269,6 +284,31 @@ func (s *filesystemStore) ListQueries(ctx context.Context, workspaceId uint, par
 	}
 
 	return queries, rows.Err()
+}
+
+func (s *filesystemStore) CountQueries(ctx context.Context, workspaceId uint) (int, error) {
+	if s.isMemoryMode() {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+
+		count := 0
+		for _, q := range s.memQueries {
+			if q.WorkspaceId == workspaceId {
+				count++
+			}
+		}
+		return count, nil
+	}
+
+	var count int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM filesystem_queries WHERE workspace_id = $1`,
+		workspaceId,
+	).Scan(&count)
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (s *filesystemStore) UpdateQuery(ctx context.Context, query *types.FilesystemQuery) error {
@@ -863,6 +903,7 @@ func (s *filesystemStore) GetWatchedSourceQueries(ctx context.Context, staleAfte
 		return nil, nil // not supported in memory mode
 	}
 
+	// Use ILIKE for case-insensitive path matching (handles old lowercase paths)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT DISTINCT q.id, q.external_id, q.workspace_id, q.integration, q.path, q.name,
 		       q.query_spec, q.guidance, q.output_format, q.file_ext, q.filename_format,
@@ -871,7 +912,7 @@ func (s *filesystemStore) GetWatchedSourceQueries(ctx context.Context, staleAfte
 		JOIN filesystem_hooks h
 		  ON h.workspace_id = q.workspace_id
 		  AND h.active = true
-		  AND (q.path = h.path OR q.path LIKE replace(replace(h.path, '%', '\%'), '_', '\_') || '/%')
+		  AND (LOWER(q.path) = LOWER(h.path) OR LOWER(q.path) LIKE LOWER(replace(replace(h.path, '%', '\%'), '_', '\_') || '/%'))
 		WHERE q.last_executed IS NULL
 		   OR q.last_executed < NOW() - $1::interval
 		ORDER BY q.last_executed ASC NULLS FIRST
@@ -922,10 +963,10 @@ func (s *filesystemStore) CreateHook(ctx context.Context, hook *types.Hook) (*ty
 	}
 
 	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO filesystem_hooks (external_id, workspace_id, path, prompt, active, created_by_member_id, token_id, encrypted_token, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		INSERT INTO filesystem_hooks (external_id, workspace_id, path, prompt, skill_path, active, created_by_member_id, token_id, encrypted_token, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		RETURNING id
-	`, hook.ExternalId, hook.WorkspaceId, hook.Path, hook.Prompt,
+	`, hook.ExternalId, hook.WorkspaceId, hook.Path, hook.Prompt, hook.SkillPath,
 		hook.Active, hook.CreatedByMemberId, hook.TokenId, hook.EncryptedToken,
 		hook.CreatedAt, hook.UpdatedAt).Scan(&hook.Id)
 	if err != nil {
@@ -948,11 +989,11 @@ func (s *filesystemStore) GetHook(ctx context.Context, externalId string) (*type
 
 	h := &types.Hook{}
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, external_id, workspace_id, path, prompt, active,
+		SELECT id, external_id, workspace_id, path, prompt, skill_path, active,
 		       created_by_member_id, token_id, encrypted_token, created_at, updated_at
 		FROM filesystem_hooks WHERE external_id = $1
 	`, externalId).Scan(
-		&h.Id, &h.ExternalId, &h.WorkspaceId, &h.Path, &h.Prompt,
+		&h.Id, &h.ExternalId, &h.WorkspaceId, &h.Path, &h.Prompt, &h.SkillPath,
 		&h.Active, &h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
 		&h.CreatedAt, &h.UpdatedAt,
 	)
@@ -979,11 +1020,11 @@ func (s *filesystemStore) GetHookById(ctx context.Context, id uint) (*types.Hook
 
 	h := &types.Hook{}
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, external_id, workspace_id, path, prompt, active,
+		SELECT id, external_id, workspace_id, path, prompt, skill_path, active,
 		       created_by_member_id, token_id, encrypted_token, created_at, updated_at
 		FROM filesystem_hooks WHERE id = $1
 	`, id).Scan(
-		&h.Id, &h.ExternalId, &h.WorkspaceId, &h.Path, &h.Prompt,
+		&h.Id, &h.ExternalId, &h.WorkspaceId, &h.Path, &h.Prompt, &h.SkillPath,
 		&h.Active, &h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
 		&h.CreatedAt, &h.UpdatedAt,
 	)
@@ -1013,7 +1054,7 @@ func (s *filesystemStore) ListHooks(ctx context.Context, workspaceId uint) ([]*t
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, external_id, workspace_id, path, prompt, active,
+		SELECT id, external_id, workspace_id, path, prompt, skill_path, active,
 		       created_by_member_id, token_id, encrypted_token, created_at, updated_at
 		FROM filesystem_hooks WHERE workspace_id = $1
 		ORDER BY created_at
@@ -1027,7 +1068,7 @@ func (s *filesystemStore) ListHooks(ctx context.Context, workspaceId uint) ([]*t
 	for rows.Next() {
 		h := &types.Hook{}
 		err := rows.Scan(
-			&h.Id, &h.ExternalId, &h.WorkspaceId, &h.Path, &h.Prompt,
+			&h.Id, &h.ExternalId, &h.WorkspaceId, &h.Path, &h.Prompt, &h.SkillPath,
 			&h.Active, &h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
 			&h.CreatedAt, &h.UpdatedAt,
 		)
@@ -1047,6 +1088,7 @@ func (s *filesystemStore) UpdateHook(ctx context.Context, hook *types.Hook) erro
 		defer s.mu.Unlock()
 		if existing, ok := s.memHooks[hook.ExternalId]; ok {
 			existing.Prompt = hook.Prompt
+			existing.SkillPath = hook.SkillPath
 			existing.Active = hook.Active
 			existing.UpdatedAt = hook.UpdatedAt
 		}
@@ -1055,9 +1097,9 @@ func (s *filesystemStore) UpdateHook(ctx context.Context, hook *types.Hook) erro
 
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE filesystem_hooks SET
-			prompt = $1, active = $2, updated_at = $3
-		WHERE external_id = $4
-	`, hook.Prompt, hook.Active, hook.UpdatedAt, hook.ExternalId)
+			prompt = $1, skill_path = $2, active = $3, updated_at = $4
+		WHERE external_id = $5
+	`, hook.Prompt, hook.SkillPath, hook.Active, hook.UpdatedAt, hook.ExternalId)
 	if err != nil {
 		return fmt.Errorf("update hook: %w", err)
 	}
