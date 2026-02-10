@@ -29,12 +29,10 @@ A skill is a folder with a SKILL.md file following the Agent Skills spec
 agents can use. Hooks trigger skills to run automatically.
 
 Skills can be installed from:
-  - A public Airstore workspace: airstore://beam/email-triage
   - A GitHub repo path: github.com/beam-cloud/skills/email-triage
   - A local directory: ./my-skill/
 
 Examples:
-  airstore skill install airstore://beam/email-triage
   airstore skill install github.com/user/repo/skill-name
   airstore skill install ./local-skill/
   airstore skill list
@@ -47,26 +45,11 @@ type SkillSource int
 
 const (
 	SourceLocal SkillSource = iota
-	SourceAirstore
 	SourceGitHub
 )
 
 // ParseSkillSource determines the source type and parses the reference.
 func ParseSkillSource(ref string) (source SkillSource, slug, path string, err error) {
-	// airstore://slug/path/to/skill
-	if strings.HasPrefix(ref, "airstore://") {
-		rest := strings.TrimPrefix(ref, "airstore://")
-		parts := strings.SplitN(rest, "/", 2)
-		if len(parts) == 0 || parts[0] == "" {
-			return 0, "", "", fmt.Errorf("invalid airstore:// URI: missing slug")
-		}
-		slug = parts[0]
-		if len(parts) > 1 {
-			path = parts[1]
-		}
-		return SourceAirstore, slug, path, nil
-	}
-
 	// github.com/owner/repo/path/to/skill
 	if strings.HasPrefix(ref, "github.com/") {
 		rest := strings.TrimPrefix(ref, "github.com/")
@@ -89,15 +72,13 @@ func ParseSkillSource(ref string) (source SkillSource, slug, path string, err er
 var skillInstallCmd = &cobra.Command{
 	Use:   "install <source>",
 	Short: "Install a skill from URL or local path",
-	Long: `Install a skill from a public workspace, GitHub, or local directory.
+	Long: `Install a skill from GitHub or local directory.
 
 Sources:
-  airstore://slug/skill-name    Install from a public Airstore workspace
   github.com/owner/repo/path    Install from a GitHub repository  
   ./path/to/skill               Install from a local directory
 
 Examples:
-  airstore skill install airstore://beam/email-triage
   airstore skill install github.com/beam-cloud/skills/email-triage
   airstore skill install ./my-custom-skill/`,
 	Args: cobra.ExactArgs(1),
@@ -115,18 +96,6 @@ Examples:
 		var skillFiles map[string][]byte
 
 		switch source {
-		case SourceAirstore:
-			skillName = filepath.Base(path)
-			if skillName == "" || skillName == "." {
-				PrintErrorMsg("airstore:// URI must include skill path, e.g. airstore://beam/email-triage")
-				return nil
-			}
-			skillFiles, manifest, _, err = fetchFromAirstore(slug, path)
-			if err != nil {
-				PrintErrorMsg(err.Error())
-				return nil
-			}
-
 		case SourceGitHub:
 			skillName = filepath.Base(path)
 			if skillName == "" || skillName == "." {
@@ -247,93 +216,6 @@ Examples:
 
 		return nil
 	},
-}
-
-// fetchFromAirstore fetches a skill from a public Airstore workspace.
-func fetchFromAirstore(slug, skillPath string) (files map[string][]byte, manifest *skills.SkillManifest, content string, err error) {
-	baseURL := gatewayHTTPAddr
-
-	// First, fetch SKILL.md to parse manifest
-	skillMDPath := skillPath
-	if !strings.HasSuffix(skillMDPath, "/SKILL.md") {
-		skillMDPath = strings.TrimSuffix(skillMDPath, "/") + "/SKILL.md"
-	}
-
-	skillMDURL := fmt.Sprintf("%s/r/%s/%s", baseURL, slug, skillMDPath)
-	resp, err := http.Get(skillMDURL)
-	if err != nil {
-		return nil, nil, "", fmt.Errorf("fetching SKILL.md: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, nil, "", fmt.Errorf("skill not found at airstore://%s/%s", slug, skillPath)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, nil, "", fmt.Errorf("server returned %d for SKILL.md", resp.StatusCode)
-	}
-
-	skillMDBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, nil, "", fmt.Errorf("reading SKILL.md: %w", err)
-	}
-
-	manifest, err = skills.Parse(skillMDBytes)
-	if err != nil {
-		return nil, nil, "", fmt.Errorf("parsing SKILL.md: %w", err)
-	}
-	content = string(skillMDBytes)
-
-	// List the skill directory to get all files
-	listURL := fmt.Sprintf("%s/api/v1/public/%s/list?path=/%s", baseURL, slug, strings.TrimPrefix(skillPath, "/"))
-	listResp, err := http.Get(listURL)
-	if err != nil {
-		// If list fails, just include SKILL.md
-		files = map[string][]byte{"SKILL.md": skillMDBytes}
-		return files, manifest, content, nil
-	}
-	defer listResp.Body.Close()
-
-	if listResp.StatusCode != http.StatusOK {
-		files = map[string][]byte{"SKILL.md": skillMDBytes}
-		return files, manifest, content, nil
-	}
-
-	var listData struct {
-		Entries []struct {
-			Name  string `json:"name"`
-			IsDir bool   `json:"is_dir"`
-		} `json:"entries"`
-	}
-	if err := json.NewDecoder(listResp.Body).Decode(&listData); err != nil {
-		files = map[string][]byte{"SKILL.md": skillMDBytes}
-		return files, manifest, content, nil
-	}
-
-	// Fetch all files in the directory
-	files = make(map[string][]byte)
-	basePath := strings.TrimSuffix(skillPath, "/")
-
-	for _, entry := range listData.Entries {
-		if entry.IsDir {
-			continue // Skip subdirectories for now
-		}
-		fileURL := fmt.Sprintf("%s/r/%s/%s/%s", baseURL, slug, basePath, entry.Name)
-		fileResp, err := http.Get(fileURL)
-		if err != nil {
-			continue
-		}
-		fileBytes, _ := io.ReadAll(fileResp.Body)
-		fileResp.Body.Close()
-		files[entry.Name] = fileBytes
-	}
-
-	// Ensure SKILL.md is included
-	if _, ok := files["SKILL.md"]; !ok {
-		files["SKILL.md"] = skillMDBytes
-	}
-
-	return files, manifest, content, nil
 }
 
 // fetchFromGitHub fetches a skill from a GitHub repository.
@@ -813,20 +695,15 @@ var skillRunCmd = &cobra.Command{
 
 var skillSearchCmd = &cobra.Command{
 	Use:   "search [query]",
-	Short: "Search for skills in public workspaces",
-	Long: `Search for skills shared by the community.
-
-Browse official skills at: airstore.ai/w/beam
+	Short: "Search for skills on GitHub",
+	Long: `Search for skills shared by the community on GitHub.
 
 Examples:
   airstore skill search email
   airstore skill search github`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		PrintNewline()
-		PrintInfo("Browse official skills at: https://airstore.ai/w/beam")
-		PrintNewline()
 		PrintInfo("Install skills with:")
-		fmt.Println("  airstore skill install airstore://beam/email-triage")
 		fmt.Println("  airstore skill install github.com/user/repo/skill-name")
 		PrintNewline()
 		return nil

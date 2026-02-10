@@ -10,7 +10,7 @@ import (
 
 // Workspace methods on PostgresBackend
 
-const workspaceCols = `id, external_id, name, visibility, slug, created_at, updated_at`
+const workspaceCols = `id, external_id, name, created_at, updated_at`
 
 func scanWorkspace(row interface{ Scan(dest ...any) error }) (*types.Workspace, error) {
 	ws := &types.Workspace{}
@@ -18,8 +18,6 @@ func scanWorkspace(row interface{ Scan(dest ...any) error }) (*types.Workspace, 
 		&ws.Id,
 		&ws.ExternalId,
 		&ws.Name,
-		&ws.Visibility,
-		&ws.Slug,
 		&ws.CreatedAt,
 		&ws.UpdatedAt,
 	)
@@ -80,48 +78,6 @@ func (b *PostgresBackend) GetWorkspaceByName(ctx context.Context, name string) (
 		return nil, fmt.Errorf("failed to get workspace by name: %w", err)
 	}
 	return ws, nil
-}
-
-// GetWorkspaceBySlug retrieves a public workspace by its vanity slug.
-func (b *PostgresBackend) GetWorkspaceBySlug(ctx context.Context, slug string) (*types.Workspace, error) {
-	query := `SELECT ` + workspaceCols + ` FROM workspace WHERE slug = $1`
-
-	ws, err := scanWorkspace(b.db.QueryRowContext(ctx, query, slug))
-	if err == sql.ErrNoRows {
-		return nil, nil // not found is nil, nil (used by public API)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to get workspace by slug: %w", err)
-	}
-	return ws, nil
-}
-
-// SetWorkspaceVisibility updates a workspace's visibility.
-func (b *PostgresBackend) SetWorkspaceVisibility(ctx context.Context, id uint, visibility types.WorkspaceVisibility) error {
-	query := `UPDATE workspace SET visibility = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1`
-	result, err := b.db.ExecContext(ctx, query, id, visibility)
-	if err != nil {
-		return fmt.Errorf("failed to set visibility: %w", err)
-	}
-	n, _ := result.RowsAffected()
-	if n == 0 {
-		return &types.ErrWorkspaceNotFound{ExternalId: fmt.Sprintf("%d", id)}
-	}
-	return nil
-}
-
-// SetWorkspaceSlug updates a workspace's vanity slug.
-func (b *PostgresBackend) SetWorkspaceSlug(ctx context.Context, id uint, slug string) error {
-	query := `UPDATE workspace SET slug = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1`
-	result, err := b.db.ExecContext(ctx, query, id, slug)
-	if err != nil {
-		return fmt.Errorf("failed to set slug: %w", err)
-	}
-	n, _ := result.RowsAffected()
-	if n == 0 {
-		return &types.ErrWorkspaceNotFound{ExternalId: fmt.Sprintf("%d", id)}
-	}
-	return nil
 }
 
 // ListWorkspaces returns all workspaces

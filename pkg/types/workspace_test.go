@@ -26,18 +26,6 @@ func TestWorkspaceBucketName(t *testing.T) {
 	}
 }
 
-func TestWorkspaceVisibility(t *testing.T) {
-	ws := &Workspace{Visibility: VisibilityPublic}
-	if !ws.IsPublic() {
-		t.Error("Expected IsPublic() to return true for public workspace")
-	}
-
-	ws.Visibility = VisibilityPrivate
-	if ws.IsPublic() {
-		t.Error("Expected IsPublic() to return false for private workspace")
-	}
-}
-
 func TestWorkspaceToolSettings(t *testing.T) {
 	settings := NewWorkspaceToolSettings(1)
 

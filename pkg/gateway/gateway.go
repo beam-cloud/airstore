@@ -486,13 +486,6 @@ func (g *Gateway) registerServices() error {
 		log.Info().Msg("workspace, members, tokens, connections, hooks, and tasks APIs registered")
 	}
 
-	// Public API routes (no authentication required)
-	if g.storageClient != nil {
-		bucketPrefix := g.Config.Filesystem.WorkspaceStorage.DefaultBucketPrefix
-		apiv1.NewPublicGroup(g.rootRouteGroup, g.BackendRepo, g.storageClient, bucketPrefix)
-		log.Info().Msg("public API registered at /r/:slug/* and /api/v1/public/:slug")
-	}
-
 	return nil
 }
 
