@@ -10,7 +10,7 @@ import (
 
 // Workspace methods on PostgresBackend
 
-const workspaceCols = `id, external_id, name, created_at, updated_at`
+const workspaceCols = `id, external_id, name, tenant_id, created_at, updated_at`
 
 func scanWorkspace(row interface{ Scan(dest ...any) error }) (*types.Workspace, error) {
 	ws := &types.Workspace{}
@@ -18,20 +18,21 @@ func scanWorkspace(row interface{ Scan(dest ...any) error }) (*types.Workspace, 
 		&ws.Id,
 		&ws.ExternalId,
 		&ws.Name,
+		&ws.TenantId,
 		&ws.CreatedAt,
 		&ws.UpdatedAt,
 	)
 	return ws, err
 }
 
-// CreateWorkspace creates a new workspace
-func (b *PostgresBackend) CreateWorkspace(ctx context.Context, name string) (*types.Workspace, error) {
+// CreateWorkspace creates a new workspace with an optional tenant_id for org scoping.
+func (b *PostgresBackend) CreateWorkspace(ctx context.Context, name string, tenantId *string) (*types.Workspace, error) {
 	query := `
-		INSERT INTO workspace (name)
-		VALUES ($1)
+		INSERT INTO workspace (name, tenant_id)
+		VALUES ($1, $2)
 		RETURNING ` + workspaceCols
 
-	ws, err := scanWorkspace(b.db.QueryRowContext(ctx, query, name))
+	ws, err := scanWorkspace(b.db.QueryRowContext(ctx, query, name, tenantId))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create workspace: %w", err)
 	}
@@ -87,6 +88,32 @@ func (b *PostgresBackend) ListWorkspaces(ctx context.Context) ([]*types.Workspac
 	rows, err := b.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list workspaces: %w", err)
+	}
+	defer rows.Close()
+
+	var workspaces []*types.Workspace
+	for rows.Next() {
+		ws, err := scanWorkspace(rows)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan workspace: %w", err)
+		}
+		workspaces = append(workspaces, ws)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating workspaces: %w", err)
+	}
+
+	return workspaces, nil
+}
+
+// ListWorkspacesByTenantId returns all workspaces belonging to a tenant
+func (b *PostgresBackend) ListWorkspacesByTenantId(ctx context.Context, tenantId string) ([]*types.Workspace, error) {
+	query := `SELECT ` + workspaceCols + ` FROM workspace WHERE tenant_id = $1 ORDER BY created_at DESC`
+
+	rows, err := b.db.QueryContext(ctx, query, tenantId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list workspaces by tenant: %w", err)
 	}
 	defer rows.Close()
 

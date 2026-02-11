@@ -402,9 +402,9 @@ func (g *Gateway) registerServices() error {
 		// Task factory (shared between HTTP API and hook evaluator)
 		taskFactory := tasks.NewFactory(g.BackendRepo, taskQueue, g.Config.Sandbox.GetDefaultImage())
 
-		// Workspace CRUD endpoints (cluster admin only)
+		// Workspace CRUD endpoints (cluster admin or org tokens)
 		workspacesAdminGroup := g.baseRouteGroup.Group("/workspaces")
-		workspacesAdminGroup.Use(auth.RequireClusterAdminMiddleware())
+		workspacesAdminGroup.Use(requireClusterAdminOrOrgMiddleware())
 		apiv1.NewWorkspacesGroup(workspacesAdminGroup, g.BackendRepo, g.storageClient)
 
 		// Worker tokens API (cluster admin only)
@@ -412,6 +412,12 @@ func (g *Gateway) registerServices() error {
 		workerTokensGroup.Use(auth.RequireClusterAdminMiddleware())
 		apiv1.NewWorkerTokensGroup(workerTokensGroup, g.BackendRepo)
 		log.Info().Msg("worker tokens API registered at /api/v1/worker-tokens")
+
+		// Organization tokens API (cluster admin only)
+		orgTokensGroup := g.baseRouteGroup.Group("/org-tokens")
+		orgTokensGroup.Use(auth.RequireClusterAdminMiddleware())
+		apiv1.NewOrgTokensGroup(orgTokensGroup, g.BackendRepo)
+		log.Info().Msg("org tokens API registered at /api/v1/org-tokens")
 
 		// Workspace-scoped APIs (support both admin and member tokens)
 		workspaceAuthConfig := apiv1.WorkspaceAuthConfig{
@@ -719,4 +725,26 @@ func (g *Gateway) initTools() error {
 		Msg("tools initialized")
 
 	return nil
+}
+
+// requireClusterAdminOrOrgMiddleware allows cluster_admin or organization tokens.
+func requireClusterAdminOrOrgMiddleware() echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			info := auth.AuthInfoFromContext(c.Request().Context())
+			if info == nil {
+				return c.JSON(http.StatusUnauthorized, apiv1.Response{
+					Success: false,
+					Error:   "authentication required",
+				})
+			}
+			if info.IsClusterAdmin() || info.IsOrganization() {
+				return next(c)
+			}
+			return c.JSON(http.StatusForbidden, apiv1.Response{
+				Success: false,
+				Error:   "admin or organization token required",
+			})
+		}
+	}
 }

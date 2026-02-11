@@ -32,12 +32,20 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Logged in?
-	if tray.LoadToken() == "" {
+	// Resolve token: prefer --token / AIRSTORE_TOKEN, then credentials file
+	effectiveToken := authToken
+	if effectiveToken == "" {
+		effectiveToken = tray.LoadToken()
+	}
+
+	if effectiveToken == "" {
 		PrintErrorMsg("Not logged in")
-		PrintHint("Run 'airstore login' first")
+		PrintHint("Run 'airstore login' first, or pass --token / AIRSTORE_TOKEN")
 		return nil
 	}
+
+	// Store resolved token for use by spawn and runTray
+	authToken = effectiveToken
 
 	// Internal flag: run tray directly (called by spawned process)
 	if os.Getenv("AIRSTORE_TRAY") == "1" {
@@ -52,6 +60,7 @@ func runTray() error {
 	runtime.LockOSThread()
 	cfg := tray.LoadConfig()
 	cfg.GatewayAddr = gatewayAddr
+	cfg.Token = authToken
 	return tray.Run(cfg)
 }
 
@@ -69,7 +78,7 @@ func spawn() error {
 	}
 
 	proc := exec.Command(exe, args...)
-	proc.Env = append(os.Environ(), "AIRSTORE_TRAY=1")
+	proc.Env = append(os.Environ(), "AIRSTORE_TRAY=1", "AIRSTORE_TOKEN="+authToken)
 	proc.Dir = "/"
 	proc.Stdin = nil
 	proc.Stdout = nil
