@@ -12,6 +12,10 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// tokenPrefixLen is the number of hex characters stored as a plaintext prefix
+// for fast indexed token lookups (avoids O(n) bcrypt scans).
+const tokenPrefixLen = 16
+
 // generateToken creates a cryptographically secure random token
 func generateToken() (string, error) {
 	b := make([]byte, 32)
@@ -37,8 +41,8 @@ func (r *PostgresBackend) CreateToken(ctx context.Context, workspaceId, memberId
 		tokenType = types.TokenTypeWorkspaceMember
 	}
 
-	// Store first 16 chars as a lookup prefix for fast validation
-	prefix := raw[:16]
+	// Store a plaintext prefix for fast indexed validation lookups
+	prefix := raw[:tokenPrefixLen]
 
 	query := `
 		INSERT INTO token (workspace_id, member_id, token_hash, token_prefix, name, expires_at, token_type)
@@ -68,7 +72,7 @@ func (r *PostgresBackend) CreateWorkerToken(ctx context.Context, name string, po
 		return nil, "", fmt.Errorf("hash token: %w", err)
 	}
 
-	prefix := raw[:16]
+	prefix := raw[:tokenPrefixLen]
 
 	query := `
 		INSERT INTO token (workspace_id, member_id, token_hash, token_prefix, name, pool_name, expires_at, token_type)
@@ -99,7 +103,7 @@ func (r *PostgresBackend) CreateWorkspaceServiceToken(ctx context.Context, works
 		return nil, "", fmt.Errorf("hash token: %w", err)
 	}
 
-	prefix := raw[:16]
+	prefix := raw[:tokenPrefixLen]
 
 	query := `
 		INSERT INTO token (workspace_id, member_id, token_hash, token_prefix, name, expires_at, token_type)
@@ -144,7 +148,7 @@ func (r *PostgresBackend) ValidateToken(ctx context.Context, rawToken string) (*
 
 func (r *PostgresBackend) validateMemberToken(ctx context.Context, rawToken string) (*types.TokenValidationResult, error) {
 	// Try fast path: use token_prefix for indexed lookup (O(1) instead of O(n) bcrypt)
-	if len(rawToken) >= 16 {
+	if len(rawToken) >= tokenPrefixLen {
 		result, err := r.validateMemberTokenByPrefix(ctx, rawToken)
 		if err == nil && result != nil {
 			return result, nil
@@ -157,7 +161,7 @@ func (r *PostgresBackend) validateMemberToken(ctx context.Context, rawToken stri
 
 // validateMemberTokenByPrefix uses the token_prefix column for O(1) lookup.
 func (r *PostgresBackend) validateMemberTokenByPrefix(ctx context.Context, rawToken string) (*types.TokenValidationResult, error) {
-	prefix := rawToken[:16]
+	prefix := rawToken[:tokenPrefixLen]
 
 	query := `
 		SELECT 
@@ -300,7 +304,7 @@ func (r *PostgresBackend) validateMemberTokenScan(ctx context.Context, rawToken 
 // validateServiceToken validates workspace service tokens (workspace-scoped, no member).
 func (r *PostgresBackend) validateServiceToken(ctx context.Context, rawToken string) (*types.TokenValidationResult, error) {
 	// Try fast path: use token_prefix for indexed lookup
-	if len(rawToken) >= 16 {
+	if len(rawToken) >= tokenPrefixLen {
 		result, err := r.validateServiceTokenByPrefix(ctx, rawToken)
 		if err == nil && result != nil {
 			return result, nil
@@ -312,7 +316,7 @@ func (r *PostgresBackend) validateServiceToken(ctx context.Context, rawToken str
 }
 
 func (r *PostgresBackend) validateServiceTokenByPrefix(ctx context.Context, rawToken string) (*types.TokenValidationResult, error) {
-	prefix := rawToken[:16]
+	prefix := rawToken[:tokenPrefixLen]
 
 	query := `
 		SELECT
@@ -428,7 +432,7 @@ func (r *PostgresBackend) validateServiceTokenScan(ctx context.Context, rawToken
 
 func (r *PostgresBackend) validateWorkerToken(ctx context.Context, rawToken string) (*types.TokenValidationResult, error) {
 	// Try fast path: use token_prefix for indexed lookup
-	if len(rawToken) >= 16 {
+	if len(rawToken) >= tokenPrefixLen {
 		result, err := r.validateWorkerTokenByPrefix(ctx, rawToken)
 		if err == nil && result != nil {
 			return result, nil
@@ -440,7 +444,7 @@ func (r *PostgresBackend) validateWorkerToken(ctx context.Context, rawToken stri
 }
 
 func (r *PostgresBackend) validateWorkerTokenByPrefix(ctx context.Context, rawToken string) (*types.TokenValidationResult, error) {
-	prefix := rawToken[:16]
+	prefix := rawToken[:tokenPrefixLen]
 
 	query := `
 		SELECT t.id, t.token_hash, t.expires_at, t.pool_name
