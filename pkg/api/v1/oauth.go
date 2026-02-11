@@ -10,16 +10,17 @@ import (
 
 	"github.com/beam-cloud/airstore/pkg/oauth"
 	"github.com/beam-cloud/airstore/pkg/repository"
+	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog/log"
 )
 
 const (
-	errMsgSessionInvalid = "Invalid or expired OAuth session"
-	errMsgProviderConfig = "Provider not configured"
-	errMsgNoAuthCode     = "Missing authorization code"
-	errMsgTokenExchange  = "Token exchange failed"
-	errMsgSaveConnection = "Failed to save connection"
+	errMsgSessionInvalid = "Invalid or expired OAuth session. This usually means the callback URL doesn't match the server that created the session (e.g. session created on localhost but callback went to production)."
+	errMsgProviderConfig = "This OAuth provider is not configured on the server. Check that the provider credentials are set in the gateway config."
+	errMsgNoAuthCode     = "The OAuth provider did not return an authorization code. This can happen if you denied the request or the provider encountered an error."
+	errMsgTokenExchange  = "Failed to exchange the authorization code for access tokens. The provider may have rejected the request — check that the OAuth client ID and secret are correct."
+	errMsgSaveConnection = "OAuth succeeded but we couldn't save the connection to the database. Please try again."
 )
 
 // OAuthGroup handles OAuth endpoints for workspace integrations.
@@ -84,8 +85,8 @@ func (og *OAuthGroup) CreateSession(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, "integration_type required")
 	}
 
-	// Resolve workspace: admin callers pass workspace_id explicitly; member
-	// tokens carry the workspace implicitly.
+	// Resolve workspace: admin/org callers pass workspace_id explicitly;
+	// member tokens carry the workspace implicitly.
 	var workspaceId uint
 	var workspaceExt string
 
@@ -101,13 +102,32 @@ func (og *OAuthGroup) CreateSession(c echo.Context) error {
 		workspaceId = ws.Id
 		workspaceExt = ws.ExternalId
 	} else {
-		// Member / org token — validate and extract workspace from token.
+		// Validate token first.
 		result, err := og.backend.ValidateToken(c.Request().Context(), token)
 		if err != nil || result == nil {
 			return ErrorResponse(c, http.StatusUnauthorized, "invalid token")
 		}
-		workspaceId = result.WorkspaceId
-		workspaceExt = result.WorkspaceExt
+
+		if result.TokenType == types.TokenTypeOrganization {
+			// Org tokens don't carry a workspace — require workspace_id in body
+			// and verify it belongs to the tenant.
+			if req.WorkspaceId == "" {
+				return ErrorResponse(c, http.StatusBadRequest, "workspace_id required for organization token")
+			}
+			ws, err := og.backend.GetWorkspaceByExternalId(c.Request().Context(), req.WorkspaceId)
+			if err != nil || ws == nil {
+				return ErrorResponse(c, http.StatusNotFound, "workspace not found")
+			}
+			if result.TenantId != "" && (ws.TenantId == nil || *ws.TenantId != result.TenantId) {
+				return ErrorResponse(c, http.StatusNotFound, "workspace not found")
+			}
+			workspaceId = ws.Id
+			workspaceExt = ws.ExternalId
+		} else {
+			// Member/service token — workspace is embedded in the token.
+			workspaceId = result.WorkspaceId
+			workspaceExt = result.WorkspaceExt
+		}
 	}
 
 	provider, err := og.registry.GetProviderForIntegration(req.IntegrationType)

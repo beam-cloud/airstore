@@ -152,12 +152,22 @@ detect_arch() {
     esac
 }
 
-# Get latest version from GitHub
+# Get latest CLI version from GitHub (excludes SDK releases)
 get_latest_version() {
+    # We need to filter releases to only get CLI versions (v*), not SDK versions (sdk-v*)
+    # The /releases/latest endpoint doesn't support filtering, so we query the list
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/'
+        curl -fsSL "https://api.github.com/repos/${REPO}/releases?per_page=20" | \
+            grep '"tag_name":' | \
+            sed -E 's/.*"([^"]+)".*/\1/' | \
+            grep -E '^v[0-9]' | \
+            head -1
     elif command -v wget >/dev/null 2>&1; then
-        wget -qO- "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/'
+        wget -qO- "https://api.github.com/repos/${REPO}/releases?per_page=20" | \
+            grep '"tag_name":' | \
+            sed -E 's/.*"([^"]+)".*/\1/' | \
+            grep -E '^v[0-9]' | \
+            head -1
     else
         error "Neither curl nor wget found. Please install one of them."
     fi
