@@ -6,6 +6,8 @@ import type { IntegrationType } from './shared.js';
 export interface OAuthSessionCreateParams {
   /** The integration provider. */
   integrationType: IntegrationType;
+  /** Workspace to associate the connection with (required for org/admin tokens). */
+  workspaceId?: string;
   /** URL to redirect after OAuth callback. */
   returnTo?: string;
 }

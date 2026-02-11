@@ -44,6 +44,7 @@ export class OAuth {
     const body: Record<string, unknown> = {
       integration_type: params.integrationType,
     };
+    if (params.workspaceId !== undefined) body['workspace_id'] = params.workspaceId;
     if (params.returnTo !== undefined) body['return_to'] = params.returnTo;
 
     return this.client.request<OAuthSession>(
