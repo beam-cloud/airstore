@@ -49,6 +49,9 @@ func (tg *TokensGroup) Create(c echo.Context) error {
 	if req.Name == "" {
 		req.Name = "API Token"
 	}
+	if req.ExpiresIn < 0 {
+		return ErrorResponse(c, http.StatusBadRequest, "expires_in must not be negative")
+	}
 
 	ws, err := tg.backend.GetWorkspaceByExternalId(ctx, c.Param("workspace_id"))
 	if err != nil || ws == nil {

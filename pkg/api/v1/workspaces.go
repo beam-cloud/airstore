@@ -132,38 +132,49 @@ func (g *WorkspacesGroup) ListWorkspaces(c echo.Context) error {
 	return SuccessResponse(c, response)
 }
 
-// GetWorkspace returns a workspace by external ID.
-func (g *WorkspacesGroup) GetWorkspace(c echo.Context) error {
+// getWorkspaceWithTenantCheck fetches a workspace by external ID and verifies
+// that org-token callers own it. Returns nil workspace + an error response if
+// the check fails; the caller should return that error directly.
+func (g *WorkspacesGroup) getWorkspaceWithTenantCheck(c echo.Context) (*types.Workspace, error) {
 	externalId := c.Param("id")
 
 	workspace, err := g.backend.GetWorkspaceByExternalId(c.Request().Context(), externalId)
 	if err != nil {
 		if _, ok := err.(*types.ErrWorkspaceNotFound); ok {
-			return ErrorResponse(c, http.StatusNotFound, "workspace not found")
+			return nil, ErrorResponse(c, http.StatusNotFound, "workspace not found")
 		}
 		log.Error().Err(err).Str("workspace", externalId).Msg("failed to get workspace")
-		return ErrorResponse(c, http.StatusInternalServerError, "failed to get workspace")
+		return nil, ErrorResponse(c, http.StatusInternalServerError, "failed to get workspace")
 	}
 
+	// Org tokens may only access workspaces tagged with their tenant_id.
+	if info := auth.AuthInfoFromContext(c.Request().Context()); info != nil && info.IsOrganization() {
+		if workspace.TenantId == nil || *workspace.TenantId != info.TenantId {
+			return nil, ErrorResponse(c, http.StatusNotFound, "workspace not found")
+		}
+	}
+
+	return workspace, nil
+}
+
+// GetWorkspace returns a workspace by external ID.
+func (g *WorkspacesGroup) GetWorkspace(c echo.Context) error {
+	workspace, err := g.getWorkspaceWithTenantCheck(c)
+	if err != nil {
+		return err
+	}
 	return SuccessResponse(c, workspaceToResponse(workspace))
 }
 
 // DeleteWorkspace deletes a workspace by external ID.
 func (g *WorkspacesGroup) DeleteWorkspace(c echo.Context) error {
-	externalId := c.Param("id")
-
-	// Get workspace first to get internal ID
-	workspace, err := g.backend.GetWorkspaceByExternalId(c.Request().Context(), externalId)
+	workspace, err := g.getWorkspaceWithTenantCheck(c)
 	if err != nil {
-		if _, ok := err.(*types.ErrWorkspaceNotFound); ok {
-			return ErrorResponse(c, http.StatusNotFound, "workspace not found")
-		}
-		log.Error().Err(err).Str("workspace", externalId).Msg("failed to get workspace for deletion")
-		return ErrorResponse(c, http.StatusInternalServerError, "failed to delete workspace")
+		return err
 	}
 
 	if err := g.backend.DeleteWorkspace(c.Request().Context(), workspace.Id); err != nil {
-		log.Error().Err(err).Str("workspace", externalId).Msg("failed to delete workspace")
+		log.Error().Err(err).Str("workspace", workspace.ExternalId).Msg("failed to delete workspace")
 		return ErrorResponse(c, http.StatusInternalServerError, "failed to delete workspace")
 	}
 

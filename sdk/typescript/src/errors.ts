@@ -51,7 +51,7 @@ export class APIError extends AirstoreError {
     if (status === 409) return new ConflictError(message, headers, requestId);
     if (status === 422) return new UnprocessableEntityError(message, headers, requestId);
     if (status === 429) return new RateLimitError(message, headers, requestId);
-    if (status >= 500) return new InternalServerError(message, headers, requestId);
+    if (status >= 500) return new InternalServerError(status, message, headers, requestId);
 
     return new APIError(status, message, headers, requestId);
   }
@@ -107,8 +107,8 @@ export class RateLimitError extends APIError {
 
 /** 5xx - Server-side error. Safe to retry with backoff. */
 export class InternalServerError extends APIError {
-  constructor(message: string, headers: Headers, requestId: string | undefined) {
-    super(500, message, headers, requestId);
+  constructor(status: number, message: string, headers: Headers, requestId: string | undefined) {
+    super(status, message, headers, requestId);
     this.name = 'InternalServerError';
   }
 }

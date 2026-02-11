@@ -1,6 +1,7 @@
 package apiv1
 
 import (
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"net/http"
@@ -88,7 +89,7 @@ func (og *OAuthGroup) CreateSession(c echo.Context) error {
 	var workspaceId uint
 	var workspaceExt string
 
-	if og.adminToken != "" && token == og.adminToken {
+	if og.adminToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(og.adminToken)) == 1 {
 		// Admin token — workspace_id is required in the request body.
 		if req.WorkspaceId == "" {
 			return ErrorResponse(c, http.StatusBadRequest, "workspace_id required for admin token")

@@ -253,16 +253,19 @@ export class CoreClient {
 
   /** Calculate backoff with jitter. */
   private _backoffMs(attempt: number, lastError: unknown): number {
-    // Respect Retry-After header if present
+    // Respect Retry-After headers if present.
+    // retry-after-ms is already in milliseconds; retry-after is in seconds.
     if (lastError instanceof APIError) {
-      const retryAfter =
-        lastError.headers.get('retry-after-ms') ??
-        lastError.headers.get('retry-after');
+      const retryAfterMs = lastError.headers.get('retry-after-ms');
+      if (retryAfterMs) {
+        const ms = Number(retryAfterMs);
+        if (!isNaN(ms)) return ms;
+      }
+
+      const retryAfter = lastError.headers.get('retry-after');
       if (retryAfter) {
-        const ms = Number(retryAfter);
-        if (!isNaN(ms)) {
-          return retryAfter.includes('.') || ms > 1000 ? ms : ms * 1000;
-        }
+        const seconds = Number(retryAfter);
+        if (!isNaN(seconds)) return seconds * 1000;
       }
     }
 

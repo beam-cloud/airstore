@@ -35,7 +35,7 @@ describe('OAuth', () => {
       });
       sessionId = session.session_id;
     } catch (err) {
-      if (err instanceof APIError) {
+      if (err instanceof APIError && [400, 401, 403, 404, 500].includes(err.status)) {
         console.warn(`Skipping: OAuth not configured (${err.status})`);
         return;
       }

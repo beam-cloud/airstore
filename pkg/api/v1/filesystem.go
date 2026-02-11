@@ -3,6 +3,7 @@ package apiv1
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -2565,7 +2566,7 @@ func NewFilesystemAuthMiddleware(cfg FilesystemAuthConfig) echo.MiddlewareFunc {
 			var info *types.AuthInfo
 
 			// Check if it's an admin token
-			if cfg.AdminToken != "" && token == cfg.AdminToken {
+			if cfg.AdminToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(cfg.AdminToken)) == 1 {
 				// Admin token - get workspace from URL
 				workspace, err := cfg.Backend.GetWorkspaceByExternalId(ctx, workspaceID)
 				if err != nil {
