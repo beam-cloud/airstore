@@ -47,7 +47,18 @@ func NewWorkspaceAuthMiddleware(cfg WorkspaceAuthConfig) echo.MiddlewareFunc {
 				if err != nil || info == nil {
 					return ErrorResponse(c, http.StatusUnauthorized, "invalid token")
 				}
-				if info.Workspace == nil || info.Workspace.ExternalId != workspaceID {
+
+				// Organization tokens: verify workspace belongs to this tenant
+				if info.TokenType == types.TokenTypeOrganization && info.TenantId != "" {
+					ws, err := cfg.Backend.GetWorkspaceByExternalId(ctx, workspaceID)
+					if err != nil || ws == nil {
+						return ErrorResponse(c, http.StatusNotFound, "workspace not found")
+					}
+					if ws.TenantId == nil || *ws.TenantId != info.TenantId {
+						return ErrorResponse(c, http.StatusForbidden, "workspace does not belong to this tenant")
+					}
+					info.Workspace = &types.WorkspaceInfo{Id: ws.Id, ExternalId: ws.ExternalId, Name: ws.Name}
+				} else if info.Workspace == nil || info.Workspace.ExternalId != workspaceID {
 					return ErrorResponse(c, http.StatusForbidden, "token does not have access to this workspace")
 				}
 

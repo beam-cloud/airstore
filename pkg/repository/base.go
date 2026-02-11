@@ -69,6 +69,10 @@ type TokenRepository interface {
 	CreateWorkerToken(ctx context.Context, name string, poolName *string, expiresAt *time.Time) (*types.Token, string, error)
 	ListWorkerTokens(ctx context.Context) ([]types.Token, error)
 
+	// Organization tokens (tenant-scoped)
+	CreateOrgToken(ctx context.Context, name string, tenantId string, expiresAt *time.Time) (*types.Token, string, error)
+	ListOrgTokens(ctx context.Context, tenantId string) ([]types.Token, error)
+
 	// Workspace service tokens (workspace-scoped, no member)
 	CreateWorkspaceServiceToken(ctx context.Context, workspaceId uint, name string) (*types.Token, string, error)
 	EnsureWorkspaceServiceToken(ctx context.Context, workspaceId uint) (*types.Token, string, error)
@@ -104,11 +108,12 @@ type WorkspaceToolRepository interface {
 // For filesystem queries and metadata, use FilesystemStore instead.
 type BackendRepository interface {
 	// Workspaces
-	CreateWorkspace(ctx context.Context, name string) (*types.Workspace, error)
+	CreateWorkspace(ctx context.Context, name string, tenantId *string) (*types.Workspace, error)
 	GetWorkspace(ctx context.Context, id uint) (*types.Workspace, error)
 	GetWorkspaceByExternalId(ctx context.Context, externalId string) (*types.Workspace, error)
 	GetWorkspaceByName(ctx context.Context, name string) (*types.Workspace, error)
 	ListWorkspaces(ctx context.Context) ([]*types.Workspace, error)
+	ListWorkspacesByTenantId(ctx context.Context, tenantId string) ([]*types.Workspace, error)
 	DeleteWorkspace(ctx context.Context, id uint) error
 
 	// Workspace Tool Settings

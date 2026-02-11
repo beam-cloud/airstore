@@ -59,7 +59,7 @@ func (s *GatewayService) CreateWorkspace(ctx context.Context, req *pb.CreateWork
 		return &pb.WorkspaceResponse{Ok: false, Error: err.Error()}, nil
 	}
 
-	ws, err := s.backend.CreateWorkspace(ctx, req.Name)
+	ws, err := s.backend.CreateWorkspace(ctx, req.Name, nil)
 	if err != nil {
 		return &pb.WorkspaceResponse{Ok: false, Error: err.Error()}, nil
 	}

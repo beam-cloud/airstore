@@ -46,9 +46,6 @@ func (tg *TokensGroup) Create(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid request")
 	}
-	if req.MemberId == "" && req.Email == "" {
-		return ErrorResponse(c, http.StatusBadRequest, "member_id or email required")
-	}
 	if req.Name == "" {
 		req.Name = "API Token"
 	}
@@ -61,7 +58,8 @@ func (tg *TokensGroup) Create(c echo.Context) error {
 	var member *types.WorkspaceMember
 	var autoCreatedId string
 
-	if req.MemberId != "" {
+	switch {
+	case req.MemberId != "":
 		member, err = tg.backend.GetMember(ctx, req.MemberId)
 		if err != nil || member == nil {
 			return ErrorResponse(c, http.StatusNotFound, "member not found")
@@ -69,8 +67,17 @@ func (tg *TokensGroup) Create(c echo.Context) error {
 		if member.WorkspaceId != ws.Id {
 			return ErrorResponse(c, http.StatusBadRequest, "member not in workspace")
 		}
-	} else {
+	case req.Email != "":
 		member, err = tg.backend.CreateMember(ctx, ws.Id, req.Email, req.Email, types.RoleMember)
+		if err != nil {
+			return ErrorResponse(c, http.StatusInternalServerError, "failed to create member")
+		}
+		autoCreatedId = member.ExternalId
+	default:
+		// No member specified — auto-create a service member so callers
+		// (e.g. SDK) don't need to know about the member model.
+		svcName := req.Name + " (service)"
+		member, err = tg.backend.CreateMember(ctx, ws.Id, svcName, svcName, types.RoleMember)
 		if err != nil {
 			return ErrorResponse(c, http.StatusInternalServerError, "failed to create member")
 		}

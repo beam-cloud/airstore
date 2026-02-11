@@ -27,6 +27,7 @@ import (
 
 var (
 	mountVerbose bool
+	mountDaemon  bool
 	configPath   string
 	mountUID     uint32
 	mountGID     uint32
@@ -48,6 +49,7 @@ Examples:
 
 func init() {
 	mountCmd.Flags().BoolVarP(&mountVerbose, "verbose", "v", false, "Verbose logging")
+	mountCmd.Flags().BoolVarP(&mountDaemon, "daemon", "d", false, "Daemon mode: suppress interactive UI, suitable for headless/systemd use")
 	mountCmd.Flags().StringVarP(&configPath, "config", "c", "", "Config file (for local mode)")
 	mountCmd.Flags().Uint32Var(&mountUID, "uid", 0, "File owner UID (default: current user)")
 	mountCmd.Flags().Uint32Var(&mountGID, "gid", 0, "File owner GID (default: current user)")
@@ -81,7 +83,7 @@ func runMount(cmd *cobra.Command, args []string) error {
 		if cm.GetConfig().Mode == types.ModeLocal {
 			mode = "local"
 
-			err := withSpinner("Starting gateway...", func() error {
+			err := withMaybeSpinner("Starting gateway...", func() error {
 				var err error
 				gw, err = gateway.NewGateway()
 				if err != nil {
@@ -99,7 +101,9 @@ func runMount(cmd *cobra.Command, args []string) error {
 				PrintFormattedError("Failed to start gateway", err)
 				return nil
 			}
-			PrintSuccessWithValue("Gateway ready", effectiveGateway)
+			if !mountDaemon {
+				PrintSuccessWithValue("Gateway ready", effectiveGateway)
+			}
 		}
 	}
 
@@ -116,7 +120,7 @@ func runMount(cmd *cobra.Command, args []string) error {
 		gidPtr = &mountGID
 	}
 
-	err := withSpinner("Connecting...", func() error {
+	err := withMaybeSpinner("Connecting...", func() error {
 		var err error
 		fs, err = filesystem.NewFilesystem(filesystem.Config{
 			MountPoint:  mountPoint,
@@ -147,10 +151,10 @@ func runMount(cmd *cobra.Command, args []string) error {
 		fs.RegisterVNode(vnode.NewConfigVNode(effectiveGateway, authToken))
 		fs.RegisterVNode(vnode.NewToolsVNode(effectiveGateway, authToken, shim))
 		fs.RegisterVNode(vnode.NewSourcesVNode(conn, authToken))
-		fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, authToken, types.PathSkills))  // /Skills
-		fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, authToken, types.PathMemory))  // /Memory
-		fs.RegisterVNode(vnode.NewTasksVNodeGRPC(conn, authToken))                      // /Tasks
-		fs.SetStorageFallback(vnode.NewStorageVNode(conn, authToken))                   // user folders
+		fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, authToken, types.PathSkills)) // /Skills
+		fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, authToken, types.PathMemory)) // /Memory
+		fs.RegisterVNode(vnode.NewTasksVNodeGRPC(conn, authToken))                     // /Tasks
+		fs.SetStorageFallback(vnode.NewStorageVNode(conn, authToken))                  // user folders
 
 		return nil
 	})
@@ -170,8 +174,13 @@ func runMount(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	PrintSuccessWithValue("Mounted", mountPoint)
-	printMountStatus(mountPoint, effectiveGateway, mode)
+	if mountDaemon {
+		// Daemon mode: minimal output suitable for scripts/systemd
+		fmt.Printf("airstore: mounted at %s (gateway=%s, mode=%s)\n", mountPoint, effectiveGateway, mode)
+	} else {
+		PrintSuccessWithValue("Mounted", mountPoint)
+		printMountStatus(mountPoint, effectiveGateway, mode)
+	}
 
 	// Run mount in background
 	mountErr := make(chan error, 1)
@@ -187,7 +196,7 @@ func runMount(cmd *cobra.Command, args []string) error {
 		// Mount exited
 	case <-sig:
 		fmt.Println()
-		withSpinner("Unmounting...", func() error {
+		withMaybeSpinner("Unmounting...", func() error {
 			if gw != nil {
 				go gw.Shutdown()
 			}
@@ -195,7 +204,11 @@ func runMount(cmd *cobra.Command, args []string) error {
 			time.Sleep(200 * time.Millisecond)
 			return nil
 		})
-		PrintSuccess("Unmounted")
+		if mountDaemon {
+			fmt.Println("airstore: unmounted")
+		} else {
+			PrintSuccess("Unmounted")
+		}
 
 		select {
 		case <-mountErr:
@@ -226,6 +239,14 @@ func withSpinner(title string, fn func() error) error {
 		Action(func() { err = fn() }).
 		Run()
 	return err
+}
+
+// withMaybeSpinner runs fn with a spinner in interactive mode, or directly in daemon mode.
+func withMaybeSpinner(title string, fn func() error) error {
+	if mountDaemon {
+		return fn()
+	}
+	return withSpinner(title, fn)
 }
 
 func printMountStatus(mount, gateway, mode string) {

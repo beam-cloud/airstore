@@ -15,6 +15,7 @@ type Workspace struct {
 	Id         uint      `json:"id" db:"id"`                   // Internal ID for joins
 	ExternalId string    `json:"external_id" db:"external_id"` // External UUID for API
 	Name       string    `json:"name" db:"name"`
+	TenantId   *string   `json:"tenant_id,omitempty" db:"tenant_id"` // Nullable tenant scoping tag
 	CreatedAt  time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at" db:"updated_at"`
 }

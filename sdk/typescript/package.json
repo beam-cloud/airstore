@@ -1,0 +1,45 @@
+{
+  "name": "@airstore/sdk",
+  "version": "0.1.0",
+  "description": "Official TypeScript SDK for the Airstore API",
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "npm run build:esm && npm run build:cjs",
+    "build:esm": "tsc -p tsconfig.json",
+    "build:cjs": "tsc -p tsconfig.cjs.json",
+    "clean": "rm -rf dist",
+    "lint": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:prod": "AIRSTORE_BASE_URL=https://api.airstore.ai/api/v1 vitest run",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "keywords": [
+    "airstore",
+    "sdk",
+    "typescript",
+    "api",
+    "virtual-filesystem"
+  ],
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/node": "^25.2.3",
+    "typescript": "^5.3.0",
+    "vitest": "^4.0.18"
+  }
+}
