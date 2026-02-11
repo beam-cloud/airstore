@@ -13,7 +13,6 @@ import (
 	"github.com/beam-cloud/airstore/pkg/filesystem/vnode"
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/rs/zerolog/log"
-	"github.com/winfsp/cgofuse/fuse"
 )
 
 // Compile-time assertion: vnode.FileInfo and FileInfo must have identical size.
@@ -45,9 +44,11 @@ type Config struct {
 	Verbose     bool
 	Uid         *uint32 // File owner uid (nil = use current user, 0 = root)
 	Gid         *uint32 // File owner gid (nil = use current user, 0 = root)
+	Backend     string  // "fuse", "nfs", or "" for platform auto-detect
 }
 
-// Filesystem is a FUSE filesystem that connects to the gateway via gRPC.
+// Filesystem connects to the gateway via gRPC and exposes a virtual filesystem.
+// It can be mounted via FUSE or NFS depending on the configured backend.
 type Filesystem struct {
 	config   Config
 	metadata LegacyMetadataEngine
@@ -68,7 +69,7 @@ type Filesystem struct {
 	// here so repeat lookups return ENOENT without RPCs.
 	negativeCache *expirable.LRU[string, struct{}]
 
-	host      *fuse.FileSystemHost
+	backend   MountBackend
 	mounted   bool
 	destroyed bool // Set when Destroy() is called by FUSE layer
 	mu        sync.Mutex
@@ -114,6 +115,13 @@ func NewFilesystem(cfg Config) (*Filesystem, error) {
 		log.Debug().Str("gateway", cfg.GatewayAddr).Msg("connected to gateway")
 	}
 
+	// Resolve mount backend (auto-detect if not specified)
+	backendName := cfg.Backend
+	if backendName == "" {
+		backendName = defaultBackend()
+	}
+	cfg.Backend = backendName
+
 	fs := &Filesystem{
 		config:        cfg,
 		verbose:       cfg.Verbose,
@@ -123,6 +131,7 @@ func NewFilesystem(cfg Config) (*Filesystem, error) {
 		trace:         newFuseTraceFromEnv(),
 		dirChildren:   expirable.NewLRU[string, map[string]struct{}](dirChildrenSize, nil, dirChildrenTTL),
 		negativeCache: expirable.NewLRU[string, struct{}](negativeCacheSize, nil, negativeCacheTTL),
+		backend:       NewBackend(backendName),
 	}
 
 	if err := fs.initRoot(); err != nil {
@@ -180,53 +189,43 @@ func (f *Filesystem) Mount() error {
 		return err
 	}
 
-	f.host = fuse.NewFileSystemHost(newAdapter(f))
-
-	opts := f.mountOptions()
 	if f.verbose {
-		log.Debug().Str("path", f.config.MountPoint).Msg("mounting filesystem")
+		log.Debug().
+			Str("path", f.config.MountPoint).
+			Str("backend", f.config.Backend).
+			Msg("mounting filesystem")
 	}
 
 	f.mu.Lock()
 	f.mounted = true
 	f.mu.Unlock()
 
-	stopTrace := make(chan struct{})
-	if f.trace != nil {
-		log.Info().Str("mount", f.config.MountPoint).Msg("fuse trace enabled (AIRSTORE_FUSE_TRACE=1)")
-		go f.trace.reportLoop(stopTrace, f.config.MountPoint)
-	}
-
-	ok := f.host.Mount(f.config.MountPoint, opts)
-
-	if f.trace != nil {
-		close(stopTrace)
-	}
+	// Delegate to the configured backend (FUSE or NFS). This call blocks
+	// until the filesystem is unmounted.
+	err := f.backend.Mount(f, f.config.MountPoint)
 
 	f.mu.Lock()
 	f.mounted = false
 	f.mu.Unlock()
 
-	if !ok {
-		return fmt.Errorf("mount failed")
-	}
-	return nil
+	// Clean up vnodes. Idempotent — safe even if the FUSE adapter already
+	// called Destroy() during unmount.
+	f.Destroy()
+
+	return err
 }
 
 func (f *Filesystem) Unmount() error {
 	f.mu.Lock()
-	host := f.host
+	backend := f.backend
 	destroyed := f.destroyed
 	f.mu.Unlock()
 
-	if destroyed || host == nil {
+	if destroyed || backend == nil {
 		return nil
 	}
 
-	// Note: host.Unmount may block depending on the FUSE backend.
-	// Callers that need a hard timeout should enforce it at a higher level (e.g., CLI).
-	_ = host.Unmount()
-	return nil
+	return backend.Unmount()
 }
 
 func (f *Filesystem) IsMounted() bool {
@@ -250,6 +249,10 @@ func (f *Filesystem) logDebug(msg string) {
 func (f *Filesystem) Init() error { return nil }
 func (f *Filesystem) Destroy() {
 	f.mu.Lock()
+	if f.destroyed {
+		f.mu.Unlock()
+		return
+	}
 	f.destroyed = true
 	f.mu.Unlock()
 

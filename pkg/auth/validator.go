@@ -44,9 +44,11 @@ func (v *CompositeValidator) ValidateToken(ctx context.Context, token string) (*
 		return nil, nil
 	}
 
-	// Check cache first — avoids Postgres query + O(n) bcrypt comparisons
+	// Check cache first — avoids Postgres query + O(n) bcrypt comparisons.
+	// Return a shallow copy so callers can't corrupt shared cached state.
 	if info, ok := v.cache.Get(token); ok {
-		return info, nil
+		cp := *info
+		return &cp, nil
 	}
 
 	info, err := v.authorizer.AuthorizeToken(ctx, token)

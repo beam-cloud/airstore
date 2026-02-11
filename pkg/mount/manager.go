@@ -27,6 +27,7 @@ type Config struct {
 	GatewayAddr string
 	Token       string
 	Verbose     bool
+	Backend     string // "fuse", "nfs", or "" for platform auto-detect
 }
 
 type StateCallback func(State, error)
@@ -171,6 +172,7 @@ func (m *MountManager) createFilesystem(addr string) (*filesystem.Filesystem, *g
 		GatewayAddr: addr,
 		Token:       m.cfg.Token,
 		Verbose:     m.cfg.Verbose,
+		Backend:     m.cfg.Backend,
 	})
 	if err != nil {
 		if strings.Contains(err.Error(), "connection refused") {
@@ -276,14 +278,18 @@ func (m *MountManager) Reload() error {
 }
 
 func unmount(path string) {
-	if runtime.GOOS != "darwin" {
-		return
-	}
-
-	cmds := [][]string{
-		{"diskutil", "unmount", "force", path},
-		{"diskutil", "unmount", path},
-		{"umount", "-f", path},
+	var cmds [][]string
+	if runtime.GOOS == "darwin" {
+		cmds = [][]string{
+			{"diskutil", "unmount", "force", path},
+			{"diskutil", "unmount", path},
+			{"umount", "-f", path},
+		}
+	} else {
+		cmds = [][]string{
+			{"umount", path},
+			{"umount", "-f", path},
+		}
 	}
 
 	for _, args := range cmds {
