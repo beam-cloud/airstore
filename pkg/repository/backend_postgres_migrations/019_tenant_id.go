@@ -11,6 +11,15 @@ func init() {
 }
 
 func upTenantId(tx *sql.Tx) error {
+	// Add 'organization' to the token_type enum so org tokens can be created.
+	// NOTE: ALTER TYPE ... ADD VALUE cannot run inside a transaction in Postgres <12.
+	// goose runs each migration in a transaction, but ADD VALUE IF NOT EXISTS is
+	// safe in Postgres 12+ which we require. If this fails on older Postgres,
+	// run this ALTER manually outside a transaction first.
+	if _, err := tx.Exec(`ALTER TYPE token_type ADD VALUE IF NOT EXISTS 'organization'`); err != nil {
+		return err
+	}
+
 	stmts := []string{
 		// Add tenant_id column to workspace for tenant scoping
 		`ALTER TABLE workspace ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(255)`,
