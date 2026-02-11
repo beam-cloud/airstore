@@ -59,13 +59,14 @@ export class Connections {
    * @returns Array of connections.
    */
   async list(workspaceId: string, options?: RequestOptions): Promise<Connection[]> {
-    return this.client.request<Connection[]>(
+    const result = await this.client.request<Connection[]>(
       'GET',
       `/workspaces/${workspaceId}/connections`,
       undefined,
       undefined,
       options,
     );
+    return Array.isArray(result) ? result : [];
   }
 
   /**

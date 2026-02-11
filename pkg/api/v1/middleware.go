@@ -1,6 +1,7 @@
 package apiv1
 
 import (
+	"crypto/subtle"
 	"net/http"
 	"strings"
 
@@ -31,7 +32,7 @@ func NewWorkspaceAuthMiddleware(cfg WorkspaceAuthConfig) echo.MiddlewareFunc {
 			var info *types.AuthInfo
 
 			switch {
-			case cfg.AdminToken != "" && token == cfg.AdminToken:
+			case cfg.AdminToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(cfg.AdminToken)) == 1:
 				ws, err := cfg.Backend.GetWorkspaceByExternalId(ctx, workspaceID)
 				if err != nil || ws == nil {
 					return ErrorResponse(c, http.StatusNotFound, "workspace not found")
@@ -48,14 +49,13 @@ func NewWorkspaceAuthMiddleware(cfg WorkspaceAuthConfig) echo.MiddlewareFunc {
 					return ErrorResponse(c, http.StatusUnauthorized, "invalid token")
 				}
 
-				// Organization tokens: verify workspace belongs to this tenant
+				// Organization tokens: verify workspace belongs to this tenant.
+				// Return the same error for "not found" and "wrong tenant" to prevent
+				// org token holders from enumerating workspaces outside their tenant.
 				if info.TokenType == types.TokenTypeOrganization && info.TenantId != "" {
 					ws, err := cfg.Backend.GetWorkspaceByExternalId(ctx, workspaceID)
-					if err != nil || ws == nil {
+					if err != nil || ws == nil || ws.TenantId == nil || *ws.TenantId != info.TenantId {
 						return ErrorResponse(c, http.StatusNotFound, "workspace not found")
-					}
-					if ws.TenantId == nil || *ws.TenantId != info.TenantId {
-						return ErrorResponse(c, http.StatusForbidden, "workspace does not belong to this tenant")
 					}
 					info.Workspace = &types.WorkspaceInfo{Id: ws.Id, ExternalId: ws.ExternalId, Name: ws.Name}
 				} else if info.Workspace == nil || info.Workspace.ExternalId != workspaceID {

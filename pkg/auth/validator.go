@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/subtle"
 	"time"
 
 	expirable "github.com/hashicorp/golang-lru/v2/expirable"
@@ -36,7 +37,7 @@ func NewCompositeValidator(clusterToken string, authorizer TokenAuthorizer) *Com
 }
 
 func (v *CompositeValidator) ValidateClusterToken(token string) bool {
-	return v.clusterToken != "" && token == v.clusterToken
+	return v.clusterToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(v.clusterToken)) == 1
 }
 
 func (v *CompositeValidator) ValidateToken(ctx context.Context, token string) (*types.AuthInfo, error) {
@@ -73,7 +74,7 @@ func NewStaticValidator(clusterToken string) *StaticValidator {
 }
 
 func (v *StaticValidator) ValidateClusterToken(token string) bool {
-	return v.clusterToken == "" || token == v.clusterToken
+	return v.clusterToken == "" || subtle.ConstantTimeCompare([]byte(token), []byte(v.clusterToken)) == 1
 }
 
 func (v *StaticValidator) ValidateToken(ctx context.Context, token string) (*types.AuthInfo, error) {

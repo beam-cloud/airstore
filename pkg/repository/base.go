@@ -72,6 +72,7 @@ type TokenRepository interface {
 	// Organization tokens (tenant-scoped)
 	CreateOrgToken(ctx context.Context, name string, tenantId string, expiresAt *time.Time) (*types.Token, string, error)
 	ListOrgTokens(ctx context.Context, tenantId string) ([]types.Token, error)
+	RevokeOrgToken(ctx context.Context, externalId string) error
 
 	// Workspace service tokens (workspace-scoped, no member)
 	CreateWorkspaceServiceToken(ctx context.Context, workspaceId uint, name string) (*types.Token, string, error)

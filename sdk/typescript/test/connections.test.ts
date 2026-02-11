@@ -65,13 +65,10 @@ describe('Connections', () => {
     if (connId) {
       await client.connections.del(workspace.external_id, connId);
 
-      // Verify it's gone — list may return empty array or non-array (API returns null for empty)
+      // Verify it's gone
       const connections = await client.connections.list(workspace.external_id);
-      if (Array.isArray(connections)) {
-        const found = connections.find((c) => c.external_id === connId);
-        expect(found).toBeUndefined();
-      }
-      // If not an array, the list is empty which also means it's deleted
+      const found = connections.find((c) => c.external_id === connId);
+      expect(found).toBeUndefined();
     }
   });
 });

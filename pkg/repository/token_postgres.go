@@ -795,3 +795,19 @@ func (r *PostgresBackend) RevokeToken(ctx context.Context, externalId string) er
 	}
 	return nil
 }
+
+// RevokeOrgToken deletes a token only if it is of type 'organization'.
+// Returns sql.ErrNoRows if the token doesn't exist or isn't an org token.
+func (r *PostgresBackend) RevokeOrgToken(ctx context.Context, externalId string) error {
+	query := `DELETE FROM token WHERE external_id = $1 AND token_type = 'organization'`
+	result, err := r.db.ExecContext(ctx, query, externalId)
+	if err != nil {
+		return fmt.Errorf("revoke org token: %w", err)
+	}
+
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}

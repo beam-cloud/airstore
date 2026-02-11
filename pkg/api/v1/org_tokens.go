@@ -63,6 +63,10 @@ func (ot *OrgTokensGroup) Create(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, "tenant_id is required")
 	}
 
+	if req.ExpiresIn < 0 {
+		return ErrorResponse(c, http.StatusBadRequest, "expires_in must not be negative")
+	}
+
 	var expiresAt *time.Time
 	if req.ExpiresIn > 0 {
 		t := time.Now().Add(time.Duration(req.ExpiresIn) * time.Second)
@@ -105,7 +109,7 @@ func (ot *OrgTokensGroup) Revoke(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, "token_id is required")
 	}
 
-	if err := ot.backend.RevokeToken(c.Request().Context(), tokenId); err != nil {
+	if err := ot.backend.RevokeOrgToken(c.Request().Context(), tokenId); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrorResponse(c, http.StatusNotFound, "token not found")
 		}
