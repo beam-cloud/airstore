@@ -498,7 +498,7 @@ func (g *Gateway) registerServices() error {
 		}
 
 		// OAuth API for workspace integrations (gmail, gdrive, github, notion, slack)
-		apiv1.NewOAuthGroup(g.baseRouteGroup.Group("/oauth"), g.oauthStore, g.oauthRegistry, g.BackendRepo)
+		apiv1.NewOAuthGroup(g.baseRouteGroup.Group("/oauth"), g.oauthStore, g.oauthRegistry, g.BackendRepo, g.Config.Gateway.AuthToken)
 		if providers := g.oauthRegistry.ListConfiguredProviders(); len(providers) > 0 {
 			log.Info().Strs("providers", providers).Msg("oauth API registered at /api/v1/oauth")
 		} else {

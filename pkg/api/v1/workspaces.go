@@ -19,7 +19,8 @@ type WorkspacesGroup struct {
 }
 
 type CreateWorkspaceRequest struct {
-	Name string `json:"name" validate:"required"`
+	Name     string `json:"name" validate:"required"`
+	TenantId string `json:"tenant_id,omitempty"`
 }
 
 type WorkspaceResponse struct {
@@ -63,10 +64,13 @@ func (g *WorkspacesGroup) CreateWorkspace(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, "name is required")
 	}
 
-	// If called by an org token, auto-set tenant_id on the workspace
+	// Resolve tenant_id: org tokens auto-set it from the token; admin callers
+	// can pass it explicitly in the request body.
 	var tenantId *string
 	if info := auth.AuthInfoFromContext(ctx); info != nil && info.IsOrganization() {
 		tenantId = &info.TenantId
+	} else if req.TenantId != "" {
+		tenantId = &req.TenantId
 	}
 
 	// Create workspace in database
