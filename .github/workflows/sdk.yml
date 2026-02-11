@@ -81,7 +81,7 @@ jobs:
           echo "Publishing version: $VERSION"
 
       - name: Set package version
-        run: npm version "${{ steps.version.outputs.version }}" --no-git-tag-version
+        run: npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
 
       - name: Build
         run: npm run build
