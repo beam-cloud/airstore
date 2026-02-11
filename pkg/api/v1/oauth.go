@@ -1,7 +1,6 @@
 package apiv1
 
 import (
-	"crypto/subtle"
 	"errors"
 	"fmt"
 	"net/http"
@@ -10,7 +9,6 @@ import (
 
 	"github.com/beam-cloud/airstore/pkg/oauth"
 	"github.com/beam-cloud/airstore/pkg/repository"
-	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog/log"
 )
@@ -63,8 +61,8 @@ type CreateSessionResponse struct {
 // CreateSession creates a new OAuth session and returns the authorization URL.
 //
 // Auth: accepts either a workspace-scoped member token (workspace derived from
-// the token) or the cluster admin token (workspace_id must be in the request
-// body).
+// the token) or the cluster admin / org token (workspace_id must be in the
+// request body).
 func (og *OAuthGroup) CreateSession(c echo.Context) error {
 	authHeader := c.Request().Header.Get("Authorization")
 	if authHeader == "" {
@@ -85,50 +83,24 @@ func (og *OAuthGroup) CreateSession(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, "integration_type required")
 	}
 
-	// Resolve workspace: admin/org callers pass workspace_id explicitly;
-	// member tokens carry the workspace implicitly.
-	var workspaceId uint
-	var workspaceExt string
-
-	if og.adminToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(og.adminToken)) == 1 {
-		// Admin token — workspace_id is required in the request body.
-		if req.WorkspaceId == "" {
-			return ErrorResponse(c, http.StatusBadRequest, "workspace_id required for admin token")
-		}
-		ws, err := og.backend.GetWorkspaceByExternalId(c.Request().Context(), req.WorkspaceId)
-		if err != nil || ws == nil {
-			return ErrorResponse(c, http.StatusNotFound, "workspace not found")
-		}
-		workspaceId = ws.Id
-		workspaceExt = ws.ExternalId
-	} else {
-		// Validate token first.
-		result, err := og.backend.ValidateToken(c.Request().Context(), token)
-		if err != nil || result == nil {
-			return ErrorResponse(c, http.StatusUnauthorized, "invalid token")
-		}
-
-		if result.TokenType == types.TokenTypeOrganization {
-			// Org tokens don't carry a workspace — require workspace_id in body
-			// and verify it belongs to the tenant.
-			if req.WorkspaceId == "" {
-				return ErrorResponse(c, http.StatusBadRequest, "workspace_id required for organization token")
-			}
-			ws, err := og.backend.GetWorkspaceByExternalId(c.Request().Context(), req.WorkspaceId)
-			if err != nil || ws == nil {
-				return ErrorResponse(c, http.StatusNotFound, "workspace not found")
-			}
-			if result.TenantId != "" && (ws.TenantId == nil || *ws.TenantId != result.TenantId) {
-				return ErrorResponse(c, http.StatusNotFound, "workspace not found")
-			}
-			workspaceId = ws.Id
-			workspaceExt = ws.ExternalId
-		} else {
-			// Member/service token — workspace is embedded in the token.
-			workspaceId = result.WorkspaceId
-			workspaceExt = result.WorkspaceExt
+	// Resolve the caller identity and target workspace using the shared helper.
+	info, err := resolveCallerWorkspace(c.Request().Context(), token, og.adminToken, req.WorkspaceId, og.backend)
+	if err != nil {
+		msg := err.Error()
+		switch msg {
+		case "authorization required", "invalid token":
+			return ErrorResponse(c, http.StatusUnauthorized, msg)
+		case "workspace not found":
+			return ErrorResponse(c, http.StatusNotFound, msg)
+		case "token does not have access to this workspace":
+			return ErrorResponse(c, http.StatusForbidden, msg)
+		default:
+			return ErrorResponse(c, http.StatusBadRequest, msg)
 		}
 	}
+
+	workspaceId := info.Workspace.Id
+	workspaceExt := info.Workspace.ExternalId
 
 	provider, err := og.registry.GetProviderForIntegration(req.IntegrationType)
 	if err != nil {
