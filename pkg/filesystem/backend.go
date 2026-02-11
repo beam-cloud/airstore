@@ -23,7 +23,7 @@ const (
 )
 
 // NewBackend creates a MountBackend by name.
-// An empty name uses the platform default (auto-detection).
+// Callers should resolve "" to a concrete name via defaultBackend() before calling.
 func NewBackend(name string) MountBackend {
 	switch name {
 	case BackendNFS:

@@ -51,8 +51,16 @@ func (b *NFSBackend) Mount(fs *Filesystem, mountPoint string) error {
 		serverDone <- nfs.Serve(listener, cacheHandler)
 	}()
 
-	// Give the server a moment to accept connections
-	time.Sleep(100 * time.Millisecond)
+	// Wait until the NFS server is accepting connections before mounting.
+	addr := listener.Addr().String()
+	for i := 0; i < 20; i++ {
+		conn, err := net.DialTimeout("tcp", addr, 50*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 
 	// Mount the NFS share via the kernel NFS client
 	if err := b.execMount(port, mountPoint); err != nil {
@@ -73,6 +81,8 @@ func (b *NFSBackend) Mount(fs *Filesystem, mountPoint string) error {
 }
 
 func (b *NFSBackend) Unmount() error {
+	var umountErr error
+
 	// Unmount the OS-level NFS mount first (stops kernel from sending requests).
 	if b.mountPoint != "" {
 		cmds := [][]string{
@@ -80,21 +90,28 @@ func (b *NFSBackend) Unmount() error {
 			{"umount", "-f", b.mountPoint},
 			{"umount", "-l", b.mountPoint}, // lazy unmount as last resort
 		}
+		umountErr = fmt.Errorf("all umount attempts failed for %s", b.mountPoint)
 		for _, args := range cmds {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			if exec.CommandContext(ctx, args[0], args[1:]...).Run() == nil {
 				cancel()
+				umountErr = nil
 				break
 			}
 			cancel()
 		}
+		if umountErr != nil {
+			log.Warn().Str("mount", b.mountPoint).Msg("all umount attempts failed; mount may still be active")
+		}
 	}
 
 	// Close the listener, which causes nfs.Serve to return.
+	// Done unconditionally — even if umount failed, killing the server
+	// ensures the mount becomes stale rather than serving bad data.
 	if b.listener != nil {
 		b.listener.Close()
 	}
-	return nil
+	return umountErr
 }
 
 // execMount runs the mount(8) command to attach the NFS share.

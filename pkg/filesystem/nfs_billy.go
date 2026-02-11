@@ -327,7 +327,7 @@ func newBillyFileInfo(name string, info *FileInfo) *billyFileInfo {
 	return &billyFileInfo{
 		name:    name,
 		size:    info.Size,
-		mode:    os.FileMode(info.Mode),
+		mode:    unixModeToGoFileMode(info.Mode),
 		modTime: info.Mtime,
 		dir:     info.IsDir(),
 	}
@@ -341,7 +341,7 @@ func newBillyFileInfoFromDirEntry(e *DirEntry) *billyFileInfo {
 	return &billyFileInfo{
 		name:    e.Name,
 		size:    e.Size,
-		mode:    os.FileMode(e.Mode),
+		mode:    unixModeToGoFileMode(e.Mode),
 		modTime: mtime,
 		dir:     e.Mode&syscall.S_IFDIR != 0,
 	}
@@ -353,3 +353,35 @@ func (fi *billyFileInfo) Mode() os.FileMode  { return fi.mode }
 func (fi *billyFileInfo) ModTime() time.Time { return fi.modTime }
 func (fi *billyFileInfo) IsDir() bool        { return fi.dir }
 func (fi *billyFileInfo) Sys() interface{}   { return nil }
+
+// unixModeToGoFileMode converts raw Unix mode bits (as stored in our FileInfo
+// and DirEntry) to Go's os.FileMode encoding. This is critical because go-nfs
+// checks os.ModeSymlink, os.ModeDir, etc. which use different bit positions
+// than the raw Unix S_IFLNK, S_IFDIR values.
+func unixModeToGoFileMode(mode uint32) os.FileMode {
+	fm := os.FileMode(mode & 0777) // permission bits (rwxrwxrwx)
+	switch mode & syscall.S_IFMT {
+	case syscall.S_IFBLK:
+		fm |= os.ModeDevice
+	case syscall.S_IFCHR:
+		fm |= os.ModeDevice | os.ModeCharDevice
+	case syscall.S_IFDIR:
+		fm |= os.ModeDir
+	case syscall.S_IFIFO:
+		fm |= os.ModeNamedPipe
+	case syscall.S_IFLNK:
+		fm |= os.ModeSymlink
+	case syscall.S_IFSOCK:
+		fm |= os.ModeSocket
+	}
+	if mode&syscall.S_ISGID != 0 {
+		fm |= os.ModeSetgid
+	}
+	if mode&syscall.S_ISUID != 0 {
+		fm |= os.ModeSetuid
+	}
+	if mode&syscall.S_ISVTX != 0 {
+		fm |= os.ModeSticky
+	}
+	return fm
+}

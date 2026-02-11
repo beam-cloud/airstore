@@ -624,22 +624,31 @@ func (s *filesystemStore) StatPath(ctx context.Context, path string) (*types.Dir
 	dirCmd := pipe.Get(ctx, common.Keys.FsDirMeta(path))
 	fileCmd := pipe.Get(ctx, common.Keys.FsFileMeta(path))
 	symlinkCmd := pipe.Get(ctx, common.Keys.FsSymlink(path))
-	_, _ = pipe.Exec(ctx) // individual errors checked per command
+	_, execErr := pipe.Exec(ctx)
+
+	// redis.Nil is expected (most keys won't exist for a given path).
+	// Any other error means Redis is unreachable — propagate it so the
+	// caller returns an IO error instead of a false "not found".
+	if execErr != nil && execErr != redis.Nil {
+		return nil, nil, "", fmt.Errorf("redis pipeline: %w", execErr)
+	}
 
 	// Check directory
 	if data, err := dirCmd.Bytes(); err == nil {
 		var meta types.DirMeta
-		if err := json.Unmarshal(data, &meta); err == nil {
-			return &meta, nil, "", nil
+		if err := json.Unmarshal(data, &meta); err != nil {
+			return nil, nil, "", fmt.Errorf("corrupt dir metadata at %s: %w", path, err)
 		}
+		return &meta, nil, "", nil
 	}
 
 	// Check file
 	if data, err := fileCmd.Bytes(); err == nil {
 		var meta types.FileMeta
-		if err := json.Unmarshal(data, &meta); err == nil {
-			return nil, &meta, "", nil
+		if err := json.Unmarshal(data, &meta); err != nil {
+			return nil, nil, "", fmt.Errorf("corrupt file metadata at %s: %w", path, err)
 		}
+		return nil, &meta, "", nil
 	}
 
 	// Check symlink
