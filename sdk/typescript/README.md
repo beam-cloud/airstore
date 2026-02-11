@@ -17,7 +17,6 @@ const airstore = new Airstore({
   apiKey: 'org_...', // or set AIRSTORE_API_KEY env var
 });
 
-// Create a workspace for a new user
 const workspace = await airstore.workspaces.create({ name: 'user-123' });
 console.log(workspace.external_id);
 ```
@@ -31,10 +30,10 @@ import Airstore from '@airstore/sdk';
 
 const airstore = new Airstore({ apiKey: process.env.AIRSTORE_API_KEY });
 
-async function provisionUser(userId: string, gmailTokens: {
-  accessToken: string;
-  refreshToken: string;
-}) {
+async function provisionUser(
+  userId: string,
+  gmailTokens: { accessToken: string; refreshToken: string },
+) {
   // 1. Create a workspace
   const ws = await airstore.workspaces.create({ name: `user-${userId}` });
 
@@ -79,19 +78,19 @@ async function provisionUser(userId: string, gmailTokens: {
 
 ```typescript
 const airstore = new Airstore({
-  // Required: API key (org token or cluster admin token)
+  // Required — org token or cluster admin token
   apiKey: 'org_...',
 
-  // Optional: override the base URL (default: https://api.airstore.ai/api/v1)
+  // Override the base URL (default: https://api.airstore.ai/api/v1)
   baseURL: 'https://api.airstore.ai/api/v1',
 
-  // Optional: request timeout in ms (default: 60000)
+  // Request timeout in ms (default: 60000)
   timeout: 30_000,
 
-  // Optional: max retries for 429/5xx errors (default: 2)
+  // Max retries for 429/5xx errors (default: 2)
   maxRetries: 3,
 
-  // Optional: default headers for every request
+  // Default headers for every request
   defaultHeaders: { 'X-Custom-Header': 'value' },
 });
 ```
@@ -111,7 +110,7 @@ const airstore = new Airstore({
 // Create
 const ws = await airstore.workspaces.create({ name: 'my-workspace' });
 
-// List all
+// List all (org tokens only see their tenant's workspaces)
 const workspaces = await airstore.workspaces.list();
 
 // Retrieve by ID
@@ -137,7 +136,7 @@ const conn = await airstore.connections.create('ws_abc123', {
   apiKey: 'ghp_...',
 });
 
-// List connections in a workspace
+// List
 const connections = await airstore.connections.list('ws_abc123');
 
 // Delete
@@ -155,11 +154,11 @@ const folder = await airstore.smartFolders.create('ws_abc123', {
   outputFormat: 'folder', // or 'file'
 });
 
-// List
+// List all
 const folders = await airstore.smartFolders.list('ws_abc123');
 
-// Retrieve
-const folder = await airstore.smartFolders.retrieve('ws_abc123', 'query_abc');
+// Retrieve by path
+const folder = await airstore.smartFolders.retrieve('ws_abc123', '/Sources/gmail/Important Emails');
 
 // Update
 const updated = await airstore.smartFolders.update('ws_abc123', 'query_abc', {
@@ -179,9 +178,9 @@ const token = await airstore.tokens.create('ws_abc123', {
   name: 'vm-mount',
   expiresIn: 86400, // optional, seconds
 });
-console.log(token.token); // raw value, shown once
+console.log(token.token); // raw value — only shown once
 
-// List tokens
+// List tokens (values are never returned)
 const tokens = await airstore.tokens.list('ws_abc123');
 
 // Revoke
@@ -198,10 +197,10 @@ const member = await airstore.members.create('ws_abc123', {
   role: 'member', // 'admin' | 'member' | 'viewer'
 });
 
-// List members
+// List
 const members = await airstore.members.list('ws_abc123');
 
-// Remove a member
+// Remove
 await airstore.members.del('ws_abc123', 'mem_abc123');
 ```
 
@@ -211,7 +210,7 @@ For interactive connection setup where users authorize via browser redirect:
 
 ```typescript
 // Create an OAuth session
-const session = await airstore.oauth.createSession('ws_abc123', {
+const session = await airstore.oauth.createSession({
   integrationType: 'gmail',
   returnTo: 'https://myapp.com/callback',
 });
@@ -257,10 +256,10 @@ Every method accepts an optional last argument for per-request overrides:
 
 ```typescript
 const ws = await airstore.workspaces.list({
-  timeout: 10_000,       // override timeout
-  maxRetries: 5,         // override retries
-  signal: controller.signal, // abort signal
-  headers: { 'X-Trace-Id': 'abc' }, // extra headers
+  timeout: 10_000,
+  maxRetries: 5,
+  signal: controller.signal,
+  headers: { 'X-Trace-Id': 'abc' },
 });
 ```
 
@@ -269,7 +268,11 @@ const ws = await airstore.workspaces.list({
 The SDK throws typed errors for easy programmatic handling:
 
 ```typescript
-import { AuthenticationError, NotFoundError, RateLimitError } from '@airstore/sdk';
+import {
+  AuthenticationError,
+  NotFoundError,
+  RateLimitError,
+} from '@airstore/sdk';
 
 try {
   await airstore.workspaces.retrieve('ws_nonexistent');
@@ -313,12 +316,25 @@ console.log(ws.lastResponse.headers);     // Headers object
 
 ## Automatic Retries
 
-The SDK automatically retries failed requests for transient errors (408, 409, 429, 500, 502, 503, 504) with exponential backoff and jitter. The `Retry-After` header is respected when present.
+The SDK automatically retries on transient errors (408, 409, 429, 500, 502, 503, 504) with exponential backoff and jitter. The `Retry-After` header is respected when present.
+
+## Raw Requests
+
+For endpoints not yet covered by the SDK, use the escape hatch:
+
+```typescript
+const response = await airstore.rawRequest('POST', '/some/new/endpoint', {
+  body: { key: 'value' },
+  timeout: 5_000,
+});
+const data = await response.json();
+```
 
 ## Requirements
 
 - Node.js 18+ (uses native `fetch`)
 - TypeScript 5.0+ (for type-only imports)
+- Zero runtime dependencies
 
 ## License
 

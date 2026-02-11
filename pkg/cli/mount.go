@@ -151,10 +151,10 @@ func runMount(cmd *cobra.Command, args []string) error {
 		fs.RegisterVNode(vnode.NewConfigVNode(effectiveGateway, authToken))
 		fs.RegisterVNode(vnode.NewToolsVNode(effectiveGateway, authToken, shim))
 		fs.RegisterVNode(vnode.NewSourcesVNode(conn, authToken))
-		fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, authToken, types.PathSkills))  // /Skills
-		fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, authToken, types.PathMemory))  // /Memory
-		fs.RegisterVNode(vnode.NewTasksVNodeGRPC(conn, authToken))                      // /Tasks
-		fs.SetStorageFallback(vnode.NewStorageVNode(conn, authToken))                   // user folders
+		fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, authToken, types.PathSkills)) // /Skills
+		fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, authToken, types.PathMemory)) // /Memory
+		fs.RegisterVNode(vnode.NewTasksVNodeGRPC(conn, authToken))                     // /Tasks
+		fs.SetStorageFallback(vnode.NewStorageVNode(conn, authToken))                  // user folders
 
 		return nil
 	})
