@@ -30,6 +30,7 @@ var (
 	configPath   string
 	mountUID     uint32
 	mountGID     uint32
+	mountBackend string
 )
 
 var mountCmd = &cobra.Command{
@@ -50,6 +51,7 @@ func init() {
 	mountCmd.Flags().StringVarP(&configPath, "config", "c", "", "Config file (for local mode)")
 	mountCmd.Flags().Uint32Var(&mountUID, "uid", 0, "File owner UID (default: current user)")
 	mountCmd.Flags().Uint32Var(&mountGID, "gid", 0, "File owner GID (default: current user)")
+	mountCmd.Flags().StringVar(&mountBackend, "backend", "", "Mount backend: fuse, nfs, or auto-detect (default)")
 	rootCmd.AddCommand(mountCmd)
 }
 
@@ -123,6 +125,7 @@ func runMount(cmd *cobra.Command, args []string) error {
 			Verbose:     mountVerbose,
 			Uid:         uidPtr,
 			Gid:         gidPtr,
+			Backend:     mountBackend,
 		})
 		if err != nil {
 			return err
@@ -251,15 +254,19 @@ func printMountStatus(mount, gateway, mode string) {
 }
 
 func unmount(path string) {
-	if runtime.GOOS != "darwin" {
-		return
-	}
-
-	cmds := [][]string{
-		{"diskutil", "unmount", "force", path},
-		{"diskutil", "unmount", path},
-		{"umount", path},
-		{"umount", "-f", path},
+	var cmds [][]string
+	if runtime.GOOS == "darwin" {
+		cmds = [][]string{
+			{"diskutil", "unmount", "force", path},
+			{"diskutil", "unmount", path},
+			{"umount", path},
+			{"umount", "-f", path},
+		}
+	} else {
+		cmds = [][]string{
+			{"umount", path},
+			{"umount", "-f", path},
+		}
 	}
 
 	for _, args := range cmds {

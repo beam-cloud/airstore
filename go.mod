@@ -21,8 +21,8 @@ require (
 	github.com/charmbracelet/huh/spinner v0.0.0-20260202112050-cf338358ac5c
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/coreos/go-iptables v0.8.0
+	github.com/go-git/go-billy/v5 v5.7.0
 	github.com/go-viper/mapstructure/v2 v2.0.0
-	github.com/godbus/dbus/v5 v5.1.0
 	github.com/google/uuid v1.6.0
 	github.com/hanwen/go-fuse/v2 v2.9.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
@@ -42,6 +42,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	github.com/vishvananda/netlink v1.3.1
 	github.com/vishvananda/netns v0.0.5
+	github.com/willscott/go-nfs v0.0.3
 	github.com/winfsp/cgofuse v1.6.1-0.20250813110601-7d90b0992471
 	golang.org/x/crypto v0.45.0
 	golang.org/x/oauth2 v0.32.0
@@ -96,6 +97,7 @@ require (
 	github.com/go-openapi/jsonpointer v0.19.6 // indirect
 	github.com/go-openapi/jsonreference v0.20.2 // indirect
 	github.com/go-openapi/swag v0.22.3 // indirect
+	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/gofrs/flock v0.8.1 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang-jwt/jwt v3.2.2+incompatible // indirect
@@ -133,6 +135,7 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
+	github.com/rasky/go-xdr v0.0.0-20170124162913-1a41d1a06c93 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/sethvargo/go-retry v0.3.0 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
@@ -143,6 +146,7 @@ require (
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasttemplate v1.2.2 // indirect
 	github.com/vbatts/tar-split v0.11.6 // indirect
+	github.com/willscott/go-nfs-client v0.0.0-20240104095149-b44639837b00 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect

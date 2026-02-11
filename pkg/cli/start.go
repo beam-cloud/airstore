@@ -81,11 +81,18 @@ func spawn() error {
 		return nil
 	}
 
-	// Wait briefly for process to initialize and write PID
-	time.Sleep(200 * time.Millisecond)
+	// Poll for up to 5 seconds for process to initialize and write PID
+	var pid int
+	for i := 0; i < 25; i++ {
+		time.Sleep(200 * time.Millisecond)
+		pid = tray.ReadPID()
+		if pid != 0 && processExists(pid) {
+			break
+		}
+	}
 
 	// Verify it started
-	if pid := tray.ReadPID(); pid != 0 && processExists(pid) {
+	if pid != 0 && processExists(pid) {
 		cfg := tray.LoadConfig()
 		PrintSuccess("Started")
 		PrintKeyValue("PID", fmt.Sprintf("%d", pid))

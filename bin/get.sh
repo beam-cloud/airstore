@@ -96,6 +96,44 @@ install_fuse_t() {
     info "fuse-t installed successfully"
 }
 
+# Install NFS client utilities on Linux (needed when FUSE is unavailable)
+install_nfs_utils() {
+    OS=$(detect_os)
+    
+    if [ "$OS" != "linux" ]; then
+        return 0
+    fi
+    
+    # If FUSE is available, NFS fallback is not needed
+    if [ -e /dev/fuse ]; then
+        return 0
+    fi
+    
+    info "FUSE not available — checking for NFS client utilities..."
+    
+    if command -v mount.nfs >/dev/null 2>&1; then
+        info "NFS client utilities are installed"
+        return 0
+    fi
+    
+    warn "NFS client utilities not found (needed for mounting without FUSE)"
+    
+    if command -v apt-get >/dev/null 2>&1; then
+        info "Installing nfs-common..."
+        sudo apt-get update -qq && sudo apt-get install -y -qq nfs-common
+    elif command -v dnf >/dev/null 2>&1; then
+        info "Installing nfs-utils..."
+        sudo dnf install -y nfs-utils
+    elif command -v yum >/dev/null 2>&1; then
+        info "Installing nfs-utils..."
+        sudo yum install -y nfs-utils
+    else
+        warn "Could not auto-install NFS utilities. Please install manually:"
+        warn "  Debian/Ubuntu: sudo apt install nfs-common"
+        warn "  RHEL/Fedora:   sudo dnf install nfs-utils"
+    fi
+}
+
 # Detect OS
 detect_os() {
     case "$(uname -s)" in
@@ -208,6 +246,9 @@ main() {
     
     # Install fuse-t on macOS
     install_fuse_t
+
+    # Install NFS utilities on Linux (fallback when FUSE is unavailable)
+    install_nfs_utils
     
     echo ""
     info "Installation complete!"
