@@ -37,15 +37,18 @@ func (r *PostgresBackend) CreateToken(ctx context.Context, workspaceId, memberId
 		tokenType = types.TokenTypeWorkspaceMember
 	}
 
+	// Store first 16 chars as a lookup prefix for fast validation
+	prefix := raw[:16]
+
 	query := `
-		INSERT INTO token (workspace_id, member_id, token_hash, name, expires_at, token_type)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		RETURNING id, external_id, workspace_id, member_id, token_type, token_hash, name, pool_name, expires_at, created_at, last_used_at
+		INSERT INTO token (workspace_id, member_id, token_hash, token_prefix, name, expires_at, token_type)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		RETURNING id, external_id, workspace_id, member_id, token_type, token_hash, token_prefix, name, pool_name, expires_at, created_at, last_used_at
 	`
 
 	var t types.Token
-	err = r.db.QueryRowContext(ctx, query, workspaceId, memberId, string(hash), name, expiresAt, tokenType).Scan(
-		&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.Name, &t.PoolName, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt,
+	err = r.db.QueryRowContext(ctx, query, workspaceId, memberId, string(hash), prefix, name, expiresAt, tokenType).Scan(
+		&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.TokenPrefix, &t.Name, &t.PoolName, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt,
 	)
 	if err != nil {
 		return nil, "", fmt.Errorf("create token: %w", err)
@@ -65,15 +68,17 @@ func (r *PostgresBackend) CreateWorkerToken(ctx context.Context, name string, po
 		return nil, "", fmt.Errorf("hash token: %w", err)
 	}
 
+	prefix := raw[:16]
+
 	query := `
-		INSERT INTO token (workspace_id, member_id, token_hash, name, pool_name, expires_at, token_type)
-		VALUES (NULL, NULL, $1, $2, $3, $4, 'worker')
-		RETURNING id, external_id, workspace_id, member_id, token_type, token_hash, name, pool_name, expires_at, created_at, last_used_at
+		INSERT INTO token (workspace_id, member_id, token_hash, token_prefix, name, pool_name, expires_at, token_type)
+		VALUES (NULL, NULL, $1, $2, $3, $4, $5, 'worker')
+		RETURNING id, external_id, workspace_id, member_id, token_type, token_hash, token_prefix, name, pool_name, expires_at, created_at, last_used_at
 	`
 
 	var t types.Token
-	err = r.db.QueryRowContext(ctx, query, string(hash), name, poolName, expiresAt).Scan(
-		&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.Name, &t.PoolName, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt,
+	err = r.db.QueryRowContext(ctx, query, string(hash), prefix, name, poolName, expiresAt).Scan(
+		&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.TokenPrefix, &t.Name, &t.PoolName, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt,
 	)
 	if err != nil {
 		return nil, "", fmt.Errorf("create worker token: %w", err)
@@ -94,15 +99,17 @@ func (r *PostgresBackend) CreateWorkspaceServiceToken(ctx context.Context, works
 		return nil, "", fmt.Errorf("hash token: %w", err)
 	}
 
+	prefix := raw[:16]
+
 	query := `
-		INSERT INTO token (workspace_id, member_id, token_hash, name, expires_at, token_type)
-		VALUES ($1, NULL, $2, $3, NULL, 'workspace_service')
-		RETURNING id, external_id, workspace_id, member_id, token_type, token_hash, name, pool_name, expires_at, created_at, last_used_at
+		INSERT INTO token (workspace_id, member_id, token_hash, token_prefix, name, expires_at, token_type)
+		VALUES ($1, NULL, $2, $3, $4, NULL, 'workspace_service')
+		RETURNING id, external_id, workspace_id, member_id, token_type, token_hash, token_prefix, name, pool_name, expires_at, created_at, last_used_at
 	`
 
 	var t types.Token
-	err = r.db.QueryRowContext(ctx, query, workspaceId, string(hash), name).Scan(
-		&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.Name, &t.PoolName, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt,
+	err = r.db.QueryRowContext(ctx, query, workspaceId, string(hash), prefix, name).Scan(
+		&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.TokenPrefix, &t.Name, &t.PoolName, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt,
 	)
 	if err != nil {
 		return nil, "", fmt.Errorf("create workspace service token: %w", err)
@@ -136,6 +143,22 @@ func (r *PostgresBackend) ValidateToken(ctx context.Context, rawToken string) (*
 }
 
 func (r *PostgresBackend) validateMemberToken(ctx context.Context, rawToken string) (*types.TokenValidationResult, error) {
+	// Try fast path: use token_prefix for indexed lookup (O(1) instead of O(n) bcrypt)
+	if len(rawToken) >= 16 {
+		result, err := r.validateMemberTokenByPrefix(ctx, rawToken)
+		if err == nil && result != nil {
+			return result, nil
+		}
+	}
+
+	// Fallback: scan all tokens for legacy tokens without prefix
+	return r.validateMemberTokenScan(ctx, rawToken)
+}
+
+// validateMemberTokenByPrefix uses the token_prefix column for O(1) lookup.
+func (r *PostgresBackend) validateMemberTokenByPrefix(ctx context.Context, rawToken string) (*types.TokenValidationResult, error) {
+	prefix := rawToken[:16]
+
 	query := `
 		SELECT 
 			t.id, t.token_hash, t.expires_at, t.token_type,
@@ -144,7 +167,74 @@ func (r *PostgresBackend) validateMemberToken(ctx context.Context, rawToken stri
 		FROM token t
 		JOIN workspace w ON t.workspace_id = w.id
 		JOIN workspace_member m ON t.member_id = m.id
-		WHERE (t.expires_at IS NULL OR t.expires_at > CURRENT_TIMESTAMP)
+		WHERE t.token_prefix = $1
+		  AND t.token_type = 'workspace_member'
+		  AND (t.expires_at IS NULL OR t.expires_at > CURRENT_TIMESTAMP)
+	`
+
+	var (
+		tokenId       uint
+		tokenHash     string
+		expiresAt     sql.NullTime
+		tokenType     types.TokenType
+		workspaceId   uint
+		workspaceExt  string
+		workspaceName string
+		memberId      uint
+		memberExt     string
+		memberEmail   string
+		memberRole    types.MemberRole
+	)
+
+	err := r.db.QueryRowContext(ctx, query, prefix).Scan(
+		&tokenId, &tokenHash, &expiresAt, &tokenType,
+		&workspaceId, &workspaceExt, &workspaceName,
+		&memberId, &memberExt, &memberEmail, &memberRole,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if bcrypt.CompareHashAndPassword([]byte(tokenHash), []byte(rawToken)) != nil {
+		return nil, fmt.Errorf("invalid token")
+	}
+
+	if expiresAt.Valid && expiresAt.Time.Before(time.Now()) {
+		return nil, fmt.Errorf("token expired")
+	}
+
+	go func(id uint) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		r.db.ExecContext(ctx, `UPDATE token SET last_used_at = CURRENT_TIMESTAMP WHERE id = $1`, id)
+	}(tokenId)
+
+	return &types.TokenValidationResult{
+		TokenType:     tokenType,
+		TokenId:       tokenId,
+		WorkspaceId:   workspaceId,
+		WorkspaceExt:  workspaceExt,
+		WorkspaceName: workspaceName,
+		MemberId:      memberId,
+		MemberExt:     memberExt,
+		MemberEmail:   memberEmail,
+		MemberRole:    memberRole,
+	}, nil
+}
+
+// validateMemberTokenScan is the legacy fallback that scans all tokens.
+// Used for tokens created before the token_prefix column was added.
+func (r *PostgresBackend) validateMemberTokenScan(ctx context.Context, rawToken string) (*types.TokenValidationResult, error) {
+	query := `
+		SELECT 
+			t.id, t.token_hash, t.expires_at, t.token_type,
+			w.id, w.external_id, w.name,
+			m.id, m.external_id, m.email, m.role
+		FROM token t
+		JOIN workspace w ON t.workspace_id = w.id
+		JOIN workspace_member m ON t.member_id = m.id
+		WHERE t.token_prefix IS NULL
+		  AND (t.expires_at IS NULL OR t.expires_at > CURRENT_TIMESTAMP)
 		  AND t.token_type = 'workspace_member'
 	`
 
@@ -209,13 +299,81 @@ func (r *PostgresBackend) validateMemberToken(ctx context.Context, rawToken stri
 
 // validateServiceToken validates workspace service tokens (workspace-scoped, no member).
 func (r *PostgresBackend) validateServiceToken(ctx context.Context, rawToken string) (*types.TokenValidationResult, error) {
+	// Try fast path: use token_prefix for indexed lookup
+	if len(rawToken) >= 16 {
+		result, err := r.validateServiceTokenByPrefix(ctx, rawToken)
+		if err == nil && result != nil {
+			return result, nil
+		}
+	}
+
+	// Fallback: scan legacy tokens without prefix
+	return r.validateServiceTokenScan(ctx, rawToken)
+}
+
+func (r *PostgresBackend) validateServiceTokenByPrefix(ctx context.Context, rawToken string) (*types.TokenValidationResult, error) {
+	prefix := rawToken[:16]
+
 	query := `
 		SELECT
 			t.id, t.token_hash, t.expires_at,
 			w.id, w.external_id, w.name
 		FROM token t
 		JOIN workspace w ON t.workspace_id = w.id
-		WHERE (t.expires_at IS NULL OR t.expires_at > CURRENT_TIMESTAMP)
+		WHERE t.token_prefix = $1
+		  AND t.token_type = 'workspace_service'
+		  AND (t.expires_at IS NULL OR t.expires_at > CURRENT_TIMESTAMP)
+	`
+
+	var (
+		tokenId       uint
+		tokenHash     string
+		expiresAt     sql.NullTime
+		workspaceId   uint
+		workspaceExt  string
+		workspaceName string
+	)
+
+	err := r.db.QueryRowContext(ctx, query, prefix).Scan(
+		&tokenId, &tokenHash, &expiresAt,
+		&workspaceId, &workspaceExt, &workspaceName,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if bcrypt.CompareHashAndPassword([]byte(tokenHash), []byte(rawToken)) != nil {
+		return nil, fmt.Errorf("invalid token")
+	}
+
+	if expiresAt.Valid && expiresAt.Time.Before(time.Now()) {
+		return nil, fmt.Errorf("token expired")
+	}
+
+	go func(id uint) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		r.db.ExecContext(ctx, `UPDATE token SET last_used_at = CURRENT_TIMESTAMP WHERE id = $1`, id)
+	}(tokenId)
+
+	return &types.TokenValidationResult{
+		TokenType:     types.TokenTypeWorkspaceService,
+		TokenId:       tokenId,
+		WorkspaceId:   workspaceId,
+		WorkspaceExt:  workspaceExt,
+		WorkspaceName: workspaceName,
+	}, nil
+}
+
+func (r *PostgresBackend) validateServiceTokenScan(ctx context.Context, rawToken string) (*types.TokenValidationResult, error) {
+	query := `
+		SELECT
+			t.id, t.token_hash, t.expires_at,
+			w.id, w.external_id, w.name
+		FROM token t
+		JOIN workspace w ON t.workspace_id = w.id
+		WHERE t.token_prefix IS NULL
+		  AND (t.expires_at IS NULL OR t.expires_at > CURRENT_TIMESTAMP)
 		  AND t.token_type = 'workspace_service'
 	`
 
@@ -269,10 +427,71 @@ func (r *PostgresBackend) validateServiceToken(ctx context.Context, rawToken str
 }
 
 func (r *PostgresBackend) validateWorkerToken(ctx context.Context, rawToken string) (*types.TokenValidationResult, error) {
+	// Try fast path: use token_prefix for indexed lookup
+	if len(rawToken) >= 16 {
+		result, err := r.validateWorkerTokenByPrefix(ctx, rawToken)
+		if err == nil && result != nil {
+			return result, nil
+		}
+	}
+
+	// Fallback: scan legacy tokens without prefix
+	return r.validateWorkerTokenScan(ctx, rawToken)
+}
+
+func (r *PostgresBackend) validateWorkerTokenByPrefix(ctx context.Context, rawToken string) (*types.TokenValidationResult, error) {
+	prefix := rawToken[:16]
+
 	query := `
 		SELECT t.id, t.token_hash, t.expires_at, t.pool_name
 		FROM token t
-		WHERE t.token_type = 'worker'
+		WHERE t.token_prefix = $1
+		  AND t.token_type = 'worker'
+		  AND (t.expires_at IS NULL OR t.expires_at > CURRENT_TIMESTAMP)
+	`
+
+	var (
+		tokenId   uint
+		tokenHash string
+		expiresAt sql.NullTime
+		poolName  sql.NullString
+	)
+
+	err := r.db.QueryRowContext(ctx, query, prefix).Scan(&tokenId, &tokenHash, &expiresAt, &poolName)
+	if err != nil {
+		return nil, err
+	}
+
+	if bcrypt.CompareHashAndPassword([]byte(tokenHash), []byte(rawToken)) != nil {
+		return nil, fmt.Errorf("invalid token")
+	}
+
+	if expiresAt.Valid && expiresAt.Time.Before(time.Now()) {
+		return nil, fmt.Errorf("token expired")
+	}
+
+	go func(id uint) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		r.db.ExecContext(ctx, `UPDATE token SET last_used_at = CURRENT_TIMESTAMP WHERE id = $1`, id)
+	}(tokenId)
+
+	result := &types.TokenValidationResult{
+		TokenType: types.TokenTypeWorker,
+		TokenId:   tokenId,
+	}
+	if poolName.Valid {
+		result.PoolName = poolName.String
+	}
+	return result, nil
+}
+
+func (r *PostgresBackend) validateWorkerTokenScan(ctx context.Context, rawToken string) (*types.TokenValidationResult, error) {
+	query := `
+		SELECT t.id, t.token_hash, t.expires_at, t.pool_name
+		FROM token t
+		WHERE t.token_prefix IS NULL
+		  AND t.token_type = 'worker'
 		  AND (t.expires_at IS NULL OR t.expires_at > CURRENT_TIMESTAMP)
 	`
 
@@ -368,13 +587,13 @@ func (r *PostgresBackend) AuthorizeToken(ctx context.Context, rawToken string) (
 
 func (r *PostgresBackend) GetToken(ctx context.Context, externalId string) (*types.Token, error) {
 	query := `
-		SELECT id, external_id, workspace_id, member_id, token_type, token_hash, name, pool_name, expires_at, created_at, last_used_at
+		SELECT id, external_id, workspace_id, member_id, token_type, token_hash, token_prefix, name, pool_name, expires_at, created_at, last_used_at
 		FROM token WHERE external_id = $1
 	`
 
 	var t types.Token
 	err := r.db.QueryRowContext(ctx, query, externalId).Scan(
-		&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.Name, &t.PoolName, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt,
+		&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.TokenPrefix, &t.Name, &t.PoolName, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -387,7 +606,7 @@ func (r *PostgresBackend) GetToken(ctx context.Context, externalId string) (*typ
 
 func (r *PostgresBackend) ListTokens(ctx context.Context, workspaceId uint) ([]types.Token, error) {
 	query := `
-		SELECT id, external_id, workspace_id, member_id, token_type, token_hash, name, pool_name, expires_at, created_at, last_used_at
+		SELECT id, external_id, workspace_id, member_id, token_type, token_hash, token_prefix, name, pool_name, expires_at, created_at, last_used_at
 		FROM token WHERE workspace_id = $1 ORDER BY created_at DESC
 	`
 
@@ -400,7 +619,7 @@ func (r *PostgresBackend) ListTokens(ctx context.Context, workspaceId uint) ([]t
 	var tokens []types.Token
 	for rows.Next() {
 		var t types.Token
-		if err := rows.Scan(&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.Name, &t.PoolName, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt); err != nil {
+		if err := rows.Scan(&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.TokenPrefix, &t.Name, &t.PoolName, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt); err != nil {
 			return nil, fmt.Errorf("scan token: %w", err)
 		}
 		tokens = append(tokens, t)
@@ -411,7 +630,7 @@ func (r *PostgresBackend) ListTokens(ctx context.Context, workspaceId uint) ([]t
 // ListWorkerTokens returns all worker tokens (cluster-level, not workspace-scoped)
 func (r *PostgresBackend) ListWorkerTokens(ctx context.Context) ([]types.Token, error) {
 	query := `
-		SELECT id, external_id, workspace_id, member_id, token_type, token_hash, name, pool_name, expires_at, created_at, last_used_at
+		SELECT id, external_id, workspace_id, member_id, token_type, token_hash, token_prefix, name, pool_name, expires_at, created_at, last_used_at
 		FROM token WHERE token_type = 'worker' ORDER BY created_at DESC
 	`
 
@@ -424,7 +643,7 @@ func (r *PostgresBackend) ListWorkerTokens(ctx context.Context) ([]types.Token, 
 	var tokens []types.Token
 	for rows.Next() {
 		var t types.Token
-		if err := rows.Scan(&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.Name, &t.PoolName, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt); err != nil {
+		if err := rows.Scan(&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.TokenPrefix, &t.Name, &t.PoolName, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt); err != nil {
 			return nil, fmt.Errorf("scan worker token: %w", err)
 		}
 		tokens = append(tokens, t)
