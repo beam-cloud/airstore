@@ -35,6 +35,7 @@ type Token struct {
 	MemberId    *uint      `db:"member_id" json:"member_id,omitempty"`
 	TokenType   TokenType  `db:"token_type" json:"token_type"`
 	TokenHash   string     `db:"token_hash" json:"-"`
+	TokenPrefix *string    `db:"token_prefix" json:"-"`
 	Name        string     `db:"name" json:"name"`
 	PoolName    *string    `db:"pool_name" json:"pool_name,omitempty"`
 	ExpiresAt   *time.Time `db:"expires_at" json:"expires_at,omitempty"`
