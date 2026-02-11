@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/beam-cloud/airstore/pkg/oauth"
@@ -13,11 +14,11 @@ import (
 )
 
 const (
-	errMsgSessionInvalid  = "Invalid or expired OAuth session"
-	errMsgProviderConfig  = "Provider not configured"
-	errMsgNoAuthCode      = "Missing authorization code"
-	errMsgTokenExchange   = "Token exchange failed"
-	errMsgSaveConnection  = "Failed to save connection"
+	errMsgSessionInvalid = "Invalid or expired OAuth session"
+	errMsgProviderConfig = "Provider not configured"
+	errMsgNoAuthCode     = "Missing authorization code"
+	errMsgTokenExchange  = "Token exchange failed"
+	errMsgSaveConnection = "Failed to save connection"
 )
 
 // OAuthGroup handles OAuth endpoints for workspace integrations.
@@ -159,27 +160,42 @@ func (og *OAuthGroup) Callback(c echo.Context) error {
 		return renderErrorPage(c, errMsgSessionInvalid)
 	}
 
+	// returnToOrError redirects to the app root when ReturnTo is set
+	// (same-tab flow), otherwise falls back to the static error page.
+	returnToOrError := func(message string) error {
+		if session.ReturnTo != "" {
+			if u, err := url.Parse(session.ReturnTo); err == nil {
+				u.Path = "/"
+				u.RawQuery = ""
+				u.Fragment = ""
+				log.Warn().Str("session_id", session.ID).Str("error", message).Msg("oauth callback error, redirecting to UI")
+				return c.Redirect(http.StatusFound, u.String())
+			}
+		}
+		return renderErrorPage(c, message)
+	}
+
 	provider, err := og.registry.GetProvider(session.ProviderName)
 	if err != nil {
 		og.store.Fail(session.ID, err.Error())
-		return renderErrorPage(c, errMsgProviderConfig)
+		return returnToOrError(errMsgProviderConfig)
 	}
 
 	if errParam != "" {
 		og.store.Fail(session.ID, provider.Name()+": "+errParam)
-		return renderErrorPage(c, fmt.Sprintf("%s authorization failed: %s", provider.Name(), errParam))
+		return returnToOrError(fmt.Sprintf("%s authorization failed: %s", provider.Name(), errParam))
 	}
 
 	if code == "" {
 		og.store.Fail(session.ID, errMsgNoAuthCode)
-		return renderErrorPage(c, errMsgNoAuthCode)
+		return returnToOrError(errMsgNoAuthCode)
 	}
 
 	creds, err := provider.Exchange(c.Request().Context(), code, session.IntegrationType)
 	if err != nil {
 		og.store.Fail(session.ID, err.Error())
 		log.Error().Err(err).Str("session_id", session.ID).Str("provider", provider.Name()).Msg("oauth token exchange failed")
-		return renderErrorPage(c, errMsgTokenExchange)
+		return returnToOrError(errMsgTokenExchange)
 	}
 
 	conn, err := og.backend.SaveConnection(
@@ -193,7 +209,7 @@ func (og *OAuthGroup) Callback(c echo.Context) error {
 	if err != nil {
 		og.store.Fail(session.ID, err.Error())
 		log.Error().Err(err).Str("session_id", session.ID).Msg("failed to save connection")
-		return renderErrorPage(c, errMsgSaveConnection)
+		return returnToOrError(errMsgSaveConnection)
 	}
 
 	og.store.Complete(session.ID, conn.ExternalId)
