@@ -17,7 +17,11 @@ import (
 )
 
 const tasksCacheTTL = 5 * time.Second
-const taskFileSentinelSize int64 = 10 << 20 // 10MB — must be large enough for FUSE/NFS to issue reads covering all content
+
+type cachedTaskContent struct {
+	data      []byte
+	expiresAt time.Time
+}
 
 // TasksVNode provides /tasks directory listing tasks as files.
 // Each task appears as a file named {task_id}.task
@@ -32,19 +36,27 @@ type TasksVNode struct {
 	grpcConn    *grpc.ClientConn
 	token       string
 	bearerToken string // precomputed auth header value
+	logsFetcher func(ctx context.Context, taskId string) string
 
 	// Cache for task list
 	cacheMu     sync.RWMutex
 	cachedTasks []*types.Task
 	cacheExpiry time.Time
+
+	// Cache for rendered task file contents.
+	contentMu    sync.RWMutex
+	contentCache map[string]*cachedTaskContent
+	sizeCache    map[string]int64 // last-known content size, guarded by contentMu
 }
 
 // NewTasksVNode creates a TasksVNode with database access for task listing.
 // Use this when the backend is available (e.g., in gateway).
 func NewTasksVNode(backend repository.BackendRepository, token string) *TasksVNode {
 	return &TasksVNode{
-		backend: backend,
-		token:   token,
+		backend:      backend,
+		token:        token,
+		contentCache: make(map[string]*cachedTaskContent),
+		sizeCache:    make(map[string]int64),
 	}
 }
 
@@ -52,10 +64,13 @@ func NewTasksVNode(backend repository.BackendRepository, token string) *TasksVNo
 // Use this for CLI mounts where we don't have direct DB access.
 func NewTasksVNodeGRPC(conn *grpc.ClientConn, token string) *TasksVNode {
 	t := &TasksVNode{
-		grpcConn:    conn,
-		token:       token,
-		bearerToken: BearerToken(token),
+		grpcConn:     conn,
+		token:        token,
+		bearerToken:  BearerToken(token),
+		contentCache: make(map[string]*cachedTaskContent),
+		sizeCache:    make(map[string]int64),
 	}
+	t.logsFetcher = t.fetchTaskLogsGRPC
 	// Pre-warm cache in background
 	go t.warmCache()
 	return t
@@ -244,6 +259,83 @@ func (t *TasksVNode) fetchTaskLogsGRPC(ctx context.Context, taskId string) strin
 	return sb.String()
 }
 
+func (t *TasksVNode) getCachedTaskContent(taskId string) ([]byte, bool) {
+	t.contentMu.RLock()
+	cached := t.contentCache[taskId]
+	t.contentMu.RUnlock()
+	if cached == nil || time.Now().After(cached.expiresAt) {
+		return nil, false
+	}
+	return cached.data, true
+}
+
+func (t *TasksVNode) setCachedTaskContent(taskId string, data []byte) {
+	t.contentMu.Lock()
+	if t.contentCache == nil {
+		t.contentCache = make(map[string]*cachedTaskContent)
+	}
+	t.contentCache[taskId] = &cachedTaskContent{
+		data:      data,
+		expiresAt: time.Now().Add(tasksCacheTTL),
+	}
+	if t.sizeCache == nil {
+		t.sizeCache = make(map[string]int64)
+	}
+	t.sizeCache[taskId] = int64(len(data))
+	t.contentMu.Unlock()
+}
+
+// getLastKnownSize returns the last-known content size for a task, or 0 if unknown.
+func (t *TasksVNode) getLastKnownSize(taskId string) int64 {
+	t.contentMu.RLock()
+	s := t.sizeCache[taskId]
+	t.contentMu.RUnlock()
+	return s
+}
+
+func (t *TasksVNode) renderTaskContent(ctx context.Context, task *types.Task) []byte {
+	// Build task content: task info + logs
+	var content strings.Builder
+	content.WriteString(fmt.Sprintf("Task: %s\n", task.ExternalId))
+	content.WriteString(fmt.Sprintf("Status: %s\n", task.Status))
+	if task.Prompt != "" {
+		content.WriteString(fmt.Sprintf("Prompt: %s\n", task.Prompt))
+	}
+	content.WriteString(fmt.Sprintf("Created: %s\n", task.CreatedAt.Format(time.RFC3339)))
+	if task.StartedAt != nil {
+		content.WriteString(fmt.Sprintf("Started: %s\n", task.StartedAt.Format(time.RFC3339)))
+	}
+	if task.FinishedAt != nil {
+		content.WriteString(fmt.Sprintf("Finished: %s\n", task.FinishedAt.Format(time.RFC3339)))
+	}
+	if task.ExitCode != nil {
+		content.WriteString(fmt.Sprintf("Exit Code: %d\n", *task.ExitCode))
+	}
+	if task.Error != "" {
+		content.WriteString(fmt.Sprintf("Error: %s\n", task.Error))
+	}
+	content.WriteString("\n--- Output ---\n")
+
+	// Get logs via gRPC (reads from S2)
+	if t.logsFetcher != nil {
+		logs := t.logsFetcher(ctx, task.ExternalId)
+		content.WriteString(logs)
+	} else {
+		content.WriteString("(logs available via API)\n")
+	}
+
+	return []byte(content.String())
+}
+
+func (t *TasksVNode) getTaskContent(ctx context.Context, task *types.Task) []byte {
+	if data, ok := t.getCachedTaskContent(task.ExternalId); ok {
+		return data
+	}
+	data := t.renderTaskContent(ctx, task)
+	t.setCachedTaskContent(task.ExternalId, data)
+	return data
+}
+
 // pbToTask converts a proto Task to a types.Task
 func pbToTask(pt *pb.Task) *types.Task {
 	task := &types.Task{
@@ -301,8 +393,15 @@ func (t *TasksVNode) Getattr(path string) (*FileInfo, error) {
 		return nil, err
 	}
 
+	size := int64(0)
+	if data, ok := t.getCachedTaskContent(task.ExternalId); ok {
+		size = int64(len(data))
+	} else if s := t.getLastKnownSize(task.ExternalId); s > 0 {
+		size = s
+	}
+
 	// Task file - return file info
-	info := NewFileInfo(PathIno(path), taskFileSentinelSize, 0644)
+	info := NewFileInfo(PathIno(path), size, 0644)
 	if task.CreatedAt.Unix() > 0 {
 		info.Mtime = task.CreatedAt
 		info.Ctime = task.CreatedAt
@@ -328,11 +427,12 @@ func (t *TasksVNode) Readdir(path string) ([]DirEntry, error) {
 	for _, task := range tasks {
 		name := taskFilename(task.ExternalId)
 		mtime := task.CreatedAt.Unix()
+		data := t.getTaskContent(ctx, task)
 		entries = append(entries, DirEntry{
 			Name:  name,
 			Mode:  syscall.S_IFREG | 0644,
 			Ino:   PathIno(TasksPath + "/" + name),
-			Size:  taskFileSentinelSize,
+			Size:  int64(len(data)),
 			Mtime: mtime,
 		})
 	}
@@ -377,37 +477,7 @@ func (t *TasksVNode) Read(path string, buf []byte, off int64, fh FileHandle) (in
 		return 0, err
 	}
 
-	// Build task content: task info + logs
-	var content strings.Builder
-	content.WriteString(fmt.Sprintf("Task: %s\n", task.ExternalId))
-	content.WriteString(fmt.Sprintf("Status: %s\n", task.Status))
-	if task.Prompt != "" {
-		content.WriteString(fmt.Sprintf("Prompt: %s\n", task.Prompt))
-	}
-	content.WriteString(fmt.Sprintf("Created: %s\n", task.CreatedAt.Format(time.RFC3339)))
-	if task.StartedAt != nil {
-		content.WriteString(fmt.Sprintf("Started: %s\n", task.StartedAt.Format(time.RFC3339)))
-	}
-	if task.FinishedAt != nil {
-		content.WriteString(fmt.Sprintf("Finished: %s\n", task.FinishedAt.Format(time.RFC3339)))
-	}
-	if task.ExitCode != nil {
-		content.WriteString(fmt.Sprintf("Exit Code: %d\n", *task.ExitCode))
-	}
-	if task.Error != "" {
-		content.WriteString(fmt.Sprintf("Error: %s\n", task.Error))
-	}
-	content.WriteString("\n--- Output ---\n")
-
-	// Get logs via gRPC (reads from S2)
-	if t.grpcConn != nil {
-		logs := t.fetchTaskLogsGRPC(ctx, task.ExternalId)
-		content.WriteString(logs)
-	} else {
-		content.WriteString("(logs available via API)\n")
-	}
-
-	data := []byte(content.String())
+	data := t.getTaskContent(ctx, task)
 
 	// Handle offset
 	if off >= int64(len(data)) {
