@@ -378,10 +378,13 @@ func (t *TasksVNode) Getattr(path string) (*FileInfo, error) {
 		return nil, err
 	}
 
-	data := t.getTaskContent(ctx, task)
+	size := int64(0)
+	if data, ok := t.getCachedTaskContent(task.ExternalId); ok {
+		size = int64(len(data))
+	}
 
 	// Task file - return file info
-	info := NewFileInfo(PathIno(path), int64(len(data)), 0644)
+	info := NewFileInfo(PathIno(path), size, 0644)
 	if task.CreatedAt.Unix() > 0 {
 		info.Mtime = task.CreatedAt
 		info.Ctime = task.CreatedAt
