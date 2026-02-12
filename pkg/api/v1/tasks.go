@@ -10,6 +10,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 )
 
@@ -33,6 +34,7 @@ type CreateTaskRequest struct {
 
 type TaskResponse struct {
 	ExternalID  string            `json:"external_id"`
+	Name        string            `json:"name"`
 	WorkspaceID string            `json:"workspace_id"`
 	Status      string            `json:"status"`
 	Prompt      string            `json:"prompt,omitempty"`
@@ -203,11 +205,19 @@ func (g *TasksGroup) ListTasks(c echo.Context) error {
 	return SuccessResponse(c, response)
 }
 
-// GetTask returns a task by external ID
+// GetTask returns a task by external ID or name
 func (g *TasksGroup) GetTask(c echo.Context) error {
-	externalId := c.Param("id")
+	id := c.Param("id")
+	ctx := c.Request().Context()
 
-	task, err := g.backend.GetTask(c.Request().Context(), externalId)
+	// Try UUID lookup first; if it doesn't look like a UUID, try name lookup
+	var task *types.Task
+	var err error
+	if _, uuidErr := uuid.Parse(id); uuidErr == nil {
+		task, err = g.backend.GetTask(ctx, id)
+	} else {
+		task, err = g.backend.GetTaskByName(ctx, id)
+	}
 	if err != nil {
 		if _, ok := err.(*types.ErrTaskNotFound); ok {
 			return ErrorResponse(c, http.StatusNotFound, "task not found")
@@ -395,6 +405,7 @@ func (w *sseWriter) sendStatus(task *types.Task) {
 func taskToResponse(t *types.Task, workspaceExternalId string) TaskResponse {
 	resp := TaskResponse{
 		ExternalID:  t.ExternalId,
+		Name:        t.Name,
 		WorkspaceID: workspaceExternalId,
 		Status:      string(t.Status),
 		Prompt:      t.Prompt,

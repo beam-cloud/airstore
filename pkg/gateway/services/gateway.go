@@ -13,6 +13,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/sources"
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
+	"github.com/google/uuid"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -520,7 +521,14 @@ func (s *GatewayService) GetTask(ctx context.Context, req *pb.GetTaskRequest) (*
 		return &pb.TaskResponse{Ok: false, Error: "authentication required"}, nil
 	}
 
-	task, err := s.backend.GetTask(ctx, req.Id)
+	// Try UUID lookup first; if it doesn't look like a UUID, try name lookup
+	var task *types.Task
+	var err error
+	if _, uuidErr := uuid.Parse(req.Id); uuidErr == nil {
+		task, err = s.backend.GetTask(ctx, req.Id)
+	} else {
+		task, err = s.backend.GetTaskByName(ctx, req.Id)
+	}
 	if err != nil {
 		if _, ok := err.(*types.ErrTaskNotFound); ok {
 			return &pb.TaskResponse{Ok: false, Error: "task not found"}, nil
@@ -630,6 +638,7 @@ func connectionToPb(c *types.IntegrationConnection, workspaceExtId string) *pb.C
 func taskToPb(t *types.Task) *pb.Task {
 	task := &pb.Task{
 		Id:        t.ExternalId,
+		Name:      t.Name,
 		Status:    string(t.Status),
 		Prompt:    t.Prompt,
 		Image:     t.Image,

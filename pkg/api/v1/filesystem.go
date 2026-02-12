@@ -1476,13 +1476,13 @@ func (g *FilesystemGroup) statTasks(c echo.Context, ctx context.Context, fullPat
 		return SuccessResponse(c, types.NewRootFolder(types.DirNameTasks, types.PathTasks).WithChildCount(childCount))
 	}
 
-	// Individual task file - extract task ID from filename
-	taskId := g.extractTaskId(relPath)
-	if taskId == "" {
+	// Individual task file - extract task name from filename
+	taskName := g.extractTaskName(relPath)
+	if taskName == "" {
 		return ErrorResponse(c, http.StatusNotFound, "task not found")
 	}
 
-	task, err := g.backend.GetTask(ctx, taskId)
+	task, err := g.lookupTask(ctx, taskName)
 	if err != nil {
 		if _, ok := err.(*types.ErrTaskNotFound); ok {
 			return ErrorResponse(c, http.StatusNotFound, "task not found")
@@ -1499,13 +1499,13 @@ func (g *FilesystemGroup) statTasks(c echo.Context, ctx context.Context, fullPat
 }
 
 func (g *FilesystemGroup) readTasks(c echo.Context, ctx context.Context, relPath string, offset, length int64) error {
-	// Extract task ID from filename
-	taskId := g.extractTaskId(relPath)
-	if taskId == "" {
+	// Extract task name from filename
+	taskName := g.extractTaskName(relPath)
+	if taskName == "" {
 		return ErrorResponse(c, http.StatusNotFound, "task not found")
 	}
 
-	task, err := g.backend.GetTask(ctx, taskId)
+	task, err := g.lookupTask(ctx, taskName)
 	if err != nil {
 		if _, ok := err.(*types.ErrTaskNotFound); ok {
 			return ErrorResponse(c, http.StatusNotFound, "task not found")
@@ -1539,6 +1539,9 @@ func (g *FilesystemGroup) readTasks(c echo.Context, ctx context.Context, relPath
 // taskToVirtualFile converts a Task to a VirtualFile for the filesystem API
 func (g *FilesystemGroup) taskToVirtualFile(task *types.Task) *types.VirtualFile {
 	name := task.ExternalId + ".task"
+	if task.Name != "" {
+		name = task.Name + ".task"
+	}
 	path := types.PathTasks + "/" + name
 
 	vf := types.NewVirtualFile(task.ExternalId, name, path, types.VFTypeTask)
@@ -1566,8 +1569,19 @@ func (g *FilesystemGroup) taskToVirtualFile(task *types.Task) *types.VirtualFile
 	return vf
 }
 
-// extractTaskId extracts the task ID from a filename like "abc123.task"
-func (g *FilesystemGroup) extractTaskId(relPath string) string {
+// lookupTask finds a task by name slug, falling back to external ID for backwards compatibility.
+func (g *FilesystemGroup) lookupTask(ctx context.Context, nameOrId string) (*types.Task, error) {
+	// Try name-based lookup first (covers new slug-based names)
+	task, err := g.backend.GetTaskByName(ctx, nameOrId)
+	if err == nil {
+		return task, nil
+	}
+	// Fall back to external ID lookup (covers old UUID-based names)
+	return g.backend.GetTask(ctx, nameOrId)
+}
+
+// extractTaskName extracts the task name (slug or UUID) from a filename like "fix-auth-bug-a1b2c3d4.task"
+func (g *FilesystemGroup) extractTaskName(relPath string) string {
 	// Remove leading slash if present
 	relPath = strings.TrimPrefix(relPath, "/")
 

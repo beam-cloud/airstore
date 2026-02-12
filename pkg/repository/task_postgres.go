@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/lib/pq"
 )
@@ -59,13 +60,19 @@ func (b *PostgresBackend) CreateTask(ctx context.Context, task *types.Task) erro
 		return fmt.Errorf("failed to create task: %w", err)
 	}
 
+	// Generate human-readable name from prompt/image + external ID
+	task.Name = common.GenerateTaskName(task.Prompt, task.Image, task.ExternalId)
+	if _, err := b.db.ExecContext(ctx, `UPDATE task SET name = $1 WHERE id = $2`, task.Name, task.Id); err != nil {
+		return fmt.Errorf("failed to set task name: %w", err)
+	}
+
 	return nil
 }
 
 // GetTask retrieves a task by external ID
 func (b *PostgresBackend) GetTask(ctx context.Context, externalId string) (*types.Task, error) {
 	query := `
-		SELECT id, external_id, workspace_id, created_by_member_id, status, prompt, image, entrypoint, env, 
+		SELECT id, external_id, name, workspace_id, created_by_member_id, status, prompt, image, entrypoint, env,
 		       exit_code, error, created_at, started_at, finished_at,
 		       hook_id, attempt, max_attempts
 		FROM task
@@ -78,7 +85,7 @@ func (b *PostgresBackend) GetTask(ctx context.Context, externalId string) (*type
 // GetTaskById retrieves a task by internal ID
 func (b *PostgresBackend) GetTaskById(ctx context.Context, id uint) (*types.Task, error) {
 	query := `
-		SELECT id, external_id, workspace_id, created_by_member_id, status, prompt, image, entrypoint, env, 
+		SELECT id, external_id, name, workspace_id, created_by_member_id, status, prompt, image, entrypoint, env,
 		       exit_code, error, created_at, started_at, finished_at,
 		       hook_id, attempt, max_attempts
 		FROM task
@@ -94,6 +101,7 @@ func (b *PostgresBackend) scanTask(row *sql.Row) (*types.Task, error) {
 	var entrypoint pq.StringArray
 	var envJSON []byte
 	var createdByMemberId sql.NullInt64
+	var name sql.NullString
 	var prompt sql.NullString
 	var exitCode sql.NullInt32
 	var errorMsg sql.NullString
@@ -103,6 +111,7 @@ func (b *PostgresBackend) scanTask(row *sql.Row) (*types.Task, error) {
 	err := row.Scan(
 		&task.Id,
 		&task.ExternalId,
+		&name,
 		&task.WorkspaceId,
 		&createdByMemberId,
 		&task.Status,
@@ -126,6 +135,9 @@ func (b *PostgresBackend) scanTask(row *sql.Row) (*types.Task, error) {
 		return nil, fmt.Errorf("failed to get task: %w", err)
 	}
 
+	if name.Valid {
+		task.Name = name.String
+	}
 	if createdByMemberId.Valid {
 		memberId := uint(createdByMemberId.Int64)
 		task.CreatedByMemberId = &memberId
@@ -162,7 +174,7 @@ func (b *PostgresBackend) scanTask(row *sql.Row) (*types.Task, error) {
 // Limited to 100 most recent tasks
 func (b *PostgresBackend) ListTasks(ctx context.Context, workspaceId uint) ([]*types.Task, error) {
 	query := `
-		SELECT id, external_id, workspace_id, created_by_member_id, status, prompt, image, entrypoint, env, 
+		SELECT id, external_id, name, workspace_id, created_by_member_id, status, prompt, image, entrypoint, env,
 		       exit_code, error, created_at, started_at, finished_at,
 		       hook_id, attempt, max_attempts
 		FROM task
@@ -183,6 +195,7 @@ func (b *PostgresBackend) ListTasks(ctx context.Context, workspaceId uint) ([]*t
 		var entrypoint pq.StringArray
 		var envJSON []byte
 		var createdByMemberId sql.NullInt64
+		var name sql.NullString
 		var prompt sql.NullString
 		var exitCode sql.NullInt32
 		var errorMsg sql.NullString
@@ -192,6 +205,7 @@ func (b *PostgresBackend) ListTasks(ctx context.Context, workspaceId uint) ([]*t
 		if err := rows.Scan(
 			&task.Id,
 			&task.ExternalId,
+			&name,
 			&task.WorkspaceId,
 			&createdByMemberId,
 			&task.Status,
@@ -211,6 +225,9 @@ func (b *PostgresBackend) ListTasks(ctx context.Context, workspaceId uint) ([]*t
 			return nil, fmt.Errorf("failed to scan task: %w", err)
 		}
 
+		if name.Valid {
+			task.Name = name.String
+		}
 		if createdByMemberId.Valid {
 			memberId := uint(createdByMemberId.Int64)
 			task.CreatedByMemberId = &memberId
@@ -426,6 +443,7 @@ func (b *PostgresBackend) GetRetryableTasks(ctx context.Context) ([]*types.Task,
 		var entrypoint pq.StringArray
 		var envJSON []byte
 		var createdByMemberId sql.NullInt64
+		var name sql.NullString
 		var prompt sql.NullString
 		var exitCode sql.NullInt32
 		var errorMsg sql.NullString
@@ -433,7 +451,7 @@ func (b *PostgresBackend) GetRetryableTasks(ctx context.Context) ([]*types.Task,
 		var hookId sql.NullInt64
 
 		if err := rows.Scan(
-			&task.Id, &task.ExternalId, &task.WorkspaceId, &createdByMemberId,
+			&task.Id, &task.ExternalId, &name, &task.WorkspaceId, &createdByMemberId,
 			&task.Status, &prompt, &task.Image, &entrypoint, &envJSON,
 			&exitCode, &errorMsg, &task.CreatedAt, &startedAt, &finishedAt,
 			&hookId, &task.Attempt, &task.MaxAttempts,
@@ -441,6 +459,9 @@ func (b *PostgresBackend) GetRetryableTasks(ctx context.Context) ([]*types.Task,
 			return nil, fmt.Errorf("failed to scan retryable task: %w", err)
 		}
 
+		if name.Valid {
+			task.Name = name.String
+		}
 		if createdByMemberId.Valid {
 			mid := uint(createdByMemberId.Int64)
 			task.CreatedByMemberId = &mid
@@ -473,6 +494,7 @@ func (b *PostgresBackend) GetRetryableTasks(ctx context.Context) ([]*types.Task,
 
 		tasks = append(tasks, task)
 	}
+
 	return tasks, rows.Err()
 }
 
@@ -520,6 +542,7 @@ func (b *PostgresBackend) scanTaskRows(ctx context.Context, query string, args .
 		var entrypoint pq.StringArray
 		var envJSON []byte
 		var createdByMemberId sql.NullInt64
+		var name sql.NullString
 		var prompt sql.NullString
 		var exitCode sql.NullInt32
 		var errorMsg sql.NullString
@@ -527,7 +550,7 @@ func (b *PostgresBackend) scanTaskRows(ctx context.Context, query string, args .
 		var hookId sql.NullInt64
 
 		if err := rows.Scan(
-			&task.Id, &task.ExternalId, &task.WorkspaceId, &createdByMemberId,
+			&task.Id, &task.ExternalId, &name, &task.WorkspaceId, &createdByMemberId,
 			&task.Status, &prompt, &task.Image, &entrypoint, &envJSON,
 			&exitCode, &errorMsg, &task.CreatedAt, &startedAt, &finishedAt,
 			&hookId, &task.Attempt, &task.MaxAttempts,
@@ -535,6 +558,9 @@ func (b *PostgresBackend) scanTaskRows(ctx context.Context, query string, args .
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
 
+		if name.Valid {
+			task.Name = name.String
+		}
 		if createdByMemberId.Valid {
 			mid := uint(createdByMemberId.Int64)
 			task.CreatedByMemberId = &mid
@@ -567,4 +593,17 @@ func (b *PostgresBackend) scanTaskRows(ctx context.Context, query string, args .
 		tasks = append(tasks, task)
 	}
 	return tasks, rows.Err()
+}
+
+// GetTaskByName retrieves a task by its human-readable name slug.
+func (b *PostgresBackend) GetTaskByName(ctx context.Context, name string) (*types.Task, error) {
+	query := `
+		SELECT id, external_id, name, workspace_id, created_by_member_id, status, prompt, image, entrypoint, env,
+		       exit_code, error, created_at, started_at, finished_at,
+		       hook_id, attempt, max_attempts
+		FROM task
+		WHERE name = $1
+	`
+
+	return b.scanTask(b.db.QueryRowContext(ctx, query, name))
 }

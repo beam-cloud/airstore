@@ -160,7 +160,7 @@ func (t *TasksVNode) fetchTasksGRPC(ctx context.Context) ([]*types.Task, error) 
 	return tasks, nil
 }
 
-// getTaskByName finds a task by its filename (e.g., "abc123.task")
+// getTaskByName finds a task by its filename (e.g., "fix-auth-bug-a1b2c3d4.task")
 // Uses cached task list first for fast lookups during directory listing.
 func (t *TasksVNode) getTaskByName(ctx context.Context, name string) (*types.Task, error) {
 	if isAppleDoublePath(name) {
@@ -169,13 +169,13 @@ func (t *TasksVNode) getTaskByName(ctx context.Context, name string) (*types.Tas
 	if !strings.HasSuffix(name, ".task") {
 		return nil, ErrNotFound
 	}
-	taskId := strings.TrimSuffix(name, ".task")
+	taskName := strings.TrimSuffix(name, ".task")
 
 	// Check cache first - fast path for Getattr during ls
 	t.cacheMu.RLock()
 	if t.cachedTasks != nil && time.Now().Before(t.cacheExpiry) {
 		for _, task := range t.cachedTasks {
-			if task.ExternalId == taskId {
+			if task.Name == taskName || task.ExternalId == taskName {
 				t.cacheMu.RUnlock()
 				return task, nil
 			}
@@ -191,7 +191,11 @@ func (t *TasksVNode) getTaskByName(ctx context.Context, name string) (*types.Tas
 			return nil, ErrNotFound
 		}
 
-		task, err := t.backend.GetTask(ctx, taskId)
+		// Try name lookup first, then fall back to external ID
+		task, err := t.backend.GetTaskByName(ctx, taskName)
+		if err != nil {
+			task, err = t.backend.GetTask(ctx, taskName)
+		}
 		if err != nil {
 			if _, ok := err.(*types.ErrTaskNotFound); ok {
 				return nil, ErrNotFound
@@ -208,7 +212,7 @@ func (t *TasksVNode) getTaskByName(ctx context.Context, name string) (*types.Tas
 	}
 
 	if t.grpcConn != nil {
-		return t.fetchTaskGRPC(ctx, taskId)
+		return t.fetchTaskGRPC(ctx, taskName)
 	}
 
 	return nil, ErrNotFound
@@ -248,6 +252,7 @@ func (t *TasksVNode) fetchTaskLogsGRPC(ctx context.Context, taskId string) strin
 func pbToTask(pt *pb.Task) *types.Task {
 	task := &types.Task{
 		ExternalId: pt.Id,
+		Name:       pt.Name,
 		Status:     types.TaskStatus(pt.Status),
 		Prompt:     pt.Prompt,
 		Image:      pt.Image,
@@ -275,9 +280,12 @@ func pbToTask(pt *pb.Task) *types.Task {
 	return task
 }
 
-// taskFilename returns the filename for a task
-func taskFilename(taskId string) string {
-	return taskId + ".task"
+// taskFilename returns the filename for a task, using the slug name if available
+func taskFilename(task *types.Task) string {
+	if task.Name != "" {
+		return task.Name + ".task"
+	}
+	return task.ExternalId + ".task"
 }
 
 func (t *TasksVNode) Getattr(path string) (*FileInfo, error) {
@@ -326,7 +334,7 @@ func (t *TasksVNode) Readdir(path string) ([]DirEntry, error) {
 
 	entries := make([]DirEntry, 0, len(tasks))
 	for _, task := range tasks {
-		name := taskFilename(task.ExternalId)
+		name := taskFilename(task)
 		mtime := task.CreatedAt.Unix()
 		entries = append(entries, DirEntry{
 			Name:  name,

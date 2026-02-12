@@ -132,6 +132,7 @@ type BackendRepository interface {
 	// Tasks
 	CreateTask(ctx context.Context, task *types.Task) error
 	GetTask(ctx context.Context, externalId string) (*types.Task, error)
+	GetTaskByName(ctx context.Context, name string) (*types.Task, error)
 	GetTaskById(ctx context.Context, id uint) (*types.Task, error)
 	ListTasks(ctx context.Context, workspaceId uint) ([]*types.Task, error)
 	UpdateTaskStatus(ctx context.Context, externalId string, status types.TaskStatus) error

@@ -13,6 +13,9 @@ type Task struct {
 	// ExternalId is the UUID exposed via API
 	ExternalId string `json:"external_id" db:"external_id"`
 
+	// Name is a human-readable slug auto-generated from the task's prompt/image
+	Name string `json:"name" db:"name"`
+
 	// WorkspaceId is the internal workspace ID (for joins)
 	WorkspaceId uint `json:"workspace_id" db:"workspace_id"`
 

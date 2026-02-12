@@ -91,14 +91,15 @@ func listTasks() error {
 
 	PrintHeader("Tasks")
 
-	table := NewTable("ID", "STATUS", "IMAGE", "CREATED", "EXIT")
+	table := NewTable("NAME", "ID", "STATUS", "IMAGE", "CREATED", "EXIT")
 	for _, t := range resp.Tasks {
 		exitCode := "-"
 		if t.HasExitCode {
 			exitCode = fmt.Sprintf("%d", t.ExitCode)
 		}
 		image := Truncate(t.Image, 35)
-		table.AddRow(t.Id, t.Status, image, FormatRelativeTime(t.CreatedAt), exitCode)
+		name := Truncate(t.Name, 40)
+		table.AddRow(name, t.Id, t.Status, image, FormatRelativeTime(t.CreatedAt), exitCode)
 	}
 	table.Print()
 	PrintNewline()
@@ -130,6 +131,9 @@ func getTask(id string) error {
 	}
 
 	PrintNewline()
+	if t.Name != "" {
+		PrintKeyValue("Name", t.Name)
+	}
 	PrintKeyValue("ID", t.Id)
 	PrintKeyValueStyled("Status", t.Status, statusStyle(t.Status))
 	PrintKeyValue("Image", t.Image)

@@ -227,6 +227,7 @@ message Task {
   string created_at = 8;
   string started_at = 9;
   string finished_at = 10;
+  string name = 11;
 }
 
 message CreateTaskRequest {
