@@ -420,7 +420,7 @@ func (b *PostgresBackend) GetRetryableTasks(ctx context.Context) ([]*types.Task,
 	// Fetch all failed hook tasks that haven't exhausted retries.
 	// Backoff filtering is done in Go since the delay depends on attempt number.
 	query := `
-		SELECT id, external_id, workspace_id, created_by_member_id, status, prompt, image, entrypoint, env,
+		SELECT id, external_id, name, workspace_id, created_by_member_id, status, prompt, image, entrypoint, env,
 		       exit_code, error, created_at, started_at, finished_at,
 		       hook_id, attempt, max_attempts
 		FROM task
@@ -502,7 +502,7 @@ func (b *PostgresBackend) GetRetryableTasks(ctx context.Context) ([]*types.Task,
 func (b *PostgresBackend) GetStuckHookTasks(ctx context.Context, timeout time.Duration) ([]*types.Task, error) {
 	cutoff := time.Now().Add(-timeout)
 	query := `
-		SELECT id, external_id, workspace_id, created_by_member_id, status, prompt, image, entrypoint, env,
+		SELECT id, external_id, name, workspace_id, created_by_member_id, status, prompt, image, entrypoint, env,
 		       exit_code, error, created_at, started_at, finished_at,
 		       hook_id, attempt, max_attempts
 		FROM task
@@ -517,7 +517,7 @@ func (b *PostgresBackend) GetStuckHookTasks(ctx context.Context, timeout time.Du
 // ListTasksByHook returns all tasks triggered by a specific hook, most recent first.
 func (b *PostgresBackend) ListTasksByHook(ctx context.Context, hookId uint) ([]*types.Task, error) {
 	query := `
-		SELECT id, external_id, workspace_id, created_by_member_id, status, prompt, image, entrypoint, env,
+		SELECT id, external_id, name, workspace_id, created_by_member_id, status, prompt, image, entrypoint, env,
 		       exit_code, error, created_at, started_at, finished_at,
 		       hook_id, attempt, max_attempts
 		FROM task
