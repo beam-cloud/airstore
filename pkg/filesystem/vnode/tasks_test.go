@@ -48,11 +48,8 @@ func TestTasksVNode_GetattrUsesPlaceholderUntilContentCached(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Getattr failed: %v", err)
 	}
-	if info.Size != 0 {
-		t.Fatalf("expected uncached getattr size placeholder 0, got %d", info.Size)
-	}
-	if logFetches != 0 {
-		t.Fatalf("expected getattr to avoid log fetches, got %d fetches", logFetches)
+	if logFetches != 1 {
+		t.Fatalf("expected one log fetch after getattr, got %d", logFetches)
 	}
 
 	buf := make([]byte, len(logs)+4096)
@@ -63,8 +60,11 @@ func TestTasksVNode_GetattrUsesPlaceholderUntilContentCached(t *testing.T) {
 	if n <= 10<<20 {
 		t.Fatalf("expected read length >10MB, got %d", n)
 	}
+	if int64(n) != info.Size {
+		t.Fatalf("expected getattr size %d to match read length %d", info.Size, n)
+	}
 	if logFetches != 1 {
-		t.Fatalf("expected one log fetch after read, got %d", logFetches)
+		t.Fatalf("expected cache reuse (still 1 fetch), got %d", logFetches)
 	}
 
 	info, err = tv.Getattr(path)

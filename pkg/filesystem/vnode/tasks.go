@@ -378,10 +378,8 @@ func (t *TasksVNode) Getattr(path string) (*FileInfo, error) {
 		return nil, err
 	}
 
-	size := int64(0)
-	if data, ok := t.getCachedTaskContent(task.ExternalId); ok {
-		size = int64(len(data))
-	}
+	data := t.getTaskContent(ctx, task)
+	size := int64(len(data))
 
 	// Task file - return file info
 	info := NewFileInfo(PathIno(path), size, 0644)
