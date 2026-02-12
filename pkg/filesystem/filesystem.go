@@ -45,6 +45,8 @@ type Config struct {
 	Uid         *uint32 // File owner uid (nil = use current user, 0 = root)
 	Gid         *uint32 // File owner gid (nil = use current user, 0 = root)
 	Backend     string  // "fuse", "nfs", or "" for platform auto-detect
+	Compression string  // compression strategy: "strip", "distill", "chain", or "" (disabled)
+	Session     string  // custom access session ID; defaults to workspace ID if empty
 }
 
 // Filesystem connects to the gateway via gRPC and exposes a virtual filesystem.

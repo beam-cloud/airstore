@@ -151,40 +151,54 @@ func (a *adapter) Utimens(path string, tmsp []fuse.Timespec) int {
 	return toErrno(a.fs.Utimens(path, atime, mtime))
 }
 
-func (a *adapter) Open(path string, flags int) (int, uint64) {
+// OpenEx implements fuse.FileSystemOpenEx. We use OpenEx (instead of Open)
+// so we can set DirectIo=true on the fuse_file_info. With direct I/O the
+// kernel reads until EOF instead of trusting the file size from Getattr.
+// This is essential because:
+//   - Getattr reports the raw size from query metadata (before compression)
+//   - After Open, the actual content may be smaller (compressed) or larger
+//   - Without direct_io, macOS FUSE pads reads with null bytes to the Getattr size
+//   - For a remote filesystem with an in-memory content cache, the kernel
+//     page cache adds no value and can serve stale data
+func (a *adapter) OpenEx(path string, fi *fuse.FileInfo_t) int {
 	var start time.Time
 	if a.fs.trace != nil {
 		start = time.Now()
 	}
-	fh, err := a.fs.Open(path, flags)
+	fh, err := a.fs.Open(path, fi.Flags)
 	if err != nil {
 		if a.fs.trace != nil {
 			a.fs.trace.recordOpen(path, time.Since(start), err)
 		}
-		return toErrno(err), 0
+		return toErrno(err)
 	}
 	if a.fs.trace != nil {
 		a.fs.trace.recordOpen(path, time.Since(start), nil)
 	}
-	return 0, uint64(fh)
+	fi.Fh = uint64(fh)
+	fi.DirectIo = true
+	return 0
 }
 
-func (a *adapter) Create(path string, flags int, mode uint32) (int, uint64) {
+// CreateEx implements fuse.FileSystemOpenEx alongside OpenEx.
+func (a *adapter) CreateEx(path string, mode uint32, fi *fuse.FileInfo_t) int {
 	var start time.Time
 	if a.fs.trace != nil {
 		start = time.Now()
 	}
-	fh, err := a.fs.Create(path, flags, mode)
+	fh, err := a.fs.Create(path, fi.Flags, mode)
 	if err != nil {
 		if a.fs.trace != nil {
 			a.fs.trace.recordCreate(path, time.Since(start), err)
 		}
-		return toErrno(err), 0
+		return toErrno(err)
 	}
 	if a.fs.trace != nil {
 		a.fs.trace.recordCreate(path, time.Since(start), nil)
 	}
-	return 0, uint64(fh)
+	fi.Fh = uint64(fh)
+	fi.DirectIo = true
+	return 0
 }
 
 func (a *adapter) Read(path string, buf []byte, off int64, fh uint64) int {

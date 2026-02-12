@@ -26,8 +26,10 @@ import (
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/clients"
 	"github.com/beam-cloud/airstore/pkg/common"
+	"github.com/beam-cloud/airstore/pkg/compression"
 	"github.com/beam-cloud/airstore/pkg/gateway/services"
 	"github.com/beam-cloud/airstore/pkg/hooks"
+	"github.com/beam-cloud/airstore/pkg/instrumentation"
 	"github.com/beam-cloud/airstore/pkg/oauth"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/scheduler"
@@ -66,6 +68,10 @@ type Gateway struct {
 	oauthRegistry  *oauth.Registry
 	s2Client       *common.S2Client
 	eventBus       *common.EventBus
+
+	// Compression middleware (optional)
+	compressionFlusher  *compression.AsyncFlusher
+	compressionRecorder instrumentation.AccessRecorder
 }
 
 func NewGateway() (*Gateway, error) {
@@ -379,6 +385,58 @@ func (g *Gateway) registerServices() error {
 		hookOpts = append(hookOpts, services.WithSeenTracker(seenTracker))
 	}
 
+	// Set model API keys as env vars so BAML clients (clients.baml) can pick them up.
+	if key := g.Config.AnthropicAPIKey(); key != "" {
+		os.Setenv("ANTHROPIC_API_KEY", key)
+	}
+	if key := g.Config.CerebrasAPIKey(); key != "" {
+		os.Setenv("CEREBRAS_API_KEY", key)
+	}
+
+	// Wire compression middleware if a strategy is configured
+	if g.Config.Compression.Strategy != "" {
+		compCfg := compression.Config{
+			Strategy:             compression.Strategy(g.Config.Compression.Strategy),
+			TokenThreshold:       g.Config.Compression.TokenThreshold,
+			MaxContentBytes:      g.Config.Compression.MaxContentBytes,
+			TokenEncoding:        g.Config.Compression.TokenEncoding,
+			Timeout:              g.Config.Compression.Timeout,
+			ContentCacheMaxBytes: g.Config.Compression.ContentCacheMaxBytes,
+			ContentCacheTTL:      g.Config.Compression.ContentCacheTTL,
+		}
+
+		compressor, err := compression.NewCompressor(compCfg.Strategy, compCfg)
+		if err != nil {
+			return fmt.Errorf("compression: %w", err)
+		}
+		{
+			var compStore *compression.CompressedStore
+			if g.RedisClient != nil {
+				compStore = compression.NewCompressedStore(g.RedisClient, compCfg)
+			}
+
+			var recorder instrumentation.AccessRecorder
+			if g.s2Client != nil {
+				recorder = instrumentation.NewS2Recorder(g.s2Client)
+			} else {
+				recorder = instrumentation.NewNoopRecorder()
+			}
+
+			var s3Uploader compression.S3Uploader
+			bucket := ""
+			if g.storageClient != nil {
+				s3Uploader = g.storageClient.S3Client()
+				bucket = g.storageClient.BucketPrefix()
+			}
+
+			flusher := compression.NewAsyncFlusher(s3Uploader, bucket, compStore, recorder)
+			g.compressionFlusher = flusher
+			g.compressionRecorder = recorder
+			hookOpts = append(hookOpts, services.WithCompressionMiddleware(compressor, compStore, flusher, compCfg))
+			log.Info().Str("strategy", g.Config.Compression.Strategy).Msg("compression middleware enabled")
+		}
+	}
+
 	var sourceService *services.SourceService
 	if g.BackendRepo != nil && len(g.oauthRegistry.ListConfiguredProviders()) > 0 {
 		sourceService = services.NewSourceServiceWithOAuth(g.sourceRegistry, g.BackendRepo, filesystemStore, g.oauthRegistry, hookOpts...)
@@ -633,6 +691,14 @@ func (g *Gateway) shutdown() {
 		eg.Go(func() error {
 			return g.mcpManager.Close()
 		})
+	}
+
+	// Shutdown compression middleware (drain pending writes)
+	if g.compressionFlusher != nil {
+		g.compressionFlusher.Shutdown()
+	}
+	if g.compressionRecorder != nil {
+		g.compressionRecorder.Flush()
 	}
 
 	g.cancelFunc()

@@ -130,7 +130,7 @@ func NewWorker() (*Worker, error) {
 		ImageConfig:      config.Image,
 		S2Token:          config.Streams.Token,
 		S2Basin:          config.Streams.Basin,
-		AnthropicAPIKey:  config.Anthropic.APIKey,
+		AnthropicAPIKey:  config.AnthropicAPIKey(),
 	})
 	if err != nil {
 		cancel()

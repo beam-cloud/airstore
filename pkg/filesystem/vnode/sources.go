@@ -77,11 +77,30 @@ type cachedContent struct {
 }
 
 // SourcesVNode handles /sources/ - both native content and smart queries.
+// SourcesVNodeOption configures optional fields on a SourcesVNode.
+type SourcesVNodeOption func(*SourcesVNode)
+
+// WithCompression sets the compression strategy (e.g. "strip") forwarded to the
+// gateway via the x-airstore-compression gRPC metadata header. When set, content
+// reads use the Read RPC (which routes through compression middleware) instead of
+// ExecuteSmartQuery, and Getattr prefetches content to report accurate sizes.
+func WithCompression(strategy string) SourcesVNodeOption {
+	return func(v *SourcesVNode) { v.compression = strategy }
+}
+
+// WithSession sets the access session ID forwarded to the gateway via the
+// x-airstore-session gRPC metadata header for analytics tracking.
+func WithSession(session string) SourcesVNodeOption {
+	return func(v *SourcesVNode) { v.session = session }
+}
+
 type SourcesVNode struct {
 	SmartQueryBase
 	client      pb.SourceServiceClient
 	token       string
 	bearerToken string // precomputed auth header value
+	compression string // compression strategy to pass via gRPC metadata
+	session     string // access session ID to pass via gRPC metadata
 
 	// Cache for query results to avoid repeated ExecuteSmartQuery calls
 	// during Readdir->Getattr cycles
@@ -116,7 +135,7 @@ type SourcesVNode struct {
 }
 
 // NewSourcesVNode creates a new SourcesVNode.
-func NewSourcesVNode(conn *grpc.ClientConn, token string) *SourcesVNode {
+func NewSourcesVNode(conn *grpc.ClientConn, token string, opts ...SourcesVNodeOption) *SourcesVNode {
 	v := &SourcesVNode{
 		client:       pb.NewSourceServiceClient(conn),
 		token:        token,
@@ -130,6 +149,9 @@ func NewSourcesVNode(conn *grpc.ClientConn, token string) *SourcesVNode {
 		nextHandle:   1,
 		recentDirs:   make(map[string]time.Time),
 		stopRefresh:  make(chan struct{}),
+	}
+	for _, opt := range opts {
+		opt(v)
 	}
 	go v.backgroundRefreshLoop()
 	return v
@@ -146,6 +168,12 @@ func (v *SourcesVNode) ctx() (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(context.Background(), sourcesTimeout)
 	if v.bearerToken != "" {
 		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", v.bearerToken)
+	}
+	if v.compression != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, "x-airstore-compression", v.compression)
+	}
+	if v.session != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, "x-airstore-session", v.session)
 	}
 	return ctx, cancel
 }
@@ -189,10 +217,17 @@ func (v *SourcesVNode) Getattr(path string) (*FileInfo, error) {
 		return nil, fs.ErrNotExist
 	}
 
-	// Fast path: check stat cache first
+	// Fast path: check stat cache first.
+	// When compression is on, the stat cache may hold raw (uncompressed)
+	// sizes from Readdir. Only trust it for directories or when we have
+	// prefetched content with the accurate size.
 	if info := v.getCachedStat(path); info != nil {
-		v.applyOpenContentSize(path, info)
-		return info, nil
+		isDir := info.Mode&syscall.S_IFDIR != 0
+		_, hasContent := v.getOpenContent(path)
+		if v.compression == "" || isDir || hasContent {
+			v.applyOpenContentSize(path, info)
+			return info, nil
+		}
 	}
 
 	// /sources/{integration}
@@ -251,9 +286,17 @@ func (v *SourcesVNode) Getattr(path string) (*FileInfo, error) {
 	}
 
 	// Is this inside a smart query folder? (materialized result)
+	//
+	// File sizing strategy:
+	//   1. openContent cache — already prefetched or open. Always accurate.
+	//   2. readdir metadata   — fast path for ls -la (no-compression only).
+	//   3. prefetch via RPC   — fetches content, caches for Open/Read reuse.
+	//
+	// With compression, step 2 is skipped because metadata sizes are raw
+	// (uncompressed) and would cause null-byte padding from FUSE.
 	parentPath := filepath.Dir(path)
 	if q := v.getQuery(ctx, parentPath); q != nil && q.OutputFormat == types.SmartQueryOutputFolder {
-		// If the file is already open, use the accurate size from cached content.
+		// Tier 1: already open or pre-fetched content — always accurate.
 		if data, ok := v.getOpenContent(path); ok {
 			info := NewFileInfo(PathIno(path), int64(len(data)), 0644)
 			_, mtime, _ := v.getQueryResultMetaCached(q.Path, filepath.Base(path))
@@ -265,18 +308,41 @@ func (v *SourcesVNode) Getattr(path string) (*FileInfo, error) {
 			return info, nil
 		}
 
-		// Use the size from the readdir cache (populated by executeQueryAsDir).
-		// Content is only fetched lazily when the file is actually opened/read.
-		// The size here comes from the query execution results and is accurate
-		// for the cached query run. If size is 0, the kernel reads until EOF.
 		filename := filepath.Base(path)
-		size, mtime, _ := v.getQueryResultMetaCached(q.Path, filename)
-		info := NewFileInfo(PathIno(path), size, 0644)
-		if mtime > 0 {
-			t := time.Unix(mtime, 0)
+
+		// Fast path (no compression): use readdir cache size for ls -la.
+		if v.compression == "" {
+			size, mtime, ok := v.getQueryResultMetaCached(q.Path, filename)
+			if ok && size > 0 {
+				info := NewFileInfo(PathIno(path), size, 0644)
+				if mtime > 0 {
+					t := time.Unix(mtime, 0)
+					info.Mtime = t
+					info.Ctime = t
+				}
+				return info, nil
+			}
+		}
+
+		// Slow path (prefetch): fetch actual content to determine the real size.
+		// macOS FUSE uses the file size from Getattr to bound reads — a
+		// wrong size causes null-byte padding or empty reads. By fetching
+		// here and caching in openContent, we report the exact byte count
+		// and avoid a redundant fetch in Open/Read.
+		data, err := v.fetchQueryResultContent(ctx, q, filename)
+		if err != nil || len(data) == 0 {
+			return nil, fs.ErrNotExist
+		}
+		// Cache for Open/Read to reuse (refs=0; retainOpenContent increments).
+		v.prefetchContent(path, data)
+		info := NewFileInfo(PathIno(path), int64(len(data)), 0644)
+		// Try to get mtime from the readdir cache.
+		if _, cachedMtime, ok := v.getQueryResultMetaCached(q.Path, filename); ok && cachedMtime > 0 {
+			t := time.Unix(cachedMtime, 0)
 			info.Mtime = t
 			info.Ctime = t
 		}
+		v.setCachedStat(path, info)
 		return info, nil
 	}
 
@@ -431,10 +497,6 @@ func (v *SourcesVNode) executeQueryAsDir(ctx context.Context, q *types.SmartQuer
 				Size:  listingSize(e.Size),
 				Mtime: e.Mtime,
 			})
-			// Cache stat for all entries (files and directories) so that
-			// subsequent Getattr calls during ls -l are served from cache
-			// instead of eagerly fetching content. The size may be stale
-			// but is corrected when the file is actually opened/read.
 			v.cacheStatFromEntry(childPath, e)
 		}
 		return entries, nil
@@ -463,7 +525,6 @@ func (v *SourcesVNode) executeQueryAsDir(ctx context.Context, q *types.SmartQuer
 			Size:  listingSize(e.Size),
 			Mtime: e.Mtime,
 		})
-		// Cache stat for all entries so Getattr is served from cache.
 		v.cacheStatFromEntry(childPath, e)
 	}
 	return entries, nil
@@ -608,7 +669,21 @@ func (v *SourcesVNode) readQueryResult(ctx context.Context, q *types.SmartQuery,
 	return copyFromOffset(buf, data, off), nil
 }
 
+// fetchContentViaRead calls the Read RPC which routes through the gateway's
+// compression middleware. Used when compression is enabled.
+func (v *SourcesVNode) fetchContentViaRead(ctx context.Context, readPath string) ([]byte, error) {
+	resp, err := v.client.Read(ctx, &pb.SourceReadRequest{Path: readPath})
+	if err != nil || resp == nil || !resp.Ok || len(resp.Data) == 0 {
+		return nil, fs.ErrNotExist
+	}
+	return resp.Data, nil
+}
+
 func (v *SourcesVNode) fetchQueryFileContent(ctx context.Context, q *types.SmartQuery) ([]byte, error) {
+	if v.compression != "" {
+		return v.fetchContentViaRead(ctx, strings.TrimPrefix(q.Path, SourcesPath+"/"))
+	}
+
 	resp, err := v.client.ExecuteSmartQuery(ctx, &pb.ExecuteSmartQueryRequest{Path: q.Path})
 	if err != nil || !resp.Ok || len(resp.FileData) == 0 {
 		return nil, fs.ErrNotExist
@@ -617,9 +692,11 @@ func (v *SourcesVNode) fetchQueryFileContent(ctx context.Context, q *types.Smart
 }
 
 func (v *SourcesVNode) fetchQueryResultContent(ctx context.Context, q *types.SmartQuery, filename string) ([]byte, error) {
-	// Look up the result_id from cache for more reliable fetching
-	resultId := v.getResultIdFromCache(q.Path, filename)
+	if v.compression != "" {
+		return v.fetchContentViaRead(ctx, strings.TrimPrefix(q.Path, SourcesPath+"/")+"/"+filename)
+	}
 
+	resultId := v.getResultIdFromCache(q.Path, filename)
 	resp, err := v.client.ExecuteSmartQuery(ctx, &pb.ExecuteSmartQueryRequest{
 		Path:     q.Path,
 		Filename: filename,
@@ -1222,6 +1299,21 @@ func (v *SourcesVNode) releaseOpenContent(fh FileHandle) {
 			return
 		}
 		delete(v.openContent, path)
+	}
+}
+
+// prefetchContent stores content in the open content cache without creating a
+// file handle. Used by Getattr to pre-fetch content for accurate size reporting.
+// Open's retainOpenContent will find and reuse this cached content.
+func (v *SourcesVNode) prefetchContent(path string, data []byte) {
+	v.openMu.Lock()
+	defer v.openMu.Unlock()
+	if _, ok := v.openContent[path]; !ok {
+		v.openContent[path] = &cachedContent{
+			data:     data,
+			cachedAt: time.Now(),
+			refs:     0, // No active Open; retainOpenContent increments to 1
+		}
 	}
 }
 

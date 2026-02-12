@@ -1,0 +1,142 @@
+package compression
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"github.com/beam-cloud/airstore/pkg/common"
+	"github.com/redis/go-redis/v9"
+	"github.com/rs/zerolog/log"
+)
+
+// RedisClient is the minimal Redis interface used by CompressedStore.
+// Both *redis.Client and *common.RedisClient satisfy this.
+type RedisClient interface {
+	Get(ctx context.Context, key string) *redis.StringCmd
+	Set(ctx context.Context, key string, value interface{}, expiration time.Duration) *redis.StatusCmd
+	IncrBy(ctx context.Context, key string, value int64) *redis.IntCmd
+	Expire(ctx context.Context, key string, expiration time.Duration) *redis.BoolCmd
+	Pipeline() redis.Pipeliner
+}
+
+// CompressedPointer is the small metadata stored in Redis that maps
+// a (workspace, queryPath, resultID) to its compressed S3 key and token counts.
+type CompressedPointer struct {
+	S3Key            string `json:"s3_key"`
+	OriginalTokens   int    `json:"original_tokens"`
+	CompressedTokens int    `json:"compressed_tokens"`
+	Strategy         string `json:"strategy"`
+	CreatedAt        int64  `json:"created_at"`
+	Size             int    `json:"size"`
+}
+
+// CompressedStore handles read/write of compressed content pointers and
+// cached content in Redis, with a per-workspace byte budget.
+type CompressedStore struct {
+	redis         RedisClient
+	cacheMaxBytes int64
+	cacheTTL      time.Duration
+}
+
+// NewCompressedStore creates a store backed by Redis.
+func NewCompressedStore(rdb RedisClient, cfg Config) *CompressedStore {
+	maxBytes := cfg.ContentCacheMaxBytes
+	if maxBytes <= 0 {
+		maxBytes = 10 * 1024 * 1024 // 10 MB
+	}
+	ttl := cfg.ContentCacheTTL
+	if ttl <= 0 {
+		ttl = 5 * time.Minute
+	}
+	return &CompressedStore{
+		redis:         rdb,
+		cacheMaxBytes: maxBytes,
+		cacheTTL:      ttl,
+	}
+}
+
+// GetPointer reads the compression pointer for a result+strategy. Returns nil if not found.
+func (s *CompressedStore) GetPointer(ctx context.Context, workspaceId uint, queryPath, resultID, strategy string) *CompressedPointer {
+	if s.redis == nil {
+		return nil
+	}
+	key := common.Keys.FsCompressedPointer(workspaceId, queryPath, resultID, strategy)
+	data, err := s.redis.Get(ctx, key).Bytes()
+	if err != nil {
+		return nil
+	}
+	var ptr CompressedPointer
+	if err := json.Unmarshal(data, &ptr); err != nil {
+		return nil
+	}
+	return &ptr
+}
+
+// SetPointer writes the compression pointer. Pointers are small (~200 bytes)
+// and do not expire.
+func (s *CompressedStore) SetPointer(ctx context.Context, workspaceId uint, queryPath, resultID, strategy string, ptr *CompressedPointer) error {
+	if s.redis == nil {
+		return nil
+	}
+	key := common.Keys.FsCompressedPointer(workspaceId, queryPath, resultID, strategy)
+	data, err := json.Marshal(ptr)
+	if err != nil {
+		return err
+	}
+	return s.redis.Set(ctx, key, data, 0).Err() // no TTL for pointers
+}
+
+// GetContent reads cached compressed content. Returns nil on miss.
+func (s *CompressedStore) GetContent(ctx context.Context, workspaceId uint, queryPath, resultID, strategy string) []byte {
+	if s.redis == nil {
+		return nil
+	}
+	key := common.Keys.FsCompressedContent(workspaceId, queryPath, resultID, strategy)
+	data, err := s.redis.Get(ctx, key).Bytes()
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
+// SetContent caches compressed content subject to the per-workspace byte budget.
+// If adding this entry would exceed the budget, the write is silently skipped
+// (the content is still in S3 via the pointer).
+func (s *CompressedStore) SetContent(ctx context.Context, workspaceId uint, queryPath, resultID, strategy string, content []byte) error {
+	if s.redis == nil {
+		return nil
+	}
+
+	// Check budget
+	usageKey := common.Keys.FsCompressedUsage(workspaceId)
+	currentUsage, _ := s.redis.Get(ctx, usageKey).Int64()
+	if currentUsage+int64(len(content)) > s.cacheMaxBytes {
+		log.Debug().
+			Int64("current", currentUsage).
+			Int("adding", len(content)).
+			Int64("max", s.cacheMaxBytes).
+			Msg("compressed content cache budget exceeded, skipping cache write")
+		return nil // budget exceeded, skip
+	}
+
+	key := common.Keys.FsCompressedContent(workspaceId, queryPath, resultID, strategy)
+	pipe := s.redis.Pipeline()
+	pipe.Set(ctx, key, content, s.cacheTTL)
+	pipe.IncrBy(ctx, usageKey, int64(len(content)))
+	// Set a TTL on the usage counter too — stale counters self-correct
+	pipe.Expire(ctx, usageKey, s.cacheTTL*2)
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
+// S3Key generates the S3 object key for compressed content.
+// Format: compressed/{workspaceExtId}/{queryPath}/{resultID}/{strategy}.{contentHash}
+func S3Key(workspaceExtId, queryPath, resultID string, strategy Strategy, content []byte) string {
+	h := sha256.Sum256(content)
+	hash := hex.EncodeToString(h[:8]) // 16 hex chars — enough for dedup
+	return fmt.Sprintf("compressed/%s/%s/%s/%s.%s", workspaceExtId, queryPath, resultID, strategy, hash)
+}

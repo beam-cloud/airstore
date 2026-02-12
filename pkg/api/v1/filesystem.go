@@ -24,6 +24,7 @@ import (
 	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog/log"
+	grpcmd "google.golang.org/grpc/metadata"
 )
 
 // FilesystemGroup handles filesystem API endpoints
@@ -188,6 +189,13 @@ func (g *FilesystemGroup) Read(c echo.Context) error {
 	// Parse optional offset and length
 	offset, _ := strconv.ParseInt(c.QueryParam("offset"), 10, 64)
 	length, _ := strconv.ParseInt(c.QueryParam("length"), 10, 64)
+
+	// Inject compression strategy into gRPC-compatible metadata on the context
+	// so that SourceService.readSmartQueryResult() can pick it up.
+	if compressionStrategy := c.QueryParam("compression"); compressionStrategy != "" {
+		md := grpcmd.Pairs("x-airstore-compression", compressionStrategy)
+		ctx = grpcmd.NewIncomingContext(ctx, md)
+	}
 
 	// Virtual folders have their own handlers
 	if types.IsVirtualFolder(rootDir) {

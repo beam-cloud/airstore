@@ -43,6 +43,11 @@ var (
 	hookConsumerGroup string = "hook-evaluators"
 	hookSeen          string = "hook:seen:%d:%s" // workspaceId, pathHash
 	hookPollLock      string = "hook:poll:%s"    // queryExternalId
+
+	// Compression keys — include strategy so each compressor caches independently
+	fsCompressedPointer string = "airstore:compressed:%d:%s:%s:%s" // workspaceId, pathHash, resultId, strategy
+	fsCompressedContent string = "airstore:cc:%d:%s:%s:%s"         // workspaceId, pathHash, resultId, strategy
+	fsCompressedUsage   string = "airstore:cc:usage:%d"            // workspaceId
 )
 
 var Keys = &redisKeys{}
@@ -153,4 +158,18 @@ func (rk *redisKeys) HookSeen(workspaceId uint, pathHash string) string {
 
 func (rk *redisKeys) HookPollLock(queryExtId string) string {
 	return fmt.Sprintf(hookPollLock, queryExtId)
+}
+
+// Compression keys
+
+func (rk *redisKeys) FsCompressedPointer(workspaceId uint, path, resultId, strategy string) string {
+	return fmt.Sprintf(fsCompressedPointer, workspaceId, types.GeneratePathID(path), resultId, strategy)
+}
+
+func (rk *redisKeys) FsCompressedContent(workspaceId uint, path, resultId, strategy string) string {
+	return fmt.Sprintf(fsCompressedContent, workspaceId, types.GeneratePathID(path), resultId, strategy)
+}
+
+func (rk *redisKeys) FsCompressedUsage(workspaceId uint) string {
+	return fmt.Sprintf(fsCompressedUsage, workspaceId)
 }

@@ -17,22 +17,49 @@ type AppConfig struct {
 	DebugMode  bool   `key:"debugMode" json:"debug_mode"`
 	PrettyLogs bool   `key:"prettyLogs" json:"pretty_logs"`
 
-	ClusterName string           `key:"clusterName" json:"cluster_name"`
-	Database    DatabaseConfig   `key:"database" json:"database"`
-	Image       ImageConfig      `key:"image" json:"image"`
-	Sandbox     SandboxSettings  `key:"sandbox" json:"sandbox"`
-	Filesystem  FilesystemConfig `key:"filesystem" json:"filesystem"`
-	Gateway     GatewayConfig    `key:"gateway" json:"gateway"`
-	Scheduler   SchedulerConfig  `key:"scheduler" json:"scheduler"`
-	Tools       ToolsConfig      `key:"tools" json:"tools"`
-	OAuth       IntegrationOAuth `key:"oauth" json:"oauth"`     // OAuth for workspace integrations (gmail, gdrive)
-	Streams     StreamsConfig    `key:"streams" json:"streams"` // S2 stream configuration for task logs
-	Anthropic   AnthropicConfig  `key:"anthropic" json:"anthropic"`
+	ClusterName string            `key:"clusterName" json:"cluster_name"`
+	Database    DatabaseConfig    `key:"database" json:"database"`
+	Image       ImageConfig       `key:"image" json:"image"`
+	Sandbox     SandboxSettings   `key:"sandbox" json:"sandbox"`
+	Filesystem  FilesystemConfig  `key:"filesystem" json:"filesystem"`
+	Gateway     GatewayConfig     `key:"gateway" json:"gateway"`
+	Scheduler   SchedulerConfig   `key:"scheduler" json:"scheduler"`
+	Tools       ToolsConfig       `key:"tools" json:"tools"`
+	OAuth       IntegrationOAuth  `key:"oauth" json:"oauth"`             // OAuth for workspace integrations (gmail, gdrive)
+	Streams     StreamsConfig     `key:"streams" json:"streams"`         // S2 stream configuration for task logs
+	Models      ModelsConfig      `key:"models" json:"models"`           // LLM provider API keys (BAML inference, sandbox tasks)
+	Compression CompressionConfig `key:"compression" json:"compression"` // Context compression middleware
+
+	// Deprecated: use Models.Anthropic instead. Kept for backwards compatibility.
+	Anthropic struct {
+		APIKey string `key:"apiKey" json:"api_key"`
+	} `key:"anthropic" json:"anthropic"`
 }
 
-// AnthropicConfig configures Anthropic API access for BAML inference and Claude Code tasks
-type AnthropicConfig struct {
+// ModelsConfig centralises API keys for all LLM providers.
+// BAML picks these up via env vars (ANTHROPIC_API_KEY, CEREBRAS_API_KEY).
+type ModelsConfig struct {
+	Anthropic ModelProviderConfig `key:"anthropic" json:"anthropic"` // Claude models (smart queries, sandbox)
+	Cerebras  ModelProviderConfig `key:"cerebras" json:"cerebras"`   // Cerebras models (distillation)
+}
+
+// ModelProviderConfig holds credentials for a single LLM provider.
+type ModelProviderConfig struct {
 	APIKey string `key:"apiKey" json:"api_key"`
+}
+
+// AnthropicAPIKey returns the Anthropic API key, preferring Models.Anthropic
+// but falling back to the deprecated top-level Anthropic field.
+func (c *AppConfig) AnthropicAPIKey() string {
+	if c.Models.Anthropic.APIKey != "" {
+		return c.Models.Anthropic.APIKey
+	}
+	return c.Anthropic.APIKey
+}
+
+// CerebrasAPIKey returns the Cerebras API key.
+func (c *AppConfig) CerebrasAPIKey() string {
+	return c.Models.Cerebras.APIKey
 }
 
 // StreamsConfig configures S2 stream storage for task logs
@@ -338,4 +365,19 @@ type IntegrationOAuth struct {
 type ProviderOAuthCredentials struct {
 	ClientID     string `key:"clientId" json:"client_id"`
 	ClientSecret string `key:"clientSecret" json:"client_secret"`
+}
+
+// ----------------------------------------------------------------------------
+// Compression Configuration
+// ----------------------------------------------------------------------------
+
+// CompressionConfig configures the context compression middleware.
+type CompressionConfig struct {
+	Strategy             string        `key:"strategy" json:"strategy"`                            // "strip" or "passthrough"
+	TokenThreshold       int           `key:"tokenThreshold" json:"token_threshold"`               // skip compression if below this many tokens
+	MaxContentBytes      int           `key:"maxContentBytes" json:"max_content_bytes"`            // skip if content exceeds this size
+	TokenEncoding        string        `key:"tokenEncoding" json:"token_encoding"`                 // tiktoken encoding, default "cl100k_base"
+	Timeout              time.Duration `key:"timeout" json:"timeout"`                              // max compression time; 0 = strategy default
+	ContentCacheMaxBytes int64         `key:"contentCacheMaxBytes" json:"content_cache_max_bytes"` // per-workspace Redis budget; default 10MB
+	ContentCacheTTL      time.Duration `key:"contentCacheTTL" json:"content_cache_ttl"`            // per-entry TTL; default 5m
 }
