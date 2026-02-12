@@ -46,6 +46,7 @@ type TasksVNode struct {
 	// Cache for rendered task file contents.
 	contentMu    sync.RWMutex
 	contentCache map[string]*cachedTaskContent
+	sizeCache    map[string]int64 // last-known content size, guarded by contentMu
 }
 
 // NewTasksVNode creates a TasksVNode with database access for task listing.
@@ -55,6 +56,7 @@ func NewTasksVNode(backend repository.BackendRepository, token string) *TasksVNo
 		backend:      backend,
 		token:        token,
 		contentCache: make(map[string]*cachedTaskContent),
+		sizeCache:    make(map[string]int64),
 	}
 }
 
@@ -66,6 +68,7 @@ func NewTasksVNodeGRPC(conn *grpc.ClientConn, token string) *TasksVNode {
 		token:        token,
 		bearerToken:  BearerToken(token),
 		contentCache: make(map[string]*cachedTaskContent),
+		sizeCache:    make(map[string]int64),
 	}
 	t.logsFetcher = t.fetchTaskLogsGRPC
 	// Pre-warm cache in background
@@ -275,7 +278,19 @@ func (t *TasksVNode) setCachedTaskContent(taskId string, data []byte) {
 		data:      data,
 		expiresAt: time.Now().Add(tasksCacheTTL),
 	}
+	if t.sizeCache == nil {
+		t.sizeCache = make(map[string]int64)
+	}
+	t.sizeCache[taskId] = int64(len(data))
 	t.contentMu.Unlock()
+}
+
+// getLastKnownSize returns the last-known content size for a task, or 0 if unknown.
+func (t *TasksVNode) getLastKnownSize(taskId string) int64 {
+	t.contentMu.RLock()
+	s := t.sizeCache[taskId]
+	t.contentMu.RUnlock()
+	return s
 }
 
 func (t *TasksVNode) renderTaskContent(ctx context.Context, task *types.Task) []byte {
@@ -378,8 +393,12 @@ func (t *TasksVNode) Getattr(path string) (*FileInfo, error) {
 		return nil, err
 	}
 
-	data := t.getTaskContent(ctx, task)
-	size := int64(len(data))
+	size := int64(0)
+	if data, ok := t.getCachedTaskContent(task.ExternalId); ok {
+		size = int64(len(data))
+	} else if s := t.getLastKnownSize(task.ExternalId); s > 0 {
+		size = s
+	}
 
 	// Task file - return file info
 	info := NewFileInfo(PathIno(path), size, 0644)

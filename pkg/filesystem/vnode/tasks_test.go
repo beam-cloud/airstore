@@ -23,6 +23,7 @@ func newTestTasksVNode(task *types.Task, logs string) *TasksVNode {
 		cachedTasks:  []*types.Task{task},
 		cacheExpiry:  time.Now().Add(time.Minute),
 		contentCache: make(map[string]*cachedTaskContent),
+		sizeCache:    make(map[string]int64),
 		logsFetcher: func(ctx context.Context, taskId string) string {
 			return logs
 		},
@@ -37,6 +38,7 @@ func TestTasksVNode_GetattrUsesPlaceholderUntilContentCached(t *testing.T) {
 		cachedTasks:  []*types.Task{task},
 		cacheExpiry:  time.Now().Add(time.Minute),
 		contentCache: make(map[string]*cachedTaskContent),
+		sizeCache:    make(map[string]int64),
 		logsFetcher: func(ctx context.Context, taskId string) string {
 			logFetches++
 			return logs
@@ -44,14 +46,20 @@ func TestTasksVNode_GetattrUsesPlaceholderUntilContentCached(t *testing.T) {
 	}
 
 	path := TasksPath + "/task-large.task"
+
+	// First Getattr: no content cache, no sizeCache entry → size=0, no log fetch
 	info, err := tv.Getattr(path)
 	if err != nil {
 		t.Fatalf("Getattr failed: %v", err)
 	}
-	if logFetches != 1 {
-		t.Fatalf("expected one log fetch after getattr, got %d", logFetches)
+	if info.Size != 0 {
+		t.Fatalf("expected size 0 before any content fetch, got %d", info.Size)
+	}
+	if logFetches != 0 {
+		t.Fatalf("expected no log fetch from Getattr, got %d", logFetches)
 	}
 
+	// Read: populates content cache + sizeCache
 	buf := make([]byte, len(logs)+4096)
 	n, err := tv.Read(path, buf, 0, 0)
 	if err != nil {
@@ -60,21 +68,23 @@ func TestTasksVNode_GetattrUsesPlaceholderUntilContentCached(t *testing.T) {
 	if n <= 10<<20 {
 		t.Fatalf("expected read length >10MB, got %d", n)
 	}
+	if logFetches != 1 {
+		t.Fatalf("expected one log fetch after Read, got %d", logFetches)
+	}
+
+	// Second Getattr: content cache hit → returns actual size, no extra fetch
+	info, err = tv.Getattr(path)
+	if err != nil {
+		t.Fatalf("second Getattr failed: %v", err)
+	}
 	if int64(n) != info.Size {
-		t.Fatalf("expected getattr size %d to match read length %d", info.Size, n)
+		t.Fatalf("expected cached Getattr size %d, got %d", n, info.Size)
 	}
 	if logFetches != 1 {
 		t.Fatalf("expected cache reuse (still 1 fetch), got %d", logFetches)
 	}
 
-	info, err = tv.Getattr(path)
-	if err != nil {
-		t.Fatalf("second getattr failed: %v", err)
-	}
-	if int64(n) != info.Size {
-		t.Fatalf("expected cached getattr size %d, got %d", n, info.Size)
-	}
-
+	// Read at EOF: 0 bytes
 	n, err = tv.Read(path, buf[:1], info.Size, 0)
 	if err != nil {
 		t.Fatalf("Read at EOF failed: %v", err)
@@ -123,6 +133,7 @@ func TestTasksVNode_TaskContentCacheReusedAcrossOps(t *testing.T) {
 		cachedTasks:  []*types.Task{task},
 		cacheExpiry:  time.Now().Add(time.Minute),
 		contentCache: make(map[string]*cachedTaskContent),
+		sizeCache:    make(map[string]int64),
 		logsFetcher: func(ctx context.Context, taskId string) string {
 			logFetches++
 			return "cached logs\n"
@@ -130,12 +141,21 @@ func TestTasksVNode_TaskContentCacheReusedAcrossOps(t *testing.T) {
 	}
 
 	path := TasksPath + "/task-cache.task"
+	// Getattr: cache-only, no fetch
 	if _, err := tv.Getattr(path); err != nil {
 		t.Fatalf("Getattr failed: %v", err)
 	}
+	if logFetches != 0 {
+		t.Fatalf("expected no log fetch from Getattr, got %d", logFetches)
+	}
+	// Readdir: triggers first (and only) fetch
 	if _, err := tv.Readdir(TasksPath); err != nil {
 		t.Fatalf("Readdir failed: %v", err)
 	}
+	if logFetches != 1 {
+		t.Fatalf("expected one log fetch after Readdir, got %d", logFetches)
+	}
+	// Read: cache hit, no additional fetch
 	buf := make([]byte, 4096)
 	if _, err := tv.Read(path, buf, 0, 0); err != nil {
 		t.Fatalf("Read failed: %v", err)
