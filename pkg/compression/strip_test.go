@@ -99,28 +99,6 @@ func TestReplaceHTMLEntities(t *testing.T) {
 	}
 }
 
-func TestStripLongURLs(t *testing.T) {
-	short := "https://example.com/page"
-	long := "https://tracking.example.com/v2/lk/" + strings.Repeat("a", 120)
-
-	tests := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{"short URL kept", short, short},
-		{"long URL replaced", "click here: " + long, "click here: [link]"},
-		{"mixed", short + "\n" + long, short + "\n[link]"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := string(stripLongURLs([]byte(tt.in)))
-			if got != tt.want {
-				t.Errorf("got %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
 
 func TestStripURLOnlyLines(t *testing.T) {
 	tests := []struct {
@@ -363,10 +341,6 @@ func TestStripGmail(t *testing.T) {
 	assertNotContains(t, got, "quoted reply text")
 	assertNotContains(t, got, "On Mon, Jan 1 wrote:")
 
-	// Long URLs replaced
-	assertNotContains(t, got, "tracking.example.com")
-	assertContains(t, got, "[link]")
-
 	// URL budget: at most 3 URL-only lines
 	urlLineCount := 0
 	for _, line := range strings.Split(got, "\n") {
@@ -428,14 +402,21 @@ func TestStripSlack(t *testing.T) {
 		"hey team, standup notes:\n" +
 		"Reactions: thumbsup (3), heart (1)\n" +
 		"bob has joined the channel\n" +
+		"carol set the channel topic to \"standup\"\n" +
+		"dave uploaded a file: report.pdf\n" +
+		"I'll fix that (edited)\n" +
 		"Thread reply: sounds good!\n"
 
 	got := string(stripSlack([]byte(input)))
 
 	assertContains(t, got, "hey team, standup notes:")
+	assertContains(t, got, "I'll fix that")
 	assertContains(t, got, "Thread reply: sounds good!")
 	assertNotContains(t, got, "Reactions:")
 	assertNotContains(t, got, "has joined the channel")
+	assertNotContains(t, got, "set the channel topic")
+	assertNotContains(t, got, "uploaded a file")
+	assertNotContains(t, got, "(edited)")
 }
 
 func TestStripNotion(t *testing.T) {
@@ -555,6 +536,28 @@ func TestStripCompressor_Integration(t *testing.T) {
 		100.0*float64(result.OriginalTokens-result.CompressedTokens)/float64(result.OriginalTokens))
 }
 
+// TestStripCompressor_PostHog verifies PostHog JSON passes through unchanged.
+func TestStripCompressor_PostHog(t *testing.T) {
+	comp := NewStripCompressor(DefaultConfig())
+	input := `{
+  "id": 42,
+  "event": "page_view",
+  "properties": {
+    "url": "https://example.com/very/long/path/that/might/be/over/one/hundred/and/twenty/characters/if/we/kept/going/and/going/and/going/for/a/while",
+    "referrer": "https://google.com"
+  }
+}
+`
+	result, err := comp.Compress(context.Background(), []byte(input), ContentMeta{Integration: "posthog"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Content must be byte-identical (minus null bytes, which the input doesn't have).
+	if string(result.Data) != input {
+		t.Errorf("PostHog content was modified.\ngot:  %q\nwant: %q", result.Data, input)
+	}
+}
+
 // TestStripCompressor_UnknownIntegration verifies the default path works.
 func TestStripCompressor_UnknownIntegration(t *testing.T) {
 	comp := NewStripCompressor(DefaultConfig())
@@ -573,7 +576,6 @@ func TestStripCompressor_UnknownIntegration(t *testing.T) {
 	got := string(result.Data)
 	assertContains(t, got, "Some content")
 	assertContains(t, got, "More content")
-	assertContains(t, got, "[link]")
 	assertNotContains(t, got, "<b>")
 }
 

@@ -27,7 +27,7 @@ import (
 	grpcmd "google.golang.org/grpc/metadata"
 )
 
-const credCacheTTL = 5 * time.Minute // Cache credentials for 5 minutes
+const credCacheTTL = 5 * time.Minute  // Cache credentials for 5 minutes
 const connCacheTTL = 10 * time.Second // Cache connected integration set briefly
 
 // cachedCreds holds cached credentials with expiration
@@ -1036,7 +1036,6 @@ func (s *SourceService) readWithCompression(
 	offset, length int64,
 	strategyStr, session string,
 ) (*pb.SourceReadResponse, error) {
-	startMs := time.Now().UnixMilli()
 	wsExtId := auth.WorkspaceExtId(ctx)
 	if session == "" {
 		session = wsExtId // default session = workspace ID
@@ -1083,7 +1082,8 @@ func (s *SourceService) readWithCompression(
 				Str("strategy", strategyStr).Str("file", filename).
 				Int("original_tokens", ptr.OriginalTokens).Int("compressed_tokens", ptr.CompressedTokens).
 				Int("cached_bytes", len(cached)).
-				Msg("compression: cache hit — serving from Redis")
+				Msg("compression: cache hit — serving from cache")
+
 			event := buildEvent(nil, nil, compression.OutcomeCacheHit, "")
 			event.OriginalTokens = ptr.OriginalTokens
 			event.CompressedTokens = ptr.CompressedTokens
@@ -1125,8 +1125,6 @@ func (s *SourceService) readWithCompression(
 	defer cancel()
 
 	result, compErr := compressor.Compress(compCtx, rawContent, meta)
-
-	_ = startMs // consumed via result.DurationMs
 
 	// Determine outcome
 	var returnData []byte

@@ -17,7 +17,8 @@ make e2e
 ./e2e/run.sh fs       # FUSE filesystem mount
 ./e2e/run.sh tools    # Tool execution via filesystem
 ./e2e/run.sh context  # S3 context storage (LocalStack)
-./e2e/run.sh sources  # Integration sources (/sources)
+./e2e/run.sh sources      # Integration sources (/sources)
+./e2e/run.sh compression  # Compression strategy comparison
 ```
 
 ## Tests
@@ -31,6 +32,7 @@ make e2e
 | `context` | S3 read/write via LocalStack |
 | `sources` | Read-only integration filesystem (GitHub, Gmail, Notion, etc.) |
 | `smart` | Smart query filesystem (mkdir creates Gmail queries, etc.) |
+| `compression` | Read files raw vs strip vs passthrough, verify token reduction and cache |
 
 ## Requirements
 

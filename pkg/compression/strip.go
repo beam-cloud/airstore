@@ -15,7 +15,6 @@ import (
 
 var (
 	// Shared
-	reLongURL       = regexp.MustCompile(`https?://\S{120,}`)
 	reMailtoLine    = regexp.MustCompile(`(?m)^\s*mailto:\S+\s*$`)
 	reHTMLComment   = regexp.MustCompile(`<!--[\s\S]*?-->`)
 	reHTMLTag       = regexp.MustCompile(`</?[a-zA-Z][a-zA-Z0-9]*[^>]*>`)
@@ -41,8 +40,11 @@ var (
 	reDiffBlankAdd = regexp.MustCompile(`(?m)^[+-]\s*$`)
 
 	// Slack
-	reSlackReaction  = regexp.MustCompile(`(?m)^Reactions:.*$`)
-	reSlackJoinLeave = regexp.MustCompile(`(?mi)^.*(has joined|has left|was added to|was removed from) (the channel|#\S+).*$`)
+	reSlackReaction    = regexp.MustCompile(`(?m)^Reactions:.*$`)
+	reSlackJoinLeave   = regexp.MustCompile(`(?mi)^.*(has joined|has left|was added to|was removed from) (the channel|#\S+).*$`)
+	reSlackTopicSet    = regexp.MustCompile(`(?mi)^.*set the channel (topic|purpose|description).*$`)
+	reSlackFileUpload  = regexp.MustCompile(`(?mi)^.*uploaded a file:.*$`)
+	reSlackEdited      = regexp.MustCompile(`\s*\(edited\)\s*`)
 
 	// Notion
 	reNotionMeta = regexp.MustCompile(`(?m)^\*\*(URL|Created|Last edited):\*\*\s+.*$`)
@@ -89,7 +91,11 @@ func (s *StripCompressor) Compress(ctx context.Context, content []byte, meta Con
 	origTokens := s.counter.Count(content)
 
 	data := stripNullBytes(content)
-	switch strings.ToLower(meta.Integration) {
+	integration := strings.ToLower(meta.Integration)
+
+	switch integration {
+	case "posthog":
+		// Structured JSON — pass through unchanged.
 	case "gmail":
 		data = stripGmail(data)
 	case "github":
@@ -101,10 +107,12 @@ func (s *StripCompressor) Compress(ctx context.Context, content []byte, meta Con
 	case "linear":
 		data = stripLinear(data)
 	default:
-		data = stripLongURLs(data)
 		data = stripURLOnlyLines(data, 10)
 	}
-	data = cleanup(data)
+
+	if integration != "posthog" {
+		data = cleanup(data)
+	}
 
 	return &CompressionResult{
 		Data:             data,
@@ -135,7 +143,6 @@ func stripGmail(data []byte) []byte {
 	body = reQuotedLine.ReplaceAll(body, nil)
 	body = replaceHTMLEntities(body)
 	body = dropLines(body, gmailJunkLines)
-	body = stripLongURLs(body)
 	body = stripURLOnlyLines(body, 3)
 	body = collapseWhitespace(body)
 	body = truncateAtFooter(body, gmailFooterMarkers, 0.2)
@@ -156,6 +163,10 @@ func stripGitHub(data []byte) []byte {
 func stripSlack(data []byte) []byte {
 	data = reSlackReaction.ReplaceAll(data, nil)
 	data = reSlackJoinLeave.ReplaceAll(data, nil)
+	data = reSlackTopicSet.ReplaceAll(data, nil)
+	data = reSlackFileUpload.ReplaceAll(data, nil)
+	data = reSlackEdited.ReplaceAll(data, nil)
+	data = stripURLOnlyLines(data, 5)
 	return data
 }
 
@@ -203,11 +214,6 @@ func replaceHTMLEntities(data []byte) []byte {
 		"&quot;", `"`, "&apos;", "'",
 	)
 	return reHTMLEntity.ReplaceAll([]byte(r.Replace(string(data))), nil)
-}
-
-// stripLongURLs replaces tracking URLs (>120 chars) with [link].
-func stripLongURLs(data []byte) []byte {
-	return reLongURL.ReplaceAll(data, []byte("[link]"))
 }
 
 // stripURLOnlyLines keeps the first `budget` unique URL-only lines, drops the rest.
