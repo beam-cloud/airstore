@@ -71,3 +71,56 @@ make e2e
 │     S3      │                       │  (FUSE)     │
 └─────────────┘                       └─────────────┘
 ```
+
+---
+
+## Integration Tests (CI)
+
+The `integration_test.sh` script runs against the **production gateway** in CI
+(GitHub Actions) and can also be run locally. It does not require a k3d cluster.
+
+### Quick Start
+
+```bash
+# Run locally (requires an Airstore API key and a mounted filesystem)
+AIRSTORE_API_KEY=<your-token> bash e2e/integration_test.sh
+
+# Generate charts from results
+pip install matplotlib
+python e2e/plot_results.py e2e/results.json e2e/plots/
+```
+
+### What it tests
+
+| Phase | Description |
+|-------|-------------|
+| I/O Smoke | `ls`, `cat`, `stat` against the NFS mount (`/sources/gmail/...`) |
+| Compression A/B | Reads each file raw vs `strip` via HTTP API, asserts no inflation and min avg reduction |
+| Cache Consistency | Reads same file 3x with `strip`, asserts identical results |
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AIRSTORE_API_KEY` | (required) | Workspace auth token |
+| `AIRSTORE_GATEWAY_HTTP` | `https://api.airstore.ai` | HTTP API base URL |
+| `AIRSTORE_MOUNT` | `/tmp/airstore` | NFS mount point |
+| `AIRSTORE_QUERY_PATH` | `/sources/gmail/unread-emails` | Source path to test |
+| `COMPRESSION_MIN_REDUCTION` | `10` | Min avg % reduction (fail below) |
+| `RESULTS_JSON` | `e2e/results.json` | Output path for structured results |
+
+### Output
+
+- **`results.json`** — structured test results (uploaded as CI artifact)
+- **`plots/`** — PNG charts: bytes comparison, reduction %, latency, summary donut
+- **Job summary** — markdown table rendered in the GitHub Actions Summary tab
+
+### CI Workflow
+
+The `.github/workflows/integration.yml` workflow runs on PRs and pushes to `main`:
+
+1. Builds the CLI binary
+2. Mounts the filesystem via NFS backend (`--backend nfs`)
+3. Runs `integration_test.sh`
+4. Generates charts with `plot_results.py`
+5. Uploads results + plots as artifacts
