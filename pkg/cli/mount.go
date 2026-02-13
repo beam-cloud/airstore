@@ -26,12 +26,14 @@ import (
 )
 
 var (
-	mountVerbose bool
-	mountDaemon  bool
-	configPath   string
-	mountUID     uint32
-	mountGID     uint32
-	mountBackend string
+	mountVerbose     bool
+	mountDaemon      bool
+	configPath       string
+	mountUID         uint32
+	mountGID         uint32
+	mountBackend     string
+	mountCompression string
+	mountSession     string
 )
 
 var mountCmd = &cobra.Command{
@@ -54,6 +56,8 @@ func init() {
 	mountCmd.Flags().Uint32Var(&mountUID, "uid", 0, "File owner UID (default: current user)")
 	mountCmd.Flags().Uint32Var(&mountGID, "gid", 0, "File owner GID (default: current user)")
 	mountCmd.Flags().StringVar(&mountBackend, "backend", "", "Mount backend: fuse, nfs, or auto-detect (default)")
+	mountCmd.Flags().StringVar(&mountCompression, "compression", "", "Compression strategy: strip (omit to disable)")
+	mountCmd.Flags().StringVar(&mountSession, "session", "", "Custom access session ID for telemetry (default: workspace ID)")
 	rootCmd.AddCommand(mountCmd)
 }
 
@@ -72,6 +76,17 @@ func runMount(cmd *cobra.Command, args []string) error {
 	if err := os.MkdirAll(mountPoint, 0755); err != nil {
 		PrintFormattedError("Failed to create mount point", err)
 		return nil
+	}
+
+	// Validate compression strategy
+	if mountCompression != "" {
+		switch mountCompression {
+		case "strip":
+			// valid
+		default:
+			PrintFormattedError("Invalid compression strategy", fmt.Errorf("%q is not supported (valid: strip)", mountCompression))
+			return nil
+		}
 	}
 
 	// Check for local mode
@@ -130,6 +145,8 @@ func runMount(cmd *cobra.Command, args []string) error {
 			Uid:         uidPtr,
 			Gid:         gidPtr,
 			Backend:     mountBackend,
+			Compression: mountCompression,
+			Session:     mountSession,
 		})
 		if err != nil {
 			return err
@@ -150,7 +167,15 @@ func runMount(cmd *cobra.Command, args []string) error {
 		// Register all vnodes
 		fs.RegisterVNode(vnode.NewConfigVNode(effectiveGateway, authToken))
 		fs.RegisterVNode(vnode.NewToolsVNode(effectiveGateway, authToken, shim))
-		fs.RegisterVNode(vnode.NewSourcesVNode(conn, authToken))
+
+		var sourcesOpts []vnode.SourcesVNodeOption
+		if mountCompression != "" {
+			sourcesOpts = append(sourcesOpts, vnode.WithCompression(mountCompression))
+		}
+		if mountSession != "" {
+			sourcesOpts = append(sourcesOpts, vnode.WithSession(mountSession))
+		}
+		fs.RegisterVNode(vnode.NewSourcesVNode(conn, authToken, sourcesOpts...))
 		fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, authToken, types.PathSkills)) // /Skills
 		fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, authToken, types.PathMemory)) // /Memory
 		fs.RegisterVNode(vnode.NewTasksVNodeGRPC(conn, authToken))                     // /Tasks
@@ -179,7 +204,7 @@ func runMount(cmd *cobra.Command, args []string) error {
 		fmt.Printf("airstore: mounted at %s (gateway=%s, mode=%s)\n", mountPoint, effectiveGateway, mode)
 	} else {
 		PrintSuccessWithValue("Mounted", mountPoint)
-		printMountStatus(mountPoint, effectiveGateway, mode)
+		printMountStatus(mountPoint, effectiveGateway, mode, mountCompression)
 	}
 
 	// Run mount in background
@@ -249,13 +274,18 @@ func withMaybeSpinner(title string, fn func() error) error {
 	return withSpinner(title, fn)
 }
 
-func printMountStatus(mount, gateway, mode string) {
+func printMountStatus(mount, gateway, mode, compression string) {
 	fmt.Println()
 	fmt.Printf("  %s\n\n", BrandStyle.Render("airstore mounted"))
 
 	PrintKeyValue("Mount", mount)
 	PrintKeyValue("Gateway", gateway)
 	PrintKeyValue("Mode", mode)
+	if compression != "" {
+		PrintKeyValue("Compression", compression)
+	} else {
+		PrintKeyValue("Compression", "off")
+	}
 
 	fmt.Println()
 	fmt.Printf("  %s\n", DimStyle.Render("Available paths:"))

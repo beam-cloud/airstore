@@ -2,6 +2,8 @@ package services
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"path"
@@ -13,7 +15,9 @@ import (
 
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/common"
+	"github.com/beam-cloud/airstore/pkg/compression"
 	"github.com/beam-cloud/airstore/pkg/hooks"
+	"github.com/beam-cloud/airstore/pkg/instrumentation"
 	"github.com/beam-cloud/airstore/pkg/oauth"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/sources"
@@ -22,9 +26,10 @@ import (
 	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/singleflight"
+	grpcmd "google.golang.org/grpc/metadata"
 )
 
-const credCacheTTL = 5 * time.Minute // Cache credentials for 5 minutes
+const credCacheTTL = 5 * time.Minute  // Cache credentials for 5 minutes
 const connCacheTTL = 10 * time.Second // Cache connected integration set briefly
 
 // cachedCreds holds cached credentials with expiration
@@ -71,6 +76,12 @@ type SourceService struct {
 	queryGroup    singleflight.Group
 	hookStream    common.EventEmitter // optional: for emitting source change events
 	seenTracker   *hooks.SeenTracker  // optional: for detecting new query results
+
+	// Compression middleware (optional)
+	compressor      compression.ContextCompressor
+	compressedStore *compression.CompressedStore // nil when cache disabled
+	recorder        instrumentation.AccessRecorder
+	compressionCfg  compression.Config
 }
 
 // SourceServiceOption configures optional dependencies on SourceService.
@@ -84,6 +95,21 @@ func WithHookStream(emitter common.EventEmitter) SourceServiceOption {
 // WithSeenTracker sets the seen tracker for change detection.
 func WithSeenTracker(tracker *hooks.SeenTracker) SourceServiceOption {
 	return func(s *SourceService) { s.seenTracker = tracker }
+}
+
+// WithCompressionMiddleware sets the compression compressor, optional Redis cache, and recorder.
+func WithCompressionMiddleware(
+	compressor compression.ContextCompressor,
+	store *compression.CompressedStore, // nil when cache disabled
+	recorder instrumentation.AccessRecorder,
+	cfg compression.Config,
+) SourceServiceOption {
+	return func(s *SourceService) {
+		s.compressor = compressor
+		s.compressedStore = store
+		s.recorder = recorder
+		s.compressionCfg = cfg
+	}
 }
 
 // NewSourceService creates a new SourceService.
@@ -910,7 +936,8 @@ func (s *SourceService) findQueryAndFilename(ctx context.Context, workspaceId ui
 	return "", ""
 }
 
-// readSmartQueryResult reads content from a smart query result
+// readSmartQueryResult reads content from a smart query result, optionally
+// compressing via the compression middleware if enabled.
 func (s *SourceService) readSmartQueryResult(ctx context.Context, pctx *sources.ProviderContext, queryPath, filename string, offset, length int64) (*pb.SourceReadResponse, error) {
 	query, err := s.fsStore.GetQuery(ctx, pctx.WorkspaceId, queryPath)
 	if err != nil || query == nil {
@@ -945,6 +972,22 @@ func (s *SourceService) readSmartQueryResult(ctx context.Context, pctx *sources.
 		return &pb.SourceReadResponse{Ok: false, Error: "result not found"}, nil
 	}
 
+	// ---------------------------------------------------------------
+	// Compression middleware intercept
+	// ---------------------------------------------------------------
+	strategy, session := s.compressionMeta(ctx)
+	if strategy != "" {
+		if s.compressor != nil {
+			log.Debug().Str("strategy", strategy).Str("file", filename).Msg("compression: entering compressed read path")
+			return s.readWithCompression(ctx, pctx, executor, query.Integration, queryPath, filename, resultID, query.QuerySpec, offset, length, strategy, session)
+		}
+		log.Warn().Str("strategy", strategy).Msg("compression: requested but compressor not initialized")
+	}
+
+	// ---------------------------------------------------------------
+	// Standard (uncompressed) read path
+	// ---------------------------------------------------------------
+
 	// Try cached content first
 	if content, err := s.fsStore.GetResultContent(ctx, pctx.WorkspaceId, queryPath, resultID); err == nil && len(content) > 0 {
 		return readSlice(content, offset, length), nil
@@ -962,6 +1005,210 @@ func (s *SourceService) readSmartQueryResult(ctx context.Context, pctx *sources.
 	}
 
 	return readSlice(content, offset, length), nil
+}
+
+// compressionMeta extracts compression strategy and session from gRPC incoming metadata.
+func (s *SourceService) compressionMeta(ctx context.Context) (strategy, session string) {
+	md, ok := grpcmd.FromIncomingContext(ctx)
+	if !ok {
+		return "", ""
+	}
+	if vals := md.Get("x-airstore-compression"); len(vals) > 0 {
+		strategy = vals[0]
+	}
+	if vals := md.Get("x-airstore-session"); len(vals) > 0 {
+		session = vals[0]
+	}
+	return strategy, session
+}
+
+// readWithCompression handles the compressed read path:
+// 1. Check cache (if enabled)
+// 2. Fetch raw, compress with timeout, return immediately
+// 3. Record access event, dispatch async cache write (if enabled)
+//
+// querySpec is hashed into cache keys so that changing the smart query
+// automatically invalidates stale compressed content.
+func (s *SourceService) readWithCompression(
+	ctx context.Context,
+	pctx *sources.ProviderContext,
+	executor sources.QueryExecutor,
+	integration, queryPath, filename, resultID, querySpec string,
+	offset, length int64,
+	strategyStr, session string,
+) (*pb.SourceReadResponse, error) {
+	wsExtId := auth.WorkspaceExtId(ctx)
+	if session == "" {
+		session = wsExtId // default session = workspace ID
+	}
+
+	// Cache key includes a hash of the query spec so that changing the
+	// smart query automatically invalidates stale compressed content.
+	cacheResultID := resultID
+	if querySpec != "" {
+		h := sha256.Sum256([]byte(querySpec))
+		cacheResultID = resultID + ":" + hex.EncodeToString(h[:4])
+	}
+
+	meta := compression.ContentMeta{
+		Integration: integration,
+		QueryPath:   queryPath,
+		ResultID:    resultID,
+		Filename:    filename,
+	}
+
+	buildEvent := func(content []byte, result *compression.CompressionResult, outcome compression.Outcome, errMsg string) instrumentation.AccessEvent {
+		ev := instrumentation.AccessEvent{
+			Timestamp:   time.Now().UnixMilli(),
+			WorkspaceID: wsExtId,
+			SessionID:   session,
+			Path:        queryPath + "/" + filename,
+			Integration: integration,
+			QueryPath:   queryPath,
+			ResultID:    resultID,
+			Strategy:    strategyStr,
+			Outcome:     string(outcome),
+			ErrorMsg:    errMsg,
+		}
+		if content != nil {
+			ev.OriginalBytes = len(content)
+		}
+		if result != nil {
+			ev.OriginalTokens = result.OriginalTokens
+			ev.CompressedTokens = result.CompressedTokens
+			ev.CompressedBytes = len(result.Data)
+			ev.CompressionMs = result.DurationMs
+		}
+		return ev
+	}
+
+	// Step 1: Check content cache (only when enabled)
+	if s.compressedStore != nil {
+		if ptr := s.compressedStore.GetPointer(ctx, pctx.WorkspaceId, queryPath, cacheResultID, strategyStr); ptr != nil {
+			if cached := s.compressedStore.GetContent(ctx, pctx.WorkspaceId, queryPath, cacheResultID, strategyStr); cached != nil {
+				log.Debug().
+					Str("strategy", strategyStr).Str("file", filename).
+					Int("original_tokens", ptr.OriginalTokens).Int("compressed_tokens", ptr.CompressedTokens).
+					Int("cached_bytes", len(cached)).
+					Msg("compression: cache hit")
+
+				if s.recorder != nil {
+					ev := buildEvent(nil, nil, compression.OutcomeCacheHit, "")
+					ev.OriginalTokens = ptr.OriginalTokens
+					ev.CompressedTokens = ptr.CompressedTokens
+					ev.CompressedBytes = len(cached)
+					ev.OriginalBytes = ptr.Size
+					s.recorder.Record(ctx, ev)
+				}
+				return readSlice(cached, offset, length), nil
+			}
+			log.Debug().Str("strategy", strategyStr).Str("file", filename).Msg("compression: pointer hit but content expired, re-compressing")
+		}
+	}
+
+	// Step 2: Fetch raw content from provider (or cache)
+	var rawContent []byte
+	if content, err := s.fsStore.GetResultContent(ctx, pctx.WorkspaceId, queryPath, resultID); err == nil && len(content) > 0 {
+		rawContent = content
+	} else {
+		content, err := executor.ReadResult(ctx, pctx, resultID)
+		if err != nil {
+			return &pb.SourceReadResponse{Ok: false, Error: err.Error()}, nil
+		}
+		rawContent = content
+		// Cache raw content
+		if err := s.fsStore.StoreResultContent(ctx, pctx.WorkspaceId, queryPath, resultID, content); err != nil {
+			log.Warn().Err(err).Str("path", queryPath).Str("result", resultID).Msg("failed to cache result content")
+		}
+	}
+
+	// Step 3: Best-effort compress with timeout.
+	compressor := s.compressor
+	if reqStrategy := compression.Strategy(strategyStr); reqStrategy.Valid() && reqStrategy != s.compressor.Name() {
+		if perReq, err := compression.NewCompressor(reqStrategy, s.compressionCfg); err == nil {
+			compressor = perReq
+		}
+	}
+
+	timeout := s.compressionCfg.DefaultTimeout()
+	compCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	result, compErr := compressor.Compress(compCtx, rawContent, meta)
+
+	// Determine outcome
+	var returnData []byte
+	var outcome compression.Outcome
+	var errMsg string
+
+	switch {
+	case compErr != nil && compCtx.Err() != nil:
+		outcome = compression.OutcomeTimeout
+		errMsg = compCtx.Err().Error()
+		returnData = rawContent
+	case compErr != nil:
+		outcome = compression.OutcomeError
+		errMsg = compErr.Error()
+		returnData = rawContent
+	case result.Outcome == compression.OutcomeSkipped:
+		outcome = compression.OutcomeSkipped
+		returnData = rawContent
+	default:
+		outcome = compression.OutcomeCompressed
+		returnData = result.Data
+	}
+
+	// Log the compression result
+	logEvent := log.Debug().
+		Str("strategy", strategyStr).Str("file", filename).
+		Str("outcome", string(outcome)).
+		Int("original_bytes", len(rawContent))
+	if result != nil {
+		logEvent = logEvent.
+			Int("original_tokens", result.OriginalTokens).
+			Int("compressed_tokens", result.CompressedTokens).
+			Int("compressed_bytes", len(result.Data)).
+			Int64("duration_ms", result.DurationMs)
+		if result.OriginalTokens > 0 {
+			pct := 100.0 * float64(result.CompressedTokens) / float64(result.OriginalTokens)
+			logEvent = logEvent.Float64("token_ratio_pct", pct)
+		}
+	}
+	if errMsg != "" {
+		logEvent = logEvent.Str("error", errMsg)
+	}
+	logEvent.Msg("compression: result")
+
+	// Step 4: Record access event (always)
+	if s.recorder != nil {
+		s.recorder.Record(ctx, buildEvent(rawContent, result, outcome, errMsg))
+	}
+
+	// Step 5: Async Redis cache write (cache enabled + compression succeeded)
+	if s.compressedStore != nil && outcome == compression.OutcomeCompressed {
+		data := make([]byte, len(result.Data))
+		copy(data, result.Data)
+		store := s.compressedStore
+		wsID, qp, rID, strat := pctx.WorkspaceId, queryPath, cacheResultID, strategyStr
+		ptr := &compression.CompressedPointer{
+			OriginalTokens:   result.OriginalTokens,
+			CompressedTokens: result.CompressedTokens,
+			Strategy:         strategyStr,
+			CreatedAt:        time.Now().Unix(),
+			Size:             len(rawContent),
+		}
+		go func() {
+			ctx := context.Background()
+			if err := store.SetPointer(ctx, wsID, qp, rID, strat, ptr); err != nil {
+				log.Warn().Err(err).Msg("compression: failed to cache pointer")
+			}
+			if err := store.SetContent(ctx, wsID, qp, rID, strat, data); err != nil {
+				log.Warn().Err(err).Msg("compression: failed to cache content")
+			}
+		}()
+	}
+
+	return readSlice(returnData, offset, length), nil
 }
 
 // Readlink reads a symbolic link target
@@ -1590,6 +1837,23 @@ func (s *SourceService) ExecuteSmartQuery(ctx context.Context, req *pb.ExecuteSm
 			if resultId == "" {
 				return &pb.ExecuteSmartQueryResponse{Ok: false, Error: "file not found in query results"}, nil
 			}
+		}
+
+		// Check if compression is requested via gRPC metadata
+		strategyStr, session := s.compressionMeta(ctx)
+		if strategyStr != "" && s.compressor != nil {
+			log.Debug().
+				Str("strategy", strategyStr).Str("file", req.Filename).Str("path", req.Path).
+				Msg("compression: entering compressed read path (ExecuteSmartQuery)")
+			resp, err := s.readWithCompression(ctx, pctx, executor, query.Integration, req.Path, req.Filename, resultId, query.QuerySpec, 0, 0, strategyStr, session)
+			if err != nil {
+				return &pb.ExecuteSmartQueryResponse{Ok: false, Error: err.Error()}, nil
+			}
+			return &pb.ExecuteSmartQueryResponse{Ok: true, FileData: resp.Data}, nil
+		} else if strategyStr != "" {
+			log.Warn().
+				Str("strategy", strategyStr).Str("file", req.Filename).
+				Msg("compression: requested but compressor not initialized")
 		}
 
 		// Try cached content first

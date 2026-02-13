@@ -1,0 +1,53 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: Integration
+    # Skip on forked PRs where secrets are unavailable.
+    if: github.event_name == 'push' || !github.event.pull_request.head.repo.fork
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+          pip install matplotlib
+
+      - name: Run integration tests
+        env:
+          AIRSTORE_WS_TOKEN: ${{ secrets.AIRSTORE_WS_TOKEN }}
+          RESULTS_JSON: e2e/results.json
+        run: bash e2e/integration_test.sh
+
+      - name: Generate plots and summary
+        if: always()
+        run: |
+          mkdir -p e2e/plots
+          python e2e/plot_results.py e2e/results.json e2e/plots/ || true
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results
+          path: |
+            e2e/results.json
+            e2e/plots/
+          retention-days: 30

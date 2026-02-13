@@ -28,6 +28,8 @@ type Config struct {
 	Token       string
 	Verbose     bool
 	Backend     string // "fuse", "nfs", or "" for platform auto-detect
+	Compression string // compression strategy: "strip", "distill", "chain", or "" (disabled)
+	Session     string // custom access session ID; defaults to workspace ID if empty
 }
 
 type StateCallback func(State, error)
@@ -201,7 +203,15 @@ func (m *MountManager) createFilesystem(addr string) (*filesystem.Filesystem, *g
 	// Register all vnodes
 	fs.RegisterVNode(vnode.NewConfigVNode(addr, m.cfg.Token))
 	fs.RegisterVNode(vnode.NewToolsVNode(addr, m.cfg.Token, shim))
-	fs.RegisterVNode(vnode.NewSourcesVNode(conn, m.cfg.Token))
+
+	var sourcesOpts []vnode.SourcesVNodeOption
+	if m.cfg.Compression != "" {
+		sourcesOpts = append(sourcesOpts, vnode.WithCompression(m.cfg.Compression))
+	}
+	if m.cfg.Session != "" {
+		sourcesOpts = append(sourcesOpts, vnode.WithSession(m.cfg.Session))
+	}
+	fs.RegisterVNode(vnode.NewSourcesVNode(conn, m.cfg.Token, sourcesOpts...))
 	fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, m.cfg.Token, types.PathSkills))  // /Skills
 	fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, m.cfg.Token, types.PathMemory))  // /Memory
 	fs.RegisterVNode(vnode.NewTasksVNodeGRPC(conn, m.cfg.Token))                      // /Tasks

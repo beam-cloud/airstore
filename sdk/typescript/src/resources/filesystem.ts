@@ -53,6 +53,7 @@ export class Filesystem {
    * @param opts.path - File path to read.
    * @param opts.offset - Byte offset to start reading from.
    * @param opts.length - Number of bytes to read.
+   * @param opts.compression - Compression strategy: 'strip', 'distill', or 'chain'. Omit to disable.
    * @param options - Per-request overrides.
    * @returns File contents as a string.
    *
@@ -60,12 +61,18 @@ export class Filesystem {
    */
   async read(
     workspaceId: string,
-    opts: { path: string; offset?: number; length?: number },
+    opts: {
+      path: string;
+      offset?: number;
+      length?: number;
+      compression?: 'strip' | 'distill' | 'chain';
+    },
     options?: RequestOptions,
   ): Promise<string> {
     const params: Record<string, string> = { path: opts.path };
     if (opts.offset !== undefined) params['offset'] = String(opts.offset);
     if (opts.length !== undefined) params['length'] = String(opts.length);
+    if (opts.compression !== undefined) params['compression'] = opts.compression;
 
     const resp = await this.client.rawRequest(
       'GET',
