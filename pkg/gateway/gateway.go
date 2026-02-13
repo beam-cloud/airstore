@@ -374,10 +374,15 @@ func (g *Gateway) registerServices() error {
 	// Register gateway gRPC service (workspace/member/token/connection/task management)
 	var gatewayService *services.GatewayService
 	if g.BackendRepo != nil {
-		gatewayService := services.NewGatewayService(g.BackendRepo, g.s2Client, filesystemStore, g.eventBus, g.sourceRegistry)
+		gatewayService = services.NewGatewayService(g.BackendRepo, g.s2Client, filesystemStore, g.eventBus, g.sourceRegistry)
 		pb.RegisterGatewayServiceServer(g.grpcServer, gatewayService)
 		log.Info().Msg("gateway service registered")
 	}
+
+	// Register batched access-log ingestion service for mount-side logical reads.
+	accessIngestService := services.NewAccessIngestService(g.compressionRecorder, g.RedisClient)
+	pb.RegisterAccessLogServiceServer(g.grpcServer, accessIngestService)
+	log.Info().Msg("access ingest service registered")
 
 	// Register source providers
 	g.initSources()

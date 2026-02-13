@@ -47,8 +47,8 @@ func (g *AccessLogGroup) registerRoutes() {
 
 type listReadsResponse struct {
 	Reads      []instrumentation.AccessEvent `json:"reads"`
-	NextCursor string      `json:"next_cursor"`
-	HasMore    bool        `json:"has_more"`
+	NextCursor string                        `json:"next_cursor"`
+	HasMore    bool                          `json:"has_more"`
 }
 
 // ListReads returns a page of access log entries from S2.
@@ -147,11 +147,14 @@ type pathStats struct {
 
 type summaryResponse struct {
 	TotalReads       int                         `json:"total_reads"`
+	BackendReads     int                         `json:"backend_reads"`
+	CacheServedReads int                         `json:"cache_served_reads"`
 	OriginalTokens   int                         `json:"total_original_tokens"`
 	CompressedTokens int                         `json:"total_compressed_tokens"`
 	CompressionRatio float64                     `json:"compression_ratio"`
 	ByIntegration    map[string]integrationStats `json:"by_integration"`
 	ByOutcome        map[string]int              `json:"by_outcome"`
+	ByCacheSource    map[string]int              `json:"by_cache_source"`
 	TopPaths         []pathStats                 `json:"top_paths"`
 }
 
@@ -189,6 +192,7 @@ func (g *AccessLogGroup) GetSummary(c echo.Context) error {
 	summary := summaryResponse{
 		ByIntegration: make(map[string]integrationStats),
 		ByOutcome:     make(map[string]int),
+		ByCacheSource: make(map[string]int),
 	}
 	type pathAcc struct {
 		sourceURI   string
@@ -238,6 +242,14 @@ func (g *AccessLogGroup) GetSummary(c echo.Context) error {
 			if ev.Outcome != "" {
 				summary.ByOutcome[ev.Outcome]++
 			}
+			if ev.CacheSource != "" {
+				summary.ByCacheSource[ev.CacheSource]++
+			} else {
+				summary.ByCacheSource["unknown"]++
+			}
+			if ev.CacheSource == "backend_rpc" {
+				summary.BackendReads++
+			}
 
 			if ev.Path != "" {
 				pa, ok := pathCounts[ev.Path]
@@ -261,6 +273,7 @@ func (g *AccessLogGroup) GetSummary(c echo.Context) error {
 	if summary.OriginalTokens > 0 {
 		summary.CompressionRatio = float64(summary.CompressedTokens) / float64(summary.OriginalTokens)
 	}
+	summary.CacheServedReads = summary.TotalReads - summary.BackendReads
 
 	allPaths := make([]pathStats, 0, len(pathCounts))
 	for p, pa := range pathCounts {

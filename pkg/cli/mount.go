@@ -18,6 +18,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/filesystem/vnode/embed"
 	"github.com/beam-cloud/airstore/pkg/gateway"
 	"github.com/beam-cloud/airstore/pkg/types"
+	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/charmbracelet/huh/spinner"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -167,6 +168,14 @@ func runMount(cmd *cobra.Command, args []string) error {
 		conn, err = grpc.NewClient(effectiveGateway, dialOpts...)
 		if err != nil {
 			return err
+		}
+		if mountAccessLog {
+			fs.SetAccessCollector(filesystem.NewAccessCollector(
+				pb.NewAccessLogServiceClient(conn),
+				filesystem.AccessCollectorConfig{
+					AuthToken: authToken,
+				},
+			))
 		}
 
 		// Load shim binary for tools
@@ -318,7 +327,7 @@ func printMountStatus(mount, gateway, mode, compression string) {
 // The session may be empty, in which case the gateway defaults to workspace ID.
 func sessionInterceptor(session string) grpc.UnaryClientInterceptor {
 	return func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
-		ctx = metadata.AppendToOutgoingContext(ctx, "x-airstore-session", session)
+		ctx = metadata.AppendToOutgoingContext(ctx, "x-airstore-session", session, "x-airstore-access-origin", "fuse")
 		return invoker(ctx, method, req, reply, cc, opts...)
 	}
 }

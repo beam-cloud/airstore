@@ -2,6 +2,8 @@
  * A single read recorded in the access log.
  */
 export interface AccessLogRead {
+  /** Client-generated event ID (for dedupe/retry safety). */
+  event_id?: string;
   /** Unix millisecond timestamp of the read. */
   ts: number;
   /** Workspace external ID. */
@@ -10,6 +12,20 @@ export interface AccessLogRead {
   session_id: string;
   /** Virtual filesystem path that was read. */
   path: string;
+  /** Where read data came from ("backend_rpc", "open_content", "content_cache", etc.). */
+  cache_source?: string;
+  /** Requested read offset. */
+  offset?: number;
+  /** Requested bytes in this read call. */
+  requested_bytes?: number;
+  /** Returned bytes in this read call. */
+  read_bytes?: number;
+  /** End-to-end read latency in milliseconds. */
+  latency_ms?: number;
+  /** Mount identifier for client-emitted events. */
+  mount_id?: string;
+  /** Event origin (e.g., "fuse"). */
+  access_origin?: string;
   /** Integration that served the content (e.g., "github", "gmail"). */
   integration: string;
   /** Canonical upstream reference (e.g., "github://abc123", "gmail://msg-id"). */
@@ -100,10 +116,13 @@ export interface AccessLogSummaryParams {
  */
 export interface AccessLogSummary {
   total_reads: number;
+  backend_reads: number;
+  cache_served_reads: number;
   total_original_tokens: number;
   total_compressed_tokens: number;
   compression_ratio: number;
   by_integration: Record<string, IntegrationStats>;
   by_outcome: Record<string, number>;
+  by_cache_source: Record<string, number>;
   top_paths: PathStats[];
 }

@@ -238,7 +238,7 @@ func (f *billyFile) Read(p []byte) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	n, err := f.fs.Read(f.path, p, f.pos, f.fh)
+	n, _, err := f.fs.Read(f.path, p, f.pos, f.fh)
 	if err != nil {
 		return 0, err
 	}
@@ -251,7 +251,7 @@ func (f *billyFile) Read(p []byte) (int, error) {
 
 // ReadAt implements io.ReaderAt — reads without changing the file position.
 func (f *billyFile) ReadAt(p []byte, off int64) (int, error) {
-	n, err := f.fs.Read(f.path, p, off, f.fh)
+	n, _, err := f.fs.Read(f.path, p, off, f.fh)
 	if err != nil {
 		return n, err
 	}
@@ -347,7 +347,7 @@ func newBillyFileInfoFromDirEntry(e *DirEntry) *billyFileInfo {
 	}
 }
 
-func (fi *billyFileInfo) Name() string      { return fi.name }
+func (fi *billyFileInfo) Name() string       { return fi.name }
 func (fi *billyFileInfo) Size() int64        { return fi.size }
 func (fi *billyFileInfo) Mode() os.FileMode  { return fi.mode }
 func (fi *billyFileInfo) ModTime() time.Time { return fi.modTime }

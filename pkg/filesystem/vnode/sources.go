@@ -36,6 +36,7 @@ import (
 	pb "github.com/beam-cloud/airstore/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/proto"
 )
 
 const sourcesTimeout = 30 * time.Second
@@ -72,6 +73,7 @@ type cachedStat struct {
 // cachedContent holds open file content with a reference count.
 type cachedContent struct {
 	data     []byte
+	hint     *pb.SourceReadCostHint
 	cachedAt time.Time
 	refs     int
 }
@@ -166,6 +168,21 @@ func (v *SourcesVNode) ctx() (context.Context, context.CancelFunc) {
 	return ctx, cancel
 }
 
+func cloneCostHint(hint *pb.SourceReadCostHint) *pb.SourceReadCostHint {
+	if hint == nil {
+		return nil
+	}
+	cloned, ok := proto.Clone(hint).(*pb.SourceReadCostHint)
+	if !ok {
+		return nil
+	}
+	return cloned
+}
+
+func sourceAttribution(cacheSource string, hint *pb.SourceReadCostHint) *ReadAttribution {
+	return AttributionFromCostHint(cacheSource, hint)
+}
+
 // rel strips the /sources prefix
 func (v *SourcesVNode) rel(path string) string {
 	return strings.TrimPrefix(strings.TrimPrefix(path, SourcesPath), "/")
@@ -211,7 +228,7 @@ func (v *SourcesVNode) Getattr(path string) (*FileInfo, error) {
 	// prefetched content with the accurate size.
 	if info := v.getCachedStat(path); info != nil {
 		isDir := info.Mode&syscall.S_IFDIR != 0
-		_, hasContent := v.getOpenContent(path)
+		_, _, hasContent := v.getOpenContent(path)
 		if v.compression == "" || isDir || hasContent {
 			v.applyOpenContentSize(path, info)
 			return info, nil
@@ -285,7 +302,7 @@ func (v *SourcesVNode) Getattr(path string) (*FileInfo, error) {
 	parentPath := filepath.Dir(path)
 	if q := v.getQuery(ctx, parentPath); q != nil && q.OutputFormat == types.SmartQueryOutputFolder {
 		// Tier 1: already open or pre-fetched content — always accurate.
-		if data, ok := v.getOpenContent(path); ok {
+		if data, _, ok := v.getOpenContent(path); ok {
 			info := NewFileInfo(PathIno(path), int64(len(data)), 0644)
 			_, mtime, _ := v.getQueryResultMetaCached(q.Path, filepath.Base(path))
 			if mtime > 0 {
@@ -317,12 +334,12 @@ func (v *SourcesVNode) Getattr(path string) (*FileInfo, error) {
 		// wrong size causes null-byte padding or empty reads. By fetching
 		// here and caching in openContent, we report the exact byte count
 		// and avoid a redundant fetch in Open/Read.
-		data, err := v.fetchQueryResultContent(ctx, q, filename)
+		data, hint, err := v.fetchQueryResultContent(ctx, q, filename)
 		if err != nil || len(data) == 0 {
 			return nil, fs.ErrNotExist
 		}
 		// Cache for Open/Read to reuse (refs=0; retainOpenContent increments).
-		v.prefetchContent(path, data)
+		v.prefetchContent(path, data, hint)
 		info := NewFileInfo(PathIno(path), int64(len(data)), 0644)
 		// Try to get mtime from the readdir cache.
 		if _, cachedMtime, ok := v.getQueryResultMetaCached(q.Path, filename); ok && cachedMtime > 0 {
@@ -569,7 +586,7 @@ func (v *SourcesVNode) Open(path string, flags int) (FileHandle, error) {
 	path = filepath.Clean(path)
 
 	// Reuse cached open content when possible
-	if data, fh, ok := v.retainOpenContent(path); ok {
+	if data, _, fh, ok := v.retainOpenContent(path); ok {
 		v.cacheOpenStat(path, int64(len(data)), 0, time.Time{})
 		return fh, nil
 	}
@@ -577,7 +594,7 @@ func (v *SourcesVNode) Open(path string, flags int) (FileHandle, error) {
 	ctx, cancel := v.ctx()
 	defer cancel()
 
-	data, mode, mtime, ok, err := v.fetchContentForOpen(ctx, path)
+	data, hint, mode, mtime, ok, err := v.fetchContentForOpen(ctx, path)
 	if !ok {
 		return 0, nil
 	}
@@ -585,7 +602,7 @@ func (v *SourcesVNode) Open(path string, flags int) (FileHandle, error) {
 		return 0, err
 	}
 
-	fh := v.addOpenContent(path, data)
+	fh := v.addOpenContent(path, data, hint)
 	v.cacheOpenStat(path, int64(len(data)), mode, mtime)
 	return fh, nil
 }
@@ -598,9 +615,14 @@ func (v *SourcesVNode) Release(path string, fh FileHandle) error {
 
 // Read reads file data.
 func (v *SourcesVNode) Read(path string, buf []byte, off int64, fh FileHandle) (int, error) {
+	n, _, err := v.ReadWithAttribution(path, buf, off, fh)
+	return n, err
+}
+
+func (v *SourcesVNode) ReadWithAttribution(path string, buf []byte, off int64, fh FileHandle) (int, *ReadAttribution, error) {
 	// Serve from open content cache when available
-	if data, ok := v.getOpenContent(path); ok {
-		return copyFromOffset(buf, data, off), nil
+	if data, hint, ok := v.getOpenContent(path); ok {
+		return copyFromOffset(buf, data, off), sourceAttribution("open_content", hint), nil
 	}
 
 	ctx, cancel := v.ctx()
@@ -611,68 +633,78 @@ func (v *SourcesVNode) Read(path string, buf []byte, off int64, fh FileHandle) (
 	if integration != "" && subpath == types.SourceStatusFile {
 		data, err := v.readReadme(ctx, integration, off, int64(len(buf)))
 		if err != nil {
-			return 0, err
+			return 0, nil, err
 		}
-		return copy(buf, data), nil
+		return copy(buf, data), &ReadAttribution{CacheSource: "synthetic"}, nil
 	}
 
 	// Query metadata files (.query.as and .{name}.query.as)
 	if data, _, isMeta, err := v.queryMetaContent(ctx, path); isMeta {
 		if err != nil {
-			return 0, err
+			return 0, nil, err
 		}
-		return copyFromOffset(buf, data, off), nil
+		return copyFromOffset(buf, data, off), &ReadAttribution{CacheSource: "metadata"}, nil
 	}
 
 	// Smart query file (single-file mode)
 	if q := v.getQuery(ctx, path); q != nil && q.OutputFormat == types.SmartQueryOutputFile {
-		return v.readQueryFile(ctx, q, buf, off)
+		return v.readQueryFileWithAttribution(ctx, q, buf, off)
 	}
 
 	// File inside smart query folder (materialized result)
 	parentPath := filepath.Dir(path)
 	if q := v.getQuery(ctx, parentPath); q != nil && q.OutputFormat == types.SmartQueryOutputFolder {
-		return v.readQueryResult(ctx, q, filepath.Base(path), buf, off)
+		return v.readQueryResultWithAttribution(ctx, q, filepath.Base(path), buf, off)
 	}
 
 	// No native content fallback - only query results are readable
-	return 0, fs.ErrNotExist
+	return 0, nil, fs.ErrNotExist
 }
 
 // readQueryFile reads a single-file smart query result.
 func (v *SourcesVNode) readQueryFile(ctx context.Context, q *types.SmartQuery, buf []byte, off int64) (int, error) {
-	data, err := v.fetchQueryFileContent(ctx, q)
+	n, _, err := v.readQueryFileWithAttribution(ctx, q, buf, off)
+	return n, err
+}
+
+func (v *SourcesVNode) readQueryFileWithAttribution(ctx context.Context, q *types.SmartQuery, buf []byte, off int64) (int, *ReadAttribution, error) {
+	data, hint, err := v.fetchQueryFileContent(ctx, q)
 	if err != nil {
-		return 0, fs.ErrNotExist
+		return 0, nil, fs.ErrNotExist
 	}
-	return copyFromOffset(buf, data, off), nil
+	return copyFromOffset(buf, data, off), sourceAttribution("backend_rpc", hint), nil
 }
 
 // readQueryResult reads a specific file from query results.
 func (v *SourcesVNode) readQueryResult(ctx context.Context, q *types.SmartQuery, filename string, buf []byte, off int64) (int, error) {
-	data, err := v.fetchQueryResultContent(ctx, q, filename)
+	n, _, err := v.readQueryResultWithAttribution(ctx, q, filename, buf, off)
+	return n, err
+}
+
+func (v *SourcesVNode) readQueryResultWithAttribution(ctx context.Context, q *types.SmartQuery, filename string, buf []byte, off int64) (int, *ReadAttribution, error) {
+	data, hint, err := v.fetchQueryResultContent(ctx, q, filename)
 	if err != nil {
-		return 0, fs.ErrNotExist
+		return 0, nil, fs.ErrNotExist
 	}
-	return copyFromOffset(buf, data, off), nil
+	return copyFromOffset(buf, data, off), sourceAttribution("backend_rpc", hint), nil
 }
 
 // fetchContentViaRead calls the Read RPC on the gateway. All content reads
 // are routed through this method so the server-side access log interceptor
 // can record them, and the compression middleware can intercept when active.
-func (v *SourcesVNode) fetchContentViaRead(ctx context.Context, readPath string) ([]byte, error) {
+func (v *SourcesVNode) fetchContentViaRead(ctx context.Context, readPath string) ([]byte, *pb.SourceReadCostHint, error) {
 	resp, err := v.client.Read(ctx, &pb.SourceReadRequest{Path: readPath})
 	if err != nil || resp == nil || !resp.Ok || len(resp.Data) == 0 {
-		return nil, fs.ErrNotExist
+		return nil, nil, fs.ErrNotExist
 	}
-	return resp.Data, nil
+	return resp.Data, cloneCostHint(resp.CostHint), nil
 }
 
-func (v *SourcesVNode) fetchQueryFileContent(ctx context.Context, q *types.SmartQuery) ([]byte, error) {
+func (v *SourcesVNode) fetchQueryFileContent(ctx context.Context, q *types.SmartQuery) ([]byte, *pb.SourceReadCostHint, error) {
 	return v.fetchContentViaRead(ctx, strings.TrimPrefix(q.Path, SourcesPath+"/"))
 }
 
-func (v *SourcesVNode) fetchQueryResultContent(ctx context.Context, q *types.SmartQuery, filename string) ([]byte, error) {
+func (v *SourcesVNode) fetchQueryResultContent(ctx context.Context, q *types.SmartQuery, filename string) ([]byte, *pb.SourceReadCostHint, error) {
 	return v.fetchContentViaRead(ctx, strings.TrimPrefix(q.Path, SourcesPath+"/")+"/"+filename)
 }
 
@@ -723,51 +755,51 @@ func (v *SourcesVNode) getQueryResultMetaCached(queryPath, filename string) (siz
 	return 0, 0, false
 }
 
-func (v *SourcesVNode) fetchContentForOpen(ctx context.Context, path string) ([]byte, uint32, time.Time, bool, error) {
+func (v *SourcesVNode) fetchContentForOpen(ctx context.Context, path string) ([]byte, *pb.SourceReadCostHint, uint32, time.Time, bool, error) {
 	integration, subpath := v.parsePath(path)
 	if integration == "" {
-		return nil, 0, time.Time{}, false, nil
+		return nil, nil, 0, time.Time{}, false, nil
 	}
 
 	// Ignore macOS system files
 	if isSystemFile(integration) || (subpath != "" && isSystemFile(filepath.Base(subpath))) {
-		return nil, 0, time.Time{}, true, fs.ErrNotExist
+		return nil, nil, 0, time.Time{}, true, fs.ErrNotExist
 	}
 
 	// README.md at integration root
 	if subpath == types.SourceStatusFile {
 		data, err := v.readReadme(ctx, integration, 0, 0)
 		if err != nil {
-			return nil, 0, time.Time{}, true, err
+			return nil, nil, 0, time.Time{}, true, err
 		}
 		mode, mtime := v.readmeOpenInfo(path)
-		return data, mode, mtime, true, nil
+		return data, nil, mode, mtime, true, nil
 	}
 
 	// Query metadata files (.query.as and .{name}.query.as)
 	if data, mtime, isMeta, err := v.queryMetaContent(ctx, path); isMeta {
 		if err != nil {
-			return nil, 0, time.Time{}, true, err
+			return nil, nil, 0, time.Time{}, true, err
 		}
-		return data, syscall.S_IFREG | 0444, mtime, true, nil
+		return data, nil, syscall.S_IFREG | 0444, mtime, true, nil
 	}
 
 	// Smart query file (single-file mode)
 	if q := v.getQuery(ctx, path); q != nil && q.OutputFormat == types.SmartQueryOutputFile {
-		data, err := v.fetchQueryFileContent(ctx, q)
+		data, hint, err := v.fetchQueryFileContent(ctx, q)
 		if err != nil {
-			return nil, 0, time.Time{}, true, err
+			return nil, nil, 0, time.Time{}, true, err
 		}
-		return data, syscall.S_IFREG | 0644, smartQueryMtime(q), true, nil
+		return data, hint, syscall.S_IFREG | 0644, smartQueryMtime(q), true, nil
 	}
 
 	// File inside smart query folder (materialized result)
 	parentPath := filepath.Dir(path)
 	if q := v.getQuery(ctx, parentPath); q != nil && q.OutputFormat == types.SmartQueryOutputFolder {
 		filename := filepath.Base(path)
-		data, err := v.fetchQueryResultContent(ctx, q, filename)
+		data, hint, err := v.fetchQueryResultContent(ctx, q, filename)
 		if err != nil {
-			return nil, 0, time.Time{}, true, err
+			return nil, nil, 0, time.Time{}, true, err
 		}
 		mode := uint32(syscall.S_IFREG | 0644)
 		mtime := time.Time{}
@@ -782,10 +814,10 @@ func (v *SourcesVNode) fetchContentForOpen(ctx context.Context, path string) ([]
 		if mtime.IsZero() {
 			mtime = time.Now()
 		}
-		return data, mode, mtime, true, nil
+		return data, hint, mode, mtime, true, nil
 	}
 
-	return nil, 0, time.Time{}, false, nil
+	return nil, nil, 0, time.Time{}, false, nil
 }
 
 func (v *SourcesVNode) cacheOpenStat(path string, size int64, mode uint32, mtime time.Time) {
@@ -1174,17 +1206,17 @@ func (v *SourcesVNode) setCachedStat(path string, info *FileInfo) {
 
 // Open content cache helpers
 
-func (v *SourcesVNode) getOpenContent(path string) ([]byte, bool) {
+func (v *SourcesVNode) getOpenContent(path string) ([]byte, *pb.SourceReadCostHint, bool) {
 	v.openMu.RLock()
 	defer v.openMu.RUnlock()
 
 	if cached, ok := v.openContent[path]; ok {
-		return cached.data, true
+		return cached.data, cloneCostHint(cached.hint), true
 	}
-	return nil, false
+	return nil, nil, false
 }
 
-func (v *SourcesVNode) addOpenContent(path string, data []byte) FileHandle {
+func (v *SourcesVNode) addOpenContent(path string, data []byte, hint *pb.SourceReadCostHint) FileHandle {
 	v.openMu.Lock()
 	defer v.openMu.Unlock()
 
@@ -1196,6 +1228,7 @@ func (v *SourcesVNode) addOpenContent(path string, data []byte) FileHandle {
 		cached.refs++
 		if data != nil {
 			cached.data = data
+			cached.hint = cloneCostHint(hint)
 			cached.cachedAt = time.Now()
 		}
 		return fh
@@ -1203,32 +1236,33 @@ func (v *SourcesVNode) addOpenContent(path string, data []byte) FileHandle {
 
 	v.openContent[path] = &cachedContent{
 		data:     data,
+		hint:     cloneCostHint(hint),
 		cachedAt: time.Now(),
 		refs:     1,
 	}
 	return fh
 }
 
-func (v *SourcesVNode) retainOpenContent(path string) ([]byte, FileHandle, bool) {
+func (v *SourcesVNode) retainOpenContent(path string) ([]byte, *pb.SourceReadCostHint, FileHandle, bool) {
 	v.openMu.Lock()
 	defer v.openMu.Unlock()
 
 	cached, ok := v.openContent[path]
 	if !ok {
-		return nil, 0, false
+		return nil, nil, 0, false
 	}
 
 	// Don't reuse stale prefetched entries; let Open fetch fresh content.
 	if cached.refs == 0 && time.Since(cached.cachedAt) > prefetchTTL {
 		delete(v.openContent, path)
-		return nil, 0, false
+		return nil, nil, 0, false
 	}
 
 	fh := v.nextHandle
 	v.nextHandle++
 	v.openHandles[fh] = path
 	cached.refs++
-	return cached.data, fh, true
+	return cached.data, cloneCostHint(cached.hint), fh, true
 }
 
 func (v *SourcesVNode) releaseOpenContent(fh FileHandle) {
@@ -1264,7 +1298,7 @@ const prefetchTTL = 30 * time.Second
 //
 // Stale prefetched entries (refs=0, older than prefetchTTL) are lazily evicted
 // on each call to avoid unbounded memory growth from directory listings.
-func (v *SourcesVNode) prefetchContent(path string, data []byte) {
+func (v *SourcesVNode) prefetchContent(path string, data []byte, hint *pb.SourceReadCostHint) {
 	v.openMu.Lock()
 	defer v.openMu.Unlock()
 
@@ -1279,6 +1313,7 @@ func (v *SourcesVNode) prefetchContent(path string, data []byte) {
 	if _, ok := v.openContent[path]; !ok {
 		v.openContent[path] = &cachedContent{
 			data:     data,
+			hint:     cloneCostHint(hint),
 			cachedAt: now,
 			refs:     0, // No active Open; retainOpenContent increments to 1
 		}
@@ -1289,7 +1324,7 @@ func (v *SourcesVNode) applyOpenContentSize(path string, info *FileInfo) {
 	if info == nil {
 		return
 	}
-	if data, ok := v.getOpenContent(path); ok {
+	if data, _, ok := v.getOpenContent(path); ok {
 		info.Size = int64(len(data))
 	}
 }

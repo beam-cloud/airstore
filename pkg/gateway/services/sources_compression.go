@@ -75,6 +75,22 @@ func (s *SourceService) readWithCompression(
 		return ev
 	}
 
+	buildHint := func(ev instrumentation.AccessEvent) *pb.SourceReadCostHint {
+		return &pb.SourceReadCostHint{
+			Integration:      ev.Integration,
+			SourceUri:        ev.SourceURI,
+			QueryPath:        ev.QueryPath,
+			ResultId:         ev.ResultID,
+			Strategy:         ev.Strategy,
+			Outcome:          ev.Outcome,
+			OriginalBytes:    int32(ev.OriginalBytes),
+			CompressedBytes:  int32(ev.CompressedBytes),
+			OriginalTokens:   int32(ev.OriginalTokens),
+			CompressedTokens: int32(ev.CompressedTokens),
+			CompressionMs:    ev.CompressionMs,
+		}
+	}
+
 	// Check content cache
 	if s.compressedStore != nil {
 		if ptr := s.compressedStore.GetPointer(ctx, pctx.WorkspaceId, queryPath, cacheResultID, strategyStr); ptr != nil {
@@ -94,15 +110,17 @@ func (s *SourceService) readWithCompression(
 					st.Strategy = strategyStr
 				}
 
-				if s.recorder != nil {
-					ev := buildEvent(nil, nil, compression.OutcomeCacheHit, "")
-					ev.OriginalTokens = ptr.OriginalTokens
-					ev.CompressedTokens = ptr.CompressedTokens
-					ev.CompressedBytes = len(cached)
-					ev.OriginalBytes = ptr.Size
+				ev := buildEvent(nil, nil, compression.OutcomeCacheHit, "")
+				ev.OriginalTokens = ptr.OriginalTokens
+				ev.CompressedTokens = ptr.CompressedTokens
+				ev.CompressedBytes = len(cached)
+				ev.OriginalBytes = ptr.Size
+				if s.recorder != nil && !isFuseAccessOrigin(ctx) {
 					s.recorder.Record(ctx, ev)
 				}
-				return readSlice(cached, offset, length), nil
+				resp := readSlice(cached, offset, length)
+				resp.CostHint = buildHint(ev)
+				return resp, nil
 			}
 			log.Debug().Str("strategy", strategyStr).Str("file", filename).
 				Msg("compression: pointer hit but content expired, re-compressing")
@@ -177,8 +195,9 @@ func (s *SourceService) readWithCompression(
 	}
 	logEvent.Msg("compression: result")
 
-	if s.recorder != nil {
-		s.recorder.Record(ctx, buildEvent(rawContent, result, outcome, errMsg))
+	ev := buildEvent(rawContent, result, outcome, errMsg)
+	if s.recorder != nil && !isFuseAccessOrigin(ctx) {
+		s.recorder.Record(ctx, ev)
 	}
 
 	// Async write to cache
@@ -206,5 +225,7 @@ func (s *SourceService) readWithCompression(
 		}()
 	}
 
-	return readSlice(returnData, offset, length), nil
+	resp := readSlice(returnData, offset, length)
+	resp.CostHint = buildHint(ev)
+	return resp, nil
 }

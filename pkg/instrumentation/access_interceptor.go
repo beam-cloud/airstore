@@ -47,6 +47,12 @@ func (a *AccessLogInterceptor) Unary() grpc.UnaryServerInterceptor {
 			return handler(ctx, req)
 		}
 
+		// Mount-originated reads are recorded by the mount collector and flushed
+		// via AccessLogService. Skip interceptor logging to avoid duplicates.
+		if metaVal(ctx, "x-airstore-access-origin") == "fuse" {
+			return handler(ctx, req)
+		}
+
 		// Let the compression middleware record its own richer events.
 		if metaVal(ctx, "x-airstore-compression") != "" {
 			return handler(ctx, req)

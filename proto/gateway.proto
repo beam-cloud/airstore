@@ -46,10 +46,51 @@ service GatewayService {
   rpc ListHookRuns(ListHookRunsRequest) returns (ListHookRunsResponse);
 }
 
+// AccessLogService ingests batched logical read events from mounts.
+service AccessLogService {
+  rpc IngestAccessEvents(IngestAccessEventsRequest) returns (IngestAccessEventsResponse);
+}
+
 // Common
 message DeleteResponse {
   bool ok = 1;
   string error = 2;
+}
+
+message AccessLogEvent {
+  string event_id = 1;
+  int64 ts = 2;
+  string session_id = 3;
+  string path = 4;
+  string cache_source = 5;
+  int64 offset = 6;
+  int32 requested_bytes = 7;
+  int32 read_bytes = 8;
+  int64 latency_ms = 9;
+  string error_msg = 10;
+  string mount_id = 11;
+  string access_origin = 12;
+  string integration = 13;
+  string source_uri = 14;
+  string query_path = 15;
+  string result_id = 16;
+  int32 original_bytes = 17;
+  int32 compressed_bytes = 18;
+  int32 original_tokens = 19;
+  int32 compressed_tokens = 20;
+  string strategy = 21;
+  string outcome = 22;
+  int64 compression_ms = 23;
+}
+
+message IngestAccessEventsRequest {
+  repeated AccessLogEvent events = 1;
+}
+
+message IngestAccessEventsResponse {
+  bool ok = 1;
+  string error = 2;
+  int32 accepted = 3;
 }
 
 // Workspace messages

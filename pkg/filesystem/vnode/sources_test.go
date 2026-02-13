@@ -36,7 +36,7 @@ func TestSourcesVNode_Getattr_MaterializedResultUsesOpenContentSize(t *testing.T
 	// Simulate prefetched content (step 1). Getattr should use the
 	// actual content length (123), not the metadata size (999).
 	filePath := queryPath + "/example.txt"
-	v.prefetchContent(filePath, make([]byte, 123))
+	v.prefetchContent(filePath, make([]byte, 123), nil)
 
 	info, err := v.Getattr(filePath)
 	if err != nil {
