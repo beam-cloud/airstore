@@ -396,7 +396,7 @@ func (g *Gateway) registerServices() error {
 	var compStore *compression.CompressedStore
 	if g.Config.Compression.Strategy != "" {
 		compCfg := compression.Config{
-			Strategy:             compression.Strategy(g.Config.Compression.Strategy),
+			Strategy:             compression.CompressionStrategy(g.Config.Compression.Strategy),
 			CacheEnabled:         g.Config.Compression.CacheEnabled,
 			TokenThreshold:       g.Config.Compression.TokenThreshold,
 			MaxContentBytes:      g.Config.Compression.MaxContentBytes,

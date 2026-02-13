@@ -71,7 +71,7 @@ func (s *SourceService) readWithCompression(
 		return ev
 	}
 
-	// Check content cache.
+	// Check content cache
 	if s.compressedStore != nil {
 		if ptr := s.compressedStore.GetPointer(ctx, pctx.WorkspaceId, queryPath, cacheResultID, strategyStr); ptr != nil {
 			if cached := s.compressedStore.GetContent(ctx, pctx.WorkspaceId, queryPath, cacheResultID, strategyStr); cached != nil {
@@ -105,7 +105,7 @@ func (s *SourceService) readWithCompression(
 		}
 	}
 
-	// Fetch raw content from cache or provider.
+	// Fetch raw content from cache or provider
 	var rawContent []byte
 	if content, err := s.fsStore.GetResultContent(ctx, pctx.WorkspaceId, queryPath, resultID); err == nil && len(content) > 0 {
 		rawContent = content
@@ -122,7 +122,7 @@ func (s *SourceService) readWithCompression(
 
 	// Compress.
 	compressor := s.compressor
-	if reqStrategy := compression.Strategy(strategyStr); reqStrategy.Valid() && reqStrategy != s.compressor.Name() {
+	if reqStrategy := compression.CompressionStrategy(strategyStr); reqStrategy.Valid() && reqStrategy != s.compressor.Name() {
 		if perReq, err := compression.NewCompressor(reqStrategy, s.compressionCfg); err == nil {
 			compressor = perReq
 		}
@@ -157,6 +157,7 @@ func (s *SourceService) readWithCompression(
 		Str("strategy", strategyStr).Str("file", filename).
 		Str("outcome", string(outcome)).
 		Int("original_bytes", len(rawContent))
+
 	if result != nil {
 		logEvent = logEvent.
 			Int("original_tokens", result.OriginalTokens).
@@ -176,7 +177,7 @@ func (s *SourceService) readWithCompression(
 		s.recorder.Record(ctx, buildEvent(rawContent, result, outcome, errMsg))
 	}
 
-	// Async cache write.
+	// Async write to cache
 	if s.compressedStore != nil && outcome == compression.OutcomeCompressed {
 		data := make([]byte, len(result.Data))
 		copy(data, result.Data)
@@ -189,6 +190,7 @@ func (s *SourceService) readWithCompression(
 			CreatedAt:        time.Now().Unix(),
 			Size:             len(rawContent),
 		}
+
 		go func() {
 			bgCtx := context.Background()
 			if err := store.SetPointer(bgCtx, wsID, qp, rID, strat, ptr); err != nil {

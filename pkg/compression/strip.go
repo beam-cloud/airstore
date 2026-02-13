@@ -82,7 +82,7 @@ func NewStripCompressor(cfg Config) *StripCompressor {
 	return &StripCompressor{counter: newTokenCounter(cfg)}
 }
 
-func (s *StripCompressor) Name() Strategy { return StrategyStrip }
+func (s *StripCompressor) Name() CompressionStrategy { return CompressionStrategyStrip }
 
 func (s *StripCompressor) Compress(ctx context.Context, content []byte, meta ContentMeta) (*CompressionResult, error) {
 	start := time.Now()
@@ -116,16 +116,13 @@ func (s *StripCompressor) Compress(ctx context.Context, content []byte, meta Con
 		Data:             data,
 		OriginalTokens:   origTokens,
 		CompressedTokens: s.counter.Count(data),
-		Strategy:         StrategyStrip,
+		Strategy:         CompressionStrategyStrip,
 		Outcome:          OutcomeCompressed,
 		DurationMs:       time.Since(start).Milliseconds(),
 	}, nil
 }
 
-// ---------------------------------------------------------------------------
-// Per-source strippers. Each one knows the format and removes noise.
-// ---------------------------------------------------------------------------
-
+// Per-source strippers. Each one knows the format and tries to removes noise
 func stripGmail(data []byte) []byte {
 	header, body := splitAtMarker(data, "=== BODY ===")
 
@@ -175,10 +172,6 @@ func stripNotion(data []byte) []byte {
 func stripLinear(data []byte) []byte {
 	return reLinearMeta.ReplaceAll(data, nil)
 }
-
-// ---------------------------------------------------------------------------
-// Helpers — pure functions, no state, easy to test in isolation.
-// ---------------------------------------------------------------------------
 
 // stripNullBytes removes 0x00 padding from FUSE read buffers.
 func stripNullBytes(data []byte) []byte {

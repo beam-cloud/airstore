@@ -78,34 +78,41 @@ api_get() {
     curl -sf -H "Authorization: Bearer $TOKEN" "$BASE_URL$1"
 }
 
-# Like api_get but also captures response headers into $RESP_HEADERS.
-# Body goes to stdout. Usage: BODY=$(api_get_with_headers "/path")
-RESP_HEADERS=""
+# api_get_with_headers performs a GET and writes the response body and headers
+# to temp files. Avoids subshell so header values are accessible to the caller.
+#   Usage: api_get_with_headers "/path" && BODY=$(resp_body)
+_RESP_HEADERS_FILE=$(mktemp)
+_RESP_BODY_FILE=$(mktemp)
+trap 'rm -f "$_RESP_HEADERS_FILE" "$_RESP_BODY_FILE"' EXIT
+
 api_get_with_headers() {
-    local tmpheaders
-    tmpheaders=$(mktemp)
-    local body
-    body=$(curl -sf -D "$tmpheaders" -H "Authorization: Bearer $TOKEN" "$BASE_URL$1")
-    local rc=$?
-    RESP_HEADERS=$(cat "$tmpheaders" 2>/dev/null || true)
-    rm -f "$tmpheaders"
-    [ $rc -eq 0 ] && echo "$body"
-    return $rc
+    : > "$_RESP_HEADERS_FILE"
+    : > "$_RESP_BODY_FILE"
+    if curl -sf -D "$_RESP_HEADERS_FILE" -o "$_RESP_BODY_FILE" \
+        -H "Authorization: Bearer $TOKEN" "$BASE_URL$1"; then
+        return 0
+    else
+        return $?
+    fi
 }
 
-# Extract a header value from $RESP_HEADERS (case-insensitive).
+resp_body() { cat "$_RESP_BODY_FILE"; }
+
+# Extract a header value from the last api_get_with_headers call.
 header_val() {
-    echo "$RESP_HEADERS" | grep -i "^$1:" | head -1 | sed 's/^[^:]*: *//' | tr -d '\r\n'
+    grep -i "^$1:" "$_RESP_HEADERS_FILE" 2>/dev/null | head -1 | sed 's/^[^:]*: *//' | tr -d '\r\n'
 }
 
 api_post() {
     curl -sf -X POST -H "Authorization: Bearer $TOKEN" "$BASE_URL$1"
 }
 
-# Millisecond timer (linux date +%s%N, perl fallback for mac)
+# Millisecond timer (GNU date +%s%N on Linux, perl fallback for macOS)
 now_ms() {
-    if date +%s%N >/dev/null 2>&1 && [ "$(date +%s%N)" != "%s%N" ]; then
-        echo $(( $(date +%s%N) / 1000000 ))
+    local ns
+    ns=$(date +%s%N 2>/dev/null)
+    if [[ "$ns" =~ ^[0-9]+$ ]]; then
+        echo $(( ns / 1000000 ))
     else
         perl -MTime::HiRes=time -e 'printf "%d\n", time()*1000'
     fi
@@ -295,7 +302,10 @@ else
 
         # Read with strip compression (capture headers for real token counts)
         T0=$(now_ms)
-        STRIP_BODY=$(api_get_with_headers "/fs/read?path=$ENC_PATH&compression=strip" 2>/dev/null) || { fail "Strip read failed: $FNAME"; continue; }
+        if ! api_get_with_headers "/fs/read?path=$ENC_PATH&compression=strip" 2>/dev/null; then
+            fail "Strip read failed: $FNAME"; continue
+        fi
+        STRIP_BODY=$(resp_body)
         T1=$(now_ms)
         STRIP_MS=$((T1-T0))
         STRIP_BYTES=${#STRIP_BODY}
