@@ -786,6 +786,51 @@ func (s *SourceService) isIntegrationVisible(ctx context.Context, workspaceId ui
 }
 
 // ---------------------------------------------------------------------------
+// Direct source read by URI
+// ---------------------------------------------------------------------------
+
+// ReadBySourceURI fetches content directly from a provider using a source URI
+// of the form "integration://resultID". This bypasses the smart-folder layer
+// entirely, so it works even if the query results have changed since the
+// original read was recorded.
+func (s *SourceService) ReadBySourceURI(ctx context.Context, workspaceId uint, memberId uint, sourceURI string) ([]byte, error) {
+	integration, resultID, err := ParseSourceURI(sourceURI)
+	if err != nil {
+		return nil, err
+	}
+
+	provider := s.registry.Get(integration)
+	if provider == nil {
+		return nil, fmt.Errorf("unknown integration: %s", integration)
+	}
+
+	executor, ok := provider.(sources.QueryExecutor)
+	if !ok {
+		return nil, fmt.Errorf("integration %s does not support direct reads", integration)
+	}
+
+	pctx := &sources.ProviderContext{
+		WorkspaceId: workspaceId,
+		MemberId:    memberId,
+	}
+	pctx, connected := s.loadCredentials(ctx, pctx, integration)
+	if !connected || pctx.Credentials == nil {
+		return nil, fmt.Errorf("no credentials for integration %s", integration)
+	}
+
+	return executor.ReadResult(ctx, pctx, resultID)
+}
+
+// ParseSourceURI splits "integration://resultID" into its parts.
+func ParseSourceURI(uri string) (integration, resultID string, err error) {
+	idx := strings.Index(uri, "://")
+	if idx <= 0 || idx+3 >= len(uri) {
+		return "", "", fmt.Errorf("invalid source_uri: %q", uri)
+	}
+	return uri[:idx], uri[idx+3:], nil
+}
+
+// ---------------------------------------------------------------------------
 // Path & response helpers
 // ---------------------------------------------------------------------------
 

@@ -6,6 +6,7 @@ import { Tokens } from './resources/tokens.js';
 import { Members } from './resources/members.js';
 import { OAuth } from './resources/oauth.js';
 import { Filesystem } from './resources/filesystem.js';
+import { AccessLog } from './resources/access-log.js';
 
 /**
  * The Airstore SDK client.
@@ -109,6 +110,14 @@ export class Airstore extends CoreClient {
   readonly fs: Filesystem;
 
   /**
+   * Query the workspace access log.
+   *
+   * Every file read is recorded with token counts, compression outcome,
+   * and a source_uri that pins content back to its upstream origin.
+   */
+  readonly accessLog: AccessLog;
+
+  /**
    * Create a new Airstore SDK client.
    *
    * @param opts - Client configuration. At minimum, provide an `apiKey`
@@ -125,6 +134,7 @@ export class Airstore extends CoreClient {
     this.members = new Members(this);
     this.oauth = new OAuth(this);
     this.fs = new Filesystem(this);
+    this.accessLog = new AccessLog(this);
   }
 }
 

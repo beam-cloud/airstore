@@ -47,12 +47,16 @@ func (s *SourceService) readWithCompression(
 	}
 
 	buildEvent := func(content []byte, result *compression.CompressionResult, outcome compression.Outcome, errMsg string) instrumentation.AccessEvent {
+		// Build canonical source reference: {integration}://{resultID}
+		sourceURI := integration + "://" + resultID
+
 		ev := instrumentation.AccessEvent{
 			Timestamp:   time.Now().UnixMilli(),
 			WorkspaceID: wsExtId,
 			SessionID:   session,
 			Path:        queryPath + "/" + filename,
 			Integration: integration,
+			SourceURI:   sourceURI,
 			QueryPath:   queryPath,
 			ResultID:    resultID,
 			Strategy:    strategyStr,

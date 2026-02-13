@@ -8,10 +8,6 @@ import (
 	"github.com/beam-cloud/airstore/pkg/types"
 )
 
-// ---------------------------------------------------------------------------
-// Helper tests — each one is small, deterministic, no external deps.
-// ---------------------------------------------------------------------------
-
 func TestStripNullBytes(t *testing.T) {
 	tests := []struct {
 		name string
@@ -466,10 +462,6 @@ func TestStripLinear(t *testing.T) {
 	assertNotContains(t, got, "| Team |")
 	assertNotContains(t, got, "| Project |")
 }
-
-// ---------------------------------------------------------------------------
-// Integration test — exercises the full StripCompressor.Compress path.
-// ---------------------------------------------------------------------------
 
 func TestStripCompressor_Integration(t *testing.T) {
 	comp := NewStripCompressor(DefaultConfig())

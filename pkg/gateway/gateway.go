@@ -35,7 +35,6 @@ import (
 	"github.com/beam-cloud/airstore/pkg/scheduler"
 	"github.com/beam-cloud/airstore/pkg/sources"
 	"github.com/beam-cloud/airstore/pkg/sources/providers"
-	"github.com/beam-cloud/airstore/pkg/tasks"
 	"github.com/beam-cloud/airstore/pkg/tools"
 	_ "github.com/beam-cloud/airstore/pkg/tools/builtin" // self-registering tools
 	toolclients "github.com/beam-cloud/airstore/pkg/tools/clients"
@@ -456,7 +455,7 @@ func (g *Gateway) registerServices() error {
 		}
 
 		// Task factory (shared between HTTP API and hook evaluator)
-		taskFactory := tasks.NewFactory(g.BackendRepo, taskQueue, g.Config.Sandbox.GetDefaultImage())
+		taskFactory := hooks.NewTaskFactory(g.BackendRepo, taskQueue, g.Config.Sandbox.GetDefaultImage())
 
 		// Workspace CRUD endpoints (cluster admin or org tokens)
 		workspacesAdminGroup := g.baseRouteGroup.Group("/workspaces")
@@ -521,6 +520,11 @@ func (g *Gateway) registerServices() error {
 		cacheGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/cache")
 		cacheGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
 		apiv1.NewCacheGroup(cacheGroup, compStore)
+
+		// Access log API (nested under workspaces, workspace-scoped auth)
+		accessLogGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/access-log")
+		accessLogGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
+		apiv1.NewAccessLogGroup(accessLogGroup, g.BackendRepo, g.s2Client, sourceService)
 
 		// Tasks API
 		apiv1.NewTasksGroup(g.baseRouteGroup.Group("/tasks"), g.BackendRepo, taskQueue, g.s2Client, g.Config.Sandbox.GetDefaultImage())
