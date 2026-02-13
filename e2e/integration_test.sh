@@ -8,7 +8,7 @@
 #   AIRSTORE_WS_TOKEN=<token> bash e2e/integration_test.sh
 #
 # Environment:
-#   AIRSTORE_WS_TOKEN            (required)  Workspace auth token
+#   AIRSTORE_WS_TOKEN           (required)  Workspace auth token
 #   AIRSTORE_GATEWAY_HTTP       (optional)  HTTP API base, default https://api.airstore.ai
 #   AIRSTORE_QUERY_PATH         (optional)  Source path, default /sources/gmail/unread-emails
 #   COMPRESSION_MIN_REDUCTION   (optional)  Min avg % reduction, default 10
@@ -48,13 +48,17 @@ if [ -z "$TOKEN" ]; then
     exit 1
 fi
 
-# Resolve workspace ID from token
+# Resolve workspace ID from token via /auth/whoami
 info "Resolving workspace..."
-WORKSPACE=$(curl -sf -H "Authorization: Bearer $TOKEN" "$GATEWAY_HTTP/api/v1/workspaces" \
-    | jq -r '.data[0].external_id // .data[0].id // empty' 2>/dev/null)
+WHOAMI=$(curl -sf -H "Authorization: Bearer $TOKEN" "$GATEWAY_HTTP/api/v1/auth/whoami") || {
+    echo "ERROR: Failed to resolve token (is the gateway reachable?)"
+    exit 1
+}
+WORKSPACE=$(echo "$WHOAMI" | jq -r '.data.workspace_id // empty' 2>/dev/null)
 
 if [ -z "$WORKSPACE" ]; then
-    echo "ERROR: Could not resolve workspace ID from token"
+    echo "ERROR: Token did not resolve to a workspace"
+    echo "Response: $WHOAMI"
     exit 1
 fi
 

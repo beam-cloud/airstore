@@ -440,6 +440,11 @@ func (g *Gateway) registerServices() error {
 	pb.RegisterSourceServiceServer(g.grpcServer, sourceService)
 	log.Info().Int("providers", len(g.sourceRegistry.List())).Strs("available", g.sourceRegistry.List()).Msg("sources service registered")
 
+	// Auth introspection (any valid token)
+	if g.BackendRepo != nil {
+		apiv1.NewAuthGroup(g.baseRouteGroup.Group("/auth"), g.BackendRepo)
+	}
+
 	// Register task and workspace APIs (requires Postgres)
 	if g.BackendRepo != nil {
 		taskQueue := repository.NewRedisTaskQueue(g.RedisClient, "default")
