@@ -6,11 +6,13 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
 
 	"github.com/beam-cloud/airstore/pkg/filesystem/vnode"
+	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/rs/zerolog/log"
 )
@@ -47,6 +49,7 @@ type Config struct {
 	Backend     string  // "fuse", "nfs", or "" for platform auto-detect
 	Compression string  // compression strategy: "strip", "distill", "chain", or "" (disabled)
 	Session     string  // custom access session ID; defaults to workspace ID if empty
+	AccessLog   bool    // enable access logging; when false, no session header is sent
 }
 
 // Filesystem connects to the gateway via gRPC and exposes a virtual filesystem.
@@ -75,6 +78,10 @@ type Filesystem struct {
 	mounted   bool
 	destroyed bool // Set when Destroy() is called by FUSE layer
 	mu        sync.Mutex
+
+	accessCollector *AccessCollector
+	mountID         string
+	readSeq         uint64
 }
 
 // LegacyMetadataEngine provides filesystem metadata operations via gRPC.
@@ -134,6 +141,7 @@ func NewFilesystem(cfg Config) (*Filesystem, error) {
 		dirChildren:   expirable.NewLRU[string, map[string]struct{}](dirChildrenSize, nil, dirChildrenTTL),
 		negativeCache: expirable.NewLRU[string, struct{}](negativeCacheSize, nil, negativeCacheTTL),
 		backend:       NewBackend(backendName),
+		mountID:       fmt.Sprintf("mount-%d-%d", os.Getpid(), time.Now().UnixNano()),
 	}
 
 	if err := fs.initRoot(); err != nil {
@@ -151,6 +159,14 @@ func (f *Filesystem) RegisterVNode(node vnode.VirtualNode) {
 // SetStorageFallback sets the fallback vnode for unmatched storage paths
 func (f *Filesystem) SetStorageFallback(node vnode.VirtualNode) {
 	f.vnodes.SetFallback(node)
+}
+
+// SetAccessCollector sets the mount-side access collector used to flush
+// logical read events to the gateway.
+func (f *Filesystem) SetAccessCollector(collector *AccessCollector) {
+	f.mu.Lock()
+	f.accessCollector = collector
+	f.mu.Unlock()
 }
 
 func (f *Filesystem) initRoot() error {
@@ -256,12 +272,17 @@ func (f *Filesystem) Destroy() {
 		return
 	}
 	f.destroyed = true
+	collector := f.accessCollector
+	f.accessCollector = nil
 	f.mu.Unlock()
 
 	for _, vn := range f.vnodes.List() {
 		if c, ok := vn.(interface{ Cleanup() }); ok {
 			c.Cleanup()
 		}
+	}
+	if collector != nil {
+		collector.Close()
 	}
 }
 
@@ -512,21 +533,93 @@ func (f *Filesystem) Open(path string, flags int) (FileHandle, error) {
 	return 0, nil
 }
 
-func (f *Filesystem) Read(path string, buf []byte, off int64, fh FileHandle) (int, error) {
+func (f *Filesystem) Read(path string, buf []byte, off int64, fh FileHandle) (int, *vnode.ReadAttribution, error) {
 	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
-		return vn.Read(path, buf, off, vnode.FileHandle(fh))
+		if n, ok := vn.(vnode.ReadAttributionNode); ok {
+			return n.ReadWithAttribution(path, buf, off, vnode.FileHandle(fh))
+		}
+		n, err := vn.Read(path, buf, off, vnode.FileHandle(fh))
+		return n, vnode.AttributionForCache(vnode.CacheSourceUnknown), err
 	}
 
 	parent, name := splitPath(path)
 	meta, err := f.metadata.GetFileMetadata(f.resolveDir(parent), name)
 	if err != nil {
-		return 0, ErrNotFound
+		return 0, nil, ErrNotFound
 	}
 
 	if off >= int64(len(meta.FileData)) {
-		return 0, nil
+		return 0, vnode.AttributionForCache(vnode.CacheSourceLegacyMetadata), nil
 	}
-	return copy(buf, meta.FileData[off:]), nil
+	return copy(buf, meta.FileData[off:]), vnode.AttributionForCache(vnode.CacheSourceLegacyMetadata), nil
+}
+
+func (f *Filesystem) recordLogicalRead(
+	path string,
+	off int64,
+	requestedBytes int,
+	readBytes int,
+	latency time.Duration,
+	readErr error,
+	attr *vnode.ReadAttribution,
+) {
+	if !f.config.AccessLog {
+		return
+	}
+
+	f.mu.Lock()
+	collector := f.accessCollector
+	f.mu.Unlock()
+	if collector == nil {
+		return
+	}
+
+	normalizedPath := strings.TrimPrefix(path, "/")
+	if normalizedPath == "" {
+		normalizedPath = path
+	}
+
+	event := &pb.AccessLogEvent{
+		EventId:        fmt.Sprintf("%s-%d", f.mountID, atomic.AddUint64(&f.readSeq, 1)),
+		Ts:             time.Now().UnixMilli(),
+		SessionId:      f.config.Session,
+		Path:           normalizedPath,
+		Offset:         off,
+		RequestedBytes: int32(requestedBytes),
+		ReadBytes:      int32(readBytes),
+		LatencyMs:      latency.Milliseconds(),
+		MountId:        f.mountID,
+		AccessOrigin:   "fuse",
+		CacheSource:    vnode.CacheSourceUnknown,
+	}
+
+	if attr != nil {
+		if attr.CacheSource != "" {
+			event.CacheSource = attr.CacheSource
+		}
+		event.Integration = attr.Integration
+		event.SourceUri = attr.SourceURI
+		event.QueryPath = attr.QueryPath
+		event.ResultId = attr.ResultID
+		event.Strategy = attr.Strategy
+		event.Outcome = attr.Outcome
+		event.OriginalBytes = int64(attr.OriginalBytes)
+		event.CompressedBytes = int64(attr.CompressedBytes)
+		event.OriginalTokens = int64(attr.OriginalTokens)
+		event.CompressedTokens = int64(attr.CompressedTokens)
+		event.CompressionMs = attr.CompressionMs
+	}
+
+	if readErr != nil {
+		event.ErrorMsg = readErr.Error()
+		if event.Outcome == "" {
+			event.Outcome = "error"
+		}
+	} else if event.Outcome == "" {
+		event.Outcome = "passthrough"
+	}
+
+	collector.Record(event)
 }
 
 func (f *Filesystem) Release(path string, fh FileHandle) error {

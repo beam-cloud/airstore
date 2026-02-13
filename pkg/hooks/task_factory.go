@@ -1,4 +1,4 @@
-package tasks
+package hooks
 
 import (
 	"context"
@@ -10,18 +10,18 @@ import (
 )
 
 // Factory creates tasks, saves to Postgres, and pushes to the queue.
-type Factory struct {
+type TaskFactory struct {
 	backend repository.BackendRepository
 	queue   repository.TaskQueue
 	image   string // default sandbox image for Claude Code tasks
 }
 
-func NewFactory(backend repository.BackendRepository, queue repository.TaskQueue, defaultImage string) *Factory {
-	return &Factory{backend: backend, queue: queue, image: defaultImage}
+func NewTaskFactory(backend repository.BackendRepository, queue repository.TaskQueue, defaultImage string) *TaskFactory {
+	return &TaskFactory{backend: backend, queue: queue, image: defaultImage}
 }
 
 // CreateTask implements hooks.TaskCreator.
-func (f *Factory) CreateTask(ctx context.Context, workspaceId uint, createdByMemberId *uint, memberToken, prompt string, hookId uint, attempt, maxAttempts int) error {
+func (f *TaskFactory) CreateTask(ctx context.Context, workspaceId uint, createdByMemberId *uint, memberToken, prompt string, hookId uint, attempt, maxAttempts int) error {
 	image := f.image
 	if image == "" {
 		return fmt.Errorf("image or prompt required")

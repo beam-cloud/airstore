@@ -1046,3 +1046,93 @@ var GatewayService_ServiceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "gateway.proto",
 }
+
+const (
+	AccessLogService_IngestAccessEvents_FullMethodName = "/gateway.AccessLogService/IngestAccessEvents"
+)
+
+// AccessLogServiceClient is the client API for AccessLogService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type AccessLogServiceClient interface {
+	IngestAccessEvents(ctx context.Context, in *IngestAccessEventsRequest, opts ...grpc.CallOption) (*IngestAccessEventsResponse, error)
+}
+
+type accessLogServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewAccessLogServiceClient(cc grpc.ClientConnInterface) AccessLogServiceClient {
+	return &accessLogServiceClient{cc}
+}
+
+func (c *accessLogServiceClient) IngestAccessEvents(ctx context.Context, in *IngestAccessEventsRequest, opts ...grpc.CallOption) (*IngestAccessEventsResponse, error) {
+	out := new(IngestAccessEventsResponse)
+	err := c.cc.Invoke(ctx, AccessLogService_IngestAccessEvents_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// AccessLogServiceServer is the server API for AccessLogService service.
+// All implementations must embed UnimplementedAccessLogServiceServer
+// for forward compatibility
+type AccessLogServiceServer interface {
+	IngestAccessEvents(context.Context, *IngestAccessEventsRequest) (*IngestAccessEventsResponse, error)
+	mustEmbedUnimplementedAccessLogServiceServer()
+}
+
+// UnimplementedAccessLogServiceServer must be embedded to have forward compatible implementations.
+type UnimplementedAccessLogServiceServer struct {
+}
+
+func (UnimplementedAccessLogServiceServer) IngestAccessEvents(context.Context, *IngestAccessEventsRequest) (*IngestAccessEventsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method IngestAccessEvents not implemented")
+}
+func (UnimplementedAccessLogServiceServer) mustEmbedUnimplementedAccessLogServiceServer() {}
+
+// UnsafeAccessLogServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to AccessLogServiceServer will
+// result in compilation errors.
+type UnsafeAccessLogServiceServer interface {
+	mustEmbedUnimplementedAccessLogServiceServer()
+}
+
+func RegisterAccessLogServiceServer(s grpc.ServiceRegistrar, srv AccessLogServiceServer) {
+	s.RegisterService(&AccessLogService_ServiceDesc, srv)
+}
+
+func _AccessLogService_IngestAccessEvents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(IngestAccessEventsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AccessLogServiceServer).IngestAccessEvents(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AccessLogService_IngestAccessEvents_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AccessLogServiceServer).IngestAccessEvents(ctx, req.(*IngestAccessEventsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// AccessLogService_ServiceDesc is the grpc.ServiceDesc for AccessLogService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var AccessLogService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "gateway.AccessLogService",
+	HandlerType: (*AccessLogServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "IngestAccessEvents",
+			Handler:    _AccessLogService_IngestAccessEvents_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "gateway.proto",
+}

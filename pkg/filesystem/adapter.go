@@ -202,19 +202,18 @@ func (a *adapter) CreateEx(path string, mode uint32, fi *fuse.FileInfo_t) int {
 }
 
 func (a *adapter) Read(path string, buf []byte, off int64, fh uint64) int {
-	var start time.Time
-	if a.fs.trace != nil {
-		start = time.Now()
-	}
-	n, err := a.fs.Read(path, buf, off, FileHandle(fh))
+	start := time.Now()
+	n, attr, err := a.fs.Read(path, buf, off, FileHandle(fh))
+	elapsed := time.Since(start)
+	a.fs.recordLogicalRead(path, off, len(buf), n, elapsed, err, attr)
 	if err != nil {
 		if a.fs.trace != nil {
-			a.fs.trace.recordRead(path, time.Since(start), err)
+			a.fs.trace.recordRead(path, elapsed, err)
 		}
 		return toErrno(err)
 	}
 	if a.fs.trace != nil {
-		a.fs.trace.recordRead(path, time.Since(start), nil)
+		a.fs.trace.recordRead(path, elapsed, nil)
 	}
 	return n
 }

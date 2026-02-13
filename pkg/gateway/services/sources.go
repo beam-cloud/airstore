@@ -62,6 +62,8 @@ type SourceService struct {
 	compressedStore *compression.CompressedStore
 	recorder        instrumentation.AccessRecorder
 	compressionCfg  compression.Config
+	passthroughOnce sync.Once
+	passthroughComp compression.ContextCompressor
 }
 
 type SourceServiceOption func(*SourceService)
@@ -74,16 +76,18 @@ func WithSeenTracker(tracker *hooks.SeenTracker) SourceServiceOption {
 	return func(s *SourceService) { s.seenTracker = tracker }
 }
 
+func WithRecorder(recorder instrumentation.AccessRecorder) SourceServiceOption {
+	return func(s *SourceService) { s.recorder = recorder }
+}
+
 func WithCompressionMiddleware(
 	compressor compression.ContextCompressor,
 	store *compression.CompressedStore,
-	recorder instrumentation.AccessRecorder,
 	cfg compression.Config,
 ) SourceServiceOption {
 	return func(s *SourceService) {
 		s.compressor = compressor
 		s.compressedStore = store
-		s.recorder = recorder
 		s.compressionCfg = cfg
 	}
 }
@@ -412,7 +416,11 @@ func (s *SourceService) Read(ctx context.Context, req *pb.SourceReadRequest) (*p
 		if err != nil {
 			return &pb.SourceReadResponse{Ok: false, Error: err.Error()}, nil
 		}
-		return &pb.SourceReadResponse{Ok: true, Data: data}, nil
+		return &pb.SourceReadResponse{
+			Ok:       true,
+			Data:     data,
+			CostHint: s.passthroughCostHint(ctx, integration, "", relPath, relPath, data),
+		}, nil
 	}
 
 	return &pb.SourceReadResponse{Ok: false, Error: "file not found"}, nil
@@ -635,9 +643,11 @@ func (s *SourceService) readSmartQueryResult(ctx context.Context, pctx *sources.
 		log.Warn().Str("strategy", strategy).Msg("compression: requested but compressor not initialized")
 	}
 
-	// Standard read.
+	// Standard read (no compression).
 	if content, err := s.fsStore.GetResultContent(ctx, pctx.WorkspaceId, queryPath, resultID); err == nil && len(content) > 0 {
-		return readSlice(content, offset, length), nil
+		resp := readSlice(content, offset, length)
+		resp.CostHint = s.passthroughCostHint(ctx, query.Integration, queryPath, resultID, filename, resp.Data)
+		return resp, nil
 	}
 
 	content, err := executor.ReadResult(ctx, pctx, resultID)
@@ -647,7 +657,9 @@ func (s *SourceService) readSmartQueryResult(ctx context.Context, pctx *sources.
 	if err := s.fsStore.StoreResultContent(ctx, pctx.WorkspaceId, queryPath, resultID, content); err != nil {
 		log.Warn().Err(err).Str("path", queryPath).Str("result", resultID).Msg("failed to cache result content")
 	}
-	return readSlice(content, offset, length), nil
+	resp := readSlice(content, offset, length)
+	resp.CostHint = s.passthroughCostHint(ctx, query.Integration, queryPath, resultID, filename, resp.Data)
+	return resp, nil
 }
 
 // compressionMeta extracts compression strategy and session from gRPC metadata.
@@ -663,6 +675,74 @@ func (s *SourceService) compressionMeta(ctx context.Context) (strategy, session 
 		session = vals[0]
 	}
 	return strategy, session
+}
+
+func isFuseAccessOrigin(ctx context.Context) bool {
+	md, ok := grpcmd.FromIncomingContext(ctx)
+	if !ok {
+		return false
+	}
+	vals := md.Get("x-airstore-access-origin")
+	return len(vals) > 0 && vals[0] == "fuse"
+}
+
+func (s *SourceService) getPassthroughCompressor() compression.ContextCompressor {
+	s.passthroughOnce.Do(func() {
+		cfg := s.compressionCfg
+		if cfg.TokenEncoding == "" {
+			cfg.TokenEncoding = compression.DefaultConfig().TokenEncoding
+		}
+		comp, err := compression.NewCompressor(compression.CompressionStrategyPassthrough, cfg)
+		if err == nil {
+			s.passthroughComp = comp
+		}
+	})
+	return s.passthroughComp
+}
+
+func (s *SourceService) passthroughCostHint(
+	ctx context.Context,
+	integration, queryPath, resultID, filename string,
+	content []byte,
+) *pb.SourceReadCostHint {
+	sourceURI := ""
+	if integration != "" && resultID != "" {
+		sourceURI = integration + "://" + resultID
+	}
+	hint := &pb.SourceReadCostHint{
+		Integration:      integration,
+		SourceUri:        sourceURI,
+		QueryPath:        queryPath,
+		ResultId:         resultID,
+		Strategy:         string(compression.CompressionStrategyPassthrough),
+		Outcome:          string(compression.OutcomePassthrough),
+		OriginalBytes:    int64(len(content)),
+		CompressedBytes:  int64(len(content)),
+		OriginalTokens:   0,
+		CompressedTokens: 0,
+		CompressionMs:    0,
+	}
+
+	comp := s.getPassthroughCompressor()
+	if comp == nil {
+		return hint
+	}
+
+	res, err := comp.Compress(ctx, content, compression.ContentMeta{
+		Integration: integration,
+		QueryPath:   queryPath,
+		ResultID:    resultID,
+		Filename:    filename,
+	})
+	if err != nil || res == nil {
+		return hint
+	}
+	hint.Strategy = string(res.Strategy)
+	hint.Outcome = string(res.Outcome)
+	hint.OriginalTokens = int64(res.OriginalTokens)
+	hint.CompressedTokens = int64(res.CompressedTokens)
+	hint.CompressionMs = res.DurationMs
+	return hint
 }
 
 // findQueryAndFilename walks up the path to find the parent smart query folder.
@@ -783,6 +863,51 @@ func (s *SourceService) InvalidateConnectionCache(workspaceId uint) {
 func (s *SourceService) isIntegrationVisible(ctx context.Context, workspaceId uint, integration string) bool {
 	connSet := s.connectedIntegrations(ctx, workspaceId)
 	return connSet == nil || connSet[integration]
+}
+
+// ---------------------------------------------------------------------------
+// Direct source read by URI
+// ---------------------------------------------------------------------------
+
+// ReadBySourceURI fetches content directly from a provider using a source URI
+// of the form "integration://resultID". This bypasses the smart-folder layer
+// entirely, so it works even if the query results have changed since the
+// original read was recorded.
+func (s *SourceService) ReadBySourceURI(ctx context.Context, workspaceId uint, memberId uint, sourceURI string) ([]byte, error) {
+	integration, resultID, err := ParseSourceURI(sourceURI)
+	if err != nil {
+		return nil, err
+	}
+
+	provider := s.registry.Get(integration)
+	if provider == nil {
+		return nil, fmt.Errorf("unknown integration: %s", integration)
+	}
+
+	executor, ok := provider.(sources.QueryExecutor)
+	if !ok {
+		return nil, fmt.Errorf("integration %s does not support direct reads", integration)
+	}
+
+	pctx := &sources.ProviderContext{
+		WorkspaceId: workspaceId,
+		MemberId:    memberId,
+	}
+	pctx, connected := s.loadCredentials(ctx, pctx, integration)
+	if !connected || pctx.Credentials == nil {
+		return nil, fmt.Errorf("no credentials for integration %s", integration)
+	}
+
+	return executor.ReadResult(ctx, pctx, resultID)
+}
+
+// ParseSourceURI splits "integration://resultID" into its parts.
+func ParseSourceURI(uri string) (integration, resultID string, err error) {
+	idx := strings.Index(uri, "://")
+	if idx <= 0 || idx+3 >= len(uri) {
+		return "", "", fmt.Errorf("invalid source_uri: %q", uri)
+	}
+	return uri[:idx], uri[idx+3:], nil
 }
 
 // ---------------------------------------------------------------------------

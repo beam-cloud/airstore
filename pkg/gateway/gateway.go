@@ -35,7 +35,6 @@ import (
 	"github.com/beam-cloud/airstore/pkg/scheduler"
 	"github.com/beam-cloud/airstore/pkg/sources"
 	"github.com/beam-cloud/airstore/pkg/sources/providers"
-	"github.com/beam-cloud/airstore/pkg/tasks"
 	"github.com/beam-cloud/airstore/pkg/tools"
 	_ "github.com/beam-cloud/airstore/pkg/tools/builtin" // self-registering tools
 	toolclients "github.com/beam-cloud/airstore/pkg/tools/clients"
@@ -231,8 +230,17 @@ func (g *Gateway) initGRPC() error {
 	}
 	authInterceptor := auth.NewGRPCInterceptor(validator)
 
+	// Create access recorder (S2-backed or noop) — used by both the gRPC
+	// interceptor and the compression middleware.
+	if g.s2Client != nil {
+		g.compressionRecorder = instrumentation.NewEventFlusher(g.s2Client)
+	} else {
+		g.compressionRecorder = instrumentation.NewNoopRecorder()
+	}
+	accessInterceptor := instrumentation.NewAccessLogInterceptor(g.compressionRecorder)
+
 	serverOptions := []grpc.ServerOption{
-		grpc.UnaryInterceptor(authInterceptor.Unary()),
+		grpc.ChainUnaryInterceptor(authInterceptor.Unary(), accessInterceptor.Unary()),
 		grpc.StreamInterceptor(authInterceptor.Stream()),
 		grpc.MaxRecvMsgSize(g.Config.Gateway.GRPC.MaxRecvMsgSize * 1024 * 1024),
 		grpc.MaxSendMsgSize(g.Config.Gateway.GRPC.MaxSendMsgSize * 1024 * 1024),
@@ -366,10 +374,15 @@ func (g *Gateway) registerServices() error {
 	// Register gateway gRPC service (workspace/member/token/connection/task management)
 	var gatewayService *services.GatewayService
 	if g.BackendRepo != nil {
-		gatewayService := services.NewGatewayService(g.BackendRepo, g.s2Client, filesystemStore, g.eventBus, g.sourceRegistry)
+		gatewayService = services.NewGatewayService(g.BackendRepo, g.s2Client, filesystemStore, g.eventBus, g.sourceRegistry)
 		pb.RegisterGatewayServiceServer(g.grpcServer, gatewayService)
 		log.Info().Msg("gateway service registered")
 	}
+
+	// Register batched access-log ingestion service for mount-side logical reads.
+	accessService := services.NewAccessService(g.compressionRecorder, g.RedisClient)
+	pb.RegisterAccessLogServiceServer(g.grpcServer, accessService)
+	log.Info().Msg("access log service registered")
 
 	// Register source providers
 	g.initSources()
@@ -392,7 +405,10 @@ func (g *Gateway) registerServices() error {
 		os.Setenv("CEREBRAS_API_KEY", key)
 	}
 
-	// Wire compression middleware if a strategy is configured
+	// Wire compression middleware if a strategy is configured.
+	// The recorder is already on g.compressionRecorder (created in initGRPC).
+	recorder := g.compressionRecorder
+
 	var compStore *compression.CompressedStore
 	if g.Config.Compression.Strategy != "" {
 		compCfg := compression.Config{
@@ -411,22 +427,14 @@ func (g *Gateway) registerServices() error {
 			return fmt.Errorf("compression: %w", err)
 		}
 
-		// Access event recorder (always enabled)
-		var recorder instrumentation.AccessRecorder
-		if g.s2Client != nil {
-			recorder = instrumentation.NewEventFlusher(g.s2Client)
-		} else {
-			recorder = instrumentation.NewNoopRecorder()
-		}
-		g.compressionRecorder = recorder
-
 		// Compressed content cache (optional Redis cache, gated by config)
 		if compCfg.CacheEnabled && g.RedisClient != nil {
 			compStore = compression.NewCompressedStore(g.RedisClient, compCfg)
 			log.Info().Msg("compression cache enabled (Redis)")
 		}
 
-		hookOpts = append(hookOpts, services.WithCompressionMiddleware(compressor, compStore, recorder, compCfg))
+		hookOpts = append(hookOpts, services.WithRecorder(recorder))
+		hookOpts = append(hookOpts, services.WithCompressionMiddleware(compressor, compStore, compCfg))
 		log.Info().Str("strategy", g.Config.Compression.Strategy).Msg("compression middleware enabled")
 	}
 
@@ -456,7 +464,7 @@ func (g *Gateway) registerServices() error {
 		}
 
 		// Task factory (shared between HTTP API and hook evaluator)
-		taskFactory := tasks.NewFactory(g.BackendRepo, taskQueue, g.Config.Sandbox.GetDefaultImage())
+		taskFactory := hooks.NewTaskFactory(g.BackendRepo, taskQueue, g.Config.Sandbox.GetDefaultImage())
 
 		// Workspace CRUD endpoints (cluster admin or org tokens)
 		workspacesAdminGroup := g.baseRouteGroup.Group("/workspaces")
@@ -521,6 +529,11 @@ func (g *Gateway) registerServices() error {
 		cacheGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/cache")
 		cacheGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
 		apiv1.NewCacheGroup(cacheGroup, compStore)
+
+		// Access log API (nested under workspaces, workspace-scoped auth)
+		accessLogGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/access-log")
+		accessLogGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
+		apiv1.NewAccessLogGroup(accessLogGroup, g.BackendRepo, g.s2Client, sourceService)
 
 		// Tasks API
 		apiv1.NewTasksGroup(g.baseRouteGroup.Group("/tasks"), g.BackendRepo, taskQueue, g.s2Client, g.Config.Sandbox.GetDefaultImage())

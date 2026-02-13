@@ -89,10 +89,25 @@ message SourceReadRequest {
   int64 length = 3;  // 0 means read to end
 }
 
+message SourceReadCostHint {
+  string integration = 1;
+  string source_uri = 2;
+  string query_path = 3;
+  string result_id = 4;
+  string strategy = 5;
+  string outcome = 6;
+  int64 original_bytes = 7;
+  int64 compressed_bytes = 8;
+  int64 original_tokens = 9;
+  int64 compressed_tokens = 10;
+  int64 compression_ms = 11;
+}
+
 message SourceReadResponse {
   bool ok = 1;
   string error = 2;
   bytes data = 3;
+  SourceReadCostHint cost_hint = 4;
 }
 
 // Readlink
