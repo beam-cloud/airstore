@@ -45,28 +45,8 @@ func (g *AccessLogGroup) registerRoutes() {
 	g.routerGroup.GET("/read", g.ReadSource)
 }
 
-// readEntry is the JSON shape returned for each access log entry.
-type readEntry struct {
-	Timestamp        int64  `json:"ts"`
-	WorkspaceID      string `json:"workspace_id"`
-	SessionID        string `json:"session_id"`
-	Path             string `json:"path"`
-	Integration      string `json:"integration"`
-	SourceURI        string `json:"source_uri"`
-	QueryPath        string `json:"query_path,omitempty"`
-	ResultID         string `json:"result_id,omitempty"`
-	OriginalBytes    int    `json:"original_bytes"`
-	CompressedBytes  int    `json:"compressed_bytes"`
-	OriginalTokens   int    `json:"original_tokens"`
-	CompressedTokens int    `json:"compressed_tokens"`
-	Strategy         string `json:"strategy"`
-	Outcome          string `json:"outcome"`
-	CompressionMs    int64  `json:"compression_ms"`
-	ErrorMsg         string `json:"error_msg,omitempty"`
-}
-
 type listReadsResponse struct {
-	Reads      []readEntry `json:"reads"`
+	Reads      []instrumentation.AccessEvent `json:"reads"`
 	NextCursor string      `json:"next_cursor"`
 	HasMore    bool        `json:"has_more"`
 }
@@ -114,7 +94,7 @@ func (g *AccessLogGroup) ListReads(c echo.Context) error {
 		return ErrorResponse(c, http.StatusInternalServerError, "failed to read access log: "+err.Error())
 	}
 
-	reads := make([]readEntry, 0, limit)
+	reads := make([]instrumentation.AccessEvent, 0, limit)
 	var nextSeqNum int64 = cursor
 
 	for _, r := range records {
@@ -134,24 +114,7 @@ func (g *AccessLogGroup) ListReads(c echo.Context) error {
 			continue
 		}
 
-		reads = append(reads, readEntry{
-			Timestamp:        ev.Timestamp,
-			WorkspaceID:      ev.WorkspaceID,
-			SessionID:        ev.SessionID,
-			Path:             ev.Path,
-			Integration:      ev.Integration,
-			SourceURI:        ev.SourceURI,
-			QueryPath:        ev.QueryPath,
-			ResultID:         ev.ResultID,
-			OriginalBytes:    ev.OriginalBytes,
-			CompressedBytes:  ev.CompressedBytes,
-			OriginalTokens:   ev.OriginalTokens,
-			CompressedTokens: ev.CompressedTokens,
-			Strategy:         ev.Strategy,
-			Outcome:          ev.Outcome,
-			CompressionMs:    ev.CompressionMs,
-			ErrorMsg:         ev.ErrorMsg,
-		})
+		reads = append(reads, ev)
 
 		if int64(len(reads)) >= limit {
 			break
