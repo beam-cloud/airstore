@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/beam-cloud/airstore/pkg/instrumentation"
 	"github.com/beam-cloud/airstore/pkg/types"
 )
 
@@ -31,6 +32,15 @@ func (r *PostgresBackend) SaveConnection(ctx context.Context, workspaceId uint, 
 	if err != nil {
 		return nil, fmt.Errorf("save connection: %w", err)
 	}
+
+	if r.recorder != nil {
+		r.recorder.Record(ctx, instrumentation.NewEvent("connection.created", map[string]any{
+			"workspace_id":     workspaceId,
+			"integration_type": integrationType,
+			"scope":            scope,
+		}))
+	}
+
 	return &c, nil
 }
 

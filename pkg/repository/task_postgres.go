@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/beam-cloud/airstore/pkg/instrumentation"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/lib/pq"
 )
@@ -317,6 +318,15 @@ func (b *PostgresBackend) SetTaskResult(ctx context.Context, externalId string, 
 
 	if rowsAffected == 0 {
 		return &types.ErrTaskNotFound{ExternalId: externalId}
+	}
+
+	if b.recorder != nil {
+		b.recorder.Record(ctx, instrumentation.NewEvent("task.completed", map[string]any{
+			"task_ext_id": externalId,
+			"exit_code":   exitCode,
+			"status":      string(status),
+			"has_error":   errorMsg != "",
+		}))
 	}
 
 	return nil

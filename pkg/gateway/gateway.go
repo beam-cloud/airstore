@@ -70,6 +70,9 @@ type Gateway struct {
 
 	// Compression middleware (optional)
 	compressionRecorder instrumentation.AccessRecorder
+
+	// Product analytics event recorder
+	eventRecorder instrumentation.EventRecorder
 }
 
 func NewGateway() (*Gateway, error) {
@@ -133,6 +136,14 @@ func NewGateway() (*Gateway, error) {
 		log.Info().Str("basin", config.Streams.Basin).Msg("S2 log streaming enabled")
 	}
 
+	// Product analytics event recorder — always-on, writes structured JSON via zerolog.
+	eventRecorder := instrumentation.NewLogRecorder()
+
+	// Wire event recorder into Postgres backend for dual-path events.
+	if backendRepo != nil {
+		backendRepo.SetEventRecorder(eventRecorder)
+	}
+
 	gateway := &Gateway{
 		Config:         config,
 		RedisClient:    redisClient,
@@ -145,6 +156,7 @@ func NewGateway() (*Gateway, error) {
 		oauthStore:     oauth.NewStore(redisClient, 0),
 		oauthRegistry:  oauthRegistry,
 		s2Client:       s2Client,
+		eventRecorder:  eventRecorder,
 	}
 
 	return gateway, nil
@@ -238,9 +250,10 @@ func (g *Gateway) initGRPC() error {
 		g.compressionRecorder = instrumentation.NewNoopRecorder()
 	}
 	accessInterceptor := instrumentation.NewAccessLogInterceptor(g.compressionRecorder)
+	sessionInterceptor := instrumentation.NewSessionInterceptor(g.RedisClient, g.eventRecorder)
 
 	serverOptions := []grpc.ServerOption{
-		grpc.ChainUnaryInterceptor(authInterceptor.Unary(), accessInterceptor.Unary()),
+		grpc.ChainUnaryInterceptor(authInterceptor.Unary(), accessInterceptor.Unary(), sessionInterceptor.Unary()),
 		grpc.StreamInterceptor(authInterceptor.Stream()),
 		grpc.MaxRecvMsgSize(g.Config.Gateway.GRPC.MaxRecvMsgSize * 1024 * 1024),
 		grpc.MaxSendMsgSize(g.Config.Gateway.GRPC.MaxSendMsgSize * 1024 * 1024),
@@ -343,6 +356,7 @@ func (g *Gateway) registerServices() error {
 			g.storageClient = client
 			g.storageService = svc
 			svc.SetHookStream(hookEmitter)
+			svc.SetEventRecorder(g.eventRecorder)
 			pb.RegisterContextServiceServer(g.grpcServer, svc)
 		}
 	}
@@ -368,6 +382,7 @@ func (g *Gateway) registerServices() error {
 	} else {
 		toolService = services.NewToolService(g.toolRegistry)
 	}
+	toolService.SetEventRecorder(g.eventRecorder)
 	pb.RegisterToolServiceServer(g.grpcServer, toolService)
 	log.Info().Msg("tools service registered")
 
