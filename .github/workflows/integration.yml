@@ -32,7 +32,7 @@ jobs:
 
       - name: Run integration tests
         env:
-          AIRSTORE_API_KEY: ${{ secrets.AIRSTORE_API_KEY }}
+          AIRSTORE_WS_TOKEN: ${{ secrets.AIRSTORE_WS_TOKEN }}
           RESULTS_JSON: e2e/results.json
         run: bash e2e/integration_test.sh
 

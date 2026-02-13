@@ -5,10 +5,10 @@
 # Outputs structured results to RESULTS_JSON.
 #
 # Usage:
-#   AIRSTORE_API_KEY=<token> bash e2e/integration_test.sh
+#   AIRSTORE_WS_TOKEN=<token> bash e2e/integration_test.sh
 #
 # Environment:
-#   AIRSTORE_API_KEY            (required)  Workspace auth token
+#   AIRSTORE_WS_TOKEN            (required)  Workspace auth token
 #   AIRSTORE_GATEWAY_HTTP       (optional)  HTTP API base, default https://api.airstore.ai
 #   AIRSTORE_QUERY_PATH         (optional)  Source path, default /sources/gmail/unread-emails
 #   COMPRESSION_MIN_REDUCTION   (optional)  Min avg % reduction, default 10
@@ -20,7 +20,7 @@ set -euo pipefail
 # Config
 # ---------------------------------------------------------------------------
 
-TOKEN="${AIRSTORE_API_KEY:-}"
+TOKEN="${AIRSTORE_WS_TOKEN:-}"
 GATEWAY_HTTP="${AIRSTORE_GATEWAY_HTTP:-https://api.airstore.ai}"
 QUERY_PATH="${AIRSTORE_QUERY_PATH:-/sources/gmail/unread-emails}"
 MIN_REDUCTION="${COMPRESSION_MIN_REDUCTION:-10}"
@@ -44,7 +44,7 @@ info() { echo -e "  ${YELLOW}....${NC}  $1"; }
 # ---------------------------------------------------------------------------
 
 if [ -z "$TOKEN" ]; then
-    echo "ERROR: AIRSTORE_API_KEY is required"
+    echo "ERROR: AIRSTORE_WS_TOKEN is required"
     exit 1
 fi
 

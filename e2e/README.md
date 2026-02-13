@@ -84,7 +84,7 @@ require a k3d cluster or filesystem mount.
 
 ```bash
 # Run locally
-AIRSTORE_API_KEY=<your-token> bash e2e/integration_test.sh
+AIRSTORE_WS_TOKEN=<your-token> bash e2e/integration_test.sh
 
 # Generate charts from results
 pip install matplotlib
@@ -103,7 +103,7 @@ python e2e/plot_results.py e2e/results.json e2e/plots/
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AIRSTORE_API_KEY` | (required) | Workspace auth token |
+| `AIRSTORE_WS_TOKEN` | (required) | Workspace auth token |
 | `AIRSTORE_GATEWAY_HTTP` | `https://api.airstore.ai` | HTTP API base URL |
 | `AIRSTORE_QUERY_PATH` | `/sources/gmail/unread-emails` | Source path to test |
 | `COMPRESSION_MIN_REDUCTION` | `10` | Min avg % reduction (fail below) |
