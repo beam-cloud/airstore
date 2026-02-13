@@ -1117,7 +1117,9 @@ func (s *SourceService) readWithCompression(
 		}
 		rawContent = content
 		// Cache raw content
-		_ = s.fsStore.StoreResultContent(ctx, pctx.WorkspaceId, queryPath, resultID, content)
+		if err := s.fsStore.StoreResultContent(ctx, pctx.WorkspaceId, queryPath, resultID, content); err != nil {
+			log.Warn().Err(err).Str("path", queryPath).Str("result", resultID).Msg("failed to cache result content")
+		}
 	}
 
 	// Step 3: Best-effort compress with timeout.

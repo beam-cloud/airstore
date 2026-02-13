@@ -1091,6 +1091,12 @@ test_compression() {
         return
     fi
 
+    # Percent-encode a string for safe use in URL query values.
+    # Preserves '/' since the server expects path separators.
+    url_encode() {
+        python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe='/'))" "$1"
+    }
+
     api_get() {
         curl -sf -H "Authorization: Bearer $TOKEN" "$BASE_URL/api/v1/workspaces/$WORKSPACE$1"
     }
@@ -1099,7 +1105,7 @@ test_compression() {
     # Step 1: List files in the query path
     # -------------------------------------------------------------------------
     info "Listing files in $QUERY_PATH..."
-    LIST_JSON=$(api_get "/fs/list?path=$QUERY_PATH") || fail "List request failed"
+    LIST_JSON=$(api_get "/fs/list?path=$(url_encode "$QUERY_PATH")") || fail "List request failed"
     FILES=$(echo "$LIST_JSON" | jq -r '.data.entries[] | select(.is_folder==false and (.name | startswith(".")|not)) | .path' 2>/dev/null)
     FILE_COUNT=$(echo "$FILES" | grep -c . || true)
 
@@ -1122,12 +1128,14 @@ test_compression() {
     TOTAL_STRIP=0
     ERRORS=0
 
-    for FILE_PATH in $FILES; do
+    while IFS= read -r FILE_PATH; do
+        [ -z "$FILE_PATH" ] && continue
         FNAME=$(basename "$FILE_PATH")
 
-        RAW_BODY=$(api_get "/fs/read?path=$FILE_PATH" 2>/dev/null) || { ERRORS=$((ERRORS+1)); continue; }
-        STRIP_BODY=$(api_get "/fs/read?path=$FILE_PATH&compression=strip" 2>/dev/null) || { ERRORS=$((ERRORS+1)); continue; }
-        PASS_BODY=$(api_get "/fs/read?path=$FILE_PATH&compression=passthrough" 2>/dev/null) || true
+        ENC_PATH=$(url_encode "$FILE_PATH")
+        RAW_BODY=$(api_get "/fs/read?path=$ENC_PATH" 2>/dev/null) || { ERRORS=$((ERRORS+1)); continue; }
+        STRIP_BODY=$(api_get "/fs/read?path=$ENC_PATH&compression=strip" 2>/dev/null) || { ERRORS=$((ERRORS+1)); continue; }
+        PASS_BODY=$(api_get "/fs/read?path=$ENC_PATH&compression=passthrough" 2>/dev/null) || true
 
         RAW_BYTES=${#RAW_BODY}
         STRIP_BYTES=${#STRIP_BODY}
@@ -1148,7 +1156,7 @@ test_compression() {
             fi
             printf "  %-50s %8d %8d %8d  -%d%%\n" "${FNAME:0:50}" "$RAW_BYTES" "$STRIP_BYTES" "$PASS_BYTES" "$PCT"
         fi
-    done
+    done <<< "$FILES"
 
     echo "  $(printf '%0.s-' {1..80})"
     if [ "$TOTAL_RAW" -gt 0 ]; then

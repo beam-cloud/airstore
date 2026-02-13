@@ -1272,6 +1272,12 @@ func (v *SourcesVNode) retainOpenContent(path string) ([]byte, FileHandle, bool)
 		return nil, 0, false
 	}
 
+	// Don't reuse stale prefetched entries; let Open fetch fresh content.
+	if cached.refs == 0 && time.Since(cached.cachedAt) > prefetchTTL {
+		delete(v.openContent, path)
+		return nil, 0, false
+	}
+
 	fh := v.nextHandle
 	v.nextHandle++
 	v.openHandles[fh] = path
@@ -1302,16 +1308,32 @@ func (v *SourcesVNode) releaseOpenContent(fh FileHandle) {
 	}
 }
 
+// prefetchTTL is how long a prefetched entry (refs=0) survives without being
+// opened. Prevents unbounded accumulation from directory listings.
+const prefetchTTL = 30 * time.Second
+
 // prefetchContent stores content in the open content cache without creating a
 // file handle. Used by Getattr to pre-fetch content for accurate size reporting.
 // Open's retainOpenContent will find and reuse this cached content.
+//
+// Stale prefetched entries (refs=0, older than prefetchTTL) are lazily evicted
+// on each call to avoid unbounded memory growth from directory listings.
 func (v *SourcesVNode) prefetchContent(path string, data []byte) {
 	v.openMu.Lock()
 	defer v.openMu.Unlock()
+
+	// Lazy eviction: remove stale prefetched entries that were never opened.
+	now := time.Now()
+	for p, c := range v.openContent {
+		if c.refs == 0 && now.Sub(c.cachedAt) > prefetchTTL {
+			delete(v.openContent, p)
+		}
+	}
+
 	if _, ok := v.openContent[path]; !ok {
 		v.openContent[path] = &cachedContent{
 			data:     data,
-			cachedAt: time.Now(),
+			cachedAt: now,
 			refs:     0, // No active Open; retainOpenContent increments to 1
 		}
 	}

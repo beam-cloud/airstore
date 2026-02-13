@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")  # headless
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
@@ -27,6 +28,7 @@ import matplotlib.ticker as ticker
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def truncate(name: str, maxlen: int = 30) -> str:
     if len(name) <= maxlen:
@@ -44,6 +46,7 @@ def save(fig, path: str) -> None:
 # Chart 1: Bytes comparison (grouped bar)
 # ---------------------------------------------------------------------------
 
+
 def plot_bytes_comparison(files: list[dict], out: str) -> None:
     if not files:
         return
@@ -56,15 +59,28 @@ def plot_bytes_comparison(files: list[dict], out: str) -> None:
     fig, ax = plt.subplots(figsize=(max(8, len(files) * 0.8), 5))
     x = range(len(names))
     w = 0.35
-    ax.bar([i - w / 2 for i in x], raw, w, label="Raw", color="#9e9e9e", edgecolor="white")
-    ax.bar([i + w / 2 for i in x], strip, w, label="Strip", color="#1976d2", edgecolor="white")
+    ax.bar(
+        [i - w / 2 for i in x], raw, w, label="Raw", color="#9e9e9e", edgecolor="white"
+    )
+    ax.bar(
+        [i + w / 2 for i in x],
+        strip,
+        w,
+        label="Strip",
+        color="#1976d2",
+        edgecolor="white",
+    )
 
     ax.set_xlabel("File")
     ax.set_ylabel("Bytes")
     ax.set_title("Raw vs Strip: Byte Size per File")
     ax.set_xticks(list(x))
     ax.set_xticklabels(names, rotation=45, ha="right", fontsize=8)
-    ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda v, _: f"{v / 1000:.0f}k" if v >= 1000 else f"{v:.0f}"))
+    ax.yaxis.set_major_formatter(
+        ticker.FuncFormatter(
+            lambda v, _: f"{v / 1000:.0f}k" if v >= 1000 else f"{v:.0f}"
+        )
+    )
     ax.legend()
     fig.tight_layout()
     save(fig, out)
@@ -73,6 +89,7 @@ def plot_bytes_comparison(files: list[dict], out: str) -> None:
 # ---------------------------------------------------------------------------
 # Chart 2: Reduction % (horizontal bar)
 # ---------------------------------------------------------------------------
+
 
 def plot_reduction_pct(files: list[dict], threshold: int, out: str) -> None:
     if not files:
@@ -91,7 +108,13 @@ def plot_reduction_pct(files: list[dict], threshold: int, out: str) -> None:
 
     fig, ax = plt.subplots(figsize=(8, max(4, len(files) * 0.4)))
     ax.barh(names, pcts, color=colors, edgecolor="white")
-    ax.axvline(x=threshold, color="#f44336", linestyle="--", linewidth=1.5, label=f"Threshold ({threshold}%)")
+    ax.axvline(
+        x=threshold,
+        color="#f44336",
+        linestyle="--",
+        linewidth=1.5,
+        label=f"Threshold ({threshold}%)",
+    )
     ax.set_xlabel("Reduction %")
     ax.set_title("Compression Reduction per File")
     ax.legend(loc="lower right")
@@ -105,6 +128,7 @@ def plot_reduction_pct(files: list[dict], threshold: int, out: str) -> None:
 # Chart 3: Latency comparison (grouped bar)
 # ---------------------------------------------------------------------------
 
+
 def plot_latency_comparison(files: list[dict], out: str) -> None:
     if not files:
         return
@@ -115,8 +139,22 @@ def plot_latency_comparison(files: list[dict], out: str) -> None:
     fig, ax = plt.subplots(figsize=(max(8, len(files) * 0.8), 5))
     x = range(len(names))
     w = 0.35
-    ax.bar([i - w / 2 for i in x], raw_lat, w, label="Raw", color="#9e9e9e", edgecolor="white")
-    ax.bar([i + w / 2 for i in x], strip_lat, w, label="Strip", color="#1976d2", edgecolor="white")
+    ax.bar(
+        [i - w / 2 for i in x],
+        raw_lat,
+        w,
+        label="Raw",
+        color="#9e9e9e",
+        edgecolor="white",
+    )
+    ax.bar(
+        [i + w / 2 for i in x],
+        strip_lat,
+        w,
+        label="Strip",
+        color="#1976d2",
+        edgecolor="white",
+    )
 
     ax.set_xlabel("File")
     ax.set_ylabel("Latency (ms)")
@@ -131,6 +169,7 @@ def plot_latency_comparison(files: list[dict], out: str) -> None:
 # ---------------------------------------------------------------------------
 # Chart 4: Summary donut
 # ---------------------------------------------------------------------------
+
 
 def plot_summary_donut(total_raw: int, total_strip: int, out: str) -> None:
     if total_raw <= 0:
@@ -152,7 +191,15 @@ def plot_summary_donut(total_raw: int, total_strip: int, out: str) -> None:
         pctdistance=0.8,
         wedgeprops=dict(width=0.4, edgecolor="white"),
     )
-    ax.text(0, 0, f"{pct:.0f}%\nreduced", ha="center", va="center", fontsize=18, fontweight="bold")
+    ax.text(
+        0,
+        0,
+        f"{pct:.0f}%\nreduced",
+        ha="center",
+        va="center",
+        fontsize=18,
+        fontweight="bold",
+    )
     ax.set_title("Overall Compression Savings")
     fig.tight_layout()
     save(fig, out)
@@ -161,6 +208,7 @@ def plot_summary_donut(total_raw: int, total_strip: int, out: str) -> None:
 # ---------------------------------------------------------------------------
 # Chart 5: I/O test latency bar
 # ---------------------------------------------------------------------------
+
 
 def plot_io_latency(io_tests: list[dict], out: str) -> None:
     tests = [t for t in io_tests if t.get("latency_ms", 0) > 0]
@@ -183,6 +231,7 @@ def plot_io_latency(io_tests: list[dict], out: str) -> None:
 # ---------------------------------------------------------------------------
 # Markdown summary for GitHub Actions job summary
 # ---------------------------------------------------------------------------
+
 
 def write_summary(data: dict, plots_dir: str) -> str:
     io = data.get("io_tests", {})
@@ -227,7 +276,9 @@ def write_summary(data: dict, plots_dir: str) -> str:
     lines.append(f"| Total strip bytes | {comp.get('total_strip_bytes', 0):,} |")
     lines.append(f"| Average reduction | **{comp.get('avg_reduction_pct', 0)}%** |")
     lines.append(f"| Min threshold | {comp.get('min_reduction_pct', 0)}% |")
-    lines.append(f"| Cache consistent | {'Yes' if comp.get('cache_consistent') else 'No'} |")
+    lines.append(
+        f"| Cache consistent | {'Yes' if comp.get('cache_consistent') else 'No'} |"
+    )
     lines.append("")
 
     if files:
@@ -256,6 +307,7 @@ def write_summary(data: dict, plots_dir: str) -> str:
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main() -> int:
     if len(sys.argv) < 3:
         print(f"Usage: {sys.argv[0]} <results.json> <plots_dir/>")
@@ -282,8 +334,12 @@ def main() -> int:
 
     if files:
         plot_bytes_comparison(files, os.path.join(plots_dir, "bytes_comparison.png"))
-        plot_reduction_pct(files, threshold, os.path.join(plots_dir, "reduction_pct.png"))
-        plot_latency_comparison(files, os.path.join(plots_dir, "latency_comparison.png"))
+        plot_reduction_pct(
+            files, threshold, os.path.join(plots_dir, "reduction_pct.png")
+        )
+        plot_latency_comparison(
+            files, os.path.join(plots_dir, "latency_comparison.png")
+        )
         plot_summary_donut(
             comp.get("total_raw_bytes", 0),
             comp.get("total_strip_bytes", 0),

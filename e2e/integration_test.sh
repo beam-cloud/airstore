@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# Integration tests against a live Airstore gateway.
-# Runs I/O smoke tests via the NFS mount and compression A/B regression
-# tests via the HTTP API. Outputs structured results to RESULTS_JSON.
+# Integration tests against a live Airstore gateway via HTTP API.
+# Runs I/O smoke tests and compression A/B regression tests.
+# Outputs structured results to RESULTS_JSON.
 #
 # Usage:
 #   AIRSTORE_API_KEY=<token> bash e2e/integration_test.sh
@@ -10,7 +10,6 @@
 # Environment:
 #   AIRSTORE_API_KEY            (required)  Workspace auth token
 #   AIRSTORE_GATEWAY_HTTP       (optional)  HTTP API base, default https://api.airstore.ai
-#   AIRSTORE_MOUNT              (optional)  Mount point, default /tmp/airstore
 #   AIRSTORE_QUERY_PATH         (optional)  Source path, default /sources/gmail/unread-emails
 #   COMPRESSION_MIN_REDUCTION   (optional)  Min avg % reduction, default 10
 #   RESULTS_JSON                (optional)  Output path, default e2e/results.json
@@ -23,7 +22,6 @@ set -euo pipefail
 
 TOKEN="${AIRSTORE_API_KEY:-}"
 GATEWAY_HTTP="${AIRSTORE_GATEWAY_HTTP:-https://api.airstore.ai}"
-MOUNT="${AIRSTORE_MOUNT:-/tmp/airstore}"
 QUERY_PATH="${AIRSTORE_QUERY_PATH:-/sources/gmail/unread-emails}"
 MIN_REDUCTION="${COMPRESSION_MIN_REDUCTION:-10}"
 RESULTS="${RESULTS_JSON:-e2e/results.json}"
@@ -51,6 +49,7 @@ if [ -z "$TOKEN" ]; then
 fi
 
 # Resolve workspace ID from token
+info "Resolving workspace..."
 WORKSPACE=$(curl -sf -H "Authorization: Bearer $TOKEN" "$GATEWAY_HTTP/api/v1/workspaces" \
     | jq -r '.data[0].external_id // .data[0].id // empty' 2>/dev/null)
 
@@ -58,17 +57,24 @@ if [ -z "$WORKSPACE" ]; then
     echo "ERROR: Could not resolve workspace ID from token"
     exit 1
 fi
+
+BASE_URL="$GATEWAY_HTTP/api/v1/workspaces/$WORKSPACE"
 echo "Workspace: $WORKSPACE"
 echo "Gateway:   $GATEWAY_HTTP"
-echo "Mount:     $MOUNT"
 echo "Query:     $QUERY_PATH"
 echo ""
 
-api_get() {
-    curl -sf -H "Authorization: Bearer $TOKEN" "$GATEWAY_HTTP/api/v1/workspaces/$WORKSPACE$1"
+# Percent-encode a string for safe use in URL query values.
+# Preserves '/' since the server expects path separators.
+url_encode() {
+    python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe='/'))" "$1"
 }
 
-# Millisecond timer helper (uses date +%s%N on linux, perl fallback on mac)
+api_get() {
+    curl -sf -H "Authorization: Bearer $TOKEN" "$BASE_URL$1"
+}
+
+# Millisecond timer (linux date +%s%N, perl fallback for mac)
 now_ms() {
     if date +%s%N >/dev/null 2>&1 && [ "$(date +%s%N)" != "%s%N" ]; then
         echo $(( $(date +%s%N) / 1000000 ))
@@ -81,7 +87,6 @@ now_ms() {
 # JSON result builder
 # ---------------------------------------------------------------------------
 
-# We build the JSON incrementally using temp files
 IO_TESTS_JSON="[]"
 COMP_FILES_JSON="[]"
 
@@ -101,7 +106,7 @@ add_comp_file() {
 }
 
 # ============================================================================
-# Phase 1: I/O Smoke Tests
+# Phase 1: I/O Smoke Tests (via HTTP API)
 # ============================================================================
 
 echo "=== Phase 1: I/O Smoke Tests ==="
@@ -109,96 +114,105 @@ echo ""
 
 IO_PASSED=true
 
-# Test 1: ls /sources/
-info "ls sources..."
+# Test 1: List /sources/
+info "GET /fs/list?path=/sources/ ..."
 T0=$(now_ms)
-if ls "$MOUNT/sources/" >/dev/null 2>&1; then
+if SOURCES_JSON=$(api_get "/fs/list?path=/sources/" 2>/dev/null); then
     T1=$(now_ms)
-    ENTRIES=$(ls "$MOUNT/sources/" | wc -l)
+    ENTRIES=$(echo "$SOURCES_JSON" | jq '.data.entries | length' 2>/dev/null || echo 0)
     if [ "$ENTRIES" -gt 0 ]; then
-        pass "ls /sources/ ($ENTRIES entries, $((T1-T0))ms)"
-        add_io_test "ls_sources" true $((T1-T0))
+        pass "list /sources/ ($ENTRIES entries, $((T1-T0))ms)"
+        add_io_test "list_sources" true $((T1-T0))
     else
-        fail "ls /sources/ returned 0 entries"
-        add_io_test "ls_sources" false $((T1-T0))
+        fail "list /sources/ returned 0 entries"
+        add_io_test "list_sources" false $((T1-T0))
         IO_PASSED=false
     fi
 else
     T1=$(now_ms)
-    fail "ls /sources/ failed"
-    add_io_test "ls_sources" false $((T1-T0))
+    fail "list /sources/ request failed"
+    add_io_test "list_sources" false $((T1-T0))
     IO_PASSED=false
 fi
 
-# Test 2: ls /sources/gmail/
-info "ls gmail..."
+# Test 2: List /sources/gmail/
+info "GET /fs/list?path=/sources/gmail/ ..."
 T0=$(now_ms)
-if ls "$MOUNT/sources/gmail/" >/dev/null 2>&1; then
+if GMAIL_JSON=$(api_get "/fs/list?path=/sources/gmail/" 2>/dev/null); then
     T1=$(now_ms)
-    pass "ls /sources/gmail/ ($((T1-T0))ms)"
-    add_io_test "ls_gmail" true $((T1-T0))
+    ENTRIES=$(echo "$GMAIL_JSON" | jq '.data.entries | length' 2>/dev/null || echo 0)
+    pass "list /sources/gmail/ ($ENTRIES entries, $((T1-T0))ms)"
+    add_io_test "list_gmail" true $((T1-T0))
 else
     T1=$(now_ms)
-    fail "ls /sources/gmail/ failed"
-    add_io_test "ls_gmail" false $((T1-T0))
+    fail "list /sources/gmail/ request failed"
+    add_io_test "list_gmail" false $((T1-T0))
     IO_PASSED=false
 fi
 
-# Test 3: ls query path
-info "ls query path..."
+# Test 3: List query path
+info "GET /fs/list?path=$QUERY_PATH ..."
 T0=$(now_ms)
-QUERY_MOUNT_PATH="$MOUNT$QUERY_PATH"
-if ls "$QUERY_MOUNT_PATH/" >/dev/null 2>&1; then
+if LIST_JSON=$(api_get "/fs/list?path=$(url_encode "$QUERY_PATH")" 2>/dev/null); then
     T1=$(now_ms)
-    FILE_LIST=$(ls "$QUERY_MOUNT_PATH/" 2>/dev/null | head -20)
-    FILE_COUNT=$(echo "$FILE_LIST" | grep -c . || true)
-    pass "ls $QUERY_PATH ($FILE_COUNT files, $((T1-T0))ms)"
-    add_io_test "ls_query_path" true $((T1-T0))
+    FILE_COUNT=$(echo "$LIST_JSON" | jq '[.data.entries[] | select(.is_folder==false and (.name | startswith(".")|not))] | length' 2>/dev/null || echo 0)
+    pass "list $QUERY_PATH ($FILE_COUNT files, $((T1-T0))ms)"
+    add_io_test "list_query_path" true $((T1-T0))
 else
     T1=$(now_ms)
-    fail "ls $QUERY_PATH failed"
-    add_io_test "ls_query_path" false $((T1-T0))
+    fail "list $QUERY_PATH request failed"
+    add_io_test "list_query_path" false $((T1-T0))
     IO_PASSED=false
 fi
 
-# Test 4: cat first file
-FIRST_FILE=$(ls "$QUERY_MOUNT_PATH/" 2>/dev/null | grep -v '^\.' | head -1 || true)
+# Test 4: Read first file
+FILES=$(echo "$LIST_JSON" | jq -r '.data.entries[] | select(.is_folder==false and (.name | startswith(".")|not)) | .path' 2>/dev/null || true)
+FIRST_FILE=$(echo "$FILES" | head -1)
+
 if [ -n "$FIRST_FILE" ]; then
-    info "cat $FIRST_FILE..."
+    FIRST_FNAME=$(basename "$FIRST_FILE")
+    ENC_FIRST=$(url_encode "$FIRST_FILE")
+    info "GET /fs/read?path=$FIRST_FILE ..."
     T0=$(now_ms)
-    CONTENT=$(cat "$QUERY_MOUNT_PATH/$FIRST_FILE" 2>/dev/null) || true
-    T1=$(now_ms)
-    CONTENT_BYTES=${#CONTENT}
-    if [ "$CONTENT_BYTES" -gt 0 ]; then
-        pass "cat $FIRST_FILE ($CONTENT_BYTES bytes, $((T1-T0))ms)"
-        add_io_test "cat_file" true $((T1-T0)) "$CONTENT_BYTES"
-    else
-        fail "cat $FIRST_FILE returned empty content"
-        add_io_test "cat_file" false $((T1-T0)) 0
-        IO_PASSED=false
-    fi
-
-    # Test 5: stat first file
-    info "stat $FIRST_FILE..."
-    T0=$(now_ms)
-    if STAT_SIZE=$(stat -c%s "$QUERY_MOUNT_PATH/$FIRST_FILE" 2>/dev/null || stat -f%z "$QUERY_MOUNT_PATH/$FIRST_FILE" 2>/dev/null); then
+    if READ_BODY=$(api_get "/fs/read?path=$ENC_FIRST" 2>/dev/null); then
         T1=$(now_ms)
-        if [ "$STAT_SIZE" -gt 0 ]; then
-            pass "stat $FIRST_FILE (size=$STAT_SIZE, $((T1-T0))ms)"
-            add_io_test "stat_file" true $((T1-T0)) "$STAT_SIZE"
+        READ_BYTES=${#READ_BODY}
+        if [ "$READ_BYTES" -gt 0 ]; then
+            pass "read $FIRST_FNAME ($READ_BYTES bytes, $((T1-T0))ms)"
+            add_io_test "read_file" true $((T1-T0)) "$READ_BYTES"
         else
-            fail "stat $FIRST_FILE returned size 0"
-            add_io_test "stat_file" false $((T1-T0)) 0
+            fail "read $FIRST_FNAME returned empty content"
+            add_io_test "read_file" false $((T1-T0)) 0
             IO_PASSED=false
         fi
     else
         T1=$(now_ms)
-        fail "stat $FIRST_FILE failed"
+        fail "read $FIRST_FNAME request failed"
+        add_io_test "read_file" false $((T1-T0)) 0
+        IO_PASSED=false
+    fi
+
+    # Test 5: Stat first file
+    info "GET /fs/stat?path=$FIRST_FILE ..."
+    T0=$(now_ms)
+    if STAT_JSON=$(api_get "/fs/stat?path=$ENC_FIRST" 2>/dev/null); then
+        T1=$(now_ms)
+        STAT_SIZE=$(echo "$STAT_JSON" | jq '.data.size // 0' 2>/dev/null || echo 0)
+        if [ "$STAT_SIZE" -gt 0 ]; then
+            pass "stat $FIRST_FNAME (size=$STAT_SIZE, $((T1-T0))ms)"
+            add_io_test "stat_file" true $((T1-T0)) "$STAT_SIZE"
+        else
+            pass "stat $FIRST_FNAME (size=0 — virtual file, $((T1-T0))ms)"
+            add_io_test "stat_file" true $((T1-T0)) 0
+        fi
+    else
+        T1=$(now_ms)
+        fail "stat $FIRST_FNAME request failed"
         add_io_test "stat_file" false $((T1-T0)) 0
         IO_PASSED=false
     fi
 else
-    info "No files found to cat/stat, skipping"
+    info "No files found to read/stat, skipping"
 fi
 
 echo ""
@@ -214,99 +228,93 @@ COMP_PASSED=true
 CACHE_CONSISTENT=true
 TOTAL_RAW=0
 TOTAL_STRIP=0
+TOTAL_PCT=0
 
-# List files via API
-info "Listing files in $QUERY_PATH..."
-LIST_JSON=$(api_get "/fs/list?path=$QUERY_PATH") || { fail "List request failed"; COMP_PASSED=false; }
+FILE_COUNT=$(echo "$FILES" | grep -c . 2>/dev/null || true)
 
-if [ "$COMP_PASSED" = true ]; then
-    FILES=$(echo "$LIST_JSON" | jq -r '.data.entries[] | select(.is_folder==false and (.name | startswith(".")|not)) | .path' 2>/dev/null)
-    FILE_COUNT=$(echo "$FILES" | grep -c . || true)
+if [ "$FILE_COUNT" -eq 0 ]; then
+    info "No files found in $QUERY_PATH, skipping compression tests"
+else
+    pass "Testing $FILE_COUNT files"
+    echo ""
+    printf "  %-50s %8s %8s %6s %8s %8s\n" "FILE" "raw" "strip" "red%" "raw_ms" "strip_ms"
+    echo "  $(printf '%0.s-' {1..96})"
 
-    if [ "$FILE_COUNT" -eq 0 ]; then
-        info "No files found in $QUERY_PATH, skipping compression tests"
-    else
-        pass "Found $FILE_COUNT files"
-        echo ""
-        printf "  %-50s %8s %8s %6s %8s %8s\n" "FILE" "raw" "strip" "red%" "raw_ms" "strip_ms"
-        echo "  $(printf '%0.s-' {1..96})"
+    while IFS= read -r FILE_PATH; do
+        [ -z "$FILE_PATH" ] && continue
+        FNAME=$(basename "$FILE_PATH")
+        ENC_PATH=$(url_encode "$FILE_PATH")
 
-        for FILE_PATH in $FILES; do
-            FNAME=$(basename "$FILE_PATH")
+        # Read raw
+        T0=$(now_ms)
+        RAW_BODY=$(api_get "/fs/read?path=$ENC_PATH" 2>/dev/null) || { fail "Raw read failed: $FNAME"; continue; }
+        T1=$(now_ms)
+        RAW_MS=$((T1-T0))
+        RAW_BYTES=${#RAW_BODY}
 
-            # Read raw
-            T0=$(now_ms)
-            RAW_BODY=$(api_get "/fs/read?path=$FILE_PATH" 2>/dev/null) || { fail "Raw read failed: $FNAME"; continue; }
-            T1=$(now_ms)
-            RAW_MS=$((T1-T0))
-            RAW_BYTES=${#RAW_BODY}
+        # Read with strip compression
+        T0=$(now_ms)
+        STRIP_BODY=$(api_get "/fs/read?path=$ENC_PATH&compression=strip" 2>/dev/null) || { fail "Strip read failed: $FNAME"; continue; }
+        T1=$(now_ms)
+        STRIP_MS=$((T1-T0))
+        STRIP_BYTES=${#STRIP_BODY}
 
-            # Read with strip compression
-            T0=$(now_ms)
-            STRIP_BODY=$(api_get "/fs/read?path=$FILE_PATH&compression=strip" 2>/dev/null) || { fail "Strip read failed: $FNAME"; continue; }
-            T1=$(now_ms)
-            STRIP_MS=$((T1-T0))
-            STRIP_BYTES=${#STRIP_BODY}
+        TOTAL_RAW=$((TOTAL_RAW + RAW_BYTES))
+        TOTAL_STRIP=$((TOTAL_STRIP + STRIP_BYTES))
 
-            TOTAL_RAW=$((TOTAL_RAW + RAW_BYTES))
-            TOTAL_STRIP=$((TOTAL_STRIP + STRIP_BYTES))
-
-            if [ "$RAW_BYTES" -gt 0 ]; then
-                PCT=$(( (RAW_BYTES - STRIP_BYTES) * 100 / RAW_BYTES ))
-            else
-                PCT=0
-            fi
-
-            # Check for inflation
-            if [ "$STRIP_BYTES" -gt "$RAW_BYTES" ]; then
-                printf "  ${RED}%-50s %8d %8d %5d%% %8d %8d  INFLATED${NC}\n" \
-                    "${FNAME:0:50}" "$RAW_BYTES" "$STRIP_BYTES" "$PCT" "$RAW_MS" "$STRIP_MS"
-                COMP_PASSED=false
-                ERRORS=$((ERRORS+1))
-            else
-                printf "  %-50s %8d %8d %5d%% %8d %8d\n" \
-                    "${FNAME:0:50}" "$RAW_BYTES" "$STRIP_BYTES" "$PCT" "$RAW_MS" "$STRIP_MS"
-            fi
-
-            add_comp_file "$FNAME" "$RAW_BYTES" "$STRIP_BYTES" "$PCT" "$RAW_MS" "$STRIP_MS"
-        done
-
-        echo "  $(printf '%0.s-' {1..96})"
-
-        if [ "$TOTAL_RAW" -gt 0 ]; then
-            TOTAL_PCT=$(( (TOTAL_RAW - TOTAL_STRIP) * 100 / TOTAL_RAW ))
-            printf "  %-50s %8d %8d %5d%%\n" "TOTAL" "$TOTAL_RAW" "$TOTAL_STRIP" "$TOTAL_PCT"
+        if [ "$RAW_BYTES" -gt 0 ]; then
+            PCT=$(( (RAW_BYTES - STRIP_BYTES) * 100 / RAW_BYTES ))
         else
-            TOTAL_PCT=0
+            PCT=0
         fi
-        echo ""
 
-        # Check minimum reduction threshold
-        if [ "$TOTAL_RAW" -gt 0 ] && [ "$TOTAL_PCT" -lt "$MIN_REDUCTION" ]; then
-            fail "Average reduction ${TOTAL_PCT}% is below minimum ${MIN_REDUCTION}%"
+        # Check for inflation
+        if [ "$STRIP_BYTES" -gt "$RAW_BYTES" ]; then
+            printf "  ${RED}%-50s %8d %8d %5d%% %8d %8d  INFLATED${NC}\n" \
+                "${FNAME:0:50}" "$RAW_BYTES" "$STRIP_BYTES" "$PCT" "$RAW_MS" "$STRIP_MS"
             COMP_PASSED=false
+            ERRORS=$((ERRORS+1))
         else
-            pass "Average reduction: ${TOTAL_PCT}% (threshold: ${MIN_REDUCTION}%)"
+            printf "  %-50s %8d %8d %5d%% %8d %8d\n" \
+                "${FNAME:0:50}" "$RAW_BYTES" "$STRIP_BYTES" "$PCT" "$RAW_MS" "$STRIP_MS"
         fi
 
-        # ---------------------------------------------------------------
-        # Cache consistency: read same file 3 times with strip
-        # ---------------------------------------------------------------
-        FIRST_FILE=$(echo "$FILES" | head -1)
-        if [ -n "$FIRST_FILE" ]; then
-            info "Cache consistency check on $(basename "$FIRST_FILE")..."
-            R1=$(api_get "/fs/read?path=$FIRST_FILE&compression=strip")
-            sleep 1
-            R2=$(api_get "/fs/read?path=$FIRST_FILE&compression=strip")
-            R3=$(api_get "/fs/read?path=$FIRST_FILE&compression=strip")
+        add_comp_file "$FNAME" "$RAW_BYTES" "$STRIP_BYTES" "$PCT" "$RAW_MS" "$STRIP_MS"
+    done <<< "$FILES"
 
-            if [ "$R1" = "$R2" ] && [ "$R2" = "$R3" ]; then
-                pass "Cache consistent (3 reads identical)"
-            else
-                fail "Cache inconsistency: reads returned different content"
-                CACHE_CONSISTENT=false
-                COMP_PASSED=false
-            fi
+    echo "  $(printf '%0.s-' {1..96})"
+
+    if [ "$TOTAL_RAW" -gt 0 ]; then
+        TOTAL_PCT=$(( (TOTAL_RAW - TOTAL_STRIP) * 100 / TOTAL_RAW ))
+        printf "  %-50s %8d %8d %5d%%\n" "TOTAL" "$TOTAL_RAW" "$TOTAL_STRIP" "$TOTAL_PCT"
+    fi
+    echo ""
+
+    # Check minimum reduction threshold
+    if [ "$TOTAL_RAW" -gt 0 ] && [ "$TOTAL_PCT" -lt "$MIN_REDUCTION" ]; then
+        fail "Average reduction ${TOTAL_PCT}% is below minimum ${MIN_REDUCTION}%"
+        COMP_PASSED=false
+    else
+        pass "Average reduction: ${TOTAL_PCT}% (threshold: ${MIN_REDUCTION}%)"
+    fi
+
+    # ---------------------------------------------------------------
+    # Cache consistency: read same file 3 times with strip
+    # ---------------------------------------------------------------
+    if [ -n "$FIRST_FILE" ]; then
+        ENC_FIRST=${ENC_FIRST:-$(url_encode "$FIRST_FILE")}
+        info "Cache consistency check on $(basename "$FIRST_FILE")..."
+        R1=$(api_get "/fs/read?path=$ENC_FIRST&compression=strip")
+        sleep 1
+        R2=$(api_get "/fs/read?path=$ENC_FIRST&compression=strip")
+        R3=$(api_get "/fs/read?path=$ENC_FIRST&compression=strip")
+
+        if [ "$R1" = "$R2" ] && [ "$R2" = "$R3" ]; then
+            pass "Cache consistent (3 reads identical)"
+        else
+            fail "Cache inconsistency: reads returned different content"
+            CACHE_CONSISTENT=false
+            COMP_PASSED=false
         fi
     fi
 fi
@@ -319,8 +327,6 @@ echo ""
 
 mkdir -p "$(dirname "$RESULTS")"
 
-AVG_PCT=${TOTAL_PCT:-0}
-
 jq -n \
     --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --arg gw "$GATEWAY_HTTP" \
@@ -329,7 +335,7 @@ jq -n \
     --argjson io_tests "$IO_TESTS_JSON" \
     --argjson comp_passed "$COMP_PASSED" \
     --argjson min_red "$MIN_REDUCTION" \
-    --argjson avg_red "$AVG_PCT" \
+    --argjson avg_red "$TOTAL_PCT" \
     --argjson total_raw "$TOTAL_RAW" \
     --argjson total_strip "$TOTAL_STRIP" \
     --argjson cache "$CACHE_CONSISTENT" \

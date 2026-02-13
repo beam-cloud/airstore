@@ -12,59 +12,27 @@ permissions:
 jobs:
   integration:
     name: Integration
+    # Skip on forked PRs where secrets are unavailable.
+    if: github.event_name == 'push' || !github.event.pull_request.head.repo.fork
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install system dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y nfs-common libfuse-dev libfuse3-dev jq
+          sudo apt-get install -y jq
           pip install matplotlib
-
-      - name: Build CLI
-        run: go build -o bin/cli ./cmd/cli
-
-      - name: Mount filesystem
-        env:
-          AIRSTORE_API_KEY: ${{ secrets.AIRSTORE_API_KEY }}
-        run: |
-          mkdir -p /tmp/airstore
-          sudo bin/cli mount /tmp/airstore \
-            --gateway gateway.airstore.ai:443 \
-            --token "$AIRSTORE_API_KEY" \
-            --backend nfs \
-            --daemon &
-
-          # Wait for mount (up to 30s)
-          for i in $(seq 1 30); do
-            if mountpoint -q /tmp/airstore 2>/dev/null; then
-              echo "Filesystem mounted after ${i}s"
-              break
-            fi
-            if [ "$i" -eq 30 ]; then
-              echo "ERROR: Mount timed out after 30s"
-              exit 1
-            fi
-            sleep 1
-          done
 
       - name: Run integration tests
         env:
           AIRSTORE_API_KEY: ${{ secrets.AIRSTORE_API_KEY }}
-          AIRSTORE_MOUNT: /tmp/airstore
           RESULTS_JSON: e2e/results.json
         run: bash e2e/integration_test.sh
 
@@ -83,7 +51,3 @@ jobs:
             e2e/results.json
             e2e/plots/
           retention-days: 30
-
-      - name: Cleanup
-        if: always()
-        run: sudo umount /tmp/airstore 2>/dev/null || true

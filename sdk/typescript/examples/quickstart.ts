@@ -25,8 +25,8 @@ const folder = await airstore.smartFolders.create(ws.external_id, {
 
 // Browse the virtual filesystem
 const files = await airstore.fs.list(ws.external_id, { path: folder.path })
-files.forEach((f) => console.log(`${f.type === 'directory' ? '📁' : '📄'} ${f.name}`))
+files.forEach((f) => console.log(`${f.is_folder ? '📁' : '📄'} ${f.name}`))
 
 // Read a file
-const first = files.find((f) => f.type !== 'directory')
+const first = files.find((f) => !f.is_folder)
 if (first) console.log(await airstore.fs.read(ws.external_id, { path: first.path! }))
