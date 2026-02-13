@@ -78,6 +78,26 @@ api_get() {
     curl -sf -H "Authorization: Bearer $TOKEN" "$BASE_URL$1"
 }
 
+# Like api_get but also captures response headers into $RESP_HEADERS.
+# Body goes to stdout. Usage: BODY=$(api_get_with_headers "/path")
+RESP_HEADERS=""
+api_get_with_headers() {
+    local tmpheaders
+    tmpheaders=$(mktemp)
+    local body
+    body=$(curl -sf -D "$tmpheaders" -H "Authorization: Bearer $TOKEN" "$BASE_URL$1")
+    local rc=$?
+    RESP_HEADERS=$(cat "$tmpheaders" 2>/dev/null || true)
+    rm -f "$tmpheaders"
+    [ $rc -eq 0 ] && echo "$body"
+    return $rc
+}
+
+# Extract a header value from $RESP_HEADERS (case-insensitive).
+header_val() {
+    echo "$RESP_HEADERS" | grep -i "^$1:" | head -1 | sed 's/^[^:]*: *//' | tr -d '\r\n'
+}
+
 api_post() {
     curl -sf -X POST -H "Authorization: Bearer $TOKEN" "$BASE_URL$1"
 }
@@ -106,10 +126,7 @@ add_io_test() {
 }
 
 add_comp_file() {
-    local name="$1" raw="$2" strip="$3" pct="$4" raw_lat="$5" strip_lat="$6"
-    # Estimate token counts (~4 bytes/token for cl100k_base English text)
-    local raw_tok=$((raw / 4))
-    local strip_tok=$((strip / 4))
+    local name="$1" raw="$2" strip="$3" pct="$4" raw_lat="$5" strip_lat="$6" raw_tok="$7" strip_tok="$8"
     local tok_saved=$((raw_tok - strip_tok))
     COMP_FILES_JSON=$(echo "$COMP_FILES_JSON" | jq \
         --arg n "$name" --argjson r "$raw" --argjson s "$strip" \
@@ -276,9 +293,9 @@ else
         RAW_MS=$((T1-T0))
         RAW_BYTES=${#RAW_BODY}
 
-        # Read with strip compression
+        # Read with strip compression (capture headers for real token counts)
         T0=$(now_ms)
-        STRIP_BODY=$(api_get "/fs/read?path=$ENC_PATH&compression=strip" 2>/dev/null) || { fail "Strip read failed: $FNAME"; continue; }
+        STRIP_BODY=$(api_get_with_headers "/fs/read?path=$ENC_PATH&compression=strip" 2>/dev/null) || { fail "Strip read failed: $FNAME"; continue; }
         T1=$(now_ms)
         STRIP_MS=$((T1-T0))
         STRIP_BYTES=${#STRIP_BODY}
@@ -286,9 +303,17 @@ else
         TOTAL_RAW=$((TOTAL_RAW + RAW_BYTES))
         TOTAL_STRIP=$((TOTAL_STRIP + STRIP_BYTES))
 
-        # Estimate token counts (~4 bytes/token for cl100k_base)
-        RAW_TOK=$((RAW_BYTES / 4))
-        STRIP_TOK=$((STRIP_BYTES / 4))
+        # Use real token counts from server headers; fall back to estimate.
+        HDR_RAW_TOK=$(header_val "X-Compression-Original-Tokens")
+        HDR_STRIP_TOK=$(header_val "X-Compression-Compressed-Tokens")
+        if [ -n "$HDR_RAW_TOK" ] && [ "$HDR_RAW_TOK" -gt 0 ] 2>/dev/null; then
+            RAW_TOK=$HDR_RAW_TOK
+            STRIP_TOK=${HDR_STRIP_TOK:-0}
+        else
+            # Fallback estimate (~4 bytes/token for cl100k_base)
+            RAW_TOK=$((RAW_BYTES / 4))
+            STRIP_TOK=$((STRIP_BYTES / 4))
+        fi
         TOTAL_RAW_TOK=$((TOTAL_RAW_TOK + RAW_TOK))
         TOTAL_STRIP_TOK=$((TOTAL_STRIP_TOK + STRIP_TOK))
 
@@ -309,7 +334,7 @@ else
                 "${FNAME:0:50}" "$RAW_BYTES" "$STRIP_BYTES" "$RAW_TOK" "$STRIP_TOK" "$PCT" "$RAW_MS" "$STRIP_MS"
         fi
 
-        add_comp_file "$FNAME" "$RAW_BYTES" "$STRIP_BYTES" "$PCT" "$RAW_MS" "$STRIP_MS"
+        add_comp_file "$FNAME" "$RAW_BYTES" "$STRIP_BYTES" "$PCT" "$RAW_MS" "$STRIP_MS" "$RAW_TOK" "$STRIP_TOK"
     done <<< "$FILES"
 
     echo "  $(printf '%0.s-' {1..96})"

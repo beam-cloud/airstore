@@ -14,13 +14,10 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// readWithCompression handles the compressed read path:
-//  1. Check Redis cache (if enabled)
-//  2. Fetch raw content, compress with timeout, return immediately
-//  3. Record access event, dispatch async cache write
-//
-// The querySpec hash is folded into cache keys so that changing a smart
-// query automatically invalidates stale compressed content.
+// readWithCompression checks the Redis cache, fetches raw content on miss,
+// compresses with a timeout, records the access event, and dispatches an
+// async cache write. The querySpec hash is folded into cache keys so that
+// changing a smart query automatically invalidates stale content.
 func (s *SourceService) readWithCompression(
 	ctx context.Context,
 	pctx *sources.ProviderContext,
@@ -39,7 +36,7 @@ func (s *SourceService) readWithCompression(
 	cacheResultID := resultID
 	if querySpec != "" {
 		h := sha256.Sum256([]byte(querySpec))
-		cacheResultID = resultID + ":" + hex.EncodeToString(h[:4])
+		cacheResultID = resultID + ":" + hex.EncodeToString(h[:8])
 	}
 
 	meta := compression.ContentMeta{
@@ -74,8 +71,7 @@ func (s *SourceService) readWithCompression(
 		return ev
 	}
 
-	// ── Step 1: Check content cache ──────────────────────────────────
-
+	// Check content cache.
 	if s.compressedStore != nil {
 		if ptr := s.compressedStore.GetPointer(ctx, pctx.WorkspaceId, queryPath, cacheResultID, strategyStr); ptr != nil {
 			if cached := s.compressedStore.GetContent(ctx, pctx.WorkspaceId, queryPath, cacheResultID, strategyStr); cached != nil {
@@ -84,6 +80,15 @@ func (s *SourceService) readWithCompression(
 					Int("original_tokens", ptr.OriginalTokens).Int("compressed_tokens", ptr.CompressedTokens).
 					Int("cached_bytes", len(cached)).
 					Msg("compression: cache hit")
+
+				// Populate context-carried stats from cached pointer.
+				if st := compression.GetCompressionStats(ctx); st != nil {
+					st.OriginalBytes = ptr.Size
+					st.CompressedBytes = len(cached)
+					st.OriginalTokens = ptr.OriginalTokens
+					st.CompressedTokens = ptr.CompressedTokens
+					st.Strategy = strategyStr
+				}
 
 				if s.recorder != nil {
 					ev := buildEvent(nil, nil, compression.OutcomeCacheHit, "")
@@ -100,8 +105,7 @@ func (s *SourceService) readWithCompression(
 		}
 	}
 
-	// ── Step 2: Fetch raw content ────────────────────────────────────
-
+	// Fetch raw content from cache or provider.
 	var rawContent []byte
 	if content, err := s.fsStore.GetResultContent(ctx, pctx.WorkspaceId, queryPath, resultID); err == nil && len(content) > 0 {
 		rawContent = content
@@ -116,8 +120,7 @@ func (s *SourceService) readWithCompression(
 		}
 	}
 
-	// ── Step 3: Compress with timeout ────────────────────────────────
-
+	// Compress.
 	compressor := s.compressor
 	if reqStrategy := compression.Strategy(strategyStr); reqStrategy.Valid() && reqStrategy != s.compressor.Name() {
 		if perReq, err := compression.NewCompressor(reqStrategy, s.compressionCfg); err == nil {
@@ -147,7 +150,8 @@ func (s *SourceService) readWithCompression(
 		outcome, returnData = compression.OutcomeCompressed, result.Data
 	}
 
-	// ── Step 4: Log ──────────────────────────────────────────────────
+	// Populate context-carried stats so the HTTP handler can emit headers.
+	compression.SetCompressionStats(ctx, len(rawContent), result, strategyStr)
 
 	logEvent := log.Debug().
 		Str("strategy", strategyStr).Str("file", filename).
@@ -168,14 +172,11 @@ func (s *SourceService) readWithCompression(
 	}
 	logEvent.Msg("compression: result")
 
-	// ── Step 5: Record access event ──────────────────────────────────
-
 	if s.recorder != nil {
 		s.recorder.Record(ctx, buildEvent(rawContent, result, outcome, errMsg))
 	}
 
-	// ── Step 6: Async cache write ────────────────────────────────────
-
+	// Async cache write.
 	if s.compressedStore != nil && outcome == compression.OutcomeCompressed {
 		data := make([]byte, len(result.Data))
 		copy(data, result.Data)

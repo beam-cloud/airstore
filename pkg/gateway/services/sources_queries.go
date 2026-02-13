@@ -248,6 +248,9 @@ func (s *SourceService) CreateSmartQuery(ctx context.Context, req *pb.CreateSmar
 	if !auth.IsAuthenticated(ctx) {
 		return &pb.CreateSmartQueryResponse{Ok: false, Error: "unauthorized"}, nil
 	}
+	if !isValidQueryName(req.Name) {
+		return &pb.CreateSmartQueryResponse{Ok: false, Error: "invalid query name: must not contain '/' or '..' sequences"}, nil
+	}
 	workspaceId := auth.WorkspaceId(ctx)
 
 	path := types.PathSources + "/" + req.Integration + "/" + req.Name
@@ -255,40 +258,11 @@ func (s *SourceService) CreateSmartQuery(ctx context.Context, req *pb.CreateSmar
 		path += req.FileExt
 	}
 
-	querySpec, filenameFormat, err := s.inferQuerySpec(ctx, req.Integration, req.Name, req.Guidance)
+	querySpec, filenameFormat, err := s.resolveQuerySpec(ctx, req.Integration, req.Name, req.Guidance)
 	if err != nil {
-		log.Warn().Err(err).Str("name", req.Name).Str("integration", req.Integration).Msg("BAML inference failed")
 		return &pb.CreateSmartQueryResponse{Ok: false, Error: err.Error()}, nil
 	}
-
-	spec := parseQuerySpec(req.Integration, querySpec)
-	if spec.Query == "" && req.Integration != string(types.SourcePostHog) {
-		return &pb.CreateSmartQueryResponse{Ok: false, Error: "invalid query spec from inference"}, nil
-	}
-	if filenameFormat == "" {
-		filenameFormat = spec.FilenameFormat
-	}
-	if filenameFormat == "" {
-		filenameFormat = sources.DefaultFilenameFormat(req.Integration)
-	}
-
-	// Iterative refinement: only for gmail with guidance.
-	if req.Integration == string(types.SourceGmail) && req.Guidance != "" {
-		pctx, err := s.providerContext(ctx)
-		if err == nil {
-			pctx, connected := s.loadCredentials(ctx, pctx, req.Integration)
-			if connected {
-				refined, err := s.refineGmailQueryWithResults(ctx, pctx, req.Guidance, spec.Query)
-				if err != nil {
-					log.Warn().Err(err).Msg("query refinement failed, using initial query")
-				} else if refined != spec.Query {
-					log.Info().Str("original", spec.Query).Str("refined", refined).Msg("refined gmail query")
-					spec.Query = refined
-					querySpec = buildGmailQuerySpec(refined, spec.Limit, filenameFormat)
-				}
-			}
-		}
-	}
+	querySpec = s.refineQueryIfNeeded(ctx, req.Integration, req.Guidance, querySpec, filenameFormat)
 
 	query := &types.FilesystemQuery{
 		WorkspaceId:    workspaceId,
@@ -383,6 +357,9 @@ func (s *SourceService) UpdateSmartQuery(ctx context.Context, req *pb.UpdateSmar
 	needsUpdate := false
 
 	// Rename: update path.
+	if req.Name != "" && !isValidQueryName(req.Name) {
+		return &pb.UpdateSmartQueryResponse{Ok: false, Error: "invalid query name: must not contain '/' or '..' sequences"}, nil
+	}
 	if req.Name != "" && req.Name != query.Name {
 		query.Name = req.Name
 		query.Path = types.PathSources + "/" + query.Integration + "/" + req.Name
@@ -395,16 +372,11 @@ func (s *SourceService) UpdateSmartQuery(ctx context.Context, req *pb.UpdateSmar
 	// Re-run LLM inference if guidance changed.
 	if req.Guidance != query.Guidance {
 		query.Guidance = req.Guidance
-		querySpec, filenameFormat, err := s.inferQuerySpec(ctx, query.Integration, query.Name, req.Guidance)
+		querySpec, filenameFormat, err := s.resolveQuerySpec(ctx, query.Integration, query.Name, req.Guidance)
 		if err != nil {
-			log.Warn().Err(err).Str("name", query.Name).Str("integration", query.Integration).Msg("BAML inference failed during update")
 			return &pb.UpdateSmartQueryResponse{Ok: false, Error: "failed to regenerate query: " + err.Error()}, nil
 		}
-		spec := parseQuerySpec(query.Integration, querySpec)
-		if spec.Query == "" && query.Integration != string(types.SourcePostHog) {
-			return &pb.UpdateSmartQueryResponse{Ok: false, Error: "invalid query spec from inference"}, nil
-		}
-		query.QuerySpec = querySpec
+		query.QuerySpec = s.refineQueryIfNeeded(ctx, query.Integration, req.Guidance, querySpec, filenameFormat)
 		if filenameFormat != "" {
 			query.FilenameFormat = filenameFormat
 		}
@@ -563,8 +535,71 @@ func (s *SourceService) inferQuerySpec(ctx context.Context, integration, name, g
 		return "", "", err
 	}
 
-	data, _ := json.Marshal(result)
+	data, err := json.Marshal(result)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to marshal query spec: %w", err)
+	}
 	return string(data), extractFilenameFormat(data), nil
+}
+
+// resolveQuerySpec runs LLM inference, validates the result, and fills in
+// filename format defaults. Returns the raw query spec and filename format.
+func (s *SourceService) resolveQuerySpec(ctx context.Context, integration, name, guidance string) (querySpec, filenameFormat string, err error) {
+	querySpec, filenameFormat, err = s.inferQuerySpec(ctx, integration, name, guidance)
+	if err != nil {
+		log.Warn().Err(err).Str("name", name).Str("integration", integration).Msg("BAML inference failed")
+		return "", "", err
+	}
+
+	spec := parseQuerySpec(integration, querySpec)
+	if spec.Query == "" && integration != string(types.SourcePostHog) {
+		return "", "", fmt.Errorf("invalid query spec from inference")
+	}
+	if filenameFormat == "" {
+		filenameFormat = spec.FilenameFormat
+	}
+	if filenameFormat == "" {
+		filenameFormat = sources.DefaultFilenameFormat(integration)
+	}
+	return querySpec, filenameFormat, nil
+}
+
+// refineQueryIfNeeded runs provider-specific iterative refinement on an
+// already-resolved query spec. Currently only Gmail benefits from this
+// (evaluating real API results against user guidance). For all other sources
+// this is a no-op and returns the inputs unchanged.
+func (s *SourceService) refineQueryIfNeeded(ctx context.Context, integration, guidance, querySpec, filenameFormat string) string {
+	if guidance == "" {
+		return querySpec
+	}
+
+	spec := parseQuerySpec(integration, querySpec)
+
+	switch types.SourceType(integration) {
+	case types.SourceGmail:
+		pctx, err := s.providerContext(ctx)
+		if err != nil {
+			return querySpec
+		}
+
+		pctx, connected := s.loadCredentials(ctx, pctx, integration)
+		if !connected {
+			return querySpec
+		}
+
+		refined, err := s.refineGmailQueryWithResults(ctx, pctx, guidance, spec.Query)
+		if err != nil {
+			log.Warn().Err(err).Msg("query refinement failed, using initial query")
+			return querySpec
+		}
+
+		if refined != spec.Query {
+			log.Info().Str("original", spec.Query).Str("refined", refined).Msg("refined query")
+			return buildGmailQuerySpec(refined, spec.Limit, filenameFormat)
+		}
+	}
+
+	return querySpec
 }
 
 // buildGuidancePtr wraps guidance for BAML. For GDrive queries, appends a UTC
@@ -772,4 +807,12 @@ func smartQueryToProto(q *types.SmartQuery) *pb.SmartQuery {
 
 func filesystemQueryToProto(q *types.FilesystemQuery) *pb.SmartQuery {
 	return smartQueryToProto(q)
+}
+
+// isValidQueryName rejects names that could cause path traversal.
+func isValidQueryName(name string) bool {
+	return name != "" &&
+		!strings.Contains(name, "/") &&
+		!strings.Contains(name, "\\") &&
+		!strings.Contains(name, "..")
 }

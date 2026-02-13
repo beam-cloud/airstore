@@ -143,7 +143,7 @@ def plot_token_comparison(files: list[dict], out: str) -> None:
             )
 
     ax.set_xlabel("File")
-    ax.set_ylabel("Estimated Tokens (cl100k)")
+    ax.set_ylabel("Tokens (cl100k)")
     ax.set_title("Raw vs Strip: Token Count per File")
     ax.set_xticks(list(x))
     ax.set_xticklabels(names, rotation=45, ha="right", fontsize=8)
@@ -304,7 +304,7 @@ def plot_summary_donut(
         fontsize=14,
         fontweight="bold",
     )
-    ax2.set_title("Token Savings (est.)")
+    ax2.set_title("Token Savings")
 
     fig.suptitle("Overall Compression Savings", fontsize=14, fontweight="bold")
     fig.tight_layout()
@@ -389,7 +389,12 @@ def write_summary(data: dict, plots_dir: str) -> str:
     lines.append(f"| **Total raw tokens** | **{total_raw_tok:,}** |")
     lines.append(f"| **Total strip tokens** | **{total_strip_tok:,}** |")
     lines.append(f"| **Tokens saved** | **{tokens_saved:,}** |")
-    lines.append(f"| Average reduction | **{comp.get('avg_reduction_pct', 0)}%** |")
+    tok_red_pct = (
+        round(tokens_saved * 100 / total_raw_tok) if total_raw_tok > 0 else 0
+    )
+    byte_red_pct = comp.get("avg_reduction_pct", 0)
+    lines.append(f"| Byte reduction | **{byte_red_pct}%** |")
+    lines.append(f"| Token reduction | **{tok_red_pct}%** |")
     lines.append(f"| Min threshold | {comp.get('min_reduction_pct', 0)}% |")
     lines.append(
         f"| Cache consistent | {'Yes' if comp.get('cache_consistent') else 'No'} |"
