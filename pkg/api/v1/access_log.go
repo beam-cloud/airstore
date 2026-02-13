@@ -41,6 +41,7 @@ func NewAccessLogGroup(
 
 func (g *AccessLogGroup) registerRoutes() {
 	g.routerGroup.GET("", g.ListReads)
+	g.routerGroup.GET("/sessions", g.ListSessions)
 	g.routerGroup.GET("/summary", g.GetSummary)
 	g.routerGroup.GET("/read", g.ReadSource)
 }
@@ -128,6 +129,51 @@ func (g *AccessLogGroup) ListReads(c echo.Context) error {
 		NextCursor: strconv.FormatInt(nextSeqNum, 10),
 		HasMore:    hasMore,
 	})
+}
+
+// --- Sessions ---
+
+type listSessionsResponse struct {
+	Sessions []string `json:"sessions"`
+}
+
+// ListSessions returns distinct session IDs that have access log streams.
+//
+//	GET /api/v1/workspaces/:workspace_id/access-log/sessions
+//
+// It lists S2 streams matching the "access." prefix and extracts the
+// session ID component from each stream name (format: access.{session}.events).
+func (g *AccessLogGroup) ListSessions(c echo.Context) error {
+	ctx := c.Request().Context()
+
+	if g.s2Client == nil || !g.s2Client.Enabled() {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "access log unavailable")
+	}
+
+	wsExtId := c.Param("workspace_id")
+	ws, err := g.backend.GetWorkspaceByExternalId(ctx, wsExtId)
+	if err != nil || ws == nil {
+		return ErrorResponse(c, http.StatusNotFound, "workspace not found")
+	}
+
+	streams, err := g.s2Client.ListStreams(ctx, instrumentation.AccessStreamPrefix())
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to list streams: "+err.Error())
+	}
+
+	sessions := make([]string, 0, len(streams))
+	for _, s := range streams {
+		sessionID := instrumentation.SessionIDFromStreamName(s.Name)
+		if sessionID == "" {
+			continue
+		}
+		sessions = append(sessions, sessionID)
+	}
+
+	// Sort for deterministic output
+	sort.Strings(sessions)
+
+	return SuccessResponse(c, listSessionsResponse{Sessions: sessions})
 }
 
 // --- Summary ---
