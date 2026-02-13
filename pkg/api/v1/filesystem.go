@@ -16,6 +16,7 @@ import (
 
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/common"
+	"github.com/beam-cloud/airstore/pkg/compression"
 	"github.com/beam-cloud/airstore/pkg/gateway/services"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/sources"
@@ -1164,6 +1165,11 @@ func (g *FilesystemGroup) readSources(c echo.Context, ctx context.Context, relPa
 
 	// Use SourceService.Read for all other source files
 	if g.sourceService != nil {
+		// Attach a stats receiver so the compression layer can report
+		// real token counts back to us.
+		var stats *compression.CompressionStats
+		ctx, stats = compression.WithCompressionStats(ctx)
+
 		resp, err := g.sourceService.Read(ctx, &pb.SourceReadRequest{
 			Path:   relPath,
 			Offset: offset,
@@ -1178,6 +1184,16 @@ func (g *FilesystemGroup) readSources(c echo.Context, ctx context.Context, relPa
 				return ErrorResponse(c, http.StatusNotFound, resp.Error)
 			}
 			return ErrorResponse(c, http.StatusBadRequest, resp.Error)
+		}
+
+		// Emit compression metadata as response headers when available.
+		if stats.OriginalTokens > 0 {
+			h := c.Response().Header()
+			h.Set("X-Compression-Original-Tokens", strconv.Itoa(stats.OriginalTokens))
+			h.Set("X-Compression-Compressed-Tokens", strconv.Itoa(stats.CompressedTokens))
+			h.Set("X-Compression-Original-Bytes", strconv.Itoa(stats.OriginalBytes))
+			h.Set("X-Compression-Compressed-Bytes", strconv.Itoa(stats.CompressedBytes))
+			h.Set("X-Compression-Strategy", stats.Strategy)
 		}
 
 		// Determine content type based on file extension

@@ -827,9 +827,13 @@ func fileInfo(resp *s3.HeadObjectOutput) *pb.FileInfo {
 	if isLink {
 		mode = uint32(syscall.S_IFLNK | 0777)
 	}
+	var mtime int64
+	if resp.LastModified != nil {
+		mtime = resp.LastModified.Unix()
+	}
 	return &pb.FileInfo{
 		Size: aws.ToInt64(resp.ContentLength), Mode: mode,
-		Mtime: resp.LastModified.Unix(), IsLink: isLink,
+		Mtime: mtime, IsLink: isLink,
 	}
 }
 
