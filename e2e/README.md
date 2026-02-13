@@ -1,6 +1,6 @@
 # End-to-End Tests
 
-E2E tests run against the k3d cluster to verify the full system works.
+E2E tests run against the k3d cluster to verify the full system works
 
 ## Quick Start
 

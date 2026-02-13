@@ -173,3 +173,13 @@ func (rk *redisKeys) FsCompressedContent(workspaceId uint, path, resultId, strat
 func (rk *redisKeys) FsCompressedUsage(workspaceId uint) string {
 	return fmt.Sprintf(fsCompressedUsage, workspaceId)
 }
+
+// FsCompressedScanPatterns returns Redis SCAN patterns that match all
+// compressed pointers, content, and usage keys for a workspace.
+func (rk *redisKeys) FsCompressedScanPatterns(workspaceId uint) []string {
+	return []string{
+		fmt.Sprintf("airstore:compressed:%d:*", workspaceId),
+		fmt.Sprintf("airstore:cc:%d:*", workspaceId),
+		fmt.Sprintf("airstore:cc:usage:%d", workspaceId),
+	}
+}

@@ -343,6 +343,45 @@ func (s *SourceService) Stat(ctx context.Context, req *pb.SourceStatRequest) (*p
 		}, nil
 	}
 
+	// Check if this is a smart query result or query folder before hitting the provider.
+	queryPath, filename := s.findQueryAndFilename(ctx, pctx.WorkspaceId, integration, relPath)
+	if queryPath != "" {
+		// It's a smart query result file — resolve metadata from the store.
+		results, err := s.fsStore.GetQueryResults(ctx, pctx.WorkspaceId, queryPath)
+		if err == nil {
+			for _, r := range results {
+				if r.Filename == filename {
+					mtime := r.Mtime
+					if mtime == 0 {
+						mtime = sources.NowUnix()
+					}
+					return &pb.SourceStatResponse{
+						Ok: true,
+						Info: &pb.SourceFileInfo{
+							Size:  r.Size,
+							Mode:  sources.ModeFile,
+							Mtime: mtime,
+						},
+					}, nil
+				}
+			}
+		}
+		// Result file not found in store — fall through to provider.
+	} else {
+		// Check if the path itself is a smart query folder (e.g., "unread-emails").
+		qp := types.PathSources + "/" + integration + "/" + relPath
+		if q, err := s.fsStore.GetQuery(ctx, pctx.WorkspaceId, qp); err == nil && q != nil {
+			return &pb.SourceStatResponse{
+				Ok: true,
+				Info: &pb.SourceFileInfo{
+					Mode:  sources.ModeDir,
+					IsDir: true,
+					Mtime: sources.NowUnix(),
+				},
+			}, nil
+		}
+	}
+
 	// Rate limit check
 	if err := s.rateLimiter.Wait(ctx, pctx.WorkspaceId, integration); err != nil {
 		return &pb.SourceStatResponse{Ok: false, Error: "rate limited"}, nil

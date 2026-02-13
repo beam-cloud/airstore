@@ -17,6 +17,7 @@ type RedisClient interface {
 	Set(ctx context.Context, key string, value interface{}, expiration time.Duration) *redis.StatusCmd
 	IncrBy(ctx context.Context, key string, value int64) *redis.IntCmd
 	Expire(ctx context.Context, key string, expiration time.Duration) *redis.BoolCmd
+	Del(ctx context.Context, keys ...string) *redis.IntCmd
 	Pipeline() redis.Pipeliner
 }
 
@@ -28,6 +29,12 @@ type CompressedPointer struct {
 	Strategy         string `json:"strategy"`
 	CreatedAt        int64  `json:"created_at"`
 	Size             int    `json:"size"`
+}
+
+// ScanClient is an optional extension for RedisClient that supports
+// key scanning. *common.RedisClient satisfies this.
+type ScanClient interface {
+	Scan(ctx context.Context, pattern string) ([]string, error)
 }
 
 // CompressedStore handles read/write of compressed content pointers and
@@ -126,4 +133,38 @@ func (s *CompressedStore) SetContent(ctx context.Context, workspaceId uint, quer
 	pipe.Expire(ctx, usageKey, s.cacheTTL*2)
 	_, err := pipe.Exec(ctx)
 	return err
+}
+
+// FlushWorkspace deletes all compressed pointers, content, and usage
+// keys for a workspace. The RedisClient must implement ScanClient
+// (e.g., *common.RedisClient) for pattern-based key discovery.
+func (s *CompressedStore) FlushWorkspace(ctx context.Context, workspaceId uint) (int, error) {
+	if s.redis == nil {
+		return 0, nil
+	}
+
+	scanner, ok := s.redis.(ScanClient)
+	if !ok {
+		// Fallback: just delete the usage counter (pointers/content have TTLs).
+		s.redis.Del(ctx, common.Keys.FsCompressedUsage(workspaceId))
+		return 1, nil
+	}
+
+	patterns := common.Keys.FsCompressedScanPatterns(workspaceId)
+	total := 0
+	for _, pattern := range patterns {
+		keys, err := scanner.Scan(ctx, pattern)
+		if err != nil {
+			return total, err
+		}
+		if len(keys) == 0 {
+			continue
+		}
+		deleted, err := s.redis.Del(ctx, keys...).Result()
+		total += int(deleted)
+		if err != nil {
+			return total, err
+		}
+	}
+	return total, nil
 }

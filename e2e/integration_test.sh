@@ -78,6 +78,10 @@ api_get() {
     curl -sf -H "Authorization: Bearer $TOKEN" "$BASE_URL$1"
 }
 
+api_post() {
+    curl -sf -X POST -H "Authorization: Bearer $TOKEN" "$BASE_URL$1"
+}
+
 # Millisecond timer (linux date +%s%N, perl fallback for mac)
 now_ms() {
     if date +%s%N >/dev/null 2>&1 && [ "$(date +%s%N)" != "%s%N" ]; then
@@ -154,10 +158,10 @@ else
     IO_PASSED=false
 fi
 
-# Test 3: List query path
-info "GET /fs/list?path=$QUERY_PATH ..."
+# Test 3: List query path (with refresh to ensure fresh smart query execution)
+info "GET /fs/list?path=$QUERY_PATH&refresh=true ..."
 T0=$(now_ms)
-if LIST_JSON=$(api_get "/fs/list?path=$(url_encode "$QUERY_PATH")" 2>/dev/null); then
+if LIST_JSON=$(api_get "/fs/list?path=$(url_encode "$QUERY_PATH")&refresh=true" 2>/dev/null); then
     T1=$(now_ms)
     FILE_COUNT=$(echo "$LIST_JSON" | jq '[.data.entries[] | select(.is_folder==false and (.name | startswith(".")|not))] | length' 2>/dev/null || echo 0)
     pass "list $QUERY_PATH ($FILE_COUNT files, $((T1-T0))ms)"
@@ -227,6 +231,15 @@ echo ""
 
 echo "=== Phase 2: Compression A/B Tests ==="
 echo ""
+
+# Flush the compression cache so every test shows actual compression work.
+info "Flushing compression cache..."
+if FLUSH_JSON=$(api_post "/cache/flush" 2>/dev/null); then
+    KEYS_DEL=$(echo "$FLUSH_JSON" | jq '.data.keys_deleted // 0' 2>/dev/null || echo 0)
+    pass "Compression cache flushed ($KEYS_DEL keys deleted)"
+else
+    info "Cache flush unavailable (non-fatal)"
+fi
 
 COMP_PASSED=true
 CACHE_CONSISTENT=true
