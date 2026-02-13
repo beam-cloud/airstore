@@ -107,10 +107,15 @@ add_io_test() {
 
 add_comp_file() {
     local name="$1" raw="$2" strip="$3" pct="$4" raw_lat="$5" strip_lat="$6"
+    # Estimate token counts (~4 bytes/token for cl100k_base English text)
+    local raw_tok=$((raw / 4))
+    local strip_tok=$((strip / 4))
+    local tok_saved=$((raw_tok - strip_tok))
     COMP_FILES_JSON=$(echo "$COMP_FILES_JSON" | jq \
         --arg n "$name" --argjson r "$raw" --argjson s "$strip" \
         --argjson p "$pct" --argjson rl "$raw_lat" --argjson sl "$strip_lat" \
-        '. + [{"name":$n,"raw_bytes":$r,"strip_bytes":$s,"reduction_pct":$p,"raw_latency_ms":$rl,"strip_latency_ms":$sl}]')
+        --argjson rt "$raw_tok" --argjson st "$strip_tok" --argjson ts "$tok_saved" \
+        '. + [{"name":$n,"raw_bytes":$r,"strip_bytes":$s,"reduction_pct":$p,"raw_latency_ms":$rl,"strip_latency_ms":$sl,"raw_tokens":$rt,"strip_tokens":$st,"tokens_saved":$ts}]')
 }
 
 # ============================================================================
@@ -245,6 +250,8 @@ COMP_PASSED=true
 CACHE_CONSISTENT=true
 TOTAL_RAW=0
 TOTAL_STRIP=0
+TOTAL_RAW_TOK=0
+TOTAL_STRIP_TOK=0
 TOTAL_PCT=0
 
 FILE_COUNT=$(echo "$FILES" | grep -c . 2>/dev/null || true)
@@ -254,8 +261,8 @@ if [ "$FILE_COUNT" -eq 0 ]; then
 else
     pass "Testing $FILE_COUNT files"
     echo ""
-    printf "  %-50s %8s %8s %6s %8s %8s\n" "FILE" "raw" "strip" "red%" "raw_ms" "strip_ms"
-    echo "  $(printf '%0.s-' {1..96})"
+    printf "  %-50s %8s %8s %8s %8s %6s %8s %8s\n" "FILE" "raw" "strip" "raw_tok" "str_tok" "red%" "raw_ms" "strip_ms"
+    echo "  $(printf '%0.s-' {1..114})"
 
     while IFS= read -r FILE_PATH; do
         [ -z "$FILE_PATH" ] && continue
@@ -279,6 +286,12 @@ else
         TOTAL_RAW=$((TOTAL_RAW + RAW_BYTES))
         TOTAL_STRIP=$((TOTAL_STRIP + STRIP_BYTES))
 
+        # Estimate token counts (~4 bytes/token for cl100k_base)
+        RAW_TOK=$((RAW_BYTES / 4))
+        STRIP_TOK=$((STRIP_BYTES / 4))
+        TOTAL_RAW_TOK=$((TOTAL_RAW_TOK + RAW_TOK))
+        TOTAL_STRIP_TOK=$((TOTAL_STRIP_TOK + STRIP_TOK))
+
         if [ "$RAW_BYTES" -gt 0 ]; then
             PCT=$(( (RAW_BYTES - STRIP_BYTES) * 100 / RAW_BYTES ))
         else
@@ -287,13 +300,13 @@ else
 
         # Check for inflation
         if [ "$STRIP_BYTES" -gt "$RAW_BYTES" ]; then
-            printf "  ${RED}%-50s %8d %8d %5d%% %8d %8d  INFLATED${NC}\n" \
-                "${FNAME:0:50}" "$RAW_BYTES" "$STRIP_BYTES" "$PCT" "$RAW_MS" "$STRIP_MS"
+            printf "  ${RED}%-50s %8d %8d %8d %8d %5d%% %8d %8d  INFLATED${NC}\n" \
+                "${FNAME:0:50}" "$RAW_BYTES" "$STRIP_BYTES" "$RAW_TOK" "$STRIP_TOK" "$PCT" "$RAW_MS" "$STRIP_MS"
             COMP_PASSED=false
             ERRORS=$((ERRORS+1))
         else
-            printf "  %-50s %8d %8d %5d%% %8d %8d\n" \
-                "${FNAME:0:50}" "$RAW_BYTES" "$STRIP_BYTES" "$PCT" "$RAW_MS" "$STRIP_MS"
+            printf "  %-50s %8d %8d %8d %8d %5d%% %8d %8d\n" \
+                "${FNAME:0:50}" "$RAW_BYTES" "$STRIP_BYTES" "$RAW_TOK" "$STRIP_TOK" "$PCT" "$RAW_MS" "$STRIP_MS"
         fi
 
         add_comp_file "$FNAME" "$RAW_BYTES" "$STRIP_BYTES" "$PCT" "$RAW_MS" "$STRIP_MS"
@@ -355,6 +368,8 @@ jq -n \
     --argjson avg_red "$TOTAL_PCT" \
     --argjson total_raw "$TOTAL_RAW" \
     --argjson total_strip "$TOTAL_STRIP" \
+    --argjson total_raw_tok "$TOTAL_RAW_TOK" \
+    --argjson total_strip_tok "$TOTAL_STRIP_TOK" \
     --argjson cache "$CACHE_CONSISTENT" \
     --argjson comp_files "$COMP_FILES_JSON" \
     '{
@@ -371,6 +386,8 @@ jq -n \
             avg_reduction_pct: $avg_red,
             total_raw_bytes: $total_raw,
             total_strip_bytes: $total_strip,
+            total_raw_tokens: $total_raw_tok,
+            total_strip_tokens: $total_strip_tok,
             cache_consistent: $cache,
             files: $comp_files
         }

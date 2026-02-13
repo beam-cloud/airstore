@@ -8,9 +8,12 @@ Usage:
 
 Outputs:
     - e2e/plots/bytes_comparison.png
+    - e2e/plots/token_comparison.png
     - e2e/plots/reduction_pct.png
     - e2e/plots/latency_comparison.png
     - e2e/plots/summary_donut.png
+    - e2e/plots/io_latency.png
+    - e2e/plots/summary.md
     - Markdown appended to $GITHUB_STEP_SUMMARY (if set)
 """
 
@@ -36,6 +39,15 @@ def truncate(name: str, maxlen: int = 30) -> str:
     return name[: maxlen - 3] + "..."
 
 
+def fmt_k(v: float, _=None) -> str:
+    """Format large numbers with k/M suffix."""
+    if abs(v) >= 1_000_000:
+        return f"{v / 1_000_000:.1f}M"
+    if abs(v) >= 1_000:
+        return f"{v / 1_000:.0f}k"
+    return f"{v:.0f}"
+
+
 def save(fig, path: str) -> None:
     fig.savefig(path, dpi=150, bbox_inches="tight", facecolor="white")
     plt.close(fig)
@@ -50,7 +62,6 @@ def save(fig, path: str) -> None:
 def plot_bytes_comparison(files: list[dict], out: str) -> None:
     if not files:
         return
-    # Sort by raw size descending
     files = sorted(files, key=lambda f: f["raw_bytes"], reverse=True)
     names = [truncate(f["name"]) for f in files]
     raw = [f["raw_bytes"] for f in files]
@@ -76,18 +87,77 @@ def plot_bytes_comparison(files: list[dict], out: str) -> None:
     ax.set_title("Raw vs Strip: Byte Size per File")
     ax.set_xticks(list(x))
     ax.set_xticklabels(names, rotation=45, ha="right", fontsize=8)
-    ax.yaxis.set_major_formatter(
-        ticker.FuncFormatter(
-            lambda v, _: f"{v / 1000:.0f}k" if v >= 1000 else f"{v:.0f}"
-        )
-    )
+    ax.yaxis.set_major_formatter(ticker.FuncFormatter(fmt_k))
     ax.legend()
     fig.tight_layout()
     save(fig, out)
 
 
 # ---------------------------------------------------------------------------
-# Chart 2: Reduction % (horizontal bar)
+# Chart 2: Token comparison (grouped bar)
+# ---------------------------------------------------------------------------
+
+
+def plot_token_comparison(files: list[dict], out: str) -> None:
+    if not files:
+        return
+    files = sorted(files, key=lambda f: f.get("raw_tokens", 0), reverse=True)
+    names = [truncate(f["name"]) for f in files]
+    raw_tok = [f.get("raw_tokens", f["raw_bytes"] // 4) for f in files]
+    strip_tok = [f.get("strip_tokens", f["strip_bytes"] // 4) for f in files]
+
+    fig, ax = plt.subplots(figsize=(max(8, len(files) * 0.8), 5))
+    x = range(len(names))
+    w = 0.35
+    bars_raw = ax.bar(
+        [i - w / 2 for i in x],
+        raw_tok,
+        w,
+        label="Raw tokens",
+        color="#ff7043",
+        edgecolor="white",
+    )
+    bars_strip = ax.bar(
+        [i + w / 2 for i in x],
+        strip_tok,
+        w,
+        label="Strip tokens",
+        color="#26a69a",
+        edgecolor="white",
+    )
+
+    # Annotate token savings on top of each pair
+    for i in range(len(files)):
+        saved = raw_tok[i] - strip_tok[i]
+        if saved > 0 and raw_tok[i] > 0:
+            pct = saved * 100 / raw_tok[i]
+            ax.text(
+                i,
+                max(raw_tok[i], strip_tok[i]) * 1.02,
+                f"-{saved:,}\n({pct:.0f}%)",
+                ha="center",
+                va="bottom",
+                fontsize=7,
+                color="#2e7d32",
+                fontweight="bold",
+            )
+
+    ax.set_xlabel("File")
+    ax.set_ylabel("Estimated Tokens (cl100k)")
+    ax.set_title("Raw vs Strip: Token Count per File")
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(names, rotation=45, ha="right", fontsize=8)
+    ax.yaxis.set_major_formatter(ticker.FuncFormatter(fmt_k))
+    ax.legend()
+    # Add some headroom for annotations
+    ymax = max(max(raw_tok), max(strip_tok)) if raw_tok else 1
+    ax.set_ylim(top=ymax * 1.25)
+    fig.tight_layout()
+    save(fig, out)
+
+
+# ---------------------------------------------------------------------------
+# Chart 3: Reduction % (horizontal bar)
 # ---------------------------------------------------------------------------
 
 
@@ -125,7 +195,7 @@ def plot_reduction_pct(files: list[dict], threshold: int, out: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Chart 3: Latency comparison (grouped bar)
+# Chart 4: Latency comparison (grouped bar)
 # ---------------------------------------------------------------------------
 
 
@@ -167,46 +237,82 @@ def plot_latency_comparison(files: list[dict], out: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Chart 4: Summary donut
+# Chart 5: Summary donut (bytes + tokens)
 # ---------------------------------------------------------------------------
 
 
-def plot_summary_donut(total_raw: int, total_strip: int, out: str) -> None:
+def plot_summary_donut(
+    total_raw: int,
+    total_strip: int,
+    total_raw_tok: int,
+    total_strip_tok: int,
+    out: str,
+) -> None:
     if total_raw <= 0:
         return
-    saved = total_raw - total_strip
-    pct = saved * 100 / total_raw
+    saved_bytes = total_raw - total_strip
+    pct_bytes = saved_bytes * 100 / total_raw
 
-    fig, ax = plt.subplots(figsize=(5, 5))
-    sizes = [total_strip, saved]
-    colors = ["#1976d2", "#4caf50"]
-    labels = [f"Kept ({total_strip:,} B)", f"Saved ({saved:,} B)"]
+    saved_tok = total_raw_tok - total_strip_tok
+    pct_tok = saved_tok * 100 / total_raw_tok if total_raw_tok > 0 else 0
 
-    wedges, texts, autotexts = ax.pie(
-        sizes,
-        labels=labels,
-        colors=colors,
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
+
+    # Bytes donut
+    sizes_b = [total_strip, saved_bytes]
+    colors_b = ["#1976d2", "#4caf50"]
+    labels_b = [f"Kept ({total_strip:,} B)", f"Saved ({saved_bytes:,} B)"]
+    ax1.pie(
+        sizes_b,
+        labels=labels_b,
+        colors=colors_b,
         autopct="%1.1f%%",
         startangle=90,
         pctdistance=0.8,
         wedgeprops=dict(width=0.4, edgecolor="white"),
     )
-    ax.text(
+    ax1.text(
         0,
         0,
-        f"{pct:.0f}%\nreduced",
+        f"{pct_bytes:.0f}%\nreduced",
         ha="center",
         va="center",
-        fontsize=18,
+        fontsize=16,
         fontweight="bold",
     )
-    ax.set_title("Overall Compression Savings")
+    ax1.set_title("Byte Savings")
+
+    # Token donut
+    sizes_t = [total_strip_tok, saved_tok]
+    colors_t = ["#ff7043", "#26a69a"]
+    labels_t = [f"Kept ({total_strip_tok:,} tok)", f"Saved ({saved_tok:,} tok)"]
+    ax2.pie(
+        sizes_t,
+        labels=labels_t,
+        colors=colors_t,
+        autopct="%1.1f%%",
+        startangle=90,
+        pctdistance=0.8,
+        wedgeprops=dict(width=0.4, edgecolor="white"),
+    )
+    ax2.text(
+        0,
+        0,
+        f"{pct_tok:.0f}%\ntokens\nsaved",
+        ha="center",
+        va="center",
+        fontsize=14,
+        fontweight="bold",
+    )
+    ax2.set_title("Token Savings (est.)")
+
+    fig.suptitle("Overall Compression Savings", fontsize=14, fontweight="bold")
     fig.tight_layout()
     save(fig, out)
 
 
 # ---------------------------------------------------------------------------
-# Chart 5: I/O test latency bar
+# Chart 6: I/O test latency bar
 # ---------------------------------------------------------------------------
 
 
@@ -242,6 +348,12 @@ def write_summary(data: dict, plots_dir: str) -> str:
     comp_ok = comp.get("passed", False)
     overall = io_ok and comp_ok
 
+    total_raw_tok = comp.get("total_raw_tokens", comp.get("total_raw_bytes", 0) // 4)
+    total_strip_tok = comp.get(
+        "total_strip_tokens", comp.get("total_strip_bytes", 0) // 4
+    )
+    tokens_saved = total_raw_tok - total_strip_tok
+
     lines = []
     status = "PASSED" if overall else "FAILED"
     badge = "white_check_mark" if overall else "x"
@@ -269,11 +381,14 @@ def write_summary(data: dict, plots_dir: str) -> str:
     # Compression summary
     lines.append("### Compression A/B Tests")
     lines.append("")
-    lines.append(f"| Metric | Value |")
-    lines.append(f"|--------|-------|")
+    lines.append("| Metric | Value |")
+    lines.append("|--------|-------|")
     lines.append(f"| Files tested | {len(files)} |")
     lines.append(f"| Total raw bytes | {comp.get('total_raw_bytes', 0):,} |")
     lines.append(f"| Total strip bytes | {comp.get('total_strip_bytes', 0):,} |")
+    lines.append(f"| **Total raw tokens** | **{total_raw_tok:,}** |")
+    lines.append(f"| **Total strip tokens** | **{total_strip_tok:,}** |")
+    lines.append(f"| **Tokens saved** | **{tokens_saved:,}** |")
     lines.append(f"| Average reduction | **{comp.get('avg_reduction_pct', 0)}%** |")
     lines.append(f"| Min threshold | {comp.get('min_reduction_pct', 0)}% |")
     lines.append(
@@ -285,13 +400,23 @@ def write_summary(data: dict, plots_dir: str) -> str:
         lines.append("<details>")
         lines.append("<summary>Per-file results</summary>")
         lines.append("")
-        lines.append("| File | Raw | Strip | Reduction | Raw ms | Strip ms |")
-        lines.append("|------|-----|-------|-----------|--------|----------|")
+        lines.append(
+            "| File | Raw B | Strip B | Raw Tok | Strip Tok | Tok Saved | Red% | Raw ms | Strip ms |"
+        )
+        lines.append(
+            "|------|-------|---------|---------|-----------|-----------|------|--------|----------|"
+        )
         for f in sorted(files, key=lambda x: x["reduction_pct"]):
+            rt = f.get("raw_tokens", f["raw_bytes"] // 4)
+            st = f.get("strip_tokens", f["strip_bytes"] // 4)
+            ts = f.get("tokens_saved", rt - st)
             lines.append(
                 f"| `{truncate(f['name'], 40)}` "
                 f"| {f['raw_bytes']:,} "
                 f"| {f['strip_bytes']:,} "
+                f"| {rt:,} "
+                f"| {st:,} "
+                f"| {ts:,} "
                 f"| {f['reduction_pct']}% "
                 f"| {f['raw_latency_ms']}ms "
                 f"| {f['strip_latency_ms']}ms |"
@@ -334,6 +459,7 @@ def main() -> int:
 
     if files:
         plot_bytes_comparison(files, os.path.join(plots_dir, "bytes_comparison.png"))
+        plot_token_comparison(files, os.path.join(plots_dir, "token_comparison.png"))
         plot_reduction_pct(
             files, threshold, os.path.join(plots_dir, "reduction_pct.png")
         )
@@ -343,6 +469,8 @@ def main() -> int:
         plot_summary_donut(
             comp.get("total_raw_bytes", 0),
             comp.get("total_strip_bytes", 0),
+            comp.get("total_raw_tokens", comp.get("total_raw_bytes", 0) // 4),
+            comp.get("total_strip_tokens", comp.get("total_strip_bytes", 0) // 4),
             os.path.join(plots_dir, "summary_donut.png"),
         )
 
