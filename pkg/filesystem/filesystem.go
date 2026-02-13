@@ -603,10 +603,10 @@ func (f *Filesystem) recordLogicalRead(
 		event.ResultId = attr.ResultID
 		event.Strategy = attr.Strategy
 		event.Outcome = attr.Outcome
-		event.OriginalBytes = int32(attr.OriginalBytes)
-		event.CompressedBytes = int32(attr.CompressedBytes)
-		event.OriginalTokens = int32(attr.OriginalTokens)
-		event.CompressedTokens = int32(attr.CompressedTokens)
+		event.OriginalBytes = int64(attr.OriginalBytes)
+		event.CompressedBytes = int64(attr.CompressedBytes)
+		event.OriginalTokens = int64(attr.OriginalTokens)
+		event.CompressedTokens = int64(attr.CompressedTokens)
 		event.CompressionMs = attr.CompressionMs
 	}
 

@@ -74,10 +74,10 @@ message AccessLogEvent {
   string source_uri = 14;
   string query_path = 15;
   string result_id = 16;
-  int32 original_bytes = 17;
-  int32 compressed_bytes = 18;
-  int32 original_tokens = 19;
-  int32 compressed_tokens = 20;
+  int64 original_bytes = 17;
+  int64 compressed_bytes = 18;
+  int64 original_tokens = 19;
+  int64 compressed_tokens = 20;
   string strategy = 21;
   string outcome = 22;
   int64 compression_ms = 23;
