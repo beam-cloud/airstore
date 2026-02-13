@@ -2,10 +2,7 @@ package compression
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/common"
@@ -23,10 +20,9 @@ type RedisClient interface {
 	Pipeline() redis.Pipeliner
 }
 
-// CompressedPointer is the small metadata stored in Redis that maps
-// a (workspace, queryPath, resultID) to its compressed S3 key and token counts.
+// CompressedPointer is small metadata stored in Redis that maps
+// a (workspace, queryPath, resultID, strategy) to token counts.
 type CompressedPointer struct {
-	S3Key            string `json:"s3_key"`
 	OriginalTokens   int    `json:"original_tokens"`
 	CompressedTokens int    `json:"compressed_tokens"`
 	Strategy         string `json:"strategy"`
@@ -76,8 +72,8 @@ func (s *CompressedStore) GetPointer(ctx context.Context, workspaceId uint, quer
 	return &ptr
 }
 
-// SetPointer writes the compression pointer. Pointers are small (~200 bytes)
-// and do not expire.
+// SetPointer writes the compression pointer with the same TTL as content.
+// Pointers are small (~200 bytes); they expire alongside the cached content.
 func (s *CompressedStore) SetPointer(ctx context.Context, workspaceId uint, queryPath, resultID, strategy string, ptr *CompressedPointer) error {
 	if s.redis == nil {
 		return nil
@@ -87,7 +83,7 @@ func (s *CompressedStore) SetPointer(ctx context.Context, workspaceId uint, quer
 	if err != nil {
 		return err
 	}
-	return s.redis.Set(ctx, key, data, 0).Err() // no TTL for pointers
+	return s.redis.Set(ctx, key, data, s.cacheTTL).Err()
 }
 
 // GetContent reads cached compressed content. Returns nil on miss.
@@ -104,8 +100,7 @@ func (s *CompressedStore) GetContent(ctx context.Context, workspaceId uint, quer
 }
 
 // SetContent caches compressed content subject to the per-workspace byte budget.
-// If adding this entry would exceed the budget, the write is silently skipped
-// (the content is still in S3 via the pointer).
+// If adding this entry would exceed the budget, the write is silently skipped.
 func (s *CompressedStore) SetContent(ctx context.Context, workspaceId uint, queryPath, resultID, strategy string, content []byte) error {
 	if s.redis == nil {
 		return nil
@@ -131,12 +126,4 @@ func (s *CompressedStore) SetContent(ctx context.Context, workspaceId uint, quer
 	pipe.Expire(ctx, usageKey, s.cacheTTL*2)
 	_, err := pipe.Exec(ctx)
 	return err
-}
-
-// S3Key generates the S3 object key for compressed content.
-// Format: compressed/{workspaceExtId}/{queryPath}/{resultID}/{strategy}.{contentHash}
-func S3Key(workspaceExtId, queryPath, resultID string, strategy Strategy, content []byte) string {
-	h := sha256.Sum256(content)
-	hash := hex.EncodeToString(h[:8]) // 16 hex chars — enough for dedup
-	return fmt.Sprintf("compressed/%s/%s/%s/%s.%s", workspaceExtId, queryPath, resultID, strategy, hash)
 }

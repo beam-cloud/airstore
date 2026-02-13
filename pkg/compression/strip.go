@@ -7,11 +7,9 @@ import (
 	"regexp"
 	"strings"
 	"time"
-)
 
-// ---------------------------------------------------------------------------
-// All regexes compiled once at init. No regexp.MustCompile inside functions.
-// ---------------------------------------------------------------------------
+	"github.com/beam-cloud/airstore/pkg/types"
+)
 
 var (
 	// Shared
@@ -40,11 +38,11 @@ var (
 	reDiffBlankAdd = regexp.MustCompile(`(?m)^[+-]\s*$`)
 
 	// Slack
-	reSlackReaction    = regexp.MustCompile(`(?m)^Reactions:.*$`)
-	reSlackJoinLeave   = regexp.MustCompile(`(?mi)^.*(has joined|has left|was added to|was removed from) (the channel|#\S+).*$`)
-	reSlackTopicSet    = regexp.MustCompile(`(?mi)^.*set the channel (topic|purpose|description).*$`)
-	reSlackFileUpload  = regexp.MustCompile(`(?mi)^.*uploaded a file:.*$`)
-	reSlackEdited      = regexp.MustCompile(`\s*\(edited\)\s*`)
+	reSlackReaction   = regexp.MustCompile(`(?m)^Reactions:.*$`)
+	reSlackJoinLeave  = regexp.MustCompile(`(?mi)^.*(has joined|has left|was added to|was removed from) (the channel|#\S+).*$`)
+	reSlackTopicSet   = regexp.MustCompile(`(?mi)^.*set the channel (topic|purpose|description).*$`)
+	reSlackFileUpload = regexp.MustCompile(`(?mi)^.*uploaded a file:.*$`)
+	reSlackEdited     = regexp.MustCompile(`\s*\(edited\)\s*`)
 
 	// Notion
 	reNotionMeta = regexp.MustCompile(`(?m)^\*\*(URL|Created|Last edited):\*\*\s+.*$`)
@@ -91,26 +89,26 @@ func (s *StripCompressor) Compress(ctx context.Context, content []byte, meta Con
 	origTokens := s.counter.Count(content)
 
 	data := stripNullBytes(content)
-	integration := strings.ToLower(meta.Integration)
+	src := types.SourceType(strings.ToLower(meta.Integration))
 
-	switch integration {
-	case "posthog":
+	switch src {
+	case types.SourcePostHog:
 		// Structured JSON — pass through unchanged.
-	case "gmail":
+	case types.SourceGmail:
 		data = stripGmail(data)
-	case "github":
+	case types.SourceGitHub:
 		data = stripGitHub(data)
-	case "slack":
+	case types.SourceSlack:
 		data = stripSlack(data)
-	case "notion":
+	case types.SourceNotion:
 		data = stripNotion(data)
-	case "linear":
+	case types.SourceLinear:
 		data = stripLinear(data)
 	default:
 		data = stripURLOnlyLines(data, 10)
 	}
 
-	if integration != "posthog" {
+	if src != types.SourcePostHog {
 		data = cleanup(data)
 	}
 

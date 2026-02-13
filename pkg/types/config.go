@@ -374,10 +374,11 @@ type ProviderOAuthCredentials struct {
 // CompressionConfig configures the context compression middleware.
 type CompressionConfig struct {
 	Strategy             string        `key:"strategy" json:"strategy"`                            // "strip" or "passthrough"
+	CacheEnabled         bool          `key:"cacheEnabled" json:"cache_enabled"`                   // enable Redis compressed content cache (default false)
 	TokenThreshold       int           `key:"tokenThreshold" json:"token_threshold"`               // skip compression if below this many tokens
 	MaxContentBytes      int           `key:"maxContentBytes" json:"max_content_bytes"`            // skip if content exceeds this size
 	TokenEncoding        string        `key:"tokenEncoding" json:"token_encoding"`                 // tiktoken encoding, default "cl100k_base"
 	Timeout              time.Duration `key:"timeout" json:"timeout"`                              // max compression time; 0 = strategy default
-	ContentCacheMaxBytes int64         `key:"contentCacheMaxBytes" json:"content_cache_max_bytes"` // per-workspace Redis budget; default 10MB
-	ContentCacheTTL      time.Duration `key:"contentCacheTTL" json:"content_cache_ttl"`            // per-entry TTL; default 5m
+	ContentCacheMaxBytes int64         `key:"contentCacheMaxBytes" json:"content_cache_max_bytes"` // per-workspace Redis budget; default 10MB (cache only)
+	ContentCacheTTL      time.Duration `key:"contentCacheTTL" json:"content_cache_ttl"`            // per-entry TTL; default 5m (cache only)
 }

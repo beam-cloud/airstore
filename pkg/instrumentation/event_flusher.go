@@ -14,61 +14,62 @@ const (
 	defaultBufferSize = 4096
 )
 
-// S2Recorder writes access events to an S2 stream asynchronously.
+// EventFlusher writes access events to an S2 stream asynchronously.
 // Record() is non-blocking; events are buffered and flushed by a background goroutine.
-type S2Recorder struct {
-	s2   *common.S2Client
-	ch   chan AccessEvent
-	done chan struct{}
-	wg   sync.WaitGroup
+type EventFlusher struct {
+	s2       *common.S2Client
+	ch       chan AccessEvent
+	done     chan struct{}
+	wg       sync.WaitGroup
+	closeOnce sync.Once
 }
 
-// NewS2Recorder creates and starts an S2-backed access recorder.
+// NewEventFlusher creates and starts an S2-backed access recorder.
 // Call Flush() on shutdown to drain buffered events.
-func NewS2Recorder(s2 *common.S2Client) *S2Recorder {
-	r := &S2Recorder{
+func NewEventFlusher(s2 *common.S2Client) *EventFlusher {
+	f := &EventFlusher{
 		s2:   s2,
 		ch:   make(chan AccessEvent, defaultBufferSize),
 		done: make(chan struct{}),
 	}
-	r.wg.Add(1)
-	go r.loop()
-	return r
+	f.wg.Add(1)
+	go f.loop()
+	return f
 }
 
 // Record enqueues an event for async delivery. Non-blocking: if the buffer
 // is full the event is dropped (logged as a warning).
-func (r *S2Recorder) Record(_ context.Context, event AccessEvent) error {
+func (f *EventFlusher) Record(_ context.Context, event AccessEvent) error {
 	select {
-	case r.ch <- event:
+	case f.ch <- event:
 		return nil
 	default:
-		log.Warn().Str("path", event.Path).Msg("access recorder buffer full, dropping event")
+		log.Warn().Str("path", event.Path).Msg("event flusher buffer full, dropping event")
 		return nil
 	}
 }
 
 // Flush signals the background goroutine to stop and waits for it to
-// drain remaining events.
-func (r *S2Recorder) Flush() error {
-	close(r.done)
-	r.wg.Wait()
+// drain remaining events. Safe to call multiple times.
+func (f *EventFlusher) Flush() error {
+	f.closeOnce.Do(func() { close(f.done) })
+	f.wg.Wait()
 	return nil
 }
 
 // loop is the background goroutine that drains the channel and writes to S2.
-func (r *S2Recorder) loop() {
-	defer r.wg.Done()
+func (f *EventFlusher) loop() {
+	defer f.wg.Done()
 	for {
 		select {
-		case event := <-r.ch:
-			r.send(event)
-		case <-r.done:
+		case event := <-f.ch:
+			f.send(event)
+		case <-f.done:
 			// Drain remaining events
 			for {
 				select {
-				case event := <-r.ch:
-					r.send(event)
+				case event := <-f.ch:
+					f.send(event)
 				default:
 					return
 				}
@@ -82,12 +83,12 @@ func AccessStreamName(sessionID string) string {
 	return fmt.Sprintf("access.%s.events", sessionID)
 }
 
-func (r *S2Recorder) send(event AccessEvent) {
-	if r.s2 == nil || !r.s2.Enabled() {
+func (f *EventFlusher) send(event AccessEvent) {
+	if f.s2 == nil || !f.s2.Enabled() {
 		return
 	}
 	stream := AccessStreamName(event.SessionID)
-	if err := r.s2.Append(context.Background(), stream, event); err != nil {
+	if err := f.s2.Append(context.Background(), stream, event); err != nil {
 		log.Warn().Err(err).Str("stream", stream).Msg("failed to append access event to S2")
 	}
 }

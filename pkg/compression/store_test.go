@@ -47,7 +47,6 @@ func TestStore_PointerRoundTrip(t *testing.T) {
 	ctx := context.Background()
 
 	ptr := &CompressedPointer{
-		S3Key:            "compressed/ws/query/result/strip.abc123",
 		OriginalTokens:   1000,
 		CompressedTokens: 200,
 		Strategy:         "strip",
@@ -64,9 +63,6 @@ func TestStore_PointerRoundTrip(t *testing.T) {
 	got := store.GetPointer(ctx, 1, "/sources/gmail/inbox", "result-1", "strip")
 	if got == nil {
 		t.Fatal("pointer not found after write")
-	}
-	if got.S3Key != ptr.S3Key {
-		t.Errorf("S3Key: got %q, want %q", got.S3Key, ptr.S3Key)
 	}
 	if got.OriginalTokens != ptr.OriginalTokens {
 		t.Errorf("OriginalTokens: got %d, want %d", got.OriginalTokens, ptr.OriginalTokens)
@@ -111,18 +107,23 @@ func TestStore_PointerStrategyIsolation(t *testing.T) {
 	}
 }
 
-func TestStore_PointerNoTTL(t *testing.T) {
+func TestStore_PointerTTL(t *testing.T) {
 	store, mini := testStore(t)
 	ctx := context.Background()
 
 	store.SetPointer(ctx, 1, "/q", "r1", "strip", &CompressedPointer{Strategy: "strip"})
 
-	// Fast-forward time — pointers should survive (no TTL)
-	mini.FastForward(10 * time.Minute)
+	// Should exist before TTL
+	if got := store.GetPointer(ctx, 1, "/q", "r1", "strip"); got == nil {
+		t.Error("pointer should exist before TTL")
+	}
 
-	got := store.GetPointer(ctx, 1, "/q", "r1", "strip")
-	if got == nil {
-		t.Error("pointer should not expire")
+	// Fast-forward past TTL (1 minute configured in testStore)
+	mini.FastForward(2 * time.Minute)
+
+	// Should be gone
+	if got := store.GetPointer(ctx, 1, "/q", "r1", "strip"); got != nil {
+		t.Error("pointer should expire after TTL")
 	}
 }
 
@@ -304,31 +305,3 @@ func TestStore_NilRedis(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// S3Key generation
-// ---------------------------------------------------------------------------
-
-func TestS3Key(t *testing.T) {
-	content := []byte("some compressed content")
-	key := S3Key("ws-ext-123", "/sources/gmail/inbox", "result-1", StrategyStrip, content)
-
-	// Should contain all components
-	if key == "" {
-		t.Fatal("empty key")
-	}
-	// Deterministic — same input gives same key
-	key2 := S3Key("ws-ext-123", "/sources/gmail/inbox", "result-1", StrategyStrip, content)
-	if key != key2 {
-		t.Errorf("S3Key not deterministic: %q != %q", key, key2)
-	}
-	// Different content gives different key
-	key3 := S3Key("ws-ext-123", "/sources/gmail/inbox", "result-1", StrategyStrip, []byte("different"))
-	if key == key3 {
-		t.Error("S3Key should differ for different content")
-	}
-	// Different strategy gives different key
-	key4 := S3Key("ws-ext-123", "/sources/gmail/inbox", "result-1", StrategyPassthrough, content)
-	if key == key4 {
-		t.Error("S3Key should differ for different strategy")
-	}
-}

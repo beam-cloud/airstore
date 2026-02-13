@@ -66,7 +66,7 @@ type CompressionResult struct {
 
 // ContentMeta provides context about the content being compressed.
 type ContentMeta struct {
-	Integration string // "gmail", "github", etc.
+	Integration string // Source type: types.SourceGmail, types.SourceGitHub, etc.
 	QueryPath   string
 	ResultID    string
 	Filename    string
@@ -87,12 +87,13 @@ type ContextCompressor interface {
 // Config holds all compression settings.
 type Config struct {
 	Strategy             Strategy      `yaml:"strategy"`
+	CacheEnabled         bool          `yaml:"cacheEnabled"`
 	TokenThreshold       int           `yaml:"tokenThreshold"`
 	MaxContentBytes      int           `yaml:"maxContentBytes"`
 	TokenEncoding        string        `yaml:"tokenEncoding"`
 	Timeout              time.Duration `yaml:"timeout"`
-	ContentCacheMaxBytes int64         `yaml:"contentCacheMaxBytes"`
-	ContentCacheTTL      time.Duration `yaml:"contentCacheTTL"`
+	ContentCacheMaxBytes int64         `yaml:"contentCacheMaxBytes"` // cache only
+	ContentCacheTTL      time.Duration `yaml:"contentCacheTTL"`     // cache only
 }
 
 func DefaultConfig() Config {

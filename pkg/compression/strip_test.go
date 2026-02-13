@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/beam-cloud/airstore/pkg/types"
 )
 
 // ---------------------------------------------------------------------------
@@ -494,7 +496,7 @@ func TestStripCompressor_Integration(t *testing.T) {
 		"Legal stuff here.\n" +
 		strings.Repeat("\x00", 5000)
 
-	result, err := comp.Compress(ctx, []byte(raw), ContentMeta{Integration: "gmail", Filename: "test.txt"})
+	result, err := comp.Compress(ctx, []byte(raw), ContentMeta{Integration: string(types.SourceGmail), Filename: "test.txt"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -548,7 +550,7 @@ func TestStripCompressor_PostHog(t *testing.T) {
   }
 }
 `
-	result, err := comp.Compress(context.Background(), []byte(input), ContentMeta{Integration: "posthog"})
+	result, err := comp.Compress(context.Background(), []byte(input), ContentMeta{Integration: string(types.SourcePostHog)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -582,7 +584,7 @@ func TestStripCompressor_UnknownIntegration(t *testing.T) {
 // TestStripCompressor_EmptyContent verifies empty input doesn't panic.
 func TestStripCompressor_EmptyContent(t *testing.T) {
 	comp := NewStripCompressor(DefaultConfig())
-	result, err := comp.Compress(context.Background(), nil, ContentMeta{Integration: "gmail"})
+	result, err := comp.Compress(context.Background(), nil, ContentMeta{Integration: string(types.SourceGmail)})
 	if err != nil {
 		t.Fatal(err)
 	}

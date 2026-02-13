@@ -70,7 +70,6 @@ type Gateway struct {
 	eventBus       *common.EventBus
 
 	// Compression middleware (optional)
-	compressionFlusher  *compression.AsyncFlusher
 	compressionRecorder instrumentation.AccessRecorder
 }
 
@@ -397,6 +396,7 @@ func (g *Gateway) registerServices() error {
 	if g.Config.Compression.Strategy != "" {
 		compCfg := compression.Config{
 			Strategy:             compression.Strategy(g.Config.Compression.Strategy),
+			CacheEnabled:         g.Config.Compression.CacheEnabled,
 			TokenThreshold:       g.Config.Compression.TokenThreshold,
 			MaxContentBytes:      g.Config.Compression.MaxContentBytes,
 			TokenEncoding:        g.Config.Compression.TokenEncoding,
@@ -409,32 +409,25 @@ func (g *Gateway) registerServices() error {
 		if err != nil {
 			return fmt.Errorf("compression: %w", err)
 		}
-		{
-			var compStore *compression.CompressedStore
-			if g.RedisClient != nil {
-				compStore = compression.NewCompressedStore(g.RedisClient, compCfg)
-			}
 
-			var recorder instrumentation.AccessRecorder
-			if g.s2Client != nil {
-				recorder = instrumentation.NewS2Recorder(g.s2Client)
-			} else {
-				recorder = instrumentation.NewNoopRecorder()
-			}
-
-			var s3Uploader compression.S3Uploader
-			bucket := ""
-			if g.storageClient != nil {
-				s3Uploader = g.storageClient.S3Client()
-				bucket = g.storageClient.BucketPrefix()
-			}
-
-			flusher := compression.NewAsyncFlusher(s3Uploader, bucket, compStore, recorder)
-			g.compressionFlusher = flusher
-			g.compressionRecorder = recorder
-			hookOpts = append(hookOpts, services.WithCompressionMiddleware(compressor, compStore, flusher, compCfg))
-			log.Info().Str("strategy", g.Config.Compression.Strategy).Msg("compression middleware enabled")
+		// Access event recorder (always enabled)
+		var recorder instrumentation.AccessRecorder
+		if g.s2Client != nil {
+			recorder = instrumentation.NewEventFlusher(g.s2Client)
+		} else {
+			recorder = instrumentation.NewNoopRecorder()
 		}
+		g.compressionRecorder = recorder
+
+		// Compressed content cache (optional Redis cache, gated by config)
+		var compStore *compression.CompressedStore
+		if compCfg.CacheEnabled && g.RedisClient != nil {
+			compStore = compression.NewCompressedStore(g.RedisClient, compCfg)
+			log.Info().Msg("compression cache enabled (Redis)")
+		}
+
+		hookOpts = append(hookOpts, services.WithCompressionMiddleware(compressor, compStore, recorder, compCfg))
+		log.Info().Str("strategy", g.Config.Compression.Strategy).Msg("compression middleware enabled")
 	}
 
 	var sourceService *services.SourceService
@@ -693,10 +686,7 @@ func (g *Gateway) shutdown() {
 		})
 	}
 
-	// Shutdown compression middleware (drain pending writes)
-	if g.compressionFlusher != nil {
-		g.compressionFlusher.Shutdown()
-	}
+	// Flush compression event recorder
 	if g.compressionRecorder != nil {
 		g.compressionRecorder.Flush()
 	}
