@@ -393,6 +393,7 @@ func (g *Gateway) registerServices() error {
 	}
 
 	// Wire compression middleware if a strategy is configured
+	var compStore *compression.CompressedStore
 	if g.Config.Compression.Strategy != "" {
 		compCfg := compression.Config{
 			Strategy:             compression.Strategy(g.Config.Compression.Strategy),
@@ -420,7 +421,6 @@ func (g *Gateway) registerServices() error {
 		g.compressionRecorder = recorder
 
 		// Compressed content cache (optional Redis cache, gated by config)
-		var compStore *compression.CompressedStore
 		if compCfg.CacheEnabled && g.RedisClient != nil {
 			compStore = compression.NewCompressedStore(g.RedisClient, compCfg)
 			log.Info().Msg("compression cache enabled (Redis)")
@@ -516,6 +516,11 @@ func (g *Gateway) registerServices() error {
 		filesystemGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
 		apiv1.NewFilesystemGroup(filesystemGroup, g.BackendRepo, g.storageService, sourceService, g.sourceRegistry, g.toolRegistry, g.s2Client)
 		log.Info().Msg("filesystem API registered at /api/v1/workspaces/:workspace_id/fs")
+
+		// Cache management API (nested under workspaces, workspace-scoped auth)
+		cacheGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/cache")
+		cacheGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
+		apiv1.NewCacheGroup(cacheGroup, compStore)
 
 		// Tasks API
 		apiv1.NewTasksGroup(g.baseRouteGroup.Group("/tasks"), g.BackendRepo, taskQueue, g.s2Client, g.Config.Sandbox.GetDefaultImage())
