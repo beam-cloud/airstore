@@ -74,16 +74,18 @@ func WithSeenTracker(tracker *hooks.SeenTracker) SourceServiceOption {
 	return func(s *SourceService) { s.seenTracker = tracker }
 }
 
+func WithRecorder(recorder instrumentation.AccessRecorder) SourceServiceOption {
+	return func(s *SourceService) { s.recorder = recorder }
+}
+
 func WithCompressionMiddleware(
 	compressor compression.ContextCompressor,
 	store *compression.CompressedStore,
-	recorder instrumentation.AccessRecorder,
 	cfg compression.Config,
 ) SourceServiceOption {
 	return func(s *SourceService) {
 		s.compressor = compressor
 		s.compressedStore = store
-		s.recorder = recorder
 		s.compressionCfg = cfg
 	}
 }
@@ -635,7 +637,7 @@ func (s *SourceService) readSmartQueryResult(ctx context.Context, pctx *sources.
 		log.Warn().Str("strategy", strategy).Msg("compression: requested but compressor not initialized")
 	}
 
-	// Standard read.
+	// Standard read (no compression).
 	if content, err := s.fsStore.GetResultContent(ctx, pctx.WorkspaceId, queryPath, resultID); err == nil && len(content) > 0 {
 		return readSlice(content, offset, length), nil
 	}
@@ -664,6 +666,7 @@ func (s *SourceService) compressionMeta(ctx context.Context) (strategy, session 
 	}
 	return strategy, session
 }
+
 
 // findQueryAndFilename walks up the path to find the parent smart query folder.
 // Returns ("", "") if relPath is not inside a smart query.

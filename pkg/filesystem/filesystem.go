@@ -47,6 +47,7 @@ type Config struct {
 	Backend     string  // "fuse", "nfs", or "" for platform auto-detect
 	Compression string  // compression strategy: "strip", "distill", "chain", or "" (disabled)
 	Session     string  // custom access session ID; defaults to workspace ID if empty
+	AccessLog   bool    // enable access logging; when false, no session header is sent
 }
 
 // Filesystem connects to the gateway via gRPC and exposes a virtual filesystem.

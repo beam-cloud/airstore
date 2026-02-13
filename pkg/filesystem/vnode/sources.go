@@ -81,17 +81,9 @@ type cachedContent struct {
 type SourcesVNodeOption func(*SourcesVNode)
 
 // WithCompression sets the compression strategy (e.g. "strip") forwarded to the
-// gateway via the x-airstore-compression gRPC metadata header. When set, content
-// reads use the Read RPC (which routes through compression middleware) instead of
-// ExecuteSmartQuery, and Getattr prefetches content to report accurate sizes.
+// gateway via the x-airstore-compression gRPC metadata header.
 func WithCompression(strategy string) SourcesVNodeOption {
 	return func(v *SourcesVNode) { v.compression = strategy }
-}
-
-// WithSession sets the access session ID forwarded to the gateway via the
-// x-airstore-session gRPC metadata header for analytics tracking.
-func WithSession(session string) SourcesVNodeOption {
-	return func(v *SourcesVNode) { v.session = session }
 }
 
 type SourcesVNode struct {
@@ -100,7 +92,6 @@ type SourcesVNode struct {
 	token       string
 	bearerToken string // precomputed auth header value
 	compression string // compression strategy to pass via gRPC metadata
-	session     string // access session ID to pass via gRPC metadata
 
 	// Cache for query results to avoid repeated ExecuteSmartQuery calls
 	// during Readdir->Getattr cycles
@@ -171,9 +162,6 @@ func (v *SourcesVNode) ctx() (context.Context, context.CancelFunc) {
 	}
 	if v.compression != "" {
 		ctx = metadata.AppendToOutgoingContext(ctx, "x-airstore-compression", v.compression)
-	}
-	if v.session != "" {
-		ctx = metadata.AppendToOutgoingContext(ctx, "x-airstore-session", v.session)
 	}
 	return ctx, cancel
 }
@@ -669,8 +657,9 @@ func (v *SourcesVNode) readQueryResult(ctx context.Context, q *types.SmartQuery,
 	return copyFromOffset(buf, data, off), nil
 }
 
-// fetchContentViaRead calls the Read RPC which routes through the gateway's
-// compression middleware. Used when compression is enabled.
+// fetchContentViaRead calls the Read RPC on the gateway. All content reads
+// are routed through this method so the server-side access log interceptor
+// can record them, and the compression middleware can intercept when active.
 func (v *SourcesVNode) fetchContentViaRead(ctx context.Context, readPath string) ([]byte, error) {
 	resp, err := v.client.Read(ctx, &pb.SourceReadRequest{Path: readPath})
 	if err != nil || resp == nil || !resp.Ok || len(resp.Data) == 0 {
@@ -680,32 +669,11 @@ func (v *SourcesVNode) fetchContentViaRead(ctx context.Context, readPath string)
 }
 
 func (v *SourcesVNode) fetchQueryFileContent(ctx context.Context, q *types.SmartQuery) ([]byte, error) {
-	if v.compression != "" {
-		return v.fetchContentViaRead(ctx, strings.TrimPrefix(q.Path, SourcesPath+"/"))
-	}
-
-	resp, err := v.client.ExecuteSmartQuery(ctx, &pb.ExecuteSmartQueryRequest{Path: q.Path})
-	if err != nil || !resp.Ok || len(resp.FileData) == 0 {
-		return nil, fs.ErrNotExist
-	}
-	return resp.FileData, nil
+	return v.fetchContentViaRead(ctx, strings.TrimPrefix(q.Path, SourcesPath+"/"))
 }
 
 func (v *SourcesVNode) fetchQueryResultContent(ctx context.Context, q *types.SmartQuery, filename string) ([]byte, error) {
-	if v.compression != "" {
-		return v.fetchContentViaRead(ctx, strings.TrimPrefix(q.Path, SourcesPath+"/")+"/"+filename)
-	}
-
-	resultId := v.getResultIdFromCache(q.Path, filename)
-	resp, err := v.client.ExecuteSmartQuery(ctx, &pb.ExecuteSmartQueryRequest{
-		Path:     q.Path,
-		Filename: filename,
-		ResultId: resultId,
-	})
-	if err != nil || !resp.Ok || len(resp.FileData) == 0 {
-		return nil, fs.ErrNotExist
-	}
-	return resp.FileData, nil
+	return v.fetchContentViaRead(ctx, strings.TrimPrefix(q.Path, SourcesPath+"/")+"/"+filename)
 }
 
 func (v *SourcesVNode) readmeOpenInfo(path string) (uint32, time.Time) {
@@ -842,18 +810,6 @@ func (v *SourcesVNode) cacheOpenStat(path string, size int64, mode uint32, mtime
 		info.Ctime = mtime
 	}
 	v.setCachedStat(path, info)
-}
-
-// getResultIdFromCache looks up the result_id for a filename from the cached query results
-func (v *SourcesVNode) getResultIdFromCache(queryPath, filename string) string {
-	if cached := v.getCachedResultsNoRefresh(queryPath); cached != nil {
-		for _, e := range cached {
-			if e.Name == filename && e.ResultId != "" {
-				return e.ResultId
-			}
-		}
-	}
-	return ""
 }
 
 // isSystemFile returns true if the filename is a system/metadata file that should be ignored.
@@ -1076,16 +1032,6 @@ func (v *SourcesVNode) getQueryResultMeta(ctx context.Context, queryPath, filena
 	}
 
 	return 0, 0, false
-}
-
-// getQueryResultSize looks up the size of a file in query results.
-// Uses local cache first (populated by Readdir), falls back to RPC.
-func (v *SourcesVNode) getQueryResultSize(ctx context.Context, queryPath, filename string) int64 {
-	size, _, ok := v.getQueryResultMeta(ctx, queryPath, filename)
-	if !ok || size <= 0 {
-		return defaultUnknownFileSize
-	}
-	return size
 }
 
 func (v *SourcesVNode) protoToFileInfo(path string, info *pb.SourceFileInfo) *FileInfo {

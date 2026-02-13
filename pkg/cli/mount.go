@@ -23,6 +23,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 )
 
 var (
@@ -34,6 +35,7 @@ var (
 	mountBackend     string
 	mountCompression string
 	mountSession     string
+	mountAccessLog   bool
 )
 
 var mountCmd = &cobra.Command{
@@ -58,6 +60,7 @@ func init() {
 	mountCmd.Flags().StringVar(&mountBackend, "backend", "", "Mount backend: fuse, nfs, or auto-detect (default)")
 	mountCmd.Flags().StringVar(&mountCompression, "compression", "", "Compression strategy: strip (omit to disable)")
 	mountCmd.Flags().StringVar(&mountSession, "session", "", "Custom access session ID for telemetry (default: workspace ID)")
+	mountCmd.Flags().BoolVar(&mountAccessLog, "access-log", true, "Enable access logging (default: true)")
 	rootCmd.AddCommand(mountCmd)
 }
 
@@ -147,13 +150,21 @@ func runMount(cmd *cobra.Command, args []string) error {
 			Backend:     mountBackend,
 			Compression: mountCompression,
 			Session:     mountSession,
+			AccessLog:   mountAccessLog,
 		})
 		if err != nil {
 			return err
 		}
 
-		// Create gRPC connection for vnodes
-		conn, err = grpc.NewClient(effectiveGateway, grpc.WithTransportCredentials(TransportCredentials(effectiveGateway)))
+		// Create gRPC connection for vnodes.
+		// When access logging is on, a client-side interceptor injects the
+		// session header on every outgoing RPC so the gateway can record events.
+		dialOpts := []grpc.DialOption{grpc.WithTransportCredentials(TransportCredentials(effectiveGateway))}
+		if mountAccessLog {
+			session := mountSession // may be empty — gateway defaults to workspace ID
+			dialOpts = append(dialOpts, grpc.WithUnaryInterceptor(sessionInterceptor(session)))
+		}
+		conn, err = grpc.NewClient(effectiveGateway, dialOpts...)
 		if err != nil {
 			return err
 		}
@@ -171,9 +182,6 @@ func runMount(cmd *cobra.Command, args []string) error {
 		var sourcesOpts []vnode.SourcesVNodeOption
 		if mountCompression != "" {
 			sourcesOpts = append(sourcesOpts, vnode.WithCompression(mountCompression))
-		}
-		if mountSession != "" {
-			sourcesOpts = append(sourcesOpts, vnode.WithSession(mountSession))
 		}
 		fs.RegisterVNode(vnode.NewSourcesVNode(conn, authToken, sourcesOpts...))
 		fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, authToken, types.PathSkills)) // /Skills
@@ -302,6 +310,17 @@ func printMountStatus(mount, gateway, mode, compression string) {
 
 	fmt.Println()
 	fmt.Printf("  %s\n\n", DimStyle.Render("Press Ctrl+C to unmount"))
+}
+
+// sessionInterceptor returns a gRPC client-side unary interceptor that
+// injects x-airstore-session metadata on every outgoing call. This is the
+// single point that enables server-side access logging for all vnodes.
+// The session may be empty, in which case the gateway defaults to workspace ID.
+func sessionInterceptor(session string) grpc.UnaryClientInterceptor {
+	return func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+		ctx = metadata.AppendToOutgoingContext(ctx, "x-airstore-session", session)
+		return invoker(ctx, method, req, reply, cc, opts...)
+	}
 }
 
 func unmount(path string) {

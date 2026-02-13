@@ -230,8 +230,17 @@ func (g *Gateway) initGRPC() error {
 	}
 	authInterceptor := auth.NewGRPCInterceptor(validator)
 
+	// Create access recorder (S2-backed or noop) — used by both the gRPC
+	// interceptor and the compression middleware.
+	if g.s2Client != nil {
+		g.compressionRecorder = instrumentation.NewEventFlusher(g.s2Client)
+	} else {
+		g.compressionRecorder = instrumentation.NewNoopRecorder()
+	}
+	accessInterceptor := instrumentation.NewAccessLogInterceptor(g.compressionRecorder)
+
 	serverOptions := []grpc.ServerOption{
-		grpc.UnaryInterceptor(authInterceptor.Unary()),
+		grpc.ChainUnaryInterceptor(authInterceptor.Unary(), accessInterceptor.Unary()),
 		grpc.StreamInterceptor(authInterceptor.Stream()),
 		grpc.MaxRecvMsgSize(g.Config.Gateway.GRPC.MaxRecvMsgSize * 1024 * 1024),
 		grpc.MaxSendMsgSize(g.Config.Gateway.GRPC.MaxSendMsgSize * 1024 * 1024),
@@ -391,7 +400,10 @@ func (g *Gateway) registerServices() error {
 		os.Setenv("CEREBRAS_API_KEY", key)
 	}
 
-	// Wire compression middleware if a strategy is configured
+	// Wire compression middleware if a strategy is configured.
+	// The recorder is already on g.compressionRecorder (created in initGRPC).
+	recorder := g.compressionRecorder
+
 	var compStore *compression.CompressedStore
 	if g.Config.Compression.Strategy != "" {
 		compCfg := compression.Config{
@@ -410,22 +422,14 @@ func (g *Gateway) registerServices() error {
 			return fmt.Errorf("compression: %w", err)
 		}
 
-		// Access event recorder (always enabled)
-		var recorder instrumentation.AccessRecorder
-		if g.s2Client != nil {
-			recorder = instrumentation.NewEventFlusher(g.s2Client)
-		} else {
-			recorder = instrumentation.NewNoopRecorder()
-		}
-		g.compressionRecorder = recorder
-
 		// Compressed content cache (optional Redis cache, gated by config)
 		if compCfg.CacheEnabled && g.RedisClient != nil {
 			compStore = compression.NewCompressedStore(g.RedisClient, compCfg)
 			log.Info().Msg("compression cache enabled (Redis)")
 		}
 
-		hookOpts = append(hookOpts, services.WithCompressionMiddleware(compressor, compStore, recorder, compCfg))
+		hookOpts = append(hookOpts, services.WithRecorder(recorder))
+		hookOpts = append(hookOpts, services.WithCompressionMiddleware(compressor, compStore, compCfg))
 		log.Info().Str("strategy", g.Config.Compression.Strategy).Msg("compression middleware enabled")
 	}
 

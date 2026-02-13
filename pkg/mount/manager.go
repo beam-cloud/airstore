@@ -19,6 +19,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/metadata"
 )
 
 type Config struct {
@@ -30,6 +31,7 @@ type Config struct {
 	Backend     string // "fuse", "nfs", or "" for platform auto-detect
 	Compression string // compression strategy: "strip", "distill", "chain", or "" (disabled)
 	Session     string // custom access session ID; defaults to workspace ID if empty
+	AccessLog   bool   // enable access logging; when false, no session header is sent
 }
 
 type StateCallback func(State, error)
@@ -188,14 +190,18 @@ func (m *MountManager) createFilesystem(addr string) (*filesystem.Filesystem, *g
 		return nil, nil, fmt.Errorf("load shim: %w", err)
 	}
 
-	conn, err := grpc.NewClient(addr,
+	dialOpts := []grpc.DialOption{
 		grpc.WithTransportCredentials(common.TransportCredentials(addr)),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                30 * time.Second, // Ping every 30s if idle — detects dead connections after sleep/wake
 			Timeout:             10 * time.Second, // Wait 10s for ping ack before marking connection dead
 			PermitWithoutStream: true,             // Send pings even when no RPCs are in flight
 		}),
-	)
+	}
+	if m.cfg.AccessLog {
+		dialOpts = append(dialOpts, grpc.WithUnaryInterceptor(sessionInterceptor(m.cfg.Session)))
+	}
+	conn, err := grpc.NewClient(addr, dialOpts...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -208,9 +214,6 @@ func (m *MountManager) createFilesystem(addr string) (*filesystem.Filesystem, *g
 	if m.cfg.Compression != "" {
 		sourcesOpts = append(sourcesOpts, vnode.WithCompression(m.cfg.Compression))
 	}
-	if m.cfg.Session != "" {
-		sourcesOpts = append(sourcesOpts, vnode.WithSession(m.cfg.Session))
-	}
 	fs.RegisterVNode(vnode.NewSourcesVNode(conn, m.cfg.Token, sourcesOpts...))
 	fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, m.cfg.Token, types.PathSkills)) // /Skills
 	fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, m.cfg.Token, types.PathMemory)) // /Memory
@@ -218,6 +221,15 @@ func (m *MountManager) createFilesystem(addr string) (*filesystem.Filesystem, *g
 	fs.SetStorageFallback(vnode.NewStorageVNode(conn, m.cfg.Token))                  // user folders
 
 	return fs, conn, nil
+}
+
+// sessionInterceptor returns a gRPC client-side unary interceptor that
+// injects x-airstore-session metadata on every outgoing call.
+func sessionInterceptor(session string) grpc.UnaryClientInterceptor {
+	return func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+		ctx = metadata.AppendToOutgoingContext(ctx, "x-airstore-session", session)
+		return invoker(ctx, method, req, reply, cc, opts...)
+	}
 }
 
 func (m *MountManager) Stop() {
