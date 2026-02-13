@@ -84,9 +84,12 @@ RESP_HEADERS=""
 api_get_with_headers() {
     local tmpheaders
     tmpheaders=$(mktemp)
-    local body
-    body=$(curl -sf -D "$tmpheaders" -H "Authorization: Bearer $TOKEN" "$BASE_URL$1")
-    local rc=$?
+    local body rc
+    if body=$(curl -sf -D "$tmpheaders" -H "Authorization: Bearer $TOKEN" "$BASE_URL$1"); then
+        rc=0
+    else
+        rc=$?
+    fi
     RESP_HEADERS=$(cat "$tmpheaders" 2>/dev/null || true)
     rm -f "$tmpheaders"
     [ $rc -eq 0 ] && echo "$body"

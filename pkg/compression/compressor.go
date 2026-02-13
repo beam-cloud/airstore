@@ -6,38 +6,30 @@ import (
 	"time"
 )
 
-// ---------------------------------------------------------------------------
-// Strategy
-// ---------------------------------------------------------------------------
-
-type Strategy string
+type CompressionStrategy string
 
 const (
-	StrategyStrip       Strategy = "strip"
-	StrategyPassthrough Strategy = "passthrough"
+	CompressionStrategyStrip       CompressionStrategy = "strip"
+	CompressionStrategyPassthrough CompressionStrategy = "passthrough"
 )
 
-func ParseStrategy(s string) (Strategy, error) {
-	st := Strategy(s)
+func ParseStrategy(s string) (CompressionStrategy, error) {
+	st := CompressionStrategy(s)
 	if st.Valid() {
 		return st, nil
 	}
 	return "", fmt.Errorf("unknown compression strategy %q (valid: strip, passthrough)", s)
 }
 
-func (s Strategy) Valid() bool {
+func (s CompressionStrategy) Valid() bool {
 	switch s {
-	case StrategyStrip, StrategyPassthrough:
+	case CompressionStrategyStrip, CompressionStrategyPassthrough:
 		return true
 	}
 	return false
 }
 
-func (s Strategy) String() string { return string(s) }
-
-// ---------------------------------------------------------------------------
-// Outcome
-// ---------------------------------------------------------------------------
+func (s CompressionStrategy) String() string { return string(s) }
 
 type Outcome string
 
@@ -50,16 +42,12 @@ const (
 	OutcomeSkipped     Outcome = "skipped"
 )
 
-// ---------------------------------------------------------------------------
-// Core types
-// ---------------------------------------------------------------------------
-
 // CompressionResult is returned by every Compress call.
 type CompressionResult struct {
 	Data             []byte
 	OriginalTokens   int
 	CompressedTokens int
-	Strategy         Strategy
+	Strategy         CompressionStrategy
 	Outcome          Outcome
 	DurationMs       int64
 }
@@ -76,7 +64,7 @@ type ContentMeta struct {
 // ContextCompressor transforms raw content into a smaller representation.
 // Implementations must be safe for concurrent use.
 type ContextCompressor interface {
-	Name() Strategy
+	Name() CompressionStrategy
 	Compress(ctx context.Context, content []byte, meta ContentMeta) (*CompressionResult, error)
 }
 
@@ -86,19 +74,19 @@ type ContextCompressor interface {
 
 // Config holds all compression settings.
 type Config struct {
-	Strategy             Strategy      `yaml:"strategy"`
-	CacheEnabled         bool          `yaml:"cacheEnabled"`
-	TokenThreshold       int           `yaml:"tokenThreshold"`
-	MaxContentBytes      int           `yaml:"maxContentBytes"`
-	TokenEncoding        string        `yaml:"tokenEncoding"`
-	Timeout              time.Duration `yaml:"timeout"`
-	ContentCacheMaxBytes int64         `yaml:"contentCacheMaxBytes"` // cache only
-	ContentCacheTTL      time.Duration `yaml:"contentCacheTTL"`     // cache only
+	Strategy             CompressionStrategy `yaml:"strategy"`
+	CacheEnabled         bool                `yaml:"cacheEnabled"`
+	TokenThreshold       int                 `yaml:"tokenThreshold"`
+	MaxContentBytes      int                 `yaml:"maxContentBytes"`
+	TokenEncoding        string              `yaml:"tokenEncoding"`
+	Timeout              time.Duration       `yaml:"timeout"`
+	ContentCacheMaxBytes int64               `yaml:"contentCacheMaxBytes"` // cache only
+	ContentCacheTTL      time.Duration       `yaml:"contentCacheTTL"`      // cache only
 }
 
 func DefaultConfig() Config {
 	return Config{
-		Strategy:             StrategyStrip,
+		Strategy:             CompressionStrategyStrip,
 		TokenEncoding:        "cl100k_base",
 		ContentCacheMaxBytes: 10 * 1024 * 1024,
 		ContentCacheTTL:      5 * time.Minute,
@@ -124,32 +112,25 @@ func newTokenCounter(cfg Config) *TokenCounter {
 	return tc
 }
 
-// ---------------------------------------------------------------------------
-// Factory
-// ---------------------------------------------------------------------------
-
-func NewCompressor(strategy Strategy, cfg Config) (ContextCompressor, error) {
+func NewCompressor(strategy CompressionStrategy, cfg Config) (ContextCompressor, error) {
 	switch strategy {
-	case StrategyStrip:
+	case CompressionStrategyStrip:
 		return NewStripCompressor(cfg), nil
-	case StrategyPassthrough:
+	case CompressionStrategyPassthrough:
 		return newPassthroughCompressor(cfg), nil
 	default:
 		return nil, fmt.Errorf("unsupported compression strategy %q", strategy)
 	}
 }
 
-// ---------------------------------------------------------------------------
 // Passthrough — returns content unchanged, still counts tokens for metrics.
-// ---------------------------------------------------------------------------
-
 type passthrough struct{ counter *TokenCounter }
 
 func newPassthroughCompressor(cfg Config) *passthrough {
 	return &passthrough{counter: newTokenCounter(cfg)}
 }
 
-func (p *passthrough) Name() Strategy { return StrategyPassthrough }
+func (p *passthrough) Name() CompressionStrategy { return CompressionStrategyPassthrough }
 
 func (p *passthrough) Compress(_ context.Context, content []byte, _ ContentMeta) (*CompressionResult, error) {
 	start := time.Now()
@@ -158,7 +139,7 @@ func (p *passthrough) Compress(_ context.Context, content []byte, _ ContentMeta)
 		Data:             content,
 		OriginalTokens:   tokens,
 		CompressedTokens: tokens,
-		Strategy:         StrategyPassthrough,
+		Strategy:         CompressionStrategyPassthrough,
 		Outcome:          OutcomePassthrough,
 		DurationMs:       time.Since(start).Milliseconds(),
 	}, nil

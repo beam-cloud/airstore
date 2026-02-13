@@ -101,7 +101,6 @@ func TestReplaceHTMLEntities(t *testing.T) {
 	}
 }
 
-
 func TestStripURLOnlyLines(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -526,8 +525,8 @@ func TestStripCompressor_Integration(t *testing.T) {
 	if result.CompressedTokens >= result.OriginalTokens {
 		t.Errorf("CompressedTokens (%d) should be < OriginalTokens (%d)", result.CompressedTokens, result.OriginalTokens)
 	}
-	if result.Strategy != StrategyStrip {
-		t.Errorf("Strategy: got %q, want %q", result.Strategy, StrategyStrip)
+	if result.Strategy != CompressionStrategyStrip {
+		t.Errorf("CompressionStrategy: got %q, want %q", result.Strategy, CompressionStrategyStrip)
 	}
 	if result.Outcome != OutcomeCompressed {
 		t.Errorf("Outcome: got %q, want %q", result.Outcome, OutcomeCompressed)
