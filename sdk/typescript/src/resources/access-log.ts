@@ -115,11 +115,12 @@ export class AccessLog {
     workspaceId: string,
     sourceUri: string,
     options?: RequestOptions,
-  ): Promise<Response> {
-    return this.client.rawRequest(
+  ): Promise<ArrayBuffer> {
+    const resp = await this.client.rawRequest(
       'GET',
       `/workspaces/${workspaceId}/access-log/read`,
       { params: { uri: sourceUri }, ...options },
     );
+    return resp.arrayBuffer();
   }
 }

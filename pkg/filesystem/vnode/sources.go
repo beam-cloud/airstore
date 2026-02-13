@@ -179,10 +179,6 @@ func cloneCostHint(hint *pb.SourceReadCostHint) *pb.SourceReadCostHint {
 	return cloned
 }
 
-func sourceAttribution(cacheSource string, hint *pb.SourceReadCostHint) *ReadAttribution {
-	return AttributionFromCostHint(cacheSource, hint)
-}
-
 // rel strips the /sources prefix
 func (v *SourcesVNode) rel(path string) string {
 	return strings.TrimPrefix(strings.TrimPrefix(path, SourcesPath), "/")
@@ -622,7 +618,7 @@ func (v *SourcesVNode) Read(path string, buf []byte, off int64, fh FileHandle) (
 func (v *SourcesVNode) ReadWithAttribution(path string, buf []byte, off int64, fh FileHandle) (int, *ReadAttribution, error) {
 	// Serve from open content cache when available
 	if data, hint, ok := v.getOpenContent(path); ok {
-		return copyFromOffset(buf, data, off), sourceAttribution("open_content", hint), nil
+		return copyFromOffset(buf, data, off), AttributionFromCostHint(CacheSourceOpenContent, hint), nil
 	}
 
 	ctx, cancel := v.ctx()
@@ -635,7 +631,7 @@ func (v *SourcesVNode) ReadWithAttribution(path string, buf []byte, off int64, f
 		if err != nil {
 			return 0, nil, err
 		}
-		return copy(buf, data), &ReadAttribution{CacheSource: "synthetic"}, nil
+		return copy(buf, data), AttributionForCache(CacheSourceSynthetic), nil
 	}
 
 	// Query metadata files (.query.as and .{name}.query.as)
@@ -643,7 +639,7 @@ func (v *SourcesVNode) ReadWithAttribution(path string, buf []byte, off int64, f
 		if err != nil {
 			return 0, nil, err
 		}
-		return copyFromOffset(buf, data, off), &ReadAttribution{CacheSource: "metadata"}, nil
+		return copyFromOffset(buf, data, off), AttributionForCache(CacheSourceMetadata), nil
 	}
 
 	// Smart query file (single-file mode)
@@ -672,7 +668,7 @@ func (v *SourcesVNode) readQueryFileWithAttribution(ctx context.Context, q *type
 	if err != nil {
 		return 0, nil, fs.ErrNotExist
 	}
-	return copyFromOffset(buf, data, off), sourceAttribution("backend_rpc", hint), nil
+	return copyFromOffset(buf, data, off), AttributionFromCostHint(CacheSourceBackendRPC, hint), nil
 }
 
 // readQueryResult reads a specific file from query results.
@@ -686,7 +682,7 @@ func (v *SourcesVNode) readQueryResultWithAttribution(ctx context.Context, q *ty
 	if err != nil {
 		return 0, nil, fs.ErrNotExist
 	}
-	return copyFromOffset(buf, data, off), sourceAttribution("backend_rpc", hint), nil
+	return copyFromOffset(buf, data, off), AttributionFromCostHint(CacheSourceBackendRPC, hint), nil
 }
 
 // fetchContentViaRead calls the Read RPC on the gateway. All content reads

@@ -79,3 +79,27 @@ func TestAccessCollectorDrainsOnClose(t *testing.T) {
 		t.Fatalf("expected 1 drained event on close, got %d", events)
 	}
 }
+
+func TestAccessCollectorDropsRecordsAfterClose(t *testing.T) {
+	client := &fakeAccessLogClient{}
+	collector := NewAccessCollector(client, AccessCollectorConfig{
+		BufferSize:    16,
+		BatchSize:     100,
+		FlushInterval: time.Hour,
+	})
+
+	collector.Record(&pb.AccessLogEvent{EventId: "e1", Path: "skills/AGENTS.md"})
+	collector.Close()
+
+	callsBefore, eventsBefore := client.snapshot()
+	collector.Record(&pb.AccessLogEvent{EventId: "e2", Path: "skills/README.md"})
+	time.Sleep(20 * time.Millisecond)
+	callsAfter, eventsAfter := client.snapshot()
+
+	if callsAfter != callsBefore {
+		t.Fatalf("expected no flush calls after close, got before=%d after=%d", callsBefore, callsAfter)
+	}
+	if eventsAfter != eventsBefore {
+		t.Fatalf("expected no ingested events after close, got before=%d after=%d", eventsBefore, eventsAfter)
+	}
+}

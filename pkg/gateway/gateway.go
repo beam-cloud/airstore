@@ -380,9 +380,9 @@ func (g *Gateway) registerServices() error {
 	}
 
 	// Register batched access-log ingestion service for mount-side logical reads.
-	accessIngestService := services.NewAccessIngestService(g.compressionRecorder, g.RedisClient)
-	pb.RegisterAccessLogServiceServer(g.grpcServer, accessIngestService)
-	log.Info().Msg("access ingest service registered")
+	accessService := services.NewAccessService(g.compressionRecorder, g.RedisClient)
+	pb.RegisterAccessLogServiceServer(g.grpcServer, accessService)
+	log.Info().Msg("access log service registered")
 
 	// Register source providers
 	g.initSources()

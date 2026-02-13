@@ -164,7 +164,9 @@ func (f *Filesystem) SetStorageFallback(node vnode.VirtualNode) {
 // SetAccessCollector sets the mount-side access collector used to flush
 // logical read events to the gateway.
 func (f *Filesystem) SetAccessCollector(collector *AccessCollector) {
+	f.mu.Lock()
 	f.accessCollector = collector
+	f.mu.Unlock()
 }
 
 func (f *Filesystem) initRoot() error {
@@ -537,7 +539,7 @@ func (f *Filesystem) Read(path string, buf []byte, off int64, fh FileHandle) (in
 			return n.ReadWithAttribution(path, buf, off, vnode.FileHandle(fh))
 		}
 		n, err := vn.Read(path, buf, off, vnode.FileHandle(fh))
-		return n, &vnode.ReadAttribution{CacheSource: "unknown"}, err
+		return n, vnode.AttributionForCache(vnode.CacheSourceUnknown), err
 	}
 
 	parent, name := splitPath(path)
@@ -547,9 +549,9 @@ func (f *Filesystem) Read(path string, buf []byte, off int64, fh FileHandle) (in
 	}
 
 	if off >= int64(len(meta.FileData)) {
-		return 0, &vnode.ReadAttribution{CacheSource: "legacy_metadata"}, nil
+		return 0, vnode.AttributionForCache(vnode.CacheSourceLegacyMetadata), nil
 	}
-	return copy(buf, meta.FileData[off:]), &vnode.ReadAttribution{CacheSource: "legacy_metadata"}, nil
+	return copy(buf, meta.FileData[off:]), vnode.AttributionForCache(vnode.CacheSourceLegacyMetadata), nil
 }
 
 func (f *Filesystem) recordLogicalRead(
@@ -561,7 +563,14 @@ func (f *Filesystem) recordLogicalRead(
 	readErr error,
 	attr *vnode.ReadAttribution,
 ) {
-	if !f.config.AccessLog || f.accessCollector == nil {
+	if !f.config.AccessLog {
+		return
+	}
+
+	f.mu.Lock()
+	collector := f.accessCollector
+	f.mu.Unlock()
+	if collector == nil {
 		return
 	}
 
@@ -581,7 +590,7 @@ func (f *Filesystem) recordLogicalRead(
 		LatencyMs:      latency.Milliseconds(),
 		MountId:        f.mountID,
 		AccessOrigin:   "fuse",
-		CacheSource:    "unknown",
+		CacheSource:    vnode.CacheSourceUnknown,
 	}
 
 	if attr != nil {
@@ -610,7 +619,7 @@ func (f *Filesystem) recordLogicalRead(
 		event.Outcome = "passthrough"
 	}
 
-	f.accessCollector.Record(event)
+	collector.Record(event)
 }
 
 func (f *Filesystem) Release(path string, fh FileHandle) error {

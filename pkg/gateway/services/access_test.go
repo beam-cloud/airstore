@@ -60,9 +60,9 @@ func newTestRedis(t *testing.T) *common.RedisClient {
 	return rdb
 }
 
-func TestAccessIngestServiceRequiresWorkspaceContext(t *testing.T) {
+func TestAccessServiceRequiresWorkspaceContext(t *testing.T) {
 	rec := &collectingRecorder{}
-	svc := NewAccessIngestService(rec, nil)
+	svc := NewAccessService(rec, nil)
 
 	resp, err := svc.IngestAccessEvents(context.Background(), &pb.IngestAccessEventsRequest{
 		Events: []*pb.AccessLogEvent{{EventId: "e1", Path: "sources/a.txt"}},
@@ -75,9 +75,9 @@ func TestAccessIngestServiceRequiresWorkspaceContext(t *testing.T) {
 	}
 }
 
-func TestAccessIngestServiceNormalizesWorkspaceAndSession(t *testing.T) {
+func TestAccessServiceNormalizesWorkspaceAndSession(t *testing.T) {
 	rec := &collectingRecorder{}
-	svc := NewAccessIngestService(rec, nil)
+	svc := NewAccessService(rec, nil)
 
 	resp, err := svc.IngestAccessEvents(authCtx("ws-ext"), &pb.IngestAccessEventsRequest{
 		Events: []*pb.AccessLogEvent{{
@@ -118,9 +118,9 @@ func TestAccessIngestServiceNormalizesWorkspaceAndSession(t *testing.T) {
 	}
 }
 
-func TestAccessIngestServiceDedupesByEventIDWhenRedisConfigured(t *testing.T) {
+func TestAccessServiceDedupesByEventIDWhenRedisConfigured(t *testing.T) {
 	rec := &collectingRecorder{}
-	svc := NewAccessIngestService(rec, newTestRedis(t))
+	svc := NewAccessService(rec, newTestRedis(t))
 
 	ctx := authCtx("ws-ext")
 	req := &pb.IngestAccessEventsRequest{

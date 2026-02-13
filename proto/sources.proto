@@ -96,10 +96,10 @@ message SourceReadCostHint {
   string result_id = 4;
   string strategy = 5;
   string outcome = 6;
-  int32 original_bytes = 7;
-  int32 compressed_bytes = 8;
-  int32 original_tokens = 9;
-  int32 compressed_tokens = 10;
+  int64 original_bytes = 7;
+  int64 compressed_bytes = 8;
+  int64 original_tokens = 9;
+  int64 compressed_tokens = 10;
   int64 compression_ms = 11;
 }
 

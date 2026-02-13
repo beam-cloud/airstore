@@ -237,74 +237,21 @@ func (s *StorageVNode) Read(path string, buf []byte, off int64, fh FileHandle) (
 	return n, err
 }
 
+func (s *StorageVNode) cachedReadOps() cachedReadOps {
+	return cachedReadOps{
+		content:         s.content,
+		writer:          s.asyncWriter,
+		getHandleState:  s.getHandleState,
+		enqueueWrites:   s.enqueueWritesForPath,
+		consumePrefetch: s.consumePrefetch,
+		maybeStatSmall:  s.maybeStatSmall,
+		readRange:       s.readRange,
+		recordRead:      s.recordRead,
+	}
+}
+
 func (s *StorageVNode) ReadWithAttribution(path string, buf []byte, off int64, fh FileHandle) (int, *ReadAttribution, error) {
-	// AppleDouble files are empty.
-	if isAppleDoublePath(path) {
-		return 0, &ReadAttribution{CacheSource: "synthetic"}, nil
-	}
-
-	// Drain handleState buffers into asyncWriter (non-blocking).
-	s.enqueueWritesForPath(path)
-
-	// Serve from dirty buffer if the asyncWriter has pending data covering this range.
-	if data, dataOff, ok := s.asyncWriter.Get(path); ok {
-		dataEnd := dataOff + int64(len(data))
-		if off >= dataOff && off < dataEnd {
-			n := copy(buf, data[off-dataOff:])
-			return n, &ReadAttribution{CacheSource: "dirty_buffer"}, nil
-		}
-		if off >= dataEnd {
-			return 0, &ReadAttribution{CacheSource: "dirty_buffer"}, nil // EOF — file was truncated/rewritten
-		}
-		// Read is before the dirty range; force flush and fall through to S3.
-		if err := s.asyncWriter.ForceFlush(path); err != nil {
-			return 0, nil, err
-		}
-	}
-
-	state := s.getHandleState(fh)
-	if state != nil {
-		if data, ok, err := s.consumePrefetch(path, off, state); err != nil {
-			return 0, nil, err
-		} else if ok {
-			n := copy(buf, data)
-			s.recordRead(state, path, off, n)
-			return n, &ReadAttribution{CacheSource: "prefetch"}, nil
-		}
-	}
-
-	// Small file cache (mtime validated)
-	if info, ok := s.maybeStatSmall(path); ok && info.Size <= smallFileMaxSize && info.Mtime != 0 {
-		if data, ok := s.content.Get(path, info.Mtime); ok {
-			if off >= int64(len(data)) {
-				return 0, &ReadAttribution{CacheSource: "content_cache"}, nil
-			}
-			n := copy(buf, data[off:])
-			s.recordRead(state, path, off, n)
-			return n, &ReadAttribution{CacheSource: "content_cache"}, nil
-		}
-
-		data, err := s.readRange(path, 0, info.Size)
-		if err != nil {
-			return 0, nil, err
-		}
-		s.content.Set(path, data, info.Mtime)
-		if off >= int64(len(data)) {
-			return 0, &ReadAttribution{CacheSource: "backend_rpc"}, nil
-		}
-		n := copy(buf, data[off:])
-		s.recordRead(state, path, off, n)
-		return n, &ReadAttribution{CacheSource: "backend_rpc"}, nil
-	}
-
-	// Regular read
-	data, err := s.readRange(path, off, int64(len(buf)))
-	if err != nil {
-		return 0, nil, err
-	}
-	n := copy(buf, data)
-	s.recordRead(state, path, off, n)
-	return n, &ReadAttribution{CacheSource: "backend_rpc"}, nil
+	return readWithCachedFlow(path, buf, off, fh, s.cachedReadOps())
 }
 
 func (s *StorageVNode) Create(path string, flags int, mode uint32) (FileHandle, error) {

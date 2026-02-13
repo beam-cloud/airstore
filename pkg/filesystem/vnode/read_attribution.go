@@ -20,14 +20,30 @@ type ReadAttribution struct {
 	CompressionMs    int64
 }
 
+const (
+	CacheSourceUnknown        = "unknown"
+	CacheSourceBackendRPC     = "backend_rpc"
+	CacheSourceOpenContent    = "open_content"
+	CacheSourceContentCache   = "content_cache"
+	CacheSourcePrefetch       = "prefetch"
+	CacheSourceDirtyBuffer    = "dirty_buffer"
+	CacheSourceSynthetic      = "synthetic"
+	CacheSourceMetadata       = "metadata"
+	CacheSourceLegacyMetadata = "legacy_metadata"
+)
+
 // ReadAttributionNode is an optional vnode extension that returns attribution
 // metadata alongside read bytes.
 type ReadAttributionNode interface {
 	ReadWithAttribution(path string, buf []byte, off int64, fh FileHandle) (int, *ReadAttribution, error)
 }
 
+func AttributionForCache(cacheSource string) *ReadAttribution {
+	return &ReadAttribution{CacheSource: cacheSource}
+}
+
 func AttributionFromCostHint(cacheSource string, hint *pb.SourceReadCostHint) *ReadAttribution {
-	attr := &ReadAttribution{CacheSource: cacheSource}
+	attr := AttributionForCache(cacheSource)
 	if hint == nil {
 		return attr
 	}

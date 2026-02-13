@@ -24,7 +24,6 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/metadata"
 )
 
 var (
@@ -163,18 +162,16 @@ func runMount(cmd *cobra.Command, args []string) error {
 		dialOpts := []grpc.DialOption{grpc.WithTransportCredentials(TransportCredentials(effectiveGateway))}
 		if mountAccessLog {
 			session := mountSession // may be empty — gateway defaults to workspace ID
-			dialOpts = append(dialOpts, grpc.WithUnaryInterceptor(sessionInterceptor(session)))
+			dialOpts = append(dialOpts, grpc.WithUnaryInterceptor(filesystem.MountAccessUnaryInterceptor(session)))
 		}
 		conn, err = grpc.NewClient(effectiveGateway, dialOpts...)
 		if err != nil {
 			return err
 		}
 		if mountAccessLog {
-			fs.SetAccessCollector(filesystem.NewAccessCollector(
+			fs.SetAccessCollector(filesystem.NewAccessCollectorWithToken(
 				pb.NewAccessLogServiceClient(conn),
-				filesystem.AccessCollectorConfig{
-					AuthToken: authToken,
-				},
+				authToken,
 			))
 		}
 
@@ -319,17 +316,6 @@ func printMountStatus(mount, gateway, mode, compression string) {
 
 	fmt.Println()
 	fmt.Printf("  %s\n\n", DimStyle.Render("Press Ctrl+C to unmount"))
-}
-
-// sessionInterceptor returns a gRPC client-side unary interceptor that
-// injects x-airstore-session metadata on every outgoing call. This is the
-// single point that enables server-side access logging for all vnodes.
-// The session may be empty, in which case the gateway defaults to workspace ID.
-func sessionInterceptor(session string) grpc.UnaryClientInterceptor {
-	return func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
-		ctx = metadata.AppendToOutgoingContext(ctx, "x-airstore-session", session, "x-airstore-access-origin", "fuse")
-		return invoker(ctx, method, req, reply, cc, opts...)
-	}
 }
 
 func unmount(path string) {

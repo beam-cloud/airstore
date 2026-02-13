@@ -83,10 +83,10 @@ func (s *SourceService) readWithCompression(
 			ResultId:         ev.ResultID,
 			Strategy:         ev.Strategy,
 			Outcome:          ev.Outcome,
-			OriginalBytes:    int32(ev.OriginalBytes),
-			CompressedBytes:  int32(ev.CompressedBytes),
-			OriginalTokens:   int32(ev.OriginalTokens),
-			CompressedTokens: int32(ev.CompressedTokens),
+			OriginalBytes:    int64(ev.OriginalBytes),
+			CompressedBytes:  int64(ev.CompressedBytes),
+			OriginalTokens:   int64(ev.OriginalTokens),
+			CompressedTokens: int64(ev.CompressedTokens),
 			CompressionMs:    ev.CompressionMs,
 		}
 	}

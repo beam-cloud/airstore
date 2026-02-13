@@ -20,7 +20,6 @@ import (
 	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
-	"google.golang.org/grpc/metadata"
 )
 
 type Config struct {
@@ -203,18 +202,16 @@ func (m *MountManager) createFilesystem(addr string) (*filesystem.Filesystem, *g
 		}),
 	}
 	if m.cfg.AccessLog {
-		dialOpts = append(dialOpts, grpc.WithUnaryInterceptor(sessionInterceptor(m.cfg.Session)))
+		dialOpts = append(dialOpts, grpc.WithUnaryInterceptor(filesystem.MountAccessUnaryInterceptor(m.cfg.Session)))
 	}
 	conn, err := grpc.NewClient(addr, dialOpts...)
 	if err != nil {
 		return nil, nil, err
 	}
 	if m.cfg.AccessLog {
-		fs.SetAccessCollector(filesystem.NewAccessCollector(
+		fs.SetAccessCollector(filesystem.NewAccessCollectorWithToken(
 			pb.NewAccessLogServiceClient(conn),
-			filesystem.AccessCollectorConfig{
-				AuthToken: m.cfg.Token,
-			},
+			m.cfg.Token,
 		))
 	}
 
@@ -233,15 +230,6 @@ func (m *MountManager) createFilesystem(addr string) (*filesystem.Filesystem, *g
 	fs.SetStorageFallback(vnode.NewStorageVNode(conn, m.cfg.Token))                  // user folders
 
 	return fs, conn, nil
-}
-
-// sessionInterceptor returns a gRPC client-side unary interceptor that
-// injects x-airstore-session metadata on every outgoing call.
-func sessionInterceptor(session string) grpc.UnaryClientInterceptor {
-	return func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
-		ctx = metadata.AppendToOutgoingContext(ctx, "x-airstore-session", session, "x-airstore-access-origin", "fuse")
-		return invoker(ctx, method, req, reply, cc, opts...)
-	}
 }
 
 func (m *MountManager) Stop() {

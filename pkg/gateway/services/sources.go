@@ -646,7 +646,7 @@ func (s *SourceService) readSmartQueryResult(ctx context.Context, pctx *sources.
 	// Standard read (no compression).
 	if content, err := s.fsStore.GetResultContent(ctx, pctx.WorkspaceId, queryPath, resultID); err == nil && len(content) > 0 {
 		resp := readSlice(content, offset, length)
-		resp.CostHint = s.passthroughCostHint(ctx, query.Integration, queryPath, resultID, filename, content)
+		resp.CostHint = s.passthroughCostHint(ctx, query.Integration, queryPath, resultID, filename, resp.Data)
 		return resp, nil
 	}
 
@@ -658,7 +658,7 @@ func (s *SourceService) readSmartQueryResult(ctx context.Context, pctx *sources.
 		log.Warn().Err(err).Str("path", queryPath).Str("result", resultID).Msg("failed to cache result content")
 	}
 	resp := readSlice(content, offset, length)
-	resp.CostHint = s.passthroughCostHint(ctx, query.Integration, queryPath, resultID, filename, content)
+	resp.CostHint = s.passthroughCostHint(ctx, query.Integration, queryPath, resultID, filename, resp.Data)
 	return resp, nil
 }
 
@@ -716,8 +716,8 @@ func (s *SourceService) passthroughCostHint(
 		ResultId:         resultID,
 		Strategy:         string(compression.CompressionStrategyPassthrough),
 		Outcome:          string(compression.OutcomePassthrough),
-		OriginalBytes:    int32(len(content)),
-		CompressedBytes:  int32(len(content)),
+		OriginalBytes:    int64(len(content)),
+		CompressedBytes:  int64(len(content)),
 		OriginalTokens:   0,
 		CompressedTokens: 0,
 		CompressionMs:    0,
@@ -739,8 +739,8 @@ func (s *SourceService) passthroughCostHint(
 	}
 	hint.Strategy = string(res.Strategy)
 	hint.Outcome = string(res.Outcome)
-	hint.OriginalTokens = int32(res.OriginalTokens)
-	hint.CompressedTokens = int32(res.CompressedTokens)
+	hint.OriginalTokens = int64(res.OriginalTokens)
+	hint.CompressedTokens = int64(res.CompressedTokens)
 	hint.CompressionMs = res.DurationMs
 	return hint
 }
