@@ -86,6 +86,7 @@ func normalizeAccessEvent(workspaceID string, in *pb.AccessLogEvent) instrumenta
 		Strategy:         in.Strategy,
 		Outcome:          in.Outcome,
 		CompressionMs:    in.CompressionMs,
+		FetchMs:          in.FetchMs,
 		ErrorMsg:         in.ErrorMsg,
 		MountID:          in.MountId,
 		AccessOrigin:     in.AccessOrigin,

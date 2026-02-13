@@ -75,6 +75,7 @@ type cachedContent struct {
 	data     []byte
 	hint     *pb.SourceReadCostHint
 	cachedAt time.Time
+	fetchMs  int64 // how long the content fetch took (ms)
 	refs     int
 }
 
@@ -590,7 +591,9 @@ func (v *SourcesVNode) Open(path string, flags int) (FileHandle, error) {
 	ctx, cancel := v.ctx()
 	defer cancel()
 
+	fetchStart := time.Now()
 	data, hint, mode, mtime, ok, err := v.fetchContentForOpen(ctx, path)
+	fetchMs := time.Since(fetchStart).Milliseconds()
 	if !ok {
 		return 0, nil
 	}
@@ -598,7 +601,7 @@ func (v *SourcesVNode) Open(path string, flags int) (FileHandle, error) {
 		return 0, err
 	}
 
-	fh := v.addOpenContent(path, data, hint)
+	fh := v.addOpenContentWithFetchMs(path, data, hint, fetchMs)
 	v.cacheOpenStat(path, int64(len(data)), mode, mtime)
 	return fh, nil
 }
@@ -617,8 +620,10 @@ func (v *SourcesVNode) Read(path string, buf []byte, off int64, fh FileHandle) (
 
 func (v *SourcesVNode) ReadWithAttribution(path string, buf []byte, off int64, fh FileHandle) (int, *ReadAttribution, error) {
 	// Serve from open content cache when available
-	if data, hint, ok := v.getOpenContent(path); ok {
-		return copyFromOffset(buf, data, off), AttributionFromCostHint(CacheSourceOpenContent, hint), nil
+	if data, hint, fetchMs, ok := v.getOpenContentWithFetchMs(path); ok {
+		attr := AttributionFromCostHint(CacheSourceOpenContent, hint)
+		attr.FetchMs = fetchMs
+		return copyFromOffset(buf, data, off), attr, nil
 	}
 
 	ctx, cancel := v.ctx()
@@ -1212,7 +1217,21 @@ func (v *SourcesVNode) getOpenContent(path string) ([]byte, *pb.SourceReadCostHi
 	return nil, nil, false
 }
 
+func (v *SourcesVNode) getOpenContentWithFetchMs(path string) ([]byte, *pb.SourceReadCostHint, int64, bool) {
+	v.openMu.RLock()
+	defer v.openMu.RUnlock()
+
+	if cached, ok := v.openContent[path]; ok {
+		return cached.data, cloneCostHint(cached.hint), cached.fetchMs, true
+	}
+	return nil, nil, 0, false
+}
+
 func (v *SourcesVNode) addOpenContent(path string, data []byte, hint *pb.SourceReadCostHint) FileHandle {
+	return v.addOpenContentWithFetchMs(path, data, hint, 0)
+}
+
+func (v *SourcesVNode) addOpenContentWithFetchMs(path string, data []byte, hint *pb.SourceReadCostHint, fetchMs int64) FileHandle {
 	v.openMu.Lock()
 	defer v.openMu.Unlock()
 
@@ -1226,6 +1245,7 @@ func (v *SourcesVNode) addOpenContent(path string, data []byte, hint *pb.SourceR
 			cached.data = data
 			cached.hint = cloneCostHint(hint)
 			cached.cachedAt = time.Now()
+			cached.fetchMs = fetchMs
 		}
 		return fh
 	}
@@ -1234,6 +1254,7 @@ func (v *SourcesVNode) addOpenContent(path string, data []byte, hint *pb.SourceR
 		data:     data,
 		hint:     cloneCostHint(hint),
 		cachedAt: time.Now(),
+		fetchMs:  fetchMs,
 		refs:     1,
 	}
 	return fh

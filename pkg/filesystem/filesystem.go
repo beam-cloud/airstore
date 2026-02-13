@@ -608,6 +608,7 @@ func (f *Filesystem) recordLogicalRead(
 		event.OriginalTokens = int64(attr.OriginalTokens)
 		event.CompressedTokens = int64(attr.CompressedTokens)
 		event.CompressionMs = attr.CompressionMs
+		event.FetchMs = attr.FetchMs
 	}
 
 	if readErr != nil {

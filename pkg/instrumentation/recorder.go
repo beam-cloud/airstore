@@ -28,6 +28,7 @@ type AccessEvent struct {
 	Strategy         string `json:"strategy"` // requested strategy
 	Outcome          string `json:"outcome"`  // "compressed", "cache_hit", "passthrough", "timeout", "error", "skipped"
 	CompressionMs    int64  `json:"compression_ms"`
+	FetchMs          int64  `json:"fetch_ms,omitempty"` // e2e content fetch duration (e.g. time to fetch from source during Open)
 	ErrorMsg         string `json:"error_msg,omitempty"` // populated on outcome=error or timeout
 }
 

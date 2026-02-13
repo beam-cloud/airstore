@@ -81,6 +81,7 @@ message AccessLogEvent {
   string strategy = 21;
   string outcome = 22;
   int64 compression_ms = 23;
+  int64 fetch_ms = 24; // e2e content fetch duration (e.g. time to fetch from source during Open)
 }
 
 message IngestAccessEventsRequest {

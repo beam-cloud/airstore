@@ -3,6 +3,7 @@ package instrumentation
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/beam-cloud/airstore/pkg/common"
@@ -78,9 +79,26 @@ func (f *EventFlusher) loop() {
 	}
 }
 
+const accessStreamPrefix = "access."
+const accessStreamSuffix = ".events"
+
 // AccessStreamName returns the S2 stream name for an access session.
 func AccessStreamName(sessionID string) string {
-	return fmt.Sprintf("access.%s.events", sessionID)
+	return fmt.Sprintf("%s%s%s", accessStreamPrefix, sessionID, accessStreamSuffix)
+}
+
+// AccessStreamPrefix returns the prefix used for all access log streams.
+func AccessStreamPrefix() string {
+	return accessStreamPrefix
+}
+
+// SessionIDFromStreamName extracts the session ID from a stream name
+// of the form "access.{session_id}.events".
+func SessionIDFromStreamName(name string) string {
+	if !strings.HasPrefix(name, accessStreamPrefix) || !strings.HasSuffix(name, accessStreamSuffix) {
+		return ""
+	}
+	return name[len(accessStreamPrefix) : len(name)-len(accessStreamSuffix)]
 }
 
 func (f *EventFlusher) send(event AccessEvent) {
