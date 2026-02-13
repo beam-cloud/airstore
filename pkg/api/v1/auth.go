@@ -29,7 +29,15 @@ func (g *AuthGroup) Whoami(c echo.Context) error {
 	}
 
 	info, err := g.backend.AuthorizeToken(c.Request().Context(), token)
-	if err != nil || info == nil {
+	if err != nil {
+		// Distinguish auth failures from infrastructure errors
+		if strings.Contains(err.Error(), "invalid token") || strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "expired") {
+			return ErrorResponse(c, http.StatusUnauthorized, "invalid token")
+		}
+
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to validate token")
+	}
+	if info == nil {
 		return ErrorResponse(c, http.StatusUnauthorized, "invalid token")
 	}
 
