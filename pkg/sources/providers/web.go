@@ -270,7 +270,11 @@ type scrapeResult struct {
 
 // mapURLs discovers pages on a website via Firecrawl /map.
 func (w *WebProvider) mapURLs(ctx context.Context, siteURL string, limit int, includePaths []string) ([]mapLink, error) {
-	payload := map[string]any{"url": siteURL, "limit": limit}
+	payload := map[string]any{
+		"url":         siteURL,
+		"limit":       limit,
+		"ignoreCache": true, // bypass Firecrawl sitemap cache (up to 7 days); we cache on our end
+	}
 	if len(includePaths) > 0 {
 		payload["includePaths"] = includePaths
 	}
