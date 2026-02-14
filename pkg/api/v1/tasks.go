@@ -78,6 +78,10 @@ func (g *TasksGroup) registerRoutes() {
 func (g *TasksGroup) CreateTask(c echo.Context) error {
 	ctx := c.Request().Context()
 
+	if !auth.IsAuthenticated(ctx) {
+		return ErrorResponse(c, http.StatusUnauthorized, "unauthorized")
+	}
+
 	var req CreateTaskRequest
 	if err := c.Bind(&req); err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
@@ -128,6 +132,10 @@ func (g *TasksGroup) CreateTask(c echo.Context) error {
 			return ErrorResponse(c, http.StatusBadRequest, "workspace not found")
 		}
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+
+	if err := auth.RequireWorkspaceAccess(ctx, workspace.ExternalId); err != nil {
+		return ErrorResponse(c, http.StatusForbidden, err.Error())
 	}
 
 	task := &types.Task{
