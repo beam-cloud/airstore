@@ -46,6 +46,10 @@ var (
 	hookSeen          string = "airstore:hook:seen:%d:%s" // workspaceId, pathHash
 	hookPollLock      string = "airstore:hook:poll:%s"    // queryExternalId
 
+	// OAuth keys
+	oauthSession string = "airstore:oauth:session:%s" // sessionId
+	oauthState   string = "airstore:oauth:state:%s"   // state
+
 	// Compression keys — include strategy so each compressor caches independently
 	fsCompressedPointer string = "airstore:compressed:%d:%s:%s:%s" // workspaceId, pathHash, resultId, strategy
 	fsCompressedContent string = "airstore:cc:%d:%s:%s:%s"         // workspaceId, pathHash, resultId, strategy
@@ -172,6 +176,16 @@ func (rk *redisKeys) HookSeen(workspaceId uint, pathHash string) string {
 
 func (rk *redisKeys) HookPollLock(queryExtId string) string {
 	return fmt.Sprintf(hookPollLock, queryExtId)
+}
+
+// OAuth keys
+
+func (rk *redisKeys) OAuthSession(sessionId string) string {
+	return fmt.Sprintf(oauthSession, sessionId)
+}
+
+func (rk *redisKeys) OAuthState(state string) string {
+	return fmt.Sprintf(oauthState, state)
 }
 
 // Compression keys

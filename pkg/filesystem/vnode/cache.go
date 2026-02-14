@@ -470,11 +470,6 @@ func (v *SourcesVNode) getOpenContentWithFetchMs(path string) ([]byte, *pb.Sourc
 	}
 	return nil, nil, 0, false
 }
-
-func (v *SourcesVNode) addOpenContent(path string, data []byte, hint *pb.SourceReadCostHint) FileHandle {
-	return v.addOpenContentWithFetchMs(path, data, hint, 0)
-}
-
 func (v *SourcesVNode) addOpenContentWithFetchMs(path string, data []byte, hint *pb.SourceReadCostHint, fetchMs int64) FileHandle {
 	v.openMu.Lock()
 	defer v.openMu.Unlock()
