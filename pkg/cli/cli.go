@@ -112,7 +112,6 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&authToken, "token", getEnv("AIRSTORE_TOKEN", ""), "Authentication token")
 	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 
-	rootCmd.AddCommand(workspaceCmd)
 	rootCmd.AddCommand(memberCmd)
 	rootCmd.AddCommand(tokenCmd)
 	rootCmd.AddCommand(connectionCmd)
