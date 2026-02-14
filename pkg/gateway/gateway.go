@@ -753,6 +753,7 @@ func (g *Gateway) initSources() {
 	g.sourceRegistry.Register(providers.NewSlackProvider())
 	g.sourceRegistry.Register(providers.NewLinearProvider())
 	g.sourceRegistry.Register(providers.NewPostHogProvider())
+	g.sourceRegistry.Register(providers.NewWebProvider(g.Config.Sources.Firecrawl.APIKey))
 
 	log.Info().Strs("providers", g.sourceRegistry.List()).Msg("source providers registered")
 }

@@ -31,7 +31,7 @@ func NewGitHubProvider() *GitHubProvider {
 }
 
 func (g *GitHubProvider) Name() string {
-	return types.ToolGitHub.String()
+	return types.GitHub.String()
 }
 
 // Stat returns file/directory attributes

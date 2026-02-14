@@ -41,8 +41,8 @@ func NewWikipediaClient() *WikipediaClient {
 }
 
 // Name returns the tool identifier - implements ToolClient interface
-func (w *WikipediaClient) Name() types.ToolName {
-	return types.ToolWikipedia
+func (w *WikipediaClient) Name() types.IntegrationName {
+	return types.Wikipedia
 }
 
 // Execute runs a Wikipedia command - implements ToolClient interface

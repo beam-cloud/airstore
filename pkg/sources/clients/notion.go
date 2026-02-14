@@ -61,8 +61,8 @@ func NewNotionClient() *NotionClient {
 }
 
 // Integration returns the integration name
-func (c *NotionClient) Integration() types.ToolName {
-	return types.ToolNotion
+func (c *NotionClient) Integration() types.IntegrationName {
+	return types.Notion
 }
 
 // Request makes a GET request to the Notion API

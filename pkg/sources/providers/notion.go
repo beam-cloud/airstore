@@ -33,7 +33,7 @@ func NewNotionProvider() *NotionProvider {
 }
 
 func (n *NotionProvider) Name() string {
-	return types.ToolNotion.String()
+	return types.Notion.String()
 }
 
 // Stat returns file/directory attributes

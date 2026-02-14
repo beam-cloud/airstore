@@ -33,7 +33,7 @@ func NewGDriveProvider() *GDriveProvider {
 }
 
 func (g *GDriveProvider) Name() string {
-	return types.ToolGDrive.String()
+	return types.GDrive.String()
 }
 
 // Stat returns file/directory attributes

@@ -109,7 +109,3 @@ tools:
   #       command: npx
   #       args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
   mcp: {}
-
-# Anthropic (for BAML inference and Claude Code tasks)
-anthropic:
-  apiKey: ""

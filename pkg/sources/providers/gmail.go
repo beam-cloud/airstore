@@ -122,7 +122,7 @@ func NewGmailProvider() *GmailProvider {
 }
 
 func (g *GmailProvider) Name() string {
-	return types.ToolGmail.String()
+	return types.Gmail.String()
 }
 
 // checkAuth validates that credentials are present

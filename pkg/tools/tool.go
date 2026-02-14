@@ -38,7 +38,7 @@ type ParamDef struct {
 
 // RequiresCredentials returns true if the tool needs stored credentials
 func RequiresCredentials(name string) bool {
-	return types.RequiresAuth(types.ToolName(name))
+	return types.RequiresAuth(types.IntegrationName(name))
 }
 
 // Global tool registry

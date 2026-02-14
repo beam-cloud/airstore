@@ -246,13 +246,13 @@ func (s *SourceService) ReadDir(ctx context.Context, req *pb.SourceReadDirReques
 
 	p := cleanPath(req.Path)
 
-	// Root /sources — list connected integrations only.
+	// Root /sources — list visible integrations.
+	// Built-in integrations (AuthNone) are always shown; others require a connection.
 	if p == "" {
-		connected := s.connectedIntegrations(ctx, pctx.WorkspaceId)
 		allNames := s.registry.List()
 		entries := make([]*pb.SourceDirEntry, 0, len(allNames))
 		for _, name := range allNames {
-			if connected != nil && !connected[name] {
+			if !s.isIntegrationVisible(ctx, pctx.WorkspaceId, name) {
 				continue
 			}
 			entries = append(entries, &pb.SourceDirEntry{
@@ -778,6 +778,12 @@ func (s *SourceService) providerContext(ctx context.Context) (*sources.ProviderC
 }
 
 func (s *SourceService) loadCredentials(ctx context.Context, pctx *sources.ProviderContext, integration string) (*sources.ProviderContext, bool) {
+	// Built-in integrations (AuthNone) carry their own credentials (e.g. global
+	// API key from config). No per-workspace DB connection needed.
+	if meta, ok := types.GetIntegrationMeta(types.IntegrationName(integration)); ok && meta.AuthType == types.AuthNone {
+		return pctx, true
+	}
+
 	if s.backend == nil || pctx.WorkspaceId == 0 {
 		return pctx, false
 	}
@@ -861,6 +867,10 @@ func (s *SourceService) InvalidateConnectionCache(workspaceId uint) {
 }
 
 func (s *SourceService) isIntegrationVisible(ctx context.Context, workspaceId uint, integration string) bool {
+	// Built-in integrations (AuthNone) are always visible — no connection needed.
+	if meta, ok := types.GetIntegrationMeta(types.IntegrationName(integration)); ok && meta.AuthType == types.AuthNone {
+		return true
+	}
 	connSet := s.connectedIntegrations(ctx, workspaceId)
 	return connSet == nil || connSet[integration]
 }

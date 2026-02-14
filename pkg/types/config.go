@@ -13,10 +13,9 @@ const (
 
 // AppConfig is the root configuration for the airstore gateway
 type AppConfig struct {
-	Mode       string `key:"mode" json:"mode"` // "local" or "remote"
-	DebugMode  bool   `key:"debugMode" json:"debug_mode"`
-	PrettyLogs bool   `key:"prettyLogs" json:"pretty_logs"`
-
+	Mode        string            `key:"mode" json:"mode"` // "local" or "remote"
+	DebugMode   bool              `key:"debugMode" json:"debug_mode"`
+	PrettyLogs  bool              `key:"prettyLogs" json:"pretty_logs"`
 	ClusterName string            `key:"clusterName" json:"cluster_name"`
 	Database    DatabaseConfig    `key:"database" json:"database"`
 	Image       ImageConfig       `key:"image" json:"image"`
@@ -25,15 +24,11 @@ type AppConfig struct {
 	Gateway     GatewayConfig     `key:"gateway" json:"gateway"`
 	Scheduler   SchedulerConfig   `key:"scheduler" json:"scheduler"`
 	Tools       ToolsConfig       `key:"tools" json:"tools"`
+	Sources     SourcesConfig     `key:"sources" json:"sources"`         // Builtin source provider credentials
 	OAuth       IntegrationOAuth  `key:"oauth" json:"oauth"`             // OAuth for workspace integrations (gmail, gdrive)
 	Streams     StreamsConfig     `key:"streams" json:"streams"`         // S2 stream configuration for task logs
 	Models      ModelsConfig      `key:"models" json:"models"`           // LLM provider API keys (BAML inference, sandbox tasks)
 	Compression CompressionConfig `key:"compression" json:"compression"` // Context compression middleware
-
-	// Deprecated: use Models.Anthropic instead. Kept for backwards compatibility.
-	Anthropic struct {
-		APIKey string `key:"apiKey" json:"api_key"`
-	} `key:"anthropic" json:"anthropic"`
 }
 
 // ModelsConfig centralises API keys for all LLM providers.
@@ -48,13 +43,8 @@ type ModelProviderConfig struct {
 	APIKey string `key:"apiKey" json:"api_key"`
 }
 
-// AnthropicAPIKey returns the Anthropic API key, preferring Models.Anthropic
-// but falling back to the deprecated top-level Anthropic field.
 func (c *AppConfig) AnthropicAPIKey() string {
-	if c.Models.Anthropic.APIKey != "" {
-		return c.Models.Anthropic.APIKey
-	}
-	return c.Anthropic.APIKey
+	return c.Models.Anthropic.APIKey
 }
 
 // CerebrasAPIKey returns the Cerebras API key.
@@ -344,6 +334,11 @@ func (c *MCPServerConfig) RedactConfig() *MCPServerConfig {
 	}
 	redacted.Auth = c.Auth.Redact()
 	return redacted
+}
+
+// SourcesConfig holds API keys for builtin source providers.
+type SourcesConfig struct {
+	Firecrawl IntegrationAPIKey `key:"firecrawl" json:"firecrawl"`
 }
 
 // ----------------------------------------------------------------------------

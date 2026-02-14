@@ -28,7 +28,7 @@ func NewLinearProvider() *LinearProvider {
 	}
 }
 
-func (l *LinearProvider) Name() string { return types.ToolLinear.String() }
+func (l *LinearProvider) Name() string { return types.Linear.String() }
 
 func (l *LinearProvider) checkAuth(pctx *sources.ProviderContext) error {
 	if pctx.Credentials == nil || pctx.Credentials.AccessToken == "" {

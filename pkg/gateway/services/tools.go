@@ -169,7 +169,7 @@ func (s *ToolService) buildExecContext(ctx context.Context, toolName string) *to
 	}
 
 	// Check if this tool requires credentials
-	if !types.RequiresAuth(types.ToolName(toolName)) {
+	if !types.RequiresAuth(types.IntegrationName(toolName)) {
 		return execCtx
 	}
 

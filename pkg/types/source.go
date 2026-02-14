@@ -11,6 +11,7 @@ const (
 	SourceSlack   SourceType = "slack"
 	SourceLinear  SourceType = "linear"
 	SourcePostHog SourceType = "posthog"
+	SourceWeb     SourceType = "web"
 )
 
 func (s SourceType) String() string { return string(s) }

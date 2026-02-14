@@ -33,7 +33,7 @@ func NewSlackProvider() *SlackProvider {
 }
 
 func (s *SlackProvider) Name() string {
-	return types.ToolSlack.String()
+	return types.Slack.String()
 }
 
 // Stat returns file/directory attributes

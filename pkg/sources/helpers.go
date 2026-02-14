@@ -47,7 +47,7 @@ func GenerateSourceReadme(integration string, connected bool, scope string, work
 	}
 
 	// Get integration metadata for display name and description
-	if meta, ok := types.GetIntegrationMeta(types.ToolName(integration)); ok {
+	if meta, ok := types.GetIntegrationMeta(types.IntegrationName(integration)); ok {
 		status.DisplayName = meta.DisplayName
 		status.Description = meta.Description
 	} else {
