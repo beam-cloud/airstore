@@ -1,9 +1,85 @@
 import type { OutputFormat } from './shared.js';
 
+// ── Enums ────────────────────────────────────────────────────────────────────
+
 /**
  * View mode: "smart" uses LLM inference, "query" uses structured filters.
  */
 export type ViewMode = 'smart' | 'query';
+
+/** Supported integration identifiers. */
+export type Integration =
+  | 'gmail'
+  | 'github'
+  | 'gdrive'
+  | 'notion'
+  | 'slack'
+  | 'linear'
+  | 'posthog'
+  | 'web';
+
+// Gmail
+export type GmailLabel =
+  | 'inbox' | 'sent' | 'starred' | 'important'
+  | 'drafts' | 'spam' | 'trash';
+
+// GitHub
+export type GitHubResourceType =
+  | 'issues' | 'prs' | 'commits' | 'files'
+  | 'releases' | 'workflows' | 'branches';
+export type GitHubState = 'open' | 'closed' | 'merged';
+export type GitHubContentType = 'markdown' | 'diff' | 'json' | 'raw';
+
+// Google Drive
+export type GDriveMimeType =
+  | 'pdf' | 'document' | 'spreadsheet' | 'presentation' | 'image';
+
+// Linear
+export type LinearResourceType = 'issues' | 'projects';
+export type LinearState =
+  | 'backlog' | 'todo' | 'in_progress' | 'done' | 'canceled';
+export type LinearPriority = 'urgent' | 'high' | 'medium' | 'low';
+
+// PostHog
+export type PostHogResourceType =
+  | 'events' | 'feature-flags' | 'insights' | 'cohorts';
+
+// Web / Firecrawl
+export type WebMode = 'map' | 'search';
+
+// ── Const enum objects (for runtime enumeration / dropdowns) ─────────────────
+
+export const ViewModes = { Smart: 'smart', Query: 'query' } as const;
+
+export const GmailLabels = [
+  'inbox', 'sent', 'starred', 'important', 'drafts', 'spam', 'trash',
+] as const;
+
+export const GitHubResourceTypes = [
+  'issues', 'prs', 'commits', 'files', 'releases', 'workflows', 'branches',
+] as const;
+export const GitHubStates = ['open', 'closed', 'merged'] as const;
+export const GitHubContentTypes = ['markdown', 'diff', 'json', 'raw'] as const;
+
+export const GDriveMimeTypes = [
+  'pdf', 'document', 'spreadsheet', 'presentation', 'image',
+] as const;
+
+export const LinearResourceTypes = ['issues', 'projects'] as const;
+export const LinearStates = [
+  'backlog', 'todo', 'in_progress', 'done', 'canceled',
+] as const;
+export const LinearPriorities = ['urgent', 'high', 'medium', 'low'] as const;
+
+export const PostHogResourceTypes = [
+  'events', 'feature-flags', 'insights', 'cohorts',
+] as const;
+
+export const WebModes = ['map', 'search'] as const;
+
+export const Integrations = [
+  'gmail', 'github', 'gdrive', 'notion', 'slack', 'linear', 'posthog', 'web',
+] as const;
 
 // ── Per-integration filter types ──────────────────────────────────────────────
 
@@ -11,7 +87,7 @@ export interface GmailFilter {
   from?: string;
   to?: string;
   subject?: string;
-  label?: string;
+  label?: GmailLabel;
   newer_than?: string;
   older_than?: string;
   has_attachment?: boolean;
@@ -21,16 +97,16 @@ export interface GmailFilter {
 
 export interface GitHubFilter {
   repo: string;
-  type?: 'issues' | 'prs' | 'commits' | 'files' | 'releases' | 'workflows' | 'branches';
-  state?: 'open' | 'closed' | 'merged';
+  type?: GitHubResourceType;
+  state?: GitHubState;
   label?: string;
   author?: string;
-  content_type?: 'markdown' | 'diff' | 'json' | 'raw';
+  content_type?: GitHubContentType;
 }
 
 export interface GDriveFilter {
   name_contains?: string;
-  mime_type?: 'pdf' | 'document' | 'spreadsheet' | 'presentation' | 'image' | string;
+  mime_type?: GDriveMimeType;
   shared_with_me?: boolean;
   starred?: boolean;
   modified_after?: string;
@@ -52,22 +128,22 @@ export interface SlackFilter {
 }
 
 export interface LinearFilter {
-  type?: 'issues' | 'projects';
+  type?: LinearResourceType;
   team?: string;
-  state?: 'backlog' | 'todo' | 'in_progress' | 'done' | 'canceled';
+  state?: LinearState;
   assignee?: string;
-  priority?: 'urgent' | 'high' | 'medium' | 'low';
+  priority?: LinearPriority;
   label?: string;
 }
 
 export interface PostHogFilter {
-  type?: 'events' | 'feature-flags' | 'insights' | 'cohorts';
+  type?: PostHogResourceType;
   query?: string;
   project_id?: number;
 }
 
 export interface WebFilter {
-  mode?: 'map' | 'search';
+  mode?: WebMode;
   url?: string;
   query?: string;
   include_paths?: string[];
@@ -98,8 +174,8 @@ export type ViewFilter =
  * to `"query"`; otherwise it defaults to `"smart"`.
  */
 export interface ViewCreateParams {
-  /** Integration source (e.g., "gmail", "gdrive", "github", "web"). */
-  integration: string;
+  /** Integration source. */
+  integration: Integration;
   /** Display name for the view. */
   name: string;
   /** Natural language guidance for LLM inference (smart mode). */
@@ -138,7 +214,7 @@ export interface SourceView {
   /** Unique external identifier. */
   external_id: string;
   /** Integration source. */
-  integration: string;
+  integration: Integration;
   /** Virtual filesystem path. */
   path: string;
   /** Display name. */
@@ -166,7 +242,7 @@ export interface SyncResult {
   /** The view's external ID. */
   external_id: string;
   /** Integration source. */
-  integration: string;
+  integration: Integration;
   /** Virtual filesystem path. */
   path: string;
   /** View mode. */
