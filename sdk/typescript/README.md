@@ -179,7 +179,7 @@ const prView = await airstore.views.create('ws_abc123', {
 const views = await airstore.views.list('ws_abc123');
 
 // Retrieve by path
-const view = await airstore.views.retrieve('ws_abc123', '/sources/gmail/Important Emails');
+const found = await airstore.views.retrieve('ws_abc123', '/sources/gmail/Important Emails');
 
 // Update
 const updated = await airstore.views.update('ws_abc123', 'view_abc', {

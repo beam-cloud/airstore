@@ -28,7 +28,7 @@ import { AccessLog } from './resources/access-log.js';
  * });
  *
  * // 3. Create a source view (smart mode — LLM-inferred)
- * await airstore.views.create(ws.external_id, {
+ * const view = await airstore.views.create(ws.external_id, {
  *   integration: 'gmail',
  *   name: 'Recent Emails',
  *   guidance: 'Last 7 days of emails from the inbox',

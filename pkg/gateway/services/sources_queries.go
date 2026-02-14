@@ -596,6 +596,7 @@ func (s *SourceService) SyncView(ctx context.Context, req *pb.SyncViewRequest) (
 		Ok:           true,
 		View:         viewToProto(result.Query),
 		ResultsCount: int32(result.ResultsCount),
+		NewResults:   int32(result.NewResults),
 	}, nil
 }
 

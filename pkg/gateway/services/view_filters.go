@@ -195,7 +195,7 @@ func buildGDriveFilter(raw json.RawMessage, limit int) (string, error) {
 	}
 	var parts []string
 	if f.NameContains != "" {
-		parts = append(parts, fmt.Sprintf("name contains '%s'", f.NameContains))
+		parts = append(parts, fmt.Sprintf("name contains '%s'", escDriveQuote(f.NameContains)))
 	}
 	if f.MimeType != "" {
 		mimeMap := map[string]string{
@@ -207,7 +207,7 @@ func buildGDriveFilter(raw json.RawMessage, limit int) (string, error) {
 		if m, ok := mimeMap[f.MimeType]; ok {
 			parts = append(parts, fmt.Sprintf("mimeType = '%s'", m))
 		} else {
-			parts = append(parts, fmt.Sprintf("mimeType = '%s'", f.MimeType))
+			parts = append(parts, fmt.Sprintf("mimeType = '%s'", escDriveQuote(f.MimeType)))
 		}
 	}
 	if f.SharedWithMe != nil && *f.SharedWithMe {
@@ -223,7 +223,7 @@ func buildGDriveFilter(raw json.RawMessage, limit int) (string, error) {
 		parts = append(parts, fmt.Sprintf("modifiedTime < '%sT00:00:00'", f.ModifiedBefore))
 	}
 	if f.FolderID != "" {
-		parts = append(parts, fmt.Sprintf("'%s' in parents", f.FolderID))
+		parts = append(parts, fmt.Sprintf("'%s' in parents", escDriveQuote(f.FolderID)))
 	}
 	return marshalSpec(newSpec("gdrive", strings.Join(parts, " and "), limit))
 }
@@ -341,4 +341,10 @@ func marshalSpec(spec map[string]any) (string, error) {
 		return "", err
 	}
 	return string(data), nil
+}
+
+// escDriveQuote escapes single quotes in values interpolated into Google Drive
+// query strings (e.g. name contains 'O\'Reilly').
+func escDriveQuote(s string) string {
+	return strings.ReplaceAll(s, "'", "\\'")
 }

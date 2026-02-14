@@ -20,6 +20,8 @@ describe('Source Views', () => {
     } catch (err) {
       if (err instanceof APIError && (err.status === 400 || err.status === 422)) {
         console.warn('Source view tests will be best-effort: could not create connection');
+      } else {
+        throw err;
       }
     }
   });
