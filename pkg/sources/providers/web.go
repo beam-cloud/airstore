@@ -326,6 +326,7 @@ func (w *WebProvider) scrape(ctx context.Context, pageURL string) (*scrapeResult
 		"skipTlsVerification": true,
 		"removeBase64Images":  true,
 		"excludeTags":         []string{"img", "picture", "video", "svg", "figure"},
+		"maxAge":              0, // bypass Firecrawl cache; we cache on our end
 	}, &resp)
 	if err != nil {
 		return nil, err
