@@ -40,9 +40,26 @@ import (
 )
 
 const sourcesTimeout = 30 * time.Second
-const resultsCacheTTL = 45 * time.Second           // Cache query results to avoid repeated API calls (max staleness)
-const resultsCacheRefreshAge = 30 * time.Second    // Trigger background refresh when cache older than this
-const backgroundRefreshInterval = 15 * time.Second // Background cache refresh interval
+
+// resultsCacheTTL is the hard upper bound on how long results are served from
+// the in-memory cache. After this, the next ReadDir forces a fresh ExecuteView RPC.
+const resultsCacheTTL = 45 * time.Second
+
+// resultsCacheRefreshAge is the soft threshold after which a background refresh
+// is triggered while still serving cached data (stale-while-revalidate pattern).
+const resultsCacheRefreshAge = 30 * time.Second
+
+// backgroundRefreshInterval is the tick interval for proactive cache warming.
+const backgroundRefreshInterval = 15 * time.Second
+
+// queryDefCacheTTL controls how long view definitions (name, query_spec,
+// LastExecuted, etc.) are cached. Shorter than resultsCacheTTL so that the
+// FUSE layer detects syncs faster: after a sync, the gateway updates
+// LastExecuted in Postgres. Once the query-def cache expires (at most this
+// duration), the FUSE layer re-fetches the definition, sees LastExecuted >
+// cachedAt, and invalidates the stale results cache.
+const queryDefCacheTTL = 15 * time.Second
+
 const queryMetaName = ".query.as"
 
 // cachedQueryResult holds cached query execution results
@@ -488,8 +505,9 @@ func (v *SourcesVNode) executeQueryAsDir(ctx context.Context, q *types.SourceVie
 		Mtime: queryMtime,
 	}}
 
-	// Check cache first
-	if cached := v.getCachedResults(q.Path); cached != nil {
+	// Check cache first. If the view was synced (LastExecuted) after the cache was
+	// populated, skip the cache so we pick up fresh results from the gateway.
+	if cached := v.getCachedResultsIfFresh(q); cached != nil {
 		for _, e := range cached {
 			childPath := q.Path + "/" + e.Name
 			entries = append(entries, DirEntry{
@@ -900,20 +918,7 @@ func (v *SourcesVNode) Mkdir(path string, mode uint32) error {
 	}
 
 	// Cache the newly created query so subsequent Getattr calls can find it immediately
-	query := &types.SourceView{
-		ExternalId:   resp.View.ExternalId,
-		Integration:  resp.View.Integration,
-		Path:         resp.View.Path,
-		Name:         resp.View.Name,
-		QuerySpec:    resp.View.QuerySpec,
-		Guidance:     resp.View.Guidance,
-		OutputFormat: types.ViewOutputFormat(resp.View.OutputFormat),
-		FileExt:      resp.View.FileExt,
-		CacheTTL:     int(resp.View.CacheTtl),
-		CreatedAt:    time.Unix(resp.View.CreatedAt, 0),
-		UpdatedAt:    time.Unix(resp.View.UpdatedAt, 0),
-	}
-	v.setCachedQuery(path, query)
+	v.setCachedQuery(path, protoToSourceView(resp.View))
 
 	log.Info().Str("path", path).Str("query", resp.View.QuerySpec).Msg("created source view")
 	return nil
@@ -949,20 +954,7 @@ func (v *SourcesVNode) Create(path string, flags int, mode uint32) (FileHandle, 
 	}
 
 	// Cache the newly created query so subsequent Getattr calls can find it immediately
-	query := &types.SourceView{
-		ExternalId:   resp.View.ExternalId,
-		Integration:  resp.View.Integration,
-		Path:         resp.View.Path,
-		Name:         resp.View.Name,
-		QuerySpec:    resp.View.QuerySpec,
-		Guidance:     resp.View.Guidance,
-		OutputFormat: types.ViewOutputFormat(resp.View.OutputFormat),
-		FileExt:      resp.View.FileExt,
-		CacheTTL:     int(resp.View.CacheTtl),
-		CreatedAt:    time.Unix(resp.View.CreatedAt, 0),
-		UpdatedAt:    time.Unix(resp.View.UpdatedAt, 0),
-	}
-	v.setCachedQuery(path, query)
+	v.setCachedQuery(path, protoToSourceView(resp.View))
 
 	log.Info().Str("path", path).Str("query", resp.View.QuerySpec).Msg("created source view file")
 	return 0, nil
@@ -993,22 +985,34 @@ func (v *SourcesVNode) getQuery(ctx context.Context, path string) *types.SourceV
 		return nil
 	}
 
-	query := &types.SourceView{
-		ExternalId:   resp.View.ExternalId,
-		Integration:  resp.View.Integration,
-		Path:         resp.View.Path,
-		Name:         resp.View.Name,
-		QuerySpec:    resp.View.QuerySpec,
-		Guidance:     resp.View.Guidance,
-		OutputFormat: types.ViewOutputFormat(resp.View.OutputFormat),
-		FileExt:      resp.View.FileExt,
-		CacheTTL:     int(resp.View.CacheTtl),
-		CreatedAt:    time.Unix(resp.View.CreatedAt, 0),
-		UpdatedAt:    time.Unix(resp.View.UpdatedAt, 0),
-	}
-
+	query := protoToSourceView(resp.View)
 	v.setCachedQuery(path, query)
 	return query
+}
+
+// protoToSourceView converts a proto SourceView to the internal SourceView type.
+func protoToSourceView(v *pb.SourceView) *types.SourceView {
+	if v == nil {
+		return nil
+	}
+	q := &types.SourceView{
+		ExternalId:   v.ExternalId,
+		Integration:  v.Integration,
+		Path:         v.Path,
+		Name:         v.Name,
+		QuerySpec:    v.QuerySpec,
+		Guidance:     v.Guidance,
+		OutputFormat: types.ViewOutputFormat(v.OutputFormat),
+		FileExt:      v.FileExt,
+		CacheTTL:     int(v.CacheTtl),
+		CreatedAt:    time.Unix(v.CreatedAt, 0),
+		UpdatedAt:    time.Unix(v.UpdatedAt, 0),
+	}
+	if v.LastExecuted != 0 {
+		t := time.Unix(v.LastExecuted, 0)
+		q.LastExecuted = &t
+	}
+	return q
 }
 
 // defaultUnknownFileSize is used when file size is unknown.
@@ -1081,24 +1085,6 @@ func (v *SourcesVNode) protoToFileInfo(path string, info *pb.SourceFileInfo) *Fi
 	}
 }
 
-// getCachedResults retrieves cached query results if still valid.
-// If the cache is older than resultsCacheRefreshAge, triggers a background refresh
-// while still returning the cached data (stale-while-revalidate pattern).
-func (v *SourcesVNode) getCachedResults(queryPath string) []*pb.SourceDirEntry {
-	v.resultsMu.RLock()
-	defer v.resultsMu.RUnlock()
-
-	if cached, ok := v.results[queryPath]; ok && time.Now().Before(cached.expiresAt) {
-		// If cache is older than refresh threshold, trigger background refresh
-		// This ensures new entries appear within ~45s + kernel timeout (1s) = 46s < 60s
-		if time.Since(cached.cachedAt) > resultsCacheRefreshAge {
-			go v.triggerQueryRefresh(queryPath)
-		}
-		return cached.entries
-	}
-	return nil
-}
-
 // getCachedResultsNoRefresh returns cached results without triggering refresh.
 func (v *SourcesVNode) getCachedResultsNoRefresh(queryPath string) []*pb.SourceDirEntry {
 	v.resultsMu.RLock()
@@ -1108,6 +1094,65 @@ func (v *SourcesVNode) getCachedResultsNoRefresh(queryPath string) []*pb.SourceD
 		return cached.entries
 	}
 	return nil
+}
+
+// getCachedResultsIfFresh returns cached results only if they are still valid
+// AND the view has not been synced since the cache was populated.
+// If the view's LastExecuted is newer than the cache, the stale results and any
+// associated openContent entries are evicted so the caller fetches fresh data.
+func (v *SourcesVNode) getCachedResultsIfFresh(q *types.SourceView) []*pb.SourceDirEntry {
+	v.resultsMu.RLock()
+	cached, ok := v.results[q.Path]
+	if !ok || !time.Now().Before(cached.expiresAt) {
+		v.resultsMu.RUnlock()
+		return nil
+	}
+
+	staleBySync := q.LastExecuted != nil && q.LastExecuted.After(cached.cachedAt)
+	shouldRefresh := time.Since(cached.cachedAt) > resultsCacheRefreshAge
+	entries := cached.entries
+	v.resultsMu.RUnlock()
+
+	if staleBySync {
+		// Evict stale listing/content caches and force fresh ExecuteView.
+		v.evictViewCaches(q.Path)
+		return nil
+	}
+	if shouldRefresh {
+		// Stale-while-revalidate.
+		go v.triggerQueryRefresh(q.Path)
+	}
+	return entries
+}
+
+// evictViewCaches removes the results cache and all openContent entries that
+// are children of the given view path. Called when a sync is detected.
+func (v *SourcesVNode) evictViewCaches(viewPath string) {
+	// Evict results listing
+	v.resultsMu.Lock()
+	delete(v.results, viewPath)
+	v.resultsMu.Unlock()
+
+	// Evict cached stat entries for children
+	prefix := viewPath + "/"
+	v.statsMu.Lock()
+	for k := range v.stats {
+		if strings.HasPrefix(k, prefix) {
+			delete(v.stats, k)
+		}
+	}
+	v.statsMu.Unlock()
+
+	// Evict open content entries for children so file reads get fresh data
+	v.openMu.Lock()
+	for k := range v.openContent {
+		if strings.HasPrefix(k, prefix) {
+			delete(v.openContent, k)
+		}
+	}
+	v.openMu.Unlock()
+
+	log.Debug().Str("path", viewPath).Msg("evicted stale view caches after sync detection")
 }
 
 // triggerQueryRefresh refreshes the query results in the background
@@ -1155,7 +1200,7 @@ func (v *SourcesVNode) setCachedQuery(path string, query *types.SourceView) {
 
 	v.queries[path] = &cachedQuery{
 		query:     query,
-		expiresAt: time.Now().Add(resultsCacheTTL),
+		expiresAt: time.Now().Add(queryDefCacheTTL),
 	}
 }
 

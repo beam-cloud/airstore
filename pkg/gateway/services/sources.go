@@ -51,9 +51,9 @@ type SourceService struct {
 	cache         *sources.SourceCache
 	rateLimiter   *sources.RateLimiter
 	oauthRegistry *oauth.Registry
-	credCache     sync.Map // map[string]*cachedCreds
-	connCache     sync.Map // map[uint]*cachedConnSet
-	queryGroup    singleflight.Group
+	credCache     sync.Map           // map[string]*cachedCreds
+	connCache     sync.Map           // map[uint]*cachedConnSet
+	queryGroup    singleflight.Group // deduplicates synchronous query execution
 	hookStream    common.EventEmitter
 	seenTracker   *hooks.SeenTracker
 
