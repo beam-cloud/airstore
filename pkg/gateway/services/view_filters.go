@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/beam-cloud/airstore/pkg/sources"
 	"github.com/beam-cloud/airstore/pkg/types"
 )
 
@@ -109,6 +108,21 @@ func buildQuerySpecFromFilter(integration string, filter json.RawMessage, limit 
 	}
 }
 
+// queryKey returns the JSON key for a given integration's query string.
+func queryKey(integration string) string {
+	return integration + "_query"
+}
+
+// newSpec creates a base query spec with integration key, query, and limit.
+// Providers determine filename_format from metadata (e.g., content_type) at
+// execution time via DefaultFilenameFormat — filter builders never set it.
+func newSpec(integration, query string, limit int) map[string]any {
+	return map[string]any{
+		queryKey(integration): query,
+		"limit":               limit,
+	}
+}
+
 func buildGmailFilter(raw json.RawMessage, limit int) (string, error) {
 	var f GmailFilter
 	if err := json.Unmarshal(raw, &f); err != nil {
@@ -142,12 +156,7 @@ func buildGmailFilter(raw json.RawMessage, limit int) (string, error) {
 	if f.IsStarred != nil && *f.IsStarred {
 		parts = append(parts, "is:starred")
 	}
-	query := strings.Join(parts, " ")
-	return marshalSpec(map[string]any{
-		"gmail_query":     query,
-		"limit":           limit,
-		"filename_format": sources.DefaultFilenameFormat("gmail"),
-	})
+	return marshalSpec(newSpec("gmail", strings.Join(parts, " "), limit))
 }
 
 func buildGitHubFilter(raw json.RawMessage, limit int) (string, error) {
@@ -169,12 +178,7 @@ func buildGitHubFilter(raw json.RawMessage, limit int) (string, error) {
 	if f.Author != "" {
 		parts = append(parts, "author:"+f.Author)
 	}
-	query := strings.Join(parts, " ")
-	spec := map[string]any{
-		"github_query":    query,
-		"limit":           limit,
-		"filename_format": sources.DefaultFilenameFormat("github"),
-	}
+	spec := newSpec("github", strings.Join(parts, " "), limit)
 	if f.Type != "" {
 		spec["search_type"] = f.Type
 	}
@@ -221,12 +225,7 @@ func buildGDriveFilter(raw json.RawMessage, limit int) (string, error) {
 	if f.FolderID != "" {
 		parts = append(parts, fmt.Sprintf("'%s' in parents", f.FolderID))
 	}
-	query := strings.Join(parts, " and ")
-	return marshalSpec(map[string]any{
-		"gdrive_query":    query,
-		"limit":           limit,
-		"filename_format": sources.DefaultFilenameFormat("gdrive"),
-	})
+	return marshalSpec(newSpec("gdrive", strings.Join(parts, " and "), limit))
 }
 
 func buildNotionFilter(raw json.RawMessage, limit int) (string, error) {
@@ -234,11 +233,7 @@ func buildNotionFilter(raw json.RawMessage, limit int) (string, error) {
 	if err := json.Unmarshal(raw, &f); err != nil {
 		return "", err
 	}
-	return marshalSpec(map[string]any{
-		"notion_query":    f.Search,
-		"limit":           limit,
-		"filename_format": sources.DefaultFilenameFormat("notion"),
-	})
+	return marshalSpec(newSpec("notion", f.Search, limit))
 }
 
 func buildSlackFilter(raw json.RawMessage, limit int) (string, error) {
@@ -265,12 +260,7 @@ func buildSlackFilter(raw json.RawMessage, limit int) (string, error) {
 	if f.HasReaction != nil && *f.HasReaction {
 		parts = append(parts, "has:reaction")
 	}
-	query := strings.Join(parts, " ")
-	return marshalSpec(map[string]any{
-		"slack_query":     query,
-		"limit":           limit,
-		"filename_format": sources.DefaultFilenameFormat("slack"),
-	})
+	return marshalSpec(newSpec("slack", strings.Join(parts, " "), limit))
 }
 
 func buildLinearFilter(raw json.RawMessage, limit int) (string, error) {
@@ -294,12 +284,7 @@ func buildLinearFilter(raw json.RawMessage, limit int) (string, error) {
 	if f.Label != "" {
 		parts = append(parts, "label:"+quoteIfNeeded(f.Label))
 	}
-	query := strings.Join(parts, " ")
-	spec := map[string]any{
-		"linear_query":    query,
-		"limit":           limit,
-		"filename_format": sources.DefaultFilenameFormat("linear"),
-	}
+	spec := newSpec("linear", strings.Join(parts, " "), limit)
 	if f.Type != "" {
 		spec["search_type"] = f.Type
 	}
@@ -311,11 +296,7 @@ func buildPostHogFilter(raw json.RawMessage, limit int) (string, error) {
 	if err := json.Unmarshal(raw, &f); err != nil {
 		return "", err
 	}
-	spec := map[string]any{
-		"posthog_query":   f.Query,
-		"limit":           limit,
-		"filename_format": sources.DefaultFilenameFormat("posthog"),
-	}
+	spec := newSpec("posthog", f.Query, limit)
 	if f.Type != "" {
 		spec["search_type"] = f.Type
 	}
@@ -338,12 +319,8 @@ func buildWebFilter(raw json.RawMessage, limit int) (string, error) {
 	if mode == "search" {
 		query = f.Query
 	}
-	spec := map[string]any{
-		"web_query":       query,
-		"web_mode":        mode,
-		"limit":           limit,
-		"filename_format": sources.DefaultFilenameFormat("web"),
-	}
+	spec := newSpec("web", query, limit)
+	spec["web_mode"] = mode
 	if len(f.IncludePaths) > 0 {
 		spec["include_paths"] = f.IncludePaths
 	}

@@ -254,3 +254,13 @@ export interface SyncResult {
   /** Number of newly discovered results since the last sync. */
   new_results: number;
 }
+
+/**
+ * A selectable resource from an integration (repo, channel, etc.).
+ */
+export interface IntegrationResource {
+  /** Unique identifier (e.g., "owner/repo", "general"). */
+  id: string;
+  /** Display name (e.g., "owner/repo", "#general"). */
+  name: string;
+}

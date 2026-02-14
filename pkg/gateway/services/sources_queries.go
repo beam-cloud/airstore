@@ -600,6 +600,46 @@ func (s *SourceService) SyncView(ctx context.Context, req *pb.SyncViewRequest) (
 }
 
 // ---------------------------------------------------------------------------
+// Resource listing
+// ---------------------------------------------------------------------------
+
+func (s *SourceService) ListResources(ctx context.Context, req *pb.ListResourcesRequest) (*pb.ListResourcesResponse, error) {
+	if !auth.IsAuthenticated(ctx) {
+		return &pb.ListResourcesResponse{Ok: false, Error: "unauthorized"}, nil
+	}
+
+	provider := s.registry.Get(req.Integration)
+	if provider == nil {
+		return &pb.ListResourcesResponse{Ok: false, Error: fmt.Sprintf("unknown integration: %s", req.Integration)}, nil
+	}
+
+	lister, ok := provider.(sources.ResourceLister)
+	if !ok {
+		return &pb.ListResourcesResponse{Ok: false, Error: fmt.Sprintf("integration %s does not support resource listing", req.Integration)}, nil
+	}
+
+	pctx, err := s.providerContext(ctx)
+	if err != nil {
+		return &pb.ListResourcesResponse{Ok: false, Error: err.Error()}, nil
+	}
+	pctx, ok = s.loadCredentials(ctx, pctx, req.Integration)
+	if !ok {
+		return &pb.ListResourcesResponse{Ok: false, Error: "integration not connected"}, nil
+	}
+
+	resources, err := lister.ListResources(ctx, pctx, req.ResourceType)
+	if err != nil {
+		return &pb.ListResourcesResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	pbResources := make([]*pb.SourceResource, len(resources))
+	for i, r := range resources {
+		pbResources[i] = &pb.SourceResource{Id: r.ID, Name: r.Name}
+	}
+	return &pb.ListResourcesResponse{Ok: true, Resources: pbResources}, nil
+}
+
+// ---------------------------------------------------------------------------
 // LLM inference
 // ---------------------------------------------------------------------------
 
@@ -842,7 +882,10 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 	}
 
 	filenameFormat := spec.FilenameFormat
-	if filenameFormat == "" {
+	if filenameFormat == "" && spec.ContentType == "" {
+		// Only apply the generic default when no content_type is set.
+		// Providers with content_type-aware filename logic (e.g., GitHub)
+		// will choose the right format themselves when filenameFormat is empty.
 		filenameFormat = sources.DefaultFilenameFormat(integration)
 	}
 

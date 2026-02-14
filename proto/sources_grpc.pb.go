@@ -19,17 +19,18 @@ import (
 const _ = grpc.SupportPackageIsVersion7
 
 const (
-	SourceService_Stat_FullMethodName        = "/sources.SourceService/Stat"
-	SourceService_ReadDir_FullMethodName     = "/sources.SourceService/ReadDir"
-	SourceService_Read_FullMethodName        = "/sources.SourceService/Read"
-	SourceService_Readlink_FullMethodName    = "/sources.SourceService/Readlink"
-	SourceService_CreateView_FullMethodName  = "/sources.SourceService/CreateView"
-	SourceService_GetView_FullMethodName     = "/sources.SourceService/GetView"
-	SourceService_ListViews_FullMethodName   = "/sources.SourceService/ListViews"
-	SourceService_DeleteView_FullMethodName  = "/sources.SourceService/DeleteView"
-	SourceService_UpdateView_FullMethodName  = "/sources.SourceService/UpdateView"
-	SourceService_ExecuteView_FullMethodName = "/sources.SourceService/ExecuteView"
-	SourceService_SyncView_FullMethodName    = "/sources.SourceService/SyncView"
+	SourceService_Stat_FullMethodName          = "/sources.SourceService/Stat"
+	SourceService_ReadDir_FullMethodName       = "/sources.SourceService/ReadDir"
+	SourceService_Read_FullMethodName          = "/sources.SourceService/Read"
+	SourceService_Readlink_FullMethodName      = "/sources.SourceService/Readlink"
+	SourceService_CreateView_FullMethodName    = "/sources.SourceService/CreateView"
+	SourceService_GetView_FullMethodName       = "/sources.SourceService/GetView"
+	SourceService_ListViews_FullMethodName     = "/sources.SourceService/ListViews"
+	SourceService_DeleteView_FullMethodName    = "/sources.SourceService/DeleteView"
+	SourceService_UpdateView_FullMethodName    = "/sources.SourceService/UpdateView"
+	SourceService_ExecuteView_FullMethodName   = "/sources.SourceService/ExecuteView"
+	SourceService_SyncView_FullMethodName      = "/sources.SourceService/SyncView"
+	SourceService_ListResources_FullMethodName = "/sources.SourceService/ListResources"
 )
 
 // SourceServiceClient is the client API for SourceService service.
@@ -58,6 +59,8 @@ type SourceServiceClient interface {
 	ExecuteView(ctx context.Context, in *ExecuteViewRequest, opts ...grpc.CallOption) (*ExecuteViewResponse, error)
 	// SyncView re-executes a view's query, refreshing cached metadata
 	SyncView(ctx context.Context, in *SyncViewRequest, opts ...grpc.CallOption) (*SyncViewResponse, error)
+	// ListResources returns available resources for an integration (repos, channels, etc.)
+	ListResources(ctx context.Context, in *ListResourcesRequest, opts ...grpc.CallOption) (*ListResourcesResponse, error)
 }
 
 type sourceServiceClient struct {
@@ -167,6 +170,15 @@ func (c *sourceServiceClient) SyncView(ctx context.Context, in *SyncViewRequest,
 	return out, nil
 }
 
+func (c *sourceServiceClient) ListResources(ctx context.Context, in *ListResourcesRequest, opts ...grpc.CallOption) (*ListResourcesResponse, error) {
+	out := new(ListResourcesResponse)
+	err := c.cc.Invoke(ctx, SourceService_ListResources_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SourceServiceServer is the server API for SourceService service.
 // All implementations must embed UnimplementedSourceServiceServer
 // for forward compatibility
@@ -193,6 +205,8 @@ type SourceServiceServer interface {
 	ExecuteView(context.Context, *ExecuteViewRequest) (*ExecuteViewResponse, error)
 	// SyncView re-executes a view's query, refreshing cached metadata
 	SyncView(context.Context, *SyncViewRequest) (*SyncViewResponse, error)
+	// ListResources returns available resources for an integration (repos, channels, etc.)
+	ListResources(context.Context, *ListResourcesRequest) (*ListResourcesResponse, error)
 	mustEmbedUnimplementedSourceServiceServer()
 }
 
@@ -232,6 +246,9 @@ func (UnimplementedSourceServiceServer) ExecuteView(context.Context, *ExecuteVie
 }
 func (UnimplementedSourceServiceServer) SyncView(context.Context, *SyncViewRequest) (*SyncViewResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SyncView not implemented")
+}
+func (UnimplementedSourceServiceServer) ListResources(context.Context, *ListResourcesRequest) (*ListResourcesResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListResources not implemented")
 }
 func (UnimplementedSourceServiceServer) mustEmbedUnimplementedSourceServiceServer() {}
 
@@ -444,6 +461,24 @@ func _SourceService_SyncView_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SourceService_ListResources_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListResourcesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SourceServiceServer).ListResources(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SourceService_ListResources_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SourceServiceServer).ListResources(ctx, req.(*ListResourcesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SourceService_ServiceDesc is the grpc.ServiceDesc for SourceService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -494,6 +529,10 @@ var SourceService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SyncView",
 			Handler:    _SourceService_SyncView_Handler,
+		},
+		{
+			MethodName: "ListResources",
+			Handler:    _SourceService_ListResources_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

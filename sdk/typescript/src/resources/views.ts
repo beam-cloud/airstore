@@ -4,6 +4,7 @@ import type {
   ViewCreateParams,
   ViewUpdateParams,
   SyncResult,
+  IntegrationResource,
 } from '../types/views.js';
 
 /**
@@ -147,5 +148,35 @@ export class Views {
       undefined,
       options,
     );
+  }
+
+  /**
+   * List available resources for an integration (repos, channels, etc.).
+   *
+   * Used to populate filter dropdowns with real data from connected sources.
+   *
+   * @example
+   * ```ts
+   * const repos = await airstore.views.listResources("ws_abc", "github");
+   * // [{ id: "owner/repo", name: "owner/repo" }, ...]
+   * ```
+   */
+  async listResources(
+    workspaceId: string,
+    integration: string,
+    resourceType?: string,
+    options?: RequestOptions,
+  ): Promise<IntegrationResource[]> {
+    const params: Record<string, string> = {};
+    if (resourceType) params['type'] = resourceType;
+
+    const result = await this.client.request<{ resources: IntegrationResource[] }>(
+      'GET',
+      `/workspaces/${workspaceId}/fs/sources/${integration}/resources`,
+      undefined,
+      params,
+      options,
+    );
+    return (result as { resources: IntegrationResource[] }).resources ?? [];
   }
 }

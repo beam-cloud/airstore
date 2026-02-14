@@ -122,6 +122,23 @@ func DefaultFilenameFormat(integration string) string {
 	}
 }
 
+// Resource represents a selectable item from an integration (repo, channel, etc.).
+type Resource struct {
+	ID   string `json:"id"`   // Unique identifier (e.g., "owner/repo", "C01234")
+	Name string `json:"name"` // Display name (e.g., "owner/repo", "#general")
+}
+
+// ResourceLister is optionally implemented by providers that can enumerate
+// available resources for use in filter dropdowns (repos, channels, etc.).
+type ResourceLister interface {
+	// DefaultResourceType returns the primary resource type name (e.g., "repos", "channels").
+	DefaultResourceType() string
+
+	// ListResources returns available resources of the given type.
+	// Supported types are provider-specific (e.g., "repos" for GitHub, "channels" for Slack).
+	ListResources(ctx context.Context, pctx *ProviderContext, resourceType string) ([]Resource, error)
+}
+
 // CredentialValidator is optionally implemented by providers that can validate
 // credentials at connection creation time.
 type CredentialValidator interface {

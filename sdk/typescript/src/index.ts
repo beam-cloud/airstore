@@ -59,6 +59,7 @@ export type {
   PostHogResourceType,
   WebFilter,
   WebMode,
+  IntegrationResource,
 } from './types/views.js';
 export {
   ViewModes,

@@ -106,6 +106,9 @@ func (g *FilesystemGroup) registerRoutes() {
 	g.routerGroup.PUT("/views/:id", g.UpdateView)      // :id = external_id
 	g.routerGroup.DELETE("/views/:id", g.DeleteView)   // :id = external_id
 	g.routerGroup.POST("/views/:id/sync", g.SyncView)  // Sync a view
+
+	// Integration resource listing
+	g.routerGroup.GET("/sources/:integration/resources", g.ListResources)
 }
 
 // List returns directory contents as VirtualFile entries
@@ -2537,6 +2540,51 @@ func (g *FilesystemGroup) SyncView(c echo.Context) error {
 		"results_count":  result.ResultsCount,
 		"new_results":    result.NewResults,
 	})
+}
+
+// ListResources returns available resources for an integration (repos, channels, etc.).
+func (g *FilesystemGroup) ListResources(c echo.Context) error {
+	ctx := c.Request().Context()
+	logRequest(c, "list_resources")
+
+	if g.sourceService == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "source service not available")
+	}
+
+	integration := c.Param("integration")
+	resourceType := c.QueryParam("type")
+	if resourceType == "" {
+		resourceType = defaultResourceType(integration)
+	}
+
+	resp, err := g.sourceService.ListResources(ctx, &pb.ListResourcesRequest{
+		Integration:  integration,
+		ResourceType: resourceType,
+	})
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+	if !resp.Ok {
+		return ErrorResponse(c, http.StatusBadRequest, resp.Error)
+	}
+
+	items := make([]map[string]string, len(resp.Resources))
+	for i, r := range resp.Resources {
+		items[i] = map[string]string{"id": r.Id, "name": r.Name}
+	}
+	return SuccessResponse(c, map[string]interface{}{"resources": items})
+}
+
+// defaultResourceType returns the primary resource type for an integration.
+func defaultResourceType(integration string) string {
+	switch integration {
+	case "github":
+		return "repos"
+	case "slack":
+		return "channels"
+	default:
+		return ""
+	}
 }
 
 // protoViewToResponse converts a pb.SourceView to ViewResponse.

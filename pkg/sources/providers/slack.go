@@ -36,6 +36,41 @@ func (s *SlackProvider) Name() string {
 	return types.Slack.String()
 }
 
+// DefaultResourceType implements sources.ResourceLister.
+func (s *SlackProvider) DefaultResourceType() string { return "channels" }
+
+// ListResources implements sources.ResourceLister.
+func (s *SlackProvider) ListResources(ctx context.Context, pctx *sources.ProviderContext, resourceType string) ([]sources.Resource, error) {
+	if pctx.Credentials == nil || pctx.Credentials.AccessToken == "" {
+		return nil, sources.ErrNotConnected
+	}
+	switch resourceType {
+	case "channels":
+		params := url.Values{"types": {"public_channel,private_channel"}, "limit": {"200"}, "exclude_archived": {"true"}}
+		var result struct {
+			OK       bool `json:"ok"`
+			Channels []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"channels"`
+			Error string `json:"error"`
+		}
+		if err := s.request(ctx, pctx.Credentials.AccessToken, "conversations.list", params, &result); err != nil {
+			return nil, err
+		}
+		if !result.OK {
+			return nil, fmt.Errorf("slack API error: %s", result.Error)
+		}
+		out := make([]sources.Resource, 0, len(result.Channels))
+		for _, ch := range result.Channels {
+			out = append(out, sources.Resource{ID: ch.Name, Name: "#" + ch.Name})
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("unsupported resource type: %s", resourceType)
+	}
+}
+
 // Stat returns file/directory attributes
 func (s *SlackProvider) Stat(ctx context.Context, pctx *sources.ProviderContext, path string) (*sources.FileInfo, error) {
 	if pctx.Credentials == nil || pctx.Credentials.AccessToken == "" {

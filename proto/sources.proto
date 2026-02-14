@@ -41,6 +41,9 @@ service SourceService {
 
   // SyncView re-executes a view's query, refreshing cached metadata
   rpc SyncView(SyncViewRequest) returns (SyncViewResponse);
+
+  // ListResources returns available resources for an integration (repos, channels, etc.)
+  rpc ListResources(ListResourcesRequest) returns (ListResourcesResponse);
 }
 
 // SourceFileInfo contains file/directory metadata
@@ -231,4 +234,21 @@ message SyncViewResponse {
   SourceView view = 3;
   int32 results_count = 4;    // Total number of results after sync
   int32 new_results = 5;      // Number of newly detected results
+}
+
+// ListResources - returns available resources for an integration
+message ListResourcesRequest {
+  string integration = 1;      // e.g., "github", "slack"
+  string resource_type = 2;    // e.g., "repos", "channels"
+}
+
+message ListResourcesResponse {
+  bool ok = 1;
+  string error = 2;
+  repeated SourceResource resources = 3;
+}
+
+message SourceResource {
+  string id = 1;       // Unique identifier (e.g., "owner/repo")
+  string name = 2;     // Display name (e.g., "owner/repo", "#general")
 }
