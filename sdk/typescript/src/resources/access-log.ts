@@ -102,7 +102,7 @@ export class AccessLog {
   /**
    * Read content directly from an upstream source using a `source_uri`.
    *
-   * This bypasses the smart-folder/query layer entirely. Even if the
+   * This bypasses the source-view/query layer entirely. Even if the
    * materialized view has changed, the source_uri lets you pull the
    * exact content that was originally read.
    *

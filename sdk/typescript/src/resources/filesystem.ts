@@ -5,13 +5,13 @@ import type { VirtualFile, DirectoryListing, TreeListing } from '../types/filesy
  * Read-only access to the workspace virtual filesystem.
  *
  * The filesystem provides a unified view of all connected integrations,
- * smart folders, tools, and user-uploaded files.
+ * source views, tools, and user-uploaded files.
  *
  * @example
  * ```ts
  * const listing = await airstore.fs.list("ws_abc", { path: "/" });
  * const content = await airstore.fs.read("ws_abc", {
- *   path: "/Sources/gmail/inbox/email.txt",
+ *   path: "/sources/gmail/inbox/email.txt",
  * });
  * ```
  */

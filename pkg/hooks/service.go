@@ -61,14 +61,14 @@ func (s *Service) Create(ctx context.Context, wsId uint, memberId, tokenId *uint
 //   - Root-level source folders (/sources/gmail, /sources/github)
 //
 // Hooks CAN be attached to:
-//   - Smart query folders under sources (/sources/gmail/my-query)
+//   - Source view folders under sources (/sources/gmail/my-query)
 //   - Top-level query folders (/my-emails)
 func ValidateHookPath(path string) error {
 	if types.IsSystemRootPath(path) {
 		return fmt.Errorf("cannot add hook to %s", path)
 	}
 	if types.IsRootLevelSource(path) {
-		return fmt.Errorf("cannot add hook to root-level source %s; use a smart query folder instead", path)
+		return fmt.Errorf("cannot add hook to root-level source %s; use a source view folder instead", path)
 	}
 	return nil
 }

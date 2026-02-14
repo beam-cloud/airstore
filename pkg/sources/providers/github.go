@@ -34,6 +34,32 @@ func (g *GitHubProvider) Name() string {
 	return types.GitHub.String()
 }
 
+// DefaultResourceType implements sources.ResourceLister.
+func (g *GitHubProvider) DefaultResourceType() string { return "repos" }
+
+// ListResources implements sources.ResourceLister.
+func (g *GitHubProvider) ListResources(ctx context.Context, pctx *sources.ProviderContext, resourceType string) ([]sources.Resource, error) {
+	if pctx.Credentials == nil || pctx.Credentials.AccessToken == "" {
+		return nil, sources.ErrNotConnected
+	}
+	switch resourceType {
+	case "repos":
+		repos, err := g.fetchReposRaw(ctx, pctx.Credentials.AccessToken)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]sources.Resource, 0, len(repos))
+		for _, r := range repos {
+			if name, ok := r["full_name"].(string); ok {
+				out = append(out, sources.Resource{ID: name, Name: name})
+			}
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("unsupported resource type: %s", resourceType)
+	}
+}
+
 // Stat returns file/directory attributes
 func (g *GitHubProvider) Stat(ctx context.Context, pctx *sources.ProviderContext, path string) (*sources.FileInfo, error) {
 	if pctx.Credentials == nil || pctx.Credentials.AccessToken == "" {

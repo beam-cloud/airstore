@@ -19,21 +19,21 @@ const (
 	sourcePollWorkers = 5                // concurrent refresh workers
 )
 
-// QueryRefresher executes a source query and emits change events.
+// ViewSyncer re-executes a source view query and emits change events.
 // Implemented by SourceService in the gateway layer.
-type QueryRefresher interface {
+type ViewSyncer interface {
 	RefreshQuery(ctx context.Context, query *types.FilesystemQuery) error
 }
 
-// SourcePoller periodically refreshes source queries watched by active hooks.
-// Each query is locked via Redis SETNX so only one replica refreshes it per interval.
+// SourcePoller periodically syncs source views watched by active hooks.
+// Each view is locked via Redis SETNX so only one replica refreshes it per interval.
 type SourcePoller struct {
 	store     repository.FilesystemStore
-	refresher QueryRefresher
+	refresher ViewSyncer
 	rdb       *common.RedisClient
 }
 
-func NewSourcePoller(store repository.FilesystemStore, refresher QueryRefresher, rdb *common.RedisClient) *SourcePoller {
+func NewSourcePoller(store repository.FilesystemStore, refresher ViewSyncer, rdb *common.RedisClient) *SourcePoller {
 	return &SourcePoller{store: store, refresher: refresher, rdb: rdb}
 }
 

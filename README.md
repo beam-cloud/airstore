@@ -19,14 +19,14 @@ Airstore adds any source of data into a virtual filesystem. Connect Gmail, GitHu
 
 Claude Code already knows how to read files, search directories, and work with file contents. By turning your integrations into files, Claude can use the same tools it uses for code, for your data.
 
-Smart folders also let you scope exactly what Claude can access. Instead of granting access to your entire inbox, create a folder with just "invoices from last week."
+Source views also let you scope exactly what Claude can access. Instead of granting access to your entire inbox, create a view with just "invoices from last week" — or use structured filters for precise control.
 
 ## Features
 
-- **Smart folders** - Natural language queries that materialize as folders of files
-- **Integrations** - Connect GitHub, Gmail, Google Drive, Linear, Notion, Slack
+- **Source views** - Natural language or structured queries that materialize as folders of files
+- **Integrations** - Connect GitHub, Gmail, Google Drive, Linear, Notion, Slack, Web
 - **Tools** - MCP servers exposed as executable binaries
-- **Team workspaces** - Share integrations and smart folders across your team
+- **Team workspaces** - Share integrations and source views across your team
 - **Local mode** - Run entirely on your own infrastructure
 
 ## Quick Start
@@ -39,9 +39,9 @@ Go to [app.airstore.ai](https://app.airstore.ai) and create an account.
 
 In the dashboard, go to **Settings → Integrations** and connect a service (GitHub, Gmail, Drive, and more.).
 
-### 3. Create a smart folder
+### 3. Create a source view
 
-Click **New Smart Folder** and describe what you want in natural language:
+Click **New Folder** and describe what you want in natural language, or use structured filters:
 
 - "Open PRs in acme/api that need review"
 - "Invoices I received in email last week"
@@ -63,7 +63,7 @@ airstore login
 airstore mount ~/airstore 
 ```
 
-Your smart folders are now available as local directories:
+Your source views are now available as local directories:
 
 ```bash
 ls ~/airstore/gmail/invoices/
@@ -101,18 +101,18 @@ Ask Claude to work with your data:
 ```
 ~/airstore/
 ├── linear/
-│   └── design-issues/     # Smart folder
+│   └── design-issues/     # Source view
 ├── github/
-│   └── open-prs/          # Smart folder
+│   └── open-prs/          # Source view
 ├── gmail/
-│   └── invoices/          # Smart folder
+│   └── invoices/          # Source view
 └── tools/
     ├── github             # MCP tool executable
     ├── linear             # MCP tool executable
     └── gmail              # MCP tool executable
 ```
 
-**Smart folders** contain data from your integrations, materialized as files. They sync automatically in the background.
+**Source views** contain data from your integrations, materialized as files. They sync automatically in the background, or manually on demand.
 
 **Tools** are MCP servers exposed as executables that let you take actions:
 
@@ -259,7 +259,7 @@ make build
 Full documentation at [docs.airstore.ai](https://docs.airstore.ai):
 
 - [Quickstart](https://docs.airstore.ai/quickstart) - Get running in 5 minutes
-- [Smart Folders](https://docs.airstore.ai/concepts/smart-folders) - Create dynamic data views
+- [Source Views](https://docs.airstore.ai/concepts/source-views) - Create dynamic data views
 - [Tools](https://docs.airstore.ai/concepts/tools) - Run MCP tools as CLI commands
 - [CLI Reference](https://docs.airstore.ai/reference/cli) - Full command documentation
 

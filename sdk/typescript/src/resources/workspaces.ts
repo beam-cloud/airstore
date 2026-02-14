@@ -4,7 +4,7 @@ import type { Workspace, WorkspaceCreateParams } from '../types/workspaces.js';
 /**
  * Manage workspaces.
  *
- * Workspaces are the top-level container for connections, smart folders,
+ * Workspaces are the top-level container for connections, source views,
  * members, and the virtual filesystem. When using an organization token,
  * workspaces are automatically scoped to the token's tenant.
  *

@@ -17,7 +17,7 @@ import (
 // readWithCompression checks the Redis cache, fetches raw content on miss,
 // compresses with a timeout, records the access event, and dispatches an
 // async cache write. The querySpec hash is folded into cache keys so that
-// changing a smart query automatically invalidates stale content.
+// changing a source view query automatically invalidates stale content.
 func (s *SourceService) readWithCompression(
 	ctx context.Context,
 	pctx *sources.ProviderContext,
@@ -31,7 +31,7 @@ func (s *SourceService) readWithCompression(
 		session = wsExtId
 	}
 
-	// Fold query-spec hash into the cache key so that editing a smart query
+	// Fold query-spec hash into the cache key so that editing a source view
 	// invalidates stale compressed content without an explicit flush.
 	cacheResultID := resultID
 	if querySpec != "" {

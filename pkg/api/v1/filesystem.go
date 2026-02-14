@@ -98,13 +98,17 @@ func (g *FilesystemGroup) registerRoutes() {
 	g.routerGroup.PUT("/tools/providers/:name", g.UpdateToolProvider)
 	g.routerGroup.DELETE("/tools/providers/:name", g.DeleteToolProvider)
 
-	// Smart query endpoints
-	g.routerGroup.POST("/queries", g.CreateQuery)
-	g.routerGroup.GET("/queries", g.GetQuery)           // ?path=...
-	g.routerGroup.GET("/queries/list", g.ListQueries)   // List all queries
-	g.routerGroup.GET("/queries/count", g.CountQueries) // Count queries in workspace
-	g.routerGroup.PUT("/queries/:id", g.UpdateQuery)    // :id = external_id
-	g.routerGroup.DELETE("/queries/:id", g.DeleteQuery) // :id = external_id
+	// Source view endpoints
+	g.routerGroup.POST("/views", g.CreateView)
+	g.routerGroup.GET("/views", g.GetView)             // ?path=...
+	g.routerGroup.GET("/views/list", g.ListViews)      // List all views
+	g.routerGroup.GET("/views/count", g.CountViews)    // Count views in workspace
+	g.routerGroup.PUT("/views/:id", g.UpdateView)      // :id = external_id
+	g.routerGroup.DELETE("/views/:id", g.DeleteView)   // :id = external_id
+	g.routerGroup.POST("/views/:id/sync", g.SyncView)  // Sync a view
+
+	// Integration resource listing
+	g.routerGroup.GET("/sources/:integration/resources", g.ListResources)
 }
 
 // List returns directory contents as VirtualFile entries
@@ -192,7 +196,7 @@ func (g *FilesystemGroup) Read(c echo.Context) error {
 	length, _ := strconv.ParseInt(c.QueryParam("length"), 10, 64)
 
 	// Inject compression strategy into gRPC-compatible metadata on the context
-	// so that SourceService.readSmartQueryResult() can pick it up.
+	// so that SourceService.readViewResult() can pick it up.
 	if compressionStrategy := c.QueryParam("compression"); compressionStrategy != "" {
 		md := grpcmd.Pairs("x-airstore-compression", compressionStrategy)
 		ctx = grpcmd.NewIncomingContext(ctx, md)
@@ -349,7 +353,7 @@ func (g *FilesystemGroup) Search(c echo.Context) error {
 		}
 	}
 
-	// Search sources (integrations, smart query folders, and their contents)
+	// Search sources (integrations, source view folders, and their contents)
 	if g.sourceService != nil {
 		// Helper to add a source entry if it matches
 		addSourceEntry := func(name, path string, isDir bool, size int64) {
@@ -366,7 +370,7 @@ func (g *FilesystemGroup) Search(c echo.Context) error {
 		// Helper to search a directory recursively (up to maxDepth)
 		var searchSourceDir func(path string, depth int)
 		searchSourceDir = func(path string, depth int) {
-			if depth > 2 { // integration -> smart query folder -> files
+			if depth > 2 { // integration -> source view folder -> files
 				return
 			}
 			resp, err := g.sourceService.ReadDir(ctx, &pb.SourceReadDirRequest{Path: path})
@@ -944,14 +948,14 @@ func (g *FilesystemGroup) listSources(c echo.Context, ctx context.Context, relPa
 		})
 	}
 
-	// If refresh requested, force re-execute the smart query
+	// If refresh requested, force re-execute the source view query
 	// Only attempt refresh for paths that could be smart queries (integration/query-name)
 	// e.g., "gmail/unread-emails" not just "gmail"
 	if refresh && g.sourceService != nil && strings.Contains(relPath, "/") {
 		queryPath := types.SourcePath(relPath)
-		if _, err := g.sourceService.RefreshSmartQuery(ctx, queryPath); err != nil {
-			// Log but don't fail - might not be a smart query folder
-			log.Debug().Err(err).Str("path", queryPath).Msg("refresh: not a smart query or refresh failed")
+		if _, err := g.sourceService.SyncViewByPath(ctx, queryPath); err != nil {
+			// Log but don't fail - might not be a source view folder
+			log.Debug().Err(err).Str("path", queryPath).Msg("refresh: not a source view or refresh failed")
 		}
 	}
 
@@ -982,11 +986,11 @@ func (g *FilesystemGroup) listSources(c echo.Context, ctx context.Context, relPa
 		parentPath := types.SourcePath(relPath)
 		if relPath == integration {
 			// Listing integration root - fetch all smart queries
-			queriesResp, err := g.sourceService.ListSmartQueries(ctx, &pb.ListSmartQueriesRequest{
+			queriesResp, err := g.sourceService.ListViews(ctx, &pb.ListViewsRequest{
 				ParentPath: parentPath,
 			})
 			if err == nil && queriesResp.Ok {
-				for _, q := range queriesResp.Queries {
+				for _, q := range queriesResp.Views {
 					// Use lowercase keys to handle both old (lowercase) and new (uppercase) paths
 					queryExternalIds[strings.ToLower(q.Path)] = q.ExternalId
 					queryGuidance[strings.ToLower(q.Path)] = q.Guidance
@@ -1006,7 +1010,7 @@ func (g *FilesystemGroup) listSources(c echo.Context, ctx context.Context, relPa
 				types.VFTypeSource,
 			).WithFolder(e.IsDir).WithReadOnly(true).WithMetadata(types.MetaKeyProvider, integration)
 
-			// Add external_id and guidance if this is a smart query
+			// Add external_id and guidance if this is a source view
 			// Use lowercase for lookup to match how we stored them (case-insensitive)
 			entryPathLower := strings.ToLower(entryPath)
 			if extId, ok := queryExternalIds[entryPathLower]; ok {
@@ -2271,46 +2275,51 @@ func getManifestToolCount(manifest []byte) int {
 	return len(m.Tools)
 }
 
-// CreateQueryRequest represents a request to create a smart query
-type CreateQueryRequest struct {
-	Integration  string `json:"integration"`   // e.g., "gmail", "gdrive"
-	Name         string `json:"name"`          // Folder/file name
-	Guidance     string `json:"guidance"`      // Optional user guidance for LLM
-	OutputFormat string `json:"output_format"` // "folder" or "file"
-	FileExt      string `json:"file_ext"`      // For files: ".json", ".md"
+// CreateViewRequest represents a request to create a source view.
+// If Filter is non-empty, the view uses query mode; otherwise smart mode (LLM inference).
+type CreateViewRequest struct {
+	Integration  string          `json:"integration"`    // e.g., "gmail", "gdrive"
+	Name         string          `json:"name"`           // Folder/file name
+	Guidance     string          `json:"guidance"`       // Natural language guidance (smart mode)
+	Filter       json.RawMessage `json:"filter"`         // Structured filter JSON (query mode)
+	OutputFormat string          `json:"output_format"`  // "folder" or "file" (default: "folder")
+	FileExt      string          `json:"file_ext"`       // For files: ".json", ".md"
 }
 
-// UpdateQueryRequest represents a request to update a smart query
-type UpdateQueryRequest struct {
-	Name     string `json:"name"`     // New name (optional)
-	Guidance string `json:"guidance"` // New guidance (optional)
+// UpdateViewRequest represents a request to update a source view.
+type UpdateViewRequest struct {
+	Name     string          `json:"name"`     // New name (optional)
+	Guidance string          `json:"guidance"` // New guidance (optional)
+	Filter   json.RawMessage `json:"filter"`   // New filter (optional, query mode)
 }
 
-// SmartQueryResponse represents a smart query in API responses
-type SmartQueryResponse struct {
-	ExternalID   string `json:"external_id"`
-	Integration  string `json:"integration"`
-	Path         string `json:"path"`
-	Name         string `json:"name"`
-	QuerySpec    string `json:"query_spec"`
-	Guidance     string `json:"guidance"`
-	OutputFormat string `json:"output_format"`
-	FileExt      string `json:"file_ext"`
-	CacheTTL     int    `json:"cache_ttl"`
-	CreatedAt    int64  `json:"created_at"`
-	UpdatedAt    int64  `json:"updated_at"`
+// ViewResponse represents a source view in API responses.
+type ViewResponse struct {
+	ExternalID   string           `json:"external_id"`
+	Integration  string           `json:"integration"`
+	Path         string           `json:"path"`
+	Name         string           `json:"name"`
+	Mode         string           `json:"mode"`
+	QuerySpec    string           `json:"query_spec,omitempty"`
+	Guidance     string           `json:"guidance,omitempty"`
+	Filter       *json.RawMessage `json:"filter,omitempty"`
+	OutputFormat string           `json:"output_format"`
+	FileExt      string           `json:"file_ext,omitempty"`
+	CacheTTL     int              `json:"cache_ttl"`
+	CreatedAt    int64            `json:"created_at"`
+	UpdatedAt    int64            `json:"updated_at"`
 }
 
-// CreateQuery creates a new smart query via LLM inference
-func (g *FilesystemGroup) CreateQuery(c echo.Context) error {
+// CreateView creates a new source view via LLM inference or structured filter.
+func (g *FilesystemGroup) CreateView(c echo.Context) error {
 	ctx := c.Request().Context()
-	logRequest(c, "create_query")
+	logRequest(c, "create_view")
 
 	if g.sourceService == nil {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "source service not available")
 	}
 
-	var req CreateQueryRequest
+	var req CreateViewRequest
 	if err := c.Bind(&req); err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
 	}
@@ -2325,28 +2334,29 @@ func (g *FilesystemGroup) CreateQuery(c echo.Context) error {
 		req.OutputFormat = "folder"
 	}
 
-	resp, err := g.sourceService.CreateSmartQuery(ctx, &pb.CreateSmartQueryRequest{
+	resp, err := g.sourceService.CreateView(ctx, &pb.CreateViewRequest{
 		Integration:  req.Integration,
 		Name:         req.Name,
 		Guidance:     req.Guidance,
+		Filter:       string(req.Filter),
 		OutputFormat: req.OutputFormat,
 		FileExt:      req.FileExt,
 	})
 	if err != nil {
-		log.Error().Err(err).Msg("failed to create smart query")
-		return ErrorResponse(c, http.StatusInternalServerError, "failed to create query")
+		log.Error().Err(err).Msg("failed to create source view")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to create view")
 	}
 	if !resp.Ok {
 		return ErrorResponse(c, http.StatusBadRequest, resp.Error)
 	}
 
-	return SuccessResponse(c, protoQueryToResponse(resp.Query))
+	return SuccessResponse(c, protoViewToResponse(resp.View))
 }
 
-// GetQuery retrieves a smart query by path
-func (g *FilesystemGroup) GetQuery(c echo.Context) error {
+// GetView retrieves a source view by path.
+func (g *FilesystemGroup) GetView(c echo.Context) error {
 	ctx := c.Request().Context()
-	logRequest(c, "get_query")
+	logRequest(c, "get_view")
 
 	if g.sourceService == nil {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "source service not available")
@@ -2357,83 +2367,81 @@ func (g *FilesystemGroup) GetQuery(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, "path is required")
 	}
 
-	resp, err := g.sourceService.GetSmartQuery(ctx, &pb.GetSmartQueryRequest{
+	resp, err := g.sourceService.GetView(ctx, &pb.GetViewRequest{
 		Path: path,
 	})
 	if err != nil {
-		log.Error().Err(err).Str("path", path).Msg("failed to get smart query")
-		return ErrorResponse(c, http.StatusInternalServerError, "failed to get query")
+		log.Error().Err(err).Str("path", path).Msg("failed to get source view")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to get view")
 	}
 	if !resp.Ok {
 		return ErrorResponse(c, http.StatusBadRequest, resp.Error)
 	}
-	if resp.Query == nil {
-		return ErrorResponse(c, http.StatusNotFound, "query not found")
+	if resp.View == nil {
+		return ErrorResponse(c, http.StatusNotFound, "view not found")
 	}
 
-	return SuccessResponse(c, protoQueryToResponse(resp.Query))
+	return SuccessResponse(c, protoViewToResponse(resp.View))
 }
 
-// ListQueries lists all smart queries in the workspace
-func (g *FilesystemGroup) ListQueries(c echo.Context) error {
+// ListViews lists all source views in the workspace.
+func (g *FilesystemGroup) ListViews(c echo.Context) error {
 	ctx := c.Request().Context()
-	logRequest(c, "list_queries")
+	logRequest(c, "list_views")
 
 	if g.sourceService == nil {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "source service not available")
 	}
 
-	// List all queries (empty parent path = all queries)
-	resp, err := g.sourceService.ListSmartQueries(ctx, &pb.ListSmartQueriesRequest{
+	resp, err := g.sourceService.ListViews(ctx, &pb.ListViewsRequest{
 		ParentPath: "",
 	})
 	if err != nil {
-		log.Error().Err(err).Msg("failed to list smart queries")
-		return ErrorResponse(c, http.StatusInternalServerError, "failed to list queries")
+		log.Error().Err(err).Msg("failed to list source views")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to list views")
 	}
 	if !resp.Ok {
 		return ErrorResponse(c, http.StatusBadRequest, resp.Error)
 	}
 
-	queries := make([]*SmartQueryResponse, 0, len(resp.Queries))
-	for _, q := range resp.Queries {
-		queries = append(queries, protoQueryToResponse(q))
+	views := make([]*ViewResponse, 0, len(resp.Views))
+	for _, q := range resp.Views {
+		views = append(views, protoViewToResponse(q))
 	}
 
 	return SuccessResponse(c, map[string]interface{}{
-		"queries": queries,
-		"count":   len(queries),
+		"views": views,
+		"count": len(views),
 	})
 }
 
-// CountQueries returns the count of smart queries in the workspace
-func (g *FilesystemGroup) CountQueries(c echo.Context) error {
+// CountViews returns the count of source views in the workspace.
+func (g *FilesystemGroup) CountViews(c echo.Context) error {
 	ctx := c.Request().Context()
-	logRequest(c, "count_queries")
+	logRequest(c, "count_views")
 
 	workspaceId := auth.WorkspaceId(ctx)
 	if workspaceId == 0 || g.backend == nil {
 		return SuccessResponse(c, map[string]interface{}{"count": 0})
 	}
 
-	// Direct query to filesystem_queries table
 	var count int
 	err := g.backend.DB().QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM filesystem_queries WHERE workspace_id = $1`,
 		workspaceId,
 	).Scan(&count)
 	if err != nil {
-		log.Error().Err(err).Uint("workspace_id", workspaceId).Msg("failed to count queries")
+		log.Error().Err(err).Uint("workspace_id", workspaceId).Msg("failed to count views")
 		return SuccessResponse(c, map[string]interface{}{"count": 0})
 	}
 
 	return SuccessResponse(c, map[string]interface{}{"count": count})
 }
 
-// UpdateQuery updates an existing smart query by external_id
-func (g *FilesystemGroup) UpdateQuery(c echo.Context) error {
+// UpdateView updates an existing source view by external_id.
+func (g *FilesystemGroup) UpdateView(c echo.Context) error {
 	ctx := c.Request().Context()
-	logRequest(c, "update_query")
+	logRequest(c, "update_view")
 
 	if g.sourceService == nil {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "source service not available")
@@ -2444,19 +2452,20 @@ func (g *FilesystemGroup) UpdateQuery(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, "id is required")
 	}
 
-	var req UpdateQueryRequest
+	var req UpdateViewRequest
 	if err := c.Bind(&req); err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
 	}
 
-	resp, err := g.sourceService.UpdateSmartQuery(ctx, &pb.UpdateSmartQueryRequest{
+	resp, err := g.sourceService.UpdateView(ctx, &pb.UpdateViewRequest{
 		ExternalId: externalId,
 		Name:       req.Name,
 		Guidance:   req.Guidance,
+		Filter:     string(req.Filter),
 	})
 	if err != nil {
-		log.Error().Err(err).Str("external_id", externalId).Msg("failed to update smart query")
-		return ErrorResponse(c, http.StatusInternalServerError, "failed to update query")
+		log.Error().Err(err).Str("external_id", externalId).Msg("failed to update source view")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to update view")
 	}
 	if !resp.Ok {
 		if strings.Contains(resp.Error, "not found") {
@@ -2465,13 +2474,13 @@ func (g *FilesystemGroup) UpdateQuery(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, resp.Error)
 	}
 
-	return SuccessResponse(c, protoQueryToResponse(resp.Query))
+	return SuccessResponse(c, protoViewToResponse(resp.View))
 }
 
-// DeleteQuery removes a smart query by external_id
-func (g *FilesystemGroup) DeleteQuery(c echo.Context) error {
+// DeleteView removes a source view by external_id.
+func (g *FilesystemGroup) DeleteView(c echo.Context) error {
 	ctx := c.Request().Context()
-	logRequest(c, "delete_query")
+	logRequest(c, "delete_view")
 
 	if g.sourceService == nil {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "source service not available")
@@ -2482,12 +2491,12 @@ func (g *FilesystemGroup) DeleteQuery(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, "id is required")
 	}
 
-	resp, err := g.sourceService.DeleteSmartQuery(ctx, &pb.DeleteSmartQueryRequest{
+	resp, err := g.sourceService.DeleteView(ctx, &pb.DeleteViewRequest{
 		ExternalId: externalId,
 	})
 	if err != nil {
-		log.Error().Err(err).Str("external_id", externalId).Msg("failed to delete smart query")
-		return ErrorResponse(c, http.StatusInternalServerError, "failed to delete query")
+		log.Error().Err(err).Str("external_id", externalId).Msg("failed to delete source view")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to delete view")
 	}
 	if !resp.Ok {
 		if strings.Contains(resp.Error, "not found") {
@@ -2499,16 +2508,96 @@ func (g *FilesystemGroup) DeleteQuery(c echo.Context) error {
 	return SuccessResponse(c, map[string]bool{"deleted": true})
 }
 
-// protoQueryToResponse converts a pb.SmartQuery to SmartQueryResponse
-func protoQueryToResponse(q *pb.SmartQuery) *SmartQueryResponse {
+// SyncView triggers a sync (re-execution) of a source view.
+func (g *FilesystemGroup) SyncView(c echo.Context) error {
+	ctx := c.Request().Context()
+	logRequest(c, "sync_view")
+
+	if g.sourceService == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "source service not available")
+	}
+
+	externalId := c.Param("id")
+	if externalId == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "id is required")
+	}
+
+	result, err := g.sourceService.SyncViewByExternalId(ctx, externalId)
+	if err != nil {
+		log.Error().Err(err).Str("external_id", externalId).Msg("failed to sync source view")
+		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "unauthorized") {
+			return ErrorResponse(c, http.StatusNotFound, err.Error())
+		}
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to sync view")
+	}
+
+	return SuccessResponse(c, map[string]interface{}{
+		"external_id":    result.Query.ExternalId,
+		"integration":    result.Query.Integration,
+		"path":           result.Query.Path,
+		"mode":           string(result.Query.Mode),
+		"last_synced_at": result.Query.LastExecuted,
+		"results_count":  result.ResultsCount,
+		"new_results":    result.NewResults,
+	})
+}
+
+// ListResources returns available resources for an integration (repos, channels, etc.).
+func (g *FilesystemGroup) ListResources(c echo.Context) error {
+	ctx := c.Request().Context()
+	logRequest(c, "list_resources")
+
+	if g.sourceService == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "source service not available")
+	}
+
+	integration := c.Param("integration")
+	resourceType := c.QueryParam("type")
+	if resourceType == "" {
+		resourceType = defaultResourceType(integration)
+	}
+
+	resp, err := g.sourceService.ListResources(ctx, &pb.ListResourcesRequest{
+		Integration:  integration,
+		ResourceType: resourceType,
+	})
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+	if !resp.Ok {
+		return ErrorResponse(c, http.StatusBadRequest, resp.Error)
+	}
+
+	items := make([]map[string]string, len(resp.Resources))
+	for i, r := range resp.Resources {
+		items[i] = map[string]string{"id": r.Id, "name": r.Name}
+	}
+	return SuccessResponse(c, map[string]interface{}{"resources": items})
+}
+
+// defaultResourceType returns the primary resource type for an integration.
+func defaultResourceType(integration string) string {
+	switch integration {
+	case "github":
+		return "repos"
+	case "slack":
+		return "channels"
+	default:
+		return ""
+	}
+}
+
+// protoViewToResponse converts a pb.SourceView to ViewResponse.
+func protoViewToResponse(q *pb.SourceView) *ViewResponse {
 	if q == nil {
 		return nil
 	}
-	return &SmartQueryResponse{
+	resp := &ViewResponse{
 		ExternalID:   q.ExternalId,
 		Integration:  q.Integration,
 		Path:         q.Path,
 		Name:         q.Name,
+		Mode:         q.Mode,
 		QuerySpec:    q.QuerySpec,
 		Guidance:     q.Guidance,
 		OutputFormat: q.OutputFormat,
@@ -2517,6 +2606,11 @@ func protoQueryToResponse(q *pb.SmartQuery) *SmartQueryResponse {
 		CreatedAt:    q.CreatedAt,
 		UpdatedAt:    q.UpdatedAt,
 	}
+	if q.Filter != "" {
+		raw := json.RawMessage(q.Filter)
+		resp.Filter = &raw
+	}
+	return resp
 }
 
 // ============================================================================

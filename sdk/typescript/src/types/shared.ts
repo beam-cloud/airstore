@@ -33,5 +33,5 @@ export type IntegrationType =
 /** Workspace member roles. */
 export type MemberRole = 'admin' | 'member' | 'viewer';
 
-/** Smart folder output format. */
+/** Source view output format. */
 export type OutputFormat = 'folder' | 'file';

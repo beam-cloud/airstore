@@ -1,6 +1,6 @@
 # @airstore/sdk
 
-Official TypeScript SDK for the [Airstore](https://airstore.ai) API. Provision workspaces, manage connections, configure smart folders, and generate mount tokens — all from your backend.
+Official TypeScript SDK for the [Airstore](https://airstore.ai) API. Provision workspaces, manage connections, configure source views, and generate mount tokens — all from your backend.
 
 ## Installation
 
@@ -51,8 +51,8 @@ async function provisionUser(
     refreshToken: gmailTokens.refreshToken,
   });
 
-  // 4. Set up smart folders for what the agent should see
-  await airstore.smartFolders.create(ws.external_id, {
+  // 4. Set up source views for what the agent should see
+  await airstore.views.create(ws.external_id, {
     integration: 'gmail',
     name: 'Recent Emails',
     guidance: 'Last 7 days of emails from the inbox',
@@ -143,31 +143,71 @@ const connections = await airstore.connections.list('ws_abc123');
 await airstore.connections.del('ws_abc123', 'conn_abc123');
 ```
 
-### Smart Folders
+### Source Views
+
+Source views come in two modes: **smart** (LLM-inferred from natural language) and **query** (structured per-integration filters).
 
 ```typescript
-// Create
-const folder = await airstore.smartFolders.create('ws_abc123', {
+// Smart mode — describe what you want in natural language
+const view = await airstore.views.create('ws_abc123', {
   integration: 'gmail',
   name: 'Important Emails',
   guidance: 'Emails marked as important from the last month',
   outputFormat: 'folder', // or 'file'
 });
 
+// Query mode — auto-detected when filter is provided
+const view2 = await airstore.views.create('ws_abc123', {
+  integration: 'gmail',
+  name: 'Unread from boss',
+  filter: { from: 'boss@company.com', is_unread: true },
+});
+
+// Query mode with GitHub content types
+const prView = await airstore.views.create('ws_abc123', {
+  integration: 'github',
+  name: 'Open PRs',
+  filter: {
+    repo: 'acme/api',
+    type: 'prs',
+    state: 'open',
+    content_type: 'diff', // 'markdown' | 'diff' | 'json' | 'raw'
+  },
+});
+
 // List all
-const folders = await airstore.smartFolders.list('ws_abc123');
+const views = await airstore.views.list('ws_abc123');
 
 // Retrieve by path
-const folder = await airstore.smartFolders.retrieve('ws_abc123', '/Sources/gmail/Important Emails');
+const found = await airstore.views.retrieve('ws_abc123', '/sources/gmail/Important Emails');
 
 // Update
-const updated = await airstore.smartFolders.update('ws_abc123', 'query_abc', {
+const updated = await airstore.views.update('ws_abc123', 'view_abc', {
   guidance: 'Updated guidance text',
 });
 
+// Sync — re-execute the query and refresh cached files
+const result = await airstore.views.sync('ws_abc123', 'view_abc');
+console.log(`${result.results_count} total, ${result.new_results} new`);
+
 // Delete
-await airstore.smartFolders.del('ws_abc123', 'query_abc');
+await airstore.views.del('ws_abc123', 'view_abc');
 ```
+
+#### Per-integration filter fields
+
+Each integration accepts a typed filter object:
+
+| Integration | Key fields |
+|---|---|
+| `gmail` | `from`, `to`, `subject`, `label`, `newer_than`, `older_than`, `has_attachment`, `is_unread`, `is_starred` |
+| `github` | `repo` (required), `type`, `state`, `label`, `author`, `content_type` |
+| `gdrive` | `name_contains`, `mime_type`, `shared_with_me`, `starred`, `modified_after`, `modified_before`, `folder_id` |
+| `notion` | `search` |
+| `slack` | `channel`, `from`, `after`, `before`, `has_link`, `has_reaction` |
+| `linear` | `type`, `team`, `state`, `assignee`, `priority`, `label` |
+| `posthog` | `type`, `query`, `project_id` |
+| `web` | `mode`, `url`, `query`, `include_paths` |
 
 ### Tokens
 
@@ -237,7 +277,7 @@ const entries = await airstore.fs.list('ws_abc123', { path: '/' });
 
 // Read file contents
 const content = await airstore.fs.read('ws_abc123', {
-  path: '/Sources/gmail/inbox/email.txt',
+  path: '/sources/gmail/inbox/email.txt',
 });
 
 // Get directory tree
@@ -247,7 +287,7 @@ const tree = await airstore.fs.tree('ws_abc123', {
 });
 
 // Stat a file
-const meta = await airstore.fs.stat('ws_abc123', '/Sources/gmail/inbox/email.txt');
+const meta = await airstore.fs.stat('ws_abc123', '/sources/gmail/inbox/email.txt');
 ```
 
 ## Per-Request Options

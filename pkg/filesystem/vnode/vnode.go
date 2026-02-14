@@ -12,8 +12,8 @@ type VNodeType int
 const (
 	// VNodeReadOnly is for read-only paths like /tools/, /.airstore/
 	VNodeReadOnly VNodeType = iota
-	// VNodeSmartQuery is for /sources/{integration}/ - mkdir/touch creates smart queries
-	VNodeSmartQuery
+	// VNodeSourceView is for /sources/{integration}/ - mkdir/touch creates source views
+	VNodeSourceView
 	// VNodeWritable is for fully writable paths like /skills/
 	VNodeWritable
 )
@@ -46,7 +46,7 @@ type DirEntry struct {
 //
 // Write semantics by VNodeType:
 //   - VNodeReadOnly: All writes return ErrReadOnly (e.g., /tools/, /.airstore/)
-//   - VNodeSmartQuery: Mkdir/Create create smart queries, Write/Unlink/Rmdir not supported
+//   - VNodeSourceView: Mkdir/Create create source views, Write/Unlink/Rmdir not supported
 //   - VNodeWritable: Full read/write access (e.g., /skills/)
 type VirtualNode interface {
 	Prefix() string
@@ -91,21 +91,21 @@ func (ReadOnlyBase) Readlink(string) (string, error)                       { ret
 func (ReadOnlyBase) Release(string, FileHandle) error                      { return nil }
 func (ReadOnlyBase) Fsync(string, FileHandle) error                        { return nil }
 
-// SmartQueryBase provides default implementations for smart query VNodes.
-// Embed this in VNodes that support smart queries (e.g., /sources/).
-// Mkdir and Create should be overridden to create smart queries.
-type SmartQueryBase struct{}
+// SourceViewBase provides default implementations for source view VNodes.
+// Embed this in VNodes that support source views (e.g., /sources/).
+// Mkdir and Create should be overridden to create source views.
+type SourceViewBase struct{}
 
-func (SmartQueryBase) Type() VNodeType                                       { return VNodeSmartQuery }
-func (SmartQueryBase) Write(string, []byte, int64, FileHandle) (int, error)  { return 0, ErrReadOnly }
-func (SmartQueryBase) Truncate(string, int64, FileHandle) error              { return ErrReadOnly }
-func (SmartQueryBase) Rmdir(string) error                                    { return ErrNotSupported }
-func (SmartQueryBase) Unlink(string) error                                   { return ErrNotSupported }
-func (SmartQueryBase) Rename(string, string) error                           { return ErrNotSupported }
-func (SmartQueryBase) Symlink(string, string) error                          { return ErrNotSupported }
-func (SmartQueryBase) Readlink(string) (string, error)                       { return "", ErrNotSupported }
-func (SmartQueryBase) Release(string, FileHandle) error                      { return nil }
-func (SmartQueryBase) Fsync(string, FileHandle) error                        { return nil }
+func (SourceViewBase) Type() VNodeType                                       { return VNodeSourceView }
+func (SourceViewBase) Write(string, []byte, int64, FileHandle) (int, error)  { return 0, ErrReadOnly }
+func (SourceViewBase) Truncate(string, int64, FileHandle) error              { return ErrReadOnly }
+func (SourceViewBase) Rmdir(string) error                                    { return ErrNotSupported }
+func (SourceViewBase) Unlink(string) error                                   { return ErrNotSupported }
+func (SourceViewBase) Rename(string, string) error                           { return ErrNotSupported }
+func (SourceViewBase) Symlink(string, string) error                          { return ErrNotSupported }
+func (SourceViewBase) Readlink(string) (string, error)                       { return "", ErrNotSupported }
+func (SourceViewBase) Release(string, FileHandle) error                      { return nil }
+func (SourceViewBase) Fsync(string, FileHandle) error                        { return nil }
 
 // registeredNode pairs a VirtualNode with its precomputed prefix strings
 // so Match() never allocates.

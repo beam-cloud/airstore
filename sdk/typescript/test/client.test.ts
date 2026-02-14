@@ -61,7 +61,7 @@ describe('Client', () => {
     const client = new Airstore({ apiKey: 'test' });
     expect(client.workspaces).toBeDefined();
     expect(client.connections).toBeDefined();
-    expect(client.smartFolders).toBeDefined();
+    expect(client.views).toBeDefined();
     expect(client.tokens).toBeDefined();
     expect(client.members).toBeDefined();
     expect(client.oauth).toBeDefined();

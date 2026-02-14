@@ -75,7 +75,7 @@ type QueryResponse struct {
 }
 
 // QueryExecutor is an optional interface implemented by providers that support
-// filesystem query operations. This enables the smart query filesystem feature
+// filesystem query operations. This enables the source view filesystem feature
 // where users create virtual folders/files that execute queries on access.
 type QueryExecutor interface {
 	// ExecuteQuery runs a query and returns results with pagination metadata.
@@ -85,7 +85,7 @@ type QueryExecutor interface {
 	ExecuteQuery(ctx context.Context, pctx *ProviderContext, spec QuerySpec) (*QueryResponse, error)
 
 	// ReadResult fetches content for a specific result by its provider ID.
-	// This is called when a user reads a file from a smart query folder.
+	// This is called when a user reads a file from a source view folder.
 	ReadResult(ctx context.Context, pctx *ProviderContext, resultID string) ([]byte, error)
 
 	// FormatFilename generates a filename from metadata using the format template.
@@ -120,6 +120,23 @@ func DefaultFilenameFormat(integration string) string {
 	default:
 		return "{id}"
 	}
+}
+
+// Resource represents a selectable item from an integration (repo, channel, etc.).
+type Resource struct {
+	ID   string `json:"id"`   // Unique identifier (e.g., "owner/repo", "C01234")
+	Name string `json:"name"` // Display name (e.g., "owner/repo", "#general")
+}
+
+// ResourceLister is optionally implemented by providers that can enumerate
+// available resources for use in filter dropdowns (repos, channels, etc.).
+type ResourceLister interface {
+	// DefaultResourceType returns the primary resource type name (e.g., "repos", "channels").
+	DefaultResourceType() string
+
+	// ListResources returns available resources of the given type.
+	// Supported types are provider-specific (e.g., "repos" for GitHub, "channels" for Slack).
+	ListResources(ctx context.Context, pctx *ProviderContext, resourceType string) ([]Resource, error)
 }
 
 // CredentialValidator is optionally implemented by providers that can validate

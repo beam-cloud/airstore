@@ -186,7 +186,7 @@ func (s *SourceService) Stat(ctx context.Context, req *pb.SourceStatRequest) (*p
 		}, nil
 	}
 
-	// Smart query result file or query folder.
+	// Source view result file or view folder.
 	queryPath, filename := s.findQueryAndFilename(ctx, pctx.WorkspaceId, integration, relPath)
 	if queryPath != "" {
 		results, err := s.fsStore.GetQueryResults(ctx, pctx.WorkspaceId, queryPath)
@@ -205,7 +205,7 @@ func (s *SourceService) Stat(ctx context.Context, req *pb.SourceStatRequest) (*p
 			}
 		}
 	} else {
-		// Check if the path itself is a smart query folder.
+		// Check if the path itself is a source view folder.
 		qp := types.PathSources + "/" + integration + "/" + relPath
 		if q, err := s.fsStore.GetQuery(ctx, pctx.WorkspaceId, qp); err == nil && q != nil {
 			return &pb.SourceStatResponse{
@@ -279,14 +279,14 @@ func (s *SourceService) ReadDir(ctx context.Context, req *pb.SourceReadDirReques
 		return s.readDirIntegrationRoot(ctx, pctx, integration, connected)
 	}
 
-	// Smart query folder.
+	// Source view folder.
 	queryPath := types.PathSources + "/" + p
 	query, err := s.fsStore.GetQuery(ctx, pctx.WorkspaceId, queryPath)
 	if err != nil {
 		log.Debug().Err(err).Str("path", queryPath).Msg("query lookup error")
 	}
-	if query != nil && query.OutputFormat == types.QueryOutputFolder {
-		return s.readDirSmartQuery(ctx, pctx, query, connected)
+	if query != nil && query.OutputFormat == types.ViewOutputFolder {
+		return s.readDirView(ctx, pctx, query, connected)
 	}
 
 	// .query.as is a file, not a directory.
@@ -294,7 +294,7 @@ func (s *SourceService) ReadDir(ctx context.Context, req *pb.SourceReadDirReques
 		return &pb.SourceReadDirResponse{Ok: false, Error: "not a directory"}, nil
 	}
 
-	// If parent is a smart query, this is inside a result — no subdirectories.
+	// If parent is a source view, this is inside a result — no subdirectories.
 	parentPath := types.PathSources + "/" + integration
 	if idx := strings.LastIndex(relPath, "/"); idx > 0 {
 		parentPath = types.PathSources + "/" + integration + "/" + relPath[:idx]
@@ -395,16 +395,16 @@ func (s *SourceService) Read(ctx context.Context, req *pb.SourceReadRequest) (*p
 		}
 		queryPath += "/" + filename
 		query, err := s.fsStore.GetQuery(ctx, pctx.WorkspaceId, queryPath)
-		if err != nil || query == nil || query.OutputFormat != types.QueryOutputFile {
+		if err != nil || query == nil || query.OutputFormat != types.ViewOutputFile {
 			return &pb.SourceReadResponse{Ok: false, Error: "query not found"}, nil
 		}
 		return readSlice(s.generateQueryMetaJSON(query), req.Offset, req.Length), nil
 	}
 
-	// Smart query result file.
+	// Source view result file.
 	queryPath, filename := s.findQueryAndFilename(ctx, pctx.WorkspaceId, integration, relPath)
 	if queryPath != "" {
-		return s.readSmartQueryResult(ctx, pctx, queryPath, filename, req.Offset, req.Length)
+		return s.readViewResult(ctx, pctx, queryPath, filename, req.Offset, req.Length)
 	}
 
 	// NativeBrowsable provider read.
@@ -481,7 +481,7 @@ func (s *SourceService) readDirIntegrationRoot(ctx context.Context, pctx *source
 				continue // skip nested entries
 			}
 
-			if q.OutputFormat == types.QueryOutputFolder {
+			if q.OutputFormat == types.ViewOutputFolder {
 				entries = append(entries, &pb.SourceDirEntry{
 					Name: name, Mode: sources.ModeDir, IsDir: true,
 					Mtime: q.UpdatedAt.Unix(), ChildCount: int32(s.getQueryChildCount(ctx, pctx.WorkspaceId, q.Path)),
@@ -540,7 +540,7 @@ func (s *SourceService) readDirIntegrationRoot(ctx context.Context, pctx *source
 	return &pb.SourceReadDirResponse{Ok: true, Entries: entries}, nil
 }
 
-func (s *SourceService) readDirSmartQuery(ctx context.Context, pctx *sources.ProviderContext, query *types.FilesystemQuery, connected bool) (*pb.SourceReadDirResponse, error) {
+func (s *SourceService) readDirView(ctx context.Context, pctx *sources.ProviderContext, query *types.FilesystemQuery, connected bool) (*pb.SourceReadDirResponse, error) {
 	queryMeta := s.generateQueryMetaJSON(query)
 	entries := []*pb.SourceDirEntry{
 		{Name: ".query.as", Mode: sources.ModeFile | 0444, Size: int64(len(queryMeta)), Mtime: query.UpdatedAt.Unix()},
@@ -552,7 +552,7 @@ func (s *SourceService) readDirSmartQuery(ctx context.Context, pctx *sources.Pro
 
 	results, err := s.getOrExecuteQuery(ctx, pctx, query)
 	if err != nil {
-		log.Warn().Err(err).Str("path", query.Path).Msg("failed to execute smart query")
+		log.Warn().Err(err).Str("path", query.Path).Msg("failed to execute source view query")
 		return &pb.SourceReadDirResponse{Ok: true, Entries: entries}, nil
 	}
 
@@ -599,9 +599,9 @@ func (s *SourceService) generateQueryMetaJSON(query *types.FilesystemQuery) []by
 // Read helpers
 // ---------------------------------------------------------------------------
 
-// readSmartQueryResult reads content from a smart query result, optionally
+// readViewResult reads content from a source view result, optionally
 // compressing via the compression middleware if enabled.
-func (s *SourceService) readSmartQueryResult(ctx context.Context, pctx *sources.ProviderContext, queryPath, filename string, offset, length int64) (*pb.SourceReadResponse, error) {
+func (s *SourceService) readViewResult(ctx context.Context, pctx *sources.ProviderContext, queryPath, filename string, offset, length int64) (*pb.SourceReadResponse, error) {
 	query, err := s.fsStore.GetQuery(ctx, pctx.WorkspaceId, queryPath)
 	if err != nil || query == nil {
 		return &pb.SourceReadResponse{Ok: false, Error: "query not found"}, nil
@@ -745,8 +745,8 @@ func (s *SourceService) passthroughCostHint(
 	return hint
 }
 
-// findQueryAndFilename walks up the path to find the parent smart query folder.
-// Returns ("", "") if relPath is not inside a smart query.
+// findQueryAndFilename walks up the path to find the parent source view folder.
+// Returns ("", "") if relPath is not inside a source view.
 func (s *SourceService) findQueryAndFilename(ctx context.Context, workspaceId uint, integration, relPath string) (queryPath, filename string) {
 	parts := strings.Split(relPath, "/")
 	for i := len(parts) - 1; i >= 0; i-- {
@@ -755,7 +755,7 @@ func (s *SourceService) findQueryAndFilename(ctx context.Context, workspaceId ui
 			candidate += "/" + strings.Join(parts[:i], "/")
 		}
 		q, err := s.fsStore.GetQuery(ctx, workspaceId, candidate)
-		if err == nil && q != nil && q.OutputFormat == types.QueryOutputFolder {
+		if err == nil && q != nil && q.OutputFormat == types.ViewOutputFolder {
 			return q.Path, strings.Join(parts[i:], "/")
 		}
 	}
@@ -880,7 +880,7 @@ func (s *SourceService) isIntegrationVisible(ctx context.Context, workspaceId ui
 // ---------------------------------------------------------------------------
 
 // ReadBySourceURI fetches content directly from a provider using a source URI
-// of the form "integration://resultID". This bypasses the smart-folder layer
+// of the form "integration://resultID". This bypasses the source-view layer
 // entirely, so it works even if the query results have changed since the
 // original read was recorded.
 func (s *SourceService) ReadBySourceURI(ctx context.Context, workspaceId uint, memberId uint, sourceURI string) ([]byte, error) {
