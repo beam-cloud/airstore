@@ -134,54 +134,68 @@ func NewPoolScaler(ctx context.Context, config PoolScalerConfig, taskQueue repos
 	}, nil
 }
 
-// EnsureDeployment checks if the worker deployment exists and creates/updates it
+// EnsureDeployment checks if the worker deployment exists and creates/updates it.
+// Skips the update when the config hash is unchanged (common case). Retries on
+// conflict since the scaler may update replicas between our GET and UPDATE.
 func (s *PoolScaler) EnsureDeployment() error {
 	ctx := context.Background()
-	deployment := s.buildDeployment()
+	desired := s.buildDeployment()
+	desiredHash := desired.Spec.Template.Annotations[annotationConfigHash]
 
-	// Check if deployment already exists
-	existing, err := s.kubeClient.AppsV1().Deployments(s.config.Namespace).Get(
-		ctx, s.config.DeploymentName, metav1.GetOptions{})
-	if err == nil {
-		// Deployment exists - update it to ensure env vars are current
-		deployment.ResourceVersion = existing.ResourceVersion
-		// Preserve current replica count (don't reset to min)
+	const maxRetries = 3
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		existing, err := s.kubeClient.AppsV1().Deployments(s.config.Namespace).Get(
+			ctx, s.config.DeploymentName, metav1.GetOptions{})
+
+		if errors.IsNotFound(err) {
+			_, createErr := s.kubeClient.AppsV1().Deployments(s.config.Namespace).Create(
+				ctx, desired, metav1.CreateOptions{})
+			if createErr != nil {
+				return fmt.Errorf("failed to create worker deployment: %w", createErr)
+			}
+			log.Info().
+				Str("pool", s.config.PoolName).
+				Str("deployment", s.config.DeploymentName).
+				Str("image", s.config.WorkerImage).
+				Int32("replicas", s.config.MinReplicas).
+				Msg("created worker deployment")
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("failed to get deployment: %w", err)
+		}
+
+		// Skip update if config hasn't changed — avoids unnecessary writes
+		// and the conflict window with the scaler entirely.
+		existingHash := existing.Spec.Template.Annotations[annotationConfigHash]
+		if existingHash == desiredHash {
+			return nil
+		}
+
+		// Config changed — apply update, preserving current replica count.
+		desired.ResourceVersion = existing.ResourceVersion
 		if existing.Spec.Replicas != nil {
-			deployment.Spec.Replicas = existing.Spec.Replicas
+			desired.Spec.Replicas = existing.Spec.Replicas
 		}
 
 		_, err = s.kubeClient.AppsV1().Deployments(s.config.Namespace).Update(
-			ctx, deployment, metav1.UpdateOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to update worker deployment: %w", err)
+			ctx, desired, metav1.UpdateOptions{})
+		if err == nil {
+			log.Info().
+				Str("pool", s.config.PoolName).
+				Str("deployment", s.config.DeploymentName).
+				Msg("updated worker deployment")
+			return nil
 		}
-
-		log.Info().
-			Str("pool", s.config.PoolName).
-			Str("deployment", s.config.DeploymentName).
-			Msg("updated worker deployment")
-		return nil
+		if errors.IsConflict(err) {
+			log.Debug().Str("pool", s.config.PoolName).Int("attempt", attempt+1).
+				Msg("deployment update conflict, retrying")
+			continue
+		}
+		return fmt.Errorf("failed to update worker deployment: %w", err)
 	}
 
-	if !errors.IsNotFound(err) {
-		return fmt.Errorf("failed to check deployment existence: %w", err)
-	}
-
-	// Create the deployment
-	_, err = s.kubeClient.AppsV1().Deployments(s.config.Namespace).Create(
-		ctx, deployment, metav1.CreateOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to create worker deployment: %w", err)
-	}
-
-	log.Info().
-		Str("pool", s.config.PoolName).
-		Str("deployment", s.config.DeploymentName).
-		Str("image", s.config.WorkerImage).
-		Int32("replicas", s.config.MinReplicas).
-		Msg("created worker deployment")
-
-	return nil
+	return fmt.Errorf("deployment update failed after %d retries (conflict)", maxRetries)
 }
 
 // buildDeployment constructs the K8s Deployment spec for workers
