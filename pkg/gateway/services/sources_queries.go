@@ -45,9 +45,9 @@ func (s *SourceService) InvalidateQueryCache(ctx context.Context, workspaceId ui
 	return s.fsStore.InvalidateQuery(ctx, workspaceId, queryPath)
 }
 
-// executeFreshQuery invalidates cached view data and then re-executes the query.
-// The invalidation warning is non-fatal so sync/refresh can still proceed.
-func (s *SourceService) executeFreshQuery(ctx context.Context, pctx *sources.ProviderContext, query *types.FilesystemQuery, op string) ([]repository.QueryResult, error) {
+// invalidateAndExecute clears cached results for a view and re-executes its
+// provider query. The cache invalidation is best-effort (logged, not fatal).
+func (s *SourceService) invalidateAndExecute(ctx context.Context, pctx *sources.ProviderContext, query *types.FilesystemQuery, op string) ([]repository.QueryResult, error) {
 	if err := s.fsStore.InvalidateQuery(ctx, pctx.WorkspaceId, query.Path); err != nil {
 		log.Warn().Err(err).Str("path", query.Path).Str("op", op).Msg("failed to invalidate query cache")
 	}
@@ -80,7 +80,7 @@ func (s *SourceService) SyncViewByPath(ctx context.Context, queryPath string) ([
 		Str("query_spec", query.QuerySpec).
 		Msg("syncing source view")
 
-	results, err := s.executeFreshQuery(ctx, pctx, query, "sync_by_path")
+	results, err := s.invalidateAndExecute(ctx, pctx, query, "sync_by_path")
 	if err != nil {
 		return nil, fmt.Errorf("query execution failed: %w", err)
 	}
@@ -112,7 +112,7 @@ func (s *SourceService) SyncViewByExternalId(ctx context.Context, externalId str
 		return nil, fmt.Errorf("not connected to %s", query.Integration)
 	}
 
-	results, err := s.executeFreshQuery(ctx, pctx, query, "sync_by_external_id")
+	results, err := s.invalidateAndExecute(ctx, pctx, query, "sync_by_external_id")
 	if err != nil {
 		return nil, fmt.Errorf("query execution failed: %w", err)
 	}
@@ -136,7 +136,7 @@ func (s *SourceService) RefreshQuery(ctx context.Context, query *types.Filesyste
 		return fmt.Errorf("not connected to %s (workspace %d)", query.Integration, query.WorkspaceId)
 	}
 
-	results, err := s.executeFreshQuery(ctx, pctx, query, "poller_refresh")
+	results, err := s.invalidateAndExecute(ctx, pctx, query, "poller_refresh")
 	if err != nil {
 		return err
 	}
@@ -297,7 +297,7 @@ func (s *SourceService) getOrExecuteQuery(ctx context.Context, pctx *sources.Pro
 		if results, err := s.fsStore.GetQueryResults(ctx, pctx.WorkspaceId, query.Path); err == nil && len(results) > 0 && !s.shouldRefreshQueryOnAccess(query) {
 			return results, nil
 		}
-		return s.executeFreshQuery(ctx, pctx, query, "access_refresh")
+		return s.invalidateAndExecute(ctx, pctx, query, "access_refresh")
 	})
 	if err != nil {
 		return nil, err
