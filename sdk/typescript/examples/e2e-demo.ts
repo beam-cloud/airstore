@@ -160,7 +160,7 @@ async function main() {
 
     const emails = await client.fs.list(workspaceId, { path: folder.path });
     if (emails.length === 0) {
-      info('Source view is empty (may still be syncing). Trying Sources/gmail/ instead...');
+      info('Source view is empty (may still be syncing). Trying sources/gmail/ instead...');
       const gmailDir = await client.fs.list(workspaceId, { path: '/sources/gmail/' });
       for (const entry of gmailDir.slice(0, 10)) {
         console.log(`    ${entry.type === 'directory' ? '📁' : '📄'} ${entry.name}`);
