@@ -118,17 +118,27 @@ async function main() {
     }
 
     // ----------------------------------------------------------------
-    // 6. Create source view for unread emails
+    // 6. Create source views (smart + query mode)
     // ----------------------------------------------------------------
-    step(6, 'Create source view: "Unread Emails"');
+    step(6, 'Create source views');
+
+    // Smart mode — LLM infers the query from natural language
     const folder = await client.views.create(workspaceId, {
       integration: 'gmail',
       name: 'Unread Emails',
       guidance: 'Show only unread emails from the inbox',
       outputFormat: 'folder',
     });
-    ok(`Source view created at ${folder.path}`);
+    ok(`Smart view created at ${folder.path}`);
     info('View ID', folder.external_id);
+
+    // Query mode — structured filter, no LLM involved
+    const queryView = await client.views.create(workspaceId, {
+      integration: 'gmail',
+      name: 'From Boss',
+      filter: { from: 'boss@company.com', is_unread: true },
+    });
+    ok(`Query view created at ${queryView.path} (mode: ${queryView.mode})`);
 
     // ----------------------------------------------------------------
     // 7. Browse the virtual filesystem
@@ -151,7 +161,7 @@ async function main() {
     const emails = await client.fs.list(workspaceId, { path: folder.path });
     if (emails.length === 0) {
       info('Source view is empty (may still be syncing). Trying Sources/gmail/ instead...');
-      const gmailDir = await client.fs.list(workspaceId, { path: '/Sources/gmail/' });
+      const gmailDir = await client.fs.list(workspaceId, { path: '/sources/gmail/' });
       for (const entry of gmailDir.slice(0, 10)) {
         console.log(`    ${entry.type === 'directory' ? '📁' : '📄'} ${entry.name}`);
       }
@@ -167,7 +177,7 @@ async function main() {
     step(8, 'Read a file');
 
     // Find the first readable file from the source view or gmail source
-    const filesToTry = emails.length > 0 ? emails : await client.fs.list(workspaceId, { path: '/Sources/gmail/' });
+    const filesToTry = emails.length > 0 ? emails : await client.fs.list(workspaceId, { path: '/sources/gmail/' });
     const firstFile = filesToTry.find((e) => e.type !== 'directory');
 
     if (firstFile) {
@@ -192,13 +202,14 @@ async function main() {
     // ----------------------------------------------------------------
     step(9, 'Sync and list source views');
 
-    // Manually sync the view
+    // Sync re-executes the view's query and refreshes cached files.
+    // Idempotent — safe to call on a schedule or before critical reads.
     const syncResult = await client.views.sync(workspaceId, folder.external_id);
-    ok(`Synced: ${syncResult.results_count} total results, ${syncResult.new_results} new`);
+    ok(`Synced "${folder.name}": ${syncResult.results_count} total, ${syncResult.new_results} new`);
 
     const views = await client.views.list(workspaceId);
     for (const f of views) {
-      console.log(`    📂 ${f.name} → ${f.path} (${f.integration})`);
+      console.log(`    📂 ${f.name} → ${f.path} (${f.integration}, ${f.mode} mode)`);
     }
     ok(`${views.length} source view(s)`);
 

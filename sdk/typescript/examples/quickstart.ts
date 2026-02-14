@@ -29,6 +29,12 @@ await airstore.views.create(ws.external_id, {
   filter: { from: 'boss@company.com', is_unread: true },
 })
 
+// GitHub query mode with content_type for diff output
+await airstore.views.create(ws.external_id, {
+  integration: 'github', name: 'Open PRs',
+  filter: { repo: 'acme/api', type: 'prs', state: 'open', content_type: 'diff' },
+})
+
 // Browse the virtual filesystem
 const files = await airstore.fs.list(ws.external_id, { path: folder.path })
 files.forEach((f) => console.log(`${f.is_folder ? '📁' : '📄'} ${f.name}`))
