@@ -572,6 +572,40 @@ func TestStripCompressor_UnknownIntegration(t *testing.T) {
 	assertNotContains(t, got, "<b>")
 }
 
+// TestStripWeb verifies web/markdown content stripping.
+func TestStripWeb(t *testing.T) {
+	comp := NewStripCompressor(DefaultConfig())
+	ctx := context.Background()
+
+	input := "# Cocktail Recipe\n\n" +
+		"A delicious cocktail.\n\n" +
+		"https://example.com/nav/link1\n" +
+		"https://example.com/nav/link2\n" +
+		"https://example.com/nav/link3\n" +
+		"https://example.com/nav/link4\n" +
+		"https://example.com/nav/link5\n" +
+		"https://example.com/nav/link6\n" +
+		"https://example.com/nav/link7\n" +
+		"https://example.com/nav/link8\n" +
+		"https://example.com/nav/link9\n" +
+		"https://example.com/nav/link10\n" +
+		"https://example.com/nav/link11\n" +
+		"https://example.com/nav/link12\n" +
+		"\nIngredients:\n- 2 oz bourbon\n- 1 sugar cube\n"
+
+	result, err := comp.Compress(ctx, []byte(input), ContentMeta{Integration: string(types.SourceWeb)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := string(result.Data)
+	assertContains(t, got, "Cocktail Recipe")
+	assertContains(t, got, "delicious cocktail")
+	assertContains(t, got, "2 oz bourbon")
+	// URLs beyond the budget (10) should be stripped
+	assertNotContains(t, got, "link12")
+}
+
 // TestStripCompressor_EmptyContent verifies empty input doesn't panic.
 func TestStripCompressor_EmptyContent(t *testing.T) {
 	comp := NewStripCompressor(DefaultConfig())

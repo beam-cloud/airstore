@@ -528,6 +528,8 @@ func (s *SourceService) inferQuerySpec(ctx context.Context, integration, name, g
 		result, err = baml.InferLinearQuery(ctx, name, guidancePtr)
 	case types.SourcePostHog:
 		result, err = baml.InferPostHogQuery(ctx, name, guidancePtr)
+	case types.SourceWeb:
+		result, err = baml.InferWebQuery(ctx, name, guidancePtr)
 	default:
 		return "", "", fmt.Errorf("unsupported integration: %s", integration)
 	}
@@ -691,19 +693,21 @@ func formatResultsForEvaluation(results []sources.QueryResult) string {
 
 func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 	var spec struct {
-		GmailQuery     string `json:"gmail_query"`
-		GDriveQuery    string `json:"gdrive_query"`
-		NotionQuery    string `json:"notion_query"`
-		GitHubQuery    string `json:"github_query"`
-		SlackQuery     string `json:"slack_query"`
-		LinearQuery    string `json:"linear_query"`
-		PostHogQuery   string `json:"posthog_query"`
-		SearchType     string `json:"search_type"`
-		ContentType    string `json:"content_type"`
-		ProjectID      int    `json:"project_id"`
-		Limit          int    `json:"limit"`
-		MaxResults     int    `json:"max_results"`
-		FilenameFormat string `json:"filename_format"`
+		GmailQuery     string   `json:"gmail_query"`
+		GDriveQuery    string   `json:"gdrive_query"`
+		NotionQuery    string   `json:"notion_query"`
+		GitHubQuery    string   `json:"github_query"`
+		SlackQuery     string   `json:"slack_query"`
+		LinearQuery    string   `json:"linear_query"`
+		PostHogQuery   string   `json:"posthog_query"`
+		WebQuery       string   `json:"web_query"`
+		IncludePaths   []string `json:"include_paths"`
+		SearchType     string   `json:"search_type"`
+		ContentType    string   `json:"content_type"`
+		ProjectID      int      `json:"project_id"`
+		Limit          int      `json:"limit"`
+		MaxResults     int      `json:"max_results"`
+		FilenameFormat string   `json:"filename_format"`
 	}
 
 	limit := defaultPageSize
@@ -736,6 +740,8 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 		query = spec.LinearQuery
 	case types.SourcePostHog:
 		query = spec.PostHogQuery
+	case types.SourceWeb:
+		query = spec.WebQuery
 	}
 
 	filenameFormat := spec.FilenameFormat
@@ -752,6 +758,11 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 	}
 	if spec.ProjectID > 0 {
 		metadata["project_id"] = strconv.Itoa(spec.ProjectID)
+	}
+	if len(spec.IncludePaths) > 0 {
+		if pathsJSON, err := json.Marshal(spec.IncludePaths); err == nil {
+			metadata["include_paths"] = string(pathsJSON)
+		}
 	}
 
 	return sources.QuerySpec{

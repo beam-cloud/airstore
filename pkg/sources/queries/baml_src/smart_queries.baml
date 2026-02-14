@@ -50,6 +50,13 @@ class PostHogQueryResult {
   filename_format string @description("Template for result filenames. Placeholders vary by search_type.")
 }
 
+class WebQueryResult {
+  web_query string @description("The URL to crawl/map for discovering pages. Must be a valid URL starting with https://")
+  include_paths string[] @description("URL path patterns to include (e.g. /cocktails/*). Empty array = discover all paths.")
+  limit int @description("Max pages to discover (default: 100)")
+  filename_format string @description("Template for result filenames. Use {title}, {path}, {id}, {date}. Example: {title}_{id}.md")
+}
+
 // -----------------------------------------------------------------------------
 // PostHog Query Inference
 // -----------------------------------------------------------------------------
@@ -955,6 +962,66 @@ test TestPostHogSignupFunnel {
   functions [InferPostHogQuery]
   args {
     name "signup-funnel"
+    guidance null
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Web Query Inference
+// -----------------------------------------------------------------------------
+
+function InferWebQuery(name: string, guidance: string?) -> WebQueryResult {
+  client AnthropicClient
+  prompt #"
+    Convert a folder name into a web crawl configuration.
+
+    If guidance contains a URL, use it as web_query. Otherwise infer the URL from the name.
+    Use include_paths to scope the crawl when the URL points to a large site.
+    Always use https://. Default limit: 100. Default filename_format: {title}_{id}.md
+
+    EXAMPLES:
+    - "hennessy-cocktails" (guidance: "https://www.hennessy.com/en-us/cocktails")
+      → web_query: "https://www.hennessy.com/en-us/cocktails", include_paths: ["/en-us/cocktails/*"], limit: 100
+    - "react-docs"
+      → web_query: "https://react.dev/reference", include_paths: ["/reference/*"], limit: 100
+    - "python-tutorial"
+      → web_query: "https://docs.python.org/3/tutorial/", include_paths: ["/3/tutorial/*"], limit: 50
+    - "hacker-news"
+      → web_query: "https://news.ycombinator.com", include_paths: [], limit: 50
+
+    Folder name: {{ name }}
+    {% if guidance %}
+    User guidance: {{ guidance }}
+    {% endif %}
+
+    {{ ctx.output_format }}
+  "#
+}
+
+// -----------------------------------------------------------------------------
+// Web Query Tests
+// -----------------------------------------------------------------------------
+
+test TestWebQueryWithGuidance {
+  functions [InferWebQuery]
+  args {
+    name "hennessy-cocktails"
+    guidance "https://www.hennessy.com/en-us/cocktails?page=1"
+  }
+}
+
+test TestWebQueryDocs {
+  functions [InferWebQuery]
+  args {
+    name "react-docs"
+    guidance null
+  }
+}
+
+test TestWebQueryBlog {
+  functions [InferWebQuery]
+  args {
+    name "openai-blog"
     guidance null
   }
 }

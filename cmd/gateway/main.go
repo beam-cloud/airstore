@@ -24,8 +24,8 @@ func main() {
 
 	// Set ANTHROPIC_API_KEY from config for BAML inference
 	// This must happen before gateway.NewGateway() which imports the BAML package
-	if config.Anthropic.APIKey != "" {
-		os.Setenv("ANTHROPIC_API_KEY", config.Anthropic.APIKey)
+	if key := config.AnthropicAPIKey(); key != "" {
+		os.Setenv("ANTHROPIC_API_KEY", key)
 	}
 
 	gw, err := gateway.NewGateway()

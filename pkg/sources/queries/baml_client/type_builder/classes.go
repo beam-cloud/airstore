@@ -354,3 +354,47 @@ func (t *TypeBuilder) SlackQueryResult() (*SlackQueryResultClassView, error) {
 func (t *SlackQueryResultClassView) Type() (baml.Type, error) {
 	return t.inner.Type()
 }
+
+type WebQueryResultClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *WebQueryResultClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *WebQueryResultClassView) PropertyWeb_query() (ClassPropertyView, error) {
+	return t.inner.Property("web_query")
+}
+
+func (t *WebQueryResultClassView) PropertyInclude_paths() (ClassPropertyView, error) {
+	return t.inner.Property("include_paths")
+}
+
+func (t *WebQueryResultClassView) PropertyLimit() (ClassPropertyView, error) {
+	return t.inner.Property("limit")
+}
+
+func (t *WebQueryResultClassView) PropertyFilename_format() (ClassPropertyView, error) {
+	return t.inner.Property("filename_format")
+}
+
+func (t *TypeBuilder) WebQueryResult() (*WebQueryResultClassView, error) {
+	bld, err := t.inner.Class("WebQueryResult")
+	if err != nil {
+		return nil, err
+	}
+	return &WebQueryResultClassView{inner: bld}, nil
+}
+
+func (t *WebQueryResultClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}

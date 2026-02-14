@@ -35,7 +35,7 @@ func NewPostHogProvider() *PostHogProvider {
 	return &PostHogProvider{}
 }
 
-func (p *PostHogProvider) Name() string { return types.ToolPostHog.String() }
+func (p *PostHogProvider) Name() string { return types.PostHog.String() }
 
 // IsNativeBrowsable returns true — PostHog exposes a native file tree.
 func (p *PostHogProvider) IsNativeBrowsable() bool { return true }

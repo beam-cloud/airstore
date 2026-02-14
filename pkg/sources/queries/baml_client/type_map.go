@@ -37,4 +37,6 @@ var typeMap = map[string]reflect.Type{
 	"STREAM_TYPES.PostHogQueryResult":   reflect.TypeOf(stream_types.PostHogQueryResult{}),
 	"TYPES.SlackQueryResult":            reflect.TypeOf(types.SlackQueryResult{}),
 	"STREAM_TYPES.SlackQueryResult":     reflect.TypeOf(stream_types.SlackQueryResult{}),
+	"TYPES.WebQueryResult":              reflect.TypeOf(types.WebQueryResult{}),
+	"STREAM_TYPES.WebQueryResult":       reflect.TypeOf(stream_types.WebQueryResult{}),
 }

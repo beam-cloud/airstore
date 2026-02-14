@@ -104,6 +104,8 @@ func (s *StripCompressor) Compress(ctx context.Context, content []byte, meta Con
 		data = stripNotion(data)
 	case types.SourceLinear:
 		data = stripLinear(data)
+	case types.SourceWeb:
+		data = stripWeb(data)
 	default:
 		data = stripURLOnlyLines(data, 10)
 	}
@@ -171,6 +173,10 @@ func stripNotion(data []byte) []byte {
 
 func stripLinear(data []byte) []byte {
 	return reLinearMeta.ReplaceAll(data, nil)
+}
+
+func stripWeb(data []byte) []byte {
+	return stripURLOnlyLines(data, 10)
 }
 
 // stripNullBytes removes 0x00 padding from FUSE read buffers.

@@ -27,7 +27,7 @@ type ToolProvider interface {
 
 // ToolClient is implemented by tool backends
 type ToolClient interface {
-	Name() types.ToolName
+	Name() types.IntegrationName
 	Execute(ctx context.Context, command string, args map[string]any, creds *types.IntegrationCredentials, stdout, stderr io.Writer) error
 }
 

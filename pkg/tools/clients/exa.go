@@ -38,8 +38,8 @@ func NewExaClient(apiKey string) *ExaClient {
 }
 
 // Name returns the tool identifier - implements ToolClient interface
-func (e *ExaClient) Name() types.ToolName {
-	return types.ToolExa
+func (e *ExaClient) Name() types.IntegrationName {
+	return types.Exa
 }
 
 // Execute runs an Exa command - implements ToolClient interface

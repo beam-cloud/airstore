@@ -13,13 +13,13 @@ import (
 
 // ClientRegistry holds registered tool clients that can be paired with schemas
 type ClientRegistry struct {
-	clients map[types.ToolName]ToolClient
+	clients map[types.IntegrationName]ToolClient
 }
 
 // NewClientRegistry creates a new client registry
 func NewClientRegistry() *ClientRegistry {
 	return &ClientRegistry{
-		clients: make(map[types.ToolName]ToolClient),
+		clients: make(map[types.IntegrationName]ToolClient),
 	}
 }
 
@@ -30,7 +30,7 @@ func (r *ClientRegistry) Register(client ToolClient) {
 
 // Get returns a client by name
 func (r *ClientRegistry) Get(name string) (ToolClient, bool) {
-	client, ok := r.clients[types.ToolName(name)]
+	client, ok := r.clients[types.IntegrationName(name)]
 	return client, ok
 }
 

@@ -39,8 +39,8 @@ func NewWeatherClient(apiKey string) *WeatherClient {
 }
 
 // Name returns the tool identifier - implements ToolClient interface
-func (w *WeatherClient) Name() types.ToolName {
-	return types.ToolWeather
+func (w *WeatherClient) Name() types.IntegrationName {
+	return types.Weather
 }
 
 // Execute runs a Weather command - implements ToolClient interface
