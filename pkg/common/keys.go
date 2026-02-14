@@ -8,9 +8,9 @@ import (
 
 var (
 	// Filesystem VNode metadata keys (used by FUSE layer)
-	filesystemDirAccess  string = "filesystem:dir:access:%s:%s" // pid, name
-	filesystemDirContent string = "filesystem:dir:content:%s"   // id
-	filesystemFile       string = "filesystem:file:%s:%s"       // pid, name
+	filesystemDirAccess  string = "airstore:filesystem:dir:access:%s:%s" // pid, name
+	filesystemDirContent string = "airstore:filesystem:dir:content:%s"   // id
+	filesystemFile       string = "airstore:filesystem:file:%s:%s"       // pid, name
 
 	// Filesystem store cache keys (used by FilesystemStore)
 	fsDirMeta     string = "airstore:fs:dir:%s"   // pathHash
@@ -19,30 +19,32 @@ var (
 	fsDirChildren string = "airstore:fs:ls:%s"    // pathHash
 	fsQueryResult string = "airstore:qr:%d:%s"    // workspaceId, pathHash
 	fsResultBody  string = "airstore:rc:%d:%s:%s" // workspaceId, pathHash, resultId
+	fsResultIndex string = "airstore:idx:rc:%d:%s"
+	fsCompIndex   string = "airstore:idx:cc:%d:%s"
 
 	// Session keys
-	sessionState string = "session:state:%s" // sessionId
-	sessionLock  string = "session:lock:%s"  // sessionId
-	sessionIndex string = "session:index"
+	sessionState string = "airstore:session:state:%s" // sessionId
+	sessionLock  string = "airstore:session:lock:%s"  // sessionId
+	sessionIndex string = "airstore:session:index"
 
 	// Scheduler keys
-	schedulerWorkerState string = "scheduler:worker:state:%s" // workerId
-	schedulerWorkerLock  string = "scheduler:worker:lock:%s"  // workerId
-	schedulerWorkerIndex string = "scheduler:worker:index"
+	schedulerWorkerState string = "airstore:scheduler:worker:state:%s" // workerId
+	schedulerWorkerLock  string = "airstore:scheduler:worker:lock:%s"  // workerId
+	schedulerWorkerIndex string = "airstore:scheduler:worker:index"
 
 	// Gateway keys
-	gatewayInitLock string = "gateway:init:%s:lock" // name
+	gatewayInitLock string = "airstore:gateway:init:%s:lock" // name
 
 	// Network keys
-	networkIPLock string = "network:ip:lock"
-	networkIPPool string = "network:pool"
-	networkIPMap  string = "network:mapping"
+	networkIPLock string = "airstore:network:ip:lock"
+	networkIPPool string = "airstore:network:pool"
+	networkIPMap  string = "airstore:network:mapping"
 
 	// Hook keys
-	hookStream        string = "hook:events"
-	hookConsumerGroup string = "hook-evaluators"
-	hookSeen          string = "hook:seen:%d:%s" // workspaceId, pathHash
-	hookPollLock      string = "hook:poll:%s"    // queryExternalId
+	hookStream        string = "airstore:hook:events"
+	hookConsumerGroup string = "airstore:hook:evaluators"
+	hookSeen          string = "airstore:hook:seen:%d:%s" // workspaceId, pathHash
+	hookPollLock      string = "airstore:hook:poll:%s"    // queryExternalId
 
 	// Compression keys — include strategy so each compressor caches independently
 	fsCompressedPointer string = "airstore:compressed:%d:%s:%s:%s" // workspaceId, pathHash, resultId, strategy
@@ -92,6 +94,18 @@ func (rk *redisKeys) FsQueryResult(workspaceId uint, path string) string {
 
 func (rk *redisKeys) FsResultBody(workspaceId uint, path, resultId string) string {
 	return fmt.Sprintf(fsResultBody, workspaceId, types.GeneratePathID(path), resultId)
+}
+
+// FsResultBodyIndex returns the set key that tracks all result-content cache
+// keys for a workspace + query path.
+func (rk *redisKeys) FsResultBodyIndex(workspaceId uint, path string) string {
+	return fmt.Sprintf(fsResultIndex, workspaceId, types.GeneratePathID(path))
+}
+
+// FsCompressedIndex returns the set key that tracks all compressed cache keys
+// (pointer + content) for a workspace + query path.
+func (rk *redisKeys) FsCompressedIndex(workspaceId uint, path string) string {
+	return fmt.Sprintf(fsCompIndex, workspaceId, types.GeneratePathID(path))
 }
 
 // Session keys

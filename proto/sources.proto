@@ -145,6 +145,7 @@ message SourceView {
   int64 updated_at = 11;
   string mode = 12;            // "smart" or "query"
   string filter = 13;          // JSON structured filter (for query mode, enables round-trip editing)
+  int64 last_executed = 14;    // Unix timestamp of last query execution (0 = never)
 }
 
 // CreateView - creates a view from a folder/file name via LLM inference or structured filter

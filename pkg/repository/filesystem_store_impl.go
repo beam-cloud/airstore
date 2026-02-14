@@ -547,6 +547,8 @@ func (s *filesystemStore) StoreResultContent(ctx context.Context, workspaceId ui
 	if err := s.redis.Set(ctx, cacheKey, content, contentTTL).Err(); err != nil {
 		// Log but don't fail
 	}
+	// Track cache key in an index for O(1) invalidation by query path.
+	s.addIndexMember(ctx, common.Keys.FsResultBodyIndex(workspaceId, queryPath), cacheKey, contentTTL*2)
 
 	// Index in Elasticsearch if available
 	if s.elastic != nil {
@@ -916,11 +918,17 @@ func (s *filesystemStore) InvalidateQuery(ctx context.Context, workspaceId uint,
 		return nil
 	}
 
-	// Invalidate Redis cache
-	pattern := common.Keys.FsQueryResult(workspaceId, queryPath)
-	if err := s.redis.Del(ctx, pattern).Err(); err != nil {
+	// Invalidate Redis results listing cache
+	listingKey := common.Keys.FsQueryResult(workspaceId, queryPath)
+	if err := s.redis.Del(ctx, listingKey).Err(); err != nil {
 		// Log but continue
 	}
+
+	// Invalidate indexed result-content keys for this path.
+	s.deleteIndexedKeys(ctx, common.Keys.FsResultBodyIndex(workspaceId, queryPath))
+
+	// Invalidate indexed compressed keys (pointer + content) for this path.
+	s.deleteIndexedKeys(ctx, common.Keys.FsCompressedIndex(workspaceId, queryPath))
 
 	// Delete from Elasticsearch if available
 	if s.elastic != nil {
@@ -935,6 +943,37 @@ func (s *filesystemStore) InvalidateQuery(ctx context.Context, workspaceId uint,
 	}
 
 	return nil
+}
+
+const indexDeleteBatchSize = 500
+
+// addIndexMember best-effort adds a cache key to a Redis set index and extends
+// index TTL so it outlives members slightly (helpful for eager invalidation).
+func (s *filesystemStore) addIndexMember(ctx context.Context, indexKey, member string, ttl time.Duration) {
+	if err := s.redis.SAdd(ctx, indexKey, member).Err(); err != nil {
+		return
+	}
+	if ttl > 0 {
+		_ = s.redis.Expire(ctx, indexKey, ttl).Err()
+	}
+}
+
+// deleteIndexedKeys deletes all keys currently referenced by an index set,
+// then deletes the set itself. Best-effort by design.
+func (s *filesystemStore) deleteIndexedKeys(ctx context.Context, indexKey string) {
+	keys, err := s.redis.SMembers(ctx, indexKey).Result()
+	if err != nil {
+		_ = s.redis.Del(ctx, indexKey).Err()
+		return
+	}
+	for i := 0; i < len(keys); i += indexDeleteBatchSize {
+		end := i + indexDeleteBatchSize
+		if end > len(keys) {
+			end = len(keys)
+		}
+		_ = s.redis.Del(ctx, keys[i:end]...).Err()
+	}
+	_ = s.redis.Del(ctx, indexKey).Err()
 }
 
 // parentPath returns the parent directory of a path

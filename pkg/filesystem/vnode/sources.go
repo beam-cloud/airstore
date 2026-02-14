@@ -40,44 +40,8 @@ import (
 )
 
 const sourcesTimeout = 30 * time.Second
-const resultsCacheTTL = 45 * time.Second           // Cache query results to avoid repeated API calls (max staleness)
-const resultsCacheRefreshAge = 30 * time.Second    // Trigger background refresh when cache older than this
-const backgroundRefreshInterval = 15 * time.Second // Background cache refresh interval
+
 const queryMetaName = ".query.as"
-
-// cachedQueryResult holds cached query execution results
-type cachedQueryResult struct {
-	entries   []*pb.SourceDirEntry
-	expiresAt time.Time
-	cachedAt  time.Time // When this entry was cached (for refresh triggering)
-}
-
-// cachedQuery holds a cached query definition
-type cachedQuery struct {
-	query     *types.SourceView
-	expiresAt time.Time
-}
-
-// cachedIntegration holds cached integration metadata
-type cachedIntegration struct {
-	mtime     int64
-	expiresAt time.Time
-}
-
-// cachedStat holds cached stat metadata for a path
-type cachedStat struct {
-	info      *FileInfo
-	expiresAt time.Time
-}
-
-// cachedContent holds open file content with a reference count.
-type cachedContent struct {
-	data     []byte
-	hint     *pb.SourceReadCostHint
-	cachedAt time.Time
-	fetchMs  int64 // how long the content fetch took (ms)
-	refs     int
-}
 
 // SourcesVNode handles /sources/ - both native content and source views.
 // SourcesVNodeOption configures optional fields on a SourcesVNode.
@@ -403,6 +367,7 @@ func (v *SourcesVNode) Readdir(path string) ([]DirEntry, error) {
 	// Is this a source view folder? Execute it.
 	if q := v.getQuery(ctx, path); q != nil {
 		if q.OutputFormat == types.ViewOutputFolder {
+			v.trackRecentDir(path)
 			return v.executeQueryAsDir(ctx, q)
 		}
 	}
@@ -488,8 +453,9 @@ func (v *SourcesVNode) executeQueryAsDir(ctx context.Context, q *types.SourceVie
 		Mtime: queryMtime,
 	}}
 
-	// Check cache first
-	if cached := v.getCachedResults(q.Path); cached != nil {
+	// Check cache first. If the view was synced (LastExecuted) after the cache was
+	// populated, skip the cache so we pick up fresh results from the gateway.
+	if cached := v.getCachedResultsIfFresh(q); cached != nil {
 		for _, e := range cached {
 			childPath := q.Path + "/" + e.Name
 			entries = append(entries, DirEntry{
@@ -900,20 +866,7 @@ func (v *SourcesVNode) Mkdir(path string, mode uint32) error {
 	}
 
 	// Cache the newly created query so subsequent Getattr calls can find it immediately
-	query := &types.SourceView{
-		ExternalId:   resp.View.ExternalId,
-		Integration:  resp.View.Integration,
-		Path:         resp.View.Path,
-		Name:         resp.View.Name,
-		QuerySpec:    resp.View.QuerySpec,
-		Guidance:     resp.View.Guidance,
-		OutputFormat: types.ViewOutputFormat(resp.View.OutputFormat),
-		FileExt:      resp.View.FileExt,
-		CacheTTL:     int(resp.View.CacheTtl),
-		CreatedAt:    time.Unix(resp.View.CreatedAt, 0),
-		UpdatedAt:    time.Unix(resp.View.UpdatedAt, 0),
-	}
-	v.setCachedQuery(path, query)
+	v.setCachedQuery(path, protoToSourceView(resp.View))
 
 	log.Info().Str("path", path).Str("query", resp.View.QuerySpec).Msg("created source view")
 	return nil
@@ -949,20 +902,7 @@ func (v *SourcesVNode) Create(path string, flags int, mode uint32) (FileHandle, 
 	}
 
 	// Cache the newly created query so subsequent Getattr calls can find it immediately
-	query := &types.SourceView{
-		ExternalId:   resp.View.ExternalId,
-		Integration:  resp.View.Integration,
-		Path:         resp.View.Path,
-		Name:         resp.View.Name,
-		QuerySpec:    resp.View.QuerySpec,
-		Guidance:     resp.View.Guidance,
-		OutputFormat: types.ViewOutputFormat(resp.View.OutputFormat),
-		FileExt:      resp.View.FileExt,
-		CacheTTL:     int(resp.View.CacheTtl),
-		CreatedAt:    time.Unix(resp.View.CreatedAt, 0),
-		UpdatedAt:    time.Unix(resp.View.UpdatedAt, 0),
-	}
-	v.setCachedQuery(path, query)
+	v.setCachedQuery(path, protoToSourceView(resp.View))
 
 	log.Info().Str("path", path).Str("query", resp.View.QuerySpec).Msg("created source view file")
 	return 0, nil
@@ -974,41 +914,29 @@ func (v *SourcesVNode) Readlink(path string) (string, error) {
 	return "", fs.ErrNotExist
 }
 
-// getQuery retrieves a source view by path, returns nil if not found.
-// Uses local cache to avoid repeated GetView RPCs.
-func (v *SourcesVNode) getQuery(ctx context.Context, path string) *types.SourceView {
-	// Check cache first
-	if cached, found := v.getCachedQuery(path); found {
-		return cached
-	}
-
-	resp, err := v.client.GetView(ctx, &pb.GetViewRequest{Path: path})
-	if err != nil {
+// protoToSourceView converts a proto SourceView to the internal SourceView type.
+func protoToSourceView(v *pb.SourceView) *types.SourceView {
+	if v == nil {
 		return nil
 	}
-
-	if resp == nil || !resp.Ok || resp.View == nil {
-		// Cache negative result too (path is not a query)
-		v.setCachedQuery(path, nil)
-		return nil
+	q := &types.SourceView{
+		ExternalId:   v.ExternalId,
+		Integration:  v.Integration,
+		Path:         v.Path,
+		Name:         v.Name,
+		QuerySpec:    v.QuerySpec,
+		Guidance:     v.Guidance,
+		OutputFormat: types.ViewOutputFormat(v.OutputFormat),
+		FileExt:      v.FileExt,
+		CacheTTL:     int(v.CacheTtl),
+		CreatedAt:    time.Unix(v.CreatedAt, 0),
+		UpdatedAt:    time.Unix(v.UpdatedAt, 0),
 	}
-
-	query := &types.SourceView{
-		ExternalId:   resp.View.ExternalId,
-		Integration:  resp.View.Integration,
-		Path:         resp.View.Path,
-		Name:         resp.View.Name,
-		QuerySpec:    resp.View.QuerySpec,
-		Guidance:     resp.View.Guidance,
-		OutputFormat: types.ViewOutputFormat(resp.View.OutputFormat),
-		FileExt:      resp.View.FileExt,
-		CacheTTL:     int(resp.View.CacheTtl),
-		CreatedAt:    time.Unix(resp.View.CreatedAt, 0),
-		UpdatedAt:    time.Unix(resp.View.UpdatedAt, 0),
+	if v.LastExecuted != 0 {
+		t := time.Unix(v.LastExecuted, 0)
+		q.LastExecuted = &t
 	}
-
-	v.setCachedQuery(path, query)
-	return query
+	return q
 }
 
 // defaultUnknownFileSize is used when file size is unknown.
@@ -1025,48 +953,6 @@ func listingSize(size int64) int64 {
 	return size
 }
 
-func (v *SourcesVNode) getQueryResultMeta(ctx context.Context, queryPath, filename string) (size int64, mtime int64, ok bool) {
-	// Check local cache first (populated by executeQueryAsDir during Readdir)
-	if cached := v.getCachedResultsNoRefresh(queryPath); cached != nil {
-		for _, e := range cached {
-			if e.Name == filename {
-				size = e.Size
-				if size <= 0 {
-					size = defaultUnknownFileSize
-				}
-				return size, e.Mtime, true
-			}
-		}
-	}
-
-	// Cache miss - execute query via RPC (should be cached on gateway side)
-	resp, err := v.client.ExecuteView(ctx, &pb.ExecuteViewRequest{Path: queryPath})
-	if err != nil {
-		log.Warn().Err(err).Str("path", queryPath).Msg("getQueryResultMeta RPC failed")
-		return 0, 0, false
-	}
-	if resp == nil || !resp.Ok {
-		log.Warn().Str("path", queryPath).Str("error", resp.GetError()).Msg("getQueryResultMeta RPC returned not ok")
-		return 0, 0, false
-	}
-
-	// Cache the results for future lookups
-	v.setCachedResults(queryPath, resp.Entries)
-
-	// Find matching entry
-	for _, e := range resp.Entries {
-		if e.Name == filename {
-			size = e.Size
-			if size <= 0 {
-				size = defaultUnknownFileSize
-			}
-			return size, e.Mtime, true
-		}
-	}
-
-	return 0, 0, false
-}
-
 func (v *SourcesVNode) protoToFileInfo(path string, info *pb.SourceFileInfo) *FileInfo {
 	now := time.Now()
 	mtime := now
@@ -1078,396 +964,5 @@ func (v *SourcesVNode) protoToFileInfo(path string, info *pb.SourceFileInfo) *Fi
 		Ino: PathIno(path), Size: info.Size, Mode: info.Mode, Nlink: 1,
 		Uid: uid, Gid: gid,
 		Atime: now, Mtime: mtime, Ctime: mtime,
-	}
-}
-
-// getCachedResults retrieves cached query results if still valid.
-// If the cache is older than resultsCacheRefreshAge, triggers a background refresh
-// while still returning the cached data (stale-while-revalidate pattern).
-func (v *SourcesVNode) getCachedResults(queryPath string) []*pb.SourceDirEntry {
-	v.resultsMu.RLock()
-	defer v.resultsMu.RUnlock()
-
-	if cached, ok := v.results[queryPath]; ok && time.Now().Before(cached.expiresAt) {
-		// If cache is older than refresh threshold, trigger background refresh
-		// This ensures new entries appear within ~45s + kernel timeout (1s) = 46s < 60s
-		if time.Since(cached.cachedAt) > resultsCacheRefreshAge {
-			go v.triggerQueryRefresh(queryPath)
-		}
-		return cached.entries
-	}
-	return nil
-}
-
-// getCachedResultsNoRefresh returns cached results without triggering refresh.
-func (v *SourcesVNode) getCachedResultsNoRefresh(queryPath string) []*pb.SourceDirEntry {
-	v.resultsMu.RLock()
-	defer v.resultsMu.RUnlock()
-
-	if cached, ok := v.results[queryPath]; ok && time.Now().Before(cached.expiresAt) {
-		return cached.entries
-	}
-	return nil
-}
-
-// triggerQueryRefresh refreshes the query results in the background
-func (v *SourcesVNode) triggerQueryRefresh(queryPath string) {
-	ctx, cancel := v.ctx()
-	defer cancel()
-
-	resp, err := v.client.ExecuteView(ctx, &pb.ExecuteViewRequest{Path: queryPath})
-	if err != nil || !resp.Ok {
-		return
-	}
-
-	v.setCachedResults(queryPath, resp.Entries)
-}
-
-// setCachedResults stores query results in the cache
-func (v *SourcesVNode) setCachedResults(queryPath string, entries []*pb.SourceDirEntry) {
-	v.resultsMu.Lock()
-	defer v.resultsMu.Unlock()
-
-	now := time.Now()
-	v.results[queryPath] = &cachedQueryResult{
-		entries:   entries,
-		expiresAt: now.Add(resultsCacheTTL),
-		cachedAt:  now,
-	}
-}
-
-// getCachedQuery retrieves cached query definition if still valid
-// Returns (query, true) if found in cache, (nil, false) if not found
-func (v *SourcesVNode) getCachedQuery(path string) (*types.SourceView, bool) {
-	v.queriesMu.RLock()
-	defer v.queriesMu.RUnlock()
-
-	if cached, ok := v.queries[path]; ok && time.Now().Before(cached.expiresAt) {
-		return cached.query, true // query may be nil (negative cache)
-	}
-	return nil, false
-}
-
-// setCachedQuery stores view definition in the cache (nil for negative cache).
-func (v *SourcesVNode) setCachedQuery(path string, query *types.SourceView) {
-	v.queriesMu.Lock()
-	defer v.queriesMu.Unlock()
-
-	v.queries[path] = &cachedQuery{
-		query:     query,
-		expiresAt: time.Now().Add(resultsCacheTTL),
-	}
-}
-
-// Integration cache helpers
-
-func (v *SourcesVNode) getCachedIntegration(name string) *cachedIntegration {
-	v.integrationsMu.RLock()
-	defer v.integrationsMu.RUnlock()
-
-	if cached, ok := v.integrations[name]; ok && time.Now().Before(cached.expiresAt) {
-		return cached
-	}
-	return nil
-}
-
-func (v *SourcesVNode) setCachedIntegration(name string, mtime int64) {
-	v.integrationsMu.Lock()
-	defer v.integrationsMu.Unlock()
-
-	v.integrations[name] = &cachedIntegration{
-		mtime:     mtime,
-		expiresAt: time.Now().Add(resultsCacheTTL),
-	}
-}
-
-// Stat cache helpers
-
-func (v *SourcesVNode) getCachedStat(path string) *FileInfo {
-	v.statsMu.RLock()
-	defer v.statsMu.RUnlock()
-
-	if cached, ok := v.stats[path]; ok && time.Now().Before(cached.expiresAt) && cached.info != nil {
-		// Return a copy to avoid mutation
-		info := *cached.info
-		return &info
-	}
-	return nil
-}
-
-func (v *SourcesVNode) setCachedStat(path string, info *FileInfo) {
-	v.statsMu.Lock()
-	defer v.statsMu.Unlock()
-
-	v.stats[path] = &cachedStat{
-		info:      info,
-		expiresAt: time.Now().Add(resultsCacheTTL),
-	}
-}
-
-// Open content cache helpers
-
-func (v *SourcesVNode) getOpenContent(path string) ([]byte, *pb.SourceReadCostHint, bool) {
-	v.openMu.RLock()
-	defer v.openMu.RUnlock()
-
-	if cached, ok := v.openContent[path]; ok {
-		return cached.data, cloneCostHint(cached.hint), true
-	}
-	return nil, nil, false
-}
-
-func (v *SourcesVNode) getOpenContentWithFetchMs(path string) ([]byte, *pb.SourceReadCostHint, int64, bool) {
-	v.openMu.RLock()
-	defer v.openMu.RUnlock()
-
-	if cached, ok := v.openContent[path]; ok {
-		return cached.data, cloneCostHint(cached.hint), cached.fetchMs, true
-	}
-	return nil, nil, 0, false
-}
-
-func (v *SourcesVNode) addOpenContent(path string, data []byte, hint *pb.SourceReadCostHint) FileHandle {
-	return v.addOpenContentWithFetchMs(path, data, hint, 0)
-}
-
-func (v *SourcesVNode) addOpenContentWithFetchMs(path string, data []byte, hint *pb.SourceReadCostHint, fetchMs int64) FileHandle {
-	v.openMu.Lock()
-	defer v.openMu.Unlock()
-
-	fh := v.nextHandle
-	v.nextHandle++
-	v.openHandles[fh] = path
-
-	if cached, ok := v.openContent[path]; ok {
-		cached.refs++
-		if data != nil {
-			cached.data = data
-			cached.hint = cloneCostHint(hint)
-			cached.cachedAt = time.Now()
-			cached.fetchMs = fetchMs
-		}
-		return fh
-	}
-
-	v.openContent[path] = &cachedContent{
-		data:     data,
-		hint:     cloneCostHint(hint),
-		cachedAt: time.Now(),
-		fetchMs:  fetchMs,
-		refs:     1,
-	}
-	return fh
-}
-
-func (v *SourcesVNode) retainOpenContent(path string) ([]byte, *pb.SourceReadCostHint, FileHandle, bool) {
-	v.openMu.Lock()
-	defer v.openMu.Unlock()
-
-	cached, ok := v.openContent[path]
-	if !ok {
-		return nil, nil, 0, false
-	}
-
-	// Don't reuse stale prefetched entries; let Open fetch fresh content.
-	if cached.refs == 0 && time.Since(cached.cachedAt) > prefetchTTL {
-		delete(v.openContent, path)
-		return nil, nil, 0, false
-	}
-
-	fh := v.nextHandle
-	v.nextHandle++
-	v.openHandles[fh] = path
-	cached.refs++
-	return cached.data, cloneCostHint(cached.hint), fh, true
-}
-
-func (v *SourcesVNode) releaseOpenContent(fh FileHandle) {
-	if fh == 0 {
-		return
-	}
-
-	v.openMu.Lock()
-	defer v.openMu.Unlock()
-
-	path, ok := v.openHandles[fh]
-	if !ok {
-		return
-	}
-	delete(v.openHandles, fh)
-
-	if cached, ok := v.openContent[path]; ok {
-		if cached.refs > 1 {
-			cached.refs--
-			return
-		}
-		delete(v.openContent, path)
-	}
-}
-
-// prefetchTTL is how long a prefetched entry (refs=0) survives without being
-// opened. Prevents unbounded accumulation from directory listings.
-const prefetchTTL = 30 * time.Second
-
-// prefetchContent stores content in the open content cache without creating a
-// file handle. Used by Getattr to pre-fetch content for accurate size reporting.
-// Open's retainOpenContent will find and reuse this cached content.
-//
-// Stale prefetched entries (refs=0, older than prefetchTTL) are lazily evicted
-// on each call to avoid unbounded memory growth from directory listings.
-func (v *SourcesVNode) prefetchContent(path string, data []byte, hint *pb.SourceReadCostHint) {
-	v.openMu.Lock()
-	defer v.openMu.Unlock()
-
-	// Lazy eviction: remove stale prefetched entries that were never opened.
-	now := time.Now()
-	for p, c := range v.openContent {
-		if c.refs == 0 && now.Sub(c.cachedAt) > prefetchTTL {
-			delete(v.openContent, p)
-		}
-	}
-
-	if _, ok := v.openContent[path]; !ok {
-		v.openContent[path] = &cachedContent{
-			data:     data,
-			hint:     cloneCostHint(hint),
-			cachedAt: now,
-			refs:     0, // No active Open; retainOpenContent increments to 1
-		}
-	}
-}
-
-func (v *SourcesVNode) applyOpenContentSize(path string, info *FileInfo) {
-	if info == nil {
-		return
-	}
-	if data, _, ok := v.getOpenContent(path); ok {
-		info.Size = int64(len(data))
-	}
-}
-
-// cacheStatFromEntry creates and caches a FileInfo from a SourceDirEntry
-func (v *SourcesVNode) cacheStatFromEntry(path string, e *pb.SourceDirEntry) {
-	if e == nil {
-		return
-	}
-
-	ino := PathIno(path)
-	var info *FileInfo
-	if e.IsDir {
-		info = NewDirInfo(ino)
-	} else {
-		info = NewFileInfo(ino, e.Size, e.Mode&0777)
-	}
-	info.Mode = e.Mode
-	info.Size = e.Size
-
-	if e.Mtime > 0 {
-		t := time.Unix(e.Mtime, 0)
-		info.Atime, info.Mtime, info.Ctime = t, t, t
-	}
-
-	v.setCachedStat(path, info)
-}
-
-// Background refresh
-
-// trackRecentDir records a directory as recently accessed for background refresh
-func (v *SourcesVNode) trackRecentDir(path string) {
-	v.recentDirsMu.Lock()
-	v.recentDirs[path] = time.Now()
-	v.recentDirsMu.Unlock()
-}
-
-// getRecentDirs returns directories accessed in the last 2 minutes
-func (v *SourcesVNode) getRecentDirs() []string {
-	v.recentDirsMu.RLock()
-	defer v.recentDirsMu.RUnlock()
-
-	cutoff := time.Now().Add(-2 * time.Minute)
-	dirs := make([]string, 0, len(v.recentDirs))
-	for path, accessed := range v.recentDirs {
-		if accessed.After(cutoff) {
-			dirs = append(dirs, path)
-		}
-	}
-	return dirs
-}
-
-// cleanupOldRecentDirs removes directories not accessed recently
-func (v *SourcesVNode) cleanupOldRecentDirs() {
-	v.recentDirsMu.Lock()
-	defer v.recentDirsMu.Unlock()
-
-	cutoff := time.Now().Add(-5 * time.Minute)
-	for path, accessed := range v.recentDirs {
-		if accessed.Before(cutoff) {
-			delete(v.recentDirs, path)
-		}
-	}
-}
-
-// backgroundRefreshLoop periodically refreshes caches for frequently accessed paths
-func (v *SourcesVNode) backgroundRefreshLoop() {
-	ticker := time.NewTicker(backgroundRefreshInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-v.stopRefresh:
-			return
-		case <-ticker.C:
-			v.doBackgroundRefresh()
-		}
-	}
-}
-
-// doBackgroundRefresh refreshes integration list and recently accessed directories
-func (v *SourcesVNode) doBackgroundRefresh() {
-	ctx, cancel := v.ctx()
-	defer cancel()
-
-	// Always refresh integration list (cheap, high value)
-	v.refreshIntegrations(ctx)
-
-	// Refresh recently accessed directories
-	for _, path := range v.getRecentDirs() {
-		integration, subpath := v.parsePath(path)
-		if integration != "" && subpath == "" {
-			// This is an integration root like /sources/gmail
-			v.refreshIntegrationDir(ctx, path, integration)
-		}
-	}
-
-	// Cleanup old tracking data
-	v.cleanupOldRecentDirs()
-}
-
-// refreshIntegrations refreshes the integration list cache
-func (v *SourcesVNode) refreshIntegrations(ctx context.Context) {
-	resp, err := v.client.ReadDir(ctx, &pb.SourceReadDirRequest{Path: ""})
-	if err != nil || !resp.Ok {
-		return
-	}
-
-	for _, e := range resp.Entries {
-		if e.IsDir {
-			childPath := SourcesPath + "/" + e.Name
-			v.setCachedIntegration(e.Name, e.Mtime)
-			v.cacheStatFromEntry(childPath, e)
-		}
-	}
-}
-
-// refreshIntegrationDir refreshes the cache for an integration directory
-func (v *SourcesVNode) refreshIntegrationDir(ctx context.Context, path, integration string) {
-	resp, err := v.client.ReadDir(ctx, &pb.SourceReadDirRequest{Path: integration})
-	if err != nil || resp == nil || !resp.Ok {
-		return
-	}
-
-	for _, e := range resp.Entries {
-		childPath := path + "/" + e.Name
-		v.cacheStatFromEntry(childPath, e)
 	}
 }

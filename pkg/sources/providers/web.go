@@ -94,22 +94,34 @@ func (w *WebProvider) ExecuteQuery(ctx context.Context, _ *sources.ProviderConte
 
 	mode := spec.Metadata["web_mode"] // "map" or "search"
 	limit := clamp(spec.Limit, 1, 500, 100)
+	siteURL, siteURLErr := url.ParseRequestURI(spec.Query)
+	isURLQuery := siteURLErr == nil
 
 	var links []mapLink
 	var err error
+
+	// Smart query inference can occasionally emit web_mode=search even when the
+	// query is clearly a URL. Force URL queries through map mode for predictable
+	// crawl semantics.
+	if mode == "search" && isURLQuery {
+		mode = "map"
+	}
 
 	switch mode {
 	case "search":
 		links, err = w.searchWeb(ctx, spec.Query, limit)
 	default: // "map" or unset
-		if _, e := url.ParseRequestURI(spec.Query); e != nil {
-			return nil, fmt.Errorf("invalid URL %q: %w", spec.Query, e)
+		if !isURLQuery {
+			return nil, fmt.Errorf("invalid URL %q: %w", spec.Query, siteURLErr)
 		}
 		var includePaths []string
 		if raw := spec.Metadata["include_paths"]; raw != "" {
 			json.Unmarshal([]byte(raw), &includePaths) // best-effort
 		}
 		links, err = w.mapURLs(ctx, spec.Query, limit, includePaths)
+		// Firecrawl map responses can include off-site links depending on crawl
+		// topology. Keep only same-site URLs for map mode.
+		links = filterLinksToSite(siteURL, links)
 	}
 	if err != nil {
 		return nil, err
@@ -159,6 +171,37 @@ func (w *WebProvider) ExecuteQuery(ctx context.Context, _ *sources.ProviderConte
 		})
 	}
 	return &sources.QueryResponse{Results: results}, nil
+}
+
+// filterLinksToSite keeps only links that match the queried host (allowing a
+// common www/non-www variant). This prevents off-site leakage in map mode.
+func filterLinksToSite(siteURL *url.URL, links []mapLink) []mapLink {
+	if siteURL == nil {
+		return links
+	}
+	host := strings.ToLower(siteURL.Hostname())
+	if host == "" {
+		return links
+	}
+
+	allowed := map[string]struct{}{host: {}}
+	if strings.HasPrefix(host, "www.") {
+		allowed[strings.TrimPrefix(host, "www.")] = struct{}{}
+	} else {
+		allowed["www."+host] = struct{}{}
+	}
+
+	out := make([]mapLink, 0, len(links))
+	for _, link := range links {
+		u, err := url.Parse(link.URL)
+		if err != nil {
+			continue
+		}
+		if _, ok := allowed[strings.ToLower(u.Hostname())]; ok {
+			out = append(out, link)
+		}
+	}
+	return out
 }
 
 // ReadResult scrapes a single page and returns its markdown content.
@@ -227,7 +270,11 @@ type scrapeResult struct {
 
 // mapURLs discovers pages on a website via Firecrawl /map.
 func (w *WebProvider) mapURLs(ctx context.Context, siteURL string, limit int, includePaths []string) ([]mapLink, error) {
-	payload := map[string]any{"url": siteURL, "limit": limit}
+	payload := map[string]any{
+		"url":         siteURL,
+		"limit":       limit,
+		"ignoreCache": true, // bypass Firecrawl sitemap cache (up to 7 days); we cache on our end
+	}
 	if len(includePaths) > 0 {
 		payload["includePaths"] = includePaths
 	}
@@ -283,6 +330,7 @@ func (w *WebProvider) scrape(ctx context.Context, pageURL string) (*scrapeResult
 		"skipTlsVerification": true,
 		"removeBase64Images":  true,
 		"excludeTags":         []string{"img", "picture", "video", "svg", "figure"},
+		"maxAge":              0, // bypass Firecrawl cache; we cache on our end
 	}, &resp)
 	if err != nil {
 		return nil, err

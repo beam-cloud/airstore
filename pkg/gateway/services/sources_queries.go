@@ -45,6 +45,15 @@ func (s *SourceService) InvalidateQueryCache(ctx context.Context, workspaceId ui
 	return s.fsStore.InvalidateQuery(ctx, workspaceId, queryPath)
 }
 
+// invalidateAndExecute clears cached results for a view and re-executes its
+// provider query. The cache invalidation is best-effort (logged, not fatal).
+func (s *SourceService) invalidateAndExecute(ctx context.Context, pctx *sources.ProviderContext, query *types.FilesystemQuery, op string) ([]repository.QueryResult, error) {
+	if err := s.fsStore.InvalidateQuery(ctx, pctx.WorkspaceId, query.Path); err != nil {
+		log.Warn().Err(err).Str("path", query.Path).Str("op", op).Msg("failed to invalidate query cache")
+	}
+	return s.executeAndCacheQuery(ctx, pctx, query)
+}
+
 // SyncViewByPath forces re-execution of a source view by path, bypassing all caches.
 // Returns the results and emits hook events for newly seen items.
 func (s *SourceService) SyncViewByPath(ctx context.Context, queryPath string) ([]repository.QueryResult, error) {
@@ -71,7 +80,7 @@ func (s *SourceService) SyncViewByPath(ctx context.Context, queryPath string) ([
 		Str("query_spec", query.QuerySpec).
 		Msg("syncing source view")
 
-	results, err := s.executeAndCacheQuery(ctx, pctx, query)
+	results, err := s.invalidateAndExecute(ctx, pctx, query, "sync_by_path")
 	if err != nil {
 		return nil, fmt.Errorf("query execution failed: %w", err)
 	}
@@ -103,7 +112,7 @@ func (s *SourceService) SyncViewByExternalId(ctx context.Context, externalId str
 		return nil, fmt.Errorf("not connected to %s", query.Integration)
 	}
 
-	results, err := s.executeAndCacheQuery(ctx, pctx, query)
+	results, err := s.invalidateAndExecute(ctx, pctx, query, "sync_by_external_id")
 	if err != nil {
 		return nil, fmt.Errorf("query execution failed: %w", err)
 	}
@@ -127,7 +136,7 @@ func (s *SourceService) RefreshQuery(ctx context.Context, query *types.Filesyste
 		return fmt.Errorf("not connected to %s (workspace %d)", query.Integration, query.WorkspaceId)
 	}
 
-	results, err := s.executeAndCacheQuery(ctx, pctx, query)
+	results, err := s.invalidateAndExecute(ctx, pctx, query, "poller_refresh")
 	if err != nil {
 		return err
 	}
@@ -270,17 +279,25 @@ func (s *SourceService) executeAndCacheQuery(ctx context.Context, pctx *sources.
 	return allResults, nil
 }
 
+// defaultStaleThreshold is the minimum stale window for access-triggered
+// refresh. Even when a query has a shorter CacheTTL, we avoid re-executing on
+// every access to keep provider/API load predictable.
+const defaultStaleThreshold = 5 * time.Minute
+
 func (s *SourceService) getOrExecuteQuery(ctx context.Context, pctx *sources.ProviderContext, query *types.FilesystemQuery) ([]repository.QueryResult, error) {
-	if results, err := s.fsStore.GetQueryResults(ctx, pctx.WorkspaceId, query.Path); err == nil && len(results) > 0 {
+	// Fast path: cache hit and still fresh.
+	if results, err := s.fsStore.GetQueryResults(ctx, pctx.WorkspaceId, query.Path); err == nil && len(results) > 0 && !s.shouldRefreshQueryOnAccess(query) {
 		return results, nil
 	}
 
+	// Cache miss or stale cache: refresh synchronously (singleflight-deduplicated).
 	key := fmt.Sprintf("%d:%s", pctx.WorkspaceId, query.Path)
 	value, err, _ := s.queryGroup.Do(key, func() (any, error) {
-		if results, err := s.fsStore.GetQueryResults(ctx, pctx.WorkspaceId, query.Path); err == nil && len(results) > 0 {
+		// Double-check after acquiring the flight.
+		if results, err := s.fsStore.GetQueryResults(ctx, pctx.WorkspaceId, query.Path); err == nil && len(results) > 0 && !s.shouldRefreshQueryOnAccess(query) {
 			return results, nil
 		}
-		return s.executeAndCacheQuery(ctx, pctx, query)
+		return s.invalidateAndExecute(ctx, pctx, query, "access_refresh")
 	})
 	if err != nil {
 		return nil, err
@@ -290,6 +307,28 @@ func (s *SourceService) getOrExecuteQuery(ctx context.Context, pctx *sources.Pro
 		return nil, fmt.Errorf("unexpected query result type for %s", query.Path)
 	}
 	return results, nil
+}
+
+// shouldRefreshQueryOnAccess reports whether a query should be re-executed on
+// this access based on LastExecuted and the access refresh interval.
+func (s *SourceService) shouldRefreshQueryOnAccess(query *types.FilesystemQuery) bool {
+	if query.LastExecuted == nil {
+		return true // never executed
+	}
+	return time.Since(*query.LastExecuted) > s.accessRefreshInterval(query)
+}
+
+// accessRefreshInterval returns the age threshold for access-triggered refresh.
+// We use max(CacheTTL, defaultStaleThreshold) for stable load behavior.
+func (s *SourceService) accessRefreshInterval(query *types.FilesystemQuery) time.Duration {
+	if query.CacheTTL <= 0 {
+		return defaultStaleThreshold
+	}
+	cfg := time.Duration(query.CacheTTL) * time.Second
+	if cfg < defaultStaleThreshold {
+		return defaultStaleThreshold
+	}
+	return cfg
 }
 
 // ---------------------------------------------------------------------------
@@ -945,7 +984,7 @@ func viewToProto(q *types.FilesystemQuery) *pb.SourceView {
 	if q == nil {
 		return nil
 	}
-	return &pb.SourceView{
+	v := &pb.SourceView{
 		ExternalId:   q.ExternalId,
 		Integration:  q.Integration,
 		Path:         q.Path,
@@ -960,6 +999,10 @@ func viewToProto(q *types.FilesystemQuery) *pb.SourceView {
 		Mode:         string(q.Mode),
 		Filter:       q.Filter,
 	}
+	if q.LastExecuted != nil {
+		v.LastExecuted = q.LastExecuted.Unix()
+	}
+	return v
 }
 
 // isValidQueryName rejects names that could cause path traversal.
