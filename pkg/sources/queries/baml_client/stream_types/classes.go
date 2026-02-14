@@ -483,6 +483,7 @@ func (c SlackQueryResult) BamlTypeName() string {
 }
 
 type WebQueryResult struct {
+	Web_mode        *string  `json:"web_mode"`
 	Web_query       *string  `json:"web_query"`
 	Include_paths   []string `json:"include_paths"`
 	Limit           *int64   `json:"limit"`
@@ -502,6 +503,9 @@ func (c *WebQueryResult) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMa
 		key := field.Key
 		valueHolder := field.Value
 		switch key {
+
+		case "web_mode":
+			c.Web_mode = baml.Decode(valueHolder).Interface().(*string)
 
 		case "web_query":
 			c.Web_query = baml.Decode(valueHolder).Interface().(*string)
@@ -526,6 +530,8 @@ func (c *WebQueryResult) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMa
 
 func (c WebQueryResult) Encode() (*cffi.HostValue, error) {
 	fields := map[string]any{}
+
+	fields["web_mode"] = c.Web_mode
 
 	fields["web_query"] = c.Web_query
 

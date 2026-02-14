@@ -19,12 +19,22 @@ import (
 
 const firecrawlAPI = "https://api.firecrawl.dev/v2"
 
+// Estimated markdown size for a web page. Real size isn't known until scrape
+// time (lazy), but reporting 0 breaks tools that check size before reading.
+const estimatedPageSize int64 = 64 * 1024
+
 // WebProvider discovers and scrapes web pages via Firecrawl, exposing each
 // page as a markdown file through smart queries.
 //
-//	mkdir /sources/web/hennessy-cocktails
-//	ls   /sources/web/hennessy-cocktails/
-//	cat  /sources/web/hennessy-cocktails/old-fashioned.md
+// Two modes (selected by the "web_mode" metadata key):
+//
+//	map    (default) — discover pages on a site via /map, scrape lazily
+//	search           — web search via /search, scrape top results
+//
+// Usage:
+//
+//	mkdir /sources/web/hennessy-cocktails   # map mode (URL in guidance)
+//	mkdir /sources/web/latest-ai-news      # search mode (no URL)
 type WebProvider struct {
 	apiKey     string
 	httpClient *http.Client
@@ -75,24 +85,32 @@ func (w *WebProvider) Search(_ context.Context, _ *sources.ProviderContext, _ st
 // QueryExecutor
 // ---------------------------------------------------------------------------
 
-// ExecuteQuery uses Firecrawl /map to discover pages. Each URL becomes a
-// QueryResult; content is fetched lazily in ReadResult.
+// ExecuteQuery discovers pages via /map or /search depending on the
+// "web_mode" metadata key. Each result is scraped lazily in ReadResult.
 func (w *WebProvider) ExecuteQuery(ctx context.Context, _ *sources.ProviderContext, spec sources.QuerySpec) (*sources.QueryResponse, error) {
 	if w.apiKey == "" {
 		return nil, sources.ErrNotConnected
 	}
-	if _, err := url.ParseRequestURI(spec.Query); err != nil {
-		return nil, fmt.Errorf("invalid URL %q: %w", spec.Query, err)
-	}
 
+	mode := spec.Metadata["web_mode"] // "map" or "search"
 	limit := clamp(spec.Limit, 1, 500, 100)
 
-	var includePaths []string
-	if raw, ok := spec.Metadata["include_paths"]; ok && raw != "" {
-		json.Unmarshal([]byte(raw), &includePaths) // best-effort
-	}
+	var links []mapLink
+	var err error
 
-	links, err := w.mapURLs(ctx, spec.Query, limit, includePaths)
+	switch mode {
+	case "search":
+		links, err = w.searchWeb(ctx, spec.Query, limit)
+	default: // "map" or unset
+		if _, e := url.ParseRequestURI(spec.Query); e != nil {
+			return nil, fmt.Errorf("invalid URL %q: %w", spec.Query, e)
+		}
+		var includePaths []string
+		if raw := spec.Metadata["include_paths"]; raw != "" {
+			json.Unmarshal([]byte(raw), &includePaths) // best-effort
+		}
+		links, err = w.mapURLs(ctx, spec.Query, limit, includePaths)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -104,27 +122,40 @@ func (w *WebProvider) ExecuteQuery(ctx context.Context, _ *sources.ProviderConte
 
 	now := sources.NowUnix()
 	today := time.Now().Format("2006-01-02")
+	seen := make(map[string]bool, len(links))
 	results := make([]sources.QueryResult, 0, len(links))
 
 	for _, link := range links {
-		if link.URL == "" {
+		if link.URL == "" || seen[link.URL] {
 			continue
 		}
+		seen[link.URL] = true
+
 		p, _ := url.Parse(link.URL)
 		path := ""
 		if p != nil {
 			path = p.Path
 		}
+
 		id := shortHash(link.URL)
 		title := link.Title
 		if title == "" {
 			title = lastPathSegment(path)
 		}
+
 		meta := map[string]string{
 			"id": id, "url": link.URL, "path": path, "title": title, "date": today,
 		}
+		if link.Description != "" {
+			meta["description"] = link.Description
+		}
+
 		results = append(results, sources.QueryResult{
-			ID: link.URL, Filename: w.FormatFilename(format, meta), Metadata: meta, Mtime: now,
+			ID:       link.URL,
+			Filename: w.FormatFilename(format, meta),
+			Metadata: meta,
+			Size:     estimatedPageSize,
+			Mtime:    now,
 		})
 	}
 	return &sources.QueryResponse{Results: results}, nil
@@ -139,16 +170,19 @@ func (w *WebProvider) ReadResult(ctx context.Context, _ *sources.ProviderContext
 		return nil, fmt.Errorf("invalid URL %q: %w", resultID, err)
 	}
 
-	md, title, err := w.scrape(ctx, resultID)
+	page, err := w.scrape(ctx, resultID)
 	if err != nil {
 		return nil, err
 	}
 
 	var b strings.Builder
-	if title != "" {
-		fmt.Fprintf(&b, "# %s\n\n", title)
+	if page.Title != "" {
+		fmt.Fprintf(&b, "# %s\n\n", page.Title)
 	}
-	fmt.Fprintf(&b, "> Source: %s\n\n---\n\n%s", resultID, md)
+	if page.Description != "" {
+		fmt.Fprintf(&b, "*%s*\n\n", page.Description)
+	}
+	fmt.Fprintf(&b, "> Source: %s\n\n---\n\n%s", resultID, page.Markdown)
 	return []byte(b.String()), nil
 }
 
@@ -177,12 +211,21 @@ func (w *WebProvider) FormatFilename(format string, meta map[string]string) stri
 // Firecrawl API
 // ---------------------------------------------------------------------------
 
+// mapLink represents a discovered page from /map or /search.
 type mapLink struct {
 	URL         string `json:"url"`
 	Title       string `json:"title"`
 	Description string `json:"description"`
 }
 
+// scrapeResult holds content returned by /scrape.
+type scrapeResult struct {
+	Markdown    string
+	Title       string
+	Description string
+}
+
+// mapURLs discovers pages on a website via Firecrawl /map.
 func (w *WebProvider) mapURLs(ctx context.Context, siteURL string, limit int, includePaths []string) ([]mapLink, error) {
 	payload := map[string]any{"url": siteURL, "limit": limit}
 	if len(includePaths) > 0 {
@@ -201,28 +244,57 @@ func (w *WebProvider) mapURLs(ctx context.Context, siteURL string, limit int, in
 	return resp.Links, nil
 }
 
-func (w *WebProvider) scrape(ctx context.Context, pageURL string) (markdown, title string, err error) {
+// searchWeb finds pages matching a query via Firecrawl /search.
+func (w *WebProvider) searchWeb(ctx context.Context, query string, limit int) ([]mapLink, error) {
+	payload := map[string]any{"query": query, "limit": limit}
+	var resp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Web []mapLink `json:"web"`
+		} `json:"data"`
+	}
+	if err := w.post(ctx, "/search", payload, &resp); err != nil {
+		return nil, err
+	}
+	if !resp.Success {
+		return nil, fmt.Errorf("firecrawl /search: success=false for %q", query)
+	}
+	return resp.Data.Web, nil
+}
+
+// scrape fetches a single page's content via Firecrawl /scrape.
+// Images and media tags are excluded since this is a text filesystem.
+func (w *WebProvider) scrape(ctx context.Context, pageURL string) (*scrapeResult, error) {
 	var resp struct {
 		Success bool `json:"success"`
 		Data    struct {
 			Markdown string `json:"markdown"`
 			Metadata struct {
-				Title string `json:"title"`
+				Title       string `json:"title"`
+				Description string `json:"description"`
 			} `json:"metadata"`
 		} `json:"data"`
 	}
-	err = w.post(ctx, "/scrape", map[string]any{
-		"url": pageURL, "formats": []string{"markdown"},
-		"onlyMainContent": true, "blockAds": true,
-		"skipTlsVerification": true, "removeBase64Images": true,
+	err := w.post(ctx, "/scrape", map[string]any{
+		"url":                 pageURL,
+		"formats":             []string{"markdown"},
+		"onlyMainContent":     true,
+		"blockAds":            true,
+		"skipTlsVerification": true,
+		"removeBase64Images":  true,
+		"excludeTags":         []string{"img", "picture", "video", "svg", "figure"},
 	}, &resp)
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
 	if !resp.Success {
-		return "", "", fmt.Errorf("firecrawl /scrape: success=false for %s", pageURL)
+		return nil, fmt.Errorf("firecrawl /scrape: success=false for %s", pageURL)
 	}
-	return resp.Data.Markdown, resp.Data.Metadata.Title, nil
+	return &scrapeResult{
+		Markdown:    resp.Data.Markdown,
+		Title:       resp.Data.Metadata.Title,
+		Description: resp.Data.Metadata.Description,
+	}, nil
 }
 
 // post sends an authenticated POST to the Firecrawl API.
@@ -251,10 +323,6 @@ func (w *WebProvider) post(ctx context.Context, path string, payload any, dest a
 	return json.NewDecoder(resp.Body).Decode(dest)
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 func shortHash(s string) string {
 	h := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(h[:4])
@@ -270,10 +338,11 @@ func lastPathSegment(p string) string {
 	if p == "" {
 		return "index"
 	}
-	if i := strings.LastIndex(p, "."); i > 0 {
+	// Strip query string before extension so "page.html?v=2" → "page"
+	if i := strings.Index(p, "?"); i > 0 {
 		p = p[:i]
 	}
-	if i := strings.Index(p, "?"); i > 0 {
+	if i := strings.LastIndex(p, "."); i > 0 {
 		p = p[:i]
 	}
 	return p

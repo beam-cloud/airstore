@@ -51,8 +51,9 @@ class PostHogQueryResult {
 }
 
 class WebQueryResult {
-  web_query string @description("The URL to crawl/map for discovering pages. Must be a valid URL starting with https://")
-  include_paths string[] @description("URL path patterns to include (e.g. /cocktails/*). Empty array = discover all paths.")
+  web_mode string @description("'map' to crawl a specific site, 'search' to find pages via web search. Default: map")
+  web_query string @description("For web_mode=map: the URL to crawl. For web_mode=search: the search query string.")
+  include_paths string[] @description("URL path patterns to include when web_mode=map (e.g. /cocktails/*). Empty array = all paths. Ignored for search.")
   limit int @description("Max pages to discover (default: 100)")
   filename_format string @description("Template for result filenames. Use {title}, {path}, {id}, {date}. Example: {title}_{id}.md")
 }
@@ -973,21 +974,29 @@ test TestPostHogSignupFunnel {
 function InferWebQuery(name: string, guidance: string?) -> WebQueryResult {
   client AnthropicClient
   prompt #"
-    Convert a folder name into a web crawl configuration.
+    Convert a folder name into a web query. Two modes:
 
-    If guidance contains a URL, use it as web_query. Otherwise infer the URL from the name.
-    Use include_paths to scope the crawl when the URL points to a large site.
-    Always use https://. Default limit: 100. Default filename_format: {title}_{id}.md
+    web_mode=map    — crawl a specific website. web_query must be a valid https:// URL.
+    web_mode=search — web search. web_query is a search query string (not a URL).
+
+    Use web_mode=map when guidance contains a URL or the name implies a specific site.
+    Use web_mode=search when the name describes a topic, question, or information need.
 
     EXAMPLES:
     - "hennessy-cocktails" (guidance: "https://www.hennessy.com/en-us/cocktails")
-      → web_query: "https://www.hennessy.com/en-us/cocktails", include_paths: ["/en-us/cocktails/*"], limit: 100
+      → web_mode: "map", web_query: "https://www.hennessy.com/en-us/cocktails", include_paths: ["/en-us/cocktails/*"], limit: 100
     - "react-docs"
-      → web_query: "https://react.dev/reference", include_paths: ["/reference/*"], limit: 100
+      → web_mode: "map", web_query: "https://react.dev/reference", include_paths: ["/reference/*"], limit: 100
     - "python-tutorial"
-      → web_query: "https://docs.python.org/3/tutorial/", include_paths: ["/3/tutorial/*"], limit: 50
-    - "hacker-news"
-      → web_query: "https://news.ycombinator.com", include_paths: [], limit: 50
+      → web_mode: "map", web_query: "https://docs.python.org/3/tutorial/", include_paths: ["/3/tutorial/*"], limit: 50
+    - "latest AI news"
+      → web_mode: "search", web_query: "latest AI news 2025", include_paths: [], limit: 20
+    - "best rust web frameworks"
+      → web_mode: "search", web_query: "best rust web frameworks comparison", include_paths: [], limit: 15
+    - "climate change research papers"
+      → web_mode: "search", web_query: "climate change research papers 2025", include_paths: [], limit: 20
+
+    Defaults: web_mode=map, limit=100, filename_format={title}_{id}.md
 
     Folder name: {{ name }}
     {% if guidance %}
@@ -1022,6 +1031,22 @@ test TestWebQueryBlog {
   functions [InferWebQuery]
   args {
     name "openai-blog"
+    guidance null
+  }
+}
+
+test TestWebQuerySearch {
+  functions [InferWebQuery]
+  args {
+    name "latest AI news"
+    guidance null
+  }
+}
+
+test TestWebQuerySearchTopic {
+  functions [InferWebQuery]
+  args {
+    name "best rust web frameworks"
     guidance null
   }
 }

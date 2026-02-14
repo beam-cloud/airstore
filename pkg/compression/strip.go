@@ -47,6 +47,9 @@ var (
 	// Notion
 	reNotionMeta = regexp.MustCompile(`(?m)^\*\*(URL|Created|Last edited):\*\*\s+.*$`)
 
+	// Web
+	reMarkdownImage = regexp.MustCompile(`(?m)!\[[^\]]*\]\([^)]+\)\s*`)
+
 	// Linear
 	reLinearMeta = regexp.MustCompile(`(?m)^\|\s*(Created|Updated|URL|Team|Project)\s*\|.*$`)
 )
@@ -176,6 +179,7 @@ func stripLinear(data []byte) []byte {
 }
 
 func stripWeb(data []byte) []byte {
+	data = reMarkdownImage.ReplaceAll(data, nil)
 	return stripURLOnlyLines(data, 10)
 }
 

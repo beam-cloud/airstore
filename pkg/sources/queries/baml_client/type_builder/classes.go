@@ -371,6 +371,10 @@ func (t *WebQueryResultClassView) ListProperties() ([]ClassPropertyView, error) 
 	return builders, nil
 }
 
+func (t *WebQueryResultClassView) PropertyWeb_mode() (ClassPropertyView, error) {
+	return t.inner.Property("web_mode")
+}
+
 func (t *WebQueryResultClassView) PropertyWeb_query() (ClassPropertyView, error) {
 	return t.inner.Property("web_query")
 }

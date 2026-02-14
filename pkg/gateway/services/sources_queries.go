@@ -701,6 +701,7 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 		LinearQuery    string   `json:"linear_query"`
 		PostHogQuery   string   `json:"posthog_query"`
 		WebQuery       string   `json:"web_query"`
+		WebMode        string   `json:"web_mode"`
 		IncludePaths   []string `json:"include_paths"`
 		SearchType     string   `json:"search_type"`
 		ContentType    string   `json:"content_type"`
@@ -763,6 +764,9 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 		if pathsJSON, err := json.Marshal(spec.IncludePaths); err == nil {
 			metadata["include_paths"] = string(pathsJSON)
 		}
+	}
+	if spec.WebMode != "" {
+		metadata["web_mode"] = spec.WebMode
 	}
 
 	return sources.QuerySpec{
