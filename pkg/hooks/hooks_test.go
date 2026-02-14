@@ -749,7 +749,7 @@ func TestValidateHookPath(t *testing.T) {
 		{types.PathSources + "/gmail", true},
 		{"/sources/gmail/", true},
 
-		// Smart query folders under sources - allowed
+		// Source view folders under sources - allowed
 		{types.PathSources + "/gdrive/invoices", false},
 		{"/sources/gdrive/invoices/", false},
 		{types.PathSources + "/gmail/new unread emails", false},

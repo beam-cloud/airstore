@@ -1,0 +1,367 @@
+package services
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"github.com/beam-cloud/airstore/pkg/sources"
+	"github.com/beam-cloud/airstore/pkg/types"
+)
+
+// Per-integration filter structs. Each integration gets a typed filter that
+// the backend converts to a QuerySpec JSON string. The filter is what the
+// UI form builds and what SDK users pass.
+
+type GmailFilter struct {
+	From          string `json:"from"`
+	To            string `json:"to"`
+	Subject       string `json:"subject"`
+	Label         string `json:"label"`
+	NewerThan     string `json:"newer_than"`
+	OlderThan     string `json:"older_than"`
+	HasAttachment *bool  `json:"has_attachment"`
+	IsUnread      *bool  `json:"is_unread"`
+	IsStarred     *bool  `json:"is_starred"`
+}
+
+type GitHubFilter struct {
+	Repo        string `json:"repo"`
+	Type        string `json:"type"`
+	State       string `json:"state"`
+	Label       string `json:"label"`
+	Author      string `json:"author"`
+	ContentType string `json:"content_type"`
+}
+
+type GDriveFilter struct {
+	NameContains   string `json:"name_contains"`
+	MimeType       string `json:"mime_type"`
+	SharedWithMe   *bool  `json:"shared_with_me"`
+	Starred        *bool  `json:"starred"`
+	ModifiedAfter  string `json:"modified_after"`
+	ModifiedBefore string `json:"modified_before"`
+	FolderID       string `json:"folder_id"`
+}
+
+type NotionFilter struct {
+	Search string `json:"search"`
+}
+
+type SlackFilter struct {
+	Channel     string `json:"channel"`
+	From        string `json:"from"`
+	After       string `json:"after"`
+	Before      string `json:"before"`
+	HasLink     *bool  `json:"has_link"`
+	HasReaction *bool  `json:"has_reaction"`
+}
+
+type LinearFilter struct {
+	Type     string `json:"type"`
+	Team     string `json:"team"`
+	State    string `json:"state"`
+	Assignee string `json:"assignee"`
+	Priority string `json:"priority"`
+	Label    string `json:"label"`
+}
+
+type PostHogFilter struct {
+	Type      string `json:"type"`
+	Query     string `json:"query"`
+	ProjectID int    `json:"project_id"`
+}
+
+type WebFilter struct {
+	Mode         string   `json:"mode"` // "map" or "search"
+	URL          string   `json:"url"`
+	Query        string   `json:"query"`
+	IncludePaths []string `json:"include_paths"`
+}
+
+// buildQuerySpecFromFilter converts a structured per-integration filter into
+// the same JSON shape that parseQuerySpec() already consumes. This is the
+// bridge between the new "query mode" API and the existing execution engine.
+func buildQuerySpecFromFilter(integration string, filter json.RawMessage, limit int) (string, error) {
+	if limit <= 0 {
+		limit = defaultPageSize
+	}
+
+	switch types.SourceType(integration) {
+	case types.SourceGmail:
+		return buildGmailFilter(filter, limit)
+	case types.SourceGitHub:
+		return buildGitHubFilter(filter, limit)
+	case types.SourceGDrive:
+		return buildGDriveFilter(filter, limit)
+	case types.SourceNotion:
+		return buildNotionFilter(filter, limit)
+	case types.SourceSlack:
+		return buildSlackFilter(filter, limit)
+	case types.SourceLinear:
+		return buildLinearFilter(filter, limit)
+	case types.SourcePostHog:
+		return buildPostHogFilter(filter, limit)
+	case types.SourceWeb:
+		return buildWebFilter(filter, limit)
+	default:
+		return "", fmt.Errorf("unsupported integration for filter: %s", integration)
+	}
+}
+
+func buildGmailFilter(raw json.RawMessage, limit int) (string, error) {
+	var f GmailFilter
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return "", err
+	}
+	var parts []string
+	if f.From != "" {
+		parts = append(parts, "from:"+quoteIfNeeded(f.From))
+	}
+	if f.To != "" {
+		parts = append(parts, "to:"+quoteIfNeeded(f.To))
+	}
+	if f.Subject != "" {
+		parts = append(parts, "subject:"+quoteIfNeeded(f.Subject))
+	}
+	if f.Label != "" {
+		parts = append(parts, "label:"+f.Label)
+	}
+	if f.NewerThan != "" {
+		parts = append(parts, "newer_than:"+f.NewerThan)
+	}
+	if f.OlderThan != "" {
+		parts = append(parts, "older_than:"+f.OlderThan)
+	}
+	if f.HasAttachment != nil && *f.HasAttachment {
+		parts = append(parts, "has:attachment")
+	}
+	if f.IsUnread != nil && *f.IsUnread {
+		parts = append(parts, "is:unread")
+	}
+	if f.IsStarred != nil && *f.IsStarred {
+		parts = append(parts, "is:starred")
+	}
+	query := strings.Join(parts, " ")
+	return marshalSpec(map[string]any{
+		"gmail_query":     query,
+		"limit":           limit,
+		"filename_format": sources.DefaultFilenameFormat("gmail"),
+	})
+}
+
+func buildGitHubFilter(raw json.RawMessage, limit int) (string, error) {
+	var f GitHubFilter
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return "", err
+	}
+	if f.Repo == "" {
+		return "", fmt.Errorf("repo is required for GitHub filter")
+	}
+	var parts []string
+	parts = append(parts, "repo:"+f.Repo)
+	if f.State != "" {
+		parts = append(parts, "is:"+f.State)
+	}
+	if f.Label != "" {
+		parts = append(parts, "label:"+f.Label)
+	}
+	if f.Author != "" {
+		parts = append(parts, "author:"+f.Author)
+	}
+	query := strings.Join(parts, " ")
+	spec := map[string]any{
+		"github_query":    query,
+		"limit":           limit,
+		"filename_format": sources.DefaultFilenameFormat("github"),
+	}
+	if f.Type != "" {
+		spec["search_type"] = f.Type
+	}
+	if f.ContentType != "" {
+		spec["content_type"] = f.ContentType
+	}
+	return marshalSpec(spec)
+}
+
+func buildGDriveFilter(raw json.RawMessage, limit int) (string, error) {
+	var f GDriveFilter
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return "", err
+	}
+	var parts []string
+	if f.NameContains != "" {
+		parts = append(parts, fmt.Sprintf("name contains '%s'", f.NameContains))
+	}
+	if f.MimeType != "" {
+		mimeMap := map[string]string{
+			"pdf":          "application/pdf",
+			"document":     "application/vnd.google-apps.document",
+			"spreadsheet":  "application/vnd.google-apps.spreadsheet",
+			"presentation": "application/vnd.google-apps.presentation",
+		}
+		if m, ok := mimeMap[f.MimeType]; ok {
+			parts = append(parts, fmt.Sprintf("mimeType = '%s'", m))
+		} else {
+			parts = append(parts, fmt.Sprintf("mimeType = '%s'", f.MimeType))
+		}
+	}
+	if f.SharedWithMe != nil && *f.SharedWithMe {
+		parts = append(parts, "sharedWithMe = true")
+	}
+	if f.Starred != nil && *f.Starred {
+		parts = append(parts, "starred = true")
+	}
+	if f.ModifiedAfter != "" {
+		parts = append(parts, fmt.Sprintf("modifiedTime > '%sT00:00:00'", f.ModifiedAfter))
+	}
+	if f.ModifiedBefore != "" {
+		parts = append(parts, fmt.Sprintf("modifiedTime < '%sT00:00:00'", f.ModifiedBefore))
+	}
+	if f.FolderID != "" {
+		parts = append(parts, fmt.Sprintf("'%s' in parents", f.FolderID))
+	}
+	query := strings.Join(parts, " and ")
+	return marshalSpec(map[string]any{
+		"gdrive_query":    query,
+		"limit":           limit,
+		"filename_format": sources.DefaultFilenameFormat("gdrive"),
+	})
+}
+
+func buildNotionFilter(raw json.RawMessage, limit int) (string, error) {
+	var f NotionFilter
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return "", err
+	}
+	return marshalSpec(map[string]any{
+		"notion_query":    f.Search,
+		"limit":           limit,
+		"filename_format": sources.DefaultFilenameFormat("notion"),
+	})
+}
+
+func buildSlackFilter(raw json.RawMessage, limit int) (string, error) {
+	var f SlackFilter
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return "", err
+	}
+	var parts []string
+	if f.Channel != "" {
+		parts = append(parts, "in:"+f.Channel)
+	}
+	if f.From != "" {
+		parts = append(parts, "from:"+f.From)
+	}
+	if f.After != "" {
+		parts = append(parts, "after:"+f.After)
+	}
+	if f.Before != "" {
+		parts = append(parts, "before:"+f.Before)
+	}
+	if f.HasLink != nil && *f.HasLink {
+		parts = append(parts, "has:link")
+	}
+	if f.HasReaction != nil && *f.HasReaction {
+		parts = append(parts, "has:reaction")
+	}
+	query := strings.Join(parts, " ")
+	return marshalSpec(map[string]any{
+		"slack_query":     query,
+		"limit":           limit,
+		"filename_format": sources.DefaultFilenameFormat("slack"),
+	})
+}
+
+func buildLinearFilter(raw json.RawMessage, limit int) (string, error) {
+	var f LinearFilter
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return "", err
+	}
+	var parts []string
+	if f.Team != "" {
+		parts = append(parts, "team:"+f.Team)
+	}
+	if f.State != "" {
+		parts = append(parts, "state:"+quoteIfNeeded(f.State))
+	}
+	if f.Assignee != "" {
+		parts = append(parts, "assignee:"+f.Assignee)
+	}
+	if f.Priority != "" {
+		parts = append(parts, "priority:"+f.Priority)
+	}
+	if f.Label != "" {
+		parts = append(parts, "label:"+quoteIfNeeded(f.Label))
+	}
+	query := strings.Join(parts, " ")
+	spec := map[string]any{
+		"linear_query":    query,
+		"limit":           limit,
+		"filename_format": sources.DefaultFilenameFormat("linear"),
+	}
+	if f.Type != "" {
+		spec["search_type"] = f.Type
+	}
+	return marshalSpec(spec)
+}
+
+func buildPostHogFilter(raw json.RawMessage, limit int) (string, error) {
+	var f PostHogFilter
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return "", err
+	}
+	spec := map[string]any{
+		"posthog_query":   f.Query,
+		"limit":           limit,
+		"filename_format": sources.DefaultFilenameFormat("posthog"),
+	}
+	if f.Type != "" {
+		spec["search_type"] = f.Type
+	}
+	if f.ProjectID > 0 {
+		spec["project_id"] = f.ProjectID
+	}
+	return marshalSpec(spec)
+}
+
+func buildWebFilter(raw json.RawMessage, limit int) (string, error) {
+	var f WebFilter
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return "", err
+	}
+	mode := f.Mode
+	if mode == "" {
+		mode = "map"
+	}
+	query := f.URL
+	if mode == "search" {
+		query = f.Query
+	}
+	spec := map[string]any{
+		"web_query":       query,
+		"web_mode":        mode,
+		"limit":           limit,
+		"filename_format": sources.DefaultFilenameFormat("web"),
+	}
+	if len(f.IncludePaths) > 0 {
+		spec["include_paths"] = f.IncludePaths
+	}
+	return marshalSpec(spec)
+}
+
+// quoteIfNeeded wraps a value in double quotes if it contains spaces.
+func quoteIfNeeded(s string) string {
+	if strings.Contains(s, " ") {
+		return `"` + s + `"`
+	}
+	return s
+}
+
+func marshalSpec(spec map[string]any) (string, error) {
+	data, err := json.Marshal(spec)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}

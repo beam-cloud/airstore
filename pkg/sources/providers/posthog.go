@@ -231,7 +231,7 @@ func (p *PostHogProvider) Search(_ context.Context, _ *sources.ProviderContext, 
 var _ sources.QueryExecutor = (*PostHogProvider)(nil)
 
 // ExecuteQuery runs a PostHog search query and returns results.
-// Implements the sources.QueryExecutor interface for smart folder queries.
+// Implements the sources.QueryExecutor interface for source view queries.
 func (p *PostHogProvider) ExecuteQuery(ctx context.Context, pctx *sources.ProviderContext, spec sources.QuerySpec) (*sources.QueryResponse, error) {
 	if err := p.checkAuth(pctx); err != nil {
 		return nil, err

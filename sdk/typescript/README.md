@@ -1,6 +1,6 @@
 # @airstore/sdk
 
-Official TypeScript SDK for the [Airstore](https://airstore.ai) API. Provision workspaces, manage connections, configure smart folders, and generate mount tokens — all from your backend.
+Official TypeScript SDK for the [Airstore](https://airstore.ai) API. Provision workspaces, manage connections, configure source views, and generate mount tokens — all from your backend.
 
 ## Installation
 
@@ -51,8 +51,8 @@ async function provisionUser(
     refreshToken: gmailTokens.refreshToken,
   });
 
-  // 4. Set up smart folders for what the agent should see
-  await airstore.smartFolders.create(ws.external_id, {
+  // 4. Set up source views for what the agent should see
+  await airstore.views.create(ws.external_id, {
     integration: 'gmail',
     name: 'Recent Emails',
     guidance: 'Last 7 days of emails from the inbox',
@@ -143,30 +143,41 @@ const connections = await airstore.connections.list('ws_abc123');
 await airstore.connections.del('ws_abc123', 'conn_abc123');
 ```
 
-### Smart Folders
+### Source Views
 
 ```typescript
-// Create
-const folder = await airstore.smartFolders.create('ws_abc123', {
+// Create (smart mode — LLM-inferred query)
+const view = await airstore.views.create('ws_abc123', {
   integration: 'gmail',
   name: 'Important Emails',
   guidance: 'Emails marked as important from the last month',
   outputFormat: 'folder', // or 'file'
 });
 
+// Create (query mode — auto-detected when filter is provided)
+const view2 = await airstore.views.create('ws_abc123', {
+  integration: 'gmail',
+  name: 'Unread from boss',
+  filter: { from: 'boss@company.com', is_unread: true },
+});
+
 // List all
-const folders = await airstore.smartFolders.list('ws_abc123');
+const views = await airstore.views.list('ws_abc123');
 
 // Retrieve by path
-const folder = await airstore.smartFolders.retrieve('ws_abc123', '/Sources/gmail/Important Emails');
+const view = await airstore.views.retrieve('ws_abc123', '/Sources/gmail/Important Emails');
 
 // Update
-const updated = await airstore.smartFolders.update('ws_abc123', 'query_abc', {
+const updated = await airstore.views.update('ws_abc123', 'view_abc', {
   guidance: 'Updated guidance text',
 });
 
+// Sync (manually refresh metadata from source)
+const result = await airstore.views.sync('ws_abc123', 'view_abc');
+console.log(`${result.results_count} total, ${result.new_results} new`);
+
 // Delete
-await airstore.smartFolders.del('ws_abc123', 'query_abc');
+await airstore.views.del('ws_abc123', 'view_abc');
 ```
 
 ### Tokens

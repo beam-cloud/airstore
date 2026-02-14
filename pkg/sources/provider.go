@@ -75,7 +75,7 @@ type QueryResponse struct {
 }
 
 // QueryExecutor is an optional interface implemented by providers that support
-// filesystem query operations. This enables the smart query filesystem feature
+// filesystem query operations. This enables the source view filesystem feature
 // where users create virtual folders/files that execute queries on access.
 type QueryExecutor interface {
 	// ExecuteQuery runs a query and returns results with pagination metadata.
@@ -85,7 +85,7 @@ type QueryExecutor interface {
 	ExecuteQuery(ctx context.Context, pctx *ProviderContext, spec QuerySpec) (*QueryResponse, error)
 
 	// ReadResult fetches content for a specific result by its provider ID.
-	// This is called when a user reads a file from a smart query folder.
+	// This is called when a user reads a file from a source view folder.
 	ReadResult(ctx context.Context, pctx *ProviderContext, resultID string) ([]byte, error)
 
 	// FormatFilename generates a filename from metadata using the format template.

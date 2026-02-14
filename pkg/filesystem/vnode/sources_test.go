@@ -20,9 +20,9 @@ func TestSourcesVNode_Getattr_MaterializedResultUsesOpenContentSize(t *testing.T
 	}
 
 	queryPath := "/sources/gmail/coreweave-emails"
-	q := &types.SmartQuery{
+	q := &types.SourceView{
 		Path:         queryPath,
-		OutputFormat: types.SmartQueryOutputFolder,
+		OutputFormat: types.ViewOutputFolder,
 		CreatedAt:    time.Unix(1700000000, 0),
 		UpdatedAt:    time.Unix(1700000100, 0),
 	}
@@ -65,9 +65,9 @@ func TestSourcesVNode_Getattr_MaterializedResultUsesReaddirCache(t *testing.T) {
 	}
 
 	queryPath := "/sources/gmail/coreweave-emails"
-	q := &types.SmartQuery{
+	q := &types.SourceView{
 		Path:         queryPath,
-		OutputFormat: types.SmartQueryOutputFolder,
+		OutputFormat: types.ViewOutputFolder,
 		CreatedAt:    time.Unix(1700000000, 0),
 		UpdatedAt:    time.Unix(1700000100, 0),
 	}
@@ -101,9 +101,9 @@ func TestSourcesVNode_Getattr_QueryMetaFileUsesQueryUpdatedAt(t *testing.T) {
 
 	queryPath := "/sources/gmail/coreweave-emails"
 	updated := time.Unix(1700000100, 0)
-	q := &types.SmartQuery{
+	q := &types.SourceView{
 		Path:         queryPath,
-		OutputFormat: types.SmartQueryOutputFolder,
+		OutputFormat: types.ViewOutputFolder,
 		CreatedAt:    time.Unix(1700000000, 0),
 		UpdatedAt:    updated,
 	}

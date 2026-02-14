@@ -22,7 +22,7 @@ export {
 // ── Resource classes ─────────────────────────────────────────────────────────
 export { Workspaces } from './resources/workspaces.js';
 export { Connections } from './resources/connections.js';
-export { SmartFolders } from './resources/smart-folders.js';
+export { Views } from './resources/views.js';
 export { Tokens } from './resources/tokens.js';
 export { Members } from './resources/members.js';
 export { OAuth } from './resources/oauth.js';
@@ -33,7 +33,22 @@ export { AccessLog } from './resources/access-log.js';
 export type { PaginatedList, IntegrationType, MemberRole, OutputFormat } from './types/shared.js';
 export type { Workspace, WorkspaceCreateParams } from './types/workspaces.js';
 export type { Connection, ConnectionCreateParams } from './types/connections.js';
-export type { SmartFolder, SmartFolderCreateParams, SmartFolderUpdateParams } from './types/smart-folders.js';
+export type {
+  SourceView,
+  ViewCreateParams,
+  ViewUpdateParams,
+  ViewMode,
+  ViewFilter,
+  SyncResult,
+  GmailFilter,
+  GitHubFilter,
+  GDriveFilter,
+  NotionFilter,
+  SlackFilter,
+  LinearFilter,
+  PostHogFilter,
+  WebFilter,
+} from './types/views.js';
 export type { Token, TokenCreateParams, TokenCreated } from './types/tokens.js';
 export type { Member, MemberCreateParams } from './types/members.js';
 export type { OAuthSession, OAuthSessionCreateParams, OAuthSessionStatus, OAuthPollOptions } from './types/oauth.js';

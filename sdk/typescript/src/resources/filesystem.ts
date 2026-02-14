@@ -5,7 +5,7 @@ import type { VirtualFile, DirectoryListing, TreeListing } from '../types/filesy
  * Read-only access to the workspace virtual filesystem.
  *
  * The filesystem provides a unified view of all connected integrations,
- * smart folders, tools, and user-uploaded files.
+ * source views, tools, and user-uploaded files.
  *
  * @example
  * ```ts

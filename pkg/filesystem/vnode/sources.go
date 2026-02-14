@@ -1,22 +1,22 @@
 // Package vnode provides virtual filesystem nodes for the FUSE layer.
 //
-// SourcesVNode handles /sources/{integration}/ paths as a query-based filesystem.
-// Content is accessed ONLY through filesystem queries - native provider content
+// SourcesVNode handles /sources/{integration}/ paths as a view-based filesystem.
+// Content is accessed ONLY through source views - native provider content
 // (like messages/, labels/) is not exposed directly.
 //
 // Usage:
 //
-//	mkdir /sources/gmail/unread-emails    <- creates query via LLM inference
-//	ls /sources/gmail/unread-emails/      <- executes query, shows results
-//	cat /sources/gmail/unread-emails/.query.as <- shows query definition
+//	mkdir /sources/gmail/unread-emails    <- creates view via LLM inference
+//	ls /sources/gmail/unread-emails/      <- executes view query, shows results
+//	cat /sources/gmail/unread-emails/.query.as <- shows view definition
 //	cat /sources/gmail/unread-emails/msg.txt <- reads materialized result
 //
 // Structure:
 //
 //	/sources/                            <- lists available integrations
-//	/sources/gmail/                      <- lists user-created queries only
-//	/sources/gmail/unread-emails/        <- query folder (mkdir creates)
-//	  .query.as                          <- query definition (JSON)
+//	/sources/gmail/                      <- lists user-created views only
+//	/sources/gmail/unread-emails/        <- view folder (mkdir creates)
+//	  .query.as                          <- view definition (JSON)
 //	  2026-01-28_invoice_abc.txt         <- materialized search results
 package vnode
 
@@ -54,7 +54,7 @@ type cachedQueryResult struct {
 
 // cachedQuery holds a cached query definition
 type cachedQuery struct {
-	query     *types.SmartQuery
+	query     *types.SourceView
 	expiresAt time.Time
 }
 
@@ -79,7 +79,7 @@ type cachedContent struct {
 	refs     int
 }
 
-// SourcesVNode handles /sources/ - both native content and smart queries.
+// SourcesVNode handles /sources/ - both native content and source views.
 // SourcesVNodeOption configures optional fields on a SourcesVNode.
 type SourcesVNodeOption func(*SourcesVNode)
 
@@ -90,18 +90,18 @@ func WithCompression(strategy string) SourcesVNodeOption {
 }
 
 type SourcesVNode struct {
-	SmartQueryBase
+	SourceViewBase
 	client      pb.SourceServiceClient
 	token       string
 	bearerToken string // precomputed auth header value
 	compression string // compression strategy to pass via gRPC metadata
 
-	// Cache for query results to avoid repeated ExecuteSmartQuery calls
+	// Cache for query results to avoid repeated ExecuteView calls
 	// during Readdir->Getattr cycles
 	resultsMu sync.RWMutex
 	results   map[string]*cachedQueryResult // path -> cached results
 
-	// Cache for query definitions to avoid repeated GetSmartQuery calls
+	// Cache for view definitions to avoid repeated GetView calls
 	// during Readdir->Getattr cycles
 	queriesMu sync.RWMutex
 	queries   map[string]*cachedQuery // path -> cached query definition
@@ -287,7 +287,7 @@ func (v *SourcesVNode) Getattr(path string) (*FileInfo, error) {
 		return info, nil
 	}
 
-	// Is this inside a smart query folder? (materialized result)
+	// Is this inside a source view folder? (materialized result)
 	//
 	// File sizing strategy:
 	//   1. openContent cache — already prefetched or open. Always accurate.
@@ -297,7 +297,7 @@ func (v *SourcesVNode) Getattr(path string) (*FileInfo, error) {
 	// With compression, step 2 is skipped because metadata sizes are raw
 	// (uncompressed) and would cause null-byte padding from FUSE.
 	parentPath := filepath.Dir(path)
-	if q := v.getQuery(ctx, parentPath); q != nil && q.OutputFormat == types.SmartQueryOutputFolder {
+	if q := v.getQuery(ctx, parentPath); q != nil && q.OutputFormat == types.ViewOutputFolder {
 		// Tier 1: already open or pre-fetched content — always accurate.
 		if data, _, ok := v.getOpenContent(path); ok {
 			info := NewFileInfo(PathIno(path), int64(len(data)), 0644)
@@ -348,23 +348,23 @@ func (v *SourcesVNode) Getattr(path string) (*FileInfo, error) {
 		return info, nil
 	}
 
-	// Is this path a smart query?
+	// Is this path a source view?
 	if q := v.getQuery(ctx, path); q != nil {
-		if q.OutputFormat == types.SmartQueryOutputFolder {
+		if q.OutputFormat == types.ViewOutputFolder {
 			info := NewDirInfo(PathIno(path))
 			// Set Nlink based on cached results count for better UX
 			// Standard Unix convention: Nlink = 2 + subdirectory count
-			// For smart query folders, we use result count to show child items
+			// For source view folders, we use result count to show child items
 			if cached := v.getCachedResultsNoRefresh(q.Path); cached != nil {
 				info.Nlink = uint32(2 + len(cached))
 			}
-			qt := smartQueryMtime(q)
+			qt := viewMtime(q)
 			info.Mtime = qt
 			info.Ctime = qt
 			return info, nil
 		}
 		info := NewFileInfo(PathIno(path), 0, 0644)
-		qt := smartQueryMtime(q)
+		qt := viewMtime(q)
 		info.Mtime = qt
 		info.Ctime = qt
 		v.applyOpenContentSize(path, info)
@@ -375,7 +375,7 @@ func (v *SourcesVNode) Getattr(path string) (*FileInfo, error) {
 	return nil, fs.ErrNotExist
 }
 
-func smartQueryMtime(q *types.SmartQuery) time.Time {
+func viewMtime(q *types.SourceView) time.Time {
 	if q == nil {
 		return time.Now()
 	}
@@ -400,14 +400,14 @@ func (v *SourcesVNode) Readdir(path string) ([]DirEntry, error) {
 
 	integration, subpath := v.parsePath(path)
 
-	// Is this a smart query folder? Execute it.
+	// Is this a source view folder? Execute it.
 	if q := v.getQuery(ctx, path); q != nil {
-		if q.OutputFormat == types.SmartQueryOutputFolder {
+		if q.OutputFormat == types.ViewOutputFolder {
 			return v.executeQueryAsDir(ctx, q)
 		}
 	}
 
-	// /sources/{integration} - list README.md + smart queries
+	// /sources/{integration} - list README.md + source views
 	if subpath == "" {
 		return v.listIntegration(ctx, path, integration)
 	}
@@ -416,7 +416,7 @@ func (v *SourcesVNode) Readdir(path string) ([]DirEntry, error) {
 	return nil, fs.ErrNotExist
 }
 
-// listIntegration returns integration root entries: README.md + smart queries.
+// listIntegration returns integration root entries: README.md + source views.
 // Native provider content (messages/, labels/, etc.) is not exposed directly.
 func (v *SourcesVNode) listIntegration(ctx context.Context, path, integration string) ([]DirEntry, error) {
 	v.trackRecentDir(path) // Track for background refresh
@@ -475,11 +475,11 @@ func (v *SourcesVNode) listIntegrations(ctx context.Context) ([]DirEntry, error)
 	return entries, nil
 }
 
-// executeQueryAsDir executes a smart query and returns results as directory entries.
-func (v *SourcesVNode) executeQueryAsDir(ctx context.Context, q *types.SmartQuery) ([]DirEntry, error) {
+// executeQueryAsDir executes a source view query and returns results as directory entries.
+func (v *SourcesVNode) executeQueryAsDir(ctx context.Context, q *types.SourceView) ([]DirEntry, error) {
 	// Always include the .query.as file
 	queryMeta, _ := json.MarshalIndent(q, "", "  ")
-	queryMtime := int64(smartQueryMtime(q).Unix())
+	queryMtime := int64(viewMtime(q).Unix())
 	entries := []DirEntry{{
 		Name:  queryMetaName,
 		Mode:  syscall.S_IFREG | 0444,
@@ -505,7 +505,7 @@ func (v *SourcesVNode) executeQueryAsDir(ctx context.Context, q *types.SmartQuer
 	}
 
 	// Execute via gateway RPC
-	resp, err := v.client.ExecuteSmartQuery(ctx, &pb.ExecuteSmartQueryRequest{Path: q.Path})
+	resp, err := v.client.ExecuteView(ctx, &pb.ExecuteViewRequest{Path: q.Path})
 	if err != nil {
 		log.Warn().Err(err).Str("path", q.Path).Msg("query execution failed")
 		return entries, nil // Return just .query.as on failure
@@ -561,18 +561,18 @@ func (v *SourcesVNode) queryMetaContent(ctx context.Context, path string) ([]byt
 			return nil, time.Time{}, true, fs.ErrNotExist
 		}
 		data, _ := json.MarshalIndent(q, "", "  ")
-		return data, smartQueryMtime(q), true, nil
+		return data, viewMtime(q), true, nil
 	}
 
 	if strings.HasPrefix(base, ".") && strings.HasSuffix(base, queryMetaName) {
 		queryFileName := strings.TrimPrefix(strings.TrimSuffix(base, queryMetaName), ".")
 		queryPath := filepath.Join(filepath.Dir(path), queryFileName)
 		q := v.getQuery(ctx, queryPath)
-		if q == nil || q.OutputFormat != types.SmartQueryOutputFile {
+		if q == nil || q.OutputFormat != types.ViewOutputFile {
 			return nil, time.Time{}, true, fs.ErrNotExist
 		}
 		data, _ := json.MarshalIndent(q, "", "  ")
-		return data, smartQueryMtime(q), true, nil
+		return data, viewMtime(q), true, nil
 	}
 
 	return nil, time.Time{}, false, nil
@@ -647,28 +647,28 @@ func (v *SourcesVNode) ReadWithAttribution(path string, buf []byte, off int64, f
 		return copyFromOffset(buf, data, off), AttributionForCache(CacheSourceMetadata), nil
 	}
 
-	// Smart query file (single-file mode)
-	if q := v.getQuery(ctx, path); q != nil && q.OutputFormat == types.SmartQueryOutputFile {
+	// Source view file (single-file mode)
+	if q := v.getQuery(ctx, path); q != nil && q.OutputFormat == types.ViewOutputFile {
 		return v.readQueryFileWithAttribution(ctx, q, buf, off)
 	}
 
-	// File inside smart query folder (materialized result)
+	// File inside source view folder (materialized result)
 	parentPath := filepath.Dir(path)
-	if q := v.getQuery(ctx, parentPath); q != nil && q.OutputFormat == types.SmartQueryOutputFolder {
+	if q := v.getQuery(ctx, parentPath); q != nil && q.OutputFormat == types.ViewOutputFolder {
 		return v.readQueryResultWithAttribution(ctx, q, filepath.Base(path), buf, off)
 	}
 
-	// No native content fallback - only query results are readable
+	// No native content fallback - only view results are readable
 	return 0, nil, fs.ErrNotExist
 }
 
-// readQueryFile reads a single-file smart query result.
-func (v *SourcesVNode) readQueryFile(ctx context.Context, q *types.SmartQuery, buf []byte, off int64) (int, error) {
+// readQueryFile reads a single-file source view result.
+func (v *SourcesVNode) readQueryFile(ctx context.Context, q *types.SourceView, buf []byte, off int64) (int, error) {
 	n, _, err := v.readQueryFileWithAttribution(ctx, q, buf, off)
 	return n, err
 }
 
-func (v *SourcesVNode) readQueryFileWithAttribution(ctx context.Context, q *types.SmartQuery, buf []byte, off int64) (int, *ReadAttribution, error) {
+func (v *SourcesVNode) readQueryFileWithAttribution(ctx context.Context, q *types.SourceView, buf []byte, off int64) (int, *ReadAttribution, error) {
 	data, hint, err := v.fetchQueryFileContent(ctx, q)
 	if err != nil {
 		return 0, nil, fs.ErrNotExist
@@ -677,12 +677,12 @@ func (v *SourcesVNode) readQueryFileWithAttribution(ctx context.Context, q *type
 }
 
 // readQueryResult reads a specific file from query results.
-func (v *SourcesVNode) readQueryResult(ctx context.Context, q *types.SmartQuery, filename string, buf []byte, off int64) (int, error) {
+func (v *SourcesVNode) readQueryResult(ctx context.Context, q *types.SourceView, filename string, buf []byte, off int64) (int, error) {
 	n, _, err := v.readQueryResultWithAttribution(ctx, q, filename, buf, off)
 	return n, err
 }
 
-func (v *SourcesVNode) readQueryResultWithAttribution(ctx context.Context, q *types.SmartQuery, filename string, buf []byte, off int64) (int, *ReadAttribution, error) {
+func (v *SourcesVNode) readQueryResultWithAttribution(ctx context.Context, q *types.SourceView, filename string, buf []byte, off int64) (int, *ReadAttribution, error) {
 	data, hint, err := v.fetchQueryResultContent(ctx, q, filename)
 	if err != nil {
 		return 0, nil, fs.ErrNotExist
@@ -701,11 +701,11 @@ func (v *SourcesVNode) fetchContentViaRead(ctx context.Context, readPath string)
 	return resp.Data, cloneCostHint(resp.CostHint), nil
 }
 
-func (v *SourcesVNode) fetchQueryFileContent(ctx context.Context, q *types.SmartQuery) ([]byte, *pb.SourceReadCostHint, error) {
+func (v *SourcesVNode) fetchQueryFileContent(ctx context.Context, q *types.SourceView) ([]byte, *pb.SourceReadCostHint, error) {
 	return v.fetchContentViaRead(ctx, strings.TrimPrefix(q.Path, SourcesPath+"/"))
 }
 
-func (v *SourcesVNode) fetchQueryResultContent(ctx context.Context, q *types.SmartQuery, filename string) ([]byte, *pb.SourceReadCostHint, error) {
+func (v *SourcesVNode) fetchQueryResultContent(ctx context.Context, q *types.SourceView, filename string) ([]byte, *pb.SourceReadCostHint, error) {
 	return v.fetchContentViaRead(ctx, strings.TrimPrefix(q.Path, SourcesPath+"/")+"/"+filename)
 }
 
@@ -785,18 +785,18 @@ func (v *SourcesVNode) fetchContentForOpen(ctx context.Context, path string) ([]
 		return data, nil, syscall.S_IFREG | 0444, mtime, true, nil
 	}
 
-	// Smart query file (single-file mode)
-	if q := v.getQuery(ctx, path); q != nil && q.OutputFormat == types.SmartQueryOutputFile {
+	// Source view file (single-file mode)
+	if q := v.getQuery(ctx, path); q != nil && q.OutputFormat == types.ViewOutputFile {
 		data, hint, err := v.fetchQueryFileContent(ctx, q)
 		if err != nil {
 			return nil, nil, 0, time.Time{}, true, err
 		}
-		return data, hint, syscall.S_IFREG | 0644, smartQueryMtime(q), true, nil
+		return data, hint, syscall.S_IFREG | 0644, viewMtime(q), true, nil
 	}
 
-	// File inside smart query folder (materialized result)
+	// File inside source view folder (materialized result)
 	parentPath := filepath.Dir(path)
-	if q := v.getQuery(ctx, parentPath); q != nil && q.OutputFormat == types.SmartQueryOutputFolder {
+	if q := v.getQuery(ctx, parentPath); q != nil && q.OutputFormat == types.ViewOutputFolder {
 		filename := filepath.Base(path)
 		data, hint, err := v.fetchQueryResultContent(ctx, q, filename)
 		if err != nil {
@@ -869,7 +869,7 @@ func isSystemFile(name string) bool {
 	return false
 }
 
-// Mkdir creates a smart query folder.
+// Mkdir creates a source view folder.
 func (v *SourcesVNode) Mkdir(path string, mode uint32) error {
 	path = filepath.Clean(path)
 	integration, subpath := v.parsePath(path)
@@ -887,7 +887,7 @@ func (v *SourcesVNode) Mkdir(path string, mode uint32) error {
 	ctx, cancel := v.ctx()
 	defer cancel()
 
-	resp, err := v.client.CreateSmartQuery(ctx, &pb.CreateSmartQueryRequest{
+	resp, err := v.client.CreateView(ctx, &pb.CreateViewRequest{
 		Integration: integration, Name: subpath, OutputFormat: "folder",
 	})
 	if err != nil {
@@ -900,26 +900,26 @@ func (v *SourcesVNode) Mkdir(path string, mode uint32) error {
 	}
 
 	// Cache the newly created query so subsequent Getattr calls can find it immediately
-	query := &types.SmartQuery{
-		ExternalId:   resp.Query.ExternalId,
-		Integration:  resp.Query.Integration,
-		Path:         resp.Query.Path,
-		Name:         resp.Query.Name,
-		QuerySpec:    resp.Query.QuerySpec,
-		Guidance:     resp.Query.Guidance,
-		OutputFormat: types.SmartQueryOutputFormat(resp.Query.OutputFormat),
-		FileExt:      resp.Query.FileExt,
-		CacheTTL:     int(resp.Query.CacheTtl),
-		CreatedAt:    time.Unix(resp.Query.CreatedAt, 0),
-		UpdatedAt:    time.Unix(resp.Query.UpdatedAt, 0),
+	query := &types.SourceView{
+		ExternalId:   resp.View.ExternalId,
+		Integration:  resp.View.Integration,
+		Path:         resp.View.Path,
+		Name:         resp.View.Name,
+		QuerySpec:    resp.View.QuerySpec,
+		Guidance:     resp.View.Guidance,
+		OutputFormat: types.ViewOutputFormat(resp.View.OutputFormat),
+		FileExt:      resp.View.FileExt,
+		CacheTTL:     int(resp.View.CacheTtl),
+		CreatedAt:    time.Unix(resp.View.CreatedAt, 0),
+		UpdatedAt:    time.Unix(resp.View.UpdatedAt, 0),
 	}
 	v.setCachedQuery(path, query)
 
-	log.Info().Str("path", path).Str("query", resp.Query.QuerySpec).Msg("created smart query")
+	log.Info().Str("path", path).Str("query", resp.View.QuerySpec).Msg("created source view")
 	return nil
 }
 
-// Create creates a smart query file.
+// Create creates a source view file.
 func (v *SourcesVNode) Create(path string, flags int, mode uint32) (FileHandle, error) {
 	path = filepath.Clean(path)
 	integration, subpath := v.parsePath(path)
@@ -941,7 +941,7 @@ func (v *SourcesVNode) Create(path string, flags int, mode uint32) (FileHandle, 
 	ctx, cancel := v.ctx()
 	defer cancel()
 
-	resp, err := v.client.CreateSmartQuery(ctx, &pb.CreateSmartQueryRequest{
+	resp, err := v.client.CreateView(ctx, &pb.CreateViewRequest{
 		Integration: integration, Name: name, OutputFormat: "file", FileExt: ext,
 	})
 	if err != nil || !resp.Ok {
@@ -949,22 +949,22 @@ func (v *SourcesVNode) Create(path string, flags int, mode uint32) (FileHandle, 
 	}
 
 	// Cache the newly created query so subsequent Getattr calls can find it immediately
-	query := &types.SmartQuery{
-		ExternalId:   resp.Query.ExternalId,
-		Integration:  resp.Query.Integration,
-		Path:         resp.Query.Path,
-		Name:         resp.Query.Name,
-		QuerySpec:    resp.Query.QuerySpec,
-		Guidance:     resp.Query.Guidance,
-		OutputFormat: types.SmartQueryOutputFormat(resp.Query.OutputFormat),
-		FileExt:      resp.Query.FileExt,
-		CacheTTL:     int(resp.Query.CacheTtl),
-		CreatedAt:    time.Unix(resp.Query.CreatedAt, 0),
-		UpdatedAt:    time.Unix(resp.Query.UpdatedAt, 0),
+	query := &types.SourceView{
+		ExternalId:   resp.View.ExternalId,
+		Integration:  resp.View.Integration,
+		Path:         resp.View.Path,
+		Name:         resp.View.Name,
+		QuerySpec:    resp.View.QuerySpec,
+		Guidance:     resp.View.Guidance,
+		OutputFormat: types.ViewOutputFormat(resp.View.OutputFormat),
+		FileExt:      resp.View.FileExt,
+		CacheTTL:     int(resp.View.CacheTtl),
+		CreatedAt:    time.Unix(resp.View.CreatedAt, 0),
+		UpdatedAt:    time.Unix(resp.View.UpdatedAt, 0),
 	}
 	v.setCachedQuery(path, query)
 
-	log.Info().Str("path", path).Str("query", resp.Query.QuerySpec).Msg("created smart query file")
+	log.Info().Str("path", path).Str("query", resp.View.QuerySpec).Msg("created source view file")
 	return 0, nil
 }
 
@@ -974,37 +974,37 @@ func (v *SourcesVNode) Readlink(path string) (string, error) {
 	return "", fs.ErrNotExist
 }
 
-// getQuery retrieves a smart query by path, returns nil if not found.
-// Uses local cache to avoid repeated GetSmartQuery RPCs.
-func (v *SourcesVNode) getQuery(ctx context.Context, path string) *types.SmartQuery {
+// getQuery retrieves a source view by path, returns nil if not found.
+// Uses local cache to avoid repeated GetView RPCs.
+func (v *SourcesVNode) getQuery(ctx context.Context, path string) *types.SourceView {
 	// Check cache first
 	if cached, found := v.getCachedQuery(path); found {
 		return cached
 	}
 
-	resp, err := v.client.GetSmartQuery(ctx, &pb.GetSmartQueryRequest{Path: path})
+	resp, err := v.client.GetView(ctx, &pb.GetViewRequest{Path: path})
 	if err != nil {
 		return nil
 	}
 
-	if resp == nil || !resp.Ok || resp.Query == nil {
+	if resp == nil || !resp.Ok || resp.View == nil {
 		// Cache negative result too (path is not a query)
 		v.setCachedQuery(path, nil)
 		return nil
 	}
 
-	query := &types.SmartQuery{
-		ExternalId:   resp.Query.ExternalId,
-		Integration:  resp.Query.Integration,
-		Path:         resp.Query.Path,
-		Name:         resp.Query.Name,
-		QuerySpec:    resp.Query.QuerySpec,
-		Guidance:     resp.Query.Guidance,
-		OutputFormat: types.SmartQueryOutputFormat(resp.Query.OutputFormat),
-		FileExt:      resp.Query.FileExt,
-		CacheTTL:     int(resp.Query.CacheTtl),
-		CreatedAt:    time.Unix(resp.Query.CreatedAt, 0),
-		UpdatedAt:    time.Unix(resp.Query.UpdatedAt, 0),
+	query := &types.SourceView{
+		ExternalId:   resp.View.ExternalId,
+		Integration:  resp.View.Integration,
+		Path:         resp.View.Path,
+		Name:         resp.View.Name,
+		QuerySpec:    resp.View.QuerySpec,
+		Guidance:     resp.View.Guidance,
+		OutputFormat: types.ViewOutputFormat(resp.View.OutputFormat),
+		FileExt:      resp.View.FileExt,
+		CacheTTL:     int(resp.View.CacheTtl),
+		CreatedAt:    time.Unix(resp.View.CreatedAt, 0),
+		UpdatedAt:    time.Unix(resp.View.UpdatedAt, 0),
 	}
 
 	v.setCachedQuery(path, query)
@@ -1040,7 +1040,7 @@ func (v *SourcesVNode) getQueryResultMeta(ctx context.Context, queryPath, filena
 	}
 
 	// Cache miss - execute query via RPC (should be cached on gateway side)
-	resp, err := v.client.ExecuteSmartQuery(ctx, &pb.ExecuteSmartQueryRequest{Path: queryPath})
+	resp, err := v.client.ExecuteView(ctx, &pb.ExecuteViewRequest{Path: queryPath})
 	if err != nil {
 		log.Warn().Err(err).Str("path", queryPath).Msg("getQueryResultMeta RPC failed")
 		return 0, 0, false
@@ -1115,7 +1115,7 @@ func (v *SourcesVNode) triggerQueryRefresh(queryPath string) {
 	ctx, cancel := v.ctx()
 	defer cancel()
 
-	resp, err := v.client.ExecuteSmartQuery(ctx, &pb.ExecuteSmartQueryRequest{Path: queryPath})
+	resp, err := v.client.ExecuteView(ctx, &pb.ExecuteViewRequest{Path: queryPath})
 	if err != nil || !resp.Ok {
 		return
 	}
@@ -1138,7 +1138,7 @@ func (v *SourcesVNode) setCachedResults(queryPath string, entries []*pb.SourceDi
 
 // getCachedQuery retrieves cached query definition if still valid
 // Returns (query, true) if found in cache, (nil, false) if not found
-func (v *SourcesVNode) getCachedQuery(path string) (*types.SmartQuery, bool) {
+func (v *SourcesVNode) getCachedQuery(path string) (*types.SourceView, bool) {
 	v.queriesMu.RLock()
 	defer v.queriesMu.RUnlock()
 
@@ -1148,8 +1148,8 @@ func (v *SourcesVNode) getCachedQuery(path string) (*types.SmartQuery, bool) {
 	return nil, false
 }
 
-// setCachedQuery stores query definition in the cache (nil for negative cache)
-func (v *SourcesVNode) setCachedQuery(path string, query *types.SmartQuery) {
+// setCachedQuery stores view definition in the cache (nil for negative cache).
+func (v *SourcesVNode) setCachedQuery(path string, query *types.SourceView) {
 	v.queriesMu.Lock()
 	defer v.queriesMu.Unlock()
 

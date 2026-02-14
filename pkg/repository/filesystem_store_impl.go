@@ -18,6 +18,15 @@ import (
 
 const defaultCacheTTL = 30 * time.Second
 
+// nullableString converts an empty string to sql.NullString{Valid: false}
+// and a non-empty string to sql.NullString{String: s, Valid: true}.
+func nullableString(s string) sql.NullString {
+	if s == "" {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: s, Valid: true}
+}
+
 // ElasticsearchClient is an optional interface for Elasticsearch operations.
 type ElasticsearchClient interface {
 	Index(ctx context.Context, index, docID string, body []byte) error
@@ -99,7 +108,7 @@ func (s *filesystemStore) CreateQuery(ctx context.Context, query *types.Filesyst
 	query.UpdatedAt = time.Now()
 
 	if query.OutputFormat == "" {
-		query.OutputFormat = types.QueryOutputFolder
+		query.OutputFormat = types.ViewOutputFolder
 	}
 
 	if s.isMemoryMode() {
@@ -118,11 +127,12 @@ func (s *filesystemStore) CreateQuery(ctx context.Context, query *types.Filesyst
 	}
 
 	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO filesystem_queries (external_id, workspace_id, integration, path, name, query_spec, guidance, output_format, file_ext, filename_format, cache_ttl, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		INSERT INTO filesystem_queries (external_id, workspace_id, integration, path, name, query_spec, guidance, output_format, file_ext, filename_format, cache_ttl, mode, filter, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		RETURNING id
 	`, query.ExternalId, query.WorkspaceId, query.Integration, query.Path, query.Name,
 		query.QuerySpec, query.Guidance, query.OutputFormat, query.FileExt, query.FilenameFormat, query.CacheTTL,
+		query.Mode, nullableString(query.Filter),
 		query.CreatedAt, query.UpdatedAt).Scan(&query.Id)
 	if err != nil {
 		return nil, fmt.Errorf("create filesystem query: %w", err)
@@ -164,13 +174,15 @@ func (s *filesystemStore) GetQuery(ctx context.Context, workspaceId uint, path s
 	var filenameFormat sql.NullString
 
 	// Use ILIKE for case-insensitive path matching (handles old lowercase paths)
+	var filterStr sql.NullString
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, external_id, workspace_id, integration, path, name, query_spec, guidance, output_format, file_ext, filename_format, cache_ttl, created_at, updated_at, last_executed
+		SELECT id, external_id, workspace_id, integration, path, name, query_spec, guidance, output_format, file_ext, filename_format, cache_ttl, mode, filter, created_at, updated_at, last_executed
 		FROM filesystem_queries WHERE workspace_id = $1 AND LOWER(path) = LOWER($2)
 	`, workspaceId, path).Scan(
 		&query.Id, &query.ExternalId, &query.WorkspaceId, &query.Integration,
 		&query.Path, &query.Name, &query.QuerySpec, &query.Guidance,
 		&query.OutputFormat, &query.FileExt, &filenameFormat, &query.CacheTTL,
+		&query.Mode, &filterStr,
 		&query.CreatedAt, &query.UpdatedAt, &lastExecuted,
 	)
 	if err == sql.ErrNoRows {
@@ -186,6 +198,9 @@ func (s *filesystemStore) GetQuery(ctx context.Context, workspaceId uint, path s
 	if filenameFormat.Valid {
 		query.FilenameFormat = filenameFormat.String
 	}
+	if filterStr.Valid {
+		query.Filter = filterStr.String
+	}
 	return query, nil
 }
 
@@ -200,13 +215,15 @@ func (s *filesystemStore) GetQueryByExternalId(ctx context.Context, externalId s
 	var lastExecuted sql.NullTime
 	var filenameFormat sql.NullString
 
+	var filterStr sql.NullString
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, external_id, workspace_id, integration, path, name, query_spec, guidance, output_format, file_ext, filename_format, cache_ttl, created_at, updated_at, last_executed
+		SELECT id, external_id, workspace_id, integration, path, name, query_spec, guidance, output_format, file_ext, filename_format, cache_ttl, mode, filter, created_at, updated_at, last_executed
 		FROM filesystem_queries WHERE external_id = $1
 	`, externalId).Scan(
 		&query.Id, &query.ExternalId, &query.WorkspaceId, &query.Integration,
 		&query.Path, &query.Name, &query.QuerySpec, &query.Guidance,
 		&query.OutputFormat, &query.FileExt, &filenameFormat, &query.CacheTTL,
+		&query.Mode, &filterStr,
 		&query.CreatedAt, &query.UpdatedAt, &lastExecuted,
 	)
 	if err == sql.ErrNoRows {
@@ -221,6 +238,9 @@ func (s *filesystemStore) GetQueryByExternalId(ctx context.Context, externalId s
 	}
 	if filenameFormat.Valid {
 		query.FilenameFormat = filenameFormat.String
+	}
+	if filterStr.Valid {
+		query.Filter = filterStr.String
 	}
 	return query, nil
 }
@@ -250,7 +270,7 @@ func (s *filesystemStore) ListQueries(ctx context.Context, workspaceId uint, par
 	excludePattern := parentPath + "/%/%"
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, external_id, workspace_id, integration, path, name, query_spec, guidance, output_format, file_ext, filename_format, cache_ttl, created_at, updated_at, last_executed
+		SELECT id, external_id, workspace_id, integration, path, name, query_spec, guidance, output_format, file_ext, filename_format, cache_ttl, mode, filter, created_at, updated_at, last_executed
 		FROM filesystem_queries 
 		WHERE workspace_id = $1 AND path ILIKE $2 AND path NOT ILIKE $3
 		ORDER BY name
@@ -265,10 +285,12 @@ func (s *filesystemStore) ListQueries(ctx context.Context, workspaceId uint, par
 		query := &types.FilesystemQuery{}
 		var lastExecuted sql.NullTime
 		var filenameFormat sql.NullString
+		var filterStr sql.NullString
 		err := rows.Scan(
 			&query.Id, &query.ExternalId, &query.WorkspaceId, &query.Integration,
 			&query.Path, &query.Name, &query.QuerySpec, &query.Guidance,
 			&query.OutputFormat, &query.FileExt, &filenameFormat, &query.CacheTTL,
+			&query.Mode, &filterStr,
 			&query.CreatedAt, &query.UpdatedAt, &lastExecuted,
 		)
 		if err != nil {
@@ -279,6 +301,9 @@ func (s *filesystemStore) ListQueries(ctx context.Context, workspaceId uint, par
 		}
 		if filenameFormat.Valid {
 			query.FilenameFormat = filenameFormat.String
+		}
+		if filterStr.Valid {
+			query.Filter = filterStr.String
 		}
 		queries = append(queries, query)
 	}
@@ -333,6 +358,8 @@ func (s *filesystemStore) UpdateQuery(ctx context.Context, query *types.Filesyst
 			existing.FileExt = query.FileExt
 			existing.FilenameFormat = query.FilenameFormat
 			existing.CacheTTL = query.CacheTTL
+			existing.Mode = query.Mode
+			existing.Filter = query.Filter
 			existing.UpdatedAt = query.UpdatedAt
 			existing.LastExecuted = query.LastExecuted
 		}
@@ -342,10 +369,11 @@ func (s *filesystemStore) UpdateQuery(ctx context.Context, query *types.Filesyst
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE filesystem_queries SET
 			name = $1, path = $2, query_spec = $3, guidance = $4, output_format = $5, 
-			file_ext = $6, filename_format = $7, cache_ttl = $8, updated_at = $9, last_executed = $10
-		WHERE external_id = $11
+			file_ext = $6, filename_format = $7, cache_ttl = $8, mode = $9, filter = $10, updated_at = $11, last_executed = $12
+		WHERE external_id = $13
 	`, query.Name, query.Path, query.QuerySpec, query.Guidance, query.OutputFormat,
-		query.FileExt, query.FilenameFormat, query.CacheTTL, query.UpdatedAt, query.LastExecuted, query.ExternalId)
+		query.FileExt, query.FilenameFormat, query.CacheTTL, query.Mode, nullableString(query.Filter),
+		query.UpdatedAt, query.LastExecuted, query.ExternalId)
 	if err != nil {
 		return fmt.Errorf("update filesystem query: %w", err)
 	}

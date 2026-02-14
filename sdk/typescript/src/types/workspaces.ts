@@ -9,7 +9,7 @@ export interface WorkspaceCreateParams {
 /**
  * A workspace in Airstore.
  *
- * Workspaces contain connections, smart folders, members, and a virtual filesystem.
+ * Workspaces contain connections, source views, members, and a virtual filesystem.
  * When created with an org token, they are automatically scoped to the token's tenant.
  */
 export interface Workspace {

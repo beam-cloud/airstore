@@ -342,7 +342,7 @@ func (g *AccessLogGroup) GetSummary(c echo.Context) error {
 }
 
 // ReadSource fetches content directly from an upstream integration using a
-// source_uri. This bypasses the smart-folder layer, so it works even if the
+// source_uri. This bypasses the source-view layer, so it works even if the
 // query results have changed since the original read.
 //
 //	GET /api/v1/workspaces/:workspace_id/access-log/read?uri=github://abc123
