@@ -21,7 +21,6 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.Task) (*type
 	sandboxID := fmt.Sprintf("task-%s", task.ExternalId)
 
 	env := w.sandboxManager.copyTaskEnv(task)
-	w.sandboxManager.injectAnthropicAPIKey(env, false)
 
 	taskMountSource := w.sandboxManager.mountFilesystem(ctx, task)
 	defer w.sandboxManager.cleanupMount(task.ExternalId)
@@ -56,16 +55,10 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.Task) (*type
 	}
 	defer inputCleanup()
 
-	resizeCh, resizeCleanup, err := w.terminalIO.SubscribeResize(sessionCtx, task.ExternalId)
-	if err != nil {
-		return nil, fmt.Errorf("failed to subscribe terminal resize: %w", err)
-	}
-	defer resizeCleanup()
-
 	stdinReader, stdinWriter := io.Pipe()
 	defer stdinReader.Close()
 
-	go forwardTerminalInput(sessionCtx, stdinWriter, inputCh, resizeCh, func() {
+	go forwardTerminalInput(sessionCtx, stdinWriter, inputCh, func() {
 		signalActivity(activityCh)
 	})
 
@@ -122,36 +115,14 @@ func forwardTerminalInput(
 	ctx context.Context,
 	stdinWriter *io.PipeWriter,
 	inputCh <-chan []byte,
-	resizeCh <-chan repository.TerminalResizeEvent,
 	onActivity func(),
 ) {
 	defer stdinWriter.Close()
-
-	// Apply the first resize event by injecting a stty command through stdin.
-	// This sets the PTY dimensions before the user starts interacting.
-	// Subsequent resizes are acknowledged for activity tracking but not injected
-	// (inline stty would interfere with TUI programs like Claude Code).
-	initialResizeDone := false
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case event, ok := <-resizeCh:
-			if !ok {
-				resizeCh = nil
-				continue
-			}
-			if !initialResizeDone && event.Cols > 0 && event.Rows > 0 {
-				initialResizeDone = true
-				resizeCmd := fmt.Sprintf("stty cols %d rows %d 2>/dev/null\n", event.Cols, event.Rows)
-				if _, err := stdinWriter.Write([]byte(resizeCmd)); err != nil {
-					return
-				}
-			}
-			if onActivity != nil {
-				onActivity()
-			}
 		case data, ok := <-inputCh:
 			if !ok {
 				return

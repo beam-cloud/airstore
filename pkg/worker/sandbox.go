@@ -903,8 +903,23 @@ func (m *SandboxManager) cleanupMount(taskID string) {
 	}
 }
 
+// ptySetupScript is the shell script executed inside the sandbox for interactive
+// terminal sessions.  It starts an interactive shell under a PTY wrapper,
+// falling back through script → python pty → bash -i → sh -i depending on
+// what's available in the image.
+const ptySetupScript = `
+# Start an interactive shell under a PTY wrapper.
+if command -v script >/dev/null 2>&1; then exec script -qc /bin/bash /dev/null
+elif command -v python3 >/dev/null 2>&1; then exec python3 -c 'import pty; pty.spawn("/bin/bash")'
+elif command -v python  >/dev/null 2>&1; then exec python  -c 'import pty; pty.spawn("/bin/bash")'
+elif [ -x /bin/bash ];                  then exec /bin/bash -i
+else                                          exec /bin/sh -i
+fi
+`
+
+const ptyDefaultPATH = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
 // AttachPTY starts a long-lived PTY-backed shell process in a running sandbox.
-// It is intended for interactive terminal sessions.
 func (m *SandboxManager) AttachPTY(ctx context.Context, sandboxID string, stdin io.Reader, stdout io.Writer) error {
 	m.mu.RLock()
 	sandbox, exists := m.sandboxes[sandboxID]
@@ -916,41 +931,16 @@ func (m *SandboxManager) AttachPTY(ctx context.Context, sandboxID string, stdin 
 		return fmt.Errorf("sandbox %s is not running", sandboxID)
 	}
 
-	// Exec a shell under a PTY wrapper so terminal-aware tools (e.g. Claude Code)
-	// detect an interactive TTY environment. We use /bin/sh as a stable entrypoint
-	// and fall back gracefully when util-linux `script` is not present in the image.
-	proc := specs.Process{
-		Args: []string{
-			"/bin/sh",
-			"-lc",
-			"if command -v script >/dev/null 2>&1; then " +
-				"exec script -qc /bin/bash /dev/null; " +
-				"elif command -v python3 >/dev/null 2>&1; then " +
-				"exec python3 -c 'import pty; pty.spawn(\"/bin/bash\")'; " +
-				"elif command -v python >/dev/null 2>&1; then " +
-				"exec python -c 'import pty; pty.spawn(\"/bin/bash\")'; " +
-				"elif [ -x /bin/bash ]; then " +
-				"exec /bin/bash -i; " +
-				"else " +
-				"exec /bin/sh -i; " +
-				"fi",
-		},
-		Cwd: types.ContainerWorkDir,
-		User: specs.User{
-			UID: types.SandboxUserUID,
-			GID: types.SandboxUserGID,
-		},
+	env := []string{ptyDefaultPATH, "TERM=xterm-256color"}
+	for k, v := range sandbox.Config.Env {
+		env = append(env, fmt.Sprintf("%s=%s", k, v))
 	}
 
-	// Re-apply sandbox env so interactive tools have the same context as task runs.
-	// Ensure a sane PATH so command lookup works for script/python/bash fallbacks.
-	proc.Env = make([]string, 0, len(sandbox.Config.Env)+2)
-	proc.Env = append(proc.Env,
-		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-		"TERM=xterm-256color",
-	)
-	for key, value := range sandbox.Config.Env {
-		proc.Env = append(proc.Env, fmt.Sprintf("%s=%s", key, value))
+	proc := specs.Process{
+		Args: []string{"/bin/sh", "-lc", ptySetupScript},
+		Cwd:  types.ContainerWorkDir,
+		Env:  env,
+		User: specs.User{UID: types.SandboxUserUID, GID: types.SandboxUserGID},
 	}
 
 	return m.runtime.Exec(ctx, sandboxID, proc, &runtime.ExecOpts{
