@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"io"
 	"os/exec"
 	"syscall"
 	"time"
@@ -78,6 +79,9 @@ func (r *Runc) Exec(ctx context.Context, containerID string, proc specs.Process,
 	runcOpts := &runc.ExecOpts{}
 
 	if opts != nil {
+		if opts.StdinReader != nil {
+			runcOpts.IO = &stdinOnlyIO{reader: opts.StdinReader}
+		}
 		if opts.OutputWriter != nil {
 			runcOpts.OutputWriter = opts.OutputWriter
 		}
@@ -87,6 +91,24 @@ func (r *Runc) Exec(ctx context.Context, containerID string, proc specs.Process,
 	}
 
 	return r.handle.Exec(ctx, containerID, proc, runcOpts)
+}
+
+// stdinOnlyIO adapts an io.Reader into go-runc's IO interface.
+// Stdout/Stderr are intentionally nil so OutputWriter can be used for output.
+type stdinOnlyIO struct {
+	reader io.Reader
+}
+
+func (s *stdinOnlyIO) Close() error { return nil }
+
+func (s *stdinOnlyIO) Stdin() io.WriteCloser { return nil }
+
+func (s *stdinOnlyIO) Stdout() io.ReadCloser { return nil }
+
+func (s *stdinOnlyIO) Stderr() io.ReadCloser { return nil }
+
+func (s *stdinOnlyIO) Set(cmd *exec.Cmd) {
+	cmd.Stdin = s.reader
 }
 
 func (r *Runc) Kill(ctx context.Context, containerID string, sig syscall.Signal, opts *KillOpts) error {

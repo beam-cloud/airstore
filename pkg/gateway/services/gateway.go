@@ -422,6 +422,16 @@ func (s *GatewayService) CreateTask(ctx context.Context, req *pb.CreateTaskReque
 	if req.Prompt != "" && image == "" {
 		image = s.defaultImage
 	}
+	taskType := types.TaskType(req.Type)
+	if taskType == "" {
+		taskType = types.TaskTypeBackground
+	}
+	if taskType != types.TaskTypeBackground && taskType != types.TaskTypeInteractive {
+		return &pb.TaskResponse{Ok: false, Error: "type must be 'background' or 'interactive'"}, nil
+	}
+	if image == "" && taskType == types.TaskTypeInteractive {
+		image = s.defaultImage
+	}
 	if image == "" {
 		return &pb.TaskResponse{Ok: false, Error: "image or prompt is required"}, nil
 	}
@@ -455,6 +465,7 @@ func (s *GatewayService) CreateTask(ctx context.Context, req *pb.CreateTaskReque
 		CreatedByMemberId: createdByMemberId,
 		MemberToken:       memberToken,
 		Status:            types.TaskStatusPending,
+		Type:              taskType,
 		Prompt:            req.Prompt,
 		Image:             image,
 		Entrypoint:        entrypoint,
@@ -628,9 +639,11 @@ func connectionToPb(c *types.IntegrationConnection, workspaceExtId string) *pb.C
 }
 
 func taskToPb(t *types.Task) *pb.Task {
+	t.NormalizeType()
 	task := &pb.Task{
 		Id:        t.ExternalId,
 		Status:    string(t.Status),
+		Type:      string(t.Type),
 		Prompt:    t.Prompt,
 		Image:     t.Image,
 		Error:     t.Error,

@@ -456,6 +456,7 @@ func (g *Gateway) registerServices() error {
 	// Register task and workspace APIs (requires Postgres)
 	if g.BackendRepo != nil {
 		taskQueue := repository.NewRedisTaskQueue(g.RedisClient, "default")
+		terminalIO := repository.NewRedisTerminalIORepository(g.RedisClient)
 
 		// Wire task queue into the gRPC gateway service for CreateTask/DeleteTask
 		if gatewayService != nil {
@@ -536,7 +537,7 @@ func (g *Gateway) registerServices() error {
 		apiv1.NewAccessLogGroup(accessLogGroup, g.BackendRepo, g.s2Client, sourceService)
 
 		// Tasks API
-		apiv1.NewTasksGroup(g.baseRouteGroup.Group("/tasks"), g.BackendRepo, taskQueue, g.s2Client, g.Config.Sandbox.GetDefaultImage())
+		apiv1.NewTasksGroup(g.baseRouteGroup.Group("/tasks"), g.BackendRepo, taskQueue, terminalIO, g.s2Client, g.Config.Sandbox.GetDefaultImage())
 
 		// Hook engine: matches events → hooks → tasks, polls for retries
 		var skillReader hooks.SkillReader

@@ -214,6 +214,9 @@ func (r *Runsc) Exec(ctx context.Context, containerID string, proc specs.Process
 		cmd.Stdout = opts.OutputWriter
 		cmd.Stderr = opts.OutputWriter
 	}
+	if opts != nil && opts.StdinReader != nil {
+		cmd.Stdin = opts.StdinReader
+	}
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to exec in container: %w", err)

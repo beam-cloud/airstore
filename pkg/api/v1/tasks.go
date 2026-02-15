@@ -1,7 +1,9 @@
 package apiv1
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -17,6 +19,7 @@ type TasksGroup struct {
 	routerGroup  *echo.Group
 	backend      repository.BackendRepository
 	taskQueue    repository.TaskQueue
+	terminalIO   repository.TerminalIORepository
 	s2Client     *common.S2Client
 	defaultImage string
 }
@@ -26,6 +29,7 @@ type CreateTaskRequest struct {
 	WorkspaceName string               `json:"workspace_name"` // Or workspace name
 	Prompt        string               `json:"prompt"`         // Claude Code prompt (auto-sets image)
 	Image         string               `json:"image"`          // Container image (optional if prompt provided)
+	Type          types.TaskType       `json:"type,omitempty"` // background (default) or interactive
 	Entrypoint    []string             `json:"entrypoint"`
 	Env           map[string]string    `json:"env"`
 	Resources     *types.TaskResources `json:"resources,omitempty"` // CPU/Memory/GPU (uses defaults if nil)
@@ -35,6 +39,7 @@ type TaskResponse struct {
 	ExternalID  string            `json:"external_id"`
 	WorkspaceID string            `json:"workspace_id"`
 	Status      string            `json:"status"`
+	Type        string            `json:"type"`
 	Prompt      string            `json:"prompt,omitempty"`
 	Image       string            `json:"image"`
 	Entrypoint  []string          `json:"entrypoint"`
@@ -50,6 +55,7 @@ func NewTasksGroup(
 	routerGroup *echo.Group,
 	backend repository.BackendRepository,
 	taskQueue repository.TaskQueue,
+	terminalIO repository.TerminalIORepository,
 	s2Client *common.S2Client,
 	defaultImage string,
 ) *TasksGroup {
@@ -57,6 +63,7 @@ func NewTasksGroup(
 		routerGroup:  routerGroup,
 		backend:      backend,
 		taskQueue:    taskQueue,
+		terminalIO:   terminalIO,
 		s2Client:     s2Client,
 		defaultImage: defaultImage,
 	}
@@ -72,6 +79,9 @@ func (g *TasksGroup) registerRoutes() {
 	g.routerGroup.POST("/:id/cancel", g.CancelTask)
 	g.routerGroup.PATCH("/:id/result", g.SetTaskResult)
 	g.routerGroup.GET("/:id/logs/stream", g.StreamLogs)
+	g.routerGroup.GET("/:id/terminal/connect", g.ConnectTerminal)
+	g.routerGroup.POST("/:id/terminal/input", g.SendTerminalInput)
+	g.routerGroup.POST("/:id/terminal/resize", g.ResizeTerminal)
 }
 
 // CreateTask creates a new task and queues it for execution
@@ -83,8 +93,20 @@ func (g *TasksGroup) CreateTask(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
 	}
 
+	taskType := req.Type
+	if taskType == "" {
+		taskType = types.TaskTypeBackground
+	}
+	if taskType != types.TaskTypeBackground && taskType != types.TaskTypeInteractive {
+		return ErrorResponse(c, http.StatusBadRequest, "type must be 'background' or 'interactive'")
+	}
+
 	// If prompt is provided, this is a Claude Code task - use default sandbox image
 	if req.Prompt != "" {
+		req.Image = g.defaultImage
+	}
+	// Interactive sessions default to the gateway sandbox image when not specified.
+	if req.Image == "" && taskType == types.TaskTypeInteractive {
 		req.Image = g.defaultImage
 	}
 
@@ -135,6 +157,7 @@ func (g *TasksGroup) CreateTask(c echo.Context) error {
 		CreatedByMemberId: createdByMemberId,
 		MemberToken:       memberToken,
 		Status:            types.TaskStatusPending,
+		Type:              taskType,
 		Prompt:            req.Prompt,
 		Image:             req.Image,
 		Entrypoint:        req.Entrypoint,
@@ -259,6 +282,16 @@ type SetTaskResultRequest struct {
 	Error    string `json:"error"`
 }
 
+type TerminalInputRequest struct {
+	Data    string `json:"data,omitempty"`
+	DataB64 string `json:"data_b64,omitempty"`
+}
+
+type TerminalResizeRequest struct {
+	Cols int `json:"cols"`
+	Rows int `json:"rows"`
+}
+
 func (g *TasksGroup) SetTaskResult(c echo.Context) error {
 	externalId := c.Param("id")
 
@@ -275,6 +308,91 @@ func (g *TasksGroup) SetTaskResult(c echo.Context) error {
 	}
 
 	return SuccessResponse(c, nil)
+}
+
+// ConnectTerminal streams interactive terminal output via SSE.
+func (g *TasksGroup) ConnectTerminal(c echo.Context) error {
+	ctx := c.Request().Context()
+	taskID := c.Param("id")
+
+	if _, err := g.requireInteractiveTerminalTask(c, taskID); err != nil {
+		return err
+	}
+
+	outCh, cleanup, err := g.terminalIO.SubscribeOutput(ctx, taskID)
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to subscribe terminal output")
+	}
+	defer cleanup()
+
+	w := &sseWriter{c: c}
+	w.init()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case chunk, ok := <-outCh:
+			if !ok {
+				return nil
+			}
+			w.write(map[string]any{
+				"type":     "output",
+				"data_b64": base64.StdEncoding.EncodeToString(chunk),
+			})
+			w.flush()
+		}
+	}
+}
+
+// SendTerminalInput publishes input bytes for an interactive task terminal.
+func (g *TasksGroup) SendTerminalInput(c echo.Context) error {
+	ctx := c.Request().Context()
+	taskID := c.Param("id")
+
+	if _, err := g.requireInteractiveTerminalTask(c, taskID); err != nil {
+		return err
+	}
+
+	var req TerminalInputRequest
+	if err := c.Bind(&req); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
+	}
+
+	data, err := decodeTerminalInput(req)
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+	}
+
+	if err := g.terminalIO.PublishInput(ctx, taskID, data); err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to publish terminal input")
+	}
+
+	return SuccessResponse(c, map[string]bool{"ok": true})
+}
+
+// ResizeTerminal publishes a resize event for an interactive task terminal.
+func (g *TasksGroup) ResizeTerminal(c echo.Context) error {
+	ctx := c.Request().Context()
+	taskID := c.Param("id")
+
+	if _, err := g.requireInteractiveTerminalTask(c, taskID); err != nil {
+		return err
+	}
+
+	var req TerminalResizeRequest
+	if err := c.Bind(&req); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
+	}
+	if req.Cols <= 0 || req.Rows <= 0 {
+		return ErrorResponse(c, http.StatusBadRequest, "cols and rows must be positive")
+	}
+
+	if err := g.terminalIO.PublishResize(ctx, taskID, req.Cols, req.Rows); err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to publish terminal resize")
+	}
+
+	return SuccessResponse(c, map[string]bool{"ok": true})
 }
 
 // StreamLogs streams task logs via SSE from S2.
@@ -324,6 +442,47 @@ func (g *TasksGroup) StreamLogs(c echo.Context) error {
 			}
 		}
 	}
+}
+
+func (g *TasksGroup) requireInteractiveTask(c echo.Context, taskID string) (*types.Task, error) {
+	task, err := g.backend.GetTask(c.Request().Context(), taskID)
+	if err != nil {
+		if _, ok := err.(*types.ErrTaskNotFound); ok {
+			return nil, ErrorResponse(c, http.StatusNotFound, "task not found")
+		}
+		return nil, ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+
+	if !task.IsInteractive() {
+		return nil, ErrorResponse(c, http.StatusBadRequest, "task is not interactive")
+	}
+
+	return task, nil
+}
+
+func (g *TasksGroup) requireInteractiveTerminalTask(c echo.Context, taskID string) (*types.Task, error) {
+	task, err := g.requireInteractiveTask(c, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if task.IsTerminal() {
+		return nil, ErrorResponse(c, http.StatusConflict, "task has already finished")
+	}
+	if g.terminalIO == nil {
+		return nil, ErrorResponse(c, http.StatusServiceUnavailable, "terminal transport unavailable")
+	}
+	return task, nil
+}
+
+func decodeTerminalInput(req TerminalInputRequest) ([]byte, error) {
+	if req.DataB64 == "" {
+		return []byte(req.Data), nil
+	}
+	decoded, err := base64.StdEncoding.DecodeString(req.DataB64)
+	if err != nil {
+		return nil, errors.New("invalid data_b64")
+	}
+	return decoded, nil
 }
 
 // sseWriter handles SSE output formatting.
@@ -393,10 +552,12 @@ func (w *sseWriter) sendStatus(task *types.Task) {
 }
 
 func taskToResponse(t *types.Task, workspaceExternalId string) TaskResponse {
+	t.NormalizeType()
 	resp := TaskResponse{
 		ExternalID:  t.ExternalId,
 		WorkspaceID: workspaceExternalId,
 		Status:      string(t.Status),
+		Type:        string(t.Type),
 		Prompt:      t.Prompt,
 		Image:       t.Image,
 		Entrypoint:  t.Entrypoint,

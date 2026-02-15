@@ -40,6 +40,7 @@ type Worker struct {
 	ctx             context.Context
 	cancel          context.CancelFunc
 	taskQueue       repository.TaskQueue
+	terminalIO      repository.TerminalIORepository
 	sandboxManager  *SandboxManager
 
 	// Graceful shutdown
@@ -110,6 +111,7 @@ func NewWorker() (*Worker, error) {
 
 	// Create task queue (for pulling tasks, not for logs)
 	taskQueue := repository.NewRedisTaskQueue(redisClient, poolName)
+	terminalIO := repository.NewRedisTerminalIORepository(redisClient)
 
 	// Determine runtime type (default to gVisor for security)
 	runtimeType := os.Getenv("RUNTIME_TYPE")
@@ -155,6 +157,7 @@ func NewWorker() (*Worker, error) {
 		ctx:             ctx,
 		cancel:          cancel,
 		taskQueue:       taskQueue,
+		terminalIO:      terminalIO,
 		sandboxManager:  sandboxManager,
 		shutdownTimeout: shutdownTimeout,
 	}
@@ -241,7 +244,12 @@ func (w *Worker) taskLoop() {
 		}
 
 		// Execute the task in a sandbox
-		result, err := w.sandboxManager.RunTask(w.ctx, *task)
+		var result *types.TaskResult
+		if task.IsInteractive() {
+			result, err = w.runInteractiveTask(w.ctx, *task)
+		} else {
+			result, err = w.sandboxManager.RunTask(w.ctx, *task)
+		}
 
 		// Task complete (success or failure), decrement active count
 		w.activeTasks.Done()

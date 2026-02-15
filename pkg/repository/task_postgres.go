@@ -22,8 +22,8 @@ func (b *PostgresBackend) CreateTask(ctx context.Context, task *types.Task) erro
 	}
 
 	query := `
-		INSERT INTO task (workspace_id, created_by_member_id, status, prompt, image, entrypoint, env, hook_id, attempt, max_attempts)
-		VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6, $7, $8, $9, $10)
+		INSERT INTO task (workspace_id, created_by_member_id, status, type, prompt, image, entrypoint, env, hook_id, attempt, max_attempts)
+		VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6, $7, $8, $9, $10, $11)
 		RETURNING id, external_id, created_at
 	`
 
@@ -42,11 +42,13 @@ func (b *PostgresBackend) CreateTask(ctx context.Context, task *types.Task) erro
 	if task.MaxAttempts == 0 {
 		task.MaxAttempts = 1
 	}
+	task.NormalizeType()
 
 	err = b.db.QueryRowContext(ctx, query,
 		task.WorkspaceId,
 		memberIdArg,
 		task.Status,
+		task.Type,
 		task.Prompt,
 		task.Image,
 		pq.Array(task.Entrypoint),
@@ -65,7 +67,7 @@ func (b *PostgresBackend) CreateTask(ctx context.Context, task *types.Task) erro
 // GetTask retrieves a task by external ID
 func (b *PostgresBackend) GetTask(ctx context.Context, externalId string) (*types.Task, error) {
 	query := `
-		SELECT id, external_id, workspace_id, created_by_member_id, status, prompt, image, entrypoint, env, 
+		SELECT id, external_id, workspace_id, created_by_member_id, status, type, prompt, image, entrypoint, env, 
 		       exit_code, error, created_at, started_at, finished_at,
 		       hook_id, attempt, max_attempts
 		FROM task
@@ -78,7 +80,7 @@ func (b *PostgresBackend) GetTask(ctx context.Context, externalId string) (*type
 // GetTaskById retrieves a task by internal ID
 func (b *PostgresBackend) GetTaskById(ctx context.Context, id uint) (*types.Task, error) {
 	query := `
-		SELECT id, external_id, workspace_id, created_by_member_id, status, prompt, image, entrypoint, env, 
+		SELECT id, external_id, workspace_id, created_by_member_id, status, type, prompt, image, entrypoint, env, 
 		       exit_code, error, created_at, started_at, finished_at,
 		       hook_id, attempt, max_attempts
 		FROM task
@@ -94,6 +96,7 @@ func (b *PostgresBackend) scanTask(row *sql.Row) (*types.Task, error) {
 	var entrypoint pq.StringArray
 	var envJSON []byte
 	var createdByMemberId sql.NullInt64
+	var taskType sql.NullString
 	var prompt sql.NullString
 	var exitCode sql.NullInt32
 	var errorMsg sql.NullString
@@ -106,6 +109,7 @@ func (b *PostgresBackend) scanTask(row *sql.Row) (*types.Task, error) {
 		&task.WorkspaceId,
 		&createdByMemberId,
 		&task.Status,
+		&taskType,
 		&prompt,
 		&task.Image,
 		&entrypoint,
@@ -130,6 +134,10 @@ func (b *PostgresBackend) scanTask(row *sql.Row) (*types.Task, error) {
 		memberId := uint(createdByMemberId.Int64)
 		task.CreatedByMemberId = &memberId
 	}
+	if taskType.Valid {
+		task.Type = types.TaskType(taskType.String)
+	}
+	task.NormalizeType()
 	if hookId.Valid {
 		hid := uint(hookId.Int64)
 		task.HookId = &hid
@@ -162,7 +170,7 @@ func (b *PostgresBackend) scanTask(row *sql.Row) (*types.Task, error) {
 // Limited to 100 most recent tasks
 func (b *PostgresBackend) ListTasks(ctx context.Context, workspaceId uint) ([]*types.Task, error) {
 	query := `
-		SELECT id, external_id, workspace_id, created_by_member_id, status, prompt, image, entrypoint, env, 
+		SELECT id, external_id, workspace_id, created_by_member_id, status, type, prompt, image, entrypoint, env, 
 		       exit_code, error, created_at, started_at, finished_at,
 		       hook_id, attempt, max_attempts
 		FROM task
@@ -183,6 +191,7 @@ func (b *PostgresBackend) ListTasks(ctx context.Context, workspaceId uint) ([]*t
 		var entrypoint pq.StringArray
 		var envJSON []byte
 		var createdByMemberId sql.NullInt64
+		var taskType sql.NullString
 		var prompt sql.NullString
 		var exitCode sql.NullInt32
 		var errorMsg sql.NullString
@@ -195,6 +204,7 @@ func (b *PostgresBackend) ListTasks(ctx context.Context, workspaceId uint) ([]*t
 			&task.WorkspaceId,
 			&createdByMemberId,
 			&task.Status,
+			&taskType,
 			&prompt,
 			&task.Image,
 			&entrypoint,
@@ -215,6 +225,10 @@ func (b *PostgresBackend) ListTasks(ctx context.Context, workspaceId uint) ([]*t
 			memberId := uint(createdByMemberId.Int64)
 			task.CreatedByMemberId = &memberId
 		}
+		if taskType.Valid {
+			task.Type = types.TaskType(taskType.String)
+		}
+		task.NormalizeType()
 		if hookId.Valid {
 			hid := uint(hookId.Int64)
 			task.HookId = &hid
@@ -403,7 +417,7 @@ func (b *PostgresBackend) GetRetryableTasks(ctx context.Context) ([]*types.Task,
 	// Fetch all failed hook tasks that haven't exhausted retries.
 	// Backoff filtering is done in Go since the delay depends on attempt number.
 	query := `
-		SELECT id, external_id, workspace_id, created_by_member_id, status, prompt, image, entrypoint, env,
+		SELECT id, external_id, workspace_id, created_by_member_id, status, type, prompt, image, entrypoint, env,
 		       exit_code, error, created_at, started_at, finished_at,
 		       hook_id, attempt, max_attempts
 		FROM task
@@ -426,6 +440,7 @@ func (b *PostgresBackend) GetRetryableTasks(ctx context.Context) ([]*types.Task,
 		var entrypoint pq.StringArray
 		var envJSON []byte
 		var createdByMemberId sql.NullInt64
+		var taskType sql.NullString
 		var prompt sql.NullString
 		var exitCode sql.NullInt32
 		var errorMsg sql.NullString
@@ -434,7 +449,7 @@ func (b *PostgresBackend) GetRetryableTasks(ctx context.Context) ([]*types.Task,
 
 		if err := rows.Scan(
 			&task.Id, &task.ExternalId, &task.WorkspaceId, &createdByMemberId,
-			&task.Status, &prompt, &task.Image, &entrypoint, &envJSON,
+			&task.Status, &taskType, &prompt, &task.Image, &entrypoint, &envJSON,
 			&exitCode, &errorMsg, &task.CreatedAt, &startedAt, &finishedAt,
 			&hookId, &task.Attempt, &task.MaxAttempts,
 		); err != nil {
@@ -445,6 +460,10 @@ func (b *PostgresBackend) GetRetryableTasks(ctx context.Context) ([]*types.Task,
 			mid := uint(createdByMemberId.Int64)
 			task.CreatedByMemberId = &mid
 		}
+		if taskType.Valid {
+			task.Type = types.TaskType(taskType.String)
+		}
+		task.NormalizeType()
 		if hookId.Valid {
 			hid := uint(hookId.Int64)
 			task.HookId = &hid
@@ -480,7 +499,7 @@ func (b *PostgresBackend) GetRetryableTasks(ctx context.Context) ([]*types.Task,
 func (b *PostgresBackend) GetStuckHookTasks(ctx context.Context, timeout time.Duration) ([]*types.Task, error) {
 	cutoff := time.Now().Add(-timeout)
 	query := `
-		SELECT id, external_id, workspace_id, created_by_member_id, status, prompt, image, entrypoint, env,
+		SELECT id, external_id, workspace_id, created_by_member_id, status, type, prompt, image, entrypoint, env,
 		       exit_code, error, created_at, started_at, finished_at,
 		       hook_id, attempt, max_attempts
 		FROM task
@@ -495,7 +514,7 @@ func (b *PostgresBackend) GetStuckHookTasks(ctx context.Context, timeout time.Du
 // ListTasksByHook returns all tasks triggered by a specific hook, most recent first.
 func (b *PostgresBackend) ListTasksByHook(ctx context.Context, hookId uint) ([]*types.Task, error) {
 	query := `
-		SELECT id, external_id, workspace_id, created_by_member_id, status, prompt, image, entrypoint, env,
+		SELECT id, external_id, workspace_id, created_by_member_id, status, type, prompt, image, entrypoint, env,
 		       exit_code, error, created_at, started_at, finished_at,
 		       hook_id, attempt, max_attempts
 		FROM task
@@ -520,6 +539,7 @@ func (b *PostgresBackend) scanTaskRows(ctx context.Context, query string, args .
 		var entrypoint pq.StringArray
 		var envJSON []byte
 		var createdByMemberId sql.NullInt64
+		var taskType sql.NullString
 		var prompt sql.NullString
 		var exitCode sql.NullInt32
 		var errorMsg sql.NullString
@@ -528,7 +548,7 @@ func (b *PostgresBackend) scanTaskRows(ctx context.Context, query string, args .
 
 		if err := rows.Scan(
 			&task.Id, &task.ExternalId, &task.WorkspaceId, &createdByMemberId,
-			&task.Status, &prompt, &task.Image, &entrypoint, &envJSON,
+			&task.Status, &taskType, &prompt, &task.Image, &entrypoint, &envJSON,
 			&exitCode, &errorMsg, &task.CreatedAt, &startedAt, &finishedAt,
 			&hookId, &task.Attempt, &task.MaxAttempts,
 		); err != nil {
@@ -539,6 +559,10 @@ func (b *PostgresBackend) scanTaskRows(ctx context.Context, query string, args .
 			mid := uint(createdByMemberId.Int64)
 			task.CreatedByMemberId = &mid
 		}
+		if taskType.Valid {
+			task.Type = types.TaskType(taskType.String)
+		}
+		task.NormalizeType()
 		if hookId.Valid {
 			hid := uint(hookId.Int64)
 			task.HookId = &hid

@@ -134,12 +134,16 @@ type ImageConfig struct {
 
 // SandboxSettings configures the task sandbox/container runtime defaults
 type SandboxSettings struct {
-	// DefaultImage is the container image used for Claude Code tasks
+	// DefaultImage is the container image used when a task omits image.
 	DefaultImage string `key:"defaultImage" json:"default_image"`
+	// InteractiveIdleTimeout controls how long an interactive task may stay
+	// inactive (no input/output activity) before it is automatically completed.
+	InteractiveIdleTimeout time.Duration `key:"interactiveIdleTimeout" json:"interactive_idle_timeout"`
 }
 
 // DefaultSandboxImage is the fallback image if not configured
 const DefaultSandboxImage = "public.ecr.aws/n4e0e1y0/airstore-default-sandbox:latest"
+const DefaultInteractiveIdleTimeout = 10 * time.Minute
 
 // GetDefaultImage returns the configured default image or the fallback
 func (c SandboxSettings) GetDefaultImage() string {
@@ -147,6 +151,14 @@ func (c SandboxSettings) GetDefaultImage() string {
 		return c.DefaultImage
 	}
 	return DefaultSandboxImage
+}
+
+// GetInteractiveIdleTimeout returns the interactive idle timeout with a sane default.
+func (c SandboxSettings) GetInteractiveIdleTimeout() time.Duration {
+	if c.InteractiveIdleTimeout <= 0 {
+		return DefaultInteractiveIdleTimeout
+	}
+	return c.InteractiveIdleTimeout
 }
 
 // WorkspaceStorageConfig for per-workspace S3 buckets (bucket: {prefix}-{workspace_id})

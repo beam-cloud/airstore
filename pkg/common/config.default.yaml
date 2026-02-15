@@ -39,6 +39,7 @@ image:
 # Sandbox configuration for task execution
 sandbox:
   defaultImage: public.ecr.aws/n4e0e1y0/airstore-default-sandbox:latest
+  interactiveIdleTimeout: 10m
 
 filesystem:
   mountPoint: /tmp/airstore
