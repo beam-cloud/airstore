@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"io"
 	"syscall"
 
 	types "github.com/beam-cloud/airstore/pkg/types"
@@ -40,6 +41,7 @@ type RunOpts struct {
 // ExecOpts contains options for executing a command in a container
 type ExecOpts struct {
 	OutputWriter OutputWriter
+	StdinReader  io.Reader
 	Started      chan<- int
 }
 

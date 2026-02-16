@@ -47,6 +47,19 @@ type TaskQueue interface {
 	GetLogBuffer(ctx context.Context, taskID string) ([][]byte, error)
 }
 
+// TerminalIORepository manages interactive terminal I/O transport.
+// Implementations encapsulate broker/channel details (e.g., Redis pub/sub).
+type TerminalIORepository interface {
+	PublishInput(ctx context.Context, taskID string, data []byte) error
+	SubscribeInput(ctx context.Context, taskID string) (<-chan []byte, func(), error)
+
+	PublishOutput(ctx context.Context, taskID string, data []byte) error
+	SubscribeOutput(ctx context.Context, taskID string) (<-chan []byte, func(), error)
+
+	PublishCancel(ctx context.Context, taskID string) error
+	SubscribeCancel(ctx context.Context, taskID string) (<-chan struct{}, func(), error)
+}
+
 // MemberRepository manages workspace members
 type MemberRepository interface {
 	CreateMember(ctx context.Context, workspaceId uint, email, name string, role types.MemberRole) (*types.WorkspaceMember, error)

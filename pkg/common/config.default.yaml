@@ -39,6 +39,7 @@ image:
 # Sandbox configuration for task execution
 sandbox:
   defaultImage: public.ecr.aws/n4e0e1y0/airstore-default-sandbox:latest
+  interactiveIdleTimeout: 10m
 
 filesystem:
   mountPoint: /tmp/airstore
@@ -79,8 +80,8 @@ scheduler:
   cleanupInterval: 1m
   heartbeatInterval: 10s
   heartbeatTimeout: 30s
-  defaultWorkerCpu: 1000
-  defaultWorkerMemory: 1024
+  defaultWorkerCpu: 1000     # millicores (fallback when CPU_LIMIT env var not set)
+  defaultWorkerMemory: 1024  # MiB (fallback when MEMORY_LIMIT env var not set)
   pools:
     default:
       deploymentName: airstore-worker-default

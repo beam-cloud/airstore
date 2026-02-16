@@ -26,6 +26,9 @@ type Task struct {
 	// Status is the current task status
 	Status TaskStatus `json:"status" db:"status"`
 
+	// Type controls task execution mode (background by default).
+	Type TaskType `json:"type" db:"type"`
+
 	// Prompt is the Claude Code prompt (if this is a Claude Code task)
 	Prompt string `json:"prompt,omitempty" db:"prompt"`
 
@@ -42,9 +45,9 @@ type Task struct {
 	Resources *TaskResources `json:"resources,omitempty" db:"-"`
 
 	// Hook-triggered task fields (nil/defaults for manual tasks)
-	HookId      *uint `json:"hook_id,omitempty" db:"hook_id"`   // nil = manual, non-nil = hook-triggered
-	Attempt     int   `json:"attempt" db:"attempt"`              // 1-based attempt number
-	MaxAttempts int   `json:"max_attempts" db:"max_attempts"`    // default 1 (manual), 3 (hook)
+	HookId      *uint `json:"hook_id,omitempty" db:"hook_id"` // nil = manual, non-nil = hook-triggered
+	Attempt     int   `json:"attempt" db:"attempt"`           // 1-based attempt number
+	MaxAttempts int   `json:"max_attempts" db:"max_attempts"` // default 1 (manual), 3 (hook)
 
 	// ExitCode is the exit code when complete
 	ExitCode *int `json:"exit_code,omitempty" db:"exit_code"`
@@ -60,6 +63,27 @@ type Task struct {
 
 	// FinishedAt is when the task finished
 	FinishedAt *time.Time `json:"finished_at,omitempty" db:"finished_at"`
+}
+
+// TaskType represents how a task should execute.
+type TaskType string
+
+const (
+	TaskTypeBackground  TaskType = "background"
+	TaskTypeInteractive TaskType = "interactive"
+)
+
+// NormalizeType applies the default task type when unset.
+func (t *Task) NormalizeType() {
+	if t.Type == "" {
+		t.Type = TaskTypeBackground
+	}
+}
+
+// IsInteractive returns true when the task should run in interactive mode.
+func (t *Task) IsInteractive() bool {
+	t.NormalizeType()
+	return t.Type == TaskTypeInteractive
 }
 
 // IsClaudeCodeTask returns true if this task has a prompt (Claude Code task)
@@ -99,9 +123,9 @@ const (
 
 // Maximum resource limits for validation
 const (
-	MaxTaskCPU    int64 = 32000      // 32 CPUs
-	MaxTaskMemory int64 = 128 << 30  // 128 GiB
-	MaxTaskGPU    int   = 8          // 8 GPUs
+	MaxTaskCPU    int64 = 32000     // 32 CPUs
+	MaxTaskMemory int64 = 128 << 30 // 128 GiB
+	MaxTaskGPU    int   = 8         // 8 GPUs
 )
 
 // Validate checks that resource values are within acceptable bounds.

@@ -802,22 +802,35 @@ func ptrInt64(v int64) *int64 {
 }
 
 // buildEntrypoint constructs the entrypoint for a task.
-// For Claude Code tasks, wraps the prompt in the CLI invocation.
+// Prompt tasks are resolved through prompt runner entrypoints; all other tasks
+// use their explicit task entrypoint.
 func (m *SandboxManager) buildEntrypoint(task types.Task, env map[string]string) []string {
-	if !task.IsClaudeCodeTask() {
+	if task.Prompt == "" {
 		return task.Entrypoint
 	}
 
-	// Inject Anthropic API key for Claude Code
-	if m.anthropicAPIKey != "" {
-		env["ANTHROPIC_API_KEY"] = m.anthropicAPIKey
-	}
+	return m.buildPromptTaskEntrypoint(task, env)
+}
+
+func (m *SandboxManager) buildPromptTaskEntrypoint(task types.Task, env map[string]string) []string {
+	// Prompt tasks currently use Claude CLI. Keep this isolated so future
+	// prompt runners can be swapped without touching generic entrypoint flow.
+	return m.buildClaudePromptEntrypoint(task, env)
+}
+
+func (m *SandboxManager) buildClaudePromptEntrypoint(task types.Task, env map[string]string) []string {
+	// Claude prompt tasks should use the worker-configured API key.
+	m.injectAnthropicAPIKey(env, true)
 
 	log.Info().
 		Str("task_id", task.ExternalId).
 		Str("prompt", task.Prompt[:min(50, len(task.Prompt))]).
 		Msg("running claude code task")
 
+	return claudePromptEntrypoint(task.Prompt)
+}
+
+func claudePromptEntrypoint(prompt string) []string {
 	// Claude Code CLI: non-interactive, streaming JSON output
 	return []string{
 		"claude",
@@ -825,7 +838,38 @@ func (m *SandboxManager) buildEntrypoint(task types.Task, env map[string]string)
 		"--verbose",
 		"--output-format", "stream-json",
 		"--dangerously-skip-permissions",
-		"-p", task.Prompt,
+		"-p", prompt,
+	}
+}
+
+func (m *SandboxManager) copyTaskEnv(task types.Task) map[string]string {
+	env := make(map[string]string, len(task.Env)+1)
+	for key, value := range task.Env {
+		env[key] = value
+	}
+	return env
+}
+
+func (m *SandboxManager) injectAnthropicAPIKey(env map[string]string, overwrite bool) {
+	if m.anthropicAPIKey == "" {
+		return
+	}
+	if overwrite || env["ANTHROPIC_API_KEY"] == "" {
+		env["ANTHROPIC_API_KEY"] = m.anthropicAPIKey
+	}
+}
+
+func (m *SandboxManager) buildTaskSandboxConfig(task types.Task, entrypoint []string, env map[string]string, mountSource string) types.SandboxConfig {
+	return types.SandboxConfig{
+		ID:              fmt.Sprintf("task-%s", task.ExternalId),
+		WorkspaceID:     fmt.Sprintf("%d", task.WorkspaceId),
+		Image:           task.Image,
+		Runtime:         types.ContainerRuntimeGvisor,
+		Entrypoint:      entrypoint,
+		Env:             env,
+		WorkingDir:      types.ContainerWorkDir,
+		FilesystemMount: mountSource,
+		Resources:       task.GetResources(),
 	}
 }
 
@@ -859,15 +903,70 @@ func (m *SandboxManager) cleanupMount(taskID string) {
 	}
 }
 
+// ptySetupScript is the shell script executed inside the sandbox for interactive
+// terminal sessions.  It starts an interactive shell under a PTY wrapper,
+// falling back through script → python pty → bash -i → sh -i depending on
+// what's available in the image.
+//
+// Each PTY path sets the terminal size to a reasonable default (COLUMNS x LINES
+// from the environment, defaulting to 180x40) since there is no dynamic resize.
+const ptySetupScript = `
+C=${COLUMNS:-180}; L=${LINES:-40}
+S="stty cols $C rows $L 2>/dev/null; exec /bin/bash"
+if command -v script >/dev/null 2>&1; then exec script -qc "$S" /dev/null
+elif command -v python3 >/dev/null 2>&1; then exec python3 -c "import pty; pty.spawn([\"/bin/bash\",\"-c\",\"$S\"])"
+elif command -v python  >/dev/null 2>&1; then exec python  -c "import pty; pty.spawn([\"/bin/bash\",\"-c\",\"$S\"])"
+elif [ -x /bin/bash ];                  then exec /bin/bash -i
+else                                          exec /bin/sh -i
+fi
+`
+
+const (
+	ptyDefaultPATH = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	ptyDefaultCols = "180"
+	ptyDefaultRows = "40"
+)
+
+// AttachPTY starts a long-lived PTY-backed shell process in a running sandbox.
+func (m *SandboxManager) AttachPTY(ctx context.Context, sandboxID string, stdin io.Reader, stdout io.Writer) error {
+	m.mu.RLock()
+	sandbox, exists := m.sandboxes[sandboxID]
+	m.mu.RUnlock()
+	if !exists {
+		return fmt.Errorf("sandbox %s not found", sandboxID)
+	}
+	if sandbox.State.Status != types.SandboxStatusRunning {
+		return fmt.Errorf("sandbox %s is not running", sandboxID)
+	}
+
+	env := []string{
+		ptyDefaultPATH,
+		"TERM=xterm-256color",
+		"COLUMNS=" + ptyDefaultCols,
+		"LINES=" + ptyDefaultRows,
+	}
+	for k, v := range sandbox.Config.Env {
+		env = append(env, fmt.Sprintf("%s=%s", k, v))
+	}
+
+	proc := specs.Process{
+		Args: []string{"/bin/sh", "-lc", ptySetupScript},
+		Cwd:  types.ContainerWorkDir,
+		Env:  env,
+		User: specs.User{UID: types.SandboxUserUID, GID: types.SandboxUserGID},
+	}
+
+	return m.runtime.Exec(ctx, sandboxID, proc, &runtime.ExecOpts{
+		OutputWriter: stdout,
+		StdinReader:  stdin,
+	})
+}
+
 // RunTask creates and runs a sandbox for a task, returning when complete
 func (m *SandboxManager) RunTask(ctx context.Context, task types.Task) (*types.TaskResult, error) {
 	sandboxID := fmt.Sprintf("task-%s", task.ExternalId)
 
-	// Initialize env map
-	env := task.Env
-	if env == nil {
-		env = make(map[string]string)
-	}
+	env := m.copyTaskEnv(task)
 
 	// Build entrypoint
 	entrypoint := m.buildEntrypoint(task, env)
@@ -876,18 +975,7 @@ func (m *SandboxManager) RunTask(ctx context.Context, task types.Task) (*types.T
 	taskMountSource := m.mountFilesystem(ctx, task)
 	defer m.cleanupMount(task.ExternalId)
 
-	// Build sandbox config
-	cfg := types.SandboxConfig{
-		ID:              sandboxID,
-		WorkspaceID:     fmt.Sprintf("%d", task.WorkspaceId),
-		Image:           task.Image,
-		Runtime:         types.ContainerRuntimeGvisor,
-		Entrypoint:      entrypoint,
-		Env:             env,
-		WorkingDir:      types.ContainerWorkDir,
-		FilesystemMount: taskMountSource,
-		Resources:       task.GetResources(),
-	}
+	cfg := m.buildTaskSandboxConfig(task, entrypoint, env, taskMountSource)
 
 	// Create the sandbox
 	state, err := m.Create(cfg)

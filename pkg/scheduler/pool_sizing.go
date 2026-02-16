@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/repository"
@@ -212,6 +213,13 @@ func (s *PoolScaler) buildDeployment() *appsv1.Deployment {
 	gatewayGRPCAddr := fmt.Sprintf("%s.%s.svc.cluster.local:1993",
 		s.config.GatewayServiceName, s.config.Namespace)
 
+	// Derive worker resource limits from K8s resource spec so the worker
+	// can compute how many tasks it can run concurrently.
+	cpuQuantity := resource.MustParse(s.config.WorkerCpu)
+	memQuantity := resource.MustParse(s.config.WorkerMemory)
+	cpuMillis := cpuQuantity.MilliValue() // millicores
+	memMiB := memQuantity.Value() >> 20   // bytes → MiB
+
 	// Serialize config to JSON for workers
 	configJSON, configHash := s.serializeConfig()
 
@@ -273,11 +281,21 @@ func (s *PoolScaler) buildDeployment() *appsv1.Deployment {
 									Name:  "AIRSTORE_TOKEN",
 									Value: s.config.WorkerToken,
 								},
-								{
-									// Full config as JSON - worker loads via ConfigManager
-									Name:  "CONFIG_JSON",
-									Value: configJSON,
-								},
+							{
+								// Full config as JSON - worker loads via ConfigManager
+								Name:  "CONFIG_JSON",
+								Value: configJSON,
+							},
+							{
+								// Worker CPU capacity in millicores (used to compute task concurrency)
+								Name:  "CPU_LIMIT",
+								Value: strconv.FormatInt(cpuMillis, 10),
+							},
+							{
+								// Worker memory capacity in MiB (used to compute task concurrency)
+								Name:  "MEMORY_LIMIT",
+								Value: strconv.FormatInt(memMiB, 10),
+							},
 							},
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{
