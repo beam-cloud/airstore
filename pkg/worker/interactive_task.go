@@ -79,7 +79,7 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.Task) (*type
 	runErr := w.sandboxManager.AttachPTY(sessionCtx, sandboxID, stdinReader, terminalWriter)
 	exitCode, errMsg, status := interactiveResult(runErr, idleTimedOut.Load())
 
-	w.sandboxManager.publishStatus(sessionCtx, task.ExternalId, status, &exitCode, errMsg)
+	w.sandboxManager.publishStatus(ctx, task.ExternalId, status, &exitCode, errMsg)
 	return &types.TaskResult{
 		ID:       task.ExternalId,
 		ExitCode: exitCode,
