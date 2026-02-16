@@ -498,23 +498,29 @@ func (s *SourceService) UpdateView(ctx context.Context, req *pb.UpdateViewReques
 		query.Filter = ""
 		if req.Guidance != "" {
 			query.Guidance = req.Guidance
-			querySpec, filenameFormat, err := s.resolveQuerySpec(ctx, query.Integration, query.Name, req.Guidance)
-			if err != nil {
-				return &pb.UpdateViewResponse{Ok: false, Error: "failed to regenerate query: " + err.Error()}, nil
-			}
-			query.QuerySpec = s.refineQueryIfNeeded(ctx, query.Integration, req.Guidance, querySpec, filenameFormat)
-			if filenameFormat != "" {
-				query.FilenameFormat = filenameFormat
-			}
 		}
+
+		// Always regenerate query spec from name + guidance (may be empty).
+		guidance := query.Guidance
+		querySpec, filenameFormat, err := s.resolveQuerySpec(ctx, query.Integration, query.Name, guidance)
+		if err != nil {
+			return &pb.UpdateViewResponse{Ok: false, Error: "failed to regenerate query: " + err.Error()}, nil
+		}
+		query.QuerySpec = s.refineQueryIfNeeded(ctx, query.Integration, guidance, querySpec, filenameFormat)
+		if filenameFormat != "" {
+			query.FilenameFormat = filenameFormat
+		}
+
 		needsUpdate = true
 	} else if req.Guidance != "" && req.Guidance != query.Guidance {
 		query.Guidance = req.Guidance
 		query.Mode = types.ViewModeSmart
+
 		querySpec, filenameFormat, err := s.resolveQuerySpec(ctx, query.Integration, query.Name, req.Guidance)
 		if err != nil {
 			return &pb.UpdateViewResponse{Ok: false, Error: "failed to regenerate query: " + err.Error()}, nil
 		}
+
 		query.QuerySpec = s.refineQueryIfNeeded(ctx, query.Integration, req.Guidance, querySpec, filenameFormat)
 		if filenameFormat != "" {
 			query.FilenameFormat = filenameFormat
