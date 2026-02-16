@@ -55,6 +55,25 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.Task) (*type
 	}
 	defer inputCleanup()
 
+	cancelCh, cancelCleanup, err := w.terminalIO.SubscribeCancel(sessionCtx, task.ExternalId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to subscribe terminal cancel: %w", err)
+	}
+	defer cancelCleanup()
+
+	go func() {
+		select {
+		case <-sessionCtx.Done():
+		case <-cancelCh:
+			log.Info().Str("task_id", task.ExternalId).Msg("received cancel signal for interactive task")
+			sessionCancel()
+			// Force-stop the sandbox so AttachPTY returns promptly.
+			// Killing only the `runsc exec` wrapper doesn't kill the sandbox's
+			// init process; Stop sends SIGKILL to all processes in the container.
+			w.sandboxManager.Stop(sandboxID, true)
+		}
+	}()
+
 	stdinReader, stdinWriter := io.Pipe()
 	defer stdinReader.Close()
 
@@ -69,10 +88,9 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.Task) (*type
 		onActivity: func() {
 			signalActivity(activityCh)
 		},
-		mirror: io.MultiWriter(
-			NewS2Writer(sessionCtx, w.sandboxManager.s2, task.ExternalId, "stdout"),
-			NewConsoleWriter(task.ExternalId, "stdout"),
-		),
+		// Only mirror to S2 for log persistence. Console logging is omitted for
+		// interactive tasks — every byte of PTY output would spam the worker logs.
+		mirror: NewS2Writer(sessionCtx, w.sandboxManager.s2, task.ExternalId, "stdout"),
 	}
 
 	start := time.Now()

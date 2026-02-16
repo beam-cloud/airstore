@@ -55,6 +55,9 @@ type TerminalIORepository interface {
 
 	PublishOutput(ctx context.Context, taskID string, data []byte) error
 	SubscribeOutput(ctx context.Context, taskID string) (<-chan []byte, func(), error)
+
+	PublishCancel(ctx context.Context, taskID string) error
+	SubscribeCancel(ctx context.Context, taskID string) (<-chan struct{}, func(), error)
 }
 
 // MemberRepository manages workspace members

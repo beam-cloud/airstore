@@ -51,6 +51,16 @@ type TaskResponse struct {
 	FinishedAt  string            `json:"finished_at,omitempty"`
 }
 
+type SetTaskResultRequest struct {
+	ExitCode int    `json:"exit_code"`
+	Error    string `json:"error"`
+}
+
+type TerminalInputRequest struct {
+	Data    string `json:"data,omitempty"`
+	DataB64 string `json:"data_b64,omitempty"`
+}
+
 func NewTasksGroup(
 	routerGroup *echo.Group,
 	backend repository.BackendRepository,
@@ -272,21 +282,15 @@ func (g *TasksGroup) CancelTask(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, err.Error())
 	}
 
+	// Signal the worker to stop the sandbox immediately (best-effort).
+	if g.terminalIO != nil {
+		_ = g.terminalIO.PublishCancel(c.Request().Context(), externalId)
+	}
+
 	return SuccessResponse(c, map[string]string{"status": "cancelled"})
 }
 
-// SetTaskResult is called by workers to report task completion
-type SetTaskResultRequest struct {
-	ExitCode int    `json:"exit_code"`
-	Error    string `json:"error"`
-}
-
-type TerminalInputRequest struct {
-	Data    string `json:"data,omitempty"`
-	DataB64 string `json:"data_b64,omitempty"`
-}
-
-
+// SetTaskResult is called by workers to report task completion.
 func (g *TasksGroup) SetTaskResult(c echo.Context) error {
 	externalId := c.Param("id")
 
