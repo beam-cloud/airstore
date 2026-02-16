@@ -48,8 +48,8 @@ type SchedulerConfig struct {
 	CleanupInterval       time.Duration               `key:"cleanupInterval" json:"cleanup_interval"`
 	HeartbeatInterval     time.Duration               `key:"heartbeatInterval" json:"heartbeat_interval"`
 	HeartbeatTimeout      time.Duration               `key:"heartbeatTimeout" json:"heartbeat_timeout"`
-	DefaultWorkerCpu      int64                       `key:"defaultWorkerCpu" json:"default_worker_cpu"`
-	DefaultWorkerMemory   int64                       `key:"defaultWorkerMemory" json:"default_worker_memory"`
+	DefaultWorkerCpu      int64                       `key:"defaultWorkerCpu" json:"default_worker_cpu"`    // millicores
+	DefaultWorkerMemory   int64                       `key:"defaultWorkerMemory" json:"default_worker_memory"` // MiB
 	Pools                 map[string]WorkerPoolConfig `key:"pools" json:"pools"`
 }
 

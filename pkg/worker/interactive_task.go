@@ -23,24 +23,43 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.Task) (*type
 	env := w.sandboxManager.copyTaskEnv(task)
 
 	taskMountSource := w.sandboxManager.mountFilesystem(ctx, task)
-	defer w.sandboxManager.cleanupMount(task.ExternalId)
 
 	cfg := w.sandboxManager.buildTaskSandboxConfig(task, []string{"sleep", "infinity"}, env, taskMountSource)
 
 	if _, err := w.sandboxManager.Create(cfg); err != nil {
+		w.sandboxManager.cleanupMount(task.ExternalId)
 		return nil, fmt.Errorf("failed to create interactive sandbox: %w", err)
 	}
-	defer w.sandboxManager.Delete(sandboxID, true)
 
 	if err := w.sandboxManager.Start(sandboxID); err != nil {
 		w.sandboxManager.publishStatus(ctx, task.ExternalId, types.TaskStatusFailed, nil, err.Error())
+		w.sandboxManager.Delete(sandboxID, true)
+		w.sandboxManager.cleanupMount(task.ExternalId)
 		return nil, fmt.Errorf("failed to start interactive sandbox: %w", err)
 	}
 
 	w.sandboxManager.publishStatus(ctx, task.ExternalId, types.TaskStatusRunning, nil, "")
 
+	result := w.runInteractiveSession(ctx, task, sandboxID)
+
+	// Run heavy sandbox teardown (runtime delete, overlay cleanup, mount unmount)
+	// in a background goroutine so the worker can accept new tasks immediately.
+	go func() {
+		w.sandboxManager.Delete(sandboxID, true)
+		w.sandboxManager.cleanupMount(task.ExternalId)
+		log.Info().Str("task_id", task.ExternalId).Msg("interactive sandbox cleanup complete")
+	}()
+
+	return result, nil
+}
+
+// runInteractiveSession owns the PTY session lifecycle. It blocks until the
+// session ends (user disconnect, idle timeout, or cancel) and returns the result.
+// Sandbox teardown is NOT done here — the caller handles it.
+func (w *Worker) runInteractiveSession(ctx context.Context, task types.Task, sandboxID string) *types.TaskResult {
 	sessionCtx, sessionCancel := context.WithCancel(ctx)
 	defer sessionCancel()
+
 	idleTimeout := w.config.Sandbox.GetInteractiveIdleTimeout()
 	var idleTimedOut atomic.Bool
 	activityCh := make(chan struct{}, 1)
@@ -51,13 +70,13 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.Task) (*type
 
 	inputCh, inputCleanup, err := w.terminalIO.SubscribeInput(sessionCtx, task.ExternalId)
 	if err != nil {
-		return nil, fmt.Errorf("failed to subscribe terminal input: %w", err)
+		return interactiveErrorResult(task.ExternalId, err)
 	}
 	defer inputCleanup()
 
 	cancelCh, cancelCleanup, err := w.terminalIO.SubscribeCancel(sessionCtx, task.ExternalId)
 	if err != nil {
-		return nil, fmt.Errorf("failed to subscribe terminal cancel: %w", err)
+		return interactiveErrorResult(task.ExternalId, err)
 	}
 	defer cancelCleanup()
 
@@ -103,7 +122,7 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.Task) (*type
 		ExitCode: exitCode,
 		Error:    errMsg,
 		Duration: time.Since(start),
-	}, nil
+	}
 }
 
 func interactiveResult(err error, idleTimedOut bool) (int, string, types.TaskStatus) {
@@ -119,6 +138,14 @@ func interactiveResult(err error, idleTimedOut bool) (int, string, types.TaskSta
 	}
 
 	return -1, err.Error(), types.TaskStatusFailed
+}
+
+func interactiveErrorResult(taskID string, err error) *types.TaskResult {
+	return &types.TaskResult{
+		ID:       taskID,
+		ExitCode: -1,
+		Error:    err.Error(),
+	}
 }
 
 type terminalOutputWriter struct {
