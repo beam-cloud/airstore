@@ -328,6 +328,9 @@ func (g *TasksGroup) ConnectTerminal(c echo.Context) error {
 	w := &sseWriter{c: c}
 	w.init()
 
+	keepalive := time.NewTicker(20 * time.Second)
+	defer keepalive.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -341,6 +344,8 @@ func (g *TasksGroup) ConnectTerminal(c echo.Context) error {
 				"data_b64": base64.StdEncoding.EncodeToString(chunk),
 			})
 			w.flush()
+		case <-keepalive.C:
+			w.comment("keepalive")
 		}
 	}
 }
@@ -505,6 +510,12 @@ func (w *sseWriter) write(v any) {
 	r.Write([]byte("data: "))
 	r.Write(data)
 	r.Write([]byte("\n\n"))
+}
+
+func (w *sseWriter) comment(text string) {
+	r := w.c.Response()
+	r.Write([]byte(": " + text + "\n\n"))
+	r.Flush()
 }
 
 func (w *sseWriter) flush() {

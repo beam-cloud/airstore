@@ -456,7 +456,11 @@ func (g *Gateway) registerServices() error {
 	// Register task and workspace APIs (requires Postgres)
 	if g.BackendRepo != nil {
 		taskQueue := repository.NewRedisTaskQueue(g.RedisClient, "default")
-		terminalIO := repository.NewRedisTerminalIORepository(g.RedisClient)
+
+		var terminalIO repository.TerminalIORepository
+		if g.RedisClient != nil {
+			terminalIO = repository.NewRedisTerminalIORepository(g.RedisClient)
+		}
 
 		// Wire task queue into the gRPC gateway service for CreateTask/DeleteTask
 		if gatewayService != nil {
