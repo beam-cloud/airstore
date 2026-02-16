@@ -31,12 +31,6 @@ func TestRedisTerminalIORepository_PublishSubscribe(t *testing.T) {
 	}
 	defer outputCleanup()
 
-	resizeCh, resizeCleanup, err := repo.SubscribeResize(ctx, taskID)
-	if err != nil {
-		t.Fatalf("subscribe resize: %v", err)
-	}
-	defer resizeCleanup()
-
 	wantInput := []byte("echo hi\n")
 	if err := repo.PublishInput(ctx, taskID, wantInput); err != nil {
 		t.Fatalf("publish input: %v", err)
@@ -61,18 +55,6 @@ func TestRedisTerminalIORepository_PublishSubscribe(t *testing.T) {
 	}
 	if string(gotOutput) != string(wantOutput) {
 		t.Fatalf("output mismatch: got %q want %q", gotOutput, wantOutput)
-	}
-
-	if err := repo.PublishResize(ctx, taskID, 120, 40); err != nil {
-		t.Fatalf("publish resize: %v", err)
-	}
-
-	gotResize, err := waitFor[TerminalResizeEvent](resizeCh)
-	if err != nil {
-		t.Fatalf("wait resize: %v", err)
-	}
-	if gotResize.Cols != 120 || gotResize.Rows != 40 {
-		t.Fatalf("resize mismatch: got %+v", gotResize)
 	}
 }
 

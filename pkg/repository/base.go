@@ -47,12 +47,6 @@ type TaskQueue interface {
 	GetLogBuffer(ctx context.Context, taskID string) ([][]byte, error)
 }
 
-// TerminalResizeEvent is a terminal resize operation for an interactive task.
-type TerminalResizeEvent struct {
-	Cols int `json:"cols"`
-	Rows int `json:"rows"`
-}
-
 // TerminalIORepository manages interactive terminal I/O transport.
 // Implementations encapsulate broker/channel details (e.g., Redis pub/sub).
 type TerminalIORepository interface {
@@ -61,9 +55,6 @@ type TerminalIORepository interface {
 
 	PublishOutput(ctx context.Context, taskID string, data []byte) error
 	SubscribeOutput(ctx context.Context, taskID string) (<-chan []byte, func(), error)
-
-	PublishResize(ctx context.Context, taskID string, cols int, rows int) error
-	SubscribeResize(ctx context.Context, taskID string) (<-chan TerminalResizeEvent, func(), error)
 }
 
 // MemberRepository manages workspace members

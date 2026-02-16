@@ -907,17 +907,25 @@ func (m *SandboxManager) cleanupMount(taskID string) {
 // terminal sessions.  It starts an interactive shell under a PTY wrapper,
 // falling back through script → python pty → bash -i → sh -i depending on
 // what's available in the image.
+//
+// Each PTY path sets the terminal size to a reasonable default (COLUMNS x LINES
+// from the environment, defaulting to 180x40) since there is no dynamic resize.
 const ptySetupScript = `
-# Start an interactive shell under a PTY wrapper.
-if command -v script >/dev/null 2>&1; then exec script -qc /bin/bash /dev/null
-elif command -v python3 >/dev/null 2>&1; then exec python3 -c 'import pty; pty.spawn("/bin/bash")'
-elif command -v python  >/dev/null 2>&1; then exec python  -c 'import pty; pty.spawn("/bin/bash")'
+C=${COLUMNS:-180}; L=${LINES:-40}
+S="stty cols $C rows $L 2>/dev/null; exec /bin/bash"
+if command -v script >/dev/null 2>&1; then exec script -qc "$S" /dev/null
+elif command -v python3 >/dev/null 2>&1; then exec python3 -c "import pty; pty.spawn([\"/bin/bash\",\"-c\",\"$S\"])"
+elif command -v python  >/dev/null 2>&1; then exec python  -c "import pty; pty.spawn([\"/bin/bash\",\"-c\",\"$S\"])"
 elif [ -x /bin/bash ];                  then exec /bin/bash -i
 else                                          exec /bin/sh -i
 fi
 `
 
-const ptyDefaultPATH = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+const (
+	ptyDefaultPATH = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	ptyDefaultCols = "180"
+	ptyDefaultRows = "40"
+)
 
 // AttachPTY starts a long-lived PTY-backed shell process in a running sandbox.
 func (m *SandboxManager) AttachPTY(ctx context.Context, sandboxID string, stdin io.Reader, stdout io.Writer) error {
@@ -931,7 +939,12 @@ func (m *SandboxManager) AttachPTY(ctx context.Context, sandboxID string, stdin 
 		return fmt.Errorf("sandbox %s is not running", sandboxID)
 	}
 
-	env := []string{ptyDefaultPATH, "TERM=xterm-256color"}
+	env := []string{
+		ptyDefaultPATH,
+		"TERM=xterm-256color",
+		"COLUMNS=" + ptyDefaultCols,
+		"LINES=" + ptyDefaultRows,
+	}
 	for k, v := range sandbox.Config.Env {
 		env = append(env, fmt.Sprintf("%s=%s", k, v))
 	}

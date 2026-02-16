@@ -81,7 +81,6 @@ func (g *TasksGroup) registerRoutes() {
 	g.routerGroup.GET("/:id/logs/stream", g.StreamLogs)
 	g.routerGroup.GET("/:id/terminal/connect", g.ConnectTerminal)
 	g.routerGroup.POST("/:id/terminal/input", g.SendTerminalInput)
-	g.routerGroup.POST("/:id/terminal/resize", g.ResizeTerminal)
 }
 
 // CreateTask creates a new task and queues it for execution
@@ -287,10 +286,6 @@ type TerminalInputRequest struct {
 	DataB64 string `json:"data_b64,omitempty"`
 }
 
-type TerminalResizeRequest struct {
-	Cols int `json:"cols"`
-	Rows int `json:"rows"`
-}
 
 func (g *TasksGroup) SetTaskResult(c echo.Context) error {
 	externalId := c.Param("id")
@@ -371,30 +366,6 @@ func (g *TasksGroup) SendTerminalInput(c echo.Context) error {
 
 	if err := g.terminalIO.PublishInput(ctx, taskID, data); err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, "failed to publish terminal input")
-	}
-
-	return SuccessResponse(c, map[string]bool{"ok": true})
-}
-
-// ResizeTerminal publishes a resize event for an interactive task terminal.
-func (g *TasksGroup) ResizeTerminal(c echo.Context) error {
-	ctx := c.Request().Context()
-	taskID := c.Param("id")
-
-	if _, err := g.requireInteractiveTerminalTask(c, taskID); err != nil {
-		return err
-	}
-
-	var req TerminalResizeRequest
-	if err := c.Bind(&req); err != nil {
-		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
-	}
-	if req.Cols <= 0 || req.Rows <= 0 {
-		return ErrorResponse(c, http.StatusBadRequest, "cols and rows must be positive")
-	}
-
-	if err := g.terminalIO.PublishResize(ctx, taskID, req.Cols, req.Rows); err != nil {
-		return ErrorResponse(c, http.StatusInternalServerError, "failed to publish terminal resize")
 	}
 
 	return SuccessResponse(c, map[string]bool{"ok": true})
