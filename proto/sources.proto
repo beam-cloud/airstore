@@ -202,6 +202,7 @@ message UpdateViewRequest {
   string name = 2;               // New name (optional, triggers rename + path update)
   string guidance = 3;           // New guidance (triggers re-inference of query_spec)
   string filter = 4;             // New structured filter JSON (query mode)
+  string mode = 5;               // Explicit mode: "smart" or "query" (triggers mode switch)
 }
 
 message UpdateViewResponse {

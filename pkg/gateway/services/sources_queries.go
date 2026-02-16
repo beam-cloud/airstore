@@ -205,7 +205,7 @@ func (s *SourceService) executeAndCacheQuery(ctx context.Context, pctx *sources.
 	}
 
 	spec := parseQuerySpec(query.Integration, query.QuerySpec)
-	if spec.Query == "" && query.Integration != string(types.SourcePostHog) {
+	if spec.Query == "" && !emptyQueryAllowed(query.Integration) {
 		return nil, fmt.Errorf("empty query spec for %s", query.Integration)
 	}
 
@@ -360,6 +360,11 @@ func (s *SourceService) CreateView(ctx context.Context, req *pb.CreateViewReques
 		if err != nil {
 			return &pb.CreateViewResponse{Ok: false, Error: "invalid filter: " + err.Error()}, nil
 		}
+		// Validate the filter produces a non-empty query for integrations that need it.
+		spec := parseQuerySpec(req.Integration, querySpec)
+		if spec.Query == "" && !emptyQueryAllowed(req.Integration) {
+			return &pb.CreateViewResponse{Ok: false, Error: "filter produces no query criteria"}, nil
+		}
 		filenameFormat = sources.DefaultFilenameFormat(req.Integration)
 	} else {
 		querySpec, filenameFormat, err = s.resolveQuerySpec(ctx, req.Integration, req.Name, req.Guidance)
@@ -487,8 +492,25 @@ func (s *SourceService) UpdateView(ctx context.Context, req *pb.UpdateViewReques
 		query.QuerySpec = querySpec
 		query.FilenameFormat = sources.DefaultFilenameFormat(query.Integration)
 		needsUpdate = true
+	} else if req.Mode == string(types.ViewModeSmart) && query.Mode != types.ViewModeSmart {
+		// Explicit switch from query → smart mode.
+		query.Mode = types.ViewModeSmart
+		query.Filter = ""
+		if req.Guidance != "" {
+			query.Guidance = req.Guidance
+			querySpec, filenameFormat, err := s.resolveQuerySpec(ctx, query.Integration, query.Name, req.Guidance)
+			if err != nil {
+				return &pb.UpdateViewResponse{Ok: false, Error: "failed to regenerate query: " + err.Error()}, nil
+			}
+			query.QuerySpec = s.refineQueryIfNeeded(ctx, query.Integration, req.Guidance, querySpec, filenameFormat)
+			if filenameFormat != "" {
+				query.FilenameFormat = filenameFormat
+			}
+		}
+		needsUpdate = true
 	} else if req.Guidance != "" && req.Guidance != query.Guidance {
 		query.Guidance = req.Guidance
+		query.Mode = types.ViewModeSmart
 		querySpec, filenameFormat, err := s.resolveQuerySpec(ctx, query.Integration, query.Name, req.Guidance)
 		if err != nil {
 			return &pb.UpdateViewResponse{Ok: false, Error: "failed to regenerate query: " + err.Error()}, nil
@@ -730,13 +752,16 @@ func (s *SourceService) resolveQuerySpec(ctx context.Context, integration, name,
 	}
 
 	spec := parseQuerySpec(integration, querySpec)
-	if spec.Query == "" && integration != string(types.SourcePostHog) {
+	if spec.Query == "" && !emptyQueryAllowed(integration) {
 		return "", "", fmt.Errorf("invalid query spec from inference")
 	}
 	if filenameFormat == "" {
 		filenameFormat = spec.FilenameFormat
 	}
-	if filenameFormat == "" {
+	// Ensure the filename format is a valid template (contains placeholders).
+	// LLMs sometimes return literal filenames (e.g., "test.md") instead of
+	// templates with {identifier}/{title} placeholders.
+	if filenameFormat == "" || !strings.Contains(filenameFormat, "{") {
 		filenameFormat = sources.DefaultFilenameFormat(integration)
 	}
 	return querySpec, filenameFormat, nil
@@ -1003,6 +1028,17 @@ func viewToProto(q *types.FilesystemQuery) *pb.SourceView {
 		v.LastExecuted = q.LastExecuted.Unix()
 	}
 	return v
+}
+
+// emptyQueryAllowed returns true for integrations whose providers handle
+// empty query strings gracefully (i.e., return all items with no filter).
+func emptyQueryAllowed(integration string) bool {
+	switch types.SourceType(integration) {
+	case types.SourceLinear, types.SourcePostHog:
+		return true
+	default:
+		return false
+	}
 }
 
 // isValidQueryName rejects names that could cause path traversal.

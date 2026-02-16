@@ -2291,6 +2291,7 @@ type UpdateViewRequest struct {
 	Name     string          `json:"name"`     // New name (optional)
 	Guidance string          `json:"guidance"` // New guidance (optional)
 	Filter   json.RawMessage `json:"filter"`   // New filter (optional, query mode)
+	Mode     string          `json:"mode"`     // Explicit mode: "smart" or "query"
 }
 
 // ViewResponse represents a source view in API responses.
@@ -2462,6 +2463,7 @@ func (g *FilesystemGroup) UpdateView(c echo.Context) error {
 		Name:       req.Name,
 		Guidance:   req.Guidance,
 		Filter:     string(req.Filter),
+		Mode:       req.Mode,
 	})
 	if err != nil {
 		log.Error().Err(err).Str("external_id", externalId).Msg("failed to update source view")
@@ -2582,6 +2584,8 @@ func defaultResourceType(integration string) string {
 		return "repos"
 	case "slack":
 		return "channels"
+	case "linear":
+		return "teams"
 	default:
 		return ""
 	}

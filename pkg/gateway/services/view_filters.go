@@ -63,6 +63,7 @@ type LinearFilter struct {
 	Assignee string `json:"assignee"`
 	Priority string `json:"priority"`
 	Label    string `json:"label"`
+	Project  string `json:"project"`
 }
 
 type PostHogFilter struct {
@@ -279,10 +280,18 @@ func buildLinearFilter(raw json.RawMessage, limit int) (string, error) {
 		parts = append(parts, "assignee:"+f.Assignee)
 	}
 	if f.Priority != "" {
-		parts = append(parts, "priority:"+f.Priority)
+		priorityMap := map[string]string{
+			"urgent": "1", "high": "2", "medium": "3", "low": "4",
+		}
+		if num, ok := priorityMap[strings.ToLower(f.Priority)]; ok {
+			parts = append(parts, "priority:"+num)
+		}
 	}
 	if f.Label != "" {
 		parts = append(parts, "label:"+quoteIfNeeded(f.Label))
+	}
+	if f.Project != "" {
+		parts = append(parts, "project:"+quoteIfNeeded(f.Project))
 	}
 	spec := newSpec("linear", strings.Join(parts, " "), limit)
 	if f.Type != "" {
