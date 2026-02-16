@@ -729,7 +729,7 @@ func (g *GDriveProvider) FormatFilename(format string, metadata map[string]strin
 			safeValue = value
 		} else {
 			// Sanitize the value for filesystem use
-			safeValue = sanitizeFolderName(value)
+			safeValue = sources.SanitizeFilename(value)
 			// Truncate long values (except id)
 			if key != "id" && len(safeValue) > 50 {
 				safeValue = safeValue[:50]

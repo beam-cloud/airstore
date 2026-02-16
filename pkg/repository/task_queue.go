@@ -11,20 +11,8 @@ import (
 )
 
 const (
-	// Redis key prefixes
-	taskQueueKey     = "airstore:task_queue:%s"    // per-pool queue
-	taskInFlightKey  = "airstore:task_inflight:%s" // tasks being processed
-	taskStateKey     = "airstore:task_state:%s"    // task state by ID
-	taskResultKey    = "airstore:task_result:%s"   // task result by ID
-	taskLogsChannel  = "airstore:task_logs:%s"     // pub/sub channel for task logs
-	taskLogsKey      = "airstore:task_logs_buf:%s" // log buffer for task
-	defaultQueueName = "default"
-
-	// Default timeout for blocking pop
+	defaultQueueName  = "default"
 	defaultPopTimeout = 5 * time.Second
-
-	// Maximum log buffer size per task (1MB)
-	maxLogBufferSize = 1 << 20
 )
 
 // RedisTaskQueue implements TaskQueue using Redis
@@ -66,8 +54,8 @@ func (q *RedisTaskQueue) Push(ctx context.Context, task *types.Task) error {
 
 	// Store state and push to queue atomically via pipeline
 	pipe := q.rdb.Pipeline()
-	pipe.Set(ctx, fmt.Sprintf(taskStateKey, task.ExternalId), stateData, 24*time.Hour)
-	pipe.LPush(ctx, fmt.Sprintf(taskQueueKey, q.queueName), data)
+	pipe.Set(ctx, common.Keys.TaskState(task.ExternalId), stateData, 24*time.Hour)
+	pipe.LPush(ctx, common.Keys.TaskQueue(q.queueName), data)
 	_, err = pipe.Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to push task: %w", err)
@@ -78,8 +66,8 @@ func (q *RedisTaskQueue) Push(ctx context.Context, task *types.Task) error {
 
 // Pop blocks until a task is available and returns it
 func (q *RedisTaskQueue) Pop(ctx context.Context, workerID string) (*types.Task, error) {
-	queueKey := fmt.Sprintf(taskQueueKey, q.queueName)
-	inFlightKey := fmt.Sprintf(taskInFlightKey, q.queueName)
+	queueKey := common.Keys.TaskQueue(q.queueName)
+	inFlightKey := common.Keys.TaskInFlight(q.queueName)
 
 	// BRPOP with timeout - blocks until task available
 	result, err := q.rdb.BRPop(ctx, defaultPopTimeout, queueKey).Result()
@@ -117,7 +105,7 @@ func (q *RedisTaskQueue) Pop(ctx context.Context, workerID string) (*types.Task,
 
 	pipe := q.rdb.Pipeline()
 	pipe.SAdd(ctx, inFlightKey, task.ExternalId)
-	pipe.Set(ctx, fmt.Sprintf(taskStateKey, task.ExternalId), stateData, 24*time.Hour)
+	pipe.Set(ctx, common.Keys.TaskState(task.ExternalId), stateData, 24*time.Hour)
 	_, _ = pipe.Exec(ctx)
 	// Task was popped - return it even if tracking failed
 
@@ -126,7 +114,7 @@ func (q *RedisTaskQueue) Pop(ctx context.Context, workerID string) (*types.Task,
 
 // Complete marks a task as complete and stores the result
 func (q *RedisTaskQueue) Complete(ctx context.Context, taskID string, result *types.TaskResult) error {
-	inFlightKey := fmt.Sprintf(taskInFlightKey, q.queueName)
+	inFlightKey := common.Keys.TaskInFlight(q.queueName)
 
 	// Update state to complete
 	state := &types.TaskState{
@@ -145,8 +133,8 @@ func (q *RedisTaskQueue) Complete(ctx context.Context, taskID string, result *ty
 
 	pipe := q.rdb.Pipeline()
 	pipe.SRem(ctx, inFlightKey, taskID)
-	pipe.Set(ctx, fmt.Sprintf(taskStateKey, taskID), stateData, 24*time.Hour)
-	pipe.Set(ctx, fmt.Sprintf(taskResultKey, taskID), resultData, 24*time.Hour)
+	pipe.Set(ctx, common.Keys.TaskState(taskID), stateData, 24*time.Hour)
+	pipe.Set(ctx, common.Keys.TaskResult(taskID), resultData, 24*time.Hour)
 	_, err := pipe.Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to complete task: %w", err)
@@ -166,7 +154,7 @@ func (q *RedisTaskQueue) Fail(ctx context.Context, taskID string, taskErr error)
 
 // GetState returns the current state of a task
 func (q *RedisTaskQueue) GetState(ctx context.Context, taskID string) (*types.TaskState, error) {
-	data, err := q.rdb.Get(ctx, fmt.Sprintf(taskStateKey, taskID)).Result()
+	data, err := q.rdb.Get(ctx, common.Keys.TaskState(taskID)).Result()
 	if err != nil {
 		return nil, fmt.Errorf("task not found: %w", err)
 	}
@@ -181,7 +169,7 @@ func (q *RedisTaskQueue) GetState(ctx context.Context, taskID string) (*types.Ta
 
 // GetResult returns the result of a completed task
 func (q *RedisTaskQueue) GetResult(ctx context.Context, taskID string) (*types.TaskResult, error) {
-	data, err := q.rdb.Get(ctx, fmt.Sprintf(taskResultKey, taskID)).Result()
+	data, err := q.rdb.Get(ctx, common.Keys.TaskResult(taskID)).Result()
 	if err != nil {
 		return nil, fmt.Errorf("result not found: %w", err)
 	}
@@ -196,12 +184,12 @@ func (q *RedisTaskQueue) GetResult(ctx context.Context, taskID string) (*types.T
 
 // Len returns the number of pending tasks in the queue
 func (q *RedisTaskQueue) Len(ctx context.Context) (int64, error) {
-	return q.rdb.LLen(ctx, fmt.Sprintf(taskQueueKey, q.queueName)).Result()
+	return q.rdb.LLen(ctx, common.Keys.TaskQueue(q.queueName)).Result()
 }
 
 // InFlightCount returns the number of tasks currently being processed
 func (q *RedisTaskQueue) InFlightCount(ctx context.Context) (int64, error) {
-	return q.rdb.SCard(ctx, fmt.Sprintf(taskInFlightKey, q.queueName)).Result()
+	return q.rdb.SCard(ctx, common.Keys.TaskInFlight(q.queueName)).Result()
 }
 
 // TaskLogEntry represents a log entry for a task
@@ -235,8 +223,8 @@ func (q *RedisTaskQueue) PublishLog(ctx context.Context, taskID string, stream s
 		return fmt.Errorf("failed to marshal log entry: %w", err)
 	}
 
-	channel := fmt.Sprintf(taskLogsChannel, taskID)
-	bufferKey := fmt.Sprintf(taskLogsKey, taskID)
+	channel := common.Keys.TaskLogsChannel(taskID)
+	bufferKey := common.Keys.TaskLogsBuffer(taskID)
 
 	// Publish to channel for live subscribers and append to buffer for late joiners
 	pipe := q.rdb.Pipeline()
@@ -266,13 +254,12 @@ func (q *RedisTaskQueue) PublishStatus(ctx context.Context, taskID string, statu
 		return fmt.Errorf("failed to marshal status event: %w", err)
 	}
 
-	channel := fmt.Sprintf(taskLogsChannel, taskID)
-	return q.rdb.Publish(ctx, channel, eventData).Err()
+	return q.rdb.Publish(ctx, common.Keys.TaskLogsChannel(taskID), eventData).Err()
 }
 
 // SubscribeLogs subscribes to a task's log channel and returns a channel of log entries
 func (q *RedisTaskQueue) SubscribeLogs(ctx context.Context, taskID string) (<-chan []byte, func(), error) {
-	channel := fmt.Sprintf(taskLogsChannel, taskID)
+	channel := common.Keys.TaskLogsChannel(taskID)
 	msgCh, errCh := q.rdb.Subscribe(ctx, channel)
 
 	out := make(chan []byte, 100)
@@ -316,7 +303,7 @@ func (q *RedisTaskQueue) SubscribeLogs(ctx context.Context, taskID string) (<-ch
 
 // GetLogBuffer returns buffered logs for a task (for late joiners)
 func (q *RedisTaskQueue) GetLogBuffer(ctx context.Context, taskID string) ([][]byte, error) {
-	bufferKey := fmt.Sprintf(taskLogsKey, taskID)
+	bufferKey := common.Keys.TaskLogsBuffer(taskID)
 
 	result, err := q.rdb.LRange(ctx, bufferKey, 0, -1).Result()
 	if err != nil {
