@@ -2,16 +2,9 @@ package repository
 
 import (
 	"context"
-	"fmt"
 	"sync"
 
 	"github.com/beam-cloud/airstore/pkg/common"
-)
-
-const (
-	terminalInputChannel  = "airstore:terminal:%s:input"
-	terminalOutputChannel = "airstore:terminal:%s:output"
-	terminalCancelChannel = "airstore:terminal:%s:cancel"
 )
 
 // RedisTerminalIORepository implements TerminalIORepository on Redis pub/sub.
@@ -24,27 +17,27 @@ func NewRedisTerminalIORepository(rdb *common.RedisClient) TerminalIORepository 
 }
 
 func (r *RedisTerminalIORepository) PublishInput(ctx context.Context, taskID string, data []byte) error {
-	return r.rdb.Publish(ctx, fmt.Sprintf(terminalInputChannel, taskID), data).Err()
+	return r.rdb.Publish(ctx, common.Keys.TerminalInput(taskID), data).Err()
 }
 
 func (r *RedisTerminalIORepository) SubscribeInput(ctx context.Context, taskID string) (<-chan []byte, func(), error) {
-	return r.subscribeBytes(ctx, fmt.Sprintf(terminalInputChannel, taskID))
+	return r.subscribeBytes(ctx, common.Keys.TerminalInput(taskID))
 }
 
 func (r *RedisTerminalIORepository) PublishOutput(ctx context.Context, taskID string, data []byte) error {
-	return r.rdb.Publish(ctx, fmt.Sprintf(terminalOutputChannel, taskID), data).Err()
+	return r.rdb.Publish(ctx, common.Keys.TerminalOutput(taskID), data).Err()
 }
 
 func (r *RedisTerminalIORepository) SubscribeOutput(ctx context.Context, taskID string) (<-chan []byte, func(), error) {
-	return r.subscribeBytes(ctx, fmt.Sprintf(terminalOutputChannel, taskID))
+	return r.subscribeBytes(ctx, common.Keys.TerminalOutput(taskID))
 }
 
 func (r *RedisTerminalIORepository) PublishCancel(ctx context.Context, taskID string) error {
-	return r.rdb.Publish(ctx, fmt.Sprintf(terminalCancelChannel, taskID), []byte("cancel")).Err()
+	return r.rdb.Publish(ctx, common.Keys.TerminalCancel(taskID), []byte("cancel")).Err()
 }
 
 func (r *RedisTerminalIORepository) SubscribeCancel(ctx context.Context, taskID string) (<-chan struct{}, func(), error) {
-	msgCh, errCh := r.rdb.Subscribe(ctx, fmt.Sprintf(terminalCancelChannel, taskID))
+	msgCh, errCh := r.rdb.Subscribe(ctx, common.Keys.TerminalCancel(taskID))
 	out := make(chan struct{}, 1)
 	done := make(chan struct{})
 	var once sync.Once

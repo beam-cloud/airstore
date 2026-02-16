@@ -481,10 +481,10 @@ func (l *LinearProvider) fetchIssue(ctx context.Context, token, id string) (map[
 func (l *LinearProvider) parseQueryToFilter(query string) map[string]any {
 	// Tokenize the query, respecting quotes and OR
 	tokens := linearTokenize(query)
-	
+
 	// Split by OR to handle alternatives
 	orGroups := linearSplitOR(tokens)
-	
+
 	if len(orGroups) > 1 {
 		// Multiple OR groups - each group becomes an AND, combined with OR
 		var orFilters []map[string]any
@@ -501,77 +501,9 @@ func (l *LinearProvider) parseQueryToFilter(query string) map[string]any {
 		}
 		return make(map[string]any)
 	}
-	
+
 	// Single group - AND logic between filters
 	return l.parseTokenGroup(tokens)
-}
-
-// parseTokenGroupFlat returns individual filters as a slice (for OR combining)
-func (l *LinearProvider) parseTokenGroupFlat(tokens []string) []map[string]any {
-	var filters []map[string]any
-	var searchTerms []string
-
-	for _, token := range tokens {
-		switch {
-		case strings.HasPrefix(token, "assignee:"):
-			value := strings.TrimPrefix(token, "assignee:")
-			if value == "me" {
-				filters = append(filters, map[string]any{"assignee": map[string]any{"isMe": map[string]any{"eq": true}}})
-			} else {
-				filters = append(filters, map[string]any{"assignee": map[string]any{"name": map[string]any{"containsIgnoreCase": value}}})
-			}
-		case strings.HasPrefix(token, "creator:"):
-			value := strings.TrimPrefix(token, "creator:")
-			filters = append(filters, map[string]any{"creator": map[string]any{"name": map[string]any{"containsIgnoreCase": value}}})
-		case strings.HasPrefix(token, "state:"):
-			value := l.normalizeState(strings.TrimPrefix(token, "state:"))
-			filters = append(filters, map[string]any{"state": map[string]any{"name": map[string]any{"containsIgnoreCase": value}}})
-		case strings.HasPrefix(token, "team:"):
-			filters = append(filters, map[string]any{"team": map[string]any{"key": map[string]any{"eqIgnoreCase": strings.TrimPrefix(token, "team:")}}})
-		case strings.HasPrefix(token, "priority:"):
-			var p int
-			fmt.Sscanf(strings.TrimPrefix(token, "priority:"), "%d", &p)
-			filters = append(filters, map[string]any{"priority": map[string]any{"eq": p}})
-		case strings.HasPrefix(token, "label:"):
-			filters = append(filters, map[string]any{"labels": map[string]any{"name": map[string]any{"containsIgnoreCase": strings.TrimPrefix(token, "label:")}}})
-		case strings.HasPrefix(token, "project:"):
-			filters = append(filters, map[string]any{"project": map[string]any{"name": map[string]any{"containsIgnoreCase": strings.TrimPrefix(token, "project:")}}})
-		case strings.HasPrefix(token, "cycle:"):
-			value := strings.TrimPrefix(token, "cycle:")
-			switch strings.ToLower(value) {
-			case "current":
-				filters = append(filters, map[string]any{"cycle": map[string]any{"isActive": map[string]any{"eq": true}}})
-			case "next":
-				filters = append(filters, map[string]any{"cycle": map[string]any{"isNext": map[string]any{"eq": true}}})
-			case "previous":
-				filters = append(filters, map[string]any{"cycle": map[string]any{"isPrevious": map[string]any{"eq": true}}})
-			}
-		case strings.HasPrefix(token, "estimate:"):
-			var e int
-			fmt.Sscanf(strings.TrimPrefix(token, "estimate:"), "%d", &e)
-			filters = append(filters, map[string]any{"estimate": map[string]any{"eq": e}})
-		case token == "no:assignee":
-			filters = append(filters, map[string]any{"assignee": map[string]any{"null": true}})
-		case token == "no:label":
-			filters = append(filters, map[string]any{"labels": map[string]any{"length": map[string]any{"eq": 0}}})
-		case token == "is:bug":
-			filters = append(filters, map[string]any{"labels": map[string]any{"name": map[string]any{"containsIgnoreCase": "bug"}}})
-		case token == "is:feature":
-			filters = append(filters, map[string]any{"labels": map[string]any{"name": map[string]any{"containsIgnoreCase": "feature"}}})
-		default:
-			if token != "" {
-				searchTerms = append(searchTerms, token)
-			}
-		}
-	}
-
-	// Add text search filters
-	if len(searchTerms) > 0 {
-		text := strings.Join(searchTerms, " ")
-		filters = append(filters, map[string]any{"title": map[string]any{"containsIgnoreCase": text}})
-		filters = append(filters, map[string]any{"description": map[string]any{"containsIgnoreCase": text}})
-	}
-	return filters
 }
 
 func (l *LinearProvider) normalizeState(value string) string {
@@ -595,7 +527,7 @@ func linearTokenize(query string) []string {
 	var tokens []string
 	var current strings.Builder
 	inQuotes := false
-	
+
 	for i := 0; i < len(query); i++ {
 		c := query[i]
 		switch {
@@ -621,7 +553,7 @@ func linearTokenize(query string) []string {
 func linearSplitOR(tokens []string) [][]string {
 	var groups [][]string
 	var current []string
-	
+
 	for _, t := range tokens {
 		if strings.EqualFold(t, "OR") {
 			if len(current) > 0 {
@@ -704,7 +636,7 @@ func (l *LinearProvider) parseTokenGroup(tokens []string) map[string]any {
 			{"title": map[string]any{"containsIgnoreCase": text}},
 			{"description": map[string]any{"containsIgnoreCase": text}},
 		}
-		
+
 		if len(filter) == 0 {
 			filter["or"] = textFilter
 		} else {

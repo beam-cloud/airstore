@@ -271,13 +271,13 @@ func buildLinearFilter(raw json.RawMessage, limit int) (string, error) {
 	}
 	var parts []string
 	if f.Team != "" {
-		parts = append(parts, "team:"+f.Team)
+		parts = append(parts, "team:"+quoteIfNeeded(f.Team))
 	}
 	if f.State != "" {
 		parts = append(parts, "state:"+quoteIfNeeded(f.State))
 	}
 	if f.Assignee != "" {
-		parts = append(parts, "assignee:"+f.Assignee)
+		parts = append(parts, "assignee:"+quoteIfNeeded(f.Assignee))
 	}
 	if f.Priority != "" {
 		priorityMap := map[string]string{
@@ -286,8 +286,7 @@ func buildLinearFilter(raw json.RawMessage, limit int) (string, error) {
 		if num, ok := priorityMap[strings.ToLower(f.Priority)]; ok {
 			parts = append(parts, "priority:"+num)
 		} else {
-			// Value is already numeric or unrecognized — pass through as-is.
-			parts = append(parts, "priority:"+f.Priority)
+			parts = append(parts, "priority:"+quoteIfNeeded(f.Priority))
 		}
 	}
 	if f.Label != "" {
