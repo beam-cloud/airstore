@@ -285,6 +285,9 @@ func buildLinearFilter(raw json.RawMessage, limit int) (string, error) {
 		}
 		if num, ok := priorityMap[strings.ToLower(f.Priority)]; ok {
 			parts = append(parts, "priority:"+num)
+		} else {
+			// Value is already numeric or unrecognized — pass through as-is.
+			parts = append(parts, "priority:"+f.Priority)
 		}
 	}
 	if f.Label != "" {
