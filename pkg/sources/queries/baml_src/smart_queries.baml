@@ -459,11 +459,16 @@ function InferLinearQuery(name: string, guidance: string?) -> LinearQueryResult 
     SYNTAX:
     - Plain text: searches title + description (very flexible, use this a lot!)
     - assignee:name | assignee:me - who it's assigned to
+    - no:assignee - unassigned issues
     - state:backlog | state:todo | state:"in progress" | state:done | state:canceled
     - priority:1 (urgent) | priority:2 (high) | priority:3 (medium) | priority:4 (low)  
     - label:name - filter by label
+    - no:label - unlabeled issues
     - team:KEY - filter by team key
+    - project:name - filter by project name
     - creator:name - who created it
+    - cycle:current | cycle:next | cycle:previous - filter by cycle
+    - estimate:N - filter by point estimate
     - OR - combine alternatives (use generously!)
     
     STRATEGY - Think about what the user ACTUALLY wants:
@@ -478,15 +483,19 @@ function InferLinearQuery(name: string, guidance: string?) -> LinearQueryResult 
        "john's tickets" → assignee:john OR john
        "sarah jones work" → assignee:sarah OR assignee:jones OR sarah OR jones
        "assigned to mike" → assignee:mike
+       "unassigned issues" → no:assignee
        
     3. STATUS/PRIORITY searches → filters
        "my open issues" → assignee:me state:todo OR state:"in progress"
        "urgent bugs" → priority:1 bug
        "blocked tickets" → blocked OR blocking
        "stuff in review" → review
+       "in progress issues" → state:"in progress"
        
-    4. PROJECT/CUSTOMER searches → text search (names vary!)
-       "acme corp" → acme OR "acme corp"
+    4. PROJECT/CYCLE searches → project or cycle filter
+       "acme project" → project:acme
+       "current sprint" → cycle:current
+       "next sprint issues" → cycle:next
        "q1 roadmap" → q1 roadmap
        "enterprise features" → enterprise
        
@@ -503,7 +512,14 @@ function InferLinearQuery(name: string, guidance: string?) -> LinearQueryResult 
     - Don't over-filter - better to return more results than miss things
     
     SEARCH TYPE: "issues" (default) or "projects" (only if explicitly asking for projects list)
-    DEFAULTS: limit=50, filename_format={identifier}_{title}.md
+    
+    DEFAULTS:
+    - limit: 50
+    - filename_format: {identifier}_{title}.md
+    
+    CRITICAL: filename_format MUST contain placeholders like {identifier}, {title}, etc.
+    NEVER return a literal filename like "test.md" or the folder name as the format.
+    The format is a TEMPLATE applied to every result, so it MUST use placeholders.
     
     Folder/file name: {{ name }}
     {% if guidance %}
