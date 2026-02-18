@@ -483,7 +483,7 @@ func parseDateToUnix(s string) int64 {
 // resolveChannelID returns the Slack channel ID for the given channel name.
 func (s *SlackProvider) resolveChannelID(ctx context.Context, token, channelName string) (string, error) {
 	params := url.Values{
-		"types":            {"public_channel"},
+		"types":            {"public_channel,private_channel"},
 		"exclude_archived": {"true"},
 		"limit":            {"200"},
 	}
