@@ -151,6 +151,25 @@ func fetchAllPages[T any](ctx context.Context, c *PostHogClient, initialPath str
 	return allResults, nil
 }
 
+// PostHogPersonalAPIKey represents the response from GET /api/personal_api_keys/@current/.
+type PostHogPersonalAPIKey struct {
+	ID                  string   `json:"id"`
+	Label               string   `json:"label"`
+	Scopes              []string `json:"scopes"`
+	ScopedTeams         []int    `json:"scoped_teams"`
+	ScopedOrganizations []string `json:"scoped_organizations"`
+}
+
+// GetCurrentKey validates the API key by calling GET /api/personal_api_keys/@current/.
+// This works for any valid personal API key regardless of scopes.
+func (c *PostHogClient) GetCurrentKey(ctx context.Context) (*PostHogPersonalAPIKey, error) {
+	var key PostHogPersonalAPIKey
+	if err := c.doRequest(ctx, "/api/personal_api_keys/@current/", &key); err != nil {
+		return nil, err
+	}
+	return &key, nil
+}
+
 // ListProjects returns all projects (teams) accessible with the API key.
 func (c *PostHogClient) ListProjects(ctx context.Context) ([]PostHogProject, error) {
 	var resp struct {

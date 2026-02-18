@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -70,9 +71,11 @@ func (p *PostHogProvider) newClient(creds *types.IntegrationCredentials) *client
 }
 
 // resolveProjects returns the list of projects based on credentials.
-// If Extra["project_id"] is set, it fetches that single project using the
-// project-scoped GetProject endpoint. Otherwise, it calls ListProjects
-// which requires a full-access (personal) API key.
+// It validates the API key using GET /api/personal_api_keys/@current/ which
+// works for any valid personal API key regardless of scopes.
+// If Extra["project_id"] is set, it validates the key and checks scoped_teams.
+// If no project_id and the key has scoped_teams, those are returned directly.
+// Otherwise, it falls through to ListProjects for full-access keys.
 func (p *PostHogProvider) resolveProjects(ctx context.Context, client *clients.PostHogClient, creds *types.IntegrationCredentials) ([]clients.PostHogProject, error) {
 	if creds.Extra != nil {
 		if pidStr, ok := creds.Extra["project_id"]; ok && pidStr != "" {
@@ -80,13 +83,32 @@ func (p *PostHogProvider) resolveProjects(ctx context.Context, client *clients.P
 			if err != nil {
 				return nil, fmt.Errorf("invalid project_id %q: %w", pidStr, err)
 			}
-			proj, err := client.GetProject(ctx, pid)
+			key, err := client.GetCurrentKey(ctx)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("failed to validate API key: %w", err)
 			}
-			return []clients.PostHogProject{*proj}, nil
+			if len(key.ScopedTeams) > 0 && !slices.Contains(key.ScopedTeams, pid) {
+				return nil, fmt.Errorf("API key is not scoped for project %d", pid)
+			}
+			return []clients.PostHogProject{
+				{ID: pid, Name: fmt.Sprintf("project-%d", pid)},
+			}, nil
 		}
 	}
+
+	// No project_id specified — check if key is team-scoped
+	key, err := client.GetCurrentKey(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to validate API key: %w", err)
+	}
+	if len(key.ScopedTeams) > 0 {
+		projects := make([]clients.PostHogProject, len(key.ScopedTeams))
+		for i, tid := range key.ScopedTeams {
+			projects[i] = clients.PostHogProject{ID: tid, Name: fmt.Sprintf("project-%d", tid)}
+		}
+		return projects, nil
+	}
+
 	return client.ListProjects(ctx)
 }
 
