@@ -54,24 +54,18 @@ type listReadsResponse struct {
 }
 
 func resolveAccessSession(workspaceID, requested string) string {
-	session := strings.TrimSpace(requested)
-	if session == "" {
-		return workspaceID
+	if session := strings.TrimSpace(requested); session != "" {
+		return session
 	}
-	return session
+	return workspaceID
 }
 
 func accessEventInScope(ev instrumentation.AccessEvent, workspaceID, sessionID string) bool {
-	// Hard guard against cross-workspace leakage.
-	if ev.WorkspaceID == "" || ev.WorkspaceID != workspaceID {
+	if ev.WorkspaceID != workspaceID {
 		return false
 	}
-	// Older payloads may omit session_id; default them to workspace session.
-	evSessionID := ev.SessionID
-	if evSessionID == "" {
-		evSessionID = workspaceID
-	}
-	return evSessionID == sessionID
+	expectedSession := resolveAccessSession(workspaceID, sessionID)
+	return resolveAccessSession(workspaceID, ev.SessionID) == expectedSession
 }
 
 // ListReads returns a page of access log entries from S2.
