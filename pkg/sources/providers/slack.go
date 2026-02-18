@@ -12,6 +12,7 @@ import (
 
 	"github.com/beam-cloud/airstore/pkg/sources"
 	"github.com/beam-cloud/airstore/pkg/types"
+	"github.com/rs/zerolog/log"
 )
 
 const (
@@ -202,6 +203,21 @@ func (s *SlackProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provider
 	}
 
 	token := pctx.Credentials.AccessToken
+
+	// For pure channel+date queries (no text search terms), use conversations.history
+	// which directly reads channel history. search.messages may silently return 0
+	// results when a query has only operator filters and no text search term.
+	if channelName, oldest, latest, ok := parseChannelHistoryQuery(spec.Query); ok {
+		channelID, err := s.resolveChannelID(ctx, token, channelName)
+		if err == nil && channelID != "" {
+			log.Debug().Str("channel", channelName).Str("channel_id", channelID).
+				Int64("oldest", oldest).Int64("latest", latest).
+				Msg("slack: using conversations.history for channel query")
+			return s.executeChannelHistory(ctx, token, channelID, channelName, oldest, latest, limit, spec.PageToken, spec.FilenameFormat)
+		}
+		log.Warn().Err(err).Str("channel", channelName).Str("query", spec.Query).
+			Msg("slack: channel ID lookup failed, falling back to search.messages")
+	}
 
 	// Search messages using Slack API
 	messages, nextCursor, err := s.searchMessagesWithCursor(ctx, token, spec.Query, limit, spec.PageToken)
@@ -416,6 +432,179 @@ func (s *SlackProvider) searchMessagesWithCursor(ctx context.Context, token, que
 	}
 
 	return result.Messages.Matches, nextCursor, nil
+}
+
+// parseChannelHistoryQuery detects if a Slack query is a pure channel+date query
+// (no text search terms) that can be handled via conversations.history.
+// Returns (channelName, oldest, latest, ok). oldest/latest are Unix timestamps (0 = no bound).
+func parseChannelHistoryQuery(query string) (channelName string, oldest, latest int64, ok bool) {
+	tokens := strings.Fields(strings.TrimSpace(query))
+	if len(tokens) == 0 {
+		return "", 0, 0, false
+	}
+	for _, token := range tokens {
+		lower := strings.ToLower(token)
+		switch {
+		case strings.HasPrefix(lower, "in:"):
+			name := token[len("in:"):]
+			name = strings.TrimPrefix(name, "#")
+			name = strings.TrimPrefix(name, "@")
+			channelName = strings.ToLower(name)
+		case strings.HasPrefix(lower, "after:"):
+			oldest = parseDateToUnix(token[len("after:"):])
+		case strings.HasPrefix(lower, "before:"):
+			latest = parseDateToUnix(token[len("before:"):]) + 86400
+		case strings.HasPrefix(lower, "on:"):
+			t := parseDateToUnix(token[len("on:"):])
+			if t > 0 {
+				oldest = t
+				latest = t + 86400
+			}
+		default:
+			// Unrecognized token is a text search term — fall back to search.messages.
+			return "", 0, 0, false
+		}
+	}
+	if channelName == "" {
+		return "", 0, 0, false
+	}
+	return channelName, oldest, latest, true
+}
+
+// parseDateToUnix parses a date string (YYYY-MM-DD or YYYY-M-D) to a Unix timestamp at midnight UTC.
+func parseDateToUnix(s string) int64 {
+	t, err := time.Parse("2006-1-2", s)
+	if err != nil {
+		return 0
+	}
+	return t.UTC().Unix()
+}
+
+// resolveChannelID returns the Slack channel ID for the given channel name.
+func (s *SlackProvider) resolveChannelID(ctx context.Context, token, channelName string) (string, error) {
+	params := url.Values{
+		"types":            {"public_channel"},
+		"exclude_archived": {"true"},
+		"limit":            {"200"},
+	}
+	var result struct {
+		OK       bool   `json:"ok"`
+		Error    string `json:"error"`
+		Channels []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"channels"`
+	}
+	if err := s.request(ctx, token, "conversations.list", params, &result); err != nil {
+		return "", err
+	}
+	if !result.OK {
+		return "", fmt.Errorf("slack API error: %s", result.Error)
+	}
+	for _, ch := range result.Channels {
+		if ch.Name == channelName {
+			return ch.ID, nil
+		}
+	}
+	return "", fmt.Errorf("channel not found: %s", channelName)
+}
+
+// fetchChannelHistory fetches messages from a channel using conversations.history.
+func (s *SlackProvider) fetchChannelHistory(ctx context.Context, token, channelID string, oldest, latest int64, limit int, cursor string) ([]map[string]any, string, error) {
+	params := url.Values{
+		"channel":   {channelID},
+		"limit":     {fmt.Sprintf("%d", limit)},
+		"inclusive": {"true"},
+	}
+	if oldest > 0 {
+		params.Set("oldest", fmt.Sprintf("%d", oldest))
+	}
+	if latest > 0 {
+		params.Set("latest", fmt.Sprintf("%d", latest))
+	}
+	if cursor != "" {
+		params.Set("cursor", cursor)
+	}
+	var result struct {
+		OK       bool             `json:"ok"`
+		Error    string           `json:"error"`
+		Messages []map[string]any `json:"messages"`
+		HasMore  bool             `json:"has_more"`
+		ResponseMetadata struct {
+			NextCursor string `json:"next_cursor"`
+		} `json:"response_metadata"`
+	}
+	if err := s.request(ctx, token, "conversations.history", params, &result); err != nil {
+		return nil, "", err
+	}
+	if !result.OK {
+		return nil, "", fmt.Errorf("slack API error: %s", result.Error)
+	}
+	nextCursor := ""
+	if result.HasMore {
+		nextCursor = result.ResponseMetadata.NextCursor
+	}
+	return result.Messages, nextCursor, nil
+}
+
+// executeChannelHistory fetches channel messages and returns them as a QueryResponse.
+func (s *SlackProvider) executeChannelHistory(ctx context.Context, token, channelID, channelName string, oldest, latest int64, limit int, cursor, filenameFormat string) (*sources.QueryResponse, error) {
+	messages, nextCursor, err := s.fetchChannelHistory(ctx, token, channelID, oldest, latest, limit, cursor)
+	if err != nil {
+		return nil, err
+	}
+	log.Debug().Str("channel_id", channelID).Int("raw_count", len(messages)).
+		Msg("slack: conversations.history returned messages")
+	if filenameFormat == "" {
+		filenameFormat = sources.DefaultFilenameFormat("slack")
+	}
+	results := make([]sources.QueryResult, 0, len(messages))
+	for _, msg := range messages {
+		ts, _ := msg["ts"].(string)
+		text, _ := msg["text"].(string)
+		user, _ := msg["user"].(string)
+		username, _ := msg["username"].(string)
+		if username == "" {
+			username = user
+		}
+		// Skip system messages (joins, leaves, topic changes, etc.)
+		subtype, _ := msg["subtype"].(string)
+		if subtype != "" && subtype != "bot_message" && subtype != "thread_broadcast" {
+			continue
+		}
+		mtime := sources.NowUnix()
+		var msgDate string
+		if ts != "" {
+			if t, err := parseSlackTimestamp(ts); err == nil {
+				mtime = t.Unix()
+				msgDate = t.Format("2006-01-02")
+			}
+		}
+		if msgDate == "" {
+			msgDate = time.Unix(mtime, 0).Format("2006-01-02")
+		}
+		metadata := map[string]string{
+			"id":         ts,
+			"channel":    channelName,
+			"channel_id": channelID,
+			"user":       username,
+			"date":       msgDate,
+			"text":       truncateText(text, 50),
+		}
+		filename := s.FormatFilename(filenameFormat, metadata)
+		results = append(results, sources.QueryResult{
+			ID:       ts + ":" + channelID,
+			Filename: filename,
+			Metadata: metadata,
+			Size:     int64(len(text)),
+			Mtime:    mtime,
+		})
+	}
+	return &sources.QueryResponse{
+		Results:       results,
+		NextPageToken: nextCursor,
+		HasMore:       nextCursor != "",
+	}, nil
 }
 
 // fetchMessageWithThread fetches a message and its thread replies
