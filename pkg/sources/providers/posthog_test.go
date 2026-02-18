@@ -77,6 +77,35 @@ func TestPostHogProvider_Stat(t *testing.T) {
 	})
 }
 
+func TestPostHogProvider_Stat_WithProjectID(t *testing.T) {
+	p := NewPostHogProvider()
+	ctx := context.Background()
+
+	t.Run("root is dir with project_id in extra", func(t *testing.T) {
+		pctx := &sources.ProviderContext{
+			Credentials: &types.IntegrationCredentials{
+				APIKey: "phx_test",
+				Extra:  map[string]string{"project_id": "42"},
+			},
+		}
+		info, err := p.Stat(ctx, pctx, "")
+		require.NoError(t, err)
+		assert.True(t, info.IsDir)
+	})
+
+	t.Run("subcategory is dir with project_id in extra", func(t *testing.T) {
+		pctx := &sources.ProviderContext{
+			Credentials: &types.IntegrationCredentials{
+				APIKey: "phx_test",
+				Extra:  map[string]string{"project_id": "42"},
+			},
+		}
+		info, err := p.Stat(ctx, pctx, "42_test/events")
+		require.NoError(t, err)
+		assert.True(t, info.IsDir)
+	})
+}
+
 func TestPostHogProvider_Search(t *testing.T) {
 	p := NewPostHogProvider()
 	ctx := context.Background()
@@ -104,6 +133,32 @@ func TestPostHogProvider_ValidateCredentials_EmptyKey(t *testing.T) {
 	err := p.ValidateCredentials(ctx, &types.IntegrationCredentials{APIKey: ""})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "api_key is required")
+}
+
+func TestPostHogProvider_ValidateCredentials_EmptyKeyWithProjectID(t *testing.T) {
+	p := NewPostHogProvider()
+	ctx := context.Background()
+
+	// Even with a project_id in Extra, an empty API key should fail early
+	err := p.ValidateCredentials(ctx, &types.IntegrationCredentials{
+		APIKey: "",
+		Extra:  map[string]string{"project_id": "12345"},
+	})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "api_key is required")
+}
+
+func TestPostHogProvider_ValidateCredentials_InvalidProjectID(t *testing.T) {
+	p := NewPostHogProvider()
+	ctx := context.Background()
+
+	// A non-numeric project_id should fail with an appropriate error
+	err := p.ValidateCredentials(ctx, &types.IntegrationCredentials{
+		APIKey: "phx_test",
+		Extra:  map[string]string{"project_id": "not-a-number"},
+	})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid project_id")
 }
 
 func TestPostHogProjectDirName(t *testing.T) {

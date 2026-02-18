@@ -162,6 +162,18 @@ func (c *PostHogClient) ListProjects(ctx context.Context) ([]PostHogProject, err
 	return resp.Results, nil
 }
 
+// GetProject retrieves a single project by ID.
+// Uses: GET /api/projects/{id}/ which is a project-scoped endpoint
+// and works with project-scoped API keys (unlike ListProjects).
+func (c *PostHogClient) GetProject(ctx context.Context, projectID int) (*PostHogProject, error) {
+	path := fmt.Sprintf("/api/projects/%d/", projectID)
+	var proj PostHogProject
+	if err := c.doRequest(ctx, path, &proj); err != nil {
+		return nil, err
+	}
+	return &proj, nil
+}
+
 // ListEvents returns recent events for a project.
 func (c *PostHogClient) ListEvents(ctx context.Context, projectID, limit int) ([]PostHogEvent, error) {
 	if limit <= 0 {

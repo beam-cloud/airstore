@@ -41,12 +41,13 @@ func (p *PostHogProvider) Name() string { return types.PostHog.String() }
 func (p *PostHogProvider) IsNativeBrowsable() bool { return true }
 
 // ValidateCredentials checks that the API key is valid by calling the projects endpoint.
+// For project-scoped keys (Extra["project_id"] set), it calls GetProject instead of ListProjects.
 func (p *PostHogProvider) ValidateCredentials(ctx context.Context, creds *types.IntegrationCredentials) error {
 	if creds.APIKey == "" {
 		return fmt.Errorf("api_key is required")
 	}
 	client := p.newClient(creds)
-	_, err := client.ListProjects(ctx)
+	_, err := p.resolveProjects(ctx, client, creds)
 	if err != nil {
 		return fmt.Errorf("credential validation failed: %w", err)
 	}
@@ -68,6 +69,27 @@ func (p *PostHogProvider) newClient(creds *types.IntegrationCredentials) *client
 	return clients.NewPostHogClient(creds.APIKey, host)
 }
 
+// resolveProjects returns the list of projects based on credentials.
+// If Extra["project_id"] is set, it fetches that single project using the
+// project-scoped GetProject endpoint. Otherwise, it calls ListProjects
+// which requires a full-access (personal) API key.
+func (p *PostHogProvider) resolveProjects(ctx context.Context, client *clients.PostHogClient, creds *types.IntegrationCredentials) ([]clients.PostHogProject, error) {
+	if creds.Extra != nil {
+		if pidStr, ok := creds.Extra["project_id"]; ok && pidStr != "" {
+			pid, err := strconv.Atoi(pidStr)
+			if err != nil {
+				return nil, fmt.Errorf("invalid project_id %q: %w", pidStr, err)
+			}
+			proj, err := client.GetProject(ctx, pid)
+			if err != nil {
+				return nil, err
+			}
+			return []clients.PostHogProject{*proj}, nil
+		}
+	}
+	return client.ListProjects(ctx)
+}
+
 // subcategories are the fixed directories under each project.
 var posthogSubcategories = []string{"events", "feature-flags", "insights", "cohorts"}
 
@@ -86,7 +108,7 @@ func (p *PostHogProvider) Stat(ctx context.Context, pctx *sources.ProviderContex
 	case 1:
 		// Project directory — validate it exists
 		client := p.newClient(pctx.Credentials)
-		projects, err := client.ListProjects(ctx)
+		projects, err := p.resolveProjects(ctx, client, pctx.Credentials)
 		if err != nil {
 			return nil, err
 		}
@@ -128,7 +150,7 @@ func (p *PostHogProvider) ReadDir(ctx context.Context, pctx *sources.ProviderCon
 
 	// Root — list projects
 	if path == "" {
-		projects, err := client.ListProjects(ctx)
+		projects, err := p.resolveProjects(ctx, client, pctx.Credentials)
 		if err != nil {
 			return nil, err
 		}
@@ -247,9 +269,9 @@ func (p *PostHogProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provid
 		}
 	}
 	if projectID == 0 {
-		projects, err := client.ListProjects(ctx)
+		projects, err := p.resolveProjects(ctx, client, pctx.Credentials)
 		if err != nil {
-			return nil, fmt.Errorf("failed to list projects: %w", err)
+			return nil, fmt.Errorf("failed to resolve projects: %w", err)
 		}
 		if len(projects) == 0 {
 			return &sources.QueryResponse{Results: []sources.QueryResult{}}, nil
