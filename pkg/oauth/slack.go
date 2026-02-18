@@ -20,6 +20,8 @@ var slackIntegrationScopes = map[string][]string{
 	"slack": {
 		"channels:read",
 		"channels:history",
+		"groups:read",
+		"groups:history",
 		"files:read",
 		"search:read",
 		"users:read",
