@@ -110,7 +110,14 @@ func (b *billyFS) Remove(filename string) error {
 }
 
 func (b *billyFS) Join(elem ...string) string {
-	return path.Join(elem...)
+	if len(elem) == 0 {
+		return "/"
+	}
+	joined := path.Join(elem...)
+	if joined == "" || joined == "." {
+		return "/"
+	}
+	return joined
 }
 
 // ---------------------------------------------------------------------------
@@ -208,7 +215,13 @@ func (b *billyFS) Chtimes(name string, atime time.Time, mtime time.Time) error {
 // ---------------------------------------------------------------------------
 
 func (b *billyFS) cleanPath(p string) string {
+	if p == "" || p == "." {
+		return "/"
+	}
 	p = path.Clean(p)
+	if p == "." {
+		return "/"
+	}
 	if !strings.HasPrefix(p, "/") {
 		p = "/" + p
 	}

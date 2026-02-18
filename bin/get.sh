@@ -32,6 +32,24 @@ prompt() {
     printf "${BLUE}==>${NC} %s " "$1"
 }
 
+# Run a command as root (directly when already root, otherwise via sudo).
+run_as_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+    else
+        error "Root privileges required to run: $* (install sudo or run as root)"
+    fi
+}
+
+can_elevate() {
+    if [ "$(id -u)" -eq 0 ]; then
+        return 0
+    fi
+    command -v sudo >/dev/null 2>&1
+}
+
 # Check if Homebrew is installed
 check_homebrew() {
     if command -v brew >/dev/null 2>&1; then
@@ -96,41 +114,192 @@ install_fuse_t() {
     info "fuse-t installed successfully"
 }
 
-# Install NFS client utilities on Linux (needed when FUSE is unavailable)
-install_nfs_utils() {
+# Detect whether we're running in a container runtime.
+is_container_runtime() {
+    if [ -f "/.dockerenv" ]; then
+        return 0
+    fi
+    if [ -r "/proc/1/cgroup" ] && grep -Eq "(docker|containerd|kubepods|podman|lxc)" /proc/1/cgroup; then
+        return 0
+    fi
+    return 1
+}
+
+# Probe whether mount(2) is allowed in this environment.
+can_mount_tmpfs() {
+    if ! command -v mount >/dev/null 2>&1 || ! command -v umount >/dev/null 2>&1; then
+        return 1
+    fi
+
+    probe_dir=$(mktemp -d 2>/dev/null || echo "/tmp/airstore-mount-probe-$$")
+    mkdir -p "$probe_dir"
+
+    if mount -t tmpfs tmpfs "$probe_dir" >/dev/null 2>&1; then
+        umount "$probe_dir" >/dev/null 2>&1 || true
+        rmdir "$probe_dir" >/dev/null 2>&1 || true
+        return 0
+    fi
+
+    rmdir "$probe_dir" >/dev/null 2>&1 || true
+    return 1
+}
+
+# Enable rootless FUSE allow_other when possible.
+enable_fuse_user_allow_other() {
+    OS=$(detect_os)
+    if [ "$OS" != "linux" ]; then
+        return 0
+    fi
+    if [ ! -f "/etc/fuse.conf" ]; then
+        return 0
+    fi
+    if grep -Eq '^[[:space:]]*user_allow_other([[:space:]]|$)' /etc/fuse.conf; then
+        return 0
+    fi
+
+    info "Enabling user_allow_other in /etc/fuse.conf for rootless FUSE mounts..."
+    run_as_root sh -c "printf '\nuser_allow_other\n' >> /etc/fuse.conf" || \
+        warn "Could not update /etc/fuse.conf; rootless FUSE may require manual user_allow_other"
+}
+
+# Try to make /dev/fuse available on Linux hosts where the FUSE kernel module
+# exists but is not loaded/device node missing (common on fresh VMs).
+ensure_fuse_device_linux() {
+    OS=$(detect_os)
+    if [ "$OS" != "linux" ]; then
+        return 0
+    fi
+    if [ -e "/dev/fuse" ]; then
+        return 0
+    fi
+
+    warn "/dev/fuse is missing; attempting to enable FUSE kernel support..."
+
+    if ! can_elevate; then
+        warn "No root/sudo access to load kernel modules. FUSE will remain unavailable."
+        return 0
+    fi
+
+    if command -v modprobe >/dev/null 2>&1; then
+        if ! run_as_root modprobe fuse >/dev/null 2>&1; then
+            warn "modprobe fuse failed (kernel may not expose FUSE module)"
+        fi
+    fi
+
+    if [ ! -e "/dev/fuse" ] && [ -e "/sys/module/fuse" ] && command -v mknod >/dev/null 2>&1; then
+        if ! run_as_root mknod /dev/fuse c 10 229 >/dev/null 2>&1; then
+            warn "could not create /dev/fuse device node"
+        fi
+    fi
+
+    if [ -e "/dev/fuse" ]; then
+        run_as_root chmod 666 /dev/fuse >/dev/null 2>&1 || true
+        info "/dev/fuse is now available"
+    else
+        warn "/dev/fuse is still unavailable; Linux will use NFS fallback backend"
+    fi
+}
+
+# Install Linux mount prerequisites for both FUSE and NFS backends.
+install_linux_mount_prereqs() {
     OS=$(detect_os)
     
     if [ "$OS" != "linux" ]; then
         return 0
     fi
-    
-    # If FUSE is available, NFS fallback is not needed
-    if [ -e /dev/fuse ]; then
-        return 0
+
+    need_nfs_utils=0
+    need_fuse_userspace=0
+
+    if ! command -v mount.nfs >/dev/null 2>&1 && ! command -v mount.nfs4 >/dev/null 2>&1; then
+        need_nfs_utils=1
     fi
-    
-    info "FUSE not available — checking for NFS client utilities..."
-    
-    if command -v mount.nfs >/dev/null 2>&1; then
-        info "NFS client utilities are installed"
-        return 0
+
+    if ! command -v fusermount >/dev/null 2>&1 && ! command -v fusermount3 >/dev/null 2>&1; then
+        need_fuse_userspace=1
     fi
-    
-    warn "NFS client utilities not found (needed for mounting without FUSE)"
-    
-    if command -v apt-get >/dev/null 2>&1; then
-        info "Installing nfs-common..."
-        sudo apt-get update -qq && sudo apt-get install -y -qq nfs-common
-    elif command -v dnf >/dev/null 2>&1; then
-        info "Installing nfs-utils..."
-        sudo dnf install -y nfs-utils
-    elif command -v yum >/dev/null 2>&1; then
-        info "Installing nfs-utils..."
-        sudo yum install -y nfs-utils
+
+    if [ "$need_nfs_utils" -eq 0 ] && [ "$need_fuse_userspace" -eq 0 ]; then
+        info "Linux mount prerequisites are already installed"
     else
-        warn "Could not auto-install NFS utilities. Please install manually:"
-        warn "  Debian/Ubuntu: sudo apt install nfs-common"
-        warn "  RHEL/Fedora:   sudo dnf install nfs-utils"
+        warn "Some Linux mount prerequisites are missing; installing required packages..."
+    fi
+
+    if command -v apt-get >/dev/null 2>&1; then
+        pkgs=""
+        [ "$need_nfs_utils" -eq 1 ] && pkgs="${pkgs} nfs-common"
+        [ "$need_fuse_userspace" -eq 1 ] && pkgs="${pkgs} fuse libfuse2"
+        if [ -n "$pkgs" ]; then
+            info "Installing:${pkgs}"
+            run_as_root apt-get update -qq
+            if ! run_as_root apt-get install -y -qq $pkgs; then
+                if [ "$need_fuse_userspace" -eq 1 ]; then
+                    warn "fuse package unavailable; retrying with fuse3 + libfuse2"
+                    pkgs_fallback=""
+                    [ "$need_nfs_utils" -eq 1 ] && pkgs_fallback="${pkgs_fallback} nfs-common"
+                    pkgs_fallback="${pkgs_fallback} fuse3 libfuse2"
+                    run_as_root apt-get install -y -qq $pkgs_fallback || warn "Package install failed; please install prerequisites manually"
+                else
+                    warn "Package install failed; please install prerequisites manually"
+                fi
+            fi
+        fi
+    elif command -v dnf >/dev/null 2>&1; then
+        pkgs=""
+        [ "$need_nfs_utils" -eq 1 ] && pkgs="${pkgs} nfs-utils"
+        [ "$need_fuse_userspace" -eq 1 ] && pkgs="${pkgs} fuse fuse-libs"
+        if [ -n "$pkgs" ]; then
+            info "Installing:${pkgs}"
+            if ! run_as_root dnf install -y $pkgs; then
+                if [ "$need_fuse_userspace" -eq 1 ]; then
+                    warn "fuse3 package unavailable; retrying with fuse"
+                    pkgs_fallback=""
+                    [ "$need_nfs_utils" -eq 1 ] && pkgs_fallback="${pkgs_fallback} nfs-utils"
+                    pkgs_fallback="${pkgs_fallback} fuse3"
+                    run_as_root dnf install -y $pkgs_fallback || warn "Package install failed; please install prerequisites manually"
+                else
+                    warn "Package install failed; please install prerequisites manually"
+                fi
+            fi
+        fi
+    elif command -v yum >/dev/null 2>&1; then
+        pkgs=""
+        [ "$need_nfs_utils" -eq 1 ] && pkgs="${pkgs} nfs-utils"
+        [ "$need_fuse_userspace" -eq 1 ] && pkgs="${pkgs} fuse fuse-libs"
+        if [ -n "$pkgs" ]; then
+            info "Installing:${pkgs}"
+            run_as_root yum install -y $pkgs || warn "Package install failed; please install prerequisites manually"
+        fi
+    elif command -v apk >/dev/null 2>&1; then
+        pkgs=""
+        [ "$need_nfs_utils" -eq 1 ] && pkgs="${pkgs} nfs-utils"
+        [ "$need_fuse_userspace" -eq 1 ] && pkgs="${pkgs} fuse3"
+        if [ -n "$pkgs" ]; then
+            info "Installing:${pkgs}"
+            run_as_root apk add --no-cache $pkgs || warn "Package install failed; please install prerequisites manually"
+        fi
+    else
+        warn "Could not auto-install Linux mount prerequisites. Please install manually:"
+        warn "  Debian/Ubuntu: sudo apt install nfs-common fuse libfuse2"
+        warn "  RHEL/Fedora:   sudo dnf install nfs-utils fuse fuse-libs"
+        warn "  Alpine:         sudo apk add nfs-utils fuse3"
+    fi
+
+    ensure_fuse_device_linux
+
+    if command -v fusermount >/dev/null 2>&1 || command -v fusermount3 >/dev/null 2>&1; then
+        enable_fuse_user_allow_other
+    fi
+
+    # Re-check and report environment constraints that package install cannot fix.
+    if [ ! -e /dev/fuse ]; then
+        warn "/dev/fuse is not present. FUSE backend is unavailable; airstore will use NFS fallback."
+    fi
+    if is_container_runtime && ! can_mount_tmpfs; then
+        warn "This container appears to block mount(2) (common in unprivileged containers)."
+        warn "Kernel mounts (NFS fallback) and often FUSE mounts may fail without extra capabilities."
+        warn "For real mount semantics, run with e.g. '--cap-add SYS_ADMIN --device /dev/fuse --security-opt apparmor=unconfined'."
+        warn "Some sandboxes (including many gVisor setups) may disallow mounts entirely."
     fi
 }
 
@@ -241,9 +410,9 @@ main() {
         mv "$BINARY_PATH" "${INSTALL_DIR}/${BINARY_NAME}"
         chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
     else
-        warn "Permission denied for ${INSTALL_DIR}. Using sudo..."
-        sudo mv "$BINARY_PATH" "${INSTALL_DIR}/${BINARY_NAME}"
-        sudo chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
+        warn "Permission denied for ${INSTALL_DIR}. Using elevated privileges..."
+        run_as_root mv "$BINARY_PATH" "${INSTALL_DIR}/${BINARY_NAME}"
+        run_as_root chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
     fi
     
     # Verify installation
@@ -257,8 +426,8 @@ main() {
     # Install fuse-t on macOS
     install_fuse_t
 
-    # Install NFS utilities on Linux (fallback when FUSE is unavailable)
-    install_nfs_utils
+    # Install Linux mount prerequisites (FUSE + NFS userspace tools)
+    install_linux_mount_prereqs
     
     echo ""
     info "Installation complete!"

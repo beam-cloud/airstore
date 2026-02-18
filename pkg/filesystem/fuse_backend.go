@@ -43,7 +43,10 @@ func (b *FuseBackend) Mount(fs *Filesystem, mountPoint string) (err error) {
 
 	ok := b.host.Mount(mountPoint, opts)
 	if !ok {
-		return fmt.Errorf("%w: mount returned false", ErrFUSEUnavailable)
+		return fmt.Errorf(
+			"%w: mount returned false (check /dev/fuse, /etc/fuse.conf user_allow_other, and container mount capabilities)",
+			ErrFUSEUnavailable,
+		)
 	}
 	return nil
 }
