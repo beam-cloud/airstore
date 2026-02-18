@@ -1,4 +1,4 @@
-package tray
+package desktop
 
 import (
 	"encoding/json"
@@ -12,13 +12,14 @@ const configDir = ".airstore"
 const configFile = "tray.yaml"
 const credsFile = "credentials"
 
-// Config holds user-configurable settings for the tray app.
+// Config holds user-configurable settings for the desktop/tray app.
 type Config struct {
-	MountPoint  string `yaml:"mountPoint"`
-	ConfigPath  string `yaml:"configPath"`
-	GatewayAddr string `yaml:"gatewayAddr"`
-	AutoMount   bool   `yaml:"autoMount"`
-	Token       string `yaml:"-"` // Runtime only, not persisted. Set via --token / AIRSTORE_TOKEN.
+	MountPoint      string `yaml:"mountPoint"`
+	ConfigPath      string `yaml:"configPath"`
+	GatewayAddr     string `yaml:"gatewayAddr"`
+	GatewayHTTPAddr string `yaml:"gatewayHTTPAddr,omitempty"`
+	AutoMount       bool   `yaml:"autoMount"`
+	Token           string `yaml:"-"` // Runtime only, not persisted.
 }
 
 // DefaultConfig returns the default configuration.
@@ -26,13 +27,12 @@ func DefaultConfig() Config {
 	home, _ := os.UserHomeDir()
 	return Config{
 		MountPoint:  filepath.Join(home, "Desktop", "Airstore"),
-		ConfigPath:  "",
 		GatewayAddr: defaultGateway(),
 		AutoMount:   true,
 	}
 }
 
-func configPath() string {
+func cfgPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, configDir, configFile)
 }
@@ -42,8 +42,7 @@ func configPath() string {
 func LoadConfig() Config {
 	cfg := DefaultConfig()
 
-	path := configPath()
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(cfgPath())
 	if err != nil {
 		return cfg
 	}
@@ -52,7 +51,6 @@ func LoadConfig() Config {
 		return DefaultConfig()
 	}
 
-	// Ensure defaults for missing values
 	defaults := DefaultConfig()
 	if cfg.MountPoint == "" {
 		cfg.MountPoint = defaults.MountPoint
@@ -66,16 +64,14 @@ func LoadConfig() Config {
 
 // SaveConfig writes configuration to ~/.airstore/tray.yaml.
 func SaveConfig(cfg Config) error {
-	path := configPath()
+	path := cfgPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
-
 	data, err := yaml.Marshal(&cfg)
 	if err != nil {
 		return err
 	}
-
 	return os.WriteFile(path, data, 0644)
 }
 

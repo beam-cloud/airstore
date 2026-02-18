@@ -1,0 +1,78 @@
+@import "tailwindcss";
+
+@theme {
+  /* Font families — matches theme.py FontFamilyTokens */
+  --font-sans: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --font-mono: "IBM Plex Mono", "SF Mono", "Menlo", monospace;
+
+  /* Gray scale — theme.py GrayShades (light mode) */
+  --color-gray-1: #fcfcfc;
+  --color-gray-2: #f8f8f8;
+  --color-gray-3: #f3f3f3;
+  --color-gray-4: #ededed;
+  --color-gray-5: #e1e1e1;
+  --color-gray-6: #dcdcdc;
+  --color-gray-7: #bdbdbd;
+  --color-gray-8: #9e9e9e;
+  --color-gray-9: #8f8f8f;
+  --color-gray-10: #858585;
+  --color-gray-11: #666666;
+  --color-gray-12: #2d2d2d;
+
+  /* Blue accent — theme.py BlueShades (light mode) */
+  --color-blue-3: #edf4ff;
+  --color-blue-4: #e1edff;
+  --color-blue-5: #cee4fe;
+  --color-blue-6: #b6d8ff;
+  --color-blue-9: #0091ff;
+  --color-blue-10: #0081f1;
+  --color-blue-11: #006adc;
+  --color-blue-12: #00254d;
+
+  /* Red — theme.py RedShades (light mode) */
+  --color-red-3: #ffefef;
+  --color-red-9: #e5484d;
+  --color-red-11: #cd2b31;
+
+  /* Green — theme.py GreenShades (light mode) */
+  --color-green-3: #e6f6eb;
+  --color-green-9: #30a46c;
+  --color-green-11: #18794e;
+
+  /* Yellow — theme.py YellowShades (light mode) */
+  --color-yellow-3: #fffbd1;
+  --color-yellow-9: #ffb224;
+  --color-yellow-11: #f1a10d;
+
+  /* Violet — theme.py VioletShades (light mode) */
+  --color-violet-3: #f5f2ff;
+  --color-violet-9: #8e7ce6;
+  --color-violet-11: #6e56cf;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  margin: 0;
+  background: var(--color-gray-1);
+  color: var(--color-gray-12);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+::selection {
+  background: var(--color-blue-4);
+  color: var(--color-blue-12);
+}

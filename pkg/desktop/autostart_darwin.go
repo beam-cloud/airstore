@@ -1,6 +1,6 @@
 //go:build darwin
 
-package tray
+package desktop
 
 import (
 	"fmt"
@@ -15,7 +15,6 @@ func launchAgentPath() string {
 	return filepath.Join(home, "Library", "LaunchAgents", launchAgentLabel+".plist")
 }
 
-// getBinaryPath returns the resolved path to the current executable.
 func getBinaryPath() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -23,7 +22,7 @@ func getBinaryPath() (string, error) {
 	}
 	resolved, err := filepath.EvalSymlinks(exe)
 	if err != nil {
-		return exe, nil // symlink resolution failed, use original
+		return exe, nil
 	}
 	return resolved, nil
 }

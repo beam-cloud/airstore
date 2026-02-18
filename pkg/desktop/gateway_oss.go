@@ -1,8 +1,7 @@
 //go:build !managed
 
-package tray
+package desktop
 
-// defaultGateway returns the local gateway for OSS builds.
 func defaultGateway() string {
 	return "localhost:1993"
 }

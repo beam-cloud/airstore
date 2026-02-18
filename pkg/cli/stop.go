@@ -5,7 +5,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/beam-cloud/airstore/pkg/tray"
+	"github.com/beam-cloud/airstore/pkg/desktop"
 	"github.com/spf13/cobra"
 )
 
@@ -21,7 +21,7 @@ func init() {
 }
 
 func runStop(cmd *cobra.Command, args []string) error {
-	pid := tray.ReadPID()
+	pid := desktop.ReadPID()
 	if pid == 0 || !processExists(pid) {
 		PrintWarning("Not running")
 		return nil
@@ -29,11 +29,9 @@ func runStop(cmd *cobra.Command, args []string) error {
 
 	proc, _ := os.FindProcess(pid)
 
-	// SIGTERM for graceful shutdown
 	PrintInfo("Stopping...")
 	proc.Signal(syscall.SIGTERM)
 
-	// Wait up to 3s for exit
 	for i := 0; i < 30; i++ {
 		time.Sleep(100 * time.Millisecond)
 		if !processExists(pid) {
@@ -42,7 +40,6 @@ func runStop(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Force kill
 	proc.Signal(syscall.SIGKILL)
 	PrintSuccess("Stopped")
 	return nil

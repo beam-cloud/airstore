@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/beam-cloud/airstore/pkg/tray"
+	"github.com/beam-cloud/airstore/pkg/desktop"
 	"github.com/spf13/cobra"
 )
 
@@ -29,8 +29,8 @@ func init() {
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
-	cfg := tray.LoadConfig()
-	pid := tray.ReadPID()
+	cfg := desktop.LoadConfig()
+	pid := desktop.ReadPID()
 
 	status := StatusInfo{
 		Running: pid != 0 && processExists(pid),

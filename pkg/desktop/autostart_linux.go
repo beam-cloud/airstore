@@ -1,6 +1,6 @@
 //go:build linux
 
-package tray
+package desktop
 
 import (
 	"fmt"
@@ -11,7 +11,6 @@ import (
 const desktopFileName = "airstore.desktop"
 
 func autostartDir() string {
-	// Check XDG_CONFIG_HOME first
 	if xdgConfig := os.Getenv("XDG_CONFIG_HOME"); xdgConfig != "" {
 		return filepath.Join(xdgConfig, "autostart")
 	}
@@ -23,7 +22,6 @@ func autostartPath() string {
 	return filepath.Join(autostartDir(), desktopFileName)
 }
 
-// getBinaryPath returns the resolved path to the current executable.
 func getBinaryPath() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -54,12 +52,10 @@ func EnableAutostart() error {
 	if err != nil {
 		return err
 	}
-
 	path := autostartPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
-
 	return os.WriteFile(path, []byte(fmt.Sprintf(desktopTemplate, binaryPath)), 0644)
 }
 

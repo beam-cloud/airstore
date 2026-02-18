@@ -85,10 +85,21 @@ doctor:
 # Build
 # ============================================================================
 
-build: check-go shim
+build: check-go shim desktop-embed
 	$(BUILD_ENV) go build -o bin/gateway ./cmd/gateway
 	$(BUILD_ENV) go build -o bin/worker ./cmd/worker
 	$(BUILD_ENV) go build -o bin/airstore ./cmd/cli
+desktop-embed:
+	@if [ -d desktop/frontend ]; then \
+		if ! command -v npm >/dev/null 2>&1; then \
+			echo ""; \
+			echo "ERROR: npm is required to build embedded desktop UI."; \
+			echo ""; \
+			exit 1; \
+		fi; \
+		cd desktop/frontend && npm run build:embed; \
+	fi
+
 
 SHIM_DIR := pkg/filesystem/vnode/embed/shims
 SHIM_SRC := ./cmd/tools/shim
@@ -208,23 +219,23 @@ stop:
 # ============================================================================
 
 # OSS build (default) - no login command
-cli: check-go
+cli: check-go desktop-embed
 	$(BUILD_ENV) go build -o bin/airstore ./cmd/cli
 
 # Managed build (includes login, points to airstore.ai)
-cli-managed: check-go
+cli-managed: check-go desktop-embed
 	$(BUILD_ENV) go build -tags managed \
 		-ldflags "-X github.com/beam-cloud/airstore/pkg/cli.Release=true" \
 		-o bin/airstore ./cmd/cli
 
 # Dev managed build (includes login, points to local gateway for testing)
-cli-managed-dev: check-go
+cli-managed-dev: check-go desktop-embed
 	$(BUILD_ENV) go build -tags managed \
 		-o bin/airstore ./cmd/cli
 
 # Release build (managed + optimizations)
 VERSION ?= dev
-cli-release: check-go shim
+cli-release: check-go shim desktop-embed
 	$(BUILD_ENV) go build -tags managed \
 		-ldflags "-s -w -X github.com/beam-cloud/airstore/pkg/cli.Version=$(VERSION) \
 		          -X github.com/beam-cloud/airstore/pkg/cli.Release=true" \
@@ -268,6 +279,7 @@ clean-all:
 	@docker network prune -f 2>/dev/null || true
 
 .PHONY: check-go setup doctor build cli cli-managed cli-managed-dev cli-release \
+        desktop-embed \
         shim clean protocol baml fmt tidy \
         test e2e e2e-check \
         k3d-up k3d-down k3d-rebuild use \

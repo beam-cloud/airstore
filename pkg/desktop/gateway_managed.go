@@ -1,8 +1,7 @@
 //go:build managed
 
-package tray
+package desktop
 
-// defaultGateway returns the production gateway for managed builds.
 func defaultGateway() string {
 	return "gateway.airstore.ai:443"
 }

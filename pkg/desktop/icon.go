@@ -1,4 +1,4 @@
-package tray
+package desktop
 
 import _ "embed"
 
