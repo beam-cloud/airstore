@@ -1,6 +1,7 @@
 package filesystem
 
 import (
+	"errors"
 	"os"
 	"runtime"
 )
@@ -20,6 +21,13 @@ type MountBackend interface {
 const (
 	BackendFUSE = "fuse"
 	BackendNFS  = "nfs"
+)
+
+var (
+	// ErrFUSEUnavailable indicates that the runtime cannot mount via FUSE.
+	ErrFUSEUnavailable = errors.New("fuse unavailable")
+	// ErrNFSHelperMissing indicates mount(8) could not find mount.nfs helper.
+	ErrNFSHelperMissing = errors.New("nfs helper missing")
 )
 
 // NewBackend creates a MountBackend by name.

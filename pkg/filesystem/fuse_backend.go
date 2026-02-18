@@ -19,7 +19,7 @@ func NewFuseBackend() *FuseBackend {
 	return &FuseBackend{}
 }
 
-func (b *FuseBackend) Mount(fs *Filesystem, mountPoint string) error {
+func (b *FuseBackend) Mount(fs *Filesystem, mountPoint string) (err error) {
 	b.host = fuse.NewFileSystemHost(newAdapter(fs))
 	opts := fs.mountOptions()
 
@@ -32,16 +32,18 @@ func (b *FuseBackend) Mount(fs *Filesystem, mountPoint string) error {
 	if fs.trace != nil {
 		log.Info().Str("mount", mountPoint).Msg("fuse trace enabled (AIRSTORE_FUSE_TRACE=1)")
 		go fs.trace.reportLoop(stopTrace, mountPoint)
+		defer close(stopTrace)
 	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("%w: %v", ErrFUSEUnavailable, r)
+		}
+	}()
 
 	ok := b.host.Mount(mountPoint, opts)
-
-	if fs.trace != nil {
-		close(stopTrace)
-	}
-
 	if !ok {
-		return fmt.Errorf("FUSE mount failed")
+		return fmt.Errorf("%w: mount returned false", ErrFUSEUnavailable)
 	}
 	return nil
 }

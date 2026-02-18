@@ -117,14 +117,40 @@ func (b *NFSBackend) Unmount() error {
 // execMount runs the mount(8) command to attach the NFS share.
 func (b *NFSBackend) execMount(port int, mountPoint string) error {
 	opts := fmt.Sprintf("port=%d,mountport=%d,nfsvers=3,noacl,tcp,nolock", port, port)
-	cmd := exec.Command("mount", "-t", "nfs", "-o", opts, "127.0.0.1:/", mountPoint)
+	source := "127.0.0.1:/"
+
+	// Prefer mount(2) first. This avoids relying on distro-provided mount.nfs
+	// helper binaries that are often missing on minimal Linux images.
+	mountSysErr := mountNFS(source, mountPoint, opts)
+	if mountSysErr == nil {
+		return nil
+	}
+
+	cmd := exec.Command("mount", "-t", "nfs", "-o", opts, source, mountPoint)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("%s: %s", err, strings.TrimSpace(string(out)))
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
+		}
+		if isNFSHelperMissingMessage(msg) {
+			return fmt.Errorf(
+				"%w: %s (install nfs mount helpers, e.g. `apt-get install nfs-common`)",
+				ErrNFSHelperMissing,
+				msg,
+			)
+		}
+		return fmt.Errorf("%s: %s (mount(2) error: %v)", err, msg, mountSysErr)
 	}
 	return nil
 }
 
 func isClosedConnError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "use of closed network connection")
+}
+
+func isNFSHelperMissingMessage(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "mount.nfs") ||
+		(strings.Contains(lower, "helper program") && strings.Contains(lower, "mount"))
 }

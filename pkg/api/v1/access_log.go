@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/common"
@@ -52,6 +53,27 @@ type listReadsResponse struct {
 	HasMore    bool                          `json:"has_more"`
 }
 
+func resolveAccessSession(workspaceID, requested string) string {
+	session := strings.TrimSpace(requested)
+	if session == "" {
+		return workspaceID
+	}
+	return session
+}
+
+func accessEventInScope(ev instrumentation.AccessEvent, workspaceID, sessionID string) bool {
+	// Hard guard against cross-workspace leakage.
+	if ev.WorkspaceID == "" || ev.WorkspaceID != workspaceID {
+		return false
+	}
+	// Older payloads may omit session_id; default them to workspace session.
+	evSessionID := ev.SessionID
+	if evSessionID == "" {
+		evSessionID = workspaceID
+	}
+	return evSessionID == sessionID
+}
+
 // ListReads returns a page of access log entries from S2.
 //
 //	GET /api/v1/workspaces/:workspace_id/access-log
@@ -77,12 +99,8 @@ func (g *AccessLogGroup) ListReads(c echo.Context) error {
 		limit = 100
 	}
 
-	session := c.QueryParam("session")
-	if session == "" {
-		session = wsExtId
-	}
-
-	stream := instrumentation.AccessStreamName(session)
+	session := resolveAccessSession(wsExtId, c.QueryParam("session"))
+	stream := instrumentation.AccessWorkspaceStreamName(wsExtId, session)
 
 	// Fetch more than limit to account for time-window filtering
 	fetchCount := int(limit) * 2
@@ -105,6 +123,9 @@ func (g *AccessLogGroup) ListReads(c echo.Context) error {
 
 		var ev instrumentation.AccessEvent
 		if err := json.Unmarshal([]byte(r.Body), &ev); err != nil {
+			continue
+		}
+		if !accessEventInScope(ev, wsExtId, session) {
 			continue
 		}
 
@@ -141,8 +162,8 @@ type listSessionsResponse struct {
 //
 //	GET /api/v1/workspaces/:workspace_id/access-log/sessions
 //
-// It lists S2 streams matching the "access." prefix and extracts the
-// session ID component from each stream name (format: access.{session}.events).
+// It lists S2 streams matching the workspace-scoped prefix and extracts the
+// session ID component from stream names (format: access.{workspace}.{session}.events).
 func (g *AccessLogGroup) ListSessions(c echo.Context) error {
 	ctx := c.Request().Context()
 
@@ -156,17 +177,24 @@ func (g *AccessLogGroup) ListSessions(c echo.Context) error {
 		return ErrorResponse(c, http.StatusNotFound, "workspace not found")
 	}
 
-	streams, err := g.s2Client.ListStreams(ctx, instrumentation.AccessStreamPrefix())
+	streams, err := g.s2Client.ListStreams(ctx, instrumentation.AccessWorkspaceStreamPrefix(wsExtId))
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, "failed to list streams: "+err.Error())
 	}
 
-	sessions := make([]string, 0, len(streams))
+	sessionSet := map[string]struct{}{
+		wsExtId: {},
+	}
 	for _, s := range streams {
-		sessionID := instrumentation.SessionIDFromStreamName(s.Name)
+		sessionID := instrumentation.SessionIDFromWorkspaceStreamName(s.Name, wsExtId)
 		if sessionID == "" {
 			continue
 		}
+		sessionSet[sessionID] = struct{}{}
+	}
+
+	sessions := make([]string, 0, len(sessionSet))
+	for sessionID := range sessionSet {
 		sessions = append(sessions, sessionID)
 	}
 
@@ -224,12 +252,8 @@ func (g *AccessLogGroup) GetSummary(c echo.Context) error {
 	startMs := parseIntParam(c, "start", 0)
 	endMs := parseIntParam(c, "end", 0)
 
-	session := c.QueryParam("session")
-	if session == "" {
-		session = wsExtId
-	}
-
-	stream := instrumentation.AccessStreamName(session)
+	session := resolveAccessSession(wsExtId, c.QueryParam("session"))
+	stream := instrumentation.AccessWorkspaceStreamName(wsExtId, session)
 
 	var seqNum int64 = 0
 	const pageSize = 1000
@@ -263,6 +287,9 @@ func (g *AccessLogGroup) GetSummary(c echo.Context) error {
 
 			var ev instrumentation.AccessEvent
 			if err := json.Unmarshal([]byte(r.Body), &ev); err != nil {
+				continue
+			}
+			if !accessEventInScope(ev, wsExtId, session) {
 				continue
 			}
 

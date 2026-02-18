@@ -18,10 +18,10 @@ const (
 // EventFlusher writes access events to an S2 stream asynchronously.
 // Record() is non-blocking; events are buffered and flushed by a background goroutine.
 type EventFlusher struct {
-	s2       *common.S2Client
-	ch       chan AccessEvent
-	done     chan struct{}
-	wg       sync.WaitGroup
+	s2        *common.S2Client
+	ch        chan AccessEvent
+	done      chan struct{}
+	wg        sync.WaitGroup
 	closeOnce sync.Once
 }
 
@@ -81,15 +81,50 @@ func (f *EventFlusher) loop() {
 
 const accessStreamPrefix = "access."
 const accessStreamSuffix = ".events"
+const accessWorkspaceSeparator = "."
 
 // AccessStreamName returns the S2 stream name for an access session.
+// Legacy format: access.{session_id}.events
 func AccessStreamName(sessionID string) string {
 	return fmt.Sprintf("%s%s%s", accessStreamPrefix, sessionID, accessStreamSuffix)
 }
 
+// AccessWorkspaceStreamName returns a workspace-scoped access stream name.
+// Format: access.{workspace_id}.{session_id}.events
+//
+// If workspaceID is empty, it falls back to the legacy AccessStreamName format.
+func AccessWorkspaceStreamName(workspaceID, sessionID string) string {
+	if workspaceID == "" {
+		return AccessStreamName(sessionID)
+	}
+	if sessionID == "" {
+		sessionID = workspaceID
+	}
+	return fmt.Sprintf(
+		"%s%s%s%s%s",
+		accessStreamPrefix,
+		workspaceID,
+		accessWorkspaceSeparator,
+		sessionID,
+		accessStreamSuffix,
+	)
+}
+
 // AccessStreamPrefix returns the prefix used for all access log streams.
+// This is the global/legacy prefix ("access.").
 func AccessStreamPrefix() string {
 	return accessStreamPrefix
+}
+
+// AccessWorkspaceStreamPrefix returns the stream-name prefix for a workspace.
+// Format: access.{workspace_id}.
+//
+// If workspaceID is empty, it falls back to AccessStreamPrefix().
+func AccessWorkspaceStreamPrefix(workspaceID string) string {
+	if workspaceID == "" {
+		return AccessStreamPrefix()
+	}
+	return fmt.Sprintf("%s%s%s", accessStreamPrefix, workspaceID, accessWorkspaceSeparator)
 }
 
 // SessionIDFromStreamName extracts the session ID from a stream name
@@ -101,11 +136,25 @@ func SessionIDFromStreamName(name string) string {
 	return name[len(accessStreamPrefix) : len(name)-len(accessStreamSuffix)]
 }
 
+// SessionIDFromWorkspaceStreamName extracts a session ID for a specific workspace
+// from stream names of the form "access.{workspace_id}.{session_id}.events".
+// It returns an empty string when the stream does not belong to that workspace.
+func SessionIDFromWorkspaceStreamName(name, workspaceID string) string {
+	if workspaceID == "" {
+		return SessionIDFromStreamName(name)
+	}
+	prefix := AccessWorkspaceStreamPrefix(workspaceID)
+	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, accessStreamSuffix) {
+		return ""
+	}
+	return name[len(prefix) : len(name)-len(accessStreamSuffix)]
+}
+
 func (f *EventFlusher) send(event AccessEvent) {
 	if f.s2 == nil || !f.s2.Enabled() {
 		return
 	}
-	stream := AccessStreamName(event.SessionID)
+	stream := AccessWorkspaceStreamName(event.WorkspaceID, event.SessionID)
 	if err := f.s2.Append(context.Background(), stream, event); err != nil {
 		log.Warn().Err(err).Str("stream", stream).Msg("failed to append access event to S2")
 	}
