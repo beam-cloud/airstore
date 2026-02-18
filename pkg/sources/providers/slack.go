@@ -375,7 +375,11 @@ func (s *SlackProvider) searchMessagesWithCursor(ctx context.Context, token, que
 		"sort":  {"timestamp"},
 	}
 	if cursor != "" {
-		params.Set("cursor", cursor)
+		if strings.HasPrefix(cursor, "page:") {
+			params.Set("page", strings.TrimPrefix(cursor, "page:"))
+		} else {
+			params.Set("cursor", cursor)
+		}
 	}
 
 	var result struct {
