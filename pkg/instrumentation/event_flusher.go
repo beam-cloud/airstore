@@ -130,10 +130,7 @@ func AccessWorkspaceStreamPrefix(workspaceID string) string {
 // SessionIDFromStreamName extracts the session ID from a stream name
 // of the form "access.{session_id}.events".
 func SessionIDFromStreamName(name string) string {
-	if !strings.HasPrefix(name, accessStreamPrefix) || !strings.HasSuffix(name, accessStreamSuffix) {
-		return ""
-	}
-	return name[len(accessStreamPrefix) : len(name)-len(accessStreamSuffix)]
+	return extractSessionFromAccessStream(name, accessStreamPrefix)
 }
 
 // SessionIDFromWorkspaceStreamName extracts a session ID for a specific workspace
@@ -143,11 +140,7 @@ func SessionIDFromWorkspaceStreamName(name, workspaceID string) string {
 	if workspaceID == "" {
 		return SessionIDFromStreamName(name)
 	}
-	prefix := AccessWorkspaceStreamPrefix(workspaceID)
-	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, accessStreamSuffix) {
-		return ""
-	}
-	return name[len(prefix) : len(name)-len(accessStreamSuffix)]
+	return extractSessionFromAccessStream(name, AccessWorkspaceStreamPrefix(workspaceID))
 }
 
 func (f *EventFlusher) send(event AccessEvent) {
@@ -158,4 +151,11 @@ func (f *EventFlusher) send(event AccessEvent) {
 	if err := f.s2.Append(context.Background(), stream, event); err != nil {
 		log.Warn().Err(err).Str("stream", stream).Msg("failed to append access event to S2")
 	}
+}
+
+func extractSessionFromAccessStream(name, prefix string) string {
+	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, accessStreamSuffix) {
+		return ""
+	}
+	return name[len(prefix) : len(name)-len(accessStreamSuffix)]
 }

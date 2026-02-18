@@ -6,14 +6,14 @@ import (
 	"github.com/beam-cloud/airstore/pkg/instrumentation"
 )
 
-func TestResolveAccessSession(t *testing.T) {
-	if got := resolveAccessSession("ws-1", ""); got != "ws-1" {
+func TestNormalizeAccessSession(t *testing.T) {
+	if got := normalizeAccessSession("ws-1", ""); got != "ws-1" {
 		t.Fatalf("expected workspace default session, got %q", got)
 	}
-	if got := resolveAccessSession("ws-1", "  "); got != "ws-1" {
+	if got := normalizeAccessSession("ws-1", "  "); got != "ws-1" {
 		t.Fatalf("expected trimmed empty session to default, got %q", got)
 	}
-	if got := resolveAccessSession("ws-1", "custom"); got != "custom" {
+	if got := normalizeAccessSession("ws-1", "custom"); got != "custom" {
 		t.Fatalf("expected explicit session, got %q", got)
 	}
 }

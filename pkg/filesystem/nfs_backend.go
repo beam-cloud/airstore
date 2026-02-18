@@ -13,6 +13,8 @@ import (
 	nfshelper "github.com/willscott/go-nfs/helpers"
 )
 
+const loopbackNFSExport = "127.0.0.1:/"
+
 // NFSBackend mounts the filesystem by running a userspace NFSv3 server on
 // loopback and mounting it via the kernel NFS client. This is the fallback
 // for Linux environments where FUSE (/dev/fuse) is not available.
@@ -117,22 +119,18 @@ func (b *NFSBackend) Unmount() error {
 // execMount runs the mount(8) command to attach the NFS share.
 func (b *NFSBackend) execMount(port int, mountPoint string) error {
 	opts := fmt.Sprintf("port=%d,mountport=%d,nfsvers=3,noacl,tcp,nolock", port, port)
-	source := "127.0.0.1:/"
 
 	// Prefer mount(2) first. This avoids relying on distro-provided mount.nfs
 	// helper binaries that are often missing on minimal Linux images.
-	mountSysErr := mountNFS(source, mountPoint, opts)
+	mountSysErr := mountNFS(loopbackNFSExport, mountPoint, opts)
 	if mountSysErr == nil {
 		return nil
 	}
 
-	cmd := exec.Command("mount", "-t", "nfs", "-o", opts, source, mountPoint)
+	cmd := exec.Command("mount", "-t", "nfs", "-o", opts, loopbackNFSExport, mountPoint)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		msg := strings.TrimSpace(string(out))
-		if msg == "" {
-			msg = err.Error()
-		}
+		msg := commandErrorMessage(err, out)
 		if isNFSHelperMissingMessage(msg) {
 			return fmt.Errorf(
 				"%w: %s (install nfs mount helpers, e.g. `apt-get install nfs-common`)",
@@ -153,4 +151,11 @@ func isNFSHelperMissingMessage(msg string) bool {
 	lower := strings.ToLower(msg)
 	return strings.Contains(lower, "mount.nfs") ||
 		(strings.Contains(lower, "helper program") && strings.Contains(lower, "mount"))
+}
+
+func commandErrorMessage(cmdErr error, out []byte) string {
+	if msg := strings.TrimSpace(string(out)); msg != "" {
+		return msg
+	}
+	return cmdErr.Error()
 }

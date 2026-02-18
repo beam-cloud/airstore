@@ -241,28 +241,26 @@ func (f *Filesystem) mountWithFallback() error {
 	primaryBackendName := f.config.Backend
 	primaryBackend := f.backend
 
-	err := f.safeBackendMount(primaryBackendName, primaryBackend, f.config.MountPoint)
-	if err == nil {
+	primaryErr := f.safeBackendMount(primaryBackendName, primaryBackend, f.config.MountPoint)
+	if primaryErr == nil {
 		return nil
 	}
 
-	if !f.shouldAttemptFallback(primaryBackendName, err) {
-		return err
+	if !f.shouldAttemptFallback(primaryBackendName, primaryErr) {
+		return primaryErr
 	}
 
-	fallbackBackendName := BackendNFS
-	if primaryBackendName == BackendNFS {
-		fallbackBackendName = BackendFUSE
-	}
+	return f.mountWithNFSFallback(primaryBackendName, primaryErr)
+}
+
+func (f *Filesystem) mountWithNFSFallback(primaryBackendName string, primaryErr error) error {
+	const fallbackBackendName = BackendNFS
 	fallbackBackend := NewBackend(fallbackBackendName)
-	if fallbackBackend == nil {
-		return err
-	}
 
 	log.Warn().
 		Str("from", primaryBackendName).
 		Str("to", fallbackBackendName).
-		Err(err).
+		Err(primaryErr).
 		Msg("primary mount backend failed; trying fallback backend")
 
 	// Swap backend so unmount goes through the backend that actually mounted.
@@ -276,12 +274,12 @@ func (f *Filesystem) mountWithFallback() error {
 		return nil
 	}
 	if errors.Is(fallbackErr, ErrNFSHelperMissing) {
-		return fmt.Errorf("%s mount failed: %w; nfs fallback unavailable: %w", primaryBackendName, err, fallbackErr)
+		return fmt.Errorf("%s mount failed: %w; nfs fallback unavailable: %w", primaryBackendName, primaryErr, fallbackErr)
 	}
 	return fmt.Errorf(
 		"%s mount failed: %w; %s fallback failed: %w",
 		primaryBackendName,
-		err,
+		primaryErr,
 		fallbackBackendName,
 		fallbackErr,
 	)
@@ -336,12 +334,6 @@ func (f *Filesystem) IsDestroyed() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.destroyed
-}
-
-func (f *Filesystem) logDebug(msg string) {
-	if f.verbose {
-		log.Debug().Msg(msg)
-	}
 }
 
 func (f *Filesystem) Init() error { return nil }

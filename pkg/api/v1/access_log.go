@@ -53,19 +53,18 @@ type listReadsResponse struct {
 	HasMore    bool                          `json:"has_more"`
 }
 
-func resolveAccessSession(workspaceID, requested string) string {
+func normalizeAccessSession(workspaceID, requested string) string {
 	if session := strings.TrimSpace(requested); session != "" {
 		return session
 	}
 	return workspaceID
 }
 
-func accessEventInScope(ev instrumentation.AccessEvent, workspaceID, sessionID string) bool {
+func accessEventInScope(ev instrumentation.AccessEvent, workspaceID, expectedSession string) bool {
 	if ev.WorkspaceID != workspaceID {
 		return false
 	}
-	expectedSession := resolveAccessSession(workspaceID, sessionID)
-	return resolveAccessSession(workspaceID, ev.SessionID) == expectedSession
+	return normalizeAccessSession(workspaceID, ev.SessionID) == expectedSession
 }
 
 // ListReads returns a page of access log entries from S2.
@@ -93,7 +92,7 @@ func (g *AccessLogGroup) ListReads(c echo.Context) error {
 		limit = 100
 	}
 
-	session := resolveAccessSession(wsExtId, c.QueryParam("session"))
+	session := normalizeAccessSession(wsExtId, c.QueryParam("session"))
 	stream := instrumentation.AccessWorkspaceStreamName(wsExtId, session)
 
 	// Fetch more than limit to account for time-window filtering
@@ -246,7 +245,7 @@ func (g *AccessLogGroup) GetSummary(c echo.Context) error {
 	startMs := parseIntParam(c, "start", 0)
 	endMs := parseIntParam(c, "end", 0)
 
-	session := resolveAccessSession(wsExtId, c.QueryParam("session"))
+	session := normalizeAccessSession(wsExtId, c.QueryParam("session"))
 	stream := instrumentation.AccessWorkspaceStreamName(wsExtId, session)
 
 	var seqNum int64 = 0
