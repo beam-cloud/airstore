@@ -90,9 +90,11 @@ func (p *PostHogProvider) resolveProjects(ctx context.Context, client *clients.P
 			if len(key.ScopedTeams) > 0 && !slices.Contains(key.ScopedTeams, pid) {
 				return nil, fmt.Errorf("API key is not scoped for project %d", pid)
 			}
-			return []clients.PostHogProject{
-				{ID: pid, Name: fmt.Sprintf("project-%d", pid)},
-			}, nil
+			proj, err := client.GetProject(ctx, pid)
+			if err != nil {
+				return nil, fmt.Errorf("project %d not found: %w", pid, err)
+			}
+			return []clients.PostHogProject{*proj}, nil
 		}
 	}
 
