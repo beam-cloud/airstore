@@ -1,6 +1,7 @@
 package filesystem
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -74,10 +75,11 @@ type Filesystem struct {
 	// here so repeat lookups return ENOENT without RPCs.
 	negativeCache *expirable.LRU[string, struct{}]
 
-	backend   MountBackend
-	mounted   bool
-	destroyed bool // Set when Destroy() is called by FUSE layer
-	mu        sync.Mutex
+	backend     MountBackend
+	backendAuto bool
+	mounted     bool
+	destroyed   bool // Set when Destroy() is called by FUSE layer
+	mu          sync.Mutex
 
 	accessCollector *AccessCollector
 	mountID         string
@@ -126,6 +128,7 @@ func NewFilesystem(cfg Config) (*Filesystem, error) {
 
 	// Resolve mount backend (auto-detect if not specified)
 	backendName := cfg.Backend
+	backendAuto := backendName == ""
 	if backendName == "" {
 		backendName = defaultBackend()
 	}
@@ -141,6 +144,7 @@ func NewFilesystem(cfg Config) (*Filesystem, error) {
 		dirChildren:   expirable.NewLRU[string, map[string]struct{}](dirChildrenSize, nil, dirChildrenTTL),
 		negativeCache: expirable.NewLRU[string, struct{}](negativeCacheSize, nil, negativeCacheTTL),
 		backend:       NewBackend(backendName),
+		backendAuto:   backendAuto,
 		mountID:       fmt.Sprintf("mount-%d-%d", os.Getpid(), time.Now().UnixNano()),
 	}
 
@@ -220,7 +224,7 @@ func (f *Filesystem) Mount() error {
 
 	// Delegate to the configured backend (FUSE or NFS). This call blocks
 	// until the filesystem is unmounted.
-	err := f.backend.Mount(f, f.config.MountPoint)
+	err := f.mountWithFallback()
 
 	f.mu.Lock()
 	f.mounted = false
@@ -231,6 +235,80 @@ func (f *Filesystem) Mount() error {
 	f.Destroy()
 
 	return err
+}
+
+func (f *Filesystem) mountWithFallback() error {
+	primaryBackendName := f.config.Backend
+	primaryBackend := f.backend
+
+	primaryErr := f.safeBackendMount(primaryBackendName, primaryBackend, f.config.MountPoint)
+	if primaryErr == nil {
+		return nil
+	}
+
+	if !f.shouldAttemptFallback(primaryBackendName, primaryErr) {
+		return primaryErr
+	}
+
+	return f.mountWithNFSFallback(primaryBackendName, primaryErr)
+}
+
+func (f *Filesystem) mountWithNFSFallback(primaryBackendName string, primaryErr error) error {
+	const fallbackBackendName = BackendNFS
+	fallbackBackend := NewBackend(fallbackBackendName)
+
+	log.Warn().
+		Str("from", primaryBackendName).
+		Str("to", fallbackBackendName).
+		Err(primaryErr).
+		Msg("primary mount backend failed; trying fallback backend")
+
+	// Swap backend so unmount goes through the backend that actually mounted.
+	f.mu.Lock()
+	f.backend = fallbackBackend
+	f.config.Backend = fallbackBackendName
+	f.mu.Unlock()
+
+	fallbackErr := f.safeBackendMount(fallbackBackendName, fallbackBackend, f.config.MountPoint)
+	if fallbackErr == nil {
+		return nil
+	}
+	if errors.Is(fallbackErr, ErrNFSHelperMissing) {
+		return fmt.Errorf("%s mount failed: %w; nfs fallback unavailable: %w", primaryBackendName, primaryErr, fallbackErr)
+	}
+	return fmt.Errorf(
+		"%s mount failed: %w; %s fallback failed: %w",
+		primaryBackendName,
+		primaryErr,
+		fallbackBackendName,
+		fallbackErr,
+	)
+}
+
+func (f *Filesystem) safeBackendMount(
+	backendName string,
+	backend MountBackend,
+	mountPoint string,
+) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			if backendName == BackendFUSE {
+				err = fmt.Errorf("%w: %v", ErrFUSEUnavailable, r)
+				return
+			}
+			err = fmt.Errorf("%s backend panic: %v", backendName, r)
+		}
+	}()
+	return backend.Mount(f, mountPoint)
+}
+
+func (f *Filesystem) shouldAttemptFallback(backendName string, err error) bool {
+	if !f.backendAuto {
+		return false
+	}
+	// Auto mode should recover from FUSE runtime availability issues on Linux
+	// by retrying with NFS.
+	return backendName == BackendFUSE && errors.Is(err, ErrFUSEUnavailable)
 }
 
 func (f *Filesystem) Unmount() error {
@@ -256,12 +334,6 @@ func (f *Filesystem) IsDestroyed() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.destroyed
-}
-
-func (f *Filesystem) logDebug(msg string) {
-	if f.verbose {
-		log.Debug().Msg(msg)
-	}
 }
 
 func (f *Filesystem) Init() error { return nil }
