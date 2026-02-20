@@ -73,9 +73,9 @@ func TestSlackResultIDRoundTrip(t *testing.T) {
 		t.Fatalf("unexpected parse result: ts=%q channel=%q thread=%q", ts, channelID, threadTS)
 	}
 
-	legacy := buildSlackResultID("1771448784.952069", "C456", "1771448784.952069")
-	if legacy != "1771448784.952069:C456" {
-		t.Fatalf("unexpected legacy id: %q", legacy)
+	withoutThreadTS := buildSlackResultID("1771448784.952069", "C456", "")
+	if withoutThreadTS != "1771448784.952069:C456" {
+		t.Fatalf("unexpected two-part id without thread_ts: %q", withoutThreadTS)
 	}
 }
 
@@ -129,7 +129,7 @@ func TestSlackProviderReadResult_ThreadReplyWithThreadID(t *testing.T) {
 	}
 }
 
-func TestSlackProviderReadResult_LegacyIDTopLevelMessage(t *testing.T) {
+func TestSlackProviderReadResult_TwoPartIDTopLevelMessage(t *testing.T) {
 	targetTS := "1771448784.952069"
 	channelID := "C999"
 
@@ -164,7 +164,7 @@ func TestSlackProviderReadResult_LegacyIDTopLevelMessage(t *testing.T) {
 	}
 }
 
-func TestSlackProviderReadResult_LegacyReplyIDFallback(t *testing.T) {
+func TestSlackProviderReadResult_ReplyWithoutThreadTSUsesRecoveryScan(t *testing.T) {
 	targetTS := "1773000010.000200"
 	threadTS := "1773000000.000100"
 	channelID := "C555"
@@ -176,7 +176,7 @@ func TestSlackProviderReadResult_LegacyReplyIDFallback(t *testing.T) {
 			if query.Get("oldest") == targetTS && query.Get("latest") == targetTS {
 				return map[string]any{"ok": true, "messages": []map[string]any{}}
 			}
-			// Recent history fallback returns a thread root candidate.
+			// Recovery scan examines recent thread roots when thread_ts is missing.
 			return map[string]any{
 				"ok": true,
 				"messages": []map[string]any{
@@ -189,7 +189,7 @@ func TestSlackProviderReadResult_LegacyReplyIDFallback(t *testing.T) {
 					"ok": true,
 					"messages": []map[string]any{
 						{"ts": threadTS, "user": "U_PARENT", "text": "root"},
-						{"ts": targetTS, "user": "U_REPLY", "text": "legacy reply body"},
+						{"ts": targetTS, "user": "U_REPLY", "text": "recovered reply body"},
 					},
 					"has_more": false,
 					"response_metadata": map[string]any{
@@ -208,12 +208,19 @@ func TestSlackProviderReadResult_LegacyReplyIDFallback(t *testing.T) {
 		Credentials: &types.IntegrationCredentials{AccessToken: "xoxp-test"},
 	}
 
-	content, err := p.ReadResult(context.Background(), pctx, targetTS+":"+channelID)
+	// Simulate a fresh query result that omitted thread_ts, which still produces
+	// a 2-part result ID and requires the recovery scan path at read time.
+	resultID := buildSlackResultID(targetTS, channelID, "")
+	if resultID != targetTS+":"+channelID {
+		t.Fatalf("expected two-part ID for missing thread_ts, got: %s", resultID)
+	}
+
+	content, err := p.ReadResult(context.Background(), pctx, resultID)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	if !strings.Contains(string(content), "legacy reply body") {
-		t.Fatalf("expected legacy reply body in content, got: %s", string(content))
+	if !strings.Contains(string(content), "recovered reply body") {
+		t.Fatalf("expected recovered reply body in content, got: %s", string(content))
 	}
 }
 

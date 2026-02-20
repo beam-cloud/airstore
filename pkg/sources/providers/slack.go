@@ -317,7 +317,7 @@ func (s *SlackProvider) ReadResult(ctx context.Context, pctx *sources.ProviderCo
 	}
 
 	// Parse resultID which is either:
-	// - legacy: "ts:channel_id"
+	// - 2-part: "ts:channel_id"
 	// - thread-aware: "ts:channel_id:thread_ts"
 	ts, channelID, threadTS, err := parseSlackResultID(resultID)
 	if err != nil {
@@ -650,7 +650,7 @@ func (s *SlackProvider) fetchMessageWithThread(ctx context.Context, token, chann
 		threadReplies, _ := s.fetchThreadReplies(ctx, token, channelID, msg)
 		return formatSlackMessage(msg, threadReplies), nil
 	}
-	if err != nil && err != sources.ErrNotFound {
+	if err != sources.ErrNotFound {
 		return nil, err
 	}
 
@@ -665,13 +665,14 @@ func (s *SlackProvider) fetchMessageWithThread(ctx context.Context, token, chann
 		}
 	}
 
-	// Legacy fallback: attempt to resolve reply messages even when IDs don't
-	// include thread_ts (older cached results).
-	msg, err = s.findMessageInRecentThreads(ctx, token, channelID, ts)
+	// Recovery scan: Slack search results may omit thread_ts for some reply
+	// matches, producing 2-part IDs. Scan recent thread roots to resolve those
+	// reply timestamps.
+	msg, err = s.findReplyByScanningRecentThreads(ctx, token, channelID, ts)
 	if err == nil {
 		return formatSlackMessage(msg, nil), nil
 	}
-	if err != nil && err != sources.ErrNotFound {
+	if err != sources.ErrNotFound {
 		return nil, err
 	}
 
@@ -805,7 +806,7 @@ func (s *SlackProvider) fetchMessageFromThread(ctx context.Context, token, chann
 	return target, nil, nil
 }
 
-func (s *SlackProvider) findMessageInRecentThreads(ctx context.Context, token, channelID, targetTS string) (map[string]any, error) {
+func (s *SlackProvider) findReplyByScanningRecentThreads(ctx context.Context, token, channelID, targetTS string) (map[string]any, error) {
 	params := url.Values{
 		"channel":   {channelID},
 		"latest":    {targetTS},
