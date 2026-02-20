@@ -243,6 +243,7 @@ func (s *SlackProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provider
 		ts, _ := msg["ts"].(string)
 		text, _ := msg["text"].(string)
 		user, _ := msg["user"].(string)
+		threadTS, _ := msg["thread_ts"].(string)
 		username, _ := msg["username"].(string)
 		if username == "" {
 			username = user
@@ -272,23 +273,27 @@ func (s *SlackProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provider
 
 		// Build metadata
 		metadata := map[string]string{
-			"id":       ts,
-			"channel":  channelName,
-			"user":     username,
-			"date":     msgDate,
-			"text":     truncateText(text, 50),
+			"id":      ts,
+			"channel": channelName,
+			"user":    username,
+			"date":    msgDate,
+			"text":    truncateText(text, 50),
 		}
 
 		// Add channel_id for ReadResult
 		if channelID != "" {
 			metadata["channel_id"] = channelID
 		}
+		// Include thread_ts when available so ReadResult can resolve thread replies.
+		if threadTS != "" {
+			metadata["thread_ts"] = threadTS
+		}
 
 		// Generate filename
 		filename := s.FormatFilename(filenameFormat, metadata)
 
 		results = append(results, sources.QueryResult{
-			ID:       ts + ":" + channelID, // Include channel_id for reading
+			ID:       buildSlackResultID(ts, channelID, threadTS),
 			Filename: filename,
 			Metadata: metadata,
 			Size:     int64(len(text)),
@@ -311,17 +316,18 @@ func (s *SlackProvider) ReadResult(ctx context.Context, pctx *sources.ProviderCo
 		return nil, sources.ErrNotConnected
 	}
 
-	// Parse resultID which is "ts:channel_id"
-	parts := strings.SplitN(resultID, ":", 2)
-	if len(parts) != 2 {
+	// Parse resultID which is either:
+	// - 2-part: "ts:channel_id"
+	// - thread-aware: "ts:channel_id:thread_ts"
+	ts, channelID, threadTS, err := parseSlackResultID(resultID)
+	if err != nil {
 		return nil, fmt.Errorf("invalid result ID format")
 	}
-	ts, channelID := parts[0], parts[1]
 
 	token := pctx.Credentials.AccessToken
 
 	// Fetch the specific message and its thread replies
-	content, err := s.fetchMessageWithThread(ctx, token, channelID, ts)
+	content, err := s.fetchMessageWithThread(ctx, token, channelID, ts, threadTS)
 	if err != nil {
 		return nil, err
 	}
@@ -367,6 +373,29 @@ func (s *SlackProvider) FormatFilename(format string, metadata map[string]string
 	}
 
 	return result
+}
+
+func buildSlackResultID(ts, channelID, threadTS string) string {
+	resultID := ts + ":" + channelID
+	if threadTS != "" && threadTS != ts {
+		return resultID + ":" + threadTS
+	}
+	return resultID
+}
+
+func parseSlackResultID(resultID string) (ts, channelID, threadTS string, err error) {
+	parts := strings.SplitN(resultID, ":", 3)
+	if len(parts) < 2 {
+		return "", "", "", fmt.Errorf("invalid result ID format")
+	}
+
+	ts = parts[0]
+	channelID = parts[1]
+	if len(parts) == 3 {
+		threadTS = parts[2]
+	}
+
+	return ts, channelID, threadTS, nil
 }
 
 // Compile-time interface checks
@@ -526,10 +555,10 @@ func (s *SlackProvider) fetchChannelHistory(ctx context.Context, token, channelI
 		params.Set("cursor", cursor)
 	}
 	var result struct {
-		OK       bool             `json:"ok"`
-		Error    string           `json:"error"`
-		Messages []map[string]any `json:"messages"`
-		HasMore  bool             `json:"has_more"`
+		OK               bool             `json:"ok"`
+		Error            string           `json:"error"`
+		Messages         []map[string]any `json:"messages"`
+		HasMore          bool             `json:"has_more"`
 		ResponseMetadata struct {
 			NextCursor string `json:"next_cursor"`
 		} `json:"response_metadata"`
@@ -563,6 +592,7 @@ func (s *SlackProvider) executeChannelHistory(ctx context.Context, token, channe
 		ts, _ := msg["ts"].(string)
 		text, _ := msg["text"].(string)
 		user, _ := msg["user"].(string)
+		threadTS, _ := msg["thread_ts"].(string)
 		username, _ := msg["username"].(string)
 		if username == "" {
 			username = user
@@ -591,9 +621,12 @@ func (s *SlackProvider) executeChannelHistory(ctx context.Context, token, channe
 			"date":       msgDate,
 			"text":       truncateText(text, 50),
 		}
+		if threadTS != "" {
+			metadata["thread_ts"] = threadTS
+		}
 		filename := s.FormatFilename(filenameFormat, metadata)
 		results = append(results, sources.QueryResult{
-			ID:       ts + ":" + channelID,
+			ID:       buildSlackResultID(ts, channelID, threadTS),
 			Filename: filename,
 			Metadata: metadata,
 			Size:     int64(len(text)),
@@ -607,9 +640,46 @@ func (s *SlackProvider) executeChannelHistory(ctx context.Context, token, channe
 	}, nil
 }
 
-// fetchMessageWithThread fetches a message and its thread replies
-func (s *SlackProvider) fetchMessageWithThread(ctx context.Context, token, channelID, ts string) ([]byte, error) {
-	// First, get the conversation history for the specific message
+// fetchMessageWithThread fetches a message and its thread replies.
+// It first tries direct lookup by message timestamp, then falls back to
+// thread-based resolution for search hits that represent thread replies.
+func (s *SlackProvider) fetchMessageWithThread(ctx context.Context, token, channelID, ts, threadTS string) ([]byte, error) {
+	// Fast path for top-level messages.
+	msg, err := s.fetchMessageByTimestamp(ctx, token, channelID, ts)
+	if err == nil {
+		threadReplies, _ := s.fetchThreadReplies(ctx, token, channelID, msg)
+		return formatSlackMessage(msg, threadReplies), nil
+	}
+	if err != sources.ErrNotFound {
+		return nil, err
+	}
+
+	// Thread-aware fallback (needed for search hits that are thread replies).
+	if threadTS != "" {
+		msg, threadReplies, err := s.fetchMessageFromThread(ctx, token, channelID, threadTS, ts)
+		if err == nil {
+			return formatSlackMessage(msg, threadReplies), nil
+		}
+		if err != sources.ErrNotFound {
+			return nil, err
+		}
+	}
+
+	// Recovery scan: Slack search results may omit thread_ts for some reply
+	// matches, producing 2-part IDs. Scan recent thread roots to resolve those
+	// reply timestamps.
+	msg, err = s.findReplyByScanningRecentThreads(ctx, token, channelID, ts)
+	if err == nil {
+		return formatSlackMessage(msg, nil), nil
+	}
+	if err != sources.ErrNotFound {
+		return nil, err
+	}
+
+	return nil, sources.ErrNotFound
+}
+
+func (s *SlackProvider) fetchMessageByTimestamp(ctx context.Context, token, channelID, ts string) (map[string]any, error) {
 	params := url.Values{
 		"channel":   {channelID},
 		"oldest":    {ts},
@@ -636,36 +706,153 @@ func (s *SlackProvider) fetchMessageWithThread(ctx context.Context, token, chann
 		return nil, sources.ErrNotFound
 	}
 
-	msg := historyResult.Messages[0]
+	return historyResult.Messages[0], nil
+}
 
-	// Check if message has thread replies
+func (s *SlackProvider) fetchThreadReplies(ctx context.Context, token, channelID string, msg map[string]any) ([]map[string]any, error) {
+	// Check if message has thread replies.
 	replyCount, _ := msg["reply_count"].(float64)
-	var threadReplies []map[string]any
-
 	if replyCount > 0 {
-		// Fetch thread replies
-		threadParams := url.Values{
+		ts, _ := msg["ts"].(string)
+		if ts == "" {
+			return nil, nil
+		}
+		threadMessages, err := s.fetchThreadMessages(ctx, token, channelID, ts)
+		if err != nil {
+			return nil, err
+		}
+		if len(threadMessages) > 1 {
+			return threadMessages[1:], nil
+		}
+	}
+	return nil, nil
+}
+
+func (s *SlackProvider) fetchThreadMessages(ctx context.Context, token, channelID, threadTS string) ([]map[string]any, error) {
+	cursor := ""
+	allMessages := make([]map[string]any, 0, 50)
+
+	for {
+		params := url.Values{
 			"channel": {channelID},
-			"ts":      {ts},
-			"limit":   {"100"},
+			"ts":      {threadTS},
+			"limit":   {"200"},
+		}
+		if cursor != "" {
+			params.Set("cursor", cursor)
 		}
 
 		var threadResult struct {
-			OK       bool             `json:"ok"`
-			Error    string           `json:"error"`
-			Messages []map[string]any `json:"messages"`
+			OK               bool             `json:"ok"`
+			Error            string           `json:"error"`
+			Messages         []map[string]any `json:"messages"`
+			HasMore          bool             `json:"has_more"`
+			ResponseMetadata struct {
+				NextCursor string `json:"next_cursor"`
+			} `json:"response_metadata"`
 		}
 
-		if err := s.request(ctx, token, "conversations.replies", threadParams, &threadResult); err == nil && threadResult.OK {
-			// Skip first message (it's the parent)
-			if len(threadResult.Messages) > 1 {
-				threadReplies = threadResult.Messages[1:]
+		if err := s.request(ctx, token, "conversations.replies", params, &threadResult); err != nil {
+			return nil, err
+		}
+		if !threadResult.OK {
+			return nil, fmt.Errorf("slack API error: %s", threadResult.Error)
+		}
+
+		allMessages = append(allMessages, threadResult.Messages...)
+
+		if !threadResult.HasMore || threadResult.ResponseMetadata.NextCursor == "" {
+			break
+		}
+		cursor = threadResult.ResponseMetadata.NextCursor
+	}
+
+	if len(allMessages) == 0 {
+		return nil, sources.ErrNotFound
+	}
+
+	return allMessages, nil
+}
+
+func (s *SlackProvider) fetchMessageFromThread(ctx context.Context, token, channelID, threadTS, targetTS string) (map[string]any, []map[string]any, error) {
+	threadMessages, err := s.fetchThreadMessages(ctx, token, channelID, threadTS)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var target map[string]any
+	for _, msg := range threadMessages {
+		if msgTS, _ := msg["ts"].(string); msgTS == targetTS {
+			target = msg
+			break
+		}
+	}
+	if target == nil {
+		return nil, nil, sources.ErrNotFound
+	}
+
+	// Preserve prior formatting behavior for thread root reads.
+	if targetTS == threadTS {
+		threadReplies := make([]map[string]any, 0, len(threadMessages)-1)
+		for _, msg := range threadMessages {
+			if msgTS, _ := msg["ts"].(string); msgTS != threadTS {
+				threadReplies = append(threadReplies, msg)
+			}
+		}
+		return target, threadReplies, nil
+	}
+
+	// For reply reads, return the specific reply body.
+	return target, nil, nil
+}
+
+func (s *SlackProvider) findReplyByScanningRecentThreads(ctx context.Context, token, channelID, targetTS string) (map[string]any, error) {
+	params := url.Values{
+		"channel":   {channelID},
+		"latest":    {targetTS},
+		"inclusive": {"true"},
+		"limit":     {"25"},
+	}
+
+	var historyResult struct {
+		OK       bool             `json:"ok"`
+		Error    string           `json:"error"`
+		Messages []map[string]any `json:"messages"`
+	}
+
+	if err := s.request(ctx, token, "conversations.history", params, &historyResult); err != nil {
+		return nil, err
+	}
+	if !historyResult.OK {
+		return nil, fmt.Errorf("slack API error: %s", historyResult.Error)
+	}
+
+	for _, candidate := range historyResult.Messages {
+		candidateTS, _ := candidate["ts"].(string)
+		if candidateTS == "" {
+			continue
+		}
+		if candidateTS == targetTS {
+			return candidate, nil
+		}
+
+		replyCount, _ := candidate["reply_count"].(float64)
+		if replyCount <= 0 {
+			continue
+		}
+
+		threadMessages, err := s.fetchThreadMessages(ctx, token, channelID, candidateTS)
+		if err != nil {
+			continue
+		}
+		for _, msg := range threadMessages {
+			if msgTS, _ := msg["ts"].(string); msgTS == targetTS {
+				return msg, nil
 			}
 		}
 	}
 
-	// Format the message as readable text
-	return formatSlackMessage(msg, threadReplies), nil
+	return nil, sources.ErrNotFound
 }
 
 // request makes a GET request to the Slack API
