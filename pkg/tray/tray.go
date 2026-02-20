@@ -33,6 +33,7 @@ func Run(cfg Config) error {
 		ConfigPath:  cfg.ConfigPath,
 		GatewayAddr: cfg.GatewayAddr,
 		Token:       token,
+		AccessLog:   true,
 	}, app.onStateChange)
 
 	systray.Run(app.onReady, app.onExit)
