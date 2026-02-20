@@ -135,8 +135,3 @@ func getEnv(key, defaultValue string) string {
 func getClient() (*Client, error) {
 	return NewClient(gatewayAddr, authToken)
 }
-
-func exitError(err error) {
-	PrintError(err)
-	os.Exit(1)
-}
