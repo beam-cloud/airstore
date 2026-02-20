@@ -606,6 +606,7 @@ func (s *SourceService) readViewResult(ctx context.Context, pctx *sources.Provid
 	if err != nil || query == nil {
 		return &pb.SourceReadResponse{Ok: false, Error: "query not found"}, nil
 	}
+	pctx = s.withViewWebAuthSnapshot(pctx, query)
 
 	provider := s.registry.Get(query.Integration)
 	if provider == nil {
@@ -775,6 +776,35 @@ func (s *SourceService) providerContext(ctx context.Context) (*sources.ProviderC
 		WorkspaceId: auth.WorkspaceId(ctx),
 		MemberId:    auth.MemberId(ctx),
 	}, nil
+}
+
+const webAuthSnapshotExtraKey = "web_auth_snapshot"
+
+// withViewWebAuthSnapshot attaches a per-view web auth snapshot to the provider
+// context for web views only. It clones credentials to avoid mutating shared
+// cached credential objects.
+func (s *SourceService) withViewWebAuthSnapshot(pctx *sources.ProviderContext, query *types.FilesystemQuery) *sources.ProviderContext {
+	if pctx == nil || query == nil || query.Integration != types.SourceWeb.String() || strings.TrimSpace(query.WebAuthSnapshot) == "" {
+		return pctx
+	}
+
+	clonedCtx := *pctx
+	creds := &types.IntegrationCredentials{}
+	if pctx.Credentials != nil {
+		*creds = *pctx.Credentials
+	}
+
+	extra := make(map[string]string)
+	if pctx.Credentials != nil {
+		for k, v := range pctx.Credentials.Extra {
+			extra[k] = v
+		}
+	}
+	extra[webAuthSnapshotExtraKey] = query.WebAuthSnapshot
+	creds.Extra = extra
+	clonedCtx.Credentials = creds
+
+	return &clonedCtx
 }
 
 func (s *SourceService) loadCredentials(ctx context.Context, pctx *sources.ProviderContext, integration string) (*sources.ProviderContext, bool) {

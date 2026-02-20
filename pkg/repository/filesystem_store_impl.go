@@ -127,12 +127,12 @@ func (s *filesystemStore) CreateQuery(ctx context.Context, query *types.Filesyst
 	}
 
 	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO filesystem_queries (external_id, workspace_id, integration, path, name, query_spec, guidance, output_format, file_ext, filename_format, cache_ttl, mode, filter, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+		INSERT INTO filesystem_queries (external_id, workspace_id, integration, path, name, query_spec, guidance, output_format, file_ext, filename_format, cache_ttl, mode, filter, web_auth_snapshot, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 		RETURNING id
 	`, query.ExternalId, query.WorkspaceId, query.Integration, query.Path, query.Name,
 		query.QuerySpec, query.Guidance, query.OutputFormat, query.FileExt, query.FilenameFormat, query.CacheTTL,
-		query.Mode, nullableString(query.Filter),
+		query.Mode, nullableString(query.Filter), nullableString(query.WebAuthSnapshot),
 		query.CreatedAt, query.UpdatedAt).Scan(&query.Id)
 	if err != nil {
 		return nil, fmt.Errorf("create filesystem query: %w", err)
@@ -175,14 +175,15 @@ func (s *filesystemStore) GetQuery(ctx context.Context, workspaceId uint, path s
 
 	// Use ILIKE for case-insensitive path matching (handles old lowercase paths)
 	var filterStr sql.NullString
+	var webAuthSnapshot sql.NullString
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, external_id, workspace_id, integration, path, name, query_spec, guidance, output_format, file_ext, filename_format, cache_ttl, mode, filter, created_at, updated_at, last_executed
+		SELECT id, external_id, workspace_id, integration, path, name, query_spec, guidance, output_format, file_ext, filename_format, cache_ttl, mode, filter, web_auth_snapshot, created_at, updated_at, last_executed
 		FROM filesystem_queries WHERE workspace_id = $1 AND LOWER(path) = LOWER($2)
 	`, workspaceId, path).Scan(
 		&query.Id, &query.ExternalId, &query.WorkspaceId, &query.Integration,
 		&query.Path, &query.Name, &query.QuerySpec, &query.Guidance,
 		&query.OutputFormat, &query.FileExt, &filenameFormat, &query.CacheTTL,
-		&query.Mode, &filterStr,
+		&query.Mode, &filterStr, &webAuthSnapshot,
 		&query.CreatedAt, &query.UpdatedAt, &lastExecuted,
 	)
 	if err == sql.ErrNoRows {
@@ -201,6 +202,9 @@ func (s *filesystemStore) GetQuery(ctx context.Context, workspaceId uint, path s
 	if filterStr.Valid {
 		query.Filter = filterStr.String
 	}
+	if webAuthSnapshot.Valid {
+		query.WebAuthSnapshot = webAuthSnapshot.String
+	}
 	return query, nil
 }
 
@@ -216,14 +220,15 @@ func (s *filesystemStore) GetQueryByExternalId(ctx context.Context, externalId s
 	var filenameFormat sql.NullString
 
 	var filterStr sql.NullString
+	var webAuthSnapshot sql.NullString
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, external_id, workspace_id, integration, path, name, query_spec, guidance, output_format, file_ext, filename_format, cache_ttl, mode, filter, created_at, updated_at, last_executed
+		SELECT id, external_id, workspace_id, integration, path, name, query_spec, guidance, output_format, file_ext, filename_format, cache_ttl, mode, filter, web_auth_snapshot, created_at, updated_at, last_executed
 		FROM filesystem_queries WHERE external_id = $1
 	`, externalId).Scan(
 		&query.Id, &query.ExternalId, &query.WorkspaceId, &query.Integration,
 		&query.Path, &query.Name, &query.QuerySpec, &query.Guidance,
 		&query.OutputFormat, &query.FileExt, &filenameFormat, &query.CacheTTL,
-		&query.Mode, &filterStr,
+		&query.Mode, &filterStr, &webAuthSnapshot,
 		&query.CreatedAt, &query.UpdatedAt, &lastExecuted,
 	)
 	if err == sql.ErrNoRows {
@@ -241,6 +246,9 @@ func (s *filesystemStore) GetQueryByExternalId(ctx context.Context, externalId s
 	}
 	if filterStr.Valid {
 		query.Filter = filterStr.String
+	}
+	if webAuthSnapshot.Valid {
+		query.WebAuthSnapshot = webAuthSnapshot.String
 	}
 	return query, nil
 }
@@ -270,7 +278,7 @@ func (s *filesystemStore) ListQueries(ctx context.Context, workspaceId uint, par
 	excludePattern := parentPath + "/%/%"
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, external_id, workspace_id, integration, path, name, query_spec, guidance, output_format, file_ext, filename_format, cache_ttl, mode, filter, created_at, updated_at, last_executed
+		SELECT id, external_id, workspace_id, integration, path, name, query_spec, guidance, output_format, file_ext, filename_format, cache_ttl, mode, filter, web_auth_snapshot, created_at, updated_at, last_executed
 		FROM filesystem_queries 
 		WHERE workspace_id = $1 AND path ILIKE $2 AND path NOT ILIKE $3
 		ORDER BY name
@@ -286,11 +294,12 @@ func (s *filesystemStore) ListQueries(ctx context.Context, workspaceId uint, par
 		var lastExecuted sql.NullTime
 		var filenameFormat sql.NullString
 		var filterStr sql.NullString
+		var webAuthSnapshot sql.NullString
 		err := rows.Scan(
 			&query.Id, &query.ExternalId, &query.WorkspaceId, &query.Integration,
 			&query.Path, &query.Name, &query.QuerySpec, &query.Guidance,
 			&query.OutputFormat, &query.FileExt, &filenameFormat, &query.CacheTTL,
-			&query.Mode, &filterStr,
+			&query.Mode, &filterStr, &webAuthSnapshot,
 			&query.CreatedAt, &query.UpdatedAt, &lastExecuted,
 		)
 		if err != nil {
@@ -304,6 +313,9 @@ func (s *filesystemStore) ListQueries(ctx context.Context, workspaceId uint, par
 		}
 		if filterStr.Valid {
 			query.Filter = filterStr.String
+		}
+		if webAuthSnapshot.Valid {
+			query.WebAuthSnapshot = webAuthSnapshot.String
 		}
 		queries = append(queries, query)
 	}
@@ -360,6 +372,7 @@ func (s *filesystemStore) UpdateQuery(ctx context.Context, query *types.Filesyst
 			existing.CacheTTL = query.CacheTTL
 			existing.Mode = query.Mode
 			existing.Filter = query.Filter
+			existing.WebAuthSnapshot = query.WebAuthSnapshot
 			existing.UpdatedAt = query.UpdatedAt
 			existing.LastExecuted = query.LastExecuted
 		}
@@ -369,11 +382,11 @@ func (s *filesystemStore) UpdateQuery(ctx context.Context, query *types.Filesyst
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE filesystem_queries SET
 			name = $1, path = $2, query_spec = $3, guidance = $4, output_format = $5, 
-			file_ext = $6, filename_format = $7, cache_ttl = $8, mode = $9, filter = $10, updated_at = $11, last_executed = $12
-		WHERE external_id = $13
+			file_ext = $6, filename_format = $7, cache_ttl = $8, mode = $9, filter = $10, web_auth_snapshot = $11, updated_at = $12, last_executed = $13
+		WHERE external_id = $14
 	`, query.Name, query.Path, query.QuerySpec, query.Guidance, query.OutputFormat,
 		query.FileExt, query.FilenameFormat, query.CacheTTL, query.Mode, nullableString(query.Filter),
-		query.UpdatedAt, query.LastExecuted, query.ExternalId)
+		nullableString(query.WebAuthSnapshot), query.UpdatedAt, query.LastExecuted, query.ExternalId)
 	if err != nil {
 		return fmt.Errorf("update filesystem query: %w", err)
 	}
@@ -1030,7 +1043,7 @@ func (s *filesystemStore) GetWatchedSourceQueries(ctx context.Context, staleAfte
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT DISTINCT q.id, q.external_id, q.workspace_id, q.integration, q.path, q.name,
 		       q.query_spec, q.guidance, q.output_format, q.file_ext, q.filename_format,
-		       q.cache_ttl, q.created_at, q.updated_at, q.last_executed
+		       q.cache_ttl, q.web_auth_snapshot, q.created_at, q.updated_at, q.last_executed
 		FROM filesystem_queries q
 		JOIN filesystem_hooks h
 		  ON h.workspace_id = q.workspace_id
@@ -1051,11 +1064,12 @@ func (s *filesystemStore) GetWatchedSourceQueries(ctx context.Context, staleAfte
 		q := &types.FilesystemQuery{}
 		var lastExecuted sql.NullTime
 		var filenameFormat sql.NullString
+		var webAuthSnapshot sql.NullString
 		if err := rows.Scan(
 			&q.Id, &q.ExternalId, &q.WorkspaceId, &q.Integration,
 			&q.Path, &q.Name, &q.QuerySpec, &q.Guidance,
 			&q.OutputFormat, &q.FileExt, &filenameFormat, &q.CacheTTL,
-			&q.CreatedAt, &q.UpdatedAt, &lastExecuted,
+			&webAuthSnapshot, &q.CreatedAt, &q.UpdatedAt, &lastExecuted,
 		); err != nil {
 			return nil, fmt.Errorf("scan watched query: %w", err)
 		}
@@ -1064,6 +1078,9 @@ func (s *filesystemStore) GetWatchedSourceQueries(ctx context.Context, staleAfte
 		}
 		if filenameFormat.Valid {
 			q.FilenameFormat = filenameFormat.String
+		}
+		if webAuthSnapshot.Valid {
+			q.WebAuthSnapshot = webAuthSnapshot.String
 		}
 		queries = append(queries, q)
 	}

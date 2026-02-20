@@ -73,7 +73,7 @@ type PostHogFilter struct {
 }
 
 type WebFilter struct {
-	Mode         string   `json:"mode"` // "map" or "search"
+	Mode         string   `json:"mode"` // preferred: "website"|"single_page"|"web_search"; legacy: "crawl"|"scrape"|"search"|"map"
 	URL          string   `json:"url"`
 	Query        string   `json:"query"`
 	IncludePaths []string `json:"include_paths"`
@@ -322,9 +322,18 @@ func buildWebFilter(raw json.RawMessage, limit int) (string, error) {
 	if err := json.Unmarshal(raw, &f); err != nil {
 		return "", err
 	}
-	mode := f.Mode
-	if mode == "" {
-		mode = "map"
+	mode := strings.ToLower(strings.TrimSpace(f.Mode))
+	switch mode {
+	case "", "website":
+		mode = "crawl"
+	case "single_page":
+		mode = "scrape"
+	case "web_search":
+		mode = "search"
+	case "crawl", "scrape", "search", "map":
+		// keep normalized value
+	default:
+		mode = "crawl"
 	}
 	query := f.URL
 	if mode == "search" {
@@ -332,7 +341,7 @@ func buildWebFilter(raw json.RawMessage, limit int) (string, error) {
 	}
 	spec := newSpec("web", query, limit)
 	spec["web_mode"] = mode
-	if len(f.IncludePaths) > 0 {
+	if len(f.IncludePaths) > 0 && (mode == "crawl" || mode == "map") {
 		spec["include_paths"] = f.IncludePaths
 	}
 	return marshalSpec(spec)

@@ -194,6 +194,8 @@ func (s *SourceService) emitNewResultHooks(ctx context.Context, workspaceId uint
 // ---------------------------------------------------------------------------
 
 func (s *SourceService) executeAndCacheQuery(ctx context.Context, pctx *sources.ProviderContext, query *types.FilesystemQuery) ([]repository.QueryResult, error) {
+	pctx = s.withViewWebAuthSnapshot(pctx, query)
+
 	provider := s.registry.Get(query.Integration)
 	if provider == nil {
 		return nil, fmt.Errorf("provider not found: %s", query.Integration)
@@ -554,6 +556,157 @@ func (s *SourceService) UpdateView(ctx context.Context, req *pb.UpdateViewReques
 	return &pb.UpdateViewResponse{Ok: true, View: viewToProto(query)}, nil
 }
 
+// SetViewWebAuthSnapshot stores a per-view web auth snapshot (cookies/headers)
+// for a web source view. Snapshot data is persisted in a hidden field and is
+// not exposed through view APIs.
+func (s *SourceService) SetViewWebAuthSnapshot(ctx context.Context, externalId string, snapshot json.RawMessage) error {
+	if !auth.IsAuthenticated(ctx) {
+		return fmt.Errorf("unauthorized")
+	}
+	if externalId == "" {
+		return fmt.Errorf("view id is required")
+	}
+	if len(snapshot) == 0 {
+		return fmt.Errorf("snapshot is required")
+	}
+
+	query, err := s.fsStore.GetQueryByExternalId(ctx, externalId)
+	if err != nil {
+		return fmt.Errorf("failed to load view: %w", err)
+	}
+	if query == nil {
+		return fmt.Errorf("view not found")
+	}
+	if query.WorkspaceId != auth.WorkspaceId(ctx) {
+		return fmt.Errorf("unauthorized")
+	}
+	if query.Integration != types.SourceWeb.String() {
+		return fmt.Errorf("web auth is only supported for web views")
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal(snapshot, &parsed); err != nil {
+		return fmt.Errorf("invalid snapshot: %w", err)
+	}
+	if len(parsed) == 0 {
+		return fmt.Errorf("snapshot is empty")
+	}
+
+	normalized, err := json.Marshal(parsed)
+	if err != nil {
+		return fmt.Errorf("failed to normalize snapshot: %w", err)
+	}
+	query.WebAuthSnapshot = string(normalized)
+
+	if err := s.fsStore.UpdateQuery(ctx, query); err != nil {
+		return fmt.Errorf("failed to save snapshot: %w", err)
+	}
+	if err := s.fsStore.InvalidateQuery(ctx, query.WorkspaceId, query.Path); err != nil {
+		log.Warn().Err(err).Str("path", query.Path).Msg("failed to invalidate query cache after web auth update")
+	}
+
+	log.Info().
+		Str("external_id", externalId).
+		Str("path", query.Path).
+		Msg("saved web auth snapshot for view")
+	return nil
+}
+
+// ClearViewWebAuthSnapshot removes any stored per-view web auth snapshot from a
+// web source view.
+func (s *SourceService) ClearViewWebAuthSnapshot(ctx context.Context, externalId string) error {
+	if !auth.IsAuthenticated(ctx) {
+		return fmt.Errorf("unauthorized")
+	}
+	if externalId == "" {
+		return fmt.Errorf("view id is required")
+	}
+
+	query, err := s.fsStore.GetQueryByExternalId(ctx, externalId)
+	if err != nil {
+		return fmt.Errorf("failed to load view: %w", err)
+	}
+	if query == nil {
+		return fmt.Errorf("view not found")
+	}
+	if query.WorkspaceId != auth.WorkspaceId(ctx) {
+		return fmt.Errorf("unauthorized")
+	}
+	if query.Integration != types.SourceWeb.String() {
+		return fmt.Errorf("web auth is only supported for web views")
+	}
+
+	query.WebAuthSnapshot = ""
+	if err := s.fsStore.UpdateQuery(ctx, query); err != nil {
+		return fmt.Errorf("failed to clear snapshot: %w", err)
+	}
+	if err := s.fsStore.InvalidateQuery(ctx, query.WorkspaceId, query.Path); err != nil {
+		log.Warn().Err(err).Str("path", query.Path).Msg("failed to invalidate query cache after web auth clear")
+	}
+
+	log.Info().
+		Str("external_id", externalId).
+		Str("path", query.Path).
+		Msg("cleared web auth snapshot for view")
+	return nil
+}
+
+// StoreViewResults accepts pre-scraped content for a web view's result files
+// and stores them in the content cache. This allows external scrapers (e.g. a
+// browser-based daemon) to push content that the read path serves immediately
+// without calling the provider's ReadResult.
+func (s *SourceService) StoreViewResults(ctx context.Context, externalId string, items []ResultContentItem) (int, error) {
+	if !auth.IsAuthenticated(ctx) {
+		return 0, fmt.Errorf("unauthorized")
+	}
+	if externalId == "" {
+		return 0, fmt.Errorf("view id is required")
+	}
+	if len(items) == 0 {
+		return 0, fmt.Errorf("no results provided")
+	}
+
+	query, err := s.fsStore.GetQueryByExternalId(ctx, externalId)
+	if err != nil {
+		return 0, fmt.Errorf("failed to load view: %w", err)
+	}
+	if query == nil {
+		return 0, fmt.Errorf("view not found")
+	}
+	if query.WorkspaceId != auth.WorkspaceId(ctx) {
+		return 0, fmt.Errorf("unauthorized")
+	}
+	if query.Integration != types.SourceWeb.String() {
+		return 0, fmt.Errorf("result storage is only supported for web views")
+	}
+
+	stored := 0
+	for _, item := range items {
+		id := strings.TrimSpace(item.ResultID)
+		if id == "" || len(item.Content) == 0 {
+			continue
+		}
+		if err := s.fsStore.StoreResultContent(ctx, query.WorkspaceId, query.Path, id, item.Content); err != nil {
+			log.Warn().Err(err).Str("result_id", id).Msg("failed to store pre-scraped result")
+			continue
+		}
+		stored++
+	}
+
+	log.Info().
+		Str("external_id", externalId).
+		Int("submitted", len(items)).
+		Int("stored", stored).
+		Msg("stored pre-scraped view results")
+	return stored, nil
+}
+
+// ResultContentItem represents a single pre-scraped result for batch storage.
+type ResultContentItem struct {
+	ResultID string `json:"result_id"`
+	Content  []byte `json:"content"`
+}
+
 // ExecuteView runs a view's query and returns materialized results.
 func (s *SourceService) ExecuteView(ctx context.Context, req *pb.ExecuteViewRequest) (*pb.ExecuteViewResponse, error) {
 	if !auth.IsAuthenticated(ctx) {
@@ -574,6 +727,7 @@ func (s *SourceService) ExecuteView(ctx context.Context, req *pb.ExecuteViewRequ
 	if !connected {
 		return &pb.ExecuteViewResponse{Ok: false, Error: "not connected"}, nil
 	}
+	pctx = s.withViewWebAuthSnapshot(pctx, query)
 
 	provider := s.registry.Get(query.Integration)
 	if provider == nil {

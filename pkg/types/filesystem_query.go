@@ -36,9 +36,12 @@ type FilesystemQuery struct {
 	CacheTTL       int              `json:"cache_ttl" db:"cache_ttl"`             // Seconds, 0 = always live
 	Mode           ViewMode         `json:"mode" db:"mode"`                       // "smart" or "query"
 	Filter         string           `json:"filter,omitempty" db:"filter"`         // JSON structured filter (query mode, round-trip editing)
-	CreatedAt      time.Time        `json:"created_at" db:"created_at"`
-	UpdatedAt      time.Time        `json:"updated_at" db:"updated_at"`
-	LastExecuted   *time.Time       `json:"last_executed,omitempty" db:"last_executed"`
+	// WebAuthSnapshot stores per-view web auth material (cookies/headers JSON).
+	// This field is intentionally excluded from API responses and .query.as metadata.
+	WebAuthSnapshot string     `json:"-" db:"web_auth_snapshot"`
+	CreatedAt       time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at" db:"updated_at"`
+	LastExecuted    *time.Time `json:"last_executed,omitempty" db:"last_executed"`
 }
 
 // IsFolder returns true if results materialize as a directory.

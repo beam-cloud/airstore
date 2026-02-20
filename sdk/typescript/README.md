@@ -207,7 +207,7 @@ Each integration accepts a typed filter object:
 | `slack` | `channel`, `from`, `after`, `before`, `has_link`, `has_reaction` |
 | `linear` | `type`, `team`, `state`, `assignee`, `priority`, `label` |
 | `posthog` | `type`, `query`, `project_id` |
-| `web` | `mode`, `url`, `query`, `include_paths` |
+| `web` | `mode` (`website`/`single_page`/`web_search` preferred; legacy: `crawl`/`scrape`/`search`/`map`), `url`, `query`, `include_paths` |
 
 ### Tokens
 

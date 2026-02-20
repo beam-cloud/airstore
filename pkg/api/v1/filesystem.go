@@ -100,12 +100,15 @@ func (g *FilesystemGroup) registerRoutes() {
 
 	// Source view endpoints
 	g.routerGroup.POST("/views", g.CreateView)
-	g.routerGroup.GET("/views", g.GetView)             // ?path=...
-	g.routerGroup.GET("/views/list", g.ListViews)      // List all views
-	g.routerGroup.GET("/views/count", g.CountViews)    // Count views in workspace
-	g.routerGroup.PUT("/views/:id", g.UpdateView)      // :id = external_id
-	g.routerGroup.DELETE("/views/:id", g.DeleteView)   // :id = external_id
-	g.routerGroup.POST("/views/:id/sync", g.SyncView)  // Sync a view
+	g.routerGroup.GET("/views", g.GetView)            // ?path=...
+	g.routerGroup.GET("/views/list", g.ListViews)     // List all views
+	g.routerGroup.GET("/views/count", g.CountViews)   // Count views in workspace
+	g.routerGroup.PUT("/views/:id", g.UpdateView)     // :id = external_id
+	g.routerGroup.DELETE("/views/:id", g.DeleteView)  // :id = external_id
+	g.routerGroup.POST("/views/:id/sync", g.SyncView) // Sync a view
+	g.routerGroup.PUT("/views/:id/web-auth", g.SetViewWebAuth)
+	g.routerGroup.DELETE("/views/:id/web-auth", g.ClearViewWebAuth)
+	g.routerGroup.PUT("/views/:id/results", g.StoreViewResults)
 
 	// Integration resource listing
 	g.routerGroup.GET("/sources/:integration/resources", g.ListResources)
@@ -1186,6 +1189,13 @@ func (g *FilesystemGroup) readSources(c echo.Context, ctx context.Context, relPa
 		if !resp.Ok {
 			if strings.Contains(resp.Error, "not found") {
 				return ErrorResponse(c, http.StatusNotFound, resp.Error)
+			}
+			if strings.Contains(resp.Error, "blocked") ||
+				strings.Contains(resp.Error, "firecrawl") ||
+				strings.Contains(resp.Error, "rate limited") ||
+				strings.Contains(resp.Error, "context canceled") ||
+				strings.Contains(resp.Error, "context deadline") {
+				return ErrorResponse(c, http.StatusBadGateway, resp.Error)
 			}
 			return ErrorResponse(c, http.StatusBadRequest, resp.Error)
 		}
@@ -2278,12 +2288,12 @@ func getManifestToolCount(manifest []byte) int {
 // CreateViewRequest represents a request to create a source view.
 // If Filter is non-empty, the view uses query mode; otherwise smart mode (LLM inference).
 type CreateViewRequest struct {
-	Integration  string          `json:"integration"`    // e.g., "gmail", "gdrive"
-	Name         string          `json:"name"`           // Folder/file name
-	Guidance     string          `json:"guidance"`       // Natural language guidance (smart mode)
-	Filter       json.RawMessage `json:"filter"`         // Structured filter JSON (query mode)
-	OutputFormat string          `json:"output_format"`  // "folder" or "file" (default: "folder")
-	FileExt      string          `json:"file_ext"`       // For files: ".json", ".md"
+	Integration  string          `json:"integration"`   // e.g., "gmail", "gdrive"
+	Name         string          `json:"name"`          // Folder/file name
+	Guidance     string          `json:"guidance"`      // Natural language guidance (smart mode)
+	Filter       json.RawMessage `json:"filter"`        // Structured filter JSON (query mode)
+	OutputFormat string          `json:"output_format"` // "folder" or "file" (default: "folder")
+	FileExt      string          `json:"file_ext"`      // For files: ".json", ".md"
 }
 
 // UpdateViewRequest represents a request to update a source view.
@@ -2292,6 +2302,23 @@ type UpdateViewRequest struct {
 	Guidance string          `json:"guidance"` // New guidance (optional)
 	Filter   json.RawMessage `json:"filter"`   // New filter (optional, query mode)
 	Mode     string          `json:"mode"`     // Explicit mode: "smart" or "query"
+}
+
+// SetViewWebAuthRequest represents a request to save a per-view web auth snapshot.
+type SetViewWebAuthRequest struct {
+	Snapshot json.RawMessage `json:"snapshot"`
+}
+
+// StoreViewResultsRequest represents a request to push pre-scraped content
+// for one or more result files within a web source view.
+type StoreViewResultsRequest struct {
+	Results []StoreViewResultItem `json:"results"`
+}
+
+// StoreViewResultItem is a single result entry with its pre-scraped content.
+type StoreViewResultItem struct {
+	ResultID string `json:"result_id"`
+	Content  string `json:"content"`
 }
 
 // ViewResponse represents a source view in API responses.
@@ -2542,6 +2569,135 @@ func (g *FilesystemGroup) SyncView(c echo.Context) error {
 		"results_count":  result.ResultsCount,
 		"new_results":    result.NewResults,
 	})
+}
+
+// SetViewWebAuth stores a per-view web auth snapshot for a source view.
+func (g *FilesystemGroup) SetViewWebAuth(c echo.Context) error {
+	ctx := c.Request().Context()
+	logRequest(c, "set_view_web_auth")
+
+	if g.sourceService == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "source service not available")
+	}
+
+	externalId := c.Param("id")
+	if externalId == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "id is required")
+	}
+
+	var req SetViewWebAuthRequest
+	if err := c.Bind(&req); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
+	}
+	if len(req.Snapshot) == 0 {
+		return ErrorResponse(c, http.StatusBadRequest, "snapshot is required")
+	}
+
+	if err := g.sourceService.SetViewWebAuthSnapshot(ctx, externalId, req.Snapshot); err != nil {
+		errMsg := err.Error()
+		switch {
+		case strings.Contains(errMsg, "view not found"):
+			return ErrorResponse(c, http.StatusNotFound, errMsg)
+		case strings.Contains(errMsg, "unauthorized"):
+			return ErrorResponse(c, http.StatusForbidden, errMsg)
+		case strings.Contains(errMsg, "invalid snapshot"),
+			strings.Contains(errMsg, "snapshot is"),
+			strings.Contains(errMsg, "web auth is only supported"):
+			return ErrorResponse(c, http.StatusBadRequest, errMsg)
+		default:
+			log.Error().Err(err).Str("external_id", externalId).Msg("failed to save web auth snapshot")
+			return ErrorResponse(c, http.StatusInternalServerError, "failed to save web auth snapshot")
+		}
+	}
+
+	return SuccessResponse(c, map[string]bool{"saved": true})
+}
+
+// ClearViewWebAuth removes a per-view web auth snapshot from a source view.
+func (g *FilesystemGroup) ClearViewWebAuth(c echo.Context) error {
+	ctx := c.Request().Context()
+	logRequest(c, "clear_view_web_auth")
+
+	if g.sourceService == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "source service not available")
+	}
+
+	externalId := c.Param("id")
+	if externalId == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "id is required")
+	}
+
+	if err := g.sourceService.ClearViewWebAuthSnapshot(ctx, externalId); err != nil {
+		errMsg := err.Error()
+		switch {
+		case strings.Contains(errMsg, "view not found"):
+			return ErrorResponse(c, http.StatusNotFound, errMsg)
+		case strings.Contains(errMsg, "unauthorized"):
+			return ErrorResponse(c, http.StatusForbidden, errMsg)
+		case strings.Contains(errMsg, "web auth is only supported"):
+			return ErrorResponse(c, http.StatusBadRequest, errMsg)
+		default:
+			log.Error().Err(err).Str("external_id", externalId).Msg("failed to clear web auth snapshot")
+			return ErrorResponse(c, http.StatusInternalServerError, "failed to clear web auth snapshot")
+		}
+	}
+
+	return SuccessResponse(c, map[string]bool{"cleared": true})
+}
+
+// StoreViewResults accepts pre-scraped content for a web view's result files.
+func (g *FilesystemGroup) StoreViewResults(c echo.Context) error {
+	ctx := c.Request().Context()
+	logRequest(c, "store_view_results")
+
+	if g.sourceService == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "source service not available")
+	}
+
+	externalId := c.Param("id")
+	if externalId == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "id is required")
+	}
+
+	var req StoreViewResultsRequest
+	if err := c.Bind(&req); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
+	}
+	if len(req.Results) == 0 {
+		return ErrorResponse(c, http.StatusBadRequest, "results array is required")
+	}
+
+	items := make([]services.ResultContentItem, 0, len(req.Results))
+	for _, r := range req.Results {
+		if strings.TrimSpace(r.ResultID) == "" || r.Content == "" {
+			continue
+		}
+		items = append(items, services.ResultContentItem{
+			ResultID: r.ResultID,
+			Content:  []byte(r.Content),
+		})
+	}
+	if len(items) == 0 {
+		return ErrorResponse(c, http.StatusBadRequest, "no valid results in request")
+	}
+
+	stored, err := g.sourceService.StoreViewResults(ctx, externalId, items)
+	if err != nil {
+		errMsg := err.Error()
+		switch {
+		case strings.Contains(errMsg, "view not found"):
+			return ErrorResponse(c, http.StatusNotFound, errMsg)
+		case strings.Contains(errMsg, "unauthorized"):
+			return ErrorResponse(c, http.StatusForbidden, errMsg)
+		case strings.Contains(errMsg, "only supported for web"):
+			return ErrorResponse(c, http.StatusBadRequest, errMsg)
+		default:
+			log.Error().Err(err).Str("external_id", externalId).Msg("failed to store view results")
+			return ErrorResponse(c, http.StatusInternalServerError, "failed to store results")
+		}
+	}
+
+	return SuccessResponse(c, map[string]int{"stored": stored})
 }
 
 // ListResources returns available resources for an integration (repos, channels, etc.).

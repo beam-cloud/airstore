@@ -45,7 +45,11 @@ export type PostHogResourceType =
   | 'events' | 'feature-flags' | 'insights' | 'cohorts';
 
 // Web / Firecrawl
-export type WebMode = 'map' | 'search';
+// Intent values are preferred in new integrations.
+export type WebIntentMode = 'website' | 'single_page' | 'web_search';
+// Legacy technical values remain supported for backward compatibility.
+export type WebLegacyMode = 'crawl' | 'scrape' | 'search' | 'map';
+export type WebMode = WebIntentMode | WebLegacyMode;
 
 // ── Const enum objects (for runtime enumeration / dropdowns) ─────────────────
 
@@ -75,7 +79,12 @@ export const PostHogResourceTypes = [
   'events', 'feature-flags', 'insights', 'cohorts',
 ] as const;
 
-export const WebModes = ['map', 'search'] as const;
+export const WebIntentModes = ['website', 'single_page', 'web_search'] as const;
+export const WebLegacyModes = ['crawl', 'scrape', 'search', 'map'] as const;
+export const WebModes = [
+  'website', 'single_page', 'web_search',
+  'crawl', 'scrape', 'search', 'map',
+] as const;
 
 export const Integrations = [
   'gmail', 'github', 'gdrive', 'notion', 'slack', 'linear', 'posthog', 'web',
