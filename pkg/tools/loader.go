@@ -90,7 +90,19 @@ func (l *Loader) LoadFromFS(toolsFS embed.FS, dir string) ([]*SchemaProvider, er
 			return nil
 		}
 
-		// Find matching client
+		// Local tools don't need a client — they execute inside the sandbox
+		if schema.LocalCommand != "" {
+			provider := NewSchemaProvider(schema, nil)
+			providers = append(providers, provider)
+			log.Info().
+				Str("tool", schema.Name).
+				Str("local_command", schema.LocalCommand).
+				Int("commands", len(schema.Commands)).
+				Msg("loaded local tool")
+			return nil
+		}
+
+		// Find matching client for gateway-executed tools
 		client, ok := l.clients.Get(schema.Name)
 		if !ok {
 			log.Debug().Str("tool", schema.Name).Msg("no client registered for tool, skipping")

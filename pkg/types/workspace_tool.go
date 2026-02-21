@@ -61,12 +61,13 @@ const (
 
 // ResolvedTool represents a tool with its origin and metadata for listing
 type ResolvedTool struct {
-	Name        string              `json:"name"`
-	Help        string              `json:"help,omitempty"`
-	Origin      WorkspaceToolOrigin `json:"origin"`
-	ExternalId  string              `json:"external_id,omitempty"` // Only for workspace tools
-	Enabled     bool                `json:"enabled"`
-	ToolCount   int                 `json:"tool_count,omitempty"` // For MCP servers
+	Name         string              `json:"name"`
+	Help         string              `json:"help,omitempty"`
+	Origin       WorkspaceToolOrigin `json:"origin"`
+	ExternalId   string              `json:"external_id,omitempty"`
+	Enabled      bool                `json:"enabled"`
+	ToolCount    int                 `json:"tool_count,omitempty"`
+	LocalCommand string              `json:"local_command,omitempty"`
 }
 
 // CreateWorkspaceToolRequest is the API request to create a workspace tool

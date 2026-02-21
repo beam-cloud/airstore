@@ -1,0 +1,282 @@
+name: browser
+description: Headless browser automation via Kernel cloud browsers. Uses semantic accessibility refs from snapshots to interact with page elements.
+icon: monitor
+local_command: agent-browser
+
+commands:
+  open:
+    description: Navigate to a URL (launches a Kernel cloud browser if none active)
+    params:
+      - name: url
+        type: string
+        required: true
+        position: 0
+        description: URL to navigate to
+
+  snapshot:
+    description: Get accessibility tree with element refs for clicking/typing. This is the primary way to understand what's on the page.
+    params:
+      - name: interactive
+        type: bool
+        default: false
+        short: -i
+        flag: --interactive
+        description: Only show interactive elements (buttons, links, inputs)
+
+      - name: compact
+        type: bool
+        default: false
+        short: -c
+        flag: --compact
+        description: Remove empty structural elements
+
+      - name: selector
+        type: string
+        short: -s
+        flag: --selector
+        description: Scope snapshot to a CSS selector
+
+      - name: depth
+        type: int
+        short: -d
+        flag: --depth
+        description: Limit tree depth
+
+  click:
+    description: Click an element by ref (e.g. @e5) or CSS selector
+    params:
+      - name: selector
+        type: string
+        required: true
+        position: 0
+        description: "Element ref from snapshot (@e5) or CSS selector"
+
+  dblclick:
+    description: Double-click an element
+    params:
+      - name: selector
+        type: string
+        required: true
+        position: 0
+        description: "Element ref (@e5) or CSS selector"
+
+  type:
+    description: Type text into an element (appends to existing value)
+    params:
+      - name: selector
+        type: string
+        required: true
+        position: 0
+        description: "Element ref (@e5) or CSS selector"
+
+      - name: text
+        type: string
+        required: true
+        position: 1
+        description: Text to type
+
+  fill:
+    description: Clear and replace the value of an input element
+    params:
+      - name: selector
+        type: string
+        required: true
+        position: 0
+        description: "Element ref (@e5) or CSS selector"
+
+      - name: text
+        type: string
+        required: true
+        position: 1
+        description: Text to fill
+
+  press:
+    description: "Press a keyboard key (Enter, Tab, Escape, Control+a, etc.)"
+    params:
+      - name: key
+        type: string
+        required: true
+        position: 0
+        description: "Key name (Enter, Tab, Escape, Control+a, ArrowDown, etc.)"
+
+  hover:
+    description: Hover over an element
+    params:
+      - name: selector
+        type: string
+        required: true
+        position: 0
+        description: "Element ref (@e5) or CSS selector"
+
+  focus:
+    description: Focus an element
+    params:
+      - name: selector
+        type: string
+        required: true
+        position: 0
+        description: "Element ref (@e5) or CSS selector"
+
+  check:
+    description: Check a checkbox
+    params:
+      - name: selector
+        type: string
+        required: true
+        position: 0
+        description: "Element ref (@e5) or CSS selector"
+
+  uncheck:
+    description: Uncheck a checkbox
+    params:
+      - name: selector
+        type: string
+        required: true
+        position: 0
+        description: "Element ref (@e5) or CSS selector"
+
+  select:
+    description: Select a dropdown option by value
+    params:
+      - name: selector
+        type: string
+        required: true
+        position: 0
+        description: "Element ref (@e5) or CSS selector"
+
+      - name: value
+        type: string
+        required: true
+        position: 1
+        description: Option value to select
+
+  scroll:
+    description: Scroll the page in a direction
+    params:
+      - name: direction
+        type: string
+        required: true
+        position: 0
+        description: "Scroll direction: up, down, left, right"
+
+      - name: pixels
+        type: int
+        position: 1
+        description: "Number of pixels to scroll (default: one viewport)"
+
+  wait:
+    description: Wait for an element to appear or a number of milliseconds
+    params:
+      - name: target
+        type: string
+        required: true
+        position: 0
+        description: "CSS selector to wait for, or milliseconds (e.g. '2000')"
+
+      - name: timeout
+        type: int
+        flag: --timeout
+        description: Maximum wait time in milliseconds
+
+  screenshot:
+    description: Take a screenshot of the page
+    params:
+      - name: path
+        type: string
+        position: 0
+        description: File path to save screenshot (default prints base64)
+
+      - name: full
+        type: bool
+        default: false
+        short: -f
+        flag: --full
+        description: Capture full page (not just viewport)
+
+      - name: annotate
+        type: bool
+        default: false
+        flag: --annotate
+        description: Add numbered labels for vision models
+
+  eval:
+    description: Execute JavaScript in the page and return the result
+    params:
+      - name: script
+        type: string
+        required: true
+        position: 0
+        description: JavaScript expression or code to execute
+
+  get:
+    description: "Get page information: text, html, value, title, url, count, box, styles"
+    params:
+      - name: what
+        type: string
+        required: true
+        position: 0
+        description: "What to get: text, html, value, attr, title, url, count, box, styles"
+
+      - name: selector
+        type: string
+        position: 1
+        description: "Element ref (@e5) or CSS selector (required for text/html/value/attr/count/box/styles)"
+
+  is:
+    description: "Check element state: visible, enabled, checked"
+    params:
+      - name: what
+        type: string
+        required: true
+        position: 0
+        description: "State to check: visible, enabled, checked"
+
+      - name: selector
+        type: string
+        required: true
+        position: 1
+        description: "Element ref (@e5) or CSS selector"
+
+  cookies:
+    description: Get, set, or clear browser cookies
+    params:
+      - name: action
+        type: string
+        required: true
+        position: 0
+        description: "Action: get, set, clear"
+
+      - name: json
+        type: string
+        position: 1
+        description: "Cookie JSON for 'set' action"
+
+  tab:
+    description: "Manage browser tabs: new, list, close, or switch by number"
+    params:
+      - name: action
+        type: string
+        required: true
+        position: 0
+        description: "Action: new, list, close, or tab number"
+
+  back:
+    description: Navigate back in browser history
+
+  forward:
+    description: Navigate forward in browser history
+
+  reload:
+    description: Reload the current page
+
+  close:
+    description: Close the browser and end the session
+
+  exec:
+    description: Run any agent-browser command not covered by the built-in commands
+    params:
+      - name: args
+        type: string
+        required: true
+        position: 0
+        description: "Raw arguments to pass to agent-browser (e.g. 'drag @e1 @e2', 'upload @e3 /path/to/file')"

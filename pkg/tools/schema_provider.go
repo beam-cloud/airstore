@@ -30,6 +30,11 @@ func (p *SchemaProvider) Name() string {
 	return p.schema.Name
 }
 
+// LocalCommand returns the local CLI command for sandbox execution, or "" for gateway execution
+func (p *SchemaProvider) LocalCommand() string {
+	return p.schema.LocalCommand
+}
+
 // Help generates help text from the schema
 func (p *SchemaProvider) Help() string {
 	var sb strings.Builder
@@ -93,13 +98,15 @@ func (p *SchemaProvider) ExecuteWithContext(ctx context.Context, execCtx *Execut
 		return err
 	}
 
-	// Extract credentials from execution context
+	if p.client == nil {
+		return fmt.Errorf("%s is a local tool — run it directly in the sandbox", p.schema.Name)
+	}
+
 	var creds *types.IntegrationCredentials
 	if execCtx != nil {
 		creds = execCtx.Credentials
 	}
 
-	// Execute via client
 	return p.client.Execute(ctx, command, parsedArgs, creds, stdout, stderr)
 }
 

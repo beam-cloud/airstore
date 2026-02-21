@@ -32,11 +32,12 @@ type ToolsVNode struct {
 	modTime     time.Time       // stable timestamps for getattr
 
 	// Cache with TTL
-	mu           sync.RWMutex
-	tools        []string
-	toolSet      map[string]bool
-	lastFetch    time.Time
-	cacheModTime time.Time // Updated when tool set changes
+	mu            sync.RWMutex
+	tools         []string
+	toolSet       map[string]bool
+	localWrappers map[string][]byte // tool name → wrapper script for local execution
+	lastFetch     time.Time
+	cacheModTime  time.Time // Updated when tool set changes
 }
 
 // NewToolsVNode creates a new ToolsVNode.
@@ -44,14 +45,15 @@ func NewToolsVNode(gatewayAddr string, token string, shimBinary []byte) *ToolsVN
 	modTime := time.Now()
 
 	t := &ToolsVNode{
-		gatewayAddr:  gatewayAddr,
-		token:        token,
-		bearerToken:  BearerToken(token),
-		shim:         shimBinary,
-		modTime:      modTime,
-		tools:        []string{},
-		toolSet:      make(map[string]bool),
-		cacheModTime: modTime,
+		gatewayAddr:   gatewayAddr,
+		token:         token,
+		bearerToken:   BearerToken(token),
+		shim:          shimBinary,
+		modTime:       modTime,
+		tools:         []string{},
+		toolSet:       make(map[string]bool),
+		localWrappers: make(map[string][]byte),
+		cacheModTime:  modTime,
 	}
 
 	// Initial fetch - non-blocking if it fails
@@ -86,7 +88,11 @@ func (t *ToolsVNode) Getattr(path string) (*FileInfo, error) {
 		return nil, fs.ErrNotExist
 	}
 
-	info := NewExecFileInfo(toolIno(name), int64(len(t.shim)))
+	size := int64(len(t.shim))
+	if wrapper := t.getLocalWrapper(name); wrapper != nil {
+		size = int64(len(wrapper))
+	}
+	info := NewExecFileInfo(toolIno(name), size)
 	mtime := t.getCacheModTime()
 	info.Atime = mtime
 	info.Mtime = mtime
@@ -134,10 +140,16 @@ func (t *ToolsVNode) Read(path string, buf []byte, off int64, fh FileHandle) (in
 	if !t.hasTool(name) {
 		return 0, fs.ErrNotExist
 	}
-	if off >= int64(len(t.shim)) {
+
+	data := t.shim
+	if wrapper := t.getLocalWrapper(name); wrapper != nil {
+		data = wrapper
+	}
+
+	if off >= int64(len(data)) {
 		return 0, nil
 	}
-	return copy(buf, t.shim[off:]), nil
+	return copy(buf, data[off:]), nil
 }
 
 // hasTool checks if a tool is registered.
@@ -145,6 +157,13 @@ func (t *ToolsVNode) hasTool(name string) bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return t.toolSet[name]
+}
+
+// getLocalWrapper returns the wrapper script for a local tool, or nil for gateway tools.
+func (t *ToolsVNode) getLocalWrapper(name string) []byte {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.localWrappers[name]
 }
 
 // getTools returns the list of registered tools.
@@ -174,22 +193,26 @@ func (t *ToolsVNode) maybeRefresh() {
 	}
 }
 
+type toolEntry struct {
+	name         string
+	localCommand string
+}
+
 // refreshCache fetches the latest tools from the gateway
 func (t *ToolsVNode) refreshCache() {
-	tools := t.fetchTools()
-	if tools == nil {
+	entries := t.fetchTools()
+	if entries == nil {
 		return
 	}
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	// Check if the tool set has changed
-	changed := len(tools) != len(t.tools)
+	changed := len(entries) != len(t.tools)
 	if !changed {
-		newSet := make(map[string]bool, len(tools))
-		for _, name := range tools {
-			newSet[name] = true
+		newSet := make(map[string]bool, len(entries))
+		for _, e := range entries {
+			newSet[e.name] = true
 		}
 		for _, name := range t.tools {
 			if !newSet[name] {
@@ -199,26 +222,28 @@ func (t *ToolsVNode) refreshCache() {
 		}
 	}
 
-	// Update cache
-	t.tools = tools
-	t.toolSet = make(map[string]bool, len(tools))
-	for _, name := range tools {
-		t.toolSet[name] = true
+	t.tools = make([]string, len(entries))
+	t.toolSet = make(map[string]bool, len(entries))
+	t.localWrappers = make(map[string][]byte)
+	for i, e := range entries {
+		t.tools[i] = e.name
+		t.toolSet[e.name] = true
+		if e.localCommand != "" {
+			t.localWrappers[e.name] = []byte("#!/bin/sh\nexec " + e.localCommand + " \"$@\"\n")
+		}
 	}
 	t.lastFetch = time.Now()
 
-	// Update modTime if tools changed (helps OS notice changes)
 	if changed {
 		t.cacheModTime = time.Now()
 	}
 }
 
 // fetchTools queries the gateway for registered tools.
-func (t *ToolsVNode) fetchTools() []string {
+func (t *ToolsVNode) fetchTools() []toolEntry {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Add auth token if available
 	if t.bearerToken != "" {
 		md := metadata.Pairs("authorization", t.bearerToken)
 		ctx = metadata.NewOutgoingContext(ctx, md)
@@ -243,11 +268,11 @@ func (t *ToolsVNode) fetchTools() []string {
 		return nil
 	}
 
-	tools := make([]string, len(resp.Tools))
+	entries := make([]toolEntry, len(resp.Tools))
 	for i, tool := range resp.Tools {
-		tools[i] = tool.Name
+		entries[i] = toolEntry{name: tool.Name, localCommand: tool.LocalCommand}
 	}
-	return tools
+	return entries
 }
 
 func toolsIno() uint64 {

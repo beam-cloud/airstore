@@ -15,6 +15,7 @@ const (
 	Linear    IntegrationName = "linear"
 	PostHog   IntegrationName = "posthog"
 	Web       IntegrationName = "web"
+	Browser   IntegrationName = "browser"
 )
 
 func (n IntegrationName) String() string { return string(n) }

@@ -27,6 +27,9 @@ filesystem:
 #     redirectUrl: "http://localhost:1994/api/v1/oauth/google/callback"
 
 tools:
+  integrations:
+    kernel:
+      apiKey: "sk_d7761120-53d0-49d3-bcd0-a401c8309de1.8FVwTzme/20sd5sPt6BxkLSAwxjLMzWPGgI45cSzynM"
   mcp:
     # Filesystem - read/write files (add directories as args)
     filesystem:

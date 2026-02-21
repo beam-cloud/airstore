@@ -20,6 +20,7 @@ message ListToolsRequest {}
 message ToolInfo {
   string name = 1;
   string help = 2;
+  string local_command = 3;
 }
 
 message ListToolsResponse {

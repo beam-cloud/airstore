@@ -823,8 +823,9 @@ func (m *SandboxManager) buildPromptTaskEntrypoint(task types.Task, env map[stri
 
 func (m *SandboxManager) buildClaudePromptEntrypoint(task types.Task, env map[string]string) []string {
 	m.injectAnthropicAPIKey(env, true)
-	if m.kernelAPIKey != "" && env["KERNEL_API_KEY"] == "" {
-		env["KERNEL_API_KEY"] = m.kernelAPIKey
+	m.injectAPIKey(env, "KERNEL_API_KEY", m.kernelAPIKey, false)
+	if m.kernelAPIKey != "" {
+		env["AGENT_BROWSER_PROVIDER"] = "kernel"
 	}
 
 	log.Info().
@@ -856,11 +857,15 @@ func (m *SandboxManager) copyTaskEnv(task types.Task) map[string]string {
 }
 
 func (m *SandboxManager) injectAnthropicAPIKey(env map[string]string, overwrite bool) {
-	if m.anthropicAPIKey == "" {
+	m.injectAPIKey(env, "ANTHROPIC_API_KEY", m.anthropicAPIKey, overwrite)
+}
+
+func (m *SandboxManager) injectAPIKey(env map[string]string, key, value string, overwrite bool) {
+	if value == "" {
 		return
 	}
-	if overwrite || env["ANTHROPIC_API_KEY"] == "" {
-		env["ANTHROPIC_API_KEY"] = m.anthropicAPIKey
+	if overwrite || env[key] == "" {
+		env[key] = value
 	}
 }
 
