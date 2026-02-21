@@ -30,7 +30,7 @@ func (p *SchemaProvider) Name() string {
 	return p.schema.Name
 }
 
-// LocalCommand returns the local CLI command for sandbox execution, or "" for gateway execution
+// LocalCommand implements LocalToolProvider.
 func (p *SchemaProvider) LocalCommand() string {
 	return p.schema.LocalCommand
 }

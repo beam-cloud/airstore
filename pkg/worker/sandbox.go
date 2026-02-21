@@ -823,10 +823,7 @@ func (m *SandboxManager) buildPromptTaskEntrypoint(task types.Task, env map[stri
 
 func (m *SandboxManager) buildClaudePromptEntrypoint(task types.Task, env map[string]string) []string {
 	m.injectAnthropicAPIKey(env, true)
-	m.injectAPIKey(env, "KERNEL_API_KEY", m.kernelAPIKey, false)
-	if m.kernelAPIKey != "" {
-		env["AGENT_BROWSER_PROVIDER"] = "kernel"
-	}
+	m.injectKernelEnv(env)
 
 	log.Info().
 		Str("task_id", task.ExternalId).
@@ -834,6 +831,16 @@ func (m *SandboxManager) buildClaudePromptEntrypoint(task types.Task, env map[st
 		Msg("running claude code task")
 
 	return claudePromptEntrypoint(task.Prompt)
+}
+
+func (m *SandboxManager) injectKernelEnv(env map[string]string) {
+	if m.kernelAPIKey == "" {
+		return
+	}
+	m.injectAPIKey(env, "KERNEL_API_KEY", m.kernelAPIKey, false)
+	if env["AGENT_BROWSER_PROVIDER"] == "" {
+		env["AGENT_BROWSER_PROVIDER"] = "kernel"
+	}
 }
 
 func claudePromptEntrypoint(prompt string) []string {

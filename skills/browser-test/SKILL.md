@@ -11,93 +11,34 @@ metadata:
 # Browser Automation Test
 
 You have a browser tool at `/workspace/tools/browser` that controls a headless
-cloud browser via Kernel. It wraps the `agent-browser` CLI.
+cloud browser via Kernel. Run it directly with Bash — it is NOT an MCP tool.
 
-## Your Task
+## Goal
 
-Perform the following browser automation sequence and save structured results.
+1. Open https://news.ycombinator.com
+2. Take an interactive snapshot (`snapshot --interactive`) to see element refs
+3. Use `eval` to extract the top 5 story titles and URLs as JSON
+4. Click the first story link using its ref from the snapshot
+5. Get the destination page title and URL
+6. Navigate back and confirm the title is "Hacker News"
+7. Close the browser session
 
-### Step 1 — Open Hacker News
+## Save Results
 
-```bash
-/workspace/tools/browser open https://news.ycombinator.com
-```
-
-### Step 2 — Snapshot the page
-
-Take an interactive snapshot to understand the page structure:
-
-```bash
-/workspace/tools/browser snapshot --interactive
-```
-
-### Step 3 — Extract top stories
-
-Use `eval` to extract the top 5 stories as JSON:
-
-```bash
-/workspace/tools/browser eval 'JSON.stringify(
-  Array.from(document.querySelectorAll(".titleline > a")).slice(0,5).map((a,i) => ({
-    rank: i+1,
-    title: a.textContent,
-    url: a.href
-  }))
-)'
-```
-
-### Step 4 — Click the first story
-
-From the snapshot, click the first story link using its accessibility ref
-(e.g. `@e3` or whichever ref corresponds to the first `.titleline > a`).
-
-```bash
-/workspace/tools/browser click <ref>
-```
-
-### Step 5 — Capture the destination
-
-Get the current page title and URL:
-
-```bash
-/workspace/tools/browser get title
-/workspace/tools/browser get url
-```
-
-### Step 6 — Go back and verify
-
-```bash
-/workspace/tools/browser back
-/workspace/tools/browser get title
-```
-
-### Step 7 — Save results
-
-Write a JSON file to `/workspace/Memory/browser-test/results.json` containing:
+Write structured JSON to `/workspace/Memory/browser-test/results.json`:
 
 ```json
 {
   "timestamp": "<ISO 8601>",
-  "stories": [ ... the 5 extracted stories ... ],
-  "visited": {
-    "title": "<title of the story page>",
-    "url": "<url of the story page>"
-  },
+  "stories": [{"rank": 1, "title": "...", "url": "..."}, ...],
+  "visited": {"title": "...", "url": "..."},
   "status": "success"
 }
 ```
 
 Create the directory first: `mkdir -p /workspace/Memory/browser-test`
 
-### Step 8 — Clean up
+## Notes
 
-```bash
-/workspace/tools/browser close
-```
-
-## Important Notes
-
-- The browser tool is a local CLI wrapper around `agent-browser`.
-  Run it directly with Bash — it is NOT an MCP tool.
-- Each command prints its result to stdout. Parse the output as needed.
 - If a command fails, retry once before reporting failure.
 - The browser session persists across commands (stateful daemon).

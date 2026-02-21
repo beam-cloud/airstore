@@ -63,8 +63,8 @@ func (s *ToolService) ListTools(ctx context.Context, req *pb.ListToolsRequest) (
 	for _, name := range names {
 		if p := s.registry.Get(name); p != nil {
 			info := &pb.ToolInfo{Name: p.Name(), Help: p.Help()}
-			if sp, ok := p.(*tools.SchemaProvider); ok && sp.LocalCommand() != "" {
-				info.LocalCommand = sp.LocalCommand()
+			if lp, ok := p.(tools.LocalToolProvider); ok {
+				info.LocalCommand = lp.LocalCommand()
 			}
 			infos = append(infos, info)
 		}

@@ -80,8 +80,8 @@ func (r *WorkspaceToolResolver) List(ctx context.Context) ([]types.ResolvedTool,
 			Origin:  types.ToolOriginGlobal,
 			Enabled: enabled,
 		}
-		if lt, ok := provider.(interface{ LocalCommand() string }); ok {
-			rt.LocalCommand = lt.LocalCommand()
+		if lp, ok := provider.(LocalToolProvider); ok {
+			rt.LocalCommand = lp.LocalCommand()
 		}
 		result = append(result, rt)
 	}

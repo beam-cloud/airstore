@@ -90,33 +90,9 @@ func (l *Loader) LoadFromFS(toolsFS embed.FS, dir string) ([]*SchemaProvider, er
 			return nil
 		}
 
-		// Local tools don't need a client — they execute inside the sandbox
-		if schema.LocalCommand != "" {
-			provider := NewSchemaProvider(schema, nil)
-			providers = append(providers, provider)
-			log.Info().
-				Str("tool", schema.Name).
-				Str("local_command", schema.LocalCommand).
-				Int("commands", len(schema.Commands)).
-				Msg("loaded local tool")
-			return nil
+		if p := l.providerForSchema(schema); p != nil {
+			providers = append(providers, p)
 		}
-
-		// Find matching client for gateway-executed tools
-		client, ok := l.clients.Get(schema.Name)
-		if !ok {
-			log.Debug().Str("tool", schema.Name).Msg("no client registered for tool, skipping")
-			return nil
-		}
-
-		provider := NewSchemaProvider(schema, client)
-		providers = append(providers, provider)
-
-		log.Info().
-			Str("tool", schema.Name).
-			Int("commands", len(schema.Commands)).
-			Msg("loaded tool")
-
 		return nil
 	})
 
@@ -140,25 +116,14 @@ func (l *Loader) LoadFromDir(dir string) ([]*SchemaProvider, error) {
 	var providers []*SchemaProvider
 
 	for _, schema := range schemas {
-		// Skip if already registered via self-registration (builtin tools)
 		if _, exists := selfRegistered[schema.Name]; exists {
 			log.Debug().Str("tool", schema.Name).Msg("tool already self-registered, skipping YAML schema")
 			continue
 		}
 
-		client, ok := l.clients.Get(schema.Name)
-		if !ok {
-			log.Debug().Str("tool", schema.Name).Msg("no client registered for tool, skipping")
-			continue
+		if p := l.providerForSchema(schema); p != nil {
+			providers = append(providers, p)
 		}
-
-		provider := NewSchemaProvider(schema, client)
-		providers = append(providers, provider)
-
-		log.Info().
-			Str("tool", schema.Name).
-			Int("commands", len(schema.Commands)).
-			Msg("loaded tool")
 	}
 
 	return providers, nil
@@ -171,12 +136,42 @@ func (l *Loader) LoadFromBytes(data []byte) (*SchemaProvider, error) {
 		return nil, err
 	}
 
+	if schema.LocalCommand != "" {
+		return NewSchemaProvider(schema, nil), nil
+	}
+
 	client, ok := l.clients.Get(schema.Name)
 	if !ok {
 		return nil, fmt.Errorf("no client registered for tool: %s", schema.Name)
 	}
 
 	return NewSchemaProvider(schema, client), nil
+}
+
+// providerForSchema creates a SchemaProvider for a parsed schema.
+// Local tools (with local_command) get a nil client since they execute in-sandbox.
+// Gateway-executed tools are matched to a registered client by name.
+func (l *Loader) providerForSchema(schema *ToolSchema) *SchemaProvider {
+	if schema.LocalCommand != "" {
+		log.Info().
+			Str("tool", schema.Name).
+			Str("local_command", schema.LocalCommand).
+			Int("commands", len(schema.Commands)).
+			Msg("loaded local tool")
+		return NewSchemaProvider(schema, nil)
+	}
+
+	client, ok := l.clients.Get(schema.Name)
+	if !ok {
+		log.Debug().Str("tool", schema.Name).Msg("no client registered, skipping")
+		return nil
+	}
+
+	log.Info().
+		Str("tool", schema.Name).
+		Int("commands", len(schema.Commands)).
+		Msg("loaded tool")
+	return NewSchemaProvider(schema, client)
 }
 
 // RegisterProviders loads tools and registers them with a provider registry

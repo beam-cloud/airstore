@@ -25,6 +25,13 @@ type ToolProvider interface {
 	ExecuteWithContext(ctx context.Context, execCtx *ExecutionContext, args []string, stdout, stderr io.Writer) error
 }
 
+// LocalToolProvider is an optional interface for tools that execute locally
+// inside the sandbox rather than proxying through the gateway.
+// The FUSE layer serves a wrapper script for these tools instead of the gRPC shim.
+type LocalToolProvider interface {
+	LocalCommand() string
+}
+
 // ToolClient is implemented by tool backends
 type ToolClient interface {
 	Name() types.IntegrationName

@@ -1,5 +1,7 @@
 name: browser
-description: Headless browser automation via Kernel cloud browsers. Uses semantic accessibility refs from snapshots to interact with page elements.
+description: >-
+  Headless browser automation via Kernel cloud browsers.
+  Uses semantic accessibility refs from snapshots to interact with page elements.
 icon: monitor
 local_command: agent-browser
 

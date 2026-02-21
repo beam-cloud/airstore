@@ -20,24 +20,24 @@ const (
 )
 
 // ToolsVNode implements VirtualNode for the /tools directory.
-// It serves tool binaries directly via FUSE.
-// Tools are cached with a TTL to allow dynamic updates without remount.
+// It serves tool binaries via FUSE, choosing between two modes per tool:
+//   - Gateway tools: served as the compiled gRPC shim binary
+//   - Local tools:   served as a shell wrapper that execs the CLI directly
 type ToolsVNode struct {
-	ReadOnlyBase // Embeds read-only defaults for write operations
+	ReadOnlyBase
 
 	gatewayAddr string
-	token       string // Auth token for gRPC calls
-	bearerToken string // precomputed auth header value
-	shim        []byte          // shim binary served via FUSE
-	modTime     time.Time       // stable timestamps for getattr
+	token       string
+	bearerToken string
+	shim        []byte    // gRPC shim binary for gateway-executed tools
+	modTime     time.Time // stable timestamp for initial getattr
 
-	// Cache with TTL
 	mu            sync.RWMutex
-	tools         []string
-	toolSet       map[string]bool
-	localWrappers map[string][]byte // tool name → wrapper script for local execution
+	tools         []string          // ordered tool names
+	toolSet       map[string]bool   // fast membership check
+	localWrappers map[string][]byte // tool → wrapper script (nil = use shim)
 	lastFetch     time.Time
-	cacheModTime  time.Time // Updated when tool set changes
+	cacheModTime  time.Time
 }
 
 // NewToolsVNode creates a new ToolsVNode.
@@ -88,11 +88,7 @@ func (t *ToolsVNode) Getattr(path string) (*FileInfo, error) {
 		return nil, fs.ErrNotExist
 	}
 
-	size := int64(len(t.shim))
-	if wrapper := t.getLocalWrapper(name); wrapper != nil {
-		size = int64(len(wrapper))
-	}
-	info := NewExecFileInfo(toolIno(name), size)
+	info := NewExecFileInfo(toolIno(name), int64(len(t.toolBinary(name))))
 	mtime := t.getCacheModTime()
 	info.Atime = mtime
 	info.Mtime = mtime
@@ -141,11 +137,7 @@ func (t *ToolsVNode) Read(path string, buf []byte, off int64, fh FileHandle) (in
 		return 0, fs.ErrNotExist
 	}
 
-	data := t.shim
-	if wrapper := t.getLocalWrapper(name); wrapper != nil {
-		data = wrapper
-	}
-
+	data := t.toolBinary(name)
 	if off >= int64(len(data)) {
 		return 0, nil
 	}
@@ -159,11 +151,15 @@ func (t *ToolsVNode) hasTool(name string) bool {
 	return t.toolSet[name]
 }
 
-// getLocalWrapper returns the wrapper script for a local tool, or nil for gateway tools.
-func (t *ToolsVNode) getLocalWrapper(name string) []byte {
+// toolBinary returns the bytes to serve for a given tool:
+// a shell wrapper for local tools, the gRPC shim for gateway tools.
+func (t *ToolsVNode) toolBinary(name string) []byte {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	return t.localWrappers[name]
+	if w, ok := t.localWrappers[name]; ok {
+		return w
+	}
+	return t.shim
 }
 
 // getTools returns the list of registered tools.
@@ -198,45 +194,47 @@ type toolEntry struct {
 	localCommand string
 }
 
-// refreshCache fetches the latest tools from the gateway
+// refreshCache fetches the latest tools from the gateway and rebuilds the cache.
 func (t *ToolsVNode) refreshCache() {
 	entries := t.fetchTools()
 	if entries == nil {
 		return
 	}
 
+	names := make([]string, len(entries))
+	set := make(map[string]bool, len(entries))
+	wrappers := make(map[string][]byte)
+	for i, e := range entries {
+		names[i] = e.name
+		set[e.name] = true
+		if e.localCommand != "" {
+			wrappers[e.name] = []byte("#!/bin/sh\nexec " + e.localCommand + " \"$@\"\n")
+		}
+	}
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	changed := len(entries) != len(t.tools)
-	if !changed {
-		newSet := make(map[string]bool, len(entries))
-		for _, e := range entries {
-			newSet[e.name] = true
-		}
-		for _, name := range t.tools {
-			if !newSet[name] {
-				changed = true
-				break
-			}
-		}
-	}
-
-	t.tools = make([]string, len(entries))
-	t.toolSet = make(map[string]bool, len(entries))
-	t.localWrappers = make(map[string][]byte)
-	for i, e := range entries {
-		t.tools[i] = e.name
-		t.toolSet[e.name] = true
-		if e.localCommand != "" {
-			t.localWrappers[e.name] = []byte("#!/bin/sh\nexec " + e.localCommand + " \"$@\"\n")
-		}
-	}
+	changed := !sameKeys(set, t.toolSet)
+	t.tools = names
+	t.toolSet = set
+	t.localWrappers = wrappers
 	t.lastFetch = time.Now()
-
 	if changed {
 		t.cacheModTime = time.Now()
 	}
+}
+
+func sameKeys(a, b map[string]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if !b[k] {
+			return false
+		}
+	}
+	return true
 }
 
 // fetchTools queries the gateway for registered tools.
