@@ -47,6 +47,10 @@ func (c *AppConfig) AnthropicAPIKey() string {
 	return c.Models.Anthropic.APIKey
 }
 
+func (c *AppConfig) KernelAPIKey() string {
+	return c.Tools.Integrations.Kernel.APIKey
+}
+
 // CerebrasAPIKey returns the Cerebras API key.
 func (c *AppConfig) CerebrasAPIKey() string {
 	return c.Models.Cerebras.APIKey
@@ -228,6 +232,7 @@ type IntegrationsConfig struct {
 	Weather IntegrationAPIKey `key:"weather" json:"weather"`
 	Exa     IntegrationAPIKey `key:"exa" json:"exa"`
 	GitHub  GitHubConfig      `key:"github" json:"github"`
+	Kernel  IntegrationAPIKey `key:"kernel" json:"kernel"`
 }
 
 // IntegrationAPIKey is a simple API key configuration

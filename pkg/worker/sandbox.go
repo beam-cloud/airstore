@@ -27,6 +27,7 @@ type SandboxManager struct {
 	gatewayAddr     string
 	authToken       string
 	anthropicAPIKey string
+	kernelAPIKey    string
 	enableFS        bool
 
 	// Components
@@ -88,6 +89,7 @@ type Config struct {
 
 	// API keys
 	AnthropicAPIKey string
+	KernelAPIKey    string
 }
 
 func NewSandboxManager(ctx context.Context, cfg Config) (*SandboxManager, error) {
@@ -165,6 +167,7 @@ func NewSandboxManager(ctx context.Context, cfg Config) (*SandboxManager, error)
 		gatewayAddr:     cfg.GatewayAddr,
 		authToken:       cfg.AuthToken,
 		anthropicAPIKey: cfg.AnthropicAPIKey,
+		kernelAPIKey:    cfg.KernelAPIKey,
 		enableFS:        cfg.EnableFilesystem,
 		runtime:         rt,
 		imageManager:    imgMgr,
@@ -819,8 +822,10 @@ func (m *SandboxManager) buildPromptTaskEntrypoint(task types.Task, env map[stri
 }
 
 func (m *SandboxManager) buildClaudePromptEntrypoint(task types.Task, env map[string]string) []string {
-	// Claude prompt tasks should use the worker-configured API key.
 	m.injectAnthropicAPIKey(env, true)
+	if m.kernelAPIKey != "" && env["KERNEL_API_KEY"] == "" {
+		env["KERNEL_API_KEY"] = m.kernelAPIKey
+	}
 
 	log.Info().
 		Str("task_id", task.ExternalId).

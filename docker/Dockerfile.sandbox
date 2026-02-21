@@ -60,7 +60,11 @@ RUN groupadd -g 1000 sandbox \
     && echo "sandbox ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
 # Install global npm packages as root first
-RUN npm install -g typescript ts-node
+# agent-browser: headless browser CLI for AI agents (used with Kernel cloud browsers via -p kernel)
+RUN npm install -g typescript ts-node agent-browser
+
+# Default to Kernel provider for browser automation (no local Chromium needed)
+ENV AGENT_BROWSER_PROVIDER=kernel
 
 # Switch to sandbox user for Claude Code installation
 USER sandbox
