@@ -139,7 +139,8 @@ func (s *TaskService) ListTasks(ctx context.Context, _ *pb.ListTasksRequest) (*p
 }
 
 func (s *TaskService) GetTask(ctx context.Context, req *pb.GetTaskRequest) (*pb.TaskResponse, error) {
-	if auth.AuthInfoFromContext(ctx) == nil {
+	workspaceID := auth.WorkspaceId(ctx)
+	if workspaceID == 0 {
 		return &pb.TaskResponse{Ok: false, Error: "authentication required"}, nil
 	}
 
@@ -150,19 +151,27 @@ func (s *TaskService) GetTask(ctx context.Context, req *pb.GetTaskRequest) (*pb.
 		}
 		return &pb.TaskResponse{Ok: false, Error: err.Error()}, nil
 	}
+	if task.WorkspaceId != workspaceID {
+		return &pb.TaskResponse{Ok: false, Error: "task not found"}, nil
+	}
 	return &pb.TaskResponse{Ok: true, Task: taskToPb(task)}, nil
 }
 
 func (s *TaskService) GetTaskLogs(ctx context.Context, req *pb.GetTaskLogsRequest) (*pb.GetTaskLogsResponse, error) {
-	if auth.AuthInfoFromContext(ctx) == nil {
+	workspaceID := auth.WorkspaceId(ctx)
+	if workspaceID == 0 {
 		return &pb.GetTaskLogsResponse{Ok: false, Error: "authentication required"}, nil
 	}
 
-	if _, err := s.backend.GetTask(ctx, req.Id); err != nil {
+	task, err := s.backend.GetTask(ctx, req.Id)
+	if err != nil {
 		if _, ok := err.(*types.ErrTaskNotFound); ok {
 			return &pb.GetTaskLogsResponse{Ok: false, Error: "task not found"}, nil
 		}
 		return &pb.GetTaskLogsResponse{Ok: false, Error: err.Error()}, nil
+	}
+	if task.WorkspaceId != workspaceID {
+		return &pb.GetTaskLogsResponse{Ok: false, Error: "task not found"}, nil
 	}
 	if s.s2Client == nil || !s.s2Client.Enabled() {
 		return &pb.GetTaskLogsResponse{Ok: true, Logs: []*pb.TaskLogEntry{}}, nil

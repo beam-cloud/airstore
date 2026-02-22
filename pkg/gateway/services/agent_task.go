@@ -60,6 +60,10 @@ func (s *AgentService) CreateAgentTaskEnvelope(ctx context.Context, req *pb.Crea
 }
 
 func (s *AgentService) GetAgentTaskEnvelope(ctx context.Context, req *pb.GetAgentTaskEnvelopeRequest) (*pb.AgentTaskEnvelopeResponse, error) {
+	if s.api == nil {
+		return &pb.AgentTaskEnvelopeResponse{Ok: false, Error: "orchestration unavailable"}, nil
+	}
+
 	ws, err := s.resolveWorkspace(ctx, req.WorkspaceId)
 	if err != nil {
 		return &pb.AgentTaskEnvelopeResponse{Ok: false, Error: err.Error()}, nil

@@ -281,25 +281,27 @@ func (s *AgentService) handleExecutionEnvelope(ctx context.Context, envelope *ty
 	}); err != nil {
 		return err
 	}
-	if err := s.instanceController.RouteDispatchTarget(ctx, instanceKey, 1); err != nil {
-		log.Warn().Err(err).Str("instance_key", instanceKey).Msg("failed to route initial dispatch target")
+
+	desiredDispatch := 1
+	var runningAttempts int
+	hasInstanceState := false
+	if instance, err := s.backend.GetExecutionInstanceByKey(ctx, instanceKey); err == nil {
+		hasInstanceState = true
+		runningAttempts = instance.RunningAttempts
+		if instance.DesiredDispatchConcurrency > 0 {
+			desiredDispatch = instance.DesiredDispatchConcurrency
+		}
 	}
 
-	if instance, err := s.backend.GetExecutionInstanceByKey(ctx, instanceKey); err == nil {
-		desired := instance.DesiredDispatchConcurrency
-		if desired <= 0 {
-			desired = 1
-			if err := s.instanceController.RouteDispatchTarget(ctx, instanceKey, desired); err != nil {
-				log.Warn().Err(err).Str("instance_key", instanceKey).Msg("failed to route desired dispatch target")
-			}
+	if err := s.instanceController.RouteDispatchTarget(ctx, instanceKey, desiredDispatch); err != nil {
+		log.Warn().Err(err).Str("instance_key", instanceKey).Int("dispatch_target", desiredDispatch).Msg("failed to route dispatch target")
+	}
+	if hasInstanceState && runningAttempts >= desiredDispatch {
+		// Capacity is currently saturated for this execution class.
+		if err := s.queueRouter.RequeueEnvelope(ctx, envelope.ID); err != nil {
+			return err
 		}
-		if instance.RunningAttempts >= desired {
-			// Capacity is currently saturated for this execution class.
-			if err := s.queueRouter.RequeueEnvelope(ctx, envelope.ID); err != nil {
-				return err
-			}
-			return nil
-		}
+		return nil
 	}
 
 	run, runPolicy, instanceKey, prompt, err := s.materializeRun(ctx, envelope)

@@ -202,6 +202,7 @@ type BackendRepository interface {
 	GetOrCreateExecutionInstance(ctx context.Context, inst *types.AgentExecutionInstance) (*types.AgentExecutionInstance, error)
 	GetExecutionInstanceByKey(ctx context.Context, instanceKey string) (*types.AgentExecutionInstance, error)
 	UpdateExecutionInstanceState(ctx context.Context, instanceKey string, running, pending, stopping, desired int, status types.AgentExecutionInstanceStatus, lastEventAt *time.Time) error
+	AdjustExecutionInstanceRunningAttempts(ctx context.Context, instanceKey string, runningDelta int, lastEventAt *time.Time) error
 
 	// Database access
 	DB() *sql.DB

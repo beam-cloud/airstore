@@ -55,12 +55,15 @@ func (m *AttemptEventManager) getOrCreate(ctx context.Context, instanceKey strin
 	if ctx == nil {
 		ctx = m.defaultCtx
 	}
+
 	m.mu.RLock()
 	existing, ok := m.instances[instanceKey]
 	m.mu.RUnlock()
 	if ok {
 		return existing, nil
 	}
+
+	factoryCtx := context.WithoutCancel(ctx)
 	v, err, _ := m.initGroup.Do(instanceKey, func() (any, error) {
 		m.mu.RLock()
 		if existing, ok := m.instances[instanceKey]; ok {
@@ -71,7 +74,7 @@ func (m *AttemptEventManager) getOrCreate(ctx context.Context, instanceKey strin
 		if m.instanceFactory == nil {
 			return nil, fmt.Errorf("instance factory is not configured")
 		}
-		instance, err := m.instanceFactory(ctx, instanceKey)
+		instance, err := m.instanceFactory(factoryCtx, instanceKey)
 		if err != nil {
 			return nil, err
 		}
@@ -80,6 +83,7 @@ func (m *AttemptEventManager) getOrCreate(ctx context.Context, instanceKey strin
 		m.mu.Unlock()
 		return instance, nil
 	})
+
 	if err != nil {
 		return nil, err
 	}

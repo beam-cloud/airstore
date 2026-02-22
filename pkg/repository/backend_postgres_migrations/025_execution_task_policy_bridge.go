@@ -192,6 +192,28 @@ func downExecutionTaskPolicyBridge(tx *sql.Tx) error {
 		   DROP COLUMN IF EXISTS exec_host,
 		   DROP COLUMN IF EXISTS timeout_ms,
 		   DROP COLUMN IF EXISTS run_attempt_id;`,
+		`DO $$ BEGIN
+		   IF to_regclass('public.goose_db_version') IS NULL
+		      OR NOT EXISTS (
+		        SELECT 1
+		        FROM goose_db_version
+		        WHERE version_id = 22
+		          AND is_applied = TRUE
+		      )
+		   THEN
+		     ALTER TABLE IF EXISTS agent_task_envelope DROP CONSTRAINT IF EXISTS fk_agent_task_envelope_target_run;
+		     DROP TABLE IF EXISTS agent_run_snapshot;
+		     DROP TABLE IF EXISTS agent_run_attempt;
+		     DROP TABLE IF EXISTS agent_run;
+		     DROP TABLE IF EXISTS agent_task_envelope;
+		     DROP TABLE IF EXISTS agent_profile;
+		     DROP TYPE IF EXISTS agent_attempt_status;
+		     DROP TYPE IF EXISTS agent_run_status;
+		     DROP TYPE IF EXISTS agent_envelope_state;
+		     DROP TYPE IF EXISTS agent_queue_mode;
+		     DROP TYPE IF EXISTS agent_envelope_kind;
+		   END IF;
+		 END $$;`,
 	}
 	for _, stmt := range stmts {
 		if _, err := tx.Exec(stmt); err != nil {

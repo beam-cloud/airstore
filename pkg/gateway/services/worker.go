@@ -251,25 +251,8 @@ func updateExecutionInstanceCounts(ctx context.Context, backend repository.Backe
 	if !ok || instanceKey == "" {
 		return nil
 	}
-	instance, err := backend.GetExecutionInstanceByKey(ctx, instanceKey)
-	if err != nil {
-		return err
-	}
-	running := instance.RunningAttempts + runningDelta
-	if running < 0 {
-		running = 0
-	}
 	now := time.Now()
-	return backend.UpdateExecutionInstanceState(
-		ctx,
-		instanceKey,
-		running,
-		instance.PendingAttempts,
-		instance.StoppingAttempts,
-		instance.DesiredDispatchConcurrency,
-		instance.Status,
-		&now,
-	)
+	return backend.AdjustExecutionInstanceRunningAttempts(ctx, instanceKey, runningDelta, &now)
 }
 
 func (s *WorkerService) AllocateIP(ctx context.Context, req *pb.AllocateIPRequest) (*pb.AllocateIPResponse, error) {

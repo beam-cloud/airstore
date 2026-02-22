@@ -91,6 +91,10 @@ func (r *EnvelopeQueueRouter) Pop(ctx context.Context, timeout time.Duration) (s
 }
 
 func (r *EnvelopeQueueRouter) ResolveEnvelopeID(ctx context.Context, token string) (string, error) {
+	if r.store == nil {
+		return "", fmt.Errorf("queue store is required")
+	}
+
 	if strings.HasPrefix(token, dispatchTokenEnvPrefix) {
 		return strings.TrimPrefix(token, dispatchTokenEnvPrefix), nil
 	}
@@ -107,6 +111,9 @@ func (r *EnvelopeQueueRouter) ResolveEnvelopeID(ctx context.Context, token strin
 }
 
 func (r *EnvelopeQueueRouter) RequeueEnvelope(ctx context.Context, envelopeID string) error {
+	if r.store == nil {
+		return fmt.Errorf("queue store is required")
+	}
 	if strings.TrimSpace(envelopeID) == "" {
 		return fmt.Errorf("envelope_id is required")
 	}

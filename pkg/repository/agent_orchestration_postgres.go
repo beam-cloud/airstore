@@ -976,3 +976,27 @@ func (b *PostgresBackend) UpdateExecutionInstanceState(
 	}
 	return nil
 }
+
+func (b *PostgresBackend) AdjustExecutionInstanceRunningAttempts(
+	ctx context.Context,
+	instanceKey string,
+	runningDelta int,
+	lastEventAt *time.Time,
+) error {
+	query := `
+		UPDATE agent_execution_instance
+		SET running_attempts = GREATEST(running_attempts + $2, 0),
+		    last_event_at = COALESCE($3, last_event_at),
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE instance_key = $1
+	`
+	res, err := b.db.ExecContext(ctx, query, instanceKey, runningDelta, lastEventAt)
+	if err != nil {
+		return fmt.Errorf("adjust execution instance running attempts: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return fmt.Errorf("execution instance not found: %s", instanceKey)
+	}
+	return nil
+}

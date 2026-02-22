@@ -76,7 +76,7 @@ async function readTaskLogs(taskId: string, timeoutMs = 30_000): Promise<string>
 
 async function waitForOutputJSON(
   workspaceId: string,
-  path = '/memory/output.json',
+  paths = ['/memory/output.json', '/workspace/memory/output.json'],
   timeoutMs = 45_000,
 ): Promise<string> {
   const client = getClient();
@@ -84,22 +84,24 @@ async function waitForOutputJSON(
   let lastError: unknown;
 
   while (Date.now() < deadline) {
-    try {
-      const content = await client.fs.read(workspaceId, { path });
-      if (content.trim() !== '') return content;
-    } catch (err) {
-      lastError = err;
-      if (!(err instanceof APIError && err.status === 404)) {
-        throw err;
+    for (const path of paths) {
+      try {
+        const content = await client.fs.read(workspaceId, { path });
+        if (content.trim() !== '') return content;
+      } catch (err) {
+        lastError = err;
+        if (!(err instanceof APIError && err.status === 404)) {
+          throw err;
+        }
       }
     }
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
 
   if (lastError instanceof Error) {
-    throw new Error(`timed out waiting for ${path}: ${lastError.message}`);
+    throw new Error(`timed out waiting for output JSON (${paths.join(', ')}): ${lastError.message}`);
   }
-  throw new Error(`timed out waiting for ${path}`);
+  throw new Error(`timed out waiting for output JSON (${paths.join(', ')})`);
 }
 
 describe('Agent/Runs E2E', () => {
