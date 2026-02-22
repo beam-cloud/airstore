@@ -106,12 +106,28 @@ func CanWrite(ctx context.Context) bool {
 	return i != nil && i.CanWrite()
 }
 
+type WorkspaceServiceTokenEnsurer interface {
+	EnsureWorkspaceServiceToken(ctx context.Context, workspaceId uint) (*types.Token, string, error)
+}
+
 func HasWorkspaceScopedToken(ctx context.Context, rawToken string) bool {
 	if rawToken == "" {
 		return false
 	}
 	i := AuthInfoFromContext(ctx)
 	return i != nil && (i.IsWorkspaceMember() || i.IsWorkspaceService())
+}
+
+func EnsureTaskMountToken(ctx context.Context, workspaceID uint, candidate string, ensurer WorkspaceServiceTokenEnsurer) (string, error) {
+	if HasWorkspaceScopedToken(ctx, candidate) {
+		return candidate, nil
+	}
+
+	_, raw, err := ensurer.EnsureWorkspaceServiceToken(ctx, workspaceID)
+	if err != nil {
+		return "", err
+	}
+	return raw, nil
 }
 
 // --- Field accessors ---

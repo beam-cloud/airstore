@@ -443,7 +443,7 @@ func (s *GatewayService) CreateTask(ctx context.Context, req *pb.CreateTaskReque
 		createdByMemberId = &memberId
 	}
 
-	memberToken, err := s.ensureTaskMountToken(ctx, workspaceId, extractRawToken(ctx))
+	memberToken, err := auth.EnsureTaskMountToken(ctx, workspaceId, extractRawToken(ctx), s.backend)
 	if err != nil {
 		return &pb.TaskResponse{Ok: false, Error: "failed to provision workspace token: " + err.Error()}, nil
 	}
@@ -806,18 +806,6 @@ func extractRawToken(ctx context.Context) string {
 		return ""
 	}
 	return strings.TrimPrefix(vals[0], "Bearer ")
-}
-
-func (s *GatewayService) ensureTaskMountToken(ctx context.Context, workspaceID uint, candidate string) (string, error) {
-	if auth.HasWorkspaceScopedToken(ctx, candidate) {
-		return candidate, nil
-	}
-
-	_, raw, err := s.backend.EnsureWorkspaceServiceToken(ctx, workspaceID)
-	if err != nil {
-		return "", err
-	}
-	return raw, nil
 }
 
 func hookToPb(h *types.Hook, workspaceExternalId string) *pb.Hook {

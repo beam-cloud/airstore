@@ -1,7 +1,6 @@
 package apiv1
 
 import (
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -101,18 +100,6 @@ func extractBearerToken(header string) string {
 	return ""
 }
 
-func (g *TasksGroup) ensureTaskMountToken(ctx context.Context, workspaceID uint, candidate string) (string, error) {
-	if auth.HasWorkspaceScopedToken(ctx, candidate) {
-		return candidate, nil
-	}
-
-	_, raw, err := g.backend.EnsureWorkspaceServiceToken(ctx, workspaceID)
-	if err != nil {
-		return "", err
-	}
-	return raw, nil
-}
-
 // CreateTask creates a new task and queues it for execution
 func (g *TasksGroup) CreateTask(c echo.Context) error {
 	ctx := c.Request().Context()
@@ -176,7 +163,7 @@ func (g *TasksGroup) CreateTask(c echo.Context) error {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 
-	memberToken, err = g.ensureTaskMountToken(ctx, workspace.Id, memberToken)
+	memberToken, err = auth.EnsureTaskMountToken(ctx, workspace.Id, memberToken, g.backend)
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, "failed to provision workspace token: "+err.Error())
 	}
