@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -54,7 +55,7 @@ type taskMount struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	ready     bool
-	err       error
+	exited    chan error
 }
 
 // NewMountManager creates a new mount manager
@@ -79,15 +80,27 @@ func NewMountManager(config MountConfig) (*MountManager, error) {
 // Returns the mount path that can be bind-mounted into containers
 func (m *MountManager) Mount(ctx context.Context, taskID, token string) (string, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Check if mount already exists
 	if mount, exists := m.mounts[taskID]; exists {
 		if mount.ready {
-			return mount.mountPath, nil
+			mountPath := mount.mountPath
+			m.mu.Unlock()
+			return mountPath, nil
 		}
-		return "", fmt.Errorf("mount for task %s is still initializing", taskID)
+		mountPath := mount.mountPath
+		exited := mount.exited
+		m.mu.Unlock()
+
+		select {
+		case err, ok := <-exited:
+			if ok && err != nil {
+				return "", fmt.Errorf("mount process for task %s exited during initialization: %w", taskID, err)
+			}
+			return "", fmt.Errorf("mount process for task %s exited before becoming ready", taskID)
+		default:
+			return "", fmt.Errorf("mount for task %s is still initializing at %s", taskID, mountPath)
+		}
 	}
+	m.mu.Unlock()
 
 	// Create mount directory for this task
 	mountPath := filepath.Join(m.config.MountDir, taskID)
@@ -103,6 +116,7 @@ func (m *MountManager) Mount(ctx context.Context, taskID, token string) (string,
 		mountPath,
 		"--gateway", m.config.GatewayAddr,
 		"--token", token,
+		"--daemon",
 		"--uid", fmt.Sprintf("%d", types.SandboxUserUID),
 		"--gid", fmt.Sprintf("%d", types.SandboxUserGID),
 	)
@@ -123,72 +137,90 @@ func (m *MountManager) Mount(ctx context.Context, taskID, token string) (string,
 		ctx:       mountCtx,
 		cancel:    cancel,
 		ready:     false,
+		exited:    make(chan error, 1),
 	}
+
+	m.mu.Lock()
 	m.mounts[taskID] = mount
+	m.mu.Unlock()
 
-	// Wait for mount to be ready (check for files in the mount)
-	go m.waitForReady(mount)
+	go func() {
+		mount.exited <- cmd.Wait()
+		close(mount.exited)
+	}()
 
-	// Block until ready or timeout
-	readyCtx, readyCancel := context.WithTimeout(ctx, m.config.MountReadyTimeout)
-	defer readyCancel()
+	cleanupOnError := true
+	defer func() {
+		if cleanupOnError {
+			if err := m.Unmount(taskID); err != nil {
+				log.Warn().Err(err).Str("task_id", taskID).Msg("failed to cleanup mount after error")
+			}
+		}
+	}()
+
+	timeout := time.NewTimer(m.config.MountReadyTimeout)
+	defer timeout.Stop()
 
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
+	var lastMissing []string
+	var lastReadErr error
 	for {
 		select {
-		case <-readyCtx.Done():
-			// Timeout - check if mount has any files
-			entries, err := os.ReadDir(mountPath)
-			if err == nil && len(entries) > 0 {
-				mount.ready = true
-				log.Info().
-					Str("task_id", taskID).
-					Str("mount_path", mountPath).
-					Int("files", len(entries)).
-					Msg("task mount ready")
-				return mountPath, nil
-			}
-			log.Warn().
-				Str("task_id", taskID).
-				Str("mount_path", mountPath).
-				Msg("mount ready timeout, proceeding anyway")
-			mount.ready = true
-			return mountPath, nil
-		case <-ticker.C:
-			if mount.ready {
-				return mountPath, nil
-			}
-			if mount.err != nil {
-				return "", mount.err
-			}
-		}
-	}
-}
-
-// waitForReady waits for the mount to have files
-func (m *MountManager) waitForReady(mount *taskMount) {
-	ticker := time.NewTicker(200 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-mount.ctx.Done():
-			return
-		case <-ticker.C:
-			entries, err := os.ReadDir(mount.mountPath)
-			if err == nil && len(entries) > 0 {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-timeout.C:
+			ready, missing, err := checkFilesystemMountReady(mountPath)
+			if ready {
 				m.mu.Lock()
 				mount.ready = true
 				m.mu.Unlock()
-
-				log.Debug().
-					Str("task_id", mount.taskID).
-					Int("files", len(entries)).
-					Msg("mount became ready")
-				return
+				cleanupOnError = false
+				log.Info().
+					Str("task_id", taskID).
+					Str("mount_path", mountPath).
+					Msg("task mount ready")
+				return mountPath, nil
 			}
+			if err != nil {
+				if lastReadErr != nil {
+					err = lastReadErr
+				}
+				return "", fmt.Errorf("task mount %s not ready: %w", mountPath, err)
+			}
+			if len(missing) == 0 {
+				missing = lastMissing
+			}
+			return "", fmt.Errorf("task mount %s missing required roots: %s", mountPath, strings.Join(missing, ", "))
+		case err, ok := <-mount.exited:
+			if ok && err != nil {
+				return "", fmt.Errorf("mount process for task %s exited before ready: %w", taskID, err)
+			}
+			return "", fmt.Errorf("mount process for task %s exited before becoming ready", taskID)
+		case <-ticker.C:
+			ready, missing, err := checkFilesystemMountReady(mountPath)
+			if err != nil {
+				lastReadErr = err
+				continue
+			}
+			lastMissing = missing
+			if !ready {
+				continue
+			}
+
+			m.mu.Lock()
+			mount.ready = true
+			m.mu.Unlock()
+
+			entries, _ := os.ReadDir(mountPath)
+			cleanupOnError = false
+			log.Info().
+				Str("task_id", taskID).
+				Str("mount_path", mountPath).
+				Int("entries", len(entries)).
+				Msg("task mount ready")
+			return mountPath, nil
 		}
 	}
 }
@@ -209,16 +241,18 @@ func (m *MountManager) Unmount(taskID string) error {
 	// Stop the mount process
 	if mount.cmd != nil && mount.cmd.Process != nil {
 		mount.cancel()
-		mount.cmd.Process.Signal(syscall.SIGTERM)
+		_ = mount.cmd.Process.Signal(syscall.SIGTERM)
 
-		// Wait with timeout
-		done := make(chan error, 1)
-		go func() { done <- mount.cmd.Wait() }()
-
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			mount.cmd.Process.Kill()
+		if mount.exited != nil {
+			select {
+			case <-mount.exited:
+			case <-time.After(5 * time.Second):
+				_ = mount.cmd.Process.Kill()
+				select {
+				case <-mount.exited:
+				case <-time.After(2 * time.Second):
+				}
+			}
 		}
 	}
 

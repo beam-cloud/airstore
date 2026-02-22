@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -69,7 +68,8 @@ func runMount(cmd *cobra.Command, args []string) error {
 
 	// Suppress logs unless verbose or FUSE trace is enabled
 	if !mountVerbose && os.Getenv("AIRSTORE_FUSE_TRACE") == "" {
-		log.Logger = zerolog.New(io.Discard)
+		// Keep warnings/errors visible in daemon mode for operability.
+		log.Logger = zerolog.New(os.Stderr).Level(zerolog.WarnLevel).With().Timestamp().Logger()
 	}
 
 	if configPath != "" {

@@ -1,11 +1,9 @@
 ---
 name: browser-test
-description: End-to-end browser automation test using Kernel cloud browsers
+description: End-to-end browser automation test using Kernel cloud browsers. Use when the user asks to test or verify browser automation, run a browser smoke test, or validate that the Kernel cloud browser tool is working correctly.
 metadata:
   author: beam-cloud
-  airstore:
-    writes:
-      - /Memory/browser-test/
+  airstore-writes: "/memory/browser-test/"
 ---
 
 # Browser Automation Test
@@ -25,7 +23,7 @@ cloud browser via Kernel. Run it directly with Bash — it is NOT an MCP tool.
 
 ## Save Results
 
-Write structured JSON to `/workspace/Memory/browser-test/results.json`:
+Write structured JSON to `/workspace/memory/browser-test/results.json`:
 
 ```json
 {
@@ -36,7 +34,7 @@ Write structured JSON to `/workspace/Memory/browser-test/results.json`:
 }
 ```
 
-Create the directory first: `mkdir -p /workspace/Memory/browser-test`
+Create the directory first: `mkdir -p /workspace/memory/browser-test`
 
 ## Notes
 

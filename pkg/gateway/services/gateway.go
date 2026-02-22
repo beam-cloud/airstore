@@ -451,6 +451,21 @@ func (s *GatewayService) CreateTask(ctx context.Context, req *pb.CreateTaskReque
 		}
 	}
 
+	// Ensure task mounts always receive a workspace-scoped token.
+	// Cluster-admin/worker/org tokens don't carry workspace context, which causes
+	// mount-side gateway operations (including access-log ingest) to be rejected.
+	info := auth.AuthInfoFromContext(ctx)
+	hasWorkspaceScopedToken := info != nil &&
+		(info.IsWorkspaceMember() || info.IsWorkspaceService()) &&
+		memberToken != ""
+	if !hasWorkspaceScopedToken {
+		_, raw, err := s.backend.EnsureWorkspaceServiceToken(ctx, workspaceId)
+		if err != nil {
+			return &pb.TaskResponse{Ok: false, Error: "failed to provision workspace token: " + err.Error()}, nil
+		}
+		memberToken = raw
+	}
+
 	env := req.Env
 	if env == nil {
 		env = make(map[string]string)

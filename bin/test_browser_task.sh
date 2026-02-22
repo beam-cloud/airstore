@@ -109,7 +109,14 @@ curl -sN "$GATEWAY_HTTP/api/v1/tasks/$TASK_ID/logs/stream" \
     case "$type" in
         log)
             text=$(echo "$json" | jq -r '.data // empty' 2>/dev/null)
-            [[ -n "$text" ]] && echo "$text"
+            stream=$(echo "$json" | jq -r '.stream // "stdout"' 2>/dev/null)
+            if [[ -n "$text" ]]; then
+                if [[ "$stream" == "stderr" ]]; then
+                    printf "\033[2m%s\033[0m\n" "$text"
+                else
+                    echo "$text"
+                fi
+            fi
             ;;
         status)
             exit_code=$(echo "$json" | jq -r '.exit_code // empty' 2>/dev/null)
@@ -121,6 +128,11 @@ curl -sN "$GATEWAY_HTTP/api/v1/tasks/$TASK_ID/logs/stream" \
                 err "Task finished: status=$status exit=$exit_code"
             fi
             break
+            ;;
+        *)
+            # Backward compat: treat events with .data but no .type as log lines
+            text=$(echo "$json" | jq -r '.data // empty' 2>/dev/null)
+            [[ -n "$text" ]] && echo "$text"
             ;;
     esac
 done

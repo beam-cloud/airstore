@@ -161,6 +161,21 @@ func (g *TasksGroup) CreateTask(c echo.Context) error {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 
+	// Ensure task mounts always receive a workspace-scoped token.
+	// Cluster-admin/worker/org tokens don't carry workspace context, which causes
+	// mount-side gateway operations (including access-log ingest) to be rejected.
+	info := auth.AuthInfoFromContext(ctx)
+	hasWorkspaceScopedToken := info != nil &&
+		(info.IsWorkspaceMember() || info.IsWorkspaceService()) &&
+		memberToken != ""
+	if !hasWorkspaceScopedToken {
+		_, raw, err := g.backend.EnsureWorkspaceServiceToken(ctx, workspace.Id)
+		if err != nil {
+			return ErrorResponse(c, http.StatusInternalServerError, "failed to provision workspace token: "+err.Error())
+		}
+		memberToken = raw
+	}
+
 	task := &types.Task{
 		WorkspaceId:       workspace.Id,
 		CreatedByMemberId: createdByMemberId,
@@ -497,10 +512,20 @@ func (w *sseWriter) flush() {
 	w.c.Response().Flush()
 }
 
+func (w *sseWriter) logEvent(e common.TaskLogEntry) map[string]any {
+	return map[string]any{
+		"type":      "log",
+		"task_id":   e.TaskID,
+		"timestamp": e.Timestamp,
+		"stream":    e.Stream,
+		"data":      e.Data,
+	}
+}
+
 func (w *sseWriter) sendLogs(logs []common.TaskLogEntry) int64 {
 	var cursor int64
 	for _, e := range logs {
-		w.write(e)
+		w.write(w.logEvent(e))
 		if e.Timestamp > cursor {
 			cursor = e.Timestamp
 		}
@@ -515,7 +540,7 @@ func (w *sseWriter) sendLogsAfter(logs []common.TaskLogEntry, cursor int64) int6
 	dirty := false
 	for _, e := range logs {
 		if e.Timestamp > cursor {
-			w.write(e)
+			w.write(w.logEvent(e))
 			cursor = e.Timestamp
 			dirty = true
 		}

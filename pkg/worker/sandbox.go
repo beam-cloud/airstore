@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -136,7 +137,7 @@ func NewSandboxManager(ctx context.Context, cfg Config) (*SandboxManager, error)
 			MountDir:          paths.MountDir,
 			CLIBinary:         paths.CLIBinary,
 			GatewayAddr:       cfg.GatewayAddr,
-			MountReadyTimeout: 5 * time.Second,
+			MountReadyTimeout: 20 * time.Second,
 		})
 		if err != nil {
 			cancel()
@@ -161,7 +162,7 @@ func NewSandboxManager(ctx context.Context, cfg Config) (*SandboxManager, error)
 		log.Info().Str("basin", cfg.S2Basin).Msg("S2 streaming enabled")
 	}
 
-	return &SandboxManager{
+	manager := &SandboxManager{
 		paths:           paths,
 		workerID:        cfg.WorkerID,
 		gatewayAddr:     cfg.GatewayAddr,
@@ -177,7 +178,18 @@ func NewSandboxManager(ctx context.Context, cfg Config) (*SandboxManager, error)
 		sandboxes:       make(map[string]*Sandbox),
 		ctx:             managerCtx,
 		cancel:          cancel,
-	}, nil
+	}
+
+	// Bring up the global worker mount during initialization so the first task
+	// doesn't race filesystem startup on cold workers.
+	if manager.enableFS {
+		if err := manager.startFilesystem(); err != nil {
+			cancel()
+			return nil, fmt.Errorf("start global filesystem mount: %w", err)
+		}
+	}
+
+	return manager, nil
 }
 
 func coalesce(a, b string) string {
@@ -205,8 +217,12 @@ func (m *SandboxManager) startFilesystem() error {
 		return fmt.Errorf("failed to create filesystem mount dir: %w", err)
 	}
 
-	// Build command: cli mount <path> --gateway <addr> --token <token>
-	args := []string{"mount", m.paths.WorkerMount, "--gateway", m.gatewayAddr}
+	// Build command: cli mount <path> --gateway <addr> --token <token> --uid <uid> --gid <gid>
+	args := []string{"mount", m.paths.WorkerMount, "--gateway", m.gatewayAddr,
+		"--daemon",
+		"--uid", fmt.Sprintf("%d", types.SandboxUserUID),
+		"--gid", fmt.Sprintf("%d", types.SandboxUserGID),
+	}
 	if m.authToken != "" {
 		args = append(args, "--token", m.authToken)
 	}
@@ -255,8 +271,8 @@ func (m *SandboxManager) startFilesystem() error {
 		}
 	}()
 
-	// Wait for mount to be ready (check for files or process exit)
-	timeout := time.After(10 * time.Second)
+	// Wait for mount to be ready (required system roots visible) or process exit.
+	timeout := time.After(20 * time.Second)
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -266,22 +282,52 @@ func (m *SandboxManager) startFilesystem() error {
 		exitChan <- cmd.Wait()
 	}()
 
+	var lastMissing []string
+	var lastReadErr error
 	for {
 		select {
 		case <-timeout:
-			log.Warn().Msg("timeout waiting for filesystem mount, continuing anyway")
-			return nil
+			ready, missing, err := checkFilesystemMountReady(m.paths.WorkerMount)
+			if ready {
+				log.Info().
+					Str("mount", m.paths.WorkerMount).
+					Msg("filesystem mount became ready at timeout boundary")
+				return nil
+			}
+			if err != nil {
+				if lastReadErr != nil {
+					err = lastReadErr
+				}
+				return fmt.Errorf("timed out waiting for filesystem mount readiness: %w", err)
+			}
+			if len(missing) == 0 {
+				missing = lastMissing
+			}
+			return fmt.Errorf(
+				"timed out waiting for filesystem mount readiness; missing required roots: %s",
+				strings.Join(missing, ", "),
+			)
 		case err := <-exitChan:
 			if err != nil {
 				return fmt.Errorf("cli mount exited unexpectedly: %w", err)
 			}
 			return fmt.Errorf("cli mount exited unexpectedly with code 0")
 		case <-ticker.C:
-			// Check if mount has files
-			entries, err := os.ReadDir(m.paths.WorkerMount)
-			if err == nil && len(entries) > 0 {
+			ready, missing, err := checkFilesystemMountReady(m.paths.WorkerMount)
+			if err != nil {
+				lastReadErr = err
+				continue
+			}
+			lastMissing = missing
+			if ready {
+				entries, readErr := os.ReadDir(m.paths.WorkerMount)
+				entryCount := 0
+				if readErr == nil {
+					entryCount = len(entries)
+				}
 				log.Info().
-					Int("files", len(entries)).
+					Str("mount", m.paths.WorkerMount).
+					Int("entries", entryCount).
 					Msg("filesystem mount ready")
 				return nil
 			}
@@ -647,6 +693,10 @@ func (m *SandboxManager) Close() error {
 		}
 	}
 
+	if m.mountManager != nil {
+		m.mountManager.CleanupAll()
+	}
+
 	// Close image manager
 	if m.imageManager != nil {
 		if err := m.imageManager.Close(); err != nil {
@@ -713,7 +763,7 @@ func (m *SandboxManager) generateSpec(cfg types.SandboxConfig, rootfsPath string
 	// Add filesystem mount (bind mount from FUSE mount)
 	if cfg.FilesystemMount != "" {
 		if err := m.addFilesystemMount(&spec, cfg.FilesystemMount); err != nil {
-			log.Warn().Err(err).Str("source", cfg.FilesystemMount).Msg("failed to add filesystem mount")
+			return nil, fmt.Errorf("failed to add filesystem mount: %w", err)
 		}
 	}
 
@@ -773,14 +823,16 @@ func (m *SandboxManager) generateSpec(cfg types.SandboxConfig, rootfsPath string
 
 // addFilesystemMount bind-mounts a FUSE filesystem into the sandbox at /workspace.
 func (m *SandboxManager) addFilesystemMount(spec *specs.Spec, source string) error {
-	// Verify the mount exists and has files
-	entries, err := os.ReadDir(source)
+	// Verify the mount exists and includes required system roots.
+	ready, missing, err := checkFilesystemMountReady(source)
 	if err != nil {
 		return fmt.Errorf("filesystem mount not ready at %s: %w", source, err)
 	}
-	if len(entries) == 0 {
-		log.Warn().Str("mount", source).Msg("filesystem mount is empty")
+	if !ready {
+		return fmt.Errorf("filesystem mount missing required roots at %s: %s", source, strings.Join(missing, ", "))
 	}
+
+	entries, _ := os.ReadDir(source)
 
 	// Bind mount at container working directory
 	spec.Mounts = append(spec.Mounts, specs.Mount{
@@ -835,12 +887,14 @@ func (m *SandboxManager) buildClaudePromptEntrypoint(task types.Task, env map[st
 
 func (m *SandboxManager) injectKernelEnv(env map[string]string) {
 	if m.kernelAPIKey == "" {
+		log.Warn().Msg("kernel API key not configured, browser tool will not work")
 		return
 	}
 	m.injectAPIKey(env, "KERNEL_API_KEY", m.kernelAPIKey, false)
 	if env["AGENT_BROWSER_PROVIDER"] == "" {
 		env["AGENT_BROWSER_PROVIDER"] = "kernel"
 	}
+	log.Debug().Str("provider", env["AGENT_BROWSER_PROVIDER"]).Msg("kernel browser env injected")
 }
 
 func claudePromptEntrypoint(prompt string) []string {

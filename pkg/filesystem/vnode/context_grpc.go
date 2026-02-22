@@ -6,10 +6,12 @@ import (
 	"io/fs"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
+	"github.com/rs/zerolog/log"
 	"github.com/winfsp/cgofuse/fuse"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -72,9 +74,11 @@ func (c *ContextVNodeGRPC) rel(path string) string {
 
 // Getattr returns file attributes with caching
 func (c *ContextVNodeGRPC) Getattr(path string) (*FileInfo, error) {
-	// Vnode root always exists (virtual directory, no RPC needed)
+	// Vnode root always exists (virtual directory, no RPC needed).
+	// Use 0777 so gVisor's gofer (which may run as a different UID)
+	// passes the kernel's default_permissions check for writes.
 	if path == c.Prefix() {
-		return NewDirInfo(PathIno(path)), nil
+		return newFileInfo(PathIno(path), 0, syscall.S_IFDIR|0777, 2), nil
 	}
 
 	// AppleDouble files are zero-length placeholders
@@ -261,11 +265,14 @@ func (c *ContextVNodeGRPC) Create(path string, flags int, mode uint32) (FileHand
 	ctx, cancel := c.ctx()
 	defer cancel()
 
-	resp, err := c.client.Create(ctx, &pb.ContextCreateRequest{Path: c.rel(path), Mode: mode})
+	relPath := c.rel(path)
+	resp, err := c.client.Create(ctx, &pb.ContextCreateRequest{Path: relPath, Mode: mode})
 	if err != nil {
+		log.Warn().Err(err).Str("path", relPath).Msg("context create: gRPC error")
 		return 0, err
 	}
 	if !resp.Ok {
+		log.Warn().Str("path", relPath).Str("error", resp.Error).Msg("context create: rejected")
 		return 0, fs.ErrPermission
 	}
 	c.cache.Invalidate(path)
@@ -375,11 +382,14 @@ func (c *ContextVNodeGRPC) Truncate(path string, size int64, fh FileHandle) erro
 	ctx, cancel := c.ctx()
 	defer cancel()
 
-	resp, err := c.client.Truncate(ctx, &pb.ContextTruncateRequest{Path: c.rel(path), Size: size})
+	relPath := c.rel(path)
+	resp, err := c.client.Truncate(ctx, &pb.ContextTruncateRequest{Path: relPath, Size: size})
 	if err != nil {
+		log.Warn().Err(err).Str("path", relPath).Msg("context truncate: gRPC error")
 		return err
 	}
 	if !resp.Ok {
+		log.Warn().Str("path", relPath).Str("error", resp.Error).Msg("context truncate: rejected")
 		return fs.ErrPermission
 	}
 	c.cache.Invalidate(path)
@@ -391,11 +401,14 @@ func (c *ContextVNodeGRPC) Mkdir(path string, mode uint32) error {
 	ctx, cancel := c.ctx()
 	defer cancel()
 
-	resp, err := c.client.Mkdir(ctx, &pb.ContextMkdirRequest{Path: c.rel(path), Mode: mode})
+	relPath := c.rel(path)
+	resp, err := c.client.Mkdir(ctx, &pb.ContextMkdirRequest{Path: relPath, Mode: mode})
 	if err != nil {
+		log.Warn().Err(err).Str("path", relPath).Msg("context mkdir: gRPC error")
 		return err
 	}
 	if !resp.Ok {
+		log.Warn().Str("path", relPath).Str("error", resp.Error).Msg("context mkdir: rejected")
 		return fs.ErrPermission
 	}
 	c.cache.Invalidate(path)
@@ -766,8 +779,16 @@ func (c *ContextVNodeGRPC) toFileInfo(path string, info *pb.FileInfo) *FileInfo 
 		mtime = time.Unix(info.Mtime, 0)
 	}
 	uid, gid := GetOwner()
+	mode := info.Mode
+	// Ensure directories and files are world-writable so gVisor's gofer
+	// (which may run as a different UID) passes default_permissions checks.
+	if info.IsDir {
+		mode = syscall.S_IFDIR | 0777
+	} else {
+		mode = (mode & syscall.S_IFMT) | 0666 | (mode & 0111)
+	}
 	return &FileInfo{
-		Ino: PathIno(path), Size: info.Size, Mode: info.Mode, Nlink: 1,
+		Ino: PathIno(path), Size: info.Size, Mode: mode, Nlink: 1,
 		Uid: uid, Gid: gid,
 		Atime: now, Mtime: mtime, Ctime: mtime,
 	}
