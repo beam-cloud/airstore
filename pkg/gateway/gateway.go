@@ -31,6 +31,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/hooks"
 	"github.com/beam-cloud/airstore/pkg/instrumentation"
 	"github.com/beam-cloud/airstore/pkg/oauth"
+	"github.com/beam-cloud/airstore/pkg/orchestration"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/scheduler"
 	"github.com/beam-cloud/airstore/pkg/sources"
@@ -374,7 +375,7 @@ func (g *Gateway) registerServices() error {
 	// Register gateway gRPC service (workspace/member/token/connection/task management)
 	var gatewayService *services.GatewayService
 	if g.BackendRepo != nil {
-		gatewayService = services.NewGatewayService(g.BackendRepo, g.s2Client, filesystemStore, g.eventBus, g.sourceRegistry)
+		gatewayService = services.NewGatewayService(g.BackendRepo, filesystemStore, g.eventBus, g.sourceRegistry)
 		pb.RegisterGatewayServiceServer(g.grpcServer, gatewayService)
 		log.Info().Msg("gateway service registered")
 	}
@@ -462,11 +463,20 @@ func (g *Gateway) registerServices() error {
 			terminalIO = repository.NewRedisTerminalIORepository(g.RedisClient)
 		}
 
-		// Wire task queue into the gRPC gateway service for CreateTask/DeleteTask
+		// Wire source cache invalidation hooks into gateway service.
 		if gatewayService != nil {
-			gatewayService.SetTaskQueue(taskQueue, g.Config.Sandbox.GetDefaultImage())
 			gatewayService.SetSourceService(sourceService)
 		}
+
+		// Register task gRPC service.
+		taskService := services.NewTaskService(
+			g.BackendRepo,
+			taskQueue,
+			g.s2Client,
+			g.Config.Sandbox.GetDefaultImage(),
+		)
+		pb.RegisterTaskServiceServer(g.grpcServer, taskService)
+		log.Info().Msg("task service registered")
 
 		// Task factory (shared between HTTP API and hook evaluator)
 		taskFactory := hooks.NewTaskFactory(g.BackendRepo, taskQueue, g.Config.Sandbox.GetDefaultImage())
@@ -542,6 +552,26 @@ func (g *Gateway) registerServices() error {
 
 		// Tasks API
 		apiv1.NewTasksGroup(g.baseRouteGroup.Group("/tasks"), g.BackendRepo, taskQueue, terminalIO, g.s2Client, g.Config.Sandbox.GetDefaultImage())
+
+		// Agent orchestration engine and gRPC service.
+		orchestratorSvc := orchestration.NewService(
+			g.ctx,
+			g.BackendRepo,
+			taskQueue,
+			g.RedisClient,
+			g.s2Client,
+			g.Config.Sandbox.GetDefaultImage(),
+		)
+		orchestratorSvc.Start(g.ctx)
+		agentAPI := orchestration.NewAgentAPI(g.BackendRepo, g.RedisClient, orchestratorSvc)
+		agentService := services.NewAgentService(g.BackendRepo, agentAPI)
+		pb.RegisterAgentServiceServer(g.grpcServer, agentService)
+		log.Info().Msg("agent service registered")
+
+		// Agent orchestration HTTP API (workspace-scoped)
+		orchestrationGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id")
+		orchestrationGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
+		apiv1.NewOrchestrationGroup(orchestrationGroup, agentAPI)
 
 		// Hook engine: matches events → hooks → tasks, polls for retries
 		var skillReader hooks.SkillReader

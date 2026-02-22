@@ -138,8 +138,8 @@ func (t *TasksVNode) getTasks(ctx context.Context) ([]*types.Task, error) {
 }
 
 // grpcClient returns a cached gRPC client
-func (t *TasksVNode) grpcClient() pb.GatewayServiceClient {
-	return pb.NewGatewayServiceClient(t.grpcConn)
+func (t *TasksVNode) grpcClient() pb.TaskServiceClient {
+	return pb.NewTaskServiceClient(t.grpcConn)
 }
 
 // fetchTasksGRPC fetches tasks from the gateway via gRPC

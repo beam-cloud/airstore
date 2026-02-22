@@ -264,12 +264,19 @@ func (w *Worker) executeTask(task types.Task) {
 		log.Warn().Err(err).Str("task_id", task.ExternalId).Msg("failed to mark task as started")
 	}
 
+	taskCtx := w.ctx
+	cancel := func() {}
+	if task.TimeoutMs != nil && *task.TimeoutMs > 0 {
+		taskCtx, cancel = context.WithTimeout(w.ctx, time.Duration(*task.TimeoutMs)*time.Millisecond)
+	}
+	defer cancel()
+
 	var result *types.TaskResult
 	var err error
 	if task.IsInteractive() {
-		result, err = w.runInteractiveTask(w.ctx, task)
+		result, err = w.runInteractiveTask(taskCtx, task)
 	} else {
-		result, err = w.sandboxManager.RunTask(w.ctx, task)
+		result, err = w.sandboxManager.RunTask(taskCtx, task)
 	}
 
 	if err != nil {

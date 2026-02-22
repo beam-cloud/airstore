@@ -69,7 +69,7 @@ func listTasks() error {
 	}
 	defer client.Close()
 
-	resp, err := client.Gateway.ListTasks(context.Background(), &pb.ListTasksRequest{})
+	resp, err := client.Tasks.ListTasks(context.Background(), &pb.ListTasksRequest{})
 	if err != nil {
 		PrintError(err)
 		return nil
@@ -114,7 +114,7 @@ func getTask(id string) error {
 	}
 	defer client.Close()
 
-	resp, err := client.Gateway.GetTask(context.Background(), &pb.GetTaskRequest{Id: id})
+	resp, err := client.Tasks.GetTask(context.Background(), &pb.GetTaskRequest{Id: id})
 	if err != nil {
 		PrintError(err)
 		return nil
@@ -172,7 +172,7 @@ func deleteTask(id string) error {
 			return err
 		}
 
-		resp, err := client.Gateway.DeleteTask(context.Background(), &pb.DeleteTaskRequest{Id: id})
+		resp, err := client.Tasks.DeleteTask(context.Background(), &pb.DeleteTaskRequest{Id: id})
 		if err != nil {
 			return err
 		}
@@ -203,7 +203,7 @@ func getTaskLogs(id string) error {
 	}
 	defer client.Close()
 
-	resp, err := client.Gateway.GetTaskLogs(context.Background(), &pb.GetTaskLogsRequest{Id: id})
+	resp, err := client.Tasks.GetTaskLogs(context.Background(), &pb.GetTaskLogsRequest{Id: id})
 	if err != nil {
 		PrintError(err)
 		return nil

@@ -7,6 +7,9 @@ import { Members } from './resources/members.js';
 import { OAuth } from './resources/oauth.js';
 import { Filesystem } from './resources/filesystem.js';
 import { AccessLog } from './resources/access-log.js';
+import { Agents } from './resources/agents.js';
+import { Tasks } from './resources/tasks.js';
+import { Runs } from './resources/runs.js';
 
 /**
  * The Airstore SDK client.
@@ -69,6 +72,12 @@ export class Airstore extends CoreClient {
   readonly fs: Filesystem;
   /** Query the workspace access log. */
   readonly accessLog: AccessLog;
+  /** Manage orchestration agent profiles. */
+  readonly agents: Agents;
+  /** Manage orchestration task envelopes (intent tasks). */
+  readonly tasks: Tasks;
+  /** Read and control orchestration runs. */
+  readonly runs: Runs;
 
   constructor(opts?: ClientOptions) {
     super(opts);
@@ -80,6 +89,9 @@ export class Airstore extends CoreClient {
     this.oauth = new OAuth(this);
     this.fs = new Filesystem(this);
     this.accessLog = new AccessLog(this);
+    this.agents = new Agents(this);
+    this.tasks = new Tasks(this);
+    this.runs = new Runs(this);
   }
 }
 

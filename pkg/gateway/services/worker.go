@@ -2,6 +2,8 @@ package services
 
 import (
 	"context"
+	"strings"
+	"time"
 
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/scheduler"
@@ -130,6 +132,20 @@ func (s *WorkerService) SetTaskStarted(ctx context.Context, req *pb.SetTaskStart
 	if err := s.backend.SetTaskStarted(ctx, req.TaskId); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to set task started: %v", err)
 	}
+
+	attempt, err := s.backend.GetRunAttemptByExecutionTaskExternalID(ctx, req.TaskId)
+	if err == nil {
+		now := time.Now()
+		_ = s.backend.UpdateAgentRunAttemptStart(ctx, attempt.ID, now)
+		_ = s.backend.UpdateAgentRunLifecycle(ctx, attempt.RunID, types.AgentRunStatusRunning, &now, nil, nil)
+		_ = appendRunSnapshot(ctx, s.backend, attempt.RunID, types.AgentRunStatusRunning, &now, nil, nil, map[string]any{
+			"attempt_id": attempt.ID,
+			"task_id":    req.TaskId,
+			"event":      "started",
+		})
+		_ = updateExecutionInstanceCounts(ctx, s.backend, attempt.RunID, 1)
+	}
+
 	return &pb.SetTaskStartedResponse{}, nil
 }
 
@@ -145,7 +161,115 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 		return nil, status.Errorf(codes.Internal, "failed to set task result: %v", err)
 	}
 
+	attempt, err := s.backend.GetRunAttemptByExecutionTaskExternalID(ctx, req.TaskId)
+	if err == nil {
+		now := time.Now()
+		exitCode := int(req.ExitCode)
+
+		attemptStatus := types.AgentAttemptStatusOK
+		runStatus := types.AgentRunStatusOK
+		var errMsg *string
+
+		if req.Error != "" {
+			msg := req.Error
+			errMsg = &msg
+		}
+		lowerErr := strings.ToLower(req.Error)
+		switch {
+		case strings.Contains(lowerErr, "timeout"):
+			attemptStatus = types.AgentAttemptStatusTimeout
+			runStatus = types.AgentRunStatusTimeout
+		case strings.Contains(lowerErr, "cancel"):
+			attemptStatus = types.AgentAttemptStatusCancelled
+			runStatus = types.AgentRunStatusCancelled
+		case req.ExitCode != 0 || req.Error != "":
+			attemptStatus = types.AgentAttemptStatusError
+			runStatus = types.AgentRunStatusError
+		}
+
+		_ = s.backend.UpdateAgentRunAttemptResult(ctx, attempt.ID, attemptStatus, &exitCode, now, errMsg)
+		_ = s.backend.UpdateAgentRunLifecycle(ctx, attempt.RunID, runStatus, nil, &now, errMsg)
+		_ = appendRunSnapshot(ctx, s.backend, attempt.RunID, runStatus, nil, &now, errMsg, map[string]any{
+			"attempt_id": attempt.ID,
+			"task_id":    req.TaskId,
+			"exit_code":  req.ExitCode,
+			"error":      req.Error,
+			"event":      "finished",
+		})
+		_ = updateExecutionInstanceCounts(ctx, s.backend, attempt.RunID, -1)
+	}
+
 	return &pb.SetTaskResultResponse{}, nil
+}
+
+func appendRunSnapshot(
+	ctx context.Context,
+	backend *repository.PostgresBackend,
+	runID string,
+	status types.AgentRunStatus,
+	startedAt *time.Time,
+	endedAt *time.Time,
+	errorMsg *string,
+	payload map[string]any,
+) error {
+	seq, err := backend.IncrementAgentRunSnapshotSeq(ctx, runID)
+	if err != nil {
+		return err
+	}
+	var startedAtMs *int64
+	var endedAtMs *int64
+	if startedAt != nil {
+		v := startedAt.UnixMilli()
+		startedAtMs = &v
+	}
+	if endedAt != nil {
+		v := endedAt.UnixMilli()
+		endedAtMs = &v
+	}
+	return backend.AppendAgentRunSnapshot(ctx, &types.AgentRunSnapshot{
+		RunID:       runID,
+		Seq:         seq,
+		Status:      status,
+		StartedAtMs: startedAtMs,
+		EndedAtMs:   endedAtMs,
+		Error:       errorMsg,
+		TS:          time.Now().UnixMilli(),
+		PayloadJSON: payload,
+	})
+}
+
+func updateExecutionInstanceCounts(ctx context.Context, backend *repository.PostgresBackend, runID string, runningDelta int) error {
+	run, err := backend.GetAgentRunByID(ctx, runID)
+	if err != nil {
+		return err
+	}
+	instanceKeyVal, ok := run.DeliveryJSON["instance_key"]
+	if !ok {
+		return nil
+	}
+	instanceKey, ok := instanceKeyVal.(string)
+	if !ok || instanceKey == "" {
+		return nil
+	}
+	instance, err := backend.GetExecutionInstanceByKey(ctx, instanceKey)
+	if err != nil {
+		return err
+	}
+	running := instance.RunningAttempts + runningDelta
+	if running < 0 {
+		running = 0
+	}
+	now := time.Now()
+	return backend.UpdateExecutionInstanceState(
+		ctx,
+		instanceKey,
+		running,
+		instance.PendingAttempts,
+		instance.StoppingAttempts,
+		instance.DesiredDispatchConcurrency,
+		instance.Status,
+		&now,
+	)
 }
 
 func (s *WorkerService) AllocateIP(ctx context.Context, req *pb.AllocateIPRequest) (*pb.AllocateIPResponse, error) {

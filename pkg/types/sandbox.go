@@ -36,6 +36,9 @@ type SandboxConfig struct {
 
 	// FilesystemMount is the host path to bind-mount at /workspace (optional)
 	FilesystemMount string `json:"-"`
+
+	// FilesystemReadOnly controls whether /workspace is mounted read-only.
+	FilesystemReadOnly bool `json:"-"`
 }
 
 // SandboxMount specifies a mount point for a sandbox

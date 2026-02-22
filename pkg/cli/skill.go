@@ -706,7 +706,7 @@ var skillRunCmd = &cobra.Command{
 		var taskResp *pb.TaskResponse
 		err = RunSpinnerWithResult("Running skill...", func() error {
 			var err error
-			taskResp, err = client.Gateway.CreateTask(ctx, &pb.CreateTaskRequest{
+			taskResp, err = client.Tasks.CreateTask(ctx, &pb.CreateTaskRequest{
 				Prompt: prompt,
 			})
 			return err

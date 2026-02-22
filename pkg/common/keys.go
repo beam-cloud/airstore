@@ -58,6 +58,17 @@ var (
 	taskLogsChannel = "airstore:task_logs:%s"     // taskId (pub/sub)
 	taskLogsBuffer  = "airstore:task_logs_buf:%s" // taskId
 
+	// Agent orchestration keys
+	agentEnvelopeQueue     = "airstore:agent:envelope:queue"
+	agentEnvelopeBacklog   = "airstore:agent:envelope:backlog:%s"  // instanceKey
+	agentEnvelopeModeState = "airstore:agent:envelope:mode:%s"     // modeKey
+	agentEnvelopeModeSet   = "airstore:agent:envelope:mode:active" // modeKey set
+	agentDispatchLock      = "airstore:agent:dispatch:lock:%s"     // instanceKey
+	agentAttemptEvents     = "airstore:agent:attempt:events"
+	agentRunEventsChannel  = "airstore:agent:run:%s:events"
+	agentRunEventsBuffer   = "airstore:agent:run:%s:events:buf"
+	agentInstanceLock      = "airstore:agent:instance:lock:%s" // instanceKey
+
 	// Terminal IO keys (pub/sub channels)
 	terminalInput  = "airstore:terminal:%s:input"  // taskId
 	terminalOutput = "airstore:terminal:%s:output" // taskId
@@ -226,6 +237,44 @@ func (rk *redisKeys) TaskLogsChannel(taskId string) string {
 
 func (rk *redisKeys) TaskLogsBuffer(taskId string) string {
 	return fmt.Sprintf(taskLogsBuffer, taskId)
+}
+
+// --- Agent orchestration keys ---
+
+func (rk *redisKeys) AgentEnvelopeQueue() string {
+	return agentEnvelopeQueue
+}
+
+func (rk *redisKeys) AgentEnvelopeBacklog(instanceKey string) string {
+	return fmt.Sprintf(agentEnvelopeBacklog, instanceKey)
+}
+
+func (rk *redisKeys) AgentEnvelopeModeState(modeKey string) string {
+	return fmt.Sprintf(agentEnvelopeModeState, modeKey)
+}
+
+func (rk *redisKeys) AgentEnvelopeModeSet() string {
+	return agentEnvelopeModeSet
+}
+
+func (rk *redisKeys) AgentDispatchLock(instanceKey string) string {
+	return fmt.Sprintf(agentDispatchLock, instanceKey)
+}
+
+func (rk *redisKeys) AgentAttemptEvents() string {
+	return agentAttemptEvents
+}
+
+func (rk *redisKeys) AgentRunEventsChannel(runID string) string {
+	return fmt.Sprintf(agentRunEventsChannel, runID)
+}
+
+func (rk *redisKeys) AgentRunEventsBuffer(runID string) string {
+	return fmt.Sprintf(agentRunEventsBuffer, runID)
+}
+
+func (rk *redisKeys) AgentInstanceLock(instanceKey string) string {
+	return fmt.Sprintf(agentInstanceLock, instanceKey)
 }
 
 // --- Terminal IO keys ---

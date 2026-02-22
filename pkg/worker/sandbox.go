@@ -393,9 +393,9 @@ func (m *SandboxManager) Create(cfg types.SandboxConfig) (*types.SandboxState, e
 		return nil, fmt.Errorf("failed to prepare spec: %w", err)
 	}
 
-	// Set up container networking (NAT for internet access)
+	// Set up container networking (NAT for internet access) unless disabled.
 	var containerIP string
-	if m.network != nil {
+	if m.network != nil && cfg.Network.Mode != "none" {
 		ip, err := m.network.Setup(cfg.ID, spec)
 		if err != nil {
 			overlay.Cleanup()
@@ -762,7 +762,7 @@ func (m *SandboxManager) generateSpec(cfg types.SandboxConfig, rootfsPath string
 
 	// Add filesystem mount (bind mount from FUSE mount)
 	if cfg.FilesystemMount != "" {
-		if err := m.addFilesystemMount(&spec, cfg.FilesystemMount); err != nil {
+		if err := m.addFilesystemMount(&spec, cfg.FilesystemMount, cfg.FilesystemReadOnly); err != nil {
 			return nil, fmt.Errorf("failed to add filesystem mount: %w", err)
 		}
 	}
@@ -822,7 +822,7 @@ func (m *SandboxManager) generateSpec(cfg types.SandboxConfig, rootfsPath string
 }
 
 // addFilesystemMount bind-mounts a FUSE filesystem into the sandbox at /workspace.
-func (m *SandboxManager) addFilesystemMount(spec *specs.Spec, source string) error {
+func (m *SandboxManager) addFilesystemMount(spec *specs.Spec, source string, readOnly bool) error {
 	// Verify the mount exists and includes required system roots.
 	ready, missing, err := checkFilesystemMountReady(source)
 	if err != nil {
@@ -835,11 +835,18 @@ func (m *SandboxManager) addFilesystemMount(spec *specs.Spec, source string) err
 	entries, _ := os.ReadDir(source)
 
 	// Bind mount at container working directory
+	options := []string{"rbind"}
+	if readOnly {
+		options = append(options, "ro")
+	} else {
+		options = append(options, "rw")
+	}
+
 	spec.Mounts = append(spec.Mounts, specs.Mount{
 		Destination: types.ContainerWorkDir,
 		Type:        "bind",
 		Source:      source,
-		Options:     []string{"rbind", "rw"},
+		Options:     options,
 	})
 
 	log.Debug().
@@ -931,22 +938,48 @@ func (m *SandboxManager) injectAPIKey(env map[string]string, key, value string, 
 }
 
 func (m *SandboxManager) buildTaskSandboxConfig(task types.Task, entrypoint []string, env map[string]string, mountSource string) types.SandboxConfig {
+	runtimeType := types.ContainerRuntimeGvisor
+	if task.RuntimeType != nil && *task.RuntimeType == types.ContainerRuntimeRunc.String() {
+		runtimeType = types.ContainerRuntimeRunc
+	}
+
+	workspaceAccess := "rw"
+	if task.WorkspaceAccess != nil && *task.WorkspaceAccess != "" {
+		workspaceAccess = *task.WorkspaceAccess
+	}
+	if workspaceAccess == "none" {
+		mountSource = ""
+	}
+
+	networkMode := "bridge"
+	if task.NetworkEnabled != nil && !*task.NetworkEnabled {
+		networkMode = "none"
+	}
+
 	return types.SandboxConfig{
-		ID:              fmt.Sprintf("task-%s", task.ExternalId),
-		WorkspaceID:     fmt.Sprintf("%d", task.WorkspaceId),
-		Image:           task.Image,
-		Runtime:         types.ContainerRuntimeGvisor,
-		Entrypoint:      entrypoint,
-		Env:             env,
-		WorkingDir:      types.ContainerWorkDir,
-		FilesystemMount: mountSource,
-		Resources:       task.GetResources(),
+		ID:                 fmt.Sprintf("task-%s", task.ExternalId),
+		WorkspaceID:        fmt.Sprintf("%d", task.WorkspaceId),
+		Image:              task.Image,
+		Runtime:            runtimeType,
+		Entrypoint:         entrypoint,
+		Env:                env,
+		WorkingDir:         types.ContainerWorkDir,
+		FilesystemMount:    mountSource,
+		FilesystemReadOnly: workspaceAccess == "ro",
+		Resources:          task.GetResources(),
+		Network: types.SandboxNetwork{
+			Mode: networkMode,
+		},
 	}
 }
 
 // mountFilesystem sets up the filesystem mount for a task.
 // Prefers task-specific mount with member token, falls back to worker global mount.
 func (m *SandboxManager) mountFilesystem(ctx context.Context, task types.Task) string {
+	if task.WorkspaceAccess != nil && *task.WorkspaceAccess == "none" {
+		return ""
+	}
+
 	// Try task-specific mount with member token
 	if task.MemberToken != "" && m.mountManager != nil {
 		mountPath, err := m.mountManager.Mount(ctx, task.ExternalId, task.MemberToken)

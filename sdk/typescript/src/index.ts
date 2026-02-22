@@ -28,6 +28,9 @@ export { Members } from './resources/members.js';
 export { OAuth } from './resources/oauth.js';
 export { Filesystem } from './resources/filesystem.js';
 export { AccessLog } from './resources/access-log.js';
+export { Agents } from './resources/agents.js';
+export { Tasks } from './resources/tasks.js';
+export { Runs } from './resources/runs.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 export type { PaginatedList, IntegrationType, MemberRole, OutputFormat } from './types/shared.js';
@@ -79,6 +82,25 @@ export type { Token, TokenCreateParams, TokenCreated } from './types/tokens.js';
 export type { Member, MemberCreateParams } from './types/members.js';
 export type { OAuthSession, OAuthSessionCreateParams, OAuthSessionStatus, OAuthPollOptions } from './types/oauth.js';
 export type { VirtualFile, DirectoryListing, TreeListing } from './types/filesystem.js';
+export type { AgentProfile, AgentCreateParams } from './types/agents.js';
+export type {
+  QueueMode,
+  EnvelopeKind,
+  EnvelopeState,
+  RoutingContext,
+  AgentTaskEnvelope,
+  AgentCommandCreateParams,
+  TaskEnvelopeAcceptedResponse,
+} from './types/tasks.js';
+export type {
+  RunStatus,
+  AttemptStatus,
+  AgentRun,
+  AgentRunAttempt,
+  AgentRunSnapshot,
+  RunInputParams,
+  RunCancelResponse,
+} from './types/runs.js';
 export type {
   AccessLogRead,
   AccessLogListParams,

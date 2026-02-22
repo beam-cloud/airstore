@@ -34,11 +34,6 @@ const (
 	GatewayService_AddConnection_FullMethodName     = "/gateway.GatewayService/AddConnection"
 	GatewayService_ListConnections_FullMethodName   = "/gateway.GatewayService/ListConnections"
 	GatewayService_RemoveConnection_FullMethodName  = "/gateway.GatewayService/RemoveConnection"
-	GatewayService_CreateTask_FullMethodName        = "/gateway.GatewayService/CreateTask"
-	GatewayService_ListTasks_FullMethodName         = "/gateway.GatewayService/ListTasks"
-	GatewayService_GetTask_FullMethodName           = "/gateway.GatewayService/GetTask"
-	GatewayService_DeleteTask_FullMethodName        = "/gateway.GatewayService/DeleteTask"
-	GatewayService_GetTaskLogs_FullMethodName       = "/gateway.GatewayService/GetTaskLogs"
 	GatewayService_CreateHook_FullMethodName        = "/gateway.GatewayService/CreateHook"
 	GatewayService_ListHooks_FullMethodName         = "/gateway.GatewayService/ListHooks"
 	GatewayService_GetHook_FullMethodName           = "/gateway.GatewayService/GetHook"
@@ -71,12 +66,6 @@ type GatewayServiceClient interface {
 	AddConnection(ctx context.Context, in *AddConnectionRequest, opts ...grpc.CallOption) (*ConnectionResponse, error)
 	ListConnections(ctx context.Context, in *ListConnectionsRequest, opts ...grpc.CallOption) (*ListConnectionsResponse, error)
 	RemoveConnection(ctx context.Context, in *RemoveConnectionRequest, opts ...grpc.CallOption) (*DeleteResponse, error)
-	// Tasks
-	CreateTask(ctx context.Context, in *CreateTaskRequest, opts ...grpc.CallOption) (*TaskResponse, error)
-	ListTasks(ctx context.Context, in *ListTasksRequest, opts ...grpc.CallOption) (*ListTasksResponse, error)
-	GetTask(ctx context.Context, in *GetTaskRequest, opts ...grpc.CallOption) (*TaskResponse, error)
-	DeleteTask(ctx context.Context, in *DeleteTaskRequest, opts ...grpc.CallOption) (*DeleteResponse, error)
-	GetTaskLogs(ctx context.Context, in *GetTaskLogsRequest, opts ...grpc.CallOption) (*GetTaskLogsResponse, error)
 	// Hooks
 	CreateHook(ctx context.Context, in *CreateHookRequest, opts ...grpc.CallOption) (*HookResponse, error)
 	ListHooks(ctx context.Context, in *ListHooksRequest, opts ...grpc.CallOption) (*ListHooksResponse, error)
@@ -229,51 +218,6 @@ func (c *gatewayServiceClient) RemoveConnection(ctx context.Context, in *RemoveC
 	return out, nil
 }
 
-func (c *gatewayServiceClient) CreateTask(ctx context.Context, in *CreateTaskRequest, opts ...grpc.CallOption) (*TaskResponse, error) {
-	out := new(TaskResponse)
-	err := c.cc.Invoke(ctx, GatewayService_CreateTask_FullMethodName, in, out, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *gatewayServiceClient) ListTasks(ctx context.Context, in *ListTasksRequest, opts ...grpc.CallOption) (*ListTasksResponse, error) {
-	out := new(ListTasksResponse)
-	err := c.cc.Invoke(ctx, GatewayService_ListTasks_FullMethodName, in, out, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *gatewayServiceClient) GetTask(ctx context.Context, in *GetTaskRequest, opts ...grpc.CallOption) (*TaskResponse, error) {
-	out := new(TaskResponse)
-	err := c.cc.Invoke(ctx, GatewayService_GetTask_FullMethodName, in, out, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *gatewayServiceClient) DeleteTask(ctx context.Context, in *DeleteTaskRequest, opts ...grpc.CallOption) (*DeleteResponse, error) {
-	out := new(DeleteResponse)
-	err := c.cc.Invoke(ctx, GatewayService_DeleteTask_FullMethodName, in, out, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *gatewayServiceClient) GetTaskLogs(ctx context.Context, in *GetTaskLogsRequest, opts ...grpc.CallOption) (*GetTaskLogsResponse, error) {
-	out := new(GetTaskLogsResponse)
-	err := c.cc.Invoke(ctx, GatewayService_GetTaskLogs_FullMethodName, in, out, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 func (c *gatewayServiceClient) CreateHook(ctx context.Context, in *CreateHookRequest, opts ...grpc.CallOption) (*HookResponse, error) {
 	out := new(HookResponse)
 	err := c.cc.Invoke(ctx, GatewayService_CreateHook_FullMethodName, in, out, opts...)
@@ -352,12 +296,6 @@ type GatewayServiceServer interface {
 	AddConnection(context.Context, *AddConnectionRequest) (*ConnectionResponse, error)
 	ListConnections(context.Context, *ListConnectionsRequest) (*ListConnectionsResponse, error)
 	RemoveConnection(context.Context, *RemoveConnectionRequest) (*DeleteResponse, error)
-	// Tasks
-	CreateTask(context.Context, *CreateTaskRequest) (*TaskResponse, error)
-	ListTasks(context.Context, *ListTasksRequest) (*ListTasksResponse, error)
-	GetTask(context.Context, *GetTaskRequest) (*TaskResponse, error)
-	DeleteTask(context.Context, *DeleteTaskRequest) (*DeleteResponse, error)
-	GetTaskLogs(context.Context, *GetTaskLogsRequest) (*GetTaskLogsResponse, error)
 	// Hooks
 	CreateHook(context.Context, *CreateHookRequest) (*HookResponse, error)
 	ListHooks(context.Context, *ListHooksRequest) (*ListHooksResponse, error)
@@ -416,21 +354,6 @@ func (UnimplementedGatewayServiceServer) ListConnections(context.Context, *ListC
 }
 func (UnimplementedGatewayServiceServer) RemoveConnection(context.Context, *RemoveConnectionRequest) (*DeleteResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method RemoveConnection not implemented")
-}
-func (UnimplementedGatewayServiceServer) CreateTask(context.Context, *CreateTaskRequest) (*TaskResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method CreateTask not implemented")
-}
-func (UnimplementedGatewayServiceServer) ListTasks(context.Context, *ListTasksRequest) (*ListTasksResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method ListTasks not implemented")
-}
-func (UnimplementedGatewayServiceServer) GetTask(context.Context, *GetTaskRequest) (*TaskResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method GetTask not implemented")
-}
-func (UnimplementedGatewayServiceServer) DeleteTask(context.Context, *DeleteTaskRequest) (*DeleteResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method DeleteTask not implemented")
-}
-func (UnimplementedGatewayServiceServer) GetTaskLogs(context.Context, *GetTaskLogsRequest) (*GetTaskLogsResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method GetTaskLogs not implemented")
 }
 func (UnimplementedGatewayServiceServer) CreateHook(context.Context, *CreateHookRequest) (*HookResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CreateHook not implemented")
@@ -733,96 +656,6 @@ func _GatewayService_RemoveConnection_Handler(srv interface{}, ctx context.Conte
 	return interceptor(ctx, in, info, handler)
 }
 
-func _GatewayService_CreateTask_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(CreateTaskRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(GatewayServiceServer).CreateTask(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: GatewayService_CreateTask_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(GatewayServiceServer).CreateTask(ctx, req.(*CreateTaskRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _GatewayService_ListTasks_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ListTasksRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(GatewayServiceServer).ListTasks(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: GatewayService_ListTasks_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(GatewayServiceServer).ListTasks(ctx, req.(*ListTasksRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _GatewayService_GetTask_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(GetTaskRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(GatewayServiceServer).GetTask(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: GatewayService_GetTask_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(GatewayServiceServer).GetTask(ctx, req.(*GetTaskRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _GatewayService_DeleteTask_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(DeleteTaskRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(GatewayServiceServer).DeleteTask(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: GatewayService_DeleteTask_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(GatewayServiceServer).DeleteTask(ctx, req.(*DeleteTaskRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _GatewayService_GetTaskLogs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(GetTaskLogsRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(GatewayServiceServer).GetTaskLogs(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: GatewayService_GetTaskLogs_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(GatewayServiceServer).GetTaskLogs(ctx, req.(*GetTaskLogsRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
 func _GatewayService_CreateHook_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CreateHookRequest)
 	if err := dec(in); err != nil {
@@ -999,26 +832,6 @@ var GatewayService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _GatewayService_RemoveConnection_Handler,
 		},
 		{
-			MethodName: "CreateTask",
-			Handler:    _GatewayService_CreateTask_Handler,
-		},
-		{
-			MethodName: "ListTasks",
-			Handler:    _GatewayService_ListTasks_Handler,
-		},
-		{
-			MethodName: "GetTask",
-			Handler:    _GatewayService_GetTask_Handler,
-		},
-		{
-			MethodName: "DeleteTask",
-			Handler:    _GatewayService_DeleteTask_Handler,
-		},
-		{
-			MethodName: "GetTaskLogs",
-			Handler:    _GatewayService_GetTaskLogs_Handler,
-		},
-		{
 			MethodName: "CreateHook",
 			Handler:    _GatewayService_CreateHook_Handler,
 		},
@@ -1041,6 +854,741 @@ var GatewayService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListHookRuns",
 			Handler:    _GatewayService_ListHookRuns_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "gateway.proto",
+}
+
+const (
+	TaskService_CreateTask_FullMethodName  = "/gateway.TaskService/CreateTask"
+	TaskService_ListTasks_FullMethodName   = "/gateway.TaskService/ListTasks"
+	TaskService_GetTask_FullMethodName     = "/gateway.TaskService/GetTask"
+	TaskService_DeleteTask_FullMethodName  = "/gateway.TaskService/DeleteTask"
+	TaskService_GetTaskLogs_FullMethodName = "/gateway.TaskService/GetTaskLogs"
+)
+
+// TaskServiceClient is the client API for TaskService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type TaskServiceClient interface {
+	CreateTask(ctx context.Context, in *CreateTaskRequest, opts ...grpc.CallOption) (*TaskResponse, error)
+	ListTasks(ctx context.Context, in *ListTasksRequest, opts ...grpc.CallOption) (*ListTasksResponse, error)
+	GetTask(ctx context.Context, in *GetTaskRequest, opts ...grpc.CallOption) (*TaskResponse, error)
+	DeleteTask(ctx context.Context, in *DeleteTaskRequest, opts ...grpc.CallOption) (*DeleteResponse, error)
+	GetTaskLogs(ctx context.Context, in *GetTaskLogsRequest, opts ...grpc.CallOption) (*GetTaskLogsResponse, error)
+}
+
+type taskServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewTaskServiceClient(cc grpc.ClientConnInterface) TaskServiceClient {
+	return &taskServiceClient{cc}
+}
+
+func (c *taskServiceClient) CreateTask(ctx context.Context, in *CreateTaskRequest, opts ...grpc.CallOption) (*TaskResponse, error) {
+	out := new(TaskResponse)
+	err := c.cc.Invoke(ctx, TaskService_CreateTask_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *taskServiceClient) ListTasks(ctx context.Context, in *ListTasksRequest, opts ...grpc.CallOption) (*ListTasksResponse, error) {
+	out := new(ListTasksResponse)
+	err := c.cc.Invoke(ctx, TaskService_ListTasks_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *taskServiceClient) GetTask(ctx context.Context, in *GetTaskRequest, opts ...grpc.CallOption) (*TaskResponse, error) {
+	out := new(TaskResponse)
+	err := c.cc.Invoke(ctx, TaskService_GetTask_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *taskServiceClient) DeleteTask(ctx context.Context, in *DeleteTaskRequest, opts ...grpc.CallOption) (*DeleteResponse, error) {
+	out := new(DeleteResponse)
+	err := c.cc.Invoke(ctx, TaskService_DeleteTask_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *taskServiceClient) GetTaskLogs(ctx context.Context, in *GetTaskLogsRequest, opts ...grpc.CallOption) (*GetTaskLogsResponse, error) {
+	out := new(GetTaskLogsResponse)
+	err := c.cc.Invoke(ctx, TaskService_GetTaskLogs_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// TaskServiceServer is the server API for TaskService service.
+// All implementations must embed UnimplementedTaskServiceServer
+// for forward compatibility
+type TaskServiceServer interface {
+	CreateTask(context.Context, *CreateTaskRequest) (*TaskResponse, error)
+	ListTasks(context.Context, *ListTasksRequest) (*ListTasksResponse, error)
+	GetTask(context.Context, *GetTaskRequest) (*TaskResponse, error)
+	DeleteTask(context.Context, *DeleteTaskRequest) (*DeleteResponse, error)
+	GetTaskLogs(context.Context, *GetTaskLogsRequest) (*GetTaskLogsResponse, error)
+	mustEmbedUnimplementedTaskServiceServer()
+}
+
+// UnimplementedTaskServiceServer must be embedded to have forward compatible implementations.
+type UnimplementedTaskServiceServer struct {
+}
+
+func (UnimplementedTaskServiceServer) CreateTask(context.Context, *CreateTaskRequest) (*TaskResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CreateTask not implemented")
+}
+func (UnimplementedTaskServiceServer) ListTasks(context.Context, *ListTasksRequest) (*ListTasksResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListTasks not implemented")
+}
+func (UnimplementedTaskServiceServer) GetTask(context.Context, *GetTaskRequest) (*TaskResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetTask not implemented")
+}
+func (UnimplementedTaskServiceServer) DeleteTask(context.Context, *DeleteTaskRequest) (*DeleteResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DeleteTask not implemented")
+}
+func (UnimplementedTaskServiceServer) GetTaskLogs(context.Context, *GetTaskLogsRequest) (*GetTaskLogsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetTaskLogs not implemented")
+}
+func (UnimplementedTaskServiceServer) mustEmbedUnimplementedTaskServiceServer() {}
+
+// UnsafeTaskServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to TaskServiceServer will
+// result in compilation errors.
+type UnsafeTaskServiceServer interface {
+	mustEmbedUnimplementedTaskServiceServer()
+}
+
+func RegisterTaskServiceServer(s grpc.ServiceRegistrar, srv TaskServiceServer) {
+	s.RegisterService(&TaskService_ServiceDesc, srv)
+}
+
+func _TaskService_CreateTask_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateTaskRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TaskServiceServer).CreateTask(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TaskService_CreateTask_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TaskServiceServer).CreateTask(ctx, req.(*CreateTaskRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _TaskService_ListTasks_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListTasksRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TaskServiceServer).ListTasks(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TaskService_ListTasks_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TaskServiceServer).ListTasks(ctx, req.(*ListTasksRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _TaskService_GetTask_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetTaskRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TaskServiceServer).GetTask(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TaskService_GetTask_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TaskServiceServer).GetTask(ctx, req.(*GetTaskRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _TaskService_DeleteTask_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteTaskRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TaskServiceServer).DeleteTask(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TaskService_DeleteTask_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TaskServiceServer).DeleteTask(ctx, req.(*DeleteTaskRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _TaskService_GetTaskLogs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetTaskLogsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TaskServiceServer).GetTaskLogs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TaskService_GetTaskLogs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TaskServiceServer).GetTaskLogs(ctx, req.(*GetTaskLogsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// TaskService_ServiceDesc is the grpc.ServiceDesc for TaskService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var TaskService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "gateway.TaskService",
+	HandlerType: (*TaskServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "CreateTask",
+			Handler:    _TaskService_CreateTask_Handler,
+		},
+		{
+			MethodName: "ListTasks",
+			Handler:    _TaskService_ListTasks_Handler,
+		},
+		{
+			MethodName: "GetTask",
+			Handler:    _TaskService_GetTask_Handler,
+		},
+		{
+			MethodName: "DeleteTask",
+			Handler:    _TaskService_DeleteTask_Handler,
+		},
+		{
+			MethodName: "GetTaskLogs",
+			Handler:    _TaskService_GetTaskLogs_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "gateway.proto",
+}
+
+const (
+	AgentService_CreateAgentProfile_FullMethodName      = "/gateway.AgentService/CreateAgentProfile"
+	AgentService_ListAgentProfiles_FullMethodName       = "/gateway.AgentService/ListAgentProfiles"
+	AgentService_GetAgentProfile_FullMethodName         = "/gateway.AgentService/GetAgentProfile"
+	AgentService_CreateAgentTaskEnvelope_FullMethodName = "/gateway.AgentService/CreateAgentTaskEnvelope"
+	AgentService_GetAgentTaskEnvelope_FullMethodName    = "/gateway.AgentService/GetAgentTaskEnvelope"
+	AgentService_EnqueueRunInput_FullMethodName         = "/gateway.AgentService/EnqueueRunInput"
+	AgentService_ListAgentRuns_FullMethodName           = "/gateway.AgentService/ListAgentRuns"
+	AgentService_GetAgentRun_FullMethodName             = "/gateway.AgentService/GetAgentRun"
+	AgentService_ListAgentRunAttempts_FullMethodName    = "/gateway.AgentService/ListAgentRunAttempts"
+	AgentService_ListAgentRunSnapshots_FullMethodName   = "/gateway.AgentService/ListAgentRunSnapshots"
+	AgentService_ListAgentRunEvents_FullMethodName      = "/gateway.AgentService/ListAgentRunEvents"
+	AgentService_CancelAgentRun_FullMethodName          = "/gateway.AgentService/CancelAgentRun"
+)
+
+// AgentServiceClient is the client API for AgentService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type AgentServiceClient interface {
+	CreateAgentProfile(ctx context.Context, in *CreateAgentProfileRequest, opts ...grpc.CallOption) (*AgentProfileResponse, error)
+	ListAgentProfiles(ctx context.Context, in *ListAgentProfilesRequest, opts ...grpc.CallOption) (*ListAgentProfilesResponse, error)
+	GetAgentProfile(ctx context.Context, in *GetAgentProfileRequest, opts ...grpc.CallOption) (*AgentProfileResponse, error)
+	CreateAgentTaskEnvelope(ctx context.Context, in *CreateAgentTaskEnvelopeRequest, opts ...grpc.CallOption) (*AgentTaskEnvelopeAcceptedResponse, error)
+	GetAgentTaskEnvelope(ctx context.Context, in *GetAgentTaskEnvelopeRequest, opts ...grpc.CallOption) (*AgentTaskEnvelopeResponse, error)
+	EnqueueRunInput(ctx context.Context, in *EnqueueRunInputRequest, opts ...grpc.CallOption) (*AgentTaskEnvelopeAcceptedResponse, error)
+	ListAgentRuns(ctx context.Context, in *ListAgentRunsRequest, opts ...grpc.CallOption) (*ListAgentRunsResponse, error)
+	GetAgentRun(ctx context.Context, in *GetAgentRunRequest, opts ...grpc.CallOption) (*AgentRunResponse, error)
+	ListAgentRunAttempts(ctx context.Context, in *ListAgentRunAttemptsRequest, opts ...grpc.CallOption) (*ListAgentRunAttemptsResponse, error)
+	ListAgentRunSnapshots(ctx context.Context, in *ListAgentRunSnapshotsRequest, opts ...grpc.CallOption) (*ListAgentRunSnapshotsResponse, error)
+	ListAgentRunEvents(ctx context.Context, in *ListAgentRunEventsRequest, opts ...grpc.CallOption) (*ListAgentRunEventsResponse, error)
+	CancelAgentRun(ctx context.Context, in *CancelAgentRunRequest, opts ...grpc.CallOption) (*CancelAgentRunResponse, error)
+}
+
+type agentServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewAgentServiceClient(cc grpc.ClientConnInterface) AgentServiceClient {
+	return &agentServiceClient{cc}
+}
+
+func (c *agentServiceClient) CreateAgentProfile(ctx context.Context, in *CreateAgentProfileRequest, opts ...grpc.CallOption) (*AgentProfileResponse, error) {
+	out := new(AgentProfileResponse)
+	err := c.cc.Invoke(ctx, AgentService_CreateAgentProfile_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentServiceClient) ListAgentProfiles(ctx context.Context, in *ListAgentProfilesRequest, opts ...grpc.CallOption) (*ListAgentProfilesResponse, error) {
+	out := new(ListAgentProfilesResponse)
+	err := c.cc.Invoke(ctx, AgentService_ListAgentProfiles_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentServiceClient) GetAgentProfile(ctx context.Context, in *GetAgentProfileRequest, opts ...grpc.CallOption) (*AgentProfileResponse, error) {
+	out := new(AgentProfileResponse)
+	err := c.cc.Invoke(ctx, AgentService_GetAgentProfile_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentServiceClient) CreateAgentTaskEnvelope(ctx context.Context, in *CreateAgentTaskEnvelopeRequest, opts ...grpc.CallOption) (*AgentTaskEnvelopeAcceptedResponse, error) {
+	out := new(AgentTaskEnvelopeAcceptedResponse)
+	err := c.cc.Invoke(ctx, AgentService_CreateAgentTaskEnvelope_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentServiceClient) GetAgentTaskEnvelope(ctx context.Context, in *GetAgentTaskEnvelopeRequest, opts ...grpc.CallOption) (*AgentTaskEnvelopeResponse, error) {
+	out := new(AgentTaskEnvelopeResponse)
+	err := c.cc.Invoke(ctx, AgentService_GetAgentTaskEnvelope_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentServiceClient) EnqueueRunInput(ctx context.Context, in *EnqueueRunInputRequest, opts ...grpc.CallOption) (*AgentTaskEnvelopeAcceptedResponse, error) {
+	out := new(AgentTaskEnvelopeAcceptedResponse)
+	err := c.cc.Invoke(ctx, AgentService_EnqueueRunInput_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentServiceClient) ListAgentRuns(ctx context.Context, in *ListAgentRunsRequest, opts ...grpc.CallOption) (*ListAgentRunsResponse, error) {
+	out := new(ListAgentRunsResponse)
+	err := c.cc.Invoke(ctx, AgentService_ListAgentRuns_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentServiceClient) GetAgentRun(ctx context.Context, in *GetAgentRunRequest, opts ...grpc.CallOption) (*AgentRunResponse, error) {
+	out := new(AgentRunResponse)
+	err := c.cc.Invoke(ctx, AgentService_GetAgentRun_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentServiceClient) ListAgentRunAttempts(ctx context.Context, in *ListAgentRunAttemptsRequest, opts ...grpc.CallOption) (*ListAgentRunAttemptsResponse, error) {
+	out := new(ListAgentRunAttemptsResponse)
+	err := c.cc.Invoke(ctx, AgentService_ListAgentRunAttempts_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentServiceClient) ListAgentRunSnapshots(ctx context.Context, in *ListAgentRunSnapshotsRequest, opts ...grpc.CallOption) (*ListAgentRunSnapshotsResponse, error) {
+	out := new(ListAgentRunSnapshotsResponse)
+	err := c.cc.Invoke(ctx, AgentService_ListAgentRunSnapshots_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentServiceClient) ListAgentRunEvents(ctx context.Context, in *ListAgentRunEventsRequest, opts ...grpc.CallOption) (*ListAgentRunEventsResponse, error) {
+	out := new(ListAgentRunEventsResponse)
+	err := c.cc.Invoke(ctx, AgentService_ListAgentRunEvents_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentServiceClient) CancelAgentRun(ctx context.Context, in *CancelAgentRunRequest, opts ...grpc.CallOption) (*CancelAgentRunResponse, error) {
+	out := new(CancelAgentRunResponse)
+	err := c.cc.Invoke(ctx, AgentService_CancelAgentRun_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// AgentServiceServer is the server API for AgentService service.
+// All implementations must embed UnimplementedAgentServiceServer
+// for forward compatibility
+type AgentServiceServer interface {
+	CreateAgentProfile(context.Context, *CreateAgentProfileRequest) (*AgentProfileResponse, error)
+	ListAgentProfiles(context.Context, *ListAgentProfilesRequest) (*ListAgentProfilesResponse, error)
+	GetAgentProfile(context.Context, *GetAgentProfileRequest) (*AgentProfileResponse, error)
+	CreateAgentTaskEnvelope(context.Context, *CreateAgentTaskEnvelopeRequest) (*AgentTaskEnvelopeAcceptedResponse, error)
+	GetAgentTaskEnvelope(context.Context, *GetAgentTaskEnvelopeRequest) (*AgentTaskEnvelopeResponse, error)
+	EnqueueRunInput(context.Context, *EnqueueRunInputRequest) (*AgentTaskEnvelopeAcceptedResponse, error)
+	ListAgentRuns(context.Context, *ListAgentRunsRequest) (*ListAgentRunsResponse, error)
+	GetAgentRun(context.Context, *GetAgentRunRequest) (*AgentRunResponse, error)
+	ListAgentRunAttempts(context.Context, *ListAgentRunAttemptsRequest) (*ListAgentRunAttemptsResponse, error)
+	ListAgentRunSnapshots(context.Context, *ListAgentRunSnapshotsRequest) (*ListAgentRunSnapshotsResponse, error)
+	ListAgentRunEvents(context.Context, *ListAgentRunEventsRequest) (*ListAgentRunEventsResponse, error)
+	CancelAgentRun(context.Context, *CancelAgentRunRequest) (*CancelAgentRunResponse, error)
+	mustEmbedUnimplementedAgentServiceServer()
+}
+
+// UnimplementedAgentServiceServer must be embedded to have forward compatible implementations.
+type UnimplementedAgentServiceServer struct {
+}
+
+func (UnimplementedAgentServiceServer) CreateAgentProfile(context.Context, *CreateAgentProfileRequest) (*AgentProfileResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CreateAgentProfile not implemented")
+}
+func (UnimplementedAgentServiceServer) ListAgentProfiles(context.Context, *ListAgentProfilesRequest) (*ListAgentProfilesResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListAgentProfiles not implemented")
+}
+func (UnimplementedAgentServiceServer) GetAgentProfile(context.Context, *GetAgentProfileRequest) (*AgentProfileResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetAgentProfile not implemented")
+}
+func (UnimplementedAgentServiceServer) CreateAgentTaskEnvelope(context.Context, *CreateAgentTaskEnvelopeRequest) (*AgentTaskEnvelopeAcceptedResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CreateAgentTaskEnvelope not implemented")
+}
+func (UnimplementedAgentServiceServer) GetAgentTaskEnvelope(context.Context, *GetAgentTaskEnvelopeRequest) (*AgentTaskEnvelopeResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetAgentTaskEnvelope not implemented")
+}
+func (UnimplementedAgentServiceServer) EnqueueRunInput(context.Context, *EnqueueRunInputRequest) (*AgentTaskEnvelopeAcceptedResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method EnqueueRunInput not implemented")
+}
+func (UnimplementedAgentServiceServer) ListAgentRuns(context.Context, *ListAgentRunsRequest) (*ListAgentRunsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListAgentRuns not implemented")
+}
+func (UnimplementedAgentServiceServer) GetAgentRun(context.Context, *GetAgentRunRequest) (*AgentRunResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetAgentRun not implemented")
+}
+func (UnimplementedAgentServiceServer) ListAgentRunAttempts(context.Context, *ListAgentRunAttemptsRequest) (*ListAgentRunAttemptsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListAgentRunAttempts not implemented")
+}
+func (UnimplementedAgentServiceServer) ListAgentRunSnapshots(context.Context, *ListAgentRunSnapshotsRequest) (*ListAgentRunSnapshotsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListAgentRunSnapshots not implemented")
+}
+func (UnimplementedAgentServiceServer) ListAgentRunEvents(context.Context, *ListAgentRunEventsRequest) (*ListAgentRunEventsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListAgentRunEvents not implemented")
+}
+func (UnimplementedAgentServiceServer) CancelAgentRun(context.Context, *CancelAgentRunRequest) (*CancelAgentRunResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CancelAgentRun not implemented")
+}
+func (UnimplementedAgentServiceServer) mustEmbedUnimplementedAgentServiceServer() {}
+
+// UnsafeAgentServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to AgentServiceServer will
+// result in compilation errors.
+type UnsafeAgentServiceServer interface {
+	mustEmbedUnimplementedAgentServiceServer()
+}
+
+func RegisterAgentServiceServer(s grpc.ServiceRegistrar, srv AgentServiceServer) {
+	s.RegisterService(&AgentService_ServiceDesc, srv)
+}
+
+func _AgentService_CreateAgentProfile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateAgentProfileRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).CreateAgentProfile(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentService_CreateAgentProfile_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).CreateAgentProfile(ctx, req.(*CreateAgentProfileRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentService_ListAgentProfiles_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListAgentProfilesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).ListAgentProfiles(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentService_ListAgentProfiles_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).ListAgentProfiles(ctx, req.(*ListAgentProfilesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentService_GetAgentProfile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetAgentProfileRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).GetAgentProfile(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentService_GetAgentProfile_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).GetAgentProfile(ctx, req.(*GetAgentProfileRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentService_CreateAgentTaskEnvelope_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateAgentTaskEnvelopeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).CreateAgentTaskEnvelope(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentService_CreateAgentTaskEnvelope_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).CreateAgentTaskEnvelope(ctx, req.(*CreateAgentTaskEnvelopeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentService_GetAgentTaskEnvelope_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetAgentTaskEnvelopeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).GetAgentTaskEnvelope(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentService_GetAgentTaskEnvelope_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).GetAgentTaskEnvelope(ctx, req.(*GetAgentTaskEnvelopeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentService_EnqueueRunInput_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EnqueueRunInputRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).EnqueueRunInput(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentService_EnqueueRunInput_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).EnqueueRunInput(ctx, req.(*EnqueueRunInputRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentService_ListAgentRuns_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListAgentRunsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).ListAgentRuns(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentService_ListAgentRuns_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).ListAgentRuns(ctx, req.(*ListAgentRunsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentService_GetAgentRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetAgentRunRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).GetAgentRun(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentService_GetAgentRun_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).GetAgentRun(ctx, req.(*GetAgentRunRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentService_ListAgentRunAttempts_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListAgentRunAttemptsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).ListAgentRunAttempts(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentService_ListAgentRunAttempts_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).ListAgentRunAttempts(ctx, req.(*ListAgentRunAttemptsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentService_ListAgentRunSnapshots_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListAgentRunSnapshotsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).ListAgentRunSnapshots(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentService_ListAgentRunSnapshots_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).ListAgentRunSnapshots(ctx, req.(*ListAgentRunSnapshotsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentService_ListAgentRunEvents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListAgentRunEventsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).ListAgentRunEvents(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentService_ListAgentRunEvents_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).ListAgentRunEvents(ctx, req.(*ListAgentRunEventsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentService_CancelAgentRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CancelAgentRunRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).CancelAgentRun(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentService_CancelAgentRun_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).CancelAgentRun(ctx, req.(*CancelAgentRunRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// AgentService_ServiceDesc is the grpc.ServiceDesc for AgentService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var AgentService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "gateway.AgentService",
+	HandlerType: (*AgentServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "CreateAgentProfile",
+			Handler:    _AgentService_CreateAgentProfile_Handler,
+		},
+		{
+			MethodName: "ListAgentProfiles",
+			Handler:    _AgentService_ListAgentProfiles_Handler,
+		},
+		{
+			MethodName: "GetAgentProfile",
+			Handler:    _AgentService_GetAgentProfile_Handler,
+		},
+		{
+			MethodName: "CreateAgentTaskEnvelope",
+			Handler:    _AgentService_CreateAgentTaskEnvelope_Handler,
+		},
+		{
+			MethodName: "GetAgentTaskEnvelope",
+			Handler:    _AgentService_GetAgentTaskEnvelope_Handler,
+		},
+		{
+			MethodName: "EnqueueRunInput",
+			Handler:    _AgentService_EnqueueRunInput_Handler,
+		},
+		{
+			MethodName: "ListAgentRuns",
+			Handler:    _AgentService_ListAgentRuns_Handler,
+		},
+		{
+			MethodName: "GetAgentRun",
+			Handler:    _AgentService_GetAgentRun_Handler,
+		},
+		{
+			MethodName: "ListAgentRunAttempts",
+			Handler:    _AgentService_ListAgentRunAttempts_Handler,
+		},
+		{
+			MethodName: "ListAgentRunSnapshots",
+			Handler:    _AgentService_ListAgentRunSnapshots_Handler,
+		},
+		{
+			MethodName: "ListAgentRunEvents",
+			Handler:    _AgentService_ListAgentRunEvents_Handler,
+		},
+		{
+			MethodName: "CancelAgentRun",
+			Handler:    _AgentService_CancelAgentRun_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

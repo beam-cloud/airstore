@@ -143,6 +143,40 @@ const connections = await airstore.connections.list('ws_abc123');
 await airstore.connections.del('ws_abc123', 'conn_abc123');
 ```
 
+### Orchestration (Agents, Task Envelopes, Runs)
+
+The orchestration APIs are workspace-scoped and intentionally split into:
+
+- `agents`: persistent profile/config.
+- `tasks`: **intent envelopes** (accepted-first ingress, idempotent).
+- `runs`: execution lifecycle and attempt/snapshot introspection.
+
+```typescript
+// 1) Create an agent profile
+const agent = await airstore.agents.create('ws_abc123', {
+  agentKey: 'support-agent',
+  name: 'Support Agent',
+  config: { model: 'claude-sonnet-4' },
+});
+
+// 2) Submit a task envelope (intent), not a direct execution task
+const accepted = await airstore.tasks.create('ws_abc123', {
+  message: 'Summarize the latest support tickets',
+  sessionId: 'session-123',
+  agentId: agent.id,
+  idempotencyKey: 'idem-abc',
+  timeoutMs: 120_000,
+});
+
+// 3) Resolve and poll the run
+const runId = accepted.run_id ?? accepted.envelope.target_run_id;
+if (runId) {
+  const run = await airstore.runs.retrieve('ws_abc123', runId);
+  const attempts = await airstore.runs.listAttempts('ws_abc123', runId);
+  const snapshots = await airstore.runs.listSnapshots('ws_abc123', runId);
+}
+```
+
 ### Source Views
 
 Source views come in two modes: **smart** (LLM-inferred from natural language) and **query** (structured per-integration filters).

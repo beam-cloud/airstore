@@ -44,6 +44,21 @@ type Task struct {
 	// Resources specifies resource requirements (optional - uses defaults if nil)
 	Resources *TaskResources `json:"resources,omitempty" db:"-"`
 
+	// RunAttemptID links this execution task to an orchestrated run attempt.
+	RunAttemptID *string `json:"run_attempt_id,omitempty" db:"run_attempt_id"`
+
+	// TimeoutMs applies a per-task execution timeout when set.
+	TimeoutMs *int `json:"timeout_ms,omitempty" db:"timeout_ms"`
+
+	// Execution policy fields bridged from run attempts.
+	ExecHost        *string        `json:"exec_host,omitempty" db:"exec_host"`
+	ExecSecurity    *string        `json:"exec_security,omitempty" db:"exec_security"`
+	ExecAsk         *string        `json:"exec_ask,omitempty" db:"exec_ask"`
+	RuntimeType     *string        `json:"runtime_type,omitempty" db:"runtime_type"`
+	WorkspaceAccess *string        `json:"workspace_access,omitempty" db:"workspace_access"`
+	NetworkEnabled  *bool          `json:"network_enabled,omitempty" db:"network_enabled"`
+	ExecutionPolicy map[string]any `json:"execution_policy,omitempty" db:"-"`
+
 	// Hook-triggered task fields (nil/defaults for manual tasks)
 	HookId      *uint `json:"hook_id,omitempty" db:"hook_id"` // nil = manual, non-nil = hook-triggered
 	Attempt     int   `json:"attempt" db:"attempt"`           // 1-based attempt number

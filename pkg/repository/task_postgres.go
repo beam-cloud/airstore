@@ -21,9 +21,25 @@ func (b *PostgresBackend) CreateTask(ctx context.Context, task *types.Task) erro
 		return fmt.Errorf("failed to marshal env: %w", err)
 	}
 
+	if task.ExecutionPolicy == nil {
+		task.ExecutionPolicy = map[string]any{}
+	}
+	executionPolicyJSON, err := json.Marshal(task.ExecutionPolicy)
+	if err != nil {
+		return fmt.Errorf("failed to marshal execution policy: %w", err)
+	}
+
 	query := `
-		INSERT INTO task (workspace_id, created_by_member_id, status, type, prompt, image, entrypoint, env, hook_id, attempt, max_attempts)
-		VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6, $7, $8, $9, $10, $11)
+		INSERT INTO task (
+			workspace_id, created_by_member_id, status, type, prompt, image, entrypoint, env,
+			hook_id, attempt, max_attempts, run_attempt_id, timeout_ms, exec_host, exec_security,
+			exec_ask, runtime_type, workspace_access, network_enabled, execution_policy_json
+		)
+		VALUES (
+			$1, $2, $3, $4, NULLIF($5, ''), $6, $7, $8,
+			$9, $10, $11, $12, $13, $14, $15,
+			$16, $17, $18, $19, $20
+		)
 		RETURNING id, external_id, created_at
 	`
 
@@ -56,6 +72,15 @@ func (b *PostgresBackend) CreateTask(ctx context.Context, task *types.Task) erro
 		task.HookId,
 		task.Attempt,
 		task.MaxAttempts,
+		task.RunAttemptID,
+		task.TimeoutMs,
+		task.ExecHost,
+		task.ExecSecurity,
+		task.ExecAsk,
+		task.RuntimeType,
+		task.WorkspaceAccess,
+		task.NetworkEnabled,
+		executionPolicyJSON,
 	).Scan(&task.Id, &task.ExternalId, &task.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("failed to create task: %w", err)
@@ -69,7 +94,8 @@ func (b *PostgresBackend) GetTask(ctx context.Context, externalId string) (*type
 	query := `
 		SELECT id, external_id, workspace_id, created_by_member_id, status, type, prompt, image, entrypoint, env, 
 		       exit_code, error, created_at, started_at, finished_at,
-		       hook_id, attempt, max_attempts
+		       hook_id, attempt, max_attempts,
+		       run_attempt_id, timeout_ms, exec_host, exec_security, exec_ask, runtime_type, workspace_access, network_enabled, execution_policy_json
 		FROM task
 		WHERE external_id = $1
 	`
@@ -82,7 +108,8 @@ func (b *PostgresBackend) GetTaskById(ctx context.Context, id uint) (*types.Task
 	query := `
 		SELECT id, external_id, workspace_id, created_by_member_id, status, type, prompt, image, entrypoint, env, 
 		       exit_code, error, created_at, started_at, finished_at,
-		       hook_id, attempt, max_attempts
+		       hook_id, attempt, max_attempts,
+		       run_attempt_id, timeout_ms, exec_host, exec_security, exec_ask, runtime_type, workspace_access, network_enabled, execution_policy_json
 		FROM task
 		WHERE id = $1
 	`
@@ -102,6 +129,15 @@ func (b *PostgresBackend) scanTask(row *sql.Row) (*types.Task, error) {
 	var errorMsg sql.NullString
 	var startedAt, finishedAt sql.NullTime
 	var hookId sql.NullInt64
+	var runAttemptID sql.NullString
+	var timeoutMs sql.NullInt32
+	var execHost sql.NullString
+	var execSecurity sql.NullString
+	var execAsk sql.NullString
+	var runtimeType sql.NullString
+	var workspaceAccess sql.NullString
+	var networkEnabled sql.NullBool
+	var executionPolicyJSON []byte
 
 	err := row.Scan(
 		&task.Id,
@@ -122,6 +158,15 @@ func (b *PostgresBackend) scanTask(row *sql.Row) (*types.Task, error) {
 		&hookId,
 		&task.Attempt,
 		&task.MaxAttempts,
+		&runAttemptID,
+		&timeoutMs,
+		&execHost,
+		&execSecurity,
+		&execAsk,
+		&runtimeType,
+		&workspaceAccess,
+		&networkEnabled,
+		&executionPolicyJSON,
 	)
 	if err == sql.ErrNoRows {
 		return nil, &types.ErrTaskNotFound{}
@@ -162,6 +207,38 @@ func (b *PostgresBackend) scanTask(row *sql.Row) (*types.Task, error) {
 	if finishedAt.Valid {
 		task.FinishedAt = &finishedAt.Time
 	}
+	if runAttemptID.Valid {
+		task.RunAttemptID = &runAttemptID.String
+	}
+	if timeoutMs.Valid {
+		v := int(timeoutMs.Int32)
+		task.TimeoutMs = &v
+	}
+	if execHost.Valid {
+		task.ExecHost = &execHost.String
+	}
+	if execSecurity.Valid {
+		task.ExecSecurity = &execSecurity.String
+	}
+	if execAsk.Valid {
+		task.ExecAsk = &execAsk.String
+	}
+	if runtimeType.Valid {
+		task.RuntimeType = &runtimeType.String
+	}
+	if workspaceAccess.Valid {
+		task.WorkspaceAccess = &workspaceAccess.String
+	}
+	if networkEnabled.Valid {
+		v := networkEnabled.Bool
+		task.NetworkEnabled = &v
+	}
+	if len(executionPolicyJSON) > 0 {
+		_ = json.Unmarshal(executionPolicyJSON, &task.ExecutionPolicy)
+		if task.ExecutionPolicy == nil {
+			task.ExecutionPolicy = map[string]any{}
+		}
+	}
 
 	return task, nil
 }
@@ -172,7 +249,8 @@ func (b *PostgresBackend) ListTasks(ctx context.Context, workspaceId uint) ([]*t
 	query := `
 		SELECT id, external_id, workspace_id, created_by_member_id, status, type, prompt, image, entrypoint, env, 
 		       exit_code, error, created_at, started_at, finished_at,
-		       hook_id, attempt, max_attempts
+		       hook_id, attempt, max_attempts,
+		       run_attempt_id, timeout_ms, exec_host, exec_security, exec_ask, runtime_type, workspace_access, network_enabled, execution_policy_json
 		FROM task
 		WHERE ($1 = 0 OR workspace_id = $1)
 		ORDER BY created_at DESC
@@ -197,6 +275,15 @@ func (b *PostgresBackend) ListTasks(ctx context.Context, workspaceId uint) ([]*t
 		var errorMsg sql.NullString
 		var startedAt, finishedAt sql.NullTime
 		var hookId sql.NullInt64
+		var runAttemptID sql.NullString
+		var timeoutMs sql.NullInt32
+		var execHost sql.NullString
+		var execSecurity sql.NullString
+		var execAsk sql.NullString
+		var runtimeType sql.NullString
+		var workspaceAccess sql.NullString
+		var networkEnabled sql.NullBool
+		var executionPolicyJSON []byte
 
 		if err := rows.Scan(
 			&task.Id,
@@ -217,6 +304,15 @@ func (b *PostgresBackend) ListTasks(ctx context.Context, workspaceId uint) ([]*t
 			&hookId,
 			&task.Attempt,
 			&task.MaxAttempts,
+			&runAttemptID,
+			&timeoutMs,
+			&execHost,
+			&execSecurity,
+			&execAsk,
+			&runtimeType,
+			&workspaceAccess,
+			&networkEnabled,
+			&executionPolicyJSON,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan task: %w", err)
 		}
@@ -252,6 +348,38 @@ func (b *PostgresBackend) ListTasks(ctx context.Context, workspaceId uint) ([]*t
 		}
 		if finishedAt.Valid {
 			task.FinishedAt = &finishedAt.Time
+		}
+		if runAttemptID.Valid {
+			task.RunAttemptID = &runAttemptID.String
+		}
+		if timeoutMs.Valid {
+			v := int(timeoutMs.Int32)
+			task.TimeoutMs = &v
+		}
+		if execHost.Valid {
+			task.ExecHost = &execHost.String
+		}
+		if execSecurity.Valid {
+			task.ExecSecurity = &execSecurity.String
+		}
+		if execAsk.Valid {
+			task.ExecAsk = &execAsk.String
+		}
+		if runtimeType.Valid {
+			task.RuntimeType = &runtimeType.String
+		}
+		if workspaceAccess.Valid {
+			task.WorkspaceAccess = &workspaceAccess.String
+		}
+		if networkEnabled.Valid {
+			v := networkEnabled.Bool
+			task.NetworkEnabled = &v
+		}
+		if len(executionPolicyJSON) > 0 {
+			_ = json.Unmarshal(executionPolicyJSON, &task.ExecutionPolicy)
+			if task.ExecutionPolicy == nil {
+				task.ExecutionPolicy = map[string]any{}
+			}
 		}
 
 		tasks = append(tasks, task)
@@ -419,7 +547,8 @@ func (b *PostgresBackend) GetRetryableTasks(ctx context.Context) ([]*types.Task,
 	query := `
 		SELECT id, external_id, workspace_id, created_by_member_id, status, type, prompt, image, entrypoint, env,
 		       exit_code, error, created_at, started_at, finished_at,
-		       hook_id, attempt, max_attempts
+		       hook_id, attempt, max_attempts,
+		       run_attempt_id, timeout_ms, exec_host, exec_security, exec_ask, runtime_type, workspace_access, network_enabled, execution_policy_json
 		FROM task
 		WHERE hook_id IS NOT NULL
 		  AND status = 'failed'
@@ -446,12 +575,22 @@ func (b *PostgresBackend) GetRetryableTasks(ctx context.Context) ([]*types.Task,
 		var errorMsg sql.NullString
 		var startedAt, finishedAt sql.NullTime
 		var hookId sql.NullInt64
+		var runAttemptID sql.NullString
+		var timeoutMs sql.NullInt32
+		var execHost sql.NullString
+		var execSecurity sql.NullString
+		var execAsk sql.NullString
+		var runtimeType sql.NullString
+		var workspaceAccess sql.NullString
+		var networkEnabled sql.NullBool
+		var executionPolicyJSON []byte
 
 		if err := rows.Scan(
 			&task.Id, &task.ExternalId, &task.WorkspaceId, &createdByMemberId,
 			&task.Status, &taskType, &prompt, &task.Image, &entrypoint, &envJSON,
 			&exitCode, &errorMsg, &task.CreatedAt, &startedAt, &finishedAt,
 			&hookId, &task.Attempt, &task.MaxAttempts,
+			&runAttemptID, &timeoutMs, &execHost, &execSecurity, &execAsk, &runtimeType, &workspaceAccess, &networkEnabled, &executionPolicyJSON,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan retryable task: %w", err)
 		}
@@ -489,6 +628,38 @@ func (b *PostgresBackend) GetRetryableTasks(ctx context.Context) ([]*types.Task,
 		if finishedAt.Valid {
 			task.FinishedAt = &finishedAt.Time
 		}
+		if runAttemptID.Valid {
+			task.RunAttemptID = &runAttemptID.String
+		}
+		if timeoutMs.Valid {
+			v := int(timeoutMs.Int32)
+			task.TimeoutMs = &v
+		}
+		if execHost.Valid {
+			task.ExecHost = &execHost.String
+		}
+		if execSecurity.Valid {
+			task.ExecSecurity = &execSecurity.String
+		}
+		if execAsk.Valid {
+			task.ExecAsk = &execAsk.String
+		}
+		if runtimeType.Valid {
+			task.RuntimeType = &runtimeType.String
+		}
+		if workspaceAccess.Valid {
+			task.WorkspaceAccess = &workspaceAccess.String
+		}
+		if networkEnabled.Valid {
+			v := networkEnabled.Bool
+			task.NetworkEnabled = &v
+		}
+		if len(executionPolicyJSON) > 0 {
+			_ = json.Unmarshal(executionPolicyJSON, &task.ExecutionPolicy)
+			if task.ExecutionPolicy == nil {
+				task.ExecutionPolicy = map[string]any{}
+			}
+		}
 
 		tasks = append(tasks, task)
 	}
@@ -501,7 +672,8 @@ func (b *PostgresBackend) GetStuckHookTasks(ctx context.Context, timeout time.Du
 	query := `
 		SELECT id, external_id, workspace_id, created_by_member_id, status, type, prompt, image, entrypoint, env,
 		       exit_code, error, created_at, started_at, finished_at,
-		       hook_id, attempt, max_attempts
+		       hook_id, attempt, max_attempts,
+		       run_attempt_id, timeout_ms, exec_host, exec_security, exec_ask, runtime_type, workspace_access, network_enabled, execution_policy_json
 		FROM task
 		WHERE hook_id IS NOT NULL
 		  AND status IN ('pending', 'running', 'scheduled')
@@ -516,7 +688,8 @@ func (b *PostgresBackend) ListTasksByHook(ctx context.Context, hookId uint) ([]*
 	query := `
 		SELECT id, external_id, workspace_id, created_by_member_id, status, type, prompt, image, entrypoint, env,
 		       exit_code, error, created_at, started_at, finished_at,
-		       hook_id, attempt, max_attempts
+		       hook_id, attempt, max_attempts,
+		       run_attempt_id, timeout_ms, exec_host, exec_security, exec_ask, runtime_type, workspace_access, network_enabled, execution_policy_json
 		FROM task
 		WHERE hook_id = $1
 		ORDER BY created_at DESC
@@ -545,12 +718,22 @@ func (b *PostgresBackend) scanTaskRows(ctx context.Context, query string, args .
 		var errorMsg sql.NullString
 		var startedAt, finishedAt sql.NullTime
 		var hookId sql.NullInt64
+		var runAttemptID sql.NullString
+		var timeoutMs sql.NullInt32
+		var execHost sql.NullString
+		var execSecurity sql.NullString
+		var execAsk sql.NullString
+		var runtimeType sql.NullString
+		var workspaceAccess sql.NullString
+		var networkEnabled sql.NullBool
+		var executionPolicyJSON []byte
 
 		if err := rows.Scan(
 			&task.Id, &task.ExternalId, &task.WorkspaceId, &createdByMemberId,
 			&task.Status, &taskType, &prompt, &task.Image, &entrypoint, &envJSON,
 			&exitCode, &errorMsg, &task.CreatedAt, &startedAt, &finishedAt,
 			&hookId, &task.Attempt, &task.MaxAttempts,
+			&runAttemptID, &timeoutMs, &execHost, &execSecurity, &execAsk, &runtimeType, &workspaceAccess, &networkEnabled, &executionPolicyJSON,
 		); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
@@ -587,6 +770,38 @@ func (b *PostgresBackend) scanTaskRows(ctx context.Context, query string, args .
 		}
 		if finishedAt.Valid {
 			task.FinishedAt = &finishedAt.Time
+		}
+		if runAttemptID.Valid {
+			task.RunAttemptID = &runAttemptID.String
+		}
+		if timeoutMs.Valid {
+			v := int(timeoutMs.Int32)
+			task.TimeoutMs = &v
+		}
+		if execHost.Valid {
+			task.ExecHost = &execHost.String
+		}
+		if execSecurity.Valid {
+			task.ExecSecurity = &execSecurity.String
+		}
+		if execAsk.Valid {
+			task.ExecAsk = &execAsk.String
+		}
+		if runtimeType.Valid {
+			task.RuntimeType = &runtimeType.String
+		}
+		if workspaceAccess.Valid {
+			task.WorkspaceAccess = &workspaceAccess.String
+		}
+		if networkEnabled.Valid {
+			v := networkEnabled.Bool
+			task.NetworkEnabled = &v
+		}
+		if len(executionPolicyJSON) > 0 {
+			_ = json.Unmarshal(executionPolicyJSON, &task.ExecutionPolicy)
+			if task.ExecutionPolicy == nil {
+				task.ExecutionPolicy = map[string]any{}
+			}
 		}
 		tasks = append(tasks, task)
 	}

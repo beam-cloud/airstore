@@ -163,6 +163,46 @@ type BackendRepository interface {
 	GetStuckHookTasks(ctx context.Context, timeout time.Duration) ([]*types.Task, error)
 	ListTasksByHook(ctx context.Context, hookId uint) ([]*types.Task, error)
 
+	// Agent orchestration: profiles
+	CreateAgentProfile(ctx context.Context, profile *types.AgentProfile) error
+	GetAgentProfile(ctx context.Context, workspaceId uint, agentId string) (*types.AgentProfile, error)
+	GetAgentProfileByKey(ctx context.Context, workspaceId uint, agentKey string) (*types.AgentProfile, error)
+	ListAgentProfiles(ctx context.Context, workspaceId uint) ([]*types.AgentProfile, error)
+	UpdateAgentProfile(ctx context.Context, profile *types.AgentProfile) error
+
+	// Agent orchestration: envelopes
+	CreateAgentTaskEnvelope(ctx context.Context, envelope *types.AgentTaskEnvelope) error
+	GetAgentTaskEnvelopeByID(ctx context.Context, envelopeId string) (*types.AgentTaskEnvelope, error)
+	GetAgentTaskEnvelope(ctx context.Context, workspaceId uint, envelopeId string) (*types.AgentTaskEnvelope, error)
+	GetAgentTaskEnvelopeByIdempotency(ctx context.Context, workspaceId uint, agentId *string, idempotencyKey string) (*types.AgentTaskEnvelope, error)
+	UpdateAgentTaskEnvelopeState(ctx context.Context, envelopeId string, state types.AgentEnvelopeState, droppedReason *string, targetRunID *string) error
+
+	// Agent orchestration: runs
+	CreateAgentRun(ctx context.Context, run *types.AgentRun) error
+	GetAgentRunByID(ctx context.Context, runId string) (*types.AgentRun, error)
+	GetAgentRun(ctx context.Context, workspaceId uint, runId string) (*types.AgentRun, error)
+	ListAgentRuns(ctx context.Context, workspaceId uint, limit int) ([]*types.AgentRun, error)
+	UpdateAgentRunLifecycle(ctx context.Context, runId string, status types.AgentRunStatus, startedAt, endedAt *time.Time, errorMsg *string) error
+	IncrementAgentRunSnapshotSeq(ctx context.Context, runId string) (int64, error)
+
+	// Agent orchestration: attempts
+	CreateAgentRunAttempt(ctx context.Context, attempt *types.AgentRunAttempt) error
+	GetAgentRunAttempt(ctx context.Context, attemptId string) (*types.AgentRunAttempt, error)
+	ListAgentRunAttempts(ctx context.Context, runId string) ([]*types.AgentRunAttempt, error)
+	GetRunAttemptByExecutionTaskExternalID(ctx context.Context, taskExternalId string) (*types.AgentRunAttempt, error)
+	UpdateAgentRunAttemptStart(ctx context.Context, attemptId string, startedAt time.Time) error
+	UpdateAgentRunAttemptResult(ctx context.Context, attemptId string, status types.AgentAttemptStatus, exitCode *int, endedAt time.Time, errorMsg *string) error
+	BindAttemptExecutionTask(ctx context.Context, attemptId, taskExternalID string) error
+
+	// Agent orchestration: run snapshots
+	AppendAgentRunSnapshot(ctx context.Context, snap *types.AgentRunSnapshot) error
+	ListAgentRunSnapshots(ctx context.Context, runId string, limit int) ([]*types.AgentRunSnapshot, error)
+
+	// Agent orchestration: execution instances
+	GetOrCreateExecutionInstance(ctx context.Context, inst *types.AgentExecutionInstance) (*types.AgentExecutionInstance, error)
+	GetExecutionInstanceByKey(ctx context.Context, instanceKey string) (*types.AgentExecutionInstance, error)
+	UpdateExecutionInstanceState(ctx context.Context, instanceKey string, running, pending, stopping, desired int, status types.AgentExecutionInstanceStatus, lastEventAt *time.Time) error
+
 	// Database access
 	DB() *sql.DB
 

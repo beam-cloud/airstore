@@ -64,6 +64,14 @@ type TaskStatusEntry struct {
 	Error     string `json:"error,omitempty"`
 }
 
+// RunEventEntry represents a lifecycle event emitted by the orchestration engine.
+type RunEventEntry struct {
+	RunID     string         `json:"run_id"`
+	EventType string         `json:"event_type"`
+	Timestamp int64          `json:"timestamp"`
+	Payload   map[string]any `json:"payload,omitempty"`
+}
+
 // StreamNames provides consistent stream naming
 type StreamNames struct{}
 
@@ -75,6 +83,11 @@ func (StreamNames) TaskLogs(taskID string) string {
 // TaskStatus returns the stream name for a task's status events
 func (StreamNames) TaskStatus(taskID string) string {
 	return fmt.Sprintf("task.%s.status", taskID)
+}
+
+// RunEvents returns the stream name for orchestration run events.
+func (StreamNames) RunEvents(runID string) string {
+	return fmt.Sprintf("run.%s.events", runID)
 }
 
 // Streams provides access to stream names
@@ -153,6 +166,17 @@ func (c *S2Client) AppendStatus(ctx context.Context, taskID, status string, exit
 		Error:     errorMsg,
 	}
 	return c.Append(ctx, Streams.TaskStatus(taskID), entry)
+}
+
+// AppendRunEvent appends a run event entry to the run event stream.
+func (c *S2Client) AppendRunEvent(ctx context.Context, runID, eventType string, payload map[string]any) error {
+	entry := RunEventEntry{
+		RunID:     runID,
+		EventType: eventType,
+		Timestamp: time.Now().UnixMilli(),
+		Payload:   payload,
+	}
+	return c.Append(ctx, Streams.RunEvents(runID), entry)
 }
 
 // ReadRecord represents a record read from S2
