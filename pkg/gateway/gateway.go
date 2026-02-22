@@ -554,18 +554,16 @@ func (g *Gateway) registerServices() error {
 		apiv1.NewTasksGroup(g.baseRouteGroup.Group("/tasks"), g.BackendRepo, taskQueue, terminalIO, g.s2Client, g.Config.Sandbox.GetDefaultImage())
 
 		// Agent orchestration engine and gRPC service.
-		runEventStore := repository.NewAgentRunEventStore(g.RedisClient)
 		orchestratorSvc := orchestration.NewAgentService(
 			g.ctx,
 			g.BackendRepo,
 			taskQueue,
 			g.RedisClient,
-			runEventStore,
 			g.s2Client,
 			g.Config.Sandbox.GetDefaultImage(),
 		)
 		orchestratorSvc.Start(g.ctx)
-		agentAPI := orchestration.NewAgentAPI(g.BackendRepo, runEventStore, orchestratorSvc)
+		agentAPI := orchestration.NewAgentAPI(g.BackendRepo, orchestratorSvc)
 		agentService := services.NewAgentService(g.BackendRepo, agentAPI)
 		pb.RegisterAgentServiceServer(g.grpcServer, agentService)
 		log.Info().Msg("agent service registered")

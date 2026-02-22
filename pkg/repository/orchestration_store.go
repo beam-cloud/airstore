@@ -11,37 +11,35 @@ import (
 
 const redisNilError = "redis: nil"
 
-// AgentRunEventStore persists and reads run events for orchestration.
-type AgentRunEventStore interface {
-	PublishRunEvent(ctx context.Context, runID string, body []byte) error
-	ListRunEvents(ctx context.Context, runID string) ([]string, error)
-}
-
-// AgentEnvelopeQueueStore backs envelope queueing and queue-mode reshaping state.
-type AgentEnvelopeQueueStore struct {
+// OrchestrationStore centralizes Redis-backed orchestration primitives:
+// queue tokens, mode reshaping state, instance locks, and run events.
+type OrchestrationStore struct {
 	backend BackendRepository
 	redis   *common.RedisClient
 }
 
-func NewAgentEnvelopeQueueStore(backend BackendRepository, redis *common.RedisClient) *AgentEnvelopeQueueStore {
-	return &AgentEnvelopeQueueStore{
+func NewOrchestrationStore(backend BackendRepository, redis *common.RedisClient) *OrchestrationStore {
+	return &OrchestrationStore{
 		backend: backend,
 		redis:   redis,
 	}
 }
 
-func (s *AgentEnvelopeQueueStore) UpdateEnvelopeState(ctx context.Context, envelopeID string, state types.AgentEnvelopeState, dropReason *string, targetRunID *string) error {
+func (s *OrchestrationStore) UpdateEnvelopeState(ctx context.Context, envelopeID string, state types.AgentEnvelopeState, dropReason *string, targetRunID *string) error {
+	if s == nil || s.backend == nil {
+		return fmt.Errorf("backend is required for envelope state updates")
+	}
 	return s.backend.UpdateAgentTaskEnvelopeState(ctx, envelopeID, state, dropReason, targetRunID)
 }
 
-func (s *AgentEnvelopeQueueStore) PushQueueToken(ctx context.Context, token string) error {
+func (s *OrchestrationStore) PushQueueToken(ctx context.Context, token string) error {
 	if s.redis == nil {
 		return fmt.Errorf("redis is required for orchestration queue")
 	}
 	return s.redis.LPush(ctx, common.Keys.AgentEnvelopeQueue(), token).Err()
 }
 
-func (s *AgentEnvelopeQueueStore) PopQueueToken(ctx context.Context, timeout time.Duration) (string, error) {
+func (s *OrchestrationStore) PopQueueToken(ctx context.Context, timeout time.Duration) (string, error) {
 	if s.redis == nil {
 		return "", fmt.Errorf("redis is required for orchestration queue")
 	}
@@ -58,7 +56,7 @@ func (s *AgentEnvelopeQueueStore) PopQueueToken(ctx context.Context, timeout tim
 	return result[1], nil
 }
 
-func (s *AgentEnvelopeQueueStore) GetModeEnvelopeID(ctx context.Context, modeKey string) (string, error) {
+func (s *OrchestrationStore) GetModeEnvelopeID(ctx context.Context, modeKey string) (string, error) {
 	if s.redis == nil {
 		return "", fmt.Errorf("redis is required for orchestration queue")
 	}
@@ -72,14 +70,14 @@ func (s *AgentEnvelopeQueueStore) GetModeEnvelopeID(ctx context.Context, modeKey
 	return id, nil
 }
 
-func (s *AgentEnvelopeQueueStore) SetModeEnvelopeID(ctx context.Context, modeKey string, envelopeID string, ttl time.Duration) error {
+func (s *OrchestrationStore) SetModeEnvelopeID(ctx context.Context, modeKey string, envelopeID string, ttl time.Duration) error {
 	if s.redis == nil {
 		return fmt.Errorf("redis is required for orchestration queue")
 	}
 	return s.redis.Set(ctx, common.Keys.AgentEnvelopeModeState(modeKey), envelopeID, ttl).Err()
 }
 
-func (s *AgentEnvelopeQueueStore) AddModeKey(ctx context.Context, modeKey string) (bool, error) {
+func (s *OrchestrationStore) AddModeKey(ctx context.Context, modeKey string) (bool, error) {
 	if s.redis == nil {
 		return false, fmt.Errorf("redis is required for orchestration queue")
 	}
@@ -87,7 +85,7 @@ func (s *AgentEnvelopeQueueStore) AddModeKey(ctx context.Context, modeKey string
 	return added > 0, err
 }
 
-func (s *AgentEnvelopeQueueStore) RemoveModeKey(ctx context.Context, modeKey string) error {
+func (s *OrchestrationStore) RemoveModeKey(ctx context.Context, modeKey string) error {
 	if s.redis == nil {
 		return fmt.Errorf("redis is required for orchestration queue")
 	}
@@ -95,7 +93,7 @@ func (s *AgentEnvelopeQueueStore) RemoveModeKey(ctx context.Context, modeKey str
 	return err
 }
 
-func (s *AgentEnvelopeQueueStore) GetDelModeEnvelopeID(ctx context.Context, modeKey string) (string, error) {
+func (s *OrchestrationStore) GetDelModeEnvelopeID(ctx context.Context, modeKey string) (string, error) {
 	if s.redis == nil {
 		return "", fmt.Errorf("redis is required for orchestration queue")
 	}
@@ -109,23 +107,14 @@ func (s *AgentEnvelopeQueueStore) GetDelModeEnvelopeID(ctx context.Context, mode
 	return envelopeID, nil
 }
 
-// AgentInstanceDispatchLocker provides best-effort distributed locking per instance key.
-type AgentInstanceDispatchLocker struct {
-	redis *common.RedisClient
-}
-
-func NewAgentInstanceDispatchLocker(redis *common.RedisClient) *AgentInstanceDispatchLocker {
-	return &AgentInstanceDispatchLocker{redis: redis}
-}
-
-func (l *AgentInstanceDispatchLocker) WithInstanceLock(ctx context.Context, lockKey string, fn func() error) error {
+func (s *OrchestrationStore) WithInstanceLock(ctx context.Context, lockKey string, fn func() error) error {
 	if fn == nil {
 		return fmt.Errorf("lock function is required")
 	}
-	if l == nil || l.redis == nil {
+	if s == nil || s.redis == nil {
 		return fn()
 	}
-	lock := common.NewRedisLock(l.redis)
+	lock := common.NewRedisLock(s.redis)
 	if err := lock.Acquire(ctx, lockKey, common.RedisLockOptions{TtlS: 5, Retries: 1}); err != nil {
 		return fmt.Errorf("acquire instance lock: %w", err)
 	}
@@ -135,19 +124,7 @@ func (l *AgentInstanceDispatchLocker) WithInstanceLock(ctx context.Context, lock
 	return fn()
 }
 
-// RedisAgentRunEventStore is the Redis-backed run-event store implementation.
-type RedisAgentRunEventStore struct {
-	redis *common.RedisClient
-}
-
-func NewAgentRunEventStore(redis *common.RedisClient) AgentRunEventStore {
-	if redis == nil {
-		return nil
-	}
-	return &RedisAgentRunEventStore{redis: redis}
-}
-
-func (s *RedisAgentRunEventStore) PublishRunEvent(ctx context.Context, runID string, body []byte) error {
+func (s *OrchestrationStore) PublishRunEvent(ctx context.Context, runID string, body []byte) error {
 	if s == nil || s.redis == nil {
 		return nil
 	}
@@ -159,7 +136,7 @@ func (s *RedisAgentRunEventStore) PublishRunEvent(ctx context.Context, runID str
 	return err
 }
 
-func (s *RedisAgentRunEventStore) ListRunEvents(ctx context.Context, runID string) ([]string, error) {
+func (s *OrchestrationStore) ListRunEvents(ctx context.Context, runID string) ([]string, error) {
 	if s == nil || s.redis == nil {
 		return []string{}, nil
 	}

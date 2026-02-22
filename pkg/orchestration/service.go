@@ -16,7 +16,7 @@ import (
 type AgentService struct {
 	backend            repository.BackendRepository
 	taskQueue          repository.TaskQueue
-	runEvents          repository.AgentRunEventStore
+	orchestrationStore *repository.OrchestrationStore
 	s2                 *common.S2Client
 	defaultImage       string
 	queueRouter        *EnvelopeQueueRouter
@@ -28,23 +28,18 @@ func NewAgentService(
 	backend repository.BackendRepository,
 	taskQueue repository.TaskQueue,
 	redis *common.RedisClient,
-	runEvents repository.AgentRunEventStore,
 	s2 *common.S2Client,
 	defaultImage string,
 ) *AgentService {
-	queueStore := repository.NewAgentEnvelopeQueueStore(backend, redis)
-	instanceLocker := repository.NewAgentInstanceDispatchLocker(redis)
-	if runEvents == nil {
-		runEvents = repository.NewAgentRunEventStore(redis)
-	}
+	orchestrationStore := repository.NewOrchestrationStore(backend, redis)
 	return &AgentService{
 		backend:            backend,
 		taskQueue:          taskQueue,
-		runEvents:          runEvents,
+		orchestrationStore: orchestrationStore,
 		s2:                 s2,
 		defaultImage:       defaultImage,
-		queueRouter:        NewEnvelopeQueueRouter(queueStore),
-		instanceController: NewExecutionInstanceController(ctx, backend, instanceLocker, common.Keys.AgentInstanceLock),
+		queueRouter:        NewEnvelopeQueueRouter(orchestrationStore),
+		instanceController: NewExecutionInstanceController(ctx, backend, orchestrationStore, common.Keys.AgentInstanceLock),
 	}
 }
 
@@ -524,9 +519,9 @@ func (s *AgentService) publishRunEvent(ctx context.Context, runID, eventType str
 			log.Warn().Err(err).Str("run_id", runID).Msg("failed to append run event to s2")
 		}
 	}
-	if s.runEvents != nil {
+	if s.orchestrationStore != nil {
 		body, _ := json.Marshal(event)
-		return s.runEvents.PublishRunEvent(ctx, runID, body)
+		return s.orchestrationStore.PublishRunEvent(ctx, runID, body)
 	}
 	return nil
 }

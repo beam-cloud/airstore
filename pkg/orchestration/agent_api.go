@@ -14,20 +14,17 @@ import (
 // AgentAPI is the shared application layer for agent/task-envelope/run flows.
 // Transport layers (gRPC/HTTP) should call this directly.
 type AgentAPI struct {
-	backend   repository.BackendRepository
-	runEvents repository.AgentRunEventStore
-	runtime   *AgentService
+	backend repository.BackendRepository
+	runtime *AgentService
 }
 
 func NewAgentAPI(
 	backend repository.BackendRepository,
-	runEvents repository.AgentRunEventStore,
 	runtime *AgentService,
 ) *AgentAPI {
 	return &AgentAPI{
-		backend:   backend,
-		runEvents: runEvents,
-		runtime:   runtime,
+		backend: backend,
+		runtime: runtime,
 	}
 }
 
@@ -160,10 +157,10 @@ func (a *AgentAPI) ListRunEvents(ctx context.Context, workspaceID uint, runID st
 	if _, err := a.GetRun(ctx, workspaceID, runID); err != nil {
 		return nil, err
 	}
-	if a.runEvents == nil {
+	if a.runtime == nil || a.runtime.orchestrationStore == nil {
 		return []map[string]any{}, nil
 	}
-	rows, err := a.runEvents.ListRunEvents(ctx, runID)
+	rows, err := a.runtime.orchestrationStore.ListRunEvents(ctx, runID)
 	if err != nil {
 		return nil, err
 	}

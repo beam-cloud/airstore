@@ -37,7 +37,7 @@ func TestValidateRunInputQueueModeUnsupported(t *testing.T) {
 }
 
 func TestEnqueueRunInputEnvelopeRejectsUnsupportedQueueModes(t *testing.T) {
-	api := NewAgentAPI(nil, nil, &AgentService{})
+	api := NewAgentAPI(nil, &AgentService{})
 
 	_, _, err := api.EnqueueRunInputEnvelope(
 		context.Background(),
