@@ -16,6 +16,17 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+const (
+	defaultMountReadyTimeout = 5 * time.Second
+	mountReadyPollInterval   = 100 * time.Millisecond
+	mountDirPerm             = 0o755
+	mountSubcommand          = "mount"
+	fusermountBinary         = "fusermount"
+	fusermountUnmountFlag    = "-u"
+	termWaitTimeout          = 5 * time.Second
+	killWaitTimeout          = 2 * time.Second
+)
+
 // MountConfig configures the mount manager
 type MountConfig struct {
 	// MountDir is the base directory for per-task mounts
@@ -34,9 +45,9 @@ type MountConfig struct {
 // DefaultMountConfig returns sensible defaults
 func DefaultMountConfig() MountConfig {
 	return MountConfig{
-		MountDir:          "/tmp/airstore-mounts",
-		CLIBinary:         "/usr/local/bin/cli",
-		MountReadyTimeout: 5 * time.Second,
+		MountDir:          types.DefaultMountDir,
+		CLIBinary:         types.DefaultCLIBinary,
+		MountReadyTimeout: defaultMountReadyTimeout,
 	}
 }
 
@@ -49,11 +60,8 @@ type MountManager struct {
 
 // taskMount represents an active FUSE mount for a task
 type taskMount struct {
-	taskID    string
-	token     string
 	mountPath string
 	cmd       *exec.Cmd
-	ctx       context.Context
 	cancel    context.CancelFunc
 	ready     bool
 	exited    chan error
@@ -119,7 +127,7 @@ func checkFilesystemMountReady(mountPath string) (bool, []string, error) {
 // NewMountManager creates a new mount manager
 func NewMountManager(config MountConfig) (*MountManager, error) {
 	// Ensure mount directory exists
-	if err := os.MkdirAll(config.MountDir, 0755); err != nil {
+	if err := os.MkdirAll(config.MountDir, mountDirPerm); err != nil {
 		return nil, fmt.Errorf("failed to create mount directory %s: %w", config.MountDir, err)
 	}
 
@@ -134,35 +142,60 @@ func NewMountManager(config MountConfig) (*MountManager, error) {
 	}, nil
 }
 
+func (m *MountManager) getOrCreateMount(taskID string) (*taskMount, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if mount, exists := m.mounts[taskID]; exists {
+		return mount, false
+	}
+
+	mount := &taskMount{
+		mountPath: filepath.Join(m.config.MountDir, taskID),
+		exited:    make(chan error, 1),
+	}
+	m.mounts[taskID] = mount
+	return mount, true
+}
+
+func (m *MountManager) markMountReady(mount *taskMount) {
+	m.mu.Lock()
+	mount.ready = true
+	m.mu.Unlock()
+}
+
 // Mount creates a FUSE mount for a task using the given token
 // Returns the mount path that can be bind-mounted into containers
 func (m *MountManager) Mount(ctx context.Context, taskID, token string) (string, error) {
-	m.mu.Lock()
-	if mount, exists := m.mounts[taskID]; exists {
+	mount, created := m.getOrCreateMount(taskID)
+	if !created {
 		if mount.ready {
-			mountPath := mount.mountPath
-			m.mu.Unlock()
-			return mountPath, nil
+			return mount.mountPath, nil
 		}
-		mountPath := mount.mountPath
-		exited := mount.exited
-		m.mu.Unlock()
 
 		select {
-		case err, ok := <-exited:
+		case err, ok := <-mount.exited:
 			if ok && err != nil {
 				return "", fmt.Errorf("mount process for task %s exited during initialization: %w", taskID, err)
 			}
 			return "", fmt.Errorf("mount process for task %s exited before becoming ready", taskID)
 		default:
-			return "", fmt.Errorf("mount for task %s is still initializing at %s", taskID, mountPath)
+			return "", fmt.Errorf("mount for task %s is still initializing at %s", taskID, mount.mountPath)
 		}
 	}
-	m.mu.Unlock()
+
+	cleanupOnError := true
+	defer func() {
+		if cleanupOnError {
+			if err := m.Unmount(taskID); err != nil {
+				log.Warn().Err(err).Str("task_id", taskID).Msg("failed to cleanup mount after error")
+			}
+		}
+	}()
 
 	// Create mount directory for this task
-	mountPath := filepath.Join(m.config.MountDir, taskID)
-	if err := os.MkdirAll(mountPath, 0755); err != nil {
+	mountPath := mount.mountPath
+	if err := os.MkdirAll(mountPath, mountDirPerm); err != nil {
 		return "", fmt.Errorf("failed to create task mount directory: %w", err)
 	}
 
@@ -170,7 +203,7 @@ func (m *MountManager) Mount(ctx context.Context, taskID, token string) (string,
 	mountCtx, cancel := context.WithCancel(ctx)
 
 	// Start FUSE mount process with sandbox user ownership
-	cmd := exec.CommandContext(mountCtx, m.config.CLIBinary, "mount",
+	cmd := exec.CommandContext(mountCtx, m.config.CLIBinary, mountSubcommand,
 		mountPath,
 		"--gateway", m.config.GatewayAddr,
 		"--token", token,
@@ -183,23 +216,12 @@ func (m *MountManager) Mount(ctx context.Context, taskID, token string) (string,
 
 	if err := cmd.Start(); err != nil {
 		cancel()
-		os.RemoveAll(mountPath)
 		return "", fmt.Errorf("failed to start mount process: %w", err)
 	}
 
-	mount := &taskMount{
-		taskID:    taskID,
-		token:     token,
-		mountPath: mountPath,
-		cmd:       cmd,
-		ctx:       mountCtx,
-		cancel:    cancel,
-		ready:     false,
-		exited:    make(chan error, 1),
-	}
-
 	m.mu.Lock()
-	m.mounts[taskID] = mount
+	mount.cmd = cmd
+	mount.cancel = cancel
 	m.mu.Unlock()
 
 	go func() {
@@ -207,19 +229,10 @@ func (m *MountManager) Mount(ctx context.Context, taskID, token string) (string,
 		close(mount.exited)
 	}()
 
-	cleanupOnError := true
-	defer func() {
-		if cleanupOnError {
-			if err := m.Unmount(taskID); err != nil {
-				log.Warn().Err(err).Str("task_id", taskID).Msg("failed to cleanup mount after error")
-			}
-		}
-	}()
-
 	timeout := time.NewTimer(m.config.MountReadyTimeout)
 	defer timeout.Stop()
 
-	ticker := time.NewTicker(100 * time.Millisecond)
+	ticker := time.NewTicker(mountReadyPollInterval)
 	defer ticker.Stop()
 
 	var lastMissing []string
@@ -231,9 +244,7 @@ func (m *MountManager) Mount(ctx context.Context, taskID, token string) (string,
 		case <-timeout.C:
 			ready, missing, err := checkFilesystemMountReady(mountPath)
 			if ready {
-				m.mu.Lock()
-				mount.ready = true
-				m.mu.Unlock()
+				m.markMountReady(mount)
 				cleanupOnError = false
 				log.Info().
 					Str("task_id", taskID).
@@ -267,16 +278,11 @@ func (m *MountManager) Mount(ctx context.Context, taskID, token string) (string,
 				continue
 			}
 
-			m.mu.Lock()
-			mount.ready = true
-			m.mu.Unlock()
-
-			entries, _ := os.ReadDir(mountPath)
+			m.markMountReady(mount)
 			cleanupOnError = false
 			log.Info().
 				Str("task_id", taskID).
 				Str("mount_path", mountPath).
-				Int("entries", len(entries)).
 				Msg("task mount ready")
 			return mountPath, nil
 		}
@@ -304,18 +310,18 @@ func (m *MountManager) Unmount(taskID string) error {
 		if mount.exited != nil {
 			select {
 			case <-mount.exited:
-			case <-time.After(5 * time.Second):
+			case <-time.After(termWaitTimeout):
 				_ = mount.cmd.Process.Kill()
 				select {
 				case <-mount.exited:
-				case <-time.After(2 * time.Second):
+				case <-time.After(killWaitTimeout):
 				}
 			}
 		}
 	}
 
 	// Try fusermount to ensure clean unmount
-	exec.Command("fusermount", "-u", mount.mountPath).Run()
+	exec.Command(fusermountBinary, fusermountUnmountFlag, mount.mountPath).Run()
 
 	// Remove mount directory
 	if err := os.RemoveAll(mount.mountPath); err != nil {
