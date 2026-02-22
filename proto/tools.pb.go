@@ -110,8 +110,10 @@ type ToolInfo struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	Name         string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Help         string `protobuf:"bytes,2,opt,name=help,proto3" json:"help,omitempty"`
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Help string `protobuf:"bytes,2,opt,name=help,proto3" json:"help,omitempty"`
+	// If set, the tool runs locally inside the sandbox via this CLI command
+	// rather than proxying through the gateway's ExecuteTool RPC.
 	LocalCommand string `protobuf:"bytes,3,opt,name=local_command,json=localCommand,proto3" json:"local_command,omitempty"`
 }
 

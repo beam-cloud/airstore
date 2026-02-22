@@ -443,27 +443,9 @@ func (s *GatewayService) CreateTask(ctx context.Context, req *pb.CreateTaskReque
 		createdByMemberId = &memberId
 	}
 
-	// Extract auth token from gRPC metadata for passing to container
-	var memberToken string
-	if md, ok := metadata.FromIncomingContext(ctx); ok {
-		if vals := md.Get("authorization"); len(vals) > 0 {
-			memberToken = strings.TrimPrefix(vals[0], "Bearer ")
-		}
-	}
-
-	// Ensure task mounts always receive a workspace-scoped token.
-	// Cluster-admin/worker/org tokens don't carry workspace context, which causes
-	// mount-side gateway operations (including access-log ingest) to be rejected.
-	info := auth.AuthInfoFromContext(ctx)
-	hasWorkspaceScopedToken := info != nil &&
-		(info.IsWorkspaceMember() || info.IsWorkspaceService()) &&
-		memberToken != ""
-	if !hasWorkspaceScopedToken {
-		_, raw, err := s.backend.EnsureWorkspaceServiceToken(ctx, workspaceId)
-		if err != nil {
-			return &pb.TaskResponse{Ok: false, Error: "failed to provision workspace token: " + err.Error()}, nil
-		}
-		memberToken = raw
+	memberToken, err := s.ensureTaskMountToken(ctx, workspaceId, extractRawToken(ctx))
+	if err != nil {
+		return &pb.TaskResponse{Ok: false, Error: "failed to provision workspace token: " + err.Error()}, nil
 	}
 
 	env := req.Env
@@ -824,6 +806,18 @@ func extractRawToken(ctx context.Context) string {
 		return ""
 	}
 	return strings.TrimPrefix(vals[0], "Bearer ")
+}
+
+func (s *GatewayService) ensureTaskMountToken(ctx context.Context, workspaceID uint, candidate string) (string, error) {
+	if auth.HasWorkspaceScopedToken(ctx, candidate) {
+		return candidate, nil
+	}
+
+	_, raw, err := s.backend.EnsureWorkspaceServiceToken(ctx, workspaceID)
+	if err != nil {
+		return "", err
+	}
+	return raw, nil
 }
 
 func hookToPb(h *types.Hook, workspaceExternalId string) *pb.Hook {

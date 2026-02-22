@@ -106,6 +106,14 @@ func CanWrite(ctx context.Context) bool {
 	return i != nil && i.CanWrite()
 }
 
+func HasWorkspaceScopedToken(ctx context.Context, rawToken string) bool {
+	if rawToken == "" {
+		return false
+	}
+	i := AuthInfoFromContext(ctx)
+	return i != nil && (i.IsWorkspaceMember() || i.IsWorkspaceService())
+}
+
 // --- Field accessors ---
 
 func TokenId(ctx context.Context) uint {

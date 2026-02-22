@@ -1,6 +1,7 @@
 package apiv1
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -93,6 +94,25 @@ func (g *TasksGroup) registerRoutes() {
 	g.routerGroup.POST("/:id/terminal/input", g.SendTerminalInput)
 }
 
+func extractBearerToken(header string) string {
+	if strings.HasPrefix(header, "Bearer ") {
+		return strings.TrimPrefix(header, "Bearer ")
+	}
+	return ""
+}
+
+func (g *TasksGroup) ensureTaskMountToken(ctx context.Context, workspaceID uint, candidate string) (string, error) {
+	if auth.HasWorkspaceScopedToken(ctx, candidate) {
+		return candidate, nil
+	}
+
+	_, raw, err := g.backend.EnsureWorkspaceServiceToken(ctx, workspaceID)
+	if err != nil {
+		return "", err
+	}
+	return raw, nil
+}
+
 // CreateTask creates a new task and queues it for execution
 func (g *TasksGroup) CreateTask(c echo.Context) error {
 	ctx := c.Request().Context()
@@ -135,12 +155,7 @@ func (g *TasksGroup) CreateTask(c echo.Context) error {
 		createdByMemberId = &memberId
 	}
 
-	// Extract auth token for passing to container (for filesystem mounting)
-	var memberToken string
-	authHeader := c.Request().Header.Get("Authorization")
-	if strings.HasPrefix(authHeader, "Bearer ") {
-		memberToken = strings.TrimPrefix(authHeader, "Bearer ")
-	}
+	memberToken := extractBearerToken(c.Request().Header.Get("Authorization"))
 
 	// Resolve workspace
 	var workspace *types.Workspace
@@ -161,19 +176,9 @@ func (g *TasksGroup) CreateTask(c echo.Context) error {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 
-	// Ensure task mounts always receive a workspace-scoped token.
-	// Cluster-admin/worker/org tokens don't carry workspace context, which causes
-	// mount-side gateway operations (including access-log ingest) to be rejected.
-	info := auth.AuthInfoFromContext(ctx)
-	hasWorkspaceScopedToken := info != nil &&
-		(info.IsWorkspaceMember() || info.IsWorkspaceService()) &&
-		memberToken != ""
-	if !hasWorkspaceScopedToken {
-		_, raw, err := g.backend.EnsureWorkspaceServiceToken(ctx, workspace.Id)
-		if err != nil {
-			return ErrorResponse(c, http.StatusInternalServerError, "failed to provision workspace token: "+err.Error())
-		}
-		memberToken = raw
+	memberToken, err = g.ensureTaskMountToken(ctx, workspace.Id, memberToken)
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to provision workspace token: "+err.Error())
 	}
 
 	task := &types.Task{

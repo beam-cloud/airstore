@@ -21,7 +21,7 @@ type WorkspaceTool struct {
 	WorkspaceId       uint                      `json:"workspace_id" db:"workspace_id"`
 	Name              string                    `json:"name" db:"name"`
 	ProviderType      WorkspaceToolProviderType `json:"provider_type" db:"provider_type"`
-	Config            json.RawMessage           `json:"config" db:"config"`           // Serialized MCPServerConfig
+	Config            json.RawMessage           `json:"config" db:"config"`               // Serialized MCPServerConfig
 	Manifest          json.RawMessage           `json:"manifest,omitempty" db:"manifest"` // Cached tools/list output
 	CreatedByMemberId *uint                     `json:"created_by_member_id,omitempty" db:"created_by_member_id"`
 	CreatedAt         time.Time                 `json:"created_at" db:"created_at"`
