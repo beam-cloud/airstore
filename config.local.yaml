@@ -29,7 +29,7 @@ filesystem:
 tools:
   integrations:
     kernel:
-      apiKey: "sk_d7761120-53d0-49d3-bcd0-a401c8309de1.8FVwTzme/20sd5sPt6BxkLSAwxjLMzWPGgI45cSzynM"
+      apiKey: ""
   mcp:
     # Filesystem - read/write files (add directories as args)
     filesystem:
