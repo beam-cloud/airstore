@@ -145,7 +145,7 @@ describe('Agent/Runs E2E', () => {
     const agent = await client.agents.create(workspaceId, {
       agentKey: uniqueName('e2e-agent'),
       name: uniqueName('E2E Agent'),
-      config: { model: 'claude-sonnet-4' },
+      config: { model: 'claude-sonnet-4-6' },
     });
     agentId = agent.id;
   });
@@ -194,7 +194,7 @@ describe('Agent/Runs E2E', () => {
     const run = await waitForTerminalRun(workspaceId, runId, 180_000);
     expect(run.id).toBe(runId);
     expect(run.status).toBe('ok');
-    expect(run.model).toBe('claude-sonnet-4');
+    expect(run.model).toBe('claude-sonnet-4-6');
 
     const attempts = await client.runs.listAttempts(workspaceId, runId);
     const snapshots = await client.runs.listSnapshots(workspaceId, runId);
