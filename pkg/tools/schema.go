@@ -10,10 +10,11 @@ import (
 
 // ToolSchema defines the structure of a tool definition YAML file
 type ToolSchema struct {
-	Name        string                    `yaml:"name"`
-	Description string                    `yaml:"description"`
-	Icon        string                    `yaml:"icon,omitempty"`
-	Commands    map[string]*CommandSchema `yaml:"commands"`
+	Name         string                    `yaml:"name"`
+	Description  string                    `yaml:"description"`
+	Icon         string                    `yaml:"icon,omitempty"`
+	LocalCommand string                    `yaml:"local_command,omitempty"`
+	Commands     map[string]*CommandSchema `yaml:"commands"`
 }
 
 // CommandSchema defines a single command within a tool

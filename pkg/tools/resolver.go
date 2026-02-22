@@ -74,12 +74,16 @@ func (r *WorkspaceToolResolver) List(ctx context.Context) ([]types.ResolvedTool,
 		}
 
 		enabled := settings == nil || settings.IsEnabled(name)
-		result = append(result, types.ResolvedTool{
+		rt := types.ResolvedTool{
 			Name:    name,
 			Help:    provider.Help(),
 			Origin:  types.ToolOriginGlobal,
 			Enabled: enabled,
-		})
+		}
+		if lp, ok := provider.(LocalToolProvider); ok {
+			rt.LocalCommand = lp.LocalCommand()
+		}
+		result = append(result, rt)
 	}
 
 	// Add workspace-specific tools

@@ -113,6 +113,14 @@ var integrations = map[IntegrationName]IntegrationMeta{
 		AuthType:    AuthNone,
 		Scope:       ScopeShared,
 	},
+	Browser: {
+		Name:        Browser,
+		DisplayName: "Browser",
+		Description: "Headless browser automation via Kernel cloud browsers",
+		Icon:        "monitor",
+		AuthType:    AuthNone,
+		Scope:       ScopeShared,
+	},
 }
 
 func GetIntegrationMeta(name IntegrationName) (IntegrationMeta, bool) {

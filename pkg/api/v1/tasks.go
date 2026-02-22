@@ -93,6 +93,13 @@ func (g *TasksGroup) registerRoutes() {
 	g.routerGroup.POST("/:id/terminal/input", g.SendTerminalInput)
 }
 
+func extractBearerToken(header string) string {
+	if strings.HasPrefix(header, "Bearer ") {
+		return strings.TrimPrefix(header, "Bearer ")
+	}
+	return ""
+}
+
 // CreateTask creates a new task and queues it for execution
 func (g *TasksGroup) CreateTask(c echo.Context) error {
 	ctx := c.Request().Context()
@@ -135,12 +142,7 @@ func (g *TasksGroup) CreateTask(c echo.Context) error {
 		createdByMemberId = &memberId
 	}
 
-	// Extract auth token for passing to container (for filesystem mounting)
-	var memberToken string
-	authHeader := c.Request().Header.Get("Authorization")
-	if strings.HasPrefix(authHeader, "Bearer ") {
-		memberToken = strings.TrimPrefix(authHeader, "Bearer ")
-	}
+	memberToken := extractBearerToken(c.Request().Header.Get("Authorization"))
 
 	// Resolve workspace
 	var workspace *types.Workspace
@@ -159,6 +161,11 @@ func (g *TasksGroup) CreateTask(c echo.Context) error {
 			return ErrorResponse(c, http.StatusBadRequest, "workspace not found")
 		}
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+
+	memberToken, err = auth.EnsureTaskMountToken(ctx, workspace.Id, memberToken, g.backend)
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to provision workspace token: "+err.Error())
 	}
 
 	task := &types.Task{
@@ -497,10 +504,20 @@ func (w *sseWriter) flush() {
 	w.c.Response().Flush()
 }
 
+func (w *sseWriter) logEvent(e common.TaskLogEntry) map[string]any {
+	return map[string]any{
+		"type":      "log",
+		"task_id":   e.TaskID,
+		"timestamp": e.Timestamp,
+		"stream":    e.Stream,
+		"data":      e.Data,
+	}
+}
+
 func (w *sseWriter) sendLogs(logs []common.TaskLogEntry) int64 {
 	var cursor int64
 	for _, e := range logs {
-		w.write(e)
+		w.write(w.logEvent(e))
 		if e.Timestamp > cursor {
 			cursor = e.Timestamp
 		}
@@ -515,7 +532,7 @@ func (w *sseWriter) sendLogsAfter(logs []common.TaskLogEntry, cursor int64) int6
 	dirty := false
 	for _, e := range logs {
 		if e.Timestamp > cursor {
-			w.write(e)
+			w.write(w.logEvent(e))
 			cursor = e.Timestamp
 			dirty = true
 		}

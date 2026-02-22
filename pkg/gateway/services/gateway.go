@@ -443,12 +443,9 @@ func (s *GatewayService) CreateTask(ctx context.Context, req *pb.CreateTaskReque
 		createdByMemberId = &memberId
 	}
 
-	// Extract auth token from gRPC metadata for passing to container
-	var memberToken string
-	if md, ok := metadata.FromIncomingContext(ctx); ok {
-		if vals := md.Get("authorization"); len(vals) > 0 {
-			memberToken = strings.TrimPrefix(vals[0], "Bearer ")
-		}
+	memberToken, err := auth.EnsureTaskMountToken(ctx, workspaceId, extractRawToken(ctx), s.backend)
+	if err != nil {
+		return &pb.TaskResponse{Ok: false, Error: "failed to provision workspace token: " + err.Error()}, nil
 	}
 
 	env := req.Env

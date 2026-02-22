@@ -1,6 +1,7 @@
 package vnode
 
 import (
+	"bytes"
 	"context"
 	"io/fs"
 	"strings"
@@ -20,23 +21,24 @@ const (
 )
 
 // ToolsVNode implements VirtualNode for the /tools directory.
-// It serves tool binaries directly via FUSE.
-// Tools are cached with a TTL to allow dynamic updates without remount.
+// It serves tool binaries via FUSE, choosing between two modes per tool:
+//   - Gateway tools: served as the compiled gRPC shim binary
+//   - Local tools:   served as a shell wrapper that execs the CLI directly
 type ToolsVNode struct {
-	ReadOnlyBase // Embeds read-only defaults for write operations
+	ReadOnlyBase
 
 	gatewayAddr string
-	token       string // Auth token for gRPC calls
-	bearerToken string // precomputed auth header value
-	shim        []byte          // shim binary served via FUSE
-	modTime     time.Time       // stable timestamps for getattr
+	token       string
+	bearerToken string
+	shim        []byte    // gRPC shim binary for gateway-executed tools
+	modTime     time.Time // stable timestamp for initial getattr
 
-	// Cache with TTL
-	mu           sync.RWMutex
-	tools        []string
-	toolSet      map[string]bool
-	lastFetch    time.Time
-	cacheModTime time.Time // Updated when tool set changes
+	mu            sync.RWMutex
+	tools         []string          // ordered tool names
+	toolSet       map[string]bool   // fast membership check
+	localWrappers map[string][]byte // tool → wrapper script (nil = use shim)
+	lastFetch     time.Time
+	cacheModTime  time.Time
 }
 
 // NewToolsVNode creates a new ToolsVNode.
@@ -44,14 +46,15 @@ func NewToolsVNode(gatewayAddr string, token string, shimBinary []byte) *ToolsVN
 	modTime := time.Now()
 
 	t := &ToolsVNode{
-		gatewayAddr:  gatewayAddr,
-		token:        token,
-		bearerToken:  BearerToken(token),
-		shim:         shimBinary,
-		modTime:      modTime,
-		tools:        []string{},
-		toolSet:      make(map[string]bool),
-		cacheModTime: modTime,
+		gatewayAddr:   gatewayAddr,
+		token:         token,
+		bearerToken:   BearerToken(token),
+		shim:          shimBinary,
+		modTime:       modTime,
+		tools:         []string{},
+		toolSet:       make(map[string]bool),
+		localWrappers: make(map[string][]byte),
+		cacheModTime:  modTime,
 	}
 
 	// Initial fetch - non-blocking if it fails
@@ -86,7 +89,7 @@ func (t *ToolsVNode) Getattr(path string) (*FileInfo, error) {
 		return nil, fs.ErrNotExist
 	}
 
-	info := NewExecFileInfo(toolIno(name), int64(len(t.shim)))
+	info := NewExecFileInfo(toolIno(name), int64(len(t.toolBinary(name))))
 	mtime := t.getCacheModTime()
 	info.Atime = mtime
 	info.Mtime = mtime
@@ -134,10 +137,12 @@ func (t *ToolsVNode) Read(path string, buf []byte, off int64, fh FileHandle) (in
 	if !t.hasTool(name) {
 		return 0, fs.ErrNotExist
 	}
-	if off >= int64(len(t.shim)) {
+
+	data := t.toolBinary(name)
+	if off >= int64(len(data)) {
 		return 0, nil
 	}
-	return copy(buf, t.shim[off:]), nil
+	return copy(buf, data[off:]), nil
 }
 
 // hasTool checks if a tool is registered.
@@ -145,6 +150,17 @@ func (t *ToolsVNode) hasTool(name string) bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return t.toolSet[name]
+}
+
+// toolBinary returns the bytes to serve for a given tool:
+// a shell wrapper for local tools, the gRPC shim for gateway tools.
+func (t *ToolsVNode) toolBinary(name string) []byte {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if w, ok := t.localWrappers[name]; ok {
+		return w
+	}
+	return t.shim
 }
 
 // getTools returns the list of registered tools.
@@ -174,51 +190,74 @@ func (t *ToolsVNode) maybeRefresh() {
 	}
 }
 
-// refreshCache fetches the latest tools from the gateway
+type toolEntry struct {
+	name         string
+	localCommand string
+}
+
+// refreshCache fetches the latest tools from the gateway and rebuilds the cache.
 func (t *ToolsVNode) refreshCache() {
-	tools := t.fetchTools()
-	if tools == nil {
+	entries := t.fetchTools()
+	if entries == nil {
 		return
+	}
+
+	names := make([]string, len(entries))
+	set := make(map[string]bool, len(entries))
+	wrappers := make(map[string][]byte)
+	for i, e := range entries {
+		names[i] = e.name
+		set[e.name] = true
+		if e.localCommand != "" {
+			wrappers[e.name] = []byte("#!/bin/sh\nexec " + e.localCommand + " \"$@\"\n")
+		}
 	}
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	// Check if the tool set has changed
-	changed := len(tools) != len(t.tools)
-	if !changed {
-		newSet := make(map[string]bool, len(tools))
-		for _, name := range tools {
-			newSet[name] = true
-		}
-		for _, name := range t.tools {
-			if !newSet[name] {
-				changed = true
-				break
-			}
-		}
-	}
-
-	// Update cache
-	t.tools = tools
-	t.toolSet = make(map[string]bool, len(tools))
-	for _, name := range tools {
-		t.toolSet[name] = true
-	}
+	// Bump cache mtime when either the tool names or wrapper bytes change.
+	// This lets timestamp-based clients notice localCommand updates.
+	changed := !sameKeys(set, t.toolSet) || !sameWrapperBytes(wrappers, t.localWrappers)
+	t.tools = names
+	t.toolSet = set
+	t.localWrappers = wrappers
 	t.lastFetch = time.Now()
-
-	// Update modTime if tools changed (helps OS notice changes)
 	if changed {
 		t.cacheModTime = time.Now()
 	}
 }
 
+func sameKeys(a, b map[string]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if !b[k] {
+			return false
+		}
+	}
+	return true
+}
+
+func sameWrapperBytes(a, b map[string][]byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, va := range a {
+		vb, ok := b[k]
+		if !ok || !bytes.Equal(va, vb) {
+			return false
+		}
+	}
+	return true
+}
+
 // fetchTools queries the gateway for registered tools.
-func (t *ToolsVNode) fetchTools() []string {
+func (t *ToolsVNode) fetchTools() []toolEntry {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Add auth token if available
 	if t.bearerToken != "" {
 		md := metadata.Pairs("authorization", t.bearerToken)
 		ctx = metadata.NewOutgoingContext(ctx, md)
@@ -243,11 +282,11 @@ func (t *ToolsVNode) fetchTools() []string {
 		return nil
 	}
 
-	tools := make([]string, len(resp.Tools))
+	entries := make([]toolEntry, len(resp.Tools))
 	for i, tool := range resp.Tools {
-		tools[i] = tool.Name
+		entries[i] = toolEntry{name: tool.Name, localCommand: tool.LocalCommand}
 	}
-	return tools
+	return entries
 }
 
 func toolsIno() uint64 {

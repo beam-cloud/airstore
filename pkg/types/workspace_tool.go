@@ -21,7 +21,7 @@ type WorkspaceTool struct {
 	WorkspaceId       uint                      `json:"workspace_id" db:"workspace_id"`
 	Name              string                    `json:"name" db:"name"`
 	ProviderType      WorkspaceToolProviderType `json:"provider_type" db:"provider_type"`
-	Config            json.RawMessage           `json:"config" db:"config"`           // Serialized MCPServerConfig
+	Config            json.RawMessage           `json:"config" db:"config"`               // Serialized MCPServerConfig
 	Manifest          json.RawMessage           `json:"manifest,omitempty" db:"manifest"` // Cached tools/list output
 	CreatedByMemberId *uint                     `json:"created_by_member_id,omitempty" db:"created_by_member_id"`
 	CreatedAt         time.Time                 `json:"created_at" db:"created_at"`
@@ -61,12 +61,13 @@ const (
 
 // ResolvedTool represents a tool with its origin and metadata for listing
 type ResolvedTool struct {
-	Name        string              `json:"name"`
-	Help        string              `json:"help,omitempty"`
-	Origin      WorkspaceToolOrigin `json:"origin"`
-	ExternalId  string              `json:"external_id,omitempty"` // Only for workspace tools
-	Enabled     bool                `json:"enabled"`
-	ToolCount   int                 `json:"tool_count,omitempty"` // For MCP servers
+	Name         string              `json:"name"`
+	Help         string              `json:"help,omitempty"`
+	Origin       WorkspaceToolOrigin `json:"origin"`
+	ExternalId   string              `json:"external_id,omitempty"`
+	Enabled      bool                `json:"enabled"`
+	ToolCount    int                 `json:"tool_count,omitempty"`
+	LocalCommand string              `json:"local_command,omitempty"`
 }
 
 // CreateWorkspaceToolRequest is the API request to create a workspace tool

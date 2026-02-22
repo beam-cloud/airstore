@@ -138,6 +138,7 @@ func NewWorker() (*Worker, error) {
 		S2Token:          config.Streams.Token,
 		S2Basin:          config.Streams.Basin,
 		AnthropicAPIKey:  config.AnthropicAPIKey(),
+		KernelAPIKey:     config.KernelAPIKey(),
 	})
 	if err != nil {
 		cancel()
