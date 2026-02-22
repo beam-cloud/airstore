@@ -17,13 +17,13 @@ import (
 type AgentAPI struct {
 	backend repository.BackendRepository
 	redis   *common.RedisClient
-	runtime *Service
+	runtime *AgentService
 }
 
 func NewAgentAPI(
 	backend repository.BackendRepository,
 	redis *common.RedisClient,
-	runtime *Service,
+	runtime *AgentService,
 ) *AgentAPI {
 	return &AgentAPI{
 		backend: backend,

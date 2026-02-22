@@ -554,7 +554,7 @@ func (g *Gateway) registerServices() error {
 		apiv1.NewTasksGroup(g.baseRouteGroup.Group("/tasks"), g.BackendRepo, taskQueue, terminalIO, g.s2Client, g.Config.Sandbox.GetDefaultImage())
 
 		// Agent orchestration engine and gRPC service.
-		orchestratorSvc := orchestration.NewService(
+		orchestratorSvc := orchestration.NewAgentService(
 			g.ctx,
 			g.BackendRepo,
 			taskQueue,

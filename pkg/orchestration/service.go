@@ -13,7 +13,7 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-type Service struct {
+type AgentService struct {
 	backend            repository.BackendRepository
 	taskQueue          repository.TaskQueue
 	redis              *common.RedisClient
@@ -23,17 +23,17 @@ type Service struct {
 	instanceController *ExecutionInstanceController
 }
 
-func NewService(
+func NewAgentService(
 	ctx context.Context,
 	backend repository.BackendRepository,
 	taskQueue repository.TaskQueue,
 	redis *common.RedisClient,
 	s2 *common.S2Client,
 	defaultImage string,
-) *Service {
+) *AgentService {
 	queueStore := repository.NewAgentEnvelopeQueueStore(backend, redis)
 	instanceLocker := repository.NewAgentInstanceDispatchLocker(redis)
-	return &Service{
+	return &AgentService{
 		backend:            backend,
 		taskQueue:          taskQueue,
 		redis:              redis,
@@ -44,11 +44,11 @@ func NewService(
 	}
 }
 
-func (s *Service) Start(ctx context.Context) {
+func (s *AgentService) Start(ctx context.Context) {
 	go s.dispatchLoop(ctx)
 }
 
-func (s *Service) AcceptAgentCommand(
+func (s *AgentService) AcceptAgentCommand(
 	ctx context.Context,
 	workspaceID uint,
 	params AgentCommandParams,
@@ -105,7 +105,7 @@ func (s *Service) AcceptAgentCommand(
 	return envelope, false, nil
 }
 
-func (s *Service) AcceptRunInput(
+func (s *AgentService) AcceptRunInput(
 	ctx context.Context,
 	workspaceID uint,
 	targetRunID string,
@@ -162,7 +162,7 @@ func (s *Service) AcceptRunInput(
 	return envelope, false, nil
 }
 
-func (s *Service) dispatchLoop(ctx context.Context) {
+func (s *AgentService) dispatchLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -197,7 +197,7 @@ func (s *Service) dispatchLoop(ctx context.Context) {
 	}
 }
 
-func (s *Service) dispatchEnvelope(ctx context.Context, envelopeID string) error {
+func (s *AgentService) dispatchEnvelope(ctx context.Context, envelopeID string) error {
 	envelope, err := s.backend.GetAgentTaskEnvelopeByID(ctx, envelopeID)
 	if err != nil {
 		return err
@@ -214,7 +214,7 @@ func (s *Service) dispatchEnvelope(ctx context.Context, envelopeID string) error
 	}
 }
 
-func (s *Service) handleInterruptEnvelope(ctx context.Context, envelope *types.AgentTaskEnvelope) error {
+func (s *AgentService) handleInterruptEnvelope(ctx context.Context, envelope *types.AgentTaskEnvelope) error {
 	if envelope.TargetRunID == nil {
 		reason := "interrupt_missing_target"
 		return s.backend.UpdateAgentTaskEnvelopeState(ctx, envelope.ID, types.AgentEnvelopeStateDropped, &reason, nil)
@@ -242,7 +242,7 @@ func (s *Service) handleInterruptEnvelope(ctx context.Context, envelope *types.A
 	return s.backend.UpdateAgentTaskEnvelopeState(ctx, envelope.ID, types.AgentEnvelopeStateDispatched, nil, envelope.TargetRunID)
 }
 
-func (s *Service) handleExecutionEnvelope(ctx context.Context, envelope *types.AgentTaskEnvelope) error {
+func (s *AgentService) handleExecutionEnvelope(ctx context.Context, envelope *types.AgentTaskEnvelope) error {
 	instanceKey := stringFromPayload(envelope.PayloadJSON, "instance_key")
 	if instanceKey == "" {
 		p := DefaultRunExecutionPolicy()
@@ -358,7 +358,7 @@ func (s *Service) handleExecutionEnvelope(ctx context.Context, envelope *types.A
 	return nil
 }
 
-func (s *Service) materializeRun(
+func (s *AgentService) materializeRun(
 	ctx context.Context,
 	envelope *types.AgentTaskEnvelope,
 ) (*types.AgentRun, RunExecutionPolicy, string, string, error) {
@@ -472,7 +472,7 @@ func (s *Service) materializeRun(
 	return run, runPolicy, instanceKey, prompt, nil
 }
 
-func (s *Service) appendRunSnapshot(
+func (s *AgentService) appendRunSnapshot(
 	ctx context.Context,
 	runID string,
 	status types.AgentRunStatus,
@@ -508,7 +508,7 @@ func (s *Service) appendRunSnapshot(
 	})
 }
 
-func (s *Service) publishRunEvent(ctx context.Context, runID, eventType string, payload map[string]any) error {
+func (s *AgentService) publishRunEvent(ctx context.Context, runID, eventType string, payload map[string]any) error {
 	event := map[string]any{
 		"run_id":     runID,
 		"event_type": eventType,
@@ -646,7 +646,7 @@ func executionInstanceKeyFromRun(run *types.AgentRun) string {
 	})
 }
 
-func (s *Service) requeueIfDispatchable(ctx context.Context, envelopeID string) error {
+func (s *AgentService) requeueIfDispatchable(ctx context.Context, envelopeID string) error {
 	envelope, err := s.backend.GetAgentTaskEnvelopeByID(ctx, envelopeID)
 	if err != nil {
 		return err
