@@ -242,17 +242,8 @@ func (s *AgentService) handleInterruptEnvelope(ctx context.Context, envelope *ty
 }
 
 func (s *AgentService) handleExecutionEnvelope(ctx context.Context, envelope *types.AgentTaskEnvelope) error {
-	instanceKey := stringFromPayload(envelope.PayloadJSON, "instance_key")
-	if instanceKey == "" {
-		p := DefaultRunExecutionPolicy()
-		if rawPolicy, ok := envelope.PayloadJSON["policy"]; ok {
-			body, _ := json.Marshal(rawPolicy)
-			_ = json.Unmarshal(body, &p)
-			p = NormalizeRunExecutionPolicy(p)
-		}
-		lane := strPtrMaybe(stringFromPayload(envelope.PayloadJSON, "lane"))
-		instanceKey = ExecutionClassKey(envelope.WorkspaceID, envelope.AgentID, lane, p)
-	}
+	runPolicy := runPolicyFromPayload(envelope.PayloadJSON)
+	instanceKey := instanceKeyFromPayload(envelope.WorkspaceID, envelope.AgentID, envelope.PayloadJSON, runPolicy)
 
 	if _, err := s.instanceController.EnsureInstance(ctx, ExecutionInstanceConfig{
 		InstanceKey:            instanceKey,
@@ -379,23 +370,14 @@ func (s *AgentService) materializeRun(
 		return nil, RunExecutionPolicy{}, "", "", fmt.Errorf("timeout_ms must be >= 0")
 	}
 
-	runPolicy := DefaultRunExecutionPolicy()
-	if rawPolicy, ok := payload["policy"]; ok {
-		b, _ := json.Marshal(rawPolicy)
-		_ = json.Unmarshal(b, &runPolicy)
-		runPolicy = NormalizeRunExecutionPolicy(runPolicy)
-	}
+	runPolicy := runPolicyFromPayload(payload)
 	if err := ValidateRunExecutionPolicy(runPolicy); err != nil {
 		return nil, RunExecutionPolicy{}, "", "", err
 	}
 
 	sessionKey := strPtrMaybe(stringFromPayload(payload, "session_key"))
 	agentID := envelope.AgentID
-	instanceKey := stringFromPayload(payload, "instance_key")
-	if instanceKey == "" {
-		lane := strPtrMaybe(stringFromPayload(payload, "lane"))
-		instanceKey = ExecutionClassKey(envelope.WorkspaceID, agentID, lane, runPolicy)
-	}
+	instanceKey := instanceKeyFromPayload(envelope.WorkspaceID, agentID, payload, runPolicy)
 
 	var provider *string
 	if v := stringFromPayload(payload, "provider"); v != "" {
@@ -444,16 +426,7 @@ func (s *AgentService) materializeRun(
 		run.NetworkEnabled = targetRun.NetworkEnabled
 		run.Interactive = targetRun.Interactive
 		run.TimeoutMs = targetRun.TimeoutMs
-		runPolicy = RunExecutionPolicy{
-			Host:            ExecHost(targetRun.ExecHost),
-			Security:        ExecSecurity(targetRun.ExecSecurity),
-			Ask:             ExecAsk(targetRun.ExecAsk),
-			RuntimeType:     targetRun.RuntimeType,
-			WorkspaceAccess: targetRun.WorkspaceAccess,
-			NetworkEnabled:  targetRun.NetworkEnabled,
-			Interactive:     targetRun.Interactive,
-			Resources:       map[string]any{},
-		}
+		runPolicy = runPolicyFromRun(targetRun)
 		instanceKey = executionInstanceKeyFromRun(targetRun)
 		run.DeliveryJSON = map[string]any{"instance_key": instanceKey, "target_run_id": targetRun.ID}
 	}
@@ -568,6 +541,25 @@ func timeoutOrDefault(timeout *int, fallback int) int {
 	return *timeout
 }
 
+func runPolicyFromPayload(payload map[string]any) RunExecutionPolicy {
+	policy := DefaultRunExecutionPolicy()
+	rawPolicy, ok := payload["policy"]
+	if !ok {
+		return policy
+	}
+	body, _ := json.Marshal(rawPolicy)
+	_ = json.Unmarshal(body, &policy)
+	return NormalizeRunExecutionPolicy(policy)
+}
+
+func instanceKeyFromPayload(workspaceID uint, agentID *string, payload map[string]any, policy RunExecutionPolicy) string {
+	if instanceKey := stringFromPayload(payload, "instance_key"); instanceKey != "" {
+		return instanceKey
+	}
+	lane := strPtrMaybe(stringFromPayload(payload, "lane"))
+	return ExecutionClassKey(workspaceID, agentID, lane, policy)
+}
+
 func stringFromPayload(payload map[string]any, key string) string {
 	v, ok := payload[key]
 	if !ok || v == nil {
@@ -617,6 +609,22 @@ func boolPtr(v bool) *bool {
 	return &v
 }
 
+func runPolicyFromRun(run *types.AgentRun) RunExecutionPolicy {
+	if run == nil {
+		return DefaultRunExecutionPolicy()
+	}
+	return RunExecutionPolicy{
+		Host:            ExecHost(run.ExecHost),
+		Security:        ExecSecurity(run.ExecSecurity),
+		Ask:             ExecAsk(run.ExecAsk),
+		RuntimeType:     run.RuntimeType,
+		WorkspaceAccess: run.WorkspaceAccess,
+		NetworkEnabled:  run.NetworkEnabled,
+		Interactive:     run.Interactive,
+		Resources:       map[string]any{},
+	}
+}
+
 func executionInstanceKeyFromRun(run *types.AgentRun) string {
 	if run == nil {
 		return ""
@@ -628,16 +636,7 @@ func executionInstanceKeyFromRun(run *types.AgentRun) string {
 			}
 		}
 	}
-	return ExecutionClassKey(run.WorkspaceID, run.AgentID, nil, RunExecutionPolicy{
-		Host:            ExecHost(run.ExecHost),
-		Security:        ExecSecurity(run.ExecSecurity),
-		Ask:             ExecAsk(run.ExecAsk),
-		RuntimeType:     run.RuntimeType,
-		WorkspaceAccess: run.WorkspaceAccess,
-		NetworkEnabled:  run.NetworkEnabled,
-		Interactive:     run.Interactive,
-		Resources:       map[string]any{},
-	})
+	return ExecutionClassKey(run.WorkspaceID, run.AgentID, nil, runPolicyFromRun(run))
 }
 
 func (s *AgentService) requeueIfDispatchable(ctx context.Context, envelopeID string) error {

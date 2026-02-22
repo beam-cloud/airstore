@@ -164,15 +164,7 @@ func (a *AgentAPI) ListRunEvents(ctx context.Context, workspaceID uint, runID st
 	if err != nil {
 		return nil, err
 	}
-
-	out := make([]map[string]any, 0, len(rows))
-	for _, row := range rows {
-		var event map[string]any
-		if err := json.Unmarshal([]byte(row), &event); err == nil {
-			out = append(out, event)
-		}
-	}
-	return out, nil
+	return decodeRunEvents(rows), nil
 }
 
 func (a *AgentAPI) CancelRun(ctx context.Context, workspaceID uint, runID string) error {
@@ -194,4 +186,15 @@ func (a *AgentAPI) CancelRun(ctx context.Context, workspaceID uint, runID string
 		}
 	}
 	return nil
+}
+
+func decodeRunEvents(rows []string) []map[string]any {
+	out := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		var event map[string]any
+		if err := json.Unmarshal([]byte(row), &event); err == nil {
+			out = append(out, event)
+		}
+	}
+	return out
 }

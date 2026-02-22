@@ -10,6 +10,7 @@ import (
 )
 
 const redisNilError = "redis: nil"
+const orchestrationQueueRedisRequired = "redis is required for orchestration queue"
 
 // OrchestrationStore centralizes Redis-backed orchestration primitives:
 // queue tokens, mode reshaping state, instance locks, and run events.
@@ -33,17 +34,19 @@ func (s *OrchestrationStore) UpdateEnvelopeState(ctx context.Context, envelopeID
 }
 
 func (s *OrchestrationStore) PushQueueToken(ctx context.Context, token string) error {
-	if s.redis == nil {
-		return fmt.Errorf("redis is required for orchestration queue")
+	redis, err := s.queueRedis()
+	if err != nil {
+		return err
 	}
-	return s.redis.LPush(ctx, common.Keys.AgentEnvelopeQueue(), token).Err()
+	return redis.LPush(ctx, common.Keys.AgentEnvelopeQueue(), token).Err()
 }
 
 func (s *OrchestrationStore) PopQueueToken(ctx context.Context, timeout time.Duration) (string, error) {
-	if s.redis == nil {
-		return "", fmt.Errorf("redis is required for orchestration queue")
+	redis, err := s.queueRedis()
+	if err != nil {
+		return "", err
 	}
-	result, err := s.redis.BRPop(ctx, timeout, common.Keys.AgentEnvelopeQueue()).Result()
+	result, err := redis.BRPop(ctx, timeout, common.Keys.AgentEnvelopeQueue()).Result()
 	if err != nil {
 		if isRedisNil(err) {
 			return "", nil
@@ -57,54 +60,47 @@ func (s *OrchestrationStore) PopQueueToken(ctx context.Context, timeout time.Dur
 }
 
 func (s *OrchestrationStore) GetModeEnvelopeID(ctx context.Context, modeKey string) (string, error) {
-	if s.redis == nil {
-		return "", fmt.Errorf("redis is required for orchestration queue")
-	}
-	id, err := s.redis.Get(ctx, common.Keys.AgentEnvelopeModeState(modeKey)).Result()
+	redis, err := s.queueRedis()
 	if err != nil {
-		if isRedisNil(err) {
-			return "", nil
-		}
 		return "", err
 	}
-	return id, nil
+	id, err := redis.Get(ctx, common.Keys.AgentEnvelopeModeState(modeKey)).Result()
+	return redisStringOrEmpty(id, err)
 }
 
 func (s *OrchestrationStore) SetModeEnvelopeID(ctx context.Context, modeKey string, envelopeID string, ttl time.Duration) error {
-	if s.redis == nil {
-		return fmt.Errorf("redis is required for orchestration queue")
+	redis, err := s.queueRedis()
+	if err != nil {
+		return err
 	}
-	return s.redis.Set(ctx, common.Keys.AgentEnvelopeModeState(modeKey), envelopeID, ttl).Err()
+	return redis.Set(ctx, common.Keys.AgentEnvelopeModeState(modeKey), envelopeID, ttl).Err()
 }
 
 func (s *OrchestrationStore) AddModeKey(ctx context.Context, modeKey string) (bool, error) {
-	if s.redis == nil {
-		return false, fmt.Errorf("redis is required for orchestration queue")
+	redis, err := s.queueRedis()
+	if err != nil {
+		return false, err
 	}
-	added, err := s.redis.SAdd(ctx, common.Keys.AgentEnvelopeModeSet(), modeKey).Result()
+	added, err := redis.SAdd(ctx, common.Keys.AgentEnvelopeModeSet(), modeKey).Result()
 	return added > 0, err
 }
 
 func (s *OrchestrationStore) RemoveModeKey(ctx context.Context, modeKey string) error {
-	if s.redis == nil {
-		return fmt.Errorf("redis is required for orchestration queue")
+	redis, err := s.queueRedis()
+	if err != nil {
+		return err
 	}
-	_, err := s.redis.SRem(ctx, common.Keys.AgentEnvelopeModeSet(), modeKey).Result()
+	_, err = redis.SRem(ctx, common.Keys.AgentEnvelopeModeSet(), modeKey).Result()
 	return err
 }
 
 func (s *OrchestrationStore) GetDelModeEnvelopeID(ctx context.Context, modeKey string) (string, error) {
-	if s.redis == nil {
-		return "", fmt.Errorf("redis is required for orchestration queue")
-	}
-	envelopeID, err := s.redis.GetDel(ctx, common.Keys.AgentEnvelopeModeState(modeKey)).Result()
+	redis, err := s.queueRedis()
 	if err != nil {
-		if isRedisNil(err) {
-			return "", nil
-		}
 		return "", err
 	}
-	return envelopeID, nil
+	envelopeID, err := redis.GetDel(ctx, common.Keys.AgentEnvelopeModeState(modeKey)).Result()
+	return redisStringOrEmpty(envelopeID, err)
 }
 
 func (s *OrchestrationStore) WithInstanceLock(ctx context.Context, lockKey string, fn func() error) error {
@@ -145,4 +141,21 @@ func (s *OrchestrationStore) ListRunEvents(ctx context.Context, runID string) ([
 
 func isRedisNil(err error) bool {
 	return err != nil && err.Error() == redisNilError
+}
+
+func (s *OrchestrationStore) queueRedis() (*common.RedisClient, error) {
+	if s == nil || s.redis == nil {
+		return nil, fmt.Errorf(orchestrationQueueRedisRequired)
+	}
+	return s.redis, nil
+}
+
+func redisStringOrEmpty(value string, err error) (string, error) {
+	if err == nil {
+		return value, nil
+	}
+	if isRedisNil(err) {
+		return "", nil
+	}
+	return "", err
 }
