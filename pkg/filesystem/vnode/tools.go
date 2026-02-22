@@ -1,6 +1,7 @@
 package vnode
 
 import (
+	"bytes"
 	"context"
 	"io/fs"
 	"strings"
@@ -215,7 +216,9 @@ func (t *ToolsVNode) refreshCache() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	changed := !sameKeys(set, t.toolSet)
+	// Bump cache mtime when either the tool names or wrapper bytes change.
+	// This lets timestamp-based clients notice localCommand updates.
+	changed := !sameKeys(set, t.toolSet) || !sameWrapperBytes(wrappers, t.localWrappers)
 	t.tools = names
 	t.toolSet = set
 	t.localWrappers = wrappers
@@ -231,6 +234,19 @@ func sameKeys(a, b map[string]bool) bool {
 	}
 	for k := range a {
 		if !b[k] {
+			return false
+		}
+	}
+	return true
+}
+
+func sameWrapperBytes(a, b map[string][]byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, va := range a {
+		vb, ok := b[k]
+		if !ok || !bytes.Equal(va, vb) {
 			return false
 		}
 	}
