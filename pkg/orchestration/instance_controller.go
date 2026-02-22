@@ -3,11 +3,12 @@ package orchestration
 import (
 	"context"
 	"fmt"
+	"strings"
+
 	"github.com/beam-cloud/airstore/pkg/types"
 )
 
 type ExecutionInstanceController struct {
-	ctx                 context.Context
 	store               ExecutionInstanceStore
 	locker              InstanceDispatchLocker
 	instanceLockKeyFunc func(string) string
@@ -26,12 +27,14 @@ func NewExecutionInstanceController(
 		}
 	}
 	controller := &ExecutionInstanceController{
-		ctx:                 ctx,
 		store:               store,
 		locker:              locker,
 		instanceLockKeyFunc: instanceLockKeyFunc,
 	}
 	controller.attemptEvents = NewAttemptEventManager(ctx, func(factoryCtx context.Context, instanceKey string) (IExecutionInstance, error) {
+		if store == nil {
+			return nil, fmt.Errorf("instance store is required")
+		}
 		inst, err := store.GetExecutionInstanceByKey(factoryCtx, instanceKey)
 		if err != nil {
 			return nil, err
@@ -49,11 +52,37 @@ func NewExecutionInstanceController(
 	return controller
 }
 
-func (c *ExecutionInstanceController) EnsureInstance(cfg ExecutionInstanceConfig) (IExecutionInstance, error) {
+func (c *ExecutionInstanceController) ensureReady() error {
+	if c.store == nil {
+		return fmt.Errorf("instance store is required")
+	}
+	if c.attemptEvents == nil {
+		return fmt.Errorf("attempt event manager is not configured")
+	}
+	return nil
+}
+
+func (c *ExecutionInstanceController) EnsureInstance(ctx context.Context, cfg ExecutionInstanceConfig) (IExecutionInstance, error) {
+	if err := c.ensureReady(); err != nil {
+		return nil, err
+	}
+	cfg.InstanceKey = strings.TrimSpace(cfg.InstanceKey)
 	if cfg.InstanceKey == "" {
 		return nil, fmt.Errorf("instance_key is required")
 	}
-	if _, err := c.store.GetOrCreateExecutionInstance(c.ctx, &types.AgentExecutionInstance{
+	if cfg.FailedAttemptThreshold <= 0 {
+		cfg.FailedAttemptThreshold = defaultFailedAttemptThreshold
+	}
+	if strings.TrimSpace(cfg.ExecutionClassKey) == "" {
+		cfg.ExecutionClassKey = cfg.InstanceKey
+	}
+	if strings.TrimSpace(cfg.InstanceLockKey) == "" {
+		cfg.InstanceLockKey = c.instanceLockKeyFunc(cfg.InstanceKey)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, err := c.store.GetOrCreateExecutionInstance(ctx, &types.AgentExecutionInstance{
 		InstanceKey:                cfg.InstanceKey,
 		WorkspaceID:                cfg.WorkspaceID,
 		AgentID:                    cfg.AgentID,
@@ -70,13 +99,19 @@ func (c *ExecutionInstanceController) EnsureInstance(cfg ExecutionInstanceConfig
 	}); err != nil {
 		return nil, err
 	}
-	return c.attemptEvents.getOrCreate(cfg.InstanceKey)
+	return c.attemptEvents.getOrCreate(ctx, cfg.InstanceKey)
 }
 
-func (c *ExecutionInstanceController) RouteAttemptEvent(instanceKey string, event AttemptEvent) error {
-	return c.attemptEvents.RouteAttemptEvent(instanceKey, event)
+func (c *ExecutionInstanceController) RouteAttemptEvent(ctx context.Context, instanceKey string, event AttemptEvent) error {
+	if err := c.ensureReady(); err != nil {
+		return err
+	}
+	return c.attemptEvents.RouteAttemptEvent(ctx, instanceKey, event)
 }
 
-func (c *ExecutionInstanceController) RouteDispatchTarget(instanceKey string, target int) error {
-	return c.attemptEvents.RouteDispatchTarget(instanceKey, target)
+func (c *ExecutionInstanceController) RouteDispatchTarget(ctx context.Context, instanceKey string, target int) error {
+	if err := c.ensureReady(); err != nil {
+		return err
+	}
+	return c.attemptEvents.RouteDispatchTarget(ctx, instanceKey, target)
 }

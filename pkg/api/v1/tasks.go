@@ -24,6 +24,11 @@ type TasksGroup struct {
 	defaultImage string
 }
 
+// TasksGroup is the execution-task API surface.
+//
+// This path operates on execution substrate tasks (`task` table). Agent
+// orchestration ingress remains workspace-scoped under `/workspaces/:workspace_id/tasks`.
+
 type CreateTaskRequest struct {
 	WorkspaceID   string               `json:"workspace_id"`   // External workspace ID
 	WorkspaceName string               `json:"workspace_name"` // Or workspace name
@@ -100,7 +105,7 @@ func extractBearerToken(header string) string {
 	return ""
 }
 
-// CreateTask creates a new task and queues it for execution
+// CreateTask creates a new execution task and queues it for worker execution.
 func (g *TasksGroup) CreateTask(c echo.Context) error {
 	ctx := c.Request().Context()
 

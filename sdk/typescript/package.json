@@ -28,6 +28,7 @@
     "test:watch": "vitest",
     "test:prod": "AIRSTORE_BASE_URL=https://api.airstore.ai/api/v1 vitest run",
     "smoke:agent-runs": "tsx examples/agent-runs-smoke.ts",
+    "example:agent-sandbox": "tsx examples/agent-sandbox-example.ts",
     "prepublishOnly": "npm run clean && npm run build"
   },
   "keywords": [

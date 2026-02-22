@@ -2,7 +2,7 @@ import type { CoreClient, RequestOptions } from '../client.js';
 import type { AgentCreateParams, AgentProfile } from '../types/agents.js';
 
 /**
- * Manage orchestration agent profiles in a workspace.
+ * Manage agent profiles in a workspace.
  */
 export class Agents {
   constructor(private readonly client: CoreClient) {}

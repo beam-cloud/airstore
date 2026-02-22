@@ -10,6 +10,13 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+const (
+	defaultFailedAttemptThreshold = 5
+	maxFailedAttemptHistory       = 128
+	attemptEventBufferSize        = 256
+	dispatchEventBufferSize       = 64
+)
+
 type ExecutionInstanceState struct {
 	RunningAttempts  int
 	PendingAttempts  int
@@ -30,7 +37,6 @@ type ExecutionInstanceConfig struct {
 type ExecutionInstance struct {
 	Ctx        context.Context
 	CancelFunc context.CancelFunc
-	IsActive   bool
 
 	AttemptEventChan  chan AttemptEvent
 	DispatchEventChan chan int
@@ -79,7 +85,7 @@ func NewExecutionInstance(
 		return nil, fmt.Errorf("instance_key is required")
 	}
 	if cfg.FailedAttemptThreshold <= 0 {
-		cfg.FailedAttemptThreshold = 5
+		cfg.FailedAttemptThreshold = defaultFailedAttemptThreshold
 	}
 	if cfg.InstanceLockKey == "" {
 		cfg.InstanceLockKey = cfg.InstanceKey
@@ -89,9 +95,8 @@ func NewExecutionInstance(
 	inst := &ExecutionInstance{
 		Ctx:                    instCtx,
 		CancelFunc:             cancel,
-		IsActive:               true,
-		AttemptEventChan:       make(chan AttemptEvent, 256),
-		DispatchEventChan:      make(chan int, 64),
+		AttemptEventChan:       make(chan AttemptEvent, attemptEventBufferSize),
+		DispatchEventChan:      make(chan int, dispatchEventBufferSize),
 		InstanceLockKey:        cfg.InstanceLockKey,
 		FailedAttemptThreshold: cfg.FailedAttemptThreshold,
 		instanceKey:            cfg.InstanceKey,
@@ -127,7 +132,6 @@ func (e *ExecutionInstance) loop() {
 	for {
 		select {
 		case <-e.Ctx.Done():
-			e.IsActive = false
 			return
 		case ev := <-e.AttemptEventChan:
 			e.applyAttemptEvent(ev)
@@ -147,24 +151,16 @@ func (e *ExecutionInstance) applyAttemptEvent(ev AttemptEvent) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	switch {
-	case ev.Change > 0:
-		e.state.RunningAttempts += ev.Change
-		if e.state.RunningAttempts < 0 {
-			e.state.RunningAttempts = 0
-		}
-	case ev.Change < 0:
-		e.state.RunningAttempts += ev.Change
-		if e.state.RunningAttempts < 0 {
-			e.state.RunningAttempts = 0
-		}
+	e.state.RunningAttempts += ev.Change
+	if e.state.RunningAttempts < 0 {
+		e.state.RunningAttempts = 0
 	}
 
 	switch ev.Status {
 	case string(types.AgentAttemptStatusError), string(types.AgentAttemptStatusTimeout), string(types.AgentAttemptStatusCancelled):
 		e.state.FailedAttempts = append(e.state.FailedAttempts, ev.AttemptID)
-		if len(e.state.FailedAttempts) > 128 {
-			e.state.FailedAttempts = e.state.FailedAttempts[len(e.state.FailedAttempts)-128:]
+		if len(e.state.FailedAttempts) > maxFailedAttemptHistory {
+			e.state.FailedAttempts = e.state.FailedAttempts[len(e.state.FailedAttempts)-maxFailedAttemptHistory:]
 		}
 	}
 
@@ -173,17 +169,12 @@ func (e *ExecutionInstance) applyAttemptEvent(ev AttemptEvent) {
 		e.desiredDispatchTarget = 0
 	}
 
-	now := time.Now()
-	_ = e.store.UpdateExecutionInstanceState(
-		e.Ctx,
-		e.instanceKey,
-		e.state.RunningAttempts,
-		e.state.PendingAttempts,
-		e.state.StoppingAttempts,
-		e.desiredDispatchTarget,
-		e.status,
-		&now,
-	)
+	if err := e.persistStateLocked(); err != nil {
+		log.Warn().
+			Err(err).
+			Str("instance_key", e.instanceKey).
+			Msg("failed to persist execution instance attempt update")
+	}
 }
 
 func (e *ExecutionInstance) ConsumeAttemptEvent(ev AttemptEvent) {
@@ -220,17 +211,7 @@ func (e *ExecutionInstance) HandleDispatchEvent(target int) error {
 		}
 		e.desiredDispatchTarget = target
 
-		now := time.Now()
-		return e.store.UpdateExecutionInstanceState(
-			e.Ctx,
-			e.instanceKey,
-			e.state.RunningAttempts,
-			e.state.PendingAttempts,
-			e.state.StoppingAttempts,
-			e.desiredDispatchTarget,
-			e.status,
-			&now,
-		)
+		return e.persistStateLocked()
 	}
 	if e.locker != nil {
 		return e.locker.WithInstanceLock(e.Ctx, e.InstanceLockKey, apply)
@@ -243,6 +224,9 @@ func (e *ExecutionInstance) Sync() error {
 	if err != nil {
 		return err
 	}
+	if inst == nil {
+		return fmt.Errorf("execution instance %q not found", e.instanceKey)
+	}
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -253,6 +237,20 @@ func (e *ExecutionInstance) Sync() error {
 	e.state.StoppingAttempts = inst.StoppingAttempts
 	e.status = inst.Status
 	return nil
+}
+
+func (e *ExecutionInstance) persistStateLocked() error {
+	now := time.Now()
+	return e.store.UpdateExecutionInstanceState(
+		e.Ctx,
+		e.instanceKey,
+		e.state.RunningAttempts,
+		e.state.PendingAttempts,
+		e.state.StoppingAttempts,
+		e.desiredDispatchTarget,
+		e.status,
+		&now,
+	)
 }
 
 func (e *ExecutionInstance) DesiredDispatchTarget() int {

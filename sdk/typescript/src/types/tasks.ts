@@ -1,12 +1,27 @@
 export type QueueMode =
   | 'steer'
   | 'followup'
-  | 'collect'
-  | 'steer-backlog'
   | 'interrupt'
   | 'queue';
 
-export type EnvelopeKind = 'agent_command' | 'run_input' | 'followup' | 'cron';
+export type ExecHost = 'sandbox';
+export type ExecSecurity = 'deny' | 'allowlist' | 'full';
+export type ExecAsk = 'off' | 'on-miss' | 'always';
+export type RuntimeType = 'gvisor' | 'runc';
+export type WorkspaceAccess = 'none' | 'ro' | 'rw';
+
+export interface RunExecutionPolicy {
+  host?: ExecHost;
+  security?: ExecSecurity;
+  ask?: ExecAsk;
+  runtimeType?: RuntimeType;
+  workspaceAccess?: WorkspaceAccess;
+  networkEnabled?: boolean;
+  interactive?: boolean;
+  resources?: Record<string, number>;
+}
+
+export type EnvelopeKind = 'agent_command' | 'run_input';
 
 export type EnvelopeState = 'accepted' | 'queued' | 'dispatched' | 'dropped' | 'cancelled';
 
@@ -51,6 +66,7 @@ export interface AgentCommandCreateParams {
   sessionKey?: string;
   deliver?: boolean;
   timeoutMs?: number;
+  policy?: RunExecutionPolicy;
   lane?: string;
   extraSystemPrompt?: string;
   routing?: RoutingContext;

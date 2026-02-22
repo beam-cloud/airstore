@@ -72,11 +72,11 @@ export class Airstore extends CoreClient {
   readonly fs: Filesystem;
   /** Query the workspace access log. */
   readonly accessLog: AccessLog;
-  /** Manage orchestration agent profiles. */
+  /** Manage workspace agent profiles. */
   readonly agents: Agents;
-  /** Manage orchestration task envelopes (intent tasks). */
+  /** Manage task envelopes (intent tasks). */
   readonly tasks: Tasks;
-  /** Read and control orchestration runs. */
+  /** Read and control run lifecycle state. */
   readonly runs: Runs;
 
   constructor(opts?: ClientOptions) {

@@ -1,58 +1,54 @@
 # Agent Orchestration Model (MVP)
 
-This document defines the backend orchestration contract introduced for agents and runs.
+This is the minimal contract for agents + runs in `airstore`.
 
-## Intent vs Execution Separation
+## Core Model
 
-- `agent_task_envelope` is the source of truth for accepted intent and routing metadata.
-- `agent_run` is the source of truth for run lifecycle state.
-- `agent_run_attempt` is the source of truth for concrete execution attempts.
-- `task` remains the execution substrate only; legacy `/api/v1/tasks` semantics are unchanged.
+- `agent_task_envelope`: accepted intent + routing + idempotency.
+- `agent_run`: execution lifecycle for the accepted intent.
+- `agent_run_attempt`: concrete execution attempt(s) for a run.
+- `task`: internal execution unit used by run attempts in the worker substrate.
 
-## Accepted-First Semantics
+## Runtime Flow
 
-Agent command ingress is accepted first and queued asynchronously:
+1. Validate and accept command payload.
+2. Persist envelope as `accepted`.
+3. Queue envelope in Redis and mark it `queued`.
+4. Dispatcher creates `run` and first `run_attempt`.
+5. Worker lifecycle updates attempts/runs and appends snapshots/events.
 
-1. Validate payload (`message`, `session_id`, `idempotency_key`, strict JSON fields).
-2. Persist envelope with state `accepted`.
-3. Queue envelope in Redis and transition envelope state to `queued`.
-4. Return accepted response immediately.
-5. Dispatcher later materializes `run` + `run_attempt` and bridges to execution `task`.
+Clients should treat acceptance as async and poll `runs` for terminal state.
 
-Because the acceptance step is decoupled from dispatch, client APIs should treat acceptance as asynchronous and poll `runs` for terminal state.
+## Queue Modes
 
-## Queue Reshaping
+Supported queue modes are `queue`, `followup`, `steer`, and `interrupt`.
 
-The queue router supports mode-based reshaping before dispatch:
+- `queue`: FIFO by envelope ID.
+- `followup` / `steer` / `interrupt`: latest-envelope-wins per mode key.
+- Replaced envelopes are marked `dropped` with a reason.
 
-- `queue`: FIFO enqueue by envelope ID.
-- `followup` / `steer` / `interrupt`: mode-key queue with latest-envelope wins behavior.
-- Replaced envelopes are marked `dropped` with a dropped reason.
+## Execution Policy
 
-## Run Lifecycle and Snapshots
+`POST /tasks` accepts an optional `policy` object:
 
-- Dispatcher creates `agent_run` in `accepted` and appends the first snapshot.
-- Worker callbacks (`SetTaskStarted`, `SetTaskResult`) update attempt + run lifecycle state.
-- Snapshot events are appended independently of envelope state transitions.
-- Run events are published to Redis (and S2 when configured).
+- `host`, `security`, `ask`
+- `runtime_type`, `workspace_access`, `network_enabled`, `interactive`
+- `resources` (`cpu`, `memory`, `gpu`)
 
-## Execution Policy Mapping
+The policy is validated at ingress, persisted on run/attempt metadata, and bridged onto execution tasks for worker sandbox configuration.
 
-Run policy maps deterministically to execution task + sandbox behavior:
+## API Surface
 
-- `host=sandbox` only (MVP constraint).
-- `interactive=true` maps to interactive task mode.
-- `runtime_type` maps to sandbox runtime (`gvisor`/`runc`).
-- `workspace_access` maps to mount behavior (`none`, `ro`, `rw`).
-- `network_enabled=false` disables sandbox networking.
-- `timeout_ms` maps to per-task execution context timeout.
-
-## API Surface (Workspace Scoped)
-
-Under `/api/v1/workspaces/:workspace_id`:
+Workspace-scoped endpoints under `/api/v1/workspaces/:workspace_id`:
 
 - `POST /agents`, `GET /agents`, `GET /agents/:agent_id`
-- `POST /tasks`, `GET /tasks/:envelope_id` (task envelope intent API)
+- `POST /tasks`, `GET /tasks/:envelope_id`
 - `GET /runs`, `GET /runs/:run_id`
 - `GET /runs/:run_id/attempts`, `GET /runs/:run_id/snapshots`, `GET /runs/:run_id/events`
 - `POST /runs/:run_id/input`, `POST /runs/:run_id/cancel`
+
+## Operational Caveats
+
+- Agent/run ingress endpoints use strict JSON decoding (unknown fields or extra trailing payload are rejected).
+- Accepted responses always include `accepted`, `idempotent_hit`, and `envelope`; task ingress also returns `run_id` when available.
+- Migration bridge logic includes idempotent schema guards so partially drifted databases can self-heal on startup.

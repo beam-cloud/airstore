@@ -49,7 +49,7 @@ func ValidateRunExecutionPolicy(p RunExecutionPolicy) error {
 	}
 
 	switch p.Host {
-	case ExecHostSandbox, ExecHostGateway, ExecHostNode:
+	case ExecHostSandbox:
 	default:
 		return fmt.Errorf("invalid host: %s", p.Host)
 	}
@@ -74,9 +74,6 @@ func ValidateRunExecutionPolicy(p RunExecutionPolicy) error {
 		return fmt.Errorf("invalid workspace_access: %s", p.WorkspaceAccess)
 	}
 
-	if p.Host != ExecHostSandbox {
-		return fmt.Errorf("only host=sandbox is supported in mvp")
-	}
 	return nil
 }
 

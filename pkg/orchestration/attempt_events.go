@@ -3,6 +3,7 @@ package orchestration
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,7 +26,7 @@ type IExecutionInstance interface {
 }
 
 type AttemptEventManager struct {
-	ctx             context.Context
+	defaultCtx      context.Context
 	mu              sync.RWMutex
 	instances       map[string]IExecutionInstance
 	initGroup       singleflight.Group
@@ -33,17 +34,27 @@ type AttemptEventManager struct {
 }
 
 func NewAttemptEventManager(
-	ctx context.Context,
+	defaultCtx context.Context,
 	instanceFactory func(ctx context.Context, instanceKey string) (IExecutionInstance, error),
 ) *AttemptEventManager {
+	if defaultCtx == nil {
+		defaultCtx = context.Background()
+	}
 	return &AttemptEventManager{
-		ctx:             ctx,
+		defaultCtx:      defaultCtx,
 		instances:       make(map[string]IExecutionInstance),
 		instanceFactory: instanceFactory,
 	}
 }
 
-func (m *AttemptEventManager) getOrCreate(instanceKey string) (IExecutionInstance, error) {
+func (m *AttemptEventManager) getOrCreate(ctx context.Context, instanceKey string) (IExecutionInstance, error) {
+	instanceKey = strings.TrimSpace(instanceKey)
+	if instanceKey == "" {
+		return nil, fmt.Errorf("instance_key is required")
+	}
+	if ctx == nil {
+		ctx = m.defaultCtx
+	}
 	m.mu.RLock()
 	existing, ok := m.instances[instanceKey]
 	m.mu.RUnlock()
@@ -60,7 +71,7 @@ func (m *AttemptEventManager) getOrCreate(instanceKey string) (IExecutionInstanc
 		if m.instanceFactory == nil {
 			return nil, fmt.Errorf("instance factory is not configured")
 		}
-		instance, err := m.instanceFactory(m.ctx, instanceKey)
+		instance, err := m.instanceFactory(ctx, instanceKey)
 		if err != nil {
 			return nil, err
 		}
@@ -79,8 +90,8 @@ func (m *AttemptEventManager) getOrCreate(instanceKey string) (IExecutionInstanc
 	return instance, nil
 }
 
-func (m *AttemptEventManager) RouteAttemptEvent(instanceKey string, event AttemptEvent) error {
-	instance, err := m.getOrCreate(instanceKey)
+func (m *AttemptEventManager) RouteAttemptEvent(ctx context.Context, instanceKey string, event AttemptEvent) error {
+	instance, err := m.getOrCreate(ctx, instanceKey)
 	if err != nil {
 		return err
 	}
@@ -91,8 +102,8 @@ func (m *AttemptEventManager) RouteAttemptEvent(instanceKey string, event Attemp
 	return nil
 }
 
-func (m *AttemptEventManager) RouteDispatchTarget(instanceKey string, target int) error {
-	instance, err := m.getOrCreate(instanceKey)
+func (m *AttemptEventManager) RouteDispatchTarget(ctx context.Context, instanceKey string, target int) error {
+	instance, err := m.getOrCreate(ctx, instanceKey)
 	if err != nil {
 		return err
 	}

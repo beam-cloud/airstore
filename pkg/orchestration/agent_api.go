@@ -111,7 +111,22 @@ func (a *AgentAPI) EnqueueRunInputEnvelope(
 	if queueMode == "" {
 		queueMode = types.AgentQueueModeFollowup
 	}
+	if err := validateRunInputQueueMode(queueMode); err != nil {
+		return nil, false, err
+	}
 	return a.runtime.AcceptRunInput(ctx, workspaceID, runID, queueMode, message, idempotencyKey)
+}
+
+func validateRunInputQueueMode(mode types.AgentQueueMode) error {
+	switch mode {
+	case types.AgentQueueModeQueue,
+		types.AgentQueueModeFollowup,
+		types.AgentQueueModeSteer,
+		types.AgentQueueModeInterrupt:
+		return nil
+	default:
+		return fmt.Errorf("queue_mode %q is not supported (supported: queue, followup, steer, interrupt)", mode)
+	}
 }
 
 func (a *AgentAPI) ListRuns(ctx context.Context, workspaceID uint, limit int) ([]*types.AgentRun, error) {

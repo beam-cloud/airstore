@@ -328,11 +328,11 @@ func (b *PostgresBackend) UpdateAgentTaskEnvelopeState(ctx context.Context, enve
 	now := time.Now()
 	query := `
 		UPDATE agent_task_envelope
-		SET state = $2,
-		    queued_at = CASE WHEN $2 = 'queued' THEN $3 ELSE queued_at END,
-		    dispatched_at = CASE WHEN $2 = 'dispatched' THEN $3 ELSE dispatched_at END,
-		    dropped_reason = CASE WHEN $2 = 'dropped' THEN $4 ELSE dropped_reason END,
-		    target_run_id = COALESCE($5, target_run_id),
+		SET state = $2::agent_envelope_state,
+		    queued_at = CASE WHEN $2::agent_envelope_state = 'queued'::agent_envelope_state THEN $3 ELSE queued_at END,
+		    dispatched_at = CASE WHEN $2::agent_envelope_state = 'dispatched'::agent_envelope_state THEN $3 ELSE dispatched_at END,
+		    dropped_reason = CASE WHEN $2::agent_envelope_state = 'dropped'::agent_envelope_state THEN $4 ELSE dropped_reason END,
+		    target_run_id = COALESCE($5::uuid, target_run_id),
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = $1
 	`

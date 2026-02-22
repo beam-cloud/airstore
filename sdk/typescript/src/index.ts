@@ -85,6 +85,12 @@ export type { VirtualFile, DirectoryListing, TreeListing } from './types/filesys
 export type { AgentProfile, AgentCreateParams } from './types/agents.js';
 export type {
   QueueMode,
+  ExecHost,
+  ExecSecurity,
+  ExecAsk,
+  RuntimeType,
+  WorkspaceAccess,
+  RunExecutionPolicy,
   EnvelopeKind,
   EnvelopeState,
   RoutingContext,

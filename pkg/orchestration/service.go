@@ -62,6 +62,9 @@ func (s *Service) AcceptAgentCommand(
 	}
 
 	runPolicy := DefaultRunExecutionPolicy()
+	if params.Policy != nil {
+		runPolicy = NormalizeRunExecutionPolicy(*params.Policy)
+	}
 	instanceKey := ExecutionClassKey(workspaceID, params.AgentID, params.Lane, runPolicy)
 
 	payload := map[string]any{
@@ -187,6 +190,9 @@ func (s *Service) dispatchLoop(ctx context.Context) {
 
 		if err := s.dispatchEnvelope(ctx, envelopeID); err != nil {
 			log.Warn().Err(err).Str("envelope_id", envelopeID).Msg("dispatch envelope failed")
+			if requeueErr := s.requeueIfDispatchable(ctx, envelopeID); requeueErr != nil {
+				log.Warn().Err(requeueErr).Str("envelope_id", envelopeID).Msg("failed to requeue envelope after dispatch error")
+			}
 		}
 	}
 }
@@ -249,7 +255,7 @@ func (s *Service) handleExecutionEnvelope(ctx context.Context, envelope *types.A
 		instanceKey = ExecutionClassKey(envelope.WorkspaceID, envelope.AgentID, lane, p)
 	}
 
-	if _, err := s.instanceController.EnsureInstance(ExecutionInstanceConfig{
+	if _, err := s.instanceController.EnsureInstance(ctx, ExecutionInstanceConfig{
 		InstanceKey:            instanceKey,
 		WorkspaceID:            envelope.WorkspaceID,
 		AgentID:                envelope.AgentID,
@@ -257,19 +263,26 @@ func (s *Service) handleExecutionEnvelope(ctx context.Context, envelope *types.A
 		ExecutionClassKey:      strings.TrimPrefix(instanceKey, "execclass_"),
 		FailedAttemptThreshold: 5,
 		InstanceLockKey:        common.Keys.AgentInstanceLock(instanceKey),
-	}); err == nil {
-		_ = s.instanceController.RouteDispatchTarget(instanceKey, 1)
+	}); err != nil {
+		return err
+	}
+	if err := s.instanceController.RouteDispatchTarget(ctx, instanceKey, 1); err != nil {
+		log.Warn().Err(err).Str("instance_key", instanceKey).Msg("failed to route initial dispatch target")
 	}
 
 	if instance, err := s.backend.GetExecutionInstanceByKey(ctx, instanceKey); err == nil {
 		desired := instance.DesiredDispatchConcurrency
 		if desired <= 0 {
 			desired = 1
-			_ = s.instanceController.RouteDispatchTarget(instanceKey, desired)
+			if err := s.instanceController.RouteDispatchTarget(ctx, instanceKey, desired); err != nil {
+				log.Warn().Err(err).Str("instance_key", instanceKey).Msg("failed to route desired dispatch target")
+			}
 		}
 		if instance.RunningAttempts >= desired {
 			// Capacity is currently saturated for this execution class.
-			_ = s.queueRouter.RequeueEnvelope(ctx, envelope.ID)
+			if err := s.queueRouter.RequeueEnvelope(ctx, envelope.ID); err != nil {
+				return err
+			}
 			return nil
 		}
 	}
@@ -631,4 +644,15 @@ func executionInstanceKeyFromRun(run *types.AgentRun) string {
 		Interactive:     run.Interactive,
 		Resources:       map[string]any{},
 	})
+}
+
+func (s *Service) requeueIfDispatchable(ctx context.Context, envelopeID string) error {
+	envelope, err := s.backend.GetAgentTaskEnvelopeByID(ctx, envelopeID)
+	if err != nil {
+		return err
+	}
+	if envelope.State != types.AgentEnvelopeStateAccepted && envelope.State != types.AgentEnvelopeStateQueued {
+		return nil
+	}
+	return s.queueRouter.RequeueEnvelope(ctx, envelope.ID)
 }

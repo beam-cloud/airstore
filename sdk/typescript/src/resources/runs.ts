@@ -9,7 +9,7 @@ import type {
 import type { TaskEnvelopeAcceptedResponse } from '../types/tasks.js';
 
 /**
- * Read and control orchestration runs.
+ * Read and control run lifecycle state (attempts, snapshots, events).
  */
 export class Runs {
   constructor(private readonly client: CoreClient) {}

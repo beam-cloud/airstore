@@ -126,6 +126,11 @@ func NewWorker() (*Worker, error) {
 
 	// Create sandbox manager
 	sandboxManager, err := NewSandboxManager(ctx, Config{
+		BundleDir:        os.Getenv("AIRSTORE_WORKER_BUNDLE_DIR"),
+		StateDir:         os.Getenv("AIRSTORE_WORKER_STATE_DIR"),
+		MountDir:         os.Getenv("AIRSTORE_WORKER_MOUNT_DIR"),
+		WorkerMount:      os.Getenv("AIRSTORE_WORKER_FS_MOUNT"),
+		CLIBinary:        os.Getenv("AIRSTORE_WORKER_CLI_BINARY"),
 		WorkerID:         workerId,
 		GatewayAddr:      gatewayGRPCAddr,
 		AuthToken:        authToken,

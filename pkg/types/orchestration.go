@@ -7,19 +7,15 @@ type AgentEnvelopeKind string
 const (
 	AgentEnvelopeKindAgentCommand AgentEnvelopeKind = "agent_command"
 	AgentEnvelopeKindRunInput     AgentEnvelopeKind = "run_input"
-	AgentEnvelopeKindFollowup     AgentEnvelopeKind = "followup"
-	AgentEnvelopeKindCron         AgentEnvelopeKind = "cron"
 )
 
 type AgentQueueMode string
 
 const (
-	AgentQueueModeSteer        AgentQueueMode = "steer"
-	AgentQueueModeFollowup     AgentQueueMode = "followup"
-	AgentQueueModeCollect      AgentQueueMode = "collect"
-	AgentQueueModeSteerBacklog AgentQueueMode = "steer-backlog"
-	AgentQueueModeInterrupt    AgentQueueMode = "interrupt"
-	AgentQueueModeQueue        AgentQueueMode = "queue"
+	AgentQueueModeSteer     AgentQueueMode = "steer"
+	AgentQueueModeFollowup  AgentQueueMode = "followup"
+	AgentQueueModeInterrupt AgentQueueMode = "interrupt"
+	AgentQueueModeQueue     AgentQueueMode = "queue"
 )
 
 type AgentEnvelopeState string

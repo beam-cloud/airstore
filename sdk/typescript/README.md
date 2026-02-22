@@ -145,11 +145,18 @@ await airstore.connections.del('ws_abc123', 'conn_abc123');
 
 ### Orchestration (Agents, Task Envelopes, Runs)
 
-The orchestration APIs are workspace-scoped and intentionally split into:
+These APIs are workspace-scoped and split into:
 
 - `agents`: persistent profile/config.
-- `tasks`: **intent envelopes** (accepted-first ingress, idempotent).
+- `tasks`: task envelopes (accepted-first ingress, idempotent).
 - `runs`: execution lifecycle and attempt/snapshot introspection.
+
+Flow is:
+
+1. submit a task envelope,
+2. materialize a run,
+3. execute via run attempts,
+4. map attempts to execution tasks in the worker substrate.
 
 ```typescript
 // 1) Create an agent profile
@@ -166,6 +173,16 @@ const accepted = await airstore.tasks.create('ws_abc123', {
   agentId: agent.id,
   idempotencyKey: 'idem-abc',
   timeoutMs: 120_000,
+  policy: {
+    host: 'sandbox',
+    security: 'allowlist',
+    ask: 'off',
+    runtimeType: 'gvisor',
+    workspaceAccess: 'rw',
+    networkEnabled: true,
+    interactive: false,
+    resources: { cpu: 1000, memory: 2 * 1024 * 1024 * 1024 },
+  },
 });
 
 // 3) Resolve and poll the run
@@ -176,6 +193,8 @@ if (runId) {
   const snapshots = await airstore.runs.listSnapshots('ws_abc123', runId);
 }
 ```
+
+`runs.input(...)` supports queue modes: `queue`, `followup`, `steer`, `interrupt`.
 
 ### Source Views
 
