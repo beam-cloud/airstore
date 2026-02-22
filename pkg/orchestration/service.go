@@ -65,6 +65,22 @@ func (s *AgentService) AcceptAgentCommand(
 		runPolicy = NormalizeRunExecutionPolicy(*params.Policy)
 	}
 	instanceKey := ExecutionClassKey(workspaceID, params.AgentID, params.Lane, runPolicy)
+	agentConfig := map[string]any{}
+	agentProvider := ""
+	agentModel := ""
+	if params.AgentID != nil {
+		agentID := strings.TrimSpace(*params.AgentID)
+		if agentID == "" {
+			return nil, false, fmt.Errorf("agent_id must not be empty")
+		}
+		profile, err := s.backend.GetAgentProfile(ctx, workspaceID, agentID)
+		if err != nil {
+			return nil, false, err
+		}
+		agentConfig = cloneAnyMap(profile.ConfigJSON)
+		agentProvider = agentConfigString(agentConfig, "provider", "llm_provider")
+		agentModel = agentConfigString(agentConfig, "model", "default_model", "llm_model")
+	}
 
 	payload := map[string]any{
 		"message":             params.Message,
@@ -79,6 +95,15 @@ func (s *AgentService) AcceptAgentCommand(
 		"deliver":             params.Deliver,
 		"attachments":         params.Attachments,
 		"instance_key":        instanceKey,
+	}
+	if len(agentConfig) > 0 {
+		payload["agent_config"] = agentConfig
+	}
+	if agentProvider != "" {
+		payload["provider"] = agentProvider
+	}
+	if agentModel != "" {
+		payload["model"] = agentModel
 	}
 
 	envelope := &types.AgentTaskEnvelope{
@@ -314,6 +339,24 @@ func (s *AgentService) handleExecutionEnvelope(ctx context.Context, envelope *ty
 	if err != nil {
 		return err
 	}
+	taskEnv := map[string]string{}
+	applyRunRuntimeEnv(taskEnv, run)
+	applyAgentConfigEnv(taskEnv, mapFromPayload(envelope.PayloadJSON, "agent_config"))
+	executionPolicy := map[string]any{
+		"host":             run.ExecHost,
+		"security":         run.ExecSecurity,
+		"ask":              run.ExecAsk,
+		"runtime_type":     run.RuntimeType,
+		"workspace_access": run.WorkspaceAccess,
+		"network_enabled":  run.NetworkEnabled,
+		"interactive":      run.Interactive,
+	}
+	if run.Provider != nil {
+		executionPolicy["provider"] = *run.Provider
+	}
+	if run.Model != nil {
+		executionPolicy["model"] = *run.Model
+	}
 
 	execTask := &types.Task{
 		WorkspaceId:       run.WorkspaceID,
@@ -323,7 +366,7 @@ func (s *AgentService) handleExecutionEnvelope(ctx context.Context, envelope *ty
 		Prompt:            prompt,
 		Image:             s.defaultImage,
 		Entrypoint:        []string{},
-		Env:               map[string]string{},
+		Env:               taskEnv,
 		Resources:         ToTaskResources(runPolicy),
 		RunAttemptID:      &attempt.ID,
 		TimeoutMs:         &run.TimeoutMs,
@@ -333,7 +376,7 @@ func (s *AgentService) handleExecutionEnvelope(ctx context.Context, envelope *ty
 		RuntimeType:       strPtr(run.RuntimeType),
 		WorkspaceAccess:   strPtr(run.WorkspaceAccess),
 		NetworkEnabled:    boolPtr(run.NetworkEnabled),
-		ExecutionPolicy:   map[string]any{"host": run.ExecHost, "security": run.ExecSecurity, "ask": run.ExecAsk, "runtime_type": run.RuntimeType, "workspace_access": run.WorkspaceAccess, "network_enabled": run.NetworkEnabled, "interactive": run.Interactive},
+		ExecutionPolicy:   executionPolicy,
 		CreatedByMemberId: nil,
 	}
 	if err := s.backend.CreateTask(ctx, execTask); err != nil {
@@ -378,15 +421,7 @@ func (s *AgentService) materializeRun(
 	sessionKey := strPtrMaybe(stringFromPayload(payload, "session_key"))
 	agentID := envelope.AgentID
 	instanceKey := instanceKeyFromPayload(envelope.WorkspaceID, agentID, payload, runPolicy)
-
-	var provider *string
-	if v := stringFromPayload(payload, "provider"); v != "" {
-		provider = &v
-	}
-	var model *string
-	if v := stringFromPayload(payload, "model"); v != "" {
-		model = &v
-	}
+	provider, model := providerModelFromPayload(payload)
 
 	run := &types.AgentRun{
 		WorkspaceID:      envelope.WorkspaceID,
@@ -550,6 +585,127 @@ func runPolicyFromPayload(payload map[string]any) RunExecutionPolicy {
 	body, _ := json.Marshal(rawPolicy)
 	_ = json.Unmarshal(body, &policy)
 	return NormalizeRunExecutionPolicy(policy)
+}
+
+func mapFromPayload(payload map[string]any, key string) map[string]any {
+	raw, ok := payload[key]
+	if !ok || raw == nil {
+		return map[string]any{}
+	}
+	if typed, ok := raw.(map[string]any); ok {
+		return typed
+	}
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return map[string]any{}
+	}
+	out := map[string]any{}
+	if err := json.Unmarshal(b, &out); err != nil {
+		return map[string]any{}
+	}
+	return out
+}
+
+func cloneAnyMap(src map[string]any) map[string]any {
+	if len(src) == 0 {
+		return map[string]any{}
+	}
+	out := make(map[string]any, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+func agentConfigString(config map[string]any, keys ...string) string {
+	if len(config) == 0 {
+		return ""
+	}
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		if value := stringFromPayload(config, key); strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func providerModelFromPayload(payload map[string]any) (*string, *string) {
+	provider := strPtrMaybe(stringFromPayload(payload, "provider"))
+	model := strPtrMaybe(stringFromPayload(payload, "model"))
+	if provider != nil && model != nil {
+		return provider, model
+	}
+	agentConfig := mapFromPayload(payload, "agent_config")
+	if provider == nil {
+		provider = strPtrMaybe(agentConfigString(agentConfig, "provider", "llm_provider"))
+	}
+	if model == nil {
+		model = strPtrMaybe(agentConfigString(agentConfig, "model", "default_model", "llm_model"))
+	}
+	return provider, model
+}
+
+func applyRunRuntimeEnv(env map[string]string, run *types.AgentRun) {
+	if env == nil || run == nil {
+		return
+	}
+	if run.Provider != nil && strings.TrimSpace(*run.Provider) != "" {
+		env["AIRSTORE_AGENT_PROVIDER"] = strings.TrimSpace(*run.Provider)
+	}
+	if run.Model != nil && strings.TrimSpace(*run.Model) != "" {
+		env["AIRSTORE_AGENT_MODEL"] = strings.TrimSpace(*run.Model)
+	}
+}
+
+func applyAgentConfigEnv(env map[string]string, config map[string]any) {
+	if env == nil || len(config) == 0 {
+		return
+	}
+	for key, value := range config {
+		sanitized := sanitizeEnvSegment(key)
+		if sanitized == "" || value == nil {
+			continue
+		}
+		env["AIRSTORE_AGENT_CONFIG_"+sanitized] = stringifyEnvValue(value)
+	}
+}
+
+func sanitizeEnvSegment(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	var builder strings.Builder
+	builder.Grow(len(value))
+	for _, ch := range value {
+		switch {
+		case ch >= 'a' && ch <= 'z':
+			builder.WriteRune(ch - 32)
+		case ch >= 'A' && ch <= 'Z', ch >= '0' && ch <= '9':
+			builder.WriteRune(ch)
+		default:
+			builder.WriteRune('_')
+		}
+	}
+	return strings.Trim(builder.String(), "_")
+}
+
+func stringifyEnvValue(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case bool, int, int32, int64, float32, float64:
+		return fmt.Sprintf("%v", typed)
+	default:
+		body, err := json.Marshal(typed)
+		if err != nil {
+			return fmt.Sprintf("%v", typed)
+		}
+		return string(body)
+	}
 }
 
 func instanceKeyFromPayload(workspaceID uint, agentID *string, payload map[string]any, policy RunExecutionPolicy) string {

@@ -18,6 +18,7 @@ type fakeBackend struct {
 	repository.BackendRepository
 	mu           sync.Mutex
 	envelopes    map[string]*types.AgentTaskEnvelope
+	profiles     map[string]*types.AgentProfile
 	idempotency  map[string]string
 	droppedCount int
 }
@@ -25,6 +26,7 @@ type fakeBackend struct {
 func newFakeBackend() *fakeBackend {
 	return &fakeBackend{
 		envelopes:   map[string]*types.AgentTaskEnvelope{},
+		profiles:    map[string]*types.AgentProfile{},
 		idempotency: map[string]string{},
 	}
 }
@@ -80,6 +82,16 @@ func (f *fakeBackend) UpdateAgentTaskEnvelopeState(_ context.Context, envelopeID
 		f.droppedCount++
 	}
 	return nil
+}
+
+func (f *fakeBackend) GetAgentProfile(_ context.Context, workspaceID uint, agentID string) (*types.AgentProfile, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	profile, ok := f.profiles[agentID]
+	if !ok || profile.WorkspaceID != workspaceID {
+		return nil, &types.ErrAgentProfileNotFound{ID: agentID}
+	}
+	return profile, nil
 }
 
 func newTestRedis(t *testing.T) (*common.RedisClient, func()) {
@@ -177,4 +189,43 @@ func TestQueueReshapingDropsOlderFollowupEnvelope(t *testing.T) {
 	envelopeID, err := router.ResolveEnvelopeID(ctx, token)
 	require.NoError(t, err)
 	require.Equal(t, second.ID, envelopeID)
+}
+
+func TestAcceptAgentCommandAppliesAgentConfigModelAndProvider(t *testing.T) {
+	redisClient, cleanup := newTestRedis(t)
+	defer cleanup()
+
+	backend := newFakeBackend()
+	agentID := uuid.NewString()
+	backend.profiles[agentID] = &types.AgentProfile{
+		ID:          agentID,
+		WorkspaceID: 42,
+		AgentKey:    "agent-key",
+		Name:        "Agent",
+		ConfigJSON: map[string]any{
+			"provider": "claude",
+			"model":    "claude-sonnet-4",
+			"purpose":  "test",
+		},
+		Active: true,
+	}
+
+	svc := NewAgentService(context.Background(), backend, nil, redisClient, nil, "ghcr.io/beam/sandbox:latest")
+	params := AgentCommandParams{
+		Message:        "hello world",
+		AgentID:        &agentID,
+		SessionID:      "session-1",
+		IdempotencyKey: "idem-with-model",
+	}
+
+	envelope, deduped, err := svc.AcceptAgentCommand(context.Background(), 42, params)
+	require.NoError(t, err)
+	require.False(t, deduped)
+	require.Equal(t, "claude", envelope.PayloadJSON["provider"])
+	require.Equal(t, "claude-sonnet-4", envelope.PayloadJSON["model"])
+	require.Equal(t, map[string]any{
+		"provider": "claude",
+		"model":    "claude-sonnet-4",
+		"purpose":  "test",
+	}, envelope.PayloadJSON["agent_config"])
 }

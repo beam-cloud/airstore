@@ -23,13 +23,11 @@ import (
 // SandboxManager manages the lifecycle of sandboxes on a worker.
 type SandboxManager struct {
 	// Configuration
-	paths           types.WorkerPaths
-	workerID        string
-	gatewayAddr     string
-	authToken       string
-	anthropicAPIKey string
-	kernelAPIKey    string
-	enableFS        bool
+	paths       types.WorkerPaths
+	workerID    string
+	gatewayAddr string
+	authToken   string
+	enableFS    bool
 
 	// Components
 	runtime      runtime.Runtime
@@ -44,6 +42,10 @@ type SandboxManager struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	fsCmd     *exec.Cmd
+
+	// Prompt runners
+	promptRunners       map[string]AgentExecutionRunner
+	defaultPromptRunner AgentExecutionRunner
 }
 
 // Sandbox represents a running sandbox with its resources.
@@ -163,21 +165,28 @@ func NewSandboxManager(ctx context.Context, cfg Config) (*SandboxManager, error)
 	}
 
 	manager := &SandboxManager{
-		paths:           paths,
-		workerID:        cfg.WorkerID,
-		gatewayAddr:     cfg.GatewayAddr,
-		authToken:       cfg.AuthToken,
-		anthropicAPIKey: cfg.AnthropicAPIKey,
-		kernelAPIKey:    cfg.KernelAPIKey,
-		enableFS:        cfg.EnableFilesystem,
-		runtime:         rt,
-		imageManager:    imgMgr,
-		mountManager:    mountMgr,
-		network:         netMgr,
-		s2:              s2,
-		sandboxes:       make(map[string]*Sandbox),
-		ctx:             managerCtx,
-		cancel:          cancel,
+		paths:        paths,
+		workerID:     cfg.WorkerID,
+		gatewayAddr:  cfg.GatewayAddr,
+		authToken:    cfg.AuthToken,
+		enableFS:     cfg.EnableFilesystem,
+		runtime:      rt,
+		imageManager: imgMgr,
+		mountManager: mountMgr,
+		network:      netMgr,
+		s2:           s2,
+		sandboxes:    make(map[string]*Sandbox),
+		ctx:          managerCtx,
+		cancel:       cancel,
+	}
+	claudeRunner := NewClaudeCodeRunner(ClaudeCodeRunnerOptions{
+		AnthropicAPIKey: cfg.AnthropicAPIKey,
+		KernelAPIKey:    cfg.KernelAPIKey,
+	})
+	manager.defaultPromptRunner = claudeRunner
+	manager.promptRunners = map[string]AgentExecutionRunner{
+		"claude":    claudeRunner,
+		"anthropic": claudeRunner,
 	}
 
 	// Bring up the global worker mount during initialization so the first task
@@ -870,45 +879,31 @@ func (m *SandboxManager) buildEntrypoint(task types.Task, env map[string]string)
 }
 
 func (m *SandboxManager) buildPromptTaskEntrypoint(task types.Task, env map[string]string) []string {
-	// Prompt tasks currently use Claude CLI. Keep this isolated so future
-	// prompt runners can be swapped without touching generic entrypoint flow.
-	return m.buildClaudePromptEntrypoint(task, env)
+	runner := m.resolvePromptRunner(task, env)
+	return runner.BuildEntrypoint(task, env)
 }
 
-func (m *SandboxManager) buildClaudePromptEntrypoint(task types.Task, env map[string]string) []string {
-	m.injectAnthropicAPIKey(env, true)
-	m.injectKernelEnv(env)
-
-	log.Info().
-		Str("task_id", task.ExternalId).
-		Str("prompt", task.Prompt[:min(50, len(task.Prompt))]).
-		Msg("running claude code task")
-
-	return claudePromptEntrypoint(task.Prompt)
-}
-
-func (m *SandboxManager) injectKernelEnv(env map[string]string) {
-	if m.kernelAPIKey == "" {
-		log.Warn().Msg("kernel API key not configured, browser tool will not work")
-		return
+func (m *SandboxManager) resolvePromptRunner(task types.Task, env map[string]string) AgentExecutionRunner {
+	defaultRunner := m.defaultPromptRunner
+	if defaultRunner == nil {
+		defaultRunner = NewClaudeCodeRunner(ClaudeCodeRunnerOptions{})
 	}
-	m.injectAPIKey(env, "KERNEL_API_KEY", m.kernelAPIKey, false)
-	if env["AGENT_BROWSER_PROVIDER"] == "" {
-		env["AGENT_BROWSER_PROVIDER"] = "kernel"
-	}
-	log.Debug().Str("provider", env["AGENT_BROWSER_PROVIDER"]).Msg("kernel browser env injected")
-}
 
-func claudePromptEntrypoint(prompt string) []string {
-	// Claude Code CLI: non-interactive, streaming JSON output
-	return []string{
-		"claude",
-		"--print",
-		"--verbose",
-		"--output-format", "stream-json",
-		"--dangerously-skip-permissions",
-		"-p", prompt,
+	provider := runnerProviderFromEnv(env)
+	if provider == "" {
+		return defaultRunner
 	}
+
+	runner, ok := m.promptRunners[provider]
+	if !ok || runner == nil {
+		log.Warn().
+			Str("provider", provider).
+			Str("task_id", task.ExternalId).
+			Str("default_runner", defaultRunner.Name()).
+			Msg("unsupported agent provider for prompt task, falling back to default runner")
+		return defaultRunner
+	}
+	return runner
 }
 
 func (m *SandboxManager) copyTaskEnv(task types.Task) map[string]string {
@@ -917,19 +912,6 @@ func (m *SandboxManager) copyTaskEnv(task types.Task) map[string]string {
 		env[key] = value
 	}
 	return env
-}
-
-func (m *SandboxManager) injectAnthropicAPIKey(env map[string]string, overwrite bool) {
-	m.injectAPIKey(env, "ANTHROPIC_API_KEY", m.anthropicAPIKey, overwrite)
-}
-
-func (m *SandboxManager) injectAPIKey(env map[string]string, key, value string, overwrite bool) {
-	if value == "" {
-		return
-	}
-	if overwrite || env[key] == "" {
-		env[key] = value
-	}
 }
 
 func (m *SandboxManager) buildTaskSandboxConfig(task types.Task, entrypoint []string, env map[string]string, mountSource string) types.SandboxConfig {

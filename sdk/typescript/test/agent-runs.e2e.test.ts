@@ -194,6 +194,7 @@ describe('Agent/Runs E2E', () => {
     const run = await waitForTerminalRun(workspaceId, runId, 180_000);
     expect(run.id).toBe(runId);
     expect(run.status).toBe('ok');
+    expect(run.model).toBe('claude-sonnet-4');
 
     const attempts = await client.runs.listAttempts(workspaceId, runId);
     const snapshots = await client.runs.listSnapshots(workspaceId, runId);
