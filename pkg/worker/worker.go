@@ -21,7 +21,6 @@ import (
 
 const (
 	defaultHeartbeatInterval time.Duration = 10 * time.Second
-	defaultShutdownTimeout   time.Duration = 30 * time.Second
 )
 
 // Worker represents a airstore worker that:

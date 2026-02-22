@@ -16,7 +16,7 @@ import (
 type AgentService struct {
 	backend            repository.BackendRepository
 	taskQueue          repository.TaskQueue
-	redis              *common.RedisClient
+	runEvents          repository.AgentRunEventStore
 	s2                 *common.S2Client
 	defaultImage       string
 	queueRouter        *EnvelopeQueueRouter
@@ -28,15 +28,19 @@ func NewAgentService(
 	backend repository.BackendRepository,
 	taskQueue repository.TaskQueue,
 	redis *common.RedisClient,
+	runEvents repository.AgentRunEventStore,
 	s2 *common.S2Client,
 	defaultImage string,
 ) *AgentService {
 	queueStore := repository.NewAgentEnvelopeQueueStore(backend, redis)
 	instanceLocker := repository.NewAgentInstanceDispatchLocker(redis)
+	if runEvents == nil {
+		runEvents = repository.NewAgentRunEventStore(redis)
+	}
 	return &AgentService{
 		backend:            backend,
 		taskQueue:          taskQueue,
-		redis:              redis,
+		runEvents:          runEvents,
 		s2:                 s2,
 		defaultImage:       defaultImage,
 		queueRouter:        NewEnvelopeQueueRouter(queueStore),
@@ -520,14 +524,9 @@ func (s *AgentService) publishRunEvent(ctx context.Context, runID, eventType str
 			log.Warn().Err(err).Str("run_id", runID).Msg("failed to append run event to s2")
 		}
 	}
-	if s.redis != nil {
+	if s.runEvents != nil {
 		body, _ := json.Marshal(event)
-		pipe := s.redis.Pipeline()
-		pipe.Publish(ctx, common.Keys.AgentRunEventsChannel(runID), body)
-		pipe.RPush(ctx, common.Keys.AgentRunEventsBuffer(runID), body)
-		pipe.Expire(ctx, common.Keys.AgentRunEventsBuffer(runID), 24*time.Hour)
-		_, err := pipe.Exec(ctx)
-		return err
+		return s.runEvents.PublishRunEvent(ctx, runID, body)
 	}
 	return nil
 }

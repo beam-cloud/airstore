@@ -47,7 +47,7 @@ import (
 type Gateway struct {
 	Config      types.AppConfig
 	RedisClient *common.RedisClient
-	BackendRepo *repository.PostgresBackend
+	BackendRepo repository.BackendRepository
 	httpServer  *http.Server
 	grpcServer  *grpc.Server
 	echo        *echo.Echo
@@ -87,7 +87,7 @@ func NewGateway() (*Gateway, error) {
 	}
 
 	var redisClient *common.RedisClient
-	var backendRepo *repository.PostgresBackend
+	var backendRepo repository.BackendRepository
 
 	// Local mode: skip Redis and Postgres
 	if config.IsLocalMode() {
@@ -554,16 +554,18 @@ func (g *Gateway) registerServices() error {
 		apiv1.NewTasksGroup(g.baseRouteGroup.Group("/tasks"), g.BackendRepo, taskQueue, terminalIO, g.s2Client, g.Config.Sandbox.GetDefaultImage())
 
 		// Agent orchestration engine and gRPC service.
+		runEventStore := repository.NewAgentRunEventStore(g.RedisClient)
 		orchestratorSvc := orchestration.NewAgentService(
 			g.ctx,
 			g.BackendRepo,
 			taskQueue,
 			g.RedisClient,
+			runEventStore,
 			g.s2Client,
 			g.Config.Sandbox.GetDefaultImage(),
 		)
 		orchestratorSvc.Start(g.ctx)
-		agentAPI := orchestration.NewAgentAPI(g.BackendRepo, g.RedisClient, orchestratorSvc)
+		agentAPI := orchestration.NewAgentAPI(g.BackendRepo, runEventStore, orchestratorSvc)
 		agentService := services.NewAgentService(g.BackendRepo, agentAPI)
 		pb.RegisterAgentServiceServer(g.grpcServer, agentService)
 		log.Info().Msg("agent service registered")

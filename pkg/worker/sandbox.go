@@ -858,11 +858,6 @@ func (m *SandboxManager) addFilesystemMount(spec *specs.Spec, source string, rea
 	return nil
 }
 
-// ptrInt64 returns a pointer to an int64
-func ptrInt64(v int64) *int64 {
-	return &v
-}
-
 // buildEntrypoint constructs the entrypoint for a task.
 // Prompt tasks are resolved through prompt runner entrypoints; all other tasks
 // use their explicit task entrypoint.

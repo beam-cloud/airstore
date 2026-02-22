@@ -16,11 +16,11 @@ import (
 type WorkerService struct {
 	pb.UnimplementedWorkerServiceServer
 	scheduler  *scheduler.Scheduler
-	backend    *repository.PostgresBackend
+	backend    repository.BackendRepository
 	workerRepo repository.WorkerRepository
 }
 
-func NewWorkerService(sched *scheduler.Scheduler, backend *repository.PostgresBackend, workerRepo repository.WorkerRepository) *WorkerService {
+func NewWorkerService(sched *scheduler.Scheduler, backend repository.BackendRepository, workerRepo repository.WorkerRepository) *WorkerService {
 	return &WorkerService{
 		scheduler:  sched,
 		backend:    backend,
@@ -204,7 +204,7 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 
 func appendRunSnapshot(
 	ctx context.Context,
-	backend *repository.PostgresBackend,
+	backend repository.BackendRepository,
 	runID string,
 	status types.AgentRunStatus,
 	startedAt *time.Time,
@@ -238,7 +238,7 @@ func appendRunSnapshot(
 	})
 }
 
-func updateExecutionInstanceCounts(ctx context.Context, backend *repository.PostgresBackend, runID string, runningDelta int) error {
+func updateExecutionInstanceCounts(ctx context.Context, backend repository.BackendRepository, runID string, runningDelta int) error {
 	run, err := backend.GetAgentRunByID(ctx, runID)
 	if err != nil {
 		return err

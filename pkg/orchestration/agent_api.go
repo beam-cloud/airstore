@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 )
@@ -15,20 +14,20 @@ import (
 // AgentAPI is the shared application layer for agent/task-envelope/run flows.
 // Transport layers (gRPC/HTTP) should call this directly.
 type AgentAPI struct {
-	backend repository.BackendRepository
-	redis   *common.RedisClient
-	runtime *AgentService
+	backend   repository.BackendRepository
+	runEvents repository.AgentRunEventStore
+	runtime   *AgentService
 }
 
 func NewAgentAPI(
 	backend repository.BackendRepository,
-	redis *common.RedisClient,
+	runEvents repository.AgentRunEventStore,
 	runtime *AgentService,
 ) *AgentAPI {
 	return &AgentAPI{
-		backend: backend,
-		redis:   redis,
-		runtime: runtime,
+		backend:   backend,
+		runEvents: runEvents,
+		runtime:   runtime,
 	}
 }
 
@@ -161,10 +160,10 @@ func (a *AgentAPI) ListRunEvents(ctx context.Context, workspaceID uint, runID st
 	if _, err := a.GetRun(ctx, workspaceID, runID); err != nil {
 		return nil, err
 	}
-	if a.redis == nil {
+	if a.runEvents == nil {
 		return []map[string]any{}, nil
 	}
-	rows, err := a.redis.LRange(ctx, common.Keys.AgentRunEventsBuffer(runID), 0, -1).Result()
+	rows, err := a.runEvents.ListRunEvents(ctx, runID)
 	if err != nil {
 		return nil, err
 	}

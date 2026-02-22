@@ -105,7 +105,7 @@ func TestAcceptAgentCommandAcceptedFirstAndIdempotent(t *testing.T) {
 	defer cleanup()
 
 	backend := newFakeBackend()
-	svc := NewAgentService(context.Background(), backend, nil, redisClient, nil, "ghcr.io/beam/sandbox:latest")
+	svc := NewAgentService(context.Background(), backend, nil, redisClient, nil, nil, "ghcr.io/beam/sandbox:latest")
 
 	params := AgentCommandParams{
 		Message:        "hello world",
