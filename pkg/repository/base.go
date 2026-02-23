@@ -148,7 +148,7 @@ type BackendRepository interface {
 	// Workspace Tools
 	WorkspaceToolRepository
 
-	// Run executions (internal execution substrate)
+	// Run execution payloads
 	CreateRunExecution(ctx context.Context, task *types.RunExecution) error
 	GetRunExecution(ctx context.Context, externalId string) (*types.RunExecution, error)
 	GetRunExecutionByID(ctx context.Context, id uint) (*types.RunExecution, error)

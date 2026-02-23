@@ -50,7 +50,7 @@ var (
 	oauthSession = "airstore:oauth:session:%s" // sessionId
 	oauthState   = "airstore:oauth:state:%s"   // state
 
-	// Run execution queue keys (internal execution substrate)
+	// Run execution queue keys
 	runExecutionQueueKey    = "airstore:run_execution:queue:%s"    // pool name
 	runExecutionDelayedKey  = "airstore:run_execution:delayed:%s"  // pool name (zset by due timestamp ms)
 	runExecutionInFlightKey = "airstore:run_execution:inflight:%s" // pool name
@@ -60,11 +60,11 @@ var (
 	runExecutionLogsBuffer  = "airstore:run_execution:logs_buf:%s" // runExecutionId
 
 	// Task queue keys (high-level task ingress)
-	taskQueueKey     = "airstore:task:queue"
-	taskBacklogKey   = "airstore:task:backlog:%s"  // instanceKey
-	taskModeStateKey = "airstore:task:mode:%s"     // modeKey
-	taskModeSetKey   = "airstore:task:mode:active" // modeKey set
-	agentDispatchLock     = "airstore:agent:dispatch:lock:%s"     // instanceKey
+	taskQueueKey          = "airstore:task:queue"
+	taskBacklogKey        = "airstore:task:backlog:%s"        // instanceKey
+	taskModeStateKey      = "airstore:task:mode:%s"           // modeKey
+	taskModeSetKey        = "airstore:task:mode:active"       // modeKey set
+	agentDispatchLock     = "airstore:agent:dispatch:lock:%s" // instanceKey
 	agentAttemptEvents    = "airstore:agent:attempt:events"
 	agentRunEventsChannel = "airstore:agent:run:%s:events"
 	agentRunEventsBuffer  = "airstore:agent:run:%s:events:buf"
