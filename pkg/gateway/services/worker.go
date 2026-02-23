@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/beam-cloud/airstore/pkg/orchestration"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/scheduler"
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -21,6 +22,10 @@ type WorkerService struct {
 	backend    repository.BackendRepository
 	workerRepo repository.WorkerRepository
 	taskQueue  repository.TaskQueue
+}
+
+type delayedTaskQueue interface {
+	PushDelayed(ctx context.Context, task *types.Task, delay time.Duration) error
 }
 
 func NewWorkerService(
@@ -138,11 +143,28 @@ func (s *WorkerService) SetTaskStarted(ctx context.Context, req *pb.SetTaskStart
 	if s.backend == nil {
 		return nil, status.Errorf(codes.Unavailable, "task persistence not available")
 	}
+
+	attempt, err := s.backend.GetRunAttemptByExecutionTaskExternalID(ctx, req.TaskId)
+	if err == nil {
+		run, runErr := s.backend.GetAgentRunByID(ctx, attempt.RunID)
+		if runErr == nil && run.Status.IsTerminal() {
+			now := time.Now()
+			errMsg := "run is already terminal"
+			_ = s.backend.UpdateAgentRunAttemptResult(ctx, attempt.ID, types.AgentAttemptStatusCancelled, nil, now, &errMsg)
+			_ = s.backend.SetTaskResult(ctx, req.TaskId, -1, errMsg)
+			_ = appendRunSnapshot(ctx, s.backend, attempt.RunID, run.Status, nil, &now, &errMsg, map[string]any{
+				"attempt_id": attempt.ID,
+				"task_id":    req.TaskId,
+				"event":      "start_rejected_terminal_run",
+			})
+			return nil, status.Errorf(codes.FailedPrecondition, "run is already terminal")
+		}
+	}
+
 	if err := s.backend.SetTaskStarted(ctx, req.TaskId); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to set task started: %v", err)
 	}
 
-	attempt, err := s.backend.GetRunAttemptByExecutionTaskExternalID(ctx, req.TaskId)
 	if err == nil {
 		now := time.Now()
 		_ = s.backend.UpdateAgentRunAttemptStart(ctx, attempt.ID, now)
@@ -212,13 +234,13 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 			if retryInfo, retryErr := s.scheduleRetryAttempt(ctx, attempt, req.TaskId); retryErr == nil && retryInfo.scheduled {
 				_ = s.backend.UpdateAgentRunLifecycle(ctx, attempt.RunID, types.AgentRunStatusRunning, nil, nil, nil)
 				_ = appendRunSnapshot(ctx, s.backend, attempt.RunID, types.AgentRunStatusRunning, nil, nil, nil, map[string]any{
-					"attempt_id":      attempt.ID,
-					"task_id":         req.TaskId,
-					"exit_code":       req.ExitCode,
-					"error":           req.Error,
-					"event":           "retry_scheduled",
-					"next_attempt_no": retryInfo.nextAttemptNo,
-					"retry_delay_ms":  retryInfo.delayMs,
+					"attempt_id":                            attempt.ID,
+					"task_id":                               req.TaskId,
+					"exit_code":                             req.ExitCode,
+					"error":                                 req.Error,
+					"event":                                 "retry_scheduled",
+					"next_attempt_no":                       retryInfo.nextAttemptNo,
+					types.AgentExecutionMetaKeyRetryDelayMs: retryInfo.delayMs,
 				})
 				return &pb.SetTaskResultResponse{}, nil
 			}
@@ -278,7 +300,7 @@ func updateExecutionInstanceCounts(ctx context.Context, backend repository.Backe
 	if err != nil {
 		return err
 	}
-	instanceKeyVal, ok := run.DeliveryJSON["instance_key"]
+	instanceKeyVal, ok := run.DeliveryJSON[types.AgentExecutionMetaKeyInstanceKey]
 	if !ok {
 		return nil
 	}
@@ -351,7 +373,7 @@ func (s *WorkerService) scheduleRetryAttempt(ctx context.Context, attempt *types
 		RunID:           run.ID,
 		AttemptNo:       nextAttemptNo,
 		Status:          types.AgentAttemptStatusPending,
-		Strategy:        "retry",
+		Strategy:        types.AgentAttemptStrategyRetry,
 		Provider:        run.Provider,
 		Model:           run.Model,
 		ExecHost:        run.ExecHost,
@@ -362,7 +384,7 @@ func (s *WorkerService) scheduleRetryAttempt(ctx context.Context, attempt *types
 		NetworkEnabled:  run.NetworkEnabled,
 		Interactive:     run.Interactive,
 	}
-	if run.ExecAsk != "off" {
+	if run.ExecAsk != string(orchestration.ExecAskOff) {
 		retryAttempt.Status = types.AgentAttemptStatusBlocked
 	}
 	if err := s.backend.CreateAgentRunAttempt(ctx, retryAttempt); err != nil {
@@ -381,7 +403,7 @@ func (s *WorkerService) scheduleRetryAttempt(ctx context.Context, attempt *types
 	if executionPolicy == nil {
 		executionPolicy = map[string]any{}
 	}
-	executionPolicy["retry"] = map[string]any{
+	executionPolicy[types.AgentExecutionMetaKeyRetry] = map[string]any{
 		"max_attempts": retryPolicy.maxAttempts,
 		"delay_ms":     retryPolicy.delayMs,
 	}
@@ -422,20 +444,46 @@ func (s *WorkerService) scheduleRetryAttempt(ctx context.Context, attempt *types
 			return retryScheduleResult{}, err
 		}
 	} else {
-		taskCopy := *retryTask
-		go func(delay time.Duration, queuedTask types.Task) {
-			timer := time.NewTimer(delay)
-			defer timer.Stop()
-			<-timer.C
-			if err := s.taskQueue.Push(context.Background(), &queuedTask); err != nil {
-				log.Warn().
-					Err(err).
-					Str("task_id", queuedTask.ExternalId).
-					Str("run_id", run.ID).
-					Int("delay_ms", retryPolicy.delayMs).
-					Msg("failed to enqueue delayed retry task")
+		delay := time.Duration(retryPolicy.delayMs) * time.Millisecond
+		if delayedQueue, ok := s.taskQueue.(delayedTaskQueue); ok {
+			if err := delayedQueue.PushDelayed(ctx, retryTask, delay); err != nil {
+				return retryScheduleResult{}, err
 			}
-		}(time.Duration(retryPolicy.delayMs)*time.Millisecond, taskCopy)
+		} else {
+			taskCopy := *retryTask
+			runID := run.ID
+			go func(delay time.Duration, queuedTask types.Task) {
+				timer := time.NewTimer(delay)
+				defer timer.Stop()
+				<-timer.C
+
+				latestRun, err := s.backend.GetAgentRunByID(context.Background(), runID)
+				if err != nil {
+					log.Warn().
+						Err(err).
+						Str("task_id", queuedTask.ExternalId).
+						Str("run_id", runID).
+						Msg("failed to recheck run status before delayed retry enqueue")
+					return
+				}
+				if latestRun.Status.IsTerminal() {
+					log.Info().
+						Str("task_id", queuedTask.ExternalId).
+						Str("run_id", runID).
+						Str("run_status", string(latestRun.Status)).
+						Msg("skipping delayed retry enqueue for terminal run")
+					return
+				}
+				if err := s.taskQueue.Push(context.Background(), &queuedTask); err != nil {
+					log.Warn().
+						Err(err).
+						Str("task_id", queuedTask.ExternalId).
+						Str("run_id", runID).
+						Int("delay_ms", retryPolicy.delayMs).
+						Msg("failed to enqueue delayed retry task")
+				}
+			}(delay, taskCopy)
+		}
 	}
 
 	return retryScheduleResult{
@@ -451,22 +499,25 @@ type runRetryPolicy struct {
 }
 
 func retryPolicyFromRun(run *types.AgentRun) runRetryPolicy {
-	policy := runRetryPolicy{maxAttempts: 2, delayMs: 0}
+	policy := runRetryPolicy{
+		maxAttempts: orchestration.DefaultRetryMaxAttempts,
+		delayMs:     orchestration.DefaultRetryDelayMs,
+	}
 	if run == nil || len(run.DeliveryJSON) == 0 {
 		return policy
 	}
 
-	if value, ok := run.DeliveryJSON["retry_max_attempts"]; ok {
+	if value, ok := run.DeliveryJSON[types.AgentExecutionMetaKeyRetryMaxAttempts]; ok {
 		if parsed := intFromAny(value); parsed > 0 {
 			policy.maxAttempts = parsed
 		}
 	}
-	if value, ok := run.DeliveryJSON["retry_delay_ms"]; ok {
+	if value, ok := run.DeliveryJSON[types.AgentExecutionMetaKeyRetryDelayMs]; ok {
 		if parsed := intFromAny(value); parsed >= 0 {
 			policy.delayMs = parsed
 		}
 	}
-	if nested, ok := run.DeliveryJSON["retry"].(map[string]any); ok {
+	if nested, ok := run.DeliveryJSON[types.AgentExecutionMetaKeyRetry].(map[string]any); ok {
 		if parsed := intFromAny(nested["max_attempts"]); parsed > 0 {
 			policy.maxAttempts = parsed
 		}
@@ -489,6 +540,12 @@ func intFromAny(value any) int {
 		return int(typed)
 	case float64:
 		return int(typed)
+	case string:
+		var parsed int
+		if _, err := fmt.Sscanf(strings.TrimSpace(typed), "%d", &parsed); err == nil {
+			return parsed
+		}
+		return 0
 	default:
 		return 0
 	}
@@ -535,7 +592,7 @@ func resolveTaskResources(task *types.Task) *types.TaskResources {
 	if task.ExecutionPolicy == nil {
 		return nil
 	}
-	raw, ok := task.ExecutionPolicy["resources"]
+	raw, ok := task.ExecutionPolicy[types.AgentExecutionMetaKeyResources]
 	if !ok || raw == nil {
 		return nil
 	}

@@ -52,6 +52,7 @@ var (
 
 	// Task queue keys
 	taskQueueKey    = "airstore:task_queue:%s"    // pool name
+	taskDelayedKey  = "airstore:task_delayed:%s"  // pool name (zset by due timestamp ms)
 	taskInFlightKey = "airstore:task_inflight:%s" // pool name
 	taskStateKey    = "airstore:task_state:%s"    // taskId
 	taskResultKey   = "airstore:task_result:%s"   // taskId
@@ -221,6 +222,10 @@ func (rk *redisKeys) TaskQueue(pool string) string {
 
 func (rk *redisKeys) TaskInFlight(pool string) string {
 	return fmt.Sprintf(taskInFlightKey, pool)
+}
+
+func (rk *redisKeys) TaskDelayed(pool string) string {
+	return fmt.Sprintf(taskDelayedKey, pool)
 }
 
 func (rk *redisKeys) TaskState(taskId string) string {

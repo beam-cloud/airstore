@@ -32,6 +32,33 @@ export { Agents } from './resources/agents.js';
 export { Tasks } from './resources/tasks.js';
 export { Runs } from './resources/runs.js';
 
+// ── Typed constants ───────────────────────────────────────────────────────────
+export {
+  QUEUE_MODE_STEER,
+  QUEUE_MODE_STEER_BACKLOG,
+  QUEUE_MODE_FOLLOWUP,
+  QUEUE_MODE_INTERRUPT,
+  QUEUE_MODE_QUEUE,
+  EXEC_HOST_SANDBOX,
+  EXEC_SECURITY_DENY,
+  EXEC_SECURITY_ALLOWLIST,
+  EXEC_SECURITY_FULL,
+  EXEC_ASK_OFF,
+  EXEC_ASK_ON_MISS,
+  EXEC_ASK_ALWAYS,
+  RUNTIME_TYPE_GVISOR,
+  RUNTIME_TYPE_RUNC,
+  WORKSPACE_ACCESS_NONE,
+  WORKSPACE_ACCESS_RO,
+  WORKSPACE_ACCESS_RW,
+  RETRY_DEFAULT_MAX_ATTEMPTS,
+  RETRY_DEFAULT_DELAY_MS,
+} from './types/tasks.js';
+export {
+  ATTEMPT_STRATEGY_PRIMARY,
+  ATTEMPT_STRATEGY_RETRY,
+} from './types/runs.js';
+
 // ── Types ────────────────────────────────────────────────────────────────────
 export type { PaginatedList, IntegrationType, MemberRole, OutputFormat } from './types/shared.js';
 export type { Workspace, WorkspaceCreateParams } from './types/workspaces.js';
@@ -102,6 +129,7 @@ export type {
 export type {
   RunStatus,
   AttemptStatus,
+  AttemptStrategy,
   AgentRun,
   AgentRunAttempt,
   AgentRunSnapshot,

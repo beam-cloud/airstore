@@ -11,28 +11,25 @@ import (
 )
 
 const (
-	workspaceAccessNone = "none"
-	workspaceAccessRO   = "ro"
-	workspaceAccessRW   = "rw"
-	runtimeTypeGvisor   = "gvisor"
-	runtimeTypeRunc     = "runc"
-	defaultRetryMax     = 2
+	DefaultRetryMaxAttempts = 2
+	DefaultRetryDelayMs     = 0
 )
 
 func DefaultRunExecutionPolicy() RunExecutionPolicy {
+	retry := RunRetryPolicy{
+		MaxAttempts: DefaultRetryMaxAttempts,
+		DelayMs:     DefaultRetryDelayMs,
+	}
 	return RunExecutionPolicy{
 		Host:            ExecHostSandbox,
 		Security:        ExecSecurityAllowlist,
 		Ask:             ExecAskOff,
-		RuntimeType:     runtimeTypeGvisor,
-		WorkspaceAccess: workspaceAccessRW,
+		RuntimeType:     RuntimeTypeGvisor,
+		WorkspaceAccess: WorkspaceAccessRW,
 		NetworkEnabled:  true,
 		Interactive:     false,
 		Resources:       map[string]any{},
-		Retry: RunRetryPolicy{
-			MaxAttempts: defaultRetryMax,
-			DelayMs:     0,
-		},
+		Retry:           &retry,
 	}
 }
 
@@ -47,12 +44,12 @@ func ValidateRunExecutionPolicy(p RunExecutionPolicy) error {
 		p.Ask = ExecAskOff
 	}
 	if p.RuntimeType == "" {
-		p.RuntimeType = runtimeTypeGvisor
+		p.RuntimeType = RuntimeTypeGvisor
 	}
 	if p.WorkspaceAccess == "" {
-		p.WorkspaceAccess = workspaceAccessRW
+		p.WorkspaceAccess = WorkspaceAccessRW
 	}
-	p.Retry = NormalizeRunRetryPolicy(p.Retry)
+	retry := RetryPolicyOrDefault(p.Retry)
 
 	switch p.Host {
 	case ExecHostSandbox:
@@ -70,20 +67,20 @@ func ValidateRunExecutionPolicy(p RunExecutionPolicy) error {
 		return fmt.Errorf("invalid ask: %s", p.Ask)
 	}
 	switch p.RuntimeType {
-	case runtimeTypeGvisor, runtimeTypeRunc:
+	case RuntimeTypeGvisor, RuntimeTypeRunc:
 	default:
 		return fmt.Errorf("invalid runtime_type: %s", p.RuntimeType)
 	}
 	switch p.WorkspaceAccess {
-	case workspaceAccessNone, workspaceAccessRO, workspaceAccessRW:
+	case WorkspaceAccessNone, WorkspaceAccessRO, WorkspaceAccessRW:
 	default:
 		return fmt.Errorf("invalid workspace_access: %s", p.WorkspaceAccess)
 	}
-	if p.Retry.MaxAttempts <= 0 {
-		return fmt.Errorf("invalid retry.max_attempts: %d", p.Retry.MaxAttempts)
+	if retry.MaxAttempts <= 0 {
+		return fmt.Errorf("invalid retry.max_attempts: %d", retry.MaxAttempts)
 	}
-	if p.Retry.DelayMs < 0 {
-		return fmt.Errorf("invalid retry.delay_ms: %d", p.Retry.DelayMs)
+	if retry.DelayMs < 0 {
+		return fmt.Errorf("invalid retry.delay_ms: %d", retry.DelayMs)
 	}
 
 	return nil
@@ -100,26 +97,34 @@ func NormalizeRunExecutionPolicy(p RunExecutionPolicy) RunExecutionPolicy {
 		p.Ask = ExecAskOff
 	}
 	if p.RuntimeType == "" {
-		p.RuntimeType = runtimeTypeGvisor
+		p.RuntimeType = RuntimeTypeGvisor
 	}
 	if p.WorkspaceAccess == "" {
-		p.WorkspaceAccess = workspaceAccessRW
+		p.WorkspaceAccess = WorkspaceAccessRW
 	}
 	if p.Resources == nil {
 		p.Resources = map[string]any{}
 	}
-	p.Retry = NormalizeRunRetryPolicy(p.Retry)
+	retry := RetryPolicyOrDefault(p.Retry)
+	p.Retry = &retry
 	return p
 }
 
 func NormalizeRunRetryPolicy(r RunRetryPolicy) RunRetryPolicy {
 	if r.MaxAttempts <= 0 {
-		r.MaxAttempts = defaultRetryMax
+		r.MaxAttempts = DefaultRetryMaxAttempts
 	}
 	if r.DelayMs < 0 {
-		r.DelayMs = 0
+		r.DelayMs = DefaultRetryDelayMs
 	}
 	return r
+}
+
+func RetryPolicyOrDefault(r *RunRetryPolicy) RunRetryPolicy {
+	if r == nil {
+		return NormalizeRunRetryPolicy(RunRetryPolicy{})
+	}
+	return NormalizeRunRetryPolicy(*r)
 }
 
 func ToTaskType(p RunExecutionPolicy) types.TaskType {

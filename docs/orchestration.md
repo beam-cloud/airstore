@@ -38,6 +38,11 @@ Supported queue modes are `queue`, `followup`, `steer`, and `interrupt`.
 - `followup` / `steer` / `interrupt`: latest-envelope-wins per mode key.
 - Replaced envelopes are marked `dropped` with a reason.
 - `run_input` envelopes dispatch new attempts on the target run (`target_run_id`) instead of creating unrelated runs.
+- `steer` is best-effort cooperative in-run injection:
+  - The target run must be `running`.
+  - A running attempt must exist with a live interactive execution task.
+  - When eligible, input is injected into that task (same run, same attempt stream).
+  - When not eligible, behavior falls back to followup-attempt dispatch (no input loss).
 - `interrupt` cancels active attempt tasks and then continues with the latest run input.
 
 ## Execution Policy
@@ -81,7 +86,7 @@ Implemented now:
 Not yet implemented:
 
 - Full delivery-plan resolver with explicit plan objects/state transitions.
-- `collect` and `steer-backlog` queue modes.
+- `collect` queue mode.
 - Chat-native send/event stream contract (`chat.send`, delta/final stream semantics).
 - Subagent spawn registry, requester announcement routing, and completion lifecycle.
 - HITL exec approval request/resolve transport and state machine.

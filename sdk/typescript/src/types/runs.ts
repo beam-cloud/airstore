@@ -1,4 +1,11 @@
-import type { QueueMode } from './tasks.js';
+import type {
+  QueueMode,
+  ExecAsk,
+  ExecHost,
+  ExecSecurity,
+  RuntimeType,
+  WorkspaceAccess,
+} from './tasks.js';
 
 export type RunStatus = 'accepted' | 'running' | 'ok' | 'error' | 'timeout' | 'cancelled';
 export type AttemptStatus =
@@ -9,6 +16,9 @@ export type AttemptStatus =
   | 'error'
   | 'timeout'
   | 'cancelled';
+export type AttemptStrategy = 'primary' | 'retry';
+export const ATTEMPT_STRATEGY_PRIMARY: AttemptStrategy = 'primary';
+export const ATTEMPT_STRATEGY_RETRY: AttemptStrategy = 'retry';
 
 export interface AgentRun {
   id: string;
@@ -20,11 +30,11 @@ export interface AgentRun {
   session_key?: string;
   provider?: string;
   model?: string;
-  exec_host: string;
-  exec_security: string;
-  exec_ask: string;
-  runtime_type: string;
-  workspace_access: string;
+  exec_host: ExecHost;
+  exec_security: ExecSecurity;
+  exec_ask: ExecAsk;
+  runtime_type: RuntimeType;
+  workspace_access: WorkspaceAccess;
   network_enabled: boolean;
   interactive: boolean;
   timeout_ms: number;
@@ -43,14 +53,14 @@ export interface AgentRunAttempt {
   run_id: string;
   attempt_no: number;
   status: AttemptStatus;
-  strategy: string;
+  strategy: AttemptStrategy;
   provider?: string;
   model?: string;
-  exec_host: string;
-  exec_security: string;
-  exec_ask: string;
-  runtime_type: string;
-  workspace_access: string;
+  exec_host: ExecHost;
+  exec_security: ExecSecurity;
+  exec_ask: ExecAsk;
+  runtime_type: RuntimeType;
+  workspace_access: WorkspaceAccess;
   network_enabled: boolean;
   interactive: boolean;
   execution_task_external_id?: string;

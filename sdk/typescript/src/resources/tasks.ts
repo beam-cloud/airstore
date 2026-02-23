@@ -1,4 +1,13 @@
 import type { CoreClient, RequestOptions } from '../client.js';
+import {
+  EXEC_ASK_OFF,
+  EXEC_HOST_SANDBOX,
+  EXEC_SECURITY_ALLOWLIST,
+  RETRY_DEFAULT_DELAY_MS,
+  RETRY_DEFAULT_MAX_ATTEMPTS,
+  RUNTIME_TYPE_GVISOR,
+  WORKSPACE_ACCESS_RW,
+} from '../types/tasks.js';
 import type {
   AgentCommandCreateParams,
   AgentTaskEnvelope,
@@ -75,17 +84,17 @@ function toRoutingBody(routing: AgentCommandCreateParams['routing']): Record<str
 function toPolicyBody(policy: RunExecutionPolicy | undefined): Record<string, unknown> | undefined {
   if (!policy) return undefined;
   return {
-    host: policy.host ?? 'sandbox',
-    security: policy.security ?? 'allowlist',
-    ask: policy.ask ?? 'off',
-    runtime_type: policy.runtimeType ?? 'gvisor',
-    workspace_access: policy.workspaceAccess ?? 'rw',
+    host: policy.host ?? EXEC_HOST_SANDBOX,
+    security: policy.security ?? EXEC_SECURITY_ALLOWLIST,
+    ask: policy.ask ?? EXEC_ASK_OFF,
+    runtime_type: policy.runtimeType ?? RUNTIME_TYPE_GVISOR,
+    workspace_access: policy.workspaceAccess ?? WORKSPACE_ACCESS_RW,
     network_enabled: policy.networkEnabled ?? true,
     interactive: policy.interactive ?? false,
     resources: policy.resources ?? {},
     retry: {
-      max_attempts: policy.retry?.maxAttempts ?? 2,
-      delay_ms: policy.retry?.delayMs ?? 0,
+      max_attempts: policy.retry?.maxAttempts ?? RETRY_DEFAULT_MAX_ATTEMPTS,
+      delay_ms: policy.retry?.delayMs ?? RETRY_DEFAULT_DELAY_MS,
     },
   };
 }

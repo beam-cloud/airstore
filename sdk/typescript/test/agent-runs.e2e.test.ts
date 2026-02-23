@@ -2,6 +2,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { APIError } from '../src/errors.js';
 import { getClient, uniqueName } from './helpers.js';
 
+declare const process: {
+  env: Record<string, string | undefined>;
+};
+
 const TERMINAL = new Set(['ok', 'error', 'timeout', 'cancelled']);
 
 async function waitForRunId(

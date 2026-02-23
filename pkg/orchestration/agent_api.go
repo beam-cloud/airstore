@@ -105,10 +105,18 @@ func (a *AgentAPI) EnqueueRunInputEnvelope(
 	if queueMode == "" {
 		queueMode = types.AgentQueueModeFollowup
 	}
+	queueMode = normalizeRunInputQueueMode(queueMode)
 	if err := validateRunInputQueueMode(queueMode); err != nil {
 		return nil, false, err
 	}
 	return a.runtime.AcceptRunInput(ctx, workspaceID, runID, queueMode, message, idempotencyKey)
+}
+
+func normalizeRunInputQueueMode(mode types.AgentQueueMode) types.AgentQueueMode {
+	if mode == types.AgentQueueModeSteerBacklog {
+		return types.AgentQueueModeSteer
+	}
+	return mode
 }
 
 func validateRunInputQueueMode(mode types.AgentQueueMode) error {
@@ -116,10 +124,11 @@ func validateRunInputQueueMode(mode types.AgentQueueMode) error {
 	case types.AgentQueueModeQueue,
 		types.AgentQueueModeFollowup,
 		types.AgentQueueModeSteer,
+		types.AgentQueueModeSteerBacklog,
 		types.AgentQueueModeInterrupt:
 		return nil
 	default:
-		return fmt.Errorf("queue_mode %q is not supported (supported: queue, followup, steer, interrupt)", mode)
+		return fmt.Errorf("queue_mode %q is not supported (supported: queue, followup, steer, steer-backlog, interrupt)", mode)
 	}
 }
 
@@ -179,7 +188,7 @@ func (a *AgentAPI) CancelRun(ctx context.Context, workspaceID uint, runID string
 
 	attempts, _ := a.backend.ListAgentRunAttempts(ctx, run.ID)
 	for _, attempt := range attempts {
-		if attempt.ExecutionTaskExternalID != nil && (attempt.Status == types.AgentAttemptStatusPending || attempt.Status == types.AgentAttemptStatusRunning) {
+		if attempt.ExecutionTaskExternalID != nil && attempt.Status.IsInFlight() {
 			_ = a.backend.CancelTask(ctx, *attempt.ExecutionTaskExternalID)
 		}
 	}

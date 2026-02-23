@@ -58,18 +58,25 @@ const (
 	ExecAskOff    ExecAsk = "off"
 	ExecAskOnMiss ExecAsk = "on-miss"
 	ExecAskAlways ExecAsk = "always"
+
+	RuntimeTypeGvisor = "gvisor"
+	RuntimeTypeRunc   = "runc"
+
+	WorkspaceAccessNone = "none"
+	WorkspaceAccessRO   = "ro"
+	WorkspaceAccessRW   = "rw"
 )
 
 type RunExecutionPolicy struct {
-	Host            ExecHost       `json:"host"`
-	Security        ExecSecurity   `json:"security"`
-	Ask             ExecAsk        `json:"ask"`
-	RuntimeType     string         `json:"runtime_type"`
-	WorkspaceAccess string         `json:"workspace_access"`
-	NetworkEnabled  bool           `json:"network_enabled"`
-	Interactive     bool           `json:"interactive"`
-	Resources       map[string]any `json:"resources,omitempty"`
-	Retry           RunRetryPolicy `json:"retry,omitempty"`
+	Host            ExecHost        `json:"host"`
+	Security        ExecSecurity    `json:"security"`
+	Ask             ExecAsk         `json:"ask"`
+	RuntimeType     string          `json:"runtime_type"`
+	WorkspaceAccess string          `json:"workspace_access"`
+	NetworkEnabled  bool            `json:"network_enabled"`
+	Interactive     bool            `json:"interactive"`
+	Resources       map[string]any  `json:"resources,omitempty"`
+	Retry           *RunRetryPolicy `json:"retry,omitempty"`
 }
 
 type RunRetryPolicy struct {

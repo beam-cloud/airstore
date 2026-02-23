@@ -13,6 +13,7 @@ func TestValidateRunInputQueueModeSupported(t *testing.T) {
 		types.AgentQueueModeQueue,
 		types.AgentQueueModeFollowup,
 		types.AgentQueueModeSteer,
+		types.AgentQueueModeSteerBacklog,
 		types.AgentQueueModeInterrupt,
 	}
 
@@ -25,7 +26,6 @@ func TestValidateRunInputQueueModeSupported(t *testing.T) {
 func TestValidateRunInputQueueModeUnsupported(t *testing.T) {
 	modes := []types.AgentQueueMode{
 		types.AgentQueueMode("collect"),
-		types.AgentQueueMode("steer-backlog"),
 		types.AgentQueueMode("unknown"),
 	}
 
@@ -34,6 +34,11 @@ func TestValidateRunInputQueueModeUnsupported(t *testing.T) {
 		require.Error(t, err, "mode=%s should be rejected", mode)
 		require.Contains(t, err.Error(), "not supported")
 	}
+}
+
+func TestNormalizeRunInputQueueModeSteerBacklog(t *testing.T) {
+	mode := normalizeRunInputQueueMode(types.AgentQueueModeSteerBacklog)
+	require.Equal(t, types.AgentQueueModeSteer, mode)
 }
 
 func TestEnqueueRunInputEnvelopeRejectsUnsupportedQueueModes(t *testing.T) {
@@ -75,8 +80,8 @@ func TestValidateAgentCommandParamsAcceptsValidPolicy(t *testing.T) {
 			Host:            ExecHostSandbox,
 			Security:        ExecSecurityAllowlist,
 			Ask:             ExecAskOff,
-			RuntimeType:     "gvisor",
-			WorkspaceAccess: "rw",
+			RuntimeType:     RuntimeTypeGvisor,
+			WorkspaceAccess: WorkspaceAccessRW,
 			NetworkEnabled:  true,
 			Interactive:     false,
 			Resources: map[string]any{

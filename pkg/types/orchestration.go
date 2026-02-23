@@ -12,10 +12,11 @@ const (
 type AgentQueueMode string
 
 const (
-	AgentQueueModeSteer     AgentQueueMode = "steer"
-	AgentQueueModeFollowup  AgentQueueMode = "followup"
-	AgentQueueModeInterrupt AgentQueueMode = "interrupt"
-	AgentQueueModeQueue     AgentQueueMode = "queue"
+	AgentQueueModeSteer        AgentQueueMode = "steer"
+	AgentQueueModeSteerBacklog AgentQueueMode = "steer-backlog"
+	AgentQueueModeFollowup     AgentQueueMode = "followup"
+	AgentQueueModeInterrupt    AgentQueueMode = "interrupt"
+	AgentQueueModeQueue        AgentQueueMode = "queue"
 )
 
 type AgentEnvelopeState string
@@ -39,6 +40,28 @@ const (
 	AgentRunStatusCancelled AgentRunStatus = "cancelled"
 )
 
+func (s AgentRunStatus) IsActive() bool {
+	switch s {
+	case AgentRunStatusAccepted, AgentRunStatusRunning:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s AgentRunStatus) IsSteerEligible() bool {
+	return s == AgentRunStatusRunning
+}
+
+func (s AgentRunStatus) IsTerminal() bool {
+	switch s {
+	case AgentRunStatusOK, AgentRunStatusError, AgentRunStatusTimeout, AgentRunStatusCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
 type AgentAttemptStatus string
 
 const (
@@ -49,6 +72,28 @@ const (
 	AgentAttemptStatusError     AgentAttemptStatus = "error"
 	AgentAttemptStatusTimeout   AgentAttemptStatus = "timeout"
 	AgentAttemptStatusCancelled AgentAttemptStatus = "cancelled"
+)
+
+func (s AgentAttemptStatus) IsInFlight() bool {
+	switch s {
+	case AgentAttemptStatusPending, AgentAttemptStatusRunning:
+		return true
+	default:
+		return false
+	}
+}
+
+const (
+	AgentAttemptStrategyPrimary = "primary"
+	AgentAttemptStrategyRetry   = "retry"
+)
+
+const (
+	AgentExecutionMetaKeyInstanceKey      = "instance_key"
+	AgentExecutionMetaKeyRetry            = "retry"
+	AgentExecutionMetaKeyRetryMaxAttempts = "retry_max_attempts"
+	AgentExecutionMetaKeyRetryDelayMs     = "retry_delay_ms"
+	AgentExecutionMetaKeyResources        = "resources"
 )
 
 type AgentExecutionInstanceStatus string

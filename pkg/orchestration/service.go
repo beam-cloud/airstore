@@ -18,6 +18,7 @@ type AgentService struct {
 	backend            repository.BackendRepository
 	taskQueue          repository.TaskQueue
 	orchestrationStore *repository.OrchestrationStore
+	terminalIO         repository.TerminalIORepository
 	s2                 *common.S2Client
 	defaultImage       string
 	queueRouter        *EnvelopeQueueRouter
@@ -33,10 +34,15 @@ func NewAgentService(
 	defaultImage string,
 ) *AgentService {
 	orchestrationStore := repository.NewOrchestrationStore(backend, redis)
+	var terminalIO repository.TerminalIORepository
+	if redis != nil {
+		terminalIO = repository.NewRedisTerminalIORepository(redis)
+	}
 	return &AgentService{
 		backend:            backend,
 		taskQueue:          taskQueue,
 		orchestrationStore: orchestrationStore,
+		terminalIO:         terminalIO,
 		s2:                 s2,
 		defaultImage:       defaultImage,
 		queueRouter:        NewEnvelopeQueueRouter(orchestrationStore),
@@ -85,20 +91,20 @@ func (s *AgentService) AcceptAgentCommand(
 	}
 
 	payload := map[string]any{
-		"message":             params.Message,
-		"session_id":          params.SessionID,
-		"session_key":         params.SessionKey,
-		"agent_id":            params.AgentID,
-		"timeout_ms":          timeoutOrDefault(params.TimeoutMs, 600000),
-		"policy":              runPolicy,
-		"lane":                params.Lane,
-		"extra_system_prompt": params.ExtraSystemPrompt,
-		"input_provenance":    params.InputProvenance,
-		"deliver":             params.Deliver,
-		"attachments":         params.Attachments,
-		"instance_key":        instanceKey,
-		"label":               params.Label,
-		"spawned_by":          params.SpawnedBy,
+		"message":                              params.Message,
+		"session_id":                           params.SessionID,
+		"session_key":                          params.SessionKey,
+		"agent_id":                             params.AgentID,
+		"timeout_ms":                           timeoutOrDefault(params.TimeoutMs, 600000),
+		"policy":                               runPolicy,
+		"lane":                                 params.Lane,
+		"extra_system_prompt":                  params.ExtraSystemPrompt,
+		"input_provenance":                     params.InputProvenance,
+		"deliver":                              params.Deliver,
+		"attachments":                          params.Attachments,
+		types.AgentExecutionMetaKeyInstanceKey: instanceKey,
+		"label":                                params.Label,
+		"spawned_by":                           params.SpawnedBy,
 	}
 	if len(agentConfig) > 0 {
 		payload["agent_config"] = agentConfig
@@ -158,12 +164,12 @@ func (s *AgentService) AcceptRunInput(
 
 	instanceKey := executionInstanceKeyFromRun(run)
 	payload := map[string]any{
-		"message":      message,
-		"session_id":   run.SessionID,
-		"session_key":  run.SessionKey,
-		"agent_id":     run.AgentID,
-		"timeout_ms":   run.TimeoutMs,
-		"instance_key": instanceKey,
+		"message":                              message,
+		"session_id":                           run.SessionID,
+		"session_key":                          run.SessionKey,
+		"agent_id":                             run.AgentID,
+		"timeout_ms":                           run.TimeoutMs,
+		types.AgentExecutionMetaKeyInstanceKey: instanceKey,
 	}
 	envelope := &types.AgentTaskEnvelope{
 		WorkspaceID:    workspaceID,
@@ -253,7 +259,7 @@ func (s *AgentService) handleInterruptEnvelope(ctx context.Context, envelope *ty
 
 	attempts, _ := s.backend.ListAgentRunAttempts(ctx, run.ID)
 	for _, attempt := range attempts {
-		if attempt.ExecutionTaskExternalID != nil && (attempt.Status == types.AgentAttemptStatusPending || attempt.Status == types.AgentAttemptStatusRunning) {
+		if attempt.ExecutionTaskExternalID != nil && attempt.Status.IsInFlight() {
 			_ = s.backend.CancelTask(ctx, *attempt.ExecutionTaskExternalID)
 		}
 	}
@@ -294,6 +300,16 @@ func (s *AgentService) handleExecutionEnvelope(ctx context.Context, envelope *ty
 		return err
 	}
 
+	if envelope.Kind == types.AgentEnvelopeKindRunInput && envelope.QueueMode == types.AgentQueueModeSteer && envelope.TargetRunID != nil {
+		steered, err := s.trySteerRunInputEnvelope(ctx, envelope)
+		if err != nil {
+			return err
+		}
+		if steered {
+			return nil
+		}
+	}
+
 	desiredDispatch := 1
 	var runningAttempts int
 	hasInstanceState := false
@@ -320,7 +336,7 @@ func (s *AgentService) handleExecutionEnvelope(ctx context.Context, envelope *ty
 		return s.handleRunInputEnvelope(ctx, envelope)
 	}
 
-	run, runPolicy, _, prompt, err := s.materializeRun(ctx, envelope)
+	run, runPolicy, prompt, err := s.materializeRun(ctx, envelope)
 	if err != nil {
 		reason := "run_materialization_failed"
 		_ = s.backend.UpdateAgentTaskEnvelopeState(ctx, envelope.ID, types.AgentEnvelopeStateDropped, &reason, envelope.TargetRunID)
@@ -338,6 +354,77 @@ func (s *AgentService) handleExecutionEnvelope(ctx context.Context, envelope *ty
 	return err
 }
 
+func (s *AgentService) trySteerRunInputEnvelope(ctx context.Context, envelope *types.AgentTaskEnvelope) (bool, error) {
+	if envelope == nil || envelope.TargetRunID == nil || s.terminalIO == nil {
+		return false, nil
+	}
+
+	run, err := s.backend.GetAgentRun(ctx, envelope.WorkspaceID, *envelope.TargetRunID)
+	if err != nil {
+		return false, err
+	}
+	if !run.Status.IsSteerEligible() {
+		return false, nil
+	}
+
+	prompt := runInputPrompt(envelope.PayloadJSON)
+	if prompt == "" {
+		return false, nil
+	}
+
+	attempts, err := s.backend.ListAgentRunAttempts(ctx, run.ID)
+	if err != nil {
+		return false, err
+	}
+
+	var activeAttempt *types.AgentRunAttempt
+	for i := len(attempts) - 1; i >= 0; i-- {
+		attempt := attempts[i]
+		if attempt == nil {
+			continue
+		}
+		if attempt.Status != types.AgentAttemptStatusRunning || attempt.ExecutionTaskExternalID == nil {
+			continue
+		}
+		if strings.TrimSpace(*attempt.ExecutionTaskExternalID) == "" {
+			continue
+		}
+		activeAttempt = attempt
+		break
+	}
+	if activeAttempt == nil || activeAttempt.ExecutionTaskExternalID == nil {
+		return false, nil
+	}
+
+	execTask, err := s.backend.GetTask(ctx, *activeAttempt.ExecutionTaskExternalID)
+	if err != nil {
+		return false, nil
+	}
+	if execTask == nil || !execTask.IsInteractive() || execTask.IsTerminal() {
+		return false, nil
+	}
+
+	input := []byte(prompt)
+	if !strings.HasSuffix(prompt, "\n") {
+		input = append(input, '\n')
+	}
+	if err := s.terminalIO.PublishInput(ctx, execTask.ExternalId, input); err != nil {
+		return false, nil
+	}
+
+	if err := s.backend.UpdateAgentTaskEnvelopeState(ctx, envelope.ID, types.AgentEnvelopeStateDispatched, nil, envelope.TargetRunID); err != nil {
+		return false, err
+	}
+
+	_ = s.publishRunEvent(ctx, run.ID, "input_steered", map[string]any{
+		"envelope_id": envelope.ID,
+		"queue_mode":  envelope.QueueMode,
+		"task_id":     execTask.ExternalId,
+		"attempt_id":  activeAttempt.ID,
+	})
+	return true, nil
+}
+
 func (s *AgentService) handleRunInputEnvelope(ctx context.Context, envelope *types.AgentTaskEnvelope) error {
 	if envelope.TargetRunID == nil {
 		reason := "run_input_missing_target"
@@ -348,15 +435,8 @@ func (s *AgentService) handleRunInputEnvelope(ctx context.Context, envelope *typ
 	if err != nil {
 		return err
 	}
-	if envelope.QueueMode == types.AgentQueueModeSteer && !isRunActive(run.Status) {
-		reason := "steer_target_not_active"
-		return s.backend.UpdateAgentTaskEnvelopeState(ctx, envelope.ID, types.AgentEnvelopeStateDropped, &reason, envelope.TargetRunID)
-	}
 
-	prompt := strings.TrimSpace(stringFromPayload(envelope.PayloadJSON, "message"))
-	if prompt == "" {
-		prompt = strings.TrimSpace(stringFromPayload(envelope.PayloadJSON, "prompt"))
-	}
+	prompt := runInputPrompt(envelope.PayloadJSON)
 	if prompt == "" {
 		reason := "run_input_missing_message"
 		return s.backend.UpdateAgentTaskEnvelopeState(ctx, envelope.ID, types.AgentEnvelopeStateDropped, &reason, envelope.TargetRunID)
@@ -382,24 +462,37 @@ func (s *AgentService) handleRunInputEnvelope(ctx context.Context, envelope *typ
 	if err := s.backend.UpdateAgentTaskEnvelopeState(ctx, envelope.ID, types.AgentEnvelopeStateDispatched, nil, envelope.TargetRunID); err != nil {
 		return err
 	}
-	_ = s.publishRunEvent(ctx, run.ID, "input_dispatched", map[string]any{
+	eventType := "input_dispatched"
+	if envelope.QueueMode == types.AgentQueueModeSteer {
+		eventType = "steer_fallback_dispatched"
+	}
+	_ = s.publishRunEvent(ctx, run.ID, eventType, map[string]any{
 		"envelope_id": envelope.ID,
 		"queue_mode":  envelope.QueueMode,
+		"mode":        "followup_attempt",
 	})
 	return nil
+}
+
+func runInputPrompt(payload map[string]any) string {
+	prompt := strings.TrimSpace(stringFromPayload(payload, "message"))
+	if prompt == "" {
+		prompt = strings.TrimSpace(stringFromPayload(payload, "prompt"))
+	}
+	return prompt
 }
 
 func (s *AgentService) materializeRun(
 	ctx context.Context,
 	envelope *types.AgentTaskEnvelope,
-) (*types.AgentRun, RunExecutionPolicy, string, string, error) {
+) (*types.AgentRun, RunExecutionPolicy, string, error) {
 	payload := envelope.PayloadJSON
 	prompt := strings.TrimSpace(stringFromPayload(payload, "message"))
 	if prompt == "" {
 		prompt = strings.TrimSpace(stringFromPayload(payload, "prompt"))
 	}
 	if prompt == "" {
-		return nil, RunExecutionPolicy{}, "", "", fmt.Errorf("missing prompt/message in envelope payload")
+		return nil, RunExecutionPolicy{}, "", fmt.Errorf("missing prompt/message in envelope payload")
 	}
 	if extraSystemPrompt := strings.TrimSpace(stringFromPayload(payload, "extra_system_prompt")); extraSystemPrompt != "" {
 		prompt = extraSystemPrompt + "\n\n" + prompt
@@ -407,16 +500,16 @@ func (s *AgentService) materializeRun(
 
 	sessionID := stringFromPayload(payload, "session_id")
 	if sessionID == "" {
-		return nil, RunExecutionPolicy{}, "", "", fmt.Errorf("missing session_id in payload")
+		return nil, RunExecutionPolicy{}, "", fmt.Errorf("missing session_id in payload")
 	}
 	timeoutMs := intFromPayload(payload, "timeout_ms", 600000)
 	if timeoutMs < 0 {
-		return nil, RunExecutionPolicy{}, "", "", fmt.Errorf("timeout_ms must be >= 0")
+		return nil, RunExecutionPolicy{}, "", fmt.Errorf("timeout_ms must be >= 0")
 	}
 
 	runPolicy := runPolicyFromPayload(payload)
 	if err := ValidateRunExecutionPolicy(runPolicy); err != nil {
-		return nil, RunExecutionPolicy{}, "", "", err
+		return nil, RunExecutionPolicy{}, "", err
 	}
 
 	sessionKey := strPtrMaybe(stringFromPayload(payload, "session_key"))
@@ -445,41 +538,18 @@ func (s *AgentService) materializeRun(
 		DeliveryJSON:     buildRunDelivery(instanceKey, runPolicy, nil),
 	}
 	applyDeliveryMetadata(run.DeliveryJSON, payload, envelope.RoutingJSON)
-	if envelope.Kind == types.AgentEnvelopeKindRunInput && envelope.TargetRunID != nil {
-		targetRun, err := s.backend.GetAgentRunByID(ctx, *envelope.TargetRunID)
-		if err != nil {
-			return nil, RunExecutionPolicy{}, "", "", err
-		}
-		run.AgentID = targetRun.AgentID
-		run.SessionID = targetRun.SessionID
-		run.SessionKey = targetRun.SessionKey
-		run.Provider = targetRun.Provider
-		run.Model = targetRun.Model
-		run.ExecHost = targetRun.ExecHost
-		run.ExecSecurity = targetRun.ExecSecurity
-		run.ExecAsk = targetRun.ExecAsk
-		run.RuntimeType = targetRun.RuntimeType
-		run.WorkspaceAccess = targetRun.WorkspaceAccess
-		run.NetworkEnabled = targetRun.NetworkEnabled
-		run.Interactive = targetRun.Interactive
-		run.TimeoutMs = targetRun.TimeoutMs
-		runPolicy = runPolicyFromRun(targetRun)
-		instanceKey = executionInstanceKeyFromRun(targetRun)
-		run.DeliveryJSON = buildRunDelivery(instanceKey, runPolicy, &targetRun.ID)
-		applyDeliveryMetadata(run.DeliveryJSON, payload, envelope.RoutingJSON)
-	}
 
 	if err := s.backend.CreateAgentRun(ctx, run); err != nil {
-		return nil, RunExecutionPolicy{}, "", "", err
+		return nil, RunExecutionPolicy{}, "", err
 	}
 	if err := s.backend.UpdateAgentTaskEnvelopeState(ctx, envelope.ID, types.AgentEnvelopeStateDispatched, nil, &run.ID); err != nil {
-		return nil, RunExecutionPolicy{}, "", "", err
+		return nil, RunExecutionPolicy{}, "", err
 	}
 	if err := s.appendRunSnapshot(ctx, run.ID, types.AgentRunStatusAccepted, nil, nil, nil, map[string]any{"envelope_id": envelope.ID}); err != nil {
 		log.Warn().Err(err).Str("run_id", run.ID).Msg("failed to append accepted snapshot")
 	}
 	_ = s.publishRunEvent(ctx, run.ID, "accepted", map[string]any{"envelope_id": envelope.ID})
-	return run, runPolicy, instanceKey, prompt, nil
+	return run, runPolicy, prompt, nil
 }
 
 func (s *AgentService) createAttemptExecutionTask(
@@ -499,7 +569,7 @@ func (s *AgentService) createAttemptExecutionTask(
 		RunID:           run.ID,
 		AttemptNo:       nextAttemptNo,
 		Status:          types.AgentAttemptStatusPending,
-		Strategy:        "primary",
+		Strategy:        types.AgentAttemptStrategyPrimary,
 		Provider:        run.Provider,
 		Model:           run.Model,
 		ExecHost:        run.ExecHost,
@@ -528,18 +598,19 @@ func (s *AgentService) createAttemptExecutionTask(
 	applyRunRuntimeEnv(taskEnv, run)
 	applyAgentConfigEnv(taskEnv, agentConfig)
 	applyPayloadRuntimeEnv(taskEnv, payload)
+	retryPolicy := RetryPolicyOrDefault(runPolicy.Retry)
 	executionPolicy := map[string]any{
-		"host":             run.ExecHost,
-		"security":         run.ExecSecurity,
-		"ask":              run.ExecAsk,
-		"runtime_type":     run.RuntimeType,
-		"workspace_access": run.WorkspaceAccess,
-		"network_enabled":  run.NetworkEnabled,
-		"interactive":      run.Interactive,
-		"resources":        cloneAnyMap(runPolicy.Resources),
-		"retry": map[string]any{
-			"max_attempts": runPolicy.Retry.MaxAttempts,
-			"delay_ms":     runPolicy.Retry.DelayMs,
+		"host":                               run.ExecHost,
+		"security":                           run.ExecSecurity,
+		"ask":                                run.ExecAsk,
+		"runtime_type":                       run.RuntimeType,
+		"workspace_access":                   run.WorkspaceAccess,
+		"network_enabled":                    run.NetworkEnabled,
+		"interactive":                        run.Interactive,
+		types.AgentExecutionMetaKeyResources: cloneAnyMap(runPolicy.Resources),
+		types.AgentExecutionMetaKeyRetry: map[string]any{
+			"max_attempts": retryPolicy.MaxAttempts,
+			"delay_ms":     retryPolicy.DelayMs,
 		},
 	}
 	if run.Provider != nil {
@@ -884,7 +955,7 @@ func stringifyEnvValue(value any) string {
 }
 
 func instanceKeyFromPayload(workspaceID uint, agentID *string, payload map[string]any, policy RunExecutionPolicy) string {
-	if instanceKey := stringFromPayload(payload, "instance_key"); instanceKey != "" {
+	if instanceKey := stringFromPayload(payload, types.AgentExecutionMetaKeyInstanceKey); instanceKey != "" {
 		return instanceKey
 	}
 	lane := strPtrMaybe(stringFromPayload(payload, "lane"))
@@ -947,7 +1018,7 @@ func runPolicyFromRun(run *types.AgentRun) RunExecutionPolicy {
 	retry := retryPolicyFromDelivery(run.DeliveryJSON)
 	resources := map[string]any{}
 	if len(run.DeliveryJSON) > 0 {
-		if rawResources, ok := run.DeliveryJSON["resources"]; ok {
+		if rawResources, ok := run.DeliveryJSON[types.AgentExecutionMetaKeyResources]; ok {
 			if typedResources, ok := rawResources.(map[string]any); ok {
 				resources = cloneAnyMap(typedResources)
 			}
@@ -962,7 +1033,7 @@ func runPolicyFromRun(run *types.AgentRun) RunExecutionPolicy {
 		NetworkEnabled:  run.NetworkEnabled,
 		Interactive:     run.Interactive,
 		Resources:       resources,
-		Retry:           retry,
+		Retry:           &retry,
 	}
 }
 
@@ -971,10 +1042,10 @@ func retryPolicyFromDelivery(delivery map[string]any) RunRetryPolicy {
 	if len(delivery) == 0 {
 		return NormalizeRunRetryPolicy(retry)
 	}
-	retry.MaxAttempts = intFromAny(delivery["retry_max_attempts"])
-	retry.DelayMs = intFromAny(delivery["retry_delay_ms"])
+	retry.MaxAttempts = intFromAny(delivery[types.AgentExecutionMetaKeyRetryMaxAttempts])
+	retry.DelayMs = intFromAny(delivery[types.AgentExecutionMetaKeyRetryDelayMs])
 
-	if nested, ok := delivery["retry"].(map[string]any); ok {
+	if nested, ok := delivery[types.AgentExecutionMetaKeyRetry].(map[string]any); ok {
 		if retry.MaxAttempts == 0 {
 			retry.MaxAttempts = intFromAny(nested["max_attempts"])
 		}
@@ -987,11 +1058,12 @@ func retryPolicyFromDelivery(delivery map[string]any) RunRetryPolicy {
 
 func buildRunDelivery(instanceKey string, policy RunExecutionPolicy, targetRunID *string) map[string]any {
 	policy = NormalizeRunExecutionPolicy(policy)
+	retryPolicy := RetryPolicyOrDefault(policy.Retry)
 	delivery := map[string]any{
-		"instance_key":       instanceKey,
-		"retry_max_attempts": policy.Retry.MaxAttempts,
-		"retry_delay_ms":     policy.Retry.DelayMs,
-		"resources":          cloneAnyMap(policy.Resources),
+		types.AgentExecutionMetaKeyInstanceKey:      instanceKey,
+		types.AgentExecutionMetaKeyRetryMaxAttempts: retryPolicy.MaxAttempts,
+		types.AgentExecutionMetaKeyRetryDelayMs:     retryPolicy.DelayMs,
+		types.AgentExecutionMetaKeyResources:        cloneAnyMap(policy.Resources),
 	}
 	if targetRunID != nil && strings.TrimSpace(*targetRunID) != "" {
 		delivery["target_run_id"] = strings.TrimSpace(*targetRunID)
@@ -1044,22 +1116,13 @@ func executionInstanceKeyFromRun(run *types.AgentRun) string {
 		return ""
 	}
 	if run.DeliveryJSON != nil {
-		if raw, ok := run.DeliveryJSON["instance_key"]; ok {
+		if raw, ok := run.DeliveryJSON[types.AgentExecutionMetaKeyInstanceKey]; ok {
 			if s, ok := raw.(string); ok && s != "" {
 				return s
 			}
 		}
 	}
 	return ExecutionClassKey(run.WorkspaceID, run.AgentID, nil, runPolicyFromRun(run))
-}
-
-func isRunActive(status types.AgentRunStatus) bool {
-	switch status {
-	case types.AgentRunStatusAccepted, types.AgentRunStatusRunning:
-		return true
-	default:
-		return false
-	}
 }
 
 func (s *AgentService) requeueIfDispatchable(ctx context.Context, envelopeID string) error {

@@ -8,12 +8,30 @@ import (
 
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/types"
+	"github.com/redis/go-redis/v9"
 )
 
 const (
 	defaultQueueName  = "default"
 	defaultPopTimeout = 5 * time.Second
+	delayedMoveBatch  = 128
 )
+
+const moveDueDelayedTasksScript = `
+local delayed = KEYS[1]
+local queue = KEYS[2]
+local now = ARGV[1]
+local limit = tonumber(ARGV[2])
+local moved = 0
+local items = redis.call('ZRANGEBYSCORE', delayed, '-inf', now, 'LIMIT', 0, limit)
+for _, item in ipairs(items) do
+	if redis.call('ZREM', delayed, item) == 1 then
+		redis.call('LPUSH', queue, item)
+		moved = moved + 1
+	end
+end
+return moved
+`
 
 // RedisTaskQueue implements TaskQueue using Redis
 type RedisTaskQueue struct {
@@ -64,10 +82,51 @@ func (q *RedisTaskQueue) Push(ctx context.Context, task *types.Task) error {
 	return nil
 }
 
+// PushDelayed stores a task for delayed enqueue using a Redis sorted set.
+// Delayed tasks survive process restarts and are moved to the main queue by Pop.
+func (q *RedisTaskQueue) PushDelayed(ctx context.Context, task *types.Task, delay time.Duration) error {
+	if delay <= 0 {
+		return q.Push(ctx, task)
+	}
+
+	data, err := json.Marshal(task)
+	if err != nil {
+		return fmt.Errorf("failed to marshal delayed task: %w", err)
+	}
+
+	state := &types.TaskState{
+		ID:        task.ExternalId,
+		Status:    types.TaskStatusPending,
+		ExitCode:  -1,
+		CreatedAt: time.Now(),
+	}
+	stateData, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("failed to marshal delayed state: %w", err)
+	}
+
+	dueAtMs := time.Now().Add(delay).UnixMilli()
+	pipe := q.rdb.Pipeline()
+	pipe.Set(ctx, common.Keys.TaskState(task.ExternalId), stateData, 24*time.Hour)
+	pipe.ZAdd(ctx, common.Keys.TaskDelayed(q.queueName), redis.Z{
+		Score:  float64(dueAtMs),
+		Member: data,
+	})
+	_, err = pipe.Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to push delayed task: %w", err)
+	}
+	return nil
+}
+
 // Pop blocks until a task is available and returns it
 func (q *RedisTaskQueue) Pop(ctx context.Context, workerID string) (*types.Task, error) {
 	queueKey := common.Keys.TaskQueue(q.queueName)
 	inFlightKey := common.Keys.TaskInFlight(q.queueName)
+
+	if err := q.moveDueDelayedTasks(ctx); err != nil {
+		return nil, err
+	}
 
 	// BRPOP with timeout - blocks until task available
 	result, err := q.rdb.BRPop(ctx, defaultPopTimeout, queueKey).Result()
@@ -110,6 +169,27 @@ func (q *RedisTaskQueue) Pop(ctx context.Context, workerID string) (*types.Task,
 	// Task was popped - return it even if tracking failed
 
 	return &task, nil
+}
+
+func (q *RedisTaskQueue) moveDueDelayedTasks(ctx context.Context) error {
+	delayedKey := common.Keys.TaskDelayed(q.queueName)
+	queueKey := common.Keys.TaskQueue(q.queueName)
+
+	for {
+		moved, err := q.rdb.Eval(
+			ctx,
+			moveDueDelayedTasksScript,
+			[]string{delayedKey, queueKey},
+			time.Now().UnixMilli(),
+			delayedMoveBatch,
+		).Int()
+		if err != nil {
+			return fmt.Errorf("failed to move delayed tasks: %w", err)
+		}
+		if moved < delayedMoveBatch {
+			return nil
+		}
+	}
 }
 
 // Complete marks a task as complete and stores the result

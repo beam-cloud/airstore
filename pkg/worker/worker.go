@@ -17,6 +17,8 @@ import (
 	"github.com/beam-cloud/airstore/pkg/runtime"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/rs/zerolog/log"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 const (
@@ -265,6 +267,13 @@ func (w *Worker) executeTask(task types.Task) {
 		Msg("received task")
 
 	if err := w.gatewayClient.SetTaskStarted(w.ctx, task.ExternalId); err != nil {
+		if status.Code(err) == codes.FailedPrecondition {
+			log.Info().Err(err).Str("task_id", task.ExternalId).Msg("gateway rejected task start due to terminal run state")
+			if qErr := w.taskQueue.Fail(w.ctx, task.ExternalId, fmt.Errorf("task start rejected: %w", err)); qErr != nil {
+				log.Warn().Err(qErr).Str("task_id", task.ExternalId).Msg("failed to mark skipped task as failed in queue")
+			}
+			return
+		}
 		log.Warn().Err(err).Str("task_id", task.ExternalId).Msg("failed to mark task as started")
 	}
 
