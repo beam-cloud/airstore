@@ -15,6 +15,9 @@ const (
 	defaultQueueName  = "default"
 	defaultPopTimeout = 5 * time.Second
 	delayedMoveBatch  = 128
+	taskStateTTL      = 24 * time.Hour
+	taskResultTTL     = 24 * time.Hour
+	taskLogBufferTTL  = 24 * time.Hour
 )
 
 const moveDueDelayedTasksScript = `
@@ -72,7 +75,7 @@ func (q *RedisTaskQueue) Push(ctx context.Context, task *types.Task) error {
 
 	// Store state and push to queue atomically via pipeline
 	pipe := q.rdb.Pipeline()
-	pipe.Set(ctx, common.Keys.TaskState(task.ExternalId), stateData, 24*time.Hour)
+	pipe.Set(ctx, common.Keys.TaskState(task.ExternalId), stateData, taskStateTTL)
 	pipe.LPush(ctx, common.Keys.TaskQueue(q.queueName), data)
 	_, err = pipe.Exec(ctx)
 	if err != nil {
@@ -107,7 +110,7 @@ func (q *RedisTaskQueue) PushDelayed(ctx context.Context, task *types.Task, dela
 
 	dueAtMs := time.Now().Add(delay).UnixMilli()
 	pipe := q.rdb.Pipeline()
-	pipe.Set(ctx, common.Keys.TaskState(task.ExternalId), stateData, 24*time.Hour)
+	pipe.Set(ctx, common.Keys.TaskState(task.ExternalId), stateData, taskStateTTLForDelay(delay))
 	pipe.ZAdd(ctx, common.Keys.TaskDelayed(q.queueName), redis.Z{
 		Score:  float64(dueAtMs),
 		Member: data,
@@ -117,6 +120,19 @@ func (q *RedisTaskQueue) PushDelayed(ctx context.Context, task *types.Task, dela
 		return fmt.Errorf("failed to push delayed task: %w", err)
 	}
 	return nil
+}
+
+func taskStateTTLForDelay(delay time.Duration) time.Duration {
+	if delay <= 0 {
+		return taskStateTTL
+	}
+
+	ttl := taskStateTTL + delay
+	// Overflow guard: fall back to no expiration for extremely large delays.
+	if ttl < taskStateTTL {
+		return 0
+	}
+	return ttl
 }
 
 // Pop blocks until a task is available and returns it
@@ -164,7 +180,7 @@ func (q *RedisTaskQueue) Pop(ctx context.Context, workerID string) (*types.Task,
 
 	pipe := q.rdb.Pipeline()
 	pipe.SAdd(ctx, inFlightKey, task.ExternalId)
-	pipe.Set(ctx, common.Keys.TaskState(task.ExternalId), stateData, 24*time.Hour)
+	pipe.Set(ctx, common.Keys.TaskState(task.ExternalId), stateData, taskStateTTL)
 	_, _ = pipe.Exec(ctx)
 	// Task was popped - return it even if tracking failed
 
@@ -213,8 +229,8 @@ func (q *RedisTaskQueue) Complete(ctx context.Context, taskID string, result *ty
 
 	pipe := q.rdb.Pipeline()
 	pipe.SRem(ctx, inFlightKey, taskID)
-	pipe.Set(ctx, common.Keys.TaskState(taskID), stateData, 24*time.Hour)
-	pipe.Set(ctx, common.Keys.TaskResult(taskID), resultData, 24*time.Hour)
+	pipe.Set(ctx, common.Keys.TaskState(taskID), stateData, taskStateTTL)
+	pipe.Set(ctx, common.Keys.TaskResult(taskID), resultData, taskResultTTL)
 	_, err := pipe.Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to complete task: %w", err)
@@ -310,7 +326,7 @@ func (q *RedisTaskQueue) PublishLog(ctx context.Context, taskID string, stream s
 	pipe := q.rdb.Pipeline()
 	pipe.Publish(ctx, channel, entryData)
 	pipe.RPush(ctx, bufferKey, entryData)
-	pipe.Expire(ctx, bufferKey, 24*time.Hour)
+	pipe.Expire(ctx, bufferKey, taskLogBufferTTL)
 	_, err = pipe.Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to publish log: %w", err)

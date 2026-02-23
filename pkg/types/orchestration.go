@@ -107,6 +107,15 @@ const (
 )
 
 const (
+	AgentEnvelopeDropReasonInterruptMissingTarget = "interrupt_missing_target"
+	AgentEnvelopeDropReasonRunMaterializationFail = "run_materialization_failed"
+	AgentEnvelopeDropReasonRunInputMissingTarget  = "run_input_missing_target"
+	AgentEnvelopeDropReasonRunInputMissingMessage = "run_input_missing_message"
+	AgentEnvelopeDropReasonRunInputTerminalTarget = "run_input_terminal_target"
+	AgentEnvelopeDropReasonReshapedByQueueMode    = "reshaped_by_queue_mode"
+)
+
+const (
 	AgentExecutionMetaKeyInstanceKey      = "instance_key"
 	AgentExecutionMetaKeyRetry            = "retry"
 	AgentExecutionMetaKeyRetryMaxAttempts = "retry_max_attempts"

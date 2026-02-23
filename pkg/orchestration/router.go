@@ -60,7 +60,7 @@ func (r *EnvelopeQueueRouter) enqueueModeKey(ctx context.Context, envelope *type
 		return err
 	}
 	if prevID != "" && prevID != envelope.ID {
-		reason := "reshaped_by_queue_mode"
+		reason := types.AgentEnvelopeDropReasonReshapedByQueueMode
 		_ = r.store.UpdateEnvelopeState(ctx, prevID, types.AgentEnvelopeStateDropped, &reason, envelope.TargetRunID)
 	}
 	if err := r.store.SetModeEnvelopeID(ctx, modeKey, envelope.ID, 15*time.Minute); err != nil {

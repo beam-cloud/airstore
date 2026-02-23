@@ -438,3 +438,33 @@ func TestTrySteerRunInputEnvelopeFallsBackWhenTaskNotInteractive(t *testing.T) {
 	require.Equal(t, types.AgentEnvelopeStateQueued, backend.envelopes[envelopeID].State)
 	require.Empty(t, terminalIO.inputs[taskID])
 }
+
+func TestHandleRunInputEnvelopeDropsWhenTargetRunTerminal(t *testing.T) {
+	backend := newFakeBackend()
+	runID := uuid.NewString()
+	backend.runs[runID] = &types.AgentRun{
+		ID:          runID,
+		WorkspaceID: 42,
+		Status:      types.AgentRunStatusCancelled,
+		SessionID:   "session-1",
+	}
+
+	envelopeID := uuid.NewString()
+	envelope := &types.AgentTaskEnvelope{
+		ID:          envelopeID,
+		WorkspaceID: 42,
+		Kind:        types.AgentEnvelopeKindRunInput,
+		QueueMode:   types.AgentQueueModeSteer,
+		State:       types.AgentEnvelopeStateQueued,
+		PayloadJSON: map[string]any{"message": "fallback"},
+		TargetRunID: &runID,
+	}
+	backend.envelopes[envelopeID] = envelope
+
+	svc := NewAgentService(context.Background(), backend, nil, nil, nil, "ghcr.io/beam/sandbox:latest")
+	err := svc.handleRunInputEnvelope(context.Background(), envelope)
+	require.NoError(t, err)
+	require.Equal(t, types.AgentEnvelopeStateDropped, backend.envelopes[envelopeID].State)
+	require.NotNil(t, backend.envelopes[envelopeID].DroppedReason)
+	require.Equal(t, types.AgentEnvelopeDropReasonRunInputTerminalTarget, *backend.envelopes[envelopeID].DroppedReason)
+}

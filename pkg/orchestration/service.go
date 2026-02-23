@@ -248,7 +248,7 @@ func (s *AgentService) dispatchEnvelope(ctx context.Context, envelopeID string) 
 
 func (s *AgentService) handleInterruptEnvelope(ctx context.Context, envelope *types.AgentTaskEnvelope) error {
 	if envelope.TargetRunID == nil {
-		reason := "interrupt_missing_target"
+		reason := types.AgentEnvelopeDropReasonInterruptMissingTarget
 		return s.backend.UpdateAgentTaskEnvelopeState(ctx, envelope.ID, types.AgentEnvelopeStateDropped, &reason, nil)
 	}
 
@@ -338,7 +338,7 @@ func (s *AgentService) handleExecutionEnvelope(ctx context.Context, envelope *ty
 
 	run, runPolicy, prompt, err := s.materializeRun(ctx, envelope)
 	if err != nil {
-		reason := "run_materialization_failed"
+		reason := types.AgentEnvelopeDropReasonRunMaterializationFail
 		_ = s.backend.UpdateAgentTaskEnvelopeState(ctx, envelope.ID, types.AgentEnvelopeStateDropped, &reason, envelope.TargetRunID)
 		return err
 	}
@@ -427,7 +427,7 @@ func (s *AgentService) trySteerRunInputEnvelope(ctx context.Context, envelope *t
 
 func (s *AgentService) handleRunInputEnvelope(ctx context.Context, envelope *types.AgentTaskEnvelope) error {
 	if envelope.TargetRunID == nil {
-		reason := "run_input_missing_target"
+		reason := types.AgentEnvelopeDropReasonRunInputMissingTarget
 		return s.backend.UpdateAgentTaskEnvelopeState(ctx, envelope.ID, types.AgentEnvelopeStateDropped, &reason, nil)
 	}
 
@@ -435,10 +435,14 @@ func (s *AgentService) handleRunInputEnvelope(ctx context.Context, envelope *typ
 	if err != nil {
 		return err
 	}
+	if run.Status.IsTerminal() {
+		reason := types.AgentEnvelopeDropReasonRunInputTerminalTarget
+		return s.backend.UpdateAgentTaskEnvelopeState(ctx, envelope.ID, types.AgentEnvelopeStateDropped, &reason, envelope.TargetRunID)
+	}
 
 	prompt := runInputPrompt(envelope.PayloadJSON)
 	if prompt == "" {
-		reason := "run_input_missing_message"
+		reason := types.AgentEnvelopeDropReasonRunInputMissingMessage
 		return s.backend.UpdateAgentTaskEnvelopeState(ctx, envelope.ID, types.AgentEnvelopeStateDropped, &reason, envelope.TargetRunID)
 	}
 
