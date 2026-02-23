@@ -106,8 +106,9 @@ func (l *LinearProvider) Exchange(ctx context.Context, code, integrationType str
 	}
 
 	var result struct {
-		AccessToken string `json:"access_token"`
-		ExpiresIn   int    `json:"expires_in"`
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int    `json:"expires_in"`
 	}
 
 	if err := decodeJSON(resp.Body, &result); err != nil {
@@ -115,7 +116,8 @@ func (l *LinearProvider) Exchange(ctx context.Context, code, integrationType str
 	}
 
 	creds := &types.IntegrationCredentials{
-		AccessToken: result.AccessToken,
+		AccessToken:  result.AccessToken,
+		RefreshToken: result.RefreshToken,
 	}
 
 	if result.ExpiresIn > 0 {
@@ -127,5 +129,53 @@ func (l *LinearProvider) Exchange(ctx context.Context, code, integrationType str
 }
 
 func (l *LinearProvider) Refresh(ctx context.Context, refreshToken string) (*types.IntegrationCredentials, error) {
-	return nil, fmt.Errorf("linear tokens do not support refresh")
+	if refreshToken == "" {
+		return nil, fmt.Errorf("no refresh token")
+	}
+
+	data := url.Values{
+		"client_id":     {l.clientID},
+		"client_secret": {l.clientSecret},
+		"refresh_token": {refreshToken},
+		"grant_type":    {"refresh_token"},
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", linearEndpoint.TokenURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := l.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("refresh failed: status %d", resp.StatusCode)
+	}
+
+	var result struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int    `json:"expires_in"`
+	}
+
+	if err := decodeJSON(resp.Body, &result); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+
+	creds := &types.IntegrationCredentials{
+		AccessToken:  result.AccessToken,
+		RefreshToken: result.RefreshToken,
+	}
+
+	if result.ExpiresIn > 0 {
+		expiry := time.Now().Add(time.Duration(result.ExpiresIn) * time.Second)
+		creds.ExpiresAt = &expiry
+	}
+
+	return creds, nil
 }
