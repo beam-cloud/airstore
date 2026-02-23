@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
+	"sync/atomic"
 	"syscall"
 
 	"time"
@@ -18,9 +20,11 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
 
 	apiv1 "github.com/beam-cloud/airstore/pkg/api/v1"
 	"github.com/beam-cloud/airstore/pkg/auth"
@@ -62,12 +66,13 @@ type Gateway struct {
 	sourceRegistry *sources.Registry
 	mcpManager     *tools.MCPManager
 
-	storageService *services.StorageService
-	storageClient  *clients.StorageClient
-	oauthStore     *oauth.Store
-	oauthRegistry  *oauth.Registry
-	s2Client       *common.S2Client
-	eventBus       *common.EventBus
+	storageService  *services.StorageService
+	storageClient   *clients.StorageClient
+	oauthStore      *oauth.Store
+	oauthRegistry   *oauth.Registry
+	s2Client        *common.S2Client
+	eventBus        *common.EventBus
+	migrationsReady atomic.Bool
 
 	// Compression middleware (optional)
 	compressionRecorder instrumentation.AccessRecorder
@@ -88,6 +93,7 @@ func NewGateway() (*Gateway, error) {
 
 	var redisClient *common.RedisClient
 	var backendRepo repository.BackendRepository
+	migrationsReady := true
 
 	// Local mode: skip Redis and Postgres
 	if config.IsLocalMode() {
@@ -101,14 +107,17 @@ func NewGateway() (*Gateway, error) {
 
 		// Initialize Postgres backend (optional - may not be configured)
 		if config.Database.Postgres.Host != "" {
+			migrationsReady = false
 			backendRepo, err = repository.NewPostgresBackend(config.Database.Postgres)
 			if err != nil {
-				log.Warn().Err(err).Msg("failed to connect to postgres, task API will be disabled")
+				return nil, fmt.Errorf("failed to connect to postgres: %w", err)
 			} else {
 				// Run migrations
 				if err := backendRepo.RunMigrations(); err != nil {
-					log.Warn().Err(err).Msg("failed to run postgres migrations")
+					_ = backendRepo.Close()
+					return nil, fmt.Errorf("failed to run postgres migrations: %w", err)
 				}
+				migrationsReady = true
 			}
 		}
 	}
@@ -147,6 +156,7 @@ func NewGateway() (*Gateway, error) {
 		oauthRegistry:  oauthRegistry,
 		s2Client:       s2Client,
 	}
+	gateway.migrationsReady.Store(migrationsReady)
 
 	return gateway, nil
 }
@@ -207,15 +217,37 @@ func (g *Gateway) initHTTP() error {
 
 	g.echo = e
 	g.httpServer = &http.Server{
-		Addr:    fmt.Sprintf("%s:%d", g.Config.Gateway.HTTP.Host, g.Config.Gateway.HTTP.Port),
-		Handler: e,
+		Addr:              fmt.Sprintf("%s:%d", g.Config.Gateway.HTTP.Host, g.Config.Gateway.HTTP.Port),
+		Handler:           e,
+		ReadTimeout:       15 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	g.baseRouteGroup = e.Group(apiv1.HttpServerBaseRoute)
 	g.rootRouteGroup = e.Group(apiv1.HttpServerRootRoute)
 
 	// Register API groups (health check works without Redis in local mode)
-	apiv1.NewHealthGroup(g.baseRouteGroup.Group("/health"), g.RedisClient)
+	var redisProbe func(context.Context) error
+	if g.RedisClient != nil {
+		redisProbe = func(ctx context.Context) error {
+			return g.RedisClient.Ping(ctx).Err()
+		}
+	}
+
+	var postgresProbe func(context.Context) error
+	if g.BackendRepo != nil {
+		postgresProbe = g.BackendRepo.Ping
+	}
+
+	apiv1.NewHealthGroup(
+		g.baseRouteGroup.Group("/health"),
+		redisProbe,
+		postgresProbe,
+		func() bool { return g.migrationsReady.Load() },
+	)
 
 	return nil
 }
@@ -241,8 +273,8 @@ func (g *Gateway) initGRPC() error {
 	accessInterceptor := instrumentation.NewAccessLogInterceptor(g.compressionRecorder)
 
 	serverOptions := []grpc.ServerOption{
-		grpc.ChainUnaryInterceptor(authInterceptor.Unary(), accessInterceptor.Unary()),
-		grpc.StreamInterceptor(authInterceptor.Stream()),
+		grpc.ChainUnaryInterceptor(grpcUnaryPanicRecoveryInterceptor(), authInterceptor.Unary(), accessInterceptor.Unary()),
+		grpc.ChainStreamInterceptor(grpcStreamPanicRecoveryInterceptor(), authInterceptor.Stream()),
 		grpc.MaxRecvMsgSize(g.Config.Gateway.GRPC.MaxRecvMsgSize * 1024 * 1024),
 		grpc.MaxSendMsgSize(g.Config.Gateway.GRPC.MaxSendMsgSize * 1024 * 1024),
 		grpc.KeepaliveParams(keepalive.ServerParameters{
@@ -624,29 +656,29 @@ func (g *Gateway) StartAsync() error {
 		return fmt.Errorf("failed to register services: %w", err)
 	}
 
+	httpAddr := fmt.Sprintf("%s:%d", g.Config.Gateway.HTTP.Host, g.Config.Gateway.HTTP.Port)
+	httpListener, err := net.Listen("tcp", httpAddr)
+	if err != nil {
+		return fmt.Errorf("failed to bind http listener: %w", err)
+	}
+
+	grpcAddr := fmt.Sprintf(":%d", g.Config.Gateway.GRPC.Port)
+	grpcListener, err := net.Listen("tcp", grpcAddr)
+	if err != nil {
+		_ = httpListener.Close()
+		return fmt.Errorf("failed to bind grpc listener: %w", err)
+	}
+
 	// Start HTTP server
 	go func() {
-		addr := fmt.Sprintf("%s:%d", g.Config.Gateway.HTTP.Host, g.Config.Gateway.HTTP.Port)
-		lis, err := net.Listen("tcp", addr)
-		if err != nil {
-			log.Error().Err(err).Msg("failed to listen on http")
-			return
-		}
-
-		if err := g.httpServer.Serve(lis); err != nil && err != http.ErrServerClosed {
+		if err := g.httpServer.Serve(httpListener); err != nil && err != http.ErrServerClosed {
 			log.Error().Err(err).Msg("http server error")
 		}
 	}()
 
 	// Start gRPC server
 	go func() {
-		lis, err := net.Listen("tcp", fmt.Sprintf(":%d", g.Config.Gateway.GRPC.Port))
-		if err != nil {
-			log.Error().Err(err).Msg("failed to listen on grpc")
-			return
-		}
-
-		if err := g.grpcServer.Serve(lis); err != nil {
+		if err := g.grpcServer.Serve(grpcListener); err != nil {
 			log.Error().Err(err).Msg("grpc server error")
 		}
 	}()
@@ -846,5 +878,37 @@ func requireClusterAdminOrOrgMiddleware() echo.MiddlewareFunc {
 				Error:   "admin or organization token required",
 			})
 		}
+	}
+}
+
+func grpcUnaryPanicRecoveryInterceptor() grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (_ interface{}, err error) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				log.Error().
+					Interface("panic", recovered).
+					Str("method", info.FullMethod).
+					Bytes("stack", debug.Stack()).
+					Msg("panic recovered in gRPC unary handler")
+				err = status.Error(codes.Internal, "internal server error")
+			}
+		}()
+		return handler(ctx, req)
+	}
+}
+
+func grpcStreamPanicRecoveryInterceptor() grpc.StreamServerInterceptor {
+	return func(srv interface{}, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				log.Error().
+					Interface("panic", recovered).
+					Str("method", info.FullMethod).
+					Bytes("stack", debug.Stack()).
+					Msg("panic recovered in gRPC stream handler")
+				err = status.Error(codes.Internal, "internal server error")
+			}
+		}()
+		return handler(srv, stream)
 	}
 }

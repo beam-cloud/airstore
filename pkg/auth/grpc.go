@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -56,8 +57,13 @@ func (i *GRPCInterceptor) authenticate(ctx context.Context) (context.Context, er
 
 	info, err := i.validator.ValidateToken(ctx, token)
 	if err != nil {
-		log.Debug().Err(err).Msg("auth: invalid token")
-		return ctx, status.Errorf(codes.Unauthenticated, "invalid token")
+		statusErr := mapValidationError(err)
+		if status.Code(statusErr) == codes.Unavailable {
+			log.Warn().Err(err).Msg("auth backend unavailable during token validation")
+		} else {
+			log.Debug().Err(err).Msg("auth: invalid token")
+		}
+		return ctx, statusErr
 	}
 
 	if info != nil {
@@ -65,6 +71,19 @@ func (i *GRPCInterceptor) authenticate(ctx context.Context) (context.Context, er
 	}
 
 	return ctx, status.Errorf(codes.Unauthenticated, "invalid token")
+}
+
+func mapValidationError(err error) error {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return status.Error(codes.Canceled, "request canceled")
+	case errors.Is(err, context.DeadlineExceeded):
+		return status.Error(codes.DeadlineExceeded, "auth validation timeout")
+	case isCredentialValidationError(err):
+		return status.Error(codes.Unauthenticated, "invalid token")
+	default:
+		return status.Error(codes.Unavailable, "authentication backend unavailable")
+	}
 }
 
 func (i *GRPCInterceptor) Unary() grpc.UnaryServerInterceptor {
