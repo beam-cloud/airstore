@@ -145,7 +145,7 @@ func (g *RunsGroup) EnqueueRunInput(c echo.Context) error {
 	}
 	runID := c.Param("run_id")
 
-	envelope, deduped, err := g.agents.EnqueueRunInputEnvelope(
+	task, deduped, err := g.agents.EnqueueRunInput(
 		c.Request().Context(),
 		workspaceID,
 		runID,
@@ -165,8 +165,8 @@ func (g *RunsGroup) EnqueueRunInput(c echo.Context) error {
 		Data: map[string]any{
 			"accepted":       true,
 			"idempotent_hit": deduped,
-			"task":           envelope,
-			"run_id":         envelope.TargetRunID,
+			"task":           task,
+			"run_id":         task.TargetRunID,
 		},
 	})
 }

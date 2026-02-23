@@ -101,7 +101,7 @@ async function main() {
     }
     assert(runId, 'run was not materialized from task within timeout');
 
-    console.log('[5/7] wait for execution task binding');
+    console.log('[5/7] wait for run execution binding');
     const attemptDeadline = Date.now() + 45_000;
     let attempts = await client.runs.listAttempts(workspaceId, runId);
     while (
@@ -112,7 +112,7 @@ async function main() {
       attempts = await client.runs.listAttempts(workspaceId, runId);
     }
     const boundAttempt = attempts.find((attempt) => Boolean(attempt.execution_id));
-    assert(boundAttempt, 'run attempt did not bind to execution task');
+    assert(boundAttempt, 'run attempt did not bind to run execution');
 
     console.log('[6/7] wait for terminal run state');
     const runDeadline = Date.now() + 180_000;

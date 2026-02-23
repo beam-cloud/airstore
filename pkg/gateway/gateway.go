@@ -541,7 +541,7 @@ func (g *Gateway) registerServices() error {
 		accessLogGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
 		apiv1.NewAccessLogGroup(accessLogGroup, g.BackendRepo, g.s2Client, sourceService)
 
-		// Agent orchestration engine and gRPC service.
+		// Agent/task/run engine and gRPC service.
 		orchestratorSvc := orchestration.NewAgentService(
 			g.ctx,
 			g.BackendRepo,
@@ -556,14 +556,14 @@ func (g *Gateway) registerServices() error {
 		pb.RegisterAgentServiceServer(g.grpcServer, agentService)
 		log.Info().Msg("agent service registered")
 
-		// Agent/task-envelope/run HTTP APIs (workspace-scoped)
+		// Agent/task/run HTTP APIs (workspace-scoped)
 		agentAPIRoot := g.baseRouteGroup.Group("/workspaces/:workspace_id")
 		agentAPIRoot.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
 		apiv1.NewAgentsGroup(agentAPIRoot.Group("/agents"), agentAPI)
-		apiv1.NewAgentTasksGroup(agentAPIRoot.Group("/tasks"), agentAPI)
+		apiv1.NewWorkspaceTasksGroup(agentAPIRoot.Group("/tasks"), agentAPI)
 		apiv1.NewRunsGroup(agentAPIRoot.Group("/runs"), agentAPI)
 
-		// Task API (`/api/v1/tasks`) delegates to orchestration acceptance.
+		// Task API (`/api/v1/tasks`) delegates to the shared task acceptance path.
 		apiv1.NewTasksGroup(g.baseRouteGroup.Group("/tasks"), g.BackendRepo, agentAPI, terminalIO, g.s2Client)
 
 		// Hook engine: matches events → hooks → tasks, polls for retries
@@ -607,7 +607,7 @@ func (g *Gateway) registerServices() error {
 			log.Warn().Msg("oauth API registered but no providers configured (set oauth.callbackUrl and provider credentials)")
 		}
 
-		log.Info().Msg("workspace, members, tokens, connections, hooks, task, and orchestration APIs registered")
+		log.Info().Msg("workspace, members, tokens, connections, hooks, and agent/task/run APIs registered")
 	}
 
 	return nil

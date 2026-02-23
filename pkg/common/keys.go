@@ -59,16 +59,17 @@ var (
 	taskLogsChannel = "airstore:task_logs:%s"     // taskId (pub/sub)
 	taskLogsBuffer  = "airstore:task_logs_buf:%s" // taskId
 
-	// Agent orchestration keys
-	agentEnvelopeQueue     = "airstore:agent:envelope:queue"
-	agentEnvelopeBacklog   = "airstore:agent:envelope:backlog:%s"  // instanceKey
-	agentEnvelopeModeState = "airstore:agent:envelope:mode:%s"     // modeKey
-	agentEnvelopeModeSet   = "airstore:agent:envelope:mode:active" // modeKey set
-	agentDispatchLock      = "airstore:agent:dispatch:lock:%s"     // instanceKey
-	agentAttemptEvents     = "airstore:agent:attempt:events"
-	agentRunEventsChannel  = "airstore:agent:run:%s:events"
-	agentRunEventsBuffer   = "airstore:agent:run:%s:events:buf"
-	agentInstanceLock      = "airstore:agent:instance:lock:%s" // instanceKey
+	// Agent task queue keys.
+	// Note: Redis values keep the "envelope" namespace for compatibility.
+	agentTaskQueue        = "airstore:agent:envelope:queue"
+	agentTaskBacklog      = "airstore:agent:envelope:backlog:%s"  // instanceKey
+	agentTaskModeState    = "airstore:agent:envelope:mode:%s"     // modeKey
+	agentTaskModeSet      = "airstore:agent:envelope:mode:active" // modeKey set
+	agentDispatchLock     = "airstore:agent:dispatch:lock:%s"     // instanceKey
+	agentAttemptEvents    = "airstore:agent:attempt:events"
+	agentRunEventsChannel = "airstore:agent:run:%s:events"
+	agentRunEventsBuffer  = "airstore:agent:run:%s:events:buf"
+	agentInstanceLock     = "airstore:agent:instance:lock:%s" // instanceKey
 
 	// Terminal IO keys (pub/sub channels)
 	terminalInput  = "airstore:terminal:%s:input"  // taskId
@@ -246,20 +247,20 @@ func (rk *redisKeys) TaskLogsBuffer(taskId string) string {
 
 // --- Agent orchestration keys ---
 
-func (rk *redisKeys) AgentEnvelopeQueue() string {
-	return agentEnvelopeQueue
+func (rk *redisKeys) AgentTaskQueue() string {
+	return agentTaskQueue
 }
 
-func (rk *redisKeys) AgentEnvelopeBacklog(instanceKey string) string {
-	return fmt.Sprintf(agentEnvelopeBacklog, instanceKey)
+func (rk *redisKeys) AgentTaskBacklog(instanceKey string) string {
+	return fmt.Sprintf(agentTaskBacklog, instanceKey)
 }
 
-func (rk *redisKeys) AgentEnvelopeModeState(modeKey string) string {
-	return fmt.Sprintf(agentEnvelopeModeState, modeKey)
+func (rk *redisKeys) AgentTaskModeState(modeKey string) string {
+	return fmt.Sprintf(agentTaskModeState, modeKey)
 }
 
-func (rk *redisKeys) AgentEnvelopeModeSet() string {
-	return agentEnvelopeModeSet
+func (rk *redisKeys) AgentTaskModeSet() string {
+	return agentTaskModeSet
 }
 
 func (rk *redisKeys) AgentDispatchLock(instanceKey string) string {

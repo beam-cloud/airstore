@@ -26,11 +26,11 @@ func NewOrchestrationStore(backend BackendRepository, redis *common.RedisClient)
 	}
 }
 
-func (s *OrchestrationStore) UpdateEnvelopeState(ctx context.Context, envelopeID string, state types.AgentTaskState, dropReason *string, targetRunID *string) error {
+func (s *OrchestrationStore) UpdateTaskState(ctx context.Context, taskID string, state types.AgentTaskState, dropReason *string, targetRunID *string) error {
 	if s == nil || s.backend == nil {
-		return fmt.Errorf("backend is required for envelope state updates")
+		return fmt.Errorf("backend is required for task state updates")
 	}
-	return s.backend.UpdateTaskState(ctx, envelopeID, state, dropReason, targetRunID)
+	return s.backend.UpdateTaskState(ctx, taskID, state, dropReason, targetRunID)
 }
 
 func (s *OrchestrationStore) PushQueueToken(ctx context.Context, token string) error {
@@ -38,7 +38,7 @@ func (s *OrchestrationStore) PushQueueToken(ctx context.Context, token string) e
 	if err != nil {
 		return err
 	}
-	return redis.LPush(ctx, common.Keys.AgentEnvelopeQueue(), token).Err()
+	return redis.LPush(ctx, common.Keys.AgentTaskQueue(), token).Err()
 }
 
 func (s *OrchestrationStore) PopQueueToken(ctx context.Context, timeout time.Duration) (string, error) {
@@ -46,7 +46,7 @@ func (s *OrchestrationStore) PopQueueToken(ctx context.Context, timeout time.Dur
 	if err != nil {
 		return "", err
 	}
-	result, err := redis.BRPop(ctx, timeout, common.Keys.AgentEnvelopeQueue()).Result()
+	result, err := redis.BRPop(ctx, timeout, common.Keys.AgentTaskQueue()).Result()
 	if err != nil {
 		if isRedisNil(err) {
 			return "", nil
@@ -59,21 +59,21 @@ func (s *OrchestrationStore) PopQueueToken(ctx context.Context, timeout time.Dur
 	return result[1], nil
 }
 
-func (s *OrchestrationStore) GetModeEnvelopeID(ctx context.Context, modeKey string) (string, error) {
+func (s *OrchestrationStore) GetModeTaskID(ctx context.Context, modeKey string) (string, error) {
 	redis, err := s.queueRedis()
 	if err != nil {
 		return "", err
 	}
-	id, err := redis.Get(ctx, common.Keys.AgentEnvelopeModeState(modeKey)).Result()
+	id, err := redis.Get(ctx, common.Keys.AgentTaskModeState(modeKey)).Result()
 	return redisStringOrEmpty(id, err)
 }
 
-func (s *OrchestrationStore) SetModeEnvelopeID(ctx context.Context, modeKey string, envelopeID string, ttl time.Duration) error {
+func (s *OrchestrationStore) SetModeTaskID(ctx context.Context, modeKey string, taskID string, ttl time.Duration) error {
 	redis, err := s.queueRedis()
 	if err != nil {
 		return err
 	}
-	return redis.Set(ctx, common.Keys.AgentEnvelopeModeState(modeKey), envelopeID, ttl).Err()
+	return redis.Set(ctx, common.Keys.AgentTaskModeState(modeKey), taskID, ttl).Err()
 }
 
 func (s *OrchestrationStore) AddModeKey(ctx context.Context, modeKey string) (bool, error) {
@@ -81,7 +81,7 @@ func (s *OrchestrationStore) AddModeKey(ctx context.Context, modeKey string) (bo
 	if err != nil {
 		return false, err
 	}
-	added, err := redis.SAdd(ctx, common.Keys.AgentEnvelopeModeSet(), modeKey).Result()
+	added, err := redis.SAdd(ctx, common.Keys.AgentTaskModeSet(), modeKey).Result()
 	return added > 0, err
 }
 
@@ -90,17 +90,17 @@ func (s *OrchestrationStore) RemoveModeKey(ctx context.Context, modeKey string) 
 	if err != nil {
 		return err
 	}
-	_, err = redis.SRem(ctx, common.Keys.AgentEnvelopeModeSet(), modeKey).Result()
+	_, err = redis.SRem(ctx, common.Keys.AgentTaskModeSet(), modeKey).Result()
 	return err
 }
 
-func (s *OrchestrationStore) GetDelModeEnvelopeID(ctx context.Context, modeKey string) (string, error) {
+func (s *OrchestrationStore) GetDelModeTaskID(ctx context.Context, modeKey string) (string, error) {
 	redis, err := s.queueRedis()
 	if err != nil {
 		return "", err
 	}
-	envelopeID, err := redis.GetDel(ctx, common.Keys.AgentEnvelopeModeState(modeKey)).Result()
-	return redisStringOrEmpty(envelopeID, err)
+	taskID, err := redis.GetDel(ctx, common.Keys.AgentTaskModeState(modeKey)).Result()
+	return redisStringOrEmpty(taskID, err)
 }
 
 func (s *OrchestrationStore) WithInstanceLock(ctx context.Context, lockKey string, fn func() error) error {

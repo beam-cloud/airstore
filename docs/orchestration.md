@@ -40,8 +40,8 @@ Supported queue modes are `queue`, `followup`, `steer`, and `interrupt`.
 - `run_input` tasks dispatch new attempts on the target run (`target_run_id`) instead of creating unrelated runs.
 - `steer` is best-effort cooperative in-run injection:
   - The target run must be `running`.
-  - A running attempt must exist with a live interactive execution task.
-  - When eligible, input is injected into that task (same run, same attempt stream).
+  - A running attempt must exist with a live interactive run execution.
+  - When eligible, input is injected into that run execution (same run, same attempt stream).
   - When not eligible, behavior falls back to followup-attempt dispatch (no input loss).
 - `interrupt` cancels active attempt tasks and then continues with the latest run input.
 
@@ -54,7 +54,7 @@ Supported queue modes are `queue`, `followup`, `steer`, and `interrupt`.
 - `resources` (`cpu`, `memory`, `gpu`)
 - `retry` (`max_attempts`, `delay_ms`)
 
-The policy is validated at ingress, persisted on run/attempt metadata, and bridged onto execution tasks for worker sandbox configuration.
+The policy is validated at ingress, persisted on run/attempt metadata, and bridged onto run executions for worker sandbox configuration.
 
 ## API Surface
 

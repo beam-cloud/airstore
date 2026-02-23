@@ -11,7 +11,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/types"
 )
 
-// AgentAPI is the shared application layer for agent/task-envelope/run flows.
+// AgentAPI is the shared application layer for agent/task/run flows.
 // Transport layers (gRPC/HTTP) should call this directly.
 type AgentAPI struct {
 	backend repository.BackendRepository
@@ -94,7 +94,7 @@ func (a *AgentAPI) ListTasks(ctx context.Context, workspaceID uint, limit int) (
 	return a.backend.ListTasks(ctx, workspaceID, limit)
 }
 
-func (a *AgentAPI) EnqueueRunInputEnvelope(
+func (a *AgentAPI) EnqueueRunInput(
 	ctx context.Context,
 	workspaceID uint,
 	runID string,

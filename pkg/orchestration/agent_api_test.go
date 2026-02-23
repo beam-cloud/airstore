@@ -44,7 +44,7 @@ func TestNormalizeRunInputQueueModeSteerBacklog(t *testing.T) {
 func TestEnqueueRunInputEnvelopeRejectsUnsupportedQueueModes(t *testing.T) {
 	api := NewAgentAPI(nil, &AgentService{})
 
-	_, _, err := api.EnqueueRunInputEnvelope(
+	_, _, err := api.EnqueueRunInput(
 		context.Background(),
 		1,
 		"run-1",

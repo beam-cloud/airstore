@@ -21,7 +21,7 @@ type AgentService struct {
 	terminalIO         repository.TerminalIORepository
 	s2                 *common.S2Client
 	defaultImage       string
-	queueRouter        *EnvelopeQueueRouter
+	queueRouter        *TaskQueueRouter
 	instanceController *ExecutionInstanceController
 }
 
@@ -45,7 +45,7 @@ func NewAgentService(
 		terminalIO:         terminalIO,
 		s2:                 s2,
 		defaultImage:       defaultImage,
-		queueRouter:        NewEnvelopeQueueRouter(orchestrationStore),
+		queueRouter:        NewTaskQueueRouter(orchestrationStore),
 		instanceController: NewExecutionInstanceController(ctx, backend, orchestrationStore, common.Keys.AgentInstanceLock),
 	}
 }
@@ -211,7 +211,7 @@ func (s *AgentService) dispatchLoop(ctx context.Context) {
 			continue
 		}
 
-		envelopeID, err := s.queueRouter.ResolveEnvelopeID(ctx, token)
+		envelopeID, err := s.queueRouter.ResolveTaskID(ctx, token)
 		if err != nil {
 			log.Warn().Err(err).Str("token", token).Msg("resolve dispatch token failed")
 			continue
@@ -326,7 +326,7 @@ func (s *AgentService) handleExecutionEnvelope(ctx context.Context, envelope *ty
 	}
 	if hasInstanceState && runningAttempts >= desiredDispatch {
 		// Capacity is currently saturated for this execution class.
-		if err := s.queueRouter.RequeueEnvelope(ctx, envelope.ID); err != nil {
+		if err := s.queueRouter.RequeueTask(ctx, envelope.ID); err != nil {
 			return err
 		}
 		return nil
@@ -1137,5 +1137,5 @@ func (s *AgentService) requeueIfDispatchable(ctx context.Context, envelopeID str
 	if envelope.State != types.AgentTaskStateAccepted && envelope.State != types.AgentTaskStateQueued {
 		return nil
 	}
-	return s.queueRouter.RequeueEnvelope(ctx, envelope.ID)
+	return s.queueRouter.RequeueTask(ctx, envelope.ID)
 }

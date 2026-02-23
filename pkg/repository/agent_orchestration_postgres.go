@@ -809,7 +809,7 @@ func (b *PostgresBackend) BindAttemptExecutionTask(ctx context.Context, attemptI
 	`
 	res, err := b.db.ExecContext(ctx, query, attemptId, taskExternalID)
 	if err != nil {
-		return fmt.Errorf("bind attempt execution task: %w", err)
+		return fmt.Errorf("bind attempt run execution: %w", err)
 	}
 	affected, _ := res.RowsAffected()
 	if affected == 0 {

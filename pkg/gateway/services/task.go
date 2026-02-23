@@ -57,13 +57,7 @@ func (s *AgentService) CreateTask(ctx context.Context, req *pb.CreateTaskRequest
 		return &pb.AgentTaskAcceptedResponse{Ok: false, Error: err.Error()}, nil
 	}
 
-	workspaceExtID := auth.WorkspaceExtId(ctx)
-	if workspaceExtID == "" {
-		workspace, err := s.backend.GetWorkspace(ctx, workspaceID)
-		if err == nil && workspace != nil {
-			workspaceExtID = workspace.ExternalId
-		}
-	}
+	workspaceExtID := s.resolveWorkspaceExternalID(ctx, workspaceID)
 
 	return &pb.AgentTaskAcceptedResponse{
 		Ok:            true,
@@ -140,13 +134,7 @@ func (s *AgentService) ListTasks(ctx context.Context, _ *pb.ListTasksRequest) (*
 		return &pb.ListTasksResponse{Ok: false, Error: err.Error()}, nil
 	}
 
-	workspaceExtID := auth.WorkspaceExtId(ctx)
-	if workspaceExtID == "" {
-		workspace, err := s.backend.GetWorkspace(ctx, workspaceID)
-		if err == nil && workspace != nil {
-			workspaceExtID = workspace.ExternalId
-		}
-	}
+	workspaceExtID := s.resolveWorkspaceExternalID(ctx, workspaceID)
 
 	out := make([]*pb.AgentTask, 0, len(tasks))
 	for _, task := range tasks {
@@ -174,13 +162,7 @@ func (s *AgentService) GetTask(ctx context.Context, req *pb.GetTaskRequest) (*pb
 		return &pb.AgentTaskResponse{Ok: false, Error: err.Error()}, nil
 	}
 
-	workspaceExtID := auth.WorkspaceExtId(ctx)
-	if workspaceExtID == "" {
-		workspace, err := s.backend.GetWorkspace(ctx, workspaceID)
-		if err == nil && workspace != nil {
-			workspaceExtID = workspace.ExternalId
-		}
-	}
+	workspaceExtID := s.resolveWorkspaceExternalID(ctx, workspaceID)
 
 	return &pb.AgentTaskResponse{Ok: true, Task: agentTaskToProto(task, workspaceExtID)}, nil
 }
@@ -249,7 +231,7 @@ func (s *AgentService) EnqueueRunInput(ctx context.Context, req *pb.EnqueueRunIn
 	}
 
 	queueMode := types.AgentQueueMode(req.QueueMode)
-	task, deduped, err := s.api.EnqueueRunInputEnvelope(ctx, ws.Id, req.RunId, queueMode, req.Message, req.IdempotencyKey)
+	task, deduped, err := s.api.EnqueueRunInput(ctx, ws.Id, req.RunId, queueMode, req.Message, req.IdempotencyKey)
 	if err != nil {
 		return &pb.AgentTaskAcceptedResponse{Ok: false, Error: err.Error()}, nil
 	}
@@ -287,5 +269,19 @@ func stringOrEmpty(v *string) string {
 		return ""
 	}
 	return *v
+}
+
+func (s *AgentService) resolveWorkspaceExternalID(ctx context.Context, workspaceID uint) string {
+	workspaceExtID := auth.WorkspaceExtId(ctx)
+	if workspaceExtID != "" {
+		return workspaceExtID
+	}
+
+	workspace, err := s.backend.GetWorkspace(ctx, workspaceID)
+	if err == nil && workspace != nil {
+		return workspace.ExternalId
+	}
+
+	return ""
 }
 

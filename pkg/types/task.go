@@ -44,7 +44,7 @@ type RunExecution struct {
 	// Resources specifies resource requirements (optional - uses defaults if nil)
 	Resources *RunExecutionResources `json:"resources,omitempty" db:"-"`
 
-	// RunAttemptID links this execution task to an orchestrated run attempt.
+	// RunAttemptID links this run execution to an orchestrated run attempt.
 	RunAttemptID *string `json:"run_attempt_id,omitempty" db:"run_attempt_id"`
 
 	// TimeoutMs applies a per-task execution timeout when set.

@@ -215,7 +215,7 @@ func TestAcceptAgentCommandAcceptedFirstAndIdempotent(t *testing.T) {
 	require.Equal(t, types.AgentTaskStateQueued, envelope.State)
 	require.Nil(t, envelope.TargetRunID, "run should not exist at acceptance time")
 
-	queueLen, err := redisClient.LLen(context.Background(), common.Keys.AgentEnvelopeQueue()).Result()
+	queueLen, err := redisClient.LLen(context.Background(), common.Keys.AgentTaskQueue()).Result()
 	require.NoError(t, err)
 	require.EqualValues(t, 1, queueLen)
 
@@ -224,7 +224,7 @@ func TestAcceptAgentCommandAcceptedFirstAndIdempotent(t *testing.T) {
 	require.True(t, deduped)
 	require.Equal(t, envelope.ID, again.ID)
 
-	queueLen, err = redisClient.LLen(context.Background(), common.Keys.AgentEnvelopeQueue()).Result()
+	queueLen, err = redisClient.LLen(context.Background(), common.Keys.AgentTaskQueue()).Result()
 	require.NoError(t, err)
 	require.EqualValues(t, 1, queueLen, "idempotent replay must not enqueue duplicate work")
 }
@@ -235,7 +235,7 @@ func TestQueueReshapingDropsOlderFollowupEnvelope(t *testing.T) {
 
 	backend := newFakeBackend()
 	store := repository.NewOrchestrationStore(backend, redisClient)
-	router := NewEnvelopeQueueRouter(store)
+	router := NewTaskQueueRouter(store)
 	ctx := context.Background()
 
 	instanceKey := "execclass_test"
@@ -269,7 +269,7 @@ func TestQueueReshapingDropsOlderFollowupEnvelope(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, token)
 
-	envelopeID, err := router.ResolveEnvelopeID(ctx, token)
+	envelopeID, err := router.ResolveTaskID(ctx, token)
 	require.NoError(t, err)
 	require.Equal(t, second.ID, envelopeID)
 }

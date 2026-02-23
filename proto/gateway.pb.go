@@ -2561,7 +2561,7 @@ func (x *GetTaskLogsResponse) GetLogs() []*TaskLogEntry {
 	return nil
 }
 
-// Agent orchestration messages
+// Agent, task, and run messages
 type AgentProfile struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache

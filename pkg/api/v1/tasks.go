@@ -23,7 +23,7 @@ type TasksGroup struct {
 	s2Client    *common.S2Client
 }
 
-type AgentTasksGroup struct {
+type WorkspaceTasksGroup struct {
 	routerGroup *echo.Group
 	agents      *orchestration.AgentAPI
 }
@@ -53,7 +53,7 @@ type CreateTaskRequest struct {
 	SpawnedBy         string                            `json:"spawned_by,omitempty"`
 }
 
-type TaskResponse struct {
+type RunExecutionResponse struct {
 	ExternalID  string            `json:"external_id"`
 	WorkspaceID string            `json:"workspace_id"`
 	Status      string            `json:"status"`
@@ -97,8 +97,8 @@ func NewTasksGroup(
 	return g
 }
 
-func NewAgentTasksGroup(routerGroup *echo.Group, agents *orchestration.AgentAPI) *AgentTasksGroup {
-	g := &AgentTasksGroup{
+func NewWorkspaceTasksGroup(routerGroup *echo.Group, agents *orchestration.AgentAPI) *WorkspaceTasksGroup {
+	g := &WorkspaceTasksGroup{
 		routerGroup: routerGroup,
 		agents:      agents,
 	}
@@ -118,12 +118,12 @@ func (g *TasksGroup) registerRoutes() {
 	g.routerGroup.POST("/:id/terminal/input", g.SendTerminalInput)
 }
 
-func (g *AgentTasksGroup) registerRoutes() {
+func (g *WorkspaceTasksGroup) registerRoutes() {
 	g.routerGroup.POST("", g.CreateTask)
 	g.routerGroup.GET("/:task_id", g.GetTask)
 }
 
-func (g *AgentTasksGroup) CreateTask(c echo.Context) error {
+func (g *WorkspaceTasksGroup) CreateTask(c echo.Context) error {
 	if g.agents == nil {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "task service unavailable")
 	}
@@ -157,7 +157,7 @@ func (g *AgentTasksGroup) CreateTask(c echo.Context) error {
 	})
 }
 
-func (g *AgentTasksGroup) GetTask(c echo.Context) error {
+func (g *WorkspaceTasksGroup) GetTask(c echo.Context) error {
 	if g.agents == nil {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "task service unavailable")
 	}
@@ -232,7 +232,7 @@ func (g *TasksGroup) CreateTask(c echo.Context) error {
 		spawnedBy = &value
 	}
 
-	envelope, deduped, err := g.agents.AcceptAgentCommand(ctx, workspace.Id, orchestration.AgentCommandParams{
+	task, deduped, err := g.agents.AcceptAgentCommand(ctx, workspace.Id, orchestration.AgentCommandParams{
 		Message:           req.Message,
 		AgentID:           &agentID,
 		SessionID:         req.SessionID,
@@ -262,8 +262,8 @@ func (g *TasksGroup) CreateTask(c echo.Context) error {
 		Data: map[string]any{
 			"accepted":       true,
 			"idempotent_hit": deduped,
-			"task":           envelope,
-			"run_id":         envelope.TargetRunID,
+			"task":           task,
+			"run_id":         task.TargetRunID,
 		},
 	})
 }
@@ -289,7 +289,7 @@ func (g *TasksGroup) ListTasks(c echo.Context) error {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 
-	var response []TaskResponse
+	var response []RunExecutionResponse
 	for _, t := range tasks {
 		// Get workspace external ID for each task
 		ws, _ := g.backend.GetWorkspace(c.Request().Context(), t.WorkspaceId)
@@ -297,7 +297,7 @@ func (g *TasksGroup) ListTasks(c echo.Context) error {
 		if ws != nil {
 			wsExternalId = ws.ExternalId
 		}
-		response = append(response, taskToResponse(t, wsExternalId))
+		response = append(response, runExecutionToResponse(t, wsExternalId))
 	}
 
 	return SuccessResponse(c, response)
@@ -322,7 +322,7 @@ func (g *TasksGroup) GetTask(c echo.Context) error {
 		wsExternalId = ws.ExternalId
 	}
 
-	return SuccessResponse(c, taskToResponse(task, wsExternalId))
+	return SuccessResponse(c, runExecutionToResponse(task, wsExternalId))
 }
 
 // DeleteTask deletes a task by external ID
@@ -615,9 +615,9 @@ func (w *sseWriter) sendStatus(task *types.RunExecution) {
 	w.flush()
 }
 
-func taskToResponse(t *types.RunExecution, workspaceExternalId string) TaskResponse {
+func runExecutionToResponse(t *types.RunExecution, workspaceExternalId string) RunExecutionResponse {
 	t.NormalizeType()
-	resp := TaskResponse{
+	resp := RunExecutionResponse{
 		ExternalID:  t.ExternalId,
 		WorkspaceID: workspaceExternalId,
 		Status:      string(t.Status),

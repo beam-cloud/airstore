@@ -156,7 +156,7 @@ Flow is:
 1. submit a task,
 2. materialize a run,
 3. execute via run attempts,
-4. map attempts to execution tasks in the worker substrate.
+4. map attempts to execution entries in the worker substrate.
 
 ```typescript
 // 1) Create an agent profile

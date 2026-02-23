@@ -10,60 +10,61 @@ import (
 )
 
 const (
-	dispatchTokenEnvPrefix  = "env:"
+	// Keep "env:" token values for compatibility with existing queued entries.
+	dispatchTokenTaskPrefix = "env:"
 	dispatchTokenModePrefix = "mode:"
 )
 
-type EnvelopeQueueRouter struct {
-	store EnvelopeQueueStore
+type TaskQueueRouter struct {
+	store TaskQueueStore
 }
 
-type EnvelopeQueueStore interface {
-	UpdateEnvelopeState(ctx context.Context, envelopeID string, state types.AgentTaskState, dropReason *string, targetRunID *string) error
+type TaskQueueStore interface {
+	UpdateTaskState(ctx context.Context, taskID string, state types.AgentTaskState, dropReason *string, targetRunID *string) error
 	PushQueueToken(ctx context.Context, token string) error
 	PopQueueToken(ctx context.Context, timeout time.Duration) (string, error)
-	GetModeEnvelopeID(ctx context.Context, modeKey string) (string, error)
-	SetModeEnvelopeID(ctx context.Context, modeKey string, envelopeID string, ttl time.Duration) error
+	GetModeTaskID(ctx context.Context, modeKey string) (string, error)
+	SetModeTaskID(ctx context.Context, modeKey string, taskID string, ttl time.Duration) error
 	AddModeKey(ctx context.Context, modeKey string) (bool, error)
 	RemoveModeKey(ctx context.Context, modeKey string) error
-	GetDelModeEnvelopeID(ctx context.Context, modeKey string) (string, error)
+	GetDelModeTaskID(ctx context.Context, modeKey string) (string, error)
 }
 
-func NewEnvelopeQueueRouter(store EnvelopeQueueStore) *EnvelopeQueueRouter {
-	return &EnvelopeQueueRouter{
+func NewTaskQueueRouter(store TaskQueueStore) *TaskQueueRouter {
+	return &TaskQueueRouter{
 		store: store,
 	}
 }
 
-func (r *EnvelopeQueueRouter) Enqueue(ctx context.Context, envelope *types.AgentTask, instanceKey string) error {
+func (r *TaskQueueRouter) Enqueue(ctx context.Context, task *types.AgentTask, instanceKey string) error {
 	if r.store == nil {
 		return fmt.Errorf("queue store is required")
 	}
 
-	if err := r.store.UpdateEnvelopeState(ctx, envelope.ID, types.AgentTaskStateQueued, nil, envelope.TargetRunID); err != nil {
+	if err := r.store.UpdateTaskState(ctx, task.ID, types.AgentTaskStateQueued, nil, task.TargetRunID); err != nil {
 		return err
 	}
 
-	switch envelope.QueueMode {
+	switch task.QueueMode {
 	case types.AgentQueueModeFollowup, types.AgentQueueModeSteer, types.AgentQueueModeInterrupt:
-		return r.enqueueModeKey(ctx, envelope, instanceKey)
+		return r.enqueueModeKey(ctx, task, instanceKey)
 	default:
-		token := dispatchTokenEnvPrefix + envelope.ID
+		token := dispatchTokenTaskPrefix + task.ID
 		return r.store.PushQueueToken(ctx, token)
 	}
 }
 
-func (r *EnvelopeQueueRouter) enqueueModeKey(ctx context.Context, envelope *types.AgentTask, instanceKey string) error {
-	modeKey := fmt.Sprintf("%s:%s", instanceKey, envelope.QueueMode)
-	prevID, err := r.store.GetModeEnvelopeID(ctx, modeKey)
+func (r *TaskQueueRouter) enqueueModeKey(ctx context.Context, task *types.AgentTask, instanceKey string) error {
+	modeKey := fmt.Sprintf("%s:%s", instanceKey, task.QueueMode)
+	prevID, err := r.store.GetModeTaskID(ctx, modeKey)
 	if err != nil {
 		return err
 	}
-	if prevID != "" && prevID != envelope.ID {
+	if prevID != "" && prevID != task.ID {
 		reason := types.AgentTaskDropReasonReshapedByQueueMode
-		_ = r.store.UpdateEnvelopeState(ctx, prevID, types.AgentTaskStateDropped, &reason, envelope.TargetRunID)
+		_ = r.store.UpdateTaskState(ctx, prevID, types.AgentTaskStateDropped, &reason, task.TargetRunID)
 	}
-	if err := r.store.SetModeEnvelopeID(ctx, modeKey, envelope.ID, 15*time.Minute); err != nil {
+	if err := r.store.SetModeTaskID(ctx, modeKey, task.ID, 15*time.Minute); err != nil {
 		return err
 	}
 
@@ -80,7 +81,7 @@ func (r *EnvelopeQueueRouter) enqueueModeKey(ctx context.Context, envelope *type
 	return nil
 }
 
-func (r *EnvelopeQueueRouter) Pop(ctx context.Context, timeout time.Duration) (string, error) {
+func (r *TaskQueueRouter) Pop(ctx context.Context, timeout time.Duration) (string, error) {
 	if r.store == nil {
 		return "", fmt.Errorf("queue store is required")
 	}
@@ -90,13 +91,13 @@ func (r *EnvelopeQueueRouter) Pop(ctx context.Context, timeout time.Duration) (s
 	return r.store.PopQueueToken(ctx, timeout)
 }
 
-func (r *EnvelopeQueueRouter) ResolveEnvelopeID(ctx context.Context, token string) (string, error) {
+func (r *TaskQueueRouter) ResolveTaskID(ctx context.Context, token string) (string, error) {
 	if r.store == nil {
 		return "", fmt.Errorf("queue store is required")
 	}
 
-	if strings.HasPrefix(token, dispatchTokenEnvPrefix) {
-		return strings.TrimPrefix(token, dispatchTokenEnvPrefix), nil
+	if strings.HasPrefix(token, dispatchTokenTaskPrefix) {
+		return strings.TrimPrefix(token, dispatchTokenTaskPrefix), nil
 	}
 
 	if strings.HasPrefix(token, dispatchTokenModePrefix) {
@@ -104,18 +105,18 @@ func (r *EnvelopeQueueRouter) ResolveEnvelopeID(ctx context.Context, token strin
 		if err := r.store.RemoveModeKey(ctx, modeKey); err != nil {
 			return "", err
 		}
-		return r.store.GetDelModeEnvelopeID(ctx, modeKey)
+		return r.store.GetDelModeTaskID(ctx, modeKey)
 	}
 
 	return "", fmt.Errorf("unsupported dispatch token: %s", token)
 }
 
-func (r *EnvelopeQueueRouter) RequeueEnvelope(ctx context.Context, envelopeID string) error {
+func (r *TaskQueueRouter) RequeueTask(ctx context.Context, taskID string) error {
 	if r.store == nil {
 		return fmt.Errorf("queue store is required")
 	}
-	if strings.TrimSpace(envelopeID) == "" {
-		return fmt.Errorf("envelope_id is required")
+	if strings.TrimSpace(taskID) == "" {
+		return fmt.Errorf("task_id is required")
 	}
-	return r.store.PushQueueToken(ctx, dispatchTokenEnvPrefix+envelopeID)
+	return r.store.PushQueueToken(ctx, dispatchTokenTaskPrefix+taskID)
 }
