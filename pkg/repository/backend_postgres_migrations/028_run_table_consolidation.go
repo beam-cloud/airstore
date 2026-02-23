@@ -12,42 +12,24 @@ func init() {
 
 func upRunTableConsolidation(tx *sql.Tx) error {
 	stmts := []string{
-		`DO $$ BEGIN
-		   IF EXISTS (
-		     SELECT 1
-		     FROM information_schema.columns
-		     WHERE table_schema = current_schema()
-		       AND table_name = 'agent_run'
-		       AND column_name = 'origin_envelope_id'
-		   ) THEN
-		     ALTER TABLE agent_run RENAME COLUMN origin_envelope_id TO origin_task_id;
-		   ELSIF NOT EXISTS (
-		     SELECT 1
-		     FROM information_schema.columns
-		     WHERE table_schema = current_schema()
-		       AND table_name = 'agent_run'
-		       AND column_name = 'origin_task_id'
-		   ) THEN
-		     RAISE EXCEPTION 'migration 028 expected agent_run.origin_envelope_id or agent_run.origin_task_id';
-		   END IF;
-		 END $$;`,
-		`ALTER TABLE agent_run DROP CONSTRAINT IF EXISTS uq_agent_run_origin_envelope;`,
-		`ALTER TABLE agent_run DROP CONSTRAINT IF EXISTS agent_run_origin_envelope_id_fkey;`,
+		`ALTER TABLE agent_run RENAME COLUMN origin_envelope_id TO origin_task_id;`,
+		`ALTER TABLE agent_run DROP CONSTRAINT uq_agent_run_origin_envelope;`,
+		`ALTER TABLE agent_run DROP CONSTRAINT agent_run_origin_envelope_id_fkey;`,
 		`ALTER TABLE agent_run DROP CONSTRAINT IF EXISTS agent_run_origin_task_id_fkey;`,
-		`ALTER TABLE agent_run_attempt DROP CONSTRAINT IF EXISTS agent_run_attempt_execution_task_external_id_fkey;`,
+		`ALTER TABLE agent_run_attempt DROP CONSTRAINT agent_run_attempt_execution_task_external_id_fkey;`,
 		`ALTER TABLE agent_run
-		   ADD COLUMN IF NOT EXISTS created_by_member_id INTEGER REFERENCES workspace_member(id) ON DELETE SET NULL,
-		   ADD COLUMN IF NOT EXISTS type TEXT NOT NULL DEFAULT 'background',
-		   ADD COLUMN IF NOT EXISTS prompt TEXT,
-		   ADD COLUMN IF NOT EXISTS image VARCHAR(512) NOT NULL DEFAULT '',
-		   ADD COLUMN IF NOT EXISTS entrypoint TEXT[] NOT NULL DEFAULT '{}',
-		   ADD COLUMN IF NOT EXISTS env JSONB NOT NULL DEFAULT '{}'::jsonb,
-		   ADD COLUMN IF NOT EXISTS hook_id INTEGER REFERENCES filesystem_hooks(id) ON DELETE SET NULL,
-		   ADD COLUMN IF NOT EXISTS attempt INTEGER NOT NULL DEFAULT 1,
-		   ADD COLUMN IF NOT EXISTS max_attempts INTEGER NOT NULL DEFAULT 1,
-		   ADD COLUMN IF NOT EXISTS run_attempt_id UUID NULL,
-		   ADD COLUMN IF NOT EXISTS exit_code INTEGER,
-		   ADD COLUMN IF NOT EXISTS execution_policy_json JSONB NOT NULL DEFAULT '{}'::jsonb;`,
+		   ADD COLUMN created_by_member_id INTEGER REFERENCES workspace_member(id) ON DELETE SET NULL,
+		   ADD COLUMN type TEXT NOT NULL DEFAULT 'background',
+		   ADD COLUMN prompt TEXT,
+		   ADD COLUMN image VARCHAR(512) NOT NULL DEFAULT '',
+		   ADD COLUMN entrypoint TEXT[] NOT NULL DEFAULT '{}',
+		   ADD COLUMN env JSONB NOT NULL DEFAULT '{}'::jsonb,
+		   ADD COLUMN hook_id INTEGER REFERENCES filesystem_hooks(id) ON DELETE SET NULL,
+		   ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1,
+		   ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 1,
+		   ADD COLUMN run_attempt_id UUID NULL,
+		   ADD COLUMN exit_code INTEGER,
+		   ADD COLUMN execution_policy_json JSONB NOT NULL DEFAULT '{}'::jsonb;`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_run_hook_active
 		 ON agent_run(hook_id)
 		 WHERE hook_id IS NOT NULL AND status IN ('accepted', 'running');`,
