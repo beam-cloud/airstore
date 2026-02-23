@@ -10,9 +10,8 @@ import (
 )
 
 const (
-	// Keep "env:" token values for compatibility with existing queued entries.
-	dispatchTokenTaskPrefix = "env:"
-	dispatchTokenModePrefix = "mode:"
+	dispatchTokenTaskPrefix = "task:"
+	dispatchTokenModePrefix = "task-mode:"
 )
 
 type TaskQueueRouter struct {

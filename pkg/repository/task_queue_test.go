@@ -110,7 +110,7 @@ func TestRedisTaskQueuePushDelayedExtendsTaskStateTTL(t *testing.T) {
 	delay := 48 * time.Hour
 	require.NoError(t, queue.PushDelayed(context.Background(), task, delay))
 
-	ttl, err := queue.rdb.TTL(context.Background(), common.Keys.TaskState(task.ExternalId)).Result()
+	ttl, err := queue.rdb.TTL(context.Background(), common.Keys.RunExecutionState(task.ExternalId)).Result()
 	require.NoError(t, err)
 	require.Greater(t, ttl, delay, "task state TTL should outlive the scheduled delay")
 }

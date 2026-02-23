@@ -215,7 +215,7 @@ func TestAcceptAgentCommandAcceptedFirstAndIdempotent(t *testing.T) {
 	require.Equal(t, types.AgentTaskStateQueued, envelope.State)
 	require.Nil(t, envelope.TargetRunID, "run should not exist at acceptance time")
 
-	queueLen, err := redisClient.LLen(context.Background(), common.Keys.AgentTaskQueue()).Result()
+	queueLen, err := redisClient.LLen(context.Background(), common.Keys.TaskQueue()).Result()
 	require.NoError(t, err)
 	require.EqualValues(t, 1, queueLen)
 
@@ -224,7 +224,7 @@ func TestAcceptAgentCommandAcceptedFirstAndIdempotent(t *testing.T) {
 	require.True(t, deduped)
 	require.Equal(t, envelope.ID, again.ID)
 
-	queueLen, err = redisClient.LLen(context.Background(), common.Keys.AgentTaskQueue()).Result()
+	queueLen, err = redisClient.LLen(context.Background(), common.Keys.TaskQueue()).Result()
 	require.NoError(t, err)
 	require.EqualValues(t, 1, queueLen, "idempotent replay must not enqueue duplicate work")
 }

@@ -50,21 +50,20 @@ var (
 	oauthSession = "airstore:oauth:session:%s" // sessionId
 	oauthState   = "airstore:oauth:state:%s"   // state
 
-	// Task queue keys
-	taskQueueKey    = "airstore:task_queue:%s"    // pool name
-	taskDelayedKey  = "airstore:task_delayed:%s"  // pool name (zset by due timestamp ms)
-	taskInFlightKey = "airstore:task_inflight:%s" // pool name
-	taskStateKey    = "airstore:task_state:%s"    // taskId
-	taskResultKey   = "airstore:task_result:%s"   // taskId
-	taskLogsChannel = "airstore:task_logs:%s"     // taskId (pub/sub)
-	taskLogsBuffer  = "airstore:task_logs_buf:%s" // taskId
+	// Run execution queue keys (internal execution substrate)
+	runExecutionQueueKey    = "airstore:run_execution:queue:%s"    // pool name
+	runExecutionDelayedKey  = "airstore:run_execution:delayed:%s"  // pool name (zset by due timestamp ms)
+	runExecutionInFlightKey = "airstore:run_execution:inflight:%s" // pool name
+	runExecutionStateKey    = "airstore:run_execution:state:%s"    // runExecutionId
+	runExecutionResultKey   = "airstore:run_execution:result:%s"   // runExecutionId
+	runExecutionLogsChannel = "airstore:run_execution:logs:%s"     // runExecutionId (pub/sub)
+	runExecutionLogsBuffer  = "airstore:run_execution:logs_buf:%s" // runExecutionId
 
-	// Agent task queue keys.
-	// Note: Redis values keep the "envelope" namespace for compatibility.
-	agentTaskQueue        = "airstore:agent:envelope:queue"
-	agentTaskBacklog      = "airstore:agent:envelope:backlog:%s"  // instanceKey
-	agentTaskModeState    = "airstore:agent:envelope:mode:%s"     // modeKey
-	agentTaskModeSet      = "airstore:agent:envelope:mode:active" // modeKey set
+	// Task queue keys (high-level task ingress)
+	taskQueueKey     = "airstore:task:queue"
+	taskBacklogKey   = "airstore:task:backlog:%s"  // instanceKey
+	taskModeStateKey = "airstore:task:mode:%s"     // modeKey
+	taskModeSetKey   = "airstore:task:mode:active" // modeKey set
 	agentDispatchLock     = "airstore:agent:dispatch:lock:%s"     // instanceKey
 	agentAttemptEvents    = "airstore:agent:attempt:events"
 	agentRunEventsChannel = "airstore:agent:run:%s:events"
@@ -215,52 +214,52 @@ func (rk *redisKeys) OAuthState(state string) string {
 	return fmt.Sprintf(oauthState, state)
 }
 
+// --- Run execution queue keys ---
+
+func (rk *redisKeys) RunExecutionQueue(pool string) string {
+	return fmt.Sprintf(runExecutionQueueKey, pool)
+}
+
+func (rk *redisKeys) RunExecutionInFlight(pool string) string {
+	return fmt.Sprintf(runExecutionInFlightKey, pool)
+}
+
+func (rk *redisKeys) RunExecutionDelayed(pool string) string {
+	return fmt.Sprintf(runExecutionDelayedKey, pool)
+}
+
+func (rk *redisKeys) RunExecutionState(runExecutionID string) string {
+	return fmt.Sprintf(runExecutionStateKey, runExecutionID)
+}
+
+func (rk *redisKeys) RunExecutionResult(runExecutionID string) string {
+	return fmt.Sprintf(runExecutionResultKey, runExecutionID)
+}
+
+func (rk *redisKeys) RunExecutionLogsChannel(runExecutionID string) string {
+	return fmt.Sprintf(runExecutionLogsChannel, runExecutionID)
+}
+
+func (rk *redisKeys) RunExecutionLogsBuffer(runExecutionID string) string {
+	return fmt.Sprintf(runExecutionLogsBuffer, runExecutionID)
+}
+
 // --- Task queue keys ---
 
-func (rk *redisKeys) TaskQueue(pool string) string {
-	return fmt.Sprintf(taskQueueKey, pool)
+func (rk *redisKeys) TaskQueue() string {
+	return taskQueueKey
 }
 
-func (rk *redisKeys) TaskInFlight(pool string) string {
-	return fmt.Sprintf(taskInFlightKey, pool)
+func (rk *redisKeys) TaskBacklog(instanceKey string) string {
+	return fmt.Sprintf(taskBacklogKey, instanceKey)
 }
 
-func (rk *redisKeys) TaskDelayed(pool string) string {
-	return fmt.Sprintf(taskDelayedKey, pool)
+func (rk *redisKeys) TaskModeState(modeKey string) string {
+	return fmt.Sprintf(taskModeStateKey, modeKey)
 }
 
-func (rk *redisKeys) TaskState(taskId string) string {
-	return fmt.Sprintf(taskStateKey, taskId)
-}
-
-func (rk *redisKeys) TaskResult(taskId string) string {
-	return fmt.Sprintf(taskResultKey, taskId)
-}
-
-func (rk *redisKeys) TaskLogsChannel(taskId string) string {
-	return fmt.Sprintf(taskLogsChannel, taskId)
-}
-
-func (rk *redisKeys) TaskLogsBuffer(taskId string) string {
-	return fmt.Sprintf(taskLogsBuffer, taskId)
-}
-
-// --- Agent orchestration keys ---
-
-func (rk *redisKeys) AgentTaskQueue() string {
-	return agentTaskQueue
-}
-
-func (rk *redisKeys) AgentTaskBacklog(instanceKey string) string {
-	return fmt.Sprintf(agentTaskBacklog, instanceKey)
-}
-
-func (rk *redisKeys) AgentTaskModeState(modeKey string) string {
-	return fmt.Sprintf(agentTaskModeState, modeKey)
-}
-
-func (rk *redisKeys) AgentTaskModeSet() string {
-	return agentTaskModeSet
+func (rk *redisKeys) TaskModeSet() string {
+	return taskModeSetKey
 }
 
 func (rk *redisKeys) AgentDispatchLock(instanceKey string) string {

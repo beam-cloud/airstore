@@ -38,7 +38,7 @@ func (s *OrchestrationStore) PushQueueToken(ctx context.Context, token string) e
 	if err != nil {
 		return err
 	}
-	return redis.LPush(ctx, common.Keys.AgentTaskQueue(), token).Err()
+	return redis.LPush(ctx, common.Keys.TaskQueue(), token).Err()
 }
 
 func (s *OrchestrationStore) PopQueueToken(ctx context.Context, timeout time.Duration) (string, error) {
@@ -46,7 +46,7 @@ func (s *OrchestrationStore) PopQueueToken(ctx context.Context, timeout time.Dur
 	if err != nil {
 		return "", err
 	}
-	result, err := redis.BRPop(ctx, timeout, common.Keys.AgentTaskQueue()).Result()
+	result, err := redis.BRPop(ctx, timeout, common.Keys.TaskQueue()).Result()
 	if err != nil {
 		if isRedisNil(err) {
 			return "", nil
@@ -64,7 +64,7 @@ func (s *OrchestrationStore) GetModeTaskID(ctx context.Context, modeKey string) 
 	if err != nil {
 		return "", err
 	}
-	id, err := redis.Get(ctx, common.Keys.AgentTaskModeState(modeKey)).Result()
+	id, err := redis.Get(ctx, common.Keys.TaskModeState(modeKey)).Result()
 	return redisStringOrEmpty(id, err)
 }
 
@@ -73,7 +73,7 @@ func (s *OrchestrationStore) SetModeTaskID(ctx context.Context, modeKey string, 
 	if err != nil {
 		return err
 	}
-	return redis.Set(ctx, common.Keys.AgentTaskModeState(modeKey), taskID, ttl).Err()
+	return redis.Set(ctx, common.Keys.TaskModeState(modeKey), taskID, ttl).Err()
 }
 
 func (s *OrchestrationStore) AddModeKey(ctx context.Context, modeKey string) (bool, error) {
@@ -81,7 +81,7 @@ func (s *OrchestrationStore) AddModeKey(ctx context.Context, modeKey string) (bo
 	if err != nil {
 		return false, err
 	}
-	added, err := redis.SAdd(ctx, common.Keys.AgentTaskModeSet(), modeKey).Result()
+	added, err := redis.SAdd(ctx, common.Keys.TaskModeSet(), modeKey).Result()
 	return added > 0, err
 }
 
@@ -90,7 +90,7 @@ func (s *OrchestrationStore) RemoveModeKey(ctx context.Context, modeKey string) 
 	if err != nil {
 		return err
 	}
-	_, err = redis.SRem(ctx, common.Keys.AgentTaskModeSet(), modeKey).Result()
+	_, err = redis.SRem(ctx, common.Keys.TaskModeSet(), modeKey).Result()
 	return err
 }
 
@@ -99,7 +99,7 @@ func (s *OrchestrationStore) GetDelModeTaskID(ctx context.Context, modeKey strin
 	if err != nil {
 		return "", err
 	}
-	taskID, err := redis.GetDel(ctx, common.Keys.AgentTaskModeState(modeKey)).Result()
+	taskID, err := redis.GetDel(ctx, common.Keys.TaskModeState(modeKey)).Result()
 	return redisStringOrEmpty(taskID, err)
 }
 
