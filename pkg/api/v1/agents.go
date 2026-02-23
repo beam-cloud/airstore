@@ -43,7 +43,7 @@ func (g *AgentsGroup) registerRoutes() {
 
 func (g *AgentsGroup) CreateAgent(c echo.Context) error {
 	if g.agents == nil {
-		return ErrorResponse(c, http.StatusServiceUnavailable, "orchestration unavailable")
+		return ErrorResponse(c, http.StatusServiceUnavailable, "agent service unavailable")
 	}
 
 	var req createAgentAPIRequest
@@ -71,7 +71,7 @@ func (g *AgentsGroup) CreateAgent(c echo.Context) error {
 
 func (g *AgentsGroup) ListAgents(c echo.Context) error {
 	if g.agents == nil {
-		return ErrorResponse(c, http.StatusServiceUnavailable, "orchestration unavailable")
+		return ErrorResponse(c, http.StatusServiceUnavailable, "agent service unavailable")
 	}
 	workspaceID, err := requireWorkspaceID(c)
 	if err != nil {
@@ -86,7 +86,7 @@ func (g *AgentsGroup) ListAgents(c echo.Context) error {
 
 func (g *AgentsGroup) GetAgent(c echo.Context) error {
 	if g.agents == nil {
-		return ErrorResponse(c, http.StatusServiceUnavailable, "orchestration unavailable")
+		return ErrorResponse(c, http.StatusServiceUnavailable, "agent service unavailable")
 	}
 	workspaceID, err := requireWorkspaceID(c)
 	if err != nil {

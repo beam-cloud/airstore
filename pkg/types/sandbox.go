@@ -26,7 +26,7 @@ type SandboxConfig struct {
 	WorkingDir string `json:"working_dir"`
 
 	// Resources specifies resource limits for the sandbox
-	Resources TaskResources `json:"resources"`
+	Resources RunExecutionResources `json:"resources"`
 
 	// Mounts specifies additional mounts for the sandbox
 	Mounts []SandboxMount `json:"mounts"`

@@ -4,14 +4,14 @@ import { createTestWorkspace, deleteTestWorkspace, getClient, uniqueName } from 
 
 async function waitForRunId(
   workspaceId: string,
-  envelopeId: string,
+  taskId: string,
   timeoutMs = 30000,
 ): Promise<string | undefined> {
   const client = getClient();
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const envelope = await client.tasks.retrieve(workspaceId, envelopeId);
-    if (envelope.target_run_id) return envelope.target_run_id;
+    const task = await client.tasks.retrieve(workspaceId, taskId);
+    if (task.target_run_id) return task.target_run_id;
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
   return undefined;
@@ -23,7 +23,7 @@ describe('Runs', () => {
   let agentId: string;
 
   beforeAll(async () => {
-    workspace = await createTestWorkspace('orchestration-runs');
+    workspace = await createTestWorkspace('agent-runs');
     const agent = await client.agents.create(workspace.external_id, {
       agentKey: uniqueName('run-agent'),
       name: uniqueName('Run Agent'),
@@ -46,7 +46,7 @@ describe('Runs', () => {
 
     const runId =
       accepted.run_id ??
-      (await waitForRunId(workspace.external_id, accepted.envelope.id));
+      (await waitForRunId(workspace.external_id, accepted.task.id));
     expect(runId).toBeDefined();
     if (!runId) return;
 
@@ -77,7 +77,7 @@ describe('Runs', () => {
 
     const runId =
       accepted.run_id ??
-      (await waitForRunId(workspace.external_id, accepted.envelope.id));
+      (await waitForRunId(workspace.external_id, accepted.task.id));
     expect(runId).toBeDefined();
     if (!runId) return;
 
@@ -87,7 +87,7 @@ describe('Runs', () => {
     });
 
     expect(inputAccepted.accepted).toBe(true);
-    expect(inputAccepted.envelope.idempotency_key.length).toBeGreaterThan(0);
-    expect(inputAccepted.envelope.target_run_id).toBe(runId);
+    expect(inputAccepted.task.idempotency_key.length).toBeGreaterThan(0);
+    expect(inputAccepted.task.target_run_id).toBe(runId);
   });
 });

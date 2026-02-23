@@ -13,7 +13,7 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-func (w *Worker) runInteractiveTask(ctx context.Context, task types.Task) (*types.TaskResult, error) {
+func (w *Worker) runInteractiveTask(ctx context.Context, task types.RunExecution) (*types.RunExecutionResult, error) {
 	if w.terminalIO == nil {
 		return nil, fmt.Errorf("terminal transport is not configured")
 	}
@@ -32,13 +32,13 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.Task) (*type
 	}
 
 	if err := w.sandboxManager.Start(sandboxID); err != nil {
-		w.sandboxManager.publishStatus(ctx, task.ExternalId, types.TaskStatusFailed, nil, err.Error())
+		w.sandboxManager.publishStatus(ctx, task.ExternalId, types.RunExecutionStatusFailed, nil, err.Error())
 		w.sandboxManager.Delete(sandboxID, true)
 		w.sandboxManager.cleanupMount(task.ExternalId)
 		return nil, fmt.Errorf("failed to start interactive sandbox: %w", err)
 	}
 
-	w.sandboxManager.publishStatus(ctx, task.ExternalId, types.TaskStatusRunning, nil, "")
+	w.sandboxManager.publishStatus(ctx, task.ExternalId, types.RunExecutionStatusRunning, nil, "")
 
 	result := w.runInteractiveSession(ctx, task, sandboxID)
 
@@ -56,7 +56,7 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.Task) (*type
 // runInteractiveSession owns the PTY session lifecycle. It blocks until the
 // session ends (user disconnect, idle timeout, or cancel) and returns the result.
 // Sandbox teardown is NOT done here — the caller handles it.
-func (w *Worker) runInteractiveSession(ctx context.Context, task types.Task, sandboxID string) *types.TaskResult {
+func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecution, sandboxID string) *types.RunExecutionResult {
 	sessionCtx, sessionCancel := context.WithCancel(ctx)
 	defer sessionCancel()
 
@@ -117,7 +117,7 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.Task, san
 	exitCode, errMsg, status := interactiveResult(runErr, idleTimedOut.Load())
 
 	w.sandboxManager.publishStatus(ctx, task.ExternalId, status, &exitCode, errMsg)
-	return &types.TaskResult{
+	return &types.RunExecutionResult{
 		ID:       task.ExternalId,
 		ExitCode: exitCode,
 		Error:    errMsg,
@@ -125,23 +125,23 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.Task, san
 	}
 }
 
-func interactiveResult(err error, idleTimedOut bool) (int, string, types.TaskStatus) {
+func interactiveResult(err error, idleTimedOut bool) (int, string, types.RunExecutionStatus) {
 	if err == nil {
-		return 0, "", types.TaskStatusComplete
+		return 0, "", types.RunExecutionStatusComplete
 	}
 
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		if idleTimedOut {
-			return 0, "", types.TaskStatusComplete
+			return 0, "", types.RunExecutionStatusComplete
 		}
-		return -1, "interactive session cancelled", types.TaskStatusCancelled
+		return -1, "interactive session cancelled", types.RunExecutionStatusCancelled
 	}
 
-	return -1, err.Error(), types.TaskStatusFailed
+	return -1, err.Error(), types.RunExecutionStatusFailed
 }
 
-func interactiveErrorResult(taskID string, err error) *types.TaskResult {
-	return &types.TaskResult{
+func interactiveErrorResult(taskID string, err error) *types.RunExecutionResult {
+	return &types.RunExecutionResult{
 		ID:       taskID,
 		ExitCode: -1,
 		Error:    err.Error(),

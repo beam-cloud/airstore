@@ -119,12 +119,12 @@ export type {
   WorkspaceAccess,
   RunRetryPolicy,
   RunExecutionPolicy,
-  EnvelopeKind,
-  EnvelopeState,
+  TaskKind,
+  TaskState,
   RoutingContext,
-  AgentTaskEnvelope,
+  AgentTask,
   AgentCommandCreateParams,
-  TaskEnvelopeAcceptedResponse,
+  TaskAcceptedResponse,
 } from './types/tasks.js';
 export type {
   RunStatus,

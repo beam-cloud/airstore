@@ -127,18 +127,18 @@ func RetryPolicyOrDefault(r *RunRetryPolicy) RunRetryPolicy {
 	return NormalizeRunRetryPolicy(*r)
 }
 
-func ToTaskType(p RunExecutionPolicy) types.TaskType {
+func ToRunExecutionType(p RunExecutionPolicy) types.RunExecutionType {
 	if p.Interactive {
-		return types.TaskTypeInteractive
+		return types.RunExecutionTypeInteractive
 	}
-	return types.TaskTypeBackground
+	return types.RunExecutionTypeBackground
 }
 
-func ToTaskResources(p RunExecutionPolicy) *types.TaskResources {
+func ToRunExecutionResources(p RunExecutionPolicy) *types.RunExecutionResources {
 	if len(p.Resources) == 0 {
 		return nil
 	}
-	out := &types.TaskResources{}
+	out := &types.RunExecutionResources{}
 	if v, ok := numberAsInt64(p.Resources["cpu"]); ok {
 		out.CPU = v
 	}

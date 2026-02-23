@@ -1,6 +1,11 @@
 #!/usr/bin/env npx tsx
 import { Airstore } from '../src/airstore.js';
 
+declare const process: {
+  env: Record<string, string | undefined>;
+  exit(code?: number): never;
+};
+
 const TERMINAL_RUN_STATUSES = new Set(['ok', 'error', 'timeout', 'cancelled']);
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -74,7 +79,7 @@ async function main() {
     });
     assert(agent.id, 'expected agent id');
 
-    console.log('[3/7] submit task envelope');
+    console.log('[3/7] submit task');
     const sessionId = `sandbox-session-${Date.now()}`;
     const accepted = await client.tasks.create(workspaceId, {
       message: 'Run a minimal sandbox task and report status',
@@ -86,27 +91,27 @@ async function main() {
     assert(accepted.accepted, 'expected accepted response');
 
     console.log('[4/7] wait for run materialization');
-    let runId = accepted.run_id ?? accepted.envelope.target_run_id;
-    const envelopeId = accepted.envelope.id;
-    const envelopeDeadline = Date.now() + 30_000;
-    while (!runId && Date.now() < envelopeDeadline) {
+    let runId = accepted.run_id ?? accepted.task.target_run_id;
+    const taskId = accepted.task.id;
+    const taskDeadline = Date.now() + 30_000;
+    while (!runId && Date.now() < taskDeadline) {
       await sleep(1000);
-      const envelope = await client.tasks.retrieve(workspaceId, envelopeId);
-      runId = envelope.target_run_id;
+      const task = await client.tasks.retrieve(workspaceId, taskId);
+      runId = task.target_run_id;
     }
-    assert(runId, 'run was not materialized from envelope within timeout');
+    assert(runId, 'run was not materialized from task within timeout');
 
     console.log('[5/7] wait for execution task binding');
     const attemptDeadline = Date.now() + 45_000;
     let attempts = await client.runs.listAttempts(workspaceId, runId);
     while (
       Date.now() < attemptDeadline &&
-      !attempts.some((attempt) => Boolean(attempt.execution_task_external_id))
+      !attempts.some((attempt) => Boolean(attempt.execution_id))
     ) {
       await sleep(1500);
       attempts = await client.runs.listAttempts(workspaceId, runId);
     }
-    const boundAttempt = attempts.find((attempt) => Boolean(attempt.execution_task_external_id));
+    const boundAttempt = attempts.find((attempt) => Boolean(attempt.execution_id));
     assert(boundAttempt, 'run attempt did not bind to execution task');
 
     console.log('[6/7] wait for terminal run state');
@@ -137,7 +142,7 @@ async function main() {
 
     console.log('agent sandbox plumbing verified');
     console.log(
-      `workspace=${workspaceId} run=${runId} status=${run.status} attempts=${attempts.length} execution_task=${boundAttempt.execution_task_external_id} snapshots=${snapshots.length} events=${events.length}`,
+      `workspace=${workspaceId} run=${runId} status=${run.status} attempts=${attempts.length} execution=${boundAttempt.execution_id} snapshots=${snapshots.length} events=${events.length}`,
     );
   } finally {
     if (createdWorkspace && workspaceId && process.env['KEEP_EXAMPLE_WORKSPACE'] !== '1') {

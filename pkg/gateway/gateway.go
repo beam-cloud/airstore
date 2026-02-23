@@ -469,16 +469,6 @@ func (g *Gateway) registerServices() error {
 			gatewayService.SetSourceService(sourceService)
 		}
 
-		// Register task gRPC service.
-		taskService := services.NewTaskService(
-			g.BackendRepo,
-			taskQueue,
-			g.s2Client,
-			g.Config.Sandbox.GetDefaultImage(),
-		)
-		pb.RegisterTaskServiceServer(g.grpcServer, taskService)
-		log.Info().Msg("task service registered")
-
 		// Task factory (shared between HTTP API and hook evaluator)
 		taskFactory := hooks.NewTaskFactory(g.BackendRepo, taskQueue, g.Config.Sandbox.GetDefaultImage())
 
@@ -551,9 +541,6 @@ func (g *Gateway) registerServices() error {
 		accessLogGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
 		apiv1.NewAccessLogGroup(accessLogGroup, g.BackendRepo, g.s2Client, sourceService)
 
-		// Execution-task HTTP API (`/api/v1/tasks`).
-		apiv1.NewTasksGroup(g.baseRouteGroup.Group("/tasks"), g.BackendRepo, taskQueue, terminalIO, g.s2Client, g.Config.Sandbox.GetDefaultImage())
-
 		// Agent orchestration engine and gRPC service.
 		orchestratorSvc := orchestration.NewAgentService(
 			g.ctx,
@@ -565,7 +552,7 @@ func (g *Gateway) registerServices() error {
 		)
 		orchestratorSvc.Start(g.ctx)
 		agentAPI := orchestration.NewAgentAPI(g.BackendRepo, orchestratorSvc)
-		agentService := services.NewAgentService(g.BackendRepo, agentAPI)
+		agentService := services.NewAgentService(g.BackendRepo, agentAPI, g.s2Client)
 		pb.RegisterAgentServiceServer(g.grpcServer, agentService)
 		log.Info().Msg("agent service registered")
 
@@ -575,6 +562,9 @@ func (g *Gateway) registerServices() error {
 		apiv1.NewAgentsGroup(agentAPIRoot.Group("/agents"), agentAPI)
 		apiv1.NewAgentTasksGroup(agentAPIRoot.Group("/tasks"), agentAPI)
 		apiv1.NewRunsGroup(agentAPIRoot.Group("/runs"), agentAPI)
+
+		// Task API (`/api/v1/tasks`) delegates to orchestration acceptance.
+		apiv1.NewTasksGroup(g.baseRouteGroup.Group("/tasks"), g.BackendRepo, agentAPI, terminalIO, g.s2Client)
 
 		// Hook engine: matches events → hooks → tasks, polls for retries
 		var skillReader hooks.SkillReader
@@ -617,7 +607,7 @@ func (g *Gateway) registerServices() error {
 			log.Warn().Msg("oauth API registered but no providers configured (set oauth.callbackUrl and provider credentials)")
 		}
 
-		log.Info().Msg("workspace, members, tokens, connections, hooks, execution-task, and orchestration APIs registered")
+		log.Info().Msg("workspace, members, tokens, connections, hooks, task, and orchestration APIs registered")
 	}
 
 	return nil

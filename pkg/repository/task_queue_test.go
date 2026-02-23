@@ -35,11 +35,11 @@ func TestRedisTaskQueuePushDelayedMovesIntoQueueAtDueTime(t *testing.T) {
 	queue, cleanup := newTestTaskQueue(t)
 	defer cleanup()
 
-	task := &types.Task{
+	task := &types.RunExecution{
 		ExternalId:  "task-delayed-1",
 		WorkspaceId: 1,
-		Status:      types.TaskStatusPending,
-		Type:        types.TaskTypeBackground,
+		Status:      types.RunExecutionStatusPending,
+		Type:        types.RunExecutionTypeBackground,
 		Image:       "ghcr.io/beam/sandbox:latest",
 		Entrypoint:  []string{},
 		Env:         map[string]string{},
@@ -65,11 +65,11 @@ func TestRedisTaskQueuePushDelayedSurvivesQueueReconstruction(t *testing.T) {
 	queue, cleanup := newTestTaskQueue(t)
 	defer cleanup()
 
-	task := &types.Task{
+	task := &types.RunExecution{
 		ExternalId:  "task-delayed-2",
 		WorkspaceId: 1,
-		Status:      types.TaskStatusPending,
-		Type:        types.TaskTypeBackground,
+		Status:      types.RunExecutionStatusPending,
+		Type:        types.RunExecutionTypeBackground,
 		Image:       "ghcr.io/beam/sandbox:latest",
 		Entrypoint:  []string{},
 		Env:         map[string]string{},
@@ -97,11 +97,11 @@ func TestRedisTaskQueuePushDelayedExtendsTaskStateTTL(t *testing.T) {
 	queue, cleanup := newTestTaskQueue(t)
 	defer cleanup()
 
-	task := &types.Task{
+	task := &types.RunExecution{
 		ExternalId:  "task-delayed-ttl",
 		WorkspaceId: 1,
-		Status:      types.TaskStatusPending,
-		Type:        types.TaskTypeBackground,
+		Status:      types.RunExecutionStatusPending,
+		Type:        types.RunExecutionTypeBackground,
 		Image:       "ghcr.io/beam/sandbox:latest",
 		Entrypoint:  []string{},
 		Env:         map[string]string{},

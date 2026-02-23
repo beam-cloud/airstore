@@ -6,7 +6,7 @@ import type {
   RunCancelResponse,
   RunInputParams,
 } from '../types/runs.js';
-import type { TaskEnvelopeAcceptedResponse } from '../types/tasks.js';
+import type { TaskAcceptedResponse } from '../types/tasks.js';
 
 /**
  * Read and control run lifecycle state (attempts, snapshots, events).
@@ -85,8 +85,8 @@ export class Runs {
     runId: string,
     params: RunInputParams,
     options?: RequestOptions,
-  ): Promise<TaskEnvelopeAcceptedResponse> {
-    return this.client.request<TaskEnvelopeAcceptedResponse>(
+  ): Promise<TaskAcceptedResponse> {
+    return this.client.request<TaskAcceptedResponse>(
       'POST',
       `/workspaces/${workspaceId}/runs/${runId}/input`,
       {

@@ -2,182 +2,223 @@ package services
 
 import (
 	"context"
-	"time"
+	"strings"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
-	"github.com/beam-cloud/airstore/pkg/common"
-	"github.com/beam-cloud/airstore/pkg/repository"
+	"github.com/beam-cloud/airstore/pkg/orchestration"
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
 )
 
-type TaskService struct {
-	pb.UnimplementedTaskServiceServer
-	backend      repository.BackendRepository
-	taskQueue    repository.TaskQueue
-	s2Client     *common.S2Client
-	defaultImage string
-}
-
-func NewTaskService(
-	backend repository.BackendRepository,
-	taskQueue repository.TaskQueue,
-	s2Client *common.S2Client,
-	defaultImage string,
-) *TaskService {
-	return &TaskService{
-		backend:      backend,
-		taskQueue:    taskQueue,
-		s2Client:     s2Client,
-		defaultImage: defaultImage,
-	}
-}
-
-func (s *TaskService) CreateTask(ctx context.Context, req *pb.CreateTaskRequest) (*pb.TaskResponse, error) {
+func (s *AgentService) CreateTask(ctx context.Context, req *pb.CreateTaskRequest) (*pb.AgentTaskAcceptedResponse, error) {
 	workspaceID := auth.WorkspaceId(ctx)
 	if workspaceID == 0 {
-		return &pb.TaskResponse{Ok: false, Error: "authentication required"}, nil
+		return &pb.AgentTaskAcceptedResponse{Ok: false, Error: "authentication required"}, nil
 	}
 
-	image := req.Image
-	if req.Prompt != "" && image == "" {
-		image = s.defaultImage
-	}
-	taskType := types.TaskType(req.Type)
-	if taskType == "" {
-		taskType = types.TaskTypeBackground
-	}
-	if taskType != types.TaskTypeBackground && taskType != types.TaskTypeInteractive {
-		return &pb.TaskResponse{Ok: false, Error: "type must be 'background' or 'interactive'"}, nil
-	}
-	if image == "" && taskType == types.TaskTypeInteractive {
-		image = s.defaultImage
-	}
-	if image == "" {
-		return &pb.TaskResponse{Ok: false, Error: "image or prompt is required"}, nil
+	if s.api == nil {
+		return &pb.AgentTaskAcceptedResponse{Ok: false, Error: "task service unavailable"}, nil
 	}
 
-	var createdByMemberID *uint
-	memberID := auth.MemberId(ctx)
-	if memberID > 0 {
-		createdByMemberID = &memberID
+	message := strings.TrimSpace(req.Message)
+	if message == "" {
+		return &pb.AgentTaskAcceptedResponse{Ok: false, Error: "message is required"}, nil
 	}
 
-	memberToken, err := auth.EnsureTaskMountToken(ctx, workspaceID, extractRawToken(ctx), s.backend)
+	agentID := strings.TrimSpace(req.AgentId)
+	if agentID == "" {
+		return &pb.AgentTaskAcceptedResponse{Ok: false, Error: "agent_id is required"}, nil
+	}
+
+	var sessionKey *string
+	if value := strings.TrimSpace(req.SessionKey); value != "" {
+		sessionKey = &value
+	}
+	var lane *string
+	if value := strings.TrimSpace(req.Lane); value != "" {
+		lane = &value
+	}
+	var extraSystemPrompt *string
+	if value := strings.TrimSpace(req.ExtraSystemPrompt); value != "" {
+		extraSystemPrompt = &value
+	}
+
+	task, idempotentHit, err := s.api.AcceptAgentCommand(ctx, workspaceID, orchestration.AgentCommandParams{
+		Message:           message,
+		AgentID:           &agentID,
+		SessionID:         strings.TrimSpace(req.SessionId),
+		SessionKey:        sessionKey,
+		IdempotencyKey:    strings.TrimSpace(req.IdempotencyKey),
+		Lane:              lane,
+		ExtraSystemPrompt: extraSystemPrompt,
+		Routing:           orchestration.RoutingContext{},
+	})
 	if err != nil {
-		return &pb.TaskResponse{Ok: false, Error: "failed to provision workspace token: " + err.Error()}, nil
+		return &pb.AgentTaskAcceptedResponse{Ok: false, Error: err.Error()}, nil
 	}
 
-	env := req.Env
-	if env == nil {
-		env = map[string]string{}
-	}
-	entrypoint := req.Entrypoint
-	if entrypoint == nil {
-		entrypoint = []string{}
+	workspaceExtID := auth.WorkspaceExtId(ctx)
+	if workspaceExtID == "" {
+		workspace, err := s.backend.GetWorkspace(ctx, workspaceID)
+		if err == nil && workspace != nil {
+			workspaceExtID = workspace.ExternalId
+		}
 	}
 
-	task := &types.Task{
-		WorkspaceId:       workspaceID,
-		CreatedByMemberId: createdByMemberID,
-		MemberToken:       memberToken,
-		Status:            types.TaskStatusPending,
-		Type:              taskType,
-		Prompt:            req.Prompt,
-		Image:             image,
-		Entrypoint:        entrypoint,
-		Env:               env,
-	}
-	if err := s.backend.CreateTask(ctx, task); err != nil {
-		return &pb.TaskResponse{Ok: false, Error: err.Error()}, nil
-	}
-	if s.taskQueue != nil {
-		_ = s.taskQueue.Push(ctx, task)
-	}
-	return &pb.TaskResponse{Ok: true, Task: taskToPb(task)}, nil
+	return &pb.AgentTaskAcceptedResponse{
+		Ok:            true,
+		Accepted:      true,
+		IdempotentHit: idempotentHit,
+		Task:          agentTaskToProto(task, workspaceExtID),
+		RunId:         stringOrEmpty(task.TargetRunID),
+	}, nil
 }
 
-func (s *TaskService) DeleteTask(ctx context.Context, req *pb.DeleteTaskRequest) (*pb.DeleteResponse, error) {
+func newestExecutionID(attempts []*types.AgentRunAttempt) string {
+	for i := len(attempts) - 1; i >= 0; i-- {
+		attempt := attempts[i]
+		if attempt == nil || attempt.ExecutionID == nil {
+			continue
+		}
+
+		executionID := strings.TrimSpace(*attempt.ExecutionID)
+		if executionID != "" {
+			return executionID
+		}
+	}
+
+	return ""
+}
+
+func (s *AgentService) DeleteTask(ctx context.Context, req *pb.DeleteTaskRequest) (*pb.DeleteResponse, error) {
 	workspaceID := auth.WorkspaceId(ctx)
 	if workspaceID == 0 {
 		return &pb.DeleteResponse{Ok: false, Error: "authentication required"}, nil
 	}
 
-	task, err := s.backend.GetTask(ctx, req.Id)
+	if s.api == nil {
+		return &pb.DeleteResponse{Ok: false, Error: "task service unavailable"}, nil
+	}
+
+	task, err := s.api.GetTask(ctx, workspaceID, req.Id)
 	if err != nil {
-		if _, ok := err.(*types.ErrTaskNotFound); ok {
+		if _, ok := err.(*types.ErrAgentTaskNotFound); ok {
 			return &pb.DeleteResponse{Ok: false, Error: "task not found"}, nil
 		}
 		return &pb.DeleteResponse{Ok: false, Error: err.Error()}, nil
 	}
-	if task.WorkspaceId != workspaceID {
-		return &pb.DeleteResponse{Ok: false, Error: "task not found"}, nil
+
+	if task.TargetRunID != nil {
+		if err := s.api.CancelRun(ctx, workspaceID, *task.TargetRunID); err != nil {
+			return &pb.DeleteResponse{Ok: false, Error: err.Error()}, nil
+		}
 	}
 
-	if err := s.backend.DeleteTask(ctx, req.Id); err != nil {
-		return &pb.DeleteResponse{Ok: false, Error: err.Error()}, nil
+	if task.State == types.AgentTaskStateAccepted ||
+		task.State == types.AgentTaskStateQueued ||
+		task.State == types.AgentTaskStateDispatched {
+		if err := s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateCancelled, nil, task.TargetRunID); err != nil {
+			return &pb.DeleteResponse{Ok: false, Error: err.Error()}, nil
+		}
 	}
+
 	return &pb.DeleteResponse{Ok: true}, nil
 }
 
-func (s *TaskService) ListTasks(ctx context.Context, _ *pb.ListTasksRequest) (*pb.ListTasksResponse, error) {
+func (s *AgentService) ListTasks(ctx context.Context, _ *pb.ListTasksRequest) (*pb.ListTasksResponse, error) {
 	workspaceID := auth.WorkspaceId(ctx)
 	if workspaceID == 0 {
 		return &pb.ListTasksResponse{Ok: false, Error: "authentication required"}, nil
 	}
 
-	tasks, err := s.backend.ListTasks(ctx, workspaceID)
+	if s.api == nil {
+		return &pb.ListTasksResponse{Ok: false, Error: "task service unavailable"}, nil
+	}
+
+	tasks, err := s.api.ListTasks(ctx, workspaceID, 100)
 	if err != nil {
 		return &pb.ListTasksResponse{Ok: false, Error: err.Error()}, nil
 	}
 
-	out := make([]*pb.Task, 0, len(tasks))
-	for _, task := range tasks {
-		out = append(out, taskToPb(task))
+	workspaceExtID := auth.WorkspaceExtId(ctx)
+	if workspaceExtID == "" {
+		workspace, err := s.backend.GetWorkspace(ctx, workspaceID)
+		if err == nil && workspace != nil {
+			workspaceExtID = workspace.ExternalId
+		}
 	}
+
+	out := make([]*pb.AgentTask, 0, len(tasks))
+	for _, task := range tasks {
+		out = append(out, agentTaskToProto(task, workspaceExtID))
+	}
+
 	return &pb.ListTasksResponse{Ok: true, Tasks: out}, nil
 }
 
-func (s *TaskService) GetTask(ctx context.Context, req *pb.GetTaskRequest) (*pb.TaskResponse, error) {
+func (s *AgentService) GetTask(ctx context.Context, req *pb.GetTaskRequest) (*pb.AgentTaskResponse, error) {
 	workspaceID := auth.WorkspaceId(ctx)
 	if workspaceID == 0 {
-		return &pb.TaskResponse{Ok: false, Error: "authentication required"}, nil
+		return &pb.AgentTaskResponse{Ok: false, Error: "authentication required"}, nil
 	}
 
-	task, err := s.backend.GetTask(ctx, req.Id)
+	if s.api == nil {
+		return &pb.AgentTaskResponse{Ok: false, Error: "task service unavailable"}, nil
+	}
+
+	task, err := s.api.GetTask(ctx, workspaceID, req.Id)
 	if err != nil {
-		if _, ok := err.(*types.ErrTaskNotFound); ok {
-			return &pb.TaskResponse{Ok: false, Error: "task not found"}, nil
+		if _, ok := err.(*types.ErrAgentTaskNotFound); ok {
+			return &pb.AgentTaskResponse{Ok: false, Error: "task not found"}, nil
 		}
-		return &pb.TaskResponse{Ok: false, Error: err.Error()}, nil
+		return &pb.AgentTaskResponse{Ok: false, Error: err.Error()}, nil
 	}
-	if task.WorkspaceId != workspaceID {
-		return &pb.TaskResponse{Ok: false, Error: "task not found"}, nil
+
+	workspaceExtID := auth.WorkspaceExtId(ctx)
+	if workspaceExtID == "" {
+		workspace, err := s.backend.GetWorkspace(ctx, workspaceID)
+		if err == nil && workspace != nil {
+			workspaceExtID = workspace.ExternalId
+		}
 	}
-	return &pb.TaskResponse{Ok: true, Task: taskToPb(task)}, nil
+
+	return &pb.AgentTaskResponse{Ok: true, Task: agentTaskToProto(task, workspaceExtID)}, nil
 }
 
-func (s *TaskService) GetTaskLogs(ctx context.Context, req *pb.GetTaskLogsRequest) (*pb.GetTaskLogsResponse, error) {
+func (s *AgentService) GetTaskLogs(ctx context.Context, req *pb.GetTaskLogsRequest) (*pb.GetTaskLogsResponse, error) {
 	workspaceID := auth.WorkspaceId(ctx)
 	if workspaceID == 0 {
 		return &pb.GetTaskLogsResponse{Ok: false, Error: "authentication required"}, nil
 	}
 
-	task, err := s.backend.GetTask(ctx, req.Id)
+	if s.api == nil {
+		return &pb.GetTaskLogsResponse{Ok: false, Error: "task service unavailable"}, nil
+	}
+
+	task, err := s.api.GetTask(ctx, workspaceID, req.Id)
 	if err != nil {
-		if _, ok := err.(*types.ErrTaskNotFound); ok {
+		if _, ok := err.(*types.ErrAgentTaskNotFound); ok {
 			return &pb.GetTaskLogsResponse{Ok: false, Error: "task not found"}, nil
 		}
 		return &pb.GetTaskLogsResponse{Ok: false, Error: err.Error()}, nil
 	}
-	if task.WorkspaceId != workspaceID {
-		return &pb.GetTaskLogsResponse{Ok: false, Error: "task not found"}, nil
-	}
 	if s.s2Client == nil || !s.s2Client.Enabled() {
 		return &pb.GetTaskLogsResponse{Ok: true, Logs: []*pb.TaskLogEntry{}}, nil
 	}
+	if task.TargetRunID == nil {
+		return &pb.GetTaskLogsResponse{Ok: true, Logs: []*pb.TaskLogEntry{}}, nil
+	}
 
-	logs, _, err := s.s2Client.ReadLogs(ctx, req.Id, 0)
+	attempts, err := s.backend.ListAgentRunAttempts(ctx, *task.TargetRunID)
+	if err != nil {
+		return &pb.GetTaskLogsResponse{Ok: false, Error: err.Error()}, nil
+	}
+	executionID := newestExecutionID(attempts)
+	if executionID == "" {
+		return &pb.GetTaskLogsResponse{Ok: true, Logs: []*pb.TaskLogEntry{}}, nil
+	}
+
+	logs, _, err := s.s2Client.ReadLogs(ctx, executionID, 0)
 	if err != nil {
 		return &pb.GetTaskLogsResponse{Ok: false, Error: err.Error()}, nil
 	}
@@ -185,7 +226,7 @@ func (s *TaskService) GetTaskLogs(ctx context.Context, req *pb.GetTaskLogsReques
 	out := make([]*pb.TaskLogEntry, 0, len(logs))
 	for _, log := range logs {
 		out = append(out, &pb.TaskLogEntry{
-			TaskId:    log.TaskID,
+			TaskId:    req.Id,
 			Timestamp: log.Timestamp,
 			Stream:    log.Stream,
 			Data:      log.Data,
@@ -194,26 +235,57 @@ func (s *TaskService) GetTaskLogs(ctx context.Context, req *pb.GetTaskLogsReques
 	return &pb.GetTaskLogsResponse{Ok: true, Logs: out}, nil
 }
 
-func taskToPb(t *types.Task) *pb.Task {
-	t.NormalizeType()
-	task := &pb.Task{
-		Id:        t.ExternalId,
-		Status:    string(t.Status),
-		Type:      string(t.Type),
-		Prompt:    t.Prompt,
-		Image:     t.Image,
-		Error:     t.Error,
-		CreatedAt: t.CreatedAt.Format(time.RFC3339),
+func (s *AgentService) EnqueueRunInput(ctx context.Context, req *pb.EnqueueRunInputRequest) (*pb.AgentTaskAcceptedResponse, error) {
+	if s.api == nil {
+		return &pb.AgentTaskAcceptedResponse{Ok: false, Error: "task service unavailable"}, nil
 	}
-	if t.ExitCode != nil {
-		task.ExitCode = int32(*t.ExitCode)
-		task.HasExitCode = true
+
+	ws, err := s.resolveWorkspace(ctx, req.WorkspaceId)
+	if err != nil {
+		return &pb.AgentTaskAcceptedResponse{Ok: false, Error: err.Error()}, nil
 	}
-	if t.StartedAt != nil {
-		task.StartedAt = t.StartedAt.Format(time.RFC3339)
+	if err := auth.RequireWorkspaceAccess(ctx, ws.ExternalId); err != nil {
+		return &pb.AgentTaskAcceptedResponse{Ok: false, Error: err.Error()}, nil
 	}
-	if t.FinishedAt != nil {
-		task.FinishedAt = t.FinishedAt.Format(time.RFC3339)
+
+	queueMode := types.AgentQueueMode(req.QueueMode)
+	task, deduped, err := s.api.EnqueueRunInputEnvelope(ctx, ws.Id, req.RunId, queueMode, req.Message, req.IdempotencyKey)
+	if err != nil {
+		return &pb.AgentTaskAcceptedResponse{Ok: false, Error: err.Error()}, nil
 	}
-	return task
+
+	return &pb.AgentTaskAcceptedResponse{
+		Ok:            true,
+		Accepted:      true,
+		IdempotentHit: deduped,
+		Task:          agentTaskToProto(task, ws.ExternalId),
+		RunId:         stringOrEmpty(task.TargetRunID),
+	}, nil
 }
+
+func agentTaskToProto(task *types.AgentTask, workspaceExternalID string) *pb.AgentTask {
+	if task == nil {
+		return nil
+	}
+	return &pb.AgentTask{
+		Id:             task.ID,
+		WorkspaceId:    workspaceExternalID,
+		AgentId:        stringOrEmpty(task.AgentID),
+		Kind:           string(task.Kind),
+		QueueMode:      string(task.QueueMode),
+		State:          string(task.State),
+		IdempotencyKey: task.IdempotencyKey,
+		TargetRunId:    stringOrEmpty(task.TargetRunID),
+		DroppedReason:  stringOrEmpty(task.DroppedReason),
+		CreatedAt:      formatTime(task.CreatedAt),
+		UpdatedAt:      formatTime(task.UpdatedAt),
+	}
+}
+
+func stringOrEmpty(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
+}
+

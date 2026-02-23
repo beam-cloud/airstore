@@ -58,12 +58,12 @@ func (s *AgentService) AcceptAgentCommand(
 	ctx context.Context,
 	workspaceID uint,
 	params AgentCommandParams,
-) (*types.AgentTaskEnvelope, bool, error) {
+) (*types.AgentTask, bool, error) {
 	normalizeAgentCommandDefaults(&params)
 	if err := ValidateAgentCommandParams(&params); err != nil {
 		return nil, false, err
 	}
-	existing, err := s.backend.GetAgentTaskEnvelopeByIdempotency(ctx, workspaceID, params.AgentID, params.IdempotencyKey)
+	existing, err := s.backend.GetTaskByIdempotency(ctx, workspaceID, params.AgentID, params.IdempotencyKey)
 	if err == nil {
 		return existing, true, nil
 	}
@@ -116,18 +116,18 @@ func (s *AgentService) AcceptAgentCommand(
 		payload["model"] = agentModel
 	}
 
-	envelope := &types.AgentTaskEnvelope{
+	envelope := &types.AgentTask{
 		WorkspaceID:    workspaceID,
 		AgentID:        params.AgentID,
-		Kind:           types.AgentEnvelopeKindAgentCommand,
+		Kind:           types.AgentTaskKindAgentCommand,
 		QueueMode:      types.AgentQueueModeQueue,
-		State:          types.AgentEnvelopeStateAccepted,
+		State:          types.AgentTaskStateAccepted,
 		IdempotencyKey: params.IdempotencyKey,
 		PayloadJSON:    payload,
 		RoutingJSON:    routingToMap(params.Routing),
 	}
-	if err := s.backend.CreateAgentTaskEnvelope(ctx, envelope); err != nil {
-		if existing, lookupErr := s.backend.GetAgentTaskEnvelopeByIdempotency(ctx, workspaceID, params.AgentID, params.IdempotencyKey); lookupErr == nil {
+	if err := s.backend.CreateTask(ctx, envelope); err != nil {
+		if existing, lookupErr := s.backend.GetTaskByIdempotency(ctx, workspaceID, params.AgentID, params.IdempotencyKey); lookupErr == nil {
 			return existing, true, nil
 		}
 		return nil, false, err
@@ -146,7 +146,7 @@ func (s *AgentService) AcceptRunInput(
 	queueMode types.AgentQueueMode,
 	message string,
 	idempotencyKey string,
-) (*types.AgentTaskEnvelope, bool, error) {
+) (*types.AgentTask, bool, error) {
 	if strings.TrimSpace(message) == "" {
 		return nil, false, fmt.Errorf("message is required")
 	}
@@ -157,7 +157,7 @@ func (s *AgentService) AcceptRunInput(
 		return nil, false, err
 	}
 
-	existing, err := s.backend.GetAgentTaskEnvelopeByIdempotency(ctx, workspaceID, run.AgentID, idempotencyKey)
+	existing, err := s.backend.GetTaskByIdempotency(ctx, workspaceID, run.AgentID, idempotencyKey)
 	if err == nil {
 		return existing, true, nil
 	}
@@ -171,19 +171,19 @@ func (s *AgentService) AcceptRunInput(
 		"timeout_ms":                           run.TimeoutMs,
 		types.AgentExecutionMetaKeyInstanceKey: instanceKey,
 	}
-	envelope := &types.AgentTaskEnvelope{
+	envelope := &types.AgentTask{
 		WorkspaceID:    workspaceID,
 		AgentID:        run.AgentID,
-		Kind:           types.AgentEnvelopeKindRunInput,
+		Kind:           types.AgentTaskKindRunInput,
 		QueueMode:      queueMode,
-		State:          types.AgentEnvelopeStateAccepted,
+		State:          types.AgentTaskStateAccepted,
 		IdempotencyKey: idempotencyKey,
 		PayloadJSON:    payload,
 		RoutingJSON:    map[string]any{},
 		TargetRunID:    &targetRunID,
 	}
-	if err := s.backend.CreateAgentTaskEnvelope(ctx, envelope); err != nil {
-		if existing, lookupErr := s.backend.GetAgentTaskEnvelopeByIdempotency(ctx, workspaceID, run.AgentID, idempotencyKey); lookupErr == nil {
+	if err := s.backend.CreateTask(ctx, envelope); err != nil {
+		if existing, lookupErr := s.backend.GetTaskByIdempotency(ctx, workspaceID, run.AgentID, idempotencyKey); lookupErr == nil {
 			return existing, true, nil
 		}
 		return nil, false, err
@@ -230,11 +230,11 @@ func (s *AgentService) dispatchLoop(ctx context.Context) {
 }
 
 func (s *AgentService) dispatchEnvelope(ctx context.Context, envelopeID string) error {
-	envelope, err := s.backend.GetAgentTaskEnvelopeByID(ctx, envelopeID)
+	envelope, err := s.backend.GetTaskByID(ctx, envelopeID)
 	if err != nil {
 		return err
 	}
-	if envelope.State != types.AgentEnvelopeStateQueued && envelope.State != types.AgentEnvelopeStateAccepted {
+	if envelope.State != types.AgentTaskStateQueued && envelope.State != types.AgentTaskStateAccepted {
 		return nil
 	}
 
@@ -246,10 +246,10 @@ func (s *AgentService) dispatchEnvelope(ctx context.Context, envelopeID string) 
 	}
 }
 
-func (s *AgentService) handleInterruptEnvelope(ctx context.Context, envelope *types.AgentTaskEnvelope) error {
+func (s *AgentService) handleInterruptEnvelope(ctx context.Context, envelope *types.AgentTask) error {
 	if envelope.TargetRunID == nil {
-		reason := types.AgentEnvelopeDropReasonInterruptMissingTarget
-		return s.backend.UpdateAgentTaskEnvelopeState(ctx, envelope.ID, types.AgentEnvelopeStateDropped, &reason, nil)
+		reason := types.AgentTaskDropReasonInterruptMissingTarget
+		return s.backend.UpdateTaskState(ctx, envelope.ID, types.AgentTaskStateDropped, &reason, nil)
 	}
 
 	run, err := s.backend.GetAgentRunByID(ctx, *envelope.TargetRunID)
@@ -259,11 +259,11 @@ func (s *AgentService) handleInterruptEnvelope(ctx context.Context, envelope *ty
 
 	attempts, _ := s.backend.ListAgentRunAttempts(ctx, run.ID)
 	for _, attempt := range attempts {
-		if attempt.ExecutionTaskExternalID != nil && attempt.Status.IsInFlight() {
-			_ = s.backend.CancelTask(ctx, *attempt.ExecutionTaskExternalID)
+		if attempt.ExecutionID != nil && attempt.Status.IsInFlight() {
+			_ = s.backend.CancelRunExecution(ctx, *attempt.ExecutionID)
 		}
 	}
-	if envelope.Kind == types.AgentEnvelopeKindRunInput {
+	if envelope.Kind == types.AgentTaskKindRunInput {
 		_ = s.publishRunEvent(ctx, run.ID, types.AgentRunEventInterrupted, map[string]any{
 			"envelope_id": envelope.ID,
 			"action":      "cancel_then_continue",
@@ -281,10 +281,10 @@ func (s *AgentService) handleInterruptEnvelope(ctx context.Context, envelope *ty
 	}
 	_ = s.appendRunSnapshot(ctx, run.ID, types.AgentRunStatusCancelled, nil, &now, &errMsg, map[string]any{"cause": "interrupt"})
 	_ = s.publishRunEvent(ctx, run.ID, types.AgentRunEventInterrupted, map[string]any{"envelope_id": envelope.ID})
-	return s.backend.UpdateAgentTaskEnvelopeState(ctx, envelope.ID, types.AgentEnvelopeStateDispatched, nil, envelope.TargetRunID)
+	return s.backend.UpdateTaskState(ctx, envelope.ID, types.AgentTaskStateDispatched, nil, envelope.TargetRunID)
 }
 
-func (s *AgentService) handleExecutionEnvelope(ctx context.Context, envelope *types.AgentTaskEnvelope) error {
+func (s *AgentService) handleExecutionEnvelope(ctx context.Context, envelope *types.AgentTask) error {
 	runPolicy := runPolicyFromPayload(envelope.PayloadJSON)
 	instanceKey := instanceKeyFromPayload(envelope.WorkspaceID, envelope.AgentID, envelope.PayloadJSON, runPolicy)
 
@@ -300,7 +300,7 @@ func (s *AgentService) handleExecutionEnvelope(ctx context.Context, envelope *ty
 		return err
 	}
 
-	if envelope.Kind == types.AgentEnvelopeKindRunInput && envelope.QueueMode == types.AgentQueueModeSteer && envelope.TargetRunID != nil {
+	if envelope.Kind == types.AgentTaskKindRunInput && envelope.QueueMode == types.AgentQueueModeSteer && envelope.TargetRunID != nil {
 		steered, err := s.trySteerRunInputEnvelope(ctx, envelope)
 		if err != nil {
 			return err
@@ -332,14 +332,14 @@ func (s *AgentService) handleExecutionEnvelope(ctx context.Context, envelope *ty
 		return nil
 	}
 
-	if envelope.Kind == types.AgentEnvelopeKindRunInput && envelope.TargetRunID != nil {
+	if envelope.Kind == types.AgentTaskKindRunInput && envelope.TargetRunID != nil {
 		return s.handleRunInputEnvelope(ctx, envelope)
 	}
 
 	run, runPolicy, prompt, err := s.materializeRun(ctx, envelope)
 	if err != nil {
-		reason := types.AgentEnvelopeDropReasonRunMaterializationFail
-		_ = s.backend.UpdateAgentTaskEnvelopeState(ctx, envelope.ID, types.AgentEnvelopeStateDropped, &reason, envelope.TargetRunID)
+		reason := types.AgentTaskDropReasonRunMaterializationFail
+		_ = s.backend.UpdateTaskState(ctx, envelope.ID, types.AgentTaskStateDropped, &reason, envelope.TargetRunID)
 		return err
 	}
 
@@ -354,7 +354,7 @@ func (s *AgentService) handleExecutionEnvelope(ctx context.Context, envelope *ty
 	return err
 }
 
-func (s *AgentService) trySteerRunInputEnvelope(ctx context.Context, envelope *types.AgentTaskEnvelope) (bool, error) {
+func (s *AgentService) trySteerRunInputEnvelope(ctx context.Context, envelope *types.AgentTask) (bool, error) {
 	if envelope == nil || envelope.TargetRunID == nil || s.terminalIO == nil {
 		return false, nil
 	}
@@ -383,20 +383,20 @@ func (s *AgentService) trySteerRunInputEnvelope(ctx context.Context, envelope *t
 		if attempt == nil {
 			continue
 		}
-		if attempt.Status != types.AgentAttemptStatusRunning || attempt.ExecutionTaskExternalID == nil {
+		if attempt.Status != types.AgentAttemptStatusRunning || attempt.ExecutionID == nil {
 			continue
 		}
-		if strings.TrimSpace(*attempt.ExecutionTaskExternalID) == "" {
+		if strings.TrimSpace(*attempt.ExecutionID) == "" {
 			continue
 		}
 		activeAttempt = attempt
 		break
 	}
-	if activeAttempt == nil || activeAttempt.ExecutionTaskExternalID == nil {
+	if activeAttempt == nil || activeAttempt.ExecutionID == nil {
 		return false, nil
 	}
 
-	execTask, err := s.backend.GetTask(ctx, *activeAttempt.ExecutionTaskExternalID)
+	execTask, err := s.backend.GetRunExecution(ctx, *activeAttempt.ExecutionID)
 	if err != nil {
 		return false, nil
 	}
@@ -412,7 +412,7 @@ func (s *AgentService) trySteerRunInputEnvelope(ctx context.Context, envelope *t
 		return false, nil
 	}
 
-	if err := s.backend.UpdateAgentTaskEnvelopeState(ctx, envelope.ID, types.AgentEnvelopeStateDispatched, nil, envelope.TargetRunID); err != nil {
+	if err := s.backend.UpdateTaskState(ctx, envelope.ID, types.AgentTaskStateDispatched, nil, envelope.TargetRunID); err != nil {
 		return false, err
 	}
 
@@ -425,10 +425,10 @@ func (s *AgentService) trySteerRunInputEnvelope(ctx context.Context, envelope *t
 	return true, nil
 }
 
-func (s *AgentService) handleRunInputEnvelope(ctx context.Context, envelope *types.AgentTaskEnvelope) error {
+func (s *AgentService) handleRunInputEnvelope(ctx context.Context, envelope *types.AgentTask) error {
 	if envelope.TargetRunID == nil {
-		reason := types.AgentEnvelopeDropReasonRunInputMissingTarget
-		return s.backend.UpdateAgentTaskEnvelopeState(ctx, envelope.ID, types.AgentEnvelopeStateDropped, &reason, nil)
+		reason := types.AgentTaskDropReasonRunInputMissingTarget
+		return s.backend.UpdateTaskState(ctx, envelope.ID, types.AgentTaskStateDropped, &reason, nil)
 	}
 
 	run, err := s.backend.GetAgentRun(ctx, envelope.WorkspaceID, *envelope.TargetRunID)
@@ -436,14 +436,14 @@ func (s *AgentService) handleRunInputEnvelope(ctx context.Context, envelope *typ
 		return err
 	}
 	if run.Status.IsTerminal() {
-		reason := types.AgentEnvelopeDropReasonRunInputTerminalTarget
-		return s.backend.UpdateAgentTaskEnvelopeState(ctx, envelope.ID, types.AgentEnvelopeStateDropped, &reason, envelope.TargetRunID)
+		reason := types.AgentTaskDropReasonRunInputTerminalTarget
+		return s.backend.UpdateTaskState(ctx, envelope.ID, types.AgentTaskStateDropped, &reason, envelope.TargetRunID)
 	}
 
 	prompt := runInputPrompt(envelope.PayloadJSON)
 	if prompt == "" {
-		reason := types.AgentEnvelopeDropReasonRunInputMissingMessage
-		return s.backend.UpdateAgentTaskEnvelopeState(ctx, envelope.ID, types.AgentEnvelopeStateDropped, &reason, envelope.TargetRunID)
+		reason := types.AgentTaskDropReasonRunInputMissingMessage
+		return s.backend.UpdateTaskState(ctx, envelope.ID, types.AgentTaskStateDropped, &reason, envelope.TargetRunID)
 	}
 
 	runPolicy := runPolicyFromRun(run)
@@ -463,7 +463,7 @@ func (s *AgentService) handleRunInputEnvelope(ctx context.Context, envelope *typ
 	); err != nil {
 		return err
 	}
-	if err := s.backend.UpdateAgentTaskEnvelopeState(ctx, envelope.ID, types.AgentEnvelopeStateDispatched, nil, envelope.TargetRunID); err != nil {
+	if err := s.backend.UpdateTaskState(ctx, envelope.ID, types.AgentTaskStateDispatched, nil, envelope.TargetRunID); err != nil {
 		return err
 	}
 	eventType := types.AgentRunEventInputDispatched
@@ -488,7 +488,7 @@ func runInputPrompt(payload map[string]any) string {
 
 func (s *AgentService) materializeRun(
 	ctx context.Context,
-	envelope *types.AgentTaskEnvelope,
+	envelope *types.AgentTask,
 ) (*types.AgentRun, RunExecutionPolicy, string, error) {
 	payload := envelope.PayloadJSON
 	prompt := strings.TrimSpace(stringFromPayload(payload, "message"))
@@ -522,31 +522,31 @@ func (s *AgentService) materializeRun(
 	provider, model := providerModelFromPayload(payload)
 
 	run := &types.AgentRun{
-		WorkspaceID:      envelope.WorkspaceID,
-		AgentID:          agentID,
-		OriginEnvelopeID: envelope.ID,
-		Status:           types.AgentRunStatusAccepted,
-		SessionID:        sessionID,
-		SessionKey:       sessionKey,
-		Provider:         provider,
-		Model:            model,
-		ExecHost:         string(runPolicy.Host),
-		ExecSecurity:     string(runPolicy.Security),
-		ExecAsk:          string(runPolicy.Ask),
-		RuntimeType:      runPolicy.RuntimeType,
-		WorkspaceAccess:  runPolicy.WorkspaceAccess,
-		NetworkEnabled:   runPolicy.NetworkEnabled,
-		Interactive:      runPolicy.Interactive,
-		TimeoutMs:        timeoutMs,
-		UsageJSON:        map[string]any{},
-		DeliveryJSON:     buildRunDelivery(instanceKey, runPolicy, nil),
+		WorkspaceID:     envelope.WorkspaceID,
+		AgentID:         agentID,
+		OriginTaskID:    envelope.ID,
+		Status:          types.AgentRunStatusAccepted,
+		SessionID:       sessionID,
+		SessionKey:      sessionKey,
+		Provider:        provider,
+		Model:           model,
+		ExecHost:        string(runPolicy.Host),
+		ExecSecurity:    string(runPolicy.Security),
+		ExecAsk:         string(runPolicy.Ask),
+		RuntimeType:     runPolicy.RuntimeType,
+		WorkspaceAccess: runPolicy.WorkspaceAccess,
+		NetworkEnabled:  runPolicy.NetworkEnabled,
+		Interactive:     runPolicy.Interactive,
+		TimeoutMs:       timeoutMs,
+		UsageJSON:       map[string]any{},
+		DeliveryJSON:    buildRunDelivery(instanceKey, runPolicy, nil),
 	}
 	applyDeliveryMetadata(run.DeliveryJSON, payload, envelope.RoutingJSON)
 
 	if err := s.backend.CreateAgentRun(ctx, run); err != nil {
 		return nil, RunExecutionPolicy{}, "", err
 	}
-	if err := s.backend.UpdateAgentTaskEnvelopeState(ctx, envelope.ID, types.AgentEnvelopeStateDispatched, nil, &run.ID); err != nil {
+	if err := s.backend.UpdateTaskState(ctx, envelope.ID, types.AgentTaskStateDispatched, nil, &run.ID); err != nil {
 		return nil, RunExecutionPolicy{}, "", err
 	}
 	if err := s.appendRunSnapshot(ctx, run.ID, types.AgentRunStatusAccepted, nil, nil, nil, map[string]any{"envelope_id": envelope.ID}); err != nil {
@@ -625,16 +625,16 @@ func (s *AgentService) createAttemptExecutionTask(
 	}
 	applyPayloadExecutionMetadata(executionPolicy, payload)
 
-	execTask := &types.Task{
+	execTask := &types.RunExecution{
 		WorkspaceId:       run.WorkspaceID,
 		MemberToken:       memberToken,
-		Status:            types.TaskStatusPending,
-		Type:              ToTaskType(runPolicy),
+		Status:            types.RunExecutionStatusPending,
+		Type:              ToRunExecutionType(runPolicy),
 		Prompt:            prompt,
 		Image:             s.defaultImage,
 		Entrypoint:        []string{},
 		Env:               taskEnv,
-		Resources:         ToTaskResources(runPolicy),
+		Resources:         ToRunExecutionResources(runPolicy),
 		RunAttemptID:      &attempt.ID,
 		TimeoutMs:         &run.TimeoutMs,
 		ExecHost:          strPtr(run.ExecHost),
@@ -646,7 +646,7 @@ func (s *AgentService) createAttemptExecutionTask(
 		ExecutionPolicy:   executionPolicy,
 		CreatedByMemberId: nil,
 	}
-	if err := s.backend.CreateTask(ctx, execTask); err != nil {
+	if err := s.backend.CreateRunExecution(ctx, execTask); err != nil {
 		return nil, err
 	}
 	if err := s.backend.BindAttemptExecutionTask(ctx, attempt.ID, execTask.ExternalId); err != nil {
@@ -1130,11 +1130,11 @@ func executionInstanceKeyFromRun(run *types.AgentRun) string {
 }
 
 func (s *AgentService) requeueIfDispatchable(ctx context.Context, envelopeID string) error {
-	envelope, err := s.backend.GetAgentTaskEnvelopeByID(ctx, envelopeID)
+	envelope, err := s.backend.GetTaskByID(ctx, envelopeID)
 	if err != nil {
 		return err
 	}
-	if envelope.State != types.AgentEnvelopeStateAccepted && envelope.State != types.AgentEnvelopeStateQueued {
+	if envelope.State != types.AgentTaskStateAccepted && envelope.State != types.AgentTaskStateQueued {
 		return nil
 	}
 	return s.queueRouter.RequeueEnvelope(ctx, envelope.ID)

@@ -100,12 +100,12 @@ func (g *FilesystemGroup) registerRoutes() {
 
 	// Source view endpoints
 	g.routerGroup.POST("/views", g.CreateView)
-	g.routerGroup.GET("/views", g.GetView)             // ?path=...
-	g.routerGroup.GET("/views/list", g.ListViews)      // List all views
-	g.routerGroup.GET("/views/count", g.CountViews)    // Count views in workspace
-	g.routerGroup.PUT("/views/:id", g.UpdateView)      // :id = external_id
-	g.routerGroup.DELETE("/views/:id", g.DeleteView)   // :id = external_id
-	g.routerGroup.POST("/views/:id/sync", g.SyncView)  // Sync a view
+	g.routerGroup.GET("/views", g.GetView)            // ?path=...
+	g.routerGroup.GET("/views/list", g.ListViews)     // List all views
+	g.routerGroup.GET("/views/count", g.CountViews)   // Count views in workspace
+	g.routerGroup.PUT("/views/:id", g.UpdateView)     // :id = external_id
+	g.routerGroup.DELETE("/views/:id", g.DeleteView)  // :id = external_id
+	g.routerGroup.POST("/views/:id/sync", g.SyncView) // Sync a view
 
 	// Integration resource listing
 	g.routerGroup.GET("/sources/:integration/resources", g.ListResources)
@@ -229,7 +229,7 @@ func (g *FilesystemGroup) Tree(c echo.Context) error {
 	continuationToken := c.QueryParam("continuation_token")
 	showHidden := c.QueryParam("show_hidden") == "true"
 
-	rootDir, _ := splitRootPath(path)
+	rootDir, relPath := splitRootPath(path)
 
 	// Virtual folders have their own handlers
 	if types.IsVirtualFolder(rootDir) {
@@ -248,10 +248,61 @@ func (g *FilesystemGroup) Tree(c echo.Context) error {
 				Entries: entries,
 			})
 		case types.DirNameTasks:
-			// Tasks are virtual - return empty for now (will be implemented with task service)
+			workspaceId := auth.WorkspaceId(ctx)
+			if workspaceId == 0 {
+				return ErrorResponse(c, http.StatusUnauthorized, "authentication required")
+			}
+
+			// /tasks is flat: return all task files.
+			if relPath == "" {
+				tasks, err := g.backend.ListRunExecutions(ctx, workspaceId)
+				if err != nil {
+					log.Error().Err(err).Msg("failed to list tasks for tree")
+					return ErrorResponse(c, http.StatusInternalServerError, "failed to list tasks")
+				}
+
+				entries := make([]types.VirtualFile, 0, len(tasks))
+				for _, task := range tasks {
+					entries = append(entries, *g.taskToVirtualFile(task))
+				}
+
+				return SuccessResponse(c, types.VirtualFileTreeResponse{
+					Path:    path,
+					Entries: entries,
+				})
+			}
+
+			// /tasks/<id>.task points to a file, so tree can only return that file.
+			taskId := g.extractTaskId(relPath)
+			if taskId == "" {
+				return SuccessResponse(c, types.VirtualFileTreeResponse{
+					Path:    path,
+					Entries: []types.VirtualFile{},
+				})
+			}
+
+			task, err := g.backend.GetRunExecution(ctx, taskId)
+			if err != nil {
+				if _, ok := err.(*types.ErrRunExecutionNotFound); ok {
+					return SuccessResponse(c, types.VirtualFileTreeResponse{
+						Path:    path,
+						Entries: []types.VirtualFile{},
+					})
+				}
+				log.Error().Err(err).Str("task_id", taskId).Msg("failed to get task for tree")
+				return ErrorResponse(c, http.StatusInternalServerError, "failed to read task")
+			}
+
+			if task.WorkspaceId != workspaceId {
+				return SuccessResponse(c, types.VirtualFileTreeResponse{
+					Path:    path,
+					Entries: []types.VirtualFile{},
+				})
+			}
+
 			return SuccessResponse(c, types.VirtualFileTreeResponse{
 				Path:    path,
-				Entries: []types.VirtualFile{},
+				Entries: []types.VirtualFile{*g.taskToVirtualFile(task)},
 			})
 		}
 	}
@@ -1468,6 +1519,11 @@ func (g *FilesystemGroup) buildToolEntries(ctx context.Context, showHidden bool)
 // ============================================================================
 
 func (g *FilesystemGroup) listTasks(c echo.Context, ctx context.Context, relPath string) error {
+	// /tasks is a flat virtual directory; subpaths are not listable.
+	if relPath != "" {
+		return ErrorResponse(c, http.StatusNotFound, "path not found")
+	}
+
 	// Get workspace from auth context
 	workspaceId := auth.WorkspaceId(ctx)
 	if workspaceId == 0 {
@@ -1475,7 +1531,7 @@ func (g *FilesystemGroup) listTasks(c echo.Context, ctx context.Context, relPath
 	}
 
 	// List tasks from database
-	tasks, err := g.backend.ListTasks(ctx, workspaceId)
+	tasks, err := g.backend.ListRunExecutions(ctx, workspaceId)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to list tasks")
 		return ErrorResponse(c, http.StatusInternalServerError, "failed to list tasks")
@@ -1498,7 +1554,7 @@ func (g *FilesystemGroup) statTasks(c echo.Context, ctx context.Context, fullPat
 	if relPath == "" {
 		childCount := 0
 		if workspaceId > 0 {
-			if tasks, err := g.backend.ListTasks(ctx, workspaceId); err == nil {
+			if tasks, err := g.backend.ListRunExecutions(ctx, workspaceId); err == nil {
 				childCount = len(tasks)
 			}
 		}
@@ -1511,9 +1567,9 @@ func (g *FilesystemGroup) statTasks(c echo.Context, ctx context.Context, fullPat
 		return ErrorResponse(c, http.StatusNotFound, "task not found")
 	}
 
-	task, err := g.backend.GetTask(ctx, taskId)
+	task, err := g.backend.GetRunExecution(ctx, taskId)
 	if err != nil {
-		if _, ok := err.(*types.ErrTaskNotFound); ok {
+		if _, ok := err.(*types.ErrRunExecutionNotFound); ok {
 			return ErrorResponse(c, http.StatusNotFound, "task not found")
 		}
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
@@ -1534,9 +1590,9 @@ func (g *FilesystemGroup) readTasks(c echo.Context, ctx context.Context, relPath
 		return ErrorResponse(c, http.StatusNotFound, "task not found")
 	}
 
-	task, err := g.backend.GetTask(ctx, taskId)
+	task, err := g.backend.GetRunExecution(ctx, taskId)
 	if err != nil {
-		if _, ok := err.(*types.ErrTaskNotFound); ok {
+		if _, ok := err.(*types.ErrRunExecutionNotFound); ok {
 			return ErrorResponse(c, http.StatusNotFound, "task not found")
 		}
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
@@ -1566,7 +1622,7 @@ func (g *FilesystemGroup) readTasks(c echo.Context, ctx context.Context, relPath
 }
 
 // taskToVirtualFile converts a Task to a VirtualFile for the filesystem API
-func (g *FilesystemGroup) taskToVirtualFile(task *types.Task) *types.VirtualFile {
+func (g *FilesystemGroup) taskToVirtualFile(task *types.RunExecution) *types.VirtualFile {
 	name := task.ExternalId + ".task"
 	path := types.PathTasks + "/" + name
 
@@ -1609,7 +1665,7 @@ func (g *FilesystemGroup) extractTaskId(relPath string) string {
 }
 
 // buildTaskContent builds the text content of a task file
-func (g *FilesystemGroup) buildTaskContent(ctx context.Context, task *types.Task) string {
+func (g *FilesystemGroup) buildTaskContent(ctx context.Context, task *types.RunExecution) string {
 	var sb strings.Builder
 
 	sb.WriteString(fmt.Sprintf("Task: %s\n", task.ExternalId))
@@ -2278,12 +2334,12 @@ func getManifestToolCount(manifest []byte) int {
 // CreateViewRequest represents a request to create a source view.
 // If Filter is non-empty, the view uses query mode; otherwise smart mode (LLM inference).
 type CreateViewRequest struct {
-	Integration  string          `json:"integration"`    // e.g., "gmail", "gdrive"
-	Name         string          `json:"name"`           // Folder/file name
-	Guidance     string          `json:"guidance"`       // Natural language guidance (smart mode)
-	Filter       json.RawMessage `json:"filter"`         // Structured filter JSON (query mode)
-	OutputFormat string          `json:"output_format"`  // "folder" or "file" (default: "folder")
-	FileExt      string          `json:"file_ext"`       // For files: ".json", ".md"
+	Integration  string          `json:"integration"`   // e.g., "gmail", "gdrive"
+	Name         string          `json:"name"`          // Folder/file name
+	Guidance     string          `json:"guidance"`      // Natural language guidance (smart mode)
+	Filter       json.RawMessage `json:"filter"`        // Structured filter JSON (query mode)
+	OutputFormat string          `json:"output_format"` // "folder" or "file" (default: "folder")
+	FileExt      string          `json:"file_ext"`      // For files: ".json", ".md"
 }
 
 // UpdateViewRequest represents a request to update a source view.

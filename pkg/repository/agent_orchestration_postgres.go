@@ -172,17 +172,17 @@ func (b *PostgresBackend) UpdateAgentProfile(ctx context.Context, profile *types
 	return nil
 }
 
-func (b *PostgresBackend) CreateAgentTaskEnvelope(ctx context.Context, envelope *types.AgentTaskEnvelope) error {
-	payloadJSON, err := marshalJSONMap(envelope.PayloadJSON)
+func (b *PostgresBackend) CreateTask(ctx context.Context, task *types.AgentTask) error {
+	payloadJSON, err := marshalJSONMap(task.PayloadJSON)
 	if err != nil {
 		return fmt.Errorf("marshal envelope payload: %w", err)
 	}
-	routingJSON, err := marshalJSONMap(envelope.RoutingJSON)
+	routingJSON, err := marshalJSONMap(task.RoutingJSON)
 	if err != nil {
 		return fmt.Errorf("marshal envelope routing: %w", err)
 	}
 	query := `
-		INSERT INTO agent_task_envelope (
+		INSERT INTO agent_task (
 			workspace_id, agent_id, kind, queue_mode, state, idempotency_key,
 			payload_json, routing_json, parent_envelope_id, target_run_id
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -191,24 +191,24 @@ func (b *PostgresBackend) CreateAgentTaskEnvelope(ctx context.Context, envelope 
 	if err := b.db.QueryRowContext(
 		ctx,
 		query,
-		envelope.WorkspaceID,
-		envelope.AgentID,
-		envelope.Kind,
-		envelope.QueueMode,
-		envelope.State,
-		envelope.IdempotencyKey,
+		task.WorkspaceID,
+		task.AgentID,
+		task.Kind,
+		task.QueueMode,
+		task.State,
+		task.IdempotencyKey,
 		payloadJSON,
 		routingJSON,
-		envelope.ParentEnvelopeID,
-		envelope.TargetRunID,
-	).Scan(&envelope.ID, &envelope.AcceptedAt, &envelope.CreatedAt, &envelope.UpdatedAt); err != nil {
+		task.ParentTaskID,
+		task.TargetRunID,
+	).Scan(&task.ID, &task.AcceptedAt, &task.CreatedAt, &task.UpdatedAt); err != nil {
 		return fmt.Errorf("create agent task envelope: %w", err)
 	}
 	return nil
 }
 
-func (b *PostgresBackend) scanAgentTaskEnvelope(row scanner) (*types.AgentTaskEnvelope, error) {
-	envelope := &types.AgentTaskEnvelope{}
+func (b *PostgresBackend) scanAgentTask(row scanner) (*types.AgentTask, error) {
+	task := &types.AgentTask{}
 	var payloadJSON []byte
 	var routingJSON []byte
 	var agentID sql.NullString
@@ -218,92 +218,128 @@ func (b *PostgresBackend) scanAgentTaskEnvelope(row scanner) (*types.AgentTaskEn
 	var dispatchedAt sql.NullTime
 	var droppedReason sql.NullString
 	err := row.Scan(
-		&envelope.ID,
-		&envelope.WorkspaceID,
+		&task.ID,
+		&task.WorkspaceID,
 		&agentID,
-		&envelope.Kind,
-		&envelope.QueueMode,
-		&envelope.State,
-		&envelope.IdempotencyKey,
+		&task.Kind,
+		&task.QueueMode,
+		&task.State,
+		&task.IdempotencyKey,
 		&payloadJSON,
 		&routingJSON,
 		&parentID,
 		&targetRunID,
-		&envelope.AcceptedAt,
+		&task.AcceptedAt,
 		&queuedAt,
 		&dispatchedAt,
 		&droppedReason,
-		&envelope.CreatedAt,
-		&envelope.UpdatedAt,
+		&task.CreatedAt,
+		&task.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
-		return nil, &types.ErrAgentTaskEnvelopeNotFound{}
+		return nil, &types.ErrAgentTaskNotFound{}
 	}
 	if err != nil {
 		return nil, err
 	}
 	if agentID.Valid {
-		envelope.AgentID = &agentID.String
+		task.AgentID = &agentID.String
 	}
 	if parentID.Valid {
-		envelope.ParentEnvelopeID = &parentID.String
+		task.ParentTaskID = &parentID.String
 	}
 	if targetRunID.Valid {
-		envelope.TargetRunID = &targetRunID.String
+		task.TargetRunID = &targetRunID.String
 	}
 	if queuedAt.Valid {
-		envelope.QueuedAt = &queuedAt.Time
+		task.QueuedAt = &queuedAt.Time
 	}
 	if dispatchedAt.Valid {
-		envelope.DispatchedAt = &dispatchedAt.Time
+		task.DispatchedAt = &dispatchedAt.Time
 	}
 	if droppedReason.Valid {
-		envelope.DroppedReason = &droppedReason.String
+		task.DroppedReason = &droppedReason.String
 	}
-	envelope.PayloadJSON = unmarshalJSONMap(payloadJSON)
-	envelope.RoutingJSON = unmarshalJSONMap(routingJSON)
-	return envelope, nil
+	task.PayloadJSON = unmarshalJSONMap(payloadJSON)
+	task.RoutingJSON = unmarshalJSONMap(routingJSON)
+	return task, nil
 }
 
-func (b *PostgresBackend) GetAgentTaskEnvelope(ctx context.Context, workspaceId uint, envelopeId string) (*types.AgentTaskEnvelope, error) {
+func (b *PostgresBackend) GetTask(ctx context.Context, workspaceId uint, taskID string) (*types.AgentTask, error) {
 	query := `
 		SELECT id, workspace_id, agent_id, kind, queue_mode, state, idempotency_key, payload_json, routing_json,
 		       parent_envelope_id, target_run_id, accepted_at, queued_at, dispatched_at, dropped_reason, created_at, updated_at
-		FROM agent_task_envelope
+		FROM agent_task
 		WHERE workspace_id = $1 AND id = $2
 	`
-	env, err := b.scanAgentTaskEnvelope(b.db.QueryRowContext(ctx, query, workspaceId, envelopeId))
+	task, err := b.scanAgentTask(b.db.QueryRowContext(ctx, query, workspaceId, taskID))
 	if err != nil {
-		if _, ok := err.(*types.ErrAgentTaskEnvelopeNotFound); ok {
-			return nil, &types.ErrAgentTaskEnvelopeNotFound{ID: envelopeId}
+		if _, ok := err.(*types.ErrAgentTaskNotFound); ok {
+			return nil, &types.ErrAgentTaskNotFound{ID: taskID}
 		}
 		return nil, fmt.Errorf("get agent task envelope: %w", err)
 	}
-	return env, nil
+	return task, nil
 }
 
-func (b *PostgresBackend) GetAgentTaskEnvelopeByID(ctx context.Context, envelopeId string) (*types.AgentTaskEnvelope, error) {
+func (b *PostgresBackend) ListTasks(ctx context.Context, workspaceId uint, limit int) ([]*types.AgentTask, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+
 	query := `
 		SELECT id, workspace_id, agent_id, kind, queue_mode, state, idempotency_key, payload_json, routing_json,
 		       parent_envelope_id, target_run_id, accepted_at, queued_at, dispatched_at, dropped_reason, created_at, updated_at
-		FROM agent_task_envelope
+		FROM agent_task
+		WHERE workspace_id = $1
+		ORDER BY created_at DESC
+		LIMIT $2
+	`
+
+	rows, err := b.db.QueryContext(ctx, query, workspaceId, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list agent tasks: %w", err)
+	}
+	defer rows.Close()
+
+	tasks := make([]*types.AgentTask, 0, limit)
+	for rows.Next() {
+		task, err := b.scanAgentTask(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan agent task: %w", err)
+		}
+		tasks = append(tasks, task)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate agent task rows: %w", err)
+	}
+
+	return tasks, nil
+}
+
+func (b *PostgresBackend) GetTaskByID(ctx context.Context, taskID string) (*types.AgentTask, error) {
+	query := `
+		SELECT id, workspace_id, agent_id, kind, queue_mode, state, idempotency_key, payload_json, routing_json,
+		       parent_envelope_id, target_run_id, accepted_at, queued_at, dispatched_at, dropped_reason, created_at, updated_at
+		FROM agent_task
 		WHERE id = $1
 	`
-	env, err := b.scanAgentTaskEnvelope(b.db.QueryRowContext(ctx, query, envelopeId))
+	task, err := b.scanAgentTask(b.db.QueryRowContext(ctx, query, taskID))
 	if err != nil {
-		if _, ok := err.(*types.ErrAgentTaskEnvelopeNotFound); ok {
-			return nil, &types.ErrAgentTaskEnvelopeNotFound{ID: envelopeId}
+		if _, ok := err.(*types.ErrAgentTaskNotFound); ok {
+			return nil, &types.ErrAgentTaskNotFound{ID: taskID}
 		}
 		return nil, fmt.Errorf("get envelope by id: %w", err)
 	}
-	return env, nil
+	return task, nil
 }
 
-func (b *PostgresBackend) GetAgentTaskEnvelopeByIdempotency(ctx context.Context, workspaceId uint, agentId *string, idempotencyKey string) (*types.AgentTaskEnvelope, error) {
+func (b *PostgresBackend) GetTaskByIdempotency(ctx context.Context, workspaceId uint, agentId *string, idempotencyKey string) (*types.AgentTask, error) {
 	query := `
 		SELECT id, workspace_id, agent_id, kind, queue_mode, state, idempotency_key, payload_json, routing_json,
 		       parent_envelope_id, target_run_id, accepted_at, queued_at, dispatched_at, dropped_reason, created_at, updated_at
-		FROM agent_task_envelope
+		FROM agent_task
 		WHERE workspace_id = $1
 		  AND idempotency_key = $2
 		  AND (($3::uuid IS NULL AND agent_id IS NULL) OR agent_id = $3::uuid)
@@ -314,35 +350,35 @@ func (b *PostgresBackend) GetAgentTaskEnvelopeByIdempotency(ctx context.Context,
 	if agentId != nil {
 		agentArg = *agentId
 	}
-	env, err := b.scanAgentTaskEnvelope(b.db.QueryRowContext(ctx, query, workspaceId, idempotencyKey, agentArg))
+	task, err := b.scanAgentTask(b.db.QueryRowContext(ctx, query, workspaceId, idempotencyKey, agentArg))
 	if err != nil {
-		if _, ok := err.(*types.ErrAgentTaskEnvelopeNotFound); ok {
-			return nil, &types.ErrAgentTaskEnvelopeNotFound{ID: idempotencyKey}
+		if _, ok := err.(*types.ErrAgentTaskNotFound); ok {
+			return nil, &types.ErrAgentTaskNotFound{ID: idempotencyKey}
 		}
 		return nil, fmt.Errorf("get envelope by idempotency: %w", err)
 	}
-	return env, nil
+	return task, nil
 }
 
-func (b *PostgresBackend) UpdateAgentTaskEnvelopeState(ctx context.Context, envelopeId string, state types.AgentEnvelopeState, droppedReason *string, targetRunID *string) error {
+func (b *PostgresBackend) UpdateTaskState(ctx context.Context, taskID string, state types.AgentTaskState, droppedReason *string, targetRunID *string) error {
 	now := time.Now()
 	query := `
-		UPDATE agent_task_envelope
-		SET state = $2::agent_envelope_state,
-		    queued_at = CASE WHEN $2::agent_envelope_state = 'queued'::agent_envelope_state THEN $3 ELSE queued_at END,
-		    dispatched_at = CASE WHEN $2::agent_envelope_state = 'dispatched'::agent_envelope_state THEN $3 ELSE dispatched_at END,
-		    dropped_reason = CASE WHEN $2::agent_envelope_state = 'dropped'::agent_envelope_state THEN $4 ELSE dropped_reason END,
+		UPDATE agent_task
+		SET state = $2::agent_task_state,
+		    queued_at = CASE WHEN $2::agent_task_state = 'queued'::agent_task_state THEN $3 ELSE queued_at END,
+		    dispatched_at = CASE WHEN $2::agent_task_state = 'dispatched'::agent_task_state THEN $3 ELSE dispatched_at END,
+		    dropped_reason = CASE WHEN $2::agent_task_state = 'dropped'::agent_task_state THEN $4 ELSE dropped_reason END,
 		    target_run_id = COALESCE($5::uuid, target_run_id),
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = $1
 	`
-	res, err := b.db.ExecContext(ctx, query, envelopeId, state, now, droppedReason, targetRunID)
+	res, err := b.db.ExecContext(ctx, query, taskID, state, now, droppedReason, targetRunID)
 	if err != nil {
 		return fmt.Errorf("update envelope state: %w", err)
 	}
 	affected, _ := res.RowsAffected()
 	if affected == 0 {
-		return &types.ErrAgentTaskEnvelopeNotFound{ID: envelopeId}
+		return &types.ErrAgentTaskNotFound{ID: taskID}
 	}
 	return nil
 }
@@ -373,7 +409,7 @@ func (b *PostgresBackend) CreateAgentRun(ctx context.Context, run *types.AgentRu
 		query,
 		run.WorkspaceID,
 		run.AgentID,
-		run.OriginEnvelopeID,
+		run.OriginTaskID,
 		run.Status,
 		run.SessionID,
 		run.SessionKey,
@@ -410,7 +446,7 @@ func (b *PostgresBackend) scanAgentRun(row scanner) (*types.AgentRun, error) {
 		&run.ID,
 		&run.WorkspaceID,
 		&agentID,
-		&run.OriginEnvelopeID,
+		&run.OriginTaskID,
 		&run.Status,
 		&run.SessionID,
 		&sessionKey,
@@ -597,7 +633,7 @@ func (b *PostgresBackend) CreateAgentRunAttempt(ctx context.Context, attempt *ty
 		attempt.WorkspaceAccess,
 		attempt.NetworkEnabled,
 		attempt.Interactive,
-		attempt.ExecutionTaskExternalID,
+		attempt.ExecutionID,
 	).Scan(&attempt.ID, &attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
 		return fmt.Errorf("create run attempt: %w", err)
 	}
@@ -649,7 +685,7 @@ func (b *PostgresBackend) scanAgentRunAttempt(row scanner) (*types.AgentRunAttem
 		attempt.Model = &model.String
 	}
 	if executionTaskExternalID.Valid {
-		attempt.ExecutionTaskExternalID = &executionTaskExternalID.String
+		attempt.ExecutionID = &executionTaskExternalID.String
 	}
 	if startedAt.Valid {
 		attempt.StartedAt = &startedAt.Time
@@ -712,7 +748,7 @@ func (b *PostgresBackend) ListAgentRunAttempts(ctx context.Context, runId string
 	return out, rows.Err()
 }
 
-func (b *PostgresBackend) GetRunAttemptByExecutionTaskExternalID(ctx context.Context, taskExternalId string) (*types.AgentRunAttempt, error) {
+func (b *PostgresBackend) GetRunAttemptByExecutionID(ctx context.Context, executionID string) (*types.AgentRunAttempt, error) {
 	query := `
 		SELECT id, run_id, attempt_no, status, strategy, provider, model,
 		       exec_host, exec_security, exec_ask, runtime_type, workspace_access,
@@ -721,12 +757,12 @@ func (b *PostgresBackend) GetRunAttemptByExecutionTaskExternalID(ctx context.Con
 		FROM agent_run_attempt
 		WHERE execution_task_external_id = $1
 	`
-	attempt, err := b.scanAgentRunAttempt(b.db.QueryRowContext(ctx, query, taskExternalId))
+	attempt, err := b.scanAgentRunAttempt(b.db.QueryRowContext(ctx, query, executionID))
 	if err != nil {
 		if _, ok := err.(*types.ErrAgentRunAttemptNotFound); ok {
-			return nil, &types.ErrAgentRunAttemptNotFound{ID: taskExternalId}
+			return nil, &types.ErrAgentRunAttemptNotFound{ID: executionID}
 		}
-		return nil, fmt.Errorf("get attempt by execution task id: %w", err)
+		return nil, fmt.Errorf("get attempt by execution id: %w", err)
 	}
 	return attempt, nil
 }

@@ -88,6 +88,9 @@ func ValidateAgentCommandParams(v *AgentCommandParams) error {
 	if v == nil {
 		return fmt.Errorf("payload is required")
 	}
+	if v.AgentID == nil || strings.TrimSpace(*v.AgentID) == "" {
+		return fmt.Errorf("agent_id is required")
+	}
 	if strings.TrimSpace(v.Message) == "" {
 		return fmt.Errorf("message is required")
 	}

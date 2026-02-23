@@ -143,17 +143,17 @@ const connections = await airstore.connections.list('ws_abc123');
 await airstore.connections.del('ws_abc123', 'conn_abc123');
 ```
 
-### Orchestration (Agents, Task Envelopes, Runs)
+### Agents, Tasks, Runs
 
 These APIs are workspace-scoped and split into:
 
 - `agents`: persistent profile/config.
-- `tasks`: task envelopes (accepted-first ingress, idempotent).
+- `tasks`: accepted-first task ingress with idempotency.
 - `runs`: execution lifecycle and attempt/snapshot introspection.
 
 Flow is:
 
-1. submit a task envelope,
+1. submit a task,
 2. materialize a run,
 3. execute via run attempts,
 4. map attempts to execution tasks in the worker substrate.
@@ -166,7 +166,7 @@ const agent = await airstore.agents.create('ws_abc123', {
   config: { model: 'claude-sonnet-4' },
 });
 
-// 2) Submit a task envelope (intent), not a direct execution task
+// 2) Submit a task intent (not a direct worker execution)
 const accepted = await airstore.tasks.create('ws_abc123', {
   message: 'Summarize the latest support tickets',
   // sessionId optional (server generates UUID when omitted)
@@ -189,7 +189,7 @@ const accepted = await airstore.tasks.create('ws_abc123', {
 });
 
 // 3) Resolve and poll the run
-const runId = accepted.run_id ?? accepted.envelope.target_run_id;
+const runId = accepted.run_id ?? accepted.task.target_run_id;
 if (runId) {
   const run = await airstore.runs.retrieve('ws_abc123', runId);
   const attempts = await airstore.runs.listAttempts('ws_abc123', runId);

@@ -208,7 +208,7 @@ func coalesce(a, b string) string {
 	return b
 }
 
-func (m *SandboxManager) publishStatus(ctx context.Context, taskID string, status types.TaskStatus, exitCode *int, errMsg string) {
+func (m *SandboxManager) publishStatus(ctx context.Context, taskID string, status types.RunExecutionStatus, exitCode *int, errMsg string) {
 	if m.s2 != nil && m.s2.Enabled() {
 		m.s2.AppendStatus(ctx, taskID, string(status), exitCode, errMsg)
 	}
@@ -870,7 +870,7 @@ func (m *SandboxManager) addFilesystemMount(spec *specs.Spec, source string, rea
 // buildEntrypoint constructs the entrypoint for a task.
 // Prompt tasks are resolved through prompt runner entrypoints; all other tasks
 // use their explicit task entrypoint.
-func (m *SandboxManager) buildEntrypoint(task types.Task, env map[string]string) []string {
+func (m *SandboxManager) buildEntrypoint(task types.RunExecution, env map[string]string) []string {
 	if task.Prompt == "" {
 		return task.Entrypoint
 	}
@@ -878,12 +878,12 @@ func (m *SandboxManager) buildEntrypoint(task types.Task, env map[string]string)
 	return m.buildPromptTaskEntrypoint(task, env)
 }
 
-func (m *SandboxManager) buildPromptTaskEntrypoint(task types.Task, env map[string]string) []string {
+func (m *SandboxManager) buildPromptTaskEntrypoint(task types.RunExecution, env map[string]string) []string {
 	runner := m.resolvePromptRunner(task, env)
 	return runner.BuildEntrypoint(task, env)
 }
 
-func (m *SandboxManager) resolvePromptRunner(task types.Task, env map[string]string) AgentExecutionRunner {
+func (m *SandboxManager) resolvePromptRunner(task types.RunExecution, env map[string]string) AgentExecutionRunner {
 	defaultRunner := m.defaultPromptRunner
 	if defaultRunner == nil {
 		defaultRunner = NewClaudeCodeRunner(ClaudeCodeRunnerOptions{})
@@ -906,7 +906,7 @@ func (m *SandboxManager) resolvePromptRunner(task types.Task, env map[string]str
 	return runner
 }
 
-func (m *SandboxManager) copyTaskEnv(task types.Task) map[string]string {
+func (m *SandboxManager) copyTaskEnv(task types.RunExecution) map[string]string {
 	env := make(map[string]string, len(task.Env)+1)
 	for key, value := range task.Env {
 		env[key] = value
@@ -914,7 +914,7 @@ func (m *SandboxManager) copyTaskEnv(task types.Task) map[string]string {
 	return env
 }
 
-func (m *SandboxManager) buildTaskSandboxConfig(task types.Task, entrypoint []string, env map[string]string, mountSource string) types.SandboxConfig {
+func (m *SandboxManager) buildTaskSandboxConfig(task types.RunExecution, entrypoint []string, env map[string]string, mountSource string) types.SandboxConfig {
 	runtimeType := types.ContainerRuntimeGvisor
 	if task.RuntimeType != nil && *task.RuntimeType == types.ContainerRuntimeRunc.String() {
 		runtimeType = types.ContainerRuntimeRunc
@@ -952,7 +952,7 @@ func (m *SandboxManager) buildTaskSandboxConfig(task types.Task, entrypoint []st
 
 // mountFilesystem sets up the filesystem mount for a task.
 // Prefers task-specific mount with member token, falls back to worker global mount.
-func (m *SandboxManager) mountFilesystem(ctx context.Context, task types.Task) string {
+func (m *SandboxManager) mountFilesystem(ctx context.Context, task types.RunExecution) string {
 	if task.WorkspaceAccess != nil && *task.WorkspaceAccess == "none" {
 		return ""
 	}
@@ -1044,7 +1044,7 @@ func (m *SandboxManager) AttachPTY(ctx context.Context, sandboxID string, stdin 
 }
 
 // RunTask creates and runs a sandbox for a task, returning when complete
-func (m *SandboxManager) RunTask(ctx context.Context, task types.Task) (*types.TaskResult, error) {
+func (m *SandboxManager) RunTask(ctx context.Context, task types.RunExecution) (*types.RunExecutionResult, error) {
 	sandboxID := fmt.Sprintf("task-%s", task.ExternalId)
 
 	env := m.copyTaskEnv(task)
@@ -1077,11 +1077,11 @@ func (m *SandboxManager) RunTask(ctx context.Context, task types.Task) (*types.T
 	}
 
 	// Publish starting status
-	m.publishStatus(ctx, task.ExternalId, types.TaskStatusRunning, nil, "")
+	m.publishStatus(ctx, task.ExternalId, types.RunExecutionStatusRunning, nil, "")
 
 	// Start the sandbox
 	if err := m.Start(sandboxID); err != nil {
-		m.publishStatus(ctx, task.ExternalId, types.TaskStatusFailed, nil, err.Error())
+		m.publishStatus(ctx, task.ExternalId, types.RunExecutionStatusFailed, nil, err.Error())
 		return nil, fmt.Errorf("failed to start sandbox: %w", err)
 	}
 
@@ -1098,8 +1098,8 @@ func (m *SandboxManager) RunTask(ctx context.Context, task types.Task) (*types.T
 			m.Stop(sandboxID, true)
 			exitCode := -1
 			errMsg := "task timeout or cancelled"
-			m.publishStatus(ctx, task.ExternalId, types.TaskStatusCancelled, &exitCode, errMsg)
-			return &types.TaskResult{
+			m.publishStatus(ctx, task.ExternalId, types.RunExecutionStatusCancelled, &exitCode, errMsg)
+			return &types.RunExecutionResult{
 				ID:       task.ExternalId,
 				ExitCode: exitCode,
 				Error:    errMsg,
@@ -1117,13 +1117,13 @@ func (m *SandboxManager) RunTask(ctx context.Context, task types.Task) (*types.T
 				taskOutput.Flush()
 
 				// Publish completion status
-				status := types.TaskStatusComplete
+				status := types.RunExecutionStatusComplete
 				if state.ExitCode != 0 || state.Error != "" {
-					status = types.TaskStatusFailed
+					status = types.RunExecutionStatusFailed
 				}
 				m.publishStatus(ctx, task.ExternalId, status, &state.ExitCode, state.Error)
 
-				return &types.TaskResult{
+				return &types.RunExecutionResult{
 					ID:       task.ExternalId,
 					ExitCode: state.ExitCode,
 					Error:    state.Error,

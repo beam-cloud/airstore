@@ -57,8 +57,10 @@ func TestEnqueueRunInputEnvelopeRejectsUnsupportedQueueModes(t *testing.T) {
 }
 
 func TestValidateAgentCommandParamsRejectsInvalidPolicy(t *testing.T) {
+	agentID := "00000000-0000-0000-0000-000000000001"
 	params := &AgentCommandParams{
 		Message:        "hello",
+		AgentID:        &agentID,
 		SessionID:      "session-1",
 		IdempotencyKey: "idem-1",
 		Policy: &RunExecutionPolicy{
@@ -72,8 +74,10 @@ func TestValidateAgentCommandParamsRejectsInvalidPolicy(t *testing.T) {
 }
 
 func TestValidateAgentCommandParamsAcceptsValidPolicy(t *testing.T) {
+	agentID := "00000000-0000-0000-0000-000000000001"
 	params := &AgentCommandParams{
 		Message:        "hello",
+		AgentID:        &agentID,
 		SessionID:      "session-1",
 		IdempotencyKey: "idem-1",
 		Policy: &RunExecutionPolicy{
@@ -92,4 +96,16 @@ func TestValidateAgentCommandParamsAcceptsValidPolicy(t *testing.T) {
 
 	err := ValidateAgentCommandParams(params)
 	require.NoError(t, err)
+}
+
+func TestValidateAgentCommandParamsRejectsMissingAgentID(t *testing.T) {
+	params := &AgentCommandParams{
+		Message:        "hello",
+		SessionID:      "session-1",
+		IdempotencyKey: "idem-1",
+	}
+
+	err := ValidateAgentCommandParams(params)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "agent_id is required")
 }

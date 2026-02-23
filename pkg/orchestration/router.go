@@ -19,7 +19,7 @@ type EnvelopeQueueRouter struct {
 }
 
 type EnvelopeQueueStore interface {
-	UpdateEnvelopeState(ctx context.Context, envelopeID string, state types.AgentEnvelopeState, dropReason *string, targetRunID *string) error
+	UpdateEnvelopeState(ctx context.Context, envelopeID string, state types.AgentTaskState, dropReason *string, targetRunID *string) error
 	PushQueueToken(ctx context.Context, token string) error
 	PopQueueToken(ctx context.Context, timeout time.Duration) (string, error)
 	GetModeEnvelopeID(ctx context.Context, modeKey string) (string, error)
@@ -35,12 +35,12 @@ func NewEnvelopeQueueRouter(store EnvelopeQueueStore) *EnvelopeQueueRouter {
 	}
 }
 
-func (r *EnvelopeQueueRouter) Enqueue(ctx context.Context, envelope *types.AgentTaskEnvelope, instanceKey string) error {
+func (r *EnvelopeQueueRouter) Enqueue(ctx context.Context, envelope *types.AgentTask, instanceKey string) error {
 	if r.store == nil {
 		return fmt.Errorf("queue store is required")
 	}
 
-	if err := r.store.UpdateEnvelopeState(ctx, envelope.ID, types.AgentEnvelopeStateQueued, nil, envelope.TargetRunID); err != nil {
+	if err := r.store.UpdateEnvelopeState(ctx, envelope.ID, types.AgentTaskStateQueued, nil, envelope.TargetRunID); err != nil {
 		return err
 	}
 
@@ -53,15 +53,15 @@ func (r *EnvelopeQueueRouter) Enqueue(ctx context.Context, envelope *types.Agent
 	}
 }
 
-func (r *EnvelopeQueueRouter) enqueueModeKey(ctx context.Context, envelope *types.AgentTaskEnvelope, instanceKey string) error {
+func (r *EnvelopeQueueRouter) enqueueModeKey(ctx context.Context, envelope *types.AgentTask, instanceKey string) error {
 	modeKey := fmt.Sprintf("%s:%s", instanceKey, envelope.QueueMode)
 	prevID, err := r.store.GetModeEnvelopeID(ctx, modeKey)
 	if err != nil {
 		return err
 	}
 	if prevID != "" && prevID != envelope.ID {
-		reason := types.AgentEnvelopeDropReasonReshapedByQueueMode
-		_ = r.store.UpdateEnvelopeState(ctx, prevID, types.AgentEnvelopeStateDropped, &reason, envelope.TargetRunID)
+		reason := types.AgentTaskDropReasonReshapedByQueueMode
+		_ = r.store.UpdateEnvelopeState(ctx, prevID, types.AgentTaskStateDropped, &reason, envelope.TargetRunID)
 	}
 	if err := r.store.SetModeEnvelopeID(ctx, modeKey, envelope.ID, 15*time.Minute); err != nil {
 		return err

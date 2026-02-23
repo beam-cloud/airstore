@@ -25,7 +25,7 @@ type WorkerService struct {
 }
 
 type delayedTaskQueue interface {
-	PushDelayed(ctx context.Context, task *types.Task, delay time.Duration) error
+	PushDelayed(ctx context.Context, task *types.RunExecution, delay time.Duration) error
 }
 
 func NewWorkerService(
@@ -144,14 +144,14 @@ func (s *WorkerService) SetTaskStarted(ctx context.Context, req *pb.SetTaskStart
 		return nil, status.Errorf(codes.Unavailable, "task persistence not available")
 	}
 
-	attempt, err := s.backend.GetRunAttemptByExecutionTaskExternalID(ctx, req.TaskId)
+	attempt, err := s.backend.GetRunAttemptByExecutionID(ctx, req.TaskId)
 	if err == nil {
 		run, runErr := s.backend.GetAgentRunByID(ctx, attempt.RunID)
 		if runErr == nil && run.Status.IsTerminal() {
 			now := time.Now()
 			errMsg := "run is already terminal"
 			_ = s.backend.UpdateAgentRunAttemptResult(ctx, attempt.ID, types.AgentAttemptStatusCancelled, nil, now, &errMsg)
-			_ = s.backend.SetTaskResult(ctx, req.TaskId, -1, errMsg)
+			_ = s.backend.SetRunExecutionResult(ctx, req.TaskId, -1, errMsg)
 			_ = appendRunSnapshot(ctx, s.backend, attempt.RunID, run.Status, nil, &now, &errMsg, map[string]any{
 				"attempt_id": attempt.ID,
 				"task_id":    req.TaskId,
@@ -161,7 +161,7 @@ func (s *WorkerService) SetTaskStarted(ctx context.Context, req *pb.SetTaskStart
 		}
 	}
 
-	if err := s.backend.SetTaskStarted(ctx, req.TaskId); err != nil {
+	if err := s.backend.SetRunExecutionStarted(ctx, req.TaskId); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to set task started: %v", err)
 	}
 
@@ -185,14 +185,14 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 		return nil, status.Errorf(codes.Unavailable, "task persistence not available")
 	}
 
-	if err := s.backend.SetTaskResult(ctx, req.TaskId, int(req.ExitCode), req.Error); err != nil {
-		if _, ok := err.(*types.ErrTaskNotFound); ok {
+	if err := s.backend.SetRunExecutionResult(ctx, req.TaskId, int(req.ExitCode), req.Error); err != nil {
+		if _, ok := err.(*types.ErrRunExecutionNotFound); ok {
 			return nil, status.Errorf(codes.NotFound, "task not found: %s", req.TaskId)
 		}
 		return nil, status.Errorf(codes.Internal, "failed to set task result: %v", err)
 	}
 
-	attempt, err := s.backend.GetRunAttemptByExecutionTaskExternalID(ctx, req.TaskId)
+	attempt, err := s.backend.GetRunAttemptByExecutionID(ctx, req.TaskId)
 	if err == nil {
 		now := time.Now()
 		exitCode := int(req.ExitCode)
@@ -354,7 +354,7 @@ func (s *WorkerService) scheduleRetryAttempt(ctx context.Context, attempt *types
 		return retryScheduleResult{scheduled: false}, nil
 	}
 
-	sourceTask, err := s.backend.GetTask(ctx, taskID)
+	sourceTask, err := s.backend.GetRunExecution(ctx, taskID)
 	if err != nil {
 		return retryScheduleResult{}, err
 	}
@@ -408,16 +408,16 @@ func (s *WorkerService) scheduleRetryAttempt(ctx context.Context, attempt *types
 		"delay_ms":     retryPolicy.delayMs,
 	}
 
-	retryTask := &types.Task{
+	retryTask := &types.RunExecution{
 		WorkspaceId:       run.WorkspaceID,
 		MemberToken:       memberToken,
-		Status:            types.TaskStatusPending,
+		Status:            types.RunExecutionStatusPending,
 		Type:              sourceTask.Type,
 		Prompt:            sourceTask.Prompt,
 		Image:             sourceTask.Image,
 		Entrypoint:        cloneStringSlice(sourceTask.Entrypoint),
 		Env:               taskEnv,
-		Resources:         resolveTaskResources(sourceTask),
+		Resources:         resolveRunExecutionResources(sourceTask),
 		RunAttemptID:      &retryAttempt.ID,
 		TimeoutMs:         sourceTask.TimeoutMs,
 		ExecHost:          strPtrOrNil(run.ExecHost),
@@ -433,7 +433,7 @@ func (s *WorkerService) scheduleRetryAttempt(ctx context.Context, attempt *types
 		timeout := run.TimeoutMs
 		retryTask.TimeoutMs = &timeout
 	}
-	if err := s.backend.CreateTask(ctx, retryTask); err != nil {
+	if err := s.backend.CreateRunExecution(ctx, retryTask); err != nil {
 		return retryScheduleResult{}, err
 	}
 	if err := s.backend.BindAttemptExecutionTask(ctx, retryAttempt.ID, retryTask.ExternalId); err != nil {
@@ -452,7 +452,7 @@ func (s *WorkerService) scheduleRetryAttempt(ctx context.Context, attempt *types
 		} else {
 			taskCopy := *retryTask
 			runID := run.ID
-			go func(delay time.Duration, queuedTask types.Task) {
+			go func(delay time.Duration, queuedTask types.RunExecution) {
 				timer := time.NewTimer(delay)
 				defer timer.Stop()
 				<-timer.C
@@ -582,17 +582,17 @@ func cloneStringSlice(src []string) []string {
 	return dst
 }
 
-func resolveTaskResources(task *types.Task) *types.TaskResources {
-	if task == nil {
+func resolveRunExecutionResources(exec *types.RunExecution) *types.RunExecutionResources {
+	if exec == nil {
 		return nil
 	}
-	if task.Resources != nil {
-		return task.Resources
+	if exec.Resources != nil {
+		return exec.Resources
 	}
-	if task.ExecutionPolicy == nil {
+	if exec.ExecutionPolicy == nil {
 		return nil
 	}
-	raw, ok := task.ExecutionPolicy[types.AgentExecutionMetaKeyResources]
+	raw, ok := exec.ExecutionPolicy[types.AgentExecutionMetaKeyResources]
 	if !ok || raw == nil {
 		return nil
 	}
@@ -600,7 +600,7 @@ func resolveTaskResources(task *types.Task) *types.TaskResources {
 	if !ok {
 		return nil
 	}
-	resources := &types.TaskResources{
+	resources := &types.RunExecutionResources{
 		CPU:    int64(intFromAny(resourcesMap["cpu"])),
 		Memory: int64(intFromAny(resourcesMap["memory"])),
 		GPU:    intFromAny(resourcesMap["gpu"]),

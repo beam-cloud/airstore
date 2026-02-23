@@ -1,6 +1,11 @@
 #!/usr/bin/env npx tsx
 import { Airstore } from '../src/airstore.js';
 
+declare const process: {
+  env: Record<string, string | undefined>;
+  exit(code?: number): never;
+};
+
 const TERMINAL_RUN_STATUSES = new Set(['ok', 'error', 'timeout', 'cancelled']);
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -40,7 +45,7 @@ async function main() {
     const idempotencyKey = `idem-${Date.now()}`;
     const sessionId = `session-${Date.now()}`;
 
-    console.log('[3/8] submit task envelope');
+    console.log('[3/8] submit task');
     const accepted = await client.tasks.create(workspaceId, {
       message: 'Say hello from agent/runs smoke test',
       sessionId,
@@ -49,18 +54,18 @@ async function main() {
       timeoutMs: 120_000,
     });
     assert(accepted.accepted, 'expected accepted response');
-    assert(accepted.envelope.id, 'expected envelope id');
+    assert(accepted.task.id, 'expected task id');
 
-    console.log('[4/8] resolve run id from envelope');
+    console.log('[4/8] resolve run id from task');
     let runId = accepted.run_id;
-    const envelopeId = accepted.envelope.id;
-    const envelopeDeadline = Date.now() + 30_000;
-    while (!runId && Date.now() < envelopeDeadline) {
+    const taskId = accepted.task.id;
+    const taskDeadline = Date.now() + 30_000;
+    while (!runId && Date.now() < taskDeadline) {
       await sleep(1000);
-      const envelope = await client.tasks.retrieve(workspaceId, envelopeId);
-      runId = envelope.target_run_id;
+      const task = await client.tasks.retrieve(workspaceId, taskId);
+      runId = task.target_run_id;
     }
-    assert(runId, 'run was not materialized from envelope within timeout');
+    assert(runId, 'run was not materialized from task within timeout');
 
     console.log('[5/8] poll run status');
     const runDeadline = Date.now() + 180_000;
@@ -106,8 +111,8 @@ async function main() {
     });
     assert(replay.idempotent_hit, 'expected idempotent replay hit');
     assert(
-      replay.envelope.id === accepted.envelope.id,
-      'idempotent replay returned different envelope id',
+      replay.task.id === accepted.task.id,
+      'idempotent replay returned different task id',
     );
 
     console.log('[8/8] done');

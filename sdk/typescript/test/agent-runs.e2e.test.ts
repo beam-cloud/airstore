@@ -10,14 +10,14 @@ const TERMINAL = new Set(['ok', 'error', 'timeout', 'cancelled']);
 
 async function waitForRunId(
   workspaceId: string,
-  envelopeId: string,
+  taskId: string,
   timeoutMs = 30000,
 ): Promise<string | undefined> {
   const client = getClient();
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const envelope = await client.tasks.retrieve(workspaceId, envelopeId);
-    if (envelope.target_run_id) return envelope.target_run_id;
+    const task = await client.tasks.retrieve(workspaceId, taskId);
+    if (task.target_run_id) return task.target_run_id;
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
   return undefined;
@@ -188,13 +188,13 @@ describe('Agent/Runs E2E', () => {
       },
     });
     expect(accepted.accepted).toBe(true);
-    const acceptedSessionID = accepted.envelope.payload_json['session_id'];
+    const acceptedSessionID = accepted.task.payload_json['session_id'];
     expect(typeof acceptedSessionID).toBe('string');
     expect((acceptedSessionID as string).length).toBeGreaterThan(0);
 
     const runId =
       accepted.run_id ??
-      (await waitForRunId(workspaceId, accepted.envelope.id));
+      (await waitForRunId(workspaceId, accepted.task.id));
     expect(runId).toBeDefined();
     if (!runId) return;
 
@@ -210,7 +210,7 @@ describe('Agent/Runs E2E', () => {
     expect(attempts.every((attempt) => attempt.run_id === runId)).toBe(true);
     expect(snapshots.every((snapshot) => snapshot.run_id === runId)).toBe(true);
 
-    const execTaskId = attempts[attempts.length - 1]?.execution_task_external_id;
+    const execTaskId = attempts[attempts.length - 1]?.execution_id;
     expect(execTaskId).toBeDefined();
     if (!execTaskId) return;
 
@@ -243,6 +243,6 @@ describe('Agent/Runs E2E', () => {
       timeoutMs: 180_000,
     });
     expect(replay.idempotent_hit).toBe(true);
-    expect(replay.envelope.id).toBe(accepted.envelope.id);
+    expect(replay.task.id).toBe(accepted.task.id);
   }, 300_000);
 });

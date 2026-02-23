@@ -24,7 +24,7 @@ export interface AgentRun {
   id: string;
   workspace_id: number;
   agent_id?: string;
-  origin_envelope_id: string;
+  origin_task_id: string;
   status: RunStatus;
   session_id: string;
   session_key?: string;
@@ -63,7 +63,7 @@ export interface AgentRunAttempt {
   workspace_access: WorkspaceAccess;
   network_enabled: boolean;
   interactive: boolean;
-  execution_task_external_id?: string;
+  execution_id?: string;
   started_at?: string;
   ended_at?: string;
   exit_code?: number;

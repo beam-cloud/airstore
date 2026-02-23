@@ -74,7 +74,7 @@ export class Airstore extends CoreClient {
   readonly accessLog: AccessLog;
   /** Manage workspace agent profiles. */
   readonly agents: Agents;
-  /** Manage task envelopes (intent tasks). */
+  /** Manage tasks (intent). */
   readonly tasks: Tasks;
   /** Read and control run lifecycle state. */
   readonly runs: Runs;

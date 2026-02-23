@@ -54,7 +54,7 @@ func NewRedisTaskQueue(rdb *common.RedisClient, queueName string) *RedisTaskQueu
 }
 
 // Push adds a task to the queue
-func (q *RedisTaskQueue) Push(ctx context.Context, task *types.Task) error {
+func (q *RedisTaskQueue) Push(ctx context.Context, task *types.RunExecution) error {
 	// Serialize task
 	data, err := json.Marshal(task)
 	if err != nil {
@@ -62,9 +62,9 @@ func (q *RedisTaskQueue) Push(ctx context.Context, task *types.Task) error {
 	}
 
 	// Store task state
-	state := &types.TaskState{
+	state := &types.RunExecutionState{
 		ID:        task.ExternalId,
-		Status:    types.TaskStatusPending,
+		Status:    types.RunExecutionStatusPending,
 		ExitCode:  -1,
 		CreatedAt: time.Now(),
 	}
@@ -87,7 +87,7 @@ func (q *RedisTaskQueue) Push(ctx context.Context, task *types.Task) error {
 
 // PushDelayed stores a task for delayed enqueue using a Redis sorted set.
 // Delayed tasks survive process restarts and are moved to the main queue by Pop.
-func (q *RedisTaskQueue) PushDelayed(ctx context.Context, task *types.Task, delay time.Duration) error {
+func (q *RedisTaskQueue) PushDelayed(ctx context.Context, task *types.RunExecution, delay time.Duration) error {
 	if delay <= 0 {
 		return q.Push(ctx, task)
 	}
@@ -97,9 +97,9 @@ func (q *RedisTaskQueue) PushDelayed(ctx context.Context, task *types.Task, dela
 		return fmt.Errorf("failed to marshal delayed task: %w", err)
 	}
 
-	state := &types.TaskState{
+	state := &types.RunExecutionState{
 		ID:        task.ExternalId,
-		Status:    types.TaskStatusPending,
+		Status:    types.RunExecutionStatusPending,
 		ExitCode:  -1,
 		CreatedAt: time.Now(),
 	}
@@ -136,7 +136,7 @@ func taskStateTTLForDelay(delay time.Duration) time.Duration {
 }
 
 // Pop blocks until a task is available and returns it
-func (q *RedisTaskQueue) Pop(ctx context.Context, workerID string) (*types.Task, error) {
+func (q *RedisTaskQueue) Pop(ctx context.Context, workerID string) (*types.RunExecution, error) {
 	queueKey := common.Keys.TaskQueue(q.queueName)
 	inFlightKey := common.Keys.TaskInFlight(q.queueName)
 
@@ -161,16 +161,16 @@ func (q *RedisTaskQueue) Pop(ctx context.Context, workerID string) (*types.Task,
 	taskData := result[1]
 
 	// Deserialize task
-	var task types.Task
+	var task types.RunExecution
 	if err := json.Unmarshal([]byte(taskData), &task); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal task: %w", err)
 	}
 
 	// Add to in-flight set and update state
 	now := time.Now()
-	state := &types.TaskState{
+	state := &types.RunExecutionState{
 		ID:          task.ExternalId,
-		Status:      types.TaskStatusRunning,
+		Status:      types.RunExecutionStatusRunning,
 		WorkerID:    workerID,
 		ExitCode:    -1,
 		ScheduledAt: now,
@@ -209,18 +209,18 @@ func (q *RedisTaskQueue) moveDueDelayedTasks(ctx context.Context) error {
 }
 
 // Complete marks a task as complete and stores the result
-func (q *RedisTaskQueue) Complete(ctx context.Context, taskID string, result *types.TaskResult) error {
+func (q *RedisTaskQueue) Complete(ctx context.Context, taskID string, result *types.RunExecutionResult) error {
 	inFlightKey := common.Keys.TaskInFlight(q.queueName)
 
 	// Update state to complete
-	state := &types.TaskState{
+	state := &types.RunExecutionState{
 		ID:         taskID,
-		Status:     types.TaskStatusComplete,
+		Status:     types.RunExecutionStatusComplete,
 		ExitCode:   result.ExitCode,
 		FinishedAt: time.Now(),
 	}
 	if result.Error != "" {
-		state.Status = types.TaskStatusFailed
+		state.Status = types.RunExecutionStatusFailed
 		state.Error = result.Error
 	}
 
@@ -241,7 +241,7 @@ func (q *RedisTaskQueue) Complete(ctx context.Context, taskID string, result *ty
 
 // Fail marks a task as failed
 func (q *RedisTaskQueue) Fail(ctx context.Context, taskID string, taskErr error) error {
-	return q.Complete(ctx, taskID, &types.TaskResult{
+	return q.Complete(ctx, taskID, &types.RunExecutionResult{
 		ID:       taskID,
 		ExitCode: -1,
 		Error:    taskErr.Error(),
@@ -249,13 +249,13 @@ func (q *RedisTaskQueue) Fail(ctx context.Context, taskID string, taskErr error)
 }
 
 // GetState returns the current state of a task
-func (q *RedisTaskQueue) GetState(ctx context.Context, taskID string) (*types.TaskState, error) {
+func (q *RedisTaskQueue) GetState(ctx context.Context, taskID string) (*types.RunExecutionState, error) {
 	data, err := q.rdb.Get(ctx, common.Keys.TaskState(taskID)).Result()
 	if err != nil {
 		return nil, fmt.Errorf("task not found: %w", err)
 	}
 
-	var state types.TaskState
+	var state types.RunExecutionState
 	if err := json.Unmarshal([]byte(data), &state); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal state: %w", err)
 	}
@@ -264,13 +264,13 @@ func (q *RedisTaskQueue) GetState(ctx context.Context, taskID string) (*types.Ta
 }
 
 // GetResult returns the result of a completed task
-func (q *RedisTaskQueue) GetResult(ctx context.Context, taskID string) (*types.TaskResult, error) {
+func (q *RedisTaskQueue) GetResult(ctx context.Context, taskID string) (*types.RunExecutionResult, error) {
 	data, err := q.rdb.Get(ctx, common.Keys.TaskResult(taskID)).Result()
 	if err != nil {
 		return nil, fmt.Errorf("result not found: %w", err)
 	}
 
-	var result types.TaskResult
+	var result types.RunExecutionResult
 	if err := json.Unmarshal([]byte(data), &result); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal result: %w", err)
 	}
@@ -298,11 +298,11 @@ type TaskLogEntry struct {
 
 // TaskStatusEvent represents a task status change event
 type TaskStatusEvent struct {
-	TaskID    string           `json:"task_id"`
-	Timestamp int64            `json:"timestamp"`
-	Status    types.TaskStatus `json:"status"`
-	ExitCode  *int             `json:"exit_code,omitempty"`
-	Error     string           `json:"error,omitempty"`
+	TaskID    string                   `json:"task_id"`
+	Timestamp int64                    `json:"timestamp"`
+	Status    types.RunExecutionStatus `json:"status"`
+	ExitCode  *int                     `json:"exit_code,omitempty"`
+	Error     string                   `json:"error,omitempty"`
 }
 
 // PublishLog publishes a log entry to the task's log channel
@@ -336,7 +336,7 @@ func (q *RedisTaskQueue) PublishLog(ctx context.Context, taskID string, stream s
 }
 
 // PublishStatus publishes a task status change event
-func (q *RedisTaskQueue) PublishStatus(ctx context.Context, taskID string, status types.TaskStatus, exitCode *int, errorMsg string) error {
+func (q *RedisTaskQueue) PublishStatus(ctx context.Context, taskID string, status types.RunExecutionStatus, exitCode *int, errorMsg string) error {
 	event := TaskStatusEvent{
 		TaskID:    taskID,
 		Timestamp: time.Now().UnixMilli(),

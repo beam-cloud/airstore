@@ -10,13 +10,13 @@ import {
 } from '../types/tasks.js';
 import type {
   AgentCommandCreateParams,
-  AgentTaskEnvelope,
+  AgentTask,
   RunExecutionPolicy,
-  TaskEnvelopeAcceptedResponse,
+  TaskAcceptedResponse,
 } from '../types/tasks.js';
 
 /**
- * Task-envelope APIs for agent orchestration.
+ * Task APIs for agents.
  */
 export class Tasks {
   constructor(private readonly client: CoreClient) {}
@@ -25,8 +25,8 @@ export class Tasks {
     workspaceId: string,
     params: AgentCommandCreateParams,
     options?: RequestOptions,
-  ): Promise<TaskEnvelopeAcceptedResponse> {
-    return this.client.request<TaskEnvelopeAcceptedResponse>(
+  ): Promise<TaskAcceptedResponse> {
+    return this.client.request<TaskAcceptedResponse>(
       'POST',
       `/workspaces/${workspaceId}/tasks`,
       {
@@ -52,12 +52,12 @@ export class Tasks {
 
   async retrieve(
     workspaceId: string,
-    envelopeId: string,
+    taskId: string,
     options?: RequestOptions,
-  ): Promise<AgentTaskEnvelope> {
-    return this.client.request<AgentTaskEnvelope>(
+  ): Promise<AgentTask> {
+    return this.client.request<AgentTask>(
       'GET',
-      `/workspaces/${workspaceId}/tasks/${envelopeId}`,
+      `/workspaces/${workspaceId}/tasks/${taskId}`,
       undefined,
       undefined,
       options,

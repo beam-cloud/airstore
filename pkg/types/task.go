@@ -5,8 +5,8 @@ import (
 	"time"
 )
 
-// Task represents a unit of work to be executed in a sandbox
-type Task struct {
+// RunExecution represents a unit of work to be executed in a sandbox (substrate run-attempt execution).
+type RunExecution struct {
 	// Id is the internal ID for joins
 	Id uint `json:"id" db:"id"`
 
@@ -23,11 +23,11 @@ type Task struct {
 	// This is NOT stored in the database - it's set at creation time and passed to workers
 	MemberToken string `json:"member_token,omitempty" db:"-"`
 
-	// Status is the current task status
-	Status TaskStatus `json:"status" db:"status"`
+	// Status is the current run execution status
+	Status RunExecutionStatus `json:"status" db:"status"`
 
-	// Type controls task execution mode (background by default).
-	Type TaskType `json:"type" db:"type"`
+	// Type controls run execution mode (background by default).
+	Type RunExecutionType `json:"type" db:"type"`
 
 	// Prompt is the Claude Code prompt (if this is a Claude Code task)
 	Prompt string `json:"prompt,omitempty" db:"prompt"`
@@ -42,7 +42,7 @@ type Task struct {
 	Env map[string]string `json:"env" db:"env"`
 
 	// Resources specifies resource requirements (optional - uses defaults if nil)
-	Resources *TaskResources `json:"resources,omitempty" db:"-"`
+	Resources *RunExecutionResources `json:"resources,omitempty" db:"-"`
 
 	// RunAttemptID links this execution task to an orchestrated run attempt.
 	RunAttemptID *string `json:"run_attempt_id,omitempty" db:"run_attempt_id"`
@@ -80,123 +80,123 @@ type Task struct {
 	FinishedAt *time.Time `json:"finished_at,omitempty" db:"finished_at"`
 }
 
-// TaskType represents how a task should execute.
-type TaskType string
+// RunExecutionType represents how a run execution should execute.
+type RunExecutionType string
 
 const (
-	TaskTypeBackground  TaskType = "background"
-	TaskTypeInteractive TaskType = "interactive"
+	RunExecutionTypeBackground  RunExecutionType = "background"
+	RunExecutionTypeInteractive RunExecutionType = "interactive"
 )
 
-// NormalizeType applies the default task type when unset.
-func (t *Task) NormalizeType() {
+// NormalizeType applies the default run execution type when unset.
+func (t *RunExecution) NormalizeType() {
 	if t.Type == "" {
-		t.Type = TaskTypeBackground
+		t.Type = RunExecutionTypeBackground
 	}
 }
 
-// IsInteractive returns true when the task should run in interactive mode.
-func (t *Task) IsInteractive() bool {
+// IsInteractive returns true when the run execution should run in interactive mode.
+func (t *RunExecution) IsInteractive() bool {
 	t.NormalizeType()
-	return t.Type == TaskTypeInteractive
+	return t.Type == RunExecutionTypeInteractive
 }
 
-// IsClaudeCodeTask returns true if this task has a prompt (Claude Code task)
-func (t *Task) IsClaudeCodeTask() bool {
+// IsClaudeCodeRunExecution returns true if this run execution has a prompt (Claude Code task)
+func (t *RunExecution) IsClaudeCodeRunExecution() bool {
 	return t.Prompt != ""
 }
 
-// IsTerminal returns true if the task is in a terminal state.
-func (t *Task) IsTerminal() bool {
-	return t.Status == TaskStatusComplete ||
-		t.Status == TaskStatusFailed ||
-		t.Status == TaskStatusCancelled
+// IsTerminal returns true if the run execution is in a terminal state.
+func (t *RunExecution) IsTerminal() bool {
+	return t.Status == RunExecutionStatusComplete ||
+		t.Status == RunExecutionStatusFailed ||
+		t.Status == RunExecutionStatusCancelled
 }
 
-// ErrTaskNotFound is returned when a task cannot be found
-type ErrTaskNotFound struct {
+// ErrRunExecutionNotFound is returned when a run execution cannot be found
+type ErrRunExecutionNotFound struct {
 	ExternalId string
 }
 
-func (e *ErrTaskNotFound) Error() string {
-	return "task not found: " + e.ExternalId
+func (e *ErrRunExecutionNotFound) Error() string {
+	return "run execution not found: " + e.ExternalId
 }
 
-// TaskResources specifies resource requirements.
-// Flow: API → Task.Resources → SandboxConfig.Resources → OCI spec limits
-type TaskResources struct {
+// RunExecutionResources specifies resource requirements.
+// Flow: API → RunExecution.Resources → SandboxConfig.Resources → OCI spec limits
+type RunExecutionResources struct {
 	CPU    int64 `json:"cpu"`    // millicores (1000 = 1 CPU)
 	Memory int64 `json:"memory"` // bytes
 	GPU    int   `json:"gpu"`    // count
 }
 
-// Default resource limits (applied when Task.Resources is nil)
+// Default resource limits (applied when RunExecution.Resources is nil)
 const (
-	DefaultTaskCPU    int64 = 2000    // 2 CPUs
-	DefaultTaskMemory int64 = 2 << 30 // 2 GiB
+	DefaultRunExecutionCPU    int64 = 2000    // 2 CPUs
+	DefaultRunExecutionMemory int64 = 2 << 30 // 2 GiB
 )
 
 // Maximum resource limits for validation
 const (
-	MaxTaskCPU    int64 = 32000     // 32 CPUs
-	MaxTaskMemory int64 = 128 << 30 // 128 GiB
-	MaxTaskGPU    int   = 8         // 8 GPUs
+	MaxRunExecutionCPU    int64 = 32000     // 32 CPUs
+	MaxRunExecutionMemory int64 = 128 << 30 // 128 GiB
+	MaxRunExecutionGPU    int   = 8         // 8 GPUs
 )
 
 // Validate checks that resource values are within acceptable bounds.
 // Returns an error describing the first invalid field found.
-func (r *TaskResources) Validate() error {
+func (r *RunExecutionResources) Validate() error {
 	if r == nil {
 		return nil // nil means use defaults
 	}
 	if r.CPU < 0 {
 		return fmt.Errorf("cpu must be non-negative, got %d", r.CPU)
 	}
-	if r.CPU > MaxTaskCPU {
-		return fmt.Errorf("cpu exceeds maximum of %d millicores, got %d", MaxTaskCPU, r.CPU)
+	if r.CPU > MaxRunExecutionCPU {
+		return fmt.Errorf("cpu exceeds maximum of %d millicores, got %d", MaxRunExecutionCPU, r.CPU)
 	}
 	if r.Memory < 0 {
 		return fmt.Errorf("memory must be non-negative, got %d", r.Memory)
 	}
-	if r.Memory > MaxTaskMemory {
-		return fmt.Errorf("memory exceeds maximum of %d bytes, got %d", MaxTaskMemory, r.Memory)
+	if r.Memory > MaxRunExecutionMemory {
+		return fmt.Errorf("memory exceeds maximum of %d bytes, got %d", MaxRunExecutionMemory, r.Memory)
 	}
 	if r.GPU < 0 {
 		return fmt.Errorf("gpu must be non-negative, got %d", r.GPU)
 	}
-	if r.GPU > MaxTaskGPU {
-		return fmt.Errorf("gpu exceeds maximum of %d, got %d", MaxTaskGPU, r.GPU)
+	if r.GPU > MaxRunExecutionGPU {
+		return fmt.Errorf("gpu exceeds maximum of %d, got %d", MaxRunExecutionGPU, r.GPU)
 	}
 	return nil
 }
 
 // GetResources returns resources with defaults applied.
-func (t *Task) GetResources() TaskResources {
+func (t *RunExecution) GetResources() RunExecutionResources {
 	if t.Resources != nil {
 		return *t.Resources
 	}
-	return TaskResources{CPU: DefaultTaskCPU, Memory: DefaultTaskMemory}
+	return RunExecutionResources{CPU: DefaultRunExecutionCPU, Memory: DefaultRunExecutionMemory}
 }
 
-// TaskStatus represents the current status of a task
-type TaskStatus string
+// RunExecutionStatus represents the current status of a run execution
+type RunExecutionStatus string
 
 const (
-	TaskStatusPending   TaskStatus = "pending"
-	TaskStatusScheduled TaskStatus = "scheduled"
-	TaskStatusRunning   TaskStatus = "running"
-	TaskStatusComplete  TaskStatus = "complete"
-	TaskStatusFailed    TaskStatus = "failed"
-	TaskStatusCancelled TaskStatus = "cancelled"
+	RunExecutionStatusPending   RunExecutionStatus = "pending"
+	RunExecutionStatusScheduled RunExecutionStatus = "scheduled"
+	RunExecutionStatusRunning   RunExecutionStatus = "running"
+	RunExecutionStatusComplete  RunExecutionStatus = "complete"
+	RunExecutionStatusFailed    RunExecutionStatus = "failed"
+	RunExecutionStatusCancelled RunExecutionStatus = "cancelled"
 )
 
-// TaskState represents the current state of a task
-type TaskState struct {
-	// ID is the task identifier
+// RunExecutionState represents the current state of a run execution
+type RunExecutionState struct {
+	// ID is the run execution identifier
 	ID string `json:"id"`
 
 	// Status is the current status
-	Status TaskStatus `json:"status"`
+	Status RunExecutionStatus `json:"status"`
 
 	// SandboxID is the sandbox running this task (empty if not yet scheduled)
 	SandboxID string `json:"sandbox_id,omitempty"`
@@ -223,12 +223,12 @@ type TaskState struct {
 	FinishedAt time.Time `json:"finished_at,omitempty"`
 }
 
-// TaskResult contains the result of a completed task
-type TaskResult struct {
-	// ID is the task identifier
+// RunExecutionResult contains the result of a completed run execution
+type RunExecutionResult struct {
+	// ID is the run execution identifier
 	ID string `json:"id"`
 
-	// ExitCode is the exit code of the task
+	// ExitCode is the exit code of the run execution
 	ExitCode int `json:"exit_code"`
 
 	// Output is the stdout/stderr output (if captured)

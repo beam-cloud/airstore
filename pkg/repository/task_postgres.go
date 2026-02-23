@@ -11,10 +11,10 @@ import (
 	"github.com/lib/pq"
 )
 
-// Task methods on PostgresBackend
+// Run execution methods on PostgresBackend.
 
-// CreateTask creates a new task
-func (b *PostgresBackend) CreateTask(ctx context.Context, task *types.Task) error {
+// CreateRunExecution creates a new run execution.
+func (b *PostgresBackend) CreateRunExecution(ctx context.Context, task *types.RunExecution) error {
 	// Convert env map to JSON
 	envJSON, err := json.Marshal(task.Env)
 	if err != nil {
@@ -89,8 +89,8 @@ func (b *PostgresBackend) CreateTask(ctx context.Context, task *types.Task) erro
 	return nil
 }
 
-// GetTask retrieves a task by external ID
-func (b *PostgresBackend) GetTask(ctx context.Context, externalId string) (*types.Task, error) {
+// GetRunExecution retrieves a run execution by external ID.
+func (b *PostgresBackend) GetRunExecution(ctx context.Context, externalId string) (*types.RunExecution, error) {
 	query := `
 		SELECT id, external_id, workspace_id, created_by_member_id, status, type, prompt, image, entrypoint, env, 
 		       exit_code, error, created_at, started_at, finished_at,
@@ -103,8 +103,8 @@ func (b *PostgresBackend) GetTask(ctx context.Context, externalId string) (*type
 	return b.scanTask(b.db.QueryRowContext(ctx, query, externalId))
 }
 
-// GetTaskById retrieves a task by internal ID
-func (b *PostgresBackend) GetTaskById(ctx context.Context, id uint) (*types.Task, error) {
+// GetRunExecutionByID retrieves a run execution by internal ID.
+func (b *PostgresBackend) GetRunExecutionByID(ctx context.Context, id uint) (*types.RunExecution, error) {
 	query := `
 		SELECT id, external_id, workspace_id, created_by_member_id, status, type, prompt, image, entrypoint, env, 
 		       exit_code, error, created_at, started_at, finished_at,
@@ -118,8 +118,8 @@ func (b *PostgresBackend) GetTaskById(ctx context.Context, id uint) (*types.Task
 }
 
 // scanTask scans a task row into a Task struct
-func (b *PostgresBackend) scanTask(row *sql.Row) (*types.Task, error) {
-	task := &types.Task{}
+func (b *PostgresBackend) scanTask(row *sql.Row) (*types.RunExecution, error) {
+	task := &types.RunExecution{}
 	var entrypoint pq.StringArray
 	var envJSON []byte
 	var createdByMemberId sql.NullInt64
@@ -169,7 +169,7 @@ func (b *PostgresBackend) scanTask(row *sql.Row) (*types.Task, error) {
 		&executionPolicyJSON,
 	)
 	if err == sql.ErrNoRows {
-		return nil, &types.ErrTaskNotFound{}
+		return nil, &types.ErrRunExecutionNotFound{}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get task: %w", err)
@@ -180,7 +180,7 @@ func (b *PostgresBackend) scanTask(row *sql.Row) (*types.Task, error) {
 		task.CreatedByMemberId = &memberId
 	}
 	if taskType.Valid {
-		task.Type = types.TaskType(taskType.String)
+		task.Type = types.RunExecutionType(taskType.String)
 	}
 	task.NormalizeType()
 	if hookId.Valid {
@@ -243,9 +243,9 @@ func (b *PostgresBackend) scanTask(row *sql.Row) (*types.Task, error) {
 	return task, nil
 }
 
-// ListTasks returns all tasks for a workspace (0 = all workspaces)
-// Limited to 100 most recent tasks
-func (b *PostgresBackend) ListTasks(ctx context.Context, workspaceId uint) ([]*types.Task, error) {
+// ListRunExecutions returns all run executions for a workspace (0 = all workspaces).
+// Limited to 100 most recent entries.
+func (b *PostgresBackend) ListRunExecutions(ctx context.Context, workspaceId uint) ([]*types.RunExecution, error) {
 	query := `
 		SELECT id, external_id, workspace_id, created_by_member_id, status, type, prompt, image, entrypoint, env, 
 		       exit_code, error, created_at, started_at, finished_at,
@@ -263,9 +263,9 @@ func (b *PostgresBackend) ListTasks(ctx context.Context, workspaceId uint) ([]*t
 	}
 	defer rows.Close()
 
-	var tasks []*types.Task
+	var tasks []*types.RunExecution
 	for rows.Next() {
-		task := &types.Task{}
+		task := &types.RunExecution{}
 		var entrypoint pq.StringArray
 		var envJSON []byte
 		var createdByMemberId sql.NullInt64
@@ -322,7 +322,7 @@ func (b *PostgresBackend) ListTasks(ctx context.Context, workspaceId uint) ([]*t
 			task.CreatedByMemberId = &memberId
 		}
 		if taskType.Valid {
-			task.Type = types.TaskType(taskType.String)
+			task.Type = types.RunExecutionType(taskType.String)
 		}
 		task.NormalizeType()
 		if hookId.Valid {
@@ -392,8 +392,8 @@ func (b *PostgresBackend) ListTasks(ctx context.Context, workspaceId uint) ([]*t
 	return tasks, nil
 }
 
-// UpdateTaskStatus updates a task's status
-func (b *PostgresBackend) UpdateTaskStatus(ctx context.Context, externalId string, status types.TaskStatus) error {
+// UpdateRunExecutionStatus updates a run execution status.
+func (b *PostgresBackend) UpdateRunExecutionStatus(ctx context.Context, externalId string, status types.RunExecutionStatus) error {
 	query := `UPDATE task SET status = $2 WHERE external_id = $1`
 
 	result, err := b.db.ExecContext(ctx, query, externalId, status)
@@ -407,17 +407,17 @@ func (b *PostgresBackend) UpdateTaskStatus(ctx context.Context, externalId strin
 	}
 
 	if rowsAffected == 0 {
-		return &types.ErrTaskNotFound{ExternalId: externalId}
+		return &types.ErrRunExecutionNotFound{ExternalId: externalId}
 	}
 
 	return nil
 }
 
-// SetTaskStarted marks a task as started
-func (b *PostgresBackend) SetTaskStarted(ctx context.Context, externalId string) error {
+// SetRunExecutionStarted marks a run execution as started.
+func (b *PostgresBackend) SetRunExecutionStarted(ctx context.Context, externalId string) error {
 	query := `UPDATE task SET status = $2, started_at = $3 WHERE external_id = $1`
 
-	result, err := b.db.ExecContext(ctx, query, externalId, types.TaskStatusRunning, time.Now())
+	result, err := b.db.ExecContext(ctx, query, externalId, types.RunExecutionStatusRunning, time.Now())
 	if err != nil {
 		return fmt.Errorf("failed to set task started: %w", err)
 	}
@@ -428,17 +428,17 @@ func (b *PostgresBackend) SetTaskStarted(ctx context.Context, externalId string)
 	}
 
 	if rowsAffected == 0 {
-		return &types.ErrTaskNotFound{ExternalId: externalId}
+		return &types.ErrRunExecutionNotFound{ExternalId: externalId}
 	}
 
 	return nil
 }
 
-// SetTaskResult sets the final result of a task
-func (b *PostgresBackend) SetTaskResult(ctx context.Context, externalId string, exitCode int, errorMsg string) error {
-	status := types.TaskStatusComplete
+// SetRunExecutionResult sets the final result of a run execution.
+func (b *PostgresBackend) SetRunExecutionResult(ctx context.Context, externalId string, exitCode int, errorMsg string) error {
+	status := types.RunExecutionStatusComplete
 	if exitCode != 0 || errorMsg != "" {
-		status = types.TaskStatusFailed
+		status = types.RunExecutionStatusFailed
 	}
 
 	query := `
@@ -458,28 +458,28 @@ func (b *PostgresBackend) SetTaskResult(ctx context.Context, externalId string, 
 	}
 
 	if rowsAffected == 0 {
-		return &types.ErrTaskNotFound{ExternalId: externalId}
+		return &types.ErrRunExecutionNotFound{ExternalId: externalId}
 	}
 
 	return nil
 }
 
-// MarkTaskRetried sets attempt = max_attempts on a failed task so the retry
-// poller no longer picks it up. Called before creating the retry task.
-func (b *PostgresBackend) MarkTaskRetried(ctx context.Context, externalId string) error {
+// MarkRunExecutionRetried sets attempt = max_attempts on a failed run execution
+// so the retry poller no longer picks it up. Called before creating a retry.
+func (b *PostgresBackend) MarkRunExecutionRetried(ctx context.Context, externalId string) error {
 	result, err := b.db.ExecContext(ctx,
 		`UPDATE task SET attempt = max_attempts WHERE external_id = $1`, externalId)
 	if err != nil {
 		return fmt.Errorf("mark task retried: %w", err)
 	}
 	if n, _ := result.RowsAffected(); n == 0 {
-		return &types.ErrTaskNotFound{ExternalId: externalId}
+		return &types.ErrRunExecutionNotFound{ExternalId: externalId}
 	}
 	return nil
 }
 
-// DeleteTask removes a task by external ID
-func (b *PostgresBackend) DeleteTask(ctx context.Context, externalId string) error {
+// DeleteRunExecution removes a run execution by external ID.
+func (b *PostgresBackend) DeleteRunExecution(ctx context.Context, externalId string) error {
 	query := `DELETE FROM task WHERE external_id = $1`
 
 	result, err := b.db.ExecContext(ctx, query, externalId)
@@ -493,14 +493,14 @@ func (b *PostgresBackend) DeleteTask(ctx context.Context, externalId string) err
 	}
 
 	if rowsAffected == 0 {
-		return &types.ErrTaskNotFound{ExternalId: externalId}
+		return &types.ErrRunExecutionNotFound{ExternalId: externalId}
 	}
 
 	return nil
 }
 
-// CancelTask cancels a running or pending task
-func (b *PostgresBackend) CancelTask(ctx context.Context, externalId string) error {
+// CancelRunExecution cancels a running or pending run execution.
+func (b *PostgresBackend) CancelRunExecution(ctx context.Context, externalId string) error {
 	query := `
 		UPDATE task 
 		SET status = $2, finished_at = $3
@@ -510,11 +510,11 @@ func (b *PostgresBackend) CancelTask(ctx context.Context, externalId string) err
 
 	result, err := b.db.ExecContext(ctx, query,
 		externalId,
-		types.TaskStatusCancelled,
+		types.RunExecutionStatusCancelled,
 		time.Now(),
-		types.TaskStatusPending,
-		types.TaskStatusScheduled,
-		types.TaskStatusRunning,
+		types.RunExecutionStatusPending,
+		types.RunExecutionStatusScheduled,
+		types.RunExecutionStatusRunning,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to cancel task: %w", err)
@@ -526,22 +526,22 @@ func (b *PostgresBackend) CancelTask(ctx context.Context, externalId string) err
 	}
 
 	if rowsAffected == 0 {
-		// Check if task exists
-		_, err := b.GetTask(ctx, externalId)
+		// Check if run execution exists.
+		_, err := b.GetRunExecution(ctx, externalId)
 		if err != nil {
 			return err
 		}
-		// Task exists but is not in a cancellable state
-		return fmt.Errorf("task cannot be cancelled (already finished)")
+		// Entry exists but is not in a cancellable state.
+		return fmt.Errorf("run execution cannot be cancelled (already finished)")
 	}
 
 	return nil
 }
 
-// GetRetryableTasks returns failed hook-triggered tasks eligible for retry.
-// A task is retryable if: hook_id set, status=failed, attempt < max_attempts,
+// GetRetryableRunExecutions returns failed hook-triggered entries eligible for retry.
+// An entry is retryable if: hook_id set, status=failed, attempt < max_attempts,
 // and enough time has passed since finished_at (exponential backoff).
-func (b *PostgresBackend) GetRetryableTasks(ctx context.Context) ([]*types.Task, error) {
+func (b *PostgresBackend) GetRetryableRunExecutions(ctx context.Context) ([]*types.RunExecution, error) {
 	// Fetch all failed hook tasks that haven't exhausted retries.
 	// Backoff filtering is done in Go since the delay depends on attempt number.
 	query := `
@@ -563,9 +563,9 @@ func (b *PostgresBackend) GetRetryableTasks(ctx context.Context) ([]*types.Task,
 	}
 	defer rows.Close()
 
-	var tasks []*types.Task
+	var tasks []*types.RunExecution
 	for rows.Next() {
-		task := &types.Task{}
+		task := &types.RunExecution{}
 		var entrypoint pq.StringArray
 		var envJSON []byte
 		var createdByMemberId sql.NullInt64
@@ -600,7 +600,7 @@ func (b *PostgresBackend) GetRetryableTasks(ctx context.Context) ([]*types.Task,
 			task.CreatedByMemberId = &mid
 		}
 		if taskType.Valid {
-			task.Type = types.TaskType(taskType.String)
+			task.Type = types.RunExecutionType(taskType.String)
 		}
 		task.NormalizeType()
 		if hookId.Valid {
@@ -667,7 +667,7 @@ func (b *PostgresBackend) GetRetryableTasks(ctx context.Context) ([]*types.Task,
 }
 
 // GetStuckHookTasks returns hook-triggered tasks stuck in pending/running longer than timeout.
-func (b *PostgresBackend) GetStuckHookTasks(ctx context.Context, timeout time.Duration) ([]*types.Task, error) {
+func (b *PostgresBackend) GetStuckHookRunExecutions(ctx context.Context, timeout time.Duration) ([]*types.RunExecution, error) {
 	cutoff := time.Now().Add(-timeout)
 	query := `
 		SELECT id, external_id, workspace_id, created_by_member_id, status, type, prompt, image, entrypoint, env,
@@ -684,7 +684,7 @@ func (b *PostgresBackend) GetStuckHookTasks(ctx context.Context, timeout time.Du
 }
 
 // ListTasksByHook returns all tasks triggered by a specific hook, most recent first.
-func (b *PostgresBackend) ListTasksByHook(ctx context.Context, hookId uint) ([]*types.Task, error) {
+func (b *PostgresBackend) ListRunExecutionsByHook(ctx context.Context, hookId uint) ([]*types.RunExecution, error) {
 	query := `
 		SELECT id, external_id, workspace_id, created_by_member_id, status, type, prompt, image, entrypoint, env,
 		       exit_code, error, created_at, started_at, finished_at,
@@ -699,16 +699,16 @@ func (b *PostgresBackend) ListTasksByHook(ctx context.Context, hookId uint) ([]*
 }
 
 // scanTaskRows executes a query and scans multiple task rows.
-func (b *PostgresBackend) scanTaskRows(ctx context.Context, query string, args ...any) ([]*types.Task, error) {
+func (b *PostgresBackend) scanTaskRows(ctx context.Context, query string, args ...any) ([]*types.RunExecution, error) {
 	rows, err := b.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query tasks: %w", err)
 	}
 	defer rows.Close()
 
-	var tasks []*types.Task
+	var tasks []*types.RunExecution
 	for rows.Next() {
-		task := &types.Task{}
+		task := &types.RunExecution{}
 		var entrypoint pq.StringArray
 		var envJSON []byte
 		var createdByMemberId sql.NullInt64
@@ -743,7 +743,7 @@ func (b *PostgresBackend) scanTaskRows(ctx context.Context, query string, args .
 			task.CreatedByMemberId = &mid
 		}
 		if taskType.Valid {
-			task.Type = types.TaskType(taskType.String)
+			task.Type = types.RunExecutionType(taskType.String)
 		}
 		task.NormalizeType()
 		if hookId.Valid {

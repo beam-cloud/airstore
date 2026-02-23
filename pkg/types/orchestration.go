@@ -2,11 +2,11 @@ package types
 
 import "time"
 
-type AgentEnvelopeKind string
+type AgentTaskKind string
 
 const (
-	AgentEnvelopeKindAgentCommand AgentEnvelopeKind = "agent_command"
-	AgentEnvelopeKindRunInput     AgentEnvelopeKind = "run_input"
+	AgentTaskKindAgentCommand AgentTaskKind = "agent_command"
+	AgentTaskKindRunInput     AgentTaskKind = "run_input"
 )
 
 type AgentQueueMode string
@@ -19,14 +19,14 @@ const (
 	AgentQueueModeQueue        AgentQueueMode = "queue"
 )
 
-type AgentEnvelopeState string
+type AgentTaskState string
 
 const (
-	AgentEnvelopeStateAccepted   AgentEnvelopeState = "accepted"
-	AgentEnvelopeStateQueued     AgentEnvelopeState = "queued"
-	AgentEnvelopeStateDispatched AgentEnvelopeState = "dispatched"
-	AgentEnvelopeStateDropped    AgentEnvelopeState = "dropped"
-	AgentEnvelopeStateCancelled  AgentEnvelopeState = "cancelled"
+	AgentTaskStateAccepted   AgentTaskState = "accepted"
+	AgentTaskStateQueued     AgentTaskState = "queued"
+	AgentTaskStateDispatched AgentTaskState = "dispatched"
+	AgentTaskStateDropped    AgentTaskState = "dropped"
+	AgentTaskStateCancelled  AgentTaskState = "cancelled"
 )
 
 type AgentRunStatus string
@@ -107,12 +107,12 @@ const (
 )
 
 const (
-	AgentEnvelopeDropReasonInterruptMissingTarget = "interrupt_missing_target"
-	AgentEnvelopeDropReasonRunMaterializationFail = "run_materialization_failed"
-	AgentEnvelopeDropReasonRunInputMissingTarget  = "run_input_missing_target"
-	AgentEnvelopeDropReasonRunInputMissingMessage = "run_input_missing_message"
-	AgentEnvelopeDropReasonRunInputTerminalTarget = "run_input_terminal_target"
-	AgentEnvelopeDropReasonReshapedByQueueMode    = "reshaped_by_queue_mode"
+	AgentTaskDropReasonInterruptMissingTarget = "interrupt_missing_target"
+	AgentTaskDropReasonRunMaterializationFail = "run_materialization_failed"
+	AgentTaskDropReasonRunInputMissingTarget  = "run_input_missing_target"
+	AgentTaskDropReasonRunInputMissingMessage = "run_input_missing_message"
+	AgentTaskDropReasonRunInputTerminalTarget = "run_input_terminal_target"
+	AgentTaskDropReasonReshapedByQueueMode    = "reshaped_by_queue_mode"
 )
 
 const (
@@ -142,76 +142,76 @@ type AgentProfile struct {
 	UpdatedAt   time.Time      `json:"updated_at" db:"updated_at"`
 }
 
-type AgentTaskEnvelope struct {
-	ID               string             `json:"id" db:"id"`
-	WorkspaceID      uint               `json:"workspace_id" db:"workspace_id"`
-	AgentID          *string            `json:"agent_id,omitempty" db:"agent_id"`
-	Kind             AgentEnvelopeKind  `json:"kind" db:"kind"`
-	QueueMode        AgentQueueMode     `json:"queue_mode" db:"queue_mode"`
-	State            AgentEnvelopeState `json:"state" db:"state"`
-	IdempotencyKey   string             `json:"idempotency_key" db:"idempotency_key"`
-	PayloadJSON      map[string]any     `json:"payload_json" db:"-"`
-	RoutingJSON      map[string]any     `json:"routing_json" db:"-"`
-	ParentEnvelopeID *string            `json:"parent_envelope_id,omitempty" db:"parent_envelope_id"`
-	TargetRunID      *string            `json:"target_run_id,omitempty" db:"target_run_id"`
-	AcceptedAt       time.Time          `json:"accepted_at" db:"accepted_at"`
-	QueuedAt         *time.Time         `json:"queued_at,omitempty" db:"queued_at"`
-	DispatchedAt     *time.Time         `json:"dispatched_at,omitempty" db:"dispatched_at"`
-	DroppedReason    *string            `json:"dropped_reason,omitempty" db:"dropped_reason"`
-	CreatedAt        time.Time          `json:"created_at" db:"created_at"`
-	UpdatedAt        time.Time          `json:"updated_at" db:"updated_at"`
+type AgentTask struct {
+	ID             string         `json:"id" db:"id"`
+	WorkspaceID    uint           `json:"workspace_id" db:"workspace_id"`
+	AgentID        *string        `json:"agent_id,omitempty" db:"agent_id"`
+	Kind           AgentTaskKind  `json:"kind" db:"kind"`
+	QueueMode      AgentQueueMode `json:"queue_mode" db:"queue_mode"`
+	State          AgentTaskState `json:"state" db:"state"`
+	IdempotencyKey string         `json:"idempotency_key" db:"idempotency_key"`
+	PayloadJSON    map[string]any `json:"payload_json" db:"-"`
+	RoutingJSON    map[string]any `json:"routing_json" db:"-"`
+	ParentTaskID   *string        `json:"parent_task_id,omitempty" db:"parent_envelope_id"`
+	TargetRunID    *string        `json:"target_run_id,omitempty" db:"target_run_id"`
+	AcceptedAt     time.Time      `json:"accepted_at" db:"accepted_at"`
+	QueuedAt       *time.Time     `json:"queued_at,omitempty" db:"queued_at"`
+	DispatchedAt   *time.Time     `json:"dispatched_at,omitempty" db:"dispatched_at"`
+	DroppedReason  *string        `json:"dropped_reason,omitempty" db:"dropped_reason"`
+	CreatedAt      time.Time      `json:"created_at" db:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at" db:"updated_at"`
 }
 
 type AgentRun struct {
-	ID               string         `json:"id" db:"id"`
-	WorkspaceID      uint           `json:"workspace_id" db:"workspace_id"`
-	AgentID          *string        `json:"agent_id,omitempty" db:"agent_id"`
-	OriginEnvelopeID string         `json:"origin_envelope_id" db:"origin_envelope_id"`
-	Status           AgentRunStatus `json:"status" db:"status"`
-	SessionID        string         `json:"session_id" db:"session_id"`
-	SessionKey       *string        `json:"session_key,omitempty" db:"session_key"`
-	Provider         *string        `json:"provider,omitempty" db:"provider"`
-	Model            *string        `json:"model,omitempty" db:"model"`
-	ExecHost         string         `json:"exec_host" db:"exec_host"`
-	ExecSecurity     string         `json:"exec_security" db:"exec_security"`
-	ExecAsk          string         `json:"exec_ask" db:"exec_ask"`
-	RuntimeType      string         `json:"runtime_type" db:"runtime_type"`
-	WorkspaceAccess  string         `json:"workspace_access" db:"workspace_access"`
-	NetworkEnabled   bool           `json:"network_enabled" db:"network_enabled"`
-	Interactive      bool           `json:"interactive" db:"interactive"`
-	TimeoutMs        int            `json:"timeout_ms" db:"timeout_ms"`
-	StartedAt        *time.Time     `json:"started_at,omitempty" db:"started_at"`
-	EndedAt          *time.Time     `json:"ended_at,omitempty" db:"ended_at"`
-	Error            *string        `json:"error,omitempty" db:"error"`
-	SnapshotTS       int64          `json:"snapshot_ts" db:"snapshot_ts"`
-	UsageJSON        map[string]any `json:"usage_json" db:"-"`
-	DeliveryJSON     map[string]any `json:"delivery_json" db:"-"`
-	CreatedAt        time.Time      `json:"created_at" db:"created_at"`
-	UpdatedAt        time.Time      `json:"updated_at" db:"updated_at"`
+	ID              string         `json:"id" db:"id"`
+	WorkspaceID     uint           `json:"workspace_id" db:"workspace_id"`
+	AgentID         *string        `json:"agent_id,omitempty" db:"agent_id"`
+	OriginTaskID    string         `json:"origin_task_id" db:"origin_envelope_id"`
+	Status          AgentRunStatus `json:"status" db:"status"`
+	SessionID       string         `json:"session_id" db:"session_id"`
+	SessionKey      *string        `json:"session_key,omitempty" db:"session_key"`
+	Provider        *string        `json:"provider,omitempty" db:"provider"`
+	Model           *string        `json:"model,omitempty" db:"model"`
+	ExecHost        string         `json:"exec_host" db:"exec_host"`
+	ExecSecurity    string         `json:"exec_security" db:"exec_security"`
+	ExecAsk         string         `json:"exec_ask" db:"exec_ask"`
+	RuntimeType     string         `json:"runtime_type" db:"runtime_type"`
+	WorkspaceAccess string         `json:"workspace_access" db:"workspace_access"`
+	NetworkEnabled  bool           `json:"network_enabled" db:"network_enabled"`
+	Interactive     bool           `json:"interactive" db:"interactive"`
+	TimeoutMs       int            `json:"timeout_ms" db:"timeout_ms"`
+	StartedAt       *time.Time     `json:"started_at,omitempty" db:"started_at"`
+	EndedAt         *time.Time     `json:"ended_at,omitempty" db:"ended_at"`
+	Error           *string        `json:"error,omitempty" db:"error"`
+	SnapshotTS      int64          `json:"snapshot_ts" db:"snapshot_ts"`
+	UsageJSON       map[string]any `json:"usage_json" db:"-"`
+	DeliveryJSON    map[string]any `json:"delivery_json" db:"-"`
+	CreatedAt       time.Time      `json:"created_at" db:"created_at"`
+	UpdatedAt       time.Time      `json:"updated_at" db:"updated_at"`
 }
 
 type AgentRunAttempt struct {
-	ID                      string             `json:"id" db:"id"`
-	RunID                   string             `json:"run_id" db:"run_id"`
-	AttemptNo               int                `json:"attempt_no" db:"attempt_no"`
-	Status                  AgentAttemptStatus `json:"status" db:"status"`
-	Strategy                string             `json:"strategy" db:"strategy"`
-	Provider                *string            `json:"provider,omitempty" db:"provider"`
-	Model                   *string            `json:"model,omitempty" db:"model"`
-	ExecHost                string             `json:"exec_host" db:"exec_host"`
-	ExecSecurity            string             `json:"exec_security" db:"exec_security"`
-	ExecAsk                 string             `json:"exec_ask" db:"exec_ask"`
-	RuntimeType             string             `json:"runtime_type" db:"runtime_type"`
-	WorkspaceAccess         string             `json:"workspace_access" db:"workspace_access"`
-	NetworkEnabled          bool               `json:"network_enabled" db:"network_enabled"`
-	Interactive             bool               `json:"interactive" db:"interactive"`
-	ExecutionTaskExternalID *string            `json:"execution_task_external_id,omitempty" db:"execution_task_external_id"`
-	StartedAt               *time.Time         `json:"started_at,omitempty" db:"started_at"`
-	EndedAt                 *time.Time         `json:"ended_at,omitempty" db:"ended_at"`
-	ExitCode                *int               `json:"exit_code,omitempty" db:"exit_code"`
-	Error                   *string            `json:"error,omitempty" db:"error"`
-	CreatedAt               time.Time          `json:"created_at" db:"created_at"`
-	UpdatedAt               time.Time          `json:"updated_at" db:"updated_at"`
+	ID              string             `json:"id" db:"id"`
+	RunID           string             `json:"run_id" db:"run_id"`
+	AttemptNo       int                `json:"attempt_no" db:"attempt_no"`
+	Status          AgentAttemptStatus `json:"status" db:"status"`
+	Strategy        string             `json:"strategy" db:"strategy"`
+	Provider        *string            `json:"provider,omitempty" db:"provider"`
+	Model           *string            `json:"model,omitempty" db:"model"`
+	ExecHost        string             `json:"exec_host" db:"exec_host"`
+	ExecSecurity    string             `json:"exec_security" db:"exec_security"`
+	ExecAsk         string             `json:"exec_ask" db:"exec_ask"`
+	RuntimeType     string             `json:"runtime_type" db:"runtime_type"`
+	WorkspaceAccess string             `json:"workspace_access" db:"workspace_access"`
+	NetworkEnabled  bool               `json:"network_enabled" db:"network_enabled"`
+	Interactive     bool               `json:"interactive" db:"interactive"`
+	ExecutionID     *string            `json:"execution_id,omitempty" db:"execution_task_external_id"`
+	StartedAt       *time.Time         `json:"started_at,omitempty" db:"started_at"`
+	EndedAt         *time.Time         `json:"ended_at,omitempty" db:"ended_at"`
+	ExitCode        *int               `json:"exit_code,omitempty" db:"exit_code"`
+	Error           *string            `json:"error,omitempty" db:"error"`
+	CreatedAt       time.Time          `json:"created_at" db:"created_at"`
+	UpdatedAt       time.Time          `json:"updated_at" db:"updated_at"`
 }
 
 type AgentRunSnapshot struct {
@@ -255,12 +255,12 @@ func (e *ErrAgentProfileNotFound) Error() string {
 	return "agent profile not found: " + e.ID
 }
 
-type ErrAgentTaskEnvelopeNotFound struct {
+type ErrAgentTaskNotFound struct {
 	ID string
 }
 
-func (e *ErrAgentTaskEnvelopeNotFound) Error() string {
-	return "agent task envelope not found: " + e.ID
+func (e *ErrAgentTaskNotFound) Error() string {
+	return "agent task not found: " + e.ID
 }
 
 type ErrAgentRunNotFound struct {

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
+	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/orchestration"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -15,17 +16,20 @@ import (
 
 type AgentService struct {
 	pb.UnimplementedAgentServiceServer
-	backend repository.BackendRepository
-	api     *orchestration.AgentAPI
+	backend  repository.BackendRepository
+	api      *orchestration.AgentAPI
+	s2Client *common.S2Client
 }
 
 func NewAgentService(
 	backend repository.BackendRepository,
 	api *orchestration.AgentAPI,
+	s2Client *common.S2Client,
 ) *AgentService {
 	return &AgentService{
-		backend: backend,
-		api:     api,
+		backend:  backend,
+		api:      api,
+		s2Client: s2Client,
 	}
 }
 

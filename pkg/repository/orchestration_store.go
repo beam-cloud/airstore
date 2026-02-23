@@ -26,11 +26,11 @@ func NewOrchestrationStore(backend BackendRepository, redis *common.RedisClient)
 	}
 }
 
-func (s *OrchestrationStore) UpdateEnvelopeState(ctx context.Context, envelopeID string, state types.AgentEnvelopeState, dropReason *string, targetRunID *string) error {
+func (s *OrchestrationStore) UpdateEnvelopeState(ctx context.Context, envelopeID string, state types.AgentTaskState, dropReason *string, targetRunID *string) error {
 	if s == nil || s.backend == nil {
 		return fmt.Errorf("backend is required for envelope state updates")
 	}
-	return s.backend.UpdateAgentTaskEnvelopeState(ctx, envelopeID, state, dropReason, targetRunID)
+	return s.backend.UpdateTaskState(ctx, envelopeID, state, dropReason, targetRunID)
 }
 
 func (s *OrchestrationStore) PushQueueToken(ctx context.Context, token string) error {

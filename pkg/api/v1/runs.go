@@ -40,7 +40,7 @@ func (g *RunsGroup) registerRoutes() {
 
 func (g *RunsGroup) ListRuns(c echo.Context) error {
 	if g.agents == nil {
-		return ErrorResponse(c, http.StatusServiceUnavailable, "orchestration unavailable")
+		return ErrorResponse(c, http.StatusServiceUnavailable, "run service unavailable")
 	}
 	workspaceID, err := requireWorkspaceID(c)
 	if err != nil {
@@ -55,7 +55,7 @@ func (g *RunsGroup) ListRuns(c echo.Context) error {
 
 func (g *RunsGroup) GetRun(c echo.Context) error {
 	if g.agents == nil {
-		return ErrorResponse(c, http.StatusServiceUnavailable, "orchestration unavailable")
+		return ErrorResponse(c, http.StatusServiceUnavailable, "run service unavailable")
 	}
 	workspaceID, err := requireWorkspaceID(c)
 	if err != nil {
@@ -74,7 +74,7 @@ func (g *RunsGroup) GetRun(c echo.Context) error {
 
 func (g *RunsGroup) ListRunAttempts(c echo.Context) error {
 	if g.agents == nil {
-		return ErrorResponse(c, http.StatusServiceUnavailable, "orchestration unavailable")
+		return ErrorResponse(c, http.StatusServiceUnavailable, "run service unavailable")
 	}
 	workspaceID, err := requireWorkspaceID(c)
 	if err != nil {
@@ -93,7 +93,7 @@ func (g *RunsGroup) ListRunAttempts(c echo.Context) error {
 
 func (g *RunsGroup) ListRunSnapshots(c echo.Context) error {
 	if g.agents == nil {
-		return ErrorResponse(c, http.StatusServiceUnavailable, "orchestration unavailable")
+		return ErrorResponse(c, http.StatusServiceUnavailable, "run service unavailable")
 	}
 	workspaceID, err := requireWorkspaceID(c)
 	if err != nil {
@@ -112,7 +112,7 @@ func (g *RunsGroup) ListRunSnapshots(c echo.Context) error {
 
 func (g *RunsGroup) ListRunEvents(c echo.Context) error {
 	if g.agents == nil {
-		return ErrorResponse(c, http.StatusServiceUnavailable, "orchestration unavailable")
+		return ErrorResponse(c, http.StatusServiceUnavailable, "run service unavailable")
 	}
 	workspaceID, err := requireWorkspaceID(c)
 	if err != nil {
@@ -131,7 +131,7 @@ func (g *RunsGroup) ListRunEvents(c echo.Context) error {
 
 func (g *RunsGroup) EnqueueRunInput(c echo.Context) error {
 	if g.agents == nil {
-		return ErrorResponse(c, http.StatusServiceUnavailable, "orchestration unavailable")
+		return ErrorResponse(c, http.StatusServiceUnavailable, "run service unavailable")
 	}
 
 	var req enqueueRunInputAPIRequest
@@ -165,14 +165,15 @@ func (g *RunsGroup) EnqueueRunInput(c echo.Context) error {
 		Data: map[string]any{
 			"accepted":       true,
 			"idempotent_hit": deduped,
-			"envelope":       envelope,
+			"task":           envelope,
+			"run_id":         envelope.TargetRunID,
 		},
 	})
 }
 
 func (g *RunsGroup) CancelRun(c echo.Context) error {
 	if g.agents == nil {
-		return ErrorResponse(c, http.StatusServiceUnavailable, "orchestration unavailable")
+		return ErrorResponse(c, http.StatusServiceUnavailable, "run service unavailable")
 	}
 	workspaceID, err := requireWorkspaceID(c)
 	if err != nil {

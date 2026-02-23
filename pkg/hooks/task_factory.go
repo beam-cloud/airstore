@@ -32,11 +32,11 @@ func (f *TaskFactory) CreateTask(ctx context.Context, workspaceId uint, createdB
 		hid = &hookId
 	}
 
-	task := &types.Task{
+	task := &types.RunExecution{
 		WorkspaceId:       workspaceId,
 		CreatedByMemberId: createdByMemberId,
 		MemberToken:       memberToken,
-		Status:            types.TaskStatusPending,
+		Status:            types.RunExecutionStatusPending,
 		Prompt:            prompt,
 		Image:             image,
 		Entrypoint:        []string{},
@@ -46,7 +46,7 @@ func (f *TaskFactory) CreateTask(ctx context.Context, workspaceId uint, createdB
 		MaxAttempts:       maxAttempts,
 	}
 
-	if err := f.backend.CreateTask(ctx, task); err != nil {
+	if err := f.backend.CreateRunExecution(ctx, task); err != nil {
 		return fmt.Errorf("create task: %w", err)
 	}
 

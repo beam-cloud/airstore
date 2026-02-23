@@ -64,35 +64,35 @@ func (m *mockCreator) last() mockTask {
 type mockBackend struct {
 	repository.BackendRepository // embed to satisfy interface
 	mu                           sync.Mutex
-	retryableTasks               []*types.Task
-	tasksByHook                  []*types.Task
+	retryableTasks               []*types.RunExecution
+	tasksByHook                  []*types.RunExecution
 }
 
-func (m *mockBackend) GetRetryableTasks(_ context.Context) ([]*types.Task, error) {
+func (m *mockBackend) GetRetryableRunExecutions(_ context.Context) ([]*types.RunExecution, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.retryableTasks, nil
 }
 
-func (m *mockBackend) ListTasksByHook(_ context.Context, hookId uint) ([]*types.Task, error) {
+func (m *mockBackend) ListRunExecutionsByHook(_ context.Context, hookId uint) ([]*types.RunExecution, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.tasksByHook, nil
 }
 
-func (m *mockBackend) GetStuckHookTasks(_ context.Context, _ time.Duration) ([]*types.Task, error) {
+func (m *mockBackend) GetStuckHookRunExecutions(_ context.Context, _ time.Duration) ([]*types.RunExecution, error) {
 	return nil, nil
 }
 
-func (m *mockBackend) SetTaskResult(_ context.Context, _ string, _ int, _ string) error {
+func (m *mockBackend) SetRunExecutionResult(_ context.Context, _ string, _ int, _ string) error {
 	return nil
 }
 
-func (m *mockBackend) MarkTaskRetried(_ context.Context, _ string) error {
+func (m *mockBackend) MarkRunExecutionRetried(_ context.Context, _ string) error {
 	return nil
 }
 
-func (m *mockBackend) setRetryable(tasks []*types.Task) {
+func (m *mockBackend) setRetryable(tasks []*types.RunExecution) {
 	m.mu.Lock()
 	m.retryableTasks = tasks
 	m.mu.Unlock()
@@ -285,19 +285,19 @@ func TestEngine_Poll_RetriesFailedTask(t *testing.T) {
 	creator := &mockCreator{}
 
 	finished := time.Now().Add(-1 * time.Minute) // finished 1 minute ago
-	failedTask := &types.Task{
+	failedTask := &types.RunExecution{
 		Id:          99,
 		ExternalId:  "task-99",
 		WorkspaceId: 10,
 		HookId:      &hookId,
-		Status:      types.TaskStatusFailed,
+		Status:      types.RunExecutionStatusFailed,
 		Attempt:     1,
 		MaxAttempts: 3,
 		Prompt:      "analyze",
 		FinishedAt:  &finished,
 	}
 
-	backend := &mockBackend{retryableTasks: []*types.Task{failedTask}}
+	backend := &mockBackend{retryableTasks: []*types.RunExecution{failedTask}}
 	eng := NewEngine(store, creator, backend, nil)
 
 	eng.Poll(context.Background())
@@ -322,19 +322,19 @@ func TestEngine_Poll_RespectsBackoff(t *testing.T) {
 
 	// Task failed 5 seconds ago, attempt 1. Backoff is 10s. Should NOT retry yet.
 	finished := time.Now().Add(-5 * time.Second)
-	failedTask := &types.Task{
+	failedTask := &types.RunExecution{
 		Id:          99,
 		ExternalId:  "task-99",
 		WorkspaceId: 10,
 		HookId:      &hookId,
-		Status:      types.TaskStatusFailed,
+		Status:      types.RunExecutionStatusFailed,
 		Attempt:     1,
 		MaxAttempts: 3,
 		Prompt:      "analyze",
 		FinishedAt:  &finished,
 	}
 
-	backend := &mockBackend{retryableTasks: []*types.Task{failedTask}}
+	backend := &mockBackend{retryableTasks: []*types.RunExecution{failedTask}}
 	eng := NewEngine(store, creator, backend, nil)
 
 	eng.Poll(context.Background())
@@ -350,12 +350,12 @@ func TestEngine_Poll_SkipsWhenActiveTaskExists(t *testing.T) {
 	store := &mockStore{hooks: []*types.Hook{hook}}
 
 	finished := time.Now().Add(-1 * time.Minute)
-	failedTask := &types.Task{
+	failedTask := &types.RunExecution{
 		Id:          99,
 		ExternalId:  "task-99",
 		WorkspaceId: 10,
 		HookId:      &hookId,
-		Status:      types.TaskStatusFailed,
+		Status:      types.RunExecutionStatusFailed,
 		Attempt:     1,
 		MaxAttempts: 3,
 		Prompt:      "analyze",
@@ -364,7 +364,7 @@ func TestEngine_Poll_SkipsWhenActiveTaskExists(t *testing.T) {
 
 	// DB constraint rejects retry when active task exists
 	creator := &mockCreator{err: fmt.Errorf("pq: duplicate key value violates unique constraint")}
-	backend := &mockBackend{retryableTasks: []*types.Task{failedTask}}
+	backend := &mockBackend{retryableTasks: []*types.RunExecution{failedTask}}
 	eng := NewEngine(store, creator, backend, nil)
 
 	eng.Poll(context.Background())
@@ -383,12 +383,12 @@ func TestEngine_Poll_DeadLetterAfterMaxAttempts(t *testing.T) {
 	finished := time.Now().Add(-1 * time.Minute)
 	// Attempt 3 of 3 -- should NOT retry (GetRetryableTasks wouldn't return it,
 	// but let's verify the query filter is correct via the test expectation)
-	failedTask := &types.Task{
+	failedTask := &types.RunExecution{
 		Id:          99,
 		ExternalId:  "task-99",
 		WorkspaceId: 10,
 		HookId:      &hookId,
-		Status:      types.TaskStatusFailed,
+		Status:      types.RunExecutionStatusFailed,
 		Attempt:     3,
 		MaxAttempts: 3,
 		Prompt:      "analyze",
@@ -396,7 +396,7 @@ func TestEngine_Poll_DeadLetterAfterMaxAttempts(t *testing.T) {
 	}
 
 	// Even if SQL leaks a max-attempt task, the engine should not retry it.
-	backend := &mockBackend{retryableTasks: []*types.Task{failedTask}}
+	backend := &mockBackend{retryableTasks: []*types.RunExecution{failedTask}}
 	eng := NewEngine(store, creator, backend, nil)
 
 	eng.Poll(context.Background())

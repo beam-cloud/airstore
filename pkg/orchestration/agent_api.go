@@ -76,15 +76,22 @@ func (a *AgentAPI) AcceptAgentCommand(
 	ctx context.Context,
 	workspaceID uint,
 	params AgentCommandParams,
-) (*types.AgentTaskEnvelope, bool, error) {
+) (*types.AgentTask, bool, error) {
 	if a.runtime == nil {
-		return nil, false, fmt.Errorf("orchestration unavailable")
+		return nil, false, fmt.Errorf("task service unavailable")
 	}
 	return a.runtime.AcceptAgentCommand(ctx, workspaceID, params)
 }
 
-func (a *AgentAPI) GetEnvelope(ctx context.Context, workspaceID uint, envelopeID string) (*types.AgentTaskEnvelope, error) {
-	return a.backend.GetAgentTaskEnvelope(ctx, workspaceID, envelopeID)
+func (a *AgentAPI) GetTask(ctx context.Context, workspaceID uint, taskID string) (*types.AgentTask, error) {
+	return a.backend.GetTask(ctx, workspaceID, taskID)
+}
+
+func (a *AgentAPI) ListTasks(ctx context.Context, workspaceID uint, limit int) ([]*types.AgentTask, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	return a.backend.ListTasks(ctx, workspaceID, limit)
 }
 
 func (a *AgentAPI) EnqueueRunInputEnvelope(
@@ -94,9 +101,9 @@ func (a *AgentAPI) EnqueueRunInputEnvelope(
 	queueMode types.AgentQueueMode,
 	message string,
 	idempotencyKey string,
-) (*types.AgentTaskEnvelope, bool, error) {
+) (*types.AgentTask, bool, error) {
 	if a.runtime == nil {
-		return nil, false, fmt.Errorf("orchestration unavailable")
+		return nil, false, fmt.Errorf("task service unavailable")
 	}
 	if strings.TrimSpace(runID) == "" {
 		return nil, false, fmt.Errorf("run_id is required")
@@ -188,8 +195,8 @@ func (a *AgentAPI) CancelRun(ctx context.Context, workspaceID uint, runID string
 
 	attempts, _ := a.backend.ListAgentRunAttempts(ctx, run.ID)
 	for _, attempt := range attempts {
-		if attempt.ExecutionTaskExternalID != nil && attempt.Status.IsInFlight() {
-			_ = a.backend.CancelTask(ctx, *attempt.ExecutionTaskExternalID)
+		if attempt.ExecutionID != nil && attempt.Status.IsInFlight() {
+			_ = a.backend.CancelRunExecution(ctx, *attempt.ExecutionID)
 		}
 	}
 	return nil

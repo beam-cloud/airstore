@@ -8,36 +8,49 @@ import (
 	"strings"
 	"time"
 
-	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/common"
+	"github.com/beam-cloud/airstore/pkg/orchestration"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/labstack/echo/v4"
 )
 
 type TasksGroup struct {
-	routerGroup  *echo.Group
-	backend      repository.BackendRepository
-	taskQueue    repository.TaskQueue
-	terminalIO   repository.TerminalIORepository
-	s2Client     *common.S2Client
-	defaultImage string
+	routerGroup *echo.Group
+	backend     repository.BackendRepository
+	agents      *orchestration.AgentAPI
+	terminalIO  repository.TerminalIORepository
+	s2Client    *common.S2Client
 }
 
-// TasksGroup is the execution-task API surface.
+type AgentTasksGroup struct {
+	routerGroup *echo.Group
+	agents      *orchestration.AgentAPI
+}
+
+// TasksGroup is the task API surface.
 //
-// This path operates on execution substrate tasks (`task` table). Agent
-// orchestration ingress remains workspace-scoped under `/workspaces/:workspace_id/tasks`.
+// Task creation is unified and delegates to the same
+// task acceptance path as `/workspaces/:workspace_id/tasks`.
 
 type CreateTaskRequest struct {
-	WorkspaceID   string               `json:"workspace_id"`   // External workspace ID
-	WorkspaceName string               `json:"workspace_name"` // Or workspace name
-	Prompt        string               `json:"prompt"`         // Claude Code prompt (auto-sets image)
-	Image         string               `json:"image"`          // Container image (optional if prompt provided)
-	Type          types.TaskType       `json:"type,omitempty"` // background (default) or interactive
-	Entrypoint    []string             `json:"entrypoint"`
-	Env           map[string]string    `json:"env"`
-	Resources     *types.TaskResources `json:"resources,omitempty"` // CPU/Memory/GPU (uses defaults if nil)
+	WorkspaceID       string                            `json:"workspace_id"`   // External workspace ID
+	WorkspaceName     string                            `json:"workspace_name"` // Or workspace name
+	Message           string                            `json:"message"`
+	AgentID           string                            `json:"agent_id"`
+	SessionID         string                            `json:"session_id,omitempty"`
+	SessionKey        string                            `json:"session_key,omitempty"`
+	Deliver           *bool                             `json:"deliver,omitempty"`
+	TimeoutMs         *int                              `json:"timeout_ms,omitempty"`
+	Policy            *orchestration.RunExecutionPolicy `json:"policy,omitempty"`
+	Lane              string                            `json:"lane,omitempty"`
+	ExtraSystemPrompt string                            `json:"extra_system_prompt,omitempty"`
+	InputProvenance   *orchestration.InputProvenance    `json:"input_provenance,omitempty"`
+	Routing           orchestration.RoutingContext      `json:"routing"`
+	Attachments       []map[string]any                  `json:"attachments,omitempty"`
+	IdempotencyKey    string                            `json:"idempotency_key,omitempty"`
+	Label             string                            `json:"label,omitempty"`
+	SpawnedBy         string                            `json:"spawned_by,omitempty"`
 }
 
 type TaskResponse struct {
@@ -69,18 +82,25 @@ type TerminalInputRequest struct {
 func NewTasksGroup(
 	routerGroup *echo.Group,
 	backend repository.BackendRepository,
-	taskQueue repository.TaskQueue,
+	agents *orchestration.AgentAPI,
 	terminalIO repository.TerminalIORepository,
 	s2Client *common.S2Client,
-	defaultImage string,
 ) *TasksGroup {
 	g := &TasksGroup{
-		routerGroup:  routerGroup,
-		backend:      backend,
-		taskQueue:    taskQueue,
-		terminalIO:   terminalIO,
-		s2Client:     s2Client,
-		defaultImage: defaultImage,
+		routerGroup: routerGroup,
+		backend:     backend,
+		agents:      agents,
+		terminalIO:  terminalIO,
+		s2Client:    s2Client,
+	}
+	g.registerRoutes()
+	return g
+}
+
+func NewAgentTasksGroup(routerGroup *echo.Group, agents *orchestration.AgentAPI) *AgentTasksGroup {
+	g := &AgentTasksGroup{
+		routerGroup: routerGroup,
+		agents:      agents,
 	}
 	g.registerRoutes()
 	return g
@@ -98,56 +118,79 @@ func (g *TasksGroup) registerRoutes() {
 	g.routerGroup.POST("/:id/terminal/input", g.SendTerminalInput)
 }
 
-func extractBearerToken(header string) string {
-	if strings.HasPrefix(header, "Bearer ") {
-		return strings.TrimPrefix(header, "Bearer ")
-	}
-	return ""
+func (g *AgentTasksGroup) registerRoutes() {
+	g.routerGroup.POST("", g.CreateTask)
+	g.routerGroup.GET("/:task_id", g.GetTask)
 }
 
-// CreateTask creates a new execution task and queues it for worker execution.
-func (g *TasksGroup) CreateTask(c echo.Context) error {
-	ctx := c.Request().Context()
+func (g *AgentTasksGroup) CreateTask(c echo.Context) error {
+	if g.agents == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "task service unavailable")
+	}
 
-	var req CreateTaskRequest
-	if err := c.Bind(&req); err != nil {
+	var req orchestration.AgentCommandParams
+	if err := decodeStrictBody(c, &req); err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
 	}
 
-	taskType := req.Type
-	if taskType == "" {
-		taskType = types.TaskTypeBackground
-	}
-	if taskType != types.TaskTypeBackground && taskType != types.TaskTypeInteractive {
-		return ErrorResponse(c, http.StatusBadRequest, "type must be 'background' or 'interactive'")
+	workspaceID, err := requireWorkspaceID(c)
+	if err != nil {
+		return err
 	}
 
-	// If prompt is provided, this is a Claude Code task - use default sandbox image
-	if req.Prompt != "" {
-		req.Image = g.defaultImage
-	}
-	// Interactive sessions default to the gateway sandbox image when not specified.
-	if req.Image == "" && taskType == types.TaskTypeInteractive {
-		req.Image = g.defaultImage
-	}
-
-	if req.Image == "" {
-		return ErrorResponse(c, http.StatusBadRequest, "image or prompt is required")
-	}
-
-	// Validate resource limits
-	if err := req.Resources.Validate(); err != nil {
+	task, deduped, err := g.agents.AcceptAgentCommand(c.Request().Context(), workspaceID, req)
+	if err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, err.Error())
 	}
+	statusCode := http.StatusAccepted
+	if deduped {
+		statusCode = http.StatusOK
+	}
+	return c.JSON(statusCode, Response{
+		Success: true,
+		Data: map[string]any{
+			"accepted":       true,
+			"idempotent_hit": deduped,
+			"task":           task,
+			"run_id":         task.TargetRunID,
+		},
+	})
+}
 
-	// Get member info from auth context
-	var createdByMemberId *uint
-	memberId := auth.MemberId(ctx)
-	if memberId > 0 {
-		createdByMemberId = &memberId
+func (g *AgentTasksGroup) GetTask(c echo.Context) error {
+	if g.agents == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "task service unavailable")
+	}
+	workspaceID, err := requireWorkspaceID(c)
+	if err != nil {
+		return err
+	}
+	taskID := c.Param("task_id")
+	task, err := g.agents.GetTask(c.Request().Context(), workspaceID, taskID)
+	if err != nil {
+		if _, ok := err.(*types.ErrAgentTaskNotFound); ok {
+			return ErrorResponse(c, http.StatusNotFound, "task not found")
+		}
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+	return SuccessResponse(c, task)
+}
+
+// CreateTask accepts a task and queues it through the agent runtime.
+func (g *TasksGroup) CreateTask(c echo.Context) error {
+	ctx := c.Request().Context()
+	if g.agents == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "task service unavailable")
 	}
 
-	memberToken := extractBearerToken(c.Request().Header.Get("Authorization"))
+	var req CreateTaskRequest
+	if err := decodeStrictBody(c, &req); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
+	}
+	agentID := strings.TrimSpace(req.AgentID)
+	if agentID == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "agent_id is required")
+	}
 
 	// Resolve workspace
 	var workspace *types.Workspace
@@ -168,47 +211,60 @@ func (g *TasksGroup) CreateTask(c echo.Context) error {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 
-	memberToken, err = auth.EnsureTaskMountToken(ctx, workspace.Id, memberToken, g.backend)
+	var sessionKey *string
+	if value := strings.TrimSpace(req.SessionKey); value != "" {
+		sessionKey = &value
+	}
+	var lane *string
+	if value := strings.TrimSpace(req.Lane); value != "" {
+		lane = &value
+	}
+	var extraSystemPrompt *string
+	if value := strings.TrimSpace(req.ExtraSystemPrompt); value != "" {
+		extraSystemPrompt = &value
+	}
+	var label *string
+	if value := strings.TrimSpace(req.Label); value != "" {
+		label = &value
+	}
+	var spawnedBy *string
+	if value := strings.TrimSpace(req.SpawnedBy); value != "" {
+		spawnedBy = &value
+	}
+
+	envelope, deduped, err := g.agents.AcceptAgentCommand(ctx, workspace.Id, orchestration.AgentCommandParams{
+		Message:           req.Message,
+		AgentID:           &agentID,
+		SessionID:         req.SessionID,
+		SessionKey:        sessionKey,
+		Deliver:           req.Deliver,
+		TimeoutMs:         req.TimeoutMs,
+		Policy:            req.Policy,
+		Lane:              lane,
+		ExtraSystemPrompt: extraSystemPrompt,
+		InputProvenance:   req.InputProvenance,
+		Routing:           req.Routing,
+		Attachments:       req.Attachments,
+		IdempotencyKey:    req.IdempotencyKey,
+		Label:             label,
+		SpawnedBy:         spawnedBy,
+	})
 	if err != nil {
-		return ErrorResponse(c, http.StatusInternalServerError, "failed to provision workspace token: "+err.Error())
+		return ErrorResponse(c, http.StatusBadRequest, err.Error())
 	}
 
-	task := &types.Task{
-		WorkspaceId:       workspace.Id,
-		CreatedByMemberId: createdByMemberId,
-		MemberToken:       memberToken,
-		Status:            types.TaskStatusPending,
-		Type:              taskType,
-		Prompt:            req.Prompt,
-		Image:             req.Image,
-		Entrypoint:        req.Entrypoint,
-		Env:               req.Env,
-		Resources:         req.Resources,
+	statusCode := http.StatusAccepted
+	if deduped {
+		statusCode = http.StatusOK
 	}
-
-	if task.Env == nil {
-		task.Env = make(map[string]string)
-	}
-	if task.Entrypoint == nil {
-		task.Entrypoint = []string{}
-	}
-
-	// Save to Postgres
-	if err := g.backend.CreateTask(ctx, task); err != nil {
-		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
-	}
-
-	// Push to Redis queue for worker to pick up
-	if g.taskQueue != nil {
-		if err := g.taskQueue.Push(ctx, task); err != nil {
-			// Log but don't fail - task is saved, can be retried
-			c.Logger().Errorf("failed to push task to queue: %v", err)
-		}
-	}
-
-	return c.JSON(http.StatusCreated, Response{
+	return c.JSON(statusCode, Response{
 		Success: true,
-		Data:    taskToResponse(task, workspace.ExternalId),
+		Data: map[string]any{
+			"accepted":       true,
+			"idempotent_hit": deduped,
+			"task":           envelope,
+			"run_id":         envelope.TargetRunID,
+		},
 	})
 }
 
@@ -228,7 +284,7 @@ func (g *TasksGroup) ListTasks(c echo.Context) error {
 		workspaceId = workspace.Id
 	}
 
-	tasks, err := g.backend.ListTasks(c.Request().Context(), workspaceId)
+	tasks, err := g.backend.ListRunExecutions(c.Request().Context(), workspaceId)
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
@@ -251,9 +307,9 @@ func (g *TasksGroup) ListTasks(c echo.Context) error {
 func (g *TasksGroup) GetTask(c echo.Context) error {
 	externalId := c.Param("id")
 
-	task, err := g.backend.GetTask(c.Request().Context(), externalId)
+	task, err := g.backend.GetRunExecution(c.Request().Context(), externalId)
 	if err != nil {
-		if _, ok := err.(*types.ErrTaskNotFound); ok {
+		if _, ok := err.(*types.ErrRunExecutionNotFound); ok {
 			return ErrorResponse(c, http.StatusNotFound, "task not found")
 		}
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
@@ -273,8 +329,8 @@ func (g *TasksGroup) GetTask(c echo.Context) error {
 func (g *TasksGroup) DeleteTask(c echo.Context) error {
 	externalId := c.Param("id")
 
-	if err := g.backend.DeleteTask(c.Request().Context(), externalId); err != nil {
-		if _, ok := err.(*types.ErrTaskNotFound); ok {
+	if err := g.backend.DeleteRunExecution(c.Request().Context(), externalId); err != nil {
+		if _, ok := err.(*types.ErrRunExecutionNotFound); ok {
 			return ErrorResponse(c, http.StatusNotFound, "task not found")
 		}
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
@@ -287,8 +343,8 @@ func (g *TasksGroup) DeleteTask(c echo.Context) error {
 func (g *TasksGroup) CancelTask(c echo.Context) error {
 	externalId := c.Param("id")
 
-	if err := g.backend.CancelTask(c.Request().Context(), externalId); err != nil {
-		if _, ok := err.(*types.ErrTaskNotFound); ok {
+	if err := g.backend.CancelRunExecution(c.Request().Context(), externalId); err != nil {
+		if _, ok := err.(*types.ErrRunExecutionNotFound); ok {
 			return ErrorResponse(c, http.StatusNotFound, "task not found")
 		}
 		return ErrorResponse(c, http.StatusBadRequest, err.Error())
@@ -311,8 +367,8 @@ func (g *TasksGroup) SetTaskResult(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
 	}
 
-	if err := g.backend.SetTaskResult(c.Request().Context(), externalId, req.ExitCode, req.Error); err != nil {
-		if _, ok := err.(*types.ErrTaskNotFound); ok {
+	if err := g.backend.SetRunExecutionResult(c.Request().Context(), externalId, req.ExitCode, req.Error); err != nil {
+		if _, ok := err.(*types.ErrRunExecutionNotFound); ok {
 			return ErrorResponse(c, http.StatusNotFound, "task not found")
 		}
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
@@ -392,9 +448,9 @@ func (g *TasksGroup) StreamLogs(c echo.Context) error {
 	taskID := c.Param("id")
 	ctx := c.Request().Context()
 
-	task, err := g.backend.GetTask(ctx, taskID)
+	task, err := g.backend.GetRunExecution(ctx, taskID)
 	if err != nil {
-		if _, ok := err.(*types.ErrTaskNotFound); ok {
+		if _, ok := err.(*types.ErrRunExecutionNotFound); ok {
 			return ErrorResponse(c, http.StatusNotFound, "task not found")
 		}
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
@@ -428,7 +484,7 @@ func (g *TasksGroup) StreamLogs(c echo.Context) error {
 			logs, seqNum, _ = g.s2Client.ReadLogs(ctx, taskID, seqNum)
 			cursor = w.sendLogsAfter(logs, cursor)
 
-			if task, err = g.backend.GetTask(ctx, taskID); err == nil && task.IsTerminal() {
+			if task, err = g.backend.GetRunExecution(ctx, taskID); err == nil && task.IsTerminal() {
 				w.sendStatus(task)
 				return nil
 			}
@@ -436,10 +492,10 @@ func (g *TasksGroup) StreamLogs(c echo.Context) error {
 	}
 }
 
-func (g *TasksGroup) requireInteractiveTask(c echo.Context, taskID string) (*types.Task, error) {
-	task, err := g.backend.GetTask(c.Request().Context(), taskID)
+func (g *TasksGroup) requireInteractiveTask(c echo.Context, taskID string) (*types.RunExecution, error) {
+	task, err := g.backend.GetRunExecution(c.Request().Context(), taskID)
 	if err != nil {
-		if _, ok := err.(*types.ErrTaskNotFound); ok {
+		if _, ok := err.(*types.ErrRunExecutionNotFound); ok {
 			return nil, ErrorResponse(c, http.StatusNotFound, "task not found")
 		}
 		return nil, ErrorResponse(c, http.StatusInternalServerError, err.Error())
@@ -452,7 +508,7 @@ func (g *TasksGroup) requireInteractiveTask(c echo.Context, taskID string) (*typ
 	return task, nil
 }
 
-func (g *TasksGroup) requireInteractiveTerminalTask(c echo.Context, taskID string) (*types.Task, error) {
+func (g *TasksGroup) requireInteractiveTerminalTask(c echo.Context, taskID string) (*types.RunExecution, error) {
 	task, err := g.requireInteractiveTask(c, taskID)
 	if err != nil {
 		return nil, err
@@ -548,7 +604,7 @@ func (w *sseWriter) sendLogsAfter(logs []common.TaskLogEntry, cursor int64) int6
 	return cursor
 }
 
-func (w *sseWriter) sendStatus(task *types.Task) {
+func (w *sseWriter) sendStatus(task *types.RunExecution) {
 	w.write(map[string]any{
 		"type":      "status",
 		"task_id":   task.ExternalId,
@@ -559,7 +615,7 @@ func (w *sseWriter) sendStatus(task *types.Task) {
 	w.flush()
 }
 
-func taskToResponse(t *types.Task, workspaceExternalId string) TaskResponse {
+func taskToResponse(t *types.RunExecution, workspaceExternalId string) TaskResponse {
 	t.NormalizeType()
 	resp := TaskResponse{
 		ExternalID:  t.ExternalId,

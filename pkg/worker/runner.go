@@ -16,7 +16,7 @@ const (
 // Different providers/runtimes can implement this interface.
 type AgentExecutionRunner interface {
 	Name() string
-	BuildEntrypoint(task types.Task, env map[string]string) []string
+	BuildEntrypoint(task types.RunExecution, env map[string]string) []string
 }
 
 type ClaudeCodeRunnerOptions struct {
@@ -40,7 +40,7 @@ func (r *ClaudeCodeRunner) Name() string {
 	return "claude"
 }
 
-func (r *ClaudeCodeRunner) BuildEntrypoint(task types.Task, env map[string]string) []string {
+func (r *ClaudeCodeRunner) BuildEntrypoint(task types.RunExecution, env map[string]string) []string {
 	r.injectAPIKey(env, "ANTHROPIC_API_KEY", r.anthropicAPIKey, true)
 	r.injectKernelEnv(env)
 	model := strings.TrimSpace(env[agentModelEnvKey])

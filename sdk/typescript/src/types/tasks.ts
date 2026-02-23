@@ -47,9 +47,9 @@ export interface RunExecutionPolicy {
   retry?: RunRetryPolicy;
 }
 
-export type EnvelopeKind = 'agent_command' | 'run_input';
+export type TaskKind = 'agent_command' | 'run_input';
 
-export type EnvelopeState = 'accepted' | 'queued' | 'dispatched' | 'dropped' | 'cancelled';
+export type TaskState = 'accepted' | 'queued' | 'dispatched' | 'dropped' | 'cancelled';
 
 export interface RoutingContext {
   to?: string;
@@ -64,17 +64,17 @@ export interface RoutingContext {
   groupSpace?: string;
 }
 
-export interface AgentTaskEnvelope {
+export interface AgentTask {
   id: string;
   workspace_id: number;
   agent_id?: string;
-  kind: EnvelopeKind;
+  kind: TaskKind;
   queue_mode: QueueMode;
-  state: EnvelopeState;
+  state: TaskState;
   idempotency_key: string;
   payload_json: Record<string, unknown>;
   routing_json: Record<string, unknown>;
-  parent_envelope_id?: string;
+  parent_task_id?: string;
   target_run_id?: string;
   accepted_at: string;
   queued_at?: string;
@@ -86,9 +86,9 @@ export interface AgentTaskEnvelope {
 
 export interface AgentCommandCreateParams {
   message: string;
+  agentId: string;
   sessionId?: string;
   idempotencyKey?: string;
-  agentId?: string;
   sessionKey?: string;
   deliver?: boolean;
   timeoutMs?: number;
@@ -101,9 +101,9 @@ export interface AgentCommandCreateParams {
   spawnedBy?: string;
 }
 
-export interface TaskEnvelopeAcceptedResponse {
+export interface TaskAcceptedResponse {
   accepted: boolean;
   idempotent_hit: boolean;
-  envelope: AgentTaskEnvelope;
+  task: AgentTask;
   run_id?: string;
 }

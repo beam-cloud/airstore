@@ -41,21 +41,16 @@ service GatewayService {
   rpc ListHookRuns(ListHookRunsRequest) returns (ListHookRunsResponse);
 }
 
-service TaskService {
-  rpc CreateTask(CreateTaskRequest) returns (TaskResponse);
-  rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
-  rpc GetTask(GetTaskRequest) returns (TaskResponse);
-  rpc DeleteTask(DeleteTaskRequest) returns (DeleteResponse);
-  rpc GetTaskLogs(GetTaskLogsRequest) returns (GetTaskLogsResponse);
-}
-
 service AgentService {
   rpc CreateAgentProfile(CreateAgentProfileRequest) returns (AgentProfileResponse);
   rpc ListAgentProfiles(ListAgentProfilesRequest) returns (ListAgentProfilesResponse);
   rpc GetAgentProfile(GetAgentProfileRequest) returns (AgentProfileResponse);
-  rpc CreateAgentTaskEnvelope(CreateAgentTaskEnvelopeRequest) returns (AgentTaskEnvelopeAcceptedResponse);
-  rpc GetAgentTaskEnvelope(GetAgentTaskEnvelopeRequest) returns (AgentTaskEnvelopeResponse);
-  rpc EnqueueRunInput(EnqueueRunInputRequest) returns (AgentTaskEnvelopeAcceptedResponse);
+  rpc CreateTask(CreateTaskRequest) returns (AgentTaskAcceptedResponse);
+  rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
+  rpc GetTask(GetTaskRequest) returns (AgentTaskResponse);
+  rpc DeleteTask(DeleteTaskRequest) returns (DeleteResponse);
+  rpc GetTaskLogs(GetTaskLogsRequest) returns (GetTaskLogsResponse);
+  rpc EnqueueRunInput(EnqueueRunInputRequest) returns (AgentTaskAcceptedResponse);
   rpc ListAgentRuns(ListAgentRunsRequest) returns (ListAgentRunsResponse);
   rpc GetAgentRun(GetAgentRunRequest) returns (AgentRunResponse);
   rpc ListAgentRunAttempts(ListAgentRunAttemptsRequest) returns (ListAgentRunAttemptsResponse);
@@ -275,27 +270,14 @@ message ListConnectionsResponse {
   repeated Connection connections = 3;
 }
 
-// Task messages
-message Task {
-  string id = 1;
-  string status = 2;
-  string prompt = 3;
-  string image = 4;
-  int32 exit_code = 5;
-  bool has_exit_code = 6;
-  string error = 7;
-  string created_at = 8;
-  string started_at = 9;
-  string finished_at = 10;
-  string type = 11; // "background" (default) or "interactive"
-}
-
 message CreateTaskRequest {
-  string prompt = 1;
-  string image = 2;
-  repeated string entrypoint = 3;
-  map<string, string> env = 4;
-  string type = 5; // "background" (default) or "interactive"
+  string message = 1;
+  string agent_id = 2;
+  string session_id = 3;
+  string session_key = 4;
+  string idempotency_key = 5;
+  string lane = 6;
+  string extra_system_prompt = 7;
 }
 
 message DeleteTaskRequest {
@@ -307,17 +289,11 @@ message ListTasksRequest {}
 message ListTasksResponse {
   bool ok = 1;
   string error = 2;
-  repeated Task tasks = 3;
+  repeated AgentTask tasks = 3;
 }
 
 message GetTaskRequest {
   string id = 1;
-}
-
-message TaskResponse {
-  bool ok = 1;
-  string error = 2;
-  Task task = 3;
 }
 
 message GetTaskLogsRequest {
@@ -337,7 +313,7 @@ message GetTaskLogsResponse {
   repeated TaskLogEntry logs = 3;
 }
 
-// Agent orchestration messages
+// Agent, task, and run messages
 message AgentProfile {
   string id = 1;
   string workspace_id = 2;
@@ -379,18 +355,7 @@ message ListAgentProfilesResponse {
   repeated AgentProfile agents = 3;
 }
 
-message CreateAgentTaskEnvelopeRequest {
-  string workspace_id = 1;
-  string message = 2;
-  string agent_id = 3;
-  string session_id = 4;
-  string session_key = 5;
-  string idempotency_key = 6;
-  string lane = 7;
-  string extra_system_prompt = 8;
-}
-
-message AgentTaskEnvelope {
+message AgentTask {
   string id = 1;
   string workspace_id = 2;
   string agent_id = 3;
@@ -404,24 +369,19 @@ message AgentTaskEnvelope {
   string updated_at = 11;
 }
 
-message AgentTaskEnvelopeAcceptedResponse {
+message AgentTaskAcceptedResponse {
   bool ok = 1;
   string error = 2;
   bool accepted = 3;
   bool idempotent_hit = 4;
-  AgentTaskEnvelope envelope = 5;
+  AgentTask task = 5;
   string run_id = 6;
 }
 
-message GetAgentTaskEnvelopeRequest {
-  string workspace_id = 1;
-  string envelope_id = 2;
-}
-
-message AgentTaskEnvelopeResponse {
+message AgentTaskResponse {
   bool ok = 1;
   string error = 2;
-  AgentTaskEnvelope envelope = 3;
+  AgentTask task = 3;
 }
 
 message EnqueueRunInputRequest {
@@ -436,7 +396,7 @@ message AgentRun {
   string id = 1;
   string workspace_id = 2;
   string agent_id = 3;
-  string origin_envelope_id = 4;
+  string origin_task_id = 4;
   string status = 5;
   string session_id = 6;
   string session_key = 7;
@@ -493,7 +453,7 @@ message AgentRunAttempt {
   string workspace_access = 12;
   bool network_enabled = 13;
   bool interactive = 14;
-  string execution_task_id = 15;
+  string execution_id = 15;
   string error = 16;
   string created_at = 17;
   string started_at = 18;

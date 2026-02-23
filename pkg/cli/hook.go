@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -168,6 +169,41 @@ func importLocalSkill(client *Client, localPath string) (string, error) {
 	}
 
 	return targetPath, nil
+}
+
+func uploadSkillFiles(ctx context.Context, client *Client, srcDir, skillName string) error {
+	return filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+
+		relPath, err := filepath.Rel(srcDir, path)
+		if err != nil {
+			return err
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+
+		remotePath := fmt.Sprintf("%s/%s/%s", types.PathSkills, skillName, filepath.ToSlash(relPath))
+		resp, err := client.Context.Write(ctx, &pb.ContextWriteRequest{
+			Path: remotePath,
+			Data: data,
+		})
+		if err != nil {
+			return err
+		}
+		if !resp.Ok {
+			return fmt.Errorf("write %s: %s", remotePath, resp.Error)
+		}
+
+		return nil
+	})
 }
 
 var hookListCmd = &cobra.Command{

@@ -182,10 +182,10 @@ func NewWorker() (*Worker, error) {
 // based on its CPU (millicores) and memory (MiB) capacity versus default
 // task resource requirements. Always returns at least 1.
 func computeMaxTasks(cpuMillis, memMiB int64) int {
-	memBytes := memMiB << 20 // MiB → bytes (same unit as DefaultTaskMemory)
+	memBytes := memMiB << 20 // MiB → bytes (same unit as DefaultRunExecutionMemory)
 
-	cpuSlots := cpuMillis / types.DefaultTaskCPU
-	memSlots := memBytes / types.DefaultTaskMemory
+	cpuSlots := cpuMillis / types.DefaultRunExecutionCPU
+	memSlots := memBytes / types.DefaultRunExecutionMemory
 
 	n := int(min(cpuSlots, memSlots))
 	if n < 1 {
@@ -252,14 +252,14 @@ func (w *Worker) workerLoop() {
 // runTask wraps executeTask with activeTasks tracking. The defer
 // guarantees Done() is called even if executeTask panics (Go unwinds
 // defers before crashing), so activeTasks.Wait() in shutdown never hangs.
-func (w *Worker) runTask(task types.Task) {
+func (w *Worker) runTask(task types.RunExecution) {
 	w.activeTasks.Add(1)
 	defer w.activeTasks.Done()
 	w.executeTask(task)
 }
 
 // executeTask runs a single task to completion: mark started → execute → record result.
-func (w *Worker) executeTask(task types.Task) {
+func (w *Worker) executeTask(task types.RunExecution) {
 	log.Info().
 		Str("worker_id", w.workerId).
 		Str("task_id", task.ExternalId).
@@ -284,7 +284,7 @@ func (w *Worker) executeTask(task types.Task) {
 	}
 	defer cancel()
 
-	var result *types.TaskResult
+	var result *types.RunExecutionResult
 	var err error
 	if task.IsInteractive() {
 		result, err = w.runInteractiveTask(taskCtx, task)
@@ -294,7 +294,7 @@ func (w *Worker) executeTask(task types.Task) {
 
 	if err != nil {
 		log.Error().Err(err).Str("task_id", task.ExternalId).Msg("task execution failed")
-		result = &types.TaskResult{ID: task.ExternalId, ExitCode: -1, Error: err.Error()}
+		result = &types.RunExecutionResult{ID: task.ExternalId, ExitCode: -1, Error: err.Error()}
 	}
 
 	log.Info().
@@ -307,7 +307,7 @@ func (w *Worker) executeTask(task types.Task) {
 }
 
 // finishTask records the result in Redis and Postgres. Single path for both success and failure.
-func (w *Worker) finishTask(taskID string, result *types.TaskResult) {
+func (w *Worker) finishTask(taskID string, result *types.RunExecutionResult) {
 	var qErr error
 	if result.ExitCode == 0 && result.Error == "" {
 		qErr = w.taskQueue.Complete(w.ctx, taskID, result)
