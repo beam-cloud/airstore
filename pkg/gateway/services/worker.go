@@ -155,7 +155,7 @@ func (s *WorkerService) SetTaskStarted(ctx context.Context, req *pb.SetTaskStart
 			_ = appendRunSnapshot(ctx, s.backend, attempt.RunID, run.Status, nil, &now, &errMsg, map[string]any{
 				"attempt_id": attempt.ID,
 				"task_id":    req.TaskId,
-				"event":      "start_rejected_terminal_run",
+				"event":      string(types.AgentRunEventStartRejectedTerminalRun),
 			})
 			return nil, status.Errorf(codes.FailedPrecondition, "run is already terminal")
 		}
@@ -172,7 +172,7 @@ func (s *WorkerService) SetTaskStarted(ctx context.Context, req *pb.SetTaskStart
 		_ = appendRunSnapshot(ctx, s.backend, attempt.RunID, types.AgentRunStatusRunning, &now, nil, nil, map[string]any{
 			"attempt_id": attempt.ID,
 			"task_id":    req.TaskId,
-			"event":      "started",
+			"event":      string(types.AgentRunEventStarted),
 		})
 		_ = updateExecutionInstanceCounts(ctx, s.backend, attempt.RunID, 1)
 	}
@@ -225,7 +225,7 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 			_ = appendRunSnapshot(ctx, s.backend, attempt.RunID, types.AgentRunStatusRunning, nil, nil, nil, map[string]any{
 				"attempt_id": attempt.ID,
 				"task_id":    req.TaskId,
-				"event":      "attempt_superseded",
+				"event":      string(types.AgentRunEventAttemptSuperseded),
 			})
 			return &pb.SetTaskResultResponse{}, nil
 		}
@@ -238,7 +238,7 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 					"task_id":                               req.TaskId,
 					"exit_code":                             req.ExitCode,
 					"error":                                 req.Error,
-					"event":                                 "retry_scheduled",
+					"event":                                 string(types.AgentRunEventRetryScheduled),
 					"next_attempt_no":                       retryInfo.nextAttemptNo,
 					types.AgentExecutionMetaKeyRetryDelayMs: retryInfo.delayMs,
 				})
@@ -252,7 +252,7 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 			"task_id":    req.TaskId,
 			"exit_code":  req.ExitCode,
 			"error":      req.Error,
-			"event":      "finished",
+			"event":      string(types.AgentRunEventFinished),
 		})
 	}
 

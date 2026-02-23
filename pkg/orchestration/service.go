@@ -264,7 +264,7 @@ func (s *AgentService) handleInterruptEnvelope(ctx context.Context, envelope *ty
 		}
 	}
 	if envelope.Kind == types.AgentEnvelopeKindRunInput {
-		_ = s.publishRunEvent(ctx, run.ID, "interrupted", map[string]any{
+		_ = s.publishRunEvent(ctx, run.ID, types.AgentRunEventInterrupted, map[string]any{
 			"envelope_id": envelope.ID,
 			"action":      "cancel_then_continue",
 		})
@@ -280,7 +280,7 @@ func (s *AgentService) handleInterruptEnvelope(ctx context.Context, envelope *ty
 		return err
 	}
 	_ = s.appendRunSnapshot(ctx, run.ID, types.AgentRunStatusCancelled, nil, &now, &errMsg, map[string]any{"cause": "interrupt"})
-	_ = s.publishRunEvent(ctx, run.ID, "interrupted", map[string]any{"envelope_id": envelope.ID})
+	_ = s.publishRunEvent(ctx, run.ID, types.AgentRunEventInterrupted, map[string]any{"envelope_id": envelope.ID})
 	return s.backend.UpdateAgentTaskEnvelopeState(ctx, envelope.ID, types.AgentEnvelopeStateDispatched, nil, envelope.TargetRunID)
 }
 
@@ -416,7 +416,7 @@ func (s *AgentService) trySteerRunInputEnvelope(ctx context.Context, envelope *t
 		return false, err
 	}
 
-	_ = s.publishRunEvent(ctx, run.ID, "input_steered", map[string]any{
+	_ = s.publishRunEvent(ctx, run.ID, types.AgentRunEventInputSteered, map[string]any{
 		"envelope_id": envelope.ID,
 		"queue_mode":  envelope.QueueMode,
 		"task_id":     execTask.ExternalId,
@@ -462,9 +462,9 @@ func (s *AgentService) handleRunInputEnvelope(ctx context.Context, envelope *typ
 	if err := s.backend.UpdateAgentTaskEnvelopeState(ctx, envelope.ID, types.AgentEnvelopeStateDispatched, nil, envelope.TargetRunID); err != nil {
 		return err
 	}
-	eventType := "input_dispatched"
+	eventType := types.AgentRunEventInputDispatched
 	if envelope.QueueMode == types.AgentQueueModeSteer {
-		eventType = "steer_fallback_dispatched"
+		eventType = types.AgentRunEventSteerFallbackDispatched
 	}
 	_ = s.publishRunEvent(ctx, run.ID, eventType, map[string]any{
 		"envelope_id": envelope.ID,
@@ -548,7 +548,7 @@ func (s *AgentService) materializeRun(
 	if err := s.appendRunSnapshot(ctx, run.ID, types.AgentRunStatusAccepted, nil, nil, nil, map[string]any{"envelope_id": envelope.ID}); err != nil {
 		log.Warn().Err(err).Str("run_id", run.ID).Msg("failed to append accepted snapshot")
 	}
-	_ = s.publishRunEvent(ctx, run.ID, "accepted", map[string]any{"envelope_id": envelope.ID})
+	_ = s.publishRunEvent(ctx, run.ID, types.AgentRunEventAccepted, map[string]any{"envelope_id": envelope.ID})
 	return run, runPolicy, prompt, nil
 }
 
@@ -707,15 +707,15 @@ func (s *AgentService) appendRunSnapshot(
 	})
 }
 
-func (s *AgentService) publishRunEvent(ctx context.Context, runID, eventType string, payload map[string]any) error {
+func (s *AgentService) publishRunEvent(ctx context.Context, runID string, eventType types.AgentRunEventType, payload map[string]any) error {
 	event := map[string]any{
 		"run_id":     runID,
-		"event_type": eventType,
+		"event_type": string(eventType),
 		"ts":         time.Now().UnixMilli(),
 		"payload":    payload,
 	}
 	if s.s2 != nil && s.s2.Enabled() {
-		if err := s.s2.AppendRunEvent(ctx, runID, eventType, payload); err != nil {
+		if err := s.s2.AppendRunEvent(ctx, runID, string(eventType), payload); err != nil {
 			log.Warn().Err(err).Str("run_id", runID).Msg("failed to append run event to s2")
 		}
 	}

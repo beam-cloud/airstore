@@ -83,6 +83,24 @@ func (s AgentAttemptStatus) IsInFlight() bool {
 	}
 }
 
+type AgentRunEventType string
+
+const (
+	// External run-event stream events (redis/s2).
+	AgentRunEventAccepted                AgentRunEventType = "accepted"
+	AgentRunEventInterrupted             AgentRunEventType = "interrupted"
+	AgentRunEventInputSteered            AgentRunEventType = "input_steered"
+	AgentRunEventInputDispatched         AgentRunEventType = "input_dispatched"
+	AgentRunEventSteerFallbackDispatched AgentRunEventType = "steer_fallback_dispatched"
+
+	// Snapshot payload event markers.
+	AgentRunEventStartRejectedTerminalRun AgentRunEventType = "start_rejected_terminal_run"
+	AgentRunEventStarted                  AgentRunEventType = "started"
+	AgentRunEventAttemptSuperseded        AgentRunEventType = "attempt_superseded"
+	AgentRunEventRetryScheduled           AgentRunEventType = "retry_scheduled"
+	AgentRunEventFinished                 AgentRunEventType = "finished"
+)
+
 const (
 	AgentAttemptStrategyPrimary = "primary"
 	AgentAttemptStrategyRetry   = "retry"
