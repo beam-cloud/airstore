@@ -3,6 +3,21 @@ import type { Workspace } from '../src/types/workspaces.js';
 import { APIError } from '../src/errors.js';
 import { getClient, createTestWorkspace, deleteTestWorkspace, uniqueName } from './helpers.js';
 
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function statusCodeFromError(err: unknown): number | undefined {
+  if (err instanceof APIError) return err.status;
+  const status = (err as { status?: unknown })?.status;
+  return typeof status === 'number' ? status : undefined;
+}
+
+function messageFromError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return String(err);
+}
+
 describe('Source Views', () => {
   const client = getClient();
   let workspace: Workspace;
@@ -143,17 +158,29 @@ describe('Source Views', () => {
       return;
     }
 
-    try {
-      const result = await client.views.sync(workspace.external_id, view.external_id);
-      expect(result.external_id).toBeDefined();
-      expect(typeof result.results_count).toBe('number');
-      expect(typeof result.new_results).toBe('number');
-    } catch (err) {
-      if (err instanceof APIError) {
-        console.warn(`Sync returned ${err.status}: ${err.message}`);
+    // Freshly-created views can briefly return 5xx while upstream sync workers warm up.
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const result = await client.views.sync(workspace.external_id, view.external_id);
+        expect(result.external_id).toBeDefined();
+        expect(typeof result.results_count).toBe('number');
+        expect(typeof result.new_results).toBe('number');
         return;
+      } catch (err) {
+        const status = statusCodeFromError(err);
+        const message = messageFromError(err);
+        const retryableServerError = status !== undefined && status >= 500;
+
+        if (!retryableServerError || attempt === 3) {
+          if (status !== undefined) {
+            console.warn(`Sync returned ${status}: ${message}`);
+            return;
+          }
+          throw err;
+        }
+
+        await sleep(1000 * attempt);
       }
-      throw err;
     }
   });
 });

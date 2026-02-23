@@ -12,214 +12,188 @@ func init() {
 
 func upRunTableConsolidation(tx *sql.Tx) error {
 	stmts := []string{
-		`DO $$ BEGIN
-		   IF EXISTS (
-		     SELECT 1
-		     FROM information_schema.columns
-		     WHERE table_name = 'agent_run' AND column_name = 'origin_envelope_id'
-		   ) AND NOT EXISTS (
-		     SELECT 1
-		     FROM information_schema.columns
-		     WHERE table_name = 'agent_run' AND column_name = 'origin_task_id'
-		   ) THEN
-		     ALTER TABLE agent_run RENAME COLUMN origin_envelope_id TO origin_task_id;
-		   END IF;
-		 END $$;`,
-		`ALTER TABLE IF EXISTS agent_run DROP CONSTRAINT IF EXISTS uq_agent_run_origin_envelope;`,
-		`ALTER TABLE IF EXISTS agent_run DROP CONSTRAINT IF EXISTS agent_run_origin_envelope_id_fkey;`,
-		`ALTER TABLE IF EXISTS agent_run DROP CONSTRAINT IF EXISTS agent_run_origin_task_id_fkey;`,
-		`ALTER TABLE IF EXISTS agent_run_attempt DROP CONSTRAINT IF EXISTS agent_run_attempt_execution_task_external_id_fkey;`,
-		`ALTER TABLE IF EXISTS agent_run
-		   ADD COLUMN IF NOT EXISTS created_by_member_id INTEGER REFERENCES workspace_member(id) ON DELETE SET NULL,
-		   ADD COLUMN IF NOT EXISTS type TEXT NOT NULL DEFAULT 'background',
-		   ADD COLUMN IF NOT EXISTS prompt TEXT,
-		   ADD COLUMN IF NOT EXISTS image VARCHAR(512) NOT NULL DEFAULT '',
-		   ADD COLUMN IF NOT EXISTS entrypoint TEXT[] NOT NULL DEFAULT '{}',
-		   ADD COLUMN IF NOT EXISTS env JSONB NOT NULL DEFAULT '{}'::jsonb,
-		   ADD COLUMN IF NOT EXISTS hook_id INTEGER REFERENCES filesystem_hooks(id) ON DELETE SET NULL,
-		   ADD COLUMN IF NOT EXISTS attempt INTEGER NOT NULL DEFAULT 1,
-		   ADD COLUMN IF NOT EXISTS max_attempts INTEGER NOT NULL DEFAULT 1,
-		   ADD COLUMN IF NOT EXISTS run_attempt_id UUID NULL,
-		   ADD COLUMN IF NOT EXISTS exit_code INTEGER,
-		   ADD COLUMN IF NOT EXISTS execution_policy_json JSONB NOT NULL DEFAULT '{}'::jsonb;`,
+		`ALTER TABLE agent_run RENAME COLUMN origin_envelope_id TO origin_task_id;`,
+		`ALTER TABLE agent_run DROP CONSTRAINT uq_agent_run_origin_envelope;`,
+		`ALTER TABLE agent_run DROP CONSTRAINT agent_run_origin_envelope_id_fkey;`,
+		`ALTER TABLE agent_run DROP CONSTRAINT IF EXISTS agent_run_origin_task_id_fkey;`,
+		`ALTER TABLE agent_run_attempt DROP CONSTRAINT agent_run_attempt_execution_task_external_id_fkey;`,
+		`ALTER TABLE agent_run
+		   ADD COLUMN created_by_member_id INTEGER REFERENCES workspace_member(id) ON DELETE SET NULL,
+		   ADD COLUMN type TEXT NOT NULL DEFAULT 'background',
+		   ADD COLUMN prompt TEXT,
+		   ADD COLUMN image VARCHAR(512) NOT NULL DEFAULT '',
+		   ADD COLUMN entrypoint TEXT[] NOT NULL DEFAULT '{}',
+		   ADD COLUMN env JSONB NOT NULL DEFAULT '{}'::jsonb,
+		   ADD COLUMN hook_id INTEGER REFERENCES filesystem_hooks(id) ON DELETE SET NULL,
+		   ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1,
+		   ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 1,
+		   ADD COLUMN run_attempt_id UUID NULL,
+		   ADD COLUMN exit_code INTEGER,
+		   ADD COLUMN execution_policy_json JSONB NOT NULL DEFAULT '{}'::jsonb;`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_run_hook_active
 		 ON agent_run(hook_id)
 		 WHERE hook_id IS NOT NULL AND status IN ('accepted', 'running');`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_run_run_attempt_id
 		 ON agent_run(run_attempt_id)
 		 WHERE run_attempt_id IS NOT NULL;`,
-		`DO $$ BEGIN
-		   IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'task')
-		      AND EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'agent_run_attempt') THEN
-		     UPDATE agent_run AS run
-		     SET created_by_member_id = COALESCE(latest.created_by_member_id, run.created_by_member_id),
-		         status = CASE latest.status::text
-		           WHEN 'pending' THEN 'accepted'::agent_run_status
-		           WHEN 'scheduled' THEN 'accepted'::agent_run_status
-		           WHEN 'running' THEN 'running'::agent_run_status
-		           WHEN 'complete' THEN 'ok'::agent_run_status
-		           WHEN 'failed' THEN 'error'::agent_run_status
-		           WHEN 'cancelled' THEN 'cancelled'::agent_run_status
-		           ELSE run.status
-		         END,
-		         type = COALESCE(NULLIF(latest.type, ''), run.type),
-		         prompt = COALESCE(latest.prompt, run.prompt),
-		         image = COALESCE(NULLIF(latest.image, ''), run.image),
-		         entrypoint = COALESCE(latest.entrypoint, run.entrypoint),
-		         env = COALESCE(latest.env, run.env),
-		         hook_id = COALESCE(latest.hook_id, run.hook_id),
-		         attempt = GREATEST(COALESCE(latest.attempt, 1), COALESCE(run.attempt, 1)),
-		         max_attempts = GREATEST(COALESCE(latest.max_attempts, 1), COALESCE(run.max_attempts, 1)),
-		         run_attempt_id = COALESCE(latest.run_attempt_id, run.run_attempt_id),
-		         timeout_ms = COALESCE(latest.timeout_ms, run.timeout_ms),
-		         exec_host = COALESCE(latest.exec_host, run.exec_host),
-		         exec_security = COALESCE(latest.exec_security, run.exec_security),
-		         exec_ask = COALESCE(latest.exec_ask, run.exec_ask),
-		         runtime_type = COALESCE(latest.runtime_type, run.runtime_type),
-		         workspace_access = COALESCE(latest.workspace_access, run.workspace_access),
-		         network_enabled = COALESCE(latest.network_enabled, run.network_enabled),
-		         exit_code = COALESCE(latest.exit_code, run.exit_code),
-		         error = COALESCE(NULLIF(latest.error, ''), run.error),
-		         started_at = COALESCE(latest.started_at, run.started_at),
-		         ended_at = COALESCE(latest.finished_at, run.ended_at),
-		         execution_policy_json = COALESCE(latest.execution_policy_json, run.execution_policy_json),
-		         updated_at = CURRENT_TIMESTAMP
-		     FROM (
-		       SELECT DISTINCT ON (attempt.run_id)
-		         attempt.run_id,
-		         attempt.id AS run_attempt_id,
-		         task.created_by_member_id,
-		         task.status,
-		         task.type,
-		         task.prompt,
-		         task.image,
-		         task.entrypoint,
-		         task.env,
-		         task.hook_id,
-		         task.attempt,
-		         task.max_attempts,
-		         task.timeout_ms,
-		         task.exec_host,
-		         task.exec_security,
-		         task.exec_ask,
-		         task.runtime_type,
-		         task.workspace_access,
-		         task.network_enabled,
-		         task.exit_code,
-		         task.error,
-		         task.started_at,
-		         task.finished_at,
-		         task.execution_policy_json
-		       FROM agent_run_attempt AS attempt
-		       JOIN task ON task.external_id = attempt.execution_task_external_id
-		       ORDER BY attempt.run_id, attempt.attempt_no DESC, attempt.created_at DESC
-		     ) AS latest
-		     WHERE run.id = latest.run_id;
-		   END IF;
-		 END $$;`,
-		`DO $$ BEGIN
-		   IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'task') THEN
-		     INSERT INTO agent_run (
-		       id,
-		       workspace_id,
-		       origin_task_id,
-		       status,
-		       session_id,
-		       exec_host,
-		       exec_security,
-		       exec_ask,
-		       runtime_type,
-		       workspace_access,
-		       network_enabled,
-		       interactive,
-		       timeout_ms,
-		       created_by_member_id,
-		       type,
-		       prompt,
-		       image,
-		       entrypoint,
-		       env,
-		       hook_id,
-		       attempt,
-		       max_attempts,
-		       run_attempt_id,
-		       exit_code,
-		       error,
-		       execution_policy_json,
-		       started_at,
-		       ended_at,
-		       created_at,
-		       updated_at
-		     )
-		     SELECT
-		       task.external_id,
-		       task.workspace_id,
-		       task.external_id,
-		       CASE task.status::text
-		         WHEN 'pending' THEN 'accepted'::agent_run_status
-		         WHEN 'scheduled' THEN 'accepted'::agent_run_status
-		         WHEN 'running' THEN 'running'::agent_run_status
-		         WHEN 'complete' THEN 'ok'::agent_run_status
-		         WHEN 'failed' THEN 'error'::agent_run_status
-		         WHEN 'cancelled' THEN 'cancelled'::agent_run_status
-		         ELSE 'error'::agent_run_status
-		       END,
-		       task.external_id::text,
-		       COALESCE(task.exec_host, 'sandbox'),
-		       COALESCE(task.exec_security, 'allowlist'),
-		       COALESCE(task.exec_ask, 'off'),
-		       COALESCE(task.runtime_type, 'gvisor'),
-		       COALESCE(task.workspace_access, 'rw'),
-		       COALESCE(task.network_enabled, TRUE),
-		       FALSE,
-		       COALESCE(task.timeout_ms, 0),
-		       task.created_by_member_id,
-		       COALESCE(NULLIF(task.type, ''), 'background'),
-		       task.prompt,
-		       COALESCE(task.image, ''),
-		       COALESCE(task.entrypoint, '{}'::text[]),
-		       COALESCE(task.env, '{}'::jsonb),
-		       task.hook_id,
-		       COALESCE(task.attempt, 1),
-		       COALESCE(task.max_attempts, 1),
-		       task.external_id,
-		       task.exit_code,
-		       NULLIF(task.error, ''),
-		       COALESCE(task.execution_policy_json, '{}'::jsonb),
-		       task.started_at,
-		       task.finished_at,
-		       task.created_at,
-		       CURRENT_TIMESTAMP
-		     FROM task
-		     LEFT JOIN agent_run_attempt AS attempt
-		       ON attempt.execution_task_external_id = task.external_id
-		     LEFT JOIN agent_run AS run
-		       ON run.id = COALESCE(attempt.run_id, task.external_id)
-		     WHERE run.id IS NULL;
-		   END IF;
-		 END $$;`,
-		`DO $$ BEGIN
-		   IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'agent_run_attempt') THEN
-		     UPDATE agent_run_attempt
-		     SET execution_task_external_id = run_id
-		     WHERE execution_task_external_id IS DISTINCT FROM run_id;
-
-		     UPDATE agent_run AS run
-		     SET run_attempt_id = latest.id
-		     FROM (
-		       SELECT DISTINCT ON (run_id) run_id, id
-		       FROM agent_run_attempt
-		       ORDER BY run_id, attempt_no DESC, created_at DESC
-		     ) AS latest
-		     WHERE latest.run_id = run.id
-		       AND run.run_attempt_id IS DISTINCT FROM latest.id;
-		   END IF;
-		 END $$;`,
-		`DROP TABLE IF EXISTS agent_run_attempt;`,
-		`DROP TYPE IF EXISTS agent_attempt_status;`,
-		`DROP VIEW IF EXISTS execution_task;`,
-		`DROP TABLE IF EXISTS task;`,
-		`DROP TYPE IF EXISTS task_status;`,
+		`UPDATE agent_run AS run
+		 SET created_by_member_id = COALESCE(latest.created_by_member_id, run.created_by_member_id),
+		     status = CASE latest.status::text
+		       WHEN 'pending' THEN 'accepted'::agent_run_status
+		       WHEN 'scheduled' THEN 'accepted'::agent_run_status
+		       WHEN 'running' THEN 'running'::agent_run_status
+		       WHEN 'complete' THEN 'ok'::agent_run_status
+		       WHEN 'failed' THEN 'error'::agent_run_status
+		       WHEN 'cancelled' THEN 'cancelled'::agent_run_status
+		       ELSE run.status
+		     END,
+		     type = COALESCE(NULLIF(latest.type, ''), run.type),
+		     prompt = COALESCE(latest.prompt, run.prompt),
+		     image = COALESCE(NULLIF(latest.image, ''), run.image),
+		     entrypoint = COALESCE(latest.entrypoint, run.entrypoint),
+		     env = COALESCE(latest.env, run.env),
+		     hook_id = COALESCE(latest.hook_id, run.hook_id),
+		     attempt = GREATEST(COALESCE(latest.attempt, 1), COALESCE(run.attempt, 1)),
+		     max_attempts = GREATEST(COALESCE(latest.max_attempts, 1), COALESCE(run.max_attempts, 1)),
+		     run_attempt_id = COALESCE(latest.run_attempt_id, run.run_attempt_id),
+		     timeout_ms = COALESCE(latest.timeout_ms, run.timeout_ms),
+		     exec_host = COALESCE(latest.exec_host, run.exec_host),
+		     exec_security = COALESCE(latest.exec_security, run.exec_security),
+		     exec_ask = COALESCE(latest.exec_ask, run.exec_ask),
+		     runtime_type = COALESCE(latest.runtime_type, run.runtime_type),
+		     workspace_access = COALESCE(latest.workspace_access, run.workspace_access),
+		     network_enabled = COALESCE(latest.network_enabled, run.network_enabled),
+		     exit_code = COALESCE(latest.exit_code, run.exit_code),
+		     error = COALESCE(NULLIF(latest.error, ''), run.error),
+		     started_at = COALESCE(latest.started_at, run.started_at),
+		     ended_at = COALESCE(latest.finished_at, run.ended_at),
+		     execution_policy_json = COALESCE(latest.execution_policy_json, run.execution_policy_json),
+		     updated_at = CURRENT_TIMESTAMP
+		 FROM (
+		   SELECT DISTINCT ON (attempt.run_id)
+		     attempt.run_id,
+		     attempt.id AS run_attempt_id,
+		     task.created_by_member_id,
+		     task.status,
+		     task.type,
+		     task.prompt,
+		     task.image,
+		     task.entrypoint,
+		     task.env,
+		     task.hook_id,
+		     task.attempt,
+		     task.max_attempts,
+		     task.timeout_ms,
+		     task.exec_host,
+		     task.exec_security,
+		     task.exec_ask,
+		     task.runtime_type,
+		     task.workspace_access,
+		     task.network_enabled,
+		     task.exit_code,
+		     task.error,
+		     task.started_at,
+		     task.finished_at,
+		     task.execution_policy_json
+		   FROM agent_run_attempt AS attempt
+		   JOIN task ON task.external_id = attempt.execution_task_external_id
+		   ORDER BY attempt.run_id, attempt.attempt_no DESC, attempt.created_at DESC
+		 ) AS latest
+		 WHERE run.id = latest.run_id;`,
+		`INSERT INTO agent_run (
+		   id,
+		   workspace_id,
+		   origin_task_id,
+		   status,
+		   session_id,
+		   exec_host,
+		   exec_security,
+		   exec_ask,
+		   runtime_type,
+		   workspace_access,
+		   network_enabled,
+		   interactive,
+		   timeout_ms,
+		   created_by_member_id,
+		   type,
+		   prompt,
+		   image,
+		   entrypoint,
+		   env,
+		   hook_id,
+		   attempt,
+		   max_attempts,
+		   run_attempt_id,
+		   exit_code,
+		   error,
+		   execution_policy_json,
+		   started_at,
+		   ended_at,
+		   created_at,
+		   updated_at
+		 )
+		 SELECT
+		   task.external_id,
+		   task.workspace_id,
+		   task.external_id,
+		   CASE task.status::text
+		     WHEN 'pending' THEN 'accepted'::agent_run_status
+		     WHEN 'scheduled' THEN 'accepted'::agent_run_status
+		     WHEN 'running' THEN 'running'::agent_run_status
+		     WHEN 'complete' THEN 'ok'::agent_run_status
+		     WHEN 'failed' THEN 'error'::agent_run_status
+		     WHEN 'cancelled' THEN 'cancelled'::agent_run_status
+		     ELSE 'error'::agent_run_status
+		   END,
+		   task.external_id::text,
+		   COALESCE(task.exec_host, 'sandbox'),
+		   COALESCE(task.exec_security, 'allowlist'),
+		   COALESCE(task.exec_ask, 'off'),
+		   COALESCE(task.runtime_type, 'gvisor'),
+		   COALESCE(task.workspace_access, 'rw'),
+		   COALESCE(task.network_enabled, TRUE),
+		   FALSE,
+		   COALESCE(task.timeout_ms, 0),
+		   task.created_by_member_id,
+		   COALESCE(NULLIF(task.type, ''), 'background'),
+		   task.prompt,
+		   COALESCE(task.image, ''),
+		   COALESCE(task.entrypoint, '{}'::text[]),
+		   COALESCE(task.env, '{}'::jsonb),
+		   task.hook_id,
+		   COALESCE(task.attempt, 1),
+		   COALESCE(task.max_attempts, 1),
+		   task.external_id,
+		   task.exit_code,
+		   NULLIF(task.error, ''),
+		   COALESCE(task.execution_policy_json, '{}'::jsonb),
+		   task.started_at,
+		   task.finished_at,
+		   task.created_at,
+		   CURRENT_TIMESTAMP
+		 FROM task
+		 LEFT JOIN agent_run_attempt AS attempt
+		   ON attempt.execution_task_external_id = task.external_id
+		 LEFT JOIN agent_run AS run
+		   ON run.id = COALESCE(attempt.run_id, task.external_id)
+		 WHERE run.id IS NULL;`,
+		`UPDATE agent_run_attempt
+		 SET execution_task_external_id = run_id
+		 WHERE execution_task_external_id IS DISTINCT FROM run_id;`,
+		`UPDATE agent_run AS run
+		 SET run_attempt_id = latest.id
+		 FROM (
+		   SELECT DISTINCT ON (run_id) run_id, id
+		   FROM agent_run_attempt
+		   ORDER BY run_id, attempt_no DESC, created_at DESC
+		 ) AS latest
+		 WHERE latest.run_id = run.id
+		   AND run.run_attempt_id IS DISTINCT FROM latest.id;`,
+		`DROP VIEW execution_task;`,
+		`DROP TABLE task;`,
+		`DROP TYPE task_status;`,
+		`DROP TABLE agent_run_attempt;`,
+		`DROP TYPE agent_attempt_status;`,
 	}
 
 	for _, stmt := range stmts {

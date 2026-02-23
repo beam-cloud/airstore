@@ -149,14 +149,13 @@ These APIs are workspace-scoped and split into:
 
 - `agents`: persistent profile/config.
 - `tasks`: accepted-first task ingress with idempotency.
-- `runs`: execution lifecycle and attempt/snapshot introspection.
+- `runs`: execution lifecycle and snapshot/event introspection.
 
 Flow is:
 
 1. submit a task,
 2. materialize a run,
-3. execute via run attempts,
-4. map attempts to execution entries in the worker substrate.
+3. observe lifecycle via run state, snapshots, and events.
 
 ```typescript
 // 1) Create an agent profile
@@ -192,8 +191,8 @@ const accepted = await airstore.tasks.create('ws_abc123', {
 const runId = accepted.run_id ?? accepted.task.target_run_id;
 if (runId) {
   const run = await airstore.runs.retrieve('ws_abc123', runId);
-  const attempts = await airstore.runs.listAttempts('ws_abc123', runId);
   const snapshots = await airstore.runs.listSnapshots('ws_abc123', runId);
+  const events = await airstore.runs.listEvents('ws_abc123', runId);
 }
 ```
 

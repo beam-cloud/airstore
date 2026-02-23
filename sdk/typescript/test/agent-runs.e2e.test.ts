@@ -1,27 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { APIError } from '../src/errors.js';
-import { getClient, uniqueName } from './helpers.js';
+import { getClient, uniqueName, waitForRunIdForTask } from './helpers.js';
 
 declare const process: {
   env: Record<string, string | undefined>;
 };
 
 const TERMINAL = new Set(['ok', 'error', 'timeout', 'cancelled']);
-
-async function waitForRunId(
-  workspaceId: string,
-  taskId: string,
-  timeoutMs = 30000,
-): Promise<string | undefined> {
-  const client = getClient();
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const task = await client.tasks.retrieve(workspaceId, taskId);
-    if (task.target_run_id) return task.target_run_id;
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
-  return undefined;
-}
 
 async function resolveWorkspaceFromWhoami(): Promise<string | undefined> {
   const client = getClient();
@@ -165,9 +150,14 @@ describe('Agent/Runs E2E', () => {
 
     const runId =
       accepted.run_id ??
-      (await waitForRunId(workspaceId, accepted.task.id));
-    expect(runId).toBeDefined();
-    if (!runId) return;
+      accepted.task.target_run_id ??
+      (await waitForRunIdForTask(workspaceId, accepted.task.id, { timeoutMs: 75_000 }));
+    if (!runId) {
+      const task = await client.tasks.retrieve(workspaceId, accepted.task.id);
+      throw new Error(
+        `run_id did not materialize for task ${accepted.task.id} (state=${task.state}, target_run_id=${task.target_run_id ?? 'none'}, dropped_reason=${task.dropped_reason ?? 'none'})`,
+      );
+    }
 
     const run = await waitForTerminalRun(workspaceId, runId, 180_000);
     expect(run.id).toBe(runId);

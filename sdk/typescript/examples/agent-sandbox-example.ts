@@ -101,22 +101,29 @@ async function main() {
     }
     assert(runId, 'run was not materialized from task within timeout');
 
-    console.log('[5/7] wait for run execution binding');
-    const attemptDeadline = Date.now() + 45_000;
-    let attempts = await client.runs.listAttempts(workspaceId, runId);
+    console.log('[5/7] wait for run activity');
+    const activityDeadline = Date.now() + 45_000;
+    let run = await client.runs.retrieve(workspaceId, runId);
+    let snapshots = await client.runs.listSnapshots(workspaceId, runId);
+    let events = await client.runs.listEvents(workspaceId, runId);
     while (
-      Date.now() < attemptDeadline &&
-      !attempts.some((attempt) => Boolean(attempt.execution_id))
+      Date.now() < activityDeadline &&
+      run.status === 'accepted' &&
+      snapshots.length === 0 &&
+      events.length === 0
     ) {
       await sleep(1500);
-      attempts = await client.runs.listAttempts(workspaceId, runId);
+      run = await client.runs.retrieve(workspaceId, runId);
+      snapshots = await client.runs.listSnapshots(workspaceId, runId);
+      events = await client.runs.listEvents(workspaceId, runId);
     }
-    const boundAttempt = attempts.find((attempt) => Boolean(attempt.execution_id));
-    assert(boundAttempt, 'run attempt did not bind to run execution');
+    assert(
+      run.status !== 'accepted' || snapshots.length > 0 || events.length > 0,
+      'run did not show activity (status/snapshots/events) within timeout',
+    );
 
     console.log('[6/7] wait for terminal run state');
     const runDeadline = Date.now() + 180_000;
-    let run = await client.runs.retrieve(workspaceId, runId);
     while (!TERMINAL_RUN_STATUSES.has(run.status) && Date.now() < runDeadline) {
       await sleep(1500);
       run = await client.runs.retrieve(workspaceId, runId);
@@ -127,8 +134,8 @@ async function main() {
     );
 
     console.log('[7/7] verify snapshots + events');
-    const snapshots = await client.runs.listSnapshots(workspaceId, runId);
-    const events = await client.runs.listEvents(workspaceId, runId);
+    snapshots = await client.runs.listSnapshots(workspaceId, runId);
+    events = await client.runs.listEvents(workspaceId, runId);
 
     assert(snapshots.length > 0, 'expected at least one run snapshot');
     assert(
@@ -142,7 +149,7 @@ async function main() {
 
     console.log('agent sandbox plumbing verified');
     console.log(
-      `workspace=${workspaceId} run=${runId} status=${run.status} attempts=${attempts.length} execution=${boundAttempt.execution_id} snapshots=${snapshots.length} events=${events.length}`,
+      `workspace=${workspaceId} run=${runId} status=${run.status} snapshots=${snapshots.length} events=${events.length}`,
     );
   } finally {
     if (createdWorkspace && workspaceId && process.env['KEEP_EXAMPLE_WORKSPACE'] !== '1') {

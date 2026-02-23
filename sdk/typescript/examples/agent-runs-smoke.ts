@@ -19,8 +19,13 @@ async function sleep(ms: number): Promise<void> {
 }
 
 async function main() {
+  const apiKey = process.env['AIRSTORE_API_KEY'];
+  if (!apiKey) {
+    throw new Error('AIRSTORE_API_KEY is required');
+  }
+
   const client = new Airstore({
-    apiKey: process.env['AIRSTORE_API_KEY'],
+    apiKey,
     baseURL: process.env['AIRSTORE_BASE_URL'] || 'http://localhost:1994/api/v1',
     timeout: 30_000,
     maxRetries: 1,
@@ -79,8 +84,7 @@ async function main() {
       `run did not reach terminal status, current=${run.status}`,
     );
 
-    console.log('[6/8] fetch attempts and snapshots');
-    const attempts = await client.runs.listAttempts(workspaceId, runId);
+    console.log('[6/8] fetch snapshots and events');
     const snapshots = await client.runs.listSnapshots(workspaceId, runId);
     const events = await client.runs.listEvents(workspaceId, runId);
 
@@ -93,12 +97,8 @@ async function main() {
       snapshots.every((snapshot, idx, all) => idx === 0 || snapshot.seq > all[idx - 1]!.seq),
       'snapshot sequence is not strictly increasing',
     );
-    assert(
-      attempts.every((attempt) => attempt.run_id === runId),
-      'attempt run_id mismatch',
-    );
     console.log(
-      `run=${runId} status=${run.status} attempts=${attempts.length} snapshots=${snapshots.length} events=${events.length}`,
+      `run=${runId} status=${run.status} snapshots=${snapshots.length} events=${events.length}`,
     );
 
     console.log('[7/8] replay idempotency key');
