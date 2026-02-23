@@ -36,8 +36,6 @@ func NewHealthGroup(g *echo.Group, redisProbe func(context.Context) error, postg
 		migrationsReady: migrationsReady,
 	}
 
-	// Keep the root endpoint as readiness for backwards compatibility.
-	g.GET("", group.ReadinessCheck)
 	g.GET("/ready", group.ReadinessCheck)
 	g.GET("/live", group.LivenessCheck)
 

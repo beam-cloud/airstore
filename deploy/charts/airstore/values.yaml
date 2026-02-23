@@ -26,10 +26,10 @@ controllers:
     annotations: {}
     labels: {}
     replicas: 1
-    strategy: RollingUpdate # Prefer rolling restarts for availability
+    strategy: Recreate # Can be Recreate or RollingUpdate
     rollingUpdate:
-      unavailable: 0
-      surge: 1
+      unavailable:
+      surge:
     initContainers:
       wait-on-backends:
         image:

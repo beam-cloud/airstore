@@ -85,9 +85,6 @@ controllers:
                 port: 1994
         securityContext:
           privileged: true
-    pod:
-      labels:
-        airstore.io/component: gateway
     hostNetwork: true
 service:
   gateway:

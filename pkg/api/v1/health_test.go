@@ -69,12 +69,23 @@ func TestHealthReadinessFailsWhenMigrationsNotReady(t *testing.T) {
 		func() bool { return false },
 	)
 
-	code, resp := performHealthRequest(t, e, http.MethodGet, "/health")
+	code, resp := performHealthRequest(t, e, http.MethodGet, "/health/ready")
 	require.Equal(t, http.StatusServiceUnavailable, code)
 	require.True(t, resp.Dependencies["postgres"].Enabled)
 	require.True(t, resp.Dependencies["migrations"].Enabled)
 	require.False(t, resp.Dependencies["migrations"].Ready)
 	require.Contains(t, resp.Dependencies["migrations"].Error, "migrations not ready")
+}
+
+func TestHealthRootRouteNotRegistered(t *testing.T) {
+	e := echo.New()
+	NewHealthGroup(e.Group("/health"), nil, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 func performHealthRequest(t *testing.T, e *echo.Echo, method, path string) (int, healthResponse) {
