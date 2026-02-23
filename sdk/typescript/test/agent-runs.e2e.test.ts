@@ -159,7 +159,6 @@ describe('Agent/Runs E2E', () => {
 
   it('creates an agent and runs a browser automation task for YC stories', async () => {
     const idempotencyKey = uniqueName('e2e-idem');
-    const sessionId = uniqueName('e2e-session');
     const browserPrompt = [
       'Use the browser tool to scrape Hacker News newest stories.',
       'URL: https://news.ycombinator.com/newest',
@@ -171,7 +170,6 @@ describe('Agent/Runs E2E', () => {
 
     const accepted = await client.tasks.create(workspaceId, {
       message: browserPrompt,
-      sessionId,
       agentId,
       idempotencyKey,
       timeoutMs: 180_000,
@@ -186,6 +184,9 @@ describe('Agent/Runs E2E', () => {
       },
     });
     expect(accepted.accepted).toBe(true);
+    const acceptedSessionID = accepted.envelope.payload_json['session_id'];
+    expect(typeof acceptedSessionID).toBe('string');
+    expect((acceptedSessionID as string).length).toBeGreaterThan(0);
 
     const runId =
       accepted.run_id ??
@@ -233,7 +234,6 @@ describe('Agent/Runs E2E', () => {
 
     const replay = await client.tasks.create(workspaceId, {
       message: browserPrompt,
-      sessionId,
       agentId,
       idempotencyKey,
       timeoutMs: 180_000,

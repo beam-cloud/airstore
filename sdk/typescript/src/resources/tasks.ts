@@ -83,5 +83,9 @@ function toPolicyBody(policy: RunExecutionPolicy | undefined): Record<string, un
     network_enabled: policy.networkEnabled ?? true,
     interactive: policy.interactive ?? false,
     resources: policy.resources ?? {},
+    retry: {
+      max_attempts: policy.retry?.maxAttempts ?? 2,
+      delay_ms: policy.retry?.delayMs ?? 0,
+    },
   };
 }

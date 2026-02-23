@@ -16,6 +16,7 @@ const (
 	workspaceAccessRW   = "rw"
 	runtimeTypeGvisor   = "gvisor"
 	runtimeTypeRunc     = "runc"
+	defaultRetryMax     = 2
 )
 
 func DefaultRunExecutionPolicy() RunExecutionPolicy {
@@ -28,6 +29,10 @@ func DefaultRunExecutionPolicy() RunExecutionPolicy {
 		NetworkEnabled:  true,
 		Interactive:     false,
 		Resources:       map[string]any{},
+		Retry: RunRetryPolicy{
+			MaxAttempts: defaultRetryMax,
+			DelayMs:     0,
+		},
 	}
 }
 
@@ -47,6 +52,7 @@ func ValidateRunExecutionPolicy(p RunExecutionPolicy) error {
 	if p.WorkspaceAccess == "" {
 		p.WorkspaceAccess = workspaceAccessRW
 	}
+	p.Retry = NormalizeRunRetryPolicy(p.Retry)
 
 	switch p.Host {
 	case ExecHostSandbox:
@@ -73,6 +79,12 @@ func ValidateRunExecutionPolicy(p RunExecutionPolicy) error {
 	default:
 		return fmt.Errorf("invalid workspace_access: %s", p.WorkspaceAccess)
 	}
+	if p.Retry.MaxAttempts <= 0 {
+		return fmt.Errorf("invalid retry.max_attempts: %d", p.Retry.MaxAttempts)
+	}
+	if p.Retry.DelayMs < 0 {
+		return fmt.Errorf("invalid retry.delay_ms: %d", p.Retry.DelayMs)
+	}
 
 	return nil
 }
@@ -96,7 +108,18 @@ func NormalizeRunExecutionPolicy(p RunExecutionPolicy) RunExecutionPolicy {
 	if p.Resources == nil {
 		p.Resources = map[string]any{}
 	}
+	p.Retry = NormalizeRunRetryPolicy(p.Retry)
 	return p
+}
+
+func NormalizeRunRetryPolicy(r RunRetryPolicy) RunRetryPolicy {
+	if r.MaxAttempts <= 0 {
+		r.MaxAttempts = defaultRetryMax
+	}
+	if r.DelayMs < 0 {
+		r.DelayMs = 0
+	}
+	return r
 }
 
 func ToTaskType(p RunExecutionPolicy) types.TaskType {

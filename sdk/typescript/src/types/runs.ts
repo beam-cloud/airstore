@@ -77,7 +77,7 @@ export interface AgentRunSnapshot {
 
 export interface RunInputParams {
   message: string;
-  idempotencyKey: string;
+  idempotencyKey?: string;
   queueMode?: QueueMode;
 }
 

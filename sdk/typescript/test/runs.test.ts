@@ -65,4 +65,29 @@ describe('Runs', () => {
     const events = await client.runs.listEvents(workspace.external_id, runId);
     expect(Array.isArray(events)).toBe(true);
   });
+
+  it('accepts run input without explicit idempotency key', async () => {
+    const accepted = await client.tasks.create(workspace.external_id, {
+      message: 'create run for run-input defaults',
+      sessionId: uniqueName('run-input-session'),
+      agentId,
+      idempotencyKey: uniqueName('run-input-idem'),
+      timeoutMs: 60_000,
+    });
+
+    const runId =
+      accepted.run_id ??
+      (await waitForRunId(workspace.external_id, accepted.envelope.id));
+    expect(runId).toBeDefined();
+    if (!runId) return;
+
+    const inputAccepted = await client.runs.input(workspace.external_id, runId, {
+      message: 'followup without explicit idempotency key',
+      queueMode: 'followup',
+    });
+
+    expect(inputAccepted.accepted).toBe(true);
+    expect(inputAccepted.envelope.idempotency_key.length).toBeGreaterThan(0);
+    expect(inputAccepted.envelope.target_run_id).toBe(runId);
+  });
 });

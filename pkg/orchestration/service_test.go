@@ -19,6 +19,7 @@ type fakeBackend struct {
 	mu           sync.Mutex
 	envelopes    map[string]*types.AgentTaskEnvelope
 	profiles     map[string]*types.AgentProfile
+	runs         map[string]*types.AgentRun
 	idempotency  map[string]string
 	droppedCount int
 }
@@ -27,6 +28,7 @@ func newFakeBackend() *fakeBackend {
 	return &fakeBackend{
 		envelopes:   map[string]*types.AgentTaskEnvelope{},
 		profiles:    map[string]*types.AgentProfile{},
+		runs:        map[string]*types.AgentRun{},
 		idempotency: map[string]string{},
 	}
 }
@@ -92,6 +94,16 @@ func (f *fakeBackend) GetAgentProfile(_ context.Context, workspaceID uint, agent
 		return nil, &types.ErrAgentProfileNotFound{ID: agentID}
 	}
 	return profile, nil
+}
+
+func (f *fakeBackend) GetAgentRun(_ context.Context, workspaceID uint, runID string) (*types.AgentRun, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	run, ok := f.runs[runID]
+	if !ok || run.WorkspaceID != workspaceID {
+		return nil, &types.ErrAgentRunNotFound{ID: runID}
+	}
+	return run, nil
 }
 
 func newTestRedis(t *testing.T) (*common.RedisClient, func()) {
@@ -228,4 +240,41 @@ func TestAcceptAgentCommandAppliesAgentConfigModelAndProvider(t *testing.T) {
 		"model":    "claude-sonnet-4",
 		"purpose":  "test",
 	}, envelope.PayloadJSON["agent_config"])
+}
+
+func TestAcceptAgentCommandGeneratesIDsWhenMissing(t *testing.T) {
+	redisClient, cleanup := newTestRedis(t)
+	defer cleanup()
+
+	backend := newFakeBackend()
+	svc := NewAgentService(context.Background(), backend, nil, redisClient, nil, "ghcr.io/beam/sandbox:latest")
+
+	envelope, deduped, err := svc.AcceptAgentCommand(context.Background(), 42, AgentCommandParams{
+		Message: "hello world",
+	})
+	require.NoError(t, err)
+	require.False(t, deduped)
+	require.NotEmpty(t, envelope.IdempotencyKey)
+	require.NotEmpty(t, envelope.PayloadJSON["session_id"])
+}
+
+func TestAcceptRunInputGeneratesIdempotencyKeyWhenMissing(t *testing.T) {
+	redisClient, cleanup := newTestRedis(t)
+	defer cleanup()
+
+	backend := newFakeBackend()
+	runID := uuid.NewString()
+	backend.runs[runID] = &types.AgentRun{
+		ID:          runID,
+		WorkspaceID: 42,
+		Status:      types.AgentRunStatusAccepted,
+		SessionID:   "session-1",
+		TimeoutMs:   60000,
+	}
+
+	svc := NewAgentService(context.Background(), backend, nil, redisClient, nil, "ghcr.io/beam/sandbox:latest")
+	envelope, deduped, err := svc.AcceptRunInput(context.Background(), 42, runID, types.AgentQueueModeFollowup, "follow up", "")
+	require.NoError(t, err)
+	require.False(t, deduped)
+	require.NotEmpty(t, envelope.IdempotencyKey)
 }

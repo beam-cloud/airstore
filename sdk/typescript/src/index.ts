@@ -90,6 +90,7 @@ export type {
   ExecAsk,
   RuntimeType,
   WorkspaceAccess,
+  RunRetryPolicy,
   RunExecutionPolicy,
   EnvelopeKind,
   EnvelopeState,

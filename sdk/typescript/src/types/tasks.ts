@@ -10,6 +10,11 @@ export type ExecAsk = 'off' | 'on-miss' | 'always';
 export type RuntimeType = 'gvisor' | 'runc';
 export type WorkspaceAccess = 'none' | 'ro' | 'rw';
 
+export interface RunRetryPolicy {
+  maxAttempts?: number;
+  delayMs?: number;
+}
+
 export interface RunExecutionPolicy {
   host?: ExecHost;
   security?: ExecSecurity;
@@ -19,6 +24,7 @@ export interface RunExecutionPolicy {
   networkEnabled?: boolean;
   interactive?: boolean;
   resources?: Record<string, number>;
+  retry?: RunRetryPolicy;
 }
 
 export type EnvelopeKind = 'agent_command' | 'run_input';
@@ -60,8 +66,8 @@ export interface AgentTaskEnvelope {
 
 export interface AgentCommandCreateParams {
   message: string;
-  sessionId: string;
-  idempotencyKey: string;
+  sessionId?: string;
+  idempotencyKey?: string;
   agentId?: string;
   sessionKey?: string;
   deliver?: boolean;

@@ -101,9 +101,7 @@ func (a *AgentAPI) EnqueueRunInputEnvelope(
 	if strings.TrimSpace(runID) == "" {
 		return nil, false, fmt.Errorf("run_id is required")
 	}
-	if strings.TrimSpace(idempotencyKey) == "" {
-		return nil, false, fmt.Errorf("idempotency_key is required")
-	}
+	idempotencyKey = normalizeGeneratedID(idempotencyKey)
 	if queueMode == "" {
 		queueMode = types.AgentQueueModeFollowup
 	}

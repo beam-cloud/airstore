@@ -54,4 +54,20 @@ describe('Orchestration Task Envelopes', () => {
     expect(replay.idempotent_hit).toBe(true);
     expect(replay.envelope.id).toBe(accepted.envelope.id);
   });
+
+  it('generates session and idempotency ids when omitted', async () => {
+    const accepted = await client.tasks.create(workspace.external_id, {
+      message: 'generate defaults for ids',
+      agentId,
+      timeoutMs: 60_000,
+    });
+
+    expect(accepted.accepted).toBe(true);
+    expect(accepted.envelope.idempotency_key.length).toBeGreaterThan(0);
+
+    const fetched = await client.tasks.retrieve(workspace.external_id, accepted.envelope.id);
+    const sessionId = fetched.payload_json['session_id'];
+    expect(typeof sessionId).toBe('string');
+    expect((sessionId as string).length).toBeGreaterThan(0);
+  });
 });

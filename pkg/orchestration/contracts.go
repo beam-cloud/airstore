@@ -69,6 +69,12 @@ type RunExecutionPolicy struct {
 	NetworkEnabled  bool           `json:"network_enabled"`
 	Interactive     bool           `json:"interactive"`
 	Resources       map[string]any `json:"resources,omitempty"`
+	Retry           RunRetryPolicy `json:"retry,omitempty"`
+}
+
+type RunRetryPolicy struct {
+	MaxAttempts int `json:"max_attempts,omitempty"`
+	DelayMs     int `json:"delay_ms,omitempty"`
 }
 
 func ValidateAgentCommandParams(v *AgentCommandParams) error {
