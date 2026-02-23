@@ -1496,8 +1496,12 @@ func (b *PostgresBackend) GetRunExecutionByID(_ context.Context, id uint) (*type
 }
 
 func (b *PostgresBackend) ListRunExecutions(ctx context.Context, workspaceId uint) ([]*types.RunExecution, error) {
+	if workspaceId == 0 {
+		return nil, fmt.Errorf("workspace id is required")
+	}
+
 	query := runExecutionSelectSQL + `
-		WHERE ($1 = 0 OR workspace_id = $1)
+		WHERE workspace_id = $1
 		  AND ` + runExecutionScopeWhere + `
 		ORDER BY created_at DESC
 		LIMIT 100

@@ -52,8 +52,8 @@ func upRunTableConsolidation(tx *sql.Tx) error {
 		   IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'task')
 		      AND EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'agent_run_attempt') THEN
 		     UPDATE agent_run AS run
-		     SET created_by_member_id = COALESCE(task.created_by_member_id, run.created_by_member_id),
-		         status = CASE task.status::text
+		     SET created_by_member_id = COALESCE(latest.created_by_member_id, run.created_by_member_id),
+		         status = CASE latest.status::text
 		           WHEN 'pending' THEN 'accepted'::agent_run_status
 		           WHEN 'scheduled' THEN 'accepted'::agent_run_status
 		           WHEN 'running' THEN 'running'::agent_run_status
@@ -62,31 +62,59 @@ func upRunTableConsolidation(tx *sql.Tx) error {
 		           WHEN 'cancelled' THEN 'cancelled'::agent_run_status
 		           ELSE run.status
 		         END,
-		         type = COALESCE(NULLIF(task.type, ''), run.type),
-		         prompt = COALESCE(task.prompt, run.prompt),
-		         image = COALESCE(NULLIF(task.image, ''), run.image),
-		         entrypoint = COALESCE(task.entrypoint, run.entrypoint),
-		         env = COALESCE(task.env, run.env),
-		         hook_id = COALESCE(task.hook_id, run.hook_id),
-		         attempt = GREATEST(COALESCE(task.attempt, 1), COALESCE(run.attempt, 1)),
-		         max_attempts = GREATEST(COALESCE(task.max_attempts, 1), COALESCE(run.max_attempts, 1)),
-		         run_attempt_id = COALESCE(attempt.id, run.run_attempt_id),
-		         timeout_ms = COALESCE(task.timeout_ms, run.timeout_ms),
-		         exec_host = COALESCE(task.exec_host, run.exec_host),
-		         exec_security = COALESCE(task.exec_security, run.exec_security),
-		         exec_ask = COALESCE(task.exec_ask, run.exec_ask),
-		         runtime_type = COALESCE(task.runtime_type, run.runtime_type),
-		         workspace_access = COALESCE(task.workspace_access, run.workspace_access),
-		         network_enabled = COALESCE(task.network_enabled, run.network_enabled),
-		         exit_code = COALESCE(task.exit_code, run.exit_code),
-		         error = COALESCE(NULLIF(task.error, ''), run.error),
-		         started_at = COALESCE(task.started_at, run.started_at),
-		         ended_at = COALESCE(task.finished_at, run.ended_at),
-		         execution_policy_json = COALESCE(task.execution_policy_json, run.execution_policy_json),
+		         type = COALESCE(NULLIF(latest.type, ''), run.type),
+		         prompt = COALESCE(latest.prompt, run.prompt),
+		         image = COALESCE(NULLIF(latest.image, ''), run.image),
+		         entrypoint = COALESCE(latest.entrypoint, run.entrypoint),
+		         env = COALESCE(latest.env, run.env),
+		         hook_id = COALESCE(latest.hook_id, run.hook_id),
+		         attempt = GREATEST(COALESCE(latest.attempt, 1), COALESCE(run.attempt, 1)),
+		         max_attempts = GREATEST(COALESCE(latest.max_attempts, 1), COALESCE(run.max_attempts, 1)),
+		         run_attempt_id = COALESCE(latest.run_attempt_id, run.run_attempt_id),
+		         timeout_ms = COALESCE(latest.timeout_ms, run.timeout_ms),
+		         exec_host = COALESCE(latest.exec_host, run.exec_host),
+		         exec_security = COALESCE(latest.exec_security, run.exec_security),
+		         exec_ask = COALESCE(latest.exec_ask, run.exec_ask),
+		         runtime_type = COALESCE(latest.runtime_type, run.runtime_type),
+		         workspace_access = COALESCE(latest.workspace_access, run.workspace_access),
+		         network_enabled = COALESCE(latest.network_enabled, run.network_enabled),
+		         exit_code = COALESCE(latest.exit_code, run.exit_code),
+		         error = COALESCE(NULLIF(latest.error, ''), run.error),
+		         started_at = COALESCE(latest.started_at, run.started_at),
+		         ended_at = COALESCE(latest.finished_at, run.ended_at),
+		         execution_policy_json = COALESCE(latest.execution_policy_json, run.execution_policy_json),
 		         updated_at = CURRENT_TIMESTAMP
-		     FROM agent_run_attempt AS attempt
-		     JOIN task ON task.external_id = attempt.execution_task_external_id
-		     WHERE run.id = attempt.run_id;
+		     FROM (
+		       SELECT DISTINCT ON (attempt.run_id)
+		         attempt.run_id,
+		         attempt.id AS run_attempt_id,
+		         task.created_by_member_id,
+		         task.status,
+		         task.type,
+		         task.prompt,
+		         task.image,
+		         task.entrypoint,
+		         task.env,
+		         task.hook_id,
+		         task.attempt,
+		         task.max_attempts,
+		         task.timeout_ms,
+		         task.exec_host,
+		         task.exec_security,
+		         task.exec_ask,
+		         task.runtime_type,
+		         task.workspace_access,
+		         task.network_enabled,
+		         task.exit_code,
+		         task.error,
+		         task.started_at,
+		         task.finished_at,
+		         task.execution_policy_json
+		       FROM agent_run_attempt AS attempt
+		       JOIN task ON task.external_id = attempt.execution_task_external_id
+		       ORDER BY attempt.run_id, attempt.attempt_no DESC, attempt.created_at DESC
+		     ) AS latest
+		     WHERE run.id = latest.run_id;
 		   END IF;
 		 END $$;`,
 		`DO $$ BEGIN
@@ -243,6 +271,7 @@ func downRunTableConsolidation(tx *sql.Tx) error {
 		   network_enabled BOOLEAN NULL,
 		   execution_policy_json JSONB NOT NULL DEFAULT '{}'::jsonb
 		 );`,
+		`CREATE OR REPLACE VIEW execution_task AS SELECT * FROM task;`,
 		`CREATE TABLE IF NOT EXISTS agent_run_attempt (
 		   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
 		   run_id UUID NOT NULL REFERENCES agent_run(id) ON DELETE CASCADE,
