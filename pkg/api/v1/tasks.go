@@ -140,7 +140,7 @@ func (g *WorkspaceTasksGroup) CreateTask(c echo.Context) error {
 
 	task, deduped, err := g.agents.AcceptAgentCommand(c.Request().Context(), workspaceID, req)
 	if err != nil {
-		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return ErrorResponse(c, statusForAcceptAgentCommandError(err), err.Error())
 	}
 	statusCode := http.StatusAccepted
 	if deduped {
@@ -250,7 +250,7 @@ func (g *TasksGroup) CreateTask(c echo.Context) error {
 		SpawnedBy:         spawnedBy,
 	})
 	if err != nil {
-		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return ErrorResponse(c, statusForAcceptAgentCommandError(err), err.Error())
 	}
 
 	statusCode := http.StatusAccepted
@@ -531,6 +531,37 @@ func decodeTerminalInput(req TerminalInputRequest) ([]byte, error) {
 		return nil, errors.New("invalid data_b64")
 	}
 	return decoded, nil
+}
+
+func statusForAcceptAgentCommandError(err error) int {
+	if err == nil {
+		return http.StatusOK
+	}
+
+	if strings.Contains(strings.ToLower(err.Error()), "task service unavailable") {
+		return http.StatusServiceUnavailable
+	}
+
+	var profileErr *types.ErrAgentProfileNotFound
+	if errors.As(err, &profileErr) {
+		return http.StatusBadRequest
+	}
+
+	if isAgentCommandValidationError(err) {
+		return http.StatusBadRequest
+	}
+
+	return http.StatusInternalServerError
+}
+
+func isAgentCommandValidationError(err error) bool {
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+
+	return strings.Contains(msg, " is required") ||
+		strings.Contains(msg, " must be ") ||
+		strings.Contains(msg, " must not ") ||
+		strings.HasPrefix(msg, "invalid ") ||
+		strings.Contains(msg, "not supported")
 }
 
 // sseWriter handles SSE output formatting.
