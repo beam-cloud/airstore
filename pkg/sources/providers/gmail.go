@@ -990,9 +990,9 @@ func (g *GmailProvider) fetchMessagesMetadataBatch(ctx context.Context, token st
 		}
 		_ = json.Unmarshal(bodyBytes, &apiErr)
 		if apiErr.Error.Message != "" {
-			return nil, fmt.Errorf("gmail batch API: %s", apiErr.Error.Message)
+			return nil, gmailStatusError(resp.StatusCode, "gmail batch API: "+apiErr.Error.Message)
 		}
-		return nil, fmt.Errorf("gmail batch API: %s", resp.Status)
+		return nil, gmailStatusError(resp.StatusCode, "gmail batch API: "+resp.Status)
 	}
 
 	contentType := resp.Header.Get("Content-Type")
@@ -1381,12 +1381,19 @@ func (g *GmailProvider) request(ctx context.Context, token, path string, result 
 		}
 		json.Unmarshal(body, &apiErr)
 		if apiErr.Error.Message != "" {
-			return fmt.Errorf("gmail API: %s", apiErr.Error.Message)
+			return gmailStatusError(resp.StatusCode, "gmail API: "+apiErr.Error.Message)
 		}
-		return fmt.Errorf("gmail API: %s", resp.Status)
+		return gmailStatusError(resp.StatusCode, "gmail API: "+resp.Status)
 	}
 
 	return json.NewDecoder(resp.Body).Decode(result)
+}
+
+func gmailStatusError(statusCode int, message string) error {
+	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+		return fmt.Errorf("%w: %s", sources.ErrNotConnected, message)
+	}
+	return fmt.Errorf("%s", message)
 }
 
 // --- Helpers ---

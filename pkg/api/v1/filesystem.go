@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -2586,6 +2587,9 @@ func (g *FilesystemGroup) SyncView(c echo.Context) error {
 		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "unauthorized") {
 			return ErrorResponse(c, http.StatusNotFound, err.Error())
 		}
+		if isSyncViewConnectionError(err) {
+			return ErrorResponse(c, http.StatusBadRequest, err.Error())
+		}
 		return ErrorResponse(c, http.StatusInternalServerError, "failed to sync view")
 	}
 
@@ -2598,6 +2602,21 @@ func (g *FilesystemGroup) SyncView(c echo.Context) error {
 		"results_count":  result.ResultsCount,
 		"new_results":    result.NewResults,
 	})
+}
+
+func isSyncViewConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, sources.ErrNotConnected) {
+		return true
+	}
+
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "not connected") ||
+		strings.Contains(message, "invalid authentication") ||
+		strings.Contains(message, "invalid_grant") ||
+		strings.Contains(message, "expired token")
 }
 
 // ListResources returns available resources for an integration (repos, channels, etc.).

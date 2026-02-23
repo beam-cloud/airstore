@@ -162,6 +162,9 @@ func (s *WorkerService) SetTaskStarted(ctx context.Context, req *pb.SetTaskStart
 	}
 
 	if err := s.backend.SetRunExecutionStarted(ctx, req.TaskId); err != nil {
+		if _, ok := err.(*types.ErrRunExecutionNotFound); ok {
+			return nil, status.Errorf(codes.NotFound, "task not found: %s", req.TaskId)
+		}
 		return nil, status.Errorf(codes.Internal, "failed to set task started: %v", err)
 	}
 

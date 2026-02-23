@@ -1,4 +1,4 @@
-package gateway
+package gatewayclient
 
 import (
 	"context"
@@ -19,14 +19,14 @@ const (
 	defaultRequestTimeout = 30 * time.Second
 )
 
-// GatewayClient is a gRPC client for communicating with the gateway
+// GatewayClient is a gRPC client for communicating with the gateway.
 type GatewayClient struct {
 	conn      *grpc.ClientConn
 	client    pb.WorkerServiceClient
 	authToken string
 }
 
-// NewGatewayClient creates a new gateway gRPC client
+// NewGatewayClient creates a new gateway gRPC client.
 func NewGatewayClient(addr string, authToken string) (*GatewayClient, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultDialTimeout)
 	defer cancel()
@@ -46,7 +46,7 @@ func NewGatewayClient(addr string, authToken string) (*GatewayClient, error) {
 	}, nil
 }
 
-// Close closes the gRPC connection
+// Close closes the gRPC connection.
 func (c *GatewayClient) Close() error {
 	if c.conn != nil {
 		return c.conn.Close()
@@ -54,7 +54,7 @@ func (c *GatewayClient) Close() error {
 	return nil
 }
 
-// withAuth adds authentication metadata to context
+// withAuth adds authentication metadata to context.
 func (c *GatewayClient) withAuth(ctx context.Context) context.Context {
 	if c.authToken != "" {
 		return metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+c.authToken)
@@ -62,12 +62,12 @@ func (c *GatewayClient) withAuth(ctx context.Context) context.Context {
 	return ctx
 }
 
-// withTimeout creates a context with default timeout and auth
+// withTimeout creates a context with default timeout and auth.
 func (c *GatewayClient) withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(c.withAuth(ctx), defaultRequestTimeout)
 }
 
-// RegisterWorkerRequest is the request for registering a worker
+// RegisterWorkerRequest is the request for registering a worker.
 type RegisterWorkerRequest struct {
 	Hostname string
 	PoolName string
@@ -76,12 +76,12 @@ type RegisterWorkerRequest struct {
 	Version  string
 }
 
-// RegisterWorkerResponse is the response from registering a worker
+// RegisterWorkerResponse is the response from registering a worker.
 type RegisterWorkerResponse struct {
 	WorkerID string
 }
 
-// RegisterWorker registers a worker with the gateway
+// RegisterWorker registers a worker with the gateway.
 func (c *GatewayClient) RegisterWorker(ctx context.Context, req *RegisterWorkerRequest) (*RegisterWorkerResponse, error) {
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
@@ -100,7 +100,7 @@ func (c *GatewayClient) RegisterWorker(ctx context.Context, req *RegisterWorkerR
 	return &RegisterWorkerResponse{WorkerID: resp.WorkerId}, nil
 }
 
-// Heartbeat sends a heartbeat for the worker
+// Heartbeat sends a heartbeat for the worker.
 func (c *GatewayClient) Heartbeat(ctx context.Context, workerId string) error {
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
@@ -118,7 +118,7 @@ func (c *GatewayClient) Heartbeat(ctx context.Context, workerId string) error {
 	return nil
 }
 
-// UpdateStatus updates the worker's status
+// UpdateStatus updates the worker's status.
 func (c *GatewayClient) UpdateStatus(ctx context.Context, workerId string, workerStatus types.WorkerStatus) error {
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
@@ -137,7 +137,7 @@ func (c *GatewayClient) UpdateStatus(ctx context.Context, workerId string, worke
 	return nil
 }
 
-// Deregister removes the worker from the gateway
+// Deregister removes the worker from the gateway.
 func (c *GatewayClient) Deregister(ctx context.Context, workerId string) error {
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
@@ -152,7 +152,7 @@ func (c *GatewayClient) Deregister(ctx context.Context, workerId string) error {
 	return nil
 }
 
-// GetWorker retrieves worker information
+// GetWorker retrieves worker information.
 func (c *GatewayClient) GetWorker(ctx context.Context, workerId string) (*types.Worker, error) {
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
@@ -188,7 +188,7 @@ func (c *GatewayClient) SetTaskStarted(ctx context.Context, taskID string) error
 	return err
 }
 
-// SetTaskResult reports the result of a task to the gateway
+// SetTaskResult reports the result of a task to the gateway.
 func (c *GatewayClient) SetTaskResult(ctx context.Context, taskID string, exitCode int, errorMsg string) error {
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
@@ -205,7 +205,7 @@ func (c *GatewayClient) SetTaskResult(ctx context.Context, taskID string, exitCo
 	return nil
 }
 
-// AllocateIP requests an IP allocation for a sandbox from the gateway
+// AllocateIP requests an IP allocation for a sandbox from the gateway.
 func (c *GatewayClient) AllocateIP(ctx context.Context, sandboxID, workerID string) (*types.IPAllocation, error) {
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
@@ -225,7 +225,7 @@ func (c *GatewayClient) AllocateIP(ctx context.Context, sandboxID, workerID stri
 	}, nil
 }
 
-// ReleaseIP releases an IP allocation for a sandbox
+// ReleaseIP releases an IP allocation for a sandbox.
 func (c *GatewayClient) ReleaseIP(ctx context.Context, sandboxID string) error {
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
@@ -240,7 +240,7 @@ func (c *GatewayClient) ReleaseIP(ctx context.Context, sandboxID string) error {
 	return nil
 }
 
-// isNotFound checks if the error is a gRPC NotFound status
+// isNotFound checks if the error is a gRPC NotFound status.
 func isNotFound(err error) bool {
 	if st, ok := status.FromError(err); ok {
 		return st.Code() == codes.NotFound

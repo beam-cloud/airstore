@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/common"
-	"github.com/beam-cloud/airstore/pkg/gateway"
+	gatewayclient "github.com/beam-cloud/airstore/pkg/gateway/client"
 	"github.com/beam-cloud/airstore/pkg/runtime"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/opencontainers/runtime-spec/specs-go"
@@ -75,7 +75,7 @@ type Config struct {
 	// Gateway
 	GatewayAddr   string
 	AuthToken     string
-	GatewayClient *gateway.GatewayClient
+	GatewayClient *gatewayclient.GatewayClient
 
 	// Features
 	EnableFilesystem bool

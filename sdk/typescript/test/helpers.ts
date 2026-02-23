@@ -6,6 +6,7 @@
  *   AIRSTORE_BASE_URL – Optional. Defaults to http://localhost:1994/api/v1
  */
 import { Airstore } from '../src/airstore.js';
+import { APIError } from '../src/errors.js';
 import type { Workspace } from '../src/types/workspaces.js';
 
 declare const process: {
@@ -17,6 +18,7 @@ declare const process: {
 // ---------------------------------------------------------------------------
 
 let _client: Airstore | undefined;
+const _ephemeralWorkspaceIds = new Set<string>();
 
 /**
  * Get a shared Airstore client configured from environment variables.
@@ -56,18 +58,51 @@ export async function createTestWorkspace(
   suffix?: string,
 ): Promise<Workspace> {
   const client = getClient();
+  const explicitWorkspaceId = process.env['AIRSTORE_WORKSPACE_ID'];
+  if (explicitWorkspaceId) {
+    return client.workspaces.retrieve(explicitWorkspaceId);
+  }
+
   const name = `sdk-test-${suffix ?? 'default'}-${Date.now()}`;
-  return client.workspaces.create({ name });
+  try {
+    const workspace = await client.workspaces.create({ name });
+    _ephemeralWorkspaceIds.add(workspace.external_id);
+    return workspace;
+  } catch (err) {
+    // Workspace-member tokens can't create workspaces; fall back to the token's workspace.
+    if (err instanceof APIError && err.status === 403) {
+      const whoami = await client.request<{ workspace_id?: string; workspace_name?: string }>(
+        'GET',
+        '/auth/whoami',
+      );
+      if (whoami.workspace_id) {
+        const now = new Date().toISOString();
+        return {
+          external_id: whoami.workspace_id,
+          name: whoami.workspace_name ?? 'workspace',
+          created_at: now,
+          updated_at: now,
+        };
+      }
+    }
+    throw err;
+  }
 }
 
 /**
  * Delete a workspace, swallowing errors (best-effort cleanup).
  */
 export async function deleteTestWorkspace(id: string): Promise<void> {
+  if (!_ephemeralWorkspaceIds.has(id)) {
+    return;
+  }
+
   try {
     await getClient().workspaces.del(id);
   } catch {
     // Swallow — workspace may already be deleted or test may have failed before creation.
+  } finally {
+    _ephemeralWorkspaceIds.delete(id);
   }
 }
 
