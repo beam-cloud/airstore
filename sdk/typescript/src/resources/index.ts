@@ -5,3 +5,6 @@ export { Tokens } from './tokens.js';
 export { Members } from './members.js';
 export { OAuth } from './oauth.js';
 export { Filesystem } from './filesystem.js';
+export { Agents } from './agents.js';
+export { Tasks } from './tasks.js';
+export { Runs } from './runs.js';

@@ -14,6 +14,7 @@ import (
 type Client struct {
 	conn    *grpc.ClientConn
 	Gateway pb.GatewayServiceClient
+	Agents  pb.AgentServiceClient
 	Tools   pb.ToolServiceClient
 	Context pb.ContextServiceClient
 }
@@ -37,6 +38,7 @@ func NewClient(addr, token string) (*Client, error) {
 	return &Client{
 		conn:    conn,
 		Gateway: pb.NewGatewayServiceClient(conn),
+		Agents:  pb.NewAgentServiceClient(conn),
 		Tools:   pb.NewToolServiceClient(conn),
 		Context: pb.NewContextServiceClient(conn),
 	}, nil

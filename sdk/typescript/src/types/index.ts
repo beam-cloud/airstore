@@ -6,3 +6,6 @@ export * from './tokens.js';
 export * from './members.js';
 export * from './oauth.js';
 export * from './filesystem.js';
+export * from './agents.js';
+export * from './tasks.js';
+export * from './runs.js';

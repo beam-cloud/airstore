@@ -23,13 +23,11 @@ import (
 // SandboxManager manages the lifecycle of sandboxes on a worker.
 type SandboxManager struct {
 	// Configuration
-	paths           types.WorkerPaths
-	workerID        string
-	gatewayAddr     string
-	authToken       string
-	anthropicAPIKey string
-	kernelAPIKey    string
-	enableFS        bool
+	paths       types.WorkerPaths
+	workerID    string
+	gatewayAddr string
+	authToken   string
+	enableFS    bool
 
 	// Components
 	runtime      runtime.Runtime
@@ -44,6 +42,10 @@ type SandboxManager struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	fsCmd     *exec.Cmd
+
+	// Prompt runners
+	promptRunners       map[string]AgentExecutionRunner
+	defaultPromptRunner AgentExecutionRunner
 }
 
 // Sandbox represents a running sandbox with its resources.
@@ -163,21 +165,28 @@ func NewSandboxManager(ctx context.Context, cfg Config) (*SandboxManager, error)
 	}
 
 	manager := &SandboxManager{
-		paths:           paths,
-		workerID:        cfg.WorkerID,
-		gatewayAddr:     cfg.GatewayAddr,
-		authToken:       cfg.AuthToken,
-		anthropicAPIKey: cfg.AnthropicAPIKey,
-		kernelAPIKey:    cfg.KernelAPIKey,
-		enableFS:        cfg.EnableFilesystem,
-		runtime:         rt,
-		imageManager:    imgMgr,
-		mountManager:    mountMgr,
-		network:         netMgr,
-		s2:              s2,
-		sandboxes:       make(map[string]*Sandbox),
-		ctx:             managerCtx,
-		cancel:          cancel,
+		paths:        paths,
+		workerID:     cfg.WorkerID,
+		gatewayAddr:  cfg.GatewayAddr,
+		authToken:    cfg.AuthToken,
+		enableFS:     cfg.EnableFilesystem,
+		runtime:      rt,
+		imageManager: imgMgr,
+		mountManager: mountMgr,
+		network:      netMgr,
+		s2:           s2,
+		sandboxes:    make(map[string]*Sandbox),
+		ctx:          managerCtx,
+		cancel:       cancel,
+	}
+	claudeRunner := NewClaudeCodeRunner(ClaudeCodeRunnerOptions{
+		AnthropicAPIKey: cfg.AnthropicAPIKey,
+		KernelAPIKey:    cfg.KernelAPIKey,
+	})
+	manager.defaultPromptRunner = claudeRunner
+	manager.promptRunners = map[string]AgentExecutionRunner{
+		"claude":    claudeRunner,
+		"anthropic": claudeRunner,
 	}
 
 	// Bring up the global worker mount during initialization so the first task
@@ -199,7 +208,7 @@ func coalesce(a, b string) string {
 	return b
 }
 
-func (m *SandboxManager) publishStatus(ctx context.Context, taskID string, status types.TaskStatus, exitCode *int, errMsg string) {
+func (m *SandboxManager) publishStatus(ctx context.Context, taskID string, status types.RunExecutionStatus, exitCode *int, errMsg string) {
 	if m.s2 != nil && m.s2.Enabled() {
 		m.s2.AppendStatus(ctx, taskID, string(status), exitCode, errMsg)
 	}
@@ -344,12 +353,20 @@ func (m *SandboxManager) Create(cfg types.SandboxConfig) (*types.SandboxState, e
 		return nil, fmt.Errorf("sandbox %s already exists", cfg.ID)
 	}
 
-	log.Info().
-		Str("sandbox_id", cfg.ID).
-		Str("workspace_id", cfg.WorkspaceID).
-		Str("image", cfg.Image).
-		Str("runtime", string(cfg.Runtime)).
-		Msg("creating sandbox")
+	taskID := ""
+	if strings.HasPrefix(cfg.ID, "task-") {
+		taskID = strings.TrimPrefix(cfg.ID, "task-")
+	}
+	createEvent := addTaskExecutionContextFromEnv(
+		log.Info().
+			Str("sandbox_id", cfg.ID).
+			Str("workspace_id", cfg.WorkspaceID).
+			Str("image", cfg.Image).
+			Str("runtime", string(cfg.Runtime)),
+		taskID,
+		cfg.Env,
+	)
+	createEvent.Msg("creating sandbox")
 
 	// Prepare rootfs from image using CLIP (lazy-loading FUSE mount)
 	rootfsPath, cleanupRootfs, err := m.imageManager.PrepareRootfs(m.ctx, cfg.Image)
@@ -393,9 +410,9 @@ func (m *SandboxManager) Create(cfg types.SandboxConfig) (*types.SandboxState, e
 		return nil, fmt.Errorf("failed to prepare spec: %w", err)
 	}
 
-	// Set up container networking (NAT for internet access)
+	// Set up container networking (NAT for internet access) unless disabled.
 	var containerIP string
-	if m.network != nil {
+	if m.network != nil && cfg.Network.Mode != "none" {
 		ip, err := m.network.Setup(cfg.ID, spec)
 		if err != nil {
 			overlay.Cleanup()
@@ -762,7 +779,7 @@ func (m *SandboxManager) generateSpec(cfg types.SandboxConfig, rootfsPath string
 
 	// Add filesystem mount (bind mount from FUSE mount)
 	if cfg.FilesystemMount != "" {
-		if err := m.addFilesystemMount(&spec, cfg.FilesystemMount); err != nil {
+		if err := m.addFilesystemMount(&spec, cfg.FilesystemMount, cfg.FilesystemReadOnly); err != nil {
 			return nil, fmt.Errorf("failed to add filesystem mount: %w", err)
 		}
 	}
@@ -822,7 +839,7 @@ func (m *SandboxManager) generateSpec(cfg types.SandboxConfig, rootfsPath string
 }
 
 // addFilesystemMount bind-mounts a FUSE filesystem into the sandbox at /workspace.
-func (m *SandboxManager) addFilesystemMount(spec *specs.Spec, source string) error {
+func (m *SandboxManager) addFilesystemMount(spec *specs.Spec, source string, readOnly bool) error {
 	// Verify the mount exists and includes required system roots.
 	ready, missing, err := checkFilesystemMountReady(source)
 	if err != nil {
@@ -835,11 +852,18 @@ func (m *SandboxManager) addFilesystemMount(spec *specs.Spec, source string) err
 	entries, _ := os.ReadDir(source)
 
 	// Bind mount at container working directory
+	options := []string{"rbind"}
+	if readOnly {
+		options = append(options, "ro")
+	} else {
+		options = append(options, "rw")
+	}
+
 	spec.Mounts = append(spec.Mounts, specs.Mount{
 		Destination: types.ContainerWorkDir,
 		Type:        "bind",
 		Source:      source,
-		Options:     []string{"rbind", "rw"},
+		Options:     options,
 	})
 
 	log.Debug().
@@ -851,15 +875,10 @@ func (m *SandboxManager) addFilesystemMount(spec *specs.Spec, source string) err
 	return nil
 }
 
-// ptrInt64 returns a pointer to an int64
-func ptrInt64(v int64) *int64 {
-	return &v
-}
-
 // buildEntrypoint constructs the entrypoint for a task.
 // Prompt tasks are resolved through prompt runner entrypoints; all other tasks
 // use their explicit task entrypoint.
-func (m *SandboxManager) buildEntrypoint(task types.Task, env map[string]string) []string {
+func (m *SandboxManager) buildEntrypoint(task types.RunExecution, env map[string]string) []string {
 	if task.Prompt == "" {
 		return task.Entrypoint
 	}
@@ -867,49 +886,36 @@ func (m *SandboxManager) buildEntrypoint(task types.Task, env map[string]string)
 	return m.buildPromptTaskEntrypoint(task, env)
 }
 
-func (m *SandboxManager) buildPromptTaskEntrypoint(task types.Task, env map[string]string) []string {
-	// Prompt tasks currently use Claude CLI. Keep this isolated so future
-	// prompt runners can be swapped without touching generic entrypoint flow.
-	return m.buildClaudePromptEntrypoint(task, env)
+func (m *SandboxManager) buildPromptTaskEntrypoint(task types.RunExecution, env map[string]string) []string {
+	runner := m.resolvePromptRunner(task, env)
+	return runner.BuildEntrypoint(task, env)
 }
 
-func (m *SandboxManager) buildClaudePromptEntrypoint(task types.Task, env map[string]string) []string {
-	m.injectAnthropicAPIKey(env, true)
-	m.injectKernelEnv(env)
-
-	log.Info().
-		Str("task_id", task.ExternalId).
-		Str("prompt", task.Prompt[:min(50, len(task.Prompt))]).
-		Msg("running claude code task")
-
-	return claudePromptEntrypoint(task.Prompt)
-}
-
-func (m *SandboxManager) injectKernelEnv(env map[string]string) {
-	if m.kernelAPIKey == "" {
-		log.Warn().Msg("kernel API key not configured, browser tool will not work")
-		return
+func (m *SandboxManager) resolvePromptRunner(task types.RunExecution, env map[string]string) AgentExecutionRunner {
+	defaultRunner := m.defaultPromptRunner
+	if defaultRunner == nil {
+		defaultRunner = NewClaudeCodeRunner(ClaudeCodeRunnerOptions{})
 	}
-	m.injectAPIKey(env, "KERNEL_API_KEY", m.kernelAPIKey, false)
-	if env["AGENT_BROWSER_PROVIDER"] == "" {
-		env["AGENT_BROWSER_PROVIDER"] = "kernel"
+
+	provider := runnerProviderFromEnv(env)
+	if provider == "" {
+		return defaultRunner
 	}
-	log.Debug().Str("provider", env["AGENT_BROWSER_PROVIDER"]).Msg("kernel browser env injected")
+
+	runner, ok := m.promptRunners[provider]
+	if !ok || runner == nil {
+		addTaskExecutionContext(
+			log.Warn().
+				Str("provider", provider).
+				Str("default_runner", defaultRunner.Name()),
+			task,
+		).Msg("unsupported agent provider for prompt task, falling back to default runner")
+		return defaultRunner
+	}
+	return runner
 }
 
-func claudePromptEntrypoint(prompt string) []string {
-	// Claude Code CLI: non-interactive, streaming JSON output
-	return []string{
-		"claude",
-		"--print",
-		"--verbose",
-		"--output-format", "stream-json",
-		"--dangerously-skip-permissions",
-		"-p", prompt,
-	}
-}
-
-func (m *SandboxManager) copyTaskEnv(task types.Task) map[string]string {
+func (m *SandboxManager) copyTaskEnv(task types.RunExecution) map[string]string {
 	env := make(map[string]string, len(task.Env)+1)
 	for key, value := range task.Env {
 		env[key] = value
@@ -917,50 +923,63 @@ func (m *SandboxManager) copyTaskEnv(task types.Task) map[string]string {
 	return env
 }
 
-func (m *SandboxManager) injectAnthropicAPIKey(env map[string]string, overwrite bool) {
-	m.injectAPIKey(env, "ANTHROPIC_API_KEY", m.anthropicAPIKey, overwrite)
-}
-
-func (m *SandboxManager) injectAPIKey(env map[string]string, key, value string, overwrite bool) {
-	if value == "" {
-		return
+func (m *SandboxManager) buildTaskSandboxConfig(task types.RunExecution, entrypoint []string, env map[string]string, mountSource string) types.SandboxConfig {
+	runtimeType := types.ContainerRuntimeGvisor
+	if task.RuntimeType != nil && *task.RuntimeType == types.ContainerRuntimeRunc.String() {
+		runtimeType = types.ContainerRuntimeRunc
 	}
-	if overwrite || env[key] == "" {
-		env[key] = value
-	}
-}
 
-func (m *SandboxManager) buildTaskSandboxConfig(task types.Task, entrypoint []string, env map[string]string, mountSource string) types.SandboxConfig {
+	workspaceAccess := "rw"
+	if task.WorkspaceAccess != nil && *task.WorkspaceAccess != "" {
+		workspaceAccess = *task.WorkspaceAccess
+	}
+	if workspaceAccess == "none" {
+		mountSource = ""
+	}
+
+	networkMode := "bridge"
+	if task.NetworkEnabled != nil && !*task.NetworkEnabled {
+		networkMode = "none"
+	}
+
 	return types.SandboxConfig{
-		ID:              fmt.Sprintf("task-%s", task.ExternalId),
-		WorkspaceID:     fmt.Sprintf("%d", task.WorkspaceId),
-		Image:           task.Image,
-		Runtime:         types.ContainerRuntimeGvisor,
-		Entrypoint:      entrypoint,
-		Env:             env,
-		WorkingDir:      types.ContainerWorkDir,
-		FilesystemMount: mountSource,
-		Resources:       task.GetResources(),
+		ID:                 fmt.Sprintf("task-%s", task.ExternalId),
+		WorkspaceID:        fmt.Sprintf("%d", task.WorkspaceId),
+		Image:              task.Image,
+		Runtime:            runtimeType,
+		Entrypoint:         entrypoint,
+		Env:                env,
+		WorkingDir:         types.ContainerWorkDir,
+		FilesystemMount:    mountSource,
+		FilesystemReadOnly: workspaceAccess == "ro",
+		Resources:          task.GetResources(),
+		Network: types.SandboxNetwork{
+			Mode: networkMode,
+		},
 	}
 }
 
 // mountFilesystem sets up the filesystem mount for a task.
 // Prefers task-specific mount with member token, falls back to worker global mount.
-func (m *SandboxManager) mountFilesystem(ctx context.Context, task types.Task) string {
+func (m *SandboxManager) mountFilesystem(ctx context.Context, task types.RunExecution) string {
+	if task.WorkspaceAccess != nil && *task.WorkspaceAccess == "none" {
+		return ""
+	}
+
 	// Try task-specific mount with member token
 	if task.MemberToken != "" && m.mountManager != nil {
 		mountPath, err := m.mountManager.Mount(ctx, task.ExternalId, task.MemberToken)
 		if err != nil {
-			log.Warn().Err(err).Str("task_id", task.ExternalId).Msg("failed to create task mount")
+			addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to create task mount")
 		} else {
-			log.Debug().Str("task_id", task.ExternalId).Msg("mounted filesystem with task token")
+			addTaskExecutionContext(log.Debug().Str("mount_path", mountPath), task).Msg("mounted filesystem with task token")
 			return mountPath
 		}
 	}
 
 	// Fall back to worker's global mount
 	if m.enableFS {
-		log.Debug().Str("task_id", task.ExternalId).Msg("using worker global mount")
+		addTaskExecutionContext(log.Debug().Str("mount_path", m.paths.WorkerMount), task).Msg("using worker global mount")
 		return m.paths.WorkerMount
 	}
 
@@ -1034,7 +1053,7 @@ func (m *SandboxManager) AttachPTY(ctx context.Context, sandboxID string, stdin 
 }
 
 // RunTask creates and runs a sandbox for a task, returning when complete
-func (m *SandboxManager) RunTask(ctx context.Context, task types.Task) (*types.TaskResult, error) {
+func (m *SandboxManager) RunTask(ctx context.Context, task types.RunExecution) (*types.RunExecutionResult, error) {
 	sandboxID := fmt.Sprintf("task-%s", task.ExternalId)
 
 	env := m.copyTaskEnv(task)
@@ -1063,15 +1082,15 @@ func (m *SandboxManager) RunTask(ctx context.Context, task types.Task) (*types.T
 		NewConsoleWriter(task.ExternalId, "stdout"),
 	)
 	if err := m.SetOutput(sandboxID, taskOutput, taskOutput.Flush); err != nil {
-		log.Warn().Err(err).Str("task_id", task.ExternalId).Msg("failed to set output")
+		addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to set output")
 	}
 
 	// Publish starting status
-	m.publishStatus(ctx, task.ExternalId, types.TaskStatusRunning, nil, "")
+	m.publishStatus(ctx, task.ExternalId, types.RunExecutionStatusRunning, nil, "")
 
 	// Start the sandbox
 	if err := m.Start(sandboxID); err != nil {
-		m.publishStatus(ctx, task.ExternalId, types.TaskStatusFailed, nil, err.Error())
+		m.publishStatus(ctx, task.ExternalId, types.RunExecutionStatusFailed, nil, err.Error())
 		return nil, fmt.Errorf("failed to start sandbox: %w", err)
 	}
 
@@ -1088,8 +1107,8 @@ func (m *SandboxManager) RunTask(ctx context.Context, task types.Task) (*types.T
 			m.Stop(sandboxID, true)
 			exitCode := -1
 			errMsg := "task timeout or cancelled"
-			m.publishStatus(ctx, task.ExternalId, types.TaskStatusCancelled, &exitCode, errMsg)
-			return &types.TaskResult{
+			m.publishStatus(ctx, task.ExternalId, types.RunExecutionStatusCancelled, &exitCode, errMsg)
+			return &types.RunExecutionResult{
 				ID:       task.ExternalId,
 				ExitCode: exitCode,
 				Error:    errMsg,
@@ -1107,13 +1126,13 @@ func (m *SandboxManager) RunTask(ctx context.Context, task types.Task) (*types.T
 				taskOutput.Flush()
 
 				// Publish completion status
-				status := types.TaskStatusComplete
+				status := types.RunExecutionStatusComplete
 				if state.ExitCode != 0 || state.Error != "" {
-					status = types.TaskStatusFailed
+					status = types.RunExecutionStatusFailed
 				}
 				m.publishStatus(ctx, task.ExternalId, status, &state.ExitCode, state.Error)
 
-				return &types.TaskResult{
+				return &types.RunExecutionResult{
 					ID:       task.ExternalId,
 					ExitCode: state.ExitCode,
 					Error:    state.Error,

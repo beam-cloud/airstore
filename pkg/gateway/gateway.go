@@ -31,6 +31,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/hooks"
 	"github.com/beam-cloud/airstore/pkg/instrumentation"
 	"github.com/beam-cloud/airstore/pkg/oauth"
+	"github.com/beam-cloud/airstore/pkg/orchestration"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/scheduler"
 	"github.com/beam-cloud/airstore/pkg/sources"
@@ -46,7 +47,7 @@ import (
 type Gateway struct {
 	Config      types.AppConfig
 	RedisClient *common.RedisClient
-	BackendRepo *repository.PostgresBackend
+	BackendRepo repository.BackendRepository
 	httpServer  *http.Server
 	grpcServer  *grpc.Server
 	echo        *echo.Echo
@@ -86,7 +87,7 @@ func NewGateway() (*Gateway, error) {
 	}
 
 	var redisClient *common.RedisClient
-	var backendRepo *repository.PostgresBackend
+	var backendRepo repository.BackendRepository
 
 	// Local mode: skip Redis and Postgres
 	if config.IsLocalMode() {
@@ -349,7 +350,8 @@ func (g *Gateway) registerServices() error {
 
 	// Register worker gRPC service (for worker-to-gateway communication)
 	if g.scheduler != nil {
-		workerService := services.NewWorkerService(g.scheduler, g.BackendRepo, g.scheduler.WorkerRepo())
+		taskQueue := repository.NewRedisTaskQueue(g.RedisClient, "default")
+		workerService := services.NewWorkerService(g.scheduler, g.BackendRepo, g.scheduler.WorkerRepo(), taskQueue)
 		pb.RegisterWorkerServiceServer(g.grpcServer, workerService)
 		log.Info().Msg("worker service registered")
 	}
@@ -374,7 +376,7 @@ func (g *Gateway) registerServices() error {
 	// Register gateway gRPC service (workspace/member/token/connection/task management)
 	var gatewayService *services.GatewayService
 	if g.BackendRepo != nil {
-		gatewayService = services.NewGatewayService(g.BackendRepo, g.s2Client, filesystemStore, g.eventBus, g.sourceRegistry)
+		gatewayService = services.NewGatewayService(g.BackendRepo, filesystemStore, g.eventBus, g.sourceRegistry)
 		pb.RegisterGatewayServiceServer(g.grpcServer, gatewayService)
 		log.Info().Msg("gateway service registered")
 	}
@@ -457,14 +459,8 @@ func (g *Gateway) registerServices() error {
 	if g.BackendRepo != nil {
 		taskQueue := repository.NewRedisTaskQueue(g.RedisClient, "default")
 
-		var terminalIO repository.TerminalIORepository
-		if g.RedisClient != nil {
-			terminalIO = repository.NewRedisTerminalIORepository(g.RedisClient)
-		}
-
-		// Wire task queue into the gRPC gateway service for CreateTask/DeleteTask
+		// Wire source cache invalidation hooks into gateway service.
 		if gatewayService != nil {
-			gatewayService.SetTaskQueue(taskQueue, g.Config.Sandbox.GetDefaultImage())
 			gatewayService.SetSourceService(sourceService)
 		}
 
@@ -540,8 +536,27 @@ func (g *Gateway) registerServices() error {
 		accessLogGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
 		apiv1.NewAccessLogGroup(accessLogGroup, g.BackendRepo, g.s2Client, sourceService)
 
-		// Tasks API
-		apiv1.NewTasksGroup(g.baseRouteGroup.Group("/tasks"), g.BackendRepo, taskQueue, terminalIO, g.s2Client, g.Config.Sandbox.GetDefaultImage())
+		// Agent/task/run engine and gRPC service.
+		orchestratorSvc := orchestration.NewAgentService(
+			g.ctx,
+			g.BackendRepo,
+			taskQueue,
+			g.RedisClient,
+			g.s2Client,
+			g.Config.Sandbox.GetDefaultImage(),
+		)
+		orchestratorSvc.Start(g.ctx)
+		agentAPI := orchestration.NewAgentAPI(g.BackendRepo, orchestratorSvc)
+		agentService := services.NewAgentService(g.BackendRepo, agentAPI, g.s2Client)
+		pb.RegisterAgentServiceServer(g.grpcServer, agentService)
+		log.Info().Msg("agent service registered")
+
+		// Agent/task/run HTTP APIs (workspace-scoped)
+		agentAPIRoot := g.baseRouteGroup.Group("/workspaces/:workspace_id")
+		agentAPIRoot.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
+		apiv1.NewAgentsGroup(agentAPIRoot.Group("/agents"), agentAPI)
+		apiv1.NewWorkspaceTasksGroup(agentAPIRoot.Group("/tasks"), agentAPI)
+		apiv1.NewRunsGroup(agentAPIRoot.Group("/runs"), agentAPI)
 
 		// Hook engine: matches events → hooks → tasks, polls for retries
 		var skillReader hooks.SkillReader
@@ -584,7 +599,7 @@ func (g *Gateway) registerServices() error {
 			log.Warn().Msg("oauth API registered but no providers configured (set oauth.callbackUrl and provider credentials)")
 		}
 
-		log.Info().Msg("workspace, members, tokens, connections, hooks, and tasks APIs registered")
+		log.Info().Msg("workspace, members, tokens, connections, hooks, and agent/task/run APIs registered")
 	}
 
 	return nil

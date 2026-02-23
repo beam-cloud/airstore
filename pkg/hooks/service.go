@@ -127,8 +127,8 @@ func (s *Service) Delete(ctx context.Context, externalId string) error {
 }
 
 // ListRuns returns tasks associated with a hook.
-func (s *Service) ListRuns(ctx context.Context, hookId uint) ([]*types.Task, error) {
-	return s.Backend.ListTasksByHook(ctx, hookId)
+func (s *Service) ListRuns(ctx context.Context, hookId uint) ([]*types.RunExecution, error) {
+	return s.Backend.ListRunExecutionsByHook(ctx, hookId)
 }
 
 func (s *Service) invalidateCache(workspaceId uint) {

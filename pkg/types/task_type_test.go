@@ -2,22 +2,22 @@ package types
 
 import "testing"
 
-func TestTaskNormalizeType_DefaultsToBackground(t *testing.T) {
-	task := &Task{}
-	task.NormalizeType()
-	if task.Type != TaskTypeBackground {
-		t.Fatalf("expected default type %q, got %q", TaskTypeBackground, task.Type)
+func TestRunExecutionNormalizeType_DefaultsToBackground(t *testing.T) {
+	exec := &RunExecution{}
+	exec.NormalizeType()
+	if exec.Type != RunExecutionTypeBackground {
+		t.Fatalf("expected default type %q, got %q", RunExecutionTypeBackground, exec.Type)
 	}
 }
 
-func TestTaskIsInteractive(t *testing.T) {
-	background := &Task{Type: TaskTypeBackground}
+func TestRunExecutionIsInteractive(t *testing.T) {
+	background := &RunExecution{Type: RunExecutionTypeBackground}
 	if background.IsInteractive() {
-		t.Fatalf("background task should not be interactive")
+		t.Fatalf("background run execution should not be interactive")
 	}
 
-	interactive := &Task{Type: TaskTypeInteractive}
+	interactive := &RunExecution{Type: RunExecutionTypeInteractive}
 	if !interactive.IsInteractive() {
-		t.Fatalf("interactive task should be interactive")
+		t.Fatalf("interactive run execution should be interactive")
 	}
 }

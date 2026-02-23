@@ -2,7 +2,7 @@
  * Shared test utilities for Airstore SDK integration tests.
  *
  * Configuration via environment variables:
- *   AIRSTORE_API_KEY  – Required. Admin or org token for API access.
+ *   AIRSTORE_API_KEY  – Required. Workspace/org/admin token for API access.
  *   AIRSTORE_BASE_URL – Optional. Defaults to http://localhost:1994/api/v1
  */
 import { Airstore } from '../src/airstore.js';
@@ -46,6 +46,7 @@ export function getClient(): Airstore {
 /**
  * Create a temporary workspace for testing. Returns the workspace object.
  * Name is prefixed with `sdk-test-` and includes a timestamp for uniqueness.
+ * Requires token permissions to create workspaces.
  */
 export async function createTestWorkspace(
   suffix?: string,

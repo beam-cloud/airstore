@@ -20,29 +20,18 @@ type GatewayService struct {
 	pb.UnimplementedGatewayServiceServer
 	backend        repository.BackendRepository
 	fsStore        repository.FilesystemStore
-	s2Client       *common.S2Client
 	hooksSvc       *hooks.Service
-	taskQueue      repository.TaskQueue
 	sourceRegistry *sources.Registry
 	sourceService  *SourceService
-	defaultImage   string
 }
 
-func NewGatewayService(backend repository.BackendRepository, s2Client *common.S2Client, fsStore repository.FilesystemStore, eventBus *common.EventBus, sourceRegistry *sources.Registry) *GatewayService {
+func NewGatewayService(backend repository.BackendRepository, fsStore repository.FilesystemStore, eventBus *common.EventBus, sourceRegistry *sources.Registry) *GatewayService {
 	return &GatewayService{
 		backend:        backend,
-		s2Client:       s2Client,
 		fsStore:        fsStore,
 		hooksSvc:       &hooks.Service{Store: fsStore, Backend: backend, EventBus: eventBus},
 		sourceRegistry: sourceRegistry,
 	}
-}
-
-// SetTaskQueue wires the task queue and default image for CreateTask.
-// Called after the queue is initialized during gateway startup.
-func (s *GatewayService) SetTaskQueue(queue repository.TaskQueue, defaultImage string) {
-	s.taskQueue = queue
-	s.defaultImage = defaultImage
 }
 
 // SetSourceService injects the SourceService so that connection mutations
@@ -410,173 +399,6 @@ func (s *GatewayService) RemoveConnection(ctx context.Context, req *pb.RemoveCon
 	return &pb.DeleteResponse{Ok: true}, nil
 }
 
-// Tasks
-
-func (s *GatewayService) CreateTask(ctx context.Context, req *pb.CreateTaskRequest) (*pb.TaskResponse, error) {
-	workspaceId := auth.WorkspaceId(ctx)
-	if workspaceId == 0 {
-		return &pb.TaskResponse{Ok: false, Error: "authentication required"}, nil
-	}
-
-	image := req.Image
-	if req.Prompt != "" && image == "" {
-		image = s.defaultImage
-	}
-	taskType := types.TaskType(req.Type)
-	if taskType == "" {
-		taskType = types.TaskTypeBackground
-	}
-	if taskType != types.TaskTypeBackground && taskType != types.TaskTypeInteractive {
-		return &pb.TaskResponse{Ok: false, Error: "type must be 'background' or 'interactive'"}, nil
-	}
-	if image == "" && taskType == types.TaskTypeInteractive {
-		image = s.defaultImage
-	}
-	if image == "" {
-		return &pb.TaskResponse{Ok: false, Error: "image or prompt is required"}, nil
-	}
-
-	// Get member info and token from auth context
-	var createdByMemberId *uint
-	memberId := auth.MemberId(ctx)
-	if memberId > 0 {
-		createdByMemberId = &memberId
-	}
-
-	memberToken, err := auth.EnsureTaskMountToken(ctx, workspaceId, extractRawToken(ctx), s.backend)
-	if err != nil {
-		return &pb.TaskResponse{Ok: false, Error: "failed to provision workspace token: " + err.Error()}, nil
-	}
-
-	env := req.Env
-	if env == nil {
-		env = make(map[string]string)
-	}
-	entrypoint := req.Entrypoint
-	if entrypoint == nil {
-		entrypoint = []string{}
-	}
-
-	task := &types.Task{
-		WorkspaceId:       workspaceId,
-		CreatedByMemberId: createdByMemberId,
-		MemberToken:       memberToken,
-		Status:            types.TaskStatusPending,
-		Type:              taskType,
-		Prompt:            req.Prompt,
-		Image:             image,
-		Entrypoint:        entrypoint,
-		Env:               env,
-	}
-
-	if err := s.backend.CreateTask(ctx, task); err != nil {
-		return &pb.TaskResponse{Ok: false, Error: err.Error()}, nil
-	}
-
-	if s.taskQueue != nil {
-		_ = s.taskQueue.Push(ctx, task)
-	}
-
-	return &pb.TaskResponse{Ok: true, Task: taskToPb(task)}, nil
-}
-
-func (s *GatewayService) DeleteTask(ctx context.Context, req *pb.DeleteTaskRequest) (*pb.DeleteResponse, error) {
-	workspaceId := auth.WorkspaceId(ctx)
-	if workspaceId == 0 {
-		return &pb.DeleteResponse{Ok: false, Error: "authentication required"}, nil
-	}
-
-	// Verify the task belongs to the caller's workspace before deleting.
-	task, err := s.backend.GetTask(ctx, req.Id)
-	if err != nil {
-		if _, ok := err.(*types.ErrTaskNotFound); ok {
-			return &pb.DeleteResponse{Ok: false, Error: "task not found"}, nil
-		}
-		return &pb.DeleteResponse{Ok: false, Error: err.Error()}, nil
-	}
-	if task.WorkspaceId != workspaceId {
-		return &pb.DeleteResponse{Ok: false, Error: "task not found"}, nil
-	}
-
-	if err := s.backend.DeleteTask(ctx, req.Id); err != nil {
-		return &pb.DeleteResponse{Ok: false, Error: err.Error()}, nil
-	}
-	return &pb.DeleteResponse{Ok: true}, nil
-}
-
-func (s *GatewayService) ListTasks(ctx context.Context, req *pb.ListTasksRequest) (*pb.ListTasksResponse, error) {
-	workspaceId := auth.WorkspaceId(ctx)
-	if workspaceId == 0 {
-		return &pb.ListTasksResponse{Ok: false, Error: "authentication required"}, nil
-	}
-
-	tasks, err := s.backend.ListTasks(ctx, workspaceId)
-	if err != nil {
-		return &pb.ListTasksResponse{Ok: false, Error: err.Error()}, nil
-	}
-
-	pbTasks := make([]*pb.Task, 0, len(tasks))
-	for _, t := range tasks {
-		pbTasks = append(pbTasks, taskToPb(t))
-	}
-	return &pb.ListTasksResponse{Ok: true, Tasks: pbTasks}, nil
-}
-
-func (s *GatewayService) GetTask(ctx context.Context, req *pb.GetTaskRequest) (*pb.TaskResponse, error) {
-	rc := auth.AuthInfoFromContext(ctx)
-	if rc == nil {
-		return &pb.TaskResponse{Ok: false, Error: "authentication required"}, nil
-	}
-
-	task, err := s.backend.GetTask(ctx, req.Id)
-	if err != nil {
-		if _, ok := err.(*types.ErrTaskNotFound); ok {
-			return &pb.TaskResponse{Ok: false, Error: "task not found"}, nil
-		}
-		return &pb.TaskResponse{Ok: false, Error: err.Error()}, nil
-	}
-
-	return &pb.TaskResponse{Ok: true, Task: taskToPb(task)}, nil
-}
-
-func (s *GatewayService) GetTaskLogs(ctx context.Context, req *pb.GetTaskLogsRequest) (*pb.GetTaskLogsResponse, error) {
-	rc := auth.AuthInfoFromContext(ctx)
-	if rc == nil {
-		return &pb.GetTaskLogsResponse{Ok: false, Error: "authentication required"}, nil
-	}
-
-	// Verify task exists
-	_, err := s.backend.GetTask(ctx, req.Id)
-	if err != nil {
-		if _, ok := err.(*types.ErrTaskNotFound); ok {
-			return &pb.GetTaskLogsResponse{Ok: false, Error: "task not found"}, nil
-		}
-		return &pb.GetTaskLogsResponse{Ok: false, Error: err.Error()}, nil
-	}
-
-	// Fetch logs from S2
-	if s.s2Client == nil || !s.s2Client.Enabled() {
-		return &pb.GetTaskLogsResponse{Ok: true, Logs: []*pb.TaskLogEntry{}}, nil
-	}
-
-	logs, _, err := s.s2Client.ReadLogs(ctx, req.Id, 0)
-	if err != nil {
-		return &pb.GetTaskLogsResponse{Ok: false, Error: err.Error()}, nil
-	}
-
-	pbLogs := make([]*pb.TaskLogEntry, 0, len(logs))
-	for _, log := range logs {
-		pbLogs = append(pbLogs, &pb.TaskLogEntry{
-			TaskId:    log.TaskID,
-			Timestamp: log.Timestamp,
-			Stream:    log.Stream,
-			Data:      log.Data,
-		})
-	}
-
-	return &pb.GetTaskLogsResponse{Ok: true, Logs: pbLogs}, nil
-}
-
 // Helpers
 
 func workspaceToPb(ws *types.Workspace) *pb.Workspace {
@@ -633,30 +455,6 @@ func connectionToPb(c *types.IntegrationConnection, workspaceExtId string) *pb.C
 		CreatedAt:       c.CreatedAt.Format(time.RFC3339),
 	}
 	return conn
-}
-
-func taskToPb(t *types.Task) *pb.Task {
-	t.NormalizeType()
-	task := &pb.Task{
-		Id:        t.ExternalId,
-		Status:    string(t.Status),
-		Type:      string(t.Type),
-		Prompt:    t.Prompt,
-		Image:     t.Image,
-		Error:     t.Error,
-		CreatedAt: t.CreatedAt.Format(time.RFC3339),
-	}
-	if t.ExitCode != nil {
-		task.ExitCode = int32(*t.ExitCode)
-		task.HasExitCode = true
-	}
-	if t.StartedAt != nil {
-		task.StartedAt = t.StartedAt.Format(time.RFC3339)
-	}
-	if t.FinishedAt != nil {
-		task.FinishedAt = t.FinishedAt.Format(time.RFC3339)
-	}
-	return task
 }
 
 // Hooks

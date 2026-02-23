@@ -13,28 +13,28 @@ import (
 func TestInteractiveResult(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		exitCode, errMsg, status := interactiveResult(nil, false)
-		if exitCode != 0 || errMsg != "" || status != types.TaskStatusComplete {
+		if exitCode != 0 || errMsg != "" || status != types.RunExecutionStatusComplete {
 			t.Fatalf("unexpected result: exit=%d err=%q status=%s", exitCode, errMsg, status)
 		}
 	})
 
 	t.Run("cancelled", func(t *testing.T) {
 		exitCode, errMsg, status := interactiveResult(context.Canceled, false)
-		if exitCode != -1 || errMsg == "" || status != types.TaskStatusCancelled {
+		if exitCode != -1 || errMsg == "" || status != types.RunExecutionStatusCancelled {
 			t.Fatalf("unexpected cancelled result: exit=%d err=%q status=%s", exitCode, errMsg, status)
 		}
 	})
 
 	t.Run("idle timeout completes task", func(t *testing.T) {
 		exitCode, errMsg, status := interactiveResult(context.Canceled, true)
-		if exitCode != 0 || errMsg != "" || status != types.TaskStatusComplete {
+		if exitCode != 0 || errMsg != "" || status != types.RunExecutionStatusComplete {
 			t.Fatalf("unexpected idle-timeout result: exit=%d err=%q status=%s", exitCode, errMsg, status)
 		}
 	})
 
 	t.Run("failed", func(t *testing.T) {
 		exitCode, errMsg, status := interactiveResult(errors.New("boom"), false)
-		if exitCode != -1 || errMsg != "boom" || status != types.TaskStatusFailed {
+		if exitCode != -1 || errMsg != "boom" || status != types.RunExecutionStatusFailed {
 			t.Fatalf("unexpected failed result: exit=%d err=%q status=%s", exitCode, errMsg, status)
 		}
 	})
@@ -49,7 +49,7 @@ func TestMonitorInteractiveSessionIdleTimeout(t *testing.T) {
 	done := make(chan struct{})
 
 	go func() {
-		monitorInteractiveSessionIdle(ctx, "task-1", cancel, 20*time.Millisecond, activityCh, &idleTimedOut)
+		monitorInteractiveSessionIdle(ctx, "task-1", taskExecutionContext{}, cancel, 20*time.Millisecond, activityCh, &idleTimedOut)
 		close(done)
 	}()
 
@@ -79,7 +79,7 @@ func TestMonitorInteractiveSessionIdleResetOnActivity(t *testing.T) {
 	done := make(chan struct{})
 
 	go func() {
-		monitorInteractiveSessionIdle(ctx, "task-2", cancel, 60*time.Millisecond, activityCh, &idleTimedOut)
+		monitorInteractiveSessionIdle(ctx, "task-2", taskExecutionContext{}, cancel, 60*time.Millisecond, activityCh, &idleTimedOut)
 		close(done)
 	}()
 
