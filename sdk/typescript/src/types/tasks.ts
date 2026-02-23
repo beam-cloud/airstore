@@ -64,6 +64,14 @@ export interface RoutingContext {
   groupSpace?: string;
 }
 
+export interface InputProvenance {
+  source?: string;
+  messageId?: string;
+  channel?: string;
+  toolCallId?: string;
+  correlationId?: string;
+}
+
 export interface AgentTask {
   id: string;
   workspace_id: number;
@@ -95,6 +103,7 @@ export interface AgentCommandCreateParams {
   policy?: RunExecutionPolicy;
   lane?: string;
   extraSystemPrompt?: string;
+  inputProvenance?: InputProvenance;
   routing?: RoutingContext;
   attachments?: Array<Record<string, unknown>>;
   label?: string;

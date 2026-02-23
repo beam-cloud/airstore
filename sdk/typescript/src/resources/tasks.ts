@@ -39,6 +39,7 @@ export class Tasks {
         policy: toPolicyBody(params.policy),
         lane: params.lane,
         extra_system_prompt: params.extraSystemPrompt,
+        input_provenance: toInputProvenanceBody(params.inputProvenance),
         routing: toRoutingBody(params.routing),
         attachments: params.attachments,
         idempotency_key: params.idempotencyKey,
@@ -78,6 +79,19 @@ function toRoutingBody(routing: AgentCommandCreateParams['routing']): Record<str
     group_id: routing.groupId,
     group_channel: routing.groupChannel,
     group_space: routing.groupSpace,
+  };
+}
+
+function toInputProvenanceBody(
+  provenance: AgentCommandCreateParams['inputProvenance'],
+): Record<string, unknown> | undefined {
+  if (!provenance) return undefined;
+  return {
+    source: provenance.source,
+    message_id: provenance.messageId,
+    channel: provenance.channel,
+    tool_call_id: provenance.toolCallId,
+    correlation_id: provenance.correlationId,
   };
 }
 

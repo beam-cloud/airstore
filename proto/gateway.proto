@@ -278,6 +278,14 @@ message CreateTaskRequest {
   string idempotency_key = 5;
   string lane = 6;
   string extra_system_prompt = 7;
+  optional bool deliver = 8;
+  optional int32 timeout_ms = 9;
+  google.protobuf.Struct policy = 10;
+  google.protobuf.Struct input_provenance = 11;
+  google.protobuf.Struct routing = 12;
+  repeated google.protobuf.Struct attachments = 13;
+  string label = 14;
+  string spawned_by = 15;
 }
 
 message DeleteTaskRequest {

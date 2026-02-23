@@ -2,12 +2,15 @@ package services
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/orchestration"
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 func (s *AgentService) CreateTask(ctx context.Context, req *pb.CreateTaskRequest) (*pb.AgentTaskAcceptedResponse, error) {
@@ -42,16 +45,54 @@ func (s *AgentService) CreateTask(ctx context.Context, req *pb.CreateTaskRequest
 	if value := strings.TrimSpace(req.ExtraSystemPrompt); value != "" {
 		extraSystemPrompt = &value
 	}
+	var deliver *bool
+	if req.Deliver != nil {
+		value := req.GetDeliver()
+		deliver = &value
+	}
+	var timeoutMs *int
+	if req.TimeoutMs != nil {
+		value := int(req.GetTimeoutMs())
+		timeoutMs = &value
+	}
+	var label *string
+	if value := strings.TrimSpace(req.Label); value != "" {
+		label = &value
+	}
+	var spawnedBy *string
+	if value := strings.TrimSpace(req.SpawnedBy); value != "" {
+		spawnedBy = &value
+	}
+	policy, err := runPolicyFromProtoStruct(req.Policy)
+	if err != nil {
+		return &pb.AgentTaskAcceptedResponse{Ok: false, Error: err.Error()}, nil
+	}
+	inputProvenance, err := inputProvenanceFromProtoStruct(req.InputProvenance)
+	if err != nil {
+		return &pb.AgentTaskAcceptedResponse{Ok: false, Error: err.Error()}, nil
+	}
+	routing, err := routingContextFromProtoStruct(req.Routing)
+	if err != nil {
+		return &pb.AgentTaskAcceptedResponse{Ok: false, Error: err.Error()}, nil
+	}
+	attachments := attachmentsFromProtoStructs(req.Attachments)
 
 	task, idempotentHit, err := s.api.AcceptAgentCommand(ctx, workspaceID, orchestration.AgentCommandParams{
 		Message:           message,
 		AgentID:           &agentID,
 		SessionID:         strings.TrimSpace(req.SessionId),
 		SessionKey:        sessionKey,
+		Deliver:           deliver,
+		TimeoutMs:         timeoutMs,
+		Policy:            policy,
 		IdempotencyKey:    strings.TrimSpace(req.IdempotencyKey),
 		Lane:              lane,
 		ExtraSystemPrompt: extraSystemPrompt,
-		Routing:           orchestration.RoutingContext{},
+		InputProvenance:   inputProvenance,
+		Routing:           routing,
+		Attachments:       attachments,
+		Label:             label,
+		SpawnedBy:         spawnedBy,
 	})
 	if err != nil {
 		return &pb.AgentTaskAcceptedResponse{Ok: false, Error: err.Error()}, nil
@@ -285,3 +326,60 @@ func (s *AgentService) resolveWorkspaceExternalID(ctx context.Context, workspace
 	return ""
 }
 
+func runPolicyFromProtoStruct(value *structpb.Struct) (*orchestration.RunExecutionPolicy, error) {
+	if value == nil {
+		return nil, nil
+	}
+	out := orchestration.RunExecutionPolicy{}
+	if err := decodeStructMap(value.AsMap(), &out); err != nil {
+		return nil, fmt.Errorf("invalid policy: %w", err)
+	}
+	return &out, nil
+}
+
+func inputProvenanceFromProtoStruct(value *structpb.Struct) (*orchestration.InputProvenance, error) {
+	if value == nil {
+		return nil, nil
+	}
+	out := orchestration.InputProvenance{}
+	if err := decodeStructMap(value.AsMap(), &out); err != nil {
+		return nil, fmt.Errorf("invalid input_provenance: %w", err)
+	}
+	return &out, nil
+}
+
+func routingContextFromProtoStruct(value *structpb.Struct) (orchestration.RoutingContext, error) {
+	if value == nil {
+		return orchestration.RoutingContext{}, nil
+	}
+	out := orchestration.RoutingContext{}
+	if err := decodeStructMap(value.AsMap(), &out); err != nil {
+		return orchestration.RoutingContext{}, fmt.Errorf("invalid routing: %w", err)
+	}
+	return out, nil
+}
+
+func attachmentsFromProtoStructs(values []*structpb.Struct) []map[string]any {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(values))
+	for _, value := range values {
+		if value == nil {
+			continue
+		}
+		out = append(out, value.AsMap())
+	}
+	return out
+}
+
+func decodeStructMap(data map[string]any, target any) error {
+	body, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(body, target); err != nil {
+		return err
+	}
+	return nil
+}
