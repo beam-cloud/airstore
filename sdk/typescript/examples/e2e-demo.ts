@@ -11,7 +11,7 @@
  * authorize Gmail, then come back and watch the rest happen automatically.
  */
 import * as readline from 'node:readline';
-import { Airstore } from '@airstore/sdk'
+import { Airstore } from '../src/index.js'
 
 // ---------------------------------------------------------------------------
 // Helpers

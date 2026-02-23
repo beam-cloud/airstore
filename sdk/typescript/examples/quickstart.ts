@@ -1,4 +1,4 @@
-import Airstore from '@airstore/sdk'
+import Airstore from '../src/index.js'
 
 // Initialize — reads AIRSTORE_API_KEY from env automatically
 const airstore = new Airstore()
