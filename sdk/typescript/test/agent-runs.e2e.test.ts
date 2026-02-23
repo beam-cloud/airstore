@@ -49,35 +49,6 @@ async function waitForTerminalRun(
   return run;
 }
 
-async function readTaskLogs(taskId: string, timeoutMs = 30_000): Promise<string> {
-  const client = getClient();
-  const resp = await client.rawRequest('GET', `/tasks/${taskId}/logs/stream`, {
-    timeout: timeoutMs,
-  });
-
-  if (!resp.ok) {
-    throw new Error(`log stream request failed: ${resp.status} ${resp.statusText}`);
-  }
-
-  const ssePayload = await resp.text();
-  const logChunks: string[] = [];
-
-  for (const line of ssePayload.split('\n')) {
-    if (!line.startsWith('data: ')) continue;
-    const raw = line.slice(6);
-    try {
-      const event = JSON.parse(raw) as { type?: string; data?: string };
-      if (event.type === 'log' && typeof event.data === 'string') {
-        logChunks.push(event.data);
-      }
-    } catch {
-      // Ignore malformed SSE rows; we only care about log payloads.
-    }
-  }
-
-  return logChunks.join('\n');
-}
-
 async function waitForOutputJSON(
   workspaceId: string,
   paths = ['/memory/output.json', '/workspace/memory/output.json'],
@@ -203,19 +174,9 @@ describe('Agent/Runs E2E', () => {
     expect(run.status).toBe('ok');
     expect(run.model).toBe('claude-sonnet-4-6');
 
-    const attempts = await client.runs.listAttempts(workspaceId, runId);
     const snapshots = await client.runs.listSnapshots(workspaceId, runId);
     expect(snapshots.length).toBeGreaterThan(0);
-    expect(attempts.length).toBeGreaterThan(0);
-    expect(attempts.every((attempt) => attempt.run_id === runId)).toBe(true);
     expect(snapshots.every((snapshot) => snapshot.run_id === runId)).toBe(true);
-
-    const execTaskId = attempts[attempts.length - 1]?.execution_id;
-    expect(execTaskId).toBeDefined();
-    if (!execTaskId) return;
-
-    const logs = await readTaskLogs(execTaskId);
-    expect(logs.toLowerCase()).toContain('news.ycombinator.com');
 
     const outputJSON = await waitForOutputJSON(workspaceId);
     const output = JSON.parse(outputJSON) as {

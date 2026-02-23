@@ -8,17 +8,6 @@ import type {
 } from './tasks.js';
 
 export type RunStatus = 'accepted' | 'running' | 'ok' | 'error' | 'timeout' | 'cancelled';
-export type AttemptStatus =
-  | 'pending'
-  | 'blocked'
-  | 'running'
-  | 'ok'
-  | 'error'
-  | 'timeout'
-  | 'cancelled';
-export type AttemptStrategy = 'primary' | 'retry';
-export const ATTEMPT_STRATEGY_PRIMARY: AttemptStrategy = 'primary';
-export const ATTEMPT_STRATEGY_RETRY: AttemptStrategy = 'retry';
 
 export interface AgentRun {
   id: string;
@@ -44,30 +33,6 @@ export interface AgentRun {
   snapshot_ts: number;
   usage_json: Record<string, unknown>;
   delivery_json: Record<string, unknown>;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface AgentRunAttempt {
-  id: string;
-  run_id: string;
-  attempt_no: number;
-  status: AttemptStatus;
-  strategy: AttemptStrategy;
-  provider?: string;
-  model?: string;
-  exec_host: ExecHost;
-  exec_security: ExecSecurity;
-  exec_ask: ExecAsk;
-  runtime_type: RuntimeType;
-  workspace_access: WorkspaceAccess;
-  network_enabled: boolean;
-  interactive: boolean;
-  execution_id?: string;
-  started_at?: string;
-  ended_at?: string;
-  exit_code?: number;
-  error?: string;
   created_at: string;
   updated_at: string;
 }

@@ -16,24 +16,24 @@ import (
 
 type fakeBackend struct {
 	repository.BackendRepository
-	mu           sync.Mutex
-	envelopes    map[string]*types.AgentTask
-	profiles     map[string]*types.AgentProfile
-	runs         map[string]*types.AgentRun
-	attempts     map[string][]*types.AgentRunAttempt
-	tasks        map[string]*types.RunExecution
-	idempotency  map[string]string
-	droppedCount int
+	mu            sync.Mutex
+	agentTasks    map[string]*types.AgentTask
+	profiles      map[string]*types.AgentProfile
+	runs          map[string]*types.AgentRun
+	attempts      map[string][]*types.AgentRunAttempt
+	runExecutions map[string]*types.RunExecution
+	idempotency   map[string]string
+	droppedCount  int
 }
 
 func newFakeBackend() *fakeBackend {
 	return &fakeBackend{
-		envelopes:   map[string]*types.AgentTask{},
-		profiles:    map[string]*types.AgentProfile{},
-		runs:        map[string]*types.AgentRun{},
-		attempts:    map[string][]*types.AgentRunAttempt{},
-		tasks:       map[string]*types.RunExecution{},
-		idempotency: map[string]string{},
+		agentTasks:    map[string]*types.AgentTask{},
+		profiles:      map[string]*types.AgentProfile{},
+		runs:          map[string]*types.AgentRun{},
+		attempts:      map[string][]*types.AgentRunAttempt{},
+		runExecutions: map[string]*types.RunExecution{},
+		idempotency:   map[string]string{},
 	}
 }
 
@@ -45,12 +45,12 @@ func idempotencyKey(workspaceID uint, agentID *string, key string) string {
 	return fmt.Sprintf("%d:%s:%s", workspaceID, agent, key)
 }
 
-func (f *fakeBackend) CreateTask(_ context.Context, envelope *types.AgentTask) error {
+func (f *fakeBackend) CreateTask(_ context.Context, task *types.AgentTask) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	envelope.ID = uuid.NewString()
-	f.envelopes[envelope.ID] = envelope
-	f.idempotency[idempotencyKey(envelope.WorkspaceID, envelope.AgentID, envelope.IdempotencyKey)] = envelope.ID
+	task.ID = uuid.NewString()
+	f.agentTasks[task.ID] = task
+	f.idempotency[idempotencyKey(task.WorkspaceID, task.AgentID, task.IdempotencyKey)] = task.ID
 	return nil
 }
 
@@ -61,25 +61,25 @@ func (f *fakeBackend) GetTaskByIdempotency(_ context.Context, workspaceID uint, 
 	if !ok {
 		return nil, &types.ErrAgentTaskNotFound{ID: key}
 	}
-	return f.envelopes[id], nil
+	return f.agentTasks[id], nil
 }
 
-func (f *fakeBackend) GetTaskByID(_ context.Context, envelopeID string) (*types.AgentTask, error) {
+func (f *fakeBackend) GetTaskByID(_ context.Context, taskID string) (*types.AgentTask, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	env, ok := f.envelopes[envelopeID]
+	env, ok := f.agentTasks[taskID]
 	if !ok {
-		return nil, &types.ErrAgentTaskNotFound{ID: envelopeID}
+		return nil, &types.ErrAgentTaskNotFound{ID: taskID}
 	}
 	return env, nil
 }
 
-func (f *fakeBackend) UpdateTaskState(_ context.Context, envelopeID string, state types.AgentTaskState, droppedReason *string, targetRunID *string) error {
+func (f *fakeBackend) UpdateTaskState(_ context.Context, taskID string, state types.AgentTaskState, droppedReason *string, targetRunID *string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	env, ok := f.envelopes[envelopeID]
+	env, ok := f.agentTasks[taskID]
 	if !ok {
-		return &types.ErrAgentTaskNotFound{ID: envelopeID}
+		return &types.ErrAgentTaskNotFound{ID: taskID}
 	}
 	env.State = state
 	env.TargetRunID = targetRunID
@@ -122,7 +122,7 @@ func (f *fakeBackend) ListAgentRunAttempts(_ context.Context, runID string) ([]*
 func (f *fakeBackend) GetRunExecution(_ context.Context, taskID string) (*types.RunExecution, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	task, ok := f.tasks[taskID]
+	task, ok := f.runExecutions[taskID]
 	if !ok {
 		return nil, &types.ErrRunExecutionNotFound{ExternalId: taskID}
 	}
@@ -208,12 +208,12 @@ func TestAcceptAgentCommandAcceptedFirstAndIdempotent(t *testing.T) {
 		IdempotencyKey: "idem-1",
 	}
 
-	envelope, deduped, err := svc.AcceptAgentCommand(context.Background(), 42, params)
+	task, deduped, err := svc.AcceptAgentCommand(context.Background(), 42, params)
 	require.NoError(t, err)
 	require.False(t, deduped)
-	require.NotEmpty(t, envelope.ID)
-	require.Equal(t, types.AgentTaskStateQueued, envelope.State)
-	require.Nil(t, envelope.TargetRunID, "run should not exist at acceptance time")
+	require.NotEmpty(t, task.ID)
+	require.Equal(t, types.AgentTaskStateQueued, task.State)
+	require.Nil(t, task.TargetRunID, "run should not exist at acceptance time")
 
 	queueLen, err := redisClient.LLen(context.Background(), common.Keys.TaskQueue()).Result()
 	require.NoError(t, err)
@@ -222,14 +222,14 @@ func TestAcceptAgentCommandAcceptedFirstAndIdempotent(t *testing.T) {
 	again, deduped, err := svc.AcceptAgentCommand(context.Background(), 42, params)
 	require.NoError(t, err)
 	require.True(t, deduped)
-	require.Equal(t, envelope.ID, again.ID)
+	require.Equal(t, task.ID, again.ID)
 
 	queueLen, err = redisClient.LLen(context.Background(), common.Keys.TaskQueue()).Result()
 	require.NoError(t, err)
 	require.EqualValues(t, 1, queueLen, "idempotent replay must not enqueue duplicate work")
 }
 
-func TestQueueReshapingDropsOlderFollowupEnvelope(t *testing.T) {
+func TestQueueReshapingDropsOlderFollowupTask(t *testing.T) {
 	redisClient, cleanup := newTestRedis(t)
 	defer cleanup()
 
@@ -256,22 +256,22 @@ func TestQueueReshapingDropsOlderFollowupEnvelope(t *testing.T) {
 		IdempotencyKey: "f2",
 	}
 
-	backend.envelopes[first.ID] = first
-	backend.envelopes[second.ID] = second
+	backend.agentTasks[first.ID] = first
+	backend.agentTasks[second.ID] = second
 
 	require.NoError(t, router.Enqueue(ctx, first, instanceKey))
 	require.NoError(t, router.Enqueue(ctx, second, instanceKey))
 
-	require.Equal(t, types.AgentTaskStateDropped, backend.envelopes[first.ID].State)
-	require.Equal(t, types.AgentTaskStateQueued, backend.envelopes[second.ID].State)
+	require.Equal(t, types.AgentTaskStateDropped, backend.agentTasks[first.ID].State)
+	require.Equal(t, types.AgentTaskStateQueued, backend.agentTasks[second.ID].State)
 
 	token, err := router.Pop(ctx, 0)
 	require.NoError(t, err)
 	require.NotEmpty(t, token)
 
-	envelopeID, err := router.ResolveTaskID(ctx, token)
+	taskID, err := router.ResolveTaskID(ctx, token)
 	require.NoError(t, err)
-	require.Equal(t, second.ID, envelopeID)
+	require.Equal(t, second.ID, taskID)
 }
 
 func TestAcceptAgentCommandAppliesAgentConfigModelAndProvider(t *testing.T) {
@@ -301,16 +301,16 @@ func TestAcceptAgentCommandAppliesAgentConfigModelAndProvider(t *testing.T) {
 		IdempotencyKey: "idem-with-model",
 	}
 
-	envelope, deduped, err := svc.AcceptAgentCommand(context.Background(), 42, params)
+	task, deduped, err := svc.AcceptAgentCommand(context.Background(), 42, params)
 	require.NoError(t, err)
 	require.False(t, deduped)
-	require.Equal(t, "claude", envelope.PayloadJSON["provider"])
-	require.Equal(t, "claude-sonnet-4", envelope.PayloadJSON["model"])
+	require.Equal(t, "claude", task.PayloadJSON["provider"])
+	require.Equal(t, "claude-sonnet-4", task.PayloadJSON["model"])
 	require.Equal(t, map[string]any{
 		"provider": "claude",
 		"model":    "claude-sonnet-4",
 		"purpose":  "test",
-	}, envelope.PayloadJSON["agent_config"])
+	}, task.PayloadJSON["agent_config"])
 }
 
 func TestAcceptAgentCommandGeneratesIDsWhenMissing(t *testing.T) {
@@ -329,14 +329,14 @@ func TestAcceptAgentCommandGeneratesIDsWhenMissing(t *testing.T) {
 	}
 	svc := NewAgentService(context.Background(), backend, nil, redisClient, nil, "ghcr.io/beam/sandbox:latest")
 
-	envelope, deduped, err := svc.AcceptAgentCommand(context.Background(), 42, AgentCommandParams{
+	task, deduped, err := svc.AcceptAgentCommand(context.Background(), 42, AgentCommandParams{
 		Message: "hello world",
 		AgentID: &agentID,
 	})
 	require.NoError(t, err)
 	require.False(t, deduped)
-	require.NotEmpty(t, envelope.IdempotencyKey)
-	require.NotEmpty(t, envelope.PayloadJSON["session_id"])
+	require.NotEmpty(t, task.IdempotencyKey)
+	require.NotEmpty(t, task.PayloadJSON["session_id"])
 }
 
 func TestAcceptAgentCommandRejectsMissingAgentID(t *testing.T) {
@@ -368,40 +368,40 @@ func TestAcceptRunInputGeneratesIdempotencyKeyWhenMissing(t *testing.T) {
 	}
 
 	svc := NewAgentService(context.Background(), backend, nil, redisClient, nil, "ghcr.io/beam/sandbox:latest")
-	envelope, deduped, err := svc.AcceptRunInput(context.Background(), 42, runID, types.AgentQueueModeFollowup, "follow up", "")
+	task, deduped, err := svc.AcceptRunInput(context.Background(), 42, runID, types.AgentQueueModeFollowup, "follow up", "")
 	require.NoError(t, err)
 	require.False(t, deduped)
-	require.NotEmpty(t, envelope.IdempotencyKey)
+	require.NotEmpty(t, task.IdempotencyKey)
 }
 
-func TestTrySteerRunInputEnvelopeInjectsInteractiveInput(t *testing.T) {
+func TestTrySteerRunInputTaskInjectsInteractiveInput(t *testing.T) {
 	backend := newFakeBackend()
 	runID := uuid.NewString()
-	taskID := uuid.NewString()
+	executionID := uuid.NewString()
 	backend.runs[runID] = &types.AgentRun{
 		ID:          runID,
 		WorkspaceID: 42,
 		Status:      types.AgentRunStatusRunning,
 		SessionID:   "session-1",
 	}
-	backend.tasks[taskID] = &types.RunExecution{
-		ExternalId: taskID,
+	backend.runExecutions[executionID] = &types.RunExecution{
+		ExternalId: executionID,
 		Type:       types.RunExecutionTypeInteractive,
 		Status:     types.RunExecutionStatusRunning,
 	}
 	backend.attempts[runID] = []*types.AgentRunAttempt{
 		{
-			ID:                      uuid.NewString(),
-			RunID:                   runID,
-			AttemptNo:               1,
-			Status:                  types.AgentAttemptStatusRunning,
-			ExecutionID:             &taskID,
+			ID:          uuid.NewString(),
+			RunID:       runID,
+			AttemptNo:   1,
+			Status:      types.AgentAttemptStatusRunning,
+			ExecutionID: &executionID,
 		},
 	}
 
-	envelopeID := uuid.NewString()
-	envelope := &types.AgentTask{
-		ID:          envelopeID,
+	taskID := uuid.NewString()
+	task := &types.AgentTask{
+		ID:          taskID,
 		WorkspaceID: 42,
 		Kind:        types.AgentTaskKindRunInput,
 		QueueMode:   types.AgentQueueModeSteer,
@@ -409,50 +409,50 @@ func TestTrySteerRunInputEnvelopeInjectsInteractiveInput(t *testing.T) {
 		PayloadJSON: map[string]any{"message": "please stop"},
 		TargetRunID: &runID,
 	}
-	backend.envelopes[envelopeID] = envelope
+	backend.agentTasks[taskID] = task
 
 	svc := NewAgentService(context.Background(), backend, nil, nil, nil, "ghcr.io/beam/sandbox:latest")
 	terminalIO := newFakeTerminalIO()
 	svc.terminalIO = terminalIO
 
-	steered, err := svc.trySteerRunInputEnvelope(context.Background(), envelope)
+	steered, err := svc.trySteerRunInputTask(context.Background(), task)
 	require.NoError(t, err)
 	require.True(t, steered)
-	require.Equal(t, types.AgentTaskStateDispatched, backend.envelopes[envelopeID].State)
+	require.Equal(t, types.AgentTaskStateDispatched, backend.agentTasks[taskID].State)
 
-	writes := terminalIO.inputs[taskID]
+	writes := terminalIO.inputs[executionID]
 	require.Len(t, writes, 1)
 	require.Equal(t, "please stop\n", string(writes[0]))
 }
 
-func TestTrySteerRunInputEnvelopeFallsBackWhenTaskNotInteractive(t *testing.T) {
+func TestTrySteerRunInputTaskFallsBackWhenTaskNotInteractive(t *testing.T) {
 	backend := newFakeBackend()
 	runID := uuid.NewString()
-	taskID := uuid.NewString()
+	executionID := uuid.NewString()
 	backend.runs[runID] = &types.AgentRun{
 		ID:          runID,
 		WorkspaceID: 42,
 		Status:      types.AgentRunStatusRunning,
 		SessionID:   "session-1",
 	}
-	backend.tasks[taskID] = &types.RunExecution{
-		ExternalId: taskID,
+	backend.runExecutions[executionID] = &types.RunExecution{
+		ExternalId: executionID,
 		Type:       types.RunExecutionTypeBackground,
 		Status:     types.RunExecutionStatusRunning,
 	}
 	backend.attempts[runID] = []*types.AgentRunAttempt{
 		{
-			ID:                      uuid.NewString(),
-			RunID:                   runID,
-			AttemptNo:               1,
-			Status:                  types.AgentAttemptStatusRunning,
-			ExecutionID:             &taskID,
+			ID:          uuid.NewString(),
+			RunID:       runID,
+			AttemptNo:   1,
+			Status:      types.AgentAttemptStatusRunning,
+			ExecutionID: &executionID,
 		},
 	}
 
-	envelopeID := uuid.NewString()
-	envelope := &types.AgentTask{
-		ID:          envelopeID,
+	taskID := uuid.NewString()
+	task := &types.AgentTask{
+		ID:          taskID,
 		WorkspaceID: 42,
 		Kind:        types.AgentTaskKindRunInput,
 		QueueMode:   types.AgentQueueModeSteer,
@@ -460,20 +460,20 @@ func TestTrySteerRunInputEnvelopeFallsBackWhenTaskNotInteractive(t *testing.T) {
 		PayloadJSON: map[string]any{"message": "fallback"},
 		TargetRunID: &runID,
 	}
-	backend.envelopes[envelopeID] = envelope
+	backend.agentTasks[taskID] = task
 
 	svc := NewAgentService(context.Background(), backend, nil, nil, nil, "ghcr.io/beam/sandbox:latest")
 	terminalIO := newFakeTerminalIO()
 	svc.terminalIO = terminalIO
 
-	steered, err := svc.trySteerRunInputEnvelope(context.Background(), envelope)
+	steered, err := svc.trySteerRunInputTask(context.Background(), task)
 	require.NoError(t, err)
 	require.False(t, steered)
-	require.Equal(t, types.AgentTaskStateQueued, backend.envelopes[envelopeID].State)
-	require.Empty(t, terminalIO.inputs[taskID])
+	require.Equal(t, types.AgentTaskStateQueued, backend.agentTasks[taskID].State)
+	require.Empty(t, terminalIO.inputs[executionID])
 }
 
-func TestHandleRunInputEnvelopeDropsWhenTargetRunTerminal(t *testing.T) {
+func TestHandleRunInputTaskDropsWhenTargetRunTerminal(t *testing.T) {
 	backend := newFakeBackend()
 	runID := uuid.NewString()
 	backend.runs[runID] = &types.AgentRun{
@@ -483,9 +483,9 @@ func TestHandleRunInputEnvelopeDropsWhenTargetRunTerminal(t *testing.T) {
 		SessionID:   "session-1",
 	}
 
-	envelopeID := uuid.NewString()
-	envelope := &types.AgentTask{
-		ID:          envelopeID,
+	taskID := uuid.NewString()
+	task := &types.AgentTask{
+		ID:          taskID,
 		WorkspaceID: 42,
 		Kind:        types.AgentTaskKindRunInput,
 		QueueMode:   types.AgentQueueModeSteer,
@@ -493,12 +493,12 @@ func TestHandleRunInputEnvelopeDropsWhenTargetRunTerminal(t *testing.T) {
 		PayloadJSON: map[string]any{"message": "fallback"},
 		TargetRunID: &runID,
 	}
-	backend.envelopes[envelopeID] = envelope
+	backend.agentTasks[taskID] = task
 
 	svc := NewAgentService(context.Background(), backend, nil, nil, nil, "ghcr.io/beam/sandbox:latest")
-	err := svc.handleRunInputEnvelope(context.Background(), envelope)
+	err := svc.handleRunInputTask(context.Background(), task)
 	require.NoError(t, err)
-	require.Equal(t, types.AgentTaskStateDropped, backend.envelopes[envelopeID].State)
-	require.NotNil(t, backend.envelopes[envelopeID].DroppedReason)
-	require.Equal(t, types.AgentTaskDropReasonRunInputTerminalTarget, *backend.envelopes[envelopeID].DroppedReason)
+	require.Equal(t, types.AgentTaskStateDropped, backend.agentTasks[taskID].State)
+	require.NotNil(t, backend.agentTasks[taskID].DroppedReason)
+	require.Equal(t, types.AgentTaskDropReasonRunInputTerminalTarget, *backend.agentTasks[taskID].DroppedReason)
 }

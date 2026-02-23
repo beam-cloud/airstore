@@ -54,11 +54,6 @@ export {
   RETRY_DEFAULT_MAX_ATTEMPTS,
   RETRY_DEFAULT_DELAY_MS,
 } from './types/tasks.js';
-export {
-  ATTEMPT_STRATEGY_PRIMARY,
-  ATTEMPT_STRATEGY_RETRY,
-} from './types/runs.js';
-
 // ── Types ────────────────────────────────────────────────────────────────────
 export type { PaginatedList, IntegrationType, MemberRole, OutputFormat } from './types/shared.js';
 export type { Workspace, WorkspaceCreateParams } from './types/workspaces.js';
@@ -121,6 +116,7 @@ export type {
   RunExecutionPolicy,
   TaskKind,
   TaskState,
+  InputProvenance,
   RoutingContext,
   AgentTask,
   AgentCommandCreateParams,
@@ -128,10 +124,7 @@ export type {
 } from './types/tasks.js';
 export type {
   RunStatus,
-  AttemptStatus,
-  AttemptStrategy,
   AgentRun,
-  AgentRunAttempt,
   AgentRunSnapshot,
   RunInputParams,
   RunCancelResponse,

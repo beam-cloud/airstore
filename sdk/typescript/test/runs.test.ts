@@ -35,7 +35,7 @@ describe('Runs', () => {
     await deleteTestWorkspace(workspace.external_id);
   });
 
-  it('retrieves run state, attempts, snapshots, and events', async () => {
+  it('retrieves run state, snapshots, and events', async () => {
     const accepted = await client.tasks.create(workspace.external_id, {
       message: 'create run for runs.test.ts',
       sessionId: uniqueName('run-session'),
@@ -52,10 +52,6 @@ describe('Runs', () => {
 
     const run = await client.runs.retrieve(workspace.external_id, runId);
     expect(run.id).toBe(runId);
-
-    const attempts = await client.runs.listAttempts(workspace.external_id, runId);
-    expect(Array.isArray(attempts)).toBe(true);
-    expect(attempts.every((attempt) => attempt.run_id === runId)).toBe(true);
 
     const snapshots = await client.runs.listSnapshots(workspace.external_id, runId);
     expect(Array.isArray(snapshots)).toBe(true);

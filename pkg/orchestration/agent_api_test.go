@@ -41,7 +41,7 @@ func TestNormalizeRunInputQueueModeSteerBacklog(t *testing.T) {
 	require.Equal(t, types.AgentQueueModeSteer, mode)
 }
 
-func TestEnqueueRunInputEnvelopeRejectsUnsupportedQueueModes(t *testing.T) {
+func TestEnqueueRunInputTaskRejectsUnsupportedQueueModes(t *testing.T) {
 	api := NewAgentAPI(nil, &AgentService{})
 
 	_, _, err := api.EnqueueRunInput(

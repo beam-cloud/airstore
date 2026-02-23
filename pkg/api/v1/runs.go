@@ -31,7 +31,6 @@ func NewRunsGroup(routerGroup *echo.Group, agents *orchestration.AgentAPI) *Runs
 func (g *RunsGroup) registerRoutes() {
 	g.routerGroup.GET("", g.ListRuns)
 	g.routerGroup.GET("/:run_id", g.GetRun)
-	g.routerGroup.GET("/:run_id/attempts", g.ListRunAttempts)
 	g.routerGroup.GET("/:run_id/snapshots", g.ListRunSnapshots)
 	g.routerGroup.GET("/:run_id/events", g.ListRunEvents)
 	g.routerGroup.POST("/:run_id/input", g.EnqueueRunInput)
@@ -70,25 +69,6 @@ func (g *RunsGroup) GetRun(c echo.Context) error {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 	return SuccessResponse(c, run)
-}
-
-func (g *RunsGroup) ListRunAttempts(c echo.Context) error {
-	if g.agents == nil {
-		return ErrorResponse(c, http.StatusServiceUnavailable, "run service unavailable")
-	}
-	workspaceID, err := requireWorkspaceID(c)
-	if err != nil {
-		return err
-	}
-	runID := c.Param("run_id")
-	attempts, err := g.agents.ListRunAttempts(c.Request().Context(), workspaceID, runID)
-	if err != nil {
-		if _, ok := err.(*types.ErrAgentRunNotFound); ok {
-			return ErrorResponse(c, http.StatusNotFound, "run not found")
-		}
-		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
-	}
-	return SuccessResponse(c, attempts)
 }
 
 func (g *RunsGroup) ListRunSnapshots(c echo.Context) error {

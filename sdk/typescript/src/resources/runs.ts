@@ -1,7 +1,6 @@
 import type { CoreClient, RequestOptions } from '../client.js';
 import type {
   AgentRun,
-  AgentRunAttempt,
   AgentRunSnapshot,
   RunCancelResponse,
   RunInputParams,
@@ -9,7 +8,7 @@ import type {
 import type { TaskAcceptedResponse } from '../types/tasks.js';
 
 /**
- * Read and control run lifecycle state (attempts, snapshots, events).
+ * Read and control run lifecycle state (snapshots, events).
  */
 export class Runs {
   constructor(private readonly client: CoreClient) {}
@@ -32,20 +31,6 @@ export class Runs {
     return this.client.request<AgentRun>(
       'GET',
       `/workspaces/${workspaceId}/runs/${runId}`,
-      undefined,
-      undefined,
-      options,
-    );
-  }
-
-  async listAttempts(
-    workspaceId: string,
-    runId: string,
-    options?: RequestOptions,
-  ): Promise<AgentRunAttempt[]> {
-    return this.client.request<AgentRunAttempt[]>(
-      'GET',
-      `/workspaces/${workspaceId}/runs/${runId}/attempts`,
       undefined,
       undefined,
       options,

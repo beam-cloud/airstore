@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 )
@@ -150,13 +151,6 @@ func (a *AgentAPI) GetRun(ctx context.Context, workspaceID uint, runID string) (
 	return a.backend.GetAgentRun(ctx, workspaceID, runID)
 }
 
-func (a *AgentAPI) ListRunAttempts(ctx context.Context, workspaceID uint, runID string) ([]*types.AgentRunAttempt, error) {
-	if _, err := a.GetRun(ctx, workspaceID, runID); err != nil {
-		return nil, err
-	}
-	return a.backend.ListAgentRunAttempts(ctx, runID)
-}
-
 func (a *AgentAPI) ListRunSnapshots(ctx context.Context, workspaceID uint, runID string, limit int) ([]*types.AgentRunSnapshot, error) {
 	if _, err := a.GetRun(ctx, workspaceID, runID); err != nil {
 		return nil, err
@@ -200,6 +194,71 @@ func (a *AgentAPI) CancelRun(ctx context.Context, workspaceID uint, runID string
 		}
 	}
 	return nil
+}
+
+func (a *AgentAPI) CancelTask(ctx context.Context, workspaceID uint, taskID string) error {
+	task, err := a.GetTask(ctx, workspaceID, taskID)
+	if err != nil {
+		return err
+	}
+
+	if task.TargetRunID != nil {
+		if err := a.CancelRun(ctx, workspaceID, *task.TargetRunID); err != nil {
+			return err
+		}
+	}
+
+	if task.State == types.AgentTaskStateAccepted ||
+		task.State == types.AgentTaskStateQueued ||
+		task.State == types.AgentTaskStateDispatched {
+		if err := a.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateCancelled, nil, task.TargetRunID); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (a *AgentAPI) GetTaskLogs(ctx context.Context, workspaceID uint, taskID string) ([]common.TaskLogEntry, error) {
+	task, err := a.GetTask(ctx, workspaceID, taskID)
+	if err != nil {
+		return nil, err
+	}
+
+	if a.runtime == nil || a.runtime.s2 == nil || !a.runtime.s2.Enabled() || task.TargetRunID == nil {
+		return []common.TaskLogEntry{}, nil
+	}
+
+	attempts, err := a.backend.ListAgentRunAttempts(ctx, *task.TargetRunID)
+	if err != nil {
+		return nil, err
+	}
+	executionID := newestExecutionID(attempts)
+	if executionID == "" {
+		return []common.TaskLogEntry{}, nil
+	}
+
+	logs, _, err := a.runtime.s2.ReadLogs(ctx, executionID, 0)
+	if err != nil {
+		return nil, err
+	}
+	return logs, nil
+}
+
+func newestExecutionID(attempts []*types.AgentRunAttempt) string {
+	for i := len(attempts) - 1; i >= 0; i-- {
+		attempt := attempts[i]
+		if attempt == nil || attempt.ExecutionID == nil {
+			continue
+		}
+
+		executionID := strings.TrimSpace(*attempt.ExecutionID)
+		if executionID != "" {
+			return executionID
+		}
+	}
+
+	return ""
 }
 
 func decodeRunEvents(rows []string) []map[string]any {

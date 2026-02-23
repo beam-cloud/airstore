@@ -872,7 +872,6 @@ const (
 	AgentService_EnqueueRunInput_FullMethodName       = "/gateway.AgentService/EnqueueRunInput"
 	AgentService_ListAgentRuns_FullMethodName         = "/gateway.AgentService/ListAgentRuns"
 	AgentService_GetAgentRun_FullMethodName           = "/gateway.AgentService/GetAgentRun"
-	AgentService_ListAgentRunAttempts_FullMethodName  = "/gateway.AgentService/ListAgentRunAttempts"
 	AgentService_ListAgentRunSnapshots_FullMethodName = "/gateway.AgentService/ListAgentRunSnapshots"
 	AgentService_ListAgentRunEvents_FullMethodName    = "/gateway.AgentService/ListAgentRunEvents"
 	AgentService_CancelAgentRun_FullMethodName        = "/gateway.AgentService/CancelAgentRun"
@@ -893,7 +892,6 @@ type AgentServiceClient interface {
 	EnqueueRunInput(ctx context.Context, in *EnqueueRunInputRequest, opts ...grpc.CallOption) (*AgentTaskAcceptedResponse, error)
 	ListAgentRuns(ctx context.Context, in *ListAgentRunsRequest, opts ...grpc.CallOption) (*ListAgentRunsResponse, error)
 	GetAgentRun(ctx context.Context, in *GetAgentRunRequest, opts ...grpc.CallOption) (*AgentRunResponse, error)
-	ListAgentRunAttempts(ctx context.Context, in *ListAgentRunAttemptsRequest, opts ...grpc.CallOption) (*ListAgentRunAttemptsResponse, error)
 	ListAgentRunSnapshots(ctx context.Context, in *ListAgentRunSnapshotsRequest, opts ...grpc.CallOption) (*ListAgentRunSnapshotsResponse, error)
 	ListAgentRunEvents(ctx context.Context, in *ListAgentRunEventsRequest, opts ...grpc.CallOption) (*ListAgentRunEventsResponse, error)
 	CancelAgentRun(ctx context.Context, in *CancelAgentRunRequest, opts ...grpc.CallOption) (*CancelAgentRunResponse, error)
@@ -1006,15 +1004,6 @@ func (c *agentServiceClient) GetAgentRun(ctx context.Context, in *GetAgentRunReq
 	return out, nil
 }
 
-func (c *agentServiceClient) ListAgentRunAttempts(ctx context.Context, in *ListAgentRunAttemptsRequest, opts ...grpc.CallOption) (*ListAgentRunAttemptsResponse, error) {
-	out := new(ListAgentRunAttemptsResponse)
-	err := c.cc.Invoke(ctx, AgentService_ListAgentRunAttempts_FullMethodName, in, out, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 func (c *agentServiceClient) ListAgentRunSnapshots(ctx context.Context, in *ListAgentRunSnapshotsRequest, opts ...grpc.CallOption) (*ListAgentRunSnapshotsResponse, error) {
 	out := new(ListAgentRunSnapshotsResponse)
 	err := c.cc.Invoke(ctx, AgentService_ListAgentRunSnapshots_FullMethodName, in, out, opts...)
@@ -1057,7 +1046,6 @@ type AgentServiceServer interface {
 	EnqueueRunInput(context.Context, *EnqueueRunInputRequest) (*AgentTaskAcceptedResponse, error)
 	ListAgentRuns(context.Context, *ListAgentRunsRequest) (*ListAgentRunsResponse, error)
 	GetAgentRun(context.Context, *GetAgentRunRequest) (*AgentRunResponse, error)
-	ListAgentRunAttempts(context.Context, *ListAgentRunAttemptsRequest) (*ListAgentRunAttemptsResponse, error)
 	ListAgentRunSnapshots(context.Context, *ListAgentRunSnapshotsRequest) (*ListAgentRunSnapshotsResponse, error)
 	ListAgentRunEvents(context.Context, *ListAgentRunEventsRequest) (*ListAgentRunEventsResponse, error)
 	CancelAgentRun(context.Context, *CancelAgentRunRequest) (*CancelAgentRunResponse, error)
@@ -1100,9 +1088,6 @@ func (UnimplementedAgentServiceServer) ListAgentRuns(context.Context, *ListAgent
 }
 func (UnimplementedAgentServiceServer) GetAgentRun(context.Context, *GetAgentRunRequest) (*AgentRunResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetAgentRun not implemented")
-}
-func (UnimplementedAgentServiceServer) ListAgentRunAttempts(context.Context, *ListAgentRunAttemptsRequest) (*ListAgentRunAttemptsResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method ListAgentRunAttempts not implemented")
 }
 func (UnimplementedAgentServiceServer) ListAgentRunSnapshots(context.Context, *ListAgentRunSnapshotsRequest) (*ListAgentRunSnapshotsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListAgentRunSnapshots not implemented")
@@ -1324,24 +1309,6 @@ func _AgentService_GetAgentRun_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
-func _AgentService_ListAgentRunAttempts_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ListAgentRunAttemptsRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(AgentServiceServer).ListAgentRunAttempts(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: AgentService_ListAgentRunAttempts_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(AgentServiceServer).ListAgentRunAttempts(ctx, req.(*ListAgentRunAttemptsRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
 func _AgentService_ListAgentRunSnapshots_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListAgentRunSnapshotsRequest)
 	if err := dec(in); err != nil {
@@ -1446,10 +1413,6 @@ var AgentService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetAgentRun",
 			Handler:    _AgentService_GetAgentRun_Handler,
-		},
-		{
-			MethodName: "ListAgentRunAttempts",
-			Handler:    _AgentService_ListAgentRunAttempts_Handler,
 		},
 		{
 			MethodName: "ListAgentRunSnapshots",

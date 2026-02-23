@@ -221,24 +221,16 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 		_ = s.backend.UpdateAgentRunAttemptResult(ctx, attempt.ID, attemptStatus, &exitCode, now, errMsg)
 		_ = updateExecutionInstanceCounts(ctx, s.backend, attempt.RunID, -1)
 
-		if isSuperseded, supersededErr := hasNewerAttempt(ctx, s.backend, attempt.RunID, attempt.AttemptNo); supersededErr == nil && isSuperseded {
-			_ = appendRunSnapshot(ctx, s.backend, attempt.RunID, types.AgentRunStatusRunning, nil, nil, nil, map[string]any{
-				"attempt_id": attempt.ID,
-				"task_id":    req.TaskId,
-				"event":      string(types.AgentRunEventAttemptSuperseded),
-			})
-			return &pb.SetTaskResultResponse{}, nil
-		}
-
 		if shouldRetryAttempt(attemptStatus) {
-			if retryInfo, retryErr := s.scheduleRetryAttempt(ctx, attempt, req.TaskId); retryErr == nil && retryInfo.scheduled {
-				_ = s.backend.UpdateAgentRunLifecycle(ctx, attempt.RunID, types.AgentRunStatusRunning, nil, nil, nil)
-				_ = appendRunSnapshot(ctx, s.backend, attempt.RunID, types.AgentRunStatusRunning, nil, nil, nil, map[string]any{
+			if retryInfo, retryErr := s.scheduleRetryRun(ctx, attempt, req.TaskId); retryErr == nil && retryInfo.scheduled {
+				_ = s.backend.UpdateAgentRunLifecycle(ctx, attempt.RunID, runStatus, nil, &now, errMsg)
+				_ = appendRunSnapshot(ctx, s.backend, attempt.RunID, runStatus, nil, &now, errMsg, map[string]any{
 					"attempt_id":                            attempt.ID,
 					"task_id":                               req.TaskId,
 					"exit_code":                             req.ExitCode,
 					"error":                                 req.Error,
 					"event":                                 string(types.AgentRunEventRetryScheduled),
+					"next_run_id":                           retryInfo.nextRunID,
 					"next_attempt_no":                       retryInfo.nextAttemptNo,
 					types.AgentExecutionMetaKeyRetryDelayMs: retryInfo.delayMs,
 				})
@@ -312,23 +304,11 @@ func updateExecutionInstanceCounts(ctx context.Context, backend repository.Backe
 	return backend.AdjustExecutionInstanceRunningAttempts(ctx, instanceKey, runningDelta, &now)
 }
 
-func hasNewerAttempt(ctx context.Context, backend repository.BackendRepository, runID string, currentAttemptNo int) (bool, error) {
-	attempts, err := backend.ListAgentRunAttempts(ctx, runID)
-	if err != nil {
-		return false, err
-	}
-	for _, attempt := range attempts {
-		if attempt != nil && attempt.AttemptNo > currentAttemptNo {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
 type retryScheduleResult struct {
 	scheduled     bool
 	nextAttemptNo int
 	delayMs       int
+	nextRunID     string
 }
 
 func shouldRetryAttempt(status types.AgentAttemptStatus) bool {
@@ -340,7 +320,7 @@ func shouldRetryAttempt(status types.AgentAttemptStatus) bool {
 	}
 }
 
-func (s *WorkerService) scheduleRetryAttempt(ctx context.Context, attempt *types.AgentRunAttempt, taskID string) (retryScheduleResult, error) {
+func (s *WorkerService) scheduleRetryRun(ctx context.Context, attempt *types.AgentRunAttempt, taskID string) (retryScheduleResult, error) {
 	if s.backend == nil || s.taskQueue == nil || attempt == nil {
 		return retryScheduleResult{}, fmt.Errorf("retry dependencies are not available")
 	}
@@ -354,26 +334,41 @@ func (s *WorkerService) scheduleRetryAttempt(ctx context.Context, attempt *types
 		return retryScheduleResult{scheduled: false}, nil
 	}
 
+	originTask, err := s.backend.GetTaskByID(ctx, run.OriginTaskID)
+	if err != nil {
+		return retryScheduleResult{}, err
+	}
+	if originTask.TargetRunID != nil && *originTask.TargetRunID != run.ID {
+		// Another completion handler already advanced retries to a newer run.
+		return retryScheduleResult{scheduled: false}, nil
+	}
+
 	sourceTask, err := s.backend.GetRunExecution(ctx, taskID)
 	if err != nil {
 		return retryScheduleResult{}, err
 	}
 
 	nextAttemptNo := attempt.AttemptNo + 1
-	attempts, err := s.backend.ListAgentRunAttempts(ctx, run.ID)
-	if err == nil {
-		for _, existing := range attempts {
-			if existing != nil && existing.AttemptNo >= nextAttemptNo {
-				nextAttemptNo = existing.AttemptNo + 1
-			}
-		}
+	if run.ExecAsk != string(orchestration.ExecAskOff) {
+		return retryScheduleResult{scheduled: false}, nil
 	}
 
-	retryAttempt := &types.AgentRunAttempt{
-		RunID:           run.ID,
-		AttemptNo:       nextAttemptNo,
-		Status:          types.AgentAttemptStatusPending,
-		Strategy:        types.AgentAttemptStrategyRetry,
+	retryDelivery := cloneAnyMap(run.DeliveryJSON)
+	if retryDelivery == nil {
+		retryDelivery = map[string]any{}
+	}
+	retryDelivery[types.AgentExecutionMetaKeyRetryMaxAttempts] = retryPolicy.maxAttempts
+	retryDelivery[types.AgentExecutionMetaKeyRetryDelayMs] = retryPolicy.delayMs
+	retryDelivery["retry_from_run_id"] = run.ID
+	retryDelivery["retry_attempt_no"] = nextAttemptNo
+
+	retryRun := &types.AgentRun{
+		WorkspaceID:     run.WorkspaceID,
+		AgentID:         run.AgentID,
+		OriginTaskID:    run.OriginTaskID,
+		Status:          types.AgentRunStatusAccepted,
+		SessionID:       run.SessionID,
+		SessionKey:      run.SessionKey,
 		Provider:        run.Provider,
 		Model:           run.Model,
 		ExecHost:        run.ExecHost,
@@ -383,16 +378,45 @@ func (s *WorkerService) scheduleRetryAttempt(ctx context.Context, attempt *types
 		WorkspaceAccess: run.WorkspaceAccess,
 		NetworkEnabled:  run.NetworkEnabled,
 		Interactive:     run.Interactive,
+		TimeoutMs:       run.TimeoutMs,
+		UsageJSON:       map[string]any{},
+		DeliveryJSON:    retryDelivery,
 	}
-	if run.ExecAsk != string(orchestration.ExecAskOff) {
-		retryAttempt.Status = types.AgentAttemptStatusBlocked
+	if err := s.backend.CreateAgentRun(ctx, retryRun); err != nil {
+		return retryScheduleResult{}, err
+	}
+
+	targetRunID := retryRun.ID
+	if err := s.backend.UpdateTaskState(ctx, run.OriginTaskID, types.AgentTaskStateDispatched, nil, &targetRunID); err != nil {
+		return retryScheduleResult{}, err
+	}
+
+	retryAttempt := &types.AgentRunAttempt{
+		RunID:           retryRun.ID,
+		AttemptNo:       nextAttemptNo,
+		Status:          types.AgentAttemptStatusPending,
+		Strategy:        types.AgentAttemptStrategyRetry,
+		Provider:        retryRun.Provider,
+		Model:           retryRun.Model,
+		ExecHost:        retryRun.ExecHost,
+		ExecSecurity:    retryRun.ExecSecurity,
+		ExecAsk:         retryRun.ExecAsk,
+		RuntimeType:     retryRun.RuntimeType,
+		WorkspaceAccess: retryRun.WorkspaceAccess,
+		NetworkEnabled:  retryRun.NetworkEnabled,
+		Interactive:     retryRun.Interactive,
 	}
 	if err := s.backend.CreateAgentRunAttempt(ctx, retryAttempt); err != nil {
 		return retryScheduleResult{}, err
 	}
-	if retryAttempt.Status == types.AgentAttemptStatusBlocked {
-		return retryScheduleResult{scheduled: false}, nil
-	}
+
+	_ = appendRunSnapshot(ctx, s.backend, retryRun.ID, types.AgentRunStatusAccepted, nil, nil, nil, map[string]any{
+		"event":             string(types.AgentRunEventAccepted),
+		"task_id":           retryRun.OriginTaskID,
+		"attempt_id":        retryAttempt.ID,
+		"retry_from_run_id": run.ID,
+		"retry_attempt_no":  nextAttemptNo,
+	})
 
 	_, memberToken, err := s.backend.EnsureWorkspaceServiceToken(ctx, run.WorkspaceID)
 	if err != nil {
@@ -409,7 +433,7 @@ func (s *WorkerService) scheduleRetryAttempt(ctx context.Context, attempt *types
 	}
 
 	retryTask := &types.RunExecution{
-		WorkspaceId:       run.WorkspaceID,
+		WorkspaceId:       retryRun.WorkspaceID,
 		MemberToken:       memberToken,
 		Status:            types.RunExecutionStatusPending,
 		Type:              sourceTask.Type,
@@ -420,17 +444,17 @@ func (s *WorkerService) scheduleRetryAttempt(ctx context.Context, attempt *types
 		Resources:         resolveRunExecutionResources(sourceTask),
 		RunAttemptID:      &retryAttempt.ID,
 		TimeoutMs:         sourceTask.TimeoutMs,
-		ExecHost:          strPtrOrNil(run.ExecHost),
-		ExecSecurity:      strPtrOrNil(run.ExecSecurity),
-		ExecAsk:           strPtrOrNil(run.ExecAsk),
-		RuntimeType:       strPtrOrNil(run.RuntimeType),
-		WorkspaceAccess:   strPtrOrNil(run.WorkspaceAccess),
-		NetworkEnabled:    boolPtr(run.NetworkEnabled),
+		ExecHost:          strPtrOrNil(retryRun.ExecHost),
+		ExecSecurity:      strPtrOrNil(retryRun.ExecSecurity),
+		ExecAsk:           strPtrOrNil(retryRun.ExecAsk),
+		RuntimeType:       strPtrOrNil(retryRun.RuntimeType),
+		WorkspaceAccess:   strPtrOrNil(retryRun.WorkspaceAccess),
+		NetworkEnabled:    boolPtr(retryRun.NetworkEnabled),
 		ExecutionPolicy:   executionPolicy,
 		CreatedByMemberId: nil,
 	}
 	if retryTask.TimeoutMs == nil {
-		timeout := run.TimeoutMs
+		timeout := retryRun.TimeoutMs
 		retryTask.TimeoutMs = &timeout
 	}
 	if err := s.backend.CreateRunExecution(ctx, retryTask); err != nil {
@@ -451,25 +475,25 @@ func (s *WorkerService) scheduleRetryAttempt(ctx context.Context, attempt *types
 			}
 		} else {
 			taskCopy := *retryTask
-			runID := run.ID
+			retryRunID := retryRun.ID
 			go func(delay time.Duration, queuedTask types.RunExecution) {
 				timer := time.NewTimer(delay)
 				defer timer.Stop()
 				<-timer.C
 
-				latestRun, err := s.backend.GetAgentRunByID(context.Background(), runID)
+				latestRun, err := s.backend.GetAgentRunByID(context.Background(), retryRunID)
 				if err != nil {
 					log.Warn().
 						Err(err).
 						Str("task_id", queuedTask.ExternalId).
-						Str("run_id", runID).
+						Str("run_id", retryRunID).
 						Msg("failed to recheck run status before delayed retry enqueue")
 					return
 				}
 				if latestRun.Status.IsTerminal() {
 					log.Info().
 						Str("task_id", queuedTask.ExternalId).
-						Str("run_id", runID).
+						Str("run_id", retryRunID).
 						Str("run_status", string(latestRun.Status)).
 						Msg("skipping delayed retry enqueue for terminal run")
 					return
@@ -478,7 +502,7 @@ func (s *WorkerService) scheduleRetryAttempt(ctx context.Context, attempt *types
 					log.Warn().
 						Err(err).
 						Str("task_id", queuedTask.ExternalId).
-						Str("run_id", runID).
+						Str("run_id", retryRunID).
 						Int("delay_ms", retryPolicy.delayMs).
 						Msg("failed to enqueue delayed retry task")
 				}
@@ -490,6 +514,7 @@ func (s *WorkerService) scheduleRetryAttempt(ctx context.Context, attempt *types
 		scheduled:     true,
 		nextAttemptNo: nextAttemptNo,
 		delayMs:       retryPolicy.delayMs,
+		nextRunID:     retryRun.ID,
 	}, nil
 }
 

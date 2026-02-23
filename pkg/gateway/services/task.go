@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/orchestration"
@@ -23,77 +22,12 @@ func (s *AgentService) CreateTask(ctx context.Context, req *pb.CreateTaskRequest
 		return &pb.AgentTaskAcceptedResponse{Ok: false, Error: "task service unavailable"}, nil
 	}
 
-	message := strings.TrimSpace(req.Message)
-	if message == "" {
-		return &pb.AgentTaskAcceptedResponse{Ok: false, Error: "message is required"}, nil
-	}
-
-	agentID := strings.TrimSpace(req.AgentId)
-	if agentID == "" {
-		return &pb.AgentTaskAcceptedResponse{Ok: false, Error: "agent_id is required"}, nil
-	}
-
-	var sessionKey *string
-	if value := strings.TrimSpace(req.SessionKey); value != "" {
-		sessionKey = &value
-	}
-	var lane *string
-	if value := strings.TrimSpace(req.Lane); value != "" {
-		lane = &value
-	}
-	var extraSystemPrompt *string
-	if value := strings.TrimSpace(req.ExtraSystemPrompt); value != "" {
-		extraSystemPrompt = &value
-	}
-	var deliver *bool
-	if req.Deliver != nil {
-		value := req.GetDeliver()
-		deliver = &value
-	}
-	var timeoutMs *int
-	if req.TimeoutMs != nil {
-		value := int(req.GetTimeoutMs())
-		timeoutMs = &value
-	}
-	var label *string
-	if value := strings.TrimSpace(req.Label); value != "" {
-		label = &value
-	}
-	var spawnedBy *string
-	if value := strings.TrimSpace(req.SpawnedBy); value != "" {
-		spawnedBy = &value
-	}
-	policy, err := runPolicyFromProtoStruct(req.Policy)
+	params, err := agentCommandParamsFromProto(req)
 	if err != nil {
 		return &pb.AgentTaskAcceptedResponse{Ok: false, Error: err.Error()}, nil
 	}
-	inputProvenance, err := inputProvenanceFromProtoStruct(req.InputProvenance)
-	if err != nil {
-		return &pb.AgentTaskAcceptedResponse{Ok: false, Error: err.Error()}, nil
-	}
-	routing, err := routingContextFromProtoStruct(req.Routing)
-	if err != nil {
-		return &pb.AgentTaskAcceptedResponse{Ok: false, Error: err.Error()}, nil
-	}
-	attachments := attachmentsFromProtoStructs(req.Attachments)
 
-	task, idempotentHit, err := s.api.AcceptAgentCommand(ctx, workspaceID, orchestration.AgentCommandParams{
-		Message:           message,
-		AgentID:           &agentID,
-		SessionID:         strings.TrimSpace(req.SessionId),
-		SessionKey:        sessionKey,
-		Deliver:           deliver,
-		TimeoutMs:         timeoutMs,
-		Policy:            policy,
-		IdempotencyKey:    strings.TrimSpace(req.IdempotencyKey),
-		Lane:              lane,
-		ExtraSystemPrompt: extraSystemPrompt,
-		InputProvenance:   inputProvenance,
-		Routing:           routing,
-		Attachments:       attachments,
-		Label:             label,
-		SpawnedBy:         spawnedBy,
-	})
+	task, idempotentHit, err := s.api.AcceptAgentCommand(ctx, workspaceID, params)
 	if err != nil {
 		return &pb.AgentTaskAcceptedResponse{Ok: false, Error: err.Error()}, nil
 	}
@@ -109,20 +43,58 @@ func (s *AgentService) CreateTask(ctx context.Context, req *pb.CreateTaskRequest
 	}, nil
 }
 
-func newestExecutionID(attempts []*types.AgentRunAttempt) string {
-	for i := len(attempts) - 1; i >= 0; i-- {
-		attempt := attempts[i]
-		if attempt == nil || attempt.ExecutionID == nil {
-			continue
-		}
+func agentCommandParamsFromProto(req *pb.CreateTaskRequest) (orchestration.AgentCommandParams, error) {
+	policy, err := runPolicyFromProtoStruct(req.Policy)
+	if err != nil {
+		return orchestration.AgentCommandParams{}, err
+	}
+	inputProvenance, err := inputProvenanceFromProtoStruct(req.InputProvenance)
+	if err != nil {
+		return orchestration.AgentCommandParams{}, err
+	}
+	routing, err := routingContextFromProtoStruct(req.Routing)
+	if err != nil {
+		return orchestration.AgentCommandParams{}, err
+	}
+	attachments := attachmentsFromProtoStructs(req.Attachments)
 
-		executionID := strings.TrimSpace(*attempt.ExecutionID)
-		if executionID != "" {
-			return executionID
-		}
+	var deliver *bool
+	if req.Deliver != nil {
+		value := req.GetDeliver()
+		deliver = &value
+	}
+	var timeoutMs *int
+	if req.TimeoutMs != nil {
+		value := int(req.GetTimeoutMs())
+		timeoutMs = &value
 	}
 
-	return ""
+	agentID := req.GetAgentId()
+
+	return orchestration.AgentCommandParams{
+		Message:           req.GetMessage(),
+		AgentID:           &agentID,
+		SessionID:         req.GetSessionId(),
+		SessionKey:        optionalStringPointer(req.GetSessionKey()),
+		Deliver:           deliver,
+		TimeoutMs:         timeoutMs,
+		Policy:            policy,
+		IdempotencyKey:    req.GetIdempotencyKey(),
+		Lane:              optionalStringPointer(req.GetLane()),
+		ExtraSystemPrompt: optionalStringPointer(req.GetExtraSystemPrompt()),
+		InputProvenance:   inputProvenance,
+		Routing:           routing,
+		Attachments:       attachments,
+		Label:             optionalStringPointer(req.GetLabel()),
+		SpawnedBy:         optionalStringPointer(req.GetSpawnedBy()),
+	}, nil
+}
+
+func optionalStringPointer(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
 }
 
 func (s *AgentService) DeleteTask(ctx context.Context, req *pb.DeleteTaskRequest) (*pb.DeleteResponse, error) {
@@ -135,26 +107,11 @@ func (s *AgentService) DeleteTask(ctx context.Context, req *pb.DeleteTaskRequest
 		return &pb.DeleteResponse{Ok: false, Error: "task service unavailable"}, nil
 	}
 
-	task, err := s.api.GetTask(ctx, workspaceID, req.Id)
-	if err != nil {
+	if err := s.api.CancelTask(ctx, workspaceID, req.Id); err != nil {
 		if _, ok := err.(*types.ErrAgentTaskNotFound); ok {
 			return &pb.DeleteResponse{Ok: false, Error: "task not found"}, nil
 		}
 		return &pb.DeleteResponse{Ok: false, Error: err.Error()}, nil
-	}
-
-	if task.TargetRunID != nil {
-		if err := s.api.CancelRun(ctx, workspaceID, *task.TargetRunID); err != nil {
-			return &pb.DeleteResponse{Ok: false, Error: err.Error()}, nil
-		}
-	}
-
-	if task.State == types.AgentTaskStateAccepted ||
-		task.State == types.AgentTaskStateQueued ||
-		task.State == types.AgentTaskStateDispatched {
-		if err := s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateCancelled, nil, task.TargetRunID); err != nil {
-			return &pb.DeleteResponse{Ok: false, Error: err.Error()}, nil
-		}
 	}
 
 	return &pb.DeleteResponse{Ok: true}, nil
@@ -218,31 +175,11 @@ func (s *AgentService) GetTaskLogs(ctx context.Context, req *pb.GetTaskLogsReque
 		return &pb.GetTaskLogsResponse{Ok: false, Error: "task service unavailable"}, nil
 	}
 
-	task, err := s.api.GetTask(ctx, workspaceID, req.Id)
+	logs, err := s.api.GetTaskLogs(ctx, workspaceID, req.Id)
 	if err != nil {
 		if _, ok := err.(*types.ErrAgentTaskNotFound); ok {
 			return &pb.GetTaskLogsResponse{Ok: false, Error: "task not found"}, nil
 		}
-		return &pb.GetTaskLogsResponse{Ok: false, Error: err.Error()}, nil
-	}
-	if s.s2Client == nil || !s.s2Client.Enabled() {
-		return &pb.GetTaskLogsResponse{Ok: true, Logs: []*pb.TaskLogEntry{}}, nil
-	}
-	if task.TargetRunID == nil {
-		return &pb.GetTaskLogsResponse{Ok: true, Logs: []*pb.TaskLogEntry{}}, nil
-	}
-
-	attempts, err := s.backend.ListAgentRunAttempts(ctx, *task.TargetRunID)
-	if err != nil {
-		return &pb.GetTaskLogsResponse{Ok: false, Error: err.Error()}, nil
-	}
-	executionID := newestExecutionID(attempts)
-	if executionID == "" {
-		return &pb.GetTaskLogsResponse{Ok: true, Logs: []*pb.TaskLogEntry{}}, nil
-	}
-
-	logs, _, err := s.s2Client.ReadLogs(ctx, executionID, 0)
-	if err != nil {
 		return &pb.GetTaskLogsResponse{Ok: false, Error: err.Error()}, nil
 	}
 

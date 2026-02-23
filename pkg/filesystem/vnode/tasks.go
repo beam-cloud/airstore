@@ -34,7 +34,7 @@ type TasksVNode struct {
 
 	// Cache for task list
 	cacheMu     sync.RWMutex
-	cachedTasks []*types.RunExecution
+	cachedTasks []*types.AgentTask
 	cacheExpiry time.Time
 }
 
@@ -97,7 +97,7 @@ func (t *TasksVNode) getWorkspaceId(ctx context.Context) (uint, error) {
 }
 
 // getTasks returns cached tasks or fetches fresh data
-func (t *TasksVNode) getTasks(ctx context.Context) ([]*types.RunExecution, error) {
+func (t *TasksVNode) getTasks(ctx context.Context) ([]*types.AgentTask, error) {
 	t.cacheMu.RLock()
 	if time.Now().Before(t.cacheExpiry) && t.cachedTasks != nil {
 		tasks := t.cachedTasks
@@ -106,7 +106,7 @@ func (t *TasksVNode) getTasks(ctx context.Context) ([]*types.RunExecution, error
 	}
 	t.cacheMu.RUnlock()
 
-	var tasks []*types.RunExecution
+	var tasks []*types.AgentTask
 	var err error
 
 	if t.backend != nil {
@@ -121,10 +121,7 @@ func (t *TasksVNode) getTasks(ctx context.Context) ([]*types.RunExecution, error
 			return nil, listErr
 		}
 
-		tasks = make([]*types.RunExecution, len(agentTasks))
-		for i, task := range agentTasks {
-			tasks[i] = agentTaskToRunExecution(task)
-		}
+		tasks = agentTasks
 	} else if t.grpcConn != nil {
 		// gRPC access (CLI mode)
 		tasks, err = t.fetchTasksGRPC(ctx)
@@ -151,7 +148,7 @@ func (t *TasksVNode) grpcClient() pb.AgentServiceClient {
 }
 
 // fetchTasksGRPC fetches tasks from the gateway via gRPC
-func (t *TasksVNode) fetchTasksGRPC(ctx context.Context) ([]*types.RunExecution, error) {
+func (t *TasksVNode) fetchTasksGRPC(ctx context.Context) ([]*types.AgentTask, error) {
 	resp, err := t.grpcClient().ListTasks(t.grpcContext(ctx), &pb.ListTasksRequest{})
 	if err != nil {
 		return nil, err
@@ -160,16 +157,16 @@ func (t *TasksVNode) fetchTasksGRPC(ctx context.Context) ([]*types.RunExecution,
 		return nil, fmt.Errorf("ListTasks failed: %s", resp.Error)
 	}
 
-	tasks := make([]*types.RunExecution, len(resp.Tasks))
+	tasks := make([]*types.AgentTask, len(resp.Tasks))
 	for i, pt := range resp.Tasks {
-		tasks[i] = pbToTask(pt)
+		tasks[i] = pbToAgentTask(pt)
 	}
 	return tasks, nil
 }
 
 // getTaskByName finds a task by its filename (e.g., "abc123.task")
 // Uses cached task list first for fast lookups during directory listing.
-func (t *TasksVNode) getTaskByName(ctx context.Context, name string) (*types.RunExecution, error) {
+func (t *TasksVNode) getTaskByName(ctx context.Context, name string) (*types.AgentTask, error) {
 	if isAppleDoublePath(name) {
 		return nil, ErrNotFound
 	}
@@ -182,7 +179,7 @@ func (t *TasksVNode) getTaskByName(ctx context.Context, name string) (*types.Run
 	t.cacheMu.RLock()
 	if t.cachedTasks != nil && time.Now().Before(t.cacheExpiry) {
 		for _, task := range t.cachedTasks {
-			if task.ExternalId == taskId {
+			if task.ID == taskId {
 				t.cacheMu.RUnlock()
 				return task, nil
 			}
@@ -206,7 +203,7 @@ func (t *TasksVNode) getTaskByName(ctx context.Context, name string) (*types.Run
 			return nil, err
 		}
 
-		return agentTaskToRunExecution(task), nil
+		return task, nil
 	}
 
 	if t.grpcConn != nil {
@@ -217,7 +214,7 @@ func (t *TasksVNode) getTaskByName(ctx context.Context, name string) (*types.Run
 }
 
 // fetchTaskGRPC fetches a single task from the gateway via gRPC
-func (t *TasksVNode) fetchTaskGRPC(ctx context.Context, taskId string) (*types.RunExecution, error) {
+func (t *TasksVNode) fetchTaskGRPC(ctx context.Context, taskId string) (*types.AgentTask, error) {
 	resp, err := t.grpcClient().GetTask(t.grpcContext(ctx), &pb.GetTaskRequest{Id: taskId})
 	if err != nil {
 		return nil, err
@@ -228,7 +225,7 @@ func (t *TasksVNode) fetchTaskGRPC(ctx context.Context, taskId string) (*types.R
 		}
 		return nil, fmt.Errorf("GetTask failed: %s", resp.Error)
 	}
-	return pbToTask(resp.Task), nil
+	return pbToAgentTask(resp.Task), nil
 }
 
 // fetchTaskLogsGRPC fetches task logs via gRPC
@@ -246,50 +243,40 @@ func (t *TasksVNode) fetchTaskLogsGRPC(ctx context.Context, taskId string) strin
 	return sb.String()
 }
 
-// pbToTask converts a proto AgentTask to a types.RunExecution view.
-func pbToTask(pt *pb.AgentTask) *types.RunExecution {
-	task := &types.RunExecution{
-		ExternalId: pt.Id,
-		Status:     taskStateToRunExecutionStatus(types.AgentTaskState(pt.State)),
-		Error:      pt.DroppedReason,
+// pbToAgentTask converts a proto task to an AgentTask view.
+func pbToAgentTask(pt *pb.AgentTask) *types.AgentTask {
+	if pt == nil {
+		return &types.AgentTask{}
+	}
+	task := &types.AgentTask{
+		ID:             pt.Id,
+		AgentID:        optionalString(pt.AgentId),
+		Kind:           types.AgentTaskKind(pt.Kind),
+		QueueMode:      types.AgentQueueMode(pt.QueueMode),
+		State:          types.AgentTaskState(pt.State),
+		IdempotencyKey: pt.IdempotencyKey,
+		TargetRunID:    optionalString(pt.TargetRunId),
+		DroppedReason:  optionalString(pt.DroppedReason),
 	}
 	if pt.CreatedAt != "" {
-		if t, err := time.Parse(time.RFC3339, pt.CreatedAt); err == nil {
-			task.CreatedAt = t
+		if parsed, err := time.Parse(time.RFC3339, pt.CreatedAt); err == nil {
+			task.CreatedAt = parsed
+		}
+	}
+	if pt.UpdatedAt != "" {
+		if parsed, err := time.Parse(time.RFC3339, pt.UpdatedAt); err == nil {
+			task.UpdatedAt = parsed
 		}
 	}
 	return task
 }
 
-func agentTaskToRunExecution(task *types.AgentTask) *types.RunExecution {
-	if task == nil {
-		return &types.RunExecution{}
+func optionalString(value string) *string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
 	}
-
-	errText := ""
-	if task.DroppedReason != nil {
-		errText = *task.DroppedReason
-	}
-
-	return &types.RunExecution{
-		ExternalId: task.ID,
-		Status:     taskStateToRunExecutionStatus(task.State),
-		Error:      errText,
-		CreatedAt:  task.CreatedAt,
-	}
-}
-
-func taskStateToRunExecutionStatus(state types.AgentTaskState) types.RunExecutionStatus {
-	switch state {
-	case types.AgentTaskStateAccepted, types.AgentTaskStateQueued:
-		return types.RunExecutionStatusPending
-	case types.AgentTaskStateDispatched:
-		return types.RunExecutionStatusRunning
-	case types.AgentTaskStateCancelled, types.AgentTaskStateDropped:
-		return types.RunExecutionStatusCancelled
-	default:
-		return types.RunExecutionStatusPending
-	}
+	return &trimmed
 }
 
 // taskFilename returns the filename for a task
@@ -343,7 +330,7 @@ func (t *TasksVNode) Readdir(path string) ([]DirEntry, error) {
 
 	entries := make([]DirEntry, 0, len(tasks))
 	for _, task := range tasks {
-		name := taskFilename(task.ExternalId)
+		name := taskFilename(task.ID)
 		mtime := task.CreatedAt.Unix()
 		entries = append(entries, DirEntry{
 			Name:  name,
@@ -396,29 +383,25 @@ func (t *TasksVNode) Read(path string, buf []byte, off int64, fh FileHandle) (in
 
 	// Build task content: task info + logs
 	var content strings.Builder
-	content.WriteString(fmt.Sprintf("Task: %s\n", task.ExternalId))
-	content.WriteString(fmt.Sprintf("Status: %s\n", task.Status))
-	if task.Prompt != "" {
-		content.WriteString(fmt.Sprintf("Prompt: %s\n", task.Prompt))
+	content.WriteString(fmt.Sprintf("Task: %s\n", task.ID))
+	content.WriteString(fmt.Sprintf("State: %s\n", task.State))
+	content.WriteString(fmt.Sprintf("Kind: %s\n", task.Kind))
+	content.WriteString(fmt.Sprintf("Queue Mode: %s\n", task.QueueMode))
+	if task.TargetRunID != nil {
+		content.WriteString(fmt.Sprintf("Run: %s\n", *task.TargetRunID))
 	}
 	content.WriteString(fmt.Sprintf("Created: %s\n", task.CreatedAt.Format(time.RFC3339)))
-	if task.StartedAt != nil {
-		content.WriteString(fmt.Sprintf("Started: %s\n", task.StartedAt.Format(time.RFC3339)))
+	if task.UpdatedAt.Unix() > 0 {
+		content.WriteString(fmt.Sprintf("Updated: %s\n", task.UpdatedAt.Format(time.RFC3339)))
 	}
-	if task.FinishedAt != nil {
-		content.WriteString(fmt.Sprintf("Finished: %s\n", task.FinishedAt.Format(time.RFC3339)))
-	}
-	if task.ExitCode != nil {
-		content.WriteString(fmt.Sprintf("Exit Code: %d\n", *task.ExitCode))
-	}
-	if task.Error != "" {
-		content.WriteString(fmt.Sprintf("Error: %s\n", task.Error))
+	if task.DroppedReason != nil {
+		content.WriteString(fmt.Sprintf("Dropped Reason: %s\n", *task.DroppedReason))
 	}
 	content.WriteString("\n--- Output ---\n")
 
 	// Get logs via gRPC (reads from S2)
 	if t.grpcConn != nil {
-		logs := t.fetchTaskLogsGRPC(ctx, task.ExternalId)
+		logs := t.fetchTaskLogsGRPC(ctx, task.ID)
 		content.WriteString(logs)
 	} else {
 		content.WriteString("(logs available via API)\n")

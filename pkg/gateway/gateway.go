@@ -459,11 +459,6 @@ func (g *Gateway) registerServices() error {
 	if g.BackendRepo != nil {
 		taskQueue := repository.NewRedisTaskQueue(g.RedisClient, "default")
 
-		var terminalIO repository.TerminalIORepository
-		if g.RedisClient != nil {
-			terminalIO = repository.NewRedisTerminalIORepository(g.RedisClient)
-		}
-
 		// Wire source cache invalidation hooks into gateway service.
 		if gatewayService != nil {
 			gatewayService.SetSourceService(sourceService)
@@ -562,9 +557,6 @@ func (g *Gateway) registerServices() error {
 		apiv1.NewAgentsGroup(agentAPIRoot.Group("/agents"), agentAPI)
 		apiv1.NewWorkspaceTasksGroup(agentAPIRoot.Group("/tasks"), agentAPI)
 		apiv1.NewRunsGroup(agentAPIRoot.Group("/runs"), agentAPI)
-
-		// Task API (`/api/v1/tasks`) delegates to the shared task acceptance path.
-		apiv1.NewTasksGroup(g.baseRouteGroup.Group("/tasks"), g.BackendRepo, agentAPI, terminalIO, g.s2Client)
 
 		// Hook engine: matches events → hooks → tasks, polls for retries
 		var skillReader hooks.SkillReader
