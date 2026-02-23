@@ -1,37 +1,129 @@
 package apiv1
 
 import (
+	"context"
 	"net/http"
+	"time"
 
-	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/labstack/echo/v4"
-	"github.com/rs/zerolog/log"
 )
 
 type HealthGroup struct {
-	redisClient *common.RedisClient
-	routerGroup *echo.Group
+	routerGroup     *echo.Group
+	redisProbe      func(context.Context) error
+	postgresProbe   func(context.Context) error
+	migrationsReady func() bool
 }
 
-func NewHealthGroup(g *echo.Group, rdb *common.RedisClient) *HealthGroup {
-	group := &HealthGroup{routerGroup: g, redisClient: rdb}
+type healthDependencyState struct {
+	Enabled bool   `json:"enabled"`
+	Ready   bool   `json:"ready"`
+	Error   string `json:"error,omitempty"`
+}
 
-	g.GET("", group.HealthCheck)
+type healthResponse struct {
+	Status       string                           `json:"status"`
+	Live         bool                             `json:"live"`
+	Ready        bool                             `json:"ready"`
+	Dependencies map[string]healthDependencyState `json:"dependencies"`
+}
+
+func NewHealthGroup(g *echo.Group, redisProbe func(context.Context) error, postgresProbe func(context.Context) error, migrationsReady func() bool) *HealthGroup {
+	group := &HealthGroup{
+		routerGroup:     g,
+		redisProbe:      redisProbe,
+		postgresProbe:   postgresProbe,
+		migrationsReady: migrationsReady,
+	}
+
+	// Keep the root endpoint as readiness for backwards compatibility.
+	g.GET("", group.ReadinessCheck)
+	g.GET("/ready", group.ReadinessCheck)
+	g.GET("/live", group.LivenessCheck)
 
 	return group
 }
 
-func (h *HealthGroup) HealthCheck(c echo.Context) error {
-	err := h.redisClient.Ping(c.Request().Context()).Err()
-	if err != nil {
-		log.Error().Err(err).Msg("health check failed")
-		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"status": "not ok",
-			"error":  err.Error(),
-		})
+func (h *HealthGroup) LivenessCheck(c echo.Context) error {
+	resp := h.buildResponse(c.Request().Context())
+	resp.Live = true
+	return c.JSON(http.StatusOK, resp)
+}
+
+func (h *HealthGroup) ReadinessCheck(c echo.Context) error {
+	resp := h.buildResponse(c.Request().Context())
+	if !resp.Ready {
+		return c.JSON(http.StatusServiceUnavailable, resp)
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+func (h *HealthGroup) buildResponse(ctx context.Context) healthResponse {
+	redisState := checkDependency(ctx, h.redisProbe)
+	postgresState := checkDependency(ctx, h.postgresProbe)
+
+	migrationsEnabled := postgresState.Enabled
+	migrationsState := healthDependencyState{
+		Enabled: migrationsEnabled,
+		Ready:   true,
+	}
+	if migrationsEnabled {
+		if h.migrationsReady != nil {
+			migrationsState.Ready = h.migrationsReady()
+		}
+		if !migrationsState.Ready {
+			migrationsState.Error = "migrations not ready"
+		}
 	}
 
-	return c.JSON(http.StatusOK, map[string]string{
-		"status": "ok",
-	})
+	deps := map[string]healthDependencyState{
+		"redis":      redisState,
+		"postgres":   postgresState,
+		"migrations": migrationsState,
+	}
+
+	ready := true
+	for _, dep := range deps {
+		if dep.Enabled && !dep.Ready {
+			ready = false
+			break
+		}
+	}
+
+	status := "ok"
+	if !ready {
+		status = "degraded"
+	}
+
+	return healthResponse{
+		Status:       status,
+		Live:         true,
+		Ready:        ready,
+		Dependencies: deps,
+	}
+}
+
+func checkDependency(ctx context.Context, probe func(context.Context) error) healthDependencyState {
+	if probe == nil {
+		return healthDependencyState{
+			Enabled: false,
+			Ready:   true,
+		}
+	}
+
+	pingCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	if err := probe(pingCtx); err != nil {
+		return healthDependencyState{
+			Enabled: true,
+			Ready:   false,
+			Error:   err.Error(),
+		}
+	}
+
+	return healthDependencyState{
+		Enabled: true,
+		Ready:   true,
+	}
 }

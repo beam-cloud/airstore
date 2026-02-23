@@ -1,0 +1,13 @@
+{{- if gt (int (default 1 .Values.controllers.gateway.replicas)) 0 }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .Release.Name }}-gateway
+  labels:
+    {{ include "bjw-s.common.lib.metadata.allLabels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      airstore.io/component: gateway
+{{- end }}
