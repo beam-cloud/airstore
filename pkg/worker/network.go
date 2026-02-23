@@ -12,7 +12,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/beam-cloud/airstore/pkg/gateway"
+	gatewayclient "github.com/beam-cloud/airstore/pkg/gateway/client"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/coreos/go-iptables/iptables"
 	"github.com/opencontainers/runtime-spec/specs-go"
@@ -33,14 +33,14 @@ const (
 type NetworkManager struct {
 	ctx      context.Context
 	workerID string
-	client   *gateway.GatewayClient
+	client   *gatewayclient.GatewayClient
 	extIface netlink.Link
 	ipt      *iptables.IPTables
 	ipt6     *iptables.IPTables // nil if IPv6 not available
 	mu       sync.Mutex
 }
 
-func NewNetworkManager(ctx context.Context, workerID string, client *gateway.GatewayClient) (*NetworkManager, error) {
+func NewNetworkManager(ctx context.Context, workerID string, client *gatewayclient.GatewayClient) (*NetworkManager, error) {
 	extIface, err := defaultInterface()
 	if err != nil {
 		return nil, fmt.Errorf("default interface: %w", err)

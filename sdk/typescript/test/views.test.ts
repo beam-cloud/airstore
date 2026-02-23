@@ -3,10 +3,6 @@ import type { Workspace } from '../src/types/workspaces.js';
 import { APIError } from '../src/errors.js';
 import { getClient, createTestWorkspace, deleteTestWorkspace, uniqueName } from './helpers.js';
 
-async function sleep(ms: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function statusCodeFromError(err: unknown): number | undefined {
   if (err instanceof APIError) return err.status;
   const status = (err as { status?: unknown })?.status;
@@ -25,24 +21,12 @@ describe('Source Views', () => {
 
   beforeAll(async () => {
     workspace = await createTestWorkspace('views');
-
-    try {
-      await client.connections.create(workspace.external_id, {
-        integrationType: 'gmail',
-        accessToken: 'test-sf-access-' + Date.now(),
-        refreshToken: 'test-sf-refresh-' + Date.now(),
-      });
-    } catch (err) {
-      if (err instanceof APIError && (err.status === 400 || err.status === 422)) {
-        console.warn('Source view tests will be best-effort: could not create connection');
-      } else {
-        throw err;
-      }
-    }
   });
 
   afterAll(async () => {
-    await deleteTestWorkspace(workspace.external_id);
+    const workspaceId = (workspace as Workspace | undefined)?.external_id;
+    if (!workspaceId) return;
+    await deleteTestWorkspace(workspaceId);
   });
 
   it('creates a source view (smart mode)', async () => {
@@ -111,13 +95,14 @@ describe('Source Views', () => {
       return;
     }
 
+    const updatedName = uniqueName('sv-updated');
     const updated = await client.views.update(
       workspace.external_id,
       view.external_id,
-      { name: 'Updated Name', guidance: 'Updated guidance' },
+      { name: updatedName, guidance: 'Updated guidance' },
     );
 
-    expect(updated.name).toBe('Updated Name');
+    expect(updated.name).toBe(updatedName);
     expect(updated.guidance).toBe('Updated guidance');
   });
 
@@ -158,29 +143,38 @@ describe('Source Views', () => {
       return;
     }
 
-    // Freshly-created views can briefly return 5xx while upstream sync workers warm up.
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        const result = await client.views.sync(workspace.external_id, view.external_id);
-        expect(result.external_id).toBeDefined();
-        expect(typeof result.results_count).toBe('number');
-        expect(typeof result.new_results).toBe('number');
-        return;
-      } catch (err) {
-        const status = statusCodeFromError(err);
-        const message = messageFromError(err);
-        const retryableServerError = status !== undefined && status >= 500;
+    try {
+      const result = await client.views.sync(
+        workspace.external_id,
+        view.external_id,
+        { timeout: 10_000, maxRetries: 0 },
+      );
+      expect(result.external_id).toBeDefined();
+      expect(typeof result.results_count).toBe('number');
+      expect(typeof result.new_results).toBe('number');
+    } catch (err) {
+      const status = statusCodeFromError(err);
+      const message = messageFromError(err);
+      const lower = message.toLowerCase();
 
-        if (!retryableServerError || attempt === 3) {
-          if (status !== undefined) {
-            console.warn(`Sync returned ${status}: ${message}`);
-            return;
-          }
+      if (status !== undefined) {
+        if (status === 400 || status === 404 || status === 422) {
+          expect(
+            lower.includes('not connected') ||
+            lower.includes('invalid authentication') ||
+            lower.includes('invalid_grant') ||
+            lower.includes('expired token') ||
+            lower.includes('not found') ||
+            lower.includes('unauthorized'),
+          ).toBe(true);
+          console.warn(`Sync returned ${status}: ${message}`);
+          return;
+        }
+        if (status >= 500) {
           throw err;
         }
-
-        await sleep(1000 * attempt);
       }
+      throw err;
     }
-  });
+  }, 45_000);
 });

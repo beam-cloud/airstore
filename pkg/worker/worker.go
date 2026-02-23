@@ -6,13 +6,14 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/common"
-	"github.com/beam-cloud/airstore/pkg/gateway"
+	gatewayclient "github.com/beam-cloud/airstore/pkg/gateway/client"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/runtime"
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -36,7 +37,7 @@ type Worker struct {
 	cpuLimit        int64
 	memoryLimit     int64
 	gatewayGRPCAddr string
-	gatewayClient   *gateway.GatewayClient
+	gatewayClient   *gatewayclient.GatewayClient
 	config          types.AppConfig
 	ctx             context.Context
 	cancel          context.CancelFunc
@@ -103,7 +104,7 @@ func NewWorker() (*Worker, error) {
 	// cpuLimit is in millicores; memoryLimit is in MiB.
 	maxConcurrentTasks := computeMaxTasks(cpuLimit, memoryLimit)
 
-	gatewayClient, err := gateway.NewGatewayClient(gatewayGRPCAddr, authToken)
+	gatewayClient, err := gatewayclient.NewGatewayClient(gatewayGRPCAddr, authToken)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("failed to create gateway client: %w", err)
@@ -268,14 +269,24 @@ func (w *Worker) executeTask(task types.RunExecution) {
 	).Msg("received task")
 
 	if err := w.gatewayClient.SetTaskStarted(w.ctx, task.ExternalId); err != nil {
-		if status.Code(err) == codes.FailedPrecondition {
-			addTaskExecutionContext(log.Info().Err(err), task).Msg("gateway rejected task start due to terminal run state")
+		code := status.Code(err)
+		lowerErr := strings.ToLower(err.Error())
+		taskMissing := code == codes.NotFound ||
+			(code == codes.Internal && (strings.Contains(lowerErr, "task not found") || strings.Contains(lowerErr, "run execution not found")))
+		switch {
+		case code == codes.FailedPrecondition, taskMissing:
+			reason := "gateway rejected task start due to terminal run state"
+			if taskMissing {
+				reason = "gateway rejected task start because run execution was not found"
+			}
+			addTaskExecutionContext(log.Info().Err(err), task).Msg(reason)
 			if qErr := w.taskQueue.Fail(w.ctx, task.ExternalId, fmt.Errorf("task start rejected: %w", err)); qErr != nil {
 				addTaskExecutionContext(log.Warn().Err(qErr), task).Msg("failed to mark skipped task as failed in queue")
 			}
 			return
+		default:
+			addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to mark task as started")
 		}
-		addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to mark task as started")
 	}
 
 	taskCtx := w.ctx
@@ -330,7 +341,7 @@ func (w *Worker) finishTask(task types.RunExecution, result *types.RunExecutionR
 
 // register registers the worker with the gateway
 func (w *Worker) register() error {
-	resp, err := w.gatewayClient.RegisterWorker(w.ctx, &gateway.RegisterWorkerRequest{
+	resp, err := w.gatewayClient.RegisterWorker(w.ctx, &gatewayclient.RegisterWorkerRequest{
 		Hostname: w.hostname,
 		PoolName: w.poolName,
 		Cpu:      w.cpuLimit,
