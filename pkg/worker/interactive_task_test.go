@@ -49,7 +49,7 @@ func TestMonitorInteractiveSessionIdleTimeout(t *testing.T) {
 	done := make(chan struct{})
 
 	go func() {
-		monitorInteractiveSessionIdle(ctx, "task-1", cancel, 20*time.Millisecond, activityCh, &idleTimedOut)
+		monitorInteractiveSessionIdle(ctx, "task-1", taskExecutionContext{}, cancel, 20*time.Millisecond, activityCh, &idleTimedOut)
 		close(done)
 	}()
 
@@ -79,7 +79,7 @@ func TestMonitorInteractiveSessionIdleResetOnActivity(t *testing.T) {
 	done := make(chan struct{})
 
 	go func() {
-		monitorInteractiveSessionIdle(ctx, "task-2", cancel, 60*time.Millisecond, activityCh, &idleTimedOut)
+		monitorInteractiveSessionIdle(ctx, "task-2", taskExecutionContext{}, cancel, 60*time.Millisecond, activityCh, &idleTimedOut)
 		close(done)
 	}()
 

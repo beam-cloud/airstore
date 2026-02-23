@@ -599,7 +599,7 @@ func (s *AgentService) createAttemptExecutionTask(
 		return nil, err
 	}
 	taskEnv := map[string]string{}
-	applyRunRuntimeEnv(taskEnv, run)
+	applyRunExecutionContextEnv(taskEnv, run, attempt.ID)
 	applyAgentConfigEnv(taskEnv, agentConfig)
 	applyPayloadRuntimeEnv(taskEnv, payload)
 	retryPolicy := RetryPolicyOrDefault(runPolicy.Retry)
@@ -617,6 +617,7 @@ func (s *AgentService) createAttemptExecutionTask(
 			"delay_ms":     retryPolicy.DelayMs,
 		},
 	}
+	applyRunExecutionContextMetadata(executionPolicy, run, attempt.ID)
 	if run.Provider != nil {
 		executionPolicy["provider"] = *run.Provider
 	}
@@ -900,12 +901,35 @@ func applyRunRuntimeEnv(env map[string]string, run *types.AgentRun) {
 	if env == nil || run == nil {
 		return
 	}
+	env["AIRSTORE_RUN_ID"] = strings.TrimSpace(run.ID)
+	env["AIRSTORE_ORIGIN_TASK_ID"] = strings.TrimSpace(run.OriginTaskID)
 	if run.Provider != nil && strings.TrimSpace(*run.Provider) != "" {
 		env["AIRSTORE_AGENT_PROVIDER"] = strings.TrimSpace(*run.Provider)
 	}
 	if run.Model != nil && strings.TrimSpace(*run.Model) != "" {
 		env["AIRSTORE_AGENT_MODEL"] = strings.TrimSpace(*run.Model)
 	}
+}
+
+func applyRunExecutionContextEnv(env map[string]string, run *types.AgentRun, attemptID string) {
+	if env == nil {
+		return
+	}
+	applyRunRuntimeEnv(env, run)
+	if strings.TrimSpace(attemptID) != "" {
+		env["AIRSTORE_RUN_ATTEMPT_ID"] = strings.TrimSpace(attemptID)
+	}
+}
+
+func applyRunExecutionContextMetadata(executionPolicy map[string]any, run *types.AgentRun, attemptID string) {
+	if executionPolicy == nil || run == nil {
+		return
+	}
+	executionPolicy[types.AgentExecutionMetaKeyRunID] = strings.TrimSpace(run.ID)
+	if strings.TrimSpace(attemptID) != "" {
+		executionPolicy[types.AgentExecutionMetaKeyRunAttemptID] = strings.TrimSpace(attemptID)
+	}
+	executionPolicy[types.AgentExecutionMetaKeyOriginTaskID] = strings.TrimSpace(run.OriginTaskID)
 }
 
 func applyAgentConfigEnv(env map[string]string, config map[string]any) {

@@ -235,6 +235,12 @@ func TestScheduleRetryRunCreatesNewRunAndRebindsTask(t *testing.T) {
 	require.NotEqual(t, originExecutionID, queuedExecution.ExternalId)
 	require.NotNil(t, queuedExecution.RunAttemptID)
 	require.Equal(t, retryAttempts[0].ID, *queuedExecution.RunAttemptID)
+	require.Equal(t, result.nextRunID, queuedExecution.ExecutionPolicy[types.AgentExecutionMetaKeyRunID])
+	require.Equal(t, retryAttempts[0].ID, queuedExecution.ExecutionPolicy[types.AgentExecutionMetaKeyRunAttemptID])
+	require.Equal(t, originTaskID, queuedExecution.ExecutionPolicy[types.AgentExecutionMetaKeyOriginTaskID])
+	require.Equal(t, result.nextRunID, queuedExecution.Env["AIRSTORE_RUN_ID"])
+	require.Equal(t, retryAttempts[0].ID, queuedExecution.Env["AIRSTORE_RUN_ATTEMPT_ID"])
+	require.Equal(t, originTaskID, queuedExecution.Env["AIRSTORE_ORIGIN_TASK_ID"])
 }
 
 func TestAgentCommandParamsFromProtoMatchesHTTPShape(t *testing.T) {

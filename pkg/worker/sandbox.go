@@ -353,12 +353,20 @@ func (m *SandboxManager) Create(cfg types.SandboxConfig) (*types.SandboxState, e
 		return nil, fmt.Errorf("sandbox %s already exists", cfg.ID)
 	}
 
-	log.Info().
-		Str("sandbox_id", cfg.ID).
-		Str("workspace_id", cfg.WorkspaceID).
-		Str("image", cfg.Image).
-		Str("runtime", string(cfg.Runtime)).
-		Msg("creating sandbox")
+	taskID := ""
+	if strings.HasPrefix(cfg.ID, "task-") {
+		taskID = strings.TrimPrefix(cfg.ID, "task-")
+	}
+	createEvent := addTaskExecutionContextFromEnv(
+		log.Info().
+			Str("sandbox_id", cfg.ID).
+			Str("workspace_id", cfg.WorkspaceID).
+			Str("image", cfg.Image).
+			Str("runtime", string(cfg.Runtime)),
+		taskID,
+		cfg.Env,
+	)
+	createEvent.Msg("creating sandbox")
 
 	// Prepare rootfs from image using CLIP (lazy-loading FUSE mount)
 	rootfsPath, cleanupRootfs, err := m.imageManager.PrepareRootfs(m.ctx, cfg.Image)
@@ -896,11 +904,12 @@ func (m *SandboxManager) resolvePromptRunner(task types.RunExecution, env map[st
 
 	runner, ok := m.promptRunners[provider]
 	if !ok || runner == nil {
-		log.Warn().
-			Str("provider", provider).
-			Str("task_id", task.ExternalId).
-			Str("default_runner", defaultRunner.Name()).
-			Msg("unsupported agent provider for prompt task, falling back to default runner")
+		addTaskExecutionContext(
+			log.Warn().
+				Str("provider", provider).
+				Str("default_runner", defaultRunner.Name()),
+			task,
+		).Msg("unsupported agent provider for prompt task, falling back to default runner")
 		return defaultRunner
 	}
 	return runner
@@ -961,16 +970,16 @@ func (m *SandboxManager) mountFilesystem(ctx context.Context, task types.RunExec
 	if task.MemberToken != "" && m.mountManager != nil {
 		mountPath, err := m.mountManager.Mount(ctx, task.ExternalId, task.MemberToken)
 		if err != nil {
-			log.Warn().Err(err).Str("task_id", task.ExternalId).Msg("failed to create task mount")
+			addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to create task mount")
 		} else {
-			log.Debug().Str("task_id", task.ExternalId).Msg("mounted filesystem with task token")
+			addTaskExecutionContext(log.Debug().Str("mount_path", mountPath), task).Msg("mounted filesystem with task token")
 			return mountPath
 		}
 	}
 
 	// Fall back to worker's global mount
 	if m.enableFS {
-		log.Debug().Str("task_id", task.ExternalId).Msg("using worker global mount")
+		addTaskExecutionContext(log.Debug().Str("mount_path", m.paths.WorkerMount), task).Msg("using worker global mount")
 		return m.paths.WorkerMount
 	}
 
@@ -1073,7 +1082,7 @@ func (m *SandboxManager) RunTask(ctx context.Context, task types.RunExecution) (
 		NewConsoleWriter(task.ExternalId, "stdout"),
 	)
 	if err := m.SetOutput(sandboxID, taskOutput, taskOutput.Flush); err != nil {
-		log.Warn().Err(err).Str("task_id", task.ExternalId).Msg("failed to set output")
+		addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to set output")
 	}
 
 	// Publish starting status

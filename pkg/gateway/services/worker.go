@@ -423,10 +423,16 @@ func (s *WorkerService) scheduleRetryRun(ctx context.Context, attempt *types.Age
 		return retryScheduleResult{}, err
 	}
 	taskEnv := cloneStringMap(sourceTask.Env)
+	taskEnv["AIRSTORE_RUN_ID"] = retryRun.ID
+	taskEnv["AIRSTORE_RUN_ATTEMPT_ID"] = retryAttempt.ID
+	taskEnv["AIRSTORE_ORIGIN_TASK_ID"] = retryRun.OriginTaskID
 	executionPolicy := cloneAnyMap(sourceTask.ExecutionPolicy)
 	if executionPolicy == nil {
 		executionPolicy = map[string]any{}
 	}
+	executionPolicy[types.AgentExecutionMetaKeyRunID] = retryRun.ID
+	executionPolicy[types.AgentExecutionMetaKeyRunAttemptID] = retryAttempt.ID
+	executionPolicy[types.AgentExecutionMetaKeyOriginTaskID] = retryRun.OriginTaskID
 	executionPolicy[types.AgentExecutionMetaKeyRetry] = map[string]any{
 		"max_attempts": retryPolicy.maxAttempts,
 		"delay_ms":     retryPolicy.delayMs,

@@ -45,11 +45,12 @@ func (r *ClaudeCodeRunner) BuildEntrypoint(task types.RunExecution, env map[stri
 	r.injectKernelEnv(env)
 	model := strings.TrimSpace(env[agentModelEnvKey])
 
-	log.Info().
-		Str("task_id", task.ExternalId).
-		Str("model", model).
-		Str("prompt", task.Prompt[:min(50, len(task.Prompt))]).
-		Msg("running claude code task")
+	addTaskExecutionContext(
+		log.Info().
+			Str("model", model).
+			Str("prompt", task.Prompt[:min(50, len(task.Prompt))]),
+		task,
+	).Msg("running claude code task")
 
 	return claudePromptEntrypoint(task.Prompt, defaultClaudePromptEntrypointOptions(model))
 }

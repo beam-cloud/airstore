@@ -47,7 +47,7 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.RunExecution
 	go func() {
 		w.sandboxManager.Delete(sandboxID, true)
 		w.sandboxManager.cleanupMount(task.ExternalId)
-		log.Info().Str("task_id", task.ExternalId).Msg("interactive sandbox cleanup complete")
+		addTaskExecutionContext(log.Info(), task).Msg("interactive sandbox cleanup complete")
 	}()
 
 	return result, nil
@@ -60,12 +60,14 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	sessionCtx, sessionCancel := context.WithCancel(ctx)
 	defer sessionCancel()
 
+	executionCtx := executionContextFromTask(task)
+
 	idleTimeout := w.config.Sandbox.GetInteractiveIdleTimeout()
 	var idleTimedOut atomic.Bool
 	activityCh := make(chan struct{}, 1)
 
 	if idleTimeout > 0 {
-		go monitorInteractiveSessionIdle(sessionCtx, task.ExternalId, sessionCancel, idleTimeout, activityCh, &idleTimedOut)
+		go monitorInteractiveSessionIdle(sessionCtx, task.ExternalId, executionCtx, sessionCancel, idleTimeout, activityCh, &idleTimedOut)
 	}
 
 	inputCh, inputCleanup, err := w.terminalIO.SubscribeInput(sessionCtx, task.ExternalId)
@@ -84,7 +86,7 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 		select {
 		case <-sessionCtx.Done():
 		case <-cancelCh:
-			log.Info().Str("task_id", task.ExternalId).Msg("received cancel signal for interactive task")
+			addTaskExecutionContext(log.Info(), task).Msg("received cancel signal for interactive task")
 			sessionCancel()
 			// Force-stop the sandbox so AttachPTY returns promptly.
 			// Killing only the `runsc exec` wrapper doesn't kill the sandbox's
@@ -101,9 +103,10 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	})
 
 	terminalWriter := &terminalOutputWriter{
-		ctx:        sessionCtx,
-		taskID:     task.ExternalId,
-		terminalIO: w.terminalIO,
+		ctx:          sessionCtx,
+		taskID:       task.ExternalId,
+		terminalIO:   w.terminalIO,
+		executionCtx: executionCtx,
 		onActivity: func() {
 			signalActivity(activityCh)
 		},
@@ -149,11 +152,12 @@ func interactiveErrorResult(taskID string, err error) *types.RunExecutionResult 
 }
 
 type terminalOutputWriter struct {
-	ctx        context.Context
-	taskID     string
-	terminalIO repository.TerminalIORepository
-	onActivity func()
-	mirror     io.Writer
+	ctx          context.Context
+	taskID       string
+	terminalIO   repository.TerminalIORepository
+	executionCtx taskExecutionContext
+	onActivity   func()
+	mirror       io.Writer
 }
 
 func forwardTerminalInput(
@@ -198,7 +202,7 @@ func (w *terminalOutputWriter) Write(p []byte) (int, error) {
 	}
 
 	if err := w.terminalIO.PublishOutput(w.ctx, w.taskID, append([]byte(nil), p...)); err != nil {
-		log.Warn().Err(err).Str("task_id", w.taskID).Msg("failed to publish terminal output")
+		addTaskExecutionContextByID(log.Warn().Err(err), w.taskID, w.executionCtx).Msg("failed to publish terminal output")
 	}
 
 	return len(p), nil
@@ -214,6 +218,7 @@ func signalActivity(activityCh chan<- struct{}) {
 func monitorInteractiveSessionIdle(
 	ctx context.Context,
 	taskID string,
+	executionCtx taskExecutionContext,
 	cancel context.CancelFunc,
 	idleTimeout time.Duration,
 	activityCh <-chan struct{},
@@ -236,10 +241,11 @@ func monitorInteractiveSessionIdle(
 			timer.Reset(idleTimeout)
 		case <-timer.C:
 			idleTimedOut.Store(true)
-			log.Info().
-				Str("task_id", taskID).
-				Dur("idle_timeout", idleTimeout).
-				Msg("interactive session idle timeout reached, stopping task")
+			addTaskExecutionContextByID(
+				log.Info().Dur("idle_timeout", idleTimeout),
+				taskID,
+				executionCtx,
+			).Msg("interactive session idle timeout reached, stopping task")
 			cancel()
 			return
 		}

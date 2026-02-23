@@ -260,21 +260,22 @@ func (w *Worker) runTask(task types.RunExecution) {
 
 // executeTask runs a single task to completion: mark started → execute → record result.
 func (w *Worker) executeTask(task types.RunExecution) {
-	log.Info().
-		Str("worker_id", w.workerId).
-		Str("task_id", task.ExternalId).
-		Uint("workspace_id", task.WorkspaceId).
-		Msg("received task")
+	addTaskExecutionContext(
+		log.Info().
+			Str("worker_id", w.workerId).
+			Uint("workspace_id", task.WorkspaceId),
+		task,
+	).Msg("received task")
 
 	if err := w.gatewayClient.SetTaskStarted(w.ctx, task.ExternalId); err != nil {
 		if status.Code(err) == codes.FailedPrecondition {
-			log.Info().Err(err).Str("task_id", task.ExternalId).Msg("gateway rejected task start due to terminal run state")
+			addTaskExecutionContext(log.Info().Err(err), task).Msg("gateway rejected task start due to terminal run state")
 			if qErr := w.taskQueue.Fail(w.ctx, task.ExternalId, fmt.Errorf("task start rejected: %w", err)); qErr != nil {
-				log.Warn().Err(qErr).Str("task_id", task.ExternalId).Msg("failed to mark skipped task as failed in queue")
+				addTaskExecutionContext(log.Warn().Err(qErr), task).Msg("failed to mark skipped task as failed in queue")
 			}
 			return
 		}
-		log.Warn().Err(err).Str("task_id", task.ExternalId).Msg("failed to mark task as started")
+		addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to mark task as started")
 	}
 
 	taskCtx := w.ctx
@@ -293,21 +294,23 @@ func (w *Worker) executeTask(task types.RunExecution) {
 	}
 
 	if err != nil {
-		log.Error().Err(err).Str("task_id", task.ExternalId).Msg("task execution failed")
+		addTaskExecutionContext(log.Error().Err(err), task).Msg("task execution failed")
 		result = &types.RunExecutionResult{ID: task.ExternalId, ExitCode: -1, Error: err.Error()}
 	}
 
-	log.Info().
-		Str("worker_id", w.workerId).
-		Str("task_id", task.ExternalId).
-		Int("exit_code", result.ExitCode).
-		Msg("task finished, returning capacity")
+	addTaskExecutionContext(
+		log.Info().
+			Str("worker_id", w.workerId).
+			Int("exit_code", result.ExitCode),
+		task,
+	).Msg("task finished, returning capacity")
 
-	w.finishTask(task.ExternalId, result)
+	w.finishTask(task, result)
 }
 
 // finishTask records the result in Redis and Postgres. Single path for both success and failure.
-func (w *Worker) finishTask(taskID string, result *types.RunExecutionResult) {
+func (w *Worker) finishTask(task types.RunExecution, result *types.RunExecutionResult) {
+	taskID := task.ExternalId
 	var qErr error
 	if result.ExitCode == 0 && result.Error == "" {
 		qErr = w.taskQueue.Complete(w.ctx, taskID, result)
@@ -315,14 +318,14 @@ func (w *Worker) finishTask(taskID string, result *types.RunExecutionResult) {
 		qErr = w.taskQueue.Fail(w.ctx, taskID, fmt.Errorf("%s", result.Error))
 	}
 	if qErr != nil {
-		log.Warn().Err(qErr).Str("task_id", taskID).Msg("failed to update task queue")
+		addTaskExecutionContext(log.Warn().Err(qErr), task).Msg("failed to update task queue")
 	}
 
 	if err := w.gatewayClient.SetTaskResult(w.ctx, taskID, result.ExitCode, result.Error); err != nil {
-		log.Warn().Err(err).Str("task_id", taskID).Msg("failed to report result to gateway")
+		addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to report result to gateway")
 	}
 
-	log.Info().Str("task_id", taskID).Int("exit_code", result.ExitCode).Msg("task finished")
+	addTaskExecutionContext(log.Info().Int("exit_code", result.ExitCode), task).Msg("task finished")
 }
 
 // register registers the worker with the gateway

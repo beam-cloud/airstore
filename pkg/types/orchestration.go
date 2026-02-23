@@ -121,6 +121,9 @@ const (
 	AgentExecutionMetaKeyRetryMaxAttempts = "retry_max_attempts"
 	AgentExecutionMetaKeyRetryDelayMs     = "retry_delay_ms"
 	AgentExecutionMetaKeyResources        = "resources"
+	AgentExecutionMetaKeyRunID            = "run_id"
+	AgentExecutionMetaKeyRunAttemptID     = "run_attempt_id"
+	AgentExecutionMetaKeyOriginTaskID     = "origin_task_id"
 )
 
 type AgentExecutionInstanceStatus string
