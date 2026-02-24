@@ -281,21 +281,21 @@ func (s *PoolScaler) buildDeployment() *appsv1.Deployment {
 									Name:  "AIRSTORE_TOKEN",
 									Value: s.config.WorkerToken,
 								},
-							{
-								// Full config as JSON - worker loads via ConfigManager
-								Name:  "CONFIG_JSON",
-								Value: configJSON,
-							},
-							{
-								// Worker CPU capacity in millicores (used to compute task concurrency)
-								Name:  "CPU_LIMIT",
-								Value: strconv.FormatInt(cpuMillis, 10),
-							},
-							{
-								// Worker memory capacity in MiB (used to compute task concurrency)
-								Name:  "MEMORY_LIMIT",
-								Value: strconv.FormatInt(memMiB, 10),
-							},
+								{
+									// Full config as JSON - worker loads via ConfigManager
+									Name:  "CONFIG_JSON",
+									Value: configJSON,
+								},
+								{
+									// Worker CPU capacity in millicores (used to compute task concurrency)
+									Name:  "CPU_LIMIT",
+									Value: strconv.FormatInt(cpuMillis, 10),
+								},
+								{
+									// Worker memory capacity in MiB (used to compute task concurrency)
+									Name:  "MEMORY_LIMIT",
+									Value: strconv.FormatInt(memMiB, 10),
+								},
 							},
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{
@@ -402,6 +402,12 @@ func (s *PoolScaler) tick() {
 		return
 	}
 
+	inFlight, err := s.taskQueue.InFlightCount(s.ctx)
+	if err != nil {
+		log.Warn().Err(err).Str("pool", s.config.PoolName).Msg("failed to get in-flight count")
+		return
+	}
+
 	// Get current replica count
 	currentReplicas, err := s.getDeploymentReplicas()
 	if err != nil {
@@ -420,34 +426,46 @@ func (s *PoolScaler) tick() {
 	log.Debug().
 		Str("pool", s.config.PoolName).
 		Int64("queue_depth", queueDepth).
+		Int64("in_flight", inFlight).
 		Int32("current_replicas", currentReplicas).
 		Msg("scaling check")
 
-	// Decide on scaling action
-	var desiredReplicas int32
-
-	if queueDepth > 0 {
-		// Tasks waiting - scale up if below max
-		s.isQueueEmptySince = false
-		if currentReplicas < s.config.MaxReplicas {
-			// Scale up by 1 (could be more aggressive)
-			desiredReplicas = min(currentReplicas+1, s.config.MaxReplicas)
-			s.scaleDeployment(desiredReplicas)
-		}
-	} else {
-		// Queue empty - track how long it's been empty
-		if !s.isQueueEmptySince {
-			s.isQueueEmptySince = true
-			s.lastQueueEmpty = time.Now()
-		}
-
-		// Scale down if queue has been empty for long enough
-		idleDuration := time.Since(s.lastQueueEmpty)
-		if idleDuration >= s.config.ScaleDownDelay && currentReplicas > s.config.MinReplicas {
-			desiredReplicas = max(currentReplicas-1, s.config.MinReplicas)
-			s.scaleDeployment(desiredReplicas)
-		}
+	desiredReplicas, shouldScale := s.calculateDesiredReplicas(currentReplicas, queueDepth, inFlight, time.Now())
+	if shouldScale {
+		s.scaleDeployment(desiredReplicas)
 	}
+}
+
+func (s *PoolScaler) calculateDesiredReplicas(currentReplicas int32, queueDepth, inFlight int64, now time.Time) (int32, bool) {
+	// Consider the pool idle only when both queue and in-flight work are empty.
+	hasWork := queueDepth > 0 || inFlight > 0
+	if hasWork {
+		s.isQueueEmptySince = false
+		if queueDepth > 0 && currentReplicas < s.config.MaxReplicas {
+			// Work is queued: scale out incrementally to avoid sudden overprovisioning.
+			return min(currentReplicas+1, s.config.MaxReplicas), true
+		}
+		return 0, false
+	}
+
+	// No work: start or continue idle window tracking.
+	if !s.isQueueEmptySince {
+		s.isQueueEmptySince = true
+		s.lastQueueEmpty = now
+		return 0, false
+	}
+
+	idleDuration := now.Sub(s.lastQueueEmpty)
+	if idleDuration < s.config.ScaleDownDelay {
+		return 0, false
+	}
+
+	if currentReplicas <= s.config.MinReplicas {
+		return 0, false
+	}
+
+	// Once the idle window has elapsed, scale directly back to the floor.
+	return s.config.MinReplicas, true
 }
 
 // getDeploymentReplicas gets the current replica count

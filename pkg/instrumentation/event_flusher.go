@@ -157,5 +157,14 @@ func extractSessionFromAccessStream(name, prefix string) string {
 	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, accessStreamSuffix) {
 		return ""
 	}
-	return name[len(prefix) : len(name)-len(accessStreamSuffix)]
+	start := len(prefix)
+	end := len(name) - len(accessStreamSuffix)
+
+	// Guard malformed or legacy names that don't contain a session segment
+	// between prefix and suffix, e.g. "access.{workspace}.events".
+	if start >= end {
+		return ""
+	}
+
+	return name[start:end]
 }

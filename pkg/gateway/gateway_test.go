@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/sources"
 	"github.com/beam-cloud/airstore/pkg/tools"
 	"github.com/beam-cloud/airstore/pkg/types"
+	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/require"
 )
 
@@ -93,4 +96,55 @@ func freeTCPPort(t *testing.T) int {
 	require.NoError(t, err)
 	defer l.Close()
 	return l.Addr().(*net.TCPAddr).Port
+}
+
+func TestShouldSkipHTTPRequestLogHealthEndpoints(t *testing.T) {
+	cLive := newEchoContext(http.MethodGet, "/api/v1/health/live", "/api/v1/health/live")
+	require.True(t, shouldSkipHTTPRequestLog(cLive))
+
+	cReady := newEchoContext(http.MethodGet, "/api/v1/health/ready", "/api/v1/health/ready")
+	require.True(t, shouldSkipHTTPRequestLog(cReady))
+}
+
+func TestShouldSkipHTTPRequestLogAccessLogPolling(t *testing.T) {
+	cTemplate := newEchoContext(
+		http.MethodGet,
+		"/api/v1/workspaces/ws-123/access-log?cursor=0",
+		"/api/v1/workspaces/:workspace_id/access-log",
+	)
+	require.True(t, shouldSkipHTTPRequestLog(cTemplate))
+
+	// Ensure URL-path fallback also works when route template is unavailable.
+	cURLFallback := newEchoContext(
+		http.MethodGet,
+		"/api/v1/workspaces/ws-123/access-log?cursor=0",
+		"",
+	)
+	require.True(t, shouldSkipHTTPRequestLog(cURLFallback))
+}
+
+func TestShouldSkipHTTPRequestLogDoesNotSkipNonPollingRequests(t *testing.T) {
+	cNoCursor := newEchoContext(
+		http.MethodGet,
+		"/api/v1/workspaces/ws-123/access-log",
+		"/api/v1/workspaces/:workspace_id/access-log",
+	)
+	require.False(t, shouldSkipHTTPRequestLog(cNoCursor))
+
+	cOther := newEchoContext(http.MethodGet, "/api/v1/workspaces/ws-123/tasks", "/api/v1/workspaces/:workspace_id/tasks")
+	require.False(t, shouldSkipHTTPRequestLog(cOther))
+
+	cPost := newEchoContext(http.MethodPost, "/api/v1/workspaces/ws-123/access-log?cursor=0", "/api/v1/workspaces/:workspace_id/access-log")
+	require.False(t, shouldSkipHTTPRequestLog(cPost))
+}
+
+func newEchoContext(method, target, routePath string) echo.Context {
+	e := echo.New()
+	req := httptest.NewRequest(method, target, nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	if routePath != "" {
+		c.SetPath(routePath)
+	}
+	return c
 }
