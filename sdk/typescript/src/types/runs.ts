@@ -1,5 +1,4 @@
 import type {
-  QueueMode,
   ExecAsk,
   ExecHost,
   ExecSecurity,
@@ -50,12 +49,22 @@ export interface AgentRunSnapshot {
   created_at: string;
 }
 
-export interface RunInputParams {
-  message: string;
-  idempotencyKey?: string;
-  queueMode?: QueueMode;
-}
-
 export interface RunCancelResponse {
   status: 'cancelled';
+}
+
+export interface RunListParams {
+  agentId?: string;
+  status?: RunStatus | RunStatus[];
+  sessionId?: string;
+  createdAfter?: string;
+  createdBefore?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface RunListResponse {
+  runs: AgentRun[];
+  next_cursor: string;
+  has_more: boolean;
 }

@@ -11,8 +11,15 @@ import {
 import type {
   AgentCommandCreateParams,
   AgentTask,
+  TaskCancelResponse,
   RunExecutionPolicy,
   TaskAcceptedResponse,
+  TaskListParams,
+  TaskListResponse,
+  TaskLogListParams,
+  TaskLogListResponse,
+  TaskEventStreamParams,
+  TaskEventBatch,
 } from '../types/tasks.js';
 
 /**
@@ -59,6 +66,76 @@ export class Tasks {
     return this.client.request<AgentTask>(
       'GET',
       `/workspaces/${workspaceId}/tasks/${taskId}`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  async listLogs(
+    workspaceId: string,
+    taskId: string,
+    params?: TaskLogListParams,
+    options?: RequestOptions,
+  ): Promise<TaskLogListResponse> {
+    return this.client.request<TaskLogListResponse>(
+      'GET',
+      `/workspaces/${workspaceId}/tasks/${taskId}/logs`,
+      undefined,
+      toTaskLogQuery(params),
+      options,
+    );
+  }
+
+  async streamEvents(
+    workspaceId: string,
+    taskId: string,
+    params?: TaskEventStreamParams,
+    options?: RequestOptions,
+  ): Promise<TaskEventBatch> {
+    return this.client.request<TaskEventBatch>(
+      'GET',
+      `/workspaces/${workspaceId}/tasks/${taskId}/stream`,
+      undefined,
+      toTaskEventStreamQuery(params),
+      options,
+    );
+  }
+
+  async list(
+    workspaceId: string,
+    params?: TaskListParams,
+    options?: RequestOptions,
+  ): Promise<TaskListResponse> {
+    const response = await this.client.request<TaskListResponse | AgentTask[]>(
+      'GET',
+      `/workspaces/${workspaceId}/tasks`,
+      undefined,
+      toTaskListQuery(params),
+      options,
+    );
+    if (Array.isArray(response)) {
+      return {
+        tasks: response,
+        next_cursor: '',
+        has_more: false,
+      };
+    }
+    return {
+      tasks: response.tasks ?? [],
+      next_cursor: response.next_cursor ?? '',
+      has_more: response.has_more ?? false,
+    };
+  }
+
+  async cancel(
+    workspaceId: string,
+    taskId: string,
+    options?: RequestOptions,
+  ): Promise<TaskCancelResponse> {
+    return this.client.request<TaskCancelResponse>(
+      'POST',
+      `/workspaces/${workspaceId}/tasks/${taskId}/cancel`,
       undefined,
       undefined,
       options,
@@ -111,4 +188,37 @@ function toPolicyBody(policy: RunExecutionPolicy | undefined): Record<string, un
       delay_ms: policy.retry?.delayMs ?? RETRY_DEFAULT_DELAY_MS,
     },
   };
+}
+
+function toTaskListQuery(params: TaskListParams | undefined): Record<string, string> | undefined {
+  if (!params) return undefined;
+  const query: Record<string, string> = {};
+  if (params.agentId) query['agent_id'] = params.agentId;
+  if (params.state) {
+    query['state'] = Array.isArray(params.state) ? params.state.join(',') : params.state;
+  }
+  if (params.createdAfter) query['created_after'] = params.createdAfter;
+  if (params.createdBefore) query['created_before'] = params.createdBefore;
+  if (params.limit !== undefined) query['limit'] = String(params.limit);
+  if (params.cursor) query['cursor'] = params.cursor;
+  return Object.keys(query).length > 0 ? query : undefined;
+}
+
+function toTaskLogQuery(params: TaskLogListParams | undefined): Record<string, string> | undefined {
+  if (!params) return undefined;
+  const query: Record<string, string> = {};
+  if (params.cursor !== undefined) query['cursor'] = String(params.cursor);
+  return Object.keys(query).length > 0 ? query : undefined;
+}
+
+function toTaskEventStreamQuery(
+  params: TaskEventStreamParams | undefined,
+): Record<string, string> | undefined {
+  if (!params) return undefined;
+  const query: Record<string, string> = {};
+  if (params.logCursor !== undefined) query['log_cursor'] = String(params.logCursor);
+  if (params.runEventCursor !== undefined) {
+    query['run_event_cursor'] = String(params.runEventCursor);
+  }
+  return Object.keys(query).length > 0 ? query : undefined;
 }

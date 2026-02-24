@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/beam-cloud/airstore/pkg/orchestration"
 	"github.com/beam-cloud/airstore/pkg/repository"
@@ -64,6 +66,22 @@ func (b *retryTestBackend) GetRunExecution(_ context.Context, externalID string)
 	return exec, nil
 }
 
+func (b *retryTestBackend) SetRunExecutionResult(_ context.Context, externalID string, exitCode int, errorMsg string) error {
+	exec, ok := b.runExecutions[externalID]
+	if !ok {
+		return &types.ErrRunExecutionNotFound{ExternalId: externalID}
+	}
+
+	exec.ExitCode = &exitCode
+	exec.Error = errorMsg
+	if exitCode == 0 && strings.TrimSpace(errorMsg) == "" {
+		exec.Status = types.RunExecutionStatusComplete
+	} else {
+		exec.Status = types.RunExecutionStatusFailed
+	}
+	return nil
+}
+
 func (b *retryTestBackend) CreateAgentRun(_ context.Context, run *types.AgentRun) error {
 	copyRun := *run
 	if copyRun.ID == "" {
@@ -82,6 +100,46 @@ func (b *retryTestBackend) UpdateTaskState(_ context.Context, taskID string, sta
 	task.State = state
 	task.DroppedReason = droppedReason
 	task.TargetRunID = targetRunID
+	return nil
+}
+
+func (b *retryTestBackend) GetRunAttemptByExecutionID(_ context.Context, executionID string) (*types.AgentRunAttempt, error) {
+	for _, attempt := range b.attemptByID {
+		if attempt == nil || attempt.ExecutionID == nil {
+			continue
+		}
+		if *attempt.ExecutionID == executionID {
+			return attempt, nil
+		}
+	}
+	return nil, &types.ErrAgentRunAttemptNotFound{ID: executionID}
+}
+
+func (b *retryTestBackend) UpdateAgentRunAttemptResult(_ context.Context, attemptID string, status types.AgentAttemptStatus, exitCode *int, endedAt time.Time, errorMsg *string) error {
+	attempt, ok := b.attemptByID[attemptID]
+	if !ok {
+		return &types.ErrAgentRunAttemptNotFound{ID: attemptID}
+	}
+	attempt.Status = status
+	attempt.ExitCode = exitCode
+	attempt.EndedAt = &endedAt
+	attempt.Error = errorMsg
+	return nil
+}
+
+func (b *retryTestBackend) UpdateAgentRunLifecycle(_ context.Context, runID string, status types.AgentRunStatus, startedAt, endedAt *time.Time, errorMsg *string) error {
+	run, ok := b.runs[runID]
+	if !ok {
+		return &types.ErrAgentRunNotFound{ID: runID}
+	}
+	run.Status = status
+	if startedAt != nil {
+		run.StartedAt = startedAt
+	}
+	if endedAt != nil {
+		run.EndedAt = endedAt
+	}
+	run.Error = errorMsg
 	return nil
 }
 
@@ -241,6 +299,56 @@ func TestScheduleRetryRunCreatesNewRunAndRebindsTask(t *testing.T) {
 	require.Equal(t, result.nextRunID, queuedExecution.Env["AIRSTORE_RUN_ID"])
 	require.Equal(t, retryAttempts[0].ID, queuedExecution.Env["AIRSTORE_RUN_ATTEMPT_ID"])
 	require.Equal(t, originTaskID, queuedExecution.Env["AIRSTORE_ORIGIN_TASK_ID"])
+}
+
+func TestSetTaskResultMarksOriginTaskDoneWhenRunFinishes(t *testing.T) {
+	backend := newRetryTestBackend()
+	svc := &WorkerService{backend: backend, taskQueue: &capturingTaskQueue{}}
+
+	agentID := "agent-1"
+	runID := "run-1"
+	originTaskID := "task-1"
+	executionID := "exec-1"
+	attemptID := "attempt-1"
+
+	backend.runs[runID] = &types.AgentRun{
+		ID:           runID,
+		WorkspaceID:  42,
+		AgentID:      &agentID,
+		OriginTaskID: originTaskID,
+		Status:       types.AgentRunStatusRunning,
+	}
+	backend.tasks[originTaskID] = &types.AgentTask{
+		ID:          originTaskID,
+		WorkspaceID: 42,
+		State:       types.AgentTaskStateDispatched,
+		TargetRunID: &runID,
+	}
+	backend.runExecutions[executionID] = &types.RunExecution{
+		ExternalId: executionID,
+		Status:     types.RunExecutionStatusRunning,
+	}
+	backend.attemptByID[attemptID] = &types.AgentRunAttempt{
+		ID:          attemptID,
+		RunID:       runID,
+		AttemptNo:   1,
+		Status:      types.AgentAttemptStatusRunning,
+		ExecutionID: &executionID,
+	}
+
+	_, err := svc.SetTaskResult(context.Background(), &pb.SetTaskResultRequest{
+		TaskId:   executionID,
+		ExitCode: 0,
+		Error:    "",
+	})
+	require.NoError(t, err)
+
+	task := backend.tasks[originTaskID]
+	require.NotNil(t, task)
+	require.Equal(t, types.AgentTaskStateDone, task.State)
+	require.NotNil(t, task.TargetRunID)
+	require.Equal(t, runID, *task.TargetRunID)
+	require.Equal(t, types.AgentRunStatusOK, backend.runs[runID].Status)
 }
 
 func TestAgentCommandParamsFromProtoMatchesHTTPShape(t *testing.T) {

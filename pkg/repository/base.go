@@ -173,6 +173,7 @@ type BackendRepository interface {
 	// Tasks
 	CreateTask(ctx context.Context, task *types.AgentTask) error
 	ListTasks(ctx context.Context, workspaceId uint, limit int) ([]*types.AgentTask, error)
+	ListTasksFiltered(ctx context.Context, workspaceId uint, filter types.AgentTaskListFilter) ([]*types.AgentTask, error)
 	GetTaskByID(ctx context.Context, taskId string) (*types.AgentTask, error)
 	GetTask(ctx context.Context, workspaceId uint, taskId string) (*types.AgentTask, error)
 	GetTaskByIdempotency(ctx context.Context, workspaceId uint, agentId *string, idempotencyKey string) (*types.AgentTask, error)
@@ -183,6 +184,7 @@ type BackendRepository interface {
 	GetAgentRunByID(ctx context.Context, runId string) (*types.AgentRun, error)
 	GetAgentRun(ctx context.Context, workspaceId uint, runId string) (*types.AgentRun, error)
 	ListAgentRuns(ctx context.Context, workspaceId uint, limit int) ([]*types.AgentRun, error)
+	ListAgentRunsFiltered(ctx context.Context, workspaceId uint, filter types.AgentRunListFilter) ([]*types.AgentRun, error)
 	UpdateAgentRunLifecycle(ctx context.Context, runId string, status types.AgentRunStatus, startedAt, endedAt *time.Time, errorMsg *string) error
 	IncrementAgentRunSnapshotSeq(ctx context.Context, runId string) (int64, error)
 

@@ -28,6 +28,7 @@ const (
 	AgentTaskStateAccepted   AgentTaskState = "accepted"
 	AgentTaskStateQueued     AgentTaskState = "queued"
 	AgentTaskStateDispatched AgentTaskState = "dispatched"
+	AgentTaskStateDone       AgentTaskState = "done"
 	AgentTaskStateDropped    AgentTaskState = "dropped"
 	AgentTaskStateCancelled  AgentTaskState = "cancelled"
 )
@@ -232,6 +233,25 @@ type AgentRunSnapshot struct {
 	TS          int64          `json:"ts" db:"ts"`
 	PayloadJSON map[string]any `json:"payload_json" db:"-"`
 	CreatedAt   time.Time      `json:"created_at" db:"created_at"`
+}
+
+type AgentTaskListFilter struct {
+	AgentID       *string
+	States        []AgentTaskState
+	CreatedAfter  *time.Time
+	CreatedBefore *time.Time
+	Limit         int
+	Offset        int
+}
+
+type AgentRunListFilter struct {
+	AgentID       *string
+	Statuses      []AgentRunStatus
+	SessionID     *string
+	CreatedAfter  *time.Time
+	CreatedBefore *time.Time
+	Limit         int
+	Offset        int
 }
 
 type AgentExecutionInstance struct {

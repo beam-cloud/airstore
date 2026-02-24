@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +18,17 @@ import (
 type AgentAPI struct {
 	backend repository.BackendRepository
 	runtime *AgentService
+}
+
+type TaskEventBatch struct {
+	TaskID             string                `json:"task_id"`
+	RunID              *string               `json:"run_id,omitempty"`
+	Task               *types.AgentTask      `json:"task,omitempty"`
+	Run                *types.AgentRun       `json:"run,omitempty"`
+	Logs               []common.TaskLogEntry `json:"logs"`
+	RunEvents          []map[string]any      `json:"run_events"`
+	NextLogCursor      int64                 `json:"next_log_cursor"`
+	NextRunEventCursor int                   `json:"next_run_event_cursor"`
 }
 
 func NewAgentAPI(
@@ -52,11 +64,16 @@ func (a *AgentAPI) CreateAgent(
 		isActive = *active
 	}
 
+	normalizedConfig, err := normalizeAgentProfileConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
 	profile := &types.AgentProfile{
 		WorkspaceID: workspaceID,
 		AgentKey:    strings.TrimSpace(agentKey),
 		Name:        strings.TrimSpace(name),
-		ConfigJSON:  config,
+		ConfigJSON:  normalizedConfig,
 		Active:      isActive,
 	}
 	if err := a.backend.CreateAgentProfile(ctx, profile); err != nil {
@@ -93,6 +110,26 @@ func (a *AgentAPI) ListTasks(ctx context.Context, workspaceID uint, limit int) (
 		limit = 100
 	}
 	return a.backend.ListTasks(ctx, workspaceID, limit)
+}
+
+func (a *AgentAPI) ListTasksFiltered(
+	ctx context.Context,
+	workspaceID uint,
+	filter types.AgentTaskListFilter,
+) ([]*types.AgentTask, string, bool, error) {
+	limit, offset := normalizeOffsetPage(filter.Limit, filter.Offset, 50, 200)
+	filter.Limit = limit + 1
+	filter.Offset = offset
+
+	tasks, err := a.backend.ListTasksFiltered(ctx, workspaceID, filter)
+	if err != nil {
+		return nil, "", false, err
+	}
+	hasMore := len(tasks) > limit
+	if hasMore {
+		tasks = tasks[:limit]
+	}
+	return tasks, nextOffsetCursor(offset, limit, hasMore), hasMore, nil
 }
 
 func (a *AgentAPI) EnqueueRunInput(
@@ -145,6 +182,26 @@ func (a *AgentAPI) ListRuns(ctx context.Context, workspaceID uint, limit int) ([
 		limit = 100
 	}
 	return a.backend.ListAgentRuns(ctx, workspaceID, limit)
+}
+
+func (a *AgentAPI) ListRunsFiltered(
+	ctx context.Context,
+	workspaceID uint,
+	filter types.AgentRunListFilter,
+) ([]*types.AgentRun, string, bool, error) {
+	limit, offset := normalizeOffsetPage(filter.Limit, filter.Offset, 50, 200)
+	filter.Limit = limit + 1
+	filter.Offset = offset
+
+	runs, err := a.backend.ListAgentRunsFiltered(ctx, workspaceID, filter)
+	if err != nil {
+		return nil, "", false, err
+	}
+	hasMore := len(runs) > limit
+	if hasMore {
+		runs = runs[:limit]
+	}
+	return runs, nextOffsetCursor(offset, limit, hasMore), hasMore, nil
 }
 
 func (a *AgentAPI) GetRun(ctx context.Context, workspaceID uint, runID string) (*types.AgentRun, error) {
@@ -220,29 +277,87 @@ func (a *AgentAPI) CancelTask(ctx context.Context, workspaceID uint, taskID stri
 }
 
 func (a *AgentAPI) GetTaskLogs(ctx context.Context, workspaceID uint, taskID string) ([]common.TaskLogEntry, error) {
+	logs, _, err := a.ListTaskLogs(ctx, workspaceID, taskID, 0)
+	return logs, err
+}
+
+func (a *AgentAPI) ListTaskLogs(
+	ctx context.Context,
+	workspaceID uint,
+	taskID string,
+	seqNum int64,
+) ([]common.TaskLogEntry, int64, error) {
+	task, err := a.GetTask(ctx, workspaceID, taskID)
+	if err != nil {
+		return nil, seqNum, err
+	}
+
+	if a.runtime == nil || a.runtime.s2 == nil || !a.runtime.s2.Enabled() || task.TargetRunID == nil {
+		return []common.TaskLogEntry{}, seqNum, nil
+	}
+
+	attempts, err := a.backend.ListAgentRunAttempts(ctx, *task.TargetRunID)
+	if err != nil {
+		return nil, seqNum, err
+	}
+	executionID := newestExecutionID(attempts)
+	if executionID == "" {
+		return []common.TaskLogEntry{}, seqNum, nil
+	}
+
+	logs, nextSeqNum, err := a.runtime.s2.ReadLogs(ctx, executionID, seqNum)
+	if err != nil {
+		return nil, seqNum, err
+	}
+	return logs, nextSeqNum, nil
+}
+
+func (a *AgentAPI) StreamTaskEvents(
+	ctx context.Context,
+	workspaceID uint,
+	taskID string,
+	logCursor int64,
+	runEventCursor int,
+) (*TaskEventBatch, error) {
 	task, err := a.GetTask(ctx, workspaceID, taskID)
 	if err != nil {
 		return nil, err
 	}
 
-	if a.runtime == nil || a.runtime.s2 == nil || !a.runtime.s2.Enabled() || task.TargetRunID == nil {
-		return []common.TaskLogEntry{}, nil
-	}
-
-	attempts, err := a.backend.ListAgentRunAttempts(ctx, *task.TargetRunID)
+	logs, nextLogCursor, err := a.ListTaskLogs(ctx, workspaceID, taskID, logCursor)
 	if err != nil {
 		return nil, err
 	}
-	executionID := newestExecutionID(attempts)
-	if executionID == "" {
-		return []common.TaskLogEntry{}, nil
+
+	var run *types.AgentRun
+	runEvents := []map[string]any{}
+	nextRunEventCursor := runEventCursor
+	if task.TargetRunID != nil {
+		run, _ = a.GetRun(ctx, workspaceID, *task.TargetRunID)
+		allEvents, err := a.ListRunEvents(ctx, workspaceID, *task.TargetRunID)
+		if err != nil {
+			return nil, err
+		}
+		if runEventCursor < 0 {
+			runEventCursor = 0
+		}
+		if runEventCursor > len(allEvents) {
+			runEventCursor = len(allEvents)
+		}
+		runEvents = allEvents[runEventCursor:]
+		nextRunEventCursor = len(allEvents)
 	}
 
-	logs, _, err := a.runtime.s2.ReadLogs(ctx, executionID, 0)
-	if err != nil {
-		return nil, err
-	}
-	return logs, nil
+	return &TaskEventBatch{
+		TaskID:             task.ID,
+		RunID:              task.TargetRunID,
+		Task:               task,
+		Run:                run,
+		Logs:               logs,
+		RunEvents:          runEvents,
+		NextLogCursor:      nextLogCursor,
+		NextRunEventCursor: nextRunEventCursor,
+	}, nil
 }
 
 func newestExecutionID(attempts []*types.AgentRunAttempt) string {
@@ -270,4 +385,60 @@ func decodeRunEvents(rows []string) []map[string]any {
 		}
 	}
 	return out
+}
+
+func normalizeAgentProfileConfig(config map[string]any) (map[string]any, error) {
+	normalized := cloneAnyMap(config)
+	runner := strings.ToLower(strings.TrimSpace(stringFromPayload(normalized, agentConfigKeyRunner)))
+	provider := strings.ToLower(strings.TrimSpace(stringFromPayload(normalized, agentConfigKeyProvider)))
+
+	switch {
+	case runner == "" && provider == "":
+		normalized[agentConfigKeyRunner] = AgentRunnerClaudeCode
+		normalized[agentConfigKeyProvider] = providerForRunner(AgentRunnerClaudeCode)
+		return normalized, nil
+
+	case runner != "":
+		if runner != AgentRunnerClaudeCode {
+			return nil, fmt.Errorf("runner %q is not supported", runner)
+		}
+		normalized[agentConfigKeyRunner] = runner
+		if provider == "" {
+			provider = providerForRunner(runner)
+		}
+		if !isClaudeCompatibleProvider(provider) {
+			return nil, fmt.Errorf(
+				"runner %q is only compatible with provider claude/anthropic",
+				runner,
+			)
+		}
+		normalized[agentConfigKeyProvider] = provider
+		return normalized, nil
+	}
+
+	normalized[agentConfigKeyProvider] = provider
+	if isClaudeCompatibleProvider(provider) {
+		normalized[agentConfigKeyRunner] = AgentRunnerClaudeCode
+	}
+	return normalized, nil
+}
+
+func normalizeOffsetPage(limit, offset, defaultLimit, maxLimit int) (int, int) {
+	if limit <= 0 {
+		limit = defaultLimit
+	}
+	if limit > maxLimit {
+		limit = maxLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return limit, offset
+}
+
+func nextOffsetCursor(offset, limit int, hasMore bool) string {
+	if !hasMore {
+		return ""
+	}
+	return strconv.Itoa(offset + limit)
 }

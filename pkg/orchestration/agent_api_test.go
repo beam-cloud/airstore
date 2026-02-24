@@ -109,3 +109,40 @@ func TestValidateAgentCommandParamsRejectsMissingAgentID(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "agent_id is required")
 }
+
+func TestCreateAgentNormalizesRunnerConfig(t *testing.T) {
+	backend := newFakeBackend()
+	api := NewAgentAPI(backend, nil)
+
+	profile, err := api.CreateAgent(
+		context.Background(),
+		42,
+		"support-agent",
+		"Support Agent",
+		map[string]any{
+			agentConfigKeyRunner: AgentRunnerClaudeCode,
+			agentConfigKeyModel:  "claude-sonnet-4-6",
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, AgentRunnerClaudeCode, profile.ConfigJSON[agentConfigKeyRunner])
+	require.Equal(t, AgentProviderClaude, profile.ConfigJSON[agentConfigKeyProvider])
+	require.Equal(t, "claude-sonnet-4-6", profile.ConfigJSON[agentConfigKeyModel])
+}
+
+func TestCreateAgentRejectsUnsupportedRunner(t *testing.T) {
+	backend := newFakeBackend()
+	api := NewAgentAPI(backend, nil)
+
+	_, err := api.CreateAgent(
+		context.Background(),
+		42,
+		"support-agent",
+		"Support Agent",
+		map[string]any{agentConfigKeyRunner: "unknown_runner"},
+		nil,
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not supported")
+}

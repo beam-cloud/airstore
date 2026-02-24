@@ -86,8 +86,13 @@ func (s *AgentService) AcceptAgentCommand(
 			return nil, false, err
 		}
 		agentConfig = cloneAnyMap(profile.ConfigJSON)
-		agentProvider = agentConfigString(agentConfig, "provider", "llm_provider")
-		agentModel = agentConfigString(agentConfig, "model", "default_model", "llm_model")
+		agentProvider = providerFromAgentConfig(agentConfig)
+		agentModel = agentConfigString(
+			agentConfig,
+			agentConfigKeyModel,
+			agentConfigKeyDefaultModel,
+			agentConfigKeyLLMModel,
+		)
 	}
 
 	payload := map[string]any{
@@ -107,13 +112,13 @@ func (s *AgentService) AcceptAgentCommand(
 		"spawned_by":                           params.SpawnedBy,
 	}
 	if len(agentConfig) > 0 {
-		payload["agent_config"] = agentConfig
+		payload[agentPayloadKeyAgentConfig] = agentConfig
 	}
 	if agentProvider != "" {
-		payload["provider"] = agentProvider
+		payload[agentConfigKeyProvider] = agentProvider
 	}
 	if agentModel != "" {
-		payload["model"] = agentModel
+		payload[agentConfigKeyModel] = agentModel
 	}
 
 	task := &types.AgentTask{
@@ -155,6 +160,9 @@ func (s *AgentService) AcceptRunInput(
 	run, err := s.backend.GetAgentRun(ctx, workspaceID, targetRunID)
 	if err != nil {
 		return nil, false, err
+	}
+	if run.Status.IsTerminal() {
+		return nil, false, fmt.Errorf("target run is terminal (%s)", run.Status)
 	}
 
 	existing, err := s.backend.GetTaskByIdempotency(ctx, workspaceID, run.AgentID, idempotencyKey)
@@ -281,7 +289,7 @@ func (s *AgentService) handleInterruptTask(ctx context.Context, task *types.Agen
 	}
 	_ = s.appendRunSnapshot(ctx, run.ID, types.AgentRunStatusCancelled, nil, &now, &errMsg, map[string]any{"cause": "interrupt"})
 	_ = s.publishRunEvent(ctx, run.ID, types.AgentRunEventInterrupted, map[string]any{"task_id": task.ID})
-	return s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDispatched, nil, task.TargetRunID)
+	return s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDone, nil, task.TargetRunID)
 }
 
 func (s *AgentService) handleExecutionTask(ctx context.Context, task *types.AgentTask) error {
@@ -348,7 +356,7 @@ func (s *AgentService) handleExecutionTask(ctx context.Context, task *types.Agen
 		run,
 		runPolicy,
 		prompt,
-		mapFromPayload(task.PayloadJSON, "agent_config"),
+		mapFromPayload(task.PayloadJSON, agentPayloadKeyAgentConfig),
 		task.PayloadJSON,
 	)
 	return err
@@ -412,7 +420,7 @@ func (s *AgentService) trySteerRunInputTask(ctx context.Context, task *types.Age
 		return false, nil
 	}
 
-	if err := s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDispatched, nil, task.TargetRunID); err != nil {
+	if err := s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDone, nil, task.TargetRunID); err != nil {
 		return false, err
 	}
 
@@ -447,7 +455,7 @@ func (s *AgentService) handleRunInputTask(ctx context.Context, task *types.Agent
 	}
 
 	runPolicy := runPolicyFromRun(run)
-	agentConfig := mapFromPayload(task.PayloadJSON, "agent_config")
+	agentConfig := mapFromPayload(task.PayloadJSON, agentPayloadKeyAgentConfig)
 	if len(agentConfig) == 0 && run.AgentID != nil {
 		if profile, err := s.backend.GetAgentProfile(ctx, task.WorkspaceID, *run.AgentID); err == nil {
 			agentConfig = cloneAnyMap(profile.ConfigJSON)
@@ -463,7 +471,7 @@ func (s *AgentService) handleRunInputTask(ctx context.Context, task *types.Agent
 	); err != nil {
 		return err
 	}
-	if err := s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDispatched, nil, task.TargetRunID); err != nil {
+	if err := s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDone, nil, task.TargetRunID); err != nil {
 		return err
 	}
 	eventType := types.AgentRunEventInputDispatched
@@ -619,10 +627,10 @@ func (s *AgentService) createAttemptExecutionTask(
 	}
 	applyRunExecutionContextMetadata(executionPolicy, run, attempt.ID)
 	if run.Provider != nil {
-		executionPolicy["provider"] = *run.Provider
+		executionPolicy[agentConfigKeyProvider] = *run.Provider
 	}
 	if run.Model != nil {
-		executionPolicy["model"] = *run.Model
+		executionPolicy[agentConfigKeyModel] = *run.Model
 	}
 	applyPayloadExecutionMetadata(executionPolicy, payload)
 
@@ -713,6 +721,7 @@ func (s *AgentService) appendRunSnapshot(
 }
 
 func (s *AgentService) publishRunEvent(ctx context.Context, runID string, eventType types.AgentRunEventType, payload map[string]any) error {
+	payload = normalizeRunEventPayload(runID, eventType, payload)
 	event := map[string]any{
 		"run_id":     runID,
 		"event_type": string(eventType),
@@ -729,6 +738,26 @@ func (s *AgentService) publishRunEvent(ctx context.Context, runID string, eventT
 		return s.orchestrationStore.PublishRunEvent(ctx, runID, body)
 	}
 	return nil
+}
+
+func normalizeRunEventPayload(runID string, eventType types.AgentRunEventType, payload map[string]any) map[string]any {
+	out := cloneAnyMap(payload)
+	out["run_id"] = runID
+	out["event_type"] = string(eventType)
+
+	if _, ok := out["kind"]; !ok {
+		switch eventType {
+		case types.AgentRunEventInputSteered,
+			types.AgentRunEventInputDispatched,
+			types.AgentRunEventSteerFallbackDispatched:
+			out["kind"] = "input"
+		case types.AgentRunEventInterrupted:
+			out["kind"] = "control"
+		default:
+			out["kind"] = "lifecycle"
+		}
+	}
+	return out
 }
 
 func routingToMap(r RoutingContext) map[string]any {
@@ -881,18 +910,35 @@ func agentConfigString(config map[string]any, keys ...string) string {
 	return ""
 }
 
+func providerFromAgentConfig(config map[string]any) string {
+	provider := strings.ToLower(
+		agentConfigString(config, agentConfigKeyProvider, agentConfigKeyLLMProvider),
+	)
+	if provider != "" {
+		return provider
+	}
+	return providerForRunner(agentConfigString(config, agentConfigKeyRunner))
+}
+
 func providerModelFromPayload(payload map[string]any) (*string, *string) {
-	provider := strPtrMaybe(stringFromPayload(payload, "provider"))
-	model := strPtrMaybe(stringFromPayload(payload, "model"))
+	provider := strPtrMaybe(stringFromPayload(payload, agentConfigKeyProvider))
+	model := strPtrMaybe(stringFromPayload(payload, agentConfigKeyModel))
 	if provider != nil && model != nil {
 		return provider, model
 	}
-	agentConfig := mapFromPayload(payload, "agent_config")
+	agentConfig := mapFromPayload(payload, agentPayloadKeyAgentConfig)
 	if provider == nil {
-		provider = strPtrMaybe(agentConfigString(agentConfig, "provider", "llm_provider"))
+		provider = strPtrMaybe(providerFromAgentConfig(agentConfig))
 	}
 	if model == nil {
-		model = strPtrMaybe(agentConfigString(agentConfig, "model", "default_model", "llm_model"))
+		model = strPtrMaybe(
+			agentConfigString(
+				agentConfig,
+				agentConfigKeyModel,
+				agentConfigKeyDefaultModel,
+				agentConfigKeyLLMModel,
+			),
+		)
 	}
 	return provider, model
 }

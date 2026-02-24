@@ -249,9 +249,38 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 			"error":      req.Error,
 			"event":      string(types.AgentRunEventFinished),
 		})
+		_ = s.markOriginTaskDoneIfCurrentRun(ctx, attempt.RunID)
 	}
 
 	return &pb.SetTaskResultResponse{}, nil
+}
+
+func (s *WorkerService) markOriginTaskDoneIfCurrentRun(ctx context.Context, runID string) error {
+	if s.backend == nil || strings.TrimSpace(runID) == "" {
+		return nil
+	}
+
+	run, err := s.backend.GetAgentRunByID(ctx, runID)
+	if err != nil {
+		return err
+	}
+	task, err := s.backend.GetTaskByID(ctx, run.OriginTaskID)
+	if err != nil {
+		return err
+	}
+
+	// Ignore stale completions from superseded runs.
+	if task.TargetRunID != nil && *task.TargetRunID != run.ID {
+		return nil
+	}
+
+	switch task.State {
+	case types.AgentTaskStateDropped, types.AgentTaskStateCancelled, types.AgentTaskStateDone:
+		return nil
+	default:
+		targetRunID := run.ID
+		return s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDone, nil, &targetRunID)
+	}
 }
 
 func appendRunSnapshot(

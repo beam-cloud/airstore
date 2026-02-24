@@ -100,6 +100,16 @@ func (f *fakeBackend) GetAgentProfile(_ context.Context, workspaceID uint, agent
 	return profile, nil
 }
 
+func (f *fakeBackend) CreateAgentProfile(_ context.Context, profile *types.AgentProfile) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if profile.ID == "" {
+		profile.ID = uuid.NewString()
+	}
+	f.profiles[profile.ID] = profile
+	return nil
+}
+
 func (f *fakeBackend) GetAgentRun(_ context.Context, workspaceID uint, runID string) (*types.AgentRun, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -286,9 +296,9 @@ func TestAcceptAgentCommandAppliesAgentConfigModelAndProvider(t *testing.T) {
 		AgentKey:    "agent-key",
 		Name:        "Agent",
 		ConfigJSON: map[string]any{
-			"provider": "claude",
-			"model":    "claude-sonnet-4",
-			"purpose":  "test",
+			agentConfigKeyProvider: AgentProviderClaude,
+			agentConfigKeyModel:    "claude-sonnet-4",
+			"purpose":              "test",
 		},
 		Active: true,
 	}
@@ -304,13 +314,42 @@ func TestAcceptAgentCommandAppliesAgentConfigModelAndProvider(t *testing.T) {
 	task, deduped, err := svc.AcceptAgentCommand(context.Background(), 42, params)
 	require.NoError(t, err)
 	require.False(t, deduped)
-	require.Equal(t, "claude", task.PayloadJSON["provider"])
-	require.Equal(t, "claude-sonnet-4", task.PayloadJSON["model"])
+	require.Equal(t, AgentProviderClaude, task.PayloadJSON[agentConfigKeyProvider])
+	require.Equal(t, "claude-sonnet-4", task.PayloadJSON[agentConfigKeyModel])
 	require.Equal(t, map[string]any{
-		"provider": "claude",
-		"model":    "claude-sonnet-4",
-		"purpose":  "test",
-	}, task.PayloadJSON["agent_config"])
+		agentConfigKeyProvider: AgentProviderClaude,
+		agentConfigKeyModel:    "claude-sonnet-4",
+		"purpose":              "test",
+	}, task.PayloadJSON[agentPayloadKeyAgentConfig])
+}
+
+func TestAcceptAgentCommandDerivesProviderFromRunner(t *testing.T) {
+	redisClient, cleanup := newTestRedis(t)
+	defer cleanup()
+
+	backend := newFakeBackend()
+	agentID := uuid.NewString()
+	backend.profiles[agentID] = &types.AgentProfile{
+		ID:          agentID,
+		WorkspaceID: 42,
+		AgentKey:    "agent-key",
+		Name:        "Agent",
+		ConfigJSON: map[string]any{
+			agentConfigKeyRunner: AgentRunnerClaudeCode,
+			agentConfigKeyModel:  "claude-sonnet-4-6",
+		},
+		Active: true,
+	}
+
+	svc := NewAgentService(context.Background(), backend, nil, redisClient, nil, "ghcr.io/beam/sandbox:latest")
+	task, deduped, err := svc.AcceptAgentCommand(context.Background(), 42, AgentCommandParams{
+		Message: "hello world",
+		AgentID: &agentID,
+	})
+	require.NoError(t, err)
+	require.False(t, deduped)
+	require.Equal(t, AgentProviderClaude, task.PayloadJSON[agentConfigKeyProvider])
+	require.Equal(t, "claude-sonnet-4-6", task.PayloadJSON[agentConfigKeyModel])
 }
 
 func TestAcceptAgentCommandGeneratesIDsWhenMissing(t *testing.T) {
@@ -374,6 +413,35 @@ func TestAcceptRunInputGeneratesIdempotencyKeyWhenMissing(t *testing.T) {
 	require.NotEmpty(t, task.IdempotencyKey)
 }
 
+func TestAcceptRunInputRejectsTerminalTargetRun(t *testing.T) {
+	redisClient, cleanup := newTestRedis(t)
+	defer cleanup()
+
+	backend := newFakeBackend()
+	runID := uuid.NewString()
+	backend.runs[runID] = &types.AgentRun{
+		ID:          runID,
+		WorkspaceID: 42,
+		Status:      types.AgentRunStatusOK,
+		SessionID:   "session-1",
+		TimeoutMs:   60000,
+	}
+
+	svc := NewAgentService(context.Background(), backend, nil, redisClient, nil, "ghcr.io/beam/sandbox:latest")
+	task, deduped, err := svc.AcceptRunInput(
+		context.Background(),
+		42,
+		runID,
+		types.AgentQueueModeFollowup,
+		"follow up",
+		"",
+	)
+	require.Error(t, err)
+	require.Nil(t, task)
+	require.False(t, deduped)
+	require.Contains(t, err.Error(), "target run is terminal")
+}
+
 func TestTrySteerRunInputTaskInjectsInteractiveInput(t *testing.T) {
 	backend := newFakeBackend()
 	runID := uuid.NewString()
@@ -418,7 +486,7 @@ func TestTrySteerRunInputTaskInjectsInteractiveInput(t *testing.T) {
 	steered, err := svc.trySteerRunInputTask(context.Background(), task)
 	require.NoError(t, err)
 	require.True(t, steered)
-	require.Equal(t, types.AgentTaskStateDispatched, backend.agentTasks[taskID].State)
+	require.Equal(t, types.AgentTaskStateDone, backend.agentTasks[taskID].State)
 
 	writes := terminalIO.inputs[executionID]
 	require.Len(t, writes, 1)

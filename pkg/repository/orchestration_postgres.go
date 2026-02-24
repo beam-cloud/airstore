@@ -54,6 +54,30 @@ func unmarshalJSONMap(data []byte) map[string]any {
 	return out
 }
 
+func normalizeLimitOffset(limit, offset, defaultLimit, maxLimit int) (int, int) {
+	if limit <= 0 {
+		limit = defaultLimit
+	}
+	if maxLimit > 0 && limit > maxLimit {
+		limit = maxLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return limit, offset
+}
+
+func optionalStringArg(value *string) any {
+	if value == nil {
+		return nil
+	}
+	trimmed := strings.TrimSpace(*value)
+	if trimmed == "" {
+		return nil
+	}
+	return trimmed
+}
+
 func (b *PostgresBackend) CreateAgentProfile(ctx context.Context, profile *types.AgentProfile) error {
 	configJSON, err := marshalJSONMap(profile.ConfigJSON)
 	if err != nil {
@@ -335,6 +359,64 @@ func (b *PostgresBackend) ListTasks(ctx context.Context, workspaceId uint, limit
 	return tasks, nil
 }
 
+func (b *PostgresBackend) ListTasksFiltered(ctx context.Context, workspaceId uint, filter types.AgentTaskListFilter) ([]*types.AgentTask, error) {
+	limit, offset := normalizeLimitOffset(filter.Limit, filter.Offset, 100, 500)
+
+	stateValues := make([]string, 0, len(filter.States))
+	for _, state := range filter.States {
+		if state == "" {
+			continue
+		}
+		stateValues = append(stateValues, string(state))
+	}
+
+	var statesArg any
+	if len(stateValues) > 0 {
+		statesArg = pq.Array(stateValues)
+	}
+
+	query := agentTaskSelect + `
+		WHERE workspace_id = $1
+		  AND ($2::uuid IS NULL OR agent_id = $2::uuid)
+		  AND ($3::text[] IS NULL OR state::text = ANY($3::text[]))
+		  AND ($4::timestamptz IS NULL OR created_at >= $4::timestamptz)
+		  AND ($5::timestamptz IS NULL OR created_at <= $5::timestamptz)
+		ORDER BY created_at DESC, id DESC
+		LIMIT $6 OFFSET $7
+	`
+
+	rows, err := b.db.QueryContext(
+		ctx,
+		query,
+		workspaceId,
+		optionalStringArg(filter.AgentID),
+		statesArg,
+		filter.CreatedAfter,
+		filter.CreatedBefore,
+		limit,
+		offset,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list filtered agent tasks: %w", err)
+	}
+	defer rows.Close()
+
+	tasks := make([]*types.AgentTask, 0, limit)
+	for rows.Next() {
+		task, err := b.scanAgentTask(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan filtered agent task: %w", err)
+		}
+		tasks = append(tasks, task)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate filtered agent task rows: %w", err)
+	}
+
+	return tasks, nil
+}
+
 func (b *PostgresBackend) GetTaskByID(ctx context.Context, taskID string) (*types.AgentTask, error) {
 	query := agentTaskSelect + `
 		WHERE id = $1
@@ -559,6 +641,61 @@ func (b *PostgresBackend) ListAgentRuns(ctx context.Context, workspaceId uint, l
 		run, err := b.scanAgentRun(rows)
 		if err != nil {
 			return nil, fmt.Errorf("scan run: %w", err)
+		}
+		out = append(out, run)
+	}
+	return out, rows.Err()
+}
+
+func (b *PostgresBackend) ListAgentRunsFiltered(ctx context.Context, workspaceId uint, filter types.AgentRunListFilter) ([]*types.AgentRun, error) {
+	limit, offset := normalizeLimitOffset(filter.Limit, filter.Offset, 100, 500)
+
+	statusValues := make([]string, 0, len(filter.Statuses))
+	for _, status := range filter.Statuses {
+		if status == "" {
+			continue
+		}
+		statusValues = append(statusValues, string(status))
+	}
+
+	var statusesArg any
+	if len(statusValues) > 0 {
+		statusesArg = pq.Array(statusValues)
+	}
+
+	query := agentRunSelect + `
+		WHERE workspace_id = $1
+		  AND ($2::uuid IS NULL OR agent_id = $2::uuid)
+		  AND ($3::text[] IS NULL OR status::text = ANY($3::text[]))
+		  AND ($4::text IS NULL OR session_id = $4::text)
+		  AND ($5::timestamptz IS NULL OR created_at >= $5::timestamptz)
+		  AND ($6::timestamptz IS NULL OR created_at <= $6::timestamptz)
+		ORDER BY created_at DESC, id DESC
+		LIMIT $7 OFFSET $8
+	`
+
+	rows, err := b.db.QueryContext(
+		ctx,
+		query,
+		workspaceId,
+		optionalStringArg(filter.AgentID),
+		statusesArg,
+		optionalStringArg(filter.SessionID),
+		filter.CreatedAfter,
+		filter.CreatedBefore,
+		limit,
+		offset,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list filtered runs: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]*types.AgentRun, 0, limit)
+	for rows.Next() {
+		run, err := b.scanAgentRun(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan filtered run: %w", err)
 		}
 		out = append(out, run)
 	}

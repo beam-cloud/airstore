@@ -1,9 +1,19 @@
+export type AgentRunner = 'claude_code';
+export type AgentProvider = 'claude' | 'anthropic';
+
+export interface AgentConfig {
+  runner?: AgentRunner;
+  provider?: AgentProvider;
+  model?: string;
+  [key: string]: unknown;
+}
+
 export interface AgentProfile {
   id: string;
   workspace_id: number;
   agent_key: string;
   name: string;
-  config_json: Record<string, unknown>;
+  config_json: AgentConfig;
   active: boolean;
   created_at: string;
   updated_at: string;
@@ -12,6 +22,7 @@ export interface AgentProfile {
 export interface AgentCreateParams {
   agentKey: string;
   name: string;
-  config?: Record<string, unknown>;
+  runner?: AgentRunner;
+  config?: AgentConfig;
   active?: boolean;
 }

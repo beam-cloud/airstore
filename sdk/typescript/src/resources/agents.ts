@@ -1,6 +1,8 @@
 import type { CoreClient, RequestOptions } from '../client.js';
 import type { AgentCreateParams, AgentProfile } from '../types/agents.js';
 
+const AGENT_CONFIG_KEY_RUNNER = 'runner';
+
 /**
  * Manage agent profiles in a workspace.
  */
@@ -12,13 +14,18 @@ export class Agents {
     params: AgentCreateParams,
     options?: RequestOptions,
   ): Promise<AgentProfile> {
+    const config: Record<string, unknown> = { ...(params.config ?? {}) };
+    if (params.runner) {
+      config[AGENT_CONFIG_KEY_RUNNER] = params.runner;
+    }
+
     return this.client.request<AgentProfile>(
       'POST',
       `/workspaces/${workspaceId}/agents`,
       {
         agent_key: params.agentKey,
         name: params.name,
-        config: params.config ?? {},
+        config,
         active: params.active,
       },
       undefined,

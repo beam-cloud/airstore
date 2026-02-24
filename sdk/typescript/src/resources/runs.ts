@@ -1,11 +1,11 @@
 import type { CoreClient, RequestOptions } from '../client.js';
 import type {
   AgentRun,
+  RunListParams,
+  RunListResponse,
   AgentRunSnapshot,
   RunCancelResponse,
-  RunInputParams,
 } from '../types/runs.js';
-import type { TaskAcceptedResponse } from '../types/tasks.js';
 
 /**
  * Read and control run lifecycle state (snapshots, events).
@@ -14,13 +14,34 @@ export class Runs {
   constructor(private readonly client: CoreClient) {}
 
   async list(workspaceId: string, options?: RequestOptions): Promise<AgentRun[]> {
-    return this.client.request<AgentRun[]>(
+    const page = await this.listPage(workspaceId, undefined, options);
+    return page.runs;
+  }
+
+  async listPage(
+    workspaceId: string,
+    params?: RunListParams,
+    options?: RequestOptions,
+  ): Promise<RunListResponse> {
+    const response = await this.client.request<RunListResponse | AgentRun[]>(
       'GET',
       `/workspaces/${workspaceId}/runs`,
       undefined,
-      undefined,
+      toRunListQuery(params),
       options,
     );
+    if (Array.isArray(response)) {
+      return {
+        runs: response,
+        next_cursor: '',
+        has_more: false,
+      };
+    }
+    return {
+      runs: response.runs ?? [],
+      next_cursor: response.next_cursor ?? '',
+      has_more: response.has_more ?? false,
+    };
   }
 
   async retrieve(
@@ -65,25 +86,6 @@ export class Runs {
     );
   }
 
-  async input(
-    workspaceId: string,
-    runId: string,
-    params: RunInputParams,
-    options?: RequestOptions,
-  ): Promise<TaskAcceptedResponse> {
-    return this.client.request<TaskAcceptedResponse>(
-      'POST',
-      `/workspaces/${workspaceId}/runs/${runId}/input`,
-      {
-        message: params.message,
-        idempotency_key: params.idempotencyKey,
-        queue_mode: params.queueMode,
-      },
-      undefined,
-      options,
-    );
-  }
-
   async cancel(
     workspaceId: string,
     runId: string,
@@ -97,4 +99,19 @@ export class Runs {
       options,
     );
   }
+}
+
+function toRunListQuery(params: RunListParams | undefined): Record<string, string> | undefined {
+  if (!params) return undefined;
+  const query: Record<string, string> = {};
+  if (params.agentId) query['agent_id'] = params.agentId;
+  if (params.status) {
+    query['status'] = Array.isArray(params.status) ? params.status.join(',') : params.status;
+  }
+  if (params.sessionId) query['session_id'] = params.sessionId;
+  if (params.createdAfter) query['created_after'] = params.createdAfter;
+  if (params.createdBefore) query['created_before'] = params.createdBefore;
+  if (params.limit !== undefined) query['limit'] = String(params.limit);
+  if (params.cursor) query['cursor'] = params.cursor;
+  return Object.keys(query).length > 0 ? query : undefined;
 }

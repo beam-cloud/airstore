@@ -31,6 +31,7 @@ export { AccessLog } from './resources/access-log.js';
 export { Agents } from './resources/agents.js';
 export { Tasks } from './resources/tasks.js';
 export { Runs } from './resources/runs.js';
+export { Channels } from './resources/channels.js';
 
 // ── Typed constants ───────────────────────────────────────────────────────────
 export {
@@ -104,7 +105,13 @@ export type { Token, TokenCreateParams, TokenCreated } from './types/tokens.js';
 export type { Member, MemberCreateParams } from './types/members.js';
 export type { OAuthSession, OAuthSessionCreateParams, OAuthSessionStatus, OAuthPollOptions } from './types/oauth.js';
 export type { VirtualFile, DirectoryListing, TreeListing } from './types/filesystem.js';
-export type { AgentProfile, AgentCreateParams } from './types/agents.js';
+export type {
+  AgentProfile,
+  AgentCreateParams,
+  AgentRunner,
+  AgentProvider,
+  AgentConfig,
+} from './types/agents.js';
 export type {
   QueueMode,
   ExecHost,
@@ -120,15 +127,31 @@ export type {
   RoutingContext,
   AgentTask,
   AgentCommandCreateParams,
+  TaskListParams,
+  TaskListResponse,
+  TaskCancelResponse,
   TaskAcceptedResponse,
+  TaskLogEntry,
+  TaskLogListParams,
+  TaskLogListResponse,
+  TaskEventStreamParams,
+  TaskEventBatch,
 } from './types/tasks.js';
 export type {
   RunStatus,
   AgentRun,
   AgentRunSnapshot,
-  RunInputParams,
   RunCancelResponse,
+  RunListParams,
+  RunListResponse,
 } from './types/runs.js';
+export type {
+  ChannelType,
+  SendDirectAgentMessageParams,
+  SendDirectAgentMessageResponse,
+  SendDirectRunMessageParams,
+  SendDirectRunMessageResponse,
+} from './types/channels.js';
 export type {
   AccessLogRead,
   AccessLogListParams,
