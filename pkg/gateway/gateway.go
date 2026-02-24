@@ -191,7 +191,8 @@ func (g *Gateway) initHTTP() error {
 	// Configure logging middleware
 	if g.Config.Gateway.HTTP.EnablePrettyLogs {
 		e.Use(middleware.LoggerWithConfig(middleware.LoggerConfig{
-			Format: "${time_rfc3339} ${method} ${uri} ${status} ${latency_human}\n",
+			Format:  "${time_rfc3339} ${method} ${uri} ${status} ${latency_human}\n",
+			Skipper: shouldSkipHTTPRequestLog,
 		}))
 	}
 

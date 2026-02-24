@@ -30,3 +30,21 @@ func TestAccessWorkspaceStreamNameFallsBackToLegacy(t *testing.T) {
 		t.Fatalf("expected legacy stream %q, got %q", want, got)
 	}
 }
+
+func TestSessionIDFromWorkspaceStreamNameIgnoresLegacyWorkspaceStream(t *testing.T) {
+	workspaceID := "c1b6bd1e-12dc-43e4-af2c-664f61b7f094"
+	legacyWorkspaceStream := AccessStreamName(workspaceID) // access.{workspace}.events
+
+	if got := SessionIDFromWorkspaceStreamName(legacyWorkspaceStream, workspaceID); got != "" {
+		t.Fatalf("expected empty session for legacy workspace stream, got %q", got)
+	}
+}
+
+func TestSessionIDFromWorkspaceStreamNameIgnoresEmptySessionSegment(t *testing.T) {
+	workspaceID := "ws-123"
+	malformed := "access.ws-123..events"
+
+	if got := SessionIDFromWorkspaceStreamName(malformed, workspaceID); got != "" {
+		t.Fatalf("expected empty session for malformed stream, got %q", got)
+	}
+}
