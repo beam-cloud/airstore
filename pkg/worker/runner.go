@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/beam-cloud/airstore/pkg/types"
+	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 )
 
@@ -11,10 +12,12 @@ const (
 	agentProviderEnvKey      = "AIRSTORE_AGENT_PROVIDER"
 	agentModelEnvKey         = "AIRSTORE_AGENT_MODEL"
 	agentResumeSessionEnvKey = "AIRSTORE_AGENT_RESUME_SESSION"
+	agentSessionIDEnvKey     = "AIRSTORE_AGENT_SESSION_ID"
 
 	claudeProviderName    = "claude"
 	claudeConfigDirEnvKey = "CLAUDE_CONFIG_DIR"
 	claudeConfigDirPath   = "/workspace/.claude"
+	claudeDefaultShellEnv = "/bin/bash"
 )
 
 // AgentExecutionRunner builds the process entrypoint for an agent task.
@@ -56,6 +59,7 @@ func (r *ClaudeCodeRunner) Name() string {
 func (r *ClaudeCodeRunner) BuildEntrypoint(task types.RunExecution, env map[string]string) []string {
 	r.injectEnv(env)
 	model := strings.TrimSpace(env[agentModelEnvKey])
+	sessionID := claudeSessionIDFromEnv(env)
 
 	addTaskExecutionContext(
 		log.Info().
@@ -65,6 +69,7 @@ func (r *ClaudeCodeRunner) BuildEntrypoint(task types.RunExecution, env map[stri
 	).Msg("running claude code task")
 
 	return newPromptEntrypointBuilder("claude").
+		withKeyValue("--session-id", sessionID).
 		withFlag("--print").
 		withFlag("--verbose").
 		withKeyValue("--output-format", "stream-json").
@@ -80,10 +85,17 @@ func (r *ClaudeCodeRunner) BuildEntrypoint(task types.RunExecution, env map[stri
 func (r *ClaudeCodeRunner) BuildTurnArgs(prompt string, env map[string]string, continueSession bool) []string {
 	r.injectEnv(env)
 	model := strings.TrimSpace(env[agentModelEnvKey])
+	sessionID := claudeSessionIDFromEnv(env)
 
 	builder := newPromptEntrypointBuilder("claude")
 	if continueSession {
-		builder.withFlag("--continue")
+		if sessionID != "" {
+			builder.withKeyValue("--resume", sessionID)
+		} else {
+			builder.withFlag("--continue")
+		}
+	} else if sessionID != "" {
+		builder.withKeyValue("--session-id", sessionID)
 	}
 	return builder.
 		withFlag("--print").
@@ -100,6 +112,10 @@ func (r *ClaudeCodeRunner) injectEnv(env map[string]string) {
 	r.injectKernelEnv(env)
 	if strings.TrimSpace(env[claudeConfigDirEnvKey]) == "" {
 		env[claudeConfigDirEnvKey] = claudeConfigDirPath
+	}
+	if strings.TrimSpace(env["SHELL"]) == "" {
+		// Force a stable non-zsh shell for Claude's internal shell snapshots.
+		env["SHELL"] = claudeDefaultShellEnv
 	}
 }
 
@@ -176,6 +192,20 @@ func runnerProviderFromEnv(env map[string]string) string {
 		return ""
 	}
 	return strings.ToLower(strings.TrimSpace(env[agentProviderEnvKey]))
+}
+
+func claudeSessionIDFromEnv(env map[string]string) string {
+	if env == nil {
+		return ""
+	}
+	sessionID := strings.TrimSpace(env[agentSessionIDEnvKey])
+	if sessionID == "" {
+		return ""
+	}
+	if _, err := uuid.Parse(sessionID); err != nil {
+		return ""
+	}
+	return sessionID
 }
 
 func providerFromExecutionPolicy(policy map[string]any) string {

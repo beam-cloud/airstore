@@ -78,7 +78,7 @@ func (c *ContextVNodeGRPC) Getattr(path string) (*FileInfo, error) {
 	// Use 0777 so gVisor's gofer (which may run as a different UID)
 	// passes the kernel's default_permissions check for writes.
 	if path == c.Prefix() {
-		return newFileInfo(PathIno(path), 0, syscall.S_IFDIR|0777, 2), nil
+		return newFileInfo(PathIno(path), 0, normalizeRuntimeWritableMode(syscall.S_IFDIR|0755), 2), nil
 	}
 
 	// AppleDouble files are zero-length placeholders
@@ -86,10 +86,9 @@ func (c *ContextVNodeGRPC) Getattr(path string) (*FileInfo, error) {
 		return NewFileInfo(PathIno(path), 0, 0644), nil
 	}
 
-	// If we have dirty data in the async writer, report its size.
-	// This ensures editors see the correct size after Truncate+Write
-	// before the data is uploaded to S3.
-	if info := c.asyncWriter.DirtyFileInfo(path, c.cachedMode(path)); info != nil {
+	// If we have dirty local data (buffered or async), report it immediately.
+	// This keeps size/read behavior correct before async upload completes.
+	if info := c.localDirtyFileInfo(path, c.cachedMode(path)); info != nil {
 		return info, nil
 	}
 
@@ -150,8 +149,13 @@ func (c *ContextVNodeGRPC) Readdir(path string) ([]DirEntry, error) {
 		}
 
 		childPath := path + "/" + e.Name
+		mode := normalizeRuntimeWritableMode(e.Mode)
+		size := e.Size
+		if dirty, ok := c.localDirtySize(childPath, mode); ok && dirty > size {
+			size = dirty
+		}
 		ino := PathIno(childPath)
-		entries = append(entries, DirEntry{Name: e.Name, Mode: e.Mode, Ino: ino})
+		entries = append(entries, DirEntry{Name: e.Name, Mode: mode, Ino: ino, Size: size})
 
 		mtime := now
 		if e.Mtime > 0 {
@@ -159,7 +163,7 @@ func (c *ContextVNodeGRPC) Readdir(path string) ([]DirEntry, error) {
 		}
 		uid, gid := GetOwner()
 		childMeta[e.Name] = &FileInfo{
-			Ino: ino, Size: e.Size, Mode: e.Mode, Nlink: 1,
+			Ino: ino, Size: size, Mode: mode, Nlink: 1,
 			Uid: uid, Gid: gid,
 			Atime: now, Mtime: mtime, Ctime: mtime,
 		}
@@ -266,7 +270,10 @@ func (c *ContextVNodeGRPC) Create(path string, flags int, mode uint32) (FileHand
 	defer cancel()
 
 	relPath := c.rel(path)
-	resp, err := c.client.Create(ctx, &pb.ContextCreateRequest{Path: relPath, Mode: mode})
+	resp, err := c.client.Create(ctx, &pb.ContextCreateRequest{
+		Path: relPath,
+		Mode: sanitizeNodeMode(mode, syscall.S_IFREG, 0644),
+	})
 	if err != nil {
 		log.Warn().Err(err).Str("path", relPath).Msg("context create: gRPC error")
 		return 0, err
@@ -402,7 +409,10 @@ func (c *ContextVNodeGRPC) Mkdir(path string, mode uint32) error {
 	defer cancel()
 
 	relPath := c.rel(path)
-	resp, err := c.client.Mkdir(ctx, &pb.ContextMkdirRequest{Path: relPath, Mode: mode})
+	resp, err := c.client.Mkdir(ctx, &pb.ContextMkdirRequest{
+		Path: relPath,
+		Mode: sanitizeNodeMode(mode, syscall.S_IFDIR, 0755),
+	})
 	if err != nil {
 		log.Warn().Err(err).Str("path", relPath).Msg("context mkdir: gRPC error")
 		return err
@@ -479,6 +489,56 @@ func (c *ContextVNodeGRPC) Rename(oldpath, newpath string) error {
 
 	c.cache.Invalidate(oldpath)
 	c.cache.Invalidate(newpath)
+	return nil
+}
+
+// Chmod updates mode metadata for files/directories.
+func (c *ContextVNodeGRPC) Chmod(path string, mode uint32) error {
+	if path == c.Prefix() {
+		return nil
+	}
+	if isAppleDoublePath(path) {
+		return nil
+	}
+
+	info, err := c.Getattr(path)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	relPath := c.rel(path)
+	if info.Mode&syscall.S_IFMT == syscall.S_IFDIR {
+		resp, err := c.client.Mkdir(ctx, &pb.ContextMkdirRequest{
+			Path: relPath,
+			Mode: sanitizeNodeMode(mode, syscall.S_IFDIR, 0755),
+		})
+		if err != nil {
+			return err
+		}
+		if !resp.Ok {
+			return fs.ErrPermission
+		}
+	} else {
+		fileType := info.Mode & syscall.S_IFMT
+		if fileType == 0 {
+			fileType = syscall.S_IFREG
+		}
+		resp, err := c.client.Create(ctx, &pb.ContextCreateRequest{
+			Path: relPath,
+			Mode: sanitizeNodeMode(mode, fileType, 0644),
+		})
+		if err != nil {
+			return err
+		}
+		if !resp.Ok {
+			return fs.ErrPermission
+		}
+	}
+
+	c.cache.Invalidate(path)
 	return nil
 }
 
@@ -759,6 +819,79 @@ func (c *ContextVNodeGRPC) enqueueWritesForPath(path string) {
 	}
 }
 
+func (c *ContextVNodeGRPC) localDirtyFileInfo(path string, fallbackMode uint32) *FileInfo {
+	size, ok := c.localDirtySize(path, fallbackMode)
+	if !ok {
+		return nil
+	}
+
+	if fallbackMode == 0 {
+		fallbackMode = syscall.S_IFREG | 0644
+	}
+	mode := normalizeRuntimeWritableMode(fallbackMode)
+	uid, gid := GetOwner()
+	now := time.Now()
+	return &FileInfo{
+		Ino: PathIno(path), Size: size, Mode: mode, Nlink: 1,
+		Uid: uid, Gid: gid,
+		Atime: now, Mtime: now, Ctime: now,
+	}
+}
+
+func (c *ContextVNodeGRPC) localDirtySize(path string, fallbackMode uint32) (int64, bool) {
+	var (
+		size     int64
+		hasDirty bool
+	)
+
+	if info := c.cache.GetInfo(path); info != nil {
+		size = info.Size
+	}
+
+	if info := c.asyncWriter.DirtyFileInfo(path, fallbackMode); info != nil {
+		hasDirty = true
+		if info.Size > size {
+			size = info.Size
+		}
+	}
+
+	if bufferedSize, ok := c.bufferedHandleSize(path); ok {
+		hasDirty = true
+		if bufferedSize > size {
+			size = bufferedSize
+		}
+	}
+
+	return size, hasDirty
+}
+
+func (c *ContextVNodeGRPC) bufferedHandleSize(path string) (int64, bool) {
+	c.writeMu.Lock()
+	entries := c.writes[path]
+	states := make([]*handleState, 0, len(entries))
+	for _, state := range entries {
+		states = append(states, state)
+	}
+	c.writeMu.Unlock()
+
+	var (
+		size int64
+		ok   bool
+	)
+	for _, state := range states {
+		state.mu.Lock()
+		if !state.closed && len(state.writeBuf) > 0 {
+			end := state.writeOff + int64(len(state.writeBuf))
+			if !ok || end > size {
+				size = end
+			}
+			ok = true
+		}
+		state.mu.Unlock()
+	}
+	return size, ok
+}
+
 // Cleanup flushes all pending async writes. Called when filesystem is unmounted.
 func (c *ContextVNodeGRPC) Cleanup() {
 	c.asyncWriter.Cleanup()
@@ -780,13 +913,10 @@ func (c *ContextVNodeGRPC) toFileInfo(path string, info *pb.FileInfo) *FileInfo 
 	}
 	uid, gid := GetOwner()
 	mode := info.Mode
-	// Ensure directories and files are world-writable so gVisor's gofer
-	// (which may run as a different UID) passes default_permissions checks.
 	if info.IsDir {
-		mode = syscall.S_IFDIR | 0777
-	} else {
-		mode = (mode & syscall.S_IFMT) | 0666 | (mode & 0111)
+		mode = withNodeFileType(mode, syscall.S_IFDIR)
 	}
+	mode = normalizeRuntimeWritableMode(mode)
 	return &FileInfo{
 		Ino: PathIno(path), Size: info.Size, Mode: mode, Nlink: 1,
 		Uid: uid, Gid: gid,

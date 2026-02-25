@@ -8,17 +8,12 @@ import type {
 } from '../types/runs.js';
 
 /**
- * Read and control run lifecycle state (snapshots, events).
+ * Read and control run lifecycle state.
  */
 export class Runs {
   constructor(private readonly client: CoreClient) {}
 
-  async list(workspaceId: string, options?: RequestOptions): Promise<AgentRun[]> {
-    const page = await this.listPage(workspaceId, undefined, options);
-    return page.runs;
-  }
-
-  async listPage(
+  async list(
     workspaceId: string,
     params?: RunListParams,
     options?: RequestOptions,
@@ -31,11 +26,7 @@ export class Runs {
       options,
     );
     if (Array.isArray(response)) {
-      return {
-        runs: response,
-        next_cursor: '',
-        has_more: false,
-      };
+      return { runs: response, next_cursor: '', has_more: false };
     }
     return {
       runs: response.runs ?? [],

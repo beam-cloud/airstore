@@ -482,6 +482,8 @@ func TestScheduleRetryRunCreatesNewRunAndRebindsTask(t *testing.T) {
 	require.NotEqual(t, originExecutionID, queuedExecution.ExternalId)
 	require.NotNil(t, queuedExecution.RunAttemptID)
 	require.Equal(t, retryAttempts[0].ID, *queuedExecution.RunAttemptID)
+	require.Equal(t, 2, queuedExecution.Attempt)
+	require.Equal(t, 3, queuedExecution.MaxAttempts)
 	require.Equal(t, result.nextRunID, queuedExecution.ExecutionPolicy[types.AgentExecutionMetaKeyRunID])
 	require.Equal(t, retryAttempts[0].ID, queuedExecution.ExecutionPolicy[types.AgentExecutionMetaKeyRunAttemptID])
 	require.Equal(t, originTaskID, queuedExecution.ExecutionPolicy[types.AgentExecutionMetaKeyOriginTaskID])

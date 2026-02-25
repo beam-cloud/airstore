@@ -33,6 +33,23 @@ func TestBuildEntrypointIncludesModel(t *testing.T) {
 	}
 }
 
+func TestBuildEntrypointIncludesSessionIDWhenValid(t *testing.T) {
+	runner := NewClaudeCodeRunner(ClaudeCodeRunnerOptions{})
+	task := types.RunExecution{
+		Prompt: "hello",
+		Env: map[string]string{
+			agentModelEnvKey:     "claude-sonnet-4",
+			agentSessionIDEnvKey: "550e8400-e29b-41d4-a716-446655440000",
+		},
+	}
+
+	args := runner.BuildEntrypoint(task, task.Env)
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--session-id 550e8400-e29b-41d4-a716-446655440000") {
+		t.Fatalf("expected --session-id flag, got %v", args)
+	}
+}
+
 func TestBuildEntrypointOmitsEmptyModel(t *testing.T) {
 	runner := NewClaudeCodeRunner(ClaudeCodeRunnerOptions{})
 	task := types.RunExecution{Prompt: "hello", Env: map[string]string{}}
@@ -78,6 +95,57 @@ func TestBuildTurnArgsContinueSession(t *testing.T) {
 	}
 }
 
+func TestBuildTurnArgsContinueSessionUsesResumeWithSessionID(t *testing.T) {
+	runner := NewClaudeCodeRunner(ClaudeCodeRunnerOptions{})
+	env := map[string]string{
+		agentModelEnvKey:     "claude-sonnet-4",
+		agentSessionIDEnvKey: "550e8400-e29b-41d4-a716-446655440000",
+	}
+	args := runner.BuildTurnArgs("follow up", env, true)
+
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--resume 550e8400-e29b-41d4-a716-446655440000") {
+		t.Fatalf("expected --resume for follow-up turn with session id: %v", args)
+	}
+	if strings.Contains(joined, "--continue") {
+		t.Fatalf("did not expect --continue when resume id is available: %v", args)
+	}
+}
+
+func TestBuildTurnArgsFirstTurnUsesSessionIDWhenAvailable(t *testing.T) {
+	runner := NewClaudeCodeRunner(ClaudeCodeRunnerOptions{})
+	env := map[string]string{
+		agentModelEnvKey:     "claude-sonnet-4",
+		agentSessionIDEnvKey: "550e8400-e29b-41d4-a716-446655440000",
+	}
+	args := runner.BuildTurnArgs("first turn", env, false)
+
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--session-id 550e8400-e29b-41d4-a716-446655440000") {
+		t.Fatalf("expected --session-id on first turn when available: %v", args)
+	}
+	if strings.Contains(joined, "--resume") {
+		t.Fatalf("did not expect --resume on first turn: %v", args)
+	}
+}
+
+func TestBuildTurnArgsContinueSessionFallsBackToContinueWhenSessionIDInvalid(t *testing.T) {
+	runner := NewClaudeCodeRunner(ClaudeCodeRunnerOptions{})
+	env := map[string]string{
+		agentModelEnvKey:     "claude-sonnet-4",
+		agentSessionIDEnvKey: "not-a-uuid",
+	}
+	args := runner.BuildTurnArgs("follow up", env, true)
+
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--continue") {
+		t.Fatalf("expected --continue fallback when session id is invalid: %v", args)
+	}
+	if strings.Contains(joined, "--resume") {
+		t.Fatalf("did not expect --resume when session id is invalid: %v", args)
+	}
+}
+
 func TestBuildTurnArgsInjectsAPIKey(t *testing.T) {
 	runner := NewClaudeCodeRunner(ClaudeCodeRunnerOptions{
 		AnthropicAPIKey: "sk-test-key",
@@ -114,6 +182,26 @@ func TestBuildTurnArgsPreservesExistingClaudeConfigDir(t *testing.T) {
 
 	if env[claudeConfigDirEnvKey] != "/workspace/custom-claude" {
 		t.Fatalf("expected existing CLAUDE_CONFIG_DIR to be preserved, got %q", env[claudeConfigDirEnvKey])
+	}
+}
+
+func TestBuildTurnArgsSetsShellDefault(t *testing.T) {
+	runner := NewClaudeCodeRunner(ClaudeCodeRunnerOptions{})
+	env := map[string]string{}
+	_ = runner.BuildTurnArgs("hello", env, false)
+
+	if env["SHELL"] != claudeDefaultShellEnv {
+		t.Fatalf("expected SHELL=%q, got %q", claudeDefaultShellEnv, env["SHELL"])
+	}
+}
+
+func TestBuildTurnArgsPreservesExistingShell(t *testing.T) {
+	runner := NewClaudeCodeRunner(ClaudeCodeRunnerOptions{})
+	env := map[string]string{"SHELL": "/bin/zsh"}
+	_ = runner.BuildTurnArgs("hello", env, false)
+
+	if env["SHELL"] != "/bin/zsh" {
+		t.Fatalf("expected existing SHELL to be preserved, got %q", env["SHELL"])
 	}
 }
 

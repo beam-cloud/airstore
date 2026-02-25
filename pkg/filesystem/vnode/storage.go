@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -84,7 +85,7 @@ func (s *StorageVNode) rel(path string) string {
 
 func (s *StorageVNode) Getattr(path string) (*FileInfo, error) {
 	if path == "/" {
-		return NewDirInfo(PathIno(path)), nil
+		return newFileInfo(PathIno(path), 0, normalizeRuntimeWritableMode(syscall.S_IFDIR|0755), 2), nil
 	}
 
 	// Treat AppleDouble files as zero-length placeholders.
@@ -92,10 +93,9 @@ func (s *StorageVNode) Getattr(path string) (*FileInfo, error) {
 		return NewFileInfo(PathIno(path), 0, 0644), nil
 	}
 
-	// If we have dirty data in the async writer, report its size.
-	// This ensures editors see the correct size after Truncate+Write
-	// before the data is uploaded to S3.
-	if info := s.asyncWriter.DirtyFileInfo(path, s.cachedMode(path)); info != nil {
+	// If we have dirty local data (buffered or async), report it immediately.
+	// This keeps size/read behavior correct before async upload completes.
+	if info := s.localDirtyFileInfo(path, s.cachedMode(path)); info != nil {
 		return info, nil
 	}
 
@@ -159,8 +159,13 @@ func (s *StorageVNode) Readdir(path string) ([]DirEntry, error) {
 		if path == "/" {
 			childPath = "/" + e.Name
 		}
+		mode := normalizeRuntimeWritableMode(e.Mode)
+		size := e.Size
+		if dirty, ok := s.localDirtySize(childPath, mode); ok && dirty > size {
+			size = dirty
+		}
 		ino := PathIno(childPath)
-		entries = append(entries, DirEntry{Name: e.Name, Mode: e.Mode, Ino: ino})
+		entries = append(entries, DirEntry{Name: e.Name, Mode: mode, Ino: ino, Size: size})
 
 		mtime := now
 		if e.Mtime > 0 {
@@ -168,7 +173,7 @@ func (s *StorageVNode) Readdir(path string) ([]DirEntry, error) {
 		}
 		uid, gid := GetOwner()
 		childMeta[e.Name] = &FileInfo{
-			Ino: ino, Size: e.Size, Mode: e.Mode, Nlink: 1,
+			Ino: ino, Size: size, Mode: mode, Nlink: 1,
 			Uid: uid, Gid: gid,
 			Atime: now, Mtime: mtime, Ctime: mtime,
 		}
@@ -264,7 +269,10 @@ func (s *StorageVNode) Create(path string, flags int, mode uint32) (FileHandle, 
 	ctx, cancel := s.ctx()
 	defer cancel()
 
-	resp, err := s.client.Create(ctx, &pb.ContextCreateRequest{Path: s.rel(path), Mode: mode})
+	resp, err := s.client.Create(ctx, &pb.ContextCreateRequest{
+		Path: s.rel(path),
+		Mode: sanitizeNodeMode(mode, syscall.S_IFREG, 0644),
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -394,7 +402,10 @@ func (s *StorageVNode) Mkdir(path string, mode uint32) error {
 	ctx, cancel := s.ctx()
 	defer cancel()
 
-	resp, err := s.client.Mkdir(ctx, &pb.ContextMkdirRequest{Path: s.rel(path), Mode: mode})
+	resp, err := s.client.Mkdir(ctx, &pb.ContextMkdirRequest{
+		Path: s.rel(path),
+		Mode: sanitizeNodeMode(mode, syscall.S_IFDIR, 0755),
+	})
 	if err != nil {
 		return err
 	}
@@ -475,6 +486,56 @@ func (s *StorageVNode) Rename(oldpath, newpath string) error {
 	s.cache.Invalidate(newpath)
 	s.invalidateParent(oldpath)
 	s.invalidateParent(newpath)
+	return nil
+}
+
+// Chmod updates mode metadata for files/directories.
+func (s *StorageVNode) Chmod(path string, mode uint32) error {
+	if path == "/" {
+		return nil
+	}
+	if isAppleDoublePath(path) {
+		return nil
+	}
+
+	info, err := s.Getattr(path)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := s.ctx()
+	defer cancel()
+
+	if info.Mode&syscall.S_IFMT == syscall.S_IFDIR {
+		resp, err := s.client.Mkdir(ctx, &pb.ContextMkdirRequest{
+			Path: s.rel(path),
+			Mode: sanitizeNodeMode(mode, syscall.S_IFDIR, 0755),
+		})
+		if err != nil {
+			return err
+		}
+		if !resp.Ok {
+			return fs.ErrInvalid
+		}
+	} else {
+		fileType := info.Mode & syscall.S_IFMT
+		if fileType == 0 {
+			fileType = syscall.S_IFREG
+		}
+		resp, err := s.client.Create(ctx, &pb.ContextCreateRequest{
+			Path: s.rel(path),
+			Mode: sanitizeNodeMode(mode, fileType, 0644),
+		})
+		if err != nil {
+			return err
+		}
+		if !resp.Ok {
+			return fs.ErrInvalid
+		}
+	}
+
+	s.cache.Invalidate(path)
+	s.invalidateParent(path)
 	return nil
 }
 
@@ -755,6 +816,79 @@ func (s *StorageVNode) enqueueWritesForPath(path string) {
 	}
 }
 
+func (s *StorageVNode) localDirtyFileInfo(path string, fallbackMode uint32) *FileInfo {
+	size, ok := s.localDirtySize(path, fallbackMode)
+	if !ok {
+		return nil
+	}
+
+	if fallbackMode == 0 {
+		fallbackMode = syscall.S_IFREG | 0644
+	}
+	mode := normalizeRuntimeWritableMode(fallbackMode)
+	uid, gid := GetOwner()
+	now := time.Now()
+	return &FileInfo{
+		Ino: PathIno(path), Size: size, Mode: mode, Nlink: 1,
+		Uid: uid, Gid: gid,
+		Atime: now, Mtime: now, Ctime: now,
+	}
+}
+
+func (s *StorageVNode) localDirtySize(path string, fallbackMode uint32) (int64, bool) {
+	var (
+		size     int64
+		hasDirty bool
+	)
+
+	if info := s.cache.GetInfo(path); info != nil {
+		size = info.Size
+	}
+
+	if info := s.asyncWriter.DirtyFileInfo(path, fallbackMode); info != nil {
+		hasDirty = true
+		if info.Size > size {
+			size = info.Size
+		}
+	}
+
+	if bufferedSize, ok := s.bufferedHandleSize(path); ok {
+		hasDirty = true
+		if bufferedSize > size {
+			size = bufferedSize
+		}
+	}
+
+	return size, hasDirty
+}
+
+func (s *StorageVNode) bufferedHandleSize(path string) (int64, bool) {
+	s.writeMu.Lock()
+	entries := s.writes[path]
+	states := make([]*handleState, 0, len(entries))
+	for _, state := range entries {
+		states = append(states, state)
+	}
+	s.writeMu.Unlock()
+
+	var (
+		size int64
+		ok   bool
+	)
+	for _, state := range states {
+		state.mu.Lock()
+		if !state.closed && len(state.writeBuf) > 0 {
+			end := state.writeOff + int64(len(state.writeBuf))
+			if !ok || end > size {
+				size = end
+			}
+			ok = true
+		}
+		state.mu.Unlock()
+	}
+	return size, ok
+}
+
 // invalidateParent invalidates only the specific child entry from its parent's cache,
 // preserving sibling metadata. This is more efficient than invalidating the entire parent.
 func (s *StorageVNode) invalidateParent(path string) {
@@ -784,8 +918,13 @@ func (s *StorageVNode) toFileInfo(path string, info *pb.FileInfo) *FileInfo {
 		mtime = time.Unix(info.Mtime, 0)
 	}
 	uid, gid := GetOwner()
+	mode := info.Mode
+	if info.IsDir {
+		mode = withNodeFileType(mode, syscall.S_IFDIR)
+	}
+	mode = normalizeRuntimeWritableMode(mode)
 	return &FileInfo{
-		Ino: PathIno(path), Size: info.Size, Mode: info.Mode, Nlink: 1,
+		Ino: PathIno(path), Size: info.Size, Mode: mode, Nlink: 1,
 		Uid: uid, Gid: gid,
 		Atime: now, Mtime: mtime, Ctime: mtime,
 	}
@@ -873,8 +1012,13 @@ func (s *StorageVNode) doBackgroundWarmup() {
 			if path == "/" {
 				childPath = "/" + e.Name
 			}
+			mode := normalizeRuntimeWritableMode(e.Mode)
+			size := e.Size
+			if dirty, ok := s.localDirtySize(childPath, mode); ok && dirty > size {
+				size = dirty
+			}
 			ino := PathIno(childPath)
-			entries = append(entries, DirEntry{Name: e.Name, Mode: e.Mode, Ino: ino})
+			entries = append(entries, DirEntry{Name: e.Name, Mode: mode, Ino: ino, Size: size})
 
 			mtime := now
 			if e.Mtime > 0 {
@@ -882,7 +1026,7 @@ func (s *StorageVNode) doBackgroundWarmup() {
 			}
 			uid, gid := GetOwner()
 			childMeta[e.Name] = &FileInfo{
-				Ino: ino, Size: e.Size, Mode: e.Mode, Nlink: 1,
+				Ino: ino, Size: size, Mode: mode, Nlink: 1,
 				Uid: uid, Gid: gid,
 				Atime: now, Mtime: mtime, Ctime: mtime,
 			}

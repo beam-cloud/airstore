@@ -794,6 +794,9 @@ func (f *Filesystem) Rename(oldpath, newpath string) error {
 
 func (f *Filesystem) Chmod(path string, mode uint32) error {
 	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
+		if chmodNode, ok := vn.(vnode.ChmodNode); ok {
+			return chmodNode.Chmod(path, mode)
+		}
 		return nil // No-op for vnodes
 	}
 	return ErrReadOnly

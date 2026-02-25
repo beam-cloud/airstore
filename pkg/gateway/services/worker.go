@@ -725,6 +725,8 @@ func (s *WorkerService) scheduleRetryRun(ctx context.Context, attempt *types.Age
 		Env:               taskEnv,
 		Resources:         resolveRunExecutionResources(sourceTask),
 		RunAttemptID:      &retryAttempt.ID,
+		Attempt:           nextAttemptNo,
+		MaxAttempts:       retryPolicy.maxAttempts,
 		TimeoutMs:         sourceTask.TimeoutMs,
 		ExecHost:          strPtrOrNil(retryRun.ExecHost),
 		ExecSecurity:      strPtrOrNil(retryRun.ExecSecurity),

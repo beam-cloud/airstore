@@ -819,6 +819,8 @@ func (s *AgentService) createAttemptExecutionTask(
 		Env:               taskEnv,
 		Resources:         ToRunExecutionResources(runPolicy),
 		RunAttemptID:      &attempt.ID,
+		Attempt:           attempt.AttemptNo,
+		MaxAttempts:       retryPolicy.MaxAttempts,
 		TimeoutMs:         &run.TimeoutMs,
 		ExecHost:          strPtr(run.ExecHost),
 		ExecSecurity:      strPtr(run.ExecSecurity),
@@ -1124,6 +1126,9 @@ func applyRunRuntimeEnv(env map[string]string, run *types.AgentRun) {
 	}
 	env["AIRSTORE_RUN_ID"] = strings.TrimSpace(run.ID)
 	env["AIRSTORE_ORIGIN_TASK_ID"] = strings.TrimSpace(run.OriginTaskID)
+	if sessionID := strings.TrimSpace(run.SessionID); sessionID != "" {
+		env["AIRSTORE_AGENT_SESSION_ID"] = sessionID
+	}
 	if run.Provider != nil && strings.TrimSpace(*run.Provider) != "" {
 		env["AIRSTORE_AGENT_PROVIDER"] = strings.TrimSpace(*run.Provider)
 	}

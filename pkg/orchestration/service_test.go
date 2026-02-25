@@ -648,6 +648,7 @@ func TestAcceptRunInputRestartsTerminalRunOnSameTask(t *testing.T) {
 	for _, exec := range backend.runExecutions {
 		require.NotNil(t, exec)
 		require.Equal(t, "true", exec.Env["AIRSTORE_AGENT_RESUME_SESSION"])
+		require.Equal(t, "session-1", exec.Env["AIRSTORE_AGENT_SESSION_ID"])
 	}
 }
 
