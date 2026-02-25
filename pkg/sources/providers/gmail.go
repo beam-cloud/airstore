@@ -278,13 +278,17 @@ func (g *GmailProvider) Search(ctx context.Context, pctx *sources.ProviderContex
 
 	results := make([]sources.SearchResult, 0, len(msgIDs))
 
+	var cancelled bool
 	for _, msgID := range msgIDs {
 		wg.Add(1)
 		select {
 		case sem <- struct{}{}: // Acquire semaphore
 		case <-ctx.Done():
 			wg.Done()
-			return results, nil
+			cancelled = true
+		}
+		if cancelled {
+			break
 		}
 
 		go func(id string) {
@@ -317,6 +321,9 @@ func (g *GmailProvider) Search(ctx context.Context, pctx *sources.ProviderContex
 	}
 
 	wg.Wait()
+	if cancelled {
+		return results, ctx.Err()
+	}
 	return results, nil
 }
 
