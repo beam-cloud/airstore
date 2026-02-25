@@ -8,15 +8,28 @@ import (
 )
 
 const (
-	agentProviderEnvKey = "AIRSTORE_AGENT_PROVIDER"
-	agentModelEnvKey    = "AIRSTORE_AGENT_MODEL"
+	agentProviderEnvKey      = "AIRSTORE_AGENT_PROVIDER"
+	agentModelEnvKey         = "AIRSTORE_AGENT_MODEL"
+	agentResumeSessionEnvKey = "AIRSTORE_AGENT_RESUME_SESSION"
+
+	claudeProviderName    = "claude"
+	claudeConfigDirEnvKey = "CLAUDE_CONFIG_DIR"
+	claudeConfigDirPath   = "/workspace/.claude"
 )
 
 // AgentExecutionRunner builds the process entrypoint for an agent task.
-// Different providers/runtimes can implement this interface.
 type AgentExecutionRunner interface {
 	Name() string
 	BuildEntrypoint(task types.RunExecution, env map[string]string) []string
+}
+
+// TurnRunner extends AgentExecutionRunner with per-turn execution.
+// Runners implementing this interface execute each turn as a separate
+// process in the sandbox, with the Go worker managing the lifecycle
+// between turns — no shell loop, no stdin pipe.
+type TurnRunner interface {
+	AgentExecutionRunner
+	BuildTurnArgs(prompt string, env map[string]string, continueSession bool) []string
 }
 
 type ClaudeCodeRunnerOptions struct {
@@ -41,8 +54,7 @@ func (r *ClaudeCodeRunner) Name() string {
 }
 
 func (r *ClaudeCodeRunner) BuildEntrypoint(task types.RunExecution, env map[string]string) []string {
-	r.injectAPIKey(env, "ANTHROPIC_API_KEY", r.anthropicAPIKey, true)
-	r.injectKernelEnv(env)
+	r.injectEnv(env)
 	model := strings.TrimSpace(env[agentModelEnvKey])
 
 	addTaskExecutionContext(
@@ -52,7 +64,43 @@ func (r *ClaudeCodeRunner) BuildEntrypoint(task types.RunExecution, env map[stri
 		task,
 	).Msg("running claude code task")
 
-	return claudePromptEntrypoint(task.Prompt, defaultClaudePromptEntrypointOptions(model))
+	return newPromptEntrypointBuilder("claude").
+		withFlag("--print").
+		withFlag("--verbose").
+		withKeyValue("--output-format", "stream-json").
+		withFlag("--dangerously-skip-permissions").
+		withKeyValue("--model", model).
+		withPrompt(task.Prompt).
+		build()
+}
+
+// BuildTurnArgs returns the argv for a single interactive turn.
+// Each turn runs claude --print as a separate process in the sandbox;
+// the Go worker manages the loop between turns.
+func (r *ClaudeCodeRunner) BuildTurnArgs(prompt string, env map[string]string, continueSession bool) []string {
+	r.injectEnv(env)
+	model := strings.TrimSpace(env[agentModelEnvKey])
+
+	builder := newPromptEntrypointBuilder("claude")
+	if continueSession {
+		builder.withFlag("--continue")
+	}
+	return builder.
+		withFlag("--print").
+		withFlag("--verbose").
+		withKeyValue("--output-format", "stream-json").
+		withFlag("--dangerously-skip-permissions").
+		withKeyValue("--model", model).
+		withPrompt(prompt).
+		build()
+}
+
+func (r *ClaudeCodeRunner) injectEnv(env map[string]string) {
+	r.injectAPIKey(env, "ANTHROPIC_API_KEY", r.anthropicAPIKey, true)
+	r.injectKernelEnv(env)
+	if strings.TrimSpace(env[claudeConfigDirEnvKey]) == "" {
+		env[claudeConfigDirEnvKey] = claudeConfigDirPath
+	}
 }
 
 func (r *ClaudeCodeRunner) injectKernelEnv(env map[string]string) {
@@ -76,35 +124,16 @@ func (r *ClaudeCodeRunner) injectAPIKey(env map[string]string, key, value string
 	}
 }
 
-type ClaudePromptEntrypointOptions struct {
-	Model           string
-	Print           bool
-	Verbose         bool
-	OutputFormat    string
-	SkipPermissions bool
-}
-
-func defaultClaudePromptEntrypointOptions(model string) ClaudePromptEntrypointOptions {
-	return ClaudePromptEntrypointOptions{
-		Model:           model,
-		Print:           true,
-		Verbose:         true,
-		OutputFormat:    "stream-json",
-		SkipPermissions: true,
-	}
-}
-
+// promptEntrypointBuilder constructs a command-line argv for a CLI tool.
 type promptEntrypointBuilder struct {
 	binary string
 	args   []string
-	prompt string
 }
 
-func newPromptEntrypointBuilder(binary string, prompt string) *promptEntrypointBuilder {
+func newPromptEntrypointBuilder(binary string) *promptEntrypointBuilder {
 	return &promptEntrypointBuilder{
 		binary: strings.TrimSpace(binary),
 		args:   []string{},
-		prompt: prompt,
 	}
 }
 
@@ -127,28 +156,19 @@ func (b *promptEntrypointBuilder) withKeyValue(flag string, value string) *promp
 	return b
 }
 
-func (b *promptEntrypointBuilder) build() []string {
-	argv := make([]string, 0, len(b.args)+3)
-	argv = append(argv, b.binary)
-	argv = append(argv, b.args...)
-	argv = append(argv, "-p", b.prompt)
-	return argv
+func (b *promptEntrypointBuilder) withPrompt(prompt string) *promptEntrypointBuilder {
+	if strings.TrimSpace(prompt) == "" {
+		return b
+	}
+	b.args = append(b.args, "-p", prompt)
+	return b
 }
 
-func claudePromptEntrypoint(prompt string, opts ClaudePromptEntrypointOptions) []string {
-	builder := newPromptEntrypointBuilder("claude", prompt)
-	if opts.Print {
-		builder.withFlag("--print")
-	}
-	if opts.Verbose {
-		builder.withFlag("--verbose")
-	}
-	builder.withKeyValue("--output-format", opts.OutputFormat)
-	if opts.SkipPermissions {
-		builder.withFlag("--dangerously-skip-permissions")
-	}
-	builder.withKeyValue("--model", opts.Model)
-	return builder.build()
+func (b *promptEntrypointBuilder) build() []string {
+	argv := make([]string, 0, len(b.args)+1)
+	argv = append(argv, b.binary)
+	argv = append(argv, b.args...)
+	return argv
 }
 
 func runnerProviderFromEnv(env map[string]string) string {
@@ -156,4 +176,27 @@ func runnerProviderFromEnv(env map[string]string) string {
 		return ""
 	}
 	return strings.ToLower(strings.TrimSpace(env[agentProviderEnvKey]))
+}
+
+func providerFromExecutionPolicy(policy map[string]any) string {
+	if len(policy) == 0 {
+		return ""
+	}
+	raw, ok := policy["provider"]
+	if !ok || raw == nil {
+		return ""
+	}
+	value, ok := raw.(string)
+	if !ok {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func isClaudeExecutionTask(task types.RunExecution) bool {
+	provider := runnerProviderFromEnv(task.Env)
+	if provider == "" {
+		provider = providerFromExecutionPolicy(task.ExecutionPolicy)
+	}
+	return provider == claudeProviderName
 }

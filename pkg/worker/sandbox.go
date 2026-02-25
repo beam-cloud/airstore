@@ -185,8 +185,7 @@ func NewSandboxManager(ctx context.Context, cfg Config) (*SandboxManager, error)
 	})
 	manager.defaultPromptRunner = claudeRunner
 	manager.promptRunners = map[string]AgentExecutionRunner{
-		"claude":    claudeRunner,
-		"anthropic": claudeRunner,
+		"claude": claudeRunner,
 	}
 
 	// Bring up the global worker mount during initialization so the first task
@@ -1017,32 +1016,37 @@ const (
 	ptyDefaultRows = "40"
 )
 
-// AttachPTY starts a long-lived PTY-backed shell process in a running sandbox.
-func (m *SandboxManager) AttachPTY(ctx context.Context, sandboxID string, stdin io.Reader, stdout io.Writer) error {
-	m.mu.RLock()
-	sandbox, exists := m.sandboxes[sandboxID]
-	m.mu.RUnlock()
-	if !exists {
-		return fmt.Errorf("sandbox %s not found", sandboxID)
-	}
-	if sandbox.State.Status != types.SandboxStatusRunning {
-		return fmt.Errorf("sandbox %s is not running", sandboxID)
-	}
-
+func buildPTYExecEnv(envMap map[string]string) []string {
 	env := []string{
 		ptyDefaultPATH,
 		"TERM=xterm-256color",
 		"COLUMNS=" + ptyDefaultCols,
 		"LINES=" + ptyDefaultRows,
 	}
-	for k, v := range sandbox.Config.Env {
+	for k, v := range envMap {
 		env = append(env, fmt.Sprintf("%s=%s", k, v))
+	}
+	return env
+}
+
+// AttachPTY starts a long-lived PTY-backed process in a running sandbox.
+// Claude interactive tasks run their task entrypoint directly; other interactive
+// tasks keep the existing shell PTY behavior.
+func (m *SandboxManager) AttachPTY(
+	ctx context.Context,
+	sandboxID string,
+	stdin io.Reader,
+	stdout io.Writer,
+) error {
+	envMap, err := m.sandboxEnv(sandboxID)
+	if err != nil {
+		return err
 	}
 
 	proc := specs.Process{
 		Args: []string{"/bin/sh", "-lc", ptySetupScript},
 		Cwd:  types.ContainerWorkDir,
-		Env:  env,
+		Env:  buildPTYExecEnv(envMap),
 		User: specs.User{UID: types.SandboxUserUID, GID: types.SandboxUserGID},
 	}
 
@@ -1050,6 +1054,72 @@ func (m *SandboxManager) AttachPTY(ctx context.Context, sandboxID string, stdin 
 		OutputWriter: stdout,
 		StdinReader:  stdin,
 	})
+}
+
+// ExecPTY runs a command inside an existing sandbox with PTY-compatible env.
+// Unlike AttachPTY, it takes explicit args and does not attach stdin — the
+// prompt is passed via command-line args. This is used by the turn-based
+// session loop where each turn is a separate Exec call.
+//
+// The command is wrapped in a login shell so that the user's profile (and
+// full PATH) is available — tools like `claude` are often installed outside
+// the minimal system PATH.
+func (m *SandboxManager) ExecPTY(
+	ctx context.Context,
+	sandboxID string,
+	args []string,
+	env map[string]string,
+	stdout io.Writer,
+) error {
+	sandboxEnv, err := m.sandboxEnv(sandboxID)
+	if err != nil {
+		return err
+	}
+	for k, v := range env {
+		sandboxEnv[k] = v
+	}
+
+	proc := specs.Process{
+		Args: []string{"/bin/bash", "-lc", shellJoinArgs(args)},
+		Cwd:  types.ContainerWorkDir,
+		Env:  buildPTYExecEnv(sandboxEnv),
+		User: specs.User{UID: types.SandboxUserUID, GID: types.SandboxUserGID},
+	}
+
+	return m.runtime.Exec(ctx, sandboxID, proc, &runtime.ExecOpts{
+		OutputWriter: stdout,
+	})
+}
+
+func shellJoinArgs(args []string) string {
+	parts := make([]string, len(args))
+	for i, arg := range args {
+		parts[i] = "'" + strings.ReplaceAll(arg, "'", `'"'"'`) + "'"
+	}
+	return strings.Join(parts, " ")
+}
+
+// sandboxEnv returns a copy of the sandbox's configured environment.
+func (m *SandboxManager) sandboxEnv(sandboxID string) (map[string]string, error) {
+	m.mu.RLock()
+	sandbox, exists := m.sandboxes[sandboxID]
+	m.mu.RUnlock()
+	if !exists {
+		return nil, fmt.Errorf("sandbox %s not found", sandboxID)
+	}
+	if sandbox.State.Status != types.SandboxStatusRunning {
+		return nil, fmt.Errorf("sandbox %s is not running", sandboxID)
+	}
+	envMap := make(map[string]string, len(sandbox.Config.Env))
+	for k, v := range sandbox.Config.Env {
+		envMap[k] = v
+	}
+	return envMap, nil
+}
+
+// ResolveRunner returns the AgentExecutionRunner for the given task.
+func (m *SandboxManager) ResolveRunner(task types.RunExecution, env map[string]string) AgentExecutionRunner {
+	return m.resolvePromptRunner(task, env)
 }
 
 // RunTask creates and runs a sandbox for a task, returning when complete

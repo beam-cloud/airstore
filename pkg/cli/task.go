@@ -222,13 +222,15 @@ func streamWriter(stream string) *os.File {
 // statusStyle returns the appropriate style for a task status
 func statusStyle(status string) lipgloss.Style {
 	switch strings.ToLower(status) {
-	case "dispatched", "running":
+	case "running":
 		return InfoStyle
-	case "complete", "completed", "success":
+	case "idle":
+		return WarningStyle
+	case "done", "complete", "completed", "success":
 		return SuccessStyle
 	case "failed", "error", "dropped":
 		return ErrorStyle
-	case "accepted", "pending", "queued":
+	case "pending", "queued":
 		return WarningStyle
 	case "cancelled":
 		return DimStyle

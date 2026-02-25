@@ -157,6 +157,7 @@ func (s *WorkerService) SetTaskStarted(ctx context.Context, req *pb.SetTaskStart
 				"task_id":    req.TaskId,
 				"event":      string(types.AgentRunEventStartRejectedTerminalRun),
 			})
+			_ = s.markOriginTaskTerminalIfCurrentRun(ctx, attempt.RunID)
 			return nil, status.Errorf(codes.FailedPrecondition, "run is already terminal")
 		}
 	}
@@ -249,13 +250,13 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 			"error":      req.Error,
 			"event":      string(types.AgentRunEventFinished),
 		})
-		_ = s.markOriginTaskDoneIfCurrentRun(ctx, attempt.RunID)
+		_ = s.markOriginTaskTerminalIfCurrentRun(ctx, attempt.RunID)
 	}
 
 	return &pb.SetTaskResultResponse{}, nil
 }
 
-func (s *WorkerService) markOriginTaskDoneIfCurrentRun(ctx context.Context, runID string) error {
+func (s *WorkerService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, runID string) error {
 	if s.backend == nil || strings.TrimSpace(runID) == "" {
 		return nil
 	}
@@ -273,14 +274,22 @@ func (s *WorkerService) markOriginTaskDoneIfCurrentRun(ctx context.Context, runI
 	if task.TargetRunID != nil && *task.TargetRunID != run.ID {
 		return nil
 	}
-
-	switch task.State {
-	case types.AgentTaskStateDropped, types.AgentTaskStateCancelled, types.AgentTaskStateDone:
+	if run.EndedAt != nil && task.UpdatedAt.After(*run.EndedAt) && task.State.IsDispatchable() {
+		// Task state was reopened after this run had already ended.
 		return nil
-	default:
-		targetRunID := run.ID
-		return s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDone, nil, &targetRunID)
 	}
+
+	if task.State.IsTerminal() {
+		return nil
+	}
+	targetRunID := run.ID
+	nextState := types.AgentTaskStateDone
+	if run.Status == types.AgentRunStatusCancelled {
+		nextState = types.AgentTaskStateCancelled
+	} else if run.Interactive && run.Status == types.AgentRunStatusOK {
+		nextState = types.AgentTaskStateIdle
+	}
+	return s.backend.UpdateTaskState(ctx, task.ID, nextState, nil, &targetRunID)
 }
 
 func appendRunSnapshot(
@@ -419,7 +428,7 @@ func (s *WorkerService) scheduleRetryRun(ctx context.Context, attempt *types.Age
 	}
 
 	targetRunID := retryRun.ID
-	if err := s.backend.UpdateTaskState(ctx, run.OriginTaskID, types.AgentTaskStateDispatched, nil, &targetRunID); err != nil {
+	if err := s.backend.UpdateTaskState(ctx, run.OriginTaskID, types.AgentTaskStateRunning, nil, &targetRunID); err != nil {
 		return retryScheduleResult{}, err
 	}
 

@@ -49,7 +49,13 @@ export interface RunExecutionPolicy {
 
 export type TaskKind = 'agent_command' | 'run_input';
 
-export type TaskState = 'accepted' | 'queued' | 'dispatched' | 'done' | 'dropped' | 'cancelled';
+export type TaskState =
+  | 'queued'
+  | 'running'
+  | 'idle'
+  | 'done'
+  | 'dropped'
+  | 'cancelled';
 
 export interface RoutingContext {
   to?: string;

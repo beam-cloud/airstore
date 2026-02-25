@@ -459,7 +459,7 @@ func (b *PostgresBackend) UpdateTaskState(ctx context.Context, taskID string, st
 		UPDATE agent_task
 		SET state = $2::agent_task_state,
 		    queued_at = CASE WHEN $2::agent_task_state = 'queued'::agent_task_state THEN $3 ELSE queued_at END,
-		    dispatched_at = CASE WHEN $2::agent_task_state = 'dispatched'::agent_task_state THEN $3 ELSE dispatched_at END,
+		    dispatched_at = CASE WHEN $2::agent_task_state = 'running'::agent_task_state THEN $3 ELSE dispatched_at END,
 		    dropped_reason = CASE WHEN $2::agent_task_state = 'dropped'::agent_task_state THEN $4 ELSE dropped_reason END,
 		    target_run_id = COALESCE($5::uuid, target_run_id),
 		    updated_at = CURRENT_TIMESTAMP

@@ -196,8 +196,16 @@ func (g *WorkspaceTasksGroup) StreamTaskEvents(c echo.Context) error {
 	if err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid run_event_cursor")
 	}
+	cursorRunID := strings.TrimSpace(c.QueryParam("cursor_run_id"))
 
-	batch, err := g.agents.StreamTaskEvents(c.Request().Context(), workspaceID, taskID, logCursor, runEventCursor)
+	batch, err := g.agents.StreamTaskEvents(
+		c.Request().Context(),
+		workspaceID,
+		taskID,
+		logCursor,
+		runEventCursor,
+		cursorRunID,
+	)
 	if err != nil {
 		if _, ok := err.(*types.ErrAgentTaskNotFound); ok {
 			return ErrorResponse(c, http.StatusNotFound, "task not found")
@@ -269,9 +277,9 @@ func parseTaskStates(raw string) ([]types.AgentTaskState, error) {
 	for _, part := range parts {
 		state := types.AgentTaskState(strings.TrimSpace(part))
 		switch state {
-		case types.AgentTaskStateAccepted,
-			types.AgentTaskStateQueued,
-			types.AgentTaskStateDispatched,
+		case types.AgentTaskStateQueued,
+			types.AgentTaskStateRunning,
+			types.AgentTaskStateIdle,
 			types.AgentTaskStateDone,
 			types.AgentTaskStateDropped,
 			types.AgentTaskStateCancelled:

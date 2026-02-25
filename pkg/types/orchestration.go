@@ -25,13 +25,31 @@ const (
 type AgentTaskState string
 
 const (
-	AgentTaskStateAccepted   AgentTaskState = "accepted"
-	AgentTaskStateQueued     AgentTaskState = "queued"
-	AgentTaskStateDispatched AgentTaskState = "dispatched"
-	AgentTaskStateDone       AgentTaskState = "done"
-	AgentTaskStateDropped    AgentTaskState = "dropped"
-	AgentTaskStateCancelled  AgentTaskState = "cancelled"
+	AgentTaskStateQueued    AgentTaskState = "queued"
+	AgentTaskStateRunning   AgentTaskState = "running"
+	AgentTaskStateIdle      AgentTaskState = "idle"
+	AgentTaskStateDone      AgentTaskState = "done"
+	AgentTaskStateDropped   AgentTaskState = "dropped"
+	AgentTaskStateCancelled AgentTaskState = "cancelled"
 )
+
+func (s AgentTaskState) IsDispatchable() bool {
+	switch s {
+	case AgentTaskStateQueued:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s AgentTaskState) IsTerminal() bool {
+	switch s {
+	case AgentTaskStateDone, AgentTaskStateDropped, AgentTaskStateCancelled:
+		return true
+	default:
+		return false
+	}
+}
 
 type AgentRunStatus string
 
@@ -368,11 +386,6 @@ func (t *RunExecution) NormalizeType() {
 func (t *RunExecution) IsInteractive() bool {
 	t.NormalizeType()
 	return t.Type == RunExecutionTypeInteractive
-}
-
-// IsClaudeCodeRunExecution returns true if this run execution has a prompt (Claude Code task)
-func (t *RunExecution) IsClaudeCodeRunExecution() bool {
-	return t.Prompt != ""
 }
 
 // IsTerminal returns true if the run execution is in a terminal state.

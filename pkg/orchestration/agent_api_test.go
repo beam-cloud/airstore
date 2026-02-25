@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/beam-cloud/airstore/pkg/types"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -54,6 +55,85 @@ func TestEnqueueRunInputTaskRejectsUnsupportedQueueModes(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not supported")
+}
+
+func TestStreamTaskEventsResetsCursorsWhenRunBindingChanges(t *testing.T) {
+	redisClient, cleanup := newTestRedis(t)
+	defer cleanup()
+
+	backend := newFakeBackend()
+	taskID := uuid.NewString()
+	runID := uuid.NewString()
+	backend.agentTasks[taskID] = &types.AgentTask{
+		ID:          taskID,
+		WorkspaceID: 42,
+		State:       types.AgentTaskStateRunning,
+		TargetRunID: &runID,
+	}
+	backend.runs[runID] = &types.AgentRun{
+		ID:          runID,
+		WorkspaceID: 42,
+		Status:      types.AgentRunStatusRunning,
+	}
+
+	runtime := NewAgentService(context.Background(), backend, nil, redisClient, nil, "ghcr.io/beam/sandbox:latest")
+	require.NoError(t, runtime.publishRunEvent(context.Background(), runID, types.AgentRunEventAccepted, map[string]any{"idx": 1}))
+	require.NoError(t, runtime.publishRunEvent(context.Background(), runID, types.AgentRunEventStarted, map[string]any{"idx": 2}))
+
+	api := NewAgentAPI(backend, runtime)
+	batch, err := api.StreamTaskEvents(
+		context.Background(),
+		42,
+		taskID,
+		100,
+		100,
+		"run-old",
+	)
+	require.NoError(t, err)
+	require.NotNil(t, batch)
+	require.NotNil(t, batch.RunID)
+	require.Equal(t, runID, *batch.RunID)
+	require.Len(t, batch.RunEvents, 2)
+	require.Equal(t, 2, batch.NextRunEventCursor)
+	require.EqualValues(t, 0, batch.NextLogCursor)
+}
+
+func TestStreamTaskEventsKeepsCursorWhenRunBindingMatches(t *testing.T) {
+	redisClient, cleanup := newTestRedis(t)
+	defer cleanup()
+
+	backend := newFakeBackend()
+	taskID := uuid.NewString()
+	runID := uuid.NewString()
+	backend.agentTasks[taskID] = &types.AgentTask{
+		ID:          taskID,
+		WorkspaceID: 42,
+		State:       types.AgentTaskStateRunning,
+		TargetRunID: &runID,
+	}
+	backend.runs[runID] = &types.AgentRun{
+		ID:          runID,
+		WorkspaceID: 42,
+		Status:      types.AgentRunStatusRunning,
+	}
+
+	runtime := NewAgentService(context.Background(), backend, nil, redisClient, nil, "ghcr.io/beam/sandbox:latest")
+	require.NoError(t, runtime.publishRunEvent(context.Background(), runID, types.AgentRunEventAccepted, map[string]any{"idx": 1}))
+	require.NoError(t, runtime.publishRunEvent(context.Background(), runID, types.AgentRunEventStarted, map[string]any{"idx": 2}))
+
+	api := NewAgentAPI(backend, runtime)
+	batch, err := api.StreamTaskEvents(
+		context.Background(),
+		42,
+		taskID,
+		0,
+		1,
+		runID,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, batch)
+	require.Len(t, batch.RunEvents, 1)
+	require.Equal(t, 2, batch.NextRunEventCursor)
 }
 
 func TestValidateAgentCommandParamsRejectsInvalidPolicy(t *testing.T) {

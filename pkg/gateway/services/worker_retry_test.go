@@ -245,7 +245,7 @@ func TestScheduleRetryRunCreatesNewRunAndRebindsTask(t *testing.T) {
 	backend.tasks[originTaskID] = &types.AgentTask{
 		ID:          originTaskID,
 		WorkspaceID: 42,
-		State:       types.AgentTaskStateDispatched,
+		State:       types.AgentTaskStateRunning,
 		TargetRunID: &originRunID,
 	}
 	backend.runExecutions[originExecutionID] = &types.RunExecution{
@@ -321,7 +321,7 @@ func TestSetTaskResultMarksOriginTaskDoneWhenRunFinishes(t *testing.T) {
 	backend.tasks[originTaskID] = &types.AgentTask{
 		ID:          originTaskID,
 		WorkspaceID: 42,
-		State:       types.AgentTaskStateDispatched,
+		State:       types.AgentTaskStateRunning,
 		TargetRunID: &runID,
 	}
 	backend.runExecutions[executionID] = &types.RunExecution{
@@ -349,6 +349,188 @@ func TestSetTaskResultMarksOriginTaskDoneWhenRunFinishes(t *testing.T) {
 	require.NotNil(t, task.TargetRunID)
 	require.Equal(t, runID, *task.TargetRunID)
 	require.Equal(t, types.AgentRunStatusOK, backend.runs[runID].Status)
+}
+
+func TestSetTaskResultMarksOriginTaskIdleWhenInteractiveRunFinishes(t *testing.T) {
+	backend := newRetryTestBackend()
+	svc := &WorkerService{backend: backend, taskQueue: &capturingTaskQueue{}}
+
+	agentID := "agent-1"
+	runID := "run-1"
+	originTaskID := "task-1"
+	executionID := "exec-1"
+	attemptID := "attempt-1"
+
+	backend.runs[runID] = &types.AgentRun{
+		ID:           runID,
+		WorkspaceID:  42,
+		AgentID:      &agentID,
+		OriginTaskID: originTaskID,
+		Status:       types.AgentRunStatusRunning,
+		Interactive:  true,
+	}
+	backend.tasks[originTaskID] = &types.AgentTask{
+		ID:          originTaskID,
+		WorkspaceID: 42,
+		State:       types.AgentTaskStateRunning,
+		TargetRunID: &runID,
+	}
+	backend.runExecutions[executionID] = &types.RunExecution{
+		ExternalId: executionID,
+		Status:     types.RunExecutionStatusRunning,
+	}
+	backend.attemptByID[attemptID] = &types.AgentRunAttempt{
+		ID:          attemptID,
+		RunID:       runID,
+		AttemptNo:   1,
+		Status:      types.AgentAttemptStatusRunning,
+		ExecutionID: &executionID,
+	}
+
+	_, err := svc.SetTaskResult(context.Background(), &pb.SetTaskResultRequest{
+		TaskId:   executionID,
+		ExitCode: 0,
+		Error:    "",
+	})
+	require.NoError(t, err)
+
+	task := backend.tasks[originTaskID]
+	require.NotNil(t, task)
+	require.Equal(t, types.AgentTaskStateIdle, task.State)
+	require.NotNil(t, task.TargetRunID)
+	require.Equal(t, runID, *task.TargetRunID)
+	require.Equal(t, types.AgentRunStatusOK, backend.runs[runID].Status)
+}
+
+func TestSetTaskResultMarksOriginTaskCancelledWhenRunCancelled(t *testing.T) {
+	backend := newRetryTestBackend()
+	svc := &WorkerService{backend: backend, taskQueue: &capturingTaskQueue{}}
+
+	agentID := "agent-1"
+	runID := "run-1"
+	originTaskID := "task-1"
+	executionID := "exec-1"
+	attemptID := "attempt-1"
+
+	backend.runs[runID] = &types.AgentRun{
+		ID:           runID,
+		WorkspaceID:  42,
+		AgentID:      &agentID,
+		OriginTaskID: originTaskID,
+		Status:       types.AgentRunStatusRunning,
+	}
+	backend.tasks[originTaskID] = &types.AgentTask{
+		ID:          originTaskID,
+		WorkspaceID: 42,
+		State:       types.AgentTaskStateRunning,
+		TargetRunID: &runID,
+	}
+	backend.runExecutions[executionID] = &types.RunExecution{
+		ExternalId: executionID,
+		Status:     types.RunExecutionStatusRunning,
+	}
+	backend.attemptByID[attemptID] = &types.AgentRunAttempt{
+		ID:          attemptID,
+		RunID:       runID,
+		AttemptNo:   1,
+		Status:      types.AgentAttemptStatusRunning,
+		ExecutionID: &executionID,
+	}
+
+	_, err := svc.SetTaskResult(context.Background(), &pb.SetTaskResultRequest{
+		TaskId:   executionID,
+		ExitCode: -1,
+		Error:    "cancelled by user",
+	})
+	require.NoError(t, err)
+
+	task := backend.tasks[originTaskID]
+	require.NotNil(t, task)
+	require.Equal(t, types.AgentTaskStateCancelled, task.State)
+	require.NotNil(t, task.TargetRunID)
+	require.Equal(t, runID, *task.TargetRunID)
+	require.Equal(t, types.AgentRunStatusCancelled, backend.runs[runID].Status)
+}
+
+func TestMarkOriginTaskTerminalSkipsStaleCompletionAfterTaskReopen(t *testing.T) {
+	backend := newRetryTestBackend()
+	svc := &WorkerService{backend: backend}
+
+	agentID := "agent-1"
+	runID := "run-1"
+	originTaskID := "task-1"
+	endedAt := time.Now().Add(-2 * time.Minute)
+	reopenedAt := endedAt.Add(5 * time.Second)
+
+	backend.runs[runID] = &types.AgentRun{
+		ID:           runID,
+		WorkspaceID:  42,
+		AgentID:      &agentID,
+		OriginTaskID: originTaskID,
+		Status:       types.AgentRunStatusOK,
+		EndedAt:      &endedAt,
+	}
+	backend.tasks[originTaskID] = &types.AgentTask{
+		ID:          originTaskID,
+		WorkspaceID: 42,
+		State:       types.AgentTaskStateQueued,
+		TargetRunID: &runID,
+		UpdatedAt:   reopenedAt,
+	}
+
+	err := svc.markOriginTaskTerminalIfCurrentRun(context.Background(), runID)
+	require.NoError(t, err)
+
+	task := backend.tasks[originTaskID]
+	require.NotNil(t, task)
+	require.Equal(t, types.AgentTaskStateQueued, task.State)
+}
+
+func TestSetTaskStartedRejectsTerminalRunMarksOriginTaskCancelled(t *testing.T) {
+	backend := newRetryTestBackend()
+	svc := &WorkerService{backend: backend, taskQueue: &capturingTaskQueue{}}
+
+	agentID := "agent-1"
+	runID := "run-1"
+	originTaskID := "task-1"
+	executionID := "exec-1"
+	attemptID := "attempt-1"
+
+	backend.runs[runID] = &types.AgentRun{
+		ID:           runID,
+		WorkspaceID:  42,
+		AgentID:      &agentID,
+		OriginTaskID: originTaskID,
+		Status:       types.AgentRunStatusCancelled,
+	}
+	backend.tasks[originTaskID] = &types.AgentTask{
+		ID:          originTaskID,
+		WorkspaceID: 42,
+		State:       types.AgentTaskStateRunning,
+		TargetRunID: &runID,
+	}
+	backend.runExecutions[executionID] = &types.RunExecution{
+		ExternalId: executionID,
+		Status:     types.RunExecutionStatusPending,
+	}
+	backend.attemptByID[attemptID] = &types.AgentRunAttempt{
+		ID:          attemptID,
+		RunID:       runID,
+		AttemptNo:   1,
+		Status:      types.AgentAttemptStatusPending,
+		ExecutionID: &executionID,
+	}
+
+	_, err := svc.SetTaskStarted(context.Background(), &pb.SetTaskStartedRequest{
+		TaskId: executionID,
+	})
+	require.Error(t, err)
+
+	task := backend.tasks[originTaskID]
+	require.NotNil(t, task)
+	require.Equal(t, types.AgentTaskStateCancelled, task.State)
+	require.NotNil(t, task.TargetRunID)
+	require.Equal(t, runID, *task.TargetRunID)
 }
 
 func TestAgentCommandParamsFromProtoMatchesHTTPShape(t *testing.T) {

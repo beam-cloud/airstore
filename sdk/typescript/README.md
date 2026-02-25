@@ -148,7 +148,7 @@ await airstore.connections.del('ws_abc123', 'conn_abc123');
 These APIs are workspace-scoped and split into:
 
 - `agents`: persistent profile/config.
-- `tasks`: accepted-first task ingress with idempotency.
+- `tasks`: task ingress with idempotency (`accepted` response flag is transport-level).
 - `runs`: execution lifecycle and snapshot/event introspection.
 
 Flow is:
@@ -156,6 +156,8 @@ Flow is:
 1. submit a task,
 2. materialize a run,
 3. observe lifecycle via run state, snapshots, and events.
+
+Task states are: `queued`, `running`, `idle`, `done`, `dropped`, `cancelled`.
 
 ```typescript
 // 1) Create an agent profile
