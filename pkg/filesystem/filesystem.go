@@ -12,6 +12,7 @@ import (
 	"time"
 	"unsafe"
 
+	airtypes "github.com/beam-cloud/airstore/pkg/types"
 	"github.com/beam-cloud/airstore/pkg/filesystem/vnode"
 	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/hashicorp/golang-lru/v2/expirable"
@@ -649,6 +650,9 @@ func (f *Filesystem) recordLogicalRead(
 	normalizedPath := strings.TrimPrefix(path, "/")
 	if normalizedPath == "" {
 		normalizedPath = path
+	}
+	if airtypes.IsHiddenDotPath(normalizedPath) {
+		return
 	}
 
 	event := &pb.AccessLogEvent{

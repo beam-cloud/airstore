@@ -7,6 +7,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/instrumentation"
+	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
 )
 
@@ -50,6 +51,10 @@ func (s *AccessService) IngestAccessEvents(ctx context.Context, req *pb.IngestAc
 }
 
 func (s *AccessService) acceptEvent(ctx context.Context, in *pb.AccessLogEvent) bool {
+	if in != nil && types.IsHiddenDotPath(in.Path) {
+		return false
+	}
+
 	if s.rdb == nil || in.EventId == "" {
 		return true
 	}

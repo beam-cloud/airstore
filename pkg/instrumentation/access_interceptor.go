@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
+	"github.com/beam-cloud/airstore/pkg/types"
 	"google.golang.org/grpc"
 	grpcmd "google.golang.org/grpc/metadata"
 )
@@ -81,6 +82,9 @@ func (a *AccessLogInterceptor) Unary() grpc.UnaryServerInterceptor {
 		fullPath := filePath
 		if svcPrefix != "" {
 			fullPath = svcPrefix + "/" + filePath
+		}
+		if types.IsHiddenDotPath(fullPath) {
+			return resp, err
 		}
 
 		a.recorder.Record(ctx, AccessEvent{

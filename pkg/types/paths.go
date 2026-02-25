@@ -50,3 +50,23 @@ func IsHookablePath(p string) bool {
 	}
 	return true
 }
+
+// IsHiddenDotPath returns true when any path segment starts with ".".
+// Examples: "/.claude/settings.json", "skills/.cache/index.json".
+func IsHiddenDotPath(p string) bool {
+	p = strings.TrimSpace(strings.TrimPrefix(p, "/"))
+	if p == "" {
+		return false
+	}
+
+	for _, segment := range strings.Split(p, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			continue
+		}
+		if strings.HasPrefix(segment, ".") {
+			return true
+		}
+	}
+
+	return false
+}

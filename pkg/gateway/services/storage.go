@@ -85,6 +85,9 @@ func (s *StorageService) emitHookEvent(ctx context.Context, eventType string, pa
 	}
 
 	path = hooks.NormalizePath(path)
+	if types.IsHiddenDotPath(path) {
+		return
+	}
 
 	log.Debug().Str("event", eventType).Str("path", path).Uint("workspace", wsId).Msg("hook event emitted")
 	s.hookStream.Emit(ctx, map[string]any{
