@@ -65,14 +65,15 @@ func (a *AgentAPI) CreateAgent(
 		isActive = *active
 	}
 
-	normalizedConfig, err := normalizeAgentProfileConfig(config)
+	trimmedKey := strings.TrimSpace(agentKey)
+	normalizedConfig, err := normalizeAgentProfileConfig(config, trimmedKey)
 	if err != nil {
 		return nil, err
 	}
 
 	profile := &types.AgentProfile{
 		WorkspaceID: workspaceID,
-		AgentKey:    strings.TrimSpace(agentKey),
+		AgentKey:    trimmedKey,
 		Name:        strings.TrimSpace(name),
 		ConfigJSON:  normalizedConfig,
 		Active:      isActive,
@@ -83,12 +84,55 @@ func (a *AgentAPI) CreateAgent(
 	return profile, nil
 }
 
+func (a *AgentAPI) GetDefaultConfig(agentKey string) map[string]any {
+	return DefaultAgentConfig(agentKey)
+}
+
 func (a *AgentAPI) ListAgents(ctx context.Context, workspaceID uint) ([]*types.AgentProfile, error) {
 	return a.backend.ListAgentProfiles(ctx, workspaceID)
 }
 
 func (a *AgentAPI) GetAgent(ctx context.Context, workspaceID uint, agentID string) (*types.AgentProfile, error) {
 	return a.backend.GetAgentProfile(ctx, workspaceID, agentID)
+}
+
+func (a *AgentAPI) UpdateAgent(
+	ctx context.Context,
+	workspaceID uint,
+	agentID string,
+	name *string,
+	config map[string]any,
+	active *bool,
+) (*types.AgentProfile, error) {
+	profile, err := a.backend.GetAgentProfile(ctx, workspaceID, agentID)
+	if err != nil {
+		return nil, err
+	}
+	if name != nil {
+		trimmed := strings.TrimSpace(*name)
+		if trimmed == "" {
+			return nil, fmt.Errorf("name cannot be empty")
+		}
+		profile.Name = trimmed
+	}
+	if active != nil {
+		profile.Active = *active
+	}
+	if config != nil {
+		merged := cloneAnyMap(profile.ConfigJSON)
+		for k, v := range config {
+			merged[k] = v
+		}
+		normalized, err := normalizeAgentProfileConfig(merged, profile.AgentKey)
+		if err != nil {
+			return nil, err
+		}
+		profile.ConfigJSON = normalized
+	}
+	if err := a.backend.UpdateAgentProfile(ctx, profile); err != nil {
+		return nil, err
+	}
+	return profile, nil
 }
 
 func (a *AgentAPI) AcceptAgentCommand(
@@ -517,8 +561,10 @@ func decodeRunEvents(rows []string) []map[string]any {
 	return out
 }
 
-func normalizeAgentProfileConfig(config map[string]any) (map[string]any, error) {
+func normalizeAgentProfileConfig(config map[string]any, agentKey string) (map[string]any, error) {
+	defaults := DefaultAgentConfig(agentKey)
 	normalized := cloneAnyMap(config)
+
 	runner := strings.ToLower(strings.TrimSpace(stringFromPayload(normalized, agentConfigKeyRunner)))
 	provider := strings.ToLower(strings.TrimSpace(stringFromPayload(normalized, agentConfigKeyProvider)))
 
@@ -541,6 +587,12 @@ func normalizeAgentProfileConfig(config map[string]any) (map[string]any, error) 
 
 	normalized[agentConfigKeyRunner] = runner
 	normalized[agentConfigKeyProvider] = provider
+
+	for _, key := range []string{agentConfigKeyWorkspaceDir, agentConfigKeySystemPrompt} {
+		if strings.TrimSpace(stringFromPayload(normalized, key)) == "" {
+			normalized[key] = defaults[key]
+		}
+	}
 	return normalized, nil
 }
 

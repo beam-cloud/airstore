@@ -9,10 +9,14 @@ import (
 )
 
 const (
-	agentProviderEnvKey      = "AIRSTORE_AGENT_PROVIDER"
-	agentModelEnvKey         = "AIRSTORE_AGENT_MODEL"
-	agentResumeSessionEnvKey = "AIRSTORE_AGENT_RESUME_SESSION"
-	agentSessionIDEnvKey     = "AIRSTORE_AGENT_SESSION_ID"
+	agentProviderEnvKey          = "AIRSTORE_AGENT_PROVIDER"
+	agentModelEnvKey             = "AIRSTORE_AGENT_MODEL"
+	agentResumeSessionEnvKey     = "AIRSTORE_AGENT_RESUME_SESSION"
+	agentSessionIDEnvKey         = "AIRSTORE_AGENT_SESSION_ID"
+	agentSystemPromptEnvKey      = "AIRSTORE_AGENT_SYSTEM_PROMPT"
+	agentSystemPromptModeEnvKey  = "AIRSTORE_AGENT_SYSTEM_PROMPT_MODE"
+
+	systemPromptModeReplace = "replace"
 
 	claudeProviderName    = "claude"
 	claudeConfigDirEnvKey = "CLAUDE_CONFIG_DIR"
@@ -68,15 +72,15 @@ func (r *ClaudeCodeRunner) BuildEntrypoint(task types.RunExecution, env map[stri
 		task,
 	).Msg("running claude code task")
 
-	return newPromptEntrypointBuilder("claude").
+	builder := newPromptEntrypointBuilder("claude").
 		withKeyValue("--session-id", sessionID).
 		withFlag("--print").
 		withFlag("--verbose").
 		withKeyValue("--output-format", "stream-json").
 		withFlag("--dangerously-skip-permissions").
-		withKeyValue("--model", model).
-		withPrompt(task.Prompt).
-		build()
+		withKeyValue("--model", model)
+	applySystemPromptFlags(builder, env)
+	return builder.withPrompt(task.Prompt).build()
 }
 
 // BuildTurnArgs returns the argv for a single interactive turn.
@@ -97,14 +101,14 @@ func (r *ClaudeCodeRunner) BuildTurnArgs(prompt string, env map[string]string, c
 	} else if sessionID != "" {
 		builder.withKeyValue("--session-id", sessionID)
 	}
-	return builder.
+	builder.
 		withFlag("--print").
 		withFlag("--verbose").
 		withKeyValue("--output-format", "stream-json").
 		withFlag("--dangerously-skip-permissions").
-		withKeyValue("--model", model).
-		withPrompt(prompt).
-		build()
+		withKeyValue("--model", model)
+	applySystemPromptFlags(builder, env)
+	return builder.withPrompt(prompt).build()
 }
 
 func (r *ClaudeCodeRunner) injectEnv(env map[string]string) {
@@ -185,6 +189,19 @@ func (b *promptEntrypointBuilder) build() []string {
 	argv = append(argv, b.binary)
 	argv = append(argv, b.args...)
 	return argv
+}
+
+func applySystemPromptFlags(builder *promptEntrypointBuilder, env map[string]string) {
+	sp := strings.TrimSpace(env[agentSystemPromptEnvKey])
+	if sp == "" {
+		return
+	}
+	mode := strings.ToLower(strings.TrimSpace(env[agentSystemPromptModeEnvKey]))
+	if mode == systemPromptModeReplace {
+		builder.withKeyValue("--system-prompt", sp)
+	} else {
+		builder.withKeyValue("--append-system-prompt", sp)
+	}
 }
 
 func runnerProviderFromEnv(env map[string]string) string {

@@ -1041,6 +1041,11 @@ func (m *SandboxManager) buildTaskSandboxConfig(task types.RunExecution, entrypo
 		networkMode = "none"
 	}
 
+	workDir := types.ContainerWorkDir
+	if wd := strings.TrimSpace(env["AIRSTORE_AGENT_WORKSPACE_DIR"]); wd != "" {
+		workDir = wd
+	}
+
 	return types.SandboxConfig{
 		ID:                 fmt.Sprintf("task-%s", task.ExternalId),
 		WorkspaceID:        fmt.Sprintf("%d", task.WorkspaceId),
@@ -1048,7 +1053,7 @@ func (m *SandboxManager) buildTaskSandboxConfig(task types.RunExecution, entrypo
 		Runtime:            runtimeType,
 		Entrypoint:         entrypoint,
 		Env:                env,
-		WorkingDir:         types.ContainerWorkDir,
+		WorkingDir:         workDir,
 		FilesystemMount:    mountSource,
 		FilesystemReadOnly: workspaceAccess == "ro",
 		Resources:          task.GetResources(),

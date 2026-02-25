@@ -5,6 +5,9 @@ export interface AgentConfig {
   runner?: AgentRunner;
   provider?: AgentProvider;
   model?: string;
+  system_prompt?: string;
+  system_prompt_mode?: string;
+  workspace_dir?: string;
   [key: string]: unknown;
 }
 

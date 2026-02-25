@@ -672,7 +672,7 @@ func (s *AgentService) materializeRun(
 		return nil, RunExecutionPolicy{}, "", fmt.Errorf("missing prompt/message in task payload")
 	}
 	if extraSystemPrompt := strings.TrimSpace(stringFromPayload(payload, "extra_system_prompt")); extraSystemPrompt != "" {
-		prompt = extraSystemPrompt + "\n\n" + prompt
+		payload["_extra_system_prompt_resolved"] = extraSystemPrompt
 	}
 
 	sessionID := stringFromPayload(payload, "session_id")
@@ -1169,11 +1169,26 @@ func applyAgentConfigEnv(env map[string]string, config map[string]any) {
 		}
 		env["AIRSTORE_AGENT_CONFIG_"+sanitized] = stringifyEnvValue(value)
 	}
+	if sp := strings.TrimSpace(stringFromPayload(config, "system_prompt")); sp != "" {
+		env["AIRSTORE_AGENT_SYSTEM_PROMPT"] = sp
+	}
+	if mode := strings.TrimSpace(stringFromPayload(config, "system_prompt_mode")); mode != "" {
+		env["AIRSTORE_AGENT_SYSTEM_PROMPT_MODE"] = mode
+	}
+	if wd := strings.TrimSpace(stringFromPayload(config, "workspace_dir")); wd != "" {
+		env["AIRSTORE_AGENT_WORKSPACE_DIR"] = wd
+	}
 }
 
 func applyPayloadRuntimeEnv(env map[string]string, payload map[string]any) {
 	if env == nil || len(payload) == 0 {
 		return
+	}
+	// Route extra_system_prompt from payload through env (fallback when agent config has none).
+	if esp := strings.TrimSpace(stringFromPayload(payload, "_extra_system_prompt_resolved")); esp != "" {
+		if strings.TrimSpace(env["AIRSTORE_AGENT_SYSTEM_PROMPT"]) == "" {
+			env["AIRSTORE_AGENT_SYSTEM_PROMPT"] = esp
+		}
 	}
 	if raw, ok := payload["deliver"]; ok && raw != nil {
 		env["AIRSTORE_AGENT_DELIVER"] = stringifyEnvValue(raw)

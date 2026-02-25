@@ -1,5 +1,5 @@
 import type { CoreClient, RequestOptions } from '../client.js';
-import type { AgentCreateParams, AgentProfile } from '../types/agents.js';
+import type { AgentConfig, AgentCreateParams, AgentProfile } from '../types/agents.js';
 
 const AGENT_CONFIG_KEY_RUNNER = 'runner';
 
@@ -8,6 +8,25 @@ const AGENT_CONFIG_KEY_RUNNER = 'runner';
  */
 export class Agents {
   constructor(private readonly client: CoreClient) {}
+
+  /**
+   * Get the default agent config for a given agent key. Includes the default
+   * system prompt and workspace directory.
+   */
+  async defaults(
+    workspaceId: string,
+    agentKey?: string,
+    options?: RequestOptions,
+  ): Promise<AgentConfig> {
+    const params = agentKey ? { agent_key: agentKey } : undefined;
+    return this.client.request<AgentConfig>(
+      'GET',
+      `/workspaces/${workspaceId}/agents/defaults`,
+      undefined,
+      params,
+      options,
+    );
+  }
 
   async create(
     workspaceId: string,
