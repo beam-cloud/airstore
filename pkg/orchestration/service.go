@@ -171,6 +171,7 @@ func (s *AgentService) AcceptRunInput(
 		return existing, true, nil
 	}
 	if run.Status.IsTerminal() {
+		s.persistUserInputLog(ctx, run.ID, message)
 		task, restartErr := s.restartTerminalTaskFromRunInput(ctx, run, queueMode, message)
 		if restartErr != nil {
 			return nil, false, restartErr
@@ -186,6 +187,7 @@ func (s *AgentService) AcceptRunInput(
 		return nil, false, deliverErr
 	}
 	if delivered {
+		s.persistUserInputLog(ctx, run.ID, message)
 		originTask, taskErr := s.backend.GetTaskByID(ctx, run.OriginTaskID)
 		if taskErr != nil {
 			return nil, false, taskErr
@@ -537,6 +539,31 @@ func (s *AgentService) handleRunInputTask(ctx context.Context, task *types.Agent
 		"mode":       "followup_attempt",
 	})
 	return nil
+}
+
+// persistUserInputLog writes the user's follow-up message to the S2 log
+// stream of the given run's most recent execution. This ensures the message
+// is part of the persisted session timeline and survives copilot re-hydration.
+func (s *AgentService) persistUserInputLog(ctx context.Context, runID, message string) {
+	if s.s2 == nil || !s.s2.Enabled() {
+		return
+	}
+	attempts, err := s.backend.ListAgentRunAttempts(ctx, runID)
+	if err != nil {
+		return
+	}
+	execID := newestExecutionID(attempts)
+	if execID == "" {
+		return
+	}
+	entry := common.TaskLogEntry{
+		TaskID:    execID,
+		Timestamp: time.Now().UnixMilli(),
+		Stream:    "user",
+		Data:      message,
+		ChunkType: "user_input",
+	}
+	_ = s.s2.Append(ctx, common.Streams.TaskLogs(execID), entry)
 }
 
 func (s *AgentService) restartTerminalTaskFromRunInput(

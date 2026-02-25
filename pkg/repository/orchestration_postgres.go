@@ -21,7 +21,8 @@ const agentTaskSelect = `
 const agentRunSelect = `
 	SELECT id, workspace_id, agent_id, origin_task_id, status, session_id, session_key, provider, model,
 	       exec_host, exec_security, exec_ask, runtime_type, workspace_access, network_enabled, interactive,
-	       timeout_ms, started_at, ended_at, error, snapshot_ts, usage_json, delivery_json, created_at, updated_at
+	       timeout_ms, started_at, ended_at, claimed_by_worker_id, claim_heartbeat_at, claim_expires_at,
+	       error, snapshot_ts, usage_json, delivery_json, created_at, updated_at
 	FROM agent_run
 `
 
@@ -534,6 +535,9 @@ func (b *PostgresBackend) scanAgentRun(row scanner) (*types.AgentRun, error) {
 	var model sql.NullString
 	var startedAt sql.NullTime
 	var endedAt sql.NullTime
+	var claimedByWorker sql.NullString
+	var claimHeartbeatAt sql.NullTime
+	var claimExpiresAt sql.NullTime
 	var errMsg sql.NullString
 	err := row.Scan(
 		&run.ID,
@@ -555,6 +559,9 @@ func (b *PostgresBackend) scanAgentRun(row scanner) (*types.AgentRun, error) {
 		&run.TimeoutMs,
 		&startedAt,
 		&endedAt,
+		&claimedByWorker,
+		&claimHeartbeatAt,
+		&claimExpiresAt,
 		&errMsg,
 		&run.SnapshotTS,
 		&usageJSON,
@@ -585,6 +592,15 @@ func (b *PostgresBackend) scanAgentRun(row scanner) (*types.AgentRun, error) {
 	}
 	if endedAt.Valid {
 		run.EndedAt = &endedAt.Time
+	}
+	if claimedByWorker.Valid {
+		run.ClaimedByWorker = &claimedByWorker.String
+	}
+	if claimHeartbeatAt.Valid {
+		run.ClaimHeartbeatAt = &claimHeartbeatAt.Time
+	}
+	if claimExpiresAt.Valid {
+		run.ClaimExpiresAt = &claimExpiresAt.Time
 	}
 	if errMsg.Valid {
 		run.Error = &errMsg.String
@@ -709,6 +725,21 @@ func (b *PostgresBackend) UpdateAgentRunLifecycle(ctx context.Context, runId str
 		    started_at = COALESCE($3, started_at),
 		    ended_at = COALESCE($4, ended_at),
 		    error = $5,
+		    claimed_by_worker_id = CASE
+		        WHEN $2 IN ('ok'::agent_run_status, 'error'::agent_run_status, 'timeout'::agent_run_status, 'cancelled'::agent_run_status)
+		          THEN NULL
+		        ELSE claimed_by_worker_id
+		    END,
+		    claim_heartbeat_at = CASE
+		        WHEN $2 IN ('ok'::agent_run_status, 'error'::agent_run_status, 'timeout'::agent_run_status, 'cancelled'::agent_run_status)
+		          THEN NULL
+		        ELSE claim_heartbeat_at
+		    END,
+		    claim_expires_at = CASE
+		        WHEN $2 IN ('ok'::agent_run_status, 'error'::agent_run_status, 'timeout'::agent_run_status, 'cancelled'::agent_run_status)
+		          THEN NULL
+		        ELSE claim_expires_at
+		    END,
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = $1
 	`
@@ -721,6 +752,165 @@ func (b *PostgresBackend) UpdateAgentRunLifecycle(ctx context.Context, runId str
 		return &types.ErrAgentRunNotFound{ID: runId}
 	}
 	return nil
+}
+
+func (b *PostgresBackend) SetAgentRunClaim(ctx context.Context, runId string, workerId string, heartbeatAt time.Time, expiresAt time.Time) error {
+	query := `
+		UPDATE agent_run
+		SET claimed_by_worker_id = $2,
+		    claim_heartbeat_at = $3,
+		    claim_expires_at = $4,
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1
+		  AND run_attempt_id IS NOT NULL
+		  AND ` + runExecutionActiveWhere + `
+		  AND (
+		      claimed_by_worker_id IS NULL
+		      OR claimed_by_worker_id = $2
+		      OR claim_expires_at IS NULL
+		      OR claim_expires_at <= $3
+		  )
+	`
+	res, err := b.db.ExecContext(ctx, query, runId, workerId, heartbeatAt, expiresAt)
+	if err != nil {
+		return fmt.Errorf("set run claim: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		run, lookupErr := b.GetAgentRunByID(ctx, runId)
+		if lookupErr != nil {
+			return lookupErr
+		}
+		if run.Status.IsTerminal() {
+			return fmt.Errorf("set run claim: run is already terminal")
+		}
+		return fmt.Errorf("set run claim: run is already claimed by another worker")
+	}
+	return nil
+}
+
+func (b *PostgresBackend) ClearAgentRunClaim(ctx context.Context, runId string) error {
+	query := `
+		UPDATE agent_run
+		SET claimed_by_worker_id = NULL,
+		    claim_heartbeat_at = NULL,
+		    claim_expires_at = NULL,
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1
+	`
+	res, err := b.db.ExecContext(ctx, query, runId)
+	if err != nil {
+		return fmt.Errorf("clear run claim: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return &types.ErrAgentRunNotFound{ID: runId}
+	}
+	return nil
+}
+
+func (b *PostgresBackend) ClearExpiredAgentRunClaim(ctx context.Context, runId string, workerId string, expiresAt time.Time) (bool, error) {
+	query := `
+		UPDATE agent_run
+		SET claimed_by_worker_id = NULL,
+		    claim_heartbeat_at = NULL,
+		    claim_expires_at = NULL,
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1
+		  AND ` + runExecutionActiveWhere + `
+		  AND claimed_by_worker_id = $2
+		  AND claim_expires_at IS NOT NULL
+		  AND claim_expires_at <= $3
+	`
+	res, err := b.db.ExecContext(ctx, query, runId, workerId, expiresAt)
+	if err != nil {
+		return false, fmt.Errorf("clear expired run claim: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	return affected > 0, nil
+}
+
+func (b *PostgresBackend) RefreshAgentRunClaims(ctx context.Context, workerId string, heartbeatAt time.Time, expiresAt time.Time) (int64, error) {
+	query := `
+		UPDATE agent_run
+		SET claim_heartbeat_at = $2,
+		    claim_expires_at = $3,
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE claimed_by_worker_id = $1
+		  AND run_attempt_id IS NOT NULL
+		  AND ` + runExecutionActiveWhere + `
+	`
+	res, err := b.db.ExecContext(ctx, query, workerId, heartbeatAt, expiresAt)
+	if err != nil {
+		return 0, fmt.Errorf("refresh run claims: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	return affected, nil
+}
+
+func normalizeClaimBatchLimit(limit int) int {
+	if limit <= 0 {
+		return 100
+	}
+	if limit > 500 {
+		return 500
+	}
+	return limit
+}
+
+func (b *PostgresBackend) ListExpiredClaimedAgentRuns(ctx context.Context, now time.Time, limit int) ([]*types.AgentRun, error) {
+	limit = normalizeClaimBatchLimit(limit)
+	query := agentRunSelect + `
+		WHERE run_attempt_id IS NOT NULL
+		  AND ` + runExecutionActiveWhere + `
+		  AND claimed_by_worker_id IS NOT NULL
+		  AND claim_expires_at IS NOT NULL
+		  AND claim_expires_at < $1
+		ORDER BY claim_expires_at ASC
+		LIMIT $2
+	`
+	rows, err := b.db.QueryContext(ctx, query, now, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list expired claimed runs: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]*types.AgentRun, 0)
+	for rows.Next() {
+		run, err := b.scanAgentRun(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan expired claimed run: %w", err)
+		}
+		out = append(out, run)
+	}
+	return out, rows.Err()
+}
+
+func (b *PostgresBackend) ListStaleUnclaimedAgentRuns(ctx context.Context, cutoff time.Time, limit int) ([]*types.AgentRun, error) {
+	limit = normalizeClaimBatchLimit(limit)
+	query := agentRunSelect + `
+		WHERE run_attempt_id IS NOT NULL
+		  AND ` + runExecutionActiveWhere + `
+		  AND claimed_by_worker_id IS NULL
+		  AND updated_at < $1
+		ORDER BY updated_at ASC
+		LIMIT $2
+	`
+	rows, err := b.db.QueryContext(ctx, query, cutoff, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list stale unclaimed runs: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]*types.AgentRun, 0)
+	for rows.Next() {
+		run, err := b.scanAgentRun(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan stale unclaimed run: %w", err)
+		}
+		out = append(out, run)
+	}
+	return out, rows.Err()
 }
 
 func (b *PostgresBackend) IncrementAgentRunSnapshotSeq(ctx context.Context, runId string) (int64, error) {
@@ -1323,6 +1513,7 @@ const runExecutionSelectSQL = `
 `
 
 const runExecutionScopeWhere = "(run_attempt_id IS NOT NULL OR hook_id IS NOT NULL)"
+const runExecutionActiveWhere = "status IN ('accepted'::agent_run_status, 'running'::agent_run_status)"
 
 func (b *PostgresBackend) CreateRunExecution(ctx context.Context, task *types.RunExecution) error {
 	envJSON, err := json.Marshal(task.Env)
@@ -1664,40 +1855,62 @@ func (b *PostgresBackend) UpdateRunExecutionStatus(ctx context.Context, external
 }
 
 func (b *PostgresBackend) SetRunExecutionStarted(ctx context.Context, externalId string) error {
+	now := time.Now()
 	query := `
 		UPDATE agent_run
 		SET status = 'running'::agent_run_status,
 		    started_at = COALESCE(started_at, $2),
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = $1::uuid
-		  AND ` + runExecutionScopeWhere
-	result, err := b.db.ExecContext(ctx, query, externalId, time.Now())
+		  AND ` + runExecutionScopeWhere + `
+		  AND ` + runExecutionActiveWhere
+	result, err := b.db.ExecContext(ctx, query, externalId, now)
 	if err != nil {
 		return fmt.Errorf("set run execution started: %w", err)
 	}
 	if rows, _ := result.RowsAffected(); rows == 0 {
-		return &types.ErrRunExecutionNotFound{ExternalId: externalId}
+		run, lookupErr := b.GetRunExecution(ctx, externalId)
+		if lookupErr != nil {
+			return lookupErr
+		}
+		if run.IsTerminal() {
+			return fmt.Errorf("run execution cannot be started (already finished)")
+		}
+		return fmt.Errorf("run execution start was not applied")
 	}
 	return nil
 }
 
 func (b *PostgresBackend) SetRunExecutionResult(ctx context.Context, externalId string, exitCode int, errorMsg string) error {
+	status := agentRunStatusFromRunExecutionResult(exitCode, errorMsg)
+	endedAt := time.Now()
 	query := `
 		UPDATE agent_run
 		SET status = $2::agent_run_status,
 		    exit_code = $3,
 		    error = NULLIF($4, ''),
 		    ended_at = $5,
+		    claimed_by_worker_id = NULL,
+		    claim_heartbeat_at = NULL,
+		    claim_expires_at = NULL,
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = $1::uuid
-		  AND ` + runExecutionScopeWhere
-	status := agentRunStatusFromRunExecutionResult(exitCode, errorMsg)
-	result, err := b.db.ExecContext(ctx, query, externalId, status, exitCode, errorMsg, time.Now())
+		  AND ` + runExecutionScopeWhere + `
+		  AND ` + runExecutionActiveWhere
+	result, err := b.db.ExecContext(ctx, query, externalId, status, exitCode, errorMsg, endedAt)
 	if err != nil {
 		return fmt.Errorf("set run execution result: %w", err)
 	}
 	if rows, _ := result.RowsAffected(); rows == 0 {
-		return &types.ErrRunExecutionNotFound{ExternalId: externalId}
+		run, lookupErr := b.GetRunExecution(ctx, externalId)
+		if lookupErr != nil {
+			return lookupErr
+		}
+		// Late duplicate callbacks are expected during crashes/retries.
+		if run.IsTerminal() {
+			return nil
+		}
+		return fmt.Errorf("run execution result was not applied")
 	}
 	return nil
 }
@@ -1743,6 +1956,9 @@ func (b *PostgresBackend) CancelRunExecution(ctx context.Context, externalId str
 		UPDATE agent_run
 		SET status = 'cancelled'::agent_run_status,
 		    ended_at = $2,
+		    claimed_by_worker_id = NULL,
+		    claim_heartbeat_at = NULL,
+		    claim_expires_at = NULL,
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = $1::uuid
 		  AND ` + runExecutionScopeWhere + `

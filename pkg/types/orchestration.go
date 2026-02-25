@@ -119,6 +119,7 @@ const (
 	AgentRunEventStartRejectedTerminalRun AgentRunEventType = "start_rejected_terminal_run"
 	AgentRunEventStarted                  AgentRunEventType = "started"
 	AgentRunEventAttemptSuperseded        AgentRunEventType = "attempt_superseded"
+	AgentRunEventOrphanRecovered          AgentRunEventType = "orphan_recovered"
 	AgentRunEventRetryScheduled           AgentRunEventType = "retry_scheduled"
 	AgentRunEventFinished                 AgentRunEventType = "finished"
 )
@@ -189,31 +190,34 @@ type AgentTask struct {
 }
 
 type AgentRun struct {
-	ID              string         `json:"id" db:"id"`
-	WorkspaceID     uint           `json:"workspace_id" db:"workspace_id"`
-	AgentID         *string        `json:"agent_id,omitempty" db:"agent_id"`
-	OriginTaskID    string         `json:"origin_task_id" db:"origin_task_id"`
-	Status          AgentRunStatus `json:"status" db:"status"`
-	SessionID       string         `json:"session_id" db:"session_id"`
-	SessionKey      *string        `json:"session_key,omitempty" db:"session_key"`
-	Provider        *string        `json:"provider,omitempty" db:"provider"`
-	Model           *string        `json:"model,omitempty" db:"model"`
-	ExecHost        string         `json:"exec_host" db:"exec_host"`
-	ExecSecurity    string         `json:"exec_security" db:"exec_security"`
-	ExecAsk         string         `json:"exec_ask" db:"exec_ask"`
-	RuntimeType     string         `json:"runtime_type" db:"runtime_type"`
-	WorkspaceAccess string         `json:"workspace_access" db:"workspace_access"`
-	NetworkEnabled  bool           `json:"network_enabled" db:"network_enabled"`
-	Interactive     bool           `json:"interactive" db:"interactive"`
-	TimeoutMs       int            `json:"timeout_ms" db:"timeout_ms"`
-	StartedAt       *time.Time     `json:"started_at,omitempty" db:"started_at"`
-	EndedAt         *time.Time     `json:"ended_at,omitempty" db:"ended_at"`
-	Error           *string        `json:"error,omitempty" db:"error"`
-	SnapshotTS      int64          `json:"snapshot_ts" db:"snapshot_ts"`
-	UsageJSON       map[string]any `json:"usage_json" db:"-"`
-	DeliveryJSON    map[string]any `json:"delivery_json" db:"-"`
-	CreatedAt       time.Time      `json:"created_at" db:"created_at"`
-	UpdatedAt       time.Time      `json:"updated_at" db:"updated_at"`
+	ID               string         `json:"id" db:"id"`
+	WorkspaceID      uint           `json:"workspace_id" db:"workspace_id"`
+	AgentID          *string        `json:"agent_id,omitempty" db:"agent_id"`
+	OriginTaskID     string         `json:"origin_task_id" db:"origin_task_id"`
+	Status           AgentRunStatus `json:"status" db:"status"`
+	SessionID        string         `json:"session_id" db:"session_id"`
+	SessionKey       *string        `json:"session_key,omitempty" db:"session_key"`
+	Provider         *string        `json:"provider,omitempty" db:"provider"`
+	Model            *string        `json:"model,omitempty" db:"model"`
+	ExecHost         string         `json:"exec_host" db:"exec_host"`
+	ExecSecurity     string         `json:"exec_security" db:"exec_security"`
+	ExecAsk          string         `json:"exec_ask" db:"exec_ask"`
+	RuntimeType      string         `json:"runtime_type" db:"runtime_type"`
+	WorkspaceAccess  string         `json:"workspace_access" db:"workspace_access"`
+	NetworkEnabled   bool           `json:"network_enabled" db:"network_enabled"`
+	Interactive      bool           `json:"interactive" db:"interactive"`
+	TimeoutMs        int            `json:"timeout_ms" db:"timeout_ms"`
+	StartedAt        *time.Time     `json:"started_at,omitempty" db:"started_at"`
+	EndedAt          *time.Time     `json:"ended_at,omitempty" db:"ended_at"`
+	ClaimedByWorker  *string        `json:"claimed_by_worker_id,omitempty" db:"claimed_by_worker_id"`
+	ClaimHeartbeatAt *time.Time     `json:"claim_heartbeat_at,omitempty" db:"claim_heartbeat_at"`
+	ClaimExpiresAt   *time.Time     `json:"claim_expires_at,omitempty" db:"claim_expires_at"`
+	Error            *string        `json:"error,omitempty" db:"error"`
+	SnapshotTS       int64          `json:"snapshot_ts" db:"snapshot_ts"`
+	UsageJSON        map[string]any `json:"usage_json" db:"-"`
+	DeliveryJSON     map[string]any `json:"delivery_json" db:"-"`
+	CreatedAt        time.Time      `json:"created_at" db:"created_at"`
+	UpdatedAt        time.Time      `json:"updated_at" db:"updated_at"`
 }
 
 type AgentRunAttempt struct {

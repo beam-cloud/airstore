@@ -385,7 +385,8 @@ func (g *Gateway) registerServices() error {
 	// Register worker gRPC service (for worker-to-gateway communication)
 	if g.scheduler != nil {
 		taskQueue := repository.NewRedisTaskQueue(g.RedisClient, "default")
-		workerService := services.NewWorkerService(g.scheduler, g.BackendRepo, g.scheduler.WorkerRepo(), taskQueue)
+		workerService := services.NewWorkerService(g.scheduler, g.BackendRepo, g.scheduler.WorkerRepo(), taskQueue, g.RedisClient, g.Config.Scheduler)
+		workerService.StartRecoveryLoop(g.ctx)
 		pb.RegisterWorkerServiceServer(g.grpcServer, workerService)
 		log.Info().Msg("worker service registered")
 	}

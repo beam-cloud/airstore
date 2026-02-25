@@ -80,6 +80,11 @@ scheduler:
   cleanupInterval: 1m
   heartbeatInterval: 10s
   heartbeatTimeout: 30s
+  runClaimLeaseTTL: 45s
+  recoveryLoopEnabled: true
+  recoveryLoopInterval: 10s
+  recoveryLoopBatchSize: 50
+  unclaimedRunStaleAfter: 2m
   defaultWorkerCpu: 1000     # millicores (fallback when CPU_LIMIT env var not set)
   defaultWorkerMemory: 1024  # MiB (fallback when MEMORY_LIMIT env var not set)
   pools:

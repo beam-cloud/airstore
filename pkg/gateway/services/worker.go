@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/orchestration"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/scheduler"
@@ -18,11 +19,24 @@ import (
 
 type WorkerService struct {
 	pb.UnimplementedWorkerServiceServer
-	scheduler  *scheduler.Scheduler
-	backend    repository.BackendRepository
-	workerRepo repository.WorkerRepository
-	taskQueue  repository.TaskQueue
+	scheduler           *scheduler.Scheduler
+	backend             repository.BackendRepository
+	workerRepo          repository.WorkerRepository
+	taskQueue           repository.TaskQueue
+	redisClient         *common.RedisClient
+	claimLeaseTTL       time.Duration
+	recoveryLoopEnabled bool
+	recoveryInterval    time.Duration
+	recoveryBatchSize   int
+	unclaimedStaleAfter time.Duration
 }
+
+const (
+	defaultRunClaimLeaseTTL       = 45 * time.Second
+	defaultRecoveryLoopInterval   = 10 * time.Second
+	defaultRecoveryLoopBatchSize  = 50
+	defaultUnclaimedRunStaleAfter = 2 * time.Minute
+)
 
 type delayedTaskQueue interface {
 	PushDelayed(ctx context.Context, task *types.RunExecution, delay time.Duration) error
@@ -33,12 +47,37 @@ func NewWorkerService(
 	backend repository.BackendRepository,
 	workerRepo repository.WorkerRepository,
 	taskQueue repository.TaskQueue,
+	redisClient *common.RedisClient,
+	schedulerConfig types.SchedulerConfig,
 ) *WorkerService {
+	claimLeaseTTL := schedulerConfig.RunClaimLeaseTTL
+	if claimLeaseTTL <= 0 {
+		claimLeaseTTL = defaultRunClaimLeaseTTL
+	}
+	recoveryInterval := schedulerConfig.RecoveryLoopInterval
+	if recoveryInterval <= 0 {
+		recoveryInterval = defaultRecoveryLoopInterval
+	}
+	recoveryBatchSize := schedulerConfig.RecoveryLoopBatchSize
+	if recoveryBatchSize <= 0 {
+		recoveryBatchSize = defaultRecoveryLoopBatchSize
+	}
+	unclaimedStaleAfter := schedulerConfig.UnclaimedRunStaleAfter
+	if unclaimedStaleAfter <= 0 {
+		unclaimedStaleAfter = defaultUnclaimedRunStaleAfter
+	}
+
 	return &WorkerService{
-		scheduler:  sched,
-		backend:    backend,
-		workerRepo: workerRepo,
-		taskQueue:  taskQueue,
+		scheduler:           sched,
+		backend:             backend,
+		workerRepo:          workerRepo,
+		taskQueue:           taskQueue,
+		redisClient:         redisClient,
+		claimLeaseTTL:       claimLeaseTTL,
+		recoveryLoopEnabled: schedulerConfig.RecoveryLoopEnabled,
+		recoveryInterval:    recoveryInterval,
+		recoveryBatchSize:   recoveryBatchSize,
+		unclaimedStaleAfter: unclaimedStaleAfter,
 	}
 }
 
@@ -64,6 +103,23 @@ func (s *WorkerService) Heartbeat(ctx context.Context, req *pb.HeartbeatRequest)
 			return nil, status.Errorf(codes.NotFound, "worker not found: %s", req.WorkerId)
 		}
 		return nil, status.Errorf(codes.Internal, "heartbeat failed: %v", err)
+	}
+
+	if s.backend != nil {
+		now := time.Now()
+		expiresAt := now.Add(s.claimLeaseDuration())
+		refreshed, err := s.backend.RefreshAgentRunClaims(ctx, req.WorkerId, now, expiresAt)
+		if err != nil {
+			log.Warn().
+				Err(err).
+				Str("worker_id", req.WorkerId).
+				Msg("failed to refresh run claim leases on heartbeat")
+		} else if refreshed > 0 {
+			log.Debug().
+				Str("worker_id", req.WorkerId).
+				Int64("claims_refreshed", refreshed).
+				Msg("refreshed active run claim leases")
+		}
 	}
 
 	return &pb.HeartbeatResponse{}, nil
@@ -144,8 +200,11 @@ func (s *WorkerService) SetTaskStarted(ctx context.Context, req *pb.SetTaskStart
 		return nil, status.Errorf(codes.Unavailable, "task persistence not available")
 	}
 
-	attempt, err := s.backend.GetRunAttemptByExecutionID(ctx, req.TaskId)
-	if err == nil {
+	attempt, err := s.lookupRunAttemptByExecutionID(ctx, req.TaskId)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to lookup run attempt: %v", err)
+	}
+	if attempt != nil {
 		run, runErr := s.backend.GetAgentRunByID(ctx, attempt.RunID)
 		if runErr == nil && run.Status.IsTerminal() {
 			now := time.Now()
@@ -166,12 +225,27 @@ func (s *WorkerService) SetTaskStarted(ctx context.Context, req *pb.SetTaskStart
 		if _, ok := err.(*types.ErrRunExecutionNotFound); ok {
 			return nil, status.Errorf(codes.NotFound, "task not found: %s", req.TaskId)
 		}
+		if isRunExecutionTerminalTransitionError(err) {
+			return nil, status.Errorf(codes.FailedPrecondition, "run is already terminal")
+		}
 		return nil, status.Errorf(codes.Internal, "failed to set task started: %v", err)
 	}
 
-	if err == nil {
+	if attempt != nil {
 		now := time.Now()
 		_ = s.backend.UpdateAgentRunAttemptStart(ctx, attempt.ID, now)
+		workerID := s.resolveTaskWorkerID(ctx, req.TaskId)
+		if workerID != "" {
+			expiresAt := now.Add(s.claimLeaseDuration())
+			if claimErr := s.backend.SetAgentRunClaim(ctx, attempt.RunID, workerID, now, expiresAt); claimErr != nil {
+				log.Warn().
+					Err(claimErr).
+					Str("run_id", attempt.RunID).
+					Str("task_id", req.TaskId).
+					Str("worker_id", workerID).
+					Msg("failed to set run claim lease on start")
+			}
+		}
 		_ = s.backend.UpdateAgentRunLifecycle(ctx, attempt.RunID, types.AgentRunStatusRunning, &now, nil, nil)
 		_ = appendRunSnapshot(ctx, s.backend, attempt.RunID, types.AgentRunStatusRunning, &now, nil, nil, map[string]any{
 			"attempt_id": attempt.ID,
@@ -179,6 +253,10 @@ func (s *WorkerService) SetTaskStarted(ctx context.Context, req *pb.SetTaskStart
 			"event":      string(types.AgentRunEventStarted),
 		})
 		_ = updateExecutionInstanceCounts(ctx, s.backend, attempt.RunID, 1)
+	} else {
+		log.Debug().
+			Str("task_id", req.TaskId).
+			Msg("started run execution without run attempt mapping")
 	}
 
 	return &pb.SetTaskStartedResponse{}, nil
@@ -189,6 +267,19 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 		return nil, status.Errorf(codes.Unavailable, "task persistence not available")
 	}
 
+	attempt, attemptErr := s.lookupRunAttemptByExecutionID(ctx, req.TaskId)
+	if attemptErr != nil {
+		return nil, status.Errorf(codes.Internal, "failed to lookup run attempt: %v", attemptErr)
+	}
+	if attempt != nil && !isRunAttemptActive(attempt) {
+		log.Info().
+			Str("task_id", req.TaskId).
+			Str("run_id", attempt.RunID).
+			Str("attempt_id", attempt.ID).
+			Msg("ignoring stale task result callback for non-active attempt")
+		return &pb.SetTaskResultResponse{}, nil
+	}
+
 	if err := s.backend.SetRunExecutionResult(ctx, req.TaskId, int(req.ExitCode), req.Error); err != nil {
 		if _, ok := err.(*types.ErrRunExecutionNotFound); ok {
 			return nil, status.Errorf(codes.NotFound, "task not found: %s", req.TaskId)
@@ -196,64 +287,208 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 		return nil, status.Errorf(codes.Internal, "failed to set task result: %v", err)
 	}
 
-	attempt, err := s.backend.GetRunAttemptByExecutionID(ctx, req.TaskId)
-	if err == nil {
-		now := time.Now()
-		exitCode := int(req.ExitCode)
-
-		attemptStatus := types.AgentAttemptStatusOK
-		runStatus := types.AgentRunStatusOK
-		var errMsg *string
-
-		if req.Error != "" {
-			msg := req.Error
-			errMsg = &msg
+	if attempt != nil {
+		if _, finalizeErr := s.finalizeRunAttempt(
+			ctx,
+			attempt,
+			req.TaskId,
+			int(req.ExitCode),
+			req.Error,
+			types.AgentRunEventFinished,
+			nil,
+		); finalizeErr != nil {
+			log.Error().
+				Err(finalizeErr).
+				Str("task_id", req.TaskId).
+				Str("run_id", attempt.RunID).
+				Str("attempt_id", attempt.ID).
+				Msg("failed to finalize run attempt after task result")
 		}
-		lowerErr := strings.ToLower(req.Error)
-		switch {
-		case strings.Contains(lowerErr, "timeout"):
-			attemptStatus = types.AgentAttemptStatusTimeout
-			runStatus = types.AgentRunStatusTimeout
-		case strings.Contains(lowerErr, "cancel"):
-			attemptStatus = types.AgentAttemptStatusCancelled
-			runStatus = types.AgentRunStatusCancelled
-		case req.ExitCode != 0 || req.Error != "":
-			attemptStatus = types.AgentAttemptStatusError
-			runStatus = types.AgentRunStatusError
-		}
-
-		_ = s.backend.UpdateAgentRunAttemptResult(ctx, attempt.ID, attemptStatus, &exitCode, now, errMsg)
-		_ = updateExecutionInstanceCounts(ctx, s.backend, attempt.RunID, -1)
-
-		if shouldRetryAttempt(attemptStatus) {
-			if retryInfo, retryErr := s.scheduleRetryRun(ctx, attempt, req.TaskId); retryErr == nil && retryInfo.scheduled {
-				_ = s.backend.UpdateAgentRunLifecycle(ctx, attempt.RunID, runStatus, nil, &now, errMsg)
-				_ = appendRunSnapshot(ctx, s.backend, attempt.RunID, runStatus, nil, &now, errMsg, map[string]any{
-					"attempt_id":                            attempt.ID,
-					"task_id":                               req.TaskId,
-					"exit_code":                             req.ExitCode,
-					"error":                                 req.Error,
-					"event":                                 string(types.AgentRunEventRetryScheduled),
-					"next_run_id":                           retryInfo.nextRunID,
-					"next_attempt_no":                       retryInfo.nextAttemptNo,
-					types.AgentExecutionMetaKeyRetryDelayMs: retryInfo.delayMs,
-				})
-				return &pb.SetTaskResultResponse{}, nil
-			}
-		}
-
-		_ = s.backend.UpdateAgentRunLifecycle(ctx, attempt.RunID, runStatus, nil, &now, errMsg)
-		_ = appendRunSnapshot(ctx, s.backend, attempt.RunID, runStatus, nil, &now, errMsg, map[string]any{
-			"attempt_id": attempt.ID,
-			"task_id":    req.TaskId,
-			"exit_code":  req.ExitCode,
-			"error":      req.Error,
-			"event":      string(types.AgentRunEventFinished),
-		})
-		_ = s.markOriginTaskTerminalIfCurrentRun(ctx, attempt.RunID)
 	}
 
 	return &pb.SetTaskResultResponse{}, nil
+}
+
+func isRunAttemptActive(attempt *types.AgentRunAttempt) bool {
+	if attempt == nil {
+		return false
+	}
+	if attempt.EndedAt != nil {
+		return false
+	}
+	return attempt.Status.IsInFlight()
+}
+
+func isRunAttemptNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	_, ok := err.(*types.ErrAgentRunAttemptNotFound)
+	return ok
+}
+
+func isRunExecutionTerminalTransitionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "cannot be started (already") ||
+		strings.Contains(lower, "already finished")
+}
+
+func (s *WorkerService) lookupRunAttemptByExecutionID(ctx context.Context, taskID string) (*types.AgentRunAttempt, error) {
+	if s.backend == nil {
+		return nil, nil
+	}
+	attempt, err := s.backend.GetRunAttemptByExecutionID(ctx, taskID)
+	if err != nil {
+		if isRunAttemptNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return attempt, nil
+}
+
+func classifyRunResult(exitCode int, errText string) (types.AgentAttemptStatus, types.AgentRunStatus, *string) {
+	attemptStatus := types.AgentAttemptStatusOK
+	runStatus := types.AgentRunStatusOK
+	var errMsg *string
+	if strings.TrimSpace(errText) != "" {
+		msg := errText
+		errMsg = &msg
+	}
+
+	lowerErr := strings.ToLower(errText)
+	switch {
+	case strings.Contains(lowerErr, "timeout"):
+		attemptStatus = types.AgentAttemptStatusTimeout
+		runStatus = types.AgentRunStatusTimeout
+	case strings.Contains(lowerErr, "cancel"):
+		attemptStatus = types.AgentAttemptStatusCancelled
+		runStatus = types.AgentRunStatusCancelled
+	case exitCode != 0 || strings.TrimSpace(errText) != "":
+		attemptStatus = types.AgentAttemptStatusError
+		runStatus = types.AgentRunStatusError
+	}
+	return attemptStatus, runStatus, errMsg
+}
+
+func mergePayload(dst map[string]any, extra map[string]any) map[string]any {
+	if dst == nil {
+		dst = map[string]any{}
+	}
+	for key, value := range extra {
+		dst[key] = value
+	}
+	return dst
+}
+
+func (s *WorkerService) finalizeRunAttempt(
+	ctx context.Context,
+	attempt *types.AgentRunAttempt,
+	taskID string,
+	exitCode int,
+	errText string,
+	finishedEvent types.AgentRunEventType,
+	extraPayload map[string]any,
+) (bool, error) {
+	if s.backend == nil || attempt == nil {
+		return false, nil
+	}
+	if !isRunAttemptActive(attempt) {
+		return false, nil
+	}
+
+	now := time.Now()
+	attemptStatus, runStatus, errMsg := classifyRunResult(exitCode, errText)
+
+	if err := s.backend.UpdateAgentRunAttemptResult(ctx, attempt.ID, attemptStatus, &exitCode, now, errMsg); err != nil {
+		return false, fmt.Errorf("update run attempt result: %w", err)
+	}
+	if err := s.backend.ClearAgentRunClaim(ctx, attempt.RunID); err != nil {
+		log.Warn().
+			Err(err).
+			Str("run_id", attempt.RunID).
+			Msg("failed to clear run claim lease during finalization")
+	}
+	if err := updateExecutionInstanceCounts(ctx, s.backend, attempt.RunID, -1); err != nil {
+		log.Warn().
+			Err(err).
+			Str("run_id", attempt.RunID).
+			Msg("failed to decrement execution instance counters during finalization")
+	}
+
+	if shouldRetryAttempt(attemptStatus) {
+		retryInfo, retryErr := s.scheduleRetryRun(ctx, attempt, taskID)
+		if retryErr != nil {
+			log.Warn().
+				Err(retryErr).
+				Str("run_id", attempt.RunID).
+				Str("attempt_id", attempt.ID).
+				Msg("failed to schedule retry run")
+		} else if retryInfo.scheduled {
+			payload := attemptSnapshotPayload(attempt.ID, taskID, exitCode, errText, types.AgentRunEventRetryScheduled)
+			payload["next_run_id"] = retryInfo.nextRunID
+			payload["next_attempt_no"] = retryInfo.nextAttemptNo
+			payload[types.AgentExecutionMetaKeyRetryDelayMs] = retryInfo.delayMs
+			payload = mergePayload(payload, extraPayload)
+			if err := s.backend.UpdateAgentRunLifecycle(ctx, attempt.RunID, runStatus, nil, &now, errMsg); err != nil {
+				return false, fmt.Errorf("update run lifecycle for retry: %w", err)
+			}
+			if err := appendRunSnapshot(ctx, s.backend, attempt.RunID, runStatus, nil, &now, errMsg, payload); err != nil {
+				return false, fmt.Errorf("append retry snapshot: %w", err)
+			}
+			return true, nil
+		}
+	}
+
+	payload := attemptSnapshotPayload(attempt.ID, taskID, exitCode, errText, finishedEvent)
+	payload = mergePayload(payload, extraPayload)
+	if err := s.backend.UpdateAgentRunLifecycle(ctx, attempt.RunID, runStatus, nil, &now, errMsg); err != nil {
+		return false, fmt.Errorf("update run lifecycle: %w", err)
+	}
+	if err := appendRunSnapshot(ctx, s.backend, attempt.RunID, runStatus, nil, &now, errMsg, payload); err != nil {
+		return false, fmt.Errorf("append completion snapshot: %w", err)
+	}
+	if err := s.markOriginTaskTerminalIfCurrentRun(ctx, attempt.RunID); err != nil {
+		return false, fmt.Errorf("mark origin task terminal: %w", err)
+	}
+	return false, nil
+}
+
+func attemptSnapshotPayload(
+	attemptID string,
+	taskID string,
+	exitCode int,
+	errText string,
+	event types.AgentRunEventType,
+) map[string]any {
+	return map[string]any{
+		"attempt_id": attemptID,
+		"task_id":    taskID,
+		"exit_code":  exitCode,
+		"error":      errText,
+		"event":      string(event),
+	}
+}
+
+func (s *WorkerService) resolveTaskWorkerID(ctx context.Context, taskID string) string {
+	if s.taskQueue == nil || strings.TrimSpace(taskID) == "" {
+		return ""
+	}
+	state, err := s.taskQueue.GetState(ctx, taskID)
+	if err != nil || state == nil {
+		return ""
+	}
+	return strings.TrimSpace(state.WorkerID)
+}
+
+func (s *WorkerService) claimLeaseDuration() time.Duration {
+	if s.claimLeaseTTL > 0 {
+		return s.claimLeaseTTL
+	}
+	return defaultRunClaimLeaseTTL
 }
 
 func (s *WorkerService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, runID string) error {

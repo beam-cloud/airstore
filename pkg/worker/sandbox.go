@@ -493,6 +493,7 @@ func (m *SandboxManager) Start(sandboxID string) error {
 	// Create a cancellable context for this sandbox
 	sandboxCtx, cancel := context.WithCancel(m.ctx)
 	sandbox.Cancel = cancel
+	sandbox.State.Status = types.SandboxStatusCreating
 	m.mu.Unlock()
 
 	log.Info().
@@ -507,8 +508,12 @@ func (m *SandboxManager) Start(sandboxID string) error {
 	}
 
 	// Start the container in a goroutine
+	started := make(chan int, 1)
+	runDone := make(chan struct {
+		exitCode int
+		err      error
+	}, 1)
 	go func() {
-		started := make(chan int, 1)
 		opts := &runtime.RunOpts{
 			Started:      started,
 			OutputWriter: outputWriter, // Capture stdout/stderr
@@ -548,14 +553,109 @@ func (m *SandboxManager) Start(sandboxID string) error {
 			Int("exit_code", exitCode).
 			Err(err).
 			Msg("sandbox exited")
+		runDone <- struct {
+			exitCode int
+			err      error
+		}{
+			exitCode: exitCode,
+			err:      err,
+		}
 	}()
 
-	// Update status to running
-	m.mu.Lock()
-	sandbox.State.Status = types.SandboxStatusRunning
-	m.mu.Unlock()
+	// Most sandboxes are one-shot command runs and don't need a runtime-level
+	// readiness probe. Interactive sessions run a long-lived "sleep infinity"
+	// entrypoint and then exec per-turn commands; those need startup gating.
+	if !isInteractiveBootstrapEntrypoint(sandbox.Config.Entrypoint) {
+		m.mu.Lock()
+		if s, ok := m.sandboxes[sandboxID]; ok {
+			s.State.Status = types.SandboxStatusRunning
+			s.State.StartedAt = time.Now()
+		}
+		m.mu.Unlock()
+		return nil
+	}
 
-	return nil
+	// Block startup until the runtime reports this sandbox as running.
+	// This avoids Exec races where runsc is still "loading sandbox".
+	startupTimeout := time.NewTimer(10 * time.Second)
+	defer startupTimeout.Stop()
+	probeTicker := time.NewTicker(50 * time.Millisecond)
+	defer probeTicker.Stop()
+
+	pid := 0
+	lastProbeStatus := ""
+	var lastProbeErr error
+
+	for {
+		select {
+		case startedPID := <-started:
+			if startedPID > 0 {
+				pid = startedPID
+			}
+
+		case result := <-runDone:
+			m.mu.RLock()
+			s, ok := m.sandboxes[sandboxID]
+			m.mu.RUnlock()
+
+			errMsg := ""
+			if ok {
+				errMsg = strings.TrimSpace(s.State.Error)
+			}
+			if errMsg == "" && result.err != nil {
+				errMsg = result.err.Error()
+			}
+			if errMsg == "" {
+				errMsg = fmt.Sprintf("sandbox exited before startup (exit_code=%d)", result.exitCode)
+			}
+			return fmt.Errorf("failed to start sandbox %s: %s", sandboxID, errMsg)
+
+		case <-probeTicker.C:
+			runtimeState, err := m.runtime.State(m.ctx, sandboxID)
+			if err != nil {
+				lastProbeErr = err
+				continue
+			}
+
+			lastProbeErr = nil
+			lastProbeStatus = strings.TrimSpace(runtimeState.Status)
+			if !strings.EqualFold(lastProbeStatus, string(types.SandboxStatusRunning)) {
+				continue
+			}
+
+			if pid == 0 && runtimeState.Pid > 0 {
+				pid = runtimeState.Pid
+			}
+
+			m.mu.Lock()
+			if s, ok := m.sandboxes[sandboxID]; ok {
+				s.State.PID = pid
+				s.State.Status = types.SandboxStatusRunning
+				s.State.StartedAt = time.Now()
+				s.State.Error = ""
+			}
+			m.mu.Unlock()
+			return nil
+
+		case <-startupTimeout.C:
+			reason := "runtime did not report running"
+			if lastProbeErr != nil {
+				reason = lastProbeErr.Error()
+			} else if lastProbeStatus != "" {
+				reason = fmt.Sprintf("runtime status %q", lastProbeStatus)
+			}
+			return fmt.Errorf("timed out waiting for sandbox %s startup: %s", sandboxID, reason)
+		}
+	}
+}
+
+func isInteractiveBootstrapEntrypoint(entrypoint []string) bool {
+	if len(entrypoint) != 2 {
+		return false
+	}
+
+	return strings.TrimSpace(entrypoint[0]) == "sleep" &&
+		strings.TrimSpace(entrypoint[1]) == "infinity"
 }
 
 // Stop stops a running sandbox

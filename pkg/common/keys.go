@@ -68,6 +68,7 @@ var (
 	agentAttemptEvents    = "airstore:agent:attempt:events"
 	agentRunEventsChannel = "airstore:agent:run:%s:events"
 	agentRunEventsBuffer  = "airstore:agent:run:%s:events:buf"
+	agentRunRecoveryLock  = "airstore:agent:run:recovery:lock"
 	agentInstanceLock     = "airstore:agent:instance:lock:%s" // instanceKey
 
 	// Terminal IO keys (pub/sub channels)
@@ -276,6 +277,10 @@ func (rk *redisKeys) AgentRunEventsChannel(runID string) string {
 
 func (rk *redisKeys) AgentRunEventsBuffer(runID string) string {
 	return fmt.Sprintf(agentRunEventsBuffer, runID)
+}
+
+func (rk *redisKeys) AgentRunRecoveryLock() string {
+	return agentRunRecoveryLock
 }
 
 func (rk *redisKeys) AgentInstanceLock(instanceKey string) string {

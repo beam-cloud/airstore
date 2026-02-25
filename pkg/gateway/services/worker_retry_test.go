@@ -143,6 +143,99 @@ func (b *retryTestBackend) UpdateAgentRunLifecycle(_ context.Context, runID stri
 	return nil
 }
 
+func (b *retryTestBackend) SetAgentRunClaim(_ context.Context, runID string, workerID string, heartbeatAt time.Time, expiresAt time.Time) error {
+	run, ok := b.runs[runID]
+	if !ok {
+		return &types.ErrAgentRunNotFound{ID: runID}
+	}
+	run.ClaimedByWorker = &workerID
+	run.ClaimHeartbeatAt = &heartbeatAt
+	run.ClaimExpiresAt = &expiresAt
+	return nil
+}
+
+func (b *retryTestBackend) ClearAgentRunClaim(_ context.Context, runID string) error {
+	run, ok := b.runs[runID]
+	if !ok {
+		return &types.ErrAgentRunNotFound{ID: runID}
+	}
+	run.ClaimedByWorker = nil
+	run.ClaimHeartbeatAt = nil
+	run.ClaimExpiresAt = nil
+	return nil
+}
+
+func (b *retryTestBackend) ClearExpiredAgentRunClaim(_ context.Context, runID string, workerID string, expiresAt time.Time) (bool, error) {
+	run, ok := b.runs[runID]
+	if !ok {
+		return false, &types.ErrAgentRunNotFound{ID: runID}
+	}
+	if run.ClaimedByWorker == nil || run.ClaimExpiresAt == nil {
+		return false, nil
+	}
+	if *run.ClaimedByWorker != workerID {
+		return false, nil
+	}
+	if run.ClaimExpiresAt.After(expiresAt) {
+		return false, nil
+	}
+	run.ClaimedByWorker = nil
+	run.ClaimHeartbeatAt = nil
+	run.ClaimExpiresAt = nil
+	return true, nil
+}
+
+func (b *retryTestBackend) RefreshAgentRunClaims(_ context.Context, workerID string, heartbeatAt time.Time, expiresAt time.Time) (int64, error) {
+	var refreshed int64
+	for _, run := range b.runs {
+		if run == nil || run.ClaimedByWorker == nil {
+			continue
+		}
+		if *run.ClaimedByWorker != workerID {
+			continue
+		}
+		if !run.Status.IsActive() {
+			continue
+		}
+		run.ClaimHeartbeatAt = &heartbeatAt
+		run.ClaimExpiresAt = &expiresAt
+		refreshed++
+	}
+	return refreshed, nil
+}
+
+func (b *retryTestBackend) ListExpiredClaimedAgentRuns(_ context.Context, now time.Time, limit int) ([]*types.AgentRun, error) {
+	runs := make([]*types.AgentRun, 0)
+	for _, run := range b.runs {
+		if run == nil || !run.Status.IsActive() || run.ClaimedByWorker == nil || run.ClaimExpiresAt == nil {
+			continue
+		}
+		if run.ClaimExpiresAt.Before(now) {
+			runs = append(runs, run)
+		}
+	}
+	if limit > 0 && len(runs) > limit {
+		runs = runs[:limit]
+	}
+	return runs, nil
+}
+
+func (b *retryTestBackend) ListStaleUnclaimedAgentRuns(_ context.Context, cutoff time.Time, limit int) ([]*types.AgentRun, error) {
+	runs := make([]*types.AgentRun, 0)
+	for _, run := range b.runs {
+		if run == nil || !run.Status.IsActive() || run.ClaimedByWorker != nil {
+			continue
+		}
+		if run.UpdatedAt.Before(cutoff) {
+			runs = append(runs, run)
+		}
+	}
+	if limit > 0 && len(runs) > limit {
+		runs = runs[:limit]
+	}
+	return runs, nil
+}
+
 func (b *retryTestBackend) CreateAgentRunAttempt(_ context.Context, attempt *types.AgentRunAttempt) error {
 	copyAttempt := *attempt
 	if copyAttempt.ID == "" {
@@ -208,13 +301,109 @@ func (b *retryTestBackend) nextExecutionExternalID() string {
 
 type capturingTaskQueue struct {
 	repository.TaskQueue
-	pushed []*types.RunExecution
+	pushed        []*types.RunExecution
+	failed        []string
+	stateByTaskID map[string]*types.RunExecutionState
 }
 
 func (q *capturingTaskQueue) Push(_ context.Context, task *types.RunExecution) error {
 	copyTask := *task
 	q.pushed = append(q.pushed, &copyTask)
 	return nil
+}
+
+func (q *capturingTaskQueue) Fail(_ context.Context, taskID string, _ error) error {
+	q.failed = append(q.failed, taskID)
+	if q.stateByTaskID == nil {
+		q.stateByTaskID = map[string]*types.RunExecutionState{}
+	}
+	q.stateByTaskID[taskID] = &types.RunExecutionState{
+		ID:         taskID,
+		Status:     types.RunExecutionStatusFailed,
+		FinishedAt: time.Now(),
+	}
+	return nil
+}
+
+func (q *capturingTaskQueue) GetState(_ context.Context, taskID string) (*types.RunExecutionState, error) {
+	if q.stateByTaskID == nil {
+		return nil, fmt.Errorf("state unavailable in capturing queue")
+	}
+	if state, ok := q.stateByTaskID[taskID]; ok {
+		return state, nil
+	}
+	return nil, fmt.Errorf("task state not found")
+}
+
+type staticWorkerRepo struct {
+	repository.WorkerRepository
+	workers map[string]*types.Worker
+}
+
+func (r *staticWorkerRepo) GetWorker(_ context.Context, workerID string) (*types.Worker, error) {
+	if r.workers == nil {
+		return nil, &types.ErrWorkerNotFound{WorkerId: workerID}
+	}
+	worker, ok := r.workers[workerID]
+	if !ok {
+		return nil, &types.ErrWorkerNotFound{WorkerId: workerID}
+	}
+	return worker, nil
+}
+
+func seedRecoverableRunContext(
+	backend *retryTestBackend,
+	runID string,
+	originTaskID string,
+	maxAttempts int,
+) *types.AgentRunAttempt {
+	agentID := "agent-1"
+	now := time.Now().Add(-5 * time.Minute)
+	backend.runs[runID] = &types.AgentRun{
+		ID:           runID,
+		WorkspaceID:  42,
+		AgentID:      &agentID,
+		OriginTaskID: originTaskID,
+		Status:       types.AgentRunStatusRunning,
+		ExecHost:     string(orchestration.ExecHostSandbox),
+		ExecSecurity: string(orchestration.ExecSecurityFull),
+		ExecAsk:      string(orchestration.ExecAskOff),
+		RuntimeType:  orchestration.RuntimeTypeGvisor,
+		TimeoutMs:    60_000,
+		UpdatedAt:    now,
+		DeliveryJSON: map[string]any{
+			types.AgentExecutionMetaKeyRetryMaxAttempts: maxAttempts,
+			types.AgentExecutionMetaKeyRetryDelayMs:     0,
+		},
+	}
+	backend.tasks[originTaskID] = &types.AgentTask{
+		ID:          originTaskID,
+		WorkspaceID: 42,
+		State:       types.AgentTaskStateRunning,
+		TargetRunID: &runID,
+		UpdatedAt:   now,
+	}
+	backend.runExecutions[runID] = &types.RunExecution{
+		ExternalId:  runID,
+		WorkspaceId: 42,
+		Status:      types.RunExecutionStatusRunning,
+		Type:        types.RunExecutionTypeBackground,
+		Prompt:      "recover me",
+		Image:       "ghcr.io/beam/sandbox:latest",
+		Entrypoint:  []string{"runner"},
+		Env:         map[string]string{"A": "B"},
+	}
+
+	attempt := &types.AgentRunAttempt{
+		ID:          fmt.Sprintf("%s-attempt-1", runID),
+		RunID:       runID,
+		AttemptNo:   1,
+		Status:      types.AgentAttemptStatusRunning,
+		ExecutionID: &runID,
+	}
+	backend.attemptByID[attempt.ID] = attempt
+	backend.attemptsByRun[runID] = []*types.AgentRunAttempt{attempt}
+	return attempt
 }
 
 func TestScheduleRetryRunCreatesNewRunAndRebindsTask(t *testing.T) {
@@ -531,6 +720,173 @@ func TestSetTaskStartedRejectsTerminalRunMarksOriginTaskCancelled(t *testing.T) 
 	require.Equal(t, types.AgentTaskStateCancelled, task.State)
 	require.NotNil(t, task.TargetRunID)
 	require.Equal(t, runID, *task.TargetRunID)
+}
+
+func TestRecoverOrphanedRunSchedulesRetry(t *testing.T) {
+	backend := newRetryTestBackend()
+	queue := &capturingTaskQueue{}
+	svc := &WorkerService{
+		backend:       backend,
+		taskQueue:     queue,
+		claimLeaseTTL: 30 * time.Second,
+	}
+
+	runID := "run-orphan-retry-1"
+	originTaskID := "task-orphan-retry-1"
+	seedRecoverableRunContext(backend, runID, originTaskID, 3)
+
+	recovered, retryScheduled, err := svc.recoverOrphanedRun(context.Background(), backend.runs[runID], "claim_lease_expired")
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.True(t, retryScheduled)
+	require.Contains(t, queue.failed, runID)
+	require.Len(t, queue.pushed, 1)
+
+	task := backend.tasks[originTaskID]
+	require.NotNil(t, task)
+	require.NotNil(t, task.TargetRunID)
+	require.NotEqual(t, runID, *task.TargetRunID)
+}
+
+func TestRecoverOrphanedRunExhaustedRetriesFinalizesTask(t *testing.T) {
+	backend := newRetryTestBackend()
+	queue := &capturingTaskQueue{}
+	svc := &WorkerService{
+		backend:       backend,
+		taskQueue:     queue,
+		claimLeaseTTL: 30 * time.Second,
+	}
+
+	runID := "run-orphan-final-1"
+	originTaskID := "task-orphan-final-1"
+	seedRecoverableRunContext(backend, runID, originTaskID, 1)
+
+	recovered, retryScheduled, err := svc.recoverOrphanedRun(context.Background(), backend.runs[runID], "claim_lease_expired")
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.False(t, retryScheduled)
+	require.Len(t, queue.pushed, 0)
+
+	task := backend.tasks[originTaskID]
+	require.NotNil(t, task)
+	require.Equal(t, types.AgentTaskStateDone, task.State)
+	require.NotNil(t, task.TargetRunID)
+	require.Equal(t, runID, *task.TargetRunID)
+}
+
+func TestProcessStaleUnclaimedRunRecoversWhenWorkerMissing(t *testing.T) {
+	backend := newRetryTestBackend()
+	queue := &capturingTaskQueue{
+		stateByTaskID: map[string]*types.RunExecutionState{},
+	}
+	svc := &WorkerService{
+		backend:       backend,
+		workerRepo:    &staticWorkerRepo{workers: map[string]*types.Worker{}},
+		taskQueue:     queue,
+		claimLeaseTTL: 30 * time.Second,
+	}
+
+	runID := "run-unclaimed-stale-1"
+	originTaskID := "task-unclaimed-stale-1"
+	seedRecoverableRunContext(backend, runID, originTaskID, 2)
+	backend.runs[runID].ClaimedByWorker = nil
+	backend.runs[runID].Status = types.AgentRunStatusAccepted
+	queue.stateByTaskID[runID] = &types.RunExecutionState{
+		ID:       runID,
+		Status:   types.RunExecutionStatusRunning,
+		WorkerID: "missing-worker",
+	}
+
+	outcome, err := svc.processStaleUnclaimedRun(context.Background(), backend.runs[runID])
+	require.NoError(t, err)
+	require.True(t, outcome.detected)
+	require.True(t, outcome.recovered)
+	require.True(t, outcome.retryScheduled)
+	require.Contains(t, queue.failed, runID)
+}
+
+func TestProcessStaleUnclaimedRunSkipsPendingQueuedState(t *testing.T) {
+	backend := newRetryTestBackend()
+	queue := &capturingTaskQueue{
+		stateByTaskID: map[string]*types.RunExecutionState{},
+	}
+	svc := &WorkerService{
+		backend:    backend,
+		workerRepo: &staticWorkerRepo{},
+		taskQueue:  queue,
+	}
+
+	runID := "run-unclaimed-pending-1"
+	originTaskID := "task-unclaimed-pending-1"
+	seedRecoverableRunContext(backend, runID, originTaskID, 2)
+	backend.runs[runID].ClaimedByWorker = nil
+	backend.runs[runID].Status = types.AgentRunStatusAccepted
+	queue.stateByTaskID[runID] = &types.RunExecutionState{
+		ID:     runID,
+		Status: types.RunExecutionStatusPending,
+	}
+
+	outcome, err := svc.processStaleUnclaimedRun(context.Background(), backend.runs[runID])
+	require.NoError(t, err)
+	require.False(t, outcome.detected)
+	require.False(t, outcome.recovered)
+	require.False(t, outcome.retryScheduled)
+	require.NotContains(t, queue.failed, runID)
+}
+
+func TestSetTaskResultIgnoresStaleCallback(t *testing.T) {
+	backend := newRetryTestBackend()
+	queue := &capturingTaskQueue{}
+	svc := &WorkerService{backend: backend, taskQueue: queue}
+
+	runID := "run-stale-callback-1"
+	originTaskID := "task-stale-callback-1"
+	seedRecoverableRunContext(backend, runID, originTaskID, 2)
+
+	endedAt := time.Now().Add(-time.Minute)
+	attempt := backend.attemptsByRun[runID][0]
+	attempt.Status = types.AgentAttemptStatusError
+	attempt.EndedAt = &endedAt
+	backend.runs[runID].Status = types.AgentRunStatusError
+	backend.tasks[originTaskID].TargetRunID = &runID
+	backend.tasks[originTaskID].State = types.AgentTaskStateRunning
+
+	_, err := svc.SetTaskResult(context.Background(), &pb.SetTaskResultRequest{
+		TaskId:   runID,
+		ExitCode: 0,
+		Error:    "",
+	})
+	require.NoError(t, err)
+	require.Equal(t, types.AgentRunStatusError, backend.runs[runID].Status)
+	require.Equal(t, types.AgentTaskStateRunning, backend.tasks[originTaskID].State)
+}
+
+func TestProcessExpiredClaimRunIdempotent(t *testing.T) {
+	backend := newRetryTestBackend()
+	queue := &capturingTaskQueue{}
+	svc := &WorkerService{
+		backend:       backend,
+		taskQueue:     queue,
+		claimLeaseTTL: 30 * time.Second,
+	}
+
+	runID := "run-expired-idempotent-1"
+	originTaskID := "task-expired-idempotent-1"
+	seedRecoverableRunContext(backend, runID, originTaskID, 1)
+	workerID := "worker-1"
+	expiresAt := time.Now().Add(-time.Minute)
+	backend.runs[runID].ClaimedByWorker = &workerID
+	backend.runs[runID].ClaimExpiresAt = &expiresAt
+
+	firstOutcome, err := svc.processExpiredClaimRun(context.Background(), time.Now(), backend.runs[runID])
+	require.NoError(t, err)
+	require.True(t, firstOutcome.detected)
+	require.True(t, firstOutcome.recovered)
+
+	secondOutcome, err := svc.processExpiredClaimRun(context.Background(), time.Now(), backend.runs[runID])
+	require.NoError(t, err)
+	require.False(t, secondOutcome.detected)
+	require.False(t, secondOutcome.recovered)
 }
 
 func TestAgentCommandParamsFromProtoMatchesHTTPShape(t *testing.T) {
