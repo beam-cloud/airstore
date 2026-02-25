@@ -31,6 +31,24 @@ func TestParseQuerySpec_Gmail(t *testing.T) {
 	}
 }
 
+func TestParseQuerySpec_GmailAttachmentMetadata(t *testing.T) {
+	queryJSON := `{"gmail_query":"has:attachment","include_attachments":true,"include_inline":false,"include_message_body":false}`
+	spec := parseQuerySpec("gmail", queryJSON)
+
+	if spec.Query != "has:attachment" {
+		t.Errorf("Expected Query to be 'has:attachment', got %q", spec.Query)
+	}
+	if got := spec.Metadata["include_attachments"]; got != "true" {
+		t.Errorf("Expected include_attachments=true metadata, got %q", got)
+	}
+	if got := spec.Metadata["include_inline"]; got != "false" {
+		t.Errorf("Expected include_inline=false metadata, got %q", got)
+	}
+	if got := spec.Metadata["include_message_body"]; got != "false" {
+		t.Errorf("Expected include_message_body=false metadata, got %q", got)
+	}
+}
+
 func TestParseQuerySpec_GDrive(t *testing.T) {
 	queryJSON := `{"gdrive_query": "mimeType='application/pdf'", "limit": 50}`
 	spec := parseQuerySpec("gdrive", queryJSON)

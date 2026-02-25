@@ -900,22 +900,25 @@ func formatResultsForEvaluation(results []sources.QueryResult) string {
 
 func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 	var spec struct {
-		GmailQuery     string   `json:"gmail_query"`
-		GDriveQuery    string   `json:"gdrive_query"`
-		NotionQuery    string   `json:"notion_query"`
-		GitHubQuery    string   `json:"github_query"`
-		SlackQuery     string   `json:"slack_query"`
-		LinearQuery    string   `json:"linear_query"`
-		PostHogQuery   string   `json:"posthog_query"`
-		WebQuery       string   `json:"web_query"`
-		WebMode        string   `json:"web_mode"`
-		IncludePaths   []string `json:"include_paths"`
-		SearchType     string   `json:"search_type"`
-		ContentType    string   `json:"content_type"`
-		ProjectID      int      `json:"project_id"`
-		Limit          int      `json:"limit"`
-		MaxResults     int      `json:"max_results"`
-		FilenameFormat string   `json:"filename_format"`
+		GmailQuery         string   `json:"gmail_query"`
+		GDriveQuery        string   `json:"gdrive_query"`
+		NotionQuery        string   `json:"notion_query"`
+		GitHubQuery        string   `json:"github_query"`
+		SlackQuery         string   `json:"slack_query"`
+		LinearQuery        string   `json:"linear_query"`
+		PostHogQuery       string   `json:"posthog_query"`
+		WebQuery           string   `json:"web_query"`
+		WebMode            string   `json:"web_mode"`
+		IncludePaths       []string `json:"include_paths"`
+		SearchType         string   `json:"search_type"`
+		ContentType        string   `json:"content_type"`
+		ProjectID          int      `json:"project_id"`
+		IncludeAttachments *bool    `json:"include_attachments"`
+		IncludeInline      *bool    `json:"include_inline"`
+		IncludeMessageBody *bool    `json:"include_message_body"`
+		Limit              int      `json:"limit"`
+		MaxResults         int      `json:"max_results"`
+		FilenameFormat     string   `json:"filename_format"`
 	}
 
 	limit := defaultPageSize
@@ -977,6 +980,15 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 	}
 	if spec.WebMode != "" {
 		metadata["web_mode"] = spec.WebMode
+	}
+	if spec.IncludeAttachments != nil {
+		metadata["include_attachments"] = strconv.FormatBool(*spec.IncludeAttachments)
+	}
+	if spec.IncludeInline != nil {
+		metadata["include_inline"] = strconv.FormatBool(*spec.IncludeInline)
+	}
+	if spec.IncludeMessageBody != nil {
+		metadata["include_message_body"] = strconv.FormatBool(*spec.IncludeMessageBody)
 	}
 
 	return sources.QuerySpec{

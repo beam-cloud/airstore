@@ -1,6 +1,9 @@
 package providers
 
 import (
+	"bytes"
+	"encoding/base64"
+	"strings"
 	"testing"
 
 	"github.com/beam-cloud/airstore/pkg/sources"
@@ -388,5 +391,187 @@ func TestIsLikelyPersonName(t *testing.T) {
 				t.Errorf("isLikelyPersonName(%s) = %v, expected %v", tt.input, result, tt.expected)
 			}
 		})
+	}
+}
+
+func TestParseGmailResultID(t *testing.T) {
+	tests := []struct {
+		name         string
+		input        string
+		wantMessage  string
+		wantAttachID string
+		wantErr      bool
+	}{
+		{
+			name:         "message result id",
+			input:        "msg:abc123",
+			wantMessage:  "abc123",
+			wantAttachID: "",
+		},
+		{
+			name:         "attachment result id",
+			input:        "att:abc123:att456",
+			wantMessage:  "abc123",
+			wantAttachID: "att456",
+		},
+		{
+			name:         "legacy message id",
+			input:        "legacy-message-id",
+			wantMessage:  "legacy-message-id",
+			wantAttachID: "",
+		},
+		{
+			name:    "invalid attachment id format",
+			input:   "att:only-message-id",
+			wantErr: true,
+		},
+		{
+			name:    "empty id",
+			input:   "",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msgID, attID, err := parseGmailResultID(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if msgID != tt.wantMessage {
+				t.Fatalf("message id mismatch: got %q want %q", msgID, tt.wantMessage)
+			}
+			if attID != tt.wantAttachID {
+				t.Fatalf("attachment id mismatch: got %q want %q", attID, tt.wantAttachID)
+			}
+		})
+	}
+}
+
+func TestExtractMessageAttachments_InlineFiltering(t *testing.T) {
+	msg := map[string]any{
+		"payload": map[string]any{
+			"mimeType": "multipart/mixed",
+			"parts": []any{
+				map[string]any{
+					"mimeType": "image/png",
+					"filename": "logo.png",
+					"headers": []any{
+						map[string]any{"name": "Content-ID", "value": "<logo>"},
+					},
+					"body": map[string]any{
+						"attachmentId": "inline-1",
+						"size":         float64(12),
+					},
+				},
+				map[string]any{
+					"mimeType": "application/pdf",
+					"filename": "invoice.pdf",
+					"headers": []any{
+						map[string]any{"name": "Content-Disposition", "value": "attachment; filename=invoice.pdf"},
+					},
+					"body": map[string]any{
+						"attachmentId": "file-1",
+						"size":         float64(64),
+					},
+				},
+			},
+		},
+	}
+
+	nonInline := extractMessageAttachments(msg, false)
+	if len(nonInline) != 1 {
+		t.Fatalf("expected 1 non-inline attachment, got %d", len(nonInline))
+	}
+	if nonInline[0].AttachmentID != "file-1" {
+		t.Fatalf("expected file-1, got %s", nonInline[0].AttachmentID)
+	}
+
+	withInline := extractMessageAttachments(msg, true)
+	if len(withInline) != 2 {
+		t.Fatalf("expected 2 attachments when includeInline=true, got %d", len(withInline))
+	}
+}
+
+func TestAttachmentOutputName_FallbackUsesMimeExtension(t *testing.T) {
+	att := gmailAttachment{
+		AttachmentID: "abcdef123456",
+		MimeType:     "application/pdf",
+	}
+
+	name := attachmentOutputName(att)
+	if !strings.HasPrefix(name, "attachment_abcdef12") {
+		t.Fatalf("expected fallback attachment prefix, got %q", name)
+	}
+	if !strings.HasSuffix(name, ".pdf") {
+		t.Fatalf("expected .pdf suffix, got %q", name)
+	}
+}
+
+func TestShouldIncludeAttachments(t *testing.T) {
+	tests := []struct {
+		name string
+		spec sources.QuerySpec
+		want bool
+	}{
+		{
+			name: "explicit metadata true",
+			spec: sources.QuerySpec{
+				Query:    "is:unread",
+				Metadata: map[string]string{"include_attachments": "true"},
+			},
+			want: true,
+		},
+		{
+			name: "explicit metadata false overrides query operators",
+			spec: sources.QuerySpec{
+				Query:    "has:attachment filename:pdf",
+				Metadata: map[string]string{"include_attachments": "false"},
+			},
+			want: false,
+		},
+		{
+			name: "inferred from query operator",
+			spec: sources.QuerySpec{
+				Query: "filename:pdf",
+			},
+			want: true,
+		},
+		{
+			name: "default false for regular query",
+			spec: sources.QuerySpec{
+				Query: "is:unread",
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldIncludeAttachments(tt.spec); got != tt.want {
+				t.Fatalf("shouldIncludeAttachments() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDecodeBodyBytes_PreservesBinaryData(t *testing.T) {
+	original := []byte{0xff, 0x00, 0x01, 0x02, 0x7f}
+	body := map[string]any{
+		"data": base64.RawURLEncoding.EncodeToString(original),
+	}
+
+	decoded, err := decodeBodyBytes(body)
+	if err != nil {
+		t.Fatalf("unexpected decode error: %v", err)
+	}
+	if !bytes.Equal(decoded, original) {
+		t.Fatalf("decoded bytes mismatch: got %v want %v", decoded, original)
 	}
 }
