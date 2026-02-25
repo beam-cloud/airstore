@@ -34,6 +34,7 @@ require (
 	github.com/labstack/echo/v4 v4.11.4
 	github.com/lib/pq v1.10.9
 	github.com/opencontainers/runtime-spec v1.3.0
+	github.com/pkoukk/tiktoken-go v0.1.8
 	github.com/pressly/goose/v3 v3.26.0
 	github.com/redis/go-redis/v9 v9.1.0
 	github.com/rs/zerolog v1.34.0
@@ -85,6 +86,7 @@ require (
 	github.com/containerd/stargz-snapshotter/estargz v0.16.3 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
+	github.com/dlclark/regexp2 v1.10.0 // indirect
 	github.com/docker/cli v27.5.0+incompatible // indirect
 	github.com/docker/distribution v2.8.3+incompatible // indirect
 	github.com/docker/docker-credential-helpers v0.8.2 // indirect

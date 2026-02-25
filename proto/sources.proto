@@ -19,25 +19,31 @@ service SourceService {
   // Readlink reads a symbolic link target (for friendly aliases)
   rpc Readlink(SourceReadlinkRequest) returns (SourceReadlinkResponse);
 
-  // Smart query operations - create queries from folder names via LLM inference
+  // Source view operations - create views from folder names via LLM inference or structured filters
   
-  // CreateSmartQuery creates a new smart query (called on mkdir/touch)
-  rpc CreateSmartQuery(CreateSmartQueryRequest) returns (CreateSmartQueryResponse);
+  // CreateView creates a new source view (called on mkdir/touch)
+  rpc CreateView(CreateViewRequest) returns (CreateViewResponse);
   
-  // GetSmartQuery retrieves a query by its path
-  rpc GetSmartQuery(GetSmartQueryRequest) returns (GetSmartQueryResponse);
+  // GetView retrieves a view by its path
+  rpc GetView(GetViewRequest) returns (GetViewResponse);
   
-  // ListSmartQueries lists queries under a parent path
-  rpc ListSmartQueries(ListSmartQueriesRequest) returns (ListSmartQueriesResponse);
+  // ListViews lists views under a parent path
+  rpc ListViews(ListViewsRequest) returns (ListViewsResponse);
   
-  // DeleteSmartQuery removes a query by external_id
-  rpc DeleteSmartQuery(DeleteSmartQueryRequest) returns (DeleteSmartQueryResponse);
+  // DeleteView removes a view by external_id
+  rpc DeleteView(DeleteViewRequest) returns (DeleteViewResponse);
 
-  // UpdateSmartQuery updates an existing query's name/guidance
-  rpc UpdateSmartQuery(UpdateSmartQueryRequest) returns (UpdateSmartQueryResponse);
+  // UpdateView updates an existing view's name/guidance
+  rpc UpdateView(UpdateViewRequest) returns (UpdateViewResponse);
 
-  // ExecuteSmartQuery runs a query and returns materialized results
-  rpc ExecuteSmartQuery(ExecuteSmartQueryRequest) returns (ExecuteSmartQueryResponse);
+  // ExecuteView runs a view's query and returns materialized results
+  rpc ExecuteView(ExecuteViewRequest) returns (ExecuteViewResponse);
+
+  // SyncView re-executes a view's query, refreshing cached metadata
+  rpc SyncView(SyncViewRequest) returns (SyncViewResponse);
+
+  // ListResources returns available resources for an integration (repos, channels, etc.)
+  rpc ListResources(ListResourcesRequest) returns (ListResourcesResponse);
 }
 
 // SourceFileInfo contains file/directory metadata
@@ -89,10 +95,25 @@ message SourceReadRequest {
   int64 length = 3;  // 0 means read to end
 }
 
+message SourceReadCostHint {
+  string integration = 1;
+  string source_uri = 2;
+  string query_path = 3;
+  string result_id = 4;
+  string strategy = 5;
+  string outcome = 6;
+  int64 original_bytes = 7;
+  int64 compressed_bytes = 8;
+  int64 original_tokens = 9;
+  int64 compressed_tokens = 10;
+  int64 compression_ms = 11;
+}
+
 message SourceReadResponse {
   bool ok = 1;
   string error = 2;
   bytes data = 3;
+  SourceReadCostHint cost_hint = 4;
 }
 
 // Readlink
@@ -106,10 +127,11 @@ message SourceReadlinkResponse {
   string target = 3;
 }
 
-// ==================== Smart Query Messages ====================
+// ==================== Source View Messages ====================
 
-// SmartQuery represents a stored query that materializes as filesystem content
-message SmartQuery {
+// SourceView represents a stored view that materializes as filesystem content.
+// A view can be created via LLM inference (smart mode) or structured filters (query mode).
+message SourceView {
   string external_id = 1;
   string integration = 2;      // "gmail", "gdrive", etc.
   string path = 3;             // Full path: "/sources/gmail/unread-emails"
@@ -121,78 +143,114 @@ message SmartQuery {
   int32 cache_ttl = 9;         // Seconds, 0 = always live
   int64 created_at = 10;       // Unix timestamp
   int64 updated_at = 11;
+  string mode = 12;            // "smart" or "query"
+  string filter = 13;          // JSON structured filter (for query mode, enables round-trip editing)
+  int64 last_executed = 14;    // Unix timestamp of last query execution (0 = never)
 }
 
-// CreateSmartQuery - creates a query from a folder/file name via LLM inference
-message CreateSmartQueryRequest {
+// CreateView - creates a view from a folder/file name via LLM inference or structured filter
+message CreateViewRequest {
   string integration = 1;      // e.g., "gmail"
   string name = 2;             // Folder name like "unread-emails"
-  string guidance = 3;         // Optional extra context for LLM
+  string guidance = 3;         // Optional extra context for LLM (smart mode)
   string output_format = 4;    // "folder" or "file"
   string file_ext = 5;         // For files: ".json", ".md"
+  string filter = 6;           // JSON structured filter (query mode)
 }
 
-message CreateSmartQueryResponse {
+message CreateViewResponse {
   bool ok = 1;
   string error = 2;
-  SmartQuery query = 3;
+  SourceView view = 3;
 }
 
-// GetSmartQuery - retrieves a query by path
-message GetSmartQueryRequest {
+// GetView - retrieves a view by path
+message GetViewRequest {
   string path = 1;             // Full path: "/sources/gmail/unread-emails"
 }
 
-message GetSmartQueryResponse {
+message GetViewResponse {
   bool ok = 1;
   string error = 2;
-  SmartQuery query = 3;        // nil if not found
+  SourceView view = 3;        // nil if not found
 }
 
-// ListSmartQueries - lists queries under a parent path
-message ListSmartQueriesRequest {
+// ListViews - lists views under a parent path
+message ListViewsRequest {
   string parent_path = 1;      // e.g., "/sources/gmail"
 }
 
-message ListSmartQueriesResponse {
+message ListViewsResponse {
   bool ok = 1;
   string error = 2;
-  repeated SmartQuery queries = 3;
+  repeated SourceView views = 3;
 }
 
-// DeleteSmartQuery - removes a query by external_id
-message DeleteSmartQueryRequest {
-  string external_id = 1;        // Stable query ID (from SmartQuery.external_id)
+// DeleteView - removes a view by external_id
+message DeleteViewRequest {
+  string external_id = 1;        // Stable view ID (from SourceView.external_id)
 }
 
-message DeleteSmartQueryResponse {
+message DeleteViewResponse {
   bool ok = 1;
   string error = 2;
 }
 
-// UpdateSmartQuery - updates an existing query's name and/or guidance
-message UpdateSmartQueryRequest {
-  string external_id = 1;        // Stable query ID (from SmartQuery.external_id)
+// UpdateView - updates an existing view's name and/or guidance
+message UpdateViewRequest {
+  string external_id = 1;        // Stable view ID (from SourceView.external_id)
   string name = 2;               // New name (optional, triggers rename + path update)
   string guidance = 3;           // New guidance (triggers re-inference of query_spec)
+  string filter = 4;             // New structured filter JSON (query mode)
+  string mode = 5;               // Explicit mode: "smart" or "query" (triggers mode switch)
 }
 
-message UpdateSmartQueryResponse {
+message UpdateViewResponse {
   bool ok = 1;
   string error = 2;
-  SmartQuery query = 3;
+  SourceView view = 3;
 }
 
-// ExecuteSmartQuery - runs a query and returns results
-message ExecuteSmartQueryRequest {
-  string path = 1;             // Query path: "/sources/gmail/unread-emails"
+// ExecuteView - runs a view's query and returns results
+message ExecuteViewRequest {
+  string path = 1;             // View path: "/sources/gmail/unread-emails"
   string filename = 2;         // Optional: specific file to read from folder results
   string result_id = 3;        // Optional: provider-specific ID for direct content retrieval
 }
 
-message ExecuteSmartQueryResponse {
+message ExecuteViewResponse {
   bool ok = 1;
   string error = 2;
   repeated SourceDirEntry entries = 3;  // For folder mode: directory entries
   bytes file_data = 4;                   // For file mode or specific filename: content
+}
+
+// SyncView - re-executes a view's query, refreshing cached metadata
+message SyncViewRequest {
+  string external_id = 1;      // Stable view ID
+}
+
+message SyncViewResponse {
+  bool ok = 1;
+  string error = 2;
+  SourceView view = 3;
+  int32 results_count = 4;    // Total number of results after sync
+  int32 new_results = 5;      // Number of newly detected results
+}
+
+// ListResources - returns available resources for an integration
+message ListResourcesRequest {
+  string integration = 1;      // e.g., "github", "slack"
+  string resource_type = 2;    // e.g., "repos", "channels"
+}
+
+message ListResourcesResponse {
+  bool ok = 1;
+  string error = 2;
+  repeated SourceResource resources = 3;
+}
+
+message SourceResource {
+  string id = 1;       // Unique identifier (e.g., "owner/repo")
+  string name = 2;     // Display name (e.g., "owner/repo", "#general")
 }

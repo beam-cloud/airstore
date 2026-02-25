@@ -49,17 +49,28 @@ controllers:
           tag: "{{ .Values.images.gateway.tag | default .Chart.AppVersion }}"
           pullPolicy: {{ .Values.images.gateway.pullPolicy | default "IfNotPresent" }}
         probes:
+          startup:
+            enabled: true
+            custom: true
+            spec:
+              failureThreshold: 45
+              periodSeconds: 2
+              timeoutSeconds: 1
+              httpGet:
+                path: /api/v1/health/live
+                port: 1994
           readiness:
             enabled: true
             custom: true
             spec:
-              initialDelaySeconds: 5
-              successThreshold: 2
-              failureThreshold: 2
+              initialDelaySeconds: 2
+              successThreshold: 1
+              failureThreshold: 3
               periodSeconds: 3
               timeoutSeconds: 1
-              grpc:
-                port: 1993
+              httpGet:
+                path: /api/v1/health/ready
+                port: 1994
           liveness:
             enabled: true
             custom: true
@@ -67,10 +78,11 @@ controllers:
               initialDelaySeconds: 10
               successThreshold: 1
               failureThreshold: 10
-              periodSeconds: 3
+              periodSeconds: 5
               timeoutSeconds: 1
-              grpc:
-                port: 1993
+              httpGet:
+                path: /api/v1/health/live
+                port: 1994
         securityContext:
           privileged: true
     hostNetwork: true

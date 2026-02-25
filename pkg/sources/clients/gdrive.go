@@ -80,8 +80,8 @@ func NewDriveClient() *DriveClient {
 }
 
 // Integration returns the integration name
-func (c *DriveClient) Integration() types.ToolName {
-	return types.ToolGDrive
+func (c *DriveClient) Integration() types.IntegrationName {
+	return types.GDrive
 }
 
 // Request makes a GET request to the Drive API

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -13,48 +12,34 @@ import (
 
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/common"
+	"github.com/beam-cloud/airstore/pkg/compression"
 	"github.com/beam-cloud/airstore/pkg/hooks"
+	"github.com/beam-cloud/airstore/pkg/instrumentation"
 	"github.com/beam-cloud/airstore/pkg/oauth"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/sources"
-	baml "github.com/beam-cloud/airstore/pkg/sources/queries/baml_client"
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/singleflight"
+	grpcmd "google.golang.org/grpc/metadata"
 )
 
-const credCacheTTL = 5 * time.Minute // Cache credentials for 5 minutes
-const connCacheTTL = 10 * time.Second // Cache connected integration set briefly
+// ---------------------------------------------------------------------------
+// Service definition
+// ---------------------------------------------------------------------------
 
-// cachedCreds holds cached credentials with expiration
+const credCacheTTL = 5 * time.Minute  // credentials cache duration
+const connCacheTTL = 10 * time.Second // connected-integrations cache duration
+
 type cachedCreds struct {
 	creds     *types.IntegrationCredentials
 	expiresAt time.Time
 }
 
-// cachedConnSet holds the set of connected integration names for a workspace.
 type cachedConnSet struct {
 	set       map[string]bool
 	expiresAt time.Time
-}
-
-// gmailQuerySpec represents the JSON structure for a Gmail query specification
-type gmailQuerySpec struct {
-	GmailQuery     string `json:"gmail_query"`
-	Limit          int    `json:"limit"`
-	FilenameFormat string `json:"filename_format"`
-}
-
-// buildGmailQuerySpec creates a JSON query spec string for Gmail queries
-func buildGmailQuerySpec(query string, limit int, filenameFormat string) string {
-	spec := gmailQuerySpec{
-		GmailQuery:     query,
-		Limit:          limit,
-		FilenameFormat: filenameFormat,
-	}
-	data, _ := json.Marshal(spec)
-	return string(data)
 }
 
 // SourceService implements the gRPC SourceService for integration access.
@@ -66,27 +51,47 @@ type SourceService struct {
 	cache         *sources.SourceCache
 	rateLimiter   *sources.RateLimiter
 	oauthRegistry *oauth.Registry
-	credCache     sync.Map // map[string]*cachedCreds - caches credentials by "workspaceId:integration"
-	connCache     sync.Map // map[uint]*cachedConnSet - caches connected integrations by workspace
-	queryGroup    singleflight.Group
-	hookStream    common.EventEmitter // optional: for emitting source change events
-	seenTracker   *hooks.SeenTracker  // optional: for detecting new query results
+	credCache     sync.Map           // map[string]*cachedCreds
+	connCache     sync.Map           // map[uint]*cachedConnSet
+	queryGroup    singleflight.Group // deduplicates synchronous query execution
+	hookStream    common.EventEmitter
+	seenTracker   *hooks.SeenTracker
+
+	// Compression middleware (optional).
+	compressor      compression.ContextCompressor
+	compressedStore *compression.CompressedStore
+	recorder        instrumentation.AccessRecorder
+	compressionCfg  compression.Config
+	passthroughOnce sync.Once
+	passthroughComp compression.ContextCompressor
 }
 
-// SourceServiceOption configures optional dependencies on SourceService.
 type SourceServiceOption func(*SourceService)
 
-// WithHookStream sets the event emitter for hook event emission.
 func WithHookStream(emitter common.EventEmitter) SourceServiceOption {
 	return func(s *SourceService) { s.hookStream = emitter }
 }
 
-// WithSeenTracker sets the seen tracker for change detection.
 func WithSeenTracker(tracker *hooks.SeenTracker) SourceServiceOption {
 	return func(s *SourceService) { s.seenTracker = tracker }
 }
 
-// NewSourceService creates a new SourceService.
+func WithRecorder(recorder instrumentation.AccessRecorder) SourceServiceOption {
+	return func(s *SourceService) { s.recorder = recorder }
+}
+
+func WithCompressionMiddleware(
+	compressor compression.ContextCompressor,
+	store *compression.CompressedStore,
+	cfg compression.Config,
+) SourceServiceOption {
+	return func(s *SourceService) {
+		s.compressor = compressor
+		s.compressedStore = store
+		s.compressionCfg = cfg
+	}
+}
+
 func NewSourceService(registry *sources.Registry, backend repository.BackendRepository, fsStore repository.FilesystemStore, opts ...SourceServiceOption) *SourceService {
 	s := &SourceService{
 		registry:    registry,
@@ -101,7 +106,6 @@ func NewSourceService(registry *sources.Registry, backend repository.BackendRepo
 	return s
 }
 
-// NewSourceServiceWithOAuth creates a SourceService with OAuth refresh support.
 func NewSourceServiceWithOAuth(registry *sources.Registry, backend repository.BackendRepository, fsStore repository.FilesystemStore, oauthRegistry *oauth.Registry, opts ...SourceServiceOption) *SourceService {
 	s := &SourceService{
 		registry:      registry,
@@ -117,212 +121,104 @@ func NewSourceServiceWithOAuth(registry *sources.Registry, backend repository.Ba
 	return s
 }
 
-// InvalidateQueryCache invalidates cached results for a query path.
-// Call this before ReadDir when refresh=true to force re-execution.
-func (s *SourceService) InvalidateQueryCache(ctx context.Context, workspaceId uint, queryPath string) error {
-	if s.fsStore == nil {
-		return nil
-	}
-	log.Info().Uint("workspace_id", workspaceId).Str("path", queryPath).Msg("invalidating query cache")
-	return s.fsStore.InvalidateQuery(ctx, workspaceId, queryPath)
-}
+// ---------------------------------------------------------------------------
+// FUSE operations
+// ---------------------------------------------------------------------------
 
-// RefreshSmartQuery forces re-execution of a smart query, bypassing all caches.
-// Returns the fresh results from the provider (e.g., Gmail API).
-func (s *SourceService) RefreshSmartQuery(ctx context.Context, queryPath string) ([]repository.QueryResult, error) {
-	pctx, err := s.providerContext(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get provider context: %w", err)
-	}
-
-	// Look up the query definition
-	query, err := s.fsStore.GetQuery(ctx, pctx.WorkspaceId, queryPath)
-	if err != nil {
-		return nil, fmt.Errorf("query lookup failed: %w", err)
-	}
-	if query == nil {
-		return nil, fmt.Errorf("query not found: %s", queryPath)
-	}
-
-	// Load credentials
-	pctx, connected := s.loadCredentials(ctx, pctx, query.Integration)
-	if !connected {
-		return nil, fmt.Errorf("not connected to %s", query.Integration)
-	}
-
-	log.Info().
-		Str("path", queryPath).
-		Str("integration", query.Integration).
-		Str("query_spec", query.QuerySpec).
-		Msg("refreshing smart query - executing provider query")
-
-	// Execute the query fresh (this calls the Gmail/GDrive/etc API)
-	results, err := s.executeAndCacheQuery(ctx, pctx, query)
-	if err != nil {
-		return nil, fmt.Errorf("query execution failed: %w", err)
-	}
-
-	log.Info().
-		Str("path", queryPath).
-		Int("results", len(results)).
-		Msg("smart query refresh complete")
-
-	return results, nil
-}
-
-// RefreshQuery re-executes a query and emits hook events if new results are found.
-// ONLY called by the source poller — never by user browsing or task filesystem reads.
-// This prevents a feedback loop where hook-triggered tasks re-trigger hooks.
-// Satisfies hooks.QueryRefresher.
-func (s *SourceService) RefreshQuery(ctx context.Context, query *types.FilesystemQuery) error {
-	pctx := &sources.ProviderContext{WorkspaceId: query.WorkspaceId}
-	pctx, connected := s.loadCredentials(ctx, pctx, query.Integration)
-	if !connected {
-		return fmt.Errorf("not connected to %s (workspace %d)", query.Integration, query.WorkspaceId)
-	}
-
-	results, err := s.executeAndCacheQuery(ctx, pctx, query)
-	if err != nil {
-		return err
-	}
-
-	// Detect new results for hook triggers.
-	// Two-phase: Compare (read-only) → Emit → Commit (advance the set).
-	// The distributed lock in SourcePoller already ensures only one replica
-	// refreshes a given query per interval. The consumer group ensures
-	// exactly-once delivery. The DB unique constraint rejects duplicate tasks.
-	// So we don't need a cooldown — just emit on new IDs and commit on success.
-	if s.seenTracker != nil && s.hookStream != nil && len(results) > 0 {
-		seenKey := common.Keys.HookSeen(pctx.WorkspaceId, types.GeneratePathID(query.Path))
-		ids := make([]string, len(results))
-		for i, r := range results {
-			ids[i] = r.ID
-		}
-
-		newIDs, compareErr := s.seenTracker.Compare(ctx, seenKey, ids)
-
-		if compareErr != nil {
-			log.Warn().Err(compareErr).Str("path", query.Path).Msg("seen tracker compare failed, skipping commit")
-			return nil
-		}
-
-		if len(newIDs) > 0 {
-			if emitErr := s.hookStream.Emit(ctx, map[string]any{
-				"event":        hooks.EventSourceChange,
-				"workspace_id": fmt.Sprintf("%d", pctx.WorkspaceId),
-				"path":         query.Path,
-				"integration":  query.Integration,
-				"new_count":    fmt.Sprintf("%d", len(newIDs)),
-				"new_items":    strings.Join(newIDs, ", "),
-			}); emitErr != nil {
-				log.Error().Err(emitErr).Str("path", query.Path).Int("new_results", len(newIDs)).
-					Msg("failed to emit source change event, will retry next poll")
-				return nil // don't commit — two-phase: retry on next poll
-			}
-			log.Info().
-				Str("path", query.Path).
-				Str("integration", query.Integration).
-				Int("new_results", len(newIDs)).
-				Msg("source change detected, hook event emitted")
-		}
-
-		// Commit: advance the seen set. Safe because either we emitted
-		// successfully or there were no new IDs (just refreshing the baseline).
-		if err := s.seenTracker.Commit(ctx, seenKey, ids); err != nil {
-			log.Warn().Err(err).Str("path", query.Path).Msg("seen tracker commit failed, next poll may re-fire")
-		}
-	}
-
-	return nil
-}
-
-// Stat returns file/directory attributes for a source path
 func (s *SourceService) Stat(ctx context.Context, req *pb.SourceStatRequest) (*pb.SourceStatResponse, error) {
 	pctx, err := s.providerContext(ctx)
 	if err != nil {
 		return &pb.SourceStatResponse{Ok: false, Error: err.Error()}, nil
 	}
 
-	path := cleanPath(req.Path)
+	p := cleanPath(req.Path)
 
-	// Root /sources directory
-	if path == "" {
+	// Root /sources directory.
+	if p == "" {
 		return &pb.SourceStatResponse{
-			Ok: true,
-			Info: &pb.SourceFileInfo{
-				Mode:  sources.ModeDir,
-				IsDir: true,
-				Mtime: sources.NowUnix(),
-			},
+			Ok:   true,
+			Info: &pb.SourceFileInfo{Mode: sources.ModeDir, IsDir: true, Mtime: sources.NowUnix()},
 		}, nil
 	}
 
-	// Parse integration name from path
-	integration, relPath := splitIntegrationPath(path)
+	integration, relPath := splitIntegrationPath(p)
 
 	provider := s.registry.Get(integration)
 	if provider == nil {
 		return &pb.SourceStatResponse{Ok: false, Error: "integration not found"}, nil
 	}
-
 	if !s.isIntegrationVisible(ctx, pctx.WorkspaceId, integration) {
 		return &pb.SourceStatResponse{Ok: false, Error: "integration not connected"}, nil
 	}
 
-	// Get credentials for this integration
 	pctx, connected := s.loadCredentials(ctx, pctx, integration)
 
-	// Handle root of integration (e.g., /sources/github)
+	// Integration root.
 	if relPath == "" {
 		return &pb.SourceStatResponse{
-			Ok: true,
-			Info: &pb.SourceFileInfo{
-				Mode:  sources.ModeDir,
-				IsDir: true,
-				Mtime: sources.NowUnix(),
-			},
+			Ok:   true,
+			Info: &pb.SourceFileInfo{Mode: sources.ModeDir, IsDir: true, Mtime: sources.NowUnix()},
 		}, nil
 	}
 
-	// Handle README.md specially (no caching needed, cheap to generate)
+	// README.md (cheap to generate, never cached).
 	if relPath == types.SourceStatusFile {
-		workspaceId := ""
 		scope := ""
 		if connected && pctx.Credentials != nil {
-			scope = "shared" // TODO: detect personal vs shared
+			scope = "shared"
 		}
-		data := sources.GenerateSourceReadme(integration, connected, scope, workspaceId)
+		data := sources.GenerateSourceReadme(integration, connected, scope, "")
 		return &pb.SourceStatResponse{
-			Ok: true,
-			Info: &pb.SourceFileInfo{
-				Size:  int64(len(data)),
-				Mode:  sources.ModeFile,
-				Mtime: sources.NowUnix(),
-			},
+			Ok:   true,
+			Info: &pb.SourceFileInfo{Size: int64(len(data)), Mode: sources.ModeFile, Mtime: sources.NowUnix()},
 		}, nil
 	}
 
-	// Check cache first
+	// Check stat cache.
 	cacheKey := sources.CacheKey(pctx.WorkspaceId, integration, relPath, "stat")
 	if info, ok := s.cache.GetInfo(cacheKey); ok {
 		return &pb.SourceStatResponse{
 			Ok: true,
 			Info: &pb.SourceFileInfo{
-				Size:   info.Size,
-				Mode:   info.Mode,
-				Mtime:  info.Mtime,
-				IsDir:  info.IsDir,
-				IsLink: info.IsLink,
+				Size: info.Size, Mode: info.Mode, Mtime: info.Mtime,
+				IsDir: info.IsDir, IsLink: info.IsLink,
 			},
 		}, nil
 	}
 
-	// Rate limit check
+	// Source view result file or view folder.
+	queryPath, filename := s.findQueryAndFilename(ctx, pctx.WorkspaceId, integration, relPath)
+	if queryPath != "" {
+		results, err := s.fsStore.GetQueryResults(ctx, pctx.WorkspaceId, queryPath)
+		if err == nil {
+			for _, r := range results {
+				if r.Filename == filename {
+					mtime := r.Mtime
+					if mtime == 0 {
+						mtime = sources.NowUnix()
+					}
+					return &pb.SourceStatResponse{
+						Ok:   true,
+						Info: &pb.SourceFileInfo{Size: r.Size, Mode: sources.ModeFile, Mtime: mtime},
+					}, nil
+				}
+			}
+		}
+	} else {
+		// Check if the path itself is a source view folder.
+		qp := types.PathSources + "/" + integration + "/" + relPath
+		if q, err := s.fsStore.GetQuery(ctx, pctx.WorkspaceId, qp); err == nil && q != nil {
+			return &pb.SourceStatResponse{
+				Ok:   true,
+				Info: &pb.SourceFileInfo{Mode: sources.ModeDir, IsDir: true, Mtime: sources.NowUnix()},
+			}, nil
+		}
+	}
+
+	// Rate-limited provider stat with singleflight.
 	if err := s.rateLimiter.Wait(ctx, pctx.WorkspaceId, integration); err != nil {
 		return &pb.SourceStatResponse{Ok: false, Error: "rate limited"}, nil
 	}
-
-	// Use singleflight to coalesce concurrent requests
 	result, err := s.cache.DoOnce(cacheKey, func() (any, error) {
 		return provider.Stat(ctx, pctx, relPath)
 	})
@@ -331,113 +227,91 @@ func (s *SourceService) Stat(ctx context.Context, req *pb.SourceStatRequest) (*p
 	}
 
 	info := result.(*sources.FileInfo)
-
-	// Cache the result
 	s.cache.SetInfo(cacheKey, info)
 
 	return &pb.SourceStatResponse{
 		Ok: true,
 		Info: &pb.SourceFileInfo{
-			Size:   info.Size,
-			Mode:   info.Mode,
-			Mtime:  info.Mtime,
-			IsDir:  info.IsDir,
-			IsLink: info.IsLink,
+			Size: info.Size, Mode: info.Mode, Mtime: info.Mtime,
+			IsDir: info.IsDir, IsLink: info.IsLink,
 		},
 	}, nil
 }
 
-// ReadDir lists directory contents
 func (s *SourceService) ReadDir(ctx context.Context, req *pb.SourceReadDirRequest) (*pb.SourceReadDirResponse, error) {
 	pctx, err := s.providerContext(ctx)
 	if err != nil {
 		return &pb.SourceReadDirResponse{Ok: false, Error: err.Error()}, nil
 	}
 
-	path := cleanPath(req.Path)
+	p := cleanPath(req.Path)
 
-	// Root /sources directory - list only connected integrations
-	if path == "" {
-		connected := s.connectedIntegrations(ctx, pctx.WorkspaceId)
+	// Root /sources — list visible integrations.
+	// Built-in integrations (AuthNone) are always shown; others require a connection.
+	if p == "" {
 		allNames := s.registry.List()
 		entries := make([]*pb.SourceDirEntry, 0, len(allNames))
 		for _, name := range allNames {
-			if connected != nil && !connected[name] {
-				continue // integration not connected — hide it
+			if !s.isIntegrationVisible(ctx, pctx.WorkspaceId, name) {
+				continue
 			}
 			entries = append(entries, &pb.SourceDirEntry{
-				Name:  name,
-				Mode:  sources.ModeDir,
-				IsDir: true,
-				Mtime: sources.NowUnix(),
+				Name: name, Mode: sources.ModeDir, IsDir: true, Mtime: sources.NowUnix(),
 			})
 		}
 		return &pb.SourceReadDirResponse{Ok: true, Entries: entries}, nil
 	}
 
-	// Parse integration name from path
-	integration, relPath := splitIntegrationPath(path)
+	integration, relPath := splitIntegrationPath(p)
 
 	provider := s.registry.Get(integration)
 	if provider == nil {
 		return &pb.SourceReadDirResponse{Ok: false, Error: "integration not found"}, nil
 	}
-
 	if !s.isIntegrationVisible(ctx, pctx.WorkspaceId, integration) {
 		return &pb.SourceReadDirResponse{Ok: false, Error: "integration not connected"}, nil
 	}
 
-	// Get credentials for this integration
 	pctx, connected := s.loadCredentials(ctx, pctx, integration)
 
-	// Integration root (e.g., /sources/gmail) - show README.md + smart queries only
+	// Integration root.
 	if relPath == "" {
 		return s.readDirIntegrationRoot(ctx, pctx, integration, connected)
 	}
 
-	// Check if this path is a smart query
-	queryPath := types.PathSources + "/" + path
+	// Source view folder.
+	queryPath := types.PathSources + "/" + p
 	query, err := s.fsStore.GetQuery(ctx, pctx.WorkspaceId, queryPath)
 	if err != nil {
 		log.Debug().Err(err).Str("path", queryPath).Msg("query lookup error")
 	}
-
-	// If it's a smart query folder, return its materialized results
-	if query != nil && query.OutputFormat == types.QueryOutputFolder {
-		return s.readDirSmartQuery(ctx, pctx, query, connected)
+	if query != nil && query.OutputFormat == types.ViewOutputFolder {
+		return s.readDirView(ctx, pctx, query, connected)
 	}
 
-	// Check for .query.as metadata file
+	// .query.as is a file, not a directory.
 	if strings.HasSuffix(relPath, ".query.as") {
-		// .query.as files are handled by Read, not ReadDir
 		return &pb.SourceReadDirResponse{Ok: false, Error: "not a directory"}, nil
 	}
 
-	// For any other path, check if parent is a smart query
+	// If parent is a source view, this is inside a result — no subdirectories.
 	parentPath := types.PathSources + "/" + integration
 	if idx := strings.LastIndex(relPath, "/"); idx > 0 {
 		parentPath = types.PathSources + "/" + integration + "/" + relPath[:idx]
 	}
-
-	parentQuery, _ := s.fsStore.GetQuery(ctx, pctx.WorkspaceId, parentPath)
-	if parentQuery != nil {
-		// This is inside a smart query result - no subdirectories
+	if parentQuery, _ := s.fsStore.GetQuery(ctx, pctx.WorkspaceId, parentPath); parentQuery != nil {
 		return &pb.SourceReadDirResponse{Ok: true, Entries: []*pb.SourceDirEntry{}}, nil
 	}
 
-	// Unknown path — if provider is NativeBrowsable, delegate to it
+	// NativeBrowsable provider.
 	if nb, ok := provider.(sources.NativeBrowsable); ok && nb.IsNativeBrowsable() && connected {
-		// Check cache first
 		cacheKey := sources.CacheKey(pctx.WorkspaceId, integration, relPath, "readdir")
 		nativeEntries, cacheHit := s.cache.GetEntries(cacheKey)
 
 		if !cacheHit {
-			// Rate limit check
 			if err := s.rateLimiter.Wait(ctx, pctx.WorkspaceId, integration); err != nil {
 				return &pb.SourceReadDirResponse{Ok: false, Error: "rate limited"}, nil
 			}
-
-			// Use singleflight to coalesce concurrent requests
 			result, err := s.cache.DoOnce(cacheKey, func() (any, error) {
 				return provider.ReadDir(ctx, pctx, relPath)
 			})
@@ -445,44 +319,143 @@ func (s *SourceService) ReadDir(ctx context.Context, req *pb.SourceReadDirReques
 				return &pb.SourceReadDirResponse{Ok: true, Entries: []*pb.SourceDirEntry{}}, nil
 			}
 			nativeEntries = result.([]sources.DirEntry)
-			// Cache the result
 			s.cache.SetEntries(cacheKey, nativeEntries)
 		}
 
 		pbEntries := make([]*pb.SourceDirEntry, 0, len(nativeEntries))
 		for _, e := range nativeEntries {
 			pbEntries = append(pbEntries, &pb.SourceDirEntry{
-				Name:  e.Name,
-				Mode:  e.Mode,
-				IsDir: e.IsDir,
-				Size:  e.Size,
-				Mtime: e.Mtime,
+				Name: e.Name, Mode: e.Mode, IsDir: e.IsDir, Size: e.Size, Mtime: e.Mtime,
 			})
 		}
 		return &pb.SourceReadDirResponse{Ok: true, Entries: pbEntries}, nil
 	}
 
-	// Not native browsable — return empty
 	return &pb.SourceReadDirResponse{Ok: true, Entries: []*pb.SourceDirEntry{}}, nil
 }
 
-// getQueryChildCount returns the number of children for a smart query folder.
-// Uses cached results if available, returns 1 (for .query.as) if not cached.
-func (s *SourceService) getQueryChildCount(ctx context.Context, workspaceId uint, queryPath string) int {
-	if s.fsStore == nil {
-		return 1 // At least .query.as file
+func (s *SourceService) Read(ctx context.Context, req *pb.SourceReadRequest) (*pb.SourceReadResponse, error) {
+	pctx, err := s.providerContext(ctx)
+	if err != nil {
+		return &pb.SourceReadResponse{Ok: false, Error: err.Error()}, nil
 	}
 
-	results, err := s.fsStore.GetQueryResults(ctx, workspaceId, queryPath)
-	if err != nil || results == nil {
-		return 1 // At least .query.as file
+	cleanedPath := cleanPath(req.Path)
+	if cleanedPath == "" {
+		return &pb.SourceReadResponse{Ok: false, Error: "is a directory"}, nil
 	}
-	return len(results) + 1 // Results + .query.as
+
+	integration, relPath := splitIntegrationPath(cleanedPath)
+
+	provider := s.registry.Get(integration)
+	if provider == nil {
+		return &pb.SourceReadResponse{Ok: false, Error: "integration not found"}, nil
+	}
+	if !s.isIntegrationVisible(ctx, pctx.WorkspaceId, integration) {
+		return &pb.SourceReadResponse{Ok: false, Error: "integration not connected"}, nil
+	}
+
+	pctx, connected := s.loadCredentials(ctx, pctx, integration)
+
+	// README.md
+	if relPath == types.SourceStatusFile {
+		scope := ""
+		if connected && pctx.Credentials != nil {
+			scope = "shared"
+		}
+		data := sources.GenerateSourceReadme(integration, connected, scope, "")
+		return readSlice(data, req.Offset, req.Length), nil
+	}
+
+	if relPath == "" {
+		return &pb.SourceReadResponse{Ok: false, Error: "is a directory"}, nil
+	}
+
+	// .query.as metadata files (folder-level).
+	if relPath == ".query.as" || strings.HasSuffix(relPath, "/.query.as") {
+		queryPath := types.PathSources + "/" + integration
+		if relPath != ".query.as" {
+			queryPath = types.PathSources + "/" + integration + "/" + strings.TrimSuffix(relPath, "/.query.as")
+		}
+		query, err := s.fsStore.GetQuery(ctx, pctx.WorkspaceId, queryPath)
+		if err != nil || query == nil {
+			return &pb.SourceReadResponse{Ok: false, Error: "query not found"}, nil
+		}
+		return readSlice(s.generateQueryMetaJSON(query), req.Offset, req.Length), nil
+	}
+
+	// .{filename}.query.as metadata files (single-file queries).
+	base := path.Base(relPath)
+	if strings.HasPrefix(base, ".") && strings.HasSuffix(base, ".query.as") {
+		filename := strings.TrimPrefix(strings.TrimSuffix(base, ".query.as"), ".")
+		dir := path.Dir(relPath)
+		queryPath := types.PathSources + "/" + integration
+		if dir != "." && dir != "" {
+			queryPath += "/" + dir
+		}
+		queryPath += "/" + filename
+		query, err := s.fsStore.GetQuery(ctx, pctx.WorkspaceId, queryPath)
+		if err != nil || query == nil || query.OutputFormat != types.ViewOutputFile {
+			return &pb.SourceReadResponse{Ok: false, Error: "query not found"}, nil
+		}
+		return readSlice(s.generateQueryMetaJSON(query), req.Offset, req.Length), nil
+	}
+
+	// Source view result file.
+	queryPath, filename := s.findQueryAndFilename(ctx, pctx.WorkspaceId, integration, relPath)
+	if queryPath != "" {
+		return s.readViewResult(ctx, pctx, queryPath, filename, req.Offset, req.Length)
+	}
+
+	// NativeBrowsable provider read.
+	if nb, ok := provider.(sources.NativeBrowsable); ok && nb.IsNativeBrowsable() && connected {
+		if err := s.rateLimiter.Wait(ctx, pctx.WorkspaceId, integration); err != nil {
+			return &pb.SourceReadResponse{Ok: false, Error: "rate limited"}, nil
+		}
+		data, err := provider.Read(ctx, pctx, relPath, req.Offset, req.Length)
+		if err != nil {
+			return &pb.SourceReadResponse{Ok: false, Error: err.Error()}, nil
+		}
+		return &pb.SourceReadResponse{
+			Ok:       true,
+			Data:     data,
+			CostHint: s.passthroughCostHint(ctx, integration, "", relPath, relPath, data),
+		}, nil
+	}
+
+	return &pb.SourceReadResponse{Ok: false, Error: "file not found"}, nil
 }
 
-// readDirIntegrationRoot returns entries for integration root: README.md + smart queries
+func (s *SourceService) Readlink(ctx context.Context, req *pb.SourceReadlinkRequest) (*pb.SourceReadlinkResponse, error) {
+	pctx, err := s.providerContext(ctx)
+	if err != nil {
+		return &pb.SourceReadlinkResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	p := cleanPath(req.Path)
+	if p == "" {
+		return &pb.SourceReadlinkResponse{Ok: false, Error: "not a symlink"}, nil
+	}
+
+	integration, relPath := splitIntegrationPath(p)
+	provider := s.registry.Get(integration)
+	if provider == nil {
+		return &pb.SourceReadlinkResponse{Ok: false, Error: "integration not found"}, nil
+	}
+
+	pctx, _ = s.loadCredentials(ctx, pctx, integration)
+	target, err := provider.Readlink(ctx, pctx, relPath)
+	if err != nil {
+		return &pb.SourceReadlinkResponse{Ok: false, Error: err.Error()}, nil
+	}
+	return &pb.SourceReadlinkResponse{Ok: true, Target: target}, nil
+}
+
+// ---------------------------------------------------------------------------
+// ReadDir helpers
+// ---------------------------------------------------------------------------
+
 func (s *SourceService) readDirIntegrationRoot(ctx context.Context, pctx *sources.ProviderContext, integration string, connected bool) (*pb.SourceReadDirResponse, error) {
-	// Generate README.md to get its size
 	scope := ""
 	if connected && pctx.Credentials != nil {
 		scope = "shared"
@@ -493,97 +466,72 @@ func (s *SourceService) readDirIntegrationRoot(ctx context.Context, pctx *source
 		{Name: types.SourceStatusFile, Mode: sources.ModeFile, Size: int64(len(statusData)), Mtime: sources.NowUnix()},
 	}
 
-	// List smart queries for this integration
+	// Smart queries for this integration.
 	parentPath := types.PathSources + "/" + integration
 	queries, err := s.fsStore.ListQueries(ctx, pctx.WorkspaceId, parentPath)
 	if err != nil {
 		log.Warn().Err(err).Str("path", parentPath).Msg("failed to list smart queries")
 	} else {
 		for _, q := range queries {
-			// Only include direct children
 			if q.Path == parentPath {
 				continue
 			}
-			// Extract name from path
 			name := strings.TrimPrefix(q.Path, parentPath+"/")
 			if strings.Contains(name, "/") {
-				continue // Skip nested entries
+				continue // skip nested entries
 			}
 
-			if q.OutputFormat == types.QueryOutputFolder {
-				childCount := s.getQueryChildCount(ctx, pctx.WorkspaceId, q.Path)
+			if q.OutputFormat == types.ViewOutputFolder {
 				entries = append(entries, &pb.SourceDirEntry{
-					Name:       name,
-					Mode:       sources.ModeDir,
-					IsDir:      true,
-					Mtime:      q.UpdatedAt.Unix(),
-					ChildCount: int32(childCount),
+					Name: name, Mode: sources.ModeDir, IsDir: true,
+					Mtime: q.UpdatedAt.Unix(), ChildCount: int32(s.getQueryChildCount(ctx, pctx.WorkspaceId, q.Path)),
 				})
 				continue
 			}
 
-			// Single-file query
+			// Single-file query.
 			filename := q.Name
 			if q.FileExt != "" {
 				filename = q.Name + q.FileExt
 			}
 			entries = append(entries, &pb.SourceDirEntry{
-				Name:  filename,
-				Mode:  sources.ModeFile,
-				IsDir: false,
-				Mtime: q.UpdatedAt.Unix(),
+				Name: filename, Mode: sources.ModeFile, Mtime: q.UpdatedAt.Unix(),
 			})
-
-			// Add hidden metadata file for single-file queries
 			queryMeta := s.generateQueryMetaJSON(q)
 			entries = append(entries, &pb.SourceDirEntry{
-				Name:  "." + filename + ".query.as",
-				Mode:  sources.ModeFile | 0444, // Read-only
-				Size:  int64(len(queryMeta)),
-				Mtime: q.UpdatedAt.Unix(),
+				Name: "." + filename + ".query.as", Mode: sources.ModeFile | 0444,
+				Size: int64(len(queryMeta)), Mtime: q.UpdatedAt.Unix(),
 			})
 		}
 	}
 
-	// If provider is NativeBrowsable, merge native root entries
+	// Merge NativeBrowsable root entries.
 	provider := s.registry.Get(integration)
 	if provider != nil && connected {
 		if nb, ok := provider.(sources.NativeBrowsable); ok && nb.IsNativeBrowsable() {
-			// Check cache first
 			cacheKey := sources.CacheKey(pctx.WorkspaceId, integration, "", "readdir")
 			nativeEntries, cacheHit := s.cache.GetEntries(cacheKey)
 
 			if !cacheHit {
-				// Rate limit check
 				if err := s.rateLimiter.Wait(ctx, pctx.WorkspaceId, integration); err == nil {
-					// Use singleflight to coalesce concurrent requests
-					result, err := s.cache.DoOnce(cacheKey, func() (any, error) {
+					if result, err := s.cache.DoOnce(cacheKey, func() (any, error) {
 						return provider.ReadDir(ctx, pctx, "")
-					})
-					if err == nil {
+					}); err == nil {
 						nativeEntries = result.([]sources.DirEntry)
-						// Cache the result
 						s.cache.SetEntries(cacheKey, nativeEntries)
 					}
 				}
 			}
 
-			if len(nativeEntries) > 0 {
-				// Build set of existing names to skip duplicates
-				existing := make(map[string]bool, len(entries))
-				for _, e := range entries {
-					existing[e.Name] = true
-				}
-				for _, ne := range nativeEntries {
-					if !existing[ne.Name] {
-						entries = append(entries, &pb.SourceDirEntry{
-							Name:  ne.Name,
-							Mode:  ne.Mode,
-							IsDir: ne.IsDir,
-							Size:  ne.Size,
-							Mtime: ne.Mtime,
-						})
-					}
+			existing := make(map[string]bool, len(entries))
+			for _, e := range entries {
+				existing[e.Name] = true
+			}
+			for _, ne := range nativeEntries {
+				if !existing[ne.Name] {
+					entries = append(entries, &pb.SourceDirEntry{
+						Name: ne.Name, Mode: ne.Mode, IsDir: ne.IsDir, Size: ne.Size, Mtime: ne.Mtime,
+					})
 				}
 			}
 		}
@@ -592,18 +540,11 @@ func (s *SourceService) readDirIntegrationRoot(ctx context.Context, pctx *source
 	return &pb.SourceReadDirResponse{Ok: true, Entries: entries}, nil
 }
 
-// readDirSmartQuery returns materialized results for a smart query folder
-func (s *SourceService) readDirSmartQuery(ctx context.Context, pctx *sources.ProviderContext, query *types.FilesystemQuery, connected bool) (*pb.SourceReadDirResponse, error) {
-	entries := []*pb.SourceDirEntry{}
-
-	// Always include .query.as metadata file
+func (s *SourceService) readDirView(ctx context.Context, pctx *sources.ProviderContext, query *types.FilesystemQuery, connected bool) (*pb.SourceReadDirResponse, error) {
 	queryMeta := s.generateQueryMetaJSON(query)
-	entries = append(entries, &pb.SourceDirEntry{
-		Name:  ".query.as",
-		Mode:  sources.ModeFile | 0444,
-		Size:  int64(len(queryMeta)),
-		Mtime: query.UpdatedAt.Unix(),
-	})
+	entries := []*pb.SourceDirEntry{
+		{Name: ".query.as", Mode: sources.ModeFile | 0444, Size: int64(len(queryMeta)), Mtime: query.UpdatedAt.Unix()},
+	}
 
 	if !connected {
 		return &pb.SourceReadDirResponse{Ok: true, Entries: entries}, nil
@@ -611,152 +552,29 @@ func (s *SourceService) readDirSmartQuery(ctx context.Context, pctx *sources.Pro
 
 	results, err := s.getOrExecuteQuery(ctx, pctx, query)
 	if err != nil {
-		log.Warn().Err(err).Str("path", query.Path).Msg("failed to execute smart query")
+		log.Warn().Err(err).Str("path", query.Path).Msg("failed to execute source view query")
 		return &pb.SourceReadDirResponse{Ok: true, Entries: entries}, nil
 	}
 
-	// Convert results to directory entries
 	for _, r := range results {
 		entries = append(entries, &pb.SourceDirEntry{
-			Name:     r.Filename,
-			Mode:     sources.ModeFile,
-			Size:     r.Size,
-			Mtime:    r.Mtime,
-			ResultId: r.ID,
+			Name: r.Filename, Mode: sources.ModeFile, Size: r.Size, Mtime: r.Mtime, ResultId: r.ID,
 		})
 	}
-
 	return &pb.SourceReadDirResponse{Ok: true, Entries: entries}, nil
 }
 
-func (s *SourceService) executeAndCacheQuery(ctx context.Context, pctx *sources.ProviderContext, query *types.FilesystemQuery) ([]repository.QueryResult, error) {
-	provider := s.registry.Get(query.Integration)
-	if provider == nil {
-		return nil, fmt.Errorf("provider not found: %s", query.Integration)
+func (s *SourceService) getQueryChildCount(ctx context.Context, workspaceId uint, queryPath string) int {
+	if s.fsStore == nil {
+		return 1
 	}
-
-	executor, ok := provider.(sources.QueryExecutor)
-	if !ok {
-		return nil, fmt.Errorf("provider does not support queries: %s", query.Integration)
+	results, err := s.fsStore.GetQueryResults(ctx, workspaceId, queryPath)
+	if err != nil || results == nil {
+		return 1
 	}
-
-	spec := parseQuerySpec(query.Integration, query.QuerySpec)
-	if spec.Query == "" && query.Integration != "posthog" {
-		return nil, fmt.Errorf("empty query spec for %s", query.Integration)
-	}
-
-	log.Info().
-		Str("integration", query.Integration).
-		Str("path", query.Path).
-		Str("query", spec.Query).
-		Int("limit", spec.Limit).
-		Int("max_results", spec.MaxResults).
-		Msg("executing provider query")
-
-	// Fetch all pages synchronously
-	var allResults []repository.QueryResult
-	seenIDs := make(map[string]bool)
-	pageNum := 0
-
-	for {
-		pageNum++
-		queryResp, err := executor.ExecuteQuery(ctx, pctx, spec)
-		if err != nil {
-			return nil, fmt.Errorf("query execution failed (page %d): %w", pageNum, err)
-		}
-
-		// Convert and dedupe
-		for _, qr := range queryResp.Results {
-			if qr.ID != "" && !seenIDs[qr.ID] {
-				seenIDs[qr.ID] = true
-				filename := qr.Filename
-				if filename == "" {
-					filename = executor.FormatFilename(spec.FilenameFormat, qr.Metadata)
-				}
-				allResults = append(allResults, repository.QueryResult{
-					ID:       qr.ID,
-					Filename: filename,
-					Metadata: qr.Metadata,
-					Size:     qr.Size,
-					Mtime:    qr.Mtime,
-				})
-			}
-		}
-
-		log.Debug().
-			Str("path", query.Path).
-			Int("page", pageNum).
-			Int("page_results", len(queryResp.Results)).
-			Int("total_unique", len(allResults)).
-			Bool("has_more", queryResp.HasMore).
-			Msg("fetched page")
-
-		// Stop if no more pages or hit max
-		if !queryResp.HasMore || queryResp.NextPageToken == "" || len(allResults) >= spec.MaxResults {
-			break
-		}
-		spec.PageToken = queryResp.NextPageToken
-	}
-
-	// Cap at max
-	if len(allResults) > spec.MaxResults {
-		allResults = allResults[:spec.MaxResults]
-	}
-
-	log.Info().
-		Str("integration", query.Integration).
-		Str("path", query.Path).
-		Int("total_results", len(allResults)).
-		Int("pages", pageNum).
-		Msg("query complete")
-
-	// Note: hook event detection is NOT done here. It's done in RefreshQuery
-	// (called only by the source poller). This prevents a feedback loop where
-	// a hook-triggered task reads the filesystem, which re-executes the query,
-	// which detects "new" results, which fires another hook, ad infinitum.
-
-	// Cache results
-	ttl := time.Duration(query.CacheTTL) * time.Second
-	if ttl == 0 {
-		ttl = 5 * time.Minute
-	}
-	if err := s.fsStore.StoreQueryResults(ctx, pctx.WorkspaceId, query.Path, allResults, ttl); err != nil {
-		log.Warn().Err(err).Str("path", query.Path).Msg("failed to cache query results")
-	}
-
-	// Update last_executed timestamp
-	now := time.Now()
-	query.LastExecuted = &now
-	if err := s.fsStore.UpdateQuery(ctx, query); err != nil {
-		log.Warn().Err(err).Str("path", query.Path).Msg("failed to update query timestamp")
-	}
-
-	return allResults, nil
+	return len(results) + 1
 }
 
-func (s *SourceService) getOrExecuteQuery(ctx context.Context, pctx *sources.ProviderContext, query *types.FilesystemQuery) ([]repository.QueryResult, error) {
-	if results, err := s.fsStore.GetQueryResults(ctx, pctx.WorkspaceId, query.Path); err == nil && len(results) > 0 {
-		return results, nil
-	}
-
-	key := fmt.Sprintf("%d:%s", pctx.WorkspaceId, query.Path)
-	value, err, _ := s.queryGroup.Do(key, func() (any, error) {
-		if results, err := s.fsStore.GetQueryResults(ctx, pctx.WorkspaceId, query.Path); err == nil && len(results) > 0 {
-			return results, nil
-		}
-		return s.executeAndCacheQuery(ctx, pctx, query)
-	})
-	if err != nil {
-		return nil, err
-	}
-	results, ok := value.([]repository.QueryResult)
-	if !ok {
-		return nil, fmt.Errorf("unexpected query result type for %s", query.Path)
-	}
-	return results, nil
-}
-
-// generateQueryMetaJSON creates the JSON content for a .query.as metadata file
 func (s *SourceService) generateQueryMetaJSON(query *types.FilesystemQuery) []byte {
 	data, _ := json.MarshalIndent(map[string]interface{}{
 		"id":              query.Id,
@@ -777,141 +595,13 @@ func (s *SourceService) generateQueryMetaJSON(query *types.FilesystemQuery) []by
 	return data
 }
 
-// Read reads file content
-func (s *SourceService) Read(ctx context.Context, req *pb.SourceReadRequest) (*pb.SourceReadResponse, error) {
-	pctx, err := s.providerContext(ctx)
-	if err != nil {
-		return &pb.SourceReadResponse{Ok: false, Error: err.Error()}, nil
-	}
+// ---------------------------------------------------------------------------
+// Read helpers
+// ---------------------------------------------------------------------------
 
-	cleanedPath := cleanPath(req.Path)
-
-	if cleanedPath == "" {
-		return &pb.SourceReadResponse{Ok: false, Error: "is a directory"}, nil
-	}
-
-	// Parse integration name from path
-	integration, relPath := splitIntegrationPath(cleanedPath)
-
-	provider := s.registry.Get(integration)
-	if provider == nil {
-		return &pb.SourceReadResponse{Ok: false, Error: "integration not found"}, nil
-	}
-
-	if !s.isIntegrationVisible(ctx, pctx.WorkspaceId, integration) {
-		return &pb.SourceReadResponse{Ok: false, Error: "integration not connected"}, nil
-	}
-
-	// Get credentials for this integration
-	pctx, connected := s.loadCredentials(ctx, pctx, integration)
-
-	// Handle README.md
-	if relPath == types.SourceStatusFile {
-		scope := ""
-		if connected && pctx.Credentials != nil {
-			scope = "shared"
-		}
-		data := sources.GenerateSourceReadme(integration, connected, scope, "")
-		return readSlice(data, req.Offset, req.Length), nil
-	}
-
-	if relPath == "" {
-		return &pb.SourceReadResponse{Ok: false, Error: "is a directory"}, nil
-	}
-
-	// Handle .query.as metadata files
-	if relPath == ".query.as" || strings.HasSuffix(relPath, "/.query.as") {
-		// Get the parent query path
-		queryPath := types.PathSources + "/" + integration
-		if relPath != ".query.as" {
-			queryPath = types.PathSources + "/" + integration + "/" + strings.TrimSuffix(relPath, "/.query.as")
-		}
-
-		query, err := s.fsStore.GetQuery(ctx, pctx.WorkspaceId, queryPath)
-		if err != nil || query == nil {
-			return &pb.SourceReadResponse{Ok: false, Error: "query not found"}, nil
-		}
-
-		data := s.generateQueryMetaJSON(query)
-		return readSlice(data, req.Offset, req.Length), nil
-	}
-
-	// Handle .{filename}.query.as metadata files for single-file queries
-	base := path.Base(relPath)
-	if strings.HasPrefix(base, ".") && strings.HasSuffix(base, ".query.as") {
-		filename := strings.TrimPrefix(strings.TrimSuffix(base, ".query.as"), ".")
-		dir := path.Dir(relPath)
-		queryPath := types.PathSources + "/" + integration
-		if dir != "." && dir != "" {
-			queryPath += "/" + dir
-		}
-		queryPath += "/" + filename
-
-		query, err := s.fsStore.GetQuery(ctx, pctx.WorkspaceId, queryPath)
-		if err != nil || query == nil || query.OutputFormat != types.QueryOutputFile {
-			return &pb.SourceReadResponse{Ok: false, Error: "query not found"}, nil
-		}
-
-		data := s.generateQueryMetaJSON(query)
-		return readSlice(data, req.Offset, req.Length), nil
-	}
-
-	// Check if this is a smart query result file
-	// Path format: /sources/gmail/unread-emails/filename.txt
-	// We need to find the parent query and the result filename
-	queryPath, filename := s.findQueryAndFilename(ctx, pctx.WorkspaceId, integration, relPath)
-	if queryPath != "" {
-		return s.readSmartQueryResult(ctx, pctx, queryPath, filename, req.Offset, req.Length)
-	}
-
-	// Not a smart query result — if provider is NativeBrowsable, delegate to it
-	if nb, ok := provider.(sources.NativeBrowsable); ok && nb.IsNativeBrowsable() && connected {
-		// Rate limit check
-		if err := s.rateLimiter.Wait(ctx, pctx.WorkspaceId, integration); err != nil {
-			return &pb.SourceReadResponse{Ok: false, Error: "rate limited"}, nil
-		}
-
-		data, err := provider.Read(ctx, pctx, relPath, req.Offset, req.Length)
-		if err != nil {
-			return &pb.SourceReadResponse{Ok: false, Error: err.Error()}, nil
-		}
-		return &pb.SourceReadResponse{Ok: true, Data: data}, nil
-	}
-
-	return &pb.SourceReadResponse{Ok: false, Error: "file not found"}, nil
-}
-
-// findQueryAndFilename finds the query path and filename for a smart query result
-func (s *SourceService) findQueryAndFilename(ctx context.Context, workspaceId uint, integration, relPath string) (string, string) {
-	// Try different path splits to find a matching query
-	parts := strings.Split(relPath, "/")
-
-	for i := len(parts) - 1; i > 0; i-- {
-		parentPath := types.PathSources + "/" + integration + "/" + strings.Join(parts[:i], "/")
-		query, err := s.fsStore.GetQuery(ctx, workspaceId, parentPath)
-		if err == nil && query != nil && query.OutputFormat == types.QueryOutputFolder {
-			filename := strings.Join(parts[i:], "/")
-			return query.Path, filename
-		}
-	}
-
-	// Check if the direct parent is a query
-	if len(parts) >= 1 {
-		parentPath := types.PathSources + "/" + integration + "/" + strings.Join(parts[:len(parts)-1], "/")
-		if len(parts) == 1 {
-			parentPath = types.PathSources + "/" + integration
-		}
-		query, err := s.fsStore.GetQuery(ctx, workspaceId, parentPath)
-		if err == nil && query != nil && query.OutputFormat == types.QueryOutputFolder {
-			return query.Path, parts[len(parts)-1]
-		}
-	}
-
-	return "", ""
-}
-
-// readSmartQueryResult reads content from a smart query result
-func (s *SourceService) readSmartQueryResult(ctx context.Context, pctx *sources.ProviderContext, queryPath, filename string, offset, length int64) (*pb.SourceReadResponse, error) {
+// readViewResult reads content from a source view result, optionally
+// compressing via the compression middleware if enabled.
+func (s *SourceService) readViewResult(ctx context.Context, pctx *sources.ProviderContext, queryPath, filename string, offset, length int64) (*pb.SourceReadResponse, error) {
 	query, err := s.fsStore.GetQuery(ctx, pctx.WorkspaceId, queryPath)
 	if err != nil || query == nil {
 		return &pb.SourceReadResponse{Ok: false, Error: "query not found"}, nil
@@ -927,7 +617,6 @@ func (s *SourceService) readSmartQueryResult(ctx context.Context, pctx *sources.
 		return &pb.SourceReadResponse{Ok: false, Error: "provider does not support queries"}, nil
 	}
 
-	// Find the result ID from filename
 	results, err := s.getOrExecuteQuery(ctx, pctx, query)
 	if err != nil {
 		return &pb.SourceReadResponse{Ok: false, Error: "failed to get query results"}, nil
@@ -940,137 +629,165 @@ func (s *SourceService) readSmartQueryResult(ctx context.Context, pctx *sources.
 			break
 		}
 	}
-
 	if resultID == "" {
 		return &pb.SourceReadResponse{Ok: false, Error: "result not found"}, nil
 	}
 
-	// Try cached content first
-	if content, err := s.fsStore.GetResultContent(ctx, pctx.WorkspaceId, queryPath, resultID); err == nil && len(content) > 0 {
-		return readSlice(content, offset, length), nil
+	// Compression intercept.
+	strategy, session := s.compressionMeta(ctx)
+	if strategy != "" {
+		if s.compressor != nil {
+			log.Debug().Str("strategy", strategy).Str("file", filename).Msg("compression: entering compressed read path")
+			return s.readWithCompression(ctx, pctx, executor, query.Integration, queryPath, filename, resultID, query.QuerySpec, offset, length, strategy, session)
+		}
+		log.Warn().Str("strategy", strategy).Msg("compression: requested but compressor not initialized")
 	}
 
-	// Fetch content from provider
+	// Standard read (no compression).
+	if content, err := s.fsStore.GetResultContent(ctx, pctx.WorkspaceId, queryPath, resultID); err == nil && len(content) > 0 {
+		resp := readSlice(content, offset, length)
+		resp.CostHint = s.passthroughCostHint(ctx, query.Integration, queryPath, resultID, filename, resp.Data)
+		return resp, nil
+	}
+
 	content, err := executor.ReadResult(ctx, pctx, resultID)
 	if err != nil {
 		return &pb.SourceReadResponse{Ok: false, Error: err.Error()}, nil
 	}
-
-	// Cache the content
 	if err := s.fsStore.StoreResultContent(ctx, pctx.WorkspaceId, queryPath, resultID, content); err != nil {
 		log.Warn().Err(err).Str("path", queryPath).Str("result", resultID).Msg("failed to cache result content")
 	}
-
-	return readSlice(content, offset, length), nil
+	resp := readSlice(content, offset, length)
+	resp.CostHint = s.passthroughCostHint(ctx, query.Integration, queryPath, resultID, filename, resp.Data)
+	return resp, nil
 }
 
-// Readlink reads a symbolic link target
-func (s *SourceService) Readlink(ctx context.Context, req *pb.SourceReadlinkRequest) (*pb.SourceReadlinkResponse, error) {
-	pctx, err := s.providerContext(ctx)
-	if err != nil {
-		return &pb.SourceReadlinkResponse{Ok: false, Error: err.Error()}, nil
+// compressionMeta extracts compression strategy and session from gRPC metadata.
+func (s *SourceService) compressionMeta(ctx context.Context) (strategy, session string) {
+	md, ok := grpcmd.FromIncomingContext(ctx)
+	if !ok {
+		return "", ""
 	}
-
-	path := cleanPath(req.Path)
-
-	if path == "" {
-		return &pb.SourceReadlinkResponse{Ok: false, Error: "not a symlink"}, nil
+	if vals := md.Get("x-airstore-compression"); len(vals) > 0 {
+		strategy = vals[0]
 	}
-
-	// Parse integration name from path
-	integration, relPath := splitIntegrationPath(path)
-
-	provider := s.registry.Get(integration)
-	if provider == nil {
-		return &pb.SourceReadlinkResponse{Ok: false, Error: "integration not found"}, nil
+	if vals := md.Get("x-airstore-session"); len(vals) > 0 {
+		session = vals[0]
 	}
-
-	pctx, _ = s.loadCredentials(ctx, pctx, integration)
-
-	target, err := provider.Readlink(ctx, pctx, relPath)
-	if err != nil {
-		return &pb.SourceReadlinkResponse{Ok: false, Error: err.Error()}, nil
-	}
-
-	return &pb.SourceReadlinkResponse{Ok: true, Target: target}, nil
+	return strategy, session
 }
 
-// providerContext creates a ProviderContext from the gRPC context
+func isFuseAccessOrigin(ctx context.Context) bool {
+	md, ok := grpcmd.FromIncomingContext(ctx)
+	if !ok {
+		return false
+	}
+	vals := md.Get("x-airstore-access-origin")
+	return len(vals) > 0 && vals[0] == "fuse"
+}
+
+func (s *SourceService) getPassthroughCompressor() compression.ContextCompressor {
+	s.passthroughOnce.Do(func() {
+		cfg := s.compressionCfg
+		if cfg.TokenEncoding == "" {
+			cfg.TokenEncoding = compression.DefaultConfig().TokenEncoding
+		}
+		comp, err := compression.NewCompressor(compression.CompressionStrategyPassthrough, cfg)
+		if err == nil {
+			s.passthroughComp = comp
+		}
+	})
+	return s.passthroughComp
+}
+
+func (s *SourceService) passthroughCostHint(
+	ctx context.Context,
+	integration, queryPath, resultID, filename string,
+	content []byte,
+) *pb.SourceReadCostHint {
+	sourceURI := ""
+	if integration != "" && resultID != "" {
+		sourceURI = integration + "://" + resultID
+	}
+	hint := &pb.SourceReadCostHint{
+		Integration:      integration,
+		SourceUri:        sourceURI,
+		QueryPath:        queryPath,
+		ResultId:         resultID,
+		Strategy:         string(compression.CompressionStrategyPassthrough),
+		Outcome:          string(compression.OutcomePassthrough),
+		OriginalBytes:    int64(len(content)),
+		CompressedBytes:  int64(len(content)),
+		OriginalTokens:   0,
+		CompressedTokens: 0,
+		CompressionMs:    0,
+	}
+
+	comp := s.getPassthroughCompressor()
+	if comp == nil {
+		return hint
+	}
+
+	res, err := comp.Compress(ctx, content, compression.ContentMeta{
+		Integration: integration,
+		QueryPath:   queryPath,
+		ResultID:    resultID,
+		Filename:    filename,
+	})
+	if err != nil || res == nil {
+		return hint
+	}
+	hint.Strategy = string(res.Strategy)
+	hint.Outcome = string(res.Outcome)
+	hint.OriginalTokens = int64(res.OriginalTokens)
+	hint.CompressedTokens = int64(res.CompressedTokens)
+	hint.CompressionMs = res.DurationMs
+	return hint
+}
+
+// findQueryAndFilename walks up the path to find the parent source view folder.
+// Returns ("", "") if relPath is not inside a source view.
+func (s *SourceService) findQueryAndFilename(ctx context.Context, workspaceId uint, integration, relPath string) (queryPath, filename string) {
+	parts := strings.Split(relPath, "/")
+	for i := len(parts) - 1; i >= 0; i-- {
+		candidate := types.PathSources + "/" + integration
+		if i > 0 {
+			candidate += "/" + strings.Join(parts[:i], "/")
+		}
+		q, err := s.fsStore.GetQuery(ctx, workspaceId, candidate)
+		if err == nil && q != nil && q.OutputFormat == types.ViewOutputFolder {
+			return q.Path, strings.Join(parts[i:], "/")
+		}
+	}
+	return "", ""
+}
+
+// ---------------------------------------------------------------------------
+// Auth & credentials
+// ---------------------------------------------------------------------------
+
 func (s *SourceService) providerContext(ctx context.Context) (*sources.ProviderContext, error) {
 	rc := auth.AuthInfoFromContext(ctx)
 	if rc == nil {
-		// Allow unauthenticated access with empty context (for local mode)
 		return &sources.ProviderContext{}, nil
 	}
-
 	return &sources.ProviderContext{
 		WorkspaceId: auth.WorkspaceId(ctx),
 		MemberId:    auth.MemberId(ctx),
 	}, nil
 }
 
-// connectedIntegrations returns the set of integration types that have active
-// connections for the given workspace.  Results are cached briefly to avoid
-// hitting the DB on every readdir.  Returns nil when filtering is not possible
-// (no backend, no workspace) — callers should treat nil as "show everything".
-func (s *SourceService) connectedIntegrations(ctx context.Context, workspaceId uint) map[string]bool {
-	if s.backend == nil || workspaceId == 0 {
-		return nil // local mode or no workspace — show all
-	}
-
-	// Check cache
-	if v, ok := s.connCache.Load(workspaceId); ok {
-		cc := v.(*cachedConnSet)
-		if time.Now().Before(cc.expiresAt) {
-			return cc.set
-		}
-		s.connCache.Delete(workspaceId)
-	}
-
-	conns, err := s.backend.ListConnections(ctx, workspaceId)
-	if err != nil {
-		log.Warn().Err(err).Uint("workspace", workspaceId).Msg("failed to list connections for source filtering")
-		return nil // on error, don't hide anything
-	}
-
-	set := make(map[string]bool, len(conns))
-	for _, c := range conns {
-		set[c.IntegrationType] = true
-	}
-
-	s.connCache.Store(workspaceId, &cachedConnSet{
-		set:       set,
-		expiresAt: time.Now().Add(connCacheTTL),
-	})
-	return set
-}
-
-// InvalidateConnectionCache evicts the cached connected-integrations set for a
-// workspace. Call this when connections are added or removed so that subsequent
-// ReadDir/Stat/Read calls reflect the change immediately.
-func (s *SourceService) InvalidateConnectionCache(workspaceId uint) {
-	s.connCache.Delete(workspaceId)
-}
-
-// isIntegrationVisible returns true if the integration should be visible for
-// the given workspace.  Returns true when filtering is not possible (no
-// backend, no workspace, error) to avoid accidentally hiding integrations.
-func (s *SourceService) isIntegrationVisible(ctx context.Context, workspaceId uint, integration string) bool {
-	connSet := s.connectedIntegrations(ctx, workspaceId)
-	return connSet == nil || connSet[integration]
-}
-
-// loadCredentials fetches integration credentials from the backend (with caching)
-// and refreshes Google OAuth tokens if expired
 func (s *SourceService) loadCredentials(ctx context.Context, pctx *sources.ProviderContext, integration string) (*sources.ProviderContext, bool) {
-	if s.backend == nil {
-		return pctx, false
+	// Built-in integrations (AuthNone) carry their own credentials (e.g. global
+	// API key from config). No per-workspace DB connection needed.
+	if meta, ok := types.GetIntegrationMeta(types.IntegrationName(integration)); ok && meta.AuthType == types.AuthNone {
+		return pctx, true
 	}
-	if pctx.WorkspaceId == 0 {
+
+	if s.backend == nil || pctx.WorkspaceId == 0 {
 		return pctx, false
 	}
 
-	// Check cache first
 	cacheKey := fmt.Sprintf("%d:%s", pctx.WorkspaceId, integration)
 	if cached, ok := s.credCache.Load(cacheKey); ok {
 		c := cached.(*cachedCreds)
@@ -1078,11 +795,9 @@ func (s *SourceService) loadCredentials(ctx context.Context, pctx *sources.Provi
 			pctx.Credentials = c.creds
 			return pctx, true
 		}
-		// Cache expired, delete it
 		s.credCache.Delete(cacheKey)
 	}
 
-	// Cache miss - load from database
 	conn, err := s.backend.GetConnection(ctx, pctx.WorkspaceId, pctx.MemberId, integration)
 	if err != nil {
 		log.Warn().Str("integration", integration).Err(err).Msg("connection lookup failed")
@@ -1098,15 +813,13 @@ func (s *SourceService) loadCredentials(ctx context.Context, pctx *sources.Provi
 		return pctx, false
 	}
 
-	// Check if OAuth token needs refresh
+	// Refresh OAuth token if needed.
 	if s.oauthRegistry != nil && oauth.NeedsRefresh(creds) {
 		if provider, err := s.oauthRegistry.GetProviderForIntegration(integration); err == nil {
 			refreshed, err := provider.Refresh(ctx, creds.RefreshToken)
 			if err != nil {
 				log.Warn().Str("integration", integration).Str("provider", provider.Name()).Err(err).Msg("token refresh failed")
-				// Continue with existing creds - they might still work
 			} else {
-				// Update stored credentials
 				if _, err := s.backend.SaveConnection(ctx, conn.WorkspaceId, conn.MemberId, integration, refreshed, conn.Scope); err != nil {
 					log.Warn().Str("integration", integration).Err(err).Msg("failed to persist refreshed token")
 				}
@@ -1115,647 +828,106 @@ func (s *SourceService) loadCredentials(ctx context.Context, pctx *sources.Provi
 		}
 	}
 
-	// Store in cache
-	s.credCache.Store(cacheKey, &cachedCreds{
-		creds:     creds,
-		expiresAt: time.Now().Add(credCacheTTL),
-	})
-
+	s.credCache.Store(cacheKey, &cachedCreds{creds: creds, expiresAt: time.Now().Add(credCacheTTL)})
 	pctx.Credentials = creds
 	return pctx, true
 }
 
-// CreateSmartQuery creates a new smart query via LLM inference
-func (s *SourceService) CreateSmartQuery(ctx context.Context, req *pb.CreateSmartQueryRequest) (*pb.CreateSmartQueryResponse, error) {
-	if !auth.IsAuthenticated(ctx) {
-		return &pb.CreateSmartQueryResponse{Ok: false, Error: "unauthorized"}, nil
-	}
-	workspaceId := auth.WorkspaceId(ctx)
-
-	path := types.PathSources + "/" + req.Integration + "/" + req.Name
-	if req.FileExt != "" {
-		path += req.FileExt
+// connectedIntegrations returns the set of connected integration types for a
+// workspace. Cached briefly. Returns nil when filtering is not possible.
+func (s *SourceService) connectedIntegrations(ctx context.Context, workspaceId uint) map[string]bool {
+	if s.backend == nil || workspaceId == 0 {
+		return nil
 	}
 
-	querySpec, filenameFormat, err := s.inferQuerySpec(ctx, req.Integration, req.Name, req.Guidance)
+	if v, ok := s.connCache.Load(workspaceId); ok {
+		cc := v.(*cachedConnSet)
+		if time.Now().Before(cc.expiresAt) {
+			return cc.set
+		}
+		s.connCache.Delete(workspaceId)
+	}
+
+	conns, err := s.backend.ListConnections(ctx, workspaceId)
 	if err != nil {
-		log.Warn().Err(err).Str("name", req.Name).Str("integration", req.Integration).Msg("BAML inference failed")
-		return &pb.CreateSmartQueryResponse{Ok: false, Error: err.Error()}, nil
+		log.Warn().Err(err).Uint("workspace", workspaceId).Msg("failed to list connections for source filtering")
+		return nil
 	}
 
-	spec := parseQuerySpec(req.Integration, querySpec)
-	if spec.Query == "" && req.Integration != "posthog" {
-		return &pb.CreateSmartQueryResponse{Ok: false, Error: "invalid query spec from inference"}, nil
+	set := make(map[string]bool, len(conns))
+	for _, c := range conns {
+		set[c.IntegrationType] = true
 	}
-	if filenameFormat == "" {
-		filenameFormat = spec.FilenameFormat
-	}
-	if filenameFormat == "" {
-		filenameFormat = sources.DefaultFilenameFormat(req.Integration)
-	}
+	s.connCache.Store(workspaceId, &cachedConnSet{set: set, expiresAt: time.Now().Add(connCacheTTL)})
+	return set
+}
 
-	// Iterative refinement: only for gmail with guidance
-	if req.Integration == "gmail" && req.Guidance != "" {
-		pctx, err := s.providerContext(ctx)
-		if err == nil {
-			pctx, connected := s.loadCredentials(ctx, pctx, req.Integration)
-			if connected {
-				refinedSpec, err := s.refineGmailQueryWithResults(ctx, pctx, req.Guidance, spec.Query)
-				if err != nil {
-					log.Warn().Err(err).Msg("query refinement failed, using initial query")
-				} else if refinedSpec != spec.Query {
-					log.Info().Str("original", spec.Query).Str("refined", refinedSpec).Msg("refined gmail query")
-					spec.Query = refinedSpec
-					querySpec = buildGmailQuerySpec(refinedSpec, spec.Limit, filenameFormat)
-				}
-			}
-		}
-	}
+func (s *SourceService) InvalidateConnectionCache(workspaceId uint) {
+	s.connCache.Delete(workspaceId)
+}
 
-	query := &types.FilesystemQuery{
-		WorkspaceId:    workspaceId,
-		Integration:    req.Integration,
-		Path:           path,
-		Name:           req.Name,
-		QuerySpec:      querySpec,
-		Guidance:       req.Guidance,
-		OutputFormat:   types.QueryOutputFormat(req.OutputFormat),
-		FileExt:        req.FileExt,
-		FilenameFormat: filenameFormat,
-		CacheTTL:       0,
+func (s *SourceService) isIntegrationVisible(ctx context.Context, workspaceId uint, integration string) bool {
+	// Built-in integrations (AuthNone) are always visible — no connection needed.
+	if meta, ok := types.GetIntegrationMeta(types.IntegrationName(integration)); ok && meta.AuthType == types.AuthNone {
+		return true
 	}
+	connSet := s.connectedIntegrations(ctx, workspaceId)
+	return connSet == nil || connSet[integration]
+}
 
-	created, err := s.fsStore.CreateQuery(ctx, query)
+// ---------------------------------------------------------------------------
+// Direct source read by URI
+// ---------------------------------------------------------------------------
+
+// ReadBySourceURI fetches content directly from a provider using a source URI
+// of the form "integration://resultID". This bypasses the source-view layer
+// entirely, so it works even if the query results have changed since the
+// original read was recorded.
+func (s *SourceService) ReadBySourceURI(ctx context.Context, workspaceId uint, memberId uint, sourceURI string) ([]byte, error) {
+	integration, resultID, err := ParseSourceURI(sourceURI)
 	if err != nil {
-		log.Error().Err(err).Str("path", path).Msg("failed to create query")
-		return &pb.CreateSmartQueryResponse{Ok: false, Error: err.Error()}, nil
+		return nil, err
 	}
 
-	log.Info().Str("path", path).Str("query", querySpec).Msg("created filesystem query")
-
-	return &pb.CreateSmartQueryResponse{
-		Ok:    true,
-		Query: smartQueryToProto(created),
-	}, nil
-}
-
-// inferQuerySpec uses BAML to convert a folder name to a query spec
-func (s *SourceService) inferQuerySpec(ctx context.Context, integration, name, guidance string) (string, string, error) {
-	var guidancePtr *string
-
-	// For time-relative guidance (e.g. "past week"), add a hidden UTC timestamp hint.
-	// IMPORTANT: We do not store this hint in the query's Guidance field; it's only passed to the LLM.
-	if integration == "gdrive" {
-		now := time.Now().UTC()
-		nowHint := fmt.Sprintf("Current time (UTC): %s\nCurrent date (UTC): %s", now.Format(time.RFC3339), now.Format("2006-01-02"))
-
-		g := strings.TrimSpace(guidance)
-		if g != "" {
-			g += "\n"
-		}
-		g += nowHint
-		guidancePtr = &g
-	} else if guidance != "" {
-		guidancePtr = &guidance
-	}
-
-	switch integration {
-	case "gmail":
-		result, err := baml.InferGmailQuery(ctx, name, guidancePtr)
-		if err != nil {
-			return "", "", err
-		}
-		data, _ := json.Marshal(result)
-		return string(data), extractFilenameFormat(data), nil
-
-	case "gdrive":
-		result, err := baml.InferGDriveQuery(ctx, name, guidancePtr)
-		if err != nil {
-			return "", "", err
-		}
-		data, _ := json.Marshal(result)
-		return string(data), extractFilenameFormat(data), nil
-
-	case "notion":
-		result, err := baml.InferNotionQuery(ctx, name, guidancePtr)
-		if err != nil {
-			return "", "", err
-		}
-		data, _ := json.Marshal(result)
-		return string(data), extractFilenameFormat(data), nil
-
-	case "github":
-		result, err := baml.InferGitHubQuery(ctx, name, guidancePtr)
-		if err != nil {
-			return "", "", err
-		}
-		data, _ := json.Marshal(result)
-		return string(data), extractFilenameFormat(data), nil
-
-	case "slack":
-		result, err := baml.InferSlackQuery(ctx, name, guidancePtr)
-		if err != nil {
-			return "", "", err
-		}
-		data, _ := json.Marshal(result)
-		return string(data), extractFilenameFormat(data), nil
-
-	case "linear":
-		result, err := baml.InferLinearQuery(ctx, name, guidancePtr)
-		if err != nil {
-			return "", "", err
-		}
-		data, _ := json.Marshal(result)
-		return string(data), extractFilenameFormat(data), nil
-
-	case "posthog":
-		result, err := baml.InferPostHogQuery(ctx, name, guidancePtr)
-		if err != nil {
-			return "", "", err
-		}
-		data, _ := json.Marshal(result)
-		return string(data), extractFilenameFormat(data), nil
-
-	default:
-		return "", "", fmt.Errorf("unsupported integration: %s", integration)
-	}
-}
-
-// refineGmailQueryWithResults executes the query, evaluates results, and refines up to 2 times
-func (s *SourceService) refineGmailQueryWithResults(ctx context.Context, pctx *sources.ProviderContext, guidance, query string) (string, error) {
-	const maxIterations = 2
-
-	currentQuery := query
-	for i := 0; i < maxIterations; i++ {
-		results, err := s.executeQueryForEvaluation(ctx, pctx, "gmail", currentQuery, 20)
-		if err != nil {
-			return currentQuery, nil
-		}
-
-		sampleJSON := formatResultsForEvaluation(results)
-		eval, err := baml.EvaluateGmailQueryResults(ctx, guidance, currentQuery, int64(len(results)), sampleJSON)
-		if err != nil {
-			return currentQuery, nil
-		}
-
-		if eval.Is_satisfactory || eval.Refined_query == nil {
-			break
-		}
-
-		log.Info().
-			Str("reasoning", eval.Reasoning).
-			Str("old_query", currentQuery).
-			Str("new_query", *eval.Refined_query).
-			Int("iteration", i).
-			Msg("refining gmail query")
-
-		currentQuery = *eval.Refined_query
-	}
-
-	return currentQuery, nil
-}
-
-// executeQueryForEvaluation runs a lightweight query for evaluation purposes (no caching)
-func (s *SourceService) executeQueryForEvaluation(ctx context.Context, pctx *sources.ProviderContext, integration, query string, limit int) ([]sources.QueryResult, error) {
 	provider := s.registry.Get(integration)
 	if provider == nil {
-		return nil, fmt.Errorf("provider not found: %s", integration)
+		return nil, fmt.Errorf("unknown integration: %s", integration)
 	}
 
 	executor, ok := provider.(sources.QueryExecutor)
 	if !ok {
-		return nil, fmt.Errorf("provider does not support queries: %s", integration)
+		return nil, fmt.Errorf("integration %s does not support direct reads", integration)
 	}
 
-	spec := sources.QuerySpec{
-		Query: query,
-		Limit: limit,
+	pctx := &sources.ProviderContext{
+		WorkspaceId: workspaceId,
+		MemberId:    memberId,
+	}
+	pctx, connected := s.loadCredentials(ctx, pctx, integration)
+	if !connected || pctx.Credentials == nil {
+		return nil, fmt.Errorf("no credentials for integration %s", integration)
 	}
 
-	resp, err := executor.ExecuteQuery(ctx, pctx, spec)
-	if err != nil {
-		return nil, err
-	}
-	return resp.Results, nil
+	return executor.ReadResult(ctx, pctx, resultID)
 }
 
-// formatResultsForEvaluation converts query results to JSON for BAML evaluation
-func formatResultsForEvaluation(results []sources.QueryResult) string {
-	type sampleResult struct {
-		From    string `json:"from"`
-		Subject string `json:"subject"`
-		Snippet string `json:"snippet"`
+// ParseSourceURI splits "integration://resultID" into its parts.
+func ParseSourceURI(uri string) (integration, resultID string, err error) {
+	idx := strings.Index(uri, "://")
+	if idx <= 0 || idx+3 >= len(uri) {
+		return "", "", fmt.Errorf("invalid source_uri: %q", uri)
 	}
-
-	// Take up to 10 sample results
-	maxSamples := 10
-	if len(results) < maxSamples {
-		maxSamples = len(results)
-	}
-
-	samples := make([]sampleResult, maxSamples)
-	for i := 0; i < maxSamples; i++ {
-		r := results[i]
-		samples[i] = sampleResult{
-			From:    r.Metadata["from"],
-			Subject: r.Metadata["subject"],
-			Snippet: r.Metadata["snippet"],
-		}
-	}
-
-	data, _ := json.Marshal(samples)
-	return string(data)
+	return uri[:idx], uri[idx+3:], nil
 }
 
-// GetSmartQuery retrieves a smart query by path
-func (s *SourceService) GetSmartQuery(ctx context.Context, req *pb.GetSmartQueryRequest) (*pb.GetSmartQueryResponse, error) {
-	if !auth.IsAuthenticated(ctx) {
-		return &pb.GetSmartQueryResponse{Ok: false, Error: "unauthorized"}, nil
-	}
+// ---------------------------------------------------------------------------
+// Path & response helpers
+// ---------------------------------------------------------------------------
 
-	query, err := s.fsStore.GetQuery(ctx, auth.WorkspaceId(ctx), req.Path)
-	if err != nil {
-		return &pb.GetSmartQueryResponse{Ok: false, Error: err.Error()}, nil
-	}
-
-	if query == nil {
-		return &pb.GetSmartQueryResponse{Ok: true, Query: nil}, nil
-	}
-
-	return &pb.GetSmartQueryResponse{
-		Ok:    true,
-		Query: smartQueryToProto(query),
-	}, nil
-}
-
-// ListSmartQueries lists queries under a parent path
-func (s *SourceService) ListSmartQueries(ctx context.Context, req *pb.ListSmartQueriesRequest) (*pb.ListSmartQueriesResponse, error) {
-	if !auth.IsAuthenticated(ctx) {
-		return &pb.ListSmartQueriesResponse{Ok: false, Error: "unauthorized"}, nil
-	}
-
-	queries, err := s.fsStore.ListQueries(ctx, auth.WorkspaceId(ctx), req.ParentPath)
-	if err != nil {
-		return &pb.ListSmartQueriesResponse{Ok: false, Error: err.Error()}, nil
-	}
-
-	protoQueries := make([]*pb.SmartQuery, len(queries))
-	for i, q := range queries {
-		protoQueries[i] = smartQueryToProto(q)
-	}
-
-	return &pb.ListSmartQueriesResponse{
-		Ok:      true,
-		Queries: protoQueries,
-	}, nil
-}
-
-// DeleteSmartQuery removes a smart query by external_id
-func (s *SourceService) DeleteSmartQuery(ctx context.Context, req *pb.DeleteSmartQueryRequest) (*pb.DeleteSmartQueryResponse, error) {
-	if !auth.IsAuthenticated(ctx) {
-		return &pb.DeleteSmartQueryResponse{Ok: false, Error: "unauthorized"}, nil
-	}
-
-	// Get the query first to verify it belongs to this workspace
-	query, err := s.fsStore.GetQueryByExternalId(ctx, req.ExternalId)
-	if err != nil || query == nil {
-		return &pb.DeleteSmartQueryResponse{Ok: false, Error: "query not found"}, nil
-	}
-
-	// Verify the query belongs to this workspace
-	if query.WorkspaceId != auth.WorkspaceId(ctx) {
-		return &pb.DeleteSmartQueryResponse{Ok: false, Error: "unauthorized"}, nil
-	}
-
-	// Invalidate cache for the query path before deletion
-	if err := s.fsStore.InvalidateQuery(ctx, query.WorkspaceId, query.Path); err != nil {
-		log.Warn().Err(err).Str("path", query.Path).Msg("failed to invalidate query cache")
-	}
-
-	if err := s.fsStore.DeleteQuery(ctx, req.ExternalId); err != nil {
-		return &pb.DeleteSmartQueryResponse{Ok: false, Error: err.Error()}, nil
-	}
-
-	log.Info().Str("external_id", req.ExternalId).Str("path", query.Path).Msg("deleted filesystem query")
-	return &pb.DeleteSmartQueryResponse{Ok: true}, nil
-}
-
-// UpdateSmartQuery updates an existing query's name and/or guidance
-func (s *SourceService) UpdateSmartQuery(ctx context.Context, req *pb.UpdateSmartQueryRequest) (*pb.UpdateSmartQueryResponse, error) {
-	if !auth.IsAuthenticated(ctx) {
-		return &pb.UpdateSmartQueryResponse{Ok: false, Error: "unauthorized"}, nil
-	}
-	workspaceId := auth.WorkspaceId(ctx)
-
-	// Get the existing query by external_id
-	query, err := s.fsStore.GetQueryByExternalId(ctx, req.ExternalId)
-	if err != nil || query == nil {
-		return &pb.UpdateSmartQueryResponse{Ok: false, Error: "query not found"}, nil
-	}
-
-	// Verify the query belongs to this workspace
-	if query.WorkspaceId != workspaceId {
-		return &pb.UpdateSmartQueryResponse{Ok: false, Error: "unauthorized"}, nil
-	}
-
-	oldPath := query.Path
-	needsUpdate := false
-
-	// Update name and recalculate path if name changed
-	if req.Name != "" && req.Name != query.Name {
-		query.Name = req.Name
-		// Recalculate path: /sources/{integration}/{name}
-		query.Path = types.PathSources + "/" + query.Integration + "/" + req.Name
-		if query.FileExt != "" {
-			query.Path += query.FileExt
-		}
-		needsUpdate = true
-	}
-
-	// Re-run LLM inference if guidance changed
-	if req.Guidance != query.Guidance {
-		query.Guidance = req.Guidance
-
-		querySpec, filenameFormat, err := s.inferQuerySpec(ctx, query.Integration, query.Name, req.Guidance)
-		if err != nil {
-			log.Warn().Err(err).Str("name", query.Name).Str("integration", query.Integration).Msg("BAML inference failed during update")
-			return &pb.UpdateSmartQueryResponse{Ok: false, Error: "failed to regenerate query: " + err.Error()}, nil
-		}
-
-		spec := parseQuerySpec(query.Integration, querySpec)
-		if spec.Query == "" && query.Integration != "posthog" {
-			return &pb.UpdateSmartQueryResponse{Ok: false, Error: "invalid query spec from inference"}, nil
-		}
-
-		query.QuerySpec = querySpec
-		if filenameFormat != "" {
-			query.FilenameFormat = filenameFormat
-		}
-		needsUpdate = true
-	}
-
-	if !needsUpdate {
-		// Nothing to update
-		return &pb.UpdateSmartQueryResponse{
-			Ok:    true,
-			Query: filesystemQueryToProto(query),
-		}, nil
-	}
-
-	// Update the query in the store
-	if err := s.fsStore.UpdateQuery(ctx, query); err != nil {
-		log.Error().Err(err).Str("external_id", req.ExternalId).Msg("failed to update query")
-		return &pb.UpdateSmartQueryResponse{Ok: false, Error: err.Error()}, nil
-	}
-
-	// Invalidate cache for the old path (if path changed) and new path
-	if oldPath != query.Path {
-		if err := s.fsStore.InvalidateQuery(ctx, workspaceId, oldPath); err != nil {
-			log.Warn().Err(err).Str("path", oldPath).Msg("failed to invalidate old query cache")
-		}
-	}
-	if err := s.fsStore.InvalidateQuery(ctx, workspaceId, query.Path); err != nil {
-		log.Warn().Err(err).Str("path", query.Path).Msg("failed to invalidate query cache")
-	}
-
-	log.Info().
-		Str("external_id", req.ExternalId).
-		Str("old_path", oldPath).
-		Str("new_path", query.Path).
-		Str("name", query.Name).
-		Msg("updated filesystem query")
-
-	return &pb.UpdateSmartQueryResponse{
-		Ok:    true,
-		Query: filesystemQueryToProto(query),
-	}, nil
-}
-
-// ExecuteSmartQuery runs a query and returns materialized results
-func (s *SourceService) ExecuteSmartQuery(ctx context.Context, req *pb.ExecuteSmartQueryRequest) (*pb.ExecuteSmartQueryResponse, error) {
-	if !auth.IsAuthenticated(ctx) {
-		return &pb.ExecuteSmartQueryResponse{Ok: false, Error: "unauthorized"}, nil
-	}
-
-	workspaceId := auth.WorkspaceId(ctx)
-	query, err := s.fsStore.GetQuery(ctx, workspaceId, req.Path)
-	if err != nil || query == nil {
-		return &pb.ExecuteSmartQueryResponse{Ok: false, Error: "query not found"}, nil
-	}
-
-	// Get provider context with credentials
-	pctx, err := s.providerContext(ctx)
-	if err != nil {
-		return &pb.ExecuteSmartQueryResponse{Ok: false, Error: err.Error()}, nil
-	}
-
-	pctx, connected := s.loadCredentials(ctx, pctx, query.Integration)
-	if !connected {
-		return &pb.ExecuteSmartQueryResponse{Ok: false, Error: "not connected"}, nil
-	}
-
-	// Get provider
-	provider := s.registry.Get(query.Integration)
-	if provider == nil {
-		return &pb.ExecuteSmartQueryResponse{Ok: false, Error: "integration not available"}, nil
-	}
-
-	// Check if provider implements QueryExecutor
-	executor, hasExecutor := provider.(sources.QueryExecutor)
-
-	// If requesting specific file content
-	if req.Filename != "" {
-		if !hasExecutor {
-			return &pb.ExecuteSmartQueryResponse{Ok: false, Error: "provider does not support queries"}, nil
-		}
-
-		// If ResultId is provided directly, use it
-		resultId := req.ResultId
-
-		// Otherwise, find the result ID from cached results
-		if resultId == "" {
-			results, err := s.getOrExecuteQuery(ctx, pctx, query)
-			if err != nil {
-				return &pb.ExecuteSmartQueryResponse{Ok: false, Error: "failed to get query results: " + err.Error()}, nil
-			}
-
-			// Find matching result by filename
-			for _, r := range results {
-				if r.Filename == req.Filename {
-					resultId = r.ID
-					break
-				}
-			}
-
-			if resultId == "" {
-				return &pb.ExecuteSmartQueryResponse{Ok: false, Error: "file not found in query results"}, nil
-			}
-		}
-
-		// Try cached content first
-		if content, err := s.fsStore.GetResultContent(ctx, workspaceId, req.Path, resultId); err == nil && len(content) > 0 {
-			return &pb.ExecuteSmartQueryResponse{Ok: true, FileData: content}, nil
-		}
-
-		// Read content using QueryExecutor
-		data, err := executor.ReadResult(ctx, pctx, resultId)
-		if err != nil {
-			return &pb.ExecuteSmartQueryResponse{Ok: false, Error: err.Error()}, nil
-		}
-
-		// Cache the content
-		if err := s.fsStore.StoreResultContent(ctx, workspaceId, req.Path, resultId, data); err != nil {
-			log.Warn().Err(err).Str("path", req.Path).Str("result", resultId).Msg("failed to cache query result content")
-		}
-		return &pb.ExecuteSmartQueryResponse{Ok: true, FileData: data}, nil
-	}
-
-	results, err := s.getOrExecuteQuery(ctx, pctx, query)
-	if err != nil {
-		return &pb.ExecuteSmartQueryResponse{Ok: false, Error: err.Error()}, nil
-	}
-
-	entries := make([]*pb.SourceDirEntry, 0, len(results))
-	for _, r := range results {
-		entries = append(entries, &pb.SourceDirEntry{
-			Name:     r.Filename,
-			Mode:     sources.ModeFile,
-			Size:     r.Size,
-			Mtime:    r.Mtime,
-			ResultId: r.ID,
-		})
-	}
-
-	return &pb.ExecuteSmartQueryResponse{Ok: true, Entries: entries}, nil
-}
-
-// Default pagination settings
-const (
-	defaultPageSize   = 50  // Default number of results per page
-	defaultMaxResults = 500 // Default max total results across all pages
-)
-
-// parseQuerySpec extracts the query string, limit, and filename format from a query spec JSON
-func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
-	var spec struct {
-		GmailQuery     string `json:"gmail_query"`
-		GDriveQuery    string `json:"gdrive_query"`
-		NotionQuery    string `json:"notion_query"`
-		GitHubQuery    string `json:"github_query"`
-		SlackQuery     string `json:"slack_query"`
-		LinearQuery    string `json:"linear_query"`
-		PostHogQuery   string `json:"posthog_query"`
-		SearchType     string `json:"search_type"`
-		ContentType    string `json:"content_type"`
-		ProjectID      int    `json:"project_id"`
-		Limit          int    `json:"limit"`
-		MaxResults     int    `json:"max_results"`
-		FilenameFormat string `json:"filename_format"`
-	}
-
-	limit := defaultPageSize
-	maxResults := defaultMaxResults
-	if json.Unmarshal([]byte(querySpec), &spec) == nil {
-		if spec.Limit > 0 {
-			limit = spec.Limit
-		}
-		if spec.MaxResults > 0 {
-			maxResults = spec.MaxResults
-		}
-	}
-
-	// Ensure maxResults doesn't exceed the hard limit
-	if maxResults > defaultMaxResults {
-		maxResults = defaultMaxResults
-	}
-
-	var query string
-	switch integration {
-	case "gmail":
-		query = spec.GmailQuery
-	case "gdrive":
-		query = spec.GDriveQuery
-	case "notion":
-		query = spec.NotionQuery
-	case "github":
-		query = spec.GitHubQuery
-	case "slack":
-		query = spec.SlackQuery
-	case "linear":
-		query = spec.LinearQuery
-	case "posthog":
-		query = spec.PostHogQuery
-	}
-
-	filenameFormat := spec.FilenameFormat
-	if filenameFormat == "" {
-		filenameFormat = sources.DefaultFilenameFormat(integration)
-	}
-
-	// Build metadata for provider-specific options
-	metadata := make(map[string]string)
-	if spec.SearchType != "" {
-		metadata["search_type"] = spec.SearchType
-	}
-	if spec.ContentType != "" {
-		metadata["content_type"] = spec.ContentType
-	}
-	if spec.ProjectID > 0 {
-		metadata["project_id"] = strconv.Itoa(spec.ProjectID)
-	}
-
-	return sources.QuerySpec{
-		Query:          query,
-		Limit:          limit,
-		MaxResults:     maxResults,
-		FilenameFormat: filenameFormat,
-		Metadata:       metadata,
-	}
-}
-
-func extractFilenameFormat(specJSON []byte) string {
-	var spec struct {
-		FilenameFormat string `json:"filename_format"`
-	}
-	if json.Unmarshal(specJSON, &spec) != nil {
-		return ""
-	}
-	return spec.FilenameFormat
-}
-
-// smartQueryToProto converts a types.SmartQuery to pb.SmartQuery
-func smartQueryToProto(q *types.SmartQuery) *pb.SmartQuery {
-	if q == nil {
-		return nil
-	}
-	return &pb.SmartQuery{
-		ExternalId:   q.ExternalId,
-		Integration:  q.Integration,
-		Path:         q.Path,
-		Name:         q.Name,
-		QuerySpec:    q.QuerySpec,
-		Guidance:     q.Guidance,
-		OutputFormat: string(q.OutputFormat),
-		FileExt:      q.FileExt,
-		CacheTtl:     int32(q.CacheTTL),
-		CreatedAt:    q.CreatedAt.Unix(),
-		UpdatedAt:    q.UpdatedAt.Unix(),
-	}
-}
-
-// filesystemQueryToProto converts a types.FilesystemQuery to pb.SmartQuery
-// FilesystemQuery and SmartQuery are type aliases, so this is a convenience wrapper
-func filesystemQueryToProto(q *types.FilesystemQuery) *pb.SmartQuery {
-	return smartQueryToProto(q)
-}
-
-// cleanPath normalizes a path by removing leading/trailing slashes
 func cleanPath(path string) string {
 	return strings.Trim(path, "/")
 }
 
-// splitIntegrationPath splits a path into integration name and relative path
-// e.g., "github/views/repos.json" -> ("github", "views/repos.json")
 func splitIntegrationPath(path string) (integration, relPath string) {
 	parts := strings.SplitN(path, "/", 2)
 	integration = parts[0]
@@ -1765,33 +937,28 @@ func splitIntegrationPath(path string) (integration, relPath string) {
 	return
 }
 
-// readSlice returns a slice of data based on offset and length
 func readSlice(data []byte, offset, length int64) *pb.SourceReadResponse {
 	if offset >= int64(len(data)) {
 		return &pb.SourceReadResponse{Ok: true, Data: nil}
 	}
-
 	end := int64(len(data))
 	if length > 0 && offset+length < end {
 		end = offset + length
 	}
-
 	return &pb.SourceReadResponse{Ok: true, Data: data[offset:end]}
 }
 
-// errorToCode maps errors to sensible errno values
 func errorToCode(err error) int {
-	if err == sources.ErrNotFound {
+	switch err {
+	case sources.ErrNotFound:
 		return int(syscall.ENOENT)
-	}
-	if err == sources.ErrNotConnected {
+	case sources.ErrNotConnected:
 		return int(syscall.EACCES)
-	}
-	if err == sources.ErrNotDir {
+	case sources.ErrNotDir:
 		return int(syscall.ENOTDIR)
-	}
-	if err == sources.ErrIsDir {
+	case sources.ErrIsDir:
 		return int(syscall.EISDIR)
+	default:
+		return int(syscall.EIO)
 	}
-	return int(syscall.EIO)
 }

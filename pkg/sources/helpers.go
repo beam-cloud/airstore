@@ -47,7 +47,7 @@ func GenerateSourceReadme(integration string, connected bool, scope string, work
 	}
 
 	// Get integration metadata for display name and description
-	if meta, ok := types.GetIntegrationMeta(types.ToolName(integration)); ok {
+	if meta, ok := types.GetIntegrationMeta(types.IntegrationName(integration)); ok {
 		status.DisplayName = meta.DisplayName
 		status.Description = meta.Description
 	} else {
@@ -60,10 +60,10 @@ func GenerateSourceReadme(integration string, connected bool, scope string, work
 	if !connected {
 		if oauthIntegrations[integration] {
 			// OAuth integrations use 'connection connect' for browser-based auth
-			status.Hint = fmt.Sprintf("beta9 connection connect %s", integration)
+			status.Hint = fmt.Sprintf("airstore connection connect %s", integration)
 		} else {
 			// Token/API-key integrations use 'connection add'
-			status.Hint = fmt.Sprintf("beta9 connection add %s %s --token <your-token>", workspaceId, integration)
+			status.Hint = fmt.Sprintf("airstore connection add %s %s --token <your-token>", workspaceId, integration)
 		}
 	}
 

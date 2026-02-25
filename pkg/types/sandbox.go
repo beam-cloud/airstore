@@ -26,7 +26,7 @@ type SandboxConfig struct {
 	WorkingDir string `json:"working_dir"`
 
 	// Resources specifies resource limits for the sandbox
-	Resources TaskResources `json:"resources"`
+	Resources RunExecutionResources `json:"resources"`
 
 	// Mounts specifies additional mounts for the sandbox
 	Mounts []SandboxMount `json:"mounts"`
@@ -36,6 +36,9 @@ type SandboxConfig struct {
 
 	// FilesystemMount is the host path to bind-mount at /workspace (optional)
 	FilesystemMount string `json:"-"`
+
+	// FilesystemReadOnly controls whether /workspace is mounted read-only.
+	FilesystemReadOnly bool `json:"-"`
 }
 
 // SandboxMount specifies a mount point for a sandbox

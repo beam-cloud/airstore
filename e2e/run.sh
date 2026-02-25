@@ -1068,6 +1068,134 @@ test_hooks() {
 }
 
 # ============================================================================
+# Test: Compression (strip vs raw vs passthrough)
+# ============================================================================
+test_compression() {
+    echo ""
+    echo "=== Test: Compression ==="
+    echo ""
+    echo "Reads files via the HTTP API with different compression strategies"
+    echo "and verifies that strip reduces token count without inflating it."
+    echo ""
+
+    wait_gateway
+
+    local TOKEN="${AIRSTORE_TOKEN:-}"
+    local WORKSPACE="${AIRSTORE_WORKSPACE_ID:-}"
+    local QUERY_PATH="${AIRSTORE_QUERY_PATH:-/sources/gmail/unread-emails}"
+    local BASE_URL="http://${GATEWAY_HTTP}"
+
+    if [ -z "$TOKEN" ] || [ -z "$WORKSPACE" ]; then
+        info "Set AIRSTORE_TOKEN and AIRSTORE_WORKSPACE_ID to run compression tests"
+        pass "Skipped (missing env vars)"
+        return
+    fi
+
+    # Percent-encode a string for safe use in URL query values.
+    # Preserves '/' since the server expects path separators.
+    url_encode() {
+        python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe='/'))" "$1"
+    }
+
+    api_get() {
+        curl -sf -H "Authorization: Bearer $TOKEN" "$BASE_URL/api/v1/workspaces/$WORKSPACE$1"
+    }
+
+    # -------------------------------------------------------------------------
+    # Step 1: List files in the query path
+    # -------------------------------------------------------------------------
+    info "Listing files in $QUERY_PATH..."
+    LIST_JSON=$(api_get "/fs/list?path=$(url_encode "$QUERY_PATH")") || fail "List request failed"
+    FILES=$(echo "$LIST_JSON" | jq -r '.data.entries[] | select(.is_folder==false and (.name | startswith(".")|not)) | .path' 2>/dev/null)
+    FILE_COUNT=$(echo "$FILES" | grep -c . || true)
+
+    if [ "$FILE_COUNT" -eq 0 ]; then
+        info "No files found in $QUERY_PATH"
+        pass "Skipped (no files)"
+        return
+    fi
+    pass "Found $FILE_COUNT files"
+
+    # -------------------------------------------------------------------------
+    # Step 2: Read each file raw vs strip, compare byte counts
+    # -------------------------------------------------------------------------
+    info "Comparing raw vs strip vs passthrough..."
+    echo ""
+    printf "  %-50s %8s %8s %8s\n" "FILE" "raw" "strip" "passthru"
+    echo "  $(printf '%0.s-' {1..80})"
+
+    TOTAL_RAW=0
+    TOTAL_STRIP=0
+    ERRORS=0
+
+    while IFS= read -r FILE_PATH; do
+        [ -z "$FILE_PATH" ] && continue
+        FNAME=$(basename "$FILE_PATH")
+
+        ENC_PATH=$(url_encode "$FILE_PATH")
+        RAW_BODY=$(api_get "/fs/read?path=$ENC_PATH" 2>/dev/null) || { ERRORS=$((ERRORS+1)); continue; }
+        STRIP_BODY=$(api_get "/fs/read?path=$ENC_PATH&compression=strip" 2>/dev/null) || { ERRORS=$((ERRORS+1)); continue; }
+        PASS_BODY=$(api_get "/fs/read?path=$ENC_PATH&compression=passthrough" 2>/dev/null) || true
+
+        RAW_BYTES=${#RAW_BODY}
+        STRIP_BYTES=${#STRIP_BODY}
+        PASS_BYTES=${#PASS_BODY}
+
+        TOTAL_RAW=$((TOTAL_RAW + RAW_BYTES))
+        TOTAL_STRIP=$((TOTAL_STRIP + STRIP_BYTES))
+
+        # Strip should never increase size
+        if [ "$STRIP_BYTES" -gt "$RAW_BYTES" ]; then
+            printf "  ${RED}%-50s %8d %8d %8d  INFLATED${NC}\n" "${FNAME:0:50}" "$RAW_BYTES" "$STRIP_BYTES" "$PASS_BYTES"
+            ERRORS=$((ERRORS+1))
+        else
+            if [ "$RAW_BYTES" -gt 0 ]; then
+                PCT=$(( (RAW_BYTES - STRIP_BYTES) * 100 / RAW_BYTES ))
+            else
+                PCT=0
+            fi
+            printf "  %-50s %8d %8d %8d  -%d%%\n" "${FNAME:0:50}" "$RAW_BYTES" "$STRIP_BYTES" "$PASS_BYTES" "$PCT"
+        fi
+    done <<< "$FILES"
+
+    echo "  $(printf '%0.s-' {1..80})"
+    if [ "$TOTAL_RAW" -gt 0 ]; then
+        TOTAL_PCT=$(( (TOTAL_RAW - TOTAL_STRIP) * 100 / TOTAL_RAW ))
+        printf "  %-50s %8d %8d %25s\n" "TOTAL" "$TOTAL_RAW" "$TOTAL_STRIP" "-${TOTAL_PCT}%"
+    fi
+    echo ""
+
+    if [ "$ERRORS" -gt 0 ]; then
+        fail "$ERRORS errors during compression test"
+    fi
+
+    if [ "$TOTAL_STRIP" -ge "$TOTAL_RAW" ] && [ "$TOTAL_RAW" -gt 0 ]; then
+        fail "strip did not reduce total byte count ($TOTAL_STRIP >= $TOTAL_RAW)"
+    fi
+
+    # -------------------------------------------------------------------------
+    # Step 3: Cache consistency — read same file 3 times with strip
+    # -------------------------------------------------------------------------
+    FIRST_FILE=$(echo "$FILES" | head -1)
+    if [ -n "$FIRST_FILE" ]; then
+        info "Cache consistency check on $(basename "$FIRST_FILE")..."
+        R1=$(api_get "/fs/read?path=$FIRST_FILE&compression=strip")
+        sleep 1  # let async flusher persist
+        R2=$(api_get "/fs/read?path=$FIRST_FILE&compression=strip")
+        R3=$(api_get "/fs/read?path=$FIRST_FILE&compression=strip")
+
+        if [ "$R1" = "$R2" ] && [ "$R2" = "$R3" ]; then
+            pass "Cache consistent (3 reads identical)"
+        else
+            fail "Cache inconsistency: reads returned different content"
+        fi
+    fi
+
+    echo ""
+    pass "Compression test passed"
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -1109,6 +1237,9 @@ case "${1:-all}" in
     hooks)
         test_hooks
         ;;
+    compression)
+        test_compression
+        ;;
     all)
         test_setup
         test_task
@@ -1117,10 +1248,11 @@ case "${1:-all}" in
         test_context
         test_sources
         test_hooks
+        test_compression
         ;;
     *)
         echo "Unknown test: $1"
-        echo "Available: setup, task, fs, tools, context, sources, index, smart, hooks, all"
+        echo "Available: setup, task, fs, tools, context, sources, index, smart, hooks, compression, all"
         exit 1
         ;;
 esac

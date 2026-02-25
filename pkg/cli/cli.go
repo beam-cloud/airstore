@@ -112,13 +112,11 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&authToken, "token", getEnv("AIRSTORE_TOKEN", ""), "Authentication token")
 	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 
-	rootCmd.AddCommand(workspaceCmd)
 	rootCmd.AddCommand(memberCmd)
 	rootCmd.AddCommand(tokenCmd)
 	rootCmd.AddCommand(connectionCmd)
 	rootCmd.AddCommand(taskCmd)
 	rootCmd.AddCommand(hookCmd)
-	rootCmd.AddCommand(skillCmd)
 }
 
 // Execute runs the CLI
@@ -135,9 +133,4 @@ func getEnv(key, defaultValue string) string {
 
 func getClient() (*Client, error) {
 	return NewClient(gatewayAddr, authToken)
-}
-
-func exitError(err error) {
-	PrintError(err)
-	os.Exit(1)
 }

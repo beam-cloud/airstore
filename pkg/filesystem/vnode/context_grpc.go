@@ -6,10 +6,12 @@ import (
 	"io/fs"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
+	"github.com/rs/zerolog/log"
 	"github.com/winfsp/cgofuse/fuse"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -43,11 +45,11 @@ func NewContextVNodeGRPC(conn *grpc.ClientConn, token string, prefix string) *Co
 		token:       token,
 		bearerToken: BearerToken(token),
 		prefix:      prefix,
-		cache:   NewMetadataCache(),
-		content: NewContentCache(),
-		handles: make(map[FileHandle]*handleState),
-		writes:  make(map[string]map[FileHandle]*handleState),
-		nextFH:  1,
+		cache:       NewMetadataCache(),
+		content:     NewContentCache(),
+		handles:     make(map[FileHandle]*handleState),
+		writes:      make(map[string]map[FileHandle]*handleState),
+		nextFH:      1,
 	}
 	c.asyncWriter = NewAsyncWriter(c.writeRange)
 	return c
@@ -72,9 +74,11 @@ func (c *ContextVNodeGRPC) rel(path string) string {
 
 // Getattr returns file attributes with caching
 func (c *ContextVNodeGRPC) Getattr(path string) (*FileInfo, error) {
-	// Vnode root always exists (virtual directory, no RPC needed)
+	// Vnode root always exists (virtual directory, no RPC needed).
+	// Use 0777 so gVisor's gofer (which may run as a different UID)
+	// passes the kernel's default_permissions check for writes.
 	if path == c.Prefix() {
-		return NewDirInfo(PathIno(path)), nil
+		return newFileInfo(PathIno(path), 0, syscall.S_IFDIR|0777, 2), nil
 	}
 
 	// AppleDouble files are zero-length placeholders
@@ -228,73 +232,25 @@ func (c *ContextVNodeGRPC) openExisting(path string) (FileHandle, error) {
 
 // Read reads file data
 func (c *ContextVNodeGRPC) Read(path string, buf []byte, off int64, fh FileHandle) (int, error) {
-	// AppleDouble files are empty.
-	if isAppleDoublePath(path) {
-		return 0, nil
+	n, _, err := c.ReadWithAttribution(path, buf, off, fh)
+	return n, err
+}
+
+func (c *ContextVNodeGRPC) cachedReadOps() cachedReadOps {
+	return cachedReadOps{
+		content:         c.content,
+		writer:          c.asyncWriter,
+		getHandleState:  c.getHandleState,
+		enqueueWrites:   c.enqueueWritesForPath,
+		consumePrefetch: c.consumePrefetch,
+		maybeStatSmall:  c.maybeStatSmall,
+		readRange:       c.readRange,
+		recordRead:      c.recordRead,
 	}
+}
 
-	// Drain handleState buffers into asyncWriter (non-blocking).
-	c.enqueueWritesForPath(path)
-
-	// Serve from dirty buffer if the asyncWriter has pending data covering this range.
-	if data, dataOff, ok := c.asyncWriter.Get(path); ok {
-		dataEnd := dataOff + int64(len(data))
-		if off >= dataOff && off < dataEnd {
-			n := copy(buf, data[off-dataOff:])
-			return n, nil
-		}
-		if off >= dataEnd {
-			return 0, nil // EOF — file was truncated/rewritten
-		}
-		// Read is before the dirty range; force flush and fall through to S3.
-		if err := c.asyncWriter.ForceFlush(path); err != nil {
-			return 0, err
-		}
-	}
-
-	state := c.getHandleState(fh)
-	if state != nil {
-		if data, ok, err := c.consumePrefetch(path, off, state); err != nil {
-			return 0, err
-		} else if ok {
-			n := copy(buf, data)
-			c.recordRead(state, path, off, n)
-			return n, nil
-		}
-	}
-
-	// Small file cache (mtime validated)
-	if info, ok := c.maybeStatSmall(path); ok && info.Size <= smallFileMaxSize && info.Mtime != 0 {
-		if data, ok := c.content.Get(path, info.Mtime); ok {
-			if off >= int64(len(data)) {
-				return 0, nil
-			}
-			n := copy(buf, data[off:])
-			c.recordRead(state, path, off, n)
-			return n, nil
-		}
-
-		data, err := c.readRange(path, 0, info.Size)
-		if err != nil {
-			return 0, err
-		}
-		c.content.Set(path, data, info.Mtime)
-		if off >= int64(len(data)) {
-			return 0, nil
-		}
-		n := copy(buf, data[off:])
-		c.recordRead(state, path, off, n)
-		return n, nil
-	}
-
-	// Regular read
-	data, err := c.readRange(path, off, int64(len(buf)))
-	if err != nil {
-		return 0, err
-	}
-	n := copy(buf, data)
-	c.recordRead(state, path, off, n)
-	return n, nil
+func (c *ContextVNodeGRPC) ReadWithAttribution(path string, buf []byte, off int64, fh FileHandle) (int, *ReadAttribution, error) {
+	return readWithCachedFlow(path, buf, off, fh, c.cachedReadOps())
 }
 
 // Create creates a new file
@@ -309,11 +265,14 @@ func (c *ContextVNodeGRPC) Create(path string, flags int, mode uint32) (FileHand
 	ctx, cancel := c.ctx()
 	defer cancel()
 
-	resp, err := c.client.Create(ctx, &pb.ContextCreateRequest{Path: c.rel(path), Mode: mode})
+	relPath := c.rel(path)
+	resp, err := c.client.Create(ctx, &pb.ContextCreateRequest{Path: relPath, Mode: mode})
 	if err != nil {
+		log.Warn().Err(err).Str("path", relPath).Msg("context create: gRPC error")
 		return 0, err
 	}
 	if !resp.Ok {
+		log.Warn().Str("path", relPath).Str("error", resp.Error).Msg("context create: rejected")
 		return 0, fs.ErrPermission
 	}
 	c.cache.Invalidate(path)
@@ -423,11 +382,14 @@ func (c *ContextVNodeGRPC) Truncate(path string, size int64, fh FileHandle) erro
 	ctx, cancel := c.ctx()
 	defer cancel()
 
-	resp, err := c.client.Truncate(ctx, &pb.ContextTruncateRequest{Path: c.rel(path), Size: size})
+	relPath := c.rel(path)
+	resp, err := c.client.Truncate(ctx, &pb.ContextTruncateRequest{Path: relPath, Size: size})
 	if err != nil {
+		log.Warn().Err(err).Str("path", relPath).Msg("context truncate: gRPC error")
 		return err
 	}
 	if !resp.Ok {
+		log.Warn().Str("path", relPath).Str("error", resp.Error).Msg("context truncate: rejected")
 		return fs.ErrPermission
 	}
 	c.cache.Invalidate(path)
@@ -439,11 +401,14 @@ func (c *ContextVNodeGRPC) Mkdir(path string, mode uint32) error {
 	ctx, cancel := c.ctx()
 	defer cancel()
 
-	resp, err := c.client.Mkdir(ctx, &pb.ContextMkdirRequest{Path: c.rel(path), Mode: mode})
+	relPath := c.rel(path)
+	resp, err := c.client.Mkdir(ctx, &pb.ContextMkdirRequest{Path: relPath, Mode: mode})
 	if err != nil {
+		log.Warn().Err(err).Str("path", relPath).Msg("context mkdir: gRPC error")
 		return err
 	}
 	if !resp.Ok {
+		log.Warn().Str("path", relPath).Str("error", resp.Error).Msg("context mkdir: rejected")
 		return fs.ErrPermission
 	}
 	c.cache.Invalidate(path)
@@ -814,8 +779,16 @@ func (c *ContextVNodeGRPC) toFileInfo(path string, info *pb.FileInfo) *FileInfo 
 		mtime = time.Unix(info.Mtime, 0)
 	}
 	uid, gid := GetOwner()
+	mode := info.Mode
+	// Ensure directories and files are world-writable so gVisor's gofer
+	// (which may run as a different UID) passes default_permissions checks.
+	if info.IsDir {
+		mode = syscall.S_IFDIR | 0777
+	} else {
+		mode = (mode & syscall.S_IFMT) | 0666 | (mode & 0111)
+	}
 	return &FileInfo{
-		Ino: PathIno(path), Size: info.Size, Mode: info.Mode, Nlink: 1,
+		Ino: PathIno(path), Size: info.Size, Mode: mode, Nlink: 1,
 		Uid: uid, Gid: gid,
 		Atime: now, Mtime: mtime, Ctime: mtime,
 	}

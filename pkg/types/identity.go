@@ -28,6 +28,7 @@ type WorkspaceMember struct {
 // Token represents an authentication token
 // For workspace_member tokens: WorkspaceId and MemberId are set
 // For worker tokens: WorkspaceId and MemberId are nil, PoolName may be set
+// For organization tokens: TenantId is set, WorkspaceId and MemberId are nil
 type Token struct {
 	Id          uint       `db:"id" json:"id"`
 	ExternalId  string     `db:"external_id" json:"external_id"`
@@ -38,6 +39,7 @@ type Token struct {
 	TokenPrefix *string    `db:"token_prefix" json:"-"`
 	Name        string     `db:"name" json:"name"`
 	PoolName    *string    `db:"pool_name" json:"pool_name,omitempty"`
+	TenantId    *string    `db:"tenant_id" json:"tenant_id,omitempty"`
 	ExpiresAt   *time.Time `db:"expires_at" json:"expires_at,omitempty"`
 	CreatedAt   time.Time  `db:"created_at" json:"created_at"`
 	LastUsedAt  *time.Time `db:"last_used_at" json:"last_used_at,omitempty"`
@@ -88,4 +90,7 @@ type TokenValidationResult struct {
 
 	// Worker fields (set for worker tokens)
 	PoolName string
+
+	// Organization fields (set for organization tokens)
+	TenantId string
 }

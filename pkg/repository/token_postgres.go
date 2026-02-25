@@ -47,12 +47,12 @@ func (r *PostgresBackend) CreateToken(ctx context.Context, workspaceId, memberId
 	query := `
 		INSERT INTO token (workspace_id, member_id, token_hash, token_prefix, name, expires_at, token_type)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		RETURNING id, external_id, workspace_id, member_id, token_type, token_hash, token_prefix, name, pool_name, expires_at, created_at, last_used_at
+		RETURNING id, external_id, workspace_id, member_id, token_type, token_hash, token_prefix, name, pool_name, tenant_id, expires_at, created_at, last_used_at
 	`
 
 	var t types.Token
 	err = r.db.QueryRowContext(ctx, query, workspaceId, memberId, string(hash), prefix, name, expiresAt, tokenType).Scan(
-		&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.TokenPrefix, &t.Name, &t.PoolName, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt,
+		&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.TokenPrefix, &t.Name, &t.PoolName, &t.TenantId, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt,
 	)
 	if err != nil {
 		return nil, "", fmt.Errorf("create token: %w", err)
@@ -77,12 +77,12 @@ func (r *PostgresBackend) CreateWorkerToken(ctx context.Context, name string, po
 	query := `
 		INSERT INTO token (workspace_id, member_id, token_hash, token_prefix, name, pool_name, expires_at, token_type)
 		VALUES (NULL, NULL, $1, $2, $3, $4, $5, 'worker')
-		RETURNING id, external_id, workspace_id, member_id, token_type, token_hash, token_prefix, name, pool_name, expires_at, created_at, last_used_at
+		RETURNING id, external_id, workspace_id, member_id, token_type, token_hash, token_prefix, name, pool_name, tenant_id, expires_at, created_at, last_used_at
 	`
 
 	var t types.Token
 	err = r.db.QueryRowContext(ctx, query, string(hash), prefix, name, poolName, expiresAt).Scan(
-		&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.TokenPrefix, &t.Name, &t.PoolName, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt,
+		&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.TokenPrefix, &t.Name, &t.PoolName, &t.TenantId, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt,
 	)
 	if err != nil {
 		return nil, "", fmt.Errorf("create worker token: %w", err)
@@ -108,12 +108,12 @@ func (r *PostgresBackend) CreateWorkspaceServiceToken(ctx context.Context, works
 	query := `
 		INSERT INTO token (workspace_id, member_id, token_hash, token_prefix, name, expires_at, token_type)
 		VALUES ($1, NULL, $2, $3, $4, NULL, 'workspace_service')
-		RETURNING id, external_id, workspace_id, member_id, token_type, token_hash, token_prefix, name, pool_name, expires_at, created_at, last_used_at
+		RETURNING id, external_id, workspace_id, member_id, token_type, token_hash, token_prefix, name, pool_name, tenant_id, expires_at, created_at, last_used_at
 	`
 
 	var t types.Token
 	err = r.db.QueryRowContext(ctx, query, workspaceId, string(hash), prefix, name).Scan(
-		&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.TokenPrefix, &t.Name, &t.PoolName, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt,
+		&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.TokenPrefix, &t.Name, &t.PoolName, &t.TenantId, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt,
 	)
 	if err != nil {
 		return nil, "", fmt.Errorf("create workspace service token: %w", err)
@@ -138,6 +138,12 @@ func (r *PostgresBackend) ValidateToken(ctx context.Context, rawToken string) (*
 
 	// Try workspace service tokens (has workspace_id, no member_id)
 	result, err = r.validateServiceToken(ctx, rawToken)
+	if err == nil && result != nil {
+		return result, nil
+	}
+
+	// Try organization tokens (tenant-scoped, no workspace_id)
+	result, err = r.validateOrganizationToken(ctx, rawToken)
 	if err == nil && result != nil {
 		return result, nil
 	}
@@ -580,6 +586,10 @@ func (r *PostgresBackend) AuthorizeToken(ctx context.Context, rawToken string) (
 			Name:       result.WorkspaceName,
 		}
 		// No member info — service tokens are workspace-scoped, not member-scoped.
+	case types.TokenTypeOrganization:
+		info.TenantId = result.TenantId
+		// No workspace context at the token level — workspace access is resolved
+		// by the workspace auth middleware when accessing workspace-scoped routes.
 	case types.TokenTypeWorker:
 		info.Worker = &types.WorkerInfo{
 			PoolName: result.PoolName,
@@ -591,13 +601,13 @@ func (r *PostgresBackend) AuthorizeToken(ctx context.Context, rawToken string) (
 
 func (r *PostgresBackend) GetToken(ctx context.Context, externalId string) (*types.Token, error) {
 	query := `
-		SELECT id, external_id, workspace_id, member_id, token_type, token_hash, token_prefix, name, pool_name, expires_at, created_at, last_used_at
+		SELECT id, external_id, workspace_id, member_id, token_type, token_hash, token_prefix, name, pool_name, tenant_id, expires_at, created_at, last_used_at
 		FROM token WHERE external_id = $1
 	`
 
 	var t types.Token
 	err := r.db.QueryRowContext(ctx, query, externalId).Scan(
-		&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.TokenPrefix, &t.Name, &t.PoolName, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt,
+		&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.TokenPrefix, &t.Name, &t.PoolName, &t.TenantId, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -610,7 +620,7 @@ func (r *PostgresBackend) GetToken(ctx context.Context, externalId string) (*typ
 
 func (r *PostgresBackend) ListTokens(ctx context.Context, workspaceId uint) ([]types.Token, error) {
 	query := `
-		SELECT id, external_id, workspace_id, member_id, token_type, token_hash, token_prefix, name, pool_name, expires_at, created_at, last_used_at
+		SELECT id, external_id, workspace_id, member_id, token_type, token_hash, token_prefix, name, pool_name, tenant_id, expires_at, created_at, last_used_at
 		FROM token WHERE workspace_id = $1 ORDER BY created_at DESC
 	`
 
@@ -623,7 +633,7 @@ func (r *PostgresBackend) ListTokens(ctx context.Context, workspaceId uint) ([]t
 	var tokens []types.Token
 	for rows.Next() {
 		var t types.Token
-		if err := rows.Scan(&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.TokenPrefix, &t.Name, &t.PoolName, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt); err != nil {
+		if err := rows.Scan(&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.TokenPrefix, &t.Name, &t.PoolName, &t.TenantId, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt); err != nil {
 			return nil, fmt.Errorf("scan token: %w", err)
 		}
 		tokens = append(tokens, t)
@@ -634,7 +644,7 @@ func (r *PostgresBackend) ListTokens(ctx context.Context, workspaceId uint) ([]t
 // ListWorkerTokens returns all worker tokens (cluster-level, not workspace-scoped)
 func (r *PostgresBackend) ListWorkerTokens(ctx context.Context) ([]types.Token, error) {
 	query := `
-		SELECT id, external_id, workspace_id, member_id, token_type, token_hash, token_prefix, name, pool_name, expires_at, created_at, last_used_at
+		SELECT id, external_id, workspace_id, member_id, token_type, token_hash, token_prefix, name, pool_name, tenant_id, expires_at, created_at, last_used_at
 		FROM token WHERE token_type = 'worker' ORDER BY created_at DESC
 	`
 
@@ -647,7 +657,7 @@ func (r *PostgresBackend) ListWorkerTokens(ctx context.Context) ([]types.Token, 
 	var tokens []types.Token
 	for rows.Next() {
 		var t types.Token
-		if err := rows.Scan(&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.TokenPrefix, &t.Name, &t.PoolName, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt); err != nil {
+		if err := rows.Scan(&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.TokenPrefix, &t.Name, &t.PoolName, &t.TenantId, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt); err != nil {
 			return nil, fmt.Errorf("scan worker token: %w", err)
 		}
 		tokens = append(tokens, t)
@@ -655,11 +665,144 @@ func (r *PostgresBackend) ListWorkerTokens(ctx context.Context) ([]types.Token, 
 	return tokens, rows.Err()
 }
 
+// CreateOrgToken creates a tenant-scoped organization token (not tied to a workspace).
+func (r *PostgresBackend) CreateOrgToken(ctx context.Context, name string, tenantId string, expiresAt *time.Time) (*types.Token, string, error) {
+	raw, err := generateToken()
+	if err != nil {
+		return nil, "", fmt.Errorf("generate token: %w", err)
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(raw), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, "", fmt.Errorf("hash token: %w", err)
+	}
+
+	prefix := raw[:tokenPrefixLen]
+
+	query := `
+		INSERT INTO token (workspace_id, member_id, token_hash, token_prefix, name, tenant_id, expires_at, token_type)
+		VALUES (NULL, NULL, $1, $2, $3, $4, $5, 'organization')
+		RETURNING id, external_id, workspace_id, member_id, token_type, token_hash, token_prefix, name, pool_name, tenant_id, expires_at, created_at, last_used_at
+	`
+
+	var t types.Token
+	err = r.db.QueryRowContext(ctx, query, string(hash), prefix, name, tenantId, expiresAt).Scan(
+		&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.TokenPrefix, &t.Name, &t.PoolName, &t.TenantId, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt,
+	)
+	if err != nil {
+		return nil, "", fmt.Errorf("create org token: %w", err)
+	}
+	return &t, raw, nil
+}
+
+// ListOrgTokens returns all organization tokens, optionally filtered by tenant_id.
+func (r *PostgresBackend) ListOrgTokens(ctx context.Context, tenantId string) ([]types.Token, error) {
+	var query string
+	var args []interface{}
+
+	if tenantId != "" {
+		query = `
+			SELECT id, external_id, workspace_id, member_id, token_type, token_hash, token_prefix, name, pool_name, tenant_id, expires_at, created_at, last_used_at
+			FROM token WHERE token_type = 'organization' AND tenant_id = $1 ORDER BY created_at DESC
+		`
+		args = append(args, tenantId)
+	} else {
+		query = `
+			SELECT id, external_id, workspace_id, member_id, token_type, token_hash, token_prefix, name, pool_name, tenant_id, expires_at, created_at, last_used_at
+			FROM token WHERE token_type = 'organization' ORDER BY created_at DESC
+		`
+	}
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list org tokens: %w", err)
+	}
+	defer rows.Close()
+
+	var tokens []types.Token
+	for rows.Next() {
+		var t types.Token
+		if err := rows.Scan(&t.Id, &t.ExternalId, &t.WorkspaceId, &t.MemberId, &t.TokenType, &t.TokenHash, &t.TokenPrefix, &t.Name, &t.PoolName, &t.TenantId, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt); err != nil {
+			return nil, fmt.Errorf("scan org token: %w", err)
+		}
+		tokens = append(tokens, t)
+	}
+	return tokens, rows.Err()
+}
+
+// validateOrganizationToken validates an organization token by prefix lookup.
+func (r *PostgresBackend) validateOrganizationToken(ctx context.Context, rawToken string) (*types.TokenValidationResult, error) {
+	if len(rawToken) < tokenPrefixLen {
+		return nil, fmt.Errorf("token too short")
+	}
+
+	prefix := rawToken[:tokenPrefixLen]
+
+	query := `
+		SELECT t.id, t.token_hash, t.expires_at, t.tenant_id
+		FROM token t
+		WHERE t.token_prefix = $1
+		  AND t.token_type = 'organization'
+		  AND (t.expires_at IS NULL OR t.expires_at > CURRENT_TIMESTAMP)
+	`
+
+	var (
+		tokenId   uint
+		tokenHash string
+		expiresAt sql.NullTime
+		tenantId  sql.NullString
+	)
+
+	err := r.db.QueryRowContext(ctx, query, prefix).Scan(&tokenId, &tokenHash, &expiresAt, &tenantId)
+	if err != nil {
+		return nil, err
+	}
+
+	if bcrypt.CompareHashAndPassword([]byte(tokenHash), []byte(rawToken)) != nil {
+		return nil, fmt.Errorf("invalid token")
+	}
+
+	if expiresAt.Valid && expiresAt.Time.Before(time.Now()) {
+		return nil, fmt.Errorf("token expired")
+	}
+
+	go func(id uint) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		r.db.ExecContext(ctx, `UPDATE token SET last_used_at = CURRENT_TIMESTAMP WHERE id = $1`, id)
+	}(tokenId)
+
+	result := &types.TokenValidationResult{
+		TokenType: types.TokenTypeOrganization,
+		TokenId:   tokenId,
+	}
+	if tenantId.Valid {
+		result.TenantId = tenantId.String
+	}
+	return result, nil
+}
+
 func (r *PostgresBackend) RevokeToken(ctx context.Context, externalId string) error {
 	query := `DELETE FROM token WHERE external_id = $1`
 	result, err := r.db.ExecContext(ctx, query, externalId)
 	if err != nil {
 		return fmt.Errorf("revoke token: %w", err)
+	}
+
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// RevokeOrgToken deletes a token only if it is of type 'organization'.
+// Returns sql.ErrNoRows if the token doesn't exist or isn't an org token.
+func (r *PostgresBackend) RevokeOrgToken(ctx context.Context, externalId string) error {
+	query := `DELETE FROM token WHERE external_id = $1 AND token_type = 'organization'`
+	result, err := r.db.ExecContext(ctx, query, externalId)
+	if err != nil {
+		return fmt.Errorf("revoke org token: %w", err)
 	}
 
 	n, _ := result.RowsAffected()

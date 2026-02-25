@@ -6,12 +6,25 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/rs/zerolog/log"
+)
+
+const (
+	defaultMountReadyTimeout = 5 * time.Second
+	mountReadyPollInterval   = 100 * time.Millisecond
+	mountDirPerm             = 0o755
+	mountSubcommand          = "mount"
+	fusermountBinary         = "fusermount"
+	fusermountUnmountFlag    = "-u"
+	termWaitTimeout          = 5 * time.Second
+	killWaitTimeout          = 2 * time.Second
 )
 
 // MountConfig configures the mount manager
@@ -32,9 +45,9 @@ type MountConfig struct {
 // DefaultMountConfig returns sensible defaults
 func DefaultMountConfig() MountConfig {
 	return MountConfig{
-		MountDir:          "/tmp/airstore-mounts",
-		CLIBinary:         "/usr/local/bin/cli",
-		MountReadyTimeout: 5 * time.Second,
+		MountDir:          types.DefaultMountDir,
+		CLIBinary:         types.DefaultCLIBinary,
+		MountReadyTimeout: defaultMountReadyTimeout,
 	}
 }
 
@@ -47,20 +60,74 @@ type MountManager struct {
 
 // taskMount represents an active FUSE mount for a task
 type taskMount struct {
-	taskID    string
-	token     string
 	mountPath string
 	cmd       *exec.Cmd
-	ctx       context.Context
 	cancel    context.CancelFunc
 	ready     bool
-	err       error
+	exited    chan error
+}
+
+var (
+	requiredFilesystemRoots   = buildRequiredFilesystemRoots()
+	requiredFilesystemRootSet = buildRequiredFilesystemRootSet(requiredFilesystemRoots)
+)
+
+func buildRequiredFilesystemRoots() []string {
+	roots := make([]string, 0, len(types.SystemPaths()))
+	for _, path := range types.SystemPaths() {
+		root := strings.TrimPrefix(strings.ToLower(path), "/")
+		if root != "" {
+			roots = append(roots, root)
+		}
+	}
+	sort.Strings(roots)
+	return roots
+}
+
+func buildRequiredFilesystemRootSet(roots []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(roots))
+	for _, root := range roots {
+		out[root] = struct{}{}
+	}
+	return out
+}
+
+// checkFilesystemMountReady validates that the mount path contains all expected
+// system root directories (/memory, /skills, /sources, /tasks, /tools).
+func checkFilesystemMountReady(mountPath string) (bool, []string, error) {
+	entries, err := os.ReadDir(mountPath)
+	if err != nil {
+		return false, nil, err
+	}
+
+	present := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		name := strings.ToLower(strings.TrimSpace(entry.Name()))
+		if name == "" {
+			continue
+		}
+
+		if _, tracked := requiredFilesystemRootSet[name]; !tracked {
+			continue
+		}
+		if entry.IsDir() {
+			present[name] = struct{}{}
+		}
+	}
+
+	missing := make([]string, 0)
+	for _, root := range requiredFilesystemRoots {
+		if _, ok := present[root]; !ok {
+			missing = append(missing, root)
+		}
+	}
+	return len(missing) == 0, missing, nil
 }
 
 // NewMountManager creates a new mount manager
 func NewMountManager(config MountConfig) (*MountManager, error) {
 	// Ensure mount directory exists
-	if err := os.MkdirAll(config.MountDir, 0755); err != nil {
+	if err := os.MkdirAll(config.MountDir, mountDirPerm); err != nil {
 		return nil, fmt.Errorf("failed to create mount directory %s: %w", config.MountDir, err)
 	}
 
@@ -75,23 +142,60 @@ func NewMountManager(config MountConfig) (*MountManager, error) {
 	}, nil
 }
 
-// Mount creates a FUSE mount for a task using the given token
-// Returns the mount path that can be bind-mounted into containers
-func (m *MountManager) Mount(ctx context.Context, taskID, token string) (string, error) {
+func (m *MountManager) getOrCreateMount(taskID string) (*taskMount, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Check if mount already exists
 	if mount, exists := m.mounts[taskID]; exists {
+		return mount, false
+	}
+
+	mount := &taskMount{
+		mountPath: filepath.Join(m.config.MountDir, taskID),
+		exited:    make(chan error, 1),
+	}
+	m.mounts[taskID] = mount
+	return mount, true
+}
+
+func (m *MountManager) markMountReady(mount *taskMount) {
+	m.mu.Lock()
+	mount.ready = true
+	m.mu.Unlock()
+}
+
+// Mount creates a FUSE mount for a task using the given token
+// Returns the mount path that can be bind-mounted into containers
+func (m *MountManager) Mount(ctx context.Context, taskID, token string) (string, error) {
+	mount, created := m.getOrCreateMount(taskID)
+	if !created {
 		if mount.ready {
 			return mount.mountPath, nil
 		}
-		return "", fmt.Errorf("mount for task %s is still initializing", taskID)
+
+		select {
+		case err, ok := <-mount.exited:
+			if ok && err != nil {
+				return "", fmt.Errorf("mount process for task %s exited during initialization: %w", taskID, err)
+			}
+			return "", fmt.Errorf("mount process for task %s exited before becoming ready", taskID)
+		default:
+			return "", fmt.Errorf("mount for task %s is still initializing at %s", taskID, mount.mountPath)
+		}
 	}
 
+	cleanupOnError := true
+	defer func() {
+		if cleanupOnError {
+			if err := m.Unmount(taskID); err != nil {
+				log.Warn().Err(err).Str("task_id", taskID).Msg("failed to cleanup mount after error")
+			}
+		}
+	}()
+
 	// Create mount directory for this task
-	mountPath := filepath.Join(m.config.MountDir, taskID)
-	if err := os.MkdirAll(mountPath, 0755); err != nil {
+	mountPath := mount.mountPath
+	if err := os.MkdirAll(mountPath, mountDirPerm); err != nil {
 		return "", fmt.Errorf("failed to create task mount directory: %w", err)
 	}
 
@@ -99,10 +203,11 @@ func (m *MountManager) Mount(ctx context.Context, taskID, token string) (string,
 	mountCtx, cancel := context.WithCancel(ctx)
 
 	// Start FUSE mount process with sandbox user ownership
-	cmd := exec.CommandContext(mountCtx, m.config.CLIBinary, "mount",
+	cmd := exec.CommandContext(mountCtx, m.config.CLIBinary, mountSubcommand,
 		mountPath,
 		"--gateway", m.config.GatewayAddr,
 		"--token", token,
+		"--daemon",
 		"--uid", fmt.Sprintf("%d", types.SandboxUserUID),
 		"--gid", fmt.Sprintf("%d", types.SandboxUserGID),
 	)
@@ -111,84 +216,75 @@ func (m *MountManager) Mount(ctx context.Context, taskID, token string) (string,
 
 	if err := cmd.Start(); err != nil {
 		cancel()
-		os.RemoveAll(mountPath)
 		return "", fmt.Errorf("failed to start mount process: %w", err)
 	}
 
-	mount := &taskMount{
-		taskID:    taskID,
-		token:     token,
-		mountPath: mountPath,
-		cmd:       cmd,
-		ctx:       mountCtx,
-		cancel:    cancel,
-		ready:     false,
-	}
-	m.mounts[taskID] = mount
+	m.mu.Lock()
+	mount.cmd = cmd
+	mount.cancel = cancel
+	m.mu.Unlock()
 
-	// Wait for mount to be ready (check for files in the mount)
-	go m.waitForReady(mount)
+	go func() {
+		mount.exited <- cmd.Wait()
+		close(mount.exited)
+	}()
 
-	// Block until ready or timeout
-	readyCtx, readyCancel := context.WithTimeout(ctx, m.config.MountReadyTimeout)
-	defer readyCancel()
+	timeout := time.NewTimer(m.config.MountReadyTimeout)
+	defer timeout.Stop()
 
-	ticker := time.NewTicker(100 * time.Millisecond)
+	ticker := time.NewTicker(mountReadyPollInterval)
 	defer ticker.Stop()
 
+	var lastMissing []string
+	var lastReadErr error
 	for {
 		select {
-		case <-readyCtx.Done():
-			// Timeout - check if mount has any files
-			entries, err := os.ReadDir(mountPath)
-			if err == nil && len(entries) > 0 {
-				mount.ready = true
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-timeout.C:
+			ready, missing, err := checkFilesystemMountReady(mountPath)
+			if ready {
+				m.markMountReady(mount)
+				cleanupOnError = false
 				log.Info().
 					Str("task_id", taskID).
 					Str("mount_path", mountPath).
-					Int("files", len(entries)).
 					Msg("task mount ready")
 				return mountPath, nil
 			}
-			log.Warn().
+			if err != nil {
+				if lastReadErr != nil {
+					err = lastReadErr
+				}
+				return "", fmt.Errorf("task mount %s not ready: %w", mountPath, err)
+			}
+			if len(missing) == 0 {
+				missing = lastMissing
+			}
+			return "", fmt.Errorf("task mount %s missing required roots: %s", mountPath, strings.Join(missing, ", "))
+		case err, ok := <-mount.exited:
+			if ok && err != nil {
+				return "", fmt.Errorf("mount process for task %s exited before ready: %w", taskID, err)
+			}
+			return "", fmt.Errorf("mount process for task %s exited before becoming ready", taskID)
+		case <-ticker.C:
+			ready, missing, err := checkFilesystemMountReady(mountPath)
+			if err != nil {
+				lastReadErr = err
+				continue
+			}
+			lastMissing = missing
+			if !ready {
+				continue
+			}
+
+			m.markMountReady(mount)
+			cleanupOnError = false
+			log.Info().
 				Str("task_id", taskID).
 				Str("mount_path", mountPath).
-				Msg("mount ready timeout, proceeding anyway")
-			mount.ready = true
+				Msg("task mount ready")
 			return mountPath, nil
-		case <-ticker.C:
-			if mount.ready {
-				return mountPath, nil
-			}
-			if mount.err != nil {
-				return "", mount.err
-			}
-		}
-	}
-}
-
-// waitForReady waits for the mount to have files
-func (m *MountManager) waitForReady(mount *taskMount) {
-	ticker := time.NewTicker(200 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-mount.ctx.Done():
-			return
-		case <-ticker.C:
-			entries, err := os.ReadDir(mount.mountPath)
-			if err == nil && len(entries) > 0 {
-				m.mu.Lock()
-				mount.ready = true
-				m.mu.Unlock()
-
-				log.Debug().
-					Str("task_id", mount.taskID).
-					Int("files", len(entries)).
-					Msg("mount became ready")
-				return
-			}
 		}
 	}
 }
@@ -209,21 +305,23 @@ func (m *MountManager) Unmount(taskID string) error {
 	// Stop the mount process
 	if mount.cmd != nil && mount.cmd.Process != nil {
 		mount.cancel()
-		mount.cmd.Process.Signal(syscall.SIGTERM)
+		_ = mount.cmd.Process.Signal(syscall.SIGTERM)
 
-		// Wait with timeout
-		done := make(chan error, 1)
-		go func() { done <- mount.cmd.Wait() }()
-
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			mount.cmd.Process.Kill()
+		if mount.exited != nil {
+			select {
+			case <-mount.exited:
+			case <-time.After(termWaitTimeout):
+				_ = mount.cmd.Process.Kill()
+				select {
+				case <-mount.exited:
+				case <-time.After(killWaitTimeout):
+				}
+			}
 		}
 	}
 
 	// Try fusermount to ensure clean unmount
-	exec.Command("fusermount", "-u", mount.mountPath).Run()
+	exec.Command(fusermountBinary, fusermountUnmountFlag, mount.mountPath).Run()
 
 	// Remove mount directory
 	if err := os.RemoveAll(mount.mountPath); err != nil {

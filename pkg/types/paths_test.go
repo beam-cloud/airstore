@@ -82,7 +82,7 @@ func TestIsHookablePath(t *testing.T) {
 		{"/sources/gmail", false},
 		{"/sources/github", false},
 
-		// Hookable - smart query folders under sources
+		// Hookable - source view folders under sources
 		{"/sources/gmail/inbox", true},
 		{"/sources/gmail/new unread emails", true},
 		{"/sources/gdrive/my-folder", true},

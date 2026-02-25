@@ -196,16 +196,16 @@ func (eng *Engine) Start(ctx context.Context) {
 func (eng *Engine) Poll(ctx context.Context) {
 	// Reap tasks stuck in pending/running
 	for _, timeout := range []time.Duration{stuckPending, stuckRunning} {
-		if tasks, err := eng.backend.GetStuckHookTasks(ctx, timeout); err == nil {
+		if tasks, err := eng.backend.GetStuckHookRunExecutions(ctx, timeout); err == nil {
 			for _, t := range tasks {
 				log.Warn().Str("task", t.ExternalId).Msg("reaping stuck task")
-				eng.backend.SetTaskResult(ctx, t.ExternalId, -1, "stuck: no response from worker")
+				eng.backend.SetRunExecutionResult(ctx, t.ExternalId, -1, "stuck: no response from worker")
 			}
 		}
 	}
 
 	// Retry failed tasks with backoff
-	tasks, err := eng.backend.GetRetryableTasks(ctx)
+	tasks, err := eng.backend.GetRetryableRunExecutions(ctx)
 	if err != nil {
 		return
 	}
@@ -235,7 +235,7 @@ func (eng *Engine) Poll(ctx context.Context) {
 		// Mark the original task as exhausted BEFORE creating the retry.
 		// Without this, the retry poller picks up the same failed task
 		// on every tick and creates infinite duplicate retries.
-		eng.backend.MarkTaskRetried(ctx, t.ExternalId)
+		eng.backend.MarkRunExecutionRetried(ctx, t.ExternalId)
 
 		if err := eng.creator.CreateTask(ctx, t.WorkspaceId, t.CreatedByMemberId, token, t.Prompt,
 			*t.HookId, next, t.MaxAttempts); err != nil {

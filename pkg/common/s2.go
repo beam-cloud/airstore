@@ -64,6 +64,14 @@ type TaskStatusEntry struct {
 	Error     string `json:"error,omitempty"`
 }
 
+// RunEventEntry represents a lifecycle event emitted by the orchestration engine.
+type RunEventEntry struct {
+	RunID     string         `json:"run_id"`
+	EventType string         `json:"event_type"`
+	Timestamp int64          `json:"timestamp"`
+	Payload   map[string]any `json:"payload,omitempty"`
+}
+
 // StreamNames provides consistent stream naming
 type StreamNames struct{}
 
@@ -75,6 +83,11 @@ func (StreamNames) TaskLogs(taskID string) string {
 // TaskStatus returns the stream name for a task's status events
 func (StreamNames) TaskStatus(taskID string) string {
 	return fmt.Sprintf("task.%s.status", taskID)
+}
+
+// RunEvents returns the stream name for orchestration run events.
+func (StreamNames) RunEvents(runID string) string {
+	return fmt.Sprintf("run.%s.events", runID)
 }
 
 // Streams provides access to stream names
@@ -155,6 +168,17 @@ func (c *S2Client) AppendStatus(ctx context.Context, taskID, status string, exit
 	return c.Append(ctx, Streams.TaskStatus(taskID), entry)
 }
 
+// AppendRunEvent appends a run event entry to the run event stream.
+func (c *S2Client) AppendRunEvent(ctx context.Context, runID, eventType string, payload map[string]any) error {
+	entry := RunEventEntry{
+		RunID:     runID,
+		EventType: eventType,
+		Timestamp: time.Now().UnixMilli(),
+		Payload:   payload,
+	}
+	return c.Append(ctx, Streams.RunEvents(runID), entry)
+}
+
 // ReadRecord represents a record read from S2
 type ReadRecord struct {
 	SeqNum    int64  `json:"seq_num"`
@@ -190,8 +214,10 @@ func (c *S2Client) Read(ctx context.Context, stream string, seqNum int64, count 
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, nil // Stream doesn't exist yet
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusConflict ||
+		resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
+		// 404 = stream doesn't exist, 409 = deletion pending, 416 = cursor past end of stream
+		return nil, nil
 	}
 
 	if resp.StatusCode >= 400 {
@@ -244,6 +270,49 @@ func FormatLogs(logs []TaskLogEntry) string {
 		buf.WriteByte('\n')
 	}
 	return buf.String()
+}
+
+// StreamInfo represents a stream returned by the S2 list streams API.
+type StreamInfo struct {
+	Name string `json:"name"`
+}
+
+type listStreamsResponse struct {
+	Streams []StreamInfo `json:"streams"`
+	HasMore bool         `json:"has_more"`
+}
+
+// ListStreams lists streams whose names begin with the given prefix.
+func (c *S2Client) ListStreams(ctx context.Context, prefix string) ([]StreamInfo, error) {
+	if !c.Enabled() {
+		return nil, nil
+	}
+
+	url := c.url("/streams") + "?prefix=" + prefix + "&limit=1000"
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	httpReq.Header.Set("Authorization", "Bearer "+c.config.Token)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("S2 error %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result listStreamsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return result.Streams, nil
 }
 
 func (c *S2Client) url(path string) string {

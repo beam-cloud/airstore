@@ -14,26 +14,30 @@ import (
 )
 
 const (
-	errMsgSessionInvalid = "Invalid or expired OAuth session"
-	errMsgProviderConfig = "Provider not configured"
-	errMsgNoAuthCode     = "Missing authorization code"
-	errMsgTokenExchange  = "Token exchange failed"
-	errMsgSaveConnection = "Failed to save connection"
+	errMsgSessionInvalid = "Invalid or expired OAuth session. This usually means the callback URL doesn't match the server that created the session (e.g. session created on localhost but callback went to production)."
+	errMsgProviderConfig = "This OAuth provider is not configured on the server. Check that the provider credentials are set in the gateway config."
+	errMsgNoAuthCode     = "The OAuth provider did not return an authorization code. This can happen if you denied the request or the provider encountered an error."
+	errMsgTokenExchange  = "Failed to exchange the authorization code for access tokens. The provider may have rejected the request — check that the OAuth client ID and secret are correct."
+	errMsgSaveConnection = "OAuth succeeded but we couldn't save the connection to the database. Please try again."
 )
 
 // OAuthGroup handles OAuth endpoints for workspace integrations.
 type OAuthGroup struct {
-	store    *oauth.Store
-	registry *oauth.Registry
-	backend  repository.BackendRepository
+	store      *oauth.Store
+	registry   *oauth.Registry
+	backend    repository.BackendRepository
+	adminToken string
 }
 
 // NewOAuthGroup creates and registers OAuth routes.
-func NewOAuthGroup(g *echo.Group, store *oauth.Store, registry *oauth.Registry, backend repository.BackendRepository) *OAuthGroup {
+// adminToken is the cluster-admin bearer token so that trusted callers (e.g. the
+// dashboard backend) can create sessions without a per-workspace member token.
+func NewOAuthGroup(g *echo.Group, store *oauth.Store, registry *oauth.Registry, backend repository.BackendRepository, adminToken string) *OAuthGroup {
 	og := &OAuthGroup{
-		store:    store,
-		registry: registry,
-		backend:  backend,
+		store:      store,
+		registry:   registry,
+		backend:    backend,
+		adminToken: adminToken,
 	}
 
 	g.POST("/sessions", og.CreateSession)
@@ -45,6 +49,7 @@ func NewOAuthGroup(g *echo.Group, store *oauth.Store, registry *oauth.Registry, 
 
 type CreateSessionRequest struct {
 	IntegrationType string `json:"integration_type"`
+	WorkspaceId     string `json:"workspace_id,omitempty"`
 	ReturnTo        string `json:"return_to,omitempty"`
 }
 
@@ -54,20 +59,19 @@ type CreateSessionResponse struct {
 }
 
 // CreateSession creates a new OAuth session and returns the authorization URL.
+//
+// Auth: accepts either a workspace-scoped member token (workspace derived from
+// the token) or the cluster admin / org token (workspace_id must be in the
+// request body).
 func (og *OAuthGroup) CreateSession(c echo.Context) error {
-	auth := c.Request().Header.Get("Authorization")
-	if auth == "" {
+	authHeader := c.Request().Header.Get("Authorization")
+	if authHeader == "" {
 		return ErrorResponse(c, http.StatusUnauthorized, "authorization required")
 	}
 
-	token := strings.TrimPrefix(auth, "Bearer ")
-	if token == auth {
+	token := strings.TrimPrefix(authHeader, "Bearer ")
+	if token == authHeader {
 		return ErrorResponse(c, http.StatusUnauthorized, "bearer token required")
-	}
-
-	result, err := og.backend.ValidateToken(c.Request().Context(), token)
-	if err != nil || result == nil {
-		return ErrorResponse(c, http.StatusUnauthorized, "invalid token")
 	}
 
 	var req CreateSessionRequest
@@ -78,6 +82,25 @@ func (og *OAuthGroup) CreateSession(c echo.Context) error {
 	if req.IntegrationType == "" {
 		return ErrorResponse(c, http.StatusBadRequest, "integration_type required")
 	}
+
+	// Resolve the caller identity and target workspace using the shared helper.
+	info, err := resolveCallerWorkspace(c.Request().Context(), token, og.adminToken, req.WorkspaceId, og.backend)
+	if err != nil {
+		msg := err.Error()
+		switch msg {
+		case "authorization required", "invalid token":
+			return ErrorResponse(c, http.StatusUnauthorized, msg)
+		case "workspace not found":
+			return ErrorResponse(c, http.StatusNotFound, msg)
+		case "token does not have access to this workspace":
+			return ErrorResponse(c, http.StatusForbidden, msg)
+		default:
+			return ErrorResponse(c, http.StatusBadRequest, msg)
+		}
+	}
+
+	workspaceId := info.Workspace.Id
+	workspaceExt := info.Workspace.ExternalId
 
 	provider, err := og.registry.GetProviderForIntegration(req.IntegrationType)
 	if err != nil {
@@ -92,7 +115,7 @@ func (og *OAuthGroup) CreateSession(c echo.Context) error {
 		}
 	}
 
-	session, err := og.store.Create(provider.Name(), result.WorkspaceId, result.WorkspaceExt, req.IntegrationType, req.ReturnTo)
+	session, err := og.store.Create(provider.Name(), workspaceId, workspaceExt, req.IntegrationType, req.ReturnTo)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to create oauth session")
 		return ErrorResponse(c, http.StatusInternalServerError, "failed to create session")
@@ -106,7 +129,7 @@ func (og *OAuthGroup) CreateSession(c echo.Context) error {
 
 	log.Info().
 		Str("session_id", session.ID).
-		Str("workspace", result.WorkspaceExt).
+		Str("workspace", workspaceExt).
 		Str("integration", req.IntegrationType).
 		Str("provider", provider.Name()).
 		Msg("oauth session created")

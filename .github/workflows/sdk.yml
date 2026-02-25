@@ -1,0 +1,92 @@
+name: SDK
+
+on:
+  push:
+    # Run on main branch pushes and SDK version tags.
+    # Note: paths filter is omitted here because tag pushes have no file diff
+    # and would be silently skipped if paths were set.
+    branches: [main]
+    tags:
+      - 'sdk-v*'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'sdk/typescript/**'
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: sdk/typescript
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: sdk/typescript/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint (type-check)
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        env:
+          AIRSTORE_API_KEY: ${{ secrets.AIRSTORE_API_KEY }}
+          AIRSTORE_BASE_URL: https://api.airstore.ai/api/v1
+        run: npm test
+
+  publish:
+    name: Publish to npm
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/sdk-v')
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+          cache: 'npm'
+          cache-dependency-path: sdk/typescript/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          # Tag format: sdk-v0.1.0 -> 0.1.0
+          VERSION="${GITHUB_REF_NAME#sdk-v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Publishing version: $VERSION"
+
+      - name: Set package version
+        run: npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
+
+      - name: Build
+        run: npm run build
+
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public

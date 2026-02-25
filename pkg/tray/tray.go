@@ -21,12 +21,19 @@ type App struct {
 }
 
 func Run(cfg Config) error {
+	// Use explicitly provided token, fall back to credentials file
+	token := cfg.Token
+	if token == "" {
+		token = LoadToken()
+	}
+
 	app := &App{cfg: cfg}
 	app.mgr = mount.NewMountManager(mount.Config{
 		MountPoint:  cfg.MountPoint,
 		ConfigPath:  cfg.ConfigPath,
 		GatewayAddr: cfg.GatewayAddr,
-		Token:       LoadToken(),
+		Token:       token,
+		AccessLog:   true,
 	}, app.onStateChange)
 
 	systray.Run(app.onReady, app.onExit)

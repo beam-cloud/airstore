@@ -9,14 +9,21 @@ import (
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/types"
-	"golang.org/x/oauth2/slack"
+)
+
+const (
+	slackAuthURL  = "https://slack.com/oauth/v2/authorize"
+	slackTokenURL = "https://slack.com/api/oauth.v2.access"
 )
 
 var slackIntegrationScopes = map[string][]string{
 	"slack": {
 		"channels:read",
 		"channels:history",
+		"groups:read",
+		"groups:history",
 		"files:read",
+		"search:read",
 		"users:read",
 		"users:read.email",
 	},
@@ -70,7 +77,7 @@ func (s *SlackProvider) AuthorizeURL(state, integrationType string) (string, err
 		"user_scope":   {strings.Join(scopes, ",")},
 	}
 
-	return slack.Endpoint.AuthURL + "?" + params.Encode(), nil
+	return slackAuthURL + "?" + params.Encode(), nil
 }
 
 func (s *SlackProvider) Exchange(ctx context.Context, code, integrationType string) (*types.IntegrationCredentials, error) {
@@ -81,7 +88,7 @@ func (s *SlackProvider) Exchange(ctx context.Context, code, integrationType stri
 		"redirect_uri":  {s.callbackURL},
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", slack.Endpoint.TokenURL, strings.NewReader(data.Encode()))
+	req, err := http.NewRequestWithContext(ctx, "POST", slackTokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +156,7 @@ func (s *SlackProvider) Refresh(ctx context.Context, refreshToken string) (*type
 		"grant_type":    {"refresh_token"},
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", slack.Endpoint.TokenURL, strings.NewReader(data.Encode()))
+	req, err := http.NewRequestWithContext(ctx, "POST", slackTokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, err
 	}

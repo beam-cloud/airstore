@@ -2,11 +2,13 @@ package filesystem
 
 import (
 	"errors"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/filesystem/vnode"
+	"github.com/rs/zerolog/log"
 	"github.com/winfsp/cgofuse/fuse"
 )
 
@@ -16,15 +18,23 @@ type adapter struct {
 }
 
 func newAdapter(fs *Filesystem) *adapter {
-	return &adapter{
-		fs: fs,
+	return &adapter{fs: fs}
+}
+
+// recoverEIO catches panics in FUSE operations so a single bad source
+// provider can't crash the mount. Sets *rc to -EIO and logs the stack.
+func recoverEIO(rc *int) {
+	if r := recover(); r != nil {
+		log.Error().Interface("recovered", r).Str("stack", string(debug.Stack())).Msg("fuse: panic in operation")
+		*rc = -int(syscall.EIO)
 	}
 }
 
 func (a *adapter) Init()    { a.fs.Init() }
 func (a *adapter) Destroy() { a.fs.Destroy() }
 
-func (a *adapter) Statfs(path string, stat *fuse.Statfs_t) int {
+func (a *adapter) Statfs(path string, stat *fuse.Statfs_t) (rc int) {
+	defer recoverEIO(&rc)
 	info, err := a.fs.Statfs()
 	if err != nil {
 		return toErrno(err)
@@ -41,7 +51,8 @@ func (a *adapter) Statfs(path string, stat *fuse.Statfs_t) int {
 	return 0
 }
 
-func (a *adapter) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
+func (a *adapter) Getattr(path string, stat *fuse.Stat_t, fh uint64) (rc int) {
+	defer recoverEIO(&rc)
 	var start time.Time
 	if a.fs.trace != nil {
 		start = time.Now()
@@ -60,15 +71,17 @@ func (a *adapter) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 	return 0
 }
 
-func (a *adapter) Readlink(path string) (int, string) {
-	target, err := a.fs.Readlink(path)
+func (a *adapter) Readlink(path string) (rc int, target string) {
+	defer recoverEIO(&rc)
+	t, err := a.fs.Readlink(path)
 	if err != nil {
 		return toErrno(err), ""
 	}
-	return 0, target
+	return 0, t
 }
 
-func (a *adapter) Mkdir(path string, mode uint32) int {
+func (a *adapter) Mkdir(path string, mode uint32) (rc int) {
+	defer recoverEIO(&rc)
 	var start time.Time
 	if a.fs.trace != nil {
 		start = time.Now()
@@ -80,65 +93,59 @@ func (a *adapter) Mkdir(path string, mode uint32) int {
 	return toErrno(err)
 }
 
-func (a *adapter) Rmdir(path string) int {
+func (a *adapter) Rmdir(path string) (rc int) {
+	defer recoverEIO(&rc)
 	return toErrno(a.fs.Rmdir(path))
 }
 
-func (a *adapter) Unlink(path string) int {
+func (a *adapter) Unlink(path string) (rc int) {
+	defer recoverEIO(&rc)
 	return toErrno(a.fs.Unlink(path))
 }
 
-func (a *adapter) Rename(oldpath, newpath string) int {
+func (a *adapter) Rename(oldpath, newpath string) (rc int) {
+	defer recoverEIO(&rc)
 	// FUSE-T SMB backend uses rename-to-hidden for delete operations.
-	// When we see a rename to .fuse_hidden*, treat it as a delete.
 	if strings.Contains(newpath, ".fuse_hidden") {
 		return toErrno(a.fs.Unlink(oldpath))
 	}
 	return toErrno(a.fs.Rename(oldpath, newpath))
 }
 
-func (a *adapter) Link(oldpath, newpath string) int {
+func (a *adapter) Link(oldpath, newpath string) (rc int) {
+	defer recoverEIO(&rc)
 	return toErrno(a.fs.Link(oldpath, newpath))
 }
 
-func (a *adapter) Symlink(target, newpath string) int {
+func (a *adapter) Symlink(target, newpath string) (rc int) {
+	defer recoverEIO(&rc)
 	return toErrno(a.fs.Symlink(target, newpath))
 }
 
-func (a *adapter) Chmod(path string, mode uint32) int {
+func (a *adapter) Chmod(path string, mode uint32) (rc int) {
+	defer recoverEIO(&rc)
 	return toErrno(a.fs.Chmod(path, mode))
 }
 
-func (a *adapter) Chown(path string, uid, gid uint32) int {
+func (a *adapter) Chown(path string, uid, gid uint32) (rc int) {
+	defer recoverEIO(&rc)
 	return toErrno(a.fs.Chown(path, uid, gid))
 }
 
-// Access checks file access permissions. We always return success to allow
-// operations like `cp` on macOS to work properly with fcopyfile.
-func (a *adapter) Access(path string, mask uint32) int {
-	// Check if file exists first
+func (a *adapter) Access(path string, mask uint32) (rc int) {
+	defer recoverEIO(&rc)
 	if _, err := a.fs.Getattr(path); err != nil {
 		return toErrno(err)
 	}
-	return 0 // Allow all access to existing files
+	return 0
 }
 
-// Chflags handles BSD file flags (macOS). We silently accept and ignore them.
-func (a *adapter) Chflags(path string, flags uint32) int {
-	return 0 // Accept and discard
-}
+func (a *adapter) Chflags(path string, flags uint32) int   { return 0 }
+func (a *adapter) Setcrtime(path string, tmsp fuse.Timespec) int  { return 0 }
+func (a *adapter) Setchgtime(path string, tmsp fuse.Timespec) int { return 0 }
 
-// Setcrtime sets file creation time (macOS). We silently accept and ignore.
-func (a *adapter) Setcrtime(path string, tmsp fuse.Timespec) int {
-	return 0 // Accept and discard
-}
-
-// Setchgtime sets file change time (macOS). We silently accept and ignore.
-func (a *adapter) Setchgtime(path string, tmsp fuse.Timespec) int {
-	return 0 // Accept and discard
-}
-
-func (a *adapter) Utimens(path string, tmsp []fuse.Timespec) int {
+func (a *adapter) Utimens(path string, tmsp []fuse.Timespec) (rc int) {
+	defer recoverEIO(&rc)
 	var atime, mtime *int64
 	if len(tmsp) >= 1 {
 		t := tmsp[0].Sec*1e9 + tmsp[0].Nsec
@@ -151,61 +158,70 @@ func (a *adapter) Utimens(path string, tmsp []fuse.Timespec) int {
 	return toErrno(a.fs.Utimens(path, atime, mtime))
 }
 
-func (a *adapter) Open(path string, flags int) (int, uint64) {
+// OpenEx uses direct I/O so the kernel reads until EOF instead of trusting
+// the file size from Getattr. Essential for a remote FS with compression.
+func (a *adapter) OpenEx(path string, fi *fuse.FileInfo_t) (rc int) {
+	defer recoverEIO(&rc)
 	var start time.Time
 	if a.fs.trace != nil {
 		start = time.Now()
 	}
-	fh, err := a.fs.Open(path, flags)
+	fh, err := a.fs.Open(path, fi.Flags)
 	if err != nil {
 		if a.fs.trace != nil {
 			a.fs.trace.recordOpen(path, time.Since(start), err)
 		}
-		return toErrno(err), 0
+		return toErrno(err)
 	}
 	if a.fs.trace != nil {
 		a.fs.trace.recordOpen(path, time.Since(start), nil)
 	}
-	return 0, uint64(fh)
+	fi.Fh = uint64(fh)
+	fi.DirectIo = true
+	return 0
 }
 
-func (a *adapter) Create(path string, flags int, mode uint32) (int, uint64) {
+func (a *adapter) CreateEx(path string, mode uint32, fi *fuse.FileInfo_t) (rc int) {
+	defer recoverEIO(&rc)
 	var start time.Time
 	if a.fs.trace != nil {
 		start = time.Now()
 	}
-	fh, err := a.fs.Create(path, flags, mode)
+	fh, err := a.fs.Create(path, fi.Flags, mode)
 	if err != nil {
 		if a.fs.trace != nil {
 			a.fs.trace.recordCreate(path, time.Since(start), err)
 		}
-		return toErrno(err), 0
+		return toErrno(err)
 	}
 	if a.fs.trace != nil {
 		a.fs.trace.recordCreate(path, time.Since(start), nil)
 	}
-	return 0, uint64(fh)
+	fi.Fh = uint64(fh)
+	fi.DirectIo = true
+	return 0
 }
 
-func (a *adapter) Read(path string, buf []byte, off int64, fh uint64) int {
-	var start time.Time
-	if a.fs.trace != nil {
-		start = time.Now()
-	}
-	n, err := a.fs.Read(path, buf, off, FileHandle(fh))
+func (a *adapter) Read(path string, buf []byte, off int64, fh uint64) (rc int) {
+	defer recoverEIO(&rc)
+	start := time.Now()
+	n, attr, err := a.fs.Read(path, buf, off, FileHandle(fh))
+	elapsed := time.Since(start)
+	a.fs.recordLogicalRead(path, off, len(buf), n, elapsed, err, attr)
 	if err != nil {
 		if a.fs.trace != nil {
-			a.fs.trace.recordRead(path, time.Since(start), err)
+			a.fs.trace.recordRead(path, elapsed, err)
 		}
 		return toErrno(err)
 	}
 	if a.fs.trace != nil {
-		a.fs.trace.recordRead(path, time.Since(start), nil)
+		a.fs.trace.recordRead(path, elapsed, nil)
 	}
 	return n
 }
 
-func (a *adapter) Write(path string, buf []byte, off int64, fh uint64) int {
+func (a *adapter) Write(path string, buf []byte, off int64, fh uint64) (rc int) {
+	defer recoverEIO(&rc)
 	var start time.Time
 	if a.fs.trace != nil {
 		start = time.Now()
@@ -223,28 +239,33 @@ func (a *adapter) Write(path string, buf []byte, off int64, fh uint64) int {
 	return n
 }
 
-func (a *adapter) Truncate(path string, size int64, fh uint64) int {
+func (a *adapter) Truncate(path string, size int64, fh uint64) (rc int) {
+	defer recoverEIO(&rc)
 	return toErrno(a.fs.Truncate(path, size, FileHandle(fh)))
 }
 
-func (a *adapter) Flush(path string, fh uint64) int {
+func (a *adapter) Flush(path string, fh uint64) (rc int) {
+	defer recoverEIO(&rc)
 	return toErrno(a.fs.Flush(path, FileHandle(fh)))
 }
 
-func (a *adapter) Release(path string, fh uint64) int {
+func (a *adapter) Release(path string, fh uint64) (rc int) {
+	defer recoverEIO(&rc)
 	return toErrno(a.fs.Release(path, FileHandle(fh)))
 }
 
-func (a *adapter) Fsync(path string, datasync bool, fh uint64) int {
+func (a *adapter) Fsync(path string, datasync bool, fh uint64) (rc int) {
+	defer recoverEIO(&rc)
 	return toErrno(a.fs.Fsync(path, datasync, FileHandle(fh)))
 }
 
-func (a *adapter) Opendir(path string) (int, uint64) {
+func (a *adapter) Opendir(path string) (rc int, fh uint64) {
+	defer recoverEIO(&rc)
 	var start time.Time
 	if a.fs.trace != nil {
 		start = time.Now()
 	}
-	fh, err := a.fs.Opendir(path)
+	h, err := a.fs.Opendir(path)
 	if err != nil {
 		if a.fs.trace != nil {
 			a.fs.trace.recordOpendir(path, time.Since(start), err)
@@ -254,10 +275,11 @@ func (a *adapter) Opendir(path string) (int, uint64) {
 	if a.fs.trace != nil {
 		a.fs.trace.recordOpendir(path, time.Since(start), nil)
 	}
-	return 0, uint64(fh)
+	return 0, uint64(h)
 }
 
-func (a *adapter) Readdir(path string, fill func(string, *fuse.Stat_t, int64) bool, off int64, fh uint64) int {
+func (a *adapter) Readdir(path string, fill func(string, *fuse.Stat_t, int64) bool, off int64, fh uint64) (rc int) {
+	defer recoverEIO(&rc)
 	var start time.Time
 	if a.fs.trace != nil {
 		start = time.Now()
@@ -270,31 +292,24 @@ func (a *adapter) Readdir(path string, fill func(string, *fuse.Stat_t, int64) bo
 		return toErrno(err)
 	}
 
-	// Batch-compute values used per entry to avoid repeated syscalls/atomics.
 	uid, gid := vnode.GetOwner()
 	now := time.Now()
 	nowSpec := fuse.NewTimespec(now)
 
-	// "." — use a synthetic dir stat instead of a full Getattr roundtrip.
 	var dotStat fuse.Stat_t
 	fillDirStat(&dotStat, vnode.PathIno(path), uid, gid, nowSpec)
 	fill(".", &dotStat, 0)
 
-	// ".." — use parent path inode; avoids a full Getattr.
 	var dotdotStat fuse.Stat_t
 	fillDirStat(&dotdotStat, vnode.PathIno(parentPath(path)), uid, gid, nowSpec)
 	fill("..", &dotdotStat, 0)
 
-	// Fill entry stats. When Mode is set (the common case for all vnodes),
-	// we use the embedded metadata directly — zero Getattr calls.
 	for i := range entries {
 		e := &entries[i]
 		var stat fuse.Stat_t
-
 		if e.Mode != 0 {
 			fillStatFromDirEntry(&stat, e, uid, gid, nowSpec)
 		} else {
-			// Fallback: no metadata — must call Getattr (rare/legacy path).
 			p := path + "/" + e.Name
 			if path == "/" {
 				p = "/" + e.Name
@@ -329,27 +344,32 @@ func parentPath(path string) string {
 	return path[:i]
 }
 
-func (a *adapter) Releasedir(path string, fh uint64) int {
+func (a *adapter) Releasedir(path string, fh uint64) (rc int) {
+	defer recoverEIO(&rc)
 	return toErrno(a.fs.Releasedir(path, FileHandle(fh)))
 }
 
-func (a *adapter) Getxattr(path, name string) (int, []byte) {
-	data, err := a.fs.Getxattr(path, name)
+func (a *adapter) Getxattr(path, name string) (rc int, data []byte) {
+	defer recoverEIO(&rc)
+	d, err := a.fs.Getxattr(path, name)
 	if err != nil {
 		return toErrno(err), nil
 	}
-	return 0, data
+	return 0, d
 }
 
-func (a *adapter) Setxattr(path, name string, value []byte, flags int) int {
+func (a *adapter) Setxattr(path, name string, value []byte, flags int) (rc int) {
+	defer recoverEIO(&rc)
 	return toErrno(a.fs.Setxattr(path, name, value, flags))
 }
 
-func (a *adapter) Removexattr(path, name string) int {
+func (a *adapter) Removexattr(path, name string) (rc int) {
+	defer recoverEIO(&rc)
 	return toErrno(a.fs.Removexattr(path, name))
 }
 
-func (a *adapter) Listxattr(path string, fill func(string) bool) int {
+func (a *adapter) Listxattr(path string, fill func(string) bool) (rc int) {
+	defer recoverEIO(&rc)
 	names, err := a.fs.Listxattr(path)
 	if err != nil {
 		return toErrno(err)
@@ -361,6 +381,10 @@ func (a *adapter) Listxattr(path string, fill func(string) bool) int {
 	}
 	return 0
 }
+
+// ---------------------------------------------------------------------------
+// Stat helpers
+// ---------------------------------------------------------------------------
 
 func fillStat(stat *fuse.Stat_t, info *FileInfo) {
 	*stat = fuse.Stat_t{}
@@ -379,12 +403,9 @@ func fillStat(stat *fuse.Stat_t, info *FileInfo) {
 	stat.Atim = atim
 	stat.Mtim = mtim
 	stat.Ctim = ctim
-	stat.Birthtim = ctim // macOS
+	stat.Birthtim = ctim
 }
 
-// fillStatFromDirEntry fills a fuse.Stat_t from a DirEntry using pre-computed
-// uid/gid and time. Called in a tight loop during Readdir — zero allocations,
-// zero syscalls, zero atomic loads per entry.
 func fillStatFromDirEntry(stat *fuse.Stat_t, e *DirEntry, uid, gid uint32, fallbackTime fuse.Timespec) {
 	*stat = fuse.Stat_t{}
 	stat.Dev = 1
@@ -396,7 +417,6 @@ func fillStatFromDirEntry(stat *fuse.Stat_t, e *DirEntry, uid, gid uint32, fallb
 	stat.Size = e.Size
 	stat.Blksize = 4096
 	stat.Blocks = (e.Size + 511) / 512
-
 	var ts fuse.Timespec
 	if e.Mtime > 0 {
 		ts = fuse.Timespec{Sec: e.Mtime}
@@ -406,11 +426,9 @@ func fillStatFromDirEntry(stat *fuse.Stat_t, e *DirEntry, uid, gid uint32, fallb
 	stat.Atim = ts
 	stat.Mtim = ts
 	stat.Ctim = ts
-	stat.Birthtim = ts // macOS
+	stat.Birthtim = ts
 }
 
-// fillDirStat fills a minimal directory stat for "." and ".." entries.
-// Avoids a full Getattr roundtrip.
 func fillDirStat(stat *fuse.Stat_t, ino uint64, uid, gid uint32, ts fuse.Timespec) {
 	*stat = fuse.Stat_t{}
 	stat.Dev = 1
@@ -426,16 +444,18 @@ func fillDirStat(stat *fuse.Stat_t, ino uint64, uid, gid uint32, ts fuse.Timespe
 	stat.Birthtim = ts
 }
 
+// ---------------------------------------------------------------------------
+// Error mapping
+// ---------------------------------------------------------------------------
+
 func toErrno(err error) int {
 	if err == nil {
 		return 0
 	}
-
 	var errno syscall.Errno
 	if errors.As(err, &errno) {
 		return -int(errno)
 	}
-
 	switch {
 	case errors.Is(err, ErrNotFound):
 		return -int(syscall.ENOENT)

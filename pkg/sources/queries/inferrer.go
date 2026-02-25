@@ -1,4 +1,4 @@
-// Package queries provides smart query inference and execution for integration sources.
+// Package queries provides query inference and execution for integration sources.
 //
 // Query inference converts folder/file names to source-specific search queries.
 // For example: "unread-emails" → Gmail query "is:unread"

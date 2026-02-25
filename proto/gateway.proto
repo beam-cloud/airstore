@@ -4,6 +4,8 @@ option go_package = "github.com/beam-cloud/airstore/proto";
 
 package gateway;
 
+import "google/protobuf/struct.proto";
+
 service GatewayService {
   // Workspaces
   rpc CreateWorkspace(CreateWorkspaceRequest) returns (WorkspaceResponse);
@@ -30,13 +32,6 @@ service GatewayService {
   rpc ListConnections(ListConnectionsRequest) returns (ListConnectionsResponse);
   rpc RemoveConnection(RemoveConnectionRequest) returns (DeleteResponse);
 
-  // Tasks
-  rpc CreateTask(CreateTaskRequest) returns (TaskResponse);
-  rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
-  rpc GetTask(GetTaskRequest) returns (TaskResponse);
-  rpc DeleteTask(DeleteTaskRequest) returns (DeleteResponse);
-  rpc GetTaskLogs(GetTaskLogsRequest) returns (GetTaskLogsResponse);
-
   // Hooks
   rpc CreateHook(CreateHookRequest) returns (HookResponse);
   rpc ListHooks(ListHooksRequest) returns (ListHooksResponse);
@@ -46,10 +41,69 @@ service GatewayService {
   rpc ListHookRuns(ListHookRunsRequest) returns (ListHookRunsResponse);
 }
 
+service AgentService {
+  rpc CreateAgentProfile(CreateAgentProfileRequest) returns (AgentProfileResponse);
+  rpc ListAgentProfiles(ListAgentProfilesRequest) returns (ListAgentProfilesResponse);
+  rpc GetAgentProfile(GetAgentProfileRequest) returns (AgentProfileResponse);
+  rpc CreateTask(CreateTaskRequest) returns (AgentTaskAcceptedResponse);
+  rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
+  rpc GetTask(GetTaskRequest) returns (AgentTaskResponse);
+  rpc DeleteTask(DeleteTaskRequest) returns (DeleteResponse);
+  rpc GetTaskLogs(GetTaskLogsRequest) returns (GetTaskLogsResponse);
+  rpc EnqueueRunInput(EnqueueRunInputRequest) returns (AgentTaskAcceptedResponse);
+  rpc ListAgentRuns(ListAgentRunsRequest) returns (ListAgentRunsResponse);
+  rpc GetAgentRun(GetAgentRunRequest) returns (AgentRunResponse);
+  rpc ListAgentRunSnapshots(ListAgentRunSnapshotsRequest) returns (ListAgentRunSnapshotsResponse);
+  rpc ListAgentRunEvents(ListAgentRunEventsRequest) returns (ListAgentRunEventsResponse);
+  rpc CancelAgentRun(CancelAgentRunRequest) returns (CancelAgentRunResponse);
+}
+
+// AccessLogService ingests batched logical read events from mounts.
+service AccessLogService {
+  rpc IngestAccessEvents(IngestAccessEventsRequest) returns (IngestAccessEventsResponse);
+}
+
 // Common
 message DeleteResponse {
   bool ok = 1;
   string error = 2;
+}
+
+message AccessLogEvent {
+  string event_id = 1;
+  int64 ts = 2;
+  string session_id = 3;
+  string path = 4;
+  string cache_source = 5;
+  int64 offset = 6;
+  int32 requested_bytes = 7;
+  int32 read_bytes = 8;
+  int64 latency_ms = 9;
+  string error_msg = 10;
+  string mount_id = 11;
+  string access_origin = 12;
+  string integration = 13;
+  string source_uri = 14;
+  string query_path = 15;
+  string result_id = 16;
+  int64 original_bytes = 17;
+  int64 compressed_bytes = 18;
+  int64 original_tokens = 19;
+  int64 compressed_tokens = 20;
+  string strategy = 21;
+  string outcome = 22;
+  int64 compression_ms = 23;
+  int64 fetch_ms = 24; // e2e content fetch duration (e.g. time to fetch from source during Open)
+}
+
+message IngestAccessEventsRequest {
+  repeated AccessLogEvent events = 1;
+}
+
+message IngestAccessEventsResponse {
+  bool ok = 1;
+  string error = 2;
+  int32 accepted = 3;
 }
 
 // Workspace messages
@@ -215,25 +269,22 @@ message ListConnectionsResponse {
   repeated Connection connections = 3;
 }
 
-// Task messages
-message Task {
-  string id = 1;
-  string status = 2;
-  string prompt = 3;
-  string image = 4;
-  int32 exit_code = 5;
-  bool has_exit_code = 6;
-  string error = 7;
-  string created_at = 8;
-  string started_at = 9;
-  string finished_at = 10;
-}
-
 message CreateTaskRequest {
-  string prompt = 1;
-  string image = 2;
-  repeated string entrypoint = 3;
-  map<string, string> env = 4;
+  string message = 1;
+  string agent_id = 2;
+  string session_id = 3;
+  string session_key = 4;
+  string idempotency_key = 5;
+  string lane = 6;
+  string extra_system_prompt = 7;
+  optional bool deliver = 8;
+  optional int32 timeout_ms = 9;
+  google.protobuf.Struct policy = 10;
+  google.protobuf.Struct input_provenance = 11;
+  google.protobuf.Struct routing = 12;
+  repeated google.protobuf.Struct attachments = 13;
+  string label = 14;
+  string spawned_by = 15;
 }
 
 message DeleteTaskRequest {
@@ -245,17 +296,11 @@ message ListTasksRequest {}
 message ListTasksResponse {
   bool ok = 1;
   string error = 2;
-  repeated Task tasks = 3;
+  repeated AgentTask tasks = 3;
 }
 
 message GetTaskRequest {
   string id = 1;
-}
-
-message TaskResponse {
-  bool ok = 1;
-  string error = 2;
-  Task task = 3;
 }
 
 message GetTaskLogsRequest {
@@ -273,6 +318,178 @@ message GetTaskLogsResponse {
   bool ok = 1;
   string error = 2;
   repeated TaskLogEntry logs = 3;
+}
+
+// Agent, task, and run messages
+message AgentProfile {
+  string id = 1;
+  string workspace_id = 2;
+  string agent_key = 3;
+  string name = 4;
+  google.protobuf.Struct config = 5;
+  bool active = 6;
+  string created_at = 7;
+  string updated_at = 8;
+}
+
+message CreateAgentProfileRequest {
+  string workspace_id = 1;
+  string agent_key = 2;
+  string name = 3;
+  google.protobuf.Struct config = 4;
+  bool active = 5;
+  bool has_active = 6;
+}
+
+message ListAgentProfilesRequest {
+  string workspace_id = 1;
+}
+
+message GetAgentProfileRequest {
+  string workspace_id = 1;
+  string agent_id = 2;
+}
+
+message AgentProfileResponse {
+  bool ok = 1;
+  string error = 2;
+  AgentProfile agent = 3;
+}
+
+message ListAgentProfilesResponse {
+  bool ok = 1;
+  string error = 2;
+  repeated AgentProfile agents = 3;
+}
+
+message AgentTask {
+  string id = 1;
+  string workspace_id = 2;
+  string agent_id = 3;
+  string kind = 4;
+  string queue_mode = 5;
+  string state = 6;
+  string idempotency_key = 7;
+  string target_run_id = 8;
+  string dropped_reason = 9;
+  string created_at = 10;
+  string updated_at = 11;
+}
+
+message AgentTaskAcceptedResponse {
+  bool ok = 1;
+  string error = 2;
+  bool accepted = 3;
+  bool idempotent_hit = 4;
+  AgentTask task = 5;
+  string run_id = 6;
+}
+
+message AgentTaskResponse {
+  bool ok = 1;
+  string error = 2;
+  AgentTask task = 3;
+}
+
+message EnqueueRunInputRequest {
+  string workspace_id = 1;
+  string run_id = 2;
+  string message = 3;
+  string queue_mode = 4;
+  string idempotency_key = 5;
+}
+
+message AgentRun {
+  string id = 1;
+  string workspace_id = 2;
+  string agent_id = 3;
+  string origin_task_id = 4;
+  string status = 5;
+  string session_id = 6;
+  string session_key = 7;
+  string provider = 8;
+  string model = 9;
+  string exec_host = 10;
+  string exec_security = 11;
+  string exec_ask = 12;
+  string runtime_type = 13;
+  string workspace_access = 14;
+  bool network_enabled = 15;
+  bool interactive = 16;
+  int32 timeout_ms = 17;
+  string error = 18;
+  string created_at = 19;
+  string started_at = 20;
+  string ended_at = 21;
+}
+
+message ListAgentRunsRequest {
+  string workspace_id = 1;
+  int32 limit = 2;
+}
+
+message ListAgentRunsResponse {
+  bool ok = 1;
+  string error = 2;
+  repeated AgentRun runs = 3;
+}
+
+message GetAgentRunRequest {
+  string workspace_id = 1;
+  string run_id = 2;
+}
+
+message AgentRunResponse {
+  bool ok = 1;
+  string error = 2;
+  AgentRun run = 3;
+}
+
+message AgentRunSnapshot {
+  string id = 1;
+  string run_id = 2;
+  int64 seq = 3;
+  string status = 4;
+  int64 started_at_ms = 5;
+  int64 ended_at_ms = 6;
+  bool has_started_at_ms = 7;
+  bool has_ended_at_ms = 8;
+  string error = 9;
+  int64 ts = 10;
+}
+
+message ListAgentRunSnapshotsRequest {
+  string workspace_id = 1;
+  string run_id = 2;
+  int32 limit = 3;
+}
+
+message ListAgentRunSnapshotsResponse {
+  bool ok = 1;
+  string error = 2;
+  repeated AgentRunSnapshot snapshots = 3;
+}
+
+message ListAgentRunEventsRequest {
+  string workspace_id = 1;
+  string run_id = 2;
+}
+
+message ListAgentRunEventsResponse {
+  bool ok = 1;
+  string error = 2;
+  repeated string events_json = 3;
+}
+
+message CancelAgentRunRequest {
+  string workspace_id = 1;
+  string run_id = 2;
+}
+
+message CancelAgentRunResponse {
+  bool ok = 1;
+  string error = 2;
+  string status = 3;
 }
 
 // Hook messages

@@ -51,7 +51,7 @@ func (s *ToolService) ListTools(ctx context.Context, req *pb.ListToolsRequest) (
 		} else {
 			infos := make([]*pb.ToolInfo, 0, len(resolved))
 			for _, t := range resolved {
-				infos = append(infos, &pb.ToolInfo{Name: t.Name, Help: t.Help})
+				infos = append(infos, &pb.ToolInfo{Name: t.Name, Help: t.Help, LocalCommand: t.LocalCommand})
 			}
 			return &pb.ListToolsResponse{Ok: true, Tools: infos}, nil
 		}
@@ -62,7 +62,11 @@ func (s *ToolService) ListTools(ctx context.Context, req *pb.ListToolsRequest) (
 	infos := make([]*pb.ToolInfo, 0, len(names))
 	for _, name := range names {
 		if p := s.registry.Get(name); p != nil {
-			infos = append(infos, &pb.ToolInfo{Name: p.Name(), Help: p.Help()})
+			info := &pb.ToolInfo{Name: p.Name(), Help: p.Help()}
+			if lp, ok := p.(tools.LocalToolProvider); ok {
+				info.LocalCommand = lp.LocalCommand()
+			}
+			infos = append(infos, info)
 		}
 	}
 	return &pb.ListToolsResponse{Ok: true, Tools: infos}, nil
@@ -169,7 +173,7 @@ func (s *ToolService) buildExecContext(ctx context.Context, toolName string) *to
 	}
 
 	// Check if this tool requires credentials
-	if !types.RequiresAuth(types.ToolName(toolName)) {
+	if !types.RequiresAuth(types.IntegrationName(toolName)) {
 		return execCtx
 	}
 

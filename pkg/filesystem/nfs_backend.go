@@ -13,6 +13,11 @@ import (
 	nfshelper "github.com/willscott/go-nfs/helpers"
 )
 
+const (
+	loopbackNFSAddr   = "127.0.0.1"
+	loopbackNFSExport = loopbackNFSAddr + ":/"
+)
+
 // NFSBackend mounts the filesystem by running a userspace NFSv3 server on
 // loopback and mounting it via the kernel NFS client. This is the fallback
 // for Linux environments where FUSE (/dev/fuse) is not available.
@@ -116,15 +121,61 @@ func (b *NFSBackend) Unmount() error {
 
 // execMount runs the mount(8) command to attach the NFS share.
 func (b *NFSBackend) execMount(port int, mountPoint string) error {
-	opts := fmt.Sprintf("port=%d,mountport=%d,nfsvers=3,noacl,tcp,nolock", port, port)
-	cmd := exec.Command("mount", "-t", "nfs", "-o", opts, "127.0.0.1:/", mountPoint)
+	// Keep options kernel-native so direct mount(2) works without mount.nfs helper.
+	opts := fmt.Sprintf(
+		"addr=%s,port=%d,mountport=%d,vers=3,proto=tcp,mountproto=tcp,nolock,noacl",
+		loopbackNFSAddr,
+		port,
+		port,
+	)
+
+	// Prefer mount(2) first. This avoids relying on distro-provided mount.nfs
+	// helper binaries that are often missing on minimal Linux images.
+	mountSysErr := mountNFS(loopbackNFSExport, mountPoint, opts)
+	if mountSysErr == nil {
+		return nil
+	}
+
+	cmd := exec.Command("mount", "-t", "nfs", "-o", opts, loopbackNFSExport, mountPoint)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("%s: %s", err, strings.TrimSpace(string(out)))
+		msg := commandErrorMessage(err, out)
+		if isNFSHelperMissingMessage(msg) && !hasNFSMountHelper() {
+			return fmt.Errorf(
+				"%w: %s (mount(2) error: %v; install nfs mount helpers, e.g. `apt-get install nfs-common`)",
+				ErrNFSHelperMissing,
+				msg,
+				mountSysErr,
+			)
+		}
+		return fmt.Errorf("%s: %s (mount(2) error: %v)", err, msg, mountSysErr)
 	}
 	return nil
 }
 
 func isClosedConnError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "use of closed network connection")
+}
+
+func isNFSHelperMissingMessage(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "mount.nfs") ||
+		(strings.Contains(lower, "helper program") && strings.Contains(lower, "mount"))
+}
+
+func hasNFSMountHelper() bool {
+	if _, err := exec.LookPath("mount.nfs"); err == nil {
+		return true
+	}
+	if _, err := exec.LookPath("mount.nfs4"); err == nil {
+		return true
+	}
+	return false
+}
+
+func commandErrorMessage(cmdErr error, out []byte) string {
+	if msg := strings.TrimSpace(string(out)); msg != "" {
+		return msg
+	}
+	return cmdErr.Error()
 }

@@ -2,6 +2,8 @@ package providers
 
 import (
 	"testing"
+
+	"github.com/beam-cloud/airstore/pkg/sources"
 )
 
 func TestExtractMimePartRecursive_PlainTextDirect(t *testing.T) {
@@ -330,7 +332,7 @@ func TestSanitizeFolderName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := sanitizeFolderName(tt.input)
+			result := sources.SanitizeFilename(tt.input)
 			if result != tt.expected {
 				t.Errorf("Expected '%s', got '%s'", tt.expected, result)
 			}

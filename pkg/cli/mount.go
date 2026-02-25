@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -18,6 +17,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/filesystem/vnode/embed"
 	"github.com/beam-cloud/airstore/pkg/gateway"
 	"github.com/beam-cloud/airstore/pkg/types"
+	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/charmbracelet/huh/spinner"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -26,11 +26,15 @@ import (
 )
 
 var (
-	mountVerbose bool
-	configPath   string
-	mountUID     uint32
-	mountGID     uint32
-	mountBackend string
+	mountVerbose     bool
+	mountDaemon      bool
+	configPath       string
+	mountUID         uint32
+	mountGID         uint32
+	mountBackend     string
+	mountCompression string
+	mountSession     string
+	mountAccessLog   bool
 )
 
 var mountCmd = &cobra.Command{
@@ -48,10 +52,14 @@ Examples:
 
 func init() {
 	mountCmd.Flags().BoolVarP(&mountVerbose, "verbose", "v", false, "Verbose logging")
+	mountCmd.Flags().BoolVarP(&mountDaemon, "daemon", "d", false, "Daemon mode: suppress interactive UI, suitable for headless/systemd use")
 	mountCmd.Flags().StringVarP(&configPath, "config", "c", "", "Config file (for local mode)")
 	mountCmd.Flags().Uint32Var(&mountUID, "uid", 0, "File owner UID (default: current user)")
 	mountCmd.Flags().Uint32Var(&mountGID, "gid", 0, "File owner GID (default: current user)")
 	mountCmd.Flags().StringVar(&mountBackend, "backend", "", "Mount backend: fuse, nfs, or auto-detect (default)")
+	mountCmd.Flags().StringVar(&mountCompression, "compression", "", "Compression strategy: strip (omit to disable)")
+	mountCmd.Flags().StringVar(&mountSession, "session", "", "Custom access session ID for telemetry (default: workspace ID)")
+	mountCmd.Flags().BoolVar(&mountAccessLog, "access-log", true, "Enable access logging (default: true)")
 	rootCmd.AddCommand(mountCmd)
 }
 
@@ -60,7 +68,8 @@ func runMount(cmd *cobra.Command, args []string) error {
 
 	// Suppress logs unless verbose or FUSE trace is enabled
 	if !mountVerbose && os.Getenv("AIRSTORE_FUSE_TRACE") == "" {
-		log.Logger = zerolog.New(io.Discard)
+		// In non-verbose mode, suppress info/debug logs but keep warn/error on stderr.
+		log.Logger = zerolog.New(os.Stderr).Level(zerolog.WarnLevel).With().Timestamp().Logger()
 	}
 
 	if configPath != "" {
@@ -72,6 +81,17 @@ func runMount(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// Validate compression strategy
+	if mountCompression != "" {
+		switch mountCompression {
+		case "strip":
+			// valid
+		default:
+			PrintFormattedError("Invalid compression strategy", fmt.Errorf("%q is not supported (valid: strip)", mountCompression))
+			return nil
+		}
+	}
+
 	// Check for local mode
 	var gw *gateway.Gateway
 	effectiveGateway := gatewayAddr
@@ -81,7 +101,7 @@ func runMount(cmd *cobra.Command, args []string) error {
 		if cm.GetConfig().Mode == types.ModeLocal {
 			mode = "local"
 
-			err := withSpinner("Starting gateway...", func() error {
+			err := withMaybeSpinner("Starting gateway...", func() error {
 				var err error
 				gw, err = gateway.NewGateway()
 				if err != nil {
@@ -99,7 +119,9 @@ func runMount(cmd *cobra.Command, args []string) error {
 				PrintFormattedError("Failed to start gateway", err)
 				return nil
 			}
-			PrintSuccessWithValue("Gateway ready", effectiveGateway)
+			if !mountDaemon {
+				PrintSuccessWithValue("Gateway ready", effectiveGateway)
+			}
 		}
 	}
 
@@ -116,7 +138,7 @@ func runMount(cmd *cobra.Command, args []string) error {
 		gidPtr = &mountGID
 	}
 
-	err := withSpinner("Connecting...", func() error {
+	err := withMaybeSpinner("Connecting...", func() error {
 		var err error
 		fs, err = filesystem.NewFilesystem(filesystem.Config{
 			MountPoint:  mountPoint,
@@ -126,15 +148,31 @@ func runMount(cmd *cobra.Command, args []string) error {
 			Uid:         uidPtr,
 			Gid:         gidPtr,
 			Backend:     mountBackend,
+			Compression: mountCompression,
+			Session:     mountSession,
+			AccessLog:   mountAccessLog,
 		})
 		if err != nil {
 			return err
 		}
 
-		// Create gRPC connection for vnodes
-		conn, err = grpc.NewClient(effectiveGateway, grpc.WithTransportCredentials(TransportCredentials(effectiveGateway)))
+		// Create gRPC connection for vnodes.
+		// When access logging is on, a client-side interceptor injects the
+		// session header on every outgoing RPC so the gateway can record events.
+		dialOpts := []grpc.DialOption{grpc.WithTransportCredentials(TransportCredentials(effectiveGateway))}
+		if mountAccessLog {
+			session := mountSession // may be empty — gateway defaults to workspace ID
+			dialOpts = append(dialOpts, grpc.WithUnaryInterceptor(filesystem.MountAccessUnaryInterceptor(session)))
+		}
+		conn, err = grpc.NewClient(effectiveGateway, dialOpts...)
 		if err != nil {
 			return err
+		}
+		if mountAccessLog {
+			fs.SetAccessCollector(filesystem.NewAccessCollectorWithToken(
+				pb.NewAccessLogServiceClient(conn),
+				authToken,
+			))
 		}
 
 		// Load shim binary for tools
@@ -146,11 +184,16 @@ func runMount(cmd *cobra.Command, args []string) error {
 		// Register all vnodes
 		fs.RegisterVNode(vnode.NewConfigVNode(effectiveGateway, authToken))
 		fs.RegisterVNode(vnode.NewToolsVNode(effectiveGateway, authToken, shim))
-		fs.RegisterVNode(vnode.NewSourcesVNode(conn, authToken))
-		fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, authToken, types.PathSkills))  // /Skills
-		fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, authToken, types.PathMemory))  // /Memory
-		fs.RegisterVNode(vnode.NewTasksVNodeGRPC(conn, authToken))                      // /Tasks
-		fs.SetStorageFallback(vnode.NewStorageVNode(conn, authToken))                   // user folders
+
+		var sourcesOpts []vnode.SourcesVNodeOption
+		if mountCompression != "" {
+			sourcesOpts = append(sourcesOpts, vnode.WithCompression(mountCompression))
+		}
+		fs.RegisterVNode(vnode.NewSourcesVNode(conn, authToken, sourcesOpts...))
+		fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, authToken, types.PathSkills)) // /Skills
+		fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, authToken, types.PathMemory)) // /Memory
+		fs.RegisterVNode(vnode.NewTasksVNodeGRPC(conn, authToken))                     // /Tasks
+		fs.SetStorageFallback(vnode.NewStorageVNode(conn, authToken))                  // user folders
 
 		return nil
 	})
@@ -170,8 +213,13 @@ func runMount(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	PrintSuccessWithValue("Mounted", mountPoint)
-	printMountStatus(mountPoint, effectiveGateway, mode)
+	if mountDaemon {
+		// Daemon mode: minimal output suitable for scripts/systemd
+		fmt.Printf("airstore: mounted at %s (gateway=%s, mode=%s)\n", mountPoint, effectiveGateway, mode)
+	} else {
+		PrintSuccessWithValue("Mounted", mountPoint)
+		printMountStatus(mountPoint, effectiveGateway, mode, mountCompression)
+	}
 
 	// Run mount in background
 	mountErr := make(chan error, 1)
@@ -187,7 +235,7 @@ func runMount(cmd *cobra.Command, args []string) error {
 		// Mount exited
 	case <-sig:
 		fmt.Println()
-		withSpinner("Unmounting...", func() error {
+		withMaybeSpinner("Unmounting...", func() error {
 			if gw != nil {
 				go gw.Shutdown()
 			}
@@ -195,7 +243,11 @@ func runMount(cmd *cobra.Command, args []string) error {
 			time.Sleep(200 * time.Millisecond)
 			return nil
 		})
-		PrintSuccess("Unmounted")
+		if mountDaemon {
+			fmt.Println("airstore: unmounted")
+		} else {
+			PrintSuccess("Unmounted")
+		}
 
 		select {
 		case <-mountErr:
@@ -228,13 +280,26 @@ func withSpinner(title string, fn func() error) error {
 	return err
 }
 
-func printMountStatus(mount, gateway, mode string) {
+// withMaybeSpinner runs fn with a spinner in interactive mode, or directly in daemon mode.
+func withMaybeSpinner(title string, fn func() error) error {
+	if mountDaemon {
+		return fn()
+	}
+	return withSpinner(title, fn)
+}
+
+func printMountStatus(mount, gateway, mode, compression string) {
 	fmt.Println()
 	fmt.Printf("  %s\n\n", BrandStyle.Render("airstore mounted"))
 
 	PrintKeyValue("Mount", mount)
 	PrintKeyValue("Gateway", gateway)
 	PrintKeyValue("Mode", mode)
+	if compression != "" {
+		PrintKeyValue("Compression", compression)
+	} else {
+		PrintKeyValue("Compression", "off")
+	}
 
 	fmt.Println()
 	fmt.Printf("  %s\n", DimStyle.Render("Available paths:"))

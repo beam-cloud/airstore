@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
+	"sync/atomic"
 	"syscall"
 
 	"time"
@@ -18,22 +20,26 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
 
 	apiv1 "github.com/beam-cloud/airstore/pkg/api/v1"
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/clients"
 	"github.com/beam-cloud/airstore/pkg/common"
+	"github.com/beam-cloud/airstore/pkg/compression"
 	"github.com/beam-cloud/airstore/pkg/gateway/services"
 	"github.com/beam-cloud/airstore/pkg/hooks"
+	"github.com/beam-cloud/airstore/pkg/instrumentation"
 	"github.com/beam-cloud/airstore/pkg/oauth"
+	"github.com/beam-cloud/airstore/pkg/orchestration"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/scheduler"
 	"github.com/beam-cloud/airstore/pkg/sources"
 	"github.com/beam-cloud/airstore/pkg/sources/providers"
-	"github.com/beam-cloud/airstore/pkg/tasks"
 	"github.com/beam-cloud/airstore/pkg/tools"
 	_ "github.com/beam-cloud/airstore/pkg/tools/builtin" // self-registering tools
 	toolclients "github.com/beam-cloud/airstore/pkg/tools/clients"
@@ -45,7 +51,7 @@ import (
 type Gateway struct {
 	Config      types.AppConfig
 	RedisClient *common.RedisClient
-	BackendRepo *repository.PostgresBackend
+	BackendRepo repository.BackendRepository
 	httpServer  *http.Server
 	grpcServer  *grpc.Server
 	echo        *echo.Echo
@@ -60,12 +66,16 @@ type Gateway struct {
 	sourceRegistry *sources.Registry
 	mcpManager     *tools.MCPManager
 
-	storageService *services.StorageService
-	storageClient  *clients.StorageClient
-	oauthStore     *oauth.Store
-	oauthRegistry  *oauth.Registry
-	s2Client       *common.S2Client
-	eventBus       *common.EventBus
+	storageService  *services.StorageService
+	storageClient   *clients.StorageClient
+	oauthStore      *oauth.Store
+	oauthRegistry   *oauth.Registry
+	s2Client        *common.S2Client
+	eventBus        *common.EventBus
+	migrationsReady atomic.Bool
+
+	// Compression middleware (optional)
+	compressionRecorder instrumentation.AccessRecorder
 }
 
 func NewGateway() (*Gateway, error) {
@@ -82,7 +92,8 @@ func NewGateway() (*Gateway, error) {
 	}
 
 	var redisClient *common.RedisClient
-	var backendRepo *repository.PostgresBackend
+	var backendRepo repository.BackendRepository
+	migrationsReady := true
 
 	// Local mode: skip Redis and Postgres
 	if config.IsLocalMode() {
@@ -96,14 +107,17 @@ func NewGateway() (*Gateway, error) {
 
 		// Initialize Postgres backend (optional - may not be configured)
 		if config.Database.Postgres.Host != "" {
+			migrationsReady = false
 			backendRepo, err = repository.NewPostgresBackend(config.Database.Postgres)
 			if err != nil {
-				log.Warn().Err(err).Msg("failed to connect to postgres, task API will be disabled")
+				return nil, fmt.Errorf("failed to connect to postgres: %w", err)
 			} else {
 				// Run migrations
 				if err := backendRepo.RunMigrations(); err != nil {
-					log.Warn().Err(err).Msg("failed to run postgres migrations")
+					_ = backendRepo.Close()
+					return nil, fmt.Errorf("failed to run postgres migrations: %w", err)
 				}
+				migrationsReady = true
 			}
 		}
 	}
@@ -142,6 +156,7 @@ func NewGateway() (*Gateway, error) {
 		oauthRegistry:  oauthRegistry,
 		s2Client:       s2Client,
 	}
+	gateway.migrationsReady.Store(migrationsReady)
 
 	return gateway, nil
 }
@@ -176,7 +191,8 @@ func (g *Gateway) initHTTP() error {
 	// Configure logging middleware
 	if g.Config.Gateway.HTTP.EnablePrettyLogs {
 		e.Use(middleware.LoggerWithConfig(middleware.LoggerConfig{
-			Format: "${time_rfc3339} ${method} ${uri} ${status} ${latency_human}\n",
+			Format:  "${time_rfc3339} ${method} ${uri} ${status} ${latency_human}\n",
+			Skipper: shouldSkipHTTPRequestLog,
 		}))
 	}
 
@@ -202,15 +218,37 @@ func (g *Gateway) initHTTP() error {
 
 	g.echo = e
 	g.httpServer = &http.Server{
-		Addr:    fmt.Sprintf("%s:%d", g.Config.Gateway.HTTP.Host, g.Config.Gateway.HTTP.Port),
-		Handler: e,
+		Addr:              fmt.Sprintf("%s:%d", g.Config.Gateway.HTTP.Host, g.Config.Gateway.HTTP.Port),
+		Handler:           e,
+		ReadTimeout:       15 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	g.baseRouteGroup = e.Group(apiv1.HttpServerBaseRoute)
 	g.rootRouteGroup = e.Group(apiv1.HttpServerRootRoute)
 
 	// Register API groups (health check works without Redis in local mode)
-	apiv1.NewHealthGroup(g.baseRouteGroup.Group("/health"), g.RedisClient)
+	var redisProbe func(context.Context) error
+	if g.RedisClient != nil {
+		redisProbe = func(ctx context.Context) error {
+			return g.RedisClient.Ping(ctx).Err()
+		}
+	}
+
+	var postgresProbe func(context.Context) error
+	if g.BackendRepo != nil {
+		postgresProbe = g.BackendRepo.Ping
+	}
+
+	apiv1.NewHealthGroup(
+		g.baseRouteGroup.Group("/health"),
+		redisProbe,
+		postgresProbe,
+		func() bool { return g.migrationsReady.Load() },
+	)
 
 	return nil
 }
@@ -226,9 +264,18 @@ func (g *Gateway) initGRPC() error {
 	}
 	authInterceptor := auth.NewGRPCInterceptor(validator)
 
+	// Create access recorder (S2-backed or noop) — used by both the gRPC
+	// interceptor and the compression middleware.
+	if g.s2Client != nil {
+		g.compressionRecorder = instrumentation.NewEventFlusher(g.s2Client)
+	} else {
+		g.compressionRecorder = instrumentation.NewNoopRecorder()
+	}
+	accessInterceptor := instrumentation.NewAccessLogInterceptor(g.compressionRecorder)
+
 	serverOptions := []grpc.ServerOption{
-		grpc.UnaryInterceptor(authInterceptor.Unary()),
-		grpc.StreamInterceptor(authInterceptor.Stream()),
+		grpc.ChainUnaryInterceptor(grpcUnaryPanicRecoveryInterceptor(), authInterceptor.Unary(), accessInterceptor.Unary()),
+		grpc.ChainStreamInterceptor(grpcStreamPanicRecoveryInterceptor(), authInterceptor.Stream()),
 		grpc.MaxRecvMsgSize(g.Config.Gateway.GRPC.MaxRecvMsgSize * 1024 * 1024),
 		grpc.MaxSendMsgSize(g.Config.Gateway.GRPC.MaxSendMsgSize * 1024 * 1024),
 		grpc.KeepaliveParams(keepalive.ServerParameters{
@@ -336,7 +383,8 @@ func (g *Gateway) registerServices() error {
 
 	// Register worker gRPC service (for worker-to-gateway communication)
 	if g.scheduler != nil {
-		workerService := services.NewWorkerService(g.scheduler, g.BackendRepo, g.scheduler.WorkerRepo())
+		taskQueue := repository.NewRedisTaskQueue(g.RedisClient, "default")
+		workerService := services.NewWorkerService(g.scheduler, g.BackendRepo, g.scheduler.WorkerRepo(), taskQueue)
 		pb.RegisterWorkerServiceServer(g.grpcServer, workerService)
 		log.Info().Msg("worker service registered")
 	}
@@ -361,10 +409,15 @@ func (g *Gateway) registerServices() error {
 	// Register gateway gRPC service (workspace/member/token/connection/task management)
 	var gatewayService *services.GatewayService
 	if g.BackendRepo != nil {
-		gatewayService := services.NewGatewayService(g.BackendRepo, g.s2Client, filesystemStore, g.eventBus, g.sourceRegistry)
+		gatewayService = services.NewGatewayService(g.BackendRepo, filesystemStore, g.eventBus, g.sourceRegistry)
 		pb.RegisterGatewayServiceServer(g.grpcServer, gatewayService)
 		log.Info().Msg("gateway service registered")
 	}
+
+	// Register batched access-log ingestion service for mount-side logical reads.
+	accessService := services.NewAccessService(g.compressionRecorder, g.RedisClient)
+	pb.RegisterAccessLogServiceServer(g.grpcServer, accessService)
+	log.Info().Msg("access log service registered")
 
 	// Register source providers
 	g.initSources()
@@ -379,6 +432,47 @@ func (g *Gateway) registerServices() error {
 		hookOpts = append(hookOpts, services.WithSeenTracker(seenTracker))
 	}
 
+	// Set model API keys as env vars so BAML clients (clients.baml) can pick them up.
+	if key := g.Config.AnthropicAPIKey(); key != "" {
+		os.Setenv("ANTHROPIC_API_KEY", key)
+	}
+	if key := g.Config.CerebrasAPIKey(); key != "" {
+		os.Setenv("CEREBRAS_API_KEY", key)
+	}
+
+	// Wire compression middleware if a strategy is configured.
+	// The recorder is already on g.compressionRecorder (created in initGRPC).
+	recorder := g.compressionRecorder
+
+	var compStore *compression.CompressedStore
+	if g.Config.Compression.Strategy != "" {
+		compCfg := compression.Config{
+			Strategy:             compression.CompressionStrategy(g.Config.Compression.Strategy),
+			CacheEnabled:         g.Config.Compression.CacheEnabled,
+			TokenThreshold:       g.Config.Compression.TokenThreshold,
+			MaxContentBytes:      g.Config.Compression.MaxContentBytes,
+			TokenEncoding:        g.Config.Compression.TokenEncoding,
+			Timeout:              g.Config.Compression.Timeout,
+			ContentCacheMaxBytes: g.Config.Compression.ContentCacheMaxBytes,
+			ContentCacheTTL:      g.Config.Compression.ContentCacheTTL,
+		}
+
+		compressor, err := compression.NewCompressor(compCfg.Strategy, compCfg)
+		if err != nil {
+			return fmt.Errorf("compression: %w", err)
+		}
+
+		// Compressed content cache (optional Redis cache, gated by config)
+		if compCfg.CacheEnabled && g.RedisClient != nil {
+			compStore = compression.NewCompressedStore(g.RedisClient, compCfg)
+			log.Info().Msg("compression cache enabled (Redis)")
+		}
+
+		hookOpts = append(hookOpts, services.WithRecorder(recorder))
+		hookOpts = append(hookOpts, services.WithCompressionMiddleware(compressor, compStore, compCfg))
+		log.Info().Str("strategy", g.Config.Compression.Strategy).Msg("compression middleware enabled")
+	}
+
 	var sourceService *services.SourceService
 	if g.BackendRepo != nil && len(g.oauthRegistry.ListConfiguredProviders()) > 0 {
 		sourceService = services.NewSourceServiceWithOAuth(g.sourceRegistry, g.BackendRepo, filesystemStore, g.oauthRegistry, hookOpts...)
@@ -389,22 +483,26 @@ func (g *Gateway) registerServices() error {
 	pb.RegisterSourceServiceServer(g.grpcServer, sourceService)
 	log.Info().Int("providers", len(g.sourceRegistry.List())).Strs("available", g.sourceRegistry.List()).Msg("sources service registered")
 
+	// Auth introspection (any valid token)
+	if g.BackendRepo != nil {
+		apiv1.NewAuthGroup(g.baseRouteGroup.Group("/auth"), g.BackendRepo)
+	}
+
 	// Register task and workspace APIs (requires Postgres)
 	if g.BackendRepo != nil {
 		taskQueue := repository.NewRedisTaskQueue(g.RedisClient, "default")
 
-		// Wire task queue into the gRPC gateway service for CreateTask/DeleteTask
+		// Wire source cache invalidation hooks into gateway service.
 		if gatewayService != nil {
-			gatewayService.SetTaskQueue(taskQueue, g.Config.Sandbox.GetDefaultImage())
 			gatewayService.SetSourceService(sourceService)
 		}
 
 		// Task factory (shared between HTTP API and hook evaluator)
-		taskFactory := tasks.NewFactory(g.BackendRepo, taskQueue, g.Config.Sandbox.GetDefaultImage())
+		taskFactory := hooks.NewTaskFactory(g.BackendRepo, taskQueue, g.Config.Sandbox.GetDefaultImage())
 
-		// Workspace CRUD endpoints (cluster admin only)
+		// Workspace CRUD endpoints (cluster admin or org tokens)
 		workspacesAdminGroup := g.baseRouteGroup.Group("/workspaces")
-		workspacesAdminGroup.Use(auth.RequireClusterAdminMiddleware())
+		workspacesAdminGroup.Use(requireClusterAdminOrOrgMiddleware())
 		apiv1.NewWorkspacesGroup(workspacesAdminGroup, g.BackendRepo, g.storageClient)
 
 		// Worker tokens API (cluster admin only)
@@ -412,6 +510,12 @@ func (g *Gateway) registerServices() error {
 		workerTokensGroup.Use(auth.RequireClusterAdminMiddleware())
 		apiv1.NewWorkerTokensGroup(workerTokensGroup, g.BackendRepo)
 		log.Info().Msg("worker tokens API registered at /api/v1/worker-tokens")
+
+		// Organization tokens API (cluster admin only)
+		orgTokensGroup := g.baseRouteGroup.Group("/org-tokens")
+		orgTokensGroup.Use(auth.RequireClusterAdminMiddleware())
+		apiv1.NewOrgTokensGroup(orgTokensGroup, g.BackendRepo)
+		log.Info().Msg("org tokens API registered at /api/v1/org-tokens")
 
 		// Workspace-scoped APIs (support both admin and member tokens)
 		workspaceAuthConfig := apiv1.WorkspaceAuthConfig{
@@ -455,8 +559,37 @@ func (g *Gateway) registerServices() error {
 		apiv1.NewFilesystemGroup(filesystemGroup, g.BackendRepo, g.storageService, sourceService, g.sourceRegistry, g.toolRegistry, g.s2Client)
 		log.Info().Msg("filesystem API registered at /api/v1/workspaces/:workspace_id/fs")
 
-		// Tasks API
-		apiv1.NewTasksGroup(g.baseRouteGroup.Group("/tasks"), g.BackendRepo, taskQueue, g.s2Client, g.Config.Sandbox.GetDefaultImage())
+		// Cache management API (nested under workspaces, workspace-scoped auth)
+		cacheGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/cache")
+		cacheGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
+		apiv1.NewCacheGroup(cacheGroup, compStore)
+
+		// Access log API (nested under workspaces, workspace-scoped auth)
+		accessLogGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/access-log")
+		accessLogGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
+		apiv1.NewAccessLogGroup(accessLogGroup, g.BackendRepo, g.s2Client, sourceService)
+
+		// Agent/task/run engine and gRPC service.
+		orchestratorSvc := orchestration.NewAgentService(
+			g.ctx,
+			g.BackendRepo,
+			taskQueue,
+			g.RedisClient,
+			g.s2Client,
+			g.Config.Sandbox.GetDefaultImage(),
+		)
+		orchestratorSvc.Start(g.ctx)
+		agentAPI := orchestration.NewAgentAPI(g.BackendRepo, orchestratorSvc)
+		agentService := services.NewAgentService(g.BackendRepo, agentAPI, g.s2Client)
+		pb.RegisterAgentServiceServer(g.grpcServer, agentService)
+		log.Info().Msg("agent service registered")
+
+		// Agent/task/run HTTP APIs (workspace-scoped)
+		agentAPIRoot := g.baseRouteGroup.Group("/workspaces/:workspace_id")
+		agentAPIRoot.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
+		apiv1.NewAgentsGroup(agentAPIRoot.Group("/agents"), agentAPI)
+		apiv1.NewWorkspaceTasksGroup(agentAPIRoot.Group("/tasks"), agentAPI)
+		apiv1.NewRunsGroup(agentAPIRoot.Group("/runs"), agentAPI)
 
 		// Hook engine: matches events → hooks → tasks, polls for retries
 		var skillReader hooks.SkillReader
@@ -492,14 +625,14 @@ func (g *Gateway) registerServices() error {
 		}
 
 		// OAuth API for workspace integrations (gmail, gdrive, github, notion, slack)
-		apiv1.NewOAuthGroup(g.baseRouteGroup.Group("/oauth"), g.oauthStore, g.oauthRegistry, g.BackendRepo)
+		apiv1.NewOAuthGroup(g.baseRouteGroup.Group("/oauth"), g.oauthStore, g.oauthRegistry, g.BackendRepo, g.Config.Gateway.AuthToken)
 		if providers := g.oauthRegistry.ListConfiguredProviders(); len(providers) > 0 {
 			log.Info().Strs("providers", providers).Msg("oauth API registered at /api/v1/oauth")
 		} else {
 			log.Warn().Msg("oauth API registered but no providers configured (set oauth.callbackUrl and provider credentials)")
 		}
 
-		log.Info().Msg("workspace, members, tokens, connections, hooks, and tasks APIs registered")
+		log.Info().Msg("workspace, members, tokens, connections, hooks, and agent/task/run APIs registered")
 	}
 
 	return nil
@@ -524,29 +657,29 @@ func (g *Gateway) StartAsync() error {
 		return fmt.Errorf("failed to register services: %w", err)
 	}
 
+	httpAddr := fmt.Sprintf("%s:%d", g.Config.Gateway.HTTP.Host, g.Config.Gateway.HTTP.Port)
+	httpListener, err := net.Listen("tcp", httpAddr)
+	if err != nil {
+		return fmt.Errorf("failed to bind http listener: %w", err)
+	}
+
+	grpcAddr := fmt.Sprintf(":%d", g.Config.Gateway.GRPC.Port)
+	grpcListener, err := net.Listen("tcp", grpcAddr)
+	if err != nil {
+		_ = httpListener.Close()
+		return fmt.Errorf("failed to bind grpc listener: %w", err)
+	}
+
 	// Start HTTP server
 	go func() {
-		addr := fmt.Sprintf("%s:%d", g.Config.Gateway.HTTP.Host, g.Config.Gateway.HTTP.Port)
-		lis, err := net.Listen("tcp", addr)
-		if err != nil {
-			log.Error().Err(err).Msg("failed to listen on http")
-			return
-		}
-
-		if err := g.httpServer.Serve(lis); err != nil && err != http.ErrServerClosed {
+		if err := g.httpServer.Serve(httpListener); err != nil && err != http.ErrServerClosed {
 			log.Error().Err(err).Msg("http server error")
 		}
 	}()
 
 	// Start gRPC server
 	go func() {
-		lis, err := net.Listen("tcp", fmt.Sprintf(":%d", g.Config.Gateway.GRPC.Port))
-		if err != nil {
-			log.Error().Err(err).Msg("failed to listen on grpc")
-			return
-		}
-
-		if err := g.grpcServer.Serve(lis); err != nil {
+		if err := g.grpcServer.Serve(grpcListener); err != nil {
 			log.Error().Err(err).Msg("grpc server error")
 		}
 	}()
@@ -629,6 +762,11 @@ func (g *Gateway) shutdown() {
 		})
 	}
 
+	// Flush compression event recorder
+	if g.compressionRecorder != nil {
+		g.compressionRecorder.Flush()
+	}
+
 	g.cancelFunc()
 
 	if err := eg.Wait(); err != nil {
@@ -668,6 +806,7 @@ func (g *Gateway) initSources() {
 	g.sourceRegistry.Register(providers.NewSlackProvider())
 	g.sourceRegistry.Register(providers.NewLinearProvider())
 	g.sourceRegistry.Register(providers.NewPostHogProvider())
+	g.sourceRegistry.Register(providers.NewWebProvider(g.Config.Sources.Firecrawl.APIKey))
 
 	log.Info().Strs("providers", g.sourceRegistry.List()).Msg("source providers registered")
 }
@@ -719,4 +858,58 @@ func (g *Gateway) initTools() error {
 		Msg("tools initialized")
 
 	return nil
+}
+
+// requireClusterAdminOrOrgMiddleware allows cluster_admin or organization tokens.
+func requireClusterAdminOrOrgMiddleware() echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			info := auth.AuthInfoFromContext(c.Request().Context())
+			if info == nil {
+				return c.JSON(http.StatusUnauthorized, apiv1.Response{
+					Success: false,
+					Error:   "authentication required",
+				})
+			}
+			if info.IsClusterAdmin() || info.IsOrganization() {
+				return next(c)
+			}
+			return c.JSON(http.StatusForbidden, apiv1.Response{
+				Success: false,
+				Error:   "admin or organization token required",
+			})
+		}
+	}
+}
+
+func grpcUnaryPanicRecoveryInterceptor() grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (_ interface{}, err error) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				log.Error().
+					Interface("panic", recovered).
+					Str("method", info.FullMethod).
+					Bytes("stack", debug.Stack()).
+					Msg("panic recovered in gRPC unary handler")
+				err = status.Error(codes.Internal, "internal server error")
+			}
+		}()
+		return handler(ctx, req)
+	}
+}
+
+func grpcStreamPanicRecoveryInterceptor() grpc.StreamServerInterceptor {
+	return func(srv interface{}, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				log.Error().
+					Interface("panic", recovered).
+					Str("method", info.FullMethod).
+					Bytes("stack", debug.Stack()).
+					Msg("panic recovered in gRPC stream handler")
+				err = status.Error(codes.Internal, "internal server error")
+			}
+		}()
+		return handler(srv, stream)
+	}
 }

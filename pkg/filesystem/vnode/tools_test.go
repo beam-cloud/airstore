@@ -191,3 +191,30 @@ func TestToolsVNode_Prefix(t *testing.T) {
 		t.Errorf("expected prefix %q, got %q", ToolsPath, tv.Prefix())
 	}
 }
+
+func TestSameWrapperBytes(t *testing.T) {
+	if !sameWrapperBytes(map[string][]byte{}, map[string][]byte{}) {
+		t.Fatal("expected empty wrapper maps to match")
+	}
+
+	if !sameWrapperBytes(
+		map[string][]byte{"tool": []byte("#!/bin/sh\nexec foo \"$@\"\n")},
+		map[string][]byte{"tool": []byte("#!/bin/sh\nexec foo \"$@\"\n")},
+	) {
+		t.Fatal("expected identical wrappers to match")
+	}
+
+	if sameWrapperBytes(
+		map[string][]byte{"tool": []byte("#!/bin/sh\nexec foo \"$@\"\n")},
+		map[string][]byte{"tool": []byte("#!/bin/sh\nexec bar \"$@\"\n")},
+	) {
+		t.Fatal("expected wrapper-content change to be detected")
+	}
+
+	if sameWrapperBytes(
+		map[string][]byte{"tool": []byte("#!/bin/sh\nexec foo \"$@\"\n")},
+		map[string][]byte{},
+	) {
+		t.Fatal("expected missing wrapper key to be detected")
+	}
+}

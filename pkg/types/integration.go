@@ -1,6 +1,5 @@
 package types
 
-// IntegrationScope defines whether an integration is personal or workspace-shared
 type IntegrationScope string
 
 const (
@@ -8,7 +7,6 @@ const (
 	ScopeShared   IntegrationScope = "shared"
 )
 
-// IntegrationAuthType defines how an integration authenticates
 type IntegrationAuthType string
 
 const (
@@ -17,9 +15,8 @@ const (
 	AuthOAuth  IntegrationAuthType = "oauth"
 )
 
-// IntegrationMeta contains metadata about an integration type
 type IntegrationMeta struct {
-	Tool        ToolName
+	Name        IntegrationName
 	DisplayName string
 	Description string
 	Icon        string
@@ -27,97 +24,110 @@ type IntegrationMeta struct {
 	Scope       IntegrationScope
 }
 
-// integrations is the canonical registry of all supported integrations
-var integrations = map[ToolName]IntegrationMeta{
-	ToolWikipedia: {
-		Tool:        ToolWikipedia,
+var integrations = map[IntegrationName]IntegrationMeta{
+	Wikipedia: {
+		Name:        Wikipedia,
 		DisplayName: "Wikipedia",
 		Description: "Encyclopedic knowledge lookup",
 		Icon:        "book-open",
 		AuthType:    AuthNone,
 		Scope:       ScopeShared,
 	},
-	ToolWeather: {
-		Tool:        ToolWeather,
+	Weather: {
+		Name:        Weather,
 		DisplayName: "Weather",
 		Description: "Weather and forecasts",
 		Icon:        "cloud-sun",
 		AuthType:    AuthAPIKey,
 		Scope:       ScopeShared,
 	},
-	ToolExa: {
-		Tool:        ToolExa,
+	Exa: {
+		Name:        Exa,
 		DisplayName: "Exa",
 		Description: "Neural web search",
 		Icon:        "search",
 		AuthType:    AuthAPIKey,
 		Scope:       ScopeShared,
 	},
-	ToolGitHub: {
-		Tool:        ToolGitHub,
+	GitHub: {
+		Name:        GitHub,
 		DisplayName: "GitHub",
 		Description: "Repository and PR management",
 		Icon:        "github",
 		AuthType:    AuthOAuth,
 		Scope:       ScopeShared,
 	},
-	ToolGmail: {
-		Tool:        ToolGmail,
+	Gmail: {
+		Name:        Gmail,
 		DisplayName: "Gmail",
 		Description: "Email access and management",
 		Icon:        "mail",
 		AuthType:    AuthOAuth,
 		Scope:       ScopePersonal,
 	},
-	ToolNotion: {
-		Tool:        ToolNotion,
+	Notion: {
+		Name:        Notion,
 		DisplayName: "Notion",
 		Description: "Workspace pages and databases",
 		Icon:        "file-text",
 		AuthType:    AuthOAuth,
 		Scope:       ScopeShared,
 	},
-	ToolGDrive: {
-		Tool:        ToolGDrive,
+	GDrive: {
+		Name:        GDrive,
 		DisplayName: "Google Drive",
 		Description: "Cloud file storage",
 		Icon:        "hard-drive",
 		AuthType:    AuthOAuth,
 		Scope:       ScopeShared,
 	},
-	ToolSlack: {
-		Tool:        ToolSlack,
+	Slack: {
+		Name:        Slack,
 		DisplayName: "Slack",
 		Description: "Channels, messages, and files",
 		Icon:        "slack",
 		AuthType:    AuthOAuth,
 		Scope:       ScopeShared,
 	},
-	ToolLinear: {
-		Tool:        ToolLinear,
+	Linear: {
+		Name:        Linear,
 		DisplayName: "Linear",
 		Description: "Issues, projects, and team workflows",
 		Icon:        "square-kanban",
 		AuthType:    AuthOAuth,
 		Scope:       ScopeShared,
 	},
-	ToolPostHog: {
-		Tool:        ToolPostHog,
+	PostHog: {
+		Name:        PostHog,
 		DisplayName: "PostHog",
 		Description: "Product analytics and feature flags",
 		Icon:        "bar-chart",
 		AuthType:    AuthAPIKey,
 		Scope:       ScopeShared,
 	},
+	Web: {
+		Name:        Web,
+		DisplayName: "Web",
+		Description: "Crawl websites into markdown files",
+		Icon:        "globe",
+		AuthType:    AuthNone,
+		Scope:       ScopeShared,
+	},
+	Browser: {
+		Name:        Browser,
+		DisplayName: "Browser",
+		Description: "Headless browser automation via Kernel cloud browsers",
+		Icon:        "monitor",
+		AuthType:    AuthNone,
+		Scope:       ScopeShared,
+	},
 }
 
-// GetIntegrationMeta returns metadata for an integration
-func GetIntegrationMeta(tool ToolName) (IntegrationMeta, bool) {
-	meta, ok := integrations[tool]
+func GetIntegrationMeta(name IntegrationName) (IntegrationMeta, bool) {
+	meta, ok := integrations[name]
 	return meta, ok
 }
 
-// ListIntegrations returns all registered integrations
 func ListIntegrations() []IntegrationMeta {
 	result := make([]IntegrationMeta, 0, len(integrations))
 	for _, meta := range integrations {
@@ -126,14 +136,12 @@ func ListIntegrations() []IntegrationMeta {
 	return result
 }
 
-// RequiresAuth returns true if the integration needs credentials
-func RequiresAuth(tool ToolName) bool {
-	meta, ok := integrations[tool]
+func RequiresAuth(name IntegrationName) bool {
+	meta, ok := integrations[name]
 	return ok && meta.AuthType != AuthNone
 }
 
-// IsPersonalScope returns true if the integration is personal by default
-func IsPersonalScope(tool ToolName) bool {
-	meta, ok := integrations[tool]
+func IsPersonalScope(name IntegrationName) bool {
+	meta, ok := integrations[name]
 	return ok && meta.Scope == ScopePersonal
 }

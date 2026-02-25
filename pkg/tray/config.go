@@ -18,6 +18,7 @@ type Config struct {
 	ConfigPath  string `yaml:"configPath"`
 	GatewayAddr string `yaml:"gatewayAddr"`
 	AutoMount   bool   `yaml:"autoMount"`
+	Token       string `yaml:"-"` // Runtime only, not persisted. Set via --token / AIRSTORE_TOKEN.
 }
 
 // DefaultConfig returns the default configuration.

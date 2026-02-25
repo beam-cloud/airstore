@@ -13,26 +13,47 @@ const (
 
 // AppConfig is the root configuration for the airstore gateway
 type AppConfig struct {
-	Mode       string `key:"mode" json:"mode"` // "local" or "remote"
-	DebugMode  bool   `key:"debugMode" json:"debug_mode"`
-	PrettyLogs bool   `key:"prettyLogs" json:"pretty_logs"`
-
-	ClusterName string           `key:"clusterName" json:"cluster_name"`
-	Database    DatabaseConfig   `key:"database" json:"database"`
-	Image       ImageConfig      `key:"image" json:"image"`
-	Sandbox     SandboxSettings  `key:"sandbox" json:"sandbox"`
-	Filesystem  FilesystemConfig `key:"filesystem" json:"filesystem"`
-	Gateway     GatewayConfig    `key:"gateway" json:"gateway"`
-	Scheduler   SchedulerConfig  `key:"scheduler" json:"scheduler"`
-	Tools       ToolsConfig      `key:"tools" json:"tools"`
-	OAuth       IntegrationOAuth `key:"oauth" json:"oauth"`     // OAuth for workspace integrations (gmail, gdrive)
-	Streams     StreamsConfig    `key:"streams" json:"streams"` // S2 stream configuration for task logs
-	Anthropic   AnthropicConfig  `key:"anthropic" json:"anthropic"`
+	Mode        string            `key:"mode" json:"mode"` // "local" or "remote"
+	DebugMode   bool              `key:"debugMode" json:"debug_mode"`
+	PrettyLogs  bool              `key:"prettyLogs" json:"pretty_logs"`
+	ClusterName string            `key:"clusterName" json:"cluster_name"`
+	Database    DatabaseConfig    `key:"database" json:"database"`
+	Image       ImageConfig       `key:"image" json:"image"`
+	Sandbox     SandboxSettings   `key:"sandbox" json:"sandbox"`
+	Filesystem  FilesystemConfig  `key:"filesystem" json:"filesystem"`
+	Gateway     GatewayConfig     `key:"gateway" json:"gateway"`
+	Scheduler   SchedulerConfig   `key:"scheduler" json:"scheduler"`
+	Tools       ToolsConfig       `key:"tools" json:"tools"`
+	Sources     SourcesConfig     `key:"sources" json:"sources"`         // Builtin source provider credentials
+	OAuth       IntegrationOAuth  `key:"oauth" json:"oauth"`             // OAuth for workspace integrations (gmail, gdrive)
+	Streams     StreamsConfig     `key:"streams" json:"streams"`         // S2 stream configuration for task logs
+	Models      ModelsConfig      `key:"models" json:"models"`           // LLM provider API keys (BAML inference, sandbox tasks)
+	Compression CompressionConfig `key:"compression" json:"compression"` // Context compression middleware
 }
 
-// AnthropicConfig configures Anthropic API access for BAML inference and Claude Code tasks
-type AnthropicConfig struct {
+// ModelsConfig centralises API keys for all LLM providers.
+// BAML picks these up via env vars (ANTHROPIC_API_KEY, CEREBRAS_API_KEY).
+type ModelsConfig struct {
+	Anthropic ModelProviderConfig `key:"anthropic" json:"anthropic"` // Claude models (smart queries, sandbox)
+	Cerebras  ModelProviderConfig `key:"cerebras" json:"cerebras"`   // Cerebras models (distillation)
+}
+
+// ModelProviderConfig holds credentials for a single LLM provider.
+type ModelProviderConfig struct {
 	APIKey string `key:"apiKey" json:"api_key"`
+}
+
+func (c *AppConfig) AnthropicAPIKey() string {
+	return c.Models.Anthropic.APIKey
+}
+
+func (c *AppConfig) KernelAPIKey() string {
+	return c.Tools.Integrations.Kernel.APIKey
+}
+
+// CerebrasAPIKey returns the Cerebras API key.
+func (c *AppConfig) CerebrasAPIKey() string {
+	return c.Models.Cerebras.APIKey
 }
 
 // StreamsConfig configures S2 stream storage for task logs
@@ -117,12 +138,16 @@ type ImageConfig struct {
 
 // SandboxSettings configures the task sandbox/container runtime defaults
 type SandboxSettings struct {
-	// DefaultImage is the container image used for Claude Code tasks
+	// DefaultImage is the container image used when a task omits image.
 	DefaultImage string `key:"defaultImage" json:"default_image"`
+	// InteractiveIdleTimeout controls how long an interactive task may stay
+	// inactive (no input/output activity) before it is automatically completed.
+	InteractiveIdleTimeout time.Duration `key:"interactiveIdleTimeout" json:"interactive_idle_timeout"`
 }
 
 // DefaultSandboxImage is the fallback image if not configured
 const DefaultSandboxImage = "public.ecr.aws/n4e0e1y0/airstore-default-sandbox:latest"
+const DefaultInteractiveIdleTimeout = 10 * time.Minute
 
 // GetDefaultImage returns the configured default image or the fallback
 func (c SandboxSettings) GetDefaultImage() string {
@@ -130,6 +155,14 @@ func (c SandboxSettings) GetDefaultImage() string {
 		return c.DefaultImage
 	}
 	return DefaultSandboxImage
+}
+
+// GetInteractiveIdleTimeout returns the interactive idle timeout with a sane default.
+func (c SandboxSettings) GetInteractiveIdleTimeout() time.Duration {
+	if c.InteractiveIdleTimeout <= 0 {
+		return DefaultInteractiveIdleTimeout
+	}
+	return c.InteractiveIdleTimeout
 }
 
 // WorkspaceStorageConfig for per-workspace S3 buckets (bucket: {prefix}-{workspace_id})
@@ -199,6 +232,7 @@ type IntegrationsConfig struct {
 	Weather IntegrationAPIKey `key:"weather" json:"weather"`
 	Exa     IntegrationAPIKey `key:"exa" json:"exa"`
 	GitHub  GitHubConfig      `key:"github" json:"github"`
+	Kernel  IntegrationAPIKey `key:"kernel" json:"kernel"`
 }
 
 // IntegrationAPIKey is a simple API key configuration
@@ -319,6 +353,11 @@ func (c *MCPServerConfig) RedactConfig() *MCPServerConfig {
 	return redacted
 }
 
+// SourcesConfig holds API keys for builtin source providers.
+type SourcesConfig struct {
+	Firecrawl IntegrationAPIKey `key:"firecrawl" json:"firecrawl"`
+}
+
 // ----------------------------------------------------------------------------
 // Integration OAuth Configuration (for workspace connections)
 // ----------------------------------------------------------------------------
@@ -338,4 +377,20 @@ type IntegrationOAuth struct {
 type ProviderOAuthCredentials struct {
 	ClientID     string `key:"clientId" json:"client_id"`
 	ClientSecret string `key:"clientSecret" json:"client_secret"`
+}
+
+// ----------------------------------------------------------------------------
+// Compression Configuration
+// ----------------------------------------------------------------------------
+
+// CompressionConfig configures the context compression middleware.
+type CompressionConfig struct {
+	Strategy             string        `key:"strategy" json:"strategy"`                            // "strip" or "passthrough"
+	CacheEnabled         bool          `key:"cacheEnabled" json:"cache_enabled"`                   // enable Redis compressed content cache (default false)
+	TokenThreshold       int           `key:"tokenThreshold" json:"token_threshold"`               // skip compression if below this many tokens
+	MaxContentBytes      int           `key:"maxContentBytes" json:"max_content_bytes"`            // skip if content exceeds this size
+	TokenEncoding        string        `key:"tokenEncoding" json:"token_encoding"`                 // tiktoken encoding, default "cl100k_base"
+	Timeout              time.Duration `key:"timeout" json:"timeout"`                              // max compression time; 0 = strategy default
+	ContentCacheMaxBytes int64         `key:"contentCacheMaxBytes" json:"content_cache_max_bytes"` // per-workspace Redis budget; default 10MB (cache only)
+	ContentCacheTTL      time.Duration `key:"contentCacheTTL" json:"content_cache_ttl"`            // per-entry TTL; default 5m (cache only)
 }

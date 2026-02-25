@@ -31,8 +31,8 @@ func NewGitHubClient() *GitHubClient {
 	}
 }
 
-func (g *GitHubClient) Name() types.ToolName {
-	return types.ToolGitHub
+func (g *GitHubClient) Name() types.IntegrationName {
+	return types.GitHub
 }
 
 func (g *GitHubClient) Execute(ctx context.Context, command string, args map[string]any, creds *types.IntegrationCredentials, stdout, stderr io.Writer) error {

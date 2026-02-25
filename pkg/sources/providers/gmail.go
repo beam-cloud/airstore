@@ -16,26 +16,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/sources"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/rs/zerolog/log"
 )
-
-// API call counter for A/B testing
-var gmailAPICallCount int64
-
-// GetGmailAPICallCount returns the current API call count
-func GetGmailAPICallCount() int64 {
-	return atomic.LoadInt64(&gmailAPICallCount)
-}
-
-// ResetGmailAPICallCount resets the API call counter
-func ResetGmailAPICallCount() {
-	atomic.StoreInt64(&gmailAPICallCount, 0)
-}
 
 const (
 	gmailAPIBase = "https://gmail.googleapis.com/gmail/v1"
@@ -122,7 +108,7 @@ func NewGmailProvider() *GmailProvider {
 }
 
 func (g *GmailProvider) Name() string {
-	return types.ToolGmail.String()
+	return types.Gmail.String()
 }
 
 // checkAuth validates that credentials are present
@@ -323,7 +309,7 @@ func (g *GmailProvider) Search(ctx context.Context, pctx *sources.ProviderContex
 func (g *GmailProvider) searchResultFilename(msg gmailMessage) string {
 	datePrefix := parseEmailDate(msg.Date)
 	sender := extractSenderName(msg.From)
-	subj := sanitizeFolderName(truncateSubject(msg.Subject, 30))
+	subj := sources.SanitizeFilename(truncateSubject(msg.Subject, 30))
 
 	// Truncate sender if too long
 	if len(sender) > 20 {
@@ -381,14 +367,6 @@ func parseEmailTimestamp(dateStr string) int64 {
 
 	log.Debug().Str("date", dateStr).Msg("failed to parse email date, using current time")
 	return time.Now().Unix()
-}
-
-// ReadSearchResult reads the content of a search result by message ID
-func (g *GmailProvider) ReadSearchResult(ctx context.Context, pctx *sources.ProviderContext, messageID string) ([]byte, error) {
-	if err := checkAuth(pctx); err != nil {
-		return nil, err
-	}
-	return g.fetchMessageBody(ctx, pctx.Credentials.AccessToken, messageID)
 }
 
 // ============================================================================
@@ -468,7 +446,7 @@ func (g *GmailProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provider
 			"id":      msg.ID,
 			"from":    extractSenderName(msg.From),
 			"to":      msg.To,
-			"subject": sanitizeFolderName(truncateSubject(msg.Subject, 40)),
+			"subject": sources.SanitizeFilename(truncateSubject(msg.Subject, 40)),
 			"date":    parseEmailDate(msg.Date),
 			"snippet": msg.Snippet,
 		}
@@ -512,7 +490,7 @@ func (g *GmailProvider) FormatFilename(format string, metadata map[string]string
 	for key, value := range metadata {
 		placeholder := "{" + key + "}"
 		// Sanitize the value for filesystem use
-		safeValue := sanitizeFolderName(value)
+		safeValue := sources.SanitizeFilename(value)
 		// Truncate long values (except id)
 		if key != "id" && len(safeValue) > 40 {
 			safeValue = safeValue[:40]
@@ -534,37 +512,6 @@ func (g *GmailProvider) FormatFilename(format string, metadata map[string]string
 
 // Compile-time interface check for QueryExecutor
 var _ sources.QueryExecutor = (*GmailProvider)(nil)
-
-// ============================================================================
-// detectCategory determines which category a message belongs to based on its labels
-func (g *GmailProvider) detectCategory(labels []string) string {
-	labelSet := make(map[string]bool)
-	for _, l := range labels {
-		labelSet[l] = true
-	}
-
-	// Check in order of specificity
-	if labelSet["UNREAD"] {
-		return "unread"
-	}
-	if labelSet["STARRED"] {
-		return "starred"
-	}
-	if labelSet["SENT"] {
-		return "sent"
-	}
-	if labelSet["IMPORTANT"] {
-		return "important"
-	}
-	if labelSet["INBOX"] {
-		return "inbox"
-	}
-
-	// Default to inbox
-	return "inbox"
-}
-
-// isGmailQueryOperator checks if a pattern looks like a Gmail query operator
 
 // --- Messages ---
 // /messages/{category}/{sender}/{subject}/meta.json
@@ -1043,9 +990,9 @@ func (g *GmailProvider) fetchMessagesMetadataBatch(ctx context.Context, token st
 		}
 		_ = json.Unmarshal(bodyBytes, &apiErr)
 		if apiErr.Error.Message != "" {
-			return nil, fmt.Errorf("gmail batch API: %s", apiErr.Error.Message)
+			return nil, gmailStatusError(resp.StatusCode, "gmail batch API: "+apiErr.Error.Message)
 		}
-		return nil, fmt.Errorf("gmail batch API: %s", resp.Status)
+		return nil, gmailStatusError(resp.StatusCode, "gmail batch API: "+resp.Status)
 	}
 
 	contentType := resp.Header.Get("Content-Type")
@@ -1434,12 +1381,19 @@ func (g *GmailProvider) request(ctx context.Context, token, path string, result 
 		}
 		json.Unmarshal(body, &apiErr)
 		if apiErr.Error.Message != "" {
-			return fmt.Errorf("gmail API: %s", apiErr.Error.Message)
+			return gmailStatusError(resp.StatusCode, "gmail API: "+apiErr.Error.Message)
 		}
-		return fmt.Errorf("gmail API: %s", resp.Status)
+		return gmailStatusError(resp.StatusCode, "gmail API: "+resp.Status)
 	}
 
 	return json.NewDecoder(resp.Body).Decode(result)
+}
+
+func gmailStatusError(statusCode int, message string) error {
+	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+		return fmt.Errorf("%w: %s", sources.ErrNotConnected, message)
+	}
+	return fmt.Errorf("%s", message)
 }
 
 // --- Helpers ---
@@ -1485,7 +1439,7 @@ func extractSenderName(from string) string {
 		name := strings.TrimSpace(from[:idx])
 		name = strings.Trim(name, `"'`) // Remove quotes if present
 		if name != "" && !isGenericSenderName(name) {
-			return sanitizeFolderName(name)
+			return sources.SanitizeFilename(name)
 		}
 	}
 
@@ -1527,7 +1481,7 @@ func extractSenderName(from string) string {
 
 		// Otherwise, try using the local part if it looks like a name
 		if isLikelyPersonName(localPart) {
-			return sanitizeFolderName(localPart)
+			return sources.SanitizeFilename(localPart)
 		}
 
 		// Fall back to domain name
@@ -1541,7 +1495,7 @@ func extractSenderName(from string) string {
 		}
 	}
 
-	return sanitizeFolderName(email)
+	return sources.SanitizeFilename(email)
 }
 
 // isGenericSenderName checks if a display name is too generic to be useful
@@ -1622,7 +1576,7 @@ func parseEmailDate(dateStr string) string {
 // Format: "2026-01-27_Meeting_reminder_abc12345"
 func formatSubjectFolder(subject, date, msgID string) string {
 	datePrefix := parseEmailDate(date)
-	subj := sanitizeFolderName(truncateSubject(subject, 30))
+	subj := sources.SanitizeFilename(truncateSubject(subject, 30))
 
 	// Ensure we have at least 8 chars of message ID
 	idSuffix := msgID
@@ -1631,13 +1585,6 @@ func formatSubjectFolder(subject, date, msgID string) string {
 	}
 
 	return fmt.Sprintf("%s_%s_%s", datePrefix, subj, idSuffix)
-}
-
-// sanitizeFolderName makes a string safe for use as a folder name.
-// It delegates to the shared sources.SanitizeFilename which strips emojis
-// and non-ASCII characters for clean, agent-friendly filenames.
-func sanitizeFolderName(s string) string {
-	return sources.SanitizeFilename(s)
 }
 
 func truncateSubject(s string, maxLen int) string {

@@ -1,23 +1,21 @@
 package types
 
-// ToolName is a type-safe tool identifier
-type ToolName string
+// IntegrationName identifies an integration (tool or source).
+type IntegrationName string
 
-// Tool name constants - add new tools here
 const (
-	ToolWikipedia ToolName = "wikipedia"
-	ToolWeather   ToolName = "weather"
-	ToolExa       ToolName = "exa"
-	ToolGitHub    ToolName = "github"
-	ToolGmail     ToolName = "gmail"
-	ToolNotion    ToolName = "notion"
-	ToolGDrive    ToolName = "gdrive"
-	ToolSlack     ToolName = "slack"
-	ToolLinear    ToolName = "linear"
-	ToolPostHog  ToolName = "posthog"
+	Wikipedia IntegrationName = "wikipedia"
+	Weather   IntegrationName = "weather"
+	Exa       IntegrationName = "exa"
+	GitHub    IntegrationName = "github"
+	Gmail     IntegrationName = "gmail"
+	Notion    IntegrationName = "notion"
+	GDrive    IntegrationName = "gdrive"
+	Slack     IntegrationName = "slack"
+	Linear    IntegrationName = "linear"
+	PostHog   IntegrationName = "posthog"
+	Web       IntegrationName = "web"
+	Browser   IntegrationName = "browser"
 )
 
-// String returns the string representation
-func (t ToolName) String() string {
-	return string(t)
-}
+func (n IntegrationName) String() string { return string(n) }

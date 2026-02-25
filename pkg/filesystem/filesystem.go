@@ -1,16 +1,19 @@
 package filesystem
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
 
 	"github.com/beam-cloud/airstore/pkg/filesystem/vnode"
+	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/rs/zerolog/log"
 )
@@ -45,6 +48,9 @@ type Config struct {
 	Uid         *uint32 // File owner uid (nil = use current user, 0 = root)
 	Gid         *uint32 // File owner gid (nil = use current user, 0 = root)
 	Backend     string  // "fuse", "nfs", or "" for platform auto-detect
+	Compression string  // compression strategy: "strip", "distill", "chain", or "" (disabled)
+	Session     string  // custom access session ID; defaults to workspace ID if empty
+	AccessLog   bool    // enable access logging; when false, no session header is sent
 }
 
 // Filesystem connects to the gateway via gRPC and exposes a virtual filesystem.
@@ -69,10 +75,15 @@ type Filesystem struct {
 	// here so repeat lookups return ENOENT without RPCs.
 	negativeCache *expirable.LRU[string, struct{}]
 
-	backend   MountBackend
-	mounted   bool
-	destroyed bool // Set when Destroy() is called by FUSE layer
-	mu        sync.Mutex
+	backend     MountBackend
+	backendAuto bool
+	mounted     bool
+	destroyed   bool // Set when Destroy() is called by FUSE layer
+	mu          sync.Mutex
+
+	accessCollector *AccessCollector
+	mountID         string
+	readSeq         uint64
 }
 
 // LegacyMetadataEngine provides filesystem metadata operations via gRPC.
@@ -117,6 +128,7 @@ func NewFilesystem(cfg Config) (*Filesystem, error) {
 
 	// Resolve mount backend (auto-detect if not specified)
 	backendName := cfg.Backend
+	backendAuto := backendName == ""
 	if backendName == "" {
 		backendName = defaultBackend()
 	}
@@ -132,6 +144,8 @@ func NewFilesystem(cfg Config) (*Filesystem, error) {
 		dirChildren:   expirable.NewLRU[string, map[string]struct{}](dirChildrenSize, nil, dirChildrenTTL),
 		negativeCache: expirable.NewLRU[string, struct{}](negativeCacheSize, nil, negativeCacheTTL),
 		backend:       NewBackend(backendName),
+		backendAuto:   backendAuto,
+		mountID:       fmt.Sprintf("mount-%d-%d", os.Getpid(), time.Now().UnixNano()),
 	}
 
 	if err := fs.initRoot(); err != nil {
@@ -149,6 +163,14 @@ func (f *Filesystem) RegisterVNode(node vnode.VirtualNode) {
 // SetStorageFallback sets the fallback vnode for unmatched storage paths
 func (f *Filesystem) SetStorageFallback(node vnode.VirtualNode) {
 	f.vnodes.SetFallback(node)
+}
+
+// SetAccessCollector sets the mount-side access collector used to flush
+// logical read events to the gateway.
+func (f *Filesystem) SetAccessCollector(collector *AccessCollector) {
+	f.mu.Lock()
+	f.accessCollector = collector
+	f.mu.Unlock()
 }
 
 func (f *Filesystem) initRoot() error {
@@ -202,7 +224,7 @@ func (f *Filesystem) Mount() error {
 
 	// Delegate to the configured backend (FUSE or NFS). This call blocks
 	// until the filesystem is unmounted.
-	err := f.backend.Mount(f, f.config.MountPoint)
+	err := f.mountWithFallback()
 
 	f.mu.Lock()
 	f.mounted = false
@@ -213,6 +235,80 @@ func (f *Filesystem) Mount() error {
 	f.Destroy()
 
 	return err
+}
+
+func (f *Filesystem) mountWithFallback() error {
+	primaryBackendName := f.config.Backend
+	primaryBackend := f.backend
+
+	primaryErr := f.safeBackendMount(primaryBackendName, primaryBackend, f.config.MountPoint)
+	if primaryErr == nil {
+		return nil
+	}
+
+	if !f.shouldAttemptFallback(primaryBackendName, primaryErr) {
+		return primaryErr
+	}
+
+	return f.mountWithNFSFallback(primaryBackendName, primaryErr)
+}
+
+func (f *Filesystem) mountWithNFSFallback(primaryBackendName string, primaryErr error) error {
+	const fallbackBackendName = BackendNFS
+	fallbackBackend := NewBackend(fallbackBackendName)
+
+	log.Warn().
+		Str("from", primaryBackendName).
+		Str("to", fallbackBackendName).
+		Err(primaryErr).
+		Msg("primary mount backend failed; trying fallback backend")
+
+	// Swap backend so unmount goes through the backend that actually mounted.
+	f.mu.Lock()
+	f.backend = fallbackBackend
+	f.config.Backend = fallbackBackendName
+	f.mu.Unlock()
+
+	fallbackErr := f.safeBackendMount(fallbackBackendName, fallbackBackend, f.config.MountPoint)
+	if fallbackErr == nil {
+		return nil
+	}
+	if errors.Is(fallbackErr, ErrNFSHelperMissing) {
+		return fmt.Errorf("%s mount failed: %w; nfs fallback unavailable: %w", primaryBackendName, primaryErr, fallbackErr)
+	}
+	return fmt.Errorf(
+		"%s mount failed: %w; %s fallback failed: %w",
+		primaryBackendName,
+		primaryErr,
+		fallbackBackendName,
+		fallbackErr,
+	)
+}
+
+func (f *Filesystem) safeBackendMount(
+	backendName string,
+	backend MountBackend,
+	mountPoint string,
+) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			if backendName == BackendFUSE {
+				err = fmt.Errorf("%w: %v", ErrFUSEUnavailable, r)
+				return
+			}
+			err = fmt.Errorf("%s backend panic: %v", backendName, r)
+		}
+	}()
+	return backend.Mount(f, mountPoint)
+}
+
+func (f *Filesystem) shouldAttemptFallback(backendName string, err error) bool {
+	if !f.backendAuto {
+		return false
+	}
+	// Auto mode should recover from FUSE runtime availability issues on Linux
+	// by retrying with NFS.
+	return backendName == BackendFUSE && errors.Is(err, ErrFUSEUnavailable)
 }
 
 func (f *Filesystem) Unmount() error {
@@ -240,12 +336,6 @@ func (f *Filesystem) IsDestroyed() bool {
 	return f.destroyed
 }
 
-func (f *Filesystem) logDebug(msg string) {
-	if f.verbose {
-		log.Debug().Msg(msg)
-	}
-}
-
 func (f *Filesystem) Init() error { return nil }
 func (f *Filesystem) Destroy() {
 	f.mu.Lock()
@@ -254,12 +344,17 @@ func (f *Filesystem) Destroy() {
 		return
 	}
 	f.destroyed = true
+	collector := f.accessCollector
+	f.accessCollector = nil
 	f.mu.Unlock()
 
 	for _, vn := range f.vnodes.List() {
 		if c, ok := vn.(interface{ Cleanup() }); ok {
 			c.Cleanup()
 		}
+	}
+	if collector != nil {
+		collector.Close()
 	}
 }
 
@@ -510,21 +605,94 @@ func (f *Filesystem) Open(path string, flags int) (FileHandle, error) {
 	return 0, nil
 }
 
-func (f *Filesystem) Read(path string, buf []byte, off int64, fh FileHandle) (int, error) {
+func (f *Filesystem) Read(path string, buf []byte, off int64, fh FileHandle) (int, *vnode.ReadAttribution, error) {
 	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
-		return vn.Read(path, buf, off, vnode.FileHandle(fh))
+		if n, ok := vn.(vnode.ReadAttributionNode); ok {
+			return n.ReadWithAttribution(path, buf, off, vnode.FileHandle(fh))
+		}
+		n, err := vn.Read(path, buf, off, vnode.FileHandle(fh))
+		return n, vnode.AttributionForCache(vnode.CacheSourceUnknown), err
 	}
 
 	parent, name := splitPath(path)
 	meta, err := f.metadata.GetFileMetadata(f.resolveDir(parent), name)
 	if err != nil {
-		return 0, ErrNotFound
+		return 0, nil, ErrNotFound
 	}
 
 	if off >= int64(len(meta.FileData)) {
-		return 0, nil
+		return 0, vnode.AttributionForCache(vnode.CacheSourceLegacyMetadata), nil
 	}
-	return copy(buf, meta.FileData[off:]), nil
+	return copy(buf, meta.FileData[off:]), vnode.AttributionForCache(vnode.CacheSourceLegacyMetadata), nil
+}
+
+func (f *Filesystem) recordLogicalRead(
+	path string,
+	off int64,
+	requestedBytes int,
+	readBytes int,
+	latency time.Duration,
+	readErr error,
+	attr *vnode.ReadAttribution,
+) {
+	if !f.config.AccessLog {
+		return
+	}
+
+	f.mu.Lock()
+	collector := f.accessCollector
+	f.mu.Unlock()
+	if collector == nil {
+		return
+	}
+
+	normalizedPath := strings.TrimPrefix(path, "/")
+	if normalizedPath == "" {
+		normalizedPath = path
+	}
+
+	event := &pb.AccessLogEvent{
+		EventId:        fmt.Sprintf("%s-%d", f.mountID, atomic.AddUint64(&f.readSeq, 1)),
+		Ts:             time.Now().UnixMilli(),
+		SessionId:      f.config.Session,
+		Path:           normalizedPath,
+		Offset:         off,
+		RequestedBytes: int32(requestedBytes),
+		ReadBytes:      int32(readBytes),
+		LatencyMs:      latency.Milliseconds(),
+		MountId:        f.mountID,
+		AccessOrigin:   "fuse",
+		CacheSource:    vnode.CacheSourceUnknown,
+	}
+
+	if attr != nil {
+		if attr.CacheSource != "" {
+			event.CacheSource = attr.CacheSource
+		}
+		event.Integration = attr.Integration
+		event.SourceUri = attr.SourceURI
+		event.QueryPath = attr.QueryPath
+		event.ResultId = attr.ResultID
+		event.Strategy = attr.Strategy
+		event.Outcome = attr.Outcome
+		event.OriginalBytes = int64(attr.OriginalBytes)
+		event.CompressedBytes = int64(attr.CompressedBytes)
+		event.OriginalTokens = int64(attr.OriginalTokens)
+		event.CompressedTokens = int64(attr.CompressedTokens)
+		event.CompressionMs = attr.CompressionMs
+		event.FetchMs = attr.FetchMs
+	}
+
+	if readErr != nil {
+		event.ErrorMsg = readErr.Error()
+		if event.Outcome == "" {
+			event.Outcome = "error"
+		}
+	} else if event.Outcome == "" {
+		event.Outcome = "passthrough"
+	}
+
+	collector.Record(event)
 }
 
 func (f *Filesystem) Release(path string, fh FileHandle) error {

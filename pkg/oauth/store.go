@@ -14,9 +14,6 @@ import (
 )
 
 const (
-	keyPrefixSession = "oauth:session:"
-	keyPrefixState   = "oauth:state:"
-
 	DefaultSessionTTL = 10 * time.Minute
 )
 
@@ -101,12 +98,12 @@ func (s *Store) Create(providerName string, workspaceID uint, workspaceExt, inte
 		return nil, err
 	}
 
-	if err := s.backend.Set(ctx, keyPrefixSession+session.ID, data, s.ttl); err != nil {
+	if err := s.backend.Set(ctx, common.Keys.OAuthSession(session.ID), data, s.ttl); err != nil {
 		return nil, ErrStorageFailed
 	}
 
-	if err := s.backend.Set(ctx, keyPrefixState+session.State, []byte(session.ID), s.ttl); err != nil {
-		s.backend.Delete(ctx, keyPrefixSession+session.ID)
+	if err := s.backend.Set(ctx, common.Keys.OAuthState(session.State), []byte(session.ID), s.ttl); err != nil {
+		s.backend.Delete(ctx, common.Keys.OAuthSession(session.ID))
 		return nil, ErrStorageFailed
 	}
 
@@ -115,7 +112,7 @@ func (s *Store) Create(providerName string, workspaceID uint, workspaceExt, inte
 
 // Get retrieves a session by ID.
 func (s *Store) Get(id string) (*Session, error) {
-	data, err := s.backend.Get(context.Background(), keyPrefixSession+id)
+	data, err := s.backend.Get(context.Background(), common.Keys.OAuthSession(id))
 	if err != nil {
 		return nil, ErrStorageFailed
 	}
@@ -139,7 +136,7 @@ func (s *Store) Get(id string) (*Session, error) {
 func (s *Store) GetByState(state string) (*Session, error) {
 	ctx := context.Background()
 
-	idData, err := s.backend.Get(ctx, keyPrefixState+state)
+	idData, err := s.backend.Get(ctx, common.Keys.OAuthState(state))
 	if err != nil {
 		return nil, ErrStorageFailed
 	}
@@ -198,8 +195,8 @@ func (s *Store) Delete(id string) error {
 	}
 
 	ctx := context.Background()
-	s.backend.Delete(ctx, keyPrefixState+session.State)
-	s.backend.Delete(ctx, keyPrefixSession+id)
+	s.backend.Delete(ctx, common.Keys.OAuthState(session.State))
+	s.backend.Delete(ctx, common.Keys.OAuthSession(id))
 	return nil
 }
 
@@ -215,15 +212,15 @@ func (s *Store) save(session *Session) error {
 		return ErrSessionExpired
 	}
 
-	return s.backend.Set(ctx, keyPrefixSession+session.ID, data, ttl)
+	return s.backend.Set(ctx, common.Keys.OAuthSession(session.ID), data, ttl)
 }
 
 func (s *Store) cleanupAfter(session *Session, delay time.Duration) {
 	time.Sleep(delay)
 
 	ctx := context.Background()
-	s.backend.Delete(ctx, keyPrefixState+session.State)
-	s.backend.Delete(ctx, keyPrefixSession+session.ID)
+	s.backend.Delete(ctx, common.Keys.OAuthState(session.State))
+	s.backend.Delete(ctx, common.Keys.OAuthSession(session.ID))
 }
 
 // redisBackend implements Backend using Redis.
