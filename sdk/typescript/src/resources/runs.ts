@@ -1,4 +1,4 @@
-import type { CoreClient, RequestOptions } from '../client.js';
+import { attachResponseMeta, type CoreClient, type RequestOptions } from '../client.js';
 import type {
   AgentRun,
   RunListParams,
@@ -13,11 +13,25 @@ import type {
 export class Runs {
   constructor(private readonly client: CoreClient) {}
 
+  async list(workspaceId: string, options?: RequestOptions): Promise<RunListResponse>;
   async list(
     workspaceId: string,
     params?: RunListParams,
     options?: RequestOptions,
+  ): Promise<RunListResponse>;
+  async list(
+    workspaceId: string,
+    paramsOrOptions?: RunListParams | RequestOptions,
+    maybeOptions?: RequestOptions,
   ): Promise<RunListResponse> {
+    const secondArgIsOptions = shouldTreatSecondArgAsOptions(paramsOrOptions, maybeOptions);
+    const params = secondArgIsOptions
+      ? undefined
+      : (paramsOrOptions as RunListParams | undefined);
+    const options = secondArgIsOptions
+      ? (paramsOrOptions as RequestOptions | undefined)
+      : maybeOptions;
+
     const response = await this.client.request<RunListResponse | AgentRun[]>(
       'GET',
       `/workspaces/${workspaceId}/runs`,
@@ -26,13 +40,19 @@ export class Runs {
       options,
     );
     if (Array.isArray(response)) {
-      return { runs: response, next_cursor: '', has_more: false };
+      return attachResponseMeta(
+        { runs: response, next_cursor: '', has_more: false },
+        response.lastResponse,
+      );
     }
-    return {
-      runs: response.runs ?? [],
-      next_cursor: response.next_cursor ?? '',
-      has_more: response.has_more ?? false,
-    };
+    return attachResponseMeta(
+      {
+        runs: response.runs ?? [],
+        next_cursor: response.next_cursor ?? '',
+        has_more: response.has_more ?? false,
+      },
+      response.lastResponse,
+    );
   }
 
   async retrieve(
@@ -105,4 +125,25 @@ function toRunListQuery(params: RunListParams | undefined): Record<string, strin
   if (params.limit !== undefined) query['limit'] = String(params.limit);
   if (params.cursor) query['cursor'] = params.cursor;
   return Object.keys(query).length > 0 ? query : undefined;
+}
+
+function shouldTreatSecondArgAsOptions(
+  paramsOrOptions: RunListParams | RequestOptions | undefined,
+  options: RequestOptions | undefined,
+): paramsOrOptions is RequestOptions {
+  if (options !== undefined) return false;
+  if (!paramsOrOptions || typeof paramsOrOptions !== 'object') return false;
+  return !hasRunListParamKeys(paramsOrOptions);
+}
+
+function hasRunListParamKeys(value: RunListParams | RequestOptions): value is RunListParams {
+  return (
+    'agentId' in value ||
+    'status' in value ||
+    'sessionId' in value ||
+    'createdAfter' in value ||
+    'createdBefore' in value ||
+    'limit' in value ||
+    'cursor' in value
+  );
 }

@@ -174,8 +174,9 @@ func (d *Direct) SendToRun(ctx context.Context, workspaceID uint, runID string, 
 		return nil, fmt.Errorf("direct channel is unavailable")
 	}
 
+	trimmedRunID := strings.TrimSpace(runID)
 	trimmedMessage := strings.TrimSpace(message.Message)
-	if strings.TrimSpace(runID) == "" {
+	if trimmedRunID == "" {
 		return nil, fmt.Errorf("run_id is required")
 	}
 	if trimmedMessage == "" {
@@ -192,7 +193,7 @@ func (d *Direct) SendToRun(ctx context.Context, workspaceID uint, runID string, 
 		idempotencyKey = uuid.NewString()
 	}
 
-	task, deduped, err := d.agents.EnqueueRunInput(ctx, workspaceID, runID, queueMode, trimmedMessage, idempotencyKey)
+	task, deduped, err := d.agents.EnqueueRunInput(ctx, workspaceID, trimmedRunID, queueMode, trimmedMessage, idempotencyKey)
 	if err != nil {
 		return nil, err
 	}

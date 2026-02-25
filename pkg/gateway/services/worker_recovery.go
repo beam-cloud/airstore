@@ -262,7 +262,8 @@ func (s *WorkerService) recoverOrphanedRun(ctx context.Context, run *types.Agent
 	}
 
 	if err := s.backend.SetRunExecutionResult(ctx, run.ID, -1, errorMsg); err != nil {
-		if _, ok := err.(*types.ErrRunExecutionNotFound); !ok {
+		var notFoundErr *types.ErrRunExecutionNotFound
+		if !errors.As(err, &notFoundErr) {
 			return false, false, err
 		}
 	}
