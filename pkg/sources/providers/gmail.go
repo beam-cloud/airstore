@@ -280,7 +280,12 @@ func (g *GmailProvider) Search(ctx context.Context, pctx *sources.ProviderContex
 
 	for _, msgID := range msgIDs {
 		wg.Add(1)
-		sem <- struct{}{} // Acquire semaphore
+		select {
+		case sem <- struct{}{}: // Acquire semaphore
+		case <-ctx.Done():
+			wg.Done()
+			return results, nil
+		}
 
 		go func(id string) {
 			defer wg.Done()
@@ -1309,7 +1314,12 @@ func (g *GmailProvider) fetchAttachmentsForMessages(ctx context.Context, token s
 		}
 
 		wg.Add(1)
-		sem <- struct{}{}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			wg.Done()
+			return attachmentsByMessage
+		}
 		go func(id string) {
 			defer wg.Done()
 			defer func() { <-sem }()
