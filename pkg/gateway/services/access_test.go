@@ -146,3 +146,30 @@ func TestAccessServiceDedupesByEventIDWhenRedisConfigured(t *testing.T) {
 		t.Fatalf("expected second ingest accepted=0, got ok=%v accepted=%d", resp2.Ok, resp2.Accepted)
 	}
 }
+
+func TestAccessServiceSkipsHiddenDotPaths(t *testing.T) {
+	rec := &collectingRecorder{}
+	svc := NewAccessService(rec, nil)
+
+	resp, err := svc.IngestAccessEvents(authCtx("ws-ext"), &pb.IngestAccessEventsRequest{
+		Events: []*pb.AccessLogEvent{
+			{EventId: "hidden-1", Path: ".claude/.claude.json"},
+			{EventId: "hidden-2", Path: "/skills/.cache/index.json"},
+			{EventId: "visible-1", Path: "sources/gmail/inbox/msg.txt"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !resp.Ok || resp.Accepted != 1 {
+		t.Fatalf("expected accepted=1 for visible event only, got ok=%v accepted=%d", resp.Ok, resp.Accepted)
+	}
+
+	events := rec.snapshot()
+	if len(events) != 1 {
+		t.Fatalf("expected 1 recorded event, got %d", len(events))
+	}
+	if events[0].Path != "sources/gmail/inbox/msg.txt" {
+		t.Fatalf("unexpected recorded path: %q", events[0].Path)
+	}
+}

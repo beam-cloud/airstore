@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -49,10 +50,12 @@ func (c *S2Client) Enabled() bool {
 
 // TaskLogEntry represents a log entry for a task
 type TaskLogEntry struct {
-	TaskID    string `json:"task_id"`
-	Timestamp int64  `json:"timestamp"`
-	Stream    string `json:"stream"` // "stdout" or "stderr"
-	Data      string `json:"data"`
+	TaskID    string         `json:"task_id"`
+	Timestamp int64          `json:"timestamp"`
+	Stream    string         `json:"stream"` // "stdout" or "stderr"
+	Data      string         `json:"data"`
+	ChunkType string         `json:"chunk_type,omitempty"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
 }
 
 // TaskStatusEntry represents a status change for a task
@@ -147,11 +150,14 @@ func (c *S2Client) Append(ctx context.Context, stream string, data interface{}) 
 
 // AppendLog is a convenience method for appending a log entry
 func (c *S2Client) AppendLog(ctx context.Context, taskID, stream, data string) error {
+	chunkType, displayData, metadata := inferTaskLogChunk(data)
 	entry := TaskLogEntry{
 		TaskID:    taskID,
 		Timestamp: time.Now().UnixMilli(),
 		Stream:    stream,
-		Data:      data,
+		Data:      displayData,
+		ChunkType: chunkType,
+		Metadata:  metadata,
 	}
 	return c.Append(ctx, Streams.TaskLogs(taskID), entry)
 }
@@ -317,4 +323,47 @@ func (c *S2Client) ListStreams(ctx context.Context, prefix string) ([]StreamInfo
 
 func (c *S2Client) url(path string) string {
 	return fmt.Sprintf("https://%s.b.aws.s2.dev/v1%s", c.config.Basin, path)
+}
+
+func inferTaskLogChunk(raw string) (string, string, map[string]any) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "text", raw, nil
+	}
+
+	if !strings.HasPrefix(trimmed, "{") || !strings.HasSuffix(trimmed, "}") {
+		return "text", raw, nil
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
+		return "text", raw, nil
+	}
+
+	chunkType := strings.TrimSpace(stringFromAny(payload["type"]))
+	if chunkType == "" {
+		chunkType = "json"
+	}
+
+	for _, key := range []string{"text", "delta", "content"} {
+		if value := strings.TrimSpace(stringFromAny(payload[key])); value != "" {
+			return chunkType, value, payload
+		}
+	}
+
+	return chunkType, raw, payload
+}
+
+func stringFromAny(value any) string {
+	if value == nil {
+		return ""
+	}
+	if typed, ok := value.(string); ok {
+		return typed
+	}
+	body, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	return string(body)
 }

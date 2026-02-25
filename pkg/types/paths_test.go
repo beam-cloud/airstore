@@ -139,3 +139,27 @@ func TestPathConstants(t *testing.T) {
 		t.Errorf("PathMemory = %q, want %q", PathMemory, "/memory")
 	}
 }
+
+func TestIsHiddenDotPath(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"/.claude/settings.json", true},
+		{".claude/.claude.json", true},
+		{"/skills/.cache/index.json", true},
+		{"/skills/agent/.scratch/out.txt", true},
+		{"/skills/report.md", false},
+		{"/sources/gmail/inbox/msg.eml", false},
+		{"/sources/gmail/query.as", false},
+		{"/", false},
+		{"", false},
+	}
+
+	for _, tt := range tests {
+		got := IsHiddenDotPath(tt.path)
+		if got != tt.want {
+			t.Errorf("IsHiddenDotPath(%q) = %v, want %v", tt.path, got, tt.want)
+		}
+	}
+}

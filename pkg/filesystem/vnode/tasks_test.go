@@ -51,7 +51,7 @@ func TestTasksVNodeReadUsesAgentTaskView(t *testing.T) {
 		WorkspaceID:    42,
 		Kind:           types.AgentTaskKindAgentCommand,
 		QueueMode:      types.AgentQueueModeQueue,
-		State:          types.AgentTaskStateDispatched,
+		State:          types.AgentTaskStateRunning,
 		IdempotencyKey: "idem-123",
 		TargetRunID:    &runID,
 		CreatedAt:      createdAt,
@@ -74,7 +74,7 @@ func TestTasksVNodeReadUsesAgentTaskView(t *testing.T) {
 
 	content := string(buf[:n])
 	require.Contains(t, content, "Task: task-123")
-	require.Contains(t, content, "State: dispatched")
+	require.Contains(t, content, "State: running")
 	require.Contains(t, content, "Kind: agent_command")
 	require.Contains(t, content, "Queue Mode: queue")
 	require.Contains(t, content, "Run: run-123")

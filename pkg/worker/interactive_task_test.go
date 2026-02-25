@@ -10,6 +10,41 @@ import (
 	"github.com/beam-cloud/airstore/pkg/types"
 )
 
+type testTerminalIO struct {
+	inputCh chan []byte
+}
+
+func (tio *testTerminalIO) PublishInput(_ context.Context, _ string, _ []byte) error {
+	return nil
+}
+
+func (tio *testTerminalIO) SubscribeInput(_ context.Context, _ string) (<-chan []byte, func(), error) {
+	if tio.inputCh == nil {
+		tio.inputCh = make(chan []byte)
+	}
+	return tio.inputCh, func() {}, nil
+}
+
+func (tio *testTerminalIO) PublishOutput(_ context.Context, _ string, _ []byte) error {
+	return nil
+}
+
+func (tio *testTerminalIO) SubscribeOutput(_ context.Context, _ string) (<-chan []byte, func(), error) {
+	ch := make(chan []byte)
+	close(ch)
+	return ch, func() {}, nil
+}
+
+func (tio *testTerminalIO) PublishCancel(_ context.Context, _ string) error {
+	return nil
+}
+
+func (tio *testTerminalIO) SubscribeCancel(_ context.Context, _ string) (<-chan struct{}, func(), error) {
+	ch := make(chan struct{})
+	close(ch)
+	return ch, func() {}, nil
+}
+
 func TestInteractiveResult(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		exitCode, errMsg, status := interactiveResult(nil, false)
@@ -106,5 +141,86 @@ func TestMonitorInteractiveSessionIdleResetOnActivity(t *testing.T) {
 	case <-done:
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("idle monitor goroutine did not exit")
+	}
+}
+
+func TestWaitForFollowupInputTimesOut(t *testing.T) {
+	terminalIO := &testTerminalIO{inputCh: make(chan []byte)}
+	worker := &Worker{terminalIO: terminalIO}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	started := time.Now()
+	prompt := worker.waitForFollowupInput(ctx, "task-1", 25*time.Millisecond)
+	elapsed := time.Since(started)
+
+	if prompt != "" {
+		t.Fatalf("expected empty prompt on timeout, got %q", prompt)
+	}
+	if elapsed > 200*time.Millisecond {
+		t.Fatalf("expected between-turn timeout to end quickly, elapsed=%s", elapsed)
+	}
+}
+
+func TestWaitForFollowupInputReturnsPrompt(t *testing.T) {
+	terminalIO := &testTerminalIO{inputCh: make(chan []byte, 1)}
+	worker := &Worker{terminalIO: terminalIO}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		terminalIO.inputCh <- []byte("  follow up  ")
+	}()
+
+	prompt := worker.waitForFollowupInput(ctx, "task-2", 200*time.Millisecond)
+	if prompt != "follow up" {
+		t.Fatalf("expected trimmed prompt, got %q", prompt)
+	}
+}
+
+func TestShouldContinueFromFirstTurn(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		want bool
+	}{
+		{
+			name: "missing env",
+			env:  map[string]string{},
+			want: false,
+		},
+		{
+			name: "explicit false",
+			env: map[string]string{
+				agentResumeSessionEnvKey: "false",
+			},
+			want: false,
+		},
+		{
+			name: "explicit true",
+			env: map[string]string{
+				agentResumeSessionEnvKey: "true",
+			},
+			want: true,
+		},
+		{
+			name: "numeric true",
+			env: map[string]string{
+				agentResumeSessionEnvKey: "1",
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shouldContinueFromFirstTurn(tt.env)
+			if got != tt.want {
+				t.Fatalf("unexpected continue flag: got=%t want=%t", got, tt.want)
+			}
+		})
 	}
 }

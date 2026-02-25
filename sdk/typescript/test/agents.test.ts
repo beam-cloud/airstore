@@ -18,6 +18,7 @@ describe('Agents', () => {
     const created = await client.agents.create(workspace.external_id, {
       agentKey: uniqueName('agent-key'),
       name: uniqueName('agent-name'),
+      runner: 'claude_code',
       config: { model: 'claude-sonnet-4' },
     });
 
@@ -28,6 +29,8 @@ describe('Agents', () => {
     const fetched = await client.agents.retrieve(workspace.external_id, created.id);
     expect(fetched.id).toBe(created.id);
     expect(fetched.agent_key).toBe(created.agent_key);
+    expect(fetched.config_json.runner).toBe('claude_code');
+    expect(fetched.config_json.provider).toBe('claude');
   });
 
   it('lists workspace agent profiles', async () => {

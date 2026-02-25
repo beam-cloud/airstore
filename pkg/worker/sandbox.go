@@ -185,8 +185,7 @@ func NewSandboxManager(ctx context.Context, cfg Config) (*SandboxManager, error)
 	})
 	manager.defaultPromptRunner = claudeRunner
 	manager.promptRunners = map[string]AgentExecutionRunner{
-		"claude":    claudeRunner,
-		"anthropic": claudeRunner,
+		"claude": claudeRunner,
 	}
 
 	// Bring up the global worker mount during initialization so the first task
@@ -494,6 +493,7 @@ func (m *SandboxManager) Start(sandboxID string) error {
 	// Create a cancellable context for this sandbox
 	sandboxCtx, cancel := context.WithCancel(m.ctx)
 	sandbox.Cancel = cancel
+	sandbox.State.Status = types.SandboxStatusCreating
 	m.mu.Unlock()
 
 	log.Info().
@@ -508,8 +508,12 @@ func (m *SandboxManager) Start(sandboxID string) error {
 	}
 
 	// Start the container in a goroutine
+	started := make(chan int, 1)
+	runDone := make(chan struct {
+		exitCode int
+		err      error
+	}, 1)
 	go func() {
-		started := make(chan int, 1)
 		opts := &runtime.RunOpts{
 			Started:      started,
 			OutputWriter: outputWriter, // Capture stdout/stderr
@@ -549,14 +553,109 @@ func (m *SandboxManager) Start(sandboxID string) error {
 			Int("exit_code", exitCode).
 			Err(err).
 			Msg("sandbox exited")
+		runDone <- struct {
+			exitCode int
+			err      error
+		}{
+			exitCode: exitCode,
+			err:      err,
+		}
 	}()
 
-	// Update status to running
-	m.mu.Lock()
-	sandbox.State.Status = types.SandboxStatusRunning
-	m.mu.Unlock()
+	// Most sandboxes are one-shot command runs and don't need a runtime-level
+	// readiness probe. Interactive sessions run a long-lived "sleep infinity"
+	// entrypoint and then exec per-turn commands; those need startup gating.
+	if !isInteractiveBootstrapEntrypoint(sandbox.Config.Entrypoint) {
+		m.mu.Lock()
+		if s, ok := m.sandboxes[sandboxID]; ok {
+			s.State.Status = types.SandboxStatusRunning
+			s.State.StartedAt = time.Now()
+		}
+		m.mu.Unlock()
+		return nil
+	}
 
-	return nil
+	// Block startup until the runtime reports this sandbox as running.
+	// This avoids Exec races where runsc is still "loading sandbox".
+	startupTimeout := time.NewTimer(10 * time.Second)
+	defer startupTimeout.Stop()
+	probeTicker := time.NewTicker(50 * time.Millisecond)
+	defer probeTicker.Stop()
+
+	pid := 0
+	lastProbeStatus := ""
+	var lastProbeErr error
+
+	for {
+		select {
+		case startedPID := <-started:
+			if startedPID > 0 {
+				pid = startedPID
+			}
+
+		case result := <-runDone:
+			m.mu.RLock()
+			s, ok := m.sandboxes[sandboxID]
+			m.mu.RUnlock()
+
+			errMsg := ""
+			if ok {
+				errMsg = strings.TrimSpace(s.State.Error)
+			}
+			if errMsg == "" && result.err != nil {
+				errMsg = result.err.Error()
+			}
+			if errMsg == "" {
+				errMsg = fmt.Sprintf("sandbox exited before startup (exit_code=%d)", result.exitCode)
+			}
+			return fmt.Errorf("failed to start sandbox %s: %s", sandboxID, errMsg)
+
+		case <-probeTicker.C:
+			runtimeState, err := m.runtime.State(m.ctx, sandboxID)
+			if err != nil {
+				lastProbeErr = err
+				continue
+			}
+
+			lastProbeErr = nil
+			lastProbeStatus = strings.TrimSpace(runtimeState.Status)
+			if !strings.EqualFold(lastProbeStatus, string(types.SandboxStatusRunning)) {
+				continue
+			}
+
+			if pid == 0 && runtimeState.Pid > 0 {
+				pid = runtimeState.Pid
+			}
+
+			m.mu.Lock()
+			if s, ok := m.sandboxes[sandboxID]; ok {
+				s.State.PID = pid
+				s.State.Status = types.SandboxStatusRunning
+				s.State.StartedAt = time.Now()
+				s.State.Error = ""
+			}
+			m.mu.Unlock()
+			return nil
+
+		case <-startupTimeout.C:
+			reason := "runtime did not report running"
+			if lastProbeErr != nil {
+				reason = lastProbeErr.Error()
+			} else if lastProbeStatus != "" {
+				reason = fmt.Sprintf("runtime status %q", lastProbeStatus)
+			}
+			return fmt.Errorf("timed out waiting for sandbox %s startup: %s", sandboxID, reason)
+		}
+	}
+}
+
+func isInteractiveBootstrapEntrypoint(entrypoint []string) bool {
+	if len(entrypoint) != 2 {
+		return false
+	}
+
+	return strings.TrimSpace(entrypoint[0]) == "sleep" &&
+		strings.TrimSpace(entrypoint[1]) == "infinity"
 }
 
 // Stop stops a running sandbox
@@ -942,6 +1041,11 @@ func (m *SandboxManager) buildTaskSandboxConfig(task types.RunExecution, entrypo
 		networkMode = "none"
 	}
 
+	workDir := types.ContainerWorkDir
+	if wd := strings.TrimSpace(env["AIRSTORE_AGENT_WORKSPACE_DIR"]); wd != "" {
+		workDir = wd
+	}
+
 	return types.SandboxConfig{
 		ID:                 fmt.Sprintf("task-%s", task.ExternalId),
 		WorkspaceID:        fmt.Sprintf("%d", task.WorkspaceId),
@@ -949,7 +1053,7 @@ func (m *SandboxManager) buildTaskSandboxConfig(task types.RunExecution, entrypo
 		Runtime:            runtimeType,
 		Entrypoint:         entrypoint,
 		Env:                env,
-		WorkingDir:         types.ContainerWorkDir,
+		WorkingDir:         workDir,
 		FilesystemMount:    mountSource,
 		FilesystemReadOnly: workspaceAccess == "ro",
 		Resources:          task.GetResources(),
@@ -1017,32 +1121,37 @@ const (
 	ptyDefaultRows = "40"
 )
 
-// AttachPTY starts a long-lived PTY-backed shell process in a running sandbox.
-func (m *SandboxManager) AttachPTY(ctx context.Context, sandboxID string, stdin io.Reader, stdout io.Writer) error {
-	m.mu.RLock()
-	sandbox, exists := m.sandboxes[sandboxID]
-	m.mu.RUnlock()
-	if !exists {
-		return fmt.Errorf("sandbox %s not found", sandboxID)
-	}
-	if sandbox.State.Status != types.SandboxStatusRunning {
-		return fmt.Errorf("sandbox %s is not running", sandboxID)
-	}
-
+func buildPTYExecEnv(envMap map[string]string) []string {
 	env := []string{
 		ptyDefaultPATH,
 		"TERM=xterm-256color",
 		"COLUMNS=" + ptyDefaultCols,
 		"LINES=" + ptyDefaultRows,
 	}
-	for k, v := range sandbox.Config.Env {
+	for k, v := range envMap {
 		env = append(env, fmt.Sprintf("%s=%s", k, v))
+	}
+	return env
+}
+
+// AttachPTY starts a long-lived PTY-backed process in a running sandbox.
+// Claude interactive tasks run their task entrypoint directly; other interactive
+// tasks keep the existing shell PTY behavior.
+func (m *SandboxManager) AttachPTY(
+	ctx context.Context,
+	sandboxID string,
+	stdin io.Reader,
+	stdout io.Writer,
+) error {
+	envMap, err := m.sandboxEnv(sandboxID)
+	if err != nil {
+		return err
 	}
 
 	proc := specs.Process{
 		Args: []string{"/bin/sh", "-lc", ptySetupScript},
 		Cwd:  types.ContainerWorkDir,
-		Env:  env,
+		Env:  buildPTYExecEnv(envMap),
 		User: specs.User{UID: types.SandboxUserUID, GID: types.SandboxUserGID},
 	}
 
@@ -1050,6 +1159,72 @@ func (m *SandboxManager) AttachPTY(ctx context.Context, sandboxID string, stdin 
 		OutputWriter: stdout,
 		StdinReader:  stdin,
 	})
+}
+
+// ExecPTY runs a command inside an existing sandbox with PTY-compatible env.
+// Unlike AttachPTY, it takes explicit args and does not attach stdin — the
+// prompt is passed via command-line args. This is used by the turn-based
+// session loop where each turn is a separate Exec call.
+//
+// The command is wrapped in a login shell so that the user's profile (and
+// full PATH) is available — tools like `claude` are often installed outside
+// the minimal system PATH.
+func (m *SandboxManager) ExecPTY(
+	ctx context.Context,
+	sandboxID string,
+	args []string,
+	env map[string]string,
+	stdout io.Writer,
+) error {
+	sandboxEnv, err := m.sandboxEnv(sandboxID)
+	if err != nil {
+		return err
+	}
+	for k, v := range env {
+		sandboxEnv[k] = v
+	}
+
+	proc := specs.Process{
+		Args: []string{"/bin/bash", "-lc", shellJoinArgs(args)},
+		Cwd:  types.ContainerWorkDir,
+		Env:  buildPTYExecEnv(sandboxEnv),
+		User: specs.User{UID: types.SandboxUserUID, GID: types.SandboxUserGID},
+	}
+
+	return m.runtime.Exec(ctx, sandboxID, proc, &runtime.ExecOpts{
+		OutputWriter: stdout,
+	})
+}
+
+func shellJoinArgs(args []string) string {
+	parts := make([]string, len(args))
+	for i, arg := range args {
+		parts[i] = "'" + strings.ReplaceAll(arg, "'", `'"'"'`) + "'"
+	}
+	return strings.Join(parts, " ")
+}
+
+// sandboxEnv returns a copy of the sandbox's configured environment.
+func (m *SandboxManager) sandboxEnv(sandboxID string) (map[string]string, error) {
+	m.mu.RLock()
+	sandbox, exists := m.sandboxes[sandboxID]
+	m.mu.RUnlock()
+	if !exists {
+		return nil, fmt.Errorf("sandbox %s not found", sandboxID)
+	}
+	if sandbox.State.Status != types.SandboxStatusRunning {
+		return nil, fmt.Errorf("sandbox %s is not running", sandboxID)
+	}
+	envMap := make(map[string]string, len(sandbox.Config.Env))
+	for k, v := range sandbox.Config.Env {
+		envMap[k] = v
+	}
+	return envMap, nil
+}
+
+// ResolveRunner returns the AgentExecutionRunner for the given task.
+func (m *SandboxManager) ResolveRunner(task types.RunExecution, env map[string]string) AgentExecutionRunner {
+	return m.resolvePromptRunner(task, env)
 }
 
 // RunTask creates and runs a sandbox for a task, returning when complete

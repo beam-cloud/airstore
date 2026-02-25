@@ -26,6 +26,12 @@ type createAgentAPIRequest struct {
 	Active   *bool          `json:"active,omitempty"`
 }
 
+type updateAgentAPIRequest struct {
+	Name   *string        `json:"name,omitempty"`
+	Config map[string]any `json:"config,omitempty"`
+	Active *bool          `json:"active,omitempty"`
+}
+
 func NewAgentsGroup(routerGroup *echo.Group, agents *orchestration.AgentAPI) *AgentsGroup {
 	g := &AgentsGroup{
 		routerGroup: routerGroup,
@@ -36,9 +42,11 @@ func NewAgentsGroup(routerGroup *echo.Group, agents *orchestration.AgentAPI) *Ag
 }
 
 func (g *AgentsGroup) registerRoutes() {
+	g.routerGroup.GET("/defaults", g.GetDefaults)
 	g.routerGroup.POST("", g.CreateAgent)
 	g.routerGroup.GET("", g.ListAgents)
 	g.routerGroup.GET("/:agent_id", g.GetAgent)
+	g.routerGroup.PATCH("/:agent_id", g.UpdateAgent)
 }
 
 func (g *AgentsGroup) CreateAgent(c echo.Context) error {
@@ -82,6 +90,41 @@ func (g *AgentsGroup) ListAgents(c echo.Context) error {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 	return SuccessResponse(c, profiles)
+}
+
+func (g *AgentsGroup) UpdateAgent(c echo.Context) error {
+	if g.agents == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "agent service unavailable")
+	}
+
+	var req updateAgentAPIRequest
+	if err := decodeStrictBody(c, &req); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
+	}
+
+	workspaceID, err := requireWorkspaceID(c)
+	if err != nil {
+		return err
+	}
+	agentID := c.Param("agent_id")
+
+	profile, err := g.agents.UpdateAgent(c.Request().Context(), workspaceID, agentID, req.Name, req.Config, req.Active)
+	if err != nil {
+		if _, ok := err.(*types.ErrAgentProfileNotFound); ok {
+			return ErrorResponse(c, http.StatusNotFound, "agent not found")
+		}
+		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+	}
+	return c.JSON(http.StatusOK, Response{Success: true, Data: profile})
+}
+
+func (g *AgentsGroup) GetDefaults(c echo.Context) error {
+	if g.agents == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "agent service unavailable")
+	}
+	agentKey := strings.TrimSpace(c.QueryParam("agent_key"))
+	config := g.agents.GetDefaultConfig(agentKey)
+	return SuccessResponse(c, config)
 }
 
 func (g *AgentsGroup) GetAgent(c echo.Context) error {

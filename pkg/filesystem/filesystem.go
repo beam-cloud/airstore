@@ -12,6 +12,7 @@ import (
 	"time"
 	"unsafe"
 
+	airtypes "github.com/beam-cloud/airstore/pkg/types"
 	"github.com/beam-cloud/airstore/pkg/filesystem/vnode"
 	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/hashicorp/golang-lru/v2/expirable"
@@ -650,6 +651,9 @@ func (f *Filesystem) recordLogicalRead(
 	if normalizedPath == "" {
 		normalizedPath = path
 	}
+	if airtypes.IsHiddenDotPath(normalizedPath) {
+		return
+	}
 
 	event := &pb.AccessLogEvent{
 		EventId:        fmt.Sprintf("%s-%d", f.mountID, atomic.AddUint64(&f.readSeq, 1)),
@@ -794,6 +798,9 @@ func (f *Filesystem) Rename(oldpath, newpath string) error {
 
 func (f *Filesystem) Chmod(path string, mode uint32) error {
 	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
+		if chmodNode, ok := vn.(vnode.ChmodNode); ok {
+			return chmodNode.Chmod(path, mode)
+		}
 		return nil // No-op for vnodes
 	}
 	return ErrReadOnly

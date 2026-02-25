@@ -4,19 +4,39 @@ import (
 	"strings"
 
 	"github.com/beam-cloud/airstore/pkg/types"
+	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 )
 
 const (
-	agentProviderEnvKey = "AIRSTORE_AGENT_PROVIDER"
-	agentModelEnvKey    = "AIRSTORE_AGENT_MODEL"
+	agentProviderEnvKey          = "AIRSTORE_AGENT_PROVIDER"
+	agentModelEnvKey             = "AIRSTORE_AGENT_MODEL"
+	agentResumeSessionEnvKey     = "AIRSTORE_AGENT_RESUME_SESSION"
+	agentSessionIDEnvKey         = "AIRSTORE_AGENT_SESSION_ID"
+	agentSystemPromptEnvKey      = "AIRSTORE_AGENT_SYSTEM_PROMPT"
+	agentSystemPromptModeEnvKey  = "AIRSTORE_AGENT_SYSTEM_PROMPT_MODE"
+
+	systemPromptModeReplace = "replace"
+
+	claudeProviderName    = "claude"
+	claudeConfigDirEnvKey = "CLAUDE_CONFIG_DIR"
+	claudeConfigDirPath   = "/workspace/.claude"
+	claudeDefaultShellEnv = "/bin/bash"
 )
 
 // AgentExecutionRunner builds the process entrypoint for an agent task.
-// Different providers/runtimes can implement this interface.
 type AgentExecutionRunner interface {
 	Name() string
 	BuildEntrypoint(task types.RunExecution, env map[string]string) []string
+}
+
+// TurnRunner extends AgentExecutionRunner with per-turn execution.
+// Runners implementing this interface execute each turn as a separate
+// process in the sandbox, with the Go worker managing the lifecycle
+// between turns — no shell loop, no stdin pipe.
+type TurnRunner interface {
+	AgentExecutionRunner
+	BuildTurnArgs(prompt string, env map[string]string, continueSession bool) []string
 }
 
 type ClaudeCodeRunnerOptions struct {
@@ -41,9 +61,9 @@ func (r *ClaudeCodeRunner) Name() string {
 }
 
 func (r *ClaudeCodeRunner) BuildEntrypoint(task types.RunExecution, env map[string]string) []string {
-	r.injectAPIKey(env, "ANTHROPIC_API_KEY", r.anthropicAPIKey, true)
-	r.injectKernelEnv(env)
+	r.injectEnv(env)
 	model := strings.TrimSpace(env[agentModelEnvKey])
+	sessionID := claudeSessionIDFromEnv(env)
 
 	addTaskExecutionContext(
 		log.Info().
@@ -52,7 +72,55 @@ func (r *ClaudeCodeRunner) BuildEntrypoint(task types.RunExecution, env map[stri
 		task,
 	).Msg("running claude code task")
 
-	return claudePromptEntrypoint(task.Prompt, defaultClaudePromptEntrypointOptions(model))
+	builder := newPromptEntrypointBuilder("claude").
+		withKeyValue("--session-id", sessionID).
+		withFlag("--print").
+		withFlag("--verbose").
+		withKeyValue("--output-format", "stream-json").
+		withFlag("--dangerously-skip-permissions").
+		withKeyValue("--model", model)
+	applySystemPromptFlags(builder, env)
+	return builder.withPrompt(task.Prompt).build()
+}
+
+// BuildTurnArgs returns the argv for a single interactive turn.
+// Each turn runs claude --print as a separate process in the sandbox;
+// the Go worker manages the loop between turns.
+func (r *ClaudeCodeRunner) BuildTurnArgs(prompt string, env map[string]string, continueSession bool) []string {
+	r.injectEnv(env)
+	model := strings.TrimSpace(env[agentModelEnvKey])
+	sessionID := claudeSessionIDFromEnv(env)
+
+	builder := newPromptEntrypointBuilder("claude")
+	if continueSession {
+		if sessionID != "" {
+			builder.withKeyValue("--resume", sessionID)
+		} else {
+			builder.withFlag("--continue")
+		}
+	} else if sessionID != "" {
+		builder.withKeyValue("--session-id", sessionID)
+	}
+	builder.
+		withFlag("--print").
+		withFlag("--verbose").
+		withKeyValue("--output-format", "stream-json").
+		withFlag("--dangerously-skip-permissions").
+		withKeyValue("--model", model)
+	applySystemPromptFlags(builder, env)
+	return builder.withPrompt(prompt).build()
+}
+
+func (r *ClaudeCodeRunner) injectEnv(env map[string]string) {
+	r.injectAPIKey(env, "ANTHROPIC_API_KEY", r.anthropicAPIKey, true)
+	r.injectKernelEnv(env)
+	if strings.TrimSpace(env[claudeConfigDirEnvKey]) == "" {
+		env[claudeConfigDirEnvKey] = claudeConfigDirPath
+	}
+	if strings.TrimSpace(env["SHELL"]) == "" {
+		// Force a stable non-zsh shell for Claude's internal shell snapshots.
+		env["SHELL"] = claudeDefaultShellEnv
+	}
 }
 
 func (r *ClaudeCodeRunner) injectKernelEnv(env map[string]string) {
@@ -76,35 +144,16 @@ func (r *ClaudeCodeRunner) injectAPIKey(env map[string]string, key, value string
 	}
 }
 
-type ClaudePromptEntrypointOptions struct {
-	Model           string
-	Print           bool
-	Verbose         bool
-	OutputFormat    string
-	SkipPermissions bool
-}
-
-func defaultClaudePromptEntrypointOptions(model string) ClaudePromptEntrypointOptions {
-	return ClaudePromptEntrypointOptions{
-		Model:           model,
-		Print:           true,
-		Verbose:         true,
-		OutputFormat:    "stream-json",
-		SkipPermissions: true,
-	}
-}
-
+// promptEntrypointBuilder constructs a command-line argv for a CLI tool.
 type promptEntrypointBuilder struct {
 	binary string
 	args   []string
-	prompt string
 }
 
-func newPromptEntrypointBuilder(binary string, prompt string) *promptEntrypointBuilder {
+func newPromptEntrypointBuilder(binary string) *promptEntrypointBuilder {
 	return &promptEntrypointBuilder{
 		binary: strings.TrimSpace(binary),
 		args:   []string{},
-		prompt: prompt,
 	}
 }
 
@@ -127,28 +176,32 @@ func (b *promptEntrypointBuilder) withKeyValue(flag string, value string) *promp
 	return b
 }
 
+func (b *promptEntrypointBuilder) withPrompt(prompt string) *promptEntrypointBuilder {
+	if strings.TrimSpace(prompt) == "" {
+		return b
+	}
+	b.args = append(b.args, "-p", prompt)
+	return b
+}
+
 func (b *promptEntrypointBuilder) build() []string {
-	argv := make([]string, 0, len(b.args)+3)
+	argv := make([]string, 0, len(b.args)+1)
 	argv = append(argv, b.binary)
 	argv = append(argv, b.args...)
-	argv = append(argv, "-p", b.prompt)
 	return argv
 }
 
-func claudePromptEntrypoint(prompt string, opts ClaudePromptEntrypointOptions) []string {
-	builder := newPromptEntrypointBuilder("claude", prompt)
-	if opts.Print {
-		builder.withFlag("--print")
+func applySystemPromptFlags(builder *promptEntrypointBuilder, env map[string]string) {
+	sp := strings.TrimSpace(env[agentSystemPromptEnvKey])
+	if sp == "" {
+		return
 	}
-	if opts.Verbose {
-		builder.withFlag("--verbose")
+	mode := strings.ToLower(strings.TrimSpace(env[agentSystemPromptModeEnvKey]))
+	if mode == systemPromptModeReplace {
+		builder.withKeyValue("--system-prompt", sp)
+	} else {
+		builder.withKeyValue("--append-system-prompt", sp)
 	}
-	builder.withKeyValue("--output-format", opts.OutputFormat)
-	if opts.SkipPermissions {
-		builder.withFlag("--dangerously-skip-permissions")
-	}
-	builder.withKeyValue("--model", opts.Model)
-	return builder.build()
 }
 
 func runnerProviderFromEnv(env map[string]string) string {
@@ -156,4 +209,41 @@ func runnerProviderFromEnv(env map[string]string) string {
 		return ""
 	}
 	return strings.ToLower(strings.TrimSpace(env[agentProviderEnvKey]))
+}
+
+func claudeSessionIDFromEnv(env map[string]string) string {
+	if env == nil {
+		return ""
+	}
+	sessionID := strings.TrimSpace(env[agentSessionIDEnvKey])
+	if sessionID == "" {
+		return ""
+	}
+	if _, err := uuid.Parse(sessionID); err != nil {
+		return ""
+	}
+	return sessionID
+}
+
+func providerFromExecutionPolicy(policy map[string]any) string {
+	if len(policy) == 0 {
+		return ""
+	}
+	raw, ok := policy["provider"]
+	if !ok || raw == nil {
+		return ""
+	}
+	value, ok := raw.(string)
+	if !ok {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func isClaudeExecutionTask(task types.RunExecution) bool {
+	provider := runnerProviderFromEnv(task.Env)
+	if provider == "" {
+		provider = providerFromExecutionPolicy(task.ExecutionPolicy)
+	}
+	return provider == claudeProviderName
 }

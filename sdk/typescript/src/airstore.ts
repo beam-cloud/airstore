@@ -10,6 +10,7 @@ import { AccessLog } from './resources/access-log.js';
 import { Agents } from './resources/agents.js';
 import { Tasks } from './resources/tasks.js';
 import { Runs } from './resources/runs.js';
+import { Channels } from './resources/channels.js';
 
 /**
  * The Airstore SDK client.
@@ -78,6 +79,8 @@ export class Airstore extends CoreClient {
   readonly tasks: Tasks;
   /** Read and control run lifecycle state. */
   readonly runs: Runs;
+  /** Send direct channel messages to agents and runs. */
+  readonly channels: Channels;
 
   constructor(opts?: ClientOptions) {
     super(opts);
@@ -92,6 +95,7 @@ export class Airstore extends CoreClient {
     this.agents = new Agents(this);
     this.tasks = new Tasks(this);
     this.runs = new Runs(this);
+    this.channels = new Channels(this);
   }
 }
 

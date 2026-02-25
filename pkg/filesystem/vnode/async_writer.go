@@ -31,12 +31,14 @@ type AsyncWriter struct {
 }
 
 type pendingWrite struct {
-	off       int64
-	data      []byte      // nil means nothing queued to upload
-	timer     *time.Timer // debounce timer
-	firstTime time.Time   // when first enqueued in this cycle (for max delay cap)
-	flushDone chan error   // non-nil while an upload is in flight; receives result
-	retries   int         // number of consecutive failed upload attempts
+	off         int64
+	data        []byte      // nil means nothing queued to upload
+	timer       *time.Timer // debounce timer
+	firstTime   time.Time   // when first enqueued in this cycle (for max delay cap)
+	flushDone   chan error  // non-nil while an upload is in flight; receives result
+	inflightOff int64
+	inflight    []byte // data currently being uploaded
+	retries     int    // number of consecutive failed upload attempts
 }
 
 // NewAsyncWriter creates a new async writer that calls fn for uploads.
@@ -131,11 +133,17 @@ func (aw *AsyncWriter) EnqueueNoTimer(path string, off int64, data []byte) {
 func (aw *AsyncWriter) DirtyFileInfo(path string, fallbackMode uint32) *FileInfo {
 	aw.mu.Lock()
 	pw := aw.pending[path]
-	if pw == nil || pw.data == nil {
+	if pw == nil {
 		aw.mu.Unlock()
 		return nil
 	}
-	size := pw.off + int64(len(pw.data))
+
+	off, data, ok := dirtyPayloadLocked(pw)
+	if !ok {
+		aw.mu.Unlock()
+		return nil
+	}
+	size := off + int64(len(data))
 	aw.mu.Unlock()
 
 	if fallbackMode == 0 {
@@ -157,10 +165,22 @@ func (aw *AsyncWriter) Get(path string) (data []byte, off int64, ok bool) {
 	defer aw.mu.Unlock()
 
 	pw := aw.pending[path]
-	if pw != nil && pw.data != nil {
-		return pw.data, pw.off, true
+	if pw != nil {
+		if off, data, ok := dirtyPayloadLocked(pw); ok {
+			return data, off, true
+		}
 	}
 	return nil, 0, false
+}
+
+func dirtyPayloadLocked(pw *pendingWrite) (off int64, data []byte, ok bool) {
+	if pw.data != nil {
+		return pw.off, pw.data, true
+	}
+	if pw.flushDone != nil && pw.inflight != nil {
+		return pw.inflightOff, pw.inflight, true
+	}
+	return 0, nil, false
 }
 
 // ForceFlush synchronously flushes any pending write for the given path.
@@ -178,7 +198,7 @@ func (aw *AsyncWriter) ForceFlush(path string) error {
 		if pw.flushDone != nil {
 			ch := pw.flushDone
 			aw.mu.Unlock()
-			<-ch // wait for upload to complete
+			<-ch     // wait for upload to complete
 			continue // loop to check if new data arrived during upload
 		}
 
@@ -199,6 +219,8 @@ func (aw *AsyncWriter) ForceFlush(path string) error {
 		off := pw.off
 		pw.data = nil
 		pw.flushDone = make(chan error, 1)
+		pw.inflightOff = off
+		pw.inflight = data
 		aw.mu.Unlock()
 
 		err := aw.writeFn(path, off, data)
@@ -206,6 +228,8 @@ func (aw *AsyncWriter) ForceFlush(path string) error {
 		aw.mu.Lock()
 		doneCh := pw.flushDone
 		pw.flushDone = nil
+		pw.inflight = nil
+		pw.inflightOff = 0
 
 		hasMore := pw.data != nil
 		if !hasMore {
@@ -237,6 +261,8 @@ func (aw *AsyncWriter) doFlush(path string) {
 	off := pw.off
 	pw.data = nil
 	pw.flushDone = make(chan error, 1)
+	pw.inflightOff = off
+	pw.inflight = data
 	if pw.timer != nil {
 		pw.timer.Stop()
 		pw.timer = nil
@@ -248,6 +274,8 @@ func (aw *AsyncWriter) doFlush(path string) {
 	aw.mu.Lock()
 	doneCh := pw.flushDone
 	pw.flushDone = nil
+	pw.inflight = nil
+	pw.inflightOff = 0
 
 	if pw.data != nil {
 		// New data was enqueued during upload — schedule another flush.

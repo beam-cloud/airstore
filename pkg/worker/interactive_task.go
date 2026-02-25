@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -12,6 +13,8 @@ import (
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/rs/zerolog/log"
 )
+
+const DefaultBetweenTurnsTimeout = 60 * time.Second
 
 func (w *Worker) runInteractiveTask(ctx context.Context, task types.RunExecution) (*types.RunExecutionResult, error) {
 	if w.terminalIO == nil {
@@ -42,8 +45,6 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.RunExecution
 
 	result := w.runInteractiveSession(ctx, task, sandboxID)
 
-	// Run heavy sandbox teardown (runtime delete, overlay cleanup, mount unmount)
-	// in a background goroutine so the worker can accept new tasks immediately.
 	go func() {
 		w.sandboxManager.Delete(sandboxID, true)
 		w.sandboxManager.cleanupMount(task.ExternalId)
@@ -53,9 +54,6 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.RunExecution
 	return result, nil
 }
 
-// runInteractiveSession owns the PTY session lifecycle. It blocks until the
-// session ends (user disconnect, idle timeout, or cancel) and returns the result.
-// Sandbox teardown is NOT done here — the caller handles it.
 func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecution, sandboxID string) *types.RunExecutionResult {
 	sessionCtx, sessionCancel := context.WithCancel(ctx)
 	defer sessionCancel()
@@ -70,12 +68,6 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 		go monitorInteractiveSessionIdle(sessionCtx, task.ExternalId, executionCtx, sessionCancel, idleTimeout, activityCh, &idleTimedOut)
 	}
 
-	inputCh, inputCleanup, err := w.terminalIO.SubscribeInput(sessionCtx, task.ExternalId)
-	if err != nil {
-		return interactiveErrorResult(task.ExternalId, err)
-	}
-	defer inputCleanup()
-
 	cancelCh, cancelCleanup, err := w.terminalIO.SubscribeCancel(sessionCtx, task.ExternalId)
 	if err != nil {
 		return interactiveErrorResult(task.ExternalId, err)
@@ -85,40 +77,50 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	go func() {
 		select {
 		case <-sessionCtx.Done():
-		case <-cancelCh:
+		case _, ok := <-cancelCh:
+			if !ok {
+				return
+			}
 			addTaskExecutionContext(log.Info(), task).Msg("received cancel signal for interactive task")
 			sessionCancel()
-			// Force-stop the sandbox so AttachPTY returns promptly.
-			// Killing only the `runsc exec` wrapper doesn't kill the sandbox's
-			// init process; Stop sends SIGKILL to all processes in the container.
 			w.sandboxManager.Stop(sandboxID, true)
 		}
 	}()
 
-	stdinReader, stdinWriter := io.Pipe()
-	defer stdinReader.Close()
-
-	go forwardTerminalInput(sessionCtx, stdinWriter, inputCh, func() {
-		signalActivity(activityCh)
-	})
+	interactiveMirror := NewTaskOutput(
+		task.ExternalId,
+		"stdout",
+		NewS2Writer(sessionCtx, w.sandboxManager.s2, task.ExternalId, "stdout"),
+		NewConsoleWriter(task.ExternalId, "stdout"),
+	)
+	defer interactiveMirror.Flush()
 
 	terminalWriter := &terminalOutputWriter{
 		ctx:          sessionCtx,
 		taskID:       task.ExternalId,
 		terminalIO:   w.terminalIO,
 		executionCtx: executionCtx,
-		onActivity: func() {
-			signalActivity(activityCh)
-		},
-		// Only mirror to S2 for log persistence. Console logging is omitted for
-		// interactive tasks — every byte of PTY output would spam the worker logs.
-		mirror: NewS2Writer(sessionCtx, w.sandboxManager.s2, task.ExternalId, "stdout"),
+		onActivity:   func() { signalActivity(activityCh) },
+		mirror:       interactiveMirror,
 	}
 
 	start := time.Now()
-	runErr := w.sandboxManager.AttachPTY(sessionCtx, sandboxID, stdinReader, terminalWriter)
-	exitCode, errMsg, status := interactiveResult(runErr, idleTimedOut.Load())
+	env := w.sandboxManager.copyTaskEnv(task)
+	runner := w.sandboxManager.ResolveRunner(task, env)
 
+	var runErr error
+	if tr, ok := runner.(TurnRunner); ok {
+		runErr = w.runTurnSession(sessionCtx, task, sandboxID, tr, env, terminalWriter, activityCh)
+	} else {
+		runErr = w.runGenericPTYSession(sessionCtx, task, sandboxID, terminalWriter, activityCh)
+	}
+
+	addTaskExecutionContext(
+		log.Info().Dur("session_duration", time.Since(start)).Err(runErr),
+		task,
+	).Msg("interactive session finished")
+
+	exitCode, errMsg, status := interactiveResult(runErr, idleTimedOut.Load())
 	w.sandboxManager.publishStatus(ctx, task.ExternalId, status, &exitCode, errMsg)
 	return &types.RunExecutionResult{
 		ID:       task.ExternalId,
@@ -126,6 +128,150 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 		Error:    errMsg,
 		Duration: time.Since(start),
 	}
+}
+
+// runTurnSession executes an interactive session as a series of per-turn
+// Exec calls. Each turn runs the runner's CLI (e.g. claude --print) as a
+// separate process, with the prompt passed via command-line args. Between
+// turns, the worker waits for follow-up input via Redis pubsub. The idle
+// monitor handles timeout; no shell loop or stdin pipe is involved.
+func (w *Worker) runTurnSession(
+	ctx context.Context,
+	task types.RunExecution,
+	sandboxID string,
+	runner TurnRunner,
+	env map[string]string,
+	stdout io.Writer,
+	activityCh chan<- struct{},
+) error {
+	prompt := strings.TrimSpace(task.Prompt)
+	isFirstTurn := true
+	resumeFromFirstTurn := shouldContinueFromFirstTurn(env)
+
+	for prompt != "" {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		continueSession := !isFirstTurn || resumeFromFirstTurn
+		args := runner.BuildTurnArgs(prompt, env, continueSession)
+		addTaskExecutionContext(
+			log.Info().
+				Bool("first_turn", isFirstTurn).
+				Bool("continue_session", continueSession).
+				Str("prompt", prompt[:min(50, len(prompt))]),
+			task,
+		).Msg("executing turn")
+
+		signalActivity(activityCh)
+		err := w.sandboxManager.ExecPTY(ctx, sandboxID, args, env, stdout)
+		signalActivity(activityCh)
+
+		if err != nil {
+			return err
+		}
+		isFirstTurn = false
+
+		addTaskExecutionContext(log.Info(), task).Msg("turn complete, waiting for follow-up input")
+		prompt = w.waitForFollowupInput(ctx, task.ExternalId, DefaultBetweenTurnsTimeout)
+	}
+
+	return nil
+}
+
+// waitForFollowupInput blocks until follow-up input arrives via Redis
+// pubsub, the per-turn timeout expires, or the context is cancelled
+// (e.g. idle timeout). Returns the trimmed prompt, or "" if the
+// session should end.
+func (w *Worker) waitForFollowupInput(ctx context.Context, taskID string, timeout time.Duration) string {
+	if w.terminalIO == nil {
+		<-ctx.Done()
+		return ""
+	}
+
+	var timeoutCh <-chan time.Time
+	var timer *time.Timer
+	if timeout > 0 {
+		timer = time.NewTimer(timeout)
+		timeoutCh = timer.C
+		defer timer.Stop()
+	}
+
+	for {
+		inputCh, cleanup, err := w.terminalIO.SubscribeInput(ctx, taskID)
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				return ""
+			case <-timeoutCh:
+				return ""
+			case <-time.After(250 * time.Millisecond):
+				continue
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			cleanup()
+			return ""
+		case <-timeoutCh:
+			cleanup()
+			return ""
+		case data, ok := <-inputCh:
+			cleanup()
+			if !ok {
+				select {
+				case <-ctx.Done():
+					return ""
+				case <-timeoutCh:
+					return ""
+				case <-time.After(250 * time.Millisecond):
+					continue
+				}
+			}
+			prompt := strings.TrimSpace(string(data))
+			if prompt == "" {
+				continue
+			}
+			return prompt
+		}
+	}
+}
+
+func shouldContinueFromFirstTurn(env map[string]string) bool {
+	if len(env) == 0 {
+		return false
+	}
+
+	switch strings.ToLower(strings.TrimSpace(env[agentResumeSessionEnvKey])) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// runGenericPTYSession handles interactive sessions for runners that don't
+// support per-turn execution. Falls back to the stdin-pipe approach.
+func (w *Worker) runGenericPTYSession(
+	ctx context.Context,
+	task types.RunExecution,
+	sandboxID string,
+	stdout io.Writer,
+	activityCh chan<- struct{},
+) error {
+	stdinReader, stdinWriter := io.Pipe()
+	defer stdinReader.Close()
+
+	go forwardTerminalInput(
+		ctx, stdinWriter, task.ExternalId,
+		executionContextFromTask(task),
+		w.terminalIO,
+		func() { signalActivity(activityCh) },
+	)
+
+	addTaskExecutionContext(log.Info(), task).Msg("starting generic PTY session")
+	return w.sandboxManager.AttachPTY(ctx, sandboxID, stdinReader, stdout)
 }
 
 func interactiveResult(err error, idleTimedOut bool) (int, string, types.RunExecutionStatus) {
@@ -160,35 +306,6 @@ type terminalOutputWriter struct {
 	mirror       io.Writer
 }
 
-func forwardTerminalInput(
-	ctx context.Context,
-	stdinWriter *io.PipeWriter,
-	inputCh <-chan []byte,
-	onActivity func(),
-) {
-	defer stdinWriter.Close()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case data, ok := <-inputCh:
-			if !ok {
-				return
-			}
-			if len(data) == 0 {
-				continue
-			}
-			if _, err := stdinWriter.Write(data); err != nil {
-				return
-			}
-			if onActivity != nil {
-				onActivity()
-			}
-		}
-	}
-}
-
 func (w *terminalOutputWriter) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
@@ -206,6 +323,72 @@ func (w *terminalOutputWriter) Write(p []byte) (int, error) {
 	}
 
 	return len(p), nil
+}
+
+// forwardTerminalInput pipes Redis pubsub input to a writer (for generic
+// PTY sessions). Turn-based sessions don't use this — they call
+// waitForFollowupInput instead.
+func forwardTerminalInput(
+	ctx context.Context,
+	stdinWriter *io.PipeWriter,
+	taskID string,
+	executionCtx taskExecutionContext,
+	terminalIO repository.TerminalIORepository,
+	onActivity func(),
+) {
+	defer stdinWriter.Close()
+
+	for {
+		if terminalIO == nil {
+			<-ctx.Done()
+			return
+		}
+
+		inputCh, cleanup, err := terminalIO.SubscribeInput(ctx, taskID)
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(250 * time.Millisecond):
+				continue
+			}
+		}
+
+		channelClosed := false
+		for !channelClosed {
+			select {
+			case <-ctx.Done():
+				cleanup()
+				return
+			case data, ok := <-inputCh:
+				if !ok {
+					channelClosed = true
+					continue
+				}
+				if len(data) == 0 {
+					continue
+				}
+				if _, err := stdinWriter.Write(data); err != nil {
+					cleanup()
+					return
+				}
+				if onActivity != nil {
+					onActivity()
+				}
+			}
+		}
+		cleanup()
+		if ctx.Err() != nil {
+			return
+		}
+		addTaskExecutionContextByID(log.Warn(), taskID, executionCtx).Msg("terminal input subscription closed; retrying")
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(250 * time.Millisecond):
+			continue
+		}
+	}
 }
 
 func signalActivity(activityCh chan<- struct{}) {

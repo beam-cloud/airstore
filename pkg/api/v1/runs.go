@@ -1,7 +1,9 @@
 package apiv1
 
 import (
+	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/beam-cloud/airstore/pkg/orchestration"
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -13,10 +15,10 @@ type RunsGroup struct {
 	agents      *orchestration.AgentAPI
 }
 
-type enqueueRunInputAPIRequest struct {
-	Message        string               `json:"message"`
-	QueueMode      types.AgentQueueMode `json:"queue_mode"`
-	IdempotencyKey string               `json:"idempotency_key"`
+type listRunsResponse struct {
+	Runs       []*types.AgentRun `json:"runs"`
+	NextCursor string            `json:"next_cursor"`
+	HasMore    bool              `json:"has_more"`
 }
 
 func NewRunsGroup(routerGroup *echo.Group, agents *orchestration.AgentAPI) *RunsGroup {
@@ -33,7 +35,6 @@ func (g *RunsGroup) registerRoutes() {
 	g.routerGroup.GET("/:run_id", g.GetRun)
 	g.routerGroup.GET("/:run_id/snapshots", g.ListRunSnapshots)
 	g.routerGroup.GET("/:run_id/events", g.ListRunEvents)
-	g.routerGroup.POST("/:run_id/input", g.EnqueueRunInput)
 	g.routerGroup.POST("/:run_id/cancel", g.CancelRun)
 }
 
@@ -45,11 +46,63 @@ func (g *RunsGroup) ListRuns(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	runs, err := g.agents.ListRuns(c.Request().Context(), workspaceID, 100)
+	limitQuery := strings.TrimSpace(c.QueryParam("limit"))
+	cursorQuery := strings.TrimSpace(c.QueryParam("cursor"))
+	statusQuery := strings.TrimSpace(c.QueryParam("status"))
+	agentQuery := strings.TrimSpace(c.QueryParam("agent_id"))
+	sessionQuery := strings.TrimSpace(c.QueryParam("session_id"))
+	createdAfterQuery := strings.TrimSpace(c.QueryParam("created_after"))
+	createdBeforeQuery := strings.TrimSpace(c.QueryParam("created_before"))
+	if limitQuery == "" &&
+		cursorQuery == "" &&
+		statusQuery == "" &&
+		agentQuery == "" &&
+		sessionQuery == "" &&
+		createdAfterQuery == "" &&
+		createdBeforeQuery == "" {
+		runs, err := g.agents.ListRuns(c.Request().Context(), workspaceID, 100)
+		if err != nil {
+			return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+		}
+		return SuccessResponse(c, runs)
+	}
+
+	limit := parseLimitParam(limitQuery, 50, 200)
+	offset, err := parseOffsetCursor(cursorQuery)
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid cursor")
+	}
+	statuses, err := parseRunStatuses(statusQuery)
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+	}
+	createdAfter, err := parseOptionalRFC3339(createdAfterQuery)
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid created_after timestamp")
+	}
+	createdBefore, err := parseOptionalRFC3339(createdBeforeQuery)
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid created_before timestamp")
+	}
+
+	filter := types.AgentRunListFilter{
+		AgentID:       strPtrMaybeQuery(agentQuery),
+		Statuses:      statuses,
+		SessionID:     strPtrMaybeQuery(sessionQuery),
+		CreatedAfter:  createdAfter,
+		CreatedBefore: createdBefore,
+		Limit:         limit,
+		Offset:        offset,
+	}
+	runs, nextCursor, hasMore, err := g.agents.ListRunsFiltered(c.Request().Context(), workspaceID, filter)
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
-	return SuccessResponse(c, runs)
+	return SuccessResponse(c, listRunsResponse{
+		Runs:       runs,
+		NextCursor: nextCursor,
+		HasMore:    hasMore,
+	})
 }
 
 func (g *RunsGroup) GetRun(c echo.Context) error {
@@ -109,48 +162,6 @@ func (g *RunsGroup) ListRunEvents(c echo.Context) error {
 	return SuccessResponse(c, events)
 }
 
-func (g *RunsGroup) EnqueueRunInput(c echo.Context) error {
-	if g.agents == nil {
-		return ErrorResponse(c, http.StatusServiceUnavailable, "run service unavailable")
-	}
-
-	var req enqueueRunInputAPIRequest
-	if err := decodeStrictBody(c, &req); err != nil {
-		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
-	}
-
-	workspaceID, err := requireWorkspaceID(c)
-	if err != nil {
-		return err
-	}
-	runID := c.Param("run_id")
-
-	task, deduped, err := g.agents.EnqueueRunInput(
-		c.Request().Context(),
-		workspaceID,
-		runID,
-		req.QueueMode,
-		req.Message,
-		req.IdempotencyKey,
-	)
-	if err != nil {
-		return ErrorResponse(c, http.StatusBadRequest, err.Error())
-	}
-	statusCode := http.StatusAccepted
-	if deduped {
-		statusCode = http.StatusOK
-	}
-	return c.JSON(statusCode, Response{
-		Success: true,
-		Data: map[string]any{
-			"accepted":       true,
-			"idempotent_hit": deduped,
-			"task":           task,
-			"run_id":         task.TargetRunID,
-		},
-	})
-}
-
 func (g *RunsGroup) CancelRun(c echo.Context) error {
 	if g.agents == nil {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "run service unavailable")
@@ -167,4 +178,28 @@ func (g *RunsGroup) CancelRun(c echo.Context) error {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 	return SuccessResponse(c, map[string]any{"status": "cancelled"})
+}
+
+func parseRunStatuses(raw string) ([]types.AgentRunStatus, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, nil
+	}
+	parts := strings.Split(trimmed, ",")
+	statuses := make([]types.AgentRunStatus, 0, len(parts))
+	for _, part := range parts {
+		status := types.AgentRunStatus(strings.TrimSpace(part))
+		switch status {
+		case types.AgentRunStatusAccepted,
+			types.AgentRunStatusRunning,
+			types.AgentRunStatusOK,
+			types.AgentRunStatusError,
+			types.AgentRunStatusTimeout,
+			types.AgentRunStatusCancelled:
+			statuses = append(statuses, status)
+		default:
+			return nil, errors.New("invalid status filter")
+		}
+	}
+	return statuses, nil
 }

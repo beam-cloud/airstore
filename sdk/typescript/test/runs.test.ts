@@ -100,7 +100,7 @@ describe('Runs', () => {
       );
     }
 
-    const inputAccepted = await client.runs.input(workspace.external_id, runId, {
+    const inputAccepted = await client.channels.sendDirectRunMessage(workspace.external_id, runId, {
       message: 'followup without explicit idempotency key',
       queueMode: 'followup',
     });

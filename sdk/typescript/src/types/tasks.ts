@@ -49,7 +49,13 @@ export interface RunExecutionPolicy {
 
 export type TaskKind = 'agent_command' | 'run_input';
 
-export type TaskState = 'accepted' | 'queued' | 'dispatched' | 'dropped' | 'cancelled';
+export type TaskState =
+  | 'queued'
+  | 'running'
+  | 'idle'
+  | 'done'
+  | 'dropped'
+  | 'cancelled';
 
 export interface RoutingContext {
   to?: string;
@@ -115,4 +121,56 @@ export interface TaskAcceptedResponse {
   idempotent_hit: boolean;
   task: AgentTask;
   run_id?: string;
+}
+
+export interface TaskListParams {
+  agentId?: string;
+  state?: TaskState | TaskState[];
+  createdAfter?: string;
+  createdBefore?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface TaskListResponse {
+  tasks: AgentTask[];
+  next_cursor: string;
+  has_more: boolean;
+}
+
+export interface TaskCancelResponse {
+  status: 'cancelled';
+}
+
+export interface TaskLogEntry {
+  timestamp: number;
+  stream: string;
+  data: string;
+  chunk_type?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface TaskLogListParams {
+  cursor?: number;
+}
+
+export interface TaskLogListResponse {
+  logs: TaskLogEntry[];
+  next_cursor: number;
+}
+
+export interface TaskEventStreamParams {
+  logCursor?: number;
+  runEventCursor?: number;
+}
+
+export interface TaskEventBatch {
+  task_id: string;
+  run_id?: string;
+  task?: AgentTask;
+  run?: Record<string, unknown>;
+  logs: TaskLogEntry[];
+  run_events: Array<Record<string, unknown>>;
+  next_log_cursor: number;
+  next_run_event_cursor: number;
 }
