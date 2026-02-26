@@ -85,6 +85,8 @@ func NewGateway() (*Gateway, error) {
 		return nil, err
 	}
 	config := configManager.GetConfig()
+	config.Gateway.GRPC.Port = types.ResolveGatewayGRPCPort(config.Gateway.GRPC.Port)
+	config.Gateway.HTTP.Port = types.ResolveGatewayHTTPPort(config.Gateway.HTTP.Port)
 
 	// Setup logging
 	if config.PrettyLogs {

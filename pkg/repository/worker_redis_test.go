@@ -66,3 +66,27 @@ func TestAllocateIPReadsLegacyPlainIPv4Mapping(t *testing.T) {
 	require.NotEmpty(t, alloc.IPv6)
 	require.Equal(t, types.DefaultGatewayIPv6, alloc.GatewayIPv6)
 }
+
+func TestAllocateIPReturnsErrorForCorruptedStoredMapping(t *testing.T) {
+	rdb, err := NewRedisClientForTest()
+	require.NoError(t, err)
+
+	repo := NewWorkerRedisRepository(rdb).(*WorkerRedisRepository)
+	ctx := context.Background()
+
+	require.NoError(t, rdb.HSet(ctx, common.Keys.NetworkIPMap(), "broken-sandbox", "not-json-not-ip").Err())
+
+	_, err = repo.AllocateIP(ctx, "broken-sandbox", "worker-1")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid stored ip allocation")
+}
+
+func TestDeriveIPv6AddressNoCollisionForAdjacentIPv4s(t *testing.T) {
+	ipv6a, err := deriveIPv6Address("10.200.0.1")
+	require.NoError(t, err)
+
+	ipv6b, err := deriveIPv6Address("10.200.0.2")
+	require.NoError(t, err)
+
+	require.NotEqual(t, ipv6a, ipv6b)
+}

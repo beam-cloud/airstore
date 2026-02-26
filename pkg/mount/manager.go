@@ -138,7 +138,7 @@ func (m *MountManager) setup() (string, error) {
 
 	addr := m.cfg.GatewayAddr
 	if addr == "" {
-		addr = "localhost:1993"
+		addr = types.DefaultGatewayGRPCAddr()
 	}
 
 	// Check for local mode

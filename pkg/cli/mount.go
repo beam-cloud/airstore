@@ -37,17 +37,19 @@ var (
 	mountAccessLog   bool
 )
 
-var mountCmd = &cobra.Command{
-	Use:   "mount <path>",
-	Short: "Mount filesystem",
-	Long: `Mount the Airstore virtual filesystem at the specified path.
+var mountCommandLong = fmt.Sprintf(`Mount the Airstore virtual filesystem at the specified path.
 
 Examples:
   airstore mount ~/airstore
-  airstore mount /tmp/airstore --gateway localhost:1993
-  airstore mount /tmp/airstore --uid 1000 --gid 1000`,
-	Args: cobra.ExactArgs(1),
-	RunE: runMount,
+  airstore mount /tmp/airstore --gateway %s
+  airstore mount /tmp/airstore --uid 1000 --gid 1000`, types.DefaultGatewayGRPCAddr())
+
+var mountCmd = &cobra.Command{
+	Use:   "mount <path>",
+	Short: "Mount filesystem",
+	Long:  mountCommandLong,
+	Args:  cobra.ExactArgs(1),
+	RunE:  runMount,
 }
 
 func init() {

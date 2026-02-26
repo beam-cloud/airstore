@@ -119,7 +119,7 @@ func NewPoolScaler(ctx context.Context, config PoolScalerConfig, taskQueue repos
 		config.GatewayServiceName = "airstore-gateway"
 	}
 	if config.GatewayPort == 0 {
-		config.GatewayPort = 1993
+		config.GatewayPort = types.ResolveGatewayGRPCPort(config.AppConfig.Gateway.GRPC.Port)
 	}
 
 	// Create K8s client

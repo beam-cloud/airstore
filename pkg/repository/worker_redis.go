@@ -196,6 +196,13 @@ func (r *WorkerRedisRepository) AllocateIP(ctx context.Context, sandboxID, worke
 		if legacyErr == nil {
 			return legacyAlloc, nil
 		}
+
+		return nil, fmt.Errorf(
+			"invalid stored ip allocation for sandbox %s (json decode: %v, legacy decode: %v)",
+			sandboxID,
+			decodeErr,
+			legacyErr,
+		)
 	}
 
 	// Find available IP in subnet
@@ -208,6 +215,9 @@ func (r *WorkerRedisRepository) AllocateIP(ctx context.Context, sandboxID, worke
 	var ip string
 	for i := 2; i < 255; i++ { // .0 = network, .1 = gateway, .255 = broadcast
 		candidate := fmt.Sprintf("%s.%d", types.DefaultSubnetPrefix, i)
+		if candidate == types.DefaultGateway {
+			continue
+		}
 		if !used[candidate] {
 			ip = candidate
 			break
@@ -342,11 +352,13 @@ func deriveIPv6Address(ipv4 string) (string, error) {
 	}
 
 	derived := append(net.IP(nil), baseV6...)
-	derived[8], derived[9], derived[10], derived[11], derived[12], derived[13], derived[14] = 0, 0, 0, 0, 0, 0, 0
-	derived[15] = v4[3]
+	// Keep the configured /64 prefix and derive host bits from full IPv4 bytes
+	// to guarantee stable, collision-free mapping for the /24 subnet.
+	derived[8], derived[9], derived[10], derived[11] = 0, 0, 0, 0
+	derived[12], derived[13], derived[14], derived[15] = v4[0], v4[1], v4[2], v4[3]
 
 	if derived.String() == types.DefaultGatewayIPv6 {
-		derived[15]++
+		return "", fmt.Errorf("derived ipv6 address collides with gateway: %s", derived.String())
 	}
 
 	return derived.String(), nil

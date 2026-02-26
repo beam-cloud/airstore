@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"path"
 	"strings"
 
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -15,6 +16,7 @@ const (
 	agentSessionIDEnvKey         = "AIRSTORE_AGENT_SESSION_ID"
 	agentSystemPromptEnvKey      = "AIRSTORE_AGENT_SYSTEM_PROMPT"
 	agentSystemPromptModeEnvKey  = "AIRSTORE_AGENT_SYSTEM_PROMPT_MODE"
+	agentWorkspaceDirEnvKey      = "AIRSTORE_AGENT_WORKSPACE_DIR"
 
 	systemPromptModeReplace = "replace"
 
@@ -22,6 +24,7 @@ const (
 	claudeConfigDirEnvKey = "CLAUDE_CONFIG_DIR"
 	claudeConfigDirPath   = "/workspace/.claude"
 	claudeDefaultShellEnv = "/bin/bash"
+	claudeStateDirName    = ".claude"
 )
 
 // AgentExecutionRunner builds the process entrypoint for an agent task.
@@ -115,12 +118,22 @@ func (r *ClaudeCodeRunner) injectEnv(env map[string]string) {
 	r.injectAPIKey(env, "ANTHROPIC_API_KEY", r.anthropicAPIKey, true)
 	r.injectKernelEnv(env)
 	if strings.TrimSpace(env[claudeConfigDirEnvKey]) == "" {
-		env[claudeConfigDirEnvKey] = claudeConfigDirPath
+		env[claudeConfigDirEnvKey] = defaultClaudeConfigDir(env)
 	}
 	if strings.TrimSpace(env["SHELL"]) == "" {
 		// Force a stable non-zsh shell for Claude's internal shell snapshots.
 		env["SHELL"] = claudeDefaultShellEnv
 	}
+}
+
+func defaultClaudeConfigDir(env map[string]string) string {
+	if env != nil {
+		if workspaceDir := strings.TrimSpace(env[agentWorkspaceDirEnvKey]); workspaceDir != "" {
+			// Keep Claude state with agent workspace for restart persistence.
+			return path.Join(workspaceDir, claudeStateDirName)
+		}
+	}
+	return claudeConfigDirPath
 }
 
 func (r *ClaudeCodeRunner) injectKernelEnv(env map[string]string) {

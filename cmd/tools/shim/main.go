@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/common"
+	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
 	"google.golang.org/grpc"
 )
@@ -50,7 +51,7 @@ func main() {
 
 func loadConfig() *Config {
 	cfg := &Config{
-		GatewayAddr: "localhost:1993",
+		GatewayAddr: types.DefaultGatewayGRPCAddr(),
 	}
 
 	// Try to read from /.airstore/config relative to the shim location

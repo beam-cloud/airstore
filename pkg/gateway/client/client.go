@@ -33,7 +33,6 @@ func NewGatewayClient(addr string, authToken string) (*GatewayClient, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultDialTimeout)
 	defer cancel()
 
-	familySummary := resolveAddressFamilies(addr)
 	tlsEnabled := common.NeedsTLS(addr)
 	keepaliveParams := keepalive.ClientParameters{
 		Time:                60 * time.Second,
@@ -54,6 +53,7 @@ func NewGatewayClient(addr string, authToken string) (*GatewayClient, error) {
 		}),
 	)
 	if err != nil {
+		familySummary := resolveAddressFamilies(addr)
 		mode := "plaintext"
 		if tlsEnabled {
 			mode = "tls"

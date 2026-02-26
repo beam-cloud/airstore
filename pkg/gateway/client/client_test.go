@@ -2,10 +2,12 @@ package gatewayclient
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"testing"
 	"time"
 
+	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -57,6 +59,6 @@ func TestNewGatewayClientDefersConnectionFailureUntilFirstRPC(t *testing.T) {
 }
 
 func TestResolveAddressFamiliesForLocalhost(t *testing.T) {
-	family := resolveAddressFamilies("127.0.0.1:1993")
+	family := resolveAddressFamilies(fmt.Sprintf("127.0.0.1:%d", types.DefaultGatewayGRPCPort))
 	require.Equal(t, "ipv4", family)
 }
