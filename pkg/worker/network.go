@@ -135,7 +135,11 @@ func (m *NetworkManager) Setup(sandboxID string, spec *specs.Spec) (string, erro
 		return "", err
 	}
 
-	log.Info().Str("sandbox", sandboxID).Str("ip", ip).Msg("network configured")
+	logger := log.Info().Str("sandbox", sandboxID).Str("ip", ip)
+	if alloc.IPv6 != "" {
+		logger = logger.Str("ipv6", alloc.IPv6)
+	}
+	logger.Msg("network configured")
 	return ip, nil
 }
 
@@ -289,7 +293,20 @@ func (m *NetworkManager) ensureBridge() error {
 	if err := m.ipt.InsertUnique("filter", "FORWARD", 1, "-i", bridgeName, "-o", extName, "-j", "ACCEPT"); err != nil {
 		return err
 	}
-	return m.ipt.InsertUnique("filter", "FORWARD", 1, "-i", extName, "-o", bridgeName, "-j", "ACCEPT")
+	if err := m.ipt.InsertUnique("filter", "FORWARD", 1, "-i", extName, "-o", bridgeName, "-j", "ACCEPT"); err != nil {
+		return err
+	}
+
+	if m.ipt6 != nil {
+		if err := m.ipt6.InsertUnique("filter", "FORWARD", 1, "-i", bridgeName, "-o", extName, "-j", "ACCEPT"); err != nil {
+			return err
+		}
+		if err := m.ipt6.InsertUnique("filter", "FORWARD", 1, "-i", extName, "-o", bridgeName, "-j", "ACCEPT"); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (m *NetworkManager) createVeth(host, cont string) error {
@@ -330,6 +347,15 @@ func (m *NetworkManager) configureContainer(alloc *types.IPAllocation, veth netl
 		return err
 	}
 
+	// Ensure loopback addresses exist in the sandbox network namespace.
+	ipv4Lo := &netlink.Addr{IPNet: &net.IPNet{
+		IP:   net.ParseIP("127.0.0.1"),
+		Mask: net.CIDRMask(8, 32),
+	}}
+	if err := netlink.AddrAdd(lo, ipv4Lo); err != nil && !errors.Is(err, unix.EEXIST) {
+		return err
+	}
+
 	// Container veth
 	if err := netlink.LinkSetUp(veth); err != nil {
 		return err
@@ -343,10 +369,59 @@ func (m *NetworkManager) configureContainer(alloc *types.IPAllocation, veth netl
 		return err
 	}
 
-	return netlink.RouteAdd(&netlink.Route{
+	if err := netlink.RouteAdd(&netlink.Route{
 		LinkIndex: veth.Attrs().Index,
 		Gw:        net.ParseIP(alloc.Gateway),
-	})
+	}); err != nil && !errors.Is(err, unix.EEXIST) {
+		return err
+	}
+
+	if alloc.IPv6 == "" {
+		return nil
+	}
+
+	// Force-enable IPv6 for dual-stack sandboxes.
+	if err := os.WriteFile("/proc/sys/net/ipv6/conf/all/disable_ipv6", []byte("0\n"), 0644); err != nil {
+		return err
+	}
+	if err := os.WriteFile("/proc/sys/net/ipv6/ip_nonlocal_bind", []byte("1\n"), 0644); err != nil {
+		return err
+	}
+
+	ipv6Lo := &netlink.Addr{IPNet: &net.IPNet{
+		IP:   net.ParseIP("::1"),
+		Mask: net.CIDRMask(128, 128),
+	}}
+	if err := netlink.AddrAdd(lo, ipv6Lo); err != nil && !errors.Is(err, unix.EEXIST) {
+		return err
+	}
+
+	prefixLenV6 := alloc.PrefixLenIPv6
+	if prefixLenV6 <= 0 {
+		prefixLenV6 = types.DefaultPrefixLenIPv6
+	}
+
+	addrV6 := &netlink.Addr{IPNet: &net.IPNet{
+		IP:   net.ParseIP(alloc.IPv6),
+		Mask: net.CIDRMask(prefixLenV6, 128),
+	}}
+	if err := netlink.AddrAdd(veth, addrV6); err != nil && !errors.Is(err, unix.EEXIST) {
+		return err
+	}
+
+	gatewayV6 := alloc.GatewayIPv6
+	if gatewayV6 == "" {
+		gatewayV6 = types.DefaultGatewayIPv6
+	}
+
+	if err := netlink.RouteAdd(&netlink.Route{
+		LinkIndex: veth.Attrs().Index,
+		Gw:        net.ParseIP(gatewayV6),
+	}); err != nil && !errors.Is(err, unix.EEXIST) {
+		return err
+	}
+
+	return nil
 }
 
 func setNetworkNamespace(namespaces []specs.LinuxNamespace, sandboxID string) []specs.LinuxNamespace {

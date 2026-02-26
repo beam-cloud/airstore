@@ -3,13 +3,15 @@ package gatewayclient
 import (
 	"context"
 	"fmt"
+	"net"
 	"time"
 
+	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
@@ -31,12 +33,39 @@ func NewGatewayClient(addr string, authToken string) (*GatewayClient, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultDialTimeout)
 	defer cancel()
 
+	tlsEnabled := common.NeedsTLS(addr)
+	keepaliveParams := keepalive.ClientParameters{
+		Time:                60 * time.Second,
+		Timeout:             10 * time.Second,
+		PermitWithoutStream: true,
+	}
+
+	dialer := &net.Dialer{
+		Timeout:   defaultDialTimeout,
+		KeepAlive: 30 * time.Second,
+	}
+
 	conn, err := grpc.DialContext(ctx, addr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
+		grpc.WithTransportCredentials(common.TransportCredentials(addr)),
+		grpc.WithKeepaliveParams(keepaliveParams),
+		grpc.WithContextDialer(func(ctx context.Context, target string) (net.Conn, error) {
+			return dialer.DialContext(ctx, "tcp", target)
+		}),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to gateway: %w", err)
+		familySummary := resolveAddressFamilies(addr)
+		mode := "plaintext"
+		if tlsEnabled {
+			mode = "tls"
+		}
+		return nil, fmt.Errorf(
+			"failed to connect to gateway (target=%s mode=%s timeout=%s resolved=%s): %w",
+			addr,
+			mode,
+			defaultDialTimeout,
+			familySummary,
+			err,
+		)
 	}
 
 	return &GatewayClient{
@@ -44,6 +73,44 @@ func NewGatewayClient(addr string, authToken string) (*GatewayClient, error) {
 		client:    pb.NewWorkerServiceClient(conn),
 		authToken: authToken,
 	}, nil
+}
+
+func resolveAddressFamilies(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return "unresolved"
+	}
+
+	hasV4 := false
+	hasV6 := false
+	for _, candidate := range addrs {
+		if candidate.IP.To4() != nil {
+			hasV4 = true
+			continue
+		}
+		if candidate.IP.To16() != nil {
+			hasV6 = true
+		}
+	}
+
+	switch {
+	case hasV4 && hasV6:
+		return "ipv4+ipv6"
+	case hasV4:
+		return "ipv4"
+	case hasV6:
+		return "ipv6"
+	default:
+		return "none"
+	}
 }
 
 // Close closes the gRPC connection.
@@ -219,9 +286,12 @@ func (c *GatewayClient) AllocateIP(ctx context.Context, sandboxID, workerID stri
 	}
 
 	return &types.IPAllocation{
-		IP:        resp.Ip,
-		Gateway:   resp.Gateway,
-		PrefixLen: int(resp.PrefixLen),
+		IP:            resp.Ip,
+		Gateway:       resp.Gateway,
+		PrefixLen:     int(resp.PrefixLen),
+		IPv6:          resp.Ipv6,
+		GatewayIPv6:   resp.GatewayIpv6,
+		PrefixLenIPv6: int(resp.PrefixLenIpv6),
 	}, nil
 }
 

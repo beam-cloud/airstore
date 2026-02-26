@@ -12,8 +12,8 @@ import (
 	"time"
 	"unsafe"
 
-	airtypes "github.com/beam-cloud/airstore/pkg/types"
 	"github.com/beam-cloud/airstore/pkg/filesystem/vnode"
+	airtypes "github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/rs/zerolog/log"
@@ -109,7 +109,7 @@ func NewFilesystem(cfg Config) (*Filesystem, error) {
 		cfg.MountPoint = "/tmp/airstore"
 	}
 	if cfg.GatewayAddr == "" {
-		cfg.GatewayAddr = "localhost:1993"
+		cfg.GatewayAddr = airtypes.DefaultGatewayGRPCAddr()
 	}
 
 	// Initialize global owner config (thread-safe)

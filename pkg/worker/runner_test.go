@@ -173,6 +173,18 @@ func TestBuildTurnArgsSetsClaudeConfigDirDefault(t *testing.T) {
 	}
 }
 
+func TestBuildTurnArgsSetsClaudeConfigDirFromAgentWorkspaceDir(t *testing.T) {
+	runner := NewClaudeCodeRunner(ClaudeCodeRunnerOptions{})
+	env := map[string]string{
+		agentWorkspaceDirEnvKey: "/workspace/agents/prospect-bot/",
+	}
+	_ = runner.BuildTurnArgs("hello", env, false)
+
+	if env[claudeConfigDirEnvKey] != "/workspace/agents/prospect-bot/.claude" {
+		t.Fatalf("expected agent workspace scoped CLAUDE_CONFIG_DIR, got %q", env[claudeConfigDirEnvKey])
+	}
+}
+
 func TestBuildTurnArgsPreservesExistingClaudeConfigDir(t *testing.T) {
 	runner := NewClaudeCodeRunner(ClaudeCodeRunnerOptions{})
 	env := map[string]string{
@@ -182,6 +194,28 @@ func TestBuildTurnArgsPreservesExistingClaudeConfigDir(t *testing.T) {
 
 	if env[claudeConfigDirEnvKey] != "/workspace/custom-claude" {
 		t.Fatalf("expected existing CLAUDE_CONFIG_DIR to be preserved, got %q", env[claudeConfigDirEnvKey])
+	}
+}
+
+func TestBuildTurnArgsDoesNotSetHomeWhenUnset(t *testing.T) {
+	runner := NewClaudeCodeRunner(ClaudeCodeRunnerOptions{})
+	env := map[string]string{}
+	_ = runner.BuildTurnArgs("hello", env, false)
+
+	if _, exists := env["HOME"]; exists {
+		t.Fatalf("expected HOME to remain unset when not provided, got %q", env["HOME"])
+	}
+}
+
+func TestBuildTurnArgsPreservesExistingHome(t *testing.T) {
+	runner := NewClaudeCodeRunner(ClaudeCodeRunnerOptions{})
+	env := map[string]string{
+		"HOME": "/home/sandbox",
+	}
+	_ = runner.BuildTurnArgs("hello", env, false)
+
+	if env["HOME"] != "/home/sandbox" {
+		t.Fatalf("expected existing HOME to be preserved, got %q", env["HOME"])
 	}
 }
 

@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -142,5 +143,23 @@ func TestSandboxStartWaitsForRuntimeReady(t *testing.T) {
 
 	if err := manager.Stop("task-startup", true); err != nil {
 		t.Fatalf("stop failed: %v", err)
+	}
+}
+
+func TestResolveSandboxResolvConfSourcePrefersHostConfig(t *testing.T) {
+	if _, err := os.Stat("/etc/resolv.conf"); err != nil {
+		t.Skip("/etc/resolv.conf is not available in this environment")
+	}
+
+	source := resolveSandboxResolvConfSource(true)
+	if source != "/etc/resolv.conf" {
+		t.Fatalf("expected host resolv.conf, got %s", source)
+	}
+}
+
+func TestResolveSandboxResolvConfSourceReturnsKnownFallbackPath(t *testing.T) {
+	source := resolveSandboxResolvConfSource(false)
+	if source != "/workspace/etc/resolv.conf" && source != "/etc/resolv.conf" {
+		t.Fatalf("unexpected resolv.conf source: %s", source)
 	}
 }
