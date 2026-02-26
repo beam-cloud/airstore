@@ -56,7 +56,8 @@ fi
 ln -sf "$SHIM_BIN" "$TOOL_LINK"
 
 # Worker sandboxes export GATEWAY_ADDR. The shim reads AIRSTORE_GATEWAY.
-if [ -n "${GATEWAY_ADDR:-}" ]; then
+# Preserve explicit AIRSTORE_GATEWAY overrides when set.
+if [ -n "${GATEWAY_ADDR:-}" ] && [ -z "${AIRSTORE_GATEWAY:-}" ]; then
 	export AIRSTORE_GATEWAY="$GATEWAY_ADDR"
 fi
 

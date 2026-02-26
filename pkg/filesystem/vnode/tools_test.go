@@ -219,6 +219,51 @@ func TestGatewayToolWrapperExecutesCopiedShim(t *testing.T) {
 	}
 }
 
+func TestGatewayToolWrapperPreservesExplicitAirstoreGateway(t *testing.T) {
+	shimData := []byte("#!/bin/sh\nprintf 'gateway=%s\\n' \"${AIRSTORE_GATEWAY:-}\"\n")
+	tv := &ToolsVNode{
+		tools:   []string{"wikipedia"},
+		toolSet: map[string]bool{"wikipedia": true},
+	}
+
+	mountRoot := t.TempDir()
+	toolsDir := filepath.Join(mountRoot, "tools")
+	if err := os.MkdirAll(toolsDir, 0o755); err != nil {
+		t.Fatalf("mkdir tools: %v", err)
+	}
+
+	wrapperPath := filepath.Join(toolsDir, "wikipedia")
+	if err := os.WriteFile(wrapperPath, tv.toolBinary("wikipedia"), 0o755); err != nil {
+		t.Fatalf("write wrapper: %v", err)
+	}
+	configDir := filepath.Join(mountRoot, ".airstore")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config"), []byte(`{"gateway_addr":"gateway.test.internal:1993"}`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "tool-shim"), shimData, 0o755); err != nil {
+		t.Fatalf("write shim: %v", err)
+	}
+
+	cmd := exec.Command(wrapperPath, "--help")
+	cmd.Env = append(os.Environ(),
+		"TMPDIR="+t.TempDir(),
+		"GATEWAY_ADDR=worker.gateway.internal:1993",
+		"AIRSTORE_GATEWAY=custom.gateway.internal:2993",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("wrapper execution failed: %v output=%s", err, string(out))
+	}
+
+	output := string(out)
+	if !strings.Contains(output, "gateway=custom.gateway.internal:2993") {
+		t.Fatalf("expected explicit AIRSTORE_GATEWAY to be preserved, got: %s", output)
+	}
+}
+
 func TestToolsVNode_Read_NotFound(t *testing.T) {
 	tv := &ToolsVNode{
 		tools:   []string{},
