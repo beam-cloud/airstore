@@ -9,11 +9,13 @@ import (
 
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/types"
+	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/bsm/redislock"
 	"github.com/rs/zerolog/log"
 )
 
 const defaultRecoveryLockTTL = 15 * time.Second
+const terminalQueueReconcileGracePeriod = 5 * time.Second
 
 type orphanRecoveryStats struct {
 	detected       int
@@ -91,6 +93,30 @@ func (s *WorkerService) runRecoveryCycle(ctx context.Context) {
 	now := time.Now()
 	stats := orphanRecoveryStats{}
 	seenRuns := map[string]struct{}{}
+
+	claimedRuns, err := s.backend.ListClaimedAgentRuns(ctx, s.recoveryBatchSize)
+	if err != nil {
+		log.Warn().Err(err).Msg("worker recovery loop: failed to list claimed runs")
+		return
+	}
+	for _, run := range claimedRuns {
+		if run == nil || strings.TrimSpace(run.ID) == "" {
+			continue
+		}
+		if _, dup := seenRuns[run.ID]; dup {
+			continue
+		}
+		outcome, recErr := s.processClaimedRun(ctx, run)
+		if recErr != nil {
+			log.Warn().Err(recErr).Str("run_id", run.ID).Msg("worker recovery loop: failed to reconcile claimed run")
+			continue
+		}
+		if !outcome.detected {
+			continue
+		}
+		seenRuns[run.ID] = struct{}{}
+		s.applyRecoveryOutcome(&stats, outcome)
+	}
 
 	// Guardrail: recovery is index-driven SQL + direct-key Redis operations only.
 	// Never use Redis SCAN/KEYS in this path.
@@ -205,6 +231,47 @@ func (s *WorkerService) processStaleUnclaimedRun(ctx context.Context, run *types
 	}, err
 }
 
+func (s *WorkerService) processClaimedRun(ctx context.Context, run *types.AgentRun) (orphanRecoveryOutcome, error) {
+	if run == nil || !run.Status.IsActive() || run.ClaimedByWorker == nil {
+		return orphanRecoveryOutcome{}, nil
+	}
+	if s.taskQueue == nil {
+		return orphanRecoveryOutcome{}, nil
+	}
+
+	state, err := s.taskQueue.GetState(ctx, run.ID)
+	if err != nil || state == nil {
+		return orphanRecoveryOutcome{}, nil
+	}
+	if !runExecutionStateIsTerminal(state.Status) {
+		return orphanRecoveryOutcome{}, nil
+	}
+	if !isTerminalQueueStateReady(state, terminalQueueReconcileGracePeriod) {
+		return orphanRecoveryOutcome{}, nil
+	}
+
+	exitCode := state.ExitCode
+	errText := strings.TrimSpace(state.Error)
+	if result, resultErr := s.taskQueue.GetResult(ctx, run.ID); resultErr == nil && result != nil {
+		if strings.TrimSpace(result.Error) != "" || errText == "" {
+			errText = strings.TrimSpace(result.Error)
+		}
+		exitCode = result.ExitCode
+	}
+	_, setErr := s.SetTaskResult(ctx, &pb.SetTaskResultRequest{
+		TaskId:   run.ID,
+		ExitCode: int32(exitCode),
+		Error:    errText,
+	})
+	if setErr != nil {
+		return orphanRecoveryOutcome{}, setErr
+	}
+	return orphanRecoveryOutcome{
+		detected:  true,
+		recovered: true,
+	}, nil
+}
+
 func (s *WorkerService) shouldRecoverUnclaimedRun(ctx context.Context, run *types.AgentRun) bool {
 	if run == nil {
 		return false
@@ -293,4 +360,26 @@ func (s *WorkerService) unclaimedStaleDuration() time.Duration {
 		return s.unclaimedStaleAfter
 	}
 	return defaultUnclaimedRunStaleAfter
+}
+
+func runExecutionStateIsTerminal(status types.RunExecutionStatus) bool {
+	switch status {
+	case types.RunExecutionStatusComplete, types.RunExecutionStatusFailed, types.RunExecutionStatusCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+func isTerminalQueueStateReady(state *types.RunExecutionState, grace time.Duration) bool {
+	if state == nil {
+		return false
+	}
+	if grace <= 0 {
+		return true
+	}
+	if state.FinishedAt.IsZero() {
+		return true
+	}
+	return time.Since(state.FinishedAt) >= grace
 }

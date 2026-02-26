@@ -191,6 +191,7 @@ type BackendRepository interface {
 	ClearAgentRunClaim(ctx context.Context, runId string) error
 	ClearExpiredAgentRunClaim(ctx context.Context, runId string, workerId string, expiresAt time.Time) (bool, error)
 	RefreshAgentRunClaims(ctx context.Context, workerId string, heartbeatAt time.Time, expiresAt time.Time) (int64, error)
+	ListClaimedAgentRuns(ctx context.Context, limit int) ([]*types.AgentRun, error)
 	ListExpiredClaimedAgentRuns(ctx context.Context, now time.Time, limit int) ([]*types.AgentRun, error)
 	ListStaleUnclaimedAgentRuns(ctx context.Context, cutoff time.Time, limit int) ([]*types.AgentRun, error)
 	IncrementAgentRunSnapshotSeq(ctx context.Context, runId string) (int64, error)

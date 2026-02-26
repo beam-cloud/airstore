@@ -873,6 +873,32 @@ func (b *PostgresBackend) RefreshAgentRunClaims(ctx context.Context, workerId st
 	return affected, nil
 }
 
+func (b *PostgresBackend) ListClaimedAgentRuns(ctx context.Context, limit int) ([]*types.AgentRun, error) {
+	limit = normalizeClaimBatchLimit(limit)
+	query := agentRunSelect + `
+		WHERE run_attempt_id IS NOT NULL
+		  AND ` + runExecutionActiveWhere + `
+		  AND claimed_by_worker_id IS NOT NULL
+		ORDER BY claim_heartbeat_at ASC NULLS FIRST, updated_at ASC
+		LIMIT $1
+	`
+	rows, err := b.db.QueryContext(ctx, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list claimed runs: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]*types.AgentRun, 0)
+	for rows.Next() {
+		run, err := b.scanAgentRun(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan claimed run: %w", err)
+		}
+		out = append(out, run)
+	}
+	return out, rows.Err()
+}
+
 func normalizeClaimBatchLimit(limit int) int {
 	if limit <= 0 {
 		return 100

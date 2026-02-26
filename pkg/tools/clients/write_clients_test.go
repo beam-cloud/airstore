@@ -166,6 +166,41 @@ func TestGDriveWriteFileRequiresArguments(t *testing.T) {
 	}
 }
 
+func TestNotionCommandRequiresArguments(t *testing.T) {
+	client := NewNotionClient()
+	tests := []struct {
+		name    string
+		command string
+		args    map[string]any
+	}{
+		{
+			name:    "search missing query",
+			command: notionCmdSearch,
+			args:    map[string]any{},
+		},
+		{
+			name:    "create-page missing title",
+			command: notionCmdCreatePage,
+			args: map[string]any{
+				"parent_id": "abc123",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			err := client.Execute(context.Background(), tc.command, tc.args, &types.IntegrationCredentials{AccessToken: "token"}, &stdout, &bytes.Buffer{})
+			if err != nil {
+				t.Fatalf("expected structured JSON error, got hard error: %v", err)
+			}
+			if !bytes.Contains(stdout.Bytes(), []byte(`"error"`)) {
+				t.Fatalf("expected JSON error output, got %q", stdout.String())
+			}
+		})
+	}
+}
+
 func TestLinearCreateIssueRequiresTitle(t *testing.T) {
 	client := NewLinearClient()
 	var stdout bytes.Buffer
