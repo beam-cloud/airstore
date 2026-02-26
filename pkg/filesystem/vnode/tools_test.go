@@ -1,7 +1,12 @@
 package vnode
 
 import (
+	"bytes"
 	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -36,13 +41,30 @@ func TestToolsVNode_Getattr_Tool(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if info.Size != int64(len(shimData)) {
-		t.Errorf("expected size %d, got %d", len(shimData), info.Size)
+	if info.Size != int64(len(gatewayToolWrapper)) {
+		t.Errorf("expected wrapper size %d, got %d", len(gatewayToolWrapper), info.Size)
 	}
 
 	// Should be executable
 	if info.Mode&0111 == 0 {
 		t.Error("expected executable mode")
+	}
+}
+
+func TestToolsVNode_Getattr_SharedShim(t *testing.T) {
+	shimData := []byte("test binary data")
+	tv := &ToolsVNode{
+		shim:    shimData,
+		tools:   []string{"mytool"},
+		toolSet: map[string]bool{"mytool": true},
+	}
+
+	info, err := tv.Getattr(toolsShimPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.Size != int64(len(shimData)) {
+		t.Errorf("expected size %d, got %d", len(shimData), info.Size)
 	}
 }
 
@@ -139,7 +161,7 @@ func TestToolsVNode_Read(t *testing.T) {
 		toolSet: map[string]bool{"tool1": true},
 	}
 
-	// Read from start
+	// Gateway tools serve a wrapper script.
 	buf := make([]byte, 5)
 	n, err := tv.Read("/tools/tool1", buf, 0, 0)
 	if err != nil {
@@ -148,26 +170,89 @@ func TestToolsVNode_Read(t *testing.T) {
 	if n != 5 {
 		t.Errorf("expected 5 bytes, got %d", n)
 	}
-	if string(buf) != "hello" {
-		t.Errorf("expected 'hello', got %q", buf)
+	if string(buf) != "#!/bi" {
+		t.Errorf("expected wrapper prefix, got %q", buf)
 	}
 
-	// Read with offset
+	// Read with offset into wrapper body.
 	n, err = tv.Read("/tools/tool1", buf, 6, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if string(buf[:n]) != "world" {
-		t.Errorf("expected 'world', got %q", buf[:n])
+	if string(buf[:n]) != "/sh\ns" {
+		t.Errorf("expected wrapper bytes, got %q", buf[:n])
 	}
 
 	// Read past end
-	n, err = tv.Read("/tools/tool1", buf, int64(len(shimData)+10), 0)
+	n, err = tv.Read("/tools/tool1", buf, int64(len(tv.toolBinary("tool1"))+10), 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if n != 0 {
 		t.Errorf("expected 0 bytes past end, got %d", n)
+	}
+}
+
+func TestToolsVNode_Read_SharedShim(t *testing.T) {
+	shimData := []byte("hello world shim binary")
+	tv := &ToolsVNode{
+		shim:    shimData,
+		tools:   []string{"tool1"},
+		toolSet: map[string]bool{"tool1": true},
+	}
+
+	buf := make([]byte, len(shimData))
+	n, err := tv.Read(toolsShimPath, buf, 0, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if n != len(shimData) {
+		t.Fatalf("expected %d bytes, got %d", len(shimData), n)
+	}
+	if !bytes.Equal(buf[:n], shimData) {
+		t.Fatalf("expected shared shim bytes to match")
+	}
+}
+
+func TestGatewayToolWrapperExecutesCopiedShim(t *testing.T) {
+	tv := &ToolsVNode{
+		shim: []byte("#!/bin/sh\nprintf 'argv0=%s\\n' \"$0\"\nprintf 'gateway=%s\\n' \"${AIRSTORE_GATEWAY:-}\"\n"),
+		tools:   []string{"wikipedia"},
+		toolSet: map[string]bool{"wikipedia": true},
+	}
+
+	mountRoot := t.TempDir()
+	toolsDir := filepath.Join(mountRoot, "tools")
+	if err := os.MkdirAll(toolsDir, 0o755); err != nil {
+		t.Fatalf("mkdir tools: %v", err)
+	}
+
+	wrapperPath := filepath.Join(toolsDir, "wikipedia")
+	if err := os.WriteFile(wrapperPath, tv.toolBinary("wikipedia"), 0o755); err != nil {
+		t.Fatalf("write wrapper: %v", err)
+	}
+	shimPath := filepath.Join(toolsDir, toolsShimName)
+	if err := os.WriteFile(shimPath, tv.shim, 0o755); err != nil {
+		t.Fatalf("write shim: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	cmd := exec.Command(wrapperPath, "--help")
+	cmd.Env = append(os.Environ(),
+		"TMPDIR="+tmpDir,
+		"GATEWAY_ADDR=gateway.test.internal:1993",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("wrapper execution failed: %v output=%s", err, string(out))
+	}
+
+	output := string(out)
+	if !strings.Contains(output, "gateway=gateway.test.internal:1993") {
+		t.Fatalf("expected wrapper to map GATEWAY_ADDR to AIRSTORE_GATEWAY, got: %s", output)
+	}
+	if !strings.Contains(output, ".airstore-shims/wikipedia") {
+		t.Fatalf("expected wrapper to exec via tool-named symlink, got: %s", output)
 	}
 }
 
@@ -216,5 +301,27 @@ func TestSameWrapperBytes(t *testing.T) {
 		map[string][]byte{},
 	) {
 		t.Fatal("expected missing wrapper key to be detected")
+	}
+}
+
+func TestToolNameFromPath(t *testing.T) {
+	tests := []struct {
+		path string
+		want string
+		ok   bool
+	}{
+		{path: "/tools/wikipedia", want: "wikipedia", ok: true},
+		{path: "/tools/.airstore-shim", want: ".airstore-shim", ok: true},
+		{path: "/tools", want: "", ok: false},
+		{path: "/tools/", want: "", ok: false},
+		{path: "/tools/a/b", want: "", ok: false},
+		{path: "/source/wikipedia", want: "", ok: false},
+	}
+
+	for _, tc := range tests {
+		got, ok := toolNameFromPath(tc.path)
+		if ok != tc.ok || got != tc.want {
+			t.Fatalf("toolNameFromPath(%q) = (%q, %v), want (%q, %v)", tc.path, got, ok, tc.want, tc.ok)
+		}
 	}
 }

@@ -18,25 +18,66 @@ import (
 const (
 	// ToolsCacheTTL is the time-to-live for the tools cache
 	ToolsCacheTTL = 5 * time.Second
+
+	toolsShimName = ".airstore-shim"
+	toolsShimPath = ToolsPathPrefix + toolsShimName
 )
 
+var gatewayToolWrapper = []byte(`#!/bin/sh
+set -eu
+
+TOOLS_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || true)
+SHIM_SRC="$TOOLS_DIR/.airstore-shim"
+if [ ! -r "$SHIM_SRC" ]; then
+	SHIM_SRC="/workspace/tools/.airstore-shim"
+fi
+if [ ! -r "$SHIM_SRC" ]; then
+	printf 'airstore shim not found (tried %s and /workspace/tools/.airstore-shim)\n' "$TOOLS_DIR/.airstore-shim" >&2
+	exit 127
+fi
+
+CACHE_DIR="${TMPDIR:-/tmp}/.airstore-shims"
+SHIM_BIN="$CACHE_DIR/airstore-tool-shim"
+TOOL_NAME="${0##*/}"
+TOOL_LINK="$CACHE_DIR/$TOOL_NAME"
+
+mkdir -p "$CACHE_DIR"
+if [ ! -x "$SHIM_BIN" ]; then
+	TMP="$SHIM_BIN.$$"
+	if command -v cp >/dev/null 2>&1; then
+		cp "$SHIM_SRC" "$TMP"
+	else
+		cat "$SHIM_SRC" > "$TMP"
+	fi
+	chmod 755 "$TMP"
+	mv -f "$TMP" "$SHIM_BIN"
+fi
+
+ln -sf "$SHIM_BIN" "$TOOL_LINK"
+
+# Worker sandboxes export GATEWAY_ADDR. The shim reads AIRSTORE_GATEWAY.
+if [ -n "${GATEWAY_ADDR:-}" ] && [ -z "${AIRSTORE_GATEWAY:-}" ]; then
+	export AIRSTORE_GATEWAY="$GATEWAY_ADDR"
+fi
+
+exec "$TOOL_LINK" "$@"
+`)
+
 // ToolsVNode implements VirtualNode for the /tools directory.
-// It serves tool binaries via FUSE, choosing between two modes per tool:
-//   - Gateway tools: served as the compiled gRPC shim binary
-//   - Local tools:   served as a shell wrapper that execs the CLI directly
+// It serves executable wrappers for tools:
+//   - Gateway tools: wrapper that copies an embedded shim to local /tmp and execs it
+//   - Local tools:   wrapper that execs the local CLI directly
 type ToolsVNode struct {
 	ReadOnlyBase
 
 	gatewayAddr string
-	token       string
 	bearerToken string
 	shim        []byte    // gRPC shim binary for gateway-executed tools
-	modTime     time.Time // stable timestamp for initial getattr
 
 	mu            sync.RWMutex
 	tools         []string          // ordered tool names
 	toolSet       map[string]bool   // fast membership check
-	localWrappers map[string][]byte // tool → wrapper script (nil = use shim)
+	localWrappers map[string][]byte // tool → wrapper script (missing key = gateway wrapper)
 	lastFetch     time.Time
 	cacheModTime  time.Time
 }
@@ -47,10 +88,8 @@ func NewToolsVNode(gatewayAddr string, token string, shimBinary []byte) *ToolsVN
 
 	t := &ToolsVNode{
 		gatewayAddr:   gatewayAddr,
-		token:         token,
 		bearerToken:   BearerToken(token),
 		shim:          shimBinary,
-		modTime:       modTime,
 		tools:         []string{},
 		toolSet:       make(map[string]bool),
 		localWrappers: make(map[string][]byte),
@@ -80,8 +119,17 @@ func (t *ToolsVNode) Getattr(path string) (*FileInfo, error) {
 		return info, nil
 	}
 
-	name := strings.TrimPrefix(path, ToolsPathPrefix)
-	if name == "" || strings.Contains(name, "/") {
+	if path == toolsShimPath {
+		info := NewFileInfo(toolIno(toolsShimName), int64(len(t.shim)), 0444)
+		mtime := t.getCacheModTime()
+		info.Atime = mtime
+		info.Mtime = mtime
+		info.Ctime = mtime
+		return info, nil
+	}
+
+	name, ok := toolNameFromPath(path)
+	if !ok {
 		return nil, fs.ErrNotExist
 	}
 
@@ -123,8 +171,12 @@ func (t *ToolsVNode) Open(path string, flags int) (FileHandle, error) {
 		return 0, syscall.EISDIR
 	}
 
-	name := strings.TrimPrefix(path, ToolsPathPrefix)
-	if !t.hasTool(name) {
+	if path == toolsShimPath {
+		return 0, nil
+	}
+
+	name, ok := toolNameFromPath(path)
+	if !ok || !t.hasTool(name) {
 		return 0, fs.ErrNotExist
 	}
 
@@ -133,8 +185,15 @@ func (t *ToolsVNode) Open(path string, flags int) (FileHandle, error) {
 
 // Read reads bytes from a tool binary (served from memory)
 func (t *ToolsVNode) Read(path string, buf []byte, off int64, fh FileHandle) (int, error) {
-	name := strings.TrimPrefix(path, ToolsPathPrefix)
-	if !t.hasTool(name) {
+	if path == toolsShimPath {
+		if off >= int64(len(t.shim)) {
+			return 0, nil
+		}
+		return copy(buf, t.shim[off:]), nil
+	}
+
+	name, ok := toolNameFromPath(path)
+	if !ok || !t.hasTool(name) {
 		return 0, fs.ErrNotExist
 	}
 
@@ -153,14 +212,14 @@ func (t *ToolsVNode) hasTool(name string) bool {
 }
 
 // toolBinary returns the bytes to serve for a given tool:
-// a shell wrapper for local tools, the gRPC shim for gateway tools.
+// a shell wrapper for local tools, a gateway shim bootstrap wrapper otherwise.
 func (t *ToolsVNode) toolBinary(name string) []byte {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	if w, ok := t.localWrappers[name]; ok {
 		return w
 	}
-	return t.shim
+	return gatewayToolWrapper
 }
 
 // getTools returns the list of registered tools.
@@ -295,4 +354,15 @@ func toolsIno() uint64 {
 
 func toolIno(name string) uint64 {
 	return PathIno(ToolsPathPrefix + name)
+}
+
+func toolNameFromPath(path string) (string, bool) {
+	if !strings.HasPrefix(path, ToolsPathPrefix) {
+		return "", false
+	}
+	name := strings.TrimPrefix(path, ToolsPathPrefix)
+	if name == "" || strings.Contains(name, "/") {
+		return "", false
+	}
+	return name, true
 }

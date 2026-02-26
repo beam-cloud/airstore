@@ -390,6 +390,18 @@ func (f *Filesystem) Getattr(path string) (*FileInfo, error) {
 		return macPlaceholderInfo(path), nil
 	}
 
+	// Check for virtual node match first (e.g., /sources/*, /skills/*, /tools/*).
+	// Some virtual nodes intentionally synthesize entries that may be hidden from
+	// directory listings; bypassing generic negative caches avoids false ENOENT.
+	// VNode Getattr returns *vnode.FileInfo with identical layout.
+	if vn := f.vnodes.Match(path); vn != nil {
+		info, err := vn.Getattr(path)
+		if err != nil {
+			return nil, err
+		}
+		return (*FileInfo)(info), nil
+	}
+
 	// Extract parent dir via index — avoids filepath.Dir allocation.
 	dir := "/"
 	if i := strings.LastIndexByte(path, '/'); i > 0 {
@@ -410,17 +422,6 @@ func (f *Filesystem) Getattr(path string) (*FileInfo, error) {
 	// was never readdir'd (e.g., direct deep path access).
 	if _, ok := f.negativeCache.Get(path); ok {
 		return nil, ErrNotFound
-	}
-
-	// Check for virtual node match (e.g., /sources/*, /skills/*, /tools/*).
-	// VNode Getattr returns *vnode.FileInfo which has identical layout — return
-	// directly to avoid a copy.
-	if vn := f.vnodes.Match(path); vn != nil {
-		info, err := vn.Getattr(path)
-		if err != nil {
-			return nil, err
-		}
-		return (*FileInfo)(info), nil
 	}
 
 	// Check fallback storage (S3-backed) BEFORE legacy metadata.
