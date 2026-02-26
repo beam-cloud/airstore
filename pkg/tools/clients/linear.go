@@ -73,16 +73,8 @@ type linearTeam struct {
 }
 
 func (l *LinearClient) listTeams(ctx context.Context, token string) ([]linearTeam, error) {
-	const gql = `
-query ListTeams {
-  teams(first: 50, orderBy: name) {
-    nodes {
-      id
-      key
-      name
-    }
-  }
-}`
+	// Keep this query minimal — Linear may reject unsupported args with HTTP 400.
+	const gql = `{ teams { nodes { id key name } } }`
 
 	var data struct {
 		Teams struct {

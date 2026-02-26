@@ -104,6 +104,14 @@ func extractAPIErrorMessage(raw []byte) string {
 		return msg
 	}
 
+	if errorsAny, ok := obj["errors"].([]any); ok && len(errorsAny) > 0 {
+		if firstErr, ok := errorsAny[0].(map[string]any); ok {
+			if msg := getString(firstErr, "message"); msg != "" {
+				return msg
+			}
+		}
+	}
+
 	if errVal, ok := obj["error"]; ok {
 		switch e := errVal.(type) {
 		case string:
