@@ -48,11 +48,7 @@ TOOL_LINK="$CACHE_DIR/$TOOL_NAME"
 mkdir -p "$CACHE_DIR"
 if [ ! -x "$SHIM_BIN" ]; then
 	TMP="$SHIM_BIN.$$"
-	if command -v cp >/dev/null 2>&1; then
-		cp "$SHIM_SRC" "$TMP"
-	else
-		cat "$SHIM_SRC" > "$TMP"
-	fi
+	cat "$SHIM_SRC" > "$TMP"
 	chmod 755 "$TMP"
 	mv -f "$TMP" "$SHIM_BIN"
 fi
@@ -113,12 +109,8 @@ func (t *ToolsVNode) Prefix() string {
 func (t *ToolsVNode) Getattr(path string) (*FileInfo, error) {
 	if path == ToolsPath {
 		t.maybeRefresh()
-		info := NewDirInfo(toolsIno())
-		mtime := t.getCacheModTime()
-		info.Atime = mtime
-		info.Mtime = mtime
-		info.Ctime = mtime
-		return info, nil
+		_, mtime := t.snapshotTools()
+		return withCacheTimes(NewDirInfo(toolsIno()), mtime), nil
 	}
 
 	name, ok := toolNameFromPath(path)
@@ -126,16 +118,12 @@ func (t *ToolsVNode) Getattr(path string) (*FileInfo, error) {
 		return nil, fs.ErrNotExist
 	}
 
-	if !t.hasTool(name) {
+	data, mtime, ok := t.lookupTool(name)
+	if !ok {
 		return nil, fs.ErrNotExist
 	}
 
-	info := NewExecFileInfo(toolIno(name), int64(len(t.toolBinary(name))))
-	mtime := t.getCacheModTime()
-	info.Atime = mtime
-	info.Mtime = mtime
-	info.Ctime = mtime
-	return info, nil
+	return withCacheTimes(NewExecFileInfo(toolIno(name), int64(len(data))), mtime), nil
 }
 
 // Readdir returns entries in /tools directory
@@ -145,7 +133,7 @@ func (t *ToolsVNode) Readdir(path string) ([]DirEntry, error) {
 	}
 
 	t.maybeRefresh()
-	tools := t.getTools()
+	tools, _ := t.snapshotTools()
 	entries := make([]DirEntry, 0, len(tools))
 	for _, name := range tools {
 		entries = append(entries, DirEntry{
@@ -165,7 +153,10 @@ func (t *ToolsVNode) Open(path string, flags int) (FileHandle, error) {
 	}
 
 	name, ok := toolNameFromPath(path)
-	if !ok || !t.hasTool(name) {
+	if !ok {
+		return 0, fs.ErrNotExist
+	}
+	if _, _, exists := t.lookupTool(name); !exists {
 		return 0, fs.ErrNotExist
 	}
 
@@ -175,22 +166,26 @@ func (t *ToolsVNode) Open(path string, flags int) (FileHandle, error) {
 // Read reads bytes from a tool binary (served from memory)
 func (t *ToolsVNode) Read(path string, buf []byte, off int64, fh FileHandle) (int, error) {
 	name, ok := toolNameFromPath(path)
-	if !ok || !t.hasTool(name) {
+	if !ok {
 		return 0, fs.ErrNotExist
 	}
-
-	data := t.toolBinary(name)
+	data, _, exists := t.lookupTool(name)
+	if !exists {
+		return 0, fs.ErrNotExist
+	}
 	if off >= int64(len(data)) {
 		return 0, nil
 	}
 	return copy(buf, data[off:]), nil
 }
 
-// hasTool checks if a tool is registered.
-func (t *ToolsVNode) hasTool(name string) bool {
+func (t *ToolsVNode) lookupTool(name string) ([]byte, time.Time, bool) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	return t.toolSet[name]
+	if !t.toolSet[name] {
+		return nil, time.Time{}, false
+	}
+	return toolBinaryLocked(t.localWrappers, name), t.cacheModTime, true
 }
 
 // toolBinary returns the bytes to serve for a given tool:
@@ -198,26 +193,29 @@ func (t *ToolsVNode) hasTool(name string) bool {
 func (t *ToolsVNode) toolBinary(name string) []byte {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	if w, ok := t.localWrappers[name]; ok {
+	return toolBinaryLocked(t.localWrappers, name)
+}
+
+func toolBinaryLocked(localWrappers map[string][]byte, name string) []byte {
+	if w, ok := localWrappers[name]; ok {
 		return w
 	}
 	return gatewayToolWrapper
 }
 
-// getTools returns the list of registered tools.
-func (t *ToolsVNode) getTools() []string {
+func (t *ToolsVNode) snapshotTools() ([]string, time.Time) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	result := make([]string, len(t.tools))
 	copy(result, t.tools)
-	return result
+	return result, t.cacheModTime
 }
 
-// getCacheModTime returns the cache modification time
-func (t *ToolsVNode) getCacheModTime() time.Time {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	return t.cacheModTime
+func withCacheTimes(info *FileInfo, mtime time.Time) *FileInfo {
+	info.Atime = mtime
+	info.Mtime = mtime
+	info.Ctime = mtime
+	return info
 }
 
 // maybeRefresh refreshes the cache if TTL has expired

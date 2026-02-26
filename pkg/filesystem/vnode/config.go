@@ -17,7 +17,6 @@ type Config struct {
 type ConfigVNode struct {
 	ReadOnlyBase // Embeds read-only defaults for write operations
 
-	config     Config
 	configJSON []byte
 	toolShim   []byte
 }
@@ -33,7 +32,6 @@ func NewConfigVNode(gatewayAddr, token string, toolShim []byte) *ConfigVNode {
 	data, _ := json.MarshalIndent(cfg, "", "  ")
 
 	return &ConfigVNode{
-		config:     cfg,
 		configJSON: data,
 		toolShim:   toolShim,
 	}
@@ -46,16 +44,15 @@ func (c *ConfigVNode) Prefix() string {
 
 // Getattr returns file attributes
 func (c *ConfigVNode) Getattr(path string) (*FileInfo, error) {
-	switch path {
-	case ConfigDir:
+	if path == ConfigDir {
 		return NewDirInfo(configDirIno()), nil
-	case ConfigFile:
-		return NewFileInfo(configFileIno(), int64(len(c.configJSON)), 0444), nil
-	case ConfigToolShim:
-		return NewFileInfo(configToolShimIno(), int64(len(c.toolShim)), 0444), nil
-	default:
+	}
+
+	payload, ino, ok := c.payloadForPath(path)
+	if !ok {
 		return nil, fs.ErrNotExist
 	}
+	return NewFileInfo(ino, int64(len(payload)), 0444), nil
 }
 
 // Readdir returns directory entries
@@ -75,10 +72,7 @@ func (c *ConfigVNode) Open(path string, flags int) (FileHandle, error) {
 	if path == ConfigDir {
 		return 0, syscall.EISDIR
 	}
-	if path == ConfigFile {
-		return 0, nil
-	}
-	if path == ConfigToolShim {
+	if _, _, ok := c.payloadForPath(path); ok {
 		return 0, nil
 	}
 	return 0, fs.ErrNotExist
@@ -86,19 +80,24 @@ func (c *ConfigVNode) Open(path string, flags int) (FileHandle, error) {
 
 // Read reads from the config file
 func (c *ConfigVNode) Read(path string, buf []byte, off int64, fh FileHandle) (int, error) {
+	payload, _, ok := c.payloadForPath(path)
+	if !ok {
+		return 0, fs.ErrNotExist
+	}
+	if off >= int64(len(payload)) {
+		return 0, nil
+	}
+	return copy(buf, payload[off:]), nil
+}
+
+func (c *ConfigVNode) payloadForPath(path string) ([]byte, uint64, bool) {
 	switch path {
 	case ConfigFile:
-		if off >= int64(len(c.configJSON)) {
-			return 0, nil
-		}
-		return copy(buf, c.configJSON[off:]), nil
+		return c.configJSON, configFileIno(), true
 	case ConfigToolShim:
-		if off >= int64(len(c.toolShim)) {
-			return 0, nil
-		}
-		return copy(buf, c.toolShim[off:]), nil
+		return c.toolShim, configToolShimIno(), true
 	default:
-		return 0, fs.ErrNotExist
+		return nil, 0, false
 	}
 }
 
