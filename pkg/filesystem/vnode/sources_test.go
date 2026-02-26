@@ -1,6 +1,8 @@
 package vnode
 
 import (
+	"errors"
+	"syscall"
 	"testing"
 	"time"
 
@@ -118,5 +120,60 @@ func TestSourcesVNode_Getattr_QueryMetaFileUsesQueryUpdatedAt(t *testing.T) {
 	}
 	if got := info.Mtime.Unix(); got != updated.Unix() {
 		t.Fatalf("expected .query.as mtime=%d, got %d", updated.Unix(), got)
+	}
+}
+
+func TestSourcesVNode_OpenDirectoryReturnsEISDIR(t *testing.T) {
+	v := &SourcesVNode{
+		results:      make(map[string]*cachedQueryResult),
+		queries:      make(map[string]*cachedQuery),
+		integrations: make(map[string]*cachedIntegration),
+		stats:        make(map[string]*cachedStat),
+		openContent:  make(map[string]*cachedContent),
+		openHandles:  make(map[FileHandle]string),
+		recentDirs:   make(map[string]time.Time),
+	}
+	// Seed the integration cache so Getattr returns a directory for /sources/gmail.
+	v.setCachedIntegration("gmail", time.Now().Unix())
+
+	_, err := v.Open("/sources/gmail", 0)
+	if !errors.Is(err, syscall.EISDIR) {
+		t.Fatalf("Open directory: expected EISDIR, got %v", err)
+	}
+
+	_, err = v.Open(SourcesPath, 0)
+	if !errors.Is(err, syscall.EISDIR) {
+		t.Fatalf("Open /sources root: expected EISDIR, got %v", err)
+	}
+}
+
+func TestSourcesVNode_MutationOpsAreReadOnly(t *testing.T) {
+	v := &SourcesVNode{}
+	path := "/sources/gmail/unread-emails"
+
+	_, err := v.Create(path+"/new.txt", 0, 0644)
+	if !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("Create: expected ErrReadOnly, got %v", err)
+	}
+	if err := v.Mkdir(path, 0755); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("Mkdir: expected ErrReadOnly, got %v", err)
+	}
+	if _, err := v.Write(path+"/new.txt", []byte("x"), 0, 0); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("Write: expected ErrReadOnly, got %v", err)
+	}
+	if err := v.Truncate(path+"/new.txt", 0, 0); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("Truncate: expected ErrReadOnly, got %v", err)
+	}
+	if err := v.Rmdir(path); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("Rmdir: expected ErrReadOnly, got %v", err)
+	}
+	if err := v.Unlink(path + "/new.txt"); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("Unlink: expected ErrReadOnly, got %v", err)
+	}
+	if err := v.Rename(path+"/a", path+"/b"); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("Rename: expected ErrReadOnly, got %v", err)
+	}
+	if err := v.Symlink(path+"/target", path+"/link"); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("Symlink: expected ErrReadOnly, got %v", err)
 	}
 }
