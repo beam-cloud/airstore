@@ -1,6 +1,7 @@
 package vnode
 
 import (
+	"context"
 	"errors"
 	"syscall"
 	"testing"
@@ -8,7 +9,24 @@ import (
 
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
+	"google.golang.org/grpc"
 )
+
+type sourceServiceClientStub struct {
+	pb.SourceServiceClient
+	readFn func(context.Context, *pb.SourceReadRequest, ...grpc.CallOption) (*pb.SourceReadResponse, error)
+}
+
+func (s *sourceServiceClientStub) Read(
+	ctx context.Context,
+	req *pb.SourceReadRequest,
+	opts ...grpc.CallOption,
+) (*pb.SourceReadResponse, error) {
+	if s.readFn != nil {
+		return s.readFn(ctx, req, opts...)
+	}
+	return &pb.SourceReadResponse{Ok: false, Error: "stub read not configured"}, nil
+}
 
 func TestSourcesVNode_Getattr_MaterializedResultUsesOpenContentSize(t *testing.T) {
 	v := &SourcesVNode{
@@ -175,5 +193,83 @@ func TestSourcesVNode_MutationOpsAreReadOnly(t *testing.T) {
 	}
 	if err := v.Symlink(path+"/target", path+"/link"); !errors.Is(err, ErrReadOnly) {
 		t.Fatalf("Symlink: expected ErrReadOnly, got %v", err)
+	}
+}
+
+func TestSourcesVNode_OpenMaterializedResultPrefetchesWhenCachedSizeUnknown(t *testing.T) {
+	content := []byte("hello from materialized source result")
+	readCalls := 0
+	client := &sourceServiceClientStub{
+		readFn: func(_ context.Context, req *pb.SourceReadRequest, _ ...grpc.CallOption) (*pb.SourceReadResponse, error) {
+			readCalls++
+			if req.Path == "" {
+				t.Fatalf("expected non-empty read path")
+			}
+			return &pb.SourceReadResponse{
+				Ok:   true,
+				Data: content,
+			}, nil
+		},
+	}
+
+	v := &SourcesVNode{
+		client:      client,
+		results:     make(map[string]*cachedQueryResult),
+		queries:     make(map[string]*cachedQuery),
+		openContent: make(map[string]*cachedContent),
+		openHandles: make(map[FileHandle]string),
+		stats:       make(map[string]*cachedStat),
+	}
+
+	queryPath := "/sources/gmail/coreweave-emails"
+	filePath := queryPath + "/example.txt"
+	q := &types.SourceView{
+		Path:         queryPath,
+		OutputFormat: types.ViewOutputFolder,
+		CreatedAt:    time.Unix(1700000000, 0),
+		UpdatedAt:    time.Unix(1700000100, 0),
+	}
+	v.setCachedQuery(queryPath, q)
+	v.setCachedResults(queryPath, []*pb.SourceDirEntry{
+		{
+			Name:  "example.txt",
+			Size:  0, // Unknown/placeholder metadata must not block real reads.
+			Mode:  syscall.S_IFREG | 0444,
+			Mtime: time.Now().Unix(),
+		},
+	})
+	v.cacheStatFromEntry(filePath, &pb.SourceDirEntry{
+		Name:  "example.txt",
+		Size:  0, // Unknown cached stat should not short-circuit Getattr.
+		Mode:  syscall.S_IFREG | 0444,
+		Mtime: time.Now().Unix(),
+	})
+
+	fh, err := v.Open(filePath, 0)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	if readCalls != 1 {
+		t.Fatalf("expected exactly one content prefetch read, got %d", readCalls)
+	}
+
+	info, err := v.Getattr(filePath)
+	if err != nil {
+		t.Fatalf("Getattr returned error: %v", err)
+	}
+	if info == nil {
+		t.Fatalf("Getattr returned nil info")
+	}
+	if info.Size != int64(len(content)) {
+		t.Fatalf("expected size=%d, got %d", len(content), info.Size)
+	}
+
+	buf := make([]byte, len(content)+8)
+	n, err := v.Read(filePath, buf, 0, fh)
+	if err != nil {
+		t.Fatalf("Read returned error: %v", err)
+	}
+	if got := string(buf[:n]); got != string(content) {
+		t.Fatalf("expected read content %q, got %q", string(content), got)
 	}
 }

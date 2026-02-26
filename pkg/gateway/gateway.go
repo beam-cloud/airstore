@@ -540,7 +540,7 @@ func (g *Gateway) registerServices() error {
 		// Connections API (nested under workspaces, workspace-scoped auth)
 		connectionsGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/connections")
 		connectionsGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
-		apiv1.NewConnectionsGroup(connectionsGroup, g.BackendRepo, g.sourceRegistry)
+		apiv1.NewConnectionsGroup(connectionsGroup, g.BackendRepo, g.sourceRegistry, g.storageClient)
 
 		// Hooks API (nested under workspaces, workspace-scoped auth)
 		hooksGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/hooks")
@@ -631,7 +631,7 @@ func (g *Gateway) registerServices() error {
 		}
 
 		// OAuth API for workspace integrations (gmail, gdrive, github, notion, slack)
-		apiv1.NewOAuthGroup(g.baseRouteGroup.Group("/oauth"), g.oauthStore, g.oauthRegistry, g.BackendRepo, g.Config.Gateway.AuthToken)
+		apiv1.NewOAuthGroup(g.baseRouteGroup.Group("/oauth"), g.oauthStore, g.oauthRegistry, g.BackendRepo, g.storageClient, g.Config.Gateway.AuthToken)
 		if providers := g.oauthRegistry.ListConfiguredProviders(); len(providers) > 0 {
 			log.Info().Strs("providers", providers).Msg("oauth API registered at /api/v1/oauth")
 		} else {
@@ -842,7 +842,12 @@ func (g *Gateway) initTools() error {
 
 	// Connection-based integrations (always registered, credentials checked at runtime)
 	clientRegistry.Register(toolclients.NewGitHubClient())
-	log.Debug().Msg("github integration registered (connection-based)")
+	clientRegistry.Register(toolclients.NewGmailClient())
+	clientRegistry.Register(toolclients.NewGDriveClient())
+	clientRegistry.Register(toolclients.NewSlackClient())
+	clientRegistry.Register(toolclients.NewNotionClient())
+	clientRegistry.Register(toolclients.NewLinearClient())
+	log.Debug().Msg("oauth source integrations registered (connection-based)")
 
 	// Load tool definitions from embedded YAML files
 	// Schemas are matched to clients by name - unmatched schemas are skipped

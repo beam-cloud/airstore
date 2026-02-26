@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/beam-cloud/airstore/pkg/common"
@@ -99,6 +100,18 @@ func (f *fakeBackend) UpdateTaskState(_ context.Context, taskID string, state ty
 		env.DroppedReason = droppedReason
 		f.droppedCount++
 	}
+	return nil
+}
+
+func (f *fakeBackend) ArchiveTask(_ context.Context, taskID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	task, ok := f.agentTasks[taskID]
+	if !ok {
+		return &types.ErrAgentTaskNotFound{ID: taskID}
+	}
+	now := time.Now()
+	task.ArchivedAt = &now
 	return nil
 }
 

@@ -224,3 +224,86 @@ func TestShouldContinueFromFirstTurn(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildFirstTurnStrategies(t *testing.T) {
+	tests := []struct {
+		name      string
+		env       map[string]string
+		wantModes []TurnArgMode
+	}{
+		{
+			name: "resume not requested",
+			env: map[string]string{
+				agentSessionIDEnvKey: "550e8400-e29b-41d4-a716-446655440000",
+			},
+			wantModes: []TurnArgMode{TurnArgModeFirstStart},
+		},
+		{
+			name: "resume requested with session id",
+			env: map[string]string{
+				agentResumeSessionEnvKey: "true",
+				agentSessionIDEnvKey:     "550e8400-e29b-41d4-a716-446655440000",
+			},
+			wantModes: []TurnArgMode{
+				TurnArgModeFirstResumeLatest,
+				TurnArgModeFirstResumeByID,
+				TurnArgModeFirstFreshNoSession,
+			},
+		},
+		{
+			name: "resume requested without session id",
+			env: map[string]string{
+				agentResumeSessionEnvKey: "true",
+			},
+			wantModes: []TurnArgMode{
+				TurnArgModeFirstResumeLatest,
+				TurnArgModeFirstFreshNoSession,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildFirstTurnStrategies(tt.env)
+			if len(got) != len(tt.wantModes) {
+				t.Fatalf("unexpected strategy count: got=%d want=%d", len(got), len(tt.wantModes))
+			}
+			for i, strategy := range got {
+				if strategy.mode != tt.wantModes[i] {
+					t.Fatalf("unexpected strategy at %d: got=%s want=%s", i, strategy.mode, tt.wantModes[i])
+				}
+			}
+		})
+	}
+}
+
+func TestEnvForFirstTurnStrategy(t *testing.T) {
+	base := map[string]string{
+		agentSessionIDEnvKey:     "550e8400-e29b-41d4-a716-446655440000",
+		agentResumeSessionEnvKey: "true",
+		agentModelEnvKey:         "claude-sonnet-4",
+	}
+
+	t.Run("fresh fallback clears session state", func(t *testing.T) {
+		out := envForFirstTurnStrategy(base, firstTurnStrategy{mode: TurnArgModeFirstFreshNoSession})
+		if _, ok := out[agentSessionIDEnvKey]; ok {
+			t.Fatalf("expected %s to be removed in fresh fallback", agentSessionIDEnvKey)
+		}
+		if _, ok := out[agentResumeSessionEnvKey]; ok {
+			t.Fatalf("expected %s to be removed in fresh fallback", agentResumeSessionEnvKey)
+		}
+		if out[agentModelEnvKey] != "claude-sonnet-4" {
+			t.Fatalf("expected unrelated env to be preserved, got=%q", out[agentModelEnvKey])
+		}
+	})
+
+	t.Run("resume modes keep session state", func(t *testing.T) {
+		out := envForFirstTurnStrategy(base, firstTurnStrategy{mode: TurnArgModeFirstResumeByID})
+		if out[agentSessionIDEnvKey] == "" {
+			t.Fatalf("expected session id to be preserved for resume-by-id mode")
+		}
+		if out[agentResumeSessionEnvKey] == "" {
+			t.Fatalf("expected resume flag to be preserved for resume-by-id mode")
+		}
+	})
+}

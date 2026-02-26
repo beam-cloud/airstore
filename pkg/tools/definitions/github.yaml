@@ -91,6 +91,95 @@ commands:
         position: 2
         description: "Pull request number"
 
+  list-pr-files:
+    description: List changed files for a pull request
+    params:
+      - name: owner
+        type: string
+        required: true
+        position: 0
+        description: "Repository owner"
+
+      - name: repo
+        type: string
+        required: true
+        position: 1
+        description: "Repository name"
+
+      - name: number
+        type: int
+        required: true
+        position: 2
+        description: "Pull request number"
+
+      - name: limit
+        type: int
+        default: 100
+        short: -n
+        flag: --limit
+        description: "Maximum number of files to return (1-100)"
+
+  comment-pr:
+    description: Add a conversation comment to a pull request
+    params:
+      - name: owner
+        type: string
+        required: true
+        position: 0
+        description: "Repository owner"
+
+      - name: repo
+        type: string
+        required: true
+        position: 1
+        description: "Repository name"
+
+      - name: number
+        type: int
+        required: true
+        position: 2
+        description: "Pull request number"
+
+      - name: body
+        type: string
+        required: true
+        position: 3
+        description: "Comment body"
+
+  review-pr:
+    description: Submit a pull request review (comment, approve, or request changes)
+    params:
+      - name: owner
+        type: string
+        required: true
+        position: 0
+        description: "Repository owner"
+
+      - name: repo
+        type: string
+        required: true
+        position: 1
+        description: "Repository name"
+
+      - name: number
+        type: int
+        required: true
+        position: 2
+        description: "Pull request number"
+
+      - name: body
+        type: string
+        required: true
+        position: 3
+        description: "Review summary/body"
+
+      - name: event
+        type: string
+        short: -e
+        flag: --event
+        default: COMMENT
+        description: "Review event: COMMENT, APPROVE, REQUEST_CHANGES"
+
   list-issues:
     description: List issues for a repository
     params:
@@ -140,3 +229,30 @@ commands:
         required: true
         position: 2
         description: "Issue number"
+
+  create-issue:
+    description: Create a new issue in a repository
+    params:
+      - name: owner
+        type: string
+        required: true
+        position: 0
+        description: "Repository owner"
+
+      - name: repo
+        type: string
+        required: true
+        position: 1
+        description: "Repository name"
+
+      - name: title
+        type: string
+        required: true
+        position: 2
+        description: "Issue title"
+
+      - name: body
+        type: string
+        short: -b
+        flag: --body
+        description: "Issue body/description"

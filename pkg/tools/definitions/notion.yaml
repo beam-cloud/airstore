@@ -1,0 +1,19 @@
+name: notion
+description: Append content to Notion pages
+icon: file-text
+
+commands:
+  append-paragraph:
+    description: Append a paragraph block to a Notion block/page
+    params:
+      - name: block_id
+        type: string
+        required: true
+        position: 0
+        description: "Target block ID (typically a page ID)"
+
+      - name: text
+        type: string
+        required: true
+        position: 1
+        description: "Paragraph content to append"

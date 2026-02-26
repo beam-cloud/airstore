@@ -178,6 +178,7 @@ type BackendRepository interface {
 	GetTask(ctx context.Context, workspaceId uint, taskId string) (*types.AgentTask, error)
 	GetTaskByIdempotency(ctx context.Context, workspaceId uint, agentId *string, idempotencyKey string) (*types.AgentTask, error)
 	UpdateTaskState(ctx context.Context, taskId string, state types.AgentTaskState, droppedReason *string, targetRunID *string) error
+	ArchiveTask(ctx context.Context, taskId string) error
 
 	// Runs
 	CreateAgentRun(ctx context.Context, run *types.AgentRun) error

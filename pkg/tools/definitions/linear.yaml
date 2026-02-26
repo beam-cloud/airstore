@@ -1,0 +1,25 @@
+name: linear
+description: Create Linear issues
+icon: square-kanban
+
+commands:
+  create-issue:
+    description: Create a new issue in Linear
+    params:
+      - name: team_id
+        type: string
+        required: true
+        position: 0
+        description: "Linear team ID"
+
+      - name: title
+        type: string
+        required: true
+        position: 1
+        description: "Issue title"
+
+      - name: description
+        type: string
+        short: -d
+        flag: --description
+        description: "Issue description/body"

@@ -201,6 +201,13 @@ func (s *ToolService) buildExecContext(ctx context.Context, toolName string) *to
 				log.Warn().Str("tool", toolName).Str("provider", provider.Name()).Err(err).Msg("token refresh failed")
 				// Continue with existing creds - they might still work
 			} else {
+				refreshed = oauth.MergeCredentialMetadata(refreshed, creds)
+				var scopes []string
+				if refreshed.Extra != nil {
+					scopes = types.CSVToList(refreshed.Extra[types.CredentialMetaGrantedScopes])
+				}
+				refreshed = oauth.AnnotateCredentials(toolName, refreshed, scopes)
+
 				// Update stored credentials
 				if _, err := s.backend.SaveConnection(ctx, conn.WorkspaceId, conn.MemberId, toolName, refreshed, conn.Scope); err != nil {
 					log.Warn().Str("tool", toolName).Err(err).Msg("failed to persist refreshed token")
