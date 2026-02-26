@@ -10,7 +10,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/types"
 )
 
-const managedSourceSkillSuffix = "-writeback"
+const managedSourceLegacySkillSuffix = "-writeback"
 
 type ManagedSkillStorage interface {
 	WorkspaceBucketName(workspaceExternalId string) string
@@ -21,7 +21,12 @@ type ManagedSkillStorage interface {
 
 func ManagedSourceSkillName(integration string) string {
 	integration = strings.ToLower(strings.TrimSpace(integration))
-	return integration + managedSourceSkillSuffix
+	return integration
+}
+
+func managedSourceLegacySkillName(integration string) string {
+	integration = strings.ToLower(strings.TrimSpace(integration))
+	return integration + managedSourceLegacySkillSuffix
 }
 
 func ManagedSourceSkillSource(integration string) string {
@@ -93,6 +98,15 @@ func UpsertManagedSourceSkill(ctx context.Context, storage ManagedSkillStorage, 
 
 	bucket := storage.WorkspaceBucketName(workspaceExternalID)
 	skillName := ManagedSourceSkillName(integration)
+
+	// Cleanup legacy managed skill path from earlier naming.
+	legacyName := managedSourceLegacySkillName(integration)
+	if legacyName != skillName {
+		if err := deleteManagedSourceSkillByName(ctx, storage, bucket, legacyName); err != nil {
+			return fmt.Errorf("cleanup legacy managed skill %q: %w", legacyName, err)
+		}
+	}
+
 	manifestKey := ManifestKey(skillName)
 	metaKey := Dir + "/" + skillName + "/" + InstalledMetaFile
 
@@ -118,7 +132,23 @@ func DeleteManagedSourceSkill(ctx context.Context, storage ManagedSkillStorage, 
 	}
 
 	bucket := storage.WorkspaceBucketName(workspaceExternalID)
-	prefix := Dir + "/" + ManagedSourceSkillName(integration) + "/"
+	skillName := ManagedSourceSkillName(integration)
+	if err := deleteManagedSourceSkillByName(ctx, storage, bucket, skillName); err != nil {
+		return err
+	}
+
+	// Also delete legacy path so rename does not leave stale managed skills behind.
+	legacyName := managedSourceLegacySkillName(integration)
+	if legacyName != skillName {
+		if err := deleteManagedSourceSkillByName(ctx, storage, bucket, legacyName); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func deleteManagedSourceSkillByName(ctx context.Context, storage ManagedSkillStorage, bucket, skillName string) error {
+	prefix := Dir + "/" + skillName + "/"
 	out, err := storage.ListObjects(ctx, bucket, prefix, 1000)
 	if err != nil {
 		return fmt.Errorf("list managed skill objects: %w", err)

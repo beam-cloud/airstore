@@ -57,7 +57,7 @@ func TestUpsertManagedSourceSkill(t *testing.T) {
 	}
 
 	bucket := store.WorkspaceBucketName("workspace-1")
-	manifestKey := bucket + "/" + ManifestKey("github-writeback")
+	manifestKey := bucket + "/" + ManifestKey("github")
 	manifest, ok := store.objects[manifestKey]
 	if !ok {
 		t.Fatalf("expected managed skill manifest upload")
@@ -70,7 +70,7 @@ func TestUpsertManagedSourceSkill(t *testing.T) {
 		t.Fatalf("expected manifest to include needs metadata: %s", content)
 	}
 
-	metaKey := bucket + "/" + Dir + "/github-writeback/" + InstalledMetaFile
+	metaKey := bucket + "/" + Dir + "/github/" + InstalledMetaFile
 	metaBytes, ok := store.objects[metaKey]
 	if !ok {
 		t.Fatalf("expected managed skill installed metadata upload")
@@ -87,20 +87,48 @@ func TestUpsertManagedSourceSkill(t *testing.T) {
 func TestDeleteManagedSourceSkill(t *testing.T) {
 	store := newMockManagedSkillStorage()
 	bucket := store.WorkspaceBucketName("workspace-1")
-	store.objects[bucket+"/"+Dir+"/github-writeback/SKILL.md"] = []byte("manifest")
+	store.objects[bucket+"/"+Dir+"/github/SKILL.md"] = []byte("manifest")
+	store.objects[bucket+"/"+Dir+"/github/.installed.json"] = []byte("{}")
+	store.objects[bucket+"/"+Dir+"/github-writeback/SKILL.md"] = []byte("legacy manifest")
 	store.objects[bucket+"/"+Dir+"/github-writeback/.installed.json"] = []byte("{}")
 	store.objects[bucket+"/"+Dir+"/other-skill/SKILL.md"] = []byte("keep")
 
 	if err := DeleteManagedSourceSkill(context.Background(), store, "workspace-1", "github"); err != nil {
 		t.Fatalf("delete managed skill: %v", err)
 	}
-	if _, ok := store.objects[bucket+"/"+Dir+"/github-writeback/SKILL.md"]; ok {
+	if _, ok := store.objects[bucket+"/"+Dir+"/github/SKILL.md"]; ok {
 		t.Fatalf("expected managed skill manifest to be deleted")
+	}
+	if _, ok := store.objects[bucket+"/"+Dir+"/github/.installed.json"]; ok {
+		t.Fatalf("expected managed skill metadata to be deleted")
+	}
+	if _, ok := store.objects[bucket+"/"+Dir+"/github-writeback/SKILL.md"]; ok {
+		t.Fatalf("expected legacy managed skill manifest to be deleted")
 	}
 	if _, ok := store.objects[bucket+"/"+Dir+"/github-writeback/.installed.json"]; ok {
 		t.Fatalf("expected managed skill metadata to be deleted")
 	}
 	if _, ok := store.objects[bucket+"/"+Dir+"/other-skill/SKILL.md"]; !ok {
 		t.Fatalf("expected non-target skill objects to remain")
+	}
+}
+
+func TestUpsertManagedSourceSkill_CleansUpLegacyPath(t *testing.T) {
+	store := newMockManagedSkillStorage()
+	bucket := store.WorkspaceBucketName("workspace-1")
+	store.objects[bucket+"/"+Dir+"/github-writeback/SKILL.md"] = []byte("legacy manifest")
+	store.objects[bucket+"/"+Dir+"/github-writeback/.installed.json"] = []byte("{}")
+
+	if err := UpsertManagedSourceSkill(context.Background(), store, "workspace-1", "github"); err != nil {
+		t.Fatalf("upsert managed skill: %v", err)
+	}
+	if _, ok := store.objects[bucket+"/"+Dir+"/github-writeback/SKILL.md"]; ok {
+		t.Fatalf("expected legacy managed skill manifest to be deleted")
+	}
+	if _, ok := store.objects[bucket+"/"+Dir+"/github-writeback/.installed.json"]; ok {
+		t.Fatalf("expected legacy managed skill metadata to be deleted")
+	}
+	if _, ok := store.objects[bucket+"/"+Dir+"/github/SKILL.md"]; !ok {
+		t.Fatalf("expected new managed skill manifest to exist")
 	}
 }
