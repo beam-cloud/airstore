@@ -3,7 +3,9 @@ package orchestration
 import (
 	"context"
 	"testing"
+	"time"
 
+	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -225,4 +227,108 @@ func TestCreateAgentRejectsUnsupportedRunner(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not supported")
+}
+
+func TestArchiveTaskRejectsNonTerminalState(t *testing.T) {
+	backend := newFakeBackend()
+	taskID := uuid.NewString()
+	backend.agentTasks[taskID] = &types.AgentTask{
+		ID:          taskID,
+		WorkspaceID: 42,
+		State:       types.AgentTaskStateRunning,
+	}
+
+	api := NewAgentAPI(backend, nil)
+	err := api.ArchiveTask(context.Background(), 42, taskID)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "idle or terminal")
+	require.Nil(t, backend.agentTasks[taskID].ArchivedAt)
+}
+
+func TestArchiveTaskMarksTerminalTaskArchived(t *testing.T) {
+	backend := newFakeBackend()
+	taskID := uuid.NewString()
+	backend.agentTasks[taskID] = &types.AgentTask{
+		ID:          taskID,
+		WorkspaceID: 42,
+		State:       types.AgentTaskStateDone,
+	}
+
+	api := NewAgentAPI(backend, nil)
+	err := api.ArchiveTask(context.Background(), 42, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, backend.agentTasks[taskID].ArchivedAt)
+}
+
+func TestArchiveTaskMarksIdleTaskArchived(t *testing.T) {
+	backend := newFakeBackend()
+	taskID := uuid.NewString()
+	backend.agentTasks[taskID] = &types.AgentTask{
+		ID:          taskID,
+		WorkspaceID: 42,
+		State:       types.AgentTaskStateIdle,
+	}
+
+	api := NewAgentAPI(backend, nil)
+	err := api.ArchiveTask(context.Background(), 42, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, backend.agentTasks[taskID].ArchivedAt)
+}
+
+func TestCancelTaskRejectsNonRunningState(t *testing.T) {
+	backend := newFakeBackend()
+	taskID := uuid.NewString()
+	backend.agentTasks[taskID] = &types.AgentTask{
+		ID:          taskID,
+		WorkspaceID: 42,
+		State:       types.AgentTaskStateIdle,
+	}
+
+	api := NewAgentAPI(backend, nil)
+	err := api.CancelTask(context.Background(), 42, taskID)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "only running tasks")
+	require.Equal(t, types.AgentTaskStateIdle, backend.agentTasks[taskID].State)
+}
+
+func TestPrependTaskPromptLogPrependsPrompt(t *testing.T) {
+	task := &types.AgentTask{
+		ID: "task-1",
+		PayloadJSON: map[string]any{
+			"message": "ship this release",
+		},
+		AcceptedAt: time.UnixMilli(1000),
+	}
+	logs := []common.TaskLogEntry{
+		{TaskID: "task-1", Timestamp: 1010, Stream: "stdout", Data: "working"},
+	}
+
+	out := prependTaskPromptLog(task, logs)
+	require.Len(t, out, 2)
+	require.Equal(t, "user", out[0].Stream)
+	require.Equal(t, "ship this release", out[0].Data)
+	require.Equal(t, "task_prompt", out[0].ChunkType)
+}
+
+func TestPrependTaskPromptLogDoesNotDuplicateExistingUserPrompt(t *testing.T) {
+	task := &types.AgentTask{
+		ID: "task-1",
+		PayloadJSON: map[string]any{
+			"prompt": "ship this release",
+		},
+		AcceptedAt: time.UnixMilli(1000),
+	}
+	logs := []common.TaskLogEntry{
+		{
+			TaskID:    "task-1",
+			Timestamp: 1005,
+			Stream:    "user",
+			Data:      "ship this release",
+			ChunkType: "user_input",
+		},
+	}
+
+	out := prependTaskPromptLog(task, logs)
+	require.Len(t, out, 1)
+	require.Equal(t, "user_input", out[0].ChunkType)
 }

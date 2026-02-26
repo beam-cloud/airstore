@@ -4,20 +4,25 @@ import (
 	"net/http"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
+	"github.com/beam-cloud/airstore/pkg/clients"
+	"github.com/beam-cloud/airstore/pkg/oauth"
 	"github.com/beam-cloud/airstore/pkg/repository"
+	"github.com/beam-cloud/airstore/pkg/skills"
 	"github.com/beam-cloud/airstore/pkg/sources"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/labstack/echo/v4"
+	"github.com/rs/zerolog/log"
 )
 
 type ConnectionsGroup struct {
 	g              *echo.Group
 	backend        repository.BackendRepository
 	sourceRegistry *sources.Registry
+	storage        *clients.StorageClient
 }
 
-func NewConnectionsGroup(g *echo.Group, backend repository.BackendRepository, sourceRegistry *sources.Registry) *ConnectionsGroup {
-	cg := &ConnectionsGroup{g: g, backend: backend, sourceRegistry: sourceRegistry}
+func NewConnectionsGroup(g *echo.Group, backend repository.BackendRepository, sourceRegistry *sources.Registry, storage *clients.StorageClient) *ConnectionsGroup {
+	cg := &ConnectionsGroup{g: g, backend: backend, sourceRegistry: sourceRegistry, storage: storage}
 	cg.g.POST("", cg.Create)
 	cg.g.GET("", cg.List)
 	cg.g.DELETE("/:connection_id", cg.Delete)
@@ -32,6 +37,47 @@ type CreateConnectionRequest struct {
 	RefreshToken    string            `json:"refresh_token,omitempty"`
 	APIKey          string            `json:"api_key,omitempty"`
 	Extra           map[string]string `json:"extra,omitempty"`
+}
+
+func serializeConnection(conn *types.IntegrationConnection) map[string]any {
+	out := map[string]any{
+		"id":               conn.Id,
+		"external_id":      conn.ExternalId,
+		"integration_type": conn.IntegrationType,
+		"scope":            conn.Scope,
+		"created_at":       conn.CreatedAt,
+		"updated_at":       conn.UpdatedAt,
+		"status":           "active",
+	}
+	if conn.MemberId != nil {
+		out["member_id"] = *conn.MemberId
+	}
+
+	extra := map[string]any{}
+	creds, err := repository.DecryptCredentials(conn)
+	if err == nil && creds != nil {
+		for key, value := range creds.Extra {
+			if key == types.CredentialMetaGrantedScopes || key == types.CredentialMetaCapabilities {
+				continue
+			}
+			extra[key] = value
+		}
+		scopes := types.CSVToList(creds.Extra[types.CredentialMetaGrantedScopes])
+		if len(scopes) > 0 {
+			extra["granted_scopes"] = scopes
+		}
+		capabilities := types.CSVToList(creds.Extra[types.CredentialMetaCapabilities])
+		if len(capabilities) > 0 {
+			extra["capabilities"] = capabilities
+		}
+		if types.SupportsSourceWrite(types.IntegrationName(conn.IntegrationType)) {
+			extra["write_enabled"] = types.CredentialsSupportSourceWrite(types.IntegrationName(conn.IntegrationType), creds)
+		}
+	}
+	if len(extra) > 0 {
+		out["extra"] = extra
+	}
+	return out
 }
 
 func (cg *ConnectionsGroup) Create(c echo.Context) error {
@@ -87,6 +133,7 @@ func (cg *ConnectionsGroup) Create(c echo.Context) error {
 		APIKey:       req.APIKey,
 		Extra:        req.Extra,
 	}
+	creds = oauth.AnnotateCredentials(req.IntegrationType, creds, oauth.ParseScopeString(req.Scope))
 
 	// Validate credentials if the provider supports it
 	if cg.sourceRegistry != nil {
@@ -103,8 +150,13 @@ func (cg *ConnectionsGroup) Create(c echo.Context) error {
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
+	if cg.storage != nil && types.SupportsSourceWrite(types.IntegrationName(req.IntegrationType)) {
+		if err := skills.UpsertManagedSourceSkill(ctx, cg.storage, ws.ExternalId, req.IntegrationType); err != nil {
+			log.Warn().Err(err).Str("workspace", ws.ExternalId).Str("integration", req.IntegrationType).Msg("failed to provision managed source skill")
+		}
+	}
 
-	return c.JSON(http.StatusCreated, Response{Success: true, Data: conn})
+	return c.JSON(http.StatusCreated, Response{Success: true, Data: serializeConnection(conn)})
 }
 
 func (cg *ConnectionsGroup) List(c echo.Context) error {
@@ -120,7 +172,11 @@ func (cg *ConnectionsGroup) List(c echo.Context) error {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 
-	return c.JSON(http.StatusOK, Response{Success: true, Data: conns})
+	result := make([]map[string]any, 0, len(conns))
+	for i := range conns {
+		result = append(result, serializeConnection(&conns[i]))
+	}
+	return c.JSON(http.StatusOK, Response{Success: true, Data: result})
 }
 
 func (cg *ConnectionsGroup) Delete(c echo.Context) error {
@@ -150,6 +206,31 @@ func (cg *ConnectionsGroup) Delete(c echo.Context) error {
 
 	if err := cg.backend.DeleteConnection(ctx, connId); err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+
+	if cg.storage != nil && types.SupportsSourceWrite(types.IntegrationName(conn.IntegrationType)) {
+		remaining, err := cg.backend.ListConnections(ctx, conn.WorkspaceId)
+		if err != nil {
+			log.Warn().Err(err).Uint("workspace_id", conn.WorkspaceId).Str("integration", conn.IntegrationType).Msg("failed to check remaining connections")
+		} else {
+			hasRemaining := false
+			for _, c := range remaining {
+				if c.IntegrationType == conn.IntegrationType {
+					hasRemaining = true
+					break
+				}
+			}
+			if !hasRemaining {
+				ws, wsErr := cg.backend.GetWorkspace(ctx, conn.WorkspaceId)
+				if wsErr != nil {
+					log.Warn().Err(wsErr).Uint("workspace_id", conn.WorkspaceId).Msg("failed to resolve workspace for managed skill cleanup")
+				} else if ws != nil {
+					if err := skills.DeleteManagedSourceSkill(ctx, cg.storage, ws.ExternalId, conn.IntegrationType); err != nil {
+						log.Warn().Err(err).Str("workspace", ws.ExternalId).Str("integration", conn.IntegrationType).Msg("failed to delete managed source skill")
+					}
+				}
+			}
+		}
 	}
 
 	return c.JSON(http.StatusOK, Response{Success: true})

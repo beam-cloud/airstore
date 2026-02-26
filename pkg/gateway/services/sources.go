@@ -820,6 +820,13 @@ func (s *SourceService) loadCredentials(ctx context.Context, pctx *sources.Provi
 			if err != nil {
 				log.Warn().Str("integration", integration).Str("provider", provider.Name()).Err(err).Msg("token refresh failed")
 			} else {
+				refreshed = oauth.MergeCredentialMetadata(refreshed, creds)
+				var scopes []string
+				if refreshed.Extra != nil {
+					scopes = types.CSVToList(refreshed.Extra[types.CredentialMetaGrantedScopes])
+				}
+				refreshed = oauth.AnnotateCredentials(integration, refreshed, scopes)
+
 				if _, err := s.backend.SaveConnection(ctx, conn.WorkspaceId, conn.MemberId, integration, refreshed, conn.Scope); err != nil {
 					log.Warn().Str("integration", integration).Err(err).Msg("failed to persist refreshed token")
 				}

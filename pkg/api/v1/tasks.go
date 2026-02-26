@@ -34,6 +34,7 @@ func (g *WorkspaceTasksGroup) registerRoutes() {
 	g.routerGroup.GET("/:task_id/logs", g.ListTaskLogs)
 	g.routerGroup.GET("/:task_id/stream", g.StreamTaskEvents)
 	g.routerGroup.POST("/:task_id/cancel", g.CancelTask)
+	g.routerGroup.POST("/:task_id/archive", g.ArchiveTask)
 }
 
 func (g *WorkspaceTasksGroup) CreateTask(c echo.Context) error {
@@ -231,9 +232,33 @@ func (g *WorkspaceTasksGroup) CancelTask(c echo.Context) error {
 		if _, ok := err.(*types.ErrAgentTaskNotFound); ok {
 			return ErrorResponse(c, http.StatusNotFound, "task not found")
 		}
+		if strings.Contains(strings.ToLower(err.Error()), "only running tasks") {
+			return ErrorResponse(c, http.StatusBadRequest, err.Error())
+		}
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 	return SuccessResponse(c, map[string]any{"status": "cancelled"})
+}
+
+func (g *WorkspaceTasksGroup) ArchiveTask(c echo.Context) error {
+	if g.agents == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "task service unavailable")
+	}
+	workspaceID, err := requireWorkspaceID(c)
+	if err != nil {
+		return err
+	}
+	taskID := c.Param("task_id")
+	if err := g.agents.ArchiveTask(c.Request().Context(), workspaceID, taskID); err != nil {
+		if _, ok := err.(*types.ErrAgentTaskNotFound); ok {
+			return ErrorResponse(c, http.StatusNotFound, "task not found")
+		}
+		if strings.Contains(strings.ToLower(err.Error()), "archived") {
+			return ErrorResponse(c, http.StatusBadRequest, err.Error())
+		}
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+	return SuccessResponse(c, map[string]any{"status": "archived"})
 }
 
 func statusForAcceptAgentCommandError(err error) int {

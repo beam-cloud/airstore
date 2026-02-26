@@ -26,6 +26,8 @@ var slackIntegrationScopes = map[string][]string{
 		"search:read",
 		"users:read",
 		"users:read.email",
+		"chat:write",
+		"chat:write.public",
 	},
 }
 
@@ -81,6 +83,11 @@ func (s *SlackProvider) AuthorizeURL(state, integrationType string) (string, err
 }
 
 func (s *SlackProvider) Exchange(ctx context.Context, code, integrationType string) (*types.IntegrationCredentials, error) {
+	scopes, ok := slackIntegrationScopes[integrationType]
+	if !ok {
+		return nil, fmt.Errorf("unsupported integration: %s", integrationType)
+	}
+
 	data := url.Values{
 		"client_id":     {s.clientID},
 		"client_secret": {s.clientSecret},
@@ -109,6 +116,7 @@ func (s *SlackProvider) Exchange(ctx context.Context, code, integrationType stri
 		OK          bool   `json:"ok"`
 		Error       string `json:"error"`
 		AccessToken string `json:"access_token"`
+		Scope       string `json:"scope"`
 		AppID       string `json:"app_id"`
 		Team        struct {
 			ID   string `json:"id"`
@@ -117,6 +125,7 @@ func (s *SlackProvider) Exchange(ctx context.Context, code, integrationType stri
 		AuthedUser struct {
 			ID          string `json:"id"`
 			AccessToken string `json:"access_token"`
+			Scope       string `json:"scope"`
 		} `json:"authed_user"`
 	}
 
@@ -133,7 +142,7 @@ func (s *SlackProvider) Exchange(ctx context.Context, code, integrationType stri
 		accessToken = result.AccessToken
 	}
 
-	return &types.IntegrationCredentials{
+	creds := &types.IntegrationCredentials{
 		AccessToken: accessToken,
 		Extra: map[string]string{
 			"team_id":   result.Team.ID,
@@ -141,7 +150,9 @@ func (s *SlackProvider) Exchange(ctx context.Context, code, integrationType stri
 			"user_id":   result.AuthedUser.ID,
 			"app_id":    result.AppID,
 		},
-	}, nil
+	}
+	grantedScopes := NormalizeScopes(ParseScopeString(result.Scope), ParseScopeString(result.AuthedUser.Scope), scopes)
+	return AnnotateCredentials(integrationType, creds, grantedScopes), nil
 }
 
 func (s *SlackProvider) Refresh(ctx context.Context, refreshToken string) (*types.IntegrationCredentials, error) {

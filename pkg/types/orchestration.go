@@ -185,6 +185,7 @@ type AgentTask struct {
 	QueuedAt       *time.Time     `json:"queued_at,omitempty" db:"queued_at"`
 	DispatchedAt   *time.Time     `json:"dispatched_at,omitempty" db:"dispatched_at"`
 	DroppedReason  *string        `json:"dropped_reason,omitempty" db:"dropped_reason"`
+	ArchivedAt     *time.Time     `json:"archived_at,omitempty" db:"archived_at"`
 	CreatedAt      time.Time      `json:"created_at" db:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at" db:"updated_at"`
 }

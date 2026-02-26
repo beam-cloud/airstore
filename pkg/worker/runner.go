@@ -10,13 +10,13 @@ import (
 )
 
 const (
-	agentProviderEnvKey          = "AIRSTORE_AGENT_PROVIDER"
-	agentModelEnvKey             = "AIRSTORE_AGENT_MODEL"
-	agentResumeSessionEnvKey     = "AIRSTORE_AGENT_RESUME_SESSION"
-	agentSessionIDEnvKey         = "AIRSTORE_AGENT_SESSION_ID"
-	agentSystemPromptEnvKey      = "AIRSTORE_AGENT_SYSTEM_PROMPT"
-	agentSystemPromptModeEnvKey  = "AIRSTORE_AGENT_SYSTEM_PROMPT_MODE"
-	agentWorkspaceDirEnvKey      = "AIRSTORE_AGENT_WORKSPACE_DIR"
+	agentProviderEnvKey         = "AIRSTORE_AGENT_PROVIDER"
+	agentModelEnvKey            = "AIRSTORE_AGENT_MODEL"
+	agentResumeSessionEnvKey    = "AIRSTORE_AGENT_RESUME_SESSION"
+	agentSessionIDEnvKey        = "AIRSTORE_AGENT_SESSION_ID"
+	agentSystemPromptEnvKey     = "AIRSTORE_AGENT_SYSTEM_PROMPT"
+	agentSystemPromptModeEnvKey = "AIRSTORE_AGENT_SYSTEM_PROMPT_MODE"
+	agentWorkspaceDirEnvKey     = "AIRSTORE_AGENT_WORKSPACE_DIR"
 
 	systemPromptModeReplace = "replace"
 
@@ -39,8 +39,23 @@ type AgentExecutionRunner interface {
 // between turns — no shell loop, no stdin pipe.
 type TurnRunner interface {
 	AgentExecutionRunner
-	BuildTurnArgs(prompt string, env map[string]string, continueSession bool) []string
+	BuildTurnArgs(prompt string, env map[string]string, mode TurnArgMode) []string
 }
+
+type TurnArgMode string
+
+const (
+	// TurnArgModeFirstStart is a normal first turn; it preserves explicit session ids.
+	TurnArgModeFirstStart TurnArgMode = "first_start"
+	// TurnArgModeFirstResumeLatest resumes from latest local/VFS state.
+	TurnArgModeFirstResumeLatest TurnArgMode = "first_resume_latest"
+	// TurnArgModeFirstResumeByID resumes using an explicit session id.
+	TurnArgModeFirstResumeByID TurnArgMode = "first_resume_by_id"
+	// TurnArgModeFirstFreshNoSession starts a new session without an explicit session id.
+	TurnArgModeFirstFreshNoSession TurnArgMode = "first_fresh_no_session"
+	// TurnArgModeFollowup is used for non-first turns.
+	TurnArgModeFollowup TurnArgMode = "followup"
+)
 
 type ClaudeCodeRunnerOptions struct {
 	AnthropicAPIKey string
@@ -89,20 +104,33 @@ func (r *ClaudeCodeRunner) BuildEntrypoint(task types.RunExecution, env map[stri
 // BuildTurnArgs returns the argv for a single interactive turn.
 // Each turn runs claude --print as a separate process in the sandbox;
 // the Go worker manages the loop between turns.
-func (r *ClaudeCodeRunner) BuildTurnArgs(prompt string, env map[string]string, continueSession bool) []string {
+func (r *ClaudeCodeRunner) BuildTurnArgs(prompt string, env map[string]string, mode TurnArgMode) []string {
 	r.injectEnv(env)
 	model := strings.TrimSpace(env[agentModelEnvKey])
 	sessionID := claudeSessionIDFromEnv(env)
 
 	builder := newPromptEntrypointBuilder("claude")
-	if continueSession {
+	switch mode {
+	case TurnArgModeFirstResumeLatest:
+		builder.withFlag("--continue")
+	case TurnArgModeFirstResumeByID:
 		if sessionID != "" {
 			builder.withKeyValue("--resume", sessionID)
 		} else {
 			builder.withFlag("--continue")
 		}
-	} else if sessionID != "" {
-		builder.withKeyValue("--session-id", sessionID)
+	case TurnArgModeFirstFreshNoSession:
+		// Intentionally omit session flags.
+	case TurnArgModeFollowup:
+		if sessionID != "" {
+			builder.withKeyValue("--resume", sessionID)
+		} else {
+			builder.withFlag("--continue")
+		}
+	default:
+		if sessionID != "" {
+			builder.withKeyValue("--session-id", sessionID)
+		}
 	}
 	builder.
 		withFlag("--print").

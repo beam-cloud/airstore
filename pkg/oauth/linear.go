@@ -80,6 +80,11 @@ func (l *LinearProvider) AuthorizeURL(state, integrationType string) (string, er
 }
 
 func (l *LinearProvider) Exchange(ctx context.Context, code, integrationType string) (*types.IntegrationCredentials, error) {
+	scopes, ok := linearIntegrationScopes[integrationType]
+	if !ok {
+		return nil, fmt.Errorf("unsupported integration: %s", integrationType)
+	}
+
 	data := url.Values{
 		"client_id":     {l.clientID},
 		"client_secret": {l.clientSecret},
@@ -109,6 +114,7 @@ func (l *LinearProvider) Exchange(ctx context.Context, code, integrationType str
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
 		ExpiresIn    int    `json:"expires_in"`
+		Scope        string `json:"scope"`
 	}
 
 	if err := decodeJSON(resp.Body, &result); err != nil {
@@ -124,8 +130,12 @@ func (l *LinearProvider) Exchange(ctx context.Context, code, integrationType str
 		expiry := time.Now().Add(time.Duration(result.ExpiresIn) * time.Second)
 		creds.ExpiresAt = &expiry
 	}
-
-	return creds, nil
+	grantedScopes := NormalizeScopes(ParseScopeString(result.Scope))
+	if len(grantedScopes) == 0 {
+		// Fallback for providers that omit scope in the token response.
+		grantedScopes = scopes
+	}
+	return AnnotateCredentials(integrationType, creds, grantedScopes), nil
 }
 
 func (l *LinearProvider) Refresh(ctx context.Context, refreshToken string) (*types.IntegrationCredentials, error) {

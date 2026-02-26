@@ -64,7 +64,7 @@ func TestBuildEntrypointOmitsEmptyModel(t *testing.T) {
 func TestBuildTurnArgsFirstTurn(t *testing.T) {
 	runner := NewClaudeCodeRunner(ClaudeCodeRunnerOptions{})
 	env := map[string]string{agentModelEnvKey: "claude-sonnet-4"}
-	args := runner.BuildTurnArgs("what is this?", env, false)
+	args := runner.BuildTurnArgs("what is this?", env, TurnArgModeFirstStart)
 
 	joined := strings.Join(args, " ")
 	if strings.Contains(joined, "--continue") {
@@ -84,7 +84,7 @@ func TestBuildTurnArgsFirstTurn(t *testing.T) {
 func TestBuildTurnArgsContinueSession(t *testing.T) {
 	runner := NewClaudeCodeRunner(ClaudeCodeRunnerOptions{})
 	env := map[string]string{agentModelEnvKey: "claude-sonnet-4"}
-	args := runner.BuildTurnArgs("follow up", env, true)
+	args := runner.BuildTurnArgs("follow up", env, TurnArgModeFollowup)
 
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "--continue") {
@@ -101,7 +101,7 @@ func TestBuildTurnArgsContinueSessionUsesResumeWithSessionID(t *testing.T) {
 		agentModelEnvKey:     "claude-sonnet-4",
 		agentSessionIDEnvKey: "550e8400-e29b-41d4-a716-446655440000",
 	}
-	args := runner.BuildTurnArgs("follow up", env, true)
+	args := runner.BuildTurnArgs("follow up", env, TurnArgModeFollowup)
 
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "--resume 550e8400-e29b-41d4-a716-446655440000") {
@@ -118,7 +118,7 @@ func TestBuildTurnArgsFirstTurnUsesSessionIDWhenAvailable(t *testing.T) {
 		agentModelEnvKey:     "claude-sonnet-4",
 		agentSessionIDEnvKey: "550e8400-e29b-41d4-a716-446655440000",
 	}
-	args := runner.BuildTurnArgs("first turn", env, false)
+	args := runner.BuildTurnArgs("first turn", env, TurnArgModeFirstStart)
 
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "--session-id 550e8400-e29b-41d4-a716-446655440000") {
@@ -135,7 +135,7 @@ func TestBuildTurnArgsContinueSessionFallsBackToContinueWhenSessionIDInvalid(t *
 		agentModelEnvKey:     "claude-sonnet-4",
 		agentSessionIDEnvKey: "not-a-uuid",
 	}
-	args := runner.BuildTurnArgs("follow up", env, true)
+	args := runner.BuildTurnArgs("follow up", env, TurnArgModeFollowup)
 
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "--continue") {
@@ -146,12 +146,46 @@ func TestBuildTurnArgsContinueSessionFallsBackToContinueWhenSessionIDInvalid(t *
 	}
 }
 
+func TestBuildTurnArgsFirstResumeLatestPrefersContinue(t *testing.T) {
+	runner := NewClaudeCodeRunner(ClaudeCodeRunnerOptions{})
+	env := map[string]string{
+		agentModelEnvKey:     "claude-sonnet-4",
+		agentSessionIDEnvKey: "550e8400-e29b-41d4-a716-446655440000",
+	}
+	args := runner.BuildTurnArgs("resume latest", env, TurnArgModeFirstResumeLatest)
+
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--continue") {
+		t.Fatalf("expected --continue for VFS-first resume: %v", args)
+	}
+	if strings.Contains(joined, "--resume") {
+		t.Fatalf("did not expect --resume in VFS-first mode: %v", args)
+	}
+	if strings.Contains(joined, "--session-id") {
+		t.Fatalf("did not expect --session-id in VFS-first mode: %v", args)
+	}
+}
+
+func TestBuildTurnArgsFirstFreshNoSessionOmitsSessionFlags(t *testing.T) {
+	runner := NewClaudeCodeRunner(ClaudeCodeRunnerOptions{})
+	env := map[string]string{
+		agentModelEnvKey:     "claude-sonnet-4",
+		agentSessionIDEnvKey: "550e8400-e29b-41d4-a716-446655440000",
+	}
+	args := runner.BuildTurnArgs("fresh fallback", env, TurnArgModeFirstFreshNoSession)
+
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "--session-id") || strings.Contains(joined, "--resume") || strings.Contains(joined, "--continue") {
+		t.Fatalf("did not expect any session flags in fresh fallback mode: %v", args)
+	}
+}
+
 func TestBuildTurnArgsInjectsAPIKey(t *testing.T) {
 	runner := NewClaudeCodeRunner(ClaudeCodeRunnerOptions{
 		AnthropicAPIKey: "sk-test-key",
 	})
 	env := map[string]string{}
-	_ = runner.BuildTurnArgs("hello", env, false)
+	_ = runner.BuildTurnArgs("hello", env, TurnArgModeFirstStart)
 
 	if env["ANTHROPIC_API_KEY"] != "sk-test-key" {
 		t.Fatalf("expected API key injection, got %q", env["ANTHROPIC_API_KEY"])
@@ -161,7 +195,7 @@ func TestBuildTurnArgsInjectsAPIKey(t *testing.T) {
 func TestBuildTurnArgsSetsClaudeConfigDirDefault(t *testing.T) {
 	runner := NewClaudeCodeRunner(ClaudeCodeRunnerOptions{})
 	env := map[string]string{}
-	_ = runner.BuildTurnArgs("hello", env, false)
+	_ = runner.BuildTurnArgs("hello", env, TurnArgModeFirstStart)
 
 	if env[claudeConfigDirEnvKey] != claudeConfigDirPath {
 		t.Fatalf(
@@ -178,7 +212,7 @@ func TestBuildTurnArgsSetsClaudeConfigDirFromAgentWorkspaceDir(t *testing.T) {
 	env := map[string]string{
 		agentWorkspaceDirEnvKey: "/workspace/agents/prospect-bot/",
 	}
-	_ = runner.BuildTurnArgs("hello", env, false)
+	_ = runner.BuildTurnArgs("hello", env, TurnArgModeFirstStart)
 
 	if env[claudeConfigDirEnvKey] != "/workspace/agents/prospect-bot/.claude" {
 		t.Fatalf("expected agent workspace scoped CLAUDE_CONFIG_DIR, got %q", env[claudeConfigDirEnvKey])
@@ -190,7 +224,7 @@ func TestBuildTurnArgsPreservesExistingClaudeConfigDir(t *testing.T) {
 	env := map[string]string{
 		claudeConfigDirEnvKey: "/workspace/custom-claude",
 	}
-	_ = runner.BuildTurnArgs("hello", env, false)
+	_ = runner.BuildTurnArgs("hello", env, TurnArgModeFirstStart)
 
 	if env[claudeConfigDirEnvKey] != "/workspace/custom-claude" {
 		t.Fatalf("expected existing CLAUDE_CONFIG_DIR to be preserved, got %q", env[claudeConfigDirEnvKey])
@@ -200,7 +234,7 @@ func TestBuildTurnArgsPreservesExistingClaudeConfigDir(t *testing.T) {
 func TestBuildTurnArgsDoesNotSetHomeWhenUnset(t *testing.T) {
 	runner := NewClaudeCodeRunner(ClaudeCodeRunnerOptions{})
 	env := map[string]string{}
-	_ = runner.BuildTurnArgs("hello", env, false)
+	_ = runner.BuildTurnArgs("hello", env, TurnArgModeFirstStart)
 
 	if _, exists := env["HOME"]; exists {
 		t.Fatalf("expected HOME to remain unset when not provided, got %q", env["HOME"])
@@ -212,7 +246,7 @@ func TestBuildTurnArgsPreservesExistingHome(t *testing.T) {
 	env := map[string]string{
 		"HOME": "/home/sandbox",
 	}
-	_ = runner.BuildTurnArgs("hello", env, false)
+	_ = runner.BuildTurnArgs("hello", env, TurnArgModeFirstStart)
 
 	if env["HOME"] != "/home/sandbox" {
 		t.Fatalf("expected existing HOME to be preserved, got %q", env["HOME"])
@@ -222,7 +256,7 @@ func TestBuildTurnArgsPreservesExistingHome(t *testing.T) {
 func TestBuildTurnArgsSetsShellDefault(t *testing.T) {
 	runner := NewClaudeCodeRunner(ClaudeCodeRunnerOptions{})
 	env := map[string]string{}
-	_ = runner.BuildTurnArgs("hello", env, false)
+	_ = runner.BuildTurnArgs("hello", env, TurnArgModeFirstStart)
 
 	if env["SHELL"] != claudeDefaultShellEnv {
 		t.Fatalf("expected SHELL=%q, got %q", claudeDefaultShellEnv, env["SHELL"])
@@ -232,7 +266,7 @@ func TestBuildTurnArgsSetsShellDefault(t *testing.T) {
 func TestBuildTurnArgsPreservesExistingShell(t *testing.T) {
 	runner := NewClaudeCodeRunner(ClaudeCodeRunnerOptions{})
 	env := map[string]string{"SHELL": "/bin/zsh"}
-	_ = runner.BuildTurnArgs("hello", env, false)
+	_ = runner.BuildTurnArgs("hello", env, TurnArgModeFirstStart)
 
 	if env["SHELL"] != "/bin/zsh" {
 		t.Fatalf("expected existing SHELL to be preserved, got %q", env["SHELL"])

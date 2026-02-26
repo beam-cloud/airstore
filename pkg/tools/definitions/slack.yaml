@@ -1,0 +1,19 @@
+name: slack
+description: Post messages to Slack channels
+icon: slack
+
+commands:
+  post-message:
+    description: Post a message to a Slack channel
+    params:
+      - name: channel
+        type: string
+        required: true
+        position: 0
+        description: "Channel ID or name"
+
+      - name: text
+        type: string
+        required: true
+        position: 1
+        description: "Message text"

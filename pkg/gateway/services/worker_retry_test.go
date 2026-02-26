@@ -220,6 +220,20 @@ func (b *retryTestBackend) ListExpiredClaimedAgentRuns(_ context.Context, now ti
 	return runs, nil
 }
 
+func (b *retryTestBackend) ListClaimedAgentRuns(_ context.Context, limit int) ([]*types.AgentRun, error) {
+	runs := make([]*types.AgentRun, 0)
+	for _, run := range b.runs {
+		if run == nil || !run.Status.IsActive() || run.ClaimedByWorker == nil {
+			continue
+		}
+		runs = append(runs, run)
+	}
+	if limit > 0 && len(runs) > limit {
+		runs = runs[:limit]
+	}
+	return runs, nil
+}
+
 func (b *retryTestBackend) ListStaleUnclaimedAgentRuns(_ context.Context, cutoff time.Time, limit int) ([]*types.AgentRun, error) {
 	runs := make([]*types.AgentRun, 0)
 	for _, run := range b.runs {
@@ -301,9 +315,10 @@ func (b *retryTestBackend) nextExecutionExternalID() string {
 
 type capturingTaskQueue struct {
 	repository.TaskQueue
-	pushed        []*types.RunExecution
-	failed        []string
-	stateByTaskID map[string]*types.RunExecutionState
+	pushed         []*types.RunExecution
+	failed         []string
+	stateByTaskID  map[string]*types.RunExecutionState
+	resultByTaskID map[string]*types.RunExecutionResult
 }
 
 func (q *capturingTaskQueue) Push(_ context.Context, task *types.RunExecution) error {
@@ -333,6 +348,16 @@ func (q *capturingTaskQueue) GetState(_ context.Context, taskID string) (*types.
 		return state, nil
 	}
 	return nil, fmt.Errorf("task state not found")
+}
+
+func (q *capturingTaskQueue) GetResult(_ context.Context, taskID string) (*types.RunExecutionResult, error) {
+	if q.resultByTaskID == nil {
+		return nil, fmt.Errorf("result unavailable in capturing queue")
+	}
+	if result, ok := q.resultByTaskID[taskID]; ok {
+		return result, nil
+	}
+	return nil, fmt.Errorf("task result not found")
 }
 
 type staticWorkerRepo struct {
@@ -774,6 +799,82 @@ func TestRecoverOrphanedRunExhaustedRetriesFinalizesTask(t *testing.T) {
 	require.Equal(t, types.AgentTaskStateDone, task.State)
 	require.NotNil(t, task.TargetRunID)
 	require.Equal(t, runID, *task.TargetRunID)
+}
+
+func TestProcessClaimedRunReconcilesTerminalQueueState(t *testing.T) {
+	backend := newRetryTestBackend()
+	queue := &capturingTaskQueue{
+		stateByTaskID:  map[string]*types.RunExecutionState{},
+		resultByTaskID: map[string]*types.RunExecutionResult{},
+	}
+	svc := &WorkerService{
+		backend:   backend,
+		taskQueue: queue,
+	}
+
+	runID := "run-claimed-terminal-1"
+	originTaskID := "task-claimed-terminal-1"
+	seedRecoverableRunContext(backend, runID, originTaskID, 2)
+	workerID := "worker-claimed-terminal"
+	claimHeartbeat := time.Now().Add(-20 * time.Second)
+	claimExpires := time.Now().Add(20 * time.Second)
+	backend.runs[runID].ClaimedByWorker = &workerID
+	backend.runs[runID].ClaimHeartbeatAt = &claimHeartbeat
+	backend.runs[runID].ClaimExpiresAt = &claimExpires
+
+	queue.stateByTaskID[runID] = &types.RunExecutionState{
+		ID:         runID,
+		Status:     types.RunExecutionStatusComplete,
+		ExitCode:   0,
+		FinishedAt: time.Now().Add(-30 * time.Second),
+	}
+	queue.resultByTaskID[runID] = &types.RunExecutionResult{
+		ID:       runID,
+		ExitCode: 0,
+	}
+
+	outcome, err := svc.processClaimedRun(context.Background(), backend.runs[runID])
+	require.NoError(t, err)
+	require.True(t, outcome.detected)
+	require.True(t, outcome.recovered)
+	require.Equal(t, types.AgentRunStatusOK, backend.runs[runID].Status)
+	require.Nil(t, backend.runs[runID].ClaimedByWorker)
+	require.Equal(t, types.AgentTaskStateDone, backend.tasks[originTaskID].State)
+}
+
+func TestProcessClaimedRunSkipsFreshTerminalQueueState(t *testing.T) {
+	backend := newRetryTestBackend()
+	queue := &capturingTaskQueue{
+		stateByTaskID:  map[string]*types.RunExecutionState{},
+		resultByTaskID: map[string]*types.RunExecutionResult{},
+	}
+	svc := &WorkerService{
+		backend:   backend,
+		taskQueue: queue,
+	}
+
+	runID := "run-claimed-fresh-1"
+	originTaskID := "task-claimed-fresh-1"
+	seedRecoverableRunContext(backend, runID, originTaskID, 2)
+	workerID := "worker-claimed-fresh"
+	backend.runs[runID].ClaimedByWorker = &workerID
+
+	queue.stateByTaskID[runID] = &types.RunExecutionState{
+		ID:         runID,
+		Status:     types.RunExecutionStatusComplete,
+		ExitCode:   0,
+		FinishedAt: time.Now(),
+	}
+	queue.resultByTaskID[runID] = &types.RunExecutionResult{
+		ID:       runID,
+		ExitCode: 0,
+	}
+
+	outcome, err := svc.processClaimedRun(context.Background(), backend.runs[runID])
+	require.NoError(t, err)
+	require.False(t, outcome.detected)
+	require.False(t, outcome.recovered)
+	require.Equal(t, types.AgentRunStatusRunning, backend.runs[runID].Status)
 }
 
 func TestProcessStaleUnclaimedRunRecoversWhenWorkerMissing(t *testing.T) {

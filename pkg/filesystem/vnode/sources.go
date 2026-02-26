@@ -183,13 +183,15 @@ func (v *SourcesVNode) Getattr(path string) (*FileInfo, error) {
 	}
 
 	// Fast path: check stat cache first.
-	// When compression is on, the stat cache may hold raw (uncompressed)
-	// sizes from Readdir. Only trust it for directories or when we have
-	// prefetched content with the accurate size.
+	// For files, cached listing metadata may be unknown/stale. Only trust
+	// file sizes that are non-zero and non-placeholder in no-compression
+	// mode, or when we have prefetched content (always authoritative).
+	// Otherwise fall through to normal resolution/prefetch.
 	if info := v.getCachedStat(path); info != nil {
 		isDir := info.Mode&syscall.S_IFDIR != 0
 		_, _, hasContent := v.getOpenContent(path)
-		if v.compression == "" || isDir || hasContent {
+		hasTrustedFileSize := info.Size > 0 && info.Size != listingPlaceholderSize
+		if isDir || hasContent || (v.compression == "" && hasTrustedFileSize) {
 			v.applyOpenContentSize(path, info)
 			return info, nil
 		}
@@ -278,7 +280,7 @@ func (v *SourcesVNode) Getattr(path string) (*FileInfo, error) {
 		// Fast path (no compression): use readdir cache size for ls -la.
 		if v.compression == "" {
 			size, mtime, ok := v.getQueryResultMetaCached(q.Path, filename)
-			if ok && size > 0 {
+			if ok && size > 0 && size != listingPlaceholderSize {
 				info := NewFileInfo(PathIno(path), size, 0644)
 				if mtime > 0 {
 					t := time.Unix(mtime, 0)
@@ -886,7 +888,8 @@ func protoToSourceView(v *pb.SourceView) *types.SourceView {
 // Must be large enough for FUSE to read all content (diffs can be several MB).
 const defaultUnknownFileSize = 10 * 1024 * 1024 // 10MB
 
-// listingPlaceholderSize avoids per-entry Getattr calls during listings.
+// listingPlaceholderSize is a UI/listing hint only (not authoritative file size).
+// Reads should resolve real size via open-content or prefetch paths.
 const listingPlaceholderSize = 4 * 1024 // 4KB
 
 func listingSize(size int64) int64 {

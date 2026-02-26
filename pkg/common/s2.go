@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -366,4 +367,132 @@ func stringFromAny(value any) string {
 		return ""
 	}
 	return string(body)
+}
+
+const redactedPlaceholder = "[REDACTED]"
+
+var (
+	sensitiveJSONStringValuePattern = regexp.MustCompile(`(?i)("([^"]*(?:api[_-]?key|secret|token|password|authorization|session_key|private_key|access_key)[^"]*)"\s*:\s*)"(.*?)"`)
+	sensitiveAssignmentPattern      = regexp.MustCompile(`(?i)\b([A-Z0-9_]*(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD|AUTHORIZATION|SESSION_KEY|PRIVATE_KEY|ACCESS_KEY)[A-Z0-9_]*)\s*=\s*("[^"]*"|'[^']*'|[^\s,;]+)`)
+	bearerTokenPattern              = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+\-/]+=*\b`)
+	anthropicKeyPattern             = regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{8,}\b`)
+)
+
+func isSensitiveKey(key string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	if normalized == "" {
+		return false
+	}
+	normalized = strings.ReplaceAll(normalized, "-", "_")
+	normalized = strings.ReplaceAll(normalized, ".", "_")
+
+	for _, needle := range []string{
+		"api_key",
+		"apikey",
+		"secret",
+		"token",
+		"password",
+		"authorization",
+		"session_key",
+		"private_key",
+		"access_key",
+	} {
+		if strings.Contains(normalized, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// RedactSensitiveString masks likely secrets in plain text payloads.
+func RedactSensitiveString(raw string) string {
+	if raw == "" {
+		return raw
+	}
+	redacted := sensitiveJSONStringValuePattern.ReplaceAllString(raw, `${1}"`+redactedPlaceholder+`"`)
+	redacted = sensitiveAssignmentPattern.ReplaceAllString(redacted, `${1}=`+redactedPlaceholder)
+	redacted = bearerTokenPattern.ReplaceAllString(redacted, `Bearer `+redactedPlaceholder)
+	redacted = anthropicKeyPattern.ReplaceAllString(redacted, redactedPlaceholder)
+	return redacted
+}
+
+// RedactSensitiveValue walks a nested value and masks secret-like content.
+func RedactSensitiveValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return RedactSensitiveMap(typed)
+	case map[string]string:
+		out := make(map[string]string, len(typed))
+		for key, val := range typed {
+			if isSensitiveKey(key) {
+				out[key] = redactedPlaceholder
+				continue
+			}
+			out[key] = RedactSensitiveString(val)
+		}
+		return out
+	case []any:
+		out := make([]any, len(typed))
+		for idx, item := range typed {
+			out[idx] = RedactSensitiveValue(item)
+		}
+		return out
+	case []string:
+		out := make([]string, len(typed))
+		for idx, item := range typed {
+			out[idx] = RedactSensitiveString(item)
+		}
+		return out
+	case string:
+		return RedactSensitiveString(typed)
+	default:
+		return value
+	}
+}
+
+// RedactSensitiveMap clones and redacts a JSON-like map.
+func RedactSensitiveMap(payload map[string]any) map[string]any {
+	if payload == nil {
+		return nil
+	}
+	out := make(map[string]any, len(payload))
+	for key, value := range payload {
+		if isSensitiveKey(key) {
+			out[key] = redactedPlaceholder
+			continue
+		}
+		out[key] = RedactSensitiveValue(value)
+	}
+	return out
+}
+
+// RedactSensitiveMaps clones and redacts a list of JSON-like maps.
+func RedactSensitiveMaps(items []map[string]any) []map[string]any {
+	if len(items) == 0 {
+		return items
+	}
+	out := make([]map[string]any, len(items))
+	for idx, item := range items {
+		out[idx] = RedactSensitiveMap(item)
+	}
+	return out
+}
+
+// RedactTaskLogEntry clones a log entry with secret-like content redacted.
+func RedactTaskLogEntry(entry TaskLogEntry) TaskLogEntry {
+	entry.Data = RedactSensitiveString(entry.Data)
+	entry.Metadata = RedactSensitiveMap(entry.Metadata)
+	return entry
+}
+
+// RedactTaskLogEntries clones and redacts a task log slice.
+func RedactTaskLogEntries(entries []TaskLogEntry) []TaskLogEntry {
+	if len(entries) == 0 {
+		return entries
+	}
+	out := make([]TaskLogEntry, len(entries))
+	for idx, entry := range entries {
+		out[idx] = RedactTaskLogEntry(entry)
+	}
+	return out
 }

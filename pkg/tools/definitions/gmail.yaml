@@ -1,0 +1,52 @@
+name: gmail
+description: Write operations for Gmail
+icon: mail
+
+commands:
+  create-draft:
+    description: Create a Gmail draft email
+    params:
+      - name: to
+        type: string
+        required: true
+        position: 0
+        description: "Recipient email address"
+
+      - name: subject
+        type: string
+        required: true
+        position: 1
+        description: "Email subject"
+
+      - name: body
+        type: string
+        required: true
+        position: 2
+        description: "Email body text"
+
+  send-email:
+    description: Send a Gmail email immediately
+    params:
+      - name: to
+        type: string
+        required: true
+        position: 0
+        description: "Recipient email address"
+
+      - name: subject
+        type: string
+        required: true
+        position: 1
+        description: "Email subject"
+
+      - name: body
+        type: string
+        required: true
+        position: 2
+        description: "Email body text"
+
+      - name: thread_id
+        type: string
+        short: -t
+        flag: --thread-id
+        description: "Optional Gmail thread ID to send within"

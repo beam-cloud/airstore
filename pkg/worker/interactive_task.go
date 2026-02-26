@@ -51,12 +51,12 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.RunExecution
 
 	result := w.runInteractiveSession(ctx, task, sandboxID)
 
-	go func() {
-		w.sandboxManager.Delete(sandboxID, true)
-		time.Sleep(mountFlushGracePeriod)
-		w.sandboxManager.cleanupMount(task.ExternalId)
-		addTaskExecutionContext(log.Info(), task).Msg("interactive sandbox cleanup complete")
-	}()
+	if err := w.sandboxManager.Delete(sandboxID, true); err != nil {
+		addTaskExecutionContext(log.Warn().Err(err), task).Msg("interactive sandbox delete failed during cleanup")
+	}
+	time.Sleep(mountFlushGracePeriod)
+	w.sandboxManager.cleanupMount(task.ExternalId)
+	addTaskExecutionContext(log.Info(), task).Msg("interactive sandbox cleanup complete")
 
 	return result, nil
 }
@@ -153,42 +153,50 @@ func (w *Worker) runTurnSession(
 ) error {
 	prompt := strings.TrimSpace(task.Prompt)
 	isFirstTurn := true
-	resumeFromFirstTurn := shouldContinueFromFirstTurn(env)
+	sessionEnv := cloneTurnEnv(env)
+	firstTurnStrategies := buildFirstTurnStrategies(sessionEnv)
 
 	for prompt != "" {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 
-		continueSession := !isFirstTurn || resumeFromFirstTurn
-		args := runner.BuildTurnArgs(prompt, env, continueSession)
-		addTaskExecutionContext(
-			log.Info().
-				Bool("first_turn", isFirstTurn).
-				Bool("continue_session", continueSession).
-				Str("prompt", prompt[:min(50, len(prompt))]),
-			task,
-		).Msg("executing turn")
-
-		signalActivity(activityCh)
-		err := w.sandboxManager.ExecPTY(ctx, sandboxID, args, env, stdout)
-		signalActivity(activityCh)
-
-		if err != nil {
-			if isFirstTurn && resumeFromFirstTurn {
-				// Session resume failed — the persisted conversation state may
-				// be corrupt (e.g. orphaned tool_result blocks from a previous
-				// sandbox teardown race). Retry as a fresh session.
-				addTaskExecutionContext(
-					log.Warn().Err(err),
-					task,
-				).Msg("session resume failed, retrying with fresh session")
-				resumeFromFirstTurn = false
-				continue
+		if isFirstTurn {
+			nextEnv, err := w.executeFirstTurnWithStrategy(
+				ctx,
+				task,
+				sandboxID,
+				runner,
+				sessionEnv,
+				stdout,
+				activityCh,
+				prompt,
+				firstTurnStrategies,
+			)
+			if err != nil {
+				return err
 			}
-			return err
+			sessionEnv = nextEnv
+			isFirstTurn = false
+		} else {
+			err := w.executeTurn(
+				ctx,
+				task,
+				sandboxID,
+				runner,
+				sessionEnv,
+				stdout,
+				activityCh,
+				prompt,
+				TurnArgModeFollowup,
+				1,
+				1,
+				"",
+			)
+			if err != nil {
+				return err
+			}
 		}
-		isFirstTurn = false
 
 		addTaskExecutionContext(log.Info(), task).Msg("turn complete, waiting for follow-up input")
 		prompt = w.waitForFollowupInput(ctx, task.ExternalId, DefaultBetweenTurnsTimeout)
@@ -267,6 +275,173 @@ func shouldContinueFromFirstTurn(env map[string]string) bool {
 	default:
 		return false
 	}
+}
+
+type firstTurnStrategy struct {
+	mode             TurnArgMode
+	transitionReason string
+}
+
+func buildFirstTurnStrategies(env map[string]string) []firstTurnStrategy {
+	if !shouldContinueFromFirstTurn(env) {
+		return []firstTurnStrategy{
+			{
+				mode:             TurnArgModeFirstStart,
+				transitionReason: "resume not requested",
+			},
+		}
+	}
+
+	strategies := []firstTurnStrategy{
+		{
+			mode:             TurnArgModeFirstResumeLatest,
+			transitionReason: "resume requested; prefer local VFS state",
+		},
+	}
+	if strings.TrimSpace(env[agentSessionIDEnvKey]) != "" {
+		strategies = append(
+			strategies,
+			firstTurnStrategy{
+				mode:             TurnArgModeFirstResumeByID,
+				transitionReason: "resume fallback using explicit session id",
+			},
+		)
+	}
+	strategies = append(
+		strategies,
+		firstTurnStrategy{
+			mode:             TurnArgModeFirstFreshNoSession,
+			transitionReason: "final fallback to fresh session without explicit id",
+		},
+	)
+	return strategies
+}
+
+func cloneTurnEnv(env map[string]string) map[string]string {
+	if len(env) == 0 {
+		return map[string]string{}
+	}
+	cloned := make(map[string]string, len(env))
+	for key, value := range env {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func envForFirstTurnStrategy(base map[string]string, strategy firstTurnStrategy) map[string]string {
+	env := cloneTurnEnv(base)
+	if strategy.mode == TurnArgModeFirstFreshNoSession {
+		delete(env, agentSessionIDEnvKey)
+		delete(env, agentResumeSessionEnvKey)
+	}
+	return env
+}
+
+func (w *Worker) executeFirstTurnWithStrategy(
+	ctx context.Context,
+	task types.RunExecution,
+	sandboxID string,
+	runner TurnRunner,
+	baseEnv map[string]string,
+	stdout io.Writer,
+	activityCh chan<- struct{},
+	prompt string,
+	strategies []firstTurnStrategy,
+) (map[string]string, error) {
+	if len(strategies) == 0 {
+		return baseEnv, fmt.Errorf("no first-turn strategy configured")
+	}
+
+	totalAttempts := len(strategies)
+	for idx, strategy := range strategies {
+		attempt := idx + 1
+		attemptEnv := envForFirstTurnStrategy(baseEnv, strategy)
+		err := w.executeTurn(
+			ctx,
+			task,
+			sandboxID,
+			runner,
+			attemptEnv,
+			stdout,
+			activityCh,
+			prompt,
+			strategy.mode,
+			attempt,
+			totalAttempts,
+			strategy.transitionReason,
+		)
+		if err == nil {
+			return attemptEnv, nil
+		}
+		if attempt < totalAttempts {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return baseEnv, err
+			}
+			addTaskExecutionContext(
+				log.Warn().
+					Err(err).
+					Str("turn_mode", string(strategy.mode)).
+					Str("next_turn_mode", string(strategies[idx+1].mode)).
+					Int("resume_attempt", attempt).
+					Int("resume_attempts_total", totalAttempts),
+				task,
+			).Msg("first-turn strategy failed, trying next strategy")
+			continue
+		}
+
+		// Emit a single clear failure when a resumed session exhausts bounded retries.
+		if totalAttempts > 1 {
+			addTaskExecutionContext(
+				log.Error().
+					Err(err).
+					Str("turn_mode", string(strategy.mode)).
+					Int("resume_attempt", attempt).
+					Int("resume_attempts_total", totalAttempts),
+				task,
+			).Msg("session resume exhausted all first-turn strategies")
+			return baseEnv, fmt.Errorf("session resume exhausted all first-turn strategies: %w", err)
+		}
+		return baseEnv, err
+	}
+
+	return baseEnv, fmt.Errorf("failed to execute first turn")
+}
+
+func (w *Worker) executeTurn(
+	ctx context.Context,
+	task types.RunExecution,
+	sandboxID string,
+	runner TurnRunner,
+	env map[string]string,
+	stdout io.Writer,
+	activityCh chan<- struct{},
+	prompt string,
+	mode TurnArgMode,
+	attempt int,
+	totalAttempts int,
+	transitionReason string,
+) error {
+	args := runner.BuildTurnArgs(prompt, env, mode)
+	logger := addTaskExecutionContext(
+		log.Info().
+			Bool("first_turn", mode != TurnArgModeFollowup).
+			Str("turn_mode", string(mode)).
+			Bool("session_id_present", strings.TrimSpace(env[agentSessionIDEnvKey]) != "").
+			Str("prompt", prompt[:min(50, len(prompt))]),
+		task,
+	)
+	if totalAttempts > 1 {
+		logger = logger.Int("resume_attempt", attempt).Int("resume_attempts_total", totalAttempts)
+	}
+	if strings.TrimSpace(transitionReason) != "" {
+		logger = logger.Str("transition_reason", transitionReason)
+	}
+	logger.Msg("executing turn")
+
+	signalActivity(activityCh)
+	err := w.sandboxManager.ExecPTY(ctx, sandboxID, args, env, stdout)
+	signalActivity(activityCh)
+	return err
 }
 
 // runGenericPTYSession handles interactive sessions for runners that don't

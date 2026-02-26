@@ -14,7 +14,7 @@ import (
 
 const agentTaskSelect = `
 	SELECT id, workspace_id, agent_id, kind, queue_mode, state, idempotency_key, payload_json, routing_json,
-	       parent_envelope_id, target_run_id, accepted_at, queued_at, dispatched_at, dropped_reason, created_at, updated_at
+	       parent_envelope_id, target_run_id, accepted_at, queued_at, dispatched_at, dropped_reason, archived_at, created_at, updated_at
 	FROM agent_task
 `
 
@@ -265,6 +265,7 @@ func (b *PostgresBackend) scanAgentTask(row scanner) (*types.AgentTask, error) {
 	var queuedAt sql.NullTime
 	var dispatchedAt sql.NullTime
 	var droppedReason sql.NullString
+	var archivedAt sql.NullTime
 	err := row.Scan(
 		&task.ID,
 		&task.WorkspaceID,
@@ -281,6 +282,7 @@ func (b *PostgresBackend) scanAgentTask(row scanner) (*types.AgentTask, error) {
 		&queuedAt,
 		&dispatchedAt,
 		&droppedReason,
+		&archivedAt,
 		&task.CreatedAt,
 		&task.UpdatedAt,
 	)
@@ -308,6 +310,9 @@ func (b *PostgresBackend) scanAgentTask(row scanner) (*types.AgentTask, error) {
 	if droppedReason.Valid {
 		task.DroppedReason = &droppedReason.String
 	}
+	if archivedAt.Valid {
+		task.ArchivedAt = &archivedAt.Time
+	}
 	task.PayloadJSON = unmarshalJSONMap(payloadJSON)
 	task.RoutingJSON = unmarshalJSONMap(routingJSON)
 	return task, nil
@@ -334,6 +339,7 @@ func (b *PostgresBackend) ListTasks(ctx context.Context, workspaceId uint, limit
 
 	query := agentTaskSelect + `
 		WHERE workspace_id = $1
+		  AND archived_at IS NULL
 		ORDER BY created_at DESC
 		LIMIT $2
 	`
@@ -378,6 +384,7 @@ func (b *PostgresBackend) ListTasksFiltered(ctx context.Context, workspaceId uin
 
 	query := agentTaskSelect + `
 		WHERE workspace_id = $1
+		  AND archived_at IS NULL
 		  AND ($2::uuid IS NULL OR agent_id = $2::uuid)
 		  AND ($3::text[] IS NULL OR state::text = ANY($3::text[]))
 		  AND ($4::timestamptz IS NULL OR created_at >= $4::timestamptz)
@@ -469,6 +476,24 @@ func (b *PostgresBackend) UpdateTaskState(ctx context.Context, taskID string, st
 	res, err := b.db.ExecContext(ctx, query, taskID, state, now, droppedReason, targetRunID)
 	if err != nil {
 		return fmt.Errorf("update task state: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return &types.ErrAgentTaskNotFound{ID: taskID}
+	}
+	return nil
+}
+
+func (b *PostgresBackend) ArchiveTask(ctx context.Context, taskID string) error {
+	query := `
+		UPDATE agent_task
+		SET archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP),
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1
+	`
+	res, err := b.db.ExecContext(ctx, query, taskID)
+	if err != nil {
+		return fmt.Errorf("archive task: %w", err)
 	}
 	affected, _ := res.RowsAffected()
 	if affected == 0 {
@@ -846,6 +871,32 @@ func (b *PostgresBackend) RefreshAgentRunClaims(ctx context.Context, workerId st
 	}
 	affected, _ := res.RowsAffected()
 	return affected, nil
+}
+
+func (b *PostgresBackend) ListClaimedAgentRuns(ctx context.Context, limit int) ([]*types.AgentRun, error) {
+	limit = normalizeClaimBatchLimit(limit)
+	query := agentRunSelect + `
+		WHERE run_attempt_id IS NOT NULL
+		  AND ` + runExecutionActiveWhere + `
+		  AND claimed_by_worker_id IS NOT NULL
+		ORDER BY claim_heartbeat_at ASC NULLS FIRST, updated_at ASC
+		LIMIT $1
+	`
+	rows, err := b.db.QueryContext(ctx, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list claimed runs: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]*types.AgentRun, 0)
+	for rows.Next() {
+		run, err := b.scanAgentRun(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan claimed run: %w", err)
+		}
+		out = append(out, run)
+	}
+	return out, rows.Err()
 }
 
 func normalizeClaimBatchLimit(limit int) int {

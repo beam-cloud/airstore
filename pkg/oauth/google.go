@@ -17,10 +17,10 @@ import (
 
 var googleIntegrationScopes = map[string][]string{
 	"gmail": {
-		"https://www.googleapis.com/auth/gmail.readonly",
+		"https://www.googleapis.com/auth/gmail.modify",
 	},
 	"gdrive": {
-		"https://www.googleapis.com/auth/drive.readonly",
+		"https://www.googleapis.com/auth/drive",
 	},
 }
 
@@ -94,8 +94,18 @@ func (g *GoogleProvider) Exchange(ctx context.Context, code, integrationType str
 	if !token.Expiry.IsZero() {
 		creds.ExpiresAt = &token.Expiry
 	}
+	var grantedScopes []string
+	if raw := token.Extra("scope"); raw != nil {
+		if scopeStr, ok := raw.(string); ok {
+			grantedScopes = NormalizeScopes(ParseScopeString(scopeStr))
+		}
+	}
+	if len(grantedScopes) == 0 {
+		// Fallback for providers that omit scope in the token response.
+		grantedScopes = scopes
+	}
 
-	return creds, nil
+	return AnnotateCredentials(integrationType, creds, grantedScopes), nil
 }
 
 func (g *GoogleProvider) Refresh(ctx context.Context, refreshToken string) (*types.IntegrationCredentials, error) {

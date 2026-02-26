@@ -147,14 +147,22 @@ func (a *AgentAPI) AcceptAgentCommand(
 }
 
 func (a *AgentAPI) GetTask(ctx context.Context, workspaceID uint, taskID string) (*types.AgentTask, error) {
-	return a.backend.GetTask(ctx, workspaceID, taskID)
+	task, err := a.backend.GetTask(ctx, workspaceID, taskID)
+	if err != nil {
+		return nil, err
+	}
+	return sanitizeTaskForResponse(task), nil
 }
 
 func (a *AgentAPI) ListTasks(ctx context.Context, workspaceID uint, limit int) ([]*types.AgentTask, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	return a.backend.ListTasks(ctx, workspaceID, limit)
+	tasks, err := a.backend.ListTasks(ctx, workspaceID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return sanitizeTasksForResponse(tasks), nil
 }
 
 func (a *AgentAPI) ListTasksFiltered(
@@ -174,7 +182,7 @@ func (a *AgentAPI) ListTasksFiltered(
 	if hasMore {
 		tasks = tasks[:limit]
 	}
-	return tasks, nextOffsetCursor(offset, limit, hasMore), hasMore, nil
+	return sanitizeTasksForResponse(tasks), nextOffsetCursor(offset, limit, hasMore), hasMore, nil
 }
 
 func (a *AgentAPI) EnqueueRunInput(
@@ -226,7 +234,11 @@ func (a *AgentAPI) ListRuns(ctx context.Context, workspaceID uint, limit int) ([
 	if limit <= 0 {
 		limit = 100
 	}
-	return a.backend.ListAgentRuns(ctx, workspaceID, limit)
+	runs, err := a.backend.ListAgentRuns(ctx, workspaceID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return sanitizeRunsForResponse(runs), nil
 }
 
 func (a *AgentAPI) ListRunsFiltered(
@@ -246,11 +258,15 @@ func (a *AgentAPI) ListRunsFiltered(
 	if hasMore {
 		runs = runs[:limit]
 	}
-	return runs, nextOffsetCursor(offset, limit, hasMore), hasMore, nil
+	return sanitizeRunsForResponse(runs), nextOffsetCursor(offset, limit, hasMore), hasMore, nil
 }
 
 func (a *AgentAPI) GetRun(ctx context.Context, workspaceID uint, runID string) (*types.AgentRun, error) {
-	return a.backend.GetAgentRun(ctx, workspaceID, runID)
+	run, err := a.backend.GetAgentRun(ctx, workspaceID, runID)
+	if err != nil {
+		return nil, err
+	}
+	return sanitizeRunForResponse(run), nil
 }
 
 func (a *AgentAPI) ListRunSnapshots(ctx context.Context, workspaceID uint, runID string, limit int) ([]*types.AgentRunSnapshot, error) {
@@ -274,7 +290,7 @@ func (a *AgentAPI) ListRunEvents(ctx context.Context, workspaceID uint, runID st
 	if err != nil {
 		return nil, err
 	}
-	return decodeRunEvents(rows), nil
+	return common.RedactSensitiveMaps(decodeRunEvents(rows)), nil
 }
 
 func (a *AgentAPI) CancelRun(ctx context.Context, workspaceID uint, runID string) error {
@@ -303,6 +319,9 @@ func (a *AgentAPI) CancelTask(ctx context.Context, workspaceID uint, taskID stri
 	if err != nil {
 		return err
 	}
+	if task.State != types.AgentTaskStateRunning {
+		return fmt.Errorf("only running tasks can be stopped")
+	}
 
 	if task.TargetRunID != nil {
 		if err := a.CancelRun(ctx, workspaceID, *task.TargetRunID); err != nil {
@@ -317,6 +336,20 @@ func (a *AgentAPI) CancelTask(ctx context.Context, workspaceID uint, taskID stri
 	}
 
 	return nil
+}
+
+func (a *AgentAPI) ArchiveTask(ctx context.Context, workspaceID uint, taskID string) error {
+	task, err := a.GetTask(ctx, workspaceID, taskID)
+	if err != nil {
+		return err
+	}
+	if task.ArchivedAt != nil {
+		return nil
+	}
+	if task.State != types.AgentTaskStateIdle && !task.State.IsTerminal() {
+		return fmt.Errorf("only idle or terminal tasks can be archived")
+	}
+	return a.backend.ArchiveTask(ctx, task.ID)
 }
 
 func (a *AgentAPI) GetTaskLogs(ctx context.Context, workspaceID uint, taskID string) ([]common.TaskLogEntry, error) {
@@ -351,7 +384,12 @@ func (a *AgentAPI) ListTaskLogs(
 
 	// Cursor zero means "hydrate history". Return logs across all runs of this
 	// task session so resumed runs show the full timeline by default.
-	return a.listTaskSessionHistoryLogs(ctx, workspaceID, task, currentRunID)
+	history, nextSeq, err := a.listTaskSessionHistoryLogs(ctx, workspaceID, task, currentRunID)
+	if err != nil {
+		return nil, seqNum, err
+	}
+	history = prependTaskPromptLog(task, history)
+	return common.RedactTaskLogEntries(history), nextSeq, nil
 }
 
 func (a *AgentAPI) listTaskLogsForRun(
@@ -372,7 +410,7 @@ func (a *AgentAPI) listTaskLogsForRun(
 	if err != nil {
 		return nil, seqNum, err
 	}
-	return logs, nextSeqNum, nil
+	return common.RedactTaskLogEntries(logs), nextSeqNum, nil
 }
 
 func (a *AgentAPI) listTaskSessionHistoryLogs(
@@ -473,7 +511,7 @@ func (a *AgentAPI) listTaskSessionHistoryLogs(
 		}
 	}
 
-	return history, currentNextSeq, nil
+	return common.RedactTaskLogEntries(history), currentNextSeq, nil
 }
 
 func (a *AgentAPI) StreamTaskEvents(
@@ -559,6 +597,85 @@ func decodeRunEvents(rows []string) []map[string]any {
 		}
 	}
 	return out
+}
+
+func prependTaskPromptLog(task *types.AgentTask, logs []common.TaskLogEntry) []common.TaskLogEntry {
+	if task == nil {
+		return logs
+	}
+	prompt := strings.TrimSpace(stringFromPayload(task.PayloadJSON, "message"))
+	if prompt == "" {
+		prompt = strings.TrimSpace(stringFromPayload(task.PayloadJSON, "prompt"))
+	}
+	if prompt == "" {
+		return logs
+	}
+	for _, entry := range logs {
+		if strings.TrimSpace(entry.Stream) != "user" {
+			continue
+		}
+		if strings.TrimSpace(entry.Data) == prompt {
+			return logs
+		}
+	}
+
+	timestamp := task.AcceptedAt.UnixMilli()
+	if timestamp <= 0 {
+		timestamp = task.CreatedAt.UnixMilli()
+	}
+	if timestamp <= 0 {
+		timestamp = time.Now().UnixMilli()
+	}
+	promptEntry := common.TaskLogEntry{
+		TaskID:    task.ID,
+		Timestamp: timestamp,
+		Stream:    "user",
+		Data:      prompt,
+		ChunkType: "task_prompt",
+	}
+	return append([]common.TaskLogEntry{promptEntry}, logs...)
+}
+
+func sanitizeTaskForResponse(task *types.AgentTask) *types.AgentTask {
+	if task == nil {
+		return nil
+	}
+	safe := *task
+	safe.PayloadJSON = common.RedactSensitiveMap(task.PayloadJSON)
+	safe.RoutingJSON = common.RedactSensitiveMap(task.RoutingJSON)
+	return &safe
+}
+
+func sanitizeTasksForResponse(tasks []*types.AgentTask) []*types.AgentTask {
+	if len(tasks) == 0 {
+		return tasks
+	}
+	safe := make([]*types.AgentTask, len(tasks))
+	for idx, task := range tasks {
+		safe[idx] = sanitizeTaskForResponse(task)
+	}
+	return safe
+}
+
+func sanitizeRunForResponse(run *types.AgentRun) *types.AgentRun {
+	if run == nil {
+		return nil
+	}
+	safe := *run
+	safe.UsageJSON = common.RedactSensitiveMap(run.UsageJSON)
+	safe.DeliveryJSON = common.RedactSensitiveMap(run.DeliveryJSON)
+	return &safe
+}
+
+func sanitizeRunsForResponse(runs []*types.AgentRun) []*types.AgentRun {
+	if len(runs) == 0 {
+		return runs
+	}
+	safe := make([]*types.AgentRun, len(runs))
+	for idx, run := range runs {
+		safe[idx] = sanitizeRunForResponse(run)
+	}
+	return safe
 }
 
 func normalizeAgentProfileConfig(config map[string]any, agentKey string) (map[string]any, error) {
