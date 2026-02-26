@@ -15,4 +15,5 @@ const (
 	SourcesPathPrefix = types.PathSources + "/"
 	ConfigDir         = "/.airstore"
 	ConfigFile        = "/.airstore/config"
+	ConfigToolShim    = "/.airstore/tool-shim"
 )

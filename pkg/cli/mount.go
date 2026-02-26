@@ -184,8 +184,8 @@ func runMount(cmd *cobra.Command, args []string) error {
 		}
 
 		// Register all vnodes
-		fs.RegisterVNode(vnode.NewConfigVNode(effectiveGateway, authToken))
-		fs.RegisterVNode(vnode.NewToolsVNode(effectiveGateway, authToken, shim))
+		fs.RegisterVNode(vnode.NewConfigVNode(effectiveGateway, authToken, shim))
+		fs.RegisterVNode(vnode.NewToolsVNode(effectiveGateway, authToken))
 
 		var sourcesOpts []vnode.SourcesVNodeOption
 		if mountCompression != "" {

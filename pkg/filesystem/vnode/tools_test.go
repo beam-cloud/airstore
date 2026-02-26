@@ -2,13 +2,16 @@ package vnode
 
 import (
 	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 )
 
 func TestToolsVNode_Getattr_Dir(t *testing.T) {
 	tv := &ToolsVNode{
-		shim:    []byte("test binary"),
 		tools:   []string{"tool1", "tool2"},
 		toolSet: map[string]bool{"tool1": true, "tool2": true},
 	}
@@ -24,9 +27,7 @@ func TestToolsVNode_Getattr_Dir(t *testing.T) {
 }
 
 func TestToolsVNode_Getattr_Tool(t *testing.T) {
-	shimData := []byte("test binary data")
 	tv := &ToolsVNode{
-		shim:    shimData,
 		tools:   []string{"mytool"},
 		toolSet: map[string]bool{"mytool": true},
 	}
@@ -36,8 +37,8 @@ func TestToolsVNode_Getattr_Tool(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if info.Size != int64(len(shimData)) {
-		t.Errorf("expected size %d, got %d", len(shimData), info.Size)
+	if info.Size != int64(len(gatewayToolWrapper)) {
+		t.Errorf("expected wrapper size %d, got %d", len(gatewayToolWrapper), info.Size)
 	}
 
 	// Should be executable
@@ -48,7 +49,6 @@ func TestToolsVNode_Getattr_Tool(t *testing.T) {
 
 func TestToolsVNode_Getattr_NotFound(t *testing.T) {
 	tv := &ToolsVNode{
-		shim:    []byte("test"),
 		tools:   []string{},
 		toolSet: map[string]bool{},
 	}
@@ -61,7 +61,6 @@ func TestToolsVNode_Getattr_NotFound(t *testing.T) {
 
 func TestToolsVNode_Readdir(t *testing.T) {
 	tv := &ToolsVNode{
-		shim:    []byte("test"),
 		tools:   []string{"tool1", "tool2", "tool3"},
 		toolSet: map[string]bool{"tool1": true, "tool2": true, "tool3": true},
 	}
@@ -94,7 +93,6 @@ func TestToolsVNode_Readdir(t *testing.T) {
 
 func TestToolsVNode_Readdir_NotDir(t *testing.T) {
 	tv := &ToolsVNode{
-		shim:    []byte("test"),
 		tools:   []string{"tool1"},
 		toolSet: map[string]bool{"tool1": true},
 	}
@@ -107,7 +105,6 @@ func TestToolsVNode_Readdir_NotDir(t *testing.T) {
 
 func TestToolsVNode_Open(t *testing.T) {
 	tv := &ToolsVNode{
-		shim:    []byte("test"),
 		tools:   []string{"tool1"},
 		toolSet: map[string]bool{"tool1": true},
 	}
@@ -132,14 +129,12 @@ func TestToolsVNode_Open(t *testing.T) {
 }
 
 func TestToolsVNode_Read(t *testing.T) {
-	shimData := []byte("hello world shim binary")
 	tv := &ToolsVNode{
-		shim:    shimData,
 		tools:   []string{"tool1"},
 		toolSet: map[string]bool{"tool1": true},
 	}
 
-	// Read from start
+	// Gateway tools serve a wrapper script.
 	buf := make([]byte, 5)
 	n, err := tv.Read("/tools/tool1", buf, 0, 0)
 	if err != nil {
@@ -148,21 +143,21 @@ func TestToolsVNode_Read(t *testing.T) {
 	if n != 5 {
 		t.Errorf("expected 5 bytes, got %d", n)
 	}
-	if string(buf) != "hello" {
-		t.Errorf("expected 'hello', got %q", buf)
+	if string(buf) != "#!/bi" {
+		t.Errorf("expected wrapper prefix, got %q", buf)
 	}
 
-	// Read with offset
+	// Read with offset into wrapper body.
 	n, err = tv.Read("/tools/tool1", buf, 6, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if string(buf[:n]) != "world" {
-		t.Errorf("expected 'world', got %q", buf[:n])
+	if string(buf[:n]) != "/sh\ns" {
+		t.Errorf("expected wrapper bytes, got %q", buf[:n])
 	}
 
 	// Read past end
-	n, err = tv.Read("/tools/tool1", buf, int64(len(shimData)+10), 0)
+	n, err = tv.Read("/tools/tool1", buf, int64(len(tv.toolBinary("tool1"))+10), 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -171,9 +166,106 @@ func TestToolsVNode_Read(t *testing.T) {
 	}
 }
 
+func TestGatewayToolWrapperExecutesCopiedShim(t *testing.T) {
+	shimData := []byte("#!/bin/sh\nprintf 'argv0=%s\\n' \"$0\"\nprintf 'gateway=%s\\n' \"${AIRSTORE_GATEWAY:-}\"\nprintf 'config=%s\\n' \"${AIRSTORE_CONFIG_PATH:-}\"\n")
+	tv := &ToolsVNode{
+		tools:   []string{"wikipedia"},
+		toolSet: map[string]bool{"wikipedia": true},
+	}
+
+	mountRoot := t.TempDir()
+	toolsDir := filepath.Join(mountRoot, "tools")
+	if err := os.MkdirAll(toolsDir, 0o755); err != nil {
+		t.Fatalf("mkdir tools: %v", err)
+	}
+
+	wrapperPath := filepath.Join(toolsDir, "wikipedia")
+	if err := os.WriteFile(wrapperPath, tv.toolBinary("wikipedia"), 0o755); err != nil {
+		t.Fatalf("write wrapper: %v", err)
+	}
+	configDir := filepath.Join(mountRoot, ".airstore")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	configPath := filepath.Join(configDir, "config")
+	if err := os.WriteFile(configPath, []byte(`{"gateway_addr":"gateway.test.internal:1993"}`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	shimPath := filepath.Join(configDir, "tool-shim")
+	if err := os.WriteFile(shimPath, shimData, 0o755); err != nil {
+		t.Fatalf("write shim: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	cmd := exec.Command(wrapperPath, "--help")
+	cmd.Env = append(os.Environ(),
+		"TMPDIR="+tmpDir,
+		"GATEWAY_ADDR=gateway.test.internal:1993",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("wrapper execution failed: %v output=%s", err, string(out))
+	}
+
+	output := string(out)
+	if !strings.Contains(output, "gateway=gateway.test.internal:1993") {
+		t.Fatalf("expected wrapper to map GATEWAY_ADDR to AIRSTORE_GATEWAY, got: %s", output)
+	}
+	if !strings.Contains(output, "config="+configPath) {
+		t.Fatalf("expected wrapper to export AIRSTORE_CONFIG_PATH, got: %s", output)
+	}
+	if !strings.Contains(output, ".airstore-shims/wikipedia") {
+		t.Fatalf("expected wrapper to exec via tool-named symlink, got: %s", output)
+	}
+}
+
+func TestGatewayToolWrapperPreservesExplicitAirstoreGateway(t *testing.T) {
+	shimData := []byte("#!/bin/sh\nprintf 'gateway=%s\\n' \"${AIRSTORE_GATEWAY:-}\"\n")
+	tv := &ToolsVNode{
+		tools:   []string{"wikipedia"},
+		toolSet: map[string]bool{"wikipedia": true},
+	}
+
+	mountRoot := t.TempDir()
+	toolsDir := filepath.Join(mountRoot, "tools")
+	if err := os.MkdirAll(toolsDir, 0o755); err != nil {
+		t.Fatalf("mkdir tools: %v", err)
+	}
+
+	wrapperPath := filepath.Join(toolsDir, "wikipedia")
+	if err := os.WriteFile(wrapperPath, tv.toolBinary("wikipedia"), 0o755); err != nil {
+		t.Fatalf("write wrapper: %v", err)
+	}
+	configDir := filepath.Join(mountRoot, ".airstore")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config"), []byte(`{"gateway_addr":"gateway.test.internal:1993"}`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "tool-shim"), shimData, 0o755); err != nil {
+		t.Fatalf("write shim: %v", err)
+	}
+
+	cmd := exec.Command(wrapperPath, "--help")
+	cmd.Env = append(os.Environ(),
+		"TMPDIR="+t.TempDir(),
+		"GATEWAY_ADDR=worker.gateway.internal:1993",
+		"AIRSTORE_GATEWAY=custom.gateway.internal:2993",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("wrapper execution failed: %v output=%s", err, string(out))
+	}
+
+	output := string(out)
+	if !strings.Contains(output, "gateway=custom.gateway.internal:2993") {
+		t.Fatalf("expected explicit AIRSTORE_GATEWAY to be preserved, got: %s", output)
+	}
+}
+
 func TestToolsVNode_Read_NotFound(t *testing.T) {
 	tv := &ToolsVNode{
-		shim:    []byte("test"),
 		tools:   []string{},
 		toolSet: map[string]bool{},
 	}
@@ -216,5 +308,27 @@ func TestSameWrapperBytes(t *testing.T) {
 		map[string][]byte{},
 	) {
 		t.Fatal("expected missing wrapper key to be detected")
+	}
+}
+
+func TestToolNameFromPath(t *testing.T) {
+	tests := []struct {
+		path string
+		want string
+		ok   bool
+	}{
+		{path: "/tools/wikipedia", want: "wikipedia", ok: true},
+		{path: "/tools/.hidden", want: ".hidden", ok: true},
+		{path: "/tools", want: "", ok: false},
+		{path: "/tools/", want: "", ok: false},
+		{path: "/tools/a/b", want: "", ok: false},
+		{path: "/source/wikipedia", want: "", ok: false},
+	}
+
+	for _, tc := range tests {
+		got, ok := toolNameFromPath(tc.path)
+		if ok != tc.ok || got != tc.want {
+			t.Fatalf("toolNameFromPath(%q) = (%q, %v), want (%q, %v)", tc.path, got, ok, tc.want, tc.ok)
+		}
 	}
 }

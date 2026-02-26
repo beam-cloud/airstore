@@ -20,37 +20,75 @@ const (
 	ToolsCacheTTL = 5 * time.Second
 )
 
+var gatewayToolWrapper = []byte(`#!/bin/sh
+set -eu
+
+TOOLS_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || true)
+MOUNT_ROOT=$(CDPATH= cd -- "$TOOLS_DIR/.." 2>/dev/null && pwd || true)
+SHIM_SRC="$MOUNT_ROOT/.airstore/tool-shim"
+CONFIG_PATH="$MOUNT_ROOT/.airstore/config"
+if [ ! -r "$SHIM_SRC" ]; then
+	SHIM_SRC="/workspace/.airstore/tool-shim"
+	CONFIG_PATH="/workspace/.airstore/config"
+fi
+if [ ! -r "$SHIM_SRC" ]; then
+	printf 'airstore shim not found (tried %s and /workspace/.airstore/tool-shim)\n' "$MOUNT_ROOT/.airstore/tool-shim" >&2
+	exit 127
+fi
+
+if [ -r "$CONFIG_PATH" ]; then
+	export AIRSTORE_CONFIG_PATH="$CONFIG_PATH"
+fi
+
+CACHE_DIR="${TMPDIR:-/tmp}/.airstore-shims"
+SHIM_BIN="$CACHE_DIR/airstore-tool-shim"
+TOOL_NAME="${0##*/}"
+TOOL_LINK="$CACHE_DIR/$TOOL_NAME"
+
+mkdir -p "$CACHE_DIR"
+if [ ! -x "$SHIM_BIN" ]; then
+	TMP="$SHIM_BIN.$$"
+	cat "$SHIM_SRC" > "$TMP"
+	chmod 755 "$TMP"
+	mv -f "$TMP" "$SHIM_BIN"
+fi
+
+ln -sf "$SHIM_BIN" "$TOOL_LINK"
+
+# Worker sandboxes export GATEWAY_ADDR. The shim reads AIRSTORE_GATEWAY.
+# Preserve explicit AIRSTORE_GATEWAY overrides when set.
+if [ -n "${GATEWAY_ADDR:-}" ] && [ -z "${AIRSTORE_GATEWAY:-}" ]; then
+	export AIRSTORE_GATEWAY="$GATEWAY_ADDR"
+fi
+
+exec "$TOOL_LINK" "$@"
+`)
+
 // ToolsVNode implements VirtualNode for the /tools directory.
-// It serves tool binaries via FUSE, choosing between two modes per tool:
-//   - Gateway tools: served as the compiled gRPC shim binary
-//   - Local tools:   served as a shell wrapper that execs the CLI directly
+// It serves executable wrappers for tools:
+//   - Gateway tools: wrapper that copies an embedded shim to local /tmp and execs it
+//   - Local tools:   wrapper that execs the local CLI directly
 type ToolsVNode struct {
 	ReadOnlyBase
 
 	gatewayAddr string
-	token       string
 	bearerToken string
-	shim        []byte    // gRPC shim binary for gateway-executed tools
-	modTime     time.Time // stable timestamp for initial getattr
 
 	mu            sync.RWMutex
 	tools         []string          // ordered tool names
 	toolSet       map[string]bool   // fast membership check
-	localWrappers map[string][]byte // tool → wrapper script (nil = use shim)
+	localWrappers map[string][]byte // tool → wrapper script (missing key = gateway wrapper)
 	lastFetch     time.Time
 	cacheModTime  time.Time
 }
 
 // NewToolsVNode creates a new ToolsVNode.
-func NewToolsVNode(gatewayAddr string, token string, shimBinary []byte) *ToolsVNode {
+func NewToolsVNode(gatewayAddr string, token string) *ToolsVNode {
 	modTime := time.Now()
 
 	t := &ToolsVNode{
 		gatewayAddr:   gatewayAddr,
-		token:         token,
 		bearerToken:   BearerToken(token),
-		shim:          shimBinary,
-		modTime:       modTime,
 		tools:         []string{},
 		toolSet:       make(map[string]bool),
 		localWrappers: make(map[string][]byte),
@@ -72,29 +110,21 @@ func (t *ToolsVNode) Prefix() string {
 func (t *ToolsVNode) Getattr(path string) (*FileInfo, error) {
 	if path == ToolsPath {
 		t.maybeRefresh()
-		info := NewDirInfo(toolsIno())
-		mtime := t.getCacheModTime()
-		info.Atime = mtime
-		info.Mtime = mtime
-		info.Ctime = mtime
-		return info, nil
+		_, mtime := t.snapshotTools()
+		return withCacheTimes(NewDirInfo(toolsIno()), mtime), nil
 	}
 
-	name := strings.TrimPrefix(path, ToolsPathPrefix)
-	if name == "" || strings.Contains(name, "/") {
+	name, ok := toolNameFromPath(path)
+	if !ok {
 		return nil, fs.ErrNotExist
 	}
 
-	if !t.hasTool(name) {
+	data, mtime, ok := t.lookupTool(name)
+	if !ok {
 		return nil, fs.ErrNotExist
 	}
 
-	info := NewExecFileInfo(toolIno(name), int64(len(t.toolBinary(name))))
-	mtime := t.getCacheModTime()
-	info.Atime = mtime
-	info.Mtime = mtime
-	info.Ctime = mtime
-	return info, nil
+	return withCacheTimes(NewExecFileInfo(toolIno(name), int64(len(data))), mtime), nil
 }
 
 // Readdir returns entries in /tools directory
@@ -104,7 +134,7 @@ func (t *ToolsVNode) Readdir(path string) ([]DirEntry, error) {
 	}
 
 	t.maybeRefresh()
-	tools := t.getTools()
+	tools, _ := t.snapshotTools()
 	entries := make([]DirEntry, 0, len(tools))
 	for _, name := range tools {
 		entries = append(entries, DirEntry{
@@ -123,8 +153,11 @@ func (t *ToolsVNode) Open(path string, flags int) (FileHandle, error) {
 		return 0, syscall.EISDIR
 	}
 
-	name := strings.TrimPrefix(path, ToolsPathPrefix)
-	if !t.hasTool(name) {
+	name, ok := toolNameFromPath(path)
+	if !ok {
+		return 0, fs.ErrNotExist
+	}
+	if _, _, exists := t.lookupTool(name); !exists {
 		return 0, fs.ErrNotExist
 	}
 
@@ -133,50 +166,57 @@ func (t *ToolsVNode) Open(path string, flags int) (FileHandle, error) {
 
 // Read reads bytes from a tool binary (served from memory)
 func (t *ToolsVNode) Read(path string, buf []byte, off int64, fh FileHandle) (int, error) {
-	name := strings.TrimPrefix(path, ToolsPathPrefix)
-	if !t.hasTool(name) {
+	name, ok := toolNameFromPath(path)
+	if !ok {
 		return 0, fs.ErrNotExist
 	}
-
-	data := t.toolBinary(name)
+	data, _, exists := t.lookupTool(name)
+	if !exists {
+		return 0, fs.ErrNotExist
+	}
 	if off >= int64(len(data)) {
 		return 0, nil
 	}
 	return copy(buf, data[off:]), nil
 }
 
-// hasTool checks if a tool is registered.
-func (t *ToolsVNode) hasTool(name string) bool {
+func (t *ToolsVNode) lookupTool(name string) ([]byte, time.Time, bool) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	return t.toolSet[name]
+	if !t.toolSet[name] {
+		return nil, time.Time{}, false
+	}
+	return toolBinaryLocked(t.localWrappers, name), t.cacheModTime, true
 }
 
 // toolBinary returns the bytes to serve for a given tool:
-// a shell wrapper for local tools, the gRPC shim for gateway tools.
+// a shell wrapper for local tools, a gateway shim bootstrap wrapper otherwise.
 func (t *ToolsVNode) toolBinary(name string) []byte {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	if w, ok := t.localWrappers[name]; ok {
-		return w
-	}
-	return t.shim
+	return toolBinaryLocked(t.localWrappers, name)
 }
 
-// getTools returns the list of registered tools.
-func (t *ToolsVNode) getTools() []string {
+func toolBinaryLocked(localWrappers map[string][]byte, name string) []byte {
+	if w, ok := localWrappers[name]; ok {
+		return w
+	}
+	return gatewayToolWrapper
+}
+
+func (t *ToolsVNode) snapshotTools() ([]string, time.Time) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	result := make([]string, len(t.tools))
 	copy(result, t.tools)
-	return result
+	return result, t.cacheModTime
 }
 
-// getCacheModTime returns the cache modification time
-func (t *ToolsVNode) getCacheModTime() time.Time {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	return t.cacheModTime
+func withCacheTimes(info *FileInfo, mtime time.Time) *FileInfo {
+	info.Atime = mtime
+	info.Mtime = mtime
+	info.Ctime = mtime
+	return info
 }
 
 // maybeRefresh refreshes the cache if TTL has expired
@@ -295,4 +335,15 @@ func toolsIno() uint64 {
 
 func toolIno(name string) uint64 {
 	return PathIno(ToolsPathPrefix + name)
+}
+
+func toolNameFromPath(path string) (string, bool) {
+	if !strings.HasPrefix(path, ToolsPathPrefix) {
+		return "", false
+	}
+	name := strings.TrimPrefix(path, ToolsPathPrefix)
+	if name == "" || strings.Contains(name, "/") {
+		return "", false
+	}
+	return name, true
 }
