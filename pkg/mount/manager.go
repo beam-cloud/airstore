@@ -216,8 +216,8 @@ func (m *MountManager) createFilesystem(addr string) (*filesystem.Filesystem, *g
 	}
 
 	// Register all vnodes
-	fs.RegisterVNode(vnode.NewConfigVNode(addr, m.cfg.Token))
-	fs.RegisterVNode(vnode.NewToolsVNode(addr, m.cfg.Token, shim))
+	fs.RegisterVNode(vnode.NewConfigVNode(addr, m.cfg.Token, shim))
+	fs.RegisterVNode(vnode.NewToolsVNode(addr, m.cfg.Token))
 
 	var sourcesOpts []vnode.SourcesVNodeOption
 	if m.cfg.Compression != "" {

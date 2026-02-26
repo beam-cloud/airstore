@@ -18,22 +18,26 @@ import (
 const (
 	// ToolsCacheTTL is the time-to-live for the tools cache
 	ToolsCacheTTL = 5 * time.Second
-
-	toolsShimName = ".airstore-shim"
-	toolsShimPath = ToolsPathPrefix + toolsShimName
 )
 
 var gatewayToolWrapper = []byte(`#!/bin/sh
 set -eu
 
 TOOLS_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || true)
-SHIM_SRC="$TOOLS_DIR/.airstore-shim"
+MOUNT_ROOT=$(CDPATH= cd -- "$TOOLS_DIR/.." 2>/dev/null && pwd || true)
+SHIM_SRC="$MOUNT_ROOT/.airstore/tool-shim"
+CONFIG_PATH="$MOUNT_ROOT/.airstore/config"
 if [ ! -r "$SHIM_SRC" ]; then
-	SHIM_SRC="/workspace/tools/.airstore-shim"
+	SHIM_SRC="/workspace/.airstore/tool-shim"
+	CONFIG_PATH="/workspace/.airstore/config"
 fi
 if [ ! -r "$SHIM_SRC" ]; then
-	printf 'airstore shim not found (tried %s and /workspace/tools/.airstore-shim)\n' "$TOOLS_DIR/.airstore-shim" >&2
+	printf 'airstore shim not found (tried %s and /workspace/.airstore/tool-shim)\n' "$MOUNT_ROOT/.airstore/tool-shim" >&2
 	exit 127
+fi
+
+if [ -r "$CONFIG_PATH" ]; then
+	export AIRSTORE_CONFIG_PATH="$CONFIG_PATH"
 fi
 
 CACHE_DIR="${TMPDIR:-/tmp}/.airstore-shims"
@@ -56,7 +60,7 @@ fi
 ln -sf "$SHIM_BIN" "$TOOL_LINK"
 
 # Worker sandboxes export GATEWAY_ADDR. The shim reads AIRSTORE_GATEWAY.
-if [ -n "${GATEWAY_ADDR:-}" ] && [ -z "${AIRSTORE_GATEWAY:-}" ]; then
+if [ -n "${GATEWAY_ADDR:-}" ]; then
 	export AIRSTORE_GATEWAY="$GATEWAY_ADDR"
 fi
 
@@ -72,7 +76,6 @@ type ToolsVNode struct {
 
 	gatewayAddr string
 	bearerToken string
-	shim        []byte    // gRPC shim binary for gateway-executed tools
 
 	mu            sync.RWMutex
 	tools         []string          // ordered tool names
@@ -83,13 +86,12 @@ type ToolsVNode struct {
 }
 
 // NewToolsVNode creates a new ToolsVNode.
-func NewToolsVNode(gatewayAddr string, token string, shimBinary []byte) *ToolsVNode {
+func NewToolsVNode(gatewayAddr string, token string) *ToolsVNode {
 	modTime := time.Now()
 
 	t := &ToolsVNode{
 		gatewayAddr:   gatewayAddr,
 		bearerToken:   BearerToken(token),
-		shim:          shimBinary,
 		tools:         []string{},
 		toolSet:       make(map[string]bool),
 		localWrappers: make(map[string][]byte),
@@ -112,15 +114,6 @@ func (t *ToolsVNode) Getattr(path string) (*FileInfo, error) {
 	if path == ToolsPath {
 		t.maybeRefresh()
 		info := NewDirInfo(toolsIno())
-		mtime := t.getCacheModTime()
-		info.Atime = mtime
-		info.Mtime = mtime
-		info.Ctime = mtime
-		return info, nil
-	}
-
-	if path == toolsShimPath {
-		info := NewFileInfo(toolIno(toolsShimName), int64(len(t.shim)), 0444)
 		mtime := t.getCacheModTime()
 		info.Atime = mtime
 		info.Mtime = mtime
@@ -171,10 +164,6 @@ func (t *ToolsVNode) Open(path string, flags int) (FileHandle, error) {
 		return 0, syscall.EISDIR
 	}
 
-	if path == toolsShimPath {
-		return 0, nil
-	}
-
 	name, ok := toolNameFromPath(path)
 	if !ok || !t.hasTool(name) {
 		return 0, fs.ErrNotExist
@@ -185,13 +174,6 @@ func (t *ToolsVNode) Open(path string, flags int) (FileHandle, error) {
 
 // Read reads bytes from a tool binary (served from memory)
 func (t *ToolsVNode) Read(path string, buf []byte, off int64, fh FileHandle) (int, error) {
-	if path == toolsShimPath {
-		if off >= int64(len(t.shim)) {
-			return 0, nil
-		}
-		return copy(buf, t.shim[off:]), nil
-	}
-
 	name, ok := toolNameFromPath(path)
 	if !ok || !t.hasTool(name) {
 		return 0, fs.ErrNotExist

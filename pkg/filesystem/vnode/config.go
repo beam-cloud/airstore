@@ -19,10 +19,11 @@ type ConfigVNode struct {
 
 	config     Config
 	configJSON []byte
+	toolShim   []byte
 }
 
 // NewConfigVNode creates a ConfigVNode with the given settings
-func NewConfigVNode(gatewayAddr, token string) *ConfigVNode {
+func NewConfigVNode(gatewayAddr, token string, toolShim []byte) *ConfigVNode {
 	cfg := Config{
 		GatewayAddr: gatewayAddr,
 		Token:       token,
@@ -34,6 +35,7 @@ func NewConfigVNode(gatewayAddr, token string) *ConfigVNode {
 	return &ConfigVNode{
 		config:     cfg,
 		configJSON: data,
+		toolShim:   toolShim,
 	}
 }
 
@@ -49,6 +51,8 @@ func (c *ConfigVNode) Getattr(path string) (*FileInfo, error) {
 		return NewDirInfo(configDirIno()), nil
 	case ConfigFile:
 		return NewFileInfo(configFileIno(), int64(len(c.configJSON)), 0444), nil
+	case ConfigToolShim:
+		return NewFileInfo(configToolShimIno(), int64(len(c.toolShim)), 0444), nil
 	default:
 		return nil, fs.ErrNotExist
 	}
@@ -62,6 +66,7 @@ func (c *ConfigVNode) Readdir(path string) ([]DirEntry, error) {
 
 	return []DirEntry{
 		{Name: "config", Mode: syscall.S_IFREG | 0444, Ino: configFileIno()},
+		{Name: "tool-shim", Mode: syscall.S_IFREG | 0444, Ino: configToolShimIno()},
 	}, nil
 }
 
@@ -73,18 +78,28 @@ func (c *ConfigVNode) Open(path string, flags int) (FileHandle, error) {
 	if path == ConfigFile {
 		return 0, nil
 	}
+	if path == ConfigToolShim {
+		return 0, nil
+	}
 	return 0, fs.ErrNotExist
 }
 
 // Read reads from the config file
 func (c *ConfigVNode) Read(path string, buf []byte, off int64, fh FileHandle) (int, error) {
-	if path != ConfigFile {
+	switch path {
+	case ConfigFile:
+		if off >= int64(len(c.configJSON)) {
+			return 0, nil
+		}
+		return copy(buf, c.configJSON[off:]), nil
+	case ConfigToolShim:
+		if off >= int64(len(c.toolShim)) {
+			return 0, nil
+		}
+		return copy(buf, c.toolShim[off:]), nil
+	default:
 		return 0, fs.ErrNotExist
 	}
-	if off >= int64(len(c.configJSON)) {
-		return 0, nil
-	}
-	return copy(buf, c.configJSON[off:]), nil
 }
 
 func configDirIno() uint64 {
@@ -93,4 +108,8 @@ func configDirIno() uint64 {
 
 func configFileIno() uint64 {
 	return PathIno(ConfigFile)
+}
+
+func configToolShimIno() uint64 {
+	return PathIno(ConfigToolShim)
 }

@@ -1,7 +1,6 @@
 package vnode
 
 import (
-	"bytes"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -13,7 +12,6 @@ import (
 
 func TestToolsVNode_Getattr_Dir(t *testing.T) {
 	tv := &ToolsVNode{
-		shim:    []byte("test binary"),
 		tools:   []string{"tool1", "tool2"},
 		toolSet: map[string]bool{"tool1": true, "tool2": true},
 	}
@@ -29,9 +27,7 @@ func TestToolsVNode_Getattr_Dir(t *testing.T) {
 }
 
 func TestToolsVNode_Getattr_Tool(t *testing.T) {
-	shimData := []byte("test binary data")
 	tv := &ToolsVNode{
-		shim:    shimData,
 		tools:   []string{"mytool"},
 		toolSet: map[string]bool{"mytool": true},
 	}
@@ -51,26 +47,8 @@ func TestToolsVNode_Getattr_Tool(t *testing.T) {
 	}
 }
 
-func TestToolsVNode_Getattr_SharedShim(t *testing.T) {
-	shimData := []byte("test binary data")
-	tv := &ToolsVNode{
-		shim:    shimData,
-		tools:   []string{"mytool"},
-		toolSet: map[string]bool{"mytool": true},
-	}
-
-	info, err := tv.Getattr(toolsShimPath)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if info.Size != int64(len(shimData)) {
-		t.Errorf("expected size %d, got %d", len(shimData), info.Size)
-	}
-}
-
 func TestToolsVNode_Getattr_NotFound(t *testing.T) {
 	tv := &ToolsVNode{
-		shim:    []byte("test"),
 		tools:   []string{},
 		toolSet: map[string]bool{},
 	}
@@ -83,7 +61,6 @@ func TestToolsVNode_Getattr_NotFound(t *testing.T) {
 
 func TestToolsVNode_Readdir(t *testing.T) {
 	tv := &ToolsVNode{
-		shim:    []byte("test"),
 		tools:   []string{"tool1", "tool2", "tool3"},
 		toolSet: map[string]bool{"tool1": true, "tool2": true, "tool3": true},
 	}
@@ -116,7 +93,6 @@ func TestToolsVNode_Readdir(t *testing.T) {
 
 func TestToolsVNode_Readdir_NotDir(t *testing.T) {
 	tv := &ToolsVNode{
-		shim:    []byte("test"),
 		tools:   []string{"tool1"},
 		toolSet: map[string]bool{"tool1": true},
 	}
@@ -129,7 +105,6 @@ func TestToolsVNode_Readdir_NotDir(t *testing.T) {
 
 func TestToolsVNode_Open(t *testing.T) {
 	tv := &ToolsVNode{
-		shim:    []byte("test"),
 		tools:   []string{"tool1"},
 		toolSet: map[string]bool{"tool1": true},
 	}
@@ -154,9 +129,7 @@ func TestToolsVNode_Open(t *testing.T) {
 }
 
 func TestToolsVNode_Read(t *testing.T) {
-	shimData := []byte("hello world shim binary")
 	tv := &ToolsVNode{
-		shim:    shimData,
 		tools:   []string{"tool1"},
 		toolSet: map[string]bool{"tool1": true},
 	}
@@ -193,30 +166,9 @@ func TestToolsVNode_Read(t *testing.T) {
 	}
 }
 
-func TestToolsVNode_Read_SharedShim(t *testing.T) {
-	shimData := []byte("hello world shim binary")
-	tv := &ToolsVNode{
-		shim:    shimData,
-		tools:   []string{"tool1"},
-		toolSet: map[string]bool{"tool1": true},
-	}
-
-	buf := make([]byte, len(shimData))
-	n, err := tv.Read(toolsShimPath, buf, 0, 0)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if n != len(shimData) {
-		t.Fatalf("expected %d bytes, got %d", len(shimData), n)
-	}
-	if !bytes.Equal(buf[:n], shimData) {
-		t.Fatalf("expected shared shim bytes to match")
-	}
-}
-
 func TestGatewayToolWrapperExecutesCopiedShim(t *testing.T) {
+	shimData := []byte("#!/bin/sh\nprintf 'argv0=%s\\n' \"$0\"\nprintf 'gateway=%s\\n' \"${AIRSTORE_GATEWAY:-}\"\nprintf 'config=%s\\n' \"${AIRSTORE_CONFIG_PATH:-}\"\n")
 	tv := &ToolsVNode{
-		shim: []byte("#!/bin/sh\nprintf 'argv0=%s\\n' \"$0\"\nprintf 'gateway=%s\\n' \"${AIRSTORE_GATEWAY:-}\"\n"),
 		tools:   []string{"wikipedia"},
 		toolSet: map[string]bool{"wikipedia": true},
 	}
@@ -231,8 +183,16 @@ func TestGatewayToolWrapperExecutesCopiedShim(t *testing.T) {
 	if err := os.WriteFile(wrapperPath, tv.toolBinary("wikipedia"), 0o755); err != nil {
 		t.Fatalf("write wrapper: %v", err)
 	}
-	shimPath := filepath.Join(toolsDir, toolsShimName)
-	if err := os.WriteFile(shimPath, tv.shim, 0o755); err != nil {
+	configDir := filepath.Join(mountRoot, ".airstore")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	configPath := filepath.Join(configDir, "config")
+	if err := os.WriteFile(configPath, []byte(`{"gateway_addr":"gateway.test.internal:1993"}`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	shimPath := filepath.Join(configDir, "tool-shim")
+	if err := os.WriteFile(shimPath, shimData, 0o755); err != nil {
 		t.Fatalf("write shim: %v", err)
 	}
 
@@ -251,6 +211,9 @@ func TestGatewayToolWrapperExecutesCopiedShim(t *testing.T) {
 	if !strings.Contains(output, "gateway=gateway.test.internal:1993") {
 		t.Fatalf("expected wrapper to map GATEWAY_ADDR to AIRSTORE_GATEWAY, got: %s", output)
 	}
+	if !strings.Contains(output, "config="+configPath) {
+		t.Fatalf("expected wrapper to export AIRSTORE_CONFIG_PATH, got: %s", output)
+	}
 	if !strings.Contains(output, ".airstore-shims/wikipedia") {
 		t.Fatalf("expected wrapper to exec via tool-named symlink, got: %s", output)
 	}
@@ -258,7 +221,6 @@ func TestGatewayToolWrapperExecutesCopiedShim(t *testing.T) {
 
 func TestToolsVNode_Read_NotFound(t *testing.T) {
 	tv := &ToolsVNode{
-		shim:    []byte("test"),
 		tools:   []string{},
 		toolSet: map[string]bool{},
 	}
@@ -311,7 +273,7 @@ func TestToolNameFromPath(t *testing.T) {
 		ok   bool
 	}{
 		{path: "/tools/wikipedia", want: "wikipedia", ok: true},
-		{path: "/tools/.airstore-shim", want: ".airstore-shim", ok: true},
+		{path: "/tools/.hidden", want: ".hidden", ok: true},
 		{path: "/tools", want: "", ok: false},
 		{path: "/tools/", want: "", ok: false},
 		{path: "/tools/a/b", want: "", ok: false},
