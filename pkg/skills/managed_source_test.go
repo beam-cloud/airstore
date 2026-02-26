@@ -3,6 +3,7 @@ package skills
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -40,6 +41,9 @@ func (m *mockManagedSkillStorage) ListObjects(ctx context.Context, bucket, prefi
 		}
 		key := strings.TrimPrefix(fullKey, bucket+"/")
 		out.Contents = append(out.Contents, s3types.Object{Key: aws.String(key)})
+		if maxKeys > 0 && int32(len(out.Contents)) >= maxKeys {
+			break
+		}
 	}
 	return out, nil
 }
@@ -130,5 +134,24 @@ func TestUpsertManagedSourceSkill_CleansUpLegacyPath(t *testing.T) {
 	}
 	if _, ok := store.objects[bucket+"/"+Dir+"/github/SKILL.md"]; !ok {
 		t.Fatalf("expected new managed skill manifest to exist")
+	}
+}
+
+func TestDeleteManagedSourceSkill_DeletesAllPages(t *testing.T) {
+	store := newMockManagedSkillStorage()
+	bucket := store.WorkspaceBucketName("workspace-1")
+	for i := 0; i < 1205; i++ {
+		key := fmt.Sprintf("%s/github/item-%d.txt", Dir, i)
+		store.objects[bucket+"/"+key] = []byte("x")
+	}
+
+	if err := DeleteManagedSourceSkill(context.Background(), store, "workspace-1", "github"); err != nil {
+		t.Fatalf("delete managed skill: %v", err)
+	}
+
+	for fullKey := range store.objects {
+		if strings.HasPrefix(fullKey, bucket+"/"+Dir+"/github/") {
+			t.Fatalf("expected all managed skill objects deleted, found %s", fullKey)
+		}
 	}
 }

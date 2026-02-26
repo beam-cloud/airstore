@@ -53,8 +53,7 @@ func TestOAuthWriteClientsRequireConnection(t *testing.T) {
 			name: "linear",
 			execFn: func(stdout *bytes.Buffer) error {
 				return NewLinearClient().Execute(context.Background(), linearCmdCreateIssue, map[string]any{
-					"team_id": "TEAM",
-					"title":   "bug",
+					"title": "bug",
 				}, nil, stdout, &bytes.Buffer{})
 			},
 		},
@@ -143,11 +142,35 @@ func TestGmailSendEmailRequiresArguments(t *testing.T) {
 	}
 }
 
+func TestBuildRawEmailSanitizesHeaderInjection(t *testing.T) {
+	raw := buildRawEmail("victim@example.com\r\nBcc: attacker@example.com", "hello\r\nX-Test: injected", "body")
+	if bytes.Contains([]byte(raw), []byte("\r\nBcc:")) {
+		t.Fatalf("expected CRLF header injection to be sanitized, got %q", raw)
+	}
+	if bytes.Contains([]byte(raw), []byte("\r\nX-Test:")) {
+		t.Fatalf("expected CRLF header injection to be sanitized, got %q", raw)
+	}
+}
+
 func TestGDriveWriteFileRequiresArguments(t *testing.T) {
 	client := NewGDriveClient()
 	var stdout bytes.Buffer
 	err := client.Execute(context.Background(), gdriveCmdWriteFile, map[string]any{
 		"name": "notes.txt",
+	}, &types.IntegrationCredentials{AccessToken: "token"}, &stdout, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("expected structured JSON error, got hard error: %v", err)
+	}
+	if !bytes.Contains(stdout.Bytes(), []byte(`"error"`)) {
+		t.Fatalf("expected JSON error output, got %q", stdout.String())
+	}
+}
+
+func TestLinearCreateIssueRequiresTitle(t *testing.T) {
+	client := NewLinearClient()
+	var stdout bytes.Buffer
+	err := client.Execute(context.Background(), linearCmdCreateIssue, map[string]any{
+		"description": "missing title",
 	}, &types.IntegrationCredentials{AccessToken: "token"}, &stdout, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("expected structured JSON error, got hard error: %v", err)

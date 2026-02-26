@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/beam-cloud/airstore/pkg/types"
 )
@@ -50,12 +51,20 @@ func (g *GmailClient) Execute(ctx context.Context, command string, args map[stri
 }
 
 func buildRawEmail(to, subject, body string) string {
+	to = sanitizeEmailHeaderValue(to)
+	subject = sanitizeEmailHeaderValue(subject)
 	return fmt.Sprintf(
 		"To: %s\r\nSubject: %s\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s",
 		to,
 		subject,
 		body,
 	)
+}
+
+func sanitizeEmailHeaderValue(value string) string {
+	value = strings.ReplaceAll(value, "\r", " ")
+	value = strings.ReplaceAll(value, "\n", " ")
+	return strings.TrimSpace(value)
 }
 
 func formatGmailMessageResult(to, subject string, result map[string]any) map[string]any {

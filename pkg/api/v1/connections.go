@@ -2,7 +2,6 @@ package apiv1
 
 import (
 	"net/http"
-	"strings"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/clients"
@@ -58,6 +57,9 @@ func serializeConnection(conn *types.IntegrationConnection) map[string]any {
 	creds, err := repository.DecryptCredentials(conn)
 	if err == nil && creds != nil {
 		for key, value := range creds.Extra {
+			if key == types.CredentialMetaGrantedScopes || key == types.CredentialMetaCapabilities {
+				continue
+			}
 			extra[key] = value
 		}
 		scopes := types.CSVToList(creds.Extra[types.CredentialMetaGrantedScopes])
@@ -168,47 +170,6 @@ func (cg *ConnectionsGroup) List(c echo.Context) error {
 	conns, err := cg.backend.ListConnections(c.Request().Context(), ws.Id)
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
-	}
-	for i := range conns {
-		conn := &conns[i]
-		creds, decErr := repository.DecryptCredentials(conn)
-		if decErr != nil || creds == nil {
-			continue
-		}
-		extraCaps := ""
-		if creds.Extra != nil {
-			extraCaps = creds.Extra[types.CredentialMetaCapabilities]
-		}
-		if strings.TrimSpace(extraCaps) != "" {
-			continue
-		}
-		var scopes []string
-		if creds.Extra != nil {
-			scopes = types.CSVToList(creds.Extra[types.CredentialMetaGrantedScopes])
-		}
-		annotated := oauth.AnnotateCredentials(conn.IntegrationType, creds, scopes)
-		if annotated == nil || annotated.Extra == nil || strings.TrimSpace(annotated.Extra[types.CredentialMetaCapabilities]) == "" {
-			continue
-		}
-		updated, saveErr := cg.backend.SaveConnection(c.Request().Context(), conn.WorkspaceId, conn.MemberId, conn.IntegrationType, annotated, conn.Scope)
-		if saveErr != nil {
-			log.Warn().Err(saveErr).Uint("workspace_id", conn.WorkspaceId).Str("integration", conn.IntegrationType).Msg("failed to backfill connection capability metadata")
-			continue
-		}
-		conns[i] = *updated
-	}
-	if cg.storage != nil {
-		managedIntegrations := make(map[string]struct{})
-		for _, conn := range conns {
-			if types.SupportsSourceWrite(types.IntegrationName(conn.IntegrationType)) {
-				managedIntegrations[conn.IntegrationType] = struct{}{}
-			}
-		}
-		for integration := range managedIntegrations {
-			if err := skills.UpsertManagedSourceSkill(c.Request().Context(), cg.storage, ws.ExternalId, integration); err != nil {
-				log.Warn().Err(err).Str("workspace", ws.ExternalId).Str("integration", integration).Msg("failed to reconcile managed source skill")
-			}
-		}
 	}
 
 	result := make([]map[string]any, 0, len(conns))

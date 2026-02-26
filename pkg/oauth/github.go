@@ -86,11 +86,15 @@ func (g *GitHubProvider) Exchange(ctx context.Context, code, integrationType str
 	if !token.Expiry.IsZero() {
 		creds.ExpiresAt = &token.Expiry
 	}
-	grantedScopes := scopes
+	var grantedScopes []string
 	if raw := token.Extra("scope"); raw != nil {
 		if scopeStr, ok := raw.(string); ok {
-			grantedScopes = NormalizeScopes(ParseScopeString(scopeStr), scopes)
+			grantedScopes = NormalizeScopes(ParseScopeString(scopeStr))
 		}
+	}
+	if len(grantedScopes) == 0 {
+		// GitHub may omit scope on some token responses; fall back to requested scopes.
+		grantedScopes = scopes
 	}
 
 	return AnnotateCredentials(integrationType, creds, grantedScopes), nil

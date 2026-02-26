@@ -3,6 +3,7 @@ package clients
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -11,6 +12,8 @@ import (
 )
 
 type OAuthCommandHandler func(ctx context.Context, token string, args map[string]any) (any, error)
+
+var errToolResponseWritten = errors.New("tool response already written")
 
 // GetStringArg extracts a string argument from args map
 func GetStringArg(args map[string]any, key, defaultVal string) string {
@@ -58,7 +61,10 @@ func WriteToolError(w io.Writer, msg string) error {
 // On failure it writes a structured error to stdout for consistent CLI behavior.
 func RequireAccessToken(toolName string, creds *types.IntegrationCredentials, stdout io.Writer) (string, error) {
 	if creds == nil || strings.TrimSpace(creds.AccessToken) == "" {
-		return "", WriteToolError(stdout, fmt.Sprintf("%s: not connected", toolName))
+		if err := WriteToolError(stdout, fmt.Sprintf("%s: not connected", toolName)); err != nil {
+			return "", err
+		}
+		return "", errToolResponseWritten
 	}
 	return creds.AccessToken, nil
 }
@@ -76,6 +82,9 @@ func ExecuteOAuthCommand(
 ) error {
 	token, err := RequireAccessToken(toolName, creds, stdout)
 	if err != nil {
+		if errors.Is(err, errToolResponseWritten) {
+			return nil
+		}
 		return err
 	}
 

@@ -55,23 +55,24 @@ This skill is managed by Airstore and auto-created when %s is connected.
 Use this skill when you need to read source context and then write back safely.
 
 Source views are always read-only:
-- Read context from /sources/%s/*
-- Perform mutations only through filesystem tools at /tools/%s
+- Read context from sources/%s/*
+- Perform mutations only through filesystem tools at tools/%s
+- If sources/%s only has README.md, skip source browsing and proceed with tools/%s
 
 ## Recommended workflow
 
-1. Inspect relevant data under /sources/%s/...
-2. Discover available commands with /tools/%s --help
-3. Inspect command params with /tools/%s <command> --help
-4. Execute writes with /tools/%s <command> ...
+1. Inspect relevant data under sources/%s/...
+2. Discover available commands with tools/%s --help
+3. Inspect command params with tools/%s <command> --help
+4. Execute writes with tools/%s <command> ...
 5. Report the action result and any identifiers returned by the tool
 
 ## Hard rules
 
-- Never write directly under /sources
-- All external changes must go through /tools/%s
+- Never write directly under sources/
+- All external changes must go through tools/%s
 - If a command is denied, explain the missing OAuth permissions and ask the user to reconnect %s
-`, skillName, description, integration, integration, skillName, integration, integration, integration, integration, integration, integration, integration, integration, integration))
+`, skillName, description, integration, integration, skillName, integration, integration, integration, integration, integration, integration, integration, integration, integration, integration, integration))
 }
 
 func managedSourceInstallMetadata(integration string) ([]byte, error) {
@@ -149,17 +150,24 @@ func DeleteManagedSourceSkill(ctx context.Context, storage ManagedSkillStorage, 
 
 func deleteManagedSourceSkillByName(ctx context.Context, storage ManagedSkillStorage, bucket, skillName string) error {
 	prefix := Dir + "/" + skillName + "/"
-	out, err := storage.ListObjects(ctx, bucket, prefix, 1000)
-	if err != nil {
-		return fmt.Errorf("list managed skill objects: %w", err)
-	}
-	for _, obj := range out.Contents {
-		if obj.Key == nil || *obj.Key == "" {
-			continue
+	for {
+		out, err := storage.ListObjects(ctx, bucket, prefix, 1000)
+		if err != nil {
+			return fmt.Errorf("list managed skill objects: %w", err)
 		}
-		if err := storage.Delete(ctx, bucket, *obj.Key); err != nil {
-			return fmt.Errorf("delete managed skill object %q: %w", *obj.Key, err)
+		if len(out.Contents) == 0 {
+			return nil
+		}
+		for _, obj := range out.Contents {
+			if obj.Key == nil || *obj.Key == "" {
+				continue
+			}
+			if err := storage.Delete(ctx, bucket, *obj.Key); err != nil {
+				return fmt.Errorf("delete managed skill object %q: %w", *obj.Key, err)
+			}
+		}
+		if len(out.Contents) < 1000 {
+			return nil
 		}
 	}
-	return nil
 }

@@ -130,7 +130,11 @@ func (l *LinearProvider) Exchange(ctx context.Context, code, integrationType str
 		expiry := time.Now().Add(time.Duration(result.ExpiresIn) * time.Second)
 		creds.ExpiresAt = &expiry
 	}
-	grantedScopes := NormalizeScopes(ParseScopeString(result.Scope), scopes)
+	grantedScopes := NormalizeScopes(ParseScopeString(result.Scope))
+	if len(grantedScopes) == 0 {
+		// Fallback for providers that omit scope in the token response.
+		grantedScopes = scopes
+	}
 	return AnnotateCredentials(integrationType, creds, grantedScopes), nil
 }
 

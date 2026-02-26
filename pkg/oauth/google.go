@@ -94,11 +94,15 @@ func (g *GoogleProvider) Exchange(ctx context.Context, code, integrationType str
 	if !token.Expiry.IsZero() {
 		creds.ExpiresAt = &token.Expiry
 	}
-	grantedScopes := scopes
+	var grantedScopes []string
 	if raw := token.Extra("scope"); raw != nil {
 		if scopeStr, ok := raw.(string); ok {
-			grantedScopes = NormalizeScopes(ParseScopeString(scopeStr), scopes)
+			grantedScopes = NormalizeScopes(ParseScopeString(scopeStr))
 		}
+	}
+	if len(grantedScopes) == 0 {
+		// Fallback for providers that omit scope in the token response.
+		grantedScopes = scopes
 	}
 
 	return AnnotateCredentials(integrationType, creds, grantedScopes), nil
