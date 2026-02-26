@@ -75,6 +75,12 @@ scheduler:
   gatewayServiceName: airstore-gateway
   workerImage: public.ecr.aws/n4e0e1y0/airstore-worker:latest
   workerNamespace: airstore
+  gatewayExternalGRPCAddr: ""
+  workerServiceAccountName: ""
+  workerHostNetwork: false
+  workerImagePullSecrets: []
+  useGatewayServiceHostname: true
+  useHostResolvConf: true
   workerTTL: 1h
   workerShutdownTimeout: 5m  # Time to wait for running tasks during graceful shutdown
   cleanupInterval: 1m
@@ -96,6 +102,8 @@ scheduler:
       scaleDownDelay: 5m
       workerCpu: 1000
       workerMemory: 1024
+      runtimeClassName: ""
+      nodeSelector: {}
 
 # Tools - All built-in tool configuration
 tools:

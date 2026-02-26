@@ -942,9 +942,12 @@ func (s *WorkerService) AllocateIP(ctx context.Context, req *pb.AllocateIPReques
 	}
 
 	return &pb.AllocateIPResponse{
-		Ip:        alloc.IP,
-		Gateway:   alloc.Gateway,
-		PrefixLen: int32(alloc.PrefixLen),
+		Ip:            alloc.IP,
+		Gateway:       alloc.Gateway,
+		PrefixLen:     int32(alloc.PrefixLen),
+		Ipv6:          alloc.IPv6,
+		GatewayIpv6:   alloc.GatewayIPv6,
+		PrefixLenIpv6: int32(alloc.PrefixLenIPv6),
 	}, nil
 }
 

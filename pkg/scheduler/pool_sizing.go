@@ -55,8 +55,17 @@ type PoolScalerConfig struct {
 	WorkerMemory string
 
 	// Gateway connection
-	GatewayServiceName string
-	GatewayPort        int
+	GatewayServiceName        string
+	GatewayPort               int
+	GatewayExternalGRPCAddr   string
+	UseGatewayServiceHostname bool
+
+	// Pod-level worker settings
+	WorkerServiceAccountName string
+	WorkerHostNetwork        bool
+	WorkerImagePullSecrets   []string
+	RuntimeClassName         string
+	NodeSelector             map[string]string
 
 	// Worker authentication token
 	WorkerToken string
@@ -110,7 +119,7 @@ func NewPoolScaler(ctx context.Context, config PoolScalerConfig, taskQueue repos
 		config.GatewayServiceName = "airstore-gateway"
 	}
 	if config.GatewayPort == 0 {
-		config.GatewayPort = 1994
+		config.GatewayPort = 1993
 	}
 
 	// Create K8s client
@@ -209,9 +218,8 @@ func (s *PoolScaler) buildDeployment() *appsv1.Deployment {
 
 	replicas := s.config.MinReplicas
 
-	// Build gateway gRPC address (workers use gRPC to communicate with gateway)
-	gatewayGRPCAddr := fmt.Sprintf("%s.%s.svc.cluster.local:1993",
-		s.config.GatewayServiceName, s.config.Namespace)
+	// Build gateway gRPC address (workers use gRPC to communicate with gateway).
+	gatewayGRPCAddr := s.gatewayGRPCAddr()
 
 	// Derive worker resource limits from K8s resource spec so the worker
 	// can compute how many tasks it can run concurrently.
@@ -255,48 +263,20 @@ func (s *PoolScaler) buildDeployment() *appsv1.Deployment {
 				Spec: corev1.PodSpec{
 					// Allow workers time to drain running tasks before being killed
 					TerminationGracePeriodSeconds: int64Ptr(int64(s.config.AppConfig.Scheduler.WorkerShutdownTimeout.Seconds()) + 30),
+					ServiceAccountName:            s.config.WorkerServiceAccountName,
+					AutomountServiceAccountToken:  boolPtr(true),
+					HostNetwork:                   s.config.WorkerHostNetwork,
+					DNSPolicy:                     s.dnsPolicy(),
+					ImagePullSecrets:              s.imagePullSecrets(),
+					EnableServiceLinks:            boolPtr(false),
+					RuntimeClassName:              s.runtimeClassName(),
+					NodeSelector:                  s.config.NodeSelector,
 					Containers: []corev1.Container{
 						{
 							Name:            "worker",
 							Image:           s.config.WorkerImage,
 							ImagePullPolicy: corev1.PullAlways,
-							Env: []corev1.EnvVar{
-								{
-									Name: "WORKER_ID",
-									ValueFrom: &corev1.EnvVarSource{
-										FieldRef: &corev1.ObjectFieldSelector{
-											FieldPath: "metadata.name",
-										},
-									},
-								},
-								{
-									Name:  "WORKER_POOL",
-									Value: s.config.PoolName,
-								},
-								{
-									Name:  "GATEWAY_GRPC_ADDR",
-									Value: gatewayGRPCAddr,
-								},
-								{
-									Name:  "AIRSTORE_TOKEN",
-									Value: s.config.WorkerToken,
-								},
-								{
-									// Full config as JSON - worker loads via ConfigManager
-									Name:  "CONFIG_JSON",
-									Value: configJSON,
-								},
-								{
-									// Worker CPU capacity in millicores (used to compute task concurrency)
-									Name:  "CPU_LIMIT",
-									Value: strconv.FormatInt(cpuMillis, 10),
-								},
-								{
-									// Worker memory capacity in MiB (used to compute task concurrency)
-									Name:  "MEMORY_LIMIT",
-									Value: strconv.FormatInt(memMiB, 10),
-								},
-							},
+							Env:             s.workerEnv(configJSON, cpuMillis, memMiB, gatewayGRPCAddr),
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{
 									corev1.ResourceCPU:    resource.MustParse(s.config.WorkerCpu),
@@ -343,6 +323,104 @@ func (s *PoolScaler) serializeConfig() (string, string) {
 	}
 	hash := fmt.Sprintf("%x", sha256.Sum256(data))[:16]
 	return string(data), hash
+}
+
+func (s *PoolScaler) gatewayGRPCAddr() string {
+	if !s.config.UseGatewayServiceHostname && s.config.GatewayExternalGRPCAddr != "" {
+		return s.config.GatewayExternalGRPCAddr
+	}
+
+	return fmt.Sprintf("%s.%s.svc.cluster.local:%d",
+		s.config.GatewayServiceName, s.config.Namespace, s.config.GatewayPort)
+}
+
+func (s *PoolScaler) workerEnv(configJSON string, cpuMillis, memMiB int64, gatewayGRPCAddr string) []corev1.EnvVar {
+	return []corev1.EnvVar{
+		{
+			Name: "WORKER_ID",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "metadata.name",
+				},
+			},
+		},
+		{
+			Name:  "WORKER_POOL",
+			Value: s.config.PoolName,
+		},
+		{
+			Name:  "GATEWAY_GRPC_ADDR",
+			Value: gatewayGRPCAddr,
+		},
+		{
+			Name:  "AIRSTORE_TOKEN",
+			Value: s.config.WorkerToken,
+		},
+		{
+			// Full config as JSON - worker loads via ConfigManager.
+			Name:  "CONFIG_JSON",
+			Value: configJSON,
+		},
+		{
+			// Worker CPU capacity in millicores (used to compute task concurrency).
+			Name:  "CPU_LIMIT",
+			Value: strconv.FormatInt(cpuMillis, 10),
+		},
+		{
+			// Worker memory capacity in MiB (used to compute task concurrency).
+			Name:  "MEMORY_LIMIT",
+			Value: strconv.FormatInt(memMiB, 10),
+		},
+		{
+			Name: "POD_IP",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "status.podIP",
+				},
+			},
+		},
+		{
+			Name:  "POD_NAMESPACE",
+			Value: s.config.Namespace,
+		},
+		{
+			Name: "NETWORK_PREFIX",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "spec.nodeName",
+				},
+			},
+		},
+	}
+}
+
+func (s *PoolScaler) imagePullSecrets() []corev1.LocalObjectReference {
+	if len(s.config.WorkerImagePullSecrets) == 0 {
+		return nil
+	}
+
+	refs := make([]corev1.LocalObjectReference, 0, len(s.config.WorkerImagePullSecrets))
+	for _, name := range s.config.WorkerImagePullSecrets {
+		refs = append(refs, corev1.LocalObjectReference{Name: name})
+	}
+
+	return refs
+}
+
+func (s *PoolScaler) dnsPolicy() corev1.DNSPolicy {
+	if s.config.WorkerHostNetwork {
+		return corev1.DNSClusterFirstWithHostNet
+	}
+
+	return corev1.DNSClusterFirst
+}
+
+func (s *PoolScaler) runtimeClassName() *string {
+	if s.config.RuntimeClassName == "" {
+		return nil
+	}
+
+	return &s.config.RuntimeClassName
 }
 
 // boolPtr returns a pointer to a bool

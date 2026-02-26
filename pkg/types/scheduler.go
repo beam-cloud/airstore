@@ -39,23 +39,29 @@ type WorkerJobOpts struct {
 
 // SchedulerConfig holds scheduler-specific configuration
 type SchedulerConfig struct {
-	Enabled                bool                        `key:"enabled" json:"enabled"`
-	GatewayServiceName     string                      `key:"gatewayServiceName" json:"gateway_service_name"`
-	WorkerImage            string                      `key:"workerImage" json:"worker_image"`
-	WorkerNamespace        string                      `key:"workerNamespace" json:"worker_namespace"`
-	WorkerTTL              time.Duration               `key:"workerTTL" json:"worker_ttl"`
-	WorkerShutdownTimeout  time.Duration               `key:"workerShutdownTimeout" json:"worker_shutdown_timeout"` // Time to wait for tasks during graceful shutdown
-	CleanupInterval        time.Duration               `key:"cleanupInterval" json:"cleanup_interval"`
-	HeartbeatInterval      time.Duration               `key:"heartbeatInterval" json:"heartbeat_interval"`
-	HeartbeatTimeout       time.Duration               `key:"heartbeatTimeout" json:"heartbeat_timeout"`
-	RunClaimLeaseTTL       time.Duration               `key:"runClaimLeaseTTL" json:"run_claim_lease_ttl"`
-	RecoveryLoopEnabled    bool                        `key:"recoveryLoopEnabled" json:"recovery_loop_enabled"`
-	RecoveryLoopInterval   time.Duration               `key:"recoveryLoopInterval" json:"recovery_loop_interval"`
-	RecoveryLoopBatchSize  int                         `key:"recoveryLoopBatchSize" json:"recovery_loop_batch_size"`
-	UnclaimedRunStaleAfter time.Duration               `key:"unclaimedRunStaleAfter" json:"unclaimed_run_stale_after"`
-	DefaultWorkerCpu       int64                       `key:"defaultWorkerCpu" json:"default_worker_cpu"`       // millicores
-	DefaultWorkerMemory    int64                       `key:"defaultWorkerMemory" json:"default_worker_memory"` // MiB
-	Pools                  map[string]WorkerPoolConfig `key:"pools" json:"pools"`
+	Enabled                   bool                        `key:"enabled" json:"enabled"`
+	GatewayServiceName        string                      `key:"gatewayServiceName" json:"gateway_service_name"`
+	WorkerImage               string                      `key:"workerImage" json:"worker_image"`
+	WorkerNamespace           string                      `key:"workerNamespace" json:"worker_namespace"`
+	GatewayExternalGRPCAddr   string                      `key:"gatewayExternalGRPCAddr" json:"gateway_external_grpc_addr"`
+	WorkerServiceAccountName  string                      `key:"workerServiceAccountName" json:"worker_service_account_name"`
+	WorkerHostNetwork         bool                        `key:"workerHostNetwork" json:"worker_host_network"`
+	WorkerImagePullSecrets    []string                    `key:"workerImagePullSecrets" json:"worker_image_pull_secrets"`
+	UseGatewayServiceHostname bool                        `key:"useGatewayServiceHostname" json:"use_gateway_service_hostname"`
+	UseHostResolvConf         bool                        `key:"useHostResolvConf" json:"use_host_resolv_conf"`
+	WorkerTTL                 time.Duration               `key:"workerTTL" json:"worker_ttl"`
+	WorkerShutdownTimeout     time.Duration               `key:"workerShutdownTimeout" json:"worker_shutdown_timeout"` // Time to wait for tasks during graceful shutdown
+	CleanupInterval           time.Duration               `key:"cleanupInterval" json:"cleanup_interval"`
+	HeartbeatInterval         time.Duration               `key:"heartbeatInterval" json:"heartbeat_interval"`
+	HeartbeatTimeout          time.Duration               `key:"heartbeatTimeout" json:"heartbeat_timeout"`
+	RunClaimLeaseTTL          time.Duration               `key:"runClaimLeaseTTL" json:"run_claim_lease_ttl"`
+	RecoveryLoopEnabled       bool                        `key:"recoveryLoopEnabled" json:"recovery_loop_enabled"`
+	RecoveryLoopInterval      time.Duration               `key:"recoveryLoopInterval" json:"recovery_loop_interval"`
+	RecoveryLoopBatchSize     int                         `key:"recoveryLoopBatchSize" json:"recovery_loop_batch_size"`
+	UnclaimedRunStaleAfter    time.Duration               `key:"unclaimedRunStaleAfter" json:"unclaimed_run_stale_after"`
+	DefaultWorkerCpu          int64                       `key:"defaultWorkerCpu" json:"default_worker_cpu"`       // millicores
+	DefaultWorkerMemory       int64                       `key:"defaultWorkerMemory" json:"default_worker_memory"` // MiB
+	Pools                     map[string]WorkerPoolConfig `key:"pools" json:"pools"`
 }
 
 // Worker TTL constant

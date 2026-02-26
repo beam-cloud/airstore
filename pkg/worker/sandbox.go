@@ -23,11 +23,12 @@ import (
 // SandboxManager manages the lifecycle of sandboxes on a worker.
 type SandboxManager struct {
 	// Configuration
-	paths       types.WorkerPaths
-	workerID    string
-	gatewayAddr string
-	authToken   string
-	enableFS    bool
+	paths             types.WorkerPaths
+	workerID          string
+	gatewayAddr       string
+	authToken         string
+	enableFS          bool
+	useHostResolvConf bool
 
 	// Components
 	runtime      runtime.Runtime
@@ -78,8 +79,9 @@ type Config struct {
 	GatewayClient *gatewayclient.GatewayClient
 
 	// Features
-	EnableFilesystem bool
-	EnableNetwork    bool
+	EnableFilesystem  bool
+	EnableNetwork     bool
+	UseHostResolvConf bool
 
 	// Runtime
 	RuntimeType   string
@@ -165,19 +167,20 @@ func NewSandboxManager(ctx context.Context, cfg Config) (*SandboxManager, error)
 	}
 
 	manager := &SandboxManager{
-		paths:        paths,
-		workerID:     cfg.WorkerID,
-		gatewayAddr:  cfg.GatewayAddr,
-		authToken:    cfg.AuthToken,
-		enableFS:     cfg.EnableFilesystem,
-		runtime:      rt,
-		imageManager: imgMgr,
-		mountManager: mountMgr,
-		network:      netMgr,
-		s2:           s2,
-		sandboxes:    make(map[string]*Sandbox),
-		ctx:          managerCtx,
-		cancel:       cancel,
+		paths:             paths,
+		workerID:          cfg.WorkerID,
+		gatewayAddr:       cfg.GatewayAddr,
+		authToken:         cfg.AuthToken,
+		enableFS:          cfg.EnableFilesystem,
+		useHostResolvConf: cfg.UseHostResolvConf,
+		runtime:           rt,
+		imageManager:      imgMgr,
+		mountManager:      mountMgr,
+		network:           netMgr,
+		s2:                s2,
+		sandboxes:         make(map[string]*Sandbox),
+		ctx:               managerCtx,
+		cancel:            cancel,
 	}
 	claudeRunner := NewClaudeCodeRunner(ClaudeCodeRunnerOptions{
 		AnthropicAPIKey: cfg.AnthropicAPIKey,
@@ -926,15 +929,31 @@ func (m *SandboxManager) generateSpec(cfg types.SandboxConfig, rootfsPath string
 	// Set hostname to sandbox ID
 	spec.Hostname = cfg.ID
 
-	// Add DNS configuration (resolv.conf is created in Dockerfile.worker with nameserver 8.8.8.8)
+	// Prefer the worker pod's resolv.conf so sandbox DNS matches cluster DNS behavior.
+	resolvConfSource := resolveSandboxResolvConfSource(m.useHostResolvConf)
 	spec.Mounts = append(spec.Mounts, specs.Mount{
 		Destination: "/etc/resolv.conf",
 		Type:        "none",
-		Source:      "/workspace/etc/resolv.conf",
+		Source:      resolvConfSource,
 		Options:     []string{"ro", "rbind", "rprivate", "nosuid", "noexec", "nodev"},
 	})
 
 	return &spec, nil
+}
+
+func resolveSandboxResolvConfSource(useHostResolvConf bool) string {
+	if useHostResolvConf {
+		if _, err := os.Stat("/etc/resolv.conf"); err == nil {
+			return "/etc/resolv.conf"
+		}
+	}
+
+	if _, err := os.Stat("/workspace/etc/resolv.conf"); err == nil {
+		return "/workspace/etc/resolv.conf"
+	}
+
+	// Final fallback for environments where /workspace/etc may not exist.
+	return "/etc/resolv.conf"
 }
 
 // addFilesystemMount bind-mounts a FUSE filesystem into the sandbox at /workspace.
