@@ -280,8 +280,8 @@ func (s *StorageVNode) Create(path string, flags int, mode uint32) (FileHandle, 
 		return 0, fs.ErrInvalid
 	}
 
-	s.cache.Invalidate(path)
-	s.invalidateParent(path)
+	invalidatePathCaches(s.cache, s.content, path)
+	invalidateParentCache(s.cache, path)
 	return s.allocHandle(path), nil
 }
 
@@ -290,6 +290,9 @@ func (s *StorageVNode) Write(path string, buf []byte, off int64, fh FileHandle) 
 	if isAppleDoublePath(path) {
 		return len(buf), nil // Pretend write succeeded
 	}
+	// Clear cached small-file content eagerly so readers never observe stale bytes
+	// when writes happen within the same mtime second.
+	s.content.Invalidate(path)
 
 	state := s.getHandleState(fh)
 	if state == nil {
@@ -374,7 +377,7 @@ func (s *StorageVNode) Truncate(path string, size int64, fh FileHandle) error {
 		// fires and uploads empty content before the Write data arrives.
 		s.enqueueWritesForPath(path)
 		s.asyncWriter.EnqueueNoTimer(path, 0, []byte{})
-		s.cache.Invalidate(path)
+		invalidatePathCaches(s.cache, s.content, path)
 		return nil
 	}
 
@@ -394,7 +397,7 @@ func (s *StorageVNode) Truncate(path string, size int64, fh FileHandle) error {
 		return fs.ErrInvalid
 	}
 
-	s.cache.Invalidate(path)
+	invalidatePathCaches(s.cache, s.content, path)
 	return nil
 }
 
@@ -413,8 +416,8 @@ func (s *StorageVNode) Mkdir(path string, mode uint32) error {
 		return fs.ErrInvalid
 	}
 
-	s.cache.Invalidate(path)
-	s.invalidateParent(path)
+	invalidatePathCaches(s.cache, s.content, path)
+	invalidateParentCache(s.cache, path)
 	return nil
 }
 
@@ -430,8 +433,8 @@ func (s *StorageVNode) Rmdir(path string) error {
 		return fs.ErrInvalid
 	}
 
-	s.cache.Invalidate(path)
-	s.invalidateParent(path)
+	invalidatePathCaches(s.cache, s.content, path)
+	invalidateParentCache(s.cache, path)
 	return nil
 }
 
@@ -451,8 +454,8 @@ func (s *StorageVNode) Unlink(path string) error {
 		return fs.ErrInvalid
 	}
 
-	s.cache.Invalidate(path)
-	s.invalidateParent(path)
+	invalidatePathCaches(s.cache, s.content, path)
+	invalidateParentCache(s.cache, path)
 	return nil
 }
 
@@ -482,10 +485,10 @@ func (s *StorageVNode) Rename(oldpath, newpath string) error {
 		return fs.ErrInvalid
 	}
 
-	s.cache.Invalidate(oldpath)
-	s.cache.Invalidate(newpath)
-	s.invalidateParent(oldpath)
-	s.invalidateParent(newpath)
+	invalidatePathCaches(s.cache, s.content, oldpath)
+	invalidatePathCaches(s.cache, s.content, newpath)
+	invalidateParentCache(s.cache, oldpath)
+	invalidateParentCache(s.cache, newpath)
 	return nil
 }
 
@@ -534,8 +537,8 @@ func (s *StorageVNode) Chmod(path string, mode uint32) error {
 		}
 	}
 
-	s.cache.Invalidate(path)
-	s.invalidateParent(path)
+	invalidatePathCaches(s.cache, s.content, path)
+	invalidateParentCache(s.cache, path)
 	return nil
 }
 
@@ -553,8 +556,8 @@ func (s *StorageVNode) Symlink(target, linkPath string) error {
 		return fs.ErrInvalid
 	}
 
-	s.cache.Invalidate(linkPath)
-	s.invalidateParent(linkPath)
+	invalidatePathCaches(s.cache, s.content, linkPath)
+	invalidateParentCache(s.cache, linkPath)
 	return nil
 }
 
@@ -699,7 +702,7 @@ func (s *StorageVNode) writeRange(path string, off int64, data []byte) error {
 	if !resp.Ok {
 		return fs.ErrInvalid
 	}
-	s.cache.Invalidate(path)
+	invalidatePathCaches(s.cache, s.content, path)
 	return nil
 }
 
@@ -887,20 +890,6 @@ func (s *StorageVNode) bufferedHandleSize(path string) (int64, bool) {
 		state.mu.Unlock()
 	}
 	return size, ok
-}
-
-// invalidateParent invalidates only the specific child entry from its parent's cache,
-// preserving sibling metadata. This is more efficient than invalidating the entire parent.
-func (s *StorageVNode) invalidateParent(path string) {
-	parentPath := "/"
-	childName := strings.TrimPrefix(path, "/")
-
-	if idx := strings.LastIndex(path, "/"); idx > 0 {
-		parentPath = path[:idx]
-		childName = path[idx+1:]
-	}
-
-	s.cache.InvalidateChild(parentPath, childName)
 }
 
 // cachedMode returns the file mode from the metadata cache, or 0 if not cached.

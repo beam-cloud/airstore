@@ -6,7 +6,6 @@
 //
 // Usage:
 //
-//	mkdir /sources/gmail/unread-emails    <- creates view via LLM inference
 //	ls /sources/gmail/unread-emails/      <- executes view query, shows results
 //	cat /sources/gmail/unread-emails/.query.as <- shows view definition
 //	cat /sources/gmail/unread-emails/msg.txt <- reads materialized result
@@ -15,7 +14,7 @@
 //
 //	/sources/                            <- lists available integrations
 //	/sources/gmail/                      <- lists user-created views only
-//	/sources/gmail/unread-emails/        <- view folder (mkdir creates)
+//	/sources/gmail/unread-emails/        <- materialized view folder (read-only)
 //	  .query.as                          <- view definition (JSON)
 //	  2026-01-28_invoice_abc.txt         <- materialized search results
 package vnode
@@ -54,7 +53,7 @@ func WithCompression(strategy string) SourcesVNodeOption {
 }
 
 type SourcesVNode struct {
-	SourceViewBase
+	ReadOnlyBase
 	client      pb.SourceServiceClient
 	token       string
 	bearerToken string // precomputed auth header value
@@ -548,6 +547,11 @@ func (v *SourcesVNode) queryMetaContent(ctx context.Context, path string) ([]byt
 func (v *SourcesVNode) Open(path string, flags int) (FileHandle, error) {
 	path = filepath.Clean(path)
 
+	// Directories cannot be opened for reading — return EISDIR per POSIX.
+	if info, err := v.Getattr(path); err == nil && info.Mode&syscall.S_IFDIR != 0 {
+		return 0, syscall.EISDIR
+	}
+
 	// Reuse cached open content when possible
 	if data, _, fh, ok := v.retainOpenContent(path); ok {
 		v.cacheOpenStat(path, int64(len(data)), 0, time.Time{})
@@ -835,77 +839,16 @@ func isSystemFile(name string) bool {
 	return false
 }
 
-// Mkdir creates a source view folder.
+// Mkdir is not supported for /sources in the mounted VFS.
+// Source views are managed by gateway-side APIs, not filesystem writes.
 func (v *SourcesVNode) Mkdir(path string, mode uint32) error {
-	path = filepath.Clean(path)
-	integration, subpath := v.parsePath(path)
-	if integration == "" || subpath == "" || strings.Contains(subpath, "/") {
-		log.Debug().Str("path", path).Str("integration", integration).Str("subpath", subpath).Msg("mkdir denied: invalid path")
-		return syscall.EPERM
-	}
-
-	// Ignore macOS system files
-	if isSystemFile(subpath) {
-		log.Debug().Str("path", path).Str("subpath", subpath).Msg("mkdir ignored: system file")
-		return syscall.EPERM
-	}
-
-	ctx, cancel := v.ctx()
-	defer cancel()
-
-	resp, err := v.client.CreateView(ctx, &pb.CreateViewRequest{
-		Integration: integration, Name: subpath, OutputFormat: "folder",
-	})
-	if err != nil {
-		log.Error().Err(err).Str("path", path).Msg("mkdir failed")
-		return syscall.EIO
-	}
-	if !resp.Ok {
-		log.Error().Str("error", resp.Error).Msg("mkdir failed")
-		return syscall.EIO
-	}
-
-	// Cache the newly created query so subsequent Getattr calls can find it immediately
-	v.setCachedQuery(path, protoToSourceView(resp.View))
-
-	log.Info().Str("path", path).Str("query", resp.View.QuerySpec).Msg("created source view")
-	return nil
+	return ErrReadOnly
 }
 
-// Create creates a source view file.
+// Create is not supported for /sources in the mounted VFS.
+// Source views are managed by gateway-side APIs, not filesystem writes.
 func (v *SourcesVNode) Create(path string, flags int, mode uint32) (FileHandle, error) {
-	path = filepath.Clean(path)
-	integration, subpath := v.parsePath(path)
-	if integration == "" || subpath == "" || strings.Contains(subpath, "/") {
-		return 0, syscall.EPERM
-	}
-
-	// Ignore macOS system files
-	if isSystemFile(subpath) {
-		return 0, syscall.EPERM
-	}
-
-	name := subpath
-	ext := filepath.Ext(subpath)
-	if ext != "" {
-		name = strings.TrimSuffix(subpath, ext)
-	}
-
-	ctx, cancel := v.ctx()
-	defer cancel()
-
-	resp, err := v.client.CreateView(ctx, &pb.CreateViewRequest{
-		Integration: integration, Name: name, OutputFormat: "file", FileExt: ext,
-	})
-	if err != nil || !resp.Ok {
-		return 0, syscall.EIO
-	}
-
-	// Cache the newly created query so subsequent Getattr calls can find it immediately
-	v.setCachedQuery(path, protoToSourceView(resp.View))
-
-	log.Info().Str("path", path).Str("query", resp.View.QuerySpec).Msg("created source view file")
-	return 0, nil
+	return 0, ErrReadOnly
 }
 
 // Readlink reads symlink target.

@@ -12,8 +12,6 @@ type VNodeType int
 const (
 	// VNodeReadOnly is for read-only paths like /tools/, /.airstore/
 	VNodeReadOnly VNodeType = iota
-	// VNodeSourceView is for /sources/{integration}/ - mkdir/touch creates source views
-	VNodeSourceView
 	// VNodeWritable is for fully writable paths like /skills/
 	VNodeWritable
 )
@@ -46,7 +44,6 @@ type DirEntry struct {
 //
 // Write semantics by VNodeType:
 //   - VNodeReadOnly: All writes return ErrReadOnly (e.g., /tools/, /.airstore/)
-//   - VNodeSourceView: Mkdir/Create create source views, Write/Unlink/Rmdir not supported
 //   - VNodeWritable: Full read/write access (e.g., /skills/)
 type VirtualNode interface {
 	Prefix() string
@@ -78,34 +75,18 @@ type VirtualNode interface {
 // Embed this in VNodes that don't support writes (e.g., /tools/).
 type ReadOnlyBase struct{}
 
-func (ReadOnlyBase) Type() VNodeType                                       { return VNodeReadOnly }
-func (ReadOnlyBase) Create(string, int, uint32) (FileHandle, error)        { return 0, ErrReadOnly }
-func (ReadOnlyBase) Write(string, []byte, int64, FileHandle) (int, error)  { return 0, ErrReadOnly }
-func (ReadOnlyBase) Truncate(string, int64, FileHandle) error              { return ErrReadOnly }
-func (ReadOnlyBase) Mkdir(string, uint32) error                            { return ErrReadOnly }
-func (ReadOnlyBase) Rmdir(string) error                                    { return ErrReadOnly }
-func (ReadOnlyBase) Unlink(string) error                                   { return ErrReadOnly }
-func (ReadOnlyBase) Rename(string, string) error                           { return ErrReadOnly }
-func (ReadOnlyBase) Symlink(string, string) error                          { return ErrReadOnly }
-func (ReadOnlyBase) Readlink(string) (string, error)                       { return "", ErrNotSupported }
-func (ReadOnlyBase) Release(string, FileHandle) error                      { return nil }
-func (ReadOnlyBase) Fsync(string, FileHandle) error                        { return nil }
-
-// SourceViewBase provides default implementations for source view VNodes.
-// Embed this in VNodes that support source views (e.g., /sources/).
-// Mkdir and Create should be overridden to create source views.
-type SourceViewBase struct{}
-
-func (SourceViewBase) Type() VNodeType                                       { return VNodeSourceView }
-func (SourceViewBase) Write(string, []byte, int64, FileHandle) (int, error)  { return 0, ErrReadOnly }
-func (SourceViewBase) Truncate(string, int64, FileHandle) error              { return ErrReadOnly }
-func (SourceViewBase) Rmdir(string) error                                    { return ErrNotSupported }
-func (SourceViewBase) Unlink(string) error                                   { return ErrNotSupported }
-func (SourceViewBase) Rename(string, string) error                           { return ErrNotSupported }
-func (SourceViewBase) Symlink(string, string) error                          { return ErrNotSupported }
-func (SourceViewBase) Readlink(string) (string, error)                       { return "", ErrNotSupported }
-func (SourceViewBase) Release(string, FileHandle) error                      { return nil }
-func (SourceViewBase) Fsync(string, FileHandle) error                        { return nil }
+func (ReadOnlyBase) Type() VNodeType                                      { return VNodeReadOnly }
+func (ReadOnlyBase) Create(string, int, uint32) (FileHandle, error)       { return 0, ErrReadOnly }
+func (ReadOnlyBase) Write(string, []byte, int64, FileHandle) (int, error) { return 0, ErrReadOnly }
+func (ReadOnlyBase) Truncate(string, int64, FileHandle) error             { return ErrReadOnly }
+func (ReadOnlyBase) Mkdir(string, uint32) error                           { return ErrReadOnly }
+func (ReadOnlyBase) Rmdir(string) error                                   { return ErrReadOnly }
+func (ReadOnlyBase) Unlink(string) error                                  { return ErrReadOnly }
+func (ReadOnlyBase) Rename(string, string) error                          { return ErrReadOnly }
+func (ReadOnlyBase) Symlink(string, string) error                         { return ErrReadOnly }
+func (ReadOnlyBase) Readlink(string) (string, error)                      { return "", ErrNotSupported }
+func (ReadOnlyBase) Release(string, FileHandle) error                     { return nil }
+func (ReadOnlyBase) Fsync(string, FileHandle) error                       { return nil }
 
 // registeredNode pairs a VirtualNode with its precomputed prefix strings
 // so Match() never allocates.

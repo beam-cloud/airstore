@@ -114,27 +114,27 @@ func TestPathIno_Deterministic(t *testing.T) {
 
 func TestFileInfoConstructors(t *testing.T) {
 	tests := []struct {
-		name     string
-		fn       func() *FileInfo
-		checkIno uint64
+		name      string
+		fn        func() *FileInfo
+		checkIno  uint64
 		checkMode uint32
 	}{
 		{
-			name:     "NewDirInfo",
-			fn:       func() *FileInfo { return NewDirInfo(100) },
-			checkIno: 100,
+			name:      "NewDirInfo",
+			fn:        func() *FileInfo { return NewDirInfo(100) },
+			checkIno:  100,
 			checkMode: 0040755, // S_IFDIR | 0755
 		},
 		{
-			name:     "NewExecFileInfo",
-			fn:       func() *FileInfo { return NewExecFileInfo(200, 1024) },
-			checkIno: 200,
+			name:      "NewExecFileInfo",
+			fn:        func() *FileInfo { return NewExecFileInfo(200, 1024) },
+			checkIno:  200,
 			checkMode: 0100755, // S_IFREG | 0755
 		},
 		{
-			name:     "NewSymlinkInfo",
-			fn:       func() *FileInfo { return NewSymlinkInfo(300, 10) },
-			checkIno: 300,
+			name:      "NewSymlinkInfo",
+			fn:        func() *FileInfo { return NewSymlinkInfo(300, 10) },
+			checkIno:  300,
 			checkMode: 0120777, // S_IFLNK | 0777
 		},
 	}
@@ -157,5 +157,60 @@ func TestFileInfoConstructors(t *testing.T) {
 				t.Error("expected recent timestamp")
 			}
 		})
+	}
+}
+
+func TestInvalidatePathCachesClearsMetadataAndContent(t *testing.T) {
+	meta := NewMetadataCache()
+	content := NewContentCache()
+	path := "/dir/file.txt"
+
+	meta.Set(path, &FileInfo{Ino: 1, Size: 4, Mode: 0644})
+	content.Set(path, []byte("data"), 123)
+
+	if got := meta.GetInfo(path); got == nil {
+		t.Fatal("expected metadata cache entry before invalidation")
+	}
+	if _, ok := content.Get(path, 123); !ok {
+		t.Fatal("expected content cache entry before invalidation")
+	}
+
+	invalidatePathCaches(meta, content, path)
+
+	if got := meta.GetInfo(path); got != nil {
+		t.Fatal("expected metadata cache entry to be removed")
+	}
+	if _, ok := content.Get(path, 123); ok {
+		t.Fatal("expected content cache entry to be removed")
+	}
+}
+
+func TestInvalidateParentCacheRemovesOnlyTargetChild(t *testing.T) {
+	meta := NewMetadataCache()
+	parent := "/dir"
+	children := []DirEntry{
+		{Name: "a.txt", Mode: 0644, Ino: 1},
+		{Name: "b.txt", Mode: 0644, Ino: 2},
+	}
+	childMeta := map[string]*FileInfo{
+		"a.txt": {Ino: 1, Size: 1},
+		"b.txt": {Ino: 2, Size: 1},
+	}
+	meta.SetWithChildren(parent, children, childMeta)
+
+	invalidateParentCache(meta, "/dir/a.txt")
+
+	entry := meta.Get(parent)
+	if entry == nil {
+		t.Fatal("expected parent entry to remain cached")
+	}
+	if len(entry.Children) != 1 || entry.Children[0].Name != "b.txt" {
+		t.Fatalf("expected only b.txt to remain, got %#v", entry.Children)
+	}
+	if _, ok := entry.ChildMeta["a.txt"]; ok {
+		t.Fatal("expected a.txt metadata to be removed")
+	}
+	if _, ok := entry.ChildMeta["b.txt"]; !ok {
+		t.Fatal("expected b.txt metadata to remain")
 	}
 }

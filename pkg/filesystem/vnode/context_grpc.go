@@ -282,7 +282,8 @@ func (c *ContextVNodeGRPC) Create(path string, flags int, mode uint32) (FileHand
 		log.Warn().Str("path", relPath).Str("error", resp.Error).Msg("context create: rejected")
 		return 0, fs.ErrPermission
 	}
-	c.cache.Invalidate(path)
+	invalidatePathCaches(c.cache, c.content, path)
+	invalidateParentCache(c.cache, path)
 	return c.allocHandle(path), nil
 }
 
@@ -292,6 +293,9 @@ func (c *ContextVNodeGRPC) Write(path string, buf []byte, off int64, fh FileHand
 	if isAppleDoublePath(path) {
 		return len(buf), nil // Pretend write succeeded
 	}
+	// Clear cached small-file content eagerly so readers never observe stale bytes
+	// when writes happen within the same mtime second.
+	c.content.Invalidate(path)
 
 	state := c.getHandleState(fh)
 	if state == nil {
@@ -377,7 +381,7 @@ func (c *ContextVNodeGRPC) Truncate(path string, size int64, fh FileHandle) erro
 		// fires and uploads empty content before the Write data arrives.
 		c.enqueueWritesForPath(path)
 		c.asyncWriter.EnqueueNoTimer(path, 0, []byte{})
-		c.cache.Invalidate(path)
+		invalidatePathCaches(c.cache, c.content, path)
 		return nil
 	}
 
@@ -399,7 +403,7 @@ func (c *ContextVNodeGRPC) Truncate(path string, size int64, fh FileHandle) erro
 		log.Warn().Str("path", relPath).Str("error", resp.Error).Msg("context truncate: rejected")
 		return fs.ErrPermission
 	}
-	c.cache.Invalidate(path)
+	invalidatePathCaches(c.cache, c.content, path)
 	return nil
 }
 
@@ -421,7 +425,8 @@ func (c *ContextVNodeGRPC) Mkdir(path string, mode uint32) error {
 		log.Warn().Str("path", relPath).Str("error", resp.Error).Msg("context mkdir: rejected")
 		return fs.ErrPermission
 	}
-	c.cache.Invalidate(path)
+	invalidatePathCaches(c.cache, c.content, path)
+	invalidateParentCache(c.cache, path)
 	return nil
 }
 
@@ -437,7 +442,8 @@ func (c *ContextVNodeGRPC) Rmdir(path string) error {
 	if !resp.Ok {
 		return fs.ErrPermission
 	}
-	c.cache.Invalidate(path)
+	invalidatePathCaches(c.cache, c.content, path)
+	invalidateParentCache(c.cache, path)
 	return nil
 }
 
@@ -457,7 +463,8 @@ func (c *ContextVNodeGRPC) Unlink(path string) error {
 	if !resp.Ok {
 		return fs.ErrPermission
 	}
-	c.cache.Invalidate(path)
+	invalidatePathCaches(c.cache, c.content, path)
+	invalidateParentCache(c.cache, path)
 	return nil
 }
 
@@ -487,8 +494,10 @@ func (c *ContextVNodeGRPC) Rename(oldpath, newpath string) error {
 		return fs.ErrPermission
 	}
 
-	c.cache.Invalidate(oldpath)
-	c.cache.Invalidate(newpath)
+	invalidatePathCaches(c.cache, c.content, oldpath)
+	invalidatePathCaches(c.cache, c.content, newpath)
+	invalidateParentCache(c.cache, oldpath)
+	invalidateParentCache(c.cache, newpath)
 	return nil
 }
 
@@ -538,7 +547,8 @@ func (c *ContextVNodeGRPC) Chmod(path string, mode uint32) error {
 		}
 	}
 
-	c.cache.Invalidate(path)
+	invalidatePathCaches(c.cache, c.content, path)
+	invalidateParentCache(c.cache, path)
 	return nil
 }
 
@@ -562,7 +572,8 @@ func (c *ContextVNodeGRPC) Symlink(target, linkPath string) error {
 	if !resp.Ok {
 		return fs.ErrPermission
 	}
-	c.cache.Invalidate(linkPath)
+	invalidatePathCaches(c.cache, c.content, linkPath)
+	invalidateParentCache(c.cache, linkPath)
 	return nil
 }
 
@@ -702,7 +713,7 @@ func (c *ContextVNodeGRPC) writeRange(path string, off int64, data []byte) error
 	if !resp.Ok {
 		return fs.ErrPermission
 	}
-	c.cache.Invalidate(path)
+	invalidatePathCaches(c.cache, c.content, path)
 	return nil
 }
 

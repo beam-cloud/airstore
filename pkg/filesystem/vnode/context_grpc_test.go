@@ -33,3 +33,27 @@ func TestContextVNodeLocalDirtySizeIncludesBufferedHandleWrites(t *testing.T) {
 		t.Fatalf("expected dirty file info size 5, got %d", info.Size)
 	}
 }
+
+func TestContextVNodeWriteInvalidatesContentCache(t *testing.T) {
+	path := "/skills/demo.txt"
+	c := &ContextVNodeGRPC{
+		content: NewContentCache(),
+		handles: make(map[FileHandle]*handleState),
+		writes:  make(map[string]map[FileHandle]*handleState),
+		nextFH:  1,
+	}
+
+	c.content.Set(path, []byte("old"), 123)
+	if _, ok := c.content.Get(path, 123); !ok {
+		t.Fatal("expected cached content before write")
+	}
+
+	fh := c.allocHandle(path)
+	if _, err := c.Write(path, []byte("new"), 0, fh); err != nil {
+		t.Fatalf("Write returned error: %v", err)
+	}
+
+	if _, ok := c.content.Get(path, 123); ok {
+		t.Fatal("expected content cache to be invalidated after write")
+	}
+}

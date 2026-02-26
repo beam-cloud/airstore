@@ -16,6 +16,12 @@ import (
 
 const DefaultBetweenTurnsTimeout = 60 * time.Second
 
+// mountFlushGracePeriod is a short wait after sandbox deletion but before
+// unmounting the VFS. This gives the async writer time to flush pending
+// writes (e.g. Claude session state) to object storage so the next
+// resume finds a complete conversation history.
+const mountFlushGracePeriod = 3 * time.Second
+
 func (w *Worker) runInteractiveTask(ctx context.Context, task types.RunExecution) (*types.RunExecutionResult, error) {
 	if w.terminalIO == nil {
 		return nil, fmt.Errorf("terminal transport is not configured")
@@ -47,6 +53,7 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.RunExecution
 
 	go func() {
 		w.sandboxManager.Delete(sandboxID, true)
+		time.Sleep(mountFlushGracePeriod)
 		w.sandboxManager.cleanupMount(task.ExternalId)
 		addTaskExecutionContext(log.Info(), task).Msg("interactive sandbox cleanup complete")
 	}()
@@ -168,6 +175,17 @@ func (w *Worker) runTurnSession(
 		signalActivity(activityCh)
 
 		if err != nil {
+			if isFirstTurn && resumeFromFirstTurn {
+				// Session resume failed — the persisted conversation state may
+				// be corrupt (e.g. orphaned tool_result blocks from a previous
+				// sandbox teardown race). Retry as a fresh session.
+				addTaskExecutionContext(
+					log.Warn().Err(err),
+					task,
+				).Msg("session resume failed, retrying with fresh session")
+				resumeFromFirstTurn = false
+				continue
+			}
 			return err
 		}
 		isFirstTurn = false

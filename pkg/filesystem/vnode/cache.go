@@ -105,6 +105,13 @@ func (c *ContentCache) Set(path string, data []byte, mtime int64) {
 	c.mu.Unlock()
 }
 
+// Invalidate removes a cached content entry for a path.
+func (c *ContentCache) Invalidate(path string) {
+	c.mu.Lock()
+	c.entries.Remove(path)
+	c.mu.Unlock()
+}
+
 // Get returns cached entry or nil
 func (c *MetadataCache) Get(p string) *CacheEntry {
 	if entry, ok := c.entries.Get(p); ok {
