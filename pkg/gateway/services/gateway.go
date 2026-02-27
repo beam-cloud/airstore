@@ -25,11 +25,17 @@ type GatewayService struct {
 	sourceService  *SourceService
 }
 
-func NewGatewayService(backend repository.BackendRepository, fsStore repository.FilesystemStore, eventBus *common.EventBus, sourceRegistry *sources.Registry) *GatewayService {
+func NewGatewayService(
+	backend repository.BackendRepository,
+	fsStore repository.FilesystemStore,
+	eventBus *common.EventBus,
+	sourceRegistry *sources.Registry,
+	seenTracker *hooks.SeenTracker,
+) *GatewayService {
 	return &GatewayService{
 		backend:        backend,
 		fsStore:        fsStore,
-		hooksSvc:       &hooks.Service{Store: fsStore, Backend: backend, EventBus: eventBus},
+		hooksSvc:       &hooks.Service{Store: fsStore, Backend: backend, EventBus: eventBus, Seen: seenTracker},
 		sourceRegistry: sourceRegistry,
 	}
 }

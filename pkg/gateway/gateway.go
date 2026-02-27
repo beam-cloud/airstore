@@ -413,7 +413,7 @@ func (g *Gateway) registerServices() error {
 	// Register gateway gRPC service (workspace/member/token/connection/task management)
 	var gatewayService *services.GatewayService
 	if g.BackendRepo != nil {
-		gatewayService = services.NewGatewayService(g.BackendRepo, filesystemStore, g.eventBus, g.sourceRegistry)
+		gatewayService = services.NewGatewayService(g.BackendRepo, filesystemStore, g.eventBus, g.sourceRegistry, seenTracker)
 		pb.RegisterGatewayServiceServer(g.grpcServer, gatewayService)
 		log.Info().Msg("gateway service registered")
 	}
