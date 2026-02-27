@@ -23,9 +23,9 @@ import (
 )
 
 const (
-	defaultHeartbeatInterval time.Duration = 10 * time.Second
-	finishTaskResultMaxAttempts           = 3
-	finishTaskResultTimeout               = 10 * time.Second
+	defaultHeartbeatInterval    = 10 * time.Second
+	setTaskResultMaxAttempts    = 3
+	setTaskResultRetryTimeout   = 10 * time.Second
 )
 
 // Worker represents a airstore worker that:
@@ -335,62 +335,40 @@ func (w *Worker) finishTask(task types.RunExecution, result *types.RunExecutionR
 		addTaskExecutionContext(log.Warn().Err(qErr), task).Msg("failed to update task queue")
 	}
 
-	if err := w.reportTaskResultWithRetry(task, result); err != nil {
-		addTaskExecutionContext(log.Error().Err(err), task).Msg("failed to report result to gateway after retries")
+	reportErr := setTaskResultWithRetry(task, result, w.gatewayClient.SetTaskResult, time.Sleep)
+	if reportErr != nil {
+		addTaskExecutionContext(log.Error().Err(reportErr), task).
+			Msg("failed to report result to gateway after retries")
 	}
 
 	addTaskExecutionContext(log.Info().Int("exit_code", result.ExitCode), task).Msg("task finished")
 }
 
-func (w *Worker) reportTaskResultWithRetry(task types.RunExecution, result *types.RunExecutionResult) error {
-	if w.gatewayClient == nil {
-		return fmt.Errorf("gateway client is not configured")
-	}
-	return reportTaskResultWithRetry(
-		task,
-		result,
-		func(ctx context.Context, taskID string, exitCode int, errorMsg string) error {
-			return w.gatewayClient.SetTaskResult(ctx, taskID, exitCode, errorMsg)
-		},
-		time.Sleep,
-	)
-}
-
-func reportTaskResultWithRetry(
+// setTaskResultWithRetry reports the task result to the gateway, retrying
+// transient failures with exponential backoff. Each attempt uses a detached
+// context so the call survives worker shutdown.
+func setTaskResultWithRetry(
 	task types.RunExecution,
 	result *types.RunExecutionResult,
-	reportFn func(context.Context, string, int, string) error,
+	reportFn func(ctx context.Context, taskID string, exitCode int, errMsg string) error,
 	sleepFn func(time.Duration),
 ) error {
-	if reportFn == nil {
-		return fmt.Errorf("report function is required")
-	}
-	if result == nil {
-		return fmt.Errorf("run result is required")
-	}
-	if sleepFn == nil {
-		sleepFn = time.Sleep
-	}
-
 	var lastErr error
-	for attempt := 0; attempt < finishTaskResultMaxAttempts; attempt++ {
+	for attempt := range setTaskResultMaxAttempts {
 		if attempt > 0 {
 			sleepFn(time.Duration(1<<(attempt-1)) * time.Second)
 		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), finishTaskResultTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), setTaskResultRetryTimeout)
 		lastErr = reportFn(ctx, task.ExternalId, result.ExitCode, result.Error)
 		cancel()
 		if lastErr == nil {
 			return nil
 		}
-
-		if attempt < finishTaskResultMaxAttempts-1 {
+		if attempt < setTaskResultMaxAttempts-1 {
 			addTaskExecutionContext(log.Warn().Err(lastErr).Int("attempt", attempt+1), task).
 				Msg("failed to report result to gateway, retrying")
 		}
 	}
-
 	return lastErr
 }
 

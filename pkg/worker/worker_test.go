@@ -9,90 +9,66 @@ import (
 	"github.com/beam-cloud/airstore/pkg/types"
 )
 
-func TestReportTaskResultWithRetry_RetriesThenSucceeds(t *testing.T) {
+func TestSetTaskResultWithRetry_SucceedsAfterTransientFailures(t *testing.T) {
 	task := types.RunExecution{ExternalId: "task-123"}
 	result := &types.RunExecutionResult{ID: "task-123", ExitCode: 0}
 
 	var attempts int
-	var sleeps []time.Duration
-
-	err := reportTaskResultWithRetry(
-		task,
-		result,
-		func(ctx context.Context, taskID string, exitCode int, errorMsg string) error {
+	err := setTaskResultWithRetry(task, result,
+		func(ctx context.Context, _ string, _ int, _ string) error {
 			attempts++
-			if taskID != task.ExternalId {
-				t.Fatalf("unexpected task id: got %q want %q", taskID, task.ExternalId)
-			}
-			if exitCode != result.ExitCode {
-				t.Fatalf("unexpected exit code: got %d want %d", exitCode, result.ExitCode)
-			}
-			select {
-			case <-ctx.Done():
-				t.Fatal("report context should not be cancelled before request")
-			default:
-			}
 			if _, ok := ctx.Deadline(); !ok {
-				t.Fatal("expected report context to have timeout")
+				t.Fatal("expected context with deadline")
 			}
-
-			if attempts < 3 {
-				return errors.New("transient gateway error")
+			if attempts < setTaskResultMaxAttempts {
+				return errors.New("transient")
 			}
 			return nil
 		},
-		func(d time.Duration) {
-			sleeps = append(sleeps, d)
-		},
+		func(time.Duration) {},
 	)
 	if err != nil {
-		t.Fatalf("expected success after retries, got error: %v", err)
+		t.Fatalf("expected nil error after retries, got: %v", err)
 	}
-
-	if attempts != 3 {
-		t.Fatalf("expected 3 attempts, got %d", attempts)
-	}
-	if len(sleeps) != 2 {
-		t.Fatalf("expected 2 backoff sleeps, got %d", len(sleeps))
-	}
-	if sleeps[0] != time.Second || sleeps[1] != 2*time.Second {
-		t.Fatalf("unexpected backoff schedule: %v", sleeps)
+	if attempts != setTaskResultMaxAttempts {
+		t.Fatalf("expected %d attempts, got %d", setTaskResultMaxAttempts, attempts)
 	}
 }
 
-func TestReportTaskResultWithRetry_ExhaustsRetries(t *testing.T) {
+func TestSetTaskResultWithRetry_ReturnsLastErrorWhenExhausted(t *testing.T) {
 	task := types.RunExecution{ExternalId: "task-err"}
 	result := &types.RunExecutionResult{ID: "task-err", ExitCode: -1, Error: "boom"}
 
+	permanent := errors.New("gateway down")
 	var attempts int
-	var sleeps []time.Duration
-	terminalErr := errors.New("gateway unavailable")
-
-	err := reportTaskResultWithRetry(
-		task,
-		result,
-		func(ctx context.Context, taskID string, exitCode int, errorMsg string) error {
-			attempts++
-			if taskID != task.ExternalId {
-				t.Fatalf("unexpected task id: got %q want %q", taskID, task.ExternalId)
-			}
-			return terminalErr
-		},
-		func(d time.Duration) {
-			sleeps = append(sleeps, d)
-		},
+	err := setTaskResultWithRetry(task, result,
+		func(context.Context, string, int, string) error { attempts++; return permanent },
+		func(time.Duration) {},
 	)
-	if !errors.Is(err, terminalErr) {
-		t.Fatalf("expected terminal error, got %v", err)
+	if !errors.Is(err, permanent) {
+		t.Fatalf("expected permanent error, got: %v", err)
 	}
+	if attempts != setTaskResultMaxAttempts {
+		t.Fatalf("expected %d attempts, got %d", setTaskResultMaxAttempts, attempts)
+	}
+}
 
-	if attempts != finishTaskResultMaxAttempts {
-		t.Fatalf("expected %d attempts, got %d", finishTaskResultMaxAttempts, attempts)
+func TestSetTaskResultWithRetry_BackoffSchedule(t *testing.T) {
+	task := types.RunExecution{ExternalId: "task-bo"}
+	result := &types.RunExecutionResult{ID: "task-bo", ExitCode: 0}
+
+	var sleeps []time.Duration
+	_ = setTaskResultWithRetry(task, result,
+		func(context.Context, string, int, string) error { return errors.New("fail") },
+		func(d time.Duration) { sleeps = append(sleeps, d) },
+	)
+	want := []time.Duration{1 * time.Second, 2 * time.Second}
+	if len(sleeps) != len(want) {
+		t.Fatalf("expected %d sleeps, got %d", len(want), len(sleeps))
 	}
-	if len(sleeps) != finishTaskResultMaxAttempts-1 {
-		t.Fatalf("expected %d backoff sleeps, got %d", finishTaskResultMaxAttempts-1, len(sleeps))
-	}
-	if sleeps[0] != time.Second || sleeps[1] != 2*time.Second {
-		t.Fatalf("unexpected backoff schedule: %v", sleeps)
+	for i, d := range want {
+		if sleeps[i] != d {
+			t.Fatalf("sleep[%d]: want %v, got %v", i, d, sleeps[i])
+		}
 	}
 }

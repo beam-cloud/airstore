@@ -152,23 +152,18 @@ func TestGitHubReviewPRInvalidCommentsJSON(t *testing.T) {
 func TestGitHubReviewPRAcceptsCommentsArg(t *testing.T) {
 	client := NewGitHubClient()
 	var stdout bytes.Buffer
-	commentsJSON := `[{"path":"main.go","line":10,"body":"Fix this"}]`
-	// This will fail at the HTTP call (no real GitHub API), but it should get
-	// past argument validation and JSON parsing without error.
 	err := client.Execute(context.Background(), githubCmdReviewPR, map[string]any{
 		"owner":    "octocat",
 		"repo":     "hello-world",
 		"number":   1,
 		"body":     "review",
-		"comments": commentsJSON,
+		"comments": `[{"path":"main.go","line":10,"body":"Fix this"}]`,
 	}, &types.IntegrationCredentials{AccessToken: "token"}, &stdout, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("unexpected hard error: %v", err)
 	}
-	out := stdout.String()
-	// Should get a GitHub API error (not an arg validation error)
 	if bytes.Contains(stdout.Bytes(), []byte("invalid comments JSON")) {
-		t.Fatalf("comments JSON should have parsed successfully, got %q", out)
+		t.Fatalf("comments JSON should have parsed successfully, got %q", stdout.String())
 	}
 }
 
