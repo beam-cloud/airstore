@@ -180,6 +180,12 @@ commands:
         default: COMMENT
         description: "Review event: COMMENT, APPROVE, REQUEST_CHANGES"
 
+      - name: comments
+        type: string
+        short: -c
+        flag: --comments
+        description: "JSON array of inline diff comments: [{\"path\":\"file.go\",\"line\":10,\"body\":\"Fix this\"}]"
+
   list-issues:
     description: List issues for a repository
     params:
