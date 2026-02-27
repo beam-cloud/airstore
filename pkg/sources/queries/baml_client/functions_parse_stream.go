@@ -73,6 +73,50 @@ func (*parse_stream) EvaluateGmailQueryResults(text string, opts ...CallOptionFu
 }
 
 // / Parse version of InferGDriveQuery (Takes in string and returns stream_types.GDriveQueryResult)
+func (*parse_stream) InferConfluenceQuery(text string, opts ...CallOptionFunc) (stream_types.ConfluenceQueryResult, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"text": text, "stream": true},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: InferConfluenceQuery: %w", err)
+		panic(wrapped_err)
+	}
+
+	result, err := bamlRuntime.CallFunctionParse(context.Background(), "InferConfluenceQuery", encoded)
+	if err != nil {
+		return stream_types.ConfluenceQueryResult{}, err
+	}
+
+	casted := (result).(stream_types.ConfluenceQueryResult)
+
+	return casted, nil
+}
+
 func (*parse_stream) InferGDriveQuery(text string, opts ...CallOptionFunc) (stream_types.GDriveQueryResult, error) {
 
 	var callOpts callOption

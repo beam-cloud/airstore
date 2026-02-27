@@ -732,6 +732,8 @@ func (s *SourceService) inferQuerySpec(ctx context.Context, integration, name, g
 		result, err = baml.InferLinearQuery(ctx, name, guidancePtr)
 	case types.SourcePostHog:
 		result, err = baml.InferPostHogQuery(ctx, name, guidancePtr)
+	case types.SourceConfluence:
+		result, err = baml.InferConfluenceQuery(ctx, name, guidancePtr)
 	case types.SourceWeb:
 		result, err = baml.InferWebQuery(ctx, name, guidancePtr)
 	default:
@@ -900,14 +902,15 @@ func formatResultsForEvaluation(results []sources.QueryResult) string {
 
 func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 	var spec struct {
-		GmailQuery     string   `json:"gmail_query"`
-		GDriveQuery    string   `json:"gdrive_query"`
-		NotionQuery    string   `json:"notion_query"`
-		GitHubQuery    string   `json:"github_query"`
-		SlackQuery     string   `json:"slack_query"`
-		LinearQuery    string   `json:"linear_query"`
-		PostHogQuery   string   `json:"posthog_query"`
-		WebQuery       string   `json:"web_query"`
+		GmailQuery      string   `json:"gmail_query"`
+		GDriveQuery     string   `json:"gdrive_query"`
+		NotionQuery     string   `json:"notion_query"`
+		GitHubQuery     string   `json:"github_query"`
+		SlackQuery      string   `json:"slack_query"`
+		LinearQuery     string   `json:"linear_query"`
+		PostHogQuery    string   `json:"posthog_query"`
+		ConfluenceQuery string   `json:"cql_query"`
+		WebQuery        string   `json:"web_query"`
 		WebMode        string   `json:"web_mode"`
 		IncludePaths   []string `json:"include_paths"`
 		SearchType     string   `json:"search_type"`
@@ -948,6 +951,8 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 		query = spec.LinearQuery
 	case types.SourcePostHog:
 		query = spec.PostHogQuery
+	case types.SourceConfluence:
+		query = spec.ConfluenceQuery
 	case types.SourceWeb:
 		query = spec.WebQuery
 	}

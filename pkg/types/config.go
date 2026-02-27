@@ -366,11 +366,12 @@ type SourcesConfig struct {
 // This is separate from admin.oauth which is for admin UI login only.
 type IntegrationOAuth struct {
 	CallbackURL string                   `key:"callbackUrl" json:"callback_url"` // e.g., https://api.airstore.ai/api/v1/oauth/callback
-	Google      ProviderOAuthCredentials `key:"google" json:"google"`
-	GitHub      ProviderOAuthCredentials `key:"github" json:"github"`
-	Notion      ProviderOAuthCredentials `key:"notion" json:"notion"`
-	Slack       ProviderOAuthCredentials `key:"slack" json:"slack"`
-	Linear      ProviderOAuthCredentials `key:"linear" json:"linear"`
+	Google    ProviderOAuthCredentials `key:"google" json:"google"`
+	GitHub    ProviderOAuthCredentials `key:"github" json:"github"`
+	Notion    ProviderOAuthCredentials `key:"notion" json:"notion"`
+	Slack     ProviderOAuthCredentials `key:"slack" json:"slack"`
+	Linear    ProviderOAuthCredentials `key:"linear" json:"linear"`
+	Atlassian ProviderOAuthCredentials `key:"atlassian" json:"atlassian"`
 }
 
 // ProviderOAuthCredentials contains client credentials for an OAuth provider.

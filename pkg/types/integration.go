@@ -166,6 +166,17 @@ var integrations = map[IntegrationName]IntegrationMeta{
 			CapabilitySourceRead,
 		},
 	},
+	Confluence: {
+		Name:        Confluence,
+		DisplayName: "Confluence",
+		Description: "Wiki pages and spaces",
+		Icon:        "book",
+		AuthType:    AuthOAuth,
+		Scope:       ScopeShared,
+		Capabilities: []IntegrationCapability{
+			CapabilitySourceRead,
+		},
+	},
 	Web: {
 		Name:        Web,
 		DisplayName: "Web",
