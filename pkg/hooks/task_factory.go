@@ -174,7 +174,17 @@ func buildHookAttachment(hook *types.Hook, event string, data map[string]any) ma
 		"path":             hook.Path,
 		"event":            event,
 	}
-	for _, key := range []string{"integration", "new_count", "new_items", "new_items_hash", "path", "workspace_id"} {
+	for _, key := range []string{
+		"integration",
+		"new_count",
+		"new_items",
+		"new_items_hash",
+		"path",
+		"workspace_id",
+		"old_path",
+		"new_path",
+		"move_op_id",
+	} {
 		if v, ok := data[key]; ok && v != nil {
 			attachment[key] = v
 		}

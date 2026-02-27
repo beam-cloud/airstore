@@ -1,6 +1,10 @@
 package hooks
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/beam-cloud/airstore/pkg/types"
+)
 
 func TestHookIdempotencyKey_SourceChangeStableAcrossEventIDs(t *testing.T) {
 	data := map[string]any{
@@ -63,5 +67,31 @@ func TestHookIdempotencyKey_FsWriteStillUsesEventID(t *testing.T) {
 	keyB := hookIdempotencyKey("hook-1", "evt-b", EventFsWrite, map[string]any{"path": "/foo.txt"})
 	if keyA == keyB {
 		t.Fatalf("expected fs.write idempotency to remain event-scoped, got %q", keyA)
+	}
+}
+
+func TestBuildHookAttachment_IncludesMoveContext(t *testing.T) {
+	hook := &types.Hook{
+		Id:         1,
+		ExternalId: "hook-1",
+		Path:       "/pdfs",
+	}
+	data := map[string]any{
+		"path":         "/pdfs/UHC_letter_jan12026.pdf",
+		"workspace_id": "124",
+		"old_path":     "/UHC_letter_jan12026.pdf",
+		"new_path":     "/pdfs/UHC_letter_jan12026.pdf",
+		"move_op_id":   "mv-123",
+	}
+
+	attachment := buildHookAttachment(hook, EventFsWrite, data)
+	if got := attachment["old_path"]; got != data["old_path"] {
+		t.Fatalf("expected old_path %v, got %v", data["old_path"], got)
+	}
+	if got := attachment["new_path"]; got != data["new_path"] {
+		t.Fatalf("expected new_path %v, got %v", data["new_path"], got)
+	}
+	if got := attachment["move_op_id"]; got != data["move_op_id"] {
+		t.Fatalf("expected move_op_id %v, got %v", data["move_op_id"], got)
 	}
 }

@@ -75,6 +75,11 @@ func (s *StorageService) SetHookStream(emitter common.EventEmitter) {
 
 // emitHookEvent sends a filesystem event to the hook event stream.
 func (s *StorageService) emitHookEvent(ctx context.Context, eventType string, path string) {
+	s.emitHookEventWithData(ctx, eventType, path, nil)
+}
+
+// emitHookEventWithData sends a filesystem event plus optional metadata to the hook stream.
+func (s *StorageService) emitHookEventWithData(ctx context.Context, eventType string, path string, meta map[string]any) {
 	if s.hookStream == nil {
 		return
 	}
@@ -89,13 +94,54 @@ func (s *StorageService) emitHookEvent(ctx context.Context, eventType string, pa
 		return
 	}
 
-	log.Debug().Str("event", eventType).Str("path", path).Uint("workspace", wsId).Msg("hook event emitted")
-	s.hookStream.Emit(ctx, map[string]any{
+	payload := map[string]any{
 		"event":            eventType,
 		"workspace_id":     fmt.Sprintf("%d", wsId),
 		"workspace_ext_id": auth.WorkspaceExtId(ctx),
 		"path":             path,
-	})
+	}
+	for key, value := range meta {
+		if value != nil {
+			payload[key] = value
+		}
+	}
+
+	logEvent := log.Debug().
+		Str("event", eventType).
+		Str("path", path).
+		Uint("workspace", wsId)
+	if rawOldPath, ok := payload["old_path"]; ok {
+		if oldPath, ok := rawOldPath.(string); ok && strings.TrimSpace(oldPath) != "" {
+			logEvent = logEvent.Str("old_path", strings.TrimSpace(oldPath))
+		}
+	}
+	if rawNewPath, ok := payload["new_path"]; ok {
+		if newPath, ok := rawNewPath.(string); ok && strings.TrimSpace(newPath) != "" {
+			logEvent = logEvent.Str("new_path", strings.TrimSpace(newPath))
+		}
+	}
+	logEvent.Msg("hook event emitted")
+
+	s.hookStream.Emit(ctx, payload)
+}
+
+// emitHookMoveEvents emits source+destination hook events for a move/rename.
+func (s *StorageService) emitHookMoveEvents(ctx context.Context, oldPath, newPath string) {
+	oldPath = hooks.NormalizePath(oldPath)
+	newPath = hooks.NormalizePath(newPath)
+	if oldPath == "" || newPath == "" || oldPath == newPath {
+		return
+	}
+
+	moveOpID := fmt.Sprintf("mv-%d", time.Now().UnixNano())
+	meta := map[string]any{
+		"old_path":   oldPath,
+		"new_path":   newPath,
+		"move_op_id": moveOpID,
+	}
+
+	s.emitHookEventWithData(ctx, hooks.EventFsDelete, oldPath, meta)
+	s.emitHookEventWithData(ctx, hooks.EventFsWrite, newPath, meta)
 }
 
 func (s *StorageService) bucket(ctx context.Context) (string, error) {
@@ -522,6 +568,7 @@ func (s *StorageService) Rename(ctx context.Context, req *pb.ContextRenameReques
 		if dirErr != nil {
 			return &pb.ContextRenameResponse{Ok: false, Error: fmt.Sprintf("rename failed: %v", err)}, nil
 		}
+		s.emitHookMoveEvents(ctx, req.OldPath, req.NewPath)
 		return &pb.ContextRenameResponse{Ok: true}, nil
 	}
 
@@ -529,6 +576,7 @@ func (s *StorageService) Rename(ctx context.Context, req *pb.ContextRenameReques
 		s.invalidate(bucket, oldKey)
 		s.invalidate(bucket, newKey)
 	}
+	s.emitHookMoveEvents(ctx, req.OldPath, req.NewPath)
 	return &pb.ContextRenameResponse{Ok: true}, nil
 }
 

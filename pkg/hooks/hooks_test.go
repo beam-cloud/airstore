@@ -57,6 +57,14 @@ func (m *mockCreator) last() mockTask {
 	return m.tasks[len(m.tasks)-1]
 }
 
+func (m *mockCreator) all() []mockTask {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]mockTask, len(m.tasks))
+	copy(out, m.tasks)
+	return out
+}
+
 // --- Mock Backend ---
 
 type mockBackend struct {
@@ -462,6 +470,49 @@ func TestEngine_Debounce_DeleteOnlyWithExistingPathResolvesAsWrite(t *testing.T)
 	}
 	if task := creator.last(); task.Event != EventFsWrite {
 		t.Fatalf("expected final event %s, got %s", EventFsWrite, task.Event)
+	}
+}
+
+func TestEngine_MoveEvents_FireSourceAndDestinationHooks(t *testing.T) {
+	sourceHook := makeHook(1, 10, "/inbox", "handle source delete")
+	destHook := makeHook(2, 10, "/pdfs", "handle destination write")
+	store := &mockStore{hooks: []*types.Hook{sourceHook, destHook}}
+	creator := &mockCreator{}
+	backend := &mockBackend{}
+	eng := NewEngine(store, creator, backend, nil)
+	delay := setShortDebounce(eng)
+
+	deleteEvent := makeEvent(EventFsDelete, "/inbox/UHC_letter_jan12026.pdf", 10)
+	deleteEvent["old_path"] = "/inbox/UHC_letter_jan12026.pdf"
+	deleteEvent["new_path"] = "/pdfs/UHC_letter_jan12026.pdf"
+	deleteEvent["move_op_id"] = "mv-test-1"
+	writeEvent := makeEvent(EventFsWrite, "/pdfs/UHC_letter_jan12026.pdf", 10)
+	writeEvent["old_path"] = "/inbox/UHC_letter_jan12026.pdf"
+	writeEvent["new_path"] = "/pdfs/UHC_letter_jan12026.pdf"
+	writeEvent["move_op_id"] = "mv-test-1"
+
+	eng.Handle("1", deleteEvent)
+	eng.Handle("2", writeEvent)
+	waitForDebounce(delay)
+
+	if creator.count() != 2 {
+		t.Fatalf("expected 2 tasks (source+destination), got %d", creator.count())
+	}
+
+	var sourceDelete, destWrite bool
+	for _, task := range creator.all() {
+		if task.HookId == sourceHook.Id && task.Event == EventFsDelete {
+			sourceDelete = true
+		}
+		if task.HookId == destHook.Id && task.Event == EventFsWrite {
+			destWrite = true
+		}
+	}
+	if !sourceDelete {
+		t.Fatalf("expected source hook %d to receive %s event", sourceHook.Id, EventFsDelete)
+	}
+	if !destWrite {
+		t.Fatalf("expected destination hook %d to receive %s event", destHook.Id, EventFsWrite)
 	}
 }
 
