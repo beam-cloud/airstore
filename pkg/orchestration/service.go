@@ -822,11 +822,15 @@ func (s *AgentService) trySteerRunInputTask(ctx context.Context, task *types.Age
 	if err := s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDone, nil, task.TargetRunID); err != nil {
 		return false, err
 	}
+	interactionState := ""
+	if interaction != nil {
+		interactionState = string(interaction.State)
+	}
 
 	_ = s.publishRunEvent(ctx, run.ID, types.AgentRunEventInputSteered, map[string]any{
 		"task_id":           task.ID,
 		"queue_mode":        task.QueueMode,
-		"interaction_state": interaction.State,
+		"interaction_state": interactionState,
 		"direct":            true,
 	})
 	return true, nil
@@ -960,6 +964,9 @@ func (s *AgentService) restartTerminalTaskFromRunInput(
 		attempts, err := s.backend.ListAgentRunAttempts(ctx, terminalRun.ID)
 		if err == nil {
 			for _, attempt := range attempts {
+				if attempt == nil {
+					continue
+				}
 				if attempt.ExecutionID != nil && attempt.Status.IsInFlight() {
 					_ = s.backend.CancelRunExecution(ctx, *attempt.ExecutionID)
 				}

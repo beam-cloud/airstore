@@ -125,6 +125,19 @@ func strPtr(v string) *string {
 	return &v
 }
 
+type failOnSecondCreateStore struct {
+	repository.FilesystemStore
+	createCalls int
+}
+
+func (s *failOnSecondCreateStore) CreateHook(ctx context.Context, hook *types.Hook) (*types.Hook, error) {
+	s.createCalls++
+	if s.createCalls > 1 {
+		return nil, fmt.Errorf("forced create failure")
+	}
+	return s.FilesystemStore.CreateHook(ctx, hook)
+}
+
 func TestResolveHookAgent_GetOrCreateAndUpdate(t *testing.T) {
 	ctx := context.Background()
 	backend := newFakeAgentBackend()
@@ -331,6 +344,54 @@ func TestServiceDelete_DoesNotDeleteSharedAgent(t *testing.T) {
 	}
 	if profile == nil || profile.ID != *first.AgentId {
 		t.Fatalf("expected shared agent %s to remain", *first.AgentId)
+	}
+}
+
+func TestServiceCreate_FailedCreateDoesNotMutateExistingAgent(t *testing.T) {
+	ctx := context.Background()
+	backend := newFakeAgentBackend()
+	store := &failOnSecondCreateStore{FilesystemStore: repository.NewMemoryFilesystemStore()}
+	svc := &Service{Store: store, Backend: backend}
+
+	first, err := svc.Create(
+		ctx,
+		13,
+		nil,
+		nil,
+		"token",
+		"/sources/github/repo-prs",
+		"review prs",
+		nil,
+		&AgentConfigPatch{Name: strPtr("Original Hook Agent")},
+	)
+	if err != nil {
+		t.Fatalf("create initial hook: %v", err)
+	}
+	if first.AgentId == nil || *first.AgentId == "" {
+		t.Fatal("expected initial hook to include agent")
+	}
+
+	_, err = svc.Create(
+		ctx,
+		13,
+		nil,
+		nil,
+		"token",
+		"/sources/github/repo-prs",
+		"review prs again",
+		nil,
+		&AgentConfigPatch{Name: strPtr("Mutated Hook Agent")},
+	)
+	if err == nil {
+		t.Fatal("expected second hook create to fail")
+	}
+
+	profile, err := backend.GetAgentProfile(ctx, 13, *first.AgentId)
+	if err != nil {
+		t.Fatalf("get existing hook agent: %v", err)
+	}
+	if profile.Name != "Original Hook Agent" {
+		t.Fatalf("expected existing hook agent name to remain unchanged, got %q", profile.Name)
 	}
 }
 

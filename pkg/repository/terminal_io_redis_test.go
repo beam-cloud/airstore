@@ -91,7 +91,7 @@ func TestRedisTerminalIORepository_InputPublishedBeforeSubscribeIsBuffered(t *te
 	}
 }
 
-func TestRedisTerminalIORepository_MultipleBufferedInputsAreConsumedInOrderAcrossSubscriptions(t *testing.T) {
+func TestRedisTerminalIORepository_MultipleBufferedInputsAreDrainedInOrder(t *testing.T) {
 	rdb, err := NewRedisClientForTest()
 	if err != nil {
 		t.Fatalf("new redis test client: %v", err)
@@ -111,12 +111,13 @@ func TestRedisTerminalIORepository_MultipleBufferedInputsAreConsumedInOrderAcros
 		t.Fatalf("publish second input: %v", err)
 	}
 
-	firstCh, firstCleanup, err := repo.SubscribeInput(ctx, taskID)
+	inputCh, cleanup, err := repo.SubscribeInput(ctx, taskID)
 	if err != nil {
-		t.Fatalf("subscribe first input: %v", err)
+		t.Fatalf("subscribe input: %v", err)
 	}
-	gotFirst, err := waitFor[[]byte](firstCh)
-	firstCleanup()
+	defer cleanup()
+
+	gotFirst, err := waitFor[[]byte](inputCh)
 	if err != nil {
 		t.Fatalf("wait first input: %v", err)
 	}
@@ -124,12 +125,7 @@ func TestRedisTerminalIORepository_MultipleBufferedInputsAreConsumedInOrderAcros
 		t.Fatalf("first input mismatch: got %q want %q", gotFirst, first)
 	}
 
-	secondCh, secondCleanup, err := repo.SubscribeInput(ctx, taskID)
-	if err != nil {
-		t.Fatalf("subscribe second input: %v", err)
-	}
-	defer secondCleanup()
-	gotSecond, err := waitFor[[]byte](secondCh)
+	gotSecond, err := waitFor[[]byte](inputCh)
 	if err != nil {
 		t.Fatalf("wait second input: %v", err)
 	}
@@ -198,11 +194,8 @@ func TestRedisTerminalIORepository_ListPendingInputs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list after consume: %v", err)
 	}
-	if len(pending) != 1 {
-		t.Fatalf("expected 1 pending after consuming first, got %d", len(pending))
-	}
-	if pending[0].Message != "second\n" {
-		t.Fatalf("remaining pending = %q, want %q", pending[0].Message, "second\n")
+	if len(pending) != 0 {
+		t.Fatalf("expected buffered inputs to be fully drained after subscribe, got %d", len(pending))
 	}
 }
 

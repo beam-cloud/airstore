@@ -116,7 +116,7 @@ func TestRedisTaskQueuePushDelayedExtendsTaskStateTTL(t *testing.T) {
 	require.Greater(t, ttl, delay, "task state TTL should outlive the scheduled delay")
 }
 
-func TestRedisTaskQueueInFlightCountPrunesStaleMembers(t *testing.T) {
+func TestRedisTaskQueueInFlightCountPrunesOnlyTerminalMembers(t *testing.T) {
 	queue, cleanup := newTestTaskQueue(t)
 	defer cleanup()
 
@@ -153,9 +153,38 @@ func TestRedisTaskQueueInFlightCountPrunesStaleMembers(t *testing.T) {
 
 	count, err := queue.InFlightCount(ctx)
 	require.NoError(t, err)
-	require.Equal(t, int64(1), count)
+	require.Equal(t, int64(2), count)
 
 	members, err := queue.rdb.SMembers(ctx, inFlightKey).Result()
 	require.NoError(t, err)
-	require.ElementsMatch(t, []string{runningID}, members)
+	require.ElementsMatch(t, []string{runningID, missingID}, members)
+}
+
+func TestRedisTaskQueueInFlightCountRefreshesRunningStateTTL(t *testing.T) {
+	queue, cleanup := newTestTaskQueue(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	inFlightKey := common.Keys.RunExecutionInFlight("default")
+	runningID := "task-running-refresh"
+	require.NoError(t, queue.rdb.SAdd(ctx, inFlightKey, runningID).Err())
+
+	runningState, err := json.Marshal(&types.RunExecutionState{
+		ID:        runningID,
+		Status:    types.RunExecutionStatusRunning,
+		WorkerID:  "worker-refresh",
+		ExitCode:  -1,
+		CreatedAt: time.Now().Add(-2 * time.Minute),
+		StartedAt: time.Now().Add(-time.Minute),
+	})
+	require.NoError(t, err)
+	require.NoError(t, queue.rdb.Set(ctx, common.Keys.RunExecutionState(runningID), runningState, time.Second).Err())
+
+	count, err := queue.InFlightCount(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), count)
+
+	ttl, err := queue.rdb.TTL(ctx, common.Keys.RunExecutionState(runningID)).Result()
+	require.NoError(t, err)
+	require.Greater(t, ttl, time.Hour, "expected running state TTL to be refreshed")
 }

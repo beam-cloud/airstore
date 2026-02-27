@@ -21,6 +21,20 @@ type RedisTerminalIORepository struct {
 
 const terminalInputBufferTTL = 24 * time.Hour
 
+const renewSessionLeaseScript = `
+if redis.call('get', KEYS[1]) == ARGV[1] then
+	return redis.call('pexpire', KEYS[1], ARGV[2])
+end
+return 0
+`
+
+const releaseSessionLeaseScript = `
+if redis.call('get', KEYS[1]) == ARGV[1] then
+	return redis.call('del', KEYS[1])
+end
+return 0
+`
+
 func NewRedisTerminalIORepository(rdb *common.RedisClient) TerminalIORepository {
 	return &RedisTerminalIORepository{rdb: rdb}
 }
@@ -77,25 +91,26 @@ func (r *RedisTerminalIORepository) SubscribeInput(ctx context.Context, taskID s
 	var once sync.Once
 
 	emitBufferedInput := func() bool {
-		data, err := r.rdb.LPop(ctx, bufferKey).Bytes()
-		if err != nil {
-			if errors.Is(err, redis.Nil) {
-				return true
+		for {
+			data, err := r.rdb.LPop(ctx, bufferKey).Bytes()
+			if err != nil {
+				if errors.Is(err, redis.Nil) {
+					return true
+				}
+				return false
 			}
-			return false
+			if len(data) == 0 {
+				continue
+			}
+			msg := extractMessage(data)
+			select {
+			case out <- msg:
+			case <-ctx.Done():
+				return false
+			case <-done:
+				return false
+			}
 		}
-		if len(data) == 0 {
-			return true
-		}
-		msg := extractMessage(data)
-		select {
-		case out <- msg:
-		case <-ctx.Done():
-			return false
-		case <-done:
-			return false
-		}
-		return true
 	}
 
 	go func() {
@@ -222,26 +237,40 @@ func (r *RedisTerminalIORepository) AcquireSessionLease(ctx context.Context, wor
 	} else if ok {
 		return true, nil
 	}
-	current, _ := r.getLeaseOwner(ctx, key)
+	current, err := r.getLeaseOwner(ctx, key)
+	if err != nil {
+		return false, err
+	}
 	return current == ownerID, nil
 }
 
 func (r *RedisTerminalIORepository) RenewSessionLease(ctx context.Context, workspaceID uint, sessionID, ownerID string, ttl time.Duration) (bool, error) {
 	key := common.Keys.SessionLease(workspaceID, sessionID)
-	current, err := r.getLeaseOwner(ctx, key)
-	if err != nil || current != ownerID {
+	result, err := r.rdb.Eval(
+		ctx,
+		renewSessionLeaseScript,
+		[]string{key},
+		ownerID,
+		ttl.Milliseconds(),
+	).Int64()
+	if err != nil {
 		return false, err
 	}
-	return r.rdb.Expire(ctx, key, ttl).Result()
+	return result == 1, nil
 }
 
 func (r *RedisTerminalIORepository) ReleaseSessionLease(ctx context.Context, workspaceID uint, sessionID, ownerID string) error {
 	key := common.Keys.SessionLease(workspaceID, sessionID)
-	current, err := r.getLeaseOwner(ctx, key)
-	if err != nil || current != ownerID {
+	_, err := r.rdb.Eval(
+		ctx,
+		releaseSessionLeaseScript,
+		[]string{key},
+		ownerID,
+	).Int64()
+	if err != nil {
 		return err
 	}
-	return r.rdb.Del(ctx, key).Err()
+	return nil
 }
 
 func (r *RedisTerminalIORepository) GetSessionLeaseOwner(ctx context.Context, workspaceID uint, sessionID string) (string, error) {

@@ -29,6 +29,8 @@ type retryTestBackend struct {
 	nextRunID       int
 	nextAttemptID   int
 	nextExecutionID int
+
+	setRunExecutionResultErr error
 }
 
 func newRetryTestBackend() *retryTestBackend {
@@ -67,6 +69,9 @@ func (b *retryTestBackend) GetRunExecution(_ context.Context, externalID string)
 }
 
 func (b *retryTestBackend) SetRunExecutionResult(_ context.Context, externalID string, exitCode int, errorMsg string) error {
+	if b.setRunExecutionResultErr != nil {
+		return b.setRunExecutionResultErr
+	}
 	exec, ok := b.runExecutions[externalID]
 	if !ok {
 		return &types.ErrRunExecutionNotFound{ExternalId: externalID}
@@ -350,6 +355,7 @@ type capturingTaskQueue struct {
 	repository.TaskQueue
 	pushed         []*types.RunExecution
 	failed         []string
+	completed      []string
 	stateByTaskID  map[string]*types.RunExecutionState
 	resultByTaskID map[string]*types.RunExecutionResult
 }
@@ -361,6 +367,7 @@ func (q *capturingTaskQueue) Push(_ context.Context, task *types.RunExecution) e
 }
 
 func (q *capturingTaskQueue) Complete(_ context.Context, taskID string, result *types.RunExecutionResult) error {
+	q.completed = append(q.completed, taskID)
 	if q.stateByTaskID == nil {
 		q.stateByTaskID = map[string]*types.RunExecutionState{}
 	}
@@ -933,6 +940,42 @@ func TestProcessClaimedRunReconcilesTerminalQueueState(t *testing.T) {
 	require.Equal(t, types.AgentRunStatusOK, backend.runs[runID].Status)
 	require.Nil(t, backend.runs[runID].ClaimedByWorker)
 	require.Equal(t, types.AgentTaskStateDone, backend.tasks[originTaskID].State)
+}
+
+func TestProcessClaimedRunSkipsQueueCompleteWhenSetTaskResultFails(t *testing.T) {
+	backend := newRetryTestBackend()
+	backend.setRunExecutionResultErr = fmt.Errorf("transient write failure")
+	queue := &capturingTaskQueue{
+		stateByTaskID:  map[string]*types.RunExecutionState{},
+		resultByTaskID: map[string]*types.RunExecutionResult{},
+	}
+	svc := &WorkerService{
+		backend:   backend,
+		taskQueue: queue,
+	}
+
+	runID := "run-claimed-terminal-fail-1"
+	originTaskID := "task-claimed-terminal-fail-1"
+	seedRecoverableRunContext(backend, runID, originTaskID, 2)
+	workerID := "worker-claimed-terminal-fail"
+	claimHeartbeat := time.Now().Add(-20 * time.Second)
+	claimExpires := time.Now().Add(20 * time.Second)
+	backend.runs[runID].ClaimedByWorker = &workerID
+	backend.runs[runID].ClaimHeartbeatAt = &claimHeartbeat
+	backend.runs[runID].ClaimExpiresAt = &claimExpires
+
+	queue.stateByTaskID[runID] = &types.RunExecutionState{
+		ID:         runID,
+		Status:     types.RunExecutionStatusComplete,
+		ExitCode:   0,
+		FinishedAt: time.Now().Add(-30 * time.Second),
+	}
+
+	outcome, err := svc.processClaimedRun(context.Background(), backend.runs[runID])
+	require.Error(t, err)
+	require.False(t, outcome.detected)
+	require.False(t, outcome.recovered)
+	require.Empty(t, queue.completed, "queue state should remain recoverable after SetTaskResult failure")
 }
 
 func TestScheduleRetryRunBlocksOnActiveSessionConflict(t *testing.T) {

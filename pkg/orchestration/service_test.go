@@ -492,7 +492,7 @@ func TestAcceptAgentCommandAcceptedFirstAndIdempotent(t *testing.T) {
 	require.EqualValues(t, 1, queueLen, "idempotent replay must not enqueue duplicate work")
 }
 
-func TestQueueRouterFollowupKeepsFIFOOrder(t *testing.T) {
+func TestQueueRouterFollowupReshapesToLatestTask(t *testing.T) {
 	redisClient, cleanup := newTestRedis(t)
 	defer cleanup()
 
@@ -525,7 +525,9 @@ func TestQueueRouterFollowupKeepsFIFOOrder(t *testing.T) {
 	require.NoError(t, router.Enqueue(ctx, first, instanceKey))
 	require.NoError(t, router.Enqueue(ctx, second, instanceKey))
 
-	require.Equal(t, types.AgentTaskStateQueued, backend.agentTasks[first.ID].State)
+	require.Equal(t, types.AgentTaskStateDropped, backend.agentTasks[first.ID].State)
+	require.NotNil(t, backend.agentTasks[first.ID].DroppedReason)
+	require.Equal(t, types.AgentTaskDropReasonReshapedByQueueMode, *backend.agentTasks[first.ID].DroppedReason)
 	require.Equal(t, types.AgentTaskStateQueued, backend.agentTasks[second.ID].State)
 
 	token, err := router.Pop(ctx, 0)
@@ -534,15 +536,11 @@ func TestQueueRouterFollowupKeepsFIFOOrder(t *testing.T) {
 
 	taskID, err := router.ResolveTaskID(ctx, token)
 	require.NoError(t, err)
-	require.Equal(t, first.ID, taskID)
+	require.Equal(t, second.ID, taskID)
 
 	token, err = router.Pop(ctx, 0)
 	require.NoError(t, err)
-	require.NotEmpty(t, token)
-
-	taskID, err = router.ResolveTaskID(ctx, token)
-	require.NoError(t, err)
-	require.Equal(t, second.ID, taskID)
+	require.Empty(t, token)
 }
 
 func TestAcceptAgentCommandAppliesAgentConfigModelAndProvider(t *testing.T) {
@@ -1452,10 +1450,14 @@ func TestAcceptRunInputIdenticalMessagesQueueAsDistinctTasks(t *testing.T) {
 	require.Equal(t, types.RunInputDeliveryQueued, outcome2)
 	require.NotNil(t, task2)
 	require.NotEqual(t, task1.ID, task2.ID, "identical follow-up text must not collapse")
+	require.Equal(t, types.AgentTaskStateDropped, backend.agentTasks[task1.ID].State)
+	require.NotNil(t, backend.agentTasks[task1.ID].DroppedReason)
+	require.Equal(t, types.AgentTaskDropReasonReshapedByQueueMode, *backend.agentTasks[task1.ID].DroppedReason)
+	require.Equal(t, types.AgentTaskStateQueued, backend.agentTasks[task2.ID].State)
 
 	queueLen, err := redisClient.LLen(context.Background(), common.Keys.TaskQueue()).Result()
 	require.NoError(t, err)
-	require.EqualValues(t, 2, queueLen)
+	require.EqualValues(t, 1, queueLen)
 }
 
 func TestMaterializeRunBlockedBySessionLease(t *testing.T) {

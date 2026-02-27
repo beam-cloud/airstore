@@ -279,6 +279,14 @@ func (s *WorkerService) processClaimedRun(ctx context.Context, run *types.AgentR
 		}
 		exitCode = result.ExitCode
 	}
+	_, setErr := s.SetTaskResult(ctx, &pb.SetTaskResultRequest{
+		TaskId:   run.ID,
+		ExitCode: int32(exitCode),
+		Error:    errText,
+	})
+	if setErr != nil {
+		return orphanRecoveryOutcome{}, setErr
+	}
 	if completeErr := s.taskQueue.Complete(ctx, run.ID, &types.RunExecutionResult{
 		ID:       run.ID,
 		ExitCode: exitCode,
@@ -287,15 +295,7 @@ func (s *WorkerService) processClaimedRun(ctx context.Context, run *types.AgentR
 		log.Warn().
 			Err(completeErr).
 			Str("run_id", run.ID).
-			Msg("worker recovery loop: failed to reconcile terminal queue state before run finalization")
-	}
-	_, setErr := s.SetTaskResult(ctx, &pb.SetTaskResultRequest{
-		TaskId:   run.ID,
-		ExitCode: int32(exitCode),
-		Error:    errText,
-	})
-	if setErr != nil {
-		return orphanRecoveryOutcome{}, setErr
+			Msg("worker recovery loop: failed to reconcile terminal queue state after run finalization")
 	}
 	return orphanRecoveryOutcome{
 		detected:  true,

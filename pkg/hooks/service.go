@@ -37,23 +37,17 @@ func (s *Service) Create(
 		return nil, fmt.Errorf("prompt is required")
 	}
 	normalizedSkills := types.NormalizeSkillPaths(skillPaths, "")
-	agent, err := ResolveHookAgent(ctx, s.Backend, wsId, path, nil, agentPatch)
-	if err != nil {
-		return nil, err
-	}
 
 	encrypted, err := EncodeToken(rawToken)
 	if err != nil {
 		return nil, fmt.Errorf("failed to store token")
 	}
 
-	agentID := agent.ID
 	hook := &types.Hook{
 		WorkspaceId:       wsId,
 		Path:              path,
 		Prompt:            prompt,
 		SkillPaths:        normalizedSkills,
-		AgentId:           &agentID,
 		Active:            true,
 		CreatedByMemberId: memberId,
 		TokenId:           tokenId,
@@ -66,6 +60,18 @@ func (s *Service) Create(
 		if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
 			return nil, fmt.Errorf("a hook already exists on %s", hook.Path)
 		}
+		return nil, err
+	}
+
+	agent, err := ResolveHookAgent(ctx, s.Backend, created.WorkspaceId, created.Path, nil, agentPatch)
+	if err != nil {
+		s.cleanupFailedCreate(ctx, created)
+		return nil, err
+	}
+	agentID := agent.ID
+	created.AgentId = &agentID
+	if err := s.Store.UpdateHook(ctx, created); err != nil {
+		s.cleanupFailedCreate(ctx, created)
 		return nil, err
 	}
 
@@ -251,5 +257,19 @@ func (s *Service) resetSeenState(ctx context.Context, workspaceID uint, path str
 			Uint("workspace_id", workspaceID).
 			Str("path", path).
 			Msg("failed to reset hook seen state")
+	}
+}
+
+func (s *Service) cleanupFailedCreate(ctx context.Context, hook *types.Hook) {
+	if s == nil || s.Store == nil || hook == nil || strings.TrimSpace(hook.ExternalId) == "" {
+		return
+	}
+	if err := s.Store.DeleteHook(ctx, hook.ExternalId); err != nil {
+		log.Warn().
+			Err(err).
+			Uint("workspace_id", hook.WorkspaceId).
+			Str("path", hook.Path).
+			Str("hook_external_id", hook.ExternalId).
+			Msg("failed to clean up hook after create-side failure")
 	}
 }

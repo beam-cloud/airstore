@@ -46,10 +46,15 @@ func (f *TaskFactory) CreateTask(
 		return fmt.Errorf("prompt is required")
 	}
 
-	idempotencyKey := hookIdempotencyKey(hook.ExternalId, eventID, event, data)
-	sessionID := hookSessionID(hook.ExternalId, eventID)
+	normalizedEventID := strings.TrimSpace(eventID)
+	if normalizedEventID == "" {
+		normalizedEventID = fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+
+	idempotencyKey := hookIdempotencyKey(hook.ExternalId, normalizedEventID, event, data)
+	sessionID := hookSessionID(hook.ExternalId, normalizedEventID)
 	source := hookInputSource
-	correlationID := strings.TrimSpace(eventID)
+	correlationID := normalizedEventID
 	var correlationPtr *string
 	if correlationID != "" {
 		correlationPtr = &correlationID
@@ -78,7 +83,7 @@ func (f *TaskFactory) CreateTask(
 		return fmt.Errorf("accept hook task: %w", err)
 	}
 	if deduped {
-		log.Debug().Str("hook", hook.ExternalId).Str("event_id", eventID).Msg("hook task deduped")
+		log.Debug().Str("hook", hook.ExternalId).Str("event_id", normalizedEventID).Msg("hook task deduped")
 	}
 	return nil
 }
@@ -93,9 +98,6 @@ func hookIdempotencyKey(hookExternalID, eventID, event string, data map[string]a
 	}
 
 	eventID = strings.TrimSpace(eventID)
-	if eventID == "" {
-		eventID = fmt.Sprintf("%d", time.Now().UnixNano())
-	}
 	key := fmt.Sprintf("hook:%s:%s", hookExternalID, eventID)
 	return compressHookIdempotencyKey(key)
 }
@@ -156,9 +158,6 @@ func hashSourceItemsCSV(raw string) string {
 
 func hookSessionID(hookExternalID, eventID string) string {
 	eventID = strings.TrimSpace(eventID)
-	if eventID == "" {
-		eventID = fmt.Sprintf("%d", time.Now().UnixNano())
-	}
 	raw := fmt.Sprintf("hook-%s-%s", strings.TrimSpace(hookExternalID), eventID)
 	if len(raw) <= 180 {
 		return raw

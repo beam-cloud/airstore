@@ -315,10 +315,12 @@ func (q *RedisTaskQueue) scrubInFlightState(ctx context.Context, inFlightKey str
 	}
 
 	staleTaskIDs := make([]interface{}, 0)
+	nonTerminalStateKeys := make([]string, 0, len(taskIDs))
 	for i, raw := range stateValues {
 		taskID := taskIDs[i]
 		if raw == nil {
-			staleTaskIDs = append(staleTaskIDs, taskID)
+			// Missing state can happen when a long-running task's state TTL expires.
+			// Keep the in-flight marker until we observe an explicit terminal state.
 			continue
 		}
 		stateRaw, ok := raw.(string)
@@ -334,6 +336,17 @@ func (q *RedisTaskQueue) scrubInFlightState(ctx context.Context, inFlightKey str
 		}
 		if runExecutionStateTerminal(state.Status) {
 			staleTaskIDs = append(staleTaskIDs, taskID)
+			continue
+		}
+		nonTerminalStateKeys = append(nonTerminalStateKeys, stateKeys[i])
+	}
+	if len(nonTerminalStateKeys) > 0 {
+		pipe := q.rdb.Pipeline()
+		for _, stateKey := range nonTerminalStateKeys {
+			pipe.Expire(ctx, stateKey, taskStateTTL)
+		}
+		if _, err := pipe.Exec(ctx); err != nil {
+			return fmt.Errorf("failed to refresh in-flight task state ttl: %w", err)
 		}
 	}
 	if len(staleTaskIDs) == 0 {

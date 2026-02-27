@@ -12,6 +12,7 @@ import (
 const (
 	dispatchTokenTaskPrefix = "task:"
 	dispatchTokenModePrefix = "task-mode:"
+	modeTaskStateTTL        = 5 * time.Minute
 )
 
 type TaskQueueRouter struct {
@@ -39,13 +40,43 @@ func (r *TaskQueueRouter) Enqueue(ctx context.Context, task *types.AgentTask, in
 	if r.store == nil {
 		return fmt.Errorf("queue store is required")
 	}
-	_ = instanceKey
+	if task == nil {
+		return fmt.Errorf("task is required")
+	}
 
 	if err := r.store.UpdateTaskState(ctx, task.ID, types.AgentTaskStateQueued, nil, task.TargetRunID); err != nil {
 		return err
 	}
-	token := dispatchTokenTaskPrefix + task.ID
-	return r.store.PushQueueToken(ctx, token)
+
+	if !usesModeQueue(task, instanceKey) {
+		token := dispatchTokenTaskPrefix + task.ID
+		return r.store.PushQueueToken(ctx, token)
+	}
+
+	modeKey := dispatchModeKey(instanceKey, task.QueueMode)
+	previousTaskID, err := r.store.GetModeTaskID(ctx, modeKey)
+	if err != nil {
+		return err
+	}
+	if previousTaskID != "" && previousTaskID != task.ID {
+		reason := types.AgentTaskDropReasonReshapedByQueueMode
+		if err := r.store.UpdateTaskState(ctx, previousTaskID, types.AgentTaskStateDropped, &reason, nil); err != nil {
+			return err
+		}
+	}
+
+	if err := r.store.SetModeTaskID(ctx, modeKey, task.ID, modeTaskStateTTL); err != nil {
+		return err
+	}
+
+	added, err := r.store.AddModeKey(ctx, modeKey)
+	if err != nil {
+		return err
+	}
+	if !added {
+		return nil
+	}
+	return r.store.PushQueueToken(ctx, dispatchTokenModePrefix+modeKey)
 }
 
 func (r *TaskQueueRouter) Pop(ctx context.Context, timeout time.Duration) (string, error) {
@@ -86,4 +117,21 @@ func (r *TaskQueueRouter) RequeueTask(ctx context.Context, taskID string) error 
 		return fmt.Errorf("task_id is required")
 	}
 	return r.store.PushQueueToken(ctx, dispatchTokenTaskPrefix+taskID)
+}
+
+func usesModeQueue(task *types.AgentTask, instanceKey string) bool {
+	if task == nil || strings.TrimSpace(instanceKey) == "" {
+		return false
+	}
+	switch types.NormalizeRunInputQueueMode(task.QueueMode) {
+	case types.AgentQueueModeFollowup, types.AgentQueueModeSteer, types.AgentQueueModeInterrupt:
+		return true
+	default:
+		return false
+	}
+}
+
+func dispatchModeKey(instanceKey string, mode types.AgentQueueMode) string {
+	normalizedMode := types.NormalizeRunInputQueueMode(mode)
+	return strings.TrimSpace(instanceKey) + ":" + strings.TrimSpace(string(normalizedMode))
 }
