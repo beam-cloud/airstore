@@ -103,9 +103,14 @@ type mockStore struct {
 	hooks                      []*types.Hook
 	existingPaths              map[string]bool
 	statErr                    error
+	listErrCount               int
 }
 
 func (m *mockStore) ListHooks(_ context.Context, wsId uint) ([]*types.Hook, error) {
+	if m.listErrCount > 0 {
+		m.listErrCount--
+		return nil, fmt.Errorf("transient list hooks failure")
+	}
 	var out []*types.Hook
 	for _, h := range m.hooks {
 		if h.WorkspaceId == wsId {
@@ -259,6 +264,60 @@ func TestEngine_Submit_PathMatching(t *testing.T) {
 	waitForDebounce(delay)
 	if creator.count() != 1 {
 		t.Fatalf("expected no match for /skillset/foo.txt, got %d tasks", creator.count())
+	}
+}
+
+func TestEngine_Submit_PathMatching_NormalizesTrailingSlashHookPath(t *testing.T) {
+	hook := makeHook(1, 10, "/skills/", "analyze")
+	store := &mockStore{hooks: []*types.Hook{hook}}
+	creator := &mockCreator{}
+	backend := &mockBackend{}
+	eng := NewEngine(store, creator, backend, nil)
+	delay := setShortDebounce(eng)
+
+	eng.Handle("1", makeEvent(EventFsCreate, "/skills/test.txt", 10))
+	waitForDebounce(delay)
+	if creator.count() != 1 {
+		t.Fatalf("expected trailing-slash hook path to match, got %d tasks", creator.count())
+	}
+}
+
+func TestEngine_Submit_PathMatching_RootHookMatchesAllPaths(t *testing.T) {
+	hook := makeHook(1, 10, "/", "analyze")
+	store := &mockStore{hooks: []*types.Hook{hook}}
+	creator := &mockCreator{}
+	backend := &mockBackend{}
+	eng := NewEngine(store, creator, backend, nil)
+	delay := setShortDebounce(eng)
+
+	eng.Handle("1", makeEvent(EventFsWrite, "/pdfs/file.pdf", 10))
+	waitForDebounce(delay)
+	if creator.count() != 1 {
+		t.Fatalf("expected root hook to match any path, got %d tasks", creator.count())
+	}
+}
+
+func TestEngine_CacheLoad_RetriesAfterTransientListFailure(t *testing.T) {
+	hook := makeHook(1, 10, "/pdfs", "analyze")
+	store := &mockStore{
+		hooks:        []*types.Hook{hook},
+		listErrCount: 1, // fail first load, then succeed
+	}
+	creator := &mockCreator{}
+	backend := &mockBackend{}
+	eng := NewEngine(store, creator, backend, nil)
+	delay := setShortDebounce(eng)
+
+	eng.Handle("1", makeEvent(EventFsWrite, "/pdfs/file-a.pdf", 10))
+	waitForDebounce(delay)
+	if creator.count() != 0 {
+		t.Fatalf("expected first event to miss due transient load error, got %d tasks", creator.count())
+	}
+
+	eng.Handle("2", makeEvent(EventFsWrite, "/pdfs/file-b.pdf", 10))
+	waitForDebounce(delay)
+	if creator.count() != 1 {
+		t.Fatalf("expected second event to load hooks and create task, got %d tasks", creator.count())
 	}
 }
 

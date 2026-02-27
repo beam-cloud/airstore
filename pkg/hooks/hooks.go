@@ -62,6 +62,7 @@ func (eng *Engine) Handle(id string, data map[string]any) {
 	event, _ := data["event"].(string)
 	wsId := ParseUint(data["workspace_id"])
 	path, _ := data["path"].(string)
+	path = NormalizePath(path)
 
 	if wsId == 0 || path == "" || event == "" {
 		log.Warn().Str("id", id).Str("event", event).Str("path", path).
@@ -76,6 +77,7 @@ func (eng *Engine) Handle(id string, data map[string]any) {
 		if resolvedPath == "" {
 			resolvedPath = path
 		}
+		resolvedPath = NormalizePath(resolvedPath)
 		effectivePayload["path"] = resolvedPath
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -389,6 +391,7 @@ type hookCache struct {
 }
 
 func (c *hookCache) match(ctx context.Context, wsId uint, path string) []*types.Hook {
+	path = NormalizePath(path)
 	c.mu.RLock()
 	hooks, ok := c.hooks[wsId]
 	c.mu.RUnlock()
@@ -399,7 +402,16 @@ func (c *hookCache) match(ctx context.Context, wsId uint, path string) []*types.
 
 	var out []*types.Hook
 	for _, h := range hooks {
-		if h.Active && (path == h.Path || strings.HasPrefix(path, h.Path+"/")) {
+		hookPath := NormalizePath(h.Path)
+		if !h.Active || hookPath == "" {
+			continue
+		}
+		// Root hook matches any path in the workspace.
+		if hookPath == "/" {
+			out = append(out, h)
+			continue
+		}
+		if path == hookPath || strings.HasPrefix(path, hookPath+"/") {
 			out = append(out, h)
 		}
 	}
@@ -420,7 +432,15 @@ func (c *hookCache) load(ctx context.Context, wsId uint) []*types.Hook {
 		return hooks
 	}
 
-	hooks, _ := c.store.ListHooks(ctx, wsId)
+	hooks, err := c.store.ListHooks(ctx, wsId)
+	if err != nil {
+		log.Warn().
+			Err(err).
+			Uint("workspace_id", wsId).
+			Msg("hook cache: failed to load hooks")
+		// Do not cache failures; retry on the next event.
+		return nil
+	}
 	c.hooks[wsId] = hooks
 	return hooks
 }
