@@ -209,13 +209,17 @@ func TestBuildTurnArgsSetsClaudeConfigDirDefault(t *testing.T) {
 
 func TestBuildTurnArgsSetsClaudeConfigDirFromAgentWorkspaceDir(t *testing.T) {
 	runner := NewClaudeCodeRunner(ClaudeCodeRunnerOptions{})
-	env := map[string]string{
-		agentWorkspaceDirEnvKey: "/workspace/agents/prospect-bot/",
-	}
+	env := map[string]string{agentWorkspaceDirEnvKey: "/workspace/agents/prospect-bot/"}
 	_ = runner.BuildTurnArgs("hello", env, TurnArgModeFirstStart)
 
-	if env[claudeConfigDirEnvKey] != "/workspace/agents/prospect-bot/.claude" {
-		t.Fatalf("expected agent workspace scoped CLAUDE_CONFIG_DIR, got %q", env[claudeConfigDirEnvKey])
+	expected := defaultClaudeConfigDir(map[string]string{
+		agentWorkspaceDirEnvKey: "/workspace/agents/prospect-bot/",
+	})
+	if env[claudeConfigDirEnvKey] != expected {
+		t.Fatalf("expected workspace-scoped CLAUDE_CONFIG_DIR, got %q want %q", env[claudeConfigDirEnvKey], expected)
+	}
+	if strings.HasPrefix(env[claudeConfigDirEnvKey], "/workspace/") {
+		t.Fatalf("expected CLAUDE_CONFIG_DIR outside /workspace, got %q", env[claudeConfigDirEnvKey])
 	}
 }
 

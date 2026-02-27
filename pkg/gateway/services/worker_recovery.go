@@ -22,12 +22,14 @@ type orphanRecoveryStats struct {
 	recovered      int
 	retryScheduled int
 	exhausted      int
+	cleanupOnly    int
 }
 
 type orphanRecoveryOutcome struct {
 	detected       bool
 	recovered      bool
 	retryScheduled bool
+	cleanupOnly    bool
 }
 
 func (s *WorkerService) StartRecoveryLoop(ctx context.Context) {
@@ -164,11 +166,24 @@ func (s *WorkerService) runRecoveryCycle(ctx context.Context) {
 	}
 
 	if stats.detected > 0 || stats.recovered > 0 {
+		if s.taskQueue != nil && stats.detected > 0 && stats.recovered == 0 {
+			inFlight, inFlightErr := s.taskQueue.InFlightCount(ctx)
+			if inFlightErr != nil {
+				log.Warn().Err(inFlightErr).Msg("worker recovery loop: failed to inspect in-flight queue depth")
+			} else if inFlight > 0 {
+				log.Warn().
+					Int("orphan_detected", stats.detected).
+					Int64("in_flight", inFlight).
+					Msg("worker recovery loop: orphans detected but none recovered while in-flight tasks remain")
+			}
+		}
+
 		log.Info().
 			Int("orphan_detected", stats.detected).
 			Int("orphan_recovered", stats.recovered).
 			Int("orphan_retry_scheduled", stats.retryScheduled).
 			Int("orphan_exhausted", stats.exhausted).
+			Int("orphan_cleanup_only", stats.cleanupOnly).
 			Msg("worker recovery loop cycle complete")
 	}
 }
@@ -182,6 +197,10 @@ func (s *WorkerService) applyRecoveryOutcome(stats *orphanRecoveryStats, outcome
 		return
 	}
 	stats.recovered++
+	if outcome.cleanupOnly {
+		stats.cleanupOnly++
+		return
+	}
 	if outcome.retryScheduled {
 		stats.retryScheduled++
 		return
@@ -207,11 +226,12 @@ func (s *WorkerService) processExpiredClaimRun(ctx context.Context, now time.Tim
 		return orphanRecoveryOutcome{}, nil
 	}
 
-	recovered, retryScheduled, err := s.recoverOrphanedRun(ctx, run, "claim_lease_expired")
+	recovered, retryScheduled, cleanupOnly, err := s.recoverOrphanedRun(ctx, run, "claim_lease_expired")
 	return orphanRecoveryOutcome{
 		detected:       true,
 		recovered:      recovered,
 		retryScheduled: retryScheduled,
+		cleanupOnly:    cleanupOnly,
 	}, err
 }
 
@@ -223,11 +243,12 @@ func (s *WorkerService) processStaleUnclaimedRun(ctx context.Context, run *types
 		return orphanRecoveryOutcome{}, nil
 	}
 
-	recovered, retryScheduled, err := s.recoverOrphanedRun(ctx, run, "unclaimed_run_stale")
+	recovered, retryScheduled, cleanupOnly, err := s.recoverOrphanedRun(ctx, run, "unclaimed_run_stale")
 	return orphanRecoveryOutcome{
 		detected:       true,
 		recovered:      recovered,
 		retryScheduled: retryScheduled,
+		cleanupOnly:    cleanupOnly,
 	}, err
 }
 
@@ -265,6 +286,16 @@ func (s *WorkerService) processClaimedRun(ctx context.Context, run *types.AgentR
 	})
 	if setErr != nil {
 		return orphanRecoveryOutcome{}, setErr
+	}
+	if completeErr := s.taskQueue.Complete(ctx, run.ID, &types.RunExecutionResult{
+		ID:       run.ID,
+		ExitCode: exitCode,
+		Error:    errText,
+	}); completeErr != nil {
+		log.Warn().
+			Err(completeErr).
+			Str("run_id", run.ID).
+			Msg("worker recovery loop: failed to reconcile terminal queue state after run finalization")
 	}
 	return orphanRecoveryOutcome{
 		detected:  true,
@@ -305,17 +336,22 @@ func (s *WorkerService) shouldRecoverUnclaimedRun(ctx context.Context, run *type
 	}
 }
 
-func (s *WorkerService) recoverOrphanedRun(ctx context.Context, run *types.AgentRun, reason string) (bool, bool, error) {
+func (s *WorkerService) recoverOrphanedRun(ctx context.Context, run *types.AgentRun, reason string) (bool, bool, bool, error) {
 	if run == nil || !run.Status.IsActive() {
-		return false, false, nil
+		return false, false, false, nil
 	}
 
 	attempt, attemptErr := s.lookupRunAttemptByExecutionID(ctx, run.ID)
 	if attemptErr != nil {
-		return false, false, attemptErr
+		return false, false, false, attemptErr
 	}
-	if attempt != nil && !isRunAttemptActive(attempt) {
-		return false, false, nil
+	attemptActive := attempt != nil && isRunAttemptActive(attempt)
+	if attempt != nil && !attemptActive {
+		log.Info().
+			Str("run_id", run.ID).
+			Str("attempt_id", attempt.ID).
+			Str("attempt_status", string(attempt.Status)).
+			Msg("worker recovery loop: run attempt is stale, reconciling queue/result without scheduling retry")
 	}
 
 	errorMsg := fmt.Sprintf("orphaned run recovered automatically: %s", reason)
@@ -331,13 +367,13 @@ func (s *WorkerService) recoverOrphanedRun(ctx context.Context, run *types.Agent
 	if err := s.backend.SetRunExecutionResult(ctx, run.ID, -1, errorMsg); err != nil {
 		var notFoundErr *types.ErrRunExecutionNotFound
 		if !errors.As(err, &notFoundErr) {
-			return false, false, err
+			return false, false, false, err
 		}
 	}
 
-	if attempt == nil {
+	if !attemptActive {
 		_ = s.markOriginTaskTerminalIfCurrentRun(ctx, run.ID)
-		return true, false, nil
+		return true, false, true, nil
 	}
 
 	retryScheduled, err := s.finalizeRunAttempt(
@@ -352,7 +388,7 @@ func (s *WorkerService) recoverOrphanedRun(ctx context.Context, run *types.Agent
 			"recovery_mode":   "automatic",
 		},
 	)
-	return true, retryScheduled, err
+	return true, retryScheduled, false, err
 }
 
 func (s *WorkerService) unclaimedStaleDuration() time.Duration {

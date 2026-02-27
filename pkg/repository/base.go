@@ -52,12 +52,24 @@ type TaskQueue interface {
 type TerminalIORepository interface {
 	PublishInput(ctx context.Context, taskID string, data []byte) error
 	SubscribeInput(ctx context.Context, taskID string) (<-chan []byte, func(), error)
+	ListPendingInputs(ctx context.Context, taskID string) ([]types.PendingInput, error)
 
 	PublishOutput(ctx context.Context, taskID string, data []byte) error
 	SubscribeOutput(ctx context.Context, taskID string) (<-chan []byte, func(), error)
 
 	PublishCancel(ctx context.Context, taskID string) error
 	SubscribeCancel(ctx context.Context, taskID string) (<-chan struct{}, func(), error)
+
+	// Session lease: exclusive ownership of an interactive session.
+	AcquireSessionLease(ctx context.Context, workspaceID uint, sessionID, ownerID string, ttl time.Duration) (bool, error)
+	RenewSessionLease(ctx context.Context, workspaceID uint, sessionID, ownerID string, ttl time.Duration) (bool, error)
+	ReleaseSessionLease(ctx context.Context, workspaceID uint, sessionID, ownerID string) error
+	GetSessionLeaseOwner(ctx context.Context, workspaceID uint, sessionID string) (string, error)
+
+	// Run interaction state: backend-owned state for working/waiting/closed.
+	SetRunInteraction(ctx context.Context, workspaceID uint, runID string, state types.RunInteractionState, activeExecutionID string, ttl time.Duration) error
+	GetRunInteraction(ctx context.Context, workspaceID uint, runID string) (*types.RunInteraction, error)
+	ClearRunInteraction(ctx context.Context, workspaceID uint, runID string) error
 }
 
 // MemberRepository manages workspace members
@@ -169,6 +181,7 @@ type BackendRepository interface {
 	GetAgentProfileByKey(ctx context.Context, workspaceId uint, agentKey string) (*types.AgentProfile, error)
 	ListAgentProfiles(ctx context.Context, workspaceId uint) ([]*types.AgentProfile, error)
 	UpdateAgentProfile(ctx context.Context, profile *types.AgentProfile) error
+	DeleteAgentProfile(ctx context.Context, workspaceId uint, agentId string) error
 
 	// Tasks
 	CreateTask(ctx context.Context, task *types.AgentTask) error
@@ -186,6 +199,7 @@ type BackendRepository interface {
 	GetAgentRun(ctx context.Context, workspaceId uint, runId string) (*types.AgentRun, error)
 	ListAgentRuns(ctx context.Context, workspaceId uint, limit int) ([]*types.AgentRun, error)
 	ListAgentRunsFiltered(ctx context.Context, workspaceId uint, filter types.AgentRunListFilter) ([]*types.AgentRun, error)
+	ListActiveRunsBySession(ctx context.Context, workspaceId uint, sessionID string, excludeRunIDs []string, limit int) ([]*types.AgentRun, error)
 	UpdateAgentRunLifecycle(ctx context.Context, runId string, status types.AgentRunStatus, startedAt, endedAt *time.Time, errorMsg *string) error
 	SetAgentRunClaim(ctx context.Context, runId string, workerId string, heartbeatAt time.Time, expiresAt time.Time) error
 	ClearAgentRunClaim(ctx context.Context, runId string) error

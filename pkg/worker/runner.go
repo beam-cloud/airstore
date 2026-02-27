@@ -1,6 +1,9 @@
 package worker
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
+	"os"
 	"path"
 	"strings"
 
@@ -22,9 +25,10 @@ const (
 
 	claudeProviderName    = "claude"
 	claudeConfigDirEnvKey = "CLAUDE_CONFIG_DIR"
-	claudeConfigDirPath   = "/workspace/.claude"
+	claudeConfigDirPath   = "/tmp/airstore-claude/default/.claude"
 	claudeDefaultShellEnv = "/bin/bash"
 	claudeStateDirName    = ".claude"
+	claudeStateRootDir    = "/tmp/airstore-claude"
 )
 
 // AgentExecutionRunner builds the process entrypoint for an agent task.
@@ -145,8 +149,13 @@ func (r *ClaudeCodeRunner) BuildTurnArgs(prompt string, env map[string]string, m
 func (r *ClaudeCodeRunner) injectEnv(env map[string]string) {
 	r.injectAPIKey(env, "ANTHROPIC_API_KEY", r.anthropicAPIKey, true)
 	r.injectKernelEnv(env)
+	generatedClaudeConfigDir := false
 	if strings.TrimSpace(env[claudeConfigDirEnvKey]) == "" {
 		env[claudeConfigDirEnvKey] = defaultClaudeConfigDir(env)
+		generatedClaudeConfigDir = true
+	}
+	if generatedClaudeConfigDir {
+		ensureClaudeConfigDir(env)
 	}
 	if strings.TrimSpace(env["SHELL"]) == "" {
 		// Force a stable non-zsh shell for Claude's internal shell snapshots.
@@ -157,11 +166,46 @@ func (r *ClaudeCodeRunner) injectEnv(env map[string]string) {
 func defaultClaudeConfigDir(env map[string]string) string {
 	if env != nil {
 		if workspaceDir := strings.TrimSpace(env[agentWorkspaceDirEnvKey]); workspaceDir != "" {
-			// Keep Claude state with agent workspace for restart persistence.
-			return path.Join(workspaceDir, claudeStateDirName)
+			scope := claudeStateScope(workspaceDir)
+			return path.Join(claudeStateRootDir, scope, claudeStateDirName)
 		}
 	}
 	return claudeConfigDirPath
+}
+
+func claudeStateScope(workspaceDir string) string {
+	normalized := strings.TrimSpace(strings.TrimSuffix(workspaceDir, "/"))
+	if normalized == "" {
+		return "default"
+	}
+	sum := sha1.Sum([]byte(normalized))
+	return hex.EncodeToString(sum[:8])
+}
+
+func ensureClaudeConfigDir(env map[string]string) {
+	if env == nil {
+		return
+	}
+	cfgDir := strings.TrimSpace(env[claudeConfigDirEnvKey])
+	if cfgDir == "" {
+		return
+	}
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		fallback := claudeConfigDirPath
+		if mkErr := os.MkdirAll(fallback, 0o755); mkErr == nil {
+			log.Warn().
+				Err(err).
+				Str("claude_config_dir", cfgDir).
+				Str("fallback", fallback).
+				Msg("failed to create claude config dir; falling back")
+			env[claudeConfigDirEnvKey] = fallback
+			return
+		}
+		log.Warn().
+			Err(err).
+			Str("claude_config_dir", cfgDir).
+			Msg("failed to create claude config dir")
+	}
 }
 
 func (r *ClaudeCodeRunner) injectKernelEnv(env map[string]string) {

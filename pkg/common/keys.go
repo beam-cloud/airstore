@@ -72,9 +72,16 @@ var (
 	agentInstanceLock     = "airstore:agent:instance:lock:%s" // instanceKey
 
 	// Terminal IO keys (pub/sub channels)
-	terminalInput  = "airstore:terminal:%s:input"  // taskId
-	terminalOutput = "airstore:terminal:%s:output" // taskId
-	terminalCancel = "airstore:terminal:%s:cancel" // taskId
+	terminalInput       = "airstore:terminal:%s:input"        // taskId
+	terminalInputBuffer = "airstore:terminal:%s:input:buffer" // taskId
+	terminalOutput      = "airstore:terminal:%s:output"       // taskId
+	terminalCancel      = "airstore:terminal:%s:cancel"       // taskId
+
+	// Session lease — exclusive ownership of an interactive session.
+	sessionLease = "airstore:session:lease:%d:%s" // workspaceId, sessionId
+
+	// Run interaction state — backend-owned working/waiting/closed snapshot.
+	runInteraction = "airstore:run:interaction:%d:%s" // workspaceId, runId
 
 	// Compression keys — include strategy so each compressor caches independently
 	fsCompressedPointer = "airstore:compressed:%d:%s:%s:%s" // workspaceId, pathHash, resultId, strategy
@@ -293,12 +300,26 @@ func (rk *redisKeys) TerminalInput(taskId string) string {
 	return fmt.Sprintf(terminalInput, taskId)
 }
 
+func (rk *redisKeys) TerminalInputBuffer(taskId string) string {
+	return fmt.Sprintf(terminalInputBuffer, taskId)
+}
+
 func (rk *redisKeys) TerminalOutput(taskId string) string {
 	return fmt.Sprintf(terminalOutput, taskId)
 }
 
 func (rk *redisKeys) TerminalCancel(taskId string) string {
 	return fmt.Sprintf(terminalCancel, taskId)
+}
+
+// --- Session lease keys ---
+
+func (rk *redisKeys) SessionLease(workspaceId uint, sessionId string) string {
+	return fmt.Sprintf(sessionLease, workspaceId, sessionId)
+}
+
+func (rk *redisKeys) RunInteraction(workspaceId uint, runId string) string {
+	return fmt.Sprintf(runInteraction, workspaceId, runId)
 }
 
 // --- Compression keys ---

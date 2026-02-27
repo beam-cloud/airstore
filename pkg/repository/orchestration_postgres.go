@@ -13,13 +13,36 @@ import (
 )
 
 const agentTaskSelect = `
-	SELECT id, workspace_id, agent_id, kind, queue_mode, state, idempotency_key, payload_json, routing_json,
+	SELECT id, workspace_id, agent_id, agent_name, kind, queue_mode, state, idempotency_key, payload_json, routing_json,
 	       parent_envelope_id, target_run_id, accepted_at, queued_at, dispatched_at, dropped_reason, archived_at, created_at, updated_at
-	FROM agent_task
+	FROM (
+		SELECT
+			t.id,
+			t.workspace_id,
+			t.agent_id,
+			COALESCE(ap.name, '') AS agent_name,
+			t.kind,
+			t.queue_mode,
+			t.state,
+			t.idempotency_key,
+			t.payload_json,
+			t.routing_json,
+			t.parent_envelope_id,
+			t.target_run_id,
+			t.accepted_at,
+			t.queued_at,
+			t.dispatched_at,
+			t.dropped_reason,
+			t.archived_at,
+			t.created_at,
+			t.updated_at
+		FROM agent_task t
+		LEFT JOIN agent_profile ap ON ap.id = t.agent_id
+	) task_view
 `
 
 const agentRunSelect = `
-	SELECT id, workspace_id, agent_id, origin_task_id, status, session_id, session_key, provider, model,
+	SELECT id, workspace_id, agent_id, origin_task_id, hook_id, status, session_id, session_key, provider, model,
 	       exec_host, exec_security, exec_ask, runtime_type, workspace_access, network_enabled, interactive,
 	       timeout_ms, started_at, ended_at, claimed_by_worker_id, claim_heartbeat_at, claim_expires_at,
 	       error, snapshot_ts, usage_json, delivery_json, created_at, updated_at
@@ -77,6 +100,13 @@ func optionalStringArg(value *string) any {
 		return nil
 	}
 	return trimmed
+}
+
+func optionalUintArg(value *uint) any {
+	if value == nil || *value == 0 {
+		return nil
+	}
+	return int64(*value)
 }
 
 func (b *PostgresBackend) CreateAgentProfile(ctx context.Context, profile *types.AgentProfile) error {
@@ -220,6 +250,25 @@ func (b *PostgresBackend) UpdateAgentProfile(ctx context.Context, profile *types
 	return nil
 }
 
+func (b *PostgresBackend) DeleteAgentProfile(ctx context.Context, workspaceId uint, agentId string) error {
+	query := `
+		DELETE FROM agent_profile
+		WHERE workspace_id = $1 AND id = $2
+	`
+	result, err := b.db.ExecContext(ctx, query, workspaceId, agentId)
+	if err != nil {
+		return fmt.Errorf("delete agent profile: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete agent profile rows affected: %w", err)
+	}
+	if rows == 0 {
+		return &types.ErrAgentProfileNotFound{ID: agentId}
+	}
+	return nil
+}
+
 func (b *PostgresBackend) CreateTask(ctx context.Context, task *types.AgentTask) error {
 	payloadJSON, err := marshalJSONMap(task.PayloadJSON)
 	if err != nil {
@@ -260,6 +309,7 @@ func (b *PostgresBackend) scanAgentTask(row scanner) (*types.AgentTask, error) {
 	var payloadJSON []byte
 	var routingJSON []byte
 	var agentID sql.NullString
+	var agentName sql.NullString
 	var parentID sql.NullString
 	var targetRunID sql.NullString
 	var queuedAt sql.NullTime
@@ -270,6 +320,7 @@ func (b *PostgresBackend) scanAgentTask(row scanner) (*types.AgentTask, error) {
 		&task.ID,
 		&task.WorkspaceID,
 		&agentID,
+		&agentName,
 		&task.Kind,
 		&task.QueueMode,
 		&task.State,
@@ -294,6 +345,9 @@ func (b *PostgresBackend) scanAgentTask(row scanner) (*types.AgentTask, error) {
 	}
 	if agentID.Valid {
 		task.AgentID = &agentID.String
+	}
+	if agentName.Valid {
+		task.AgentName = agentName.String
 	}
 	if parentID.Valid {
 		task.ParentTaskID = &parentID.String
@@ -513,13 +567,13 @@ func (b *PostgresBackend) CreateAgentRun(ctx context.Context, run *types.AgentRu
 	}
 	query := `
 		INSERT INTO agent_run (
-			workspace_id, agent_id, origin_task_id, status, session_id, session_key,
+			workspace_id, agent_id, origin_task_id, hook_id, status, session_id, session_key,
 			provider, model, exec_host, exec_security, exec_ask, runtime_type, workspace_access,
 			network_enabled, interactive, timeout_ms, usage_json, delivery_json
 		) VALUES (
-			$1, $2, $3, $4, $5, $6,
-			$7, $8, $9, $10, $11, $12, $13,
-			$14, $15, $16, $17, $18
+			$1, $2, $3, $4, $5, $6, $7,
+			$8, $9, $10, $11, $12, $13, $14,
+			$15, $16, $17, $18, $19
 		)
 		RETURNING id, snapshot_ts, created_at, updated_at
 	`
@@ -529,6 +583,7 @@ func (b *PostgresBackend) CreateAgentRun(ctx context.Context, run *types.AgentRu
 		run.WorkspaceID,
 		run.AgentID,
 		run.OriginTaskID,
+		optionalUintArg(run.HookID),
 		run.Status,
 		run.SessionID,
 		run.SessionKey,
@@ -555,6 +610,7 @@ func (b *PostgresBackend) scanAgentRun(row scanner) (*types.AgentRun, error) {
 	var usageJSON []byte
 	var deliveryJSON []byte
 	var agentID sql.NullString
+	var hookID sql.NullInt64
 	var sessionKey sql.NullString
 	var provider sql.NullString
 	var model sql.NullString
@@ -569,6 +625,7 @@ func (b *PostgresBackend) scanAgentRun(row scanner) (*types.AgentRun, error) {
 		&run.WorkspaceID,
 		&agentID,
 		&run.OriginTaskID,
+		&hookID,
 		&run.Status,
 		&run.SessionID,
 		&sessionKey,
@@ -602,6 +659,10 @@ func (b *PostgresBackend) scanAgentRun(row scanner) (*types.AgentRun, error) {
 	}
 	if agentID.Valid {
 		run.AgentID = &agentID.String
+	}
+	if hookID.Valid {
+		v := uint(hookID.Int64)
+		run.HookID = &v
 	}
 	if sessionKey.Valid {
 		run.SessionKey = &sessionKey.String
@@ -737,6 +798,59 @@ func (b *PostgresBackend) ListAgentRunsFiltered(ctx context.Context, workspaceId
 		run, err := b.scanAgentRun(rows)
 		if err != nil {
 			return nil, fmt.Errorf("scan filtered run: %w", err)
+		}
+		out = append(out, run)
+	}
+	return out, rows.Err()
+}
+
+func (b *PostgresBackend) ListActiveRunsBySession(
+	ctx context.Context,
+	workspaceId uint,
+	sessionID string,
+	excludeRunIDs []string,
+	limit int,
+) ([]*types.AgentRun, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return []*types.AgentRun{}, nil
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+
+	exclude := make([]string, 0, len(excludeRunIDs))
+	for _, runID := range excludeRunIDs {
+		runID = strings.TrimSpace(runID)
+		if runID == "" {
+			continue
+		}
+		exclude = append(exclude, runID)
+	}
+	var excludeArg any
+	if len(exclude) > 0 {
+		excludeArg = pq.Array(exclude)
+	}
+
+	query := agentRunSelect + `
+		WHERE workspace_id = $1
+		  AND session_id = $2
+		  AND ` + runExecutionActiveWhere + `
+		  AND ($3::uuid[] IS NULL OR id <> ALL($3::uuid[]))
+		ORDER BY created_at DESC, id DESC
+		LIMIT $4
+	`
+	rows, err := b.db.QueryContext(ctx, query, workspaceId, sessionID, excludeArg, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list active runs by session: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]*types.AgentRun, 0, limit)
+	for rows.Next() {
+		run, err := b.scanAgentRun(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan active run by session: %w", err)
 		}
 		out = append(out, run)
 	}
@@ -1914,7 +2028,7 @@ func (b *PostgresBackend) SetRunExecutionStarted(ctx context.Context, externalId
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = $1::uuid
 		  AND ` + runExecutionScopeWhere + `
-		  AND ` + runExecutionActiveWhere
+		  AND status = 'accepted'::agent_run_status`
 	result, err := b.db.ExecContext(ctx, query, externalId, now)
 	if err != nil {
 		return fmt.Errorf("set run execution started: %w", err)
@@ -1927,7 +2041,10 @@ func (b *PostgresBackend) SetRunExecutionStarted(ctx context.Context, externalId
 		if run.IsTerminal() {
 			return fmt.Errorf("run execution cannot be started (already finished)")
 		}
-		return fmt.Errorf("run execution start was not applied")
+		if run.Status == types.RunExecutionStatusRunning {
+			return fmt.Errorf("run execution cannot be started (already running)")
+		}
+		return fmt.Errorf("run execution cannot be started (state=%s)", run.Status)
 	}
 	return nil
 }

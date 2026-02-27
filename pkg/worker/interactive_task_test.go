@@ -1,8 +1,11 @@
 package worker
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -35,6 +38,10 @@ func (tio *testTerminalIO) SubscribeOutput(_ context.Context, _ string) (<-chan 
 	return ch, func() {}, nil
 }
 
+func (tio *testTerminalIO) ListPendingInputs(_ context.Context, _ string) ([]types.PendingInput, error) {
+	return nil, nil
+}
+
 func (tio *testTerminalIO) PublishCancel(_ context.Context, _ string) error {
 	return nil
 }
@@ -43,6 +50,34 @@ func (tio *testTerminalIO) SubscribeCancel(_ context.Context, _ string) (<-chan 
 	ch := make(chan struct{})
 	close(ch)
 	return ch, func() {}, nil
+}
+
+func (tio *testTerminalIO) AcquireSessionLease(_ context.Context, _ uint, _ string, _ string, _ time.Duration) (bool, error) {
+	return true, nil
+}
+
+func (tio *testTerminalIO) RenewSessionLease(_ context.Context, _ uint, _ string, _ string, _ time.Duration) (bool, error) {
+	return true, nil
+}
+
+func (tio *testTerminalIO) ReleaseSessionLease(_ context.Context, _ uint, _ string, _ string) error {
+	return nil
+}
+
+func (tio *testTerminalIO) GetSessionLeaseOwner(_ context.Context, _ uint, _ string) (string, error) {
+	return "", nil
+}
+
+func (tio *testTerminalIO) SetRunInteraction(_ context.Context, _ uint, _ string, _ types.RunInteractionState, _ string, _ time.Duration) error {
+	return nil
+}
+
+func (tio *testTerminalIO) GetRunInteraction(_ context.Context, _ uint, _ string) (*types.RunInteraction, error) {
+	return nil, nil
+}
+
+func (tio *testTerminalIO) ClearRunInteraction(_ context.Context, _ uint, _ string) error {
+	return nil
 }
 
 func TestInteractiveResult(t *testing.T) {
@@ -181,6 +216,38 @@ func TestWaitForFollowupInputReturnsPrompt(t *testing.T) {
 	}
 }
 
+func TestEmitRunnerStateMarkerWritesSystemPayload(t *testing.T) {
+	var buf bytes.Buffer
+
+	emitRunnerStateMarker(&buf, "task-1", runnerStateSubtypeWaitingForInput, TurnArgModeFollowup)
+
+	raw := strings.TrimSpace(buf.String())
+	if raw == "" {
+		t.Fatal("expected runner state marker output")
+	}
+
+	payload := map[string]any{}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		t.Fatalf("failed to decode marker: %v", err)
+	}
+
+	if got := payload["type"]; got != runnerStateTypeSystem {
+		t.Fatalf("unexpected type: got=%v want=%s", got, runnerStateTypeSystem)
+	}
+	if got := payload["kind"]; got != runnerStateKind {
+		t.Fatalf("unexpected kind: got=%v want=%s", got, runnerStateKind)
+	}
+	if got := payload["subtype"]; got != runnerStateSubtypeWaitingForInput {
+		t.Fatalf("unexpected subtype: got=%v want=%s", got, runnerStateSubtypeWaitingForInput)
+	}
+	if got := payload["task_id"]; got != "task-1" {
+		t.Fatalf("unexpected task_id: got=%v want=task-1", got)
+	}
+	if got := payload["turn_mode"]; got != string(TurnArgModeFollowup) {
+		t.Fatalf("unexpected turn_mode: got=%v want=%s", got, TurnArgModeFollowup)
+	}
+}
+
 func TestShouldContinueFromFirstTurn(t *testing.T) {
 	tests := []struct {
 		name string
@@ -247,7 +314,6 @@ func TestBuildFirstTurnStrategies(t *testing.T) {
 			wantModes: []TurnArgMode{
 				TurnArgModeFirstResumeLatest,
 				TurnArgModeFirstResumeByID,
-				TurnArgModeFirstFreshNoSession,
 			},
 		},
 		{
@@ -257,7 +323,6 @@ func TestBuildFirstTurnStrategies(t *testing.T) {
 			},
 			wantModes: []TurnArgMode{
 				TurnArgModeFirstResumeLatest,
-				TurnArgModeFirstFreshNoSession,
 			},
 		},
 	}
@@ -306,4 +371,66 @@ func TestEnvForFirstTurnStrategy(t *testing.T) {
 			t.Fatalf("expected resume flag to be preserved for resume-by-id mode")
 		}
 	})
+}
+
+func TestIsSessionAlreadyInUseError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "matches session collision error",
+			err:  errors.New("Session ID 61491621-b32b-4e88-8fae-cbfbe95ca11e is already in use."),
+			want: true,
+		},
+		{
+			name: "does not match unrelated error",
+			err:  errors.New("network timeout"),
+			want: false,
+		},
+		{
+			name: "nil error",
+			err:  nil,
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isSessionAlreadyInUseError(tt.err)
+			if got != tt.want {
+				t.Fatalf("unexpected match value: got=%t want=%t", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResumeSessionBusyBackoff(t *testing.T) {
+	if got := resumeSessionBusyBackoff(1); got != 500*time.Millisecond {
+		t.Fatalf("unexpected first retry backoff: %s", got)
+	}
+	if got := resumeSessionBusyBackoff(3); got != 1500*time.Millisecond {
+		t.Fatalf("unexpected third retry backoff: %s", got)
+	}
+}
+
+func TestShouldRetrySessionBusy(t *testing.T) {
+	envWithSession := map[string]string{
+		agentSessionIDEnvKey: "550e8400-e29b-41d4-a716-446655440000",
+	}
+	envWithoutSession := map[string]string{}
+
+	if !shouldRetrySessionBusy(TurnArgModeFirstStart, envWithSession) {
+		t.Fatalf("expected first-start with explicit session id to retry session collisions")
+	}
+	if shouldRetrySessionBusy(TurnArgModeFirstFreshNoSession, envWithSession) {
+		t.Fatalf("did not expect fresh-no-session mode to retry session collisions")
+	}
+	if shouldRetrySessionBusy(TurnArgModeFollowup, envWithSession) {
+		t.Fatalf("did not expect followup mode to use first-turn collision retries")
+	}
+	if shouldRetrySessionBusy(TurnArgModeFirstResumeLatest, envWithoutSession) {
+		t.Fatalf("did not expect retries when no session id is present")
+	}
 }

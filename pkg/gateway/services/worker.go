@@ -618,6 +618,9 @@ func (s *WorkerService) scheduleRetryRun(ctx context.Context, attempt *types.Age
 		// Another completion handler already advanced retries to a newer run.
 		return retryScheduleResult{scheduled: false}, nil
 	}
+	if err := s.ensureSessionAvailableForRetry(ctx, run.WorkspaceID, run.SessionID, run.ID); err != nil {
+		return retryScheduleResult{}, err
+	}
 
 	sourceTask, err := s.backend.GetRunExecution(ctx, taskID)
 	if err != nil {
@@ -925,6 +928,35 @@ func strPtrOrNil(value string) *string {
 		return nil
 	}
 	return &value
+}
+
+func (s *WorkerService) ensureSessionAvailableForRetry(
+	ctx context.Context,
+	workspaceID uint,
+	sessionID string,
+	excludeRunIDs ...string,
+) error {
+	if s == nil || s.backend == nil {
+		return nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+
+	conflicts, err := s.backend.ListActiveRunsBySession(ctx, workspaceID, sessionID, excludeRunIDs, 5)
+	if err != nil {
+		return err
+	}
+	if len(conflicts) == 0 {
+		return nil
+	}
+
+	conflictRunID := strings.TrimSpace(conflicts[0].ID)
+	if conflictRunID == "" {
+		return fmt.Errorf("session ID %s is already in use", sessionID)
+	}
+	return fmt.Errorf("session ID %s is already in use by active run %s", sessionID, conflictRunID)
 }
 
 func boolPtr(value bool) *bool {

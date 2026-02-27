@@ -3,10 +3,13 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/types"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestSetTaskResultWithRetry_SucceedsAfterTransientFailures(t *testing.T) {
@@ -95,5 +98,29 @@ func TestSetTaskResultWithRetry_StopsOnContextCancel(t *testing.T) {
 	}
 	if !errors.Is(err, transient) {
 		t.Fatalf("expected last transient error, got: %v", err)
+	}
+}
+
+func TestSetTaskResultWithRetry_DoesNotRetryOnNotFound(t *testing.T) {
+	task := types.RunExecution{ExternalId: "task-not-found"}
+	result := &types.RunExecutionResult{ID: "task-not-found", ExitCode: -1, Error: "boom"}
+
+	notFoundErr := fmt.Errorf("set task result failed: %w", status.Error(codes.NotFound, "task not found: task-not-found"))
+	var attempts int
+	err := setTaskResultWithRetry(
+		context.Background(),
+		task,
+		result,
+		func(context.Context, string, int, string) error {
+			attempts++
+			return notFoundErr
+		},
+		func(context.Context, time.Duration) {},
+	)
+	if !errors.Is(err, notFoundErr) {
+		t.Fatalf("expected not found error, got: %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("expected 1 attempt for non-retriable error, got %d", attempts)
 	}
 }
