@@ -101,6 +101,8 @@ func (m *mockBackend) setRetryable(tasks []*types.RunExecution) {
 type mockStore struct {
 	repository.FilesystemStore // embed
 	hooks                      []*types.Hook
+	existingPaths              map[string]bool
+	statErr                    error
 }
 
 func (m *mockStore) ListHooks(_ context.Context, wsId uint) ([]*types.Hook, error) {
@@ -120,6 +122,16 @@ func (m *mockStore) GetHookById(_ context.Context, id uint) (*types.Hook, error)
 		}
 	}
 	return nil, nil
+}
+
+func (m *mockStore) StatPath(_ context.Context, path string) (*types.DirMeta, *types.FileMeta, string, error) {
+	if m.statErr != nil {
+		return nil, nil, "", m.statErr
+	}
+	if m.existingPaths != nil && m.existingPaths[path] {
+		return nil, &types.FileMeta{Path: path}, "", nil
+	}
+	return nil, nil, "", nil
 }
 
 // --- Helpers ---
@@ -149,6 +161,16 @@ func makeEvent(event, path string, wsId uint) map[string]any {
 	}
 }
 
+func setShortDebounce(eng *Engine) time.Duration {
+	delay := 40 * time.Millisecond
+	eng.debounce.delay = delay
+	return delay
+}
+
+func waitForDebounce(delay time.Duration) {
+	time.Sleep(delay + 40*time.Millisecond)
+}
+
 // --- Tests ---
 
 func TestEngine_Submit_CreatesTask(t *testing.T) {
@@ -157,8 +179,10 @@ func TestEngine_Submit_CreatesTask(t *testing.T) {
 	creator := &mockCreator{}
 	backend := &mockBackend{}
 	eng := NewEngine(store, creator, backend, nil)
+	delay := setShortDebounce(eng)
 
 	eng.Handle("1", makeEvent(EventFsCreate, "/skills/test.txt", 10))
+	waitForDebounce(delay)
 
 	if creator.count() != 1 {
 		t.Fatalf("expected 1 task, got %d", creator.count())
@@ -179,8 +203,10 @@ func TestEngine_Submit_ConstraintRejectsDuplicate(t *testing.T) {
 	creator := &mockCreator{err: fmt.Errorf("pq: duplicate key value violates unique constraint")}
 	backend := &mockBackend{}
 	eng := NewEngine(store, creator, backend, nil)
+	delay := setShortDebounce(eng)
 
 	eng.Handle("1", makeEvent(EventFsCreate, "/skills/test.txt", 10))
+	waitForDebounce(delay)
 
 	// CreateTask was called but rejected by constraint -- no task created
 	if creator.count() != 0 {
@@ -196,8 +222,10 @@ func TestEngine_Submit_DoesNotRequireToken(t *testing.T) {
 	creator := &mockCreator{}
 	backend := &mockBackend{}
 	eng := NewEngine(store, creator, backend, nil)
+	delay := setShortDebounce(eng)
 
 	eng.Handle("1", makeEvent(EventFsCreate, "/skills/test.txt", 10))
+	waitForDebounce(delay)
 
 	if creator.count() != 1 {
 		t.Fatalf("expected 1 task without token requirement, got %d", creator.count())
@@ -210,21 +238,25 @@ func TestEngine_Submit_PathMatching(t *testing.T) {
 	creator := &mockCreator{}
 	backend := &mockBackend{}
 	eng := NewEngine(store, creator, backend, nil)
+	delay := setShortDebounce(eng)
 
 	// Should match: file under /skills
 	eng.Handle("1", makeEvent(EventFsCreate, "/skills/test.txt", 10))
+	waitForDebounce(delay)
 	if creator.count() != 1 {
 		t.Fatalf("expected match for /skills/test.txt, got %d tasks", creator.count())
 	}
 
 	// Should NOT match: different path
 	eng.Handle("2", makeEvent(EventFsCreate, "/inbox/doc.pdf", 10))
+	waitForDebounce(delay)
 	if creator.count() != 1 {
 		t.Fatalf("expected no match for /inbox/doc.pdf, got %d tasks", creator.count())
 	}
 
 	// Should NOT match: prefix collision (e.g. /skillset != /skills)
 	eng.Handle("3", makeEvent(EventFsCreate, "/skillset/foo.txt", 10))
+	waitForDebounce(delay)
 	if creator.count() != 1 {
 		t.Fatalf("expected no match for /skillset/foo.txt, got %d tasks", creator.count())
 	}
@@ -236,17 +268,17 @@ func TestEngine_Submit_PromptEnrichment(t *testing.T) {
 	creator := &mockCreator{}
 	backend := &mockBackend{}
 	eng := NewEngine(store, creator, backend, nil)
+	delay := setShortDebounce(eng)
 
 	eng.Handle("1", makeEvent(EventFsWrite, "/skills/report.md", 10))
-	// Debounced -- wait for it
-	time.Sleep(3 * time.Second)
+	waitForDebounce(delay)
 
 	if creator.count() != 1 {
 		t.Fatalf("expected 1 task after debounce, got %d", creator.count())
 	}
 	task := creator.last()
 	// New structured prompt: trigger first, then user prompt
-	expected := "## Trigger\n\nA file was modified at `skills/report.md`.\nRead the updated content from: `skills/report.md`\n\ndo stuff"
+	expected := "## Trigger\n\nA file was modified at `/workspace/skills/report.md`.\nRead the updated content from: `/workspace/skills/report.md`\n\ndo stuff"
 	if task.Prompt != expected {
 		t.Errorf("unexpected prompt:\ngot:  %q\nwant: %q", task.Prompt, expected)
 	}
@@ -258,18 +290,119 @@ func TestEngine_Debounce_CoalescesWrites(t *testing.T) {
 	creator := &mockCreator{}
 	backend := &mockBackend{}
 	eng := NewEngine(store, creator, backend, nil)
+	delay := setShortDebounce(eng)
 
 	// Rapid writes to same path
 	for i := 0; i < 10; i++ {
 		eng.Handle(fmt.Sprintf("%d", i), makeEvent(EventFsWrite, "/skills/file.txt", 10))
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
 
-	// Wait for debounce (2s after last write + buffer)
-	time.Sleep(3 * time.Second)
+	waitForDebounce(delay)
 
 	if creator.count() != 1 {
 		t.Fatalf("expected 1 task (debounced), got %d", creator.count())
+	}
+}
+
+func TestEngine_Debounce_CoalescesDeleteThenWriteAsWrite(t *testing.T) {
+	hook := makeHook(1, 10, "/skills", "analyze")
+	store := &mockStore{hooks: []*types.Hook{hook}}
+	creator := &mockCreator{}
+	backend := &mockBackend{}
+	eng := NewEngine(store, creator, backend, nil)
+	delay := setShortDebounce(eng)
+
+	eng.Handle("1", makeEvent(EventFsDelete, "/skills/file.txt", 10))
+	eng.Handle("2", makeEvent(EventFsWrite, "/skills/file.txt", 10))
+	waitForDebounce(delay)
+
+	if creator.count() != 1 {
+		t.Fatalf("expected 1 coalesced task, got %d", creator.count())
+	}
+	if task := creator.last(); task.Event != EventFsWrite {
+		t.Fatalf("expected final event %s, got %s", EventFsWrite, task.Event)
+	}
+}
+
+func TestEngine_Debounce_CoalescesCreateThenWriteAsCreate(t *testing.T) {
+	hook := makeHook(1, 10, "/skills", "analyze")
+	store := &mockStore{hooks: []*types.Hook{hook}}
+	creator := &mockCreator{}
+	backend := &mockBackend{}
+	eng := NewEngine(store, creator, backend, nil)
+	delay := setShortDebounce(eng)
+
+	eng.Handle("1", makeEvent(EventFsCreate, "/skills/file.txt", 10))
+	eng.Handle("2", makeEvent(EventFsWrite, "/skills/file.txt", 10))
+	waitForDebounce(delay)
+
+	if creator.count() != 1 {
+		t.Fatalf("expected 1 coalesced task, got %d", creator.count())
+	}
+	if task := creator.last(); task.Event != EventFsCreate {
+		t.Fatalf("expected final event %s, got %s", EventFsCreate, task.Event)
+	}
+}
+
+func TestEngine_Debounce_CoalescesWriteThenDeleteAsWrite(t *testing.T) {
+	hook := makeHook(1, 10, "/skills", "analyze")
+	store := &mockStore{hooks: []*types.Hook{hook}}
+	creator := &mockCreator{}
+	backend := &mockBackend{}
+	eng := NewEngine(store, creator, backend, nil)
+	delay := setShortDebounce(eng)
+
+	eng.Handle("1", makeEvent(EventFsWrite, "/skills/file.txt", 10))
+	eng.Handle("2", makeEvent(EventFsDelete, "/skills/file.txt", 10))
+	waitForDebounce(delay)
+
+	if creator.count() != 1 {
+		t.Fatalf("expected 1 coalesced task, got %d", creator.count())
+	}
+	if task := creator.last(); task.Event != EventFsWrite {
+		t.Fatalf("expected final event %s, got %s", EventFsWrite, task.Event)
+	}
+}
+
+func TestEngine_Debounce_DeleteOnlyRemainsDelete(t *testing.T) {
+	hook := makeHook(1, 10, "/skills", "analyze")
+	store := &mockStore{hooks: []*types.Hook{hook}}
+	creator := &mockCreator{}
+	backend := &mockBackend{}
+	eng := NewEngine(store, creator, backend, nil)
+	delay := setShortDebounce(eng)
+
+	eng.Handle("1", makeEvent(EventFsDelete, "/skills/file.txt", 10))
+	waitForDebounce(delay)
+
+	if creator.count() != 1 {
+		t.Fatalf("expected 1 coalesced task, got %d", creator.count())
+	}
+	if task := creator.last(); task.Event != EventFsDelete {
+		t.Fatalf("expected final event %s, got %s", EventFsDelete, task.Event)
+	}
+}
+
+func TestEngine_Debounce_DeleteOnlyWithExistingPathResolvesAsWrite(t *testing.T) {
+	hook := makeHook(1, 10, "/skills", "analyze")
+	store := &mockStore{
+		hooks:         []*types.Hook{hook},
+		existingPaths: map[string]bool{"/skills/file.txt": true},
+	}
+	creator := &mockCreator{}
+	backend := &mockBackend{}
+	eng := NewEngine(store, creator, backend, nil)
+	delay := setShortDebounce(eng)
+
+	eng.Handle("1", makeEvent(EventFsDelete, "/skills/file.txt", 10))
+	waitForDebounce(delay)
+
+	if creator.count() != 1 {
+		t.Fatalf("expected 1 coalesced task, got %d", creator.count())
+	}
+	if task := creator.last(); task.Event != EventFsWrite {
+		t.Fatalf("expected final event %s, got %s", EventFsWrite, task.Event)
 	}
 }
 
@@ -367,7 +500,7 @@ func (m *mockSkillReader) ReadSkillContent(_ context.Context, _ uint, _ string) 
 func TestBuildTriggerContext_FsCreate(t *testing.T) {
 	data := makeEvent(EventFsCreate, "/inbox/doc.pdf", 10)
 	got := buildTriggerContext(EventFsCreate, data)
-	want := "## Trigger\n\nA new file was created at `inbox/doc.pdf`.\nRead it from your working directory: `inbox/doc.pdf`"
+	want := "## Trigger\n\nA new file was created at `/workspace/inbox/doc.pdf`.\nRead it from: `/workspace/inbox/doc.pdf`"
 	if got != want {
 		t.Errorf("buildTriggerContext(FsCreate):\ngot:  %q\nwant: %q", got, want)
 	}
@@ -513,7 +646,7 @@ Read all new emails and categorize them by urgency.
 	if !strings.Contains(prompt, "**email-triage**") {
 		t.Error("prompt missing skill name reference")
 	}
-	if !strings.Contains(prompt, "skills/email-triage/SKILL.md") {
+	if !strings.Contains(prompt, "/workspace/skills/email-triage/SKILL.md") {
 		t.Error("prompt missing skill path reference")
 	}
 	if strings.Contains(prompt, "Read all new emails and categorize them by urgency.") {
@@ -579,7 +712,7 @@ Summarize the document concisely.
 	if !strings.Contains(prompt, "**summarizer**") {
 		t.Error("prompt missing skill name reference")
 	}
-	if !strings.Contains(prompt, "skills/summarizer/SKILL.md") {
+	if !strings.Contains(prompt, "/workspace/skills/summarizer/SKILL.md") {
 		t.Error("prompt missing skill path reference")
 	}
 	if strings.Contains(prompt, "Summarize the document concisely.") {

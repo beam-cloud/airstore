@@ -70,26 +70,38 @@ func (eng *Engine) Handle(id string, data map[string]any) {
 		return
 	}
 
-	fire := func() {
+	fire := func(eventID, resolvedEvent string, payload map[string]any) {
+		effectivePayload := cloneEventData(payload)
+		resolvedPath, _ := effectivePayload["path"].(string)
+		if resolvedPath == "" {
+			resolvedPath = path
+		}
+		effectivePayload["path"] = resolvedPath
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		hooks := eng.cache.match(ctx, wsId, path)
+		effectiveEvent := resolvedEvent
+		if isFilesystemEvent(effectiveEvent) {
+			effectiveEvent = eng.reconcileFilesystemEvent(ctx, effectiveEvent, resolvedPath)
+			effectivePayload["event"] = effectiveEvent
+		}
+
+		hooks := eng.cache.match(ctx, wsId, resolvedPath)
 		if len(hooks) == 0 {
-			log.Debug().Str("event", event).Str("path", path).Uint("workspace_id", wsId).
+			log.Debug().Str("event", effectiveEvent).Str("path", resolvedPath).Uint("workspace_id", wsId).
 				Msg("hook engine: no matching hooks")
 			return
 		}
 
 		for _, h := range hooks {
-			eng.submit(ctx, h, id, event, data)
+			eng.submit(ctx, h, eventID, effectiveEvent, effectivePayload)
 		}
 	}
 
-	if event == EventFsWrite {
-		eng.debounce.call(fmt.Sprintf("%d:%s", wsId, path), fire)
+	if isFilesystemEvent(event) {
+		eng.debounce.call(fmt.Sprintf("%d:%s", wsId, path), id, event, data, fire)
 	} else {
-		fire()
+		fire(id, event, data)
 	}
 }
 
@@ -111,6 +123,27 @@ func (eng *Engine) submit(ctx context.Context, h *types.Hook, eventID, event str
 		Str("event", event).
 		Strs("skill_paths", types.NormalizeSkillPaths(h.SkillPaths, h.SkillPath)).
 		Msg("hook fired")
+}
+
+func (eng *Engine) reconcileFilesystemEvent(ctx context.Context, event, path string) string {
+	if event != EventFsDelete || eng.store == nil {
+		return event
+	}
+	normalizedPath := NormalizePath(path)
+	dirMeta, fileMeta, symlink, err := eng.store.StatPath(ctx, normalizedPath)
+	if err != nil {
+		log.Debug().
+			Err(err).
+			Str("event", event).
+			Str("path", normalizedPath).
+			Msg("hook engine: failed to reconcile fs event")
+		return event
+	}
+	if dirMeta != nil || fileMeta != nil || strings.TrimSpace(symlink) != "" {
+		// If the path still exists at fire-time, treat delete as transient noise.
+		return EventFsWrite
+	}
+	return event
 }
 
 // buildPrompt constructs a structured prompt for the Claude Code task.
@@ -156,40 +189,35 @@ func (eng *Engine) Poll(ctx context.Context) {
 // This is always the first thing Claude sees so it understands the trigger.
 func buildTriggerContext(event string, data map[string]any) string {
 	path, _ := data["path"].(string)
+	absPath := workspaceAbsolutePath(path)
 	integration, _ := data["integration"].(string)
 	newCount, _ := data["new_count"].(string)
 	newItems, _ := data["new_items"].(string)
-
-	// Use relative paths — the airstore filesystem is mounted at the working
-	// directory (/workspace). Absolute paths like /sources/... don't exist
-	// inside the container; only workspace-relative paths work.
-	relPath := strings.TrimPrefix(path, "/")
 
 	var b strings.Builder
 
 	switch event {
 	case EventFsCreate:
 		b.WriteString("## Trigger\n\n")
-		b.WriteString("A new file was created at `" + relPath + "`.\n")
-		b.WriteString("Read it from your working directory: `" + relPath + "`")
+		b.WriteString("A new file was created at `" + absPath + "`.\n")
+		b.WriteString("Read it from: `" + absPath + "`")
 
 	case EventFsWrite:
 		b.WriteString("## Trigger\n\n")
-		b.WriteString("A file was modified at `" + relPath + "`.\n")
-		b.WriteString("Read the updated content from: `" + relPath + "`")
+		b.WriteString("A file was modified at `" + absPath + "`.\n")
+		b.WriteString("Read the updated content from: `" + absPath + "`")
 
 	case EventFsDelete:
 		b.WriteString("## Trigger\n\n")
-		b.WriteString("A file was deleted at `" + relPath + "`.")
+		b.WriteString("A file was deleted at `" + absPath + "`.")
 
 	case EventSourceChange:
 		b.WriteString("## Trigger\n\n")
 		if integration != "" {
 			b.WriteString("Source: **" + integration + "**\n")
 		}
-		b.WriteString(newCount + " new item(s) appeared in `" + relPath + "/`.\n")
-		b.WriteString("The new content is in your working directory at: `" + relPath + "/`\n")
-		b.WriteString("List and read the files there to see what changed.")
+		b.WriteString(newCount + " new item(s) appeared in `" + absPath + "/`.\n")
+		b.WriteString("List and read the files under `" + absPath + "/` to see what changed.")
 
 		// Include item IDs if the source poller provided them
 		if newItems != "" {
@@ -212,7 +240,7 @@ func buildSkillReferences(ctx context.Context, reader SkillReader, workspaceId u
 	b.WriteString("The following skills are available in your workspace. Read the SKILL.md file at each path for detailed instructions.\n")
 
 	for _, sp := range skillPaths {
-		relPath := strings.TrimPrefix(sp, "/")
+		skillPath := workspaceAbsolutePath(sp)
 		name := ""
 		if reader != nil {
 			content, err := reader.ReadSkillContent(ctx, workspaceId, sp)
@@ -224,9 +252,9 @@ func buildSkillReferences(ctx context.Context, reader SkillReader, workspaceId u
 			}
 		}
 		if name != "" {
-			b.WriteString(fmt.Sprintf("\n- **%s** — read `%s/SKILL.md`", name, relPath))
+			b.WriteString(fmt.Sprintf("\n- **%s** — read `%s/SKILL.md`", name, skillPath))
 		} else {
-			b.WriteString(fmt.Sprintf("\n- `%s/SKILL.md`", relPath))
+			b.WriteString(fmt.Sprintf("\n- `%s/SKILL.md`", skillPath))
 		}
 	}
 
@@ -406,11 +434,21 @@ type debouncer struct {
 }
 
 type debounceEntry struct {
-	timer *time.Timer
-	gen   uint64
+	timer         *time.Timer
+	gen           uint64
+	latestEventID string
+	latestEvent   string
+	latestData    map[string]any
+	sawCreate     bool
+	sawWrite      bool
+	sawDelete     bool
 }
 
-func (d *debouncer) call(key string, fn func()) {
+func (d *debouncer) call(
+	key, eventID, event string,
+	data map[string]any,
+	fn func(eventID, event string, data map[string]any),
+) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -422,6 +460,7 @@ func (d *debouncer) call(key string, fn func()) {
 		e = &debounceEntry{}
 		d.state[key] = e
 	}
+	e.absorb(eventID, event, data)
 
 	gen := e.gen
 	e.timer = time.AfterFunc(d.delay, func() {
@@ -430,8 +469,77 @@ func (d *debouncer) call(key string, fn func()) {
 			d.mu.Unlock()
 			return
 		}
+		finalEventID := e.latestEventID
+		finalEvent := e.resolveEvent()
+		finalData := cloneEventData(e.latestData)
+		finalData["event"] = finalEvent
 		delete(d.state, key)
 		d.mu.Unlock()
-		fn()
+		fn(finalEventID, finalEvent, finalData)
 	})
+}
+
+func (e *debounceEntry) absorb(eventID, event string, data map[string]any) {
+	e.latestEventID = eventID
+	e.latestEvent = event
+	e.latestData = cloneEventData(data)
+
+	switch event {
+	case EventFsCreate:
+		e.sawCreate = true
+	case EventFsWrite:
+		e.sawWrite = true
+	case EventFsDelete:
+		e.sawDelete = true
+	}
+}
+
+// resolveEvent collapses a burst of fs.* events to a single "end result" event.
+func (e *debounceEntry) resolveEvent() string {
+	// Treat mixed delete+write/create bursts as "file exists" outcomes.
+	// Copy/replace flows can emit transient deletes for the same path.
+	if e.sawDelete {
+		if e.sawCreate {
+			return EventFsCreate
+		}
+		if e.sawWrite {
+			return EventFsWrite
+		}
+		return EventFsDelete
+	}
+	if e.sawCreate {
+		return EventFsCreate
+	}
+	if e.sawWrite {
+		return EventFsWrite
+	}
+	return e.latestEvent
+}
+
+func cloneEventData(data map[string]any) map[string]any {
+	if len(data) == 0 {
+		return map[string]any{}
+	}
+	cloned := make(map[string]any, len(data))
+	for k, v := range data {
+		cloned[k] = v
+	}
+	return cloned
+}
+
+func isFilesystemEvent(event string) bool {
+	switch event {
+	case EventFsCreate, EventFsWrite, EventFsDelete:
+		return true
+	default:
+		return false
+	}
+}
+
+func workspaceAbsolutePath(path string) string {
+	normalized := NormalizePath(path)
+	if normalized == "/" {
+		return "/workspace"
+	}
+	return "/workspace" + normalized
 }
