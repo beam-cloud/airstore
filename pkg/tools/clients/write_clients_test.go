@@ -128,6 +128,45 @@ func TestGitHubPRReviewCommandsRequireArguments(t *testing.T) {
 	}
 }
 
+func TestGitHubReviewPRInvalidCommentsJSON(t *testing.T) {
+	client := NewGitHubClient()
+	var stdout bytes.Buffer
+	err := client.Execute(context.Background(), githubCmdReviewPR, map[string]any{
+		"owner":    "octocat",
+		"repo":     "hello-world",
+		"number":   1,
+		"body":     "review",
+		"comments": "not-valid-json",
+	}, &types.IntegrationCredentials{AccessToken: "token"}, &stdout, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("expected structured JSON error, got hard error: %v", err)
+	}
+	if !bytes.Contains(stdout.Bytes(), []byte(`"error"`)) {
+		t.Fatalf("expected JSON error output, got %q", stdout.String())
+	}
+	if !bytes.Contains(stdout.Bytes(), []byte("invalid comments JSON")) {
+		t.Fatalf("expected 'invalid comments JSON' in output, got %q", stdout.String())
+	}
+}
+
+func TestGitHubReviewPRAcceptsCommentsArg(t *testing.T) {
+	client := NewGitHubClient()
+	var stdout bytes.Buffer
+	err := client.Execute(context.Background(), githubCmdReviewPR, map[string]any{
+		"owner":    "octocat",
+		"repo":     "hello-world",
+		"number":   1,
+		"body":     "review",
+		"comments": `[{"path":"main.go","line":10,"body":"Fix this"}]`,
+	}, &types.IntegrationCredentials{AccessToken: "token"}, &stdout, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("unexpected hard error: %v", err)
+	}
+	if bytes.Contains(stdout.Bytes(), []byte("invalid comments JSON")) {
+		t.Fatalf("comments JSON should have parsed successfully, got %q", stdout.String())
+	}
+}
+
 func TestGmailSendEmailRequiresArguments(t *testing.T) {
 	client := NewGmailClient()
 	var stdout bytes.Buffer

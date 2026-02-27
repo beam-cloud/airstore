@@ -23,7 +23,9 @@ import (
 )
 
 const (
-	defaultHeartbeatInterval time.Duration = 10 * time.Second
+	defaultHeartbeatInterval    = 10 * time.Second
+	setTaskResultMaxAttempts    = 3
+	setTaskResultRetryTimeout   = 10 * time.Second
 )
 
 // Worker represents a airstore worker that:
@@ -333,11 +335,60 @@ func (w *Worker) finishTask(task types.RunExecution, result *types.RunExecutionR
 		addTaskExecutionContext(log.Warn().Err(qErr), task).Msg("failed to update task queue")
 	}
 
-	if err := w.gatewayClient.SetTaskResult(w.ctx, taskID, result.ExitCode, result.Error); err != nil {
-		addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to report result to gateway")
+	reportErr := setTaskResultWithRetry(w.ctx, task, result, w.gatewayClient.SetTaskResult, contextSleep)
+	if reportErr != nil {
+		addTaskExecutionContext(log.Error().Err(reportErr), task).
+			Msg("failed to report result to gateway after retries")
 	}
 
 	addTaskExecutionContext(log.Info().Int("exit_code", result.ExitCode), task).Msg("task finished")
+}
+
+// setTaskResultWithRetry reports the task result to the gateway, retrying
+// transient failures with exponential backoff. The caller's context controls
+// the overall lifetime: retries proceed while ctx is active and stop
+// immediately once it is cancelled (e.g. after the shutdown timeout).
+func setTaskResultWithRetry(
+	ctx context.Context,
+	task types.RunExecution,
+	result *types.RunExecutionResult,
+	reportFn func(ctx context.Context, taskID string, exitCode int, errMsg string) error,
+	sleepFn func(context.Context, time.Duration),
+) error {
+	var lastErr error
+	for attempt := range setTaskResultMaxAttempts {
+		if attempt > 0 {
+			sleepFn(ctx, time.Duration(1<<(attempt-1))*time.Second)
+		}
+		if ctx.Err() != nil {
+			if lastErr == nil {
+				lastErr = ctx.Err()
+			}
+			return lastErr
+		}
+
+		attemptCtx, cancel := context.WithTimeout(ctx, setTaskResultRetryTimeout)
+		lastErr = reportFn(attemptCtx, task.ExternalId, result.ExitCode, result.Error)
+		cancel()
+		if lastErr == nil {
+			return nil
+		}
+		if attempt < setTaskResultMaxAttempts-1 {
+			addTaskExecutionContext(log.Warn().Err(lastErr).Int("attempt", attempt+1), task).
+				Msg("failed to report result to gateway, retrying")
+		}
+	}
+	return lastErr
+}
+
+// contextSleep sleeps for d or until ctx is cancelled, whichever comes first.
+func contextSleep(ctx context.Context, d time.Duration) {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-ctx.Done():
+	}
 }
 
 // register registers the worker with the gateway

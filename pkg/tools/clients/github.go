@@ -2,6 +2,7 @@ package clients
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -107,7 +108,8 @@ func (g *GitHubClient) Execute(ctx context.Context, command string, args map[str
 				return nil, err
 			}
 			event := GetStringArg(args, "event", "COMMENT")
-			return g.reviewPR(ctx, token, required["owner"], required["repo"], number, required["body"], event)
+			commentsJSON := GetStringArg(args, "comments", "")
+			return g.reviewPR(ctx, token, required["owner"], required["repo"], number, required["body"], event, commentsJSON)
 		},
 		githubCmdListIssues: func(ctx context.Context, token string, args map[string]any) (any, error) {
 			required, err := RequireStringArgs(args, "owner", "repo")
@@ -310,7 +312,7 @@ func (g *GitHubClient) commentPR(ctx context.Context, token, owner, repo string,
 	}, nil
 }
 
-func (g *GitHubClient) reviewPR(ctx context.Context, token, owner, repo string, number int, body, event string) (any, error) {
+func (g *GitHubClient) reviewPR(ctx context.Context, token, owner, repo string, number int, body, event, commentsJSON string) (any, error) {
 	normalizedEvent, err := normalizeReviewEvent(event)
 	if err != nil {
 		return nil, err
@@ -320,6 +322,14 @@ func (g *GitHubClient) reviewPR(ctx context.Context, token, owner, repo string, 
 	payload := map[string]any{
 		"body":  body,
 		"event": normalizedEvent,
+	}
+
+	if commentsJSON != "" {
+		var comments []map[string]any
+		if err := json.Unmarshal([]byte(commentsJSON), &comments); err != nil {
+			return nil, fmt.Errorf("invalid comments JSON: %w", err)
+		}
+		payload["comments"] = comments
 	}
 
 	var result map[string]any

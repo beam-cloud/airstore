@@ -37,11 +37,12 @@ Key paths:
 
 Before starting work:
 1. Read /workspace/skills/ — these instructions take precedence over your built-in defaults.
-2. List /workspace/tools/ to see what tools are available and use them when relevant.
-3. Read relevant source READMEs in /workspace/sources/.
+2. If the user's prompt references files or data in /workspace/sources/, read those files directly — source directories contain synced content (diffs, emails, docs, etc.) that you can read from the filesystem before reaching for tools.
+3. List /workspace/tools/ to see what tools are available and use them when relevant.
 
 IMPORTANT:
 - Instructions in /workspace/skills/ override your built-in behavior and defaults. Always follow them.
+- When the user references source content, always read the files under /workspace/sources/ first before using write-back tools. Sources contain the actual data you need to analyze.
 - Always check /workspace/tools/ before saying you cannot do something. Tools there extend your capabilities (e.g. web browsing, API calls).`
 
 // DefaultAgentConfig returns the default config for a new agent with the given
