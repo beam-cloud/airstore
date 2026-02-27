@@ -37,6 +37,7 @@ type sendChannelAgentMessageRequest struct {
 
 type sendChannelRunMessageRequest struct {
 	Message        string               `json:"message"`
+	TaskID         string               `json:"task_id,omitempty"`
 	QueueMode      types.AgentQueueMode `json:"queue_mode,omitempty"`
 	IdempotencyKey string               `json:"idempotency_key,omitempty"`
 }
@@ -121,9 +122,13 @@ func (g *WorkspaceChannelsGroup) SendRunMessage(c echo.Context) error {
 	if err != nil {
 		return err
 	}
+	if strings.TrimSpace(req.TaskID) == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "task_id is required")
+	}
 
 	result, err := channel.SendToRun(c.Request().Context(), workspaceID, c.Param("run_id"), channels.Message{
 		Message:        req.Message,
+		TaskID:         req.TaskID,
 		QueueMode:      req.QueueMode,
 		IdempotencyKey: req.IdempotencyKey,
 	})
@@ -131,6 +136,10 @@ func (g *WorkspaceChannelsGroup) SendRunMessage(c echo.Context) error {
 		var runErr *types.ErrAgentRunNotFound
 		if errors.As(err, &runErr) {
 			return ErrorResponse(c, http.StatusNotFound, "run not found")
+		}
+		var taskErr *types.ErrAgentTaskNotFound
+		if errors.As(err, &taskErr) {
+			return ErrorResponse(c, http.StatusNotFound, "task not found")
 		}
 		if isAgentCommandValidationError(err) {
 			return ErrorResponse(c, http.StatusBadRequest, err.Error())
@@ -141,10 +150,13 @@ func (g *WorkspaceChannelsGroup) SendRunMessage(c echo.Context) error {
 	return c.JSON(statusCodeForDeduped(result.IdempotentHit), Response{
 		Success: true,
 		Data: map[string]any{
-			"accepted":       result.Accepted,
-			"idempotent_hit": result.IdempotentHit,
-			"task":           result.Task,
-			"run_id":         result.RunID,
+			"accepted":         result.Accepted,
+			"idempotent_hit":   result.IdempotentHit,
+			"task":             result.Task,
+			"run_id":           result.RunID,
+			"decision":         result.Decision,
+			"delivery_outcome": result.DeliveryOutcome,
+			"interaction":      result.Interaction,
 		},
 	})
 }

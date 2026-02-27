@@ -5,7 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/repository"
+	"github.com/beam-cloud/airstore/pkg/types"
 )
 
 func newTestTracker(t *testing.T) *SeenTracker {
@@ -22,13 +24,20 @@ func TestSeenTracker_FirstCall_SeedsBaseline(t *testing.T) {
 	ctx := context.Background()
 	key := "test:seen:first"
 
-	// First call with IDs should return nil (baseline seed, no flood).
+	// First call with IDs should return all IDs as new so hooks can bootstrap.
 	newIDs, err := tracker.Compare(ctx, key, []string{"a", "b", "c"})
 	if err != nil {
 		t.Fatalf("compare: %v", err)
 	}
-	if newIDs != nil {
-		t.Errorf("first call should return nil, got %v", newIDs)
+	if len(newIDs) != 3 {
+		t.Fatalf("expected 3 IDs on first compare, got %d: %v", len(newIDs), newIDs)
+	}
+	got := make(map[string]bool, len(newIDs))
+	for _, id := range newIDs {
+		got[id] = true
+	}
+	if !got["a"] || !got["b"] || !got["c"] {
+		t.Errorf("expected [a b c], got %v", newIDs)
 	}
 }
 
@@ -166,13 +175,13 @@ func TestSeenTracker_CommitEmpty_ClearsSet(t *testing.T) {
 		t.Fatalf("commit empty: %v", err)
 	}
 
-	// Now compare with {a} should return nil (first call again, set was cleared)
+	// After clearing, the key is still initialized, so {a} is new.
 	newIDs, err := tracker.Compare(ctx, key, []string{"a"})
 	if err != nil {
 		t.Fatalf("compare: %v", err)
 	}
-	if newIDs != nil {
-		t.Errorf("expected nil after clear (re-seed), got %v", newIDs)
+	if len(newIDs) != 1 || newIDs[0] != "a" {
+		t.Errorf("expected [a] after clear, got %v", newIDs)
 	}
 }
 
@@ -199,7 +208,7 @@ func TestSeenTracker_DetectsRemovedAndReaddedIDs(t *testing.T) {
 	}
 }
 
-func TestSeenTracker_TTLIsSet(t *testing.T) {
+func TestSeenTracker_NoExpiry(t *testing.T) {
 	rdb, err := repository.NewRedisClientForTest()
 	if err != nil {
 		t.Fatalf("failed to create test redis: %v", err)
@@ -211,13 +220,55 @@ func TestSeenTracker_TTLIsSet(t *testing.T) {
 	tracker.Compare(ctx, key, []string{"a"})
 	tracker.Commit(ctx, key, []string{"a"})
 
-	// Verify TTL was set
+	// Verify set key does not expire.
 	ttl, err := rdb.TTL(ctx, key).Result()
 	if err != nil {
 		t.Fatalf("ttl: %v", err)
 	}
-	// TTL should be close to 24h (within a few seconds is fine)
-	if ttl < 23*time.Hour || ttl > 25*time.Hour {
-		t.Errorf("expected TTL ~24h, got %v", ttl)
+	if ttl != -1*time.Nanosecond {
+		t.Errorf("expected no expiry (-1), got %v", ttl)
+	}
+
+	// Verify the init marker also does not expire.
+	initTTL, err := rdb.TTL(ctx, key+":init").Result()
+	if err != nil {
+		t.Fatalf("init ttl: %v", err)
+	}
+	if initTTL != -1*time.Nanosecond {
+		t.Errorf("expected no expiry on init marker (-1), got %v", initTTL)
+	}
+}
+
+func TestSeenTracker_ResetPath_ReinitializesFirstObservation(t *testing.T) {
+	tracker := newTestTracker(t)
+	ctx := context.Background()
+	workspaceID := uint(321)
+	path := "/sources/github/repo-prs"
+	key := common.Keys.HookSeen(workspaceID, types.GeneratePathID(path))
+	ids := []string{"a", "b"}
+
+	// Seed baseline and verify unchanged snapshots produce no new IDs.
+	_, _ = tracker.Compare(ctx, key, ids)
+	if err := tracker.Commit(ctx, key, ids); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	newIDs, err := tracker.Compare(ctx, key, ids)
+	if err != nil {
+		t.Fatalf("compare before reset: %v", err)
+	}
+	if len(newIDs) != 0 {
+		t.Fatalf("expected no new IDs before reset, got %v", newIDs)
+	}
+
+	// Reset should force next compare for this path to bootstrap.
+	if err := tracker.ResetPath(ctx, workspaceID, path); err != nil {
+		t.Fatalf("reset path: %v", err)
+	}
+	newIDs, err = tracker.Compare(ctx, key, ids)
+	if err != nil {
+		t.Fatalf("compare after reset: %v", err)
+	}
+	if len(newIDs) != len(ids) {
+		t.Fatalf("expected %d new IDs after reset, got %d (%v)", len(ids), len(newIDs), newIDs)
 	}
 }

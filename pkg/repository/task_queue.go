@@ -18,6 +18,7 @@ const (
 	taskStateTTL      = 24 * time.Hour
 	taskResultTTL     = 24 * time.Hour
 	taskLogBufferTTL  = 24 * time.Hour
+	maxInFlightScrub  = 256
 )
 
 const moveDueDelayedTasksScript = `
@@ -285,7 +286,72 @@ func (q *RedisTaskQueue) Len(ctx context.Context) (int64, error) {
 
 // InFlightCount returns the number of tasks currently being processed
 func (q *RedisTaskQueue) InFlightCount(ctx context.Context) (int64, error) {
-	return q.rdb.SCard(ctx, common.Keys.RunExecutionInFlight(q.queueName)).Result()
+	inFlightKey := common.Keys.RunExecutionInFlight(q.queueName)
+	if err := q.scrubInFlightState(ctx, inFlightKey); err != nil {
+		return 0, err
+	}
+	return q.rdb.SCard(ctx, inFlightKey).Result()
+}
+
+func (q *RedisTaskQueue) scrubInFlightState(ctx context.Context, inFlightKey string) error {
+	if q == nil || q.rdb == nil {
+		return nil
+	}
+	taskIDs, err := q.rdb.SRandMemberN(ctx, inFlightKey, maxInFlightScrub).Result()
+	if err != nil {
+		return fmt.Errorf("failed to sample in-flight tasks: %w", err)
+	}
+	if len(taskIDs) == 0 {
+		return nil
+	}
+
+	stateKeys := make([]string, 0, len(taskIDs))
+	for _, taskID := range taskIDs {
+		stateKeys = append(stateKeys, common.Keys.RunExecutionState(taskID))
+	}
+	stateValues, err := q.rdb.MGet(ctx, stateKeys...).Result()
+	if err != nil {
+		return fmt.Errorf("failed to fetch in-flight task states: %w", err)
+	}
+
+	staleTaskIDs := make([]interface{}, 0)
+	for i, raw := range stateValues {
+		taskID := taskIDs[i]
+		if raw == nil {
+			staleTaskIDs = append(staleTaskIDs, taskID)
+			continue
+		}
+		stateRaw, ok := raw.(string)
+		if !ok {
+			staleTaskIDs = append(staleTaskIDs, taskID)
+			continue
+		}
+
+		var state types.RunExecutionState
+		if err := json.Unmarshal([]byte(stateRaw), &state); err != nil {
+			staleTaskIDs = append(staleTaskIDs, taskID)
+			continue
+		}
+		if runExecutionStateTerminal(state.Status) {
+			staleTaskIDs = append(staleTaskIDs, taskID)
+		}
+	}
+	if len(staleTaskIDs) == 0 {
+		return nil
+	}
+	if err := q.rdb.SRem(ctx, inFlightKey, staleTaskIDs...).Err(); err != nil {
+		return fmt.Errorf("failed to prune stale in-flight tasks: %w", err)
+	}
+	return nil
+}
+
+func runExecutionStateTerminal(status types.RunExecutionStatus) bool {
+	switch status {
+	case types.RunExecutionStatusComplete, types.RunExecutionStatusFailed, types.RunExecutionStatusCancelled:
+		return true
+	default:
+		return false
+	}
 }
 
 // TaskLogEntry represents a log entry for a task

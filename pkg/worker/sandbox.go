@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -684,16 +685,41 @@ func (m *SandboxManager) Stop(sandboxID string, force bool) error {
 	// Kill the container
 	opts := &runtime.KillOpts{All: true}
 	if err := m.runtime.Kill(m.ctx, sandboxID, 15, opts); err != nil { // SIGTERM
+		if isContainerAlreadyStopped(err) {
+			log.Debug().Str("sandbox_id", sandboxID).Msg("container already stopped, skipping kill")
+			return nil
+		}
 		if !force {
 			return fmt.Errorf("failed to kill sandbox: %w", err)
 		}
-		// Force kill with SIGKILL
 		if err := m.runtime.Kill(m.ctx, sandboxID, 9, opts); err != nil {
+			if isContainerAlreadyStopped(err) {
+				log.Debug().Str("sandbox_id", sandboxID).Msg("container already stopped, skipping force kill")
+				return nil
+			}
 			log.Warn().Err(err).Str("sandbox_id", sandboxID).Msg("force kill failed")
 		}
 	}
 
 	return nil
+}
+
+// isContainerAlreadyStopped returns true when a runtime kill error
+// indicates the container has already exited. Both runsc and runc
+// return exit code 128 in this case.
+func isContainerAlreadyStopped(err error) bool {
+	if err == nil {
+		return false
+	}
+	var exitErr *exec.ExitError
+	if ok := errors.As(err, &exitErr); ok {
+		return exitErr.ExitCode() == 128
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "container not running") ||
+		strings.Contains(msg, "container is not running") ||
+		strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "does not exist")
 }
 
 // Delete removes a sandbox and cleans up resources

@@ -484,7 +484,21 @@ func (s *GatewayService) CreateHook(ctx context.Context, req *pb.CreateHookReque
 		return &pb.HookResponse{Ok: false, Error: "authentication token required"}, nil
 	}
 
-	hook, err := s.hooksSvc.Create(ctx, ws.Id, memberId, tokenId, rawToken, req.Path, req.Prompt, req.SkillPath)
+	skillPaths := []string{}
+	if strings.TrimSpace(req.SkillPath) != "" {
+		skillPaths = []string{req.SkillPath}
+	}
+	hook, err := s.hooksSvc.Create(
+		ctx,
+		ws.Id,
+		memberId,
+		tokenId,
+		rawToken,
+		req.Path,
+		req.Prompt,
+		skillPaths,
+		nil,
+	)
 	if err != nil {
 		return &pb.HookResponse{Ok: false, Error: err.Error()}, nil
 	}
@@ -532,12 +546,16 @@ func (s *GatewayService) UpdateHook(ctx context.Context, req *pb.UpdateHookReque
 	if req.HasActive {
 		active = &req.Active
 	}
-	var skillPath *string
+	var skillPaths *[]string
 	if req.HasSkillPath {
-		skillPath = &req.SkillPath
+		values := []string{}
+		if strings.TrimSpace(req.SkillPath) != "" {
+			values = []string{req.SkillPath}
+		}
+		skillPaths = &values
 	}
 
-	hook, err := s.hooksSvc.Update(ctx, req.Id, prompt, active, skillPath)
+	hook, err := s.hooksSvc.Update(ctx, req.Id, prompt, active, skillPaths, nil)
 	if err != nil {
 		return &pb.HookResponse{Ok: false, Error: err.Error()}, nil
 	}
@@ -607,12 +625,16 @@ func extractRawToken(ctx context.Context) string {
 }
 
 func hookToPb(h *types.Hook, workspaceExternalId string) *pb.Hook {
+	skillPath := h.SkillPath
+	if len(h.SkillPaths) > 0 {
+		skillPath = h.SkillPaths[0]
+	}
 	return &pb.Hook{
 		Id:          h.ExternalId,
 		WorkspaceId: workspaceExternalId,
 		Path:        h.Path,
 		Prompt:      h.Prompt,
-		SkillPath:   h.SkillPath,
+		SkillPath:   skillPath,
 		Active:      h.Active,
 		CreatedAt:   h.CreatedAt.Format(time.RFC3339),
 		UpdatedAt:   h.UpdatedAt.Format(time.RFC3339),

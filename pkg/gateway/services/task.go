@@ -209,7 +209,7 @@ func (s *AgentService) EnqueueRunInput(ctx context.Context, req *pb.EnqueueRunIn
 	}
 
 	queueMode := types.AgentQueueMode(req.QueueMode)
-	task, deduped, err := s.api.EnqueueRunInput(ctx, ws.Id, req.RunId, queueMode, req.Message, req.IdempotencyKey)
+	task, deduped, _, err := s.api.EnqueueRunInput(ctx, ws.Id, req.RunId, queueMode, req.Message, req.IdempotencyKey)
 	if err != nil {
 		return &pb.AgentTaskAcceptedResponse{Ok: false, Error: err.Error()}, nil
 	}

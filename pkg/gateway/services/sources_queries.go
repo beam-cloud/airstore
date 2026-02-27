@@ -2,8 +2,11 @@ package services
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -148,45 +151,77 @@ func (s *SourceService) RefreshQuery(ctx context.Context, query *types.Filesyste
 // emitNewResultHooks detects new results via the seen tracker and emits hook events.
 // Returns the count of newly detected results.
 func (s *SourceService) emitNewResultHooks(ctx context.Context, workspaceId uint, query *types.FilesystemQuery, results []repository.QueryResult) int {
-	if s.seenTracker == nil || s.hookStream == nil || len(results) == 0 {
+	if s.seenTracker == nil || s.hookStream == nil {
 		return 0
 	}
 
-	seenKey := common.Keys.HookSeen(workspaceId, types.GeneratePathID(query.Path))
-	ids := make([]string, len(results))
-	for i, r := range results {
-		ids[i] = r.ID
+	queryPath := hooks.NormalizePath(query.Path)
+	seenKey := common.Keys.HookSeen(workspaceId, types.GeneratePathID(queryPath))
+	ids := make([]string, 0, len(results))
+	for _, r := range results {
+		id := strings.TrimSpace(r.ID)
+		if id == "" {
+			continue
+		}
+		ids = append(ids, id)
 	}
 
 	newIDs, compareErr := s.seenTracker.Compare(ctx, seenKey, ids)
 	if compareErr != nil {
-		log.Warn().Err(compareErr).Str("path", query.Path).Msg("seen tracker compare failed, skipping commit")
+		log.Warn().Err(compareErr).Str("path", queryPath).Msg("seen tracker compare failed, skipping commit")
 		return 0
 	}
 
 	if len(newIDs) > 0 {
+		newItemsHash := hashHookItemIDs(newIDs)
 		if emitErr := s.hookStream.Emit(ctx, map[string]any{
-			"event":        hooks.EventSourceChange,
-			"workspace_id": fmt.Sprintf("%d", workspaceId),
-			"path":         query.Path,
-			"integration":  query.Integration,
-			"new_count":    fmt.Sprintf("%d", len(newIDs)),
-			"new_items":    strings.Join(newIDs, ", "),
+			"event":          hooks.EventSourceChange,
+			"workspace_id":   fmt.Sprintf("%d", workspaceId),
+			"path":           queryPath,
+			"integration":    query.Integration,
+			"new_count":      fmt.Sprintf("%d", len(newIDs)),
+			"new_items":      strings.Join(newIDs, ", "),
+			"new_items_hash": newItemsHash,
 		}); emitErr != nil {
-			log.Error().Err(emitErr).Str("path", query.Path).Int("new_results", len(newIDs)).
+			log.Error().Err(emitErr).Str("path", queryPath).Int("new_results", len(newIDs)).
 				Msg("failed to emit source change event, will retry next poll")
 			return 0 // don't commit — retry on next poll
 		}
 		log.Info().
-			Str("path", query.Path).Str("integration", query.Integration).
+			Str("path", queryPath).Str("integration", query.Integration).
 			Int("new_results", len(newIDs)).
 			Msg("source change detected, hook event emitted")
 	}
 
 	if err := s.seenTracker.Commit(ctx, seenKey, ids); err != nil {
-		log.Warn().Err(err).Str("path", query.Path).Msg("seen tracker commit failed, next poll may re-fire")
+		log.Warn().Err(err).Str("path", queryPath).Msg("seen tracker commit failed, next poll may re-fire")
 	}
 	return len(newIDs)
+}
+
+func hashHookItemIDs(ids []string) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	seen := make(map[string]struct{}, len(ids))
+	normalized := make([]string, 0, len(ids))
+	for _, raw := range ids {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		normalized = append(normalized, id)
+	}
+	if len(normalized) == 0 {
+		return ""
+	}
+	sort.Strings(normalized)
+	sum := sha1.Sum([]byte(strings.Join(normalized, "\n")))
+	return hex.EncodeToString(sum[:])
 }
 
 // ---------------------------------------------------------------------------

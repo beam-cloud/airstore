@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,17 +24,11 @@ const (
 )
 
 const (
-	maxAttempts   = 3
 	debounceDelay = 2 * time.Second
-	pollInterval  = 30 * time.Second
-	retryBase     = 10 * time.Second
-	retryMax      = 5 * time.Minute
-	stuckPending  = 2 * time.Minute
-	stuckRunning  = 10 * time.Minute
 )
 
 type TaskCreator interface {
-	CreateTask(ctx context.Context, wsId uint, memberId *uint, token, prompt string, hookId uint, attempt, max int) error
+	CreateTask(ctx context.Context, hook *types.Hook, eventID, event, prompt string, data map[string]any) error
 }
 
 // SkillReader reads skill content from workspace storage.
@@ -89,7 +82,7 @@ func (eng *Engine) Handle(id string, data map[string]any) {
 		}
 
 		for _, h := range hooks {
-			eng.submit(ctx, h, event, data)
+			eng.submit(ctx, h, id, event, data)
 		}
 	}
 
@@ -102,36 +95,30 @@ func (eng *Engine) Handle(id string, data map[string]any) {
 
 func (eng *Engine) InvalidateCache(wsId uint) { eng.cache.invalidate(wsId) }
 
-func (eng *Engine) submit(ctx context.Context, h *types.Hook, event string, data map[string]any) {
-	if h.TokenId == nil {
-		log.Warn().Str("hook", h.ExternalId).Msg("hook has no token, skipping (re-create hook to fix)")
-		return
-	}
-
-	token, err := DecodeToken(h.EncryptedToken)
-	if err != nil || token == "" {
-		log.Warn().Err(err).Str("hook", h.ExternalId).Msg("hook token invalid, skipping")
+func (eng *Engine) submit(ctx context.Context, h *types.Hook, eventID, event string, data map[string]any) {
+	if !eng.ensureHookAgent(ctx, h) {
 		return
 	}
 
 	prompt := eng.buildPrompt(ctx, h, event, data)
-	if err := eng.creator.CreateTask(ctx, h.WorkspaceId, h.CreatedByMemberId, token, prompt,
-		h.Id, 1, maxAttempts); err != nil {
-		return // DB constraint rejects duplicates -- expected
+	if err := eng.creator.CreateTask(ctx, h, eventID, event, prompt, data); err != nil {
+		log.Warn().Err(err).Str("hook", h.ExternalId).Msg("hook engine: failed to enqueue agent task")
+		return
 	}
 
-	log.Info().Str("hook", h.ExternalId).Str("event", event).Str("skill_path", h.SkillPath).Msg("hook fired")
+	log.Info().
+		Str("hook", h.ExternalId).
+		Str("event", event).
+		Strs("skill_paths", types.NormalizeSkillPaths(h.SkillPaths, h.SkillPath)).
+		Msg("hook fired")
 }
 
 // buildPrompt constructs a structured prompt for the Claude Code task.
 //
 // The prompt has three clearly separated sections:
-//   1. Trigger context  – what happened (event type, path, integration, items)
-//   2. Skill instructions – from SKILL.md (if a skill is attached)
-//   3. Additional context – user-provided extra instructions on the hook
-//
-// This structure gives Claude a clear "situation → instructions → extra context"
-// flow so it knows what triggered the task before reading what to do about it.
+//  1. Trigger context    – what happened (event type, path, integration, items)
+//  2. Skill references   – names + paths to SKILL.md files (not full contents)
+//  3. Additional context – user-provided extra instructions on the hook
 func (eng *Engine) buildPrompt(ctx context.Context, h *types.Hook, event string, data map[string]any) string {
 	var sections []string
 
@@ -141,33 +128,13 @@ func (eng *Engine) buildPrompt(ctx context.Context, h *types.Hook, event string,
 		sections = append(sections, trigger)
 	}
 
-	// --- Section 2: Skill instructions (if any) ---
-	var skillMeta *skills.AirstoreSkillMeta
-	if h.SkillPath != "" && eng.skillReader != nil {
-		skillContent, err := eng.skillReader.ReadSkillContent(ctx, h.WorkspaceId, h.SkillPath)
-		if err != nil {
-			log.Warn().Err(err).Str("skill_path", h.SkillPath).Msg("failed to read skill content")
-		} else {
-			// Parse manifest for metadata (needs/writes)
-			manifest, parseErr := skills.Parse([]byte(skillContent))
-			if parseErr == nil {
-				skillMeta = manifest.AirstoreMetadata()
-			}
-
-			// Extract the instruction body (everything after frontmatter)
-			instructions := skills.ExtractInstructions([]byte(skillContent))
-			if instructions != "" {
-				sections = append(sections, instructions)
-			}
-		}
+	// --- Section 2: Skill references (if any) ---
+	skillPaths := types.NormalizeSkillPaths(h.SkillPaths, h.SkillPath)
+	if len(skillPaths) > 0 {
+		sections = append(sections, buildSkillReferences(ctx, eng.skillReader, h.WorkspaceId, skillPaths))
 	}
 
-	// --- Section 3: Integration/skill context ---
-	if meta := buildSkillContext(skillMeta, data); meta != "" {
-		sections = append(sections, meta)
-	}
-
-	// --- Section 4: Additional user-provided prompt ---
+	// --- Section 3: Additional user-provided prompt ---
 	if h.Prompt != "" {
 		sections = append(sections, h.Prompt)
 	}
@@ -175,83 +142,14 @@ func (eng *Engine) buildPrompt(ctx context.Context, h *types.Hook, event string,
 	return strings.Join(sections, "\n\n")
 }
 
-// Start runs the retry poller. Call as a goroutine.
+// Start blocks until the engine context is cancelled.
 func (eng *Engine) Start(ctx context.Context) {
-	log.Info().Msg("hook poller started")
-
-	t := time.NewTicker(pollInterval)
-	defer t.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			eng.Poll(ctx)
-		}
-	}
+	<-ctx.Done()
 }
 
-// Poll reaps stuck tasks and retries failed ones. Exported for testing.
+// Poll is retained as a no-op for compatibility with existing tests.
 func (eng *Engine) Poll(ctx context.Context) {
-	// Reap tasks stuck in pending/running
-	for _, timeout := range []time.Duration{stuckPending, stuckRunning} {
-		if tasks, err := eng.backend.GetStuckHookRunExecutions(ctx, timeout); err == nil {
-			for _, t := range tasks {
-				log.Warn().Str("task", t.ExternalId).Msg("reaping stuck task")
-				eng.backend.SetRunExecutionResult(ctx, t.ExternalId, -1, "stuck: no response from worker")
-			}
-		}
-	}
-
-	// Retry failed tasks with backoff
-	tasks, err := eng.backend.GetRetryableRunExecutions(ctx)
-	if err != nil {
-		return
-	}
-
-	now := time.Now()
-	for _, t := range tasks {
-		if t.FinishedAt == nil || t.HookId == nil || t.Attempt >= t.MaxAttempts {
-			continue
-		}
-
-		if now.Before(t.FinishedAt.Add(retryDelay(t.Attempt))) {
-			continue
-		}
-
-		hook, err := eng.store.GetHookById(ctx, *t.HookId)
-		if err != nil || hook == nil {
-			continue
-		}
-
-		token, _ := DecodeToken(hook.EncryptedToken)
-		if token == "" {
-			continue
-		}
-
-		next := t.Attempt + 1
-
-		// Mark the original task as exhausted BEFORE creating the retry.
-		// Without this, the retry poller picks up the same failed task
-		// on every tick and creates infinite duplicate retries.
-		eng.backend.MarkRunExecutionRetried(ctx, t.ExternalId)
-
-		if err := eng.creator.CreateTask(ctx, t.WorkspaceId, t.CreatedByMemberId, token, t.Prompt,
-			*t.HookId, next, t.MaxAttempts); err != nil {
-			continue
-		}
-
-		log.Info().Str("hook", hook.ExternalId).Int("attempt", next).Msg("retrying")
-	}
-}
-
-func retryDelay(attempt int) time.Duration {
-	d := time.Duration(float64(retryBase) * math.Pow(3, float64(attempt-1)))
-	if d > retryMax {
-		return retryMax
-	}
-	return d
+	_ = ctx
 }
 
 // buildTriggerContext constructs the "what happened" section of the prompt.
@@ -305,8 +203,37 @@ func buildTriggerContext(event string, data map[string]any) string {
 	return b.String()
 }
 
+// buildSkillReferences emits a compact "## Skills" section that tells the agent
+// which skills are relevant and where to find them, without inlining the full
+// SKILL.md contents (which would make the task prompt too verbose).
+func buildSkillReferences(ctx context.Context, reader SkillReader, workspaceId uint, skillPaths []string) string {
+	var b strings.Builder
+	b.WriteString("## Skills\n\n")
+	b.WriteString("The following skills are available in your workspace. Read the SKILL.md file at each path for detailed instructions.\n")
+
+	for _, sp := range skillPaths {
+		relPath := strings.TrimPrefix(sp, "/")
+		name := ""
+		if reader != nil {
+			content, err := reader.ReadSkillContent(ctx, workspaceId, sp)
+			if err == nil {
+				manifest, parseErr := skills.Parse([]byte(content))
+				if parseErr == nil {
+					name = manifest.Name
+				}
+			}
+		}
+		if name != "" {
+			b.WriteString(fmt.Sprintf("\n- **%s** — read `%s/SKILL.md`", name, relPath))
+		} else {
+			b.WriteString(fmt.Sprintf("\n- `%s/SKILL.md`", relPath))
+		}
+	}
+
+	return b.String()
+}
+
 // buildSkillContext adds integration/output path hints from the skill's metadata.
-// This helps Claude understand which integrations are relevant and where to write output.
 func buildSkillContext(meta *skills.AirstoreSkillMeta, data map[string]any) string {
 	if meta == nil {
 		return ""
@@ -395,6 +322,34 @@ func ParseUint(v any) uint {
 	default:
 		return 0
 	}
+}
+
+func (eng *Engine) ensureHookAgent(ctx context.Context, hook *types.Hook) bool {
+	if hook == nil {
+		return false
+	}
+	if hook.AgentId != nil && strings.TrimSpace(*hook.AgentId) != "" {
+		return true
+	}
+	if eng.backend == nil {
+		log.Warn().Str("hook", hook.ExternalId).Msg("hook has no agent and backend is unavailable")
+		return false
+	}
+
+	profile, err := ResolveHookAgent(ctx, eng.backend, hook.WorkspaceId, hook.Path, nil, nil)
+	if err != nil || profile == nil {
+		log.Warn().Err(err).Str("hook", hook.ExternalId).Msg("failed to resolve hook agent")
+		return false
+	}
+
+	agentID := profile.ID
+	hook.AgentId = &agentID
+	if eng.store != nil {
+		if err := eng.store.UpdateHook(ctx, hook); err != nil {
+			log.Warn().Err(err).Str("hook", hook.ExternalId).Msg("failed to persist hook agent linkage")
+		}
+	}
+	return true
 }
 
 // Hook cache (in-memory, invalidated on CRUD)

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
+	"github.com/beam-cloud/airstore/pkg/hooks"
 	"github.com/beam-cloud/airstore/pkg/orchestration"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/labstack/echo/v4"
@@ -17,6 +18,7 @@ import (
 type AgentsGroup struct {
 	routerGroup *echo.Group
 	agents      *orchestration.AgentAPI
+	hooks       *hooks.Service
 }
 
 type createAgentAPIRequest struct {
@@ -32,10 +34,11 @@ type updateAgentAPIRequest struct {
 	Active *bool          `json:"active,omitempty"`
 }
 
-func NewAgentsGroup(routerGroup *echo.Group, agents *orchestration.AgentAPI) *AgentsGroup {
+func NewAgentsGroup(routerGroup *echo.Group, agents *orchestration.AgentAPI, hooksSvc *hooks.Service) *AgentsGroup {
 	g := &AgentsGroup{
 		routerGroup: routerGroup,
 		agents:      agents,
+		hooks:       hooksSvc,
 	}
 	g.registerRoutes()
 	return g
@@ -47,6 +50,7 @@ func (g *AgentsGroup) registerRoutes() {
 	g.routerGroup.GET("", g.ListAgents)
 	g.routerGroup.GET("/:agent_id", g.GetAgent)
 	g.routerGroup.PATCH("/:agent_id", g.UpdateAgent)
+	g.routerGroup.DELETE("/:agent_id", g.DeleteAgent)
 }
 
 func (g *AgentsGroup) CreateAgent(c echo.Context) error {
@@ -116,6 +120,57 @@ func (g *AgentsGroup) UpdateAgent(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, err.Error())
 	}
 	return c.JSON(http.StatusOK, Response{Success: true, Data: profile})
+}
+
+func (g *AgentsGroup) DeleteAgent(c echo.Context) error {
+	if g.agents == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "agent service unavailable")
+	}
+
+	workspaceID, err := requireWorkspaceID(c)
+	if err != nil {
+		return err
+	}
+	agentID := strings.TrimSpace(c.Param("agent_id"))
+	if agentID == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "agent_id is required")
+	}
+
+	deletedHooks := 0
+	if g.hooks != nil {
+		hooksList, err := g.hooks.List(c.Request().Context(), workspaceID)
+		if err != nil {
+			return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+		}
+		for _, hook := range hooksList {
+			if hook == nil || hook.AgentId == nil {
+				continue
+			}
+			if strings.TrimSpace(*hook.AgentId) != agentID {
+				continue
+			}
+			if err := g.hooks.Delete(c.Request().Context(), hook.ExternalId); err != nil {
+				return ErrorResponse(c, http.StatusBadRequest, err.Error())
+			}
+			deletedHooks++
+		}
+	}
+
+	if err := g.agents.DeleteAgent(c.Request().Context(), workspaceID, agentID); err != nil {
+		if _, ok := err.(*types.ErrAgentProfileNotFound); ok && deletedHooks > 0 {
+			return SuccessResponse(c, map[string]any{
+				"deleted_hooks": deletedHooks,
+			})
+		}
+		if _, ok := err.(*types.ErrAgentProfileNotFound); ok {
+			return ErrorResponse(c, http.StatusNotFound, "agent not found")
+		}
+		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+	}
+
+	return SuccessResponse(c, map[string]any{
+		"deleted_hooks": deletedHooks,
+	})
 }
 
 func (g *AgentsGroup) GetDefaults(c echo.Context) error {

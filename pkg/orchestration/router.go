@@ -39,45 +39,13 @@ func (r *TaskQueueRouter) Enqueue(ctx context.Context, task *types.AgentTask, in
 	if r.store == nil {
 		return fmt.Errorf("queue store is required")
 	}
+	_ = instanceKey
 
 	if err := r.store.UpdateTaskState(ctx, task.ID, types.AgentTaskStateQueued, nil, task.TargetRunID); err != nil {
 		return err
 	}
-
-	switch task.QueueMode {
-	case types.AgentQueueModeFollowup, types.AgentQueueModeSteer, types.AgentQueueModeInterrupt:
-		return r.enqueueModeKey(ctx, task, instanceKey)
-	default:
-		token := dispatchTokenTaskPrefix + task.ID
-		return r.store.PushQueueToken(ctx, token)
-	}
-}
-
-func (r *TaskQueueRouter) enqueueModeKey(ctx context.Context, task *types.AgentTask, instanceKey string) error {
-	modeKey := fmt.Sprintf("%s:%s", instanceKey, task.QueueMode)
-	prevID, err := r.store.GetModeTaskID(ctx, modeKey)
-	if err != nil {
-		return err
-	}
-	if prevID != "" && prevID != task.ID {
-		reason := types.AgentTaskDropReasonReshapedByQueueMode
-		_ = r.store.UpdateTaskState(ctx, prevID, types.AgentTaskStateDropped, &reason, task.TargetRunID)
-	}
-	if err := r.store.SetModeTaskID(ctx, modeKey, task.ID, 15*time.Minute); err != nil {
-		return err
-	}
-
-	added, err := r.store.AddModeKey(ctx, modeKey)
-	if err != nil {
-		return err
-	}
-	if added {
-		token := dispatchTokenModePrefix + modeKey
-		if err := r.store.PushQueueToken(ctx, token); err != nil {
-			return err
-		}
-	}
-	return nil
+	token := dispatchTokenTaskPrefix + task.ID
+	return r.store.PushQueueToken(ctx, token)
 }
 
 func (r *TaskQueueRouter) Pop(ctx context.Context, timeout time.Duration) (string, error) {

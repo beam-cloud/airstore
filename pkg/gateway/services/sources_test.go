@@ -1,8 +1,26 @@
 package services
 
 import (
+	"context"
 	"testing"
+
+	hookspkg "github.com/beam-cloud/airstore/pkg/hooks"
+	"github.com/beam-cloud/airstore/pkg/repository"
+	"github.com/beam-cloud/airstore/pkg/types"
 )
+
+type testHookEmitter struct {
+	events []map[string]any
+}
+
+func (e *testHookEmitter) Emit(_ context.Context, data map[string]any) error {
+	copied := make(map[string]any, len(data))
+	for k, v := range data {
+		copied[k] = v
+	}
+	e.events = append(e.events, copied)
+	return nil
+}
 
 func TestParseQuerySpec_Defaults(t *testing.T) {
 	// Empty query spec should use defaults
@@ -134,5 +152,95 @@ func TestDefaultPaginationConstants(t *testing.T) {
 	}
 	if defaultMaxResults != 500 {
 		t.Errorf("Expected defaultMaxResults to be 500, got %d", defaultMaxResults)
+	}
+}
+
+func TestEmitNewResultHooks_FirstObservationEmits(t *testing.T) {
+	rdb, err := repository.NewRedisClientForTest()
+	if err != nil {
+		t.Fatalf("failed to create test redis: %v", err)
+	}
+	emitter := &testHookEmitter{}
+	svc := &SourceService{
+		seenTracker: hookspkg.NewSeenTracker(rdb),
+		hookStream:  emitter,
+	}
+
+	query := &types.FilesystemQuery{
+		WorkspaceId: 124,
+		Integration: "github",
+		Path:        "/sources/github/test-prs",
+	}
+	results := []repository.QueryResult{
+		{ID: "pr-1"},
+		{ID: "pr-2"},
+	}
+
+	newCount := svc.emitNewResultHooks(context.Background(), 124, query, results)
+	if newCount != 2 {
+		t.Fatalf("expected 2 new results on first observation, got %d", newCount)
+	}
+	if len(emitter.events) != 1 {
+		t.Fatalf("expected 1 emitted event, got %d", len(emitter.events))
+	}
+	if gotPath, _ := emitter.events[0]["path"].(string); gotPath != "/sources/github/test-prs" {
+		t.Fatalf("unexpected emitted path: %q", gotPath)
+	}
+	if gotHash, _ := emitter.events[0]["new_items_hash"].(string); gotHash == "" {
+		t.Fatalf("expected non-empty new_items_hash on emitted event")
+	}
+
+	// Same snapshot should not emit again.
+	newCount = svc.emitNewResultHooks(context.Background(), 124, query, results)
+	if newCount != 0 {
+		t.Fatalf("expected 0 new results for unchanged snapshot, got %d", newCount)
+	}
+	if len(emitter.events) != 1 {
+		t.Fatalf("expected still 1 emitted event, got %d", len(emitter.events))
+	}
+}
+
+func TestEmitNewResultHooks_EmptyThenReappearEmits(t *testing.T) {
+	rdb, err := repository.NewRedisClientForTest()
+	if err != nil {
+		t.Fatalf("failed to create test redis: %v", err)
+	}
+	emitter := &testHookEmitter{}
+	svc := &SourceService{
+		seenTracker: hookspkg.NewSeenTracker(rdb),
+		hookStream:  emitter,
+	}
+
+	query := &types.FilesystemQuery{
+		WorkspaceId: 125,
+		Integration: "github",
+		// Deliberately include trailing slash to verify normalization before emit.
+		Path: "/sources/github/reappear/",
+	}
+
+	// First poll empty: no event, but tracker is initialized.
+	newCount := svc.emitNewResultHooks(context.Background(), 125, query, nil)
+	if newCount != 0 {
+		t.Fatalf("expected 0 new results for empty snapshot, got %d", newCount)
+	}
+	if len(emitter.events) != 0 {
+		t.Fatalf("expected no emitted events for empty snapshot, got %d", len(emitter.events))
+	}
+
+	// Results appear later: should emit immediately.
+	newCount = svc.emitNewResultHooks(context.Background(), 125, query, []repository.QueryResult{
+		{ID: "pr-99"},
+	})
+	if newCount != 1 {
+		t.Fatalf("expected 1 new result after reappearance, got %d", newCount)
+	}
+	if len(emitter.events) != 1 {
+		t.Fatalf("expected 1 emitted event after reappearance, got %d", len(emitter.events))
+	}
+	if gotPath, _ := emitter.events[0]["path"].(string); gotPath != "/sources/github/reappear" {
+		t.Fatalf("expected normalized emitted path, got %q", gotPath)
+	}
+	if gotHash, _ := emitter.events[0]["new_items_hash"].(string); gotHash == "" {
+		t.Fatalf("expected non-empty new_items_hash on emitted event")
 	}
 }

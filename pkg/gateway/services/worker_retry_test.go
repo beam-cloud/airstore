@@ -234,6 +234,39 @@ func (b *retryTestBackend) ListClaimedAgentRuns(_ context.Context, limit int) ([
 	return runs, nil
 }
 
+func (b *retryTestBackend) ListActiveRunsBySession(_ context.Context, workspaceID uint, sessionID string, excludeRunIDs []string, limit int) ([]*types.AgentRun, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return []*types.AgentRun{}, nil
+	}
+	exclude := make(map[string]struct{}, len(excludeRunIDs))
+	for _, runID := range excludeRunIDs {
+		runID = strings.TrimSpace(runID)
+		if runID == "" {
+			continue
+		}
+		exclude[runID] = struct{}{}
+	}
+
+	runs := make([]*types.AgentRun, 0)
+	for _, run := range b.runs {
+		if run == nil || run.WorkspaceID != workspaceID || !run.Status.IsActive() {
+			continue
+		}
+		if strings.TrimSpace(run.SessionID) != sessionID {
+			continue
+		}
+		if _, skip := exclude[run.ID]; skip {
+			continue
+		}
+		runs = append(runs, run)
+		if limit > 0 && len(runs) >= limit {
+			break
+		}
+	}
+	return runs, nil
+}
+
 func (b *retryTestBackend) ListStaleUnclaimedAgentRuns(_ context.Context, cutoff time.Time, limit int) ([]*types.AgentRun, error) {
 	runs := make([]*types.AgentRun, 0)
 	for _, run := range b.runs {
@@ -324,6 +357,35 @@ type capturingTaskQueue struct {
 func (q *capturingTaskQueue) Push(_ context.Context, task *types.RunExecution) error {
 	copyTask := *task
 	q.pushed = append(q.pushed, &copyTask)
+	return nil
+}
+
+func (q *capturingTaskQueue) Complete(_ context.Context, taskID string, result *types.RunExecutionResult) error {
+	if q.stateByTaskID == nil {
+		q.stateByTaskID = map[string]*types.RunExecutionState{}
+	}
+	if q.resultByTaskID == nil {
+		q.resultByTaskID = map[string]*types.RunExecutionResult{}
+	}
+	status := types.RunExecutionStatusComplete
+	errText := ""
+	exitCode := -1
+	if result != nil {
+		exitCode = result.ExitCode
+		errText = strings.TrimSpace(result.Error)
+		if errText != "" || result.ExitCode != 0 {
+			status = types.RunExecutionStatusFailed
+		}
+		copyResult := *result
+		q.resultByTaskID[taskID] = &copyResult
+	}
+	q.stateByTaskID[taskID] = &types.RunExecutionState{
+		ID:         taskID,
+		Status:     status,
+		ExitCode:   exitCode,
+		Error:      errText,
+		FinishedAt: time.Now(),
+	}
 	return nil
 }
 
@@ -762,10 +824,11 @@ func TestRecoverOrphanedRunSchedulesRetry(t *testing.T) {
 	originTaskID := "task-orphan-retry-1"
 	seedRecoverableRunContext(backend, runID, originTaskID, 3)
 
-	recovered, retryScheduled, err := svc.recoverOrphanedRun(context.Background(), backend.runs[runID], "claim_lease_expired")
+	recovered, retryScheduled, cleanupOnly, err := svc.recoverOrphanedRun(context.Background(), backend.runs[runID], "claim_lease_expired")
 	require.NoError(t, err)
 	require.True(t, recovered)
 	require.True(t, retryScheduled)
+	require.False(t, cleanupOnly)
 	require.Contains(t, queue.failed, runID)
 	require.Len(t, queue.pushed, 1)
 
@@ -788,10 +851,11 @@ func TestRecoverOrphanedRunExhaustedRetriesFinalizesTask(t *testing.T) {
 	originTaskID := "task-orphan-final-1"
 	seedRecoverableRunContext(backend, runID, originTaskID, 1)
 
-	recovered, retryScheduled, err := svc.recoverOrphanedRun(context.Background(), backend.runs[runID], "claim_lease_expired")
+	recovered, retryScheduled, cleanupOnly, err := svc.recoverOrphanedRun(context.Background(), backend.runs[runID], "claim_lease_expired")
 	require.NoError(t, err)
 	require.True(t, recovered)
 	require.False(t, retryScheduled)
+	require.False(t, cleanupOnly)
 	require.Len(t, queue.pushed, 0)
 
 	task := backend.tasks[originTaskID]
@@ -799,6 +863,35 @@ func TestRecoverOrphanedRunExhaustedRetriesFinalizesTask(t *testing.T) {
 	require.Equal(t, types.AgentTaskStateDone, task.State)
 	require.NotNil(t, task.TargetRunID)
 	require.Equal(t, runID, *task.TargetRunID)
+}
+
+func TestRecoverOrphanedRunStaleAttemptPerformsCleanupOnly(t *testing.T) {
+	backend := newRetryTestBackend()
+	queue := &capturingTaskQueue{}
+	svc := &WorkerService{
+		backend:       backend,
+		taskQueue:     queue,
+		claimLeaseTTL: 30 * time.Second,
+	}
+
+	runID := "run-orphan-stale-attempt-1"
+	originTaskID := "task-orphan-stale-attempt-1"
+	attempt := seedRecoverableRunContext(backend, runID, originTaskID, 3)
+	endedAt := time.Now().Add(-30 * time.Second)
+	attempt.Status = types.AgentAttemptStatusError
+	attempt.EndedAt = &endedAt
+
+	recovered, retryScheduled, cleanupOnly, err := svc.recoverOrphanedRun(context.Background(), backend.runs[runID], "claim_lease_expired")
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.False(t, retryScheduled)
+	require.True(t, cleanupOnly)
+	require.Contains(t, queue.failed, runID)
+	require.Empty(t, queue.pushed)
+
+	task := backend.tasks[originTaskID]
+	require.NotNil(t, task)
+	require.Equal(t, types.AgentTaskStateDone, task.State)
 }
 
 func TestProcessClaimedRunReconcilesTerminalQueueState(t *testing.T) {
@@ -840,6 +933,81 @@ func TestProcessClaimedRunReconcilesTerminalQueueState(t *testing.T) {
 	require.Equal(t, types.AgentRunStatusOK, backend.runs[runID].Status)
 	require.Nil(t, backend.runs[runID].ClaimedByWorker)
 	require.Equal(t, types.AgentTaskStateDone, backend.tasks[originTaskID].State)
+}
+
+func TestScheduleRetryRunBlocksOnActiveSessionConflict(t *testing.T) {
+	backend := newRetryTestBackend()
+	queue := &capturingTaskQueue{}
+	svc := &WorkerService{backend: backend, taskQueue: queue}
+
+	agentID := "agent-1"
+	originRunID := "run-retry-session-conflict-1"
+	conflictingRunID := "run-retry-session-conflict-2"
+	originTaskID := "task-retry-session-conflict-1"
+	originExecutionID := "exec-retry-session-conflict-1"
+	sessionID := "session-1"
+
+	backend.runs[originRunID] = &types.AgentRun{
+		ID:           originRunID,
+		WorkspaceID:  42,
+		AgentID:      &agentID,
+		OriginTaskID: originTaskID,
+		Status:       types.AgentRunStatusRunning,
+		SessionID:    sessionID,
+		ExecHost:     string(orchestration.ExecHostSandbox),
+		ExecSecurity: string(orchestration.ExecSecurityFull),
+		ExecAsk:      string(orchestration.ExecAskOff),
+		RuntimeType:  orchestration.RuntimeTypeGvisor,
+		TimeoutMs:    60_000,
+		DeliveryJSON: map[string]any{
+			types.AgentExecutionMetaKeyRetryMaxAttempts: 3,
+			types.AgentExecutionMetaKeyRetryDelayMs:     0,
+		},
+	}
+	backend.runs[conflictingRunID] = &types.AgentRun{
+		ID:           conflictingRunID,
+		WorkspaceID:  42,
+		AgentID:      &agentID,
+		OriginTaskID: "task-other",
+		Status:       types.AgentRunStatusAccepted,
+		SessionID:    sessionID,
+		ExecHost:     string(orchestration.ExecHostSandbox),
+		ExecSecurity: string(orchestration.ExecSecurityFull),
+		ExecAsk:      string(orchestration.ExecAskOff),
+		RuntimeType:  orchestration.RuntimeTypeGvisor,
+		TimeoutMs:    60_000,
+	}
+	backend.tasks[originTaskID] = &types.AgentTask{
+		ID:          originTaskID,
+		WorkspaceID: 42,
+		State:       types.AgentTaskStateRunning,
+		TargetRunID: &originRunID,
+	}
+	backend.runExecutions[originExecutionID] = &types.RunExecution{
+		ExternalId:  originExecutionID,
+		WorkspaceId: 42,
+		Status:      types.RunExecutionStatusFailed,
+		Type:        types.RunExecutionTypeBackground,
+		Prompt:      "retry me",
+		Image:       "ghcr.io/beam/sandbox:latest",
+		Entrypoint:  []string{"runner"},
+		Env:         map[string]string{"A": "B"},
+	}
+
+	attempt := &types.AgentRunAttempt{
+		ID:        "attempt-session-conflict-1",
+		RunID:     originRunID,
+		AttemptNo: 1,
+		Status:    types.AgentAttemptStatusError,
+	}
+	backend.attemptByID[attempt.ID] = attempt
+	backend.attemptsByRun[originRunID] = []*types.AgentRunAttempt{attempt}
+
+	result, err := svc.scheduleRetryRun(context.Background(), attempt, originExecutionID)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "session ID session-1 is already in use")
+	require.False(t, result.scheduled)
+	require.Empty(t, queue.pushed)
 }
 
 func TestProcessClaimedRunSkipsFreshTerminalQueueState(t *testing.T) {

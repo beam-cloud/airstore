@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -113,4 +114,48 @@ func TestRedisTaskQueuePushDelayedExtendsTaskStateTTL(t *testing.T) {
 	ttl, err := queue.rdb.TTL(context.Background(), common.Keys.RunExecutionState(task.ExternalId)).Result()
 	require.NoError(t, err)
 	require.Greater(t, ttl, delay, "task state TTL should outlive the scheduled delay")
+}
+
+func TestRedisTaskQueueInFlightCountPrunesStaleMembers(t *testing.T) {
+	queue, cleanup := newTestTaskQueue(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	inFlightKey := common.Keys.RunExecutionInFlight("default")
+
+	runningID := "task-running"
+	terminalID := "task-terminal"
+	missingID := "task-missing"
+	require.NoError(t, queue.rdb.SAdd(ctx, inFlightKey, runningID, terminalID, missingID).Err())
+
+	runningState, err := json.Marshal(&types.RunExecutionState{
+		ID:        runningID,
+		Status:    types.RunExecutionStatusRunning,
+		WorkerID:  "worker-1",
+		ExitCode:  -1,
+		CreatedAt: time.Now().Add(-2 * time.Minute),
+		StartedAt: time.Now().Add(-time.Minute),
+	})
+	require.NoError(t, err)
+	require.NoError(t, queue.rdb.Set(ctx, common.Keys.RunExecutionState(runningID), runningState, taskStateTTL).Err())
+
+	terminalState, err := json.Marshal(&types.RunExecutionState{
+		ID:         terminalID,
+		Status:     types.RunExecutionStatusFailed,
+		WorkerID:   "worker-2",
+		ExitCode:   -1,
+		CreatedAt:  time.Now().Add(-3 * time.Minute),
+		StartedAt:  time.Now().Add(-2 * time.Minute),
+		FinishedAt: time.Now().Add(-time.Minute),
+	})
+	require.NoError(t, err)
+	require.NoError(t, queue.rdb.Set(ctx, common.Keys.RunExecutionState(terminalID), terminalState, taskStateTTL).Err())
+
+	count, err := queue.InFlightCount(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), count)
+
+	members, err := queue.rdb.SMembers(ctx, inFlightKey).Result()
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{runningID}, members)
 }

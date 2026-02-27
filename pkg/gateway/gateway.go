@@ -501,9 +501,6 @@ func (g *Gateway) registerServices() error {
 			gatewayService.SetSourceService(sourceService)
 		}
 
-		// Task factory (shared between HTTP API and hook evaluator)
-		taskFactory := hooks.NewTaskFactory(g.BackendRepo, taskQueue, g.Config.Sandbox.GetDefaultImage())
-
 		// Workspace CRUD endpoints (cluster admin or org tokens)
 		workspacesAdminGroup := g.baseRouteGroup.Group("/workspaces")
 		workspacesAdminGroup.Use(requireClusterAdminOrOrgMiddleware())
@@ -545,7 +542,12 @@ func (g *Gateway) registerServices() error {
 		// Hooks API (nested under workspaces, workspace-scoped auth)
 		hooksGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/hooks")
 		hooksGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
-		hooksSvc := &hooks.Service{Store: filesystemStore, Backend: g.BackendRepo, EventBus: g.eventBus}
+		hooksSvc := &hooks.Service{
+			Store:    filesystemStore,
+			Backend:  g.BackendRepo,
+			EventBus: g.eventBus,
+			Seen:     seenTracker,
+		}
 		apiv1.NewHooksGroup(hooksGroup, g.BackendRepo, hooksSvc)
 		log.Info().Msg("hooks API registered at /api/v1/workspaces/:workspace_id/hooks")
 
@@ -589,15 +591,23 @@ func (g *Gateway) registerServices() error {
 		pb.RegisterAgentServiceServer(g.grpcServer, agentService)
 		log.Info().Msg("agent service registered")
 
+		// Hook task factory routes filesystem events through AcceptAgentCommand.
+		taskFactory := hooks.NewTaskFactory(
+			g.BackendRepo,
+			taskQueue,
+			g.Config.Sandbox.GetDefaultImage(),
+			agentAPI,
+		)
+
 		// Agent/task/run HTTP APIs (workspace-scoped)
 		agentAPIRoot := g.baseRouteGroup.Group("/workspaces/:workspace_id")
 		agentAPIRoot.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
-		apiv1.NewAgentsGroup(agentAPIRoot.Group("/agents"), agentAPI)
+		apiv1.NewAgentsGroup(agentAPIRoot.Group("/agents"), agentAPI, hooksSvc)
 		apiv1.NewWorkspaceTasksGroup(agentAPIRoot.Group("/tasks"), agentAPI)
 		apiv1.NewRunsGroup(agentAPIRoot.Group("/runs"), agentAPI)
 		apiv1.NewWorkspaceChannelsGroup(agentAPIRoot.Group("/channels"), channelRegistry)
 
-		// Hook engine: matches events → hooks → tasks, polls for retries
+		// Hook engine: matches events → hooks → agent tasks.
 		var skillReader hooks.SkillReader
 		if g.storageClient != nil {
 			skillReader = hooks.NewStorageSkillReader(g.storageClient, g.BackendRepo)

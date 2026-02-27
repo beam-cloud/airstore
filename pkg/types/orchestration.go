@@ -2,6 +2,7 @@ package types
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -12,6 +13,14 @@ const (
 	AgentTaskKindRunInput     AgentTaskKind = "run_input"
 )
 
+// PendingInput represents a user message buffered in the run's input
+// queue, waiting to be consumed by the worker session.
+type PendingInput struct {
+	ID        string `json:"id"`
+	Message   string `json:"message"`
+	CreatedAt int64  `json:"created_at"`
+}
+
 type AgentQueueMode string
 
 const (
@@ -21,6 +30,75 @@ const (
 	AgentQueueModeInterrupt    AgentQueueMode = "interrupt"
 	AgentQueueModeQueue        AgentQueueMode = "queue"
 )
+
+const DefaultRunInputQueueMode AgentQueueMode = AgentQueueModeFollowup
+
+// RunInputDeliveryOutcome describes how a run-input message was handled.
+type RunInputDeliveryOutcome string
+
+const (
+	RunInputDeliveryDirect      RunInputDeliveryOutcome = "direct"
+	RunInputDeliveryQueued      RunInputDeliveryOutcome = "queued"
+	RunInputDeliveryInterrupted RunInputDeliveryOutcome = "interrupted"
+	RunInputDeliveryRestarted   RunInputDeliveryOutcome = "restarted"
+)
+
+// RunInputDecision is the canonical backend decision for run input routing.
+// Kept aligned with RunInputDeliveryOutcome for backwards compatibility.
+type RunInputDecision = RunInputDeliveryOutcome
+
+const (
+	RunInputDecisionDirect      RunInputDecision = RunInputDeliveryDirect
+	RunInputDecisionQueued      RunInputDecision = RunInputDeliveryQueued
+	RunInputDecisionInterrupted RunInputDecision = RunInputDeliveryInterrupted
+	RunInputDecisionRestarted   RunInputDecision = RunInputDeliveryRestarted
+)
+
+// RunInteractionState is the backend-owned interaction state for an agent run.
+type RunInteractionState string
+
+const (
+	RunInteractionStateWorking         RunInteractionState = "working"
+	RunInteractionStateWaitingForInput RunInteractionState = "waiting_for_input"
+	RunInteractionStateClosed          RunInteractionState = "closed"
+)
+
+// RunInteraction is the canonical interaction view consumed by clients.
+type RunInteraction struct {
+	State             RunInteractionState `json:"state"`
+	ActiveExecutionID string              `json:"active_execution_id,omitempty"`
+	PendingCount      int                 `json:"pending_count"`
+	PendingInputs     []PendingInput      `json:"pending_inputs,omitempty"`
+	UpdatedAt         int64               `json:"updated_at,omitempty"`
+}
+
+func NormalizeRunInputQueueMode(mode AgentQueueMode) AgentQueueMode {
+	normalized := AgentQueueMode(strings.ToLower(strings.TrimSpace(string(mode))))
+	switch normalized {
+	case "":
+		return DefaultRunInputQueueMode
+	case AgentQueueModeSteerBacklog:
+		// Keep steer-backlog as a compatibility alias for steer.
+		return AgentQueueModeSteer
+	default:
+		return normalized
+	}
+}
+
+func ValidateRunInputQueueMode(mode AgentQueueMode) error {
+	switch NormalizeRunInputQueueMode(mode) {
+	case AgentQueueModeQueue,
+		AgentQueueModeFollowup,
+		AgentQueueModeSteer,
+		AgentQueueModeInterrupt:
+		return nil
+	default:
+		return fmt.Errorf(
+			"queue_mode %q is not supported (supported: queue, followup, steer, steer-backlog, interrupt)",
+			mode,
+		)
+	}
+}
 
 type AgentTaskState string
 
@@ -173,6 +251,7 @@ type AgentTask struct {
 	ID             string         `json:"id" db:"id"`
 	WorkspaceID    uint           `json:"workspace_id" db:"workspace_id"`
 	AgentID        *string        `json:"agent_id,omitempty" db:"agent_id"`
+	AgentName      string         `json:"agent_name,omitempty" db:"-"`
 	Kind           AgentTaskKind  `json:"kind" db:"kind"`
 	QueueMode      AgentQueueMode `json:"queue_mode" db:"queue_mode"`
 	State          AgentTaskState `json:"state" db:"state"`
@@ -195,6 +274,7 @@ type AgentRun struct {
 	WorkspaceID      uint           `json:"workspace_id" db:"workspace_id"`
 	AgentID          *string        `json:"agent_id,omitempty" db:"agent_id"`
 	OriginTaskID     string         `json:"origin_task_id" db:"origin_task_id"`
+	HookID           *uint          `json:"hook_id,omitempty" db:"hook_id"`
 	Status           AgentRunStatus `json:"status" db:"status"`
 	SessionID        string         `json:"session_id" db:"session_id"`
 	SessionKey       *string        `json:"session_key,omitempty" db:"session_key"`

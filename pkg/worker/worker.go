@@ -23,9 +23,9 @@ import (
 )
 
 const (
-	defaultHeartbeatInterval    = 10 * time.Second
-	setTaskResultMaxAttempts    = 3
-	setTaskResultRetryTimeout   = 10 * time.Second
+	defaultHeartbeatInterval  = 10 * time.Second
+	setTaskResultMaxAttempts  = 3
+	setTaskResultRetryTimeout = 10 * time.Second
 )
 
 // Worker represents a airstore worker that:
@@ -337,8 +337,13 @@ func (w *Worker) finishTask(task types.RunExecution, result *types.RunExecutionR
 
 	reportErr := setTaskResultWithRetry(w.ctx, task, result, w.gatewayClient.SetTaskResult, contextSleep)
 	if reportErr != nil {
-		addTaskExecutionContext(log.Error().Err(reportErr), task).
-			Msg("failed to report result to gateway after retries")
+		if isNonRetriableSetTaskResultError(reportErr) {
+			addTaskExecutionContext(log.Warn().Err(reportErr), task).
+				Msg("failed to report result to gateway, not retrying non-retriable error")
+		} else {
+			addTaskExecutionContext(log.Error().Err(reportErr), task).
+				Msg("failed to report result to gateway after retries")
+		}
 	}
 
 	addTaskExecutionContext(log.Info().Int("exit_code", result.ExitCode), task).Msg("task finished")
@@ -373,12 +378,30 @@ func setTaskResultWithRetry(
 		if lastErr == nil {
 			return nil
 		}
+		if isNonRetriableSetTaskResultError(lastErr) {
+			return lastErr
+		}
 		if attempt < setTaskResultMaxAttempts-1 {
 			addTaskExecutionContext(log.Warn().Err(lastErr).Int("attempt", attempt+1), task).
 				Msg("failed to report result to gateway, retrying")
 		}
 	}
 	return lastErr
+}
+
+func isNonRetriableSetTaskResultError(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch status.Code(err) {
+	case codes.NotFound, codes.FailedPrecondition, codes.InvalidArgument, codes.PermissionDenied, codes.Unauthenticated:
+		return true
+	}
+
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "task not found") ||
+		strings.Contains(lower, "run execution not found") ||
+		strings.Contains(lower, "already finished")
 }
 
 // contextSleep sleeps for d or until ctx is cancelled, whichever comes first.

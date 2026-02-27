@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -162,4 +163,43 @@ func TestResolveSandboxResolvConfSourceReturnsKnownFallbackPath(t *testing.T) {
 	if source != "/workspace/etc/resolv.conf" && source != "/etc/resolv.conf" {
 		t.Fatalf("unexpected resolv.conf source: %s", source)
 	}
+}
+
+func TestIsContainerAlreadyStopped(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil error", nil, false},
+		{"generic error", fmt.Errorf("something bad"), false},
+		{"exit code 128", &exec.ExitError{ProcessState: exitCodeState(t, 128)}, true},
+		{"exit code 1", &exec.ExitError{ProcessState: exitCodeState(t, 1)}, false},
+		{"container not running message", fmt.Errorf("container not running"), true},
+		{"does not exist message", fmt.Errorf("container does not exist"), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isContainerAlreadyStopped(tt.err)
+			if got != tt.want {
+				t.Errorf("isContainerAlreadyStopped(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// exitCodeState runs a subprocess that exits with the given code to
+// obtain a real *os.ProcessState, since the field is unexported.
+func exitCodeState(t *testing.T, code int) *os.ProcessState {
+	t.Helper()
+	cmd := exec.Command("sh", "-c", fmt.Sprintf("exit %d", code))
+	err := cmd.Run()
+	if err == nil {
+		t.Fatal("expected non-zero exit")
+	}
+	ee, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected ExitError, got %T", err)
+	}
+	return ee.ProcessState
 }
