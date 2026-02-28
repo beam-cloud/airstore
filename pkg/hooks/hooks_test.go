@@ -345,7 +345,7 @@ func TestEngine_Submit_PromptEnrichment(t *testing.T) {
 	}
 	task := creator.last()
 	// New structured prompt: trigger first, then user prompt
-	expected := "## Trigger\n\nA file was modified at `/workspace/skills/report.md`.\nRead the updated content from: `/workspace/skills/report.md`\n\ndo stuff"
+	expected := "A file was modified at `/workspace/skills/report.md`.\n\nTask: do stuff"
 	if task.Prompt != expected {
 		t.Errorf("unexpected prompt:\ngot:  %q\nwant: %q", task.Prompt, expected)
 	}
@@ -610,7 +610,7 @@ func (m *mockSkillReader) ReadSkillContent(_ context.Context, _ uint, _ string) 
 func TestBuildTriggerContext_FsCreate(t *testing.T) {
 	data := makeEvent(EventFsCreate, "/inbox/doc.pdf", 10)
 	got := buildTriggerContext(EventFsCreate, data)
-	want := "## Trigger\n\nA new file was created at `/workspace/inbox/doc.pdf`.\nRead it from: `/workspace/inbox/doc.pdf`"
+	want := "A new file was created at `/workspace/inbox/doc.pdf`.\nRead it from: `/workspace/inbox/doc.pdf`"
 	if got != want {
 		t.Errorf("buildTriggerContext(FsCreate):\ngot:  %q\nwant: %q", got, want)
 	}
@@ -692,14 +692,14 @@ func TestBuildSkillContext_MatchedIntegration(t *testing.T) {
 }
 
 func TestBuildSkillContext_WritePaths(t *testing.T) {
-	meta := &skills.AirstoreSkillMeta{Writes: []string{"/memory/email-triage/", "/reports/"}}
+	meta := &skills.AirstoreSkillMeta{Writes: []string{"/reports/email-triage/", "/reports/"}}
 	data := map[string]any{}
 	got := buildSkillContext(meta, data)
 
 	if !strings.Contains(got, "Write output to:") {
 		t.Errorf("expected write paths, got: %q", got)
 	}
-	if !strings.Contains(got, "`memory/email-triage/`") {
+	if !strings.Contains(got, "`reports/email-triage/`") {
 		t.Errorf("expected relative path, got: %q", got)
 	}
 }
@@ -713,7 +713,7 @@ metadata:
     needs:
       - gmail
     writes:
-      - /memory/email-triage/
+      - /reports/email-triage/
 ---
 
 Read all new emails and categorize them by urgency.
@@ -739,11 +739,8 @@ Read all new emails and categorize them by urgency.
 	prompt := eng.buildPrompt(ctx, hook, EventSourceChange, data)
 
 	// Section 1: Trigger context
-	if !strings.Contains(prompt, "## Trigger") {
-		t.Error("prompt missing trigger section")
-	}
 	if !strings.Contains(prompt, "2 new item(s)") {
-		t.Error("prompt missing new count")
+		t.Error("prompt missing trigger section")
 	}
 	if !strings.Contains(prompt, "New items: msg-a, msg-b") {
 		t.Error("prompt missing new items")
@@ -764,14 +761,14 @@ Read all new emails and categorize them by urgency.
 	}
 
 	// Section 3: Additional user prompt
-	if !strings.Contains(prompt, "Also flag anything from VIPs.") {
+	if !strings.Contains(prompt, "Task: Also flag anything from VIPs.") {
 		t.Error("prompt missing additional user prompt")
 	}
 
 	// Verify order: trigger comes before skill references
-	triggerIdx := strings.Index(prompt, "## Trigger")
+	triggerIdx := strings.Index(prompt, "2 new item(s)")
 	skillIdx := strings.Index(prompt, "## Skills")
-	userIdx := strings.Index(prompt, "Also flag anything")
+	userIdx := strings.Index(prompt, "Task: Also flag anything")
 	if triggerIdx >= skillIdx {
 		t.Error("trigger should come before skill references")
 	}
@@ -791,10 +788,10 @@ func TestBuildPrompt_NoSkill(t *testing.T) {
 	ctx := context.Background()
 	prompt := eng.buildPrompt(ctx, hook, EventFsCreate, data)
 
-	if !strings.Contains(prompt, "## Trigger") {
+	if !strings.Contains(prompt, "A new file was created at `/workspace/inbox/report.pdf`.") {
 		t.Error("prompt missing trigger section")
 	}
-	if !strings.Contains(prompt, "process these files") {
+	if !strings.Contains(prompt, "Task: process these files") {
 		t.Error("prompt missing user prompt")
 	}
 }
@@ -847,8 +844,6 @@ func TestValidateHookPath(t *testing.T) {
 		{types.PathSkills, true},
 		{types.PathSources, true},
 		{"/sources/", true}, // lowercase also blocked (case-insensitive)
-		{types.PathMemory, true},
-
 		// Root-level source folders - blocked (testing case-insensitive)
 		{types.PathSources + "/gdrive", true},
 		{"/sources/gdrive/", true},

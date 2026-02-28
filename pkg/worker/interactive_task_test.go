@@ -14,7 +14,9 @@ import (
 )
 
 type testTerminalIO struct {
-	inputCh chan []byte
+	inputCh            chan []byte
+	cancelCh           chan struct{}
+	subscribeCancelErr error
 }
 
 func (tio *testTerminalIO) PublishInput(_ context.Context, _ string, _ []byte) error {
@@ -47,6 +49,12 @@ func (tio *testTerminalIO) PublishCancel(_ context.Context, _ string) error {
 }
 
 func (tio *testTerminalIO) SubscribeCancel(_ context.Context, _ string) (<-chan struct{}, func(), error) {
+	if tio.subscribeCancelErr != nil {
+		return nil, func() {}, tio.subscribeCancelErr
+	}
+	if tio.cancelCh != nil {
+		return tio.cancelCh, func() {}, nil
+	}
 	ch := make(chan struct{})
 	close(ch)
 	return ch, func() {}, nil

@@ -24,6 +24,7 @@ type WorkerService struct {
 	workerRepo          repository.WorkerRepository
 	taskQueue           repository.TaskQueue
 	redisClient         *common.RedisClient
+	terminalIO          repository.TerminalIORepository
 	claimLeaseTTL       time.Duration
 	recoveryLoopEnabled bool
 	recoveryInterval    time.Duration
@@ -67,12 +68,18 @@ func NewWorkerService(
 		unclaimedStaleAfter = defaultUnclaimedRunStaleAfter
 	}
 
+	var terminalIO repository.TerminalIORepository
+	if redisClient != nil {
+		terminalIO = repository.NewRedisTerminalIORepository(redisClient)
+	}
+
 	return &WorkerService{
 		scheduler:           sched,
 		backend:             backend,
 		workerRepo:          workerRepo,
 		taskQueue:           taskQueue,
 		redisClient:         redisClient,
+		terminalIO:          terminalIO,
 		claimLeaseTTL:       claimLeaseTTL,
 		recoveryLoopEnabled: schedulerConfig.RecoveryLoopEnabled,
 		recoveryInterval:    recoveryInterval,
@@ -277,6 +284,19 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 			Str("run_id", attempt.RunID).
 			Str("attempt_id", attempt.ID).
 			Msg("ignoring stale task result callback for non-active attempt")
+		return &pb.SetTaskResultResponse{}, nil
+	}
+
+	// Defense-in-depth: if the worker supplies an attempt_id and it no longer
+	// matches the current attempt on the run, this result belongs to a
+	// superseded execution. Skip finalization to avoid marking a newer
+	// attempt terminal while its worker is still running.
+	if attempt != nil && strings.TrimSpace(req.AttemptId) != "" && attempt.ID != req.AttemptId {
+		log.Info().
+			Str("task_id", req.TaskId).
+			Str("expected_attempt", req.AttemptId).
+			Str("current_attempt", attempt.ID).
+			Msg("ignoring stale task result: attempt was superseded")
 		return &pb.SetTaskResultResponse{}, nil
 	}
 
@@ -944,6 +964,14 @@ func (s *WorkerService) ensureSessionAvailableForRetry(
 		return nil
 	}
 
+	if s.terminalIO != nil {
+		if owner, _ := s.terminalIO.GetSessionLeaseOwner(ctx, workspaceID, sessionID); owner != "" {
+			if !s.tryReconcileStaleSessionLease(ctx, workspaceID, sessionID, owner) {
+				return fmt.Errorf("session ID %s is already in use (lease: %s)", sessionID, owner)
+			}
+		}
+	}
+
 	conflicts, err := s.backend.ListActiveRunsBySession(ctx, workspaceID, sessionID, excludeRunIDs, 5)
 	if err != nil {
 		return err
@@ -957,6 +985,10 @@ func (s *WorkerService) ensureSessionAvailableForRetry(
 		return fmt.Errorf("session ID %s is already in use", sessionID)
 	}
 	return fmt.Errorf("session ID %s is already in use by active run %s", sessionID, conflictRunID)
+}
+
+func (s *WorkerService) tryReconcileStaleSessionLease(ctx context.Context, workspaceID uint, sessionID, owner string) bool {
+	return orchestration.ReconcileStaleSessionLease(ctx, s.backend, s.terminalIO, workspaceID, sessionID, owner)
 }
 
 func boolPtr(value bool) *bool {

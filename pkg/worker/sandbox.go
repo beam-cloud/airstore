@@ -662,7 +662,10 @@ func isInteractiveBootstrapEntrypoint(entrypoint []string) bool {
 		strings.TrimSpace(entrypoint[1]) == "infinity"
 }
 
-// Stop stops a running sandbox
+// Stop stops a running sandbox by sending a signal to the container
+// processes. The sandbox context is NOT cancelled here so that
+// runsc can exit naturally and report the real exit code. The
+// context is cancelled later in Delete() as a final cleanup step.
 func (m *SandboxManager) Stop(sandboxID string, force bool) error {
 	m.mu.RLock()
 	sandbox, exists := m.sandboxes[sandboxID]
@@ -677,12 +680,9 @@ func (m *SandboxManager) Stop(sandboxID string, force bool) error {
 		Bool("force", force).
 		Msg("stopping sandbox")
 
-	// Cancel the sandbox context
-	if sandbox.Cancel != nil {
-		sandbox.Cancel()
-	}
-
-	// Kill the container
+	// Kill the container processes via the runtime. Do NOT cancel the
+	// sandbox context — that would SIGKILL the runsc wrapper before it
+	// can report the container's real exit code.
 	opts := &runtime.KillOpts{All: true}
 	if err := m.runtime.Kill(m.ctx, sandboxID, 15, opts); err != nil { // SIGTERM
 		if isContainerAlreadyStopped(err) {
@@ -698,6 +698,10 @@ func (m *SandboxManager) Stop(sandboxID string, force bool) error {
 				return nil
 			}
 			log.Warn().Err(err).Str("sandbox_id", sandboxID).Msg("force kill failed")
+			// Last resort: cancel the sandbox context to force-kill runsc
+			if sandbox.Cancel != nil {
+				sandbox.Cancel()
+			}
 		}
 	}
 
@@ -742,6 +746,13 @@ func (m *SandboxManager) Delete(sandboxID string, force bool) error {
 		if err := m.Stop(sandboxID, force); err != nil && !force {
 			return fmt.Errorf("failed to stop sandbox: %w", err)
 		}
+	}
+
+	// Cancel sandbox context to tear down the runsc process and its
+	// goroutines. This is done after Stop() so that runsc has a chance
+	// to exit naturally and report the real container exit code.
+	if sandbox.Cancel != nil {
+		sandbox.Cancel()
 	}
 
 	// Delete from runtime

@@ -20,7 +20,7 @@ metadata:
     needs:
       - gmail
     writes:
-      - /memory/email-triage/
+      - /reports/email-triage/
 ---
 
 # Instructions
@@ -40,7 +40,7 @@ When triggered by new emails:
 
 		am := manifest.AirstoreMetadata()
 		assert.Equal(t, []string{"gmail"}, am.Needs)
-		assert.Equal(t, []string{"/memory/email-triage/"}, am.Writes)
+		assert.Equal(t, []string{"/reports/email-triage/"}, am.Writes)
 	})
 
 	t.Run("minimal skill with name and description", func(t *testing.T) {
@@ -71,8 +71,8 @@ metadata:
       - gmail
       - slack
     writes:
-      - /memory/multi-source/
-      - /memory/urgent/
+      - /reports/multi-source/
+      - /reports/urgent/
 ---
 `)
 		manifest, err := Parse(data)
@@ -80,7 +80,7 @@ metadata:
 
 		am := manifest.AirstoreMetadata()
 		assert.Equal(t, []string{"gmail", "slack"}, am.Needs)
-		assert.Equal(t, []string{"/memory/multi-source/", "/memory/urgent/"}, am.Writes)
+		assert.Equal(t, []string{"/reports/multi-source/", "/reports/urgent/"}, am.Writes)
 	})
 
 	t.Run("standard fields without airstore metadata", func(t *testing.T) {

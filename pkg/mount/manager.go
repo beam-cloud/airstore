@@ -225,7 +225,6 @@ func (m *MountManager) createFilesystem(addr string) (*filesystem.Filesystem, *g
 	}
 	fs.RegisterVNode(vnode.NewSourcesVNode(conn, m.cfg.Token, sourcesOpts...))
 	fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, m.cfg.Token, types.PathSkills)) // /Skills
-	fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, m.cfg.Token, types.PathMemory)) // /Memory
 	fs.RegisterVNode(vnode.NewTasksVNodeGRPC(conn, m.cfg.Token))                     // /Tasks
 	fs.SetStorageFallback(vnode.NewStorageVNode(conn, m.cfg.Token))                  // user folders
 

@@ -1239,7 +1239,7 @@ func TestAgentCommandParamsFromProtoMatchesHTTPShape(t *testing.T) {
 	}
 	attachment := map[string]any{
 		"type": "text",
-		"path": "/workspace/memory/input.txt",
+		"path": "/workspace/data/input.txt",
 	}
 
 	deliver := true
@@ -1301,4 +1301,100 @@ func mustStruct(t *testing.T, values map[string]any) *structpb.Struct {
 	st, err := structpb.NewStruct(values)
 	require.NoError(t, err)
 	return st
+}
+
+type retryFakeTerminalIO struct {
+	repository.TerminalIORepository
+	leases map[string]string
+}
+
+func newRetryFakeTerminalIO() *retryFakeTerminalIO {
+	return &retryFakeTerminalIO{leases: map[string]string{}}
+}
+
+func retryLeaseKey(workspaceID uint, sessionID string) string {
+	return fmt.Sprintf("%d:%s", workspaceID, sessionID)
+}
+
+func (f *retryFakeTerminalIO) GetSessionLeaseOwner(_ context.Context, workspaceID uint, sessionID string) (string, error) {
+	return f.leases[retryLeaseKey(workspaceID, sessionID)], nil
+}
+
+func (f *retryFakeTerminalIO) ReleaseSessionLease(_ context.Context, workspaceID uint, sessionID, ownerID string) error {
+	key := retryLeaseKey(workspaceID, sessionID)
+	if f.leases[key] == ownerID {
+		delete(f.leases, key)
+	}
+	return nil
+}
+
+func TestRetryReconcilesStaleLease(t *testing.T) {
+	backend := newRetryTestBackend()
+	tio := newRetryFakeTerminalIO()
+
+	executionID := "exec-stale-retry"
+	staleOwner := "worker-dead:" + executionID
+	tio.leases[retryLeaseKey(42, "session-1")] = staleOwner
+
+	svc := &WorkerService{backend: backend, terminalIO: tio}
+	err := svc.ensureSessionAvailableForRetry(context.Background(), 42, "session-1", "run-exclude")
+	require.NoError(t, err, "stale lease should be auto-cleared during retry")
+	require.Empty(t, tio.leases[retryLeaseKey(42, "session-1")])
+}
+
+func TestRetryDoesNotClearActiveLease(t *testing.T) {
+	backend := newRetryTestBackend()
+	tio := newRetryFakeTerminalIO()
+
+	executionID := "exec-active-retry"
+	activeOwner := "worker-alive:" + executionID
+	backend.runExecutions[executionID] = &types.RunExecution{
+		ExternalId: executionID,
+		Status:     types.RunExecutionStatusRunning,
+	}
+	tio.leases[retryLeaseKey(42, "session-1")] = activeOwner
+
+	svc := &WorkerService{backend: backend, terminalIO: tio}
+	err := svc.ensureSessionAvailableForRetry(context.Background(), 42, "session-1", "run-exclude")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "already in use")
+	require.Equal(t, activeOwner, tio.leases[retryLeaseKey(42, "session-1")], "active lease must not be cleared")
+}
+
+func TestSetTaskResultIgnoresSupersededAttemptID(t *testing.T) {
+	backend := newRetryTestBackend()
+	queue := &capturingTaskQueue{}
+	svc := &WorkerService{backend: backend, taskQueue: queue}
+
+	runID := "run-superseded-1"
+	originTaskID := "task-superseded-1"
+	seedRecoverableRunContext(backend, runID, originTaskID, 2)
+
+	currentAttemptID := "attempt-current-1"
+	staleAttemptID := "attempt-stale-1"
+	executionID := runID
+
+	backend.attemptByID[currentAttemptID] = &types.AgentRunAttempt{
+		ID:          currentAttemptID,
+		RunID:       runID,
+		AttemptNo:   2,
+		Status:      types.AgentAttemptStatusRunning,
+		ExecutionID: &executionID,
+	}
+	backend.attemptsByRun[runID] = []*types.AgentRunAttempt{
+		backend.attemptByID[currentAttemptID],
+	}
+
+	_, err := svc.SetTaskResult(context.Background(), &pb.SetTaskResultRequest{
+		TaskId:    runID,
+		ExitCode:  0,
+		Error:     "",
+		AttemptId: staleAttemptID,
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, types.AgentRunStatusRunning, backend.runs[runID].Status,
+		"run should remain running because the stale attempt was ignored")
+	require.Equal(t, types.AgentTaskStateRunning, backend.tasks[originTaskID].State,
+		"origin task should remain running because the stale attempt was ignored")
 }

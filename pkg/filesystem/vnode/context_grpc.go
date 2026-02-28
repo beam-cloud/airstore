@@ -21,7 +21,7 @@ const rpcTimeout = 30 * time.Second // Per-RPC timeout for context operations
 
 // ContextVNodeGRPC implements VirtualNode for S3-backed context storage.
 // It supports all read and write operations. The prefix determines the
-// mount path (e.g., "/skills", "/memory").
+// mount path (e.g., "/skills").
 type ContextVNodeGRPC struct {
 	client      pb.ContextServiceClient
 	token       string
@@ -38,7 +38,7 @@ type ContextVNodeGRPC struct {
 }
 
 // NewContextVNodeGRPC creates a new context virtual node with the given prefix.
-// The prefix determines the mount path (e.g., types.PathSkills, types.PathMemory).
+// The prefix determines the mount path (e.g., types.PathSkills).
 func NewContextVNodeGRPC(conn *grpc.ClientConn, token string, prefix string) *ContextVNodeGRPC {
 	c := &ContextVNodeGRPC{
 		client:      pb.NewContextServiceClient(conn),

@@ -115,7 +115,7 @@ func servicePrefix(fullMethod string) string {
 	case strings.Contains(fullMethod, "SourceService"):
 		return "sources"
 	case strings.Contains(fullMethod, "ContextService"):
-		// The ContextService is used for /skills and /memory; the path
+		// The ContextService is used for /skills; the path
 		// itself already carries the prefix (e.g. "skills/AGENTS.md").
 		return ""
 	default:

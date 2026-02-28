@@ -18,7 +18,7 @@ func TestSetTaskResultWithRetry_SucceedsAfterTransientFailures(t *testing.T) {
 
 	var attempts int
 	err := setTaskResultWithRetry(context.Background(), task, result,
-		func(ctx context.Context, _ string, _ int, _ string) error {
+		func(ctx context.Context, _ string, _ int, _ string, _ string) error {
 			attempts++
 			if _, ok := ctx.Deadline(); !ok {
 				t.Fatal("expected context with deadline")
@@ -45,7 +45,7 @@ func TestSetTaskResultWithRetry_ReturnsLastErrorWhenExhausted(t *testing.T) {
 	permanent := errors.New("gateway down")
 	var attempts int
 	err := setTaskResultWithRetry(context.Background(), task, result,
-		func(context.Context, string, int, string) error { attempts++; return permanent },
+		func(context.Context, string, int, string, string) error { attempts++; return permanent },
 		func(context.Context, time.Duration) {},
 	)
 	if !errors.Is(err, permanent) {
@@ -62,7 +62,7 @@ func TestSetTaskResultWithRetry_BackoffSchedule(t *testing.T) {
 
 	var sleeps []time.Duration
 	_ = setTaskResultWithRetry(context.Background(), task, result,
-		func(context.Context, string, int, string) error { return errors.New("fail") },
+		func(context.Context, string, int, string, string) error { return errors.New("fail") },
 		func(_ context.Context, d time.Duration) { sleeps = append(sleeps, d) },
 	)
 	want := []time.Duration{1 * time.Second, 2 * time.Second}
@@ -85,7 +85,7 @@ func TestSetTaskResultWithRetry_StopsOnContextCancel(t *testing.T) {
 	var attempts int
 	transient := errors.New("transient")
 	err := setTaskResultWithRetry(ctx, task, result,
-		func(context.Context, string, int, string) error {
+		func(context.Context, string, int, string, string) error {
 			attempts++
 			return transient
 		},
@@ -111,7 +111,7 @@ func TestSetTaskResultWithRetry_DoesNotRetryOnNotFound(t *testing.T) {
 		context.Background(),
 		task,
 		result,
-		func(context.Context, string, int, string) error {
+		func(context.Context, string, int, string, string) error {
 			attempts++
 			return notFoundErr
 		},
@@ -122,5 +122,48 @@ func TestSetTaskResultWithRetry_DoesNotRetryOnNotFound(t *testing.T) {
 	}
 	if attempts != 1 {
 		t.Fatalf("expected 1 attempt for non-retriable error, got %d", attempts)
+	}
+}
+
+func TestSubscribeTaskCancellationCancelsNonInteractiveTaskContext(t *testing.T) {
+	terminalIO := &testTerminalIO{cancelCh: make(chan struct{}, 1)}
+	worker := &Worker{terminalIO: terminalIO}
+
+	taskCtx, taskCancel := context.WithCancel(context.Background())
+	defer taskCancel()
+
+	task := types.RunExecution{ExternalId: "task-cancel"}
+	cleanup := worker.subscribeTaskCancellation(taskCtx, task, taskCancel)
+	defer cleanup()
+
+	terminalIO.cancelCh <- struct{}{}
+
+	select {
+	case <-taskCtx.Done():
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("expected task context to be cancelled after cancel signal")
+	}
+}
+
+func TestSubscribeTaskCancellationSkipsInteractiveTasks(t *testing.T) {
+	terminalIO := &testTerminalIO{cancelCh: make(chan struct{}, 1)}
+	worker := &Worker{terminalIO: terminalIO}
+
+	taskCtx, taskCancel := context.WithCancel(context.Background())
+	defer taskCancel()
+
+	task := types.RunExecution{
+		ExternalId: "task-interactive",
+		Type:       types.RunExecutionTypeInteractive,
+	}
+	cleanup := worker.subscribeTaskCancellation(taskCtx, task, taskCancel)
+	defer cleanup()
+
+	terminalIO.cancelCh <- struct{}{}
+
+	select {
+	case <-taskCtx.Done():
+		t.Fatal("did not expect interactive task context to be cancelled by non-interactive subscription path")
+	case <-time.After(75 * time.Millisecond):
 	}
 }

@@ -1,6 +1,7 @@
 package hooks
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -93,5 +94,23 @@ func TestBuildHookAttachment_IncludesMoveContext(t *testing.T) {
 	}
 	if got := attachment["move_op_id"]; got != data["move_op_id"] {
 		t.Fatalf("expected move_op_id %v, got %v", data["move_op_id"], got)
+	}
+}
+
+func TestHookSessionID_StableForSameHook(t *testing.T) {
+	sessionA := hookSessionID("hook-1")
+	sessionB := hookSessionID("hook-1")
+	if sessionA != sessionB {
+		t.Fatalf("expected stable session id for same hook, got %q vs %q", sessionA, sessionB)
+	}
+}
+
+func TestHookSessionID_CompressesLongHookExternalID(t *testing.T) {
+	sessionID := hookSessionID(strings.Repeat("x", 512))
+	if len(sessionID) > 180 {
+		t.Fatalf("expected compressed session id length <= 180, got %d", len(sessionID))
+	}
+	if !strings.HasPrefix(sessionID, "hook-") {
+		t.Fatalf("expected compressed session id to retain hook prefix, got %q", sessionID)
 	}
 }

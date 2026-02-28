@@ -33,7 +33,6 @@ Key paths:
 - /workspace/skills/ — project instructions, coding standards, and context that OVERRIDE your defaults
 - /workspace/sources/ — read-only data from connected integrations (each has a README)
 - /workspace/tools/ — CLI tools (browser, API clients, etc.) you can run directly
-- /workspace/memory/ — persistent state across task runs
 
 Before starting work:
 1. Read /workspace/skills/ — these instructions take precedence over your built-in defaults.

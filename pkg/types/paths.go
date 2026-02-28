@@ -7,7 +7,7 @@ import "strings"
 
 // SystemPaths returns all system root paths that cannot have hooks attached.
 func SystemPaths() []string {
-	return []string{PathTasks, PathTools, PathSkills, PathSources, PathMemory}
+	return []string{PathTasks, PathTools, PathSkills, PathSources}
 }
 
 // IsSystemRootPath returns true if the path is a system root directory.

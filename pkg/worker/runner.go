@@ -167,6 +167,9 @@ func defaultClaudeConfigDir(env map[string]string) string {
 	if env != nil {
 		if workspaceDir := strings.TrimSpace(env[agentWorkspaceDirEnvKey]); workspaceDir != "" {
 			scope := claudeStateScope(workspaceDir)
+			if sessionID := claudeSessionIDFromEnv(env); sessionID != "" {
+				scope = claudeStateScopeWithSession(workspaceDir, sessionID)
+			}
 			return path.Join(claudeStateRootDir, scope, claudeStateDirName)
 		}
 	}
@@ -179,6 +182,16 @@ func claudeStateScope(workspaceDir string) string {
 		return "default"
 	}
 	sum := sha1.Sum([]byte(normalized))
+	return hex.EncodeToString(sum[:8])
+}
+
+func claudeStateScopeWithSession(workspaceDir, sessionID string) string {
+	normalized := strings.TrimSpace(strings.TrimSuffix(workspaceDir, "/"))
+	if normalized == "" {
+		normalized = "default"
+	}
+	combined := normalized + ":" + strings.TrimSpace(sessionID)
+	sum := sha1.Sum([]byte(combined))
 	return hex.EncodeToString(sum[:8])
 }
 

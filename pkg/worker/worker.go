@@ -262,6 +262,32 @@ func (w *Worker) runTask(task types.RunExecution) {
 	w.executeTask(task)
 }
 
+func (w *Worker) subscribeTaskCancellation(ctx context.Context, task types.RunExecution, cancel context.CancelFunc) func() {
+	if w == nil || w.terminalIO == nil || task.IsInteractive() {
+		return func() {}
+	}
+
+	cancelCh, cancelCleanup, err := w.terminalIO.SubscribeCancel(ctx, task.ExternalId)
+	if err != nil {
+		addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to subscribe for task cancellation")
+		return func() {}
+	}
+
+	go func() {
+		select {
+		case <-ctx.Done():
+		case _, ok := <-cancelCh:
+			if !ok {
+				return
+			}
+			addTaskExecutionContext(log.Info(), task).Msg("received cancel signal for task")
+			cancel()
+		}
+	}()
+
+	return cancelCleanup
+}
+
 // executeTask runs a single task to completion: mark started → execute → record result.
 func (w *Worker) executeTask(task types.RunExecution) {
 	addTaskExecutionContext(
@@ -292,12 +318,17 @@ func (w *Worker) executeTask(task types.RunExecution) {
 		}
 	}
 
-	taskCtx := w.ctx
-	cancel := func() {}
+	taskCtx, taskCancel := context.WithCancel(w.ctx)
+	defer taskCancel()
+
 	if task.TimeoutMs != nil && *task.TimeoutMs > 0 {
-		taskCtx, cancel = context.WithTimeout(w.ctx, time.Duration(*task.TimeoutMs)*time.Millisecond)
+		timeoutCtx, timeoutCancel := context.WithTimeout(taskCtx, time.Duration(*task.TimeoutMs)*time.Millisecond)
+		taskCtx = timeoutCtx
+		defer timeoutCancel()
 	}
-	defer cancel()
+
+	cancelCleanup := w.subscribeTaskCancellation(taskCtx, task, taskCancel)
+	defer cancelCleanup()
 
 	var result *types.RunExecutionResult
 	var err error
@@ -357,9 +388,13 @@ func setTaskResultWithRetry(
 	ctx context.Context,
 	task types.RunExecution,
 	result *types.RunExecutionResult,
-	reportFn func(ctx context.Context, taskID string, exitCode int, errMsg string) error,
+	reportFn func(ctx context.Context, taskID string, exitCode int, errMsg string, attemptID string) error,
 	sleepFn func(context.Context, time.Duration),
 ) error {
+	attemptID := ""
+	if task.RunAttemptID != nil {
+		attemptID = *task.RunAttemptID
+	}
 	var lastErr error
 	for attempt := range setTaskResultMaxAttempts {
 		if attempt > 0 {
@@ -373,7 +408,7 @@ func setTaskResultWithRetry(
 		}
 
 		attemptCtx, cancel := context.WithTimeout(ctx, setTaskResultRetryTimeout)
-		lastErr = reportFn(attemptCtx, task.ExternalId, result.ExitCode, result.Error)
+		lastErr = reportFn(attemptCtx, task.ExternalId, result.ExitCode, result.Error, attemptID)
 		cancel()
 		if lastErr == nil {
 			return nil
