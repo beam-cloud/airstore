@@ -102,8 +102,8 @@ func TestIsHookablePath(t *testing.T) {
 
 func TestSystemPaths(t *testing.T) {
 	paths := SystemPaths()
-	if len(paths) != 5 {
-		t.Errorf("SystemPaths() returned %d paths, want 5", len(paths))
+	if len(paths) != 4 {
+		t.Errorf("SystemPaths() returned %d paths, want 4", len(paths))
 	}
 
 	expected := map[string]bool{
@@ -111,7 +111,6 @@ func TestSystemPaths(t *testing.T) {
 		"/tools":   true,
 		"/skills":  true,
 		"/sources": true,
-		"/memory":  true,
 	}
 
 	for _, p := range paths {
@@ -134,9 +133,6 @@ func TestPathConstants(t *testing.T) {
 	}
 	if PathSources != "/sources" {
 		t.Errorf("PathSources = %q, want %q", PathSources, "/sources")
-	}
-	if PathMemory != "/memory" {
-		t.Errorf("PathMemory = %q, want %q", PathMemory, "/memory")
 	}
 }
 

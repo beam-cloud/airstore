@@ -374,6 +374,54 @@ func TestCancelTaskRejectsNonRunningState(t *testing.T) {
 	require.Equal(t, types.AgentTaskStateIdle, backend.agentTasks[taskID].State)
 }
 
+func TestCancelRunPublishesCancelSignalForInFlightExecution(t *testing.T) {
+	redisClient, cleanup := newTestRedis(t)
+	defer cleanup()
+
+	backend := newFakeBackend()
+	runID := uuid.NewString()
+	executionID := uuid.NewString()
+
+	backend.runs[runID] = &types.AgentRun{
+		ID:          runID,
+		WorkspaceID: 42,
+		Status:      types.AgentRunStatusRunning,
+	}
+	backend.runExecutions[executionID] = &types.RunExecution{
+		ExternalId: executionID,
+		WorkspaceId: 42,
+		Status:     types.RunExecutionStatusRunning,
+	}
+	backend.attempts[runID] = []*types.AgentRunAttempt{
+		{
+			ID:          uuid.NewString(),
+			RunID:       runID,
+			Status:      types.AgentAttemptStatusRunning,
+			ExecutionID: &executionID,
+		},
+	}
+
+	runtime := NewAgentService(context.Background(), backend, nil, redisClient, nil, "ghcr.io/beam/sandbox:latest")
+	subCtx, subCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer subCancel()
+
+	cancelCh, cancelCleanup, err := runtime.terminalIO.SubscribeCancel(subCtx, executionID)
+	require.NoError(t, err)
+	defer cancelCleanup()
+
+	api := NewAgentAPI(backend, runtime)
+	require.NoError(t, api.CancelRun(context.Background(), 42, runID))
+
+	select {
+	case <-cancelCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected cancel signal to be published for execution")
+	}
+
+	require.Equal(t, types.AgentRunStatusCancelled, backend.runs[runID].Status)
+	require.Equal(t, types.RunExecutionStatusCancelled, backend.runExecutions[executionID].Status)
+}
+
 func TestPrependTaskPromptLogPrependsPrompt(t *testing.T) {
 	task := &types.AgentTask{
 		ID: "task-1",

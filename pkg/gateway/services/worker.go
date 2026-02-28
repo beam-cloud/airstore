@@ -24,6 +24,7 @@ type WorkerService struct {
 	workerRepo          repository.WorkerRepository
 	taskQueue           repository.TaskQueue
 	redisClient         *common.RedisClient
+	terminalIO          repository.TerminalIORepository
 	claimLeaseTTL       time.Duration
 	recoveryLoopEnabled bool
 	recoveryInterval    time.Duration
@@ -67,12 +68,18 @@ func NewWorkerService(
 		unclaimedStaleAfter = defaultUnclaimedRunStaleAfter
 	}
 
+	var terminalIO repository.TerminalIORepository
+	if redisClient != nil {
+		terminalIO = repository.NewRedisTerminalIORepository(redisClient)
+	}
+
 	return &WorkerService{
 		scheduler:           sched,
 		backend:             backend,
 		workerRepo:          workerRepo,
 		taskQueue:           taskQueue,
 		redisClient:         redisClient,
+		terminalIO:          terminalIO,
 		claimLeaseTTL:       claimLeaseTTL,
 		recoveryLoopEnabled: schedulerConfig.RecoveryLoopEnabled,
 		recoveryInterval:    recoveryInterval,
@@ -944,6 +951,14 @@ func (s *WorkerService) ensureSessionAvailableForRetry(
 		return nil
 	}
 
+	if s.terminalIO != nil {
+		if owner, _ := s.terminalIO.GetSessionLeaseOwner(ctx, workspaceID, sessionID); owner != "" {
+			if !s.tryReconcileStaleSessionLease(ctx, workspaceID, sessionID, owner) {
+				return fmt.Errorf("session ID %s is already in use (lease: %s)", sessionID, owner)
+			}
+		}
+	}
+
 	conflicts, err := s.backend.ListActiveRunsBySession(ctx, workspaceID, sessionID, excludeRunIDs, 5)
 	if err != nil {
 		return err
@@ -957,6 +972,35 @@ func (s *WorkerService) ensureSessionAvailableForRetry(
 		return fmt.Errorf("session ID %s is already in use", sessionID)
 	}
 	return fmt.Errorf("session ID %s is already in use by active run %s", sessionID, conflictRunID)
+}
+
+func (s *WorkerService) tryReconcileStaleSessionLease(ctx context.Context, workspaceID uint, sessionID, owner string) bool {
+	if s.backend == nil || s.terminalIO == nil || owner == "" {
+		return false
+	}
+	executionID := extractRetryLeaseExecutionID(owner)
+	if executionID == "" {
+		return false
+	}
+	exec, err := s.backend.GetRunExecution(ctx, executionID)
+	if err != nil || exec == nil || exec.IsTerminal() {
+		log.Info().
+			Str("session_id", sessionID).
+			Str("lease_owner", owner).
+			Str("execution_id", executionID).
+			Msg("force-releasing stale session lease during retry")
+		_ = s.terminalIO.ReleaseSessionLease(ctx, workspaceID, sessionID, owner)
+		return true
+	}
+	return false
+}
+
+func extractRetryLeaseExecutionID(owner string) string {
+	parts := strings.SplitN(owner, ":", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+	return strings.TrimSpace(parts[1])
 }
 
 func boolPtr(value bool) *bool {

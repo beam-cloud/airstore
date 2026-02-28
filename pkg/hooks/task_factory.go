@@ -52,7 +52,7 @@ func (f *TaskFactory) CreateTask(
 	}
 
 	idempotencyKey := hookIdempotencyKey(hook.ExternalId, normalizedEventID, event, data)
-	sessionID := hookSessionID(hook.ExternalId, normalizedEventID)
+	sessionID := hookSessionID(hook.ExternalId)
 	source := hookInputSource
 	correlationID := normalizedEventID
 	var correlationPtr *string
@@ -156,9 +156,8 @@ func hashSourceItemsCSV(raw string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func hookSessionID(hookExternalID, eventID string) string {
-	eventID = strings.TrimSpace(eventID)
-	raw := fmt.Sprintf("hook-%s-%s", strings.TrimSpace(hookExternalID), eventID)
+func hookSessionID(hookExternalID string) string {
+	raw := fmt.Sprintf("hook-%s", strings.TrimSpace(hookExternalID))
 	if len(raw) <= 180 {
 		return raw
 	}

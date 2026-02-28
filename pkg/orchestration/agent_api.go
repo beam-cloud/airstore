@@ -308,6 +308,14 @@ func (a *AgentAPI) CancelRun(ctx context.Context, workspaceID uint, runID string
 		return err
 	}
 
+	// Prefer runtime-backed cancellation so in-flight executions also receive
+	// cancel signals in addition to DB status updates.
+	if a.runtime != nil && a.runtime.backend != nil {
+		if _, cancelErr := a.runtime.cancelInFlightRunExecutions(ctx, run.ID); cancelErr == nil {
+			return nil
+		}
+	}
+
 	attempts, _ := a.backend.ListAgentRunAttempts(ctx, run.ID)
 	for _, attempt := range attempts {
 		if attempt.ExecutionID != nil && attempt.Status.IsInFlight() {

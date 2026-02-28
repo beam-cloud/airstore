@@ -36,7 +36,7 @@ async function waitForTerminalRun(
 
 async function waitForOutputJSON(
   workspaceId: string,
-  paths = ['/memory/output.json', '/workspace/memory/output.json'],
+  paths = ['/data/output.json', '/workspace/data/output.json'],
   timeoutMs = 45_000,
 ): Promise<string> {
   const client = getClient();
@@ -124,7 +124,7 @@ describe('Agent/Runs E2E', () => {
       'URL: https://news.ycombinator.com/newest',
       'Collect the top 5 most recent stories from the page.',
       'Build JSON with shape {"source":"https://news.ycombinator.com/newest","stories":[{"rank":1,"title":"...","url":"https://news.ycombinator.com/item?id=..."}]}.',
-      'Write that JSON to /workspace/memory/output.json (exact file path).',
+      'Write that JSON to /workspace/data/output.json (exact file path).',
       'Use absolute URLs and make sure the file contains valid JSON only.',
     ].join('\n');
 

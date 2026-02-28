@@ -277,6 +277,47 @@ func TestBuildTurnArgsPreservesExistingShell(t *testing.T) {
 	}
 }
 
+func TestClaudeConfigDirIsolatedBySession(t *testing.T) {
+	runner := NewClaudeCodeRunner(ClaudeCodeRunnerOptions{})
+	wsDir := "/workspace/agents/prospect-bot/"
+
+	envA := map[string]string{
+		agentWorkspaceDirEnvKey: wsDir,
+		agentSessionIDEnvKey:   "550e8400-e29b-41d4-a716-446655440000",
+	}
+	envB := map[string]string{
+		agentWorkspaceDirEnvKey: wsDir,
+		agentSessionIDEnvKey:   "660e8400-e29b-41d4-a716-446655440001",
+	}
+	envNoSession := map[string]string{
+		agentWorkspaceDirEnvKey: wsDir,
+	}
+
+	_ = runner.BuildTurnArgs("hello", envA, TurnArgModeFirstStart)
+	_ = runner.BuildTurnArgs("hello", envB, TurnArgModeFirstStart)
+	_ = runner.BuildTurnArgs("hello", envNoSession, TurnArgModeFirstStart)
+
+	dirA := envA[claudeConfigDirEnvKey]
+	dirB := envB[claudeConfigDirEnvKey]
+	dirNoSession := envNoSession[claudeConfigDirEnvKey]
+
+	if dirA == dirB {
+		t.Fatalf("different sessions in same workspace must have different config dirs, both got %q", dirA)
+	}
+	if dirA == dirNoSession {
+		t.Fatalf("session-scoped dir should differ from no-session dir, both got %q", dirA)
+	}
+
+	envA2 := map[string]string{
+		agentWorkspaceDirEnvKey: wsDir,
+		agentSessionIDEnvKey:   "550e8400-e29b-41d4-a716-446655440000",
+	}
+	_ = runner.BuildTurnArgs("hello", envA2, TurnArgModeFirstStart)
+	if envA2[claudeConfigDirEnvKey] != dirA {
+		t.Fatalf("same session should yield stable config dir, got %q want %q", envA2[claudeConfigDirEnvKey], dirA)
+	}
+}
+
 func TestClaudeCodeRunnerImplementsTurnRunner(t *testing.T) {
 	var runner AgentExecutionRunner = NewClaudeCodeRunner(ClaudeCodeRunnerOptions{})
 	if _, ok := runner.(TurnRunner); !ok {

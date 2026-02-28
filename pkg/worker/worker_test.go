@@ -124,3 +124,46 @@ func TestSetTaskResultWithRetry_DoesNotRetryOnNotFound(t *testing.T) {
 		t.Fatalf("expected 1 attempt for non-retriable error, got %d", attempts)
 	}
 }
+
+func TestSubscribeTaskCancellationCancelsNonInteractiveTaskContext(t *testing.T) {
+	terminalIO := &testTerminalIO{cancelCh: make(chan struct{}, 1)}
+	worker := &Worker{terminalIO: terminalIO}
+
+	taskCtx, taskCancel := context.WithCancel(context.Background())
+	defer taskCancel()
+
+	task := types.RunExecution{ExternalId: "task-cancel"}
+	cleanup := worker.subscribeTaskCancellation(taskCtx, task, taskCancel)
+	defer cleanup()
+
+	terminalIO.cancelCh <- struct{}{}
+
+	select {
+	case <-taskCtx.Done():
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("expected task context to be cancelled after cancel signal")
+	}
+}
+
+func TestSubscribeTaskCancellationSkipsInteractiveTasks(t *testing.T) {
+	terminalIO := &testTerminalIO{cancelCh: make(chan struct{}, 1)}
+	worker := &Worker{terminalIO: terminalIO}
+
+	taskCtx, taskCancel := context.WithCancel(context.Background())
+	defer taskCancel()
+
+	task := types.RunExecution{
+		ExternalId: "task-interactive",
+		Type:       types.RunExecutionTypeInteractive,
+	}
+	cleanup := worker.subscribeTaskCancellation(taskCtx, task, taskCancel)
+	defer cleanup()
+
+	terminalIO.cancelCh <- struct{}{}
+
+	select {
+	case <-taskCtx.Done():
+		t.Fatal("did not expect interactive task context to be cancelled by non-interactive subscription path")
+	case <-time.After(75 * time.Millisecond):
+	}
+}

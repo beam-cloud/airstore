@@ -204,6 +204,25 @@ func (s *AgentService) AcceptAgentCommand(
 		)
 	}
 
+	latestRun, err := s.latestRunForSessionAgent(ctx, workspaceID, params.AgentID, params.SessionID)
+	if err != nil {
+		return nil, false, err
+	}
+	if latestRun != nil {
+		task, deduped, _, err := s.AcceptRunInput(
+			ctx,
+			workspaceID,
+			latestRun.ID,
+			types.AgentQueueModeFollowup,
+			params.Message,
+			params.IdempotencyKey,
+		)
+		if err != nil {
+			return nil, false, err
+		}
+		return task, deduped, nil
+	}
+
 	payload := map[string]any{
 		"message":                              params.Message,
 		"session_id":                           params.SessionID,
@@ -252,6 +271,33 @@ func (s *AgentService) AcceptAgentCommand(
 		return nil, false, err
 	}
 	return task, false, nil
+}
+
+func (s *AgentService) latestRunForSessionAgent(
+	ctx context.Context,
+	workspaceID uint,
+	agentID *string,
+	sessionID string,
+) (*types.AgentRun, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if s == nil || s.backend == nil || sessionID == "" {
+		return nil, nil
+	}
+	filter := types.AgentRunListFilter{
+		AgentID:   trimOptionalString(agentID),
+		SessionID: strPtr(sessionID),
+		Limit:     1,
+	}
+	runs, err := s.backend.ListAgentRunsFiltered(ctx, workspaceID, filter)
+	if err != nil {
+		return nil, err
+	}
+	for _, run := range runs {
+		if run != nil {
+			return run, nil
+		}
+	}
+	return nil, nil
 }
 
 func (s *AgentService) AcceptRunInput(
@@ -619,6 +665,7 @@ func (s *AgentService) waitForSessionLeaseDrain(ctx context.Context, workspaceID
 	tick := time.NewTicker(sessionDrainPollStep)
 	defer tick.Stop()
 
+	reconciled := false
 	for {
 		owner, err := s.terminalIO.GetSessionLeaseOwner(ctx, workspaceID, sessionID)
 		if err != nil {
@@ -626,6 +673,12 @@ func (s *AgentService) waitForSessionLeaseDrain(ctx context.Context, workspaceID
 		}
 		if owner == "" {
 			return nil
+		}
+		if !reconciled {
+			if s.tryReconcileStaleSessionLease(ctx, workspaceID, sessionID, owner) {
+				reconciled = true
+				continue
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -635,6 +688,47 @@ func (s *AgentService) waitForSessionLeaseDrain(ctx context.Context, workspaceID
 		case <-tick.C:
 		}
 	}
+}
+
+// tryReconcileStaleSessionLease checks whether the current lease owner
+// references a terminal/missing execution. If so it force-releases the
+// lease and returns true. Owner format is "workerID:executionID".
+func (s *AgentService) tryReconcileStaleSessionLease(ctx context.Context, workspaceID uint, sessionID, owner string) bool {
+	if s.backend == nil || s.terminalIO == nil || owner == "" {
+		return false
+	}
+	executionID := extractLeaseExecutionID(owner)
+	if executionID == "" {
+		return false
+	}
+	exec, err := s.backend.GetRunExecution(ctx, executionID)
+	if err != nil || exec == nil || exec.IsTerminal() {
+		log.Info().
+			Str("session_id", sessionID).
+			Str("lease_owner", owner).
+			Str("execution_id", executionID).
+			Msg("force-releasing stale session lease")
+		_ = s.terminalIO.ReleaseSessionLease(ctx, workspaceID, sessionID, owner)
+		return true
+	}
+	return false
+}
+
+func extractLeaseExecutionID(owner string) string {
+	parts := strings.SplitN(owner, ":", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+	return strings.TrimSpace(parts[1])
+}
+
+func isSessionBusyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "session") &&
+		(strings.Contains(lower, "already in use") || strings.Contains(lower, "still held"))
 }
 
 func (s *AgentService) handleExecutionTask(ctx context.Context, task *types.AgentTask) error {
@@ -694,6 +788,13 @@ func (s *AgentService) handleExecutionTask(ctx context.Context, task *types.Agen
 
 	run, runPolicy, prompt, err := s.materializeRun(ctx, task)
 	if err != nil {
+		if isSessionBusyError(err) {
+			log.Warn().Err(err).Str("task_id", task.ID).Msg("session busy during materialization, requeuing task")
+			if requeueErr := s.queueRouter.RequeueTask(ctx, task.ID); requeueErr != nil {
+				return requeueErr
+			}
+			return nil
+		}
 		reason := types.AgentTaskDropReasonRunMaterializationFail
 		_ = s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDropped, &reason, task.TargetRunID)
 		return err
@@ -961,17 +1062,7 @@ func (s *AgentService) restartTerminalTaskFromRunInput(
 		if err := s.backend.UpdateAgentRunLifecycle(ctx, terminalRun.ID, types.AgentRunStatusCancelled, nil, &now, &errMsg); err != nil {
 			log.Warn().Err(err).Str("run_id", terminalRun.ID).Msg("failed to cancel superseded run before restart")
 		}
-		attempts, err := s.backend.ListAgentRunAttempts(ctx, terminalRun.ID)
-		if err == nil {
-			for _, attempt := range attempts {
-				if attempt == nil {
-					continue
-				}
-				if attempt.ExecutionID != nil && attempt.Status.IsInFlight() {
-					_ = s.backend.CancelRunExecution(ctx, *attempt.ExecutionID)
-				}
-			}
-		}
+		_, _ = s.cancelInFlightRunExecutions(ctx, terminalRun.ID)
 	}
 	if err := s.waitForResumeBarrier(ctx, terminalRun.WorkspaceID, terminalRun.SessionID, terminalRun.ID); err != nil {
 		return nil, err
@@ -1058,7 +1149,9 @@ func (s *AgentService) ensureSessionAvailableForNewRun(
 
 	if s.terminalIO != nil {
 		if owner, _ := s.terminalIO.GetSessionLeaseOwner(ctx, workspaceID, sessionID); owner != "" {
-			return fmt.Errorf("session ID %s is already in use (lease: %s)", sessionID, owner)
+			if !s.tryReconcileStaleSessionLease(ctx, workspaceID, sessionID, owner) {
+				return fmt.Errorf("session ID %s is already in use (lease: %s)", sessionID, owner)
+			}
 		}
 	}
 

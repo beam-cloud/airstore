@@ -25,6 +25,7 @@ const (
 
 const (
 	debounceDelay = 2 * time.Second
+	submitTimeout = 10 * time.Second
 )
 
 type TaskCreator interface {
@@ -59,45 +60,20 @@ func NewEngine(store repository.FilesystemStore, creator TaskCreator, backend re
 }
 
 func (eng *Engine) Handle(id string, data map[string]any) {
-	event, _ := data["event"].(string)
+	event := strings.TrimSpace(mapString(data, "event"))
 	wsId := ParseUint(data["workspace_id"])
-	path, _ := data["path"].(string)
-	path = NormalizePath(path)
+	rawPath := strings.TrimSpace(mapString(data, "path"))
 
-	if wsId == 0 || path == "" || event == "" {
-		log.Warn().Str("id", id).Str("event", event).Str("path", path).
+	if wsId == 0 || rawPath == "" || event == "" {
+		log.Warn().Str("id", id).Str("event", event).Str("path", rawPath).
 			Interface("workspace_id", data["workspace_id"]).
 			Msg("hook engine: dropping malformed event")
 		return
 	}
+	path := NormalizePath(rawPath)
 
 	fire := func(eventID, resolvedEvent string, payload map[string]any) {
-		effectivePayload := cloneEventData(payload)
-		resolvedPath, _ := effectivePayload["path"].(string)
-		if resolvedPath == "" {
-			resolvedPath = path
-		}
-		resolvedPath = NormalizePath(resolvedPath)
-		effectivePayload["path"] = resolvedPath
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		effectiveEvent := resolvedEvent
-		if isFilesystemEvent(effectiveEvent) {
-			effectiveEvent = eng.reconcileFilesystemEvent(ctx, effectiveEvent, resolvedPath)
-			effectivePayload["event"] = effectiveEvent
-		}
-
-		hooks := eng.cache.match(ctx, wsId, resolvedPath)
-		if len(hooks) == 0 {
-			log.Debug().Str("event", effectiveEvent).Str("path", resolvedPath).Uint("workspace_id", wsId).
-				Msg("hook engine: no matching hooks")
-			return
-		}
-
-		for _, h := range hooks {
-			eng.submit(ctx, h, eventID, effectiveEvent, effectivePayload)
-		}
+		eng.dispatchEvent(eventID, wsId, path, resolvedEvent, payload)
 	}
 
 	if isFilesystemEvent(event) {
@@ -108,6 +84,41 @@ func (eng *Engine) Handle(id string, data map[string]any) {
 }
 
 func (eng *Engine) InvalidateCache(wsId uint) { eng.cache.invalidate(wsId) }
+
+func (eng *Engine) dispatchEvent(
+	eventID string,
+	workspaceID uint,
+	fallbackPath string,
+	event string,
+	data map[string]any,
+) {
+	effectivePayload := cloneEventData(data)
+	resolvedPath := NormalizePath(strings.TrimSpace(mapString(effectivePayload, "path")))
+	if resolvedPath == "/" && strings.TrimSpace(mapString(effectivePayload, "path")) == "" {
+		resolvedPath = fallbackPath
+	}
+	effectivePayload["path"] = resolvedPath
+
+	ctx, cancel := context.WithTimeout(context.Background(), submitTimeout)
+	defer cancel()
+
+	effectiveEvent := event
+	if isFilesystemEvent(effectiveEvent) {
+		effectiveEvent = eng.reconcileFilesystemEvent(ctx, effectiveEvent, resolvedPath)
+		effectivePayload["event"] = effectiveEvent
+	}
+
+	hooks := eng.cache.match(ctx, workspaceID, resolvedPath)
+	if len(hooks) == 0 {
+		log.Debug().Str("event", effectiveEvent).Str("path", resolvedPath).Uint("workspace_id", workspaceID).
+			Msg("hook engine: no matching hooks")
+		return
+	}
+
+	for _, h := range hooks {
+		eng.submit(ctx, h, eventID, effectiveEvent, effectivePayload)
+	}
+}
 
 func (eng *Engine) submit(ctx context.Context, h *types.Hook, eventID, event string, data map[string]any) {
 	if !eng.ensureHookAgent(ctx, h) {
@@ -151,30 +162,27 @@ func (eng *Engine) reconcileFilesystemEvent(ctx context.Context, event, path str
 // buildPrompt constructs a structured prompt for the Claude Code task.
 //
 // The prompt has three clearly separated sections:
-//  1. Trigger context    – what happened (event type, path, integration, items)
-//  2. Skill references   – names + paths to SKILL.md files (not full contents)
-//  3. Additional context – user-provided extra instructions on the hook
+//  1. Trigger context  – what happened (event type, path, integration, items)
+//  2. Skill references – names + paths to SKILL.md files (not full contents)
+//  3. Task line        – user-provided extra instructions from the hook prompt
 func (eng *Engine) buildPrompt(ctx context.Context, h *types.Hook, event string, data map[string]any) string {
-	var sections []string
-
-	// --- Section 1: Trigger context ---
 	trigger := buildTriggerContext(event, data)
-	if trigger != "" {
-		sections = append(sections, trigger)
-	}
 
 	// --- Section 2: Skill references (if any) ---
 	skillPaths := types.NormalizeSkillPaths(h.SkillPaths, h.SkillPath)
+	skillReferences := ""
 	if len(skillPaths) > 0 {
-		sections = append(sections, buildSkillReferences(ctx, eng.skillReader, h.WorkspaceId, skillPaths))
+		skillReferences = buildSkillReferences(ctx, eng.skillReader, h.WorkspaceId, skillPaths)
 	}
 
-	// --- Section 3: Additional user-provided prompt ---
-	if h.Prompt != "" {
-		sections = append(sections, h.Prompt)
+	// --- Section 3: User task prompt ---
+	taskLine := ""
+	taskPrompt := strings.TrimSpace(h.Prompt)
+	if taskPrompt != "" {
+		taskLine = "Task: " + taskPrompt
 	}
 
-	return strings.Join(sections, "\n\n")
+	return joinPromptSections(trigger, skillReferences, taskLine)
 }
 
 // Start blocks until the engine context is cancelled.
@@ -190,77 +198,77 @@ func (eng *Engine) Poll(ctx context.Context) {
 // buildTriggerContext constructs the "what happened" section of the prompt.
 // This is always the first thing Claude sees so it understands the trigger.
 func buildTriggerContext(event string, data map[string]any) string {
-	path, _ := data["path"].(string)
-	absPath := workspaceAbsolutePath(path)
-	integration, _ := data["integration"].(string)
-	newCount, _ := data["new_count"].(string)
-	newItems, _ := data["new_items"].(string)
-
-	var b strings.Builder
-
+	absPath := workspaceAbsolutePath(mapString(data, "path"))
 	switch event {
 	case EventFsCreate:
-		b.WriteString("## Trigger\n\n")
-		b.WriteString("A new file was created at `" + absPath + "`.\n")
-		b.WriteString("Read it from: `" + absPath + "`")
+		return "A new file was created at `" + absPath + "`.\nRead it from: `" + absPath + "`"
 
 	case EventFsWrite:
-		b.WriteString("## Trigger\n\n")
-		b.WriteString("A file was modified at `" + absPath + "`.\n")
-		b.WriteString("Read the updated content from: `" + absPath + "`")
+		return "A file was modified at `" + absPath + "`."
 
 	case EventFsDelete:
-		b.WriteString("## Trigger\n\n")
-		b.WriteString("A file was deleted at `" + absPath + "`.")
+		return "A file was deleted at `" + absPath + "`."
 
 	case EventSourceChange:
-		b.WriteString("## Trigger\n\n")
-		if integration != "" {
-			b.WriteString("Source: **" + integration + "**\n")
-		}
-		b.WriteString(newCount + " new item(s) appeared in `" + absPath + "/`.\n")
-		b.WriteString("List and read the files under `" + absPath + "/` to see what changed.")
-
-		// Include item IDs if the source poller provided them
-		if newItems != "" {
-			b.WriteString("\n\nNew items: " + newItems)
-		}
+		return buildSourceChangeTrigger(
+			absPath,
+			strings.TrimSpace(mapString(data, "integration")),
+			strings.TrimSpace(mapString(data, "new_count")),
+			strings.TrimSpace(mapString(data, "new_items")),
+		)
 
 	default:
 		return ""
 	}
+}
 
-	return b.String()
+func buildSourceChangeTrigger(absPath, integration, newCount, newItems string) string {
+	lines := make([]string, 0, 2)
+	if integration != "" {
+		lines = append(lines, "Source: **"+integration+"**")
+	}
+	lines = append(lines, newCount+" new item(s) appeared in `"+absPath+"/`.")
+	trigger := strings.Join(lines, "\n")
+	if newItems != "" {
+		return trigger + "\n\nNew items: " + newItems
+	}
+	return trigger
 }
 
 // buildSkillReferences emits a compact "## Skills" section that tells the agent
 // which skills are relevant and where to find them, without inlining the full
 // SKILL.md contents (which would make the task prompt too verbose).
 func buildSkillReferences(ctx context.Context, reader SkillReader, workspaceId uint, skillPaths []string) string {
-	var b strings.Builder
-	b.WriteString("## Skills\n\n")
-	b.WriteString("The following skills are available in your workspace. Read the SKILL.md file at each path for detailed instructions.\n")
-
+	lines := []string{
+		"## Skills",
+		"",
+		"The following skills are available in your workspace. Read the SKILL.md file at each path for detailed instructions.",
+	}
 	for _, sp := range skillPaths {
 		skillPath := workspaceAbsolutePath(sp)
-		name := ""
-		if reader != nil {
-			content, err := reader.ReadSkillContent(ctx, workspaceId, sp)
-			if err == nil {
-				manifest, parseErr := skills.Parse([]byte(content))
-				if parseErr == nil {
-					name = manifest.Name
-				}
-			}
-		}
+		name := resolveSkillName(ctx, reader, workspaceId, sp)
 		if name != "" {
-			b.WriteString(fmt.Sprintf("\n- **%s** — read `%s/SKILL.md`", name, skillPath))
+			lines = append(lines, fmt.Sprintf("- **%s** — read `%s/SKILL.md`", name, skillPath))
 		} else {
-			b.WriteString(fmt.Sprintf("\n- `%s/SKILL.md`", skillPath))
+			lines = append(lines, fmt.Sprintf("- `%s/SKILL.md`", skillPath))
 		}
 	}
+	return strings.Join(lines, "\n")
+}
 
-	return b.String()
+func resolveSkillName(ctx context.Context, reader SkillReader, workspaceId uint, skillPath string) string {
+	if reader == nil {
+		return ""
+	}
+	content, err := reader.ReadSkillContent(ctx, workspaceId, skillPath)
+	if err != nil {
+		return ""
+	}
+	manifest, err := skills.Parse([]byte(content))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(manifest.Name)
 }
 
 // buildSkillContext adds integration/output path hints from the skill's metadata.
@@ -298,16 +306,6 @@ func buildSkillContext(meta *skills.AirstoreSkillMeta, data map[string]any) stri
 		return ""
 	}
 	return strings.Join(parts, "\n")
-}
-
-// enrichPrompt is kept for backward compatibility with existing tests.
-// New code should use buildPrompt instead.
-func enrichPrompt(base, event string, data map[string]any) string {
-	trigger := buildTriggerContext(event, data)
-	if trigger == "" {
-		return base
-	}
-	return trigger + "\n\n" + base
 }
 
 func EncodeToken(raw string) ([]byte, error) { return json.Marshal(raw) }
@@ -403,15 +401,10 @@ func (c *hookCache) match(ctx context.Context, wsId uint, path string) []*types.
 	var out []*types.Hook
 	for _, h := range hooks {
 		hookPath := NormalizePath(h.Path)
-		if !h.Active || hookPath == "" {
+		if !h.Active {
 			continue
 		}
-		// Root hook matches any path in the workspace.
-		if hookPath == "/" {
-			out = append(out, h)
-			continue
-		}
-		if path == hookPath || strings.HasPrefix(path, hookPath+"/") {
+		if hookPathMatchesPath(hookPath, path) {
 			out = append(out, h)
 		}
 	}
@@ -545,6 +538,40 @@ func cloneEventData(data map[string]any) map[string]any {
 		cloned[k] = v
 	}
 	return cloned
+}
+
+func joinPromptSections(sections ...string) string {
+	filtered := make([]string, 0, len(sections))
+	for _, section := range sections {
+		if strings.TrimSpace(section) == "" {
+			continue
+		}
+		filtered = append(filtered, section)
+	}
+	return strings.Join(filtered, "\n\n")
+}
+
+func hookPathMatchesPath(hookPath, path string) bool {
+	hookPath = NormalizePath(hookPath)
+	path = NormalizePath(path)
+	if hookPath == "/" {
+		return true
+	}
+	return path == hookPath || strings.HasPrefix(path, hookPath+"/")
+}
+
+func mapString(data map[string]any, key string) string {
+	if len(data) == 0 {
+		return ""
+	}
+	value, ok := data[key]
+	if !ok || value == nil {
+		return ""
+	}
+	if asString, ok := value.(string); ok {
+		return asString
+	}
+	return fmt.Sprintf("%v", value)
 }
 
 func isFilesystemEvent(event string) bool {

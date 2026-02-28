@@ -193,7 +193,6 @@ func runMount(cmd *cobra.Command, args []string) error {
 		}
 		fs.RegisterVNode(vnode.NewSourcesVNode(conn, authToken, sourcesOpts...))
 		fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, authToken, types.PathSkills)) // /Skills
-		fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, authToken, types.PathMemory)) // /Memory
 		fs.RegisterVNode(vnode.NewTasksVNodeGRPC(conn, authToken))                     // /Tasks
 		fs.SetStorageFallback(vnode.NewStorageVNode(conn, authToken))                  // user folders
 
@@ -310,7 +309,6 @@ func printMountStatus(mount, gateway, mode, compression string) {
 		{types.PathSources + "/*", "Integration data"},
 		{types.PathSkills + "/*", "Skills and context"},
 		{types.PathTasks + "/*", "Active tasks"},
-		{types.PathMemory + "/*", "Agent memory"},
 	}
 	for _, p := range paths {
 		fmt.Printf("    %s  %s\n", CodeStyle.Render(fmt.Sprintf("%-14s", p.path)), DimStyle.Render(p.desc))

@@ -93,7 +93,7 @@ func buildRequiredFilesystemRootSet(roots []string) map[string]struct{} {
 }
 
 // checkFilesystemMountReady validates that the mount path contains all expected
-// system root directories (/memory, /skills, /sources, /tasks, /tools).
+// system root directories (/skills, /sources, /tasks, /tools).
 func checkFilesystemMountReady(mountPath string) (bool, []string, error) {
 	entries, err := os.ReadDir(mountPath)
 	if err != nil {
