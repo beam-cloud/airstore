@@ -2158,8 +2158,8 @@ func TestIsSessionBusyError(t *testing.T) {
 }
 
 func TestExtractLeaseExecutionID(t *testing.T) {
-	require.Equal(t, "exec-123", extractLeaseExecutionID("worker-1:exec-123"))
-	require.Equal(t, "", extractLeaseExecutionID("no-colon"))
-	require.Equal(t, "", extractLeaseExecutionID(""))
-	require.Equal(t, "b", extractLeaseExecutionID("a:b"))
+	require.Equal(t, "exec-123", ExtractLeaseExecutionID("worker-1:exec-123"))
+	require.Equal(t, "", ExtractLeaseExecutionID("no-colon"))
+	require.Equal(t, "", ExtractLeaseExecutionID(""))
+	require.Equal(t, "b", ExtractLeaseExecutionID("a:b"))
 }

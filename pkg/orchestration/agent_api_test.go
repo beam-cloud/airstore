@@ -413,7 +413,10 @@ func TestCancelRunPublishesCancelSignalForInFlightExecution(t *testing.T) {
 	require.NoError(t, api.CancelRun(context.Background(), 42, runID))
 
 	select {
-	case <-cancelCh:
+	case _, ok := <-cancelCh:
+		if !ok {
+			t.Fatal("cancel channel closed without delivering a signal")
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected cancel signal to be published for execution")
 	}

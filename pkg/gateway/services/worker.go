@@ -975,32 +975,7 @@ func (s *WorkerService) ensureSessionAvailableForRetry(
 }
 
 func (s *WorkerService) tryReconcileStaleSessionLease(ctx context.Context, workspaceID uint, sessionID, owner string) bool {
-	if s.backend == nil || s.terminalIO == nil || owner == "" {
-		return false
-	}
-	executionID := extractRetryLeaseExecutionID(owner)
-	if executionID == "" {
-		return false
-	}
-	exec, err := s.backend.GetRunExecution(ctx, executionID)
-	if err != nil || exec == nil || exec.IsTerminal() {
-		log.Info().
-			Str("session_id", sessionID).
-			Str("lease_owner", owner).
-			Str("execution_id", executionID).
-			Msg("force-releasing stale session lease during retry")
-		_ = s.terminalIO.ReleaseSessionLease(ctx, workspaceID, sessionID, owner)
-		return true
-	}
-	return false
-}
-
-func extractRetryLeaseExecutionID(owner string) string {
-	parts := strings.SplitN(owner, ":", 2)
-	if len(parts) != 2 {
-		return ""
-	}
-	return strings.TrimSpace(parts[1])
+	return orchestration.ReconcileStaleSessionLease(ctx, s.backend, s.terminalIO, workspaceID, sessionID, owner)
 }
 
 func boolPtr(value bool) *bool {

@@ -690,31 +690,50 @@ func (s *AgentService) waitForSessionLeaseDrain(ctx context.Context, workspaceID
 	}
 }
 
-// tryReconcileStaleSessionLease checks whether the current lease owner
+func (s *AgentService) tryReconcileStaleSessionLease(ctx context.Context, workspaceID uint, sessionID, owner string) bool {
+	return ReconcileStaleSessionLease(ctx, s.backend, s.terminalIO, workspaceID, sessionID, owner)
+}
+
+// ReconcileStaleSessionLease checks whether the current lease owner
 // references a terminal/missing execution. If so it force-releases the
 // lease and returns true. Owner format is "workerID:executionID".
-func (s *AgentService) tryReconcileStaleSessionLease(ctx context.Context, workspaceID uint, sessionID, owner string) bool {
-	if s.backend == nil || s.terminalIO == nil || owner == "" {
+// Exported so gateway/services can reuse the same logic.
+func ReconcileStaleSessionLease(
+	ctx context.Context,
+	backend repository.BackendRepository,
+	terminalIO repository.TerminalIORepository,
+	workspaceID uint,
+	sessionID, owner string,
+) bool {
+	if backend == nil || terminalIO == nil || owner == "" {
 		return false
 	}
-	executionID := extractLeaseExecutionID(owner)
+	executionID := ExtractLeaseExecutionID(owner)
 	if executionID == "" {
 		return false
 	}
-	exec, err := s.backend.GetRunExecution(ctx, executionID)
+	exec, err := backend.GetRunExecution(ctx, executionID)
 	if err != nil || exec == nil || exec.IsTerminal() {
 		log.Info().
 			Str("session_id", sessionID).
 			Str("lease_owner", owner).
 			Str("execution_id", executionID).
 			Msg("force-releasing stale session lease")
-		_ = s.terminalIO.ReleaseSessionLease(ctx, workspaceID, sessionID, owner)
+		if releaseErr := terminalIO.ReleaseSessionLease(ctx, workspaceID, sessionID, owner); releaseErr != nil {
+			log.Warn().Err(releaseErr).
+				Str("session_id", sessionID).
+				Str("lease_owner", owner).
+				Msg("failed to release stale session lease")
+			return false
+		}
 		return true
 	}
 	return false
 }
 
-func extractLeaseExecutionID(owner string) string {
+// ExtractLeaseExecutionID parses the execution ID from a lease owner
+// string formatted as "workerID:executionID".
+func ExtractLeaseExecutionID(owner string) string {
 	parts := strings.SplitN(owner, ":", 2)
 	if len(parts) != 2 {
 		return ""
