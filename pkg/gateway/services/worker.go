@@ -287,6 +287,19 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 		return &pb.SetTaskResultResponse{}, nil
 	}
 
+	// Defense-in-depth: if the worker supplies an attempt_id and it no longer
+	// matches the current attempt on the run, this result belongs to a
+	// superseded execution. Skip finalization to avoid marking a newer
+	// attempt terminal while its worker is still running.
+	if attempt != nil && strings.TrimSpace(req.AttemptId) != "" && attempt.ID != req.AttemptId {
+		log.Info().
+			Str("task_id", req.TaskId).
+			Str("expected_attempt", req.AttemptId).
+			Str("current_attempt", attempt.ID).
+			Msg("ignoring stale task result: attempt was superseded")
+		return &pb.SetTaskResultResponse{}, nil
+	}
+
 	if err := s.backend.SetRunExecutionResult(ctx, req.TaskId, int(req.ExitCode), req.Error); err != nil {
 		if _, ok := err.(*types.ErrRunExecutionNotFound); ok {
 			return nil, status.Errorf(codes.NotFound, "task not found: %s", req.TaskId)

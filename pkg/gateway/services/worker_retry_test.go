@@ -1360,3 +1360,41 @@ func TestRetryDoesNotClearActiveLease(t *testing.T) {
 	require.Contains(t, err.Error(), "already in use")
 	require.Equal(t, activeOwner, tio.leases[retryLeaseKey(42, "session-1")], "active lease must not be cleared")
 }
+
+func TestSetTaskResultIgnoresSupersededAttemptID(t *testing.T) {
+	backend := newRetryTestBackend()
+	queue := &capturingTaskQueue{}
+	svc := &WorkerService{backend: backend, taskQueue: queue}
+
+	runID := "run-superseded-1"
+	originTaskID := "task-superseded-1"
+	seedRecoverableRunContext(backend, runID, originTaskID, 2)
+
+	currentAttemptID := "attempt-current-1"
+	staleAttemptID := "attempt-stale-1"
+	executionID := runID
+
+	backend.attemptByID[currentAttemptID] = &types.AgentRunAttempt{
+		ID:          currentAttemptID,
+		RunID:       runID,
+		AttemptNo:   2,
+		Status:      types.AgentAttemptStatusRunning,
+		ExecutionID: &executionID,
+	}
+	backend.attemptsByRun[runID] = []*types.AgentRunAttempt{
+		backend.attemptByID[currentAttemptID],
+	}
+
+	_, err := svc.SetTaskResult(context.Background(), &pb.SetTaskResultRequest{
+		TaskId:    runID,
+		ExitCode:  0,
+		Error:     "",
+		AttemptId: staleAttemptID,
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, types.AgentRunStatusRunning, backend.runs[runID].Status,
+		"run should remain running because the stale attempt was ignored")
+	require.Equal(t, types.AgentTaskStateRunning, backend.tasks[originTaskID].State,
+		"origin task should remain running because the stale attempt was ignored")
+}

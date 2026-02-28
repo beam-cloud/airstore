@@ -2163,3 +2163,53 @@ func TestExtractLeaseExecutionID(t *testing.T) {
 	require.Equal(t, "", ExtractLeaseExecutionID(""))
 	require.Equal(t, "b", ExtractLeaseExecutionID("a:b"))
 }
+
+func TestHandleRunInputTaskRequeuesWhenActiveAttemptExists(t *testing.T) {
+	redisClient, cleanup := newTestRedis(t)
+	defer cleanup()
+
+	backend := newFakeBackend()
+	store := repository.NewOrchestrationStore(backend, redisClient)
+
+	runID := uuid.NewString()
+	attemptID := uuid.NewString()
+	backend.runs[runID] = &types.AgentRun{
+		ID:          runID,
+		WorkspaceID: 42,
+		Status:      types.AgentRunStatusRunning,
+		SessionID:   "session-active",
+	}
+	backend.attempts[runID] = []*types.AgentRunAttempt{
+		{
+			ID:        attemptID,
+			RunID:     runID,
+			AttemptNo: 1,
+			Status:    types.AgentAttemptStatusRunning,
+		},
+	}
+
+	taskID := uuid.NewString()
+	task := &types.AgentTask{
+		ID:          taskID,
+		WorkspaceID: 42,
+		Kind:        types.AgentTaskKindRunInput,
+		QueueMode:   types.AgentQueueModeFollowup,
+		State:       types.AgentTaskStateQueued,
+		PayloadJSON: map[string]any{"message": "follow up"},
+		TargetRunID: &runID,
+	}
+	backend.agentTasks[taskID] = task
+
+	svc := NewAgentService(context.Background(), backend, nil, nil, nil, "ghcr.io/beam/sandbox:latest")
+	svc.queueRouter = NewTaskQueueRouter(store)
+
+	err := svc.handleRunInputTask(context.Background(), task)
+	require.NoError(t, err)
+
+	require.Equal(t, types.AgentTaskStateQueued, backend.agentTasks[taskID].State,
+		"task should remain queued (not done) because requeue pushes it back to the dispatch queue")
+
+	queueLen, err := redisClient.LLen(context.Background(), common.Keys.TaskQueue()).Result()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, queueLen, "task should have been pushed back to the queue")
+}

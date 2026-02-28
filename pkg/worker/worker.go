@@ -388,9 +388,13 @@ func setTaskResultWithRetry(
 	ctx context.Context,
 	task types.RunExecution,
 	result *types.RunExecutionResult,
-	reportFn func(ctx context.Context, taskID string, exitCode int, errMsg string) error,
+	reportFn func(ctx context.Context, taskID string, exitCode int, errMsg string, attemptID string) error,
 	sleepFn func(context.Context, time.Duration),
 ) error {
+	attemptID := ""
+	if task.RunAttemptID != nil {
+		attemptID = *task.RunAttemptID
+	}
 	var lastErr error
 	for attempt := range setTaskResultMaxAttempts {
 		if attempt > 0 {
@@ -404,7 +408,7 @@ func setTaskResultWithRetry(
 		}
 
 		attemptCtx, cancel := context.WithTimeout(ctx, setTaskResultRetryTimeout)
-		lastErr = reportFn(attemptCtx, task.ExternalId, result.ExitCode, result.Error)
+		lastErr = reportFn(attemptCtx, task.ExternalId, result.ExitCode, result.Error, attemptID)
 		cancel()
 		if lastErr == nil {
 			return nil

@@ -1000,6 +1000,27 @@ func (s *AgentService) handleRunInputTask(ctx context.Context, task *types.Agent
 		}
 	}
 
+	// Guard: if the run already has an active (in-flight) attempt being
+	// executed by a worker, creating a new attempt would overwrite it on the
+	// agent_run row and push the same run ID to the queue again. When the
+	// original worker finishes it would accidentally finalize the *new*
+	// attempt, marking the task terminal while the second worker is still
+	// running. Requeue the RunInput task so steering can be retried once
+	// the current execution reaches a steer-able interaction state.
+	if !run.Status.IsTerminal() {
+		attempts, _ := s.backend.ListAgentRunAttempts(ctx, run.ID)
+		for _, a := range attempts {
+			if a != nil && a.EndedAt == nil && a.Status.IsInFlight() {
+				log.Info().
+					Str("run_id", run.ID).
+					Str("task_id", task.ID).
+					Str("attempt_id", a.ID).
+					Msg("run has active attempt, requeuing run-input task to avoid overlapping execution")
+				return s.queueRouter.RequeueTask(ctx, task.ID)
+			}
+		}
+	}
+
 	runPolicy := runPolicyFromRun(run)
 	agentConfig := mapFromPayload(task.PayloadJSON, agentPayloadKeyAgentConfig)
 	if len(agentConfig) == 0 {
