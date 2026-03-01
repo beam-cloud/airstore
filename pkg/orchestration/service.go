@@ -138,25 +138,50 @@ func (s *AgentService) resolveRunInteraction(ctx context.Context, run *types.Age
 	return interaction, nil
 }
 
+func newestInFlightAttempt(
+	attempts []*types.AgentRunAttempt,
+) (*types.AgentRunAttempt, string, bool) {
+	for i := len(attempts) - 1; i >= 0; i-- {
+		attempt := attempts[i]
+		if attempt == nil || attempt.EndedAt != nil || !attempt.Status.IsInFlight() {
+			continue
+		}
+		executionID := ""
+		if attempt.ExecutionID != nil {
+			executionID = strings.TrimSpace(*attempt.ExecutionID)
+		}
+		return attempt, executionID, true
+	}
+	return nil, "", false
+}
+
+func (s *AgentService) activeAttemptExecutionID(
+	ctx context.Context,
+	runID string,
+) (string, bool, error) {
+	attempts, err := s.backend.ListAgentRunAttempts(ctx, runID)
+	if err != nil {
+		return "", false, err
+	}
+	_, executionID, hasActiveAttempt := newestInFlightAttempt(attempts)
+	return executionID, hasActiveAttempt, nil
+}
+
 // activeExecutionExternalID resolves a run ID to the external ID of
 // its currently active execution (the key used for terminal I/O).
 func (s *AgentService) activeExecutionExternalID(ctx context.Context, runID string) (string, error) {
-	attempts, err := s.backend.ListAgentRunAttempts(ctx, runID)
+	executionID, hasActiveAttempt, err := s.activeAttemptExecutionID(ctx, runID)
 	if err != nil {
 		return "", err
 	}
-	for i := len(attempts) - 1; i >= 0; i-- {
-		a := attempts[i]
-		if a == nil || !a.Status.IsInFlight() || a.ExecutionID == nil {
-			continue
-		}
-		exec, err := s.backend.GetRunExecution(ctx, *a.ExecutionID)
-		if err != nil || exec == nil {
-			continue
-		}
-		return exec.ExternalId, nil
+	if !hasActiveAttempt || executionID == "" {
+		return "", nil
 	}
-	return "", nil
+	exec, err := s.backend.GetRunExecution(ctx, executionID)
+	if err != nil || exec == nil {
+		return "", nil
+	}
+	return exec.ExternalId, nil
 }
 
 func (s *AgentService) AcceptAgentCommand(
@@ -253,7 +278,6 @@ func (s *AgentService) AcceptAgentCommand(
 	task := &types.AgentTask{
 		WorkspaceID:    workspaceID,
 		AgentID:        params.AgentID,
-		Kind:           types.AgentTaskKindAgentCommand,
 		QueueMode:      types.AgentQueueModeQueue,
 		State:          types.AgentTaskStateQueued,
 		IdempotencyKey: params.IdempotencyKey,
@@ -355,11 +379,44 @@ func (s *AgentService) AcceptRunInput(
 		return directTask, false, outcome, nil
 	}
 
-	task, deduped, err := s.enqueueRunInputTask(ctx, workspaceID, targetRunID, run, queueMode, message, idempotencyKey)
-	if err != nil {
+	originTask, taskErr := s.getOriginTaskForRun(ctx, run)
+	if taskErr != nil {
+		return nil, false, "", taskErr
+	}
+
+	activeExecutionID, hasActiveAttempt, activeAttemptErr := s.activeAttemptExecutionID(ctx, run.ID)
+	if activeAttemptErr != nil {
+		return nil, false, "", activeAttemptErr
+	}
+	if activeExecutionID != "" {
+		s.persistUserInputLog(ctx, run.ID, message)
+		if err := s.publishInteractiveInput(ctx, activeExecutionID, message); err != nil {
+			return nil, false, "", err
+		}
+		_ = s.publishRunEvent(ctx, run.ID, types.AgentRunEventInputDispatched, map[string]any{
+			types.AgentRunEventPayloadKeyQueueMode: queueMode,
+			types.AgentRunEventPayloadKeyMode:      types.RunInputDeliveryQueued,
+		})
+		return originTask, false, types.RunInputDeliveryQueued, nil
+	}
+
+	// If a run already has an active attempt, never create a second one on the
+	// same run row. That can supersede attempt metadata and race finalization.
+	if hasActiveAttempt {
+		return nil, false, "", fmt.Errorf("run input is temporarily unavailable: active attempt has no bound execution")
+	}
+
+	runPolicy := runPolicyFromRun(run)
+	payload := buildRunInputPayload(run, message)
+	agentConfig := s.resolveRunAgentConfig(ctx, run, payload)
+	if _, err := s.createAttemptExecutionTask(ctx, run, runPolicy, message, agentConfig, payload); err != nil {
 		return nil, false, "", err
 	}
-	return task, deduped, types.RunInputDeliveryQueued, nil
+	_ = s.publishRunEvent(ctx, run.ID, types.AgentRunEventInputDispatched, map[string]any{
+		types.AgentRunEventPayloadKeyQueueMode: queueMode,
+		types.AgentRunEventPayloadKeyMode:      types.RunInputDeliveryQueued,
+	})
+	return originTask, false, types.RunInputDeliveryQueued, nil
 }
 
 func (s *AgentService) tryHandleActiveRunInput(
@@ -383,46 +440,70 @@ func (s *AgentService) tryHandleActiveRunInput(
 		}
 	}
 
-	if interaction != nil &&
-		interaction.State == types.RunInteractionStateWaitingForInput &&
-		strings.TrimSpace(interaction.ActiveExecutionID) != "" {
-		s.persistUserInputLog(ctx, run.ID, message)
-		if err := s.publishInteractiveInput(ctx, interaction.ActiveExecutionID, message); err != nil {
-			return nil, "", err
-		}
-		_ = s.publishRunEvent(ctx, run.ID, types.AgentRunEventInputSteered, map[string]any{
-			"queue_mode":        queueMode,
-			"interaction_state": interaction.State,
-			"direct":            true,
-		})
+	deliveryOutcome, interactionState, deliveryErr := s.tryDeliverToActiveExecution(ctx, run, interaction, message)
+	if deliveryErr != nil {
+		return nil, "", deliveryErr
+	}
+	if deliveryOutcome == "" {
+		return nil, "", nil
+	}
 
-		task, taskErr := s.getOriginTaskForRun(ctx, run)
-		if taskErr != nil {
-			return nil, "", taskErr
+	eventType := types.AgentRunEventInputSteered
+	if deliveryOutcome == types.RunInputDeliveryQueued {
+		eventType = types.AgentRunEventInputDispatched
+	}
+	payload := map[string]any{
+		types.AgentRunEventPayloadKeyQueueMode: queueMode,
+		types.AgentRunEventPayloadKeyDirect:    deliveryOutcome == types.RunInputDeliveryDirect,
+		types.AgentRunEventPayloadKeyMode:      deliveryOutcome,
+	}
+	if interactionState != "" {
+		payload[types.AgentRunEventPayloadKeyInteractionState] = interactionState
+	}
+	_ = s.publishRunEvent(ctx, run.ID, eventType, payload)
+
+	task, taskErr := s.originTaskForRunInput(ctx, run, message)
+	if taskErr != nil {
+		return nil, "", taskErr
+	}
+	return task, deliveryOutcome, nil
+}
+
+func (s *AgentService) tryDeliverToActiveExecution(
+	ctx context.Context,
+	run *types.AgentRun,
+	interaction *types.RunInteraction,
+	message string,
+) (types.RunInputDeliveryOutcome, types.RunInteractionState, error) {
+	if interaction != nil {
+		activeExecutionID := strings.TrimSpace(interaction.ActiveExecutionID)
+		switch {
+		case interaction.State == types.RunInteractionStateWaitingForInput &&
+			activeExecutionID != "" &&
+			s.canDeliverInteractiveInput(ctx, activeExecutionID):
+			if err := s.publishInteractiveInput(ctx, activeExecutionID, message); err != nil {
+				return "", "", err
+			}
+			return types.RunInputDeliveryDirect, interaction.State, nil
+		case interaction.State == types.RunInteractionStateWorking &&
+			activeExecutionID != "" &&
+			s.canDeliverInteractiveInput(ctx, activeExecutionID):
+			if err := s.publishInteractiveInput(ctx, activeExecutionID, message); err != nil {
+				return "", "", err
+			}
+			return types.RunInputDeliveryQueued, interaction.State, nil
+		case interaction.UpdatedAt > 0:
+			// Runner interaction state is authoritative; do not guess/fallback.
+			return "", "", nil
 		}
-		return task, types.RunInputDeliveryDirect, nil
 	}
 
 	// Backward-compatible fallback while runner-owned interaction state warms up.
-	if interaction == nil || interaction.UpdatedAt == 0 {
-		delivered, deliverErr := s.deliverInteractiveInput(ctx, run, message)
-		if deliverErr != nil {
-			return nil, "", deliverErr
-		}
-		if delivered {
-			_ = s.publishRunEvent(ctx, run.ID, types.AgentRunEventInputSteered, map[string]any{
-				"queue_mode": queueMode,
-				"direct":     true,
-				"mode":       "legacy_fallback",
-			})
-			task, taskErr := s.originTaskForRunInput(ctx, run, message)
-			if taskErr != nil {
-				return nil, "", taskErr
-			}
-			return task, types.RunInputDeliveryDirect, nil
-		}
+	delivered, err := s.deliverInteractiveInput(ctx, run, message)
+	if err != nil || !delivered {
+		return "", "", err
 	}
-	return nil, "", nil
+	return types.RunInputDeliveryDirect, "", nil
 }
 
 func (s *AgentService) originTaskForRunInput(
@@ -445,40 +526,6 @@ func (s *AgentService) getOriginTaskForRun(
 		return nil, fmt.Errorf("target run is required")
 	}
 	return s.backend.GetTaskByID(ctx, run.OriginTaskID)
-}
-
-func (s *AgentService) enqueueRunInputTask(
-	ctx context.Context,
-	workspaceID uint,
-	targetRunID string,
-	run *types.AgentRun,
-	queueMode types.AgentQueueMode,
-	message string,
-	idempotencyKey string,
-) (*types.AgentTask, bool, error) {
-	instanceKey := executionInstanceKeyFromRun(run)
-	payload := buildRunInputPayload(run, message)
-	task := &types.AgentTask{
-		WorkspaceID:    workspaceID,
-		AgentID:        run.AgentID,
-		Kind:           types.AgentTaskKindRunInput,
-		QueueMode:      queueMode,
-		State:          types.AgentTaskStateQueued,
-		IdempotencyKey: idempotencyKey,
-		PayloadJSON:    payload,
-		RoutingJSON:    map[string]any{},
-		TargetRunID:    &targetRunID,
-	}
-	if err := s.backend.CreateTask(ctx, task); err != nil {
-		if existing, lookupErr := s.backend.GetTaskByIdempotency(ctx, workspaceID, run.AgentID, idempotencyKey); lookupErr == nil {
-			return existing, true, nil
-		}
-		return nil, false, err
-	}
-	if err := s.queueRouter.Enqueue(ctx, task, instanceKey); err != nil {
-		return nil, false, err
-	}
-	return task, false, nil
 }
 
 func (s *AgentService) interruptAndDispatchInteractiveInput(
@@ -511,14 +558,14 @@ func (s *AgentService) interruptAndDispatchInteractiveInput(
 
 	payload := buildRunInputPayload(run, message)
 	runPolicy := runPolicyFromRun(run)
-	agentConfig := s.agentConfigForRun(ctx, run)
+	agentConfig := s.resolveRunAgentConfig(ctx, run, payload)
 	if _, err := s.createAttemptExecutionTask(ctx, run, runPolicy, message, agentConfig, payload); err != nil {
 		return false, err
 	}
 
 	_ = s.publishRunEvent(ctx, run.ID, types.AgentRunEventInterrupted, map[string]any{
-		"action":     "cancel_then_continue",
-		"queue_mode": types.AgentQueueModeInterrupt,
+		types.AgentRunEventPayloadKeyAction:    types.AgentRunEventActionCancelThenContinue,
+		types.AgentRunEventPayloadKeyQueueMode: types.AgentQueueModeInterrupt,
 	})
 	return true, nil
 }
@@ -592,24 +639,17 @@ func (s *AgentService) handleInterruptTask(ctx context.Context, task *types.Agen
 		return err
 	}
 
-	if task.Kind == types.AgentTaskKindRunInput {
-		_ = s.publishRunEvent(ctx, run.ID, types.AgentRunEventInterrupted, map[string]any{
-			"task_id": task.ID,
-			"action":  "cancel_then_continue",
-		})
-		if err := s.backend.UpdateAgentRunLifecycle(ctx, run.ID, types.AgentRunStatusAccepted, nil, nil, nil); err != nil {
-			return err
-		}
-		return s.handleRunInputTask(ctx, task)
-	}
-
 	now := time.Now()
-	errMsg := "interrupted by queued input"
+	errMsg := types.AgentRunErrorInterruptedByQueuedInput
 	if err := s.backend.UpdateAgentRunLifecycle(ctx, run.ID, types.AgentRunStatusCancelled, nil, &now, &errMsg); err != nil {
 		return err
 	}
-	_ = s.appendRunSnapshot(ctx, run.ID, types.AgentRunStatusCancelled, nil, &now, &errMsg, map[string]any{"cause": "interrupt"})
-	_ = s.publishRunEvent(ctx, run.ID, types.AgentRunEventInterrupted, map[string]any{"task_id": task.ID})
+	_ = s.appendRunSnapshot(ctx, run.ID, types.AgentRunStatusCancelled, nil, &now, &errMsg, map[string]any{
+		types.AgentRunEventPayloadKeyCause: types.AgentRunEventCauseInterrupt,
+	})
+	_ = s.publishRunEvent(ctx, run.ID, types.AgentRunEventInterrupted, map[string]any{
+		types.AgentRunEventPayloadKeyTaskID: task.ID,
+	})
 	return s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDone, nil, task.TargetRunID)
 }
 
@@ -766,20 +806,6 @@ func (s *AgentService) handleExecutionTask(ctx context.Context, task *types.Agen
 		return err
 	}
 
-	// Attempt direct delivery for run-input tasks before the capacity check —
-	// the concurrency slot is occupied by the very session they need to deliver to.
-	if task.Kind == types.AgentTaskKindRunInput &&
-		task.TargetRunID != nil &&
-		task.QueueMode != types.AgentQueueModeInterrupt {
-		steered, err := s.trySteerRunInputTask(ctx, task)
-		if err != nil {
-			return err
-		}
-		if steered {
-			return nil
-		}
-	}
-
 	desiredDispatch := 1
 	var runningAttempts int
 	hasInstanceState := false
@@ -801,10 +827,6 @@ func (s *AgentService) handleExecutionTask(ctx context.Context, task *types.Agen
 		return nil
 	}
 
-	if task.Kind == types.AgentTaskKindRunInput && task.TargetRunID != nil {
-		return s.handleRunInputTask(ctx, task)
-	}
-
 	run, runPolicy, prompt, err := s.materializeRun(ctx, task)
 	if err != nil {
 		if isSessionBusyError(err) {
@@ -824,7 +846,7 @@ func (s *AgentService) handleExecutionTask(ctx context.Context, task *types.Agen
 		run,
 		runPolicy,
 		prompt,
-		mapFromPayload(task.PayloadJSON, agentPayloadKeyAgentConfig),
+		s.resolveRunAgentConfig(ctx, run, task.PayloadJSON),
 		task.PayloadJSON,
 	)
 	return err
@@ -844,6 +866,20 @@ func (s *AgentService) publishInteractiveInput(ctx context.Context, executionExt
 	return nil
 }
 
+func (s *AgentService) canDeliverInteractiveInput(ctx context.Context, executionID string) bool {
+	executionID = strings.TrimSpace(executionID)
+	if executionID == "" {
+		return false
+	}
+	exec, err := s.backend.GetRunExecution(ctx, executionID)
+	if err != nil || exec == nil {
+		// Trust explicit terminal interaction state when run_execution metadata
+		// has not been persisted yet.
+		return true
+	}
+	return exec.IsInteractive() && !exec.IsTerminal()
+}
+
 // deliverInteractiveInput publishes a message directly to a running interactive
 // execution's stdin via terminalIO. Returns true if input was delivered.
 func (s *AgentService) deliverInteractiveInput(ctx context.Context, run *types.AgentRun, message string) (bool, error) {
@@ -854,31 +890,15 @@ func (s *AgentService) deliverInteractiveInput(ctx context.Context, run *types.A
 		return false, nil
 	}
 
-	attempts, err := s.backend.ListAgentRunAttempts(ctx, run.ID)
+	executionID, hasActiveAttempt, err := s.activeAttemptExecutionID(ctx, run.ID)
 	if err != nil {
 		return false, err
 	}
-
-	var activeAttempt *types.AgentRunAttempt
-	for i := len(attempts) - 1; i >= 0; i-- {
-		attempt := attempts[i]
-		if attempt == nil {
-			continue
-		}
-		if !attempt.Status.IsInFlight() || attempt.ExecutionID == nil {
-			continue
-		}
-		if strings.TrimSpace(*attempt.ExecutionID) == "" {
-			continue
-		}
-		activeAttempt = attempt
-		break
-	}
-	if activeAttempt == nil || activeAttempt.ExecutionID == nil {
+	if !hasActiveAttempt || executionID == "" {
 		return false, nil
 	}
 
-	execTask, err := s.backend.GetRunExecution(ctx, *activeAttempt.ExecutionID)
+	execTask, err := s.backend.GetRunExecution(ctx, executionID)
 	if err != nil {
 		return false, nil
 	}
@@ -890,165 +910,6 @@ func (s *AgentService) deliverInteractiveInput(ctx context.Context, run *types.A
 		return false, err
 	}
 	return true, nil
-}
-
-func (s *AgentService) trySteerRunInputTask(ctx context.Context, task *types.AgentTask) (bool, error) {
-	if task == nil || task.TargetRunID == nil {
-		return false, nil
-	}
-
-	run, err := s.backend.GetAgentRun(ctx, task.WorkspaceID, *task.TargetRunID)
-	if err != nil {
-		return false, err
-	}
-	prompt := runInputPrompt(task.PayloadJSON)
-	if prompt == "" {
-		return false, nil
-	}
-
-	interaction, interactionErr := s.resolveRunInteraction(ctx, run)
-	if interactionErr != nil {
-		return false, interactionErr
-	}
-	activeExecutionID := ""
-	if interaction != nil {
-		activeExecutionID = strings.TrimSpace(interaction.ActiveExecutionID)
-	}
-	switch {
-	case interaction != nil &&
-		interaction.State == types.RunInteractionStateWaitingForInput &&
-		activeExecutionID != "":
-		if err := s.publishInteractiveInput(ctx, activeExecutionID, prompt); err != nil {
-			return false, err
-		}
-	case interaction != nil && interaction.UpdatedAt > 0:
-		// If the worker is still in "working", queue buffered input on the active
-		// execution instead of spawning a second execution for the same run.
-		if interaction.State == types.RunInteractionStateWorking && activeExecutionID != "" {
-			if err := s.publishInteractiveInput(ctx, activeExecutionID, prompt); err != nil {
-				return false, err
-			}
-			break
-		}
-		return false, nil
-	default:
-		// Backward-compatible fallback while interaction state propagation warms up.
-		delivered, err := s.deliverInteractiveInput(ctx, run, prompt)
-		if err != nil || !delivered {
-			return false, err
-		}
-	}
-
-	if err := s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDone, nil, task.TargetRunID); err != nil {
-		return false, err
-	}
-	interactionState := ""
-	if interaction != nil {
-		interactionState = string(interaction.State)
-	}
-
-	_ = s.publishRunEvent(ctx, run.ID, types.AgentRunEventInputSteered, map[string]any{
-		"task_id":           task.ID,
-		"queue_mode":        task.QueueMode,
-		"interaction_state": interactionState,
-		"direct":            true,
-	})
-	return true, nil
-}
-
-func (s *AgentService) handleRunInputTask(ctx context.Context, task *types.AgentTask) error {
-	if task.TargetRunID == nil {
-		reason := types.AgentTaskDropReasonRunInputMissingTarget
-		return s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDropped, &reason, nil)
-	}
-
-	run, err := s.backend.GetAgentRun(ctx, task.WorkspaceID, *task.TargetRunID)
-	if err != nil {
-		return err
-	}
-	prompt := runInputPrompt(task.PayloadJSON)
-	if prompt == "" {
-		reason := types.AgentTaskDropReasonRunInputMissingMessage
-		return s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDropped, &reason, task.TargetRunID)
-	}
-	if run.Status.IsTerminal() {
-		if task.QueueMode == types.AgentQueueModeFollowup || task.QueueMode == types.AgentQueueModeQueue {
-			s.persistUserInputLog(ctx, run.ID, prompt)
-			if _, err := s.restartTerminalTaskFromRunInput(ctx, run, task.QueueMode, prompt); err != nil {
-				return err
-			}
-			if err := s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDone, nil, task.TargetRunID); err != nil {
-				return err
-			}
-			_ = s.publishRunEvent(ctx, run.ID, types.AgentRunEventInputDispatched, map[string]any{
-				"task_id":    task.ID,
-				"queue_mode": task.QueueMode,
-				"mode":       "terminal_restart_deferred",
-			})
-			return nil
-		}
-		reason := types.AgentTaskDropReasonRunInputTerminalTarget
-		return s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDropped, &reason, task.TargetRunID)
-	}
-	if task.QueueMode != types.AgentQueueModeInterrupt {
-		steered, err := s.trySteerRunInputTask(ctx, task)
-		if err != nil {
-			return err
-		}
-		if steered {
-			return nil
-		}
-	}
-
-	// Guard: if the run already has an active (in-flight) attempt being
-	// executed by a worker, creating a new attempt would overwrite it on the
-	// agent_run row and push the same run ID to the queue again. When the
-	// original worker finishes it would accidentally finalize the *new*
-	// attempt, marking the task terminal while the second worker is still
-	// running. Requeue the RunInput task so steering can be retried once
-	// the current execution reaches a steer-able interaction state.
-	if !run.Status.IsTerminal() {
-		attempts, _ := s.backend.ListAgentRunAttempts(ctx, run.ID)
-		for _, a := range attempts {
-			if a != nil && a.EndedAt == nil && a.Status.IsInFlight() {
-				log.Info().
-					Str("run_id", run.ID).
-					Str("task_id", task.ID).
-					Str("attempt_id", a.ID).
-					Msg("run has active attempt, requeuing run-input task to avoid overlapping execution")
-				return s.queueRouter.RequeueTask(ctx, task.ID)
-			}
-		}
-	}
-
-	runPolicy := runPolicyFromRun(run)
-	agentConfig := mapFromPayload(task.PayloadJSON, agentPayloadKeyAgentConfig)
-	if len(agentConfig) == 0 {
-		agentConfig = s.agentConfigForRun(ctx, run)
-	}
-	if _, err := s.createAttemptExecutionTask(
-		ctx,
-		run,
-		runPolicy,
-		prompt,
-		agentConfig,
-		task.PayloadJSON,
-	); err != nil {
-		return err
-	}
-	if err := s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDone, nil, task.TargetRunID); err != nil {
-		return err
-	}
-	eventType := types.AgentRunEventInputDispatched
-	if task.QueueMode == types.AgentQueueModeSteer {
-		eventType = types.AgentRunEventSteerFallbackDispatched
-	}
-	_ = s.publishRunEvent(ctx, run.ID, eventType, map[string]any{
-		"task_id":    task.ID,
-		"queue_mode": task.QueueMode,
-		"mode":       "followup_attempt",
-	})
-	return nil
 }
 
 // persistUserInputLog writes the user's follow-up message to the S2 log
@@ -1098,7 +959,7 @@ func (s *AgentService) restartTerminalTaskFromRunInput(
 	}
 	if !terminalRun.Status.IsTerminal() {
 		now := time.Now()
-		errMsg := "superseded by follow-up restart"
+		errMsg := types.AgentRunErrorSupersededByFollowupRestart
 		if err := s.backend.UpdateAgentRunLifecycle(ctx, terminalRun.ID, types.AgentRunStatusCancelled, nil, &now, &errMsg); err != nil {
 			log.Warn().Err(err).Str("run_id", terminalRun.ID).Msg("failed to cancel superseded run before restart")
 		}
@@ -1143,12 +1004,7 @@ func (s *AgentService) restartTerminalTaskFromRunInput(
 		return nil, err
 	}
 
-	agentConfig := mapFromPayload(task.PayloadJSON, agentPayloadKeyAgentConfig)
-	if len(agentConfig) == 0 && run.AgentID != nil {
-		if profile, profileErr := s.backend.GetAgentProfile(ctx, task.WorkspaceID, *run.AgentID); profileErr == nil {
-			agentConfig = cloneAnyMap(profile.ConfigJSON)
-		}
-	}
+	agentConfig := s.resolveRunAgentConfig(ctx, run, task.PayloadJSON)
 	if _, err := s.createAttemptExecutionTask(
 		ctx,
 		run,
@@ -1165,10 +1021,10 @@ func (s *AgentService) restartTerminalTaskFromRunInput(
 		eventType = types.AgentRunEventSteerFallbackDispatched
 	}
 	_ = s.publishRunEvent(ctx, run.ID, eventType, map[string]any{
-		"task_id":               task.ID,
-		"queue_mode":            queueMode,
-		"mode":                  "terminal_restart",
-		"restarted_from_run_id": terminalRun.ID,
+		types.AgentRunEventPayloadKeyTaskID:           task.ID,
+		types.AgentRunEventPayloadKeyQueueMode:        queueMode,
+		types.AgentRunEventPayloadKeyMode:             types.RunInputDeliveryRestarted,
+		types.AgentRunEventPayloadKeyRestartedFromRun: terminalRun.ID,
 	})
 	return task, nil
 }
@@ -1233,6 +1089,18 @@ func (s *AgentService) agentConfigForRun(ctx context.Context, run *types.AgentRu
 	return cloneAnyMap(profile.ConfigJSON)
 }
 
+func (s *AgentService) resolveRunAgentConfig(
+	ctx context.Context,
+	run *types.AgentRun,
+	payload map[string]any,
+) map[string]any {
+	agentConfig := mapFromPayload(payload, agentPayloadKeyAgentConfig)
+	if len(agentConfig) == 0 {
+		agentConfig = s.agentConfigForRun(ctx, run)
+	}
+	return agentConfig
+}
+
 func runInputPrompt(payload map[string]any) string {
 	prompt := strings.TrimSpace(stringFromPayload(payload, "message"))
 	if prompt == "" {
@@ -1265,15 +1133,13 @@ func (s *AgentService) materializeRun(
 
 	runPolicy := runPolicyFromPayload(payload)
 	provider, model := providerModelFromPayload(payload)
-	if task.Kind == types.AgentTaskKindAgentCommand {
-		if provider == nil {
-			return nil, RunExecutionPolicy{}, "", fmt.Errorf("agent provider is required in task payload")
-		}
-		if !isClaudeCompatibleProvider(*provider) {
-			return nil, RunExecutionPolicy{}, "", fmt.Errorf("agent provider %q is not supported", *provider)
-		}
-		runPolicy.Interactive = true
+	if provider == nil {
+		return nil, RunExecutionPolicy{}, "", fmt.Errorf("agent provider is required in task payload")
 	}
+	if !isClaudeCompatibleProvider(*provider) {
+		return nil, RunExecutionPolicy{}, "", fmt.Errorf("agent provider %q is not supported", *provider)
+	}
+	runPolicy.Interactive = true
 	if err := ValidateRunExecutionPolicy(runPolicy); err != nil {
 		return nil, RunExecutionPolicy{}, "", err
 	}
@@ -1325,10 +1191,14 @@ func (s *AgentService) materializeRun(
 	if err := s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateRunning, nil, &run.ID); err != nil {
 		return nil, RunExecutionPolicy{}, "", err
 	}
-	if err := s.appendRunSnapshot(ctx, run.ID, types.AgentRunStatusAccepted, nil, nil, nil, map[string]any{"task_id": task.ID}); err != nil {
+	if err := s.appendRunSnapshot(ctx, run.ID, types.AgentRunStatusAccepted, nil, nil, nil, map[string]any{
+		types.AgentRunEventPayloadKeyTaskID: task.ID,
+	}); err != nil {
 		log.Warn().Err(err).Str("run_id", run.ID).Msg("failed to append accepted snapshot")
 	}
-	_ = s.publishRunEvent(ctx, run.ID, types.AgentRunEventAccepted, map[string]any{"task_id": task.ID})
+	_ = s.publishRunEvent(ctx, run.ID, types.AgentRunEventAccepted, map[string]any{
+		types.AgentRunEventPayloadKeyTaskID: task.ID,
+	})
 	return run, runPolicy, prompt, nil
 }
 

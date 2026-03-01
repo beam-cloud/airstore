@@ -40,7 +40,6 @@ type SendResult struct {
 	IdempotentHit   bool                          `json:"idempotent_hit"`
 	Task            *types.AgentTask              `json:"task,omitempty"`
 	RunID           *string                       `json:"run_id,omitempty"`
-	Decision        types.RunInputDecision        `json:"decision,omitempty"`
 	DeliveryOutcome types.RunInputDeliveryOutcome `json:"delivery_outcome,omitempty"`
 	Interaction     *types.RunInteraction         `json:"interaction,omitempty"`
 }
@@ -239,7 +238,6 @@ func (d *Direct) SendToRun(ctx context.Context, workspaceID uint, runID string, 
 		IdempotentHit:   deduped,
 		Task:            responseTask,
 		RunID:           responseRunID,
-		Decision:        types.RunInputDecision(outcome),
 		DeliveryOutcome: outcome,
 		Interaction:     interaction,
 	}, nil

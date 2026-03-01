@@ -108,6 +108,36 @@ func (b *retryTestBackend) UpdateTaskState(_ context.Context, taskID string, sta
 	return nil
 }
 
+func (b *retryTestBackend) UpdateTaskStateIfCurrentRun(
+	_ context.Context,
+	taskID string,
+	expectedRunID string,
+	state types.AgentTaskState,
+	droppedReason *string,
+	targetRunID *string,
+) (bool, error) {
+	task, ok := b.tasks[taskID]
+	if !ok {
+		return false, nil
+	}
+	if task.State.IsTerminal() {
+		return false, nil
+	}
+	currentRunID := ""
+	if task.TargetRunID != nil {
+		currentRunID = strings.TrimSpace(*task.TargetRunID)
+	}
+	if currentRunID != strings.TrimSpace(expectedRunID) {
+		return false, nil
+	}
+	task.State = state
+	task.DroppedReason = droppedReason
+	if targetRunID != nil {
+		task.TargetRunID = targetRunID
+	}
+	return true, nil
+}
+
 func (b *retryTestBackend) GetRunAttemptByExecutionID(_ context.Context, executionID string) (*types.AgentRunAttempt, error) {
 	for _, attempt := range b.attemptByID {
 		if attempt == nil || attempt.ExecutionID == nil {
@@ -769,6 +799,41 @@ func TestMarkOriginTaskTerminalSkipsStaleCompletionAfterTaskReopen(t *testing.T)
 	task := backend.tasks[originTaskID]
 	require.NotNil(t, task)
 	require.Equal(t, types.AgentTaskStateQueued, task.State)
+}
+
+func TestMarkOriginTaskTerminalSkipsWhenTaskTargetsDifferentRun(t *testing.T) {
+	backend := newRetryTestBackend()
+	svc := &WorkerService{backend: backend}
+
+	agentID := "agent-1"
+	runID := "run-stale-1"
+	newRunID := "run-current-2"
+	originTaskID := "task-1"
+	endedAt := time.Now().Add(-2 * time.Minute)
+
+	backend.runs[runID] = &types.AgentRun{
+		ID:           runID,
+		WorkspaceID:  42,
+		AgentID:      &agentID,
+		OriginTaskID: originTaskID,
+		Status:       types.AgentRunStatusOK,
+		EndedAt:      &endedAt,
+	}
+	backend.tasks[originTaskID] = &types.AgentTask{
+		ID:          originTaskID,
+		WorkspaceID: 42,
+		State:       types.AgentTaskStateRunning,
+		TargetRunID: &newRunID,
+	}
+
+	err := svc.markOriginTaskTerminalIfCurrentRun(context.Background(), runID)
+	require.NoError(t, err)
+
+	task := backend.tasks[originTaskID]
+	require.NotNil(t, task)
+	require.Equal(t, types.AgentTaskStateRunning, task.State)
+	require.NotNil(t, task.TargetRunID)
+	require.Equal(t, newRunID, *task.TargetRunID)
 }
 
 func TestSetTaskStartedRejectsTerminalRunMarksOriginTaskCancelled(t *testing.T) {

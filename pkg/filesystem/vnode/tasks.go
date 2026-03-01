@@ -251,7 +251,6 @@ func pbToAgentTask(pt *pb.AgentTask) *types.AgentTask {
 	task := &types.AgentTask{
 		ID:             pt.Id,
 		AgentID:        optionalString(pt.AgentId),
-		Kind:           types.AgentTaskKind(pt.Kind),
 		QueueMode:      types.AgentQueueMode(pt.QueueMode),
 		State:          types.AgentTaskState(pt.State),
 		IdempotencyKey: pt.IdempotencyKey,
@@ -385,7 +384,6 @@ func (t *TasksVNode) Read(path string, buf []byte, off int64, fh FileHandle) (in
 	var content strings.Builder
 	content.WriteString(fmt.Sprintf("Task: %s\n", task.ID))
 	content.WriteString(fmt.Sprintf("State: %s\n", task.State))
-	content.WriteString(fmt.Sprintf("Kind: %s\n", task.Kind))
 	content.WriteString(fmt.Sprintf("Queue Mode: %s\n", task.QueueMode))
 	if task.TargetRunID != nil {
 		content.WriteString(fmt.Sprintf("Run: %s\n", *task.TargetRunID))

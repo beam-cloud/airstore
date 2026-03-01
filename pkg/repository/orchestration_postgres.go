@@ -13,7 +13,7 @@ import (
 )
 
 const agentTaskSelect = `
-	SELECT id, workspace_id, agent_id, agent_name, kind, queue_mode, state, idempotency_key, payload_json, routing_json,
+	SELECT id, workspace_id, agent_id, agent_name, queue_mode, state, idempotency_key, payload_json, routing_json,
 	       parent_envelope_id, target_run_id, accepted_at, queued_at, dispatched_at, dropped_reason, archived_at, created_at, updated_at
 	FROM (
 		SELECT
@@ -21,9 +21,9 @@ const agentTaskSelect = `
 			t.workspace_id,
 			t.agent_id,
 			COALESCE(ap.name, '') AS agent_name,
-			t.kind,
 			t.queue_mode,
 			t.state,
+			t.kind::text AS kind,
 			t.idempotency_key,
 			t.payload_json,
 			t.routing_json,
@@ -290,7 +290,7 @@ func (b *PostgresBackend) CreateTask(ctx context.Context, task *types.AgentTask)
 		query,
 		task.WorkspaceID,
 		task.AgentID,
-		task.Kind,
+		types.AgentTaskKindAgentCommand,
 		task.QueueMode,
 		task.State,
 		task.IdempotencyKey,
@@ -321,7 +321,6 @@ func (b *PostgresBackend) scanAgentTask(row scanner) (*types.AgentTask, error) {
 		&task.WorkspaceID,
 		&agentID,
 		&agentName,
-		&task.Kind,
 		&task.QueueMode,
 		&task.State,
 		&task.IdempotencyKey,
@@ -394,11 +393,12 @@ func (b *PostgresBackend) ListTasks(ctx context.Context, workspaceId uint, limit
 	query := agentTaskSelect + `
 		WHERE workspace_id = $1
 		  AND archived_at IS NULL
+		  AND kind::text = $2
 		ORDER BY created_at DESC
-		LIMIT $2
+		LIMIT $3
 	`
 
-	rows, err := b.db.QueryContext(ctx, query, workspaceId, limit)
+	rows, err := b.db.QueryContext(ctx, query, workspaceId, types.AgentTaskKindAgentCommand, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list agent tasks: %w", err)
 	}
@@ -440,11 +440,12 @@ func (b *PostgresBackend) ListTasksFiltered(ctx context.Context, workspaceId uin
 		WHERE workspace_id = $1
 		  AND archived_at IS NULL
 		  AND ($2::uuid IS NULL OR agent_id = $2::uuid)
-		  AND ($3::text[] IS NULL OR state::text = ANY($3::text[]))
-		  AND ($4::timestamptz IS NULL OR created_at >= $4::timestamptz)
-		  AND ($5::timestamptz IS NULL OR created_at <= $5::timestamptz)
+		  AND kind::text = $3
+		  AND ($4::text[] IS NULL OR state::text = ANY($4::text[]))
+		  AND ($5::timestamptz IS NULL OR created_at >= $5::timestamptz)
+		  AND ($6::timestamptz IS NULL OR created_at <= $6::timestamptz)
 		ORDER BY created_at DESC, id DESC
-		LIMIT $6 OFFSET $7
+		LIMIT $7 OFFSET $8
 	`
 
 	rows, err := b.db.QueryContext(
@@ -452,6 +453,7 @@ func (b *PostgresBackend) ListTasksFiltered(ctx context.Context, workspaceId uin
 		query,
 		workspaceId,
 		optionalStringArg(filter.AgentID),
+		types.AgentTaskKindAgentCommand,
 		statesArg,
 		filter.CreatedAfter,
 		filter.CreatedBefore,
@@ -498,6 +500,7 @@ func (b *PostgresBackend) GetTaskByIdempotency(ctx context.Context, workspaceId 
 		WHERE workspace_id = $1
 		  AND idempotency_key = $2
 		  AND (($3::uuid IS NULL AND agent_id IS NULL) OR agent_id = $3::uuid)
+		  AND kind::text = $4
 		ORDER BY created_at DESC
 		LIMIT 1
 	`
@@ -505,7 +508,16 @@ func (b *PostgresBackend) GetTaskByIdempotency(ctx context.Context, workspaceId 
 	if agentId != nil {
 		agentArg = *agentId
 	}
-	task, err := b.scanAgentTask(b.db.QueryRowContext(ctx, query, workspaceId, idempotencyKey, agentArg))
+	task, err := b.scanAgentTask(
+		b.db.QueryRowContext(
+			ctx,
+			query,
+			workspaceId,
+			idempotencyKey,
+			agentArg,
+			types.AgentTaskKindAgentCommand,
+		),
+	)
 	if err != nil {
 		if _, ok := err.(*types.ErrAgentTaskNotFound); ok {
 			return nil, &types.ErrAgentTaskNotFound{ID: idempotencyKey}
@@ -536,6 +548,46 @@ func (b *PostgresBackend) UpdateTaskState(ctx context.Context, taskID string, st
 		return &types.ErrAgentTaskNotFound{ID: taskID}
 	}
 	return nil
+}
+
+func (b *PostgresBackend) UpdateTaskStateIfCurrentRun(
+	ctx context.Context,
+	taskID string,
+	expectedRunID string,
+	state types.AgentTaskState,
+	droppedReason *string,
+	targetRunID *string,
+) (bool, error) {
+	now := time.Now()
+	baseArgs := []any{taskID, state, now, droppedReason, targetRunID}
+	expectedRunID = strings.TrimSpace(expectedRunID)
+
+	query := `
+		UPDATE agent_task
+		SET state = $2::agent_task_state,
+		    queued_at = CASE WHEN $2::agent_task_state = 'queued'::agent_task_state THEN $3 ELSE queued_at END,
+		    dispatched_at = CASE WHEN $2::agent_task_state = 'running'::agent_task_state THEN $3 ELSE dispatched_at END,
+		    dropped_reason = CASE WHEN $2::agent_task_state = 'dropped'::agent_task_state THEN $4 ELSE dropped_reason END,
+		    target_run_id = COALESCE($5::uuid, target_run_id),
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1
+		  AND state NOT IN ('done'::agent_task_state, 'dropped'::agent_task_state, 'cancelled'::agent_task_state)
+	`
+	var args []any
+	if expectedRunID == "" {
+		query += " AND target_run_id IS NULL"
+		args = baseArgs
+	} else {
+		query += " AND target_run_id = $6::uuid"
+		args = append(baseArgs, expectedRunID)
+	}
+
+	res, err := b.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return false, fmt.Errorf("update task state if current run: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	return affected > 0, nil
 }
 
 func (b *PostgresBackend) ArchiveTask(ctx context.Context, taskID string) error {
@@ -1207,7 +1259,7 @@ func (b *PostgresBackend) scanAgentRunAttempt(row scanner) (*types.AgentRunAttem
 	} else {
 		attempt.ID = runID
 	}
-	attempt.Status = attemptStatusFromRunStatus(runStatus, attempt.ExecAsk, image.Valid && strings.TrimSpace(image.String) != "")
+	attempt.Status = types.AttemptStatusFromRunStatus(runStatus, attempt.ExecAsk, image.Valid && strings.TrimSpace(image.String) != "")
 	if attempt.AttemptNo <= 0 {
 		attempt.AttemptNo = 1
 	}
@@ -1321,7 +1373,7 @@ func (b *PostgresBackend) UpdateAgentRunAttemptResult(ctx context.Context, attem
 	if err != nil {
 		return err
 	}
-	runStatus := runStatusFromAttemptStatus(status)
+	runStatus := types.RunStatusFromAttemptStatus(status)
 	query := `
 		UPDATE agent_run
 		SET status = $2::agent_run_status,
@@ -1384,47 +1436,6 @@ func (b *PostgresBackend) resolveRunIDForAttempt(ctx context.Context, attemptId 
 		return "", fmt.Errorf("resolve run by attempt id: %w", err)
 	}
 	return runID, nil
-}
-
-func runStatusFromAttemptStatus(status types.AgentAttemptStatus) types.AgentRunStatus {
-	switch status {
-	case types.AgentAttemptStatusRunning:
-		return types.AgentRunStatusRunning
-	case types.AgentAttemptStatusOK:
-		return types.AgentRunStatusOK
-	case types.AgentAttemptStatusTimeout:
-		return types.AgentRunStatusTimeout
-	case types.AgentAttemptStatusCancelled:
-		return types.AgentRunStatusCancelled
-	case types.AgentAttemptStatusError:
-		return types.AgentRunStatusError
-	case types.AgentAttemptStatusBlocked, types.AgentAttemptStatusPending:
-		fallthrough
-	default:
-		return types.AgentRunStatusAccepted
-	}
-}
-
-func attemptStatusFromRunStatus(status types.AgentRunStatus, execAsk string, hasExecution bool) types.AgentAttemptStatus {
-	switch status {
-	case types.AgentRunStatusRunning:
-		return types.AgentAttemptStatusRunning
-	case types.AgentRunStatusOK:
-		return types.AgentAttemptStatusOK
-	case types.AgentRunStatusTimeout:
-		return types.AgentAttemptStatusTimeout
-	case types.AgentRunStatusCancelled:
-		return types.AgentAttemptStatusCancelled
-	case types.AgentRunStatusError:
-		return types.AgentAttemptStatusError
-	case types.AgentRunStatusAccepted:
-		if !hasExecution && strings.TrimSpace(execAsk) != "" && strings.TrimSpace(execAsk) != "off" {
-			return types.AgentAttemptStatusBlocked
-		}
-		return types.AgentAttemptStatusPending
-	default:
-		return types.AgentAttemptStatusPending
-	}
 }
 
 func (b *PostgresBackend) AppendAgentRunSnapshot(ctx context.Context, snap *types.AgentRunSnapshot) error {
@@ -2050,7 +2061,7 @@ func (b *PostgresBackend) SetRunExecutionStarted(ctx context.Context, externalId
 }
 
 func (b *PostgresBackend) SetRunExecutionResult(ctx context.Context, externalId string, exitCode int, errorMsg string) error {
-	status := agentRunStatusFromRunExecutionResult(exitCode, errorMsg)
+	_, status, _ := types.ClassifyExecutionOutcome(exitCode, errorMsg)
 	endedAt := time.Now()
 	query := `
 		UPDATE agent_run
@@ -2063,22 +2074,25 @@ func (b *PostgresBackend) SetRunExecutionResult(ctx context.Context, externalId 
 		    claim_expires_at = NULL,
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = $1::uuid
-		  AND ` + runExecutionScopeWhere + `
 		  AND ` + runExecutionActiveWhere
 	result, err := b.db.ExecContext(ctx, query, externalId, status, exitCode, errorMsg, endedAt)
 	if err != nil {
 		return fmt.Errorf("set run execution result: %w", err)
 	}
 	if rows, _ := result.RowsAffected(); rows == 0 {
-		run, lookupErr := b.GetRunExecution(ctx, externalId)
+		run, lookupErr := b.GetAgentRunByID(ctx, externalId)
 		if lookupErr != nil {
+			if _, ok := lookupErr.(*types.ErrAgentRunNotFound); ok {
+				// Late retries after retention/cleanup should be harmless.
+				return nil
+			}
 			return lookupErr
 		}
 		// Late duplicate callbacks are expected during crashes/retries.
-		if run.IsTerminal() {
+		if run.Status.IsTerminal() {
 			return nil
 		}
-		return fmt.Errorf("run execution result was not applied")
+		return fmt.Errorf("run execution result was not applied (status=%s)", run.Status)
 	}
 	return nil
 }
@@ -2360,15 +2374,6 @@ func runExecutionStatusFromAgentRunStatus(status types.AgentRunStatus) types.Run
 		return types.RunExecutionStatusFailed
 	default:
 		return types.RunExecutionStatusFailed
-	}
-}
-
-func agentRunStatusFromRunExecutionResult(exitCode int, errorMsg string) types.AgentRunStatus {
-	switch {
-	case exitCode != 0 || strings.TrimSpace(errorMsg) != "":
-		return types.AgentRunStatusError
-	default:
-		return types.AgentRunStatusOK
 	}
 }
 

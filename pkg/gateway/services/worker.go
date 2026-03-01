@@ -219,9 +219,9 @@ func (s *WorkerService) SetTaskStarted(ctx context.Context, req *pb.SetTaskStart
 			_ = s.backend.UpdateAgentRunAttemptResult(ctx, attempt.ID, types.AgentAttemptStatusCancelled, nil, now, &errMsg)
 			_ = s.backend.SetRunExecutionResult(ctx, req.TaskId, -1, errMsg)
 			_ = appendRunSnapshot(ctx, s.backend, attempt.RunID, run.Status, nil, &now, &errMsg, map[string]any{
-				"attempt_id": attempt.ID,
-				"task_id":    req.TaskId,
-				"event":      string(types.AgentRunEventStartRejectedTerminalRun),
+				types.AgentRunEventPayloadKeyAttemptID: attempt.ID,
+				types.AgentRunEventPayloadKeyTaskID:    req.TaskId,
+				types.AgentRunEventPayloadKeyEvent:     string(types.AgentRunEventStartRejectedTerminalRun),
 			})
 			_ = s.markOriginTaskTerminalIfCurrentRun(ctx, attempt.RunID)
 			return nil, status.Errorf(codes.FailedPrecondition, "run is already terminal")
@@ -255,9 +255,9 @@ func (s *WorkerService) SetTaskStarted(ctx context.Context, req *pb.SetTaskStart
 		}
 		_ = s.backend.UpdateAgentRunLifecycle(ctx, attempt.RunID, types.AgentRunStatusRunning, &now, nil, nil)
 		_ = appendRunSnapshot(ctx, s.backend, attempt.RunID, types.AgentRunStatusRunning, &now, nil, nil, map[string]any{
-			"attempt_id": attempt.ID,
-			"task_id":    req.TaskId,
-			"event":      string(types.AgentRunEventStarted),
+			types.AgentRunEventPayloadKeyAttemptID: attempt.ID,
+			types.AgentRunEventPayloadKeyTaskID:    req.TaskId,
+			types.AgentRunEventPayloadKeyEvent:     string(types.AgentRunEventStarted),
 		})
 		_ = updateExecutionInstanceCounts(ctx, s.backend, attempt.RunID, 1)
 	} else {
@@ -370,30 +370,6 @@ func (s *WorkerService) lookupRunAttemptByExecutionID(ctx context.Context, taskI
 	return attempt, nil
 }
 
-func classifyRunResult(exitCode int, errText string) (types.AgentAttemptStatus, types.AgentRunStatus, *string) {
-	attemptStatus := types.AgentAttemptStatusOK
-	runStatus := types.AgentRunStatusOK
-	var errMsg *string
-	if strings.TrimSpace(errText) != "" {
-		msg := errText
-		errMsg = &msg
-	}
-
-	lowerErr := strings.ToLower(errText)
-	switch {
-	case strings.Contains(lowerErr, "timeout"):
-		attemptStatus = types.AgentAttemptStatusTimeout
-		runStatus = types.AgentRunStatusTimeout
-	case strings.Contains(lowerErr, "cancel"):
-		attemptStatus = types.AgentAttemptStatusCancelled
-		runStatus = types.AgentRunStatusCancelled
-	case exitCode != 0 || strings.TrimSpace(errText) != "":
-		attemptStatus = types.AgentAttemptStatusError
-		runStatus = types.AgentRunStatusError
-	}
-	return attemptStatus, runStatus, errMsg
-}
-
 func mergePayload(dst map[string]any, extra map[string]any) map[string]any {
 	if dst == nil {
 		dst = map[string]any{}
@@ -421,7 +397,7 @@ func (s *WorkerService) finalizeRunAttempt(
 	}
 
 	now := time.Now()
-	attemptStatus, runStatus, errMsg := classifyRunResult(exitCode, errText)
+	attemptStatus, runStatus, errMsg := types.ClassifyExecutionOutcome(exitCode, errText)
 
 	if err := s.backend.UpdateAgentRunAttemptResult(ctx, attempt.ID, attemptStatus, &exitCode, now, errMsg); err != nil {
 		return false, fmt.Errorf("update run attempt result: %w", err)
@@ -439,7 +415,7 @@ func (s *WorkerService) finalizeRunAttempt(
 			Msg("failed to decrement execution instance counters during finalization")
 	}
 
-	if shouldRetryAttempt(attemptStatus) {
+	if attemptStatus.IsRetryable() {
 		retryInfo, retryErr := s.scheduleRetryRun(ctx, attempt, taskID)
 		if retryErr != nil {
 			log.Warn().
@@ -449,8 +425,8 @@ func (s *WorkerService) finalizeRunAttempt(
 				Msg("failed to schedule retry run")
 		} else if retryInfo.scheduled {
 			payload := attemptSnapshotPayload(attempt.ID, taskID, exitCode, errText, types.AgentRunEventRetryScheduled)
-			payload["next_run_id"] = retryInfo.nextRunID
-			payload["next_attempt_no"] = retryInfo.nextAttemptNo
+			payload[types.AgentRunEventPayloadKeyNextRunID] = retryInfo.nextRunID
+			payload[types.AgentRunEventPayloadKeyNextAttemptNo] = retryInfo.nextAttemptNo
 			payload[types.AgentExecutionMetaKeyRetryDelayMs] = retryInfo.delayMs
 			payload = mergePayload(payload, extraPayload)
 			if err := s.backend.UpdateAgentRunLifecycle(ctx, attempt.RunID, runStatus, nil, &now, errMsg); err != nil {
@@ -485,11 +461,11 @@ func attemptSnapshotPayload(
 	event types.AgentRunEventType,
 ) map[string]any {
 	return map[string]any{
-		"attempt_id": attemptID,
-		"task_id":    taskID,
-		"exit_code":  exitCode,
-		"error":      errText,
-		"event":      string(event),
+		types.AgentRunEventPayloadKeyAttemptID: attemptID,
+		types.AgentRunEventPayloadKeyTaskID:    taskID,
+		types.AgentRunEventPayloadKeyExitCode:  exitCode,
+		types.AgentRunEventPayloadKeyError:     errText,
+		types.AgentRunEventPayloadKeyEvent:     string(event),
 	}
 }
 
@@ -524,27 +500,30 @@ func (s *WorkerService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, 
 	if err != nil {
 		return err
 	}
-
-	// Ignore stale completions from superseded runs.
-	if task.TargetRunID != nil && *task.TargetRunID != run.ID {
-		return nil
-	}
-	if run.EndedAt != nil && task.UpdatedAt.After(*run.EndedAt) && task.State.IsDispatchable() {
-		// Task state was reopened after this run had already ended.
-		return nil
-	}
-
 	if task.State.IsTerminal() {
 		return nil
 	}
-	targetRunID := run.ID
-	nextState := types.AgentTaskStateDone
-	if run.Status == types.AgentRunStatusCancelled {
-		nextState = types.AgentTaskStateCancelled
-	} else if run.Interactive && run.Status == types.AgentRunStatusOK {
-		nextState = types.AgentTaskStateIdle
+	if run.EndedAt != nil && task.UpdatedAt.After(*run.EndedAt) {
+		// Task state was reopened after this run had already ended.
+		return nil
 	}
-	return s.backend.UpdateTaskState(ctx, task.ID, nextState, nil, &targetRunID)
+	targetRunID := run.ID
+	nextState := types.TaskTerminalStateForRun(run.Status, run.Interactive)
+	updated, err := s.backend.UpdateTaskStateIfCurrentRun(
+		ctx,
+		run.OriginTaskID,
+		run.ID,
+		nextState,
+		nil,
+		&targetRunID,
+	)
+	if err != nil {
+		return err
+	}
+	if !updated {
+		return nil
+	}
+	return nil
 }
 
 func appendRunSnapshot(
@@ -607,15 +586,6 @@ type retryScheduleResult struct {
 	nextRunID     string
 }
 
-func shouldRetryAttempt(status types.AgentAttemptStatus) bool {
-	switch status {
-	case types.AgentAttemptStatusError, types.AgentAttemptStatusTimeout:
-		return true
-	default:
-		return false
-	}
-}
-
 func (s *WorkerService) scheduleRetryRun(ctx context.Context, attempt *types.AgentRunAttempt, taskID string) (retryScheduleResult, error) {
 	if s.backend == nil || s.taskQueue == nil || attempt == nil {
 		return retryScheduleResult{}, fmt.Errorf("retry dependencies are not available")
@@ -658,8 +628,8 @@ func (s *WorkerService) scheduleRetryRun(ctx context.Context, attempt *types.Age
 	}
 	retryDelivery[types.AgentExecutionMetaKeyRetryMaxAttempts] = retryPolicy.maxAttempts
 	retryDelivery[types.AgentExecutionMetaKeyRetryDelayMs] = retryPolicy.delayMs
-	retryDelivery["retry_from_run_id"] = run.ID
-	retryDelivery["retry_attempt_no"] = nextAttemptNo
+	retryDelivery[types.AgentExecutionMetaKeyRetryFromRunID] = run.ID
+	retryDelivery[types.AgentExecutionMetaKeyRetryAttemptNo] = nextAttemptNo
 
 	retryRun := &types.AgentRun{
 		WorkspaceID:     run.WorkspaceID,
@@ -710,11 +680,11 @@ func (s *WorkerService) scheduleRetryRun(ctx context.Context, attempt *types.Age
 	}
 
 	_ = appendRunSnapshot(ctx, s.backend, retryRun.ID, types.AgentRunStatusAccepted, nil, nil, nil, map[string]any{
-		"event":             string(types.AgentRunEventAccepted),
-		"task_id":           retryRun.OriginTaskID,
-		"attempt_id":        retryAttempt.ID,
-		"retry_from_run_id": run.ID,
-		"retry_attempt_no":  nextAttemptNo,
+		types.AgentRunEventPayloadKeyEvent:        string(types.AgentRunEventAccepted),
+		types.AgentRunEventPayloadKeyTaskID:       retryRun.OriginTaskID,
+		types.AgentRunEventPayloadKeyAttemptID:    retryAttempt.ID,
+		types.AgentExecutionMetaKeyRetryFromRunID: run.ID,
+		types.AgentExecutionMetaKeyRetryAttemptNo: nextAttemptNo,
 	})
 
 	_, memberToken, err := s.backend.EnsureWorkspaceServiceToken(ctx, run.WorkspaceID)

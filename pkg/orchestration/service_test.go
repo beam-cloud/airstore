@@ -2,7 +2,6 @@ package orchestration
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -104,6 +103,41 @@ func (f *fakeBackend) UpdateTaskState(_ context.Context, taskID string, state ty
 		f.droppedCount++
 	}
 	return nil
+}
+
+func (f *fakeBackend) UpdateTaskStateIfCurrentRun(
+	_ context.Context,
+	taskID string,
+	expectedRunID string,
+	state types.AgentTaskState,
+	droppedReason *string,
+	targetRunID *string,
+) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	task, ok := f.agentTasks[taskID]
+	if !ok {
+		return false, nil
+	}
+	if task.State.IsTerminal() {
+		return false, nil
+	}
+	currentRunID := ""
+	if task.TargetRunID != nil {
+		currentRunID = strings.TrimSpace(*task.TargetRunID)
+	}
+	if currentRunID != strings.TrimSpace(expectedRunID) {
+		return false, nil
+	}
+	task.State = state
+	if targetRunID != nil {
+		task.TargetRunID = targetRunID
+	}
+	if state == types.AgentTaskStateDropped {
+		task.DroppedReason = droppedReason
+		f.droppedCount++
+	}
+	return true, nil
 }
 
 func (f *fakeBackend) ArchiveTask(_ context.Context, taskID string) error {
@@ -580,7 +614,6 @@ func TestQueueRouterFollowupReshapesToLatestTask(t *testing.T) {
 	first := &types.AgentTask{
 		ID:             uuid.NewString(),
 		WorkspaceID:    1,
-		Kind:           types.AgentTaskKindRunInput,
 		QueueMode:      types.AgentQueueModeFollowup,
 		State:          types.AgentTaskStateQueued,
 		IdempotencyKey: "f1",
@@ -588,7 +621,6 @@ func TestQueueRouterFollowupReshapesToLatestTask(t *testing.T) {
 	second := &types.AgentTask{
 		ID:             uuid.NewString(),
 		WorkspaceID:    1,
-		Kind:           types.AgentTaskKindRunInput,
 		QueueMode:      types.AgentQueueModeFollowup,
 		State:          types.AgentTaskStateQueued,
 		IdempotencyKey: "f2",
@@ -692,7 +724,6 @@ func TestMaterializeRunForcesInteractiveForClaudeAgentCommand(t *testing.T) {
 	task := &types.AgentTask{
 		ID:          taskID,
 		WorkspaceID: 42,
-		Kind:        types.AgentTaskKindAgentCommand,
 		State:       types.AgentTaskStateQueued,
 		PayloadJSON: map[string]any{
 			"message":    "hello world",
@@ -721,7 +752,6 @@ func TestMaterializeRunRejectsAgentCommandWithoutProvider(t *testing.T) {
 	task := &types.AgentTask{
 		ID:          taskID,
 		WorkspaceID: 42,
-		Kind:        types.AgentTaskKindAgentCommand,
 		State:       types.AgentTaskStateQueued,
 		PayloadJSON: map[string]any{
 			"message":    "hello world",
@@ -805,13 +835,14 @@ func TestAcceptAgentCommandRejectsMissingAgentID(t *testing.T) {
 	require.Contains(t, err.Error(), "agent_id is required")
 }
 
-func TestAcceptAgentCommandWithActiveSessionRunEnqueuesFollowup(t *testing.T) {
+func TestAcceptAgentCommandWithActiveSessionRunRoutesFollowupToOriginTask(t *testing.T) {
 	redisClient, cleanup := newTestRedis(t)
 	defer cleanup()
 
 	backend := newFakeBackend()
 	agentID := uuid.NewString()
 	runID := uuid.NewString()
+	executionID := uuid.NewString()
 	originTaskID := uuid.NewString()
 	sessionID := "session-active"
 	model := "claude-sonnet-4-6"
@@ -830,7 +861,6 @@ func TestAcceptAgentCommandWithActiveSessionRunEnqueuesFollowup(t *testing.T) {
 		ID:          originTaskID,
 		WorkspaceID: 42,
 		AgentID:     &agentID,
-		Kind:        types.AgentTaskKindAgentCommand,
 		QueueMode:   types.AgentQueueModeQueue,
 		State:       types.AgentTaskStateRunning,
 		PayloadJSON: map[string]any{
@@ -839,6 +869,7 @@ func TestAcceptAgentCommandWithActiveSessionRunEnqueuesFollowup(t *testing.T) {
 			agentConfigKeyProvider: AgentProviderClaude,
 			agentConfigKeyModel:    model,
 		},
+		TargetRunID: &runID,
 	}
 	backend.runs[runID] = &types.AgentRun{
 		ID:           runID,
@@ -846,14 +877,43 @@ func TestAcceptAgentCommandWithActiveSessionRunEnqueuesFollowup(t *testing.T) {
 		AgentID:      &agentID,
 		OriginTaskID: originTaskID,
 		Status:       types.AgentRunStatusRunning,
+		Interactive:  true,
 		SessionID:    sessionID,
 		TimeoutMs:    60000,
 		Provider:     strPtr(AgentProviderClaude),
 		Model:        &model,
 		CreatedAt:    time.Now(),
 	}
+	backend.runExecutions[executionID] = &types.RunExecution{
+		ExternalId: executionID,
+		Type:       types.RunExecutionTypeInteractive,
+		Status:     types.RunExecutionStatusRunning,
+	}
+	backend.attempts[runID] = []*types.AgentRunAttempt{
+		{
+			ID:          uuid.NewString(),
+			RunID:       runID,
+			AttemptNo:   1,
+			Status:      types.AgentAttemptStatusRunning,
+			ExecutionID: &executionID,
+		},
+	}
+
+	terminalIO := newFakeTerminalIO()
+	require.NoError(
+		t,
+		terminalIO.SetRunInteraction(
+			context.Background(),
+			42,
+			runID,
+			types.RunInteractionStateWorking,
+			executionID,
+			time.Minute,
+		),
+	)
 
 	svc := NewAgentService(context.Background(), backend, nil, redisClient, nil, "ghcr.io/beam/sandbox:latest")
+	svc.terminalIO = terminalIO
 	task, deduped, err := svc.AcceptAgentCommand(context.Background(), 42, AgentCommandParams{
 		Message:        "follow up",
 		AgentID:        &agentID,
@@ -863,15 +923,16 @@ func TestAcceptAgentCommandWithActiveSessionRunEnqueuesFollowup(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, deduped)
 	require.NotNil(t, task)
-	require.Equal(t, types.AgentTaskKindRunInput, task.Kind)
-	require.Equal(t, types.AgentTaskStateQueued, task.State)
+	require.Equal(t, originTaskID, task.ID)
 	require.NotNil(t, task.TargetRunID)
 	require.Equal(t, runID, *task.TargetRunID)
-	require.Len(t, backend.agentTasks, 2, "active session should enqueue run input instead of creating a new command task")
+	require.Len(t, backend.agentTasks, 1, "active session follow-up should not create a new task row")
+	require.Len(t, terminalIO.inputs[executionID], 1)
+	require.Equal(t, "follow up\n", string(terminalIO.inputs[executionID][0]))
 
 	queueLen, err := redisClient.LLen(context.Background(), common.Keys.TaskQueue()).Result()
 	require.NoError(t, err)
-	require.EqualValues(t, 1, queueLen)
+	require.EqualValues(t, 0, queueLen)
 }
 
 func TestAcceptAgentCommandWithTerminalSessionRunRestartsOnSameTask(t *testing.T) {
@@ -901,7 +962,6 @@ func TestAcceptAgentCommandWithTerminalSessionRunRestartsOnSameTask(t *testing.T
 		ID:          originTaskID,
 		WorkspaceID: 42,
 		AgentID:     &agentID,
-		Kind:        types.AgentTaskKindAgentCommand,
 		QueueMode:   types.AgentQueueModeQueue,
 		State:       types.AgentTaskStateDone,
 		PayloadJSON: map[string]any{
@@ -963,25 +1023,32 @@ func TestAcceptAgentCommandWithTerminalSessionRunRestartsOnSameTask(t *testing.T
 	}
 }
 
-func TestAcceptRunInputGeneratesIdempotencyKeyWhenMissing(t *testing.T) {
+func TestAcceptRunInputMissingIdempotencyRoutesToOriginTask(t *testing.T) {
 	redisClient, cleanup := newTestRedis(t)
 	defer cleanup()
 
 	backend := newFakeBackend()
 	runID := uuid.NewString()
+	originTaskID := uuid.NewString()
 	backend.runs[runID] = &types.AgentRun{
-		ID:          runID,
+		ID:           runID,
+		WorkspaceID:  42,
+		OriginTaskID: originTaskID,
+		Status:       types.AgentRunStatusAccepted,
+		SessionID:    "session-1",
+		TimeoutMs:    60000,
+	}
+	backend.agentTasks[originTaskID] = &types.AgentTask{
+		ID:          originTaskID,
 		WorkspaceID: 42,
-		Status:      types.AgentRunStatusAccepted,
-		SessionID:   "session-1",
-		TimeoutMs:   60000,
 	}
 
-	svc := NewAgentService(context.Background(), backend, nil, redisClient, nil, "ghcr.io/beam/sandbox:latest")
+	taskQueue := repository.NewRedisTaskQueue(redisClient, "default")
+	svc := NewAgentService(context.Background(), backend, taskQueue, redisClient, nil, "ghcr.io/beam/sandbox:latest")
 	task, deduped, outcome, err := svc.AcceptRunInput(context.Background(), 42, runID, types.AgentQueueModeFollowup, "follow up", "")
 	require.NoError(t, err)
 	require.False(t, deduped)
-	require.NotEmpty(t, task.IdempotencyKey)
+	require.Equal(t, originTaskID, task.ID)
 	require.NotEmpty(t, outcome)
 }
 
@@ -1001,7 +1068,6 @@ func TestAcceptRunInputRestartsTerminalRunOnSameTask(t *testing.T) {
 		ID:          originTaskID,
 		WorkspaceID: 42,
 		AgentID:     &agentID,
-		Kind:        types.AgentTaskKindAgentCommand,
 		QueueMode:   types.AgentQueueModeQueue,
 		State:       types.AgentTaskStateDone,
 		PayloadJSON: map[string]any{
@@ -1085,7 +1151,6 @@ func TestAcceptRunInputRestartBlocksOnActiveSessionConflict(t *testing.T) {
 		ID:          originTaskID,
 		WorkspaceID: 42,
 		AgentID:     &agentID,
-		Kind:        types.AgentTaskKindAgentCommand,
 		QueueMode:   types.AgentQueueModeQueue,
 		State:       types.AgentTaskStateDone,
 		PayloadJSON: map[string]any{
@@ -1142,7 +1207,6 @@ func TestAcceptRunInputRestartAllowsSessionAfterConflictClears(t *testing.T) {
 		ID:          originTaskID,
 		WorkspaceID: 42,
 		AgentID:     &agentID,
-		Kind:        types.AgentTaskKindAgentCommand,
 		QueueMode:   types.AgentQueueModeQueue,
 		State:       types.AgentTaskStateDone,
 		PayloadJSON: map[string]any{
@@ -1203,7 +1267,6 @@ func TestAcceptRunInputDeliversDirectlyForActiveInteractiveRun(t *testing.T) {
 		ID:          originTaskID,
 		WorkspaceID: 42,
 		AgentID:     &agentID,
-		Kind:        types.AgentTaskKindAgentCommand,
 		State:       types.AgentTaskStateRunning,
 		PayloadJSON: map[string]any{"message": "original"},
 		TargetRunID: &runID,
@@ -1242,7 +1305,7 @@ func TestAcceptRunInputDeliversDirectlyForActiveInteractiveRun(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.False(t, deduped)
-	require.Equal(t, types.RunInputDeliveryDirect, outcome)
+	require.Equal(t, types.RunInputDeliveryQueued, outcome)
 	require.NotNil(t, task)
 	require.Equal(t, originTaskID, task.ID, "should return the origin task, not create a new one")
 
@@ -1268,7 +1331,6 @@ func TestAcceptRunInputDeliversDirectlyWhenInteractionWaiting(t *testing.T) {
 		ID:          originTaskID,
 		WorkspaceID: 42,
 		AgentID:     &agentID,
-		Kind:        types.AgentTaskKindAgentCommand,
 		State:       types.AgentTaskStateRunning,
 		PayloadJSON: map[string]any{"message": "original"},
 		TargetRunID: &runID,
@@ -1331,7 +1393,6 @@ func TestAcceptRunInputRestartsWhenInteractionClosedEvenIfRunStillRunning(t *tes
 		ID:          originTaskID,
 		WorkspaceID: 42,
 		AgentID:     &agentID,
-		Kind:        types.AgentTaskKindAgentCommand,
 		State:       types.AgentTaskStateRunning,
 		PayloadJSON: map[string]any{
 			"message":    "initial",
@@ -1401,7 +1462,6 @@ func TestAcceptRunInputInterruptDispatchesWithoutCreatingTaskForActiveInteractiv
 		ID:          originTaskID,
 		WorkspaceID: 42,
 		AgentID:     &agentID,
-		Kind:        types.AgentTaskKindAgentCommand,
 		State:       types.AgentTaskStateRunning,
 		PayloadJSON: map[string]any{"message": "original"},
 		TargetRunID: &runID,
@@ -1551,12 +1611,64 @@ func TestAcceptRunInputQueuesWhenInteractionWorking(t *testing.T) {
 	require.False(t, deduped)
 	require.Equal(t, types.RunInputDeliveryQueued, outcome)
 	require.NotNil(t, task)
-	require.Equal(t, types.AgentTaskKindRunInput, task.Kind)
-	require.Empty(t, terminalIO.inputs[executionID], "working state should queue, not inject directly")
+	require.Equal(t, originTaskID, task.ID)
+	require.Len(t, terminalIO.inputs[executionID], 1, "working state should buffer input on active execution")
+	require.Equal(t, "queue me\n", string(terminalIO.inputs[executionID][0]))
 
 	queueLen, err := redisClient.LLen(context.Background(), common.Keys.TaskQueue()).Result()
 	require.NoError(t, err)
-	require.EqualValues(t, 1, queueLen)
+	require.EqualValues(t, 0, queueLen)
+}
+
+func TestAcceptRunInputRejectsOverlappingAttemptWithoutExecutionBinding(t *testing.T) {
+	redisClient, cleanup := newTestRedis(t)
+	defer cleanup()
+
+	backend := newFakeBackend()
+	agentID := uuid.NewString()
+	runID := uuid.NewString()
+	originTaskID := uuid.NewString()
+
+	backend.runs[runID] = &types.AgentRun{
+		ID:           runID,
+		WorkspaceID:  42,
+		AgentID:      &agentID,
+		OriginTaskID: originTaskID,
+		Status:       types.AgentRunStatusRunning,
+		SessionID:    "session-overlap-guard",
+		Interactive:  true,
+		TimeoutMs:    60000,
+	}
+	backend.agentTasks[originTaskID] = &types.AgentTask{
+		ID:          originTaskID,
+		WorkspaceID: 42,
+		AgentID:     &agentID,
+		State:       types.AgentTaskStateRunning,
+		TargetRunID: &runID,
+	}
+	backend.attempts[runID] = []*types.AgentRunAttempt{
+		{
+			ID:        uuid.NewString(),
+			RunID:     runID,
+			AttemptNo: 1,
+			Status:    types.AgentAttemptStatusRunning,
+		},
+	}
+
+	taskQueue := repository.NewRedisTaskQueue(redisClient, "default")
+	svc := NewAgentService(context.Background(), backend, taskQueue, redisClient, nil, "ghcr.io/beam/sandbox:latest")
+
+	_, _, _, err := svc.AcceptRunInput(
+		context.Background(),
+		42,
+		runID,
+		types.AgentQueueModeFollowup,
+		"do not overlap attempts",
+		"",
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "temporarily unavailable")
+	require.Empty(t, backend.runExecutions)
 }
 
 func TestAcceptRunInputRestartUsesResumeBarrier(t *testing.T) {
@@ -1573,7 +1685,6 @@ func TestAcceptRunInputRestartUsesResumeBarrier(t *testing.T) {
 		ID:          originTaskID,
 		WorkspaceID: 42,
 		AgentID:     &agentID,
-		Kind:        types.AgentTaskKindAgentCommand,
 		State:       types.AgentTaskStateDone,
 		PayloadJSON: map[string]any{
 			"message":    "initial",
@@ -1669,6 +1780,7 @@ func TestAcceptRunInputIdenticalMessagesQueueAsDistinctTasks(t *testing.T) {
 	require.False(t, deduped1)
 	require.Equal(t, types.RunInputDeliveryQueued, outcome1)
 	require.NotNil(t, task1)
+	require.Equal(t, originTaskID, task1.ID)
 
 	task2, deduped2, outcome2, err2 := svc.AcceptRunInput(
 		context.Background(),
@@ -1682,15 +1794,14 @@ func TestAcceptRunInputIdenticalMessagesQueueAsDistinctTasks(t *testing.T) {
 	require.False(t, deduped2)
 	require.Equal(t, types.RunInputDeliveryQueued, outcome2)
 	require.NotNil(t, task2)
-	require.NotEqual(t, task1.ID, task2.ID, "identical follow-up text must not collapse")
-	require.Equal(t, types.AgentTaskStateDropped, backend.agentTasks[task1.ID].State)
-	require.NotNil(t, backend.agentTasks[task1.ID].DroppedReason)
-	require.Equal(t, types.AgentTaskDropReasonReshapedByQueueMode, *backend.agentTasks[task1.ID].DroppedReason)
-	require.Equal(t, types.AgentTaskStateQueued, backend.agentTasks[task2.ID].State)
+	require.Equal(t, originTaskID, task2.ID)
+	require.Len(t, terminalIO.inputs[executionID], 2, "identical follow-ups should both be preserved")
+	require.Equal(t, "same message\n", string(terminalIO.inputs[executionID][0]))
+	require.Equal(t, "same message\n", string(terminalIO.inputs[executionID][1]))
 
 	queueLen, err := redisClient.LLen(context.Background(), common.Keys.TaskQueue()).Result()
 	require.NoError(t, err)
-	require.EqualValues(t, 1, queueLen)
+	require.EqualValues(t, 0, queueLen)
 }
 
 func TestMaterializeRunBlockedBySessionLease(t *testing.T) {
@@ -1712,7 +1823,6 @@ func TestMaterializeRunBlockedBySessionLease(t *testing.T) {
 	task := &types.AgentTask{
 		ID:          uuid.NewString(),
 		WorkspaceID: workspaceID,
-		Kind:        types.AgentTaskKindAgentCommand,
 		AgentID:     strPtr("agent-1"),
 		PayloadJSON: map[string]any{
 			"message":    "hello",
@@ -1728,344 +1838,6 @@ func TestMaterializeRunBlockedBySessionLease(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "session ID")
 	require.Contains(t, err.Error(), "already in use")
-}
-
-func TestTrySteerRunInputTaskInjectsInteractiveInput(t *testing.T) {
-	backend := newFakeBackend()
-	runID := uuid.NewString()
-	executionID := uuid.NewString()
-	backend.runs[runID] = &types.AgentRun{
-		ID:          runID,
-		WorkspaceID: 42,
-		Status:      types.AgentRunStatusRunning,
-		SessionID:   "session-1",
-	}
-	backend.runExecutions[executionID] = &types.RunExecution{
-		ExternalId: executionID,
-		Type:       types.RunExecutionTypeInteractive,
-		Status:     types.RunExecutionStatusRunning,
-	}
-	backend.attempts[runID] = []*types.AgentRunAttempt{
-		{
-			ID:          uuid.NewString(),
-			RunID:       runID,
-			AttemptNo:   1,
-			Status:      types.AgentAttemptStatusRunning,
-			ExecutionID: &executionID,
-		},
-	}
-
-	taskID := uuid.NewString()
-	task := &types.AgentTask{
-		ID:          taskID,
-		WorkspaceID: 42,
-		Kind:        types.AgentTaskKindRunInput,
-		QueueMode:   types.AgentQueueModeSteer,
-		State:       types.AgentTaskStateQueued,
-		PayloadJSON: map[string]any{"message": "please stop"},
-		TargetRunID: &runID,
-	}
-	backend.agentTasks[taskID] = task
-
-	svc := NewAgentService(context.Background(), backend, nil, nil, nil, "ghcr.io/beam/sandbox:latest")
-	terminalIO := newFakeTerminalIO()
-	svc.terminalIO = terminalIO
-
-	steered, err := svc.trySteerRunInputTask(context.Background(), task)
-	require.NoError(t, err)
-	require.True(t, steered)
-	require.Equal(t, types.AgentTaskStateDone, backend.agentTasks[taskID].State)
-
-	writes := terminalIO.inputs[executionID]
-	require.Len(t, writes, 1)
-	require.Equal(t, "please stop\n", string(writes[0]))
-}
-
-func TestHandleRunInputTaskFollowupSteersWhenRunInteractive(t *testing.T) {
-	backend := newFakeBackend()
-	runID := uuid.NewString()
-	executionID := uuid.NewString()
-	backend.runs[runID] = &types.AgentRun{
-		ID:          runID,
-		WorkspaceID: 42,
-		Status:      types.AgentRunStatusRunning,
-		SessionID:   "session-1",
-	}
-	backend.runExecutions[executionID] = &types.RunExecution{
-		ExternalId: executionID,
-		Type:       types.RunExecutionTypeInteractive,
-		Status:     types.RunExecutionStatusRunning,
-	}
-	backend.attempts[runID] = []*types.AgentRunAttempt{
-		{
-			ID:          uuid.NewString(),
-			RunID:       runID,
-			AttemptNo:   1,
-			Status:      types.AgentAttemptStatusRunning,
-			ExecutionID: &executionID,
-		},
-	}
-
-	taskID := uuid.NewString()
-	task := &types.AgentTask{
-		ID:          taskID,
-		WorkspaceID: 42,
-		Kind:        types.AgentTaskKindRunInput,
-		QueueMode:   types.AgentQueueModeFollowup,
-		State:       types.AgentTaskStateQueued,
-		PayloadJSON: map[string]any{"message": "continue"},
-		TargetRunID: &runID,
-	}
-	backend.agentTasks[taskID] = task
-
-	svc := NewAgentService(context.Background(), backend, nil, nil, nil, "ghcr.io/beam/sandbox:latest")
-	terminalIO := newFakeTerminalIO()
-	svc.terminalIO = terminalIO
-
-	err := svc.handleRunInputTask(context.Background(), task)
-	require.NoError(t, err)
-	require.Equal(t, types.AgentTaskStateDone, backend.agentTasks[taskID].State)
-	writes := terminalIO.inputs[executionID]
-	require.Len(t, writes, 1)
-	require.Equal(t, "continue\n", string(writes[0]))
-}
-
-func TestHandleRunInputTaskFollowupBuffersWhenInteractionWorking(t *testing.T) {
-	backend := newFakeBackend()
-	runID := uuid.NewString()
-	executionID := uuid.NewString()
-	backend.runs[runID] = &types.AgentRun{
-		ID:          runID,
-		WorkspaceID: 42,
-		Status:      types.AgentRunStatusRunning,
-		SessionID:   "session-working",
-	}
-	backend.runExecutions[executionID] = &types.RunExecution{
-		ExternalId: executionID,
-		Type:       types.RunExecutionTypeInteractive,
-		Status:     types.RunExecutionStatusRunning,
-	}
-	backend.attempts[runID] = []*types.AgentRunAttempt{
-		{
-			ID:          uuid.NewString(),
-			RunID:       runID,
-			AttemptNo:   1,
-			Status:      types.AgentAttemptStatusRunning,
-			ExecutionID: &executionID,
-		},
-	}
-
-	taskID := uuid.NewString()
-	task := &types.AgentTask{
-		ID:          taskID,
-		WorkspaceID: 42,
-		Kind:        types.AgentTaskKindRunInput,
-		QueueMode:   types.AgentQueueModeFollowup,
-		State:       types.AgentTaskStateQueued,
-		PayloadJSON: map[string]any{"message": "queue while working"},
-		TargetRunID: &runID,
-	}
-	backend.agentTasks[taskID] = task
-
-	svc := NewAgentService(context.Background(), backend, nil, nil, nil, "ghcr.io/beam/sandbox:latest")
-	terminalIO := newFakeTerminalIO()
-	require.NoError(
-		t,
-		terminalIO.SetRunInteraction(
-			context.Background(),
-			42,
-			runID,
-			types.RunInteractionStateWorking,
-			executionID,
-			time.Minute,
-		),
-	)
-	svc.terminalIO = terminalIO
-
-	err := svc.handleRunInputTask(context.Background(), task)
-	require.NoError(t, err)
-	require.Equal(t, types.AgentTaskStateDone, backend.agentTasks[taskID].State)
-	writes := terminalIO.inputs[executionID]
-	require.Len(t, writes, 1)
-	require.Equal(t, "queue while working\n", string(writes[0]))
-	require.Len(t, backend.attempts[runID], 1, "should not create a replacement attempt while active execution exists")
-}
-
-func TestTrySteerRunInputTaskFallsBackWhenTaskNotInteractive(t *testing.T) {
-	backend := newFakeBackend()
-	runID := uuid.NewString()
-	executionID := uuid.NewString()
-	backend.runs[runID] = &types.AgentRun{
-		ID:          runID,
-		WorkspaceID: 42,
-		Status:      types.AgentRunStatusRunning,
-		SessionID:   "session-1",
-	}
-	backend.runExecutions[executionID] = &types.RunExecution{
-		ExternalId: executionID,
-		Type:       types.RunExecutionTypeBackground,
-		Status:     types.RunExecutionStatusRunning,
-	}
-	backend.attempts[runID] = []*types.AgentRunAttempt{
-		{
-			ID:          uuid.NewString(),
-			RunID:       runID,
-			AttemptNo:   1,
-			Status:      types.AgentAttemptStatusRunning,
-			ExecutionID: &executionID,
-		},
-	}
-
-	taskID := uuid.NewString()
-	task := &types.AgentTask{
-		ID:          taskID,
-		WorkspaceID: 42,
-		Kind:        types.AgentTaskKindRunInput,
-		QueueMode:   types.AgentQueueModeSteer,
-		State:       types.AgentTaskStateQueued,
-		PayloadJSON: map[string]any{"message": "fallback"},
-		TargetRunID: &runID,
-	}
-	backend.agentTasks[taskID] = task
-
-	svc := NewAgentService(context.Background(), backend, nil, nil, nil, "ghcr.io/beam/sandbox:latest")
-	terminalIO := newFakeTerminalIO()
-	svc.terminalIO = terminalIO
-
-	steered, err := svc.trySteerRunInputTask(context.Background(), task)
-	require.NoError(t, err)
-	require.False(t, steered)
-	require.Equal(t, types.AgentTaskStateQueued, backend.agentTasks[taskID].State)
-	require.Empty(t, terminalIO.inputs[executionID])
-}
-
-func TestTrySteerRunInputTaskUsesPendingInFlightAttempt(t *testing.T) {
-	backend := newFakeBackend()
-	runID := uuid.NewString()
-	executionID := uuid.NewString()
-	backend.runs[runID] = &types.AgentRun{
-		ID:          runID,
-		WorkspaceID: 42,
-		Status:      types.AgentRunStatusRunning,
-		SessionID:   "session-1",
-	}
-	backend.runExecutions[executionID] = &types.RunExecution{
-		ExternalId: executionID,
-		Type:       types.RunExecutionTypeInteractive,
-		Status:     types.RunExecutionStatusPending,
-	}
-	backend.attempts[runID] = []*types.AgentRunAttempt{
-		{
-			ID:          uuid.NewString(),
-			RunID:       runID,
-			AttemptNo:   2,
-			Status:      types.AgentAttemptStatusPending,
-			ExecutionID: &executionID,
-		},
-	}
-
-	taskID := uuid.NewString()
-	task := &types.AgentTask{
-		ID:          taskID,
-		WorkspaceID: 42,
-		Kind:        types.AgentTaskKindRunInput,
-		QueueMode:   types.AgentQueueModeSteer,
-		State:       types.AgentTaskStateQueued,
-		PayloadJSON: map[string]any{"message": "queued while turn active"},
-		TargetRunID: &runID,
-	}
-	backend.agentTasks[taskID] = task
-
-	svc := NewAgentService(context.Background(), backend, nil, nil, nil, "ghcr.io/beam/sandbox:latest")
-	terminalIO := newFakeTerminalIO()
-	svc.terminalIO = terminalIO
-
-	steered, err := svc.trySteerRunInputTask(context.Background(), task)
-	require.NoError(t, err)
-	require.True(t, steered)
-	require.Equal(t, types.AgentTaskStateDone, backend.agentTasks[taskID].State)
-	writes := terminalIO.inputs[executionID]
-	require.Len(t, writes, 1)
-	require.Equal(t, "queued while turn active\n", string(writes[0]))
-}
-
-func TestTrySteerRunInputTaskReturnsPublishError(t *testing.T) {
-	backend := newFakeBackend()
-	runID := uuid.NewString()
-	executionID := uuid.NewString()
-	backend.runs[runID] = &types.AgentRun{
-		ID:          runID,
-		WorkspaceID: 42,
-		Status:      types.AgentRunStatusRunning,
-		SessionID:   "session-1",
-	}
-	backend.runExecutions[executionID] = &types.RunExecution{
-		ExternalId: executionID,
-		Type:       types.RunExecutionTypeInteractive,
-		Status:     types.RunExecutionStatusRunning,
-	}
-	backend.attempts[runID] = []*types.AgentRunAttempt{
-		{
-			ID:          uuid.NewString(),
-			RunID:       runID,
-			AttemptNo:   1,
-			Status:      types.AgentAttemptStatusRunning,
-			ExecutionID: &executionID,
-		},
-	}
-
-	taskID := uuid.NewString()
-	task := &types.AgentTask{
-		ID:          taskID,
-		WorkspaceID: 42,
-		Kind:        types.AgentTaskKindRunInput,
-		QueueMode:   types.AgentQueueModeSteer,
-		State:       types.AgentTaskStateQueued,
-		PayloadJSON: map[string]any{"message": "publish error"},
-		TargetRunID: &runID,
-	}
-	backend.agentTasks[taskID] = task
-
-	svc := NewAgentService(context.Background(), backend, nil, nil, nil, "ghcr.io/beam/sandbox:latest")
-	terminalIO := newFakeTerminalIO()
-	terminalIO.publishErr = errors.New("redis unavailable")
-	svc.terminalIO = terminalIO
-
-	steered, err := svc.trySteerRunInputTask(context.Background(), task)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "publish interactive input")
-	require.False(t, steered)
-	require.Equal(t, types.AgentTaskStateQueued, backend.agentTasks[taskID].State)
-}
-
-func TestHandleRunInputTaskDropsWhenTargetRunTerminal(t *testing.T) {
-	backend := newFakeBackend()
-	runID := uuid.NewString()
-	backend.runs[runID] = &types.AgentRun{
-		ID:          runID,
-		WorkspaceID: 42,
-		Status:      types.AgentRunStatusCancelled,
-		SessionID:   "session-1",
-	}
-
-	taskID := uuid.NewString()
-	task := &types.AgentTask{
-		ID:          taskID,
-		WorkspaceID: 42,
-		Kind:        types.AgentTaskKindRunInput,
-		QueueMode:   types.AgentQueueModeSteer,
-		State:       types.AgentTaskStateQueued,
-		PayloadJSON: map[string]any{"message": "fallback"},
-		TargetRunID: &runID,
-	}
-	backend.agentTasks[taskID] = task
-
-	svc := NewAgentService(context.Background(), backend, nil, nil, nil, "ghcr.io/beam/sandbox:latest")
-	err := svc.handleRunInputTask(context.Background(), task)
-	require.NoError(t, err)
-	require.Equal(t, types.AgentTaskStateDropped, backend.agentTasks[taskID].State)
-	require.NotNil(t, backend.agentTasks[taskID].DroppedReason)
-	require.Equal(t, types.AgentTaskDropReasonRunInputTerminalTarget, *backend.agentTasks[taskID].DroppedReason)
 }
 
 func TestStaleSessionLeaseAutoCleared(t *testing.T) {
@@ -2164,52 +1936,3 @@ func TestExtractLeaseExecutionID(t *testing.T) {
 	require.Equal(t, "b", ExtractLeaseExecutionID("a:b"))
 }
 
-func TestHandleRunInputTaskRequeuesWhenActiveAttemptExists(t *testing.T) {
-	redisClient, cleanup := newTestRedis(t)
-	defer cleanup()
-
-	backend := newFakeBackend()
-	store := repository.NewOrchestrationStore(backend, redisClient)
-
-	runID := uuid.NewString()
-	attemptID := uuid.NewString()
-	backend.runs[runID] = &types.AgentRun{
-		ID:          runID,
-		WorkspaceID: 42,
-		Status:      types.AgentRunStatusRunning,
-		SessionID:   "session-active",
-	}
-	backend.attempts[runID] = []*types.AgentRunAttempt{
-		{
-			ID:        attemptID,
-			RunID:     runID,
-			AttemptNo: 1,
-			Status:    types.AgentAttemptStatusRunning,
-		},
-	}
-
-	taskID := uuid.NewString()
-	task := &types.AgentTask{
-		ID:          taskID,
-		WorkspaceID: 42,
-		Kind:        types.AgentTaskKindRunInput,
-		QueueMode:   types.AgentQueueModeFollowup,
-		State:       types.AgentTaskStateQueued,
-		PayloadJSON: map[string]any{"message": "follow up"},
-		TargetRunID: &runID,
-	}
-	backend.agentTasks[taskID] = task
-
-	svc := NewAgentService(context.Background(), backend, nil, nil, nil, "ghcr.io/beam/sandbox:latest")
-	svc.queueRouter = NewTaskQueueRouter(store)
-
-	err := svc.handleRunInputTask(context.Background(), task)
-	require.NoError(t, err)
-
-	require.Equal(t, types.AgentTaskStateQueued, backend.agentTasks[taskID].State,
-		"task should remain queued (not done) because requeue pushes it back to the dispatch queue")
-
-	queueLen, err := redisClient.LLen(context.Background(), common.Keys.TaskQueue()).Result()
-	require.NoError(t, err)
-	require.EqualValues(t, 1, queueLen, "task should have been pushed back to the queue")
-}

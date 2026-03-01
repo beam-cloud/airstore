@@ -231,7 +231,7 @@ func agentTaskToProto(task *types.AgentTask, workspaceExternalID string) *pb.Age
 		Id:             task.ID,
 		WorkspaceId:    workspaceExternalID,
 		AgentId:        stringOrEmpty(task.AgentID),
-		Kind:           string(task.Kind),
+		Kind:           types.AgentTaskKindAgentCommand,
 		QueueMode:      string(task.QueueMode),
 		State:          string(task.State),
 		IdempotencyKey: task.IdempotencyKey,
