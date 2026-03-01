@@ -229,23 +229,25 @@ func (s *AgentService) AcceptAgentCommand(
 		)
 	}
 
-	latestRun, err := s.latestRunForSessionAgent(ctx, workspaceID, params.AgentID, params.SessionID)
-	if err != nil {
-		return nil, false, err
-	}
-	if latestRun != nil {
-		task, deduped, _, err := s.AcceptRunInput(
-			ctx,
-			workspaceID,
-			latestRun.ID,
-			types.AgentQueueModeFollowup,
-			params.Message,
-			params.IdempotencyKey,
-		)
+	if params.HookID == nil {
+		latestRun, err := s.latestRunForSessionAgent(ctx, workspaceID, params.AgentID, params.SessionID)
 		if err != nil {
 			return nil, false, err
 		}
-		return task, deduped, nil
+		if latestRun != nil {
+			task, deduped, _, err := s.AcceptRunInput(
+				ctx,
+				workspaceID,
+				latestRun.ID,
+				types.AgentQueueModeFollowup,
+				params.Message,
+				params.IdempotencyKey,
+			)
+			if err != nil {
+				return nil, false, err
+			}
+			return task, deduped, nil
+		}
 	}
 
 	payload := map[string]any{
@@ -307,20 +309,57 @@ func (s *AgentService) latestRunForSessionAgent(
 	if s == nil || s.backend == nil || sessionID == "" {
 		return nil, nil
 	}
-	filter := types.AgentRunListFilter{
-		AgentID:   trimOptionalString(agentID),
+	agentID = trimOptionalString(agentID)
+
+	matchesAgent := func(run *types.AgentRun) bool {
+		if run == nil {
+			return false
+		}
+		if agentID == nil || strings.TrimSpace(*agentID) == "" {
+			return true
+		}
+		if run.AgentID == nil {
+			return false
+		}
+		return strings.TrimSpace(*run.AgentID) == strings.TrimSpace(*agentID)
+	}
+
+	// Prefer the run currently holding the session lease. This is the run
+	// that can actually accept follow-up input right now.
+	if s.terminalIO != nil {
+		if owner, _ := s.terminalIO.GetSessionLeaseOwner(ctx, workspaceID, sessionID); owner != "" {
+			if leaseRunID := ExtractLeaseExecutionID(owner); leaseRunID != "" {
+				if leaseRun, err := s.backend.GetAgentRun(ctx, workspaceID, leaseRunID); err == nil && matchesAgent(leaseRun) {
+					return leaseRun, nil
+				}
+			}
+		}
+	}
+
+	baseFilter := types.AgentRunListFilter{
+		AgentID:   agentID,
 		SessionID: strPtr(sessionID),
 		Limit:     1,
 	}
-	runs, err := s.backend.ListAgentRunsFiltered(ctx, workspaceID, filter)
-	if err != nil {
-		return nil, err
-	}
-	for _, run := range runs {
-		if run != nil {
-			return run, nil
+
+	for _, statuses := range [][]types.AgentRunStatus{
+		{types.AgentRunStatusRunning},
+		{types.AgentRunStatusAccepted},
+		nil, // fallback to latest run of any status
+	} {
+		filter := baseFilter
+		filter.Statuses = statuses
+		runs, err := s.backend.ListAgentRunsFiltered(ctx, workspaceID, filter)
+		if err != nil {
+			return nil, err
+		}
+		for _, run := range runs {
+			if run != nil {
+				return run, nil
+			}
 		}
 	}
+
 	return nil, nil
 }
 

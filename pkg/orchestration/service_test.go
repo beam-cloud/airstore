@@ -935,6 +935,243 @@ func TestAcceptAgentCommandWithActiveSessionRunRoutesFollowupToOriginTask(t *tes
 	require.EqualValues(t, 0, queueLen)
 }
 
+func TestAcceptAgentCommandWithActiveSessionRunAndHookCreatesNewTask(t *testing.T) {
+	redisClient, cleanup := newTestRedis(t)
+	defer cleanup()
+
+	backend := newFakeBackend()
+	agentID := uuid.NewString()
+	runID := uuid.NewString()
+	executionID := uuid.NewString()
+	originTaskID := uuid.NewString()
+	sessionID := "session-active-hook"
+	model := "claude-sonnet-4-6"
+	hookID := uint(99)
+	backend.profiles[agentID] = &types.AgentProfile{
+		ID:          agentID,
+		WorkspaceID: 42,
+		AgentKey:    "agent-key",
+		Name:        "Agent",
+		ConfigJSON: map[string]any{
+			agentConfigKeyRunner: AgentRunnerClaudeCode,
+			agentConfigKeyModel:  model,
+		},
+		Active: true,
+	}
+	backend.agentTasks[originTaskID] = &types.AgentTask{
+		ID:          originTaskID,
+		WorkspaceID: 42,
+		AgentID:     &agentID,
+		QueueMode:   types.AgentQueueModeQueue,
+		State:       types.AgentTaskStateRunning,
+		PayloadJSON: map[string]any{
+			"message":              "original prompt",
+			"session_id":           sessionID,
+			agentConfigKeyProvider: AgentProviderClaude,
+			agentConfigKeyModel:    model,
+		},
+		TargetRunID: &runID,
+	}
+	backend.runs[runID] = &types.AgentRun{
+		ID:           runID,
+		WorkspaceID:  42,
+		AgentID:      &agentID,
+		OriginTaskID: originTaskID,
+		Status:       types.AgentRunStatusRunning,
+		Interactive:  true,
+		SessionID:    sessionID,
+		TimeoutMs:    60000,
+		Provider:     strPtr(AgentProviderClaude),
+		Model:        &model,
+		CreatedAt:    time.Now(),
+	}
+	backend.runExecutions[executionID] = &types.RunExecution{
+		ExternalId: executionID,
+		Type:       types.RunExecutionTypeInteractive,
+		Status:     types.RunExecutionStatusRunning,
+	}
+	backend.attempts[runID] = []*types.AgentRunAttempt{
+		{
+			ID:          uuid.NewString(),
+			RunID:       runID,
+			AttemptNo:   1,
+			Status:      types.AgentAttemptStatusRunning,
+			ExecutionID: &executionID,
+		},
+	}
+
+	terminalIO := newFakeTerminalIO()
+	require.NoError(
+		t,
+		terminalIO.SetRunInteraction(
+			context.Background(),
+			42,
+			runID,
+			types.RunInteractionStateWorking,
+			executionID,
+			time.Minute,
+		),
+	)
+
+	svc := NewAgentService(context.Background(), backend, nil, redisClient, nil, "ghcr.io/beam/sandbox:latest")
+	svc.terminalIO = terminalIO
+	task, deduped, err := svc.AcceptAgentCommand(context.Background(), 42, AgentCommandParams{
+		Message:        "hook follow up",
+		AgentID:        &agentID,
+		HookID:         &hookID,
+		SessionID:      sessionID,
+		IdempotencyKey: "idem-hook-session-active",
+	})
+	require.NoError(t, err)
+	require.False(t, deduped)
+	require.NotNil(t, task)
+	require.NotEqual(t, originTaskID, task.ID, "hook-triggered commands should create new tasks even with active session runs")
+	require.Equal(t, types.AgentTaskStateQueued, task.State)
+	require.Len(t, backend.agentTasks, 2)
+	require.Len(t, terminalIO.inputs[executionID], 0, "hook command should not inject input into active run")
+
+	queueLen, err := redisClient.LLen(context.Background(), common.Keys.TaskQueue()).Result()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, queueLen)
+}
+
+func TestAcceptAgentCommandPrefersLeaseOwnerRunOverNewerSessionRuns(t *testing.T) {
+	redisClient, cleanup := newTestRedis(t)
+	defer cleanup()
+
+	backend := newFakeBackend()
+	agentID := uuid.NewString()
+	sessionID := "session-active-lease-owner"
+	activeRunID := uuid.NewString()
+	newerRunID := uuid.NewString()
+	activeExecutionID := uuid.NewString()
+	activeTaskID := uuid.NewString()
+	newerTaskID := uuid.NewString()
+	model := "claude-sonnet-4-6"
+	backend.profiles[agentID] = &types.AgentProfile{
+		ID:          agentID,
+		WorkspaceID: 42,
+		AgentKey:    "agent-key",
+		Name:        "Agent",
+		ConfigJSON: map[string]any{
+			agentConfigKeyRunner: AgentRunnerClaudeCode,
+			agentConfigKeyModel:  model,
+		},
+		Active: true,
+	}
+
+	backend.agentTasks[activeTaskID] = &types.AgentTask{
+		ID:          activeTaskID,
+		WorkspaceID: 42,
+		AgentID:     &agentID,
+		QueueMode:   types.AgentQueueModeQueue,
+		State:       types.AgentTaskStateRunning,
+		PayloadJSON: map[string]any{
+			"message":              "active prompt",
+			"session_id":           sessionID,
+			agentConfigKeyProvider: AgentProviderClaude,
+			agentConfigKeyModel:    model,
+		},
+		TargetRunID: &activeRunID,
+	}
+	backend.agentTasks[newerTaskID] = &types.AgentTask{
+		ID:          newerTaskID,
+		WorkspaceID: 42,
+		AgentID:     &agentID,
+		QueueMode:   types.AgentQueueModeQueue,
+		State:       types.AgentTaskStateRunning,
+		PayloadJSON: map[string]any{
+			"message":              "newer prompt",
+			"session_id":           sessionID,
+			agentConfigKeyProvider: AgentProviderClaude,
+			agentConfigKeyModel:    model,
+		},
+		TargetRunID: &newerRunID,
+	}
+
+	backend.runs[activeRunID] = &types.AgentRun{
+		ID:           activeRunID,
+		WorkspaceID:  42,
+		AgentID:      &agentID,
+		OriginTaskID: activeTaskID,
+		Status:       types.AgentRunStatusRunning,
+		Interactive:  true,
+		SessionID:    sessionID,
+		TimeoutMs:    60000,
+		Provider:     strPtr(AgentProviderClaude),
+		Model:        &model,
+		CreatedAt:    time.Now().Add(-2 * time.Minute),
+	}
+	backend.runs[newerRunID] = &types.AgentRun{
+		ID:           newerRunID,
+		WorkspaceID:  42,
+		AgentID:      &agentID,
+		OriginTaskID: newerTaskID,
+		Status:       types.AgentRunStatusRunning,
+		Interactive:  true,
+		SessionID:    sessionID,
+		TimeoutMs:    60000,
+		Provider:     strPtr(AgentProviderClaude),
+		Model:        &model,
+		CreatedAt:    time.Now().Add(-1 * time.Minute),
+	}
+
+	backend.runExecutions[activeExecutionID] = &types.RunExecution{
+		ExternalId: activeExecutionID,
+		Type:       types.RunExecutionTypeInteractive,
+		Status:     types.RunExecutionStatusRunning,
+	}
+	backend.attempts[activeRunID] = []*types.AgentRunAttempt{
+		{
+			ID:          uuid.NewString(),
+			RunID:       activeRunID,
+			AttemptNo:   1,
+			Status:      types.AgentAttemptStatusRunning,
+			ExecutionID: &activeExecutionID,
+		},
+	}
+	backend.attempts[newerRunID] = []*types.AgentRunAttempt{
+		{
+			ID:        uuid.NewString(),
+			RunID:     newerRunID,
+			AttemptNo: 1,
+			Status:    types.AgentAttemptStatusRunning,
+		},
+	}
+
+	terminalIO := newFakeTerminalIO()
+	terminalIO.sessionLeases[sessionLeaseKey(42, sessionID)] = "worker-lease-owner:" + activeRunID
+	require.NoError(
+		t,
+		terminalIO.SetRunInteraction(
+			context.Background(),
+			42,
+			activeRunID,
+			types.RunInteractionStateWorking,
+			activeExecutionID,
+			time.Minute,
+		),
+	)
+
+	svc := NewAgentService(context.Background(), backend, nil, redisClient, nil, "ghcr.io/beam/sandbox:latest")
+	svc.terminalIO = terminalIO
+
+	task, deduped, err := svc.AcceptAgentCommand(context.Background(), 42, AgentCommandParams{
+		Message:        "follow up",
+		AgentID:        &agentID,
+		SessionID:      sessionID,
+		IdempotencyKey: "idem-session-lease-owner",
+	})
+	require.NoError(t, err)
+	require.False(t, deduped)
+	require.NotNil(t, task)
+	require.Equal(t, activeTaskID, task.ID, "should route follow-up to lease-owner run's origin task")
+	require.NotNil(t, task.TargetRunID)
+	require.Equal(t, activeRunID, *task.TargetRunID)
+	require.Len(t, terminalIO.inputs[activeExecutionID], 1)
+	require.Equal(t, "follow up\n", string(terminalIO.inputs[activeExecutionID][0]))
+}
+
 func TestAcceptAgentCommandWithTerminalSessionRunRestartsOnSameTask(t *testing.T) {
 	redisClient, cleanup := newTestRedis(t)
 	defer cleanup()
