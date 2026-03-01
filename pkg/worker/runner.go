@@ -121,11 +121,9 @@ func (r *ClaudeCodeRunner) BuildTurnArgs(prompt string, env map[string]string, m
 			builder.withFlag("--continue")
 		}
 	case TurnArgModeFollowup:
-		if sessionID != "" {
-			builder.withKeyValue("--resume", sessionID)
-		} else {
-			builder.withFlag("--continue")
-		}
+		// Follow-up turns should continue from the latest local session state.
+		// Explicit session IDs are only used for first-turn steering.
+		builder.withFlag("--continue")
 	default:
 		if sessionID != "" {
 			builder.withKeyValue("--session-id", sessionID)
