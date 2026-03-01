@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/common"
-	"github.com/beam-cloud/airstore/pkg/orchestration"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/scheduler"
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -29,19 +28,13 @@ type WorkerService struct {
 	recoveryLoopEnabled bool
 	recoveryInterval    time.Duration
 	recoveryBatchSize   int
-	unclaimedStaleAfter time.Duration
 }
 
 const (
 	defaultRunClaimLeaseTTL       = 45 * time.Second
 	defaultRecoveryLoopInterval   = 10 * time.Second
 	defaultRecoveryLoopBatchSize  = 50
-	defaultUnclaimedRunStaleAfter = 2 * time.Minute
 )
-
-type delayedTaskQueue interface {
-	PushDelayed(ctx context.Context, task *types.RunExecution, delay time.Duration) error
-}
 
 func NewWorkerService(
 	sched *scheduler.Scheduler,
@@ -63,10 +56,6 @@ func NewWorkerService(
 	if recoveryBatchSize <= 0 {
 		recoveryBatchSize = defaultRecoveryLoopBatchSize
 	}
-	unclaimedStaleAfter := schedulerConfig.UnclaimedRunStaleAfter
-	if unclaimedStaleAfter <= 0 {
-		unclaimedStaleAfter = defaultUnclaimedRunStaleAfter
-	}
 
 	var terminalIO repository.TerminalIORepository
 	if redisClient != nil {
@@ -84,7 +73,6 @@ func NewWorkerService(
 		recoveryLoopEnabled: schedulerConfig.RecoveryLoopEnabled,
 		recoveryInterval:    recoveryInterval,
 		recoveryBatchSize:   recoveryBatchSize,
-		unclaimedStaleAfter: unclaimedStaleAfter,
 	}
 }
 
@@ -206,29 +194,43 @@ func (s *WorkerService) SetTaskStarted(ctx context.Context, req *pb.SetTaskStart
 	if s.backend == nil {
 		return nil, status.Errorf(codes.Unavailable, "task persistence not available")
 	}
+	attemptID := strings.TrimSpace(req.AttemptId)
+	if attemptID == "" {
+		return nil, status.Error(codes.InvalidArgument, "attempt_id is required")
+	}
 
 	attempt, err := s.lookupRunAttemptByExecutionID(ctx, req.TaskId)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to lookup run attempt: %v", err)
 	}
-	if attempt != nil {
-		run, runErr := s.backend.GetAgentRunByID(ctx, attempt.RunID)
-		if runErr == nil && run.Status.IsTerminal() {
-			now := time.Now()
-			errMsg := "run is already terminal"
-			_ = s.backend.UpdateAgentRunAttemptResult(ctx, attempt.ID, types.AgentAttemptStatusCancelled, nil, now, &errMsg)
-			_ = s.backend.SetRunExecutionResult(ctx, req.TaskId, -1, errMsg)
-			_ = appendRunSnapshot(ctx, s.backend, attempt.RunID, run.Status, nil, &now, &errMsg, map[string]any{
-				"attempt_id": attempt.ID,
-				"task_id":    req.TaskId,
-				"event":      string(types.AgentRunEventStartRejectedTerminalRun),
-			})
-			_ = s.markOriginTaskTerminalIfCurrentRun(ctx, attempt.RunID)
-			return nil, status.Errorf(codes.FailedPrecondition, "run is already terminal")
-		}
+	if attempt == nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "run attempt mapping not found")
+	}
+	if attempt.ID != attemptID {
+		log.Info().
+			Str("task_id", req.TaskId).
+			Str("expected_attempt", attemptID).
+			Str("current_attempt", attempt.ID).
+			Msg("ignoring stale task start callback for superseded attempt")
+		return &pb.SetTaskStartedResponse{}, nil
+	}
+	run, runErr := s.backend.GetAgentRunByID(ctx, attempt.RunID)
+	if runErr == nil && run.Status.IsTerminal() {
+		now := time.Now()
+		errMsg := "run is already terminal"
+		_ = s.backend.UpdateAgentRunAttemptResult(ctx, attempt.ID, types.AgentAttemptStatusCancelled, nil, now, &errMsg)
+		_, _ = s.backend.SetRunExecutionResultForAttempt(ctx, req.TaskId, attemptID, -1, errMsg)
+		_ = appendRunSnapshot(ctx, s.backend, attempt.RunID, run.Status, nil, &now, &errMsg, map[string]any{
+			types.AgentRunEventPayloadKeyAttemptID: attempt.ID,
+			types.AgentRunEventPayloadKeyTaskID:    req.TaskId,
+			types.AgentRunEventPayloadKeyEvent:     string(types.AgentRunEventStartRejectedTerminalRun),
+		})
+		_ = s.markOriginTaskTerminalIfCurrentRun(ctx, attempt.RunID)
+		return nil, status.Errorf(codes.FailedPrecondition, "run is already terminal")
 	}
 
-	if err := s.backend.SetRunExecutionStarted(ctx, req.TaskId); err != nil {
+	applied, err := s.backend.SetRunExecutionStartedForAttempt(ctx, req.TaskId, attemptID)
+	if err != nil {
 		if _, ok := err.(*types.ErrRunExecutionNotFound); ok {
 			return nil, status.Errorf(codes.NotFound, "task not found: %s", req.TaskId)
 		}
@@ -237,34 +239,31 @@ func (s *WorkerService) SetTaskStarted(ctx context.Context, req *pb.SetTaskStart
 		}
 		return nil, status.Errorf(codes.Internal, "failed to set task started: %v", err)
 	}
-
-	if attempt != nil {
-		now := time.Now()
-		_ = s.backend.UpdateAgentRunAttemptStart(ctx, attempt.ID, now)
-		workerID := s.resolveTaskWorkerID(ctx, req.TaskId)
-		if workerID != "" {
-			expiresAt := now.Add(s.claimLeaseDuration())
-			if claimErr := s.backend.SetAgentRunClaim(ctx, attempt.RunID, workerID, now, expiresAt); claimErr != nil {
-				log.Warn().
-					Err(claimErr).
-					Str("run_id", attempt.RunID).
-					Str("task_id", req.TaskId).
-					Str("worker_id", workerID).
-					Msg("failed to set run claim lease on start")
-			}
-		}
-		_ = s.backend.UpdateAgentRunLifecycle(ctx, attempt.RunID, types.AgentRunStatusRunning, &now, nil, nil)
-		_ = appendRunSnapshot(ctx, s.backend, attempt.RunID, types.AgentRunStatusRunning, &now, nil, nil, map[string]any{
-			"attempt_id": attempt.ID,
-			"task_id":    req.TaskId,
-			"event":      string(types.AgentRunEventStarted),
-		})
-		_ = updateExecutionInstanceCounts(ctx, s.backend, attempt.RunID, 1)
-	} else {
-		log.Debug().
-			Str("task_id", req.TaskId).
-			Msg("started run execution without run attempt mapping")
+	if !applied {
+		return &pb.SetTaskStartedResponse{}, nil
 	}
+
+	now := time.Now()
+	_ = s.backend.UpdateAgentRunAttemptStart(ctx, attempt.ID, now)
+	workerID := s.resolveTaskWorkerID(ctx, req.TaskId)
+	if workerID != "" {
+		expiresAt := now.Add(s.claimLeaseDuration())
+		if claimErr := s.backend.SetAgentRunClaim(ctx, attempt.RunID, workerID, now, expiresAt); claimErr != nil {
+			log.Warn().
+				Err(claimErr).
+				Str("run_id", attempt.RunID).
+				Str("task_id", req.TaskId).
+				Str("worker_id", workerID).
+				Msg("failed to set run claim lease on start")
+		}
+	}
+	_ = s.backend.UpdateAgentRunLifecycle(ctx, attempt.RunID, types.AgentRunStatusRunning, &now, nil, nil)
+	_ = appendRunSnapshot(ctx, s.backend, attempt.RunID, types.AgentRunStatusRunning, &now, nil, nil, map[string]any{
+		types.AgentRunEventPayloadKeyAttemptID: attempt.ID,
+		types.AgentRunEventPayloadKeyTaskID:    req.TaskId,
+		types.AgentRunEventPayloadKeyEvent:     string(types.AgentRunEventStarted),
+	})
+	_ = updateExecutionInstanceCounts(ctx, s.backend, attempt.RunID, 1)
 
 	return &pb.SetTaskStartedResponse{}, nil
 }
@@ -273,17 +272,27 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 	if s.backend == nil {
 		return nil, status.Errorf(codes.Unavailable, "task persistence not available")
 	}
+	attemptID := strings.TrimSpace(req.AttemptId)
+	if attemptID == "" {
+		return nil, status.Error(codes.InvalidArgument, "attempt_id is required")
+	}
 
 	attempt, attemptErr := s.lookupRunAttemptByExecutionID(ctx, req.TaskId)
 	if attemptErr != nil {
 		return nil, status.Errorf(codes.Internal, "failed to lookup run attempt: %v", attemptErr)
 	}
-	if attempt != nil && !isRunAttemptActive(attempt) {
-		log.Info().
+	if attempt == nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "run attempt mapping not found")
+	}
+	if !isRunAttemptActive(attempt) {
+		log.Debug().
 			Str("task_id", req.TaskId).
 			Str("run_id", attempt.RunID).
 			Str("attempt_id", attempt.ID).
-			Msg("ignoring stale task result callback for non-active attempt")
+			Str("reported_attempt_id", attemptID).
+			Str("attempt_status", string(attempt.Status)).
+			Bool("attempt_ended", attempt.EndedAt != nil).
+			Msg("dropping duplicate/stale task result callback after attempt finalized")
 		return &pb.SetTaskResultResponse{}, nil
 	}
 
@@ -291,39 +300,29 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 	// matches the current attempt on the run, this result belongs to a
 	// superseded execution. Skip finalization to avoid marking a newer
 	// attempt terminal while its worker is still running.
-	if attempt != nil && strings.TrimSpace(req.AttemptId) != "" && attempt.ID != req.AttemptId {
-		log.Info().
+	if attempt.ID != attemptID {
+		log.Debug().
 			Str("task_id", req.TaskId).
-			Str("expected_attempt", req.AttemptId).
+			Str("expected_attempt", attemptID).
 			Str("current_attempt", attempt.ID).
-			Msg("ignoring stale task result: attempt was superseded")
+			Msg("dropping stale task result callback for superseded attempt")
 		return &pb.SetTaskResultResponse{}, nil
 	}
 
-	if err := s.backend.SetRunExecutionResult(ctx, req.TaskId, int(req.ExitCode), req.Error); err != nil {
-		if _, ok := err.(*types.ErrRunExecutionNotFound); ok {
-			return nil, status.Errorf(codes.NotFound, "task not found: %s", req.TaskId)
-		}
-		return nil, status.Errorf(codes.Internal, "failed to set task result: %v", err)
-	}
-
-	if attempt != nil {
-		if _, finalizeErr := s.finalizeRunAttempt(
-			ctx,
-			attempt,
-			req.TaskId,
-			int(req.ExitCode),
-			req.Error,
-			types.AgentRunEventFinished,
-			nil,
-		); finalizeErr != nil {
-			log.Error().
-				Err(finalizeErr).
-				Str("task_id", req.TaskId).
-				Str("run_id", attempt.RunID).
-				Str("attempt_id", attempt.ID).
-				Msg("failed to finalize run attempt after task result")
-		}
+	resultKey := fmt.Sprintf("run_result:%s:%s", strings.TrimSpace(req.TaskId), attemptID)
+	if err := s.backend.EnqueueOrchestrationOutboxEvent(ctx, &types.OrchestrationOutboxEvent{
+		EventType: types.OrchestrationOutboxEventTypeRunResult,
+		DedupeKey: resultKey,
+		PayloadJSON: map[string]any{
+			types.OrchestrationOutboxPayloadTaskID:      strings.TrimSpace(req.TaskId),
+			types.OrchestrationOutboxPayloadAttemptID:   attemptID,
+			types.OrchestrationOutboxPayloadExitCode:    int(req.ExitCode),
+			types.OrchestrationOutboxPayloadError:       req.Error,
+			types.OrchestrationOutboxPayloadIdempotency: resultKey,
+		},
+		AvailableAt: time.Now(),
+	}); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to enqueue task result: %v", err)
 	}
 
 	return &pb.SetTaskResultResponse{}, nil
@@ -370,129 +369,6 @@ func (s *WorkerService) lookupRunAttemptByExecutionID(ctx context.Context, taskI
 	return attempt, nil
 }
 
-func classifyRunResult(exitCode int, errText string) (types.AgentAttemptStatus, types.AgentRunStatus, *string) {
-	attemptStatus := types.AgentAttemptStatusOK
-	runStatus := types.AgentRunStatusOK
-	var errMsg *string
-	if strings.TrimSpace(errText) != "" {
-		msg := errText
-		errMsg = &msg
-	}
-
-	lowerErr := strings.ToLower(errText)
-	switch {
-	case strings.Contains(lowerErr, "timeout"):
-		attemptStatus = types.AgentAttemptStatusTimeout
-		runStatus = types.AgentRunStatusTimeout
-	case strings.Contains(lowerErr, "cancel"):
-		attemptStatus = types.AgentAttemptStatusCancelled
-		runStatus = types.AgentRunStatusCancelled
-	case exitCode != 0 || strings.TrimSpace(errText) != "":
-		attemptStatus = types.AgentAttemptStatusError
-		runStatus = types.AgentRunStatusError
-	}
-	return attemptStatus, runStatus, errMsg
-}
-
-func mergePayload(dst map[string]any, extra map[string]any) map[string]any {
-	if dst == nil {
-		dst = map[string]any{}
-	}
-	for key, value := range extra {
-		dst[key] = value
-	}
-	return dst
-}
-
-func (s *WorkerService) finalizeRunAttempt(
-	ctx context.Context,
-	attempt *types.AgentRunAttempt,
-	taskID string,
-	exitCode int,
-	errText string,
-	finishedEvent types.AgentRunEventType,
-	extraPayload map[string]any,
-) (bool, error) {
-	if s.backend == nil || attempt == nil {
-		return false, nil
-	}
-	if !isRunAttemptActive(attempt) {
-		return false, nil
-	}
-
-	now := time.Now()
-	attemptStatus, runStatus, errMsg := classifyRunResult(exitCode, errText)
-
-	if err := s.backend.UpdateAgentRunAttemptResult(ctx, attempt.ID, attemptStatus, &exitCode, now, errMsg); err != nil {
-		return false, fmt.Errorf("update run attempt result: %w", err)
-	}
-	if err := s.backend.ClearAgentRunClaim(ctx, attempt.RunID); err != nil {
-		log.Warn().
-			Err(err).
-			Str("run_id", attempt.RunID).
-			Msg("failed to clear run claim lease during finalization")
-	}
-	if err := updateExecutionInstanceCounts(ctx, s.backend, attempt.RunID, -1); err != nil {
-		log.Warn().
-			Err(err).
-			Str("run_id", attempt.RunID).
-			Msg("failed to decrement execution instance counters during finalization")
-	}
-
-	if shouldRetryAttempt(attemptStatus) {
-		retryInfo, retryErr := s.scheduleRetryRun(ctx, attempt, taskID)
-		if retryErr != nil {
-			log.Warn().
-				Err(retryErr).
-				Str("run_id", attempt.RunID).
-				Str("attempt_id", attempt.ID).
-				Msg("failed to schedule retry run")
-		} else if retryInfo.scheduled {
-			payload := attemptSnapshotPayload(attempt.ID, taskID, exitCode, errText, types.AgentRunEventRetryScheduled)
-			payload["next_run_id"] = retryInfo.nextRunID
-			payload["next_attempt_no"] = retryInfo.nextAttemptNo
-			payload[types.AgentExecutionMetaKeyRetryDelayMs] = retryInfo.delayMs
-			payload = mergePayload(payload, extraPayload)
-			if err := s.backend.UpdateAgentRunLifecycle(ctx, attempt.RunID, runStatus, nil, &now, errMsg); err != nil {
-				return false, fmt.Errorf("update run lifecycle for retry: %w", err)
-			}
-			if err := appendRunSnapshot(ctx, s.backend, attempt.RunID, runStatus, nil, &now, errMsg, payload); err != nil {
-				return false, fmt.Errorf("append retry snapshot: %w", err)
-			}
-			return true, nil
-		}
-	}
-
-	payload := attemptSnapshotPayload(attempt.ID, taskID, exitCode, errText, finishedEvent)
-	payload = mergePayload(payload, extraPayload)
-	if err := s.backend.UpdateAgentRunLifecycle(ctx, attempt.RunID, runStatus, nil, &now, errMsg); err != nil {
-		return false, fmt.Errorf("update run lifecycle: %w", err)
-	}
-	if err := appendRunSnapshot(ctx, s.backend, attempt.RunID, runStatus, nil, &now, errMsg, payload); err != nil {
-		return false, fmt.Errorf("append completion snapshot: %w", err)
-	}
-	if err := s.markOriginTaskTerminalIfCurrentRun(ctx, attempt.RunID); err != nil {
-		return false, fmt.Errorf("mark origin task terminal: %w", err)
-	}
-	return false, nil
-}
-
-func attemptSnapshotPayload(
-	attemptID string,
-	taskID string,
-	exitCode int,
-	errText string,
-	event types.AgentRunEventType,
-) map[string]any {
-	return map[string]any{
-		"attempt_id": attemptID,
-		"task_id":    taskID,
-		"exit_code":  exitCode,
-		"error":      errText,
-		"event":      string(event),
-	}
-}
-
 func (s *WorkerService) resolveTaskWorkerID(ctx context.Context, taskID string) string {
 	if s.taskQueue == nil || strings.TrimSpace(taskID) == "" {
 		return ""
@@ -524,27 +400,30 @@ func (s *WorkerService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, 
 	if err != nil {
 		return err
 	}
-
-	// Ignore stale completions from superseded runs.
-	if task.TargetRunID != nil && *task.TargetRunID != run.ID {
-		return nil
-	}
-	if run.EndedAt != nil && task.UpdatedAt.After(*run.EndedAt) && task.State.IsDispatchable() {
-		// Task state was reopened after this run had already ended.
-		return nil
-	}
-
 	if task.State.IsTerminal() {
 		return nil
 	}
-	targetRunID := run.ID
-	nextState := types.AgentTaskStateDone
-	if run.Status == types.AgentRunStatusCancelled {
-		nextState = types.AgentTaskStateCancelled
-	} else if run.Interactive && run.Status == types.AgentRunStatusOK {
-		nextState = types.AgentTaskStateIdle
+	if run.EndedAt != nil && task.UpdatedAt.After(*run.EndedAt) {
+		// Task state was reopened after this run had already ended.
+		return nil
 	}
-	return s.backend.UpdateTaskState(ctx, task.ID, nextState, nil, &targetRunID)
+	targetRunID := run.ID
+	nextState := types.TaskTerminalStateForRun(run.Status, run.Interactive)
+	updated, err := s.backend.UpdateTaskStateIfCurrentRun(
+		ctx,
+		run.OriginTaskID,
+		run.ID,
+		nextState,
+		nil,
+		&targetRunID,
+	)
+	if err != nil {
+		return err
+	}
+	if !updated {
+		return nil
+	}
+	return nil
 }
 
 func appendRunSnapshot(
@@ -598,401 +477,6 @@ func updateExecutionInstanceCounts(ctx context.Context, backend repository.Backe
 	}
 	now := time.Now()
 	return backend.AdjustExecutionInstanceRunningAttempts(ctx, instanceKey, runningDelta, &now)
-}
-
-type retryScheduleResult struct {
-	scheduled     bool
-	nextAttemptNo int
-	delayMs       int
-	nextRunID     string
-}
-
-func shouldRetryAttempt(status types.AgentAttemptStatus) bool {
-	switch status {
-	case types.AgentAttemptStatusError, types.AgentAttemptStatusTimeout:
-		return true
-	default:
-		return false
-	}
-}
-
-func (s *WorkerService) scheduleRetryRun(ctx context.Context, attempt *types.AgentRunAttempt, taskID string) (retryScheduleResult, error) {
-	if s.backend == nil || s.taskQueue == nil || attempt == nil {
-		return retryScheduleResult{}, fmt.Errorf("retry dependencies are not available")
-	}
-
-	run, err := s.backend.GetAgentRunByID(ctx, attempt.RunID)
-	if err != nil {
-		return retryScheduleResult{}, err
-	}
-	retryPolicy := retryPolicyFromRun(run)
-	if attempt.AttemptNo >= retryPolicy.maxAttempts {
-		return retryScheduleResult{scheduled: false}, nil
-	}
-
-	originTask, err := s.backend.GetTaskByID(ctx, run.OriginTaskID)
-	if err != nil {
-		return retryScheduleResult{}, err
-	}
-	if originTask.TargetRunID != nil && *originTask.TargetRunID != run.ID {
-		// Another completion handler already advanced retries to a newer run.
-		return retryScheduleResult{scheduled: false}, nil
-	}
-	if err := s.ensureSessionAvailableForRetry(ctx, run.WorkspaceID, run.SessionID, run.ID); err != nil {
-		return retryScheduleResult{}, err
-	}
-
-	sourceTask, err := s.backend.GetRunExecution(ctx, taskID)
-	if err != nil {
-		return retryScheduleResult{}, err
-	}
-
-	nextAttemptNo := attempt.AttemptNo + 1
-	if run.ExecAsk != string(orchestration.ExecAskOff) {
-		return retryScheduleResult{scheduled: false}, nil
-	}
-
-	retryDelivery := cloneAnyMap(run.DeliveryJSON)
-	if retryDelivery == nil {
-		retryDelivery = map[string]any{}
-	}
-	retryDelivery[types.AgentExecutionMetaKeyRetryMaxAttempts] = retryPolicy.maxAttempts
-	retryDelivery[types.AgentExecutionMetaKeyRetryDelayMs] = retryPolicy.delayMs
-	retryDelivery["retry_from_run_id"] = run.ID
-	retryDelivery["retry_attempt_no"] = nextAttemptNo
-
-	retryRun := &types.AgentRun{
-		WorkspaceID:     run.WorkspaceID,
-		AgentID:         run.AgentID,
-		OriginTaskID:    run.OriginTaskID,
-		Status:          types.AgentRunStatusAccepted,
-		SessionID:       run.SessionID,
-		SessionKey:      run.SessionKey,
-		Provider:        run.Provider,
-		Model:           run.Model,
-		ExecHost:        run.ExecHost,
-		ExecSecurity:    run.ExecSecurity,
-		ExecAsk:         run.ExecAsk,
-		RuntimeType:     run.RuntimeType,
-		WorkspaceAccess: run.WorkspaceAccess,
-		NetworkEnabled:  run.NetworkEnabled,
-		Interactive:     run.Interactive,
-		TimeoutMs:       run.TimeoutMs,
-		UsageJSON:       map[string]any{},
-		DeliveryJSON:    retryDelivery,
-	}
-	if err := s.backend.CreateAgentRun(ctx, retryRun); err != nil {
-		return retryScheduleResult{}, err
-	}
-
-	targetRunID := retryRun.ID
-	if err := s.backend.UpdateTaskState(ctx, run.OriginTaskID, types.AgentTaskStateRunning, nil, &targetRunID); err != nil {
-		return retryScheduleResult{}, err
-	}
-
-	retryAttempt := &types.AgentRunAttempt{
-		RunID:           retryRun.ID,
-		AttemptNo:       nextAttemptNo,
-		Status:          types.AgentAttemptStatusPending,
-		Strategy:        types.AgentAttemptStrategyRetry,
-		Provider:        retryRun.Provider,
-		Model:           retryRun.Model,
-		ExecHost:        retryRun.ExecHost,
-		ExecSecurity:    retryRun.ExecSecurity,
-		ExecAsk:         retryRun.ExecAsk,
-		RuntimeType:     retryRun.RuntimeType,
-		WorkspaceAccess: retryRun.WorkspaceAccess,
-		NetworkEnabled:  retryRun.NetworkEnabled,
-		Interactive:     retryRun.Interactive,
-	}
-	if err := s.backend.CreateAgentRunAttempt(ctx, retryAttempt); err != nil {
-		return retryScheduleResult{}, err
-	}
-
-	_ = appendRunSnapshot(ctx, s.backend, retryRun.ID, types.AgentRunStatusAccepted, nil, nil, nil, map[string]any{
-		"event":             string(types.AgentRunEventAccepted),
-		"task_id":           retryRun.OriginTaskID,
-		"attempt_id":        retryAttempt.ID,
-		"retry_from_run_id": run.ID,
-		"retry_attempt_no":  nextAttemptNo,
-	})
-
-	_, memberToken, err := s.backend.EnsureWorkspaceServiceToken(ctx, run.WorkspaceID)
-	if err != nil {
-		return retryScheduleResult{}, err
-	}
-	taskEnv := cloneStringMap(sourceTask.Env)
-	taskEnv["AIRSTORE_RUN_ID"] = retryRun.ID
-	taskEnv["AIRSTORE_RUN_ATTEMPT_ID"] = retryAttempt.ID
-	taskEnv["AIRSTORE_ORIGIN_TASK_ID"] = retryRun.OriginTaskID
-	executionPolicy := cloneAnyMap(sourceTask.ExecutionPolicy)
-	if executionPolicy == nil {
-		executionPolicy = map[string]any{}
-	}
-	executionPolicy[types.AgentExecutionMetaKeyRunID] = retryRun.ID
-	executionPolicy[types.AgentExecutionMetaKeyRunAttemptID] = retryAttempt.ID
-	executionPolicy[types.AgentExecutionMetaKeyOriginTaskID] = retryRun.OriginTaskID
-	executionPolicy[types.AgentExecutionMetaKeyRetry] = map[string]any{
-		"max_attempts": retryPolicy.maxAttempts,
-		"delay_ms":     retryPolicy.delayMs,
-	}
-
-	retryTask := &types.RunExecution{
-		WorkspaceId:       retryRun.WorkspaceID,
-		MemberToken:       memberToken,
-		Status:            types.RunExecutionStatusPending,
-		Type:              sourceTask.Type,
-		Prompt:            sourceTask.Prompt,
-		Image:             sourceTask.Image,
-		Entrypoint:        cloneStringSlice(sourceTask.Entrypoint),
-		Env:               taskEnv,
-		Resources:         resolveRunExecutionResources(sourceTask),
-		RunAttemptID:      &retryAttempt.ID,
-		Attempt:           nextAttemptNo,
-		MaxAttempts:       retryPolicy.maxAttempts,
-		TimeoutMs:         sourceTask.TimeoutMs,
-		ExecHost:          strPtrOrNil(retryRun.ExecHost),
-		ExecSecurity:      strPtrOrNil(retryRun.ExecSecurity),
-		ExecAsk:           strPtrOrNil(retryRun.ExecAsk),
-		RuntimeType:       strPtrOrNil(retryRun.RuntimeType),
-		WorkspaceAccess:   strPtrOrNil(retryRun.WorkspaceAccess),
-		NetworkEnabled:    boolPtr(retryRun.NetworkEnabled),
-		ExecutionPolicy:   executionPolicy,
-		CreatedByMemberId: nil,
-	}
-	if retryTask.TimeoutMs == nil {
-		timeout := retryRun.TimeoutMs
-		retryTask.TimeoutMs = &timeout
-	}
-	if err := s.backend.CreateRunExecution(ctx, retryTask); err != nil {
-		return retryScheduleResult{}, err
-	}
-	if err := s.backend.BindAttemptExecutionTask(ctx, retryAttempt.ID, retryTask.ExternalId); err != nil {
-		return retryScheduleResult{}, err
-	}
-	if retryPolicy.delayMs <= 0 {
-		if err := s.taskQueue.Push(ctx, retryTask); err != nil {
-			return retryScheduleResult{}, err
-		}
-	} else {
-		delay := time.Duration(retryPolicy.delayMs) * time.Millisecond
-		if delayedQueue, ok := s.taskQueue.(delayedTaskQueue); ok {
-			if err := delayedQueue.PushDelayed(ctx, retryTask, delay); err != nil {
-				return retryScheduleResult{}, err
-			}
-		} else {
-			taskCopy := *retryTask
-			retryRunID := retryRun.ID
-			go func(delay time.Duration, queuedTask types.RunExecution) {
-				timer := time.NewTimer(delay)
-				defer timer.Stop()
-				<-timer.C
-
-				latestRun, err := s.backend.GetAgentRunByID(context.Background(), retryRunID)
-				if err != nil {
-					log.Warn().
-						Err(err).
-						Str("task_id", queuedTask.ExternalId).
-						Str("run_id", retryRunID).
-						Msg("failed to recheck run status before delayed retry enqueue")
-					return
-				}
-				if latestRun.Status.IsTerminal() {
-					log.Info().
-						Str("task_id", queuedTask.ExternalId).
-						Str("run_id", retryRunID).
-						Str("run_status", string(latestRun.Status)).
-						Msg("skipping delayed retry enqueue for terminal run")
-					return
-				}
-				if err := s.taskQueue.Push(context.Background(), &queuedTask); err != nil {
-					log.Warn().
-						Err(err).
-						Str("task_id", queuedTask.ExternalId).
-						Str("run_id", retryRunID).
-						Int("delay_ms", retryPolicy.delayMs).
-						Msg("failed to enqueue delayed retry task")
-				}
-			}(delay, taskCopy)
-		}
-	}
-
-	return retryScheduleResult{
-		scheduled:     true,
-		nextAttemptNo: nextAttemptNo,
-		delayMs:       retryPolicy.delayMs,
-		nextRunID:     retryRun.ID,
-	}, nil
-}
-
-type runRetryPolicy struct {
-	maxAttempts int
-	delayMs     int
-}
-
-func retryPolicyFromRun(run *types.AgentRun) runRetryPolicy {
-	policy := runRetryPolicy{
-		maxAttempts: orchestration.DefaultRetryMaxAttempts,
-		delayMs:     orchestration.DefaultRetryDelayMs,
-	}
-	if run == nil || len(run.DeliveryJSON) == 0 {
-		return policy
-	}
-
-	if value, ok := run.DeliveryJSON[types.AgentExecutionMetaKeyRetryMaxAttempts]; ok {
-		if parsed := intFromAny(value); parsed > 0 {
-			policy.maxAttempts = parsed
-		}
-	}
-	if value, ok := run.DeliveryJSON[types.AgentExecutionMetaKeyRetryDelayMs]; ok {
-		if parsed := intFromAny(value); parsed >= 0 {
-			policy.delayMs = parsed
-		}
-	}
-	if nested, ok := run.DeliveryJSON[types.AgentExecutionMetaKeyRetry].(map[string]any); ok {
-		if parsed := intFromAny(nested["max_attempts"]); parsed > 0 {
-			policy.maxAttempts = parsed
-		}
-		if parsed := intFromAny(nested["delay_ms"]); parsed >= 0 {
-			policy.delayMs = parsed
-		}
-	}
-	return policy
-}
-
-func intFromAny(value any) int {
-	switch typed := value.(type) {
-	case int:
-		return typed
-	case int32:
-		return int(typed)
-	case int64:
-		return int(typed)
-	case float32:
-		return int(typed)
-	case float64:
-		return int(typed)
-	case string:
-		var parsed int
-		if _, err := fmt.Sscanf(strings.TrimSpace(typed), "%d", &parsed); err == nil {
-			return parsed
-		}
-		return 0
-	default:
-		return 0
-	}
-}
-
-func cloneStringMap(src map[string]string) map[string]string {
-	if len(src) == 0 {
-		return map[string]string{}
-	}
-	dst := make(map[string]string, len(src))
-	for key, value := range src {
-		dst[key] = value
-	}
-	return dst
-}
-
-func cloneAnyMap(src map[string]any) map[string]any {
-	if len(src) == 0 {
-		return map[string]any{}
-	}
-	dst := make(map[string]any, len(src))
-	for key, value := range src {
-		dst[key] = value
-	}
-	return dst
-}
-
-func cloneStringSlice(src []string) []string {
-	if len(src) == 0 {
-		return []string{}
-	}
-	dst := make([]string, len(src))
-	copy(dst, src)
-	return dst
-}
-
-func resolveRunExecutionResources(exec *types.RunExecution) *types.RunExecutionResources {
-	if exec == nil {
-		return nil
-	}
-	if exec.Resources != nil {
-		return exec.Resources
-	}
-	if exec.ExecutionPolicy == nil {
-		return nil
-	}
-	raw, ok := exec.ExecutionPolicy[types.AgentExecutionMetaKeyResources]
-	if !ok || raw == nil {
-		return nil
-	}
-	resourcesMap, ok := raw.(map[string]any)
-	if !ok {
-		return nil
-	}
-	resources := &types.RunExecutionResources{
-		CPU:    int64(intFromAny(resourcesMap["cpu"])),
-		Memory: int64(intFromAny(resourcesMap["memory"])),
-		GPU:    intFromAny(resourcesMap["gpu"]),
-	}
-	if resources.CPU == 0 && resources.Memory == 0 && resources.GPU == 0 {
-		return nil
-	}
-	return resources
-}
-
-func strPtrOrNil(value string) *string {
-	if strings.TrimSpace(value) == "" {
-		return nil
-	}
-	return &value
-}
-
-func (s *WorkerService) ensureSessionAvailableForRetry(
-	ctx context.Context,
-	workspaceID uint,
-	sessionID string,
-	excludeRunIDs ...string,
-) error {
-	if s == nil || s.backend == nil {
-		return nil
-	}
-	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" {
-		return nil
-	}
-
-	if s.terminalIO != nil {
-		if owner, _ := s.terminalIO.GetSessionLeaseOwner(ctx, workspaceID, sessionID); owner != "" {
-			if !s.tryReconcileStaleSessionLease(ctx, workspaceID, sessionID, owner) {
-				return fmt.Errorf("session ID %s is already in use (lease: %s)", sessionID, owner)
-			}
-		}
-	}
-
-	conflicts, err := s.backend.ListActiveRunsBySession(ctx, workspaceID, sessionID, excludeRunIDs, 5)
-	if err != nil {
-		return err
-	}
-	if len(conflicts) == 0 {
-		return nil
-	}
-
-	conflictRunID := strings.TrimSpace(conflicts[0].ID)
-	if conflictRunID == "" {
-		return fmt.Errorf("session ID %s is already in use", sessionID)
-	}
-	return fmt.Errorf("session ID %s is already in use by active run %s", sessionID, conflictRunID)
-}
-
-func (s *WorkerService) tryReconcileStaleSessionLease(ctx context.Context, workspaceID uint, sessionID, owner string) bool {
-	return orchestration.ReconcileStaleSessionLease(ctx, s.backend, s.terminalIO, workspaceID, sessionID, owner)
-}
-
-func boolPtr(value bool) *bool {
-	return &value
 }
 
 func (s *WorkerService) AllocateIP(ctx context.Context, req *pb.AllocateIPRequest) (*pb.AllocateIPResponse, error) {

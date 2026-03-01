@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/common"
@@ -61,6 +62,11 @@ type Sandbox struct {
 	Output  io.Writer
 	Flush   func()
 }
+
+const (
+	sandboxKillTimeout   = 2 * time.Second
+	sandboxDeleteTimeout = 2 * time.Second
+)
 
 // Config for creating a SandboxManager.
 type Config struct {
@@ -662,10 +668,9 @@ func isInteractiveBootstrapEntrypoint(entrypoint []string) bool {
 		strings.TrimSpace(entrypoint[1]) == "infinity"
 }
 
-// Stop stops a running sandbox by sending a signal to the container
-// processes. The sandbox context is NOT cancelled here so that
-// runsc can exit naturally and report the real exit code. The
-// context is cancelled later in Delete() as a final cleanup step.
+// Stop stops a running sandbox by signalling container processes.
+// Non-force mode sends SIGTERM and preserves normal runtime teardown.
+// Force mode sends SIGKILL and immediately cancels the sandbox context.
 func (m *SandboxManager) Stop(sandboxID string, force bool) error {
 	m.mu.RLock()
 	sandbox, exists := m.sandboxes[sandboxID]
@@ -680,29 +685,26 @@ func (m *SandboxManager) Stop(sandboxID string, force bool) error {
 		Bool("force", force).
 		Msg("stopping sandbox")
 
-	// Kill the container processes via the runtime. Do NOT cancel the
-	// sandbox context — that would SIGKILL the runsc wrapper before it
-	// can report the container's real exit code.
 	opts := &runtime.KillOpts{All: true}
-	if err := m.runtime.Kill(m.ctx, sandboxID, 15, opts); err != nil { // SIGTERM
+	killSignal := syscall.SIGTERM
+	if force {
+		killSignal = syscall.SIGKILL
+	}
+	killCtx, killCancel := context.WithTimeout(m.ctx, sandboxKillTimeout)
+	defer killCancel()
+	if err := m.runtime.Kill(killCtx, sandboxID, killSignal, opts); err != nil {
 		if isContainerAlreadyStopped(err) {
 			log.Debug().Str("sandbox_id", sandboxID).Msg("container already stopped, skipping kill")
-			return nil
-		}
-		if !force {
+		} else if !force {
 			return fmt.Errorf("failed to kill sandbox: %w", err)
-		}
-		if err := m.runtime.Kill(m.ctx, sandboxID, 9, opts); err != nil {
-			if isContainerAlreadyStopped(err) {
-				log.Debug().Str("sandbox_id", sandboxID).Msg("container already stopped, skipping force kill")
-				return nil
-			}
+		} else {
 			log.Warn().Err(err).Str("sandbox_id", sandboxID).Msg("force kill failed")
-			// Last resort: cancel the sandbox context to force-kill runsc
-			if sandbox.Cancel != nil {
-				sandbox.Cancel()
-			}
 		}
+	}
+
+	if force && sandbox.Cancel != nil {
+		// Ensure runsc wrapper teardown is not blocked by slow runtime kill paths.
+		sandbox.Cancel()
 	}
 
 	return nil
@@ -755,10 +757,16 @@ func (m *SandboxManager) Delete(sandboxID string, force bool) error {
 		sandbox.Cancel()
 	}
 
-	// Delete from runtime
+	// Delete from runtime with bounded wait to avoid hanging cleanup paths.
 	opts := &runtime.DeleteOpts{Force: force}
-	if err := m.runtime.Delete(m.ctx, sandboxID, opts); err != nil {
-		log.Warn().Err(err).Str("sandbox_id", sandboxID).Msg("runtime delete failed")
+	deleteCtx, deleteCancel := context.WithTimeout(m.ctx, sandboxDeleteTimeout)
+	defer deleteCancel()
+	if err := m.runtime.Delete(deleteCtx, sandboxID, opts); err != nil {
+		if isContainerAlreadyStopped(err) {
+			log.Debug().Err(err).Str("sandbox_id", sandboxID).Msg("runtime delete skipped; sandbox already gone")
+		} else {
+			log.Warn().Err(err).Str("sandbox_id", sandboxID).Msg("runtime delete failed")
+		}
 	}
 
 	// Clean up bundle directory

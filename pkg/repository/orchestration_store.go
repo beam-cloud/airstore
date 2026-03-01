@@ -3,17 +3,20 @@ package repository
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/types"
+	redislib "github.com/redis/go-redis/v9"
 )
 
 const redisNilError = "redis: nil"
-const orchestrationQueueRedisRequired = "redis is required for orchestration queue"
+const orchestrationRedisRequired = "redis is required for orchestration"
+const orchestrationStreamMaxLen = 100_000
 
 // OrchestrationStore centralizes Redis-backed orchestration primitives:
-// queue tokens, mode reshaping state, instance locks, and run events.
+// stream dispatch/result channels, instance locks, and run events.
 type OrchestrationStore struct {
 	backend BackendRepository
 	redis   *common.RedisClient
@@ -33,74 +36,243 @@ func (s *OrchestrationStore) UpdateTaskState(ctx context.Context, taskID string,
 	return s.backend.UpdateTaskState(ctx, taskID, state, dropReason, targetRunID)
 }
 
-func (s *OrchestrationStore) PushQueueToken(ctx context.Context, token string) error {
+func (s *OrchestrationStore) EnsureTaskDispatchGroup(ctx context.Context) error {
+	return s.ensureStreamGroup(
+		ctx,
+		common.Keys.OrchestrationTaskDispatchStream(),
+		common.Keys.OrchestrationTaskDispatchGroup(),
+	)
+}
+
+func (s *OrchestrationStore) EnsureRunResultGroup(ctx context.Context) error {
+	return s.ensureStreamGroup(
+		ctx,
+		common.Keys.OrchestrationRunResultStream(),
+		common.Keys.OrchestrationRunResultGroup(),
+	)
+}
+
+func (s *OrchestrationStore) PublishTaskDispatch(ctx context.Context, values map[string]any) (string, error) {
+	return s.publishToStream(ctx, common.Keys.OrchestrationTaskDispatchStream(), values)
+}
+
+func (s *OrchestrationStore) PublishTaskDispatchDLQ(ctx context.Context, values map[string]any) (string, error) {
+	return s.publishToStream(ctx, common.Keys.OrchestrationTaskDispatchDLQ(), values)
+}
+
+func (s *OrchestrationStore) PublishRunResult(ctx context.Context, values map[string]any) (string, error) {
+	return s.publishToStream(ctx, common.Keys.OrchestrationRunResultStream(), values)
+}
+
+func (s *OrchestrationStore) PublishRunResultDLQ(ctx context.Context, values map[string]any) (string, error) {
+	return s.publishToStream(ctx, common.Keys.OrchestrationRunResultDLQ(), values)
+}
+
+func (s *OrchestrationStore) ReadTaskDispatch(
+	ctx context.Context,
+	consumer string,
+	block time.Duration,
+	count int64,
+) ([]redislib.XMessage, error) {
+	return s.readGroup(
+		ctx,
+		common.Keys.OrchestrationTaskDispatchStream(),
+		common.Keys.OrchestrationTaskDispatchGroup(),
+		consumer,
+		block,
+		count,
+	)
+}
+
+func (s *OrchestrationStore) ReadRunResults(
+	ctx context.Context,
+	consumer string,
+	block time.Duration,
+	count int64,
+) ([]redislib.XMessage, error) {
+	return s.readGroup(
+		ctx,
+		common.Keys.OrchestrationRunResultStream(),
+		common.Keys.OrchestrationRunResultGroup(),
+		consumer,
+		block,
+		count,
+	)
+}
+
+func (s *OrchestrationStore) ClaimPendingTaskDispatch(
+	ctx context.Context,
+	consumer string,
+	minIdle time.Duration,
+	count int64,
+) ([]redislib.XMessage, error) {
+	return s.claimPending(
+		ctx,
+		common.Keys.OrchestrationTaskDispatchStream(),
+		common.Keys.OrchestrationTaskDispatchGroup(),
+		consumer,
+		minIdle,
+		count,
+	)
+}
+
+func (s *OrchestrationStore) ClaimPendingRunResults(
+	ctx context.Context,
+	consumer string,
+	minIdle time.Duration,
+	count int64,
+) ([]redislib.XMessage, error) {
+	return s.claimPending(
+		ctx,
+		common.Keys.OrchestrationRunResultStream(),
+		common.Keys.OrchestrationRunResultGroup(),
+		consumer,
+		minIdle,
+		count,
+	)
+}
+
+func (s *OrchestrationStore) AckTaskDispatch(ctx context.Context, messageIDs ...string) error {
+	if len(messageIDs) == 0 {
+		return nil
+	}
 	redis, err := s.queueRedis()
 	if err != nil {
 		return err
 	}
-	return redis.LPush(ctx, common.Keys.TaskQueue(), token).Err()
+	return redis.XAck(
+		ctx,
+		common.Keys.OrchestrationTaskDispatchStream(),
+		common.Keys.OrchestrationTaskDispatchGroup(),
+		messageIDs...,
+	).Err()
 }
 
-func (s *OrchestrationStore) PopQueueToken(ctx context.Context, timeout time.Duration) (string, error) {
+func (s *OrchestrationStore) AckRunResults(ctx context.Context, messageIDs ...string) error {
+	if len(messageIDs) == 0 {
+		return nil
+	}
+	redis, err := s.queueRedis()
+	if err != nil {
+		return err
+	}
+	return redis.XAck(
+		ctx,
+		common.Keys.OrchestrationRunResultStream(),
+		common.Keys.OrchestrationRunResultGroup(),
+		messageIDs...,
+	).Err()
+}
+
+func (s *OrchestrationStore) ensureStreamGroup(ctx context.Context, stream string, group string) error {
+	redis, err := s.queueRedis()
+	if err != nil {
+		return err
+	}
+	if err := redis.XGroupCreateMkStream(ctx, stream, group, "0").Err(); err != nil {
+		if strings.Contains(strings.ToUpper(err.Error()), "BUSYGROUP") {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *OrchestrationStore) publishToStream(
+	ctx context.Context,
+	stream string,
+	values map[string]any,
+) (string, error) {
 	redis, err := s.queueRedis()
 	if err != nil {
 		return "", err
 	}
-	result, err := redis.BRPop(ctx, timeout, common.Keys.TaskQueue()).Result()
+	if len(values) == 0 {
+		return "", fmt.Errorf("stream values are required")
+	}
+	return redis.XAdd(ctx, &redislib.XAddArgs{
+		Stream: stream,
+		MaxLen: orchestrationStreamMaxLen,
+		Approx: true,
+		Values: values,
+	}).Result()
+}
+
+func (s *OrchestrationStore) readGroup(
+	ctx context.Context,
+	stream string,
+	group string,
+	consumer string,
+	block time.Duration,
+	count int64,
+) ([]redislib.XMessage, error) {
+	redis, err := s.queueRedis()
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(consumer) == "" {
+		return nil, fmt.Errorf("consumer is required")
+	}
+	if count <= 0 {
+		count = 64
+	}
+	streams, err := redis.XReadGroup(ctx, &redislib.XReadGroupArgs{
+		Group:    group,
+		Consumer: consumer,
+		Streams:  []string{stream, ">"},
+		Count:    count,
+		Block:    block,
+		NoAck:    false,
+	}).Result()
 	if err != nil {
 		if isRedisNil(err) {
-			return "", nil
+			return nil, nil
 		}
-		return "", err
+		return nil, err
 	}
-	if len(result) < 2 {
-		return "", nil
+	if len(streams) == 0 {
+		return nil, nil
 	}
-	return result[1], nil
+	return streams[0].Messages, nil
 }
 
-func (s *OrchestrationStore) GetModeTaskID(ctx context.Context, modeKey string) (string, error) {
+func (s *OrchestrationStore) claimPending(
+	ctx context.Context,
+	stream string,
+	group string,
+	consumer string,
+	minIdle time.Duration,
+	count int64,
+) ([]redislib.XMessage, error) {
 	redis, err := s.queueRedis()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	id, err := redis.Get(ctx, common.Keys.TaskModeState(modeKey)).Result()
-	return redisStringOrEmpty(id, err)
-}
+	if strings.TrimSpace(consumer) == "" {
+		return nil, fmt.Errorf("consumer is required")
+	}
+	if minIdle <= 0 {
+		minIdle = 10 * time.Second
+	}
+	if count <= 0 {
+		count = 64
+	}
 
-func (s *OrchestrationStore) SetModeTaskID(ctx context.Context, modeKey string, taskID string, ttl time.Duration) error {
-	redis, err := s.queueRedis()
+	messages, _, err := redis.XAutoClaim(ctx, &redislib.XAutoClaimArgs{
+		Stream:   stream,
+		Group:    group,
+		Consumer: consumer,
+		MinIdle:  minIdle,
+		Start:    "0-0",
+		Count:    count,
+	}).Result()
 	if err != nil {
-		return err
+		if isRedisNil(err) {
+			return nil, nil
+		}
+		return nil, err
 	}
-	return redis.Set(ctx, common.Keys.TaskModeState(modeKey), taskID, ttl).Err()
-}
-
-func (s *OrchestrationStore) AddModeKey(ctx context.Context, modeKey string) (bool, error) {
-	redis, err := s.queueRedis()
-	if err != nil {
-		return false, err
-	}
-	added, err := redis.SAdd(ctx, common.Keys.TaskModeSet(), modeKey).Result()
-	return added > 0, err
-}
-
-func (s *OrchestrationStore) RemoveModeKey(ctx context.Context, modeKey string) error {
-	redis, err := s.queueRedis()
-	if err != nil {
-		return err
-	}
-	_, err = redis.SRem(ctx, common.Keys.TaskModeSet(), modeKey).Result()
-	return err
-}
-
-func (s *OrchestrationStore) GetDelModeTaskID(ctx context.Context, modeKey string) (string, error) {
-	redis, err := s.queueRedis()
-	if err != nil {
-		return "", err
-	}
-	taskID, err := redis.GetDel(ctx, common.Keys.TaskModeState(modeKey)).Result()
-	return redisStringOrEmpty(taskID, err)
+	return messages, nil
 }
 
 func (s *OrchestrationStore) WithInstanceLock(ctx context.Context, lockKey string, fn func() error) error {
@@ -140,12 +312,12 @@ func (s *OrchestrationStore) ListRunEvents(ctx context.Context, runID string) ([
 }
 
 func isRedisNil(err error) bool {
-	return err != nil && err.Error() == redisNilError
+	return err != nil && (err.Error() == redisNilError || err == redislib.Nil)
 }
 
 func (s *OrchestrationStore) queueRedis() (*common.RedisClient, error) {
 	if s == nil || s.redis == nil {
-		return nil, fmt.Errorf(orchestrationQueueRedisRequired)
+		return nil, fmt.Errorf(orchestrationRedisRequired)
 	}
 	return s.redis, nil
 }

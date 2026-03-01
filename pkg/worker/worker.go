@@ -297,7 +297,19 @@ func (w *Worker) executeTask(task types.RunExecution) {
 		task,
 	).Msg("received task")
 
-	if err := w.gatewayClient.SetTaskStarted(w.ctx, task.ExternalId); err != nil {
+	attemptID := ""
+	if task.RunAttemptID != nil {
+		attemptID = strings.TrimSpace(*task.RunAttemptID)
+	}
+	if attemptID == "" {
+		err := fmt.Errorf("missing run attempt id for task start")
+		addTaskExecutionContext(log.Error().Err(err), task).Msg("refusing to start task without attempt fence")
+		if qErr := w.taskQueue.Fail(w.ctx, task.ExternalId, err); qErr != nil {
+			addTaskExecutionContext(log.Warn().Err(qErr), task).Msg("failed to mark task as failed in queue")
+		}
+		return
+	}
+	if err := w.gatewayClient.SetTaskStarted(w.ctx, task.ExternalId, attemptID); err != nil {
 		code := status.Code(err)
 		lowerErr := strings.ToLower(err.Error())
 		taskMissing := code == codes.NotFound ||

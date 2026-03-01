@@ -60,16 +60,17 @@ var (
 	runExecutionLogsBuffer  = "airstore:run_execution:logs_buf:%s" // runExecutionId
 
 	// Task queue keys (high-level task ingress)
-	taskQueueKey          = "airstore:task:queue"
-	taskBacklogKey        = "airstore:task:backlog:%s"        // instanceKey
-	taskModeStateKey      = "airstore:task:mode:%s"           // modeKey
-	taskModeSetKey        = "airstore:task:mode:active"       // modeKey set
-	agentDispatchLock     = "airstore:agent:dispatch:lock:%s" // instanceKey
-	agentAttemptEvents    = "airstore:agent:attempt:events"
-	agentRunEventsChannel = "airstore:agent:run:%s:events"
-	agentRunEventsBuffer  = "airstore:agent:run:%s:events:buf"
-	agentRunRecoveryLock  = "airstore:agent:run:recovery:lock"
-	agentInstanceLock     = "airstore:agent:instance:lock:%s" // instanceKey
+	orchestrationTaskDispatchStream = "airstore:orchestration:task_dispatch:stream"
+	orchestrationTaskDispatchGroup  = "airstore:orchestration:task_dispatch:group"
+	orchestrationTaskDispatchDLQ    = "airstore:orchestration:task_dispatch:dlq"
+	orchestrationRunResultStream    = "airstore:orchestration:run_result:stream"
+	orchestrationRunResultGroup     = "airstore:orchestration:run_result:group"
+	orchestrationRunResultDLQ       = "airstore:orchestration:run_result:dlq"
+	agentAttemptEvents              = "airstore:agent:attempt:events"
+	agentRunEventsChannel           = "airstore:agent:run:%s:events"
+	agentRunEventsBuffer            = "airstore:agent:run:%s:events:buf"
+	agentRunRecoveryLock            = "airstore:agent:run:recovery:lock"
+	agentInstanceLock               = "airstore:agent:instance:lock:%s" // instanceKey
 
 	// Terminal IO keys (pub/sub channels)
 	terminalInput       = "airstore:terminal:%s:input"        // taskId
@@ -252,26 +253,30 @@ func (rk *redisKeys) RunExecutionLogsBuffer(runExecutionID string) string {
 	return fmt.Sprintf(runExecutionLogsBuffer, runExecutionID)
 }
 
-// --- Task queue keys ---
+// --- Orchestration stream keys ---
 
-func (rk *redisKeys) TaskQueue() string {
-	return taskQueueKey
+func (rk *redisKeys) OrchestrationTaskDispatchStream() string {
+	return orchestrationTaskDispatchStream
 }
 
-func (rk *redisKeys) TaskBacklog(instanceKey string) string {
-	return fmt.Sprintf(taskBacklogKey, instanceKey)
+func (rk *redisKeys) OrchestrationTaskDispatchGroup() string {
+	return orchestrationTaskDispatchGroup
 }
 
-func (rk *redisKeys) TaskModeState(modeKey string) string {
-	return fmt.Sprintf(taskModeStateKey, modeKey)
+func (rk *redisKeys) OrchestrationTaskDispatchDLQ() string {
+	return orchestrationTaskDispatchDLQ
 }
 
-func (rk *redisKeys) TaskModeSet() string {
-	return taskModeSetKey
+func (rk *redisKeys) OrchestrationRunResultStream() string {
+	return orchestrationRunResultStream
 }
 
-func (rk *redisKeys) AgentDispatchLock(instanceKey string) string {
-	return fmt.Sprintf(agentDispatchLock, instanceKey)
+func (rk *redisKeys) OrchestrationRunResultGroup() string {
+	return orchestrationRunResultGroup
+}
+
+func (rk *redisKeys) OrchestrationRunResultDLQ() string {
+	return orchestrationRunResultDLQ
 }
 
 func (rk *redisKeys) AgentAttemptEvents() string {

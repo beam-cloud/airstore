@@ -18,6 +18,7 @@ import (
 type startProbeRuntime struct {
 	readyAfter time.Duration
 	running    atomic.Bool
+	lastKill   atomic.Int32
 }
 
 func (r *startProbeRuntime) Name() string { return "start-probe" }
@@ -64,9 +65,10 @@ func (r *startProbeRuntime) Exec(
 func (r *startProbeRuntime) Kill(
 	_ context.Context,
 	_ string,
-	_ syscall.Signal,
+	sig syscall.Signal,
 	_ *runtimepkg.KillOpts,
 ) error {
+	r.lastKill.Store(int32(sig))
 	return nil
 }
 
@@ -100,6 +102,10 @@ func (r *startProbeRuntime) Restore(_ context.Context, _ string, _ *runtimepkg.R
 }
 
 func (r *startProbeRuntime) Close() error { return nil }
+
+func (r *startProbeRuntime) lastKillSignal() syscall.Signal {
+	return syscall.Signal(r.lastKill.Load())
+}
 
 func TestSandboxStartWaitsForRuntimeReady(t *testing.T) {
 	runtime := &startProbeRuntime{readyAfter: 120 * time.Millisecond}
@@ -144,6 +150,9 @@ func TestSandboxStartWaitsForRuntimeReady(t *testing.T) {
 
 	if err := manager.Stop("task-startup", true); err != nil {
 		t.Fatalf("stop failed: %v", err)
+	}
+	if got := runtime.lastKillSignal(); got != syscall.SIGKILL {
+		t.Fatalf("expected stop(force=true) to send SIGKILL, got %d", got)
 	}
 }
 

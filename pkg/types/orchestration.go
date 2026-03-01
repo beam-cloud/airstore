@@ -6,12 +6,7 @@ import (
 	"time"
 )
 
-type AgentTaskKind string
-
-const (
-	AgentTaskKindAgentCommand AgentTaskKind = "agent_command"
-	AgentTaskKindRunInput     AgentTaskKind = "run_input"
-)
+const AgentTaskKindAgentCommand = "agent_command"
 
 // PendingInput represents a user message buffered in the run's input
 // queue, waiting to be consumed by the worker session.
@@ -41,17 +36,6 @@ const (
 	RunInputDeliveryQueued      RunInputDeliveryOutcome = "queued"
 	RunInputDeliveryInterrupted RunInputDeliveryOutcome = "interrupted"
 	RunInputDeliveryRestarted   RunInputDeliveryOutcome = "restarted"
-)
-
-// RunInputDecision is the canonical backend decision for run input routing.
-// Kept aligned with RunInputDeliveryOutcome for backwards compatibility.
-type RunInputDecision = RunInputDeliveryOutcome
-
-const (
-	RunInputDecisionDirect      RunInputDecision = RunInputDeliveryDirect
-	RunInputDecisionQueued      RunInputDecision = RunInputDeliveryQueued
-	RunInputDecisionInterrupted RunInputDecision = RunInputDeliveryInterrupted
-	RunInputDecisionRestarted   RunInputDecision = RunInputDeliveryRestarted
 )
 
 // RunInteractionState is the backend-owned interaction state for an agent run.
@@ -129,6 +113,16 @@ func (s AgentTaskState) IsTerminal() bool {
 	}
 }
 
+func TaskTerminalStateForRun(runStatus AgentRunStatus, interactive bool) AgentTaskState {
+	if runStatus == AgentRunStatusCancelled {
+		return AgentTaskStateCancelled
+	}
+	if interactive && runStatus == AgentRunStatusOK {
+		return AgentTaskStateIdle
+	}
+	return AgentTaskStateDone
+}
+
 type AgentRunStatus string
 
 const (
@@ -183,6 +177,86 @@ func (s AgentAttemptStatus) IsInFlight() bool {
 	}
 }
 
+func (s AgentAttemptStatus) IsRetryable() bool {
+	switch s {
+	case AgentAttemptStatusError, AgentAttemptStatusTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+// ClassifyExecutionOutcome maps an execution exit code + error text into
+// canonical attempt/run statuses used by orchestration.
+func ClassifyExecutionOutcome(exitCode int, errText string) (AgentAttemptStatus, AgentRunStatus, *string) {
+	attemptStatus := AgentAttemptStatusOK
+	runStatus := AgentRunStatusOK
+
+	trimmedErr := strings.TrimSpace(errText)
+	var errMsg *string
+	if trimmedErr != "" {
+		msg := errText
+		errMsg = &msg
+	}
+
+	lowerErr := strings.ToLower(trimmedErr)
+	switch {
+	case strings.Contains(lowerErr, "timeout"):
+		attemptStatus = AgentAttemptStatusTimeout
+		runStatus = AgentRunStatusTimeout
+	case strings.Contains(lowerErr, "cancel"):
+		attemptStatus = AgentAttemptStatusCancelled
+		runStatus = AgentRunStatusCancelled
+	case exitCode != 0 || trimmedErr != "":
+		attemptStatus = AgentAttemptStatusError
+		runStatus = AgentRunStatusError
+	}
+	return attemptStatus, runStatus, errMsg
+}
+
+func RunStatusFromAttemptStatus(status AgentAttemptStatus) AgentRunStatus {
+	switch status {
+	case AgentAttemptStatusRunning:
+		return AgentRunStatusRunning
+	case AgentAttemptStatusOK:
+		return AgentRunStatusOK
+	case AgentAttemptStatusTimeout:
+		return AgentRunStatusTimeout
+	case AgentAttemptStatusCancelled:
+		return AgentRunStatusCancelled
+	case AgentAttemptStatusError:
+		return AgentRunStatusError
+	case AgentAttemptStatusBlocked, AgentAttemptStatusPending:
+		fallthrough
+	default:
+		return AgentRunStatusAccepted
+	}
+}
+
+const AgentExecAskOff = "off"
+
+func AttemptStatusFromRunStatus(status AgentRunStatus, execAsk string, hasExecution bool) AgentAttemptStatus {
+	switch status {
+	case AgentRunStatusRunning:
+		return AgentAttemptStatusRunning
+	case AgentRunStatusOK:
+		return AgentAttemptStatusOK
+	case AgentRunStatusTimeout:
+		return AgentAttemptStatusTimeout
+	case AgentRunStatusCancelled:
+		return AgentAttemptStatusCancelled
+	case AgentRunStatusError:
+		return AgentAttemptStatusError
+	case AgentRunStatusAccepted:
+		if !hasExecution && strings.TrimSpace(execAsk) != "" && strings.TrimSpace(execAsk) != AgentExecAskOff {
+			return AgentAttemptStatusBlocked
+		}
+		return AgentAttemptStatusPending
+	default:
+		return AgentAttemptStatusPending
+	}
+}
+
 type AgentRunEventType string
 
 const (
@@ -203,6 +277,33 @@ const (
 )
 
 const (
+	AgentRunEventPayloadKeyAttemptID        = "attempt_id"
+	AgentRunEventPayloadKeyTaskID           = "task_id"
+	AgentRunEventPayloadKeyExitCode         = "exit_code"
+	AgentRunEventPayloadKeyError            = "error"
+	AgentRunEventPayloadKeyEvent            = "event"
+	AgentRunEventPayloadKeyQueueMode        = "queue_mode"
+	AgentRunEventPayloadKeyMode             = "mode"
+	AgentRunEventPayloadKeyDirect           = "direct"
+	AgentRunEventPayloadKeyInteractionState = "interaction_state"
+	AgentRunEventPayloadKeyAction           = "action"
+	AgentRunEventPayloadKeyCause            = "cause"
+	AgentRunEventPayloadKeyNextRunID        = "next_run_id"
+	AgentRunEventPayloadKeyNextAttemptNo    = "next_attempt_no"
+	AgentRunEventPayloadKeyRestartedFromRun = "restarted_from_run_id"
+)
+
+const (
+	AgentRunEventActionCancelThenContinue = "cancel_then_continue"
+	AgentRunEventCauseInterrupt           = "interrupt"
+)
+
+const (
+	AgentRunErrorInterruptedByQueuedInput    = "interrupted by queued input"
+	AgentRunErrorSupersededByFollowupRestart = "superseded by follow-up restart"
+)
+
+const (
 	AgentAttemptStrategyPrimary = "primary"
 	AgentAttemptStrategyRetry   = "retry"
 )
@@ -210,15 +311,15 @@ const (
 const (
 	AgentTaskDropReasonInterruptMissingTarget = "interrupt_missing_target"
 	AgentTaskDropReasonRunMaterializationFail = "run_materialization_failed"
-	AgentTaskDropReasonRunInputMissingTarget  = "run_input_missing_target"
-	AgentTaskDropReasonRunInputMissingMessage = "run_input_missing_message"
-	AgentTaskDropReasonRunInputTerminalTarget = "run_input_terminal_target"
 	AgentTaskDropReasonReshapedByQueueMode    = "reshaped_by_queue_mode"
+	AgentTaskDropReasonDispatchRetryExhausted = "dispatch_retry_exhausted"
 )
 
 const (
 	AgentExecutionMetaKeyInstanceKey      = "instance_key"
 	AgentExecutionMetaKeyRetry            = "retry"
+	AgentExecutionMetaKeyRetryFromRunID   = "retry_from_run_id"
+	AgentExecutionMetaKeyRetryAttemptNo   = "retry_attempt_no"
 	AgentExecutionMetaKeyRetryMaxAttempts = "retry_max_attempts"
 	AgentExecutionMetaKeyRetryDelayMs     = "retry_delay_ms"
 	AgentExecutionMetaKeyResources        = "resources"
@@ -226,6 +327,40 @@ const (
 	AgentExecutionMetaKeyRunAttemptID     = "run_attempt_id"
 	AgentExecutionMetaKeyOriginTaskID     = "origin_task_id"
 )
+
+type OrchestrationOutboxEventType string
+
+const (
+	OrchestrationOutboxEventTypeTaskDispatch OrchestrationOutboxEventType = "task_dispatch"
+	OrchestrationOutboxEventTypeRunResult    OrchestrationOutboxEventType = "run_result"
+)
+
+const (
+	OrchestrationOutboxPayloadTaskID      = "task_id"
+	OrchestrationOutboxPayloadAttemptID   = "attempt_id"
+	OrchestrationOutboxPayloadExitCode    = "exit_code"
+	OrchestrationOutboxPayloadError       = "error"
+	OrchestrationOutboxPayloadReason      = "reason"
+	OrchestrationOutboxPayloadRetryDelay  = "retry_delay_ms"
+	OrchestrationOutboxPayloadDispatchAttempt = "dispatch_attempt"
+	OrchestrationOutboxPayloadRunID       = "run_id"
+	OrchestrationOutboxPayloadSessionID   = "session_id"
+	OrchestrationOutboxPayloadStreamID    = "stream_id"
+	OrchestrationOutboxPayloadIdempotency = "idempotency_key"
+)
+
+type OrchestrationOutboxEvent struct {
+	ID         int64                      `json:"id" db:"id"`
+	EventType  OrchestrationOutboxEventType `json:"event_type" db:"event_type"`
+	DedupeKey  string                     `json:"dedupe_key" db:"dedupe_key"`
+	PayloadJSON map[string]any            `json:"payload_json" db:"-"`
+	AvailableAt time.Time                 `json:"available_at" db:"available_at"`
+	PublishedAt *time.Time                `json:"published_at,omitempty" db:"published_at"`
+	Attempts   int                        `json:"attempts" db:"attempts"`
+	LastError  *string                    `json:"last_error,omitempty" db:"last_error"`
+	CreatedAt  time.Time                  `json:"created_at" db:"created_at"`
+	UpdatedAt  time.Time                  `json:"updated_at" db:"updated_at"`
+}
 
 type AgentExecutionInstanceStatus string
 
@@ -252,7 +387,6 @@ type AgentTask struct {
 	WorkspaceID    uint           `json:"workspace_id" db:"workspace_id"`
 	AgentID        *string        `json:"agent_id,omitempty" db:"agent_id"`
 	AgentName      string         `json:"agent_name,omitempty" db:"-"`
-	Kind           AgentTaskKind  `json:"kind" db:"kind"`
 	QueueMode      AgentQueueMode `json:"queue_mode" db:"queue_mode"`
 	State          AgentTaskState `json:"state" db:"state"`
 	IdempotencyKey string         `json:"idempotency_key" db:"idempotency_key"`

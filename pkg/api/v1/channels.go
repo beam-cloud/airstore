@@ -154,7 +154,6 @@ func (g *WorkspaceChannelsGroup) SendRunMessage(c echo.Context) error {
 			"idempotent_hit":   result.IdempotentHit,
 			"task":             result.Task,
 			"run_id":           result.RunID,
-			"decision":         result.Decision,
 			"delivery_outcome": result.DeliveryOutcome,
 			"interaction":      result.Interaction,
 		},

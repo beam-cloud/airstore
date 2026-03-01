@@ -2,7 +2,6 @@ package worker
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,14 +16,6 @@ import (
 )
 
 const DefaultBetweenTurnsTimeout = 60 * time.Second
-
-const resumeSessionBusyMaxAttempts = 6
-const resumeSessionBusyBaseDelay = 500 * time.Millisecond
-
-const runnerStateTypeSystem = "system"
-const runnerStateKind = "runner_state"
-const runnerStateSubtypeTurnStarted = "turn_started"
-const runnerStateSubtypeWaitingForInput = "waiting_for_input"
 
 // mountFlushGracePeriod is a short wait after sandbox deletion but before
 // unmounting the VFS. This gives the async writer time to flush pending
@@ -270,7 +261,6 @@ func (w *Worker) runTurnSession(
 				runner,
 				sessionEnv,
 				stdout,
-				activityCh,
 				prompt,
 				firstTurnStrategies,
 			)
@@ -287,7 +277,6 @@ func (w *Worker) runTurnSession(
 				runner,
 				sessionEnv,
 				stdout,
-				activityCh,
 				prompt,
 				TurnArgModeFollowup,
 				1,
@@ -299,10 +288,11 @@ func (w *Worker) runTurnSession(
 			}
 		}
 
-		emitRunnerStateMarker(stdout, task.ExternalId, runnerStateSubtypeWaitingForInput, "")
+		// Treat turn completion as activity so the waiting window starts fresh.
+		signalActivity(activityCh)
 		w.setRunInteractionState(ctx, task, types.RunInteractionStateWaitingForInput)
 		addTaskExecutionContext(log.Info(), task).Msg("turn complete, waiting for follow-up input")
-		prompt = w.waitForFollowupInput(ctx, task.ExternalId, DefaultBetweenTurnsTimeout)
+		prompt = w.waitForFollowupInput(ctx, task.ExternalId, DefaultBetweenTurnsTimeout, activityCh)
 	}
 
 	return nil
@@ -312,7 +302,12 @@ func (w *Worker) runTurnSession(
 // pubsub, the per-turn timeout expires, or the context is cancelled
 // (e.g. idle timeout). Returns the trimmed prompt, or "" if the
 // session should end.
-func (w *Worker) waitForFollowupInput(ctx context.Context, taskID string, timeout time.Duration) string {
+func (w *Worker) waitForFollowupInput(
+	ctx context.Context,
+	taskID string,
+	timeout time.Duration,
+	activityCh chan<- struct{},
+) string {
 	if w.terminalIO == nil {
 		<-ctx.Done()
 		return ""
@@ -362,6 +357,7 @@ func (w *Worker) waitForFollowupInput(ctx context.Context, taskID string, timeou
 			if prompt == "" {
 				continue
 			}
+			signalActivity(activityCh)
 			return prompt
 		}
 	}
@@ -395,22 +391,24 @@ func buildFirstTurnStrategies(env map[string]string) []firstTurnStrategy {
 		}
 	}
 
-	strategies := []firstTurnStrategy{
+	if strings.TrimSpace(env[agentSessionIDEnvKey]) != "" {
+		return []firstTurnStrategy{
+			{
+				mode:             TurnArgModeFirstResumeByID,
+				transitionReason: "resume requested with explicit session id",
+			},
+			{
+				mode:             TurnArgModeFirstResumeLatest,
+				transitionReason: "resume fallback using latest local VFS state",
+			},
+		}
+	}
+	return []firstTurnStrategy{
 		{
 			mode:             TurnArgModeFirstResumeLatest,
-			transitionReason: "resume requested; prefer local VFS state",
+			transitionReason: "resume requested; no explicit session id",
 		},
 	}
-	if strings.TrimSpace(env[agentSessionIDEnvKey]) != "" {
-		strategies = append(
-			strategies,
-			firstTurnStrategy{
-				mode:             TurnArgModeFirstResumeByID,
-				transitionReason: "resume fallback using explicit session id",
-			},
-		)
-	}
-	return strategies
 }
 
 func cloneTurnEnv(env map[string]string) map[string]string {
@@ -424,15 +422,6 @@ func cloneTurnEnv(env map[string]string) map[string]string {
 	return cloned
 }
 
-func envForFirstTurnStrategy(base map[string]string, strategy firstTurnStrategy) map[string]string {
-	env := cloneTurnEnv(base)
-	if strategy.mode == TurnArgModeFirstFreshNoSession {
-		delete(env, agentSessionIDEnvKey)
-		delete(env, agentResumeSessionEnvKey)
-	}
-	return env
-}
-
 func (w *Worker) executeFirstTurnWithStrategy(
 	ctx context.Context,
 	task types.RunExecution,
@@ -440,7 +429,6 @@ func (w *Worker) executeFirstTurnWithStrategy(
 	runner TurnRunner,
 	baseEnv map[string]string,
 	stdout io.Writer,
-	activityCh chan<- struct{},
 	prompt string,
 	strategies []firstTurnStrategy,
 ) (map[string]string, error) {
@@ -451,27 +439,26 @@ func (w *Worker) executeFirstTurnWithStrategy(
 	totalAttempts := len(strategies)
 	for idx, strategy := range strategies {
 		attempt := idx + 1
-		attemptEnv := envForFirstTurnStrategy(baseEnv, strategy)
-		err := w.executeTurnWithResumeRetry(
+		err := w.executeTurn(
 			ctx,
 			task,
 			sandboxID,
 			runner,
-			attemptEnv,
+			baseEnv,
 			stdout,
-			activityCh,
 			prompt,
-			strategy,
+			strategy.mode,
 			attempt,
 			totalAttempts,
+			strategy.transitionReason,
 		)
 		if err == nil {
-			return attemptEnv, nil
+			return baseEnv, nil
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return baseEnv, err
 		}
 		if attempt < totalAttempts {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return baseEnv, err
-			}
 			addTaskExecutionContext(
 				log.Warn().
 					Err(err).
@@ -484,7 +471,7 @@ func (w *Worker) executeFirstTurnWithStrategy(
 			continue
 		}
 
-		// Emit a single clear failure when a resumed session exhausts bounded retries.
+		// Emit a single clear failure when first-turn fallback is exhausted.
 		if totalAttempts > 1 {
 			addTaskExecutionContext(
 				log.Error().
@@ -493,109 +480,13 @@ func (w *Worker) executeFirstTurnWithStrategy(
 					Int("resume_attempt", attempt).
 					Int("resume_attempts_total", totalAttempts),
 				task,
-			).Msg("session resume exhausted all first-turn strategies")
-			return baseEnv, fmt.Errorf("session resume exhausted all first-turn strategies: %w", err)
+			).Msg("session resume exhausted first-turn fallback")
+			return baseEnv, fmt.Errorf("session resume exhausted first-turn fallback: %w", err)
 		}
 		return baseEnv, err
 	}
 
 	return baseEnv, fmt.Errorf("failed to execute first turn")
-}
-
-func (w *Worker) executeTurnWithResumeRetry(
-	ctx context.Context,
-	task types.RunExecution,
-	sandboxID string,
-	runner TurnRunner,
-	env map[string]string,
-	stdout io.Writer,
-	activityCh chan<- struct{},
-	prompt string,
-	strategy firstTurnStrategy,
-	attempt int,
-	totalAttempts int,
-) error {
-	maxAttempts := 1
-	if shouldRetrySessionBusy(strategy.mode, env) {
-		maxAttempts = resumeSessionBusyMaxAttempts
-	}
-
-	var lastErr error
-	for try := 1; try <= maxAttempts; try++ {
-		err := w.executeTurn(
-			ctx,
-			task,
-			sandboxID,
-			runner,
-			env,
-			stdout,
-			activityCh,
-			prompt,
-			strategy.mode,
-			attempt,
-			totalAttempts,
-			strategy.transitionReason,
-		)
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-		if !isSessionAlreadyInUseError(err) || try >= maxAttempts {
-			return err
-		}
-
-		delay := resumeSessionBusyBackoff(try)
-		addTaskExecutionContext(
-			log.Warn().
-				Err(err).
-				Str("turn_mode", string(strategy.mode)).
-				Int("resume_retry", try).
-				Int("resume_retry_max", maxAttempts).
-				Dur("retry_delay", delay),
-			task,
-		).Msg("session resume reported session-id collision, retrying strategy")
-
-		if err := sleepUntil(ctx, delay); err != nil {
-			return err
-		}
-	}
-	return lastErr
-}
-
-func shouldRetrySessionBusy(mode TurnArgMode, env map[string]string) bool {
-	if mode == TurnArgModeFollowup || mode == TurnArgModeFirstFreshNoSession {
-		return false
-	}
-	return strings.TrimSpace(env[agentSessionIDEnvKey]) != ""
-}
-
-func isSessionAlreadyInUseError(err error) bool {
-	if err == nil {
-		return false
-	}
-	lower := strings.ToLower(err.Error())
-	return strings.Contains(lower, "session id") && strings.Contains(lower, "already in use")
-}
-
-func resumeSessionBusyBackoff(retry int) time.Duration {
-	if retry <= 0 {
-		retry = 1
-	}
-	return time.Duration(retry) * resumeSessionBusyBaseDelay
-}
-
-func sleepUntil(ctx context.Context, delay time.Duration) error {
-	if delay <= 0 {
-		return nil
-	}
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
 }
 
 func (w *Worker) executeTurn(
@@ -605,15 +496,12 @@ func (w *Worker) executeTurn(
 	runner TurnRunner,
 	env map[string]string,
 	stdout io.Writer,
-	activityCh chan<- struct{},
 	prompt string,
 	mode TurnArgMode,
 	attempt int,
 	totalAttempts int,
 	transitionReason string,
 ) error {
-	emitRunnerStateMarker(stdout, task.ExternalId, runnerStateSubtypeTurnStarted, mode)
-
 	args := runner.BuildTurnArgs(prompt, env, mode)
 	logger := addTaskExecutionContext(
 		log.Info().
@@ -631,38 +519,7 @@ func (w *Worker) executeTurn(
 	}
 	logger.Msg("executing turn")
 
-	signalActivity(activityCh)
-	err := w.sandboxManager.ExecPTY(ctx, sandboxID, args, env, stdout)
-	signalActivity(activityCh)
-	return err
-}
-
-func emitRunnerStateMarker(out io.Writer, taskID, subtype string, mode TurnArgMode) {
-	if out == nil {
-		return
-	}
-	taskID = strings.TrimSpace(taskID)
-	subtype = strings.TrimSpace(subtype)
-	if taskID == "" || subtype == "" {
-		return
-	}
-
-	payload := map[string]any{
-		"type":    runnerStateTypeSystem,
-		"kind":    runnerStateKind,
-		"subtype": subtype,
-		"task_id": taskID,
-		"ts":      time.Now().UnixMilli(),
-	}
-	if mode != "" {
-		payload["turn_mode"] = string(mode)
-	}
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return
-	}
-	data = append(data, '\n')
-	_, _ = out.Write(data)
+	return w.sandboxManager.ExecPTY(ctx, sandboxID, args, env, stdout)
 }
 
 // runGenericPTYSession handles interactive sessions for runners that don't
