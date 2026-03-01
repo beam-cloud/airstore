@@ -3,7 +3,6 @@ package worker
 import (
 	"crypto/sha1"
 	"encoding/hex"
-	"os"
 	"path"
 	"strings"
 
@@ -24,10 +23,9 @@ const (
 
 	claudeProviderName    = "claude"
 	claudeConfigDirEnvKey = "CLAUDE_CONFIG_DIR"
-	claudeConfigDirPath   = "/tmp/airstore-claude/default/.claude"
 	claudeDefaultShellEnv = "/bin/bash"
 	claudeStateDirName    = ".claude"
-	claudeStateRootDir    = "/tmp/airstore-claude"
+	claudeStateRootDir    = ".airstore/claude"
 )
 
 // AgentExecutionRunner builds the process entrypoint for an agent task.
@@ -82,7 +80,7 @@ func (r *ClaudeCodeRunner) Name() string {
 func (r *ClaudeCodeRunner) BuildEntrypoint(task types.RunExecution, env map[string]string) []string {
 	r.injectEnv(env)
 	model := strings.TrimSpace(env[agentModelEnvKey])
-	sessionID := claudeSessionIDFromEnv(env)
+	sessionID := claudeSessionIDForCLI(claudeSessionIDFromEnv(env))
 
 	addTaskExecutionContext(
 		log.Info().
@@ -91,8 +89,11 @@ func (r *ClaudeCodeRunner) BuildEntrypoint(task types.RunExecution, env map[stri
 		task,
 	).Msg("running claude code task")
 
-	builder := newPromptEntrypointBuilder("claude").
-		withKeyValue("--session-id", sessionID).
+	builder := newPromptEntrypointBuilder("claude")
+	if sessionID != "" {
+		builder.withKeyValue("--session-id", sessionID)
+	}
+	builder.
 		withFlag("--print").
 		withFlag("--verbose").
 		withKeyValue("--output-format", "stream-json").
@@ -108,7 +109,7 @@ func (r *ClaudeCodeRunner) BuildEntrypoint(task types.RunExecution, env map[stri
 func (r *ClaudeCodeRunner) BuildTurnArgs(prompt string, env map[string]string, mode TurnArgMode) []string {
 	r.injectEnv(env)
 	model := strings.TrimSpace(env[agentModelEnvKey])
-	sessionID := claudeSessionIDFromEnv(env)
+	sessionID := claudeSessionIDForCLI(claudeSessionIDFromEnv(env))
 
 	builder := newPromptEntrypointBuilder("claude")
 	switch mode {
@@ -142,13 +143,10 @@ func (r *ClaudeCodeRunner) BuildTurnArgs(prompt string, env map[string]string, m
 func (r *ClaudeCodeRunner) injectEnv(env map[string]string) {
 	r.injectAPIKey(env, "ANTHROPIC_API_KEY", r.anthropicAPIKey, true)
 	r.injectKernelEnv(env)
-	generatedClaudeConfigDir := false
 	if strings.TrimSpace(env[claudeConfigDirEnvKey]) == "" {
+		// Keep state path inside the mounted workspace so resume survives
+		// sandbox teardown and worker handoff.
 		env[claudeConfigDirEnvKey] = defaultClaudeConfigDir(env)
-		generatedClaudeConfigDir = true
-	}
-	if generatedClaudeConfigDir {
-		ensureClaudeConfigDir(env)
 	}
 	if strings.TrimSpace(env["SHELL"]) == "" {
 		// Force a stable non-zsh shell for Claude's internal shell snapshots.
@@ -157,16 +155,17 @@ func (r *ClaudeCodeRunner) injectEnv(env map[string]string) {
 }
 
 func defaultClaudeConfigDir(env map[string]string) string {
+	workspaceDir := types.ContainerWorkDir
 	if env != nil {
-		if workspaceDir := strings.TrimSpace(env[agentWorkspaceDirEnvKey]); workspaceDir != "" {
-			scope := claudeStateScope(workspaceDir)
-			if sessionID := claudeSessionIDFromEnv(env); sessionID != "" {
-				scope = claudeStateScopeWithSession(workspaceDir, sessionID)
-			}
-			return path.Join(claudeStateRootDir, scope, claudeStateDirName)
+		if wd := strings.TrimSpace(env[agentWorkspaceDirEnvKey]); wd != "" {
+			workspaceDir = wd
 		}
 	}
-	return claudeConfigDirPath
+	scope := claudeStateScope(workspaceDir)
+	if sessionID := claudeSessionIDFromEnv(env); sessionID != "" {
+		scope = claudeStateScopeWithSession(workspaceDir, sessionID)
+	}
+	return path.Join(workspaceDir, claudeStateRootDir, scope, claudeStateDirName)
 }
 
 func claudeStateScope(workspaceDir string) string {
@@ -186,32 +185,6 @@ func claudeStateScopeWithSession(workspaceDir, sessionID string) string {
 	combined := normalized + ":" + strings.TrimSpace(sessionID)
 	sum := sha1.Sum([]byte(combined))
 	return hex.EncodeToString(sum[:8])
-}
-
-func ensureClaudeConfigDir(env map[string]string) {
-	if env == nil {
-		return
-	}
-	cfgDir := strings.TrimSpace(env[claudeConfigDirEnvKey])
-	if cfgDir == "" {
-		return
-	}
-	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
-		fallback := claudeConfigDirPath
-		if mkErr := os.MkdirAll(fallback, 0o755); mkErr == nil {
-			log.Warn().
-				Err(err).
-				Str("claude_config_dir", cfgDir).
-				Str("fallback", fallback).
-				Msg("failed to create claude config dir; falling back")
-			env[claudeConfigDirEnvKey] = fallback
-			return
-		}
-		log.Warn().
-			Err(err).
-			Str("claude_config_dir", cfgDir).
-			Msg("failed to create claude config dir")
-	}
 }
 
 func (r *ClaudeCodeRunner) injectKernelEnv(env map[string]string) {
@@ -307,6 +280,40 @@ func claudeSessionIDFromEnv(env map[string]string) string {
 		return ""
 	}
 	return strings.TrimSpace(env[agentSessionIDEnvKey])
+}
+
+func claudeSessionIDForCLI(sessionID string) string {
+	sessionID = strings.TrimSpace(sessionID)
+	if !isCanonicalUUID(sessionID) {
+		return ""
+	}
+	return sessionID
+}
+
+func isCanonicalUUID(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		ch := value[i]
+		switch i {
+		case 8, 13, 18, 23:
+			if ch != '-' {
+				return false
+			}
+		default:
+			if !isHexByte(ch) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func isHexByte(ch byte) bool {
+	return (ch >= '0' && ch <= '9') ||
+		(ch >= 'a' && ch <= 'f') ||
+		(ch >= 'A' && ch <= 'F')
 }
 
 func providerFromExecutionPolicy(policy map[string]any) string {
