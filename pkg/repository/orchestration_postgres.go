@@ -270,6 +270,14 @@ func (b *PostgresBackend) DeleteAgentProfile(ctx context.Context, workspaceId ui
 }
 
 func (b *PostgresBackend) CreateTask(ctx context.Context, task *types.AgentTask) error {
+	return b.CreateTaskWithOutbox(ctx, task, nil)
+}
+
+func (b *PostgresBackend) CreateTaskWithOutbox(
+	ctx context.Context,
+	task *types.AgentTask,
+	event *types.OrchestrationOutboxEvent,
+) error {
 	payloadJSON, err := marshalJSONMap(task.PayloadJSON)
 	if err != nil {
 		return fmt.Errorf("marshal task payload: %w", err)
@@ -278,16 +286,23 @@ func (b *PostgresBackend) CreateTask(ctx context.Context, task *types.AgentTask)
 	if err != nil {
 		return fmt.Errorf("marshal task routing: %w", err)
 	}
-	query := `
+
+	tx, err := b.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin create task tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	insertTaskQuery := `
 		INSERT INTO agent_task (
 			workspace_id, agent_id, kind, queue_mode, state, idempotency_key,
 			payload_json, routing_json, parent_envelope_id, target_run_id
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		RETURNING id, accepted_at, created_at, updated_at
 	`
-	if err := b.db.QueryRowContext(
+	if err := tx.QueryRowContext(
 		ctx,
-		query,
+		insertTaskQuery,
 		task.WorkspaceID,
 		task.AgentID,
 		types.AgentTaskKindAgentCommand,
@@ -300,6 +315,55 @@ func (b *PostgresBackend) CreateTask(ctx context.Context, task *types.AgentTask)
 		task.TargetRunID,
 	).Scan(&task.ID, &task.AcceptedAt, &task.CreatedAt, &task.UpdatedAt); err != nil {
 		return fmt.Errorf("create agent task: %w", err)
+	}
+
+	if event == nil {
+		event = &types.OrchestrationOutboxEvent{
+			EventType: types.OrchestrationOutboxEventTypeTaskDispatch,
+			DedupeKey: fmt.Sprintf("task_dispatch:%s:initial", task.ID),
+			PayloadJSON: map[string]any{
+				types.OrchestrationOutboxPayloadTaskID: task.ID,
+			},
+		}
+	}
+	if strings.TrimSpace(event.DedupeKey) == "" {
+		event.DedupeKey = fmt.Sprintf("%s:%s", event.EventType, task.ID)
+	}
+	if event.EventType == "" {
+		event.EventType = types.OrchestrationOutboxEventTypeTaskDispatch
+	}
+	if event.AvailableAt.IsZero() {
+		event.AvailableAt = time.Now()
+	}
+	if event.PayloadJSON == nil {
+		event.PayloadJSON = map[string]any{}
+	}
+	if _, ok := event.PayloadJSON[types.OrchestrationOutboxPayloadTaskID]; !ok {
+		event.PayloadJSON[types.OrchestrationOutboxPayloadTaskID] = task.ID
+	}
+	payloadBytes, err := marshalJSONMap(event.PayloadJSON)
+	if err != nil {
+		return fmt.Errorf("marshal orchestration outbox payload: %w", err)
+	}
+
+	insertOutboxQuery := `
+		INSERT INTO orchestration_outbox (
+			event_type, dedupe_key, payload_json, available_at
+		) VALUES ($1, $2, $3, $4)
+	`
+	if _, err := tx.ExecContext(
+		ctx,
+		insertOutboxQuery,
+		event.EventType,
+		event.DedupeKey,
+		payloadBytes,
+		event.AvailableAt,
+	); err != nil {
+		return fmt.Errorf("insert orchestration outbox event: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit create task tx: %w", err)
 	}
 	return nil
 }
@@ -527,6 +591,52 @@ func (b *PostgresBackend) GetTaskByIdempotency(ctx context.Context, workspaceId 
 	return task, nil
 }
 
+func (b *PostgresBackend) ClaimQueuedTaskForDispatch(
+	ctx context.Context,
+	taskID string,
+	staleAfter time.Duration,
+) (*types.AgentTask, bool, error) {
+	if strings.TrimSpace(taskID) == "" {
+		return nil, false, fmt.Errorf("task id is required")
+	}
+	if staleAfter <= 0 {
+		staleAfter = 45 * time.Second
+	}
+
+	staleCutoff := time.Now().Add(-staleAfter)
+	query := `
+		UPDATE agent_task
+		SET state = 'running'::agent_task_state,
+		    dispatched_at = CURRENT_TIMESTAMP,
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1
+		  AND (
+		    state = 'queued'::agent_task_state
+		    OR (
+		      state = 'running'::agent_task_state
+		      AND target_run_id IS NULL
+		      AND dispatched_at IS NOT NULL
+		      AND dispatched_at <= $2
+		    )
+		  )
+		RETURNING id
+	`
+
+	var claimedID string
+	if err := b.db.QueryRowContext(ctx, query, taskID, staleCutoff).Scan(&claimedID); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("claim queued task for dispatch: %w", err)
+	}
+
+	task, err := b.GetTaskByID(ctx, claimedID)
+	if err != nil {
+		return nil, false, err
+	}
+	return task, true, nil
+}
+
 func (b *PostgresBackend) UpdateTaskState(ctx context.Context, taskID string, state types.AgentTaskState, droppedReason *string, targetRunID *string) error {
 	now := time.Now()
 	query := `
@@ -606,6 +716,223 @@ func (b *PostgresBackend) ArchiveTask(ctx context.Context, taskID string) error 
 		return &types.ErrAgentTaskNotFound{ID: taskID}
 	}
 	return nil
+}
+
+func scanOrchestrationOutboxEvent(row scanner) (*types.OrchestrationOutboxEvent, error) {
+	event := &types.OrchestrationOutboxEvent{}
+	var payloadJSON []byte
+	var publishedAt sql.NullTime
+	var lastError sql.NullString
+	err := row.Scan(
+		&event.ID,
+		&event.EventType,
+		&event.DedupeKey,
+		&payloadJSON,
+		&event.AvailableAt,
+		&publishedAt,
+		&event.Attempts,
+		&lastError,
+		&event.CreatedAt,
+		&event.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, sql.ErrNoRows
+	}
+	if err != nil {
+		return nil, err
+	}
+	event.PayloadJSON = unmarshalJSONMap(payloadJSON)
+	if publishedAt.Valid {
+		event.PublishedAt = &publishedAt.Time
+	}
+	if lastError.Valid {
+		event.LastError = &lastError.String
+	}
+	return event, nil
+}
+
+func (b *PostgresBackend) EnqueueOrchestrationOutboxEvent(
+	ctx context.Context,
+	event *types.OrchestrationOutboxEvent,
+) error {
+	if event == nil {
+		return fmt.Errorf("outbox event is required")
+	}
+	if strings.TrimSpace(string(event.EventType)) == "" {
+		return fmt.Errorf("outbox event_type is required")
+	}
+	event.DedupeKey = strings.TrimSpace(event.DedupeKey)
+	if event.DedupeKey == "" {
+		return fmt.Errorf("outbox dedupe_key is required")
+	}
+	if event.AvailableAt.IsZero() {
+		event.AvailableAt = time.Now()
+	}
+
+	payloadJSON, err := marshalJSONMap(event.PayloadJSON)
+	if err != nil {
+		return fmt.Errorf("marshal outbox payload: %w", err)
+	}
+
+	query := `
+		INSERT INTO orchestration_outbox (
+			event_type, dedupe_key, payload_json, available_at
+		) VALUES ($1, $2, $3, $4)
+		ON CONFLICT (dedupe_key) DO NOTHING
+	`
+	_, err = b.db.ExecContext(
+		ctx,
+		query,
+		event.EventType,
+		event.DedupeKey,
+		payloadJSON,
+		event.AvailableAt,
+	)
+	if err != nil {
+		return fmt.Errorf("enqueue orchestration outbox event: %w", err)
+	}
+	return nil
+}
+
+func (b *PostgresBackend) ClaimPendingOrchestrationOutboxEvents(
+	ctx context.Context,
+	limit int,
+) ([]*types.OrchestrationOutboxEvent, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+
+	query := `
+		WITH claimed AS (
+			SELECT id
+			FROM orchestration_outbox
+			WHERE published_at IS NULL
+			  AND available_at <= CURRENT_TIMESTAMP
+			ORDER BY available_at ASC, id ASC
+			FOR UPDATE SKIP LOCKED
+			LIMIT $1
+		)
+		UPDATE orchestration_outbox o
+		SET attempts = o.attempts + 1,
+		    updated_at = CURRENT_TIMESTAMP
+		FROM claimed
+		WHERE o.id = claimed.id
+		RETURNING
+			o.id,
+			o.event_type,
+			o.dedupe_key,
+			o.payload_json,
+			o.available_at,
+			o.published_at,
+			o.attempts,
+			o.last_error,
+			o.created_at,
+			o.updated_at
+	`
+
+	rows, err := b.db.QueryContext(ctx, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("claim orchestration outbox events: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]*types.OrchestrationOutboxEvent, 0, limit)
+	for rows.Next() {
+		event, scanErr := scanOrchestrationOutboxEvent(rows)
+		if scanErr != nil {
+			return nil, fmt.Errorf("scan orchestration outbox event: %w", scanErr)
+		}
+		out = append(out, event)
+	}
+	return out, rows.Err()
+}
+
+func (b *PostgresBackend) MarkOrchestrationOutboxEventPublished(ctx context.Context, eventID int64) error {
+	query := `
+		UPDATE orchestration_outbox
+		SET published_at = COALESCE(published_at, CURRENT_TIMESTAMP),
+		    last_error = NULL,
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1
+	`
+	res, err := b.db.ExecContext(ctx, query, eventID)
+	if err != nil {
+		return fmt.Errorf("mark outbox event published: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return fmt.Errorf("outbox event not found: %d", eventID)
+	}
+	return nil
+}
+
+func (b *PostgresBackend) MarkOrchestrationOutboxEventError(
+	ctx context.Context,
+	eventID int64,
+	lastError string,
+) error {
+	query := `
+		UPDATE orchestration_outbox
+		SET last_error = NULLIF($2, ''),
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1
+	`
+	res, err := b.db.ExecContext(ctx, query, eventID, strings.TrimSpace(lastError))
+	if err != nil {
+		return fmt.Errorf("mark outbox event error: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return fmt.Errorf("outbox event not found: %d", eventID)
+	}
+	return nil
+}
+
+func (b *PostgresBackend) AcquireOrchestrationResultInbox(
+	ctx context.Context,
+	resultKey string,
+	streamID string,
+) (bool, error) {
+	resultKey = strings.TrimSpace(resultKey)
+	if resultKey == "" {
+		return false, fmt.Errorf("result key is required")
+	}
+	streamID = strings.TrimSpace(streamID)
+	if streamID == "" {
+		return false, fmt.Errorf("stream id is required")
+	}
+	query := `
+		INSERT INTO orchestration_inbox_results (result_key, stream_id)
+		VALUES ($1, $2)
+		ON CONFLICT (result_key) DO NOTHING
+	`
+	res, err := b.db.ExecContext(ctx, query, resultKey, streamID)
+	if err != nil {
+		return false, fmt.Errorf("acquire orchestration result inbox: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	return affected > 0, nil
+}
+
+func (b *PostgresBackend) AcquireOrchestrationRetryGuard(
+	ctx context.Context,
+	guardKey string,
+) (bool, error) {
+	guardKey = strings.TrimSpace(guardKey)
+	if guardKey == "" {
+		return false, fmt.Errorf("guard key is required")
+	}
+	query := `
+		INSERT INTO orchestration_retry_guard (guard_key)
+		VALUES ($1)
+		ON CONFLICT (guard_key) DO NOTHING
+	`
+	res, err := b.db.ExecContext(ctx, query, guardKey)
+	if err != nil {
+		return false, fmt.Errorf("acquire orchestration retry guard: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	return affected > 0, nil
 }
 
 func (b *PostgresBackend) CreateAgentRun(ctx context.Context, run *types.AgentRun) error {
@@ -2060,6 +2387,47 @@ func (b *PostgresBackend) SetRunExecutionStarted(ctx context.Context, externalId
 	return nil
 }
 
+func (b *PostgresBackend) SetRunExecutionStartedForAttempt(
+	ctx context.Context,
+	externalId string,
+	attemptID string,
+) (bool, error) {
+	attemptID = strings.TrimSpace(attemptID)
+	if attemptID == "" {
+		return false, fmt.Errorf("set run execution started for attempt: attempt id is required")
+	}
+	now := time.Now()
+	query := `
+		UPDATE agent_run
+		SET status = 'running'::agent_run_status,
+		    started_at = COALESCE(started_at, $2),
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1::uuid
+		  AND run_attempt_id = $3::uuid
+		  AND ` + runExecutionScopeWhere + `
+		  AND status = 'accepted'::agent_run_status`
+	result, err := b.db.ExecContext(ctx, query, externalId, now, attemptID)
+	if err != nil {
+		return false, fmt.Errorf("set run execution started for attempt: %w", err)
+	}
+	if rows, _ := result.RowsAffected(); rows > 0 {
+		return true, nil
+	}
+
+	run, lookupErr := b.GetRunExecution(ctx, externalId)
+	if lookupErr != nil {
+		return false, lookupErr
+	}
+	currentAttemptID := ""
+	if run.RunAttemptID != nil {
+		currentAttemptID = strings.TrimSpace(*run.RunAttemptID)
+	}
+	if currentAttemptID != attemptID || run.Status == types.RunExecutionStatusRunning || run.IsTerminal() {
+		return false, nil
+	}
+	return false, fmt.Errorf("run execution cannot be started (state=%s)", run.Status)
+}
+
 func (b *PostgresBackend) SetRunExecutionResult(ctx context.Context, externalId string, exitCode int, errorMsg string) error {
 	_, status, _ := types.ClassifyExecutionOutcome(exitCode, errorMsg)
 	endedAt := time.Now()
@@ -2095,6 +2463,59 @@ func (b *PostgresBackend) SetRunExecutionResult(ctx context.Context, externalId 
 		return fmt.Errorf("run execution result was not applied (status=%s)", run.Status)
 	}
 	return nil
+}
+
+func (b *PostgresBackend) SetRunExecutionResultForAttempt(
+	ctx context.Context,
+	externalId string,
+	attemptID string,
+	exitCode int,
+	errorMsg string,
+) (bool, error) {
+	attemptID = strings.TrimSpace(attemptID)
+	if attemptID == "" {
+		return false, fmt.Errorf("set run execution result for attempt: attempt id is required")
+	}
+	_, status, _ := types.ClassifyExecutionOutcome(exitCode, errorMsg)
+	endedAt := time.Now()
+	query := `
+		UPDATE agent_run
+		SET status = $2::agent_run_status,
+		    exit_code = $3,
+		    error = NULLIF($4, ''),
+		    ended_at = $5,
+		    claimed_by_worker_id = NULL,
+		    claim_heartbeat_at = NULL,
+		    claim_expires_at = NULL,
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1::uuid
+		  AND run_attempt_id = $6::uuid
+		  AND ` + runExecutionActiveWhere
+	result, err := b.db.ExecContext(ctx, query, externalId, status, exitCode, errorMsg, endedAt, attemptID)
+	if err != nil {
+		return false, fmt.Errorf("set run execution result for attempt: %w", err)
+	}
+	if rows, _ := result.RowsAffected(); rows > 0 {
+		return true, nil
+	}
+
+	run, lookupErr := b.GetRunExecution(ctx, externalId)
+	if lookupErr != nil {
+		if _, ok := lookupErr.(*types.ErrRunExecutionNotFound); ok {
+			// Late retries after retention/cleanup should be harmless.
+			return false, nil
+		}
+		return false, lookupErr
+	}
+	currentAttemptID := ""
+	if run.RunAttemptID != nil {
+		currentAttemptID = strings.TrimSpace(*run.RunAttemptID)
+	}
+	if currentAttemptID != attemptID || run.IsTerminal() {
+		// Superseded or duplicate terminal callback.
+		return false, nil
+	}
+	return false, fmt.Errorf("run execution result was not applied (status=%s)", run.Status)
 }
 
 func (b *PostgresBackend) MarkRunExecutionRetried(ctx context.Context, externalId string) error {

@@ -3,6 +3,7 @@ package orchestration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/google/uuid"
+	redislib "github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog/log"
 )
 
@@ -21,7 +23,8 @@ type AgentService struct {
 	terminalIO         repository.TerminalIORepository
 	s2                 *common.S2Client
 	defaultImage       string
-	queueRouter        *TaskQueueRouter
+	dispatchConsumerID string
+	resultConsumerID   string
 	instanceController *ExecutionInstanceController
 }
 
@@ -45,12 +48,23 @@ func NewAgentService(
 		terminalIO:         terminalIO,
 		s2:                 s2,
 		defaultImage:       defaultImage,
-		queueRouter:        NewTaskQueueRouter(orchestrationStore),
+		dispatchConsumerID: "dispatch-" + uuid.NewString(),
+		resultConsumerID:   "result-" + uuid.NewString(),
 		instanceController: NewExecutionInstanceController(ctx, backend, orchestrationStore, common.Keys.AgentInstanceLock),
 	}
 }
 
 func (s *AgentService) Start(ctx context.Context) {
+	if s.orchestrationStore != nil {
+		if err := s.orchestrationStore.EnsureTaskDispatchGroup(ctx); err != nil {
+			log.Warn().Err(err).Msg("failed to ensure orchestration task-dispatch stream group")
+		}
+		if err := s.orchestrationStore.EnsureRunResultGroup(ctx); err != nil {
+			log.Warn().Err(err).Msg("failed to ensure orchestration run-result stream group")
+		}
+		go s.outboxPublisherLoop(ctx)
+		go s.resultProjectorLoop(ctx)
+	}
 	go s.dispatchLoop(ctx)
 }
 
@@ -286,14 +300,10 @@ func (s *AgentService) AcceptAgentCommand(
 		PayloadJSON:    payload,
 		RoutingJSON:    routingToMap(params.Routing),
 	}
-	if err := s.backend.CreateTask(ctx, task); err != nil {
+	if err := s.backend.CreateTaskWithOutbox(ctx, task, nil); err != nil {
 		if existing, lookupErr := s.backend.GetTaskByIdempotency(ctx, workspaceID, params.AgentID, params.IdempotencyKey); lookupErr == nil {
 			return existing, true, nil
 		}
-		return nil, false, err
-	}
-
-	if err := s.queueRouter.Enqueue(ctx, task, instanceKey); err != nil {
 		return nil, false, err
 	}
 	return task, false, nil
@@ -610,6 +620,11 @@ func (s *AgentService) interruptAndDispatchInteractiveInput(
 }
 
 func (s *AgentService) dispatchLoop(ctx context.Context) {
+	if s.orchestrationStore == nil {
+		log.Warn().Msg("orchestration dispatch loop disabled: store is unavailable")
+		return
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -617,42 +632,362 @@ func (s *AgentService) dispatchLoop(ctx context.Context) {
 		default:
 		}
 
-		token, err := s.queueRouter.Pop(ctx, 2*time.Second)
+		reclaimed, err := s.orchestrationStore.ClaimPendingTaskDispatch(
+			ctx,
+			s.dispatchConsumerID,
+			dispatchPendingMinIdle,
+			dispatchReadBatch,
+		)
 		if err != nil {
-			log.Warn().Err(err).Msg("orchestration dispatch pop failed")
-			continue
-		}
-		if token == "" {
+			log.Warn().Err(err).Msg("failed to claim pending task-dispatch events")
+		} else if err := s.processDispatchMessages(ctx, reclaimed); err != nil {
+			log.Warn().Err(err).Msg("failed to process reclaimed task-dispatch events")
 			continue
 		}
 
-		taskID, err := s.queueRouter.ResolveTaskID(ctx, token)
+		messages, err := s.orchestrationStore.ReadTaskDispatch(
+			ctx,
+			s.dispatchConsumerID,
+			dispatchReadBlock,
+			dispatchReadBatch,
+		)
 		if err != nil {
-			log.Warn().Err(err).Str("token", token).Msg("resolve dispatch token failed")
+			log.Warn().Err(err).Msg("failed to read task-dispatch stream")
 			continue
 		}
-		if taskID == "" {
-			continue
-		}
-
-		if err := s.dispatchTask(ctx, taskID); err != nil {
-			log.Warn().Err(err).Str("task_id", taskID).Msg("dispatch task failed")
-			if requeueErr := s.requeueIfDispatchable(ctx, taskID); requeueErr != nil {
-				log.Warn().Err(requeueErr).Str("task_id", taskID).Msg("failed to requeue task after dispatch error")
-			}
+		if err := s.processDispatchMessages(ctx, messages); err != nil {
+			log.Warn().Err(err).Msg("failed to process task-dispatch events")
 		}
 	}
 }
 
-func (s *AgentService) dispatchTask(ctx context.Context, taskID string) error {
-	task, err := s.backend.GetTaskByID(ctx, taskID)
-	if err != nil {
-		return err
+func (s *AgentService) processDispatchMessages(ctx context.Context, messages []redislib.XMessage) error {
+	for _, message := range messages {
+		if err := s.processDispatchMessage(ctx, message); err != nil {
+			return err
+		}
 	}
-	if !task.State.IsDispatchable() {
+	return nil
+}
+
+func (s *AgentService) processDispatchMessage(ctx context.Context, message redislib.XMessage) error {
+	taskID := strings.TrimSpace(streamValueAsString(message.Values, types.OrchestrationOutboxPayloadTaskID))
+	if taskID == "" {
+		_ = s.orchestrationStore.AckTaskDispatch(ctx, message.ID)
 		return nil
 	}
 
+	retryAttempt := intFromAny(message.Values[types.OrchestrationOutboxPayloadDispatchAttempt])
+	task, claimed, err := s.backend.ClaimQueuedTaskForDispatch(ctx, taskID, dispatchClaimStaleAfter)
+	if err != nil {
+		return err
+	}
+	if !claimed || task == nil {
+		_ = s.orchestrationStore.AckTaskDispatch(ctx, message.ID)
+		return nil
+	}
+
+	if err := s.dispatchTask(ctx, task); err != nil {
+		reason := "dispatch_error"
+		delay := computeDispatchRetryDelay(retryAttempt)
+		var retryRequest *dispatchRetryRequest
+		if errors.As(err, &retryRequest) {
+			if retryRequest.reason != "" {
+				reason = retryRequest.reason
+			}
+			if retryRequest.delay > 0 {
+				delay = retryRequest.delay
+			}
+		}
+		if scheduleErr := s.scheduleDispatchRetry(ctx, task, retryAttempt, reason, delay); scheduleErr != nil {
+			return scheduleErr
+		}
+	}
+	_ = s.orchestrationStore.AckTaskDispatch(ctx, message.ID)
+	return nil
+}
+
+type runResultProjectorMessage struct {
+	taskID       string
+	attemptID    string
+	exitCode     int
+	errorText    string
+	resultKey    string
+	retryAttempt int
+}
+
+func (s *AgentService) resultProjectorLoop(ctx context.Context) {
+	if s.orchestrationStore == nil || s.backend == nil {
+		log.Warn().Msg("orchestration result projector disabled: store is unavailable")
+		return
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		reclaimed, err := s.orchestrationStore.ClaimPendingRunResults(
+			ctx,
+			s.resultConsumerID,
+			resultPendingMinIdle,
+			resultReadBatch,
+		)
+		if err != nil {
+			log.Warn().Err(err).Msg("failed to claim pending run-result events")
+		} else if err := s.processRunResultMessages(ctx, reclaimed); err != nil {
+			log.Warn().Err(err).Msg("failed to process reclaimed run-result events")
+			continue
+		}
+
+		messages, err := s.orchestrationStore.ReadRunResults(
+			ctx,
+			s.resultConsumerID,
+			resultReadBlock,
+			resultReadBatch,
+		)
+		if err != nil {
+			log.Warn().Err(err).Msg("failed to read run-result stream")
+			continue
+		}
+		if err := s.processRunResultMessages(ctx, messages); err != nil {
+			log.Warn().Err(err).Msg("failed to process run-result events")
+		}
+	}
+}
+
+func (s *AgentService) processRunResultMessages(ctx context.Context, messages []redislib.XMessage) error {
+	for _, message := range messages {
+		if err := s.processRunResultMessage(ctx, message); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *AgentService) processRunResultMessage(ctx context.Context, message redislib.XMessage) error {
+	result := runResultProjectorMessage{
+		taskID:       strings.TrimSpace(streamValueAsString(message.Values, types.OrchestrationOutboxPayloadTaskID)),
+		attemptID:    strings.TrimSpace(streamValueAsString(message.Values, types.OrchestrationOutboxPayloadAttemptID)),
+		exitCode:     intFromAny(message.Values[types.OrchestrationOutboxPayloadExitCode]),
+		errorText:    streamValueAsString(message.Values, types.OrchestrationOutboxPayloadError),
+		resultKey:    strings.TrimSpace(streamValueAsString(message.Values, types.OrchestrationOutboxPayloadIdempotency)),
+		retryAttempt: intFromAny(message.Values[types.OrchestrationOutboxPayloadDispatchAttempt]),
+	}
+	if result.taskID == "" || result.attemptID == "" {
+		_ = s.orchestrationStore.AckRunResults(ctx, message.ID)
+		return nil
+	}
+	if result.resultKey == "" {
+		result.resultKey = fmt.Sprintf("run_result:%s:%s", result.taskID, result.attemptID)
+	}
+
+	if err := s.applyRunResultProjectorMessage(ctx, result); err != nil {
+		if s.orchestrationStore != nil {
+			_, _ = s.orchestrationStore.PublishRunResultDLQ(ctx, map[string]any{
+				types.OrchestrationOutboxPayloadTaskID:          result.taskID,
+				types.OrchestrationOutboxPayloadAttemptID:       result.attemptID,
+				types.OrchestrationOutboxPayloadExitCode:        result.exitCode,
+				types.OrchestrationOutboxPayloadError:           result.errorText,
+				types.OrchestrationOutboxPayloadReason:          err.Error(),
+				types.OrchestrationOutboxPayloadDispatchAttempt: result.retryAttempt,
+				types.OrchestrationOutboxPayloadIdempotency:     result.resultKey,
+			})
+		}
+		_ = s.orchestrationStore.AckRunResults(ctx, message.ID)
+		return nil
+	}
+
+	// Record successful projection for dedupe visibility.
+	_, _ = s.backend.AcquireOrchestrationResultInbox(ctx, result.resultKey, message.ID)
+	_ = s.orchestrationStore.AckRunResults(ctx, message.ID)
+	return nil
+}
+
+func (s *AgentService) applyRunResultProjectorMessage(ctx context.Context, result runResultProjectorMessage) error {
+	if s == nil || s.backend == nil {
+		return fmt.Errorf("run result projector dependencies are unavailable")
+	}
+	attempt, err := s.backend.GetRunAttemptByExecutionID(ctx, result.taskID)
+	if err != nil {
+		if isRunAttemptNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if attempt == nil || strings.TrimSpace(attempt.ID) != result.attemptID {
+		return nil
+	}
+	applied, err := s.backend.SetRunExecutionResultForAttempt(
+		ctx,
+		result.taskID,
+		result.attemptID,
+		result.exitCode,
+		result.errorText,
+	)
+	if err != nil {
+		return err
+	}
+	if !applied || !isRunAttemptActive(attempt) {
+		return nil
+	}
+	return s.finalizeRunAttempt(
+		ctx,
+		attempt,
+		result.taskID,
+		result.exitCode,
+		result.errorText,
+	)
+}
+
+func isRunAttemptActive(attempt *types.AgentRunAttempt) bool {
+	if attempt == nil {
+		return false
+	}
+	if attempt.EndedAt != nil {
+		return false
+	}
+	return attempt.Status.IsInFlight()
+}
+
+func isRunAttemptNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	_, ok := err.(*types.ErrAgentRunAttemptNotFound)
+	return ok
+}
+
+func (s *AgentService) finalizeRunAttempt(
+	ctx context.Context,
+	attempt *types.AgentRunAttempt,
+	taskID string,
+	exitCode int,
+	errText string,
+) error {
+	if s.backend == nil || attempt == nil {
+		return nil
+	}
+	if !isRunAttemptActive(attempt) {
+		return nil
+	}
+
+	now := time.Now()
+	attemptStatus, runStatus, errMsg := types.ClassifyExecutionOutcome(exitCode, errText)
+
+	if err := s.backend.UpdateAgentRunAttemptResult(ctx, attempt.ID, attemptStatus, &exitCode, now, errMsg); err != nil {
+		return fmt.Errorf("update run attempt result: %w", err)
+	}
+	if err := s.backend.ClearAgentRunClaim(ctx, attempt.RunID); err != nil {
+		log.Warn().
+			Err(err).
+			Str("run_id", attempt.RunID).
+			Msg("failed to clear run claim lease during finalization")
+	}
+	if err := s.updateExecutionInstanceCounts(ctx, attempt.RunID, -1); err != nil {
+		log.Warn().
+			Err(err).
+			Str("run_id", attempt.RunID).
+			Msg("failed to decrement execution instance counters during finalization")
+	}
+	payload := map[string]any{
+		types.AgentRunEventPayloadKeyAttemptID: attempt.ID,
+		types.AgentRunEventPayloadKeyTaskID:    taskID,
+		types.AgentRunEventPayloadKeyExitCode:  exitCode,
+		types.AgentRunEventPayloadKeyError:     errText,
+		types.AgentRunEventPayloadKeyEvent:     string(types.AgentRunEventFinished),
+	}
+	if err := s.backend.UpdateAgentRunLifecycle(ctx, attempt.RunID, runStatus, nil, &now, errMsg); err != nil {
+		return fmt.Errorf("update run lifecycle: %w", err)
+	}
+	if err := s.appendRunSnapshot(ctx, attempt.RunID, runStatus, nil, &now, errMsg, payload); err != nil {
+		return fmt.Errorf("append completion snapshot: %w", err)
+	}
+	if err := s.markOriginTaskTerminalIfCurrentRun(ctx, attempt.RunID); err != nil {
+		return fmt.Errorf("mark origin task terminal: %w", err)
+	}
+	return nil
+}
+
+func (s *AgentService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, runID string) error {
+	if s.backend == nil || strings.TrimSpace(runID) == "" {
+		return nil
+	}
+
+	run, err := s.backend.GetAgentRunByID(ctx, runID)
+	if err != nil {
+		return err
+	}
+	task, err := s.backend.GetTaskByID(ctx, run.OriginTaskID)
+	if err != nil {
+		return err
+	}
+	if task.State.IsTerminal() {
+		return nil
+	}
+	if run.EndedAt != nil && task.UpdatedAt.After(*run.EndedAt) {
+		// Task state was reopened after this run had already ended.
+		return nil
+	}
+	targetRunID := run.ID
+	nextState := types.TaskTerminalStateForRun(run.Status, run.Interactive)
+	updated, err := s.backend.UpdateTaskStateIfCurrentRun(
+		ctx,
+		run.OriginTaskID,
+		run.ID,
+		nextState,
+		nil,
+		&targetRunID,
+	)
+	if err != nil {
+		return err
+	}
+	if !updated {
+		return nil
+	}
+	return nil
+}
+
+func (s *AgentService) updateExecutionInstanceCounts(ctx context.Context, runID string, runningDelta int) error {
+	run, err := s.backend.GetAgentRunByID(ctx, runID)
+	if err != nil {
+		return err
+	}
+	instanceKeyVal, ok := run.DeliveryJSON[types.AgentExecutionMetaKeyInstanceKey]
+	if !ok {
+		return nil
+	}
+	instanceKey, ok := instanceKeyVal.(string)
+	if !ok || instanceKey == "" {
+		return nil
+	}
+	now := time.Now()
+	return s.backend.AdjustExecutionInstanceRunningAttempts(ctx, instanceKey, runningDelta, &now)
+}
+
+func streamValueAsString(values map[string]any, key string) string {
+	if len(values) == 0 || strings.TrimSpace(key) == "" {
+		return ""
+	}
+	raw, ok := values[key]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch typed := raw.(type) {
+	case string:
+		return typed
+	case []byte:
+		return string(typed)
+	default:
+		return fmt.Sprintf("%v", typed)
+	}
+}
+
+func (s *AgentService) dispatchTask(ctx context.Context, task *types.AgentTask) error {
+	if task == nil {
+		return nil
+	}
 	switch task.QueueMode {
 	case types.AgentQueueModeInterrupt:
 		return s.handleInterruptTask(ctx, task)
@@ -720,9 +1055,172 @@ func (s *AgentService) cancelInFlightRunExecutions(ctx context.Context, runID st
 }
 
 const (
-	sessionDrainMaxWait  = 10 * time.Second
-	sessionDrainPollStep = 500 * time.Millisecond
+	sessionDrainMaxWait      = 10 * time.Second
+	sessionDrainPollStep     = 500 * time.Millisecond
+	dispatchReadBlock        = 2 * time.Second
+	dispatchReadBatch        = int64(64)
+	dispatchPendingMinIdle   = 15 * time.Second
+	dispatchClaimStaleAfter  = 45 * time.Second
+	dispatchRetryMaxAttempts = 8
+	dispatchRetryBaseDelay   = 500 * time.Millisecond
+	dispatchRetryMaxDelay    = 30 * time.Second
+	resultReadBlock          = 2 * time.Second
+	resultReadBatch          = int64(64)
+	resultPendingMinIdle     = 15 * time.Second
+	outboxPublisherInterval  = 250 * time.Millisecond
+	outboxPublisherBatchSize = 100
 )
+
+var (
+	dispatchCapacityRequeueDelay = 500 * time.Millisecond
+	sessionBusyRequeueDelay      = 2 * time.Second
+)
+
+type dispatchRetryRequest struct {
+	reason string
+	delay  time.Duration
+}
+
+func (e *dispatchRetryRequest) Error() string {
+	if e == nil {
+		return "dispatch retry requested"
+	}
+	return fmt.Sprintf("dispatch retry requested (%s)", e.reason)
+}
+
+func computeDispatchRetryDelay(retryAttempt int) time.Duration {
+	if retryAttempt < 0 {
+		retryAttempt = 0
+	}
+	delay := dispatchRetryBaseDelay * time.Duration(1<<retryAttempt)
+	if delay > dispatchRetryMaxDelay {
+		return dispatchRetryMaxDelay
+	}
+	return delay
+}
+
+func (s *AgentService) outboxPublisherLoop(ctx context.Context) {
+	ticker := time.NewTicker(outboxPublisherInterval)
+	defer ticker.Stop()
+
+	// Prime a pass before waiting for the first tick.
+	s.publishOutboxBatch(ctx)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.publishOutboxBatch(ctx)
+		}
+	}
+}
+
+func (s *AgentService) publishOutboxBatch(ctx context.Context) {
+	if s == nil || s.backend == nil || s.orchestrationStore == nil {
+		return
+	}
+	events, err := s.backend.ClaimPendingOrchestrationOutboxEvents(ctx, outboxPublisherBatchSize)
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to claim orchestration outbox events")
+		return
+	}
+	for _, event := range events {
+		if event == nil {
+			continue
+		}
+		if err := s.publishOutboxEvent(ctx, event); err != nil {
+			_ = s.backend.MarkOrchestrationOutboxEventError(ctx, event.ID, err.Error())
+			log.Warn().
+				Err(err).
+				Int64("outbox_id", event.ID).
+				Str("event_type", string(event.EventType)).
+				Msg("failed to publish orchestration outbox event")
+			continue
+		}
+		if err := s.backend.MarkOrchestrationOutboxEventPublished(ctx, event.ID); err != nil {
+			log.Warn().
+				Err(err).
+				Int64("outbox_id", event.ID).
+				Msg("failed to mark orchestration outbox event as published")
+		}
+	}
+}
+
+func (s *AgentService) publishOutboxEvent(ctx context.Context, event *types.OrchestrationOutboxEvent) error {
+	if s == nil || s.orchestrationStore == nil || event == nil {
+		return fmt.Errorf("orchestration outbox publisher is unavailable")
+	}
+
+	switch event.EventType {
+	case types.OrchestrationOutboxEventTypeTaskDispatch:
+		_, err := s.orchestrationStore.PublishTaskDispatch(ctx, event.PayloadJSON)
+		return err
+	case types.OrchestrationOutboxEventTypeRunResult:
+		_, err := s.orchestrationStore.PublishRunResult(ctx, event.PayloadJSON)
+		return err
+	default:
+		return fmt.Errorf("unsupported orchestration outbox event type %q", event.EventType)
+	}
+}
+
+func (s *AgentService) scheduleDispatchRetry(
+	ctx context.Context,
+	task *types.AgentTask,
+	retryAttempt int,
+	reason string,
+	delay time.Duration,
+) error {
+	if s == nil || s.backend == nil || task == nil {
+		return fmt.Errorf("dispatch retry dependencies are unavailable")
+	}
+
+	nextAttempt := retryAttempt + 1
+	if nextAttempt > dispatchRetryMaxAttempts {
+		dropReason := types.AgentTaskDropReasonDispatchRetryExhausted
+		if err := s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDropped, &dropReason, task.TargetRunID); err != nil {
+			return err
+		}
+		if s.orchestrationStore != nil {
+			_, _ = s.orchestrationStore.PublishTaskDispatchDLQ(ctx, map[string]any{
+				types.OrchestrationOutboxPayloadTaskID:          task.ID,
+				types.OrchestrationOutboxPayloadReason:          reason,
+				types.OrchestrationOutboxPayloadRetryDelay:      int(delay.Milliseconds()),
+				types.OrchestrationOutboxPayloadDispatchAttempt: retryAttempt,
+			})
+		}
+		return nil
+	}
+
+	guardKey := fmt.Sprintf("dispatch_retry:%s:%d", task.ID, nextAttempt)
+	acquired, err := s.backend.AcquireOrchestrationRetryGuard(ctx, guardKey)
+	if err != nil {
+		return err
+	}
+	if !acquired {
+		return nil
+	}
+
+	if err := s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateQueued, nil, task.TargetRunID); err != nil {
+		return err
+	}
+
+	if delay <= 0 {
+		delay = computeDispatchRetryDelay(retryAttempt)
+	}
+
+	return s.backend.EnqueueOrchestrationOutboxEvent(ctx, &types.OrchestrationOutboxEvent{
+		EventType: types.OrchestrationOutboxEventTypeTaskDispatch,
+		DedupeKey: guardKey,
+		PayloadJSON: map[string]any{
+			types.OrchestrationOutboxPayloadTaskID:          task.ID,
+			types.OrchestrationOutboxPayloadReason:          reason,
+			types.OrchestrationOutboxPayloadRetryDelay:      int(delay.Milliseconds()),
+			types.OrchestrationOutboxPayloadDispatchAttempt: nextAttempt,
+		},
+		AvailableAt: time.Now().Add(delay),
+	})
+}
 
 func (s *AgentService) waitForResumeBarrier(
 	ctx context.Context,
@@ -792,7 +1290,16 @@ func ReconcileStaleSessionLease(
 		return false
 	}
 	exec, err := backend.GetRunExecution(ctx, executionID)
-	if err != nil || exec == nil || exec.IsTerminal() {
+	if err != nil {
+		log.Warn().
+			Err(err).
+			Str("session_id", sessionID).
+			Str("lease_owner", owner).
+			Str("execution_id", executionID).
+			Msg("skip stale lease reconciliation: execution proof unavailable")
+		return false
+	}
+	if exec == nil || exec.IsTerminal() {
 		log.Info().
 			Str("session_id", sessionID).
 			Str("lease_owner", owner).
@@ -860,24 +1367,23 @@ func (s *AgentService) handleExecutionTask(ctx context.Context, task *types.Agen
 		log.Warn().Err(err).Str("instance_key", instanceKey).Int("dispatch_target", desiredDispatch).Msg("failed to route dispatch target")
 	}
 	if hasInstanceState && runningAttempts >= desiredDispatch {
-		if err := s.queueRouter.RequeueTask(ctx, task.ID); err != nil {
-			return err
+		return &dispatchRetryRequest{
+			reason: "dispatch_capacity",
+			delay:  dispatchCapacityRequeueDelay,
 		}
-		return nil
 	}
 
 	run, runPolicy, prompt, err := s.materializeRun(ctx, task)
 	if err != nil {
 		if isSessionBusyError(err) {
-			log.Warn().Err(err).Str("task_id", task.ID).Msg("session busy during materialization, requeuing task")
-			if requeueErr := s.queueRouter.RequeueTask(ctx, task.ID); requeueErr != nil {
-				return requeueErr
+			return &dispatchRetryRequest{
+				reason: "session_busy",
+				delay:  sessionBusyRequeueDelay,
 			}
-			return nil
 		}
 		reason := types.AgentTaskDropReasonRunMaterializationFail
 		_ = s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDropped, &reason, task.TargetRunID)
-		return err
+		return nil
 	}
 
 	_, err = s.createAttemptExecutionTask(
@@ -1977,15 +2483,4 @@ func executionInstanceKeyFromRun(run *types.AgentRun) string {
 		}
 	}
 	return ExecutionClassKey(run.WorkspaceID, run.AgentID, nil, runPolicyFromRun(run))
-}
-
-func (s *AgentService) requeueIfDispatchable(ctx context.Context, taskID string) error {
-	task, err := s.backend.GetTaskByID(ctx, taskID)
-	if err != nil {
-		return err
-	}
-	if !task.State.IsDispatchable() {
-		return nil
-	}
-	return s.queueRouter.RequeueTask(ctx, task.ID)
 }

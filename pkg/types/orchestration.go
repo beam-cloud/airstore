@@ -312,6 +312,7 @@ const (
 	AgentTaskDropReasonInterruptMissingTarget = "interrupt_missing_target"
 	AgentTaskDropReasonRunMaterializationFail = "run_materialization_failed"
 	AgentTaskDropReasonReshapedByQueueMode    = "reshaped_by_queue_mode"
+	AgentTaskDropReasonDispatchRetryExhausted = "dispatch_retry_exhausted"
 )
 
 const (
@@ -326,6 +327,40 @@ const (
 	AgentExecutionMetaKeyRunAttemptID     = "run_attempt_id"
 	AgentExecutionMetaKeyOriginTaskID     = "origin_task_id"
 )
+
+type OrchestrationOutboxEventType string
+
+const (
+	OrchestrationOutboxEventTypeTaskDispatch OrchestrationOutboxEventType = "task_dispatch"
+	OrchestrationOutboxEventTypeRunResult    OrchestrationOutboxEventType = "run_result"
+)
+
+const (
+	OrchestrationOutboxPayloadTaskID      = "task_id"
+	OrchestrationOutboxPayloadAttemptID   = "attempt_id"
+	OrchestrationOutboxPayloadExitCode    = "exit_code"
+	OrchestrationOutboxPayloadError       = "error"
+	OrchestrationOutboxPayloadReason      = "reason"
+	OrchestrationOutboxPayloadRetryDelay  = "retry_delay_ms"
+	OrchestrationOutboxPayloadDispatchAttempt = "dispatch_attempt"
+	OrchestrationOutboxPayloadRunID       = "run_id"
+	OrchestrationOutboxPayloadSessionID   = "session_id"
+	OrchestrationOutboxPayloadStreamID    = "stream_id"
+	OrchestrationOutboxPayloadIdempotency = "idempotency_key"
+)
+
+type OrchestrationOutboxEvent struct {
+	ID         int64                      `json:"id" db:"id"`
+	EventType  OrchestrationOutboxEventType `json:"event_type" db:"event_type"`
+	DedupeKey  string                     `json:"dedupe_key" db:"dedupe_key"`
+	PayloadJSON map[string]any            `json:"payload_json" db:"-"`
+	AvailableAt time.Time                 `json:"available_at" db:"available_at"`
+	PublishedAt *time.Time                `json:"published_at,omitempty" db:"published_at"`
+	Attempts   int                        `json:"attempts" db:"attempts"`
+	LastError  *string                    `json:"last_error,omitempty" db:"last_error"`
+	CreatedAt  time.Time                  `json:"created_at" db:"created_at"`
+	UpdatedAt  time.Time                  `json:"updated_at" db:"updated_at"`
+}
 
 type AgentExecutionInstanceStatus string
 

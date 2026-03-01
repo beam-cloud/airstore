@@ -192,6 +192,11 @@ func (r *RedisClient) handleChannelSubs(
 ) {
 	pubsub := subFn(ctx, channels...)
 	defer pubsub.Close()
+	if _, err := pubsub.Receive(ctx); err != nil {
+		onSubscribe <- true
+		errCh <- err
+		return
+	}
 
 	ch := pubsub.Channel(
 		redis.WithChannelSendTimeout(3*time.Second),

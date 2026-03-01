@@ -84,6 +84,7 @@ message ListWorkersResponse {
 // Task result reporting
 message SetTaskStartedRequest {
   string task_id = 1;
+  string attempt_id = 2;
 }
 
 message SetTaskStartedResponse {}

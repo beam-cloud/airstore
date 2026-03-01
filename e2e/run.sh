@@ -15,6 +15,7 @@
 #   ./e2e/run.sh context   # Run only context/S3 test
 #   ./e2e/run.sh sources   # Run only sources/integrations test
 #   ./e2e/run.sh index     # Run only index performance test
+#   ./e2e/run.sh hooks-burst # Run hook burst/session contention gate
 
 set -e
 
@@ -1068,6 +1069,21 @@ test_hooks() {
 }
 
 # ============================================================================
+# Test: Hook burst + session contention gate
+# ============================================================================
+test_hooks_burst() {
+    echo ""
+    echo "=== Test: Hook Burst + Session Contention ==="
+
+    info "Running orchestration burst/session contention gate..."
+    (cd "$PROJECT_ROOT" && go test ./pkg/orchestration -run 'TestHookBurstSessionLeaseContention|TestRunResultProjectorFinalizesCurrentAttempt' -count=1) \
+        || fail "Hook burst/session contention gate failed"
+
+    echo ""
+    pass "Hook burst/session contention gate passed"
+}
+
+# ============================================================================
 # Test: Compression (strip vs raw vs passthrough)
 # ============================================================================
 test_compression() {
@@ -1237,6 +1253,9 @@ case "${1:-all}" in
     hooks)
         test_hooks
         ;;
+    hooks-burst|burst|contention)
+        test_hooks_burst
+        ;;
     compression)
         test_compression
         ;;
@@ -1248,11 +1267,12 @@ case "${1:-all}" in
         test_context
         test_sources
         test_hooks
+        test_hooks_burst
         test_compression
         ;;
     *)
         echo "Unknown test: $1"
-        echo "Available: setup, task, fs, tools, context, sources, index, smart, hooks, compression, all"
+        echo "Available: setup, task, fs, tools, context, sources, index, smart, hooks, hooks-burst, compression, all"
         exit 1
         ;;
 esac
