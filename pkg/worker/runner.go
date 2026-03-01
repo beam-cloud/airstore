@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/beam-cloud/airstore/pkg/types"
-	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 )
 
@@ -55,8 +54,6 @@ const (
 	TurnArgModeFirstResumeLatest TurnArgMode = "first_resume_latest"
 	// TurnArgModeFirstResumeByID resumes using an explicit session id.
 	TurnArgModeFirstResumeByID TurnArgMode = "first_resume_by_id"
-	// TurnArgModeFirstFreshNoSession starts a new session without an explicit session id.
-	TurnArgModeFirstFreshNoSession TurnArgMode = "first_fresh_no_session"
 	// TurnArgModeFollowup is used for non-first turns.
 	TurnArgModeFollowup TurnArgMode = "followup"
 )
@@ -123,8 +120,6 @@ func (r *ClaudeCodeRunner) BuildTurnArgs(prompt string, env map[string]string, m
 		} else {
 			builder.withFlag("--continue")
 		}
-	case TurnArgModeFirstFreshNoSession:
-		// Intentionally omit session flags.
 	case TurnArgModeFollowup:
 		if sessionID != "" {
 			builder.withKeyValue("--resume", sessionID)
@@ -313,14 +308,7 @@ func claudeSessionIDFromEnv(env map[string]string) string {
 	if env == nil {
 		return ""
 	}
-	sessionID := strings.TrimSpace(env[agentSessionIDEnvKey])
-	if sessionID == "" {
-		return ""
-	}
-	if _, err := uuid.Parse(sessionID); err != nil {
-		return ""
-	}
-	return sessionID
+	return strings.TrimSpace(env[agentSessionIDEnvKey])
 }
 
 func providerFromExecutionPolicy(policy map[string]any) string {

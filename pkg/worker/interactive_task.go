@@ -395,22 +395,24 @@ func buildFirstTurnStrategies(env map[string]string) []firstTurnStrategy {
 		}
 	}
 
-	strategies := []firstTurnStrategy{
+	if strings.TrimSpace(env[agentSessionIDEnvKey]) != "" {
+		return []firstTurnStrategy{
+			{
+				mode:             TurnArgModeFirstResumeByID,
+				transitionReason: "resume requested with explicit session id",
+			},
+			{
+				mode:             TurnArgModeFirstResumeLatest,
+				transitionReason: "resume fallback using latest local VFS state",
+			},
+		}
+	}
+	return []firstTurnStrategy{
 		{
 			mode:             TurnArgModeFirstResumeLatest,
-			transitionReason: "resume requested; prefer local VFS state",
+			transitionReason: "resume requested; no explicit session id",
 		},
 	}
-	if strings.TrimSpace(env[agentSessionIDEnvKey]) != "" {
-		strategies = append(
-			strategies,
-			firstTurnStrategy{
-				mode:             TurnArgModeFirstResumeByID,
-				transitionReason: "resume fallback using explicit session id",
-			},
-		)
-	}
-	return strategies
 }
 
 func cloneTurnEnv(env map[string]string) map[string]string {
@@ -422,15 +424,6 @@ func cloneTurnEnv(env map[string]string) map[string]string {
 		cloned[key] = value
 	}
 	return cloned
-}
-
-func envForFirstTurnStrategy(base map[string]string, strategy firstTurnStrategy) map[string]string {
-	env := cloneTurnEnv(base)
-	if strategy.mode == TurnArgModeFirstFreshNoSession {
-		delete(env, agentSessionIDEnvKey)
-		delete(env, agentResumeSessionEnvKey)
-	}
-	return env
 }
 
 func (w *Worker) executeFirstTurnWithStrategy(
@@ -451,7 +444,7 @@ func (w *Worker) executeFirstTurnWithStrategy(
 	totalAttempts := len(strategies)
 	for idx, strategy := range strategies {
 		attempt := idx + 1
-		attemptEnv := envForFirstTurnStrategy(baseEnv, strategy)
+		attemptEnv := cloneTurnEnv(baseEnv)
 		err := w.executeTurnWithResumeRetry(
 			ctx,
 			task,
@@ -563,7 +556,7 @@ func (w *Worker) executeTurnWithResumeRetry(
 }
 
 func shouldRetrySessionBusy(mode TurnArgMode, env map[string]string) bool {
-	if mode == TurnArgModeFollowup || mode == TurnArgModeFirstFreshNoSession {
+	if mode == TurnArgModeFollowup {
 		return false
 	}
 	return strings.TrimSpace(env[agentSessionIDEnvKey]) != ""

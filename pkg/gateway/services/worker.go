@@ -285,11 +285,14 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 		return nil, status.Errorf(codes.FailedPrecondition, "run attempt mapping not found")
 	}
 	if !isRunAttemptActive(attempt) {
-		log.Info().
+		log.Debug().
 			Str("task_id", req.TaskId).
 			Str("run_id", attempt.RunID).
 			Str("attempt_id", attempt.ID).
-			Msg("ignoring stale task result callback for non-active attempt")
+			Str("reported_attempt_id", attemptID).
+			Str("attempt_status", string(attempt.Status)).
+			Bool("attempt_ended", attempt.EndedAt != nil).
+			Msg("dropping duplicate/stale task result callback after attempt finalized")
 		return &pb.SetTaskResultResponse{}, nil
 	}
 
@@ -298,11 +301,11 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 	// superseded execution. Skip finalization to avoid marking a newer
 	// attempt terminal while its worker is still running.
 	if attempt.ID != attemptID {
-		log.Info().
+		log.Debug().
 			Str("task_id", req.TaskId).
 			Str("expected_attempt", attemptID).
 			Str("current_attempt", attempt.ID).
-			Msg("ignoring stale task result: attempt was superseded")
+			Msg("dropping stale task result callback for superseded attempt")
 		return &pb.SetTaskResultResponse{}, nil
 	}
 
