@@ -540,15 +540,6 @@ func (a *AgentAPI) listTaskSessionHistoryLogs(
 		}
 	}
 
-	sort.SliceStable(history, func(i, j int) bool {
-		left := history[i]
-		right := history[j]
-		if left.Timestamp == right.Timestamp {
-			return left.TaskID < right.TaskID
-		}
-		return left.Timestamp < right.Timestamp
-	})
-
 	return common.RedactTaskLogEntries(history), currentNextSeq, nil
 }
 
