@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/beam-cloud/airstore/pkg/types"
+	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 )
 
@@ -21,7 +22,6 @@ const (
 
 	systemPromptModeReplace = "replace"
 
-	claudeProviderName    = "claude"
 	claudeConfigDirEnvKey = "CLAUDE_CONFIG_DIR"
 	claudeDefaultShellEnv = "/bin/bash"
 	claudeStateDirName    = ".claude"
@@ -284,57 +284,11 @@ func claudeSessionIDFromEnv(env map[string]string) string {
 
 func claudeSessionIDForCLI(sessionID string) string {
 	sessionID = strings.TrimSpace(sessionID)
-	if !isCanonicalUUID(sessionID) {
+	if sessionID == "" {
+		return ""
+	}
+	if _, err := uuid.Parse(sessionID); err != nil {
 		return ""
 	}
 	return sessionID
-}
-
-func isCanonicalUUID(value string) bool {
-	if len(value) != 36 {
-		return false
-	}
-	for i := 0; i < len(value); i++ {
-		ch := value[i]
-		switch i {
-		case 8, 13, 18, 23:
-			if ch != '-' {
-				return false
-			}
-		default:
-			if !isHexByte(ch) {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func isHexByte(ch byte) bool {
-	return (ch >= '0' && ch <= '9') ||
-		(ch >= 'a' && ch <= 'f') ||
-		(ch >= 'A' && ch <= 'F')
-}
-
-func providerFromExecutionPolicy(policy map[string]any) string {
-	if len(policy) == 0 {
-		return ""
-	}
-	raw, ok := policy["provider"]
-	if !ok || raw == nil {
-		return ""
-	}
-	value, ok := raw.(string)
-	if !ok {
-		return ""
-	}
-	return strings.ToLower(strings.TrimSpace(value))
-}
-
-func isClaudeExecutionTask(task types.RunExecution) bool {
-	provider := runnerProviderFromEnv(task.Env)
-	if provider == "" {
-		provider = providerFromExecutionPolicy(task.ExecutionPolicy)
-	}
-	return provider == claudeProviderName
 }
