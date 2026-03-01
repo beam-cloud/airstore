@@ -919,9 +919,15 @@ func (s *AgentService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, r
 	if err != nil {
 		return err
 	}
+	if run == nil {
+		return nil
+	}
 	task, err := s.backend.GetTaskByID(ctx, run.OriginTaskID)
 	if err != nil {
 		return err
+	}
+	if task == nil {
+		return nil
 	}
 	if task.State.IsTerminal() {
 		return nil

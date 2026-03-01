@@ -326,11 +326,11 @@ func (b *PostgresBackend) CreateTaskWithOutbox(
 			},
 		}
 	}
-	if strings.TrimSpace(event.DedupeKey) == "" {
-		event.DedupeKey = fmt.Sprintf("%s:%s", event.EventType, task.ID)
-	}
 	if event.EventType == "" {
 		event.EventType = types.OrchestrationOutboxEventTypeTaskDispatch
+	}
+	if strings.TrimSpace(event.DedupeKey) == "" {
+		event.DedupeKey = fmt.Sprintf("%s:%s", event.EventType, task.ID)
 	}
 	if event.AvailableAt.IsZero() {
 		event.AvailableAt = time.Now()

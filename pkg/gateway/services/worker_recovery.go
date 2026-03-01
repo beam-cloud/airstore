@@ -302,9 +302,48 @@ func (s *WorkerService) recoverOrphanedRun(ctx context.Context, run *types.Agent
 		Error:     errorMsg,
 	})
 	if setErr != nil {
-		return false, false, setErr
+		fallbackErr := s.finalizeOrphanedRunDirect(ctx, attempt, run.ID, -1, errorMsg)
+		if fallbackErr != nil {
+			return false, false, fmt.Errorf("set orphaned run result: %w; direct fallback failed: %v", setErr, fallbackErr)
+		}
+		log.Warn().
+			Err(setErr).
+			Str("run_id", run.ID).
+			Str("attempt_id", attempt.ID).
+			Msg("failed to enqueue orphaned run result; applied direct finalization fallback")
+		return true, false, nil
 	}
 	return true, false, nil
+}
+
+func (s *WorkerService) finalizeOrphanedRunDirect(
+	ctx context.Context,
+	attempt *types.AgentRunAttempt,
+	taskID string,
+	exitCode int,
+	errText string,
+) error {
+	if s == nil || s.backend == nil || attempt == nil {
+		return nil
+	}
+	now := time.Now()
+	attemptStatus, runStatus, errMsg := types.ClassifyExecutionOutcome(exitCode, errText)
+	if err := s.backend.UpdateAgentRunAttemptResult(ctx, attempt.ID, attemptStatus, &exitCode, now, errMsg); err != nil {
+		return err
+	}
+	if err := s.backend.UpdateAgentRunLifecycle(ctx, attempt.RunID, runStatus, nil, &now, errMsg); err != nil {
+		return err
+	}
+	_ = appendRunSnapshot(ctx, s.backend, attempt.RunID, runStatus, nil, &now, errMsg, map[string]any{
+		types.AgentRunEventPayloadKeyAttemptID: attempt.ID,
+		types.AgentRunEventPayloadKeyTaskID:    taskID,
+		types.AgentRunEventPayloadKeyExitCode:  exitCode,
+		types.AgentRunEventPayloadKeyError:     errText,
+		types.AgentRunEventPayloadKeyEvent:     string(types.AgentRunEventOrphanRecovered),
+		"recovery_mode":                        "direct_fallback",
+	})
+	_ = updateExecutionInstanceCounts(ctx, s.backend, attempt.RunID, -1)
+	return s.markOriginTaskTerminalIfCurrentRun(ctx, attempt.RunID)
 }
 
 func runExecutionStateIsTerminal(status types.RunExecutionStatus) bool {
