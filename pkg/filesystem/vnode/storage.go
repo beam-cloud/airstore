@@ -685,7 +685,7 @@ func (s *StorageVNode) readRange(path string, off int64, length int64) ([]byte, 
 		return nil, err
 	}
 	if !resp.Ok {
-		return nil, fs.ErrNotExist
+		return nil, readResponseError(resp.Error)
 	}
 	return resp.Data, nil
 }

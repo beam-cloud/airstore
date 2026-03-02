@@ -325,6 +325,9 @@ func (s *StorageService) Read(ctx context.Context, req *pb.ContextReadRequest) (
 		if isNotFound(err) {
 			return &pb.ContextReadResponse{Ok: false, Error: "not found"}, nil
 		}
+		if isInvalidRange(err) {
+			return &pb.ContextReadResponse{Ok: true, Data: nil}, nil
+		}
 		return &pb.ContextReadResponse{Ok: false, Error: err.Error()}, nil
 	}
 	defer resp.Body.Close()
