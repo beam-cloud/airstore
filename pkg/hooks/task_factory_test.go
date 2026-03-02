@@ -97,20 +97,50 @@ func TestBuildHookAttachment_IncludesMoveContext(t *testing.T) {
 	}
 }
 
-func TestHookSessionID_StableForSameHook(t *testing.T) {
-	sessionA := hookSessionID("hook-1")
-	sessionB := hookSessionID("hook-1")
+func TestHookSessionID_StableForSameHookAndEvent(t *testing.T) {
+	sessionA := hookSessionID("hook-1", "evt-1")
+	sessionB := hookSessionID("hook-1", "evt-1")
 	if sessionA != sessionB {
 		t.Fatalf("expected stable session id for same hook, got %q vs %q", sessionA, sessionB)
 	}
 }
 
-func TestHookSessionID_CompressesLongHookExternalID(t *testing.T) {
-	sessionID := hookSessionID(strings.Repeat("x", 512))
+func TestHookSessionID_IsolatedAcrossEvents(t *testing.T) {
+	sessionA := hookSessionID("hook-1", "evt-1")
+	sessionB := hookSessionID("hook-1", "evt-2")
+	if sessionA == sessionB {
+		t.Fatalf("expected distinct session ids across events, got %q", sessionA)
+	}
+}
+
+func TestHookLane_StableAndIsolatedAcrossEvents(t *testing.T) {
+	laneA := hookLane("hook-1", "evt-1")
+	laneB := hookLane("hook-1", "evt-1")
+	laneC := hookLane("hook-1", "evt-2")
+	if laneA != laneB {
+		t.Fatalf("expected stable lane for same hook/event, got %q vs %q", laneA, laneB)
+	}
+	if laneA == laneC {
+		t.Fatalf("expected isolated lane across events, got %q", laneA)
+	}
+}
+
+func TestHookIsolationIDs_CompressLongSeed(t *testing.T) {
+	seedHook := strings.Repeat("x", 512)
+	seedEvent := strings.Repeat("y", 512)
+
+	sessionID := hookSessionID(seedHook, seedEvent)
+	lane := hookLane(seedHook, seedEvent)
 	if len(sessionID) > 180 {
 		t.Fatalf("expected compressed session id length <= 180, got %d", len(sessionID))
 	}
-	if !strings.HasPrefix(sessionID, "hook-") {
-		t.Fatalf("expected compressed session id to retain hook prefix, got %q", sessionID)
+	if len(lane) > 180 {
+		t.Fatalf("expected compressed lane length <= 180, got %d", len(lane))
+	}
+	if !strings.HasPrefix(sessionID, "hook-session:") {
+		t.Fatalf("expected compressed session id to retain prefix, got %q", sessionID)
+	}
+	if !strings.HasPrefix(lane, "hook-lane:") {
+		t.Fatalf("expected compressed lane to retain prefix, got %q", lane)
 	}
 }

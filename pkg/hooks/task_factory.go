@@ -52,7 +52,8 @@ func (f *TaskFactory) CreateTask(
 	}
 
 	idempotencyKey := hookIdempotencyKey(hook.ExternalId, normalizedEventID, event, data)
-	sessionID := hookSessionID(hook.ExternalId)
+	sessionID := hookSessionID(hook.ExternalId, normalizedEventID)
+	lane := hookLane(hook.ExternalId, normalizedEventID)
 	source := hookInputSource
 	correlationID := normalizedEventID
 	var correlationPtr *string
@@ -67,6 +68,7 @@ func (f *TaskFactory) CreateTask(
 		Message:        prompt,
 		AgentID:        hook.AgentId,
 		SessionID:      sessionID,
+		Lane:           &lane,
 		IdempotencyKey: idempotencyKey,
 		HookID:         &hookID,
 		InputProvenance: &orchestration.InputProvenance{
@@ -156,13 +158,25 @@ func hashSourceItemsCSV(raw string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func hookSessionID(hookExternalID string) string {
-	raw := fmt.Sprintf("hook-%s", strings.TrimSpace(hookExternalID))
+func hookSessionID(hookExternalID, eventID string) string {
+	return compressHookScopedID("hook-session:", hookIsolationSeed(hookExternalID, eventID))
+}
+
+func hookLane(hookExternalID, eventID string) string {
+	return compressHookScopedID("hook-lane:", hookIsolationSeed(hookExternalID, eventID))
+}
+
+func hookIsolationSeed(hookExternalID, eventID string) string {
+	return fmt.Sprintf("%s:%s", strings.TrimSpace(hookExternalID), strings.TrimSpace(eventID))
+}
+
+func compressHookScopedID(prefix, seed string) string {
+	raw := prefix + seed
 	if len(raw) <= 180 {
 		return raw
 	}
 	sum := sha1.Sum([]byte(raw))
-	return "hook-" + hex.EncodeToString(sum[:])
+	return prefix + hex.EncodeToString(sum[:])
 }
 
 func buildHookAttachment(hook *types.Hook, event string, data map[string]any) map[string]any {
