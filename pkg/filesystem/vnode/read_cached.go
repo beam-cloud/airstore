@@ -78,6 +78,7 @@ func readWithCachedFlow(path string, buf []byte, off int64, fh FileHandle, ops c
 		if err != nil {
 			return 0, nil, err
 		}
+		_, data = compactNulls(0, data)
 		ops.content.Set(path, data, info.Mtime)
 		if off >= int64(len(data)) {
 			return 0, AttributionForCache(CacheSourceBackendRPC), nil
@@ -91,6 +92,7 @@ func readWithCachedFlow(path string, buf []byte, off int64, fh FileHandle, ops c
 	if err != nil {
 		return 0, nil, err
 	}
+	_, data = compactNulls(off, data)
 	n := copy(buf, data)
 	ops.recordRead(state, path, off, n)
 	return n, AttributionForCache(CacheSourceBackendRPC), nil

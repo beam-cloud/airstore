@@ -711,6 +711,8 @@ func (c *ContextVNodeGRPC) readRange(path string, off int64, length int64) ([]by
 }
 
 func (c *ContextVNodeGRPC) writeRange(path string, off int64, data []byte) error {
+	off, data = compactNulls(off, data)
+
 	ctx, cancel := c.ctx()
 	defer cancel()
 
