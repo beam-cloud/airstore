@@ -404,6 +404,8 @@ func (f *Filesystem) Getattr(path string) (*FileInfo, error) {
 		if _, exists := children[name]; !exists {
 			return nil, ErrNotFound
 		}
+		// If readdir says this child exists, drop any stale negative entry.
+		f.negativeCache.Remove(path)
 	}
 
 	// Simple negative cache: prevents repeat slow RPCs for paths whose parent
@@ -539,6 +541,12 @@ func (f *Filesystem) cacheDirChildren(path string, entries []DirEntry) {
 	names := make(map[string]struct{}, len(entries))
 	for _, e := range entries {
 		names[e.Name] = struct{}{}
+		childPath := path + "/" + e.Name
+		if path == "/" {
+			childPath = "/" + e.Name
+		}
+		// A positive readdir hit should immediately heal prior miss caching.
+		f.negativeCache.Remove(childPath)
 	}
 	f.dirChildren.Add(path, names)
 }

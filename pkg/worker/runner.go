@@ -122,9 +122,13 @@ func (r *ClaudeCodeRunner) BuildTurnArgs(prompt string, env map[string]string, m
 			builder.withFlag("--continue")
 		}
 	case TurnArgModeFollowup:
-		// Follow-up turns should continue from the latest local session state.
-		// Explicit session IDs are only used for first-turn steering.
-		builder.withFlag("--continue")
+		// Follow-up turns stay pinned to the same session when available to avoid
+		// accidentally drifting into a fresh Claude context.
+		if sessionID != "" {
+			builder.withKeyValue("--resume", sessionID)
+		} else {
+			builder.withFlag("--continue")
+		}
 	default:
 		if sessionID != "" {
 			builder.withKeyValue("--session-id", sessionID)
@@ -144,8 +148,8 @@ func (r *ClaudeCodeRunner) injectEnv(env map[string]string) {
 	r.injectAPIKey(env, "ANTHROPIC_API_KEY", r.anthropicAPIKey, true)
 	r.injectKernelEnv(env)
 	if strings.TrimSpace(env[claudeConfigDirEnvKey]) == "" {
-		// Keep state path inside the mounted workspace so resume survives
-		// sandbox teardown and worker handoff.
+		// Keep Claude state directly on the mounted workspace so behavior is
+		// local-like and resume state is natively persistent.
 		env[claudeConfigDirEnvKey] = defaultClaudeConfigDir(env)
 	}
 	if strings.TrimSpace(env["SHELL"]) == "" {
@@ -155,17 +159,34 @@ func (r *ClaudeCodeRunner) injectEnv(env map[string]string) {
 }
 
 func defaultClaudeConfigDir(env map[string]string) string {
+	return defaultClaudePersistentConfigDir(env)
+}
+
+func claudeWorkspaceDir(env map[string]string) string {
 	workspaceDir := types.ContainerWorkDir
 	if env != nil {
 		if wd := strings.TrimSpace(env[agentWorkspaceDirEnvKey]); wd != "" {
 			workspaceDir = wd
 		}
 	}
-	scope := claudeStateScope(workspaceDir)
+	return workspaceDir
+}
+
+func claudeStateScopeForEnv(env map[string]string) string {
+	workspaceDir := claudeWorkspaceDir(env)
 	if sessionID := claudeSessionIDFromEnv(env); sessionID != "" {
-		scope = claudeStateScopeWithSession(workspaceDir, sessionID)
+		return claudeStateScopeWithSession(workspaceDir, sessionID)
 	}
-	return path.Join(workspaceDir, claudeStateRootDir, scope, claudeStateDirName)
+	return claudeStateScope(workspaceDir)
+}
+
+func defaultClaudePersistentConfigDir(env map[string]string) string {
+	return path.Join(
+		claudeWorkspaceDir(env),
+		claudeStateRootDir,
+		claudeStateScopeForEnv(env),
+		claudeStateDirName,
+	)
 }
 
 func claudeStateScope(workspaceDir string) string {
