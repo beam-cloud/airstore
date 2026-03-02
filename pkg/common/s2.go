@@ -53,6 +53,8 @@ func (c *S2Client) Enabled() bool {
 type TaskLogEntry struct {
 	TaskID    string         `json:"task_id"`
 	Timestamp int64          `json:"timestamp"`
+	SeqNum    int64          `json:"seq_num,omitempty"`
+	EventID   string         `json:"event_id,omitempty"`
 	Stream    string         `json:"stream"` // "stdout" or "stderr"
 	Data      string         `json:"data"`
 	ChunkType string         `json:"chunk_type,omitempty"`
@@ -255,6 +257,10 @@ func (c *S2Client) ReadLogs(ctx context.Context, taskID string, seqNum int64) ([
 		var entry TaskLogEntry
 		// Body is a JSON-encoded string, unmarshal it
 		if err := json.Unmarshal([]byte(r.Body), &entry); err == nil {
+			entry.SeqNum = r.SeqNum
+			if strings.TrimSpace(entry.EventID) == "" {
+				entry.EventID = fmt.Sprintf("%s:%d", taskID, r.SeqNum)
+			}
 			logs = append(logs, entry)
 		}
 		// Track the next sequence number (last seen + 1)
