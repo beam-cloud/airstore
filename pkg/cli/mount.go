@@ -23,6 +23,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 )
 
 var (
@@ -161,7 +162,14 @@ func runMount(cmd *cobra.Command, args []string) error {
 		// Create gRPC connection for vnodes.
 		// When access logging is on, a client-side interceptor injects the
 		// session header on every outgoing RPC so the gateway can record events.
-		dialOpts := []grpc.DialOption{grpc.WithTransportCredentials(TransportCredentials(effectiveGateway))}
+		dialOpts := []grpc.DialOption{
+			grpc.WithTransportCredentials(TransportCredentials(effectiveGateway)),
+			grpc.WithKeepaliveParams(keepalive.ClientParameters{
+				Time:                60 * time.Second,
+				Timeout:             10 * time.Second,
+				PermitWithoutStream: true,
+			}),
+		}
 		if mountAccessLog {
 			session := mountSession // may be empty — gateway defaults to workspace ID
 			dialOpts = append(dialOpts, grpc.WithUnaryInterceptor(filesystem.MountAccessUnaryInterceptor(session)))

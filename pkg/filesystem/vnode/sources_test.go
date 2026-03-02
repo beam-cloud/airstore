@@ -273,3 +273,62 @@ func TestSourcesVNode_OpenMaterializedResultPrefetchesWhenCachedSizeUnknown(t *t
 		t.Fatalf("expected read content %q, got %q", string(content), got)
 	}
 }
+
+func TestSourcesVNodeCleanupExpiredCaches(t *testing.T) {
+	v := &SourcesVNode{
+		results:      make(map[string]*cachedQueryResult),
+		queries:      make(map[string]*cachedQuery),
+		integrations: make(map[string]*cachedIntegration),
+		stats:        make(map[string]*cachedStat),
+		openContent:  make(map[string]*cachedContent),
+		openHandles:  make(map[FileHandle]string),
+		recentDirs:   make(map[string]time.Time),
+		stopRefresh:  make(chan struct{}),
+	}
+
+	expired := time.Now().Add(-time.Hour)
+	fresh := time.Now().Add(time.Hour)
+
+	v.results["expired"] = &cachedQueryResult{expiresAt: expired}
+	v.results["fresh"] = &cachedQueryResult{expiresAt: fresh}
+
+	v.queries["expired"] = &cachedQuery{expiresAt: expired}
+	v.queries["fresh"] = &cachedQuery{expiresAt: fresh}
+
+	v.integrations["expired"] = &cachedIntegration{expiresAt: expired}
+	v.integrations["fresh"] = &cachedIntegration{expiresAt: fresh}
+
+	v.stats["expired"] = &cachedStat{expiresAt: expired}
+	v.stats["fresh"] = &cachedStat{expiresAt: fresh}
+
+	v.openContent["stale"] = &cachedContent{refs: 0, cachedAt: time.Now().Add(-time.Hour)}
+	v.openContent["active"] = &cachedContent{refs: 1, cachedAt: time.Now().Add(-time.Hour)}
+
+	v.cleanupExpiredCaches()
+
+	if len(v.results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(v.results))
+	}
+	if _, ok := v.results["fresh"]; !ok {
+		t.Fatal("fresh result was evicted")
+	}
+
+	if len(v.queries) != 1 {
+		t.Fatalf("expected 1 query, got %d", len(v.queries))
+	}
+
+	if len(v.integrations) != 1 {
+		t.Fatalf("expected 1 integration, got %d", len(v.integrations))
+	}
+
+	if len(v.stats) != 1 {
+		t.Fatalf("expected 1 stat, got %d", len(v.stats))
+	}
+
+	if len(v.openContent) != 1 {
+		t.Fatalf("expected 1 openContent (refs>0), got %d", len(v.openContent))
+	}
+	if _, ok := v.openContent["active"]; !ok {
+		t.Fatal("active content with refs>0 was evicted")
+	}
+}

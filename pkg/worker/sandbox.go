@@ -1014,8 +1014,10 @@ func (m *SandboxManager) addFilesystemMount(spec *specs.Spec, source string, rea
 
 	entries, _ := os.ReadDir(source)
 
-	// Bind mount at container working directory
-	options := []string{"rbind"}
+	// Bind mount at container working directory.
+	// rslave propagation lets mount restarts on the host propagate into the
+	// sandbox, which is necessary for recovery after a FUSE mount process crash.
+	options := []string{"rbind", "rslave"}
 	if readOnly {
 		options = append(options, "ro")
 	} else {

@@ -11,6 +11,7 @@ import (
 
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
+	"github.com/rs/zerolog/log"
 	"github.com/winfsp/cgofuse/fuse"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -57,6 +58,7 @@ func NewStorageVNode(conn *grpc.ClientConn, token string) *StorageVNode {
 	}
 	s.asyncWriter = NewAsyncWriter(s.writeRange)
 	go s.backgroundWarmupLoop()
+	go s.handleEvictionLoop()
 	return s
 }
 
@@ -310,6 +312,7 @@ func (s *StorageVNode) Write(path string, buf []byte, off int64, fh FileHandle) 
 		state.mu.Unlock()
 		return 0, fs.ErrInvalid
 	}
+	state.touch()
 
 	// Empty buffer: start buffering or write directly if too large.
 	if len(state.writeBuf) == 0 {
@@ -637,7 +640,7 @@ func (s *StorageVNode) allocHandle(path string) FileHandle {
 	defer s.mu.Unlock()
 	fh := s.nextFH
 	s.nextFH++
-	state := &handleState{path: path}
+	state := &handleState{path: path, lastActivity: time.Now()}
 	s.handles[fh] = state
 
 	s.writeMu.Lock()
@@ -725,6 +728,7 @@ func (s *StorageVNode) recordRead(state *handleState, path string, off int64, n 
 	}
 
 	state.mu.Lock()
+	state.touch()
 	sequential := state.lastSize > 0 && state.lastOff+int64(state.lastSize) == off
 	state.lastOff = off
 	state.lastSize = n
@@ -930,6 +934,71 @@ func (s *StorageVNode) toFileInfo(path string, info *pb.FileInfo) *FileInfo {
 		Ino: PathIno(path), Size: info.Size, Mode: mode, Nlink: 1,
 		Uid: uid, Gid: gid,
 		Atime: now, Mtime: mtime, Ctime: mtime,
+	}
+}
+
+func (s *StorageVNode) OpenHandleCount() int {
+	s.mu.Lock()
+	n := len(s.handles)
+	s.mu.Unlock()
+	return n
+}
+
+// handleEvictionLoop periodically evicts handles that haven't been used recently.
+// This prevents unbounded memory growth when FUSE Release is never received
+// (process killed, 9P disconnect, gVisor edge cases).
+func (s *StorageVNode) handleEvictionLoop() {
+	ticker := time.NewTicker(handleEvictionInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.stopWarmup:
+			return
+		case <-ticker.C:
+			s.evictStaleHandles()
+		}
+	}
+}
+
+func (s *StorageVNode) evictStaleHandles() {
+	cutoff := time.Now().Add(-handleStaleTimeout)
+
+	s.mu.Lock()
+	stale := make(map[FileHandle]*handleState)
+	for fh, state := range s.handles {
+		state.mu.Lock()
+		if !state.closed && state.lastActivity.Before(cutoff) {
+			stale[fh] = state
+		}
+		state.mu.Unlock()
+	}
+	s.mu.Unlock()
+
+	for fh, state := range stale {
+		s.flushWriteBuffer(state.path, state)
+		_ = s.asyncWriter.ForceFlush(state.path)
+
+		s.mu.Lock()
+		state.mu.Lock()
+		state.closed = true
+		state.writeBuf = nil
+		state.prefetch = nil
+		state.mu.Unlock()
+		delete(s.handles, fh)
+		s.mu.Unlock()
+
+		s.writeMu.Lock()
+		if m, ok := s.writes[state.path]; ok {
+			delete(m, fh)
+			if len(m) == 0 {
+				delete(s.writes, state.path)
+			}
+		}
+		s.writeMu.Unlock()
+
+		log.Debug().Str("path", state.path).Uint64("fh", uint64(fh)).
+			Msg("evicted stale file handle")
 	}
 }
 
