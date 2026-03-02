@@ -701,6 +701,8 @@ func (s *StorageVNode) readRange(path string, off int64, length int64) ([]byte, 
 }
 
 func (s *StorageVNode) writeRange(path string, off int64, data []byte) error {
+	off, data = compactNulls(off, data)
+
 	ctx, cancel := s.ctx()
 	defer cancel()
 
