@@ -37,7 +37,9 @@ const (
 	negativeCacheSize = 10000
 	// negativeCacheTTL is how long a negative lookup result is cached.
 	// Write operations invalidate affected paths immediately.
-	negativeCacheTTL = 30 * time.Second
+	// Kept short (2s) because files may appear externally (S3 uploads, hooks)
+	// and a stale negative entry blocks all gateway checks until expiry.
+	negativeCacheTTL = 2 * time.Second
 )
 
 // Config configures the filesystem mount
@@ -396,16 +398,16 @@ func (f *Filesystem) Getattr(path string) (*FileInfo, error) {
 		dir = path[:i]
 	}
 
-	// Readdir-informed negative lookup: if the parent was recently listed and
-	// this name wasn't in the result set, the file doesn't exist. This is the
-	// fast path that eliminates RPCs for the common pattern of readdir followed
-	// by getattr probes (e.g., Claude Code checking for .claude, CLAUDE.md, etc.).
+	// Readdir-informed positive hint: if the parent was recently listed and
+	// this name IS in the result set, drop any stale negative-cache entry.
+	// We intentionally do NOT return ENOENT when the name is absent from the
+	// cached set, because files may be created externally (e.g., S3 upload by
+	// a hook) after the last readdir. Returning ENOENT here would block all
+	// gateway checks for up to the dirChildren TTL.
 	if children, ok := f.dirChildren.Get(dir); ok {
-		if _, exists := children[name]; !exists {
-			return nil, ErrNotFound
+		if _, exists := children[name]; exists {
+			f.negativeCache.Remove(path)
 		}
-		// If readdir says this child exists, drop any stale negative entry.
-		f.negativeCache.Remove(path)
 	}
 
 	// Simple negative cache: prevents repeat slow RPCs for paths whose parent
