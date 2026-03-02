@@ -41,12 +41,14 @@ func mergeWriteBuffer(oldOff int64, oldData []byte, newOff int64, newData []byte
 	return &mergedWrite{off: minOff, data: combined}
 }
 
-// compactNulls strips NULL bytes from data that is confirmed to be a text
-// file. This handles the case where the kernel page cache coalesces
-// sparse/pwrite writes into a single contiguous buffer with zero-filled
-// gaps. Bash 5.x on Linux refuses to source files containing NULLs
-// ("cannot execute binary file"), so we strip them for text content
-// written at offset 0.
+// compactNulls replaces runs of consecutive NULL bytes with a single newline
+// in data that is confirmed to be a text file. This handles the case where
+// the kernel page cache or VFS write-merge buffer coalesces sparse/pwrite
+// writes into a single contiguous buffer with zero-filled gaps. Bash 5.x on
+// Linux refuses to source files containing NULLs ("cannot execute binary
+// file"). Replacing NULL runs with newlines (rather than deleting them)
+// preserves structural separation between content sections, avoiding syntax
+// errors from token merging.
 //
 // Guards (all must be true to activate):
 //  1. offset is 0 (full file replacement, not a partial update)
@@ -77,6 +79,16 @@ func compactNulls(off int64, data []byte) (int64, []byte) {
 		return off, data
 	}
 
-	compact := bytes.ReplaceAll(data, []byte{0}, nil)
+	compact := make([]byte, 0, len(data))
+	for i := 0; i < len(data); i++ {
+		if data[i] == 0 {
+			compact = append(compact, '\n')
+			for i+1 < len(data) && data[i+1] == 0 {
+				i++
+			}
+		} else {
+			compact = append(compact, data[i])
+		}
+	}
 	return 0, compact
 }
