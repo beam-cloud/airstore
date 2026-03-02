@@ -696,7 +696,7 @@ func (c *ContextVNodeGRPC) readRange(path string, off int64, length int64) ([]by
 		return nil, err
 	}
 	if !resp.Ok {
-		return nil, fs.ErrNotExist
+		return nil, readResponseError(resp.Error)
 	}
 	return resp.Data, nil
 }
