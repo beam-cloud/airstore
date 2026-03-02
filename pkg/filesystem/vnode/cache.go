@@ -14,10 +14,9 @@ import (
 )
 
 const (
-	cacheSize        = 10000
-	cacheTTL         = 60 * time.Second // S3 metadata is stable; longer TTL reduces API calls
-	negativeCacheTTL = 10 * time.Second // Missing files may appear soon
-
+	cacheSize           = 10000
+	cacheTTL            = 60 * time.Second // S3 metadata is stable; longer TTL reduces API calls
+	negativeCacheTTL    = 2 * time.Second  // Missing files may appear soon (kept short for external creates)
 	contentCacheEntries = 1024
 	contentCacheTTL     = 2 * time.Minute
 	smallFileMaxSize    = 128 * 1024 // Cache small files only (128KB)
