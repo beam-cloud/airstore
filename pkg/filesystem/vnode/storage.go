@@ -99,11 +99,11 @@ func (s *StorageVNode) Getattr(path string) (*FileInfo, error) {
 		return info, nil
 	}
 
-	if s.cache.IsNegative(path) {
-		return nil, fs.ErrNotExist
-	}
 	if info := s.cache.GetInfo(path); info != nil {
 		return info, nil
+	}
+	if s.cache.IsNegative(path) {
+		return nil, fs.ErrNotExist
 	}
 
 	ctx, cancel := s.ctx()
@@ -214,11 +214,12 @@ func (s *StorageVNode) Open(path string, flags int) (FileHandle, error) {
 }
 
 func (s *StorageVNode) openExisting(path string) (FileHandle, error) {
-	if s.cache.IsNegative(path) {
-		return 0, fs.ErrNotExist
-	}
+	// Prefer positive cache so fresh metadata wins over stale negatives.
 	if s.cache.GetInfo(path) != nil {
 		return s.allocHandle(path), nil
+	}
+	if s.cache.IsNegative(path) {
+		return 0, fs.ErrNotExist
 	}
 
 	ctx, cancel := s.ctx()

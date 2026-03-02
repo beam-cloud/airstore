@@ -30,6 +30,11 @@ const (
 	cacheTTL        = 30 * time.Second
 	cacheMaxEntries = 10000
 
+	uploadReadyProbeWindow         = 2 * time.Second
+	uploadReadyProbeTimeoutPerHead = 750 * time.Millisecond
+	uploadReadyProbeInitialBackoff = 50 * time.Millisecond
+	uploadReadyProbeMaxBackoff     = 400 * time.Millisecond
+
 	storageModeMetadataKey = "airstore-mode"
 	defaultStorageFileMode = uint32(syscall.S_IFREG | 0644)
 	defaultStorageDirMode  = uint32(syscall.S_IFDIR | 0755)
@@ -878,6 +883,7 @@ func (s *StorageService) NotifyUploadComplete(ctx context.Context, path string) 
 	}
 
 	key := s.key(path)
+	s.waitForUploadReadiness(ctx, bucket, key)
 	s.invalidate(bucket, key)
 	s.emitHookEvent(ctx, hooks.EventFsCreate, path)
 	return nil
@@ -895,20 +901,83 @@ func (s *StorageService) readFile(ctx context.Context, bucket, key string) ([]by
 }
 
 func (s *StorageService) invalidate(bucket, key string) {
-	// Invalidate locally
-	s.cache.invalidate(bucket, key)
+	// Invalidate locally (file + parent listing scope).
+	keys := []string{key}
 	if idx := strings.LastIndex(key, "/"); idx > 0 {
-		s.cache.invalidate(bucket, key[:idx])
+		keys = append(keys, key[:idx])
 	} else {
-		s.cache.invalidate(bucket, "")
+		keys = append(keys, "")
+	}
+	for _, k := range keys {
+		s.cache.invalidate(bucket, k)
 	}
 
 	// Broadcast to other replicas
 	if s.eventBus != nil {
-		s.eventBus.Emit(common.Event{
-			Type: common.EventCacheInvalidate,
-			Data: map[string]any{"key": bucket + ":" + key},
+		sent := make(map[string]struct{}, len(keys))
+		for _, k := range keys {
+			cacheKey := bucket + ":" + k
+			if _, ok := sent[cacheKey]; ok {
+				continue
+			}
+			sent[cacheKey] = struct{}{}
+			s.eventBus.Emit(common.Event{
+				Type: common.EventCacheInvalidate,
+				Data: map[string]any{"key": cacheKey},
+			})
+		}
+	}
+}
+
+func (s *StorageService) waitForUploadReadiness(ctx context.Context, bucket, key string) {
+	if bucket == "" || key == "" || s.client == nil || s.client.S3Client() == nil {
+		return
+	}
+
+	deadline := time.Now().Add(uploadReadyProbeWindow)
+	backoff := uploadReadyProbeInitialBackoff
+	for {
+		probeCtx, cancel := context.WithTimeout(ctx, uploadReadyProbeTimeoutPerHead)
+		_, err := s.client.S3Client().HeadObject(probeCtx, &s3.HeadObjectInput{
+			Bucket: &bucket,
+			Key:    &key,
 		})
+		cancel()
+
+		if err == nil {
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			log.Debug().
+				Err(err).
+				Str("bucket", bucket).
+				Str("key", key).
+				Msg("upload-complete readiness probe timed out; continuing")
+			return
+		}
+
+		sleep := backoff
+		remaining := time.Until(deadline)
+		if sleep > remaining {
+			sleep = remaining
+		}
+		timer := time.NewTimer(sleep)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+
+		if backoff < uploadReadyProbeMaxBackoff {
+			backoff *= 2
+			if backoff > uploadReadyProbeMaxBackoff {
+				backoff = uploadReadyProbeMaxBackoff
+			}
+		}
 	}
 }
 

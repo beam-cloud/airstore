@@ -147,6 +147,9 @@ func (c *MetadataCache) Set(p string, info *FileInfo) {
 // SetWithChildren caches directory with enriched child metadata
 func (c *MetadataCache) SetWithChildren(p string, children []DirEntry, childMeta map[string]*FileInfo) {
 	c.negative.Remove(p)
+	for _, child := range children {
+		c.negative.Remove(path.Join(p, child.Name))
+	}
 	c.entries.Add(p, &CacheEntry{
 		Info:      NewDirInfo(PathIno(p)),
 		Children:  children,

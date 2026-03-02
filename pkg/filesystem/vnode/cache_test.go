@@ -66,6 +66,24 @@ func TestMetadataCache_SetWithChildren(t *testing.T) {
 	}
 }
 
+func TestMetadataCache_SetWithChildrenClearsChildNegativeEntries(t *testing.T) {
+	c := NewMetadataCache()
+	childPath := "/dir/file1"
+	c.SetNegative(childPath)
+
+	children := []DirEntry{
+		{Name: "file1", Mode: 0644, Ino: 1},
+	}
+	childMeta := map[string]*FileInfo{
+		"file1": {Ino: 1, Size: 10},
+	}
+	c.SetWithChildren("/dir", children, childMeta)
+
+	if c.IsNegative(childPath) {
+		t.Fatalf("expected child negative cache entry %s to be cleared", childPath)
+	}
+}
+
 func TestMetadataCache_Invalidate(t *testing.T) {
 	c := NewMetadataCache()
 

@@ -102,6 +102,9 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.RunExecution
 
 	sandboxID := fmt.Sprintf("task-%s", task.ExternalId)
 	env := w.sandboxManager.copyTaskEnv(task)
+	if claudeRunner, ok := w.sandboxManager.ResolveRunner(task, env).(*ClaudeCodeRunner); ok {
+		claudeRunner.injectEnv(env)
+	}
 	taskMountSource := w.sandboxManager.mountFilesystem(ctx, task)
 	cfg := w.sandboxManager.buildTaskSandboxConfig(task, []string{"sleep", "infinity"}, env, taskMountSource)
 

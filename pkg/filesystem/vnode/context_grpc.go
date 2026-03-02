@@ -92,12 +92,13 @@ func (c *ContextVNodeGRPC) Getattr(path string) (*FileInfo, error) {
 		return info, nil
 	}
 
-	// Check caches
-	if c.cache.IsNegative(path) {
-		return nil, fs.ErrNotExist
-	}
+	// Prefer positive metadata cache so fresh readdir/stat data can heal
+	// stale negative entries immediately.
 	if info := c.cache.GetInfo(path); info != nil {
 		return info, nil
+	}
+	if c.cache.IsNegative(path) {
+		return nil, fs.ErrNotExist
 	}
 
 	// RPC to backend for actual files/subdirectories
@@ -208,12 +209,12 @@ func (c *ContextVNodeGRPC) Open(path string, flags int) (FileHandle, error) {
 
 // openExisting opens an existing file and caches its metadata.
 func (c *ContextVNodeGRPC) openExisting(path string) (FileHandle, error) {
-	// Check cache first to avoid unnecessary RPC
-	if c.cache.IsNegative(path) {
-		return 0, fs.ErrNotExist
-	}
+	// Prefer positive cache so fresh metadata wins over stale negatives.
 	if c.cache.GetInfo(path) != nil {
 		return c.allocHandle(path), nil
+	}
+	if c.cache.IsNegative(path) {
+		return 0, fs.ErrNotExist
 	}
 
 	// Cache miss - verify file exists

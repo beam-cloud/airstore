@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
+	"github.com/beam-cloud/airstore/pkg/clients"
+	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/hooks"
 	"github.com/beam-cloud/airstore/pkg/types"
 )
@@ -116,5 +118,64 @@ func TestStorageService_EmitHookMoveEvents_PrefixRenameRoots(t *testing.T) {
 	}
 	if got := events[1]["path"]; got != "/pdfs" {
 		t.Fatalf("expected destination root path /pdfs, got %v", got)
+	}
+}
+
+func TestStorageService_InvalidateBroadcastsChildAndParentKeys(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	bus := common.NewEventBus(ctx, nil)
+	seen := map[string]int{}
+	var mu sync.Mutex
+	bus.On(common.EventCacheInvalidate, func(e common.Event) {
+		key, _ := e.Data["key"].(string)
+		if key == "" {
+			return
+		}
+		mu.Lock()
+		seen[key]++
+		mu.Unlock()
+	})
+
+	svc := &StorageService{
+		cache:    newMetadataCache(cacheTTL, cacheMaxEntries),
+		eventBus: bus,
+	}
+	svc.invalidate("bucket-a", "pdfs/file.pdf")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 2 {
+		t.Fatalf("expected exactly 2 broadcast keys, got %d (%v)", len(seen), seen)
+	}
+	if seen["bucket-a:pdfs/file.pdf"] != 1 {
+		t.Fatalf("expected child invalidation key, got map: %v", seen)
+	}
+	if seen["bucket-a:pdfs"] != 1 {
+		t.Fatalf("expected parent invalidation key, got map: %v", seen)
+	}
+}
+
+func TestStorageService_NotifyUploadComplete_EmitsHookEvent(t *testing.T) {
+	emitter := &captureHookEmitter{}
+
+	svc := &StorageService{
+		client:     &clients.StorageClient{}, // nil internal S3 client -> readiness probe no-ops
+		cache:      newMetadataCache(cacheTTL, cacheMaxEntries),
+		hookStream: emitter,
+	}
+
+	err := svc.NotifyUploadComplete(workspaceCtx(124, "ws-124"), "/pdfs/file.pdf")
+	if err != nil {
+		t.Fatalf("notify upload complete returned error: %v", err)
+	}
+
+	events := emitter.snapshot()
+	if len(events) != 1 {
+		t.Fatalf("expected 1 hook event, got %d", len(events))
+	}
+	if got := events[0]["event"]; got != hooks.EventFsCreate {
+		t.Fatalf("expected event %q, got %v", hooks.EventFsCreate, got)
 	}
 }
