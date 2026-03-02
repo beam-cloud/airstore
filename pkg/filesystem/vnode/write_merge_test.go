@@ -83,7 +83,7 @@ func TestCompactNulls_ShellScript(t *testing.T) {
 	if bytes.Contains(compacted, []byte{0}) {
 		t.Fatal("compacted data still contains NULL bytes")
 	}
-	want := "# Snapshot file\n# Functions\nshopt -u autocd\n"
+	want := "# Snapshot file\n\n# Functions\nshopt -u autocd\n"
 	if string(compacted) != want {
 		t.Fatalf("compacted = %q, want %q", string(compacted), want)
 	}
@@ -165,6 +165,20 @@ func TestMergeWriteBuffer_SnapshotPattern(t *testing.T) {
 		if !bytes.Contains(compacted, []byte(section)) {
 			t.Fatalf("missing section %q in compacted output", section)
 		}
+	}
+}
+
+func TestCompactNulls_PreservesStructure(t *testing.T) {
+	// NULL gap inside an if/fi block must become a newline, not be deleted,
+	// so that "then" and "fi" remain on separate lines.
+	data := []byte("#!/bin/bash\nif true; then\n\x00\x00\x00\x00\x00  echo ok\nfi\n")
+	_, compacted := compactNulls(0, data)
+	if bytes.Contains(compacted, []byte{0}) {
+		t.Fatal("compacted data still contains NULL bytes")
+	}
+	want := "#!/bin/bash\nif true; then\n\n  echo ok\nfi\n"
+	if string(compacted) != want {
+		t.Fatalf("compacted = %q, want %q", string(compacted), want)
 	}
 }
 
