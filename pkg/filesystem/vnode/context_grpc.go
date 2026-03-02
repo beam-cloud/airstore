@@ -336,10 +336,19 @@ func (c *ContextVNodeGRPC) Write(path string, buf []byte, off int64, fh FileHand
 		return len(buf), nil
 	}
 
-	// Buffer overflow or non-contiguous: flush old buffer synchronously.
-	// We use synchronous writeRange here (not Enqueue) because the asyncWriter
-	// stores only ONE (offset, data) pair per path — sequential Enqueue calls
-	// at different offsets would clobber each other.
+	// Non-contiguous or buffer overflow. Try to merge both ranges in memory
+	// so the file reaches S3 as a single PutObject. Flushing a partial write
+	// at offset A followed by a gateway merge-write at offset B fills the gap
+	// [A+len(first), B) with NULLs when B > A+len(first).
+	merged := mergeWriteBuffer(state.writeOff, state.writeBuf, off, buf)
+	if merged != nil && len(merged.data) <= writeBufferMax {
+		state.writeOff = merged.off
+		state.writeBuf = merged.data
+		state.mu.Unlock()
+		return len(buf), nil
+	}
+
+	// Combined range too large: flush old buffer synchronously then start fresh.
 	data := append([]byte(nil), state.writeBuf...)
 	writeOff := state.writeOff
 	state.writeBuf = nil
@@ -813,6 +822,7 @@ func (c *ContextVNodeGRPC) flushWriteBuffer(path string, state *handleState) {
 	state.writeBuf = nil
 	state.mu.Unlock()
 
+	writeOff, data = compactNulls(writeOff, data)
 	c.asyncWriter.Enqueue(path, writeOff, data)
 }
 
