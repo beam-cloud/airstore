@@ -71,12 +71,6 @@ type VirtualNode interface {
 	Fsync(path string, fh FileHandle) error
 }
 
-// HandleCounter is an optional interface for VNodes that track open file handles.
-// Used by memory monitoring to report handle counts.
-type HandleCounter interface {
-	OpenHandleCount() int
-}
-
 // ReadOnlyBase returns ErrReadOnly for all write operations.
 // Embed this in VNodes that don't support writes (e.g., /tools/).
 type ReadOnlyBase struct{}

@@ -275,6 +275,20 @@ func (s *WorkerService) recoverOrphanedRun(ctx context.Context, run *types.Agent
 	}
 
 	errorMsg := fmt.Sprintf("orphaned run recovered automatically: %s", reason)
+
+	// Close the interaction state so the UI doesn't show a stale
+	// "waiting for input" / "working" indicator for a dead session.
+	if s.terminalIO != nil {
+		if err := s.terminalIO.SetRunInteraction(
+			ctx, run.WorkspaceID, run.ID,
+			types.RunInteractionStateClosed, "",
+			5*time.Minute,
+		); err != nil {
+			log.Warn().Err(err).Str("run_id", run.ID).
+				Msg("worker recovery loop: failed to close interaction state for orphaned run")
+		}
+	}
+
 	if s.taskQueue != nil {
 		if err := s.taskQueue.Fail(ctx, run.ID, fmt.Errorf("%s", errorMsg)); err != nil {
 			log.Warn().

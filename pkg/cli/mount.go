@@ -26,6 +26,11 @@ import (
 	"google.golang.org/grpc/keepalive"
 )
 
+const (
+	grpcKeepaliveTime    = 60 * time.Second
+	grpcKeepaliveTimeout = 10 * time.Second
+)
+
 var (
 	mountVerbose     bool
 	mountDaemon      bool
@@ -165,8 +170,8 @@ func runMount(cmd *cobra.Command, args []string) error {
 		dialOpts := []grpc.DialOption{
 			grpc.WithTransportCredentials(TransportCredentials(effectiveGateway)),
 			grpc.WithKeepaliveParams(keepalive.ClientParameters{
-				Time:                60 * time.Second,
-				Timeout:             10 * time.Second,
+				Time:                grpcKeepaliveTime,
+				Timeout:             grpcKeepaliveTimeout,
 				PermitWithoutStream: true,
 			}),
 		}
