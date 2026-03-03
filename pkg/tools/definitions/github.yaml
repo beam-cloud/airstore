@@ -308,3 +308,38 @@ commands:
         short: -b
         flag: --body
         description: "Issue body/description"
+
+  clone-url:
+    description: >
+      Get an authenticated clone URL for a one-time git clone or push.
+      The credential helper handles auth for repos already cloned, so
+      normal git push/pull does not need this. For initial clones or
+      one-off pushes, use the URL directly without persisting it as a
+      remote. Example:
+        url=$(/workspace/tools/github clone-url owner repo | jq -r .url)
+        git push "$url" HEAD:refs/heads/my-branch
+    params:
+      - name: owner
+        type: string
+        required: true
+        position: 0
+        description: "Repository owner"
+
+      - name: repo
+        type: string
+        required: true
+        position: 1
+        description: "Repository name"
+
+  git-credentials:
+    internal: true
+    description: >
+      Returns the OAuth access token for use by git credential helpers.
+    params: []
+
+  git-config:
+    internal: true
+    description: >
+      Outputs a [user] gitconfig section with the authenticated GitHub
+      user's name and email.
+    params: []

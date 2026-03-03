@@ -22,7 +22,10 @@ const (
 	githubCmdCreatePR    = "create-pr"
 	githubCmdListIssues  = "list-issues"
 	githubCmdGetIssue    = "get-issue"
-	githubCmdCreateIssue = "create-issue"
+	githubCmdCreateIssue    = "create-issue"
+	githubCmdCloneURL       = "clone-url"
+	githubCmdGitCredentials = "git-credentials"
+	githubCmdGitConfig      = "git-config"
 )
 
 type GitHubClient struct {
@@ -43,6 +46,12 @@ func (g *GitHubClient) Name() types.IntegrationName {
 }
 
 func (g *GitHubClient) Execute(ctx context.Context, command string, args map[string]any, creds *types.IntegrationCredentials, stdout, _ io.Writer) error {
+	// git-credentials and git-config produce raw (non-JSON) output for
+	// direct consumption by git credential helpers and gitconfig files.
+	if command == githubCmdGitCredentials || command == githubCmdGitConfig {
+		return g.executeGitCommand(ctx, command, creds, stdout)
+	}
+
 	return ExecuteOAuthCommand(ctx, "github", command, args, creds, map[string]OAuthCommandHandler{
 		githubCmdListRepos: func(ctx context.Context, token string, args map[string]any) (any, error) {
 			owner := GetStringArg(args, "owner", "")
@@ -158,6 +167,15 @@ func (g *GitHubClient) Execute(ctx context.Context, command string, args map[str
 			}
 			body := GetStringArg(args, "body", "")
 			return g.createIssue(ctx, token, required["owner"], required["repo"], required["title"], body)
+		},
+		githubCmdCloneURL: func(ctx context.Context, token string, args map[string]any) (any, error) {
+			required, err := RequireStringArgs(args, "owner", "repo")
+			if err != nil {
+				return nil, err
+			}
+			return map[string]string{
+				"url": fmt.Sprintf("https://x-access-token:%s@github.com/%s/%s.git", token, required["owner"], required["repo"]),
+			}, nil
 		},
 	}, stdout)
 }
@@ -505,6 +523,53 @@ func (g *GitHubClient) createIssue(ctx context.Context, token, owner, repo, titl
 		"url":    getString(result, "html_url"),
 		"state":  getString(result, "state"),
 	}, nil
+}
+
+// executeGitCommand handles git-credentials and git-config commands that
+// produce raw (non-JSON) output for direct consumption by git.
+func (g *GitHubClient) executeGitCommand(ctx context.Context, command string, creds *types.IntegrationCredentials, stdout io.Writer) error {
+	token, err := RequireAccessToken("github", creds, stdout)
+	if err != nil {
+		if err == errToolResponseWritten {
+			return nil
+		}
+		return err
+	}
+	switch command {
+	case githubCmdGitCredentials:
+		_, err = fmt.Fprint(stdout, token)
+		return err
+	case githubCmdGitConfig:
+		return g.writeGitConfig(ctx, token, stdout)
+	default:
+		return fmt.Errorf("unknown git command: %s", command)
+	}
+}
+
+// writeGitConfig fetches the authenticated GitHub user's profile and writes
+// a [user] gitconfig section so commits are attributed to the real person.
+func (g *GitHubClient) writeGitConfig(ctx context.Context, token string, stdout io.Writer) error {
+	var user struct {
+		ID    int    `json:"id"`
+		Name  string `json:"name"`
+		Email string `json:"email"`
+		Login string `json:"login"`
+	}
+	if err := g.request(ctx, token, "GET", "/user", &user); err != nil {
+		return err
+	}
+
+	name := user.Name
+	if name == "" {
+		name = user.Login
+	}
+	email := user.Email
+	if email == "" {
+		email = fmt.Sprintf("%d+%s@users.noreply.github.com", user.ID, user.Login)
+	}
+
+	_, err := fmt.Fprintf(stdout, "[user]\n\tname = %s\n\temail = %s\n", name, email)
+	return err
 }
 
 // Response types

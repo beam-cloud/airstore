@@ -45,6 +45,9 @@ func (p *SchemaProvider) Help() string {
 	// Commands list
 	sb.WriteString("Commands:\n")
 	for name, cmd := range p.schema.Commands {
+		if cmd.Internal {
+			continue
+		}
 		sb.WriteString(fmt.Sprintf("  %-16s %s\n", name, cmd.Description))
 	}
 

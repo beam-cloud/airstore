@@ -120,6 +120,11 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.RunExecution
 		return nil, fmt.Errorf("failed to start interactive sandbox: %w", err)
 	}
 
+	// Configure git inside the sandbox: writes credential helper, gitconfig,
+	// and resolves the real GitHub user's name/email via the github tool.
+	// Runs synchronously so the config is ready before the first turn.
+	setupGitInsideSandbox(ctx, w.sandboxManager.runtime, sandboxID, env)
+
 	w.sandboxManager.publishStatus(ctx, task.ExternalId, types.RunExecutionStatusRunning, nil, "")
 	w.setRunInteractionState(ctx, task, types.RunInteractionStateWorking)
 
