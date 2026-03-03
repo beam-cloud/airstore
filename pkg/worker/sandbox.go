@@ -985,12 +985,13 @@ func (m *SandboxManager) generateSpec(cfg types.SandboxConfig, rootfsPath string
 		fmt.Sprintf("WORKSPACE_ID=%s", cfg.WorkspaceID),
 	)
 
-	// Add auth token if available (for filesystem to authenticate with gateway)
-	// Only add worker's auth token if task doesn't have its own member token
-	if m.authToken != "" && cfg.Env["AIRSTORE_TOKEN"] == "" {
-		spec.Process.Env = append(spec.Process.Env,
-			fmt.Sprintf("AIRSTORE_TOKEN=%s", m.authToken),
-		)
+	// Inject auth token: prefer the task's workspace-scoped member token
+	// (which resolves to the correct workspace/member for integrations like
+	// GitHub), falling back to the worker's cluster-level token.
+	if token := strings.TrimSpace(cfg.Env["AIRSTORE_TOKEN"]); token != "" {
+		spec.Process.Env = append(spec.Process.Env, fmt.Sprintf("AIRSTORE_TOKEN=%s", token))
+	} else if m.authToken != "" {
+		spec.Process.Env = append(spec.Process.Env, fmt.Sprintf("AIRSTORE_TOKEN=%s", m.authToken))
 	}
 
 	// Add filesystem mount (bind mount from FUSE mount)
@@ -1158,6 +1159,10 @@ func (m *SandboxManager) copyTaskEnv(task types.RunExecution) map[string]string 
 }
 
 func (m *SandboxManager) buildTaskSandboxConfig(task types.RunExecution, entrypoint []string, env map[string]string, mountSource string) types.SandboxConfig {
+	if task.MemberToken != "" {
+		env["AIRSTORE_TOKEN"] = task.MemberToken
+	}
+
 	runtimeType := types.ContainerRuntimeGvisor
 	if task.RuntimeType != nil && *task.RuntimeType == types.ContainerRuntimeRunc.String() {
 		runtimeType = types.ContainerRuntimeRunc
@@ -1169,6 +1174,13 @@ func (m *SandboxManager) buildTaskSandboxConfig(task types.RunExecution, entrypo
 	}
 	if workspaceAccess == "none" {
 		mountSource = ""
+	}
+
+	// Point git at the VFS-hosted config (credential helper + user identity).
+	// Actual files are written by setupGitFiles; resolveGitIdentity
+	// populates the [user] section after the sandbox starts.
+	for k, v := range gitEnvVars() {
+		env[k] = v
 	}
 
 	networkMode := "bridge"

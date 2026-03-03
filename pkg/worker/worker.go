@@ -399,7 +399,7 @@ func (w *Worker) executeTask(task types.RunExecution) {
 	taskCtx, taskCancel := context.WithCancel(w.ctx)
 	defer taskCancel()
 
-	if task.TimeoutMs != nil && *task.TimeoutMs > 0 {
+	if !task.IsInteractive() && task.TimeoutMs != nil && *task.TimeoutMs > 0 {
 		timeoutCtx, timeoutCancel := context.WithTimeout(taskCtx, time.Duration(*task.TimeoutMs)*time.Millisecond)
 		taskCtx = timeoutCtx
 		defer timeoutCancel()
