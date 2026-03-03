@@ -15,6 +15,50 @@ package type_builder
 
 import baml "github.com/boundaryml/baml/engine/language_client_go/pkg"
 
+type ConfluenceQueryResultClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *ConfluenceQueryResultClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *ConfluenceQueryResultClassView) PropertyCql_query() (ClassPropertyView, error) {
+	return t.inner.Property("cql_query")
+}
+
+func (t *ConfluenceQueryResultClassView) PropertyContent_type() (ClassPropertyView, error) {
+	return t.inner.Property("content_type")
+}
+
+func (t *ConfluenceQueryResultClassView) PropertyLimit() (ClassPropertyView, error) {
+	return t.inner.Property("limit")
+}
+
+func (t *ConfluenceQueryResultClassView) PropertyFilename_format() (ClassPropertyView, error) {
+	return t.inner.Property("filename_format")
+}
+
+func (t *TypeBuilder) ConfluenceQueryResult() (*ConfluenceQueryResultClassView, error) {
+	bld, err := t.inner.Class("ConfluenceQueryResult")
+	if err != nil {
+		return nil, err
+	}
+	return &ConfluenceQueryResultClassView{inner: bld}, nil
+}
+
+func (t *ConfluenceQueryResultClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
 type GDriveQueryResultClassView struct {
 	inner baml.ClassBuilder
 }

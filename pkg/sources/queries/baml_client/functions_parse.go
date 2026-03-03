@@ -72,7 +72,7 @@ func (*parse) EvaluateGmailQueryResults(text string, opts ...CallOptionFunc) (ty
 	return casted, nil
 }
 
-// / Parse version of InferGDriveQuery (Takes in string and returns types.GDriveQueryResult)
+// / Parse version of InferConfluenceQuery (Takes in string and returns types.ConfluenceQueryResult)
 func (*parse) InferConfluenceQuery(text string, opts ...CallOptionFunc) (types.ConfluenceQueryResult, error) {
 
 	var callOpts callOption
@@ -103,6 +103,8 @@ func (*parse) InferConfluenceQuery(text string, opts ...CallOptionFunc) (types.C
 
 	encoded, err := args.Encode()
 	if err != nil {
+		// This should never happen. if it does, please file an issue at https://github.com/boundaryml/baml/issues
+		// and include the type of the args you're passing in.
 		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: InferConfluenceQuery: %w", err)
 		panic(wrapped_err)
 	}
@@ -117,6 +119,7 @@ func (*parse) InferConfluenceQuery(text string, opts ...CallOptionFunc) (types.C
 	return casted, nil
 }
 
+// / Parse version of InferGDriveQuery (Takes in string and returns types.GDriveQueryResult)
 func (*parse) InferGDriveQuery(text string, opts ...CallOptionFunc) (types.GDriveQueryResult, error) {
 
 	var callOpts callOption

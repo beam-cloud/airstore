@@ -2661,6 +2661,8 @@ func defaultResourceType(integration string) string {
 		return "channels"
 	case "linear":
 		return "teams"
+	case "confluence":
+		return "spaces"
 	default:
 		return ""
 	}

@@ -21,9 +21,16 @@ var atlassianEndpoint = oauth2.Endpoint{
 
 var atlassianIntegrationScopes = map[string][]string{
 	"confluence": {
+		// Classic scopes (v1 API)
 		"read:confluence-content.all",
 		"read:confluence-space.summary",
 		"read:confluence-content.summary",
+		// Granular scopes (v2 API)
+		"read:page:confluence",
+		"read:space:confluence",
+		// CQL search
+		"search:confluence",
+		// Refresh token
 		"offline_access",
 	},
 }

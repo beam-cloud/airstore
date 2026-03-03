@@ -62,6 +62,24 @@ func (c *ConfluenceQueryResult) Decode(holder *cffi.CFFIValueClass, typeMap baml
 
 }
 
+func (c ConfluenceQueryResult) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["cql_query"] = c.Cql_query
+
+	fields["content_type"] = c.Content_type
+
+	fields["limit"] = c.Limit
+
+	fields["filename_format"] = c.Filename_format
+
+	return baml.EncodeClass("ConfluenceQueryResult", fields, nil)
+}
+
+func (c ConfluenceQueryResult) BamlTypeName() string {
+	return "ConfluenceQueryResult"
+}
+
 type GDriveQueryResult struct {
 	Gdrive_query    *string `json:"gdrive_query"`
 	Limit           *int64  `json:"limit"`
