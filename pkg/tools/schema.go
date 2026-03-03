@@ -21,6 +21,7 @@ type ToolSchema struct {
 type CommandSchema struct {
 	Description string         `yaml:"description"`
 	Params      []*ParamSchema `yaml:"params,omitempty"`
+	Internal    bool           `yaml:"internal,omitempty"`
 }
 
 // ParamSchema defines a parameter for a command

@@ -550,6 +550,7 @@ func (g *GitHubClient) executeGitCommand(ctx context.Context, command string, cr
 // a [user] gitconfig section so commits are attributed to the real person.
 func (g *GitHubClient) writeGitConfig(ctx context.Context, token string, stdout io.Writer) error {
 	var user struct {
+		ID    int    `json:"id"`
 		Name  string `json:"name"`
 		Email string `json:"email"`
 		Login string `json:"login"`
@@ -564,7 +565,7 @@ func (g *GitHubClient) writeGitConfig(ctx context.Context, token string, stdout 
 	}
 	email := user.Email
 	if email == "" {
-		email = user.Login + "@users.noreply.github.com"
+		email = fmt.Sprintf("%d+%s@users.noreply.github.com", user.ID, user.Login)
 	}
 
 	_, err := fmt.Fprintf(stdout, "[user]\n\tname = %s\n\temail = %s\n", name, email)

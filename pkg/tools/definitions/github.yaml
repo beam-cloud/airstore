@@ -311,12 +311,13 @@ commands:
 
   clone-url:
     description: >
-      Get an authenticated clone URL for git push/pull.
-      Use the returned URL as a git remote to push branches
-      before creating PRs. Example:
+      Get an authenticated clone URL for a one-time git clone or push.
+      The credential helper handles auth for repos already cloned, so
+      normal git push/pull does not need this. For initial clones or
+      one-off pushes, use the URL directly without persisting it as a
+      remote. Example:
         url=$(/workspace/tools/github clone-url owner repo | jq -r .url)
-        git remote set-url origin "$url"
-        git push origin my-branch
+        git push "$url" HEAD:refs/heads/my-branch
     params:
       - name: owner
         type: string
@@ -331,16 +332,14 @@ commands:
         description: "Repository name"
 
   git-credentials:
+    internal: true
     description: >
       Returns the OAuth access token for use by git credential helpers.
-      Called automatically by the sandbox credential helper — you do not
-      need to call this directly.
     params: []
 
   git-config:
+    internal: true
     description: >
       Outputs a [user] gitconfig section with the authenticated GitHub
-      user's name and email. Called automatically during sandbox setup
-      so git commits are attributed to the real user — you do not need
-      to call this directly.
+      user's name and email.
     params: []

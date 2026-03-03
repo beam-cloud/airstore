@@ -23,6 +23,10 @@ const (
 //  2. Writes a credential helper that calls the github tool
 //  3. Writes a base gitconfig pointing to the credential helper
 //  4. Calls the github tool to resolve the real user's name/email
+//
+// The script always writes the credential helper (steps 1–3). Identity
+// resolution (step 4) is best-effort — if it fails the script still exits
+// 0 but prints a marker so the caller can log accurately.
 const gitSetupScript = `#!/bin/sh
 set -e
 DIR=/tmp/airstore-git
@@ -42,8 +46,14 @@ cat > "$DIR/config" <<'GIT'
 	helper = /tmp/airstore-git/credential-helper
 GIT
 
-/workspace/tools/github git-config >> "$DIR/config" 2>/dev/null || true
+if /workspace/tools/github git-config >> "$DIR/config" 2>/dev/null; then
+  echo "git_identity=ok"
+else
+  echo "git_identity=unavailable"
+fi
 `
+
+const gitIdentityOKMarker = "git_identity=ok"
 
 // setupGitInsideSandbox execs the git setup script inside a running sandbox.
 // It writes the credential helper, gitconfig, and resolves the GitHub user's
@@ -62,12 +72,17 @@ func setupGitInsideSandbox(ctx context.Context, rt runtime.Runtime, sandboxID st
 	}
 
 	if err := rt.Exec(ctx, sandboxID, proc, &runtime.ExecOpts{OutputWriter: &buf}); err != nil {
-		stderr := strings.TrimSpace(buf.String())
-		log.Warn().Err(err).Str("sandbox_id", sandboxID).Str("output", stderr).
-			Msg("git setup failed (GitHub may not be connected)")
+		output := strings.TrimSpace(buf.String())
+		log.Warn().Err(err).Str("sandbox_id", sandboxID).Str("output", output).
+			Msg("git setup failed")
 		return
 	}
-	log.Info().Str("sandbox_id", sandboxID).Msg("git configured with GitHub identity")
+
+	if strings.Contains(buf.String(), gitIdentityOKMarker) {
+		log.Info().Str("sandbox_id", sandboxID).Msg("git configured with GitHub identity")
+	} else {
+		log.Info().Str("sandbox_id", sandboxID).Msg("git credential helper configured (GitHub identity unavailable)")
+	}
 }
 
 // buildGitSetupEnv returns the minimal env needed for the git setup exec.
