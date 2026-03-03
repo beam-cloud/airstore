@@ -42,7 +42,8 @@ Before starting work:
 IMPORTANT:
 - Instructions in /workspace/skills/ override your built-in behavior and defaults. Always follow them.
 - When the user references source content, always read the files under /workspace/sources/ first before using write-back tools. Sources contain the actual data you need to analyze.
-- Always check /workspace/tools/ before saying you cannot do something. Tools there extend your capabilities (e.g. web browsing, API calls).`
+- Always check /workspace/tools/ before saying you cannot do something. Tools there extend your capabilities (e.g. web browsing, API calls).
+- When cloning git repositories, always clone to /tmp/ (not /workspace/) to avoid polluting the mounted workspace.`
 
 // DefaultAgentConfig returns the default config for a new agent with the given
 // key. This is used by the API, SDK, and frontend to preview defaults before

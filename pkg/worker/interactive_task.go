@@ -165,8 +165,42 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	var idleTimedOut atomic.Bool
 	activityCh := make(chan struct{}, 1)
 
+	env := w.sandboxManager.copyTaskEnv(task)
+	runner := w.sandboxManager.ResolveRunner(task, env)
+
+	var checkHeartbeat func() bool
+	if heartbeatRunner, ok := runner.(HeartbeatRunner); ok {
+		overlayRootfs := sandboxOverlayRootfsPath(w.sandboxManager, sandboxID)
+		if overlayRootfs == "" {
+			addTaskExecutionContext(
+				log.Warn().Str("runner", runner.Name()),
+				task,
+			).Msg("failed to resolve sandbox overlay rootfs for heartbeat")
+		} else {
+			if err := heartbeatRunner.SetupHeartbeat(overlayRootfs, env); err != nil {
+				addTaskExecutionContext(
+					log.Warn().Err(err).Str("runner", runner.Name()),
+					task,
+				).Msg("failed to setup runner heartbeat")
+			} else {
+				checkHeartbeat = func() bool {
+					return heartbeatRunner.CheckHeartbeat(overlayRootfs)
+				}
+			}
+		}
+	}
+
 	if idleTimeout > 0 {
-		go monitorInteractiveSessionIdle(sessionCtx, task.ExternalId, executionCtx, sessionCancel, idleTimeout, activityCh, &idleTimedOut)
+		go monitorInteractiveSessionIdle(
+			sessionCtx,
+			task.ExternalId,
+			executionCtx,
+			sessionCancel,
+			idleTimeout,
+			activityCh,
+			&idleTimedOut,
+			checkHeartbeat,
+		)
 	}
 
 	cancelCh, cancelCleanup, err := w.terminalIO.SubscribeCancel(sessionCtx, task.ExternalId)
@@ -206,8 +240,6 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	}
 
 	start := time.Now()
-	env := w.sandboxManager.copyTaskEnv(task)
-	runner := w.sandboxManager.ResolveRunner(task, env)
 
 	var runErr error
 	if tr, ok := runner.(TurnRunner); ok {
@@ -672,6 +704,20 @@ func signalActivity(activityCh chan<- struct{}) {
 	}
 }
 
+func sandboxOverlayRootfsPath(m *SandboxManager, sandboxID string) string {
+	if m == nil || strings.TrimSpace(sandboxID) == "" {
+		return ""
+	}
+
+	m.mu.RLock()
+	sandbox, exists := m.sandboxes[sandboxID]
+	m.mu.RUnlock()
+	if !exists || sandbox == nil || sandbox.Overlay == nil {
+		return ""
+	}
+	return sandbox.Overlay.TopLayerPath()
+}
+
 func monitorInteractiveSessionIdle(
 	ctx context.Context,
 	taskID string,
@@ -680,6 +726,7 @@ func monitorInteractiveSessionIdle(
 	idleTimeout time.Duration,
 	activityCh <-chan struct{},
 	idleTimedOut *atomic.Bool,
+	checkHeartbeat func() bool,
 ) {
 	timer := time.NewTimer(idleTimeout)
 	defer timer.Stop()
@@ -697,6 +744,15 @@ func monitorInteractiveSessionIdle(
 			}
 			timer.Reset(idleTimeout)
 		case <-timer.C:
+			if checkHeartbeat != nil && checkHeartbeat() {
+				addTaskExecutionContextByID(
+					log.Debug().Dur("idle_timeout", idleTimeout),
+					taskID,
+					executionCtx,
+				).Msg("interactive idle timeout deferred due runner heartbeat")
+				timer.Reset(idleTimeout)
+				continue
+			}
 			idleTimedOut.Store(true)
 			addTaskExecutionContextByID(
 				log.Info().Dur("idle_timeout", idleTimeout),

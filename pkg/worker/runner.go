@@ -3,8 +3,14 @@ package worker
 import (
 	"crypto/sha1"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/google/uuid"
@@ -22,10 +28,13 @@ const (
 
 	systemPromptModeReplace = "replace"
 
-	claudeConfigDirEnvKey = "CLAUDE_CONFIG_DIR"
-	claudeDefaultShellEnv = "/bin/bash"
-	claudeStateDirName    = ".claude"
-	claudeStateRootDir    = ".airstore/claude"
+	claudeConfigDirEnvKey       = "CLAUDE_CONFIG_DIR"
+	claudeDefaultShellEnv       = "/bin/bash"
+	claudeStateDirName          = ".claude"
+	claudeStateRootDir          = ".airstore/claude"
+	claudeHeartbeatFilePath     = "/tmp/.claude-heartbeat"
+	claudeHeartbeatTouchCommand = "touch /tmp/.claude-heartbeat"
+	claudeHeartbeatFreshFor     = 5 * time.Minute
 )
 
 // AgentExecutionRunner builds the process entrypoint for an agent task.
@@ -41,6 +50,15 @@ type AgentExecutionRunner interface {
 type TurnRunner interface {
 	AgentExecutionRunner
 	BuildTurnArgs(prompt string, env map[string]string, mode TurnArgMode) []string
+}
+
+// HeartbeatRunner extends AgentExecutionRunner with optional liveness hooks.
+// Runners can implement this when they have a runner-specific notion of
+// "active work" that should defer interactive idle timeout.
+type HeartbeatRunner interface {
+	AgentExecutionRunner
+	SetupHeartbeat(overlayRootfs string, env map[string]string) error
+	CheckHeartbeat(overlayRootfs string) bool
 }
 
 type TurnArgMode string
@@ -144,6 +162,61 @@ func (r *ClaudeCodeRunner) BuildTurnArgs(prompt string, env map[string]string, m
 	return builder.withPrompt(prompt).build()
 }
 
+func (r *ClaudeCodeRunner) SetupHeartbeat(overlayRootfs string, env map[string]string) error {
+	overlayRootfs = strings.TrimSpace(overlayRootfs)
+	if overlayRootfs == "" {
+		return fmt.Errorf("overlay rootfs path is empty")
+	}
+	if env == nil {
+		return fmt.Errorf("environment map is nil")
+	}
+
+	r.injectEnv(env)
+
+	configDir := strings.TrimSpace(env[claudeConfigDirEnvKey])
+	if configDir == "" {
+		return fmt.Errorf("%s is not configured", claudeConfigDirEnvKey)
+	}
+
+	settingsDir := overlayContainerPath(overlayRootfs, configDir)
+	if settingsDir == "" {
+		return fmt.Errorf("failed to resolve claude settings directory")
+	}
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		return fmt.Errorf("create claude settings directory: %w", err)
+	}
+
+	settingsPath := filepath.Join(settingsDir, "settings.json")
+	settings, err := readClaudeSettingsFile(settingsPath)
+	if err != nil {
+		return fmt.Errorf("read claude settings: %w", err)
+	}
+	ensureClaudeHeartbeatPostToolHook(settings)
+
+	data, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal claude settings: %w", err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(settingsPath, data, 0o644); err != nil {
+		return fmt.Errorf("write claude settings: %w", err)
+	}
+	return nil
+}
+
+func (r *ClaudeCodeRunner) CheckHeartbeat(overlayRootfs string) bool {
+	heartbeatPath := overlayContainerPath(overlayRootfs, claudeHeartbeatFilePath)
+	if heartbeatPath == "" {
+		return false
+	}
+
+	info, err := os.Stat(heartbeatPath)
+	if err != nil {
+		return false
+	}
+	return time.Since(info.ModTime()) < claudeHeartbeatFreshFor
+}
+
 func (r *ClaudeCodeRunner) injectEnv(env map[string]string) {
 	r.injectAPIKey(env, "ANTHROPIC_API_KEY", r.anthropicAPIKey, true)
 	r.injectKernelEnv(env)
@@ -156,6 +229,93 @@ func (r *ClaudeCodeRunner) injectEnv(env map[string]string) {
 		// Force a stable non-zsh shell for Claude's internal shell snapshots.
 		env["SHELL"] = claudeDefaultShellEnv
 	}
+}
+
+func overlayContainerPath(overlayRootfs, containerPath string) string {
+	overlayRootfs = strings.TrimSpace(overlayRootfs)
+	if overlayRootfs == "" {
+		return ""
+	}
+
+	cleanedContainer := path.Clean("/" + strings.TrimSpace(containerPath))
+	cleanedContainer = strings.TrimPrefix(cleanedContainer, "/")
+	if cleanedContainer == "" {
+		return overlayRootfs
+	}
+	return filepath.Join(overlayRootfs, filepath.FromSlash(cleanedContainer))
+}
+
+func readClaudeSettingsFile(filePath string) (map[string]any, error) {
+	settings := map[string]any{}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return settings, nil
+		}
+		return nil, err
+	}
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return settings, nil
+	}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return nil, err
+	}
+	return settings, nil
+}
+
+func ensureClaudeHeartbeatPostToolHook(settings map[string]any) {
+	hooks, ok := settings["hooks"].(map[string]any)
+	if !ok || hooks == nil {
+		hooks = map[string]any{}
+		settings["hooks"] = hooks
+	}
+
+	postToolUseHooks, ok := hooks["PostToolUse"].([]any)
+	if !ok {
+		postToolUseHooks = []any{}
+	}
+	if hasClaudeHeartbeatPostToolHook(postToolUseHooks) {
+		hooks["PostToolUse"] = postToolUseHooks
+		return
+	}
+
+	postToolUseHooks = append(postToolUseHooks, map[string]any{
+		"matcher": "",
+		"hooks": []any{
+			map[string]any{
+				"type":    "command",
+				"command": claudeHeartbeatTouchCommand,
+			},
+		},
+	})
+	hooks["PostToolUse"] = postToolUseHooks
+}
+
+func hasClaudeHeartbeatPostToolHook(postToolUseHooks []any) bool {
+	for _, rawEntry := range postToolUseHooks {
+		entry, ok := rawEntry.(map[string]any)
+		if !ok {
+			continue
+		}
+		rawHooks, ok := entry["hooks"].([]any)
+		if !ok {
+			continue
+		}
+		for _, rawHook := range rawHooks {
+			hook, ok := rawHook.(map[string]any)
+			if !ok {
+				continue
+			}
+			hookType, _ := hook["type"].(string)
+			hookCommand, _ := hook["command"].(string)
+			if strings.EqualFold(strings.TrimSpace(hookType), "command") &&
+				strings.TrimSpace(hookCommand) == claudeHeartbeatTouchCommand {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func defaultClaudeConfigDir(env map[string]string) string {
