@@ -51,7 +51,7 @@ func (f *TaskFactory) CreateTask(
 		normalizedEventID = fmt.Sprintf("%d", time.Now().UnixNano())
 	}
 
-	idempotencyKey := hookIdempotencyKey(hook.ExternalId, normalizedEventID, event, data)
+	idempotencyKey := hookIdempotencyKey(hook.ExternalId, normalizedEventID, data)
 	sessionID := hookSessionID(hook.ExternalId, normalizedEventID)
 	lane := hookLane(hook.ExternalId, normalizedEventID)
 	source := hookInputSource
@@ -90,13 +90,14 @@ func (f *TaskFactory) CreateTask(
 	return nil
 }
 
-func hookIdempotencyKey(hookExternalID, eventID, event string, data map[string]any) string {
+func hookIdempotencyKey(hookExternalID, eventID string, data map[string]any) string {
 	hookExternalID = strings.TrimSpace(hookExternalID)
 
-	if event == EventSourceChange {
-		if key := sourceChangeIdempotencyKey(hookExternalID, data); key != "" {
-			return compressHookIdempotencyKey(key)
-		}
+	// Source-originated events carry new_items_hash or new_items; use
+	// content-based keys so the same batch of items dedupes regardless of
+	// the stream event ID.
+	if key := sourceChangeIdempotencyKey(hookExternalID, data); key != "" {
+		return compressHookIdempotencyKey(key)
 	}
 
 	eventID = strings.TrimSpace(eventID)
@@ -192,6 +193,8 @@ func buildHookAttachment(hook *types.Hook, event string, data map[string]any) ma
 		"new_count",
 		"new_items",
 		"new_items_hash",
+		"removed_count",
+		"removed_items",
 		"path",
 		"workspace_id",
 		"old_path",

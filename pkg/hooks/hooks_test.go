@@ -616,16 +616,16 @@ func TestBuildTriggerContext_FsCreate(t *testing.T) {
 	}
 }
 
-func TestBuildTriggerContext_SourceChange(t *testing.T) {
+func TestBuildTriggerContext_SourceCreate(t *testing.T) {
 	data := map[string]any{
-		"event":        EventSourceChange,
+		"event":        EventFsCreate,
 		"workspace_id": "10",
 		"path":         "/sources/gmail/inbox",
 		"integration":  "gmail",
 		"new_count":    "3",
 		"new_items":    "msg-1, msg-2, msg-3",
 	}
-	got := buildTriggerContext(EventSourceChange, data)
+	got := buildTriggerContext(EventFsCreate, data)
 
 	if !strings.Contains(got, "Source: **gmail**") {
 		t.Errorf("expected integration in trigger, got: %s", got)
@@ -638,18 +638,40 @@ func TestBuildTriggerContext_SourceChange(t *testing.T) {
 	}
 }
 
-func TestBuildTriggerContext_SourceChangeWithoutItems(t *testing.T) {
+func TestBuildTriggerContext_SourceCreateWithoutItems(t *testing.T) {
 	data := map[string]any{
-		"event":        EventSourceChange,
+		"event":        EventFsCreate,
 		"workspace_id": "10",
 		"path":         "/sources/gmail/inbox",
 		"integration":  "gmail",
 		"new_count":    "5",
 	}
-	got := buildTriggerContext(EventSourceChange, data)
+	got := buildTriggerContext(EventFsCreate, data)
 
 	if strings.Contains(got, "New items:") {
 		t.Errorf("should not contain 'New items:' when no items, got: %s", got)
+	}
+}
+
+func TestBuildTriggerContext_SourceDelete(t *testing.T) {
+	data := map[string]any{
+		"event":          EventFsDelete,
+		"workspace_id":   "10",
+		"path":           "/sources/linear/issues",
+		"integration":    "linear",
+		"removed_count":  "2",
+		"removed_items":  "issue-1, issue-2",
+	}
+	got := buildTriggerContext(EventFsDelete, data)
+
+	if !strings.Contains(got, "Source: **linear**") {
+		t.Errorf("expected integration in trigger, got: %s", got)
+	}
+	if !strings.Contains(got, "2 item(s) were removed") {
+		t.Errorf("expected removed count in trigger, got: %s", got)
+	}
+	if !strings.Contains(got, "Removed items: issue-1, issue-2") {
+		t.Errorf("expected removed items in trigger, got: %s", got)
 	}
 }
 
@@ -727,7 +749,7 @@ Read all new emails and categorize them by urgency.
 	eng := NewEngine(store, creator, backend, reader)
 
 	data := map[string]any{
-		"event":        EventSourceChange,
+		"event":        EventFsCreate,
 		"workspace_id": "10",
 		"path":         "/sources/gmail/inbox",
 		"integration":  "gmail",
@@ -736,7 +758,7 @@ Read all new emails and categorize them by urgency.
 	}
 
 	ctx := context.Background()
-	prompt := eng.buildPrompt(ctx, hook, EventSourceChange, data)
+	prompt := eng.buildPrompt(ctx, hook, EventFsCreate, data)
 
 	// Section 1: Trigger context
 	if !strings.Contains(prompt, "2 new item(s)") {

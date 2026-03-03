@@ -89,7 +89,7 @@ func (s *SourceService) SyncViewByPath(ctx context.Context, queryPath string) ([
 	}
 
 	// Emit hook events for newly seen items (same path as poller).
-	s.emitNewResultHooks(ctx, pctx.WorkspaceId, query, results)
+	s.emitSourceHookEvents(ctx, pctx.WorkspaceId, query, results)
 
 	log.Info().Str("path", queryPath).Int("results", len(results)).Msg("source view sync complete")
 	return results, nil
@@ -120,7 +120,7 @@ func (s *SourceService) SyncViewByExternalId(ctx context.Context, externalId str
 		return nil, fmt.Errorf("query execution failed: %w", err)
 	}
 
-	newCount := s.emitNewResultHooks(ctx, pctx.WorkspaceId, query, results)
+	newCount := s.emitSourceHookEvents(ctx, pctx.WorkspaceId, query, results)
 	log.Info().Str("path", query.Path).Int("results", len(results)).Int("new", newCount).Msg("source view sync complete")
 
 	return &SyncResult{
@@ -144,13 +144,14 @@ func (s *SourceService) RefreshQuery(ctx context.Context, query *types.Filesyste
 		return err
 	}
 
-	s.emitNewResultHooks(ctx, pctx.WorkspaceId, query, results)
+	s.emitSourceHookEvents(ctx, pctx.WorkspaceId, query, results)
 	return nil
 }
 
-// emitNewResultHooks detects new results via the seen tracker and emits hook events.
+// emitSourceHookEvents detects new and removed results via the seen tracker
+// and emits fs.create / fs.delete events with source metadata attached.
 // Returns the count of newly detected results.
-func (s *SourceService) emitNewResultHooks(ctx context.Context, workspaceId uint, query *types.FilesystemQuery, results []repository.QueryResult) int {
+func (s *SourceService) emitSourceHookEvents(ctx context.Context, workspaceId uint, query *types.FilesystemQuery, results []repository.QueryResult) int {
 	if s.seenTracker == nil || s.hookStream == nil {
 		return 0
 	}
@@ -174,16 +175,16 @@ func (s *SourceService) emitNewResultHooks(ctx context.Context, workspaceId uint
 		}
 	}
 
-	newIDs, compareErr := s.seenTracker.Compare(ctx, seenKey, ids)
+	diff, compareErr := s.seenTracker.Compare(ctx, seenKey, ids)
 	if compareErr != nil {
 		log.Warn().Err(compareErr).Str("path", queryPath).Msg("seen tracker compare failed, skipping commit")
 		return 0
 	}
 
-	if len(newIDs) > 0 {
-		newItemsHash := hashHookItemIDs(newIDs)
-		newPaths := make([]string, 0, len(newIDs))
-		for _, id := range newIDs {
+	if diff != nil && len(diff.Added) > 0 {
+		newItemsHash := hashHookItemIDs(diff.Added)
+		newPaths := make([]string, 0, len(diff.Added))
+		for _, id := range diff.Added {
 			if p, ok := idToPath[id]; ok {
 				newPaths = append(newPaths, p)
 			} else {
@@ -191,28 +192,55 @@ func (s *SourceService) emitNewResultHooks(ctx context.Context, workspaceId uint
 			}
 		}
 		if emitErr := s.hookStream.Emit(ctx, map[string]any{
-			"event":          hooks.EventSourceChange,
+			"event":          hooks.EventFsCreate,
 			"workspace_id":   fmt.Sprintf("%d", workspaceId),
 			"path":           queryPath,
 			"integration":    query.Integration,
-			"new_count":      fmt.Sprintf("%d", len(newIDs)),
+			"new_count":      fmt.Sprintf("%d", len(diff.Added)),
 			"new_items":      strings.Join(newPaths, ", "),
 			"new_items_hash": newItemsHash,
 		}); emitErr != nil {
-			log.Error().Err(emitErr).Str("path", queryPath).Int("new_results", len(newIDs)).
-				Msg("failed to emit source change event, will retry next poll")
-			return 0 // don't commit — retry on next poll
+			log.Error().Err(emitErr).Str("path", queryPath).Int("new_results", len(diff.Added)).
+				Msg("failed to emit source fs.create event, will retry next poll")
+			return 0
 		}
 		log.Info().
 			Str("path", queryPath).Str("integration", query.Integration).
-			Int("new_results", len(newIDs)).
-			Msg("source change detected, hook event emitted")
+			Int("new_results", len(diff.Added)).
+			Msg("source items created, fs.create event emitted")
+	}
+
+	if diff != nil && len(diff.Removed) > 0 {
+		removedPaths := make([]string, 0, len(diff.Removed))
+		for _, id := range diff.Removed {
+			if p, ok := idToPath[id]; ok {
+				removedPaths = append(removedPaths, p)
+			} else {
+				removedPaths = append(removedPaths, id)
+			}
+		}
+		if emitErr := s.hookStream.Emit(ctx, map[string]any{
+			"event":          hooks.EventFsDelete,
+			"workspace_id":   fmt.Sprintf("%d", workspaceId),
+			"path":           queryPath,
+			"integration":    query.Integration,
+			"removed_count":  fmt.Sprintf("%d", len(diff.Removed)),
+			"removed_items":  strings.Join(removedPaths, ", "),
+		}); emitErr != nil {
+			log.Error().Err(emitErr).Str("path", queryPath).Int("removed_results", len(diff.Removed)).
+				Msg("failed to emit source fs.delete event, will retry next poll")
+			return 0
+		}
 	}
 
 	if err := s.seenTracker.Commit(ctx, seenKey, ids); err != nil {
 		log.Warn().Err(err).Str("path", queryPath).Msg("seen tracker commit failed, next poll may re-fire")
 	}
-	return len(newIDs)
+	newCount := 0
+	if diff != nil {
+		newCount = len(diff.Added)
+	}
+	return newCount
 }
 
 func hashHookItemIDs(ids []string) string {

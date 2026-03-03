@@ -17,10 +17,9 @@ import (
 )
 
 const (
-	EventFsCreate     = "fs.create"
-	EventFsWrite      = "fs.write"
-	EventFsDelete     = "fs.delete"
-	EventSourceChange = "source.change"
+	EventFsCreate = "fs.create"
+	EventFsWrite  = "fs.write"
+	EventFsDelete = "fs.delete"
 )
 
 const (
@@ -201,36 +200,44 @@ func buildTriggerContext(event string, data map[string]any) string {
 	absPath := workspaceAbsolutePath(mapString(data, "path"))
 	switch event {
 	case EventFsCreate:
+		if integration := strings.TrimSpace(mapString(data, "integration")); integration != "" {
+			return buildSourceTrigger("created", absPath, integration, data)
+		}
 		return "A new file was created at `" + absPath + "`.\nRead it from: `" + absPath + "`"
 
 	case EventFsWrite:
 		return "A file was modified at `" + absPath + "`."
 
 	case EventFsDelete:
+		if integration := strings.TrimSpace(mapString(data, "integration")); integration != "" {
+			return buildSourceTrigger("removed", absPath, integration, data)
+		}
 		return "A file was deleted at `" + absPath + "`."
-
-	case EventSourceChange:
-		return buildSourceChangeTrigger(
-			absPath,
-			strings.TrimSpace(mapString(data, "integration")),
-			strings.TrimSpace(mapString(data, "new_count")),
-			strings.TrimSpace(mapString(data, "new_items")),
-		)
 
 	default:
 		return ""
 	}
 }
 
-func buildSourceChangeTrigger(absPath, integration, newCount, newItems string) string {
-	lines := make([]string, 0, 2)
-	if integration != "" {
-		lines = append(lines, "Source: **"+integration+"**")
+func buildSourceTrigger(verb, absPath, integration string, data map[string]any) string {
+	lines := make([]string, 0, 3)
+	lines = append(lines, "Source: **"+integration+"**")
+
+	if verb == "created" {
+		count := strings.TrimSpace(mapString(data, "new_count"))
+		lines = append(lines, count+" new item(s) appeared in `"+absPath+"/`.")
+		trigger := strings.Join(lines, "\n")
+		if items := strings.TrimSpace(mapString(data, "new_items")); items != "" {
+			return trigger + "\n\nNew items: " + items
+		}
+		return trigger
 	}
-	lines = append(lines, newCount+" new item(s) appeared in `"+absPath+"/`.")
+
+	count := strings.TrimSpace(mapString(data, "removed_count"))
+	lines = append(lines, count+" item(s) were removed from `"+absPath+"/`.")
 	trigger := strings.Join(lines, "\n")
-	if newItems != "" {
-		return trigger + "\n\nNew items: " + newItems
+	if items := strings.TrimSpace(mapString(data, "removed_items")); items != "" {
+		return trigger + "\n\nRemoved items: " + items
 	}
 	return trigger
 }

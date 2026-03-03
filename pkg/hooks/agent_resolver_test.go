@@ -435,12 +435,12 @@ func TestServiceDeleteThenRecreate_RefiresSeenSnapshot(t *testing.T) {
 	if err := tracker.Commit(ctx, seenKey, ids); err != nil {
 		t.Fatalf("commit baseline: %v", err)
 	}
-	newIDs, err := tracker.Compare(ctx, seenKey, ids)
+	result, err := tracker.Compare(ctx, seenKey, ids)
 	if err != nil {
 		t.Fatalf("compare baseline: %v", err)
 	}
-	if len(newIDs) != 0 {
-		t.Fatalf("expected no new IDs before delete/recreate, got %v", newIDs)
+	if len(result.Added) != 0 {
+		t.Fatalf("expected no new IDs before delete/recreate, got %v", result.Added)
 	}
 
 	if err := svc.Delete(ctx, first.ExternalId); err != nil {
@@ -461,11 +461,11 @@ func TestServiceDeleteThenRecreate_RefiresSeenSnapshot(t *testing.T) {
 		t.Fatalf("recreate hook: %v", err)
 	}
 
-	newIDs, err = tracker.Compare(ctx, seenKey, ids)
+	result, err = tracker.Compare(ctx, seenKey, ids)
 	if err != nil {
 		t.Fatalf("compare after recreate: %v", err)
 	}
-	if len(newIDs) != len(ids) {
-		t.Fatalf("expected %d new IDs after recreate, got %d (%v)", len(ids), len(newIDs), newIDs)
+	if len(result.Added) != len(ids) {
+		t.Fatalf("expected %d new IDs after recreate, got %d (%v)", len(ids), len(result.Added), result.Added)
 	}
 }
