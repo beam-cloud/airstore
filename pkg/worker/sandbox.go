@@ -61,11 +61,17 @@ type Sandbox struct {
 	Rootfs  func() // cleanup function
 	Output  io.Writer
 	Flush   func()
+
+	// done is closed when the Run() goroutine exits. Delete waits on this
+	// so it doesn't race with the runtime supervisor process.
+	done chan struct{}
 }
 
 const (
-	sandboxKillTimeout   = 2 * time.Second
-	sandboxDeleteTimeout = 2 * time.Second
+	sandboxKillTimeout       = 2 * time.Second
+	sandboxDeleteTimeout     = 2 * time.Second
+	sandboxRunDrainTimeout   = 5 * time.Second
+	sandboxForceDrainTimeout = 2 * time.Second
 )
 
 // Config for creating a SandboxManager.
@@ -503,6 +509,7 @@ func (m *SandboxManager) Start(sandboxID string) error {
 	// Create a cancellable context for this sandbox
 	sandboxCtx, cancel := context.WithCancel(m.ctx)
 	sandbox.Cancel = cancel
+	sandbox.done = make(chan struct{})
 	sandbox.State.Status = types.SandboxStatusCreating
 	m.mu.Unlock()
 
@@ -519,20 +526,21 @@ func (m *SandboxManager) Start(sandboxID string) error {
 
 	// Start the container in a goroutine
 	started := make(chan int, 1)
+	doneCh := sandbox.done
 	runDone := make(chan struct {
 		exitCode int
 		err      error
 	}, 1)
 	go func() {
+		defer close(doneCh)
+
 		opts := &runtime.RunOpts{
 			Started:      started,
-			OutputWriter: outputWriter, // Capture stdout/stderr
+			OutputWriter: outputWriter,
 		}
 
-		// Run the container (blocks until exit)
 		exitCode, err := m.runtime.Run(sandboxCtx, sandboxID, sandbox.Bundle, opts)
 
-		// Wait for PID notification
 		select {
 		case pid := <-started:
 			m.mu.Lock()
@@ -545,24 +553,35 @@ func (m *SandboxManager) Start(sandboxID string) error {
 		default:
 		}
 
-		// Update state on exit
+		expectedTeardownExit := isSandboxTeardownError(err)
+
 		m.mu.Lock()
 		if s, ok := m.sandboxes[sandboxID]; ok {
 			s.State.Status = types.SandboxStatusStopped
 			s.State.ExitCode = exitCode
 			s.State.FinishedAt = time.Now()
-			if err != nil {
+			if err != nil && !expectedTeardownExit {
 				s.State.Error = err.Error()
 				s.State.Status = types.SandboxStatusFailed
+			} else {
+				s.State.Error = ""
 			}
 		}
 		m.mu.Unlock()
 
-		log.Info().
-			Str("sandbox_id", sandboxID).
-			Int("exit_code", exitCode).
-			Err(err).
-			Msg("sandbox exited")
+		if err != nil && expectedTeardownExit {
+			log.Debug().
+				Str("sandbox_id", sandboxID).
+				Int("exit_code", exitCode).
+				Err(err).
+				Msg("sandbox exited during teardown")
+		} else {
+			log.Info().
+				Str("sandbox_id", sandboxID).
+				Int("exit_code", exitCode).
+				Err(err).
+				Msg("sandbox exited")
+		}
 		runDone <- struct {
 			exitCode int
 			err      error
@@ -669,11 +688,12 @@ func isInteractiveBootstrapEntrypoint(entrypoint []string) bool {
 }
 
 // Stop stops a running sandbox by signalling container processes.
-// Non-force mode sends SIGTERM and preserves normal runtime teardown.
-// Force mode sends SIGKILL and immediately cancels the sandbox context.
+// Non-force sends SIGTERM; force sends SIGKILL. Neither cancels the
+// sandbox context — that is handled by Delete after waiting for the
+// Run() goroutine to drain.
 func (m *SandboxManager) Stop(sandboxID string, force bool) error {
 	m.mu.RLock()
-	sandbox, exists := m.sandboxes[sandboxID]
+	_, exists := m.sandboxes[sandboxID]
 	m.mu.RUnlock()
 
 	if !exists {
@@ -702,11 +722,6 @@ func (m *SandboxManager) Stop(sandboxID string, force bool) error {
 		}
 	}
 
-	if force && sandbox.Cancel != nil {
-		// Ensure runsc wrapper teardown is not blocked by slow runtime kill paths.
-		sandbox.Cancel()
-	}
-
 	return nil
 }
 
@@ -728,7 +743,35 @@ func isContainerAlreadyStopped(err error) bool {
 		strings.Contains(msg, "does not exist")
 }
 
-// Delete removes a sandbox and cleans up resources
+func isSandboxTeardownError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if exitErr.ExitCode() == 137 {
+			return true
+		}
+		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
+			return status.Signaled() && status.Signal() == syscall.SIGKILL
+		}
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "signal: killed") ||
+		strings.Contains(msg, "context canceled") ||
+		strings.Contains(msg, "context deadline exceeded")
+}
+
+// Delete removes a sandbox and cleans up resources.
+//
+// The teardown sequence avoids racing with the runtime supervisor:
+//  1. Stop container processes (SIGTERM or SIGKILL depending on force)
+//  2. Wait for the Run() goroutine to finish so runsc exits cleanly
+//  3. Only cancel the sandbox context as a fallback if Run() doesn't drain
+//  4. runtime.Delete to clean up any residual state
 func (m *SandboxManager) Delete(sandboxID string, force bool) error {
 	m.mu.Lock()
 	sandbox, exists := m.sandboxes[sandboxID]
@@ -743,27 +786,53 @@ func (m *SandboxManager) Delete(sandboxID string, force bool) error {
 		Bool("force", force).
 		Msg("deleting sandbox")
 
-	// Stop if running
+	// Step 1: Stop container processes if still running.
 	if sandbox.State.Status == types.SandboxStatusRunning {
 		if err := m.Stop(sandboxID, force); err != nil && !force {
 			return fmt.Errorf("failed to stop sandbox: %w", err)
 		}
 	}
 
-	// Cancel sandbox context to tear down the runsc process and its
-	// goroutines. This is done after Stop() so that runsc has a chance
-	// to exit naturally and report the real container exit code.
+	// Step 2: Wait for the Run() goroutine to exit so the runtime supervisor
+	// (runsc) can finish its own cleanup before we try to delete.
+	if sandbox.done != nil {
+		drainTimeout := sandboxRunDrainTimeout
+		if force {
+			drainTimeout = sandboxForceDrainTimeout
+		}
+		select {
+		case <-sandbox.done:
+		case <-time.After(drainTimeout):
+			log.Warn().
+				Str("sandbox_id", sandboxID).
+				Dur("timeout", drainTimeout).
+				Msg("timed out waiting for sandbox run goroutine; forcing context cancel")
+			if sandbox.Cancel != nil {
+				sandbox.Cancel()
+			}
+			select {
+			case <-sandbox.done:
+			case <-time.After(sandboxForceDrainTimeout):
+			}
+		}
+	} else if sandbox.Cancel != nil {
+		sandbox.Cancel()
+	}
+
+	// Step 3: Ensure context is cancelled for any remaining goroutines.
 	if sandbox.Cancel != nil {
 		sandbox.Cancel()
 	}
 
-	// Delete from runtime with bounded wait to avoid hanging cleanup paths.
+	// Step 4: Ask the runtime to clean up residual container state.
+	// The Run() goroutine's deferred delete should have handled this already,
+	// but we do it explicitly to be safe.
 	opts := &runtime.DeleteOpts{Force: force}
 	deleteCtx, deleteCancel := context.WithTimeout(m.ctx, sandboxDeleteTimeout)
 	defer deleteCancel()
 	if err := m.runtime.Delete(deleteCtx, sandboxID, opts); err != nil {
-		if isContainerAlreadyStopped(err) {
-			log.Debug().Err(err).Str("sandbox_id", sandboxID).Msg("runtime delete skipped; sandbox already gone")
+		if isContainerAlreadyStopped(err) || isSandboxTeardownError(err) {
+			log.Debug().Err(err).Str("sandbox_id", sandboxID).Msg("runtime delete skipped; container already cleaned up")
 		} else {
 			log.Warn().Err(err).Str("sandbox_id", sandboxID).Msg("runtime delete failed")
 		}

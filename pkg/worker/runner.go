@@ -3,8 +3,13 @@ package worker
 import (
 	"crypto/sha1"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/google/uuid"
@@ -22,10 +27,12 @@ const (
 
 	systemPromptModeReplace = "replace"
 
-	claudeConfigDirEnvKey = "CLAUDE_CONFIG_DIR"
-	claudeDefaultShellEnv = "/bin/bash"
-	claudeStateDirName    = ".claude"
-	claudeStateRootDir    = ".airstore/claude"
+	claudeConfigDirEnvKey  = "CLAUDE_CONFIG_DIR"
+	claudeDefaultShellEnv  = "/bin/bash"
+	claudeStateDirName     = ".claude"
+	claudeStateRootDir     = ".airstore/claude"
+	claudeHeartbeatFile    = ".heartbeat"
+	claudeHeartbeatFreshFor = 5 * time.Minute
 )
 
 // AgentExecutionRunner builds the process entrypoint for an agent task.
@@ -41,6 +48,22 @@ type AgentExecutionRunner interface {
 type TurnRunner interface {
 	AgentExecutionRunner
 	BuildTurnArgs(prompt string, env map[string]string, mode TurnArgMode) []string
+}
+
+// HeartbeatRunner extends AgentExecutionRunner with liveness tracking.
+// Runners install hooks inside the sandbox that touch a heartbeat file
+// on each lifecycle event (tool use, stop). The worker also touches the
+// file on observed output as a belt-and-suspenders fallback.
+type HeartbeatRunner interface {
+	AgentExecutionRunner
+	// SetupHeartbeat writes hook configuration to the VFS so the runner
+	// touches a heartbeat file on each tool use / stop. mountSource is
+	// the host-side VFS FUSE mount path. env is the task env used to
+	// derive CLAUDE_CONFIG_DIR. Returns the host-side heartbeat path.
+	SetupHeartbeat(mountSource string, env map[string]string) (string, error)
+	// CheckHeartbeat returns true if the heartbeat file at the given
+	// host-side path was recently modified.
+	CheckHeartbeat(heartbeatPath string) bool
 }
 
 type TurnArgMode string
@@ -144,6 +167,73 @@ func (r *ClaudeCodeRunner) BuildTurnArgs(prompt string, env map[string]string, m
 	return builder.withPrompt(prompt).build()
 }
 
+func (r *ClaudeCodeRunner) SetupHeartbeat(mountSource string, env map[string]string) (string, error) {
+	if strings.TrimSpace(mountSource) == "" {
+		return "", fmt.Errorf("empty mount source")
+	}
+
+	configDir := strings.TrimSpace(env[claudeConfigDirEnvKey])
+	if configDir == "" {
+		configDir = defaultClaudeConfigDir(env)
+	}
+
+	// Heartbeat file sits next to the .claude config dir inside .airstore/claude/<scope>/.
+	heartbeatContainerPath := path.Join(path.Dir(configDir), claudeHeartbeatFile)
+
+	hostConfigDir := vfsHostPath(mountSource, configDir)
+	hostHeartbeatPath := vfsHostPath(mountSource, heartbeatContainerPath)
+
+	if err := os.MkdirAll(hostConfigDir, 0o755); err != nil {
+		return "", fmt.Errorf("mkdir %s: %w", hostConfigDir, err)
+	}
+
+	settingsPath := filepath.Join(hostConfigDir, "settings.json")
+	if err := os.WriteFile(settingsPath, buildHeartbeatHookSettings(heartbeatContainerPath), 0o644); err != nil {
+		return "", fmt.Errorf("write %s: %w", settingsPath, err)
+	}
+
+	if f, err := os.Create(hostHeartbeatPath); err == nil {
+		f.Close()
+	}
+
+	return hostHeartbeatPath, nil
+}
+
+func (r *ClaudeCodeRunner) CheckHeartbeat(heartbeatPath string) bool {
+	if heartbeatPath == "" {
+		return false
+	}
+	info, err := os.Stat(heartbeatPath)
+	if err != nil {
+		return false
+	}
+	return time.Since(info.ModTime()) < claudeHeartbeatFreshFor
+}
+
+func buildHeartbeatHookSettings(heartbeatPath string) []byte {
+	type hookEntry struct {
+		Type    string `json:"type"`
+		Command string `json:"command"`
+	}
+	type matcherGroup struct {
+		Hooks []hookEntry `json:"hooks"`
+	}
+	type settings struct {
+		Hooks map[string][]matcherGroup `json:"hooks"`
+	}
+
+	cmd := "date +%s > " + heartbeatPath
+	group := matcherGroup{Hooks: []hookEntry{{Type: "command", Command: cmd}}}
+
+	s := settings{Hooks: map[string][]matcherGroup{
+		"PostToolUse":  {group},
+		"Stop":         {group},
+		"Notification": {group},
+	}}
+	b, _ := json.MarshalIndent(s, "", "  ")
+	return b
+}
+
 func (r *ClaudeCodeRunner) injectEnv(env map[string]string) {
 	r.injectAPIKey(env, "ANTHROPIC_API_KEY", r.anthropicAPIKey, true)
 	r.injectKernelEnv(env)
@@ -156,6 +246,17 @@ func (r *ClaudeCodeRunner) injectEnv(env map[string]string) {
 		// Force a stable non-zsh shell for Claude's internal shell snapshots.
 		env["SHELL"] = claudeDefaultShellEnv
 	}
+}
+
+// vfsHostPath maps a container path (under /workspace) to the
+// corresponding host-side path on the VFS FUSE mount.
+func vfsHostPath(mountSource, containerPath string) string {
+	rel := strings.TrimPrefix(containerPath, types.ContainerWorkDir)
+	rel = strings.TrimPrefix(rel, "/")
+	if rel == "" {
+		return mountSource
+	}
+	return filepath.Join(mountSource, filepath.FromSlash(rel))
 }
 
 func defaultClaudeConfigDir(env map[string]string) string {

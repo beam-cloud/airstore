@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,8 +22,7 @@ const DefaultBetweenTurnsTimeout = 60 * time.Second
 // unmounting the VFS. This gives the async writer time to flush pending
 // writes (e.g. Claude session state) to object storage so the next
 // resume finds a complete conversation history.
-const mountFlushGracePeriod = 3 * time.Second
-
+const mountFlushGracePeriod = 10 * time.Second
 const sessionLeaseTTL = 30 * time.Second
 const sessionLeaseRenewInterval = 10 * time.Second
 const runInteractionTTL = 30 * time.Minute
@@ -123,14 +123,16 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.RunExecution
 	w.sandboxManager.publishStatus(ctx, task.ExternalId, types.RunExecutionStatusRunning, nil, "")
 	w.setRunInteractionState(ctx, task, types.RunInteractionStateWorking)
 
-	result := w.runInteractiveSession(ctx, task, sandboxID)
+	result := w.runInteractiveSession(ctx, task, sandboxID, taskMountSource)
 	w.setRunInteractionState(ctx, task, types.RunInteractionStateClosed)
 	releaseSessionLease()
 
 	if err := w.sandboxManager.Delete(sandboxID, true); err != nil {
 		addTaskExecutionContext(log.Warn().Err(err), task).Msg("interactive sandbox delete failed during cleanup")
 	}
+
 	time.Sleep(mountFlushGracePeriod)
+
 	w.sandboxManager.cleanupMount(task.ExternalId)
 	addTaskExecutionContext(log.Info(), task).Msg("interactive sandbox cleanup complete")
 
@@ -155,7 +157,7 @@ func (w *Worker) heartbeatSessionLease(ctx context.Context, workspaceID uint, se
 	}
 }
 
-func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecution, sandboxID string) *types.RunExecutionResult {
+func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecution, sandboxID string, mountSource string) *types.RunExecutionResult {
 	sessionCtx, sessionCancel := context.WithCancel(ctx)
 	defer sessionCancel()
 
@@ -165,28 +167,47 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	var idleTimedOut atomic.Bool
 	activityCh := make(chan struct{}, 1)
 
-	if idleTimeout > 0 {
-		go monitorInteractiveSessionIdle(sessionCtx, task.ExternalId, executionCtx, sessionCancel, idleTimeout, activityCh, &idleTimedOut)
-	}
+	env := w.sandboxManager.copyTaskEnv(task)
+	runner := w.sandboxManager.ResolveRunner(task, env)
 
-	cancelCh, cancelCleanup, err := w.terminalIO.SubscribeCancel(sessionCtx, task.ExternalId)
-	if err != nil {
-		return interactiveErrorResult(task.ExternalId, err)
-	}
-	defer cancelCleanup()
-
-	go func() {
-		select {
-		case <-sessionCtx.Done():
-		case _, ok := <-cancelCh:
-			if !ok {
-				return
+	var checkHeartbeat func() bool
+	var touchHeartbeat func()
+	if heartbeatRunner, ok := runner.(HeartbeatRunner); ok && mountSource != "" {
+		heartbeatPath, err := heartbeatRunner.SetupHeartbeat(mountSource, env)
+		if err != nil {
+			addTaskExecutionContext(log.Warn().Err(err).Str("runner", runner.Name()), task).
+				Msg("failed to install heartbeat hooks")
+		} else {
+			checkHeartbeat = func() bool {
+				return heartbeatRunner.CheckHeartbeat(heartbeatPath)
 			}
-			addTaskExecutionContext(log.Info(), task).Msg("received cancel signal for interactive task")
-			sessionCancel()
-			w.sandboxManager.Stop(sandboxID, true)
+			touchHeartbeat = func() {
+				_ = os.WriteFile(heartbeatPath, []byte(time.Now().Format(time.RFC3339Nano)), 0o644)
+			}
+			addTaskExecutionContext(log.Info().Str("runner", runner.Name()).Str("heartbeat", heartbeatPath), task).
+				Msg("heartbeat enabled via VFS")
 		}
-	}()
+	}
+
+	if idleTimeout > 0 {
+		go monitorInteractiveSessionIdle(
+			sessionCtx,
+			task.ExternalId,
+			executionCtx,
+			sessionCancel,
+			idleTimeout,
+			activityCh,
+			&idleTimedOut,
+			checkHeartbeat,
+		)
+	}
+
+	cancelCleanup := w.watchTaskCancellation(sessionCtx, task, func() {
+		addTaskExecutionContext(log.Info(), task).Msg("received cancel signal for interactive task")
+		sessionCancel()
+		w.sandboxManager.Stop(sandboxID, true)
+	})
+	defer cancelCleanup()
 
 	interactiveMirror := NewTaskOutput(
 		task.ExternalId,
@@ -201,13 +222,16 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 		taskID:       task.ExternalId,
 		terminalIO:   w.terminalIO,
 		executionCtx: executionCtx,
-		onActivity:   func() { signalActivity(activityCh) },
-		mirror:       interactiveMirror,
+		onActivity: func() {
+			signalActivity(activityCh)
+			if touchHeartbeat != nil {
+				touchHeartbeat()
+			}
+		},
+		mirror: interactiveMirror,
 	}
 
 	start := time.Now()
-	env := w.sandboxManager.copyTaskEnv(task)
-	runner := w.sandboxManager.ResolveRunner(task, env)
 
 	var runErr error
 	if tr, ok := runner.(TurnRunner); ok {
@@ -563,14 +587,6 @@ func interactiveResult(err error, idleTimedOut bool) (int, string, types.RunExec
 	return -1, err.Error(), types.RunExecutionStatusFailed
 }
 
-func interactiveErrorResult(taskID string, err error) *types.RunExecutionResult {
-	return &types.RunExecutionResult{
-		ID:       taskID,
-		ExitCode: -1,
-		Error:    err.Error(),
-	}
-}
-
 type terminalOutputWriter struct {
 	ctx          context.Context
 	taskID       string
@@ -680,6 +696,7 @@ func monitorInteractiveSessionIdle(
 	idleTimeout time.Duration,
 	activityCh <-chan struct{},
 	idleTimedOut *atomic.Bool,
+	checkHeartbeat func() bool,
 ) {
 	timer := time.NewTimer(idleTimeout)
 	defer timer.Stop()
@@ -697,6 +714,15 @@ func monitorInteractiveSessionIdle(
 			}
 			timer.Reset(idleTimeout)
 		case <-timer.C:
+			if checkHeartbeat != nil && checkHeartbeat() {
+				addTaskExecutionContextByID(
+					log.Debug().Dur("idle_timeout", idleTimeout),
+					taskID,
+					executionCtx,
+				).Msg("interactive idle timeout deferred due runner heartbeat")
+				timer.Reset(idleTimeout)
+				continue
+			}
 			idleTimedOut.Store(true)
 			addTaskExecutionContextByID(
 				log.Info().Dur("idle_timeout", idleTimeout),

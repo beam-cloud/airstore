@@ -186,6 +186,52 @@ commands:
         flag: --comments
         description: "JSON array of inline diff comments: [{\"path\":\"file.go\",\"line\":10,\"body\":\"Fix this\"}]"
 
+  create-pr:
+    description: Create a pull request
+    params:
+      - name: owner
+        type: string
+        required: true
+        position: 0
+        description: "Repository owner"
+
+      - name: repo
+        type: string
+        required: true
+        position: 1
+        description: "Repository name"
+
+      - name: title
+        type: string
+        required: true
+        position: 2
+        description: "Pull request title"
+
+      - name: head
+        type: string
+        required: true
+        short: -H
+        flag: --head
+        description: "Branch containing changes (e.g. feature-branch)"
+
+      - name: base
+        type: string
+        required: true
+        short: -b
+        flag: --base
+        description: "Branch to merge into (e.g. main)"
+
+      - name: body
+        type: string
+        short: -d
+        flag: --body
+        description: "Pull request description"
+
+      - name: draft
+        type: bool
+        flag: --draft
+        description: "Create as draft PR"
+
   list-issues:
     description: List issues for a repository
     params:

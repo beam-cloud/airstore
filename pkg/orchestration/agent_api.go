@@ -302,26 +302,40 @@ func (a *AgentAPI) CancelRun(ctx context.Context, workspaceID uint, runID string
 		return err
 	}
 
+	// Cancel active execution(s) before marking the run terminal so the worker
+	// still sees an in-flight execution and receives an immediate cancel signal.
+	cancelled := false
+	if a.runtime != nil && a.runtime.backend != nil {
+		var cancelErr error
+		cancelled, cancelErr = a.runtime.cancelInFlightRunExecutions(ctx, run.ID)
+		if cancelErr != nil {
+			cancelled = false
+		}
+	}
+
+	if !cancelled {
+		attempts, _ := a.backend.ListAgentRunAttempts(ctx, run.ID)
+		for _, attempt := range attempts {
+			if attempt == nil || attempt.ExecutionID == nil {
+				continue
+			}
+			executionID := strings.TrimSpace(*attempt.ExecutionID)
+			if executionID == "" {
+				continue
+			}
+			_ = a.backend.CancelRunExecution(ctx, executionID)
+			if a.runtime != nil && a.runtime.terminalIO != nil {
+				_ = a.runtime.terminalIO.PublishCancel(ctx, executionID)
+			}
+		}
+	}
+
 	now := time.Now()
 	errMsg := "cancelled by user"
 	if err := a.backend.UpdateAgentRunLifecycle(ctx, run.ID, types.AgentRunStatusCancelled, nil, &now, &errMsg); err != nil {
 		return err
 	}
 
-	// Prefer runtime-backed cancellation so in-flight executions also receive
-	// cancel signals in addition to DB status updates.
-	if a.runtime != nil && a.runtime.backend != nil {
-		if _, cancelErr := a.runtime.cancelInFlightRunExecutions(ctx, run.ID); cancelErr == nil {
-			return nil
-		}
-	}
-
-	attempts, _ := a.backend.ListAgentRunAttempts(ctx, run.ID)
-	for _, attempt := range attempts {
-		if attempt.ExecutionID != nil && attempt.Status.IsInFlight() {
-			_ = a.backend.CancelRunExecution(ctx, *attempt.ExecutionID)
-		}
-	}
 	return nil
 }
 
