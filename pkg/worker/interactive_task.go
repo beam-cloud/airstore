@@ -22,8 +22,7 @@ const DefaultBetweenTurnsTimeout = 60 * time.Second
 // unmounting the VFS. This gives the async writer time to flush pending
 // writes (e.g. Claude session state) to object storage so the next
 // resume finds a complete conversation history.
-const mountFlushGracePeriod = 3 * time.Second
-
+const mountFlushGracePeriod = 10 * time.Second
 const sessionLeaseTTL = 30 * time.Second
 const sessionLeaseRenewInterval = 10 * time.Second
 const runInteractionTTL = 30 * time.Minute
