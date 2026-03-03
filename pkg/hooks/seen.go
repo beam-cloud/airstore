@@ -33,14 +33,20 @@ func NewSeenTracker(rdb *common.RedisClient) *SeenTracker {
 // removed IDs. Does NOT modify the stored set — call Commit after successful
 // processing. On first call, Added contains all current IDs and Removed is empty.
 func (t *SeenTracker) Compare(ctx context.Context, key string, current []string) (*CompareResult, error) {
-	if len(current) == 0 {
-		return nil, nil
-	}
-
 	initKey := seenInitKey(key)
 	initialized, err := t.rdb.Exists(ctx, initKey).Result()
 	if err != nil && err != redis.Nil {
 		return nil, err
+	}
+
+	// Not yet initialized: nothing to compare against.
+	if initialized == 0 {
+		if len(current) == 0 {
+			return nil, nil
+		}
+		log.Debug().Str("key", key).Int("current", len(current)).
+			Msg("seen tracker: first call, bootstrap emit")
+		return &CompareResult{Added: append([]string(nil), current...)}, nil
 	}
 
 	old, err := t.rdb.SMembers(ctx, key).Result()
@@ -48,12 +54,8 @@ func (t *SeenTracker) Compare(ctx context.Context, key string, current []string)
 		return nil, err
 	}
 
-	// First call for this key: treat current IDs as new so hooks can run on
-	// the initial observed snapshot.
-	if initialized == 0 {
-		log.Debug().Str("key", key).Int("current", len(current)).
-			Msg("seen tracker: first call, bootstrap emit")
-		return &CompareResult{Added: append([]string(nil), current...)}, nil
+	if len(current) == 0 && len(old) == 0 {
+		return nil, nil
 	}
 
 	oldSet := make(map[string]struct{}, len(old))
@@ -77,6 +79,10 @@ func (t *SeenTracker) Compare(ctx context.Context, key string, current []string)
 		if _, present := curSet[id]; !present {
 			removed = append(removed, id)
 		}
+	}
+
+	if len(added) == 0 && len(removed) == 0 {
+		return nil, nil
 	}
 
 	log.Debug().Str("key", key).Int("previous", len(old)).Int("current", len(current)).

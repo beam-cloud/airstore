@@ -228,7 +228,8 @@ func (s *SourceService) emitSourceHookEvents(ctx context.Context, workspaceId ui
 			"removed_items":  strings.Join(removedPaths, ", "),
 		}); emitErr != nil {
 			log.Error().Err(emitErr).Str("path", queryPath).Int("removed_results", len(diff.Removed)).
-				Msg("failed to emit source fs.delete event")
+				Msg("failed to emit source fs.delete event, will retry next poll")
+			return 0
 		}
 	}
 

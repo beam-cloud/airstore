@@ -57,16 +57,13 @@ func TestSeenTracker_FirstCall_ThenCommit_ThenNoChange(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	// Second call with same IDs → empty (no added, no removed)
+	// Second call with same IDs → nil (no changes)
 	result, err := tracker.Compare(ctx, key, ids)
 	if err != nil {
 		t.Fatalf("compare: %v", err)
 	}
-	if len(result.Added) != 0 {
-		t.Errorf("expected no added IDs, got %v", result.Added)
-	}
-	if len(result.Removed) != 0 {
-		t.Errorf("expected no removed IDs, got %v", result.Removed)
+	if result != nil {
+		t.Errorf("expected nil for unchanged set, got added=%v removed=%v", result.Added, result.Removed)
 	}
 }
 
@@ -118,13 +115,10 @@ func TestSeenTracker_CommitAdvancesSet(t *testing.T) {
 	// Commit with {a, b, c}
 	tracker.Commit(ctx, key, []string{"a", "b", "c"})
 
-	// Now {a, b, c} again → no changes
+	// Now {a, b, c} again → nil (no changes)
 	result, _ = tracker.Compare(ctx, key, []string{"a", "b", "c"})
-	if len(result.Added) != 0 {
-		t.Errorf("expected no added after commit, got %v", result.Added)
-	}
-	if len(result.Removed) != 0 {
-		t.Errorf("expected no removed after commit, got %v", result.Removed)
+	if result != nil {
+		t.Errorf("expected nil for unchanged set, got added=%v removed=%v", result.Added, result.Removed)
 	}
 }
 
@@ -170,6 +164,38 @@ func TestSeenTracker_EmptyCurrentReturnsNil(t *testing.T) {
 	}
 	if result != nil {
 		t.Errorf("expected nil for empty current, got %v", result)
+	}
+}
+
+func TestSeenTracker_EmptyCurrentAfterInit_ReportsAllRemoved(t *testing.T) {
+	tracker := newTestTracker(t)
+	ctx := context.Background()
+	key := "test:seen:allempty"
+
+	// Seed with {a, b, c} and commit
+	tracker.Compare(ctx, key, []string{"a", "b", "c"})
+	tracker.Commit(ctx, key, []string{"a", "b", "c"})
+
+	// Query returns empty → all items should be reported as removed
+	result, err := tracker.Compare(ctx, key, []string{})
+	if err != nil {
+		t.Fatalf("compare: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result when all items removed, got nil")
+	}
+	if len(result.Added) != 0 {
+		t.Errorf("expected no added, got %v", result.Added)
+	}
+	if len(result.Removed) != 3 {
+		t.Fatalf("expected 3 removed, got %d: %v", len(result.Removed), result.Removed)
+	}
+	got := make(map[string]bool)
+	for _, id := range result.Removed {
+		got[id] = true
+	}
+	if !got["a"] || !got["b"] || !got["c"] {
+		t.Errorf("expected a, b, c removed, got %v", result.Removed)
 	}
 }
 
@@ -303,8 +329,8 @@ func TestSeenTracker_ResetPath_ReinitializesFirstObservation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compare before reset: %v", err)
 	}
-	if len(result.Added) != 0 {
-		t.Fatalf("expected no added IDs before reset, got %v", result.Added)
+	if result != nil {
+		t.Fatalf("expected nil for unchanged set before reset, got added=%v removed=%v", result.Added, result.Removed)
 	}
 
 	// Reset should force next compare for this path to bootstrap.
