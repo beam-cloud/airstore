@@ -388,9 +388,7 @@ func strPtrMaybeQuery(raw string) *string {
 	return &trimmed
 }
 
-// ---------------------------------------------------------------------------
-// Schedule handlers (nested under /tasks/schedules)
-// ---------------------------------------------------------------------------
+// Scheduled task handlers
 
 func (g *WorkspaceTasksGroup) CreateSchedule(c echo.Context) error {
 	ctx := c.Request().Context()
