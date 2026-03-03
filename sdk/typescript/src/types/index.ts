@@ -10,3 +10,4 @@ export * from './agents.js';
 export * from './tasks.js';
 export * from './runs.js';
 export * from './channels.js';
+export * from './hooks.js';

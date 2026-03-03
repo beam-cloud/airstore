@@ -11,6 +11,7 @@ import { Agents } from './resources/agents.js';
 import { Tasks } from './resources/tasks.js';
 import { Runs } from './resources/runs.js';
 import { Channels } from './resources/channels.js';
+import { Hooks } from './resources/hooks.js';
 
 /**
  * The Airstore SDK client.
@@ -81,6 +82,8 @@ export class Airstore extends CoreClient {
   readonly runs: Runs;
   /** Send direct channel messages to agents and runs. */
   readonly channels: Channels;
+  /** Manage workspace hooks (event-triggered tasks). */
+  readonly hooks: Hooks;
 
   constructor(opts?: ClientOptions) {
     super(opts);
@@ -96,6 +99,7 @@ export class Airstore extends CoreClient {
     this.tasks = new Tasks(this);
     this.runs = new Runs(this);
     this.channels = new Channels(this);
+    this.hooks = new Hooks(this);
   }
 }
 

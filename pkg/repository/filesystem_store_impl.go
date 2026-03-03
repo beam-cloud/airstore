@@ -1140,12 +1140,12 @@ func (s *filesystemStore) CreateHook(ctx context.Context, hook *types.Hook) (*ty
 
 	agentID := nullableStringPtr(hook.AgentId)
 	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO filesystem_hooks (external_id, workspace_id, path, prompt, skill_path, skill_paths, agent_id, active, created_by_member_id, token_id, encrypted_token, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		INSERT INTO filesystem_hooks (external_id, workspace_id, path, prompt, skill_path, skill_paths, agent_id, active, event_types, created_by_member_id, token_id, encrypted_token, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		RETURNING id
 	`, hook.ExternalId, hook.WorkspaceId, hook.Path, hook.Prompt, hook.SkillPath,
 		pq.Array(hook.SkillPaths), agentID,
-		hook.Active, hook.CreatedByMemberId, hook.TokenId, hook.EncryptedToken,
+		hook.Active, pq.Array(hook.EventTypes), hook.CreatedByMemberId, hook.TokenId, hook.EncryptedToken,
 		hook.CreatedAt, hook.UpdatedAt).Scan(&hook.Id)
 	if err != nil {
 		return nil, fmt.Errorf("create hook: %w", err)
@@ -1167,14 +1167,15 @@ func (s *filesystemStore) GetHook(ctx context.Context, externalId string) (*type
 
 	h := &types.Hook{}
 	var skillPaths pq.StringArray
+	var eventTypes pq.StringArray
 	var agentID sql.NullString
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, external_id, workspace_id, path, prompt, skill_path, skill_paths, agent_id, active,
-		       created_by_member_id, token_id, encrypted_token, created_at, updated_at
+		       event_types, created_by_member_id, token_id, encrypted_token, created_at, updated_at
 		FROM filesystem_hooks WHERE external_id = $1
 	`, externalId).Scan(
 		&h.Id, &h.ExternalId, &h.WorkspaceId, &h.Path, &h.Prompt, &h.SkillPath, &skillPaths, &agentID,
-		&h.Active, &h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
+		&h.Active, &eventTypes, &h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
 		&h.CreatedAt, &h.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -1184,6 +1185,7 @@ func (s *filesystemStore) GetHook(ctx context.Context, externalId string) (*type
 		return nil, fmt.Errorf("get hook: %w", err)
 	}
 	h.SkillPaths = []string(skillPaths)
+	h.EventTypes = []string(eventTypes)
 	if agentID.Valid {
 		v := strings.TrimSpace(agentID.String)
 		if v != "" {
@@ -1208,14 +1210,15 @@ func (s *filesystemStore) GetHookById(ctx context.Context, id uint) (*types.Hook
 
 	h := &types.Hook{}
 	var skillPaths pq.StringArray
+	var eventTypes pq.StringArray
 	var agentID sql.NullString
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, external_id, workspace_id, path, prompt, skill_path, skill_paths, agent_id, active,
-		       created_by_member_id, token_id, encrypted_token, created_at, updated_at
+		       event_types, created_by_member_id, token_id, encrypted_token, created_at, updated_at
 		FROM filesystem_hooks WHERE id = $1
 	`, id).Scan(
 		&h.Id, &h.ExternalId, &h.WorkspaceId, &h.Path, &h.Prompt, &h.SkillPath, &skillPaths, &agentID,
-		&h.Active, &h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
+		&h.Active, &eventTypes, &h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
 		&h.CreatedAt, &h.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -1225,6 +1228,7 @@ func (s *filesystemStore) GetHookById(ctx context.Context, id uint) (*types.Hook
 		return nil, fmt.Errorf("get hook by id: %w", err)
 	}
 	h.SkillPaths = []string(skillPaths)
+	h.EventTypes = []string(eventTypes)
 	if agentID.Valid {
 		v := strings.TrimSpace(agentID.String)
 		if v != "" {
@@ -1253,7 +1257,7 @@ func (s *filesystemStore) ListHooks(ctx context.Context, workspaceId uint) ([]*t
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, external_id, workspace_id, path, prompt, skill_path, skill_paths, agent_id, active,
-		       created_by_member_id, token_id, encrypted_token, created_at, updated_at
+		       event_types, created_by_member_id, token_id, encrypted_token, created_at, updated_at
 		FROM filesystem_hooks WHERE workspace_id = $1
 		ORDER BY created_at
 	`, workspaceId)
@@ -1266,16 +1270,18 @@ func (s *filesystemStore) ListHooks(ctx context.Context, workspaceId uint) ([]*t
 	for rows.Next() {
 		h := &types.Hook{}
 		var skillPaths pq.StringArray
+		var eventTypes pq.StringArray
 		var agentID sql.NullString
 		err := rows.Scan(
 			&h.Id, &h.ExternalId, &h.WorkspaceId, &h.Path, &h.Prompt, &h.SkillPath, &skillPaths, &agentID,
-			&h.Active, &h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
+			&h.Active, &eventTypes, &h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
 			&h.CreatedAt, &h.UpdatedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan hook: %w", err)
 		}
 		h.SkillPaths = []string(skillPaths)
+		h.EventTypes = []string(eventTypes)
 		if agentID.Valid {
 			v := strings.TrimSpace(agentID.String)
 			if v != "" {
@@ -1299,6 +1305,7 @@ func (s *filesystemStore) UpdateHook(ctx context.Context, hook *types.Hook) erro
 			existing.Prompt = hook.Prompt
 			existing.SkillPath = hook.SkillPath
 			existing.SkillPaths = append([]string(nil), hook.SkillPaths...)
+			existing.EventTypes = append([]string(nil), hook.EventTypes...)
 			existing.AgentId = hook.AgentId
 			existing.Active = hook.Active
 			existing.UpdatedAt = hook.UpdatedAt
@@ -1309,9 +1316,9 @@ func (s *filesystemStore) UpdateHook(ctx context.Context, hook *types.Hook) erro
 	agentID := nullableStringPtr(hook.AgentId)
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE filesystem_hooks SET
-			prompt = $1, skill_path = $2, skill_paths = $3, agent_id = $4, active = $5, updated_at = $6
-		WHERE external_id = $7
-	`, hook.Prompt, hook.SkillPath, pq.Array(hook.SkillPaths), agentID, hook.Active, hook.UpdatedAt, hook.ExternalId)
+			prompt = $1, skill_path = $2, skill_paths = $3, agent_id = $4, active = $5, event_types = $6, updated_at = $7
+		WHERE external_id = $8
+	`, hook.Prompt, hook.SkillPath, pq.Array(hook.SkillPaths), agentID, hook.Active, pq.Array(hook.EventTypes), hook.UpdatedAt, hook.ExternalId)
 	if err != nil {
 		return fmt.Errorf("update hook: %w", err)
 	}

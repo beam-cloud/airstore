@@ -38,6 +38,7 @@ func (hg *HooksGroup) Create(c echo.Context) error {
 		Prompt     string             `json:"prompt"`
 		SkillPath  string             `json:"skill_path"`
 		SkillPaths []string           `json:"skill_paths"`
+		EventTypes []string           `json:"event_types"`
 		AgentName  *string            `json:"agent_name,omitempty"`
 		AgentCfg   *hookAgentConfigIn `json:"agent_config,omitempty"`
 	}
@@ -90,6 +91,7 @@ func (hg *HooksGroup) Create(c echo.Context) error {
 		req.Path,
 		req.Prompt,
 		skillPaths,
+		req.EventTypes,
 		buildAgentPatch(req.AgentName, req.AgentCfg),
 	)
 	if err != nil {
@@ -140,6 +142,7 @@ func (hg *HooksGroup) Update(c echo.Context) error {
 		Active     *bool              `json:"active,omitempty"`
 		SkillPath  *string            `json:"skill_path,omitempty"`
 		SkillPaths *[]string          `json:"skill_paths,omitempty"`
+		EventTypes *[]string          `json:"event_types,omitempty"`
 		AgentName  *string            `json:"agent_name,omitempty"`
 		AgentCfg   *hookAgentConfigIn `json:"agent_config,omitempty"`
 	}
@@ -170,6 +173,7 @@ func (hg *HooksGroup) Update(c echo.Context) error {
 		req.Prompt,
 		req.Active,
 		skillPaths,
+		req.EventTypes,
 		buildAgentPatch(req.AgentName, req.AgentCfg),
 	)
 	if err != nil {
@@ -206,6 +210,7 @@ type hookResp struct {
 	Prompt      string         `json:"prompt"`
 	SkillPath   string         `json:"skill_path"`
 	SkillPaths  []string       `json:"skill_paths"`
+	EventTypes  []string       `json:"event_types"`
 	AgentID     string         `json:"agent_id,omitempty"`
 	AgentKey    string         `json:"agent_key,omitempty"`
 	AgentName   string         `json:"agent_name,omitempty"`
@@ -225,6 +230,10 @@ func hookJSON(h *types.Hook, wsExt string) hookResp {
 	if len(skillPaths) > 0 {
 		legacySkillPath = skillPaths[0]
 	}
+	eventTypes := h.EventTypes
+	if eventTypes == nil {
+		eventTypes = []string{"fs.create"}
+	}
 	return hookResp{
 		ExternalID:  h.ExternalId,
 		WorkspaceID: wsExt,
@@ -232,6 +241,7 @@ func hookJSON(h *types.Hook, wsExt string) hookResp {
 		Prompt:      h.Prompt,
 		SkillPath:   legacySkillPath,
 		SkillPaths:  skillPaths,
+		EventTypes:  eventTypes,
 		AgentID:     agentID,
 		AgentKey:    h.AgentKey,
 		AgentName:   h.AgentName,

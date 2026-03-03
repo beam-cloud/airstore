@@ -174,3 +174,34 @@ export interface TaskEventBatch {
   next_log_cursor: number;
   next_run_event_cursor: number;
 }
+
+// --- Scheduled Tasks (cron) ---
+
+export interface Schedule {
+  external_id: string;
+  workspace_id: string;
+  agent_id: string;
+  agent_name?: string;
+  cron_expr: string;
+  prompt: string;
+  skill_paths: string[];
+  active: boolean;
+  next_run_at: string;
+  last_run_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ScheduleCreateParams {
+  agentId: string;
+  cronExpr: string;
+  prompt: string;
+  skillPaths?: string[];
+}
+
+export interface ScheduleUpdateParams {
+  cronExpr?: string;
+  prompt?: string;
+  skillPaths?: string[];
+  active?: boolean;
+}

@@ -23,6 +23,7 @@ type Hook struct {
 	AgentName         string         `json:"agent_name,omitempty" db:"-"`
 	AgentConfig       map[string]any `json:"agent_config,omitempty" db:"-"`
 	Active            bool           `json:"active" db:"active"`
+	EventTypes        []string       `json:"event_types,omitempty" db:"event_types"`
 	CreatedByMemberId *uint          `json:"created_by_member_id,omitempty" db:"created_by_member_id"`
 	TokenId           *uint          `json:"-" db:"token_id"`
 	EncryptedToken    []byte         `json:"-" db:"encrypted_token"`

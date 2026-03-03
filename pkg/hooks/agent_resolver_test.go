@@ -239,6 +239,7 @@ func TestServiceCreate_AttachesAgentAndSkillPaths(t *testing.T) {
 		"triage new emails",
 		[]string{"/skills/email-triage", "/skills/email-triage", "  "},
 		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("create hook: %v", err)
@@ -268,6 +269,7 @@ func TestServiceDelete_DeletesAssociatedAgent(t *testing.T) {
 		"token",
 		"/sources/notion/updates",
 		"review updates",
+		nil,
 		nil,
 		nil,
 	)
@@ -313,6 +315,7 @@ func TestServiceDelete_DoesNotDeleteSharedAgent(t *testing.T) {
 		"token",
 		"/sources/github/repo-a",
 		"review repo a",
+		nil,
 		nil,
 		nil,
 	)
@@ -362,6 +365,7 @@ func TestServiceCreate_FailedCreateDoesNotMutateExistingAgent(t *testing.T) {
 		"/sources/github/repo-prs",
 		"review prs",
 		nil,
+		nil,
 		&AgentConfigPatch{Name: strPtr("Original Hook Agent")},
 	)
 	if err != nil {
@@ -379,6 +383,7 @@ func TestServiceCreate_FailedCreateDoesNotMutateExistingAgent(t *testing.T) {
 		"token",
 		"/sources/github/repo-prs",
 		"review prs again",
+		nil,
 		nil,
 		&AgentConfigPatch{Name: strPtr("Mutated Hook Agent")},
 	)
@@ -418,6 +423,7 @@ func TestServiceDeleteThenRecreate_RefiresSeenSnapshot(t *testing.T) {
 		"review prs",
 		nil,
 		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("create first hook: %v", err)
@@ -448,6 +454,7 @@ func TestServiceDeleteThenRecreate_RefiresSeenSnapshot(t *testing.T) {
 		"token",
 		path,
 		"review prs again",
+		nil,
 		nil,
 		nil,
 	); err != nil {

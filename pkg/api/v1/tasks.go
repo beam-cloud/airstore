@@ -1,26 +1,32 @@
 package apiv1
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/orchestration"
+	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/labstack/echo/v4"
+	"github.com/rs/zerolog/log"
 )
 
 type WorkspaceTasksGroup struct {
 	routerGroup *echo.Group
+	backend     repository.BackendRepository
 	agents      *orchestration.AgentAPI
 }
 
-func NewWorkspaceTasksGroup(routerGroup *echo.Group, agents *orchestration.AgentAPI) *WorkspaceTasksGroup {
+func NewWorkspaceTasksGroup(routerGroup *echo.Group, backend repository.BackendRepository, agents *orchestration.AgentAPI) *WorkspaceTasksGroup {
 	g := &WorkspaceTasksGroup{
 		routerGroup: routerGroup,
+		backend:     backend,
 		agents:      agents,
 	}
 	g.registerRoutes()
@@ -35,6 +41,13 @@ func (g *WorkspaceTasksGroup) registerRoutes() {
 	g.routerGroup.GET("/:task_id/stream", g.StreamTaskEvents)
 	g.routerGroup.POST("/:task_id/cancel", g.CancelTask)
 	g.routerGroup.POST("/:task_id/archive", g.ArchiveTask)
+
+	sched := g.routerGroup.Group("/schedules")
+	sched.POST("", g.CreateSchedule)
+	sched.GET("", g.ListSchedules)
+	sched.GET("/:id", g.GetSchedule)
+	sched.PATCH("/:id", g.UpdateSchedule)
+	sched.DELETE("/:id", g.DeleteSchedule)
 }
 
 func (g *WorkspaceTasksGroup) CreateTask(c echo.Context) error {
@@ -373,4 +386,136 @@ func strPtrMaybeQuery(raw string) *string {
 		return nil
 	}
 	return &trimmed
+}
+
+// ---------------------------------------------------------------------------
+// Schedule handlers (nested under /tasks/schedules)
+// ---------------------------------------------------------------------------
+
+func (g *WorkspaceTasksGroup) CreateSchedule(c echo.Context) error {
+	ctx := c.Request().Context()
+	var req struct {
+		AgentID    string   `json:"agent_id"`
+		CronExpr   string   `json:"cron_expr"`
+		Prompt     string   `json:"prompt"`
+		SkillPaths []string `json:"skill_paths"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request")
+	}
+	for _, pair := range [][2]string{{"cron_expr", req.CronExpr}, {"prompt", req.Prompt}, {"agent_id", req.AgentID}} {
+		if strings.TrimSpace(pair[1]) == "" {
+			return ErrorResponse(c, http.StatusBadRequest, pair[0]+" is required")
+		}
+	}
+
+	ws, err := g.backend.GetWorkspaceByExternalId(ctx, c.Param("workspace_id"))
+	if err != nil || ws == nil {
+		return ErrorResponse(c, http.StatusNotFound, "workspace not found")
+	}
+	agent, err := g.backend.GetAgentProfile(ctx, ws.Id, req.AgentID)
+	if err != nil || agent == nil {
+		return ErrorResponse(c, http.StatusNotFound, "agent not found")
+	}
+
+	st, err := g.agents.CreateSchedule(
+		ctx, ws.Id, agent.ID, req.CronExpr, req.Prompt,
+		req.SkillPaths, ptrUint(auth.MemberId(ctx)), ptrUint(auth.TokenId(ctx)), nil,
+	)
+	if err != nil {
+		log.Error().Err(err).Str("workspace", ws.ExternalId).Msg("schedule create failed")
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+	return c.JSON(http.StatusCreated, Response{Success: true, Data: g.scheduleResp(ctx, st, ws.ExternalId)})
+}
+
+func (g *WorkspaceTasksGroup) ListSchedules(c echo.Context) error {
+	ctx := c.Request().Context()
+	ws, err := g.backend.GetWorkspaceByExternalId(ctx, c.Param("workspace_id"))
+	if err != nil || ws == nil {
+		return ErrorResponse(c, http.StatusNotFound, "workspace not found")
+	}
+	list, err := g.agents.ListSchedules(ctx, ws.Id)
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+	resp := make([]map[string]any, 0, len(list))
+	for _, s := range list {
+		resp = append(resp, g.scheduleResp(ctx, s, ws.ExternalId))
+	}
+	return SuccessResponse(c, resp)
+}
+
+func (g *WorkspaceTasksGroup) GetSchedule(c echo.Context) error {
+	ctx := c.Request().Context()
+	st, err := g.agents.GetSchedule(ctx, c.Param("id"))
+	if err != nil {
+		return ErrorResponse(c, http.StatusNotFound, err.Error())
+	}
+	return SuccessResponse(c, g.scheduleResp(ctx, st, ""))
+}
+
+func (g *WorkspaceTasksGroup) UpdateSchedule(c echo.Context) error {
+	var req struct {
+		CronExpr   *string   `json:"cron_expr,omitempty"`
+		Prompt     *string   `json:"prompt,omitempty"`
+		SkillPaths *[]string `json:"skill_paths,omitempty"`
+		Active     *bool     `json:"active,omitempty"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request")
+	}
+	ctx := c.Request().Context()
+	st, err := g.agents.UpdateSchedule(ctx, c.Param("id"), req.CronExpr, req.Prompt, req.SkillPaths, req.Active)
+	if err != nil {
+		return g.scheduleError(c, err)
+	}
+	return SuccessResponse(c, g.scheduleResp(ctx, st, ""))
+}
+
+func (g *WorkspaceTasksGroup) DeleteSchedule(c echo.Context) error {
+	if err := g.agents.DeleteSchedule(c.Request().Context(), c.Param("id")); err != nil {
+		return g.scheduleError(c, err)
+	}
+	return SuccessResponse(c, nil)
+}
+
+func (g *WorkspaceTasksGroup) scheduleError(c echo.Context, err error) error {
+	if _, ok := err.(*types.ErrScheduledTaskNotFound); ok {
+		return ErrorResponse(c, http.StatusNotFound, err.Error())
+	}
+	return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+}
+
+func (g *WorkspaceTasksGroup) scheduleResp(ctx context.Context, st *types.ScheduledTask, wsExt string) map[string]any {
+	if wsExt == "" {
+		if ws, _ := g.backend.GetWorkspace(ctx, st.WorkspaceID); ws != nil {
+			wsExt = ws.ExternalId
+		}
+	}
+	agentName := ""
+	if agent, _ := g.backend.GetAgentProfile(ctx, st.WorkspaceID, st.AgentID); agent != nil {
+		agentName = agent.Name
+	}
+	skillPaths := st.SkillPaths
+	if skillPaths == nil {
+		skillPaths = []string{}
+	}
+	resp := map[string]any{
+		"external_id":  st.ExternalID,
+		"workspace_id": wsExt,
+		"agent_id":     st.AgentID,
+		"agent_name":   agentName,
+		"cron_expr":    st.CronExpr,
+		"prompt":       st.Prompt,
+		"skill_paths":  skillPaths,
+		"active":       st.Active,
+		"next_run_at":  st.NextRunAt.Format(time.RFC3339),
+		"created_at":   st.CreatedAt.Format(time.RFC3339),
+		"updated_at":   st.UpdatedAt.Format(time.RFC3339),
+	}
+	if st.LastRunAt != nil {
+		resp["last_run_at"] = st.LastRunAt.Format(time.RFC3339)
+	}
+	return resp
 }

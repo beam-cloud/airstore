@@ -25,6 +25,7 @@ func (s *Service) Create(
 	memberId, tokenId *uint,
 	rawToken, path, prompt string,
 	skillPaths []string,
+	eventTypes []string,
 	agentPatch *AgentConfigPatch,
 ) (*types.Hook, error) {
 	path = NormalizePath(path)
@@ -38,6 +39,10 @@ func (s *Service) Create(
 	}
 	normalizedSkills := types.NormalizeSkillPaths(skillPaths, "")
 
+	if len(eventTypes) == 0 {
+		eventTypes = []string{"fs.create"}
+	}
+
 	encrypted, err := EncodeToken(rawToken)
 	if err != nil {
 		return nil, fmt.Errorf("failed to store token")
@@ -48,6 +53,7 @@ func (s *Service) Create(
 		Path:              path,
 		Prompt:            prompt,
 		SkillPaths:        normalizedSkills,
+		EventTypes:        eventTypes,
 		Active:            true,
 		CreatedByMemberId: memberId,
 		TokenId:           tokenId,
@@ -133,6 +139,7 @@ func (s *Service) Update(
 	prompt *string,
 	active *bool,
 	skillPaths *[]string,
+	eventTypes *[]string,
 	agentPatch *AgentConfigPatch,
 ) (*types.Hook, error) {
 	hook, err := s.Get(ctx, externalId)
@@ -153,6 +160,9 @@ func (s *Service) Update(
 	if skillPaths != nil {
 		hook.SkillPaths = types.NormalizeSkillPaths(*skillPaths, "")
 		hook.NormalizeSkills()
+	}
+	if eventTypes != nil {
+		hook.EventTypes = *eventTypes
 	}
 	agent, err := ResolveHookAgent(ctx, s.Backend, hook.WorkspaceId, hook.Path, hook.AgentId, agentPatch)
 	if err != nil {

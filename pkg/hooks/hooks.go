@@ -108,7 +108,7 @@ func (eng *Engine) dispatchEvent(
 		effectivePayload["event"] = effectiveEvent
 	}
 
-	hooks := eng.cache.match(ctx, workspaceID, resolvedPath)
+	hooks := eng.cache.match(ctx, workspaceID, resolvedPath, effectiveEvent)
 	if len(hooks) == 0 {
 		log.Debug().Str("event", effectiveEvent).Str("path", resolvedPath).Uint("workspace_id", workspaceID).
 			Msg("hook engine: no matching hooks")
@@ -388,7 +388,7 @@ type hookCache struct {
 	store repository.FilesystemStore
 }
 
-func (c *hookCache) match(ctx context.Context, wsId uint, path string) []*types.Hook {
+func (c *hookCache) match(ctx context.Context, wsId uint, path string, event string) []*types.Hook {
 	path = NormalizePath(path)
 	c.mu.RLock()
 	hooks, ok := c.hooks[wsId]
@@ -404,11 +404,27 @@ func (c *hookCache) match(ctx context.Context, wsId uint, path string) []*types.
 		if !h.Active {
 			continue
 		}
-		if hookPathMatchesPath(hookPath, path) {
-			out = append(out, h)
+		if !hookPathMatchesPath(hookPath, path) {
+			continue
 		}
+		if !hookMatchesEvent(h, event) {
+			continue
+		}
+		out = append(out, h)
 	}
 	return out
+}
+
+func hookMatchesEvent(h *types.Hook, event string) bool {
+	if len(h.EventTypes) == 0 {
+		return true
+	}
+	for _, et := range h.EventTypes {
+		if et == event {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *hookCache) invalidate(wsId uint) {

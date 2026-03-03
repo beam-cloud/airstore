@@ -197,6 +197,13 @@ type BackendRepository interface {
 	UpdateTaskState(ctx context.Context, taskId string, state types.AgentTaskState, droppedReason *string, targetRunID *string) error
 	UpdateTaskStateIfCurrentRun(ctx context.Context, taskID string, expectedRunID string, state types.AgentTaskState, droppedReason *string, targetRunID *string) (bool, error)
 	ArchiveTask(ctx context.Context, taskId string) error
+	CreateScheduledTask(ctx context.Context, st *types.ScheduledTask) error
+	GetScheduledTask(ctx context.Context, externalID string) (*types.ScheduledTask, error)
+	ListScheduledTasks(ctx context.Context, workspaceID uint) ([]*types.ScheduledTask, error)
+	UpdateScheduledTask(ctx context.Context, st *types.ScheduledTask) error
+	DeleteScheduledTask(ctx context.Context, externalID string) error
+	ClaimDueScheduledTasks(ctx context.Context, now time.Time, limit int) ([]*types.ScheduledTask, error)
+	AdvanceScheduledTask(ctx context.Context, id string, oldNextRunAt, newNextRunAt time.Time) (bool, error)
 
 	// Orchestration outbox/inbox/retry guard
 	EnqueueOrchestrationOutboxEvent(ctx context.Context, event *types.OrchestrationOutboxEvent) error
