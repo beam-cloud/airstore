@@ -11,10 +11,16 @@ import (
 
 const seenInitSuffix = ":init"
 
-// SeenTracker detects new query result IDs by diffing against the previous set.
-// Usage: Compare (read-only) → act on new IDs → Commit (update stored set).
+// CompareResult holds the diff between previous and current ID sets.
+type CompareResult struct {
+	Added   []string
+	Removed []string
+}
+
+// SeenTracker detects new and removed query result IDs by diffing against the previous set.
+// Usage: Compare (read-only) → act on added/removed IDs → Commit (update stored set).
 // This two-phase approach ensures the stored set only advances after the caller
-// has successfully processed the new IDs.
+// has successfully processed the changes.
 type SeenTracker struct {
 	rdb *common.RedisClient
 }
@@ -23,11 +29,10 @@ func NewSeenTracker(rdb *common.RedisClient) *SeenTracker {
 	return &SeenTracker{rdb: rdb}
 }
 
-// Compare returns IDs in current that weren't in the previous set at key.
-// Does NOT modify the stored set -- call Commit after successful processing.
-// On first call, returns current as "new" so the first observed snapshot can
-// trigger a source.change event immediately.
-func (t *SeenTracker) Compare(ctx context.Context, key string, current []string) ([]string, error) {
+// Compare diffs current against the stored set at key, returning added and
+// removed IDs. Does NOT modify the stored set — call Commit after successful
+// processing. On first call, Added contains all current IDs and Removed is empty.
+func (t *SeenTracker) Compare(ctx context.Context, key string, current []string) (*CompareResult, error) {
 	if len(current) == 0 {
 		return nil, nil
 	}
@@ -48,24 +53,36 @@ func (t *SeenTracker) Compare(ctx context.Context, key string, current []string)
 	if initialized == 0 {
 		log.Debug().Str("key", key).Int("current", len(current)).
 			Msg("seen tracker: first call, bootstrap emit")
-		return append([]string(nil), current...), nil
+		return &CompareResult{Added: append([]string(nil), current...)}, nil
 	}
 
 	oldSet := make(map[string]struct{}, len(old))
 	for _, id := range old {
 		oldSet[id] = struct{}{}
 	}
+	curSet := make(map[string]struct{}, len(current))
+	for _, id := range current {
+		curSet[id] = struct{}{}
+	}
 
-	var newIDs []string
+	var added []string
 	for _, id := range current {
 		if _, seen := oldSet[id]; !seen {
-			newIDs = append(newIDs, id)
+			added = append(added, id)
 		}
 	}
 
-	log.Debug().Str("key", key).Int("previous", len(old)).Int("current", len(current)).Int("new", len(newIDs)).
+	var removed []string
+	for _, id := range old {
+		if _, present := curSet[id]; !present {
+			removed = append(removed, id)
+		}
+	}
+
+	log.Debug().Str("key", key).Int("previous", len(old)).Int("current", len(current)).
+		Int("added", len(added)).Int("removed", len(removed)).
 		Msg("seen tracker: compare complete")
-	return newIDs, nil
+	return &CompareResult{Added: added, Removed: removed}, nil
 }
 
 // Commit replaces the stored set with current and marks the key as initialized.

@@ -24,20 +24,23 @@ func TestSeenTracker_FirstCall_SeedsBaseline(t *testing.T) {
 	ctx := context.Background()
 	key := "test:seen:first"
 
-	// First call with IDs should return all IDs as new so hooks can bootstrap.
-	newIDs, err := tracker.Compare(ctx, key, []string{"a", "b", "c"})
+	// First call with IDs should return all IDs as added so hooks can bootstrap.
+	result, err := tracker.Compare(ctx, key, []string{"a", "b", "c"})
 	if err != nil {
 		t.Fatalf("compare: %v", err)
 	}
-	if len(newIDs) != 3 {
-		t.Fatalf("expected 3 IDs on first compare, got %d: %v", len(newIDs), newIDs)
+	if len(result.Added) != 3 {
+		t.Fatalf("expected 3 IDs on first compare, got %d: %v", len(result.Added), result.Added)
 	}
-	got := make(map[string]bool, len(newIDs))
-	for _, id := range newIDs {
+	got := make(map[string]bool, len(result.Added))
+	for _, id := range result.Added {
 		got[id] = true
 	}
 	if !got["a"] || !got["b"] || !got["c"] {
-		t.Errorf("expected [a b c], got %v", newIDs)
+		t.Errorf("expected [a b c], got %v", result.Added)
+	}
+	if len(result.Removed) != 0 {
+		t.Errorf("expected no removed on first call, got %v", result.Removed)
 	}
 }
 
@@ -54,13 +57,16 @@ func TestSeenTracker_FirstCall_ThenCommit_ThenNoChange(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	// Second call with same IDs → empty (no new)
-	newIDs, err := tracker.Compare(ctx, key, ids)
+	// Second call with same IDs → empty (no added, no removed)
+	result, err := tracker.Compare(ctx, key, ids)
 	if err != nil {
 		t.Fatalf("compare: %v", err)
 	}
-	if len(newIDs) != 0 {
-		t.Errorf("expected no new IDs, got %v", newIDs)
+	if len(result.Added) != 0 {
+		t.Errorf("expected no added IDs, got %v", result.Added)
+	}
+	if len(result.Removed) != 0 {
+		t.Errorf("expected no removed IDs, got %v", result.Removed)
 	}
 }
 
@@ -73,21 +79,24 @@ func TestSeenTracker_DetectsNewIDs(t *testing.T) {
 	tracker.Compare(ctx, key, []string{"a", "b"})
 	tracker.Commit(ctx, key, []string{"a", "b"})
 
-	// Now {a, b, c, d} → should detect c, d as new
-	newIDs, err := tracker.Compare(ctx, key, []string{"a", "b", "c", "d"})
+	// Now {a, b, c, d} → should detect c, d as added
+	result, err := tracker.Compare(ctx, key, []string{"a", "b", "c", "d"})
 	if err != nil {
 		t.Fatalf("compare: %v", err)
 	}
-	if len(newIDs) != 2 {
-		t.Fatalf("expected 2 new IDs, got %d: %v", len(newIDs), newIDs)
+	if len(result.Added) != 2 {
+		t.Fatalf("expected 2 added IDs, got %d: %v", len(result.Added), result.Added)
 	}
 
 	got := make(map[string]bool)
-	for _, id := range newIDs {
+	for _, id := range result.Added {
 		got[id] = true
 	}
 	if !got["c"] || !got["d"] {
-		t.Errorf("expected c and d as new, got %v", newIDs)
+		t.Errorf("expected c and d as added, got %v", result.Added)
+	}
+	if len(result.Removed) != 0 {
+		t.Errorf("expected no removed IDs, got %v", result.Removed)
 	}
 }
 
@@ -100,19 +109,22 @@ func TestSeenTracker_CommitAdvancesSet(t *testing.T) {
 	tracker.Compare(ctx, key, []string{"a", "b"})
 	tracker.Commit(ctx, key, []string{"a", "b"})
 
-	// Detect {c} as new
-	newIDs, _ := tracker.Compare(ctx, key, []string{"a", "b", "c"})
-	if len(newIDs) != 1 || newIDs[0] != "c" {
-		t.Fatalf("expected [c], got %v", newIDs)
+	// Detect {c} as added
+	result, _ := tracker.Compare(ctx, key, []string{"a", "b", "c"})
+	if len(result.Added) != 1 || result.Added[0] != "c" {
+		t.Fatalf("expected [c], got %v", result.Added)
 	}
 
 	// Commit with {a, b, c}
 	tracker.Commit(ctx, key, []string{"a", "b", "c"})
 
-	// Now {a, b, c} again → no new
-	newIDs, _ = tracker.Compare(ctx, key, []string{"a", "b", "c"})
-	if len(newIDs) != 0 {
-		t.Errorf("expected no new after commit, got %v", newIDs)
+	// Now {a, b, c} again → no changes
+	result, _ = tracker.Compare(ctx, key, []string{"a", "b", "c"})
+	if len(result.Added) != 0 {
+		t.Errorf("expected no added after commit, got %v", result.Added)
+	}
+	if len(result.Removed) != 0 {
+		t.Errorf("expected no removed after commit, got %v", result.Removed)
 	}
 }
 
@@ -125,17 +137,17 @@ func TestSeenTracker_WithoutCommit_RetryDetectsSameNew(t *testing.T) {
 	tracker.Compare(ctx, key, []string{"a"})
 	tracker.Commit(ctx, key, []string{"a"})
 
-	// Detect {b} as new — but DON'T commit (simulating failed emit)
-	newIDs, _ := tracker.Compare(ctx, key, []string{"a", "b"})
-	if len(newIDs) != 1 || newIDs[0] != "b" {
-		t.Fatalf("expected [b], got %v", newIDs)
+	// Detect {b} as added — but DON'T commit (simulating failed emit)
+	result, _ := tracker.Compare(ctx, key, []string{"a", "b"})
+	if len(result.Added) != 1 || result.Added[0] != "b" {
+		t.Fatalf("expected [b], got %v", result.Added)
 	}
 	// Intentionally skip Commit
 
-	// Retry: should still detect {b} as new since we didn't commit
-	newIDs, _ = tracker.Compare(ctx, key, []string{"a", "b"})
-	if len(newIDs) != 1 || newIDs[0] != "b" {
-		t.Errorf("expected [b] on retry (no commit), got %v", newIDs)
+	// Retry: should still detect {b} as added since we didn't commit
+	result, _ = tracker.Compare(ctx, key, []string{"a", "b"})
+	if len(result.Added) != 1 || result.Added[0] != "b" {
+		t.Errorf("expected [b] on retry (no commit), got %v", result.Added)
 	}
 }
 
@@ -144,20 +156,20 @@ func TestSeenTracker_EmptyCurrentReturnsNil(t *testing.T) {
 	ctx := context.Background()
 	key := "test:seen:empty"
 
-	newIDs, err := tracker.Compare(ctx, key, nil)
+	result, err := tracker.Compare(ctx, key, nil)
 	if err != nil {
 		t.Fatalf("compare: %v", err)
 	}
-	if newIDs != nil {
-		t.Errorf("expected nil for empty current, got %v", newIDs)
+	if result != nil {
+		t.Errorf("expected nil for empty current, got %v", result)
 	}
 
-	newIDs, err = tracker.Compare(ctx, key, []string{})
+	result, err = tracker.Compare(ctx, key, []string{})
 	if err != nil {
 		t.Fatalf("compare: %v", err)
 	}
-	if newIDs != nil {
-		t.Errorf("expected nil for empty current, got %v", newIDs)
+	if result != nil {
+		t.Errorf("expected nil for empty current, got %v", result)
 	}
 }
 
@@ -175,13 +187,13 @@ func TestSeenTracker_CommitEmpty_ClearsSet(t *testing.T) {
 		t.Fatalf("commit empty: %v", err)
 	}
 
-	// After clearing, the key is still initialized, so {a} is new.
-	newIDs, err := tracker.Compare(ctx, key, []string{"a"})
+	// After clearing, the key is still initialized, so {a} is added.
+	result, err := tracker.Compare(ctx, key, []string{"a"})
 	if err != nil {
 		t.Fatalf("compare: %v", err)
 	}
-	if len(newIDs) != 1 || newIDs[0] != "a" {
-		t.Errorf("expected [a] after clear, got %v", newIDs)
+	if len(result.Added) != 1 || result.Added[0] != "a" {
+		t.Errorf("expected [a] after clear, got %v", result.Added)
 	}
 }
 
@@ -195,16 +207,51 @@ func TestSeenTracker_DetectsRemovedAndReaddedIDs(t *testing.T) {
 	tracker.Commit(ctx, key, []string{"a", "b", "c"})
 
 	// Items rotate: {b, c, d} (a removed, d added)
-	newIDs, _ := tracker.Compare(ctx, key, []string{"b", "c", "d"})
-	if len(newIDs) != 1 || newIDs[0] != "d" {
-		t.Errorf("expected [d], got %v", newIDs)
+	result, _ := tracker.Compare(ctx, key, []string{"b", "c", "d"})
+	if len(result.Added) != 1 || result.Added[0] != "d" {
+		t.Errorf("expected added [d], got %v", result.Added)
+	}
+	if len(result.Removed) != 1 || result.Removed[0] != "a" {
+		t.Errorf("expected removed [a], got %v", result.Removed)
 	}
 	tracker.Commit(ctx, key, []string{"b", "c", "d"})
 
 	// a reappears: {a, b, c, d}
-	newIDs, _ = tracker.Compare(ctx, key, []string{"a", "b", "c", "d"})
-	if len(newIDs) != 1 || newIDs[0] != "a" {
-		t.Errorf("expected [a] (re-added), got %v", newIDs)
+	result, _ = tracker.Compare(ctx, key, []string{"a", "b", "c", "d"})
+	if len(result.Added) != 1 || result.Added[0] != "a" {
+		t.Errorf("expected [a] (re-added), got %v", result.Added)
+	}
+	if len(result.Removed) != 0 {
+		t.Errorf("expected no removed, got %v", result.Removed)
+	}
+}
+
+func TestSeenTracker_DetectsRemovedIDs(t *testing.T) {
+	tracker := newTestTracker(t)
+	ctx := context.Background()
+	key := "test:seen:removed"
+
+	// Seed {a, b, c}
+	tracker.Compare(ctx, key, []string{"a", "b", "c"})
+	tracker.Commit(ctx, key, []string{"a", "b", "c"})
+
+	// Now {a} only → b,c removed
+	result, err := tracker.Compare(ctx, key, []string{"a"})
+	if err != nil {
+		t.Fatalf("compare: %v", err)
+	}
+	if len(result.Added) != 0 {
+		t.Errorf("expected no added, got %v", result.Added)
+	}
+	if len(result.Removed) != 2 {
+		t.Fatalf("expected 2 removed, got %d: %v", len(result.Removed), result.Removed)
+	}
+	got := make(map[string]bool)
+	for _, id := range result.Removed {
+		got[id] = true
+	}
+	if !got["b"] || !got["c"] {
+		t.Errorf("expected b and c removed, got %v", result.Removed)
 	}
 }
 
@@ -247,28 +294,28 @@ func TestSeenTracker_ResetPath_ReinitializesFirstObservation(t *testing.T) {
 	key := common.Keys.HookSeen(workspaceID, types.GeneratePathID(path))
 	ids := []string{"a", "b"}
 
-	// Seed baseline and verify unchanged snapshots produce no new IDs.
+	// Seed baseline and verify unchanged snapshots produce no changes.
 	_, _ = tracker.Compare(ctx, key, ids)
 	if err := tracker.Commit(ctx, key, ids); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
-	newIDs, err := tracker.Compare(ctx, key, ids)
+	result, err := tracker.Compare(ctx, key, ids)
 	if err != nil {
 		t.Fatalf("compare before reset: %v", err)
 	}
-	if len(newIDs) != 0 {
-		t.Fatalf("expected no new IDs before reset, got %v", newIDs)
+	if len(result.Added) != 0 {
+		t.Fatalf("expected no added IDs before reset, got %v", result.Added)
 	}
 
 	// Reset should force next compare for this path to bootstrap.
 	if err := tracker.ResetPath(ctx, workspaceID, path); err != nil {
 		t.Fatalf("reset path: %v", err)
 	}
-	newIDs, err = tracker.Compare(ctx, key, ids)
+	result, err = tracker.Compare(ctx, key, ids)
 	if err != nil {
 		t.Fatalf("compare after reset: %v", err)
 	}
-	if len(newIDs) != len(ids) {
-		t.Fatalf("expected %d new IDs after reset, got %d (%v)", len(ids), len(newIDs), newIDs)
+	if len(result.Added) != len(ids) {
+		t.Fatalf("expected %d added IDs after reset, got %d (%v)", len(ids), len(result.Added), result.Added)
 	}
 }

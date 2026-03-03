@@ -173,7 +173,7 @@ func TestDefaultPaginationConstants(t *testing.T) {
 	}
 }
 
-func TestEmitNewResultHooks_FirstObservationEmits(t *testing.T) {
+func TestEmitSourceHookEvents_FirstObservationEmits(t *testing.T) {
 	rdb, err := repository.NewRedisClientForTest()
 	if err != nil {
 		t.Fatalf("failed to create test redis: %v", err)
@@ -194,12 +194,15 @@ func TestEmitNewResultHooks_FirstObservationEmits(t *testing.T) {
 		{ID: "pr-2"},
 	}
 
-	newCount := svc.emitNewResultHooks(context.Background(), 124, query, results)
+	newCount := svc.emitSourceHookEvents(context.Background(), 124, query, results)
 	if newCount != 2 {
 		t.Fatalf("expected 2 new results on first observation, got %d", newCount)
 	}
 	if len(emitter.events) != 1 {
 		t.Fatalf("expected 1 emitted event, got %d", len(emitter.events))
+	}
+	if gotEvent, _ := emitter.events[0]["event"].(string); gotEvent != hookspkg.EventFsCreate {
+		t.Fatalf("expected fs.create event, got %q", gotEvent)
 	}
 	if gotPath, _ := emitter.events[0]["path"].(string); gotPath != "/sources/github/test-prs" {
 		t.Fatalf("unexpected emitted path: %q", gotPath)
@@ -209,7 +212,7 @@ func TestEmitNewResultHooks_FirstObservationEmits(t *testing.T) {
 	}
 
 	// Same snapshot should not emit again.
-	newCount = svc.emitNewResultHooks(context.Background(), 124, query, results)
+	newCount = svc.emitSourceHookEvents(context.Background(), 124, query, results)
 	if newCount != 0 {
 		t.Fatalf("expected 0 new results for unchanged snapshot, got %d", newCount)
 	}
@@ -218,7 +221,7 @@ func TestEmitNewResultHooks_FirstObservationEmits(t *testing.T) {
 	}
 }
 
-func TestEmitNewResultHooks_EmptyThenReappearEmits(t *testing.T) {
+func TestEmitSourceHookEvents_EmptyThenReappearEmits(t *testing.T) {
 	rdb, err := repository.NewRedisClientForTest()
 	if err != nil {
 		t.Fatalf("failed to create test redis: %v", err)
@@ -237,7 +240,7 @@ func TestEmitNewResultHooks_EmptyThenReappearEmits(t *testing.T) {
 	}
 
 	// First poll empty: no event, but tracker is initialized.
-	newCount := svc.emitNewResultHooks(context.Background(), 125, query, nil)
+	newCount := svc.emitSourceHookEvents(context.Background(), 125, query, nil)
 	if newCount != 0 {
 		t.Fatalf("expected 0 new results for empty snapshot, got %d", newCount)
 	}
@@ -246,7 +249,7 @@ func TestEmitNewResultHooks_EmptyThenReappearEmits(t *testing.T) {
 	}
 
 	// Results appear later: should emit immediately.
-	newCount = svc.emitNewResultHooks(context.Background(), 125, query, []repository.QueryResult{
+	newCount = svc.emitSourceHookEvents(context.Background(), 125, query, []repository.QueryResult{
 		{ID: "pr-99"},
 	})
 	if newCount != 1 {
@@ -255,10 +258,54 @@ func TestEmitNewResultHooks_EmptyThenReappearEmits(t *testing.T) {
 	if len(emitter.events) != 1 {
 		t.Fatalf("expected 1 emitted event after reappearance, got %d", len(emitter.events))
 	}
+	if gotEvent, _ := emitter.events[0]["event"].(string); gotEvent != hookspkg.EventFsCreate {
+		t.Fatalf("expected fs.create event, got %q", gotEvent)
+	}
 	if gotPath, _ := emitter.events[0]["path"].(string); gotPath != "/sources/github/reappear" {
 		t.Fatalf("expected normalized emitted path, got %q", gotPath)
 	}
 	if gotHash, _ := emitter.events[0]["new_items_hash"].(string); gotHash == "" {
 		t.Fatalf("expected non-empty new_items_hash on emitted event")
+	}
+}
+
+func TestEmitSourceHookEvents_RemovedItemsEmitFsDelete(t *testing.T) {
+	rdb, err := repository.NewRedisClientForTest()
+	if err != nil {
+		t.Fatalf("failed to create test redis: %v", err)
+	}
+	emitter := &testHookEmitter{}
+	svc := &SourceService{
+		seenTracker: hookspkg.NewSeenTracker(rdb),
+		hookStream:  emitter,
+	}
+
+	query := &types.FilesystemQuery{
+		WorkspaceId: 126,
+		Integration: "linear",
+		Path:        "/sources/linear/issues",
+	}
+
+	// Bootstrap with {a, b, c}
+	svc.emitSourceHookEvents(context.Background(), 126, query, []repository.QueryResult{
+		{ID: "a"}, {ID: "b"}, {ID: "c"},
+	})
+	emitter.events = nil
+
+	// Now only {a} remains → b,c removed
+	newCount := svc.emitSourceHookEvents(context.Background(), 126, query, []repository.QueryResult{
+		{ID: "a"},
+	})
+	if newCount != 0 {
+		t.Fatalf("expected 0 new results, got %d", newCount)
+	}
+	if len(emitter.events) != 1 {
+		t.Fatalf("expected 1 emitted event (fs.delete), got %d", len(emitter.events))
+	}
+	if gotEvent, _ := emitter.events[0]["event"].(string); gotEvent != hookspkg.EventFsDelete {
+		t.Fatalf("expected fs.delete event, got %q", gotEvent)
+	}
+	if gotCount, _ := emitter.events[0]["removed_count"].(string); gotCount != "2" {
+		t.Fatalf("expected removed_count=2, got %q", gotCount)
 	}
 }

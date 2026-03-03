@@ -40,7 +40,7 @@ func (s *Service) Create(
 	normalizedSkills := types.NormalizeSkillPaths(skillPaths, "")
 
 	if len(eventTypes) == 0 {
-		eventTypes = []string{"fs.create"}
+		eventTypes = []string{EventFsCreate}
 	}
 
 	encrypted, err := EncodeToken(rawToken)
