@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -171,23 +172,26 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	runner := w.sandboxManager.ResolveRunner(task, env)
 
 	var checkHeartbeat func() bool
+	var touchHeartbeat func()
 	if heartbeatRunner, ok := runner.(HeartbeatRunner); ok {
-		overlayRootfs := sandboxOverlayRootfsPath(w.sandboxManager, sandboxID)
-		if overlayRootfs == "" {
-			addTaskExecutionContext(
-				log.Warn().Str("runner", runner.Name()),
-				task,
-			).Msg("failed to resolve sandbox overlay rootfs for heartbeat")
-		} else {
-			if err := heartbeatRunner.SetupHeartbeat(overlayRootfs, mountSource, env); err != nil {
-				addTaskExecutionContext(
-					log.Warn().Err(err).Str("runner", runner.Name()),
-					task,
-				).Msg("failed to setup runner heartbeat")
-			} else {
+		if overlayRootfs := sandboxOverlayRootfsPath(w.sandboxManager, sandboxID); overlayRootfs != "" {
+			heartbeatPath := heartbeatRunner.HeartbeatPath(overlayRootfs)
+			if heartbeatPath != "" {
+				// Create the heartbeat file on the overlay so Chtimes works.
+				if f, err := os.Create(heartbeatPath); err == nil {
+					f.Close()
+				}
 				checkHeartbeat = func() bool {
 					return heartbeatRunner.CheckHeartbeat(overlayRootfs)
 				}
+				touchHeartbeat = func() {
+					now := time.Now()
+					_ = os.Chtimes(heartbeatPath, now, now)
+				}
+				addTaskExecutionContext(
+					log.Info().Str("runner", runner.Name()),
+					task,
+				).Msg("worker-driven heartbeat enabled")
 			}
 		}
 	}
@@ -225,8 +229,13 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 		taskID:       task.ExternalId,
 		terminalIO:   w.terminalIO,
 		executionCtx: executionCtx,
-		onActivity:   func() { signalActivity(activityCh) },
-		mirror:       interactiveMirror,
+		onActivity: func() {
+			signalActivity(activityCh)
+			if touchHeartbeat != nil {
+				touchHeartbeat()
+			}
+		},
+		mirror: interactiveMirror,
 	}
 
 	start := time.Now()

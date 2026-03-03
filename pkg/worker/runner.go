@@ -3,9 +3,6 @@ package worker
 import (
 	"crypto/sha1"
 	"encoding/hex"
-	"encoding/json"
-	"errors"
-	"fmt"
 	"os"
 	"path"
 	"path/filepath"
@@ -32,9 +29,8 @@ const (
 	claudeDefaultShellEnv       = "/bin/bash"
 	claudeStateDirName          = ".claude"
 	claudeStateRootDir          = ".airstore/claude"
-	claudeHeartbeatFilePath     = "/tmp/.claude-heartbeat"
-	claudeHeartbeatTouchCommand = "touch /tmp/.claude-heartbeat"
-	claudeHeartbeatFreshFor     = 5 * time.Minute
+	claudeHeartbeatContainerPath = "/home/sandbox/.claude-heartbeat"
+	claudeHeartbeatFreshFor      = 5 * time.Minute
 )
 
 // AgentExecutionRunner builds the process entrypoint for an agent task.
@@ -52,17 +48,16 @@ type TurnRunner interface {
 	BuildTurnArgs(prompt string, env map[string]string, mode TurnArgMode) []string
 }
 
-// HeartbeatRunner extends AgentExecutionRunner with optional liveness hooks.
-// Runners can implement this when they have a runner-specific notion of
-// "active work" that should defer interactive idle timeout.
+// HeartbeatRunner extends AgentExecutionRunner with worker-driven liveness
+// tracking. The worker touches the heartbeat file whenever it sees output
+// from the sandbox (via the terminal output writer). Runners provide the
+// heartbeat file path and a check method. The worker handles the writing.
 type HeartbeatRunner interface {
 	AgentExecutionRunner
-	// SetupHeartbeat installs heartbeat hooks into the sandbox. overlayRootfs
-	// is the overlay merged directory; mountSource is the FUSE filesystem
-	// mount point that is bind-mounted over /workspace inside the container.
-	// Config files under /workspace must be written to mountSource so the
-	// container can see them (the overlay path is hidden by the bind mount).
-	SetupHeartbeat(overlayRootfs string, mountSource string, env map[string]string) error
+	// HeartbeatPath returns the host-side path to the heartbeat file for
+	// the given overlay rootfs. Returns "" if heartbeat is not supported.
+	HeartbeatPath(overlayRootfs string) string
+	// CheckHeartbeat returns true if the heartbeat file was recently modified.
 	CheckHeartbeat(overlayRootfs string) bool
 }
 
@@ -167,79 +162,16 @@ func (r *ClaudeCodeRunner) BuildTurnArgs(prompt string, env map[string]string, m
 	return builder.withPrompt(prompt).build()
 }
 
-func (r *ClaudeCodeRunner) SetupHeartbeat(overlayRootfs string, mountSource string, env map[string]string) error {
-	overlayRootfs = strings.TrimSpace(overlayRootfs)
-	if overlayRootfs == "" {
-		return fmt.Errorf("overlay rootfs path is empty")
-	}
-	if env == nil {
-		return fmt.Errorf("environment map is nil")
-	}
-
-	r.injectEnv(env)
-
-	configDir := strings.TrimSpace(env[claudeConfigDirEnvKey])
-	if configDir == "" {
-		return fmt.Errorf("%s is not configured", claudeConfigDirEnvKey)
-	}
-
-	// If configDir is under /workspace and we have a FUSE mount source,
-	// write to the mount source so the file is visible inside the container.
-	// The overlay path for /workspace is hidden by the bind mount.
-	settingsDir := resolveHostPath(overlayRootfs, mountSource, configDir)
-	if settingsDir == "" {
-		return fmt.Errorf("failed to resolve claude settings directory")
-	}
-	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
-		return fmt.Errorf("create claude settings directory: %w", err)
-	}
-
-	settingsPath := filepath.Join(settingsDir, "settings.json")
-	settings, err := readClaudeSettingsFile(settingsPath)
-	if err != nil {
-		return fmt.Errorf("read claude settings: %w", err)
-	}
-	ensureClaudeHeartbeatPostToolHook(settings)
-
-	data, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal claude settings: %w", err)
-	}
-	data = append(data, '\n')
-	if err := os.WriteFile(settingsPath, data, 0o644); err != nil {
-		return fmt.Errorf("write claude settings: %w", err)
-	}
-	return nil
-}
-
-// resolveHostPath maps a container-absolute path to its host-side location.
-// Paths under /workspace resolve to mountSource (the FUSE bind-mount source);
-// all other paths resolve through the overlay rootfs.
-func resolveHostPath(overlayRootfs, mountSource, containerPath string) string {
-	cleanedContainer := path.Clean("/" + strings.TrimSpace(containerPath))
-
-	mountSource = strings.TrimSpace(mountSource)
-	if mountSource != "" {
-		workDir := types.ContainerWorkDir
-		if strings.HasPrefix(cleanedContainer, workDir+"/") {
-			rel := strings.TrimPrefix(cleanedContainer, workDir+"/")
-			return filepath.Join(mountSource, filepath.FromSlash(rel))
-		}
-		if cleanedContainer == workDir {
-			return mountSource
-		}
-	}
-
-	return overlayContainerPath(overlayRootfs, containerPath)
+func (r *ClaudeCodeRunner) HeartbeatPath(overlayRootfs string) string {
+	return overlayContainerPath(overlayRootfs, claudeHeartbeatContainerPath)
 }
 
 func (r *ClaudeCodeRunner) CheckHeartbeat(overlayRootfs string) bool {
-	heartbeatPath := overlayContainerPath(overlayRootfs, claudeHeartbeatFilePath)
-	if heartbeatPath == "" {
+	p := r.HeartbeatPath(overlayRootfs)
+	if p == "" {
 		return false
 	}
-
-	info, err := os.Stat(heartbeatPath)
+	info, err := os.Stat(p)
 	if err != nil {
 		return false
 	}
@@ -272,79 +204,6 @@ func overlayContainerPath(overlayRootfs, containerPath string) string {
 		return overlayRootfs
 	}
 	return filepath.Join(overlayRootfs, filepath.FromSlash(cleanedContainer))
-}
-
-func readClaudeSettingsFile(filePath string) (map[string]any, error) {
-	settings := map[string]any{}
-
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return settings, nil
-		}
-		return nil, err
-	}
-	if len(strings.TrimSpace(string(data))) == 0 {
-		return settings, nil
-	}
-	if err := json.Unmarshal(data, &settings); err != nil {
-		return nil, err
-	}
-	return settings, nil
-}
-
-func ensureClaudeHeartbeatPostToolHook(settings map[string]any) {
-	hooks, ok := settings["hooks"].(map[string]any)
-	if !ok || hooks == nil {
-		hooks = map[string]any{}
-		settings["hooks"] = hooks
-	}
-
-	postToolUseHooks, ok := hooks["PostToolUse"].([]any)
-	if !ok {
-		postToolUseHooks = []any{}
-	}
-	if hasClaudeHeartbeatPostToolHook(postToolUseHooks) {
-		hooks["PostToolUse"] = postToolUseHooks
-		return
-	}
-
-	postToolUseHooks = append(postToolUseHooks, map[string]any{
-		"matcher": "",
-		"hooks": []any{
-			map[string]any{
-				"type":    "command",
-				"command": claudeHeartbeatTouchCommand,
-			},
-		},
-	})
-	hooks["PostToolUse"] = postToolUseHooks
-}
-
-func hasClaudeHeartbeatPostToolHook(postToolUseHooks []any) bool {
-	for _, rawEntry := range postToolUseHooks {
-		entry, ok := rawEntry.(map[string]any)
-		if !ok {
-			continue
-		}
-		rawHooks, ok := entry["hooks"].([]any)
-		if !ok {
-			continue
-		}
-		for _, rawHook := range rawHooks {
-			hook, ok := rawHook.(map[string]any)
-			if !ok {
-				continue
-			}
-			hookType, _ := hook["type"].(string)
-			hookCommand, _ := hook["command"].(string)
-			if strings.EqualFold(strings.TrimSpace(hookType), "command") &&
-				strings.TrimSpace(hookCommand) == claudeHeartbeatTouchCommand {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func defaultClaudeConfigDir(env map[string]string) string {
