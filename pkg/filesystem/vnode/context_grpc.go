@@ -35,6 +35,7 @@ type ContextVNodeGRPC struct {
 	writes      map[string]map[FileHandle]*handleState
 	nextFH      FileHandle
 	mu          sync.Mutex
+	stopEvict   chan struct{}
 }
 
 // NewContextVNodeGRPC creates a new context virtual node with the given prefix.
@@ -52,6 +53,8 @@ func NewContextVNodeGRPC(conn *grpc.ClientConn, token string, prefix string) *Co
 		nextFH:      1,
 	}
 	c.asyncWriter = NewAsyncWriter(c.writeRange)
+	c.stopEvict = make(chan struct{})
+	go c.handleEvictionLoop()
 	return c
 }
 
@@ -312,6 +315,7 @@ func (c *ContextVNodeGRPC) Write(path string, buf []byte, off int64, fh FileHand
 		state.mu.Unlock()
 		return 0, fs.ErrInvalid
 	}
+	state.touch()
 
 	// Empty buffer: start buffering or write directly if too large.
 	if len(state.writeBuf) == 0 {
@@ -647,7 +651,7 @@ func (c *ContextVNodeGRPC) allocHandle(path string) FileHandle {
 	defer c.mu.Unlock()
 	fh := c.nextFH
 	c.nextFH++
-	state := &handleState{path: path}
+	state := &handleState{path: path, lastActivity: time.Now()}
 	c.handles[fh] = state
 
 	c.writeMu.Lock()
@@ -735,6 +739,7 @@ func (c *ContextVNodeGRPC) recordRead(state *handleState, path string, off int64
 	}
 
 	state.mu.Lock()
+	state.touch()
 	sequential := state.lastSize > 0 && state.lastOff+int64(state.lastSize) == off
 	state.lastOff = off
 	state.lastSize = n
@@ -916,9 +921,72 @@ func (c *ContextVNodeGRPC) bufferedHandleSize(path string) (int64, bool) {
 	return size, ok
 }
 
-// Cleanup flushes all pending async writes. Called when filesystem is unmounted.
+func (c *ContextVNodeGRPC) OpenHandleCount() int {
+	c.mu.Lock()
+	n := len(c.handles)
+	c.mu.Unlock()
+	return n
+}
+
+// Cleanup stops background goroutines and flushes all pending async writes.
 func (c *ContextVNodeGRPC) Cleanup() {
+	close(c.stopEvict)
 	c.asyncWriter.Cleanup()
+}
+
+func (c *ContextVNodeGRPC) handleEvictionLoop() {
+	ticker := time.NewTicker(handleEvictionInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.stopEvict:
+			return
+		case <-ticker.C:
+			c.evictStaleHandles()
+		}
+	}
+}
+
+func (c *ContextVNodeGRPC) evictStaleHandles() {
+	cutoff := time.Now().Add(-handleStaleTimeout)
+
+	c.mu.Lock()
+	stale := make(map[FileHandle]*handleState)
+	for fh, state := range c.handles {
+		state.mu.Lock()
+		if !state.closed && state.lastActivity.Before(cutoff) {
+			stale[fh] = state
+		}
+		state.mu.Unlock()
+	}
+	c.mu.Unlock()
+
+	for fh, state := range stale {
+		c.flushWriteBuffer(state.path, state)
+		_ = c.asyncWriter.ForceFlush(state.path)
+
+		c.mu.Lock()
+		state.mu.Lock()
+		state.closed = true
+		state.writeBuf = nil
+		state.prefetch = nil
+		state.mu.Unlock()
+		delete(c.handles, fh)
+		c.mu.Unlock()
+
+		c.writeMu.Lock()
+		if m, ok := c.writes[state.path]; ok {
+			delete(m, fh)
+			if len(m) == 0 {
+				delete(c.writes, state.path)
+			}
+		}
+		c.writeMu.Unlock()
+
+		log.Debug().Str("path", state.path).Uint64("fh", uint64(fh)).
+			Msg("evicted stale file handle")
+	}
 }
 
 // cachedMode returns the file mode from the metadata cache, or 0 if not cached.

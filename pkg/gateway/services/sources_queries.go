@@ -157,13 +157,21 @@ func (s *SourceService) emitNewResultHooks(ctx context.Context, workspaceId uint
 
 	queryPath := hooks.NormalizePath(query.Path)
 	seenKey := common.Keys.HookSeen(workspaceId, types.GeneratePathID(queryPath))
+
+	// Build ID list for seen-tracking and an ID→filepath map so hooks
+	// report readable paths (e.g. "/sources/linear/my-view/LIN-123_title.md")
+	// instead of opaque provider IDs.
 	ids := make([]string, 0, len(results))
+	idToPath := make(map[string]string, len(results))
 	for _, r := range results {
 		id := strings.TrimSpace(r.ID)
 		if id == "" {
 			continue
 		}
 		ids = append(ids, id)
+		if r.Filename != "" {
+			idToPath[id] = queryPath + "/" + r.Filename
+		}
 	}
 
 	newIDs, compareErr := s.seenTracker.Compare(ctx, seenKey, ids)
@@ -174,13 +182,21 @@ func (s *SourceService) emitNewResultHooks(ctx context.Context, workspaceId uint
 
 	if len(newIDs) > 0 {
 		newItemsHash := hashHookItemIDs(newIDs)
+		newPaths := make([]string, 0, len(newIDs))
+		for _, id := range newIDs {
+			if p, ok := idToPath[id]; ok {
+				newPaths = append(newPaths, p)
+			} else {
+				newPaths = append(newPaths, id)
+			}
+		}
 		if emitErr := s.hookStream.Emit(ctx, map[string]any{
 			"event":          hooks.EventSourceChange,
 			"workspace_id":   fmt.Sprintf("%d", workspaceId),
 			"path":           queryPath,
 			"integration":    query.Integration,
 			"new_count":      fmt.Sprintf("%d", len(newIDs)),
-			"new_items":      strings.Join(newIDs, ", "),
+			"new_items":      strings.Join(newPaths, ", "),
 			"new_items_hash": newItemsHash,
 		}); emitErr != nil {
 			log.Error().Err(emitErr).Str("path", queryPath).Int("new_results", len(newIDs)).

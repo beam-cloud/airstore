@@ -3,6 +3,7 @@ package vnode
 import (
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestContextVNodeLocalDirtySizeIncludesBufferedHandleWrites(t *testing.T) {
@@ -55,5 +56,41 @@ func TestContextVNodeWriteInvalidatesContentCache(t *testing.T) {
 
 	if _, ok := c.content.Get(path, 123); ok {
 		t.Fatal("expected content cache to be invalidated after write")
+	}
+}
+
+func TestContextVNodeStaleHandleEviction(t *testing.T) {
+	c := &ContextVNodeGRPC{
+		content:  NewContentCache(),
+		handles:  make(map[FileHandle]*handleState),
+		writes:   make(map[string]map[FileHandle]*handleState),
+		nextFH:   1,
+		stopEvict: make(chan struct{}),
+		asyncWriter: NewAsyncWriter(func(path string, off int64, data []byte) error {
+			return nil
+		}),
+	}
+
+	for i := 0; i < 100; i++ {
+		c.allocHandle("/test/file.txt")
+	}
+
+	if got := c.OpenHandleCount(); got != 100 {
+		t.Fatalf("expected 100 handles, got %d", got)
+	}
+
+	c.mu.Lock()
+	staleTime := time.Now().Add(-handleStaleTimeout - time.Minute)
+	for _, state := range c.handles {
+		state.mu.Lock()
+		state.lastActivity = staleTime
+		state.mu.Unlock()
+	}
+	c.mu.Unlock()
+
+	c.evictStaleHandles()
+
+	if got := c.OpenHandleCount(); got != 0 {
+		t.Fatalf("expected 0 handles after eviction, got %d", got)
 	}
 }

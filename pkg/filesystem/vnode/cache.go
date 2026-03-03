@@ -690,6 +690,54 @@ func (v *SourcesVNode) doBackgroundRefresh() {
 	}
 
 	v.cleanupOldRecentDirs()
+	v.cleanupExpiredCaches()
+}
+
+// cleanupExpiredCaches removes expired entries from unbounded maps that only
+// check TTL on read but never evict. Without this, maps grow indefinitely
+// during long-running sessions.
+func (v *SourcesVNode) cleanupExpiredCaches() {
+	now := time.Now()
+
+	v.resultsMu.Lock()
+	for k, r := range v.results {
+		if now.After(r.expiresAt) {
+			delete(v.results, k)
+		}
+	}
+	v.resultsMu.Unlock()
+
+	v.queriesMu.Lock()
+	for k, q := range v.queries {
+		if now.After(q.expiresAt) {
+			delete(v.queries, k)
+		}
+	}
+	v.queriesMu.Unlock()
+
+	v.integrationsMu.Lock()
+	for k, i := range v.integrations {
+		if now.After(i.expiresAt) {
+			delete(v.integrations, k)
+		}
+	}
+	v.integrationsMu.Unlock()
+
+	v.statsMu.Lock()
+	for k, s := range v.stats {
+		if now.After(s.expiresAt) {
+			delete(v.stats, k)
+		}
+	}
+	v.statsMu.Unlock()
+
+	v.openMu.Lock()
+	for k, c := range v.openContent {
+		if c.refs == 0 && now.Sub(c.cachedAt) > prefetchTTL {
+			delete(v.openContent, k)
+		}
+	}
+	v.openMu.Unlock()
 }
 
 // refreshIntegrations refreshes the integration list cache.

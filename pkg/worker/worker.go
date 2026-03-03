@@ -105,6 +105,14 @@ func NewWorker() (*Worker, error) {
 	// Derive max concurrent tasks from worker capacity and default task resources.
 	// cpuLimit is in millicores; memoryLimit is in MiB.
 	maxConcurrentTasks := computeMaxTasks(cpuLimit, memoryLimit)
+	if maxConcurrentTasks < 1 {
+		cancel()
+		return nil, fmt.Errorf(
+			"worker under-provisioned: %dm CPU / %d MiB cannot fit a single task (%dm CPU / %d MiB); increase worker resources",
+			cpuLimit, memoryLimit,
+			types.DefaultRunExecutionCPU, types.DefaultRunExecutionMemory>>20,
+		)
+	}
 
 	gatewayClient, err := gatewayclient.NewGatewayClient(gatewayGRPCAddr, authToken)
 	if err != nil {
@@ -184,18 +192,14 @@ func NewWorker() (*Worker, error) {
 
 // computeMaxTasks derives how many tasks this worker can run concurrently
 // based on its CPU (millicores) and memory (MiB) capacity versus default
-// task resource requirements. Always returns at least 1.
+// task resource requirements. Returns 0 if the worker is under-provisioned.
 func computeMaxTasks(cpuMillis, memMiB int64) int {
 	memBytes := memMiB << 20 // MiB → bytes (same unit as DefaultRunExecutionMemory)
 
 	cpuSlots := cpuMillis / types.DefaultRunExecutionCPU
 	memSlots := memBytes / types.DefaultRunExecutionMemory
 
-	n := int(min(cpuSlots, memSlots))
-	if n < 1 {
-		return 1
-	}
-	return n
+	return int(min(cpuSlots, memSlots))
 }
 
 // Run starts the worker and blocks until shutdown

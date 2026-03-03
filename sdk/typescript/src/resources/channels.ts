@@ -54,6 +54,7 @@ export class Channels {
       `/workspaces/${workspaceId}/channels/direct/runs/${runId}/messages`,
       {
         message: params.message,
+        task_id: params.taskId,
         queue_mode: params.queueMode,
         idempotency_key: params.idempotencyKey,
       },

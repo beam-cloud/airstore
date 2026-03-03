@@ -56,6 +56,7 @@ describe('Channels', () => {
       runId,
       {
         message: 'follow-up from direct channels test',
+        taskId: initial.task.id,
         queueMode: 'followup',
       },
     );
