@@ -39,10 +39,11 @@ type CreateConnectionRequest struct {
 	Extra           map[string]string `json:"extra,omitempty"`
 }
 
-func serializeConnection(conn *types.IntegrationConnection) map[string]any {
+func serializeConnection(conn *types.IntegrationConnection, workspaceExternalId string) map[string]any {
 	out := map[string]any{
 		"id":               conn.Id,
 		"external_id":      conn.ExternalId,
+		"workspace_id":     workspaceExternalId,
 		"integration_type": conn.IntegrationType,
 		"scope":            conn.Scope,
 		"created_at":       conn.CreatedAt,
@@ -156,7 +157,7 @@ func (cg *ConnectionsGroup) Create(c echo.Context) error {
 		}
 	}
 
-	return c.JSON(http.StatusCreated, Response{Success: true, Data: serializeConnection(conn)})
+	return c.JSON(http.StatusCreated, Response{Success: true, Data: serializeConnection(conn, ws.ExternalId)})
 }
 
 func (cg *ConnectionsGroup) List(c echo.Context) error {
@@ -174,7 +175,7 @@ func (cg *ConnectionsGroup) List(c echo.Context) error {
 
 	result := make([]map[string]any, 0, len(conns))
 	for i := range conns {
-		result = append(result, serializeConnection(&conns[i]))
+		result = append(result, serializeConnection(&conns[i], ws.ExternalId))
 	}
 	return c.JSON(http.StatusOK, Response{Success: true, Data: result})
 }
