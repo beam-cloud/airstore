@@ -391,6 +391,9 @@ func strPtrMaybeQuery(raw string) *string {
 // Scheduled task handlers
 
 func (g *WorkspaceTasksGroup) CreateSchedule(c echo.Context) error {
+	if g.agents == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "task service unavailable")
+	}
 	ctx := c.Request().Context()
 	var req struct {
 		AgentID    string   `json:"agent_id"`
@@ -428,6 +431,9 @@ func (g *WorkspaceTasksGroup) CreateSchedule(c echo.Context) error {
 }
 
 func (g *WorkspaceTasksGroup) ListSchedules(c echo.Context) error {
+	if g.agents == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "task service unavailable")
+	}
 	ctx := c.Request().Context()
 	ws, err := g.backend.GetWorkspaceByExternalId(ctx, c.Param("workspace_id"))
 	if err != nil || ws == nil {
@@ -445,15 +451,25 @@ func (g *WorkspaceTasksGroup) ListSchedules(c echo.Context) error {
 }
 
 func (g *WorkspaceTasksGroup) GetSchedule(c echo.Context) error {
+	if g.agents == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "task service unavailable")
+	}
 	ctx := c.Request().Context()
-	st, err := g.agents.GetSchedule(ctx, c.Param("id"))
+	ws, err := g.backend.GetWorkspaceByExternalId(ctx, c.Param("workspace_id"))
+	if err != nil || ws == nil {
+		return ErrorResponse(c, http.StatusNotFound, "workspace not found")
+	}
+	st, err := g.agents.GetSchedule(ctx, ws.Id, c.Param("id"))
 	if err != nil {
 		return ErrorResponse(c, http.StatusNotFound, err.Error())
 	}
-	return SuccessResponse(c, g.scheduleResp(ctx, st, ""))
+	return SuccessResponse(c, g.scheduleResp(ctx, st, ws.ExternalId))
 }
 
 func (g *WorkspaceTasksGroup) UpdateSchedule(c echo.Context) error {
+	if g.agents == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "task service unavailable")
+	}
 	var req struct {
 		CronExpr   *string   `json:"cron_expr,omitempty"`
 		Prompt     *string   `json:"prompt,omitempty"`
@@ -464,15 +480,27 @@ func (g *WorkspaceTasksGroup) UpdateSchedule(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid request")
 	}
 	ctx := c.Request().Context()
-	st, err := g.agents.UpdateSchedule(ctx, c.Param("id"), req.CronExpr, req.Prompt, req.SkillPaths, req.Active)
+	ws, err := g.backend.GetWorkspaceByExternalId(ctx, c.Param("workspace_id"))
+	if err != nil || ws == nil {
+		return ErrorResponse(c, http.StatusNotFound, "workspace not found")
+	}
+	st, err := g.agents.UpdateSchedule(ctx, ws.Id, c.Param("id"), req.CronExpr, req.Prompt, req.SkillPaths, req.Active)
 	if err != nil {
 		return g.scheduleError(c, err)
 	}
-	return SuccessResponse(c, g.scheduleResp(ctx, st, ""))
+	return SuccessResponse(c, g.scheduleResp(ctx, st, ws.ExternalId))
 }
 
 func (g *WorkspaceTasksGroup) DeleteSchedule(c echo.Context) error {
-	if err := g.agents.DeleteSchedule(c.Request().Context(), c.Param("id")); err != nil {
+	if g.agents == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "task service unavailable")
+	}
+	ctx := c.Request().Context()
+	ws, err := g.backend.GetWorkspaceByExternalId(ctx, c.Param("workspace_id"))
+	if err != nil || ws == nil {
+		return ErrorResponse(c, http.StatusNotFound, "workspace not found")
+	}
+	if err := g.agents.DeleteSchedule(ctx, ws.Id, c.Param("id")); err != nil {
 		return g.scheduleError(c, err)
 	}
 	return SuccessResponse(c, nil)

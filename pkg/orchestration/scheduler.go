@@ -81,7 +81,13 @@ func (s *CronScheduler) poll(ctx context.Context) {
 		}
 
 		wg.Add(1)
-		sem <- struct{}{}
+		select {
+		case sem <- struct{}{}:
+			// acquired semaphore, proceed
+		case <-ctx.Done():
+			wg.Done()
+			return
+		}
 
 		go func(schedule *types.ScheduledTask) {
 			defer wg.Done()

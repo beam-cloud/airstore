@@ -2835,16 +2835,16 @@ func (b *PostgresBackend) CreateScheduledTask(ctx context.Context, st *types.Sch
 	).Scan(&st.ID, &st.ExternalID, &st.CreatedAt, &st.UpdatedAt)
 }
 
-func (b *PostgresBackend) GetScheduledTask(ctx context.Context, externalID string) (*types.ScheduledTask, error) {
+func (b *PostgresBackend) GetScheduledTask(ctx context.Context, workspaceID uint, externalID string) (*types.ScheduledTask, error) {
 	st := &types.ScheduledTask{}
 	var skillPaths pq.StringArray
 	query := `
 		SELECT id, external_id, workspace_id, agent_id, cron_expr, prompt, skill_paths,
 		       active, next_run_at, last_run_at, token_id, encrypted_token,
 		       created_by_member_id, created_at, updated_at
-		FROM scheduled_task WHERE external_id = $1
+		FROM scheduled_task WHERE external_id = $1 AND workspace_id = $2
 	`
-	err := b.db.QueryRowContext(ctx, query, externalID).Scan(
+	err := b.db.QueryRowContext(ctx, query, externalID, workspaceID).Scan(
 		&st.ID, &st.ExternalID, &st.WorkspaceID, &st.AgentID,
 		&st.CronExpr, &st.Prompt, &skillPaths,
 		&st.Active, &st.NextRunAt, &st.LastRunAt, &st.TokenID, &st.EncryptedToken,
@@ -2881,12 +2881,12 @@ func (b *PostgresBackend) UpdateScheduledTask(ctx context.Context, st *types.Sch
 		UPDATE scheduled_task
 		SET cron_expr = $1, prompt = $2, skill_paths = $3, active = $4,
 		    next_run_at = $5, updated_at = CURRENT_TIMESTAMP
-		WHERE external_id = $6
+		WHERE external_id = $6 AND workspace_id = $7
 		RETURNING updated_at
 	`
 	err := b.db.QueryRowContext(ctx, query,
 		st.CronExpr, st.Prompt, pq.Array(st.SkillPaths), st.Active,
-		st.NextRunAt, st.ExternalID,
+		st.NextRunAt, st.ExternalID, st.WorkspaceID,
 	).Scan(&st.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return &types.ErrScheduledTaskNotFound{ExternalID: st.ExternalID}
@@ -2894,8 +2894,8 @@ func (b *PostgresBackend) UpdateScheduledTask(ctx context.Context, st *types.Sch
 	return err
 }
 
-func (b *PostgresBackend) DeleteScheduledTask(ctx context.Context, externalID string) error {
-	result, err := b.db.ExecContext(ctx, `DELETE FROM scheduled_task WHERE external_id = $1`, externalID)
+func (b *PostgresBackend) DeleteScheduledTask(ctx context.Context, workspaceID uint, externalID string) error {
+	result, err := b.db.ExecContext(ctx, `DELETE FROM scheduled_task WHERE external_id = $1 AND workspace_id = $2`, externalID, workspaceID)
 	if err != nil {
 		return err
 	}

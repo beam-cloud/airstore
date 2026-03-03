@@ -23,9 +23,9 @@ func upScheduledTasks(tx *sql.Tx) error {
 		   active BOOLEAN NOT NULL DEFAULT TRUE,
 		   next_run_at TIMESTAMPTZ NOT NULL,
 		   last_run_at TIMESTAMPTZ,
-		   token_id INT REFERENCES token(id),
+		   token_id INT REFERENCES token(id) ON DELETE SET NULL,
 		   encrypted_token BYTEA,
-		   created_by_member_id INT REFERENCES workspace_member(id),
+		   created_by_member_id INT REFERENCES workspace_member(id) ON DELETE SET NULL,
 		   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		   updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 		 );`,

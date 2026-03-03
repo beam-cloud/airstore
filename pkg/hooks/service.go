@@ -161,9 +161,11 @@ func (s *Service) Update(
 		hook.SkillPaths = types.NormalizeSkillPaths(*skillPaths, "")
 		hook.NormalizeSkills()
 	}
-	if eventTypes != nil {
+	if eventTypes != nil && len(*eventTypes) > 0 {
 		hook.EventTypes = *eventTypes
 	}
+	// Empty event_types array is treated as "no change" to avoid unintentionally
+	// broadening the hook to match all events (hookMatchesEvent treats len==0 as match-all).
 	agent, err := ResolveHookAgent(ctx, s.Backend, hook.WorkspaceId, hook.Path, hook.AgentId, agentPatch)
 	if err != nil {
 		return nil, err

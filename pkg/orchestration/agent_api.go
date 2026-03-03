@@ -840,8 +840,8 @@ func (a *AgentAPI) CreateSchedule(
 	return st, nil
 }
 
-func (a *AgentAPI) GetSchedule(ctx context.Context, externalID string) (*types.ScheduledTask, error) {
-	return a.backend.GetScheduledTask(ctx, externalID)
+func (a *AgentAPI) GetSchedule(ctx context.Context, workspaceID uint, externalID string) (*types.ScheduledTask, error) {
+	return a.backend.GetScheduledTask(ctx, workspaceID, externalID)
 }
 
 func (a *AgentAPI) ListSchedules(ctx context.Context, workspaceID uint) ([]*types.ScheduledTask, error) {
@@ -850,13 +850,14 @@ func (a *AgentAPI) ListSchedules(ctx context.Context, workspaceID uint) ([]*type
 
 func (a *AgentAPI) UpdateSchedule(
 	ctx context.Context,
+	workspaceID uint,
 	externalID string,
 	cronExpr *string,
 	prompt *string,
 	skillPaths *[]string,
 	active *bool,
 ) (*types.ScheduledTask, error) {
-	st, err := a.backend.GetScheduledTask(ctx, externalID)
+	st, err := a.backend.GetScheduledTask(ctx, workspaceID, externalID)
 	if err != nil {
 		return nil, err
 	}
@@ -893,8 +894,8 @@ func (a *AgentAPI) UpdateSchedule(
 	return st, nil
 }
 
-func (a *AgentAPI) DeleteSchedule(ctx context.Context, externalID string) error {
-	return a.backend.DeleteScheduledTask(ctx, externalID)
+func (a *AgentAPI) DeleteSchedule(ctx context.Context, workspaceID uint, externalID string) error {
+	return a.backend.DeleteScheduledTask(ctx, workspaceID, externalID)
 }
 
 func normalizeOffsetPage(limit, offset, defaultLimit, maxLimit int) (int, int) {
