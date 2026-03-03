@@ -113,11 +113,10 @@ func (g *GitHubClient) Execute(ctx context.Context, command string, args map[str
 			return g.reviewPR(ctx, token, required["owner"], required["repo"], number, required["body"], event, commentsJSON)
 		},
 		githubCmdCreatePR: func(ctx context.Context, token string, args map[string]any) (any, error) {
-			required, err := RequireStringArgs(args, "owner", "repo", "title", "head")
+			required, err := RequireStringArgs(args, "owner", "repo", "title", "head", "base")
 			if err != nil {
 				return nil, err
 			}
-			base := GetStringArg(args, "base", "main")
 			body := GetStringArg(args, "body", "")
 			draft := GetBoolArg(args, "draft", false)
 			return g.createPR(
@@ -127,7 +126,7 @@ func (g *GitHubClient) Execute(ctx context.Context, command string, args map[str
 				required["repo"],
 				required["title"],
 				required["head"],
-				base,
+				required["base"],
 				body,
 				draft,
 			)

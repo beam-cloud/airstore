@@ -123,7 +123,7 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.RunExecution
 	w.sandboxManager.publishStatus(ctx, task.ExternalId, types.RunExecutionStatusRunning, nil, "")
 	w.setRunInteractionState(ctx, task, types.RunInteractionStateWorking)
 
-	result := w.runInteractiveSession(ctx, task, sandboxID)
+	result := w.runInteractiveSession(ctx, task, sandboxID, taskMountSource)
 	w.setRunInteractionState(ctx, task, types.RunInteractionStateClosed)
 	releaseSessionLease()
 
@@ -157,7 +157,7 @@ func (w *Worker) heartbeatSessionLease(ctx context.Context, workspaceID uint, se
 	}
 }
 
-func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecution, sandboxID string) *types.RunExecutionResult {
+func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecution, sandboxID string, mountSource string) *types.RunExecutionResult {
 	sessionCtx, sessionCancel := context.WithCancel(ctx)
 	defer sessionCancel()
 
@@ -179,7 +179,7 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 				task,
 			).Msg("failed to resolve sandbox overlay rootfs for heartbeat")
 		} else {
-			if err := heartbeatRunner.SetupHeartbeat(overlayRootfs, env); err != nil {
+			if err := heartbeatRunner.SetupHeartbeat(overlayRootfs, mountSource, env); err != nil {
 				addTaskExecutionContext(
 					log.Warn().Err(err).Str("runner", runner.Name()),
 					task,

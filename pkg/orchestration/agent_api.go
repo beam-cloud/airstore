@@ -306,7 +306,11 @@ func (a *AgentAPI) CancelRun(ctx context.Context, workspaceID uint, runID string
 	// still sees an in-flight execution and receives an immediate cancel signal.
 	cancelled := false
 	if a.runtime != nil && a.runtime.backend != nil {
-		cancelled, _ = a.runtime.cancelInFlightRunExecutions(ctx, run.ID)
+		var cancelErr error
+		cancelled, cancelErr = a.runtime.cancelInFlightRunExecutions(ctx, run.ID)
+		if cancelErr != nil {
+			cancelled = false
+		}
 	}
 
 	if !cancelled {

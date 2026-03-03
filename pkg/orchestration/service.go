@@ -1065,9 +1065,6 @@ func (s *AgentService) cancelInFlightRunExecutions(ctx context.Context, runID st
 
 		if s.terminalIO != nil {
 			if err := s.terminalIO.PublishCancel(ctx, executionID); err != nil {
-				if firstErr == nil {
-					firstErr = err
-				}
 				log.Warn().
 					Err(err).
 					Str("run_id", runID).

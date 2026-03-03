@@ -210,16 +210,16 @@ commands:
       - name: head
         type: string
         required: true
-        short: -h
+        short: -H
         flag: --head
         description: "Branch containing changes (e.g. feature-branch)"
 
       - name: base
         type: string
-        default: main
+        required: true
         short: -b
         flag: --base
-        description: "Branch to merge into (default: main)"
+        description: "Branch to merge into (e.g. main)"
 
       - name: body
         type: string

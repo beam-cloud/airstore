@@ -57,7 +57,12 @@ type TurnRunner interface {
 // "active work" that should defer interactive idle timeout.
 type HeartbeatRunner interface {
 	AgentExecutionRunner
-	SetupHeartbeat(overlayRootfs string, env map[string]string) error
+	// SetupHeartbeat installs heartbeat hooks into the sandbox. overlayRootfs
+	// is the overlay merged directory; mountSource is the FUSE filesystem
+	// mount point that is bind-mounted over /workspace inside the container.
+	// Config files under /workspace must be written to mountSource so the
+	// container can see them (the overlay path is hidden by the bind mount).
+	SetupHeartbeat(overlayRootfs string, mountSource string, env map[string]string) error
 	CheckHeartbeat(overlayRootfs string) bool
 }
 
@@ -162,7 +167,7 @@ func (r *ClaudeCodeRunner) BuildTurnArgs(prompt string, env map[string]string, m
 	return builder.withPrompt(prompt).build()
 }
 
-func (r *ClaudeCodeRunner) SetupHeartbeat(overlayRootfs string, env map[string]string) error {
+func (r *ClaudeCodeRunner) SetupHeartbeat(overlayRootfs string, mountSource string, env map[string]string) error {
 	overlayRootfs = strings.TrimSpace(overlayRootfs)
 	if overlayRootfs == "" {
 		return fmt.Errorf("overlay rootfs path is empty")
@@ -178,7 +183,10 @@ func (r *ClaudeCodeRunner) SetupHeartbeat(overlayRootfs string, env map[string]s
 		return fmt.Errorf("%s is not configured", claudeConfigDirEnvKey)
 	}
 
-	settingsDir := overlayContainerPath(overlayRootfs, configDir)
+	// If configDir is under /workspace and we have a FUSE mount source,
+	// write to the mount source so the file is visible inside the container.
+	// The overlay path for /workspace is hidden by the bind mount.
+	settingsDir := resolveHostPath(overlayRootfs, mountSource, configDir)
 	if settingsDir == "" {
 		return fmt.Errorf("failed to resolve claude settings directory")
 	}
@@ -202,6 +210,27 @@ func (r *ClaudeCodeRunner) SetupHeartbeat(overlayRootfs string, env map[string]s
 		return fmt.Errorf("write claude settings: %w", err)
 	}
 	return nil
+}
+
+// resolveHostPath maps a container-absolute path to its host-side location.
+// Paths under /workspace resolve to mountSource (the FUSE bind-mount source);
+// all other paths resolve through the overlay rootfs.
+func resolveHostPath(overlayRootfs, mountSource, containerPath string) string {
+	cleanedContainer := path.Clean("/" + strings.TrimSpace(containerPath))
+
+	mountSource = strings.TrimSpace(mountSource)
+	if mountSource != "" {
+		workDir := types.ContainerWorkDir
+		if strings.HasPrefix(cleanedContainer, workDir+"/") {
+			rel := strings.TrimPrefix(cleanedContainer, workDir+"/")
+			return filepath.Join(mountSource, filepath.FromSlash(rel))
+		}
+		if cleanedContainer == workDir {
+			return mountSource
+		}
+	}
+
+	return overlayContainerPath(overlayRootfs, containerPath)
 }
 
 func (r *ClaudeCodeRunner) CheckHeartbeat(overlayRootfs string) bool {
