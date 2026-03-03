@@ -504,6 +504,7 @@ func (s *GatewayService) CreateHook(ctx context.Context, req *pb.CreateHookReque
 		req.Prompt,
 		skillPaths,
 		nil,
+		nil,
 	)
 	if err != nil {
 		return &pb.HookResponse{Ok: false, Error: err.Error()}, nil
@@ -561,7 +562,7 @@ func (s *GatewayService) UpdateHook(ctx context.Context, req *pb.UpdateHookReque
 		skillPaths = &values
 	}
 
-	hook, err := s.hooksSvc.Update(ctx, req.Id, prompt, active, skillPaths, nil)
+	hook, err := s.hooksSvc.Update(ctx, req.Id, prompt, active, skillPaths, nil, nil)
 	if err != nil {
 		return &pb.HookResponse{Ok: false, Error: err.Error()}, nil
 	}

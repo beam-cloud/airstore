@@ -603,7 +603,7 @@ func (g *Gateway) registerServices() error {
 		agentAPIRoot := g.baseRouteGroup.Group("/workspaces/:workspace_id")
 		agentAPIRoot.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
 		apiv1.NewAgentsGroup(agentAPIRoot.Group("/agents"), agentAPI, hooksSvc)
-		apiv1.NewWorkspaceTasksGroup(agentAPIRoot.Group("/tasks"), agentAPI)
+		apiv1.NewWorkspaceTasksGroup(agentAPIRoot.Group("/tasks"), g.BackendRepo, agentAPI)
 		apiv1.NewRunsGroup(agentAPIRoot.Group("/runs"), agentAPI)
 		apiv1.NewWorkspaceChannelsGroup(agentAPIRoot.Group("/channels"), channelRegistry)
 
@@ -638,6 +638,13 @@ func (g *Gateway) registerServices() error {
 		if g.RedisClient != nil {
 			sourcePoller := hooks.NewSourcePoller(filesystemStore, sourceService, g.RedisClient)
 			go sourcePoller.Start(g.ctx)
+		}
+
+		// Cron scheduler: fires due scheduled tasks as agent tasks
+		if g.RedisClient != nil {
+			cronScheduler := orchestration.NewCronScheduler(g.BackendRepo, agentAPI, g.RedisClient)
+			go cronScheduler.Start(g.ctx)
+			log.Info().Msg("cron scheduler started")
 		}
 
 		// OAuth API for workspace integrations (gmail, gdrive, github, notion, slack)

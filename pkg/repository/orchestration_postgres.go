@@ -2818,3 +2818,141 @@ func runExecutionBoolOrDefault(value *bool, fallback bool) bool {
 	}
 	return *value
 }
+
+// --- Scheduled Tasks ---
+
+func (b *PostgresBackend) CreateScheduledTask(ctx context.Context, st *types.ScheduledTask) error {
+	query := `
+		INSERT INTO scheduled_task (
+			workspace_id, agent_id, cron_expr, prompt, skill_paths,
+			active, next_run_at, token_id, encrypted_token, created_by_member_id
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		RETURNING id, external_id, created_at, updated_at
+	`
+	return b.db.QueryRowContext(ctx, query,
+		st.WorkspaceID, st.AgentID, st.CronExpr, st.Prompt, pq.Array(st.SkillPaths),
+		st.Active, st.NextRunAt, st.TokenID, st.EncryptedToken, st.CreatedByMemberID,
+	).Scan(&st.ID, &st.ExternalID, &st.CreatedAt, &st.UpdatedAt)
+}
+
+func (b *PostgresBackend) GetScheduledTask(ctx context.Context, workspaceID uint, externalID string) (*types.ScheduledTask, error) {
+	st := &types.ScheduledTask{}
+	var skillPaths pq.StringArray
+	query := `
+		SELECT id, external_id, workspace_id, agent_id, cron_expr, prompt, skill_paths,
+		       active, next_run_at, last_run_at, token_id, encrypted_token,
+		       created_by_member_id, created_at, updated_at
+		FROM scheduled_task WHERE external_id = $1 AND workspace_id = $2
+	`
+	err := b.db.QueryRowContext(ctx, query, externalID, workspaceID).Scan(
+		&st.ID, &st.ExternalID, &st.WorkspaceID, &st.AgentID,
+		&st.CronExpr, &st.Prompt, &skillPaths,
+		&st.Active, &st.NextRunAt, &st.LastRunAt, &st.TokenID, &st.EncryptedToken,
+		&st.CreatedByMemberID, &st.CreatedAt, &st.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, &types.ErrScheduledTaskNotFound{ExternalID: externalID}
+	}
+	if err != nil {
+		return nil, err
+	}
+	st.SkillPaths = []string(skillPaths)
+	return st, nil
+}
+
+func (b *PostgresBackend) ListScheduledTasks(ctx context.Context, workspaceID uint) ([]*types.ScheduledTask, error) {
+	query := `
+		SELECT id, external_id, workspace_id, agent_id, cron_expr, prompt, skill_paths,
+		       active, next_run_at, last_run_at, token_id, encrypted_token,
+		       created_by_member_id, created_at, updated_at
+		FROM scheduled_task WHERE workspace_id = $1
+		ORDER BY created_at DESC
+	`
+	rows, err := b.db.QueryContext(ctx, query, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanScheduledTasks(rows)
+}
+
+func (b *PostgresBackend) UpdateScheduledTask(ctx context.Context, st *types.ScheduledTask) error {
+	query := `
+		UPDATE scheduled_task
+		SET cron_expr = $1, prompt = $2, skill_paths = $3, active = $4,
+		    next_run_at = $5, updated_at = CURRENT_TIMESTAMP
+		WHERE external_id = $6 AND workspace_id = $7
+		RETURNING updated_at
+	`
+	err := b.db.QueryRowContext(ctx, query,
+		st.CronExpr, st.Prompt, pq.Array(st.SkillPaths), st.Active,
+		st.NextRunAt, st.ExternalID, st.WorkspaceID,
+	).Scan(&st.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return &types.ErrScheduledTaskNotFound{ExternalID: st.ExternalID}
+	}
+	return err
+}
+
+func (b *PostgresBackend) DeleteScheduledTask(ctx context.Context, workspaceID uint, externalID string) error {
+	result, err := b.db.ExecContext(ctx, `DELETE FROM scheduled_task WHERE external_id = $1 AND workspace_id = $2`, externalID, workspaceID)
+	if err != nil {
+		return err
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return &types.ErrScheduledTaskNotFound{ExternalID: externalID}
+	}
+	return nil
+}
+
+func (b *PostgresBackend) ClaimDueScheduledTasks(ctx context.Context, now time.Time, limit int) ([]*types.ScheduledTask, error) {
+	query := `
+		SELECT id, external_id, workspace_id, agent_id, cron_expr, prompt, skill_paths,
+		       active, next_run_at, last_run_at, token_id, encrypted_token,
+		       created_by_member_id, created_at, updated_at
+		FROM scheduled_task
+		WHERE active = TRUE AND next_run_at <= $1
+		ORDER BY next_run_at ASC
+		LIMIT $2
+	`
+	rows, err := b.db.QueryContext(ctx, query, now, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanScheduledTasks(rows)
+}
+
+func (b *PostgresBackend) AdvanceScheduledTask(ctx context.Context, id string, oldNextRunAt, newNextRunAt time.Time) (bool, error) {
+	query := `
+		UPDATE scheduled_task
+		SET next_run_at = $1, last_run_at = $2, updated_at = CURRENT_TIMESTAMP
+		WHERE id = $3 AND next_run_at = $4
+	`
+	result, err := b.db.ExecContext(ctx, query, newNextRunAt, time.Now(), id, oldNextRunAt)
+	if err != nil {
+		return false, fmt.Errorf("advance scheduled task: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return n > 0, nil
+}
+
+func scanScheduledTasks(rows *sql.Rows) ([]*types.ScheduledTask, error) {
+	var result []*types.ScheduledTask
+	for rows.Next() {
+		st := &types.ScheduledTask{}
+		var skillPaths pq.StringArray
+		if err := rows.Scan(
+			&st.ID, &st.ExternalID, &st.WorkspaceID, &st.AgentID,
+			&st.CronExpr, &st.Prompt, &skillPaths,
+			&st.Active, &st.NextRunAt, &st.LastRunAt, &st.TokenID, &st.EncryptedToken,
+			&st.CreatedByMemberID, &st.CreatedAt, &st.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		st.SkillPaths = []string(skillPaths)
+		result = append(result, st)
+	}
+	return result, rows.Err()
+}

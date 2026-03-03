@@ -784,6 +784,120 @@ func normalizeAgentProfileConfig(config map[string]any, agentKey string) (map[st
 	return normalized, nil
 }
 
+// --- Scheduled Tasks ---
+
+func (a *AgentAPI) CreateSchedule(
+	ctx context.Context,
+	workspaceID uint,
+	agentID string,
+	cronExpr string,
+	prompt string,
+	skillPaths []string,
+	memberID *uint,
+	tokenID *uint,
+	encryptedToken []byte,
+) (*types.ScheduledTask, error) {
+	cronExpr = strings.TrimSpace(cronExpr)
+	if cronExpr == "" {
+		return nil, fmt.Errorf("cron_expr is required")
+	}
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return nil, fmt.Errorf("prompt is required")
+	}
+	if strings.TrimSpace(agentID) == "" {
+		return nil, fmt.Errorf("agent_id is required")
+	}
+
+	cronExpr, err := resolveCronExpr(ctx, cronExpr)
+	if err != nil {
+		return nil, err
+	}
+	nextRun, err := NextCronTime(cronExpr, time.Now())
+	if err != nil {
+		return nil, fmt.Errorf("invalid cron expression: %w", err)
+	}
+
+	if skillPaths == nil {
+		skillPaths = []string{}
+	}
+
+	st := &types.ScheduledTask{
+		WorkspaceID:       workspaceID,
+		AgentID:           agentID,
+		CronExpr:          cronExpr,
+		Prompt:            prompt,
+		SkillPaths:        skillPaths,
+		Active:            true,
+		NextRunAt:         nextRun,
+		TokenID:           tokenID,
+		EncryptedToken:    encryptedToken,
+		CreatedByMemberID: memberID,
+	}
+	if err := a.backend.CreateScheduledTask(ctx, st); err != nil {
+		return nil, err
+	}
+	return st, nil
+}
+
+func (a *AgentAPI) GetSchedule(ctx context.Context, workspaceID uint, externalID string) (*types.ScheduledTask, error) {
+	return a.backend.GetScheduledTask(ctx, workspaceID, externalID)
+}
+
+func (a *AgentAPI) ListSchedules(ctx context.Context, workspaceID uint) ([]*types.ScheduledTask, error) {
+	return a.backend.ListScheduledTasks(ctx, workspaceID)
+}
+
+func (a *AgentAPI) UpdateSchedule(
+	ctx context.Context,
+	workspaceID uint,
+	externalID string,
+	cronExpr *string,
+	prompt *string,
+	skillPaths *[]string,
+	active *bool,
+) (*types.ScheduledTask, error) {
+	st, err := a.backend.GetScheduledTask(ctx, workspaceID, externalID)
+	if err != nil {
+		return nil, err
+	}
+
+	if cronExpr != nil {
+		resolved, err := resolveCronExpr(ctx, *cronExpr)
+		if err != nil {
+			return nil, err
+		}
+		nextRun, err := NextCronTime(resolved, time.Now())
+		if err != nil {
+			return nil, fmt.Errorf("invalid cron expression: %w", err)
+		}
+		st.CronExpr = resolved
+		st.NextRunAt = nextRun
+	}
+	if prompt != nil {
+		trimmed := strings.TrimSpace(*prompt)
+		if trimmed == "" {
+			return nil, fmt.Errorf("prompt cannot be empty")
+		}
+		st.Prompt = trimmed
+	}
+	if skillPaths != nil {
+		st.SkillPaths = *skillPaths
+	}
+	if active != nil {
+		st.Active = *active
+	}
+
+	if err := a.backend.UpdateScheduledTask(ctx, st); err != nil {
+		return nil, err
+	}
+	return st, nil
+}
+
+func (a *AgentAPI) DeleteSchedule(ctx context.Context, workspaceID uint, externalID string) error {
+	return a.backend.DeleteScheduledTask(ctx, workspaceID, externalID)
+}
+
 func normalizeOffsetPage(limit, offset, defaultLimit, maxLimit int) (int, int) {
 	if limit <= 0 {
 		limit = defaultLimit

@@ -15,6 +15,38 @@ package type_builder
 
 import baml "github.com/boundaryml/baml/engine/language_client_go/pkg"
 
+type CronResultClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *CronResultClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *CronResultClassView) PropertyCron_expr() (ClassPropertyView, error) {
+	return t.inner.Property("cron_expr")
+}
+
+func (t *TypeBuilder) CronResult() (*CronResultClassView, error) {
+	bld, err := t.inner.Class("CronResult")
+	if err != nil {
+		return nil, err
+	}
+	return &CronResultClassView{inner: bld}, nil
+}
+
+func (t *CronResultClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
 type GDriveQueryResultClassView struct {
 	inner baml.ClassBuilder
 }
