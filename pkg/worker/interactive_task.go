@@ -173,26 +173,20 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 
 	var checkHeartbeat func() bool
 	var touchHeartbeat func()
-	if heartbeatRunner, ok := runner.(HeartbeatRunner); ok {
-		if overlayRootfs := sandboxOverlayRootfsPath(w.sandboxManager, sandboxID); overlayRootfs != "" {
-			heartbeatPath := heartbeatRunner.HeartbeatPath(overlayRootfs)
-			if heartbeatPath != "" {
-				// Create the heartbeat file on the overlay so Chtimes works.
-				if f, err := os.Create(heartbeatPath); err == nil {
-					f.Close()
-				}
-				checkHeartbeat = func() bool {
-					return heartbeatRunner.CheckHeartbeat(overlayRootfs)
-				}
-				touchHeartbeat = func() {
-					now := time.Now()
-					_ = os.Chtimes(heartbeatPath, now, now)
-				}
-				addTaskExecutionContext(
-					log.Info().Str("runner", runner.Name()),
-					task,
-				).Msg("worker-driven heartbeat enabled")
+	if heartbeatRunner, ok := runner.(HeartbeatRunner); ok && mountSource != "" {
+		heartbeatPath, err := heartbeatRunner.SetupHeartbeat(mountSource, env)
+		if err != nil {
+			addTaskExecutionContext(log.Warn().Err(err).Str("runner", runner.Name()), task).
+				Msg("failed to install heartbeat hooks")
+		} else {
+			checkHeartbeat = func() bool {
+				return heartbeatRunner.CheckHeartbeat(heartbeatPath)
 			}
+			touchHeartbeat = func() {
+				_ = os.WriteFile(heartbeatPath, []byte(time.Now().Format(time.RFC3339Nano)), 0o644)
+			}
+			addTaskExecutionContext(log.Info().Str("runner", runner.Name()).Str("heartbeat", heartbeatPath), task).
+				Msg("heartbeat enabled via VFS")
 		}
 	}
 
@@ -594,14 +588,6 @@ func interactiveResult(err error, idleTimedOut bool) (int, string, types.RunExec
 	return -1, err.Error(), types.RunExecutionStatusFailed
 }
 
-func interactiveErrorResult(taskID string, err error) *types.RunExecutionResult {
-	return &types.RunExecutionResult{
-		ID:       taskID,
-		ExitCode: -1,
-		Error:    err.Error(),
-	}
-}
-
 type terminalOutputWriter struct {
 	ctx          context.Context
 	taskID       string
@@ -701,20 +687,6 @@ func signalActivity(activityCh chan<- struct{}) {
 	case activityCh <- struct{}{}:
 	default:
 	}
-}
-
-func sandboxOverlayRootfsPath(m *SandboxManager, sandboxID string) string {
-	if m == nil || strings.TrimSpace(sandboxID) == "" {
-		return ""
-	}
-
-	m.mu.RLock()
-	sandbox, exists := m.sandboxes[sandboxID]
-	m.mu.RUnlock()
-	if !exists || sandbox == nil || sandbox.Overlay == nil {
-		return ""
-	}
-	return sandbox.Overlay.TopLayerPath()
 }
 
 func monitorInteractiveSessionIdle(
