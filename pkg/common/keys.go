@@ -45,6 +45,7 @@ var (
 	hookConsumerGroup = "airstore:hook:evaluators"
 	hookSeen          = "airstore:hook:seen:%d:%s" // workspaceId, pathHash
 	hookPollLock      = "airstore:hook:poll:%s"    // queryExternalId
+	cronScheduleLock  = "airstore:cron:lock:%s"    // scheduleExternalId
 
 	// OAuth keys
 	oauthSession = "airstore:oauth:session:%s" // sessionId
@@ -60,21 +61,29 @@ var (
 	runExecutionLogsBuffer  = "airstore:run_execution:logs_buf:%s" // runExecutionId
 
 	// Task queue keys (high-level task ingress)
-	taskQueueKey          = "airstore:task:queue"
-	taskBacklogKey        = "airstore:task:backlog:%s"        // instanceKey
-	taskModeStateKey      = "airstore:task:mode:%s"           // modeKey
-	taskModeSetKey        = "airstore:task:mode:active"       // modeKey set
-	agentDispatchLock     = "airstore:agent:dispatch:lock:%s" // instanceKey
-	agentAttemptEvents    = "airstore:agent:attempt:events"
-	agentRunEventsChannel = "airstore:agent:run:%s:events"
-	agentRunEventsBuffer  = "airstore:agent:run:%s:events:buf"
-	agentRunRecoveryLock  = "airstore:agent:run:recovery:lock"
-	agentInstanceLock     = "airstore:agent:instance:lock:%s" // instanceKey
+	orchestrationTaskDispatchStream = "airstore:orchestration:task_dispatch:stream"
+	orchestrationTaskDispatchGroup  = "airstore:orchestration:task_dispatch:group"
+	orchestrationTaskDispatchDLQ    = "airstore:orchestration:task_dispatch:dlq"
+	orchestrationRunResultStream    = "airstore:orchestration:run_result:stream"
+	orchestrationRunResultGroup     = "airstore:orchestration:run_result:group"
+	orchestrationRunResultDLQ       = "airstore:orchestration:run_result:dlq"
+	agentAttemptEvents              = "airstore:agent:attempt:events"
+	agentRunEventsChannel           = "airstore:agent:run:%s:events"
+	agentRunEventsBuffer            = "airstore:agent:run:%s:events:buf"
+	agentRunRecoveryLock            = "airstore:agent:run:recovery:lock"
+	agentInstanceLock               = "airstore:agent:instance:lock:%s" // instanceKey
 
 	// Terminal IO keys (pub/sub channels)
-	terminalInput  = "airstore:terminal:%s:input"  // taskId
-	terminalOutput = "airstore:terminal:%s:output" // taskId
-	terminalCancel = "airstore:terminal:%s:cancel" // taskId
+	terminalInput       = "airstore:terminal:%s:input"        // taskId
+	terminalInputBuffer = "airstore:terminal:%s:input:buffer" // taskId
+	terminalOutput      = "airstore:terminal:%s:output"       // taskId
+	terminalCancel      = "airstore:terminal:%s:cancel"       // taskId
+
+	// Session lease — exclusive ownership of an interactive session.
+	sessionLease = "airstore:session:lease:%d:%s" // workspaceId, sessionId
+
+	// Run interaction state — backend-owned working/waiting/closed snapshot.
+	runInteraction = "airstore:run:interaction:%d:%s" // workspaceId, runId
 
 	// Compression keys — include strategy so each compressor caches independently
 	fsCompressedPointer = "airstore:compressed:%d:%s:%s:%s" // workspaceId, pathHash, resultId, strategy
@@ -205,6 +214,10 @@ func (rk *redisKeys) HookPollLock(queryExtId string) string {
 	return fmt.Sprintf(hookPollLock, queryExtId)
 }
 
+func (rk *redisKeys) CronScheduleLock(scheduleExtId string) string {
+	return fmt.Sprintf(cronScheduleLock, scheduleExtId)
+}
+
 // --- OAuth keys ---
 
 func (rk *redisKeys) OAuthSession(sessionId string) string {
@@ -245,26 +258,30 @@ func (rk *redisKeys) RunExecutionLogsBuffer(runExecutionID string) string {
 	return fmt.Sprintf(runExecutionLogsBuffer, runExecutionID)
 }
 
-// --- Task queue keys ---
+// --- Orchestration stream keys ---
 
-func (rk *redisKeys) TaskQueue() string {
-	return taskQueueKey
+func (rk *redisKeys) OrchestrationTaskDispatchStream() string {
+	return orchestrationTaskDispatchStream
 }
 
-func (rk *redisKeys) TaskBacklog(instanceKey string) string {
-	return fmt.Sprintf(taskBacklogKey, instanceKey)
+func (rk *redisKeys) OrchestrationTaskDispatchGroup() string {
+	return orchestrationTaskDispatchGroup
 }
 
-func (rk *redisKeys) TaskModeState(modeKey string) string {
-	return fmt.Sprintf(taskModeStateKey, modeKey)
+func (rk *redisKeys) OrchestrationTaskDispatchDLQ() string {
+	return orchestrationTaskDispatchDLQ
 }
 
-func (rk *redisKeys) TaskModeSet() string {
-	return taskModeSetKey
+func (rk *redisKeys) OrchestrationRunResultStream() string {
+	return orchestrationRunResultStream
 }
 
-func (rk *redisKeys) AgentDispatchLock(instanceKey string) string {
-	return fmt.Sprintf(agentDispatchLock, instanceKey)
+func (rk *redisKeys) OrchestrationRunResultGroup() string {
+	return orchestrationRunResultGroup
+}
+
+func (rk *redisKeys) OrchestrationRunResultDLQ() string {
+	return orchestrationRunResultDLQ
 }
 
 func (rk *redisKeys) AgentAttemptEvents() string {
@@ -293,12 +310,26 @@ func (rk *redisKeys) TerminalInput(taskId string) string {
 	return fmt.Sprintf(terminalInput, taskId)
 }
 
+func (rk *redisKeys) TerminalInputBuffer(taskId string) string {
+	return fmt.Sprintf(terminalInputBuffer, taskId)
+}
+
 func (rk *redisKeys) TerminalOutput(taskId string) string {
 	return fmt.Sprintf(terminalOutput, taskId)
 }
 
 func (rk *redisKeys) TerminalCancel(taskId string) string {
 	return fmt.Sprintf(terminalCancel, taskId)
+}
+
+// --- Session lease keys ---
+
+func (rk *redisKeys) SessionLease(workspaceId uint, sessionId string) string {
+	return fmt.Sprintf(sessionLease, workspaceId, sessionId)
+}
+
+func (rk *redisKeys) RunInteraction(workspaceId uint, runId string) string {
+	return fmt.Sprintf(runInteraction, workspaceId, runId)
 }
 
 // --- Compression keys ---

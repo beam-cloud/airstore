@@ -21,7 +21,7 @@ const rpcTimeout = 30 * time.Second // Per-RPC timeout for context operations
 
 // ContextVNodeGRPC implements VirtualNode for S3-backed context storage.
 // It supports all read and write operations. The prefix determines the
-// mount path (e.g., "/skills", "/memory").
+// mount path (e.g., "/skills").
 type ContextVNodeGRPC struct {
 	client      pb.ContextServiceClient
 	token       string
@@ -35,10 +35,11 @@ type ContextVNodeGRPC struct {
 	writes      map[string]map[FileHandle]*handleState
 	nextFH      FileHandle
 	mu          sync.Mutex
+	stopEvict   chan struct{}
 }
 
 // NewContextVNodeGRPC creates a new context virtual node with the given prefix.
-// The prefix determines the mount path (e.g., types.PathSkills, types.PathMemory).
+// The prefix determines the mount path (e.g., types.PathSkills).
 func NewContextVNodeGRPC(conn *grpc.ClientConn, token string, prefix string) *ContextVNodeGRPC {
 	c := &ContextVNodeGRPC{
 		client:      pb.NewContextServiceClient(conn),
@@ -52,6 +53,8 @@ func NewContextVNodeGRPC(conn *grpc.ClientConn, token string, prefix string) *Co
 		nextFH:      1,
 	}
 	c.asyncWriter = NewAsyncWriter(c.writeRange)
+	c.stopEvict = make(chan struct{})
+	go c.handleEvictionLoop()
 	return c
 }
 
@@ -92,12 +95,13 @@ func (c *ContextVNodeGRPC) Getattr(path string) (*FileInfo, error) {
 		return info, nil
 	}
 
-	// Check caches
-	if c.cache.IsNegative(path) {
-		return nil, fs.ErrNotExist
-	}
+	// Prefer positive metadata cache so fresh readdir/stat data can heal
+	// stale negative entries immediately.
 	if info := c.cache.GetInfo(path); info != nil {
 		return info, nil
+	}
+	if c.cache.IsNegative(path) {
+		return nil, fs.ErrNotExist
 	}
 
 	// RPC to backend for actual files/subdirectories
@@ -208,12 +212,12 @@ func (c *ContextVNodeGRPC) Open(path string, flags int) (FileHandle, error) {
 
 // openExisting opens an existing file and caches its metadata.
 func (c *ContextVNodeGRPC) openExisting(path string) (FileHandle, error) {
-	// Check cache first to avoid unnecessary RPC
-	if c.cache.IsNegative(path) {
-		return 0, fs.ErrNotExist
-	}
+	// Prefer positive cache so fresh metadata wins over stale negatives.
 	if c.cache.GetInfo(path) != nil {
 		return c.allocHandle(path), nil
+	}
+	if c.cache.IsNegative(path) {
+		return 0, fs.ErrNotExist
 	}
 
 	// Cache miss - verify file exists
@@ -311,6 +315,7 @@ func (c *ContextVNodeGRPC) Write(path string, buf []byte, off int64, fh FileHand
 		state.mu.Unlock()
 		return 0, fs.ErrInvalid
 	}
+	state.touch()
 
 	// Empty buffer: start buffering or write directly if too large.
 	if len(state.writeBuf) == 0 {
@@ -335,10 +340,19 @@ func (c *ContextVNodeGRPC) Write(path string, buf []byte, off int64, fh FileHand
 		return len(buf), nil
 	}
 
-	// Buffer overflow or non-contiguous: flush old buffer synchronously.
-	// We use synchronous writeRange here (not Enqueue) because the asyncWriter
-	// stores only ONE (offset, data) pair per path — sequential Enqueue calls
-	// at different offsets would clobber each other.
+	// Non-contiguous or buffer overflow. Try to merge both ranges in memory
+	// so the file reaches S3 as a single PutObject. Flushing a partial write
+	// at offset A followed by a gateway merge-write at offset B fills the gap
+	// [A+len(first), B) with NULLs when B > A+len(first).
+	merged := mergeWriteBuffer(state.writeOff, state.writeBuf, off, buf)
+	if merged != nil && len(merged.data) <= writeBufferMax {
+		state.writeOff = merged.off
+		state.writeBuf = merged.data
+		state.mu.Unlock()
+		return len(buf), nil
+	}
+
+	// Combined range too large: flush old buffer synchronously then start fresh.
 	data := append([]byte(nil), state.writeBuf...)
 	writeOff := state.writeOff
 	state.writeBuf = nil
@@ -637,7 +651,7 @@ func (c *ContextVNodeGRPC) allocHandle(path string) FileHandle {
 	defer c.mu.Unlock()
 	fh := c.nextFH
 	c.nextFH++
-	state := &handleState{path: path}
+	state := &handleState{path: path, lastActivity: time.Now()}
 	c.handles[fh] = state
 
 	c.writeMu.Lock()
@@ -695,12 +709,14 @@ func (c *ContextVNodeGRPC) readRange(path string, off int64, length int64) ([]by
 		return nil, err
 	}
 	if !resp.Ok {
-		return nil, fs.ErrNotExist
+		return nil, readResponseError(resp.Error)
 	}
 	return resp.Data, nil
 }
 
 func (c *ContextVNodeGRPC) writeRange(path string, off int64, data []byte) error {
+	off, data = compactNulls(off, data)
+
 	ctx, cancel := c.ctx()
 	defer cancel()
 
@@ -723,6 +739,7 @@ func (c *ContextVNodeGRPC) recordRead(state *handleState, path string, off int64
 	}
 
 	state.mu.Lock()
+	state.touch()
 	sequential := state.lastSize > 0 && state.lastOff+int64(state.lastSize) == off
 	state.lastOff = off
 	state.lastSize = n
@@ -812,6 +829,7 @@ func (c *ContextVNodeGRPC) flushWriteBuffer(path string, state *handleState) {
 	state.writeBuf = nil
 	state.mu.Unlock()
 
+	writeOff, data = compactNulls(writeOff, data)
 	c.asyncWriter.Enqueue(path, writeOff, data)
 }
 
@@ -903,9 +921,72 @@ func (c *ContextVNodeGRPC) bufferedHandleSize(path string) (int64, bool) {
 	return size, ok
 }
 
-// Cleanup flushes all pending async writes. Called when filesystem is unmounted.
+func (c *ContextVNodeGRPC) OpenHandleCount() int {
+	c.mu.Lock()
+	n := len(c.handles)
+	c.mu.Unlock()
+	return n
+}
+
+// Cleanup stops background goroutines and flushes all pending async writes.
 func (c *ContextVNodeGRPC) Cleanup() {
+	close(c.stopEvict)
 	c.asyncWriter.Cleanup()
+}
+
+func (c *ContextVNodeGRPC) handleEvictionLoop() {
+	ticker := time.NewTicker(handleEvictionInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.stopEvict:
+			return
+		case <-ticker.C:
+			c.evictStaleHandles()
+		}
+	}
+}
+
+func (c *ContextVNodeGRPC) evictStaleHandles() {
+	cutoff := time.Now().Add(-handleStaleTimeout)
+
+	c.mu.Lock()
+	stale := make(map[FileHandle]*handleState)
+	for fh, state := range c.handles {
+		state.mu.Lock()
+		if !state.closed && state.lastActivity.Before(cutoff) {
+			stale[fh] = state
+		}
+		state.mu.Unlock()
+	}
+	c.mu.Unlock()
+
+	for fh, state := range stale {
+		c.flushWriteBuffer(state.path, state)
+		_ = c.asyncWriter.ForceFlush(state.path)
+
+		c.mu.Lock()
+		state.mu.Lock()
+		state.closed = true
+		state.writeBuf = nil
+		state.prefetch = nil
+		state.mu.Unlock()
+		delete(c.handles, fh)
+		c.mu.Unlock()
+
+		c.writeMu.Lock()
+		if m, ok := c.writes[state.path]; ok {
+			delete(m, fh)
+			if len(m) == 0 {
+				delete(c.writes, state.path)
+			}
+		}
+		c.writeMu.Unlock()
+
+		log.Debug().Str("path", state.path).Uint64("fh", uint64(fh)).
+			Msg("evicted stale file handle")
+	}
 }
 
 // cachedMode returns the file mode from the metadata cache, or 0 if not cached.

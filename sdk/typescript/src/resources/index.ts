@@ -9,3 +9,4 @@ export { Agents } from './agents.js';
 export { Tasks } from './tasks.js';
 export { Runs } from './runs.js';
 export { Channels } from './channels.js';
+export { Hooks } from './hooks.js';

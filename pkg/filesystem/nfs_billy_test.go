@@ -14,7 +14,7 @@ func TestBillyFSCleanPathNormalizesRoot(t *testing.T) {
 		{in: "/", want: "/"},
 		{in: "/.", want: "/"},
 		{in: "tools", want: "/tools"},
-		{in: "tools/../memory", want: "/memory"},
+		{in: "tools/../skills", want: "/skills"},
 	}
 
 	for _, tc := range cases {

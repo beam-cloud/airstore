@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/common"
@@ -59,7 +61,18 @@ type Sandbox struct {
 	Rootfs  func() // cleanup function
 	Output  io.Writer
 	Flush   func()
+
+	// done is closed when the Run() goroutine exits. Delete waits on this
+	// so it doesn't race with the runtime supervisor process.
+	done chan struct{}
 }
+
+const (
+	sandboxKillTimeout       = 2 * time.Second
+	sandboxDeleteTimeout     = 2 * time.Second
+	sandboxRunDrainTimeout   = 5 * time.Second
+	sandboxForceDrainTimeout = 2 * time.Second
+)
 
 // Config for creating a SandboxManager.
 type Config struct {
@@ -496,6 +509,7 @@ func (m *SandboxManager) Start(sandboxID string) error {
 	// Create a cancellable context for this sandbox
 	sandboxCtx, cancel := context.WithCancel(m.ctx)
 	sandbox.Cancel = cancel
+	sandbox.done = make(chan struct{})
 	sandbox.State.Status = types.SandboxStatusCreating
 	m.mu.Unlock()
 
@@ -512,20 +526,21 @@ func (m *SandboxManager) Start(sandboxID string) error {
 
 	// Start the container in a goroutine
 	started := make(chan int, 1)
+	doneCh := sandbox.done
 	runDone := make(chan struct {
 		exitCode int
 		err      error
 	}, 1)
 	go func() {
+		defer close(doneCh)
+
 		opts := &runtime.RunOpts{
 			Started:      started,
-			OutputWriter: outputWriter, // Capture stdout/stderr
+			OutputWriter: outputWriter,
 		}
 
-		// Run the container (blocks until exit)
 		exitCode, err := m.runtime.Run(sandboxCtx, sandboxID, sandbox.Bundle, opts)
 
-		// Wait for PID notification
 		select {
 		case pid := <-started:
 			m.mu.Lock()
@@ -538,24 +553,35 @@ func (m *SandboxManager) Start(sandboxID string) error {
 		default:
 		}
 
-		// Update state on exit
+		expectedTeardownExit := isSandboxTeardownError(err)
+
 		m.mu.Lock()
 		if s, ok := m.sandboxes[sandboxID]; ok {
 			s.State.Status = types.SandboxStatusStopped
 			s.State.ExitCode = exitCode
 			s.State.FinishedAt = time.Now()
-			if err != nil {
+			if err != nil && !expectedTeardownExit {
 				s.State.Error = err.Error()
 				s.State.Status = types.SandboxStatusFailed
+			} else {
+				s.State.Error = ""
 			}
 		}
 		m.mu.Unlock()
 
-		log.Info().
-			Str("sandbox_id", sandboxID).
-			Int("exit_code", exitCode).
-			Err(err).
-			Msg("sandbox exited")
+		if err != nil && expectedTeardownExit {
+			log.Debug().
+				Str("sandbox_id", sandboxID).
+				Int("exit_code", exitCode).
+				Err(err).
+				Msg("sandbox exited during teardown")
+		} else {
+			log.Info().
+				Str("sandbox_id", sandboxID).
+				Int("exit_code", exitCode).
+				Err(err).
+				Msg("sandbox exited")
+		}
 		runDone <- struct {
 			exitCode int
 			err      error
@@ -661,10 +687,13 @@ func isInteractiveBootstrapEntrypoint(entrypoint []string) bool {
 		strings.TrimSpace(entrypoint[1]) == "infinity"
 }
 
-// Stop stops a running sandbox
+// Stop stops a running sandbox by signalling container processes.
+// Non-force sends SIGTERM; force sends SIGKILL. Neither cancels the
+// sandbox context — that is handled by Delete after waiting for the
+// Run() goroutine to drain.
 func (m *SandboxManager) Stop(sandboxID string, force bool) error {
 	m.mu.RLock()
-	sandbox, exists := m.sandboxes[sandboxID]
+	_, exists := m.sandboxes[sandboxID]
 	m.mu.RUnlock()
 
 	if !exists {
@@ -676,19 +705,19 @@ func (m *SandboxManager) Stop(sandboxID string, force bool) error {
 		Bool("force", force).
 		Msg("stopping sandbox")
 
-	// Cancel the sandbox context
-	if sandbox.Cancel != nil {
-		sandbox.Cancel()
-	}
-
-	// Kill the container
 	opts := &runtime.KillOpts{All: true}
-	if err := m.runtime.Kill(m.ctx, sandboxID, 15, opts); err != nil { // SIGTERM
-		if !force {
+	killSignal := syscall.SIGTERM
+	if force {
+		killSignal = syscall.SIGKILL
+	}
+	killCtx, killCancel := context.WithTimeout(m.ctx, sandboxKillTimeout)
+	defer killCancel()
+	if err := m.runtime.Kill(killCtx, sandboxID, killSignal, opts); err != nil {
+		if isContainerAlreadyStopped(err) {
+			log.Debug().Str("sandbox_id", sandboxID).Msg("container already stopped, skipping kill")
+		} else if !force {
 			return fmt.Errorf("failed to kill sandbox: %w", err)
-		}
-		// Force kill with SIGKILL
-		if err := m.runtime.Kill(m.ctx, sandboxID, 9, opts); err != nil {
+		} else {
 			log.Warn().Err(err).Str("sandbox_id", sandboxID).Msg("force kill failed")
 		}
 	}
@@ -696,7 +725,53 @@ func (m *SandboxManager) Stop(sandboxID string, force bool) error {
 	return nil
 }
 
-// Delete removes a sandbox and cleans up resources
+// isContainerAlreadyStopped returns true when a runtime kill error
+// indicates the container has already exited. Both runsc and runc
+// return exit code 128 in this case.
+func isContainerAlreadyStopped(err error) bool {
+	if err == nil {
+		return false
+	}
+	var exitErr *exec.ExitError
+	if ok := errors.As(err, &exitErr); ok {
+		return exitErr.ExitCode() == 128
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "container not running") ||
+		strings.Contains(msg, "container is not running") ||
+		strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "does not exist")
+}
+
+func isSandboxTeardownError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if exitErr.ExitCode() == 137 {
+			return true
+		}
+		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
+			return status.Signaled() && status.Signal() == syscall.SIGKILL
+		}
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "signal: killed") ||
+		strings.Contains(msg, "context canceled") ||
+		strings.Contains(msg, "context deadline exceeded")
+}
+
+// Delete removes a sandbox and cleans up resources.
+//
+// The teardown sequence avoids racing with the runtime supervisor:
+//  1. Stop container processes (SIGTERM or SIGKILL depending on force)
+//  2. Wait for the Run() goroutine to finish so runsc exits cleanly
+//  3. Only cancel the sandbox context as a fallback if Run() doesn't drain
+//  4. runtime.Delete to clean up any residual state
 func (m *SandboxManager) Delete(sandboxID string, force bool) error {
 	m.mu.Lock()
 	sandbox, exists := m.sandboxes[sandboxID]
@@ -711,17 +786,56 @@ func (m *SandboxManager) Delete(sandboxID string, force bool) error {
 		Bool("force", force).
 		Msg("deleting sandbox")
 
-	// Stop if running
+	// Step 1: Stop container processes if still running.
 	if sandbox.State.Status == types.SandboxStatusRunning {
 		if err := m.Stop(sandboxID, force); err != nil && !force {
 			return fmt.Errorf("failed to stop sandbox: %w", err)
 		}
 	}
 
-	// Delete from runtime
+	// Step 2: Wait for the Run() goroutine to exit so the runtime supervisor
+	// (runsc) can finish its own cleanup before we try to delete.
+	if sandbox.done != nil {
+		drainTimeout := sandboxRunDrainTimeout
+		if force {
+			drainTimeout = sandboxForceDrainTimeout
+		}
+		select {
+		case <-sandbox.done:
+		case <-time.After(drainTimeout):
+			log.Warn().
+				Str("sandbox_id", sandboxID).
+				Dur("timeout", drainTimeout).
+				Msg("timed out waiting for sandbox run goroutine; forcing context cancel")
+			if sandbox.Cancel != nil {
+				sandbox.Cancel()
+			}
+			select {
+			case <-sandbox.done:
+			case <-time.After(sandboxForceDrainTimeout):
+			}
+		}
+	} else if sandbox.Cancel != nil {
+		sandbox.Cancel()
+	}
+
+	// Step 3: Ensure context is cancelled for any remaining goroutines.
+	if sandbox.Cancel != nil {
+		sandbox.Cancel()
+	}
+
+	// Step 4: Ask the runtime to clean up residual container state.
+	// The Run() goroutine's deferred delete should have handled this already,
+	// but we do it explicitly to be safe.
 	opts := &runtime.DeleteOpts{Force: force}
-	if err := m.runtime.Delete(m.ctx, sandboxID, opts); err != nil {
-		log.Warn().Err(err).Str("sandbox_id", sandboxID).Msg("runtime delete failed")
+	deleteCtx, deleteCancel := context.WithTimeout(m.ctx, sandboxDeleteTimeout)
+	defer deleteCancel()
+	if err := m.runtime.Delete(deleteCtx, sandboxID, opts); err != nil {
+		if isContainerAlreadyStopped(err) || isSandboxTeardownError(err) {
+			log.Debug().Err(err).Str("sandbox_id", sandboxID).Msg("runtime delete skipped; container already cleaned up")
+		} else {
+			log.Warn().Err(err).Str("sandbox_id", sandboxID).Msg("runtime delete failed")
+		}
 	}
 
 	// Clean up bundle directory
@@ -969,8 +1083,10 @@ func (m *SandboxManager) addFilesystemMount(spec *specs.Spec, source string, rea
 
 	entries, _ := os.ReadDir(source)
 
-	// Bind mount at container working directory
-	options := []string{"rbind"}
+	// Bind mount at container working directory.
+	// rslave propagation lets mount restarts on the host propagate into the
+	// sandbox, which is necessary for recovery after a FUSE mount process crash.
+	options := []string{"rbind", "rslave"}
 	if readOnly {
 		options = append(options, "ro")
 	} else {

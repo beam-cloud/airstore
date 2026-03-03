@@ -14,10 +14,9 @@ import (
 )
 
 const (
-	cacheSize        = 10000
-	cacheTTL         = 60 * time.Second // S3 metadata is stable; longer TTL reduces API calls
-	negativeCacheTTL = 10 * time.Second // Missing files may appear soon
-
+	cacheSize           = 10000
+	cacheTTL            = 60 * time.Second // S3 metadata is stable; longer TTL reduces API calls
+	negativeCacheTTL    = 2 * time.Second  // Missing files may appear soon (kept short for external creates)
 	contentCacheEntries = 1024
 	contentCacheTTL     = 2 * time.Minute
 	smallFileMaxSize    = 128 * 1024 // Cache small files only (128KB)
@@ -147,6 +146,9 @@ func (c *MetadataCache) Set(p string, info *FileInfo) {
 // SetWithChildren caches directory with enriched child metadata
 func (c *MetadataCache) SetWithChildren(p string, children []DirEntry, childMeta map[string]*FileInfo) {
 	c.negative.Remove(p)
+	for _, child := range children {
+		c.negative.Remove(path.Join(p, child.Name))
+	}
 	c.entries.Add(p, &CacheEntry{
 		Info:      NewDirInfo(PathIno(p)),
 		Children:  children,
@@ -688,6 +690,54 @@ func (v *SourcesVNode) doBackgroundRefresh() {
 	}
 
 	v.cleanupOldRecentDirs()
+	v.cleanupExpiredCaches()
+}
+
+// cleanupExpiredCaches removes expired entries from unbounded maps that only
+// check TTL on read but never evict. Without this, maps grow indefinitely
+// during long-running sessions.
+func (v *SourcesVNode) cleanupExpiredCaches() {
+	now := time.Now()
+
+	v.resultsMu.Lock()
+	for k, r := range v.results {
+		if now.After(r.expiresAt) {
+			delete(v.results, k)
+		}
+	}
+	v.resultsMu.Unlock()
+
+	v.queriesMu.Lock()
+	for k, q := range v.queries {
+		if now.After(q.expiresAt) {
+			delete(v.queries, k)
+		}
+	}
+	v.queriesMu.Unlock()
+
+	v.integrationsMu.Lock()
+	for k, i := range v.integrations {
+		if now.After(i.expiresAt) {
+			delete(v.integrations, k)
+		}
+	}
+	v.integrationsMu.Unlock()
+
+	v.statsMu.Lock()
+	for k, s := range v.stats {
+		if now.After(s.expiresAt) {
+			delete(v.stats, k)
+		}
+	}
+	v.statsMu.Unlock()
+
+	v.openMu.Lock()
+	for k, c := range v.openContent {
+		if c.refs == 0 && now.Sub(c.cachedAt) > prefetchTTL {
+			delete(v.openContent, k)
+		}
+	}
+	v.openMu.Unlock()
 }
 
 // refreshIntegrations refreshes the integration list cache.

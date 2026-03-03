@@ -805,7 +805,6 @@ func (g *FilesystemGroup) listRootDirectories(ctx context.Context) []types.Virtu
 		*types.NewRootFolder(types.DirNameSources, types.PathSources),
 		*types.NewRootFolder(types.DirNameTools, types.PathTools),
 		*types.NewRootFolder(types.DirNameTasks, types.PathTasks),
-		*types.NewRootFolder(types.DirNameMemory, types.PathMemory),
 	}
 
 	if g.toolRegistry != nil {

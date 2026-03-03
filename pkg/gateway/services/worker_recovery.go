@@ -16,20 +16,17 @@ import (
 
 const defaultRecoveryLockTTL = 15 * time.Second
 const terminalQueueReconcileGracePeriod = 5 * time.Second
-
 type orphanRecoveryStats struct {
-	detected       int
-	recovered      int
-	retryScheduled int
-	exhausted      int
+	detected    int
+	recovered   int
+	cleanupOnly int
 }
 
 type orphanRecoveryOutcome struct {
-	detected       bool
-	recovered      bool
-	retryScheduled bool
+	detected    bool
+	recovered   bool
+	cleanupOnly bool
 }
-
 func (s *WorkerService) StartRecoveryLoop(ctx context.Context) {
 	if s == nil || !s.recoveryLoopEnabled {
 		return
@@ -43,10 +40,8 @@ func (s *WorkerService) StartRecoveryLoop(ctx context.Context) {
 	log.Info().
 		Dur("interval", s.recoveryInterval).
 		Int("batch_size", s.recoveryBatchSize).
-		Dur("unclaimed_stale_after", s.unclaimedStaleDuration()).
 		Msg("worker orphan recovery loop started")
 }
-
 func (s *WorkerService) recoveryLoop(ctx context.Context) {
 	if s.recoveryInterval <= 0 {
 		s.recoveryInterval = 10 * time.Second
@@ -141,34 +136,23 @@ func (s *WorkerService) runRecoveryCycle(ctx context.Context) {
 		s.applyRecoveryOutcome(&stats, outcome)
 	}
 
-	cutoff := now.Add(-s.unclaimedStaleDuration())
-	staleUnclaimedRuns, err := s.backend.ListStaleUnclaimedAgentRuns(ctx, cutoff, s.recoveryBatchSize)
-	if err != nil {
-		log.Warn().Err(err).Msg("worker recovery loop: failed to list stale unclaimed runs")
-		return
-	}
-	for _, run := range staleUnclaimedRuns {
-		if run == nil || strings.TrimSpace(run.ID) == "" {
-			continue
-		}
-		if _, dup := seenRuns[run.ID]; dup {
-			continue
-		}
-		seenRuns[run.ID] = struct{}{}
-		outcome, recErr := s.processStaleUnclaimedRun(ctx, run)
-		if recErr != nil {
-			log.Warn().Err(recErr).Str("run_id", run.ID).Msg("worker recovery loop: failed to recover stale unclaimed run")
-			continue
-		}
-		s.applyRecoveryOutcome(&stats, outcome)
-	}
-
 	if stats.detected > 0 || stats.recovered > 0 {
+		if s.taskQueue != nil && stats.detected > 0 && stats.recovered == 0 {
+			inFlight, inFlightErr := s.taskQueue.InFlightCount(ctx)
+			if inFlightErr != nil {
+				log.Warn().Err(inFlightErr).Msg("worker recovery loop: failed to inspect in-flight queue depth")
+			} else if inFlight > 0 {
+				log.Warn().
+					Int("orphan_detected", stats.detected).
+					Int64("in_flight", inFlight).
+					Msg("worker recovery loop: orphans detected but none recovered while in-flight tasks remain")
+			}
+		}
+
 		log.Info().
 			Int("orphan_detected", stats.detected).
 			Int("orphan_recovered", stats.recovered).
-			Int("orphan_retry_scheduled", stats.retryScheduled).
-			Int("orphan_exhausted", stats.exhausted).
+			Int("orphan_cleanup_only", stats.cleanupOnly).
 			Msg("worker recovery loop cycle complete")
 	}
 }
@@ -182,11 +166,9 @@ func (s *WorkerService) applyRecoveryOutcome(stats *orphanRecoveryStats, outcome
 		return
 	}
 	stats.recovered++
-	if outcome.retryScheduled {
-		stats.retryScheduled++
-		return
+	if outcome.cleanupOnly {
+		stats.cleanupOnly++
 	}
-	stats.exhausted++
 }
 
 func (s *WorkerService) processExpiredClaimRun(ctx context.Context, now time.Time, run *types.AgentRun) (orphanRecoveryOutcome, error) {
@@ -207,27 +189,11 @@ func (s *WorkerService) processExpiredClaimRun(ctx context.Context, now time.Tim
 		return orphanRecoveryOutcome{}, nil
 	}
 
-	recovered, retryScheduled, err := s.recoverOrphanedRun(ctx, run, "claim_lease_expired")
+	recovered, cleanupOnly, err := s.recoverOrphanedRun(ctx, run, "claim_lease_expired")
 	return orphanRecoveryOutcome{
-		detected:       true,
-		recovered:      recovered,
-		retryScheduled: retryScheduled,
-	}, err
-}
-
-func (s *WorkerService) processStaleUnclaimedRun(ctx context.Context, run *types.AgentRun) (orphanRecoveryOutcome, error) {
-	if run == nil || !run.Status.IsActive() || run.ClaimedByWorker != nil {
-		return orphanRecoveryOutcome{}, nil
-	}
-	if !s.shouldRecoverUnclaimedRun(ctx, run) {
-		return orphanRecoveryOutcome{}, nil
-	}
-
-	recovered, retryScheduled, err := s.recoverOrphanedRun(ctx, run, "unclaimed_run_stale")
-	return orphanRecoveryOutcome{
-		detected:       true,
-		recovered:      recovered,
-		retryScheduled: retryScheduled,
+		detected:    true,
+		recovered:   recovered,
+		cleanupOnly: cleanupOnly,
 	}, err
 }
 
@@ -258,51 +224,36 @@ func (s *WorkerService) processClaimedRun(ctx context.Context, run *types.AgentR
 		}
 		exitCode = result.ExitCode
 	}
+	attempt, attemptErr := s.lookupRunAttemptByExecutionID(ctx, run.ID)
+	if attemptErr != nil {
+		return orphanRecoveryOutcome{}, attemptErr
+	}
+	if attempt == nil || strings.TrimSpace(attempt.ID) == "" {
+		return orphanRecoveryOutcome{}, fmt.Errorf("run attempt mapping not found for run %s", run.ID)
+	}
 	_, setErr := s.SetTaskResult(ctx, &pb.SetTaskResultRequest{
-		TaskId:   run.ID,
-		ExitCode: int32(exitCode),
-		Error:    errText,
+		TaskId:    run.ID,
+		AttemptId: strings.TrimSpace(attempt.ID),
+		ExitCode:  int32(exitCode),
+		Error:     errText,
 	})
 	if setErr != nil {
 		return orphanRecoveryOutcome{}, setErr
+	}
+	if completeErr := s.taskQueue.Complete(ctx, run.ID, &types.RunExecutionResult{
+		ID:       run.ID,
+		ExitCode: exitCode,
+		Error:    errText,
+	}); completeErr != nil {
+		log.Warn().
+			Err(completeErr).
+			Str("run_id", run.ID).
+			Msg("worker recovery loop: failed to reconcile terminal queue state after run finalization")
 	}
 	return orphanRecoveryOutcome{
 		detected:  true,
 		recovered: true,
 	}, nil
-}
-
-func (s *WorkerService) shouldRecoverUnclaimedRun(ctx context.Context, run *types.AgentRun) bool {
-	if run == nil {
-		return false
-	}
-	if s.taskQueue == nil {
-		return true
-	}
-
-	state, err := s.taskQueue.GetState(ctx, run.ID)
-	if err != nil || state == nil {
-		// Missing state for an old active run is suspicious enough to recover.
-		return true
-	}
-
-	switch state.Status {
-	case types.RunExecutionStatusPending, types.RunExecutionStatusScheduled:
-		// Still queued, not orphaned.
-		return false
-	case types.RunExecutionStatusRunning:
-		workerID := strings.TrimSpace(state.WorkerID)
-		if workerID == "" || s.workerRepo == nil {
-			return true
-		}
-		worker, err := s.workerRepo.GetWorker(ctx, workerID)
-		if err != nil {
-			return true
-		}
-		return time.Since(worker.LastSeenAt) > s.claimLeaseDuration()
-	default:
-		return true
-	}
 }
 
 func (s *WorkerService) recoverOrphanedRun(ctx context.Context, run *types.AgentRun, reason string) (bool, bool, error) {
@@ -314,11 +265,30 @@ func (s *WorkerService) recoverOrphanedRun(ctx context.Context, run *types.Agent
 	if attemptErr != nil {
 		return false, false, attemptErr
 	}
-	if attempt != nil && !isRunAttemptActive(attempt) {
-		return false, false, nil
+	attemptActive := attempt != nil && isRunAttemptActive(attempt)
+	if attempt != nil && !attemptActive {
+		log.Info().
+			Str("run_id", run.ID).
+			Str("attempt_id", attempt.ID).
+			Str("attempt_status", string(attempt.Status)).
+			Msg("worker recovery loop: run attempt is stale, reconciling queue/result without scheduling retry")
 	}
 
 	errorMsg := fmt.Sprintf("orphaned run recovered automatically: %s", reason)
+
+	// Close the interaction state so the UI doesn't show a stale
+	// "waiting for input" / "working" indicator for a dead session.
+	if s.terminalIO != nil {
+		if err := s.terminalIO.SetRunInteraction(
+			ctx, run.WorkspaceID, run.ID,
+			types.RunInteractionStateClosed, "",
+			5*time.Minute,
+		); err != nil {
+			log.Warn().Err(err).Str("run_id", run.ID).
+				Msg("worker recovery loop: failed to close interaction state for orphaned run")
+		}
+	}
+
 	if s.taskQueue != nil {
 		if err := s.taskQueue.Fail(ctx, run.ID, fmt.Errorf("%s", errorMsg)); err != nil {
 			log.Warn().
@@ -335,31 +305,59 @@ func (s *WorkerService) recoverOrphanedRun(ctx context.Context, run *types.Agent
 		}
 	}
 
-	if attempt == nil {
+	if !attemptActive {
 		_ = s.markOriginTaskTerminalIfCurrentRun(ctx, run.ID)
+		return true, true, nil
+	}
+	_, setErr := s.SetTaskResult(ctx, &pb.SetTaskResultRequest{
+		TaskId:    run.ID,
+		AttemptId: strings.TrimSpace(attempt.ID),
+		ExitCode:  -1,
+		Error:     errorMsg,
+	})
+	if setErr != nil {
+		fallbackErr := s.finalizeOrphanedRunDirect(ctx, attempt, run.ID, -1, errorMsg)
+		if fallbackErr != nil {
+			return false, false, fmt.Errorf("set orphaned run result: %w; direct fallback failed: %v", setErr, fallbackErr)
+		}
+		log.Warn().
+			Err(setErr).
+			Str("run_id", run.ID).
+			Str("attempt_id", attempt.ID).
+			Msg("failed to enqueue orphaned run result; applied direct finalization fallback")
 		return true, false, nil
 	}
-
-	retryScheduled, err := s.finalizeRunAttempt(
-		ctx,
-		attempt,
-		run.ID,
-		-1,
-		errorMsg,
-		types.AgentRunEventOrphanRecovered,
-		map[string]any{
-			"recovery_reason": reason,
-			"recovery_mode":   "automatic",
-		},
-	)
-	return true, retryScheduled, err
+	return true, false, nil
 }
 
-func (s *WorkerService) unclaimedStaleDuration() time.Duration {
-	if s.unclaimedStaleAfter > 0 {
-		return s.unclaimedStaleAfter
+func (s *WorkerService) finalizeOrphanedRunDirect(
+	ctx context.Context,
+	attempt *types.AgentRunAttempt,
+	taskID string,
+	exitCode int,
+	errText string,
+) error {
+	if s == nil || s.backend == nil || attempt == nil {
+		return nil
 	}
-	return defaultUnclaimedRunStaleAfter
+	now := time.Now()
+	attemptStatus, runStatus, errMsg := types.ClassifyExecutionOutcome(exitCode, errText)
+	if err := s.backend.UpdateAgentRunAttemptResult(ctx, attempt.ID, attemptStatus, &exitCode, now, errMsg); err != nil {
+		return err
+	}
+	if err := s.backend.UpdateAgentRunLifecycle(ctx, attempt.RunID, runStatus, nil, &now, errMsg); err != nil {
+		return err
+	}
+	_ = appendRunSnapshot(ctx, s.backend, attempt.RunID, runStatus, nil, &now, errMsg, map[string]any{
+		types.AgentRunEventPayloadKeyAttemptID: attempt.ID,
+		types.AgentRunEventPayloadKeyTaskID:    taskID,
+		types.AgentRunEventPayloadKeyExitCode:  exitCode,
+		types.AgentRunEventPayloadKeyError:     errText,
+		types.AgentRunEventPayloadKeyEvent:     string(types.AgentRunEventOrphanRecovered),
+		"recovery_mode":                        "direct_fallback",
+	})
+	_ = updateExecutionInstanceCounts(ctx, s.backend, attempt.RunID, -1)
+	return s.markOriginTaskTerminalIfCurrentRun(ctx, attempt.RunID)
 }
 
 func runExecutionStateIsTerminal(status types.RunExecutionStatus) bool {

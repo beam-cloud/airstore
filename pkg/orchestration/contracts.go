@@ -29,6 +29,7 @@ type RoutingContext struct {
 type AgentCommandParams struct {
 	Message           string              `json:"message"`
 	AgentID           *string             `json:"agent_id,omitempty"`
+	HookID            *uint               `json:"hook_id,omitempty"`
 	SessionID         string              `json:"session_id"`
 	SessionKey        *string             `json:"session_key,omitempty"`
 	Deliver           *bool               `json:"deliver,omitempty"`

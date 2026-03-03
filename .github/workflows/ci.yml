@@ -35,6 +35,10 @@ jobs:
           # Skip filesystem package - requires FUSE headers and privileged access
           go test -v -race -coverprofile=coverage.out $(go list ./pkg/... | grep -v '/filesystem')
 
+      - name: Hook burst/session contention gate
+        run: |
+          bash e2e/run.sh hooks-burst
+
       - name: Upload coverage
         uses: codecov/codecov-action@v4
         with:

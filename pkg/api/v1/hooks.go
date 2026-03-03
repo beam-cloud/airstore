@@ -11,6 +11,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/labstack/echo/v4"
+	"github.com/rs/zerolog/log"
 )
 
 type HooksGroup struct {
@@ -33,12 +34,19 @@ func (hg *HooksGroup) Create(c echo.Context) error {
 	ctx := c.Request().Context()
 
 	var req struct {
-		Path      string `json:"path"`
-		Prompt    string `json:"prompt"`
-		SkillPath string `json:"skill_path"`
+		Path       string             `json:"path"`
+		Prompt     string             `json:"prompt"`
+		SkillPath  string             `json:"skill_path"`
+		SkillPaths []string           `json:"skill_paths"`
+		EventTypes []string           `json:"event_types"`
+		AgentName  *string            `json:"agent_name,omitempty"`
+		AgentCfg   *hookAgentConfigIn `json:"agent_config,omitempty"`
 	}
-	if err := c.Bind(&req); err != nil || req.Path == "" {
+	if err := c.Bind(&req); err != nil || strings.TrimSpace(req.Path) == "" {
 		return ErrorResponse(c, http.StatusBadRequest, "path required")
+	}
+	if strings.TrimSpace(req.Prompt) == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "prompt required")
 	}
 
 	ws, err := hg.backend.GetWorkspaceByExternalId(ctx, c.Param("workspace_id"))
@@ -69,9 +77,30 @@ func (hg *HooksGroup) Create(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, "authentication token required")
 	}
 
-	hook, err := hg.svc.Create(ctx, ws.Id, memberId, tokenId, rawToken, req.Path, req.Prompt, req.SkillPath)
+	skillPaths := req.SkillPaths
+	if len(skillPaths) == 0 && strings.TrimSpace(req.SkillPath) != "" {
+		skillPaths = []string{req.SkillPath}
+	}
+
+	hook, err := hg.svc.Create(
+		ctx,
+		ws.Id,
+		memberId,
+		tokenId,
+		rawToken,
+		req.Path,
+		req.Prompt,
+		skillPaths,
+		req.EventTypes,
+		buildAgentPatch(req.AgentName, req.AgentCfg),
+	)
 	if err != nil {
-		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+		log.Error().Err(err).Str("workspace", ws.ExternalId).Str("path", req.Path).Msg("hook create failed")
+		status := http.StatusInternalServerError
+		if isHookConflictErr(err) {
+			status = http.StatusConflict
+		}
+		return ErrorResponse(c, status, err.Error())
 	}
 
 	return c.JSON(http.StatusCreated, Response{Success: true, Data: hookJSON(hook, ws.ExternalId)})
@@ -109,17 +138,50 @@ func (hg *HooksGroup) Get(c echo.Context) error {
 
 func (hg *HooksGroup) Update(c echo.Context) error {
 	var req struct {
-		Prompt    *string `json:"prompt,omitempty"`
-		Active    *bool   `json:"active,omitempty"`
-		SkillPath *string `json:"skill_path,omitempty"`
+		Prompt     *string            `json:"prompt,omitempty"`
+		Active     *bool              `json:"active,omitempty"`
+		SkillPath  *string            `json:"skill_path,omitempty"`
+		SkillPaths *[]string          `json:"skill_paths,omitempty"`
+		EventTypes *[]string          `json:"event_types,omitempty"`
+		AgentName  *string            `json:"agent_name,omitempty"`
+		AgentCfg   *hookAgentConfigIn `json:"agent_config,omitempty"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid request")
 	}
 
-	hook, err := hg.svc.Update(c.Request().Context(), c.Param("id"), req.Prompt, req.Active, req.SkillPath)
+	var skillPaths *[]string
+	switch {
+	case req.SkillPaths != nil:
+		values := append([]string(nil), (*req.SkillPaths)...)
+		if len(values) == 0 && req.SkillPath != nil && strings.TrimSpace(*req.SkillPath) != "" {
+			values = []string{*req.SkillPath}
+		}
+		skillPaths = &values
+	case req.SkillPath != nil:
+		trimmed := strings.TrimSpace(*req.SkillPath)
+		values := []string{}
+		if trimmed != "" {
+			values = []string{trimmed}
+		}
+		skillPaths = &values
+	}
+
+	hook, err := hg.svc.Update(
+		c.Request().Context(),
+		c.Param("id"),
+		req.Prompt,
+		req.Active,
+		skillPaths,
+		req.EventTypes,
+		buildAgentPatch(req.AgentName, req.AgentCfg),
+	)
 	if err != nil {
-		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+		status := http.StatusInternalServerError
+		if isHookConflictErr(err) {
+			status = http.StatusConflict
+		}
+		return ErrorResponse(c, status, err.Error())
 	}
 
 	wsExt := hg.workspaceExt(c.Request().Context(), hook.WorkspaceId)
@@ -142,27 +204,95 @@ func (hg *HooksGroup) workspaceExt(ctx context.Context, wsId uint) string {
 }
 
 type hookResp struct {
-	ExternalID  string `json:"external_id"`
-	WorkspaceID string `json:"workspace_id"`
-	Path        string `json:"path"`
-	Prompt      string `json:"prompt"`
-	SkillPath   string `json:"skill_path"`
-	Active      bool   `json:"active"`
-	CreatedAt   string `json:"created_at"`
-	UpdatedAt   string `json:"updated_at"`
+	ExternalID  string         `json:"external_id"`
+	WorkspaceID string         `json:"workspace_id"`
+	Path        string         `json:"path"`
+	Prompt      string         `json:"prompt"`
+	SkillPath   string         `json:"skill_path"`
+	SkillPaths  []string       `json:"skill_paths"`
+	EventTypes  []string       `json:"event_types"`
+	AgentID     string         `json:"agent_id,omitempty"`
+	AgentKey    string         `json:"agent_key,omitempty"`
+	AgentName   string         `json:"agent_name,omitempty"`
+	AgentConfig map[string]any `json:"agent_config,omitempty"`
+	Active      bool           `json:"active"`
+	CreatedAt   string         `json:"created_at"`
+	UpdatedAt   string         `json:"updated_at"`
 }
 
 func hookJSON(h *types.Hook, wsExt string) hookResp {
+	agentID := ""
+	if h.AgentId != nil {
+		agentID = strings.TrimSpace(*h.AgentId)
+	}
+	skillPaths := types.NormalizeSkillPaths(h.SkillPaths, h.SkillPath)
+	legacySkillPath := ""
+	if len(skillPaths) > 0 {
+		legacySkillPath = skillPaths[0]
+	}
+	eventTypes := h.EventTypes
+	if eventTypes == nil {
+		eventTypes = []string{"fs.create"}
+	}
 	return hookResp{
 		ExternalID:  h.ExternalId,
 		WorkspaceID: wsExt,
 		Path:        h.Path,
 		Prompt:      h.Prompt,
-		SkillPath:   h.SkillPath,
+		SkillPath:   legacySkillPath,
+		SkillPaths:  skillPaths,
+		EventTypes:  eventTypes,
+		AgentID:     agentID,
+		AgentKey:    h.AgentKey,
+		AgentName:   h.AgentName,
+		AgentConfig: h.AgentConfig,
 		Active:      h.Active,
 		CreatedAt:   h.CreatedAt.Format(time.RFC3339),
 		UpdatedAt:   h.UpdatedAt.Format(time.RFC3339),
 	}
+}
+
+type hookAgentConfigIn struct {
+	Runner           *string `json:"runner,omitempty"`
+	Model            *string `json:"model,omitempty"`
+	SystemPrompt     *string `json:"system_prompt,omitempty"`
+	SystemPromptMode *string `json:"system_prompt_mode,omitempty"`
+	WorkspaceDir     *string `json:"workspace_dir,omitempty"`
+}
+
+func buildAgentPatch(name *string, cfg *hookAgentConfigIn) *hooks.AgentConfigPatch {
+	patch := &hooks.AgentConfigPatch{}
+	has := false
+	if name != nil {
+		patch.Name = name
+		has = true
+	}
+	if cfg != nil {
+		if cfg.Runner != nil {
+			patch.Runner = cfg.Runner
+			has = true
+		}
+		if cfg.Model != nil {
+			patch.Model = cfg.Model
+			has = true
+		}
+		if cfg.SystemPrompt != nil {
+			patch.SystemPrompt = cfg.SystemPrompt
+			has = true
+		}
+		if cfg.SystemPromptMode != nil {
+			patch.SystemPromptMode = cfg.SystemPromptMode
+			has = true
+		}
+		if cfg.WorkspaceDir != nil {
+			patch.WorkspaceDir = cfg.WorkspaceDir
+			has = true
+		}
+	}
+	if !has {
+		return nil
+	}
+	return patch
 }
 
 func ptrUint(v uint) *uint {
@@ -170,4 +300,17 @@ func ptrUint(v uint) *uint {
 		return nil
 	}
 	return &v
+}
+
+func isHookConflictErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "already exists") ||
+		strings.Contains(msg, "already in use") ||
+		strings.Contains(msg, "duplicate key") ||
+		strings.Contains(msg, "unique constraint") ||
+		strings.Contains(msg, "violates unique") ||
+		strings.Contains(msg, "conflicts with an existing")
 }

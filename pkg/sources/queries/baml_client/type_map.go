@@ -23,6 +23,8 @@ import (
 var typeMap = map[string]reflect.Type{
 	"TYPES.ConfluenceQueryResult":        reflect.TypeOf(types.ConfluenceQueryResult{}),
 	"STREAM_TYPES.ConfluenceQueryResult": reflect.TypeOf(stream_types.ConfluenceQueryResult{}),
+	"TYPES.CronResult":                   reflect.TypeOf(types.CronResult{}),
+	"STREAM_TYPES.CronResult":            reflect.TypeOf(stream_types.CronResult{}),
 	"TYPES.GDriveQueryResult":            reflect.TypeOf(types.GDriveQueryResult{}),
 	"STREAM_TYPES.GDriveQueryResult":     reflect.TypeOf(stream_types.GDriveQueryResult{}),
 	"TYPES.GitHubQueryResult":            reflect.TypeOf(types.GitHubQueryResult{}),

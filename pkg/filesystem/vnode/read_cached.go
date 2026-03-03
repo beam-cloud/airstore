@@ -1,6 +1,22 @@
 package vnode
 
-import pb "github.com/beam-cloud/airstore/proto"
+import (
+	"fmt"
+	"io/fs"
+	"strings"
+
+	pb "github.com/beam-cloud/airstore/proto"
+)
+
+// readResponseError maps a gateway Read error string to the appropriate
+// filesystem error. Only "not found" is mapped to ErrNotExist; everything
+// else becomes a generic error (which toErrno maps to EIO).
+func readResponseError(msg string) error {
+	if strings.Contains(msg, "not found") {
+		return fs.ErrNotExist
+	}
+	return fmt.Errorf("read: %s", msg)
+}
 
 type cachedReadOps struct {
 	content *ContentCache
@@ -62,6 +78,7 @@ func readWithCachedFlow(path string, buf []byte, off int64, fh FileHandle, ops c
 		if err != nil {
 			return 0, nil, err
 		}
+		_, data = compactNulls(0, data)
 		ops.content.Set(path, data, info.Mtime)
 		if off >= int64(len(data)) {
 			return 0, AttributionForCache(CacheSourceBackendRPC), nil

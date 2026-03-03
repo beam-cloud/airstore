@@ -26,8 +26,10 @@ type TaskEventBatch struct {
 	RunID              *string               `json:"run_id,omitempty"`
 	Task               *types.AgentTask      `json:"task,omitempty"`
 	Run                *types.AgentRun       `json:"run,omitempty"`
+	Interaction        *types.RunInteraction `json:"interaction,omitempty"`
 	Logs               []common.TaskLogEntry `json:"logs"`
 	RunEvents          []map[string]any      `json:"run_events"`
+	PendingInputs      []types.PendingInput  `json:"pending_inputs"`
 	NextLogCursor      int64                 `json:"next_log_cursor"`
 	NextRunEventCursor int                   `json:"next_run_event_cursor"`
 }
@@ -135,6 +137,17 @@ func (a *AgentAPI) UpdateAgent(
 	return profile, nil
 }
 
+func (a *AgentAPI) DeleteAgent(ctx context.Context, workspaceID uint, agentID string) error {
+	if workspaceID == 0 {
+		return fmt.Errorf("workspace_id is required")
+	}
+	trimmedAgentID := strings.TrimSpace(agentID)
+	if trimmedAgentID == "" {
+		return fmt.Errorf("agent_id is required")
+	}
+	return a.backend.DeleteAgentProfile(ctx, workspaceID, trimmedAgentID)
+}
+
 func (a *AgentAPI) AcceptAgentCommand(
 	ctx context.Context,
 	workspaceID uint,
@@ -192,42 +205,19 @@ func (a *AgentAPI) EnqueueRunInput(
 	queueMode types.AgentQueueMode,
 	message string,
 	idempotencyKey string,
-) (*types.AgentTask, bool, error) {
+) (*types.AgentTask, bool, types.RunInputDeliveryOutcome, error) {
 	if a.runtime == nil {
-		return nil, false, fmt.Errorf("task service unavailable")
+		return nil, false, "", fmt.Errorf("task service unavailable")
 	}
 	if strings.TrimSpace(runID) == "" {
-		return nil, false, fmt.Errorf("run_id is required")
+		return nil, false, "", fmt.Errorf("run_id is required")
 	}
 	idempotencyKey = normalizeGeneratedID(idempotencyKey)
-	if queueMode == "" {
-		queueMode = types.AgentQueueModeFollowup
-	}
-	queueMode = normalizeRunInputQueueMode(queueMode)
-	if err := validateRunInputQueueMode(queueMode); err != nil {
-		return nil, false, err
+	queueMode = types.NormalizeRunInputQueueMode(queueMode)
+	if err := types.ValidateRunInputQueueMode(queueMode); err != nil {
+		return nil, false, "", err
 	}
 	return a.runtime.AcceptRunInput(ctx, workspaceID, runID, queueMode, message, idempotencyKey)
-}
-
-func normalizeRunInputQueueMode(mode types.AgentQueueMode) types.AgentQueueMode {
-	if mode == types.AgentQueueModeSteerBacklog {
-		return types.AgentQueueModeSteer
-	}
-	return mode
-}
-
-func validateRunInputQueueMode(mode types.AgentQueueMode) error {
-	switch mode {
-	case types.AgentQueueModeQueue,
-		types.AgentQueueModeFollowup,
-		types.AgentQueueModeSteer,
-		types.AgentQueueModeSteerBacklog,
-		types.AgentQueueModeInterrupt:
-		return nil
-	default:
-		return fmt.Errorf("queue_mode %q is not supported (supported: queue, followup, steer, steer-backlog, interrupt)", mode)
-	}
 }
 
 func (a *AgentAPI) ListRuns(ctx context.Context, workspaceID uint, limit int) ([]*types.AgentRun, error) {
@@ -269,6 +259,19 @@ func (a *AgentAPI) GetRun(ctx context.Context, workspaceID uint, runID string) (
 	return sanitizeRunForResponse(run), nil
 }
 
+func (a *AgentAPI) GetRunInteraction(ctx context.Context, workspaceID uint, runID string) (*types.RunInteraction, error) {
+	if a.runtime == nil {
+		return nil, nil
+	}
+	interaction, err := a.runtime.GetRunInteraction(ctx, workspaceID, runID)
+	if err != nil || interaction == nil {
+		return nil, err
+	}
+	safe := *interaction
+	safe.PendingInputs = sanitizePendingInputs(interaction.PendingInputs)
+	return &safe, nil
+}
+
 func (a *AgentAPI) ListRunSnapshots(ctx context.Context, workspaceID uint, runID string, limit int) ([]*types.AgentRunSnapshot, error) {
 	if _, err := a.GetRun(ctx, workspaceID, runID); err != nil {
 		return nil, err
@@ -299,18 +302,40 @@ func (a *AgentAPI) CancelRun(ctx context.Context, workspaceID uint, runID string
 		return err
 	}
 
+	// Cancel active execution(s) before marking the run terminal so the worker
+	// still sees an in-flight execution and receives an immediate cancel signal.
+	cancelled := false
+	if a.runtime != nil && a.runtime.backend != nil {
+		var cancelErr error
+		cancelled, cancelErr = a.runtime.cancelInFlightRunExecutions(ctx, run.ID)
+		if cancelErr != nil {
+			cancelled = false
+		}
+	}
+
+	if !cancelled {
+		attempts, _ := a.backend.ListAgentRunAttempts(ctx, run.ID)
+		for _, attempt := range attempts {
+			if attempt == nil || attempt.ExecutionID == nil {
+				continue
+			}
+			executionID := strings.TrimSpace(*attempt.ExecutionID)
+			if executionID == "" {
+				continue
+			}
+			_ = a.backend.CancelRunExecution(ctx, executionID)
+			if a.runtime != nil && a.runtime.terminalIO != nil {
+				_ = a.runtime.terminalIO.PublishCancel(ctx, executionID)
+			}
+		}
+	}
+
 	now := time.Now()
 	errMsg := "cancelled by user"
 	if err := a.backend.UpdateAgentRunLifecycle(ctx, run.ID, types.AgentRunStatusCancelled, nil, &now, &errMsg); err != nil {
 		return err
 	}
 
-	attempts, _ := a.backend.ListAgentRunAttempts(ctx, run.ID)
-	for _, attempt := range attempts {
-		if attempt.ExecutionID != nil && attempt.Status.IsInFlight() {
-			_ = a.backend.CancelRunExecution(ctx, *attempt.ExecutionID)
-		}
-	}
 	return nil
 }
 
@@ -410,7 +435,25 @@ func (a *AgentAPI) listTaskLogsForRun(
 	if err != nil {
 		return nil, seqNum, err
 	}
+
+	// Cursor is tracked client-side but log streams are per execution.
+	// When a run starts a new execution (interrupt/retry), a cursor from the
+	// previous execution can point past the new stream's end forever.
+	// Detect that condition and recover by replaying from seq=0 once.
+	if len(logs) == 0 && seqNum > 0 {
+		fullLogs, fullNextSeqNum, fullErr := a.runtime.s2.ReadLogs(ctx, executionID, 0)
+		if fullErr != nil {
+			return nil, seqNum, fullErr
+		}
+		if shouldResetTaskLogCursor(seqNum, fullNextSeqNum) {
+			return common.RedactTaskLogEntries(fullLogs), fullNextSeqNum, nil
+		}
+	}
 	return common.RedactTaskLogEntries(logs), nextSeqNum, nil
+}
+
+func shouldResetTaskLogCursor(cursor int64, streamNextCursor int64) bool {
+	return cursor > 0 && streamNextCursor > 0 && cursor > streamNextCursor
 }
 
 func (a *AgentAPI) listTaskSessionHistoryLogs(
@@ -542,6 +585,8 @@ func (a *AgentAPI) StreamTaskEvents(
 	}
 
 	var run *types.AgentRun
+	var interaction *types.RunInteraction
+	var pendingInputs []types.PendingInput
 	runEvents := []map[string]any{}
 	nextRunEventCursor := runEventCursor
 	if task.TargetRunID != nil {
@@ -558,6 +603,15 @@ func (a *AgentAPI) StreamTaskEvents(
 		}
 		runEvents = allEvents[runEventCursor:]
 		nextRunEventCursor = len(allEvents)
+
+		if a.runtime != nil {
+			interaction, _ = a.runtime.GetRunInteraction(ctx, workspaceID, *task.TargetRunID)
+			if interaction != nil {
+				pendingInputs = interaction.PendingInputs
+			} else {
+				pendingInputs, _ = a.runtime.ListRunPendingInputs(ctx, *task.TargetRunID)
+			}
+		}
 	}
 
 	return &TaskEventBatch{
@@ -565,8 +619,10 @@ func (a *AgentAPI) StreamTaskEvents(
 		RunID:              task.TargetRunID,
 		Task:               task,
 		Run:                run,
+		Interaction:        interaction,
 		Logs:               logs,
 		RunEvents:          runEvents,
+		PendingInputs:      pendingInputs,
 		NextLogCursor:      nextLogCursor,
 		NextRunEventCursor: nextRunEventCursor,
 	}, nil
@@ -678,6 +734,21 @@ func sanitizeRunsForResponse(runs []*types.AgentRun) []*types.AgentRun {
 	return safe
 }
 
+func sanitizePendingInputs(inputs []types.PendingInput) []types.PendingInput {
+	if len(inputs) == 0 {
+		return inputs
+	}
+	safe := make([]types.PendingInput, len(inputs))
+	for idx, input := range inputs {
+		safe[idx] = types.PendingInput{
+			ID:        strings.TrimSpace(input.ID),
+			Message:   common.RedactSensitiveString(input.Message),
+			CreatedAt: input.CreatedAt,
+		}
+	}
+	return safe
+}
+
 func normalizeAgentProfileConfig(config map[string]any, agentKey string) (map[string]any, error) {
 	defaults := DefaultAgentConfig(agentKey)
 	normalized := cloneAnyMap(config)
@@ -711,6 +782,120 @@ func normalizeAgentProfileConfig(config map[string]any, agentKey string) (map[st
 		}
 	}
 	return normalized, nil
+}
+
+// --- Scheduled Tasks ---
+
+func (a *AgentAPI) CreateSchedule(
+	ctx context.Context,
+	workspaceID uint,
+	agentID string,
+	cronExpr string,
+	prompt string,
+	skillPaths []string,
+	memberID *uint,
+	tokenID *uint,
+	encryptedToken []byte,
+) (*types.ScheduledTask, error) {
+	cronExpr = strings.TrimSpace(cronExpr)
+	if cronExpr == "" {
+		return nil, fmt.Errorf("cron_expr is required")
+	}
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return nil, fmt.Errorf("prompt is required")
+	}
+	if strings.TrimSpace(agentID) == "" {
+		return nil, fmt.Errorf("agent_id is required")
+	}
+
+	cronExpr, err := resolveCronExpr(ctx, cronExpr)
+	if err != nil {
+		return nil, err
+	}
+	nextRun, err := NextCronTime(cronExpr, time.Now())
+	if err != nil {
+		return nil, fmt.Errorf("invalid cron expression: %w", err)
+	}
+
+	if skillPaths == nil {
+		skillPaths = []string{}
+	}
+
+	st := &types.ScheduledTask{
+		WorkspaceID:       workspaceID,
+		AgentID:           agentID,
+		CronExpr:          cronExpr,
+		Prompt:            prompt,
+		SkillPaths:        skillPaths,
+		Active:            true,
+		NextRunAt:         nextRun,
+		TokenID:           tokenID,
+		EncryptedToken:    encryptedToken,
+		CreatedByMemberID: memberID,
+	}
+	if err := a.backend.CreateScheduledTask(ctx, st); err != nil {
+		return nil, err
+	}
+	return st, nil
+}
+
+func (a *AgentAPI) GetSchedule(ctx context.Context, workspaceID uint, externalID string) (*types.ScheduledTask, error) {
+	return a.backend.GetScheduledTask(ctx, workspaceID, externalID)
+}
+
+func (a *AgentAPI) ListSchedules(ctx context.Context, workspaceID uint) ([]*types.ScheduledTask, error) {
+	return a.backend.ListScheduledTasks(ctx, workspaceID)
+}
+
+func (a *AgentAPI) UpdateSchedule(
+	ctx context.Context,
+	workspaceID uint,
+	externalID string,
+	cronExpr *string,
+	prompt *string,
+	skillPaths *[]string,
+	active *bool,
+) (*types.ScheduledTask, error) {
+	st, err := a.backend.GetScheduledTask(ctx, workspaceID, externalID)
+	if err != nil {
+		return nil, err
+	}
+
+	if cronExpr != nil {
+		resolved, err := resolveCronExpr(ctx, *cronExpr)
+		if err != nil {
+			return nil, err
+		}
+		nextRun, err := NextCronTime(resolved, time.Now())
+		if err != nil {
+			return nil, fmt.Errorf("invalid cron expression: %w", err)
+		}
+		st.CronExpr = resolved
+		st.NextRunAt = nextRun
+	}
+	if prompt != nil {
+		trimmed := strings.TrimSpace(*prompt)
+		if trimmed == "" {
+			return nil, fmt.Errorf("prompt cannot be empty")
+		}
+		st.Prompt = trimmed
+	}
+	if skillPaths != nil {
+		st.SkillPaths = *skillPaths
+	}
+	if active != nil {
+		st.Active = *active
+	}
+
+	if err := a.backend.UpdateScheduledTask(ctx, st); err != nil {
+		return nil, err
+	}
+	return st, nil
+}
+
+func (a *AgentAPI) DeleteSchedule(ctx context.Context, workspaceID uint, externalID string) error {
+	return a.backend.DeleteScheduledTask(ctx, workspaceID, externalID)
 }
 
 func normalizeOffsetPage(limit, offset, defaultLimit, maxLimit int) (int, int) {

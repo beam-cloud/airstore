@@ -23,6 +23,12 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
+)
+
+const (
+	grpcKeepaliveTime    = 60 * time.Second
+	grpcKeepaliveTimeout = 10 * time.Second
 )
 
 var (
@@ -161,7 +167,14 @@ func runMount(cmd *cobra.Command, args []string) error {
 		// Create gRPC connection for vnodes.
 		// When access logging is on, a client-side interceptor injects the
 		// session header on every outgoing RPC so the gateway can record events.
-		dialOpts := []grpc.DialOption{grpc.WithTransportCredentials(TransportCredentials(effectiveGateway))}
+		dialOpts := []grpc.DialOption{
+			grpc.WithTransportCredentials(TransportCredentials(effectiveGateway)),
+			grpc.WithKeepaliveParams(keepalive.ClientParameters{
+				Time:                grpcKeepaliveTime,
+				Timeout:             grpcKeepaliveTimeout,
+				PermitWithoutStream: true,
+			}),
+		}
 		if mountAccessLog {
 			session := mountSession // may be empty — gateway defaults to workspace ID
 			dialOpts = append(dialOpts, grpc.WithUnaryInterceptor(filesystem.MountAccessUnaryInterceptor(session)))
@@ -193,7 +206,6 @@ func runMount(cmd *cobra.Command, args []string) error {
 		}
 		fs.RegisterVNode(vnode.NewSourcesVNode(conn, authToken, sourcesOpts...))
 		fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, authToken, types.PathSkills)) // /Skills
-		fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, authToken, types.PathMemory)) // /Memory
 		fs.RegisterVNode(vnode.NewTasksVNodeGRPC(conn, authToken))                     // /Tasks
 		fs.SetStorageFallback(vnode.NewStorageVNode(conn, authToken))                  // user folders
 
@@ -310,7 +322,6 @@ func printMountStatus(mount, gateway, mode, compression string) {
 		{types.PathSources + "/*", "Integration data"},
 		{types.PathSkills + "/*", "Skills and context"},
 		{types.PathTasks + "/*", "Active tasks"},
-		{types.PathMemory + "/*", "Agent memory"},
 	}
 	for _, p := range paths {
 		fmt.Printf("    %s  %s\n", CodeStyle.Render(fmt.Sprintf("%-14s", p.path)), DimStyle.Render(p.desc))

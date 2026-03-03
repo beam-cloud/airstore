@@ -24,20 +24,22 @@ var hookCmd = &cobra.Command{
 
 A hook watches a filesystem path. When something changes there -- a file is
 created, modified, or new data arrives from a source -- a task runs using the
-attached skill. The event type is passed as context to the agent automatically.
+configured task template. Optional skills are appended as extra instructions.
+The event type is passed as context to the agent automatically.
 
 Examples:
-  airstore hook create --path /sources/gmail/inbox --skill /skills/email-triage
-  airstore hook create --path /sources/gmail/inbox --skill ./my-local-skill
-  airstore hook create --path /inbox/contracts --skill /skills/contract-review --prompt "Focus on liability clauses"`,
+  airstore hook create --path /sources/gmail/inbox --prompt "Review new emails and draft summaries"
+  airstore hook create --path /sources/gmail/inbox --prompt "Review PR updates" --skill /skills/pr-review
+  airstore hook create --path /inbox/contracts --prompt "Summarize legal risk" --skill ./my-local-skill`,
 }
 
 var hookCreateCmd = &cobra.Command{
-	Use:   "create --path <path> --skill <skill>",
+	Use:   "create --path <path> --prompt <task-template> [--skill <skill>]",
 	Short: "Create a hook that watches a path",
 	Long: `Create a hook that triggers a task when something changes at a path.
 
-The hook runs the attached skill when files change. Skills can be:
+The hook runs the provided task template when files change. Optional skills can
+be attached and are appended as extra instructions. Skills can be:
   - Airstore paths: /skills/email-triage (already installed)
   - Local paths: ./my-skill (auto-imported to /skills/)
 
@@ -46,17 +48,17 @@ The agent automatically receives context about what happened:
   - "Event: 3 new results in /sources/gmail/inbox"
 
 Examples:
-  airstore hook create --path /sources/gmail/inbox --skill /skills/email-triage
-  airstore hook create --path /sources/gmail/inbox --skill ./my-local-skill
-  airstore hook create --path /inbox/contracts --skill /skills/review --prompt "Focus on liability"`,
+  airstore hook create --path /sources/gmail/inbox --prompt "Review and summarize new items"
+  airstore hook create --path /sources/gmail/inbox --prompt "Review new PR changes" --skill /skills/pr-review
+  airstore hook create --path /inbox/contracts --prompt "Focus on liability" --skill ./my-local-skill`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		path, _ := cmd.Flags().GetString("path")
 		if path == "" {
 			PrintErrorMsg("--path is required")
 			return nil
 		}
-		if hookSkill == "" && hookPrompt == "" {
-			PrintErrorMsg("--skill or --prompt is required")
+		if strings.TrimSpace(hookPrompt) == "" {
+			PrintErrorMsg("--prompt is required")
 			return nil
 		}
 
@@ -240,7 +242,7 @@ var hookListCmd = &cobra.Command{
 
 		if len(resp.Hooks) == 0 {
 			PrintInfo("No hooks found")
-			PrintHint("Create one with: airstore hook create --path <path> --skill /skills/<name>")
+			PrintHint("Create one with: airstore hook create --path <path> --prompt \"<task template>\"")
 			return nil
 		}
 

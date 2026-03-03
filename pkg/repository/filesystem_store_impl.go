@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -9,14 +10,19 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 )
 
-const defaultCacheTTL = 30 * time.Second
+const (
+	defaultCacheTTL       = 30 * time.Second
+	maxIndexedContentSize = 1 * 1024 * 1024 // 1MB safety cap for search indexing
+)
 
 // nullableString converts an empty string to sql.NullString{Valid: false}
 // and a non-empty string to sql.NullString{String: s, Valid: true}.
@@ -25,6 +31,17 @@ func nullableString(s string) sql.NullString {
 		return sql.NullString{}
 	}
 	return sql.NullString{String: s, Valid: true}
+}
+
+func nullableStringPtr(s *string) sql.NullString {
+	if s == nil {
+		return sql.NullString{}
+	}
+	trimmed := strings.TrimSpace(*s)
+	if trimmed == "" {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: trimmed, Valid: true}
 }
 
 // ElasticsearchClient is an optional interface for Elasticsearch operations.
@@ -550,8 +567,8 @@ func (s *filesystemStore) StoreResultContent(ctx context.Context, workspaceId ui
 	// Track cache key in an index for O(1) invalidation by query path.
 	s.addIndexMember(ctx, common.Keys.FsResultBodyIndex(workspaceId, queryPath), cacheKey, contentTTL*2)
 
-	// Index in Elasticsearch if available
-	if s.elastic != nil {
+	// Index in Elasticsearch if available and safe to index as text.
+	if s.elastic != nil && shouldIndexResultContent(resultID, content) {
 		doc := map[string]interface{}{
 			"query_path": queryPath,
 			"result_id":  resultID,
@@ -614,7 +631,7 @@ func (s *filesystemStore) SearchContent(ctx context.Context, workspaceId uint, q
 }
 
 func (s *filesystemStore) IndexContent(ctx context.Context, workspaceId uint, queryPath, resultID, filename string, content []byte) error {
-	if s.elastic == nil {
+	if s.elastic == nil || !shouldIndexResultContent(resultID, content) {
 		return nil
 	}
 
@@ -629,6 +646,41 @@ func (s *filesystemStore) IndexContent(ctx context.Context, workspaceId uint, qu
 	docID := fmt.Sprintf("%s_%s_content", types.GeneratePathID(queryPath), resultID)
 
 	return s.elastic.Index(ctx, s.elasticIndex(workspaceId), docID, docData)
+}
+
+func shouldIndexResultContent(resultID string, content []byte) bool {
+	if len(content) == 0 || len(content) > maxIndexedContentSize {
+		return false
+	}
+	// Gmail attachments are frequently binary; skip text indexing entirely.
+	if strings.HasPrefix(resultID, "att:") {
+		return false
+	}
+	return !looksBinaryContent(content)
+}
+
+func looksBinaryContent(content []byte) bool {
+	sample := content
+	if len(sample) > 8192 {
+		sample = sample[:8192]
+	}
+	if len(sample) == 0 {
+		return false
+	}
+	if bytes.IndexByte(sample, 0x00) >= 0 {
+		return true
+	}
+	if !utf8.Valid(sample) {
+		return true
+	}
+
+	controlBytes := 0
+	for _, b := range sample {
+		if b < 0x09 || (b > 0x0D && b < 0x20) {
+			controlBytes++
+		}
+	}
+	return float64(controlBytes)/float64(len(sample)) > 0.10
 }
 
 // ===== Filesystem Metadata =====
@@ -1076,6 +1128,7 @@ func (s *filesystemStore) CreateHook(ctx context.Context, hook *types.Hook) (*ty
 	hook.ExternalId = uuid.New().String()
 	hook.CreatedAt = time.Now()
 	hook.UpdatedAt = time.Now()
+	normalizeHookSkillFields(hook)
 
 	if s.isMemoryMode() {
 		s.mu.Lock()
@@ -1085,12 +1138,14 @@ func (s *filesystemStore) CreateHook(ctx context.Context, hook *types.Hook) (*ty
 		return hook, nil
 	}
 
+	agentID := nullableStringPtr(hook.AgentId)
 	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO filesystem_hooks (external_id, workspace_id, path, prompt, skill_path, active, created_by_member_id, token_id, encrypted_token, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		INSERT INTO filesystem_hooks (external_id, workspace_id, path, prompt, skill_path, skill_paths, agent_id, active, event_types, created_by_member_id, token_id, encrypted_token, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		RETURNING id
 	`, hook.ExternalId, hook.WorkspaceId, hook.Path, hook.Prompt, hook.SkillPath,
-		hook.Active, hook.CreatedByMemberId, hook.TokenId, hook.EncryptedToken,
+		pq.Array(hook.SkillPaths), agentID,
+		hook.Active, pq.Array(hook.EventTypes), hook.CreatedByMemberId, hook.TokenId, hook.EncryptedToken,
 		hook.CreatedAt, hook.UpdatedAt).Scan(&hook.Id)
 	if err != nil {
 		return nil, fmt.Errorf("create hook: %w", err)
@@ -1111,13 +1166,16 @@ func (s *filesystemStore) GetHook(ctx context.Context, externalId string) (*type
 	}
 
 	h := &types.Hook{}
+	var skillPaths pq.StringArray
+	var eventTypes pq.StringArray
+	var agentID sql.NullString
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, external_id, workspace_id, path, prompt, skill_path, active,
-		       created_by_member_id, token_id, encrypted_token, created_at, updated_at
+		SELECT id, external_id, workspace_id, path, prompt, skill_path, skill_paths, agent_id, active,
+		       event_types, created_by_member_id, token_id, encrypted_token, created_at, updated_at
 		FROM filesystem_hooks WHERE external_id = $1
 	`, externalId).Scan(
-		&h.Id, &h.ExternalId, &h.WorkspaceId, &h.Path, &h.Prompt, &h.SkillPath,
-		&h.Active, &h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
+		&h.Id, &h.ExternalId, &h.WorkspaceId, &h.Path, &h.Prompt, &h.SkillPath, &skillPaths, &agentID,
+		&h.Active, &eventTypes, &h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
 		&h.CreatedAt, &h.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -1126,6 +1184,15 @@ func (s *filesystemStore) GetHook(ctx context.Context, externalId string) (*type
 	if err != nil {
 		return nil, fmt.Errorf("get hook: %w", err)
 	}
+	h.SkillPaths = []string(skillPaths)
+	h.EventTypes = []string(eventTypes)
+	if agentID.Valid {
+		v := strings.TrimSpace(agentID.String)
+		if v != "" {
+			h.AgentId = &v
+		}
+	}
+	normalizeHookSkillFields(h)
 	return h, nil
 }
 
@@ -1142,13 +1209,16 @@ func (s *filesystemStore) GetHookById(ctx context.Context, id uint) (*types.Hook
 	}
 
 	h := &types.Hook{}
+	var skillPaths pq.StringArray
+	var eventTypes pq.StringArray
+	var agentID sql.NullString
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, external_id, workspace_id, path, prompt, skill_path, active,
-		       created_by_member_id, token_id, encrypted_token, created_at, updated_at
+		SELECT id, external_id, workspace_id, path, prompt, skill_path, skill_paths, agent_id, active,
+		       event_types, created_by_member_id, token_id, encrypted_token, created_at, updated_at
 		FROM filesystem_hooks WHERE id = $1
 	`, id).Scan(
-		&h.Id, &h.ExternalId, &h.WorkspaceId, &h.Path, &h.Prompt, &h.SkillPath,
-		&h.Active, &h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
+		&h.Id, &h.ExternalId, &h.WorkspaceId, &h.Path, &h.Prompt, &h.SkillPath, &skillPaths, &agentID,
+		&h.Active, &eventTypes, &h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
 		&h.CreatedAt, &h.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -1157,6 +1227,15 @@ func (s *filesystemStore) GetHookById(ctx context.Context, id uint) (*types.Hook
 	if err != nil {
 		return nil, fmt.Errorf("get hook by id: %w", err)
 	}
+	h.SkillPaths = []string(skillPaths)
+	h.EventTypes = []string(eventTypes)
+	if agentID.Valid {
+		v := strings.TrimSpace(agentID.String)
+		if v != "" {
+			h.AgentId = &v
+		}
+	}
+	normalizeHookSkillFields(h)
 	return h, nil
 }
 
@@ -1177,8 +1256,8 @@ func (s *filesystemStore) ListHooks(ctx context.Context, workspaceId uint) ([]*t
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, external_id, workspace_id, path, prompt, skill_path, active,
-		       created_by_member_id, token_id, encrypted_token, created_at, updated_at
+		SELECT id, external_id, workspace_id, path, prompt, skill_path, skill_paths, agent_id, active,
+		       event_types, created_by_member_id, token_id, encrypted_token, created_at, updated_at
 		FROM filesystem_hooks WHERE workspace_id = $1
 		ORDER BY created_at
 	`, workspaceId)
@@ -1190,14 +1269,26 @@ func (s *filesystemStore) ListHooks(ctx context.Context, workspaceId uint) ([]*t
 	var hooks []*types.Hook
 	for rows.Next() {
 		h := &types.Hook{}
+		var skillPaths pq.StringArray
+		var eventTypes pq.StringArray
+		var agentID sql.NullString
 		err := rows.Scan(
-			&h.Id, &h.ExternalId, &h.WorkspaceId, &h.Path, &h.Prompt, &h.SkillPath,
-			&h.Active, &h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
+			&h.Id, &h.ExternalId, &h.WorkspaceId, &h.Path, &h.Prompt, &h.SkillPath, &skillPaths, &agentID,
+			&h.Active, &eventTypes, &h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
 			&h.CreatedAt, &h.UpdatedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan hook: %w", err)
 		}
+		h.SkillPaths = []string(skillPaths)
+		h.EventTypes = []string(eventTypes)
+		if agentID.Valid {
+			v := strings.TrimSpace(agentID.String)
+			if v != "" {
+				h.AgentId = &v
+			}
+		}
+		normalizeHookSkillFields(h)
 		hooks = append(hooks, h)
 	}
 	return hooks, rows.Err()
@@ -1205,6 +1296,7 @@ func (s *filesystemStore) ListHooks(ctx context.Context, workspaceId uint) ([]*t
 
 func (s *filesystemStore) UpdateHook(ctx context.Context, hook *types.Hook) error {
 	hook.UpdatedAt = time.Now()
+	normalizeHookSkillFields(hook)
 
 	if s.isMemoryMode() {
 		s.mu.Lock()
@@ -1212,17 +1304,21 @@ func (s *filesystemStore) UpdateHook(ctx context.Context, hook *types.Hook) erro
 		if existing, ok := s.memHooks[hook.ExternalId]; ok {
 			existing.Prompt = hook.Prompt
 			existing.SkillPath = hook.SkillPath
+			existing.SkillPaths = append([]string(nil), hook.SkillPaths...)
+			existing.EventTypes = append([]string(nil), hook.EventTypes...)
+			existing.AgentId = hook.AgentId
 			existing.Active = hook.Active
 			existing.UpdatedAt = hook.UpdatedAt
 		}
 		return nil
 	}
 
+	agentID := nullableStringPtr(hook.AgentId)
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE filesystem_hooks SET
-			prompt = $1, skill_path = $2, active = $3, updated_at = $4
-		WHERE external_id = $5
-	`, hook.Prompt, hook.SkillPath, hook.Active, hook.UpdatedAt, hook.ExternalId)
+			prompt = $1, skill_path = $2, skill_paths = $3, agent_id = $4, active = $5, event_types = $6, updated_at = $7
+		WHERE external_id = $8
+	`, hook.Prompt, hook.SkillPath, pq.Array(hook.SkillPaths), agentID, hook.Active, pq.Array(hook.EventTypes), hook.UpdatedAt, hook.ExternalId)
 	if err != nil {
 		return fmt.Errorf("update hook: %w", err)
 	}
@@ -1242,6 +1338,18 @@ func (s *filesystemStore) DeleteHook(ctx context.Context, externalId string) err
 		return fmt.Errorf("delete hook: %w", err)
 	}
 	return nil
+}
+
+func normalizeHookSkillFields(hook *types.Hook) {
+	if hook == nil {
+		return
+	}
+	hook.SkillPaths = types.NormalizeSkillPaths(hook.SkillPaths, hook.SkillPath)
+	if len(hook.SkillPaths) > 0 {
+		hook.SkillPath = hook.SkillPaths[0]
+	} else {
+		hook.SkillPath = ""
+	}
 }
 
 var _ FilesystemStore = (*filesystemStore)(nil)

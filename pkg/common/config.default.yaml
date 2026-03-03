@@ -91,8 +91,8 @@ scheduler:
   recoveryLoopInterval: 10s
   recoveryLoopBatchSize: 50
   unclaimedRunStaleAfter: 2m
-  defaultWorkerCpu: 1000     # millicores (fallback when CPU_LIMIT env var not set)
-  defaultWorkerMemory: 1024  # MiB (fallback when MEMORY_LIMIT env var not set)
+  defaultWorkerCpu: 4000     # millicores (fallback when CPU_LIMIT env var not set)
+  defaultWorkerMemory: 4096  # MiB (fallback when MEMORY_LIMIT env var not set)
   pools:
     default:
       deploymentName: airstore-worker-default
@@ -100,8 +100,8 @@ scheduler:
       minReplicas: 1
       maxReplicas: 10
       scaleDownDelay: 5m
-      workerCpu: 1000
-      workerMemory: 1024
+      cpu: "4000m"
+      memory: "4096Mi"
       runtimeClassName: ""
       nodeSelector: {}
 

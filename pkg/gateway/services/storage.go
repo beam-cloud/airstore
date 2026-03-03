@@ -30,6 +30,11 @@ const (
 	cacheTTL        = 30 * time.Second
 	cacheMaxEntries = 10000
 
+	uploadReadyProbeWindow         = 2 * time.Second
+	uploadReadyProbeTimeoutPerHead = 750 * time.Millisecond
+	uploadReadyProbeInitialBackoff = 50 * time.Millisecond
+	uploadReadyProbeMaxBackoff     = 400 * time.Millisecond
+
 	storageModeMetadataKey = "airstore-mode"
 	defaultStorageFileMode = uint32(syscall.S_IFREG | 0644)
 	defaultStorageDirMode  = uint32(syscall.S_IFDIR | 0755)
@@ -75,6 +80,11 @@ func (s *StorageService) SetHookStream(emitter common.EventEmitter) {
 
 // emitHookEvent sends a filesystem event to the hook event stream.
 func (s *StorageService) emitHookEvent(ctx context.Context, eventType string, path string) {
+	s.emitHookEventWithData(ctx, eventType, path, nil)
+}
+
+// emitHookEventWithData sends a filesystem event plus optional metadata to the hook stream.
+func (s *StorageService) emitHookEventWithData(ctx context.Context, eventType string, path string, meta map[string]any) {
 	if s.hookStream == nil {
 		return
 	}
@@ -89,13 +99,54 @@ func (s *StorageService) emitHookEvent(ctx context.Context, eventType string, pa
 		return
 	}
 
-	log.Debug().Str("event", eventType).Str("path", path).Uint("workspace", wsId).Msg("hook event emitted")
-	s.hookStream.Emit(ctx, map[string]any{
+	payload := map[string]any{
 		"event":            eventType,
 		"workspace_id":     fmt.Sprintf("%d", wsId),
 		"workspace_ext_id": auth.WorkspaceExtId(ctx),
 		"path":             path,
-	})
+	}
+	for key, value := range meta {
+		if value != nil {
+			payload[key] = value
+		}
+	}
+
+	logEvent := log.Debug().
+		Str("event", eventType).
+		Str("path", path).
+		Uint("workspace", wsId)
+	if rawOldPath, ok := payload["old_path"]; ok {
+		if oldPath, ok := rawOldPath.(string); ok && strings.TrimSpace(oldPath) != "" {
+			logEvent = logEvent.Str("old_path", strings.TrimSpace(oldPath))
+		}
+	}
+	if rawNewPath, ok := payload["new_path"]; ok {
+		if newPath, ok := rawNewPath.(string); ok && strings.TrimSpace(newPath) != "" {
+			logEvent = logEvent.Str("new_path", strings.TrimSpace(newPath))
+		}
+	}
+	logEvent.Msg("hook event emitted")
+
+	s.hookStream.Emit(ctx, payload)
+}
+
+// emitHookMoveEvents emits source+destination hook events for a move/rename.
+func (s *StorageService) emitHookMoveEvents(ctx context.Context, oldPath, newPath string) {
+	oldPath = hooks.NormalizePath(oldPath)
+	newPath = hooks.NormalizePath(newPath)
+	if oldPath == "" || newPath == "" || oldPath == newPath {
+		return
+	}
+
+	moveOpID := fmt.Sprintf("mv-%d", time.Now().UnixNano())
+	meta := map[string]any{
+		"old_path":   oldPath,
+		"new_path":   newPath,
+		"move_op_id": moveOpID,
+	}
+
+	s.emitHookEventWithData(ctx, hooks.EventFsDelete, oldPath, meta)
+	s.emitHookEventWithData(ctx, hooks.EventFsWrite, newPath, meta)
 }
 
 func (s *StorageService) bucket(ctx context.Context) (string, error) {
@@ -273,6 +324,9 @@ func (s *StorageService) Read(ctx context.Context, req *pb.ContextReadRequest) (
 	if err != nil {
 		if isNotFound(err) {
 			return &pb.ContextReadResponse{Ok: false, Error: "not found"}, nil
+		}
+		if isInvalidRange(err) {
+			return &pb.ContextReadResponse{Ok: true, Data: nil}, nil
 		}
 		return &pb.ContextReadResponse{Ok: false, Error: err.Error()}, nil
 	}
@@ -522,6 +576,7 @@ func (s *StorageService) Rename(ctx context.Context, req *pb.ContextRenameReques
 		if dirErr != nil {
 			return &pb.ContextRenameResponse{Ok: false, Error: fmt.Sprintf("rename failed: %v", err)}, nil
 		}
+		s.emitHookMoveEvents(ctx, req.OldPath, req.NewPath)
 		return &pb.ContextRenameResponse{Ok: true}, nil
 	}
 
@@ -529,6 +584,7 @@ func (s *StorageService) Rename(ctx context.Context, req *pb.ContextRenameReques
 		s.invalidate(bucket, oldKey)
 		s.invalidate(bucket, newKey)
 	}
+	s.emitHookMoveEvents(ctx, req.OldPath, req.NewPath)
 	return &pb.ContextRenameResponse{Ok: true}, nil
 }
 
@@ -830,6 +886,7 @@ func (s *StorageService) NotifyUploadComplete(ctx context.Context, path string) 
 	}
 
 	key := s.key(path)
+	s.waitForUploadReadiness(ctx, bucket, key)
 	s.invalidate(bucket, key)
 	s.emitHookEvent(ctx, hooks.EventFsCreate, path)
 	return nil
@@ -847,20 +904,83 @@ func (s *StorageService) readFile(ctx context.Context, bucket, key string) ([]by
 }
 
 func (s *StorageService) invalidate(bucket, key string) {
-	// Invalidate locally
-	s.cache.invalidate(bucket, key)
+	// Invalidate locally (file + parent listing scope).
+	keys := []string{key}
 	if idx := strings.LastIndex(key, "/"); idx > 0 {
-		s.cache.invalidate(bucket, key[:idx])
+		keys = append(keys, key[:idx])
 	} else {
-		s.cache.invalidate(bucket, "")
+		keys = append(keys, "")
+	}
+	for _, k := range keys {
+		s.cache.invalidate(bucket, k)
 	}
 
 	// Broadcast to other replicas
 	if s.eventBus != nil {
-		s.eventBus.Emit(common.Event{
-			Type: common.EventCacheInvalidate,
-			Data: map[string]any{"key": bucket + ":" + key},
+		sent := make(map[string]struct{}, len(keys))
+		for _, k := range keys {
+			cacheKey := bucket + ":" + k
+			if _, ok := sent[cacheKey]; ok {
+				continue
+			}
+			sent[cacheKey] = struct{}{}
+			s.eventBus.Emit(common.Event{
+				Type: common.EventCacheInvalidate,
+				Data: map[string]any{"key": cacheKey},
+			})
+		}
+	}
+}
+
+func (s *StorageService) waitForUploadReadiness(ctx context.Context, bucket, key string) {
+	if bucket == "" || key == "" || s.client == nil || s.client.S3Client() == nil {
+		return
+	}
+
+	deadline := time.Now().Add(uploadReadyProbeWindow)
+	backoff := uploadReadyProbeInitialBackoff
+	for {
+		probeCtx, cancel := context.WithTimeout(ctx, uploadReadyProbeTimeoutPerHead)
+		_, err := s.client.S3Client().HeadObject(probeCtx, &s3.HeadObjectInput{
+			Bucket: &bucket,
+			Key:    &key,
 		})
+		cancel()
+
+		if err == nil {
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			log.Debug().
+				Err(err).
+				Str("bucket", bucket).
+				Str("key", key).
+				Msg("upload-complete readiness probe timed out; continuing")
+			return
+		}
+
+		sleep := backoff
+		remaining := time.Until(deadline)
+		if sleep > remaining {
+			sleep = remaining
+		}
+		timer := time.NewTimer(sleep)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+
+		if backoff < uploadReadyProbeMaxBackoff {
+			backoff *= 2
+			if backoff > uploadReadyProbeMaxBackoff {
+				backoff = uploadReadyProbeMaxBackoff
+			}
+		}
 	}
 }
 

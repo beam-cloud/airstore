@@ -32,6 +32,7 @@ export { Agents } from './resources/agents.js';
 export { Tasks } from './resources/tasks.js';
 export { Runs } from './resources/runs.js';
 export { Channels } from './resources/channels.js';
+export { Hooks } from './resources/hooks.js';
 
 // ── Typed constants ───────────────────────────────────────────────────────────
 export {
@@ -136,6 +137,9 @@ export type {
   TaskLogListResponse,
   TaskEventStreamParams,
   TaskEventBatch,
+  Schedule,
+  ScheduleCreateParams,
+  ScheduleUpdateParams,
 } from './types/tasks.js';
 export type {
   RunStatus,
@@ -161,6 +165,11 @@ export type {
   IntegrationStats,
   PathStats,
 } from './types/access-log.js';
+export type {
+  Hook,
+  HookCreateParams,
+  HookUpdateParams,
+} from './types/hooks.js';
 
 // ── Version ──────────────────────────────────────────────────────────────────
 export { VERSION } from './version.js';

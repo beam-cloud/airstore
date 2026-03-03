@@ -23,9 +23,9 @@ import (
 )
 
 const (
-	defaultHeartbeatInterval    = 10 * time.Second
-	setTaskResultMaxAttempts    = 3
-	setTaskResultRetryTimeout   = 10 * time.Second
+	defaultHeartbeatInterval  = 10 * time.Second
+	setTaskResultMaxAttempts  = 3
+	setTaskResultRetryTimeout = 10 * time.Second
 )
 
 // Worker represents a airstore worker that:
@@ -105,6 +105,15 @@ func NewWorker() (*Worker, error) {
 	// Derive max concurrent tasks from worker capacity and default task resources.
 	// cpuLimit is in millicores; memoryLimit is in MiB.
 	maxConcurrentTasks := computeMaxTasks(cpuLimit, memoryLimit)
+	if maxConcurrentTasks < 1 {
+		log.Warn().
+			Int64("worker_cpu_millis", cpuLimit).
+			Int64("worker_memory_mib", memoryLimit).
+			Int64("task_cpu_millis", types.DefaultRunExecutionCPU).
+			Int64("task_memory_mib", types.DefaultRunExecutionMemory>>20).
+			Msg("worker under-provisioned: cannot fit a single task at default resource limits; running degraded with max_tasks=1")
+		maxConcurrentTasks = 1
+	}
 
 	gatewayClient, err := gatewayclient.NewGatewayClient(gatewayGRPCAddr, authToken)
 	if err != nil {
@@ -184,18 +193,14 @@ func NewWorker() (*Worker, error) {
 
 // computeMaxTasks derives how many tasks this worker can run concurrently
 // based on its CPU (millicores) and memory (MiB) capacity versus default
-// task resource requirements. Always returns at least 1.
+// task resource requirements. Returns 0 if the worker is under-provisioned.
 func computeMaxTasks(cpuMillis, memMiB int64) int {
 	memBytes := memMiB << 20 // MiB → bytes (same unit as DefaultRunExecutionMemory)
 
 	cpuSlots := cpuMillis / types.DefaultRunExecutionCPU
 	memSlots := memBytes / types.DefaultRunExecutionMemory
 
-	n := int(min(cpuSlots, memSlots))
-	if n < 1 {
-		return 1
-	}
-	return n
+	return int(min(cpuSlots, memSlots))
 }
 
 // Run starts the worker and blocks until shutdown
@@ -262,6 +267,93 @@ func (w *Worker) runTask(task types.RunExecution) {
 	w.executeTask(task)
 }
 
+func (w *Worker) subscribeTaskCancellation(ctx context.Context, task types.RunExecution, cancel context.CancelFunc) func() {
+	if w == nil || w.terminalIO == nil || task.IsInteractive() {
+		return func() {}
+	}
+
+	return w.watchTaskCancellation(ctx, task, func() {
+		addTaskExecutionContext(log.Info(), task).Msg("received cancel signal for task")
+		cancel()
+	})
+}
+
+func (w *Worker) watchTaskCancellation(
+	ctx context.Context,
+	task types.RunExecution,
+	onCancel func(),
+) func() {
+	if w == nil || w.terminalIO == nil {
+		return func() {}
+	}
+
+	stopCh := make(chan struct{})
+	var stopOnce sync.Once
+	cleanup := func() {
+		stopOnce.Do(func() {
+			close(stopCh)
+		})
+	}
+
+	var cancelOnce sync.Once
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-stopCh:
+				return
+			default:
+			}
+
+			cancelCh, cancelCleanup, err := w.terminalIO.SubscribeCancel(ctx, task.ExternalId)
+			if err != nil {
+				addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to subscribe for task cancellation")
+				select {
+				case <-ctx.Done():
+					return
+				case <-stopCh:
+					return
+				case <-time.After(250 * time.Millisecond):
+					continue
+				}
+			}
+
+			shouldRetry := false
+			select {
+			case <-ctx.Done():
+			case <-stopCh:
+			case _, ok := <-cancelCh:
+				if !ok {
+					shouldRetry = true
+					addTaskExecutionContext(log.Warn(), task).Msg("task cancellation subscription closed; retrying")
+				} else {
+					cancelOnce.Do(func() {
+						if onCancel != nil {
+							onCancel()
+						}
+					})
+				}
+			}
+			cancelCleanup()
+
+			if !shouldRetry {
+				return
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-stopCh:
+				return
+			case <-time.After(250 * time.Millisecond):
+			}
+		}
+	}()
+
+	return cleanup
+}
+
 // executeTask runs a single task to completion: mark started → execute → record result.
 func (w *Worker) executeTask(task types.RunExecution) {
 	addTaskExecutionContext(
@@ -271,7 +363,19 @@ func (w *Worker) executeTask(task types.RunExecution) {
 		task,
 	).Msg("received task")
 
-	if err := w.gatewayClient.SetTaskStarted(w.ctx, task.ExternalId); err != nil {
+	attemptID := ""
+	if task.RunAttemptID != nil {
+		attemptID = strings.TrimSpace(*task.RunAttemptID)
+	}
+	if attemptID == "" {
+		err := fmt.Errorf("missing run attempt id for task start")
+		addTaskExecutionContext(log.Error().Err(err), task).Msg("refusing to start task without attempt fence")
+		if qErr := w.taskQueue.Fail(w.ctx, task.ExternalId, err); qErr != nil {
+			addTaskExecutionContext(log.Warn().Err(qErr), task).Msg("failed to mark task as failed in queue")
+		}
+		return
+	}
+	if err := w.gatewayClient.SetTaskStarted(w.ctx, task.ExternalId, attemptID); err != nil {
 		code := status.Code(err)
 		lowerErr := strings.ToLower(err.Error())
 		taskMissing := code == codes.NotFound ||
@@ -292,12 +396,17 @@ func (w *Worker) executeTask(task types.RunExecution) {
 		}
 	}
 
-	taskCtx := w.ctx
-	cancel := func() {}
+	taskCtx, taskCancel := context.WithCancel(w.ctx)
+	defer taskCancel()
+
 	if task.TimeoutMs != nil && *task.TimeoutMs > 0 {
-		taskCtx, cancel = context.WithTimeout(w.ctx, time.Duration(*task.TimeoutMs)*time.Millisecond)
+		timeoutCtx, timeoutCancel := context.WithTimeout(taskCtx, time.Duration(*task.TimeoutMs)*time.Millisecond)
+		taskCtx = timeoutCtx
+		defer timeoutCancel()
 	}
-	defer cancel()
+
+	cancelCleanup := w.subscribeTaskCancellation(taskCtx, task, taskCancel)
+	defer cancelCleanup()
 
 	var result *types.RunExecutionResult
 	var err error
@@ -337,8 +446,13 @@ func (w *Worker) finishTask(task types.RunExecution, result *types.RunExecutionR
 
 	reportErr := setTaskResultWithRetry(w.ctx, task, result, w.gatewayClient.SetTaskResult, contextSleep)
 	if reportErr != nil {
-		addTaskExecutionContext(log.Error().Err(reportErr), task).
-			Msg("failed to report result to gateway after retries")
+		if isNonRetriableSetTaskResultError(reportErr) {
+			addTaskExecutionContext(log.Warn().Err(reportErr), task).
+				Msg("failed to report result to gateway, not retrying non-retriable error")
+		} else {
+			addTaskExecutionContext(log.Error().Err(reportErr), task).
+				Msg("failed to report result to gateway after retries")
+		}
 	}
 
 	addTaskExecutionContext(log.Info().Int("exit_code", result.ExitCode), task).Msg("task finished")
@@ -352,9 +466,13 @@ func setTaskResultWithRetry(
 	ctx context.Context,
 	task types.RunExecution,
 	result *types.RunExecutionResult,
-	reportFn func(ctx context.Context, taskID string, exitCode int, errMsg string) error,
+	reportFn func(ctx context.Context, taskID string, exitCode int, errMsg string, attemptID string) error,
 	sleepFn func(context.Context, time.Duration),
 ) error {
+	attemptID := ""
+	if task.RunAttemptID != nil {
+		attemptID = *task.RunAttemptID
+	}
 	var lastErr error
 	for attempt := range setTaskResultMaxAttempts {
 		if attempt > 0 {
@@ -368,10 +486,13 @@ func setTaskResultWithRetry(
 		}
 
 		attemptCtx, cancel := context.WithTimeout(ctx, setTaskResultRetryTimeout)
-		lastErr = reportFn(attemptCtx, task.ExternalId, result.ExitCode, result.Error)
+		lastErr = reportFn(attemptCtx, task.ExternalId, result.ExitCode, result.Error, attemptID)
 		cancel()
 		if lastErr == nil {
 			return nil
+		}
+		if isNonRetriableSetTaskResultError(lastErr) {
+			return lastErr
 		}
 		if attempt < setTaskResultMaxAttempts-1 {
 			addTaskExecutionContext(log.Warn().Err(lastErr).Int("attempt", attempt+1), task).
@@ -379,6 +500,21 @@ func setTaskResultWithRetry(
 		}
 	}
 	return lastErr
+}
+
+func isNonRetriableSetTaskResultError(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch status.Code(err) {
+	case codes.NotFound, codes.FailedPrecondition, codes.InvalidArgument, codes.PermissionDenied, codes.Unauthenticated:
+		return true
+	}
+
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "task not found") ||
+		strings.Contains(lower, "run execution not found") ||
+		strings.Contains(lower, "already finished")
 }
 
 // contextSleep sleeps for d or until ctx is cancelled, whichever comes first.

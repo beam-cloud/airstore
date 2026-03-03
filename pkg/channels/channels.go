@@ -19,6 +19,7 @@ const (
 type Message struct {
 	Message           string                            `json:"message"`
 	IdempotencyKey    string                            `json:"idempotency_key,omitempty"`
+	TaskID            string                            `json:"task_id,omitempty"`
 	SessionID         string                            `json:"session_id,omitempty"`
 	SessionKey        *string                           `json:"session_key,omitempty"`
 	Deliver           *bool                             `json:"deliver,omitempty"`
@@ -35,10 +36,12 @@ type Message struct {
 }
 
 type SendResult struct {
-	Accepted      bool             `json:"accepted"`
-	IdempotentHit bool             `json:"idempotent_hit"`
-	Task          *types.AgentTask `json:"task,omitempty"`
-	RunID         *string          `json:"run_id,omitempty"`
+	Accepted        bool                          `json:"accepted"`
+	IdempotentHit   bool                          `json:"idempotent_hit"`
+	Task            *types.AgentTask              `json:"task,omitempty"`
+	RunID           *string                       `json:"run_id,omitempty"`
+	DeliveryOutcome types.RunInputDeliveryOutcome `json:"delivery_outcome,omitempty"`
+	Interaction     *types.RunInteraction         `json:"interaction,omitempty"`
 }
 
 type Channel interface {
@@ -182,26 +185,60 @@ func (d *Direct) SendToRun(ctx context.Context, workspaceID uint, runID string, 
 	if trimmedMessage == "" {
 		return nil, fmt.Errorf("message is required")
 	}
-
-	queueMode := message.QueueMode
-	if queueMode == "" {
-		queueMode = types.AgentQueueModeFollowup
+	taskID := strings.TrimSpace(message.TaskID)
+	var ownerTask *types.AgentTask
+	resolvedRunID := trimmedRunID
+	if taskID != "" {
+		task, err := d.agents.GetTask(ctx, workspaceID, taskID)
+		if err != nil {
+			return nil, err
+		}
+		ownerTask = task
+		if task.TargetRunID == nil || strings.TrimSpace(*task.TargetRunID) == "" {
+			return nil, fmt.Errorf("task %s has no active run", taskID)
+		}
+		resolvedRunID = strings.TrimSpace(*task.TargetRunID)
 	}
+
+	queueMode := types.NormalizeRunInputQueueMode(message.QueueMode)
 
 	idempotencyKey := strings.TrimSpace(message.IdempotencyKey)
 	if idempotencyKey == "" {
 		idempotencyKey = uuid.NewString()
 	}
 
-	task, deduped, err := d.agents.EnqueueRunInput(ctx, workspaceID, trimmedRunID, queueMode, trimmedMessage, idempotencyKey)
+	task, deduped, outcome, err := d.agents.EnqueueRunInput(ctx, workspaceID, resolvedRunID, queueMode, trimmedMessage, idempotencyKey)
 	if err != nil {
 		return nil, err
 	}
+	responseTask := task
+	if taskID != "" {
+		latestTask, latestErr := d.agents.GetTask(ctx, workspaceID, taskID)
+		if latestErr == nil && latestTask != nil {
+			responseTask = latestTask
+			if latestTask.TargetRunID != nil && strings.TrimSpace(*latestTask.TargetRunID) != "" {
+				resolvedRunID = strings.TrimSpace(*latestTask.TargetRunID)
+			}
+		} else if ownerTask != nil {
+			responseTask = ownerTask
+		}
+	}
+	var responseRunID *string
+	if resolvedRunID != "" {
+		runIDCopy := resolvedRunID
+		responseRunID = &runIDCopy
+	}
+	var interaction *types.RunInteraction
+	if resolvedRunID != "" {
+		interaction, _ = d.agents.GetRunInteraction(ctx, workspaceID, resolvedRunID)
+	}
 
 	return &SendResult{
-		Accepted:      true,
-		IdempotentHit: deduped,
-		Task:          task,
-		RunID:         task.TargetRunID,
+		Accepted:        true,
+		IdempotentHit:   deduped,
+		Task:            responseTask,
+		RunID:           responseRunID,
+		DeliveryOutcome: outcome,
+		Interaction:     interaction,
 	}, nil
 }

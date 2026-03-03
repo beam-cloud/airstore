@@ -24,7 +24,9 @@ import (
 )
 
 const (
-	gmailAPIBase = "https://gmail.googleapis.com/gmail/v1"
+	gmailAPIBase             = "https://gmail.googleapis.com/gmail/v1"
+	gmailResultMessagePrefix = "msg:"
+	gmailResultAttachPrefix  = "att:"
 )
 
 // Gmail categories (folders under /messages/)
@@ -97,6 +99,15 @@ type gmailMessage struct {
 	// Derived folder names
 	SenderFolder  string // sanitized sender email
 	SubjectFolder string // sanitized subject with ID suffix
+}
+
+// gmailAttachment represents a downloadable attachment extracted from a message payload.
+type gmailAttachment struct {
+	AttachmentID string
+	Filename     string
+	MimeType     string
+	Size         int64
+	Inline       bool
 }
 
 // NewGmailProvider creates a new Gmail source provider
@@ -267,9 +278,18 @@ func (g *GmailProvider) Search(ctx context.Context, pctx *sources.ProviderContex
 
 	results := make([]sources.SearchResult, 0, len(msgIDs))
 
+	var cancelled bool
 	for _, msgID := range msgIDs {
 		wg.Add(1)
-		sem <- struct{}{} // Acquire semaphore
+		select {
+		case sem <- struct{}{}: // Acquire semaphore
+		case <-ctx.Done():
+			wg.Done()
+			cancelled = true
+		}
+		if cancelled {
+			break
+		}
 
 		go func(id string) {
 			defer wg.Done()
@@ -301,6 +321,9 @@ func (g *GmailProvider) Search(ctx context.Context, pctx *sources.ProviderContex
 	}
 
 	wg.Wait()
+	if cancelled {
+		return results, ctx.Err()
+	}
 	return results, nil
 }
 
@@ -430,18 +453,40 @@ func (g *GmailProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provider
 		return nil, err
 	}
 
-	results := make([]sources.QueryResult, 0, len(metadataResults))
-	filenameFormat := spec.FilenameFormat
-	if filenameFormat == "" {
-		filenameFormat = sources.DefaultFilenameFormat("gmail")
+	includeAttachments := shouldIncludeAttachments(spec)
+	includeInline := boolMetadataOrDefault(spec.Metadata, "include_inline", false)
+	includeMessageBody := boolMetadataOrDefault(spec.Metadata, "include_message_body", true)
+	if !includeAttachments && !includeMessageBody {
+		// Keep at least one output mode enabled to avoid empty views by mistake.
+		includeMessageBody = true
 	}
 
+	messages := make([]gmailMessage, 0, len(metadataResults))
 	for _, msgResult := range metadataResults {
 		msg := g.parseMessage(msgResult)
 		if msg.ID == "" {
 			continue
 		}
+		messages = append(messages, msg)
+	}
 
+	attachmentsByMessage := map[string][]gmailAttachment{}
+	if includeAttachments {
+		messageIDs := make([]string, 0, len(messages))
+		for _, msg := range messages {
+			messageIDs = append(messageIDs, msg.ID)
+		}
+		attachmentsByMessage = g.fetchAttachmentsForMessages(ctx, token, messageIDs, includeInline)
+	}
+
+	results := make([]sources.QueryResult, 0, len(messages))
+	filenameFormat := spec.FilenameFormat
+	if filenameFormat == "" {
+		filenameFormat = sources.DefaultFilenameFormat("gmail")
+	}
+	seenFilenames := make(map[string]int)
+
+	for _, msg := range messages {
 		metadata := map[string]string{
 			"id":      msg.ID,
 			"from":    extractSenderName(msg.From),
@@ -451,15 +496,39 @@ func (g *GmailProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provider
 			"snippet": msg.Snippet,
 		}
 
-		filename := g.FormatFilename(filenameFormat, metadata)
+		messageFilename := g.FormatFilename(filenameFormat, metadata)
+		mtime := getMessageTimestamp(msg)
 
-		results = append(results, sources.QueryResult{
-			ID:       msg.ID,
-			Filename: filename,
-			Metadata: metadata,
-			Size:     msg.SizeEstimate,
-			Mtime:    getMessageTimestamp(msg),
-		})
+		if includeMessageBody {
+			results = append(results, sources.QueryResult{
+				ID:       gmailResultMessagePrefix + msg.ID,
+				Filename: uniqueFilename(messageFilename, seenFilenames),
+				Metadata: cloneStringMap(metadata),
+				Size:     msg.SizeEstimate,
+				Mtime:    mtime,
+			})
+		}
+
+		if !includeAttachments {
+			continue
+		}
+
+		for _, att := range attachmentsByMessage[msg.ID] {
+			attMeta := cloneStringMap(metadata)
+			attMeta["result_type"] = "attachment"
+			attMeta["attachment_id"] = att.AttachmentID
+			attMeta["attachment_name"] = attachmentOutputName(att)
+			attMeta["attachment_mime"] = att.MimeType
+			attMeta["attachment_inline"] = strconv.FormatBool(att.Inline)
+
+			results = append(results, sources.QueryResult{
+				ID:       formatAttachmentResultID(msg.ID, att.AttachmentID),
+				Filename: uniqueFilename(buildAttachmentResultFilename(messageFilename, att), seenFilenames),
+				Metadata: attMeta,
+				Size:     att.Size,
+				Mtime:    mtime,
+			})
+		}
 	}
 
 	return &sources.QueryResponse{
@@ -469,13 +538,171 @@ func (g *GmailProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provider
 	}, nil
 }
 
-// ReadResult fetches the content of an email by its message ID.
+// ReadResult fetches content for message and attachment query results.
+// Supported ID formats:
+//   - msg:<messageId>                   (message body)
+//   - att:<messageId>:<attachmentId>    (attachment bytes)
+//   - <messageId>                       (legacy message format)
+//
 // This implements the sources.QueryExecutor interface.
 func (g *GmailProvider) ReadResult(ctx context.Context, pctx *sources.ProviderContext, resultID string) ([]byte, error) {
 	if err := checkAuth(pctx); err != nil {
 		return nil, err
 	}
-	return g.fetchMessageBody(ctx, pctx.Credentials.AccessToken, resultID)
+
+	messageID, attachmentID, err := parseGmailResultID(resultID)
+	if err != nil {
+		return nil, err
+	}
+
+	token := pctx.Credentials.AccessToken
+	if attachmentID != "" {
+		return g.fetchAttachment(ctx, token, messageID, attachmentID)
+	}
+	return g.fetchMessageBody(ctx, token, messageID)
+}
+
+func shouldIncludeAttachments(spec sources.QuerySpec) bool {
+	if value, ok := spec.Metadata["include_attachments"]; ok {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			return parsed
+		}
+	}
+
+	// Smart views can opt in implicitly by including Gmail attachment operators.
+	query := strings.ToLower(spec.Query)
+	return strings.Contains(query, "has:attachment") || strings.Contains(query, "filename:")
+}
+
+func boolMetadataOrDefault(metadata map[string]string, key string, defaultValue bool) bool {
+	value, ok := metadata[key]
+	if !ok || value == "" {
+		return defaultValue
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return defaultValue
+	}
+	return parsed
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func parseGmailResultID(resultID string) (messageID, attachmentID string, err error) {
+	if resultID == "" {
+		return "", "", fmt.Errorf("invalid gmail result ID: empty")
+	}
+
+	if strings.HasPrefix(resultID, gmailResultAttachPrefix) {
+		rest := strings.TrimPrefix(resultID, gmailResultAttachPrefix)
+		parts := strings.SplitN(rest, ":", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return "", "", fmt.Errorf("invalid gmail attachment result ID: %s", resultID)
+		}
+		return parts[0], parts[1], nil
+	}
+
+	if strings.HasPrefix(resultID, gmailResultMessagePrefix) {
+		msgID := strings.TrimPrefix(resultID, gmailResultMessagePrefix)
+		if msgID == "" {
+			return "", "", fmt.Errorf("invalid gmail message result ID: %s", resultID)
+		}
+		return msgID, "", nil
+	}
+
+	// Backward compatibility with pre-attachment result IDs.
+	return resultID, "", nil
+}
+
+func formatAttachmentResultID(messageID, attachmentID string) string {
+	return gmailResultAttachPrefix + messageID + ":" + attachmentID
+}
+
+func uniqueFilename(filename string, seen map[string]int) string {
+	if filename == "" {
+		filename = "_unknown_"
+	}
+	if _, exists := seen[filename]; !exists {
+		seen[filename] = 1
+		return filename
+	}
+
+	ext := ""
+	base := filename
+	if dot := strings.LastIndex(filename, "."); dot > 0 {
+		base = filename[:dot]
+		ext = filename[dot:]
+	}
+
+	seq := seen[filename]
+	for {
+		seq++
+		candidate := fmt.Sprintf("%s__%d%s", base, seq, ext)
+		if _, exists := seen[candidate]; !exists {
+			seen[filename] = seq
+			seen[candidate] = 1
+			return candidate
+		}
+	}
+}
+
+func buildAttachmentResultFilename(messageFilename string, attachment gmailAttachment) string {
+	base := messageFilename
+	if dot := strings.LastIndex(messageFilename, "."); dot > 0 {
+		base = messageFilename[:dot]
+	}
+	return base + "__att__" + attachmentOutputName(attachment)
+}
+
+func attachmentOutputName(attachment gmailAttachment) string {
+	name := sources.SanitizeFilename(strings.TrimSpace(attachment.Filename))
+	extHint := inferredAttachmentExtension(attachment.MimeType)
+
+	if name == "" || name == "_unknown_" {
+		shortID := attachment.AttachmentID
+		if len(shortID) > 8 {
+			shortID = shortID[:8]
+		}
+		if shortID == "" {
+			shortID = "unknown"
+		}
+		if extHint == "" {
+			extHint = ".bin"
+		}
+		return "attachment_" + shortID + extHint
+	}
+
+	if extHint != "" && !hasFileExtension(name) {
+		name += extHint
+	}
+	return name
+}
+
+func inferredAttachmentExtension(mimeType string) string {
+	if mimeType == "" {
+		return ""
+	}
+	exts, err := mime.ExtensionsByType(mimeType)
+	if err != nil {
+		return ""
+	}
+	for _, ext := range exts {
+		if ext != "" {
+			return ext
+		}
+	}
+	return ""
+}
+
+func hasFileExtension(name string) bool {
+	dot := strings.LastIndex(name, ".")
+	return dot > 0 && dot < len(name)-1
 }
 
 // FormatFilename generates a filename from metadata using a format template.
@@ -1063,6 +1290,147 @@ func (g *GmailProvider) fetchMessageBody(ctx context.Context, token, msgId strin
 	return g.buildCompiledMessage(ctx, token, msgId, result), nil
 }
 
+func (g *GmailProvider) fetchAttachment(ctx context.Context, token, msgId, attachmentID string) ([]byte, error) {
+	var result map[string]any
+	path := fmt.Sprintf("/users/me/messages/%s/attachments/%s", msgId, attachmentID)
+	if err := g.request(ctx, token, path, &result); err != nil {
+		return nil, err
+	}
+
+	decoded, err := decodeBodyBytes(result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode attachment %s: %w", attachmentID, err)
+	}
+	return decoded, nil
+}
+
+func (g *GmailProvider) fetchAttachmentsForMessages(ctx context.Context, token string, msgIDs []string, includeInline bool) map[string][]gmailAttachment {
+	if len(msgIDs) == 0 {
+		return map[string][]gmailAttachment{}
+	}
+
+	const maxConcurrent = 6
+	sem := make(chan struct{}, maxConcurrent)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	attachmentsByMessage := make(map[string][]gmailAttachment, len(msgIDs))
+	for _, msgID := range msgIDs {
+		if msgID == "" {
+			continue
+		}
+
+		wg.Add(1)
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			wg.Done()
+			return attachmentsByMessage
+		}
+		go func(id string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			var msg map[string]any
+			path := fmt.Sprintf("/users/me/messages/%s?format=full", id)
+			if err := g.request(ctx, token, path, &msg); err != nil {
+				log.Debug().Err(err).Str("message_id", id).Msg("failed to fetch full message for attachment discovery")
+				return
+			}
+
+			attachments := extractMessageAttachments(msg, includeInline)
+			if len(attachments) == 0 {
+				return
+			}
+
+			mu.Lock()
+			attachmentsByMessage[id] = attachments
+			mu.Unlock()
+		}(msgID)
+	}
+
+	wg.Wait()
+	return attachmentsByMessage
+}
+
+func extractMessageAttachments(msg map[string]any, includeInline bool) []gmailAttachment {
+	payload, ok := msg["payload"].(map[string]any)
+	if !ok {
+		return nil
+	}
+
+	out := make([]gmailAttachment, 0)
+	collectMessageAttachments(payload, includeInline, &out)
+	return out
+}
+
+func collectMessageAttachments(part map[string]any, includeInline bool, out *[]gmailAttachment) {
+	body, _ := part["body"].(map[string]any)
+	attachmentID, _ := body["attachmentId"].(string)
+	if attachmentID != "" {
+		headers := extractPartHeaders(part)
+		inline := isInlineAttachment(headers)
+		if includeInline || !inline {
+			size := int64(0)
+			if rawSize, ok := body["size"].(float64); ok {
+				size = int64(rawSize)
+			}
+			filename, _ := part["filename"].(string)
+			mimeType, _ := part["mimeType"].(string)
+
+			*out = append(*out, gmailAttachment{
+				AttachmentID: attachmentID,
+				Filename:     filename,
+				MimeType:     mimeType,
+				Size:         size,
+				Inline:       inline,
+			})
+		}
+	}
+
+	if parts, ok := part["parts"].([]any); ok {
+		for _, p := range parts {
+			subPart, ok := p.(map[string]any)
+			if !ok {
+				continue
+			}
+			collectMessageAttachments(subPart, includeInline, out)
+		}
+	}
+}
+
+func extractPartHeaders(part map[string]any) map[string]string {
+	headers := make(map[string]string)
+	rawHeaders, ok := part["headers"].([]any)
+	if !ok {
+		return headers
+	}
+
+	for _, raw := range rawHeaders {
+		h, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := h["name"].(string)
+		value, _ := h["value"].(string)
+		if name != "" {
+			headers[strings.ToLower(name)] = strings.TrimSpace(value)
+		}
+	}
+	return headers
+}
+
+func isInlineAttachment(headers map[string]string) bool {
+	disposition := strings.ToLower(headers["content-disposition"])
+	switch {
+	case strings.Contains(disposition, "attachment"):
+		return false
+	case strings.Contains(disposition, "inline"):
+		return true
+	}
+	return headers["content-id"] != ""
+}
+
 // buildCompiledMessage creates a complete text representation of an email
 // including headers and body content for agent consumption
 func (g *GmailProvider) buildCompiledMessage(ctx context.Context, token, msgId string, msg map[string]any) []byte {
@@ -1277,9 +1645,19 @@ func extractMimePartRecursive(part map[string]any, targetMimeType string) string
 
 // decodeBodyData decodes the base64url-encoded body data from a Gmail message part
 func decodeBodyData(body map[string]any) string {
+	decoded, err := decodeBodyBytes(body)
+	if err != nil {
+		log.Debug().Err(err).Msg("failed to decode gmail body data")
+		return ""
+	}
+	return string(decoded)
+}
+
+// decodeBodyBytes decodes base64url body data and returns the raw bytes.
+func decodeBodyBytes(body map[string]any) ([]byte, error) {
 	data, ok := body["data"].(string)
 	if !ok || data == "" {
-		return ""
+		return []byte{}, nil
 	}
 
 	// Gmail uses URL-safe base64 encoding, often without padding
@@ -1299,13 +1677,12 @@ func decodeBodyData(body map[string]any) string {
 			}
 			decoded, err = base64.URLEncoding.DecodeString(padded)
 			if err != nil {
-				log.Debug().Err(err).Msg("failed to decode gmail body data")
-				return ""
+				return nil, err
 			}
 		}
 	}
 
-	return string(decoded)
+	return decoded, nil
 }
 
 // stripHTMLToText converts HTML content to plain text

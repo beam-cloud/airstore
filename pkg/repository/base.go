@@ -52,12 +52,24 @@ type TaskQueue interface {
 type TerminalIORepository interface {
 	PublishInput(ctx context.Context, taskID string, data []byte) error
 	SubscribeInput(ctx context.Context, taskID string) (<-chan []byte, func(), error)
+	ListPendingInputs(ctx context.Context, taskID string) ([]types.PendingInput, error)
 
 	PublishOutput(ctx context.Context, taskID string, data []byte) error
 	SubscribeOutput(ctx context.Context, taskID string) (<-chan []byte, func(), error)
 
 	PublishCancel(ctx context.Context, taskID string) error
 	SubscribeCancel(ctx context.Context, taskID string) (<-chan struct{}, func(), error)
+
+	// Session lease: exclusive ownership of an interactive session.
+	AcquireSessionLease(ctx context.Context, workspaceID uint, sessionID, ownerID string, ttl time.Duration) (bool, error)
+	RenewSessionLease(ctx context.Context, workspaceID uint, sessionID, ownerID string, ttl time.Duration) (bool, error)
+	ReleaseSessionLease(ctx context.Context, workspaceID uint, sessionID, ownerID string) error
+	GetSessionLeaseOwner(ctx context.Context, workspaceID uint, sessionID string) (string, error)
+
+	// Run interaction state: backend-owned state for working/waiting/closed.
+	SetRunInteraction(ctx context.Context, workspaceID uint, runID string, state types.RunInteractionState, activeExecutionID string, ttl time.Duration) error
+	GetRunInteraction(ctx context.Context, workspaceID uint, runID string) (*types.RunInteraction, error)
+	ClearRunInteraction(ctx context.Context, workspaceID uint, runID string) error
 }
 
 // MemberRepository manages workspace members
@@ -156,6 +168,8 @@ type BackendRepository interface {
 	UpdateRunExecutionStatus(ctx context.Context, externalId string, status types.RunExecutionStatus) error
 	SetRunExecutionStarted(ctx context.Context, externalId string) error
 	SetRunExecutionResult(ctx context.Context, externalId string, exitCode int, errorMsg string) error
+	SetRunExecutionStartedForAttempt(ctx context.Context, externalId string, attemptID string) (bool, error)
+	SetRunExecutionResultForAttempt(ctx context.Context, externalId string, attemptID string, exitCode int, errorMsg string) (bool, error)
 	CancelRunExecution(ctx context.Context, externalId string) error
 	DeleteRunExecution(ctx context.Context, externalId string) error
 	MarkRunExecutionRetried(ctx context.Context, externalId string) error
@@ -169,16 +183,35 @@ type BackendRepository interface {
 	GetAgentProfileByKey(ctx context.Context, workspaceId uint, agentKey string) (*types.AgentProfile, error)
 	ListAgentProfiles(ctx context.Context, workspaceId uint) ([]*types.AgentProfile, error)
 	UpdateAgentProfile(ctx context.Context, profile *types.AgentProfile) error
+	DeleteAgentProfile(ctx context.Context, workspaceId uint, agentId string) error
 
 	// Tasks
 	CreateTask(ctx context.Context, task *types.AgentTask) error
+	CreateTaskWithOutbox(ctx context.Context, task *types.AgentTask, event *types.OrchestrationOutboxEvent) error
 	ListTasks(ctx context.Context, workspaceId uint, limit int) ([]*types.AgentTask, error)
 	ListTasksFiltered(ctx context.Context, workspaceId uint, filter types.AgentTaskListFilter) ([]*types.AgentTask, error)
 	GetTaskByID(ctx context.Context, taskId string) (*types.AgentTask, error)
 	GetTask(ctx context.Context, workspaceId uint, taskId string) (*types.AgentTask, error)
 	GetTaskByIdempotency(ctx context.Context, workspaceId uint, agentId *string, idempotencyKey string) (*types.AgentTask, error)
+	ClaimQueuedTaskForDispatch(ctx context.Context, taskID string, staleAfter time.Duration) (*types.AgentTask, bool, error)
 	UpdateTaskState(ctx context.Context, taskId string, state types.AgentTaskState, droppedReason *string, targetRunID *string) error
+	UpdateTaskStateIfCurrentRun(ctx context.Context, taskID string, expectedRunID string, state types.AgentTaskState, droppedReason *string, targetRunID *string) (bool, error)
 	ArchiveTask(ctx context.Context, taskId string) error
+	CreateScheduledTask(ctx context.Context, st *types.ScheduledTask) error
+	GetScheduledTask(ctx context.Context, workspaceID uint, externalID string) (*types.ScheduledTask, error)
+	ListScheduledTasks(ctx context.Context, workspaceID uint) ([]*types.ScheduledTask, error)
+	UpdateScheduledTask(ctx context.Context, st *types.ScheduledTask) error
+	DeleteScheduledTask(ctx context.Context, workspaceID uint, externalID string) error
+	ClaimDueScheduledTasks(ctx context.Context, now time.Time, limit int) ([]*types.ScheduledTask, error)
+	AdvanceScheduledTask(ctx context.Context, id string, oldNextRunAt, newNextRunAt time.Time) (bool, error)
+
+	// Orchestration outbox/inbox/retry guard
+	EnqueueOrchestrationOutboxEvent(ctx context.Context, event *types.OrchestrationOutboxEvent) error
+	ClaimPendingOrchestrationOutboxEvents(ctx context.Context, limit int) ([]*types.OrchestrationOutboxEvent, error)
+	MarkOrchestrationOutboxEventPublished(ctx context.Context, eventID int64) error
+	MarkOrchestrationOutboxEventError(ctx context.Context, eventID int64, lastError string) error
+	AcquireOrchestrationResultInbox(ctx context.Context, resultKey string, streamID string) (bool, error)
+	AcquireOrchestrationRetryGuard(ctx context.Context, guardKey string) (bool, error)
 
 	// Runs
 	CreateAgentRun(ctx context.Context, run *types.AgentRun) error
@@ -186,6 +219,7 @@ type BackendRepository interface {
 	GetAgentRun(ctx context.Context, workspaceId uint, runId string) (*types.AgentRun, error)
 	ListAgentRuns(ctx context.Context, workspaceId uint, limit int) ([]*types.AgentRun, error)
 	ListAgentRunsFiltered(ctx context.Context, workspaceId uint, filter types.AgentRunListFilter) ([]*types.AgentRun, error)
+	ListActiveRunsBySession(ctx context.Context, workspaceId uint, sessionID string, excludeRunIDs []string, limit int) ([]*types.AgentRun, error)
 	UpdateAgentRunLifecycle(ctx context.Context, runId string, status types.AgentRunStatus, startedAt, endedAt *time.Time, errorMsg *string) error
 	SetAgentRunClaim(ctx context.Context, runId string, workerId string, heartbeatAt time.Time, expiresAt time.Time) error
 	ClearAgentRunClaim(ctx context.Context, runId string) error

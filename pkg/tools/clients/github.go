@@ -19,6 +19,7 @@ const (
 	githubCmdListPRFiles = "list-pr-files"
 	githubCmdCommentPR   = "comment-pr"
 	githubCmdReviewPR    = "review-pr"
+	githubCmdCreatePR    = "create-pr"
 	githubCmdListIssues  = "list-issues"
 	githubCmdGetIssue    = "get-issue"
 	githubCmdCreateIssue = "create-issue"
@@ -110,6 +111,25 @@ func (g *GitHubClient) Execute(ctx context.Context, command string, args map[str
 			event := GetStringArg(args, "event", "COMMENT")
 			commentsJSON := GetStringArg(args, "comments", "")
 			return g.reviewPR(ctx, token, required["owner"], required["repo"], number, required["body"], event, commentsJSON)
+		},
+		githubCmdCreatePR: func(ctx context.Context, token string, args map[string]any) (any, error) {
+			required, err := RequireStringArgs(args, "owner", "repo", "title", "head", "base")
+			if err != nil {
+				return nil, err
+			}
+			body := GetStringArg(args, "body", "")
+			draft := GetBoolArg(args, "draft", false)
+			return g.createPR(
+				ctx,
+				token,
+				required["owner"],
+				required["repo"],
+				required["title"],
+				required["head"],
+				required["base"],
+				body,
+				draft,
+			)
 		},
 		githubCmdListIssues: func(ctx context.Context, token string, args map[string]any) (any, error) {
 			required, err := RequireStringArgs(args, "owner", "repo")
@@ -346,6 +366,43 @@ func (g *GitHubClient) reviewPR(ctx context.Context, token, owner, repo string, 
 		"state":        getString(result, "state"),
 		"url":          getString(result, "html_url"),
 		"submitted_at": getString(result, "submitted_at"),
+	}, nil
+}
+
+func (g *GitHubClient) createPR(ctx context.Context, token, owner, repo, title, head, base, body string, draft bool) (any, error) {
+	base = strings.TrimSpace(base)
+	if base == "" {
+		base = "main"
+	}
+
+	path := fmt.Sprintf("/repos/%s/%s/pulls", owner, repo)
+	payload := map[string]any{
+		"title": title,
+		"head":  head,
+		"base":  base,
+	}
+	if body != "" {
+		payload["body"] = body
+	}
+	if draft {
+		payload["draft"] = true
+	}
+
+	var result map[string]any
+	if err := g.requestJSON(ctx, token, "POST", path, payload, &result); err != nil {
+		return nil, err
+	}
+
+	return map[string]any{
+		"owner":  owner,
+		"repo":   repo,
+		"number": getInt(result, "number"),
+		"title":  getString(result, "title"),
+		"state":  getString(result, "state"),
+		"draft":  getBool(result, "draft"),
+		"url":    getString(result, "html_url"),
+		"head":   head,
+		"base":   base,
 	}, nil
 }
 

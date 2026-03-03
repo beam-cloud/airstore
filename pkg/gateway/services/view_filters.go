@@ -13,15 +13,19 @@ import (
 // UI form builds and what SDK users pass.
 
 type GmailFilter struct {
-	From          string `json:"from"`
-	To            string `json:"to"`
-	Subject       string `json:"subject"`
-	Label         string `json:"label"`
-	NewerThan     string `json:"newer_than"`
-	OlderThan     string `json:"older_than"`
-	HasAttachment *bool  `json:"has_attachment"`
-	IsUnread      *bool  `json:"is_unread"`
-	IsStarred     *bool  `json:"is_starred"`
+	From               string `json:"from"`
+	To                 string `json:"to"`
+	Subject            string `json:"subject"`
+	Label              string `json:"label"`
+	Filename           string `json:"filename"`
+	NewerThan          string `json:"newer_than"`
+	OlderThan          string `json:"older_than"`
+	HasAttachment      *bool  `json:"has_attachment"`
+	IsUnread           *bool  `json:"is_unread"`
+	IsStarred          *bool  `json:"is_starred"`
+	IncludeAttachments *bool  `json:"include_attachments"`
+	IncludeInline      *bool  `json:"include_inline"`
+	IncludeMessageBody *bool  `json:"include_message_body"`
 }
 
 type GitHubFilter struct {
@@ -151,6 +155,9 @@ func buildGmailFilter(raw json.RawMessage, limit int) (string, error) {
 	if f.Label != "" {
 		parts = append(parts, "label:"+f.Label)
 	}
+	if f.Filename != "" {
+		parts = append(parts, "filename:"+quoteIfNeeded(f.Filename))
+	}
 	if f.NewerThan != "" {
 		parts = append(parts, "newer_than:"+f.NewerThan)
 	}
@@ -166,7 +173,23 @@ func buildGmailFilter(raw json.RawMessage, limit int) (string, error) {
 	if f.IsStarred != nil && *f.IsStarred {
 		parts = append(parts, "is:starred")
 	}
-	return marshalSpec(newSpec("gmail", strings.Join(parts, " "), limit))
+
+	spec := newSpec("gmail", strings.Join(parts, " "), limit)
+
+	if f.IncludeAttachments != nil {
+		spec["include_attachments"] = *f.IncludeAttachments
+	} else if f.HasAttachment != nil && *f.HasAttachment {
+		// If the user asks for has_attachment, include attachment files by default.
+		spec["include_attachments"] = true
+	}
+	if f.IncludeInline != nil {
+		spec["include_inline"] = *f.IncludeInline
+	}
+	if f.IncludeMessageBody != nil {
+		spec["include_message_body"] = *f.IncludeMessageBody
+	}
+
+	return marshalSpec(spec)
 }
 
 func buildGitHubFilter(raw json.RawMessage, limit int) (string, error) {

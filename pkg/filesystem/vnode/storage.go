@@ -11,6 +11,7 @@ import (
 
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
+	"github.com/rs/zerolog/log"
 	"github.com/winfsp/cgofuse/fuse"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -57,6 +58,7 @@ func NewStorageVNode(conn *grpc.ClientConn, token string) *StorageVNode {
 	}
 	s.asyncWriter = NewAsyncWriter(s.writeRange)
 	go s.backgroundWarmupLoop()
+	go s.handleEvictionLoop()
 	return s
 }
 
@@ -99,11 +101,11 @@ func (s *StorageVNode) Getattr(path string) (*FileInfo, error) {
 		return info, nil
 	}
 
-	if s.cache.IsNegative(path) {
-		return nil, fs.ErrNotExist
-	}
 	if info := s.cache.GetInfo(path); info != nil {
 		return info, nil
+	}
+	if s.cache.IsNegative(path) {
+		return nil, fs.ErrNotExist
 	}
 
 	ctx, cancel := s.ctx()
@@ -214,11 +216,12 @@ func (s *StorageVNode) Open(path string, flags int) (FileHandle, error) {
 }
 
 func (s *StorageVNode) openExisting(path string) (FileHandle, error) {
-	if s.cache.IsNegative(path) {
-		return 0, fs.ErrNotExist
-	}
+	// Prefer positive cache so fresh metadata wins over stale negatives.
 	if s.cache.GetInfo(path) != nil {
 		return s.allocHandle(path), nil
+	}
+	if s.cache.IsNegative(path) {
+		return 0, fs.ErrNotExist
 	}
 
 	ctx, cancel := s.ctx()
@@ -290,6 +293,7 @@ func (s *StorageVNode) Write(path string, buf []byte, off int64, fh FileHandle) 
 	if isAppleDoublePath(path) {
 		return len(buf), nil // Pretend write succeeded
 	}
+
 	// Clear cached small-file content eagerly so readers never observe stale bytes
 	// when writes happen within the same mtime second.
 	s.content.Invalidate(path)
@@ -308,6 +312,7 @@ func (s *StorageVNode) Write(path string, buf []byte, off int64, fh FileHandle) 
 		state.mu.Unlock()
 		return 0, fs.ErrInvalid
 	}
+	state.touch()
 
 	// Empty buffer: start buffering or write directly if too large.
 	if len(state.writeBuf) == 0 {
@@ -332,10 +337,19 @@ func (s *StorageVNode) Write(path string, buf []byte, off int64, fh FileHandle) 
 		return len(buf), nil
 	}
 
-	// Buffer overflow or non-contiguous: flush old buffer synchronously,
-	// then start fresh. We use synchronous writeRange here (not Enqueue)
-	// because the asyncWriter stores only ONE (offset, data) pair per path —
-	// sequential Enqueue calls at different offsets would clobber each other.
+	// Non-contiguous or buffer overflow. Try to merge both ranges in memory
+	// so the file reaches S3 as a single PutObject. Flushing a partial write
+	// at offset A followed by a gateway merge-write at offset B fills the gap
+	// [A+len(first), B) with NULLs when B > A+len(first).
+	merged := mergeWriteBuffer(state.writeOff, state.writeBuf, off, buf)
+	if merged != nil && len(merged.data) <= writeBufferMax {
+		state.writeOff = merged.off
+		state.writeBuf = merged.data
+		state.mu.Unlock()
+		return len(buf), nil
+	}
+
+	// Combined range too large: flush old buffer synchronously then start fresh.
 	data := append([]byte(nil), state.writeBuf...)
 	writeOff := state.writeOff
 	state.writeBuf = nil
@@ -626,7 +640,7 @@ func (s *StorageVNode) allocHandle(path string) FileHandle {
 	defer s.mu.Unlock()
 	fh := s.nextFH
 	s.nextFH++
-	state := &handleState{path: path}
+	state := &handleState{path: path, lastActivity: time.Now()}
 	s.handles[fh] = state
 
 	s.writeMu.Lock()
@@ -684,12 +698,14 @@ func (s *StorageVNode) readRange(path string, off int64, length int64) ([]byte, 
 		return nil, err
 	}
 	if !resp.Ok {
-		return nil, fs.ErrNotExist
+		return nil, readResponseError(resp.Error)
 	}
 	return resp.Data, nil
 }
 
 func (s *StorageVNode) writeRange(path string, off int64, data []byte) error {
+	off, data = compactNulls(off, data)
+
 	ctx, cancel := s.ctx()
 	defer cancel()
 
@@ -712,6 +728,7 @@ func (s *StorageVNode) recordRead(state *handleState, path string, off int64, n 
 	}
 
 	state.mu.Lock()
+	state.touch()
 	sequential := state.lastSize > 0 && state.lastOff+int64(state.lastSize) == off
 	state.lastOff = off
 	state.lastSize = n
@@ -801,6 +818,7 @@ func (s *StorageVNode) flushWriteBuffer(path string, state *handleState) {
 	state.writeBuf = nil
 	state.mu.Unlock()
 
+	writeOff, data = compactNulls(writeOff, data)
 	s.asyncWriter.Enqueue(path, writeOff, data)
 }
 
@@ -916,6 +934,71 @@ func (s *StorageVNode) toFileInfo(path string, info *pb.FileInfo) *FileInfo {
 		Ino: PathIno(path), Size: info.Size, Mode: mode, Nlink: 1,
 		Uid: uid, Gid: gid,
 		Atime: now, Mtime: mtime, Ctime: mtime,
+	}
+}
+
+func (s *StorageVNode) OpenHandleCount() int {
+	s.mu.Lock()
+	n := len(s.handles)
+	s.mu.Unlock()
+	return n
+}
+
+// handleEvictionLoop periodically evicts handles that haven't been used recently.
+// This prevents unbounded memory growth when FUSE Release is never received
+// (process killed, 9P disconnect, gVisor edge cases).
+func (s *StorageVNode) handleEvictionLoop() {
+	ticker := time.NewTicker(handleEvictionInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.stopWarmup:
+			return
+		case <-ticker.C:
+			s.evictStaleHandles()
+		}
+	}
+}
+
+func (s *StorageVNode) evictStaleHandles() {
+	cutoff := time.Now().Add(-handleStaleTimeout)
+
+	s.mu.Lock()
+	stale := make(map[FileHandle]*handleState)
+	for fh, state := range s.handles {
+		state.mu.Lock()
+		if !state.closed && state.lastActivity.Before(cutoff) {
+			stale[fh] = state
+		}
+		state.mu.Unlock()
+	}
+	s.mu.Unlock()
+
+	for fh, state := range stale {
+		s.flushWriteBuffer(state.path, state)
+		_ = s.asyncWriter.ForceFlush(state.path)
+
+		s.mu.Lock()
+		state.mu.Lock()
+		state.closed = true
+		state.writeBuf = nil
+		state.prefetch = nil
+		state.mu.Unlock()
+		delete(s.handles, fh)
+		s.mu.Unlock()
+
+		s.writeMu.Lock()
+		if m, ok := s.writes[state.path]; ok {
+			delete(m, fh)
+			if len(m) == 0 {
+				delete(s.writes, state.path)
+			}
+		}
+		s.writeMu.Unlock()
+
+		log.Debug().Str("path", state.path).Uint64("fh", uint64(fh)).
+			Msg("evicted stale file handle")
 	}
 }
 

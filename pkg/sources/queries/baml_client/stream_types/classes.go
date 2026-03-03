@@ -80,6 +80,48 @@ func (c ConfluenceQueryResult) BamlTypeName() string {
 	return "ConfluenceQueryResult"
 }
 
+type CronResult struct {
+	Cron_expr *string `json:"cron_expr"`
+}
+
+func (c *CronResult) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_STREAM_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_STREAM_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "CronResult" {
+		panic(fmt.Sprintf("expected CronResult, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "cron_expr":
+			c.Cron_expr = baml.Decode(valueHolder).Interface().(*string)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class CronResult", key))
+
+		}
+	}
+
+}
+
+func (c CronResult) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["cron_expr"] = c.Cron_expr
+
+	return baml.EncodeClass("CronResult", fields, nil)
+}
+
+func (c CronResult) BamlTypeName() string {
+	return "CronResult"
+}
+
 type GDriveQueryResult struct {
 	Gdrive_query    *string `json:"gdrive_query"`
 	Limit           *int64  `json:"limit"`

@@ -88,7 +88,7 @@ describe('Client', () => {
 
   it('can reach the gateway health endpoint', async () => {
     const client = getClient();
-    const resp = await client.rawRequest('GET', '/health');
+    const resp = await client.rawRequest('GET', '/health/ready');
     expect(resp.status).toBe(200);
   });
 });

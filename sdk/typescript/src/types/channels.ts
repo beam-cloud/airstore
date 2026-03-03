@@ -14,6 +14,7 @@ export interface SendDirectAgentMessageParams
  */
 export interface SendDirectRunMessageParams {
   message: string;
+  taskId: string;
   queueMode?: QueueMode;
   idempotencyKey?: string;
 }

@@ -1,8 +1,15 @@
 package worker
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/google/uuid"
@@ -20,11 +27,12 @@ const (
 
 	systemPromptModeReplace = "replace"
 
-	claudeProviderName    = "claude"
-	claudeConfigDirEnvKey = "CLAUDE_CONFIG_DIR"
-	claudeConfigDirPath   = "/workspace/.claude"
-	claudeDefaultShellEnv = "/bin/bash"
-	claudeStateDirName    = ".claude"
+	claudeConfigDirEnvKey  = "CLAUDE_CONFIG_DIR"
+	claudeDefaultShellEnv  = "/bin/bash"
+	claudeStateDirName     = ".claude"
+	claudeStateRootDir     = ".airstore/claude"
+	claudeHeartbeatFile    = ".heartbeat"
+	claudeHeartbeatFreshFor = 5 * time.Minute
 )
 
 // AgentExecutionRunner builds the process entrypoint for an agent task.
@@ -42,6 +50,22 @@ type TurnRunner interface {
 	BuildTurnArgs(prompt string, env map[string]string, mode TurnArgMode) []string
 }
 
+// HeartbeatRunner extends AgentExecutionRunner with liveness tracking.
+// Runners install hooks inside the sandbox that touch a heartbeat file
+// on each lifecycle event (tool use, stop). The worker also touches the
+// file on observed output as a belt-and-suspenders fallback.
+type HeartbeatRunner interface {
+	AgentExecutionRunner
+	// SetupHeartbeat writes hook configuration to the VFS so the runner
+	// touches a heartbeat file on each tool use / stop. mountSource is
+	// the host-side VFS FUSE mount path. env is the task env used to
+	// derive CLAUDE_CONFIG_DIR. Returns the host-side heartbeat path.
+	SetupHeartbeat(mountSource string, env map[string]string) (string, error)
+	// CheckHeartbeat returns true if the heartbeat file at the given
+	// host-side path was recently modified.
+	CheckHeartbeat(heartbeatPath string) bool
+}
+
 type TurnArgMode string
 
 const (
@@ -51,8 +75,6 @@ const (
 	TurnArgModeFirstResumeLatest TurnArgMode = "first_resume_latest"
 	// TurnArgModeFirstResumeByID resumes using an explicit session id.
 	TurnArgModeFirstResumeByID TurnArgMode = "first_resume_by_id"
-	// TurnArgModeFirstFreshNoSession starts a new session without an explicit session id.
-	TurnArgModeFirstFreshNoSession TurnArgMode = "first_fresh_no_session"
 	// TurnArgModeFollowup is used for non-first turns.
 	TurnArgModeFollowup TurnArgMode = "followup"
 )
@@ -81,7 +103,7 @@ func (r *ClaudeCodeRunner) Name() string {
 func (r *ClaudeCodeRunner) BuildEntrypoint(task types.RunExecution, env map[string]string) []string {
 	r.injectEnv(env)
 	model := strings.TrimSpace(env[agentModelEnvKey])
-	sessionID := claudeSessionIDFromEnv(env)
+	sessionID := claudeSessionIDForCLI(claudeSessionIDFromEnv(env))
 
 	addTaskExecutionContext(
 		log.Info().
@@ -90,8 +112,11 @@ func (r *ClaudeCodeRunner) BuildEntrypoint(task types.RunExecution, env map[stri
 		task,
 	).Msg("running claude code task")
 
-	builder := newPromptEntrypointBuilder("claude").
-		withKeyValue("--session-id", sessionID).
+	builder := newPromptEntrypointBuilder("claude")
+	if sessionID != "" {
+		builder.withKeyValue("--session-id", sessionID)
+	}
+	builder.
 		withFlag("--print").
 		withFlag("--verbose").
 		withKeyValue("--output-format", "stream-json").
@@ -107,7 +132,7 @@ func (r *ClaudeCodeRunner) BuildEntrypoint(task types.RunExecution, env map[stri
 func (r *ClaudeCodeRunner) BuildTurnArgs(prompt string, env map[string]string, mode TurnArgMode) []string {
 	r.injectEnv(env)
 	model := strings.TrimSpace(env[agentModelEnvKey])
-	sessionID := claudeSessionIDFromEnv(env)
+	sessionID := claudeSessionIDForCLI(claudeSessionIDFromEnv(env))
 
 	builder := newPromptEntrypointBuilder("claude")
 	switch mode {
@@ -119,9 +144,9 @@ func (r *ClaudeCodeRunner) BuildTurnArgs(prompt string, env map[string]string, m
 		} else {
 			builder.withFlag("--continue")
 		}
-	case TurnArgModeFirstFreshNoSession:
-		// Intentionally omit session flags.
 	case TurnArgModeFollowup:
+		// Follow-up turns stay pinned to the same session when available to avoid
+		// accidentally drifting into a fresh Claude context.
 		if sessionID != "" {
 			builder.withKeyValue("--resume", sessionID)
 		} else {
@@ -142,10 +167,79 @@ func (r *ClaudeCodeRunner) BuildTurnArgs(prompt string, env map[string]string, m
 	return builder.withPrompt(prompt).build()
 }
 
+func (r *ClaudeCodeRunner) SetupHeartbeat(mountSource string, env map[string]string) (string, error) {
+	if strings.TrimSpace(mountSource) == "" {
+		return "", fmt.Errorf("empty mount source")
+	}
+
+	configDir := strings.TrimSpace(env[claudeConfigDirEnvKey])
+	if configDir == "" {
+		configDir = defaultClaudeConfigDir(env)
+	}
+
+	// Heartbeat file sits next to the .claude config dir inside .airstore/claude/<scope>/.
+	heartbeatContainerPath := path.Join(path.Dir(configDir), claudeHeartbeatFile)
+
+	hostConfigDir := vfsHostPath(mountSource, configDir)
+	hostHeartbeatPath := vfsHostPath(mountSource, heartbeatContainerPath)
+
+	if err := os.MkdirAll(hostConfigDir, 0o755); err != nil {
+		return "", fmt.Errorf("mkdir %s: %w", hostConfigDir, err)
+	}
+
+	settingsPath := filepath.Join(hostConfigDir, "settings.json")
+	if err := os.WriteFile(settingsPath, buildHeartbeatHookSettings(heartbeatContainerPath), 0o644); err != nil {
+		return "", fmt.Errorf("write %s: %w", settingsPath, err)
+	}
+
+	if f, err := os.Create(hostHeartbeatPath); err == nil {
+		f.Close()
+	}
+
+	return hostHeartbeatPath, nil
+}
+
+func (r *ClaudeCodeRunner) CheckHeartbeat(heartbeatPath string) bool {
+	if heartbeatPath == "" {
+		return false
+	}
+	info, err := os.Stat(heartbeatPath)
+	if err != nil {
+		return false
+	}
+	return time.Since(info.ModTime()) < claudeHeartbeatFreshFor
+}
+
+func buildHeartbeatHookSettings(heartbeatPath string) []byte {
+	type hookEntry struct {
+		Type    string `json:"type"`
+		Command string `json:"command"`
+	}
+	type matcherGroup struct {
+		Hooks []hookEntry `json:"hooks"`
+	}
+	type settings struct {
+		Hooks map[string][]matcherGroup `json:"hooks"`
+	}
+
+	cmd := "date +%s > " + heartbeatPath
+	group := matcherGroup{Hooks: []hookEntry{{Type: "command", Command: cmd}}}
+
+	s := settings{Hooks: map[string][]matcherGroup{
+		"PostToolUse":  {group},
+		"Stop":         {group},
+		"Notification": {group},
+	}}
+	b, _ := json.MarshalIndent(s, "", "  ")
+	return b
+}
+
 func (r *ClaudeCodeRunner) injectEnv(env map[string]string) {
 	r.injectAPIKey(env, "ANTHROPIC_API_KEY", r.anthropicAPIKey, true)
 	r.injectKernelEnv(env)
 	if strings.TrimSpace(env[claudeConfigDirEnvKey]) == "" {
+		// Keep Claude state directly on the mounted workspace so behavior is
+		// local-like and resume state is natively persistent.
 		env[claudeConfigDirEnvKey] = defaultClaudeConfigDir(env)
 	}
 	if strings.TrimSpace(env["SHELL"]) == "" {
@@ -154,14 +248,65 @@ func (r *ClaudeCodeRunner) injectEnv(env map[string]string) {
 	}
 }
 
+// vfsHostPath maps a container path (under /workspace) to the
+// corresponding host-side path on the VFS FUSE mount.
+func vfsHostPath(mountSource, containerPath string) string {
+	rel := strings.TrimPrefix(containerPath, types.ContainerWorkDir)
+	rel = strings.TrimPrefix(rel, "/")
+	if rel == "" {
+		return mountSource
+	}
+	return filepath.Join(mountSource, filepath.FromSlash(rel))
+}
+
 func defaultClaudeConfigDir(env map[string]string) string {
+	return defaultClaudePersistentConfigDir(env)
+}
+
+func claudeWorkspaceDir(env map[string]string) string {
+	workspaceDir := types.ContainerWorkDir
 	if env != nil {
-		if workspaceDir := strings.TrimSpace(env[agentWorkspaceDirEnvKey]); workspaceDir != "" {
-			// Keep Claude state with agent workspace for restart persistence.
-			return path.Join(workspaceDir, claudeStateDirName)
+		if wd := strings.TrimSpace(env[agentWorkspaceDirEnvKey]); wd != "" {
+			workspaceDir = wd
 		}
 	}
-	return claudeConfigDirPath
+	return workspaceDir
+}
+
+func claudeStateScopeForEnv(env map[string]string) string {
+	workspaceDir := claudeWorkspaceDir(env)
+	if sessionID := claudeSessionIDFromEnv(env); sessionID != "" {
+		return claudeStateScopeWithSession(workspaceDir, sessionID)
+	}
+	return claudeStateScope(workspaceDir)
+}
+
+func defaultClaudePersistentConfigDir(env map[string]string) string {
+	return path.Join(
+		claudeWorkspaceDir(env),
+		claudeStateRootDir,
+		claudeStateScopeForEnv(env),
+		claudeStateDirName,
+	)
+}
+
+func claudeStateScope(workspaceDir string) string {
+	normalized := strings.TrimSpace(strings.TrimSuffix(workspaceDir, "/"))
+	if normalized == "" {
+		return "default"
+	}
+	sum := sha1.Sum([]byte(normalized))
+	return hex.EncodeToString(sum[:8])
+}
+
+func claudeStateScopeWithSession(workspaceDir, sessionID string) string {
+	normalized := strings.TrimSpace(strings.TrimSuffix(workspaceDir, "/"))
+	if normalized == "" {
+		normalized = "default"
+	}
+	combined := normalized + ":" + strings.TrimSpace(sessionID)
+	sum := sha1.Sum([]byte(combined))
+	return hex.EncodeToString(sum[:8])
 }
 
 func (r *ClaudeCodeRunner) injectKernelEnv(env map[string]string) {
@@ -256,7 +401,11 @@ func claudeSessionIDFromEnv(env map[string]string) string {
 	if env == nil {
 		return ""
 	}
-	sessionID := strings.TrimSpace(env[agentSessionIDEnvKey])
+	return strings.TrimSpace(env[agentSessionIDEnvKey])
+}
+
+func claudeSessionIDForCLI(sessionID string) string {
+	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return ""
 	}
@@ -264,27 +413,4 @@ func claudeSessionIDFromEnv(env map[string]string) string {
 		return ""
 	}
 	return sessionID
-}
-
-func providerFromExecutionPolicy(policy map[string]any) string {
-	if len(policy) == 0 {
-		return ""
-	}
-	raw, ok := policy["provider"]
-	if !ok || raw == nil {
-		return ""
-	}
-	value, ok := raw.(string)
-	if !ok {
-		return ""
-	}
-	return strings.ToLower(strings.TrimSpace(value))
-}
-
-func isClaudeExecutionTask(task types.RunExecution) bool {
-	provider := runnerProviderFromEnv(task.Env)
-	if provider == "" {
-		provider = providerFromExecutionPolicy(task.ExecutionPolicy)
-	}
-	return provider == claudeProviderName
 }

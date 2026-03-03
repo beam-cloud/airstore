@@ -10,6 +10,9 @@ import type {
   TaskLogListResponse,
   TaskEventStreamParams,
   TaskEventBatch,
+  Schedule,
+  ScheduleCreateParams,
+  ScheduleUpdateParams,
 } from '../types/tasks.js';
 import { toInputProvenanceBody, toPolicyBody, toRoutingBody } from './helpers.js';
 
@@ -106,15 +109,12 @@ export class Tasks {
     params?: TaskEventStreamParams,
     options?: RequestOptions,
   ): Promise<TaskEventBatch> {
-    const query: Record<string, string> = {};
-    if (params?.logCursor !== undefined) query['log_cursor'] = String(params.logCursor);
-    if (params?.runEventCursor !== undefined) query['run_event_cursor'] = String(params.runEventCursor);
+    const q: Record<string, string> = {};
+    if (params?.logCursor !== undefined) q['log_cursor'] = String(params.logCursor);
+    if (params?.runEventCursor !== undefined) q['run_event_cursor'] = String(params.runEventCursor);
     return this.client.request<TaskEventBatch>(
-      'GET',
-      `/workspaces/${workspaceId}/tasks/${taskId}/stream`,
-      undefined,
-      Object.keys(query).length > 0 ? query : undefined,
-      options,
+      'GET', `/workspaces/${workspaceId}/tasks/${taskId}/stream`,
+      undefined, Object.keys(q).length > 0 ? q : undefined, options,
     );
   }
 
@@ -130,6 +130,41 @@ export class Tasks {
       undefined,
       options,
     );
+  }
+
+  // --- Schedules (cron) ---
+
+  private schedulePath(workspaceId: string, id?: string): string {
+    const base = `/workspaces/${workspaceId}/tasks/schedules`;
+    return id ? `${base}/${id}` : base;
+  }
+
+  async createSchedule(workspaceId: string, params: ScheduleCreateParams, options?: RequestOptions): Promise<Schedule> {
+    return this.client.request<Schedule>('POST', this.schedulePath(workspaceId), {
+      agent_id: params.agentId, cron_expr: params.cronExpr, prompt: params.prompt,
+      ...(params.skillPaths != null && { skill_paths: params.skillPaths }),
+    }, undefined, options);
+  }
+
+  async listSchedules(workspaceId: string, options?: RequestOptions): Promise<Schedule[]> {
+    return this.client.request<Schedule[]>('GET', this.schedulePath(workspaceId), undefined, undefined, options);
+  }
+
+  async retrieveSchedule(workspaceId: string, scheduleId: string, options?: RequestOptions): Promise<Schedule> {
+    return this.client.request<Schedule>('GET', this.schedulePath(workspaceId, scheduleId), undefined, undefined, options);
+  }
+
+  async updateSchedule(workspaceId: string, scheduleId: string, params: ScheduleUpdateParams, options?: RequestOptions): Promise<Schedule> {
+    return this.client.request<Schedule>('PATCH', this.schedulePath(workspaceId, scheduleId), {
+      ...(params.cronExpr != null && { cron_expr: params.cronExpr }),
+      ...(params.prompt != null && { prompt: params.prompt }),
+      ...(params.skillPaths != null && { skill_paths: params.skillPaths }),
+      ...(params.active != null && { active: params.active }),
+    }, undefined, options);
+  }
+
+  async deleteSchedule(workspaceId: string, scheduleId: string, options?: RequestOptions): Promise<void> {
+    await this.client.request('DELETE', this.schedulePath(workspaceId, scheduleId), undefined, undefined, options);
   }
 }
 

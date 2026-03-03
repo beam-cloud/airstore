@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -20,19 +22,90 @@ const DefaultBetweenTurnsTimeout = 60 * time.Second
 // unmounting the VFS. This gives the async writer time to flush pending
 // writes (e.g. Claude session state) to object storage so the next
 // resume finds a complete conversation history.
-const mountFlushGracePeriod = 3 * time.Second
+const mountFlushGracePeriod = 10 * time.Second
+const sessionLeaseTTL = 30 * time.Second
+const sessionLeaseRenewInterval = 10 * time.Second
+const runInteractionTTL = 30 * time.Minute
+
+func (w *Worker) setRunInteractionState(ctx context.Context, task types.RunExecution, state types.RunInteractionState) {
+	if w == nil || w.terminalIO == nil {
+		return
+	}
+	executionCtx := executionContextFromTask(task)
+	if strings.TrimSpace(executionCtx.runID) == "" {
+		return
+	}
+	activeExecutionID := ""
+	if state != types.RunInteractionStateClosed {
+		activeExecutionID = task.ExternalId
+	}
+	if err := w.terminalIO.SetRunInteraction(
+		ctx,
+		task.WorkspaceId,
+		executionCtx.runID,
+		state,
+		activeExecutionID,
+		runInteractionTTL,
+	); err != nil {
+		addTaskExecutionContext(
+			log.Warn().
+				Err(err).
+				Str("run_id", executionCtx.runID).
+				Str("interaction_state", string(state)),
+			task,
+		).Msg("failed to persist run interaction state")
+	}
+}
 
 func (w *Worker) runInteractiveTask(ctx context.Context, task types.RunExecution) (*types.RunExecutionResult, error) {
 	if w.terminalIO == nil {
 		return nil, fmt.Errorf("terminal transport is not configured")
 	}
+	defer func() {
+		finalCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		w.setRunInteractionState(finalCtx, task, types.RunInteractionStateClosed)
+	}()
+
+	sessionID := strings.TrimSpace(task.Env[agentSessionIDEnvKey])
+	ownerID := fmt.Sprintf("%s:%s", strings.TrimSpace(w.workerId), task.ExternalId)
+	releaseSessionLease := func() {}
+
+	if sessionID != "" {
+		acquired, err := w.terminalIO.AcquireSessionLease(ctx, task.WorkspaceId, sessionID, ownerID, sessionLeaseTTL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to acquire session lease: %w", err)
+		}
+		if !acquired {
+			currentOwner, _ := w.terminalIO.GetSessionLeaseOwner(ctx, task.WorkspaceId, sessionID)
+			return nil, fmt.Errorf("session ID %s is already in use (owner: %s)", sessionID, currentOwner)
+		}
+		addTaskExecutionContext(log.Info().Str("session_id", sessionID), task).Msg("acquired session lease")
+
+		leaseCtx, leaseCancel := context.WithCancel(ctx)
+		go w.heartbeatSessionLease(leaseCtx, task.WorkspaceId, sessionID, ownerID)
+		var releaseOnce sync.Once
+		releaseSessionLease = func() {
+			releaseOnce.Do(func() {
+				leaseCancel()
+				releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if err := w.terminalIO.ReleaseSessionLease(releaseCtx, task.WorkspaceId, sessionID, ownerID); err != nil {
+					addTaskExecutionContext(log.Warn().Err(err).Str("session_id", sessionID), task).Msg("failed to release session lease")
+				} else {
+					addTaskExecutionContext(log.Info().Str("session_id", sessionID), task).Msg("released session lease")
+				}
+			})
+		}
+		defer releaseSessionLease()
+	}
 
 	sandboxID := fmt.Sprintf("task-%s", task.ExternalId)
-
 	env := w.sandboxManager.copyTaskEnv(task)
-
+	if claudeRunner, ok := w.sandboxManager.ResolveRunner(task, env).(*ClaudeCodeRunner); ok {
+		claudeRunner.injectEnv(env)
+	}
 	taskMountSource := w.sandboxManager.mountFilesystem(ctx, task)
-
 	cfg := w.sandboxManager.buildTaskSandboxConfig(task, []string{"sleep", "infinity"}, env, taskMountSource)
 
 	if _, err := w.sandboxManager.Create(cfg); err != nil {
@@ -48,20 +121,43 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.RunExecution
 	}
 
 	w.sandboxManager.publishStatus(ctx, task.ExternalId, types.RunExecutionStatusRunning, nil, "")
+	w.setRunInteractionState(ctx, task, types.RunInteractionStateWorking)
 
-	result := w.runInteractiveSession(ctx, task, sandboxID)
+	result := w.runInteractiveSession(ctx, task, sandboxID, taskMountSource)
+	w.setRunInteractionState(ctx, task, types.RunInteractionStateClosed)
+	releaseSessionLease()
 
 	if err := w.sandboxManager.Delete(sandboxID, true); err != nil {
 		addTaskExecutionContext(log.Warn().Err(err), task).Msg("interactive sandbox delete failed during cleanup")
 	}
+
 	time.Sleep(mountFlushGracePeriod)
+
 	w.sandboxManager.cleanupMount(task.ExternalId)
 	addTaskExecutionContext(log.Info(), task).Msg("interactive sandbox cleanup complete")
 
 	return result, nil
 }
 
-func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecution, sandboxID string) *types.RunExecutionResult {
+func (w *Worker) heartbeatSessionLease(ctx context.Context, workspaceID uint, sessionID, ownerID string) {
+	ticker := time.NewTicker(sessionLeaseRenewInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			renewed, err := w.terminalIO.RenewSessionLease(ctx, workspaceID, sessionID, ownerID, sessionLeaseTTL)
+			if err != nil {
+				log.Warn().Err(err).Str("session_id", sessionID).Msg("session lease renewal failed")
+			} else if !renewed {
+				log.Warn().Str("session_id", sessionID).Msg("session lease lost (owned by another)")
+			}
+		}
+	}
+}
+
+func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecution, sandboxID string, mountSource string) *types.RunExecutionResult {
 	sessionCtx, sessionCancel := context.WithCancel(ctx)
 	defer sessionCancel()
 
@@ -71,28 +167,47 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	var idleTimedOut atomic.Bool
 	activityCh := make(chan struct{}, 1)
 
-	if idleTimeout > 0 {
-		go monitorInteractiveSessionIdle(sessionCtx, task.ExternalId, executionCtx, sessionCancel, idleTimeout, activityCh, &idleTimedOut)
-	}
+	env := w.sandboxManager.copyTaskEnv(task)
+	runner := w.sandboxManager.ResolveRunner(task, env)
 
-	cancelCh, cancelCleanup, err := w.terminalIO.SubscribeCancel(sessionCtx, task.ExternalId)
-	if err != nil {
-		return interactiveErrorResult(task.ExternalId, err)
-	}
-	defer cancelCleanup()
-
-	go func() {
-		select {
-		case <-sessionCtx.Done():
-		case _, ok := <-cancelCh:
-			if !ok {
-				return
+	var checkHeartbeat func() bool
+	var touchHeartbeat func()
+	if heartbeatRunner, ok := runner.(HeartbeatRunner); ok && mountSource != "" {
+		heartbeatPath, err := heartbeatRunner.SetupHeartbeat(mountSource, env)
+		if err != nil {
+			addTaskExecutionContext(log.Warn().Err(err).Str("runner", runner.Name()), task).
+				Msg("failed to install heartbeat hooks")
+		} else {
+			checkHeartbeat = func() bool {
+				return heartbeatRunner.CheckHeartbeat(heartbeatPath)
 			}
-			addTaskExecutionContext(log.Info(), task).Msg("received cancel signal for interactive task")
-			sessionCancel()
-			w.sandboxManager.Stop(sandboxID, true)
+			touchHeartbeat = func() {
+				_ = os.WriteFile(heartbeatPath, []byte(time.Now().Format(time.RFC3339Nano)), 0o644)
+			}
+			addTaskExecutionContext(log.Info().Str("runner", runner.Name()).Str("heartbeat", heartbeatPath), task).
+				Msg("heartbeat enabled via VFS")
 		}
-	}()
+	}
+
+	if idleTimeout > 0 {
+		go monitorInteractiveSessionIdle(
+			sessionCtx,
+			task.ExternalId,
+			executionCtx,
+			sessionCancel,
+			idleTimeout,
+			activityCh,
+			&idleTimedOut,
+			checkHeartbeat,
+		)
+	}
+
+	cancelCleanup := w.watchTaskCancellation(sessionCtx, task, func() {
+		addTaskExecutionContext(log.Info(), task).Msg("received cancel signal for interactive task")
+		sessionCancel()
+		w.sandboxManager.Stop(sandboxID, true)
+	})
+	defer cancelCleanup()
 
 	interactiveMirror := NewTaskOutput(
 		task.ExternalId,
@@ -107,13 +222,16 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 		taskID:       task.ExternalId,
 		terminalIO:   w.terminalIO,
 		executionCtx: executionCtx,
-		onActivity:   func() { signalActivity(activityCh) },
-		mirror:       interactiveMirror,
+		onActivity: func() {
+			signalActivity(activityCh)
+			if touchHeartbeat != nil {
+				touchHeartbeat()
+			}
+		},
+		mirror: interactiveMirror,
 	}
 
 	start := time.Now()
-	env := w.sandboxManager.copyTaskEnv(task)
-	runner := w.sandboxManager.ResolveRunner(task, env)
 
 	var runErr error
 	if tr, ok := runner.(TurnRunner); ok {
@@ -160,6 +278,7 @@ func (w *Worker) runTurnSession(
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		w.setRunInteractionState(ctx, task, types.RunInteractionStateWorking)
 
 		if isFirstTurn {
 			nextEnv, err := w.executeFirstTurnWithStrategy(
@@ -169,7 +288,6 @@ func (w *Worker) runTurnSession(
 				runner,
 				sessionEnv,
 				stdout,
-				activityCh,
 				prompt,
 				firstTurnStrategies,
 			)
@@ -186,7 +304,6 @@ func (w *Worker) runTurnSession(
 				runner,
 				sessionEnv,
 				stdout,
-				activityCh,
 				prompt,
 				TurnArgModeFollowup,
 				1,
@@ -198,8 +315,11 @@ func (w *Worker) runTurnSession(
 			}
 		}
 
+		// Treat turn completion as activity so the waiting window starts fresh.
+		signalActivity(activityCh)
+		w.setRunInteractionState(ctx, task, types.RunInteractionStateWaitingForInput)
 		addTaskExecutionContext(log.Info(), task).Msg("turn complete, waiting for follow-up input")
-		prompt = w.waitForFollowupInput(ctx, task.ExternalId, DefaultBetweenTurnsTimeout)
+		prompt = w.waitForFollowupInput(ctx, task.ExternalId, DefaultBetweenTurnsTimeout, activityCh)
 	}
 
 	return nil
@@ -209,7 +329,12 @@ func (w *Worker) runTurnSession(
 // pubsub, the per-turn timeout expires, or the context is cancelled
 // (e.g. idle timeout). Returns the trimmed prompt, or "" if the
 // session should end.
-func (w *Worker) waitForFollowupInput(ctx context.Context, taskID string, timeout time.Duration) string {
+func (w *Worker) waitForFollowupInput(
+	ctx context.Context,
+	taskID string,
+	timeout time.Duration,
+	activityCh chan<- struct{},
+) string {
 	if w.terminalIO == nil {
 		<-ctx.Done()
 		return ""
@@ -259,6 +384,7 @@ func (w *Worker) waitForFollowupInput(ctx context.Context, taskID string, timeou
 			if prompt == "" {
 				continue
 			}
+			signalActivity(activityCh)
 			return prompt
 		}
 	}
@@ -292,29 +418,24 @@ func buildFirstTurnStrategies(env map[string]string) []firstTurnStrategy {
 		}
 	}
 
-	strategies := []firstTurnStrategy{
+	if strings.TrimSpace(env[agentSessionIDEnvKey]) != "" {
+		return []firstTurnStrategy{
+			{
+				mode:             TurnArgModeFirstResumeByID,
+				transitionReason: "resume requested with explicit session id",
+			},
+			{
+				mode:             TurnArgModeFirstResumeLatest,
+				transitionReason: "resume fallback using latest local VFS state",
+			},
+		}
+	}
+	return []firstTurnStrategy{
 		{
 			mode:             TurnArgModeFirstResumeLatest,
-			transitionReason: "resume requested; prefer local VFS state",
+			transitionReason: "resume requested; no explicit session id",
 		},
 	}
-	if strings.TrimSpace(env[agentSessionIDEnvKey]) != "" {
-		strategies = append(
-			strategies,
-			firstTurnStrategy{
-				mode:             TurnArgModeFirstResumeByID,
-				transitionReason: "resume fallback using explicit session id",
-			},
-		)
-	}
-	strategies = append(
-		strategies,
-		firstTurnStrategy{
-			mode:             TurnArgModeFirstFreshNoSession,
-			transitionReason: "final fallback to fresh session without explicit id",
-		},
-	)
-	return strategies
 }
 
 func cloneTurnEnv(env map[string]string) map[string]string {
@@ -328,15 +449,6 @@ func cloneTurnEnv(env map[string]string) map[string]string {
 	return cloned
 }
 
-func envForFirstTurnStrategy(base map[string]string, strategy firstTurnStrategy) map[string]string {
-	env := cloneTurnEnv(base)
-	if strategy.mode == TurnArgModeFirstFreshNoSession {
-		delete(env, agentSessionIDEnvKey)
-		delete(env, agentResumeSessionEnvKey)
-	}
-	return env
-}
-
 func (w *Worker) executeFirstTurnWithStrategy(
 	ctx context.Context,
 	task types.RunExecution,
@@ -344,7 +456,6 @@ func (w *Worker) executeFirstTurnWithStrategy(
 	runner TurnRunner,
 	baseEnv map[string]string,
 	stdout io.Writer,
-	activityCh chan<- struct{},
 	prompt string,
 	strategies []firstTurnStrategy,
 ) (map[string]string, error) {
@@ -355,15 +466,13 @@ func (w *Worker) executeFirstTurnWithStrategy(
 	totalAttempts := len(strategies)
 	for idx, strategy := range strategies {
 		attempt := idx + 1
-		attemptEnv := envForFirstTurnStrategy(baseEnv, strategy)
 		err := w.executeTurn(
 			ctx,
 			task,
 			sandboxID,
 			runner,
-			attemptEnv,
+			baseEnv,
 			stdout,
-			activityCh,
 			prompt,
 			strategy.mode,
 			attempt,
@@ -371,12 +480,12 @@ func (w *Worker) executeFirstTurnWithStrategy(
 			strategy.transitionReason,
 		)
 		if err == nil {
-			return attemptEnv, nil
+			return baseEnv, nil
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return baseEnv, err
 		}
 		if attempt < totalAttempts {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return baseEnv, err
-			}
 			addTaskExecutionContext(
 				log.Warn().
 					Err(err).
@@ -389,7 +498,7 @@ func (w *Worker) executeFirstTurnWithStrategy(
 			continue
 		}
 
-		// Emit a single clear failure when a resumed session exhausts bounded retries.
+		// Emit a single clear failure when first-turn fallback is exhausted.
 		if totalAttempts > 1 {
 			addTaskExecutionContext(
 				log.Error().
@@ -398,8 +507,8 @@ func (w *Worker) executeFirstTurnWithStrategy(
 					Int("resume_attempt", attempt).
 					Int("resume_attempts_total", totalAttempts),
 				task,
-			).Msg("session resume exhausted all first-turn strategies")
-			return baseEnv, fmt.Errorf("session resume exhausted all first-turn strategies: %w", err)
+			).Msg("session resume exhausted first-turn fallback")
+			return baseEnv, fmt.Errorf("session resume exhausted first-turn fallback: %w", err)
 		}
 		return baseEnv, err
 	}
@@ -414,7 +523,6 @@ func (w *Worker) executeTurn(
 	runner TurnRunner,
 	env map[string]string,
 	stdout io.Writer,
-	activityCh chan<- struct{},
 	prompt string,
 	mode TurnArgMode,
 	attempt int,
@@ -438,10 +546,7 @@ func (w *Worker) executeTurn(
 	}
 	logger.Msg("executing turn")
 
-	signalActivity(activityCh)
-	err := w.sandboxManager.ExecPTY(ctx, sandboxID, args, env, stdout)
-	signalActivity(activityCh)
-	return err
+	return w.sandboxManager.ExecPTY(ctx, sandboxID, args, env, stdout)
 }
 
 // runGenericPTYSession handles interactive sessions for runners that don't
@@ -480,14 +585,6 @@ func interactiveResult(err error, idleTimedOut bool) (int, string, types.RunExec
 	}
 
 	return -1, err.Error(), types.RunExecutionStatusFailed
-}
-
-func interactiveErrorResult(taskID string, err error) *types.RunExecutionResult {
-	return &types.RunExecutionResult{
-		ID:       taskID,
-		ExitCode: -1,
-		Error:    err.Error(),
-	}
 }
 
 type terminalOutputWriter struct {
@@ -599,6 +696,7 @@ func monitorInteractiveSessionIdle(
 	idleTimeout time.Duration,
 	activityCh <-chan struct{},
 	idleTimedOut *atomic.Bool,
+	checkHeartbeat func() bool,
 ) {
 	timer := time.NewTimer(idleTimeout)
 	defer timer.Stop()
@@ -616,6 +714,15 @@ func monitorInteractiveSessionIdle(
 			}
 			timer.Reset(idleTimeout)
 		case <-timer.C:
+			if checkHeartbeat != nil && checkHeartbeat() {
+				addTaskExecutionContextByID(
+					log.Debug().Dur("idle_timeout", idleTimeout),
+					taskID,
+					executionCtx,
+				).Msg("interactive idle timeout deferred due runner heartbeat")
+				timer.Reset(idleTimeout)
+				continue
+			}
 			idleTimedOut.Store(true)
 			addTaskExecutionContextByID(
 				log.Info().Dur("idle_timeout", idleTimeout),

@@ -25,6 +25,8 @@ const (
 	fusermountUnmountFlag    = "-u"
 	termWaitTimeout          = 5 * time.Second
 	killWaitTimeout          = 2 * time.Second
+	mountRestartBackoff      = 2 * time.Second
+	maxMountRestarts         = 5
 )
 
 // MountConfig configures the mount manager
@@ -65,6 +67,9 @@ type taskMount struct {
 	cancel    context.CancelFunc
 	ready     bool
 	exited    chan error
+	token     string
+	taskCtx   context.Context
+	stopWatch chan struct{}
 }
 
 var (
@@ -93,7 +98,7 @@ func buildRequiredFilesystemRootSet(roots []string) map[string]struct{} {
 }
 
 // checkFilesystemMountReady validates that the mount path contains all expected
-// system root directories (/memory, /skills, /sources, /tasks, /tools).
+// system root directories (/skills, /sources, /tasks, /tools).
 func checkFilesystemMountReady(mountPath string) (bool, []string, error) {
 	entries, err := os.ReadDir(mountPath)
 	if err != nil {
@@ -142,7 +147,7 @@ func NewMountManager(config MountConfig) (*MountManager, error) {
 	}, nil
 }
 
-func (m *MountManager) getOrCreateMount(taskID string) (*taskMount, bool) {
+func (m *MountManager) getOrCreateMount(ctx context.Context, taskID string) (*taskMount, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -153,6 +158,8 @@ func (m *MountManager) getOrCreateMount(taskID string) (*taskMount, bool) {
 	mount := &taskMount{
 		mountPath: filepath.Join(m.config.MountDir, taskID),
 		exited:    make(chan error, 1),
+		taskCtx:   ctx,
+		stopWatch: make(chan struct{}),
 	}
 	m.mounts[taskID] = mount
 	return mount, true
@@ -164,10 +171,112 @@ func (m *MountManager) markMountReady(mount *taskMount) {
 	m.mu.Unlock()
 }
 
-// Mount creates a FUSE mount for a task using the given token
-// Returns the mount path that can be bind-mounted into containers
+// startMountProcess starts a FUSE mount process and returns after start (does
+// not wait for ready). Caller must wait on mount.exited or poll for readiness.
+func (m *MountManager) startMountProcess(mount *taskMount) error {
+	mountCtx, cancel := context.WithCancel(mount.taskCtx)
+
+	cmd := exec.CommandContext(mountCtx, m.config.CLIBinary, mountSubcommand,
+		mount.mountPath,
+		"--gateway", m.config.GatewayAddr,
+		"--token", mount.token,
+		"--daemon",
+		"--uid", fmt.Sprintf("%d", types.SandboxUserUID),
+		"--gid", fmt.Sprintf("%d", types.SandboxUserGID),
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return fmt.Errorf("failed to start mount process: %w", err)
+	}
+
+	// Lower OOM kill priority so the kernel prefers other processes.
+	setOOMScoreAdj(cmd.Process.Pid)
+
+	m.mu.Lock()
+	mount.cmd = cmd
+	mount.cancel = cancel
+	mount.exited = make(chan error, 1)
+	m.mu.Unlock()
+
+	go func() {
+		mount.exited <- cmd.Wait()
+		close(mount.exited)
+	}()
+
+	return nil
+}
+
+// waitMountReady polls until the mount directory contains the required roots.
+func (m *MountManager) waitMountReady(mount *taskMount) error {
+	deadline := time.After(m.config.MountReadyTimeout)
+	ticker := time.NewTicker(mountReadyPollInterval)
+	defer ticker.Stop()
+
+	var lastMissing []string
+	var lastReadErr error
+	for {
+		select {
+		case <-mount.taskCtx.Done():
+			return mount.taskCtx.Err()
+		case <-deadline:
+			ready, missing, err := checkFilesystemMountReady(mount.mountPath)
+			if ready {
+				return nil
+			}
+			if err != nil {
+				if lastReadErr != nil {
+					err = lastReadErr
+				}
+				return fmt.Errorf("mount %s not ready: %w", mount.mountPath, err)
+			}
+			if len(missing) == 0 {
+				missing = lastMissing
+			}
+			return fmt.Errorf("mount %s missing required roots: %s", mount.mountPath, strings.Join(missing, ", "))
+		case err, ok := <-mount.exited:
+			if ok && err != nil {
+				return fmt.Errorf("mount process exited before ready: %w", err)
+			}
+			return fmt.Errorf("mount process exited before becoming ready")
+		case <-ticker.C:
+			ready, missing, err := checkFilesystemMountReady(mount.mountPath)
+			if err != nil {
+				lastReadErr = err
+				continue
+			}
+			lastMissing = missing
+			if ready {
+				return nil
+			}
+		}
+	}
+}
+
+// makeSharedMount marks an active FUSE mountpoint as shared so that restarts
+// propagate through rslave bind mounts into gVisor sandboxes.
+func makeSharedMount(mountPath string) {
+	if out, err := exec.Command("mount", "--make-rshared", mountPath).CombinedOutput(); err != nil {
+		log.Debug().Err(err).Str("output", string(out)).Str("path", mountPath).
+			Msg("failed to set shared mount propagation (non-fatal)")
+	}
+}
+
+// setOOMScoreAdj lowers the OOM kill priority for a process so the kernel
+// prefers killing other processes (like sandbox workloads) first.
+func setOOMScoreAdj(pid int) {
+	path := fmt.Sprintf("/proc/%d/oom_score_adj", pid)
+	if err := os.WriteFile(path, []byte("-500"), 0o644); err != nil {
+		log.Debug().Err(err).Int("pid", pid).Msg("failed to set oom_score_adj (non-fatal)")
+	}
+}
+
+// Mount creates a FUSE mount for a task using the given token.
+// Returns the mount path that can be bind-mounted into containers.
 func (m *MountManager) Mount(ctx context.Context, taskID, token string) (string, error) {
-	mount, created := m.getOrCreateMount(taskID)
+	mount, created := m.getOrCreateMount(ctx, taskID)
 	if !created {
 		if mount.ready {
 			return mount.mountPath, nil
@@ -193,100 +302,108 @@ func (m *MountManager) Mount(ctx context.Context, taskID, token string) (string,
 		}
 	}()
 
-	// Create mount directory for this task
-	mountPath := mount.mountPath
-	if err := os.MkdirAll(mountPath, mountDirPerm); err != nil {
+	if err := os.MkdirAll(mount.mountPath, mountDirPerm); err != nil {
 		return "", fmt.Errorf("failed to create task mount directory: %w", err)
 	}
 
-	// Create cancellable context for the mount process
-	mountCtx, cancel := context.WithCancel(ctx)
+	mount.token = token
 
-	// Start FUSE mount process with sandbox user ownership
-	cmd := exec.CommandContext(mountCtx, m.config.CLIBinary, mountSubcommand,
-		mountPath,
-		"--gateway", m.config.GatewayAddr,
-		"--token", token,
-		"--daemon",
-		"--uid", fmt.Sprintf("%d", types.SandboxUserUID),
-		"--gid", fmt.Sprintf("%d", types.SandboxUserGID),
-	)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Start(); err != nil {
-		cancel()
-		return "", fmt.Errorf("failed to start mount process: %w", err)
+	if err := m.startMountProcess(mount); err != nil {
+		return "", err
 	}
 
-	m.mu.Lock()
-	mount.cmd = cmd
-	mount.cancel = cancel
-	m.mu.Unlock()
+	if err := m.waitMountReady(mount); err != nil {
+		return "", fmt.Errorf("task %s: %w", taskID, err)
+	}
 
-	go func() {
-		mount.exited <- cmd.Wait()
-		close(mount.exited)
-	}()
+	// Now that the FUSE mount is live, mark it shared so restarts propagate
+	// through rslave bind mounts into the sandbox.
+	makeSharedMount(mount.mountPath)
 
-	timeout := time.NewTimer(m.config.MountReadyTimeout)
-	defer timeout.Stop()
+	m.markMountReady(mount)
+	cleanupOnError = false
+	go m.watchMount(taskID, mount)
 
-	ticker := time.NewTicker(mountReadyPollInterval)
-	defer ticker.Stop()
+	log.Info().
+		Str("task_id", taskID).
+		Str("mount_path", mount.mountPath).
+		Msg("task mount ready")
+	return mount.mountPath, nil
+}
 
-	var lastMissing []string
-	var lastReadErr error
+// watchMount monitors a mount process and restarts it if it exits unexpectedly.
+func (m *MountManager) watchMount(taskID string, mount *taskMount) {
+	restarts := 0
 	for {
 		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-timeout.C:
-			ready, missing, err := checkFilesystemMountReady(mountPath)
-			if ready {
-				m.markMountReady(mount)
-				cleanupOnError = false
-				log.Info().
-					Str("task_id", taskID).
-					Str("mount_path", mountPath).
-					Msg("task mount ready")
-				return mountPath, nil
-			}
-			if err != nil {
-				if lastReadErr != nil {
-					err = lastReadErr
-				}
-				return "", fmt.Errorf("task mount %s not ready: %w", mountPath, err)
-			}
-			if len(missing) == 0 {
-				missing = lastMissing
-			}
-			return "", fmt.Errorf("task mount %s missing required roots: %s", mountPath, strings.Join(missing, ", "))
-		case err, ok := <-mount.exited:
-			if ok && err != nil {
-				return "", fmt.Errorf("mount process for task %s exited before ready: %w", taskID, err)
-			}
-			return "", fmt.Errorf("mount process for task %s exited before becoming ready", taskID)
-		case <-ticker.C:
-			ready, missing, err := checkFilesystemMountReady(mountPath)
-			if err != nil {
-				lastReadErr = err
-				continue
-			}
-			lastMissing = missing
-			if !ready {
-				continue
+		case <-mount.stopWatch:
+			return
+		case err := <-mount.exited:
+			select {
+			case <-mount.stopWatch:
+				return
+			default:
 			}
 
-			m.markMountReady(mount)
-			cleanupOnError = false
-			log.Info().
+			if mount.taskCtx.Err() != nil {
+				return
+			}
+
+			restarts++
+			if restarts > maxMountRestarts {
+				log.Error().
+					Str("task_id", taskID).
+					Int("restarts", restarts).
+					Msg("mount process exceeded max restarts, giving up")
+				return
+			}
+
+			log.Warn().
+				Err(err).
 				Str("task_id", taskID).
-				Str("mount_path", mountPath).
-				Msg("task mount ready")
-			return mountPath, nil
+				Int("restart", restarts).
+				Msg("mount process died, restarting")
+
+			time.Sleep(mountRestartBackoff)
+
+			if mount.taskCtx.Err() != nil {
+				return
+			}
+
+			if restartErr := m.restartMount(taskID, mount); restartErr != nil {
+				log.Error().
+					Err(restartErr).
+					Str("task_id", taskID).
+					Msg("failed to restart mount process")
+				return
+			}
 		}
 	}
+}
+
+// restartMount cleans up a dead mount and starts a fresh one on the same path.
+func (m *MountManager) restartMount(taskID string, mount *taskMount) error {
+	exec.Command(fusermountBinary, fusermountUnmountFlag, mount.mountPath).Run()
+
+	if err := os.MkdirAll(mount.mountPath, mountDirPerm); err != nil {
+		return fmt.Errorf("failed to recreate mount directory: %w", err)
+	}
+
+	if err := m.startMountProcess(mount); err != nil {
+		return err
+	}
+
+	if err := m.waitMountReady(mount); err != nil {
+		return err
+	}
+
+	makeSharedMount(mount.mountPath)
+
+	log.Info().
+		Str("task_id", taskID).
+		Str("mount_path", mount.mountPath).
+		Msg("mount process restarted successfully")
+	return nil
 }
 
 // Unmount stops the FUSE mount for a task and cleans up
@@ -301,6 +418,13 @@ func (m *MountManager) Unmount(taskID string) error {
 	m.mu.Unlock()
 
 	log.Info().Str("task_id", taskID).Msg("unmounting task filesystem")
+
+	// Stop the watcher goroutine first so it doesn't restart the mount
+	select {
+	case <-mount.stopWatch:
+	default:
+		close(mount.stopWatch)
+	}
 
 	// Stop the mount process
 	if mount.cmd != nil && mount.cmd.Process != nil {

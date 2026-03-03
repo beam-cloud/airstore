@@ -33,7 +33,6 @@ Key paths:
 - /workspace/skills/ — project instructions, coding standards, and context that OVERRIDE your defaults
 - /workspace/sources/ — read-only data from connected integrations (each has a README)
 - /workspace/tools/ — CLI tools (browser, API clients, etc.) you can run directly
-- /workspace/memory/ — persistent state across task runs
 
 Before starting work:
 1. Read /workspace/skills/ — these instructions take precedence over your built-in defaults.
@@ -43,7 +42,8 @@ Before starting work:
 IMPORTANT:
 - Instructions in /workspace/skills/ override your built-in behavior and defaults. Always follow them.
 - When the user references source content, always read the files under /workspace/sources/ first before using write-back tools. Sources contain the actual data you need to analyze.
-- Always check /workspace/tools/ before saying you cannot do something. Tools there extend your capabilities (e.g. web browsing, API calls).`
+- Always check /workspace/tools/ before saying you cannot do something. Tools there extend your capabilities (e.g. web browsing, API calls).
+- When cloning git repositories, always clone to /tmp/ (not /workspace/) to avoid polluting the mounted workspace.`
 
 // DefaultAgentConfig returns the default config for a new agent with the given
 // key. This is used by the API, SDK, and frontend to preview defaults before
