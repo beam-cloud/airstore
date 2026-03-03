@@ -130,7 +130,9 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.RunExecution
 	if err := w.sandboxManager.Delete(sandboxID, true); err != nil {
 		addTaskExecutionContext(log.Warn().Err(err), task).Msg("interactive sandbox delete failed during cleanup")
 	}
+
 	time.Sleep(mountFlushGracePeriod)
+
 	w.sandboxManager.cleanupMount(task.ExternalId)
 	addTaskExecutionContext(log.Info(), task).Msg("interactive sandbox cleanup complete")
 
@@ -203,24 +205,12 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 		)
 	}
 
-	cancelCh, cancelCleanup, err := w.terminalIO.SubscribeCancel(sessionCtx, task.ExternalId)
-	if err != nil {
-		return interactiveErrorResult(task.ExternalId, err)
-	}
+	cancelCleanup := w.watchTaskCancellation(sessionCtx, task, func() {
+		addTaskExecutionContext(log.Info(), task).Msg("received cancel signal for interactive task")
+		sessionCancel()
+		w.sandboxManager.Stop(sandboxID, true)
+	})
 	defer cancelCleanup()
-
-	go func() {
-		select {
-		case <-sessionCtx.Done():
-		case _, ok := <-cancelCh:
-			if !ok {
-				return
-			}
-			addTaskExecutionContext(log.Info(), task).Msg("received cancel signal for interactive task")
-			sessionCancel()
-			w.sandboxManager.Stop(sandboxID, true)
-		}
-	}()
 
 	interactiveMirror := NewTaskOutput(
 		task.ExternalId,

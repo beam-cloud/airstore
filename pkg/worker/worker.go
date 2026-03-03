@@ -272,25 +272,86 @@ func (w *Worker) subscribeTaskCancellation(ctx context.Context, task types.RunEx
 		return func() {}
 	}
 
-	cancelCh, cancelCleanup, err := w.terminalIO.SubscribeCancel(ctx, task.ExternalId)
-	if err != nil {
-		addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to subscribe for task cancellation")
+	return w.watchTaskCancellation(ctx, task, func() {
+		addTaskExecutionContext(log.Info(), task).Msg("received cancel signal for task")
+		cancel()
+	})
+}
+
+func (w *Worker) watchTaskCancellation(
+	ctx context.Context,
+	task types.RunExecution,
+	onCancel func(),
+) func() {
+	if w == nil || w.terminalIO == nil {
 		return func() {}
 	}
 
+	stopCh := make(chan struct{})
+	var stopOnce sync.Once
+	cleanup := func() {
+		stopOnce.Do(func() {
+			close(stopCh)
+		})
+	}
+
+	var cancelOnce sync.Once
 	go func() {
-		select {
-		case <-ctx.Done():
-		case _, ok := <-cancelCh:
-			if !ok {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-stopCh:
+				return
+			default:
+			}
+
+			cancelCh, cancelCleanup, err := w.terminalIO.SubscribeCancel(ctx, task.ExternalId)
+			if err != nil {
+				addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to subscribe for task cancellation")
+				select {
+				case <-ctx.Done():
+					return
+				case <-stopCh:
+					return
+				case <-time.After(250 * time.Millisecond):
+					continue
+				}
+			}
+
+			shouldRetry := false
+			select {
+			case <-ctx.Done():
+			case <-stopCh:
+			case _, ok := <-cancelCh:
+				if !ok {
+					shouldRetry = true
+					addTaskExecutionContext(log.Warn(), task).Msg("task cancellation subscription closed; retrying")
+				} else {
+					cancelOnce.Do(func() {
+						if onCancel != nil {
+							onCancel()
+						}
+					})
+				}
+			}
+			cancelCleanup()
+
+			if !shouldRetry {
 				return
 			}
-			addTaskExecutionContext(log.Info(), task).Msg("received cancel signal for task")
-			cancel()
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-stopCh:
+				return
+			case <-time.After(250 * time.Millisecond):
+			}
 		}
 	}()
 
-	return cancelCleanup
+	return cleanup
 }
 
 // executeTask runs a single task to completion: mark started → execute → record result.

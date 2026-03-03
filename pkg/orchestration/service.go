@@ -1040,8 +1040,9 @@ func (s *AgentService) cancelInFlightRunExecutions(ctx context.Context, runID st
 	}
 
 	cancelled := false
+	var firstErr error
 	for _, attempt := range attempts {
-		if attempt == nil || !attempt.Status.IsInFlight() || attempt.ExecutionID == nil {
+		if attempt == nil || attempt.ExecutionID == nil {
 			continue
 		}
 
@@ -1051,13 +1052,40 @@ func (s *AgentService) cancelInFlightRunExecutions(ctx context.Context, runID st
 		}
 
 		cancelled = true
-		_ = s.backend.CancelRunExecution(ctx, executionID)
+		if err := s.backend.CancelRunExecution(ctx, executionID); err != nil && !isRunExecutionCancelNoopError(err) {
+			if firstErr == nil {
+				firstErr = err
+			}
+			log.Warn().
+				Err(err).
+				Str("run_id", runID).
+				Str("execution_id", executionID).
+				Msg("failed to mark run execution cancelled")
+		}
 
 		if s.terminalIO != nil {
-			_ = s.terminalIO.PublishCancel(ctx, executionID)
+			if err := s.terminalIO.PublishCancel(ctx, executionID); err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				log.Warn().
+					Err(err).
+					Str("run_id", runID).
+					Str("execution_id", executionID).
+					Msg("failed to publish run cancellation signal")
+			}
 		}
 	}
-	return cancelled, nil
+	return cancelled, firstErr
+}
+
+func isRunExecutionCancelNoopError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "already finished") ||
+		strings.Contains(lower, "cannot be cancelled")
 }
 
 const (
