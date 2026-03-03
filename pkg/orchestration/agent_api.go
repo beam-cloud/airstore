@@ -784,7 +784,7 @@ func normalizeAgentProfileConfig(config map[string]any, agentKey string) (map[st
 	return normalized, nil
 }
 
-// --- Scheduled Tasks (application layer) ---
+// --- Scheduled Tasks ---
 
 func (a *AgentAPI) CreateSchedule(
 	ctx context.Context,
