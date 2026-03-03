@@ -106,12 +106,13 @@ func NewWorker() (*Worker, error) {
 	// cpuLimit is in millicores; memoryLimit is in MiB.
 	maxConcurrentTasks := computeMaxTasks(cpuLimit, memoryLimit)
 	if maxConcurrentTasks < 1 {
-		cancel()
-		return nil, fmt.Errorf(
-			"worker under-provisioned: %dm CPU / %d MiB cannot fit a single task (%dm CPU / %d MiB); increase worker resources",
-			cpuLimit, memoryLimit,
-			types.DefaultRunExecutionCPU, types.DefaultRunExecutionMemory>>20,
-		)
+		log.Warn().
+			Int64("worker_cpu_millis", cpuLimit).
+			Int64("worker_memory_mib", memoryLimit).
+			Int64("task_cpu_millis", types.DefaultRunExecutionCPU).
+			Int64("task_memory_mib", types.DefaultRunExecutionMemory>>20).
+			Msg("worker under-provisioned: cannot fit a single task at default resource limits; running degraded with max_tasks=1")
+		maxConcurrentTasks = 1
 	}
 
 	gatewayClient, err := gatewayclient.NewGatewayClient(gatewayGRPCAddr, authToken)

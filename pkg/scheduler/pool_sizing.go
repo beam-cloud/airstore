@@ -30,8 +30,8 @@ const (
 
 	// Default worker configuration
 	defaultWorkerImage  = "registry.localhost:5000/airstore-worker:latest"
-	defaultWorkerCpu    = "500m"
-	defaultWorkerMemory = "512Mi"
+	defaultWorkerCpu    = "4000m"
+	defaultWorkerMemory = "4096Mi"
 
 	// Labels and annotations
 	labelRole            = "airstore.beam.cloud/role"

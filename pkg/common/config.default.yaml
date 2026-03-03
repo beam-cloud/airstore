@@ -100,8 +100,8 @@ scheduler:
       minReplicas: 1
       maxReplicas: 10
       scaleDownDelay: 5m
-      workerCpu: 4000
-      workerMemory: 4096
+      cpu: "4000m"
+      memory: "4096Mi"
       runtimeClassName: ""
       nodeSelector: {}
 
