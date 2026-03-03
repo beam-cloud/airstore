@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -17,7 +19,10 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const defaultCacheTTL = 30 * time.Second
+const (
+	defaultCacheTTL       = 30 * time.Second
+	maxIndexedContentSize = 1 * 1024 * 1024 // 1MB safety cap for search indexing
+)
 
 // nullableString converts an empty string to sql.NullString{Valid: false}
 // and a non-empty string to sql.NullString{String: s, Valid: true}.
@@ -562,8 +567,8 @@ func (s *filesystemStore) StoreResultContent(ctx context.Context, workspaceId ui
 	// Track cache key in an index for O(1) invalidation by query path.
 	s.addIndexMember(ctx, common.Keys.FsResultBodyIndex(workspaceId, queryPath), cacheKey, contentTTL*2)
 
-	// Index in Elasticsearch if available
-	if s.elastic != nil {
+	// Index in Elasticsearch if available and safe to index as text.
+	if s.elastic != nil && shouldIndexResultContent(resultID, content) {
 		doc := map[string]interface{}{
 			"query_path": queryPath,
 			"result_id":  resultID,
@@ -626,7 +631,7 @@ func (s *filesystemStore) SearchContent(ctx context.Context, workspaceId uint, q
 }
 
 func (s *filesystemStore) IndexContent(ctx context.Context, workspaceId uint, queryPath, resultID, filename string, content []byte) error {
-	if s.elastic == nil {
+	if s.elastic == nil || !shouldIndexResultContent(resultID, content) {
 		return nil
 	}
 
@@ -641,6 +646,41 @@ func (s *filesystemStore) IndexContent(ctx context.Context, workspaceId uint, qu
 	docID := fmt.Sprintf("%s_%s_content", types.GeneratePathID(queryPath), resultID)
 
 	return s.elastic.Index(ctx, s.elasticIndex(workspaceId), docID, docData)
+}
+
+func shouldIndexResultContent(resultID string, content []byte) bool {
+	if len(content) == 0 || len(content) > maxIndexedContentSize {
+		return false
+	}
+	// Gmail attachments are frequently binary; skip text indexing entirely.
+	if strings.HasPrefix(resultID, "att:") {
+		return false
+	}
+	return !looksBinaryContent(content)
+}
+
+func looksBinaryContent(content []byte) bool {
+	sample := content
+	if len(sample) > 8192 {
+		sample = sample[:8192]
+	}
+	if len(sample) == 0 {
+		return false
+	}
+	if bytes.IndexByte(sample, 0x00) >= 0 {
+		return true
+	}
+	if !utf8.Valid(sample) {
+		return true
+	}
+
+	controlBytes := 0
+	for _, b := range sample {
+		if b < 0x09 || (b > 0x0D && b < 0x20) {
+			controlBytes++
+		}
+	}
+	return float64(controlBytes)/float64(len(sample)) > 0.10
 }
 
 // ===== Filesystem Metadata =====
