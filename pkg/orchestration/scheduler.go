@@ -73,7 +73,7 @@ func (s *CronScheduler) poll(ctx context.Context) {
 
 	for _, sched := range schedules {
 		lockKey := common.Keys.CronScheduleLock(sched.ExternalID)
-		lockTTL := computeScheduleLockTTL(sched.CronExpr)
+		lockTTL := computeScheduleLockTTL(sched.CronExpr, sched.Timezone)
 		acquired, err := s.rdb.SetNX(ctx, lockKey, "1", lockTTL).Result()
 		if err != nil || !acquired {
 			locked.Add(1)
@@ -115,7 +115,7 @@ func (s *CronScheduler) poll(ctx context.Context) {
 }
 
 func (s *CronScheduler) fireSchedule(ctx context.Context, schedule *types.ScheduledTask) error {
-	nextRun, err := NextCronTime(schedule.CronExpr, time.Now())
+	nextRun, err := NextCronTime(schedule.CronExpr, time.Now(), schedule.Timezone)
 	if err != nil {
 		return fmt.Errorf("compute next run: %w", err)
 	}
@@ -158,12 +158,12 @@ func (s *CronScheduler) fireSchedule(ctx context.Context, schedule *types.Schedu
 	return nil
 }
 
-func computeScheduleLockTTL(cronExpr string) time.Duration {
-	next1, err := NextCronTime(cronExpr, time.Now())
+func computeScheduleLockTTL(cronExpr string, tz string) time.Duration {
+	next1, err := NextCronTime(cronExpr, time.Now(), tz)
 	if err != nil {
 		return schedulerMinLockTTL
 	}
-	next2, err := NextCronTime(cronExpr, next1)
+	next2, err := NextCronTime(cronExpr, next1, tz)
 	if err != nil {
 		return schedulerMinLockTTL
 	}

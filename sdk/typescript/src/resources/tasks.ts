@@ -142,6 +142,7 @@ export class Tasks {
   async createSchedule(workspaceId: string, params: ScheduleCreateParams, options?: RequestOptions): Promise<Schedule> {
     return this.client.request<Schedule>('POST', this.schedulePath(workspaceId), {
       agent_id: params.agentId, cron_expr: params.cronExpr, prompt: params.prompt,
+      ...(params.timezone != null && { timezone: params.timezone }),
       ...(params.skillPaths != null && { skill_paths: params.skillPaths }),
     }, undefined, options);
   }
@@ -157,6 +158,7 @@ export class Tasks {
   async updateSchedule(workspaceId: string, scheduleId: string, params: ScheduleUpdateParams, options?: RequestOptions): Promise<Schedule> {
     return this.client.request<Schedule>('PATCH', this.schedulePath(workspaceId, scheduleId), {
       ...(params.cronExpr != null && { cron_expr: params.cronExpr }),
+      ...(params.timezone != null && { timezone: params.timezone }),
       ...(params.prompt != null && { prompt: params.prompt }),
       ...(params.skillPaths != null && { skill_paths: params.skillPaths }),
       ...(params.active != null && { active: params.active }),

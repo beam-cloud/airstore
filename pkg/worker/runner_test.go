@@ -58,6 +58,70 @@ func TestDefaultClaudePersistentConfigDir_RootedUnderWorkspace(t *testing.T) {
 	}
 }
 
+func TestApplySystemPromptFlags_ReplaceMode(t *testing.T) {
+	builder := newPromptEntrypointBuilder("claude")
+	env := map[string]string{
+		agentSystemPromptEnvKey:     "You are a helpful agent.",
+		agentSystemPromptModeEnvKey: "replace",
+	}
+
+	applySystemPromptFlags(builder, env)
+	args := builder.build()
+
+	if !argPairExists(args, "--system-prompt", "You are a helpful agent.") {
+		t.Fatalf("expected --system-prompt flag in replace mode, got %v", args)
+	}
+	if argExists(args, "--append-system-prompt") {
+		t.Fatalf("expected no --append-system-prompt in replace mode, got %v", args)
+	}
+}
+
+func TestApplySystemPromptFlags_AppendMode(t *testing.T) {
+	builder := newPromptEntrypointBuilder("claude")
+	env := map[string]string{
+		agentSystemPromptEnvKey:     "Extra instructions.",
+		agentSystemPromptModeEnvKey: "append",
+	}
+
+	applySystemPromptFlags(builder, env)
+	args := builder.build()
+
+	if !argPairExists(args, "--append-system-prompt", "Extra instructions.") {
+		t.Fatalf("expected --append-system-prompt flag in append mode, got %v", args)
+	}
+	if argExists(args, "--system-prompt") {
+		t.Fatalf("expected no --system-prompt in append mode, got %v", args)
+	}
+}
+
+func TestApplySystemPromptFlags_DefaultMode(t *testing.T) {
+	builder := newPromptEntrypointBuilder("claude")
+	env := map[string]string{
+		agentSystemPromptEnvKey: "Some prompt.",
+	}
+
+	applySystemPromptFlags(builder, env)
+	args := builder.build()
+
+	if !argPairExists(args, "--append-system-prompt", "Some prompt.") {
+		t.Fatalf("expected --append-system-prompt when mode is unset, got %v", args)
+	}
+}
+
+func TestApplySystemPromptFlags_EmptyPrompt(t *testing.T) {
+	builder := newPromptEntrypointBuilder("claude")
+	env := map[string]string{
+		agentSystemPromptModeEnvKey: "replace",
+	}
+
+	applySystemPromptFlags(builder, env)
+	args := builder.build()
+
+	if argExists(args, "--system-prompt") || argExists(args, "--append-system-prompt") {
+		t.Fatalf("expected no system prompt flags when prompt is empty, got %v", args)
+	}
+}
+
 func argExists(args []string, want string) bool {
 	for _, arg := range args {
 		if arg == want {
