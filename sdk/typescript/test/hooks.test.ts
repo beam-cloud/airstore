@@ -18,7 +18,7 @@ describe('Hooks', () => {
       const view = await client.views.create(workspace.external_id, {
         integration: 'gmail',
         name: uniqueName('hook-view'),
-        guidance: 'Emails for hook testing',
+        filter: { newer_than: '7d' },
         outputFormat: 'folder',
       });
       hookBasePath = view.path ?? `/sources/${view.external_id}`;
@@ -59,13 +59,16 @@ describe('Hooks', () => {
       const view2 = await client.views.create(workspace.external_id, {
         integration: 'gmail',
         name: uniqueName('hook-view2'),
-        guidance: 'Emails for custom event hook test',
+        filter: { newer_than: '7d' },
         outputFormat: 'folder',
       });
       secondPath = view2.path ?? `/sources/${view2.external_id}`;
-    } catch {
-      console.warn('Skipping custom event types test: could not create second source view');
-      return;
+    } catch (err) {
+      if (err instanceof APIError) {
+        console.warn(`Skipping custom event types test: could not create second source view (${err.status})`);
+        return;
+      }
+      throw err;
     }
 
     const hook = await client.hooks.create(workspace.external_id, {

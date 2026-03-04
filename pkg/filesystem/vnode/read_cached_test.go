@@ -232,6 +232,54 @@ func TestReadWithCachedFlow_PeekDoesNotClearWriteBuffer(t *testing.T) {
 	}
 }
 
+// TestReadWithCachedFlow_PeekBeyondDirtyBufferFallsThrough verifies that a
+// read beyond the per-handle dirty buffer falls through to the backend
+// instead of returning 0 (EOF). This covers existing files where the handle
+// has only written a prefix but the backend still holds the rest.
+func TestReadWithCachedFlow_PeekBeyondDirtyBufferFallsThrough(t *testing.T) {
+	dirtyData := []byte("dirty prefix")
+	backendData := []byte("backend suffix at offset 200")
+
+	aw := NewAsyncWriter(func(path string, off int64, data []byte) error {
+		return nil
+	})
+
+	ops := cachedReadOps{
+		content: NewContentCache(),
+		writer:  aw,
+		getHandleState: func(fh FileHandle) *handleState {
+			return nil
+		},
+		peekHandleWrites: func(path string) (int64, []byte, bool) {
+			cp := make([]byte, len(dirtyData))
+			copy(cp, dirtyData)
+			return 0, cp, true
+		},
+		consumePrefetch: func(path string, off int64, state *handleState) ([]byte, bool, error) {
+			return nil, false, nil
+		},
+		maybeStatSmall: func(path string) (*pb.FileInfo, bool) {
+			return nil, false
+		},
+		readRange: func(path string, off int64, length int64) ([]byte, error) {
+			return backendData, nil
+		},
+		recordRead: func(state *handleState, path string, off int64, n int) {},
+	}
+
+	readBuf := make([]byte, 4096)
+	n, attr, err := readWithCachedFlow("/test/existing.txt", readBuf, 200, 0, ops)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if attr == nil || attr.CacheSource != CacheSourceBackendRPC {
+		t.Fatalf("expected backend RPC source, got %v", attr)
+	}
+	if !bytes.Equal(readBuf[:n], backendData) {
+		t.Fatalf("read data = %q, want %q", string(readBuf[:n]), string(backendData))
+	}
+}
+
 // TestReadWithCachedFlow_FallsThroughToAsyncWriter verifies that when no
 // handle buffer exists, the read path still serves from the AsyncWriter.
 func TestReadWithCachedFlow_FallsThroughToAsyncWriter(t *testing.T) {

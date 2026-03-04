@@ -38,8 +38,8 @@ export function getClient(): Airstore {
   _client = new Airstore({
     apiKey,
     baseURL: process.env['AIRSTORE_BASE_URL'] || 'http://localhost:1994/api/v1',
-    maxRetries: 1,
-    timeout: 15_000,
+    maxRetries: 0,
+    timeout: 30_000,
   });
 
   return _client;

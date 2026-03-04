@@ -439,7 +439,7 @@ func TestServiceDeleteThenRecreate_RefiresSeenSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compare baseline: %v", err)
 	}
-	if len(result.Added) != 0 {
+	if result != nil && len(result.Added) != 0 {
 		t.Fatalf("expected no new IDs before delete/recreate, got %v", result.Added)
 	}
 

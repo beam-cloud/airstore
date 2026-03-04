@@ -47,9 +47,6 @@ func readWithCachedFlow(path string, buf []byte, off int64, fh FileHandle, ops c
 			n := copy(buf, data[off-dataOff:])
 			return n, AttributionForCache(CacheSourceDirtyBuffer), nil
 		}
-		if off >= dataEnd {
-			return 0, AttributionForCache(CacheSourceDirtyBuffer), nil
-		}
 	}
 
 	if data, dataOff, ok := ops.writer.Get(path); ok {
