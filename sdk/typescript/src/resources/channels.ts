@@ -8,11 +8,16 @@ import type {
 import { toInputProvenanceBody, toPolicyBody, toRoutingBody } from './helpers.js';
 
 /**
- * Direct-channel APIs for sending agent/run messages.
+ * Send direct messages to agents and runs via named channels.
+ *
+ * Use `sendDirectAgentMessage` to start a new task by messaging an agent, and
+ * `sendDirectRunMessage` to send follow-up input to an existing run (e.g.
+ * follow-up, steer, or interrupt).
  */
 export class Channels {
   constructor(private readonly client: CoreClient) {}
 
+  /** Send a message to an agent, creating a new task. Equivalent to tasks.create via the direct channel. */
   async sendDirectAgentMessage(
     workspaceId: string,
     agentId: string,
@@ -43,6 +48,10 @@ export class Channels {
     );
   }
 
+  /**
+   * Send a follow-up message to an active run. The `queueMode` controls
+   * delivery: `followup`, `steer`, `interrupt`, or `queue`.
+   */
   async sendDirectRunMessage(
     workspaceId: string,
     runId: string,

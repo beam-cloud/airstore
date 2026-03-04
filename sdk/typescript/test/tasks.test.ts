@@ -70,4 +70,36 @@ describe('Orchestration Tasks', () => {
     expect(typeof sessionId).toBe('string');
     expect((sessionId as string).length).toBeGreaterThan(0);
   });
+
+  it('archives a task', async () => {
+    const accepted = await client.tasks.create(workspace.external_id, {
+      message: 'task to archive',
+      agentId,
+      idempotencyKey: uniqueName('archive-idem'),
+      timeoutMs: 60_000,
+    });
+    expect(accepted.accepted).toBe(true);
+
+    const taskId = accepted.task.id;
+    const TERMINAL = new Set(['done', 'dropped', 'cancelled']);
+
+    // Wait for the task to settle into an archivable state
+    const deadline = Date.now() + 10_000;
+    let task = await client.tasks.retrieve(workspace.external_id, taskId);
+    while (!TERMINAL.has(task.state) && task.state !== 'idle' && Date.now() < deadline) {
+      if (task.state === 'running') {
+        try {
+          await client.tasks.cancel(workspace.external_id, taskId);
+          break;
+        } catch {
+          // may have transitioned already
+        }
+      }
+      await new Promise((r) => setTimeout(r, 500));
+      task = await client.tasks.retrieve(workspace.external_id, taskId);
+    }
+
+    const result = await client.tasks.archive(workspace.external_id, taskId);
+    expect(result.status).toBe('archived');
+  });
 });

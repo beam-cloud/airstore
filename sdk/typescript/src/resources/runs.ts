@@ -8,11 +8,16 @@ import type {
 } from '../types/runs.js';
 
 /**
- * Read and control run lifecycle state.
+ * Read and manage the lifecycle of agent runs.
+ *
+ * A run is the actual execution instance spawned by a task. Use this resource
+ * to inspect run status, list snapshots (intermediate state), retrieve
+ * execution events, or cancel a running execution.
  */
 export class Runs {
   constructor(private readonly client: CoreClient) {}
 
+  /** List runs with optional filters (agent, status, session, date range) and cursor pagination. */
   async list(workspaceId: string, options?: RequestOptions): Promise<RunListResponse>;
   async list(
     workspaceId: string,
@@ -55,6 +60,7 @@ export class Runs {
     );
   }
 
+  /** Retrieve a single run by ID. */
   async retrieve(
     workspaceId: string,
     runId: string,
@@ -69,6 +75,7 @@ export class Runs {
     );
   }
 
+  /** List snapshots (intermediate state captures) for a run, ordered by sequence number. */
   async listSnapshots(
     workspaceId: string,
     runId: string,
@@ -83,6 +90,7 @@ export class Runs {
     );
   }
 
+  /** List execution events emitted during a run. */
   async listEvents(
     workspaceId: string,
     runId: string,
@@ -97,6 +105,7 @@ export class Runs {
     );
   }
 
+  /** Cancel an active run. */
   async cancel(
     workspaceId: string,
     runId: string,

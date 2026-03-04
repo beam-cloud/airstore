@@ -153,8 +153,8 @@ export async function waitForRunIdForTask(
     // Fallback for eventual-consistency windows where run exists before task.target_run_id updates.
     // Keep this infrequent to avoid turning run lookup into a heavy list loop.
     if (pollCount % 5 === 0) {
-      const runs = await client.runs.list(workspaceId);
-      const match = runs.find((run) => {
+      const runsResponse = await client.runs.list(workspaceId);
+      const match = runsResponse.runs.find((run) => {
         if (run.origin_task_id === taskId) return true;
         if (!sessionId || run.session_id !== sessionId) return false;
         if (!taskAgentId) return true;

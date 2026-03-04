@@ -109,6 +109,7 @@ export type { VirtualFile, DirectoryListing, TreeListing } from './types/filesys
 export type {
   AgentProfile,
   AgentCreateParams,
+  AgentUpdateParams,
   AgentRunner,
   AgentProvider,
   AgentConfig,
@@ -134,6 +135,7 @@ export type {
   TaskAcceptedResponse,
   TaskLogEntry,
   TaskLogListParams,
+  TaskArchiveResponse,
   TaskLogListResponse,
   TaskEventStreamParams,
   TaskEventBatch,

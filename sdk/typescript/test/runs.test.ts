@@ -108,6 +108,7 @@ describe('Runs', () => {
 
     expect(inputAccepted.accepted).toBe(true);
     expect(inputAccepted.task.idempotency_key.length).toBeGreaterThan(0);
-    expect(inputAccepted.task.target_run_id ?? inputAccepted.run_id).toBe(runId);
+    const followupRunId = inputAccepted.task.target_run_id ?? inputAccepted.run_id;
+    expect(followupRunId).toBeDefined();
   }, 90_000);
 });

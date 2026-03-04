@@ -247,14 +247,14 @@ func (s *StorageVNode) Read(path string, buf []byte, off int64, fh FileHandle) (
 
 func (s *StorageVNode) cachedReadOps() cachedReadOps {
 	return cachedReadOps{
-		content:         s.content,
-		writer:          s.asyncWriter,
-		getHandleState:  s.getHandleState,
-		enqueueWrites:   s.enqueueWritesForPath,
-		consumePrefetch: s.consumePrefetch,
-		maybeStatSmall:  s.maybeStatSmall,
-		readRange:       s.readRange,
-		recordRead:      s.recordRead,
+		content:          s.content,
+		writer:           s.asyncWriter,
+		getHandleState:   s.getHandleState,
+		peekHandleWrites: s.peekHandleWrites,
+		consumePrefetch:  s.consumePrefetch,
+		maybeStatSmall:   s.maybeStatSmall,
+		readRange:        s.readRange,
+		recordRead:       s.recordRead,
 	}
 }
 
@@ -908,6 +908,41 @@ func (s *StorageVNode) bufferedHandleSize(path string) (int64, bool) {
 		state.mu.Unlock()
 	}
 	return size, ok
+}
+
+// peekHandleWrites returns a snapshot of the largest per-handle write buffer
+// for path WITHOUT clearing it. Used by the read path to serve dirty data
+// without disrupting an in-progress write sequence.
+func (s *StorageVNode) peekHandleWrites(path string) (int64, []byte, bool) {
+	s.writeMu.Lock()
+	entries := s.writes[path]
+	states := make([]*handleState, 0, len(entries))
+	for _, state := range entries {
+		states = append(states, state)
+	}
+	s.writeMu.Unlock()
+
+	var (
+		bestOff  int64
+		bestData []byte
+	)
+	for _, state := range states {
+		state.mu.Lock()
+		if !state.closed && len(state.writeBuf) > 0 {
+			end := state.writeOff + int64(len(state.writeBuf))
+			if bestData == nil || end > bestOff+int64(len(bestData)) {
+				bestOff = state.writeOff
+				bestData = make([]byte, len(state.writeBuf))
+				copy(bestData, state.writeBuf)
+			}
+		}
+		state.mu.Unlock()
+	}
+	if bestData == nil {
+		return 0, nil, false
+	}
+	bestOff, bestData = compactNulls(bestOff, bestData)
+	return bestOff, bestData, true
 }
 
 // cachedMode returns the file mode from the metadata cache, or 0 if not cached.
