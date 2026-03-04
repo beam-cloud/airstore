@@ -183,6 +183,7 @@ export interface Schedule {
   agent_id: string;
   agent_name?: string;
   cron_expr: string;
+  timezone: string;
   prompt: string;
   skill_paths: string[];
   active: boolean;
@@ -195,12 +196,14 @@ export interface Schedule {
 export interface ScheduleCreateParams {
   agentId: string;
   cronExpr: string;
+  timezone?: string;
   prompt: string;
   skillPaths?: string[];
 }
 
 export interface ScheduleUpdateParams {
   cronExpr?: string;
+  timezone?: string;
   prompt?: string;
   skillPaths?: string[];
   active?: boolean;

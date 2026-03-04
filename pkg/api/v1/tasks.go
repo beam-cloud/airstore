@@ -398,6 +398,7 @@ func (g *WorkspaceTasksGroup) CreateSchedule(c echo.Context) error {
 	var req struct {
 		AgentID    string   `json:"agent_id"`
 		CronExpr   string   `json:"cron_expr"`
+		Timezone   string   `json:"timezone"`
 		Prompt     string   `json:"prompt"`
 		SkillPaths []string `json:"skill_paths"`
 	}
@@ -420,7 +421,7 @@ func (g *WorkspaceTasksGroup) CreateSchedule(c echo.Context) error {
 	}
 
 	st, err := g.agents.CreateSchedule(
-		ctx, ws.Id, agent.ID, req.CronExpr, req.Prompt,
+		ctx, ws.Id, agent.ID, req.CronExpr, req.Timezone, req.Prompt,
 		req.SkillPaths, ptrUint(auth.MemberId(ctx)), ptrUint(auth.TokenId(ctx)), nil,
 	)
 	if err != nil {
@@ -472,6 +473,7 @@ func (g *WorkspaceTasksGroup) UpdateSchedule(c echo.Context) error {
 	}
 	var req struct {
 		CronExpr   *string   `json:"cron_expr,omitempty"`
+		Timezone   *string   `json:"timezone,omitempty"`
 		Prompt     *string   `json:"prompt,omitempty"`
 		SkillPaths *[]string `json:"skill_paths,omitempty"`
 		Active     *bool     `json:"active,omitempty"`
@@ -484,7 +486,7 @@ func (g *WorkspaceTasksGroup) UpdateSchedule(c echo.Context) error {
 	if err != nil || ws == nil {
 		return ErrorResponse(c, http.StatusNotFound, "workspace not found")
 	}
-	st, err := g.agents.UpdateSchedule(ctx, ws.Id, c.Param("id"), req.CronExpr, req.Prompt, req.SkillPaths, req.Active)
+	st, err := g.agents.UpdateSchedule(ctx, ws.Id, c.Param("id"), req.CronExpr, req.Timezone, req.Prompt, req.SkillPaths, req.Active)
 	if err != nil {
 		return g.scheduleError(c, err)
 	}
@@ -533,6 +535,7 @@ func (g *WorkspaceTasksGroup) scheduleResp(ctx context.Context, st *types.Schedu
 		"agent_id":     st.AgentID,
 		"agent_name":   agentName,
 		"cron_expr":    st.CronExpr,
+		"timezone":     st.Timezone,
 		"prompt":       st.Prompt,
 		"skill_paths":  skillPaths,
 		"active":       st.Active,

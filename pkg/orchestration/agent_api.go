@@ -404,7 +404,21 @@ func (a *AgentAPI) ListTaskLogs(
 
 	// Non-zero cursor means incremental polling for the currently bound run.
 	if seqNum > 0 {
-		return a.listTaskLogsForRun(ctx, currentRunID, seqNum)
+		logs, nextCursor, err := a.listTaskLogsForRun(ctx, currentRunID, seqNum)
+		if err != nil {
+			return nil, seqNum, err
+		}
+		// When the cursor rewinds (execution changed within the same run),
+		// replay the full session history so the frontend gets all prior runs
+		// instead of just the new execution's partial log stream.
+		if nextCursor > 0 && nextCursor < seqNum {
+			history, histNext, histErr := a.listTaskSessionHistoryLogs(ctx, workspaceID, task, currentRunID)
+			if histErr == nil {
+				history = prependTaskPromptLog(task, history)
+				return common.RedactTaskLogEntries(history), histNext, nil
+			}
+		}
+		return logs, nextCursor, nil
 	}
 
 	// Cursor zero means "hydrate history". Return logs across all runs of this
@@ -791,6 +805,7 @@ func (a *AgentAPI) CreateSchedule(
 	workspaceID uint,
 	agentID string,
 	cronExpr string,
+	timezone string,
 	prompt string,
 	skillPaths []string,
 	memberID *uint,
@@ -809,11 +824,13 @@ func (a *AgentAPI) CreateSchedule(
 		return nil, fmt.Errorf("agent_id is required")
 	}
 
-	cronExpr, err := resolveCronExpr(ctx, cronExpr)
+	timezone = normalizeTimezone(timezone)
+
+	cronExpr, err := resolveCronExpr(ctx, cronExpr, timezone)
 	if err != nil {
 		return nil, err
 	}
-	nextRun, err := NextCronTime(cronExpr, time.Now())
+	nextRun, err := NextCronTime(cronExpr, time.Now(), timezone)
 	if err != nil {
 		return nil, fmt.Errorf("invalid cron expression: %w", err)
 	}
@@ -826,6 +843,7 @@ func (a *AgentAPI) CreateSchedule(
 		WorkspaceID:       workspaceID,
 		AgentID:           agentID,
 		CronExpr:          cronExpr,
+		Timezone:          timezone,
 		Prompt:            prompt,
 		SkillPaths:        skillPaths,
 		Active:            true,
@@ -838,6 +856,18 @@ func (a *AgentAPI) CreateSchedule(
 		return nil, err
 	}
 	return st, nil
+}
+
+// normalizeTimezone validates an IANA timezone string, falling back to UTC.
+func normalizeTimezone(tz string) string {
+	tz = strings.TrimSpace(tz)
+	if tz == "" {
+		return "UTC"
+	}
+	if _, err := time.LoadLocation(tz); err != nil {
+		return "UTC"
+	}
+	return tz
 }
 
 func (a *AgentAPI) GetSchedule(ctx context.Context, workspaceID uint, externalID string) (*types.ScheduledTask, error) {
@@ -853,6 +883,7 @@ func (a *AgentAPI) UpdateSchedule(
 	workspaceID uint,
 	externalID string,
 	cronExpr *string,
+	timezone *string,
 	prompt *string,
 	skillPaths *[]string,
 	active *bool,
@@ -862,16 +893,23 @@ func (a *AgentAPI) UpdateSchedule(
 		return nil, err
 	}
 
+	if timezone != nil {
+		st.Timezone = normalizeTimezone(*timezone)
+	}
+
 	if cronExpr != nil {
-		resolved, err := resolveCronExpr(ctx, *cronExpr)
+		resolved, err := resolveCronExpr(ctx, *cronExpr, st.Timezone)
 		if err != nil {
 			return nil, err
 		}
-		nextRun, err := NextCronTime(resolved, time.Now())
+		st.CronExpr = resolved
+	}
+
+	if cronExpr != nil || timezone != nil {
+		nextRun, err := NextCronTime(st.CronExpr, time.Now(), st.Timezone)
 		if err != nil {
 			return nil, fmt.Errorf("invalid cron expression: %w", err)
 		}
-		st.CronExpr = resolved
 		st.NextRunAt = nextRun
 	}
 	if prompt != nil {

@@ -105,10 +105,14 @@ func (r *ClaudeCodeRunner) BuildEntrypoint(task types.RunExecution, env map[stri
 	model := strings.TrimSpace(env[agentModelEnvKey])
 	sessionID := claudeSessionIDForCLI(claudeSessionIDFromEnv(env))
 
+	spMode := strings.ToLower(strings.TrimSpace(env[agentSystemPromptModeEnvKey]))
+	spLen := len(strings.TrimSpace(env[agentSystemPromptEnvKey]))
 	addTaskExecutionContext(
 		log.Info().
 			Str("model", model).
-			Str("prompt", task.Prompt[:min(50, len(task.Prompt))]),
+			Str("prompt", task.Prompt[:min(50, len(task.Prompt))]).
+			Str("system_prompt_mode", spMode).
+			Int("system_prompt_len", spLen),
 		task,
 	).Msg("running claude code task")
 
@@ -133,6 +137,15 @@ func (r *ClaudeCodeRunner) BuildTurnArgs(prompt string, env map[string]string, m
 	r.injectEnv(env)
 	model := strings.TrimSpace(env[agentModelEnvKey])
 	sessionID := claudeSessionIDForCLI(claudeSessionIDFromEnv(env))
+
+	spMode := strings.ToLower(strings.TrimSpace(env[agentSystemPromptModeEnvKey]))
+	spLen := len(strings.TrimSpace(env[agentSystemPromptEnvKey]))
+	log.Info().
+		Str("model", model).
+		Str("system_prompt_mode", spMode).
+		Int("system_prompt_len", spLen).
+		Str("turn_mode", string(mode)).
+		Msg("building claude code turn args")
 
 	builder := newPromptEntrypointBuilder("claude")
 	switch mode {

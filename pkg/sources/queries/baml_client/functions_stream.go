@@ -709,7 +709,7 @@ func (*stream) InferWebQuery(ctx context.Context, name string, guidance *string,
 }
 
 // / Streaming version of ParseCronSchedule
-func (*stream) ParseCronSchedule(ctx context.Context, description string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.CronResult, types.CronResult], error) {
+func (*stream) ParseCronSchedule(ctx context.Context, description string, timezone string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.CronResult, types.CronResult], error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -717,7 +717,7 @@ func (*stream) ParseCronSchedule(ctx context.Context, description string, opts .
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"description": description},
+		Kwargs: map[string]any{"description": description, "timezone": timezone},
 		Env:    getEnvVars(callOpts.env),
 	}
 
