@@ -130,6 +130,21 @@ type WorkspaceToolRepository interface {
 	DeleteWorkspaceToolByName(ctx context.Context, workspaceId uint, name string) error
 }
 
+// CreditRepository manages credit accounts and transactions
+type CreditRepository interface {
+	// Account operations
+	GetOrCreateCreditAccount(ctx context.Context, workspaceId uint) (*types.CreditAccount, error)
+	GetCreditAccount(ctx context.Context, workspaceId uint) (*types.CreditAccount, error)
+
+	// Ledger operations (all mutations go through these)
+	GrantCredits(ctx context.Context, workspaceId uint, amount int64, description string) (*types.CreditLedgerEntry, error)
+	DebitCredits(ctx context.Context, workspaceId uint, amount int64, description string, refType *string, refID *string) (*types.CreditLedgerEntry, error)
+	AdjustCredits(ctx context.Context, workspaceId uint, amount int64, description string) (*types.CreditLedgerEntry, error)
+
+	// Query
+	ListCreditLedger(ctx context.Context, workspaceId uint, limit, offset int) ([]*types.CreditLedgerEntry, error)
+}
+
 // BackendRepository is the main Postgres repository for persistent data.
 // For filesystem queries and metadata, use FilesystemStore instead.
 type BackendRepository interface {
@@ -159,6 +174,9 @@ type BackendRepository interface {
 
 	// Workspace Tools
 	WorkspaceToolRepository
+
+	// Credits
+	CreditRepository
 
 	// Run execution payloads
 	CreateRunExecution(ctx context.Context, task *types.RunExecution) error

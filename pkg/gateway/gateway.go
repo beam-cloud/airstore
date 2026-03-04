@@ -565,6 +565,12 @@ func (g *Gateway) registerServices() error {
 		apiv1.NewFilesystemGroup(filesystemGroup, g.BackendRepo, g.storageService, sourceService, g.sourceRegistry, g.toolRegistry, g.s2Client)
 		log.Info().Msg("filesystem API registered at /api/v1/workspaces/:workspace_id/fs")
 
+		// Credits API (nested under workspaces, workspace-scoped auth)
+		creditsGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/credits")
+		creditsGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
+		apiv1.NewCreditsGroup(creditsGroup, g.BackendRepo)
+		log.Info().Msg("credits API registered at /api/v1/workspaces/:workspace_id/credits")
+
 		// Cache management API (nested under workspaces, workspace-scoped auth)
 		cacheGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/cache")
 		cacheGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
