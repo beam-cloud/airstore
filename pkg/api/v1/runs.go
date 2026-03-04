@@ -202,6 +202,9 @@ func (g *RunsGroup) EnqueueInput(c echo.Context) error {
 	if strings.TrimSpace(req.Message) == "" {
 		return ErrorResponse(c, http.StatusBadRequest, "message is required")
 	}
+	if strings.TrimSpace(req.IdempotencyKey) == "" {
+		req.QueueMode = types.AgentQueueModeFollowup
+	}
 	runID := c.Param("run_id")
 	task, deduped, outcome, err := g.agents.EnqueueRunInput(
 		c.Request().Context(), workspaceID, runID, req.QueueMode, req.Message, req.IdempotencyKey,
