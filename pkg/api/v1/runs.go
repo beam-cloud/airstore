@@ -36,6 +36,7 @@ func (g *RunsGroup) registerRoutes() {
 	g.routerGroup.GET("/:run_id/snapshots", g.ListRunSnapshots)
 	g.routerGroup.GET("/:run_id/events", g.ListRunEvents)
 	g.routerGroup.POST("/:run_id/cancel", g.CancelRun)
+	g.routerGroup.POST("/:run_id/input", g.EnqueueInput)
 }
 
 func (g *RunsGroup) ListRuns(c echo.Context) error {
@@ -178,6 +179,55 @@ func (g *RunsGroup) CancelRun(c echo.Context) error {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 	return SuccessResponse(c, map[string]any{"status": "cancelled"})
+}
+
+type enqueueRunInputRequest struct {
+	Message        string               `json:"message"`
+	QueueMode      types.AgentQueueMode `json:"queue_mode,omitempty"`
+	IdempotencyKey string               `json:"idempotency_key,omitempty"`
+}
+
+func (g *RunsGroup) EnqueueInput(c echo.Context) error {
+	if g.agents == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "run service unavailable")
+	}
+	workspaceID, err := requireWorkspaceID(c)
+	if err != nil {
+		return err
+	}
+	var req enqueueRunInputRequest
+	if err := decodeStrictBody(c, &req); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
+	}
+	if strings.TrimSpace(req.Message) == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "message is required")
+	}
+	runID := c.Param("run_id")
+	task, deduped, outcome, err := g.agents.EnqueueRunInput(
+		c.Request().Context(), workspaceID, runID, req.QueueMode, req.Message, req.IdempotencyKey,
+	)
+	if err != nil {
+		if _, ok := err.(*types.ErrAgentRunNotFound); ok {
+			return ErrorResponse(c, http.StatusNotFound, "run not found")
+		}
+		if isAgentCommandValidationError(err) {
+			return ErrorResponse(c, http.StatusBadRequest, err.Error())
+		}
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+	statusCode := http.StatusAccepted
+	if deduped {
+		statusCode = http.StatusOK
+	}
+	return c.JSON(statusCode, Response{
+		Success: true,
+		Data: map[string]any{
+			"accepted":         true,
+			"idempotent_hit":   deduped,
+			"task":             task,
+			"delivery_outcome": outcome,
+		},
+	})
 }
 
 func parseRunStatuses(raw string) ([]types.AgentRunStatus, error) {
