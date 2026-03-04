@@ -1,3 +1,4 @@
+/** How a follow-up message is delivered to a running agent. */
 export type QueueMode =
   | 'steer'
   | 'steer-backlog'
@@ -30,11 +31,13 @@ export const WORKSPACE_ACCESS_RW: WorkspaceAccess = 'rw';
 export const RETRY_DEFAULT_MAX_ATTEMPTS = 2;
 export const RETRY_DEFAULT_DELAY_MS = 0;
 
+/** Retry policy for a run (max attempts and delay between retries). */
 export interface RunRetryPolicy {
   maxAttempts?: number;
   delayMs?: number;
 }
 
+/** Execution policy controlling sandbox, security, runtime, and resource limits. */
 export interface RunExecutionPolicy {
   host?: ExecHost;
   security?: ExecSecurity;
@@ -49,6 +52,7 @@ export interface RunExecutionPolicy {
 
 export type TaskKind = 'agent_command' | 'run_input';
 
+/** Lifecycle state of a task. */
 export type TaskState =
   | 'queued'
   | 'running'
@@ -57,6 +61,7 @@ export type TaskState =
   | 'dropped'
   | 'cancelled';
 
+/** Routing metadata for multi-channel delivery (Slack, email, etc.). */
 export interface RoutingContext {
   to?: string;
   replyTo?: string;
@@ -70,6 +75,7 @@ export interface RoutingContext {
   groupSpace?: string;
 }
 
+/** Provenance of the input that created this task. */
 export interface InputProvenance {
   source?: string;
   messageId?: string;
@@ -78,6 +84,7 @@ export interface InputProvenance {
   correlationId?: string;
 }
 
+/** A task representing a unit of intent sent to an agent. */
 export interface AgentTask {
   id: string;
   workspace_id: number;
@@ -98,14 +105,21 @@ export interface AgentTask {
   updated_at: string;
 }
 
+/** Parameters for creating a new task (agent command). */
 export interface AgentCommandCreateParams {
+  /** The prompt / instruction to send to the agent. */
   message: string;
+  /** ID of the agent profile to target. */
   agentId: string;
+  /** Session ID for grouping related tasks. Auto-generated if omitted. */
   sessionId?: string;
+  /** Idempotency key to prevent duplicate task creation. Auto-generated if omitted. */
   idempotencyKey?: string;
   sessionKey?: string;
   deliver?: boolean;
+  /** Maximum execution time in milliseconds. */
   timeoutMs?: number;
+  /** Execution policy (sandbox, security, runtime settings). */
   policy?: RunExecutionPolicy;
   lane?: string;
   extraSystemPrompt?: string;
@@ -116,6 +130,7 @@ export interface AgentCommandCreateParams {
   spawnedBy?: string;
 }
 
+/** Response from task creation. Contains the task and whether it was a duplicate. */
 export interface TaskAcceptedResponse {
   accepted: boolean;
   idempotent_hit: boolean;
@@ -123,6 +138,7 @@ export interface TaskAcceptedResponse {
   run_id?: string;
 }
 
+/** Filters for listing tasks. */
 export interface TaskListParams {
   agentId?: string;
   state?: TaskState | TaskState[];
@@ -132,6 +148,7 @@ export interface TaskListParams {
   cursor?: string;
 }
 
+/** Paginated list of tasks. */
 export interface TaskListResponse {
   tasks: AgentTask[];
   next_cursor: string;
@@ -142,6 +159,11 @@ export interface TaskCancelResponse {
   status: 'cancelled';
 }
 
+export interface TaskArchiveResponse {
+  status: 'archived';
+}
+
+/** A single log entry from a task execution. */
 export interface TaskLogEntry {
   timestamp: number;
   stream: string;
@@ -159,11 +181,13 @@ export interface TaskLogListResponse {
   next_cursor: number;
 }
 
+/** Cursors for polling the composite task event stream. */
 export interface TaskEventStreamParams {
   logCursor?: number;
   runEventCursor?: number;
 }
 
+/** Composite batch returned by streamEvents: task/run state, logs, and events. */
 export interface TaskEventBatch {
   task_id: string;
   run_id?: string;
@@ -175,8 +199,9 @@ export interface TaskEventBatch {
   next_run_event_cursor: number;
 }
 
-// --- Scheduled Tasks (cron) ---
+// ── Scheduled Tasks (cron) ──────────────────────────────────────────────────
 
+/** A cron schedule that periodically submits a task to an agent. */
 export interface Schedule {
   external_id: string;
   workspace_id: string;
@@ -193,14 +218,18 @@ export interface Schedule {
   updated_at: string;
 }
 
+/** Parameters for creating a cron schedule. */
 export interface ScheduleCreateParams {
   agentId: string;
+  /** Cron expression (5-field) or natural language (e.g. "every weekday at 9am"). */
   cronExpr: string;
+  /** IANA timezone (defaults to UTC). */
   timezone?: string;
   prompt: string;
   skillPaths?: string[];
 }
 
+/** Parameters for updating a cron schedule. All fields are optional. */
 export interface ScheduleUpdateParams {
   cronExpr?: string;
   timezone?: string;

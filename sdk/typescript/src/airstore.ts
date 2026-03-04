@@ -32,57 +32,58 @@ import { Hooks } from './resources/hooks.js';
  *   refreshToken: existingRefreshToken,
  * });
  *
- * // 3. Create a source view (smart mode — LLM-inferred)
+ * // 3. Create a source view
  * const view = await airstore.views.create(ws.external_id, {
  *   integration: 'gmail',
  *   name: 'Recent Emails',
  *   guidance: 'Last 7 days of emails from the inbox',
  * });
+ * ```
  *
- * // 4. Or create a source view (query mode — structured filter)
- * await airstore.views.create(ws.external_id, {
- *   integration: 'gmail',
- *   name: 'Unread from boss',
- *   filter: { from: 'boss@company.com', is_unread: true },
+ * @example Agent task flow
+ * ```ts
+ * const agent = await airstore.agents.create(ws.external_id, {
+ *   agentKey: 'my-agent',
+ *   name: 'My Agent',
+ *   runner: 'claude_code',
+ *   config: { model: 'claude-sonnet-4-6' },
  * });
  *
- * // 5. Sync a view to refresh its metadata
- * const result = await airstore.views.sync(ws.external_id, view.external_id);
- * console.log(result.results_count, result.new_results);
- *
- * // 6. Generate a mount token
- * const token = await airstore.tokens.create(ws.external_id, {
- *   email: 'agent@internal',
- *   name: 'vm-mount',
+ * const { task, run_id } = await airstore.tasks.create(ws.external_id, {
+ *   message: 'Summarize recent emails',
+ *   agentId: agent.id,
  * });
+ *
+ * // Poll for logs
+ * const batch = await airstore.tasks.streamEvents(ws.external_id, task.id);
  * ```
  */
 export class Airstore extends CoreClient {
-  /** Manage workspaces. */
+  /** Create, list, retrieve, and delete workspaces. */
   readonly workspaces: Workspaces;
-  /** Manage connections (integrations) within a workspace. */
+  /** Manage OAuth connections (Gmail, GitHub, etc.) within a workspace. */
   readonly connections: Connections;
-  /** Manage source views — materialized queries over connected data sources. */
+  /** Manage source views -- materialized queries over connected data sources. */
   readonly views: Views;
-  /** Manage workspace-scoped authentication tokens. */
+  /** Create, list, and revoke workspace-scoped authentication tokens. */
   readonly tokens: Tokens;
-  /** Manage workspace members. */
+  /** Add, list, and remove workspace members. */
   readonly members: Members;
-  /** OAuth session management for interactive connection setup. */
+  /** Interactive OAuth session management for connecting integrations. */
   readonly oauth: OAuth;
   /** Read-only access to the workspace virtual filesystem. */
   readonly fs: Filesystem;
-  /** Query the workspace access log. */
+  /** Query the workspace access log (who read what and when). */
   readonly accessLog: AccessLog;
-  /** Manage workspace agent profiles. */
+  /** CRUD for agent profiles (runner, model, system prompt configuration). */
   readonly agents: Agents;
-  /** Manage tasks (intent). */
+  /** Submit tasks, poll logs/events, manage cron schedules, cancel, and archive. */
   readonly tasks: Tasks;
-  /** Read and control run lifecycle state. */
+  /** Inspect run lifecycle: status, snapshots, events, and cancellation. */
   readonly runs: Runs;
-  /** Send direct channel messages to agents and runs. */
+  /** Send direct messages to agents (new task) or runs (follow-up / steer). */
   readonly channels: Channels;
-  /** Manage workspace hooks (event-triggered tasks). */
+  /** File-system hooks that auto-trigger agent tasks on source view changes. */
   readonly hooks: Hooks;
 
   constructor(opts?: ClientOptions) {

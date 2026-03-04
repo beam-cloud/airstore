@@ -12,30 +12,13 @@ import { AirstoreError } from '../errors.js';
  *
  * Use this when you want users to authorize via browser redirect
  * rather than passing tokens directly.
- *
- * @example
- * ```ts
- * const session = await airstore.oauth.createSession({
- *   integrationType: "gmail",
- *   returnTo: "https://myapp.com/callback",
- * });
- * console.log(session.authorize_url); // redirect user here
- * const completed = await airstore.oauth.poll(session.session_id);
- * ```
  */
 export class OAuth {
   constructor(private readonly client: CoreClient) {}
 
   /**
-   * Create an OAuth session to initiate the authorization flow.
-   *
-   * Returns a session with an `authorize_url` that the user should be
-   * redirected to. Once they complete authorization, poll the session
-   * for the resulting connection ID.
-   *
-   * @param params - Session creation parameters.
-   * @param options - Per-request overrides.
-   * @returns The session with authorize_url to redirect the user to.
+   * Create an OAuth session. Returns a session with an `authorize_url`
+   * that the user should be redirected to.
    */
   async createSession(
     params: OAuthSessionCreateParams,
@@ -56,13 +39,7 @@ export class OAuth {
     );
   }
 
-  /**
-   * Get the current status of an OAuth session.
-   *
-   * @param sessionId - Session ID from createSession.
-   * @param options - Per-request overrides.
-   * @returns The session status.
-   */
+  /** Get the current status of an OAuth session. */
   async getSession(
     sessionId: string,
     options?: RequestOptions,
@@ -76,19 +53,7 @@ export class OAuth {
     );
   }
 
-  /**
-   * Poll an OAuth session until completion or timeout.
-   *
-   * Repeatedly checks session status at the specified interval until
-   * the session completes, errors, or the timeout is reached.
-   *
-   * @param sessionId - Session ID from createSession.
-   * @param pollOpts - Polling configuration (timeout, interval).
-   * @param options - Per-request overrides.
-   * @returns The completed session status with connection_id.
-   *
-   * @throws {AirstoreError} If the session errors or times out.
-   */
+  /** Poll an OAuth session until completion, error, or timeout. */
   async poll(
     sessionId: string,
     pollOpts?: OAuthPollOptions,

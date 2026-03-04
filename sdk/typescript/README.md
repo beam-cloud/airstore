@@ -1,6 +1,6 @@
 # @airstore/sdk
 
-Official TypeScript SDK for the [Airstore](https://airstore.ai) API. Provision workspaces, manage connections, configure source views, and generate mount tokens — all from your backend.
+Official TypeScript SDK for the [Airstore](https://airstore.ai) API. Create workspaces, connect data sources, run agents, and observe everything — all from your backend.
 
 ## Installation
 
@@ -13,381 +13,292 @@ npm install @airstore/sdk
 ```typescript
 import Airstore from '@airstore/sdk';
 
-const airstore = new Airstore({
-  apiKey: 'org_...', // or set AIRSTORE_API_KEY env var
-});
-
-const workspace = await airstore.workspaces.create({ name: 'user-123' });
-console.log(workspace.external_id);
-```
-
-## Full Provisioning Flow
-
-This is the typical flow when a new user signs up on your platform:
-
-```typescript
-import Airstore from '@airstore/sdk';
-
 const airstore = new Airstore({ apiKey: process.env.AIRSTORE_API_KEY });
 
-async function provisionUser(
-  userId: string,
-  gmailTokens: { accessToken: string; refreshToken: string },
-) {
-  // 1. Create a workspace
-  const ws = await airstore.workspaces.create({ name: `user-${userId}` });
+// Create a workspace
+const ws = await airstore.workspaces.create({ name: 'user-123' });
 
-  // 2. Add a member (so we can create a scoped token)
-  const member = await airstore.members.create(ws.external_id, {
-    email: `${userId}@internal`,
-    name: userId,
-    role: 'member',
-  });
+// Create an agent
+const agent = await airstore.agents.create(ws.external_id, {
+  agentKey: 'support-agent',
+  name: 'Support Agent',
+  runner: 'claude_code',
+  config: { model: 'claude-sonnet-4-6' },
+});
 
-  // 3. Connect Gmail with existing OAuth tokens
-  await airstore.connections.create(ws.external_id, {
-    integrationType: 'gmail',
-    accessToken: gmailTokens.accessToken,
-    refreshToken: gmailTokens.refreshToken,
-  });
+// Submit a task
+const { task, run_id } = await airstore.tasks.create(ws.external_id, {
+  message: 'Summarize recent support tickets',
+  agentId: agent.id,
+});
 
-  // 4. Set up source views for what the agent should see
-  await airstore.views.create(ws.external_id, {
-    integration: 'gmail',
-    name: 'Recent Emails',
-    guidance: 'Last 7 days of emails from the inbox',
-    outputFormat: 'folder',
-  });
-
-  // 5. Generate a mount token for the user's VM
-  const token = await airstore.tokens.create(ws.external_id, {
-    email: `${userId}@internal`,
-    name: 'vm-mount',
-  });
-
-  // 6. Pass this to the VM:
-  //    airstore start --token <token.token>
-  return {
-    workspaceId: ws.external_id,
-    mountToken: token.token,
-  };
-}
+// Poll for logs and events
+const batch = await airstore.tasks.streamEvents(ws.external_id, task.id);
+console.log(batch.logs);
 ```
 
 ## Configuration
 
 ```typescript
 const airstore = new Airstore({
-  // Required — org token or cluster admin token
-  apiKey: 'org_...',
-
-  // Override the base URL (default: https://api.airstore.ai/api/v1)
-  baseURL: 'https://api.airstore.ai/api/v1',
-
-  // Request timeout in ms (default: 60000)
-  timeout: 30_000,
-
-  // Max retries for 429/5xx errors (default: 2)
-  maxRetries: 3,
-
-  // Default headers for every request
-  defaultHeaders: { 'X-Custom-Header': 'value' },
+  apiKey: 'org_...',                // or set AIRSTORE_API_KEY env var
+  baseURL: 'https://api.airstore.ai/api/v1', // or AIRSTORE_BASE_URL
+  timeout: 30_000,                  // request timeout in ms (default: 60000)
+  maxRetries: 3,                    // retries for 429/5xx (default: 2)
 });
 ```
 
-### Environment Variables
-
-| Variable | Description |
-|---|---|
-| `AIRSTORE_API_KEY` | Default API key if not passed to constructor |
-| `AIRSTORE_BASE_URL` | Default base URL if not passed to constructor |
-
 ## API Reference
+
+### Agents
+
+```typescript
+// Create
+const agent = await airstore.agents.create(wsId, {
+  agentKey: 'my-agent',
+  name: 'My Agent',
+  runner: 'claude_code',
+  config: { model: 'claude-sonnet-4-6', system_prompt: 'You are helpful.' },
+});
+
+// List
+const agents = await airstore.agents.list(wsId);
+
+// Retrieve
+const a = await airstore.agents.retrieve(wsId, agentId);
+
+// Update
+await airstore.agents.update(wsId, agentId, { name: 'Renamed Agent' });
+
+// Delete (also removes bound hooks)
+await airstore.agents.delete(wsId, agentId);
+```
+
+### Tasks
+
+```typescript
+// Create a task (returns accepted response with task + run_id)
+const { task, run_id } = await airstore.tasks.create(wsId, {
+  message: 'Do something',
+  agentId: agent.id,
+  idempotencyKey: 'unique-key',     // optional, server generates if omitted
+  sessionId: 'session-abc',         // optional, groups related tasks
+  timeoutMs: 120_000,               // optional
+  policy: {                         // optional execution policy
+    host: 'sandbox',
+    security: 'allowlist',
+    runtimeType: 'gvisor',
+    workspaceAccess: 'rw',
+  },
+});
+
+// List with filters
+const page = await airstore.tasks.list(wsId, {
+  state: ['running', 'idle'],
+  agentId: agent.id,
+  limit: 20,
+});
+
+// Retrieve
+const t = await airstore.tasks.retrieve(wsId, taskId);
+
+// Cancel a running task
+await airstore.tasks.cancel(wsId, taskId);
+
+// Archive a completed/idle task
+await airstore.tasks.archive(wsId, taskId);
+```
+
+### Log Streaming & Events
+
+```typescript
+// Fetch logs for a task (cursor-based for incremental reads)
+const logs = await airstore.tasks.listLogs(wsId, taskId);
+
+// Composite event stream: task/run state + logs + run events in one call
+let logCursor = 0;
+let eventCursor = 0;
+
+const batch = await airstore.tasks.streamEvents(wsId, taskId, {
+  logCursor,
+  runEventCursor: eventCursor,
+});
+
+// Use next cursors for subsequent polls
+logCursor = batch.next_log_cursor;
+eventCursor = batch.next_run_event_cursor;
+```
+
+### Runs
+
+```typescript
+// List runs
+const runs = await airstore.runs.list(wsId, { status: 'running' });
+
+// Retrieve a run
+const run = await airstore.runs.retrieve(wsId, runId);
+
+// List snapshots (intermediate state)
+const snapshots = await airstore.runs.listSnapshots(wsId, runId);
+
+// List execution events
+const events = await airstore.runs.listEvents(wsId, runId);
+
+// Cancel
+await airstore.runs.cancel(wsId, runId);
+```
+
+### Channels (Follow-Up Messages)
+
+```typescript
+// Send a new task to an agent via direct channel
+await airstore.channels.sendDirectAgentMessage(wsId, agentId, {
+  message: 'What about the billing tickets?',
+});
+
+// Send follow-up input to an active run
+await airstore.channels.sendDirectRunMessage(wsId, runId, {
+  message: 'Focus on the last 24 hours',
+  taskId: task.id,
+  queueMode: 'steer', // 'queue' | 'followup' | 'steer' | 'interrupt'
+});
+```
+
+### Scheduled Tasks (Cron)
+
+```typescript
+// Create a schedule
+const schedule = await airstore.tasks.createSchedule(wsId, {
+  agentId: agent.id,
+  cronExpr: '0 9 * * 1-5',    // every weekday at 9am
+  timezone: 'America/New_York',
+  prompt: 'Summarize overnight support tickets',
+});
+
+// List schedules
+const schedules = await airstore.tasks.listSchedules(wsId);
+
+// Update (pause, change cron, etc.)
+await airstore.tasks.updateSchedule(wsId, schedule.external_id, {
+  active: false,
+});
+
+// Delete
+await airstore.tasks.deleteSchedule(wsId, schedule.external_id);
+```
+
+### Hooks (File-System Triggers)
+
+```typescript
+// Create a hook on a source view folder
+const hook = await airstore.hooks.create(wsId, {
+  path: '/sources/gmail/Recent Emails',
+  prompt: 'Triage this email and draft a reply',
+  eventTypes: ['create'],
+  agentName: 'Email Triager',
+});
+
+// List / Retrieve / Update / Delete
+const hooks = await airstore.hooks.list(wsId);
+await airstore.hooks.update(wsId, hookId, { active: false });
+await airstore.hooks.delete(wsId, hookId);
+```
 
 ### Workspaces
 
 ```typescript
-// Create
 const ws = await airstore.workspaces.create({ name: 'my-workspace' });
-
-// List all (org tokens only see their tenant's workspaces)
 const workspaces = await airstore.workspaces.list();
-
-// Retrieve by ID
-const ws = await airstore.workspaces.retrieve('ws_abc123');
-
-// Delete
-await airstore.workspaces.del('ws_abc123');
+const ws2 = await airstore.workspaces.retrieve(wsId);
+await airstore.workspaces.del(wsId);
 ```
 
 ### Connections
 
 ```typescript
-// Create with existing OAuth tokens
-const conn = await airstore.connections.create('ws_abc123', {
+// OAuth tokens
+await airstore.connections.create(wsId, {
   integrationType: 'gmail',
   accessToken: '...',
   refreshToken: '...',
 });
 
-// Create with API key
-const conn = await airstore.connections.create('ws_abc123', {
+// API key
+await airstore.connections.create(wsId, {
   integrationType: 'github',
   apiKey: 'ghp_...',
 });
 
-// List
-const connections = await airstore.connections.list('ws_abc123');
-
-// Delete
-await airstore.connections.del('ws_abc123', 'conn_abc123');
+const connections = await airstore.connections.list(wsId);
+await airstore.connections.del(wsId, connectionId);
 ```
-
-### Agents, Tasks, Runs
-
-These APIs are workspace-scoped and split into:
-
-- `agents`: persistent profile/config.
-- `tasks`: task ingress with idempotency (`accepted` response flag is transport-level).
-- `runs`: execution lifecycle and snapshot/event introspection.
-
-Flow is:
-
-1. submit a task,
-2. materialize a run,
-3. observe lifecycle via run state, snapshots, and events.
-
-Task states are: `queued`, `running`, `idle`, `done`, `dropped`, `cancelled`.
-
-```typescript
-// 1) Create an agent profile
-const agent = await airstore.agents.create('ws_abc123', {
-  agentKey: 'support-agent',
-  name: 'Support Agent',
-  runner: 'claude_code',
-  config: { model: 'claude-sonnet-4' },
-});
-
-// 2) Submit a task intent (not a direct worker execution)
-const accepted = await airstore.tasks.create('ws_abc123', {
-  message: 'Summarize the latest support tickets',
-  // sessionId optional (server generates UUID when omitted)
-  agentId: agent.id,
-  // idempotencyKey optional (server generates UUID when omitted)
-  // provide one if you need deterministic replay semantics
-  idempotencyKey: 'idem-abc',
-  timeoutMs: 120_000,
-  policy: {
-    host: 'sandbox',
-    security: 'allowlist',
-    ask: 'off',
-    runtimeType: 'gvisor',
-    workspaceAccess: 'rw',
-    networkEnabled: true,
-    interactive: false,
-    resources: { cpu: 1000, memory: 2 * 1024 * 1024 * 1024 },
-    retry: { maxAttempts: 2, delayMs: 0 },
-  },
-});
-
-// 3) Resolve and poll the run
-const runId = accepted.run_id ?? accepted.task.target_run_id;
-if (runId) {
-  const run = await airstore.runs.retrieve('ws_abc123', runId);
-  const snapshots = await airstore.runs.listSnapshots('ws_abc123', runId);
-  const events = await airstore.runs.listEvents('ws_abc123', runId);
-}
-```
-
-Use `channels.sendDirectRunMessage(...)` for run follow-up input.
-It supports queue modes: `queue`, `followup`, `steer`, `steer-backlog`, `interrupt` (`steer-backlog` is normalized to `steer` server-side for MVP behavior).
-`idempotencyKey` is optional and is generated by the backend when omitted.
 
 ### Source Views
 
-Source views come in two modes: **smart** (LLM-inferred from natural language) and **query** (structured per-integration filters).
-
 ```typescript
-// Smart mode — describe what you want in natural language
-const view = await airstore.views.create('ws_abc123', {
+// Smart mode (LLM-inferred)
+const view = await airstore.views.create(wsId, {
   integration: 'gmail',
   name: 'Important Emails',
   guidance: 'Emails marked as important from the last month',
-  outputFormat: 'folder', // or 'file'
 });
 
-// Query mode — auto-detected when filter is provided
-const view2 = await airstore.views.create('ws_abc123', {
-  integration: 'gmail',
-  name: 'Unread from boss',
-  filter: { from: 'boss@company.com', is_unread: true },
-});
-
-// Query mode with GitHub content types
-const prView = await airstore.views.create('ws_abc123', {
+// Query mode (structured filter)
+const view2 = await airstore.views.create(wsId, {
   integration: 'github',
   name: 'Open PRs',
-  filter: {
-    repo: 'acme/api',
-    type: 'prs',
-    state: 'open',
-    content_type: 'diff', // 'markdown' | 'diff' | 'json' | 'raw'
-  },
+  filter: { repo: 'acme/api', type: 'prs', state: 'open' },
 });
 
-// List all
-const views = await airstore.views.list('ws_abc123');
-
-// Retrieve by path
-const found = await airstore.views.retrieve('ws_abc123', '/sources/gmail/Important Emails');
-
-// Update
-const updated = await airstore.views.update('ws_abc123', 'view_abc', {
-  guidance: 'Updated guidance text',
-});
-
-// Sync — re-execute the query and refresh cached files
-const result = await airstore.views.sync('ws_abc123', 'view_abc');
-console.log(`${result.results_count} total, ${result.new_results} new`);
-
-// Delete
-await airstore.views.del('ws_abc123', 'view_abc');
+// Sync, update, delete
+await airstore.views.sync(wsId, viewId);
+await airstore.views.update(wsId, viewId, { guidance: 'Updated' });
+await airstore.views.del(wsId, viewId);
 ```
 
-#### Per-integration filter fields
-
-Each integration accepts a typed filter object:
-
-| Integration | Key fields |
-|---|---|
-| `gmail` | `from`, `to`, `subject`, `label`, `newer_than`, `older_than`, `has_attachment`, `is_unread`, `is_starred` |
-| `github` | `repo` (required), `type`, `state`, `label`, `author`, `content_type` |
-| `gdrive` | `name_contains`, `mime_type`, `shared_with_me`, `starred`, `modified_after`, `modified_before`, `folder_id` |
-| `notion` | `search` |
-| `slack` | `channel`, `from`, `after`, `before`, `has_link`, `has_reaction` |
-| `linear` | `type`, `team`, `state`, `assignee`, `priority`, `label` |
-| `posthog` | `type`, `query`, `project_id` |
-| `web` | `mode`, `url`, `query`, `include_paths` |
-
-### Tokens
+### Tokens, Members, OAuth
 
 ```typescript
-// Create a workspace-scoped token (for CLI mounting)
-const token = await airstore.tokens.create('ws_abc123', {
-  email: 'agent@internal',
-  name: 'vm-mount',
-  expiresIn: 86400, // optional, seconds
-});
-console.log(token.token); // raw value — only shown once
-
-// List tokens (values are never returned)
-const tokens = await airstore.tokens.list('ws_abc123');
-
-// Revoke
-await airstore.tokens.revoke('ws_abc123', 'tok_abc123');
-```
-
-### Members
-
-```typescript
-// Add a member
-const member = await airstore.members.create('ws_abc123', {
-  email: 'user@example.com',
-  name: 'Jane Doe',
-  role: 'member', // 'admin' | 'member' | 'viewer'
+// Tokens (for CLI mounting)
+const token = await airstore.tokens.create(wsId, {
+  email: 'agent@internal', name: 'vm-mount',
 });
 
-// List
-const members = await airstore.members.list('ws_abc123');
+// Members
+const member = await airstore.members.create(wsId, {
+  email: 'user@example.com', name: 'Jane', role: 'member',
+});
 
-// Remove
-await airstore.members.del('ws_abc123', 'mem_abc123');
-```
-
-### OAuth Sessions
-
-For interactive connection setup where users authorize via browser redirect:
-
-```typescript
-// Create an OAuth session
+// Interactive OAuth
 const session = await airstore.oauth.createSession({
   integrationType: 'gmail',
   returnTo: 'https://myapp.com/callback',
 });
-console.log(session.authorize_url); // redirect user here
-
-// Check status
-const status = await airstore.oauth.getSession(session.session_id);
-
-// Or poll until completion (default: 5 min timeout, 2s interval)
-const completed = await airstore.oauth.poll(session.session_id, {
-  timeout: 120_000,
-  interval: 3_000,
-});
-console.log(completed.connection_id);
+const completed = await airstore.oauth.poll(session.session_id);
 ```
 
 ### Filesystem
 
-Read-only access to the virtual filesystem:
-
 ```typescript
-// List directory contents
-const entries = await airstore.fs.list('ws_abc123', { path: '/' });
-
-// Read file contents
-const content = await airstore.fs.read('ws_abc123', {
-  path: '/sources/gmail/inbox/email.txt',
-});
-
-// Get directory tree
-const tree = await airstore.fs.tree('ws_abc123', {
-  path: '/',
-  maxKeys: 100,
-});
-
-// Stat a file
-const meta = await airstore.fs.stat('ws_abc123', '/sources/gmail/inbox/email.txt');
-```
-
-## Per-Request Options
-
-Every method accepts an optional last argument for per-request overrides:
-
-```typescript
-const ws = await airstore.workspaces.list({
-  timeout: 10_000,
-  maxRetries: 5,
-  signal: controller.signal,
-  headers: { 'X-Trace-Id': 'abc' },
-});
+const entries = await airstore.fs.list(wsId, { path: '/' });
+const content = await airstore.fs.read(wsId, { path: '/sources/gmail/email.txt' });
+const tree = await airstore.fs.tree(wsId, { path: '/', maxKeys: 100 });
+const meta = await airstore.fs.stat(wsId, '/sources/gmail/email.txt');
 ```
 
 ## Error Handling
 
-The SDK throws typed errors for easy programmatic handling:
-
 ```typescript
-import {
-  AuthenticationError,
-  NotFoundError,
-  RateLimitError,
-} from '@airstore/sdk';
+import { NotFoundError, RateLimitError, AuthenticationError } from '@airstore/sdk';
 
 try {
   await airstore.workspaces.retrieve('ws_nonexistent');
 } catch (err) {
-  if (err instanceof NotFoundError) {
-    console.log('Workspace not found');
-  } else if (err instanceof AuthenticationError) {
-    console.log('Invalid API key');
-  } else if (err instanceof RateLimitError) {
-    console.log('Rate limited, retry after:', err.headers.get('retry-after'));
-  }
+  if (err instanceof NotFoundError) console.log('Not found');
+  if (err instanceof RateLimitError) console.log('Rate limited');
+  if (err instanceof AuthenticationError) console.log('Bad API key');
 }
 ```
-
-### Error Hierarchy
 
 | Class | Status | Description |
 |---|---|---|
@@ -403,37 +314,43 @@ try {
 | `APIConnectionError` | — | Network failure |
 | `APIConnectionTimeoutError` | — | Request timed out |
 
+## Per-Request Options
+
+Every method accepts an optional last argument for per-request overrides:
+
+```typescript
+await airstore.workspaces.list({
+  timeout: 10_000,
+  maxRetries: 5,
+  signal: controller.signal,
+  headers: { 'X-Trace-Id': 'abc' },
+});
+```
+
 ## Response Metadata
 
-Every response object includes a non-enumerable `lastResponse` property:
+Every response includes a non-enumerable `lastResponse` property:
 
 ```typescript
 const ws = await airstore.workspaces.create({ name: 'test' });
-console.log(ws.lastResponse.statusCode);  // 200
-console.log(ws.lastResponse.requestId);   // 'req_abc123'
-console.log(ws.lastResponse.headers);     // Headers object
+ws.lastResponse.statusCode;  // 200
+ws.lastResponse.requestId;   // 'req_abc123'
 ```
-
-## Automatic Retries
-
-The SDK automatically retries on transient errors (408, 409, 429, 500, 502, 503, 504) with exponential backoff and jitter. The `Retry-After` header is respected when present.
 
 ## Raw Requests
 
-For endpoints not yet covered by the SDK, use the escape hatch:
+For endpoints not yet covered by the SDK:
 
 ```typescript
 const response = await airstore.rawRequest('POST', '/some/new/endpoint', {
   body: { key: 'value' },
-  timeout: 5_000,
 });
-const data = await response.json();
 ```
 
 ## Requirements
 
 - Node.js 18+ (uses native `fetch`)
-- TypeScript 5.0+ (for type-only imports)
+- TypeScript 5.0+
 - Zero runtime dependencies
 
 ## License

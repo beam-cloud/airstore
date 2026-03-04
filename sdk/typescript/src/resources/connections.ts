@@ -2,32 +2,15 @@ import type { CoreClient, RequestOptions } from '../client.js';
 import type { Connection, ConnectionCreateParams } from '../types/connections.js';
 
 /**
- * Manage connections (integrations) within a workspace.
+ * Manage integration connections within a workspace.
  *
- * Connections store OAuth tokens or API keys for external services like
- * Gmail, GitHub, Notion, etc. Pass existing tokens directly to avoid
- * requiring users to re-authenticate.
- *
- * @example
- * ```ts
- * await airstore.connections.create("ws_abc", {
- *   integrationType: "gmail",
- *   accessToken: existingAccessToken,
- *   refreshToken: existingRefreshToken,
- * });
- * ```
+ * Connections store OAuth tokens or API keys for external services
+ * (Gmail, GitHub, Notion, etc.).
  */
 export class Connections {
   constructor(private readonly client: CoreClient) {}
 
-  /**
-   * Create a connection by passing existing OAuth credentials or API keys.
-   *
-   * @param workspaceId - Workspace external ID.
-   * @param params - Connection creation parameters.
-   * @param options - Per-request overrides.
-   * @returns The created connection.
-   */
+  /** Create a connection by passing existing OAuth credentials or an API key. */
   async create(
     workspaceId: string,
     params: ConnectionCreateParams,
@@ -51,13 +34,7 @@ export class Connections {
     );
   }
 
-  /**
-   * List all connections in a workspace.
-   *
-   * @param workspaceId - Workspace external ID.
-   * @param options - Per-request overrides.
-   * @returns Array of connections.
-   */
+  /** List all connections in a workspace. */
   async list(workspaceId: string, options?: RequestOptions): Promise<Connection[]> {
     const result = await this.client.request<Connection[]>(
       'GET',
@@ -69,15 +46,7 @@ export class Connections {
     return Array.isArray(result) ? result : [];
   }
 
-  /**
-   * Delete a connection.
-   *
-   * @param workspaceId - Workspace external ID.
-   * @param connectionId - Connection external ID.
-   * @param options - Per-request overrides.
-   *
-   * @throws {NotFoundError} If the connection doesn't exist.
-   */
+  /** Delete a connection. */
   async del(
     workspaceId: string,
     connectionId: string,

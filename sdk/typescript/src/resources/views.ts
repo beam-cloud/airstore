@@ -13,33 +13,13 @@ import type {
  * Source views are materialized queries over connected data sources.
  * In **smart** mode the query is LLM-inferred from natural language guidance;
  * in **query** mode the query is built from a structured per-integration filter.
- *
- * @example Smart mode (LLM-inferred)
- * ```ts
- * await airstore.views.create("ws_abc", {
- *   integration: "gmail",
- *   name: "Recent Emails",
- *   guidance: "Last 7 days of emails",
- * });
- * ```
- *
- * @example Query mode (structured filter)
- * ```ts
- * await airstore.views.create("ws_abc", {
- *   integration: "gmail",
- *   name: "Unread from boss",
- *   filter: { from: "boss@company.com", is_unread: true },
- * });
- * ```
  */
 export class Views {
   constructor(private readonly client: CoreClient) {}
 
   /**
-   * Create a new source view.
-   *
-   * If `filter` is provided the view is created in query mode;
-   * otherwise it uses smart mode with LLM inference from `guidance`.
+   * Create a new source view. If `filter` is provided the view is created
+   * in query mode; otherwise it uses smart mode with LLM inference from `guidance`.
    */
   async create(
     workspaceId: string,
@@ -94,7 +74,7 @@ export class Views {
     );
   }
 
-  /** Update an existing source view. */
+  /** Update an existing source view. Only provided fields are changed. */
   async update(
     workspaceId: string,
     viewId: string,
@@ -130,12 +110,7 @@ export class Views {
     );
   }
 
-  /**
-   * Sync a source view — re-execute its query and refresh cached metadata.
-   *
-   * Idempotent and safe to call repeatedly. Returns the count of total
-   * and newly discovered results.
-   */
+  /** Sync a source view -- re-execute its query and refresh cached metadata. */
   async sync(
     workspaceId: string,
     viewId: string,
@@ -150,17 +125,7 @@ export class Views {
     );
   }
 
-  /**
-   * List available resources for an integration (repos, channels, etc.).
-   *
-   * Used to populate filter dropdowns with real data from connected sources.
-   *
-   * @example
-   * ```ts
-   * const repos = await airstore.views.listResources("ws_abc", "github");
-   * // [{ id: "owner/repo", name: "owner/repo" }, ...]
-   * ```
-   */
+  /** List available resources for an integration (repos, channels, etc.). */
   async listResources(
     workspaceId: string,
     integration: string,

@@ -1,6 +1,6 @@
 {
   "name": "@airstore/sdk",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Official TypeScript SDK for the Airstore API",
   "main": "./dist/cjs/index.js",
   "module": "./dist/esm/index.js",
@@ -27,6 +27,7 @@
     "lint:src": "tsc --noEmit -p tsconfig.json",
     "lint:examples": "tsc --noEmit -p tsconfig.examples.json",
     "test": "vitest run",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "test:watch": "vitest",
     "test:prod": "AIRSTORE_BASE_URL=https://api.airstore.ai/api/v1 vitest run",
     "smoke:agent-runs": "tsx examples/agent-runs-smoke.ts",

@@ -1,9 +1,16 @@
 import type { CoreClient, RequestOptions } from '../client.js';
 import type { Hook, HookCreateParams, HookUpdateParams } from '../types/hooks.js';
 
+/**
+ * CRUD operations for file-system hooks within a workspace.
+ *
+ * A hook watches a source view folder for file events (create, write, delete)
+ * and automatically submits a task to an agent with the configured prompt.
+ */
 export class Hooks {
   constructor(private readonly client: CoreClient) {}
 
+  /** Create a hook on a source view folder path. */
   async create(
     workspaceId: string,
     params: HookCreateParams,
@@ -43,6 +50,7 @@ export class Hooks {
     );
   }
 
+  /** List all hooks in a workspace. */
   async list(
     workspaceId: string,
     options?: RequestOptions,
@@ -56,6 +64,7 @@ export class Hooks {
     );
   }
 
+  /** Retrieve a single hook by ID. */
   async retrieve(
     workspaceId: string,
     hookId: string,
@@ -70,6 +79,7 @@ export class Hooks {
     );
   }
 
+  /** Update a hook. Only provided fields are changed. Set `active: false` to disable. */
   async update(
     workspaceId: string,
     hookId: string,
@@ -105,6 +115,7 @@ export class Hooks {
     );
   }
 
+  /** Delete a hook permanently. */
   async delete(
     workspaceId: string,
     hookId: string,

@@ -6,27 +6,11 @@ import type { VirtualFile, DirectoryListing, TreeListing } from '../types/filesy
  *
  * The filesystem provides a unified view of all connected integrations,
  * source views, tools, and user-uploaded files.
- *
- * @example
- * ```ts
- * const listing = await airstore.fs.list("ws_abc", { path: "/" });
- * const content = await airstore.fs.read("ws_abc", {
- *   path: "/sources/gmail/inbox/email.txt",
- * });
- * ```
  */
 export class Filesystem {
   constructor(private readonly client: CoreClient) {}
 
-  /**
-   * List directory contents.
-   *
-   * @param workspaceId - Workspace external ID.
-   * @param opts - Listing options.
-   * @param opts.path - Directory path to list. Defaults to root.
-   * @param options - Per-request overrides.
-   * @returns Array of files and directories.
-   */
+  /** List directory contents at the given path (defaults to root). */
   async list(
     workspaceId: string,
     opts: { path?: string } = {},
@@ -46,18 +30,8 @@ export class Filesystem {
   }
 
   /**
-   * Read file contents as a string.
-   *
-   * @param workspaceId - Workspace external ID.
-   * @param opts - Read options.
-   * @param opts.path - File path to read.
-   * @param opts.offset - Byte offset to start reading from.
-   * @param opts.length - Number of bytes to read.
-   * @param opts.compression - Compression strategy: 'strip', 'distill', or 'chain'. Omit to disable.
-   * @param options - Per-request overrides.
-   * @returns File contents as a string.
-   *
-   * @throws {NotFoundError} If the file doesn't exist.
+   * Read file contents as a string. Supports byte-range reads
+   * (`offset`/`length`) and server-side compression strategies.
    */
   async read(
     workspaceId: string,
@@ -82,20 +56,7 @@ export class Filesystem {
     return resp.text();
   }
 
-  /**
-   * Get a directory tree for efficient prefetching.
-   *
-   * Returns a flat list of all entries under the given path. Supports
-   * pagination via `continuationToken` for large directories.
-   *
-   * @param workspaceId - Workspace external ID.
-   * @param opts - Tree options.
-   * @param opts.path - Root path for the tree. Defaults to root.
-   * @param opts.maxKeys - Maximum number of entries to return.
-   * @param opts.continuationToken - Token from a previous truncated response.
-   * @param options - Per-request overrides.
-   * @returns Tree listing with entries and pagination info.
-   */
+  /** Get a flat directory tree. Supports pagination via `continuationToken`. */
   async tree(
     workspaceId: string,
     opts: { path?: string; maxKeys?: number; continuationToken?: string } = {},
@@ -117,16 +78,7 @@ export class Filesystem {
     );
   }
 
-  /**
-   * Get file or directory metadata.
-   *
-   * @param workspaceId - Workspace external ID.
-   * @param path - Absolute path to stat.
-   * @param options - Per-request overrides.
-   * @returns File metadata.
-   *
-   * @throws {NotFoundError} If the path doesn't exist.
-   */
+  /** Get file or directory metadata. */
   async stat(
     workspaceId: string,
     path: string,
