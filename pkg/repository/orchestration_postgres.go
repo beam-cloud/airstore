@@ -2906,7 +2906,7 @@ func (b *PostgresBackend) DeleteScheduledTask(ctx context.Context, workspaceID u
 	return nil
 }
 
-func (b *PostgresBackend) ClaimDueScheduledTasks(ctx context.Context, now time.Time, limit int) ([]*types.ScheduledTask, error) {
+func (b *PostgresBackend) ListDueScheduledTasks(ctx context.Context, now time.Time, limit int) ([]*types.ScheduledTask, error) {
 	query := `
 		SELECT id, external_id, workspace_id, agent_id, cron_expr, timezone, prompt, skill_paths,
 		       active, next_run_at, last_run_at, token_id, encrypted_token,
@@ -2933,6 +2933,20 @@ func (b *PostgresBackend) AdvanceScheduledTask(ctx context.Context, id string, o
 	result, err := b.db.ExecContext(ctx, query, newNextRunAt, time.Now(), id, oldNextRunAt)
 	if err != nil {
 		return false, fmt.Errorf("advance scheduled task: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return n > 0, nil
+}
+
+func (b *PostgresBackend) RevertScheduledTaskAdvance(ctx context.Context, id string, currentNextRunAt, revertTo time.Time) (bool, error) {
+	query := `
+		UPDATE scheduled_task
+		SET next_run_at = $1, last_run_at = NULL, updated_at = CURRENT_TIMESTAMP
+		WHERE id = $2 AND next_run_at = $3
+	`
+	result, err := b.db.ExecContext(ctx, query, revertTo, id, currentNextRunAt)
+	if err != nil {
+		return false, fmt.Errorf("revert scheduled task advance: %w", err)
 	}
 	n, _ := result.RowsAffected()
 	return n > 0, nil

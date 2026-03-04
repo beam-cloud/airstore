@@ -641,11 +641,9 @@ func (g *Gateway) registerServices() error {
 		}
 
 		// Cron scheduler: fires due scheduled tasks as agent tasks
-		if g.RedisClient != nil {
-			cronScheduler := orchestration.NewCronScheduler(g.BackendRepo, agentAPI, g.RedisClient)
-			go cronScheduler.Start(g.ctx)
-			log.Info().Msg("cron scheduler started")
-		}
+		cronScheduler := orchestration.NewCronScheduler(g.BackendRepo, agentAPI)
+		go cronScheduler.Start(g.ctx)
+		log.Info().Msg("cron scheduler started")
 
 		// OAuth API for workspace integrations (gmail, gdrive, github, notion, slack)
 		apiv1.NewOAuthGroup(g.baseRouteGroup.Group("/oauth"), g.oauthStore, g.oauthRegistry, g.BackendRepo, g.storageClient, g.Config.Gateway.AuthToken)

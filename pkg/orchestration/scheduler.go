@@ -8,37 +8,36 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/rs/zerolog/log"
 )
 
 const (
-	schedulerPollInterval = 10 * time.Second
-	schedulerBatch        = 50
-	schedulerWorkers      = 5
-	schedulerMinLockTTL   = 30 * time.Second
+	schedulerPollInterval  = 10 * time.Second
+	schedulerBatch         = 50
+	schedulerWorkers       = 5
 	schedulerSubmitTimeout = 30 * time.Second
 )
 
-// CronScheduler polls for due scheduled tasks and fires them as agent tasks
-// via AcceptAgentCommand, reusing the full orchestration pipeline.
+// CronScheduler polls for due scheduled tasks and fires them as agent tasks.
+//
+// Multi-replica safety: AdvanceScheduledTask is a compare-and-swap on
+// next_run_at, so only one replica can win a given tick. If the submit
+// fails after the CAS, we revert next_run_at to allow retry on the
+// next poll cycle rather than silently skipping the occurrence.
 type CronScheduler struct {
 	backend repository.BackendRepository
 	agents  *AgentAPI
-	rdb     *common.RedisClient
 }
 
 func NewCronScheduler(
 	backend repository.BackendRepository,
 	agents *AgentAPI,
-	rdb *common.RedisClient,
 ) *CronScheduler {
-	return &CronScheduler{backend: backend, agents: agents, rdb: rdb}
+	return &CronScheduler{backend: backend, agents: agents}
 }
 
-// Start runs the poll loop. Call as a goroutine.
 func (s *CronScheduler) Start(ctx context.Context) {
 	log.Info().Msg("cron scheduler started")
 
@@ -56,7 +55,7 @@ func (s *CronScheduler) Start(ctx context.Context) {
 }
 
 func (s *CronScheduler) poll(ctx context.Context) {
-	schedules, err := s.backend.ClaimDueScheduledTasks(ctx, time.Now(), schedulerBatch)
+	schedules, err := s.backend.ListDueScheduledTasks(ctx, time.Now(), schedulerBatch)
 	if err != nil {
 		log.Warn().Err(err).Msg("cron scheduler: failed to fetch due schedules")
 		return
@@ -69,21 +68,12 @@ func (s *CronScheduler) poll(ctx context.Context) {
 
 	sem := make(chan struct{}, schedulerWorkers)
 	var wg sync.WaitGroup
-	var fired, locked, failed atomic.Int32
+	var fired, skipped, failed atomic.Int32
 
 	for _, sched := range schedules {
-		lockKey := common.Keys.CronScheduleLock(sched.ExternalID)
-		lockTTL := computeScheduleLockTTL(sched.CronExpr, sched.Timezone)
-		acquired, err := s.rdb.SetNX(ctx, lockKey, "1", lockTTL).Result()
-		if err != nil || !acquired {
-			locked.Add(1)
-			continue
-		}
-
 		wg.Add(1)
 		select {
 		case sem <- struct{}{}:
-			// acquired semaphore, proceed
 		case <-ctx.Done():
 			wg.Done()
 			return
@@ -94,11 +84,15 @@ func (s *CronScheduler) poll(ctx context.Context) {
 			defer func() { <-sem }()
 
 			if err := s.fireSchedule(ctx, schedule); err != nil {
-				failed.Add(1)
-				log.Warn().Err(err).
-					Str("schedule", schedule.ExternalID).
-					Str("cron", schedule.CronExpr).
-					Msg("cron scheduler: fire failed")
+				if err == errCASLost {
+					skipped.Add(1)
+				} else {
+					failed.Add(1)
+					log.Warn().Err(err).
+						Str("schedule", schedule.ExternalID).
+						Str("cron", schedule.CronExpr).
+						Msg("cron scheduler: fire failed")
+				}
 			} else {
 				fired.Add(1)
 			}
@@ -109,10 +103,12 @@ func (s *CronScheduler) poll(ctx context.Context) {
 
 	log.Info().
 		Int32("fired", fired.Load()).
-		Int32("already_locked", locked.Load()).
+		Int32("skipped", skipped.Load()).
 		Int32("failed", failed.Load()).
 		Msg("cron scheduler: poll cycle complete")
 }
+
+var errCASLost = fmt.Errorf("another replica already advanced this schedule")
 
 func (s *CronScheduler) fireSchedule(ctx context.Context, schedule *types.ScheduledTask) error {
 	nextRun, err := NextCronTime(schedule.CronExpr, time.Now(), schedule.Timezone)
@@ -125,7 +121,7 @@ func (s *CronScheduler) fireSchedule(ctx context.Context, schedule *types.Schedu
 		return fmt.Errorf("advance schedule: %w", err)
 	}
 	if !advanced {
-		return nil
+		return errCASLost
 	}
 
 	submitCtx, cancel := context.WithTimeout(ctx, schedulerSubmitTimeout)
@@ -152,27 +148,28 @@ func (s *CronScheduler) fireSchedule(ctx context.Context, schedule *types.Schedu
 		SpawnedBy: &spawnedBy,
 	})
 	if err != nil {
+		if revertErr := s.revertAdvance(ctx, schedule, nextRun); revertErr != nil {
+			log.Warn().Err(revertErr).
+				Str("schedule", schedule.ExternalID).
+				Msg("cron scheduler: failed to revert advance after submit error")
+		}
 		return fmt.Errorf("accept scheduled task: %w", err)
 	}
 
 	return nil
 }
 
-func computeScheduleLockTTL(cronExpr string, tz string) time.Duration {
-	next1, err := NextCronTime(cronExpr, time.Now(), tz)
+// revertAdvance undoes a successful AdvanceScheduledTask so the occurrence
+// can be retried on the next poll cycle.
+func (s *CronScheduler) revertAdvance(ctx context.Context, schedule *types.ScheduledTask, advancedTo time.Time) error {
+	reverted, err := s.backend.RevertScheduledTaskAdvance(ctx, schedule.ID, advancedTo, schedule.NextRunAt)
 	if err != nil {
-		return schedulerMinLockTTL
+		return err
 	}
-	next2, err := NextCronTime(cronExpr, next1, tz)
-	if err != nil {
-		return schedulerMinLockTTL
+	if !reverted {
+		return fmt.Errorf("CAS revert lost (schedule %s)", schedule.ExternalID)
 	}
-	interval := next2.Sub(next1)
-	ttl := time.Duration(float64(interval) * 0.9)
-	if ttl < schedulerMinLockTTL {
-		ttl = schedulerMinLockTTL
-	}
-	return ttl
+	return nil
 }
 
 func truncateSchedulePrompt(prompt string, maxLen int) string {

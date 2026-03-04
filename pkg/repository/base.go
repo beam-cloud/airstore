@@ -202,8 +202,9 @@ type BackendRepository interface {
 	ListScheduledTasks(ctx context.Context, workspaceID uint) ([]*types.ScheduledTask, error)
 	UpdateScheduledTask(ctx context.Context, st *types.ScheduledTask) error
 	DeleteScheduledTask(ctx context.Context, workspaceID uint, externalID string) error
-	ClaimDueScheduledTasks(ctx context.Context, now time.Time, limit int) ([]*types.ScheduledTask, error)
+	ListDueScheduledTasks(ctx context.Context, now time.Time, limit int) ([]*types.ScheduledTask, error)
 	AdvanceScheduledTask(ctx context.Context, id string, oldNextRunAt, newNextRunAt time.Time) (bool, error)
+	RevertScheduledTaskAdvance(ctx context.Context, id string, currentNextRunAt, revertTo time.Time) (bool, error)
 
 	// Orchestration outbox/inbox/retry guard
 	EnqueueOrchestrationOutboxEvent(ctx context.Context, event *types.OrchestrationOutboxEvent) error

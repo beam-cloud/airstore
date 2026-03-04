@@ -902,11 +902,14 @@ func (a *AgentAPI) UpdateSchedule(
 		if err != nil {
 			return nil, err
 		}
-		nextRun, err := NextCronTime(resolved, time.Now(), st.Timezone)
+		st.CronExpr = resolved
+	}
+
+	if cronExpr != nil || timezone != nil {
+		nextRun, err := NextCronTime(st.CronExpr, time.Now(), st.Timezone)
 		if err != nil {
 			return nil, fmt.Errorf("invalid cron expression: %w", err)
 		}
-		st.CronExpr = resolved
 		st.NextRunAt = nextRun
 	}
 	if prompt != nil {

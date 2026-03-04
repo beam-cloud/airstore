@@ -44,8 +44,7 @@ var (
 	hookStream        = "airstore:hook:events"
 	hookConsumerGroup = "airstore:hook:evaluators"
 	hookSeen          = "airstore:hook:seen:%d:%s" // workspaceId, pathHash
-	hookPollLock      = "airstore:hook:poll:%s"    // queryExternalId
-	cronScheduleLock  = "airstore:cron:lock:%s"    // scheduleExternalId
+	hookPollLock = "airstore:hook:poll:%s" // queryExternalId
 
 	// OAuth keys
 	oauthSession = "airstore:oauth:session:%s" // sessionId
@@ -212,10 +211,6 @@ func (rk *redisKeys) HookSeen(workspaceId uint, pathHash string) string {
 
 func (rk *redisKeys) HookPollLock(queryExtId string) string {
 	return fmt.Sprintf(hookPollLock, queryExtId)
-}
-
-func (rk *redisKeys) CronScheduleLock(scheduleExtId string) string {
-	return fmt.Sprintf(cronScheduleLock, scheduleExtId)
 }
 
 // --- OAuth keys ---
