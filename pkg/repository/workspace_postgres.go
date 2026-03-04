@@ -154,6 +154,46 @@ func (b *PostgresBackend) DeleteWorkspace(ctx context.Context, id uint) error {
 	return nil
 }
 
+// SetWorkspaceSecret upserts a per-workspace secret by key.
+func (b *PostgresBackend) SetWorkspaceSecret(ctx context.Context, workspaceId uint, key string, value []byte) error {
+	query := `
+		INSERT INTO workspace_secrets (workspace_id, key, value_encoded, updated_at)
+		VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+		ON CONFLICT (workspace_id, key)
+		DO UPDATE SET value_encoded = $3, updated_at = CURRENT_TIMESTAMP
+	`
+	_, err := b.db.ExecContext(ctx, query, workspaceId, key, value)
+	if err != nil {
+		return fmt.Errorf("failed to set workspace secret: %w", err)
+	}
+	return nil
+}
+
+// GetWorkspaceSecret retrieves a per-workspace secret by key.
+// Returns an error if the key does not exist.
+func (b *PostgresBackend) GetWorkspaceSecret(ctx context.Context, workspaceId uint, key string) ([]byte, error) {
+	query := `SELECT value_encoded FROM workspace_secrets WHERE workspace_id = $1 AND key = $2`
+	var value []byte
+	err := b.db.QueryRowContext(ctx, query, workspaceId, key).Scan(&value)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("workspace secret %q not found", key)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get workspace secret: %w", err)
+	}
+	return value, nil
+}
+
+// DeleteWorkspaceSecret removes a per-workspace secret by key.
+func (b *PostgresBackend) DeleteWorkspaceSecret(ctx context.Context, workspaceId uint, key string) error {
+	query := `DELETE FROM workspace_secrets WHERE workspace_id = $1 AND key = $2`
+	_, err := b.db.ExecContext(ctx, query, workspaceId, key)
+	if err != nil {
+		return fmt.Errorf("failed to delete workspace secret: %w", err)
+	}
+	return nil
+}
+
 // GetWorkspaceToolSettings returns all tool settings for a workspace as a lookup structure
 // Tools not in the database are considered enabled by default
 func (b *PostgresBackend) GetWorkspaceToolSettings(ctx context.Context, workspaceId uint) (*types.WorkspaceToolSettings, error) {

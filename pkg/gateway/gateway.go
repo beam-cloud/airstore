@@ -575,6 +575,12 @@ func (g *Gateway) registerServices() error {
 		accessLogGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
 		apiv1.NewAccessLogGroup(accessLogGroup, g.BackendRepo, g.s2Client, sourceService)
 
+		// Workspace secrets API (BYOK keys, workspace-scoped auth)
+		secretsGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/secrets")
+		secretsGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
+		apiv1.NewSecretsGroup(secretsGroup, g.BackendRepo)
+		log.Info().Msg("secrets API registered at /api/v1/workspaces/:workspace_id/secrets")
+
 		// Agent/task/run engine and gRPC service.
 		orchestratorSvc := orchestration.NewAgentService(
 			g.ctx,

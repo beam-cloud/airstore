@@ -1085,6 +1085,9 @@ func isRunExecutionCancelNoopError(err error) bool {
 		strings.Contains(lower, "cannot be cancelled")
 }
 
+// WorkspaceSecretAnthropicKey is the workspace_secrets key for the BYOK Anthropic API key.
+const WorkspaceSecretAnthropicKey = "anthropic_api_key"
+
 const (
 	sessionDrainMaxWait      = 10 * time.Second
 	sessionDrainPollStep     = 500 * time.Millisecond
@@ -1824,6 +1827,7 @@ func (s *AgentService) createAttemptExecutionTask(
 	applyRunExecutionContextEnv(taskEnv, run, attempt.ID)
 	applyAgentConfigEnv(taskEnv, agentConfig)
 	applyPayloadRuntimeEnv(taskEnv, payload)
+	s.applyWorkspaceBYOKEnv(ctx, taskEnv, run.WorkspaceID)
 	retryPolicy := RetryPolicyOrDefault(runPolicy.Retry)
 	executionPolicy := map[string]any{
 		"host":                               run.ExecHost,
@@ -2253,6 +2257,26 @@ func applyPayloadRuntimeEnv(env map[string]string, payload map[string]any) {
 	if boolFromAny(payload["resume_session"]) {
 		env["AIRSTORE_AGENT_RESUME_SESSION"] = "true"
 	}
+}
+
+// applyWorkspaceBYOKEnv injects the workspace's Anthropic API key into the task
+// environment if the workspace has a BYOK key configured. Errors are logged and
+// silently ignored so a misconfigured key does not block task dispatch.
+func (s *AgentService) applyWorkspaceBYOKEnv(ctx context.Context, env map[string]string, workspaceID uint) {
+	if env == nil {
+		return
+	}
+	encoded, err := s.backend.GetWorkspaceSecret(ctx, workspaceID, WorkspaceSecretAnthropicKey)
+	if err != nil {
+		// Secret not set — not an error, just use the global key.
+		return
+	}
+	var apiKey string
+	if err := json.Unmarshal(encoded, &apiKey); err != nil || strings.TrimSpace(apiKey) == "" {
+		log.Warn().Uint("workspace_id", workspaceID).Msg("workspace has invalid BYOK Anthropic key; ignoring")
+		return
+	}
+	env["ANTHROPIC_API_KEY"] = strings.TrimSpace(apiKey)
 }
 
 func applyPayloadExecutionMetadata(executionPolicy map[string]any, payload map[string]any) {

@@ -142,6 +142,11 @@ type BackendRepository interface {
 	ListWorkspacesByTenantId(ctx context.Context, tenantId string) ([]*types.Workspace, error)
 	DeleteWorkspace(ctx context.Context, id uint) error
 
+	// Workspace Secrets (BYOK and other per-workspace secrets)
+	SetWorkspaceSecret(ctx context.Context, workspaceId uint, key string, value []byte) error
+	GetWorkspaceSecret(ctx context.Context, workspaceId uint, key string) ([]byte, error)
+	DeleteWorkspaceSecret(ctx context.Context, workspaceId uint, key string) error
+
 	// Workspace Tool Settings
 	GetWorkspaceToolSettings(ctx context.Context, workspaceId uint) (*types.WorkspaceToolSettings, error)
 	GetWorkspaceToolSetting(ctx context.Context, workspaceId uint, toolName string) (*types.WorkspaceToolSetting, error)

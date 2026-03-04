@@ -235,7 +235,8 @@ func buildHeartbeatHookSettings(heartbeatPath string) []byte {
 }
 
 func (r *ClaudeCodeRunner) injectEnv(env map[string]string) {
-	r.injectAPIKey(env, "ANTHROPIC_API_KEY", r.anthropicAPIKey, true)
+	// Don't overwrite a workspace-level BYOK key that was injected at dispatch time.
+	r.injectAPIKey(env, "ANTHROPIC_API_KEY", r.anthropicAPIKey, false)
 	r.injectKernelEnv(env)
 	if strings.TrimSpace(env[claudeConfigDirEnvKey]) == "" {
 		// Keep Claude state directly on the mounted workspace so behavior is
