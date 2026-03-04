@@ -51,8 +51,8 @@ func AnnotateCredentials(integrationType string, creds *types.IntegrationCredent
 	return creds
 }
 
-// MergeCredentialMetadata copies metadata keys from source to target when missing.
-// This keeps persisted capability/scope metadata stable across token refreshes.
+// MergeCredentialMetadata copies all Extra keys from source to target when missing.
+// This keeps persisted metadata (capabilities, scopes, cloud_id, etc.) stable across token refreshes.
 func MergeCredentialMetadata(target, source *types.IntegrationCredentials) *types.IntegrationCredentials {
 	if target == nil {
 		return nil
@@ -63,12 +63,12 @@ func MergeCredentialMetadata(target, source *types.IntegrationCredentials) *type
 	if target.Extra == nil {
 		target.Extra = make(map[string]string)
 	}
-	for _, key := range []string{types.CredentialMetaGrantedScopes, types.CredentialMetaCapabilities} {
+	for key, value := range source.Extra {
 		if _, ok := target.Extra[key]; ok {
 			continue
 		}
-		if value := strings.TrimSpace(source.Extra[key]); value != "" {
-			target.Extra[key] = value
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			target.Extra[key] = trimmed
 		}
 	}
 	return target

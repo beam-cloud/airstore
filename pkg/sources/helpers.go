@@ -30,12 +30,13 @@ type SourceStatus struct {
 
 // oauthIntegrations lists integrations that use OAuth
 var oauthIntegrations = map[string]bool{
-	"gmail":  true,
-	"gdrive": true,
-	"github": true,
-	"notion": true,
-	"slack":  true,
-	"linear": true,
+	"gmail":      true,
+	"gdrive":     true,
+	"github":     true,
+	"notion":     true,
+	"slack":      true,
+	"linear":     true,
+	"confluence": true,
 }
 
 // GenerateSourceReadme creates the README.md content for an integration

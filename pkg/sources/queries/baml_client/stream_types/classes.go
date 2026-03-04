@@ -20,6 +20,66 @@ import (
 	"github.com/boundaryml/baml/engine/language_client_go/pkg/cffi"
 )
 
+type ConfluenceQueryResult struct {
+	Cql_query       *string `json:"cql_query"`
+	Content_type    *string `json:"content_type"`
+	Limit           *int64  `json:"limit"`
+	Filename_format *string `json:"filename_format"`
+}
+
+func (c *ConfluenceQueryResult) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_STREAM_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_STREAM_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "ConfluenceQueryResult" {
+		panic(fmt.Sprintf("expected ConfluenceQueryResult, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "cql_query":
+			c.Cql_query = baml.Decode(valueHolder).Interface().(*string)
+
+		case "content_type":
+			c.Content_type = baml.Decode(valueHolder).Interface().(*string)
+
+		case "limit":
+			c.Limit = baml.Decode(valueHolder).Interface().(*int64)
+
+		case "filename_format":
+			c.Filename_format = baml.Decode(valueHolder).Interface().(*string)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class ConfluenceQueryResult", key))
+
+		}
+	}
+
+}
+
+func (c ConfluenceQueryResult) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["cql_query"] = c.Cql_query
+
+	fields["content_type"] = c.Content_type
+
+	fields["limit"] = c.Limit
+
+	fields["filename_format"] = c.Filename_format
+
+	return baml.EncodeClass("ConfluenceQueryResult", fields, nil)
+}
+
+func (c ConfluenceQueryResult) BamlTypeName() string {
+	return "ConfluenceQueryResult"
+}
+
 type CronResult struct {
 	Cron_expr *string `json:"cron_expr"`
 }

@@ -984,6 +984,82 @@ test TestPostHogSignupFunnel {
 }
 
 // -----------------------------------------------------------------------------
+// Confluence Query Inference
+// -----------------------------------------------------------------------------
+
+class ConfluenceQueryResult {
+  cql_query string @description("Confluence Query Language (CQL) query string")
+  content_type string @description("Content type filter: 'page', 'blogpost', or 'all'. Default: 'all'")
+  limit int @description("Max results to return (default: 50)")
+  filename_format string @description("Template for result filenames. Use {id}, {title}, {space}, {date}, {type}. Example: {space}_{title}_{id}.md")
+}
+
+function InferConfluenceQuery(name: string, guidance: string?) -> ConfluenceQueryResult {
+  client AnthropicClient
+  prompt #"
+    Convert a folder/file name into a Confluence CQL (Confluence Query Language) query.
+
+    CQL SYNTAX:
+    - type=page — pages only
+    - type=blogpost — blog posts only
+    - space=KEY — filter by space key (e.g., space=DEV, space=ENG)
+    - title~"text" — title contains text (fuzzy match)
+    - text~"text" — full-text search (searches title + body)
+    - label="name" — filter by label
+    - creator="username" — filter by creator
+    - contributor="username" — filter by contributor
+    - lastModified>now("-7d") — modified in the last 7 days
+    - lastModified>now("-30d") — modified in the last 30 days
+    - lastModified>"2025-01-01" — modified after a specific date
+    - created>now("-7d") — created in the last 7 days
+    - ancestor=12345 — pages under a specific parent
+    - AND, OR — combine conditions
+    - ORDER BY lastModified DESC, title ASC — sorting
+
+    QUERY STRATEGY:
+    1. For topic searches → use text~ for full-text search
+    2. For space-specific → use space=KEY
+    3. For recent content → use lastModified>now("-Nd")
+    4. For labeled content → use label="name"
+    5. For specific content types → use type=page or type=blogpost
+    6. Combine operators with AND/OR
+
+    DEFAULTS:
+    - content_type: "all"
+    - limit: 50
+    - filename_format: {space}_{title}_{id}.md
+
+    Query examples:
+    - "recent-pages" → lastModified>now("-7d") ORDER BY lastModified DESC, content_type: "page"
+    - "engineering-docs" → (space=ENG OR text~"engineering") AND type=page ORDER BY lastModified DESC
+    - "kubernetes-pages" → text~"kubernetes" AND type=page ORDER BY lastModified DESC
+    - "dev-blog-posts" → space=DEV AND type=blogpost ORDER BY lastModified DESC
+    - "important-docs" → label="important" ORDER BY lastModified DESC
+    - "api-documentation" → text~"api" AND (label="documentation" OR title~"api") ORDER BY lastModified DESC
+    - "onboarding" → text~"onboarding" OR title~"onboarding" ORDER BY lastModified DESC
+    - "architecture-decisions" → text~"architecture" OR label="adr" ORDER BY lastModified DESC
+    - "meeting-notes" → title~"meeting" OR label="meeting-notes" ORDER BY lastModified DESC
+    - "recent-blog-posts" → type=blogpost AND lastModified>now("-30d") ORDER BY lastModified DESC
+    - "project-alpha" → text~"project alpha" ORDER BY lastModified DESC
+
+    Filename format: Choose a format that makes sense for the query intent.
+    Available placeholders: {id}, {title}, {space}, {date}, {type}
+    - For space-specific: {title}_{id}.md
+    - For cross-space: {space}_{title}_{id}.md
+    - For dated content: {date}_{title}_{id}.md
+    - Default: {space}_{title}_{id}.md
+
+    Folder/file name: {{ name }}
+    {% if guidance %}
+
+    Additional guidance from user: {{ guidance }}
+    {% endif %}
+
+    {{ ctx.output_format }}
+  "#
+}
+
+// -----------------------------------------------------------------------------
 // Web Query Inference
 // -----------------------------------------------------------------------------
 
@@ -1064,5 +1140,49 @@ test TestWebQuerySearchTopic {
   args {
     name "best rust web frameworks"
     guidance null
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Confluence Query Tests
+// -----------------------------------------------------------------------------
+
+test TestConfluenceRecentPages {
+  functions [InferConfluenceQuery]
+  args {
+    name "recent-pages"
+    guidance null
+  }
+}
+
+test TestConfluenceEngDocs {
+  functions [InferConfluenceQuery]
+  args {
+    name "engineering-docs"
+    guidance "documentation from the engineering space"
+  }
+}
+
+test TestConfluenceKubernetes {
+  functions [InferConfluenceQuery]
+  args {
+    name "kubernetes-pages"
+    guidance null
+  }
+}
+
+test TestConfluenceMeetingNotes {
+  functions [InferConfluenceQuery]
+  args {
+    name "meeting-notes"
+    guidance null
+  }
+}
+
+test TestConfluenceArchitectureDecisions {
+  functions [InferConfluenceQuery]
+  args {
+    name "architecture-decisions"
+    guidance "ADRs and architecture decision records"
   }
 }

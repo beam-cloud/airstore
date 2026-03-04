@@ -115,6 +115,8 @@ func DefaultFilenameFormat(integration string) string {
 		return "{identifier}_{title}.md"
 	case "posthog":
 		return "{id}.json"
+	case "confluence":
+		return "{space}_{title}_{id}.md"
 	case "web":
 		return "{title}_{id}.md"
 	default:

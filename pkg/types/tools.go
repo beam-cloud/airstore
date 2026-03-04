@@ -13,9 +13,10 @@ const (
 	GDrive    IntegrationName = "gdrive"
 	Slack     IntegrationName = "slack"
 	Linear    IntegrationName = "linear"
-	PostHog   IntegrationName = "posthog"
-	Web       IntegrationName = "web"
-	Browser   IntegrationName = "browser"
+	PostHog     IntegrationName = "posthog"
+	Confluence  IntegrationName = "confluence"
+	Web         IntegrationName = "web"
+	Browser     IntegrationName = "browser"
 )
 
 func (n IntegrationName) String() string { return string(n) }

@@ -76,6 +76,13 @@ type PostHogFilter struct {
 	ProjectID int    `json:"project_id"`
 }
 
+type ConfluenceFilter struct {
+	CQL         string `json:"cql"`
+	Space       string `json:"space"`
+	ContentType string `json:"content_type"` // "page", "blogpost", or "all"
+	Label       string `json:"label"`
+}
+
 type WebFilter struct {
 	Mode         string   `json:"mode"` // "map" or "search"
 	URL          string   `json:"url"`
@@ -106,6 +113,8 @@ func buildQuerySpecFromFilter(integration string, filter json.RawMessage, limit 
 		return buildLinearFilter(filter, limit)
 	case types.SourcePostHog:
 		return buildPostHogFilter(filter, limit)
+	case types.SourceConfluence:
+		return buildConfluenceFilter(filter, limit)
 	case types.SourceWeb:
 		return buildWebFilter(filter, limit)
 	default:
@@ -336,6 +345,44 @@ func buildPostHogFilter(raw json.RawMessage, limit int) (string, error) {
 	}
 	if f.ProjectID > 0 {
 		spec["project_id"] = f.ProjectID
+	}
+	return marshalSpec(spec)
+}
+
+func buildConfluenceFilter(raw json.RawMessage, limit int) (string, error) {
+	var f ConfluenceFilter
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return "", err
+	}
+	// If a raw CQL is provided, use it directly.
+	if f.CQL != "" {
+		spec := map[string]any{
+			"cql_query": f.CQL,
+			"limit":     limit,
+		}
+		if f.ContentType != "" && f.ContentType != "all" {
+			spec["content_type"] = f.ContentType
+		}
+		return marshalSpec(spec)
+	}
+	// Build CQL from structured fields.
+	var parts []string
+	if f.Space != "" {
+		parts = append(parts, "space="+f.Space)
+	}
+	if f.ContentType != "" && f.ContentType != "all" {
+		parts = append(parts, "type="+f.ContentType)
+	}
+	if f.Label != "" {
+		parts = append(parts, fmt.Sprintf("label=%q", f.Label))
+	}
+	cql := strings.Join(parts, " AND ")
+	if cql != "" {
+		cql += " ORDER BY lastModified DESC"
+	}
+	spec := map[string]any{
+		"cql_query": cql,
+		"limit":     limit,
 	}
 	return marshalSpec(spec)
 }
