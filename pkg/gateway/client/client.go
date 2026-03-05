@@ -259,15 +259,16 @@ func (c *GatewayClient) SetTaskStarted(ctx context.Context, taskID string, attem
 }
 
 // SetTaskResult reports the result of a task to the gateway.
-func (c *GatewayClient) SetTaskResult(ctx context.Context, taskID string, exitCode int, errorMsg string, attemptID string) error {
+func (c *GatewayClient) SetTaskResult(ctx context.Context, taskID string, exitCode int, errorMsg string, attemptID string, waitingForInput bool) error {
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
 
 	_, err := c.client.SetTaskResult(ctx, &pb.SetTaskResultRequest{
-		TaskId:    taskID,
-		ExitCode:  int32(exitCode),
-		Error:     errorMsg,
-		AttemptId: attemptID,
+		TaskId:          taskID,
+		ExitCode:        int32(exitCode),
+		Error:           errorMsg,
+		AttemptId:       attemptID,
+		WaitingForInput: waitingForInput,
 	})
 	if err != nil {
 		return fmt.Errorf("set task result failed: %w", err)
@@ -311,6 +312,39 @@ func (c *GatewayClient) ReleaseIP(ctx context.Context, sandboxID string) error {
 		return fmt.Errorf("release IP failed: %w", err)
 	}
 
+	return nil
+}
+
+// CreateTaskOutput creates a structured output for a task via gRPC.
+func (c *GatewayClient) CreateTaskOutput(ctx context.Context, req *pb.CreateTaskOutputRequest) (string, error) {
+	ctx, cancel := c.withTimeout(ctx)
+	defer cancel()
+	resp, err := c.client.CreateTaskOutput(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("create task output: %w", err)
+	}
+	return resp.Id, nil
+}
+
+// AppendTaskOutputRows appends rows to a streaming table output via gRPC.
+func (c *GatewayClient) AppendTaskOutputRows(ctx context.Context, req *pb.AppendTaskOutputRowsRequest) error {
+	ctx, cancel := c.withTimeout(ctx)
+	defer cancel()
+	_, err := c.client.AppendTaskOutputRows(ctx, req)
+	if err != nil {
+		return fmt.Errorf("append task output rows: %w", err)
+	}
+	return nil
+}
+
+// FinalizeTaskOutput sets the summary on an output via gRPC.
+func (c *GatewayClient) FinalizeTaskOutput(ctx context.Context, req *pb.FinalizeTaskOutputRequest) error {
+	ctx, cancel := c.withTimeout(ctx)
+	defer cancel()
+	_, err := c.client.FinalizeTaskOutput(ctx, req)
+	if err != nil {
+		return fmt.Errorf("finalize task output: %w", err)
+	}
 	return nil
 }
 

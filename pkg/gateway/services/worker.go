@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -314,11 +315,12 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 		EventType: types.OrchestrationOutboxEventTypeRunResult,
 		DedupeKey: resultKey,
 		PayloadJSON: map[string]any{
-			types.OrchestrationOutboxPayloadTaskID:      strings.TrimSpace(req.TaskId),
-			types.OrchestrationOutboxPayloadAttemptID:   attemptID,
-			types.OrchestrationOutboxPayloadExitCode:    int(req.ExitCode),
-			types.OrchestrationOutboxPayloadError:       req.Error,
-			types.OrchestrationOutboxPayloadIdempotency: resultKey,
+			types.OrchestrationOutboxPayloadTaskID:           strings.TrimSpace(req.TaskId),
+			types.OrchestrationOutboxPayloadAttemptID:        attemptID,
+			types.OrchestrationOutboxPayloadExitCode:         int(req.ExitCode),
+			types.OrchestrationOutboxPayloadError:            req.Error,
+			types.OrchestrationOutboxPayloadIdempotency:      resultKey,
+			types.OrchestrationOutboxPayloadWaitingForInput:  req.WaitingForInput,
 		},
 		AvailableAt: time.Now(),
 	}); err != nil {
@@ -409,7 +411,7 @@ func (s *WorkerService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, 
 	}
 	targetRunID := run.ID
 	nextState := types.TaskTerminalStateForRun(run.Status, run.Interactive)
-	updated, err := s.backend.UpdateTaskStateIfCurrentRun(
+	_, err = s.backend.UpdateTaskStateIfCurrentRun(
 		ctx,
 		run.OriginTaskID,
 		run.ID,
@@ -417,13 +419,7 @@ func (s *WorkerService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, 
 		nil,
 		&targetRunID,
 	)
-	if err != nil {
-		return err
-	}
-	if !updated {
-		return nil
-	}
-	return nil
+	return err
 }
 
 func appendRunSnapshot(
@@ -477,6 +473,71 @@ func updateExecutionInstanceCounts(ctx context.Context, backend repository.Backe
 	}
 	now := time.Now()
 	return backend.AdjustExecutionInstanceRunningAttempts(ctx, instanceKey, runningDelta, &now)
+}
+
+// ── Task Outputs ────────────────────────────────────────────────────────────
+
+func (s *WorkerService) CreateTaskOutput(ctx context.Context, req *pb.CreateTaskOutputRequest) (*pb.CreateTaskOutputResponse, error) {
+	if s.backend == nil {
+		return nil, status.Errorf(codes.Unavailable, "task persistence not available")
+	}
+
+	output := &types.TaskOutput{
+		WorkspaceID: uint(req.WorkspaceId),
+		TaskID:      req.TaskId,
+		OutputType:  req.OutputType,
+		Title:       req.Title,
+	}
+	if req.RunId != "" {
+		output.RunID = &req.RunId
+	}
+	if req.SchemaJson != "" {
+		if err := json.Unmarshal([]byte(req.SchemaJson), &output.Schema); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid schema_json: %v", err)
+		}
+	}
+	if req.DataJson != "" {
+		if err := json.Unmarshal([]byte(req.DataJson), &output.Data); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid data_json: %v", err)
+		}
+	} else {
+		output.Data = map[string]any{}
+	}
+	if req.MetadataJson != "" {
+		if err := json.Unmarshal([]byte(req.MetadataJson), &output.Metadata); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid metadata_json: %v", err)
+		}
+	}
+
+	if err := s.backend.CreateTaskOutput(ctx, output); err != nil {
+		return nil, status.Errorf(codes.Internal, "create output: %v", err)
+	}
+	return &pb.CreateTaskOutputResponse{Id: output.ID}, nil
+}
+
+func (s *WorkerService) AppendTaskOutputRows(ctx context.Context, req *pb.AppendTaskOutputRowsRequest) (*pb.AppendTaskOutputRowsResponse, error) {
+	if s.backend == nil {
+		return nil, status.Errorf(codes.Unavailable, "task persistence not available")
+	}
+	if err := s.backend.AppendTaskOutputRows(ctx, uint(req.WorkspaceId), req.OutputId, []byte(req.RowsJson)); err != nil {
+		if _, ok := err.(*types.ErrTaskOutputNotFound); ok {
+			return nil, status.Errorf(codes.NotFound, "output not found: %s", req.OutputId)
+		}
+		return nil, status.Errorf(codes.Internal, "append rows: %v", err)
+	}
+	return &pb.AppendTaskOutputRowsResponse{}, nil
+}
+
+func (s *WorkerService) FinalizeTaskOutput(ctx context.Context, req *pb.FinalizeTaskOutputRequest) (*pb.FinalizeTaskOutputResponse, error) {
+	if s.backend == nil {
+		return nil, status.Errorf(codes.Unavailable, "task persistence not available")
+	}
+	if req.Summary != "" {
+		if err := s.backend.UpdateTaskOutputSummary(ctx, uint(req.WorkspaceId), req.OutputId, req.Summary); err != nil {
+			return nil, status.Errorf(codes.Internal, "finalize output: %v", err)
+		}
+	}
+	return &pb.FinalizeTaskOutputResponse{}, nil
 }
 
 func (s *WorkerService) AllocateIP(ctx context.Context, req *pb.AllocateIPRequest) (*pb.AllocateIPResponse, error) {

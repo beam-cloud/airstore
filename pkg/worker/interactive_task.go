@@ -13,6 +13,8 @@ import (
 
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
+	turnclass "github.com/beam-cloud/airstore/pkg/worker/turnclass/baml_client"
+	turntypes "github.com/beam-cloud/airstore/pkg/worker/turnclass/baml_client/types"
 	"github.com/rs/zerolog/log"
 )
 
@@ -177,6 +179,7 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 
 	var checkHeartbeat func() bool
 	var touchHeartbeat func()
+	var checkNeedsInput func() bool
 	if heartbeatRunner, ok := runner.(HeartbeatRunner); ok && mountSource != "" {
 		heartbeatPath, err := heartbeatRunner.SetupHeartbeat(mountSource, env)
 		if err != nil {
@@ -191,6 +194,30 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 			}
 			addTaskExecutionContext(log.Info().Str("runner", runner.Name()).Str("heartbeat", heartbeatPath), task).
 				Msg("heartbeat enabled via VFS")
+		}
+	}
+	if inputRunner, ok := runner.(NeedsInputRunner); ok && mountSource != "" {
+		markerPath, err := inputRunner.SetupNeedsInput(mountSource, env)
+		if err != nil {
+			addTaskExecutionContext(log.Warn().Err(err).Str("runner", runner.Name()), task).
+				Msg("failed to install needs-input hook")
+		} else {
+			bamlEnv := w.bamlEnvForRunner(runner, env)
+			checkNeedsInput = func() bool {
+				msg := inputRunner.ReadLastMessage(markerPath)
+				if msg == "" {
+					return false
+				}
+				outcome, err := turnclass.ClassifyTurn(ctx, msg, turnclass.WithEnv(bamlEnv))
+				if err != nil {
+					addTaskExecutionContext(log.Warn().Err(err), task).
+						Msg("BAML ClassifyTurn failed, defaulting to complete")
+					return false
+				}
+				return outcome == turntypes.TurnOutcomeNEEDS_INPUT
+			}
+			addTaskExecutionContext(log.Info().Str("runner", runner.Name()), task).
+				Msg("needs-input detection enabled (Stop hook + BAML)")
 		}
 	}
 
@@ -239,32 +266,35 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	start := time.Now()
 
 	var runErr error
+	var needsInput bool
 	if tr, ok := runner.(TurnRunner); ok {
-		runErr = w.runTurnSession(sessionCtx, task, sandboxID, tr, env, terminalWriter, activityCh)
+		runErr, needsInput = w.runTurnSession(sessionCtx, task, sandboxID, tr, env, terminalWriter, activityCh, checkNeedsInput)
 	} else {
 		runErr = w.runGenericPTYSession(sessionCtx, task, sandboxID, terminalWriter, activityCh)
 	}
 
 	addTaskExecutionContext(
-		log.Info().Dur("session_duration", time.Since(start)).Err(runErr),
+		log.Info().Dur("session_duration", time.Since(start)).Bool("needs_input", needsInput),
 		task,
 	).Msg("interactive session finished")
 
 	exitCode, errMsg, status := interactiveResult(runErr, idleTimedOut.Load())
 	w.sandboxManager.publishStatus(ctx, task.ExternalId, status, &exitCode, errMsg)
 	return &types.RunExecutionResult{
-		ID:       task.ExternalId,
-		ExitCode: exitCode,
-		Error:    errMsg,
-		Duration: time.Since(start),
+		ID:              task.ExternalId,
+		ExitCode:        exitCode,
+		Error:           errMsg,
+		Duration:        time.Since(start),
+		WaitingForInput: needsInput,
 	}
 }
 
 // runTurnSession executes an interactive session as a series of per-turn
-// Exec calls. Each turn runs the runner's CLI (e.g. claude --print) as a
-// separate process, with the prompt passed via command-line args. Between
-// turns, the worker waits for follow-up input via Redis pubsub. The idle
-// monitor handles timeout; no shell loop or stdin pipe is involved.
+// Exec calls. Each turn runs claude --print via ExecPTY (no stdin pipe).
+// After each turn the Stop hook's marker file is checked: if the agent
+// asked a question (needs input), the state is set to waiting_for_input
+// and the worker blocks on Redis pubsub. Otherwise the session ends
+// cleanly — the agent's work is done.
 func (w *Worker) runTurnSession(
 	ctx context.Context,
 	task types.RunExecution,
@@ -273,7 +303,8 @@ func (w *Worker) runTurnSession(
 	env map[string]string,
 	stdout io.Writer,
 	activityCh chan<- struct{},
-) error {
+	checkNeedsInput func() bool,
+) (error, bool) {
 	prompt := strings.TrimSpace(task.Prompt)
 	isFirstTurn := true
 	sessionEnv := cloneTurnEnv(env)
@@ -281,53 +312,37 @@ func (w *Worker) runTurnSession(
 
 	for prompt != "" {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return ctx.Err(), false
 		}
 		w.setRunInteractionState(ctx, task, types.RunInteractionStateWorking)
 
 		if isFirstTurn {
 			nextEnv, err := w.executeFirstTurnWithStrategy(
-				ctx,
-				task,
-				sandboxID,
-				runner,
-				sessionEnv,
-				stdout,
-				prompt,
-				firstTurnStrategies,
+				ctx, task, sandboxID, runner, sessionEnv, stdout, prompt, firstTurnStrategies,
 			)
 			if err != nil {
-				return err
+				return err, false
 			}
 			sessionEnv = nextEnv
 			isFirstTurn = false
 		} else {
-			err := w.executeTurn(
-				ctx,
-				task,
-				sandboxID,
-				runner,
-				sessionEnv,
-				stdout,
-				prompt,
-				TurnArgModeFollowup,
-				1,
-				1,
-				"",
-			)
-			if err != nil {
-				return err
+			if err := w.executeTurn(ctx, task, sandboxID, runner, sessionEnv, stdout, prompt, TurnArgModeFollowup, 1, 1, ""); err != nil {
+				return err, false
 			}
 		}
 
-		// Treat turn completion as activity so the waiting window starts fresh.
 		signalActivity(activityCh)
+
+		if checkNeedsInput == nil || !checkNeedsInput() {
+			return nil, false
+		}
+
 		w.setRunInteractionState(ctx, task, types.RunInteractionStateWaitingForInput)
-		addTaskExecutionContext(log.Info(), task).Msg("turn complete, waiting for follow-up input")
+		addTaskExecutionContext(log.Info(), task).Msg("turn complete, agent is waiting for input")
 		prompt = w.waitForFollowupInput(ctx, task.ExternalId, DefaultBetweenTurnsTimeout, activityCh)
 	}
 
-	return nil
+	return nil, true
 }
 
 // waitForFollowupInput blocks until follow-up input arrives via Redis
@@ -620,9 +635,8 @@ func (w *terminalOutputWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// forwardTerminalInput pipes Redis pubsub input to a writer (for generic
-// PTY sessions). Turn-based sessions don't use this — they call
-// waitForFollowupInput instead.
+// forwardTerminalInput pipes Redis pubsub input to a writer. Used by
+// generic PTY sessions that accept stdin.
 func forwardTerminalInput(
 	ctx context.Context,
 	stdinWriter *io.PipeWriter,
@@ -691,6 +705,18 @@ func signalActivity(activityCh chan<- struct{}) {
 	case activityCh <- struct{}{}:
 	default:
 	}
+}
+
+// bamlEnvForRunner builds a minimal env map for BAML calls by extracting
+// the API key from the runner (which holds it from worker config).
+func (w *Worker) bamlEnvForRunner(runner AgentExecutionRunner, taskEnv map[string]string) map[string]string {
+	env := map[string]string{}
+	if cr, ok := runner.(*ClaudeCodeRunner); ok && cr.anthropicAPIKey != "" {
+		env["ANTHROPIC_API_KEY"] = cr.anthropicAPIKey
+	} else if key := taskEnv["ANTHROPIC_API_KEY"]; key != "" {
+		env["ANTHROPIC_API_KEY"] = key
+	}
+	return env
 }
 
 func monitorInteractiveSessionIdle(

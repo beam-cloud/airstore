@@ -29,9 +29,10 @@ const (
 
 	claudeConfigDirEnvKey  = "CLAUDE_CONFIG_DIR"
 	claudeDefaultShellEnv  = "/bin/bash"
-	claudeStateDirName     = ".claude"
-	claudeStateRootDir     = ".airstore/claude"
-	claudeHeartbeatFile    = ".heartbeat"
+	claudeStateDirName      = ".claude"
+	claudeStateRootDir      = ".airstore/claude"
+	claudeHeartbeatFile     = ".heartbeat"
+	claudeNeedsInputFile    = ".needs_input"
 	claudeHeartbeatFreshFor = 5 * time.Minute
 )
 
@@ -64,6 +65,16 @@ type HeartbeatRunner interface {
 	// CheckHeartbeat returns true if the heartbeat file at the given
 	// host-side path was recently modified.
 	CheckHeartbeat(heartbeatPath string) bool
+}
+
+// NeedsInputRunner extends AgentExecutionRunner with input-detection.
+// A Stop hook dumps the agent's last message to a marker file. The
+// worker reads it and calls BAML to classify whether the agent is
+// blocked on user input or done.
+type NeedsInputRunner interface {
+	AgentExecutionRunner
+	SetupNeedsInput(mountSource string, env map[string]string) (string, error)
+	ReadLastMessage(markerPath string) string
 }
 
 type TurnArgMode string
@@ -180,36 +191,54 @@ func (r *ClaudeCodeRunner) BuildTurnArgs(prompt string, env map[string]string, m
 	return builder.withPrompt(prompt).build()
 }
 
-func (r *ClaudeCodeRunner) SetupHeartbeat(mountSource string, env map[string]string) (string, error) {
-	if strings.TrimSpace(mountSource) == "" {
-		return "", fmt.Errorf("empty mount source")
-	}
+// claudeHookPaths resolves the host + container paths for hook marker
+// files relative to the CLAUDE_CONFIG_DIR parent directory.
+type claudeHookPaths struct {
+	hostConfigDir string
+	settingsPath  string
 
+	heartbeatContainer string
+	heartbeatHost      string
+
+	needsInputContainer string
+	needsInputHost      string
+}
+
+func resolveClaudeHookPaths(mountSource string, env map[string]string) (*claudeHookPaths, error) {
+	if strings.TrimSpace(mountSource) == "" {
+		return nil, fmt.Errorf("empty mount source")
+	}
 	configDir := strings.TrimSpace(env[claudeConfigDirEnvKey])
 	if configDir == "" {
 		configDir = defaultClaudeConfigDir(env)
 	}
-
-	// Heartbeat file sits next to the .claude config dir inside .airstore/claude/<scope>/.
-	heartbeatContainerPath := path.Join(path.Dir(configDir), claudeHeartbeatFile)
-
+	parentDir := path.Dir(configDir)
 	hostConfigDir := vfsHostPath(mountSource, configDir)
-	hostHeartbeatPath := vfsHostPath(mountSource, heartbeatContainerPath)
+	return &claudeHookPaths{
+		hostConfigDir:       hostConfigDir,
+		settingsPath:        filepath.Join(hostConfigDir, "settings.json"),
+		heartbeatContainer:  path.Join(parentDir, claudeHeartbeatFile),
+		heartbeatHost:       vfsHostPath(mountSource, path.Join(parentDir, claudeHeartbeatFile)),
+		needsInputContainer: path.Join(parentDir, claudeNeedsInputFile),
+		needsInputHost:      vfsHostPath(mountSource, path.Join(parentDir, claudeNeedsInputFile)),
+	}, nil
+}
 
-	if err := os.MkdirAll(hostConfigDir, 0o755); err != nil {
-		return "", fmt.Errorf("mkdir %s: %w", hostConfigDir, err)
+func (r *ClaudeCodeRunner) SetupHeartbeat(mountSource string, env map[string]string) (string, error) {
+	paths, err := resolveClaudeHookPaths(mountSource, env)
+	if err != nil {
+		return "", err
 	}
-
-	settingsPath := filepath.Join(hostConfigDir, "settings.json")
-	if err := os.WriteFile(settingsPath, buildHeartbeatHookSettings(heartbeatContainerPath), 0o644); err != nil {
-		return "", fmt.Errorf("write %s: %w", settingsPath, err)
+	if err := os.MkdirAll(paths.hostConfigDir, 0o755); err != nil {
+		return "", fmt.Errorf("mkdir %s: %w", paths.hostConfigDir, err)
 	}
-
-	if f, err := os.Create(hostHeartbeatPath); err == nil {
+	if err := os.WriteFile(paths.settingsPath, buildClaudeHookSettings(paths, false), 0o644); err != nil {
+		return "", fmt.Errorf("write %s: %w", paths.settingsPath, err)
+	}
+	if f, err := os.Create(paths.heartbeatHost); err == nil {
 		f.Close()
 	}
-
-	return hostHeartbeatPath, nil
+	return paths.heartbeatHost, nil
 }
 
 func (r *ClaudeCodeRunner) CheckHeartbeat(heartbeatPath string) bool {
@@ -223,25 +252,81 @@ func (r *ClaudeCodeRunner) CheckHeartbeat(heartbeatPath string) bool {
 	return time.Since(info.ModTime()) < claudeHeartbeatFreshFor
 }
 
-func buildHeartbeatHookSettings(heartbeatPath string) []byte {
+func (r *ClaudeCodeRunner) SetupNeedsInput(mountSource string, env map[string]string) (string, error) {
+	paths, err := resolveClaudeHookPaths(mountSource, env)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(paths.hostConfigDir, 0o755); err != nil {
+		return "", fmt.Errorf("mkdir %s: %w", paths.hostConfigDir, err)
+	}
+	scriptHost := filepath.Join(paths.hostConfigDir, "dump-stop-message.js")
+	if err := os.WriteFile(scriptHost, stopMessageDumpScript(paths.needsInputContainer), 0o644); err != nil {
+		return "", fmt.Errorf("write dump script: %w", err)
+	}
+	if err := os.WriteFile(paths.settingsPath, buildClaudeHookSettings(paths, true), 0o644); err != nil {
+		return "", fmt.Errorf("write %s: %w", paths.settingsPath, err)
+	}
+	return paths.needsInputHost, nil
+}
+
+func (r *ClaudeCodeRunner) ReadLastMessage(markerPath string) string {
+	if markerPath == "" {
+		return ""
+	}
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// stopMessageDumpScript returns a Node.js script that reads the Stop hook
+// JSON from stdin and writes the last 1000 chars of last_assistant_message
+// to markerPath. The Go worker then classifies this via BAML.
+func stopMessageDumpScript(markerPath string) []byte {
+	return []byte(fmt.Sprintf(`const fs=require("fs");
+let b=Buffer.alloc(0);
+process.stdin.on("data",c=>{b=Buffer.concat([b,c])});
+process.stdin.on("end",()=>{
+  try {
+    const m=(JSON.parse(b).last_assistant_message||"").trim();
+    fs.writeFileSync(%q,m.slice(-1000));
+  } catch(e) {
+    fs.writeFileSync(%q,"");
+  }
+});`, markerPath, markerPath))
+}
+
+func buildClaudeHookSettings(paths *claudeHookPaths, includeClassify bool) []byte {
 	type hookEntry struct {
 		Type    string `json:"type"`
 		Command string `json:"command"`
 	}
 	type matcherGroup struct {
-		Hooks []hookEntry `json:"hooks"`
+		Matcher string      `json:"matcher,omitempty"`
+		Hooks   []hookEntry `json:"hooks"`
 	}
 	type settings struct {
 		Hooks map[string][]matcherGroup `json:"hooks"`
 	}
 
-	cmd := "date +%s > " + heartbeatPath
-	group := matcherGroup{Hooks: []hookEntry{{Type: "command", Command: cmd}}}
+	heartbeatCmd := "date +%s > " + paths.heartbeatContainer
+	heartbeat := hookEntry{Type: "command", Command: heartbeatCmd}
+
+	stopHooks := []hookEntry{heartbeat}
+	if includeClassify {
+		dumpScript := path.Join(path.Dir(paths.needsInputContainer), claudeStateDirName, "dump-stop-message.js")
+		stopHooks = append(stopHooks, hookEntry{
+			Type:    "command",
+			Command: "node " + dumpScript,
+		})
+	}
 
 	s := settings{Hooks: map[string][]matcherGroup{
-		"PostToolUse":  {group},
-		"Stop":         {group},
-		"Notification": {group},
+		"PostToolUse":  {{Hooks: []hookEntry{heartbeat}}},
+		"Notification": {{Hooks: []hookEntry{heartbeat}}},
+		"Stop":         {{Hooks: stopHooks}},
 	}}
 	b, _ := json.MarshalIndent(s, "", "  ")
 	return b

@@ -96,6 +96,11 @@ func (StreamNames) RunEvents(runID string) string {
 	return fmt.Sprintf("run.%s.events", runID)
 }
 
+// ChannelConversation returns the stream name for a channel conversation between an agent and a sender.
+func (StreamNames) ChannelConversation(agentID, senderHash string) string {
+	return fmt.Sprintf("channel.%s.%s", agentID, senderHash)
+}
+
 // Streams provides access to stream names
 var Streams = StreamNames{}
 

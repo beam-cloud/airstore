@@ -371,8 +371,8 @@ func (a *AgentAPI) ArchiveTask(ctx context.Context, workspaceID uint, taskID str
 	if task.ArchivedAt != nil {
 		return nil
 	}
-	if task.State != types.AgentTaskStateIdle && !task.State.IsTerminal() {
-		return fmt.Errorf("only idle or terminal tasks can be archived")
+	if !task.State.IsTerminal() {
+		return fmt.Errorf("only terminal tasks can be archived")
 	}
 	return a.backend.ArchiveTask(ctx, task.ID)
 }

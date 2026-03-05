@@ -444,7 +444,7 @@ func (w *Worker) finishTask(task types.RunExecution, result *types.RunExecutionR
 		addTaskExecutionContext(log.Warn().Err(qErr), task).Msg("failed to update task queue")
 	}
 
-	reportErr := setTaskResultWithRetry(w.ctx, task, result, w.gatewayClient.SetTaskResult, contextSleep)
+	reportErr := setTaskResultWithRetry(w.ctx, task, result, w.gatewayClient.SetTaskResult, contextSleep, result.WaitingForInput)
 	if reportErr != nil {
 		if isNonRetriableSetTaskResultError(reportErr) {
 			addTaskExecutionContext(log.Warn().Err(reportErr), task).
@@ -466,8 +466,9 @@ func setTaskResultWithRetry(
 	ctx context.Context,
 	task types.RunExecution,
 	result *types.RunExecutionResult,
-	reportFn func(ctx context.Context, taskID string, exitCode int, errMsg string, attemptID string) error,
+	reportFn func(ctx context.Context, taskID string, exitCode int, errMsg string, attemptID string, waitingForInput bool) error,
 	sleepFn func(context.Context, time.Duration),
+	waitingForInput bool,
 ) error {
 	attemptID := ""
 	if task.RunAttemptID != nil {
@@ -486,7 +487,7 @@ func setTaskResultWithRetry(
 		}
 
 		attemptCtx, cancel := context.WithTimeout(ctx, setTaskResultRetryTimeout)
-		lastErr = reportFn(attemptCtx, task.ExternalId, result.ExitCode, result.Error, attemptID)
+		lastErr = reportFn(attemptCtx, task.ExternalId, result.ExitCode, result.Error, attemptID, waitingForInput)
 		cancel()
 		if lastErr == nil {
 			return nil

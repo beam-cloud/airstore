@@ -14,7 +14,7 @@ import (
 
 const agentTaskSelect = `
 	SELECT id, workspace_id, agent_id, agent_name, queue_mode, state, idempotency_key, payload_json, routing_json,
-	       parent_envelope_id, target_run_id, accepted_at, queued_at, dispatched_at, dropped_reason, archived_at, created_at, updated_at
+	       parent_envelope_id, target_run_id, accepted_at, queued_at, dispatched_at, dropped_reason, priority, archived_at, created_at, updated_at
 	FROM (
 		SELECT
 			t.id,
@@ -33,6 +33,7 @@ const agentTaskSelect = `
 			t.queued_at,
 			t.dispatched_at,
 			t.dropped_reason,
+			t.priority,
 			t.archived_at,
 			t.created_at,
 			t.updated_at
@@ -269,6 +270,115 @@ func (b *PostgresBackend) DeleteAgentProfile(ctx context.Context, workspaceId ui
 	return nil
 }
 
+// --- Channel Bindings ---
+
+func (b *PostgresBackend) ListChannelBindings(ctx context.Context, workspaceId uint, agentID *string) ([]*types.ChannelBinding, error) {
+	var query string
+	var args []any
+	if agentID != nil {
+		query = `SELECT id, workspace_id, agent_id, channel_type, address, config_json, active, created_at, updated_at
+			FROM agent_channel_binding WHERE workspace_id = $1 AND agent_id = $2 ORDER BY created_at ASC`
+		args = []any{workspaceId, *agentID}
+	} else {
+		query = `SELECT id, workspace_id, agent_id, channel_type, address, config_json, active, created_at, updated_at
+			FROM agent_channel_binding WHERE workspace_id = $1 AND agent_id IS NULL ORDER BY created_at ASC`
+		args = []any{workspaceId}
+	}
+	rows, err := b.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list channel bindings: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]*types.ChannelBinding, 0)
+	for rows.Next() {
+		binding, err := b.scanChannelBinding(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan channel binding: %w", err)
+		}
+		out = append(out, binding)
+	}
+	return out, rows.Err()
+}
+
+func (b *PostgresBackend) UpsertChannelBinding(ctx context.Context, binding *types.ChannelBinding) error {
+	configJSON, err := marshalJSONMap(binding.ConfigJSON)
+	if err != nil {
+		return fmt.Errorf("marshal channel binding config: %w", err)
+	}
+	query := `
+		INSERT INTO agent_channel_binding (workspace_id, agent_id, channel_type, address, config_json, active)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (channel_type, address) DO UPDATE SET
+			workspace_id = EXCLUDED.workspace_id,
+			agent_id = EXCLUDED.agent_id,
+			config_json = EXCLUDED.config_json,
+			active = EXCLUDED.active,
+			updated_at = CURRENT_TIMESTAMP
+		RETURNING id, created_at, updated_at
+	`
+	return b.db.QueryRowContext(
+		ctx, query,
+		binding.WorkspaceID, binding.AgentID, binding.ChannelType,
+		binding.Address, configJSON, binding.Active,
+	).Scan(&binding.ID, &binding.CreatedAt, &binding.UpdatedAt)
+}
+
+func (b *PostgresBackend) DeleteChannelBinding(ctx context.Context, workspaceId uint, agentID *string, channelType string) error {
+	var query string
+	var args []any
+	if agentID != nil {
+		query = `DELETE FROM agent_channel_binding WHERE workspace_id = $1 AND agent_id = $2 AND channel_type = $3`
+		args = []any{workspaceId, *agentID, channelType}
+	} else {
+		query = `DELETE FROM agent_channel_binding WHERE workspace_id = $1 AND agent_id IS NULL AND channel_type = $2`
+		args = []any{workspaceId, channelType}
+	}
+	res, err := b.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("delete channel binding: %w", err)
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		return fmt.Errorf("channel binding not found")
+	}
+	return nil
+}
+
+func (b *PostgresBackend) GetChannelBindingByAddress(ctx context.Context, channelType string, address string) (*types.ChannelBinding, error) {
+	query := `
+		SELECT id, workspace_id, agent_id, channel_type, address, config_json, active, created_at, updated_at
+		FROM agent_channel_binding
+		WHERE channel_type = $1 AND address = $2 AND active = true
+	`
+	binding, err := b.scanChannelBinding(b.db.QueryRowContext(ctx, query, channelType, address))
+	if err != nil {
+		return nil, fmt.Errorf("get channel binding by address: %w", err)
+	}
+	return binding, nil
+}
+
+func (b *PostgresBackend) scanChannelBinding(row scanner) (*types.ChannelBinding, error) {
+	binding := &types.ChannelBinding{}
+	var configJSON []byte
+	var agentID sql.NullString
+	err := row.Scan(
+		&binding.ID, &binding.WorkspaceID, &agentID,
+		&binding.ChannelType, &binding.Address, &configJSON,
+		&binding.Active, &binding.CreatedAt, &binding.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("channel binding not found")
+	}
+	if err != nil {
+		return nil, err
+	}
+	if agentID.Valid {
+		binding.AgentID = &agentID.String
+	}
+	binding.ConfigJSON = unmarshalJSONMap(configJSON)
+	return binding, nil
+}
+
 func (b *PostgresBackend) CreateTask(ctx context.Context, task *types.AgentTask) error {
 	return b.CreateTaskWithOutbox(ctx, task, nil)
 }
@@ -396,6 +506,7 @@ func (b *PostgresBackend) scanAgentTask(row scanner) (*types.AgentTask, error) {
 		&queuedAt,
 		&dispatchedAt,
 		&droppedReason,
+		&task.Priority,
 		&archivedAt,
 		&task.CreatedAt,
 		&task.UpdatedAt,
@@ -2969,4 +3080,200 @@ func scanScheduledTasks(rows *sql.Rows) ([]*types.ScheduledTask, error) {
 		result = append(result, st)
 	}
 	return result, rows.Err()
+}
+
+// ── Agent Stats ─────────────────────────────────────────────────────────────
+
+func (b *PostgresBackend) GetAgentStats(ctx context.Context, workspaceId uint, agentID string) (*types.AgentStats, error) {
+	rows, err := b.db.QueryContext(ctx, `
+		SELECT state, COUNT(*) FROM agent_task_envelope
+		WHERE workspace_id = $1 AND agent_id = $2
+		GROUP BY state`, workspaceId, agentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	stats := &types.AgentStats{ByState: make(map[string]int)}
+	for rows.Next() {
+		var state string
+		var count int
+		if err := rows.Scan(&state, &count); err != nil {
+			return nil, err
+		}
+		stats.ByState[state] = count
+		stats.Total += count
+	}
+
+	var avgSec sql.NullFloat64
+	_ = b.db.QueryRowContext(ctx, `
+		SELECT AVG(EXTRACT(EPOCH FROM (updated_at - created_at)))
+		FROM agent_task_envelope
+		WHERE workspace_id = $1 AND agent_id = $2 AND state = 'done'`, workspaceId, agentID).Scan(&avgSec)
+	if avgSec.Valid {
+		stats.AvgRunSec = &avgSec.Float64
+	}
+
+	return stats, rows.Err()
+}
+
+// ── Task Outputs ────────────────────────────────────────────────────────────
+
+func (b *PostgresBackend) ListTaskOutputs(ctx context.Context, workspaceId uint, taskID string) ([]*types.TaskOutput, error) {
+	rows, err := b.db.QueryContext(ctx, `
+		SELECT id, workspace_id, task_id, run_id, agent_id, output_type, title,
+		       summary, schema_json, data_json, metadata_json, created_at
+		FROM task_output
+		WHERE workspace_id = $1 AND task_id = $2
+		ORDER BY created_at ASC`, workspaceId, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []*types.TaskOutput
+	for rows.Next() {
+		o, err := scanTaskOutput(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, o)
+	}
+	return result, rows.Err()
+}
+
+func (b *PostgresBackend) CreateTaskOutput(ctx context.Context, output *types.TaskOutput) error {
+	schemaBytes, _ := json.Marshal(output.Schema)
+	dataBytes, _ := json.Marshal(output.Data)
+	metaBytes, _ := json.Marshal(output.Metadata)
+	if output.Schema == nil {
+		schemaBytes = nil
+	}
+	if output.Metadata == nil {
+		metaBytes = nil
+	}
+	return b.db.QueryRowContext(ctx, `
+		INSERT INTO task_output (workspace_id, task_id, run_id, agent_id, output_type, title, summary, schema_json, data_json, metadata_json)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		RETURNING id, created_at`,
+		output.WorkspaceID, output.TaskID, nilIfEmpty(output.RunID), nilIfEmpty(output.AgentID),
+		output.OutputType, output.Title, output.Summary,
+		nullableJSONB(schemaBytes), dataBytes, nullableJSONB(metaBytes),
+	).Scan(&output.ID, &output.CreatedAt)
+}
+
+func (b *PostgresBackend) GetTaskOutput(ctx context.Context, workspaceId uint, outputID string) (*types.TaskOutput, error) {
+	row := b.db.QueryRowContext(ctx, `
+		SELECT id, workspace_id, task_id, run_id, agent_id, output_type, title,
+		       summary, schema_json, data_json, metadata_json, created_at
+		FROM task_output
+		WHERE workspace_id = $1 AND id = $2`, workspaceId, outputID)
+	o := &types.TaskOutput{}
+	var runID, agentID sql.NullString
+	var summary sql.NullString
+	var schemaBytes, dataBytes, metaBytes []byte
+	err := row.Scan(&o.ID, &o.WorkspaceID, &o.TaskID, &runID, &agentID,
+		&o.OutputType, &o.Title, &summary, &schemaBytes, &dataBytes, &metaBytes, &o.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, &types.ErrTaskOutputNotFound{ID: outputID}
+	}
+	if err != nil {
+		return nil, err
+	}
+	if runID.Valid {
+		o.RunID = &runID.String
+	}
+	if agentID.Valid {
+		o.AgentID = &agentID.String
+	}
+	if summary.Valid {
+		o.Summary = &summary.String
+	}
+	json.Unmarshal(schemaBytes, &o.Schema)
+	json.Unmarshal(dataBytes, &o.Data)
+	json.Unmarshal(metaBytes, &o.Metadata)
+	return o, nil
+}
+
+func (b *PostgresBackend) AppendTaskOutputRows(ctx context.Context, workspaceId uint, outputID string, rowsJSON []byte) error {
+	res, err := b.db.ExecContext(ctx, `
+		UPDATE task_output
+		SET data_json = jsonb_set(
+			data_json,
+			'{rows}',
+			COALESCE(data_json->'rows', '[]'::jsonb) || $1::jsonb
+		)
+		WHERE id = $2 AND workspace_id = $3`, rowsJSON, outputID, workspaceId)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return &types.ErrTaskOutputNotFound{ID: outputID}
+	}
+	return nil
+}
+
+func (b *PostgresBackend) UpdateTaskOutputSummary(ctx context.Context, workspaceId uint, outputID string, summary string) error {
+	res, err := b.db.ExecContext(ctx, `
+		UPDATE task_output SET summary = $1
+		WHERE id = $2 AND workspace_id = $3`, summary, outputID, workspaceId)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return &types.ErrTaskOutputNotFound{ID: outputID}
+	}
+	return nil
+}
+
+func (b *PostgresBackend) DeleteTaskOutput(ctx context.Context, workspaceId uint, outputID string) error {
+	res, err := b.db.ExecContext(ctx, `
+		DELETE FROM task_output WHERE id = $1 AND workspace_id = $2`, outputID, workspaceId)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return &types.ErrTaskOutputNotFound{ID: outputID}
+	}
+	return nil
+}
+
+func scanTaskOutput(rows *sql.Rows) (*types.TaskOutput, error) {
+	o := &types.TaskOutput{}
+	var runID, agentID sql.NullString
+	var summary sql.NullString
+	var schemaBytes, dataBytes, metaBytes []byte
+	if err := rows.Scan(&o.ID, &o.WorkspaceID, &o.TaskID, &runID, &agentID,
+		&o.OutputType, &o.Title, &summary, &schemaBytes, &dataBytes, &metaBytes, &o.CreatedAt); err != nil {
+		return nil, err
+	}
+	if runID.Valid {
+		o.RunID = &runID.String
+	}
+	if agentID.Valid {
+		o.AgentID = &agentID.String
+	}
+	if summary.Valid {
+		o.Summary = &summary.String
+	}
+	json.Unmarshal(schemaBytes, &o.Schema)
+	json.Unmarshal(dataBytes, &o.Data)
+	json.Unmarshal(metaBytes, &o.Metadata)
+	return o, nil
+}
+
+func nilIfEmpty(s *string) interface{} {
+	if s == nil || *s == "" {
+		return nil
+	}
+	return *s
+}
+
+func nullableJSONB(b []byte) interface{} {
+	if b == nil || string(b) == "null" {
+		return nil
+	}
+	return b
 }

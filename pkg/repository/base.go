@@ -185,6 +185,14 @@ type BackendRepository interface {
 	UpdateAgentProfile(ctx context.Context, profile *types.AgentProfile) error
 	DeleteAgentProfile(ctx context.Context, workspaceId uint, agentId string) error
 
+	// Channel Bindings
+	// When agentID is nil, operates on workspace-level bindings (agent_id IS NULL).
+	// When agentID is non-nil, operates on that specific agent's bindings.
+	ListChannelBindings(ctx context.Context, workspaceId uint, agentID *string) ([]*types.ChannelBinding, error)
+	UpsertChannelBinding(ctx context.Context, binding *types.ChannelBinding) error
+	DeleteChannelBinding(ctx context.Context, workspaceId uint, agentID *string, channelType string) error
+	GetChannelBindingByAddress(ctx context.Context, channelType string, address string) (*types.ChannelBinding, error)
+
 	// Tasks
 	CreateTask(ctx context.Context, task *types.AgentTask) error
 	CreateTaskWithOutbox(ctx context.Context, task *types.AgentTask, event *types.OrchestrationOutboxEvent) error
@@ -249,6 +257,17 @@ type BackendRepository interface {
 	GetExecutionInstanceByKey(ctx context.Context, instanceKey string) (*types.AgentExecutionInstance, error)
 	UpdateExecutionInstanceState(ctx context.Context, instanceKey string, running, pending, stopping, desired int, status types.AgentExecutionInstanceStatus, lastEventAt *time.Time) error
 	AdjustExecutionInstanceRunningAttempts(ctx context.Context, instanceKey string, runningDelta int, lastEventAt *time.Time) error
+
+	// Agent stats
+	GetAgentStats(ctx context.Context, workspaceId uint, agentID string) (*types.AgentStats, error)
+
+	// Task outputs
+	ListTaskOutputs(ctx context.Context, workspaceId uint, taskID string) ([]*types.TaskOutput, error)
+	CreateTaskOutput(ctx context.Context, output *types.TaskOutput) error
+	GetTaskOutput(ctx context.Context, workspaceId uint, outputID string) (*types.TaskOutput, error)
+	AppendTaskOutputRows(ctx context.Context, workspaceId uint, outputID string, rows []byte) error
+	UpdateTaskOutputSummary(ctx context.Context, workspaceId uint, outputID string, summary string) error
+	DeleteTaskOutput(ctx context.Context, workspaceId uint, outputID string) error
 
 	// Database access
 	DB() *sql.DB

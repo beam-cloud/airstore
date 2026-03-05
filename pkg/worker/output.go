@@ -2,12 +2,16 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"strings"
 	"sync"
 
 	"github.com/beam-cloud/airstore/pkg/common"
+	gatewayclient "github.com/beam-cloud/airstore/pkg/gateway/client"
+	"github.com/beam-cloud/airstore/pkg/types"
+	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
@@ -160,6 +164,134 @@ func (w *FileWriter) Write(p []byte) (int, error) {
 
 func (w *FileWriter) Close() error {
 	return w.file.Close()
+}
+
+// OutputWriter intercepts structured output messages from agent stdout
+// (type=output, output_append, output_done) and sends them to the gateway via gRPC.
+type OutputWriter struct {
+	ctx         context.Context
+	client      *gatewayclient.GatewayClient
+	workspaceID uint32
+	taskID      string
+	runID       string
+	outputIDs   map[string]string // local output_id -> server-generated UUID
+	mu          sync.Mutex
+}
+
+func NewOutputWriter(ctx context.Context, client *gatewayclient.GatewayClient, task types.RunExecution) *OutputWriter {
+	var taskID, runID string
+	if task.ExecutionPolicy != nil {
+		taskID = anyToTrimmedString(task.ExecutionPolicy[types.AgentExecutionMetaKeyOriginTaskID])
+		runID = anyToTrimmedString(task.ExecutionPolicy[types.AgentExecutionMetaKeyRunID])
+	}
+	return &OutputWriter{
+		ctx:         ctx,
+		client:      client,
+		workspaceID: uint32(task.WorkspaceId),
+		taskID:      taskID,
+		runID:       runID,
+		outputIDs:   make(map[string]string),
+	}
+}
+
+func (w *OutputWriter) Write(p []byte) (int, error) {
+	if w.taskID == "" || w.client == nil {
+		return len(p), nil
+	}
+	line := strings.TrimSpace(string(p))
+	if line == "" || line[0] != '{' {
+		return len(p), nil
+	}
+	var payload map[string]any
+	if json.Unmarshal([]byte(line), &payload) != nil {
+		return len(p), nil
+	}
+	switch anyToTrimmedString(payload["type"]) {
+	case "output":
+		go w.createOutput(payload)
+	case "output_append":
+		go w.appendRows(payload)
+	case "output_done":
+		go w.finalizeOutput(payload)
+	}
+	return len(p), nil
+}
+
+func (w *OutputWriter) createOutput(payload map[string]any) {
+	localID := anyToTrimmedString(payload["output_id"])
+	req := &pb.CreateTaskOutputRequest{
+		WorkspaceId: w.workspaceID,
+		TaskId:      w.taskID,
+		RunId:       w.runID,
+		OutputType:  anyToTrimmedString(payload["output_type"]),
+		Title:       anyToTrimmedString(payload["title"]),
+	}
+	if v := payload["schema"]; v != nil {
+		if b, err := json.Marshal(v); err == nil {
+			req.SchemaJson = string(b)
+		}
+	}
+	if v := payload["data"]; v != nil {
+		if b, err := json.Marshal(v); err == nil {
+			req.DataJson = string(b)
+		}
+	}
+	if v := payload["metadata"]; v != nil {
+		if b, err := json.Marshal(v); err == nil {
+			req.MetadataJson = string(b)
+		}
+	}
+
+	serverID, err := w.client.CreateTaskOutput(w.ctx, req)
+	if err != nil {
+		log.Warn().Err(err).Str("task", w.taskID).Msg("output create failed")
+		return
+	}
+	if localID != "" && serverID != "" {
+		w.mu.Lock()
+		w.outputIDs[localID] = serverID
+		w.mu.Unlock()
+	}
+}
+
+func (w *OutputWriter) appendRows(payload map[string]any) {
+	localID := anyToTrimmedString(payload["output_id"])
+	w.mu.Lock()
+	serverID := w.outputIDs[localID]
+	w.mu.Unlock()
+	if serverID == "" {
+		log.Warn().Str("output_id", localID).Msg("output_append for unknown output_id")
+		return
+	}
+	rowsJSON, _ := json.Marshal(payload["rows"])
+	if err := w.client.AppendTaskOutputRows(w.ctx, &pb.AppendTaskOutputRowsRequest{
+		WorkspaceId: w.workspaceID,
+		OutputId:    serverID,
+		RowsJson:    string(rowsJSON),
+	}); err != nil {
+		log.Warn().Err(err).Str("output", serverID).Msg("output append failed")
+	}
+}
+
+func (w *OutputWriter) finalizeOutput(payload map[string]any) {
+	localID := anyToTrimmedString(payload["output_id"])
+	w.mu.Lock()
+	serverID := w.outputIDs[localID]
+	w.mu.Unlock()
+	if serverID == "" {
+		return
+	}
+	summary := anyToTrimmedString(payload["summary"])
+	if summary == "" {
+		return
+	}
+	if err := w.client.FinalizeTaskOutput(w.ctx, &pb.FinalizeTaskOutputRequest{
+		WorkspaceId: w.workspaceID,
+		OutputId:    serverID,
+		Summary:     summary,
+	}); err != nil {
+		log.Warn().Err(err).Str("output", serverID).Msg("output finalize failed")
+	}
 }
 
 // --- Factory ---

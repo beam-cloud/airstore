@@ -29,6 +29,7 @@ type AppConfig struct {
 	Streams     StreamsConfig     `key:"streams" json:"streams"`         // S2 stream configuration for task logs
 	Models      ModelsConfig      `key:"models" json:"models"`           // LLM provider API keys (BAML inference, sandbox tasks)
 	Compression CompressionConfig `key:"compression" json:"compression"` // Context compression middleware
+	Channels    ChannelsConfig    `key:"channels" json:"channels"`       // External channel provider credentials
 }
 
 // ModelsConfig centralises API keys for all LLM providers.
@@ -384,6 +385,17 @@ type ProviderOAuthCredentials struct {
 // ----------------------------------------------------------------------------
 
 // CompressionConfig configures the context compression middleware.
+type ChannelsConfig struct {
+	AgentMail ChannelAgentMailConfig `key:"agentMail" json:"agent_mail"`
+}
+
+type ChannelAgentMailConfig struct {
+	APIKey     string `key:"apiKey" json:"api_key"`
+	BaseURL    string `key:"baseUrl" json:"base_url"`
+	Domain     string `key:"domain" json:"domain"`
+	WebhookURL string `key:"webhookUrl" json:"webhook_url"` // public URL for inbound email webhooks
+}
+
 type CompressionConfig struct {
 	Strategy             string        `key:"strategy" json:"strategy"`                            // "strip" or "passthrough"
 	CacheEnabled         bool          `key:"cacheEnabled" json:"cache_enabled"`                   // enable Redis compressed content cache (default false)

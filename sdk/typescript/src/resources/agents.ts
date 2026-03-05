@@ -1,5 +1,8 @@
 import type { CoreClient, RequestOptions } from '../client.js';
-import type { AgentConfig, AgentCreateParams, AgentProfile, AgentUpdateParams } from '../types/agents.js';
+import type {
+  AgentConfig, AgentCreateParams, AgentProfile, AgentStats, AgentUpdateParams,
+  ChannelBinding, UpdateChannelsParams,
+} from '../types/agents.js';
 
 const AGENT_CONFIG_KEY_RUNNER = 'runner';
 
@@ -111,6 +114,68 @@ export class Agents {
     await this.client.request(
       'DELETE',
       `/workspaces/${workspaceId}/agents/${agentId}`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Retrieve aggregated task stats for an agent. */
+  async stats(
+    workspaceId: string,
+    agentId: string,
+    options?: RequestOptions,
+  ): Promise<AgentStats> {
+    return this.client.request<AgentStats>(
+      'GET',
+      `/workspaces/${workspaceId}/agents/${agentId}/stats`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** List channel bindings for an agent. */
+  async listChannels(
+    workspaceId: string,
+    agentId: string,
+    options?: RequestOptions,
+  ): Promise<ChannelBinding[]> {
+    return this.client.request<ChannelBinding[]>(
+      'GET',
+      `/workspaces/${workspaceId}/agents/${agentId}/channels`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Upsert channel bindings for an agent. */
+  async updateChannels(
+    workspaceId: string,
+    agentId: string,
+    params: UpdateChannelsParams,
+    options?: RequestOptions,
+  ): Promise<ChannelBinding[]> {
+    return this.client.request<ChannelBinding[]>(
+      'PUT',
+      `/workspaces/${workspaceId}/agents/${agentId}/channels`,
+      params,
+      undefined,
+      options,
+    );
+  }
+
+  /** Remove a channel binding by type. */
+  async deleteChannel(
+    workspaceId: string,
+    agentId: string,
+    channelType: string,
+    options?: RequestOptions,
+  ): Promise<void> {
+    await this.client.request(
+      'DELETE',
+      `/workspaces/${workspaceId}/agents/${agentId}/channels/${channelType}`,
       undefined,
       undefined,
       options,

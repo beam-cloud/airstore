@@ -708,12 +708,13 @@ func (s *AgentService) processDispatchMessage(ctx context.Context, message redis
 }
 
 type runResultProjectorMessage struct {
-	taskID       string
-	attemptID    string
-	exitCode     int
-	errorText    string
-	resultKey    string
-	retryAttempt int
+	taskID          string
+	attemptID       string
+	exitCode        int
+	errorText       string
+	resultKey       string
+	retryAttempt    int
+	waitingForInput bool
 }
 
 func (s *AgentService) resultProjectorLoop(ctx context.Context) {
@@ -768,12 +769,13 @@ func (s *AgentService) processRunResultMessages(ctx context.Context, messages []
 
 func (s *AgentService) processRunResultMessage(ctx context.Context, message redislib.XMessage) error {
 	result := runResultProjectorMessage{
-		taskID:       strings.TrimSpace(streamValueAsString(message.Values, types.OrchestrationOutboxPayloadTaskID)),
-		attemptID:    strings.TrimSpace(streamValueAsString(message.Values, types.OrchestrationOutboxPayloadAttemptID)),
-		exitCode:     intFromAny(message.Values[types.OrchestrationOutboxPayloadExitCode]),
-		errorText:    streamValueAsString(message.Values, types.OrchestrationOutboxPayloadError),
-		resultKey:    strings.TrimSpace(streamValueAsString(message.Values, types.OrchestrationOutboxPayloadIdempotency)),
-		retryAttempt: intFromAny(message.Values[types.OrchestrationOutboxPayloadDispatchAttempt]),
+		taskID:          strings.TrimSpace(streamValueAsString(message.Values, types.OrchestrationOutboxPayloadTaskID)),
+		attemptID:       strings.TrimSpace(streamValueAsString(message.Values, types.OrchestrationOutboxPayloadAttemptID)),
+		exitCode:        intFromAny(message.Values[types.OrchestrationOutboxPayloadExitCode]),
+		errorText:       streamValueAsString(message.Values, types.OrchestrationOutboxPayloadError),
+		resultKey:       strings.TrimSpace(streamValueAsString(message.Values, types.OrchestrationOutboxPayloadIdempotency)),
+		retryAttempt:    intFromAny(message.Values[types.OrchestrationOutboxPayloadDispatchAttempt]),
+		waitingForInput: boolFromAny(message.Values[types.OrchestrationOutboxPayloadWaitingForInput]),
 	}
 	if result.taskID == "" || result.attemptID == "" {
 		_ = s.orchestrationStore.AckRunResults(ctx, message.ID)
@@ -838,6 +840,7 @@ func (s *AgentService) applyRunResultProjectorMessage(ctx context.Context, resul
 		result.taskID,
 		result.exitCode,
 		result.errorText,
+		result.waitingForInput,
 	)
 }
 
@@ -865,6 +868,7 @@ func (s *AgentService) finalizeRunAttempt(
 	taskID string,
 	exitCode int,
 	errText string,
+	waitingForInput bool,
 ) error {
 	if s.backend == nil || attempt == nil {
 		return nil
@@ -904,13 +908,13 @@ func (s *AgentService) finalizeRunAttempt(
 	if err := s.appendRunSnapshot(ctx, attempt.RunID, runStatus, nil, &now, errMsg, payload); err != nil {
 		return fmt.Errorf("append completion snapshot: %w", err)
 	}
-	if err := s.markOriginTaskTerminalIfCurrentRun(ctx, attempt.RunID); err != nil {
+	if err := s.markOriginTaskTerminalIfCurrentRun(ctx, attempt.RunID, waitingForInput); err != nil {
 		return fmt.Errorf("mark origin task terminal: %w", err)
 	}
 	return nil
 }
 
-func (s *AgentService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, runID string) error {
+func (s *AgentService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, runID string, waitingForInput bool) error {
 	if s.backend == nil || strings.TrimSpace(runID) == "" {
 		return nil
 	}
@@ -933,11 +937,13 @@ func (s *AgentService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, r
 		return nil
 	}
 	if run.EndedAt != nil && task.UpdatedAt.After(*run.EndedAt) {
-		// Task state was reopened after this run had already ended.
 		return nil
 	}
 	targetRunID := run.ID
 	nextState := types.TaskTerminalStateForRun(run.Status, run.Interactive)
+	if waitingForInput && nextState == types.AgentTaskStateDone {
+		nextState = types.AgentTaskStateWaiting
+	}
 	updated, err := s.backend.UpdateTaskStateIfCurrentRun(
 		ctx,
 		run.OriginTaskID,

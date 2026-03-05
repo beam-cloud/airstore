@@ -14,6 +14,9 @@ import type {
   Schedule,
   ScheduleCreateParams,
   ScheduleUpdateParams,
+  TaskOutput,
+  CreateTaskOutputParams,
+  AppendRowsParams,
 } from '../types/tasks.js';
 import { toInputProvenanceBody, toPolicyBody, toRoutingBody } from './helpers.js';
 
@@ -150,7 +153,7 @@ export class Tasks {
     );
   }
 
-  /** Archive an idle or terminal task so it no longer appears in active listings. */
+  /** Archive a terminal task so it no longer appears in active listings. */
   async archive(
     workspaceId: string,
     taskId: string,
@@ -205,6 +208,49 @@ export class Tasks {
   /** Permanently delete a schedule. */
   async deleteSchedule(workspaceId: string, scheduleId: string, options?: RequestOptions): Promise<void> {
     await this.client.request('DELETE', this.schedulePath(workspaceId, scheduleId), undefined, undefined, options);
+  }
+
+  // ── Task Outputs ──────────────────────────────────────────────────────────
+
+  private outputPath(workspaceId: string, taskId: string, outputId?: string): string {
+    const base = `/workspaces/${workspaceId}/tasks/${taskId}/outputs`;
+    return outputId ? `${base}/${outputId}` : base;
+  }
+
+  /** List all outputs for a task. */
+  async listOutputs(workspaceId: string, taskId: string, options?: RequestOptions): Promise<TaskOutput[]> {
+    const resp = await this.client.request<{ outputs: TaskOutput[] }>(
+      'GET', this.outputPath(workspaceId, taskId), undefined, undefined, options,
+    );
+    return resp.outputs ?? [];
+  }
+
+  /** Create a structured output for a task. */
+  async createOutput(workspaceId: string, taskId: string, params: CreateTaskOutputParams, options?: RequestOptions): Promise<TaskOutput> {
+    return this.client.request<TaskOutput>(
+      'POST', this.outputPath(workspaceId, taskId), params, undefined, options,
+    );
+  }
+
+  /** Retrieve a single output by ID (includes full data). */
+  async getOutput(workspaceId: string, taskId: string, outputId: string, options?: RequestOptions): Promise<TaskOutput> {
+    return this.client.request<TaskOutput>(
+      'GET', this.outputPath(workspaceId, taskId, outputId), undefined, undefined, options,
+    );
+  }
+
+  /** Append rows to a table output. */
+  async appendOutputRows(workspaceId: string, taskId: string, outputId: string, params: AppendRowsParams, options?: RequestOptions): Promise<void> {
+    await this.client.request(
+      'POST', `${this.outputPath(workspaceId, taskId, outputId)}/rows`, params, undefined, options,
+    );
+  }
+
+  /** Delete an output. */
+  async deleteOutput(workspaceId: string, taskId: string, outputId: string, options?: RequestOptions): Promise<void> {
+    await this.client.request(
+      'DELETE', this.outputPath(workspaceId, taskId, outputId), undefined, undefined, options,
+    );
   }
 }
 

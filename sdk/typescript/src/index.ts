@@ -113,6 +113,9 @@ export type {
   AgentRunner,
   AgentProvider,
   AgentConfig,
+  AgentStats,
+  ChannelBinding,
+  UpdateChannelsParams,
 } from './types/agents.js';
 export type {
   QueueMode,
@@ -125,6 +128,7 @@ export type {
   RunExecutionPolicy,
   TaskKind,
   TaskState,
+  TaskPriority,
   InputProvenance,
   RoutingContext,
   AgentTask,
@@ -139,9 +143,17 @@ export type {
   TaskLogListResponse,
   TaskEventStreamParams,
   TaskEventBatch,
+  RunInteraction,
+  PendingInput,
+  RunEvent,
   Schedule,
   ScheduleCreateParams,
   ScheduleUpdateParams,
+  OutputType,
+  TaskOutput,
+  TableColumn,
+  CreateTaskOutputParams,
+  AppendRowsParams,
 } from './types/tasks.js';
 export type {
   RunStatus,

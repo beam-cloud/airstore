@@ -317,7 +317,6 @@ func parseTaskStates(raw string) ([]types.AgentTaskState, error) {
 		switch state {
 		case types.AgentTaskStateQueued,
 			types.AgentTaskStateRunning,
-			types.AgentTaskStateIdle,
 			types.AgentTaskStateDone,
 			types.AgentTaskStateDropped,
 			types.AgentTaskStateCancelled:

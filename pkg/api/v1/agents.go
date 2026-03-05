@@ -2,6 +2,7 @@ package apiv1
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
+	"github.com/beam-cloud/airstore/pkg/channels"
 	"github.com/beam-cloud/airstore/pkg/hooks"
 	"github.com/beam-cloud/airstore/pkg/orchestration"
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -16,9 +18,19 @@ import (
 )
 
 type AgentsGroup struct {
-	routerGroup *echo.Group
-	agents      *orchestration.AgentAPI
-	hooks       *hooks.Service
+	routerGroup  *echo.Group
+	agents       *orchestration.AgentAPI
+	hooks        *hooks.Service
+	backend      BackendRepo
+	emailChannel *channels.Email
+}
+
+type BackendRepo interface {
+	ListChannelBindings(ctx context.Context, workspaceId uint, agentID *string) ([]*types.ChannelBinding, error)
+	UpsertChannelBinding(ctx context.Context, binding *types.ChannelBinding) error
+	DeleteChannelBinding(ctx context.Context, workspaceId uint, agentID *string, channelType string) error
+	GetWorkspace(ctx context.Context, id uint) (*types.Workspace, error)
+	GetAgentStats(ctx context.Context, workspaceId uint, agentID string) (*types.AgentStats, error)
 }
 
 type createAgentAPIRequest struct {
@@ -34,11 +46,13 @@ type updateAgentAPIRequest struct {
 	Active *bool          `json:"active,omitempty"`
 }
 
-func NewAgentsGroup(routerGroup *echo.Group, agents *orchestration.AgentAPI, hooksSvc *hooks.Service) *AgentsGroup {
+func NewAgentsGroup(routerGroup *echo.Group, agents *orchestration.AgentAPI, hooksSvc *hooks.Service, backend BackendRepo, emailCh *channels.Email) *AgentsGroup {
 	g := &AgentsGroup{
-		routerGroup: routerGroup,
-		agents:      agents,
-		hooks:       hooksSvc,
+		routerGroup:  routerGroup,
+		agents:       agents,
+		hooks:        hooksSvc,
+		backend:      backend,
+		emailChannel: emailCh,
 	}
 	g.registerRoutes()
 	return g
@@ -51,6 +65,10 @@ func (g *AgentsGroup) registerRoutes() {
 	g.routerGroup.GET("/:agent_id", g.GetAgent)
 	g.routerGroup.PATCH("/:agent_id", g.UpdateAgent)
 	g.routerGroup.DELETE("/:agent_id", g.DeleteAgent)
+	g.routerGroup.GET("/:agent_id/stats", g.GetAgentStats)
+	g.routerGroup.GET("/:agent_id/channels", g.ListChannels)
+	g.routerGroup.PUT("/:agent_id/channels", g.UpsertChannels)
+	g.routerGroup.DELETE("/:agent_id/channels/:channel_type", g.DeleteChannel)
 }
 
 func (g *AgentsGroup) CreateAgent(c echo.Context) error {
@@ -228,4 +246,146 @@ func requireWorkspaceID(c echo.Context) (uint, error) {
 		return 0, ErrorResponse(c, http.StatusUnauthorized, "workspace auth required")
 	}
 	return workspaceID, nil
+}
+
+func (g *AgentsGroup) GetAgentStats(c echo.Context) error {
+	if g.backend == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "stats service unavailable")
+	}
+	workspaceID, err := requireWorkspaceID(c)
+	if err != nil {
+		return err
+	}
+	agentID := strings.TrimSpace(c.Param("agent_id"))
+	if agentID == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "agent_id is required")
+	}
+	stats, err := g.backend.GetAgentStats(c.Request().Context(), workspaceID, agentID)
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+	return SuccessResponse(c, stats)
+}
+
+// --- Agent Channel Binding Handlers ---
+
+type upsertChannelsRequest struct {
+	Channels []channelBindingEntry `json:"channels"`
+}
+
+type channelBindingEntry struct {
+	ChannelType string         `json:"channel_type"`
+	Address     string         `json:"address"`
+	Active      *bool          `json:"active,omitempty"`
+	ConfigJSON  map[string]any `json:"config_json,omitempty"`
+}
+
+func (g *AgentsGroup) ListChannels(c echo.Context) error {
+	if g.backend == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "channel service unavailable")
+	}
+	workspaceID, err := requireWorkspaceID(c)
+	if err != nil {
+		return err
+	}
+	agentID := strings.TrimSpace(c.Param("agent_id"))
+	if agentID == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "agent_id is required")
+	}
+	bindings, err := g.backend.ListChannelBindings(c.Request().Context(), workspaceID, &agentID)
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+	return SuccessResponse(c, bindings)
+}
+
+func (g *AgentsGroup) UpsertChannels(c echo.Context) error {
+	if g.backend == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "channel service unavailable")
+	}
+	workspaceID, err := requireWorkspaceID(c)
+	if err != nil {
+		return err
+	}
+	agentID := strings.TrimSpace(c.Param("agent_id"))
+	if agentID == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "agent_id is required")
+	}
+
+	var req upsertChannelsRequest
+	if err := decodeStrictBody(c, &req); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
+	}
+
+	results := make([]*types.ChannelBinding, 0, len(req.Channels))
+	for _, ch := range req.Channels {
+		if strings.TrimSpace(ch.ChannelType) == "" {
+			return ErrorResponse(c, http.StatusBadRequest, "channel_type is required")
+		}
+
+		active := true
+		if ch.Active != nil {
+			active = *ch.Active
+		}
+		address := strings.TrimSpace(ch.Address)
+
+		if ch.ChannelType == string(channels.ChannelTypeEmail) && address == "" && g.emailChannel != nil && g.emailChannel.Mail() != nil {
+			agent, err := g.agents.GetAgent(c.Request().Context(), workspaceID, agentID)
+			if err != nil {
+				return ErrorResponse(c, http.StatusBadRequest, "failed to look up agent: "+err.Error())
+			}
+			emailAddr, err := g.emailChannel.ProvisionInbox(c.Request().Context(), agent.AgentKey, agent.Name)
+			if err != nil {
+				return ErrorResponse(c, http.StatusBadGateway, "failed to provision inbox: "+err.Error())
+			}
+			address = emailAddr
+		}
+
+		if address == "" {
+			return ErrorResponse(c, http.StatusBadRequest, "address is required (or enable agentmail for auto-provisioning)")
+		}
+
+		binding := &types.ChannelBinding{
+			WorkspaceID: workspaceID,
+			AgentID:     &agentID,
+			ChannelType: ch.ChannelType,
+			Address:     address,
+			ConfigJSON:  ch.ConfigJSON,
+			Active:      active,
+		}
+		if err := g.backend.UpsertChannelBinding(c.Request().Context(), binding); err != nil {
+			return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+		}
+		results = append(results, binding)
+	}
+	return c.JSON(http.StatusOK, Response{Success: true, Data: results})
+}
+
+func (g *AgentsGroup) DeleteChannel(c echo.Context) error {
+	if g.backend == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "channel service unavailable")
+	}
+	workspaceID, err := requireWorkspaceID(c)
+	if err != nil {
+		return err
+	}
+	agentID := strings.TrimSpace(c.Param("agent_id"))
+	channelType := strings.TrimSpace(c.Param("channel_type"))
+	if agentID == "" || channelType == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "agent_id and channel_type are required")
+	}
+
+	if channelType == string(channels.ChannelTypeEmail) && g.emailChannel != nil && g.emailChannel.Mail() != nil {
+		bindings, _ := g.backend.ListChannelBindings(c.Request().Context(), workspaceID, &agentID)
+		for _, b := range bindings {
+			if b.ChannelType == string(channels.ChannelTypeEmail) && b.Address != "" {
+				_ = g.emailChannel.DeprovisionInbox(c.Request().Context(), b.Address)
+			}
+		}
+	}
+
+	if err := g.backend.DeleteChannelBinding(c.Request().Context(), workspaceID, &agentID, channelType); err != nil {
+		return ErrorResponse(c, http.StatusNotFound, err.Error())
+	}
+	return SuccessResponse(c, map[string]bool{"deleted": true})
 }

@@ -89,7 +89,7 @@ type AgentTaskState string
 const (
 	AgentTaskStateQueued    AgentTaskState = "queued"
 	AgentTaskStateRunning   AgentTaskState = "running"
-	AgentTaskStateIdle      AgentTaskState = "idle"
+	AgentTaskStateWaiting   AgentTaskState = "waiting"
 	AgentTaskStateDone      AgentTaskState = "done"
 	AgentTaskStateDropped   AgentTaskState = "dropped"
 	AgentTaskStateCancelled AgentTaskState = "cancelled"
@@ -97,7 +97,7 @@ const (
 
 func (s AgentTaskState) IsDispatchable() bool {
 	switch s {
-	case AgentTaskStateQueued:
+	case AgentTaskStateQueued, AgentTaskStateWaiting:
 		return true
 	default:
 		return false
@@ -116,9 +116,6 @@ func (s AgentTaskState) IsTerminal() bool {
 func TaskTerminalStateForRun(runStatus AgentRunStatus, interactive bool) AgentTaskState {
 	if runStatus == AgentRunStatusCancelled {
 		return AgentTaskStateCancelled
-	}
-	if interactive && runStatus == AgentRunStatusOK {
-		return AgentTaskStateIdle
 	}
 	return AgentTaskStateDone
 }
@@ -346,7 +343,8 @@ const (
 	OrchestrationOutboxPayloadRunID       = "run_id"
 	OrchestrationOutboxPayloadSessionID   = "session_id"
 	OrchestrationOutboxPayloadStreamID    = "stream_id"
-	OrchestrationOutboxPayloadIdempotency = "idempotency_key"
+	OrchestrationOutboxPayloadIdempotency      = "idempotency_key"
+	OrchestrationOutboxPayloadWaitingForInput  = "waiting_for_input"
 )
 
 type OrchestrationOutboxEvent struct {
@@ -381,6 +379,18 @@ type AgentProfile struct {
 	UpdatedAt   time.Time      `json:"updated_at" db:"updated_at"`
 }
 
+type ChannelBinding struct {
+	ID          int64          `json:"id" db:"id"`
+	WorkspaceID uint           `json:"workspace_id" db:"workspace_id"`
+	AgentID     *string        `json:"agent_id" db:"agent_id"`
+	ChannelType string         `json:"channel_type" db:"channel_type"`
+	Address     string         `json:"address" db:"address"`
+	ConfigJSON  map[string]any `json:"config_json" db:"-"`
+	Active      bool           `json:"active" db:"active"`
+	CreatedAt   time.Time      `json:"created_at" db:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at" db:"updated_at"`
+}
+
 // AgentTask is the high-level orchestration task (agent -> task -> run).
 type AgentTask struct {
 	ID             string         `json:"id" db:"id"`
@@ -398,6 +408,7 @@ type AgentTask struct {
 	QueuedAt       *time.Time     `json:"queued_at,omitempty" db:"queued_at"`
 	DispatchedAt   *time.Time     `json:"dispatched_at,omitempty" db:"dispatched_at"`
 	DroppedReason  *string        `json:"dropped_reason,omitempty" db:"dropped_reason"`
+	Priority       string         `json:"priority" db:"priority"`
 	ArchivedAt     *time.Time     `json:"archived_at,omitempty" db:"archived_at"`
 	CreatedAt      time.Time      `json:"created_at" db:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at" db:"updated_at"`
@@ -726,20 +737,12 @@ type RunExecutionState struct {
 
 // RunExecutionResult contains the result of a completed run execution
 type RunExecutionResult struct {
-	// ID is the run execution identifier
-	ID string `json:"id"`
-
-	// ExitCode is the exit code of the run execution
-	ExitCode int `json:"exit_code"`
-
-	// Output is the stdout/stderr output (if captured)
-	Output []byte `json:"output,omitempty"`
-
-	// Error contains error message if failed
-	Error string `json:"error,omitempty"`
-
-	// Duration is how long the task ran
-	Duration time.Duration `json:"duration"`
+	ID               string        `json:"id"`
+	ExitCode         int           `json:"exit_code"`
+	Output           []byte        `json:"output,omitempty"`
+	Error            string        `json:"error,omitempty"`
+	Duration         time.Duration `json:"duration"`
+	WaitingForInput  bool          `json:"waiting_for_input,omitempty"`
 }
 
 type ErrAgentProfileNotFound struct {
@@ -772,4 +775,34 @@ type ErrAgentRunAttemptNotFound struct {
 
 func (e *ErrAgentRunAttemptNotFound) Error() string {
 	return "agent run attempt not found: " + e.ID
+}
+
+// TaskOutput is a structured output produced by an agent during a task.
+type TaskOutput struct {
+	ID          string            `json:"id"`
+	WorkspaceID uint              `json:"workspace_id"`
+	TaskID      string            `json:"task_id"`
+	RunID       *string           `json:"run_id,omitempty"`
+	AgentID     *string           `json:"agent_id,omitempty"`
+	OutputType  string            `json:"output_type"`
+	Title       string            `json:"title"`
+	Summary     *string           `json:"summary,omitempty"`
+	Schema      map[string]any `json:"schema,omitempty"`
+	Data        map[string]any `json:"data"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
+	CreatedAt   time.Time         `json:"created_at"`
+}
+
+type ErrTaskOutputNotFound struct {
+	ID string
+}
+
+func (e *ErrTaskOutputNotFound) Error() string {
+	return "task output not found: " + e.ID
+}
+
+type AgentStats struct {
+	Total     int            `json:"total"`
+	ByState   map[string]int `json:"by_state"`
+	AvgRunSec *float64       `json:"avg_run_sec,omitempty"`
 }

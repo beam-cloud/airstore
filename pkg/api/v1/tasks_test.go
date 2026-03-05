@@ -8,12 +8,11 @@ import (
 )
 
 func TestParseTaskStatesAcceptsCanonicalStates(t *testing.T) {
-	states, err := parseTaskStates("queued,running,idle,done,dropped,cancelled")
+	states, err := parseTaskStates("queued,running,done,dropped,cancelled")
 	require.NoError(t, err)
 	require.Equal(t, []types.AgentTaskState{
 		types.AgentTaskStateQueued,
 		types.AgentTaskStateRunning,
-		types.AgentTaskStateIdle,
 		types.AgentTaskStateDone,
 		types.AgentTaskStateDropped,
 		types.AgentTaskStateCancelled,
@@ -25,5 +24,8 @@ func TestParseTaskStatesRejectsRemovedStates(t *testing.T) {
 	require.Error(t, err)
 
 	_, err = parseTaskStates("dispatched")
+	require.Error(t, err)
+
+	_, err = parseTaskStates("idle")
 	require.Error(t, err)
 }

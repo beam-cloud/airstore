@@ -33,11 +33,12 @@ type SandboxManager struct {
 	useHostResolvConf bool
 
 	// Components
-	runtime      runtime.Runtime
-	imageManager ImageManager
-	mountManager *MountManager
-	network      *NetworkManager
-	s2           *common.S2Client
+	runtime       runtime.Runtime
+	imageManager  ImageManager
+	mountManager  *MountManager
+	network       *NetworkManager
+	s2            *common.S2Client
+	gatewayClient *gatewayclient.GatewayClient
 
 	// State
 	sandboxes map[string]*Sandbox
@@ -191,6 +192,7 @@ func NewSandboxManager(ctx context.Context, cfg Config) (*SandboxManager, error)
 		mountManager:      mountMgr,
 		network:           netMgr,
 		s2:                s2,
+		gatewayClient:     cfg.GatewayClient,
 		sandboxes:         make(map[string]*Sandbox),
 		ctx:               managerCtx,
 		cancel:            cancel,
@@ -1343,6 +1345,7 @@ func (m *SandboxManager) ExecPTY(
 	})
 }
 
+
 func shellJoinArgs(args []string) string {
 	parts := make([]string, len(args))
 	for i, arg := range args {
@@ -1374,6 +1377,8 @@ func (m *SandboxManager) ResolveRunner(task types.RunExecution, env map[string]s
 	return m.resolvePromptRunner(task, env)
 }
 
+
+
 // RunTask creates and runs a sandbox for a task, returning when complete
 func (m *SandboxManager) RunTask(ctx context.Context, task types.RunExecution) (*types.RunExecutionResult, error) {
 	sandboxID := fmt.Sprintf("task-%s", task.ExternalId)
@@ -1398,10 +1403,11 @@ func (m *SandboxManager) RunTask(ctx context.Context, task types.RunExecution) (
 	// Ensure cleanup
 	defer m.Delete(sandboxID, true)
 
-	// Set up task output: S2 streams + worker console
+	// Set up task output: S2 streams + worker console + structured output capture
 	taskOutput := NewTaskOutput(task.ExternalId, "stdout",
 		NewS2Writer(ctx, m.s2, task.ExternalId, "stdout"),
 		NewConsoleWriter(task.ExternalId, "stdout"),
+		NewOutputWriter(ctx, m.gatewayClient, task),
 	)
 	if err := m.SetOutput(sandboxID, taskOutput, taskOutput.Flush); err != nil {
 		addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to set output")
