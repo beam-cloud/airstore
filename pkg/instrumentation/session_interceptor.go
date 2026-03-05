@@ -2,6 +2,7 @@ package instrumentation
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
@@ -35,19 +36,26 @@ func (s *SessionInterceptor) Unary() grpc.UnaryServerInterceptor {
 		}
 
 		vals := md.Get("x-airstore-session")
-		if len(vals) == 0 || vals[0] == "" {
+		if len(vals) == 0 {
 			return handler(ctx, req)
 		}
-		sessionID := vals[0]
 
-		key := "session:seen:" + sessionID
+		wsExtId := auth.WorkspaceExtId(ctx)
+		sessionID := strings.TrimSpace(vals[0])
+		if sessionID == "" {
+			sessionID = wsExtId
+		}
+		if sessionID == "" {
+			return handler(ctx, req)
+		}
+
+		key := "session:seen:" + wsExtId + ":" + sessionID
 		set, err := s.redis.SetNX(ctx, key, "1", sessionSeenTTL).Result()
 		if err != nil || !set {
 			// Either error or already seen — skip.
 			return handler(ctx, req)
 		}
 
-		wsExtId := auth.WorkspaceExtId(ctx)
 		s.recorder.Record(ctx, NewEvent("mount.started", map[string]any{
 			"session_id":   sessionID,
 			"workspace_id": wsExtId,
