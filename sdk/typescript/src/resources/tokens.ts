@@ -6,29 +6,14 @@ import type { Token, TokenCreateParams, TokenCreated } from '../types/tokens.js'
  *
  * Tokens are used for CLI mounting (`airstore start --token <token>`)
  * and per-workspace programmatic access.
- *
- * @example
- * ```ts
- * const token = await airstore.tokens.create("ws_abc", {
- *   email: "agent@internal",
- *   name: "vm-mount",
- * });
- * // token.token -> pass to: airstore start --token <this>
- * ```
  */
 export class Tokens {
   constructor(private readonly client: CoreClient) {}
 
   /**
-   * Create a workspace-scoped token.
-   *
-   * Either `memberId` or `email` must be provided. If `email` is given
-   * and no member with that email exists, one is auto-created.
-   *
-   * @param workspaceId - Workspace external ID.
-   * @param params - Token creation parameters.
-   * @param options - Per-request overrides.
-   * @returns The created token with raw value (shown once — store it safely).
+   * Create a workspace-scoped token. Either `memberId` or `email` must be
+   * provided. If `email` is given and no member exists, one is auto-created.
+   * The raw token value is only returned once -- store it safely.
    */
   async create(
     workspaceId: string,
@@ -50,15 +35,7 @@ export class Tokens {
     );
   }
 
-  /**
-   * List tokens in a workspace.
-   *
-   * Raw token values are never returned — only metadata.
-   *
-   * @param workspaceId - Workspace external ID.
-   * @param options - Per-request overrides.
-   * @returns Array of token metadata.
-   */
+  /** List tokens in a workspace. Raw token values are never returned. */
   async list(workspaceId: string, options?: RequestOptions): Promise<Token[]> {
     return this.client.request<Token[]>(
       'GET',
@@ -69,15 +46,7 @@ export class Tokens {
     );
   }
 
-  /**
-   * Revoke (delete) a token. Once revoked, the token can no longer be used.
-   *
-   * @param workspaceId - Workspace external ID.
-   * @param tokenId - Token external ID.
-   * @param options - Per-request overrides.
-   *
-   * @throws {NotFoundError} If the token doesn't exist.
-   */
+  /** Revoke (delete) a token. Once revoked it can no longer be used. */
   async revoke(
     workspaceId: string,
     tokenId: string,

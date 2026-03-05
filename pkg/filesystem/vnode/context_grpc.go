@@ -6,10 +6,12 @@ import (
 	"io/fs"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
+	"github.com/rs/zerolog/log"
 	"github.com/winfsp/cgofuse/fuse"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -19,7 +21,7 @@ const rpcTimeout = 30 * time.Second // Per-RPC timeout for context operations
 
 // ContextVNodeGRPC implements VirtualNode for S3-backed context storage.
 // It supports all read and write operations. The prefix determines the
-// mount path (e.g., "/skills", "/memory").
+// mount path (e.g., "/skills").
 type ContextVNodeGRPC struct {
 	client      pb.ContextServiceClient
 	token       string
@@ -33,10 +35,11 @@ type ContextVNodeGRPC struct {
 	writes      map[string]map[FileHandle]*handleState
 	nextFH      FileHandle
 	mu          sync.Mutex
+	stopEvict   chan struct{}
 }
 
 // NewContextVNodeGRPC creates a new context virtual node with the given prefix.
-// The prefix determines the mount path (e.g., types.PathSkills, types.PathMemory).
+// The prefix determines the mount path (e.g., types.PathSkills).
 func NewContextVNodeGRPC(conn *grpc.ClientConn, token string, prefix string) *ContextVNodeGRPC {
 	c := &ContextVNodeGRPC{
 		client:      pb.NewContextServiceClient(conn),
@@ -50,6 +53,8 @@ func NewContextVNodeGRPC(conn *grpc.ClientConn, token string, prefix string) *Co
 		nextFH:      1,
 	}
 	c.asyncWriter = NewAsyncWriter(c.writeRange)
+	c.stopEvict = make(chan struct{})
+	go c.handleEvictionLoop()
 	return c
 }
 
@@ -72,9 +77,11 @@ func (c *ContextVNodeGRPC) rel(path string) string {
 
 // Getattr returns file attributes with caching
 func (c *ContextVNodeGRPC) Getattr(path string) (*FileInfo, error) {
-	// Vnode root always exists (virtual directory, no RPC needed)
+	// Vnode root always exists (virtual directory, no RPC needed).
+	// Use 0777 so gVisor's gofer (which may run as a different UID)
+	// passes the kernel's default_permissions check for writes.
 	if path == c.Prefix() {
-		return NewDirInfo(PathIno(path)), nil
+		return newFileInfo(PathIno(path), 0, normalizeRuntimeWritableMode(syscall.S_IFDIR|0755), 2), nil
 	}
 
 	// AppleDouble files are zero-length placeholders
@@ -82,19 +89,19 @@ func (c *ContextVNodeGRPC) Getattr(path string) (*FileInfo, error) {
 		return NewFileInfo(PathIno(path), 0, 0644), nil
 	}
 
-	// If we have dirty data in the async writer, report its size.
-	// This ensures editors see the correct size after Truncate+Write
-	// before the data is uploaded to S3.
-	if info := c.asyncWriter.DirtyFileInfo(path, c.cachedMode(path)); info != nil {
+	// If we have dirty local data (buffered or async), report it immediately.
+	// This keeps size/read behavior correct before async upload completes.
+	if info := c.localDirtyFileInfo(path, c.cachedMode(path)); info != nil {
 		return info, nil
 	}
 
-	// Check caches
-	if c.cache.IsNegative(path) {
-		return nil, fs.ErrNotExist
-	}
+	// Prefer positive metadata cache so fresh readdir/stat data can heal
+	// stale negative entries immediately.
 	if info := c.cache.GetInfo(path); info != nil {
 		return info, nil
+	}
+	if c.cache.IsNegative(path) {
+		return nil, fs.ErrNotExist
 	}
 
 	// RPC to backend for actual files/subdirectories
@@ -146,8 +153,13 @@ func (c *ContextVNodeGRPC) Readdir(path string) ([]DirEntry, error) {
 		}
 
 		childPath := path + "/" + e.Name
+		mode := normalizeRuntimeWritableMode(e.Mode)
+		size := e.Size
+		if dirty, ok := c.localDirtySize(childPath, mode); ok && dirty > size {
+			size = dirty
+		}
 		ino := PathIno(childPath)
-		entries = append(entries, DirEntry{Name: e.Name, Mode: e.Mode, Ino: ino})
+		entries = append(entries, DirEntry{Name: e.Name, Mode: mode, Ino: ino, Size: size})
 
 		mtime := now
 		if e.Mtime > 0 {
@@ -155,7 +167,7 @@ func (c *ContextVNodeGRPC) Readdir(path string) ([]DirEntry, error) {
 		}
 		uid, gid := GetOwner()
 		childMeta[e.Name] = &FileInfo{
-			Ino: ino, Size: e.Size, Mode: e.Mode, Nlink: 1,
+			Ino: ino, Size: size, Mode: mode, Nlink: 1,
 			Uid: uid, Gid: gid,
 			Atime: now, Mtime: mtime, Ctime: mtime,
 		}
@@ -200,12 +212,12 @@ func (c *ContextVNodeGRPC) Open(path string, flags int) (FileHandle, error) {
 
 // openExisting opens an existing file and caches its metadata.
 func (c *ContextVNodeGRPC) openExisting(path string) (FileHandle, error) {
-	// Check cache first to avoid unnecessary RPC
-	if c.cache.IsNegative(path) {
-		return 0, fs.ErrNotExist
-	}
+	// Prefer positive cache so fresh metadata wins over stale negatives.
 	if c.cache.GetInfo(path) != nil {
 		return c.allocHandle(path), nil
+	}
+	if c.cache.IsNegative(path) {
+		return 0, fs.ErrNotExist
 	}
 
 	// Cache miss - verify file exists
@@ -234,14 +246,14 @@ func (c *ContextVNodeGRPC) Read(path string, buf []byte, off int64, fh FileHandl
 
 func (c *ContextVNodeGRPC) cachedReadOps() cachedReadOps {
 	return cachedReadOps{
-		content:         c.content,
-		writer:          c.asyncWriter,
-		getHandleState:  c.getHandleState,
-		enqueueWrites:   c.enqueueWritesForPath,
-		consumePrefetch: c.consumePrefetch,
-		maybeStatSmall:  c.maybeStatSmall,
-		readRange:       c.readRange,
-		recordRead:      c.recordRead,
+		content:          c.content,
+		writer:           c.asyncWriter,
+		getHandleState:   c.getHandleState,
+		peekHandleWrites: c.peekHandleWrites,
+		consumePrefetch:  c.consumePrefetch,
+		maybeStatSmall:   c.maybeStatSmall,
+		readRange:        c.readRange,
+		recordRead:       c.recordRead,
 	}
 }
 
@@ -261,14 +273,21 @@ func (c *ContextVNodeGRPC) Create(path string, flags int, mode uint32) (FileHand
 	ctx, cancel := c.ctx()
 	defer cancel()
 
-	resp, err := c.client.Create(ctx, &pb.ContextCreateRequest{Path: c.rel(path), Mode: mode})
+	relPath := c.rel(path)
+	resp, err := c.client.Create(ctx, &pb.ContextCreateRequest{
+		Path: relPath,
+		Mode: sanitizeNodeMode(mode, syscall.S_IFREG, 0644),
+	})
 	if err != nil {
+		log.Warn().Err(err).Str("path", relPath).Msg("context create: gRPC error")
 		return 0, err
 	}
 	if !resp.Ok {
+		log.Warn().Str("path", relPath).Str("error", resp.Error).Msg("context create: rejected")
 		return 0, fs.ErrPermission
 	}
-	c.cache.Invalidate(path)
+	invalidatePathCaches(c.cache, c.content, path)
+	invalidateParentCache(c.cache, path)
 	return c.allocHandle(path), nil
 }
 
@@ -278,6 +297,9 @@ func (c *ContextVNodeGRPC) Write(path string, buf []byte, off int64, fh FileHand
 	if isAppleDoublePath(path) {
 		return len(buf), nil // Pretend write succeeded
 	}
+	// Clear cached small-file content eagerly so readers never observe stale bytes
+	// when writes happen within the same mtime second.
+	c.content.Invalidate(path)
 
 	state := c.getHandleState(fh)
 	if state == nil {
@@ -293,6 +315,7 @@ func (c *ContextVNodeGRPC) Write(path string, buf []byte, off int64, fh FileHand
 		state.mu.Unlock()
 		return 0, fs.ErrInvalid
 	}
+	state.touch()
 
 	// Empty buffer: start buffering or write directly if too large.
 	if len(state.writeBuf) == 0 {
@@ -317,10 +340,19 @@ func (c *ContextVNodeGRPC) Write(path string, buf []byte, off int64, fh FileHand
 		return len(buf), nil
 	}
 
-	// Buffer overflow or non-contiguous: flush old buffer synchronously.
-	// We use synchronous writeRange here (not Enqueue) because the asyncWriter
-	// stores only ONE (offset, data) pair per path — sequential Enqueue calls
-	// at different offsets would clobber each other.
+	// Non-contiguous or buffer overflow. Try to merge both ranges in memory
+	// so the file reaches S3 as a single PutObject. Flushing a partial write
+	// at offset A followed by a gateway merge-write at offset B fills the gap
+	// [A+len(first), B) with NULLs when B > A+len(first).
+	merged := mergeWriteBuffer(state.writeOff, state.writeBuf, off, buf)
+	if merged != nil && len(merged.data) <= writeBufferMax {
+		state.writeOff = merged.off
+		state.writeBuf = merged.data
+		state.mu.Unlock()
+		return len(buf), nil
+	}
+
+	// Combined range too large: flush old buffer synchronously then start fresh.
 	data := append([]byte(nil), state.writeBuf...)
 	writeOff := state.writeOff
 	state.writeBuf = nil
@@ -363,7 +395,7 @@ func (c *ContextVNodeGRPC) Truncate(path string, size int64, fh FileHandle) erro
 		// fires and uploads empty content before the Write data arrives.
 		c.enqueueWritesForPath(path)
 		c.asyncWriter.EnqueueNoTimer(path, 0, []byte{})
-		c.cache.Invalidate(path)
+		invalidatePathCaches(c.cache, c.content, path)
 		return nil
 	}
 
@@ -375,14 +407,17 @@ func (c *ContextVNodeGRPC) Truncate(path string, size int64, fh FileHandle) erro
 	ctx, cancel := c.ctx()
 	defer cancel()
 
-	resp, err := c.client.Truncate(ctx, &pb.ContextTruncateRequest{Path: c.rel(path), Size: size})
+	relPath := c.rel(path)
+	resp, err := c.client.Truncate(ctx, &pb.ContextTruncateRequest{Path: relPath, Size: size})
 	if err != nil {
+		log.Warn().Err(err).Str("path", relPath).Msg("context truncate: gRPC error")
 		return err
 	}
 	if !resp.Ok {
+		log.Warn().Str("path", relPath).Str("error", resp.Error).Msg("context truncate: rejected")
 		return fs.ErrPermission
 	}
-	c.cache.Invalidate(path)
+	invalidatePathCaches(c.cache, c.content, path)
 	return nil
 }
 
@@ -391,14 +426,21 @@ func (c *ContextVNodeGRPC) Mkdir(path string, mode uint32) error {
 	ctx, cancel := c.ctx()
 	defer cancel()
 
-	resp, err := c.client.Mkdir(ctx, &pb.ContextMkdirRequest{Path: c.rel(path), Mode: mode})
+	relPath := c.rel(path)
+	resp, err := c.client.Mkdir(ctx, &pb.ContextMkdirRequest{
+		Path: relPath,
+		Mode: sanitizeNodeMode(mode, syscall.S_IFDIR, 0755),
+	})
 	if err != nil {
+		log.Warn().Err(err).Str("path", relPath).Msg("context mkdir: gRPC error")
 		return err
 	}
 	if !resp.Ok {
+		log.Warn().Str("path", relPath).Str("error", resp.Error).Msg("context mkdir: rejected")
 		return fs.ErrPermission
 	}
-	c.cache.Invalidate(path)
+	invalidatePathCaches(c.cache, c.content, path)
+	invalidateParentCache(c.cache, path)
 	return nil
 }
 
@@ -414,7 +456,8 @@ func (c *ContextVNodeGRPC) Rmdir(path string) error {
 	if !resp.Ok {
 		return fs.ErrPermission
 	}
-	c.cache.Invalidate(path)
+	invalidatePathCaches(c.cache, c.content, path)
+	invalidateParentCache(c.cache, path)
 	return nil
 }
 
@@ -434,7 +477,8 @@ func (c *ContextVNodeGRPC) Unlink(path string) error {
 	if !resp.Ok {
 		return fs.ErrPermission
 	}
-	c.cache.Invalidate(path)
+	invalidatePathCaches(c.cache, c.content, path)
+	invalidateParentCache(c.cache, path)
 	return nil
 }
 
@@ -464,8 +508,61 @@ func (c *ContextVNodeGRPC) Rename(oldpath, newpath string) error {
 		return fs.ErrPermission
 	}
 
-	c.cache.Invalidate(oldpath)
-	c.cache.Invalidate(newpath)
+	invalidatePathCaches(c.cache, c.content, oldpath)
+	invalidatePathCaches(c.cache, c.content, newpath)
+	invalidateParentCache(c.cache, oldpath)
+	invalidateParentCache(c.cache, newpath)
+	return nil
+}
+
+// Chmod updates mode metadata for files/directories.
+func (c *ContextVNodeGRPC) Chmod(path string, mode uint32) error {
+	if path == c.Prefix() {
+		return nil
+	}
+	if isAppleDoublePath(path) {
+		return nil
+	}
+
+	info, err := c.Getattr(path)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	relPath := c.rel(path)
+	if info.Mode&syscall.S_IFMT == syscall.S_IFDIR {
+		resp, err := c.client.Mkdir(ctx, &pb.ContextMkdirRequest{
+			Path: relPath,
+			Mode: sanitizeNodeMode(mode, syscall.S_IFDIR, 0755),
+		})
+		if err != nil {
+			return err
+		}
+		if !resp.Ok {
+			return fs.ErrPermission
+		}
+	} else {
+		fileType := info.Mode & syscall.S_IFMT
+		if fileType == 0 {
+			fileType = syscall.S_IFREG
+		}
+		resp, err := c.client.Create(ctx, &pb.ContextCreateRequest{
+			Path: relPath,
+			Mode: sanitizeNodeMode(mode, fileType, 0644),
+		})
+		if err != nil {
+			return err
+		}
+		if !resp.Ok {
+			return fs.ErrPermission
+		}
+	}
+
+	invalidatePathCaches(c.cache, c.content, path)
+	invalidateParentCache(c.cache, path)
 	return nil
 }
 
@@ -489,7 +586,8 @@ func (c *ContextVNodeGRPC) Symlink(target, linkPath string) error {
 	if !resp.Ok {
 		return fs.ErrPermission
 	}
-	c.cache.Invalidate(linkPath)
+	invalidatePathCaches(c.cache, c.content, linkPath)
+	invalidateParentCache(c.cache, linkPath)
 	return nil
 }
 
@@ -553,7 +651,7 @@ func (c *ContextVNodeGRPC) allocHandle(path string) FileHandle {
 	defer c.mu.Unlock()
 	fh := c.nextFH
 	c.nextFH++
-	state := &handleState{path: path}
+	state := &handleState{path: path, lastActivity: time.Now()}
 	c.handles[fh] = state
 
 	c.writeMu.Lock()
@@ -611,12 +709,14 @@ func (c *ContextVNodeGRPC) readRange(path string, off int64, length int64) ([]by
 		return nil, err
 	}
 	if !resp.Ok {
-		return nil, fs.ErrNotExist
+		return nil, readResponseError(resp.Error)
 	}
 	return resp.Data, nil
 }
 
 func (c *ContextVNodeGRPC) writeRange(path string, off int64, data []byte) error {
+	off, data = compactNulls(off, data)
+
 	ctx, cancel := c.ctx()
 	defer cancel()
 
@@ -629,7 +729,7 @@ func (c *ContextVNodeGRPC) writeRange(path string, off int64, data []byte) error
 	if !resp.Ok {
 		return fs.ErrPermission
 	}
-	c.cache.Invalidate(path)
+	invalidatePathCaches(c.cache, c.content, path)
 	return nil
 }
 
@@ -639,6 +739,7 @@ func (c *ContextVNodeGRPC) recordRead(state *handleState, path string, off int64
 	}
 
 	state.mu.Lock()
+	state.touch()
 	sequential := state.lastSize > 0 && state.lastOff+int64(state.lastSize) == off
 	state.lastOff = off
 	state.lastSize = n
@@ -728,6 +829,7 @@ func (c *ContextVNodeGRPC) flushWriteBuffer(path string, state *handleState) {
 	state.writeBuf = nil
 	state.mu.Unlock()
 
+	writeOff, data = compactNulls(writeOff, data)
 	c.asyncWriter.Enqueue(path, writeOff, data)
 }
 
@@ -746,9 +848,180 @@ func (c *ContextVNodeGRPC) enqueueWritesForPath(path string) {
 	}
 }
 
-// Cleanup flushes all pending async writes. Called when filesystem is unmounted.
+func (c *ContextVNodeGRPC) localDirtyFileInfo(path string, fallbackMode uint32) *FileInfo {
+	size, ok := c.localDirtySize(path, fallbackMode)
+	if !ok {
+		return nil
+	}
+
+	if fallbackMode == 0 {
+		fallbackMode = syscall.S_IFREG | 0644
+	}
+	mode := normalizeRuntimeWritableMode(fallbackMode)
+	uid, gid := GetOwner()
+	now := time.Now()
+	return &FileInfo{
+		Ino: PathIno(path), Size: size, Mode: mode, Nlink: 1,
+		Uid: uid, Gid: gid,
+		Atime: now, Mtime: now, Ctime: now,
+	}
+}
+
+func (c *ContextVNodeGRPC) localDirtySize(path string, fallbackMode uint32) (int64, bool) {
+	var (
+		size     int64
+		hasDirty bool
+	)
+
+	if info := c.cache.GetInfo(path); info != nil {
+		size = info.Size
+	}
+
+	if info := c.asyncWriter.DirtyFileInfo(path, fallbackMode); info != nil {
+		hasDirty = true
+		if info.Size > size {
+			size = info.Size
+		}
+	}
+
+	if bufferedSize, ok := c.bufferedHandleSize(path); ok {
+		hasDirty = true
+		if bufferedSize > size {
+			size = bufferedSize
+		}
+	}
+
+	return size, hasDirty
+}
+
+func (c *ContextVNodeGRPC) bufferedHandleSize(path string) (int64, bool) {
+	c.writeMu.Lock()
+	entries := c.writes[path]
+	states := make([]*handleState, 0, len(entries))
+	for _, state := range entries {
+		states = append(states, state)
+	}
+	c.writeMu.Unlock()
+
+	var (
+		size int64
+		ok   bool
+	)
+	for _, state := range states {
+		state.mu.Lock()
+		if !state.closed && len(state.writeBuf) > 0 {
+			end := state.writeOff + int64(len(state.writeBuf))
+			if !ok || end > size {
+				size = end
+			}
+			ok = true
+		}
+		state.mu.Unlock()
+	}
+	return size, ok
+}
+
+// peekHandleWrites returns a snapshot of the largest per-handle write buffer
+// for path WITHOUT clearing it. Used by the read path to serve dirty data
+// without disrupting an in-progress write sequence.
+func (c *ContextVNodeGRPC) peekHandleWrites(path string) (int64, []byte, bool) {
+	c.writeMu.Lock()
+	entries := c.writes[path]
+	states := make([]*handleState, 0, len(entries))
+	for _, state := range entries {
+		states = append(states, state)
+	}
+	c.writeMu.Unlock()
+
+	var (
+		bestOff  int64
+		bestData []byte
+	)
+	for _, state := range states {
+		state.mu.Lock()
+		if !state.closed && len(state.writeBuf) > 0 {
+			end := state.writeOff + int64(len(state.writeBuf))
+			if bestData == nil || end > bestOff+int64(len(bestData)) {
+				bestOff = state.writeOff
+				bestData = make([]byte, len(state.writeBuf))
+				copy(bestData, state.writeBuf)
+			}
+		}
+		state.mu.Unlock()
+	}
+	if bestData == nil {
+		return 0, nil, false
+	}
+	bestOff, bestData = compactNulls(bestOff, bestData)
+	return bestOff, bestData, true
+}
+
+func (c *ContextVNodeGRPC) OpenHandleCount() int {
+	c.mu.Lock()
+	n := len(c.handles)
+	c.mu.Unlock()
+	return n
+}
+
+// Cleanup stops background goroutines and flushes all pending async writes.
 func (c *ContextVNodeGRPC) Cleanup() {
+	close(c.stopEvict)
 	c.asyncWriter.Cleanup()
+}
+
+func (c *ContextVNodeGRPC) handleEvictionLoop() {
+	ticker := time.NewTicker(handleEvictionInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.stopEvict:
+			return
+		case <-ticker.C:
+			c.evictStaleHandles()
+		}
+	}
+}
+
+func (c *ContextVNodeGRPC) evictStaleHandles() {
+	cutoff := time.Now().Add(-handleStaleTimeout)
+
+	c.mu.Lock()
+	stale := make(map[FileHandle]*handleState)
+	for fh, state := range c.handles {
+		state.mu.Lock()
+		if !state.closed && state.lastActivity.Before(cutoff) {
+			stale[fh] = state
+		}
+		state.mu.Unlock()
+	}
+	c.mu.Unlock()
+
+	for fh, state := range stale {
+		c.flushWriteBuffer(state.path, state)
+		_ = c.asyncWriter.ForceFlush(state.path)
+
+		c.mu.Lock()
+		state.mu.Lock()
+		state.closed = true
+		state.writeBuf = nil
+		state.prefetch = nil
+		state.mu.Unlock()
+		delete(c.handles, fh)
+		c.mu.Unlock()
+
+		c.writeMu.Lock()
+		if m, ok := c.writes[state.path]; ok {
+			delete(m, fh)
+			if len(m) == 0 {
+				delete(c.writes, state.path)
+			}
+		}
+		c.writeMu.Unlock()
+
+		log.Debug().Str("path", state.path).Uint64("fh", uint64(fh)).
+			Msg("evicted stale file handle")
+	}
 }
 
 // cachedMode returns the file mode from the metadata cache, or 0 if not cached.
@@ -766,8 +1039,13 @@ func (c *ContextVNodeGRPC) toFileInfo(path string, info *pb.FileInfo) *FileInfo 
 		mtime = time.Unix(info.Mtime, 0)
 	}
 	uid, gid := GetOwner()
+	mode := info.Mode
+	if info.IsDir {
+		mode = withNodeFileType(mode, syscall.S_IFDIR)
+	}
+	mode = normalizeRuntimeWritableMode(mode)
 	return &FileInfo{
-		Ino: PathIno(path), Size: info.Size, Mode: info.Mode, Nlink: 1,
+		Ino: PathIno(path), Size: info.Size, Mode: mode, Nlink: 1,
 		Uid: uid, Gid: gid,
 		Atime: now, Mtime: mtime, Ctime: mtime,
 	}

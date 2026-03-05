@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/repository"
@@ -29,8 +30,8 @@ const (
 
 	// Default worker configuration
 	defaultWorkerImage  = "registry.localhost:5000/airstore-worker:latest"
-	defaultWorkerCpu    = "500m"
-	defaultWorkerMemory = "512Mi"
+	defaultWorkerCpu    = "4000m"
+	defaultWorkerMemory = "4096Mi"
 
 	// Labels and annotations
 	labelRole            = "airstore.beam.cloud/role"
@@ -54,8 +55,17 @@ type PoolScalerConfig struct {
 	WorkerMemory string
 
 	// Gateway connection
-	GatewayServiceName string
-	GatewayPort        int
+	GatewayServiceName        string
+	GatewayPort               int
+	GatewayExternalGRPCAddr   string
+	UseGatewayServiceHostname bool
+
+	// Pod-level worker settings
+	WorkerServiceAccountName string
+	WorkerHostNetwork        bool
+	WorkerImagePullSecrets   []string
+	RuntimeClassName         string
+	NodeSelector             map[string]string
 
 	// Worker authentication token
 	WorkerToken string
@@ -109,7 +119,7 @@ func NewPoolScaler(ctx context.Context, config PoolScalerConfig, taskQueue repos
 		config.GatewayServiceName = "airstore-gateway"
 	}
 	if config.GatewayPort == 0 {
-		config.GatewayPort = 1994
+		config.GatewayPort = types.ResolveGatewayGRPCPort(config.AppConfig.Gateway.GRPC.Port)
 	}
 
 	// Create K8s client
@@ -134,54 +144,68 @@ func NewPoolScaler(ctx context.Context, config PoolScalerConfig, taskQueue repos
 	}, nil
 }
 
-// EnsureDeployment checks if the worker deployment exists and creates/updates it
+// EnsureDeployment checks if the worker deployment exists and creates/updates it.
+// Skips the update when the config hash is unchanged (common case). Retries on
+// conflict since the scaler may update replicas between our GET and UPDATE.
 func (s *PoolScaler) EnsureDeployment() error {
 	ctx := context.Background()
-	deployment := s.buildDeployment()
+	desired := s.buildDeployment()
+	desiredHash := desired.Spec.Template.Annotations[annotationConfigHash]
 
-	// Check if deployment already exists
-	existing, err := s.kubeClient.AppsV1().Deployments(s.config.Namespace).Get(
-		ctx, s.config.DeploymentName, metav1.GetOptions{})
-	if err == nil {
-		// Deployment exists - update it to ensure env vars are current
-		deployment.ResourceVersion = existing.ResourceVersion
-		// Preserve current replica count (don't reset to min)
+	const maxRetries = 3
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		existing, err := s.kubeClient.AppsV1().Deployments(s.config.Namespace).Get(
+			ctx, s.config.DeploymentName, metav1.GetOptions{})
+
+		if errors.IsNotFound(err) {
+			_, createErr := s.kubeClient.AppsV1().Deployments(s.config.Namespace).Create(
+				ctx, desired, metav1.CreateOptions{})
+			if createErr != nil {
+				return fmt.Errorf("failed to create worker deployment: %w", createErr)
+			}
+			log.Info().
+				Str("pool", s.config.PoolName).
+				Str("deployment", s.config.DeploymentName).
+				Str("image", s.config.WorkerImage).
+				Int32("replicas", s.config.MinReplicas).
+				Msg("created worker deployment")
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("failed to get deployment: %w", err)
+		}
+
+		// Skip update if config hasn't changed — avoids unnecessary writes
+		// and the conflict window with the scaler entirely.
+		existingHash := existing.Spec.Template.Annotations[annotationConfigHash]
+		if existingHash == desiredHash {
+			return nil
+		}
+
+		// Config changed — apply update, preserving current replica count.
+		desired.ResourceVersion = existing.ResourceVersion
 		if existing.Spec.Replicas != nil {
-			deployment.Spec.Replicas = existing.Spec.Replicas
+			desired.Spec.Replicas = existing.Spec.Replicas
 		}
 
 		_, err = s.kubeClient.AppsV1().Deployments(s.config.Namespace).Update(
-			ctx, deployment, metav1.UpdateOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to update worker deployment: %w", err)
+			ctx, desired, metav1.UpdateOptions{})
+		if err == nil {
+			log.Info().
+				Str("pool", s.config.PoolName).
+				Str("deployment", s.config.DeploymentName).
+				Msg("updated worker deployment")
+			return nil
 		}
-
-		log.Info().
-			Str("pool", s.config.PoolName).
-			Str("deployment", s.config.DeploymentName).
-			Msg("updated worker deployment")
-		return nil
+		if errors.IsConflict(err) {
+			log.Debug().Str("pool", s.config.PoolName).Int("attempt", attempt+1).
+				Msg("deployment update conflict, retrying")
+			continue
+		}
+		return fmt.Errorf("failed to update worker deployment: %w", err)
 	}
 
-	if !errors.IsNotFound(err) {
-		return fmt.Errorf("failed to check deployment existence: %w", err)
-	}
-
-	// Create the deployment
-	_, err = s.kubeClient.AppsV1().Deployments(s.config.Namespace).Create(
-		ctx, deployment, metav1.CreateOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to create worker deployment: %w", err)
-	}
-
-	log.Info().
-		Str("pool", s.config.PoolName).
-		Str("deployment", s.config.DeploymentName).
-		Str("image", s.config.WorkerImage).
-		Int32("replicas", s.config.MinReplicas).
-		Msg("created worker deployment")
-
-	return nil
+	return fmt.Errorf("deployment update failed after %d retries (conflict)", maxRetries)
 }
 
 // buildDeployment constructs the K8s Deployment spec for workers
@@ -194,9 +218,15 @@ func (s *PoolScaler) buildDeployment() *appsv1.Deployment {
 
 	replicas := s.config.MinReplicas
 
-	// Build gateway gRPC address (workers use gRPC to communicate with gateway)
-	gatewayGRPCAddr := fmt.Sprintf("%s.%s.svc.cluster.local:1993",
-		s.config.GatewayServiceName, s.config.Namespace)
+	// Build gateway gRPC address (workers use gRPC to communicate with gateway).
+	gatewayGRPCAddr := s.gatewayGRPCAddr()
+
+	// Derive worker resource limits from K8s resource spec so the worker
+	// can compute how many tasks it can run concurrently.
+	cpuQuantity := resource.MustParse(s.config.WorkerCpu)
+	memQuantity := resource.MustParse(s.config.WorkerMemory)
+	cpuMillis := cpuQuantity.MilliValue() // millicores
+	memMiB := memQuantity.Value() >> 20   // bytes → MiB
 
 	// Serialize config to JSON for workers
 	configJSON, configHash := s.serializeConfig()
@@ -233,38 +263,20 @@ func (s *PoolScaler) buildDeployment() *appsv1.Deployment {
 				Spec: corev1.PodSpec{
 					// Allow workers time to drain running tasks before being killed
 					TerminationGracePeriodSeconds: int64Ptr(int64(s.config.AppConfig.Scheduler.WorkerShutdownTimeout.Seconds()) + 30),
+					ServiceAccountName:            s.config.WorkerServiceAccountName,
+					AutomountServiceAccountToken:  boolPtr(true),
+					HostNetwork:                   s.config.WorkerHostNetwork,
+					DNSPolicy:                     s.dnsPolicy(),
+					ImagePullSecrets:              s.imagePullSecrets(),
+					EnableServiceLinks:            boolPtr(false),
+					RuntimeClassName:              s.runtimeClassName(),
+					NodeSelector:                  s.config.NodeSelector,
 					Containers: []corev1.Container{
 						{
 							Name:            "worker",
 							Image:           s.config.WorkerImage,
 							ImagePullPolicy: corev1.PullAlways,
-							Env: []corev1.EnvVar{
-								{
-									Name: "WORKER_ID",
-									ValueFrom: &corev1.EnvVarSource{
-										FieldRef: &corev1.ObjectFieldSelector{
-											FieldPath: "metadata.name",
-										},
-									},
-								},
-								{
-									Name:  "WORKER_POOL",
-									Value: s.config.PoolName,
-								},
-								{
-									Name:  "GATEWAY_GRPC_ADDR",
-									Value: gatewayGRPCAddr,
-								},
-								{
-									Name:  "AIRSTORE_TOKEN",
-									Value: s.config.WorkerToken,
-								},
-								{
-									// Full config as JSON - worker loads via ConfigManager
-									Name:  "CONFIG_JSON",
-									Value: configJSON,
-								},
-							},
+							Env:             s.workerEnv(configJSON, cpuMillis, memMiB, gatewayGRPCAddr),
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{
 									corev1.ResourceCPU:    resource.MustParse(s.config.WorkerCpu),
@@ -311,6 +323,104 @@ func (s *PoolScaler) serializeConfig() (string, string) {
 	}
 	hash := fmt.Sprintf("%x", sha256.Sum256(data))[:16]
 	return string(data), hash
+}
+
+func (s *PoolScaler) gatewayGRPCAddr() string {
+	if !s.config.UseGatewayServiceHostname && s.config.GatewayExternalGRPCAddr != "" {
+		return s.config.GatewayExternalGRPCAddr
+	}
+
+	return fmt.Sprintf("%s.%s.svc.cluster.local:%d",
+		s.config.GatewayServiceName, s.config.Namespace, s.config.GatewayPort)
+}
+
+func (s *PoolScaler) workerEnv(configJSON string, cpuMillis, memMiB int64, gatewayGRPCAddr string) []corev1.EnvVar {
+	return []corev1.EnvVar{
+		{
+			Name: "WORKER_ID",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "metadata.name",
+				},
+			},
+		},
+		{
+			Name:  "WORKER_POOL",
+			Value: s.config.PoolName,
+		},
+		{
+			Name:  "GATEWAY_GRPC_ADDR",
+			Value: gatewayGRPCAddr,
+		},
+		{
+			Name:  "AIRSTORE_TOKEN",
+			Value: s.config.WorkerToken,
+		},
+		{
+			// Full config as JSON - worker loads via ConfigManager.
+			Name:  "CONFIG_JSON",
+			Value: configJSON,
+		},
+		{
+			// Worker CPU capacity in millicores (used to compute task concurrency).
+			Name:  "CPU_LIMIT",
+			Value: strconv.FormatInt(cpuMillis, 10),
+		},
+		{
+			// Worker memory capacity in MiB (used to compute task concurrency).
+			Name:  "MEMORY_LIMIT",
+			Value: strconv.FormatInt(memMiB, 10),
+		},
+		{
+			Name: "POD_IP",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "status.podIP",
+				},
+			},
+		},
+		{
+			Name:  "POD_NAMESPACE",
+			Value: s.config.Namespace,
+		},
+		{
+			Name: "NETWORK_PREFIX",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "spec.nodeName",
+				},
+			},
+		},
+	}
+}
+
+func (s *PoolScaler) imagePullSecrets() []corev1.LocalObjectReference {
+	if len(s.config.WorkerImagePullSecrets) == 0 {
+		return nil
+	}
+
+	refs := make([]corev1.LocalObjectReference, 0, len(s.config.WorkerImagePullSecrets))
+	for _, name := range s.config.WorkerImagePullSecrets {
+		refs = append(refs, corev1.LocalObjectReference{Name: name})
+	}
+
+	return refs
+}
+
+func (s *PoolScaler) dnsPolicy() corev1.DNSPolicy {
+	if s.config.WorkerHostNetwork {
+		return corev1.DNSClusterFirstWithHostNet
+	}
+
+	return corev1.DNSClusterFirst
+}
+
+func (s *PoolScaler) runtimeClassName() *string {
+	if s.config.RuntimeClassName == "" {
+		return nil
+	}
+
+	return &s.config.RuntimeClassName
 }
 
 // boolPtr returns a pointer to a bool
@@ -370,6 +480,12 @@ func (s *PoolScaler) tick() {
 		return
 	}
 
+	inFlight, err := s.taskQueue.InFlightCount(s.ctx)
+	if err != nil {
+		log.Warn().Err(err).Str("pool", s.config.PoolName).Msg("failed to get in-flight count")
+		return
+	}
+
 	// Get current replica count
 	currentReplicas, err := s.getDeploymentReplicas()
 	if err != nil {
@@ -388,34 +504,46 @@ func (s *PoolScaler) tick() {
 	log.Debug().
 		Str("pool", s.config.PoolName).
 		Int64("queue_depth", queueDepth).
+		Int64("in_flight", inFlight).
 		Int32("current_replicas", currentReplicas).
 		Msg("scaling check")
 
-	// Decide on scaling action
-	var desiredReplicas int32
-
-	if queueDepth > 0 {
-		// Tasks waiting - scale up if below max
-		s.isQueueEmptySince = false
-		if currentReplicas < s.config.MaxReplicas {
-			// Scale up by 1 (could be more aggressive)
-			desiredReplicas = min(currentReplicas+1, s.config.MaxReplicas)
-			s.scaleDeployment(desiredReplicas)
-		}
-	} else {
-		// Queue empty - track how long it's been empty
-		if !s.isQueueEmptySince {
-			s.isQueueEmptySince = true
-			s.lastQueueEmpty = time.Now()
-		}
-
-		// Scale down if queue has been empty for long enough
-		idleDuration := time.Since(s.lastQueueEmpty)
-		if idleDuration >= s.config.ScaleDownDelay && currentReplicas > s.config.MinReplicas {
-			desiredReplicas = max(currentReplicas-1, s.config.MinReplicas)
-			s.scaleDeployment(desiredReplicas)
-		}
+	desiredReplicas, shouldScale := s.calculateDesiredReplicas(currentReplicas, queueDepth, inFlight, time.Now())
+	if shouldScale {
+		s.scaleDeployment(desiredReplicas)
 	}
+}
+
+func (s *PoolScaler) calculateDesiredReplicas(currentReplicas int32, queueDepth, inFlight int64, now time.Time) (int32, bool) {
+	// Consider the pool idle only when both queue and in-flight work are empty.
+	hasWork := queueDepth > 0 || inFlight > 0
+	if hasWork {
+		s.isQueueEmptySince = false
+		if queueDepth > 0 && currentReplicas < s.config.MaxReplicas {
+			// Work is queued: scale out incrementally to avoid sudden overprovisioning.
+			return min(currentReplicas+1, s.config.MaxReplicas), true
+		}
+		return 0, false
+	}
+
+	// No work: start or continue idle window tracking.
+	if !s.isQueueEmptySince {
+		s.isQueueEmptySince = true
+		s.lastQueueEmpty = now
+		return 0, false
+	}
+
+	idleDuration := now.Sub(s.lastQueueEmpty)
+	if idleDuration < s.config.ScaleDownDelay {
+		return 0, false
+	}
+
+	if currentReplicas <= s.config.MinReplicas {
+		return 0, false
+	}
+
+	// Once the idle window has elapsed, scale directly back to the floor.
+	return s.config.MinReplicas, true
 }
 
 // getDeploymentReplicas gets the current replica count

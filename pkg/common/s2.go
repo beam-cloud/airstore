@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
 )
 
@@ -49,10 +51,14 @@ func (c *S2Client) Enabled() bool {
 
 // TaskLogEntry represents a log entry for a task
 type TaskLogEntry struct {
-	TaskID    string `json:"task_id"`
-	Timestamp int64  `json:"timestamp"`
-	Stream    string `json:"stream"` // "stdout" or "stderr"
-	Data      string `json:"data"`
+	TaskID    string         `json:"task_id"`
+	Timestamp int64          `json:"timestamp"`
+	SeqNum    int64          `json:"seq_num,omitempty"`
+	EventID   string         `json:"event_id,omitempty"`
+	Stream    string         `json:"stream"` // "stdout" or "stderr"
+	Data      string         `json:"data"`
+	ChunkType string         `json:"chunk_type,omitempty"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
 }
 
 // TaskStatusEntry represents a status change for a task
@@ -62,6 +68,14 @@ type TaskStatusEntry struct {
 	Status    string `json:"status"`
 	ExitCode  *int   `json:"exit_code,omitempty"`
 	Error     string `json:"error,omitempty"`
+}
+
+// RunEventEntry represents a lifecycle event emitted by the orchestration engine.
+type RunEventEntry struct {
+	RunID     string         `json:"run_id"`
+	EventType string         `json:"event_type"`
+	Timestamp int64          `json:"timestamp"`
+	Payload   map[string]any `json:"payload,omitempty"`
 }
 
 // StreamNames provides consistent stream naming
@@ -75,6 +89,11 @@ func (StreamNames) TaskLogs(taskID string) string {
 // TaskStatus returns the stream name for a task's status events
 func (StreamNames) TaskStatus(taskID string) string {
 	return fmt.Sprintf("task.%s.status", taskID)
+}
+
+// RunEvents returns the stream name for orchestration run events.
+func (StreamNames) RunEvents(runID string) string {
+	return fmt.Sprintf("run.%s.events", runID)
 }
 
 // Streams provides access to stream names
@@ -134,11 +153,14 @@ func (c *S2Client) Append(ctx context.Context, stream string, data interface{}) 
 
 // AppendLog is a convenience method for appending a log entry
 func (c *S2Client) AppendLog(ctx context.Context, taskID, stream, data string) error {
+	chunkType, displayData, metadata := inferTaskLogChunk(data)
 	entry := TaskLogEntry{
 		TaskID:    taskID,
 		Timestamp: time.Now().UnixMilli(),
 		Stream:    stream,
-		Data:      data,
+		Data:      displayData,
+		ChunkType: chunkType,
+		Metadata:  metadata,
 	}
 	return c.Append(ctx, Streams.TaskLogs(taskID), entry)
 }
@@ -153,6 +175,17 @@ func (c *S2Client) AppendStatus(ctx context.Context, taskID, status string, exit
 		Error:     errorMsg,
 	}
 	return c.Append(ctx, Streams.TaskStatus(taskID), entry)
+}
+
+// AppendRunEvent appends a run event entry to the run event stream.
+func (c *S2Client) AppendRunEvent(ctx context.Context, runID, eventType string, payload map[string]any) error {
+	entry := RunEventEntry{
+		RunID:     runID,
+		EventType: eventType,
+		Timestamp: time.Now().UnixMilli(),
+		Payload:   payload,
+	}
+	return c.Append(ctx, Streams.RunEvents(runID), entry)
 }
 
 // ReadRecord represents a record read from S2
@@ -190,8 +223,10 @@ func (c *S2Client) Read(ctx context.Context, stream string, seqNum int64, count 
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, nil // Stream doesn't exist yet
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusConflict ||
+		resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
+		// 404 = stream doesn't exist, 409 = deletion pending, 416 = cursor past end of stream
+		return nil, nil
 	}
 
 	if resp.StatusCode >= 400 {
@@ -222,6 +257,10 @@ func (c *S2Client) ReadLogs(ctx context.Context, taskID string, seqNum int64) ([
 		var entry TaskLogEntry
 		// Body is a JSON-encoded string, unmarshal it
 		if err := json.Unmarshal([]byte(r.Body), &entry); err == nil {
+			entry.SeqNum = r.SeqNum
+			if strings.TrimSpace(entry.EventID) == "" {
+				entry.EventID = fmt.Sprintf("%s:%d", taskID, r.SeqNum)
+			}
 			logs = append(logs, entry)
 		}
 		// Track the next sequence number (last seen + 1)
@@ -246,6 +285,220 @@ func FormatLogs(logs []TaskLogEntry) string {
 	return buf.String()
 }
 
+// StreamInfo represents a stream returned by the S2 list streams API.
+type StreamInfo struct {
+	Name string `json:"name"`
+}
+
+type listStreamsResponse struct {
+	Streams []StreamInfo `json:"streams"`
+	HasMore bool         `json:"has_more"`
+}
+
+// ListStreams lists streams whose names begin with the given prefix.
+func (c *S2Client) ListStreams(ctx context.Context, prefix string) ([]StreamInfo, error) {
+	if !c.Enabled() {
+		return nil, nil
+	}
+
+	url := c.url("/streams") + "?prefix=" + prefix + "&limit=1000"
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	httpReq.Header.Set("Authorization", "Bearer "+c.config.Token)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("S2 error %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result listStreamsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return result.Streams, nil
+}
+
 func (c *S2Client) url(path string) string {
 	return fmt.Sprintf("https://%s.b.aws.s2.dev/v1%s", c.config.Basin, path)
+}
+
+func inferTaskLogChunk(raw string) (string, string, map[string]any) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "text", raw, nil
+	}
+
+	if !strings.HasPrefix(trimmed, "{") || !strings.HasSuffix(trimmed, "}") {
+		return "text", raw, nil
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
+		return "text", raw, nil
+	}
+
+	chunkType := strings.TrimSpace(stringFromAny(payload["type"]))
+	if chunkType == "" {
+		chunkType = "json"
+	}
+
+	for _, key := range []string{"text", "delta", "content"} {
+		if value := strings.TrimSpace(stringFromAny(payload[key])); value != "" {
+			return chunkType, value, payload
+		}
+	}
+
+	return chunkType, raw, payload
+}
+
+func stringFromAny(value any) string {
+	if value == nil {
+		return ""
+	}
+	if typed, ok := value.(string); ok {
+		return typed
+	}
+	body, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	return string(body)
+}
+
+const redactedPlaceholder = "[REDACTED]"
+
+var (
+	sensitiveJSONStringValuePattern = regexp.MustCompile(`(?i)("([^"]*(?:api[_-]?key|secret|token|password|authorization|session_key|private_key|access_key)[^"]*)"\s*:\s*)"(.*?)"`)
+	sensitiveAssignmentPattern      = regexp.MustCompile(`(?i)\b([A-Z0-9_]*(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD|AUTHORIZATION|SESSION_KEY|PRIVATE_KEY|ACCESS_KEY)[A-Z0-9_]*)\s*=\s*("[^"]*"|'[^']*'|[^\s,;]+)`)
+	bearerTokenPattern              = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+\-/]+=*\b`)
+	anthropicKeyPattern             = regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{8,}\b`)
+)
+
+func isSensitiveKey(key string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	if normalized == "" {
+		return false
+	}
+	normalized = strings.ReplaceAll(normalized, "-", "_")
+	normalized = strings.ReplaceAll(normalized, ".", "_")
+
+	for _, needle := range []string{
+		"api_key",
+		"apikey",
+		"secret",
+		"token",
+		"password",
+		"authorization",
+		"session_key",
+		"private_key",
+		"access_key",
+	} {
+		if strings.Contains(normalized, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// RedactSensitiveString masks likely secrets in plain text payloads.
+func RedactSensitiveString(raw string) string {
+	if raw == "" {
+		return raw
+	}
+	redacted := sensitiveJSONStringValuePattern.ReplaceAllString(raw, `${1}"`+redactedPlaceholder+`"`)
+	redacted = sensitiveAssignmentPattern.ReplaceAllString(redacted, `${1}=`+redactedPlaceholder)
+	redacted = bearerTokenPattern.ReplaceAllString(redacted, `Bearer `+redactedPlaceholder)
+	redacted = anthropicKeyPattern.ReplaceAllString(redacted, redactedPlaceholder)
+	return redacted
+}
+
+// RedactSensitiveValue walks a nested value and masks secret-like content.
+func RedactSensitiveValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return RedactSensitiveMap(typed)
+	case map[string]string:
+		out := make(map[string]string, len(typed))
+		for key, val := range typed {
+			if isSensitiveKey(key) {
+				out[key] = redactedPlaceholder
+				continue
+			}
+			out[key] = RedactSensitiveString(val)
+		}
+		return out
+	case []any:
+		out := make([]any, len(typed))
+		for idx, item := range typed {
+			out[idx] = RedactSensitiveValue(item)
+		}
+		return out
+	case []string:
+		out := make([]string, len(typed))
+		for idx, item := range typed {
+			out[idx] = RedactSensitiveString(item)
+		}
+		return out
+	case string:
+		return RedactSensitiveString(typed)
+	default:
+		return value
+	}
+}
+
+// RedactSensitiveMap clones and redacts a JSON-like map.
+func RedactSensitiveMap(payload map[string]any) map[string]any {
+	if payload == nil {
+		return nil
+	}
+	out := make(map[string]any, len(payload))
+	for key, value := range payload {
+		if isSensitiveKey(key) {
+			out[key] = redactedPlaceholder
+			continue
+		}
+		out[key] = RedactSensitiveValue(value)
+	}
+	return out
+}
+
+// RedactSensitiveMaps clones and redacts a list of JSON-like maps.
+func RedactSensitiveMaps(items []map[string]any) []map[string]any {
+	if len(items) == 0 {
+		return items
+	}
+	out := make([]map[string]any, len(items))
+	for idx, item := range items {
+		out[idx] = RedactSensitiveMap(item)
+	}
+	return out
+}
+
+// RedactTaskLogEntry clones a log entry with secret-like content redacted.
+func RedactTaskLogEntry(entry TaskLogEntry) TaskLogEntry {
+	entry.Data = RedactSensitiveString(entry.Data)
+	entry.Metadata = RedactSensitiveMap(entry.Metadata)
+	return entry
+}
+
+// RedactTaskLogEntries clones and redacts a task log slice.
+func RedactTaskLogEntries(entries []TaskLogEntry) []TaskLogEntry {
+	if len(entries) == 0 {
+		return entries
+	}
+	out := make([]TaskLogEntry, len(entries))
+	for idx, entry := range entries {
+		out[idx] = RedactTaskLogEntry(entry)
+	}
+	return out
 }

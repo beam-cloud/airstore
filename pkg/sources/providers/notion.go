@@ -33,13 +33,49 @@ func NewNotionProvider() *NotionProvider {
 }
 
 func (n *NotionProvider) Name() string {
-	return types.ToolNotion.String()
+	return types.Notion.String()
+}
+
+func (n *NotionProvider) checkAuth(pctx *sources.ProviderContext) error {
+	if pctx.Credentials == nil || pctx.Credentials.AccessToken == "" {
+		return sources.ErrNotConnected
+	}
+	return nil
+}
+
+// notionExtractTitle extracts the title from a Notion page/database properties map.
+func notionExtractTitle(item map[string]any) string {
+	props, ok := item["properties"].(map[string]any)
+	if !ok {
+		return "Untitled"
+	}
+	// Try "title" property first
+	if titleProp, ok := props["title"].(map[string]any); ok {
+		if titleArr, ok := titleProp["title"].([]any); ok && len(titleArr) > 0 {
+			if textObj, ok := titleArr[0].(map[string]any); ok {
+				if plainText, ok := textObj["plain_text"].(string); ok {
+					return plainText
+				}
+			}
+		}
+	}
+	// Try "Name" property (common for databases)
+	if nameProp, ok := props["Name"].(map[string]any); ok {
+		if titleArr, ok := nameProp["title"].([]any); ok && len(titleArr) > 0 {
+			if textObj, ok := titleArr[0].(map[string]any); ok {
+				if plainText, ok := textObj["plain_text"].(string); ok {
+					return plainText
+				}
+			}
+		}
+	}
+	return "Untitled"
 }
 
 // Stat returns file/directory attributes
 func (n *NotionProvider) Stat(ctx context.Context, pctx *sources.ProviderContext, path string) (*sources.FileInfo, error) {
-	if pctx.Credentials == nil || pctx.Credentials.AccessToken == "" {
-		return nil, sources.ErrNotConnected
+	if err := n.checkAuth(pctx); err != nil {
+		return nil, err
 	}
 
 	if path == "" {
@@ -62,8 +98,8 @@ func (n *NotionProvider) Stat(ctx context.Context, pctx *sources.ProviderContext
 
 // ReadDir lists directory contents
 func (n *NotionProvider) ReadDir(ctx context.Context, pctx *sources.ProviderContext, path string) ([]sources.DirEntry, error) {
-	if pctx.Credentials == nil || pctx.Credentials.AccessToken == "" {
-		return nil, sources.ErrNotConnected
+	if err := n.checkAuth(pctx); err != nil {
+		return nil, err
 	}
 
 	if path == "" {
@@ -90,8 +126,8 @@ func (n *NotionProvider) ReadDir(ctx context.Context, pctx *sources.ProviderCont
 
 // Read reads file content
 func (n *NotionProvider) Read(ctx context.Context, pctx *sources.ProviderContext, path string, offset, length int64) ([]byte, error) {
-	if pctx.Credentials == nil || pctx.Credentials.AccessToken == "" {
-		return nil, sources.ErrNotConnected
+	if err := n.checkAuth(pctx); err != nil {
+		return nil, err
 	}
 
 	parts := strings.Split(path, "/")
@@ -116,8 +152,8 @@ func (n *NotionProvider) Readlink(ctx context.Context, pctx *sources.ProviderCon
 // Search executes a Notion search query and returns results
 // The query is a plain text search term
 func (n *NotionProvider) Search(ctx context.Context, pctx *sources.ProviderContext, query string, limit int) ([]sources.SearchResult, error) {
-	if pctx.Credentials == nil || pctx.Credentials.AccessToken == "" {
-		return nil, sources.ErrNotConnected
+	if err := n.checkAuth(pctx); err != nil {
+		return nil, err
 	}
 
 	if limit <= 0 {
@@ -179,40 +215,14 @@ func (n *NotionProvider) Search(ctx context.Context, pctx *sources.ProviderConte
 		objType, _ := item["object"].(string)
 		lastEdited, _ := item["last_edited_time"].(string)
 
-		// Get title from properties
-		title := "Untitled"
-		if props, ok := item["properties"].(map[string]any); ok {
-			if titleProp, ok := props["title"].(map[string]any); ok {
-				if titleArr, ok := titleProp["title"].([]any); ok && len(titleArr) > 0 {
-					if textObj, ok := titleArr[0].(map[string]any); ok {
-						if plainText, ok := textObj["plain_text"].(string); ok {
-							title = plainText
-						}
-					}
-				}
-			}
-			// Try Name property (common for databases)
-			if title == "Untitled" {
-				if nameProp, ok := props["Name"].(map[string]any); ok {
-					if titleArr, ok := nameProp["title"].([]any); ok && len(titleArr) > 0 {
-						if textObj, ok := titleArr[0].(map[string]any); ok {
-							if plainText, ok := textObj["plain_text"].(string); ok {
-								title = plainText
-							}
-						}
-					}
-				}
-			}
-		}
+		title := notionExtractTitle(item)
 
-		// Parse modified time
 		mtime := sources.NowUnix()
 		if t, err := time.Parse(time.RFC3339, lastEdited); err == nil {
 			mtime = t.Unix()
 		}
 
-		// Generate filename: sanitized title with ID suffix
-		safeTitle := sanitizeNotionTitle(title)
+		safeTitle := sources.SanitizeFilename(title)
 		shortID := id
 		if len(shortID) > 8 {
 			shortID = shortID[:8]
@@ -230,29 +240,6 @@ func (n *NotionProvider) Search(ctx context.Context, pctx *sources.ProviderConte
 	}
 
 	return results, nil
-}
-
-// sanitizeNotionTitle makes a Notion page title safe for use as a filename
-func sanitizeNotionTitle(title string) string {
-	// Replace unsafe characters with underscores
-	unsafe := []string{"/", "\\", ":", "*", "?", "\"", "<", ">", "|", " "}
-	result := title
-	for _, char := range unsafe {
-		result = strings.ReplaceAll(result, char, "_")
-	}
-	// Collapse multiple underscores
-	for strings.Contains(result, "__") {
-		result = strings.ReplaceAll(result, "__", "_")
-	}
-	result = strings.Trim(result, "_")
-	if result == "" {
-		result = "untitled"
-	}
-	// Truncate if too long
-	if len(result) > 50 {
-		result = result[:50]
-	}
-	return result
 }
 
 // --- Pages ---
@@ -608,32 +595,7 @@ func (n *NotionProvider) fetchPageAsMarkdown(ctx context.Context, token, pageId 
 	lastEdited, _ := page["last_edited_time"].(string)
 	pageURL, _ := page["url"].(string)
 
-	// Title
-	title := "Untitled"
-	if props, ok := page["properties"].(map[string]any); ok {
-		if titleProp, ok := props["title"].(map[string]any); ok {
-			if titleArr, ok := titleProp["title"].([]any); ok && len(titleArr) > 0 {
-				if titleObj, ok := titleArr[0].(map[string]any); ok {
-					if text, ok := titleObj["plain_text"].(string); ok {
-						title = text
-					}
-				}
-			}
-		}
-		// Try Name property
-		if title == "Untitled" {
-			if nameProp, ok := props["Name"].(map[string]any); ok {
-				if titleArr, ok := nameProp["title"].([]any); ok && len(titleArr) > 0 {
-					if titleObj, ok := titleArr[0].(map[string]any); ok {
-						if text, ok := titleObj["plain_text"].(string); ok {
-							title = text
-						}
-					}
-				}
-			}
-		}
-	}
-
+	title := notionExtractTitle(page)
 	md.WriteString("# " + title + "\n\n")
 
 	// Metadata section
@@ -890,16 +852,7 @@ func (n *NotionProvider) fetchRecentPages(ctx context.Context, token string) ([]
 			"last_edited_time": p["last_edited_time"],
 		}
 
-		// Extract title
-		if props, ok := p["properties"].(map[string]any); ok {
-			if title, ok := props["title"].(map[string]any); ok {
-				if titleArr, ok := title["title"].([]any); ok && len(titleArr) > 0 {
-					if titleObj, ok := titleArr[0].(map[string]any); ok {
-						simplified["title"] = titleObj["plain_text"]
-					}
-				}
-			}
-		}
+		simplified["title"] = notionExtractTitle(p)
 
 		result = append(result, simplified)
 	}
@@ -988,8 +941,8 @@ func (n *NotionProvider) postRequest(ctx context.Context, token, path string, bo
 // This implements the sources.QueryExecutor interface for filesystem queries.
 // Supports pagination via spec.PageToken (Notion's start_cursor) for fetching subsequent pages.
 func (n *NotionProvider) ExecuteQuery(ctx context.Context, pctx *sources.ProviderContext, spec sources.QuerySpec) (*sources.QueryResponse, error) {
-	if pctx.Credentials == nil || pctx.Credentials.AccessToken == "" {
-		return nil, sources.ErrNotConnected
+	if err := n.checkAuth(pctx); err != nil {
+		return nil, err
 	}
 
 	limit := spec.Limit
@@ -1076,42 +1029,15 @@ func (n *NotionProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provide
 		lastEdited, _ := item["last_edited_time"].(string)
 		createdTime, _ := item["created_time"].(string)
 
-		// Get title from properties
-		title := "Untitled"
-		if props, ok := item["properties"].(map[string]any); ok {
-			if titleProp, ok := props["title"].(map[string]any); ok {
-				if titleArr, ok := titleProp["title"].([]any); ok && len(titleArr) > 0 {
-					if textObj, ok := titleArr[0].(map[string]any); ok {
-						if plainText, ok := textObj["plain_text"].(string); ok {
-							title = plainText
-						}
-					}
-				}
-			}
-			// Try Name property (common for databases)
-			if title == "Untitled" {
-				if nameProp, ok := props["Name"].(map[string]any); ok {
-					if titleArr, ok := nameProp["title"].([]any); ok && len(titleArr) > 0 {
-						if textObj, ok := titleArr[0].(map[string]any); ok {
-							if plainText, ok := textObj["plain_text"].(string); ok {
-								title = plainText
-							}
-						}
-					}
-				}
-			}
-		}
+		title := notionExtractTitle(item)
 
-		// Parse modified time
-		mtime := sources.NowUnix()
+		var mtime int64
+		var modDate string
 		if t, err := time.Parse(time.RFC3339, lastEdited); err == nil {
 			mtime = t.Unix()
-		}
-
-		// Parse dates for metadata
-		modDate := ""
-		if t, err := time.Parse(time.RFC3339, lastEdited); err == nil {
 			modDate = t.Format("2006-01-02")
+		} else {
+			mtime = sources.NowUnix()
 		}
 		createdDate := ""
 		if t, err := time.Parse(time.RFC3339, createdTime); err == nil {
@@ -1154,8 +1080,8 @@ func (n *NotionProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provide
 // Returns the page content as markdown.
 // This implements the sources.QueryExecutor interface.
 func (n *NotionProvider) ReadResult(ctx context.Context, pctx *sources.ProviderContext, resultID string) ([]byte, error) {
-	if pctx.Credentials == nil || pctx.Credentials.AccessToken == "" {
-		return nil, sources.ErrNotConnected
+	if err := n.checkAuth(pctx); err != nil {
+		return nil, err
 	}
 
 	// Remove dashes if present to normalize, then add them back
@@ -1179,7 +1105,7 @@ func (n *NotionProvider) FormatFilename(format string, metadata map[string]strin
 	for key, value := range metadata {
 		placeholder := "{" + key + "}"
 		// Sanitize the value for filesystem use
-		safeValue := sanitizeNotionTitle(value)
+		safeValue := sources.SanitizeFilename(value)
 		// Truncate long values (except id)
 		if key != "id" && len(safeValue) > 50 {
 			safeValue = safeValue[:50]

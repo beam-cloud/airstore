@@ -15,6 +15,82 @@ package type_builder
 
 import baml "github.com/boundaryml/baml/engine/language_client_go/pkg"
 
+type ConfluenceQueryResultClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *ConfluenceQueryResultClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *ConfluenceQueryResultClassView) PropertyCql_query() (ClassPropertyView, error) {
+	return t.inner.Property("cql_query")
+}
+
+func (t *ConfluenceQueryResultClassView) PropertyContent_type() (ClassPropertyView, error) {
+	return t.inner.Property("content_type")
+}
+
+func (t *ConfluenceQueryResultClassView) PropertyLimit() (ClassPropertyView, error) {
+	return t.inner.Property("limit")
+}
+
+func (t *ConfluenceQueryResultClassView) PropertyFilename_format() (ClassPropertyView, error) {
+	return t.inner.Property("filename_format")
+}
+
+func (t *TypeBuilder) ConfluenceQueryResult() (*ConfluenceQueryResultClassView, error) {
+	bld, err := t.inner.Class("ConfluenceQueryResult")
+	if err != nil {
+		return nil, err
+	}
+	return &ConfluenceQueryResultClassView{inner: bld}, nil
+}
+
+func (t *ConfluenceQueryResultClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
+type CronResultClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *CronResultClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *CronResultClassView) PropertyCron_expr() (ClassPropertyView, error) {
+	return t.inner.Property("cron_expr")
+}
+
+func (t *TypeBuilder) CronResult() (*CronResultClassView, error) {
+	bld, err := t.inner.Class("CronResult")
+	if err != nil {
+		return nil, err
+	}
+	return &CronResultClassView{inner: bld}, nil
+}
+
+func (t *CronResultClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
 type GDriveQueryResultClassView struct {
 	inner baml.ClassBuilder
 }
@@ -352,5 +428,53 @@ func (t *TypeBuilder) SlackQueryResult() (*SlackQueryResultClassView, error) {
 }
 
 func (t *SlackQueryResultClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
+type WebQueryResultClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *WebQueryResultClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *WebQueryResultClassView) PropertyWeb_mode() (ClassPropertyView, error) {
+	return t.inner.Property("web_mode")
+}
+
+func (t *WebQueryResultClassView) PropertyWeb_query() (ClassPropertyView, error) {
+	return t.inner.Property("web_query")
+}
+
+func (t *WebQueryResultClassView) PropertyInclude_paths() (ClassPropertyView, error) {
+	return t.inner.Property("include_paths")
+}
+
+func (t *WebQueryResultClassView) PropertyLimit() (ClassPropertyView, error) {
+	return t.inner.Property("limit")
+}
+
+func (t *WebQueryResultClassView) PropertyFilename_format() (ClassPropertyView, error) {
+	return t.inner.Property("filename_format")
+}
+
+func (t *TypeBuilder) WebQueryResult() (*WebQueryResultClassView, error) {
+	bld, err := t.inner.Class("WebQueryResult")
+	if err != nil {
+		return nil, err
+	}
+	return &WebQueryResultClassView{inner: bld}, nil
+}
+
+func (t *WebQueryResultClassView) Type() (baml.Type, error) {
 	return t.inner.Type()
 }

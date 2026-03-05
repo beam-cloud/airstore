@@ -138,7 +138,7 @@ func (m *MountManager) setup() (string, error) {
 
 	addr := m.cfg.GatewayAddr
 	if addr == "" {
-		addr = "localhost:1993"
+		addr = types.DefaultGatewayGRPCAddr()
 	}
 
 	// Check for local mode
@@ -216,8 +216,8 @@ func (m *MountManager) createFilesystem(addr string) (*filesystem.Filesystem, *g
 	}
 
 	// Register all vnodes
-	fs.RegisterVNode(vnode.NewConfigVNode(addr, m.cfg.Token))
-	fs.RegisterVNode(vnode.NewToolsVNode(addr, m.cfg.Token, shim))
+	fs.RegisterVNode(vnode.NewConfigVNode(addr, m.cfg.Token, shim))
+	fs.RegisterVNode(vnode.NewToolsVNode(addr, m.cfg.Token))
 
 	var sourcesOpts []vnode.SourcesVNodeOption
 	if m.cfg.Compression != "" {
@@ -225,7 +225,6 @@ func (m *MountManager) createFilesystem(addr string) (*filesystem.Filesystem, *g
 	}
 	fs.RegisterVNode(vnode.NewSourcesVNode(conn, m.cfg.Token, sourcesOpts...))
 	fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, m.cfg.Token, types.PathSkills)) // /Skills
-	fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, m.cfg.Token, types.PathMemory)) // /Memory
 	fs.RegisterVNode(vnode.NewTasksVNodeGRPC(conn, m.cfg.Token))                     // /Tasks
 	fs.SetStorageFallback(vnode.NewStorageVNode(conn, m.cfg.Token))                  // user folders
 

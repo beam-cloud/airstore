@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 )
@@ -21,10 +22,8 @@ const (
 	prodGatewayGRPC = "gateway.airstore.ai:443"
 	prodGatewayHTTP = "https://api.airstore.ai"
 
-	localDashboard   = "http://localhost:3001"
-	localAPI         = "http://localhost:8113"
-	localGatewayGRPC = "localhost:1993"
-	localGatewayHTTP = "http://localhost:1994"
+	localDashboard = "http://localhost:3001"
+	localAPI       = "http://localhost:8113"
 )
 
 var (
@@ -54,14 +53,14 @@ func defaultGRPCAddr() string {
 	if Release == "true" {
 		return prodGatewayGRPC
 	}
-	return localGatewayGRPC
+	return types.DefaultGatewayGRPCAddr()
 }
 
 func defaultHTTPAddr() string {
 	if Release == "true" {
 		return prodGatewayHTTP
 	}
-	return localGatewayHTTP
+	return types.DefaultGatewayHTTPURL()
 }
 
 // Custom help template with styled output
@@ -112,13 +111,11 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&authToken, "token", getEnv("AIRSTORE_TOKEN", ""), "Authentication token")
 	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 
-	rootCmd.AddCommand(workspaceCmd)
 	rootCmd.AddCommand(memberCmd)
 	rootCmd.AddCommand(tokenCmd)
 	rootCmd.AddCommand(connectionCmd)
 	rootCmd.AddCommand(taskCmd)
 	rootCmd.AddCommand(hookCmd)
-	rootCmd.AddCommand(skillCmd)
 }
 
 // Execute runs the CLI
@@ -135,9 +132,4 @@ func getEnv(key, defaultValue string) string {
 
 func getClient() (*Client, error) {
 	return NewClient(gatewayAddr, authToken)
-}
-
-func exitError(err error) {
-	PrintError(err)
-	os.Exit(1)
 }

@@ -1,8 +1,132 @@
 package services
 
 import (
+	"context"
+	"fmt"
 	"testing"
+
+	hookspkg "github.com/beam-cloud/airstore/pkg/hooks"
+	"github.com/beam-cloud/airstore/pkg/repository"
+	"github.com/beam-cloud/airstore/pkg/types"
 )
+
+type testHookEmitter struct {
+	events []map[string]any
+}
+
+func (e *testHookEmitter) Emit(_ context.Context, data map[string]any) error {
+	copied := make(map[string]any, len(data))
+	for k, v := range data {
+		copied[k] = v
+	}
+	e.events = append(e.events, copied)
+	return nil
+}
+
+type failingDeleteEmitter struct {
+	events []map[string]any
+}
+
+func (e *failingDeleteEmitter) Emit(_ context.Context, data map[string]any) error {
+	event, _ := data["event"].(string)
+	if event == hookspkg.EventFsDelete {
+		return fmt.Errorf("simulated delete emit failure")
+	}
+	copied := make(map[string]any, len(data))
+	for k, v := range data {
+		copied[k] = v
+	}
+	e.events = append(e.events, copied)
+	return nil
+}
+
+func TestEmitSourceHookEvents_DeleteFailureSkipsCommit(t *testing.T) {
+	rdb, err := repository.NewRedisClientForTest()
+	if err != nil {
+		t.Fatalf("failed to create test redis: %v", err)
+	}
+	emitter := &failingDeleteEmitter{}
+	svc := &SourceService{
+		seenTracker: hookspkg.NewSeenTracker(rdb),
+		hookStream:  emitter,
+	}
+
+	query := &types.FilesystemQuery{
+		WorkspaceId: 127,
+		Integration: "linear",
+		Path:        "/sources/linear/del-fail",
+	}
+
+	// Bootstrap with {a, b, c}
+	svc.emitSourceHookEvents(context.Background(), 127, query, []repository.QueryResult{
+		{ID: "a"}, {ID: "b"}, {ID: "c"},
+	})
+	emitter.events = nil
+
+	// Remove b,c → delete emit will fail. Seen tracker must NOT advance.
+	newCount := svc.emitSourceHookEvents(context.Background(), 127, query, []repository.QueryResult{
+		{ID: "a"},
+	})
+	if newCount != 0 {
+		t.Fatalf("expected 0 new results, got %d", newCount)
+	}
+
+	// Retry with same input: b,c should still appear as removed because
+	// the seen tracker was not committed on the failed attempt.
+	emitter2 := &testHookEmitter{}
+	svc.hookStream = emitter2
+	newCount = svc.emitSourceHookEvents(context.Background(), 127, query, []repository.QueryResult{
+		{ID: "a"},
+	})
+	if len(emitter2.events) != 1 {
+		t.Fatalf("expected 1 retry event (fs.delete), got %d", len(emitter2.events))
+	}
+	if gotEvent, _ := emitter2.events[0]["event"].(string); gotEvent != hookspkg.EventFsDelete {
+		t.Fatalf("expected fs.delete on retry, got %q", gotEvent)
+	}
+	if gotCount, _ := emitter2.events[0]["removed_count"].(string); gotCount != "2" {
+		t.Fatalf("expected removed_count=2 on retry, got %q", gotCount)
+	}
+}
+
+func TestEmitSourceHookEvents_AllRemovedEmitsFsDelete(t *testing.T) {
+	rdb, err := repository.NewRedisClientForTest()
+	if err != nil {
+		t.Fatalf("failed to create test redis: %v", err)
+	}
+	emitter := &testHookEmitter{}
+	svc := &SourceService{
+		seenTracker: hookspkg.NewSeenTracker(rdb),
+		hookStream:  emitter,
+	}
+
+	query := &types.FilesystemQuery{
+		WorkspaceId: 128,
+		Integration: "linear",
+		Path:        "/sources/linear/allgone",
+	}
+
+	// Bootstrap with {x, y}
+	svc.emitSourceHookEvents(context.Background(), 128, query, []repository.QueryResult{
+		{ID: "x"}, {ID: "y"},
+	})
+	emitter.events = nil
+
+	// All items gone → should emit fs.delete for both
+	newCount := svc.emitSourceHookEvents(context.Background(), 128, query, nil)
+	if newCount != 0 {
+		t.Fatalf("expected 0 new results, got %d", newCount)
+	}
+	if len(emitter.events) != 1 {
+		t.Fatalf("expected 1 emitted event (fs.delete), got %d", len(emitter.events))
+	}
+	if gotEvent, _ := emitter.events[0]["event"].(string); gotEvent != hookspkg.EventFsDelete {
+		t.Fatalf("expected fs.delete event, got %q", gotEvent)
+	}
+	if gotCount, _ := emitter.events[0]["removed_count"].(string); gotCount != "2" {
+		t.Fatalf("expected removed_count=2, got %q", gotCount)
+	}
+}
 
 func TestParseQuerySpec_Defaults(t *testing.T) {
 	// Empty query spec should use defaults
@@ -28,6 +152,24 @@ func TestParseQuerySpec_Gmail(t *testing.T) {
 	}
 	if spec.MaxResults != 300 {
 		t.Errorf("Expected MaxResults to be 300, got %d", spec.MaxResults)
+	}
+}
+
+func TestParseQuerySpec_GmailAttachmentMetadata(t *testing.T) {
+	queryJSON := `{"gmail_query":"has:attachment","include_attachments":true,"include_inline":false,"include_message_body":false}`
+	spec := parseQuerySpec("gmail", queryJSON)
+
+	if spec.Query != "has:attachment" {
+		t.Errorf("Expected Query to be 'has:attachment', got %q", spec.Query)
+	}
+	if got := spec.Metadata["include_attachments"]; got != "true" {
+		t.Errorf("Expected include_attachments=true metadata, got %q", got)
+	}
+	if got := spec.Metadata["include_inline"]; got != "false" {
+		t.Errorf("Expected include_inline=false metadata, got %q", got)
+	}
+	if got := spec.Metadata["include_message_body"]; got != "false" {
+		t.Errorf("Expected include_message_body=false metadata, got %q", got)
 	}
 }
 
@@ -134,5 +276,142 @@ func TestDefaultPaginationConstants(t *testing.T) {
 	}
 	if defaultMaxResults != 500 {
 		t.Errorf("Expected defaultMaxResults to be 500, got %d", defaultMaxResults)
+	}
+}
+
+func TestEmitSourceHookEvents_FirstObservationEmits(t *testing.T) {
+	rdb, err := repository.NewRedisClientForTest()
+	if err != nil {
+		t.Fatalf("failed to create test redis: %v", err)
+	}
+	emitter := &testHookEmitter{}
+	svc := &SourceService{
+		seenTracker: hookspkg.NewSeenTracker(rdb),
+		hookStream:  emitter,
+	}
+
+	query := &types.FilesystemQuery{
+		WorkspaceId: 124,
+		Integration: "github",
+		Path:        "/sources/github/test-prs",
+	}
+	results := []repository.QueryResult{
+		{ID: "pr-1"},
+		{ID: "pr-2"},
+	}
+
+	newCount := svc.emitSourceHookEvents(context.Background(), 124, query, results)
+	if newCount != 2 {
+		t.Fatalf("expected 2 new results on first observation, got %d", newCount)
+	}
+	if len(emitter.events) != 1 {
+		t.Fatalf("expected 1 emitted event, got %d", len(emitter.events))
+	}
+	if gotEvent, _ := emitter.events[0]["event"].(string); gotEvent != hookspkg.EventFsCreate {
+		t.Fatalf("expected fs.create event, got %q", gotEvent)
+	}
+	if gotPath, _ := emitter.events[0]["path"].(string); gotPath != "/sources/github/test-prs" {
+		t.Fatalf("unexpected emitted path: %q", gotPath)
+	}
+	if gotHash, _ := emitter.events[0]["new_items_hash"].(string); gotHash == "" {
+		t.Fatalf("expected non-empty new_items_hash on emitted event")
+	}
+
+	// Same snapshot should not emit again.
+	newCount = svc.emitSourceHookEvents(context.Background(), 124, query, results)
+	if newCount != 0 {
+		t.Fatalf("expected 0 new results for unchanged snapshot, got %d", newCount)
+	}
+	if len(emitter.events) != 1 {
+		t.Fatalf("expected still 1 emitted event, got %d", len(emitter.events))
+	}
+}
+
+func TestEmitSourceHookEvents_EmptyThenReappearEmits(t *testing.T) {
+	rdb, err := repository.NewRedisClientForTest()
+	if err != nil {
+		t.Fatalf("failed to create test redis: %v", err)
+	}
+	emitter := &testHookEmitter{}
+	svc := &SourceService{
+		seenTracker: hookspkg.NewSeenTracker(rdb),
+		hookStream:  emitter,
+	}
+
+	query := &types.FilesystemQuery{
+		WorkspaceId: 125,
+		Integration: "github",
+		// Deliberately include trailing slash to verify normalization before emit.
+		Path: "/sources/github/reappear/",
+	}
+
+	// First poll empty: no event, but tracker is initialized.
+	newCount := svc.emitSourceHookEvents(context.Background(), 125, query, nil)
+	if newCount != 0 {
+		t.Fatalf("expected 0 new results for empty snapshot, got %d", newCount)
+	}
+	if len(emitter.events) != 0 {
+		t.Fatalf("expected no emitted events for empty snapshot, got %d", len(emitter.events))
+	}
+
+	// Results appear later: should emit immediately.
+	newCount = svc.emitSourceHookEvents(context.Background(), 125, query, []repository.QueryResult{
+		{ID: "pr-99"},
+	})
+	if newCount != 1 {
+		t.Fatalf("expected 1 new result after reappearance, got %d", newCount)
+	}
+	if len(emitter.events) != 1 {
+		t.Fatalf("expected 1 emitted event after reappearance, got %d", len(emitter.events))
+	}
+	if gotEvent, _ := emitter.events[0]["event"].(string); gotEvent != hookspkg.EventFsCreate {
+		t.Fatalf("expected fs.create event, got %q", gotEvent)
+	}
+	if gotPath, _ := emitter.events[0]["path"].(string); gotPath != "/sources/github/reappear" {
+		t.Fatalf("expected normalized emitted path, got %q", gotPath)
+	}
+	if gotHash, _ := emitter.events[0]["new_items_hash"].(string); gotHash == "" {
+		t.Fatalf("expected non-empty new_items_hash on emitted event")
+	}
+}
+
+func TestEmitSourceHookEvents_RemovedItemsEmitFsDelete(t *testing.T) {
+	rdb, err := repository.NewRedisClientForTest()
+	if err != nil {
+		t.Fatalf("failed to create test redis: %v", err)
+	}
+	emitter := &testHookEmitter{}
+	svc := &SourceService{
+		seenTracker: hookspkg.NewSeenTracker(rdb),
+		hookStream:  emitter,
+	}
+
+	query := &types.FilesystemQuery{
+		WorkspaceId: 126,
+		Integration: "linear",
+		Path:        "/sources/linear/issues",
+	}
+
+	// Bootstrap with {a, b, c}
+	svc.emitSourceHookEvents(context.Background(), 126, query, []repository.QueryResult{
+		{ID: "a"}, {ID: "b"}, {ID: "c"},
+	})
+	emitter.events = nil
+
+	// Now only {a} remains → b,c removed
+	newCount := svc.emitSourceHookEvents(context.Background(), 126, query, []repository.QueryResult{
+		{ID: "a"},
+	})
+	if newCount != 0 {
+		t.Fatalf("expected 0 new results, got %d", newCount)
+	}
+	if len(emitter.events) != 1 {
+		t.Fatalf("expected 1 emitted event (fs.delete), got %d", len(emitter.events))
+	}
+	if gotEvent, _ := emitter.events[0]["event"].(string); gotEvent != hookspkg.EventFsDelete {
+		t.Fatalf("expected fs.delete event, got %q", gotEvent)
+	}
+	if gotCount, _ := emitter.events[0]["removed_count"].(string); gotCount != "2" {
+		t.Fatalf("expected removed_count=2, got %q", gotCount)
 	}
 }

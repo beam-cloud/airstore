@@ -71,8 +71,8 @@ func NewGmailClient() *GmailClient {
 }
 
 // Integration returns the integration name
-func (c *GmailClient) Integration() types.ToolName {
-	return types.ToolGmail
+func (c *GmailClient) Integration() types.IntegrationName {
+	return types.Gmail
 }
 
 func (c *GmailClient) Request(ctx context.Context, token, path string, result any) error {

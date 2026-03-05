@@ -5,147 +5,187 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
-	"time"
+	"strings"
 
 	"github.com/beam-cloud/airstore/pkg/types"
 )
 
 const (
-	githubAPIBase       = "https://api.github.com"
-	githubCmdListRepos  = "list-repos"
-	githubCmdGetRepo    = "get-repo"
-	githubCmdListPRs    = "list-prs"
-	githubCmdGetPR      = "get-pr"
-	githubCmdListIssues = "list-issues"
-	githubCmdGetIssue   = "get-issue"
+	githubAPIBase        = "https://api.github.com"
+	githubCmdListRepos   = "list-repos"
+	githubCmdGetRepo     = "get-repo"
+	githubCmdListPRs     = "list-prs"
+	githubCmdGetPR       = "get-pr"
+	githubCmdListPRFiles = "list-pr-files"
+	githubCmdCommentPR   = "comment-pr"
+	githubCmdReviewPR    = "review-pr"
+	githubCmdCreatePR    = "create-pr"
+	githubCmdListIssues  = "list-issues"
+	githubCmdGetIssue    = "get-issue"
+	githubCmdCreateIssue    = "create-issue"
+	githubCmdCloneURL       = "clone-url"
+	githubCmdGitCredentials = "git-credentials"
+	githubCmdGitConfig      = "git-config"
 )
 
 type GitHubClient struct {
-	httpClient *http.Client
+	api *oauthHTTPClient
 }
 
 func NewGitHubClient() *GitHubClient {
 	return &GitHubClient{
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		api: newOAuthHTTPClient("github", githubAPIBase, map[string]string{
+			"Accept":               "application/vnd.github+json",
+			"X-GitHub-Api-Version": "2022-11-28",
+		}),
 	}
 }
 
-func (g *GitHubClient) Name() types.ToolName {
-	return types.ToolGitHub
+func (g *GitHubClient) Name() types.IntegrationName {
+	return types.GitHub
 }
 
-func (g *GitHubClient) Execute(ctx context.Context, command string, args map[string]any, creds *types.IntegrationCredentials, stdout, stderr io.Writer) error {
-	if creds == nil || creds.AccessToken == "" {
-		return g.outputError(stdout, "github: not connected. Run: cli connection add <workspace> github --token <pat>")
+func (g *GitHubClient) Execute(ctx context.Context, command string, args map[string]any, creds *types.IntegrationCredentials, stdout, _ io.Writer) error {
+	// git-credentials and git-config produce raw (non-JSON) output for
+	// direct consumption by git credential helpers and gitconfig files.
+	if command == githubCmdGitCredentials || command == githubCmdGitConfig {
+		return g.executeGitCommand(ctx, command, creds, stdout)
 	}
 
-	var result any
-	var err error
-
-	switch command {
-	case githubCmdListRepos:
-		owner := GetStringArg(args, "owner", "")
-		limit := GetIntArg(args, "limit", 30)
-		result, err = g.listRepos(ctx, creds.AccessToken, owner, limit)
-
-	case githubCmdGetRepo:
-		owner := GetStringArg(args, "owner", "")
-		repo := GetStringArg(args, "repo", "")
-		if owner == "" || repo == "" {
-			return g.outputError(stdout, "owner and repo are required")
-		}
-		result, err = g.getRepo(ctx, creds.AccessToken, owner, repo)
-
-	case githubCmdListPRs:
-		owner := GetStringArg(args, "owner", "")
-		repo := GetStringArg(args, "repo", "")
-		state := GetStringArg(args, "state", "open")
-		limit := GetIntArg(args, "limit", 30)
-		if owner == "" || repo == "" {
-			return g.outputError(stdout, "owner and repo are required")
-		}
-		result, err = g.listPRs(ctx, creds.AccessToken, owner, repo, state, limit)
-
-	case githubCmdGetPR:
-		owner := GetStringArg(args, "owner", "")
-		repo := GetStringArg(args, "repo", "")
-		number := GetIntArg(args, "number", 0)
-		if owner == "" || repo == "" || number == 0 {
-			return g.outputError(stdout, "owner, repo, and number are required")
-		}
-		result, err = g.getPR(ctx, creds.AccessToken, owner, repo, number)
-
-	case githubCmdListIssues:
-		owner := GetStringArg(args, "owner", "")
-		repo := GetStringArg(args, "repo", "")
-		state := GetStringArg(args, "state", "open")
-		limit := GetIntArg(args, "limit", 30)
-		if owner == "" || repo == "" {
-			return g.outputError(stdout, "owner and repo are required")
-		}
-		result, err = g.listIssues(ctx, creds.AccessToken, owner, repo, state, limit)
-
-	case githubCmdGetIssue:
-		owner := GetStringArg(args, "owner", "")
-		repo := GetStringArg(args, "repo", "")
-		number := GetIntArg(args, "number", 0)
-		if owner == "" || repo == "" || number == 0 {
-			return g.outputError(stdout, "owner, repo, and number are required")
-		}
-		result, err = g.getIssue(ctx, creds.AccessToken, owner, repo, number)
-
-	default:
-		return fmt.Errorf("unknown command: %s", command)
-	}
-
-	if err != nil {
-		return g.outputError(stdout, err.Error())
-	}
-
-	enc := json.NewEncoder(stdout)
-	enc.SetIndent("", "  ")
-	enc.SetEscapeHTML(false)
-	return enc.Encode(result)
-}
-
-func (g *GitHubClient) outputError(w io.Writer, msg string) error {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	enc.SetEscapeHTML(false)
-	return enc.Encode(map[string]any{"error": true, "message": msg})
+	return ExecuteOAuthCommand(ctx, "github", command, args, creds, map[string]OAuthCommandHandler{
+		githubCmdListRepos: func(ctx context.Context, token string, args map[string]any) (any, error) {
+			owner := GetStringArg(args, "owner", "")
+			limit := GetIntArg(args, "limit", 30)
+			return g.listRepos(ctx, token, owner, limit)
+		},
+		githubCmdGetRepo: func(ctx context.Context, token string, args map[string]any) (any, error) {
+			required, err := RequireStringArgs(args, "owner", "repo")
+			if err != nil {
+				return nil, err
+			}
+			return g.getRepo(ctx, token, required["owner"], required["repo"])
+		},
+		githubCmdListPRs: func(ctx context.Context, token string, args map[string]any) (any, error) {
+			required, err := RequireStringArgs(args, "owner", "repo")
+			if err != nil {
+				return nil, err
+			}
+			state := GetStringArg(args, "state", "open")
+			limit := GetIntArg(args, "limit", 30)
+			return g.listPRs(ctx, token, required["owner"], required["repo"], state, limit)
+		},
+		githubCmdGetPR: func(ctx context.Context, token string, args map[string]any) (any, error) {
+			required, err := RequireStringArgs(args, "owner", "repo")
+			if err != nil {
+				return nil, err
+			}
+			number, err := RequirePositiveIntArg(args, "number")
+			if err != nil {
+				return nil, err
+			}
+			return g.getPR(ctx, token, required["owner"], required["repo"], number)
+		},
+		githubCmdListPRFiles: func(ctx context.Context, token string, args map[string]any) (any, error) {
+			required, err := RequireStringArgs(args, "owner", "repo")
+			if err != nil {
+				return nil, err
+			}
+			number, err := RequirePositiveIntArg(args, "number")
+			if err != nil {
+				return nil, err
+			}
+			limit := GetIntArg(args, "limit", 100)
+			return g.listPRFiles(ctx, token, required["owner"], required["repo"], number, limit)
+		},
+		githubCmdCommentPR: func(ctx context.Context, token string, args map[string]any) (any, error) {
+			required, err := RequireStringArgs(args, "owner", "repo", "body")
+			if err != nil {
+				return nil, err
+			}
+			number, err := RequirePositiveIntArg(args, "number")
+			if err != nil {
+				return nil, err
+			}
+			return g.commentPR(ctx, token, required["owner"], required["repo"], number, required["body"])
+		},
+		githubCmdReviewPR: func(ctx context.Context, token string, args map[string]any) (any, error) {
+			required, err := RequireStringArgs(args, "owner", "repo", "body")
+			if err != nil {
+				return nil, err
+			}
+			number, err := RequirePositiveIntArg(args, "number")
+			if err != nil {
+				return nil, err
+			}
+			event := GetStringArg(args, "event", "COMMENT")
+			commentsJSON := GetStringArg(args, "comments", "")
+			return g.reviewPR(ctx, token, required["owner"], required["repo"], number, required["body"], event, commentsJSON)
+		},
+		githubCmdCreatePR: func(ctx context.Context, token string, args map[string]any) (any, error) {
+			required, err := RequireStringArgs(args, "owner", "repo", "title", "head", "base")
+			if err != nil {
+				return nil, err
+			}
+			body := GetStringArg(args, "body", "")
+			draft := GetBoolArg(args, "draft", false)
+			return g.createPR(
+				ctx,
+				token,
+				required["owner"],
+				required["repo"],
+				required["title"],
+				required["head"],
+				required["base"],
+				body,
+				draft,
+			)
+		},
+		githubCmdListIssues: func(ctx context.Context, token string, args map[string]any) (any, error) {
+			required, err := RequireStringArgs(args, "owner", "repo")
+			if err != nil {
+				return nil, err
+			}
+			state := GetStringArg(args, "state", "open")
+			limit := GetIntArg(args, "limit", 30)
+			return g.listIssues(ctx, token, required["owner"], required["repo"], state, limit)
+		},
+		githubCmdGetIssue: func(ctx context.Context, token string, args map[string]any) (any, error) {
+			required, err := RequireStringArgs(args, "owner", "repo")
+			if err != nil {
+				return nil, err
+			}
+			number, err := RequirePositiveIntArg(args, "number")
+			if err != nil {
+				return nil, err
+			}
+			return g.getIssue(ctx, token, required["owner"], required["repo"], number)
+		},
+		githubCmdCreateIssue: func(ctx context.Context, token string, args map[string]any) (any, error) {
+			required, err := RequireStringArgs(args, "owner", "repo", "title")
+			if err != nil {
+				return nil, err
+			}
+			body := GetStringArg(args, "body", "")
+			return g.createIssue(ctx, token, required["owner"], required["repo"], required["title"], body)
+		},
+		githubCmdCloneURL: func(ctx context.Context, token string, args map[string]any) (any, error) {
+			required, err := RequireStringArgs(args, "owner", "repo")
+			if err != nil {
+				return nil, err
+			}
+			return map[string]string{
+				"url": fmt.Sprintf("https://x-access-token:%s@github.com/%s/%s.git", token, required["owner"], required["repo"]),
+			}, nil
+		},
+	}, stdout)
 }
 
 func (g *GitHubClient) request(ctx context.Context, token, method, path string, result any) error {
-	url := githubAPIBase + path
-	req, err := http.NewRequestWithContext(ctx, method, url, nil)
-	if err != nil {
-		return err
-	}
+	return g.requestJSON(ctx, token, method, path, nil, result)
+}
 
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-
-	resp, err := g.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		var ghErr struct {
-			Message string `json:"message"`
-		}
-		json.Unmarshal(body, &ghErr)
-		if ghErr.Message != "" {
-			return fmt.Errorf("github API: %s", ghErr.Message)
-		}
-		return fmt.Errorf("github API: %s", resp.Status)
-	}
-
-	return json.NewDecoder(resp.Body).Decode(result)
+func (g *GitHubClient) requestJSON(ctx context.Context, token, method, path string, payload any, result any) error {
+	return g.api.RequestJSON(ctx, token, method, path, payload, result)
 }
 
 // API methods
@@ -259,6 +299,131 @@ func (g *GitHubClient) getPR(ctx context.Context, token, owner, repo string, num
 	}, nil
 }
 
+func (g *GitHubClient) listPRFiles(ctx context.Context, token, owner, repo string, number, limit int) (any, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 100
+	}
+	path := fmt.Sprintf("/repos/%s/%s/pulls/%d/files?per_page=%d", owner, repo, number, limit)
+	var rawFiles []map[string]any
+	if err := g.request(ctx, token, "GET", path, &rawFiles); err != nil {
+		return nil, err
+	}
+
+	files := make([]PRFileInfo, 0, len(rawFiles))
+	for _, file := range rawFiles {
+		files = append(files, PRFileInfo{
+			Filename:  getString(file, "filename"),
+			Status:    getString(file, "status"),
+			Additions: getInt(file, "additions"),
+			Deletions: getInt(file, "deletions"),
+			Changes:   getInt(file, "changes"),
+			Patch:     getString(file, "patch"),
+			BlobURL:   getString(file, "blob_url"),
+		})
+	}
+
+	return map[string]any{
+		"owner":  owner,
+		"repo":   repo,
+		"number": number,
+		"files":  files,
+		"count":  len(files),
+	}, nil
+}
+
+func (g *GitHubClient) commentPR(ctx context.Context, token, owner, repo string, number int, body string) (any, error) {
+	path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments", owner, repo, number)
+	payload := map[string]any{"body": body}
+
+	var result map[string]any
+	if err := g.requestJSON(ctx, token, "POST", path, payload, &result); err != nil {
+		return nil, err
+	}
+
+	return map[string]any{
+		"owner":      owner,
+		"repo":       repo,
+		"number":     number,
+		"comment_id": getInt(result, "id"),
+		"url":        getString(result, "html_url"),
+		"created_at": getString(result, "created_at"),
+	}, nil
+}
+
+func (g *GitHubClient) reviewPR(ctx context.Context, token, owner, repo string, number int, body, event, commentsJSON string) (any, error) {
+	normalizedEvent, err := normalizeReviewEvent(event)
+	if err != nil {
+		return nil, err
+	}
+
+	path := fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews", owner, repo, number)
+	payload := map[string]any{
+		"body":  body,
+		"event": normalizedEvent,
+	}
+
+	if commentsJSON != "" {
+		var comments []map[string]any
+		if err := json.Unmarshal([]byte(commentsJSON), &comments); err != nil {
+			return nil, fmt.Errorf("invalid comments JSON: %w", err)
+		}
+		payload["comments"] = comments
+	}
+
+	var result map[string]any
+	if err := g.requestJSON(ctx, token, "POST", path, payload, &result); err != nil {
+		return nil, err
+	}
+
+	return map[string]any{
+		"owner":        owner,
+		"repo":         repo,
+		"number":       number,
+		"review_id":    getInt(result, "id"),
+		"event":        normalizedEvent,
+		"state":        getString(result, "state"),
+		"url":          getString(result, "html_url"),
+		"submitted_at": getString(result, "submitted_at"),
+	}, nil
+}
+
+func (g *GitHubClient) createPR(ctx context.Context, token, owner, repo, title, head, base, body string, draft bool) (any, error) {
+	base = strings.TrimSpace(base)
+	if base == "" {
+		base = "main"
+	}
+
+	path := fmt.Sprintf("/repos/%s/%s/pulls", owner, repo)
+	payload := map[string]any{
+		"title": title,
+		"head":  head,
+		"base":  base,
+	}
+	if body != "" {
+		payload["body"] = body
+	}
+	if draft {
+		payload["draft"] = true
+	}
+
+	var result map[string]any
+	if err := g.requestJSON(ctx, token, "POST", path, payload, &result); err != nil {
+		return nil, err
+	}
+
+	return map[string]any{
+		"owner":  owner,
+		"repo":   repo,
+		"number": getInt(result, "number"),
+		"title":  getString(result, "title"),
+		"state":  getString(result, "state"),
+		"draft":  getBool(result, "draft"),
+		"url":    getString(result, "html_url"),
+		"head":   head,
+		"base":   base,
+	}, nil
+}
+
 func (g *GitHubClient) listIssues(ctx context.Context, token, owner, repo, state string, limit int) (any, error) {
 	path := fmt.Sprintf("/repos/%s/%s/issues?state=%s&per_page=%d", owner, repo, state, limit)
 
@@ -337,6 +502,76 @@ func (g *GitHubClient) getIssue(ctx context.Context, token, owner, repo string, 
 	}, nil
 }
 
+func (g *GitHubClient) createIssue(ctx context.Context, token, owner, repo, title, body string) (any, error) {
+	path := fmt.Sprintf("/repos/%s/%s/issues", owner, repo)
+	payload := map[string]any{
+		"title": title,
+	}
+	if body != "" {
+		payload["body"] = body
+	}
+	var result map[string]any
+	if err := g.requestJSON(ctx, token, "POST", path, payload, &result); err != nil {
+		return nil, err
+	}
+
+	return map[string]any{
+		"owner":  owner,
+		"repo":   repo,
+		"number": getInt(result, "number"),
+		"title":  getString(result, "title"),
+		"url":    getString(result, "html_url"),
+		"state":  getString(result, "state"),
+	}, nil
+}
+
+// executeGitCommand handles git-credentials and git-config commands that
+// produce raw (non-JSON) output for direct consumption by git.
+func (g *GitHubClient) executeGitCommand(ctx context.Context, command string, creds *types.IntegrationCredentials, stdout io.Writer) error {
+	token, err := RequireAccessToken("github", creds, stdout)
+	if err != nil {
+		if err == errToolResponseWritten {
+			return nil
+		}
+		return err
+	}
+	switch command {
+	case githubCmdGitCredentials:
+		_, err = fmt.Fprint(stdout, token)
+		return err
+	case githubCmdGitConfig:
+		return g.writeGitConfig(ctx, token, stdout)
+	default:
+		return fmt.Errorf("unknown git command: %s", command)
+	}
+}
+
+// writeGitConfig fetches the authenticated GitHub user's profile and writes
+// a [user] gitconfig section so commits are attributed to the real person.
+func (g *GitHubClient) writeGitConfig(ctx context.Context, token string, stdout io.Writer) error {
+	var user struct {
+		ID    int    `json:"id"`
+		Name  string `json:"name"`
+		Email string `json:"email"`
+		Login string `json:"login"`
+	}
+	if err := g.request(ctx, token, "GET", "/user", &user); err != nil {
+		return err
+	}
+
+	name := user.Name
+	if name == "" {
+		name = user.Login
+	}
+	email := user.Email
+	if email == "" {
+		email = fmt.Sprintf("%d+%s@users.noreply.github.com", user.ID, user.Login)
+	}
+
+	_, err := fmt.Fprintf(stdout, "[user]\n\tname = %s\n\temail = %s\n", name, email)
+	return err
+}
+
 // Response types
 
 type RepoInfo struct {
@@ -361,6 +596,16 @@ type PRInfo struct {
 	Draft     bool   `json:"draft"`
 	Mergeable bool   `json:"mergeable,omitempty"`
 	URL       string `json:"url"`
+}
+
+type PRFileInfo struct {
+	Filename  string `json:"filename"`
+	Status    string `json:"status"`
+	Additions int    `json:"additions"`
+	Deletions int    `json:"deletions"`
+	Changes   int    `json:"changes"`
+	Patch     string `json:"patch,omitempty"`
+	BlobURL   string `json:"blob_url,omitempty"`
 }
 
 type IssueInfo struct {
@@ -395,4 +640,17 @@ func getBool(m map[string]any, key string) bool {
 		return v
 	}
 	return false
+}
+
+func normalizeReviewEvent(event string) (string, error) {
+	candidate := strings.ToUpper(strings.TrimSpace(event))
+	if candidate == "" {
+		candidate = "COMMENT"
+	}
+	switch candidate {
+	case "COMMENT", "APPROVE", "REQUEST_CHANGES":
+		return candidate, nil
+	default:
+		return "", fmt.Errorf("event must be one of COMMENT, APPROVE, REQUEST_CHANGES")
+	}
 }

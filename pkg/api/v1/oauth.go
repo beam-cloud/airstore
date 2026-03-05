@@ -7,8 +7,11 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/beam-cloud/airstore/pkg/clients"
 	"github.com/beam-cloud/airstore/pkg/oauth"
 	"github.com/beam-cloud/airstore/pkg/repository"
+	"github.com/beam-cloud/airstore/pkg/skills"
+	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog/log"
 )
@@ -26,17 +29,19 @@ type OAuthGroup struct {
 	store      *oauth.Store
 	registry   *oauth.Registry
 	backend    repository.BackendRepository
+	storage    *clients.StorageClient
 	adminToken string
 }
 
 // NewOAuthGroup creates and registers OAuth routes.
 // adminToken is the cluster-admin bearer token so that trusted callers (e.g. the
 // dashboard backend) can create sessions without a per-workspace member token.
-func NewOAuthGroup(g *echo.Group, store *oauth.Store, registry *oauth.Registry, backend repository.BackendRepository, adminToken string) *OAuthGroup {
+func NewOAuthGroup(g *echo.Group, store *oauth.Store, registry *oauth.Registry, backend repository.BackendRepository, storage *clients.StorageClient, adminToken string) *OAuthGroup {
 	og := &OAuthGroup{
 		store:      store,
 		registry:   registry,
 		backend:    backend,
+		storage:    storage,
 		adminToken: adminToken,
 	}
 
@@ -220,6 +225,11 @@ func (og *OAuthGroup) Callback(c echo.Context) error {
 		log.Error().Err(err).Str("session_id", session.ID).Str("provider", provider.Name()).Msg("oauth token exchange failed")
 		return returnToOrError(errMsgTokenExchange)
 	}
+	var scopes []string
+	if creds != nil && creds.Extra != nil {
+		scopes = types.CSVToList(creds.Extra[types.CredentialMetaGrantedScopes])
+	}
+	creds = oauth.AnnotateCredentials(session.IntegrationType, creds, scopes)
 
 	conn, err := og.backend.SaveConnection(
 		c.Request().Context(),
@@ -236,6 +246,17 @@ func (og *OAuthGroup) Callback(c echo.Context) error {
 	}
 
 	og.store.Complete(session.ID, conn.ExternalId)
+
+	// Auto-provision a managed source write-back skill for OAuth write-capable sources.
+	if og.storage != nil && types.SupportsSourceWrite(types.IntegrationName(session.IntegrationType)) {
+		if err := skills.UpsertManagedSourceSkill(c.Request().Context(), og.storage, session.WorkspaceExt, session.IntegrationType); err != nil {
+			log.Warn().
+				Err(err).
+				Str("workspace", session.WorkspaceExt).
+				Str("integration", session.IntegrationType).
+				Msg("failed to provision managed source skill")
+		}
+	}
 
 	log.Info().
 		Str("session_id", session.ID).

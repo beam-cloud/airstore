@@ -82,7 +82,7 @@ func TestIsHookablePath(t *testing.T) {
 		{"/sources/gmail", false},
 		{"/sources/github", false},
 
-		// Hookable - smart query folders under sources
+		// Hookable - source view folders under sources
 		{"/sources/gmail/inbox", true},
 		{"/sources/gmail/new unread emails", true},
 		{"/sources/gdrive/my-folder", true},
@@ -102,8 +102,8 @@ func TestIsHookablePath(t *testing.T) {
 
 func TestSystemPaths(t *testing.T) {
 	paths := SystemPaths()
-	if len(paths) != 5 {
-		t.Errorf("SystemPaths() returned %d paths, want 5", len(paths))
+	if len(paths) != 4 {
+		t.Errorf("SystemPaths() returned %d paths, want 4", len(paths))
 	}
 
 	expected := map[string]bool{
@@ -111,7 +111,6 @@ func TestSystemPaths(t *testing.T) {
 		"/tools":   true,
 		"/skills":  true,
 		"/sources": true,
-		"/memory":  true,
 	}
 
 	for _, p := range paths {
@@ -135,7 +134,28 @@ func TestPathConstants(t *testing.T) {
 	if PathSources != "/sources" {
 		t.Errorf("PathSources = %q, want %q", PathSources, "/sources")
 	}
-	if PathMemory != "/memory" {
-		t.Errorf("PathMemory = %q, want %q", PathMemory, "/memory")
+}
+
+func TestIsHiddenDotPath(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"/.claude/settings.json", true},
+		{".claude/.claude.json", true},
+		{"/skills/.cache/index.json", true},
+		{"/skills/agent/.scratch/out.txt", true},
+		{"/skills/report.md", false},
+		{"/sources/gmail/inbox/msg.eml", false},
+		{"/sources/gmail/query.as", false},
+		{"/", false},
+		{"", false},
+	}
+
+	for _, tt := range tests {
+		got := IsHiddenDotPath(tt.path)
+		if got != tt.want {
+			t.Errorf("IsHiddenDotPath(%q) = %v, want %v", tt.path, got, tt.want)
+		}
 	}
 }

@@ -64,6 +64,17 @@ func (n *NotionProvider) AuthorizeURL(state, integrationType string) (string, er
 }
 
 func (n *NotionProvider) Exchange(ctx context.Context, code, integrationType string) (*types.IntegrationCredentials, error) {
+	supported := false
+	for _, integration := range notionIntegrations {
+		if integration == integrationType {
+			supported = true
+			break
+		}
+	}
+	if !supported {
+		return nil, fmt.Errorf("unsupported integration: %s", integrationType)
+	}
+
 	data := url.Values{
 		"grant_type":   {"authorization_code"},
 		"code":         {code},
@@ -101,14 +112,15 @@ func (n *NotionProvider) Exchange(ctx context.Context, code, integrationType str
 		return nil, fmt.Errorf("parse response: %w", err)
 	}
 
-	return &types.IntegrationCredentials{
+	creds := &types.IntegrationCredentials{
 		AccessToken: result.AccessToken,
 		Extra: map[string]string{
 			"bot_id":         result.BotID,
 			"workspace_id":   result.WorkspaceID,
 			"workspace_name": result.WorkspaceName,
 		},
-	}, nil
+	}
+	return AnnotateCredentials(integrationType, creds, nil), nil
 }
 
 func (n *NotionProvider) Refresh(ctx context.Context, refreshToken string) (*types.IntegrationCredentials, error) {

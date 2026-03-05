@@ -26,7 +26,7 @@ type SandboxConfig struct {
 	WorkingDir string `json:"working_dir"`
 
 	// Resources specifies resource limits for the sandbox
-	Resources TaskResources `json:"resources"`
+	Resources RunExecutionResources `json:"resources"`
 
 	// Mounts specifies additional mounts for the sandbox
 	Mounts []SandboxMount `json:"mounts"`
@@ -36,6 +36,9 @@ type SandboxConfig struct {
 
 	// FilesystemMount is the host path to bind-mount at /workspace (optional)
 	FilesystemMount string `json:"-"`
+
+	// FilesystemReadOnly controls whether /workspace is mounted read-only.
+	FilesystemReadOnly bool `json:"-"`
 }
 
 // SandboxMount specifies a mount point for a sandbox
@@ -105,9 +108,12 @@ type SandboxState struct {
 
 // IPAllocation represents an allocated IP for a sandbox
 type IPAllocation struct {
-	IP        string `json:"ip"`
-	Gateway   string `json:"gateway"`
-	PrefixLen int    `json:"prefix_len"`
+	IP            string `json:"ip"`
+	Gateway       string `json:"gateway"`
+	PrefixLen     int    `json:"prefix_len"`
+	IPv6          string `json:"ipv6,omitempty"`
+	GatewayIPv6   string `json:"gateway_ipv6,omitempty"`
+	PrefixLenIPv6 int    `json:"prefix_len_ipv6,omitempty"`
 }
 
 // Default network settings for container bridge (dual-stack IPv4/IPv6).
@@ -122,8 +128,9 @@ const (
 	DefaultPrefixLen    = 24
 
 	// IPv6 - ULA prefix (fd00::/8 is for private use)
-	DefaultSubnetIPv6  = "fd00:a1b2::/64"
-	DefaultGatewayIPv6 = "fd00:a1b2::1"
+	DefaultSubnetIPv6    = "fd00:a1b2::/64"
+	DefaultGatewayIPv6   = "fd00:a1b2::1"
+	DefaultPrefixLenIPv6 = 64
 )
 
 // Sandbox user identity

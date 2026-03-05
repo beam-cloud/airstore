@@ -7,7 +7,7 @@ import "strings"
 
 // SystemPaths returns all system root paths that cannot have hooks attached.
 func SystemPaths() []string {
-	return []string{PathTasks, PathTools, PathSkills, PathSources, PathMemory}
+	return []string{PathTasks, PathTools, PathSkills, PathSources}
 }
 
 // IsSystemRootPath returns true if the path is a system root directory.
@@ -49,4 +49,24 @@ func IsHookablePath(p string) bool {
 		return false
 	}
 	return true
+}
+
+// IsHiddenDotPath returns true when any path segment starts with ".".
+// Examples: "/.claude/settings.json", "skills/.cache/index.json".
+func IsHiddenDotPath(p string) bool {
+	p = strings.TrimSpace(strings.TrimPrefix(p, "/"))
+	if p == "" {
+		return false
+	}
+
+	for _, segment := range strings.Split(p, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			continue
+		}
+		if strings.HasPrefix(segment, ".") {
+			return true
+		}
+	}
+
+	return false
 }

@@ -20,6 +20,108 @@ import (
 	"github.com/boundaryml/baml/engine/language_client_go/pkg/cffi"
 )
 
+type ConfluenceQueryResult struct {
+	Cql_query       string `json:"cql_query"`
+	Content_type    string `json:"content_type"`
+	Limit           int64  `json:"limit"`
+	Filename_format string `json:"filename_format"`
+}
+
+func (c *ConfluenceQueryResult) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "ConfluenceQueryResult" {
+		panic(fmt.Sprintf("expected ConfluenceQueryResult, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "cql_query":
+			c.Cql_query = baml.Decode(valueHolder).Interface().(string)
+
+		case "content_type":
+			c.Content_type = baml.Decode(valueHolder).Interface().(string)
+
+		case "limit":
+			c.Limit = baml.Decode(valueHolder).Int()
+
+		case "filename_format":
+			c.Filename_format = baml.Decode(valueHolder).Interface().(string)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class ConfluenceQueryResult", key))
+
+		}
+	}
+
+}
+
+func (c ConfluenceQueryResult) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["cql_query"] = c.Cql_query
+
+	fields["content_type"] = c.Content_type
+
+	fields["limit"] = c.Limit
+
+	fields["filename_format"] = c.Filename_format
+
+	return baml.EncodeClass("ConfluenceQueryResult", fields, nil)
+}
+
+func (c ConfluenceQueryResult) BamlTypeName() string {
+	return "ConfluenceQueryResult"
+}
+
+type CronResult struct {
+	Cron_expr string `json:"cron_expr"`
+}
+
+func (c *CronResult) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "CronResult" {
+		panic(fmt.Sprintf("expected CronResult, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "cron_expr":
+			c.Cron_expr = baml.Decode(valueHolder).Interface().(string)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class CronResult", key))
+
+		}
+	}
+
+}
+
+func (c CronResult) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["cron_expr"] = c.Cron_expr
+
+	return baml.EncodeClass("CronResult", fields, nil)
+}
+
+func (c CronResult) BamlTypeName() string {
+	return "CronResult"
+}
+
 type GDriveQueryResult struct {
 	Gdrive_query    string `json:"gdrive_query"`
 	Limit           int64  `json:"limit"`
@@ -480,4 +582,70 @@ func (c SlackQueryResult) Encode() (*cffi.HostValue, error) {
 
 func (c SlackQueryResult) BamlTypeName() string {
 	return "SlackQueryResult"
+}
+
+type WebQueryResult struct {
+	Web_mode        string   `json:"web_mode"`
+	Web_query       string   `json:"web_query"`
+	Include_paths   []string `json:"include_paths"`
+	Limit           int64    `json:"limit"`
+	Filename_format string   `json:"filename_format"`
+}
+
+func (c *WebQueryResult) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "WebQueryResult" {
+		panic(fmt.Sprintf("expected WebQueryResult, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "web_mode":
+			c.Web_mode = baml.Decode(valueHolder).Interface().(string)
+
+		case "web_query":
+			c.Web_query = baml.Decode(valueHolder).Interface().(string)
+
+		case "include_paths":
+			c.Include_paths = baml.Decode(valueHolder).Interface().([]string)
+
+		case "limit":
+			c.Limit = baml.Decode(valueHolder).Int()
+
+		case "filename_format":
+			c.Filename_format = baml.Decode(valueHolder).Interface().(string)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class WebQueryResult", key))
+
+		}
+	}
+
+}
+
+func (c WebQueryResult) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["web_mode"] = c.Web_mode
+
+	fields["web_query"] = c.Web_query
+
+	fields["include_paths"] = c.Include_paths
+
+	fields["limit"] = c.Limit
+
+	fields["filename_format"] = c.Filename_format
+
+	return baml.EncodeClass("WebQueryResult", fields, nil)
+}
+
+func (c WebQueryResult) BamlTypeName() string {
+	return "WebQueryResult"
 }

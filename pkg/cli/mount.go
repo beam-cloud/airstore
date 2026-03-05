@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -24,6 +23,12 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
+)
+
+const (
+	grpcKeepaliveTime    = 60 * time.Second
+	grpcKeepaliveTimeout = 10 * time.Second
 )
 
 var (
@@ -38,17 +43,19 @@ var (
 	mountAccessLog   bool
 )
 
-var mountCmd = &cobra.Command{
-	Use:   "mount <path>",
-	Short: "Mount filesystem",
-	Long: `Mount the Airstore virtual filesystem at the specified path.
+var mountCommandLong = fmt.Sprintf(`Mount the Airstore virtual filesystem at the specified path.
 
 Examples:
   airstore mount ~/airstore
-  airstore mount /tmp/airstore --gateway localhost:1993
-  airstore mount /tmp/airstore --uid 1000 --gid 1000`,
-	Args: cobra.ExactArgs(1),
-	RunE: runMount,
+  airstore mount /tmp/airstore --gateway %s
+  airstore mount /tmp/airstore --uid 1000 --gid 1000`, types.DefaultGatewayGRPCAddr())
+
+var mountCmd = &cobra.Command{
+	Use:   "mount <path>",
+	Short: "Mount filesystem",
+	Long:  mountCommandLong,
+	Args:  cobra.ExactArgs(1),
+	RunE:  runMount,
 }
 
 func init() {
@@ -69,7 +76,8 @@ func runMount(cmd *cobra.Command, args []string) error {
 
 	// Suppress logs unless verbose or FUSE trace is enabled
 	if !mountVerbose && os.Getenv("AIRSTORE_FUSE_TRACE") == "" {
-		log.Logger = zerolog.New(io.Discard)
+		// In non-verbose mode, suppress info/debug logs but keep warn/error on stderr.
+		log.Logger = zerolog.New(os.Stderr).Level(zerolog.WarnLevel).With().Timestamp().Logger()
 	}
 
 	if configPath != "" {
@@ -159,7 +167,14 @@ func runMount(cmd *cobra.Command, args []string) error {
 		// Create gRPC connection for vnodes.
 		// When access logging is on, a client-side interceptor injects the
 		// session header on every outgoing RPC so the gateway can record events.
-		dialOpts := []grpc.DialOption{grpc.WithTransportCredentials(TransportCredentials(effectiveGateway))}
+		dialOpts := []grpc.DialOption{
+			grpc.WithTransportCredentials(TransportCredentials(effectiveGateway)),
+			grpc.WithKeepaliveParams(keepalive.ClientParameters{
+				Time:                grpcKeepaliveTime,
+				Timeout:             grpcKeepaliveTimeout,
+				PermitWithoutStream: true,
+			}),
+		}
 		if mountAccessLog {
 			session := mountSession // may be empty — gateway defaults to workspace ID
 			dialOpts = append(dialOpts, grpc.WithUnaryInterceptor(filesystem.MountAccessUnaryInterceptor(session)))
@@ -182,8 +197,8 @@ func runMount(cmd *cobra.Command, args []string) error {
 		}
 
 		// Register all vnodes
-		fs.RegisterVNode(vnode.NewConfigVNode(effectiveGateway, authToken))
-		fs.RegisterVNode(vnode.NewToolsVNode(effectiveGateway, authToken, shim))
+		fs.RegisterVNode(vnode.NewConfigVNode(effectiveGateway, authToken, shim))
+		fs.RegisterVNode(vnode.NewToolsVNode(effectiveGateway, authToken))
 
 		var sourcesOpts []vnode.SourcesVNodeOption
 		if mountCompression != "" {
@@ -191,7 +206,6 @@ func runMount(cmd *cobra.Command, args []string) error {
 		}
 		fs.RegisterVNode(vnode.NewSourcesVNode(conn, authToken, sourcesOpts...))
 		fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, authToken, types.PathSkills)) // /Skills
-		fs.RegisterVNode(vnode.NewContextVNodeGRPC(conn, authToken, types.PathMemory)) // /Memory
 		fs.RegisterVNode(vnode.NewTasksVNodeGRPC(conn, authToken))                     // /Tasks
 		fs.SetStorageFallback(vnode.NewStorageVNode(conn, authToken))                  // user folders
 
@@ -308,7 +322,6 @@ func printMountStatus(mount, gateway, mode, compression string) {
 		{types.PathSources + "/*", "Integration data"},
 		{types.PathSkills + "/*", "Skills and context"},
 		{types.PathTasks + "/*", "Active tasks"},
-		{types.PathMemory + "/*", "Agent memory"},
 	}
 	for _, p := range paths {
 		fmt.Printf("    %s  %s\n", CodeStyle.Render(fmt.Sprintf("%-14s", p.path)), DimStyle.Render(p.desc))

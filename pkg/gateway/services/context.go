@@ -200,6 +200,9 @@ func (s *ContextService) Read(ctx context.Context, req *pb.ContextReadRequest) (
 		if isNotFound(err) {
 			return &pb.ContextReadResponse{Ok: false, Error: "not found"}, nil
 		}
+		if isInvalidRange(err) {
+			return &pb.ContextReadResponse{Ok: true, Data: nil}, nil
+		}
 		return &pb.ContextReadResponse{Ok: false, Error: err.Error()}, nil
 	}
 	defer resp.Body.Close()
@@ -502,4 +505,10 @@ func (s *ContextService) readFile(ctx context.Context, key string) ([]byte, erro
 
 func isNotFound(err error) bool {
 	return err != nil && (strings.Contains(err.Error(), "NoSuchKey") || strings.Contains(err.Error(), "NotFound"))
+}
+
+// isInvalidRange detects S3 416 Range Not Satisfiable responses, which occur
+// when the requested byte range is entirely past the end of the object.
+func isInvalidRange(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "InvalidRange")
 }

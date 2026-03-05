@@ -17,6 +17,7 @@ type RedisClient interface {
 	Set(ctx context.Context, key string, value interface{}, expiration time.Duration) *redis.StatusCmd
 	IncrBy(ctx context.Context, key string, value int64) *redis.IntCmd
 	Expire(ctx context.Context, key string, expiration time.Duration) *redis.BoolCmd
+	SAdd(ctx context.Context, key string, members ...interface{}) *redis.IntCmd
 	Del(ctx context.Context, keys ...string) *redis.IntCmd
 	Pipeline() redis.Pipeliner
 }
@@ -90,7 +91,11 @@ func (s *CompressedStore) SetPointer(ctx context.Context, workspaceId uint, quer
 	if err != nil {
 		return err
 	}
-	return s.redis.Set(ctx, key, data, s.cacheTTL).Err()
+	if err := s.redis.Set(ctx, key, data, s.cacheTTL).Err(); err != nil {
+		return err
+	}
+	s.trackQueryCacheKey(ctx, workspaceId, queryPath, key)
+	return nil
 }
 
 // GetContent reads cached compressed content. Returns nil on miss.
@@ -132,7 +137,22 @@ func (s *CompressedStore) SetContent(ctx context.Context, workspaceId uint, quer
 	// Set a TTL on the usage counter too — stale counters self-correct
 	pipe.Expire(ctx, usageKey, s.cacheTTL*2)
 	_, err := pipe.Exec(ctx)
-	return err
+	if err != nil {
+		return err
+	}
+
+	s.trackQueryCacheKey(ctx, workspaceId, queryPath, key)
+	return nil
+}
+
+// trackQueryCacheKey adds a pointer/content cache key to the per-view compressed
+// index so invalidation can use SMEMBERS instead of SCAN.
+func (s *CompressedStore) trackQueryCacheKey(ctx context.Context, workspaceId uint, queryPath, cacheKey string) {
+	indexKey := common.Keys.FsCompressedIndex(workspaceId, queryPath)
+	if err := s.redis.SAdd(ctx, indexKey, cacheKey).Err(); err != nil {
+		return
+	}
+	_ = s.redis.Expire(ctx, indexKey, s.cacheTTL*2).Err()
 }
 
 // FlushWorkspace deletes all compressed pointers, content, and usage

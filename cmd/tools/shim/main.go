@@ -7,14 +7,22 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/common"
+	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
 	"google.golang.org/grpc"
 )
 
 const rpcTimeout = 30 * time.Second
+
+const (
+	configPathEnvKey = "AIRSTORE_CONFIG_PATH"
+	gatewayEnvKey    = "AIRSTORE_GATEWAY"
+	tokenEnvKey      = "AIRSTORE_TOKEN"
+)
 
 // Config mirrors the structure in vnode/config.go
 type Config struct {
@@ -50,35 +58,59 @@ func main() {
 
 func loadConfig() *Config {
 	cfg := &Config{
-		GatewayAddr: "localhost:1993",
+		GatewayAddr: types.DefaultGatewayGRPCAddr(),
 	}
 
-	// Try to read from /.airstore/config relative to the shim location
-	shimPath := os.Args[0]
+	loadedFromExplicitPath := false
+	if configPath := strings.TrimSpace(os.Getenv(configPathEnvKey)); configPath != "" {
+		if fileCfg, ok := readConfigFile(configPath); ok {
+			cfg = fileCfg
+			loadedFromExplicitPath = true
+		}
+	}
 
-	if absPath, err := filepath.Abs(shimPath); err == nil {
-		mountRoot := filepath.Dir(filepath.Dir(absPath))
-		configPath := filepath.Join(mountRoot, ".airstore", "config")
-
-		data, err := os.ReadFile(configPath)
-
-		if err == nil {
-			var fileCfg Config
-			if json.Unmarshal(data, &fileCfg) == nil {
-				cfg = &fileCfg
+	// Fall back to /.airstore/config relative to the shim invocation path.
+	if !loadedFromExplicitPath {
+		if configPath := configPathFromShimPath(os.Args[0]); configPath != "" {
+			if fileCfg, ok := readConfigFile(configPath); ok {
+				cfg = fileCfg
 			}
 		}
 	}
 
 	// Environment variables override
-	if v := os.Getenv("AIRSTORE_GATEWAY"); v != "" {
+	if v := os.Getenv(gatewayEnvKey); v != "" {
 		cfg.GatewayAddr = v
 	}
-	if v := os.Getenv("AIRSTORE_TOKEN"); v != "" {
+	if v := os.Getenv(tokenEnvKey); v != "" {
 		cfg.Token = v
 	}
 
 	return cfg
+}
+
+func configPathFromShimPath(shimPath string) string {
+	absPath, err := filepath.Abs(shimPath)
+	if err != nil {
+		return ""
+	}
+
+	mountRoot := filepath.Dir(filepath.Dir(absPath))
+	return filepath.Join(mountRoot, ".airstore", "config")
+}
+
+func readConfigFile(path string) (*Config, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+
+	var fileCfg Config
+	if json.Unmarshal(data, &fileCfg) != nil {
+		return nil, false
+	}
+
+	return &fileCfg, true
 }
 
 func connect(cfg *Config) (*grpc.ClientConn, error) {

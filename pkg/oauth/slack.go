@@ -9,16 +9,25 @@ import (
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/types"
-	"golang.org/x/oauth2/slack"
+)
+
+const (
+	slackAuthURL  = "https://slack.com/oauth/v2/authorize"
+	slackTokenURL = "https://slack.com/api/oauth.v2.access"
 )
 
 var slackIntegrationScopes = map[string][]string{
 	"slack": {
 		"channels:read",
 		"channels:history",
+		"groups:read",
+		"groups:history",
 		"files:read",
+		"search:read",
 		"users:read",
 		"users:read.email",
+		"chat:write",
+		"chat:write.public",
 	},
 }
 
@@ -70,10 +79,15 @@ func (s *SlackProvider) AuthorizeURL(state, integrationType string) (string, err
 		"user_scope":   {strings.Join(scopes, ",")},
 	}
 
-	return slack.Endpoint.AuthURL + "?" + params.Encode(), nil
+	return slackAuthURL + "?" + params.Encode(), nil
 }
 
 func (s *SlackProvider) Exchange(ctx context.Context, code, integrationType string) (*types.IntegrationCredentials, error) {
+	scopes, ok := slackIntegrationScopes[integrationType]
+	if !ok {
+		return nil, fmt.Errorf("unsupported integration: %s", integrationType)
+	}
+
 	data := url.Values{
 		"client_id":     {s.clientID},
 		"client_secret": {s.clientSecret},
@@ -81,7 +95,7 @@ func (s *SlackProvider) Exchange(ctx context.Context, code, integrationType stri
 		"redirect_uri":  {s.callbackURL},
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", slack.Endpoint.TokenURL, strings.NewReader(data.Encode()))
+	req, err := http.NewRequestWithContext(ctx, "POST", slackTokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, err
 	}
@@ -102,6 +116,7 @@ func (s *SlackProvider) Exchange(ctx context.Context, code, integrationType stri
 		OK          bool   `json:"ok"`
 		Error       string `json:"error"`
 		AccessToken string `json:"access_token"`
+		Scope       string `json:"scope"`
 		AppID       string `json:"app_id"`
 		Team        struct {
 			ID   string `json:"id"`
@@ -110,6 +125,7 @@ func (s *SlackProvider) Exchange(ctx context.Context, code, integrationType stri
 		AuthedUser struct {
 			ID          string `json:"id"`
 			AccessToken string `json:"access_token"`
+			Scope       string `json:"scope"`
 		} `json:"authed_user"`
 	}
 
@@ -126,7 +142,7 @@ func (s *SlackProvider) Exchange(ctx context.Context, code, integrationType stri
 		accessToken = result.AccessToken
 	}
 
-	return &types.IntegrationCredentials{
+	creds := &types.IntegrationCredentials{
 		AccessToken: accessToken,
 		Extra: map[string]string{
 			"team_id":   result.Team.ID,
@@ -134,7 +150,9 @@ func (s *SlackProvider) Exchange(ctx context.Context, code, integrationType stri
 			"user_id":   result.AuthedUser.ID,
 			"app_id":    result.AppID,
 		},
-	}, nil
+	}
+	grantedScopes := NormalizeScopes(ParseScopeString(result.Scope), ParseScopeString(result.AuthedUser.Scope), scopes)
+	return AnnotateCredentials(integrationType, creds, grantedScopes), nil
 }
 
 func (s *SlackProvider) Refresh(ctx context.Context, refreshToken string) (*types.IntegrationCredentials, error) {
@@ -149,7 +167,7 @@ func (s *SlackProvider) Refresh(ctx context.Context, refreshToken string) (*type
 		"grant_type":    {"refresh_token"},
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", slack.Endpoint.TokenURL, strings.NewReader(data.Encode()))
+	req, err := http.NewRequestWithContext(ctx, "POST", slackTokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, err
 	}

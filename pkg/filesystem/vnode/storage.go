@@ -6,10 +6,12 @@ import (
 	"io/fs"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
+	"github.com/rs/zerolog/log"
 	"github.com/winfsp/cgofuse/fuse"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -56,6 +58,7 @@ func NewStorageVNode(conn *grpc.ClientConn, token string) *StorageVNode {
 	}
 	s.asyncWriter = NewAsyncWriter(s.writeRange)
 	go s.backgroundWarmupLoop()
+	go s.handleEvictionLoop()
 	return s
 }
 
@@ -84,7 +87,7 @@ func (s *StorageVNode) rel(path string) string {
 
 func (s *StorageVNode) Getattr(path string) (*FileInfo, error) {
 	if path == "/" {
-		return NewDirInfo(PathIno(path)), nil
+		return newFileInfo(PathIno(path), 0, normalizeRuntimeWritableMode(syscall.S_IFDIR|0755), 2), nil
 	}
 
 	// Treat AppleDouble files as zero-length placeholders.
@@ -92,18 +95,17 @@ func (s *StorageVNode) Getattr(path string) (*FileInfo, error) {
 		return NewFileInfo(PathIno(path), 0, 0644), nil
 	}
 
-	// If we have dirty data in the async writer, report its size.
-	// This ensures editors see the correct size after Truncate+Write
-	// before the data is uploaded to S3.
-	if info := s.asyncWriter.DirtyFileInfo(path, s.cachedMode(path)); info != nil {
+	// If we have dirty local data (buffered or async), report it immediately.
+	// This keeps size/read behavior correct before async upload completes.
+	if info := s.localDirtyFileInfo(path, s.cachedMode(path)); info != nil {
 		return info, nil
 	}
 
-	if s.cache.IsNegative(path) {
-		return nil, fs.ErrNotExist
-	}
 	if info := s.cache.GetInfo(path); info != nil {
 		return info, nil
+	}
+	if s.cache.IsNegative(path) {
+		return nil, fs.ErrNotExist
 	}
 
 	ctx, cancel := s.ctx()
@@ -159,8 +161,13 @@ func (s *StorageVNode) Readdir(path string) ([]DirEntry, error) {
 		if path == "/" {
 			childPath = "/" + e.Name
 		}
+		mode := normalizeRuntimeWritableMode(e.Mode)
+		size := e.Size
+		if dirty, ok := s.localDirtySize(childPath, mode); ok && dirty > size {
+			size = dirty
+		}
 		ino := PathIno(childPath)
-		entries = append(entries, DirEntry{Name: e.Name, Mode: e.Mode, Ino: ino})
+		entries = append(entries, DirEntry{Name: e.Name, Mode: mode, Ino: ino, Size: size})
 
 		mtime := now
 		if e.Mtime > 0 {
@@ -168,7 +175,7 @@ func (s *StorageVNode) Readdir(path string) ([]DirEntry, error) {
 		}
 		uid, gid := GetOwner()
 		childMeta[e.Name] = &FileInfo{
-			Ino: ino, Size: e.Size, Mode: e.Mode, Nlink: 1,
+			Ino: ino, Size: size, Mode: mode, Nlink: 1,
 			Uid: uid, Gid: gid,
 			Atime: now, Mtime: mtime, Ctime: mtime,
 		}
@@ -209,11 +216,12 @@ func (s *StorageVNode) Open(path string, flags int) (FileHandle, error) {
 }
 
 func (s *StorageVNode) openExisting(path string) (FileHandle, error) {
-	if s.cache.IsNegative(path) {
-		return 0, fs.ErrNotExist
-	}
+	// Prefer positive cache so fresh metadata wins over stale negatives.
 	if s.cache.GetInfo(path) != nil {
 		return s.allocHandle(path), nil
+	}
+	if s.cache.IsNegative(path) {
+		return 0, fs.ErrNotExist
 	}
 
 	ctx, cancel := s.ctx()
@@ -239,14 +247,14 @@ func (s *StorageVNode) Read(path string, buf []byte, off int64, fh FileHandle) (
 
 func (s *StorageVNode) cachedReadOps() cachedReadOps {
 	return cachedReadOps{
-		content:         s.content,
-		writer:          s.asyncWriter,
-		getHandleState:  s.getHandleState,
-		enqueueWrites:   s.enqueueWritesForPath,
-		consumePrefetch: s.consumePrefetch,
-		maybeStatSmall:  s.maybeStatSmall,
-		readRange:       s.readRange,
-		recordRead:      s.recordRead,
+		content:          s.content,
+		writer:           s.asyncWriter,
+		getHandleState:   s.getHandleState,
+		peekHandleWrites: s.peekHandleWrites,
+		consumePrefetch:  s.consumePrefetch,
+		maybeStatSmall:   s.maybeStatSmall,
+		readRange:        s.readRange,
+		recordRead:       s.recordRead,
 	}
 }
 
@@ -264,7 +272,10 @@ func (s *StorageVNode) Create(path string, flags int, mode uint32) (FileHandle, 
 	ctx, cancel := s.ctx()
 	defer cancel()
 
-	resp, err := s.client.Create(ctx, &pb.ContextCreateRequest{Path: s.rel(path), Mode: mode})
+	resp, err := s.client.Create(ctx, &pb.ContextCreateRequest{
+		Path: s.rel(path),
+		Mode: sanitizeNodeMode(mode, syscall.S_IFREG, 0644),
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -272,8 +283,8 @@ func (s *StorageVNode) Create(path string, flags int, mode uint32) (FileHandle, 
 		return 0, fs.ErrInvalid
 	}
 
-	s.cache.Invalidate(path)
-	s.invalidateParent(path)
+	invalidatePathCaches(s.cache, s.content, path)
+	invalidateParentCache(s.cache, path)
 	return s.allocHandle(path), nil
 }
 
@@ -282,6 +293,10 @@ func (s *StorageVNode) Write(path string, buf []byte, off int64, fh FileHandle) 
 	if isAppleDoublePath(path) {
 		return len(buf), nil // Pretend write succeeded
 	}
+
+	// Clear cached small-file content eagerly so readers never observe stale bytes
+	// when writes happen within the same mtime second.
+	s.content.Invalidate(path)
 
 	state := s.getHandleState(fh)
 	if state == nil {
@@ -297,6 +312,7 @@ func (s *StorageVNode) Write(path string, buf []byte, off int64, fh FileHandle) 
 		state.mu.Unlock()
 		return 0, fs.ErrInvalid
 	}
+	state.touch()
 
 	// Empty buffer: start buffering or write directly if too large.
 	if len(state.writeBuf) == 0 {
@@ -321,10 +337,19 @@ func (s *StorageVNode) Write(path string, buf []byte, off int64, fh FileHandle) 
 		return len(buf), nil
 	}
 
-	// Buffer overflow or non-contiguous: flush old buffer synchronously,
-	// then start fresh. We use synchronous writeRange here (not Enqueue)
-	// because the asyncWriter stores only ONE (offset, data) pair per path —
-	// sequential Enqueue calls at different offsets would clobber each other.
+	// Non-contiguous or buffer overflow. Try to merge both ranges in memory
+	// so the file reaches S3 as a single PutObject. Flushing a partial write
+	// at offset A followed by a gateway merge-write at offset B fills the gap
+	// [A+len(first), B) with NULLs when B > A+len(first).
+	merged := mergeWriteBuffer(state.writeOff, state.writeBuf, off, buf)
+	if merged != nil && len(merged.data) <= writeBufferMax {
+		state.writeOff = merged.off
+		state.writeBuf = merged.data
+		state.mu.Unlock()
+		return len(buf), nil
+	}
+
+	// Combined range too large: flush old buffer synchronously then start fresh.
 	data := append([]byte(nil), state.writeBuf...)
 	writeOff := state.writeOff
 	state.writeBuf = nil
@@ -366,7 +391,7 @@ func (s *StorageVNode) Truncate(path string, size int64, fh FileHandle) error {
 		// fires and uploads empty content before the Write data arrives.
 		s.enqueueWritesForPath(path)
 		s.asyncWriter.EnqueueNoTimer(path, 0, []byte{})
-		s.cache.Invalidate(path)
+		invalidatePathCaches(s.cache, s.content, path)
 		return nil
 	}
 
@@ -386,7 +411,7 @@ func (s *StorageVNode) Truncate(path string, size int64, fh FileHandle) error {
 		return fs.ErrInvalid
 	}
 
-	s.cache.Invalidate(path)
+	invalidatePathCaches(s.cache, s.content, path)
 	return nil
 }
 
@@ -394,7 +419,10 @@ func (s *StorageVNode) Mkdir(path string, mode uint32) error {
 	ctx, cancel := s.ctx()
 	defer cancel()
 
-	resp, err := s.client.Mkdir(ctx, &pb.ContextMkdirRequest{Path: s.rel(path), Mode: mode})
+	resp, err := s.client.Mkdir(ctx, &pb.ContextMkdirRequest{
+		Path: s.rel(path),
+		Mode: sanitizeNodeMode(mode, syscall.S_IFDIR, 0755),
+	})
 	if err != nil {
 		return err
 	}
@@ -402,8 +430,8 @@ func (s *StorageVNode) Mkdir(path string, mode uint32) error {
 		return fs.ErrInvalid
 	}
 
-	s.cache.Invalidate(path)
-	s.invalidateParent(path)
+	invalidatePathCaches(s.cache, s.content, path)
+	invalidateParentCache(s.cache, path)
 	return nil
 }
 
@@ -419,8 +447,8 @@ func (s *StorageVNode) Rmdir(path string) error {
 		return fs.ErrInvalid
 	}
 
-	s.cache.Invalidate(path)
-	s.invalidateParent(path)
+	invalidatePathCaches(s.cache, s.content, path)
+	invalidateParentCache(s.cache, path)
 	return nil
 }
 
@@ -440,8 +468,8 @@ func (s *StorageVNode) Unlink(path string) error {
 		return fs.ErrInvalid
 	}
 
-	s.cache.Invalidate(path)
-	s.invalidateParent(path)
+	invalidatePathCaches(s.cache, s.content, path)
+	invalidateParentCache(s.cache, path)
 	return nil
 }
 
@@ -471,10 +499,60 @@ func (s *StorageVNode) Rename(oldpath, newpath string) error {
 		return fs.ErrInvalid
 	}
 
-	s.cache.Invalidate(oldpath)
-	s.cache.Invalidate(newpath)
-	s.invalidateParent(oldpath)
-	s.invalidateParent(newpath)
+	invalidatePathCaches(s.cache, s.content, oldpath)
+	invalidatePathCaches(s.cache, s.content, newpath)
+	invalidateParentCache(s.cache, oldpath)
+	invalidateParentCache(s.cache, newpath)
+	return nil
+}
+
+// Chmod updates mode metadata for files/directories.
+func (s *StorageVNode) Chmod(path string, mode uint32) error {
+	if path == "/" {
+		return nil
+	}
+	if isAppleDoublePath(path) {
+		return nil
+	}
+
+	info, err := s.Getattr(path)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := s.ctx()
+	defer cancel()
+
+	if info.Mode&syscall.S_IFMT == syscall.S_IFDIR {
+		resp, err := s.client.Mkdir(ctx, &pb.ContextMkdirRequest{
+			Path: s.rel(path),
+			Mode: sanitizeNodeMode(mode, syscall.S_IFDIR, 0755),
+		})
+		if err != nil {
+			return err
+		}
+		if !resp.Ok {
+			return fs.ErrInvalid
+		}
+	} else {
+		fileType := info.Mode & syscall.S_IFMT
+		if fileType == 0 {
+			fileType = syscall.S_IFREG
+		}
+		resp, err := s.client.Create(ctx, &pb.ContextCreateRequest{
+			Path: s.rel(path),
+			Mode: sanitizeNodeMode(mode, fileType, 0644),
+		})
+		if err != nil {
+			return err
+		}
+		if !resp.Ok {
+			return fs.ErrInvalid
+		}
+	}
+
+	invalidatePathCaches(s.cache, s.content, path)
+	invalidateParentCache(s.cache, path)
 	return nil
 }
 
@@ -492,8 +570,8 @@ func (s *StorageVNode) Symlink(target, linkPath string) error {
 		return fs.ErrInvalid
 	}
 
-	s.cache.Invalidate(linkPath)
-	s.invalidateParent(linkPath)
+	invalidatePathCaches(s.cache, s.content, linkPath)
+	invalidateParentCache(s.cache, linkPath)
 	return nil
 }
 
@@ -562,7 +640,7 @@ func (s *StorageVNode) allocHandle(path string) FileHandle {
 	defer s.mu.Unlock()
 	fh := s.nextFH
 	s.nextFH++
-	state := &handleState{path: path}
+	state := &handleState{path: path, lastActivity: time.Now()}
 	s.handles[fh] = state
 
 	s.writeMu.Lock()
@@ -620,12 +698,14 @@ func (s *StorageVNode) readRange(path string, off int64, length int64) ([]byte, 
 		return nil, err
 	}
 	if !resp.Ok {
-		return nil, fs.ErrNotExist
+		return nil, readResponseError(resp.Error)
 	}
 	return resp.Data, nil
 }
 
 func (s *StorageVNode) writeRange(path string, off int64, data []byte) error {
+	off, data = compactNulls(off, data)
+
 	ctx, cancel := s.ctx()
 	defer cancel()
 
@@ -638,7 +718,7 @@ func (s *StorageVNode) writeRange(path string, off int64, data []byte) error {
 	if !resp.Ok {
 		return fs.ErrInvalid
 	}
-	s.cache.Invalidate(path)
+	invalidatePathCaches(s.cache, s.content, path)
 	return nil
 }
 
@@ -648,6 +728,7 @@ func (s *StorageVNode) recordRead(state *handleState, path string, off int64, n 
 	}
 
 	state.mu.Lock()
+	state.touch()
 	sequential := state.lastSize > 0 && state.lastOff+int64(state.lastSize) == off
 	state.lastOff = off
 	state.lastSize = n
@@ -737,6 +818,7 @@ func (s *StorageVNode) flushWriteBuffer(path string, state *handleState) {
 	state.writeBuf = nil
 	state.mu.Unlock()
 
+	writeOff, data = compactNulls(writeOff, data)
 	s.asyncWriter.Enqueue(path, writeOff, data)
 }
 
@@ -755,18 +837,112 @@ func (s *StorageVNode) enqueueWritesForPath(path string) {
 	}
 }
 
-// invalidateParent invalidates only the specific child entry from its parent's cache,
-// preserving sibling metadata. This is more efficient than invalidating the entire parent.
-func (s *StorageVNode) invalidateParent(path string) {
-	parentPath := "/"
-	childName := strings.TrimPrefix(path, "/")
-
-	if idx := strings.LastIndex(path, "/"); idx > 0 {
-		parentPath = path[:idx]
-		childName = path[idx+1:]
+func (s *StorageVNode) localDirtyFileInfo(path string, fallbackMode uint32) *FileInfo {
+	size, ok := s.localDirtySize(path, fallbackMode)
+	if !ok {
+		return nil
 	}
 
-	s.cache.InvalidateChild(parentPath, childName)
+	if fallbackMode == 0 {
+		fallbackMode = syscall.S_IFREG | 0644
+	}
+	mode := normalizeRuntimeWritableMode(fallbackMode)
+	uid, gid := GetOwner()
+	now := time.Now()
+	return &FileInfo{
+		Ino: PathIno(path), Size: size, Mode: mode, Nlink: 1,
+		Uid: uid, Gid: gid,
+		Atime: now, Mtime: now, Ctime: now,
+	}
+}
+
+func (s *StorageVNode) localDirtySize(path string, fallbackMode uint32) (int64, bool) {
+	var (
+		size     int64
+		hasDirty bool
+	)
+
+	if info := s.cache.GetInfo(path); info != nil {
+		size = info.Size
+	}
+
+	if info := s.asyncWriter.DirtyFileInfo(path, fallbackMode); info != nil {
+		hasDirty = true
+		if info.Size > size {
+			size = info.Size
+		}
+	}
+
+	if bufferedSize, ok := s.bufferedHandleSize(path); ok {
+		hasDirty = true
+		if bufferedSize > size {
+			size = bufferedSize
+		}
+	}
+
+	return size, hasDirty
+}
+
+func (s *StorageVNode) bufferedHandleSize(path string) (int64, bool) {
+	s.writeMu.Lock()
+	entries := s.writes[path]
+	states := make([]*handleState, 0, len(entries))
+	for _, state := range entries {
+		states = append(states, state)
+	}
+	s.writeMu.Unlock()
+
+	var (
+		size int64
+		ok   bool
+	)
+	for _, state := range states {
+		state.mu.Lock()
+		if !state.closed && len(state.writeBuf) > 0 {
+			end := state.writeOff + int64(len(state.writeBuf))
+			if !ok || end > size {
+				size = end
+			}
+			ok = true
+		}
+		state.mu.Unlock()
+	}
+	return size, ok
+}
+
+// peekHandleWrites returns a snapshot of the largest per-handle write buffer
+// for path WITHOUT clearing it. Used by the read path to serve dirty data
+// without disrupting an in-progress write sequence.
+func (s *StorageVNode) peekHandleWrites(path string) (int64, []byte, bool) {
+	s.writeMu.Lock()
+	entries := s.writes[path]
+	states := make([]*handleState, 0, len(entries))
+	for _, state := range entries {
+		states = append(states, state)
+	}
+	s.writeMu.Unlock()
+
+	var (
+		bestOff  int64
+		bestData []byte
+	)
+	for _, state := range states {
+		state.mu.Lock()
+		if !state.closed && len(state.writeBuf) > 0 {
+			end := state.writeOff + int64(len(state.writeBuf))
+			if bestData == nil || end > bestOff+int64(len(bestData)) {
+				bestOff = state.writeOff
+				bestData = make([]byte, len(state.writeBuf))
+				copy(bestData, state.writeBuf)
+			}
+		}
+		state.mu.Unlock()
+	}
+	if bestData == nil {
+		return 0, nil, false
+	}
+	bestOff, bestData = compactNulls(bestOff, bestData)
+	return bestOff, bestData, true
 }
 
 // cachedMode returns the file mode from the metadata cache, or 0 if not cached.
@@ -784,10 +960,80 @@ func (s *StorageVNode) toFileInfo(path string, info *pb.FileInfo) *FileInfo {
 		mtime = time.Unix(info.Mtime, 0)
 	}
 	uid, gid := GetOwner()
+	mode := info.Mode
+	if info.IsDir {
+		mode = withNodeFileType(mode, syscall.S_IFDIR)
+	}
+	mode = normalizeRuntimeWritableMode(mode)
 	return &FileInfo{
-		Ino: PathIno(path), Size: info.Size, Mode: info.Mode, Nlink: 1,
+		Ino: PathIno(path), Size: info.Size, Mode: mode, Nlink: 1,
 		Uid: uid, Gid: gid,
 		Atime: now, Mtime: mtime, Ctime: mtime,
+	}
+}
+
+func (s *StorageVNode) OpenHandleCount() int {
+	s.mu.Lock()
+	n := len(s.handles)
+	s.mu.Unlock()
+	return n
+}
+
+// handleEvictionLoop periodically evicts handles that haven't been used recently.
+// This prevents unbounded memory growth when FUSE Release is never received
+// (process killed, 9P disconnect, gVisor edge cases).
+func (s *StorageVNode) handleEvictionLoop() {
+	ticker := time.NewTicker(handleEvictionInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.stopWarmup:
+			return
+		case <-ticker.C:
+			s.evictStaleHandles()
+		}
+	}
+}
+
+func (s *StorageVNode) evictStaleHandles() {
+	cutoff := time.Now().Add(-handleStaleTimeout)
+
+	s.mu.Lock()
+	stale := make(map[FileHandle]*handleState)
+	for fh, state := range s.handles {
+		state.mu.Lock()
+		if !state.closed && state.lastActivity.Before(cutoff) {
+			stale[fh] = state
+		}
+		state.mu.Unlock()
+	}
+	s.mu.Unlock()
+
+	for fh, state := range stale {
+		s.flushWriteBuffer(state.path, state)
+		_ = s.asyncWriter.ForceFlush(state.path)
+
+		s.mu.Lock()
+		state.mu.Lock()
+		state.closed = true
+		state.writeBuf = nil
+		state.prefetch = nil
+		state.mu.Unlock()
+		delete(s.handles, fh)
+		s.mu.Unlock()
+
+		s.writeMu.Lock()
+		if m, ok := s.writes[state.path]; ok {
+			delete(m, fh)
+			if len(m) == 0 {
+				delete(s.writes, state.path)
+			}
+		}
+		s.writeMu.Unlock()
+
+		log.Debug().Str("path", state.path).Uint64("fh", uint64(fh)).
+			Msg("evicted stale file handle")
 	}
 }
 
@@ -873,8 +1119,13 @@ func (s *StorageVNode) doBackgroundWarmup() {
 			if path == "/" {
 				childPath = "/" + e.Name
 			}
+			mode := normalizeRuntimeWritableMode(e.Mode)
+			size := e.Size
+			if dirty, ok := s.localDirtySize(childPath, mode); ok && dirty > size {
+				size = dirty
+			}
 			ino := PathIno(childPath)
-			entries = append(entries, DirEntry{Name: e.Name, Mode: e.Mode, Ino: ino})
+			entries = append(entries, DirEntry{Name: e.Name, Mode: mode, Ino: ino, Size: size})
 
 			mtime := now
 			if e.Mtime > 0 {
@@ -882,7 +1133,7 @@ func (s *StorageVNode) doBackgroundWarmup() {
 			}
 			uid, gid := GetOwner()
 			childMeta[e.Name] = &FileInfo{
-				Ino: ino, Size: e.Size, Mode: e.Mode, Nlink: 1,
+				Ino: ino, Size: size, Mode: mode, Nlink: 1,
 				Uid: uid, Gid: gid,
 				Atime: now, Mtime: mtime, Ctime: mtime,
 			}

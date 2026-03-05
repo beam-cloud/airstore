@@ -1,6 +1,9 @@
 package sources
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestSanitizeFilename(t *testing.T) {
 	tests := []struct {
@@ -77,5 +80,18 @@ func TestSanitizeFilename(t *testing.T) {
 				t.Errorf("SanitizeFilename(%q) = %q, want %q", tt.input, got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestGenerateSourceReadmeConnectedUsesReadOnlyGuidance(t *testing.T) {
+	content := string(GenerateSourceReadme("linear", true, "shared", ""))
+	if strings.Contains(content, "mkdir /sources/") {
+		t.Fatalf("connected README should not suggest mkdir on sources: %s", content)
+	}
+	if !strings.Contains(content, "read-only") {
+		t.Fatalf("connected README should mention read-only sources: %s", content)
+	}
+	if !strings.Contains(content, "tools/linear --help") {
+		t.Fatalf("connected README should suggest tool usage: %s", content)
 	}
 }

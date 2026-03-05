@@ -116,6 +116,80 @@ func (*stream) EvaluateGmailQueryResults(ctx context.Context, original_guidance 
 	return channel, nil
 }
 
+// / Streaming version of InferConfluenceQuery
+func (*stream) InferConfluenceQuery(ctx context.Context, name string, guidance *string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.ConfluenceQueryResult, types.ConfluenceQueryResult], error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"name": name, "guidance": guidance},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		// This should never happen. if it does, please file an issue at https://github.com/boundaryml/baml/issues
+		// and include the type of the args you're passing in.
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: InferConfluenceQuery: %w", err)
+		panic(wrapped_err)
+	}
+
+	internal_channel, err := bamlRuntime.CallFunctionStream(ctx, "InferConfluenceQuery", encoded, callOpts.onTick)
+	if err != nil {
+		return nil, err
+	}
+
+	channel := make(chan StreamValue[stream_types.ConfluenceQueryResult, types.ConfluenceQueryResult])
+	go func() {
+		for result := range internal_channel {
+			if result.Error != nil {
+				channel <- StreamValue[stream_types.ConfluenceQueryResult, types.ConfluenceQueryResult]{
+					IsError: true,
+					Error:   result.Error,
+				}
+				close(channel)
+				return
+			}
+			if result.HasData {
+				data := (result.Data).(types.ConfluenceQueryResult)
+				channel <- StreamValue[stream_types.ConfluenceQueryResult, types.ConfluenceQueryResult]{
+					IsFinal:  true,
+					as_final: &data,
+				}
+			} else {
+				data := (result.StreamData).(stream_types.ConfluenceQueryResult)
+				channel <- StreamValue[stream_types.ConfluenceQueryResult, types.ConfluenceQueryResult]{
+					IsFinal:   false,
+					as_stream: &data,
+				}
+			}
+		}
+
+		// when internal_channel is closed, close the output too
+		close(channel)
+	}()
+	return channel, nil
+}
+
 // / Streaming version of InferGDriveQuery
 func (*stream) InferGDriveQuery(ctx context.Context, name string, guidance *string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.GDriveQueryResult, types.GDriveQueryResult], error) {
 
@@ -622,6 +696,154 @@ func (*stream) InferSlackQuery(ctx context.Context, name string, guidance *strin
 			} else {
 				data := (result.StreamData).(stream_types.SlackQueryResult)
 				channel <- StreamValue[stream_types.SlackQueryResult, types.SlackQueryResult]{
+					IsFinal:   false,
+					as_stream: &data,
+				}
+			}
+		}
+
+		// when internal_channel is closed, close the output too
+		close(channel)
+	}()
+	return channel, nil
+}
+
+// / Streaming version of InferWebQuery
+func (*stream) InferWebQuery(ctx context.Context, name string, guidance *string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.WebQueryResult, types.WebQueryResult], error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"name": name, "guidance": guidance},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		// This should never happen. if it does, please file an issue at https://github.com/boundaryml/baml/issues
+		// and include the type of the args you're passing in.
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: InferWebQuery: %w", err)
+		panic(wrapped_err)
+	}
+
+	internal_channel, err := bamlRuntime.CallFunctionStream(ctx, "InferWebQuery", encoded, callOpts.onTick)
+	if err != nil {
+		return nil, err
+	}
+
+	channel := make(chan StreamValue[stream_types.WebQueryResult, types.WebQueryResult])
+	go func() {
+		for result := range internal_channel {
+			if result.Error != nil {
+				channel <- StreamValue[stream_types.WebQueryResult, types.WebQueryResult]{
+					IsError: true,
+					Error:   result.Error,
+				}
+				close(channel)
+				return
+			}
+			if result.HasData {
+				data := (result.Data).(types.WebQueryResult)
+				channel <- StreamValue[stream_types.WebQueryResult, types.WebQueryResult]{
+					IsFinal:  true,
+					as_final: &data,
+				}
+			} else {
+				data := (result.StreamData).(stream_types.WebQueryResult)
+				channel <- StreamValue[stream_types.WebQueryResult, types.WebQueryResult]{
+					IsFinal:   false,
+					as_stream: &data,
+				}
+			}
+		}
+
+		// when internal_channel is closed, close the output too
+		close(channel)
+	}()
+	return channel, nil
+}
+
+// / Streaming version of ParseCronSchedule
+func (*stream) ParseCronSchedule(ctx context.Context, description string, timezone string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.CronResult, types.CronResult], error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"description": description, "timezone": timezone},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		// This should never happen. if it does, please file an issue at https://github.com/boundaryml/baml/issues
+		// and include the type of the args you're passing in.
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: ParseCronSchedule: %w", err)
+		panic(wrapped_err)
+	}
+
+	internal_channel, err := bamlRuntime.CallFunctionStream(ctx, "ParseCronSchedule", encoded, callOpts.onTick)
+	if err != nil {
+		return nil, err
+	}
+
+	channel := make(chan StreamValue[stream_types.CronResult, types.CronResult])
+	go func() {
+		for result := range internal_channel {
+			if result.Error != nil {
+				channel <- StreamValue[stream_types.CronResult, types.CronResult]{
+					IsError: true,
+					Error:   result.Error,
+				}
+				close(channel)
+				return
+			}
+			if result.HasData {
+				data := (result.Data).(types.CronResult)
+				channel <- StreamValue[stream_types.CronResult, types.CronResult]{
+					IsFinal:  true,
+					as_final: &data,
+				}
+			} else {
+				data := (result.StreamData).(stream_types.CronResult)
+				channel <- StreamValue[stream_types.CronResult, types.CronResult]{
 					IsFinal:   false,
 					as_stream: &data,
 				}

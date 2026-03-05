@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -29,6 +30,15 @@ const (
 	maxStorageSize  = 64 << 20 // 64MB
 	cacheTTL        = 30 * time.Second
 	cacheMaxEntries = 10000
+
+	uploadReadyProbeWindow         = 2 * time.Second
+	uploadReadyProbeTimeoutPerHead = 750 * time.Millisecond
+	uploadReadyProbeInitialBackoff = 50 * time.Millisecond
+	uploadReadyProbeMaxBackoff     = 400 * time.Millisecond
+
+	storageModeMetadataKey = "airstore-mode"
+	defaultStorageFileMode = uint32(syscall.S_IFREG | 0644)
+	defaultStorageDirMode  = uint32(syscall.S_IFDIR | 0755)
 )
 
 // StorageService provides S3-backed file storage with per-workspace buckets
@@ -77,6 +87,11 @@ func (s *StorageService) SetHookStream(emitter common.EventEmitter) {
 
 // emitHookEvent sends a filesystem event to the hook event stream.
 func (s *StorageService) emitHookEvent(ctx context.Context, eventType string, path string) {
+	s.emitHookEventWithData(ctx, eventType, path, nil)
+}
+
+// emitHookEventWithData sends a filesystem event plus optional metadata to the hook stream.
+func (s *StorageService) emitHookEventWithData(ctx context.Context, eventType string, path string, meta map[string]any) {
 	if s.hookStream == nil {
 		return
 	}
@@ -87,14 +102,58 @@ func (s *StorageService) emitHookEvent(ctx context.Context, eventType string, pa
 	}
 
 	path = hooks.NormalizePath(path)
+	if types.IsHiddenDotPath(path) {
+		return
+	}
 
-	log.Debug().Str("event", eventType).Str("path", path).Uint("workspace", wsId).Msg("hook event emitted")
-	s.hookStream.Emit(ctx, map[string]any{
+	payload := map[string]any{
 		"event":            eventType,
 		"workspace_id":     fmt.Sprintf("%d", wsId),
 		"workspace_ext_id": auth.WorkspaceExtId(ctx),
 		"path":             path,
-	})
+	}
+	for key, value := range meta {
+		if value != nil {
+			payload[key] = value
+		}
+	}
+
+	logEvent := log.Debug().
+		Str("event", eventType).
+		Str("path", path).
+		Uint("workspace", wsId)
+	if rawOldPath, ok := payload["old_path"]; ok {
+		if oldPath, ok := rawOldPath.(string); ok && strings.TrimSpace(oldPath) != "" {
+			logEvent = logEvent.Str("old_path", strings.TrimSpace(oldPath))
+		}
+	}
+	if rawNewPath, ok := payload["new_path"]; ok {
+		if newPath, ok := rawNewPath.(string); ok && strings.TrimSpace(newPath) != "" {
+			logEvent = logEvent.Str("new_path", strings.TrimSpace(newPath))
+		}
+	}
+	logEvent.Msg("hook event emitted")
+
+	s.hookStream.Emit(ctx, payload)
+}
+
+// emitHookMoveEvents emits source+destination hook events for a move/rename.
+func (s *StorageService) emitHookMoveEvents(ctx context.Context, oldPath, newPath string) {
+	oldPath = hooks.NormalizePath(oldPath)
+	newPath = hooks.NormalizePath(newPath)
+	if oldPath == "" || newPath == "" || oldPath == newPath {
+		return
+	}
+
+	moveOpID := fmt.Sprintf("mv-%d", time.Now().UnixNano())
+	meta := map[string]any{
+		"old_path":   oldPath,
+		"new_path":   newPath,
+		"move_op_id": moveOpID,
+	}
+
+	s.emitHookEventWithData(ctx, hooks.EventFsDelete, oldPath, meta)
+	s.emitHookEventWithData(ctx, hooks.EventFsWrite, newPath, meta)
 }
 
 func (s *StorageService) bucket(ctx context.Context) (string, error) {
@@ -159,7 +218,7 @@ func (s *StorageService) Stat(ctx context.Context, req *pb.ContextStatRequest) (
 			Bucket: &bucket, Prefix: &prefix, Delimiter: aws.String("/"), MaxKeys: aws.Int32(1),
 		})
 		if err == nil && (len(list.Contents) > 0 || len(list.CommonPrefixes) > 0) {
-			info := dirInfo()
+			info := s.statDirInfo(ctx, bucket, key)
 			s.cache.setInfo(cacheKey, info)
 			return info, nil
 		}
@@ -205,17 +264,20 @@ func (s *StorageService) ReadDir(ctx context.Context, req *pb.ContextReadDirRequ
 		entries := make([]*pb.ContextDirEntry, 0, len(resp.Contents)+len(resp.CommonPrefixes))
 
 		for _, p := range resp.CommonPrefixes {
-			name := strings.TrimSuffix(strings.TrimPrefix(aws.ToString(p.Prefix), prefix), "/")
+			prefixKey := aws.ToString(p.Prefix)
+			name := strings.TrimSuffix(strings.TrimPrefix(prefixKey, prefix), "/")
 			if name == "" || isHiddenFile(name) {
 				continue
 			}
+			mode, mtime := s.statDirModeMtime(ctx, bucket, prefixKey)
 			entries = append(entries, &pb.ContextDirEntry{
-				Name: name, Mode: uint32(syscall.S_IFDIR | 0755), IsDir: true,
+				Name: name, Mode: mode, IsDir: true, Mtime: mtime,
 			})
 		}
 
 		for _, obj := range resp.Contents {
-			name := strings.TrimPrefix(aws.ToString(obj.Key), prefix)
+			objKey := aws.ToString(obj.Key)
+			name := strings.TrimPrefix(objKey, prefix)
 			if name == "" || strings.Contains(name, "/") || isHiddenFile(name) {
 				continue
 			}
@@ -223,8 +285,12 @@ func (s *StorageService) ReadDir(ctx context.Context, req *pb.ContextReadDirRequ
 			if obj.LastModified != nil {
 				mtime = obj.LastModified.Unix()
 			}
+			mode, statMtime := s.statFileModeMtime(ctx, bucket, objKey)
+			if statMtime > 0 {
+				mtime = statMtime
+			}
 			entries = append(entries, &pb.ContextDirEntry{
-				Name: name, Mode: uint32(syscall.S_IFREG | 0644),
+				Name: name, Mode: mode,
 				Size: aws.ToInt64(obj.Size), Mtime: mtime, Etag: aws.ToString(obj.ETag),
 			})
 		}
@@ -266,6 +332,9 @@ func (s *StorageService) Read(ctx context.Context, req *pb.ContextReadRequest) (
 		if isNotFound(err) {
 			return &pb.ContextReadResponse{Ok: false, Error: "not found"}, nil
 		}
+		if isInvalidRange(err) {
+			return &pb.ContextReadResponse{Ok: true, Data: nil}, nil
+		}
 		return &pb.ContextReadResponse{Ok: false, Error: err.Error()}, nil
 	}
 	defer resp.Body.Close()
@@ -293,6 +362,7 @@ func (s *StorageService) Write(ctx context.Context, req *pb.ContextWriteRequest)
 
 	key := s.key(req.Path)
 	data := req.Data
+	metadata := s.objectMetadataForWrite(ctx, bucket, key)
 
 	if req.Offset > 0 {
 		existing, _ := s.readFile(ctx, bucket, key)
@@ -310,7 +380,7 @@ func (s *StorageService) Write(ctx context.Context, req *pb.ContextWriteRequest)
 	}
 
 	_, err = s.client.S3Client().PutObject(ctx, &s3.PutObjectInput{
-		Bucket: &bucket, Key: &key, Body: bytes.NewReader(data),
+		Bucket: &bucket, Key: &key, Body: bytes.NewReader(data), Metadata: metadata,
 	})
 	if err != nil {
 		return &pb.ContextWriteResponse{Ok: false, Error: err.Error()}, nil
@@ -332,11 +402,38 @@ func (s *StorageService) Create(ctx context.Context, req *pb.ContextCreateReques
 	defer cancel()
 
 	key := s.key(req.Path)
-	_, err = s.client.S3Client().PutObject(ctx, &s3.PutObjectInput{
-		Bucket: &bucket, Key: &key, Body: bytes.NewReader(nil),
+	mode := sanitizeMode(req.Mode, syscall.S_IFREG, 0644)
+
+	headResp, headErr := s.client.S3Client().HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: &bucket, Key: &key,
 	})
-	if err != nil {
-		return &pb.ContextCreateResponse{Ok: false, Error: err.Error()}, nil
+	if headErr == nil {
+		metadata := withModeMetadata(headResp.Metadata, mode)
+
+		_, err = s.client.S3Client().CopyObject(ctx, &s3.CopyObjectInput{
+			Bucket:            &bucket,
+			Key:               &key,
+			CopySource:        aws.String(bucket + "/" + key),
+			Metadata:          metadata,
+			MetadataDirective: s3types.MetadataDirectiveReplace,
+		})
+		if err != nil {
+			return &pb.ContextCreateResponse{Ok: false, Error: err.Error()}, nil
+		}
+	} else {
+		if !isNotFound(headErr) {
+			return &pb.ContextCreateResponse{Ok: false, Error: headErr.Error()}, nil
+		}
+
+		_, err = s.client.S3Client().PutObject(ctx, &s3.PutObjectInput{
+			Bucket:   &bucket,
+			Key:      &key,
+			Body:     bytes.NewReader(nil),
+			Metadata: withModeMetadata(nil, mode),
+		})
+		if err != nil {
+			return &pb.ContextCreateResponse{Ok: false, Error: err.Error()}, nil
+		}
 	}
 
 	s.invalidate(bucket, key)
@@ -463,9 +560,13 @@ func (s *StorageService) Mkdir(ctx context.Context, req *pb.ContextMkdirRequest)
 
 	key := s.key(req.Path)
 	dirKey := strings.TrimSuffix(key, "/") + "/"
+	mode := sanitizeMode(req.Mode, syscall.S_IFDIR, 0755)
 
 	_, err = s.client.S3Client().PutObject(ctx, &s3.PutObjectInput{
-		Bucket: &bucket, Key: &dirKey, Body: bytes.NewReader(nil),
+		Bucket:   &bucket,
+		Key:      &dirKey,
+		Body:     bytes.NewReader(nil),
+		Metadata: withModeMetadata(nil, mode),
 	})
 	if err != nil {
 		return &pb.ContextMkdirResponse{Ok: false, Error: err.Error()}, nil
@@ -501,6 +602,7 @@ func (s *StorageService) Rename(ctx context.Context, req *pb.ContextRenameReques
 		if dirErr != nil {
 			return &pb.ContextRenameResponse{Ok: false, Error: fmt.Sprintf("rename failed: %v", err)}, nil
 		}
+		s.emitHookMoveEvents(ctx, req.OldPath, req.NewPath)
 		return &pb.ContextRenameResponse{Ok: true}, nil
 	}
 
@@ -508,6 +610,7 @@ func (s *StorageService) Rename(ctx context.Context, req *pb.ContextRenameReques
 		s.invalidate(bucket, oldKey)
 		s.invalidate(bucket, newKey)
 	}
+	s.emitHookMoveEvents(ctx, req.OldPath, req.NewPath)
 	return &pb.ContextRenameResponse{Ok: true}, nil
 }
 
@@ -518,7 +621,10 @@ func (s *StorageService) renameSingleObject(ctx context.Context, bucket, oldKey,
 	defer cancel()
 
 	_, err := s.client.S3Client().CopyObject(ctx, &s3.CopyObjectInput{
-		Bucket: &bucket, Key: &newKey, CopySource: aws.String(bucket + "/" + oldKey),
+		Bucket:            &bucket,
+		Key:               &newKey,
+		CopySource:        aws.String(bucket + "/" + oldKey),
+		MetadataDirective: s3types.MetadataDirectiveCopy,
 	})
 	if err != nil {
 		return false, err
@@ -566,7 +672,10 @@ func (s *StorageService) renamePrefix(ctx context.Context, bucket, oldPrefix, ne
 
 		copyCtx, copyCancel := s.timeout(ctx)
 		_, copyErr := s.client.S3Client().CopyObject(copyCtx, &s3.CopyObjectInput{
-			Bucket: &bucket, Key: &newObjKey, CopySource: aws.String(bucket + "/" + oldObjKey),
+			Bucket:            &bucket,
+			Key:               &newObjKey,
+			CopySource:        aws.String(bucket + "/" + oldObjKey),
+			MetadataDirective: s3types.MetadataDirectiveCopy,
 		})
 		copyCancel()
 		if copyErr != nil {
@@ -604,6 +713,7 @@ func (s *StorageService) Truncate(ctx context.Context, req *pb.ContextTruncateRe
 	defer cancel()
 
 	key := s.key(req.Path)
+	metadata := s.objectMetadataForWrite(ctx, bucket, key)
 	existing, _ := s.readFile(ctx, bucket, key)
 
 	size := req.Size
@@ -620,7 +730,7 @@ func (s *StorageService) Truncate(ctx context.Context, req *pb.ContextTruncateRe
 	}
 
 	_, err = s.client.S3Client().PutObject(ctx, &s3.PutObjectInput{
-		Bucket: &bucket, Key: &key, Body: bytes.NewReader(data),
+		Bucket: &bucket, Key: &key, Body: bytes.NewReader(data), Metadata: metadata,
 	})
 	if err != nil {
 		return &pb.ContextTruncateResponse{Ok: false, Error: err.Error()}, nil
@@ -642,7 +752,7 @@ func (s *StorageService) Symlink(ctx context.Context, req *pb.ContextSymlinkRequ
 		Bucket:   &bucket,
 		Key:      aws.String(s.key(req.LinkPath)),
 		Body:     bytes.NewReader([]byte(req.Target)),
-		Metadata: map[string]string{"symlink-target": req.Target},
+		Metadata: withModeMetadata(map[string]string{"symlink-target": req.Target}, syscall.S_IFLNK|0777),
 	})
 	if err != nil {
 		return &pb.ContextSymlinkResponse{Ok: false, Error: err.Error()}, nil
@@ -730,7 +840,8 @@ func (s *StorageService) ListTree(ctx context.Context, req *pb.ListTreeRequest) 
 			dirPath += parts[i]
 			if !seenDirs[dirPath] {
 				seenDirs[dirPath] = true
-				entries = append(entries, &pb.TreeEntry{Path: dirPath, Mode: uint32(syscall.S_IFDIR | 0755)})
+				mode, _ := s.statDirModeMtime(ctx, bucket, storageKeyForChild(prefix, dirPath)+"/")
+				entries = append(entries, &pb.TreeEntry{Path: dirPath, Mode: mode})
 			}
 		}
 
@@ -738,9 +849,11 @@ func (s *StorageService) ListTree(ctx context.Context, req *pb.ListTreeRequest) 
 		if obj.LastModified != nil {
 			mtime = obj.LastModified.Unix()
 		}
-		mode := uint32(syscall.S_IFREG | 0644)
+		mode := defaultStorageFileMode
 		if isDir {
-			mode = uint32(syscall.S_IFDIR | 0755)
+			mode, _ = s.statDirModeMtime(ctx, bucket, aws.ToString(obj.Key))
+		} else {
+			mode, _ = s.statFileModeMtime(ctx, bucket, aws.ToString(obj.Key))
 		}
 		entries = append(entries, &pb.TreeEntry{
 			Path: relPath, Size: aws.ToInt64(obj.Size), Mtime: mtime, Mode: mode, Etag: aws.ToString(obj.ETag),
@@ -799,6 +912,7 @@ func (s *StorageService) NotifyUploadComplete(ctx context.Context, path string) 
 	}
 
 	key := s.key(path)
+	s.waitForUploadReadiness(ctx, bucket, key)
 	s.invalidate(bucket, key)
 	s.emitHookEvent(ctx, hooks.EventFsCreate, path)
 	return nil
@@ -816,20 +930,83 @@ func (s *StorageService) readFile(ctx context.Context, bucket, key string) ([]by
 }
 
 func (s *StorageService) invalidate(bucket, key string) {
-	// Invalidate locally
-	s.cache.invalidate(bucket, key)
+	// Invalidate locally (file + parent listing scope).
+	keys := []string{key}
 	if idx := strings.LastIndex(key, "/"); idx > 0 {
-		s.cache.invalidate(bucket, key[:idx])
+		keys = append(keys, key[:idx])
 	} else {
-		s.cache.invalidate(bucket, "")
+		keys = append(keys, "")
+	}
+	for _, k := range keys {
+		s.cache.invalidate(bucket, k)
 	}
 
 	// Broadcast to other replicas
 	if s.eventBus != nil {
-		s.eventBus.Emit(common.Event{
-			Type: common.EventCacheInvalidate,
-			Data: map[string]any{"key": bucket + ":" + key},
+		sent := make(map[string]struct{}, len(keys))
+		for _, k := range keys {
+			cacheKey := bucket + ":" + k
+			if _, ok := sent[cacheKey]; ok {
+				continue
+			}
+			sent[cacheKey] = struct{}{}
+			s.eventBus.Emit(common.Event{
+				Type: common.EventCacheInvalidate,
+				Data: map[string]any{"key": cacheKey},
+			})
+		}
+	}
+}
+
+func (s *StorageService) waitForUploadReadiness(ctx context.Context, bucket, key string) {
+	if bucket == "" || key == "" || s.client == nil || s.client.S3Client() == nil {
+		return
+	}
+
+	deadline := time.Now().Add(uploadReadyProbeWindow)
+	backoff := uploadReadyProbeInitialBackoff
+	for {
+		probeCtx, cancel := context.WithTimeout(ctx, uploadReadyProbeTimeoutPerHead)
+		_, err := s.client.S3Client().HeadObject(probeCtx, &s3.HeadObjectInput{
+			Bucket: &bucket,
+			Key:    &key,
 		})
+		cancel()
+
+		if err == nil {
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			log.Debug().
+				Err(err).
+				Str("bucket", bucket).
+				Str("key", key).
+				Msg("upload-complete readiness probe timed out; continuing")
+			return
+		}
+
+		sleep := backoff
+		remaining := time.Until(deadline)
+		if sleep > remaining {
+			sleep = remaining
+		}
+		timer := time.NewTimer(sleep)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+
+		if backoff < uploadReadyProbeMaxBackoff {
+			backoff *= 2
+			if backoff > uploadReadyProbeMaxBackoff {
+				backoff = uploadReadyProbeMaxBackoff
+			}
+		}
 	}
 }
 
@@ -844,14 +1021,14 @@ func (s *StorageService) InvalidateCache(ctx context.Context, path string) {
 }
 
 func dirInfo() *pb.FileInfo {
-	return &pb.FileInfo{Mode: uint32(syscall.S_IFDIR | 0755), IsDir: true}
+	return &pb.FileInfo{Mode: defaultStorageDirMode, IsDir: true}
 }
 
 func fileInfo(resp *s3.HeadObjectOutput) *pb.FileInfo {
 	_, isLink := resp.Metadata["symlink-target"]
-	mode := uint32(syscall.S_IFREG | 0644)
+	mode := modeFromMetadata(resp.Metadata, defaultStorageFileMode)
 	if isLink {
-		mode = uint32(syscall.S_IFLNK | 0777)
+		mode = withFileType(mode, syscall.S_IFLNK)
 	}
 	var mtime int64
 	if resp.LastModified != nil {
@@ -868,6 +1045,155 @@ func statOk(info *pb.FileInfo) *pb.ContextStatResponse {
 }
 func statErr(err error) *pb.ContextStatResponse {
 	return &pb.ContextStatResponse{Ok: false, Error: err.Error()}
+}
+
+func (s *StorageService) statDirInfo(ctx context.Context, bucket, key string) *pb.FileInfo {
+	markerKey := strings.TrimSuffix(key, "/") + "/"
+	info := dirInfo()
+	if markerKey == "/" {
+		return info
+	}
+
+	resp, err := s.client.S3Client().HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: &bucket,
+		Key:    &markerKey,
+	})
+	if err != nil {
+		return info
+	}
+
+	info.Mode = withFileType(modeFromMetadata(resp.Metadata, defaultStorageDirMode), syscall.S_IFDIR)
+	if resp.LastModified != nil {
+		info.Mtime = resp.LastModified.Unix()
+	}
+	return info
+}
+
+func (s *StorageService) statDirModeMtime(ctx context.Context, bucket, markerKey string) (uint32, int64) {
+	statPath := strings.TrimSuffix(markerKey, "/")
+	cacheKey := s.cache.key(bucket, statPath, "stat")
+	if info, ok := s.cache.getInfo(cacheKey); ok && info.IsDir {
+		return info.Mode, info.Mtime
+	}
+
+	info := s.statDirInfo(ctx, bucket, statPath)
+	s.cache.setInfo(cacheKey, info)
+	return info.Mode, info.Mtime
+}
+
+func (s *StorageService) statFileModeMtime(ctx context.Context, bucket, key string) (uint32, int64) {
+	cacheKey := s.cache.key(bucket, key, "stat")
+	if info, ok := s.cache.getInfo(cacheKey); ok && !info.IsDir {
+		return info.Mode, info.Mtime
+	}
+
+	resp, err := s.client.S3Client().HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: &bucket,
+		Key:    &key,
+	})
+	if err != nil {
+		return defaultStorageFileMode, 0
+	}
+
+	info := fileInfo(resp)
+	s.cache.setInfo(cacheKey, info)
+	return info.Mode, info.Mtime
+}
+
+func (s *StorageService) objectMetadataForWrite(ctx context.Context, bucket, key string) map[string]string {
+	metadata := map[string]string{}
+	if resp, err := s.client.S3Client().HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: &bucket,
+		Key:    &key,
+	}); err == nil {
+		metadata = cloneObjectMetadata(resp.Metadata)
+	}
+
+	mode := modeFromMetadata(metadata, defaultStorageFileMode)
+	if mode&syscall.S_IFMT == 0 {
+		mode = withFileType(mode, syscall.S_IFREG)
+	}
+	return withModeMetadata(metadata, mode)
+}
+
+func storageKeyForChild(prefix, relPath string) string {
+	base := strings.TrimSuffix(prefix, "/")
+	rel := strings.TrimPrefix(relPath, "/")
+	if base == "" {
+		return rel
+	}
+	if rel == "" {
+		return base
+	}
+	return base + "/" + rel
+}
+
+func sanitizeMode(mode uint32, fileType uint32, defaultPerm uint32) uint32 {
+	if mode == 0 {
+		return fileType | defaultPerm
+	}
+	if requestedType := mode & syscall.S_IFMT; requestedType != 0 {
+		fileType = requestedType
+	}
+	return fileType | (mode & 07777)
+}
+
+func withFileType(mode uint32, fileType uint32) uint32 {
+	return fileType | (mode & 07777)
+}
+
+func cloneObjectMetadata(metadata map[string]string) map[string]string {
+	if len(metadata) == 0 {
+		return map[string]string{}
+	}
+	copyMap := make(map[string]string, len(metadata))
+	for key, value := range metadata {
+		copyMap[key] = value
+	}
+	return copyMap
+}
+
+func withModeMetadata(metadata map[string]string, mode uint32) map[string]string {
+	out := cloneObjectMetadata(metadata)
+	out[storageModeMetadataKey] = encodeModeMetadata(mode)
+	return out
+}
+
+func encodeModeMetadata(mode uint32) string {
+	return strconv.FormatUint(uint64(mode), 8)
+}
+
+func decodeModeMetadata(value string) (uint32, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+	if mode, err := strconv.ParseUint(value, 8, 32); err == nil {
+		return uint32(mode), true
+	}
+	if mode, err := strconv.ParseUint(value, 10, 32); err == nil {
+		return uint32(mode), true
+	}
+	return 0, false
+}
+
+func modeFromMetadata(metadata map[string]string, fallback uint32) uint32 {
+	if len(metadata) == 0 {
+		return fallback
+	}
+	value, ok := metadata[storageModeMetadataKey]
+	if !ok {
+		return fallback
+	}
+	mode, ok := decodeModeMetadata(value)
+	if !ok {
+		return fallback
+	}
+	fileType := mode & syscall.S_IFMT
+	if fileType == 0 {
+		fileType = fallback & syscall.S_IFMT
+	}
+	return fileType | (mode & 07777)
 }
 
 // isHiddenFile returns true for files that should be hidden from listings

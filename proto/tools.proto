@@ -20,6 +20,9 @@ message ListToolsRequest {}
 message ToolInfo {
   string name = 1;
   string help = 2;
+  // If set, the tool runs locally inside the sandbox via this CLI command
+  // rather than proxying through the gateway's ExecuteTool RPC.
+  string local_command = 3;
 }
 
 message ListToolsResponse {

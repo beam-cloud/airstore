@@ -95,6 +95,80 @@ func EvaluateGmailQueryResults(ctx context.Context, original_guidance string, ge
 	}
 }
 
+func InferConfluenceQuery(ctx context.Context, name string, guidance *string, opts ...CallOptionFunc) (types.ConfluenceQueryResult, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	// Resolve client option to clientRegistry (client takes precedence)
+	if callOpts.client != nil {
+		if callOpts.clientRegistry == nil {
+			callOpts.clientRegistry = baml.NewClientRegistry()
+		}
+		callOpts.clientRegistry.SetPrimaryClient(*callOpts.client)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"name": name, "guidance": guidance},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		panic(err)
+	}
+
+	if callOpts.onTick == nil {
+		result, err := bamlRuntime.CallFunction(ctx, "InferConfluenceQuery", encoded, callOpts.onTick)
+		if err != nil {
+			return types.ConfluenceQueryResult{}, err
+		}
+
+		if result.Error != nil {
+			return types.ConfluenceQueryResult{}, result.Error
+		}
+
+		casted := (result.Data).(types.ConfluenceQueryResult)
+
+		return casted, nil
+	} else {
+		channel, err := bamlRuntime.CallFunctionStream(ctx, "InferConfluenceQuery", encoded, callOpts.onTick)
+		if err != nil {
+			return types.ConfluenceQueryResult{}, err
+		}
+
+		for result := range channel {
+			if result.Error != nil {
+				return types.ConfluenceQueryResult{}, result.Error
+			}
+
+			if result.HasData {
+				return result.Data.(types.ConfluenceQueryResult), nil
+			}
+		}
+
+		return types.ConfluenceQueryResult{}, fmt.Errorf("No data returned from stream")
+	}
+}
+
 func InferGDriveQuery(ctx context.Context, name string, guidance *string, opts ...CallOptionFunc) (types.GDriveQueryResult, error) {
 
 	var callOpts callOption
@@ -610,5 +684,153 @@ func InferSlackQuery(ctx context.Context, name string, guidance *string, opts ..
 		}
 
 		return types.SlackQueryResult{}, fmt.Errorf("No data returned from stream")
+	}
+}
+
+func InferWebQuery(ctx context.Context, name string, guidance *string, opts ...CallOptionFunc) (types.WebQueryResult, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	// Resolve client option to clientRegistry (client takes precedence)
+	if callOpts.client != nil {
+		if callOpts.clientRegistry == nil {
+			callOpts.clientRegistry = baml.NewClientRegistry()
+		}
+		callOpts.clientRegistry.SetPrimaryClient(*callOpts.client)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"name": name, "guidance": guidance},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		panic(err)
+	}
+
+	if callOpts.onTick == nil {
+		result, err := bamlRuntime.CallFunction(ctx, "InferWebQuery", encoded, callOpts.onTick)
+		if err != nil {
+			return types.WebQueryResult{}, err
+		}
+
+		if result.Error != nil {
+			return types.WebQueryResult{}, result.Error
+		}
+
+		casted := (result.Data).(types.WebQueryResult)
+
+		return casted, nil
+	} else {
+		channel, err := bamlRuntime.CallFunctionStream(ctx, "InferWebQuery", encoded, callOpts.onTick)
+		if err != nil {
+			return types.WebQueryResult{}, err
+		}
+
+		for result := range channel {
+			if result.Error != nil {
+				return types.WebQueryResult{}, result.Error
+			}
+
+			if result.HasData {
+				return result.Data.(types.WebQueryResult), nil
+			}
+		}
+
+		return types.WebQueryResult{}, fmt.Errorf("No data returned from stream")
+	}
+}
+
+func ParseCronSchedule(ctx context.Context, description string, timezone string, opts ...CallOptionFunc) (types.CronResult, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	// Resolve client option to clientRegistry (client takes precedence)
+	if callOpts.client != nil {
+		if callOpts.clientRegistry == nil {
+			callOpts.clientRegistry = baml.NewClientRegistry()
+		}
+		callOpts.clientRegistry.SetPrimaryClient(*callOpts.client)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"description": description, "timezone": timezone},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		panic(err)
+	}
+
+	if callOpts.onTick == nil {
+		result, err := bamlRuntime.CallFunction(ctx, "ParseCronSchedule", encoded, callOpts.onTick)
+		if err != nil {
+			return types.CronResult{}, err
+		}
+
+		if result.Error != nil {
+			return types.CronResult{}, result.Error
+		}
+
+		casted := (result.Data).(types.CronResult)
+
+		return casted, nil
+	} else {
+		channel, err := bamlRuntime.CallFunctionStream(ctx, "ParseCronSchedule", encoded, callOpts.onTick)
+		if err != nil {
+			return types.CronResult{}, err
+		}
+
+		for result := range channel {
+			if result.Error != nil {
+				return types.CronResult{}, result.Error
+			}
+
+			if result.HasData {
+				return result.Data.(types.CronResult), nil
+			}
+		}
+
+		return types.CronResult{}, fmt.Errorf("No data returned from stream")
 	}
 }

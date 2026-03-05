@@ -60,7 +60,8 @@ RUN groupadd -g 1000 sandbox \
     && echo "sandbox ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
 # Install global npm packages as root first
-RUN npm install -g typescript ts-node
+RUN npm install -g typescript ts-node agent-browser
+ENV AGENT_BROWSER_PROVIDER=kernel
 
 # Switch to sandbox user for Claude Code installation
 USER sandbox

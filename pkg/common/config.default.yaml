@@ -39,6 +39,7 @@ image:
 # Sandbox configuration for task execution
 sandbox:
   defaultImage: public.ecr.aws/n4e0e1y0/airstore-default-sandbox:latest
+  interactiveIdleTimeout: 10m
 
 filesystem:
   mountPoint: /tmp/airstore
@@ -74,13 +75,24 @@ scheduler:
   gatewayServiceName: airstore-gateway
   workerImage: public.ecr.aws/n4e0e1y0/airstore-worker:latest
   workerNamespace: airstore
+  gatewayExternalGRPCAddr: ""
+  workerServiceAccountName: ""
+  workerHostNetwork: false
+  workerImagePullSecrets: []
+  useGatewayServiceHostname: true
+  useHostResolvConf: true
   workerTTL: 1h
   workerShutdownTimeout: 5m  # Time to wait for running tasks during graceful shutdown
   cleanupInterval: 1m
   heartbeatInterval: 10s
   heartbeatTimeout: 30s
-  defaultWorkerCpu: 1000
-  defaultWorkerMemory: 1024
+  runClaimLeaseTTL: 45s
+  recoveryLoopEnabled: true
+  recoveryLoopInterval: 10s
+  recoveryLoopBatchSize: 50
+  unclaimedRunStaleAfter: 2m
+  defaultWorkerCpu: 4000     # millicores (fallback when CPU_LIMIT env var not set)
+  defaultWorkerMemory: 4096  # MiB (fallback when MEMORY_LIMIT env var not set)
   pools:
     default:
       deploymentName: airstore-worker-default
@@ -88,8 +100,10 @@ scheduler:
       minReplicas: 1
       maxReplicas: 10
       scaleDownDelay: 5m
-      workerCpu: 1000
-      workerMemory: 1024
+      cpu: "4000m"
+      memory: "4096Mi"
+      runtimeClassName: ""
+      nodeSelector: {}
 
 # Tools - All built-in tool configuration
 tools:
@@ -109,7 +123,3 @@ tools:
   #       command: npx
   #       args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
   mcp: {}
-
-# Anthropic (for BAML inference and Claude Code tasks)
-anthropic:
-  apiKey: ""

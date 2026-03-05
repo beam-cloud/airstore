@@ -12,7 +12,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/types"
 )
 
-// --- Mock QueryRefresher ---
+// --- Mock ViewSyncer ---
 
 type mockRefresher struct {
 	mu       sync.Mutex

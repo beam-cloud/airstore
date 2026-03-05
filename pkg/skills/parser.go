@@ -45,7 +45,7 @@ func ParseFile(path string) (*SkillManifest, string, error) {
 //	    needs:
 //	      - gmail
 //	    writes:
-//	      - /memory/email-triage/
+//	      - /reports/email-triage/
 //	---
 //
 //	# Instructions

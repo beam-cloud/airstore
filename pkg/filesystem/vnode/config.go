@@ -17,12 +17,12 @@ type Config struct {
 type ConfigVNode struct {
 	ReadOnlyBase // Embeds read-only defaults for write operations
 
-	config     Config
 	configJSON []byte
+	toolShim   []byte
 }
 
 // NewConfigVNode creates a ConfigVNode with the given settings
-func NewConfigVNode(gatewayAddr, token string) *ConfigVNode {
+func NewConfigVNode(gatewayAddr, token string, toolShim []byte) *ConfigVNode {
 	cfg := Config{
 		GatewayAddr: gatewayAddr,
 		Token:       token,
@@ -32,8 +32,8 @@ func NewConfigVNode(gatewayAddr, token string) *ConfigVNode {
 	data, _ := json.MarshalIndent(cfg, "", "  ")
 
 	return &ConfigVNode{
-		config:     cfg,
 		configJSON: data,
+		toolShim:   toolShim,
 	}
 }
 
@@ -44,14 +44,15 @@ func (c *ConfigVNode) Prefix() string {
 
 // Getattr returns file attributes
 func (c *ConfigVNode) Getattr(path string) (*FileInfo, error) {
-	switch path {
-	case ConfigDir:
+	if path == ConfigDir {
 		return NewDirInfo(configDirIno()), nil
-	case ConfigFile:
-		return NewFileInfo(configFileIno(), int64(len(c.configJSON)), 0444), nil
-	default:
+	}
+
+	payload, ino, ok := c.payloadForPath(path)
+	if !ok {
 		return nil, fs.ErrNotExist
 	}
+	return NewFileInfo(ino, int64(len(payload)), 0444), nil
 }
 
 // Readdir returns directory entries
@@ -62,6 +63,7 @@ func (c *ConfigVNode) Readdir(path string) ([]DirEntry, error) {
 
 	return []DirEntry{
 		{Name: "config", Mode: syscall.S_IFREG | 0444, Ino: configFileIno()},
+		{Name: "tool-shim", Mode: syscall.S_IFREG | 0444, Ino: configToolShimIno()},
 	}, nil
 }
 
@@ -70,7 +72,7 @@ func (c *ConfigVNode) Open(path string, flags int) (FileHandle, error) {
 	if path == ConfigDir {
 		return 0, syscall.EISDIR
 	}
-	if path == ConfigFile {
+	if _, _, ok := c.payloadForPath(path); ok {
 		return 0, nil
 	}
 	return 0, fs.ErrNotExist
@@ -78,13 +80,25 @@ func (c *ConfigVNode) Open(path string, flags int) (FileHandle, error) {
 
 // Read reads from the config file
 func (c *ConfigVNode) Read(path string, buf []byte, off int64, fh FileHandle) (int, error) {
-	if path != ConfigFile {
+	payload, _, ok := c.payloadForPath(path)
+	if !ok {
 		return 0, fs.ErrNotExist
 	}
-	if off >= int64(len(c.configJSON)) {
+	if off >= int64(len(payload)) {
 		return 0, nil
 	}
-	return copy(buf, c.configJSON[off:]), nil
+	return copy(buf, payload[off:]), nil
+}
+
+func (c *ConfigVNode) payloadForPath(path string) ([]byte, uint64, bool) {
+	switch path {
+	case ConfigFile:
+		return c.configJSON, configFileIno(), true
+	case ConfigToolShim:
+		return c.toolShim, configToolShimIno(), true
+	default:
+		return nil, 0, false
+	}
 }
 
 func configDirIno() uint64 {
@@ -93,4 +107,8 @@ func configDirIno() uint64 {
 
 func configFileIno() uint64 {
 	return PathIno(ConfigFile)
+}
+
+func configToolShimIno() uint64 {
+	return PathIno(ConfigToolShim)
 }

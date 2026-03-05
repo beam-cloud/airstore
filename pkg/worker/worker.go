@@ -6,22 +6,26 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/common"
-	"github.com/beam-cloud/airstore/pkg/gateway"
+	gatewayclient "github.com/beam-cloud/airstore/pkg/gateway/client"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/runtime"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/rs/zerolog/log"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 const (
-	defaultHeartbeatInterval time.Duration = 10 * time.Second
-	defaultShutdownTimeout   time.Duration = 30 * time.Second
+	defaultHeartbeatInterval  = 10 * time.Second
+	setTaskResultMaxAttempts  = 3
+	setTaskResultRetryTimeout = 10 * time.Second
 )
 
 // Worker represents a airstore worker that:
@@ -35,17 +39,19 @@ type Worker struct {
 	cpuLimit        int64
 	memoryLimit     int64
 	gatewayGRPCAddr string
-	gatewayClient   *gateway.GatewayClient
+	gatewayClient   *gatewayclient.GatewayClient
 	config          types.AppConfig
 	ctx             context.Context
 	cancel          context.CancelFunc
 	taskQueue       repository.TaskQueue
+	terminalIO      repository.TerminalIORepository
 	sandboxManager  *SandboxManager
 
-	// Graceful shutdown
-	draining        atomic.Bool    // True when shutdown initiated, stops accepting new tasks
-	activeTasks     sync.WaitGroup // Tracks running tasks for graceful drain
-	shutdownTimeout time.Duration  // Max time to wait for tasks to complete
+	// Concurrency & shutdown
+	maxConcurrentTasks int            // Worker goroutine count (derived from CPU/memory capacity)
+	draining           atomic.Bool    // True when shutdown initiated, stops accepting new tasks
+	activeTasks        sync.WaitGroup // Tracks in-progress tasks for graceful drain
+	shutdownTimeout    time.Duration  // Max time to wait for tasks to complete
 }
 
 // NewWorker creates a new Worker instance
@@ -96,7 +102,20 @@ func NewWorker() (*Worker, error) {
 		memoryLimit = config.Scheduler.DefaultWorkerMemory
 	}
 
-	gatewayClient, err := gateway.NewGatewayClient(gatewayGRPCAddr, authToken)
+	// Derive max concurrent tasks from worker capacity and default task resources.
+	// cpuLimit is in millicores; memoryLimit is in MiB.
+	maxConcurrentTasks := computeMaxTasks(cpuLimit, memoryLimit)
+	if maxConcurrentTasks < 1 {
+		log.Warn().
+			Int64("worker_cpu_millis", cpuLimit).
+			Int64("worker_memory_mib", memoryLimit).
+			Int64("task_cpu_millis", types.DefaultRunExecutionCPU).
+			Int64("task_memory_mib", types.DefaultRunExecutionMemory>>20).
+			Msg("worker under-provisioned: cannot fit a single task at default resource limits; running degraded with max_tasks=1")
+		maxConcurrentTasks = 1
+	}
+
+	gatewayClient, err := gatewayclient.NewGatewayClient(gatewayGRPCAddr, authToken)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("failed to create gateway client: %w", err)
@@ -110,6 +129,7 @@ func NewWorker() (*Worker, error) {
 
 	// Create task queue (for pulling tasks, not for logs)
 	taskQueue := repository.NewRedisTaskQueue(redisClient, poolName)
+	terminalIO := repository.NewRedisTerminalIORepository(redisClient)
 
 	// Determine runtime type (default to gVisor for security)
 	runtimeType := os.Getenv("RUNTIME_TYPE")
@@ -119,18 +139,25 @@ func NewWorker() (*Worker, error) {
 
 	// Create sandbox manager
 	sandboxManager, err := NewSandboxManager(ctx, Config{
-		WorkerID:         workerId,
-		GatewayAddr:      gatewayGRPCAddr,
-		AuthToken:        authToken,
-		GatewayClient:    gatewayClient,
-		EnableFilesystem: true,
-		EnableNetwork:    true,
-		RuntimeType:      runtimeType,
-		RuntimeConfig:    runtime.Config{Type: runtimeType},
-		ImageConfig:      config.Image,
-		S2Token:          config.Streams.Token,
-		S2Basin:          config.Streams.Basin,
-		AnthropicAPIKey:  config.AnthropicAPIKey(),
+		BundleDir:         os.Getenv("AIRSTORE_WORKER_BUNDLE_DIR"),
+		StateDir:          os.Getenv("AIRSTORE_WORKER_STATE_DIR"),
+		MountDir:          os.Getenv("AIRSTORE_WORKER_MOUNT_DIR"),
+		WorkerMount:       os.Getenv("AIRSTORE_WORKER_FS_MOUNT"),
+		CLIBinary:         os.Getenv("AIRSTORE_WORKER_CLI_BINARY"),
+		WorkerID:          workerId,
+		GatewayAddr:       gatewayGRPCAddr,
+		AuthToken:         authToken,
+		GatewayClient:     gatewayClient,
+		EnableFilesystem:  true,
+		EnableNetwork:     true,
+		UseHostResolvConf: config.Scheduler.UseHostResolvConf,
+		RuntimeType:       runtimeType,
+		RuntimeConfig:     runtime.Config{Type: runtimeType},
+		ImageConfig:       config.Image,
+		S2Token:           config.Streams.Token,
+		S2Basin:           config.Streams.Basin,
+		AnthropicAPIKey:   config.AnthropicAPIKey(),
+		KernelAPIKey:      config.KernelAPIKey(),
 	})
 	if err != nil {
 		cancel()
@@ -144,22 +171,36 @@ func NewWorker() (*Worker, error) {
 	}
 
 	worker := &Worker{
-		workerId:        workerId,
-		poolName:        poolName,
-		hostname:        hostname,
-		cpuLimit:        cpuLimit,
-		memoryLimit:     memoryLimit,
-		gatewayGRPCAddr: gatewayGRPCAddr,
-		gatewayClient:   gatewayClient,
-		config:          config,
-		ctx:             ctx,
-		cancel:          cancel,
-		taskQueue:       taskQueue,
-		sandboxManager:  sandboxManager,
-		shutdownTimeout: shutdownTimeout,
+		workerId:           workerId,
+		poolName:           poolName,
+		hostname:           hostname,
+		cpuLimit:           cpuLimit,
+		memoryLimit:        memoryLimit,
+		gatewayGRPCAddr:    gatewayGRPCAddr,
+		gatewayClient:      gatewayClient,
+		config:             config,
+		ctx:                ctx,
+		cancel:             cancel,
+		taskQueue:          taskQueue,
+		terminalIO:         terminalIO,
+		sandboxManager:     sandboxManager,
+		maxConcurrentTasks: maxConcurrentTasks,
+		shutdownTimeout:    shutdownTimeout,
 	}
 
 	return worker, nil
+}
+
+// computeMaxTasks derives how many tasks this worker can run concurrently
+// based on its CPU (millicores) and memory (MiB) capacity versus default
+// task resource requirements. Returns 0 if the worker is under-provisioned.
+func computeMaxTasks(cpuMillis, memMiB int64) int {
+	memBytes := memMiB << 20 // MiB → bytes (same unit as DefaultRunExecutionMemory)
+
+	cpuSlots := cpuMillis / types.DefaultRunExecutionCPU
+	memSlots := memBytes / types.DefaultRunExecutionMemory
+
+	return int(min(cpuSlots, memSlots))
 }
 
 // Run starts the worker and blocks until shutdown
@@ -170,93 +211,229 @@ func (w *Worker) Run() error {
 		Str("gateway_grpc_addr", w.gatewayGRPCAddr).
 		Int64("cpu_limit", w.cpuLimit).
 		Int64("memory_limit", w.memoryLimit).
+		Int("max_concurrent_tasks", w.maxConcurrentTasks).
 		Msg("worker starting")
 
-	// Register with gateway
 	if err := w.register(); err != nil {
 		return fmt.Errorf("failed to register: %w", err)
 	}
 
-	// Start heartbeat loop
 	go w.heartbeatLoop()
 
-	// Start task loop
-	go w.taskLoop()
+	// N goroutines = N concurrent tasks. Each one independently pulls from
+	// the Redis queue via BRPOP. Redis handles the fan-out: when a task
+	// arrives, exactly one of the N blocked BRPOPs wins. No semaphores,
+	// no dispatcher, no hand-off. The goroutine IS the concurrency slot.
+	for i := 0; i < w.maxConcurrentTasks; i++ {
+		go w.workerLoop()
+	}
 
-	// Listen for shutdown signals
 	w.listenForShutdown()
-
 	return w.shutdown()
 }
 
-// taskLoop pulls tasks from the queue and executes them
-func (w *Worker) taskLoop() {
-	log.Info().Str("worker_id", w.workerId).Msg("starting task loop")
-
+// workerLoop is the main loop for a single worker goroutine. It pulls
+// tasks from the queue and executes them sequentially. N of these run
+// in parallel — the concurrency is structural, not coordinated.
+func (w *Worker) workerLoop() {
 	for {
-		// Check if draining - stop accepting new tasks
 		if w.draining.Load() {
-			log.Info().Str("worker_id", w.workerId).Msg("worker draining, stopping task loop")
 			return
 		}
 
-		select {
-		case <-w.ctx.Done():
-			log.Info().Str("worker_id", w.workerId).Msg("task loop stopped")
-			return
-		default:
-		}
-
-		// Pop task from queue (blocks up to 5 seconds)
 		task, err := w.taskQueue.Pop(w.ctx, w.workerId)
 		if err != nil {
-			// Check draining again after pop timeout
-			if w.draining.Load() {
-				log.Info().Str("worker_id", w.workerId).Msg("worker draining, stopping task loop")
+			if w.ctx.Err() != nil || w.draining.Load() {
 				return
 			}
 			log.Warn().Err(err).Str("worker_id", w.workerId).Msg("failed to pop task")
-			time.Sleep(1 * time.Second)
+			time.Sleep(time.Second)
 			continue
 		}
-
 		if task == nil {
-			// No task available, continue waiting
-			continue
+			continue // BRPOP timeout, loop and check drain
 		}
 
-		// Track active task for graceful shutdown
-		w.activeTasks.Add(1)
-
-		log.Info().
-			Str("worker_id", w.workerId).
-			Str("task_id", task.ExternalId).
-			Uint("workspace_id", task.WorkspaceId).
-			Msg("received task")
-
-		// Mark as running
-		// Log but don't abort -- the task is already dequeued and must run
-		if err := w.gatewayClient.SetTaskStarted(w.ctx, task.ExternalId); err != nil {
-			log.Warn().Err(err).Str("task_id", task.ExternalId).Msg("failed to mark task as started")
-		}
-
-		// Execute the task in a sandbox
-		result, err := w.sandboxManager.RunTask(w.ctx, *task)
-
-		// Task complete (success or failure), decrement active count
-		w.activeTasks.Done()
-
-		if err != nil {
-			log.Error().Err(err).Str("task_id", task.ExternalId).Msg("task execution failed")
-			result = &types.TaskResult{ID: task.ExternalId, ExitCode: -1, Error: err.Error()}
-		}
-
-		w.finishTask(task.ExternalId, result)
+		w.runTask(*task)
 	}
 }
 
+// runTask wraps executeTask with activeTasks tracking. The defer
+// guarantees Done() is called even if executeTask panics (Go unwinds
+// defers before crashing), so activeTasks.Wait() in shutdown never hangs.
+func (w *Worker) runTask(task types.RunExecution) {
+	w.activeTasks.Add(1)
+	defer w.activeTasks.Done()
+	w.executeTask(task)
+}
+
+func (w *Worker) subscribeTaskCancellation(ctx context.Context, task types.RunExecution, cancel context.CancelFunc) func() {
+	if w == nil || w.terminalIO == nil || task.IsInteractive() {
+		return func() {}
+	}
+
+	return w.watchTaskCancellation(ctx, task, func() {
+		addTaskExecutionContext(log.Info(), task).Msg("received cancel signal for task")
+		cancel()
+	})
+}
+
+func (w *Worker) watchTaskCancellation(
+	ctx context.Context,
+	task types.RunExecution,
+	onCancel func(),
+) func() {
+	if w == nil || w.terminalIO == nil {
+		return func() {}
+	}
+
+	stopCh := make(chan struct{})
+	var stopOnce sync.Once
+	cleanup := func() {
+		stopOnce.Do(func() {
+			close(stopCh)
+		})
+	}
+
+	var cancelOnce sync.Once
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-stopCh:
+				return
+			default:
+			}
+
+			cancelCh, cancelCleanup, err := w.terminalIO.SubscribeCancel(ctx, task.ExternalId)
+			if err != nil {
+				addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to subscribe for task cancellation")
+				select {
+				case <-ctx.Done():
+					return
+				case <-stopCh:
+					return
+				case <-time.After(250 * time.Millisecond):
+					continue
+				}
+			}
+
+			shouldRetry := false
+			select {
+			case <-ctx.Done():
+			case <-stopCh:
+			case _, ok := <-cancelCh:
+				if !ok {
+					shouldRetry = true
+					addTaskExecutionContext(log.Warn(), task).Msg("task cancellation subscription closed; retrying")
+				} else {
+					cancelOnce.Do(func() {
+						if onCancel != nil {
+							onCancel()
+						}
+					})
+				}
+			}
+			cancelCleanup()
+
+			if !shouldRetry {
+				return
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-stopCh:
+				return
+			case <-time.After(250 * time.Millisecond):
+			}
+		}
+	}()
+
+	return cleanup
+}
+
+// executeTask runs a single task to completion: mark started → execute → record result.
+func (w *Worker) executeTask(task types.RunExecution) {
+	addTaskExecutionContext(
+		log.Info().
+			Str("worker_id", w.workerId).
+			Uint("workspace_id", task.WorkspaceId),
+		task,
+	).Msg("received task")
+
+	attemptID := ""
+	if task.RunAttemptID != nil {
+		attemptID = strings.TrimSpace(*task.RunAttemptID)
+	}
+	if attemptID == "" {
+		err := fmt.Errorf("missing run attempt id for task start")
+		addTaskExecutionContext(log.Error().Err(err), task).Msg("refusing to start task without attempt fence")
+		if qErr := w.taskQueue.Fail(w.ctx, task.ExternalId, err); qErr != nil {
+			addTaskExecutionContext(log.Warn().Err(qErr), task).Msg("failed to mark task as failed in queue")
+		}
+		return
+	}
+	if err := w.gatewayClient.SetTaskStarted(w.ctx, task.ExternalId, attemptID); err != nil {
+		code := status.Code(err)
+		lowerErr := strings.ToLower(err.Error())
+		taskMissing := code == codes.NotFound ||
+			(code == codes.Internal && (strings.Contains(lowerErr, "task not found") || strings.Contains(lowerErr, "run execution not found")))
+		switch {
+		case code == codes.FailedPrecondition, taskMissing:
+			reason := "gateway rejected task start due to terminal run state"
+			if taskMissing {
+				reason = "gateway rejected task start because run execution was not found"
+			}
+			addTaskExecutionContext(log.Info().Err(err), task).Msg(reason)
+			if qErr := w.taskQueue.Fail(w.ctx, task.ExternalId, fmt.Errorf("task start rejected: %w", err)); qErr != nil {
+				addTaskExecutionContext(log.Warn().Err(qErr), task).Msg("failed to mark skipped task as failed in queue")
+			}
+			return
+		default:
+			addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to mark task as started")
+		}
+	}
+
+	taskCtx, taskCancel := context.WithCancel(w.ctx)
+	defer taskCancel()
+
+	if !task.IsInteractive() && task.TimeoutMs != nil && *task.TimeoutMs > 0 {
+		timeoutCtx, timeoutCancel := context.WithTimeout(taskCtx, time.Duration(*task.TimeoutMs)*time.Millisecond)
+		taskCtx = timeoutCtx
+		defer timeoutCancel()
+	}
+
+	cancelCleanup := w.subscribeTaskCancellation(taskCtx, task, taskCancel)
+	defer cancelCleanup()
+
+	var result *types.RunExecutionResult
+	var err error
+	if task.IsInteractive() {
+		result, err = w.runInteractiveTask(taskCtx, task)
+	} else {
+		result, err = w.sandboxManager.RunTask(taskCtx, task)
+	}
+
+	if err != nil {
+		addTaskExecutionContext(log.Error().Err(err), task).Msg("task execution failed")
+		result = &types.RunExecutionResult{ID: task.ExternalId, ExitCode: -1, Error: err.Error()}
+	}
+
+	addTaskExecutionContext(
+		log.Info().
+			Str("worker_id", w.workerId).
+			Int("exit_code", result.ExitCode),
+		task,
+	).Msg("task finished, returning capacity")
+
+	w.finishTask(task, result)
+}
+
 // finishTask records the result in Redis and Postgres. Single path for both success and failure.
-func (w *Worker) finishTask(taskID string, result *types.TaskResult) {
+func (w *Worker) finishTask(task types.RunExecution, result *types.RunExecutionResult) {
+	taskID := task.ExternalId
 	var qErr error
 	if result.ExitCode == 0 && result.Error == "" {
 		qErr = w.taskQueue.Complete(w.ctx, taskID, result)
@@ -264,19 +441,95 @@ func (w *Worker) finishTask(taskID string, result *types.TaskResult) {
 		qErr = w.taskQueue.Fail(w.ctx, taskID, fmt.Errorf("%s", result.Error))
 	}
 	if qErr != nil {
-		log.Warn().Err(qErr).Str("task_id", taskID).Msg("failed to update task queue")
+		addTaskExecutionContext(log.Warn().Err(qErr), task).Msg("failed to update task queue")
 	}
 
-	if err := w.gatewayClient.SetTaskResult(w.ctx, taskID, result.ExitCode, result.Error); err != nil {
-		log.Warn().Err(err).Str("task_id", taskID).Msg("failed to report result to gateway")
+	reportErr := setTaskResultWithRetry(w.ctx, task, result, w.gatewayClient.SetTaskResult, contextSleep)
+	if reportErr != nil {
+		if isNonRetriableSetTaskResultError(reportErr) {
+			addTaskExecutionContext(log.Warn().Err(reportErr), task).
+				Msg("failed to report result to gateway, not retrying non-retriable error")
+		} else {
+			addTaskExecutionContext(log.Error().Err(reportErr), task).
+				Msg("failed to report result to gateway after retries")
+		}
 	}
 
-	log.Info().Str("task_id", taskID).Int("exit_code", result.ExitCode).Msg("task finished")
+	addTaskExecutionContext(log.Info().Int("exit_code", result.ExitCode), task).Msg("task finished")
+}
+
+// setTaskResultWithRetry reports the task result to the gateway, retrying
+// transient failures with exponential backoff. The caller's context controls
+// the overall lifetime: retries proceed while ctx is active and stop
+// immediately once it is cancelled (e.g. after the shutdown timeout).
+func setTaskResultWithRetry(
+	ctx context.Context,
+	task types.RunExecution,
+	result *types.RunExecutionResult,
+	reportFn func(ctx context.Context, taskID string, exitCode int, errMsg string, attemptID string) error,
+	sleepFn func(context.Context, time.Duration),
+) error {
+	attemptID := ""
+	if task.RunAttemptID != nil {
+		attemptID = *task.RunAttemptID
+	}
+	var lastErr error
+	for attempt := range setTaskResultMaxAttempts {
+		if attempt > 0 {
+			sleepFn(ctx, time.Duration(1<<(attempt-1))*time.Second)
+		}
+		if ctx.Err() != nil {
+			if lastErr == nil {
+				lastErr = ctx.Err()
+			}
+			return lastErr
+		}
+
+		attemptCtx, cancel := context.WithTimeout(ctx, setTaskResultRetryTimeout)
+		lastErr = reportFn(attemptCtx, task.ExternalId, result.ExitCode, result.Error, attemptID)
+		cancel()
+		if lastErr == nil {
+			return nil
+		}
+		if isNonRetriableSetTaskResultError(lastErr) {
+			return lastErr
+		}
+		if attempt < setTaskResultMaxAttempts-1 {
+			addTaskExecutionContext(log.Warn().Err(lastErr).Int("attempt", attempt+1), task).
+				Msg("failed to report result to gateway, retrying")
+		}
+	}
+	return lastErr
+}
+
+func isNonRetriableSetTaskResultError(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch status.Code(err) {
+	case codes.NotFound, codes.FailedPrecondition, codes.InvalidArgument, codes.PermissionDenied, codes.Unauthenticated:
+		return true
+	}
+
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "task not found") ||
+		strings.Contains(lower, "run execution not found") ||
+		strings.Contains(lower, "already finished")
+}
+
+// contextSleep sleeps for d or until ctx is cancelled, whichever comes first.
+func contextSleep(ctx context.Context, d time.Duration) {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-ctx.Done():
+	}
 }
 
 // register registers the worker with the gateway
 func (w *Worker) register() error {
-	resp, err := w.gatewayClient.RegisterWorker(w.ctx, &gateway.RegisterWorkerRequest{
+	resp, err := w.gatewayClient.RegisterWorker(w.ctx, &gatewayclient.RegisterWorkerRequest{
 		Hostname: w.hostname,
 		PoolName: w.poolName,
 		Cpu:      w.cpuLimit,

@@ -2,8 +2,11 @@ package services
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -19,14 +22,21 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// Default pagination settings for smart queries.
+// Default pagination settings for source views.
 const (
 	defaultPageSize   = 50
 	defaultMaxResults = 500
 )
 
+// SyncResult is the outcome of a view sync operation.
+type SyncResult struct {
+	Query        *types.FilesystemQuery
+	ResultsCount int
+	NewResults   int
+}
+
 // ---------------------------------------------------------------------------
-// Query refresh
+// View sync
 // ---------------------------------------------------------------------------
 
 // InvalidateQueryCache invalidates cached results for a query path.
@@ -38,8 +48,18 @@ func (s *SourceService) InvalidateQueryCache(ctx context.Context, workspaceId ui
 	return s.fsStore.InvalidateQuery(ctx, workspaceId, queryPath)
 }
 
-// RefreshSmartQuery forces re-execution of a smart query, bypassing all caches.
-func (s *SourceService) RefreshSmartQuery(ctx context.Context, queryPath string) ([]repository.QueryResult, error) {
+// invalidateAndExecute clears cached results for a view and re-executes its
+// provider query. The cache invalidation is best-effort (logged, not fatal).
+func (s *SourceService) invalidateAndExecute(ctx context.Context, pctx *sources.ProviderContext, query *types.FilesystemQuery, op string) ([]repository.QueryResult, error) {
+	if err := s.fsStore.InvalidateQuery(ctx, pctx.WorkspaceId, query.Path); err != nil {
+		log.Warn().Err(err).Str("path", query.Path).Str("op", op).Msg("failed to invalidate query cache")
+	}
+	return s.executeAndCacheQuery(ctx, pctx, query)
+}
+
+// SyncViewByPath forces re-execution of a source view by path, bypassing all caches.
+// Returns the results and emits hook events for newly seen items.
+func (s *SourceService) SyncViewByPath(ctx context.Context, queryPath string) ([]repository.QueryResult, error) {
 	pctx, err := s.providerContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get provider context: %w", err)
@@ -61,20 +81,57 @@ func (s *SourceService) RefreshSmartQuery(ctx context.Context, queryPath string)
 	log.Info().
 		Str("path", queryPath).Str("integration", query.Integration).
 		Str("query_spec", query.QuerySpec).
-		Msg("refreshing smart query")
+		Msg("syncing source view")
 
-	results, err := s.executeAndCacheQuery(ctx, pctx, query)
+	results, err := s.invalidateAndExecute(ctx, pctx, query, "sync_by_path")
 	if err != nil {
 		return nil, fmt.Errorf("query execution failed: %w", err)
 	}
 
-	log.Info().Str("path", queryPath).Int("results", len(results)).Msg("smart query refresh complete")
+	// Emit hook events for newly seen items (same path as poller).
+	s.emitSourceHookEvents(ctx, pctx.WorkspaceId, query, results)
+
+	log.Info().Str("path", queryPath).Int("results", len(results)).Msg("source view sync complete")
 	return results, nil
 }
 
+// SyncViewByExternalId syncs a view by its external ID.
+func (s *SourceService) SyncViewByExternalId(ctx context.Context, externalId string) (*SyncResult, error) {
+	pctx, err := s.providerContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get provider context: %w", err)
+	}
+
+	query, err := s.fsStore.GetQueryByExternalId(ctx, externalId)
+	if err != nil || query == nil {
+		return nil, fmt.Errorf("view not found: %s", externalId)
+	}
+	if query.WorkspaceId != pctx.WorkspaceId {
+		return nil, fmt.Errorf("unauthorized")
+	}
+
+	pctx, connected := s.loadCredentials(ctx, pctx, query.Integration)
+	if !connected {
+		return nil, fmt.Errorf("not connected to %s", query.Integration)
+	}
+
+	results, err := s.invalidateAndExecute(ctx, pctx, query, "sync_by_external_id")
+	if err != nil {
+		return nil, fmt.Errorf("query execution failed: %w", err)
+	}
+
+	newCount := s.emitSourceHookEvents(ctx, pctx.WorkspaceId, query, results)
+	log.Info().Str("path", query.Path).Int("results", len(results)).Int("new", newCount).Msg("source view sync complete")
+
+	return &SyncResult{
+		Query:        query,
+		ResultsCount: len(results),
+		NewResults:   newCount,
+	}, nil
+}
+
 // RefreshQuery re-executes a query and emits hook events for new results.
-// Called ONLY by the source poller — never by user browsing or task reads.
-// This prevents a feedback loop where hook-triggered tasks re-fire hooks.
+// Called by the source poller.
 func (s *SourceService) RefreshQuery(ctx context.Context, query *types.FilesystemQuery) error {
 	pctx := &sources.ProviderContext{WorkspaceId: query.WorkspaceId}
 	pctx, connected := s.loadCredentials(ctx, pctx, query.Integration)
@@ -82,50 +139,133 @@ func (s *SourceService) RefreshQuery(ctx context.Context, query *types.Filesyste
 		return fmt.Errorf("not connected to %s (workspace %d)", query.Integration, query.WorkspaceId)
 	}
 
-	results, err := s.executeAndCacheQuery(ctx, pctx, query)
+	results, err := s.invalidateAndExecute(ctx, pctx, query, "poller_refresh")
 	if err != nil {
 		return err
 	}
 
-	if s.seenTracker == nil || s.hookStream == nil || len(results) == 0 {
-		return nil
+	s.emitSourceHookEvents(ctx, pctx.WorkspaceId, query, results)
+	return nil
+}
+
+// emitSourceHookEvents detects new and removed results via the seen tracker
+// and emits fs.create / fs.delete events with source metadata attached.
+// Returns the count of newly detected results.
+func (s *SourceService) emitSourceHookEvents(ctx context.Context, workspaceId uint, query *types.FilesystemQuery, results []repository.QueryResult) int {
+	if s.seenTracker == nil || s.hookStream == nil {
+		return 0
 	}
 
-	seenKey := common.Keys.HookSeen(pctx.WorkspaceId, types.GeneratePathID(query.Path))
-	ids := make([]string, len(results))
-	for i, r := range results {
-		ids[i] = r.ID
+	queryPath := hooks.NormalizePath(query.Path)
+	seenKey := common.Keys.HookSeen(workspaceId, types.GeneratePathID(queryPath))
+
+	// Build ID list for seen-tracking and an ID→filepath map so hooks
+	// report readable paths (e.g. "/sources/linear/my-view/LIN-123_title.md")
+	// instead of opaque provider IDs.
+	ids := make([]string, 0, len(results))
+	idToPath := make(map[string]string, len(results))
+	for _, r := range results {
+		id := strings.TrimSpace(r.ID)
+		if id == "" {
+			continue
+		}
+		ids = append(ids, id)
+		if r.Filename != "" {
+			idToPath[id] = queryPath + "/" + r.Filename
+		}
 	}
 
-	newIDs, compareErr := s.seenTracker.Compare(ctx, seenKey, ids)
+	diff, compareErr := s.seenTracker.Compare(ctx, seenKey, ids)
 	if compareErr != nil {
-		log.Warn().Err(compareErr).Str("path", query.Path).Msg("seen tracker compare failed, skipping commit")
-		return nil
+		log.Warn().Err(compareErr).Str("path", queryPath).Msg("seen tracker compare failed, skipping commit")
+		return 0
 	}
 
-	if len(newIDs) > 0 {
+	if diff != nil && len(diff.Added) > 0 {
+		newItemsHash := hashHookItemIDs(diff.Added)
+		newPaths := make([]string, 0, len(diff.Added))
+		for _, id := range diff.Added {
+			if p, ok := idToPath[id]; ok {
+				newPaths = append(newPaths, p)
+			} else {
+				newPaths = append(newPaths, id)
+			}
+		}
 		if emitErr := s.hookStream.Emit(ctx, map[string]any{
-			"event":        hooks.EventSourceChange,
-			"workspace_id": fmt.Sprintf("%d", pctx.WorkspaceId),
-			"path":         query.Path,
-			"integration":  query.Integration,
-			"new_count":    fmt.Sprintf("%d", len(newIDs)),
-			"new_items":    strings.Join(newIDs, ", "),
+			"event":          hooks.EventFsCreate,
+			"workspace_id":   fmt.Sprintf("%d", workspaceId),
+			"path":           queryPath,
+			"integration":    query.Integration,
+			"new_count":      fmt.Sprintf("%d", len(diff.Added)),
+			"new_items":      strings.Join(newPaths, ", "),
+			"new_items_hash": newItemsHash,
 		}); emitErr != nil {
-			log.Error().Err(emitErr).Str("path", query.Path).Int("new_results", len(newIDs)).
-				Msg("failed to emit source change event, will retry next poll")
-			return nil // don't commit — retry on next poll
+			log.Error().Err(emitErr).Str("path", queryPath).Int("new_results", len(diff.Added)).
+				Msg("failed to emit source fs.create event, will retry next poll")
+			return 0
 		}
 		log.Info().
-			Str("path", query.Path).Str("integration", query.Integration).
-			Int("new_results", len(newIDs)).
-			Msg("source change detected, hook event emitted")
+			Str("path", queryPath).Str("integration", query.Integration).
+			Int("new_results", len(diff.Added)).
+			Msg("source items created, fs.create event emitted")
+	}
+
+	if diff != nil && len(diff.Removed) > 0 {
+		removedPaths := make([]string, 0, len(diff.Removed))
+		for _, id := range diff.Removed {
+			if p, ok := idToPath[id]; ok {
+				removedPaths = append(removedPaths, p)
+			} else {
+				removedPaths = append(removedPaths, id)
+			}
+		}
+		if emitErr := s.hookStream.Emit(ctx, map[string]any{
+			"event":          hooks.EventFsDelete,
+			"workspace_id":   fmt.Sprintf("%d", workspaceId),
+			"path":           queryPath,
+			"integration":    query.Integration,
+			"removed_count":  fmt.Sprintf("%d", len(diff.Removed)),
+			"removed_items":  strings.Join(removedPaths, ", "),
+		}); emitErr != nil {
+			log.Error().Err(emitErr).Str("path", queryPath).Int("removed_results", len(diff.Removed)).
+				Msg("failed to emit source fs.delete event, will retry next poll")
+			return 0
+		}
 	}
 
 	if err := s.seenTracker.Commit(ctx, seenKey, ids); err != nil {
-		log.Warn().Err(err).Str("path", query.Path).Msg("seen tracker commit failed, next poll may re-fire")
+		log.Warn().Err(err).Str("path", queryPath).Msg("seen tracker commit failed, next poll may re-fire")
 	}
-	return nil
+	newCount := 0
+	if diff != nil {
+		newCount = len(diff.Added)
+	}
+	return newCount
+}
+
+func hashHookItemIDs(ids []string) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	seen := make(map[string]struct{}, len(ids))
+	normalized := make([]string, 0, len(ids))
+	for _, raw := range ids {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		normalized = append(normalized, id)
+	}
+	if len(normalized) == 0 {
+		return ""
+	}
+	sort.Strings(normalized)
+	sum := sha1.Sum([]byte(strings.Join(normalized, "\n")))
+	return hex.EncodeToString(sum[:])
 }
 
 // ---------------------------------------------------------------------------
@@ -144,7 +284,7 @@ func (s *SourceService) executeAndCacheQuery(ctx context.Context, pctx *sources.
 	}
 
 	spec := parseQuerySpec(query.Integration, query.QuerySpec)
-	if spec.Query == "" && query.Integration != string(types.SourcePostHog) {
+	if spec.Query == "" && !emptyQueryAllowed(query.Integration) {
 		return nil, fmt.Errorf("empty query spec for %s", query.Integration)
 	}
 
@@ -218,17 +358,25 @@ func (s *SourceService) executeAndCacheQuery(ctx context.Context, pctx *sources.
 	return allResults, nil
 }
 
+// defaultStaleThreshold is the minimum stale window for access-triggered
+// refresh. Even when a query has a shorter CacheTTL, we avoid re-executing on
+// every access to keep provider/API load predictable.
+const defaultStaleThreshold = 5 * time.Minute
+
 func (s *SourceService) getOrExecuteQuery(ctx context.Context, pctx *sources.ProviderContext, query *types.FilesystemQuery) ([]repository.QueryResult, error) {
-	if results, err := s.fsStore.GetQueryResults(ctx, pctx.WorkspaceId, query.Path); err == nil && len(results) > 0 {
+	// Fast path: cache hit and still fresh.
+	if results, err := s.fsStore.GetQueryResults(ctx, pctx.WorkspaceId, query.Path); err == nil && len(results) > 0 && !s.shouldRefreshQueryOnAccess(query) {
 		return results, nil
 	}
 
+	// Cache miss or stale cache: refresh synchronously (singleflight-deduplicated).
 	key := fmt.Sprintf("%d:%s", pctx.WorkspaceId, query.Path)
 	value, err, _ := s.queryGroup.Do(key, func() (any, error) {
-		if results, err := s.fsStore.GetQueryResults(ctx, pctx.WorkspaceId, query.Path); err == nil && len(results) > 0 {
+		// Double-check after acquiring the flight.
+		if results, err := s.fsStore.GetQueryResults(ctx, pctx.WorkspaceId, query.Path); err == nil && len(results) > 0 && !s.shouldRefreshQueryOnAccess(query) {
 			return results, nil
 		}
-		return s.executeAndCacheQuery(ctx, pctx, query)
+		return s.invalidateAndExecute(ctx, pctx, query, "access_refresh")
 	})
 	if err != nil {
 		return nil, err
@@ -240,16 +388,38 @@ func (s *SourceService) getOrExecuteQuery(ctx context.Context, pctx *sources.Pro
 	return results, nil
 }
 
+// shouldRefreshQueryOnAccess reports whether a query should be re-executed on
+// this access based on LastExecuted and the access refresh interval.
+func (s *SourceService) shouldRefreshQueryOnAccess(query *types.FilesystemQuery) bool {
+	if query.LastExecuted == nil {
+		return true // never executed
+	}
+	return time.Since(*query.LastExecuted) > s.accessRefreshInterval(query)
+}
+
+// accessRefreshInterval returns the age threshold for access-triggered refresh.
+// We use max(CacheTTL, defaultStaleThreshold) for stable load behavior.
+func (s *SourceService) accessRefreshInterval(query *types.FilesystemQuery) time.Duration {
+	if query.CacheTTL <= 0 {
+		return defaultStaleThreshold
+	}
+	cfg := time.Duration(query.CacheTTL) * time.Second
+	if cfg < defaultStaleThreshold {
+		return defaultStaleThreshold
+	}
+	return cfg
+}
+
 // ---------------------------------------------------------------------------
-// Smart Query CRUD (gRPC handlers)
+// Source View CRUD (gRPC handlers)
 // ---------------------------------------------------------------------------
 
-func (s *SourceService) CreateSmartQuery(ctx context.Context, req *pb.CreateSmartQueryRequest) (*pb.CreateSmartQueryResponse, error) {
+func (s *SourceService) CreateView(ctx context.Context, req *pb.CreateViewRequest) (*pb.CreateViewResponse, error) {
 	if !auth.IsAuthenticated(ctx) {
-		return &pb.CreateSmartQueryResponse{Ok: false, Error: "unauthorized"}, nil
+		return &pb.CreateViewResponse{Ok: false, Error: "unauthorized"}, nil
 	}
 	if !isValidQueryName(req.Name) {
-		return &pb.CreateSmartQueryResponse{Ok: false, Error: "invalid query name: must not contain '/' or '..' sequences"}, nil
+		return &pb.CreateViewResponse{Ok: false, Error: "invalid query name: must not contain '/' or '..' sequences"}, nil
 	}
 	workspaceId := auth.WorkspaceId(ctx)
 
@@ -258,11 +428,30 @@ func (s *SourceService) CreateSmartQuery(ctx context.Context, req *pb.CreateSmar
 		path += req.FileExt
 	}
 
-	querySpec, filenameFormat, err := s.resolveQuerySpec(ctx, req.Integration, req.Name, req.Guidance)
-	if err != nil {
-		return &pb.CreateSmartQueryResponse{Ok: false, Error: err.Error()}, nil
+	// Determine mode: if Filter is provided, use query mode; otherwise smart mode (LLM).
+	mode := types.ViewModeSmart
+	var querySpec, filenameFormat string
+	var err error
+
+	if req.Filter != "" {
+		mode = types.ViewModeQuery
+		querySpec, err = buildQuerySpecFromFilter(req.Integration, []byte(req.Filter), defaultPageSize)
+		if err != nil {
+			return &pb.CreateViewResponse{Ok: false, Error: "invalid filter: " + err.Error()}, nil
+		}
+		// Validate the filter produces a non-empty query for integrations that need it.
+		spec := parseQuerySpec(req.Integration, querySpec)
+		if spec.Query == "" && !emptyQueryAllowed(req.Integration) {
+			return &pb.CreateViewResponse{Ok: false, Error: "filter produces no query criteria"}, nil
+		}
+		filenameFormat = sources.DefaultFilenameFormat(req.Integration)
+	} else {
+		querySpec, filenameFormat, err = s.resolveQuerySpec(ctx, req.Integration, req.Name, req.Guidance)
+		if err != nil {
+			return &pb.CreateViewResponse{Ok: false, Error: err.Error()}, nil
+		}
+		querySpec = s.refineQueryIfNeeded(ctx, req.Integration, req.Guidance, querySpec, filenameFormat)
 	}
-	querySpec = s.refineQueryIfNeeded(ctx, req.Integration, req.Guidance, querySpec, filenameFormat)
 
 	query := &types.FilesystemQuery{
 		WorkspaceId:    workspaceId,
@@ -271,86 +460,88 @@ func (s *SourceService) CreateSmartQuery(ctx context.Context, req *pb.CreateSmar
 		Name:           req.Name,
 		QuerySpec:      querySpec,
 		Guidance:       req.Guidance,
-		OutputFormat:   types.QueryOutputFormat(req.OutputFormat),
+		OutputFormat:   types.ViewOutputFormat(req.OutputFormat),
 		FileExt:        req.FileExt,
 		FilenameFormat: filenameFormat,
 		CacheTTL:       0,
+		Mode:           mode,
+		Filter:         req.Filter,
 	}
 
 	created, err := s.fsStore.CreateQuery(ctx, query)
 	if err != nil {
-		log.Error().Err(err).Str("path", path).Msg("failed to create query")
-		return &pb.CreateSmartQueryResponse{Ok: false, Error: err.Error()}, nil
+		log.Error().Err(err).Str("path", path).Msg("failed to create view")
+		return &pb.CreateViewResponse{Ok: false, Error: err.Error()}, nil
 	}
 
-	log.Info().Str("path", path).Str("query", querySpec).Msg("created filesystem query")
-	return &pb.CreateSmartQueryResponse{Ok: true, Query: smartQueryToProto(created)}, nil
+	log.Info().Str("path", path).Str("mode", string(mode)).Str("query", querySpec).Msg("created source view")
+	return &pb.CreateViewResponse{Ok: true, View: viewToProto(created)}, nil
 }
 
-func (s *SourceService) GetSmartQuery(ctx context.Context, req *pb.GetSmartQueryRequest) (*pb.GetSmartQueryResponse, error) {
+func (s *SourceService) GetView(ctx context.Context, req *pb.GetViewRequest) (*pb.GetViewResponse, error) {
 	if !auth.IsAuthenticated(ctx) {
-		return &pb.GetSmartQueryResponse{Ok: false, Error: "unauthorized"}, nil
+		return &pb.GetViewResponse{Ok: false, Error: "unauthorized"}, nil
 	}
 	query, err := s.fsStore.GetQuery(ctx, auth.WorkspaceId(ctx), req.Path)
 	if err != nil {
-		return &pb.GetSmartQueryResponse{Ok: false, Error: err.Error()}, nil
+		return &pb.GetViewResponse{Ok: false, Error: err.Error()}, nil
 	}
 	if query == nil {
-		return &pb.GetSmartQueryResponse{Ok: true, Query: nil}, nil
+		return &pb.GetViewResponse{Ok: true, View: nil}, nil
 	}
-	return &pb.GetSmartQueryResponse{Ok: true, Query: smartQueryToProto(query)}, nil
+	return &pb.GetViewResponse{Ok: true, View: viewToProto(query)}, nil
 }
 
-func (s *SourceService) ListSmartQueries(ctx context.Context, req *pb.ListSmartQueriesRequest) (*pb.ListSmartQueriesResponse, error) {
+func (s *SourceService) ListViews(ctx context.Context, req *pb.ListViewsRequest) (*pb.ListViewsResponse, error) {
 	if !auth.IsAuthenticated(ctx) {
-		return &pb.ListSmartQueriesResponse{Ok: false, Error: "unauthorized"}, nil
+		return &pb.ListViewsResponse{Ok: false, Error: "unauthorized"}, nil
 	}
 	queries, err := s.fsStore.ListQueries(ctx, auth.WorkspaceId(ctx), req.ParentPath)
 	if err != nil {
-		return &pb.ListSmartQueriesResponse{Ok: false, Error: err.Error()}, nil
+		return &pb.ListViewsResponse{Ok: false, Error: err.Error()}, nil
 	}
-	out := make([]*pb.SmartQuery, len(queries))
+	out := make([]*pb.SourceView, len(queries))
 	for i, q := range queries {
-		out[i] = smartQueryToProto(q)
+		out[i] = viewToProto(q)
 	}
-	return &pb.ListSmartQueriesResponse{Ok: true, Queries: out}, nil
+	return &pb.ListViewsResponse{Ok: true, Views: out}, nil
 }
 
-func (s *SourceService) DeleteSmartQuery(ctx context.Context, req *pb.DeleteSmartQueryRequest) (*pb.DeleteSmartQueryResponse, error) {
+func (s *SourceService) DeleteView(ctx context.Context, req *pb.DeleteViewRequest) (*pb.DeleteViewResponse, error) {
 	if !auth.IsAuthenticated(ctx) {
-		return &pb.DeleteSmartQueryResponse{Ok: false, Error: "unauthorized"}, nil
+		return &pb.DeleteViewResponse{Ok: false, Error: "unauthorized"}, nil
 	}
 	query, err := s.fsStore.GetQueryByExternalId(ctx, req.ExternalId)
 	if err != nil || query == nil {
-		return &pb.DeleteSmartQueryResponse{Ok: false, Error: "query not found"}, nil
+		return &pb.DeleteViewResponse{Ok: false, Error: "view not found"}, nil
 	}
 	if query.WorkspaceId != auth.WorkspaceId(ctx) {
-		return &pb.DeleteSmartQueryResponse{Ok: false, Error: "unauthorized"}, nil
+		return &pb.DeleteViewResponse{Ok: false, Error: "unauthorized"}, nil
 	}
 
 	if err := s.fsStore.InvalidateQuery(ctx, query.WorkspaceId, query.Path); err != nil {
 		log.Warn().Err(err).Str("path", query.Path).Msg("failed to invalidate query cache")
 	}
 	if err := s.fsStore.DeleteQuery(ctx, req.ExternalId); err != nil {
-		return &pb.DeleteSmartQueryResponse{Ok: false, Error: err.Error()}, nil
+		return &pb.DeleteViewResponse{Ok: false, Error: err.Error()}, nil
 	}
 
-	log.Info().Str("external_id", req.ExternalId).Str("path", query.Path).Msg("deleted filesystem query")
-	return &pb.DeleteSmartQueryResponse{Ok: true}, nil
+	log.Info().Str("external_id", req.ExternalId).Str("path", query.Path).Msg("deleted source view")
+	return &pb.DeleteViewResponse{Ok: true}, nil
 }
 
-func (s *SourceService) UpdateSmartQuery(ctx context.Context, req *pb.UpdateSmartQueryRequest) (*pb.UpdateSmartQueryResponse, error) {
+func (s *SourceService) UpdateView(ctx context.Context, req *pb.UpdateViewRequest) (*pb.UpdateViewResponse, error) {
 	if !auth.IsAuthenticated(ctx) {
-		return &pb.UpdateSmartQueryResponse{Ok: false, Error: "unauthorized"}, nil
+		return &pb.UpdateViewResponse{Ok: false, Error: "unauthorized"}, nil
 	}
 	workspaceId := auth.WorkspaceId(ctx)
 
 	query, err := s.fsStore.GetQueryByExternalId(ctx, req.ExternalId)
 	if err != nil || query == nil {
-		return &pb.UpdateSmartQueryResponse{Ok: false, Error: "query not found"}, nil
+		return &pb.UpdateViewResponse{Ok: false, Error: "view not found"}, nil
 	}
 	if query.WorkspaceId != workspaceId {
-		return &pb.UpdateSmartQueryResponse{Ok: false, Error: "unauthorized"}, nil
+		return &pb.UpdateViewResponse{Ok: false, Error: "unauthorized"}, nil
 	}
 
 	oldPath := query.Path
@@ -358,7 +549,7 @@ func (s *SourceService) UpdateSmartQuery(ctx context.Context, req *pb.UpdateSmar
 
 	// Rename: update path.
 	if req.Name != "" && !isValidQueryName(req.Name) {
-		return &pb.UpdateSmartQueryResponse{Ok: false, Error: "invalid query name: must not contain '/' or '..' sequences"}, nil
+		return &pb.UpdateViewResponse{Ok: false, Error: "invalid query name: must not contain '/' or '..' sequences"}, nil
 	}
 	if req.Name != "" && req.Name != query.Name {
 		query.Name = req.Name
@@ -369,13 +560,46 @@ func (s *SourceService) UpdateSmartQuery(ctx context.Context, req *pb.UpdateSmar
 		needsUpdate = true
 	}
 
-	// Re-run LLM inference if guidance changed.
-	if req.Guidance != query.Guidance {
+	// Update filter (query mode) or guidance (smart mode).
+	if req.Filter != "" {
+		query.Filter = req.Filter
+		query.Mode = types.ViewModeQuery
+		querySpec, err := buildQuerySpecFromFilter(query.Integration, []byte(req.Filter), defaultPageSize)
+		if err != nil {
+			return &pb.UpdateViewResponse{Ok: false, Error: "invalid filter: " + err.Error()}, nil
+		}
+		query.QuerySpec = querySpec
+		query.FilenameFormat = sources.DefaultFilenameFormat(query.Integration)
+		needsUpdate = true
+	} else if req.Mode == string(types.ViewModeSmart) && query.Mode != types.ViewModeSmart {
+		// Explicit switch from query → smart mode.
+		query.Mode = types.ViewModeSmart
+		query.Filter = ""
+		if req.Guidance != "" {
+			query.Guidance = req.Guidance
+		}
+
+		// Always regenerate query spec from name + guidance (may be empty).
+		guidance := query.Guidance
+		querySpec, filenameFormat, err := s.resolveQuerySpec(ctx, query.Integration, query.Name, guidance)
+		if err != nil {
+			return &pb.UpdateViewResponse{Ok: false, Error: "failed to regenerate query: " + err.Error()}, nil
+		}
+		query.QuerySpec = s.refineQueryIfNeeded(ctx, query.Integration, guidance, querySpec, filenameFormat)
+		if filenameFormat != "" {
+			query.FilenameFormat = filenameFormat
+		}
+
+		needsUpdate = true
+	} else if req.Guidance != "" && req.Guidance != query.Guidance {
 		query.Guidance = req.Guidance
+		query.Mode = types.ViewModeSmart
+
 		querySpec, filenameFormat, err := s.resolveQuerySpec(ctx, query.Integration, query.Name, req.Guidance)
 		if err != nil {
-			return &pb.UpdateSmartQueryResponse{Ok: false, Error: "failed to regenerate query: " + err.Error()}, nil
+			return &pb.UpdateViewResponse{Ok: false, Error: "failed to regenerate query: " + err.Error()}, nil
 		}
+
 		query.QuerySpec = s.refineQueryIfNeeded(ctx, query.Integration, req.Guidance, querySpec, filenameFormat)
 		if filenameFormat != "" {
 			query.FilenameFormat = filenameFormat
@@ -384,12 +608,12 @@ func (s *SourceService) UpdateSmartQuery(ctx context.Context, req *pb.UpdateSmar
 	}
 
 	if !needsUpdate {
-		return &pb.UpdateSmartQueryResponse{Ok: true, Query: filesystemQueryToProto(query)}, nil
+		return &pb.UpdateViewResponse{Ok: true, View: viewToProto(query)}, nil
 	}
 
 	if err := s.fsStore.UpdateQuery(ctx, query); err != nil {
-		log.Error().Err(err).Str("external_id", req.ExternalId).Msg("failed to update query")
-		return &pb.UpdateSmartQueryResponse{Ok: false, Error: err.Error()}, nil
+		log.Error().Err(err).Str("external_id", req.ExternalId).Msg("failed to update view")
+		return &pb.UpdateViewResponse{Ok: false, Error: err.Error()}, nil
 	}
 
 	// Invalidate caches for old and new paths.
@@ -405,48 +629,48 @@ func (s *SourceService) UpdateSmartQuery(ctx context.Context, req *pb.UpdateSmar
 	log.Info().
 		Str("external_id", req.ExternalId).Str("old_path", oldPath).
 		Str("new_path", query.Path).Str("name", query.Name).
-		Msg("updated filesystem query")
-	return &pb.UpdateSmartQueryResponse{Ok: true, Query: filesystemQueryToProto(query)}, nil
+		Msg("updated source view")
+	return &pb.UpdateViewResponse{Ok: true, View: viewToProto(query)}, nil
 }
 
-// ExecuteSmartQuery runs a query and returns materialized results.
-func (s *SourceService) ExecuteSmartQuery(ctx context.Context, req *pb.ExecuteSmartQueryRequest) (*pb.ExecuteSmartQueryResponse, error) {
+// ExecuteView runs a view's query and returns materialized results.
+func (s *SourceService) ExecuteView(ctx context.Context, req *pb.ExecuteViewRequest) (*pb.ExecuteViewResponse, error) {
 	if !auth.IsAuthenticated(ctx) {
-		return &pb.ExecuteSmartQueryResponse{Ok: false, Error: "unauthorized"}, nil
+		return &pb.ExecuteViewResponse{Ok: false, Error: "unauthorized"}, nil
 	}
 	workspaceId := auth.WorkspaceId(ctx)
 
 	query, err := s.fsStore.GetQuery(ctx, workspaceId, req.Path)
 	if err != nil || query == nil {
-		return &pb.ExecuteSmartQueryResponse{Ok: false, Error: "query not found"}, nil
+		return &pb.ExecuteViewResponse{Ok: false, Error: "view not found"}, nil
 	}
 
 	pctx, err := s.providerContext(ctx)
 	if err != nil {
-		return &pb.ExecuteSmartQueryResponse{Ok: false, Error: err.Error()}, nil
+		return &pb.ExecuteViewResponse{Ok: false, Error: err.Error()}, nil
 	}
 	pctx, connected := s.loadCredentials(ctx, pctx, query.Integration)
 	if !connected {
-		return &pb.ExecuteSmartQueryResponse{Ok: false, Error: "not connected"}, nil
+		return &pb.ExecuteViewResponse{Ok: false, Error: "not connected"}, nil
 	}
 
 	provider := s.registry.Get(query.Integration)
 	if provider == nil {
-		return &pb.ExecuteSmartQueryResponse{Ok: false, Error: "integration not available"}, nil
+		return &pb.ExecuteViewResponse{Ok: false, Error: "integration not available"}, nil
 	}
 
 	// If requesting file content, resolve the result ID and read.
 	if req.Filename != "" {
 		executor, ok := provider.(sources.QueryExecutor)
 		if !ok {
-			return &pb.ExecuteSmartQueryResponse{Ok: false, Error: "provider does not support queries"}, nil
+			return &pb.ExecuteViewResponse{Ok: false, Error: "provider does not support queries"}, nil
 		}
 
 		resultId := req.ResultId
 		if resultId == "" {
 			results, err := s.getOrExecuteQuery(ctx, pctx, query)
 			if err != nil {
-				return &pb.ExecuteSmartQueryResponse{Ok: false, Error: "failed to get query results: " + err.Error()}, nil
+				return &pb.ExecuteViewResponse{Ok: false, Error: "failed to get query results: " + err.Error()}, nil
 			}
 			for _, r := range results {
 				if r.Filename == req.Filename {
@@ -455,7 +679,7 @@ func (s *SourceService) ExecuteSmartQuery(ctx context.Context, req *pb.ExecuteSm
 				}
 			}
 			if resultId == "" {
-				return &pb.ExecuteSmartQueryResponse{Ok: false, Error: "file not found in query results"}, nil
+				return &pb.ExecuteViewResponse{Ok: false, Error: "file not found in query results"}, nil
 			}
 		}
 
@@ -464,12 +688,12 @@ func (s *SourceService) ExecuteSmartQuery(ctx context.Context, req *pb.ExecuteSm
 		if strategyStr != "" && s.compressor != nil {
 			log.Debug().
 				Str("strategy", strategyStr).Str("file", req.Filename).Str("path", req.Path).
-				Msg("compression: entering compressed read path (ExecuteSmartQuery)")
+				Msg("compression: entering compressed read path (ExecuteView)")
 			resp, err := s.readWithCompression(ctx, pctx, executor, query.Integration, req.Path, req.Filename, resultId, query.QuerySpec, 0, 0, strategyStr, session)
 			if err != nil {
-				return &pb.ExecuteSmartQueryResponse{Ok: false, Error: err.Error()}, nil
+				return &pb.ExecuteViewResponse{Ok: false, Error: err.Error()}, nil
 			}
-			return &pb.ExecuteSmartQueryResponse{Ok: true, FileData: resp.Data}, nil
+			return &pb.ExecuteViewResponse{Ok: true, FileData: resp.Data}, nil
 		} else if strategyStr != "" {
 			log.Warn().Str("strategy", strategyStr).Str("file", req.Filename).
 				Msg("compression: requested but compressor not initialized")
@@ -477,22 +701,22 @@ func (s *SourceService) ExecuteSmartQuery(ctx context.Context, req *pb.ExecuteSm
 
 		// Standard read.
 		if content, err := s.fsStore.GetResultContent(ctx, workspaceId, req.Path, resultId); err == nil && len(content) > 0 {
-			return &pb.ExecuteSmartQueryResponse{Ok: true, FileData: content}, nil
+			return &pb.ExecuteViewResponse{Ok: true, FileData: content}, nil
 		}
 		data, err := executor.ReadResult(ctx, pctx, resultId)
 		if err != nil {
-			return &pb.ExecuteSmartQueryResponse{Ok: false, Error: err.Error()}, nil
+			return &pb.ExecuteViewResponse{Ok: false, Error: err.Error()}, nil
 		}
 		if err := s.fsStore.StoreResultContent(ctx, workspaceId, req.Path, resultId, data); err != nil {
-			log.Warn().Err(err).Str("path", req.Path).Str("result", resultId).Msg("failed to cache query result content")
+			log.Warn().Err(err).Str("path", req.Path).Str("result", resultId).Msg("failed to cache result content")
 		}
-		return &pb.ExecuteSmartQueryResponse{Ok: true, FileData: data}, nil
+		return &pb.ExecuteViewResponse{Ok: true, FileData: data}, nil
 	}
 
 	// List mode: return directory entries.
 	results, err := s.getOrExecuteQuery(ctx, pctx, query)
 	if err != nil {
-		return &pb.ExecuteSmartQueryResponse{Ok: false, Error: err.Error()}, nil
+		return &pb.ExecuteViewResponse{Ok: false, Error: err.Error()}, nil
 	}
 	entries := make([]*pb.SourceDirEntry, 0, len(results))
 	for _, r := range results {
@@ -500,7 +724,66 @@ func (s *SourceService) ExecuteSmartQuery(ctx context.Context, req *pb.ExecuteSm
 			Name: r.Filename, Mode: sources.ModeFile, Size: r.Size, Mtime: r.Mtime, ResultId: r.ID,
 		})
 	}
-	return &pb.ExecuteSmartQueryResponse{Ok: true, Entries: entries}, nil
+	return &pb.ExecuteViewResponse{Ok: true, Entries: entries}, nil
+}
+
+// SyncView handles the gRPC SyncView RPC.
+func (s *SourceService) SyncView(ctx context.Context, req *pb.SyncViewRequest) (*pb.SyncViewResponse, error) {
+	if !auth.IsAuthenticated(ctx) {
+		return &pb.SyncViewResponse{Ok: false, Error: "unauthorized"}, nil
+	}
+
+	result, err := s.SyncViewByExternalId(ctx, req.ExternalId)
+	if err != nil {
+		return &pb.SyncViewResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	return &pb.SyncViewResponse{
+		Ok:           true,
+		View:         viewToProto(result.Query),
+		ResultsCount: int32(result.ResultsCount),
+		NewResults:   int32(result.NewResults),
+	}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Resource listing
+// ---------------------------------------------------------------------------
+
+func (s *SourceService) ListResources(ctx context.Context, req *pb.ListResourcesRequest) (*pb.ListResourcesResponse, error) {
+	if !auth.IsAuthenticated(ctx) {
+		return &pb.ListResourcesResponse{Ok: false, Error: "unauthorized"}, nil
+	}
+
+	provider := s.registry.Get(req.Integration)
+	if provider == nil {
+		return &pb.ListResourcesResponse{Ok: false, Error: fmt.Sprintf("unknown integration: %s", req.Integration)}, nil
+	}
+
+	lister, ok := provider.(sources.ResourceLister)
+	if !ok {
+		return &pb.ListResourcesResponse{Ok: false, Error: fmt.Sprintf("integration %s does not support resource listing", req.Integration)}, nil
+	}
+
+	pctx, err := s.providerContext(ctx)
+	if err != nil {
+		return &pb.ListResourcesResponse{Ok: false, Error: err.Error()}, nil
+	}
+	pctx, ok = s.loadCredentials(ctx, pctx, req.Integration)
+	if !ok {
+		return &pb.ListResourcesResponse{Ok: false, Error: "integration not connected"}, nil
+	}
+
+	resources, err := lister.ListResources(ctx, pctx, req.ResourceType)
+	if err != nil {
+		return &pb.ListResourcesResponse{Ok: false, Error: err.Error()}, nil
+	}
+
+	pbResources := make([]*pb.SourceResource, len(resources))
+	for i, r := range resources {
+		pbResources[i] = &pb.SourceResource{Id: r.ID, Name: r.Name}
+	}
+	return &pb.ListResourcesResponse{Ok: true, Resources: pbResources}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -528,6 +811,10 @@ func (s *SourceService) inferQuerySpec(ctx context.Context, integration, name, g
 		result, err = baml.InferLinearQuery(ctx, name, guidancePtr)
 	case types.SourcePostHog:
 		result, err = baml.InferPostHogQuery(ctx, name, guidancePtr)
+	case types.SourceConfluence:
+		result, err = baml.InferConfluenceQuery(ctx, name, guidancePtr)
+	case types.SourceWeb:
+		result, err = baml.InferWebQuery(ctx, name, guidancePtr)
 	default:
 		return "", "", fmt.Errorf("unsupported integration: %s", integration)
 	}
@@ -552,13 +839,16 @@ func (s *SourceService) resolveQuerySpec(ctx context.Context, integration, name,
 	}
 
 	spec := parseQuerySpec(integration, querySpec)
-	if spec.Query == "" && integration != string(types.SourcePostHog) {
+	if spec.Query == "" && !emptyQueryAllowed(integration) {
 		return "", "", fmt.Errorf("invalid query spec from inference")
 	}
 	if filenameFormat == "" {
 		filenameFormat = spec.FilenameFormat
 	}
-	if filenameFormat == "" {
+	// Ensure the filename format is a valid template (contains placeholders).
+	// LLMs sometimes return literal filenames (e.g., "test.md") instead of
+	// templates with {identifier}/{title} placeholders.
+	if filenameFormat == "" || !strings.Contains(filenameFormat, "{") {
 		filenameFormat = sources.DefaultFilenameFormat(integration)
 	}
 	return querySpec, filenameFormat, nil
@@ -691,19 +981,26 @@ func formatResultsForEvaluation(results []sources.QueryResult) string {
 
 func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 	var spec struct {
-		GmailQuery     string `json:"gmail_query"`
-		GDriveQuery    string `json:"gdrive_query"`
-		NotionQuery    string `json:"notion_query"`
-		GitHubQuery    string `json:"github_query"`
-		SlackQuery     string `json:"slack_query"`
-		LinearQuery    string `json:"linear_query"`
-		PostHogQuery   string `json:"posthog_query"`
-		SearchType     string `json:"search_type"`
-		ContentType    string `json:"content_type"`
-		ProjectID      int    `json:"project_id"`
-		Limit          int    `json:"limit"`
-		MaxResults     int    `json:"max_results"`
-		FilenameFormat string `json:"filename_format"`
+		GmailQuery         string   `json:"gmail_query"`
+		GDriveQuery        string   `json:"gdrive_query"`
+		NotionQuery        string   `json:"notion_query"`
+		GitHubQuery        string   `json:"github_query"`
+		SlackQuery         string   `json:"slack_query"`
+		LinearQuery        string   `json:"linear_query"`
+		PostHogQuery       string   `json:"posthog_query"`
+		ConfluenceQuery    string   `json:"cql_query"`
+		WebQuery           string   `json:"web_query"`
+		WebMode            string   `json:"web_mode"`
+		IncludePaths       []string `json:"include_paths"`
+		SearchType         string   `json:"search_type"`
+		ContentType        string   `json:"content_type"`
+		ProjectID          int      `json:"project_id"`
+		IncludeAttachments *bool    `json:"include_attachments"`
+		IncludeInline      *bool    `json:"include_inline"`
+		IncludeMessageBody *bool    `json:"include_message_body"`
+		Limit              int      `json:"limit"`
+		MaxResults         int      `json:"max_results"`
+		FilenameFormat     string   `json:"filename_format"`
 	}
 
 	limit := defaultPageSize
@@ -736,10 +1033,17 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 		query = spec.LinearQuery
 	case types.SourcePostHog:
 		query = spec.PostHogQuery
+	case types.SourceConfluence:
+		query = spec.ConfluenceQuery
+	case types.SourceWeb:
+		query = spec.WebQuery
 	}
 
 	filenameFormat := spec.FilenameFormat
-	if filenameFormat == "" {
+	if filenameFormat == "" && spec.ContentType == "" {
+		// Only apply the generic default when no content_type is set.
+		// Providers with content_type-aware filename logic (e.g., GitHub)
+		// will choose the right format themselves when filenameFormat is empty.
 		filenameFormat = sources.DefaultFilenameFormat(integration)
 	}
 
@@ -752,6 +1056,23 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 	}
 	if spec.ProjectID > 0 {
 		metadata["project_id"] = strconv.Itoa(spec.ProjectID)
+	}
+	if len(spec.IncludePaths) > 0 {
+		if pathsJSON, err := json.Marshal(spec.IncludePaths); err == nil {
+			metadata["include_paths"] = string(pathsJSON)
+		}
+	}
+	if spec.WebMode != "" {
+		metadata["web_mode"] = spec.WebMode
+	}
+	if spec.IncludeAttachments != nil {
+		metadata["include_attachments"] = strconv.FormatBool(*spec.IncludeAttachments)
+	}
+	if spec.IncludeInline != nil {
+		metadata["include_inline"] = strconv.FormatBool(*spec.IncludeInline)
+	}
+	if spec.IncludeMessageBody != nil {
+		metadata["include_message_body"] = strconv.FormatBool(*spec.IncludeMessageBody)
 	}
 
 	return sources.QuerySpec{
@@ -786,11 +1107,11 @@ func buildGmailQuerySpec(query string, limit int, filenameFormat string) string 
 // Proto converters
 // ---------------------------------------------------------------------------
 
-func smartQueryToProto(q *types.SmartQuery) *pb.SmartQuery {
+func viewToProto(q *types.FilesystemQuery) *pb.SourceView {
 	if q == nil {
 		return nil
 	}
-	return &pb.SmartQuery{
+	v := &pb.SourceView{
 		ExternalId:   q.ExternalId,
 		Integration:  q.Integration,
 		Path:         q.Path,
@@ -802,11 +1123,24 @@ func smartQueryToProto(q *types.SmartQuery) *pb.SmartQuery {
 		CacheTtl:     int32(q.CacheTTL),
 		CreatedAt:    q.CreatedAt.Unix(),
 		UpdatedAt:    q.UpdatedAt.Unix(),
+		Mode:         string(q.Mode),
+		Filter:       q.Filter,
 	}
+	if q.LastExecuted != nil {
+		v.LastExecuted = q.LastExecuted.Unix()
+	}
+	return v
 }
 
-func filesystemQueryToProto(q *types.FilesystemQuery) *pb.SmartQuery {
-	return smartQueryToProto(q)
+// emptyQueryAllowed returns true for integrations whose providers handle
+// empty query strings gracefully (i.e., return all items with no filter).
+func emptyQueryAllowed(integration string) bool {
+	switch types.SourceType(integration) {
+	case types.SourceLinear, types.SourcePostHog:
+		return true
+	default:
+		return false
+	}
 }
 
 // isValidQueryName rejects names that could cause path traversal.

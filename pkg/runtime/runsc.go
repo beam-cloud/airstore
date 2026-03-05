@@ -167,12 +167,18 @@ func (r *Runsc) Run(ctx context.Context, containerID, bundlePath string, opts *R
 
 	// Wait for exit
 	err := cmd.Wait()
+
+	// If the context was cancelled, the process was killed by our own
+	// signal — the exit code does not reflect the container's real result.
+	if ctx.Err() != nil {
+		return -1, ctx.Err()
+	}
+
 	if err != nil {
 		stderrStr := stderr.String()
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok {
 				exitCode := ws.ExitStatus()
-				// Log stderr for debugging
 				if stderrStr != "" {
 					fmt.Fprintf(os.Stderr, "runsc exited with code %d, stderr: %s\n", exitCode, stderrStr)
 				}
@@ -213,6 +219,9 @@ func (r *Runsc) Exec(ctx context.Context, containerID string, proc specs.Process
 	if opts != nil && opts.OutputWriter != nil {
 		cmd.Stdout = opts.OutputWriter
 		cmd.Stderr = opts.OutputWriter
+	}
+	if opts != nil && opts.StdinReader != nil {
+		cmd.Stdin = opts.StdinReader
 	}
 
 	if err := cmd.Start(); err != nil {

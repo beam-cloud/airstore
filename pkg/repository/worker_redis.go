@@ -2,7 +2,9 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/common"
@@ -183,12 +185,24 @@ func (r *WorkerRedisRepository) AllocateIP(ctx context.Context, sandboxID, worke
 	defer r.lock.Release(lockKey)
 
 	// Idempotent: return existing allocation
-	if ip, err := r.rdb.HGet(ctx, mapKey, sandboxID).Result(); err == nil && ip != "" {
-		return &types.IPAllocation{
-			IP:        ip,
-			Gateway:   types.DefaultGateway,
-			PrefixLen: types.DefaultPrefixLen,
-		}, nil
+	if encoded, err := r.rdb.HGet(ctx, mapKey, sandboxID).Result(); err == nil && encoded != "" {
+		alloc, decodeErr := decodeStoredIPAllocation(encoded)
+		if decodeErr == nil {
+			return alloc, nil
+		}
+
+		// Backward compatibility for legacy values that stored plain IPv4 strings.
+		legacyAlloc, legacyErr := newIPAllocation(encoded)
+		if legacyErr == nil {
+			return legacyAlloc, nil
+		}
+
+		return nil, fmt.Errorf(
+			"invalid stored ip allocation for sandbox %s (json decode: %v, legacy decode: %v)",
+			sandboxID,
+			decodeErr,
+			legacyErr,
+		)
 	}
 
 	// Find available IP in subnet
@@ -201,6 +215,9 @@ func (r *WorkerRedisRepository) AllocateIP(ctx context.Context, sandboxID, worke
 	var ip string
 	for i := 2; i < 255; i++ { // .0 = network, .1 = gateway, .255 = broadcast
 		candidate := fmt.Sprintf("%s.%d", types.DefaultSubnetPrefix, i)
+		if candidate == types.DefaultGateway {
+			continue
+		}
 		if !used[candidate] {
 			ip = candidate
 			break
@@ -210,31 +227,46 @@ func (r *WorkerRedisRepository) AllocateIP(ctx context.Context, sandboxID, worke
 		return nil, fmt.Errorf("ip pool exhausted")
 	}
 
+	alloc, err := newIPAllocation(ip)
+	if err != nil {
+		return nil, fmt.Errorf("create allocation: %w", err)
+	}
+
+	encoded, err := encodeStoredIPAllocation(alloc)
+	if err != nil {
+		return nil, fmt.Errorf("encode allocation: %w", err)
+	}
+
 	pipe := r.rdb.Pipeline()
 	pipe.SAdd(ctx, poolKey, ip)
-	pipe.HSet(ctx, mapKey, sandboxID, ip)
+	pipe.HSet(ctx, mapKey, sandboxID, encoded)
 	if _, err := pipe.Exec(ctx); err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
 
-	return &types.IPAllocation{
-		IP:        ip,
-		Gateway:   types.DefaultGateway,
-		PrefixLen: types.DefaultPrefixLen,
-	}, nil
+	return alloc, nil
 }
 
 func (r *WorkerRedisRepository) ReleaseIP(ctx context.Context, sandboxID string) error {
 	poolKey := common.Keys.NetworkIPPool()
 	mapKey := common.Keys.NetworkIPMap()
 
-	ip, err := r.rdb.HGet(ctx, mapKey, sandboxID).Result()
+	encoded, err := r.rdb.HGet(ctx, mapKey, sandboxID).Result()
 	if err != nil {
 		return nil // already released
 	}
 
+	alloc, err := decodeStoredIPAllocation(encoded)
+	if err != nil {
+		// Backward compatibility for legacy plain-IPv4 map values.
+		alloc, err = newIPAllocation(encoded)
+		if err != nil {
+			return fmt.Errorf("decode allocation: %w", err)
+		}
+	}
+
 	pipe := r.rdb.Pipeline()
-	pipe.SRem(ctx, poolKey, ip)
+	pipe.SRem(ctx, poolKey, alloc.IP)
 	pipe.HDel(ctx, mapKey, sandboxID)
 	_, err = pipe.Exec(ctx)
 	return err
@@ -242,8 +274,94 @@ func (r *WorkerRedisRepository) ReleaseIP(ctx context.Context, sandboxID string)
 
 func (r *WorkerRedisRepository) GetSandboxIP(ctx context.Context, sandboxID string) (string, bool) {
 	mapKey := common.Keys.NetworkIPMap()
-	ip, err := r.rdb.HGet(ctx, mapKey, sandboxID).Result()
-	return ip, err == nil && ip != ""
+	encoded, err := r.rdb.HGet(ctx, mapKey, sandboxID).Result()
+	if err != nil || encoded == "" {
+		return "", false
+	}
+
+	if alloc, decodeErr := decodeStoredIPAllocation(encoded); decodeErr == nil {
+		return alloc.IP, alloc.IP != ""
+	}
+
+	// Legacy map values are plain IPv4 strings.
+	return encoded, true
+}
+
+type redisIPAllocation struct {
+	IP   string `json:"ip"`
+	IPv6 string `json:"ipv6"`
+}
+
+func encodeStoredIPAllocation(alloc *types.IPAllocation) (string, error) {
+	payload := redisIPAllocation{
+		IP:   alloc.IP,
+		IPv6: alloc.IPv6,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func decodeStoredIPAllocation(encoded string) (*types.IPAllocation, error) {
+	var payload redisIPAllocation
+	if err := json.Unmarshal([]byte(encoded), &payload); err != nil {
+		return nil, err
+	}
+	if payload.IP == "" {
+		return nil, fmt.Errorf("missing ipv4 address")
+	}
+	if payload.IPv6 == "" {
+		return newIPAllocation(payload.IP)
+	}
+	return &types.IPAllocation{
+		IP:            payload.IP,
+		Gateway:       types.DefaultGateway,
+		PrefixLen:     types.DefaultPrefixLen,
+		IPv6:          payload.IPv6,
+		GatewayIPv6:   types.DefaultGatewayIPv6,
+		PrefixLenIPv6: types.DefaultPrefixLenIPv6,
+	}, nil
+}
+
+func newIPAllocation(ipv4 string) (*types.IPAllocation, error) {
+	ipv6, err := deriveIPv6Address(ipv4)
+	if err != nil {
+		return nil, err
+	}
+	return &types.IPAllocation{
+		IP:            ipv4,
+		Gateway:       types.DefaultGateway,
+		PrefixLen:     types.DefaultPrefixLen,
+		IPv6:          ipv6,
+		GatewayIPv6:   types.DefaultGatewayIPv6,
+		PrefixLenIPv6: types.DefaultPrefixLenIPv6,
+	}, nil
+}
+
+func deriveIPv6Address(ipv4 string) (string, error) {
+	v4 := net.ParseIP(ipv4).To4()
+	if v4 == nil {
+		return "", fmt.Errorf("invalid ipv4 address: %s", ipv4)
+	}
+
+	baseV6 := net.ParseIP(types.DefaultGatewayIPv6).To16()
+	if baseV6 == nil {
+		return "", fmt.Errorf("invalid default ipv6 gateway: %s", types.DefaultGatewayIPv6)
+	}
+
+	derived := append(net.IP(nil), baseV6...)
+	// Keep the configured /64 prefix and derive host bits from full IPv4 bytes
+	// to guarantee stable, collision-free mapping for the /24 subnet.
+	derived[8], derived[9], derived[10], derived[11] = 0, 0, 0, 0
+	derived[12], derived[13], derived[14], derived[15] = v4[0], v4[1], v4[2], v4[3]
+
+	if derived.String() == types.DefaultGatewayIPv6 {
+		return "", fmt.Errorf("derived ipv6 address collides with gateway: %s", derived.String())
+	}
+
+	return derived.String(), nil
 }
 
 func parseInt64(s string) (int64, error) {

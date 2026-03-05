@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,20 +24,22 @@ var hookCmd = &cobra.Command{
 
 A hook watches a filesystem path. When something changes there -- a file is
 created, modified, or new data arrives from a source -- a task runs using the
-attached skill. The event type is passed as context to the agent automatically.
+configured task template. Optional skills are appended as extra instructions.
+The event type is passed as context to the agent automatically.
 
 Examples:
-  airstore hook create --path /sources/gmail/inbox --skill /skills/email-triage
-  airstore hook create --path /sources/gmail/inbox --skill ./my-local-skill
-  airstore hook create --path /inbox/contracts --skill /skills/contract-review --prompt "Focus on liability clauses"`,
+  airstore hook create --path /sources/gmail/inbox --prompt "Review new emails and draft summaries"
+  airstore hook create --path /sources/gmail/inbox --prompt "Review PR updates" --skill /skills/pr-review
+  airstore hook create --path /inbox/contracts --prompt "Summarize legal risk" --skill ./my-local-skill`,
 }
 
 var hookCreateCmd = &cobra.Command{
-	Use:   "create --path <path> --skill <skill>",
+	Use:   "create --path <path> --prompt <task-template> [--skill <skill>]",
 	Short: "Create a hook that watches a path",
 	Long: `Create a hook that triggers a task when something changes at a path.
 
-The hook runs the attached skill when files change. Skills can be:
+The hook runs the provided task template when files change. Optional skills can
+be attached and are appended as extra instructions. Skills can be:
   - Airstore paths: /skills/email-triage (already installed)
   - Local paths: ./my-skill (auto-imported to /skills/)
 
@@ -45,17 +48,17 @@ The agent automatically receives context about what happened:
   - "Event: 3 new results in /sources/gmail/inbox"
 
 Examples:
-  airstore hook create --path /sources/gmail/inbox --skill /skills/email-triage
-  airstore hook create --path /sources/gmail/inbox --skill ./my-local-skill
-  airstore hook create --path /inbox/contracts --skill /skills/review --prompt "Focus on liability"`,
+  airstore hook create --path /sources/gmail/inbox --prompt "Review and summarize new items"
+  airstore hook create --path /sources/gmail/inbox --prompt "Review new PR changes" --skill /skills/pr-review
+  airstore hook create --path /inbox/contracts --prompt "Focus on liability" --skill ./my-local-skill`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		path, _ := cmd.Flags().GetString("path")
 		if path == "" {
 			PrintErrorMsg("--path is required")
 			return nil
 		}
-		if hookSkill == "" && hookPrompt == "" {
-			PrintErrorMsg("--skill or --prompt is required")
+		if strings.TrimSpace(hookPrompt) == "" {
+			PrintErrorMsg("--prompt is required")
 			return nil
 		}
 
@@ -142,10 +145,13 @@ func importLocalSkill(client *Client, localPath string) (string, error) {
 		return "", fmt.Errorf("resolve path: %w", err)
 	}
 
-	// Check if directory exists
-	info, err := os.Stat(absPath)
+	// Check if directory exists and reject symlink roots.
+	info, err := os.Lstat(absPath)
 	if err != nil {
 		return "", fmt.Errorf("skill not found: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("skill directory must not be a symlink")
 	}
 	if !info.IsDir() {
 		return "", fmt.Errorf("skill must be a directory")
@@ -168,6 +174,45 @@ func importLocalSkill(client *Client, localPath string) (string, error) {
 	}
 
 	return targetPath, nil
+}
+
+func uploadSkillFiles(ctx context.Context, client *Client, srcDir, skillName string) error {
+	return filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		relPath, err := filepath.Rel(srcDir, path)
+		if err != nil {
+			return err
+		}
+
+		// Disallow symlinks so local skill imports cannot read data outside srcDir.
+		if d.Type()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("skill contains symlink: %s", filepath.ToSlash(relPath))
+		}
+		if d.IsDir() {
+			return nil
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+
+		remotePath := fmt.Sprintf("%s/%s/%s", types.PathSkills, skillName, filepath.ToSlash(relPath))
+		resp, err := client.Context.Write(ctx, &pb.ContextWriteRequest{
+			Path: remotePath,
+			Data: data,
+		})
+		if err != nil {
+			return err
+		}
+		if !resp.Ok {
+			return fmt.Errorf("write %s: %s", remotePath, resp.Error)
+		}
+
+		return nil
+	})
 }
 
 var hookListCmd = &cobra.Command{
@@ -197,7 +242,7 @@ var hookListCmd = &cobra.Command{
 
 		if len(resp.Hooks) == 0 {
 			PrintInfo("No hooks found")
-			PrintHint("Create one with: airstore hook create --path <path> --skill /skills/<name>")
+			PrintHint("Create one with: airstore hook create --path <path> --prompt \"<task template>\"")
 			return nil
 		}
 

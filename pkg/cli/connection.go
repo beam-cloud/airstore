@@ -16,10 +16,11 @@ import (
 )
 
 var (
-	connToken  string
-	connAPIKey string
-	connMember string
-	connScope  string
+	connToken     string
+	connAPIKey    string
+	connMember    string
+	connScope     string
+	connProjectID string
 )
 
 var connectionCmd = &cobra.Command{
@@ -41,12 +42,14 @@ Supported integration types:
   weather   - OpenWeatherMap (use --api-key)
   exa       - Exa AI search (use --api-key)
   posthog   - PostHog analytics (use --api-key with personal API key)
+              For project-scoped API keys, also pass --project-id <id>
 
 Examples:
   airstore connection add github --token ghp_xxxxxxxxxxxx
   airstore connection add notion --token secret_xxxxxxxxxxxx
   airstore connection add weather --api-key abc123
-  airstore connection add github --token ghp_xxx --member <member_id>  # Personal connection`,
+  airstore connection add posthog --api-key phx_xxx --project-id 12345  # Project-scoped key
+  airstore connection add github --token ghp_xxx --member <member_id>   # Personal connection`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		integrationType := strings.ToLower(args[0])
@@ -75,9 +78,14 @@ Examples:
 			if !strings.HasPrefix(connToken, "secret_") && !strings.HasPrefix(connToken, "ntn_") {
 				PrintWarning("Token doesn't look like a Notion integration token (expected secret_* or ntn_*)")
 			}
-		case "weather", "exa", "posthog":
+		case "weather", "exa":
 			if connAPIKey == "" {
 				PrintErrorMsg(fmt.Sprintf("%s requires --api-key", integrationType))
+				return nil
+			}
+		case "posthog":
+			if connAPIKey == "" {
+				PrintErrorMsg("posthog requires --api-key")
 				return nil
 			}
 		default:
@@ -88,6 +96,12 @@ Examples:
 
 		var client *Client
 		var resp *pb.ConnectionResponse
+
+		// Build extra metadata for provider-specific options
+		var extra map[string]string
+		if connProjectID != "" {
+			extra = map[string]string{"project_id": connProjectID}
+		}
 
 		err := RunSpinnerWithResult("Adding connection...", func() error {
 			var err error
@@ -102,6 +116,7 @@ Examples:
 				AccessToken:     connToken,
 				ApiKey:          connAPIKey,
 				Scope:           connScope,
+				Extra:           extra,
 			})
 			return err
 		})
@@ -418,6 +433,7 @@ func init() {
 	connectionAddCmd.Flags().StringVar(&connAPIKey, "api-key", "", "API key (for API key integrations)")
 	connectionAddCmd.Flags().StringVar(&connMember, "member", "", "Member ID (for personal connection, omit for shared)")
 	connectionAddCmd.Flags().StringVar(&connScope, "scope", "", "OAuth scopes")
+	connectionAddCmd.Flags().StringVar(&connProjectID, "project-id", "", "PostHog project ID (required for project-scoped API keys)")
 
 	connectionCmd.AddCommand(connectionAddCmd)
 	connectionCmd.AddCommand(connectionListCmd)

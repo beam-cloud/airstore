@@ -18,6 +18,7 @@ type ReadAttribution struct {
 	OriginalTokens   int
 	CompressedTokens int
 	CompressionMs    int64
+	FetchMs          int64 // e2e content fetch duration (e.g. time to fetch from Gmail during Open)
 }
 
 const (

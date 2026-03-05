@@ -28,7 +28,7 @@ func NewLinearProvider() *LinearProvider {
 	}
 }
 
-func (l *LinearProvider) Name() string { return types.ToolLinear.String() }
+func (l *LinearProvider) Name() string { return types.Linear.String() }
 
 func (l *LinearProvider) checkAuth(pctx *sources.ProviderContext) error {
 	if pctx.Credentials == nil || pctx.Credentials.AccessToken == "" {
@@ -158,7 +158,7 @@ func (l *LinearProvider) ReadResult(ctx context.Context, pctx *sources.ProviderC
 }
 
 func (l *LinearProvider) FormatFilename(format string, metadata map[string]string) string {
-	if format == "" {
+	if format == "" || !strings.Contains(format, "{") {
 		format = "{identifier}_{title}.md"
 	}
 
@@ -191,6 +191,107 @@ func (l *LinearProvider) FormatFilename(format string, metadata map[string]strin
 
 var _ sources.Provider = (*LinearProvider)(nil)
 var _ sources.QueryExecutor = (*LinearProvider)(nil)
+var _ sources.ResourceLister = (*LinearProvider)(nil)
+
+// ResourceLister interface implementation
+
+func (l *LinearProvider) DefaultResourceType() string { return "teams" }
+
+func (l *LinearProvider) ListResources(ctx context.Context, pctx *sources.ProviderContext, resourceType string) ([]sources.Resource, error) {
+	if err := l.checkAuth(pctx); err != nil {
+		return nil, err
+	}
+	token := pctx.Credentials.AccessToken
+	switch resourceType {
+	case "teams":
+		return l.fetchTeamResources(ctx, token)
+	case "labels":
+		return l.fetchLabelResources(ctx, token)
+	case "projects":
+		return l.fetchProjectResources(ctx, token)
+	default:
+		return nil, fmt.Errorf("unsupported resource type: %s", resourceType)
+	}
+}
+
+func (l *LinearProvider) fetchTeamResources(ctx context.Context, token string) ([]sources.Resource, error) {
+	const gql = `{ teams { nodes { id key name } } }`
+	var resp struct {
+		Data struct {
+			Teams struct {
+				Nodes []struct {
+					ID   string `json:"id"`
+					Key  string `json:"key"`
+					Name string `json:"name"`
+				} `json:"nodes"`
+			} `json:"teams"`
+		} `json:"data"`
+		Errors []graphqlError `json:"errors"`
+	}
+	if err := l.graphql(ctx, token, gql, nil, &resp); err != nil {
+		return nil, err
+	}
+	if len(resp.Errors) > 0 {
+		return nil, fmt.Errorf("linear API: %s", resp.Errors[0].Message)
+	}
+	out := make([]sources.Resource, 0, len(resp.Data.Teams.Nodes))
+	for _, t := range resp.Data.Teams.Nodes {
+		out = append(out, sources.Resource{ID: t.Key, Name: t.Name})
+	}
+	return out, nil
+}
+
+func (l *LinearProvider) fetchLabelResources(ctx context.Context, token string) ([]sources.Resource, error) {
+	const gql = `{ issueLabels(first: 100) { nodes { id name } } }`
+	var resp struct {
+		Data struct {
+			IssueLabels struct {
+				Nodes []struct {
+					ID   string `json:"id"`
+					Name string `json:"name"`
+				} `json:"nodes"`
+			} `json:"issueLabels"`
+		} `json:"data"`
+		Errors []graphqlError `json:"errors"`
+	}
+	if err := l.graphql(ctx, token, gql, nil, &resp); err != nil {
+		return nil, err
+	}
+	if len(resp.Errors) > 0 {
+		return nil, fmt.Errorf("linear API: %s", resp.Errors[0].Message)
+	}
+	out := make([]sources.Resource, 0, len(resp.Data.IssueLabels.Nodes))
+	for _, lb := range resp.Data.IssueLabels.Nodes {
+		out = append(out, sources.Resource{ID: lb.Name, Name: lb.Name})
+	}
+	return out, nil
+}
+
+func (l *LinearProvider) fetchProjectResources(ctx context.Context, token string) ([]sources.Resource, error) {
+	const gql = `{ projects(first: 100, orderBy: updatedAt) { nodes { id name } } }`
+	var resp struct {
+		Data struct {
+			Projects struct {
+				Nodes []struct {
+					ID   string `json:"id"`
+					Name string `json:"name"`
+				} `json:"nodes"`
+			} `json:"projects"`
+		} `json:"data"`
+		Errors []graphqlError `json:"errors"`
+	}
+	if err := l.graphql(ctx, token, gql, nil, &resp); err != nil {
+		return nil, err
+	}
+	if len(resp.Errors) > 0 {
+		return nil, fmt.Errorf("linear API: %s", resp.Errors[0].Message)
+	}
+	out := make([]sources.Resource, 0, len(resp.Data.Projects.Nodes))
+	for _, p := range resp.Data.Projects.Nodes {
+		out = append(out, sources.Resource{ID: p.Name, Name: p.Name})
+	}
+	return out, nil
+}
 
 // Result converters
 
@@ -380,10 +481,10 @@ func (l *LinearProvider) fetchIssue(ctx context.Context, token, id string) (map[
 func (l *LinearProvider) parseQueryToFilter(query string) map[string]any {
 	// Tokenize the query, respecting quotes and OR
 	tokens := linearTokenize(query)
-	
+
 	// Split by OR to handle alternatives
 	orGroups := linearSplitOR(tokens)
-	
+
 	if len(orGroups) > 1 {
 		// Multiple OR groups - each group becomes an AND, combined with OR
 		var orFilters []map[string]any
@@ -400,62 +501,14 @@ func (l *LinearProvider) parseQueryToFilter(query string) map[string]any {
 		}
 		return make(map[string]any)
 	}
-	
+
 	// Single group - AND logic between filters
 	return l.parseTokenGroup(tokens)
 }
 
-// parseTokenGroupFlat returns individual filters as a slice (for OR combining)
-func (l *LinearProvider) parseTokenGroupFlat(tokens []string) []map[string]any {
-	var filters []map[string]any
-	var searchTerms []string
-
-	for _, token := range tokens {
-		switch {
-		case strings.HasPrefix(token, "assignee:"):
-			value := strings.TrimPrefix(token, "assignee:")
-			if value == "me" {
-				filters = append(filters, map[string]any{"assignee": map[string]any{"isMe": map[string]any{"eq": true}}})
-			} else {
-				filters = append(filters, map[string]any{"assignee": map[string]any{"name": map[string]any{"containsIgnoreCase": value}}})
-			}
-		case strings.HasPrefix(token, "creator:"):
-			value := strings.TrimPrefix(token, "creator:")
-			filters = append(filters, map[string]any{"creator": map[string]any{"name": map[string]any{"containsIgnoreCase": value}}})
-		case strings.HasPrefix(token, "state:"):
-			value := l.normalizeState(strings.TrimPrefix(token, "state:"))
-			filters = append(filters, map[string]any{"state": map[string]any{"name": map[string]any{"containsIgnoreCase": value}}})
-		case strings.HasPrefix(token, "team:"):
-			filters = append(filters, map[string]any{"team": map[string]any{"key": map[string]any{"eqIgnoreCase": strings.TrimPrefix(token, "team:")}}})
-		case strings.HasPrefix(token, "priority:"):
-			var p int
-			fmt.Sscanf(strings.TrimPrefix(token, "priority:"), "%d", &p)
-			filters = append(filters, map[string]any{"priority": map[string]any{"eq": p}})
-		case strings.HasPrefix(token, "label:"):
-			filters = append(filters, map[string]any{"labels": map[string]any{"name": map[string]any{"containsIgnoreCase": strings.TrimPrefix(token, "label:")}}})
-		case token == "is:bug":
-			filters = append(filters, map[string]any{"labels": map[string]any{"name": map[string]any{"containsIgnoreCase": "bug"}}})
-		case token == "is:feature":
-			filters = append(filters, map[string]any{"labels": map[string]any{"name": map[string]any{"containsIgnoreCase": "feature"}}})
-		default:
-			if token != "" {
-				searchTerms = append(searchTerms, token)
-			}
-		}
-	}
-
-	// Add text search filters
-	if len(searchTerms) > 0 {
-		text := strings.Join(searchTerms, " ")
-		filters = append(filters, map[string]any{"title": map[string]any{"containsIgnoreCase": text}})
-		filters = append(filters, map[string]any{"description": map[string]any{"containsIgnoreCase": text}})
-	}
-	return filters
-}
-
 func (l *LinearProvider) normalizeState(value string) string {
 	switch strings.ToLower(value) {
-	case "in progress", "in-progress", "inprogress", "doing":
+	case "in progress", "in-progress", "in_progress", "inprogress", "doing":
 		return "In Progress"
 	case "todo", "to do", "to-do":
 		return "Todo"
@@ -474,7 +527,7 @@ func linearTokenize(query string) []string {
 	var tokens []string
 	var current strings.Builder
 	inQuotes := false
-	
+
 	for i := 0; i < len(query); i++ {
 		c := query[i]
 		switch {
@@ -500,7 +553,7 @@ func linearTokenize(query string) []string {
 func linearSplitOR(tokens []string) [][]string {
 	var groups [][]string
 	var current []string
-	
+
 	for _, t := range tokens {
 		if strings.EqualFold(t, "OR") {
 			if len(current) > 0 {
@@ -545,6 +598,26 @@ func (l *LinearProvider) parseTokenGroup(tokens []string) map[string]any {
 			filter["priority"] = map[string]any{"eq": p}
 		case strings.HasPrefix(token, "label:"):
 			filter["labels"] = map[string]any{"name": map[string]any{"containsIgnoreCase": strings.TrimPrefix(token, "label:")}}
+		case strings.HasPrefix(token, "project:"):
+			filter["project"] = map[string]any{"name": map[string]any{"containsIgnoreCase": strings.TrimPrefix(token, "project:")}}
+		case strings.HasPrefix(token, "cycle:"):
+			value := strings.TrimPrefix(token, "cycle:")
+			switch strings.ToLower(value) {
+			case "current":
+				filter["cycle"] = map[string]any{"isActive": map[string]any{"eq": true}}
+			case "next":
+				filter["cycle"] = map[string]any{"isNext": map[string]any{"eq": true}}
+			case "previous":
+				filter["cycle"] = map[string]any{"isPrevious": map[string]any{"eq": true}}
+			}
+		case strings.HasPrefix(token, "estimate:"):
+			var e int
+			fmt.Sscanf(strings.TrimPrefix(token, "estimate:"), "%d", &e)
+			filter["estimate"] = map[string]any{"eq": e}
+		case token == "no:assignee":
+			filter["assignee"] = map[string]any{"null": true}
+		case token == "no:label":
+			filter["labels"] = map[string]any{"length": map[string]any{"eq": 0}}
 		case token == "is:bug":
 			filter["labels"] = map[string]any{"name": map[string]any{"containsIgnoreCase": "bug"}}
 		case token == "is:feature":
@@ -563,7 +636,7 @@ func (l *LinearProvider) parseTokenGroup(tokens []string) map[string]any {
 			{"title": map[string]any{"containsIgnoreCase": text}},
 			{"description": map[string]any{"containsIgnoreCase": text}},
 		}
-		
+
 		if len(filter) == 0 {
 			filter["or"] = textFilter
 		} else {

@@ -1,0 +1,83 @@
+name: notion
+description: Search Notion and create/update pages
+icon: file-text
+
+commands:
+  list:
+    description: List recently edited Notion pages and databases
+    params:
+      - name: limit
+        type: int
+        default: 20
+        short: -n
+        flag: --limit
+        description: "Maximum number of results (1-100)"
+
+  search:
+    description: Search Notion pages and databases by text query
+    params:
+      - name: query
+        type: string
+        required: true
+        position: 0
+        description: "Search query text"
+
+      - name: limit
+        type: int
+        default: 20
+        short: -n
+        flag: --limit
+        description: "Maximum number of results (1-100)"
+
+  create-page:
+    description: Create a new Notion page in workspace, a page, or a database
+    params:
+      - name: title
+        type: string
+        required: true
+        position: 0
+        description: "Page title"
+
+      - name: parent_id
+        type: string
+        short: -p
+        flag: --parent-id
+        description: "Parent page/database ID (optional; defaults to workspace root when supported)"
+
+      - name: parent_type
+        type: string
+        default: auto
+        short: -t
+        flag: --parent-type
+        description: "Parent type: auto, workspace, page, or database"
+
+      - name: page_id
+        type: string
+        flag: --page-id
+        description: "Alias for parent page ID"
+
+      - name: database_id
+        type: string
+        flag: --database-id
+        description: "Alias for parent database ID"
+
+      - name: content
+        type: string
+        short: -c
+        flag: --content
+        description: "Optional first paragraph to add to the new page"
+
+  append-paragraph:
+    description: Append a paragraph block to a Notion block/page
+    params:
+      - name: block_id
+        type: string
+        required: true
+        position: 0
+        description: "Target block ID (typically a page ID)"
+
+      - name: text
+        type: string
+        required: true
+        position: 1
+        description: "Paragraph content to append"

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
+	"github.com/beam-cloud/airstore/pkg/types"
 	"google.golang.org/grpc"
 	grpcmd "google.golang.org/grpc/metadata"
 )
@@ -82,6 +83,9 @@ func (a *AccessLogInterceptor) Unary() grpc.UnaryServerInterceptor {
 		if svcPrefix != "" {
 			fullPath = svcPrefix + "/" + filePath
 		}
+		if types.IsHiddenDotPath(fullPath) {
+			return resp, err
+		}
 
 		a.recorder.Record(ctx, AccessEvent{
 			Timestamp:   time.Now().UnixMilli(),
@@ -111,7 +115,7 @@ func servicePrefix(fullMethod string) string {
 	case strings.Contains(fullMethod, "SourceService"):
 		return "sources"
 	case strings.Contains(fullMethod, "ContextService"):
-		// The ContextService is used for /skills and /memory; the path
+		// The ContextService is used for /skills; the path
 		// itself already carries the prefix (e.g. "skills/AGENTS.md").
 		return ""
 	default:

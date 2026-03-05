@@ -30,12 +30,13 @@ type SourceStatus struct {
 
 // oauthIntegrations lists integrations that use OAuth
 var oauthIntegrations = map[string]bool{
-	"gmail":  true,
-	"gdrive": true,
-	"github": true,
-	"notion": true,
-	"slack":  true,
-	"linear": true,
+	"gmail":      true,
+	"gdrive":     true,
+	"github":     true,
+	"notion":     true,
+	"slack":      true,
+	"linear":     true,
+	"confluence": true,
 }
 
 // GenerateSourceReadme creates the README.md content for an integration
@@ -47,7 +48,7 @@ func GenerateSourceReadme(integration string, connected bool, scope string, work
 	}
 
 	// Get integration metadata for display name and description
-	if meta, ok := types.GetIntegrationMeta(types.ToolName(integration)); ok {
+	if meta, ok := types.GetIntegrationMeta(types.IntegrationName(integration)); ok {
 		status.DisplayName = meta.DisplayName
 		status.Description = meta.Description
 	} else {
@@ -60,10 +61,10 @@ func GenerateSourceReadme(integration string, connected bool, scope string, work
 	if !connected {
 		if oauthIntegrations[integration] {
 			// OAuth integrations use 'connection connect' for browser-based auth
-			status.Hint = fmt.Sprintf("beta9 connection connect %s", integration)
+			status.Hint = fmt.Sprintf("airstore connection connect %s", integration)
 		} else {
 			// Token/API-key integrations use 'connection add'
-			status.Hint = fmt.Sprintf("beta9 connection add %s %s --token <your-token>", workspaceId, integration)
+			status.Hint = fmt.Sprintf("airstore connection add %s %s --token <your-token>", workspaceId, integration)
 		}
 	}
 
@@ -115,13 +116,15 @@ func generateReadmeMarkdown(status SourceStatus) []byte {
 	// Getting started or connect hint
 	if status.Connected {
 		b.WriteString("## Getting Started\n\n")
-		b.WriteString("Create smart queries to access your data:\n\n")
+		b.WriteString("Source views are read-only in this workspace.\n\n")
+		b.WriteString("Browse existing views and inspect metadata:\n\n")
 		b.WriteString("```bash\n")
-		b.WriteString(fmt.Sprintf("mkdir /sources/%s/my-query\n", status.Integration))
-		b.WriteString(fmt.Sprintf("ls /sources/%s/my-query/\n", status.Integration))
+		b.WriteString(fmt.Sprintf("ls sources/%s/\n", status.Integration))
+		b.WriteString(fmt.Sprintf("cat sources/%s/README.md\n", status.Integration))
+		b.WriteString(fmt.Sprintf("cat sources/%s/<view>/.query.as\n", status.Integration))
 		b.WriteString("```\n\n")
-		// Helpful tip
-		b.WriteString("> **Tip:** Use `ls` to explore available data and `cat` to read files.\n")
+		b.WriteString("If only `README.md` is present, no source views are configured yet.\n\n")
+		b.WriteString(fmt.Sprintf("> **Tip:** For write actions, use the tool executable at `tools/%s --help`.\n", status.Integration))
 	} else {
 		b.WriteString("## Connect\n\n")
 		b.WriteString("This integration is not connected. To connect, run:\n\n")

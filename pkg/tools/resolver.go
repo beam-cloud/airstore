@@ -28,6 +28,7 @@ type BackendRepository interface {
 	ListWorkspaceTools(ctx context.Context, workspaceId uint) ([]*types.WorkspaceTool, error)
 	GetWorkspaceToolByName(ctx context.Context, workspaceId uint, name string) (*types.WorkspaceTool, error)
 	GetWorkspaceToolSettings(ctx context.Context, workspaceId uint) (*types.WorkspaceToolSettings, error)
+	GetConnection(ctx context.Context, workspaceId uint, memberId uint, integrationType string) (*types.IntegrationConnection, error)
 }
 
 type workspaceToolKey struct {
@@ -53,6 +54,7 @@ func NewWorkspaceToolResolver(globalRegistry *Registry, backend BackendRepositor
 // filtered by workspace tool settings
 func (r *WorkspaceToolResolver) List(ctx context.Context) ([]types.ResolvedTool, error) {
 	workspaceId := auth.WorkspaceId(ctx)
+	memberId := auth.MemberId(ctx)
 
 	// Get tool settings for filtering
 	var settings *types.WorkspaceToolSettings
@@ -74,12 +76,19 @@ func (r *WorkspaceToolResolver) List(ctx context.Context) ([]types.ResolvedTool,
 		}
 
 		enabled := settings == nil || settings.IsEnabled(name)
-		result = append(result, types.ResolvedTool{
+		if enabled && !r.globalToolCapabilityEnabled(ctx, workspaceId, memberId, name) {
+			enabled = false
+		}
+		rt := types.ResolvedTool{
 			Name:    name,
 			Help:    provider.Help(),
 			Origin:  types.ToolOriginGlobal,
 			Enabled: enabled,
-		})
+		}
+		if lp, ok := provider.(LocalToolProvider); ok {
+			rt.LocalCommand = lp.LocalCommand()
+		}
+		result = append(result, rt)
 	}
 
 	// Add workspace-specific tools
@@ -146,6 +155,9 @@ func (r *WorkspaceToolResolver) Get(ctx context.Context, name string) (ToolProvi
 
 	// Check global registry first
 	if provider := r.globalRegistry.Get(name); provider != nil {
+		if !r.globalToolCapabilityEnabled(ctx, workspaceId, auth.MemberId(ctx), name) {
+			return nil, nil
+		}
 		return provider, nil
 	}
 
@@ -333,4 +345,30 @@ func (r *WorkspaceToolResolver) getToolCount(wt *types.WorkspaceTool) int {
 		return 0
 	}
 	return len(manifest.Tools)
+}
+
+func (r *WorkspaceToolResolver) globalToolCapabilityEnabled(ctx context.Context, workspaceId uint, memberId uint, toolName string) bool {
+	integration := types.IntegrationName(toolName)
+	if !types.SupportsSourceWrite(integration) {
+		return true
+	}
+	if workspaceId == 0 || r.backend == nil {
+		return false
+	}
+
+	conn, err := r.backend.GetConnection(ctx, workspaceId, memberId, toolName)
+	if err != nil {
+		log.Warn().Err(err).Uint("workspace_id", workspaceId).Str("tool", toolName).Msg("failed to resolve connection for tool capability check")
+		return false
+	}
+	if conn == nil {
+		return false
+	}
+
+	var creds types.IntegrationCredentials
+	if err := json.Unmarshal(conn.Credentials, &creds); err != nil {
+		log.Warn().Err(err).Uint("workspace_id", workspaceId).Str("tool", toolName).Msg("failed to parse connection credentials for tool capability check")
+		return false
+	}
+	return types.CredentialsSupportSourceWrite(integration, &creds)
 }

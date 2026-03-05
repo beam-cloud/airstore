@@ -15,7 +15,7 @@ import (
 var taskCmd = &cobra.Command{
 	Use:   "task",
 	Short: "Manage tasks",
-	Long:  `List and manage tasks created by hooks.`,
+	Long:  `List and manage tasks.`,
 }
 
 var taskListCmd = &cobra.Command{
@@ -69,7 +69,7 @@ func listTasks() error {
 	}
 	defer client.Close()
 
-	resp, err := client.Gateway.ListTasks(context.Background(), &pb.ListTasksRequest{})
+	resp, err := client.Agents.ListTasks(context.Background(), &pb.ListTasksRequest{})
 	if err != nil {
 		PrintError(err)
 		return nil
@@ -85,20 +85,19 @@ func listTasks() error {
 
 	if len(resp.Tasks) == 0 {
 		PrintInfo("No tasks found")
-		PrintHint("Tasks are created automatically when hooks trigger on file changes")
+		PrintHint("Create a task with the SDK or HTTP API")
 		return nil
 	}
 
 	PrintHeader("Tasks")
 
-	table := NewTable("ID", "STATUS", "IMAGE", "CREATED", "EXIT")
+	table := NewTable("ID", "STATE", "KIND", "RUN", "CREATED")
 	for _, t := range resp.Tasks {
-		exitCode := "-"
-		if t.HasExitCode {
-			exitCode = fmt.Sprintf("%d", t.ExitCode)
+		runID := "-"
+		if t.TargetRunId != "" {
+			runID = Truncate(t.TargetRunId, 12)
 		}
-		image := Truncate(t.Image, 35)
-		table.AddRow(t.Id, t.Status, image, FormatRelativeTime(t.CreatedAt), exitCode)
+		table.AddRow(t.Id, t.State, t.Kind, runID, FormatRelativeTime(t.CreatedAt))
 	}
 	table.Print()
 	PrintNewline()
@@ -114,7 +113,7 @@ func getTask(id string) error {
 	}
 	defer client.Close()
 
-	resp, err := client.Gateway.GetTask(context.Background(), &pb.GetTaskRequest{Id: id})
+	resp, err := client.Agents.GetTask(context.Background(), &pb.GetTaskRequest{Id: id})
 	if err != nil {
 		PrintError(err)
 		return nil
@@ -131,32 +130,19 @@ func getTask(id string) error {
 
 	PrintNewline()
 	PrintKeyValue("ID", t.Id)
-	PrintKeyValueStyled("Status", t.Status, statusStyle(t.Status))
-	PrintKeyValue("Image", t.Image)
-	if t.Prompt != "" {
-		PrintKeyValue("Prompt", Truncate(t.Prompt, 60))
-	}
-
-	if t.HasExitCode {
-		exitStyle := SuccessStyle
-		if t.ExitCode != 0 {
-			exitStyle = ErrorStyle
-		}
-		PrintKeyValueStyled("Exit Code", fmt.Sprintf("%d", t.ExitCode), exitStyle)
-	}
-
-	if t.Error != "" {
-		PrintKeyValueStyled("Error", t.Error, ErrorStyle)
+	PrintKeyValueStyled("State", t.State, statusStyle(t.State))
+	PrintKeyValue("Kind", t.Kind)
+	PrintKeyValue("Queue Mode", t.QueueMode)
+	PrintKeyValue("Agent ID", valueOrDash(t.AgentId))
+	PrintKeyValue("Run ID", valueOrDash(t.TargetRunId))
+	PrintKeyValue("Idempotency Key", valueOrDash(t.IdempotencyKey))
+	if t.DroppedReason != "" {
+		PrintKeyValueStyled("Dropped Reason", t.DroppedReason, ErrorStyle)
 	}
 
 	PrintNewline()
 	PrintKeyValue("Created", FormatRelativeTime(t.CreatedAt))
-	if t.StartedAt != "" {
-		PrintKeyValue("Started", FormatRelativeTime(t.StartedAt))
-	}
-	if t.FinishedAt != "" {
-		PrintKeyValue("Finished", FormatRelativeTime(t.FinishedAt))
-	}
+	PrintKeyValue("Updated", FormatRelativeTime(t.UpdatedAt))
 	PrintNewline()
 
 	return nil
@@ -172,7 +158,7 @@ func deleteTask(id string) error {
 			return err
 		}
 
-		resp, err := client.Gateway.DeleteTask(context.Background(), &pb.DeleteTaskRequest{Id: id})
+		resp, err := client.Agents.DeleteTask(context.Background(), &pb.DeleteTaskRequest{Id: id})
 		if err != nil {
 			return err
 		}
@@ -203,7 +189,7 @@ func getTaskLogs(id string) error {
 	}
 	defer client.Close()
 
-	resp, err := client.Gateway.GetTaskLogs(context.Background(), &pb.GetTaskLogsRequest{Id: id})
+	resp, err := client.Agents.GetTaskLogs(context.Background(), &pb.GetTaskLogsRequest{Id: id})
 	if err != nil {
 		PrintError(err)
 		return nil
@@ -238,9 +224,11 @@ func statusStyle(status string) lipgloss.Style {
 	switch strings.ToLower(status) {
 	case "running":
 		return InfoStyle
-	case "complete", "completed", "success":
+	case "idle":
+		return WarningStyle
+	case "done", "complete", "completed", "success":
 		return SuccessStyle
-	case "failed", "error":
+	case "failed", "error", "dropped":
 		return ErrorStyle
 	case "pending", "queued":
 		return WarningStyle
@@ -249,4 +237,11 @@ func statusStyle(status string) lipgloss.Style {
 	default:
 		return DimStyle
 	}
+}
+
+func valueOrDash(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "-"
+	}
+	return value
 }

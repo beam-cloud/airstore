@@ -10,7 +10,9 @@ const (
 	SourceGDrive  SourceType = "gdrive"
 	SourceSlack   SourceType = "slack"
 	SourceLinear  SourceType = "linear"
-	SourcePostHog SourceType = "posthog"
+	SourcePostHog    SourceType = "posthog"
+	SourceConfluence SourceType = "confluence"
+	SourceWeb        SourceType = "web"
 )
 
 func (s SourceType) String() string { return string(s) }

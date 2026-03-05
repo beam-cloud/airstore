@@ -1,0 +1,28 @@
+name: linear
+description: Create and manage Linear issues
+icon: square-kanban
+
+commands:
+  list-teams:
+    description: List available Linear teams
+
+  create-issue:
+    description: Create a new issue in Linear (defaults to first team if not provided)
+    params:
+      - name: title
+        type: string
+        required: true
+        position: 0
+        description: "Issue title"
+
+      - name: description
+        type: string
+        short: -d
+        flag: --description
+        description: "Issue description/body"
+
+      - name: team_id
+        type: string
+        short: -t
+        flag: --team-id
+        description: "Optional team ID, team key, or team name"

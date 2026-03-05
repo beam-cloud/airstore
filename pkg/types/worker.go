@@ -12,7 +12,7 @@ const (
 	DefaultMountDir = "/tmp/airstore-mounts"
 
 	// DefaultCLIBinary is the path to the CLI binary for mounting
-	DefaultCLIBinary = "/usr/local/bin/cli"
+	DefaultCLIBinary = "/usr/local/bin/airstore"
 
 	// DefaultWorkerMount is where the worker's global FUSE mount lives
 	DefaultWorkerMount = "/var/lib/airstore/fs"

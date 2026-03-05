@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/common"
@@ -41,6 +42,7 @@ func NewAccessLogGroup(
 
 func (g *AccessLogGroup) registerRoutes() {
 	g.routerGroup.GET("", g.ListReads)
+	g.routerGroup.GET("/sessions", g.ListSessions)
 	g.routerGroup.GET("/summary", g.GetSummary)
 	g.routerGroup.GET("/read", g.ReadSource)
 }
@@ -49,6 +51,20 @@ type listReadsResponse struct {
 	Reads      []instrumentation.AccessEvent `json:"reads"`
 	NextCursor string                        `json:"next_cursor"`
 	HasMore    bool                          `json:"has_more"`
+}
+
+func normalizeAccessSession(workspaceID, requested string) string {
+	if session := strings.TrimSpace(requested); session != "" {
+		return session
+	}
+	return workspaceID
+}
+
+func accessEventInScope(ev instrumentation.AccessEvent, workspaceID, expectedSession string) bool {
+	if ev.WorkspaceID != workspaceID {
+		return false
+	}
+	return normalizeAccessSession(workspaceID, ev.SessionID) == expectedSession
 }
 
 // ListReads returns a page of access log entries from S2.
@@ -76,12 +92,8 @@ func (g *AccessLogGroup) ListReads(c echo.Context) error {
 		limit = 100
 	}
 
-	session := c.QueryParam("session")
-	if session == "" {
-		session = wsExtId
-	}
-
-	stream := instrumentation.AccessStreamName(session)
+	session := normalizeAccessSession(wsExtId, c.QueryParam("session"))
+	stream := instrumentation.AccessWorkspaceStreamName(wsExtId, session)
 
 	// Fetch more than limit to account for time-window filtering
 	fetchCount := int(limit) * 2
@@ -106,6 +118,9 @@ func (g *AccessLogGroup) ListReads(c echo.Context) error {
 		if err := json.Unmarshal([]byte(r.Body), &ev); err != nil {
 			continue
 		}
+		if !accessEventInScope(ev, wsExtId, session) {
+			continue
+		}
 
 		if startMs > 0 && ev.Timestamp < startMs {
 			continue
@@ -128,6 +143,58 @@ func (g *AccessLogGroup) ListReads(c echo.Context) error {
 		NextCursor: strconv.FormatInt(nextSeqNum, 10),
 		HasMore:    hasMore,
 	})
+}
+
+// --- Sessions ---
+
+type listSessionsResponse struct {
+	Sessions []string `json:"sessions"`
+}
+
+// ListSessions returns distinct session IDs that have access log streams.
+//
+//	GET /api/v1/workspaces/:workspace_id/access-log/sessions
+//
+// It lists S2 streams matching the workspace-scoped prefix and extracts the
+// session ID component from stream names (format: access.{workspace}.{session}.events).
+func (g *AccessLogGroup) ListSessions(c echo.Context) error {
+	ctx := c.Request().Context()
+
+	if g.s2Client == nil || !g.s2Client.Enabled() {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "access log unavailable")
+	}
+
+	wsExtId := c.Param("workspace_id")
+	ws, err := g.backend.GetWorkspaceByExternalId(ctx, wsExtId)
+	if err != nil || ws == nil {
+		return ErrorResponse(c, http.StatusNotFound, "workspace not found")
+	}
+
+	streams, err := g.s2Client.ListStreams(ctx, instrumentation.AccessWorkspaceStreamPrefix(wsExtId))
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to list streams: "+err.Error())
+	}
+
+	sessionSet := map[string]struct{}{
+		wsExtId: {},
+	}
+	for _, s := range streams {
+		sessionID := instrumentation.SessionIDFromWorkspaceStreamName(s.Name, wsExtId)
+		if sessionID == "" {
+			continue
+		}
+		sessionSet[sessionID] = struct{}{}
+	}
+
+	sessions := make([]string, 0, len(sessionSet))
+	for sessionID := range sessionSet {
+		sessions = append(sessions, sessionID)
+	}
+
+	// Sort for deterministic output
+	sort.Strings(sessions)
+
+	return SuccessResponse(c, listSessionsResponse{Sessions: sessions})
 }
 
 // --- Summary ---
@@ -178,12 +245,8 @@ func (g *AccessLogGroup) GetSummary(c echo.Context) error {
 	startMs := parseIntParam(c, "start", 0)
 	endMs := parseIntParam(c, "end", 0)
 
-	session := c.QueryParam("session")
-	if session == "" {
-		session = wsExtId
-	}
-
-	stream := instrumentation.AccessStreamName(session)
+	session := normalizeAccessSession(wsExtId, c.QueryParam("session"))
+	stream := instrumentation.AccessWorkspaceStreamName(wsExtId, session)
 
 	var seqNum int64 = 0
 	const pageSize = 1000
@@ -217,6 +280,9 @@ func (g *AccessLogGroup) GetSummary(c echo.Context) error {
 
 			var ev instrumentation.AccessEvent
 			if err := json.Unmarshal([]byte(r.Body), &ev); err != nil {
+				continue
+			}
+			if !accessEventInScope(ev, wsExtId, session) {
 				continue
 			}
 
@@ -296,7 +362,7 @@ func (g *AccessLogGroup) GetSummary(c echo.Context) error {
 }
 
 // ReadSource fetches content directly from an upstream integration using a
-// source_uri. This bypasses the smart-folder layer, so it works even if the
+// source_uri. This bypasses the source-view layer, so it works even if the
 // query results have changed since the original read.
 //
 //	GET /api/v1/workspaces/:workspace_id/access-log/read?uri=github://abc123

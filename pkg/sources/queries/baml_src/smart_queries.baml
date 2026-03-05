@@ -50,6 +50,14 @@ class PostHogQueryResult {
   filename_format string @description("Template for result filenames. Placeholders vary by search_type.")
 }
 
+class WebQueryResult {
+  web_mode string @description("'map' to crawl a specific site, 'search' to find pages via web search. Default: map")
+  web_query string @description("For web_mode=map: the URL to crawl. For web_mode=search: the search query string.")
+  include_paths string[] @description("URL path patterns to include when web_mode=map (e.g. /cocktails/*). Empty array = all paths. Ignored for search.")
+  limit int @description("Max pages to discover (default: 100)")
+  filename_format string @description("Template for result filenames. Use {title}, {path}, {id}, {date}. Example: {title}_{id}.md")
+}
+
 // -----------------------------------------------------------------------------
 // PostHog Query Inference
 // -----------------------------------------------------------------------------
@@ -451,11 +459,16 @@ function InferLinearQuery(name: string, guidance: string?) -> LinearQueryResult 
     SYNTAX:
     - Plain text: searches title + description (very flexible, use this a lot!)
     - assignee:name | assignee:me - who it's assigned to
+    - no:assignee - unassigned issues
     - state:backlog | state:todo | state:"in progress" | state:done | state:canceled
     - priority:1 (urgent) | priority:2 (high) | priority:3 (medium) | priority:4 (low)  
     - label:name - filter by label
+    - no:label - unlabeled issues
     - team:KEY - filter by team key
+    - project:name - filter by project name
     - creator:name - who created it
+    - cycle:current | cycle:next | cycle:previous - filter by cycle
+    - estimate:N - filter by point estimate
     - OR - combine alternatives (use generously!)
     
     STRATEGY - Think about what the user ACTUALLY wants:
@@ -470,15 +483,19 @@ function InferLinearQuery(name: string, guidance: string?) -> LinearQueryResult 
        "john's tickets" → assignee:john OR john
        "sarah jones work" → assignee:sarah OR assignee:jones OR sarah OR jones
        "assigned to mike" → assignee:mike
+       "unassigned issues" → no:assignee
        
     3. STATUS/PRIORITY searches → filters
        "my open issues" → assignee:me state:todo OR state:"in progress"
        "urgent bugs" → priority:1 bug
        "blocked tickets" → blocked OR blocking
        "stuff in review" → review
+       "in progress issues" → state:"in progress"
        
-    4. PROJECT/CUSTOMER searches → text search (names vary!)
-       "acme corp" → acme OR "acme corp"
+    4. PROJECT/CYCLE searches → project or cycle filter
+       "acme project" → project:acme
+       "current sprint" → cycle:current
+       "next sprint issues" → cycle:next
        "q1 roadmap" → q1 roadmap
        "enterprise features" → enterprise
        
@@ -495,7 +512,14 @@ function InferLinearQuery(name: string, guidance: string?) -> LinearQueryResult 
     - Don't over-filter - better to return more results than miss things
     
     SEARCH TYPE: "issues" (default) or "projects" (only if explicitly asking for projects list)
-    DEFAULTS: limit=50, filename_format={identifier}_{title}.md
+    
+    DEFAULTS:
+    - limit: 50
+    - filename_format: {identifier}_{title}.md
+    
+    CRITICAL: filename_format MUST contain placeholders like {identifier}, {title}, etc.
+    NEVER return a literal filename like "test.md" or the folder name as the format.
+    The format is a TEMPLATE applied to every result, so it MUST use placeholders.
     
     Folder/file name: {{ name }}
     {% if guidance %}
@@ -956,5 +980,209 @@ test TestPostHogSignupFunnel {
   args {
     name "signup-funnel"
     guidance null
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Confluence Query Inference
+// -----------------------------------------------------------------------------
+
+class ConfluenceQueryResult {
+  cql_query string @description("Confluence Query Language (CQL) query string")
+  content_type string @description("Content type filter: 'page', 'blogpost', or 'all'. Default: 'all'")
+  limit int @description("Max results to return (default: 50)")
+  filename_format string @description("Template for result filenames. Use {id}, {title}, {space}, {date}, {type}. Example: {space}_{title}_{id}.md")
+}
+
+function InferConfluenceQuery(name: string, guidance: string?) -> ConfluenceQueryResult {
+  client AnthropicClient
+  prompt #"
+    Convert a folder/file name into a Confluence CQL (Confluence Query Language) query.
+
+    CQL SYNTAX:
+    - type=page — pages only
+    - type=blogpost — blog posts only
+    - space=KEY — filter by space key (e.g., space=DEV, space=ENG)
+    - title~"text" — title contains text (fuzzy match)
+    - text~"text" — full-text search (searches title + body)
+    - label="name" — filter by label
+    - creator="username" — filter by creator
+    - contributor="username" — filter by contributor
+    - lastModified>now("-7d") — modified in the last 7 days
+    - lastModified>now("-30d") — modified in the last 30 days
+    - lastModified>"2025-01-01" — modified after a specific date
+    - created>now("-7d") — created in the last 7 days
+    - ancestor=12345 — pages under a specific parent
+    - AND, OR — combine conditions
+    - ORDER BY lastModified DESC, title ASC — sorting
+
+    QUERY STRATEGY:
+    1. For topic searches → use text~ for full-text search
+    2. For space-specific → use space=KEY
+    3. For recent content → use lastModified>now("-Nd")
+    4. For labeled content → use label="name"
+    5. For specific content types → use type=page or type=blogpost
+    6. Combine operators with AND/OR
+
+    DEFAULTS:
+    - content_type: "all"
+    - limit: 50
+    - filename_format: {space}_{title}_{id}.md
+
+    Query examples:
+    - "recent-pages" → lastModified>now("-7d") ORDER BY lastModified DESC, content_type: "page"
+    - "engineering-docs" → (space=ENG OR text~"engineering") AND type=page ORDER BY lastModified DESC
+    - "kubernetes-pages" → text~"kubernetes" AND type=page ORDER BY lastModified DESC
+    - "dev-blog-posts" → space=DEV AND type=blogpost ORDER BY lastModified DESC
+    - "important-docs" → label="important" ORDER BY lastModified DESC
+    - "api-documentation" → text~"api" AND (label="documentation" OR title~"api") ORDER BY lastModified DESC
+    - "onboarding" → text~"onboarding" OR title~"onboarding" ORDER BY lastModified DESC
+    - "architecture-decisions" → text~"architecture" OR label="adr" ORDER BY lastModified DESC
+    - "meeting-notes" → title~"meeting" OR label="meeting-notes" ORDER BY lastModified DESC
+    - "recent-blog-posts" → type=blogpost AND lastModified>now("-30d") ORDER BY lastModified DESC
+    - "project-alpha" → text~"project alpha" ORDER BY lastModified DESC
+
+    Filename format: Choose a format that makes sense for the query intent.
+    Available placeholders: {id}, {title}, {space}, {date}, {type}
+    - For space-specific: {title}_{id}.md
+    - For cross-space: {space}_{title}_{id}.md
+    - For dated content: {date}_{title}_{id}.md
+    - Default: {space}_{title}_{id}.md
+
+    Folder/file name: {{ name }}
+    {% if guidance %}
+
+    Additional guidance from user: {{ guidance }}
+    {% endif %}
+
+    {{ ctx.output_format }}
+  "#
+}
+
+// -----------------------------------------------------------------------------
+// Web Query Inference
+// -----------------------------------------------------------------------------
+
+function InferWebQuery(name: string, guidance: string?) -> WebQueryResult {
+  client AnthropicClient
+  prompt #"
+    Convert a folder name into a web query. Two modes:
+
+    web_mode=map    — crawl a specific website. web_query must be a valid https:// URL.
+    web_mode=search — web search. web_query is a search query string (not a URL).
+
+    Use web_mode=map when guidance contains a URL or the name implies a specific site.
+    Use web_mode=search when the name describes a topic, question, or information need.
+
+    EXAMPLES:
+    - "hennessy-cocktails" (guidance: "https://www.hennessy.com/en-us/cocktails")
+      → web_mode: "map", web_query: "https://www.hennessy.com/en-us/cocktails", include_paths: ["/en-us/cocktails/*"], limit: 100
+    - "react-docs"
+      → web_mode: "map", web_query: "https://react.dev/reference", include_paths: ["/reference/*"], limit: 100
+    - "python-tutorial"
+      → web_mode: "map", web_query: "https://docs.python.org/3/tutorial/", include_paths: ["/3/tutorial/*"], limit: 50
+    - "latest AI news"
+      → web_mode: "search", web_query: "latest AI news 2025", include_paths: [], limit: 20
+    - "best rust web frameworks"
+      → web_mode: "search", web_query: "best rust web frameworks comparison", include_paths: [], limit: 15
+    - "climate change research papers"
+      → web_mode: "search", web_query: "climate change research papers 2025", include_paths: [], limit: 20
+
+    Defaults: web_mode=map, limit=100, filename_format={title}_{id}.md
+
+    Folder name: {{ name }}
+    {% if guidance %}
+    User guidance: {{ guidance }}
+    {% endif %}
+
+    {{ ctx.output_format }}
+  "#
+}
+
+// -----------------------------------------------------------------------------
+// Web Query Tests
+// -----------------------------------------------------------------------------
+
+test TestWebQueryWithGuidance {
+  functions [InferWebQuery]
+  args {
+    name "hennessy-cocktails"
+    guidance "https://www.hennessy.com/en-us/cocktails?page=1"
+  }
+}
+
+test TestWebQueryDocs {
+  functions [InferWebQuery]
+  args {
+    name "react-docs"
+    guidance null
+  }
+}
+
+test TestWebQueryBlog {
+  functions [InferWebQuery]
+  args {
+    name "openai-blog"
+    guidance null
+  }
+}
+
+test TestWebQuerySearch {
+  functions [InferWebQuery]
+  args {
+    name "latest AI news"
+    guidance null
+  }
+}
+
+test TestWebQuerySearchTopic {
+  functions [InferWebQuery]
+  args {
+    name "best rust web frameworks"
+    guidance null
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Confluence Query Tests
+// -----------------------------------------------------------------------------
+
+test TestConfluenceRecentPages {
+  functions [InferConfluenceQuery]
+  args {
+    name "recent-pages"
+    guidance null
+  }
+}
+
+test TestConfluenceEngDocs {
+  functions [InferConfluenceQuery]
+  args {
+    name "engineering-docs"
+    guidance "documentation from the engineering space"
+  }
+}
+
+test TestConfluenceKubernetes {
+  functions [InferConfluenceQuery]
+  args {
+    name "kubernetes-pages"
+    guidance null
+  }
+}
+
+test TestConfluenceMeetingNotes {
+  functions [InferConfluenceQuery]
+  args {
+    name "meeting-notes"
+    guidance null
+  }
+}
+
+test TestConfluenceArchitectureDecisions {
+  functions [InferConfluenceQuery]
+  args {
+    name "architecture-decisions"
+    guidance "ADRs and architecture decision records"
   }
 }

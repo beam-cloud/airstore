@@ -1,7 +1,7 @@
 #!/usr/bin/env npx tsx
 /**
  * End-to-end demo: provision a workspace, connect Gmail via OAuth,
- * create a smart folder, browse the virtual filesystem, and read a file.
+ * create a source view, browse the virtual filesystem, and read a file.
  *
  * Usage:
  *   AIRSTORE_API_KEY=<org-token> npx tsx examples/e2e-demo.ts
@@ -11,7 +11,7 @@
  * authorize Gmail, then come back and watch the rest happen automatically.
  */
 import * as readline from 'node:readline';
-import { Airstore } from '@airstore/sdk'
+import { Airstore } from '../src/index.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -118,17 +118,27 @@ async function main() {
     }
 
     // ----------------------------------------------------------------
-    // 6. Create smart folder for unread emails
+    // 6. Create source views (smart + query mode)
     // ----------------------------------------------------------------
-    step(6, 'Create smart folder: "Unread Emails"');
-    const folder = await client.smartFolders.create(workspaceId, {
+    step(6, 'Create source views');
+
+    // Smart mode — LLM infers the query from natural language
+    const folder = await client.views.create(workspaceId, {
       integration: 'gmail',
       name: 'Unread Emails',
       guidance: 'Show only unread emails from the inbox',
       outputFormat: 'folder',
     });
-    ok(`Smart folder created at ${folder.path}`);
-    info('Folder ID', folder.external_id);
+    ok(`Smart view created at ${folder.path}`);
+    info('View ID', folder.external_id);
+
+    // Query mode — structured filter, no LLM involved
+    const queryView = await client.views.create(workspaceId, {
+      integration: 'gmail',
+      name: 'From Boss',
+      filter: { from: 'boss@company.com', is_unread: true },
+    });
+    ok(`Query view created at ${queryView.path} (mode: ${queryView.mode})`);
 
     // ----------------------------------------------------------------
     // 7. Browse the virtual filesystem
@@ -142,16 +152,16 @@ async function main() {
       console.log(`    ${entry.type === 'directory' ? '📁' : '📄'} ${entry.name}`);
     }
 
-    // 7b. List the smart folder path
+    // 7b. List the source view path
     info(`Listing ${folder.path}`);
 
-    // Give the smart folder a moment to populate
+    // Give the source view a moment to populate
     await new Promise((r) => setTimeout(r, 3000));
 
     const emails = await client.fs.list(workspaceId, { path: folder.path });
     if (emails.length === 0) {
-      info('Smart folder is empty (may still be syncing). Trying Sources/gmail/ instead...');
-      const gmailDir = await client.fs.list(workspaceId, { path: '/Sources/gmail/' });
+      info('Source view is empty (may still be syncing). Trying sources/gmail/ instead...');
+      const gmailDir = await client.fs.list(workspaceId, { path: '/sources/gmail/' });
       for (const entry of gmailDir.slice(0, 10)) {
         console.log(`    ${entry.type === 'directory' ? '📁' : '📄'} ${entry.name}`);
       }
@@ -166,8 +176,8 @@ async function main() {
     // ----------------------------------------------------------------
     step(8, 'Read a file');
 
-    // Find the first readable file from the smart folder or gmail source
-    const filesToTry = emails.length > 0 ? emails : await client.fs.list(workspaceId, { path: '/Sources/gmail/' });
+    // Find the first readable file from the source view or gmail source
+    const filesToTry = emails.length > 0 ? emails : await client.fs.list(workspaceId, { path: '/sources/gmail/' });
     const firstFile = filesToTry.find((e) => e.type !== 'directory');
 
     if (firstFile) {
@@ -188,14 +198,20 @@ async function main() {
     }
 
     // ----------------------------------------------------------------
-    // 9. List smart folders
+    // 9. Sync and list views
     // ----------------------------------------------------------------
-    step(9, 'List smart folders');
-    const folders = await client.smartFolders.list(workspaceId);
-    for (const f of folders) {
-      console.log(`    📂 ${f.name} → ${f.path} (${f.integration})`);
+    step(9, 'Sync and list source views');
+
+    // Sync re-executes the view's query and refreshes cached files.
+    // Idempotent — safe to call on a schedule or before critical reads.
+    const syncResult = await client.views.sync(workspaceId, folder.external_id);
+    ok(`Synced "${folder.name}": ${syncResult.results_count} total, ${syncResult.new_results} new`);
+
+    const views = await client.views.list(workspaceId);
+    for (const f of views) {
+      console.log(`    📂 ${f.name} → ${f.path} (${f.integration}, ${f.mode} mode)`);
     }
-    ok(`${folders.length} smart folder(s)`);
+    ok(`${views.length} source view(s)`);
 
     // ----------------------------------------------------------------
     // Done!

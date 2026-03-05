@@ -1,6 +1,7 @@
 package filesystem
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"unsafe"
 
 	"github.com/beam-cloud/airstore/pkg/filesystem/vnode"
+	airtypes "github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/rs/zerolog/log"
@@ -35,7 +37,9 @@ const (
 	negativeCacheSize = 10000
 	// negativeCacheTTL is how long a negative lookup result is cached.
 	// Write operations invalidate affected paths immediately.
-	negativeCacheTTL = 30 * time.Second
+	// Kept short (2s) because files may appear externally (S3 uploads, hooks)
+	// and a stale negative entry blocks all gateway checks until expiry.
+	negativeCacheTTL = 2 * time.Second
 )
 
 // Config configures the filesystem mount
@@ -74,10 +78,11 @@ type Filesystem struct {
 	// here so repeat lookups return ENOENT without RPCs.
 	negativeCache *expirable.LRU[string, struct{}]
 
-	backend   MountBackend
-	mounted   bool
-	destroyed bool // Set when Destroy() is called by FUSE layer
-	mu        sync.Mutex
+	backend     MountBackend
+	backendAuto bool
+	mounted     bool
+	destroyed   bool // Set when Destroy() is called by FUSE layer
+	mu          sync.Mutex
 
 	accessCollector *AccessCollector
 	mountID         string
@@ -106,7 +111,7 @@ func NewFilesystem(cfg Config) (*Filesystem, error) {
 		cfg.MountPoint = "/tmp/airstore"
 	}
 	if cfg.GatewayAddr == "" {
-		cfg.GatewayAddr = "localhost:1993"
+		cfg.GatewayAddr = airtypes.DefaultGatewayGRPCAddr()
 	}
 
 	// Initialize global owner config (thread-safe)
@@ -126,6 +131,7 @@ func NewFilesystem(cfg Config) (*Filesystem, error) {
 
 	// Resolve mount backend (auto-detect if not specified)
 	backendName := cfg.Backend
+	backendAuto := backendName == ""
 	if backendName == "" {
 		backendName = defaultBackend()
 	}
@@ -141,6 +147,7 @@ func NewFilesystem(cfg Config) (*Filesystem, error) {
 		dirChildren:   expirable.NewLRU[string, map[string]struct{}](dirChildrenSize, nil, dirChildrenTTL),
 		negativeCache: expirable.NewLRU[string, struct{}](negativeCacheSize, nil, negativeCacheTTL),
 		backend:       NewBackend(backendName),
+		backendAuto:   backendAuto,
 		mountID:       fmt.Sprintf("mount-%d-%d", os.Getpid(), time.Now().UnixNano()),
 	}
 
@@ -220,7 +227,7 @@ func (f *Filesystem) Mount() error {
 
 	// Delegate to the configured backend (FUSE or NFS). This call blocks
 	// until the filesystem is unmounted.
-	err := f.backend.Mount(f, f.config.MountPoint)
+	err := f.mountWithFallback()
 
 	f.mu.Lock()
 	f.mounted = false
@@ -231,6 +238,80 @@ func (f *Filesystem) Mount() error {
 	f.Destroy()
 
 	return err
+}
+
+func (f *Filesystem) mountWithFallback() error {
+	primaryBackendName := f.config.Backend
+	primaryBackend := f.backend
+
+	primaryErr := f.safeBackendMount(primaryBackendName, primaryBackend, f.config.MountPoint)
+	if primaryErr == nil {
+		return nil
+	}
+
+	if !f.shouldAttemptFallback(primaryBackendName, primaryErr) {
+		return primaryErr
+	}
+
+	return f.mountWithNFSFallback(primaryBackendName, primaryErr)
+}
+
+func (f *Filesystem) mountWithNFSFallback(primaryBackendName string, primaryErr error) error {
+	const fallbackBackendName = BackendNFS
+	fallbackBackend := NewBackend(fallbackBackendName)
+
+	log.Warn().
+		Str("from", primaryBackendName).
+		Str("to", fallbackBackendName).
+		Err(primaryErr).
+		Msg("primary mount backend failed; trying fallback backend")
+
+	// Swap backend so unmount goes through the backend that actually mounted.
+	f.mu.Lock()
+	f.backend = fallbackBackend
+	f.config.Backend = fallbackBackendName
+	f.mu.Unlock()
+
+	fallbackErr := f.safeBackendMount(fallbackBackendName, fallbackBackend, f.config.MountPoint)
+	if fallbackErr == nil {
+		return nil
+	}
+	if errors.Is(fallbackErr, ErrNFSHelperMissing) {
+		return fmt.Errorf("%s mount failed: %w; nfs fallback unavailable: %w", primaryBackendName, primaryErr, fallbackErr)
+	}
+	return fmt.Errorf(
+		"%s mount failed: %w; %s fallback failed: %w",
+		primaryBackendName,
+		primaryErr,
+		fallbackBackendName,
+		fallbackErr,
+	)
+}
+
+func (f *Filesystem) safeBackendMount(
+	backendName string,
+	backend MountBackend,
+	mountPoint string,
+) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			if backendName == BackendFUSE {
+				err = fmt.Errorf("%w: %v", ErrFUSEUnavailable, r)
+				return
+			}
+			err = fmt.Errorf("%s backend panic: %v", backendName, r)
+		}
+	}()
+	return backend.Mount(f, mountPoint)
+}
+
+func (f *Filesystem) shouldAttemptFallback(backendName string, err error) bool {
+	if !f.backendAuto {
+		return false
+	}
+	// Auto mode should recover from FUSE runtime availability issues on Linux
+	// by retrying with NFS.
+	return backendName == BackendFUSE && errors.Is(err, ErrFUSEUnavailable)
 }
 
 func (f *Filesystem) Unmount() error {
@@ -256,12 +337,6 @@ func (f *Filesystem) IsDestroyed() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.destroyed
-}
-
-func (f *Filesystem) logDebug(msg string) {
-	if f.verbose {
-		log.Debug().Msg(msg)
-	}
 }
 
 func (f *Filesystem) Init() error { return nil }
@@ -323,13 +398,15 @@ func (f *Filesystem) Getattr(path string) (*FileInfo, error) {
 		dir = path[:i]
 	}
 
-	// Readdir-informed negative lookup: if the parent was recently listed and
-	// this name wasn't in the result set, the file doesn't exist. This is the
-	// fast path that eliminates RPCs for the common pattern of readdir followed
-	// by getattr probes (e.g., Claude Code checking for .claude, CLAUDE.md, etc.).
+	// Readdir-informed positive hint: if the parent was recently listed and
+	// this name IS in the result set, drop any stale negative-cache entry.
+	// We intentionally do NOT return ENOENT when the name is absent from the
+	// cached set, because files may be created externally (e.g., S3 upload by
+	// a hook) after the last readdir. Returning ENOENT here would block all
+	// gateway checks for up to the dirChildren TTL.
 	if children, ok := f.dirChildren.Get(dir); ok {
-		if _, exists := children[name]; !exists {
-			return nil, ErrNotFound
+		if _, exists := children[name]; exists {
+			f.negativeCache.Remove(path)
 		}
 	}
 
@@ -466,6 +543,12 @@ func (f *Filesystem) cacheDirChildren(path string, entries []DirEntry) {
 	names := make(map[string]struct{}, len(entries))
 	for _, e := range entries {
 		names[e.Name] = struct{}{}
+		childPath := path + "/" + e.Name
+		if path == "/" {
+			childPath = "/" + e.Name
+		}
+		// A positive readdir hit should immediately heal prior miss caching.
+		f.negativeCache.Remove(childPath)
 	}
 	f.dirChildren.Add(path, names)
 }
@@ -578,6 +661,9 @@ func (f *Filesystem) recordLogicalRead(
 	if normalizedPath == "" {
 		normalizedPath = path
 	}
+	if airtypes.IsHiddenDotPath(normalizedPath) {
+		return
+	}
 
 	event := &pb.AccessLogEvent{
 		EventId:        fmt.Sprintf("%s-%d", f.mountID, atomic.AddUint64(&f.readSeq, 1)),
@@ -608,6 +694,7 @@ func (f *Filesystem) recordLogicalRead(
 		event.OriginalTokens = int64(attr.OriginalTokens)
 		event.CompressedTokens = int64(attr.CompressedTokens)
 		event.CompressionMs = attr.CompressionMs
+		event.FetchMs = attr.FetchMs
 	}
 
 	if readErr != nil {
@@ -721,6 +808,9 @@ func (f *Filesystem) Rename(oldpath, newpath string) error {
 
 func (f *Filesystem) Chmod(path string, mode uint32) error {
 	if vn := f.vnodes.MatchOrFallback(path); vn != nil {
+		if chmodNode, ok := vn.(vnode.ChmodNode); ok {
+			return chmodNode.Chmod(path, mode)
+		}
 		return nil // No-op for vnodes
 	}
 	return ErrReadOnly

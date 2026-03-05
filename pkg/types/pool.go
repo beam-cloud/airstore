@@ -24,6 +24,12 @@ type WorkerPoolConfig struct {
 
 	// Memory is the memory request/limit for workers (e.g., "512Mi", "1Gi")
 	Memory string `key:"memory" json:"memory"`
+
+	// RuntimeClassName optionally sets PodSpec.RuntimeClassName.
+	RuntimeClassName string `key:"runtimeClassName" json:"runtime_class_name"`
+
+	// NodeSelector pins workers to specific nodes.
+	NodeSelector map[string]string `key:"nodeSelector" json:"node_selector"`
 }
 
 // NewWorkerPoolConfig creates a new WorkerPoolConfig with default values
