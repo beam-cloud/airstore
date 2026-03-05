@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 
+	"github.com/beam-cloud/airstore/pkg/instrumentation"
 	"github.com/beam-cloud/airstore/pkg/types"
 )
 
@@ -36,6 +37,19 @@ func (b *PostgresBackend) CreateWorkspace(ctx context.Context, name string, tena
 	if err != nil {
 		return nil, fmt.Errorf("failed to create workspace: %w", err)
 	}
+
+	if b.recorder != nil {
+		props := map[string]any{
+			"workspace_id":     ws.Id,
+			"workspace_ext_id": ws.ExternalId,
+			"workspace_name":   ws.Name,
+		}
+		if ws.TenantId != nil {
+			props["tenant_id"] = *ws.TenantId
+		}
+		b.recorder.Record(ctx, instrumentation.NewEvent("workspace.created", props))
+	}
+
 	return ws, nil
 }
 

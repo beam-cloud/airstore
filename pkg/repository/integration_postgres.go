@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/beam-cloud/airstore/pkg/instrumentation"
 	"github.com/beam-cloud/airstore/pkg/types"
 )
 
@@ -21,16 +22,26 @@ func (r *PostgresBackend) SaveConnection(ctx context.Context, workspaceId uint, 
 		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (workspace_id, COALESCE(member_id, 0), integration_type)
 		DO UPDATE SET credentials = EXCLUDED.credentials, scope = EXCLUDED.scope, expires_at = EXCLUDED.expires_at, updated_at = CURRENT_TIMESTAMP
-		RETURNING id, external_id, workspace_id, member_id, integration_type, credentials, scope, expires_at, created_at, updated_at
+		RETURNING id, external_id, workspace_id, member_id, integration_type, credentials, scope, expires_at, created_at, updated_at, (xmax = 0) AS inserted
 	`
 
 	var c types.IntegrationConnection
+	var inserted bool
 	err = r.db.QueryRowContext(ctx, query, workspaceId, memberId, integrationType, credBytes, scope, creds.ExpiresAt).Scan(
-		&c.Id, &c.ExternalId, &c.WorkspaceId, &c.MemberId, &c.IntegrationType, &c.Credentials, &c.Scope, &c.ExpiresAt, &c.CreatedAt, &c.UpdatedAt,
+		&c.Id, &c.ExternalId, &c.WorkspaceId, &c.MemberId, &c.IntegrationType, &c.Credentials, &c.Scope, &c.ExpiresAt, &c.CreatedAt, &c.UpdatedAt, &inserted,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("save connection: %w", err)
 	}
+
+	if r.recorder != nil && inserted {
+		r.recorder.Record(ctx, instrumentation.NewEvent("connection.created", map[string]any{
+			"workspace_id":     workspaceId,
+			"integration_type": integrationType,
+			"scope":            scope,
+		}))
+	}
+
 	return &c, nil
 }
 

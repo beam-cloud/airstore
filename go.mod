@@ -8,6 +8,7 @@ replace fyne.io/systray => github.com/fyne-io/systray v1.12.1-0.20260116214250-8
 
 require (
 	fyne.io/systray v1.12.0
+	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/alicebob/miniredis/v2 v2.36.1
 	github.com/aws/aws-sdk-go-v2 v1.25.2
 	github.com/aws/aws-sdk-go-v2/config v1.27.5
@@ -23,6 +24,7 @@ require (
 	github.com/coreos/go-iptables v0.8.0
 	github.com/go-git/go-billy/v5 v5.7.0
 	github.com/go-viper/mapstructure/v2 v2.0.0
+	github.com/godbus/dbus/v5 v5.1.0
 	github.com/google/uuid v1.6.0
 	github.com/hanwen/go-fuse/v2 v2.9.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
@@ -100,7 +102,6 @@ require (
 	github.com/go-openapi/jsonpointer v0.19.6 // indirect
 	github.com/go-openapi/jsonreference v0.20.2 // indirect
 	github.com/go-openapi/swag v0.22.3 // indirect
-	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/gofrs/flock v0.8.1 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang-jwt/jwt v3.2.2+incompatible // indirect

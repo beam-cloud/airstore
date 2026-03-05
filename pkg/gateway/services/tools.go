@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
+	"github.com/beam-cloud/airstore/pkg/instrumentation"
 	"github.com/beam-cloud/airstore/pkg/oauth"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/tools"
@@ -21,6 +23,12 @@ type ToolService struct {
 	resolver      *tools.WorkspaceToolResolver
 	backend       repository.BackendRepository
 	oauthRegistry *oauth.Registry
+	recorder      instrumentation.EventRecorder
+}
+
+// SetEventRecorder sets the product analytics event recorder.
+func (s *ToolService) SetEventRecorder(r instrumentation.EventRecorder) {
+	s.recorder = r
 }
 
 func NewToolService(registry *tools.Registry) *ToolService {
@@ -124,11 +132,13 @@ func (s *ToolService) ExecuteTool(req *pb.ExecuteToolRequest, stream pb.ToolServ
 	var stdout, stderr bytes.Buffer
 	var err error
 
+	start := time.Now()
 	if execCtx != nil {
 		err = p.ExecuteWithContext(ctx, execCtx, req.Args, &stdout, &stderr)
 	} else {
 		err = p.Execute(ctx, req.Args, &stdout, &stderr)
 	}
+	durationMs := time.Since(start).Milliseconds()
 
 	if stdout.Len() > 0 {
 		if e := stream.Send(&pb.ExecuteToolResponse{Stream: pb.ExecuteToolResponse_STDOUT, Data: stdout.Bytes()}); e != nil {
@@ -147,6 +157,17 @@ func (s *ToolService) ExecuteTool(req *pb.ExecuteToolRequest, stream pb.ToolServ
 		exitCode = 1
 		errMsg = err.Error()
 		log.Warn().Str("tool", req.Name).Str("error", errMsg).Msg("tool failed")
+	}
+
+	if s.recorder != nil {
+		s.recorder.Record(ctx, instrumentation.NewEvent("tool.executed", map[string]any{
+			"tool_name":    req.Name,
+			"exit_code":    int(exitCode),
+			"success":      exitCode == 0,
+			"duration_ms":  durationMs,
+			"workspace_id": auth.WorkspaceExtId(ctx),
+			"member_id":    auth.MemberId(ctx),
+		}))
 	}
 
 	return stream.Send(&pb.ExecuteToolResponse{Done: true, ExitCode: exitCode, Error: errMsg})

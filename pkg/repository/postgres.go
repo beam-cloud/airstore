@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 
+	"github.com/beam-cloud/airstore/pkg/instrumentation"
 	"github.com/beam-cloud/airstore/pkg/types"
 	_ "github.com/lib/pq"
 	"github.com/pressly/goose/v3"
@@ -16,8 +17,14 @@ import (
 
 // PostgresBackend implements BackendRepository using Postgres
 type PostgresBackend struct {
-	db     *sql.DB
-	config types.PostgresConfig
+	db       *sql.DB
+	config   types.PostgresConfig
+	recorder instrumentation.EventRecorder
+}
+
+// SetEventRecorder sets the product analytics event recorder.
+func (b *PostgresBackend) SetEventRecorder(r instrumentation.EventRecorder) {
+	b.recorder = r
 }
 
 // NewPostgresBackend creates a new Postgres backend

@@ -18,6 +18,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/clients"
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/hooks"
+	"github.com/beam-cloud/airstore/pkg/instrumentation"
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/rs/zerolog/log"
@@ -47,6 +48,12 @@ type StorageService struct {
 	cache      *metadataCache
 	eventBus   *common.EventBus
 	hookStream common.EventEmitter
+	recorder   instrumentation.EventRecorder
+}
+
+// SetEventRecorder sets the product analytics event recorder.
+func (s *StorageService) SetEventRecorder(r instrumentation.EventRecorder) {
+	s.recorder = r
 }
 
 func NewStorageService(client *clients.StorageClient, eventBus *common.EventBus) (*StorageService, error) {
@@ -528,6 +535,16 @@ func (s *StorageService) Delete(ctx context.Context, req *pb.ContextDeleteReques
 
 	s.invalidate(bucket, key)
 	s.emitHookEvent(ctx, hooks.EventFsDelete, req.Path)
+
+	if s.recorder != nil {
+		s.recorder.Record(ctx, instrumentation.NewEvent("filesystem.operation", map[string]any{
+			"operation":    "delete",
+			"path":         req.Path,
+			"recursive":    req.Recursive,
+			"workspace_id": auth.WorkspaceExtId(ctx),
+		}))
+	}
+
 	return &pb.ContextDeleteResponse{Ok: true}, nil
 }
 
@@ -556,6 +573,15 @@ func (s *StorageService) Mkdir(ctx context.Context, req *pb.ContextMkdirRequest)
 	}
 
 	s.invalidate(bucket, key)
+
+	if s.recorder != nil {
+		s.recorder.Record(ctx, instrumentation.NewEvent("filesystem.operation", map[string]any{
+			"operation":    "mkdir",
+			"path":         req.Path,
+			"workspace_id": auth.WorkspaceExtId(ctx),
+		}))
+	}
+
 	return &pb.ContextMkdirResponse{Ok: true}, nil
 }
 
