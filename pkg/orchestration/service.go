@@ -1040,15 +1040,14 @@ func (s *AgentService) persistRunUsageDelta(ctx context.Context, runID string, d
 }
 
 func mergeRunUsageJSON(base map[string]any, delta *types.LLMUsage) map[string]any {
-	normalized := normalizeLLMUsage(delta)
 	out := cloneAnyMap(base)
 	out[types.AgentRunUsageKeyVersion] = types.AgentRunUsageVersion
 
-	updatedInput := usageValueFromMap(out, types.AgentRunUsageKeyLLMInputTokens) + normalized.InputTokens
-	updatedOutput := usageValueFromMap(out, types.AgentRunUsageKeyLLMOutputTokens) + normalized.OutputTokens
-	updatedCacheCreate := usageValueFromMap(out, types.AgentRunUsageKeyLLMCacheCreationTokens) + normalized.CacheCreationInputTokens
-	updatedCacheRead := usageValueFromMap(out, types.AgentRunUsageKeyLLMCacheReadTokens) + normalized.CacheReadInputTokens
-	updatedTotal := usageValueFromMap(out, types.AgentRunUsageKeyLLMTotalTokens) + normalized.NormalizedTotal()
+	updatedInput := usageValueFromMap(out, types.AgentRunUsageKeyLLMInputTokens) + delta.InputTokens
+	updatedOutput := usageValueFromMap(out, types.AgentRunUsageKeyLLMOutputTokens) + delta.OutputTokens
+	updatedCacheCreate := usageValueFromMap(out, types.AgentRunUsageKeyLLMCacheCreationTokens) + delta.CacheCreationInputTokens
+	updatedCacheRead := usageValueFromMap(out, types.AgentRunUsageKeyLLMCacheReadTokens) + delta.CacheReadInputTokens
+	updatedTotal := usageValueFromMap(out, types.AgentRunUsageKeyLLMTotalTokens) + delta.NormalizedTotal()
 
 	out[types.AgentRunUsageKeyLLMInputTokens] = updatedInput
 	out[types.AgentRunUsageKeyLLMOutputTokens] = updatedOutput

@@ -5,6 +5,7 @@ import (
 
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
+	"github.com/stretchr/testify/require"
 )
 
 func TestBuildRunResultOutboxPayloadIncludesLLMUsage(t *testing.T) {
@@ -21,22 +22,10 @@ func TestBuildRunResultOutboxPayloadIncludesLLMUsage(t *testing.T) {
 	}
 	payload := buildRunResultOutboxPayload(req, req.AttemptId, "dedupe-key")
 
-	if payload[types.OrchestrationOutboxPayloadTaskID] != "task-1" {
-		t.Fatalf("expected task id in payload")
-	}
-	if payload[types.OrchestrationOutboxPayloadLLMInputTokens] != int64(11) {
-		t.Fatalf("expected llm input tokens")
-	}
-	if payload[types.OrchestrationOutboxPayloadLLMOutputTokens] != int64(7) {
-		t.Fatalf("expected llm output tokens")
-	}
-	if payload[types.OrchestrationOutboxPayloadLLMCacheCreationInputTokens] != int64(3) {
-		t.Fatalf("expected llm cache creation tokens")
-	}
-	if payload[types.OrchestrationOutboxPayloadLLMCacheReadInputTokens] != int64(2) {
-		t.Fatalf("expected llm cache read tokens")
-	}
-	if payload[types.OrchestrationOutboxPayloadLLMTotalTokens] != int64(23) {
-		t.Fatalf("expected llm total tokens")
-	}
+	require.Equal(t, "task-1", payload[types.OrchestrationOutboxPayloadTaskID])
+	require.Equal(t, int64(11), payload[types.OrchestrationOutboxPayloadLLMInputTokens])
+	require.Equal(t, int64(7), payload[types.OrchestrationOutboxPayloadLLMOutputTokens])
+	require.Equal(t, int64(3), payload[types.OrchestrationOutboxPayloadLLMCacheCreationInputTokens])
+	require.Equal(t, int64(2), payload[types.OrchestrationOutboxPayloadLLMCacheReadInputTokens])
+	require.Equal(t, int64(23), payload[types.OrchestrationOutboxPayloadLLMTotalTokens])
 }

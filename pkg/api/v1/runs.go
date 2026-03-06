@@ -56,15 +56,10 @@ func (g *RunsGroup) ListRuns(c echo.Context) error {
 	updatedAfterQuery := strings.TrimSpace(c.QueryParam("updated_after"))
 	updatedBeforeQuery := strings.TrimSpace(c.QueryParam("updated_before"))
 	if isSimpleListRunsQuery(
-		limitQuery,
-		cursorQuery,
-		statusQuery,
-		agentQuery,
-		sessionQuery,
-		createdAfterQuery,
-		createdBeforeQuery,
-		updatedAfterQuery,
-		updatedBeforeQuery,
+		limitQuery, cursorQuery, statusQuery,
+		agentQuery, sessionQuery,
+		createdAfterQuery, createdBeforeQuery,
+		updatedAfterQuery, updatedBeforeQuery,
 	) {
 		runs, err := g.agents.ListRuns(c.Request().Context(), workspaceID, 100)
 		if err != nil {
@@ -220,24 +215,11 @@ func parseRunStatuses(raw string) ([]types.AgentRunStatus, error) {
 	return statuses, nil
 }
 
-func isSimpleListRunsQuery(
-	limitQuery string,
-	cursorQuery string,
-	statusQuery string,
-	agentQuery string,
-	sessionQuery string,
-	createdAfterQuery string,
-	createdBeforeQuery string,
-	updatedAfterQuery string,
-	updatedBeforeQuery string,
-) bool {
-	return limitQuery == "" &&
-		cursorQuery == "" &&
-		statusQuery == "" &&
-		agentQuery == "" &&
-		sessionQuery == "" &&
-		createdAfterQuery == "" &&
-		createdBeforeQuery == "" &&
-		updatedAfterQuery == "" &&
-		updatedBeforeQuery == ""
+func isSimpleListRunsQuery(params ...string) bool {
+	for _, p := range params {
+		if p != "" {
+			return false
+		}
+	}
+	return true
 }

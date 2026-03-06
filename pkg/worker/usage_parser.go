@@ -57,8 +57,10 @@ func (p *ClaudeStreamUsageParser) Snapshot() *types.LLMUsage {
 
 	if len(p.buffer) > 0 {
 		trailing := bytes.TrimSpace(p.buffer)
-		p.buffer = nil
-		p.consumeLine(trailing)
+		if len(trailing) > 0 && trailing[0] == '{' && json.Valid(trailing) {
+			p.buffer = nil
+			p.consumeLine(trailing)
+		}
 	}
 
 	if !p.hasLatest {
