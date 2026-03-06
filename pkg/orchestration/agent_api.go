@@ -344,20 +344,18 @@ func (a *AgentAPI) CancelTask(ctx context.Context, workspaceID uint, taskID stri
 	if err != nil {
 		return err
 	}
-	if task.State != types.AgentTaskStateRunning {
-		return fmt.Errorf("only running tasks can be stopped")
+	if task.State.IsTerminal() {
+		return fmt.Errorf("task is already in terminal state %q", task.State)
 	}
 
-	if task.TargetRunID != nil {
+	if task.TargetRunID != nil && task.State == types.AgentTaskStateRunning {
 		if err := a.CancelRun(ctx, workspaceID, *task.TargetRunID); err != nil {
 			return err
 		}
 	}
 
-	if !task.State.IsTerminal() {
-		if err := a.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateCancelled, nil, task.TargetRunID); err != nil {
-			return err
-		}
+	if err := a.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateCancelled, nil, task.TargetRunID); err != nil {
+		return err
 	}
 
 	return nil
