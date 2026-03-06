@@ -31,9 +31,9 @@ type WorkerService struct {
 }
 
 const (
-	defaultRunClaimLeaseTTL       = 45 * time.Second
-	defaultRecoveryLoopInterval   = 10 * time.Second
-	defaultRecoveryLoopBatchSize  = 50
+	defaultRunClaimLeaseTTL      = 45 * time.Second
+	defaultRecoveryLoopInterval  = 10 * time.Second
+	defaultRecoveryLoopBatchSize = 50
 )
 
 func NewWorkerService(
@@ -310,22 +310,32 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 	}
 
 	resultKey := fmt.Sprintf("run_result:%s:%s", strings.TrimSpace(req.TaskId), attemptID)
+	payload := buildRunResultOutboxPayload(req, attemptID, resultKey)
 	if err := s.backend.EnqueueOrchestrationOutboxEvent(ctx, &types.OrchestrationOutboxEvent{
-		EventType: types.OrchestrationOutboxEventTypeRunResult,
-		DedupeKey: resultKey,
-		PayloadJSON: map[string]any{
-			types.OrchestrationOutboxPayloadTaskID:      strings.TrimSpace(req.TaskId),
-			types.OrchestrationOutboxPayloadAttemptID:   attemptID,
-			types.OrchestrationOutboxPayloadExitCode:    int(req.ExitCode),
-			types.OrchestrationOutboxPayloadError:       req.Error,
-			types.OrchestrationOutboxPayloadIdempotency: resultKey,
-		},
+		EventType:   types.OrchestrationOutboxEventTypeRunResult,
+		DedupeKey:   resultKey,
+		PayloadJSON: payload,
 		AvailableAt: time.Now(),
 	}); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to enqueue task result: %v", err)
 	}
 
 	return &pb.SetTaskResultResponse{}, nil
+}
+
+func buildRunResultOutboxPayload(req *pb.SetTaskResultRequest, attemptID string, resultKey string) map[string]any {
+	return map[string]any{
+		types.OrchestrationOutboxPayloadTaskID:                      strings.TrimSpace(req.TaskId),
+		types.OrchestrationOutboxPayloadAttemptID:                   attemptID,
+		types.OrchestrationOutboxPayloadExitCode:                    int(req.ExitCode),
+		types.OrchestrationOutboxPayloadError:                       req.Error,
+		types.OrchestrationOutboxPayloadLLMInputTokens:              req.LlmInputTokens,
+		types.OrchestrationOutboxPayloadLLMOutputTokens:             req.LlmOutputTokens,
+		types.OrchestrationOutboxPayloadLLMCacheCreationInputTokens: req.LlmCacheCreationInputTokens,
+		types.OrchestrationOutboxPayloadLLMCacheReadInputTokens:     req.LlmCacheReadInputTokens,
+		types.OrchestrationOutboxPayloadLLMTotalTokens:              req.LlmTotalTokens,
+		types.OrchestrationOutboxPayloadIdempotency:                 resultKey,
+	}
 }
 
 func isRunAttemptActive(attempt *types.AgentRunAttempt) bool {

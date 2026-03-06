@@ -259,15 +259,40 @@ func (c *GatewayClient) SetTaskStarted(ctx context.Context, taskID string, attem
 }
 
 // SetTaskResult reports the result of a task to the gateway.
-func (c *GatewayClient) SetTaskResult(ctx context.Context, taskID string, exitCode int, errorMsg string, attemptID string) error {
+func (c *GatewayClient) SetTaskResult(
+	ctx context.Context,
+	taskID string,
+	exitCode int,
+	errorMsg string,
+	attemptID string,
+	usage *types.LLMUsage,
+) error {
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
 
+	var llmInputTokens int64
+	var llmOutputTokens int64
+	var llmCacheCreationInputTokens int64
+	var llmCacheReadInputTokens int64
+	var llmTotalTokens int64
+	if usage != nil {
+		llmInputTokens = usage.InputTokens
+		llmOutputTokens = usage.OutputTokens
+		llmCacheCreationInputTokens = usage.CacheCreationInputTokens
+		llmCacheReadInputTokens = usage.CacheReadInputTokens
+		llmTotalTokens = usage.NormalizedTotal()
+	}
+
 	_, err := c.client.SetTaskResult(ctx, &pb.SetTaskResultRequest{
-		TaskId:    taskID,
-		ExitCode:  int32(exitCode),
-		Error:     errorMsg,
-		AttemptId: attemptID,
+		TaskId:                      taskID,
+		ExitCode:                    int32(exitCode),
+		Error:                       errorMsg,
+		AttemptId:                   attemptID,
+		LlmInputTokens:              llmInputTokens,
+		LlmOutputTokens:             llmOutputTokens,
+		LlmCacheCreationInputTokens: llmCacheCreationInputTokens,
+		LlmCacheReadInputTokens:     llmCacheReadInputTokens,
+		LlmTotalTokens:              llmTotalTokens,
 	})
 	if err != nil {
 		return fmt.Errorf("set task result failed: %w", err)

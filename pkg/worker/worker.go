@@ -418,7 +418,16 @@ func (w *Worker) executeTask(task types.RunExecution) {
 
 	if err != nil {
 		addTaskExecutionContext(log.Error().Err(err), task).Msg("task execution failed")
-		result = &types.RunExecutionResult{ID: task.ExternalId, ExitCode: -1, Error: err.Error()}
+		if result == nil {
+			result = &types.RunExecutionResult{ID: task.ExternalId, ExitCode: -1, Error: err.Error()}
+		} else {
+			if result.ExitCode == 0 {
+				result.ExitCode = -1
+			}
+			if strings.TrimSpace(result.Error) == "" {
+				result.Error = err.Error()
+			}
+		}
 	}
 
 	addTaskExecutionContext(
@@ -466,7 +475,7 @@ func setTaskResultWithRetry(
 	ctx context.Context,
 	task types.RunExecution,
 	result *types.RunExecutionResult,
-	reportFn func(ctx context.Context, taskID string, exitCode int, errMsg string, attemptID string) error,
+	reportFn func(ctx context.Context, taskID string, exitCode int, errMsg string, attemptID string, usage *types.LLMUsage) error,
 	sleepFn func(context.Context, time.Duration),
 ) error {
 	attemptID := ""
@@ -486,7 +495,7 @@ func setTaskResultWithRetry(
 		}
 
 		attemptCtx, cancel := context.WithTimeout(ctx, setTaskResultRetryTimeout)
-		lastErr = reportFn(attemptCtx, task.ExternalId, result.ExitCode, result.Error, attemptID)
+		lastErr = reportFn(attemptCtx, task.ExternalId, result.ExitCode, result.Error, attemptID, result.Usage)
 		cancel()
 		if lastErr == nil {
 			return nil
