@@ -53,13 +53,19 @@ func (g *RunsGroup) ListRuns(c echo.Context) error {
 	sessionQuery := strings.TrimSpace(c.QueryParam("session_id"))
 	createdAfterQuery := strings.TrimSpace(c.QueryParam("created_after"))
 	createdBeforeQuery := strings.TrimSpace(c.QueryParam("created_before"))
-	if limitQuery == "" &&
-		cursorQuery == "" &&
-		statusQuery == "" &&
-		agentQuery == "" &&
-		sessionQuery == "" &&
-		createdAfterQuery == "" &&
-		createdBeforeQuery == "" {
+	updatedAfterQuery := strings.TrimSpace(c.QueryParam("updated_after"))
+	updatedBeforeQuery := strings.TrimSpace(c.QueryParam("updated_before"))
+	if isSimpleListRunsQuery(
+		limitQuery,
+		cursorQuery,
+		statusQuery,
+		agentQuery,
+		sessionQuery,
+		createdAfterQuery,
+		createdBeforeQuery,
+		updatedAfterQuery,
+		updatedBeforeQuery,
+	) {
 		runs, err := g.agents.ListRuns(c.Request().Context(), workspaceID, 100)
 		if err != nil {
 			return ErrorResponse(c, http.StatusInternalServerError, err.Error())
@@ -84,6 +90,14 @@ func (g *RunsGroup) ListRuns(c echo.Context) error {
 	if err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid created_before timestamp")
 	}
+	updatedAfter, err := parseOptionalRFC3339(updatedAfterQuery)
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid updated_after timestamp")
+	}
+	updatedBefore, err := parseOptionalRFC3339(updatedBeforeQuery)
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid updated_before timestamp")
+	}
 
 	filter := types.AgentRunListFilter{
 		AgentID:       strPtrMaybeQuery(agentQuery),
@@ -91,6 +105,8 @@ func (g *RunsGroup) ListRuns(c echo.Context) error {
 		SessionID:     strPtrMaybeQuery(sessionQuery),
 		CreatedAfter:  createdAfter,
 		CreatedBefore: createdBefore,
+		UpdatedAfter:  updatedAfter,
+		UpdatedBefore: updatedBefore,
 		Limit:         limit,
 		Offset:        offset,
 	}
@@ -202,4 +218,26 @@ func parseRunStatuses(raw string) ([]types.AgentRunStatus, error) {
 		}
 	}
 	return statuses, nil
+}
+
+func isSimpleListRunsQuery(
+	limitQuery string,
+	cursorQuery string,
+	statusQuery string,
+	agentQuery string,
+	sessionQuery string,
+	createdAfterQuery string,
+	createdBeforeQuery string,
+	updatedAfterQuery string,
+	updatedBeforeQuery string,
+) bool {
+	return limitQuery == "" &&
+		cursorQuery == "" &&
+		statusQuery == "" &&
+		agentQuery == "" &&
+		sessionQuery == "" &&
+		createdAfterQuery == "" &&
+		createdBeforeQuery == "" &&
+		updatedAfterQuery == "" &&
+		updatedBeforeQuery == ""
 }

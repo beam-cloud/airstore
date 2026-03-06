@@ -94,6 +94,11 @@ message SetTaskResultRequest {
   int32 exit_code = 2;
   string error = 3;
   string attempt_id = 4;
+  int64 llm_input_tokens = 5;
+  int64 llm_output_tokens = 6;
+  int64 llm_cache_creation_input_tokens = 7;
+  int64 llm_cache_read_input_tokens = 8;
+  int64 llm_total_tokens = 9;
 }
 
 message SetTaskResultResponse {}
@@ -118,4 +123,3 @@ message ReleaseIPRequest {
 }
 
 message ReleaseIPResponse {}
-

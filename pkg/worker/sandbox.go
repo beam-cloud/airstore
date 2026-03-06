@@ -1403,7 +1403,9 @@ func (m *SandboxManager) RunTask(ctx context.Context, task types.RunExecution) (
 		NewS2Writer(ctx, m.s2, task.ExternalId, "stdout"),
 		NewConsoleWriter(task.ExternalId, "stdout"),
 	)
-	if err := m.SetOutput(sandboxID, taskOutput, taskOutput.Flush); err != nil {
+	usageParser := NewClaudeStreamUsageParser()
+	outputWriter := io.MultiWriter(taskOutput, usageParser)
+	if err := m.SetOutput(sandboxID, outputWriter, taskOutput.Flush); err != nil {
 		addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to set output")
 	}
 
@@ -1434,6 +1436,7 @@ func (m *SandboxManager) RunTask(ctx context.Context, task types.RunExecution) (
 				ID:       task.ExternalId,
 				ExitCode: exitCode,
 				Error:    errMsg,
+				Usage:    usageParser.Snapshot(),
 				Duration: time.Since(startTime),
 			}, nil
 
@@ -1458,6 +1461,7 @@ func (m *SandboxManager) RunTask(ctx context.Context, task types.RunExecution) (
 					ID:       task.ExternalId,
 					ExitCode: state.ExitCode,
 					Error:    state.Error,
+					Usage:    usageParser.Snapshot(),
 					Duration: time.Since(startTime),
 				}, nil
 			}

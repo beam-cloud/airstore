@@ -336,30 +336,35 @@ const (
 )
 
 const (
-	OrchestrationOutboxPayloadTaskID      = "task_id"
-	OrchestrationOutboxPayloadAttemptID   = "attempt_id"
-	OrchestrationOutboxPayloadExitCode    = "exit_code"
-	OrchestrationOutboxPayloadError       = "error"
-	OrchestrationOutboxPayloadReason      = "reason"
-	OrchestrationOutboxPayloadRetryDelay  = "retry_delay_ms"
-	OrchestrationOutboxPayloadDispatchAttempt = "dispatch_attempt"
-	OrchestrationOutboxPayloadRunID       = "run_id"
-	OrchestrationOutboxPayloadSessionID   = "session_id"
-	OrchestrationOutboxPayloadStreamID    = "stream_id"
-	OrchestrationOutboxPayloadIdempotency = "idempotency_key"
+	OrchestrationOutboxPayloadTaskID                      = "task_id"
+	OrchestrationOutboxPayloadAttemptID                   = "attempt_id"
+	OrchestrationOutboxPayloadExitCode                    = "exit_code"
+	OrchestrationOutboxPayloadError                       = "error"
+	OrchestrationOutboxPayloadLLMInputTokens              = "llm_input_tokens"
+	OrchestrationOutboxPayloadLLMOutputTokens             = "llm_output_tokens"
+	OrchestrationOutboxPayloadLLMCacheCreationInputTokens = "llm_cache_creation_input_tokens"
+	OrchestrationOutboxPayloadLLMCacheReadInputTokens     = "llm_cache_read_input_tokens"
+	OrchestrationOutboxPayloadLLMTotalTokens              = "llm_total_tokens"
+	OrchestrationOutboxPayloadReason                      = "reason"
+	OrchestrationOutboxPayloadRetryDelay                  = "retry_delay_ms"
+	OrchestrationOutboxPayloadDispatchAttempt             = "dispatch_attempt"
+	OrchestrationOutboxPayloadRunID                       = "run_id"
+	OrchestrationOutboxPayloadSessionID                   = "session_id"
+	OrchestrationOutboxPayloadStreamID                    = "stream_id"
+	OrchestrationOutboxPayloadIdempotency                 = "idempotency_key"
 )
 
 type OrchestrationOutboxEvent struct {
-	ID         int64                      `json:"id" db:"id"`
-	EventType  OrchestrationOutboxEventType `json:"event_type" db:"event_type"`
-	DedupeKey  string                     `json:"dedupe_key" db:"dedupe_key"`
-	PayloadJSON map[string]any            `json:"payload_json" db:"-"`
-	AvailableAt time.Time                 `json:"available_at" db:"available_at"`
-	PublishedAt *time.Time                `json:"published_at,omitempty" db:"published_at"`
-	Attempts   int                        `json:"attempts" db:"attempts"`
-	LastError  *string                    `json:"last_error,omitempty" db:"last_error"`
-	CreatedAt  time.Time                  `json:"created_at" db:"created_at"`
-	UpdatedAt  time.Time                  `json:"updated_at" db:"updated_at"`
+	ID          int64                        `json:"id" db:"id"`
+	EventType   OrchestrationOutboxEventType `json:"event_type" db:"event_type"`
+	DedupeKey   string                       `json:"dedupe_key" db:"dedupe_key"`
+	PayloadJSON map[string]any               `json:"payload_json" db:"-"`
+	AvailableAt time.Time                    `json:"available_at" db:"available_at"`
+	PublishedAt *time.Time                   `json:"published_at,omitempty" db:"published_at"`
+	Attempts    int                          `json:"attempts" db:"attempts"`
+	LastError   *string                      `json:"last_error,omitempty" db:"last_error"`
+	CreatedAt   time.Time                    `json:"created_at" db:"created_at"`
+	UpdatedAt   time.Time                    `json:"updated_at" db:"updated_at"`
 }
 
 type AgentExecutionInstanceStatus string
@@ -487,8 +492,50 @@ type AgentRunListFilter struct {
 	SessionID     *string
 	CreatedAfter  *time.Time
 	CreatedBefore *time.Time
+	UpdatedAfter  *time.Time
+	UpdatedBefore *time.Time
 	Limit         int
 	Offset        int
+}
+
+const (
+	AgentRunUsageVersion                   = 1
+	AgentRunUsageKeyVersion                = "usage_version"
+	AgentRunUsageKeyLLMInputTokens         = "llm_input_tokens"
+	AgentRunUsageKeyLLMOutputTokens        = "llm_output_tokens"
+	AgentRunUsageKeyLLMCacheCreationTokens = "llm_cache_creation_input_tokens"
+	AgentRunUsageKeyLLMCacheReadTokens     = "llm_cache_read_input_tokens"
+	AgentRunUsageKeyLLMTotalTokens         = "llm_total_tokens"
+	AgentRunUsageKeyBillingTotalTokens     = "billing_total_tokens"
+)
+
+type LLMUsage struct {
+	InputTokens              int64 `json:"llm_input_tokens,omitempty"`
+	OutputTokens             int64 `json:"llm_output_tokens,omitempty"`
+	CacheCreationInputTokens int64 `json:"llm_cache_creation_input_tokens,omitempty"`
+	CacheReadInputTokens     int64 `json:"llm_cache_read_input_tokens,omitempty"`
+	TotalTokens              int64 `json:"llm_total_tokens,omitempty"`
+}
+
+func (u *LLMUsage) IsZero() bool {
+	if u == nil {
+		return true
+	}
+	return u.InputTokens == 0 &&
+		u.OutputTokens == 0 &&
+		u.CacheCreationInputTokens == 0 &&
+		u.CacheReadInputTokens == 0 &&
+		u.TotalTokens == 0
+}
+
+func (u *LLMUsage) NormalizedTotal() int64 {
+	if u == nil {
+		return 0
+	}
+	if u.TotalTokens > 0 {
+		return u.TotalTokens
+	}
+	return u.InputTokens + u.OutputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
 }
 
 type AgentExecutionInstance struct {
@@ -737,6 +784,9 @@ type RunExecutionResult struct {
 
 	// Error contains error message if failed
 	Error string `json:"error,omitempty"`
+
+	// Usage contains aggregated LLM token usage when available.
+	Usage *LLMUsage `json:"usage,omitempty"`
 
 	// Duration is how long the task ran
 	Duration time.Duration `json:"duration"`

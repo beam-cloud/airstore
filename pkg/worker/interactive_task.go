@@ -238,11 +238,17 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 
 	start := time.Now()
 
-	var runErr error
+	var (
+		runErr error
+		usage  *types.LLMUsage
+	)
 	if tr, ok := runner.(TurnRunner); ok {
-		runErr = w.runTurnSession(sessionCtx, task, sandboxID, tr, env, terminalWriter, activityCh)
+		usage, runErr = w.runTurnSession(sessionCtx, task, sandboxID, tr, env, terminalWriter, activityCh)
 	} else {
-		runErr = w.runGenericPTYSession(sessionCtx, task, sandboxID, terminalWriter, activityCh)
+		genericParser := NewClaudeStreamUsageParser()
+		stdout := io.MultiWriter(terminalWriter, genericParser)
+		runErr = w.runGenericPTYSession(sessionCtx, task, sandboxID, stdout, activityCh)
+		usage = genericParser.Snapshot()
 	}
 
 	addTaskExecutionContext(
@@ -256,6 +262,7 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 		ID:       task.ExternalId,
 		ExitCode: exitCode,
 		Error:    errMsg,
+		Usage:    usage,
 		Duration: time.Since(start),
 	}
 }
@@ -273,17 +280,20 @@ func (w *Worker) runTurnSession(
 	env map[string]string,
 	stdout io.Writer,
 	activityCh chan<- struct{},
-) error {
+) (*types.LLMUsage, error) {
 	prompt := strings.TrimSpace(task.Prompt)
 	isFirstTurn := true
 	sessionEnv := cloneTurnEnv(env)
 	firstTurnStrategies := buildFirstTurnStrategies(sessionEnv)
+	var totalUsage *types.LLMUsage
 
 	for prompt != "" {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return totalUsage, ctx.Err()
 		}
 		w.setRunInteractionState(ctx, task, types.RunInteractionStateWorking)
+		turnUsageParser := NewClaudeStreamUsageParser()
+		turnStdout := io.MultiWriter(stdout, turnUsageParser)
 
 		if isFirstTurn {
 			nextEnv, err := w.executeFirstTurnWithStrategy(
@@ -292,12 +302,12 @@ func (w *Worker) runTurnSession(
 				sandboxID,
 				runner,
 				sessionEnv,
-				stdout,
+				turnStdout,
 				prompt,
 				firstTurnStrategies,
 			)
 			if err != nil {
-				return err
+				return totalUsage, err
 			}
 			sessionEnv = nextEnv
 			isFirstTurn = false
@@ -308,7 +318,7 @@ func (w *Worker) runTurnSession(
 				sandboxID,
 				runner,
 				sessionEnv,
-				stdout,
+				turnStdout,
 				prompt,
 				TurnArgModeFollowup,
 				1,
@@ -316,9 +326,10 @@ func (w *Worker) runTurnSession(
 				"",
 			)
 			if err != nil {
-				return err
+				return totalUsage, err
 			}
 		}
+		totalUsage = AddLLMUsage(totalUsage, turnUsageParser.Snapshot())
 
 		// Treat turn completion as activity so the waiting window starts fresh.
 		signalActivity(activityCh)
@@ -327,7 +338,7 @@ func (w *Worker) runTurnSession(
 		prompt = w.waitForFollowupInput(ctx, task.ExternalId, DefaultBetweenTurnsTimeout, activityCh)
 	}
 
-	return nil
+	return totalUsage, nil
 }
 
 // waitForFollowupInput blocks until follow-up input arrives via Redis

@@ -1151,8 +1151,10 @@ func (b *PostgresBackend) ListAgentRunsFiltered(ctx context.Context, workspaceId
 		  AND ($4::text IS NULL OR session_id = $4::text)
 		  AND ($5::timestamptz IS NULL OR created_at >= $5::timestamptz)
 		  AND ($6::timestamptz IS NULL OR created_at <= $6::timestamptz)
+		  AND ($7::timestamptz IS NULL OR updated_at >= $7::timestamptz)
+		  AND ($8::timestamptz IS NULL OR updated_at <= $8::timestamptz)
 		ORDER BY created_at DESC, id DESC
-		LIMIT $7 OFFSET $8
+		LIMIT $9 OFFSET $10
 	`
 
 	rows, err := b.db.QueryContext(
@@ -1164,6 +1166,8 @@ func (b *PostgresBackend) ListAgentRunsFiltered(ctx context.Context, workspaceId
 		optionalStringArg(filter.SessionID),
 		filter.CreatedAfter,
 		filter.CreatedBefore,
+		filter.UpdatedAfter,
+		filter.UpdatedBefore,
 		limit,
 		offset,
 	)
@@ -1264,6 +1268,29 @@ func (b *PostgresBackend) UpdateAgentRunLifecycle(ctx context.Context, runId str
 	res, err := b.db.ExecContext(ctx, query, runId, status, startedAt, endedAt, errorMsg)
 	if err != nil {
 		return fmt.Errorf("update run lifecycle: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return &types.ErrAgentRunNotFound{ID: runId}
+	}
+	return nil
+}
+
+func (b *PostgresBackend) SetAgentRunUsageJSON(ctx context.Context, runId string, usageJSON map[string]any) error {
+	serialized, err := marshalJSONMap(usageJSON)
+	if err != nil {
+		return fmt.Errorf("marshal run usage json: %w", err)
+	}
+
+	query := `
+		UPDATE agent_run
+		SET usage_json = $2,
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1
+	`
+	res, err := b.db.ExecContext(ctx, query, runId, serialized)
+	if err != nil {
+		return fmt.Errorf("set run usage json: %w", err)
 	}
 	affected, _ := res.RowsAffected()
 	if affected == 0 {
