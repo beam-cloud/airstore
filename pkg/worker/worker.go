@@ -14,6 +14,7 @@ import (
 
 	"github.com/beam-cloud/airstore/pkg/common"
 	gatewayclient "github.com/beam-cloud/airstore/pkg/gateway/client"
+	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/runtime"
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -431,6 +432,17 @@ func (w *Worker) executeTask(task types.RunExecution) {
 	w.finishTask(task, result)
 }
 
+// eagerReportResult sends the task result to the gateway before cleanup so
+// the UI reflects the state change immediately. The subsequent call in
+// finishTask is a no-op thanks to the outbox dedupe key.
+func (w *Worker) reportTaskResult(task types.RunExecution, result *types.RunExecutionResult) {
+	err := setTaskResultWithRetry(w.ctx, task, result, w.gatewayClient.SetTaskResult, contextSleep)
+	if err != nil && !isNonRetriableSetTaskResultError(err) {
+		addTaskExecutionContext(log.Warn().Err(err), task).
+			Msg("eager result report failed, finishTask will retry")
+	}
+}
+
 // finishTask records the result in Redis and Postgres. Single path for both success and failure.
 func (w *Worker) finishTask(task types.RunExecution, result *types.RunExecutionResult) {
 	taskID := task.ExternalId
@@ -466,13 +478,23 @@ func setTaskResultWithRetry(
 	ctx context.Context,
 	task types.RunExecution,
 	result *types.RunExecutionResult,
-	reportFn func(ctx context.Context, taskID string, exitCode int, errMsg string, attemptID string) error,
+	reportFn func(ctx context.Context, taskID string, exitCode int, errMsg string, attemptID string, waitingForInput bool, wakeSignal *pb.WakeSignal) error,
 	sleepFn func(context.Context, time.Duration),
 ) error {
 	attemptID := ""
 	if task.RunAttemptID != nil {
 		attemptID = *task.RunAttemptID
 	}
+
+	var protoWake *pb.WakeSignal
+	if ws := result.WakeSignal; ws != nil {
+		protoWake = &pb.WakeSignal{
+			DelayMinutes:   int32(ws.DelayMinutes),
+			Reason:         ws.Reason,
+			FollowUpPrompt: ws.FollowUpPrompt,
+		}
+	}
+
 	var lastErr error
 	for attempt := range setTaskResultMaxAttempts {
 		if attempt > 0 {
@@ -486,7 +508,7 @@ func setTaskResultWithRetry(
 		}
 
 		attemptCtx, cancel := context.WithTimeout(ctx, setTaskResultRetryTimeout)
-		lastErr = reportFn(attemptCtx, task.ExternalId, result.ExitCode, result.Error, attemptID)
+		lastErr = reportFn(attemptCtx, task.ExternalId, result.ExitCode, result.Error, attemptID, result.WaitingForInput, protoWake)
 		cancel()
 		if lastErr == nil {
 			return nil

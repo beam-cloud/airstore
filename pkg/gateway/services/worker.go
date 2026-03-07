@@ -2,11 +2,13 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/common"
+	"github.com/beam-cloud/airstore/pkg/orchestration"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/scheduler"
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -31,9 +33,9 @@ type WorkerService struct {
 }
 
 const (
-	defaultRunClaimLeaseTTL       = 45 * time.Second
-	defaultRecoveryLoopInterval   = 10 * time.Second
-	defaultRecoveryLoopBatchSize  = 50
+	defaultRunClaimLeaseTTL      = 45 * time.Second
+	defaultRecoveryLoopInterval  = 10 * time.Second
+	defaultRecoveryLoopBatchSize = 50
 )
 
 func NewWorkerService(
@@ -284,7 +286,7 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 	if attempt == nil {
 		return nil, status.Errorf(codes.FailedPrecondition, "run attempt mapping not found")
 	}
-	if !isRunAttemptActive(attempt) {
+	if !attempt.IsActive() {
 		log.Debug().
 			Str("task_id", req.TaskId).
 			Str("run_id", attempt.RunID).
@@ -310,16 +312,23 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 	}
 
 	resultKey := fmt.Sprintf("run_result:%s:%s", strings.TrimSpace(req.TaskId), attemptID)
+	payload := map[string]any{
+		types.OrchestrationOutboxPayloadTaskID:          strings.TrimSpace(req.TaskId),
+		types.OrchestrationOutboxPayloadAttemptID:       attemptID,
+		types.OrchestrationOutboxPayloadExitCode:        int(req.ExitCode),
+		types.OrchestrationOutboxPayloadError:           req.Error,
+		types.OrchestrationOutboxPayloadIdempotency:     resultKey,
+		types.OrchestrationOutboxPayloadWaitingForInput: req.WaitingForInput,
+	}
+	if ws := req.WakeSignal; ws != nil {
+		payload[types.OrchestrationOutboxPayloadWakeDelayMinutes] = int(ws.DelayMinutes)
+		payload[types.OrchestrationOutboxPayloadWakeReason] = ws.Reason
+		payload[types.OrchestrationOutboxPayloadWakeFollowUpPrompt] = ws.FollowUpPrompt
+	}
 	if err := s.backend.EnqueueOrchestrationOutboxEvent(ctx, &types.OrchestrationOutboxEvent{
-		EventType: types.OrchestrationOutboxEventTypeRunResult,
-		DedupeKey: resultKey,
-		PayloadJSON: map[string]any{
-			types.OrchestrationOutboxPayloadTaskID:      strings.TrimSpace(req.TaskId),
-			types.OrchestrationOutboxPayloadAttemptID:   attemptID,
-			types.OrchestrationOutboxPayloadExitCode:    int(req.ExitCode),
-			types.OrchestrationOutboxPayloadError:       req.Error,
-			types.OrchestrationOutboxPayloadIdempotency: resultKey,
-		},
+		EventType:   types.OrchestrationOutboxEventTypeRunResult,
+		DedupeKey:   resultKey,
+		PayloadJSON: payload,
 		AvailableAt: time.Now(),
 	}); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to enqueue task result: %v", err)
@@ -328,14 +337,24 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 	return &pb.SetTaskResultResponse{}, nil
 }
 
-func isRunAttemptActive(attempt *types.AgentRunAttempt) bool {
-	if attempt == nil {
-		return false
+func (s *WorkerService) UpdateTaskState(ctx context.Context, req *pb.UpdateTaskStateRequest) (*pb.UpdateTaskStateResponse, error) {
+	if s.backend == nil {
+		return nil, status.Errorf(codes.Unavailable, "task persistence not available")
 	}
-	if attempt.EndedAt != nil {
-		return false
+	taskID := strings.TrimSpace(req.TaskId)
+	runID := strings.TrimSpace(req.RunId)
+	state := types.AgentTaskState(strings.TrimSpace(req.State))
+	if taskID == "" || runID == "" || state == "" {
+		return nil, status.Error(codes.InvalidArgument, "task_id, state, and run_id are required")
 	}
-	return attempt.Status.IsInFlight()
+	if state != types.AgentTaskStateWaiting && state != types.AgentTaskStateRunning {
+		return nil, status.Errorf(codes.InvalidArgument, "only waiting/running transitions are allowed, got %q", state)
+	}
+
+	if _, err := s.backend.UpdateTaskStateIfCurrentRun(ctx, taskID, runID, state, nil, nil); err != nil {
+		return nil, status.Errorf(codes.Internal, "update task state: %v", err)
+	}
+	return &pb.UpdateTaskStateResponse{}, nil
 }
 
 func isRunAttemptNotFound(err error) bool {
@@ -408,7 +427,7 @@ func (s *WorkerService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, 
 		return nil
 	}
 	targetRunID := run.ID
-	nextState := types.TaskTerminalStateForRun(run.Status, run.Interactive)
+	nextState := types.TaskTerminalStateForRun(run.Status)
 	updated, err := s.backend.UpdateTaskStateIfCurrentRun(
 		ctx,
 		run.OriginTaskID,
@@ -423,7 +442,9 @@ func (s *WorkerService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, 
 	if !updated {
 		return nil
 	}
-	return nil
+	task.State = nextState
+	task.TargetRunID = &targetRunID
+	return orchestration.SyncTaskOutcome(ctx, s.backend, task, run)
 }
 
 func appendRunSnapshot(
@@ -477,6 +498,77 @@ func updateExecutionInstanceCounts(ctx context.Context, backend repository.Backe
 	}
 	now := time.Now()
 	return backend.AdjustExecutionInstanceRunningAttempts(ctx, instanceKey, runningDelta, &now)
+}
+
+// ── Task Outputs ────────────────────────────────────────────────────────────
+
+func (s *WorkerService) CreateTaskOutput(ctx context.Context, req *pb.CreateTaskOutputRequest) (*pb.CreateTaskOutputResponse, error) {
+	if s.backend == nil {
+		return nil, status.Errorf(codes.Unavailable, "task persistence not available")
+	}
+
+	output := &types.TaskOutput{
+		WorkspaceID: uint(req.WorkspaceId),
+		TaskID:      req.TaskId,
+		OutputType:  req.OutputType,
+		Title:       req.Title,
+	}
+	if req.RunId != "" {
+		output.RunID = &req.RunId
+	}
+	if req.AgentId != "" {
+		output.AgentID = &req.AgentId
+	}
+	if req.SchemaJson != "" {
+		if err := json.Unmarshal([]byte(req.SchemaJson), &output.Schema); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid schema_json: %v", err)
+		}
+	}
+	if req.DataJson != "" {
+		if err := json.Unmarshal([]byte(req.DataJson), &output.Data); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid data_json: %v", err)
+		}
+	} else {
+		output.Data = map[string]any{}
+	}
+	if req.MetadataJson != "" {
+		if err := json.Unmarshal([]byte(req.MetadataJson), &output.Metadata); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid metadata_json: %v", err)
+		}
+	}
+	if req.Uri != "" {
+		output.URI = &req.Uri
+	}
+
+	if err := s.backend.CreateTaskOutput(ctx, output); err != nil {
+		return nil, status.Errorf(codes.Internal, "create output: %v", err)
+	}
+	return &pb.CreateTaskOutputResponse{Id: output.ID}, nil
+}
+
+func (s *WorkerService) AppendTaskOutputRows(ctx context.Context, req *pb.AppendTaskOutputRowsRequest) (*pb.AppendTaskOutputRowsResponse, error) {
+	if s.backend == nil {
+		return nil, status.Errorf(codes.Unavailable, "task persistence not available")
+	}
+	if err := s.backend.AppendTaskOutputRows(ctx, uint(req.WorkspaceId), req.OutputId, []byte(req.RowsJson)); err != nil {
+		if _, ok := err.(*types.ErrTaskOutputNotFound); ok {
+			return nil, status.Errorf(codes.NotFound, "output not found: %s", req.OutputId)
+		}
+		return nil, status.Errorf(codes.Internal, "append rows: %v", err)
+	}
+	return &pb.AppendTaskOutputRowsResponse{}, nil
+}
+
+func (s *WorkerService) FinalizeTaskOutput(ctx context.Context, req *pb.FinalizeTaskOutputRequest) (*pb.FinalizeTaskOutputResponse, error) {
+	if s.backend == nil {
+		return nil, status.Errorf(codes.Unavailable, "task persistence not available")
+	}
+	if req.Summary != "" {
+		if err := s.backend.UpdateTaskOutputSummary(ctx, uint(req.WorkspaceId), req.OutputId, req.Summary); err != nil {
+			return nil, status.Errorf(codes.Internal, "finalize output: %v", err)
+		}
+	}
+	return &pb.FinalizeTaskOutputResponse{}, nil
 }
 
 func (s *WorkerService) AllocateIP(ctx context.Context, req *pb.AllocateIPRequest) (*pb.AllocateIPResponse, error) {

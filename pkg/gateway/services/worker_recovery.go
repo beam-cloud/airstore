@@ -265,7 +265,7 @@ func (s *WorkerService) recoverOrphanedRun(ctx context.Context, run *types.Agent
 	if attemptErr != nil {
 		return false, false, attemptErr
 	}
-	attemptActive := attempt != nil && isRunAttemptActive(attempt)
+	attemptActive := attempt.IsActive()
 	if attempt != nil && !attemptActive {
 		log.Info().
 			Str("run_id", run.ID).

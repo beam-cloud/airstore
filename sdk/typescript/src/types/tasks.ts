@@ -1,3 +1,5 @@
+import type { AgentRun } from './runs.js';
+
 /** How a follow-up message is delivered to a running agent. */
 export type QueueMode =
   | 'steer'
@@ -56,7 +58,8 @@ export type TaskKind = 'agent_command' | 'run_input';
 export type TaskState =
   | 'queued'
   | 'running'
-  | 'idle'
+  | 'waiting'
+  | 'sleeping'
   | 'done'
   | 'dropped'
   | 'cancelled';
@@ -84,14 +87,18 @@ export interface InputProvenance {
   correlationId?: string;
 }
 
+export type TaskPriority = 'urgent' | 'high' | 'normal' | 'low';
+
 /** A task representing a unit of intent sent to an agent. */
 export interface AgentTask {
   id: string;
   workspace_id: number;
   agent_id?: string;
-  kind: TaskKind;
+  agent_name?: string;
+  kind?: TaskKind;
   queue_mode: QueueMode;
   state: TaskState;
+  priority: TaskPriority;
   idempotency_key: string;
   payload_json: Record<string, unknown>;
   routing_json: Record<string, unknown>;
@@ -100,7 +107,14 @@ export interface AgentTask {
   accepted_at: string;
   queued_at?: string;
   dispatched_at?: string;
+  deadline?: string;
   dropped_reason?: string;
+  budget_usd?: number;
+  cost_usd: number;
+  archived_at?: string;
+  wake_at?: string;
+  wake_reason?: string;
+  wake_count?: number;
   created_at: string;
   updated_at: string;
 }
@@ -110,7 +124,7 @@ export interface AgentCommandCreateParams {
   /** The prompt / instruction to send to the agent. */
   message: string;
   /** ID of the agent profile to target. */
-  agentId: string;
+  agentId?: string;
   /** Session ID for grouping related tasks. Auto-generated if omitted. */
   sessionId?: string;
   /** Idempotency key to prevent duplicate task creation. Auto-generated if omitted. */
@@ -128,6 +142,8 @@ export interface AgentCommandCreateParams {
   attachments?: Array<Record<string, unknown>>;
   label?: string;
   spawnedBy?: string;
+  priority?: TaskPriority;
+  budgetUsd?: number;
 }
 
 /** Response from task creation. Contains the task and whether it was a duplicate. */
@@ -163,6 +179,13 @@ export interface TaskArchiveResponse {
   status: 'archived';
 }
 
+export interface TaskUpdateParams {
+  priority?: TaskPriority;
+  budgetUsd?: number | null;
+  payload?: Record<string, unknown>;
+  routing?: RoutingContext;
+}
+
 /** A single log entry from a task execution. */
 export interface TaskLogEntry {
   timestamp: number;
@@ -187,14 +210,40 @@ export interface TaskEventStreamParams {
   runEventCursor?: number;
 }
 
+/** Interaction state of an active run (working, waiting for input, or closed). */
+export interface RunInteraction {
+  state: 'working' | 'waiting_for_input' | 'closed';
+  active_execution_id?: string;
+  pending_count: number;
+  pending_inputs?: PendingInput[];
+  updated_at?: number;
+}
+
+/** A user message buffered in the run's input queue. */
+export interface PendingInput {
+  id: string;
+  message: string;
+  created_at: number;
+}
+
+/** A lifecycle event emitted by the orchestration engine during a run. */
+export interface RunEvent {
+  run_id: string;
+  event_type: string;
+  timestamp: number;
+  payload?: Record<string, unknown>;
+}
+
 /** Composite batch returned by streamEvents: task/run state, logs, and events. */
 export interface TaskEventBatch {
   task_id: string;
   run_id?: string;
   task?: AgentTask;
-  run?: Record<string, unknown>;
+  run?: AgentRun;
+  interaction?: RunInteraction;
   logs: TaskLogEntry[];
-  run_events: Array<Record<string, unknown>>;
+  run_events: RunEvent[];
+  pending_inputs: PendingInput[];
   next_log_cursor: number;
   next_run_event_cursor: number;
 }
@@ -236,4 +285,69 @@ export interface ScheduleUpdateParams {
   prompt?: string;
   skillPaths?: string[];
   active?: boolean;
+}
+
+// ── Task Outputs ────────────────────────────────────────────────────────────
+
+export type OutputType = 'table' | 'email' | 'file' | 'text' | 'link' | 'image' | 'json';
+
+/** A structured output produced by an agent during a task. */
+export interface TaskOutput {
+  id: string;
+  workspace_id: number;
+  task_id: string;
+  run_id?: string;
+  agent_id?: string;
+  agent_name?: string;
+  output_type: OutputType;
+  title: string;
+  summary?: string;
+  uri?: string;
+  schema?: TableColumn[];
+  data: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  archived_at?: string;
+  created_at: string;
+}
+
+export interface TaskOutputListParams {
+  taskId?: string;
+  agentId?: string;
+  outputType?: OutputType;
+  includeArchived?: boolean;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface TaskOutputListResponse {
+  outputs: TaskOutput[];
+  next_cursor: string;
+  has_more: boolean;
+}
+
+/** Column definition for table outputs with dynamic schemas. */
+export interface TableColumn {
+  key: string;
+  label: string;
+  type: 'string' | 'number' | 'boolean' | 'date';
+  display?: 'link' | 'badge' | 'currency' | 'image';
+  format?: string;
+}
+
+/** Parameters for creating a task output. */
+export interface CreateTaskOutputParams {
+  output_type: string;
+  title: string;
+  output_id?: string;
+  summary?: string;
+  schema?: TableColumn[];
+  data: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  run_id?: string;
+  agent_id?: string;
+}
+
+/** Parameters for appending rows to a table output. */
+export interface AppendRowsParams {
+  rows: Record<string, unknown>[];
 }

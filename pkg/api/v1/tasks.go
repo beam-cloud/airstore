@@ -11,22 +11,18 @@ import (
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/orchestration"
-	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/labstack/echo/v4"
-	"github.com/rs/zerolog/log"
 )
 
 type WorkspaceTasksGroup struct {
 	routerGroup *echo.Group
-	backend     repository.BackendRepository
 	agents      *orchestration.AgentAPI
 }
 
-func NewWorkspaceTasksGroup(routerGroup *echo.Group, backend repository.BackendRepository, agents *orchestration.AgentAPI) *WorkspaceTasksGroup {
+func NewWorkspaceTasksGroup(routerGroup *echo.Group, agents *orchestration.AgentAPI) *WorkspaceTasksGroup {
 	g := &WorkspaceTasksGroup{
 		routerGroup: routerGroup,
-		backend:     backend,
 		agents:      agents,
 	}
 	g.registerRoutes()
@@ -37,6 +33,7 @@ func (g *WorkspaceTasksGroup) registerRoutes() {
 	g.routerGroup.POST("", g.CreateTask)
 	g.routerGroup.GET("", g.ListTasks)
 	g.routerGroup.GET("/:task_id", g.GetTask)
+	g.routerGroup.PATCH("/:task_id", g.UpdateTask)
 	g.routerGroup.GET("/:task_id/logs", g.ListTaskLogs)
 	g.routerGroup.GET("/:task_id/stream", g.StreamTaskEvents)
 	g.routerGroup.POST("/:task_id/cancel", g.CancelTask)
@@ -133,7 +130,6 @@ func (g *WorkspaceTasksGroup) ListTasks(c echo.Context) error {
 	if err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, err.Error())
 	}
-
 	createdAfter, err := parseOptionalRFC3339(c.QueryParam("created_after"))
 	if err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid created_after timestamp")
@@ -144,8 +140,8 @@ func (g *WorkspaceTasksGroup) ListTasks(c echo.Context) error {
 	}
 
 	filter := types.AgentTaskListFilter{
-		AgentID:       strPtrMaybeQuery(c.QueryParam("agent_id")),
-		States:        states,
+		AgentID: strPtrMaybeQuery(c.QueryParam("agent_id")),
+		States:  states,
 		CreatedAfter:  createdAfter,
 		CreatedBefore: createdBefore,
 		Limit:         limit,
@@ -245,7 +241,7 @@ func (g *WorkspaceTasksGroup) CancelTask(c echo.Context) error {
 		if _, ok := err.(*types.ErrAgentTaskNotFound); ok {
 			return ErrorResponse(c, http.StatusNotFound, "task not found")
 		}
-		if strings.Contains(strings.ToLower(err.Error()), "only running tasks") {
+		if _, ok := err.(*types.ErrTaskNotCancellable); ok {
 			return ErrorResponse(c, http.StatusBadRequest, err.Error())
 		}
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
@@ -266,12 +262,36 @@ func (g *WorkspaceTasksGroup) ArchiveTask(c echo.Context) error {
 		if _, ok := err.(*types.ErrAgentTaskNotFound); ok {
 			return ErrorResponse(c, http.StatusNotFound, "task not found")
 		}
-		if strings.Contains(strings.ToLower(err.Error()), "archived") {
+		if _, ok := err.(*types.ErrTaskNotArchivable); ok {
 			return ErrorResponse(c, http.StatusBadRequest, err.Error())
 		}
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 	return SuccessResponse(c, map[string]any{"status": "archived"})
+}
+
+func (g *WorkspaceTasksGroup) UpdateTask(c echo.Context) error {
+	if g.agents == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "task service unavailable")
+	}
+	workspaceID, err := requireWorkspaceID(c)
+	if err != nil {
+		return err
+	}
+
+	var params orchestration.TaskUpdateParams
+	if err := decodeStrictBody(c, &params); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
+	}
+
+	task, err := g.agents.UpdateTask(c.Request().Context(), workspaceID, c.Param("task_id"), params)
+	if err != nil {
+		if _, ok := err.(*types.ErrAgentTaskNotFound); ok {
+			return ErrorResponse(c, http.StatusNotFound, "task not found")
+		}
+		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+	}
+	return SuccessResponse(c, task)
 }
 
 func statusForAcceptAgentCommandError(err error) int {
@@ -316,9 +336,11 @@ func parseTaskStates(raw string) ([]types.AgentTaskState, error) {
 		state := types.AgentTaskState(strings.TrimSpace(part))
 		switch state {
 		case types.AgentTaskStateQueued,
+			types.AgentTaskStateWaiting,
+			types.AgentTaskStateSleeping,
 			types.AgentTaskStateRunning,
-			types.AgentTaskStateIdle,
 			types.AgentTaskStateDone,
+			types.AgentTaskStateError,
 			types.AgentTaskStateDropped,
 			types.AgentTaskStateCancelled:
 			states = append(states, state)
@@ -395,6 +417,11 @@ func (g *WorkspaceTasksGroup) CreateSchedule(c echo.Context) error {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "task service unavailable")
 	}
 	ctx := c.Request().Context()
+	workspaceID, err := requireWorkspaceID(c)
+	if err != nil {
+		return err
+	}
+
 	var req struct {
 		AgentID    string   `json:"agent_id"`
 		CronExpr   string   `json:"cron_expr"`
@@ -411,24 +438,19 @@ func (g *WorkspaceTasksGroup) CreateSchedule(c echo.Context) error {
 		}
 	}
 
-	ws, err := g.backend.GetWorkspaceByExternalId(ctx, c.Param("workspace_id"))
-	if err != nil || ws == nil {
-		return ErrorResponse(c, http.StatusNotFound, "workspace not found")
-	}
-	agent, err := g.backend.GetAgentProfile(ctx, ws.Id, req.AgentID)
-	if err != nil || agent == nil {
+	agent, err := g.agents.GetAgent(ctx, workspaceID, req.AgentID)
+	if err != nil {
 		return ErrorResponse(c, http.StatusNotFound, "agent not found")
 	}
 
 	st, err := g.agents.CreateSchedule(
-		ctx, ws.Id, agent.ID, req.CronExpr, req.Timezone, req.Prompt,
+		ctx, workspaceID, agent.ID, req.CronExpr, req.Timezone, req.Prompt,
 		req.SkillPaths, ptrUint(auth.MemberId(ctx)), ptrUint(auth.TokenId(ctx)), nil,
 	)
 	if err != nil {
-		log.Error().Err(err).Str("workspace", ws.ExternalId).Msg("schedule create failed")
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
-	return c.JSON(http.StatusCreated, Response{Success: true, Data: g.scheduleResp(ctx, st, ws.ExternalId)})
+	return c.JSON(http.StatusCreated, Response{Success: true, Data: g.scheduleResp(ctx, st)})
 }
 
 func (g *WorkspaceTasksGroup) ListSchedules(c echo.Context) error {
@@ -436,17 +458,17 @@ func (g *WorkspaceTasksGroup) ListSchedules(c echo.Context) error {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "task service unavailable")
 	}
 	ctx := c.Request().Context()
-	ws, err := g.backend.GetWorkspaceByExternalId(ctx, c.Param("workspace_id"))
-	if err != nil || ws == nil {
-		return ErrorResponse(c, http.StatusNotFound, "workspace not found")
+	workspaceID, err := requireWorkspaceID(c)
+	if err != nil {
+		return err
 	}
-	list, err := g.agents.ListSchedules(ctx, ws.Id)
+	list, err := g.agents.ListSchedules(ctx, workspaceID)
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 	resp := make([]map[string]any, 0, len(list))
 	for _, s := range list {
-		resp = append(resp, g.scheduleResp(ctx, s, ws.ExternalId))
+		resp = append(resp, g.scheduleResp(ctx, s))
 	}
 	return SuccessResponse(c, resp)
 }
@@ -456,15 +478,15 @@ func (g *WorkspaceTasksGroup) GetSchedule(c echo.Context) error {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "task service unavailable")
 	}
 	ctx := c.Request().Context()
-	ws, err := g.backend.GetWorkspaceByExternalId(ctx, c.Param("workspace_id"))
-	if err != nil || ws == nil {
-		return ErrorResponse(c, http.StatusNotFound, "workspace not found")
+	workspaceID, err := requireWorkspaceID(c)
+	if err != nil {
+		return err
 	}
-	st, err := g.agents.GetSchedule(ctx, ws.Id, c.Param("id"))
+	st, err := g.agents.GetSchedule(ctx, workspaceID, c.Param("id"))
 	if err != nil {
 		return ErrorResponse(c, http.StatusNotFound, err.Error())
 	}
-	return SuccessResponse(c, g.scheduleResp(ctx, st, ws.ExternalId))
+	return SuccessResponse(c, g.scheduleResp(ctx, st))
 }
 
 func (g *WorkspaceTasksGroup) UpdateSchedule(c echo.Context) error {
@@ -482,15 +504,15 @@ func (g *WorkspaceTasksGroup) UpdateSchedule(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid request")
 	}
 	ctx := c.Request().Context()
-	ws, err := g.backend.GetWorkspaceByExternalId(ctx, c.Param("workspace_id"))
-	if err != nil || ws == nil {
-		return ErrorResponse(c, http.StatusNotFound, "workspace not found")
+	workspaceID, err := requireWorkspaceID(c)
+	if err != nil {
+		return err
 	}
-	st, err := g.agents.UpdateSchedule(ctx, ws.Id, c.Param("id"), req.CronExpr, req.Timezone, req.Prompt, req.SkillPaths, req.Active)
+	st, err := g.agents.UpdateSchedule(ctx, workspaceID, c.Param("id"), req.CronExpr, req.Timezone, req.Prompt, req.SkillPaths, req.Active)
 	if err != nil {
 		return g.scheduleError(c, err)
 	}
-	return SuccessResponse(c, g.scheduleResp(ctx, st, ws.ExternalId))
+	return SuccessResponse(c, g.scheduleResp(ctx, st))
 }
 
 func (g *WorkspaceTasksGroup) DeleteSchedule(c echo.Context) error {
@@ -498,11 +520,11 @@ func (g *WorkspaceTasksGroup) DeleteSchedule(c echo.Context) error {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "task service unavailable")
 	}
 	ctx := c.Request().Context()
-	ws, err := g.backend.GetWorkspaceByExternalId(ctx, c.Param("workspace_id"))
-	if err != nil || ws == nil {
-		return ErrorResponse(c, http.StatusNotFound, "workspace not found")
+	workspaceID, err := requireWorkspaceID(c)
+	if err != nil {
+		return err
 	}
-	if err := g.agents.DeleteSchedule(ctx, ws.Id, c.Param("id")); err != nil {
+	if err := g.agents.DeleteSchedule(ctx, workspaceID, c.Param("id")); err != nil {
 		return g.scheduleError(c, err)
 	}
 	return SuccessResponse(c, nil)
@@ -515,14 +537,9 @@ func (g *WorkspaceTasksGroup) scheduleError(c echo.Context, err error) error {
 	return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 }
 
-func (g *WorkspaceTasksGroup) scheduleResp(ctx context.Context, st *types.ScheduledTask, wsExt string) map[string]any {
-	if wsExt == "" {
-		if ws, _ := g.backend.GetWorkspace(ctx, st.WorkspaceID); ws != nil {
-			wsExt = ws.ExternalId
-		}
-	}
+func (g *WorkspaceTasksGroup) scheduleResp(ctx context.Context, st *types.ScheduledTask) map[string]any {
 	agentName := ""
-	if agent, _ := g.backend.GetAgentProfile(ctx, st.WorkspaceID, st.AgentID); agent != nil {
+	if agent, _ := g.agents.GetAgent(ctx, st.WorkspaceID, st.AgentID); agent != nil {
 		agentName = agent.Name
 	}
 	skillPaths := st.SkillPaths
@@ -531,7 +548,6 @@ func (g *WorkspaceTasksGroup) scheduleResp(ctx context.Context, st *types.Schedu
 	}
 	resp := map[string]any{
 		"external_id":  st.ExternalID,
-		"workspace_id": wsExt,
 		"agent_id":     st.AgentID,
 		"agent_name":   agentName,
 		"cron_expr":    st.CronExpr,

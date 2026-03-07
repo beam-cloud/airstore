@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rs/zerolog/log"
+
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -74,11 +76,13 @@ func (a *AgentAPI) CreateAgent(
 	}
 
 	profile := &types.AgentProfile{
-		WorkspaceID: workspaceID,
-		AgentKey:    trimmedKey,
-		Name:        strings.TrimSpace(name),
-		ConfigJSON:  normalizedConfig,
-		Active:      isActive,
+		WorkspaceID:   workspaceID,
+		AgentKey:      trimmedKey,
+		Name:          strings.TrimSpace(name),
+		Role:          "generalist",
+		MemoryScope:   "workspace",
+		ConfigJSON:    normalizedConfig,
+		Active:        isActive,
 	}
 	if err := a.backend.CreateAgentProfile(ctx, profile); err != nil {
 		return nil, err
@@ -103,6 +107,10 @@ func (a *AgentAPI) UpdateAgent(
 	workspaceID uint,
 	agentID string,
 	name *string,
+	role *string,
+	memoryScope *string,
+	qualityScore *float64,
+	costBudgetUSD *float64,
 	config map[string]any,
 	active *bool,
 ) (*types.AgentProfile, error) {
@@ -116,6 +124,18 @@ func (a *AgentAPI) UpdateAgent(
 			return nil, fmt.Errorf("name cannot be empty")
 		}
 		profile.Name = trimmed
+	}
+	if role != nil {
+		profile.Role = optionalStringValue(role, "generalist")
+	}
+	if memoryScope != nil {
+		profile.MemoryScope = optionalStringValue(memoryScope, "workspace")
+	}
+	if qualityScore != nil {
+		profile.QualityScore = qualityScore
+	}
+	if costBudgetUSD != nil {
+		profile.CostBudgetUSD = costBudgetUSD
 	}
 	if active != nil {
 		profile.Active = *active
@@ -146,6 +166,32 @@ func (a *AgentAPI) DeleteAgent(ctx context.Context, workspaceID uint, agentID st
 		return fmt.Errorf("agent_id is required")
 	}
 	return a.backend.DeleteAgentProfile(ctx, workspaceID, trimmedAgentID)
+}
+
+// --- Workspace ---
+
+func (a *AgentAPI) GetWorkspace(ctx context.Context, workspaceID uint) (*types.Workspace, error) {
+	return a.backend.GetWorkspace(ctx, workspaceID)
+}
+
+// --- Channel Bindings ---
+
+func (a *AgentAPI) ListChannelBindings(ctx context.Context, workspaceID uint, agentID *string) ([]*types.ChannelBinding, error) {
+	return a.backend.ListChannelBindings(ctx, workspaceID, agentID)
+}
+
+func (a *AgentAPI) UpsertChannelBinding(ctx context.Context, binding *types.ChannelBinding) error {
+	return a.backend.UpsertChannelBinding(ctx, binding)
+}
+
+func (a *AgentAPI) DeleteChannelBinding(ctx context.Context, workspaceID uint, agentID *string, channelType string) error {
+	return a.backend.DeleteChannelBinding(ctx, workspaceID, agentID, channelType)
+}
+
+// --- Stats ---
+
+func (a *AgentAPI) GetAgentStats(ctx context.Context, workspaceID uint, agentID string) (*types.AgentStats, error) {
+	return a.backend.GetAgentStats(ctx, workspaceID, agentID)
 }
 
 func (a *AgentAPI) AcceptAgentCommand(
@@ -344,20 +390,22 @@ func (a *AgentAPI) CancelTask(ctx context.Context, workspaceID uint, taskID stri
 	if err != nil {
 		return err
 	}
-	if task.State != types.AgentTaskStateRunning {
-		return fmt.Errorf("only running tasks can be stopped")
+	if task.State.IsTerminal() {
+		return &types.ErrTaskNotCancellable{ID: taskID, State: task.State}
 	}
 
-	if task.TargetRunID != nil {
+	if task.TargetRunID != nil && task.State == types.AgentTaskStateRunning {
 		if err := a.CancelRun(ctx, workspaceID, *task.TargetRunID); err != nil {
 			return err
 		}
 	}
 
-	if !task.State.IsTerminal() {
-		if err := a.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateCancelled, nil, task.TargetRunID); err != nil {
-			return err
-		}
+	if err := a.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateCancelled, nil, task.TargetRunID); err != nil {
+		return err
+	}
+
+	if err := a.backend.CancelPendingOutboxEventsForTask(ctx, task.ID); err != nil {
+		log.Warn().Err(err).Str("task_id", task.ID).Msg("failed to cancel pending outbox events")
 	}
 
 	return nil
@@ -371,10 +419,46 @@ func (a *AgentAPI) ArchiveTask(ctx context.Context, workspaceID uint, taskID str
 	if task.ArchivedAt != nil {
 		return nil
 	}
-	if task.State != types.AgentTaskStateIdle && !task.State.IsTerminal() {
-		return fmt.Errorf("only idle or terminal tasks can be archived")
+	if !task.State.IsTerminal() {
+		return &types.ErrTaskNotArchivable{ID: taskID, State: task.State}
 	}
 	return a.backend.ArchiveTask(ctx, task.ID)
+}
+
+type TaskUpdateParams struct {
+	Priority    *string        `json:"priority,omitempty"`
+	BudgetUSD   *float64       `json:"budget_usd,omitempty"`
+	PayloadJSON map[string]any `json:"payload_json,omitempty"`
+	RoutingJSON map[string]any `json:"routing_json,omitempty"`
+}
+
+func (a *AgentAPI) UpdateTask(ctx context.Context, workspaceID uint, taskID string, params TaskUpdateParams) (*types.AgentTask, error) {
+	task, err := a.GetTask(ctx, workspaceID, taskID)
+	if err != nil {
+		return nil, err
+	}
+
+	if params.Priority != nil {
+		p := strings.TrimSpace(*params.Priority)
+		if p != "" && !types.AgentTaskPriority(p).IsValid() {
+			return nil, fmt.Errorf("priority %q is not supported", p)
+		}
+		task.Priority = p
+	}
+	if params.BudgetUSD != nil {
+		task.BudgetUSD = params.BudgetUSD
+	}
+	if params.PayloadJSON != nil {
+		task.PayloadJSON = params.PayloadJSON
+	}
+	if params.RoutingJSON != nil {
+		task.RoutingJSON = params.RoutingJSON
+	}
+
+	if err := a.backend.UpdateTask(ctx, task); err != nil {
+		return nil, err
+	}
+	return sanitizeTaskForResponse(task), nil
 }
 
 func (a *AgentAPI) GetTaskLogs(ctx context.Context, workspaceID uint, taskID string) ([]common.TaskLogEntry, error) {
@@ -761,6 +845,17 @@ func sanitizePendingInputs(inputs []types.PendingInput) []types.PendingInput {
 		}
 	}
 	return safe
+}
+
+func optionalStringValue(value *string, fallback string) string {
+	if value == nil {
+		return fallback
+	}
+	trimmed := strings.TrimSpace(*value)
+	if trimmed == "" {
+		return fallback
+	}
+	return trimmed
 }
 
 func normalizeAgentProfileConfig(config map[string]any, agentKey string) (map[string]any, error) {

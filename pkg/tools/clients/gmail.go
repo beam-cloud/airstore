@@ -72,14 +72,23 @@ func formatGmailMessageResult(to, subject string, result map[string]any) map[str
 		"to":      to,
 		"subject": subject,
 	}
-	if id := getString(result, "id"); id != "" {
-		out["message_id"] = id
+	msgID := getString(result, "id")
+	threadID := getString(result, "threadId")
+	if msgID != "" {
+		out["message_id"] = msgID
 	}
-	if threadID := getString(result, "threadId"); threadID != "" {
+	if threadID != "" {
 		out["thread_id"] = threadID
 	}
 	if labels, ok := result["labelIds"].([]any); ok && len(labels) > 0 {
 		out["label_ids"] = labels
+	}
+	linkID := threadID
+	if linkID == "" {
+		linkID = msgID
+	}
+	if linkID != "" {
+		out["url"] = "https://mail.google.com/mail/u/0/#inbox/" + linkID
 	}
 	return out
 }

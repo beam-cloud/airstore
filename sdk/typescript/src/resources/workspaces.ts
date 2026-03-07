@@ -1,5 +1,9 @@
 import type { CoreClient, RequestOptions } from '../client.js';
 import type { Workspace, WorkspaceCreateParams } from '../types/workspaces.js';
+import type {
+  ChannelBinding,
+  UpdateChannelsParams,
+} from '../types/agents.js';
 
 /**
  * Create, list, retrieve, and delete workspaces.
@@ -51,6 +55,50 @@ export class Workspaces {
     await this.client.request<null>(
       'DELETE',
       `/workspaces/${id}`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** List workspace-level channel bindings. */
+  async listChannels(
+    workspaceId: string,
+    options?: RequestOptions,
+  ): Promise<ChannelBinding[]> {
+    return this.client.request<ChannelBinding[]>(
+      'GET',
+      `/workspaces/${workspaceId}/channels`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Upsert workspace-level channel bindings. */
+  async updateChannels(
+    workspaceId: string,
+    params: UpdateChannelsParams,
+    options?: RequestOptions,
+  ): Promise<ChannelBinding[]> {
+    return this.client.request<ChannelBinding[]>(
+      'PUT',
+      `/workspaces/${workspaceId}/channels`,
+      params,
+      undefined,
+      options,
+    );
+  }
+
+  /** Remove a workspace-level channel binding by type. */
+  async deleteChannel(
+    workspaceId: string,
+    channelType: string,
+    options?: RequestOptions,
+  ): Promise<void> {
+    await this.client.request<null>(
+      'DELETE',
+      `/workspaces/${workspaceId}/channels/${channelType}`,
       undefined,
       undefined,
       options,

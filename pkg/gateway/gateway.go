@@ -29,6 +29,7 @@ import (
 	apiv1 "github.com/beam-cloud/airstore/pkg/api/v1"
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/channels"
+	"github.com/beam-cloud/airstore/pkg/channels/inbound"
 	"github.com/beam-cloud/airstore/pkg/clients"
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/compression"
@@ -602,7 +603,31 @@ func (g *Gateway) registerServices() error {
 		)
 		orchestratorSvc.Start(g.ctx)
 		agentAPI := orchestration.NewAgentAPI(g.BackendRepo, orchestratorSvc)
-		channelRegistry := channels.NewRegistry(channels.NewDirect(agentAPI))
+		var mailClient *clients.AgentMailClient
+		if g.Config.Channels.AgentMail.APIKey != "" {
+			mailClient = clients.NewAgentMailClient(clients.AgentMailConfig{
+				APIKey:  g.Config.Channels.AgentMail.APIKey,
+				BaseURL: g.Config.Channels.AgentMail.BaseURL,
+				Domain:  g.Config.Channels.AgentMail.Domain,
+			})
+			if wh := g.Config.Channels.AgentMail.WebhookURL; wh != "" {
+				if err := mailClient.RegisterWebhook(g.ctx, wh); err != nil {
+					log.Error().Err(err).Msg("agentmail: failed to register webhook")
+				} else {
+					log.Info().Str("url", wh).Msg("agentmail webhook registered")
+				}
+			} else {
+				log.Warn().Msg("agentmail: no webhookUrl set — inbound emails won't create tasks. Set channels.agentMail.webhookUrl to your public URL (use ngrok for local dev)")
+			}
+			log.Info().Msg("agentmail integration enabled")
+		}
+
+		emailChannel := channels.NewEmail(agentAPI, g.BackendRepo, mailClient)
+		channelRegistry := channels.NewRegistry(
+			channels.NewDirect(agentAPI),
+			emailChannel,
+			channels.NewSMS(agentAPI, g.BackendRepo),
+		)
 		agentService := services.NewAgentService(g.BackendRepo, agentAPI, g.s2Client)
 		pb.RegisterAgentServiceServer(g.grpcServer, agentService)
 		log.Info().Msg("agent service registered")
@@ -618,10 +643,16 @@ func (g *Gateway) registerServices() error {
 		// Agent/task/run HTTP APIs (workspace-scoped)
 		agentAPIRoot := g.baseRouteGroup.Group("/workspaces/:workspace_id")
 		agentAPIRoot.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
-		apiv1.NewAgentsGroup(agentAPIRoot.Group("/agents"), agentAPI, hooksSvc)
-		apiv1.NewWorkspaceTasksGroup(agentAPIRoot.Group("/tasks"), g.BackendRepo, agentAPI)
+		apiv1.NewAgentsGroup(agentAPIRoot.Group("/agents"), agentAPI, hooksSvc, emailChannel)
+		apiv1.NewWorkspaceTasksGroup(agentAPIRoot.Group("/tasks"), agentAPI)
+		apiv1.NewWorkspaceOutputsGroup(agentAPIRoot.Group("/outputs"), g.BackendRepo)
+		apiv1.NewTaskOutputsGroup(agentAPIRoot.Group("/tasks/:task_id/outputs"), g.BackendRepo)
 		apiv1.NewRunsGroup(agentAPIRoot.Group("/runs"), agentAPI)
-		apiv1.NewWorkspaceChannelsGroup(agentAPIRoot.Group("/channels"), channelRegistry)
+		apiv1.NewWorkspaceChannelsGroup(agentAPIRoot.Group("/channels"), channelRegistry, agentAPI, emailChannel)
+
+		// Inbound channel webhooks (global, no workspace auth -- resolved via channel bindings)
+		inboundProcessor := inbound.NewProcessor(g.s2Client, agentAPI)
+		apiv1.NewInboundChannelsGroup(g.baseRouteGroup.Group("/channels"), channelRegistry, inboundProcessor, mailClient, agentAPI)
 
 		// Hook engine: matches events → hooks → agent tasks.
 		var skillReader hooks.SkillReader

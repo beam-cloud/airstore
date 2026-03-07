@@ -50,6 +50,7 @@ filesystem:
     defaultSecretKey: test
     defaultEndpointUrl: http://localstack:4566
     defaultRegion: us-east-1
+    publicEndpointUrl: http://localhost:4566
 
 # Gateway
 gateway:

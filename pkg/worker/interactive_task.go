@@ -13,6 +13,8 @@ import (
 
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
+	agentsignal "github.com/beam-cloud/airstore/pkg/worker/agentsignal/baml_client"
+	signaltypes "github.com/beam-cloud/airstore/pkg/worker/agentsignal/baml_client/types"
 	"github.com/rs/zerolog/log"
 )
 
@@ -54,6 +56,19 @@ func (w *Worker) setRunInteractionState(ctx context.Context, task types.RunExecu
 				Str("interaction_state", string(state)),
 			task,
 		).Msg("failed to persist run interaction state")
+	}
+}
+
+// setOriginTaskState transitions the origin task's state via the gateway.
+// Used to eagerly reflect waiting/running in the UI during a live session.
+func (w *Worker) setOriginTaskState(ctx context.Context, task types.RunExecution, state types.AgentTaskState) {
+	execCtx := executionContextFromTask(task)
+	if execCtx.originTaskID == "" || execCtx.runID == "" {
+		return
+	}
+	if err := w.gatewayClient.UpdateTaskState(ctx, execCtx.originTaskID, string(state), execCtx.runID); err != nil {
+		addTaskExecutionContext(log.Warn().Err(err).Str("target_state", string(state)), task).
+			Msg("failed to eagerly update origin task state")
 	}
 }
 
@@ -129,6 +144,12 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.RunExecution
 	w.setRunInteractionState(ctx, task, types.RunInteractionStateWorking)
 
 	result := w.runInteractiveSession(ctx, task, sandboxID, taskMountSource)
+
+	// Report result to the gateway immediately, before cleanup. The task
+	// state transitions now (~1s) instead of after the 10s flush grace
+	// period. The later call in finishTask is idempotent (outbox dedupe).
+	w.reportTaskResult(task, result)
+
 	w.setRunInteractionState(ctx, task, types.RunInteractionStateClosed)
 	releaseSessionLease()
 
@@ -177,6 +198,11 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 
 	var checkHeartbeat func() bool
 	var touchHeartbeat func()
+	var checkNeedsInput func() bool
+	var needsInputRunner NeedsInputRunner
+	var needsInputMarkerPath string
+	bamlEnv := w.sandboxManager.BamlEnv()
+
 	if heartbeatRunner, ok := runner.(HeartbeatRunner); ok && mountSource != "" {
 		heartbeatPath, err := heartbeatRunner.SetupHeartbeat(mountSource, env)
 		if err != nil {
@@ -191,6 +217,32 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 			}
 			addTaskExecutionContext(log.Info().Str("runner", runner.Name()).Str("heartbeat", heartbeatPath), task).
 				Msg("heartbeat enabled via VFS")
+		}
+	}
+	if ir, ok := runner.(NeedsInputRunner); ok && mountSource != "" {
+		markerPath, err := ir.SetupNeedsInput(mountSource, env)
+		if err != nil {
+			addTaskExecutionContext(log.Warn().Err(err).Str("runner", runner.Name()), task).
+				Msg("failed to install needs-input hook")
+		} else {
+			needsInputRunner = ir
+			needsInputMarkerPath = markerPath
+			checkNeedsInput = func() bool {
+				msg := ir.ReadLastMessage(markerPath)
+				if msg == "" {
+					return false
+				}
+				outcome, err := agentsignal.ClassifyTurn(ctx, msg, agentsignal.WithEnv(bamlEnv))
+				if err != nil {
+					addTaskExecutionContext(log.Warn().Err(err), task).
+						Msg("BAML ClassifyTurn failed, defaulting to complete")
+					return false
+				}
+				return outcome == signaltypes.TurnOutcomeNEEDS_INPUT
+			}
+
+			addTaskExecutionContext(log.Info().Str("runner", runner.Name()), task).
+				Msg("needs-input detection enabled")
 		}
 	}
 
@@ -214,12 +266,7 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	})
 	defer cancelCleanup()
 
-	interactiveMirror := NewTaskOutput(
-		task.ExternalId,
-		"stdout",
-		NewS2Writer(sessionCtx, w.sandboxManager.s2, task.ExternalId, "stdout"),
-		NewConsoleWriter(task.ExternalId, "stdout"),
-	)
+	interactiveMirror := NewTaskOutput(task.ExternalId, "stdout", w.sandboxManager.taskOutputWriters(sessionCtx, task, env)...)
 	defer interactiveMirror.Flush()
 
 	terminalWriter := &terminalOutputWriter{
@@ -239,32 +286,62 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	start := time.Now()
 
 	var runErr error
+	var needsInput bool
 	if tr, ok := runner.(TurnRunner); ok {
-		runErr = w.runTurnSession(sessionCtx, task, sandboxID, tr, env, terminalWriter, activityCh)
+		runErr, needsInput = w.runTurnSession(sessionCtx, task, sandboxID, tr, env, terminalWriter, activityCh, checkNeedsInput)
 	} else {
 		runErr = w.runGenericPTYSession(sessionCtx, task, sandboxID, terminalWriter, activityCh)
 	}
 
 	addTaskExecutionContext(
-		log.Info().Dur("session_duration", time.Since(start)).Err(runErr),
+		log.Info().Dur("session_duration", time.Since(start)).Bool("needs_input", needsInput),
 		task,
 	).Msg("interactive session finished")
 
 	exitCode, errMsg, status := interactiveResult(runErr, idleTimedOut.Load())
 	w.sandboxManager.publishStatus(ctx, task.ExternalId, status, &exitCode, errMsg)
+
+	var wakeSignal *types.RunExecutionWakeSignal
+	if !needsInput && runErr == nil && needsInputRunner != nil && needsInputMarkerPath != "" {
+		if msg := needsInputRunner.ReadLastMessage(needsInputMarkerPath); msg != "" {
+			followUp, err := agentsignal.ClassifyFollowUp(ctx, msg, agentsignal.WithEnv(bamlEnv))
+			if err != nil {
+				addTaskExecutionContext(log.Warn().Err(err), task).
+					Msg("BAML ClassifyFollowUp failed, treating as no follow-up")
+			} else if followUp.Intent == signaltypes.FollowUpIntentFOLLOW_UP {
+				wakeSignal = &types.RunExecutionWakeSignal{
+					DelayMinutes: int(followUp.Delay_minutes),
+				}
+				if followUp.Reason != nil {
+					wakeSignal.Reason = *followUp.Reason
+				}
+				if followUp.Follow_up_prompt != nil {
+					wakeSignal.FollowUpPrompt = *followUp.Follow_up_prompt
+				}
+				addTaskExecutionContext(
+					log.Info().Int("delay_minutes", wakeSignal.DelayMinutes).Str("reason", wakeSignal.Reason),
+					task,
+				).Msg("agent requested follow-up")
+			}
+		}
+	}
+
 	return &types.RunExecutionResult{
-		ID:       task.ExternalId,
-		ExitCode: exitCode,
-		Error:    errMsg,
-		Duration: time.Since(start),
+		ID:              task.ExternalId,
+		ExitCode:        exitCode,
+		Error:           errMsg,
+		Duration:        time.Since(start),
+		WaitingForInput: needsInput,
+		WakeSignal:      wakeSignal,
 	}
 }
 
 // runTurnSession executes an interactive session as a series of per-turn
-// Exec calls. Each turn runs the runner's CLI (e.g. claude --print) as a
-// separate process, with the prompt passed via command-line args. Between
-// turns, the worker waits for follow-up input via Redis pubsub. The idle
-// monitor handles timeout; no shell loop or stdin pipe is involved.
+// Exec calls. Each turn runs claude --print via ExecPTY (no stdin pipe).
+// After each turn the Stop hook's marker file is checked: if the agent
+// asked a question (needs input), the state is set to waiting_for_input
+// and the worker blocks on Redis pubsub. Otherwise the session ends
+// cleanly — the agent's work is done.
 func (w *Worker) runTurnSession(
 	ctx context.Context,
 	task types.RunExecution,
@@ -273,7 +350,8 @@ func (w *Worker) runTurnSession(
 	env map[string]string,
 	stdout io.Writer,
 	activityCh chan<- struct{},
-) error {
+	checkNeedsInput func() bool,
+) (error, bool) {
 	prompt := strings.TrimSpace(task.Prompt)
 	isFirstTurn := true
 	sessionEnv := cloneTurnEnv(env)
@@ -281,53 +359,41 @@ func (w *Worker) runTurnSession(
 
 	for prompt != "" {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return ctx.Err(), false
 		}
 		w.setRunInteractionState(ctx, task, types.RunInteractionStateWorking)
+		if !isFirstTurn {
+			w.setOriginTaskState(ctx, task, types.AgentTaskStateRunning)
+		}
 
 		if isFirstTurn {
 			nextEnv, err := w.executeFirstTurnWithStrategy(
-				ctx,
-				task,
-				sandboxID,
-				runner,
-				sessionEnv,
-				stdout,
-				prompt,
-				firstTurnStrategies,
+				ctx, task, sandboxID, runner, sessionEnv, stdout, prompt, firstTurnStrategies,
 			)
 			if err != nil {
-				return err
+				return err, false
 			}
 			sessionEnv = nextEnv
 			isFirstTurn = false
 		} else {
-			err := w.executeTurn(
-				ctx,
-				task,
-				sandboxID,
-				runner,
-				sessionEnv,
-				stdout,
-				prompt,
-				TurnArgModeFollowup,
-				1,
-				1,
-				"",
-			)
-			if err != nil {
-				return err
+			if err := w.executeTurn(ctx, task, sandboxID, runner, sessionEnv, stdout, prompt, TurnArgModeFollowup, 1, 1, ""); err != nil {
+				return err, false
 			}
 		}
 
-		// Treat turn completion as activity so the waiting window starts fresh.
 		signalActivity(activityCh)
+
+		if checkNeedsInput == nil || !checkNeedsInput() {
+			return nil, false
+		}
+
 		w.setRunInteractionState(ctx, task, types.RunInteractionStateWaitingForInput)
-		addTaskExecutionContext(log.Info(), task).Msg("turn complete, waiting for follow-up input")
+		w.setOriginTaskState(ctx, task, types.AgentTaskStateWaiting)
+		addTaskExecutionContext(log.Info(), task).Msg("turn complete, agent is waiting for input")
 		prompt = w.waitForFollowupInput(ctx, task.ExternalId, DefaultBetweenTurnsTimeout, activityCh)
 	}
 
-	return nil
+	return nil, true
 }
 
 // waitForFollowupInput blocks until follow-up input arrives via Redis
@@ -620,9 +686,8 @@ func (w *terminalOutputWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// forwardTerminalInput pipes Redis pubsub input to a writer (for generic
-// PTY sessions). Turn-based sessions don't use this — they call
-// waitForFollowupInput instead.
+// forwardTerminalInput pipes Redis pubsub input to a writer. Used by
+// generic PTY sessions that accept stdin.
 func forwardTerminalInput(
 	ctx context.Context,
 	stdinWriter *io.PipeWriter,
@@ -692,6 +757,7 @@ func signalActivity(activityCh chan<- struct{}) {
 	default:
 	}
 }
+
 
 func monitorInteractiveSessionIdle(
 	ctx context.Context,

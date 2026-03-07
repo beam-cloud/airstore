@@ -264,11 +264,15 @@ func (s *AgentService) AcceptAgentCommand(
 		}
 	}
 
+	priority := params.Priority
+	if strings.TrimSpace(priority) == "" {
+		priority = "normal"
+	}
 	payload := map[string]any{
 		"message":                              params.Message,
 		"session_id":                           params.SessionID,
 		"session_key":                          params.SessionKey,
-		"agent_id":                             params.AgentID,
+		types.AgentExecutionMetaKeyAgentID:     params.AgentID,
 		"hook_id":                              params.HookID,
 		"timeout_ms":                           timeoutOrDefault(params.TimeoutMs, 600000),
 		"policy":                               runPolicy,
@@ -280,6 +284,7 @@ func (s *AgentService) AcceptAgentCommand(
 		types.AgentExecutionMetaKeyInstanceKey: instanceKey,
 		"label":                                params.Label,
 		"spawned_by":                           params.SpawnedBy,
+		"priority":                             priority,
 	}
 	if len(agentConfig) > 0 {
 		payload[agentPayloadKeyAgentConfig] = agentConfig
@@ -299,6 +304,8 @@ func (s *AgentService) AcceptAgentCommand(
 		IdempotencyKey: params.IdempotencyKey,
 		PayloadJSON:    payload,
 		RoutingJSON:    routingToMap(params.Routing),
+		Priority:       priority,
+		BudgetUSD:      params.BudgetUSD,
 	}
 	if err := s.backend.CreateTaskWithOutbox(ctx, task, nil); err != nil {
 		if existing, lookupErr := s.backend.GetTaskByIdempotency(ctx, workspaceID, params.AgentID, params.IdempotencyKey); lookupErr == nil {
@@ -687,6 +694,13 @@ func (s *AgentService) processDispatchMessage(ctx context.Context, message redis
 		return nil
 	}
 
+	if wakePrompt := streamValueAsString(message.Values, types.OrchestrationOutboxPayloadWakeFollowUpPrompt); wakePrompt != "" {
+		if task.PayloadJSON == nil {
+			task.PayloadJSON = map[string]any{}
+		}
+		task.PayloadJSON["message"] = wakePrompt
+	}
+
 	if err := s.dispatchTask(ctx, task); err != nil {
 		reason := "dispatch_error"
 		delay := computeDispatchRetryDelay(retryAttempt)
@@ -708,12 +722,16 @@ func (s *AgentService) processDispatchMessage(ctx context.Context, message redis
 }
 
 type runResultProjectorMessage struct {
-	taskID       string
-	attemptID    string
-	exitCode     int
-	errorText    string
-	resultKey    string
-	retryAttempt int
+	taskID             string
+	attemptID          string
+	exitCode           int
+	errorText          string
+	resultKey          string
+	retryAttempt       int
+	waitingForInput    bool
+	wakeDelayMinutes   int
+	wakeReason         string
+	wakeFollowUpPrompt string
 }
 
 func (s *AgentService) resultProjectorLoop(ctx context.Context) {
@@ -768,12 +786,16 @@ func (s *AgentService) processRunResultMessages(ctx context.Context, messages []
 
 func (s *AgentService) processRunResultMessage(ctx context.Context, message redislib.XMessage) error {
 	result := runResultProjectorMessage{
-		taskID:       strings.TrimSpace(streamValueAsString(message.Values, types.OrchestrationOutboxPayloadTaskID)),
-		attemptID:    strings.TrimSpace(streamValueAsString(message.Values, types.OrchestrationOutboxPayloadAttemptID)),
-		exitCode:     intFromAny(message.Values[types.OrchestrationOutboxPayloadExitCode]),
-		errorText:    streamValueAsString(message.Values, types.OrchestrationOutboxPayloadError),
-		resultKey:    strings.TrimSpace(streamValueAsString(message.Values, types.OrchestrationOutboxPayloadIdempotency)),
-		retryAttempt: intFromAny(message.Values[types.OrchestrationOutboxPayloadDispatchAttempt]),
+		taskID:             strings.TrimSpace(streamValueAsString(message.Values, types.OrchestrationOutboxPayloadTaskID)),
+		attemptID:          strings.TrimSpace(streamValueAsString(message.Values, types.OrchestrationOutboxPayloadAttemptID)),
+		exitCode:           intFromAny(message.Values[types.OrchestrationOutboxPayloadExitCode]),
+		errorText:          streamValueAsString(message.Values, types.OrchestrationOutboxPayloadError),
+		resultKey:          strings.TrimSpace(streamValueAsString(message.Values, types.OrchestrationOutboxPayloadIdempotency)),
+		retryAttempt:       intFromAny(message.Values[types.OrchestrationOutboxPayloadDispatchAttempt]),
+		waitingForInput:    boolFromAny(message.Values[types.OrchestrationOutboxPayloadWaitingForInput]),
+		wakeDelayMinutes:   intFromAny(message.Values[types.OrchestrationOutboxPayloadWakeDelayMinutes]),
+		wakeReason:         streamValueAsString(message.Values, types.OrchestrationOutboxPayloadWakeReason),
+		wakeFollowUpPrompt: streamValueAsString(message.Values, types.OrchestrationOutboxPayloadWakeFollowUpPrompt),
 	}
 	if result.taskID == "" || result.attemptID == "" {
 		_ = s.orchestrationStore.AckRunResults(ctx, message.ID)
@@ -829,26 +851,27 @@ func (s *AgentService) applyRunResultProjectorMessage(ctx context.Context, resul
 	if err != nil {
 		return err
 	}
-	if !applied || !isRunAttemptActive(attempt) {
+	if !applied || !attempt.IsActive() {
 		return nil
 	}
+	var wakeSignal *types.RunExecutionWakeSignal
+	if result.wakeDelayMinutes > 0 {
+		wakeSignal = &types.RunExecutionWakeSignal{
+			DelayMinutes:   result.wakeDelayMinutes,
+			Reason:         result.wakeReason,
+			FollowUpPrompt: result.wakeFollowUpPrompt,
+		}
+	}
+
 	return s.finalizeRunAttempt(
 		ctx,
 		attempt,
 		result.taskID,
 		result.exitCode,
 		result.errorText,
+		result.waitingForInput,
+		wakeSignal,
 	)
-}
-
-func isRunAttemptActive(attempt *types.AgentRunAttempt) bool {
-	if attempt == nil {
-		return false
-	}
-	if attempt.EndedAt != nil {
-		return false
-	}
-	return attempt.Status.IsInFlight()
 }
 
 func isRunAttemptNotFound(err error) bool {
@@ -865,11 +888,13 @@ func (s *AgentService) finalizeRunAttempt(
 	taskID string,
 	exitCode int,
 	errText string,
+	waitingForInput bool,
+	wakeSignal *types.RunExecutionWakeSignal,
 ) error {
 	if s.backend == nil || attempt == nil {
 		return nil
 	}
-	if !isRunAttemptActive(attempt) {
+	if !attempt.IsActive() {
 		return nil
 	}
 
@@ -904,13 +929,28 @@ func (s *AgentService) finalizeRunAttempt(
 	if err := s.appendRunSnapshot(ctx, attempt.RunID, runStatus, nil, &now, errMsg, payload); err != nil {
 		return fmt.Errorf("append completion snapshot: %w", err)
 	}
-	if err := s.markOriginTaskTerminalIfCurrentRun(ctx, attempt.RunID); err != nil {
+	if err := s.markOriginTaskTerminalIfCurrentRun(ctx, attempt.RunID, waitingForInput, wakeSignal); err != nil {
 		return fmt.Errorf("mark origin task terminal: %w", err)
 	}
 	return nil
 }
 
-func (s *AgentService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, runID string) error {
+// wakeBackoffDelay computes the actual delay using exponential backoff.
+// Starts at 5 minutes, doubling each cycle, capped at the LLM's suggested delay.
+func wakeBackoffDelay(wakeCount, ceilingMinutes int) int {
+	const initialMinutes = 5
+	const maxShift = 30 // 5 << 30 ≈ 5 billion, safely fits int on all platforms
+	if wakeCount > maxShift {
+		wakeCount = maxShift
+	}
+	delay := initialMinutes << wakeCount // 5, 10, 20, 40, 80, ...
+	if delay > ceilingMinutes {
+		return ceilingMinutes
+	}
+	return delay
+}
+
+func (s *AgentService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, runID string, waitingForInput bool, wakeSignal *types.RunExecutionWakeSignal) error {
 	if s.backend == nil || strings.TrimSpace(runID) == "" {
 		return nil
 	}
@@ -933,11 +973,48 @@ func (s *AgentService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, r
 		return nil
 	}
 	if run.EndedAt != nil && task.UpdatedAt.After(*run.EndedAt) {
-		// Task state was reopened after this run had already ended.
 		return nil
 	}
 	targetRunID := run.ID
-	nextState := types.TaskTerminalStateForRun(run.Status, run.Interactive)
+	nextState := types.TaskTerminalStateForRun(run.Status)
+	if waitingForInput && nextState == types.AgentTaskStateDone {
+		nextState = types.AgentTaskStateWaiting
+	}
+
+	// Agent requested a follow-up: transition to sleeping with a deferred
+	// dispatch instead of marking the task done. The delay uses exponential
+	// backoff: first check is quick (5 min), doubling each cycle until it
+	// reaches the LLM's suggested ceiling.
+	if wakeSignal != nil && nextState == types.AgentTaskStateDone {
+		delayMin := wakeBackoffDelay(task.WakeCount, wakeSignal.DelayMinutes)
+		wakeAt := time.Now().Add(time.Duration(delayMin) * time.Minute)
+		dedupeKey := fmt.Sprintf("wake_dispatch:%s:%s", task.ID, run.ID)
+		outboxEvent := &types.OrchestrationOutboxEvent{
+			EventType: types.OrchestrationOutboxEventTypeTaskDispatch,
+			DedupeKey: dedupeKey,
+			PayloadJSON: map[string]any{
+				types.OrchestrationOutboxPayloadTaskID:            task.ID,
+				types.OrchestrationOutboxPayloadWakeFollowUpPrompt: wakeSignal.FollowUpPrompt,
+			},
+			AvailableAt: wakeAt,
+		}
+		ok, err := s.backend.SleepTaskWithOutbox(ctx, task.ID, run.ID, wakeAt, wakeSignal.Reason, outboxEvent)
+		if err != nil {
+			return fmt.Errorf("sleep task with outbox: %w", err)
+		}
+		if ok {
+			log.Info().
+				Str("task_id", task.ID).
+				Str("run_id", run.ID).
+				Int("llm_delay", wakeSignal.DelayMinutes).
+				Int("actual_delay", delayMin).
+				Int("wake_count", task.WakeCount).
+				Time("wake_at", wakeAt).
+				Msg("task transitioned to sleeping")
+		}
+		return nil
+	}
+
 	updated, err := s.backend.UpdateTaskStateIfCurrentRun(
 		ctx,
 		run.OriginTaskID,
@@ -951,6 +1028,11 @@ func (s *AgentService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, r
 	}
 	if !updated {
 		return nil
+	}
+	task.State = nextState
+	task.TargetRunID = &targetRunID
+	if err := SyncTaskOutcome(ctx, s.backend, task, run); err != nil {
+		return err
 	}
 	return nil
 }
@@ -1554,7 +1636,7 @@ func (s *AgentService) restartTerminalTaskFromRunInput(
 	payload["timeout_ms"] = terminalRun.TimeoutMs
 	payload[types.AgentExecutionMetaKeyInstanceKey] = executionInstanceKeyFromRun(terminalRun)
 	if terminalRun.AgentID != nil {
-		payload["agent_id"] = *terminalRun.AgentID
+		payload[types.AgentExecutionMetaKeyAgentID] = *terminalRun.AgentID
 	}
 	if terminalRun.SessionKey != nil {
 		payload["session_key"] = *terminalRun.SessionKey
@@ -1648,7 +1730,7 @@ func buildRunInputPayload(run *types.AgentRun, message string) map[string]any {
 		"session_id":                           run.SessionID,
 		"resume_session":                       true,
 		"session_key":                          run.SessionKey,
-		"agent_id":                             run.AgentID,
+		types.AgentExecutionMetaKeyAgentID:     run.AgentID,
 		"timeout_ms":                           run.TimeoutMs,
 		types.AgentExecutionMetaKeyInstanceKey: executionInstanceKeyFromRun(run),
 	}
@@ -2034,6 +2116,7 @@ func normalizeAgentCommandDefaults(params *AgentCommandParams) {
 	params.ExtraSystemPrompt = trimOptionalString(params.ExtraSystemPrompt)
 	params.Label = trimOptionalString(params.Label)
 	params.SpawnedBy = trimOptionalString(params.SpawnedBy)
+	params.Priority = strings.ToLower(strings.TrimSpace(params.Priority))
 	params.IdempotencyKey = normalizeGeneratedID(params.IdempotencyKey)
 
 	if params.InputProvenance != nil {
@@ -2197,6 +2280,9 @@ func applyRunExecutionContextMetadata(executionPolicy map[string]any, run *types
 		executionPolicy[types.AgentExecutionMetaKeyRunAttemptID] = strings.TrimSpace(attemptID)
 	}
 	executionPolicy[types.AgentExecutionMetaKeyOriginTaskID] = strings.TrimSpace(run.OriginTaskID)
+	if run.AgentID != nil && strings.TrimSpace(*run.AgentID) != "" {
+		executionPolicy[types.AgentExecutionMetaKeyAgentID] = strings.TrimSpace(*run.AgentID)
+	}
 }
 
 func applyAgentConfigEnv(env map[string]string, config map[string]any) {

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/beam-cloud/airstore/pkg/orchestration"
+	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/google/uuid"
 )
@@ -48,6 +49,70 @@ type Channel interface {
 	Type() ChannelType
 	SendToAgent(ctx context.Context, workspaceID uint, agentID string, message Message) (*SendResult, error)
 	SendToRun(ctx context.Context, workspaceID uint, runID string, message Message) (*SendResult, error)
+}
+
+// InboundChannel is implemented by channels that accept inbound messages (email, SMS).
+type InboundChannel interface {
+	Channel
+	ResolveInbound(ctx context.Context, address string) (workspaceID uint, agentID string, err error)
+}
+
+// acceptCommand is the shared SendToAgent logic for channels that simply create a task
+// (email, SMS). Direct uses a richer path with session keys, timeouts, etc.
+func acceptCommand(agents *orchestration.AgentAPI, channelType ChannelType, ctx context.Context, workspaceID uint, agentID string, msg Message) (*SendResult, error) {
+	if agents == nil {
+		return nil, fmt.Errorf("%s channel is unavailable", channelType)
+	}
+	trimmedAgentID := strings.TrimSpace(agentID)
+	trimmedMessage := strings.TrimSpace(msg.Message)
+	if trimmedAgentID == "" {
+		return nil, fmt.Errorf("agent_id is required")
+	}
+	if trimmedMessage == "" {
+		return nil, fmt.Errorf("message is required")
+	}
+	sessionID := strings.TrimSpace(msg.SessionID)
+	if sessionID == "" {
+		sessionID = uuid.NewString()
+	}
+	idempotencyKey := strings.TrimSpace(msg.IdempotencyKey)
+	if idempotencyKey == "" {
+		idempotencyKey = uuid.NewString()
+	}
+	routing := orchestration.RoutingContext{}
+	if msg.Routing != nil {
+		routing = *msg.Routing
+	}
+	ch := string(channelType)
+	routing.Channel = &ch
+
+	task, deduped, err := agents.AcceptAgentCommand(ctx, workspaceID, orchestration.AgentCommandParams{
+		Message:        trimmedMessage,
+		AgentID:        &trimmedAgentID,
+		SessionID:      sessionID,
+		Routing:        routing,
+		IdempotencyKey: idempotencyKey,
+		Label:          msg.Label,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &SendResult{Accepted: true, IdempotentHit: deduped, Task: task, RunID: task.TargetRunID}, nil
+}
+
+// resolveInbound looks up a channel binding by address and returns the workspace + optional agent.
+func resolveInbound(repo repository.BackendRepository, channelType ChannelType, ctx context.Context, address string) (workspaceID uint, agentID string, err error) {
+	if repo == nil {
+		return 0, "", fmt.Errorf("repository unavailable")
+	}
+	binding, err := repo.GetChannelBindingByAddress(ctx, string(channelType), address)
+	if err != nil {
+		return 0, "", fmt.Errorf("no binding for %s %s: %w", channelType, address, err)
+	}
+	if binding.AgentID != nil {
+		return binding.WorkspaceID, *binding.AgentID, nil
+	}
+	return binding.WorkspaceID, "", nil
 }
 
 type Registry struct {

@@ -89,15 +89,35 @@ type AgentTaskState string
 const (
 	AgentTaskStateQueued    AgentTaskState = "queued"
 	AgentTaskStateRunning   AgentTaskState = "running"
-	AgentTaskStateIdle      AgentTaskState = "idle"
+	AgentTaskStateWaiting   AgentTaskState = "waiting"
+	AgentTaskStateSleeping  AgentTaskState = "sleeping"
 	AgentTaskStateDone      AgentTaskState = "done"
+	AgentTaskStateError     AgentTaskState = "error"
 	AgentTaskStateDropped   AgentTaskState = "dropped"
 	AgentTaskStateCancelled AgentTaskState = "cancelled"
 )
 
+type AgentTaskPriority string
+
+const (
+	AgentTaskPriorityLow    AgentTaskPriority = "low"
+	AgentTaskPriorityNormal AgentTaskPriority = "normal"
+	AgentTaskPriorityHigh   AgentTaskPriority = "high"
+	AgentTaskPriorityUrgent AgentTaskPriority = "urgent"
+)
+
+func (p AgentTaskPriority) IsValid() bool {
+	switch p {
+	case AgentTaskPriorityLow, AgentTaskPriorityNormal, AgentTaskPriorityHigh, AgentTaskPriorityUrgent:
+		return true
+	default:
+		return false
+	}
+}
+
 func (s AgentTaskState) IsDispatchable() bool {
 	switch s {
-	case AgentTaskStateQueued:
+	case AgentTaskStateQueued, AgentTaskStateWaiting, AgentTaskStateSleeping:
 		return true
 	default:
 		return false
@@ -106,19 +126,16 @@ func (s AgentTaskState) IsDispatchable() bool {
 
 func (s AgentTaskState) IsTerminal() bool {
 	switch s {
-	case AgentTaskStateDone, AgentTaskStateDropped, AgentTaskStateCancelled:
+	case AgentTaskStateDone, AgentTaskStateError, AgentTaskStateDropped, AgentTaskStateCancelled:
 		return true
 	default:
 		return false
 	}
 }
 
-func TaskTerminalStateForRun(runStatus AgentRunStatus, interactive bool) AgentTaskState {
+func TaskTerminalStateForRun(runStatus AgentRunStatus) AgentTaskState {
 	if runStatus == AgentRunStatusCancelled {
 		return AgentTaskStateCancelled
-	}
-	if interactive && runStatus == AgentRunStatusOK {
-		return AgentTaskStateIdle
 	}
 	return AgentTaskStateDone
 }
@@ -326,6 +343,7 @@ const (
 	AgentExecutionMetaKeyRunID            = "run_id"
 	AgentExecutionMetaKeyRunAttemptID     = "run_attempt_id"
 	AgentExecutionMetaKeyOriginTaskID     = "origin_task_id"
+	AgentExecutionMetaKeyAgentID          = "agent_id"
 )
 
 type OrchestrationOutboxEventType string
@@ -336,30 +354,34 @@ const (
 )
 
 const (
-	OrchestrationOutboxPayloadTaskID      = "task_id"
-	OrchestrationOutboxPayloadAttemptID   = "attempt_id"
-	OrchestrationOutboxPayloadExitCode    = "exit_code"
-	OrchestrationOutboxPayloadError       = "error"
-	OrchestrationOutboxPayloadReason      = "reason"
-	OrchestrationOutboxPayloadRetryDelay  = "retry_delay_ms"
+	OrchestrationOutboxPayloadTaskID          = "task_id"
+	OrchestrationOutboxPayloadAttemptID       = "attempt_id"
+	OrchestrationOutboxPayloadExitCode        = "exit_code"
+	OrchestrationOutboxPayloadError           = "error"
+	OrchestrationOutboxPayloadReason          = "reason"
+	OrchestrationOutboxPayloadRetryDelay      = "retry_delay_ms"
 	OrchestrationOutboxPayloadDispatchAttempt = "dispatch_attempt"
-	OrchestrationOutboxPayloadRunID       = "run_id"
-	OrchestrationOutboxPayloadSessionID   = "session_id"
-	OrchestrationOutboxPayloadStreamID    = "stream_id"
-	OrchestrationOutboxPayloadIdempotency = "idempotency_key"
+	OrchestrationOutboxPayloadRunID           = "run_id"
+	OrchestrationOutboxPayloadSessionID       = "session_id"
+	OrchestrationOutboxPayloadStreamID        = "stream_id"
+	OrchestrationOutboxPayloadIdempotency     = "idempotency_key"
+	OrchestrationOutboxPayloadWaitingForInput    = "waiting_for_input"
+	OrchestrationOutboxPayloadWakeDelayMinutes   = "wake_delay_minutes"
+	OrchestrationOutboxPayloadWakeReason         = "wake_reason"
+	OrchestrationOutboxPayloadWakeFollowUpPrompt = "wake_follow_up_prompt"
 )
 
 type OrchestrationOutboxEvent struct {
-	ID         int64                      `json:"id" db:"id"`
-	EventType  OrchestrationOutboxEventType `json:"event_type" db:"event_type"`
-	DedupeKey  string                     `json:"dedupe_key" db:"dedupe_key"`
-	PayloadJSON map[string]any            `json:"payload_json" db:"-"`
-	AvailableAt time.Time                 `json:"available_at" db:"available_at"`
-	PublishedAt *time.Time                `json:"published_at,omitempty" db:"published_at"`
-	Attempts   int                        `json:"attempts" db:"attempts"`
-	LastError  *string                    `json:"last_error,omitempty" db:"last_error"`
-	CreatedAt  time.Time                  `json:"created_at" db:"created_at"`
-	UpdatedAt  time.Time                  `json:"updated_at" db:"updated_at"`
+	ID          int64                        `json:"id" db:"id"`
+	EventType   OrchestrationOutboxEventType `json:"event_type" db:"event_type"`
+	DedupeKey   string                       `json:"dedupe_key" db:"dedupe_key"`
+	PayloadJSON map[string]any               `json:"payload_json" db:"-"`
+	AvailableAt time.Time                    `json:"available_at" db:"available_at"`
+	PublishedAt *time.Time                   `json:"published_at,omitempty" db:"published_at"`
+	Attempts    int                          `json:"attempts" db:"attempts"`
+	LastError   *string                      `json:"last_error,omitempty" db:"last_error"`
+	CreatedAt   time.Time                    `json:"created_at" db:"created_at"`
+	UpdatedAt   time.Time                    `json:"updated_at" db:"updated_at"`
 }
 
 type AgentExecutionInstanceStatus string
@@ -371,10 +393,26 @@ const (
 )
 
 type AgentProfile struct {
-	ID          string         `json:"id" db:"id"`
+	ID            string         `json:"id" db:"id"`
+	WorkspaceID   uint           `json:"workspace_id" db:"workspace_id"`
+	AgentKey      string         `json:"agent_key" db:"agent_key"`
+	Name          string         `json:"name" db:"name"`
+	Role          string         `json:"role" db:"role"`
+	MemoryScope   string         `json:"memory_scope" db:"memory_scope"`
+	QualityScore  *float64       `json:"quality_score,omitempty" db:"quality_score"`
+	CostBudgetUSD *float64       `json:"cost_budget_usd,omitempty" db:"cost_budget_usd"`
+	ConfigJSON    map[string]any `json:"config_json" db:"-"`
+	Active        bool           `json:"active" db:"active"`
+	CreatedAt     time.Time      `json:"created_at" db:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at" db:"updated_at"`
+}
+
+type ChannelBinding struct {
+	ID          int64          `json:"id" db:"id"`
 	WorkspaceID uint           `json:"workspace_id" db:"workspace_id"`
-	AgentKey    string         `json:"agent_key" db:"agent_key"`
-	Name        string         `json:"name" db:"name"`
+	AgentID     *string        `json:"agent_id" db:"agent_id"`
+	ChannelType string         `json:"channel_type" db:"channel_type"`
+	Address     string         `json:"address" db:"address"`
 	ConfigJSON  map[string]any `json:"config_json" db:"-"`
 	Active      bool           `json:"active" db:"active"`
 	CreatedAt   time.Time      `json:"created_at" db:"created_at"`
@@ -383,8 +421,8 @@ type AgentProfile struct {
 
 // AgentTask is the high-level orchestration task (agent -> task -> run).
 type AgentTask struct {
-	ID             string         `json:"id" db:"id"`
-	WorkspaceID    uint           `json:"workspace_id" db:"workspace_id"`
+	ID             string           `json:"id" db:"id"`
+	WorkspaceID    uint             `json:"workspace_id" db:"workspace_id"`
 	AgentID        *string        `json:"agent_id,omitempty" db:"agent_id"`
 	AgentName      string         `json:"agent_name,omitempty" db:"-"`
 	QueueMode      AgentQueueMode `json:"queue_mode" db:"queue_mode"`
@@ -392,15 +430,22 @@ type AgentTask struct {
 	IdempotencyKey string         `json:"idempotency_key" db:"idempotency_key"`
 	PayloadJSON    map[string]any `json:"payload_json" db:"-"`
 	RoutingJSON    map[string]any `json:"routing_json" db:"-"`
-	ParentTaskID   *string        `json:"parent_task_id,omitempty" db:"parent_envelope_id"`
-	TargetRunID    *string        `json:"target_run_id,omitempty" db:"target_run_id"`
-	AcceptedAt     time.Time      `json:"accepted_at" db:"accepted_at"`
-	QueuedAt       *time.Time     `json:"queued_at,omitempty" db:"queued_at"`
-	DispatchedAt   *time.Time     `json:"dispatched_at,omitempty" db:"dispatched_at"`
-	DroppedReason  *string        `json:"dropped_reason,omitempty" db:"dropped_reason"`
-	ArchivedAt     *time.Time     `json:"archived_at,omitempty" db:"archived_at"`
-	CreatedAt      time.Time      `json:"created_at" db:"created_at"`
-	UpdatedAt      time.Time      `json:"updated_at" db:"updated_at"`
+	ParentTaskID   *string          `json:"parent_task_id,omitempty" db:"parent_envelope_id"`
+	TargetRunID    *string          `json:"target_run_id,omitempty" db:"target_run_id"`
+	AcceptedAt     time.Time        `json:"accepted_at" db:"accepted_at"`
+	QueuedAt       *time.Time       `json:"queued_at,omitempty" db:"queued_at"`
+	DispatchedAt   *time.Time       `json:"dispatched_at,omitempty" db:"dispatched_at"`
+	Deadline       *time.Time       `json:"deadline,omitempty" db:"deadline"`
+	DroppedReason  *string          `json:"dropped_reason,omitempty" db:"dropped_reason"`
+	Priority       string           `json:"priority" db:"priority"`
+	BudgetUSD      *float64         `json:"budget_usd,omitempty" db:"budget_usd"`
+	CostUSD        float64          `json:"cost_usd" db:"cost_usd"`
+	ArchivedAt     *time.Time       `json:"archived_at,omitempty" db:"archived_at"`
+	WakeAt         *time.Time       `json:"wake_at,omitempty" db:"wake_at"`
+	WakeReason     *string          `json:"wake_reason,omitempty" db:"wake_reason"`
+	WakeCount      int              `json:"wake_count,omitempty" db:"wake_count"`
+	CreatedAt      time.Time        `json:"created_at" db:"created_at"`
+	UpdatedAt      time.Time        `json:"updated_at" db:"updated_at"`
 }
 
 type AgentRun struct {
@@ -429,6 +474,7 @@ type AgentRun struct {
 	ClaimExpiresAt   *time.Time     `json:"claim_expires_at,omitempty" db:"claim_expires_at"`
 	Error            *string        `json:"error,omitempty" db:"error"`
 	SnapshotTS       int64          `json:"snapshot_ts" db:"snapshot_ts"`
+	CostUSD          float64        `json:"cost_usd" db:"cost_usd"`
 	UsageJSON        map[string]any `json:"usage_json" db:"-"`
 	DeliveryJSON     map[string]any `json:"delivery_json" db:"-"`
 	CreatedAt        time.Time      `json:"created_at" db:"created_at"`
@@ -459,6 +505,10 @@ type AgentRunAttempt struct {
 	UpdatedAt       time.Time          `json:"updated_at" db:"updated_at"`
 }
 
+func (a *AgentRunAttempt) IsActive() bool {
+	return a != nil && a.EndedAt == nil && a.Status.IsInFlight()
+}
+
 type AgentRunSnapshot struct {
 	ID          int64          `json:"id" db:"id"`
 	RunID       string         `json:"run_id" db:"run_id"`
@@ -483,6 +533,7 @@ type AgentTaskListFilter struct {
 
 type AgentRunListFilter struct {
 	AgentID       *string
+	TaskID        *string
 	Statuses      []AgentRunStatus
 	SessionID     *string
 	CreatedAfter  *time.Time
@@ -725,21 +776,38 @@ type RunExecutionState struct {
 }
 
 // RunExecutionResult contains the result of a completed run execution
+type RunExecutionWakeSignal struct {
+	DelayMinutes   int    `json:"delay_minutes"`
+	Reason         string `json:"reason,omitempty"`
+	FollowUpPrompt string `json:"follow_up_prompt,omitempty"`
+}
+
 type RunExecutionResult struct {
-	// ID is the run execution identifier
-	ID string `json:"id"`
+	ID              string                  `json:"id"`
+	ExitCode        int                     `json:"exit_code"`
+	Output          []byte                  `json:"output,omitempty"`
+	Error           string                  `json:"error,omitempty"`
+	Duration        time.Duration           `json:"duration"`
+	WaitingForInput bool                    `json:"waiting_for_input,omitempty"`
+	WakeSignal      *RunExecutionWakeSignal `json:"wake_signal,omitempty"`
+}
 
-	// ExitCode is the exit code of the run execution
-	ExitCode int `json:"exit_code"`
+type ErrTaskNotCancellable struct {
+	ID    string
+	State AgentTaskState
+}
 
-	// Output is the stdout/stderr output (if captured)
-	Output []byte `json:"output,omitempty"`
+func (e *ErrTaskNotCancellable) Error() string {
+	return fmt.Sprintf("task %s cannot be cancelled (state: %s)", e.ID, e.State)
+}
 
-	// Error contains error message if failed
-	Error string `json:"error,omitempty"`
+type ErrTaskNotArchivable struct {
+	ID    string
+	State AgentTaskState
+}
 
-	// Duration is how long the task ran
-	Duration time.Duration `json:"duration"`
+func (e *ErrTaskNotArchivable) Error() string {
+	return fmt.Sprintf("task %s cannot be archived (state: %s)", e.ID, e.State)
 }
 
 type ErrAgentProfileNotFound struct {
@@ -772,4 +840,50 @@ type ErrAgentRunAttemptNotFound struct {
 
 func (e *ErrAgentRunAttemptNotFound) Error() string {
 	return "agent run attempt not found: " + e.ID
+}
+
+// TaskOutput is a structured output produced by an agent during a task.
+type TaskOutput struct {
+	ID          string         `json:"id"`
+	WorkspaceID uint           `json:"workspace_id"`
+	TaskID      string         `json:"task_id"`
+	RunID       *string        `json:"run_id,omitempty"`
+	AgentID     *string        `json:"agent_id,omitempty"`
+	AgentName   string         `json:"agent_name,omitempty"`
+	OutputType  string         `json:"output_type"`
+	Title       string         `json:"title"`
+	Summary     *string        `json:"summary,omitempty"`
+	URI         *string        `json:"uri,omitempty"`
+	Schema      map[string]any `json:"schema,omitempty"`
+	Data        map[string]any `json:"data"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
+	ArchivedAt  *time.Time     `json:"archived_at,omitempty"`
+	CreatedAt   time.Time      `json:"created_at"`
+}
+
+type TaskOutputListFilter struct {
+	TaskID          *string `json:"task_id,omitempty"`
+	AgentID         *string `json:"agent_id,omitempty"`
+	OutputType      *string `json:"output_type,omitempty"`
+	ExcludeArchived bool    `json:"exclude_archived,omitempty"`
+	Limit           int     `json:"limit,omitempty"`
+}
+
+type ErrTaskOutputNotFound struct {
+	ID string
+}
+
+func (e *ErrTaskOutputNotFound) Error() string {
+	return "task output not found: " + e.ID
+}
+
+type AgentStats struct {
+	Total           int            `json:"total"`
+	ByState         map[string]int `json:"by_state"`
+	AvgRunSec       *float64       `json:"avg_run_sec,omitempty"`
+	QualityScore    *float64       `json:"quality_score,omitempty"`
+	TotalCostUSD    float64        `json:"total_cost_usd"`
+	RunningCount    int            `json:"running_count"`
+	CompletedCount  int            `json:"completed_count"`
+	FailedCount int `json:"failed_count"`
 }

@@ -16,10 +16,16 @@ service WorkerService {
   // Task lifecycle
   rpc SetTaskStarted(SetTaskStartedRequest) returns (SetTaskStartedResponse);
   rpc SetTaskResult(SetTaskResultRequest) returns (SetTaskResultResponse);
+  rpc UpdateTaskState(UpdateTaskStateRequest) returns (UpdateTaskStateResponse);
 
   // Network/IP management for sandboxes
   rpc AllocateIP(AllocateIPRequest) returns (AllocateIPResponse);
   rpc ReleaseIP(ReleaseIPRequest) returns (ReleaseIPResponse);
+
+  // Task outputs
+  rpc CreateTaskOutput(CreateTaskOutputRequest) returns (CreateTaskOutputResponse);
+  rpc AppendTaskOutputRows(AppendTaskOutputRowsRequest) returns (AppendTaskOutputRowsResponse);
+  rpc FinalizeTaskOutput(FinalizeTaskOutputRequest) returns (FinalizeTaskOutputResponse);
 }
 
 // Worker registration
@@ -89,14 +95,30 @@ message SetTaskStartedRequest {
 
 message SetTaskStartedResponse {}
 
+message WakeSignal {
+  int32  delay_minutes    = 1;
+  string reason           = 2;
+  string follow_up_prompt = 3;
+}
+
 message SetTaskResultRequest {
   string task_id = 1;
   int32 exit_code = 2;
   string error = 3;
   string attempt_id = 4;
+  bool waiting_for_input = 5;
+  WakeSignal wake_signal = 6;
 }
 
 message SetTaskResultResponse {}
+
+message UpdateTaskStateRequest {
+  string task_id = 1;
+  string state = 2;
+  string run_id = 3;
+}
+
+message UpdateTaskStateResponse {}
 
 // IP allocation for sandbox networking
 message AllocateIPRequest {
@@ -118,4 +140,38 @@ message ReleaseIPRequest {
 }
 
 message ReleaseIPResponse {}
+
+// Task output messages
+message CreateTaskOutputRequest {
+  uint32 workspace_id = 1;
+  string task_id = 2;
+  string run_id = 3;
+  string output_type = 4;
+  string title = 5;
+  string schema_json = 6;   // JSON-encoded schema
+  string data_json = 7;     // JSON-encoded initial data
+  string metadata_json = 8; // JSON-encoded metadata
+  string uri = 9;            // External deep-link URI
+  string agent_id = 10;
+}
+
+message CreateTaskOutputResponse {
+  string id = 1;
+}
+
+message AppendTaskOutputRowsRequest {
+  uint32 workspace_id = 1;
+  string output_id = 2;
+  string rows_json = 3; // JSON-encoded array of rows
+}
+
+message AppendTaskOutputRowsResponse {}
+
+message FinalizeTaskOutputRequest {
+  uint32 workspace_id = 1;
+  string output_id = 2;
+  string summary = 3;
+}
+
+message FinalizeTaskOutputResponse {}
 

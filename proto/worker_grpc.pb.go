@@ -19,16 +19,20 @@ import (
 const _ = grpc.SupportPackageIsVersion7
 
 const (
-	WorkerService_RegisterWorker_FullMethodName = "/worker.WorkerService/RegisterWorker"
-	WorkerService_Heartbeat_FullMethodName      = "/worker.WorkerService/Heartbeat"
-	WorkerService_UpdateStatus_FullMethodName   = "/worker.WorkerService/UpdateStatus"
-	WorkerService_Deregister_FullMethodName     = "/worker.WorkerService/Deregister"
-	WorkerService_GetWorker_FullMethodName      = "/worker.WorkerService/GetWorker"
-	WorkerService_ListWorkers_FullMethodName    = "/worker.WorkerService/ListWorkers"
-	WorkerService_SetTaskStarted_FullMethodName = "/worker.WorkerService/SetTaskStarted"
-	WorkerService_SetTaskResult_FullMethodName  = "/worker.WorkerService/SetTaskResult"
-	WorkerService_AllocateIP_FullMethodName     = "/worker.WorkerService/AllocateIP"
-	WorkerService_ReleaseIP_FullMethodName      = "/worker.WorkerService/ReleaseIP"
+	WorkerService_RegisterWorker_FullMethodName       = "/worker.WorkerService/RegisterWorker"
+	WorkerService_Heartbeat_FullMethodName            = "/worker.WorkerService/Heartbeat"
+	WorkerService_UpdateStatus_FullMethodName         = "/worker.WorkerService/UpdateStatus"
+	WorkerService_Deregister_FullMethodName           = "/worker.WorkerService/Deregister"
+	WorkerService_GetWorker_FullMethodName            = "/worker.WorkerService/GetWorker"
+	WorkerService_ListWorkers_FullMethodName          = "/worker.WorkerService/ListWorkers"
+	WorkerService_SetTaskStarted_FullMethodName       = "/worker.WorkerService/SetTaskStarted"
+	WorkerService_SetTaskResult_FullMethodName        = "/worker.WorkerService/SetTaskResult"
+	WorkerService_UpdateTaskState_FullMethodName      = "/worker.WorkerService/UpdateTaskState"
+	WorkerService_AllocateIP_FullMethodName           = "/worker.WorkerService/AllocateIP"
+	WorkerService_ReleaseIP_FullMethodName            = "/worker.WorkerService/ReleaseIP"
+	WorkerService_CreateTaskOutput_FullMethodName     = "/worker.WorkerService/CreateTaskOutput"
+	WorkerService_AppendTaskOutputRows_FullMethodName = "/worker.WorkerService/AppendTaskOutputRows"
+	WorkerService_FinalizeTaskOutput_FullMethodName   = "/worker.WorkerService/FinalizeTaskOutput"
 )
 
 // WorkerServiceClient is the client API for WorkerService service.
@@ -45,9 +49,14 @@ type WorkerServiceClient interface {
 	// Task lifecycle
 	SetTaskStarted(ctx context.Context, in *SetTaskStartedRequest, opts ...grpc.CallOption) (*SetTaskStartedResponse, error)
 	SetTaskResult(ctx context.Context, in *SetTaskResultRequest, opts ...grpc.CallOption) (*SetTaskResultResponse, error)
+	UpdateTaskState(ctx context.Context, in *UpdateTaskStateRequest, opts ...grpc.CallOption) (*UpdateTaskStateResponse, error)
 	// Network/IP management for sandboxes
 	AllocateIP(ctx context.Context, in *AllocateIPRequest, opts ...grpc.CallOption) (*AllocateIPResponse, error)
 	ReleaseIP(ctx context.Context, in *ReleaseIPRequest, opts ...grpc.CallOption) (*ReleaseIPResponse, error)
+	// Task outputs
+	CreateTaskOutput(ctx context.Context, in *CreateTaskOutputRequest, opts ...grpc.CallOption) (*CreateTaskOutputResponse, error)
+	AppendTaskOutputRows(ctx context.Context, in *AppendTaskOutputRowsRequest, opts ...grpc.CallOption) (*AppendTaskOutputRowsResponse, error)
+	FinalizeTaskOutput(ctx context.Context, in *FinalizeTaskOutputRequest, opts ...grpc.CallOption) (*FinalizeTaskOutputResponse, error)
 }
 
 type workerServiceClient struct {
@@ -130,6 +139,15 @@ func (c *workerServiceClient) SetTaskResult(ctx context.Context, in *SetTaskResu
 	return out, nil
 }
 
+func (c *workerServiceClient) UpdateTaskState(ctx context.Context, in *UpdateTaskStateRequest, opts ...grpc.CallOption) (*UpdateTaskStateResponse, error) {
+	out := new(UpdateTaskStateResponse)
+	err := c.cc.Invoke(ctx, WorkerService_UpdateTaskState_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *workerServiceClient) AllocateIP(ctx context.Context, in *AllocateIPRequest, opts ...grpc.CallOption) (*AllocateIPResponse, error) {
 	out := new(AllocateIPResponse)
 	err := c.cc.Invoke(ctx, WorkerService_AllocateIP_FullMethodName, in, out, opts...)
@@ -142,6 +160,33 @@ func (c *workerServiceClient) AllocateIP(ctx context.Context, in *AllocateIPRequ
 func (c *workerServiceClient) ReleaseIP(ctx context.Context, in *ReleaseIPRequest, opts ...grpc.CallOption) (*ReleaseIPResponse, error) {
 	out := new(ReleaseIPResponse)
 	err := c.cc.Invoke(ctx, WorkerService_ReleaseIP_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workerServiceClient) CreateTaskOutput(ctx context.Context, in *CreateTaskOutputRequest, opts ...grpc.CallOption) (*CreateTaskOutputResponse, error) {
+	out := new(CreateTaskOutputResponse)
+	err := c.cc.Invoke(ctx, WorkerService_CreateTaskOutput_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workerServiceClient) AppendTaskOutputRows(ctx context.Context, in *AppendTaskOutputRowsRequest, opts ...grpc.CallOption) (*AppendTaskOutputRowsResponse, error) {
+	out := new(AppendTaskOutputRowsResponse)
+	err := c.cc.Invoke(ctx, WorkerService_AppendTaskOutputRows_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workerServiceClient) FinalizeTaskOutput(ctx context.Context, in *FinalizeTaskOutputRequest, opts ...grpc.CallOption) (*FinalizeTaskOutputResponse, error) {
+	out := new(FinalizeTaskOutputResponse)
+	err := c.cc.Invoke(ctx, WorkerService_FinalizeTaskOutput_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -162,9 +207,14 @@ type WorkerServiceServer interface {
 	// Task lifecycle
 	SetTaskStarted(context.Context, *SetTaskStartedRequest) (*SetTaskStartedResponse, error)
 	SetTaskResult(context.Context, *SetTaskResultRequest) (*SetTaskResultResponse, error)
+	UpdateTaskState(context.Context, *UpdateTaskStateRequest) (*UpdateTaskStateResponse, error)
 	// Network/IP management for sandboxes
 	AllocateIP(context.Context, *AllocateIPRequest) (*AllocateIPResponse, error)
 	ReleaseIP(context.Context, *ReleaseIPRequest) (*ReleaseIPResponse, error)
+	// Task outputs
+	CreateTaskOutput(context.Context, *CreateTaskOutputRequest) (*CreateTaskOutputResponse, error)
+	AppendTaskOutputRows(context.Context, *AppendTaskOutputRowsRequest) (*AppendTaskOutputRowsResponse, error)
+	FinalizeTaskOutput(context.Context, *FinalizeTaskOutputRequest) (*FinalizeTaskOutputResponse, error)
 	mustEmbedUnimplementedWorkerServiceServer()
 }
 
@@ -196,11 +246,23 @@ func (UnimplementedWorkerServiceServer) SetTaskStarted(context.Context, *SetTask
 func (UnimplementedWorkerServiceServer) SetTaskResult(context.Context, *SetTaskResultRequest) (*SetTaskResultResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SetTaskResult not implemented")
 }
+func (UnimplementedWorkerServiceServer) UpdateTaskState(context.Context, *UpdateTaskStateRequest) (*UpdateTaskStateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UpdateTaskState not implemented")
+}
 func (UnimplementedWorkerServiceServer) AllocateIP(context.Context, *AllocateIPRequest) (*AllocateIPResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method AllocateIP not implemented")
 }
 func (UnimplementedWorkerServiceServer) ReleaseIP(context.Context, *ReleaseIPRequest) (*ReleaseIPResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ReleaseIP not implemented")
+}
+func (UnimplementedWorkerServiceServer) CreateTaskOutput(context.Context, *CreateTaskOutputRequest) (*CreateTaskOutputResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CreateTaskOutput not implemented")
+}
+func (UnimplementedWorkerServiceServer) AppendTaskOutputRows(context.Context, *AppendTaskOutputRowsRequest) (*AppendTaskOutputRowsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AppendTaskOutputRows not implemented")
+}
+func (UnimplementedWorkerServiceServer) FinalizeTaskOutput(context.Context, *FinalizeTaskOutputRequest) (*FinalizeTaskOutputResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method FinalizeTaskOutput not implemented")
 }
 func (UnimplementedWorkerServiceServer) mustEmbedUnimplementedWorkerServiceServer() {}
 
@@ -359,6 +421,24 @@ func _WorkerService_SetTaskResult_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _WorkerService_UpdateTaskState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateTaskStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkerServiceServer).UpdateTaskState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkerService_UpdateTaskState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkerServiceServer).UpdateTaskState(ctx, req.(*UpdateTaskStateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _WorkerService_AllocateIP_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(AllocateIPRequest)
 	if err := dec(in); err != nil {
@@ -391,6 +471,60 @@ func _WorkerService_ReleaseIP_Handler(srv interface{}, ctx context.Context, dec 
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(WorkerServiceServer).ReleaseIP(ctx, req.(*ReleaseIPRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _WorkerService_CreateTaskOutput_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateTaskOutputRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkerServiceServer).CreateTaskOutput(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkerService_CreateTaskOutput_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkerServiceServer).CreateTaskOutput(ctx, req.(*CreateTaskOutputRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _WorkerService_AppendTaskOutputRows_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AppendTaskOutputRowsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkerServiceServer).AppendTaskOutputRows(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkerService_AppendTaskOutputRows_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkerServiceServer).AppendTaskOutputRows(ctx, req.(*AppendTaskOutputRowsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _WorkerService_FinalizeTaskOutput_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FinalizeTaskOutputRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkerServiceServer).FinalizeTaskOutput(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkerService_FinalizeTaskOutput_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkerServiceServer).FinalizeTaskOutput(ctx, req.(*FinalizeTaskOutputRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -435,12 +569,28 @@ var WorkerService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _WorkerService_SetTaskResult_Handler,
 		},
 		{
+			MethodName: "UpdateTaskState",
+			Handler:    _WorkerService_UpdateTaskState_Handler,
+		},
+		{
 			MethodName: "AllocateIP",
 			Handler:    _WorkerService_AllocateIP_Handler,
 		},
 		{
 			MethodName: "ReleaseIP",
 			Handler:    _WorkerService_ReleaseIP_Handler,
+		},
+		{
+			MethodName: "CreateTaskOutput",
+			Handler:    _WorkerService_CreateTaskOutput_Handler,
+		},
+		{
+			MethodName: "AppendTaskOutputRows",
+			Handler:    _WorkerService_AppendTaskOutputRows_Handler,
+		},
+		{
+			MethodName: "FinalizeTaskOutput",
+			Handler:    _WorkerService_FinalizeTaskOutput_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -7,6 +7,7 @@ import type {
   TaskArchiveResponse,
   TaskListParams,
   TaskListResponse,
+  TaskUpdateParams,
   TaskLogListParams,
   TaskLogListResponse,
   TaskEventStreamParams,
@@ -14,6 +15,11 @@ import type {
   Schedule,
   ScheduleCreateParams,
   ScheduleUpdateParams,
+  TaskOutput,
+  TaskOutputListParams,
+  TaskOutputListResponse,
+  CreateTaskOutputParams,
+  AppendRowsParams,
 } from '../types/tasks.js';
 import { toInputProvenanceBody, toPolicyBody, toRoutingBody } from './helpers.js';
 
@@ -56,6 +62,8 @@ export class Tasks {
         idempotency_key: params.idempotencyKey,
         label: params.label,
         spawned_by: params.spawnedBy,
+        priority: params.priority,
+        budget_usd: params.budgetUsd,
       },
       undefined,
       options,
@@ -150,7 +158,7 @@ export class Tasks {
     );
   }
 
-  /** Archive an idle or terminal task so it no longer appears in active listings. */
+  /** Archive a terminal task so it no longer appears in active listings. */
   async archive(
     workspaceId: string,
     taskId: string,
@@ -160,6 +168,27 @@ export class Tasks {
       'POST',
       `/workspaces/${workspaceId}/tasks/${taskId}/archive`,
       undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Update metadata on an existing task. */
+  async update(
+    workspaceId: string,
+    taskId: string,
+    params: TaskUpdateParams,
+    options?: RequestOptions,
+  ): Promise<AgentTask> {
+    return this.client.request<AgentTask>(
+      'PATCH',
+      `/workspaces/${workspaceId}/tasks/${taskId}`,
+      {
+        ...(params.priority != null && { priority: params.priority }),
+        ...(params.budgetUsd !== undefined && { budget_usd: params.budgetUsd }),
+        ...(params.payload != null && { payload_json: params.payload }),
+        ...(params.routing != null && { routing_json: toRoutingBody(params.routing) }),
+      },
       undefined,
       options,
     );
@@ -206,6 +235,83 @@ export class Tasks {
   async deleteSchedule(workspaceId: string, scheduleId: string, options?: RequestOptions): Promise<void> {
     await this.client.request('DELETE', this.schedulePath(workspaceId, scheduleId), undefined, undefined, options);
   }
+
+  // ── Task Outputs ──────────────────────────────────────────────────────────
+
+  private outputPath(workspaceId: string, taskId: string, outputId?: string): string {
+    const base = `/workspaces/${workspaceId}/tasks/${taskId}/outputs`;
+    return outputId ? `${base}/${outputId}` : base;
+  }
+
+  /** List all outputs for a task. */
+  async listOutputs(workspaceId: string, taskId: string, options?: RequestOptions): Promise<TaskOutput[]> {
+    const resp = await this.client.request<{ outputs: TaskOutput[] }>(
+      'GET', this.outputPath(workspaceId, taskId), undefined, undefined, options,
+    );
+    return resp.outputs ?? [];
+  }
+
+  /** List recent outputs across a workspace. */
+  async listWorkspaceOutputs(
+    workspaceId: string,
+    params?: TaskOutputListParams,
+    options?: RequestOptions,
+  ): Promise<TaskOutputListResponse> {
+    const response = await this.client.request<TaskOutputListResponse>(
+      'GET',
+      `/workspaces/${workspaceId}/outputs`,
+      undefined,
+      toTaskOutputListQuery(params),
+      options,
+    );
+    return {
+      outputs: response.outputs ?? [],
+      next_cursor: response.next_cursor ?? '',
+      has_more: response.has_more ?? false,
+    };
+  }
+
+  /** Create a structured output for a task. */
+  async createOutput(workspaceId: string, taskId: string, params: CreateTaskOutputParams, options?: RequestOptions): Promise<TaskOutput> {
+    return this.client.request<TaskOutput>(
+      'POST', this.outputPath(workspaceId, taskId), params, undefined, options,
+    );
+  }
+
+  /** Retrieve a single output by ID (includes full data). */
+  async getOutput(workspaceId: string, taskId: string, outputId: string, options?: RequestOptions): Promise<TaskOutput> {
+    return this.client.request<TaskOutput>(
+      'GET', this.outputPath(workspaceId, taskId, outputId), undefined, undefined, options,
+    );
+  }
+
+  /** Append rows to a table output. */
+  async appendOutputRows(workspaceId: string, taskId: string, outputId: string, params: AppendRowsParams, options?: RequestOptions): Promise<void> {
+    await this.client.request(
+      'POST', `${this.outputPath(workspaceId, taskId, outputId)}/rows`, params, undefined, options,
+    );
+  }
+
+  /** Delete an output. */
+  async deleteOutput(workspaceId: string, taskId: string, outputId: string, options?: RequestOptions): Promise<void> {
+    await this.client.request(
+      'DELETE', this.outputPath(workspaceId, taskId, outputId), undefined, undefined, options,
+    );
+  }
+
+  /** Archive (dismiss) a single output. */
+  async archiveOutput(workspaceId: string, outputId: string, options?: RequestOptions): Promise<void> {
+    await this.client.request(
+      'POST', `/workspaces/${workspaceId}/outputs/${outputId}/archive`, undefined, undefined, options,
+    );
+  }
+
+  /** Archive all unarchived outputs in the workspace. */
+  async archiveAllOutputs(workspaceId: string, options?: RequestOptions): Promise<{ archived: number }> {
+    return this.client.request<{ archived: number }>(
+      'POST', `/workspaces/${workspaceId}/outputs/archive-all`, undefined, undefined, options,
+    );
+  }
 }
 
 function toTaskListQuery(params: TaskListParams | undefined): Record<string, string> | undefined {
@@ -217,6 +323,18 @@ function toTaskListQuery(params: TaskListParams | undefined): Record<string, str
   }
   if (params.createdAfter) query['created_after'] = params.createdAfter;
   if (params.createdBefore) query['created_before'] = params.createdBefore;
+  if (params.limit !== undefined) query['limit'] = String(params.limit);
+  if (params.cursor) query['cursor'] = params.cursor;
+  return Object.keys(query).length > 0 ? query : undefined;
+}
+
+function toTaskOutputListQuery(params: TaskOutputListParams | undefined): Record<string, string> | undefined {
+  if (!params) return undefined;
+  const query: Record<string, string> = {};
+  if (params.taskId) query['task_id'] = params.taskId;
+  if (params.agentId) query['agent_id'] = params.agentId;
+  if (params.outputType) query['output_type'] = params.outputType;
+  if (params.includeArchived) query['include_archived'] = 'true';
   if (params.limit !== undefined) query['limit'] = String(params.limit);
   if (params.cursor) query['cursor'] = params.cursor;
   return Object.keys(query).length > 0 ? query : undefined;

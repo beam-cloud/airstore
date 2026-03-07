@@ -185,6 +185,14 @@ type BackendRepository interface {
 	UpdateAgentProfile(ctx context.Context, profile *types.AgentProfile) error
 	DeleteAgentProfile(ctx context.Context, workspaceId uint, agentId string) error
 
+	// Channel Bindings
+	// When agentID is nil, operates on workspace-level bindings (agent_id IS NULL).
+	// When agentID is non-nil, operates on that specific agent's bindings.
+	ListChannelBindings(ctx context.Context, workspaceId uint, agentID *string) ([]*types.ChannelBinding, error)
+	UpsertChannelBinding(ctx context.Context, binding *types.ChannelBinding) error
+	DeleteChannelBinding(ctx context.Context, workspaceId uint, agentID *string, channelType string) error
+	GetChannelBindingByAddress(ctx context.Context, channelType string, address string) (*types.ChannelBinding, error)
+
 	// Tasks
 	CreateTask(ctx context.Context, task *types.AgentTask) error
 	CreateTaskWithOutbox(ctx context.Context, task *types.AgentTask, event *types.OrchestrationOutboxEvent) error
@@ -196,6 +204,10 @@ type BackendRepository interface {
 	ClaimQueuedTaskForDispatch(ctx context.Context, taskID string, staleAfter time.Duration) (*types.AgentTask, bool, error)
 	UpdateTaskState(ctx context.Context, taskId string, state types.AgentTaskState, droppedReason *string, targetRunID *string) error
 	UpdateTaskStateIfCurrentRun(ctx context.Context, taskID string, expectedRunID string, state types.AgentTaskState, droppedReason *string, targetRunID *string) (bool, error)
+	SleepTaskWithOutbox(ctx context.Context, taskID string, expectedRunID string, wakeAt time.Time, wakeReason string, outboxEvent *types.OrchestrationOutboxEvent) (bool, error)
+	CancelPendingOutboxEventsForTask(ctx context.Context, taskID string) error
+	UpdateTask(ctx context.Context, task *types.AgentTask) error
+	UpdateTaskCost(ctx context.Context, taskID string, costUSD float64) error
 	ArchiveTask(ctx context.Context, taskId string) error
 	CreateScheduledTask(ctx context.Context, st *types.ScheduledTask) error
 	GetScheduledTask(ctx context.Context, workspaceID uint, externalID string) (*types.ScheduledTask, error)
@@ -249,6 +261,20 @@ type BackendRepository interface {
 	GetExecutionInstanceByKey(ctx context.Context, instanceKey string) (*types.AgentExecutionInstance, error)
 	UpdateExecutionInstanceState(ctx context.Context, instanceKey string, running, pending, stopping, desired int, status types.AgentExecutionInstanceStatus, lastEventAt *time.Time) error
 	AdjustExecutionInstanceRunningAttempts(ctx context.Context, instanceKey string, runningDelta int, lastEventAt *time.Time) error
+
+	// Agent stats
+	GetAgentStats(ctx context.Context, workspaceId uint, agentID string) (*types.AgentStats, error)
+
+	// Task outputs
+	ListTaskOutputs(ctx context.Context, workspaceId uint, taskID string) ([]*types.TaskOutput, error)
+	ListWorkspaceTaskOutputs(ctx context.Context, workspaceId uint, filter types.TaskOutputListFilter) ([]*types.TaskOutput, error)
+	CreateTaskOutput(ctx context.Context, output *types.TaskOutput) error
+	GetTaskOutput(ctx context.Context, workspaceId uint, outputID string) (*types.TaskOutput, error)
+	AppendTaskOutputRows(ctx context.Context, workspaceId uint, outputID string, rows []byte) error
+	UpdateTaskOutputSummary(ctx context.Context, workspaceId uint, outputID string, summary string) error
+	ArchiveTaskOutput(ctx context.Context, workspaceId uint, outputID string) error
+	ArchiveAllTaskOutputs(ctx context.Context, workspaceId uint) (int64, error)
+	DeleteTaskOutput(ctx context.Context, workspaceId uint, outputID string) error
 
 	// Database access
 	DB() *sql.DB
