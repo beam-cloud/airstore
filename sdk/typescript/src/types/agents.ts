@@ -21,6 +21,10 @@ export interface AgentProfile {
   workspace_id: number;
   agent_key: string;
   name: string;
+  role: string;
+  memory_scope: string;
+  quality_score?: number;
+  cost_budget_usd?: number;
   config_json: AgentConfig;
   active: boolean;
   created_at: string;
@@ -39,6 +43,10 @@ export interface AgentCreateParams {
 /** Parameters for updating an existing agent profile. All fields are optional. */
 export interface AgentUpdateParams {
   name?: string;
+  role?: string;
+  memoryScope?: string;
+  qualityScore?: number;
+  costBudgetUsd?: number;
   config?: AgentConfig;
   active?: boolean;
 }
@@ -69,6 +77,11 @@ export interface AgentStats {
   total: number;
   by_state: Record<string, number>;
   avg_run_sec?: number;
+  quality_score?: number;
+  total_cost_usd: number;
+  running_count: number;
+  completed_count: number;
+  failed_count: number;
 }
 
 /** Parameters for upserting channel bindings. */

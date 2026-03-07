@@ -74,11 +74,13 @@ func (a *AgentAPI) CreateAgent(
 	}
 
 	profile := &types.AgentProfile{
-		WorkspaceID: workspaceID,
-		AgentKey:    trimmedKey,
-		Name:        strings.TrimSpace(name),
-		ConfigJSON:  normalizedConfig,
-		Active:      isActive,
+		WorkspaceID:   workspaceID,
+		AgentKey:      trimmedKey,
+		Name:          strings.TrimSpace(name),
+		Role:          "generalist",
+		MemoryScope:   "workspace",
+		ConfigJSON:    normalizedConfig,
+		Active:        isActive,
 	}
 	if err := a.backend.CreateAgentProfile(ctx, profile); err != nil {
 		return nil, err
@@ -103,6 +105,10 @@ func (a *AgentAPI) UpdateAgent(
 	workspaceID uint,
 	agentID string,
 	name *string,
+	role *string,
+	memoryScope *string,
+	qualityScore *float64,
+	costBudgetUSD *float64,
 	config map[string]any,
 	active *bool,
 ) (*types.AgentProfile, error) {
@@ -116,6 +122,18 @@ func (a *AgentAPI) UpdateAgent(
 			return nil, fmt.Errorf("name cannot be empty")
 		}
 		profile.Name = trimmed
+	}
+	if role != nil {
+		profile.Role = optionalStringValue(role, "generalist")
+	}
+	if memoryScope != nil {
+		profile.MemoryScope = optionalStringValue(memoryScope, "workspace")
+	}
+	if qualityScore != nil {
+		profile.QualityScore = qualityScore
+	}
+	if costBudgetUSD != nil {
+		profile.CostBudgetUSD = costBudgetUSD
 	}
 	if active != nil {
 		profile.Active = *active
@@ -759,6 +777,17 @@ func sanitizePendingInputs(inputs []types.PendingInput) []types.PendingInput {
 		}
 	}
 	return safe
+}
+
+func optionalStringValue(value *string, fallback string) string {
+	if value == nil {
+		return fallback
+	}
+	trimmed := strings.TrimSpace(*value)
+	if trimmed == "" {
+		return fallback
+	}
+	return trimmed
 }
 
 func normalizeAgentProfileConfig(config map[string]any, agentKey string) (map[string]any, error) {

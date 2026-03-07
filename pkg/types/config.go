@@ -173,6 +173,10 @@ type WorkspaceStorageConfig struct {
 	DefaultSecretKey    string `key:"defaultSecretKey" json:"default_secret_key"`
 	DefaultEndpointUrl  string `key:"defaultEndpointUrl" json:"default_endpoint_url"`
 	DefaultRegion       string `key:"defaultRegion" json:"default_region"`
+	// PublicEndpointUrl is the browser-reachable S3 endpoint used in presigned URLs.
+	// When set, presigned URLs have their host rewritten from DefaultEndpointUrl to this value.
+	// Leave empty in production where S3 presigned URLs are already publicly reachable.
+	PublicEndpointUrl string `key:"publicEndpointUrl" json:"public_endpoint_url"`
 }
 
 func (c WorkspaceStorageConfig) IsConfigured() bool {

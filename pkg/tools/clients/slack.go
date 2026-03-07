@@ -54,9 +54,29 @@ func (s *SlackClient) postMessage(ctx context.Context, token, channel, text stri
 		}
 		return nil, fmt.Errorf("slack API: request failed")
 	}
-	return map[string]any{
-		"channel": getString(result, "channel"),
-		"ts":      getString(result, "ts"),
+	ch := getString(result, "channel")
+	ts := getString(result, "ts")
+	out := map[string]any{
+		"channel": ch,
+		"ts":      ts,
 		"ok":      true,
-	}, nil
+	}
+	if ch != "" && ts != "" {
+		if link := s.getPermalink(ctx, token, ch, ts); link != "" {
+			out["url"] = link
+		}
+	}
+	return out, nil
+}
+
+func (s *SlackClient) getPermalink(ctx context.Context, token, channel, ts string) string {
+	path := fmt.Sprintf("/chat.getPermalink?channel=%s&message_ts=%s", channel, ts)
+	var result map[string]any
+	if s.api.RequestJSON(ctx, token, "GET", path, nil, &result) != nil {
+		return ""
+	}
+	if ok, _ := result["ok"].(bool); !ok {
+		return ""
+	}
+	return getString(result, "permalink")
 }

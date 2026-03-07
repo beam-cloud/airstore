@@ -7,6 +7,7 @@ import type {
   TaskArchiveResponse,
   TaskListParams,
   TaskListResponse,
+  TaskUpdateParams,
   TaskLogListParams,
   TaskLogListResponse,
   TaskEventStreamParams,
@@ -15,6 +16,8 @@ import type {
   ScheduleCreateParams,
   ScheduleUpdateParams,
   TaskOutput,
+  TaskOutputListParams,
+  TaskOutputListResponse,
   CreateTaskOutputParams,
   AppendRowsParams,
 } from '../types/tasks.js';
@@ -59,6 +62,8 @@ export class Tasks {
         idempotency_key: params.idempotencyKey,
         label: params.label,
         spawned_by: params.spawnedBy,
+        priority: params.priority,
+        budget_usd: params.budgetUsd,
       },
       undefined,
       options,
@@ -168,6 +173,27 @@ export class Tasks {
     );
   }
 
+  /** Update metadata on an existing task. */
+  async update(
+    workspaceId: string,
+    taskId: string,
+    params: TaskUpdateParams,
+    options?: RequestOptions,
+  ): Promise<AgentTask> {
+    return this.client.request<AgentTask>(
+      'PATCH',
+      `/workspaces/${workspaceId}/tasks/${taskId}`,
+      {
+        ...(params.priority != null && { priority: params.priority }),
+        ...(params.budgetUsd !== undefined && { budget_usd: params.budgetUsd }),
+        ...(params.payload != null && { payload_json: params.payload }),
+        ...(params.routing != null && { routing_json: toRoutingBody(params.routing) }),
+      },
+      undefined,
+      options,
+    );
+  }
+
   // ── Schedules (cron) ──────────────────────────────────────────────────────
 
   private schedulePath(workspaceId: string, id?: string): string {
@@ -225,6 +251,26 @@ export class Tasks {
     return resp.outputs ?? [];
   }
 
+  /** List recent outputs across a workspace. */
+  async listWorkspaceOutputs(
+    workspaceId: string,
+    params?: TaskOutputListParams,
+    options?: RequestOptions,
+  ): Promise<TaskOutputListResponse> {
+    const response = await this.client.request<TaskOutputListResponse>(
+      'GET',
+      `/workspaces/${workspaceId}/outputs`,
+      undefined,
+      toTaskOutputListQuery(params),
+      options,
+    );
+    return {
+      outputs: response.outputs ?? [],
+      next_cursor: response.next_cursor ?? '',
+      has_more: response.has_more ?? false,
+    };
+  }
+
   /** Create a structured output for a task. */
   async createOutput(workspaceId: string, taskId: string, params: CreateTaskOutputParams, options?: RequestOptions): Promise<TaskOutput> {
     return this.client.request<TaskOutput>(
@@ -252,6 +298,20 @@ export class Tasks {
       'DELETE', this.outputPath(workspaceId, taskId, outputId), undefined, undefined, options,
     );
   }
+
+  /** Archive (dismiss) a single output. */
+  async archiveOutput(workspaceId: string, outputId: string, options?: RequestOptions): Promise<void> {
+    await this.client.request(
+      'POST', `/workspaces/${workspaceId}/outputs/${outputId}/archive`, undefined, undefined, options,
+    );
+  }
+
+  /** Archive all unarchived outputs in the workspace. */
+  async archiveAllOutputs(workspaceId: string, options?: RequestOptions): Promise<{ archived: number }> {
+    return this.client.request<{ archived: number }>(
+      'POST', `/workspaces/${workspaceId}/outputs/archive-all`, undefined, undefined, options,
+    );
+  }
 }
 
 function toTaskListQuery(params: TaskListParams | undefined): Record<string, string> | undefined {
@@ -263,6 +323,18 @@ function toTaskListQuery(params: TaskListParams | undefined): Record<string, str
   }
   if (params.createdAfter) query['created_after'] = params.createdAfter;
   if (params.createdBefore) query['created_before'] = params.createdBefore;
+  if (params.limit !== undefined) query['limit'] = String(params.limit);
+  if (params.cursor) query['cursor'] = params.cursor;
+  return Object.keys(query).length > 0 ? query : undefined;
+}
+
+function toTaskOutputListQuery(params: TaskOutputListParams | undefined): Record<string, string> | undefined {
+  if (!params) return undefined;
+  const query: Record<string, string> = {};
+  if (params.taskId) query['task_id'] = params.taskId;
+  if (params.agentId) query['agent_id'] = params.agentId;
+  if (params.outputType) query['output_type'] = params.outputType;
+  if (params.includeArchived) query['include_archived'] = 'true';
   if (params.limit !== undefined) query['limit'] = String(params.limit);
   if (params.cursor) query['cursor'] = params.cursor;
   return Object.keys(query).length > 0 ? query : undefined;

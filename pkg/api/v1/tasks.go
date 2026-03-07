@@ -37,6 +37,7 @@ func (g *WorkspaceTasksGroup) registerRoutes() {
 	g.routerGroup.POST("", g.CreateTask)
 	g.routerGroup.GET("", g.ListTasks)
 	g.routerGroup.GET("/:task_id", g.GetTask)
+	g.routerGroup.PATCH("/:task_id", g.UpdateTask)
 	g.routerGroup.GET("/:task_id/logs", g.ListTaskLogs)
 	g.routerGroup.GET("/:task_id/stream", g.StreamTaskEvents)
 	g.routerGroup.POST("/:task_id/cancel", g.CancelTask)
@@ -133,7 +134,6 @@ func (g *WorkspaceTasksGroup) ListTasks(c echo.Context) error {
 	if err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, err.Error())
 	}
-
 	createdAfter, err := parseOptionalRFC3339(c.QueryParam("created_after"))
 	if err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid created_after timestamp")
@@ -144,8 +144,8 @@ func (g *WorkspaceTasksGroup) ListTasks(c echo.Context) error {
 	}
 
 	filter := types.AgentTaskListFilter{
-		AgentID:       strPtrMaybeQuery(c.QueryParam("agent_id")),
-		States:        states,
+		AgentID: strPtrMaybeQuery(c.QueryParam("agent_id")),
+		States:  states,
 		CreatedAfter:  createdAfter,
 		CreatedBefore: createdBefore,
 		Limit:         limit,
@@ -316,6 +316,7 @@ func parseTaskStates(raw string) ([]types.AgentTaskState, error) {
 		state := types.AgentTaskState(strings.TrimSpace(part))
 		switch state {
 		case types.AgentTaskStateQueued,
+			types.AgentTaskStateWaiting,
 			types.AgentTaskStateRunning,
 			types.AgentTaskStateDone,
 			types.AgentTaskStateDropped,

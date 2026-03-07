@@ -59,6 +59,7 @@ export type TaskState =
   | 'queued'
   | 'running'
   | 'waiting'
+  | 'sleeping'
   | 'done'
   | 'dropped'
   | 'cancelled';
@@ -93,7 +94,8 @@ export interface AgentTask {
   id: string;
   workspace_id: number;
   agent_id?: string;
-  kind: TaskKind;
+  agent_name?: string;
+  kind?: TaskKind;
   queue_mode: QueueMode;
   state: TaskState;
   priority: TaskPriority;
@@ -105,7 +107,14 @@ export interface AgentTask {
   accepted_at: string;
   queued_at?: string;
   dispatched_at?: string;
+  deadline?: string;
   dropped_reason?: string;
+  budget_usd?: number;
+  cost_usd: number;
+  archived_at?: string;
+  wake_at?: string;
+  wake_reason?: string;
+  wake_count?: number;
   created_at: string;
   updated_at: string;
 }
@@ -115,7 +124,7 @@ export interface AgentCommandCreateParams {
   /** The prompt / instruction to send to the agent. */
   message: string;
   /** ID of the agent profile to target. */
-  agentId: string;
+  agentId?: string;
   /** Session ID for grouping related tasks. Auto-generated if omitted. */
   sessionId?: string;
   /** Idempotency key to prevent duplicate task creation. Auto-generated if omitted. */
@@ -134,6 +143,7 @@ export interface AgentCommandCreateParams {
   label?: string;
   spawnedBy?: string;
   priority?: TaskPriority;
+  budgetUsd?: number;
 }
 
 /** Response from task creation. Contains the task and whether it was a duplicate. */
@@ -167,6 +177,13 @@ export interface TaskCancelResponse {
 
 export interface TaskArchiveResponse {
   status: 'archived';
+}
+
+export interface TaskUpdateParams {
+  priority?: TaskPriority;
+  budgetUsd?: number | null;
+  payload?: Record<string, unknown>;
+  routing?: RoutingContext;
 }
 
 /** A single log entry from a task execution. */
@@ -281,13 +298,31 @@ export interface TaskOutput {
   task_id: string;
   run_id?: string;
   agent_id?: string;
+  agent_name?: string;
   output_type: OutputType;
   title: string;
   summary?: string;
+  uri?: string;
   schema?: TableColumn[];
   data: Record<string, unknown>;
   metadata?: Record<string, unknown>;
+  archived_at?: string;
   created_at: string;
+}
+
+export interface TaskOutputListParams {
+  taskId?: string;
+  agentId?: string;
+  outputType?: OutputType;
+  includeArchived?: boolean;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface TaskOutputListResponse {
+  outputs: TaskOutput[];
+  next_cursor: string;
+  has_more: boolean;
 }
 
 /** Column definition for table outputs with dynamic schemas. */

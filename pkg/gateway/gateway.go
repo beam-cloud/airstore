@@ -629,6 +629,7 @@ func (g *Gateway) registerServices() error {
 		agentAPIRoot.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
 		apiv1.NewAgentsGroup(agentAPIRoot.Group("/agents"), agentAPI, hooksSvc, g.BackendRepo, emailChannel)
 		apiv1.NewWorkspaceTasksGroup(agentAPIRoot.Group("/tasks"), g.BackendRepo, agentAPI)
+		apiv1.NewWorkspaceOutputsGroup(agentAPIRoot.Group("/outputs"), g.BackendRepo)
 		apiv1.NewTaskOutputsGroup(agentAPIRoot.Group("/tasks/:task_id/outputs"), g.BackendRepo)
 		apiv1.NewRunsGroup(agentAPIRoot.Group("/runs"), agentAPI)
 		apiv1.NewWorkspaceChannelsGroup(agentAPIRoot.Group("/channels"), channelRegistry, g.BackendRepo, emailChannel)

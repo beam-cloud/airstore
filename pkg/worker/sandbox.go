@@ -410,6 +410,16 @@ func (m *SandboxManager) Create(cfg types.SandboxConfig) (*types.SandboxState, e
 	// Use overlay's merged path as the container rootfs
 	overlayRootfs := overlay.TopLayerPath()
 
+	// Verify the overlay rootfs is actually readable before proceeding.
+	// A broken FUSE mount or corrupt overlay will cause gVisor to crash
+	// with an opaque "cannot read client sync file" error.
+	if err := verifyRootfs(overlayRootfs); err != nil {
+		overlay.Cleanup()
+		cleanupRootfs()
+		os.RemoveAll(bundlePath)
+		return nil, fmt.Errorf("rootfs verification failed at %s: %w", overlayRootfs, err)
+	}
+
 	// Generate OCI spec using the overlay rootfs
 	spec, err := m.generateSpec(cfg, overlayRootfs)
 	if err != nil {
@@ -1112,6 +1122,48 @@ func (m *SandboxManager) addFilesystemMount(spec *specs.Spec, source string, rea
 	return nil
 }
 
+// verifyRootfs checks that the overlay-merged rootfs directory is readable and
+// contains the minimum structure expected by gVisor's gofer. A broken FUSE
+// mount or incomplete overlay can cause the gofer to crash silently.
+func verifyRootfs(rootfsPath string) error {
+	entries, err := os.ReadDir(rootfsPath)
+	if err != nil {
+		return fmt.Errorf("cannot read rootfs dir: %w", err)
+	}
+	if len(entries) == 0 {
+		return fmt.Errorf("rootfs is empty")
+	}
+
+	essential := []string{"bin", "etc", "usr"}
+	found := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		found[e.Name()] = true
+	}
+	var missing []string
+	for _, dir := range essential {
+		if !found[dir] {
+			missing = append(missing, dir)
+		}
+	}
+	if len(missing) > 0 {
+		log.Warn().
+			Str("rootfs", rootfsPath).
+			Strs("missing", missing).
+			Int("entry_count", len(entries)).
+			Msg("rootfs missing expected directories")
+		return fmt.Errorf("rootfs missing: %s", strings.Join(missing, ", "))
+	}
+
+	// Spot-check readability of /bin/sh — if the FUSE layer is dead, this
+	// will return an I/O error before gVisor has a chance to crash.
+	shPath := filepath.Join(rootfsPath, "bin", "sh")
+	if _, err := os.Stat(shPath); err != nil {
+		return fmt.Errorf("cannot stat %s: %w", shPath, err)
+	}
+
+	return nil
+}
+
 // buildEntrypoint constructs the entrypoint for a task.
 // Prompt tasks are resolved through prompt runner entrypoints; all other tasks
 // use their explicit task entrypoint.
@@ -1150,6 +1202,45 @@ func (m *SandboxManager) resolvePromptRunner(task types.RunExecution, env map[st
 		return defaultRunner
 	}
 	return runner
+}
+
+// analyzerForTask returns an OutputAnalyzer appropriate for the task's
+// runner, or nil if no analyzer applies (e.g. non-prompt tasks).
+func (m *SandboxManager) analyzerForTask(task types.RunExecution, env map[string]string) OutputAnalyzer {
+	if task.Prompt == "" {
+		return nil
+	}
+	runner := m.resolvePromptRunner(task, env)
+	if _, ok := runner.(*ClaudeCodeRunner); ok {
+		return NewClaudeCodeAnalyzer()
+	}
+	return nil
+}
+
+// BamlEnv returns the environment variables needed for BAML classifier
+// calls (e.g. ExtractOutputs, ClassifyTurn). The worker's own config
+// is the source of truth — no extraction from task env needed.
+func (m *SandboxManager) BamlEnv() map[string]string {
+	env := map[string]string{}
+	if cr, ok := m.defaultPromptRunner.(*ClaudeCodeRunner); ok && cr.anthropicAPIKey != "" {
+		env["ANTHROPIC_API_KEY"] = cr.anthropicAPIKey
+	}
+	return env
+}
+
+// taskOutputWriters builds the standard set of io.Writers for capturing
+// task stdout: S2 stream, console logging, structured output capture,
+// and (when applicable) BAML output analysis.
+func (m *SandboxManager) taskOutputWriters(ctx context.Context, task types.RunExecution, env map[string]string) []io.Writer {
+	writers := []io.Writer{
+		NewS2Writer(ctx, m.s2, task.ExternalId, "stdout"),
+		NewConsoleWriter(task.ExternalId, "stdout"),
+		NewOutputWriter(ctx, m.gatewayClient, task),
+	}
+	if analyzer := m.analyzerForTask(task, env); analyzer != nil {
+		writers = append(writers, NewAnalyzerWriter(ctx, analyzer, m.gatewayClient, task, m.BamlEnv()))
+	}
+	return writers
 }
 
 func (m *SandboxManager) copyTaskEnv(task types.RunExecution) map[string]string {
@@ -1403,12 +1494,7 @@ func (m *SandboxManager) RunTask(ctx context.Context, task types.RunExecution) (
 	// Ensure cleanup
 	defer m.Delete(sandboxID, true)
 
-	// Set up task output: S2 streams + worker console + structured output capture
-	taskOutput := NewTaskOutput(task.ExternalId, "stdout",
-		NewS2Writer(ctx, m.s2, task.ExternalId, "stdout"),
-		NewConsoleWriter(task.ExternalId, "stdout"),
-		NewOutputWriter(ctx, m.gatewayClient, task),
-	)
+	taskOutput := NewTaskOutput(task.ExternalId, "stdout", m.taskOutputWriters(ctx, task, env)...)
 	if err := m.SetOutput(sandboxID, taskOutput, taskOutput.Flush); err != nil {
 		addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to set output")
 	}

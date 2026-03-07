@@ -94,6 +94,10 @@ export class Agents {
   ): Promise<AgentProfile> {
     const body: Record<string, unknown> = {};
     if (params.name != null) body.name = params.name;
+    if (params.role != null) body.role = params.role;
+    if (params.memoryScope != null) body.memory_scope = params.memoryScope;
+    if (params.qualityScore != null) body.quality_score = params.qualityScore;
+    if (params.costBudgetUsd != null) body.cost_budget_usd = params.costBudgetUsd;
     if (params.active != null) body.active = params.active;
     if (params.config != null) body.config = params.config;
     return this.client.request<AgentProfile>(

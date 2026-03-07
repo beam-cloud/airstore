@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,8 +14,10 @@ import (
 )
 
 const agentTaskSelect = `
-	SELECT id, workspace_id, agent_id, agent_name, queue_mode, state, idempotency_key, payload_json, routing_json,
-	       parent_envelope_id, target_run_id, accepted_at, queued_at, dispatched_at, dropped_reason, priority, archived_at, created_at, updated_at
+	SELECT id, workspace_id, agent_id, agent_name, queue_mode, state,
+	       idempotency_key, payload_json, routing_json, parent_envelope_id, target_run_id,
+	       accepted_at, queued_at, dispatched_at, deadline, dropped_reason, priority, budget_usd, cost_usd, archived_at,
+	       created_at, updated_at, wake_at, wake_reason, wake_count
 	FROM (
 		SELECT
 			t.id,
@@ -32,11 +35,17 @@ const agentTaskSelect = `
 			t.accepted_at,
 			t.queued_at,
 			t.dispatched_at,
+			t.deadline,
 			t.dropped_reason,
 			t.priority,
+			t.budget_usd,
+			t.cost_usd,
 			t.archived_at,
 			t.created_at,
-			t.updated_at
+			t.updated_at,
+			t.wake_at,
+			t.wake_reason,
+			t.wake_count
 		FROM agent_task t
 		LEFT JOIN agent_profile ap ON ap.id = t.agent_id
 	) task_view
@@ -46,7 +55,7 @@ const agentRunSelect = `
 	SELECT id, workspace_id, agent_id, origin_task_id, hook_id, status, session_id, session_key, provider, model,
 	       exec_host, exec_security, exec_ask, runtime_type, workspace_access, network_enabled, interactive,
 	       timeout_ms, started_at, ended_at, claimed_by_worker_id, claim_heartbeat_at, claim_expires_at,
-	       error, snapshot_ts, usage_json, delivery_json, created_at, updated_at
+	       error, snapshot_ts, cost_usd, usage_json, delivery_json, created_at, updated_at
 	FROM agent_run
 `
 
@@ -77,6 +86,48 @@ func unmarshalJSONMap(data []byte) map[string]any {
 		out = map[string]any{}
 	}
 	return out
+}
+
+func usageCostUSD(usage map[string]any) float64 {
+	if len(usage) == 0 {
+		return 0
+	}
+	for _, key := range []string{"cost_usd", "total_cost_usd", "usd_cost", "cost"} {
+		if value, ok := usage[key]; ok {
+			switch typed := value.(type) {
+			case float64:
+				return typed
+			case float32:
+				return float64(typed)
+			case int:
+				return float64(typed)
+			case int32:
+				return float64(typed)
+			case int64:
+				return float64(typed)
+			case json.Number:
+				if parsed, err := typed.Float64(); err == nil {
+					return parsed
+				}
+			case string:
+				if parsed, err := strconv.ParseFloat(strings.TrimSpace(typed), 64); err == nil {
+					return parsed
+				}
+			case map[string]any:
+				if nested := usageCostUSD(typed); nested > 0 {
+					return nested
+				}
+			}
+		}
+	}
+	for _, key := range []string{"usage", "totals", "billing"} {
+		if nested, ok := usage[key].(map[string]any); ok {
+			if value := usageCostUSD(nested); value > 0 {
+				return value
+			}
+		}
+	}
+	return 0
 }
 
 func normalizeLimitOffset(limit, offset, defaultLimit, maxLimit int) (int, int) {
@@ -122,16 +173,28 @@ func (b *PostgresBackend) CreateAgentProfile(ctx context.Context, profile *types
 		return fmt.Errorf("name is required")
 	}
 	query := `
-		INSERT INTO agent_profile (workspace_id, agent_key, name, config_json, active)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO agent_profile (
+			workspace_id, agent_key, name, role, memory_scope, quality_score, cost_budget_usd, config_json, active
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		RETURNING id, created_at, updated_at
 	`
+	if strings.TrimSpace(profile.Role) == "" {
+		profile.Role = "generalist"
+	}
+	if strings.TrimSpace(profile.MemoryScope) == "" {
+		profile.MemoryScope = "workspace"
+	}
 	if err := b.db.QueryRowContext(
 		ctx,
 		query,
 		profile.WorkspaceID,
 		profile.AgentKey,
 		profile.Name,
+		profile.Role,
+		profile.MemoryScope,
+		profile.QualityScore,
+		profile.CostBudgetUSD,
 		configJSON,
 		profile.Active,
 	).Scan(&profile.ID, &profile.CreatedAt, &profile.UpdatedAt); err != nil {
@@ -143,11 +206,17 @@ func (b *PostgresBackend) CreateAgentProfile(ctx context.Context, profile *types
 func (b *PostgresBackend) scanAgentProfile(row scanner) (*types.AgentProfile, error) {
 	profile := &types.AgentProfile{}
 	var configJSON []byte
+	var qualityScore sql.NullFloat64
+	var costBudgetUSD sql.NullFloat64
 	err := row.Scan(
 		&profile.ID,
 		&profile.WorkspaceID,
 		&profile.AgentKey,
 		&profile.Name,
+		&profile.Role,
+		&profile.MemoryScope,
+		&qualityScore,
+		&costBudgetUSD,
 		&configJSON,
 		&profile.Active,
 		&profile.CreatedAt,
@@ -159,6 +228,12 @@ func (b *PostgresBackend) scanAgentProfile(row scanner) (*types.AgentProfile, er
 	if err != nil {
 		return nil, err
 	}
+	if qualityScore.Valid {
+		profile.QualityScore = &qualityScore.Float64
+	}
+	if costBudgetUSD.Valid {
+		profile.CostBudgetUSD = &costBudgetUSD.Float64
+	}
 	profile.ConfigJSON = unmarshalJSONMap(configJSON)
 	return profile, nil
 }
@@ -169,7 +244,7 @@ type scanner interface {
 
 func (b *PostgresBackend) GetAgentProfile(ctx context.Context, workspaceId uint, agentId string) (*types.AgentProfile, error) {
 	query := `
-		SELECT id, workspace_id, agent_key, name, config_json, active, created_at, updated_at
+		SELECT id, workspace_id, agent_key, name, role, memory_scope, quality_score, cost_budget_usd, config_json, active, created_at, updated_at
 		FROM agent_profile
 		WHERE workspace_id = $1 AND id = $2
 	`
@@ -185,7 +260,7 @@ func (b *PostgresBackend) GetAgentProfile(ctx context.Context, workspaceId uint,
 
 func (b *PostgresBackend) GetAgentProfileByKey(ctx context.Context, workspaceId uint, agentKey string) (*types.AgentProfile, error) {
 	query := `
-		SELECT id, workspace_id, agent_key, name, config_json, active, created_at, updated_at
+		SELECT id, workspace_id, agent_key, name, role, memory_scope, quality_score, cost_budget_usd, config_json, active, created_at, updated_at
 		FROM agent_profile
 		WHERE workspace_id = $1 AND agent_key = $2
 	`
@@ -201,7 +276,7 @@ func (b *PostgresBackend) GetAgentProfileByKey(ctx context.Context, workspaceId 
 
 func (b *PostgresBackend) ListAgentProfiles(ctx context.Context, workspaceId uint) ([]*types.AgentProfile, error) {
 	query := `
-		SELECT id, workspace_id, agent_key, name, config_json, active, created_at, updated_at
+		SELECT id, workspace_id, agent_key, name, role, memory_scope, quality_score, cost_budget_usd, config_json, active, created_at, updated_at
 		FROM agent_profile
 		WHERE workspace_id = $1
 		ORDER BY created_at DESC
@@ -228,9 +303,22 @@ func (b *PostgresBackend) UpdateAgentProfile(ctx context.Context, profile *types
 	if err != nil {
 		return fmt.Errorf("marshal agent config: %w", err)
 	}
+	if strings.TrimSpace(profile.Role) == "" {
+		profile.Role = "generalist"
+	}
+	if strings.TrimSpace(profile.MemoryScope) == "" {
+		profile.MemoryScope = "workspace"
+	}
 	query := `
 		UPDATE agent_profile
-		SET name = $3, config_json = $4, active = $5, updated_at = CURRENT_TIMESTAMP
+		SET name = $3,
+		    role = $4,
+		    memory_scope = $5,
+		    quality_score = $6,
+		    cost_budget_usd = $7,
+		    config_json = $8,
+		    active = $9,
+		    updated_at = CURRENT_TIMESTAMP
 		WHERE workspace_id = $1 AND id = $2
 		RETURNING updated_at
 	`
@@ -240,6 +328,10 @@ func (b *PostgresBackend) UpdateAgentProfile(ctx context.Context, profile *types
 		profile.WorkspaceID,
 		profile.ID,
 		profile.Name,
+		profile.Role,
+		profile.MemoryScope,
+		profile.QualityScore,
+		profile.CostBudgetUSD,
 		configJSON,
 		profile.Active,
 	).Scan(&profile.UpdatedAt); err != nil {
@@ -396,6 +488,9 @@ func (b *PostgresBackend) CreateTaskWithOutbox(
 	if err != nil {
 		return fmt.Errorf("marshal task routing: %w", err)
 	}
+	if strings.TrimSpace(task.Priority) == "" {
+		task.Priority = "normal"
+	}
 
 	tx, err := b.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -405,9 +500,10 @@ func (b *PostgresBackend) CreateTaskWithOutbox(
 
 	insertTaskQuery := `
 		INSERT INTO agent_task (
-			workspace_id, agent_id, kind, queue_mode, state, idempotency_key,
-			payload_json, routing_json, parent_envelope_id, target_run_id
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			workspace_id, agent_id, kind, queue_mode, state,
+			idempotency_key, payload_json, routing_json, parent_envelope_id,
+			target_run_id, deadline, priority, budget_usd, cost_usd
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		RETURNING id, accepted_at, created_at, updated_at
 	`
 	if err := tx.QueryRowContext(
@@ -423,6 +519,10 @@ func (b *PostgresBackend) CreateTaskWithOutbox(
 		routingJSON,
 		task.ParentTaskID,
 		task.TargetRunID,
+		task.Deadline,
+		task.Priority,
+		task.BudgetUSD,
+		task.CostUSD,
 	).Scan(&task.ID, &task.AcceptedAt, &task.CreatedAt, &task.UpdatedAt); err != nil {
 		return fmt.Errorf("create agent task: %w", err)
 	}
@@ -488,8 +588,13 @@ func (b *PostgresBackend) scanAgentTask(row scanner) (*types.AgentTask, error) {
 	var targetRunID sql.NullString
 	var queuedAt sql.NullTime
 	var dispatchedAt sql.NullTime
+	var deadline sql.NullTime
 	var droppedReason sql.NullString
+	var budgetUSD sql.NullFloat64
+	var costUSD sql.NullFloat64
 	var archivedAt sql.NullTime
+	var wakeAt sql.NullTime
+	var wakeReason sql.NullString
 	err := row.Scan(
 		&task.ID,
 		&task.WorkspaceID,
@@ -505,11 +610,17 @@ func (b *PostgresBackend) scanAgentTask(row scanner) (*types.AgentTask, error) {
 		&task.AcceptedAt,
 		&queuedAt,
 		&dispatchedAt,
+		&deadline,
 		&droppedReason,
 		&task.Priority,
+		&budgetUSD,
+		&costUSD,
 		&archivedAt,
 		&task.CreatedAt,
 		&task.UpdatedAt,
+		&wakeAt,
+		&wakeReason,
+		&task.WakeCount,
 	)
 	if err == sql.ErrNoRows {
 		return nil, &types.ErrAgentTaskNotFound{}
@@ -535,11 +646,26 @@ func (b *PostgresBackend) scanAgentTask(row scanner) (*types.AgentTask, error) {
 	if dispatchedAt.Valid {
 		task.DispatchedAt = &dispatchedAt.Time
 	}
+	if deadline.Valid {
+		task.Deadline = &deadline.Time
+	}
 	if droppedReason.Valid {
 		task.DroppedReason = &droppedReason.String
 	}
+	if budgetUSD.Valid {
+		task.BudgetUSD = &budgetUSD.Float64
+	}
+	if costUSD.Valid {
+		task.CostUSD = costUSD.Float64
+	}
 	if archivedAt.Valid {
 		task.ArchivedAt = &archivedAt.Time
+	}
+	if wakeAt.Valid {
+		task.WakeAt = &wakeAt.Time
+	}
+	if wakeReason.Valid {
+		task.WakeReason = &wakeReason.String
 	}
 	task.PayloadJSON = unmarshalJSONMap(payloadJSON)
 	task.RoutingJSON = unmarshalJSONMap(routingJSON)
@@ -719,10 +845,13 @@ func (b *PostgresBackend) ClaimQueuedTaskForDispatch(
 		UPDATE agent_task
 		SET state = 'running'::agent_task_state,
 		    dispatched_at = CURRENT_TIMESTAMP,
+		    wake_at = NULL,
+		    wake_reason = NULL,
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = $1
 		  AND (
 		    state = 'queued'::agent_task_state
+		    OR state = 'sleeping'::agent_task_state
 		    OR (
 		      state = 'running'::agent_task_state
 		      AND target_run_id IS NULL
@@ -754,7 +883,11 @@ func (b *PostgresBackend) UpdateTaskState(ctx context.Context, taskID string, st
 		UPDATE agent_task
 		SET state = $2::agent_task_state,
 		    queued_at = CASE WHEN $2::agent_task_state = 'queued'::agent_task_state THEN $3 ELSE queued_at END,
-		    dispatched_at = CASE WHEN $2::agent_task_state = 'running'::agent_task_state THEN $3 ELSE dispatched_at END,
+		    dispatched_at = CASE
+		      WHEN $2::agent_task_state = 'running'::agent_task_state THEN $3
+		      WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN NULL
+		      ELSE dispatched_at
+		    END,
 		    dropped_reason = CASE WHEN $2::agent_task_state = 'dropped'::agent_task_state THEN $4 ELSE dropped_reason END,
 		    target_run_id = COALESCE($5::uuid, target_run_id),
 		    updated_at = CURRENT_TIMESTAMP
@@ -787,9 +920,14 @@ func (b *PostgresBackend) UpdateTaskStateIfCurrentRun(
 		UPDATE agent_task
 		SET state = $2::agent_task_state,
 		    queued_at = CASE WHEN $2::agent_task_state = 'queued'::agent_task_state THEN $3 ELSE queued_at END,
-		    dispatched_at = CASE WHEN $2::agent_task_state = 'running'::agent_task_state THEN $3 ELSE dispatched_at END,
+		    dispatched_at = CASE
+		      WHEN $2::agent_task_state = 'running'::agent_task_state THEN $3
+		      WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN NULL
+		      ELSE dispatched_at
+		    END,
 		    dropped_reason = CASE WHEN $2::agent_task_state = 'dropped'::agent_task_state THEN $4 ELSE dropped_reason END,
 		    target_run_id = COALESCE($5::uuid, target_run_id),
+		    wake_count = CASE WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN wake_count ELSE 0 END,
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = $1
 		  AND state NOT IN ('done'::agent_task_state, 'dropped'::agent_task_state, 'cancelled'::agent_task_state)
@@ -809,6 +947,58 @@ func (b *PostgresBackend) UpdateTaskStateIfCurrentRun(
 	}
 	affected, _ := res.RowsAffected()
 	return affected > 0, nil
+}
+
+func (b *PostgresBackend) SleepTaskWithOutbox(
+	ctx context.Context,
+	taskID string,
+	expectedRunID string,
+	wakeAt time.Time,
+	wakeReason string,
+	outboxEvent *types.OrchestrationOutboxEvent,
+) (bool, error) {
+	tx, err := b.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin sleep task tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx, `
+		UPDATE agent_task
+		SET state = 'sleeping'::agent_task_state,
+		    wake_at = $2,
+		    wake_reason = $3,
+		    wake_count = wake_count + 1,
+		    dispatched_at = NULL,
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1
+		  AND target_run_id = $4::uuid
+		  AND state NOT IN ('done'::agent_task_state, 'dropped'::agent_task_state, 'cancelled'::agent_task_state)
+	`, taskID, wakeAt, wakeReason, expectedRunID)
+	if err != nil {
+		return false, fmt.Errorf("update task to sleeping: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return false, nil
+	}
+
+	payloadJSON, err := marshalJSONMap(outboxEvent.PayloadJSON)
+	if err != nil {
+		return false, fmt.Errorf("marshal outbox payload: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO orchestration_outbox (event_type, dedupe_key, payload_json, available_at)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (dedupe_key) DO NOTHING
+	`, outboxEvent.EventType, outboxEvent.DedupeKey, payloadJSON, outboxEvent.AvailableAt); err != nil {
+		return false, fmt.Errorf("enqueue wake dispatch event: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit sleep task tx: %w", err)
+	}
+	return true, nil
 }
 
 func (b *PostgresBackend) ArchiveTask(ctx context.Context, taskID string) error {
@@ -1059,11 +1249,11 @@ func (b *PostgresBackend) CreateAgentRun(ctx context.Context, run *types.AgentRu
 		INSERT INTO agent_run (
 			workspace_id, agent_id, origin_task_id, hook_id, status, session_id, session_key,
 			provider, model, exec_host, exec_security, exec_ask, runtime_type, workspace_access,
-			network_enabled, interactive, timeout_ms, usage_json, delivery_json
+			network_enabled, interactive, timeout_ms, cost_usd, usage_json, delivery_json
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7,
 			$8, $9, $10, $11, $12, $13, $14,
-			$15, $16, $17, $18, $19
+			$15, $16, $17, $18, $19, $20
 		)
 		RETURNING id, snapshot_ts, created_at, updated_at
 	`
@@ -1087,6 +1277,7 @@ func (b *PostgresBackend) CreateAgentRun(ctx context.Context, run *types.AgentRu
 		run.NetworkEnabled,
 		run.Interactive,
 		run.TimeoutMs,
+		run.CostUSD,
 		usageJSON,
 		deliveryJSON,
 	).Scan(&run.ID, &run.SnapshotTS, &run.CreatedAt, &run.UpdatedAt); err != nil {
@@ -1110,6 +1301,7 @@ func (b *PostgresBackend) scanAgentRun(row scanner) (*types.AgentRun, error) {
 	var claimHeartbeatAt sql.NullTime
 	var claimExpiresAt sql.NullTime
 	var errMsg sql.NullString
+	var costUSD sql.NullFloat64
 	err := row.Scan(
 		&run.ID,
 		&run.WorkspaceID,
@@ -1136,6 +1328,7 @@ func (b *PostgresBackend) scanAgentRun(row scanner) (*types.AgentRun, error) {
 		&claimExpiresAt,
 		&errMsg,
 		&run.SnapshotTS,
+		&costUSD,
 		&usageJSON,
 		&deliveryJSON,
 		&run.CreatedAt,
@@ -1181,8 +1374,14 @@ func (b *PostgresBackend) scanAgentRun(row scanner) (*types.AgentRun, error) {
 	if errMsg.Valid {
 		run.Error = &errMsg.String
 	}
+	if costUSD.Valid {
+		run.CostUSD = costUSD.Float64
+	}
 	run.UsageJSON = unmarshalJSONMap(usageJSON)
 	run.DeliveryJSON = unmarshalJSONMap(deliveryJSON)
+	if run.CostUSD <= 0 {
+		run.CostUSD = usageCostUSD(run.UsageJSON)
+	}
 	return run, nil
 }
 
@@ -1258,12 +1457,13 @@ func (b *PostgresBackend) ListAgentRunsFiltered(ctx context.Context, workspaceId
 	query := agentRunSelect + `
 		WHERE workspace_id = $1
 		  AND ($2::uuid IS NULL OR agent_id = $2::uuid)
-		  AND ($3::text[] IS NULL OR status::text = ANY($3::text[]))
-		  AND ($4::text IS NULL OR session_id = $4::text)
-		  AND ($5::timestamptz IS NULL OR created_at >= $5::timestamptz)
-		  AND ($6::timestamptz IS NULL OR created_at <= $6::timestamptz)
+		  AND ($3::uuid IS NULL OR origin_task_id = $3::uuid)
+		  AND ($4::text[] IS NULL OR status::text = ANY($4::text[]))
+		  AND ($5::text IS NULL OR session_id = $5::text)
+		  AND ($6::timestamptz IS NULL OR created_at >= $6::timestamptz)
+		  AND ($7::timestamptz IS NULL OR created_at <= $7::timestamptz)
 		ORDER BY created_at DESC, id DESC
-		LIMIT $7 OFFSET $8
+		LIMIT $8 OFFSET $9
 	`
 
 	rows, err := b.db.QueryContext(
@@ -1271,6 +1471,7 @@ func (b *PostgresBackend) ListAgentRunsFiltered(ctx context.Context, workspaceId
 		query,
 		workspaceId,
 		optionalStringArg(filter.AgentID),
+		optionalStringArg(filter.TaskID),
 		statusesArg,
 		optionalStringArg(filter.SessionID),
 		filter.CreatedAfter,
@@ -3086,7 +3287,7 @@ func scanScheduledTasks(rows *sql.Rows) ([]*types.ScheduledTask, error) {
 
 func (b *PostgresBackend) GetAgentStats(ctx context.Context, workspaceId uint, agentID string) (*types.AgentStats, error) {
 	rows, err := b.db.QueryContext(ctx, `
-		SELECT state, COUNT(*) FROM agent_task_envelope
+		SELECT state::text, COUNT(*) FROM agent_task
 		WHERE workspace_id = $1 AND agent_id = $2
 		GROUP BY state`, workspaceId, agentID)
 	if err != nil {
@@ -3104,14 +3305,35 @@ func (b *PostgresBackend) GetAgentStats(ctx context.Context, workspaceId uint, a
 		stats.ByState[state] = count
 		stats.Total += count
 	}
+	stats.RunningCount = stats.ByState[string(types.AgentTaskStateRunning)]
+	stats.CompletedCount = stats.ByState[string(types.AgentTaskStateDone)]
+	stats.FailedCount = stats.ByState[string(types.AgentTaskStateDropped)]
 
 	var avgSec sql.NullFloat64
 	_ = b.db.QueryRowContext(ctx, `
-		SELECT AVG(EXTRACT(EPOCH FROM (updated_at - created_at)))
-		FROM agent_task_envelope
-		WHERE workspace_id = $1 AND agent_id = $2 AND state = 'done'`, workspaceId, agentID).Scan(&avgSec)
+		SELECT AVG(EXTRACT(EPOCH FROM (COALESCE(ended_at, updated_at) - COALESCE(started_at, created_at))))
+		FROM agent_run
+		WHERE workspace_id = $1 AND agent_id = $2 AND status = 'ok'`, workspaceId, agentID).Scan(&avgSec)
 	if avgSec.Valid {
 		stats.AvgRunSec = &avgSec.Float64
+	}
+
+	var qualityScore sql.NullFloat64
+	_ = b.db.QueryRowContext(ctx, `
+		SELECT quality_score
+		FROM agent_profile
+		WHERE workspace_id = $1 AND id = $2`, workspaceId, agentID).Scan(&qualityScore)
+	if qualityScore.Valid {
+		stats.QualityScore = &qualityScore.Float64
+	}
+
+	var totalCost sql.NullFloat64
+	_ = b.db.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(cost_usd), 0)
+		FROM agent_run
+		WHERE workspace_id = $1 AND agent_id = $2`, workspaceId, agentID).Scan(&totalCost)
+	if totalCost.Valid {
+		stats.TotalCostUSD = totalCost.Float64
 	}
 
 	return stats, rows.Err()
@@ -3121,11 +3343,13 @@ func (b *PostgresBackend) GetAgentStats(ctx context.Context, workspaceId uint, a
 
 func (b *PostgresBackend) ListTaskOutputs(ctx context.Context, workspaceId uint, taskID string) ([]*types.TaskOutput, error) {
 	rows, err := b.db.QueryContext(ctx, `
-		SELECT id, workspace_id, task_id, run_id, agent_id, output_type, title,
-		       summary, schema_json, data_json, metadata_json, created_at
-		FROM task_output
-		WHERE workspace_id = $1 AND task_id = $2
-		ORDER BY created_at ASC`, workspaceId, taskID)
+		SELECT o.id, o.workspace_id, o.task_id, o.run_id, o.agent_id,
+		       COALESCE(ap.name, ''), o.output_type, o.title,
+		       o.summary, o.uri, o.schema_json, o.data_json, o.metadata_json, o.archived_at, o.created_at
+		FROM task_output o
+		LEFT JOIN agent_profile ap ON ap.id = o.agent_id
+		WHERE o.workspace_id = $1 AND o.task_id = $2
+		ORDER BY o.created_at ASC`, workspaceId, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -3141,6 +3365,52 @@ func (b *PostgresBackend) ListTaskOutputs(ctx context.Context, workspaceId uint,
 	return result, rows.Err()
 }
 
+func (b *PostgresBackend) ListWorkspaceTaskOutputs(
+	ctx context.Context,
+	workspaceId uint,
+	filter types.TaskOutputListFilter,
+) ([]*types.TaskOutput, error) {
+	limit := filter.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 60
+	}
+
+	rows, err := b.db.QueryContext(ctx, `
+		SELECT o.id, o.workspace_id, o.task_id, o.run_id, o.agent_id,
+		       COALESCE(ap.name, ''), o.output_type, o.title,
+		       o.summary, o.uri, o.schema_json, o.data_json, o.metadata_json, o.archived_at, o.created_at
+		FROM task_output o
+		LEFT JOIN agent_profile ap ON ap.id = o.agent_id
+		WHERE o.workspace_id = $1
+		  AND ($2::text IS NULL OR o.task_id = $2::uuid)
+		  AND ($3::text IS NULL OR o.agent_id = $3::uuid)
+		  AND ($4::text IS NULL OR o.output_type = $4)
+		  AND ($5::boolean IS FALSE OR o.archived_at IS NULL)
+		ORDER BY o.created_at DESC
+		LIMIT $6`,
+		workspaceId,
+		nilIfEmpty(filter.TaskID),
+		nilIfEmpty(filter.AgentID),
+		nilIfEmpty(filter.OutputType),
+		filter.ExcludeArchived,
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []*types.TaskOutput
+	for rows.Next() {
+		output, scanErr := scanTaskOutput(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		result = append(result, output)
+	}
+	return result, rows.Err()
+}
+
 func (b *PostgresBackend) CreateTaskOutput(ctx context.Context, output *types.TaskOutput) error {
 	schemaBytes, _ := json.Marshal(output.Schema)
 	dataBytes, _ := json.Marshal(output.Data)
@@ -3152,27 +3422,30 @@ func (b *PostgresBackend) CreateTaskOutput(ctx context.Context, output *types.Ta
 		metaBytes = nil
 	}
 	return b.db.QueryRowContext(ctx, `
-		INSERT INTO task_output (workspace_id, task_id, run_id, agent_id, output_type, title, summary, schema_json, data_json, metadata_json)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		INSERT INTO task_output (workspace_id, task_id, run_id, agent_id, output_type, title, summary, uri, schema_json, data_json, metadata_json)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		RETURNING id, created_at`,
 		output.WorkspaceID, output.TaskID, nilIfEmpty(output.RunID), nilIfEmpty(output.AgentID),
-		output.OutputType, output.Title, output.Summary,
+		output.OutputType, output.Title, output.Summary, nilIfEmpty(output.URI),
 		nullableJSONB(schemaBytes), dataBytes, nullableJSONB(metaBytes),
 	).Scan(&output.ID, &output.CreatedAt)
 }
 
 func (b *PostgresBackend) GetTaskOutput(ctx context.Context, workspaceId uint, outputID string) (*types.TaskOutput, error) {
 	row := b.db.QueryRowContext(ctx, `
-		SELECT id, workspace_id, task_id, run_id, agent_id, output_type, title,
-		       summary, schema_json, data_json, metadata_json, created_at
-		FROM task_output
-		WHERE workspace_id = $1 AND id = $2`, workspaceId, outputID)
+		SELECT o.id, o.workspace_id, o.task_id, o.run_id, o.agent_id,
+		       COALESCE(ap.name, ''), o.output_type, o.title,
+		       o.summary, o.uri, o.schema_json, o.data_json, o.metadata_json, o.archived_at, o.created_at
+		FROM task_output o
+		LEFT JOIN agent_profile ap ON ap.id = o.agent_id
+		WHERE o.workspace_id = $1 AND o.id = $2`, workspaceId, outputID)
 	o := &types.TaskOutput{}
 	var runID, agentID sql.NullString
-	var summary sql.NullString
+	var summary, uri sql.NullString
 	var schemaBytes, dataBytes, metaBytes []byte
 	err := row.Scan(&o.ID, &o.WorkspaceID, &o.TaskID, &runID, &agentID,
-		&o.OutputType, &o.Title, &summary, &schemaBytes, &dataBytes, &metaBytes, &o.CreatedAt)
+		&o.AgentName, &o.OutputType, &o.Title, &summary, &uri,
+		&schemaBytes, &dataBytes, &metaBytes, &o.ArchivedAt, &o.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, &types.ErrTaskOutputNotFound{ID: outputID}
 	}
@@ -3187,6 +3460,9 @@ func (b *PostgresBackend) GetTaskOutput(ctx context.Context, workspaceId uint, o
 	}
 	if summary.Valid {
 		o.Summary = &summary.String
+	}
+	if uri.Valid {
+		o.URI = &uri.String
 	}
 	json.Unmarshal(schemaBytes, &o.Schema)
 	json.Unmarshal(dataBytes, &o.Data)
@@ -3227,6 +3503,31 @@ func (b *PostgresBackend) UpdateTaskOutputSummary(ctx context.Context, workspace
 	return nil
 }
 
+func (b *PostgresBackend) ArchiveTaskOutput(ctx context.Context, workspaceId uint, outputID string) error {
+	res, err := b.db.ExecContext(ctx, `
+		UPDATE task_output SET archived_at = CURRENT_TIMESTAMP
+		WHERE id = $1 AND workspace_id = $2 AND archived_at IS NULL`, outputID, workspaceId)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return &types.ErrTaskOutputNotFound{ID: outputID}
+	}
+	return nil
+}
+
+func (b *PostgresBackend) ArchiveAllTaskOutputs(ctx context.Context, workspaceId uint) (int64, error) {
+	res, err := b.db.ExecContext(ctx, `
+		UPDATE task_output SET archived_at = CURRENT_TIMESTAMP
+		WHERE workspace_id = $1 AND archived_at IS NULL`, workspaceId)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 func (b *PostgresBackend) DeleteTaskOutput(ctx context.Context, workspaceId uint, outputID string) error {
 	res, err := b.db.ExecContext(ctx, `
 		DELETE FROM task_output WHERE id = $1 AND workspace_id = $2`, outputID, workspaceId)
@@ -3243,10 +3544,11 @@ func (b *PostgresBackend) DeleteTaskOutput(ctx context.Context, workspaceId uint
 func scanTaskOutput(rows *sql.Rows) (*types.TaskOutput, error) {
 	o := &types.TaskOutput{}
 	var runID, agentID sql.NullString
-	var summary sql.NullString
+	var summary, uri sql.NullString
 	var schemaBytes, dataBytes, metaBytes []byte
 	if err := rows.Scan(&o.ID, &o.WorkspaceID, &o.TaskID, &runID, &agentID,
-		&o.OutputType, &o.Title, &summary, &schemaBytes, &dataBytes, &metaBytes, &o.CreatedAt); err != nil {
+		&o.AgentName, &o.OutputType, &o.Title, &summary, &uri,
+		&schemaBytes, &dataBytes, &metaBytes, &o.ArchivedAt, &o.CreatedAt); err != nil {
 		return nil, err
 	}
 	if runID.Valid {
@@ -3257,6 +3559,9 @@ func scanTaskOutput(rows *sql.Rows) (*types.TaskOutput, error) {
 	}
 	if summary.Valid {
 		o.Summary = &summary.String
+	}
+	if uri.Valid {
+		o.URI = &uri.String
 	}
 	json.Unmarshal(schemaBytes, &o.Schema)
 	json.Unmarshal(dataBytes, &o.Data)

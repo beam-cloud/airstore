@@ -41,9 +41,13 @@ type createAgentAPIRequest struct {
 }
 
 type updateAgentAPIRequest struct {
-	Name   *string        `json:"name,omitempty"`
-	Config map[string]any `json:"config,omitempty"`
-	Active *bool          `json:"active,omitempty"`
+	Name          *string        `json:"name,omitempty"`
+	Role          *string        `json:"role,omitempty"`
+	MemoryScope   *string        `json:"memory_scope,omitempty"`
+	QualityScore  *float64       `json:"quality_score,omitempty"`
+	CostBudgetUSD *float64       `json:"cost_budget_usd,omitempty"`
+	Config        map[string]any `json:"config,omitempty"`
+	Active        *bool          `json:"active,omitempty"`
 }
 
 func NewAgentsGroup(routerGroup *echo.Group, agents *orchestration.AgentAPI, hooksSvc *hooks.Service, backend BackendRepo, emailCh *channels.Email) *AgentsGroup {
@@ -92,7 +96,14 @@ func (g *AgentsGroup) CreateAgent(c echo.Context) error {
 		return err
 	}
 
-	profile, err := g.agents.CreateAgent(c.Request().Context(), workspaceID, req.AgentKey, req.Name, req.Config, req.Active)
+	profile, err := g.agents.CreateAgent(
+		c.Request().Context(),
+		workspaceID,
+		req.AgentKey,
+		req.Name,
+		req.Config,
+		req.Active,
+	)
 	if err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, err.Error())
 	}
@@ -130,7 +141,18 @@ func (g *AgentsGroup) UpdateAgent(c echo.Context) error {
 	}
 	agentID := c.Param("agent_id")
 
-	profile, err := g.agents.UpdateAgent(c.Request().Context(), workspaceID, agentID, req.Name, req.Config, req.Active)
+	profile, err := g.agents.UpdateAgent(
+		c.Request().Context(),
+		workspaceID,
+		agentID,
+		req.Name,
+		req.Role,
+		req.MemoryScope,
+		req.QualityScore,
+		req.CostBudgetUSD,
+		req.Config,
+		req.Active,
+	)
 	if err != nil {
 		if _, ok := err.(*types.ErrAgentProfileNotFound); ok {
 			return ErrorResponse(c, http.StatusNotFound, "agent not found")

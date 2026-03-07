@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -48,7 +49,7 @@ func (o *TaskOutput) Write(p []byte) (int, error) {
 
 	// Process complete lines
 	for {
-		idx := indexByte(o.lineBuf, '\n')
+		idx := bytes.IndexByte(o.lineBuf, '\n')
 		if idx < 0 {
 			break
 		}
@@ -79,15 +80,6 @@ func (o *TaskOutput) emit(line string) {
 	for _, w := range o.writers {
 		w.Write([]byte(line))
 	}
-}
-
-func indexByte(b []byte, c byte) int {
-	for i, v := range b {
-		if v == c {
-			return i
-		}
-	}
-	return -1
 }
 
 // --- Writers ---
@@ -174,22 +166,20 @@ type OutputWriter struct {
 	workspaceID uint32
 	taskID      string
 	runID       string
+	agentID     string
 	outputIDs   map[string]string // local output_id -> server-generated UUID
 	mu          sync.Mutex
 }
 
 func NewOutputWriter(ctx context.Context, client *gatewayclient.GatewayClient, task types.RunExecution) *OutputWriter {
-	var taskID, runID string
-	if task.ExecutionPolicy != nil {
-		taskID = anyToTrimmedString(task.ExecutionPolicy[types.AgentExecutionMetaKeyOriginTaskID])
-		runID = anyToTrimmedString(task.ExecutionPolicy[types.AgentExecutionMetaKeyRunID])
-	}
+	ids := outputIDsFromTask(task)
 	return &OutputWriter{
 		ctx:         ctx,
 		client:      client,
-		workspaceID: uint32(task.WorkspaceId),
-		taskID:      taskID,
-		runID:       runID,
+		workspaceID: ids.workspaceID,
+		taskID:      ids.taskID,
+		runID:       ids.runID,
+		agentID:     ids.agentID,
 		outputIDs:   make(map[string]string),
 	}
 }
@@ -223,6 +213,7 @@ func (w *OutputWriter) createOutput(payload map[string]any) {
 		WorkspaceId: w.workspaceID,
 		TaskId:      w.taskID,
 		RunId:       w.runID,
+		AgentId:     w.agentID,
 		OutputType:  anyToTrimmedString(payload["output_type"]),
 		Title:       anyToTrimmedString(payload["title"]),
 	}

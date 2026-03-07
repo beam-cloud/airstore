@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/common"
+	"github.com/beam-cloud/airstore/pkg/orchestration"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/scheduler"
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -32,9 +33,9 @@ type WorkerService struct {
 }
 
 const (
-	defaultRunClaimLeaseTTL       = 45 * time.Second
-	defaultRecoveryLoopInterval   = 10 * time.Second
-	defaultRecoveryLoopBatchSize  = 50
+	defaultRunClaimLeaseTTL      = 45 * time.Second
+	defaultRecoveryLoopInterval  = 10 * time.Second
+	defaultRecoveryLoopBatchSize = 50
 )
 
 func NewWorkerService(
@@ -311,17 +312,23 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 	}
 
 	resultKey := fmt.Sprintf("run_result:%s:%s", strings.TrimSpace(req.TaskId), attemptID)
+	payload := map[string]any{
+		types.OrchestrationOutboxPayloadTaskID:          strings.TrimSpace(req.TaskId),
+		types.OrchestrationOutboxPayloadAttemptID:       attemptID,
+		types.OrchestrationOutboxPayloadExitCode:        int(req.ExitCode),
+		types.OrchestrationOutboxPayloadError:           req.Error,
+		types.OrchestrationOutboxPayloadIdempotency:     resultKey,
+		types.OrchestrationOutboxPayloadWaitingForInput: req.WaitingForInput,
+	}
+	if ws := req.WakeSignal; ws != nil {
+		payload[types.OrchestrationOutboxPayloadWakeDelayMinutes] = int(ws.DelayMinutes)
+		payload[types.OrchestrationOutboxPayloadWakeReason] = ws.Reason
+		payload[types.OrchestrationOutboxPayloadWakeFollowUpPrompt] = ws.FollowUpPrompt
+	}
 	if err := s.backend.EnqueueOrchestrationOutboxEvent(ctx, &types.OrchestrationOutboxEvent{
-		EventType: types.OrchestrationOutboxEventTypeRunResult,
-		DedupeKey: resultKey,
-		PayloadJSON: map[string]any{
-			types.OrchestrationOutboxPayloadTaskID:           strings.TrimSpace(req.TaskId),
-			types.OrchestrationOutboxPayloadAttemptID:        attemptID,
-			types.OrchestrationOutboxPayloadExitCode:         int(req.ExitCode),
-			types.OrchestrationOutboxPayloadError:            req.Error,
-			types.OrchestrationOutboxPayloadIdempotency:      resultKey,
-			types.OrchestrationOutboxPayloadWaitingForInput:  req.WaitingForInput,
-		},
+		EventType:   types.OrchestrationOutboxEventTypeRunResult,
+		DedupeKey:   resultKey,
+		PayloadJSON: payload,
 		AvailableAt: time.Now(),
 	}); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to enqueue task result: %v", err)
@@ -338,6 +345,26 @@ func isRunAttemptActive(attempt *types.AgentRunAttempt) bool {
 		return false
 	}
 	return attempt.Status.IsInFlight()
+}
+
+func (s *WorkerService) UpdateTaskState(ctx context.Context, req *pb.UpdateTaskStateRequest) (*pb.UpdateTaskStateResponse, error) {
+	if s.backend == nil {
+		return nil, status.Errorf(codes.Unavailable, "task persistence not available")
+	}
+	taskID := strings.TrimSpace(req.TaskId)
+	runID := strings.TrimSpace(req.RunId)
+	state := types.AgentTaskState(strings.TrimSpace(req.State))
+	if taskID == "" || runID == "" || state == "" {
+		return nil, status.Error(codes.InvalidArgument, "task_id, state, and run_id are required")
+	}
+	if state != types.AgentTaskStateWaiting && state != types.AgentTaskStateRunning {
+		return nil, status.Errorf(codes.InvalidArgument, "only waiting/running transitions are allowed, got %q", state)
+	}
+
+	if _, err := s.backend.UpdateTaskStateIfCurrentRun(ctx, taskID, runID, state, nil, nil); err != nil {
+		return nil, status.Errorf(codes.Internal, "update task state: %v", err)
+	}
+	return &pb.UpdateTaskStateResponse{}, nil
 }
 
 func isRunAttemptNotFound(err error) bool {
@@ -410,8 +437,8 @@ func (s *WorkerService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, 
 		return nil
 	}
 	targetRunID := run.ID
-	nextState := types.TaskTerminalStateForRun(run.Status, run.Interactive)
-	_, err = s.backend.UpdateTaskStateIfCurrentRun(
+	nextState := types.TaskTerminalStateForRun(run.Status)
+	updated, err := s.backend.UpdateTaskStateIfCurrentRun(
 		ctx,
 		run.OriginTaskID,
 		run.ID,
@@ -419,7 +446,15 @@ func (s *WorkerService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, 
 		nil,
 		&targetRunID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	if !updated {
+		return nil
+	}
+	task.State = nextState
+	task.TargetRunID = &targetRunID
+	return orchestration.SyncTaskOutcome(ctx, s.backend, task, run)
 }
 
 func appendRunSnapshot(
@@ -491,6 +526,9 @@ func (s *WorkerService) CreateTaskOutput(ctx context.Context, req *pb.CreateTask
 	if req.RunId != "" {
 		output.RunID = &req.RunId
 	}
+	if req.AgentId != "" {
+		output.AgentID = &req.AgentId
+	}
 	if req.SchemaJson != "" {
 		if err := json.Unmarshal([]byte(req.SchemaJson), &output.Schema); err != nil {
 			return nil, status.Errorf(codes.InvalidArgument, "invalid schema_json: %v", err)
@@ -507,6 +545,9 @@ func (s *WorkerService) CreateTaskOutput(ctx context.Context, req *pb.CreateTask
 		if err := json.Unmarshal([]byte(req.MetadataJson), &output.Metadata); err != nil {
 			return nil, status.Errorf(codes.InvalidArgument, "invalid metadata_json: %v", err)
 		}
+	}
+	if req.Uri != "" {
+		output.URI = &req.Uri
 	}
 
 	if err := s.backend.CreateTaskOutput(ctx, output); err != nil {

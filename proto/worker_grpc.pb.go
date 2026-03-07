@@ -27,6 +27,7 @@ const (
 	WorkerService_ListWorkers_FullMethodName          = "/worker.WorkerService/ListWorkers"
 	WorkerService_SetTaskStarted_FullMethodName       = "/worker.WorkerService/SetTaskStarted"
 	WorkerService_SetTaskResult_FullMethodName        = "/worker.WorkerService/SetTaskResult"
+	WorkerService_UpdateTaskState_FullMethodName      = "/worker.WorkerService/UpdateTaskState"
 	WorkerService_AllocateIP_FullMethodName           = "/worker.WorkerService/AllocateIP"
 	WorkerService_ReleaseIP_FullMethodName            = "/worker.WorkerService/ReleaseIP"
 	WorkerService_CreateTaskOutput_FullMethodName     = "/worker.WorkerService/CreateTaskOutput"
@@ -48,6 +49,7 @@ type WorkerServiceClient interface {
 	// Task lifecycle
 	SetTaskStarted(ctx context.Context, in *SetTaskStartedRequest, opts ...grpc.CallOption) (*SetTaskStartedResponse, error)
 	SetTaskResult(ctx context.Context, in *SetTaskResultRequest, opts ...grpc.CallOption) (*SetTaskResultResponse, error)
+	UpdateTaskState(ctx context.Context, in *UpdateTaskStateRequest, opts ...grpc.CallOption) (*UpdateTaskStateResponse, error)
 	// Network/IP management for sandboxes
 	AllocateIP(ctx context.Context, in *AllocateIPRequest, opts ...grpc.CallOption) (*AllocateIPResponse, error)
 	ReleaseIP(ctx context.Context, in *ReleaseIPRequest, opts ...grpc.CallOption) (*ReleaseIPResponse, error)
@@ -137,6 +139,15 @@ func (c *workerServiceClient) SetTaskResult(ctx context.Context, in *SetTaskResu
 	return out, nil
 }
 
+func (c *workerServiceClient) UpdateTaskState(ctx context.Context, in *UpdateTaskStateRequest, opts ...grpc.CallOption) (*UpdateTaskStateResponse, error) {
+	out := new(UpdateTaskStateResponse)
+	err := c.cc.Invoke(ctx, WorkerService_UpdateTaskState_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *workerServiceClient) AllocateIP(ctx context.Context, in *AllocateIPRequest, opts ...grpc.CallOption) (*AllocateIPResponse, error) {
 	out := new(AllocateIPResponse)
 	err := c.cc.Invoke(ctx, WorkerService_AllocateIP_FullMethodName, in, out, opts...)
@@ -196,6 +207,7 @@ type WorkerServiceServer interface {
 	// Task lifecycle
 	SetTaskStarted(context.Context, *SetTaskStartedRequest) (*SetTaskStartedResponse, error)
 	SetTaskResult(context.Context, *SetTaskResultRequest) (*SetTaskResultResponse, error)
+	UpdateTaskState(context.Context, *UpdateTaskStateRequest) (*UpdateTaskStateResponse, error)
 	// Network/IP management for sandboxes
 	AllocateIP(context.Context, *AllocateIPRequest) (*AllocateIPResponse, error)
 	ReleaseIP(context.Context, *ReleaseIPRequest) (*ReleaseIPResponse, error)
@@ -233,6 +245,9 @@ func (UnimplementedWorkerServiceServer) SetTaskStarted(context.Context, *SetTask
 }
 func (UnimplementedWorkerServiceServer) SetTaskResult(context.Context, *SetTaskResultRequest) (*SetTaskResultResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SetTaskResult not implemented")
+}
+func (UnimplementedWorkerServiceServer) UpdateTaskState(context.Context, *UpdateTaskStateRequest) (*UpdateTaskStateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UpdateTaskState not implemented")
 }
 func (UnimplementedWorkerServiceServer) AllocateIP(context.Context, *AllocateIPRequest) (*AllocateIPResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method AllocateIP not implemented")
@@ -406,6 +421,24 @@ func _WorkerService_SetTaskResult_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _WorkerService_UpdateTaskState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateTaskStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkerServiceServer).UpdateTaskState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkerService_UpdateTaskState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkerServiceServer).UpdateTaskState(ctx, req.(*UpdateTaskStateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _WorkerService_AllocateIP_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(AllocateIPRequest)
 	if err := dec(in); err != nil {
@@ -534,6 +567,10 @@ var WorkerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SetTaskResult",
 			Handler:    _WorkerService_SetTaskResult_Handler,
+		},
+		{
+			MethodName: "UpdateTaskState",
+			Handler:    _WorkerService_UpdateTaskState_Handler,
 		},
 		{
 			MethodName: "AllocateIP",

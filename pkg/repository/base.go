@@ -204,6 +204,9 @@ type BackendRepository interface {
 	ClaimQueuedTaskForDispatch(ctx context.Context, taskID string, staleAfter time.Duration) (*types.AgentTask, bool, error)
 	UpdateTaskState(ctx context.Context, taskId string, state types.AgentTaskState, droppedReason *string, targetRunID *string) error
 	UpdateTaskStateIfCurrentRun(ctx context.Context, taskID string, expectedRunID string, state types.AgentTaskState, droppedReason *string, targetRunID *string) (bool, error)
+	SleepTaskWithOutbox(ctx context.Context, taskID string, expectedRunID string, wakeAt time.Time, wakeReason string, outboxEvent *types.OrchestrationOutboxEvent) (bool, error)
+	UpdateTask(ctx context.Context, task *types.AgentTask) error
+	UpdateTaskCost(ctx context.Context, taskID string, costUSD float64) error
 	ArchiveTask(ctx context.Context, taskId string) error
 	CreateScheduledTask(ctx context.Context, st *types.ScheduledTask) error
 	GetScheduledTask(ctx context.Context, workspaceID uint, externalID string) (*types.ScheduledTask, error)
@@ -263,10 +266,13 @@ type BackendRepository interface {
 
 	// Task outputs
 	ListTaskOutputs(ctx context.Context, workspaceId uint, taskID string) ([]*types.TaskOutput, error)
+	ListWorkspaceTaskOutputs(ctx context.Context, workspaceId uint, filter types.TaskOutputListFilter) ([]*types.TaskOutput, error)
 	CreateTaskOutput(ctx context.Context, output *types.TaskOutput) error
 	GetTaskOutput(ctx context.Context, workspaceId uint, outputID string) (*types.TaskOutput, error)
 	AppendTaskOutputRows(ctx context.Context, workspaceId uint, outputID string, rows []byte) error
 	UpdateTaskOutputSummary(ctx context.Context, workspaceId uint, outputID string, summary string) error
+	ArchiveTaskOutput(ctx context.Context, workspaceId uint, outputID string) error
+	ArchiveAllTaskOutputs(ctx context.Context, workspaceId uint) (int64, error)
 	DeleteTaskOutput(ctx context.Context, workspaceId uint, outputID string) error
 
 	// Database access

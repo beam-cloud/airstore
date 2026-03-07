@@ -125,6 +125,7 @@ function toRunListQuery(params: RunListParams | undefined): Record<string, strin
   if (!params) return undefined;
   const query: Record<string, string> = {};
   if (params.agentId) query['agent_id'] = params.agentId;
+  if (params.taskId) query['task_id'] = params.taskId;
   if (params.status) {
     query['status'] = Array.isArray(params.status) ? params.status.join(',') : params.status;
   }
@@ -148,6 +149,7 @@ function shouldTreatSecondArgAsOptions(
 function hasRunListParamKeys(value: RunListParams | RequestOptions): value is RunListParams {
   return (
     'agentId' in value ||
+    'taskId' in value ||
     'status' in value ||
     'sessionId' in value ||
     'createdAfter' in value ||

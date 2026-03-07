@@ -43,6 +43,8 @@ type AgentCommandParams struct {
 	IdempotencyKey    string              `json:"idempotency_key"`
 	Label             *string             `json:"label,omitempty"`
 	SpawnedBy         *string             `json:"spawned_by,omitempty"`
+	Priority          string              `json:"priority,omitempty"`
+	BudgetUSD         *float64            `json:"budget_usd,omitempty"`
 }
 
 type ExecHost string
@@ -103,6 +105,16 @@ func ValidateAgentCommandParams(v *AgentCommandParams) error {
 	}
 	if v.TimeoutMs != nil && *v.TimeoutMs < 0 {
 		return fmt.Errorf("timeout_ms must be >= 0")
+	}
+	if v.BudgetUSD != nil && *v.BudgetUSD < 0 {
+		return fmt.Errorf("budget_usd must be >= 0")
+	}
+	if priority := strings.TrimSpace(v.Priority); priority != "" {
+		switch priority {
+		case "low", "normal", "high", "urgent":
+		default:
+			return fmt.Errorf("priority %q is not supported", v.Priority)
+		}
 	}
 	if v.Policy != nil {
 		if err := ValidateRunExecutionPolicy(*v.Policy); err != nil {

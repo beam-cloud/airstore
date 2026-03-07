@@ -105,7 +105,7 @@ export {
 export type { Token, TokenCreateParams, TokenCreated } from './types/tokens.js';
 export type { Member, MemberCreateParams } from './types/members.js';
 export type { OAuthSession, OAuthSessionCreateParams, OAuthSessionStatus, OAuthPollOptions } from './types/oauth.js';
-export type { VirtualFile, DirectoryListing, TreeListing } from './types/filesystem.js';
+export type { VirtualFile, DirectoryListing, TreeListing, SearchResult, UploadUrlResponse, DownloadUrlResponse } from './types/filesystem.js';
 export type {
   AgentProfile,
   AgentCreateParams,
@@ -133,6 +133,7 @@ export type {
   RoutingContext,
   AgentTask,
   AgentCommandCreateParams,
+  TaskUpdateParams,
   TaskListParams,
   TaskListResponse,
   TaskCancelResponse,

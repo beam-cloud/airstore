@@ -14,10 +14,27 @@ type TaskOutputsGroup struct {
 	backend     repository.BackendRepository
 }
 
+type WorkspaceOutputsGroup struct {
+	routerGroup *echo.Group
+	backend     repository.BackendRepository
+}
+
+func NewWorkspaceOutputsGroup(routerGroup *echo.Group, backend repository.BackendRepository) *WorkspaceOutputsGroup {
+	g := &WorkspaceOutputsGroup{routerGroup: routerGroup, backend: backend}
+	g.registerRoutes()
+	return g
+}
+
 func NewTaskOutputsGroup(routerGroup *echo.Group, backend repository.BackendRepository) *TaskOutputsGroup {
 	g := &TaskOutputsGroup{routerGroup: routerGroup, backend: backend}
 	g.registerRoutes()
 	return g
+}
+
+func (g *WorkspaceOutputsGroup) registerRoutes() {
+	g.routerGroup.GET("", g.ListOutputs)
+	g.routerGroup.POST("/:output_id/archive", g.ArchiveOutput)
+	g.routerGroup.POST("/archive-all", g.ArchiveAllOutputs)
 }
 
 func (g *TaskOutputsGroup) registerRoutes() {
@@ -26,6 +43,61 @@ func (g *TaskOutputsGroup) registerRoutes() {
 	g.routerGroup.GET("/:output_id", g.GetOutput)
 	g.routerGroup.POST("/:output_id/rows", g.AppendRows)
 	g.routerGroup.DELETE("/:output_id", g.DeleteOutput)
+}
+
+func (g *WorkspaceOutputsGroup) ListOutputs(c echo.Context) error {
+	workspaceID, err := requireWorkspaceID(c)
+	if err != nil {
+		return err
+	}
+
+	excludeArchived := c.QueryParam("include_archived") != "true"
+
+	outputs, err := g.backend.ListWorkspaceTaskOutputs(c.Request().Context(), workspaceID, types.TaskOutputListFilter{
+		TaskID:          strPtrMaybeQuery(c.QueryParam("task_id")),
+		AgentID:         strPtrMaybeQuery(c.QueryParam("agent_id")),
+		OutputType:      strPtrMaybeQuery(c.QueryParam("output_type")),
+		ExcludeArchived: excludeArchived,
+		Limit:           parseLimitParam(c.QueryParam("limit"), 60, 200),
+	})
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+	if outputs == nil {
+		outputs = []*types.TaskOutput{}
+	}
+	return SuccessResponse(c, map[string]any{
+		"outputs":     outputs,
+		"next_cursor": "",
+		"has_more":    false,
+	})
+}
+
+func (g *WorkspaceOutputsGroup) ArchiveOutput(c echo.Context) error {
+	workspaceID, err := requireWorkspaceID(c)
+	if err != nil {
+		return err
+	}
+	outputID := c.Param("output_id")
+	if err := g.backend.ArchiveTaskOutput(c.Request().Context(), workspaceID, outputID); err != nil {
+		if _, ok := err.(*types.ErrTaskOutputNotFound); ok {
+			return ErrorResponse(c, http.StatusNotFound, "output not found")
+		}
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
+func (g *WorkspaceOutputsGroup) ArchiveAllOutputs(c echo.Context) error {
+	workspaceID, err := requireWorkspaceID(c)
+	if err != nil {
+		return err
+	}
+	count, err := g.backend.ArchiveAllTaskOutputs(c.Request().Context(), workspaceID)
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+	return SuccessResponse(c, map[string]any{"archived": count})
 }
 
 func (g *TaskOutputsGroup) ListOutputs(c echo.Context) error {
@@ -49,6 +121,7 @@ type createOutputRequest struct {
 	Title      string         `json:"title"`
 	OutputID   string         `json:"output_id,omitempty"`
 	Summary    *string        `json:"summary,omitempty"`
+	URI        *string        `json:"uri,omitempty"`
 	Schema     map[string]any `json:"schema,omitempty"`
 	Data       map[string]any `json:"data"`
 	Metadata   map[string]any `json:"metadata,omitempty"`
@@ -79,6 +152,7 @@ func (g *TaskOutputsGroup) CreateOutput(c echo.Context) error {
 		OutputType:  req.OutputType,
 		Title:       req.Title,
 		Summary:     req.Summary,
+		URI:         req.URI,
 		Schema:      req.Schema,
 		Data:        req.Data,
 		Metadata:    req.Metadata,

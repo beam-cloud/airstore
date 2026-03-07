@@ -16,6 +16,7 @@ service WorkerService {
   // Task lifecycle
   rpc SetTaskStarted(SetTaskStartedRequest) returns (SetTaskStartedResponse);
   rpc SetTaskResult(SetTaskResultRequest) returns (SetTaskResultResponse);
+  rpc UpdateTaskState(UpdateTaskStateRequest) returns (UpdateTaskStateResponse);
 
   // Network/IP management for sandboxes
   rpc AllocateIP(AllocateIPRequest) returns (AllocateIPResponse);
@@ -94,15 +95,30 @@ message SetTaskStartedRequest {
 
 message SetTaskStartedResponse {}
 
+message WakeSignal {
+  int32  delay_minutes    = 1;
+  string reason           = 2;
+  string follow_up_prompt = 3;
+}
+
 message SetTaskResultRequest {
   string task_id = 1;
   int32 exit_code = 2;
   string error = 3;
   string attempt_id = 4;
   bool waiting_for_input = 5;
+  WakeSignal wake_signal = 6;
 }
 
 message SetTaskResultResponse {}
+
+message UpdateTaskStateRequest {
+  string task_id = 1;
+  string state = 2;
+  string run_id = 3;
+}
+
+message UpdateTaskStateResponse {}
 
 // IP allocation for sandbox networking
 message AllocateIPRequest {
@@ -135,6 +151,8 @@ message CreateTaskOutputRequest {
   string schema_json = 6;   // JSON-encoded schema
   string data_json = 7;     // JSON-encoded initial data
   string metadata_json = 8; // JSON-encoded metadata
+  string uri = 9;            // External deep-link URI
+  string agent_id = 10;
 }
 
 message CreateTaskOutputResponse {
