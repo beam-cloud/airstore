@@ -16,6 +16,7 @@ import (
 
 const defaultRecoveryLockTTL = 15 * time.Second
 const terminalQueueReconcileGracePeriod = 5 * time.Second
+
 type orphanRecoveryStats struct {
 	detected    int
 	recovered   int
@@ -27,6 +28,7 @@ type orphanRecoveryOutcome struct {
 	recovered   bool
 	cleanupOnly bool
 }
+
 func (s *WorkerService) StartRecoveryLoop(ctx context.Context) {
 	if s == nil || !s.recoveryLoopEnabled {
 		return
@@ -134,6 +136,29 @@ func (s *WorkerService) runRecoveryCycle(ctx context.Context) {
 			continue
 		}
 		s.applyRecoveryOutcome(&stats, outcome)
+	}
+
+	if s.unclaimedRunStaleAfter > 0 {
+		staleUnclaimedRuns, err := s.backend.ListStaleUnclaimedAgentRuns(ctx, now.Add(-s.unclaimedRunStaleAfter), s.recoveryBatchSize)
+		if err != nil {
+			log.Warn().Err(err).Msg("worker recovery loop: failed to list stale unclaimed runs")
+			return
+		}
+		for _, run := range staleUnclaimedRuns {
+			if run == nil || strings.TrimSpace(run.ID) == "" {
+				continue
+			}
+			if _, dup := seenRuns[run.ID]; dup {
+				continue
+			}
+			seenRuns[run.ID] = struct{}{}
+			outcome, recErr := s.processStaleUnclaimedRun(ctx, run)
+			if recErr != nil {
+				log.Warn().Err(recErr).Str("run_id", run.ID).Msg("worker recovery loop: failed to recover stale unclaimed run")
+				continue
+			}
+			s.applyRecoveryOutcome(&stats, outcome)
+		}
 	}
 
 	if stats.detected > 0 || stats.recovered > 0 {
@@ -250,6 +275,38 @@ func (s *WorkerService) processClaimedRun(ctx context.Context, run *types.AgentR
 			Str("run_id", run.ID).
 			Msg("worker recovery loop: failed to reconcile terminal queue state after run finalization")
 	}
+	return orphanRecoveryOutcome{
+		detected:  true,
+		recovered: true,
+	}, nil
+}
+
+func (s *WorkerService) processStaleUnclaimedRun(ctx context.Context, run *types.AgentRun) (orphanRecoveryOutcome, error) {
+	if run == nil || !run.Status.IsActive() || run.ClaimedByWorker != nil {
+		return orphanRecoveryOutcome{}, nil
+	}
+	if s.taskQueue == nil || s.backend == nil {
+		return orphanRecoveryOutcome{}, nil
+	}
+
+	state, err := s.taskQueue.GetState(ctx, run.ID)
+	if err == nil && state != nil && state.Status == types.RunExecutionStatusPending {
+		return orphanRecoveryOutcome{}, nil
+	}
+
+	execTask, err := s.backend.GetRunExecution(ctx, run.ID)
+	if err != nil {
+		return orphanRecoveryOutcome{}, err
+	}
+	if execTask == nil || execTask.IsTerminal() {
+		return orphanRecoveryOutcome{}, nil
+	}
+	if err := s.taskQueue.Requeue(ctx, execTask); err != nil {
+		return orphanRecoveryOutcome{}, err
+	}
+	log.Info().
+		Str("run_id", run.ID).
+		Msg("worker recovery loop: requeued stale unclaimed run")
 	return orphanRecoveryOutcome{
 		detected:  true,
 		recovered: true,

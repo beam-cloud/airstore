@@ -44,7 +44,7 @@ var (
 	hookStream        = "airstore:hook:events"
 	hookConsumerGroup = "airstore:hook:evaluators"
 	hookSeen          = "airstore:hook:seen:%d:%s" // workspaceId, pathHash
-	hookPollLock = "airstore:hook:poll:%s" // queryExternalId
+	hookPollLock      = "airstore:hook:poll:%s"    // queryExternalId
 
 	// OAuth keys
 	oauthSession = "airstore:oauth:session:%s" // sessionId
@@ -79,7 +79,8 @@ var (
 	terminalCancel      = "airstore:terminal:%s:cancel"       // taskId
 
 	// Session lease — exclusive ownership of an interactive session.
-	sessionLease = "airstore:session:lease:%d:%s" // workspaceId, sessionId
+	sessionLease      = "airstore:session:lease:%d:%s"      // workspaceId, sessionId
+	sessionCheckpoint = "airstore:session:checkpoint:%d:%s" // workspaceId, sessionId
 
 	// Run interaction state — backend-owned working/waiting/closed snapshot.
 	runInteraction = "airstore:run:interaction:%d:%s" // workspaceId, runId
@@ -321,6 +322,10 @@ func (rk *redisKeys) TerminalCancel(taskId string) string {
 
 func (rk *redisKeys) SessionLease(workspaceId uint, sessionId string) string {
 	return fmt.Sprintf(sessionLease, workspaceId, sessionId)
+}
+
+func (rk *redisKeys) SessionCheckpoint(workspaceId uint, sessionId string) string {
+	return fmt.Sprintf(sessionCheckpoint, workspaceId, sessionId)
 }
 
 func (rk *redisKeys) RunInteraction(workspaceId uint, runId string) string {

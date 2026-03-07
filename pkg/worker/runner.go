@@ -27,10 +27,11 @@ const (
 
 	systemPromptModeReplace = "replace"
 
-	claudeConfigDirEnvKey  = "CLAUDE_CONFIG_DIR"
-	claudeDefaultShellEnv  = "/bin/bash"
+	claudeConfigDirEnvKey   = "CLAUDE_CONFIG_DIR"
+	claudeDefaultShellEnv   = "/bin/bash"
 	claudeStateDirName      = ".claude"
 	claudeStateRootDir      = ".airstore/claude"
+	claudeCheckpointFile    = "session-checkpoint.json"
 	claudeHeartbeatFile     = ".heartbeat"
 	claudeNeedsInputFile    = ".needs_input"
 	claudeHeartbeatFreshFor = 5 * time.Minute
@@ -386,6 +387,38 @@ func defaultClaudePersistentConfigDir(env map[string]string) string {
 		claudeStateScopeForEnv(env),
 		claudeStateDirName,
 	)
+}
+
+func defaultClaudeCheckpointPath(env map[string]string) string {
+	return path.Join(
+		claudeWorkspaceDir(env),
+		claudeStateRootDir,
+		claudeStateScopeForEnv(env),
+		claudeCheckpointFile,
+	)
+}
+
+func writeClaudeSessionCheckpoint(mountSource string, env map[string]string, checkpoint *types.SessionCheckpoint) error {
+	if strings.TrimSpace(mountSource) == "" || checkpoint == nil {
+		return fmt.Errorf("mount source and checkpoint are required")
+	}
+	checkpointPath := vfsHostPath(mountSource, defaultClaudeCheckpointPath(env))
+	if err := os.MkdirAll(filepath.Dir(checkpointPath), 0o755); err != nil {
+		return fmt.Errorf("mkdir checkpoint dir: %w", err)
+	}
+	payload, err := json.MarshalIndent(checkpoint, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal checkpoint: %w", err)
+	}
+	tmpPath := checkpointPath + ".tmp"
+	if err := os.WriteFile(tmpPath, payload, 0o644); err != nil {
+		return fmt.Errorf("write checkpoint temp: %w", err)
+	}
+	if err := os.Rename(tmpPath, checkpointPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("rename checkpoint: %w", err)
+	}
+	return nil
 }
 
 func claudeStateScope(workspaceDir string) string {

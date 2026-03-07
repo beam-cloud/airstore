@@ -29,6 +29,7 @@ import (
 	apiv1 "github.com/beam-cloud/airstore/pkg/api/v1"
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/channels"
+	"github.com/beam-cloud/airstore/pkg/skills"
 	"github.com/beam-cloud/airstore/pkg/channels/inbound"
 	"github.com/beam-cloud/airstore/pkg/clients"
 	"github.com/beam-cloud/airstore/pkg/common"
@@ -570,9 +571,10 @@ func (g *Gateway) registerServices() error {
 
 		// Skills API (nested under workspaces, workspace-scoped auth)
 		if g.storageClient != nil {
+			skillCopilot := skills.NewCopilot(g.s2Client, g.storageClient)
 			skillsGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/skills")
 			skillsGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
-			apiv1.NewSkillsGroup(skillsGroup, g.BackendRepo, g.storageClient)
+			apiv1.NewSkillsGroup(skillsGroup, g.BackendRepo, g.storageClient, skillCopilot)
 			log.Info().Msg("skills API registered at /api/v1/workspaces/:workspace_id/skills")
 		}
 

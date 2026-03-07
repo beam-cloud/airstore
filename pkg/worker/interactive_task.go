@@ -72,10 +72,39 @@ func (w *Worker) setOriginTaskState(ctx context.Context, task types.RunExecution
 	}
 }
 
+func shouldRecordSessionCheckpoint(result *types.RunExecutionResult) bool {
+	return result != nil && strings.TrimSpace(result.Error) == ""
+}
+
+func (w *Worker) recordSessionCheckpoint(ctx context.Context, task types.RunExecution, mountSource string, env map[string]string) error {
+	if w == nil || w.terminalIO == nil {
+		return nil
+	}
+	sessionID := strings.TrimSpace(env[agentSessionIDEnvKey])
+	if sessionID == "" {
+		return nil
+	}
+	execCtx := executionContextFromTask(task)
+	if execCtx.runID == "" {
+		return nil
+	}
+	checkpoint := &types.SessionCheckpoint{
+		RunID:       execCtx.runID,
+		ExecutionID: task.ExternalId,
+		UpdatedAt:   time.Now().UnixMilli(),
+	}
+	if err := writeClaudeSessionCheckpoint(mountSource, env, checkpoint); err != nil {
+		return err
+	}
+	return w.terminalIO.SetSessionCheckpoint(ctx, task.WorkspaceId, sessionID, checkpoint, 0)
+}
+
 func (w *Worker) runInteractiveTask(ctx context.Context, task types.RunExecution) (*types.RunExecutionResult, error) {
 	if w.terminalIO == nil {
 		return nil, fmt.Errorf("terminal transport is not configured")
 	}
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
 	defer func() {
 		finalCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
@@ -87,18 +116,18 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.RunExecution
 	releaseSessionLease := func() {}
 
 	if sessionID != "" {
-		acquired, err := w.terminalIO.AcquireSessionLease(ctx, task.WorkspaceId, sessionID, ownerID, sessionLeaseTTL)
+		acquired, err := w.terminalIO.AcquireSessionLease(runCtx, task.WorkspaceId, sessionID, ownerID, sessionLeaseTTL)
 		if err != nil {
 			return nil, fmt.Errorf("failed to acquire session lease: %w", err)
 		}
 		if !acquired {
-			currentOwner, _ := w.terminalIO.GetSessionLeaseOwner(ctx, task.WorkspaceId, sessionID)
+			currentOwner, _ := w.terminalIO.GetSessionLeaseOwner(runCtx, task.WorkspaceId, sessionID)
 			return nil, fmt.Errorf("session ID %s is already in use (owner: %s)", sessionID, currentOwner)
 		}
 		addTaskExecutionContext(log.Info().Str("session_id", sessionID), task).Msg("acquired session lease")
 
-		leaseCtx, leaseCancel := context.WithCancel(ctx)
-		go w.heartbeatSessionLease(leaseCtx, task.WorkspaceId, sessionID, ownerID)
+		leaseCtx, leaseCancel := context.WithCancel(runCtx)
+		go w.heartbeatSessionLease(leaseCtx, task, sessionID, ownerID, runCancel)
 		var releaseOnce sync.Once
 		releaseSessionLease = func() {
 			releaseOnce.Do(func() {
@@ -120,7 +149,7 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.RunExecution
 	if claudeRunner, ok := w.sandboxManager.ResolveRunner(task, env).(*ClaudeCodeRunner); ok {
 		claudeRunner.injectEnv(env)
 	}
-	taskMountSource := w.sandboxManager.mountFilesystem(ctx, task)
+	taskMountSource := w.sandboxManager.mountFilesystem(runCtx, task)
 	cfg := w.sandboxManager.buildTaskSandboxConfig(task, []string{"sleep", "infinity"}, env, taskMountSource)
 
 	if _, err := w.sandboxManager.Create(cfg); err != nil {
@@ -138,20 +167,19 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.RunExecution
 	// Configure git inside the sandbox: writes credential helper, gitconfig,
 	// and resolves the real GitHub user's name/email via the github tool.
 	// Runs synchronously so the config is ready before the first turn.
-	setupGitInsideSandbox(ctx, w.sandboxManager.runtime, sandboxID, env)
+	setupGitInsideSandbox(runCtx, w.sandboxManager.runtime, sandboxID, env)
 
-	w.sandboxManager.publishStatus(ctx, task.ExternalId, types.RunExecutionStatusRunning, nil, "")
-	w.setRunInteractionState(ctx, task, types.RunInteractionStateWorking)
+	w.sandboxManager.publishStatus(runCtx, task.ExternalId, types.RunExecutionStatusRunning, nil, "")
+	w.setRunInteractionState(runCtx, task, types.RunInteractionStateWorking)
 
-	result := w.runInteractiveSession(ctx, task, sandboxID, taskMountSource)
+	result := w.runInteractiveSession(runCtx, task, sandboxID, taskMountSource)
 
 	// Report result to the gateway immediately, before cleanup. The task
 	// state transitions now (~1s) instead of after the 10s flush grace
 	// period. The later call in finishTask is idempotent (outbox dedupe).
 	w.reportTaskResult(task, result)
 
-	w.setRunInteractionState(ctx, task, types.RunInteractionStateClosed)
-	releaseSessionLease()
+	w.setRunInteractionState(runCtx, task, types.RunInteractionStateClosed)
 
 	if err := w.sandboxManager.Delete(sandboxID, true); err != nil {
 		addTaskExecutionContext(log.Warn().Err(err), task).Msg("interactive sandbox delete failed during cleanup")
@@ -159,13 +187,26 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.RunExecution
 
 	time.Sleep(mountFlushGracePeriod)
 
+	if shouldRecordSessionCheckpoint(result) {
+		checkpointCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := w.recordSessionCheckpoint(checkpointCtx, task, taskMountSource, env); err != nil {
+			addTaskExecutionContext(log.Warn().Err(err).Str("session_id", sessionID), task).
+				Msg("failed to persist durable session checkpoint")
+		} else {
+			addTaskExecutionContext(log.Info().Str("session_id", sessionID), task).
+				Msg("persisted durable session checkpoint")
+		}
+		cancel()
+	}
+
+	releaseSessionLease()
 	w.sandboxManager.cleanupMount(task.ExternalId)
 	addTaskExecutionContext(log.Info(), task).Msg("interactive sandbox cleanup complete")
 
 	return result, nil
 }
 
-func (w *Worker) heartbeatSessionLease(ctx context.Context, workspaceID uint, sessionID, ownerID string) {
+func (w *Worker) heartbeatSessionLease(ctx context.Context, task types.RunExecution, sessionID, ownerID string, onLost func()) {
 	ticker := time.NewTicker(sessionLeaseRenewInterval)
 	defer ticker.Stop()
 	for {
@@ -173,11 +214,21 @@ func (w *Worker) heartbeatSessionLease(ctx context.Context, workspaceID uint, se
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			renewed, err := w.terminalIO.RenewSessionLease(ctx, workspaceID, sessionID, ownerID, sessionLeaseTTL)
+			renewed, err := w.terminalIO.RenewSessionLease(ctx, task.WorkspaceId, sessionID, ownerID, sessionLeaseTTL)
 			if err != nil {
-				log.Warn().Err(err).Str("session_id", sessionID).Msg("session lease renewal failed")
+				addTaskExecutionContext(log.Warn().Err(err).Str("session_id", sessionID), task).
+					Msg("session lease renewal failed; canceling interactive task")
+				if onLost != nil {
+					onLost()
+				}
+				return
 			} else if !renewed {
-				log.Warn().Str("session_id", sessionID).Msg("session lease lost (owned by another)")
+				addTaskExecutionContext(log.Warn().Str("session_id", sessionID), task).
+					Msg("session lease lost; canceling interactive task")
+				if onLost != nil {
+					onLost()
+				}
+				return
 			}
 		}
 	}
@@ -757,7 +808,6 @@ func signalActivity(activityCh chan<- struct{}) {
 	default:
 	}
 }
-
 
 func monitorInteractiveSessionIdle(
 	ctx context.Context,

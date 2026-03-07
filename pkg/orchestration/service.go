@@ -694,12 +694,7 @@ func (s *AgentService) processDispatchMessage(ctx context.Context, message redis
 		return nil
 	}
 
-	if wakePrompt := streamValueAsString(message.Values, types.OrchestrationOutboxPayloadWakeFollowUpPrompt); wakePrompt != "" {
-		if task.PayloadJSON == nil {
-			task.PayloadJSON = map[string]any{}
-		}
-		task.PayloadJSON["message"] = wakePrompt
-	}
+	applyDispatchPayload(task, message.Values, retryAttempt)
 
 	if err := s.dispatchTask(ctx, task); err != nil {
 		reason := "dispatch_error"
@@ -713,12 +708,68 @@ func (s *AgentService) processDispatchMessage(ctx context.Context, message redis
 				delay = retryRequest.delay
 			}
 		}
-		if scheduleErr := s.scheduleDispatchRetry(ctx, task, retryAttempt, reason, delay); scheduleErr != nil {
+		if scheduleErr := s.scheduleDispatchRetry(
+			ctx,
+			task,
+			retryAttempt,
+			reason,
+			delay,
+			dispatchRetryPayloadFromValues(message.Values),
+		); scheduleErr != nil {
 			return scheduleErr
 		}
 	}
 	_ = s.orchestrationStore.AckTaskDispatch(ctx, message.ID)
 	return nil
+}
+
+func applyDispatchPayload(task *types.AgentTask, values map[string]any, retryAttempt int) {
+	if task == nil {
+		return
+	}
+	if task.PayloadJSON == nil {
+		task.PayloadJSON = map[string]any{}
+	}
+	if prompt := dispatchPromptFromValues(values); prompt != "" {
+		task.PayloadJSON["message"] = prompt
+		task.PayloadJSON["prompt"] = prompt
+	}
+	if boolFromAny(values[types.OrchestrationOutboxPayloadResumeSession]) {
+		task.PayloadJSON[types.OrchestrationOutboxPayloadResumeSession] = true
+	}
+	if excludeRunID := strings.TrimSpace(streamValueAsString(values, types.OrchestrationOutboxPayloadResumeExcludeRunID)); excludeRunID != "" {
+		task.PayloadJSON[types.OrchestrationOutboxPayloadResumeExcludeRunID] = excludeRunID
+	}
+	if checkpointRunID := strings.TrimSpace(streamValueAsString(values, types.OrchestrationOutboxPayloadResumeCheckpointRunID)); checkpointRunID != "" {
+		task.PayloadJSON[types.OrchestrationOutboxPayloadResumeCheckpointRunID] = checkpointRunID
+	}
+	if retryAttempt > 0 {
+		task.PayloadJSON[types.OrchestrationOutboxPayloadDispatchAttempt] = retryAttempt
+	}
+}
+
+func dispatchPromptFromValues(values map[string]any) string {
+	if prompt := strings.TrimSpace(streamValueAsString(values, types.OrchestrationOutboxPayloadDispatchPrompt)); prompt != "" {
+		return prompt
+	}
+	return strings.TrimSpace(streamValueAsString(values, types.OrchestrationOutboxPayloadWakeFollowUpPrompt))
+}
+
+func dispatchRetryPayloadFromValues(values map[string]any) map[string]any {
+	payload := map[string]any{}
+	if prompt := dispatchPromptFromValues(values); prompt != "" {
+		payload[types.OrchestrationOutboxPayloadDispatchPrompt] = prompt
+	}
+	if boolFromAny(values[types.OrchestrationOutboxPayloadResumeSession]) {
+		payload[types.OrchestrationOutboxPayloadResumeSession] = true
+	}
+	if excludeRunID := strings.TrimSpace(streamValueAsString(values, types.OrchestrationOutboxPayloadResumeExcludeRunID)); excludeRunID != "" {
+		payload[types.OrchestrationOutboxPayloadResumeExcludeRunID] = excludeRunID
+	}
+	if checkpointRunID := strings.TrimSpace(streamValueAsString(values, types.OrchestrationOutboxPayloadResumeCheckpointRunID)); checkpointRunID != "" {
+		payload[types.OrchestrationOutboxPayloadResumeCheckpointRunID] = checkpointRunID
+	}
+	return payload
 }
 
 type runResultProjectorMessage struct {
@@ -950,6 +1001,83 @@ func wakeBackoffDelay(wakeCount, ceilingMinutes int) int {
 	return delay
 }
 
+func (s *AgentService) scheduleRunResumeRetry(
+	ctx context.Context,
+	task *types.AgentTask,
+	run *types.AgentRun,
+) (bool, error) {
+	if s == nil || s.backend == nil || task == nil || run == nil {
+		return false, nil
+	}
+	if !run.Interactive || run.Status != types.AgentRunStatusError || !isSessionBusyError(pointerError(run.Error)) {
+		return false, nil
+	}
+
+	retryPayload, err := s.dispatchRetryPayloadFromRun(ctx, task, run)
+	if err != nil {
+		return true, err
+	}
+	retryAttempt := intFromAny(run.DeliveryJSON[types.OrchestrationOutboxPayloadDispatchAttempt])
+	if err := s.scheduleDispatchRetry(ctx, task, retryAttempt, "session_busy", sessionBusyRequeueDelay, retryPayload); err != nil {
+		return true, err
+	}
+	log.Info().
+		Str("task_id", task.ID).
+		Str("run_id", run.ID).
+		Str("session_id", run.SessionID).
+		Int("retry_attempt", retryAttempt+1).
+		Msg("requeued task after retryable session failure")
+	return true, nil
+}
+
+func (s *AgentService) dispatchRetryPayloadFromRun(
+	ctx context.Context,
+	task *types.AgentTask,
+	run *types.AgentRun,
+) (map[string]any, error) {
+	payload := map[string]any{
+		types.OrchestrationOutboxPayloadResumeSession:      true,
+		types.OrchestrationOutboxPayloadResumeExcludeRunID: run.ID,
+	}
+	if checkpointRunID := strings.TrimSpace(stringFromPayload(run.DeliveryJSON, types.OrchestrationOutboxPayloadResumeCheckpointRunID)); checkpointRunID != "" {
+		payload[types.OrchestrationOutboxPayloadResumeCheckpointRunID] = checkpointRunID
+	} else if s.terminalIO != nil {
+		checkpoint, err := s.terminalIO.GetSessionCheckpoint(ctx, run.WorkspaceID, run.SessionID)
+		if err != nil {
+			return nil, err
+		}
+		if checkpoint != nil && strings.TrimSpace(checkpoint.RunID) != "" {
+			payload[types.OrchestrationOutboxPayloadResumeCheckpointRunID] = strings.TrimSpace(checkpoint.RunID)
+		}
+	}
+
+	prompt := ""
+	exec, err := s.backend.GetRunExecution(ctx, run.ID)
+	if err != nil {
+		return nil, err
+	}
+	if exec != nil {
+		prompt = strings.TrimSpace(exec.Prompt)
+	}
+	if prompt == "" {
+		prompt = runInputPrompt(task.PayloadJSON)
+	}
+	if prompt != "" {
+		payload[types.OrchestrationOutboxPayloadDispatchPrompt] = prompt
+	}
+	return payload, nil
+}
+
+func pointerError(errText *string) error {
+	if errText == nil {
+		return nil
+	}
+	if strings.TrimSpace(*errText) == "" {
+		return nil
+	}
+	return errors.New(strings.TrimSpace(*errText))
+}
+
 func (s *AgentService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, runID string, waitingForInput bool, wakeSignal *types.RunExecutionWakeSignal) error {
 	if s.backend == nil || strings.TrimSpace(runID) == "" {
 		return nil
@@ -975,6 +1103,11 @@ func (s *AgentService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, r
 	if run.EndedAt != nil && task.UpdatedAt.After(*run.EndedAt) {
 		return nil
 	}
+	if retried, err := s.scheduleRunResumeRetry(ctx, task, run); err != nil {
+		return err
+	} else if retried {
+		return nil
+	}
 	targetRunID := run.ID
 	nextState := types.TaskTerminalStateForRun(run.Status)
 	if waitingForInput && nextState == types.AgentTaskStateDone {
@@ -993,8 +1126,12 @@ func (s *AgentService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, r
 			EventType: types.OrchestrationOutboxEventTypeTaskDispatch,
 			DedupeKey: dedupeKey,
 			PayloadJSON: map[string]any{
-				types.OrchestrationOutboxPayloadTaskID:            task.ID,
-				types.OrchestrationOutboxPayloadWakeFollowUpPrompt: wakeSignal.FollowUpPrompt,
+				types.OrchestrationOutboxPayloadTaskID:                task.ID,
+				types.OrchestrationOutboxPayloadDispatchPrompt:        wakeSignal.FollowUpPrompt,
+				types.OrchestrationOutboxPayloadWakeFollowUpPrompt:    wakeSignal.FollowUpPrompt,
+				types.OrchestrationOutboxPayloadResumeSession:         true,
+				types.OrchestrationOutboxPayloadResumeExcludeRunID:    run.ID,
+				types.OrchestrationOutboxPayloadResumeCheckpointRunID: run.ID,
 			},
 			AvailableAt: wakeAt,
 		}
@@ -1283,6 +1420,7 @@ func (s *AgentService) scheduleDispatchRetry(
 	retryAttempt int,
 	reason string,
 	delay time.Duration,
+	retryPayload map[string]any,
 ) error {
 	if s == nil || s.backend == nil || task == nil {
 		return fmt.Errorf("dispatch retry dependencies are unavailable")
@@ -1322,15 +1460,19 @@ func (s *AgentService) scheduleDispatchRetry(
 		delay = computeDispatchRetryDelay(retryAttempt)
 	}
 
+	payload := cloneAnyMap(retryPayload)
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	payload[types.OrchestrationOutboxPayloadTaskID] = task.ID
+	payload[types.OrchestrationOutboxPayloadReason] = reason
+	payload[types.OrchestrationOutboxPayloadRetryDelay] = int(delay.Milliseconds())
+	payload[types.OrchestrationOutboxPayloadDispatchAttempt] = nextAttempt
+
 	return s.backend.EnqueueOrchestrationOutboxEvent(ctx, &types.OrchestrationOutboxEvent{
-		EventType: types.OrchestrationOutboxEventTypeTaskDispatch,
-		DedupeKey: guardKey,
-		PayloadJSON: map[string]any{
-			types.OrchestrationOutboxPayloadTaskID:          task.ID,
-			types.OrchestrationOutboxPayloadReason:          reason,
-			types.OrchestrationOutboxPayloadRetryDelay:      int(delay.Milliseconds()),
-			types.OrchestrationOutboxPayloadDispatchAttempt: nextAttempt,
-		},
+		EventType:   types.OrchestrationOutboxEventTypeTaskDispatch,
+		DedupeKey:   guardKey,
+		PayloadJSON: payload,
 		AvailableAt: time.Now().Add(delay),
 	})
 }
@@ -1339,12 +1481,61 @@ func (s *AgentService) waitForResumeBarrier(
 	ctx context.Context,
 	workspaceID uint,
 	sessionID string,
+	expectedCheckpointRunID string,
 	excludeRunIDs ...string,
 ) error {
 	if err := s.waitForSessionLeaseDrain(ctx, workspaceID, sessionID); err != nil {
 		return err
 	}
+	if err := s.waitForSessionCheckpoint(ctx, workspaceID, sessionID, expectedCheckpointRunID); err != nil {
+		return err
+	}
 	return s.ensureSessionAvailableForNewRun(ctx, workspaceID, sessionID, excludeRunIDs...)
+}
+
+func (s *AgentService) waitForSessionCheckpoint(
+	ctx context.Context,
+	workspaceID uint,
+	sessionID string,
+	expectedRunID string,
+) error {
+	if s == nil || s.terminalIO == nil {
+		return nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	expectedRunID = strings.TrimSpace(expectedRunID)
+	if sessionID == "" || expectedRunID == "" {
+		return nil
+	}
+
+	deadline := time.After(sessionDrainMaxWait)
+	tick := time.NewTicker(sessionDrainPollStep)
+	defer tick.Stop()
+
+	for {
+		checkpoint, err := s.terminalIO.GetSessionCheckpoint(ctx, workspaceID, sessionID)
+		if err != nil {
+			return fmt.Errorf("check session checkpoint: %w", err)
+		}
+		if checkpoint != nil && strings.TrimSpace(checkpoint.RunID) == expectedRunID {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline:
+			if checkpoint != nil && strings.TrimSpace(checkpoint.RunID) != "" {
+				return fmt.Errorf(
+					"session %s checkpoint for run %s not durable yet (latest checkpoint %s)",
+					sessionID,
+					expectedRunID,
+					strings.TrimSpace(checkpoint.RunID),
+				)
+			}
+			return fmt.Errorf("session %s checkpoint for run %s not durable yet", sessionID, expectedRunID)
+		case <-tick.C:
+		}
+	}
 }
 
 func (s *AgentService) waitForSessionLeaseDrain(ctx context.Context, workspaceID uint, sessionID string) error {
@@ -1446,7 +1637,9 @@ func isSessionBusyError(err error) bool {
 	}
 	lower := strings.ToLower(err.Error())
 	return strings.Contains(lower, "session") &&
-		(strings.Contains(lower, "already in use") || strings.Contains(lower, "still held"))
+		(strings.Contains(lower, "already in use") ||
+			strings.Contains(lower, "still held") ||
+			(strings.Contains(lower, "checkpoint") && strings.Contains(lower, "not durable")))
 }
 
 func (s *AgentService) handleExecutionTask(ctx context.Context, task *types.AgentTask) error {
@@ -1623,7 +1816,7 @@ func (s *AgentService) restartTerminalTaskFromRunInput(
 		}
 		_, _ = s.cancelInFlightRunExecutions(ctx, terminalRun.ID)
 	}
-	if err := s.waitForResumeBarrier(ctx, terminalRun.WorkspaceID, terminalRun.SessionID, terminalRun.ID); err != nil {
+	if err := s.waitForResumeBarrier(ctx, terminalRun.WorkspaceID, terminalRun.SessionID, terminalRun.ID, terminalRun.ID); err != nil {
 		return nil, err
 	}
 
@@ -1631,8 +1824,9 @@ func (s *AgentService) restartTerminalTaskFromRunInput(
 	payload["message"] = message
 	payload["prompt"] = message
 	payload["session_id"] = terminalRun.SessionID
-	payload["resume_session"] = true
-	payload["resume_exclude_run_id"] = terminalRun.ID
+	payload[types.OrchestrationOutboxPayloadResumeSession] = true
+	payload[types.OrchestrationOutboxPayloadResumeExcludeRunID] = terminalRun.ID
+	payload[types.OrchestrationOutboxPayloadResumeCheckpointRunID] = terminalRun.ID
 	payload["timeout_ms"] = terminalRun.TimeoutMs
 	payload[types.AgentExecutionMetaKeyInstanceKey] = executionInstanceKeyFromRun(terminalRun)
 	if terminalRun.AgentID != nil {
@@ -1726,9 +1920,11 @@ func buildRunInputPayload(run *types.AgentRun, message string) map[string]any {
 		}
 	}
 	return map[string]any{
-		"message":                              message,
-		"session_id":                           run.SessionID,
-		"resume_session":                       true,
+		"message":    message,
+		"session_id": run.SessionID,
+		types.OrchestrationOutboxPayloadResumeSession:         true,
+		types.OrchestrationOutboxPayloadResumeExcludeRunID:    run.ID,
+		types.OrchestrationOutboxPayloadResumeCheckpointRunID: run.ID,
 		"session_key":                          run.SessionKey,
 		types.AgentExecutionMetaKeyAgentID:     run.AgentID,
 		"timeout_ms":                           run.TimeoutMs,
@@ -1802,12 +1998,18 @@ func (s *AgentService) materializeRun(
 		return nil, RunExecutionPolicy{}, "", err
 	}
 
-	if boolFromAny(payload["resume_session"]) {
+	if boolFromAny(payload[types.OrchestrationOutboxPayloadResumeSession]) {
 		excludeRunIDs := []string{}
-		if excludeRunID := strings.TrimSpace(stringFromPayload(payload, "resume_exclude_run_id")); excludeRunID != "" {
+		if excludeRunID := strings.TrimSpace(stringFromPayload(payload, types.OrchestrationOutboxPayloadResumeExcludeRunID)); excludeRunID != "" {
 			excludeRunIDs = append(excludeRunIDs, excludeRunID)
 		}
-		if err := s.waitForResumeBarrier(ctx, task.WorkspaceID, sessionID, excludeRunIDs...); err != nil {
+		if err := s.waitForResumeBarrier(
+			ctx,
+			task.WorkspaceID,
+			sessionID,
+			stringFromPayload(payload, types.OrchestrationOutboxPayloadResumeCheckpointRunID),
+			excludeRunIDs...,
+		); err != nil {
 			return nil, RunExecutionPolicy{}, "", err
 		}
 	} else {
@@ -1842,6 +2044,7 @@ func (s *AgentService) materializeRun(
 		DeliveryJSON:    buildRunDelivery(instanceKey, runPolicy, nil),
 	}
 	applyDeliveryMetadata(run.DeliveryJSON, payload, task.RoutingJSON)
+	applyResumeDeliveryMetadata(run.DeliveryJSON, payload)
 
 	if err := s.backend.CreateAgentRun(ctx, run); err != nil {
 		return nil, RunExecutionPolicy{}, "", err
@@ -2336,7 +2539,7 @@ func applyPayloadRuntimeEnv(env map[string]string, payload map[string]any) {
 			env["AIRSTORE_AGENT_INPUT_PROVENANCE_JSON"] = string(encoded)
 		}
 	}
-	if boolFromAny(payload["resume_session"]) {
+	if boolFromAny(payload[types.OrchestrationOutboxPayloadResumeSession]) {
 		env["AIRSTORE_AGENT_RESUME_SESSION"] = "true"
 	}
 }
@@ -2536,6 +2739,24 @@ func applyDeliveryMetadata(delivery map[string]any, payload map[string]any, rout
 	}
 	if len(routing) > 0 {
 		delivery["routing"] = cloneAnyMap(routing)
+	}
+}
+
+func applyResumeDeliveryMetadata(delivery map[string]any, payload map[string]any) {
+	if delivery == nil || len(payload) == 0 {
+		return
+	}
+	for _, key := range []string{
+		types.OrchestrationOutboxPayloadDispatchAttempt,
+		types.OrchestrationOutboxPayloadResumeExcludeRunID,
+		types.OrchestrationOutboxPayloadResumeCheckpointRunID,
+	} {
+		if value, ok := payload[key]; ok && value != nil {
+			delivery[key] = value
+		}
+	}
+	if boolFromAny(payload[types.OrchestrationOutboxPayloadResumeSession]) {
+		delivery[types.OrchestrationOutboxPayloadResumeSession] = true
 	}
 }
 

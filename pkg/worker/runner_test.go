@@ -1,8 +1,13 @@
 package worker
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/beam-cloud/airstore/pkg/types"
 )
 
 func TestClaudeCodeRunnerBuildTurnArgs_FollowupUsesResumeWhenSessionPresent(t *testing.T) {
@@ -119,6 +124,65 @@ func TestApplySystemPromptFlags_EmptyPrompt(t *testing.T) {
 
 	if argExists(args, "--system-prompt") || argExists(args, "--append-system-prompt") {
 		t.Fatalf("expected no system prompt flags when prompt is empty, got %v", args)
+	}
+}
+
+func TestBuildFirstTurnStrategies_ResumeSessionUsesResumeModes(t *testing.T) {
+	env := map[string]string{
+		agentResumeSessionEnvKey: "true",
+		agentSessionIDEnvKey:     "session-123",
+	}
+
+	strategies := buildFirstTurnStrategies(env)
+	if len(strategies) < 2 {
+		t.Fatalf("expected resume strategies, got %v", strategies)
+	}
+	if strategies[0].mode != TurnArgModeFirstResumeByID {
+		t.Fatalf("first strategy = %v, want %v", strategies[0].mode, TurnArgModeFirstResumeByID)
+	}
+	if strategies[1].mode != TurnArgModeFirstResumeLatest {
+		t.Fatalf("second strategy = %v, want %v", strategies[1].mode, TurnArgModeFirstResumeLatest)
+	}
+}
+
+func TestBuildFirstTurnStrategies_DefaultsToFirstStart(t *testing.T) {
+	strategies := buildFirstTurnStrategies(map[string]string{})
+	if len(strategies) != 1 || strategies[0].mode != TurnArgModeFirstStart {
+		t.Fatalf("expected first_start strategy, got %v", strategies)
+	}
+}
+
+func TestWriteClaudeSessionCheckpointPersistsManifest(t *testing.T) {
+	mountSource := t.TempDir()
+	env := map[string]string{
+		agentWorkspaceDirEnvKey: "/workspace/demo",
+		agentSessionIDEnvKey:    "session-123",
+	}
+	want := &types.SessionCheckpoint{
+		RunID:       "run-123",
+		ExecutionID: "exec-123",
+		UpdatedAt:   123456789,
+	}
+
+	if err := writeClaudeSessionCheckpoint(mountSource, env, want); err != nil {
+		t.Fatalf("write checkpoint: %v", err)
+	}
+
+	checkpointPath := vfsHostPath(mountSource, defaultClaudeCheckpointPath(env))
+	raw, err := os.ReadFile(checkpointPath)
+	if err != nil {
+		t.Fatalf("read checkpoint: %v", err)
+	}
+
+	var got types.SessionCheckpoint
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal checkpoint: %v", err)
+	}
+	if got != *want {
+		t.Fatalf("checkpoint mismatch: got %#v want %#v", got, *want)
+	}
+	if filepath.Base(checkpointPath) != claudeCheckpointFile {
+		t.Fatalf("unexpected checkpoint filename %q", checkpointPath)
 	}
 }
 
