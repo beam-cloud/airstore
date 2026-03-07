@@ -26,12 +26,12 @@ var errChannelTypeRequired = errors.New("channel_type is required")
 type WorkspaceChannelsGroup struct {
 	routerGroup  *echo.Group
 	registry     *channels.Registry
-	backend      BackendRepo
+	agents       *orchestration.AgentAPI
 	emailChannel *channels.Email
 }
 
-func NewWorkspaceChannelsGroup(routerGroup *echo.Group, registry *channels.Registry, backend BackendRepo, emailCh *channels.Email) *WorkspaceChannelsGroup {
-	g := &WorkspaceChannelsGroup{routerGroup: routerGroup, registry: registry, backend: backend, emailChannel: emailCh}
+func NewWorkspaceChannelsGroup(routerGroup *echo.Group, registry *channels.Registry, agents *orchestration.AgentAPI, emailCh *channels.Email) *WorkspaceChannelsGroup {
+	g := &WorkspaceChannelsGroup{routerGroup: routerGroup, registry: registry, agents: agents, emailChannel: emailCh}
 	g.routerGroup.POST("/:channel_type/agents/:agent_id/messages", g.SendAgentMessage)
 	g.routerGroup.POST("/:channel_type/runs/:run_id/messages", g.SendRunMessage)
 	g.routerGroup.GET("", g.ListChannels)
@@ -146,14 +146,14 @@ func (g *WorkspaceChannelsGroup) SendRunMessage(c echo.Context) error {
 
 // ListChannels returns workspace-level channel bindings (agent_id IS NULL).
 func (g *WorkspaceChannelsGroup) ListChannels(c echo.Context) error {
-	if g.backend == nil {
+	if g.agents == nil {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "channel service unavailable")
 	}
 	workspaceID, err := requireWorkspaceID(c)
 	if err != nil {
 		return err
 	}
-	bindings, err := g.backend.ListChannelBindings(c.Request().Context(), workspaceID, nil)
+	bindings, err := g.agents.ListChannelBindings(c.Request().Context(), workspaceID, nil)
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
@@ -162,7 +162,7 @@ func (g *WorkspaceChannelsGroup) ListChannels(c echo.Context) error {
 
 // UpsertChannels creates or updates workspace-level channel bindings.
 func (g *WorkspaceChannelsGroup) UpsertChannels(c echo.Context) error {
-	if g.backend == nil {
+	if g.agents == nil {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "channel service unavailable")
 	}
 	workspaceID, err := requireWorkspaceID(c)
@@ -188,7 +188,7 @@ func (g *WorkspaceChannelsGroup) UpsertChannels(c echo.Context) error {
 		address := strings.TrimSpace(ch.Address)
 
 		if ch.ChannelType == string(channels.ChannelTypeEmail) && address == "" && g.emailChannel != nil && g.emailChannel.Mail() != nil {
-			ws, err := g.backend.GetWorkspace(c.Request().Context(), workspaceID)
+			ws, err := g.agents.GetWorkspace(c.Request().Context(), workspaceID)
 			if err != nil {
 				return ErrorResponse(c, http.StatusBadRequest, "failed to look up workspace: "+err.Error())
 			}
@@ -205,13 +205,13 @@ func (g *WorkspaceChannelsGroup) UpsertChannels(c echo.Context) error {
 
 		binding := &types.ChannelBinding{
 			WorkspaceID: workspaceID,
-			AgentID:     nil, // workspace-level
+			AgentID:     nil,
 			ChannelType: ch.ChannelType,
 			Address:     address,
 			ConfigJSON:  ch.ConfigJSON,
 			Active:      active,
 		}
-		if err := g.backend.UpsertChannelBinding(c.Request().Context(), binding); err != nil {
+		if err := g.agents.UpsertChannelBinding(c.Request().Context(), binding); err != nil {
 			return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 		}
 		results = append(results, binding)
@@ -221,7 +221,7 @@ func (g *WorkspaceChannelsGroup) UpsertChannels(c echo.Context) error {
 
 // DeleteChannel removes a workspace-level channel binding by type.
 func (g *WorkspaceChannelsGroup) DeleteChannel(c echo.Context) error {
-	if g.backend == nil {
+	if g.agents == nil {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "channel service unavailable")
 	}
 	workspaceID, err := requireWorkspaceID(c)
@@ -234,15 +234,20 @@ func (g *WorkspaceChannelsGroup) DeleteChannel(c echo.Context) error {
 	}
 
 	if channelType == string(channels.ChannelTypeEmail) && g.emailChannel != nil && g.emailChannel.Mail() != nil {
-		bindings, _ := g.backend.ListChannelBindings(c.Request().Context(), workspaceID, nil)
+		bindings, err := g.agents.ListChannelBindings(c.Request().Context(), workspaceID, nil)
+		if err != nil {
+			return ErrorResponse(c, http.StatusInternalServerError, "failed to look up existing bindings: "+err.Error())
+		}
 		for _, b := range bindings {
 			if b.ChannelType == string(channels.ChannelTypeEmail) && b.Address != "" {
-				_ = g.emailChannel.DeprovisionInbox(c.Request().Context(), b.Address)
+				if depErr := g.emailChannel.DeprovisionInbox(c.Request().Context(), b.Address); depErr != nil {
+					log.Warn().Err(depErr).Str("address", b.Address).Msg("failed to deprovision inbox")
+				}
 			}
 		}
 	}
 
-	if err := g.backend.DeleteChannelBinding(c.Request().Context(), workspaceID, nil, channelType); err != nil {
+	if err := g.agents.DeleteChannelBinding(c.Request().Context(), workspaceID, nil, channelType); err != nil {
 		return ErrorResponse(c, http.StatusNotFound, err.Error())
 	}
 	return SuccessResponse(c, nil)

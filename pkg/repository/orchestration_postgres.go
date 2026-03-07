@@ -489,7 +489,7 @@ func (b *PostgresBackend) CreateTaskWithOutbox(
 		return fmt.Errorf("marshal task routing: %w", err)
 	}
 	if strings.TrimSpace(task.Priority) == "" {
-		task.Priority = "normal"
+		task.Priority = string(types.AgentTaskPriorityNormal)
 	}
 
 	tx, err := b.db.BeginTx(ctx, nil)
@@ -890,6 +890,9 @@ func (b *PostgresBackend) UpdateTaskState(ctx context.Context, taskID string, st
 		    END,
 		    dropped_reason = CASE WHEN $2::agent_task_state = 'dropped'::agent_task_state THEN $4 ELSE dropped_reason END,
 		    target_run_id = COALESCE($5::uuid, target_run_id),
+		    wake_at = CASE WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN wake_at ELSE NULL END,
+		    wake_reason = CASE WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN wake_reason ELSE NULL END,
+		    wake_count = CASE WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN wake_count ELSE 0 END,
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = $1
 	`
@@ -927,6 +930,8 @@ func (b *PostgresBackend) UpdateTaskStateIfCurrentRun(
 		    END,
 		    dropped_reason = CASE WHEN $2::agent_task_state = 'dropped'::agent_task_state THEN $4 ELSE dropped_reason END,
 		    target_run_id = COALESCE($5::uuid, target_run_id),
+		    wake_at = CASE WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN wake_at ELSE NULL END,
+		    wake_reason = CASE WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN wake_reason ELSE NULL END,
 		    wake_count = CASE WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN wake_count ELSE 0 END,
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = $1
@@ -1011,6 +1016,67 @@ func (b *PostgresBackend) ArchiveTask(ctx context.Context, taskID string) error 
 	res, err := b.db.ExecContext(ctx, query, taskID)
 	if err != nil {
 		return fmt.Errorf("archive task: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return &types.ErrAgentTaskNotFound{ID: taskID}
+	}
+	return nil
+}
+
+func (b *PostgresBackend) UpdateTask(ctx context.Context, task *types.AgentTask) error {
+	if task == nil {
+		return fmt.Errorf("task is required")
+	}
+	payloadJSON, err := marshalJSONMap(task.PayloadJSON)
+	if err != nil {
+		return fmt.Errorf("marshal task payload: %w", err)
+	}
+	routingJSON, err := marshalJSONMap(task.RoutingJSON)
+	if err != nil {
+		return fmt.Errorf("marshal task routing: %w", err)
+	}
+	if strings.TrimSpace(task.Priority) == "" {
+		task.Priority = string(types.AgentTaskPriorityNormal)
+	}
+	err = b.db.QueryRowContext(
+		ctx,
+		`UPDATE agent_task
+		    SET payload_json = $2,
+		        routing_json = $3,
+		        deadline = $4,
+		        priority = $5,
+		        budget_usd = $6,
+		        cost_usd = $7,
+		        updated_at = CURRENT_TIMESTAMP
+		  WHERE id = $1
+		  RETURNING updated_at`,
+		task.ID,
+		payloadJSON,
+		routingJSON,
+		task.Deadline,
+		task.Priority,
+		task.BudgetUSD,
+		task.CostUSD,
+	).Scan(&task.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return &types.ErrAgentTaskNotFound{ID: task.ID}
+	}
+	if err != nil {
+		return fmt.Errorf("update task: %w", err)
+	}
+	return nil
+}
+
+func (b *PostgresBackend) UpdateTaskCost(ctx context.Context, taskID string, costUSD float64) error {
+	res, err := b.db.ExecContext(
+		ctx,
+		`UPDATE agent_task SET cost_usd = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+		taskID,
+		costUSD,
+	)
+	if err != nil {
+		return fmt.Errorf("update task cost: %w", err)
 	}
 	affected, _ := res.RowsAffected()
 	if affected == 0 {
@@ -1163,6 +1229,22 @@ func (b *PostgresBackend) MarkOrchestrationOutboxEventPublished(ctx context.Cont
 	affected, _ := res.RowsAffected()
 	if affected == 0 {
 		return fmt.Errorf("outbox event not found: %d", eventID)
+	}
+	return nil
+}
+
+func (b *PostgresBackend) CancelPendingOutboxEventsForTask(ctx context.Context, taskID string) error {
+	query := `
+		UPDATE orchestration_outbox
+		SET published_at = CURRENT_TIMESTAMP,
+		    last_error = 'task_cancelled',
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE published_at IS NULL
+		  AND payload_json->>'task_id' = $1
+	`
+	_, err := b.db.ExecContext(ctx, query, taskID)
+	if err != nil {
+		return fmt.Errorf("cancel pending outbox events for task: %w", err)
 	}
 	return nil
 }
@@ -3412,14 +3494,21 @@ func (b *PostgresBackend) ListWorkspaceTaskOutputs(
 }
 
 func (b *PostgresBackend) CreateTaskOutput(ctx context.Context, output *types.TaskOutput) error {
-	schemaBytes, _ := json.Marshal(output.Schema)
-	dataBytes, _ := json.Marshal(output.Data)
-	metaBytes, _ := json.Marshal(output.Metadata)
-	if output.Schema == nil {
-		schemaBytes = nil
+	var schemaBytes, dataBytes, metaBytes []byte
+	var err error
+
+	if output.Schema != nil {
+		if schemaBytes, err = json.Marshal(output.Schema); err != nil {
+			return fmt.Errorf("marshal schema: %w", err)
+		}
 	}
-	if output.Metadata == nil {
-		metaBytes = nil
+	if dataBytes, err = json.Marshal(output.Data); err != nil {
+		return fmt.Errorf("marshal data: %w", err)
+	}
+	if output.Metadata != nil {
+		if metaBytes, err = json.Marshal(output.Metadata); err != nil {
+			return fmt.Errorf("marshal metadata: %w", err)
+		}
 	}
 	return b.db.QueryRowContext(ctx, `
 		INSERT INTO task_output (workspace_id, task_id, run_id, agent_id, output_type, title, summary, uri, schema_json, data_json, metadata_json)
@@ -3439,35 +3528,11 @@ func (b *PostgresBackend) GetTaskOutput(ctx context.Context, workspaceId uint, o
 		FROM task_output o
 		LEFT JOIN agent_profile ap ON ap.id = o.agent_id
 		WHERE o.workspace_id = $1 AND o.id = $2`, workspaceId, outputID)
-	o := &types.TaskOutput{}
-	var runID, agentID sql.NullString
-	var summary, uri sql.NullString
-	var schemaBytes, dataBytes, metaBytes []byte
-	err := row.Scan(&o.ID, &o.WorkspaceID, &o.TaskID, &runID, &agentID,
-		&o.AgentName, &o.OutputType, &o.Title, &summary, &uri,
-		&schemaBytes, &dataBytes, &metaBytes, &o.ArchivedAt, &o.CreatedAt)
+	o, err := scanTaskOutput(row)
 	if err == sql.ErrNoRows {
 		return nil, &types.ErrTaskOutputNotFound{ID: outputID}
 	}
-	if err != nil {
-		return nil, err
-	}
-	if runID.Valid {
-		o.RunID = &runID.String
-	}
-	if agentID.Valid {
-		o.AgentID = &agentID.String
-	}
-	if summary.Valid {
-		o.Summary = &summary.String
-	}
-	if uri.Valid {
-		o.URI = &uri.String
-	}
-	json.Unmarshal(schemaBytes, &o.Schema)
-	json.Unmarshal(dataBytes, &o.Data)
-	json.Unmarshal(metaBytes, &o.Metadata)
-	return o, nil
+	return o, err
 }
 
 func (b *PostgresBackend) AppendTaskOutputRows(ctx context.Context, workspaceId uint, outputID string, rowsJSON []byte) error {
@@ -3541,12 +3606,12 @@ func (b *PostgresBackend) DeleteTaskOutput(ctx context.Context, workspaceId uint
 	return nil
 }
 
-func scanTaskOutput(rows *sql.Rows) (*types.TaskOutput, error) {
+func scanTaskOutput(s scanner) (*types.TaskOutput, error) {
 	o := &types.TaskOutput{}
 	var runID, agentID sql.NullString
 	var summary, uri sql.NullString
 	var schemaBytes, dataBytes, metaBytes []byte
-	if err := rows.Scan(&o.ID, &o.WorkspaceID, &o.TaskID, &runID, &agentID,
+	if err := s.Scan(&o.ID, &o.WorkspaceID, &o.TaskID, &runID, &agentID,
 		&o.AgentName, &o.OutputType, &o.Title, &summary, &uri,
 		&schemaBytes, &dataBytes, &metaBytes, &o.ArchivedAt, &o.CreatedAt); err != nil {
 		return nil, err

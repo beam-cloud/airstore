@@ -851,7 +851,7 @@ func (s *AgentService) applyRunResultProjectorMessage(ctx context.Context, resul
 	if err != nil {
 		return err
 	}
-	if !applied || !isRunAttemptActive(attempt) {
+	if !applied || !attempt.IsActive() {
 		return nil
 	}
 	var wakeSignal *types.RunExecutionWakeSignal
@@ -874,16 +874,6 @@ func (s *AgentService) applyRunResultProjectorMessage(ctx context.Context, resul
 	)
 }
 
-func isRunAttemptActive(attempt *types.AgentRunAttempt) bool {
-	if attempt == nil {
-		return false
-	}
-	if attempt.EndedAt != nil {
-		return false
-	}
-	return attempt.Status.IsInFlight()
-}
-
 func isRunAttemptNotFound(err error) bool {
 	if err == nil {
 		return false
@@ -904,7 +894,7 @@ func (s *AgentService) finalizeRunAttempt(
 	if s.backend == nil || attempt == nil {
 		return nil
 	}
-	if !isRunAttemptActive(attempt) {
+	if !attempt.IsActive() {
 		return nil
 	}
 
@@ -949,6 +939,10 @@ func (s *AgentService) finalizeRunAttempt(
 // Starts at 5 minutes, doubling each cycle, capped at the LLM's suggested delay.
 func wakeBackoffDelay(wakeCount, ceilingMinutes int) int {
 	const initialMinutes = 5
+	const maxShift = 30 // 5 << 30 ≈ 5 billion, safely fits int on all platforms
+	if wakeCount > maxShift {
+		wakeCount = maxShift
+	}
 	delay := initialMinutes << wakeCount // 5, 10, 20, 40, 80, ...
 	if delay > ceilingMinutes {
 		return ceilingMinutes

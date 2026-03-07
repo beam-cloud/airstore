@@ -3,6 +3,8 @@ package orchestration
 import (
 	"fmt"
 	"strings"
+
+	"github.com/beam-cloud/airstore/pkg/types"
 )
 
 type InputProvenance struct {
@@ -110,9 +112,7 @@ func ValidateAgentCommandParams(v *AgentCommandParams) error {
 		return fmt.Errorf("budget_usd must be >= 0")
 	}
 	if priority := strings.TrimSpace(v.Priority); priority != "" {
-		switch priority {
-		case "low", "normal", "high", "urgent":
-		default:
+		if !types.AgentTaskPriority(priority).IsValid() {
 			return fmt.Errorf("priority %q is not supported", v.Priority)
 		}
 	}

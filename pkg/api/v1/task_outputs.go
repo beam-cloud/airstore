@@ -9,6 +9,8 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
+const ctxKeyTaskOutput = "task_output"
+
 type TaskOutputsGroup struct {
 	routerGroup *echo.Group
 	backend     repository.BackendRepository
@@ -40,10 +42,42 @@ func (g *WorkspaceOutputsGroup) registerRoutes() {
 func (g *TaskOutputsGroup) registerRoutes() {
 	g.routerGroup.GET("", g.ListOutputs)
 	g.routerGroup.POST("", g.CreateOutput)
-	g.routerGroup.GET("/:output_id", g.GetOutput)
-	g.routerGroup.POST("/:output_id/rows", g.AppendRows)
-	g.routerGroup.DELETE("/:output_id", g.DeleteOutput)
+
+	g.routerGroup.GET("/:output_id", g.withOutputOwnership(g.GetOutput))
+	g.routerGroup.POST("/:output_id/rows", g.withOutputOwnership(g.AppendRows))
+	g.routerGroup.DELETE("/:output_id", g.withOutputOwnership(g.DeleteOutput))
 }
+
+// withOutputOwnership is a handler wrapper (like WithAuth) that verifies the
+// output identified by :output_id belongs to the :task_id in the URL.
+// The loaded output is stored in the echo context for the inner handler.
+func (g *TaskOutputsGroup) withOutputOwnership(h echo.HandlerFunc) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		workspaceID, err := requireWorkspaceID(c)
+		if err != nil {
+			return err
+		}
+
+		taskID := c.Param("task_id")
+		outputID := c.Param("output_id")
+
+		output, err := g.backend.GetTaskOutput(c.Request().Context(), workspaceID, outputID)
+		if err != nil {
+			if _, ok := err.(*types.ErrTaskOutputNotFound); ok {
+				return ErrorResponse(c, http.StatusNotFound, "output not found")
+			}
+			return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+		}
+		if output.TaskID != taskID {
+			return ErrorResponse(c, http.StatusNotFound, "output not found")
+		}
+
+		c.Set(ctxKeyTaskOutput, output)
+		return h(c)
+	}
+}
+
+// ── Workspace-scoped handlers ───────────────────────────────────────────────
 
 func (g *WorkspaceOutputsGroup) ListOutputs(c echo.Context) error {
 	workspaceID, err := requireWorkspaceID(c)
@@ -99,6 +133,8 @@ func (g *WorkspaceOutputsGroup) ArchiveAllOutputs(c echo.Context) error {
 	}
 	return SuccessResponse(c, map[string]any{"archived": count})
 }
+
+// ── Task-scoped handlers ────────────────────────────────────────────────────
 
 func (g *TaskOutputsGroup) ListOutputs(c echo.Context) error {
 	workspaceID, err := requireWorkspaceID(c)
@@ -167,19 +203,9 @@ func (g *TaskOutputsGroup) CreateOutput(c echo.Context) error {
 	return c.JSON(http.StatusCreated, output)
 }
 
+// GetOutput returns a single output. Ownership is enforced by withOutputOwnership.
 func (g *TaskOutputsGroup) GetOutput(c echo.Context) error {
-	workspaceID, err := requireWorkspaceID(c)
-	if err != nil {
-		return err
-	}
-	outputID := c.Param("output_id")
-	output, err := g.backend.GetTaskOutput(c.Request().Context(), workspaceID, outputID)
-	if err != nil {
-		if _, ok := err.(*types.ErrTaskOutputNotFound); ok {
-			return ErrorResponse(c, http.StatusNotFound, "output not found")
-		}
-		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
-	}
+	output := c.Get(ctxKeyTaskOutput).(*types.TaskOutput)
 	return SuccessResponse(c, output)
 }
 
@@ -187,12 +213,13 @@ type appendRowsRequest struct {
 	Rows []map[string]any `json:"rows"`
 }
 
+// AppendRows appends rows to an output. Ownership is enforced by withOutputOwnership.
 func (g *TaskOutputsGroup) AppendRows(c echo.Context) error {
 	workspaceID, err := requireWorkspaceID(c)
 	if err != nil {
 		return err
 	}
-	outputID := c.Param("output_id")
+	output := c.Get(ctxKeyTaskOutput).(*types.TaskOutput)
 
 	var req appendRowsRequest
 	if err := decodeStrictBody(c, &req); err != nil {
@@ -207,7 +234,7 @@ func (g *TaskOutputsGroup) AppendRows(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid row data")
 	}
 
-	if err := g.backend.AppendTaskOutputRows(c.Request().Context(), workspaceID, outputID, rowsJSON); err != nil {
+	if err := g.backend.AppendTaskOutputRows(c.Request().Context(), workspaceID, output.ID, rowsJSON); err != nil {
 		if _, ok := err.(*types.ErrTaskOutputNotFound); ok {
 			return ErrorResponse(c, http.StatusNotFound, "output not found")
 		}
@@ -216,13 +243,15 @@ func (g *TaskOutputsGroup) AppendRows(c echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
+// DeleteOutput deletes an output. Ownership is enforced by withOutputOwnership.
 func (g *TaskOutputsGroup) DeleteOutput(c echo.Context) error {
 	workspaceID, err := requireWorkspaceID(c)
 	if err != nil {
 		return err
 	}
-	outputID := c.Param("output_id")
-	if err := g.backend.DeleteTaskOutput(c.Request().Context(), workspaceID, outputID); err != nil {
+	output := c.Get(ctxKeyTaskOutput).(*types.TaskOutput)
+
+	if err := g.backend.DeleteTaskOutput(c.Request().Context(), workspaceID, output.ID); err != nil {
 		if _, ok := err.(*types.ErrTaskOutputNotFound); ok {
 			return ErrorResponse(c, http.StatusNotFound, "output not found")
 		}

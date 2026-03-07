@@ -92,9 +92,28 @@ const (
 	AgentTaskStateWaiting   AgentTaskState = "waiting"
 	AgentTaskStateSleeping  AgentTaskState = "sleeping"
 	AgentTaskStateDone      AgentTaskState = "done"
+	AgentTaskStateError     AgentTaskState = "error"
 	AgentTaskStateDropped   AgentTaskState = "dropped"
 	AgentTaskStateCancelled AgentTaskState = "cancelled"
 )
+
+type AgentTaskPriority string
+
+const (
+	AgentTaskPriorityLow    AgentTaskPriority = "low"
+	AgentTaskPriorityNormal AgentTaskPriority = "normal"
+	AgentTaskPriorityHigh   AgentTaskPriority = "high"
+	AgentTaskPriorityUrgent AgentTaskPriority = "urgent"
+)
+
+func (p AgentTaskPriority) IsValid() bool {
+	switch p {
+	case AgentTaskPriorityLow, AgentTaskPriorityNormal, AgentTaskPriorityHigh, AgentTaskPriorityUrgent:
+		return true
+	default:
+		return false
+	}
+}
 
 func (s AgentTaskState) IsDispatchable() bool {
 	switch s {
@@ -107,7 +126,7 @@ func (s AgentTaskState) IsDispatchable() bool {
 
 func (s AgentTaskState) IsTerminal() bool {
 	switch s {
-	case AgentTaskStateDone, AgentTaskStateDropped, AgentTaskStateCancelled:
+	case AgentTaskStateDone, AgentTaskStateError, AgentTaskStateDropped, AgentTaskStateCancelled:
 		return true
 	default:
 		return false
@@ -486,6 +505,10 @@ type AgentRunAttempt struct {
 	UpdatedAt       time.Time          `json:"updated_at" db:"updated_at"`
 }
 
+func (a *AgentRunAttempt) IsActive() bool {
+	return a != nil && a.EndedAt == nil && a.Status.IsInFlight()
+}
+
 type AgentRunSnapshot struct {
 	ID          int64          `json:"id" db:"id"`
 	RunID       string         `json:"run_id" db:"run_id"`
@@ -767,6 +790,24 @@ type RunExecutionResult struct {
 	Duration        time.Duration           `json:"duration"`
 	WaitingForInput bool                    `json:"waiting_for_input,omitempty"`
 	WakeSignal      *RunExecutionWakeSignal `json:"wake_signal,omitempty"`
+}
+
+type ErrTaskNotCancellable struct {
+	ID    string
+	State AgentTaskState
+}
+
+func (e *ErrTaskNotCancellable) Error() string {
+	return fmt.Sprintf("task %s cannot be cancelled (state: %s)", e.ID, e.State)
+}
+
+type ErrTaskNotArchivable struct {
+	ID    string
+	State AgentTaskState
+}
+
+func (e *ErrTaskNotArchivable) Error() string {
+	return fmt.Sprintf("task %s cannot be archived (state: %s)", e.ID, e.State)
 }
 
 type ErrAgentProfileNotFound struct {

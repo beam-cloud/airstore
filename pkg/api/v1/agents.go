@@ -2,7 +2,6 @@ package apiv1
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -14,6 +13,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/hooks"
 	"github.com/beam-cloud/airstore/pkg/orchestration"
 	"github.com/beam-cloud/airstore/pkg/types"
+	"github.com/rs/zerolog/log"
 	"github.com/labstack/echo/v4"
 )
 
@@ -21,16 +21,7 @@ type AgentsGroup struct {
 	routerGroup  *echo.Group
 	agents       *orchestration.AgentAPI
 	hooks        *hooks.Service
-	backend      BackendRepo
 	emailChannel *channels.Email
-}
-
-type BackendRepo interface {
-	ListChannelBindings(ctx context.Context, workspaceId uint, agentID *string) ([]*types.ChannelBinding, error)
-	UpsertChannelBinding(ctx context.Context, binding *types.ChannelBinding) error
-	DeleteChannelBinding(ctx context.Context, workspaceId uint, agentID *string, channelType string) error
-	GetWorkspace(ctx context.Context, id uint) (*types.Workspace, error)
-	GetAgentStats(ctx context.Context, workspaceId uint, agentID string) (*types.AgentStats, error)
 }
 
 type createAgentAPIRequest struct {
@@ -50,12 +41,11 @@ type updateAgentAPIRequest struct {
 	Active        *bool          `json:"active,omitempty"`
 }
 
-func NewAgentsGroup(routerGroup *echo.Group, agents *orchestration.AgentAPI, hooksSvc *hooks.Service, backend BackendRepo, emailCh *channels.Email) *AgentsGroup {
+func NewAgentsGroup(routerGroup *echo.Group, agents *orchestration.AgentAPI, hooksSvc *hooks.Service, emailCh *channels.Email) *AgentsGroup {
 	g := &AgentsGroup{
 		routerGroup:  routerGroup,
 		agents:       agents,
 		hooks:        hooksSvc,
-		backend:      backend,
 		emailChannel: emailCh,
 	}
 	g.registerRoutes()
@@ -271,7 +261,7 @@ func requireWorkspaceID(c echo.Context) (uint, error) {
 }
 
 func (g *AgentsGroup) GetAgentStats(c echo.Context) error {
-	if g.backend == nil {
+	if g.agents == nil {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "stats service unavailable")
 	}
 	workspaceID, err := requireWorkspaceID(c)
@@ -282,7 +272,7 @@ func (g *AgentsGroup) GetAgentStats(c echo.Context) error {
 	if agentID == "" {
 		return ErrorResponse(c, http.StatusBadRequest, "agent_id is required")
 	}
-	stats, err := g.backend.GetAgentStats(c.Request().Context(), workspaceID, agentID)
+	stats, err := g.agents.GetAgentStats(c.Request().Context(), workspaceID, agentID)
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
@@ -303,7 +293,7 @@ type channelBindingEntry struct {
 }
 
 func (g *AgentsGroup) ListChannels(c echo.Context) error {
-	if g.backend == nil {
+	if g.agents == nil {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "channel service unavailable")
 	}
 	workspaceID, err := requireWorkspaceID(c)
@@ -314,7 +304,7 @@ func (g *AgentsGroup) ListChannels(c echo.Context) error {
 	if agentID == "" {
 		return ErrorResponse(c, http.StatusBadRequest, "agent_id is required")
 	}
-	bindings, err := g.backend.ListChannelBindings(c.Request().Context(), workspaceID, &agentID)
+	bindings, err := g.agents.ListChannelBindings(c.Request().Context(), workspaceID, &agentID)
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
@@ -322,7 +312,7 @@ func (g *AgentsGroup) ListChannels(c echo.Context) error {
 }
 
 func (g *AgentsGroup) UpsertChannels(c echo.Context) error {
-	if g.backend == nil {
+	if g.agents == nil {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "channel service unavailable")
 	}
 	workspaceID, err := requireWorkspaceID(c)
@@ -375,7 +365,7 @@ func (g *AgentsGroup) UpsertChannels(c echo.Context) error {
 			ConfigJSON:  ch.ConfigJSON,
 			Active:      active,
 		}
-		if err := g.backend.UpsertChannelBinding(c.Request().Context(), binding); err != nil {
+		if err := g.agents.UpsertChannelBinding(c.Request().Context(), binding); err != nil {
 			return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 		}
 		results = append(results, binding)
@@ -384,7 +374,7 @@ func (g *AgentsGroup) UpsertChannels(c echo.Context) error {
 }
 
 func (g *AgentsGroup) DeleteChannel(c echo.Context) error {
-	if g.backend == nil {
+	if g.agents == nil {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "channel service unavailable")
 	}
 	workspaceID, err := requireWorkspaceID(c)
@@ -398,15 +388,20 @@ func (g *AgentsGroup) DeleteChannel(c echo.Context) error {
 	}
 
 	if channelType == string(channels.ChannelTypeEmail) && g.emailChannel != nil && g.emailChannel.Mail() != nil {
-		bindings, _ := g.backend.ListChannelBindings(c.Request().Context(), workspaceID, &agentID)
+		bindings, err := g.agents.ListChannelBindings(c.Request().Context(), workspaceID, &agentID)
+		if err != nil {
+			return ErrorResponse(c, http.StatusInternalServerError, "failed to look up existing bindings: "+err.Error())
+		}
 		for _, b := range bindings {
 			if b.ChannelType == string(channels.ChannelTypeEmail) && b.Address != "" {
-				_ = g.emailChannel.DeprovisionInbox(c.Request().Context(), b.Address)
+				if depErr := g.emailChannel.DeprovisionInbox(c.Request().Context(), b.Address); depErr != nil {
+					log.Warn().Err(depErr).Str("address", b.Address).Msg("failed to deprovision inbox")
+				}
 			}
 		}
 	}
 
-	if err := g.backend.DeleteChannelBinding(c.Request().Context(), workspaceID, &agentID, channelType); err != nil {
+	if err := g.agents.DeleteChannelBinding(c.Request().Context(), workspaceID, &agentID, channelType); err != nil {
 		return ErrorResponse(c, http.StatusNotFound, err.Error())
 	}
 	return SuccessResponse(c, map[string]bool{"deleted": true})

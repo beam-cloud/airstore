@@ -286,7 +286,7 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 	if attempt == nil {
 		return nil, status.Errorf(codes.FailedPrecondition, "run attempt mapping not found")
 	}
-	if !isRunAttemptActive(attempt) {
+	if !attempt.IsActive() {
 		log.Debug().
 			Str("task_id", req.TaskId).
 			Str("run_id", attempt.RunID).
@@ -335,16 +335,6 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 	}
 
 	return &pb.SetTaskResultResponse{}, nil
-}
-
-func isRunAttemptActive(attempt *types.AgentRunAttempt) bool {
-	if attempt == nil {
-		return false
-	}
-	if attempt.EndedAt != nil {
-		return false
-	}
-	return attempt.Status.IsInFlight()
 }
 
 func (s *WorkerService) UpdateTaskState(ctx context.Context, req *pb.UpdateTaskStateRequest) (*pb.UpdateTaskStateResponse, error) {

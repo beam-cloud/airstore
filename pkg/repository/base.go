@@ -205,6 +205,7 @@ type BackendRepository interface {
 	UpdateTaskState(ctx context.Context, taskId string, state types.AgentTaskState, droppedReason *string, targetRunID *string) error
 	UpdateTaskStateIfCurrentRun(ctx context.Context, taskID string, expectedRunID string, state types.AgentTaskState, droppedReason *string, targetRunID *string) (bool, error)
 	SleepTaskWithOutbox(ctx context.Context, taskID string, expectedRunID string, wakeAt time.Time, wakeReason string, outboxEvent *types.OrchestrationOutboxEvent) (bool, error)
+	CancelPendingOutboxEventsForTask(ctx context.Context, taskID string) error
 	UpdateTask(ctx context.Context, task *types.AgentTask) error
 	UpdateTaskCost(ctx context.Context, taskID string, costUSD float64) error
 	ArchiveTask(ctx context.Context, taskId string) error

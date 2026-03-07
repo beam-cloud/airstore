@@ -385,10 +385,10 @@ type ProviderOAuthCredentials struct {
 }
 
 // ----------------------------------------------------------------------------
-// Compression Configuration
+// Channels Configuration
 // ----------------------------------------------------------------------------
 
-// CompressionConfig configures the context compression middleware.
+// ChannelsConfig configures inbound/outbound messaging channels.
 type ChannelsConfig struct {
 	AgentMail ChannelAgentMailConfig `key:"agentMail" json:"agent_mail"`
 }

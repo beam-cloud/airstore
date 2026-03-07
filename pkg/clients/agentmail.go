@@ -144,7 +144,10 @@ func (c *AgentMailClient) do(ctx context.Context, method, path string, body any,
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("agentmail %s %s: read body: %w", method, path, err)
+	}
 
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("agentmail %s %s: %d %s", method, path, resp.StatusCode, string(respBody))
