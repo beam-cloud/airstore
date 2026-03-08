@@ -20,22 +20,24 @@ import (
 
 type WorkerService struct {
 	pb.UnimplementedWorkerServiceServer
-	scheduler           *scheduler.Scheduler
-	backend             repository.BackendRepository
-	workerRepo          repository.WorkerRepository
-	taskQueue           repository.TaskQueue
-	redisClient         *common.RedisClient
-	terminalIO          repository.TerminalIORepository
-	claimLeaseTTL       time.Duration
-	recoveryLoopEnabled bool
-	recoveryInterval    time.Duration
-	recoveryBatchSize   int
+	scheduler              *scheduler.Scheduler
+	backend                repository.BackendRepository
+	workerRepo             repository.WorkerRepository
+	taskQueue              repository.TaskQueue
+	redisClient            *common.RedisClient
+	terminalIO             repository.TerminalIORepository
+	claimLeaseTTL          time.Duration
+	unclaimedRunStaleAfter time.Duration
+	recoveryLoopEnabled    bool
+	recoveryInterval       time.Duration
+	recoveryBatchSize      int
 }
 
 const (
-	defaultRunClaimLeaseTTL      = 45 * time.Second
-	defaultRecoveryLoopInterval  = 10 * time.Second
-	defaultRecoveryLoopBatchSize = 50
+	defaultRunClaimLeaseTTL       = 45 * time.Second
+	defaultUnclaimedRunStaleAfter = 2 * time.Minute
+	defaultRecoveryLoopInterval   = 10 * time.Second
+	defaultRecoveryLoopBatchSize  = 50
 )
 
 func NewWorkerService(
@@ -49,6 +51,10 @@ func NewWorkerService(
 	claimLeaseTTL := schedulerConfig.RunClaimLeaseTTL
 	if claimLeaseTTL <= 0 {
 		claimLeaseTTL = defaultRunClaimLeaseTTL
+	}
+	unclaimedRunStaleAfter := schedulerConfig.UnclaimedRunStaleAfter
+	if unclaimedRunStaleAfter <= 0 {
+		unclaimedRunStaleAfter = defaultUnclaimedRunStaleAfter
 	}
 	recoveryInterval := schedulerConfig.RecoveryLoopInterval
 	if recoveryInterval <= 0 {
@@ -65,16 +71,17 @@ func NewWorkerService(
 	}
 
 	return &WorkerService{
-		scheduler:           sched,
-		backend:             backend,
-		workerRepo:          workerRepo,
-		taskQueue:           taskQueue,
-		redisClient:         redisClient,
-		terminalIO:          terminalIO,
-		claimLeaseTTL:       claimLeaseTTL,
-		recoveryLoopEnabled: schedulerConfig.RecoveryLoopEnabled,
-		recoveryInterval:    recoveryInterval,
-		recoveryBatchSize:   recoveryBatchSize,
+		scheduler:              sched,
+		backend:                backend,
+		workerRepo:             workerRepo,
+		taskQueue:              taskQueue,
+		redisClient:            redisClient,
+		terminalIO:             terminalIO,
+		claimLeaseTTL:          claimLeaseTTL,
+		unclaimedRunStaleAfter: unclaimedRunStaleAfter,
+		recoveryLoopEnabled:    schedulerConfig.RecoveryLoopEnabled,
+		recoveryInterval:       recoveryInterval,
+		recoveryBatchSize:      recoveryBatchSize,
 	}
 }
 

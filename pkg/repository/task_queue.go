@@ -75,7 +75,7 @@ func (q *RedisTaskQueue) Push(ctx context.Context, task *types.RunExecution) err
 	}
 
 	// Store state and push to queue atomically via pipeline
-	pipe := q.rdb.Pipeline()
+	pipe := q.rdb.TxPipeline()
 	pipe.Set(ctx, common.Keys.RunExecutionState(task.ExternalId), stateData, taskStateTTL)
 	pipe.LPush(ctx, common.Keys.RunExecutionQueue(q.queueName), data)
 	_, err = pipe.Exec(ctx)
@@ -83,6 +83,40 @@ func (q *RedisTaskQueue) Push(ctx context.Context, task *types.RunExecution) err
 		return fmt.Errorf("failed to push task: %w", err)
 	}
 
+	return nil
+}
+
+// Requeue atomically returns an execution to the pending queue after a worker
+// crashed or lost it before the run claim was established.
+func (q *RedisTaskQueue) Requeue(ctx context.Context, task *types.RunExecution) error {
+	if task == nil || task.ExternalId == "" {
+		return fmt.Errorf("task is required for requeue")
+	}
+
+	data, err := json.Marshal(task)
+	if err != nil {
+		return fmt.Errorf("failed to marshal task for requeue: %w", err)
+	}
+
+	state := &types.RunExecutionState{
+		ID:        task.ExternalId,
+		Status:    types.RunExecutionStatusPending,
+		ExitCode:  -1,
+		CreatedAt: time.Now(),
+	}
+	stateData, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("failed to marshal requeue state: %w", err)
+	}
+
+	pipe := q.rdb.TxPipeline()
+	pipe.SRem(ctx, common.Keys.RunExecutionInFlight(q.queueName), task.ExternalId)
+	pipe.Del(ctx, common.Keys.RunExecutionResult(task.ExternalId))
+	pipe.Set(ctx, common.Keys.RunExecutionState(task.ExternalId), stateData, taskStateTTL)
+	pipe.LPush(ctx, common.Keys.RunExecutionQueue(q.queueName), data)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("failed to requeue task: %w", err)
+	}
 	return nil
 }
 

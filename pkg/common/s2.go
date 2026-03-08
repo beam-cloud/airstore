@@ -101,6 +101,16 @@ func (StreamNames) ChannelConversation(agentID, senderHash string) string {
 	return fmt.Sprintf("channel.%s.%s", agentID, senderHash)
 }
 
+// SkillDraft returns the stream name for a skill draft conversation.
+func (StreamNames) SkillDraft(draftID string) string {
+	return fmt.Sprintf("skill-draft.%s", draftID)
+}
+
+// SkillDraftIndex returns the stream name for a workspace's skill draft index.
+func (StreamNames) SkillDraftIndex(workspaceID string) string {
+	return fmt.Sprintf("skill-draft-index.%s", workspaceID)
+}
+
 // Streams provides access to stream names
 var Streams = StreamNames{}
 

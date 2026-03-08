@@ -73,7 +73,7 @@ func (e *InboundTaskType) UnmarshalJSON(data []byte) error {
 
 func (e *InboundTaskType) Decode(holder *cffi.CFFIValueEnum, typeMap baml.TypeMap) {
 	name := holder.Name
-	if name.Name != "InboundTaskType" && name.Namespace != cffi.CFFITypeNamespace_TYPES {
+	if name.Name != "InboundTaskType" || name.Namespace != cffi.CFFITypeNamespace_TYPES {
 		panic(fmt.Sprintf("expected types.InboundTaskType, got %s.%s", string(name.Namespace.String()), string(name.Name)))
 	}
 	value := holder.Value

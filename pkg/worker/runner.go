@@ -27,10 +27,11 @@ const (
 
 	systemPromptModeReplace = "replace"
 
-	claudeConfigDirEnvKey  = "CLAUDE_CONFIG_DIR"
-	claudeDefaultShellEnv  = "/bin/bash"
+	claudeConfigDirEnvKey   = "CLAUDE_CONFIG_DIR"
+	claudeDefaultShellEnv   = "/bin/bash"
 	claudeStateDirName      = ".claude"
 	claudeStateRootDir      = ".airstore/claude"
+	claudeCheckpointFile    = "session-checkpoint.json"
 	claudeHeartbeatFile     = ".heartbeat"
 	claudeNeedsInputFile    = ".needs_input"
 	claudeHeartbeatFreshFor = 5 * time.Minute
@@ -213,14 +214,25 @@ func resolveClaudeHookPaths(mountSource string, env map[string]string) (*claudeH
 		configDir = defaultClaudeConfigDir(env)
 	}
 	parentDir := path.Dir(configDir)
-	hostConfigDir := vfsHostPath(mountSource, configDir)
+	hostConfigDir, err := vfsHostPathWithinMount(mountSource, configDir)
+	if err != nil {
+		return nil, err
+	}
+	heartbeatHost, err := vfsHostPathWithinMount(mountSource, path.Join(parentDir, claudeHeartbeatFile))
+	if err != nil {
+		return nil, err
+	}
+	needsInputHost, err := vfsHostPathWithinMount(mountSource, path.Join(parentDir, claudeNeedsInputFile))
+	if err != nil {
+		return nil, err
+	}
 	return &claudeHookPaths{
 		hostConfigDir:       hostConfigDir,
 		settingsPath:        filepath.Join(hostConfigDir, "settings.json"),
 		heartbeatContainer:  path.Join(parentDir, claudeHeartbeatFile),
-		heartbeatHost:       vfsHostPath(mountSource, path.Join(parentDir, claudeHeartbeatFile)),
+		heartbeatHost:       heartbeatHost,
 		needsInputContainer: path.Join(parentDir, claudeNeedsInputFile),
-		needsInputHost:      vfsHostPath(mountSource, path.Join(parentDir, claudeNeedsInputFile)),
+		needsInputHost:      needsInputHost,
 	}, nil
 }
 
@@ -357,6 +369,19 @@ func vfsHostPath(mountSource, containerPath string) string {
 	return filepath.Join(mountSource, filepath.FromSlash(rel))
 }
 
+func vfsHostPathWithinMount(mountSource, containerPath string) (string, error) {
+	hostPath := filepath.Clean(vfsHostPath(mountSource, containerPath))
+	mountRoot := filepath.Clean(mountSource)
+	rel, err := filepath.Rel(mountRoot, hostPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve host path: %w", err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("container path %q escapes mount source", containerPath)
+	}
+	return hostPath, nil
+}
+
 func defaultClaudeConfigDir(env map[string]string) string {
 	return defaultClaudePersistentConfigDir(env)
 }
@@ -365,7 +390,10 @@ func claudeWorkspaceDir(env map[string]string) string {
 	workspaceDir := types.ContainerWorkDir
 	if env != nil {
 		if wd := strings.TrimSpace(env[agentWorkspaceDirEnvKey]); wd != "" {
-			workspaceDir = wd
+			cleaned := path.Clean(wd)
+			if cleaned == types.ContainerWorkDir || strings.HasPrefix(cleaned, types.ContainerWorkDir+"/") {
+				workspaceDir = cleaned
+			}
 		}
 	}
 	return workspaceDir
@@ -386,6 +414,41 @@ func defaultClaudePersistentConfigDir(env map[string]string) string {
 		claudeStateScopeForEnv(env),
 		claudeStateDirName,
 	)
+}
+
+func defaultClaudeCheckpointPath(env map[string]string) string {
+	return path.Join(
+		claudeWorkspaceDir(env),
+		claudeStateRootDir,
+		claudeStateScopeForEnv(env),
+		claudeCheckpointFile,
+	)
+}
+
+func writeClaudeSessionCheckpoint(mountSource string, env map[string]string, checkpoint *types.SessionCheckpoint) error {
+	if strings.TrimSpace(mountSource) == "" || checkpoint == nil {
+		return fmt.Errorf("mount source and checkpoint are required")
+	}
+	checkpointPath, err := vfsHostPathWithinMount(mountSource, defaultClaudeCheckpointPath(env))
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(checkpointPath), 0o755); err != nil {
+		return fmt.Errorf("mkdir checkpoint dir: %w", err)
+	}
+	payload, err := json.MarshalIndent(checkpoint, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal checkpoint: %w", err)
+	}
+	tmpPath := checkpointPath + ".tmp"
+	if err := os.WriteFile(tmpPath, payload, 0o644); err != nil {
+		return fmt.Errorf("write checkpoint temp: %w", err)
+	}
+	if err := os.Rename(tmpPath, checkpointPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("rename checkpoint: %w", err)
+	}
+	return nil
 }
 
 func claudeStateScope(workspaceDir string) string {

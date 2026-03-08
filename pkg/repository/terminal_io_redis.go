@@ -19,7 +19,10 @@ type RedisTerminalIORepository struct {
 	rdb *common.RedisClient
 }
 
-const terminalInputBufferTTL = 24 * time.Hour
+const (
+	terminalInputBufferTTL = 24 * time.Hour
+	sessionCheckpointTTL   = 30 * 24 * time.Hour
+)
 
 const renewSessionLeaseScript = `
 if redis.call('get', KEYS[1]) == ARGV[1] then
@@ -275,6 +278,47 @@ func (r *RedisTerminalIORepository) ReleaseSessionLease(ctx context.Context, wor
 
 func (r *RedisTerminalIORepository) GetSessionLeaseOwner(ctx context.Context, workspaceID uint, sessionID string) (string, error) {
 	return r.getLeaseOwner(ctx, common.Keys.SessionLease(workspaceID, sessionID))
+}
+
+func (r *RedisTerminalIORepository) SetSessionCheckpoint(
+	ctx context.Context,
+	workspaceID uint,
+	sessionID string,
+	checkpoint *types.SessionCheckpoint,
+	ttl time.Duration,
+) error {
+	if strings.TrimSpace(sessionID) == "" || checkpoint == nil {
+		return nil
+	}
+	if ttl <= 0 {
+		ttl = sessionCheckpointTTL
+	}
+	payload, err := json.Marshal(checkpoint)
+	if err != nil {
+		return err
+	}
+	return r.rdb.Set(ctx, common.Keys.SessionCheckpoint(workspaceID, sessionID), payload, ttl).Err()
+}
+
+func (r *RedisTerminalIORepository) GetSessionCheckpoint(ctx context.Context, workspaceID uint, sessionID string) (*types.SessionCheckpoint, error) {
+	if strings.TrimSpace(sessionID) == "" {
+		return nil, nil
+	}
+	raw, err := r.rdb.Get(ctx, common.Keys.SessionCheckpoint(workspaceID, sessionID)).Bytes()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var checkpoint types.SessionCheckpoint
+	if err := json.Unmarshal(raw, &checkpoint); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(checkpoint.RunID) == "" {
+		return nil, nil
+	}
+	return &checkpoint, nil
 }
 
 func (r *RedisTerminalIORepository) SetRunInteraction(

@@ -56,6 +56,14 @@ type RunInteraction struct {
 	UpdatedAt         int64               `json:"updated_at,omitempty"`
 }
 
+// SessionCheckpoint records the most recent interactive run that fully
+// flushed its Claude session state and is safe to resume from.
+type SessionCheckpoint struct {
+	RunID       string `json:"run_id"`
+	ExecutionID string `json:"execution_id,omitempty"`
+	UpdatedAt   int64  `json:"updated_at"`
+}
+
 func NormalizeRunInputQueueMode(mode AgentQueueMode) AgentQueueMode {
 	normalized := AgentQueueMode(strings.ToLower(strings.TrimSpace(string(mode))))
 	switch normalized {
@@ -134,10 +142,16 @@ func (s AgentTaskState) IsTerminal() bool {
 }
 
 func TaskTerminalStateForRun(runStatus AgentRunStatus) AgentTaskState {
-	if runStatus == AgentRunStatusCancelled {
+	switch runStatus {
+	case AgentRunStatusOK:
+		return AgentTaskStateDone
+	case AgentRunStatusCancelled:
 		return AgentTaskStateCancelled
+	case AgentRunStatusError, AgentRunStatusTimeout:
+		return AgentTaskStateError
+	default:
+		return AgentTaskStateError
 	}
-	return AgentTaskStateDone
 }
 
 type AgentRunStatus string
@@ -354,21 +368,25 @@ const (
 )
 
 const (
-	OrchestrationOutboxPayloadTaskID          = "task_id"
-	OrchestrationOutboxPayloadAttemptID       = "attempt_id"
-	OrchestrationOutboxPayloadExitCode        = "exit_code"
-	OrchestrationOutboxPayloadError           = "error"
-	OrchestrationOutboxPayloadReason          = "reason"
-	OrchestrationOutboxPayloadRetryDelay      = "retry_delay_ms"
-	OrchestrationOutboxPayloadDispatchAttempt = "dispatch_attempt"
-	OrchestrationOutboxPayloadRunID           = "run_id"
-	OrchestrationOutboxPayloadSessionID       = "session_id"
-	OrchestrationOutboxPayloadStreamID        = "stream_id"
-	OrchestrationOutboxPayloadIdempotency     = "idempotency_key"
-	OrchestrationOutboxPayloadWaitingForInput    = "waiting_for_input"
-	OrchestrationOutboxPayloadWakeDelayMinutes   = "wake_delay_minutes"
-	OrchestrationOutboxPayloadWakeReason         = "wake_reason"
-	OrchestrationOutboxPayloadWakeFollowUpPrompt = "wake_follow_up_prompt"
+	OrchestrationOutboxPayloadTaskID                = "task_id"
+	OrchestrationOutboxPayloadAttemptID             = "attempt_id"
+	OrchestrationOutboxPayloadExitCode              = "exit_code"
+	OrchestrationOutboxPayloadError                 = "error"
+	OrchestrationOutboxPayloadReason                = "reason"
+	OrchestrationOutboxPayloadRetryDelay            = "retry_delay_ms"
+	OrchestrationOutboxPayloadDispatchAttempt       = "dispatch_attempt"
+	OrchestrationOutboxPayloadRunID                 = "run_id"
+	OrchestrationOutboxPayloadSessionID             = "session_id"
+	OrchestrationOutboxPayloadStreamID              = "stream_id"
+	OrchestrationOutboxPayloadIdempotency           = "idempotency_key"
+	OrchestrationOutboxPayloadDispatchPrompt        = "dispatch_prompt"
+	OrchestrationOutboxPayloadResumeSession         = "resume_session"
+	OrchestrationOutboxPayloadResumeExcludeRunID    = "resume_exclude_run_id"
+	OrchestrationOutboxPayloadResumeCheckpointRunID = "resume_checkpoint_run_id"
+	OrchestrationOutboxPayloadWaitingForInput       = "waiting_for_input"
+	OrchestrationOutboxPayloadWakeDelayMinutes      = "wake_delay_minutes"
+	OrchestrationOutboxPayloadWakeReason            = "wake_reason"
+	OrchestrationOutboxPayloadWakeFollowUpPrompt    = "wake_follow_up_prompt"
 )
 
 type OrchestrationOutboxEvent struct {
@@ -421,8 +439,8 @@ type ChannelBinding struct {
 
 // AgentTask is the high-level orchestration task (agent -> task -> run).
 type AgentTask struct {
-	ID             string           `json:"id" db:"id"`
-	WorkspaceID    uint             `json:"workspace_id" db:"workspace_id"`
+	ID             string         `json:"id" db:"id"`
+	WorkspaceID    uint           `json:"workspace_id" db:"workspace_id"`
 	AgentID        *string        `json:"agent_id,omitempty" db:"agent_id"`
 	AgentName      string         `json:"agent_name,omitempty" db:"-"`
 	QueueMode      AgentQueueMode `json:"queue_mode" db:"queue_mode"`
@@ -430,22 +448,22 @@ type AgentTask struct {
 	IdempotencyKey string         `json:"idempotency_key" db:"idempotency_key"`
 	PayloadJSON    map[string]any `json:"payload_json" db:"-"`
 	RoutingJSON    map[string]any `json:"routing_json" db:"-"`
-	ParentTaskID   *string          `json:"parent_task_id,omitempty" db:"parent_envelope_id"`
-	TargetRunID    *string          `json:"target_run_id,omitempty" db:"target_run_id"`
-	AcceptedAt     time.Time        `json:"accepted_at" db:"accepted_at"`
-	QueuedAt       *time.Time       `json:"queued_at,omitempty" db:"queued_at"`
-	DispatchedAt   *time.Time       `json:"dispatched_at,omitempty" db:"dispatched_at"`
-	Deadline       *time.Time       `json:"deadline,omitempty" db:"deadline"`
-	DroppedReason  *string          `json:"dropped_reason,omitempty" db:"dropped_reason"`
-	Priority       string           `json:"priority" db:"priority"`
-	BudgetUSD      *float64         `json:"budget_usd,omitempty" db:"budget_usd"`
-	CostUSD        float64          `json:"cost_usd" db:"cost_usd"`
-	ArchivedAt     *time.Time       `json:"archived_at,omitempty" db:"archived_at"`
-	WakeAt         *time.Time       `json:"wake_at,omitempty" db:"wake_at"`
-	WakeReason     *string          `json:"wake_reason,omitempty" db:"wake_reason"`
-	WakeCount      int              `json:"wake_count,omitempty" db:"wake_count"`
-	CreatedAt      time.Time        `json:"created_at" db:"created_at"`
-	UpdatedAt      time.Time        `json:"updated_at" db:"updated_at"`
+	ParentTaskID   *string        `json:"parent_task_id,omitempty" db:"parent_envelope_id"`
+	TargetRunID    *string        `json:"target_run_id,omitempty" db:"target_run_id"`
+	AcceptedAt     time.Time      `json:"accepted_at" db:"accepted_at"`
+	QueuedAt       *time.Time     `json:"queued_at,omitempty" db:"queued_at"`
+	DispatchedAt   *time.Time     `json:"dispatched_at,omitempty" db:"dispatched_at"`
+	Deadline       *time.Time     `json:"deadline,omitempty" db:"deadline"`
+	DroppedReason  *string        `json:"dropped_reason,omitempty" db:"dropped_reason"`
+	Priority       string         `json:"priority" db:"priority"`
+	BudgetUSD      *float64       `json:"budget_usd,omitempty" db:"budget_usd"`
+	CostUSD        float64        `json:"cost_usd" db:"cost_usd"`
+	ArchivedAt     *time.Time     `json:"archived_at,omitempty" db:"archived_at"`
+	WakeAt         *time.Time     `json:"wake_at,omitempty" db:"wake_at"`
+	WakeReason     *string        `json:"wake_reason,omitempty" db:"wake_reason"`
+	WakeCount      int            `json:"wake_count,omitempty" db:"wake_count"`
+	CreatedAt      time.Time      `json:"created_at" db:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at" db:"updated_at"`
 }
 
 type AgentRun struct {
@@ -878,12 +896,12 @@ func (e *ErrTaskOutputNotFound) Error() string {
 }
 
 type AgentStats struct {
-	Total           int            `json:"total"`
-	ByState         map[string]int `json:"by_state"`
-	AvgRunSec       *float64       `json:"avg_run_sec,omitempty"`
-	QualityScore    *float64       `json:"quality_score,omitempty"`
-	TotalCostUSD    float64        `json:"total_cost_usd"`
-	RunningCount    int            `json:"running_count"`
-	CompletedCount  int            `json:"completed_count"`
-	FailedCount int `json:"failed_count"`
+	Total          int            `json:"total"`
+	ByState        map[string]int `json:"by_state"`
+	AvgRunSec      *float64       `json:"avg_run_sec,omitempty"`
+	QualityScore   *float64       `json:"quality_score,omitempty"`
+	TotalCostUSD   float64        `json:"total_cost_usd"`
+	RunningCount   int            `json:"running_count"`
+	CompletedCount int            `json:"completed_count"`
+	FailedCount    int            `json:"failed_count"`
 }

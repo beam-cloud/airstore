@@ -34,7 +34,7 @@ func ManagedSourceSkillSource(integration string) string {
 }
 
 func managedSourceSkillDescription(integration string) string {
-	return fmt.Sprintf("Managed OAuth write-back skill for %s source operations.", integration)
+	return fmt.Sprintf("Managed OAuth skill for %s source operations.", integration)
 }
 
 func managedSourceSkillManifest(integration string) []byte {

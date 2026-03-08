@@ -188,3 +188,40 @@ func TestRedisTaskQueueInFlightCountRefreshesRunningStateTTL(t *testing.T) {
 	require.NoError(t, err)
 	require.Greater(t, ttl, time.Hour, "expected running state TTL to be refreshed")
 }
+
+func TestRedisTaskQueueRequeueRestoresPendingState(t *testing.T) {
+	queue, cleanup := newTestTaskQueue(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	task := &types.RunExecution{
+		ExternalId:  "task-requeue-1",
+		WorkspaceId: 1,
+		Status:      types.RunExecutionStatusPending,
+		Type:        types.RunExecutionTypeInteractive,
+		Image:       "ghcr.io/beam/sandbox:latest",
+		Entrypoint:  []string{},
+		Env:         map[string]string{},
+	}
+
+	require.NoError(t, queue.Push(ctx, task))
+
+	popped, err := queue.Pop(ctx, "worker-1")
+	require.NoError(t, err)
+	require.NotNil(t, popped)
+
+	state, err := queue.GetState(ctx, task.ExternalId)
+	require.NoError(t, err)
+	require.Equal(t, types.RunExecutionStatusRunning, state.Status)
+
+	require.NoError(t, queue.Requeue(ctx, task))
+
+	state, err = queue.GetState(ctx, task.ExternalId)
+	require.NoError(t, err)
+	require.Equal(t, types.RunExecutionStatusPending, state.Status)
+
+	poppedAgain, err := queue.Pop(ctx, "worker-2")
+	require.NoError(t, err)
+	require.NotNil(t, poppedAgain)
+	require.Equal(t, task.ExternalId, poppedAgain.ExternalId)
+}

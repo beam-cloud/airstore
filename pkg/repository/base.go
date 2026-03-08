@@ -32,6 +32,7 @@ type WorkerPoolRepository interface {
 // TaskQueue manages task queuing and distribution via Redis
 type TaskQueue interface {
 	Push(ctx context.Context, task *types.RunExecution) error
+	Requeue(ctx context.Context, task *types.RunExecution) error
 	Pop(ctx context.Context, workerID string) (*types.RunExecution, error)
 	Complete(ctx context.Context, taskID string, result *types.RunExecutionResult) error
 	Fail(ctx context.Context, taskID string, err error) error
@@ -65,6 +66,8 @@ type TerminalIORepository interface {
 	RenewSessionLease(ctx context.Context, workspaceID uint, sessionID, ownerID string, ttl time.Duration) (bool, error)
 	ReleaseSessionLease(ctx context.Context, workspaceID uint, sessionID, ownerID string) error
 	GetSessionLeaseOwner(ctx context.Context, workspaceID uint, sessionID string) (string, error)
+	SetSessionCheckpoint(ctx context.Context, workspaceID uint, sessionID string, checkpoint *types.SessionCheckpoint, ttl time.Duration) error
+	GetSessionCheckpoint(ctx context.Context, workspaceID uint, sessionID string) (*types.SessionCheckpoint, error)
 
 	// Run interaction state: backend-owned state for working/waiting/closed.
 	SetRunInteraction(ctx context.Context, workspaceID uint, runID string, state types.RunInteractionState, activeExecutionID string, ttl time.Duration) error

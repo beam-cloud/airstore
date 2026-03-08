@@ -61,6 +61,7 @@ export type TaskState =
   | 'waiting'
   | 'sleeping'
   | 'done'
+  | 'error'
   | 'dropped'
   | 'cancelled';
 

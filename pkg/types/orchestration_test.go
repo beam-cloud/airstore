@@ -2,6 +2,28 @@ package types
 
 import "testing"
 
+func TestTaskTerminalStateForRun(t *testing.T) {
+	tests := []struct {
+		name   string
+		status AgentRunStatus
+		want   AgentTaskState
+	}{
+		{name: "ok", status: AgentRunStatusOK, want: AgentTaskStateDone},
+		{name: "error", status: AgentRunStatusError, want: AgentTaskStateError},
+		{name: "timeout", status: AgentRunStatusTimeout, want: AgentTaskStateError},
+		{name: "cancelled", status: AgentRunStatusCancelled, want: AgentTaskStateCancelled},
+		{name: "unexpected defaults to error", status: AgentRunStatusRunning, want: AgentTaskStateError},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := TaskTerminalStateForRun(tc.status); got != tc.want {
+				t.Fatalf("TaskTerminalStateForRun(%q) = %q, want %q", tc.status, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestNormalizeRunInputQueueMode(t *testing.T) {
 	tests := []struct {
 		name string

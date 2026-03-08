@@ -213,6 +213,39 @@ func TestExtractMessage_StructuredAndLegacy(t *testing.T) {
 	}
 }
 
+func TestSessionCheckpointRoundTrip(t *testing.T) {
+	rdb, err := NewRedisClientForTest()
+	if err != nil {
+		t.Fatalf("new redis test client: %v", err)
+	}
+
+	repo := NewRedisTerminalIORepository(rdb)
+	ctx := context.Background()
+
+	const workspaceID uint = 7
+	const sessionID = "session-checkpoint-test"
+	want := &types.SessionCheckpoint{
+		RunID:       "run-123",
+		ExecutionID: "exec-123",
+		UpdatedAt:   time.Now().UnixMilli(),
+	}
+
+	if err := repo.SetSessionCheckpoint(ctx, workspaceID, sessionID, want, time.Minute); err != nil {
+		t.Fatalf("set checkpoint: %v", err)
+	}
+
+	got, err := repo.GetSessionCheckpoint(ctx, workspaceID, sessionID)
+	if err != nil {
+		t.Fatalf("get checkpoint: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected checkpoint to round trip")
+	}
+	if got.RunID != want.RunID || got.ExecutionID != want.ExecutionID || got.UpdatedAt != want.UpdatedAt {
+		t.Fatalf("checkpoint mismatch: got %#v want %#v", got, want)
+	}
+}
+
 func waitFor[T any](ch <-chan T) (T, error) {
 	var zero T
 	select {
