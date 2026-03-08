@@ -1,8 +1,10 @@
 package skills
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -64,6 +66,7 @@ func TestFormatHistory(t *testing.T) {
 				require.Empty(t, result)
 			} else {
 				require.NotEmpty(t, result)
+				require.Len(t, strings.Split(strings.TrimSpace(result), "\n"), tt.wantLen)
 			}
 		})
 	}
@@ -119,9 +122,35 @@ func TestDerefStr(t *testing.T) {
 
 func TestLoadDraftNoS2(t *testing.T) {
 	copilot := NewCopilot(nil, nil)
-	_, err := copilot.LoadDraft(t.Context(), "nonexistent")
+	_, err := copilot.LoadDraft(t.Context(), "ws-123", "nonexistent")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "S2 not configured")
+}
+
+func TestDecodeDraftRecordsRejectsWrongWorkspace(t *testing.T) {
+	records := []common.ReadRecord{
+		{Body: `{"type":"meta","workspace_id":"ws-123","ts":100}`},
+	}
+
+	_, err := decodeDraftRecords("ws-999", "draft-1", records)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "draft not found")
+}
+
+func TestDecodeDraftRecordsAdvancesUpdatedAtFromMessagesAndStatus(t *testing.T) {
+	records := []common.ReadRecord{
+		{Body: `{"type":"meta","workspace_id":"ws-123","ts":100}`},
+		{Body: `{"type":"message","role":"user","content":"hello","ts":200}`},
+		{Body: `{"type":"status","content":"installed","ts":300}`},
+	}
+
+	draft, err := decodeDraftRecords("ws-123", "draft-1", records)
+	require.NoError(t, err)
+	require.Equal(t, "ws-123", draft.WorkspaceID)
+	require.Equal(t, int64(100), draft.CreatedAt)
+	require.Equal(t, int64(300), draft.UpdatedAt)
+	require.Equal(t, "installed", draft.Status)
+	require.Len(t, draft.Messages, 1)
 }
 
 func TestValidateContent(t *testing.T) {

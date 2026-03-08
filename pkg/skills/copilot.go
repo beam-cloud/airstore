@@ -52,7 +52,7 @@ func (c *Copilot) CreateDraft(workspaceID string) *Draft {
 	}
 }
 
-func (c *Copilot) LoadDraft(ctx context.Context, draftID string) (*Draft, error) {
+func (c *Copilot) LoadDraft(ctx context.Context, workspaceID, draftID string) (*Draft, error) {
 	if c.s2 == nil || !c.s2.Enabled() {
 		return nil, fmt.Errorf("S2 not configured")
 	}
@@ -65,6 +65,10 @@ func (c *Copilot) LoadDraft(ctx context.Context, draftID string) (*Draft, error)
 		return nil, fmt.Errorf("draft not found")
 	}
 
+	return decodeDraftRecords(workspaceID, draftID, records)
+}
+
+func decodeDraftRecords(workspaceID, draftID string, records []common.ReadRecord) (*Draft, error) {
 	draft := &Draft{ID: draftID, Status: "active", Messages: []DraftMessage{}}
 	for _, rec := range records {
 		var entry draftStreamEntry
@@ -75,21 +79,36 @@ func (c *Copilot) LoadDraft(ctx context.Context, draftID string) (*Draft, error)
 		case "meta":
 			draft.WorkspaceID = entry.WorkspaceID
 			draft.CreatedAt = entry.Timestamp
+			bumpDraftUpdatedAt(draft, entry.Timestamp)
 		case "message":
 			draft.Messages = append(draft.Messages, DraftMessage{
 				Role:      entry.Role,
 				Content:   entry.Content,
 				Timestamp: entry.Timestamp,
 			})
+			bumpDraftUpdatedAt(draft, entry.Timestamp)
 		case "skill":
 			draft.SkillContent = entry.Content
-			draft.UpdatedAt = entry.Timestamp
+			bumpDraftUpdatedAt(draft, entry.Timestamp)
 		case "status":
 			draft.Status = entry.Content
+			bumpDraftUpdatedAt(draft, entry.Timestamp)
 		}
+	}
+	if draft.WorkspaceID == "" || (workspaceID != "" && draft.WorkspaceID != workspaceID) {
+		return nil, fmt.Errorf("draft not found")
+	}
+	if draft.UpdatedAt == 0 {
+		draft.UpdatedAt = draft.CreatedAt
 	}
 
 	return draft, nil
+}
+
+func bumpDraftUpdatedAt(draft *Draft, timestamp int64) {
+	if draft != nil && timestamp > draft.UpdatedAt {
+		draft.UpdatedAt = timestamp
+	}
 }
 
 type draftStreamEntry struct {

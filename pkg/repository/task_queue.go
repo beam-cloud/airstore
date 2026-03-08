@@ -75,7 +75,7 @@ func (q *RedisTaskQueue) Push(ctx context.Context, task *types.RunExecution) err
 	}
 
 	// Store state and push to queue atomically via pipeline
-	pipe := q.rdb.Pipeline()
+	pipe := q.rdb.TxPipeline()
 	pipe.Set(ctx, common.Keys.RunExecutionState(task.ExternalId), stateData, taskStateTTL)
 	pipe.LPush(ctx, common.Keys.RunExecutionQueue(q.queueName), data)
 	_, err = pipe.Exec(ctx)
@@ -109,7 +109,7 @@ func (q *RedisTaskQueue) Requeue(ctx context.Context, task *types.RunExecution) 
 		return fmt.Errorf("failed to marshal requeue state: %w", err)
 	}
 
-	pipe := q.rdb.Pipeline()
+	pipe := q.rdb.TxPipeline()
 	pipe.SRem(ctx, common.Keys.RunExecutionInFlight(q.queueName), task.ExternalId)
 	pipe.Del(ctx, common.Keys.RunExecutionResult(task.ExternalId))
 	pipe.Set(ctx, common.Keys.RunExecutionState(task.ExternalId), stateData, taskStateTTL)

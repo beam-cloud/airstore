@@ -71,7 +71,7 @@ func (e *FollowUpIntent) UnmarshalJSON(data []byte) error {
 
 func (e *FollowUpIntent) Decode(holder *cffi.CFFIValueEnum, typeMap baml.TypeMap) {
 	name := holder.Name
-	if name.Name != "FollowUpIntent" && name.Namespace != cffi.CFFITypeNamespace_TYPES {
+	if name.Name != "FollowUpIntent" || name.Namespace != cffi.CFFITypeNamespace_TYPES {
 		panic(fmt.Sprintf("expected types.FollowUpIntent, got %s.%s", string(name.Namespace.String()), string(name.Name)))
 	}
 	value := holder.Value
@@ -148,7 +148,7 @@ func (e *OutputKind) UnmarshalJSON(data []byte) error {
 
 func (e *OutputKind) Decode(holder *cffi.CFFIValueEnum, typeMap baml.TypeMap) {
 	name := holder.Name
-	if name.Name != "OutputKind" && name.Namespace != cffi.CFFITypeNamespace_TYPES {
+	if name.Name != "OutputKind" || name.Namespace != cffi.CFFITypeNamespace_TYPES {
 		panic(fmt.Sprintf("expected types.OutputKind, got %s.%s", string(name.Namespace.String()), string(name.Name)))
 	}
 	value := holder.Value
@@ -213,7 +213,7 @@ func (e *TurnOutcome) UnmarshalJSON(data []byte) error {
 
 func (e *TurnOutcome) Decode(holder *cffi.CFFIValueEnum, typeMap baml.TypeMap) {
 	name := holder.Name
-	if name.Name != "TurnOutcome" && name.Namespace != cffi.CFFITypeNamespace_TYPES {
+	if name.Name != "TurnOutcome" || name.Namespace != cffi.CFFITypeNamespace_TYPES {
 		panic(fmt.Sprintf("expected types.TurnOutcome, got %s.%s", string(name.Namespace.String()), string(name.Name)))
 	}
 	value := holder.Value

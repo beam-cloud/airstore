@@ -71,7 +71,7 @@ func (e *ResponseType) UnmarshalJSON(data []byte) error {
 
 func (e *ResponseType) Decode(holder *cffi.CFFIValueEnum, typeMap baml.TypeMap) {
 	name := holder.Name
-	if name.Name != "ResponseType" && name.Namespace != cffi.CFFITypeNamespace_TYPES {
+	if name.Name != "ResponseType" || name.Namespace != cffi.CFFITypeNamespace_TYPES {
 		panic(fmt.Sprintf("expected types.ResponseType, got %s.%s", string(name.Namespace.String()), string(name.Name)))
 	}
 	value := holder.Value

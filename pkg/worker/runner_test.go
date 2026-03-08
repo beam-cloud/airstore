@@ -63,6 +63,19 @@ func TestDefaultClaudePersistentConfigDir_RootedUnderWorkspace(t *testing.T) {
 	}
 }
 
+func TestClaudeWorkspaceDirRejectsTraversalOutsideWorkspace(t *testing.T) {
+	env := map[string]string{
+		agentWorkspaceDirEnvKey: "/workspace/../../etc",
+	}
+
+	if got := claudeWorkspaceDir(env); got != types.ContainerWorkDir {
+		t.Fatalf("expected invalid workspace dir to fall back to %q, got %q", types.ContainerWorkDir, got)
+	}
+	if got := defaultClaudeCheckpointPath(env); !strings.HasPrefix(got, types.ContainerWorkDir+"/"+claudeStateRootDir+"/") {
+		t.Fatalf("expected checkpoint path to remain rooted under %q, got %q", types.ContainerWorkDir, got)
+	}
+}
+
 func TestApplySystemPromptFlags_ReplaceMode(t *testing.T) {
 	builder := newPromptEntrypointBuilder("claude")
 	env := map[string]string{
@@ -183,6 +196,14 @@ func TestWriteClaudeSessionCheckpointPersistsManifest(t *testing.T) {
 	}
 	if filepath.Base(checkpointPath) != claudeCheckpointFile {
 		t.Fatalf("unexpected checkpoint filename %q", checkpointPath)
+	}
+}
+
+func TestVFSHostPathWithinMountRejectsEscapingPath(t *testing.T) {
+	mountSource := t.TempDir()
+	_, err := vfsHostPathWithinMount(mountSource, "/tmp/../../etc")
+	if err == nil {
+		t.Fatal("expected escaping path to be rejected")
 	}
 }
 

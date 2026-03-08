@@ -113,6 +113,30 @@ func TestCreateThenGetDraft(t *testing.T) {
 	require.Equal(t, "active", getResp.Data.Status)
 }
 
+func TestGetDraftWrongWorkspaceReturnsNotFound(t *testing.T) {
+	e := newTestEchoWithDrafts(t)
+
+	body := `{"description":"Create a skill"}`
+	req := httptest.NewRequest(http.MethodPost, "/workspaces/ws-123/skills/drafts", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var createResp struct {
+		Data struct {
+			DraftID string `json:"draft_id"`
+		} `json:"data"`
+	}
+	err := json.Unmarshal(rec.Body.Bytes(), &createResp)
+	require.NoError(t, err)
+
+	req = httptest.NewRequest(http.MethodGet, "/workspaces/ws-456/skills/drafts/"+createResp.Data.DraftID, nil)
+	rec = httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+}
+
 func TestInstallDraftNotFound(t *testing.T) {
 	e := newTestEchoWithDrafts(t)
 

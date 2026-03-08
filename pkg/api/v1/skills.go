@@ -44,12 +44,20 @@ type SkillInfo struct {
 	Path        string `json:"path"`
 }
 
-// draftsStore is an in-memory store for active draft sessions.
-// Drafts are rehydrated from S2 on load and kept live during chat.
+const draftSessionTTL = 30 * time.Minute
+
+type draftSession struct {
+	mu          sync.Mutex
+	draft       *skills.Draft
+	lastTouched time.Time
+}
+
+// draftsStore is a short-lived cache for active draft sessions.
+// S2 remains the durable source of truth, and entries are evicted opportunistically.
 var draftsStore = struct {
-	sync.RWMutex
-	m map[string]*skills.Draft
-}{m: make(map[string]*skills.Draft)}
+	sync.Mutex
+	m map[string]*draftSession
+}{m: make(map[string]*draftSession)}
 
 type createDraftRequest struct {
 	Description    string `json:"description"`
@@ -194,23 +202,73 @@ func (sg *SkillsGroup) Generate(c echo.Context) error {
 	return SuccessResponse(c, map[string]string{"content": resp.Skill_content})
 }
 
-func (sg *SkillsGroup) getDraft(c echo.Context, draftID string) (*skills.Draft, error) {
-	draftsStore.RLock()
-	draft, ok := draftsStore.m[draftID]
-	draftsStore.RUnlock()
-	if ok {
-		return draft, nil
+func getCachedDraftSession(draftID string) *draftSession {
+	now := time.Now()
+	draftsStore.Lock()
+	defer draftsStore.Unlock()
+	pruneDraftSessionsLocked(now)
+	session := draftsStore.m[draftID]
+	if session != nil {
+		session.lastTouched = now
+	}
+	return session
+}
+
+func putDraftSession(draft *skills.Draft) *draftSession {
+	if draft == nil {
+		return nil
+	}
+	now := time.Now()
+	session := &draftSession{draft: draft, lastTouched: now}
+	draftsStore.Lock()
+	defer draftsStore.Unlock()
+	pruneDraftSessionsLocked(now)
+	draftsStore.m[draft.ID] = session
+	return session
+}
+
+func deleteDraftSession(draftID string) {
+	draftsStore.Lock()
+	defer draftsStore.Unlock()
+	delete(draftsStore.m, draftID)
+}
+
+func pruneDraftSessionsLocked(now time.Time) {
+	for id, session := range draftsStore.m {
+		if session == nil || now.Sub(session.lastTouched) > draftSessionTTL {
+			delete(draftsStore.m, id)
+		}
+	}
+}
+
+func cloneDraft(draft *skills.Draft) *skills.Draft {
+	if draft == nil {
+		return nil
+	}
+	out := *draft
+	out.Messages = append([]skills.DraftMessage(nil), draft.Messages...)
+	return &out
+}
+
+func (sg *SkillsGroup) getDraftSession(c echo.Context, draftID string) (*draftSession, error) {
+	workspaceID := c.Param("workspace_id")
+	if session := getCachedDraftSession(draftID); session != nil {
+		session.mu.Lock()
+		cachedWorkspaceID := session.draft.WorkspaceID
+		session.mu.Unlock()
+		if cachedWorkspaceID == workspaceID {
+			return session, nil
+		}
+		if cachedWorkspaceID != "" {
+			return nil, fmt.Errorf("draft not found")
+		}
 	}
 
-	draft, err := sg.copilot.LoadDraft(c.Request().Context(), draftID)
+	draft, err := sg.copilot.LoadDraft(c.Request().Context(), workspaceID, draftID)
 	if err != nil {
 		return nil, err
 	}
-
-	draftsStore.Lock()
-	draftsStore.m[draftID] = draft
-	draftsStore.Unlock()
-	return draft, nil
+	return putDraftSession(draft), nil
 }
 
 // ListDrafts returns draft summaries for a workspace.
@@ -255,9 +313,7 @@ func (sg *SkillsGroup) CreateDraft(c echo.Context) error {
 	_ = sg.copilot.PersistMeta(ctx, draft)
 	_ = sg.copilot.IndexDraftCreated(ctx, workspaceID, draft.ID, req.Description, req.SkillName)
 
-	draftsStore.Lock()
-	draftsStore.m[draft.ID] = draft
-	draftsStore.Unlock()
+	putDraftSession(draft)
 
 	return SuccessResponse(c, createDraftResponse{DraftID: draft.ID})
 }
@@ -268,11 +324,14 @@ func (sg *SkillsGroup) GetDraft(c echo.Context) error {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "skill copilot not configured")
 	}
 
-	draft, err := sg.getDraft(c, c.Param("draft_id"))
+	session, err := sg.getDraftSession(c, c.Param("draft_id"))
 	if err != nil {
 		return ErrorResponse(c, http.StatusNotFound, "draft not found")
 	}
 
+	session.mu.Lock()
+	draft := cloneDraft(session.draft)
+	session.mu.Unlock()
 	return SuccessResponse(c, draft)
 }
 
@@ -290,7 +349,7 @@ func (sg *SkillsGroup) ChatDraft(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, "message is required")
 	}
 
-	draft, err := sg.getDraft(c, c.Param("draft_id"))
+	session, err := sg.getDraftSession(c, c.Param("draft_id"))
 	if err != nil {
 		return ErrorResponse(c, http.StatusNotFound, "draft not found")
 	}
@@ -331,9 +390,11 @@ func (sg *SkillsGroup) ChatDraft(c echo.Context) error {
 		genCancel()
 	}()
 
+	session.mu.Lock()
+	defer session.mu.Unlock()
 	resp, err := sg.copilot.GenerateStream(
 		genCtx,
-		draft,
+		session.draft,
 		strings.TrimSpace(req.Message),
 		func(partial *skills.PartialSkillDraftResponse) {
 			writeSSE(sseEvent{
@@ -365,18 +426,23 @@ func (sg *SkillsGroup) InstallDraft(c echo.Context) error {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "skill copilot not configured")
 	}
 
-	draft, err := sg.getDraft(c, c.Param("draft_id"))
+	session, err := sg.getDraftSession(c, c.Param("draft_id"))
 	if err != nil {
 		return ErrorResponse(c, http.StatusNotFound, "draft not found")
 	}
 
 	ctx := c.Request().Context()
-	manifest, err := sg.copilot.InstallDraft(ctx, draft)
+	session.mu.Lock()
+	manifest, err := sg.copilot.InstallDraft(ctx, session.draft)
+	workspaceID := session.draft.WorkspaceID
+	draftID := session.draft.ID
+	session.mu.Unlock()
 	if err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, err.Error())
 	}
 
-	_ = sg.copilot.IndexDraftInstalled(ctx, draft.WorkspaceID, draft.ID, manifest.Name)
+	deleteDraftSession(draftID)
+	_ = sg.copilot.IndexDraftInstalled(ctx, workspaceID, draftID, manifest.Name)
 
 	return SuccessResponse(c, SkillInfo{
 		Name:        manifest.Name,
