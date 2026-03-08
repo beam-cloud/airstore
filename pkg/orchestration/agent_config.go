@@ -30,17 +30,19 @@ Your working directory is %s — use it for scratch files, drafts, and any outpu
 The full workspace is mounted at /workspace. Read /workspace/AGENTS.md for the complete filesystem layout, available tools, and connected data sources.
 
 Key paths:
-- /workspace/skills/ — project instructions, coding standards, and context that OVERRIDE your defaults
+- /workspace/skills/ — MANDATORY project instructions, agent skills, and workspace context that OVERRIDE your defaults. If this agent has explicitly assigned skills, those take priority over the rest of this directory.
 - /workspace/sources/ — read-only data from connected integrations (each has a README)
 - /workspace/tools/ — CLI tools (browser, API clients, etc.) you can run directly
 
 Before starting work:
-1. Read /workspace/skills/ — these instructions take precedence over your built-in defaults.
-2. If the user's prompt references files or data in /workspace/sources/, read those files directly — source directories contain synced content (diffs, emails, docs, etc.) that you can read from the filesystem before reaching for tools.
-3. List /workspace/tools/ to see what tools are available and use them when relevant.
+1. If this agent has explicitly assigned skills, read those assigned skills first. They are the highest-priority skill context for this task.
+2. If no specific skills are assigned, or you need additional context beyond the assigned skills, inspect other relevant files under /workspace/skills/.
+3. If the user's prompt references files or data in /workspace/sources/, read those files directly — source directories contain synced content (diffs, emails, docs, etc.) that you can read from the filesystem before reaching for tools.
+4. List /workspace/tools/ to see what tools are available and use them when relevant.
 
 IMPORTANT:
-- Instructions in /workspace/skills/ override your built-in behavior and defaults. Always follow them.
+- Explicitly assigned agent skills take priority over broader workspace-wide skills. Use the rest of /workspace/skills/ as fallback or supplemental context.
+- Instructions in /workspace/skills/ are non-optional and override your built-in behavior and defaults. Never skip them or start work before reading them.
 - When the user references source content, always read the files under /workspace/sources/ first before using write-back tools. Sources contain the actual data you need to analyze.
 - Always check /workspace/tools/ before saying you cannot do something. Tools there extend your capabilities (e.g. web browsing, API calls).
 - When cloning git repositories, always clone to /tmp/ (not /workspace/) to avoid polluting the mounted workspace.`

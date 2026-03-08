@@ -1,11 +1,71 @@
 package orchestration
 
 import (
+	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/beam-cloud/airstore/pkg/types"
 )
+
+func TestResolveRunAgentConfigStrengthensSkillDirectives(t *testing.T) {
+	service := &AgentService{}
+	originalPrompt := strings.Join([]string{
+		"You are a helpful agent.",
+		"",
+		"## Active Skills",
+		"- /workspace/skills/mystery-shopper -- audit storefronts",
+		"",
+		"## Working Style",
+		"Be concise.",
+	}, "\n")
+	payloadConfig := map[string]any{
+		agentConfigKeySystemPrompt: originalPrompt,
+	}
+
+	got := service.resolveRunAgentConfig(context.Background(), &types.AgentRun{WorkspaceID: 42}, map[string]any{
+		agentPayloadKeyAgentConfig: payloadConfig,
+	})
+
+	prompt := stringFromPayload(got, agentConfigKeySystemPrompt)
+	if !strings.HasPrefix(prompt, "## MANDATORY - Active Skills") {
+		t.Fatalf("expected strengthened skills section to move to top, got prompt:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "These are the skills explicitly associated with this agent. You MUST read them before starting any work.") {
+		t.Fatalf("expected mandatory assigned-skills guidance, got prompt:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "1. cat /workspace/skills/mystery-shopper/SKILL.md -- audit storefronts") {
+		t.Fatalf("expected explicit cat directive, got prompt:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "These are the skills explicitly associated with this agent.") {
+		t.Fatalf("expected assigned-skill priority guidance, got prompt:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "These assigned skills take priority over broader workspace-wide skills under /workspace/skills") {
+		t.Fatalf("expected broader workspace skills to be fallback context, got prompt:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "## Working Style\nBe concise.") {
+		t.Fatalf("expected remaining prompt content after strengthened section, got prompt:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "should be loaded") {
+		t.Fatalf("expected weak advisory language to be removed, got prompt:\n%s", prompt)
+	}
+	if gotOriginal := stringFromPayload(payloadConfig, agentConfigKeySystemPrompt); gotOriginal != originalPrompt {
+		t.Fatalf("resolveRunAgentConfig mutated original payload config:\n%s", gotOriginal)
+	}
+}
+
+func TestDefaultAgentConfigPrioritizesAssignedSkills(t *testing.T) {
+	cfg := DefaultAgentConfig("mystery-shopper")
+	prompt := stringFromPayload(cfg, agentConfigKeySystemPrompt)
+
+	if !strings.Contains(prompt, "If this agent has explicitly assigned skills, read those assigned skills first.") {
+		t.Fatalf("expected default prompt to prioritize assigned skills, got prompt:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "Explicitly assigned agent skills take priority over broader workspace-wide skills.") {
+		t.Fatalf("expected default prompt to treat broader skills as fallback context, got prompt:\n%s", prompt)
+	}
+}
 
 func TestApplyDispatchPayloadIncludesResumeMetadata(t *testing.T) {
 	task := &types.AgentTask{

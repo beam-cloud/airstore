@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -14,6 +15,11 @@ import (
 	"github.com/google/uuid"
 	redislib "github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog/log"
+)
+
+var (
+	activeSkillsHeaderRE   = regexp.MustCompile(`(?m)^## (?:MANDATORY - )?Active Skills\s*$`)
+	activeSkillReferenceRE = regexp.MustCompile(`(?m)(?:^\s*-\s+(/workspace/skills/[^\s/]+)(?:\s+--\s+(.*))?\s*$)|(?:^\s*\d+\.\s+cat\s+(/workspace/skills/[^\s/]+)(?:/SKILL\.md)?(?:\s+--\s+(.*))?\s*$)`)
 )
 
 type AgentService struct {
@@ -1943,6 +1949,85 @@ func (s *AgentService) agentConfigForRun(ctx context.Context, run *types.AgentRu
 	return cloneAnyMap(profile.ConfigJSON)
 }
 
+func strengthenSkillDirectives(agentConfig map[string]any) {
+	if len(agentConfig) == 0 {
+		return
+	}
+
+	systemPrompt := strings.TrimSpace(stringFromPayload(agentConfig, agentConfigKeySystemPrompt))
+	if systemPrompt == "" {
+		return
+	}
+
+	start, end, section, ok := activeSkillsSection(systemPrompt)
+	if !ok {
+		return
+	}
+
+	lines := []string{
+		"## MANDATORY - Active Skills",
+		"",
+		"These are the skills explicitly associated with this agent. You MUST read them before starting any work.",
+		"These assigned skills take priority over broader workspace-wide skills under /workspace/skills and override your defaults. Only consult the wider directory if no assigned skill covers the task or you need additional context.",
+		"",
+	}
+	seen := map[string]int{}
+	for _, match := range activeSkillReferenceRE.FindAllStringSubmatch(section, -1) {
+		path, description := strings.TrimSpace(match[1]), strings.TrimSpace(match[2])
+		if path == "" {
+			path, description = strings.TrimSpace(match[3]), strings.TrimSpace(match[4])
+		}
+		path = strings.TrimSuffix(path, "/SKILL.md")
+		if !strings.HasPrefix(path, "/workspace/skills/") {
+			continue
+		}
+		if idx, exists := seen[path]; exists {
+			if description != "" && !strings.Contains(lines[idx], " -- ") {
+				lines[idx] += " -- " + description
+			}
+			continue
+		}
+		line := fmt.Sprintf("%d. cat %s/SKILL.md", len(seen)+1, path)
+		if description != "" {
+			line += " -- " + description
+		}
+		seen[path] = len(lines)
+		lines = append(lines, line)
+	}
+	if len(seen) == 0 {
+		return
+	}
+	lines = append(lines,
+		"",
+		"DO NOT begin the user's task until you have read every skill above. Follow them before consulting broader workspace-wide skills.",
+	)
+	replacement := strings.Join(lines, "\n")
+	rest := strings.TrimSpace(strings.Join([]string{
+		strings.TrimSpace(systemPrompt[:start]),
+		strings.TrimSpace(systemPrompt[end:]),
+	}, "\n\n"))
+
+	if rest == "" {
+		agentConfig[agentConfigKeySystemPrompt] = replacement
+		return
+	}
+	agentConfig[agentConfigKeySystemPrompt] = replacement + "\n\n" + rest
+}
+
+func activeSkillsSection(systemPrompt string) (start, end int, section string, ok bool) {
+	header := activeSkillsHeaderRE.FindStringIndex(systemPrompt)
+	if header == nil {
+		return 0, 0, "", false
+	}
+	start = header[0]
+	searchFrom := header[1]
+	end = len(systemPrompt)
+	if nextSection := strings.Index(systemPrompt[searchFrom:], "\n## "); nextSection != -1 {
+		end = searchFrom + nextSection
+	}
+	return start, end, systemPrompt[start:end], true
+}
+
 func (s *AgentService) resolveRunAgentConfig(
 	ctx context.Context,
 	run *types.AgentRun,
@@ -1952,6 +2037,8 @@ func (s *AgentService) resolveRunAgentConfig(
 	if len(agentConfig) == 0 {
 		agentConfig = s.agentConfigForRun(ctx, run)
 	}
+	agentConfig = cloneAnyMap(agentConfig)
+	strengthenSkillDirectives(agentConfig)
 	return agentConfig
 }
 
