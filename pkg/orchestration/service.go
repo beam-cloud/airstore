@@ -22,6 +22,12 @@ var (
 	activeSkillReferenceRE = regexp.MustCompile(`(?m)(?:^\s*-\s+(/workspace/skills/[^\s/]+)(?:\s+--\s+(.*))?\s*$)|(?:^\s*\d+\.\s+cat\s+(/workspace/skills/[^\s/]+)(?:/SKILL\.md)?(?:\s+--\s+(.*))?\s*$)`)
 )
 
+const (
+	pendingInputSweepInterval = 15 * time.Second
+	pendingInputSweepMaxAge   = 30 * time.Second
+	pendingInputSweepBatch    = 100
+)
+
 type AgentService struct {
 	backend            repository.BackendRepository
 	taskQueue          repository.TaskQueue
@@ -70,6 +76,9 @@ func (s *AgentService) Start(ctx context.Context) {
 		}
 		go s.outboxPublisherLoop(ctx)
 		go s.resultProjectorLoop(ctx)
+	}
+	if s.backend != nil {
+		go s.pendingInputSweeperLoop(ctx)
 	}
 	go s.dispatchLoop(ctx)
 }
@@ -177,6 +186,18 @@ func (s *AgentService) activeExecutionExternalID(ctx context.Context, runID stri
 		return "", nil
 	}
 	return exec.ExternalId, nil
+}
+
+func (s *AgentService) publishTaskUpdate(ctx context.Context, workspaceID uint, taskID string) {
+	if s == nil || s.orchestrationStore == nil || strings.TrimSpace(taskID) == "" {
+		return
+	}
+	if err := s.orchestrationStore.PublishTaskLive(ctx, taskID); err != nil {
+		log.Debug().Err(err).Str("task_id", taskID).Msg("failed to publish task live update")
+	}
+	if err := s.orchestrationStore.PublishWorkspaceLive(ctx, workspaceID); err != nil {
+		log.Debug().Err(err).Uint("workspace_id", workspaceID).Msg("failed to publish workspace live update")
+	}
 }
 
 func (s *AgentService) AcceptAgentCommand(
@@ -294,6 +315,7 @@ func (s *AgentService) AcceptAgentCommand(
 		}
 		return nil, false, err
 	}
+	s.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
 	return task, false, nil
 }
 
@@ -431,6 +453,7 @@ func (s *AgentService) AcceptTaskInput(
 	if task.TargetRunID != nil {
 		s.persistUserInputLog(ctx, *task.TargetRunID, message)
 	}
+	s.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
 
 	updated, uerr := s.backend.GetTask(ctx, workspaceID, taskID)
 	if uerr == nil {
@@ -459,11 +482,20 @@ func (s *AgentService) deliverTaskInput(ctx context.Context, task *types.AgentTa
 		return s.requeueTaskForResume(ctx, task, run)
 	}
 
-	execID, _, _ := s.activeAttemptExecutionID(ctx, run.ID)
-	if execID != "" && s.terminalIO != nil {
-		return s.terminalIO.PublishInputWake(ctx, execID)
+	execID, hasActiveAttempt, err := s.activeAttemptExecutionID(ctx, run.ID)
+	if err != nil {
+		return err
 	}
-
+	if execID != "" && s.terminalIO != nil {
+		if err := s.terminalIO.PublishInputWake(ctx, execID); err != nil {
+			return err
+		}
+		s.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
+		return nil
+	}
+	if !hasActiveAttempt {
+		return s.requeueTaskForResume(ctx, task, run)
+	}
 	return nil
 }
 
@@ -488,6 +520,58 @@ func (s *AgentService) requeueTaskForResume(ctx context.Context, task *types.Age
 	}
 	if !requeued {
 		return fmt.Errorf("task %s is no longer attached to run %s", task.ID, lastRun.ID)
+	}
+	s.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
+	return nil
+}
+
+func (s *AgentService) pendingInputSweeperLoop(ctx context.Context) {
+	ticker := time.NewTicker(pendingInputSweepInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.retryOrphanedPendingInputs(ctx); err != nil {
+				log.Warn().Err(err).Msg("failed to recover orphaned pending task inputs")
+			}
+		}
+	}
+}
+
+func (s *AgentService) retryOrphanedPendingInputs(ctx context.Context) error {
+	if s == nil || s.backend == nil {
+		return nil
+	}
+	inputs, err := s.backend.ListOrphanedPendingInputs(ctx, pendingInputSweepMaxAge, pendingInputSweepBatch)
+	if err != nil || len(inputs) == 0 {
+		return err
+	}
+
+	seenTasks := make(map[string]struct{}, len(inputs))
+	for _, input := range inputs {
+		if input == nil {
+			continue
+		}
+		taskID := strings.TrimSpace(input.TaskID)
+		if taskID == "" {
+			continue
+		}
+		if _, exists := seenTasks[taskID]; exists {
+			continue
+		}
+		seenTasks[taskID] = struct{}{}
+
+		task, err := s.backend.GetTask(ctx, input.WorkspaceID, taskID)
+		if err != nil {
+			log.Warn().Err(err).Str("task_id", taskID).Msg("failed to load task for orphaned input recovery")
+			continue
+		}
+		if err := s.deliverTaskInput(ctx, task); err != nil {
+			log.Warn().Err(err).Str("task_id", taskID).Msg("failed to redeliver orphaned task input")
+		}
 	}
 	return nil
 }
@@ -876,8 +960,8 @@ func (s *AgentService) finalizeRunAttempt(
 	if err := s.appendRunSnapshot(ctx, attempt.RunID, runStatus, nil, &now, errMsg, payload); err != nil {
 		return fmt.Errorf("append completion snapshot: %w", err)
 	}
-	if err := s.markOriginTaskTerminalIfCurrentRun(ctx, attempt.RunID, waitingForInput, wakeSignal); err != nil {
-		return fmt.Errorf("mark origin task terminal: %w", err)
+	if err := s.settleOriginTask(ctx, attempt.RunID, waitingForInput, wakeSignal); err != nil {
+		return fmt.Errorf("settle origin task: %w", err)
 	}
 	return nil
 }
@@ -954,7 +1038,7 @@ func (s *AgentService) buildRetryPayload(ctx context.Context, task *types.AgentT
 	return payload
 }
 
-func (s *AgentService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, runID string, waitingForInput bool, wakeSignal *types.RunExecutionWakeSignal) error {
+func (s *AgentService) settleOriginTask(ctx context.Context, runID string, waitingForInput bool, wakeSignal *types.RunExecutionWakeSignal) error {
 	if s.backend == nil || strings.TrimSpace(runID) == "" {
 		return nil
 	}
@@ -1024,6 +1108,7 @@ func (s *AgentService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, r
 				Int("wake_count", task.WakeCount).
 				Time("wake_at", wakeAt).
 				Msg("task transitioned to sleeping")
+			s.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
 		}
 		return nil
 	}
@@ -1048,6 +1133,7 @@ func (s *AgentService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, r
 	if err := SyncTaskOutcome(ctx, s.backend, task, run); err != nil {
 		return err
 	}
+	s.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
 	return nil
 }
 
@@ -1101,7 +1187,11 @@ func (s *AgentService) dispatchTask(ctx context.Context, task *types.AgentTask) 
 func (s *AgentService) handleInterruptTask(ctx context.Context, task *types.AgentTask) error {
 	if task.TargetRunID == nil {
 		reason := types.AgentTaskDropReasonInterruptMissingTarget
-		return s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDropped, &reason, nil)
+		if err := s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDropped, &reason, nil); err != nil {
+			return err
+		}
+		s.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
+		return nil
 	}
 
 	run, err := s.backend.GetAgentRunByID(ctx, *task.TargetRunID)
@@ -1126,7 +1216,11 @@ func (s *AgentService) handleInterruptTask(ctx context.Context, task *types.Agen
 	_ = s.publishRunEvent(ctx, run.ID, types.AgentRunEventInterrupted, map[string]any{
 		types.AgentRunEventPayloadKeyTaskID: task.ID,
 	})
-	return s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDone, nil, task.TargetRunID)
+	if err := s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDone, nil, task.TargetRunID); err != nil {
+		return err
+	}
+	s.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
+	return nil
 }
 
 func (s *AgentService) cancelInFlightRunExecutions(ctx context.Context, runID string) (bool, error) {
@@ -1309,6 +1403,7 @@ func (s *AgentService) scheduleDispatchRetry(
 		if err := s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDropped, &dropReason, task.TargetRunID); err != nil {
 			return err
 		}
+		s.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
 		if s.orchestrationStore != nil {
 			_, _ = s.orchestrationStore.PublishTaskDispatchDLQ(ctx, map[string]any{
 				types.OrchestrationOutboxPayloadTaskID:          task.ID,
@@ -1332,6 +1427,7 @@ func (s *AgentService) scheduleDispatchRetry(
 	if err := s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateQueued, nil, task.TargetRunID); err != nil {
 		return err
 	}
+	s.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
 
 	if delay <= 0 {
 		delay = computeDispatchRetryDelay(retryAttempt)
@@ -1584,6 +1680,7 @@ func (s *AgentService) handleExecutionTask(ctx context.Context, task *types.Agen
 		}
 		reason := types.AgentTaskDropReasonRunMaterializationFail
 		_ = s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDropped, &reason, task.TargetRunID)
+		s.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
 		return nil
 	}
 
@@ -1941,6 +2038,7 @@ func (s *AgentService) materializeRun(
 	if err := s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateRunning, nil, &run.ID); err != nil {
 		return nil, RunExecutionPolicy{}, "", err
 	}
+	s.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
 	if err := s.appendRunSnapshot(ctx, run.ID, types.AgentRunStatusAccepted, nil, nil, nil, map[string]any{
 		types.AgentRunEventPayloadKeyTaskID: task.ID,
 	}); err != nil {

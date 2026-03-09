@@ -31,9 +31,20 @@ type TaskEventBatch struct {
 	Interaction        *types.RunInteraction `json:"interaction,omitempty"`
 	Logs               []common.TaskLogEntry `json:"logs"`
 	RunEvents          []map[string]any      `json:"run_events"`
+	Outputs            []*types.TaskOutput   `json:"outputs,omitempty"`
 	NextLogCursor      int64                 `json:"next_log_cursor"`
 	NextRunEventCursor int                   `json:"next_run_event_cursor"`
 }
+
+type WorkspaceLiveBatch struct {
+	Tasks   []*types.AgentTask  `json:"tasks"`
+	Outputs []*types.TaskOutput `json:"outputs"`
+}
+
+const (
+	defaultWorkspaceStreamTaskLimit   = 100
+	defaultWorkspaceStreamOutputLimit = 60
+)
 
 func NewAgentAPI(
 	backend repository.BackendRepository,
@@ -75,13 +86,13 @@ func (a *AgentAPI) CreateAgent(
 	}
 
 	profile := &types.AgentProfile{
-		WorkspaceID:   workspaceID,
-		AgentKey:      trimmedKey,
-		Name:          strings.TrimSpace(name),
-		Role:          "generalist",
-		MemoryScope:   "workspace",
-		ConfigJSON:    normalizedConfig,
-		Active:        isActive,
+		WorkspaceID: workspaceID,
+		AgentKey:    trimmedKey,
+		Name:        strings.TrimSpace(name),
+		Role:        "generalist",
+		MemoryScope: "workspace",
+		ConfigJSON:  normalizedConfig,
+		Active:      isActive,
 	}
 	if err := a.backend.CreateAgentProfile(ctx, profile); err != nil {
 		return nil, err
@@ -425,6 +436,9 @@ func (a *AgentAPI) CancelTask(ctx context.Context, workspaceID uint, taskID stri
 	if err := a.backend.CancelPendingOutboxEventsForTask(ctx, task.ID); err != nil {
 		log.Warn().Err(err).Str("task_id", task.ID).Msg("failed to cancel pending outbox events")
 	}
+	if a.runtime != nil {
+		a.runtime.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
+	}
 
 	return nil
 }
@@ -440,7 +454,13 @@ func (a *AgentAPI) ArchiveTask(ctx context.Context, workspaceID uint, taskID str
 	if !task.State.IsTerminal() {
 		return &types.ErrTaskNotArchivable{ID: taskID, State: task.State}
 	}
-	return a.backend.ArchiveTask(ctx, task.ID)
+	if err := a.backend.ArchiveTask(ctx, task.ID); err != nil {
+		return err
+	}
+	if a.runtime != nil {
+		a.runtime.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
+	}
+	return nil
 }
 
 type TaskUpdateParams struct {
@@ -475,6 +495,9 @@ func (a *AgentAPI) UpdateTask(ctx context.Context, workspaceID uint, taskID stri
 
 	if err := a.backend.UpdateTask(ctx, task); err != nil {
 		return nil, err
+	}
+	if a.runtime != nil {
+		a.runtime.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
 	}
 	return sanitizeTaskForResponse(task), nil
 }
@@ -681,6 +704,68 @@ func (a *AgentAPI) StreamTaskEvents(
 	runEventCursor int,
 	cursorRunID string,
 ) (*TaskEventBatch, error) {
+	return a.buildTaskEventBatch(ctx, workspaceID, taskID, logCursor, runEventCursor, cursorRunID)
+}
+
+func (a *AgentAPI) WorkspaceLiveBatch(ctx context.Context, workspaceID uint) (*WorkspaceLiveBatch, error) {
+	tasks, _, _, err := a.ListTasksFiltered(ctx, workspaceID, types.AgentTaskListFilter{
+		Limit: defaultWorkspaceStreamTaskLimit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	outputs, err := a.backend.ListWorkspaceTaskOutputs(ctx, workspaceID, types.TaskOutputListFilter{
+		ExcludeArchived: true,
+		Limit:           defaultWorkspaceStreamOutputLimit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if outputs == nil {
+		outputs = []*types.TaskOutput{}
+	}
+	return &WorkspaceLiveBatch{
+		Tasks:   tasks,
+		Outputs: outputs,
+	}, nil
+}
+
+func (a *AgentAPI) SubscribeWorkspaceLive(ctx context.Context, workspaceID uint) (<-chan struct{}, func(), error) {
+	if a.runtime == nil || a.runtime.orchestrationStore == nil {
+		return nil, nil, fmt.Errorf("workspace live unavailable")
+	}
+	return a.runtime.orchestrationStore.SubscribeWorkspaceLive(ctx, workspaceID)
+}
+
+func (a *AgentAPI) SubscribeTaskLive(ctx context.Context, taskID string) (<-chan struct{}, func(), error) {
+	if a.runtime == nil || a.runtime.orchestrationStore == nil {
+		return nil, nil, fmt.Errorf("task live unavailable")
+	}
+	return a.runtime.orchestrationStore.SubscribeTaskLive(ctx, taskID)
+}
+
+func (a *AgentAPI) SubscribeRunEvents(ctx context.Context, runID string) (<-chan struct{}, func(), error) {
+	if a.runtime == nil || a.runtime.orchestrationStore == nil {
+		return nil, nil, fmt.Errorf("run event stream unavailable")
+	}
+	return a.runtime.orchestrationStore.SubscribeRunEvents(ctx, runID)
+}
+
+func (a *AgentAPI) SubscribeExecutionLogs(ctx context.Context, executionID string) (<-chan []byte, func(), error) {
+	if a.runtime == nil || a.runtime.taskQueue == nil {
+		return nil, nil, fmt.Errorf("execution log stream unavailable")
+	}
+	return a.runtime.taskQueue.SubscribeLogs(ctx, executionID)
+}
+
+func (a *AgentAPI) buildTaskEventBatch(
+	ctx context.Context,
+	workspaceID uint,
+	taskID string,
+	logCursor int64,
+	runEventCursor int,
+	cursorRunID string,
+) (*TaskEventBatch, error) {
 	task, err := a.GetTask(ctx, workspaceID, taskID)
 	if err != nil {
 		return nil, err
@@ -724,6 +809,14 @@ func (a *AgentAPI) StreamTaskEvents(
 		}
 	}
 
+	outputs, err := a.backend.ListTaskOutputs(ctx, workspaceID, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if outputs == nil {
+		outputs = []*types.TaskOutput{}
+	}
+
 	return &TaskEventBatch{
 		TaskID:             task.ID,
 		RunID:              task.TargetRunID,
@@ -732,6 +825,7 @@ func (a *AgentAPI) StreamTaskEvents(
 		Interaction:        interaction,
 		Logs:               logs,
 		RunEvents:          runEvents,
+		Outputs:            outputs,
 		NextLogCursor:      nextLogCursor,
 		NextRunEventCursor: nextRunEventCursor,
 	}, nil

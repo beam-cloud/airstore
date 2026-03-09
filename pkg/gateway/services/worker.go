@@ -85,6 +85,19 @@ func NewWorkerService(
 	}
 }
 
+func (s *WorkerService) publishTaskUpdate(ctx context.Context, workspaceID uint, taskID string) {
+	if s == nil || s.redisClient == nil || strings.TrimSpace(taskID) == "" {
+		return
+	}
+	store := repository.NewOrchestrationStore(s.backend, s.redisClient)
+	if err := store.PublishTaskLive(ctx, taskID); err != nil {
+		log.Debug().Err(err).Str("task_id", taskID).Msg("failed to publish task live update")
+	}
+	if err := store.PublishWorkspaceLive(ctx, workspaceID); err != nil {
+		log.Debug().Err(err).Uint("workspace_id", workspaceID).Msg("failed to publish workspace live update")
+	}
+}
+
 func (s *WorkerService) RegisterWorker(ctx context.Context, req *pb.RegisterWorkerRequest) (*pb.RegisterWorkerResponse, error) {
 	worker := &types.Worker{
 		Hostname: req.Hostname,
@@ -234,7 +247,7 @@ func (s *WorkerService) SetTaskStarted(ctx context.Context, req *pb.SetTaskStart
 			types.AgentRunEventPayloadKeyTaskID:    req.TaskId,
 			types.AgentRunEventPayloadKeyEvent:     string(types.AgentRunEventStartRejectedTerminalRun),
 		})
-		_ = s.markOriginTaskTerminalIfCurrentRun(ctx, attempt.RunID)
+		_ = s.settleOriginTask(ctx, attempt.RunID)
 		return nil, status.Errorf(codes.FailedPrecondition, "run is already terminal")
 	}
 
@@ -362,6 +375,9 @@ func (s *WorkerService) UpdateTaskState(ctx context.Context, req *pb.UpdateTaskS
 	if _, err := s.backend.UpdateTaskStateIfCurrentRun(ctx, taskID, runID, state, nil, nil, inputKind); err != nil {
 		return nil, status.Errorf(codes.Internal, "update task state: %v", err)
 	}
+	if run, err := s.backend.GetAgentRunByID(ctx, runID); err == nil && run != nil {
+		s.publishTaskUpdate(ctx, run.WorkspaceID, taskID)
+	}
 	return &pb.UpdateTaskStateResponse{}, nil
 }
 
@@ -458,7 +474,7 @@ func (s *WorkerService) claimLeaseDuration() time.Duration {
 	return defaultRunClaimLeaseTTL
 }
 
-func (s *WorkerService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, runID string) error {
+func (s *WorkerService) settleOriginTask(ctx context.Context, runID string) error {
 	if s.backend == nil || strings.TrimSpace(runID) == "" {
 		return nil
 	}
@@ -596,6 +612,7 @@ func (s *WorkerService) CreateTaskOutput(ctx context.Context, req *pb.CreateTask
 	if err := s.backend.CreateTaskOutput(ctx, output); err != nil {
 		return nil, status.Errorf(codes.Internal, "create output: %v", err)
 	}
+	s.publishTaskUpdate(ctx, output.WorkspaceID, output.TaskID)
 	return &pb.CreateTaskOutputResponse{Id: output.ID}, nil
 }
 

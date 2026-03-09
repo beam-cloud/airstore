@@ -1303,6 +1303,45 @@ func (b *PostgresBackend) ListPendingTaskInputs(ctx context.Context, taskID stri
 	return out, rows.Err()
 }
 
+func (b *PostgresBackend) ListOrphanedPendingInputs(ctx context.Context, maxAge time.Duration, limit int) ([]*types.TaskInput, error) {
+	if maxAge <= 0 {
+		maxAge = 30 * time.Second
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	maxAgeSeconds := int64(maxAge / time.Second)
+	if maxAgeSeconds <= 0 {
+		maxAgeSeconds = 1
+	}
+	rows, err := b.db.QueryContext(
+		ctx,
+		`SELECT id, workspace_id, task_id, session_id, seq, kind, action, message,
+		        idempotency_key, status, claimed_by_run_id, claimed_by_execution_id,
+		        created_at, claimed_at, consumed_at
+		   FROM task_input
+		  WHERE status = 'pending'
+		    AND created_at < CURRENT_TIMESTAMP - ($1 * interval '1 second')
+		  ORDER BY created_at ASC
+		  LIMIT $2`,
+		maxAgeSeconds,
+		limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list orphaned pending task inputs: %w", err)
+	}
+	defer rows.Close()
+	var out []*types.TaskInput
+	for rows.Next() {
+		ti, err := scanTaskInput(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ti)
+	}
+	return out, rows.Err()
+}
+
 func (b *PostgresBackend) ClaimNextTaskInput(ctx context.Context, taskID string, runID string, executionID string) (*types.TaskInput, error) {
 	row := b.db.QueryRowContext(
 		ctx,

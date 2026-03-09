@@ -366,7 +366,7 @@ func (s *WorkerService) recoverOrphanedRun(ctx context.Context, run *types.Agent
 	}
 
 	if !attemptActive {
-		_ = s.markOriginTaskTerminalIfCurrentRun(ctx, run.ID)
+		_ = s.settleOriginTask(ctx, run.ID)
 		return true, true, nil
 	}
 	_, setErr := s.SetTaskResult(ctx, &pb.SetTaskResultRequest{
@@ -417,7 +417,7 @@ func (s *WorkerService) finalizeOrphanedRunDirect(
 		"recovery_mode":                        "direct_fallback",
 	})
 	_ = updateExecutionInstanceCounts(ctx, s.backend, attempt.RunID, -1)
-	return s.markOriginTaskTerminalIfCurrentRun(ctx, attempt.RunID)
+	return s.settleOriginTask(ctx, attempt.RunID)
 }
 
 func runExecutionStateIsTerminal(status types.RunExecutionStatus) bool {

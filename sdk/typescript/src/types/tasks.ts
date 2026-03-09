@@ -274,6 +274,7 @@ export interface TaskEventBatch {
   interaction?: RunInteraction;
   logs: TaskLogEntry[];
   run_events: RunEvent[];
+  outputs?: TaskOutput[];
   next_log_cursor: number;
   next_run_event_cursor: number;
 }
