@@ -225,6 +225,7 @@ func putDraftSession(draft *skills.Draft) *draftSession {
 	pruneDraftSessionsLocked(now)
 
 	if existing := draftsStore.m[draft.ID]; existing != nil {
+		existing.draft = draft
 		existing.lastTouched = now
 		return existing
 	}

@@ -194,17 +194,32 @@ export type TaskInputAction = 'approve' | 'reject';
 /** Kind of input the agent is waiting for. */
 export type TaskInputKind = 'approve_reject' | 'free_text';
 
-/** Parameters for submitting follow-up input to a task. */
-export interface SubmitTaskInputParams {
-  /** The follow-up message. Required unless action is provided. */
-  message?: string;
-  /** Structured action (approve/reject). When set, message defaults automatically. */
-  action?: TaskInputAction;
+/** Shared optional fields for task-input submissions. */
+interface SubmitTaskInputBase {
   /** Kind of input. Inferred from action if omitted. */
   kind?: TaskInputKind;
   /** Idempotency key to prevent duplicate submissions. */
   idempotencyKey?: string;
 }
+
+/**
+ * Parameters for submitting follow-up input to a task.
+ *
+ * At least one of `message` or `action` must be provided.
+ */
+export type SubmitTaskInputParams =
+  | (SubmitTaskInputBase & {
+      /** The follow-up message. */
+      message: string;
+      /** Structured action (approve/reject). When set, message defaults automatically. */
+      action?: TaskInputAction;
+    })
+  | (SubmitTaskInputBase & {
+      /** The follow-up message, optional when action is provided. */
+      message?: string;
+      /** Structured action (approve/reject). When set, message defaults automatically. */
+      action: TaskInputAction;
+    });
 
 /** Response from submitting task input. */
 export interface SubmitTaskInputResponse {

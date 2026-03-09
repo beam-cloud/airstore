@@ -223,7 +223,7 @@ func TestPutDraftSessionIsIdempotent(t *testing.T) {
 	s2 := putDraftSession(d2)
 
 	require.Same(t, s1, s2, "second put must return the session created by the first put")
-	require.Equal(t, "first", s1.draft.SkillContent, "original draft content must not be overwritten")
+	require.Equal(t, "second", s1.draft.SkillContent, "draft content must be updated with fresh data")
 }
 
 func TestListDraftsEmpty(t *testing.T) {

@@ -1246,10 +1246,18 @@ func (b *PostgresBackend) AppendTaskInput(ctx context.Context, input *types.Task
 	}
 	err := b.db.QueryRowContext(
 		ctx,
-		`INSERT INTO task_input (workspace_id, task_id, session_id, kind, action, message, idempotency_key, status,
+		`WITH _lock AS MATERIALIZED (
+		   SELECT pg_advisory_xact_lock(hashtext($2::text))
+		 ),
+		 _seq AS (
+		   SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq
+		     FROM task_input
+		    WHERE task_id = $2
+		 )
+		 INSERT INTO task_input (workspace_id, task_id, session_id, kind, action, message, idempotency_key, status,
 		   seq)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending',
-		   COALESCE((SELECT MAX(seq) FROM task_input WHERE task_id = $2), 0) + 1)
+		 SELECT $1, $2, $3, $4, $5, $6, $7, 'pending', next_seq
+		   FROM _lock, _seq
 		 ON CONFLICT (task_id, idempotency_key) DO NOTHING
 		 RETURNING id, seq, created_at`,
 		input.WorkspaceID, input.TaskID, input.SessionID,

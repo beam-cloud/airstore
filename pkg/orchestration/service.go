@@ -1625,14 +1625,18 @@ func (s *AgentService) persistUserInputLog(ctx context.Context, runID, message s
 
 func restartTaskPayload(basePayload map[string]any, terminalRun *types.AgentRun, message string) map[string]any {
 	payload := cloneAnyMap(basePayload)
-	payload["message"] = message
-	payload["prompt"] = message
+	if message != "" {
+		payload["message"] = message
+		payload["prompt"] = message
+	}
+
 	payload["session_id"] = terminalRun.SessionID
 	payload[types.OrchestrationOutboxPayloadResumeSession] = true
 	payload[types.OrchestrationOutboxPayloadResumeExcludeRunID] = terminalRun.ID
 	payload[types.OrchestrationOutboxPayloadResumeCheckpointRunID] = terminalRun.ID
 	payload["timeout_ms"] = terminalRun.TimeoutMs
 	payload[types.AgentExecutionMetaKeyInstanceKey] = executionInstanceKeyFromRun(terminalRun)
+
 	if terminalRun.AgentID != nil {
 		payload[types.AgentExecutionMetaKeyAgentID] = *terminalRun.AgentID
 	}
@@ -1647,6 +1651,7 @@ func restartTaskPayload(basePayload map[string]any, terminalRun *types.AgentRun,
 	if terminalRun.Model != nil {
 		payload[agentConfigKeyModel] = *terminalRun.Model
 	}
+
 	return payload
 }
 
