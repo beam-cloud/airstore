@@ -12,6 +12,7 @@ export interface AgentConfig {
   system_prompt?: string;
   system_prompt_mode?: string;
   workspace_dir?: string;
+  skills?: string[];
   [key: string]: unknown;
 }
 

@@ -219,10 +219,18 @@ func putDraftSession(draft *skills.Draft) *draftSession {
 		return nil
 	}
 	now := time.Now()
-	session := &draftSession{draft: draft, lastTouched: now}
 	draftsStore.Lock()
 	defer draftsStore.Unlock()
+
 	pruneDraftSessionsLocked(now)
+
+	if existing := draftsStore.m[draft.ID]; existing != nil {
+		existing.draft = draft
+		existing.lastTouched = now
+		return existing
+	}
+
+	session := &draftSession{draft: draft, lastTouched: now}
 	draftsStore.m[draft.ID] = session
 	return session
 }

@@ -30,6 +30,8 @@ const (
 	WorkerService_UpdateTaskState_FullMethodName      = "/worker.WorkerService/UpdateTaskState"
 	WorkerService_AllocateIP_FullMethodName           = "/worker.WorkerService/AllocateIP"
 	WorkerService_ReleaseIP_FullMethodName            = "/worker.WorkerService/ReleaseIP"
+	WorkerService_ClaimTaskInput_FullMethodName       = "/worker.WorkerService/ClaimTaskInput"
+	WorkerService_AckTaskInput_FullMethodName         = "/worker.WorkerService/AckTaskInput"
 	WorkerService_CreateTaskOutput_FullMethodName     = "/worker.WorkerService/CreateTaskOutput"
 	WorkerService_AppendTaskOutputRows_FullMethodName = "/worker.WorkerService/AppendTaskOutputRows"
 	WorkerService_FinalizeTaskOutput_FullMethodName   = "/worker.WorkerService/FinalizeTaskOutput"
@@ -53,6 +55,9 @@ type WorkerServiceClient interface {
 	// Network/IP management for sandboxes
 	AllocateIP(ctx context.Context, in *AllocateIPRequest, opts ...grpc.CallOption) (*AllocateIPResponse, error)
 	ReleaseIP(ctx context.Context, in *ReleaseIPRequest, opts ...grpc.CallOption) (*ReleaseIPResponse, error)
+	// Task input inbox (durable follow-up claims)
+	ClaimTaskInput(ctx context.Context, in *ClaimTaskInputRequest, opts ...grpc.CallOption) (*ClaimTaskInputResponse, error)
+	AckTaskInput(ctx context.Context, in *AckTaskInputRequest, opts ...grpc.CallOption) (*AckTaskInputResponse, error)
 	// Task outputs
 	CreateTaskOutput(ctx context.Context, in *CreateTaskOutputRequest, opts ...grpc.CallOption) (*CreateTaskOutputResponse, error)
 	AppendTaskOutputRows(ctx context.Context, in *AppendTaskOutputRowsRequest, opts ...grpc.CallOption) (*AppendTaskOutputRowsResponse, error)
@@ -166,6 +171,24 @@ func (c *workerServiceClient) ReleaseIP(ctx context.Context, in *ReleaseIPReques
 	return out, nil
 }
 
+func (c *workerServiceClient) ClaimTaskInput(ctx context.Context, in *ClaimTaskInputRequest, opts ...grpc.CallOption) (*ClaimTaskInputResponse, error) {
+	out := new(ClaimTaskInputResponse)
+	err := c.cc.Invoke(ctx, WorkerService_ClaimTaskInput_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workerServiceClient) AckTaskInput(ctx context.Context, in *AckTaskInputRequest, opts ...grpc.CallOption) (*AckTaskInputResponse, error) {
+	out := new(AckTaskInputResponse)
+	err := c.cc.Invoke(ctx, WorkerService_AckTaskInput_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *workerServiceClient) CreateTaskOutput(ctx context.Context, in *CreateTaskOutputRequest, opts ...grpc.CallOption) (*CreateTaskOutputResponse, error) {
 	out := new(CreateTaskOutputResponse)
 	err := c.cc.Invoke(ctx, WorkerService_CreateTaskOutput_FullMethodName, in, out, opts...)
@@ -211,6 +234,9 @@ type WorkerServiceServer interface {
 	// Network/IP management for sandboxes
 	AllocateIP(context.Context, *AllocateIPRequest) (*AllocateIPResponse, error)
 	ReleaseIP(context.Context, *ReleaseIPRequest) (*ReleaseIPResponse, error)
+	// Task input inbox (durable follow-up claims)
+	ClaimTaskInput(context.Context, *ClaimTaskInputRequest) (*ClaimTaskInputResponse, error)
+	AckTaskInput(context.Context, *AckTaskInputRequest) (*AckTaskInputResponse, error)
 	// Task outputs
 	CreateTaskOutput(context.Context, *CreateTaskOutputRequest) (*CreateTaskOutputResponse, error)
 	AppendTaskOutputRows(context.Context, *AppendTaskOutputRowsRequest) (*AppendTaskOutputRowsResponse, error)
@@ -254,6 +280,12 @@ func (UnimplementedWorkerServiceServer) AllocateIP(context.Context, *AllocateIPR
 }
 func (UnimplementedWorkerServiceServer) ReleaseIP(context.Context, *ReleaseIPRequest) (*ReleaseIPResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ReleaseIP not implemented")
+}
+func (UnimplementedWorkerServiceServer) ClaimTaskInput(context.Context, *ClaimTaskInputRequest) (*ClaimTaskInputResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ClaimTaskInput not implemented")
+}
+func (UnimplementedWorkerServiceServer) AckTaskInput(context.Context, *AckTaskInputRequest) (*AckTaskInputResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AckTaskInput not implemented")
 }
 func (UnimplementedWorkerServiceServer) CreateTaskOutput(context.Context, *CreateTaskOutputRequest) (*CreateTaskOutputResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CreateTaskOutput not implemented")
@@ -475,6 +507,42 @@ func _WorkerService_ReleaseIP_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _WorkerService_ClaimTaskInput_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ClaimTaskInputRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkerServiceServer).ClaimTaskInput(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkerService_ClaimTaskInput_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkerServiceServer).ClaimTaskInput(ctx, req.(*ClaimTaskInputRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _WorkerService_AckTaskInput_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AckTaskInputRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkerServiceServer).AckTaskInput(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkerService_AckTaskInput_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkerServiceServer).AckTaskInput(ctx, req.(*AckTaskInputRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _WorkerService_CreateTaskOutput_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CreateTaskOutputRequest)
 	if err := dec(in); err != nil {
@@ -579,6 +647,14 @@ var WorkerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReleaseIP",
 			Handler:    _WorkerService_ReleaseIP_Handler,
+		},
+		{
+			MethodName: "ClaimTaskInput",
+			Handler:    _WorkerService_ClaimTaskInput_Handler,
+		},
+		{
+			MethodName: "AckTaskInput",
+			Handler:    _WorkerService_AckTaskInput_Handler,
 		},
 		{
 			MethodName: "CreateTaskOutput",

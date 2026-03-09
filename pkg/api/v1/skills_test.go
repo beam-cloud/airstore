@@ -211,6 +211,21 @@ func TestChatDraftNotFound(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+func TestPutDraftSessionIsIdempotent(t *testing.T) {
+	draftsStore.Lock()
+	draftsStore.m = make(map[string]*draftSession)
+	draftsStore.Unlock()
+
+	d1 := &skills.Draft{ID: "dup-id", WorkspaceID: "ws-1", SkillContent: "first"}
+	d2 := &skills.Draft{ID: "dup-id", WorkspaceID: "ws-1", SkillContent: "second"}
+
+	s1 := putDraftSession(d1)
+	s2 := putDraftSession(d2)
+
+	require.Same(t, s1, s2, "second put must return the session created by the first put")
+	require.Equal(t, "second", s1.draft.SkillContent, "draft content must be updated with fresh data")
+}
+
 func TestListDraftsEmpty(t *testing.T) {
 	e := newTestEchoWithDrafts(t)
 

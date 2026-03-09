@@ -59,24 +59,27 @@ var (
 	runExecutionLogsChannel = "airstore:run_execution:logs:%s"     // runExecutionId (pub/sub)
 	runExecutionLogsBuffer  = "airstore:run_execution:logs_buf:%s" // runExecutionId
 
-	// Task queue keys (high-level task ingress)
+	// Orchestration streams
 	orchestrationTaskDispatchStream = "airstore:orchestration:task_dispatch:stream"
 	orchestrationTaskDispatchGroup  = "airstore:orchestration:task_dispatch:group"
 	orchestrationTaskDispatchDLQ    = "airstore:orchestration:task_dispatch:dlq"
 	orchestrationRunResultStream    = "airstore:orchestration:run_result:stream"
 	orchestrationRunResultGroup     = "airstore:orchestration:run_result:group"
 	orchestrationRunResultDLQ       = "airstore:orchestration:run_result:dlq"
-	agentAttemptEvents              = "airstore:agent:attempt:events"
-	agentRunEventsChannel           = "airstore:agent:run:%s:events"
-	agentRunEventsBuffer            = "airstore:agent:run:%s:events:buf"
-	agentRunRecoveryLock            = "airstore:agent:run:recovery:lock"
-	agentInstanceLock               = "airstore:agent:instance:lock:%s" // instanceKey
+
+	// Live update channels
+	workspaceLive         = "airstore:workspace:%d:live"
+	taskLive              = "airstore:task:%s:live"
+	agentAttemptEvents    = "airstore:agent:attempt:events"
+	agentRunEventsChannel = "airstore:agent:run:%s:events"
+	agentRunEventsBuffer  = "airstore:agent:run:%s:events:buf"
+	agentRunRecoveryLock  = "airstore:agent:run:recovery:lock"
+	agentInstanceLock     = "airstore:agent:instance:lock:%s" // instanceKey
 
 	// Terminal IO keys (pub/sub channels)
-	terminalInput       = "airstore:terminal:%s:input"        // taskId
-	terminalInputBuffer = "airstore:terminal:%s:input:buffer" // taskId
-	terminalOutput      = "airstore:terminal:%s:output"       // taskId
-	terminalCancel      = "airstore:terminal:%s:cancel"       // taskId
+	terminalInput  = "airstore:terminal:%s:input"  // taskId (wake signal)
+	terminalOutput = "airstore:terminal:%s:output" // taskId
+	terminalCancel = "airstore:terminal:%s:cancel" // taskId
 
 	// Session lease — exclusive ownership of an interactive session.
 	sessionLease      = "airstore:session:lease:%d:%s"      // workspaceId, sessionId
@@ -280,6 +283,18 @@ func (rk *redisKeys) OrchestrationRunResultDLQ() string {
 	return orchestrationRunResultDLQ
 }
 
+// --- Live update channels ---
+
+func (rk *redisKeys) WorkspaceLive(workspaceID uint) string {
+	return fmt.Sprintf(workspaceLive, workspaceID)
+}
+
+func (rk *redisKeys) TaskLive(taskID string) string {
+	return fmt.Sprintf(taskLive, taskID)
+}
+
+// --- Agent event channels ---
+
 func (rk *redisKeys) AgentAttemptEvents() string {
 	return agentAttemptEvents
 }
@@ -304,10 +319,6 @@ func (rk *redisKeys) AgentInstanceLock(instanceKey string) string {
 
 func (rk *redisKeys) TerminalInput(taskId string) string {
 	return fmt.Sprintf(terminalInput, taskId)
-}
-
-func (rk *redisKeys) TerminalInputBuffer(taskId string) string {
-	return fmt.Sprintf(terminalInputBuffer, taskId)
 }
 
 func (rk *redisKeys) TerminalOutput(taskId string) string {

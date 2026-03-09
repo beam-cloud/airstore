@@ -163,6 +163,65 @@ func (e OutputKind) BamlTypeName() string {
 	return "OutputKind"
 }
 
+type InputKind string
+
+const (
+	InputKindAPPROVE_REJECT InputKind = "APPROVE_REJECT"
+	InputKindFREE_TEXT      InputKind = "FREE_TEXT"
+)
+
+func (InputKind) Values() []InputKind {
+	return []InputKind{
+		InputKindAPPROVE_REJECT,
+		InputKindFREE_TEXT,
+	}
+}
+
+func (e InputKind) IsValid() bool {
+	for _, v := range e.Values() {
+		if e == v {
+			return true
+		}
+	}
+	return false
+}
+
+func (e InputKind) MarshalJSON() ([]byte, error) {
+	if !e.IsValid() {
+		return nil, fmt.Errorf("invalid InputKind: %q", e)
+	}
+	return json.Marshal(string(e))
+}
+
+func (e *InputKind) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	*e = InputKind(s)
+	if !e.IsValid() {
+		return fmt.Errorf("invalid InputKind: %q", s)
+	}
+	return nil
+}
+
+func (e *InputKind) Decode(holder *cffi.CFFIValueEnum, typeMap baml.TypeMap) {
+	name := holder.Name
+	if name.Name != "InputKind" || name.Namespace != cffi.CFFITypeNamespace_TYPES {
+		panic(fmt.Sprintf("expected types.InputKind, got %s.%s", string(name.Namespace.String()), string(name.Name)))
+	}
+	value := holder.Value
+	*e = InputKind(value)
+}
+
+func (e InputKind) Encode() (*cffi.HostValue, error) {
+	return baml.EncodeEnum("InputKind", string(e), false)
+}
+
+func (e InputKind) BamlTypeName() string {
+	return "InputKind"
+}
+
 type TurnOutcome string
 
 const (

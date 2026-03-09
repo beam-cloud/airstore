@@ -2,7 +2,9 @@ package apiv1
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/orchestration"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/labstack/echo/v4"
+	"github.com/rs/zerolog/log"
 )
 
 type WorkspaceTasksGroup struct {
@@ -32,10 +35,12 @@ func NewWorkspaceTasksGroup(routerGroup *echo.Group, agents *orchestration.Agent
 func (g *WorkspaceTasksGroup) registerRoutes() {
 	g.routerGroup.POST("", g.CreateTask)
 	g.routerGroup.GET("", g.ListTasks)
+	g.routerGroup.GET("/stream", g.StreamWorkspaceTasks)
 	g.routerGroup.GET("/:task_id", g.GetTask)
 	g.routerGroup.PATCH("/:task_id", g.UpdateTask)
 	g.routerGroup.GET("/:task_id/logs", g.ListTaskLogs)
 	g.routerGroup.GET("/:task_id/stream", g.StreamTaskEvents)
+	g.routerGroup.POST("/:task_id/input", g.SubmitInput)
 	g.routerGroup.POST("/:task_id/cancel", g.CancelTask)
 	g.routerGroup.POST("/:task_id/archive", g.ArchiveTask)
 
@@ -111,6 +116,70 @@ type listTaskLogsResponse struct {
 	NextCursor int64                 `json:"next_cursor"`
 }
 
+// SSE event names — keep in sync with the client-side SSE constants in realtime.ts.
+const (
+	sseEventSnapshot  = "snapshot"
+	sseEventBatch     = "batch"
+	sseEventHeartbeat = "heartbeat"
+	sseEventError     = "error"
+)
+
+const sseWriteDeadline = 5 * time.Minute
+const sseHeartbeatInterval = 15 * time.Second
+const ssePollInterval = 2 * time.Second
+
+type taskStreamEvent struct {
+	Event string `json:"event"`
+	Data  any    `json:"data,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
+type sseWriter struct {
+	w  *echo.Response
+	f  http.Flusher
+	rc *http.ResponseController
+}
+
+func newSSEWriter(c echo.Context) (*sseWriter, error) {
+	resp := c.Response()
+	f, ok := resp.Writer.(http.Flusher)
+	if !ok {
+		return nil, fmt.Errorf("streaming not supported")
+	}
+	resp.Header().Set("Content-Type", "text/event-stream")
+	resp.Header().Set("Cache-Control", "no-cache")
+	resp.Header().Set("Connection", "keep-alive")
+	resp.WriteHeader(http.StatusOK)
+
+	sw := &sseWriter{w: resp, f: f, rc: http.NewResponseController(resp)}
+	_ = sw.rc.SetWriteDeadline(time.Now().Add(sseWriteDeadline))
+	return sw, nil
+}
+
+func (s *sseWriter) send(event string, data any) error {
+	payload, err := json.Marshal(taskStreamEvent{Event: event, Data: data})
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(s.w.Writer, "data: %s\n\n", payload); err != nil {
+		return err
+	}
+	s.f.Flush()
+	_ = s.rc.SetWriteDeadline(time.Now().Add(sseWriteDeadline))
+	return nil
+}
+
+func (s *sseWriter) sendError(msg string) {
+	_ = s.send(sseEventError, map[string]string{"message": msg})
+}
+
+func wantsSSE(c echo.Context) bool {
+	if c.QueryParam("stream") == "sse" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(c.Request().Header.Get("Accept")), "text/event-stream")
+}
+
 func (g *WorkspaceTasksGroup) ListTasks(c echo.Context) error {
 	if g.agents == nil {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "task service unavailable")
@@ -140,8 +209,8 @@ func (g *WorkspaceTasksGroup) ListTasks(c echo.Context) error {
 	}
 
 	filter := types.AgentTaskListFilter{
-		AgentID: strPtrMaybeQuery(c.QueryParam("agent_id")),
-		States:  states,
+		AgentID:       strPtrMaybeQuery(c.QueryParam("agent_id")),
+		States:        states,
 		CreatedAfter:  createdAfter,
 		CreatedBefore: createdBefore,
 		Limit:         limit,
@@ -189,6 +258,9 @@ func (g *WorkspaceTasksGroup) ListTaskLogs(c echo.Context) error {
 }
 
 func (g *WorkspaceTasksGroup) StreamTaskEvents(c echo.Context) error {
+	if wantsSSE(c) {
+		return g.streamTaskEventsSSE(c)
+	}
 	if g.agents == nil {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "task service unavailable")
 	}
@@ -226,6 +298,214 @@ func (g *WorkspaceTasksGroup) StreamTaskEvents(c echo.Context) error {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 	return SuccessResponse(c, batch)
+}
+
+func (g *WorkspaceTasksGroup) StreamWorkspaceTasks(c echo.Context) error {
+	if g.agents == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "task service unavailable")
+	}
+	workspaceID, err := requireWorkspaceID(c)
+	if err != nil {
+		return err
+	}
+
+	ctx := c.Request().Context()
+	liveCh, cleanup, err := g.agents.SubscribeWorkspaceLive(ctx, workspaceID)
+	if err != nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "workspace live stream unavailable")
+	}
+	defer cleanup()
+
+	writer, err := newSSEWriter(c)
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+
+	emit := func(event string) error {
+		batch, err := g.agents.WorkspaceLiveBatch(ctx, workspaceID)
+		if err != nil {
+			return err
+		}
+		return writer.send(event, batch)
+	}
+	if err := emit(sseEventSnapshot); err != nil {
+		writer.sendError(err.Error())
+		return nil
+	}
+
+	heartbeat := time.NewTicker(sseHeartbeatInterval)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-heartbeat.C:
+			if err := writer.send(sseEventHeartbeat, nil); err != nil {
+				return nil
+			}
+		case _, ok := <-liveCh:
+			if !ok {
+				return nil
+			}
+			if err := emit(sseEventBatch); err != nil {
+				return nil
+			}
+		}
+	}
+}
+
+func (g *WorkspaceTasksGroup) streamTaskEventsSSE(c echo.Context) error {
+	if g.agents == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "task service unavailable")
+	}
+	workspaceID, err := requireWorkspaceID(c)
+	if err != nil {
+		return err
+	}
+
+	taskID := c.Param("task_id")
+	logCursor, err := parseInt64Query(c.QueryParam("log_cursor"))
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid log_cursor")
+	}
+	runEventCursor, err := parseOffsetCursor(c.QueryParam("run_event_cursor"))
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid run_event_cursor")
+	}
+	cursorRunID := strings.TrimSpace(c.QueryParam("cursor_run_id"))
+
+	ctx := c.Request().Context()
+	taskLiveCh, taskLiveCleanup, err := g.agents.SubscribeTaskLive(ctx, taskID)
+	if err != nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "task live stream unavailable")
+	}
+	defer taskLiveCleanup()
+
+	writer, err := newSSEWriter(c)
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+
+	var runEventCh <-chan struct{}
+	var runEventCleanup func()
+	currentRunID := ""
+
+	resetSubscriptions := func(batch *orchestration.TaskEventBatch) bool {
+		nextRunID := ""
+		if batch != nil && batch.RunID != nil {
+			nextRunID = strings.TrimSpace(*batch.RunID)
+		}
+		if nextRunID == currentRunID {
+			return false
+		}
+		if runEventCleanup != nil {
+			runEventCleanup()
+			runEventCleanup = nil
+		}
+		runEventCh = nil
+
+		if nextRunID != "" {
+			ch, cleanup, err := g.agents.SubscribeRunEvents(ctx, nextRunID)
+			if err != nil {
+				log.Debug().Err(err).Str("run_id", nextRunID).Msg("failed to subscribe to run events")
+			} else {
+				runEventCh = ch
+				runEventCleanup = cleanup
+			}
+		}
+
+		currentRunID = nextRunID
+		return true
+	}
+	defer func() {
+		if runEventCleanup != nil {
+			runEventCleanup()
+		}
+	}()
+
+	loadBatch := func() (*orchestration.TaskEventBatch, error) {
+		batch, err := g.agents.StreamTaskEvents(
+			ctx,
+			workspaceID,
+			taskID,
+			logCursor,
+			runEventCursor,
+			cursorRunID,
+		)
+		if err != nil {
+			return nil, err
+		}
+		logCursor = batch.NextLogCursor
+		runEventCursor = batch.NextRunEventCursor
+		if batch.RunID != nil {
+			cursorRunID = strings.TrimSpace(*batch.RunID)
+		} else {
+			cursorRunID = ""
+		}
+		return batch, nil
+	}
+
+	emit := func(event string) error {
+		batch, err := loadBatch()
+		if err != nil {
+			return err
+		}
+		if resetSubscriptions(batch) {
+			// The task switched runs or executions. Fetch once more after
+			// rewiring subscriptions so we don't miss logs/events that landed
+			// during the handoff window.
+			catchup, err := loadBatch()
+			if err != nil {
+				return err
+			}
+			batch = catchup
+			_ = resetSubscriptions(batch)
+		}
+		return writer.send(event, batch)
+	}
+	if err := emit(sseEventSnapshot); err != nil {
+		writer.sendError(err.Error())
+		return nil
+	}
+
+	heartbeat := time.NewTicker(sseHeartbeatInterval)
+	defer heartbeat.Stop()
+
+	poll := time.NewTicker(ssePollInterval)
+	defer poll.Stop()
+
+	emitBatch := func() error { return emit(sseEventBatch) }
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-heartbeat.C:
+			if err := writer.send(sseEventHeartbeat, nil); err != nil {
+				return nil
+			}
+		case <-poll.C:
+			if err := emitBatch(); err != nil {
+				return nil
+			}
+		case _, ok := <-taskLiveCh:
+			if !ok {
+				return nil
+			}
+			if err := emitBatch(); err != nil {
+				return nil
+			}
+		case _, ok := <-runEventCh:
+			if !ok {
+				runEventCh = nil
+				continue
+			}
+			if err := emitBatch(); err != nil {
+				return nil
+			}
+		}
+	}
 }
 
 func (g *WorkspaceTasksGroup) CancelTask(c echo.Context) error {
@@ -537,6 +817,56 @@ func (g *WorkspaceTasksGroup) scheduleError(c echo.Context, err error) error {
 	return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 }
 
+type submitTaskInputRequest struct {
+	Message        string                 `json:"message"`
+	Action         *types.TaskInputAction `json:"action,omitempty"`
+	Kind           types.InputKind        `json:"kind,omitempty"`
+	IdempotencyKey string                 `json:"idempotency_key,omitempty"`
+}
+
+func (g *WorkspaceTasksGroup) SubmitInput(c echo.Context) error {
+	if g.agents == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "task service unavailable")
+	}
+	workspaceID, err := requireWorkspaceID(c)
+	if err != nil {
+		return err
+	}
+	taskID := strings.TrimSpace(c.Param("task_id"))
+	if taskID == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "task_id is required")
+	}
+
+	var req submitTaskInputRequest
+	if err := decodeStrictBody(c, &req); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
+	}
+
+	task, err := g.agents.SubmitTaskInput(
+		c.Request().Context(),
+		workspaceID,
+		taskID,
+		req.Kind,
+		req.Action,
+		req.Message,
+		req.IdempotencyKey,
+	)
+	if err != nil {
+		var taskErr *types.ErrAgentTaskNotFound
+		if errors.As(err, &taskErr) {
+			return ErrorResponse(c, http.StatusNotFound, "task not found")
+		}
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+
+	return c.JSON(http.StatusOK, Response{
+		Success: true,
+		Data: map[string]any{
+			"task": task,
+		},
+	})
+}
+
 func (g *WorkspaceTasksGroup) scheduleResp(ctx context.Context, st *types.ScheduledTask) map[string]any {
 	agentName := ""
 	if agent, _ := g.agents.GetAgent(ctx, st.WorkspaceID, st.AgentID); agent != nil {
@@ -547,17 +877,17 @@ func (g *WorkspaceTasksGroup) scheduleResp(ctx context.Context, st *types.Schedu
 		skillPaths = []string{}
 	}
 	resp := map[string]any{
-		"external_id":  st.ExternalID,
-		"agent_id":     st.AgentID,
-		"agent_name":   agentName,
-		"cron_expr":    st.CronExpr,
-		"timezone":     st.Timezone,
-		"prompt":       st.Prompt,
-		"skill_paths":  skillPaths,
-		"active":       st.Active,
-		"next_run_at":  st.NextRunAt.Format(time.RFC3339),
-		"created_at":   st.CreatedAt.Format(time.RFC3339),
-		"updated_at":   st.UpdatedAt.Format(time.RFC3339),
+		"external_id": st.ExternalID,
+		"agent_id":    st.AgentID,
+		"agent_name":  agentName,
+		"cron_expr":   st.CronExpr,
+		"timezone":    st.Timezone,
+		"prompt":      st.Prompt,
+		"skill_paths": skillPaths,
+		"active":      st.Active,
+		"next_run_at": st.NextRunAt.Format(time.RFC3339),
+		"created_at":  st.CreatedAt.Format(time.RFC3339),
+		"updated_at":  st.UpdatedAt.Format(time.RFC3339),
 	}
 	if st.LastRunAt != nil {
 		resp["last_run_at"] = st.LastRunAt.Format(time.RFC3339)

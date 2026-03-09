@@ -17,7 +17,7 @@ const agentTaskSelect = `
 	SELECT id, workspace_id, agent_id, agent_name, queue_mode, state,
 	       idempotency_key, payload_json, routing_json, parent_envelope_id, target_run_id,
 	       accepted_at, queued_at, dispatched_at, deadline, dropped_reason, priority, budget_usd, cost_usd, archived_at,
-	       created_at, updated_at, wake_at, wake_reason, wake_count
+	       created_at, updated_at, wake_at, wake_reason, wake_count, input_kind
 	FROM (
 		SELECT
 			t.id,
@@ -45,7 +45,8 @@ const agentTaskSelect = `
 			t.updated_at,
 			t.wake_at,
 			t.wake_reason,
-			t.wake_count
+			t.wake_count,
+			t.input_kind
 		FROM agent_task t
 		LEFT JOIN agent_profile ap ON ap.id = t.agent_id
 	) task_view
@@ -595,6 +596,7 @@ func (b *PostgresBackend) scanAgentTask(row scanner) (*types.AgentTask, error) {
 	var archivedAt sql.NullTime
 	var wakeAt sql.NullTime
 	var wakeReason sql.NullString
+	var inputKind sql.NullString
 	err := row.Scan(
 		&task.ID,
 		&task.WorkspaceID,
@@ -621,6 +623,7 @@ func (b *PostgresBackend) scanAgentTask(row scanner) (*types.AgentTask, error) {
 		&wakeAt,
 		&wakeReason,
 		&task.WakeCount,
+		&inputKind,
 	)
 	if err == sql.ErrNoRows {
 		return nil, &types.ErrAgentTaskNotFound{}
@@ -666,6 +669,9 @@ func (b *PostgresBackend) scanAgentTask(row scanner) (*types.AgentTask, error) {
 	}
 	if wakeReason.Valid {
 		task.WakeReason = &wakeReason.String
+	}
+	if inputKind.Valid {
+		task.InputKind = types.InputKind(inputKind.String)
 	}
 	task.PayloadJSON = unmarshalJSONMap(payloadJSON)
 	task.RoutingJSON = unmarshalJSONMap(routingJSON)
@@ -847,6 +853,7 @@ func (b *PostgresBackend) ClaimQueuedTaskForDispatch(
 		    dispatched_at = CURRENT_TIMESTAMP,
 		    wake_at = NULL,
 		    wake_reason = NULL,
+		    input_kind = NULL,
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = $1
 		  AND (
@@ -890,6 +897,7 @@ func (b *PostgresBackend) UpdateTaskState(ctx context.Context, taskID string, st
 		    END,
 		    dropped_reason = CASE WHEN $2::agent_task_state = 'dropped'::agent_task_state THEN $4 ELSE dropped_reason END,
 		    target_run_id = COALESCE($5::uuid, target_run_id),
+		    input_kind = NULL,
 		    wake_at = CASE WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN wake_at ELSE NULL END,
 		    wake_reason = CASE WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN wake_reason ELSE NULL END,
 		    wake_count = CASE WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN wake_count ELSE 0 END,
@@ -914,9 +922,15 @@ func (b *PostgresBackend) UpdateTaskStateIfCurrentRun(
 	state types.AgentTaskState,
 	droppedReason *string,
 	targetRunID *string,
+	inputKind types.InputKind,
 ) (bool, error) {
 	now := time.Now()
-	baseArgs := []any{taskID, state, now, droppedReason, targetRunID}
+	var inputKindVal *string
+	if state == types.AgentTaskStateWaiting && inputKind != "" {
+		s := string(inputKind)
+		inputKindVal = &s
+	}
+	baseArgs := []any{taskID, state, now, droppedReason, targetRunID, inputKindVal}
 	expectedRunID = strings.TrimSpace(expectedRunID)
 
 	query := `
@@ -930,6 +944,7 @@ func (b *PostgresBackend) UpdateTaskStateIfCurrentRun(
 		    END,
 		    dropped_reason = CASE WHEN $2::agent_task_state = 'dropped'::agent_task_state THEN $4 ELSE dropped_reason END,
 		    target_run_id = COALESCE($5::uuid, target_run_id),
+		    input_kind = CASE WHEN $2::agent_task_state = 'waiting'::agent_task_state THEN COALESCE($6, input_kind) ELSE $6 END,
 		    wake_at = CASE WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN wake_at ELSE NULL END,
 		    wake_reason = CASE WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN wake_reason ELSE NULL END,
 		    wake_count = CASE WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN wake_count ELSE 0 END,
@@ -942,7 +957,7 @@ func (b *PostgresBackend) UpdateTaskStateIfCurrentRun(
 		query += " AND target_run_id IS NULL"
 		args = baseArgs
 	} else {
-		query += " AND target_run_id = $6::uuid"
+		query += " AND target_run_id = $7::uuid"
 		args = append(baseArgs, expectedRunID)
 	}
 
@@ -975,6 +990,7 @@ func (b *PostgresBackend) SleepTaskWithOutbox(
 		    wake_reason = $3,
 		    wake_count = wake_count + 1,
 		    dispatched_at = NULL,
+		    input_kind = NULL,
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = $1
 		  AND target_run_id = $4::uuid
@@ -1003,6 +1019,141 @@ func (b *PostgresBackend) SleepTaskWithOutbox(
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("commit sleep task tx: %w", err)
 	}
+	return true, nil
+}
+
+func (b *PostgresBackend) RequeueTaskWithOutboxIfCurrentRun(
+	ctx context.Context,
+	task *types.AgentTask,
+	expectedRunID string,
+	outboxEvent *types.OrchestrationOutboxEvent,
+) (bool, error) {
+	if task == nil {
+		return false, fmt.Errorf("task is required")
+	}
+	expectedRunID = strings.TrimSpace(expectedRunID)
+	if expectedRunID == "" {
+		return false, fmt.Errorf("expected run id is required")
+	}
+
+	payloadJSON, err := marshalJSONMap(task.PayloadJSON)
+	if err != nil {
+		return false, fmt.Errorf("marshal task payload: %w", err)
+	}
+	routingJSON, err := marshalJSONMap(task.RoutingJSON)
+	if err != nil {
+		return false, fmt.Errorf("marshal task routing: %w", err)
+	}
+	if strings.TrimSpace(task.Priority) == "" {
+		task.Priority = string(types.AgentTaskPriorityNormal)
+	}
+
+	now := time.Now()
+	tx, err := b.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin requeue task tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var queuedAt time.Time
+	if err := tx.QueryRowContext(
+		ctx,
+		`UPDATE agent_task
+		    SET payload_json = $2,
+		        routing_json = $3,
+		        deadline = $4,
+		        priority = $5,
+		        budget_usd = $6,
+		        cost_usd = $7,
+		        state = 'queued'::agent_task_state,
+		        queued_at = CURRENT_TIMESTAMP,
+		        dispatched_at = NULL,
+		        dropped_reason = NULL,
+		        target_run_id = NULL,
+		        input_kind = NULL,
+		        wake_at = NULL,
+		        wake_reason = NULL,
+		        wake_count = 0,
+		        updated_at = CURRENT_TIMESTAMP
+		  WHERE id = $1
+		    AND target_run_id = $8::uuid
+		  RETURNING queued_at, updated_at`,
+		task.ID,
+		payloadJSON,
+		routingJSON,
+		task.Deadline,
+		task.Priority,
+		task.BudgetUSD,
+		task.CostUSD,
+		expectedRunID,
+	).Scan(&queuedAt, &task.UpdatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, fmt.Errorf("requeue task for dispatch: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE orchestration_outbox
+		SET published_at = CURRENT_TIMESTAMP,
+		    last_error = 'superseded_by_followup',
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE published_at IS NULL
+		  AND payload_json->>'task_id' = $1
+	`, task.ID); err != nil {
+		return false, fmt.Errorf("cancel superseded outbox events for task: %w", err)
+	}
+
+	if outboxEvent == nil {
+		outboxEvent = &types.OrchestrationOutboxEvent{
+			EventType: types.OrchestrationOutboxEventTypeTaskDispatch,
+			DedupeKey: fmt.Sprintf("task_dispatch:%s:resume:%d", task.ID, now.UnixNano()),
+			PayloadJSON: map[string]any{
+				types.OrchestrationOutboxPayloadTaskID: task.ID,
+			},
+			AvailableAt: now,
+		}
+	}
+	if outboxEvent.EventType == "" {
+		outboxEvent.EventType = types.OrchestrationOutboxEventTypeTaskDispatch
+	}
+	if strings.TrimSpace(outboxEvent.DedupeKey) == "" {
+		outboxEvent.DedupeKey = fmt.Sprintf("task_dispatch:%s:resume:%d", task.ID, now.UnixNano())
+	}
+	if outboxEvent.AvailableAt.IsZero() {
+		outboxEvent.AvailableAt = now
+	}
+	if outboxEvent.PayloadJSON == nil {
+		outboxEvent.PayloadJSON = map[string]any{}
+	}
+	if _, ok := outboxEvent.PayloadJSON[types.OrchestrationOutboxPayloadTaskID]; !ok {
+		outboxEvent.PayloadJSON[types.OrchestrationOutboxPayloadTaskID] = task.ID
+	}
+	outboxPayload, err := marshalJSONMap(outboxEvent.PayloadJSON)
+	if err != nil {
+		return false, fmt.Errorf("marshal outbox payload: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO orchestration_outbox (event_type, dedupe_key, payload_json, available_at)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (dedupe_key) DO NOTHING
+	`, outboxEvent.EventType, outboxEvent.DedupeKey, outboxPayload, outboxEvent.AvailableAt); err != nil {
+		return false, fmt.Errorf("enqueue requeue outbox event: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit requeue task tx: %w", err)
+	}
+
+	task.State = types.AgentTaskStateQueued
+	task.TargetRunID = nil
+	task.InputKind = ""
+	task.QueuedAt = &queuedAt
+	task.DispatchedAt = nil
+	task.DroppedReason = nil
+	task.WakeAt = nil
+	task.WakeReason = nil
+	task.WakeCount = 0
 	return true, nil
 }
 
@@ -1083,6 +1234,245 @@ func (b *PostgresBackend) UpdateTaskCost(ctx context.Context, taskID string, cos
 		return &types.ErrAgentTaskNotFound{ID: taskID}
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Task input inbox (durable follow-up inputs)
+// ---------------------------------------------------------------------------
+
+func (b *PostgresBackend) AppendTaskInput(ctx context.Context, input *types.TaskInput) error {
+	if input == nil {
+		return fmt.Errorf("input is required")
+	}
+	err := b.db.QueryRowContext(
+		ctx,
+		`WITH _lock AS MATERIALIZED (
+		   SELECT pg_advisory_xact_lock(hashtext($2::text))
+		 ),
+		 _seq AS (
+		   SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq
+		     FROM task_input
+		    WHERE task_id = $2::uuid
+		 )
+		 INSERT INTO task_input (workspace_id, task_id, session_id, kind, action, message, idempotency_key, status,
+		   seq)
+		 SELECT $1::bigint, $2::uuid, $3, $4, $5, $6, $7, 'pending', next_seq
+		   FROM _lock, _seq
+		 ON CONFLICT (task_id, idempotency_key) DO NOTHING
+		 RETURNING id, seq, created_at`,
+		input.WorkspaceID, input.TaskID, input.SessionID,
+		input.Kind, input.Action, input.Message, input.IdempotencyKey,
+	).Scan(&input.ID, &input.Seq, &input.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil // idempotency conflict — already exists
+	}
+	if err != nil {
+		return fmt.Errorf("append task input: %w", err)
+	}
+	input.Status = types.TaskInputStatusPending
+	return nil
+}
+
+func (b *PostgresBackend) ListPendingTaskInputs(ctx context.Context, taskID string, limit int) ([]*types.TaskInput, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := b.db.QueryContext(
+		ctx,
+		`SELECT id, workspace_id, task_id, session_id, seq, kind, action, message,
+		        idempotency_key, status, claimed_by_run_id, claimed_by_execution_id,
+		        created_at, claimed_at, consumed_at
+		   FROM task_input
+		  WHERE task_id = $1::uuid AND status = 'pending'
+		  ORDER BY seq ASC
+		  LIMIT $2`,
+		taskID, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list pending task inputs: %w", err)
+	}
+	defer rows.Close()
+	var out []*types.TaskInput
+	for rows.Next() {
+		ti, err := scanTaskInput(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ti)
+	}
+	return out, rows.Err()
+}
+
+func (b *PostgresBackend) ListOrphanedPendingInputs(ctx context.Context, maxAge time.Duration, limit int) ([]*types.TaskInput, error) {
+	if maxAge <= 0 {
+		maxAge = 30 * time.Second
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	maxAgeSeconds := int64(maxAge / time.Second)
+	if maxAgeSeconds <= 0 {
+		maxAgeSeconds = 1
+	}
+	rows, err := b.db.QueryContext(
+		ctx,
+		`SELECT id, workspace_id, task_id, session_id, seq, kind, action, message,
+		        idempotency_key, status, claimed_by_run_id, claimed_by_execution_id,
+		        created_at, claimed_at, consumed_at
+		   FROM task_input
+		  WHERE status = 'pending'
+		    AND created_at < CURRENT_TIMESTAMP - ($1 * interval '1 second')
+		  ORDER BY created_at ASC
+		  LIMIT $2`,
+		maxAgeSeconds,
+		limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list orphaned pending task inputs: %w", err)
+	}
+	defer rows.Close()
+	var out []*types.TaskInput
+	for rows.Next() {
+		ti, err := scanTaskInput(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ti)
+	}
+	return out, rows.Err()
+}
+
+func (b *PostgresBackend) ClaimNextTaskInput(ctx context.Context, taskID string, runID string, executionID string) (*types.TaskInput, error) {
+	row := b.db.QueryRowContext(
+		ctx,
+		`UPDATE task_input
+		    SET status = 'claimed',
+		        claimed_by_run_id = $2::uuid,
+		        claimed_by_execution_id = $3,
+		        claimed_at = CURRENT_TIMESTAMP
+		  WHERE id = (
+		    SELECT id FROM task_input
+		     WHERE task_id = $1::uuid AND status = 'pending'
+		     ORDER BY seq ASC
+		     LIMIT 1
+		     FOR UPDATE SKIP LOCKED
+		  )
+		  RETURNING id, workspace_id, task_id, session_id, seq, kind, action, message,
+		            idempotency_key, status, claimed_by_run_id, claimed_by_execution_id,
+		            created_at, claimed_at, consumed_at`,
+		taskID, runID, executionID,
+	)
+	ti, err := scanTaskInput(row)
+	if err == sql.ErrNoRows {
+		return nil, nil // no pending input
+	}
+	if err != nil {
+		return nil, fmt.Errorf("claim next task input: %w", err)
+	}
+	return ti, nil
+}
+
+func (b *PostgresBackend) ConsumeOldestPendingInput(ctx context.Context, taskID string) (string, error) {
+	var message string
+	err := b.db.QueryRowContext(ctx,
+		`UPDATE task_input
+		    SET status = 'consumed', consumed_at = CURRENT_TIMESTAMP
+		  WHERE id = (
+		    SELECT id FROM task_input
+		     WHERE task_id = $1::uuid AND status = 'pending'
+		     ORDER BY seq ASC LIMIT 1
+		     FOR UPDATE SKIP LOCKED
+		  )
+		  RETURNING message`,
+		taskID,
+	).Scan(&message)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("consume oldest pending input: %w", err)
+	}
+	return strings.TrimSpace(message), nil
+}
+
+func (b *PostgresBackend) AckTaskInputConsumed(ctx context.Context, inputID string) error {
+	_, err := b.db.ExecContext(
+		ctx,
+		`UPDATE task_input
+		    SET status = 'consumed',
+		        consumed_at = CURRENT_TIMESTAMP
+		  WHERE id = $1::uuid AND status = 'claimed'`,
+		inputID,
+	)
+	if err != nil {
+		return fmt.Errorf("ack task input consumed: %w", err)
+	}
+	return nil
+}
+
+func (b *PostgresBackend) ReleaseStaleTaskInputClaims(ctx context.Context, runID string) error {
+	_, err := b.db.ExecContext(
+		ctx,
+		`UPDATE task_input
+		    SET status = 'pending',
+		        claimed_by_run_id = NULL,
+		        claimed_by_execution_id = NULL,
+		        claimed_at = NULL
+		  WHERE claimed_by_run_id = $1::uuid AND status = 'claimed'`,
+		runID,
+	)
+	if err != nil {
+		return fmt.Errorf("release stale task input claims: %w", err)
+	}
+	return nil
+}
+
+func (b *PostgresBackend) CountPendingTaskInputs(ctx context.Context, taskID string) (int, error) {
+	var count int
+	err := b.db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM task_input WHERE task_id = $1::uuid AND status = 'pending'`,
+		taskID,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count pending task inputs: %w", err)
+	}
+	return count, nil
+}
+
+func scanTaskInput(row scanner) (*types.TaskInput, error) {
+	ti := &types.TaskInput{}
+	var action sql.NullString
+	var claimedByRunID sql.NullString
+	var claimedByExecID sql.NullString
+	var claimedAt sql.NullTime
+	var consumedAt sql.NullTime
+	err := row.Scan(
+		&ti.ID, &ti.WorkspaceID, &ti.TaskID, &ti.SessionID, &ti.Seq,
+		&ti.Kind, &action, &ti.Message,
+		&ti.IdempotencyKey, &ti.Status, &claimedByRunID, &claimedByExecID,
+		&ti.CreatedAt, &claimedAt, &consumedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if action.Valid {
+		a := types.TaskInputAction(action.String)
+		ti.Action = &a
+	}
+	if claimedByRunID.Valid {
+		ti.ClaimedByRunID = &claimedByRunID.String
+	}
+	if claimedByExecID.Valid {
+		ti.ClaimedByExecID = &claimedByExecID.String
+	}
+	if claimedAt.Valid {
+		ti.ClaimedAt = &claimedAt.Time
+	}
+	if consumedAt.Valid {
+		ti.ConsumedAt = &consumedAt.Time
+	}
+	return ti, nil
 }
 
 func scanOrchestrationOutboxEvent(row scanner) (*types.OrchestrationOutboxEvent, error) {
@@ -3298,6 +3688,11 @@ func (b *PostgresBackend) DeleteScheduledTask(ctx context.Context, workspaceID u
 		return &types.ErrScheduledTaskNotFound{ExternalID: externalID}
 	}
 	return nil
+}
+
+func (b *PostgresBackend) DeleteScheduledTasksByAgent(ctx context.Context, workspaceID uint, agentID string) error {
+	_, err := b.db.ExecContext(ctx, `DELETE FROM scheduled_task WHERE workspace_id = $1 AND agent_id = $2`, workspaceID, agentID)
+	return err
 }
 
 func (b *PostgresBackend) ListDueScheduledTasks(ctx context.Context, now time.Time, limit int) ([]*types.ScheduledTask, error) {

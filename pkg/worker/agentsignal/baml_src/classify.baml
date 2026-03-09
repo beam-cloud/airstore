@@ -3,19 +3,37 @@ enum TurnOutcome {
   NEEDS_INPUT    @description("The agent is blocked. It asked a question, requested clarification, presented options to choose from, or otherwise cannot proceed without user input.")
 }
 
-function ClassifyTurn(message: string) -> TurnOutcome {
+enum InputKind {
+  APPROVE_REJECT @description("Binary approval or confirmation decision: yes/no, proceed/cancel, approve/reject, should I go ahead, do you want me to, etc.")
+  FREE_TEXT      @description("Open-ended input: needs information, clarification, a choice among many options, or detailed instructions.")
+}
+
+class TurnClassification {
+  outcome TurnOutcome
+  input_kind InputKind? @description("Only set when outcome is NEEDS_INPUT. Indicates whether the agent needs a simple approve/reject or free-text input.")
+}
+
+function ClassifyTurn(message: string) -> TurnClassification {
   client TurnClassifier
   prompt #"
-    An AI agent just completed a turn. Based on its final message, determine
-    whether the agent is done (COMPLETE) or needs a response from the user
-    (NEEDS_INPUT) before it can continue.
+    An AI agent just completed a turn. Based on its final message, determine:
+    1. Whether the agent is done (COMPLETE) or needs user input (NEEDS_INPUT).
+    2. If NEEDS_INPUT, whether the input is a binary approval/confirmation
+       (APPROVE_REJECT) or requires free-text information (FREE_TEXT).
 
-    NEEDS_INPUT examples:
-    - Asks a question ("Which option do you prefer?")
-    - Requests missing information ("I need the API key to proceed")
-    - Presents choices and waits for selection
-    - Asks for confirmation ("Should I go ahead and deploy?")
-    - Explicitly says it's waiting ("Let me know when you're ready")
+    NEEDS_INPUT + APPROVE_REJECT examples:
+    - "Should I go ahead and deploy this?"
+    - "Do you want me to proceed with option A?"
+    - "Ready to merge — shall I create the PR?"
+    - "I can delete these files. Should I proceed?"
+    - "Would you like me to continue?"
+
+    NEEDS_INPUT + FREE_TEXT examples:
+    - "Which option do you prefer? A, B, or C?"
+    - "I need the API key to proceed"
+    - "What email address should I use?"
+    - "Could you clarify what you mean by X?"
+    - "Let me know when you're ready"
 
     COMPLETE examples:
     - Delivers a final result ("Here's the report...")

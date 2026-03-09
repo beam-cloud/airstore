@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/common"
@@ -304,11 +305,92 @@ func (s *OrchestrationStore) PublishRunEvent(ctx context.Context, runID string, 
 	return err
 }
 
+func (s *OrchestrationStore) PublishWorkspaceLive(ctx context.Context, workspaceID uint) error {
+	if s == nil || s.redis == nil {
+		return nil
+	}
+	return s.redis.Publish(ctx, common.Keys.WorkspaceLive(workspaceID), []byte("live")).Err()
+}
+
+func (s *OrchestrationStore) SubscribeWorkspaceLive(ctx context.Context, workspaceID uint) (<-chan struct{}, func(), error) {
+	return s.subscribeSignals(ctx, common.Keys.WorkspaceLive(workspaceID))
+}
+
+func (s *OrchestrationStore) PublishTaskLive(ctx context.Context, taskID string) error {
+	if s == nil || s.redis == nil {
+		return nil
+	}
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return fmt.Errorf("task id is required")
+	}
+	return s.redis.Publish(ctx, common.Keys.TaskLive(taskID), []byte("live")).Err()
+}
+
+func (s *OrchestrationStore) SubscribeTaskLive(ctx context.Context, taskID string) (<-chan struct{}, func(), error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return nil, nil, fmt.Errorf("task id is required")
+	}
+	return s.subscribeSignals(ctx, common.Keys.TaskLive(taskID))
+}
+
 func (s *OrchestrationStore) ListRunEvents(ctx context.Context, runID string) ([]string, error) {
 	if s == nil || s.redis == nil {
 		return []string{}, nil
 	}
 	return s.redis.LRange(ctx, common.Keys.AgentRunEventsBuffer(runID), 0, -1).Result()
+}
+
+func (s *OrchestrationStore) SubscribeRunEvents(ctx context.Context, runID string) (<-chan struct{}, func(), error) {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return nil, nil, fmt.Errorf("run id is required")
+	}
+	return s.subscribeSignals(ctx, common.Keys.AgentRunEventsChannel(runID))
+}
+
+func (s *OrchestrationStore) subscribeSignals(ctx context.Context, channel string) (<-chan struct{}, func(), error) {
+	if s == nil || s.redis == nil {
+		return nil, nil, fmt.Errorf(orchestrationRedisRequired)
+	}
+	channel = strings.TrimSpace(channel)
+	if channel == "" {
+		return nil, nil, fmt.Errorf("channel is required")
+	}
+	msgCh, errCh := s.redis.Subscribe(ctx, channel)
+	out := make(chan struct{}, 8)
+	done := make(chan struct{})
+	var once sync.Once
+
+	go func() {
+		defer close(out)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			case _, ok := <-msgCh:
+				if !ok {
+					return
+				}
+				select {
+				case out <- struct{}{}:
+				default:
+				}
+			case _, ok := <-errCh:
+				if !ok {
+					return
+				}
+			}
+		}
+	}()
+
+	cleanup := func() {
+		once.Do(func() { close(done) })
+	}
+	return out, cleanup, nil
 }
 
 func isRedisNil(err error) bool {

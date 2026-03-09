@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/labstack/echo/v4"
@@ -14,21 +15,46 @@ const ctxKeyTaskOutput = "task_output"
 type TaskOutputsGroup struct {
 	routerGroup *echo.Group
 	backend     repository.BackendRepository
+	live        *repository.OrchestrationStore
 }
 
 type WorkspaceOutputsGroup struct {
 	routerGroup *echo.Group
 	backend     repository.BackendRepository
+	live        *repository.OrchestrationStore
 }
 
-func NewWorkspaceOutputsGroup(routerGroup *echo.Group, backend repository.BackendRepository) *WorkspaceOutputsGroup {
-	g := &WorkspaceOutputsGroup{routerGroup: routerGroup, backend: backend}
+func publishWorkspaceLive(ctx echo.Context, live *repository.OrchestrationStore, workspaceID uint) {
+	if live == nil {
+		return
+	}
+	_ = live.PublishWorkspaceLive(ctx.Request().Context(), workspaceID)
+}
+
+func publishTaskLive(ctx echo.Context, live *repository.OrchestrationStore, workspaceID uint, taskID string) {
+	if live == nil {
+		return
+	}
+	_ = live.PublishTaskLive(ctx.Request().Context(), taskID)
+	_ = live.PublishWorkspaceLive(ctx.Request().Context(), workspaceID)
+}
+
+func NewWorkspaceOutputsGroup(routerGroup *echo.Group, backend repository.BackendRepository, redis *common.RedisClient) *WorkspaceOutputsGroup {
+	g := &WorkspaceOutputsGroup{
+		routerGroup: routerGroup,
+		backend:     backend,
+		live:        repository.NewOrchestrationStore(backend, redis),
+	}
 	g.registerRoutes()
 	return g
 }
 
-func NewTaskOutputsGroup(routerGroup *echo.Group, backend repository.BackendRepository) *TaskOutputsGroup {
-	g := &TaskOutputsGroup{routerGroup: routerGroup, backend: backend}
+func NewTaskOutputsGroup(routerGroup *echo.Group, backend repository.BackendRepository, redis *common.RedisClient) *TaskOutputsGroup {
+	g := &TaskOutputsGroup{
+		routerGroup: routerGroup,
+		backend:     backend,
+		live:        repository.NewOrchestrationStore(backend, redis),
+	}
 	g.registerRoutes()
 	return g
 }
@@ -113,11 +139,22 @@ func (g *WorkspaceOutputsGroup) ArchiveOutput(c echo.Context) error {
 		return err
 	}
 	outputID := c.Param("output_id")
+	output, err := g.backend.GetTaskOutput(c.Request().Context(), workspaceID, outputID)
+	if err != nil {
+		if _, ok := err.(*types.ErrTaskOutputNotFound); ok {
+			return ErrorResponse(c, http.StatusNotFound, "output not found")
+		}
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
 	if err := g.backend.ArchiveTaskOutput(c.Request().Context(), workspaceID, outputID); err != nil {
 		if _, ok := err.(*types.ErrTaskOutputNotFound); ok {
 			return ErrorResponse(c, http.StatusNotFound, "output not found")
 		}
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+	publishWorkspaceLive(c, g.live, workspaceID)
+	if output != nil {
+		publishTaskLive(c, g.live, workspaceID, output.TaskID)
 	}
 	return c.NoContent(http.StatusNoContent)
 }
@@ -131,6 +168,7 @@ func (g *WorkspaceOutputsGroup) ArchiveAllOutputs(c echo.Context) error {
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
+	publishWorkspaceLive(c, g.live, workspaceID)
 	return SuccessResponse(c, map[string]any{"archived": count})
 }
 
@@ -200,6 +238,7 @@ func (g *TaskOutputsGroup) CreateOutput(c echo.Context) error {
 	if err := g.backend.CreateTaskOutput(c.Request().Context(), output); err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
+	publishTaskLive(c, g.live, workspaceID, taskID)
 	return c.JSON(http.StatusCreated, output)
 }
 
@@ -240,6 +279,7 @@ func (g *TaskOutputsGroup) AppendRows(c echo.Context) error {
 		}
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
+	publishTaskLive(c, g.live, workspaceID, output.TaskID)
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -257,5 +297,6 @@ func (g *TaskOutputsGroup) DeleteOutput(c echo.Context) error {
 		}
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
+	publishTaskLive(c, g.live, workspaceID, output.TaskID)
 	return c.NoContent(http.StatusNoContent)
 }

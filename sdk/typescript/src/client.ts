@@ -67,8 +67,26 @@ export function attachResponseMeta<T extends object>(
   return obj as T & { lastResponse: ResponseMeta };
 }
 
-/** Retryable status codes. */
-const RETRYABLE_STATUS_CODES = new Set([408, 409, 429, 500, 502, 503, 504]);
+const HttpStatus = {
+  NoContent:           204,
+  RequestTimeout:      408,
+  Conflict:            409,
+  TooManyRequests:     429,
+  InternalServerError: 500,
+  BadGateway:          502,
+  ServiceUnavailable:  503,
+  GatewayTimeout:      504,
+} as const;
+
+const RETRYABLE_STATUS_CODES: Set<number> = new Set([
+  HttpStatus.RequestTimeout,
+  HttpStatus.Conflict,
+  HttpStatus.TooManyRequests,
+  HttpStatus.InternalServerError,
+  HttpStatus.BadGateway,
+  HttpStatus.ServiceUnavailable,
+  HttpStatus.GatewayTimeout,
+]);
 
 /** Base backoff in ms. */
 const BASE_BACKOFF_MS = 500;
@@ -163,6 +181,9 @@ export class CoreClient {
         };
 
         if (response.ok) {
+          if (response.status === HttpStatus.NoContent || response.headers.get('content-length') === '0') {
+            return attachResponseMeta({} as T & object, meta);
+          }
           const data = (await response.json()) as { success?: boolean; data?: T };
           // Airstore API wraps responses in { success, data }
           const result = (data.data ?? data) as T & object;

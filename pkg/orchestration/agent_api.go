@@ -31,10 +31,20 @@ type TaskEventBatch struct {
 	Interaction        *types.RunInteraction `json:"interaction,omitempty"`
 	Logs               []common.TaskLogEntry `json:"logs"`
 	RunEvents          []map[string]any      `json:"run_events"`
-	PendingInputs      []types.PendingInput  `json:"pending_inputs"`
+	Outputs            []*types.TaskOutput   `json:"outputs,omitempty"`
 	NextLogCursor      int64                 `json:"next_log_cursor"`
 	NextRunEventCursor int                   `json:"next_run_event_cursor"`
 }
+
+type WorkspaceLiveBatch struct {
+	Tasks   []*types.AgentTask  `json:"tasks"`
+	Outputs []*types.TaskOutput `json:"outputs"`
+}
+
+const (
+	defaultWorkspaceStreamTaskLimit   = 100
+	defaultWorkspaceStreamOutputLimit = 60
+)
 
 func NewAgentAPI(
 	backend repository.BackendRepository,
@@ -76,13 +86,13 @@ func (a *AgentAPI) CreateAgent(
 	}
 
 	profile := &types.AgentProfile{
-		WorkspaceID:   workspaceID,
-		AgentKey:      trimmedKey,
-		Name:          strings.TrimSpace(name),
-		Role:          "generalist",
-		MemoryScope:   "workspace",
-		ConfigJSON:    normalizedConfig,
-		Active:        isActive,
+		WorkspaceID: workspaceID,
+		AgentKey:    trimmedKey,
+		Name:        strings.TrimSpace(name),
+		Role:        "generalist",
+		MemoryScope: "workspace",
+		ConfigJSON:  normalizedConfig,
+		Active:      isActive,
 	}
 	if err := a.backend.CreateAgentProfile(ctx, profile); err != nil {
 		return nil, err
@@ -165,6 +175,9 @@ func (a *AgentAPI) DeleteAgent(ctx context.Context, workspaceID uint, agentID st
 	if trimmedAgentID == "" {
 		return fmt.Errorf("agent_id is required")
 	}
+	if err := a.backend.DeleteScheduledTasksByAgent(ctx, workspaceID, trimmedAgentID); err != nil {
+		return fmt.Errorf("delete agent schedules: %w", err)
+	}
 	return a.backend.DeleteAgentProfile(ctx, workspaceID, trimmedAgentID)
 }
 
@@ -244,6 +257,24 @@ func (a *AgentAPI) ListTasksFiltered(
 	return sanitizeTasksForResponse(tasks), nextOffsetCursor(offset, limit, hasMore), hasMore, nil
 }
 
+func (a *AgentAPI) SubmitTaskInput(
+	ctx context.Context,
+	workspaceID uint,
+	taskID string,
+	kind types.InputKind,
+	action *types.TaskInputAction,
+	message string,
+	idempotencyKey string,
+) (*types.AgentTask, error) {
+	if a.runtime == nil {
+		return nil, fmt.Errorf("task service unavailable")
+	}
+	if strings.TrimSpace(taskID) == "" {
+		return nil, fmt.Errorf("task_id is required")
+	}
+	return a.runtime.AcceptTaskInput(ctx, workspaceID, taskID, kind, action, message, idempotencyKey)
+}
+
 func (a *AgentAPI) EnqueueRunInput(
 	ctx context.Context,
 	workspaceID uint,
@@ -313,9 +344,7 @@ func (a *AgentAPI) GetRunInteraction(ctx context.Context, workspaceID uint, runI
 	if err != nil || interaction == nil {
 		return nil, err
 	}
-	safe := *interaction
-	safe.PendingInputs = sanitizePendingInputs(interaction.PendingInputs)
-	return &safe, nil
+	return interaction, nil
 }
 
 func (a *AgentAPI) ListRunSnapshots(ctx context.Context, workspaceID uint, runID string, limit int) ([]*types.AgentRunSnapshot, error) {
@@ -407,6 +436,9 @@ func (a *AgentAPI) CancelTask(ctx context.Context, workspaceID uint, taskID stri
 	if err := a.backend.CancelPendingOutboxEventsForTask(ctx, task.ID); err != nil {
 		log.Warn().Err(err).Str("task_id", task.ID).Msg("failed to cancel pending outbox events")
 	}
+	if a.runtime != nil {
+		a.runtime.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
+	}
 
 	return nil
 }
@@ -420,9 +452,29 @@ func (a *AgentAPI) ArchiveTask(ctx context.Context, workspaceID uint, taskID str
 		return nil
 	}
 	if !task.State.IsTerminal() {
-		return &types.ErrTaskNotArchivable{ID: taskID, State: task.State}
+		if err := a.CancelTask(ctx, workspaceID, taskID); err != nil {
+			if _, ok := err.(*types.ErrTaskNotCancellable); !ok {
+				return err
+			}
+		}
+		task, err = a.GetTask(ctx, workspaceID, taskID)
+		if err != nil {
+			return err
+		}
+		if task.ArchivedAt != nil {
+			return nil
+		}
+		if !task.State.IsTerminal() {
+			return &types.ErrTaskNotArchivable{ID: taskID, State: task.State}
+		}
 	}
-	return a.backend.ArchiveTask(ctx, task.ID)
+	if err := a.backend.ArchiveTask(ctx, task.ID); err != nil {
+		return err
+	}
+	if a.runtime != nil {
+		a.runtime.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
+	}
+	return nil
 }
 
 type TaskUpdateParams struct {
@@ -458,6 +510,9 @@ func (a *AgentAPI) UpdateTask(ctx context.Context, workspaceID uint, taskID stri
 	if err := a.backend.UpdateTask(ctx, task); err != nil {
 		return nil, err
 	}
+	if a.runtime != nil {
+		a.runtime.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
+	}
 	return sanitizeTaskForResponse(task), nil
 }
 
@@ -477,11 +532,27 @@ func (a *AgentAPI) ListTaskLogs(
 		return nil, seqNum, err
 	}
 
-	if a.runtime == nil || a.runtime.s2 == nil || !a.runtime.s2.Enabled() || task.TargetRunID == nil {
+	if a.runtime == nil || a.runtime.s2 == nil || !a.runtime.s2.Enabled() {
 		return []common.TaskLogEntry{}, seqNum, nil
 	}
 
-	currentRunID := strings.TrimSpace(*task.TargetRunID)
+	currentRunID := ""
+	if task.TargetRunID != nil {
+		currentRunID = strings.TrimSpace(*task.TargetRunID)
+	}
+
+	// When TargetRunID is nil (task is between runs after requeue or input),
+	// fall back to the most recent run so we can still load history from s2.
+	if currentRunID == "" {
+		runs, runErr := a.backend.ListAgentRunsFiltered(ctx, workspaceID, types.AgentRunListFilter{
+			TaskID: &taskID,
+			Limit:  1,
+		})
+		if runErr != nil || len(runs) == 0 || runs[0] == nil {
+			return []common.TaskLogEntry{}, seqNum, nil
+		}
+		currentRunID = runs[0].ID
+	}
 	if currentRunID == "" {
 		return []common.TaskLogEntry{}, seqNum, nil
 	}
@@ -663,6 +734,68 @@ func (a *AgentAPI) StreamTaskEvents(
 	runEventCursor int,
 	cursorRunID string,
 ) (*TaskEventBatch, error) {
+	return a.buildTaskEventBatch(ctx, workspaceID, taskID, logCursor, runEventCursor, cursorRunID)
+}
+
+func (a *AgentAPI) WorkspaceLiveBatch(ctx context.Context, workspaceID uint) (*WorkspaceLiveBatch, error) {
+	tasks, _, _, err := a.ListTasksFiltered(ctx, workspaceID, types.AgentTaskListFilter{
+		Limit: defaultWorkspaceStreamTaskLimit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	outputs, err := a.backend.ListWorkspaceTaskOutputs(ctx, workspaceID, types.TaskOutputListFilter{
+		ExcludeArchived: true,
+		Limit:           defaultWorkspaceStreamOutputLimit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if outputs == nil {
+		outputs = []*types.TaskOutput{}
+	}
+	return &WorkspaceLiveBatch{
+		Tasks:   tasks,
+		Outputs: outputs,
+	}, nil
+}
+
+func (a *AgentAPI) SubscribeWorkspaceLive(ctx context.Context, workspaceID uint) (<-chan struct{}, func(), error) {
+	if a.runtime == nil || a.runtime.orchestrationStore == nil {
+		return nil, nil, fmt.Errorf("workspace live unavailable")
+	}
+	return a.runtime.orchestrationStore.SubscribeWorkspaceLive(ctx, workspaceID)
+}
+
+func (a *AgentAPI) SubscribeTaskLive(ctx context.Context, taskID string) (<-chan struct{}, func(), error) {
+	if a.runtime == nil || a.runtime.orchestrationStore == nil {
+		return nil, nil, fmt.Errorf("task live unavailable")
+	}
+	return a.runtime.orchestrationStore.SubscribeTaskLive(ctx, taskID)
+}
+
+func (a *AgentAPI) SubscribeRunEvents(ctx context.Context, runID string) (<-chan struct{}, func(), error) {
+	if a.runtime == nil || a.runtime.orchestrationStore == nil {
+		return nil, nil, fmt.Errorf("run event stream unavailable")
+	}
+	return a.runtime.orchestrationStore.SubscribeRunEvents(ctx, runID)
+}
+
+func (a *AgentAPI) SubscribeExecutionLogs(ctx context.Context, executionID string) (<-chan []byte, func(), error) {
+	if a.runtime == nil || a.runtime.taskQueue == nil {
+		return nil, nil, fmt.Errorf("execution log stream unavailable")
+	}
+	return a.runtime.taskQueue.SubscribeLogs(ctx, executionID)
+}
+
+func (a *AgentAPI) buildTaskEventBatch(
+	ctx context.Context,
+	workspaceID uint,
+	taskID string,
+	logCursor int64,
+	runEventCursor int,
+	cursorRunID string,
+) (*TaskEventBatch, error) {
 	task, err := a.GetTask(ctx, workspaceID, taskID)
 	if err != nil {
 		return nil, err
@@ -684,7 +817,6 @@ func (a *AgentAPI) StreamTaskEvents(
 
 	var run *types.AgentRun
 	var interaction *types.RunInteraction
-	var pendingInputs []types.PendingInput
 	runEvents := []map[string]any{}
 	nextRunEventCursor := runEventCursor
 	if task.TargetRunID != nil {
@@ -704,12 +836,15 @@ func (a *AgentAPI) StreamTaskEvents(
 
 		if a.runtime != nil {
 			interaction, _ = a.runtime.GetRunInteraction(ctx, workspaceID, *task.TargetRunID)
-			if interaction != nil {
-				pendingInputs = interaction.PendingInputs
-			} else {
-				pendingInputs, _ = a.runtime.ListRunPendingInputs(ctx, *task.TargetRunID)
-			}
 		}
+	}
+
+	outputs, err := a.backend.ListTaskOutputs(ctx, workspaceID, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if outputs == nil {
+		outputs = []*types.TaskOutput{}
 	}
 
 	return &TaskEventBatch{
@@ -720,7 +855,7 @@ func (a *AgentAPI) StreamTaskEvents(
 		Interaction:        interaction,
 		Logs:               logs,
 		RunEvents:          runEvents,
-		PendingInputs:      pendingInputs,
+		Outputs:            outputs,
 		NextLogCursor:      nextLogCursor,
 		NextRunEventCursor: nextRunEventCursor,
 	}, nil
@@ -832,21 +967,6 @@ func sanitizeRunsForResponse(runs []*types.AgentRun) []*types.AgentRun {
 	return safe
 }
 
-func sanitizePendingInputs(inputs []types.PendingInput) []types.PendingInput {
-	if len(inputs) == 0 {
-		return inputs
-	}
-	safe := make([]types.PendingInput, len(inputs))
-	for idx, input := range inputs {
-		safe[idx] = types.PendingInput{
-			ID:        strings.TrimSpace(input.ID),
-			Message:   common.RedactSensitiveString(input.Message),
-			CreatedAt: input.CreatedAt,
-		}
-	}
-	return safe
-}
-
 func optionalStringValue(value *string, fallback string) string {
 	if value == nil {
 		return fallback
@@ -890,6 +1010,22 @@ func normalizeAgentProfileConfig(config map[string]any, agentKey string) (map[st
 			normalized[key] = defaults[key]
 		}
 	}
+
+	if _, hasSkills := normalized[agentConfigKeySkills]; hasSkills {
+		if sp := stringFromPayload(normalized, agentConfigKeySystemPrompt); sp != "" {
+			if start, end, _, ok := activeSkillsSection(sp); ok {
+				cleaned := strings.TrimSpace(
+					strings.TrimSpace(sp[:start]) + "\n\n" + strings.TrimSpace(sp[end:]),
+				)
+				if cleaned == "" {
+					normalized[agentConfigKeySystemPrompt] = defaults[agentConfigKeySystemPrompt]
+				} else {
+					normalized[agentConfigKeySystemPrompt] = cleaned
+				}
+			}
+		}
+	}
+
 	return normalized, nil
 }
 

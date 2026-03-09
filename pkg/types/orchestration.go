@@ -8,14 +8,6 @@ import (
 
 const AgentTaskKindAgentCommand = "agent_command"
 
-// PendingInput represents a user message buffered in the run's input
-// queue, waiting to be consumed by the worker session.
-type PendingInput struct {
-	ID        string `json:"id"`
-	Message   string `json:"message"`
-	CreatedAt int64  `json:"created_at"`
-}
-
 type AgentQueueMode string
 
 const (
@@ -47,12 +39,55 @@ const (
 	RunInteractionStateClosed          RunInteractionState = "closed"
 )
 
-// RunInteraction is the canonical interaction view consumed by clients.
+// InputKind distinguishes what sort of user input an agent is waiting for.
+type InputKind string
+
+const (
+	InputKindApproveReject InputKind = "approve_reject"
+	InputKindFreeText      InputKind = "free_text"
+)
+
+// TaskInputAction is a structured reply action (e.g. approve/reject).
+type TaskInputAction string
+
+const (
+	TaskInputActionApprove TaskInputAction = "approve"
+	TaskInputActionReject  TaskInputAction = "reject"
+)
+
+// TaskInputStatus tracks the lifecycle of a durable follow-up input row.
+type TaskInputStatus string
+
+const (
+	TaskInputStatusPending  TaskInputStatus = "pending"
+	TaskInputStatusClaimed  TaskInputStatus = "claimed"
+	TaskInputStatusConsumed TaskInputStatus = "consumed"
+)
+
+// TaskInput is a durable follow-up input row owned by a task and consumed
+// by whichever run is active for the task/session at delivery time.
+type TaskInput struct {
+	ID                 string           `json:"id" db:"id"`
+	WorkspaceID        uint             `json:"workspace_id" db:"workspace_id"`
+	TaskID             string           `json:"task_id" db:"task_id"`
+	SessionID          string           `json:"session_id" db:"session_id"`
+	Seq                int              `json:"seq" db:"seq"`
+	Kind               InputKind        `json:"kind" db:"kind"`
+	Action             *TaskInputAction `json:"action,omitempty" db:"action"`
+	Message            string           `json:"message" db:"message"`
+	IdempotencyKey     string           `json:"idempotency_key" db:"idempotency_key"`
+	Status             TaskInputStatus  `json:"status" db:"status"`
+	ClaimedByRunID     *string          `json:"claimed_by_run_id,omitempty" db:"claimed_by_run_id"`
+	ClaimedByExecID    *string          `json:"claimed_by_execution_id,omitempty" db:"claimed_by_execution_id"`
+	CreatedAt          time.Time        `json:"created_at" db:"created_at"`
+	ClaimedAt          *time.Time       `json:"claimed_at,omitempty" db:"claimed_at"`
+	ConsumedAt         *time.Time       `json:"consumed_at,omitempty" db:"consumed_at"`
+}
+
+// RunInteraction is the runtime interaction state of an active run.
 type RunInteraction struct {
 	State             RunInteractionState `json:"state"`
 	ActiveExecutionID string              `json:"active_execution_id,omitempty"`
-	PendingCount      int                 `json:"pending_count"`
-	PendingInputs     []PendingInput      `json:"pending_inputs,omitempty"`
 	UpdatedAt         int64               `json:"updated_at,omitempty"`
 }
 
@@ -445,6 +480,7 @@ type AgentTask struct {
 	AgentName      string         `json:"agent_name,omitempty" db:"-"`
 	QueueMode      AgentQueueMode `json:"queue_mode" db:"queue_mode"`
 	State          AgentTaskState `json:"state" db:"state"`
+	InputKind      InputKind      `json:"input_kind,omitempty" db:"input_kind"`
 	IdempotencyKey string         `json:"idempotency_key" db:"idempotency_key"`
 	PayloadJSON    map[string]any `json:"payload_json" db:"-"`
 	RoutingJSON    map[string]any `json:"routing_json" db:"-"`

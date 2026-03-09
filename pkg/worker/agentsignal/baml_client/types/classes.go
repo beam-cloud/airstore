@@ -145,3 +145,42 @@ func (c FollowUpSignal) Encode() (*cffi.HostValue, error) {
 func (c FollowUpSignal) BamlTypeName() string {
 	return "FollowUpSignal"
 }
+
+type TurnClassification struct {
+	Outcome   TurnOutcome `json:"outcome"`
+	InputKind *InputKind  `json:"input_kind"`
+}
+
+func (c *TurnClassification) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "TurnClassification" {
+		panic(fmt.Sprintf("expected TurnClassification, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+		case "outcome":
+			c.Outcome = baml.Decode(valueHolder).Interface().(TurnOutcome)
+		case "input_kind":
+			c.InputKind = baml.Decode(valueHolder).Interface().(*InputKind)
+		default:
+			panic(fmt.Sprintf("unexpected field: %s in class TurnClassification", key))
+		}
+	}
+}
+
+func (c TurnClassification) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+	fields["outcome"] = c.Outcome
+	fields["input_kind"] = c.InputKind
+	return baml.EncodeClass("TurnClassification", fields, nil)
+}
+
+func (c TurnClassification) BamlTypeName() string {
+	return "TurnClassification"
+}
