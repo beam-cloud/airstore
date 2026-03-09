@@ -193,13 +193,9 @@ func (cg *ConnectionsGroup) Delete(c echo.Context) error {
 		return ErrorResponse(c, http.StatusNotFound, "connection not found")
 	}
 
-	// Check authorization: shared connections require admin, personal require admin or owner
-	if conn.IsShared() {
-		if !auth.IsAdmin(ctx) {
-			return ErrorResponse(c, http.StatusForbidden, "admin access required for shared connections")
-		}
-	} else {
-		// Personal connection
+	// Check authorization: any workspace member can disconnect shared connections;
+	// personal connections require admin or the owning member.
+	if !conn.IsShared() {
 		if !auth.IsAdmin(ctx) && *conn.MemberId != auth.MemberId(ctx) {
 			return ErrorResponse(c, http.StatusForbidden, "cannot delete another member's connection")
 		}
