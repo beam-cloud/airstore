@@ -116,6 +116,18 @@ type listTaskLogsResponse struct {
 	NextCursor int64                 `json:"next_cursor"`
 }
 
+// SSE event names — keep in sync with the client-side SSE constants in realtime.ts.
+const (
+	sseEventSnapshot  = "snapshot"
+	sseEventBatch     = "batch"
+	sseEventHeartbeat = "heartbeat"
+	sseEventError     = "error"
+)
+
+const sseWriteDeadline = 5 * time.Minute
+const sseHeartbeatInterval = 15 * time.Second
+const ssePollInterval = 2 * time.Second
+
 type taskStreamEvent struct {
 	Event string `json:"event"`
 	Data  any    `json:"data,omitempty"`
@@ -123,14 +135,14 @@ type taskStreamEvent struct {
 }
 
 type sseWriter struct {
-	response *echo.Response
-	flusher  http.Flusher
-	rc       *http.ResponseController
+	w  *echo.Response
+	f  http.Flusher
+	rc *http.ResponseController
 }
 
 func newSSEWriter(c echo.Context) (*sseWriter, error) {
 	resp := c.Response()
-	flusher, ok := resp.Writer.(http.Flusher)
+	f, ok := resp.Writer.(http.Flusher)
 	if !ok {
 		return nil, fmt.Errorf("streaming not supported")
 	}
@@ -139,29 +151,32 @@ func newSSEWriter(c echo.Context) (*sseWriter, error) {
 	resp.Header().Set("Connection", "keep-alive")
 	resp.WriteHeader(http.StatusOK)
 
-	writer := &sseWriter{
-		response: resp,
-		flusher:  flusher,
-		rc:       http.NewResponseController(resp),
-	}
-	_ = writer.rc.SetWriteDeadline(time.Now().Add(5 * time.Minute))
-	return writer, nil
+	sw := &sseWriter{w: resp, f: f, rc: http.NewResponseController(resp)}
+	_ = sw.rc.SetWriteDeadline(time.Now().Add(sseWriteDeadline))
+	return sw, nil
 }
 
-func (w *sseWriter) writeEvent(event string, data any) error {
+func (s *sseWriter) send(event string, data any) error {
 	payload, err := json.Marshal(taskStreamEvent{Event: event, Data: data})
 	if err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(w.response.Writer, "data: %s\n\n", payload); err != nil {
+	if _, err := fmt.Fprintf(s.w.Writer, "data: %s\n\n", payload); err != nil {
 		return err
 	}
-	w.flusher.Flush()
-	_ = w.rc.SetWriteDeadline(time.Now().Add(5 * time.Minute))
+	s.f.Flush()
+	_ = s.rc.SetWriteDeadline(time.Now().Add(sseWriteDeadline))
 	return nil
 }
 
+func (s *sseWriter) sendError(msg string) {
+	_ = s.send(sseEventError, map[string]string{"message": msg})
+}
+
 func wantsSSE(c echo.Context) bool {
+	if c.QueryParam("stream") == "sse" {
+		return true
+	}
 	return strings.Contains(strings.ToLower(c.Request().Header.Get("Accept")), "text/event-stream")
 }
 
@@ -311,14 +326,14 @@ func (g *WorkspaceTasksGroup) StreamWorkspaceTasks(c echo.Context) error {
 		if err != nil {
 			return err
 		}
-		return writer.writeEvent(event, batch)
+		return writer.send(event, batch)
 	}
-	if err := emit("snapshot"); err != nil {
-		_ = writer.writeEvent("error", map[string]string{"message": err.Error()})
+	if err := emit(sseEventSnapshot); err != nil {
+		writer.sendError(err.Error())
 		return nil
 	}
 
-	heartbeat := time.NewTicker(15 * time.Second)
+	heartbeat := time.NewTicker(sseHeartbeatInterval)
 	defer heartbeat.Stop()
 
 	for {
@@ -326,20 +341,14 @@ func (g *WorkspaceTasksGroup) StreamWorkspaceTasks(c echo.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-heartbeat.C:
-			if err := writer.writeEvent("heartbeat", nil); err != nil {
-				if errors.Is(err, context.Canceled) {
-					return nil
-				}
+			if err := writer.send(sseEventHeartbeat, nil); err != nil {
 				return nil
 			}
 		case _, ok := <-liveCh:
 			if !ok {
 				return nil
 			}
-			if err := emit("batch"); err != nil {
-				if errors.Is(err, context.Canceled) {
-					return nil
-				}
+			if err := emit(sseEventBatch); err != nil {
 				return nil
 			}
 		}
@@ -380,33 +389,21 @@ func (g *WorkspaceTasksGroup) streamTaskEventsSSE(c echo.Context) error {
 
 	var runEventCh <-chan struct{}
 	var runEventCleanup func()
-	var logCh <-chan []byte
-	var logCleanup func()
 	currentRunID := ""
-	currentExecutionID := ""
 
-	resetSubscriptions := func(batch *orchestration.TaskEventBatch) {
+	resetSubscriptions := func(batch *orchestration.TaskEventBatch) bool {
 		nextRunID := ""
 		if batch != nil && batch.RunID != nil {
 			nextRunID = strings.TrimSpace(*batch.RunID)
 		}
-		nextExecutionID := ""
-		if batch != nil && batch.Interaction != nil {
-			nextExecutionID = strings.TrimSpace(batch.Interaction.ActiveExecutionID)
-		}
-		if nextRunID == currentRunID && nextExecutionID == currentExecutionID {
-			return
+		if nextRunID == currentRunID {
+			return false
 		}
 		if runEventCleanup != nil {
 			runEventCleanup()
 			runEventCleanup = nil
 		}
-		if logCleanup != nil {
-			logCleanup()
-			logCleanup = nil
-		}
 		runEventCh = nil
-		logCh = nil
 
 		if nextRunID != "" {
 			ch, cleanup, err := g.agents.SubscribeRunEvents(ctx, nextRunID)
@@ -417,29 +414,17 @@ func (g *WorkspaceTasksGroup) streamTaskEventsSSE(c echo.Context) error {
 				runEventCleanup = cleanup
 			}
 		}
-		if nextExecutionID != "" {
-			ch, cleanup, err := g.agents.SubscribeExecutionLogs(ctx, nextExecutionID)
-			if err != nil {
-				log.Debug().Err(err).Str("execution_id", nextExecutionID).Msg("failed to subscribe to execution logs")
-			} else {
-				logCh = ch
-				logCleanup = cleanup
-			}
-		}
 
 		currentRunID = nextRunID
-		currentExecutionID = nextExecutionID
+		return true
 	}
 	defer func() {
 		if runEventCleanup != nil {
 			runEventCleanup()
 		}
-		if logCleanup != nil {
-			logCleanup()
-		}
 	}()
 
-	emit := func(event string) error {
+	loadBatch := func() (*orchestration.TaskEventBatch, error) {
 		batch, err := g.agents.StreamTaskEvents(
 			ctx,
 			workspaceID,
@@ -449,7 +434,7 @@ func (g *WorkspaceTasksGroup) streamTaskEventsSSE(c echo.Context) error {
 			cursorRunID,
 		)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		logCursor = batch.NextLogCursor
 		runEventCursor = batch.NextRunEventCursor
@@ -458,38 +443,57 @@ func (g *WorkspaceTasksGroup) streamTaskEventsSSE(c echo.Context) error {
 		} else {
 			cursorRunID = ""
 		}
-		resetSubscriptions(batch)
-		return writer.writeEvent(event, batch)
+		return batch, nil
 	}
-	if err := emit("snapshot"); err != nil {
-		if _, ok := err.(*types.ErrAgentTaskNotFound); ok {
-			_ = writer.writeEvent("error", map[string]string{"message": "task not found"})
-			return nil
+
+	emit := func(event string) error {
+		batch, err := loadBatch()
+		if err != nil {
+			return err
 		}
-		if _, ok := err.(*types.ErrAgentRunNotFound); ok {
-			_ = writer.writeEvent("error", map[string]string{"message": "run not found"})
-			return nil
+		if resetSubscriptions(batch) {
+			// The task switched runs or executions. Fetch once more after
+			// rewiring subscriptions so we don't miss logs/events that landed
+			// during the handoff window.
+			catchup, err := loadBatch()
+			if err != nil {
+				return err
+			}
+			batch = catchup
+			_ = resetSubscriptions(batch)
 		}
-		_ = writer.writeEvent("error", map[string]string{"message": err.Error()})
+		return writer.send(event, batch)
+	}
+	if err := emit(sseEventSnapshot); err != nil {
+		writer.sendError(err.Error())
 		return nil
 	}
 
-	heartbeat := time.NewTicker(15 * time.Second)
+	heartbeat := time.NewTicker(sseHeartbeatInterval)
 	defer heartbeat.Stop()
+
+	poll := time.NewTicker(ssePollInterval)
+	defer poll.Stop()
+
+	emitBatch := func() error { return emit(sseEventBatch) }
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-heartbeat.C:
-			if err := writer.writeEvent("heartbeat", nil); err != nil {
+			if err := writer.send(sseEventHeartbeat, nil); err != nil {
+				return nil
+			}
+		case <-poll.C:
+			if err := emitBatch(); err != nil {
 				return nil
 			}
 		case _, ok := <-taskLiveCh:
 			if !ok {
 				return nil
 			}
-			if err := emit("batch"); err != nil {
+			if err := emitBatch(); err != nil {
 				return nil
 			}
 		case _, ok := <-runEventCh:
@@ -497,15 +501,7 @@ func (g *WorkspaceTasksGroup) streamTaskEventsSSE(c echo.Context) error {
 				runEventCh = nil
 				continue
 			}
-			if err := emit("batch"); err != nil {
-				return nil
-			}
-		case _, ok := <-logCh:
-			if !ok {
-				logCh = nil
-				continue
-			}
-			if err := emit("batch"); err != nil {
+			if err := emitBatch(); err != nil {
 				return nil
 			}
 		}

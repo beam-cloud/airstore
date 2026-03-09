@@ -2156,6 +2156,7 @@ func (s *AgentService) createAttemptExecutionTask(
 	if err := s.taskQueue.Push(ctx, execTask); err != nil {
 		return nil, err
 	}
+	s.publishTaskUpdate(ctx, run.WorkspaceID, run.OriginTaskID)
 	return attempt, nil
 }
 

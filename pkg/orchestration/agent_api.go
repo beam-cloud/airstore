@@ -452,7 +452,21 @@ func (a *AgentAPI) ArchiveTask(ctx context.Context, workspaceID uint, taskID str
 		return nil
 	}
 	if !task.State.IsTerminal() {
-		return &types.ErrTaskNotArchivable{ID: taskID, State: task.State}
+		if err := a.CancelTask(ctx, workspaceID, taskID); err != nil {
+			if _, ok := err.(*types.ErrTaskNotCancellable); !ok {
+				return err
+			}
+		}
+		task, err = a.GetTask(ctx, workspaceID, taskID)
+		if err != nil {
+			return err
+		}
+		if task.ArchivedAt != nil {
+			return nil
+		}
+		if !task.State.IsTerminal() {
+			return &types.ErrTaskNotArchivable{ID: taskID, State: task.State}
+		}
 	}
 	if err := a.backend.ArchiveTask(ctx, task.ID); err != nil {
 		return err
