@@ -21,12 +21,15 @@ import (
 )
 
 var typeMap = map[string]reflect.Type{
-	"TYPES.ExtractedOutput":        reflect.TypeOf(types.ExtractedOutput{}),
-	"STREAM_TYPES.ExtractedOutput": reflect.TypeOf(stream_types.ExtractedOutput{}),
-	"TYPES.FollowUpSignal":         reflect.TypeOf(types.FollowUpSignal{}),
-	"STREAM_TYPES.FollowUpSignal":  reflect.TypeOf(stream_types.FollowUpSignal{}),
+	"TYPES.ExtractedOutput":           reflect.TypeOf(types.ExtractedOutput{}),
+	"STREAM_TYPES.ExtractedOutput":    reflect.TypeOf(stream_types.ExtractedOutput{}),
+	"TYPES.FollowUpSignal":            reflect.TypeOf(types.FollowUpSignal{}),
+	"STREAM_TYPES.FollowUpSignal":     reflect.TypeOf(stream_types.FollowUpSignal{}),
+	"TYPES.TurnClassification":        reflect.TypeOf(types.TurnClassification{}),
+	"STREAM_TYPES.TurnClassification": reflect.TypeOf(stream_types.TurnClassification{}),
 
 	"TYPES.FollowUpIntent": reflect.TypeOf(types.FollowUpIntent("")),
+	"TYPES.InputKind":      reflect.TypeOf(types.InputKind("")),
 	"TYPES.OutputKind":     reflect.TypeOf(types.OutputKind("")),
 	"TYPES.TurnOutcome":    reflect.TypeOf(types.TurnOutcome("")),
 }

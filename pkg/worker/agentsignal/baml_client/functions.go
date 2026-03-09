@@ -95,7 +95,7 @@ func ClassifyFollowUp(ctx context.Context, message string, opts ...CallOptionFun
 	}
 }
 
-func ClassifyTurn(ctx context.Context, message string, opts ...CallOptionFunc) (types.TurnOutcome, error) {
+func ClassifyTurn(ctx context.Context, message string, opts ...CallOptionFunc) (types.TurnClassification, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -139,33 +139,33 @@ func ClassifyTurn(ctx context.Context, message string, opts ...CallOptionFunc) (
 	if callOpts.onTick == nil {
 		result, err := bamlRuntime.CallFunction(ctx, "ClassifyTurn", encoded, callOpts.onTick)
 		if err != nil {
-			return types.TurnOutcome(""), err
+			return types.TurnClassification{}, err
 		}
 
 		if result.Error != nil {
-			return types.TurnOutcome(""), result.Error
+			return types.TurnClassification{}, result.Error
 		}
 
-		casted := (result.Data).(types.TurnOutcome)
+		casted := (result.Data).(types.TurnClassification)
 
 		return casted, nil
 	} else {
 		channel, err := bamlRuntime.CallFunctionStream(ctx, "ClassifyTurn", encoded, callOpts.onTick)
 		if err != nil {
-			return types.TurnOutcome(""), err
+			return types.TurnClassification{}, err
 		}
 
 		for result := range channel {
 			if result.Error != nil {
-				return types.TurnOutcome(""), result.Error
+				return types.TurnClassification{}, result.Error
 			}
 
 			if result.HasData {
-				return result.Data.(types.TurnOutcome), nil
+				return result.Data.(types.TurnClassification), nil
 			}
 		}
 
-		return types.TurnOutcome(""), fmt.Errorf("No data returned from stream")
+		return types.TurnClassification{}, fmt.Errorf("No data returned from stream")
 	}
 }
 

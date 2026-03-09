@@ -20,6 +20,8 @@ import type {
   TaskOutputListResponse,
   CreateTaskOutputParams,
   AppendRowsParams,
+  SubmitTaskInputParams,
+  SubmitTaskInputResponse,
 } from '../types/tasks.js';
 import { toInputProvenanceBody, toPolicyBody, toRoutingBody } from './helpers.js';
 
@@ -168,6 +170,30 @@ export class Tasks {
       'POST',
       `/workspaces/${workspaceId}/tasks/${taskId}/archive`,
       undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * Submit follow-up input to a task. The backend durably stores the input
+   * and delivers it to whichever run is active for the task.
+   */
+  async submitInput(
+    workspaceId: string,
+    taskId: string,
+    params: SubmitTaskInputParams,
+    options?: RequestOptions,
+  ): Promise<SubmitTaskInputResponse> {
+    return this.client.request<SubmitTaskInputResponse>(
+      'POST',
+      `/workspaces/${workspaceId}/tasks/${taskId}/input`,
+      {
+        message: params.message,
+        action: params.action,
+        kind: params.kind,
+        idempotency_key: params.idempotencyKey,
+      },
       undefined,
       options,
     );

@@ -73,9 +73,8 @@ var (
 	agentInstanceLock               = "airstore:agent:instance:lock:%s" // instanceKey
 
 	// Terminal IO keys (pub/sub channels)
-	terminalInput       = "airstore:terminal:%s:input"        // taskId
-	terminalInputBuffer = "airstore:terminal:%s:input:buffer" // taskId
-	terminalOutput      = "airstore:terminal:%s:output"       // taskId
+	terminalInput  = "airstore:terminal:%s:input"  // taskId (wake signal)
+	terminalOutput = "airstore:terminal:%s:output" // taskId
 	terminalCancel      = "airstore:terminal:%s:cancel"       // taskId
 
 	// Session lease — exclusive ownership of an interactive session.
@@ -304,10 +303,6 @@ func (rk *redisKeys) AgentInstanceLock(instanceKey string) string {
 
 func (rk *redisKeys) TerminalInput(taskId string) string {
 	return fmt.Sprintf(terminalInput, taskId)
-}
-
-func (rk *redisKeys) TerminalInputBuffer(taskId string) string {
-	return fmt.Sprintf(terminalInputBuffer, taskId)
 }
 
 func (rk *redisKeys) TerminalOutput(taskId string) string {

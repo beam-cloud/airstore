@@ -45,8 +45,10 @@ func (w *Worker) setRunInteractionState(ctx context.Context, task types.RunExecu
 		ctx,
 		task.WorkspaceId,
 		executionCtx.runID,
-		state,
-		activeExecutionID,
+		types.RunInteraction{
+			State:             state,
+			ActiveExecutionID: activeExecutionID,
+		},
 		runInteractionTTL,
 	); err != nil {
 		addTaskExecutionContext(
@@ -61,12 +63,12 @@ func (w *Worker) setRunInteractionState(ctx context.Context, task types.RunExecu
 
 // setOriginTaskState transitions the origin task's state via the gateway.
 // Used to eagerly reflect waiting/running in the UI during a live session.
-func (w *Worker) setOriginTaskState(ctx context.Context, task types.RunExecution, state types.AgentTaskState) {
+func (w *Worker) setOriginTaskState(ctx context.Context, task types.RunExecution, state types.AgentTaskState, inputKind types.InputKind) {
 	execCtx := executionContextFromTask(task)
 	if execCtx.originTaskID == "" || execCtx.runID == "" {
 		return
 	}
-	if err := w.gatewayClient.UpdateTaskState(ctx, execCtx.originTaskID, string(state), execCtx.runID); err != nil {
+	if err := w.gatewayClient.UpdateTaskState(ctx, execCtx.originTaskID, string(state), execCtx.runID, string(inputKind)); err != nil {
 		addTaskExecutionContext(log.Warn().Err(err).Str("target_state", string(state)), task).
 			Msg("failed to eagerly update origin task state")
 	}
@@ -174,12 +176,16 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.RunExecution
 
 	result := w.runInteractiveSession(runCtx, task, sandboxID, taskMountSource)
 
+	// Mark the interaction closed immediately so that any user input arriving
+	// after the session ends sees "closed" and triggers a restart instead of
+	// being published to a dead pubsub channel. The defer is still the
+	// safety net for panics.
+	w.setRunInteractionState(runCtx, task, types.RunInteractionStateClosed)
+
 	// Report result to the gateway immediately, before cleanup. The task
 	// state transitions now (~1s) instead of after the 10s flush grace
 	// period. The later call in finishTask is idempotent (outbox dedupe).
 	w.reportTaskResult(task, result)
-
-	w.setRunInteractionState(runCtx, task, types.RunInteractionStateClosed)
 
 	if err := w.sandboxManager.Delete(sandboxID, true); err != nil {
 		addTaskExecutionContext(log.Warn().Err(err), task).Msg("interactive sandbox delete failed during cleanup")
@@ -249,7 +255,7 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 
 	var checkHeartbeat func() bool
 	var touchHeartbeat func()
-	var checkNeedsInput func() bool
+	var checkNeedsInput func() (bool, types.InputKind)
 	var needsInputRunner NeedsInputRunner
 	var needsInputMarkerPath string
 	bamlEnv := w.sandboxManager.BamlEnv()
@@ -278,18 +284,24 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 		} else {
 			needsInputRunner = ir
 			needsInputMarkerPath = markerPath
-			checkNeedsInput = func() bool {
+			checkNeedsInput = func() (bool, types.InputKind) {
 				msg := ir.ReadLastMessage(markerPath)
 				if msg == "" {
-					return false
+					return false, ""
 				}
-				outcome, err := agentsignal.ClassifyTurn(ctx, msg, agentsignal.WithEnv(bamlEnv))
+				classification, err := agentsignal.ClassifyTurn(ctx, msg, agentsignal.WithEnv(bamlEnv))
 				if err != nil {
 					addTaskExecutionContext(log.Warn().Err(err), task).
 						Msg("BAML ClassifyTurn failed, defaulting to complete")
-					return false
+					return false, ""
 				}
-				return outcome == signaltypes.TurnOutcomeNEEDS_INPUT
+				if classification.Outcome != signaltypes.TurnOutcomeNEEDS_INPUT {
+					return false, ""
+				}
+				if classification.InputKind == nil {
+					return true, types.InputKindFreeText
+				}
+				return true, types.InputKind(strings.ToLower(string(*classification.InputKind)))
 			}
 
 			addTaskExecutionContext(log.Info().Str("runner", runner.Name()), task).
@@ -401,7 +413,7 @@ func (w *Worker) runTurnSession(
 	env map[string]string,
 	stdout io.Writer,
 	activityCh chan<- struct{},
-	checkNeedsInput func() bool,
+	checkNeedsInput func() (bool, types.InputKind),
 ) (error, bool) {
 	prompt := strings.TrimSpace(task.Prompt)
 	isFirstTurn := true
@@ -414,7 +426,7 @@ func (w *Worker) runTurnSession(
 		}
 		w.setRunInteractionState(ctx, task, types.RunInteractionStateWorking)
 		if !isFirstTurn {
-			w.setOriginTaskState(ctx, task, types.AgentTaskStateRunning)
+			w.setOriginTaskState(ctx, task, types.AgentTaskStateRunning, "")
 		}
 
 		if isFirstTurn {
@@ -434,30 +446,38 @@ func (w *Worker) runTurnSession(
 
 		signalActivity(activityCh)
 
-		if checkNeedsInput == nil || !checkNeedsInput() {
+		if checkNeedsInput == nil {
+			return nil, false
+		}
+		needsInput, inputKind := checkNeedsInput()
+		if !needsInput {
 			return nil, false
 		}
 
 		w.setRunInteractionState(ctx, task, types.RunInteractionStateWaitingForInput)
-		w.setOriginTaskState(ctx, task, types.AgentTaskStateWaiting)
+		w.setOriginTaskState(ctx, task, types.AgentTaskStateWaiting, inputKind)
 		addTaskExecutionContext(log.Info(), task).Msg("turn complete, agent is waiting for input")
-		prompt = w.waitForFollowupInput(ctx, task.ExternalId, DefaultBetweenTurnsTimeout, activityCh)
+		prompt = w.waitForFollowupInput(ctx, task, DefaultBetweenTurnsTimeout, activityCh)
 	}
 
 	return nil, true
 }
 
-// waitForFollowupInput blocks until follow-up input arrives via Redis
-// pubsub, the per-turn timeout expires, or the context is cancelled
-// (e.g. idle timeout). Returns the trimmed prompt, or "" if the
-// session should end.
+// waitForFollowupInput claims the next durable task_input via the gateway,
+// using Redis pubsub as a low-latency wake hint. Returns the trimmed prompt
+// or "" if the session should end.
 func (w *Worker) waitForFollowupInput(
 	ctx context.Context,
-	taskID string,
+	task types.RunExecution,
 	timeout time.Duration,
 	activityCh chan<- struct{},
 ) string {
-	if w.terminalIO == nil {
+	execCtx := executionContextFromTask(task)
+	originTaskID := execCtx.originTaskID
+	runID := execCtx.runID
+	executionID := task.ExternalId
+
+	if originTaskID == "" || runID == "" {
 		<-ctx.Done()
 		return ""
 	}
@@ -470,44 +490,66 @@ func (w *Worker) waitForFollowupInput(
 		defer timer.Stop()
 	}
 
-	for {
-		inputCh, cleanup, err := w.terminalIO.SubscribeInput(ctx, taskID)
+	tryClaim := func() string {
+		resp, err := w.gatewayClient.ClaimTaskInput(ctx, originTaskID, runID, executionID)
 		if err != nil {
-			select {
-			case <-ctx.Done():
-				return ""
-			case <-timeoutCh:
-				return ""
-			case <-time.After(250 * time.Millisecond):
-				continue
-			}
+			addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to claim task input")
+			return ""
 		}
+		if !resp.Found {
+			return ""
+		}
+		prompt := strings.TrimSpace(resp.Message)
+		if prompt == "" {
+			_ = w.gatewayClient.AckTaskInput(ctx, resp.InputId)
+			return ""
+		}
+		if err := w.gatewayClient.AckTaskInput(ctx, resp.InputId); err != nil {
+			addTaskExecutionContext(log.Warn().Err(err).Str("input_id", resp.InputId), task).
+				Msg("failed to ack task input")
+		}
+		return prompt
+	}
 
+	if prompt := tryClaim(); prompt != "" {
+		signalActivity(activityCh)
+		return prompt
+	}
+
+	var wakeCh <-chan struct{}
+	var wakeCleanup func()
+	if w.terminalIO != nil {
+		var err error
+		wakeCh, wakeCleanup, err = w.terminalIO.SubscribeInputWake(ctx, executionID)
+		if err != nil {
+			addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to subscribe to input wake")
+		}
+	}
+	if wakeCleanup != nil {
+		defer wakeCleanup()
+	}
+	if wakeCh == nil {
+		wakeCh = make(chan struct{})
+	}
+
+	pollInterval := 2 * time.Second
+
+	for {
 		select {
 		case <-ctx.Done():
-			cleanup()
 			return ""
 		case <-timeoutCh:
-			cleanup()
 			return ""
-		case data, ok := <-inputCh:
-			cleanup()
-			if !ok {
-				select {
-				case <-ctx.Done():
-					return ""
-				case <-timeoutCh:
-					return ""
-				case <-time.After(250 * time.Millisecond):
-					continue
-				}
+		case <-wakeCh:
+			if prompt := tryClaim(); prompt != "" {
+				signalActivity(activityCh)
+				return prompt
 			}
-			prompt := strings.TrimSpace(string(data))
-			if prompt == "" {
-				continue
+		case <-time.After(pollInterval):
+			if prompt := tryClaim(); prompt != "" {
+				signalActivity(activityCh)
+				return prompt
 			}
-			signalActivity(activityCh)
-			return prompt
 		}
 	}
 }
@@ -672,7 +714,8 @@ func (w *Worker) executeTurn(
 }
 
 // runGenericPTYSession handles interactive sessions for runners that don't
-// support per-turn execution. Falls back to the stdin-pipe approach.
+// support per-turn execution. Stdin is not forwarded; follow-up input uses
+// the durable task_input inbox via the turn-based path.
 func (w *Worker) runGenericPTYSession(
 	ctx context.Context,
 	task types.RunExecution,
@@ -680,18 +723,8 @@ func (w *Worker) runGenericPTYSession(
 	stdout io.Writer,
 	activityCh chan<- struct{},
 ) error {
-	stdinReader, stdinWriter := io.Pipe()
-	defer stdinReader.Close()
-
-	go forwardTerminalInput(
-		ctx, stdinWriter, task.ExternalId,
-		executionContextFromTask(task),
-		w.terminalIO,
-		func() { signalActivity(activityCh) },
-	)
-
 	addTaskExecutionContext(log.Info(), task).Msg("starting generic PTY session")
-	return w.sandboxManager.AttachPTY(ctx, sandboxID, stdinReader, stdout)
+	return w.sandboxManager.AttachPTY(ctx, sandboxID, nil, stdout)
 }
 
 func interactiveResult(err error, idleTimedOut bool) (int, string, types.RunExecutionStatus) {
@@ -735,71 +768,6 @@ func (w *terminalOutputWriter) Write(p []byte) (int, error) {
 	}
 
 	return len(p), nil
-}
-
-// forwardTerminalInput pipes Redis pubsub input to a writer. Used by
-// generic PTY sessions that accept stdin.
-func forwardTerminalInput(
-	ctx context.Context,
-	stdinWriter *io.PipeWriter,
-	taskID string,
-	executionCtx taskExecutionContext,
-	terminalIO repository.TerminalIORepository,
-	onActivity func(),
-) {
-	defer stdinWriter.Close()
-
-	for {
-		if terminalIO == nil {
-			<-ctx.Done()
-			return
-		}
-
-		inputCh, cleanup, err := terminalIO.SubscribeInput(ctx, taskID)
-		if err != nil {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(250 * time.Millisecond):
-				continue
-			}
-		}
-
-		channelClosed := false
-		for !channelClosed {
-			select {
-			case <-ctx.Done():
-				cleanup()
-				return
-			case data, ok := <-inputCh:
-				if !ok {
-					channelClosed = true
-					continue
-				}
-				if len(data) == 0 {
-					continue
-				}
-				if _, err := stdinWriter.Write(data); err != nil {
-					cleanup()
-					return
-				}
-				if onActivity != nil {
-					onActivity()
-				}
-			}
-		}
-		cleanup()
-		if ctx.Err() != nil {
-			return
-		}
-		addTaskExecutionContextByID(log.Warn(), taskID, executionCtx).Msg("terminal input subscription closed; retrying")
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(250 * time.Millisecond):
-			continue
-		}
-	}
 }
 
 func signalActivity(activityCh chan<- struct{}) {

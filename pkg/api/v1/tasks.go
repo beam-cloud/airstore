@@ -36,6 +36,7 @@ func (g *WorkspaceTasksGroup) registerRoutes() {
 	g.routerGroup.PATCH("/:task_id", g.UpdateTask)
 	g.routerGroup.GET("/:task_id/logs", g.ListTaskLogs)
 	g.routerGroup.GET("/:task_id/stream", g.StreamTaskEvents)
+	g.routerGroup.POST("/:task_id/input", g.SubmitInput)
 	g.routerGroup.POST("/:task_id/cancel", g.CancelTask)
 	g.routerGroup.POST("/:task_id/archive", g.ArchiveTask)
 
@@ -535,6 +536,56 @@ func (g *WorkspaceTasksGroup) scheduleError(c echo.Context, err error) error {
 		return ErrorResponse(c, http.StatusNotFound, err.Error())
 	}
 	return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+}
+
+type submitTaskInputRequest struct {
+	Message        string                  `json:"message"`
+	Action         *types.TaskInputAction  `json:"action,omitempty"`
+	Kind           types.InputKind         `json:"kind,omitempty"`
+	IdempotencyKey string                  `json:"idempotency_key,omitempty"`
+}
+
+func (g *WorkspaceTasksGroup) SubmitInput(c echo.Context) error {
+	if g.agents == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "task service unavailable")
+	}
+	workspaceID, err := requireWorkspaceID(c)
+	if err != nil {
+		return err
+	}
+	taskID := strings.TrimSpace(c.Param("task_id"))
+	if taskID == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "task_id is required")
+	}
+
+	var req submitTaskInputRequest
+	if err := decodeStrictBody(c, &req); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
+	}
+
+	task, err := g.agents.SubmitTaskInput(
+		c.Request().Context(),
+		workspaceID,
+		taskID,
+		req.Kind,
+		req.Action,
+		req.Message,
+		req.IdempotencyKey,
+	)
+	if err != nil {
+		var taskErr *types.ErrAgentTaskNotFound
+		if errors.As(err, &taskErr) {
+			return ErrorResponse(c, http.StatusNotFound, "task not found")
+		}
+		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+	}
+
+	return c.JSON(http.StatusOK, Response{
+		Success: true,
+		Data: map[string]any{
+			"task": task,
+		},
+	})
 }
 
 func (g *WorkspaceTasksGroup) scheduleResp(ctx context.Context, st *types.ScheduledTask) map[string]any {

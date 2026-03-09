@@ -278,17 +278,48 @@ func (c *GatewayClient) SetTaskResult(ctx context.Context, taskID string, exitCo
 	return nil
 }
 
-func (c *GatewayClient) UpdateTaskState(ctx context.Context, taskID string, state string, runID string) error {
+func (c *GatewayClient) UpdateTaskState(ctx context.Context, taskID string, state string, runID string, inputKind string) error {
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
 
 	_, err := c.client.UpdateTaskState(ctx, &pb.UpdateTaskStateRequest{
-		TaskId: taskID,
-		State:  state,
-		RunId:  runID,
+		TaskId:    taskID,
+		State:     state,
+		RunId:     runID,
+		InputKind: inputKind,
 	})
 	if err != nil {
 		return fmt.Errorf("update task state failed: %w", err)
+	}
+	return nil
+}
+
+// ClaimTaskInput claims the next pending durable input for a task.
+func (c *GatewayClient) ClaimTaskInput(ctx context.Context, taskID, runID, executionID string) (*pb.ClaimTaskInputResponse, error) {
+	ctx, cancel := c.withTimeout(ctx)
+	defer cancel()
+
+	resp, err := c.client.ClaimTaskInput(ctx, &pb.ClaimTaskInputRequest{
+		TaskId:      taskID,
+		RunId:       runID,
+		ExecutionId: executionID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("claim task input failed: %w", err)
+	}
+	return resp, nil
+}
+
+// AckTaskInput acknowledges that a claimed input has been consumed.
+func (c *GatewayClient) AckTaskInput(ctx context.Context, inputID string) error {
+	ctx, cancel := c.withTimeout(ctx)
+	defer cancel()
+
+	_, err := c.client.AckTaskInput(ctx, &pb.AckTaskInputRequest{
+		InputId: inputID,
+	})
+	if err != nil {
+		return fmt.Errorf("ack task input failed: %w", err)
 	}
 	return nil
 }

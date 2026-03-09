@@ -2,7 +2,6 @@ package orchestration
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 
@@ -101,37 +100,37 @@ func TestApplyDispatchPayloadIncludesResumeMetadata(t *testing.T) {
 	}
 }
 
-func TestBuildRunInputPayloadCarriesResumeCheckpoint(t *testing.T) {
-	run := &types.AgentRun{
-		ID:        "run-123",
-		SessionID: "session-123",
-		TimeoutMs: 60000,
+func TestIsRetryableError(t *testing.T) {
+	retryable := []string{
+		"session abc checkpoint for run xyz not durable yet",
+		"session ID abc is already in use",
+		"session still held by worker",
+		"TOOMANYREQUESTS: Rate exceeded",
+		"failed to fetch image: GET https://public.ecr.aws/v2/foo: TOOMANYREQUESTS",
+		"failed to prepare rootfs from image: mount archive: failed to fetch image",
+		"connection refused",
+		"dial tcp 10.0.0.1:443: i/o timeout",
+		"TLS handshake timeout",
+		"503 Service Unavailable",
+		"rate limit hit, please retry",
+		"request throttled by upstream",
+		"failed to pull image: temporary failure in name resolution",
+	}
+	for _, msg := range retryable {
+		if !isRetryableError(msg) {
+			t.Fatalf("expected retryable: %s", msg)
+		}
 	}
 
-	payload := buildRunInputPayload(run, "continue please")
-
-	if got := payload["message"]; got != "continue please" {
-		t.Fatalf("message = %#v, want continue please", got)
+	permanent := []string{
+		"agent not found",
+		"invalid configuration",
+		"permission denied",
+		"syntax error in prompt",
 	}
-	if got := payload[types.OrchestrationOutboxPayloadResumeSession]; got != true {
-		t.Fatalf("resume_session = %#v, want true", got)
-	}
-	if got := payload[types.OrchestrationOutboxPayloadResumeExcludeRunID]; got != "run-123" {
-		t.Fatalf("resume_exclude_run_id = %#v, want run-123", got)
-	}
-	if got := payload[types.OrchestrationOutboxPayloadResumeCheckpointRunID]; got != "run-123" {
-		t.Fatalf("resume_checkpoint_run_id = %#v, want run-123", got)
-	}
-}
-
-func TestIsSessionBusyErrorMatchesCheckpointBarrier(t *testing.T) {
-	if !isSessionBusyError(errors.New("session abc checkpoint for run xyz not durable yet")) {
-		t.Fatal("expected checkpoint barrier error to be retryable")
-	}
-	if !isSessionBusyError(errors.New("session ID abc is already in use")) {
-		t.Fatal("expected already-in-use error to be retryable")
-	}
-	if isSessionBusyError(errors.New("totally unrelated failure")) {
-		t.Fatal("expected unrelated error not to be retryable")
+	for _, msg := range permanent {
+		if isRetryableError(msg) {
+			t.Fatalf("expected permanent: %s", msg)
+		}
 	}
 }

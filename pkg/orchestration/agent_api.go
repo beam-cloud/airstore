@@ -31,7 +31,6 @@ type TaskEventBatch struct {
 	Interaction        *types.RunInteraction `json:"interaction,omitempty"`
 	Logs               []common.TaskLogEntry `json:"logs"`
 	RunEvents          []map[string]any      `json:"run_events"`
-	PendingInputs      []types.PendingInput  `json:"pending_inputs"`
 	NextLogCursor      int64                 `json:"next_log_cursor"`
 	NextRunEventCursor int                   `json:"next_run_event_cursor"`
 }
@@ -165,6 +164,9 @@ func (a *AgentAPI) DeleteAgent(ctx context.Context, workspaceID uint, agentID st
 	if trimmedAgentID == "" {
 		return fmt.Errorf("agent_id is required")
 	}
+	if err := a.backend.DeleteScheduledTasksByAgent(ctx, workspaceID, trimmedAgentID); err != nil {
+		return fmt.Errorf("delete agent schedules: %w", err)
+	}
 	return a.backend.DeleteAgentProfile(ctx, workspaceID, trimmedAgentID)
 }
 
@@ -244,6 +246,24 @@ func (a *AgentAPI) ListTasksFiltered(
 	return sanitizeTasksForResponse(tasks), nextOffsetCursor(offset, limit, hasMore), hasMore, nil
 }
 
+func (a *AgentAPI) SubmitTaskInput(
+	ctx context.Context,
+	workspaceID uint,
+	taskID string,
+	kind types.InputKind,
+	action *types.TaskInputAction,
+	message string,
+	idempotencyKey string,
+) (*types.AgentTask, error) {
+	if a.runtime == nil {
+		return nil, fmt.Errorf("task service unavailable")
+	}
+	if strings.TrimSpace(taskID) == "" {
+		return nil, fmt.Errorf("task_id is required")
+	}
+	return a.runtime.AcceptTaskInput(ctx, workspaceID, taskID, kind, action, message, idempotencyKey)
+}
+
 func (a *AgentAPI) EnqueueRunInput(
 	ctx context.Context,
 	workspaceID uint,
@@ -313,9 +333,7 @@ func (a *AgentAPI) GetRunInteraction(ctx context.Context, workspaceID uint, runI
 	if err != nil || interaction == nil {
 		return nil, err
 	}
-	safe := *interaction
-	safe.PendingInputs = sanitizePendingInputs(interaction.PendingInputs)
-	return &safe, nil
+	return interaction, nil
 }
 
 func (a *AgentAPI) ListRunSnapshots(ctx context.Context, workspaceID uint, runID string, limit int) ([]*types.AgentRunSnapshot, error) {
@@ -684,7 +702,6 @@ func (a *AgentAPI) StreamTaskEvents(
 
 	var run *types.AgentRun
 	var interaction *types.RunInteraction
-	var pendingInputs []types.PendingInput
 	runEvents := []map[string]any{}
 	nextRunEventCursor := runEventCursor
 	if task.TargetRunID != nil {
@@ -704,11 +721,6 @@ func (a *AgentAPI) StreamTaskEvents(
 
 		if a.runtime != nil {
 			interaction, _ = a.runtime.GetRunInteraction(ctx, workspaceID, *task.TargetRunID)
-			if interaction != nil {
-				pendingInputs = interaction.PendingInputs
-			} else {
-				pendingInputs, _ = a.runtime.ListRunPendingInputs(ctx, *task.TargetRunID)
-			}
 		}
 	}
 
@@ -720,7 +732,6 @@ func (a *AgentAPI) StreamTaskEvents(
 		Interaction:        interaction,
 		Logs:               logs,
 		RunEvents:          runEvents,
-		PendingInputs:      pendingInputs,
 		NextLogCursor:      nextLogCursor,
 		NextRunEventCursor: nextRunEventCursor,
 	}, nil
@@ -832,21 +843,6 @@ func sanitizeRunsForResponse(runs []*types.AgentRun) []*types.AgentRun {
 	return safe
 }
 
-func sanitizePendingInputs(inputs []types.PendingInput) []types.PendingInput {
-	if len(inputs) == 0 {
-		return inputs
-	}
-	safe := make([]types.PendingInput, len(inputs))
-	for idx, input := range inputs {
-		safe[idx] = types.PendingInput{
-			ID:        strings.TrimSpace(input.ID),
-			Message:   common.RedactSensitiveString(input.Message),
-			CreatedAt: input.CreatedAt,
-		}
-	}
-	return safe
-}
-
 func optionalStringValue(value *string, fallback string) string {
 	if value == nil {
 		return fallback
@@ -890,6 +886,22 @@ func normalizeAgentProfileConfig(config map[string]any, agentKey string) (map[st
 			normalized[key] = defaults[key]
 		}
 	}
+
+	if _, hasSkills := normalized[agentConfigKeySkills]; hasSkills {
+		if sp := stringFromPayload(normalized, agentConfigKeySystemPrompt); sp != "" {
+			if start, end, _, ok := activeSkillsSection(sp); ok {
+				cleaned := strings.TrimSpace(
+					strings.TrimSpace(sp[:start]) + "\n\n" + strings.TrimSpace(sp[end:]),
+				)
+				if cleaned == "" {
+					normalized[agentConfigKeySystemPrompt] = defaults[agentConfigKeySystemPrompt]
+				} else {
+					normalized[agentConfigKeySystemPrompt] = cleaned
+				}
+			}
+		}
+	}
+
 	return normalized, nil
 }
 

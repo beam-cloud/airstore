@@ -105,6 +105,7 @@ export interface AgentTask {
   routing_json: Record<string, unknown>;
   parent_task_id?: string;
   target_run_id?: string;
+  input_kind?: 'approve_reject' | 'free_text';
   accepted_at: string;
   queued_at?: string;
   dispatched_at?: string;
@@ -187,6 +188,29 @@ export interface TaskUpdateParams {
   routing?: RoutingContext;
 }
 
+/** Structured action for approve/reject input. */
+export type TaskInputAction = 'approve' | 'reject';
+
+/** Kind of input the agent is waiting for. */
+export type TaskInputKind = 'approve_reject' | 'free_text';
+
+/** Parameters for submitting follow-up input to a task. */
+export interface SubmitTaskInputParams {
+  /** The follow-up message. Required unless action is provided. */
+  message?: string;
+  /** Structured action (approve/reject). When set, message defaults automatically. */
+  action?: TaskInputAction;
+  /** Kind of input. Inferred from action if omitted. */
+  kind?: TaskInputKind;
+  /** Idempotency key to prevent duplicate submissions. */
+  idempotencyKey?: string;
+}
+
+/** Response from submitting task input. */
+export interface SubmitTaskInputResponse {
+  task: AgentTask;
+}
+
 /** A single log entry from a task execution. */
 export interface TaskLogEntry {
   timestamp: number;
@@ -215,16 +239,7 @@ export interface TaskEventStreamParams {
 export interface RunInteraction {
   state: 'working' | 'waiting_for_input' | 'closed';
   active_execution_id?: string;
-  pending_count: number;
-  pending_inputs?: PendingInput[];
   updated_at?: number;
-}
-
-/** A user message buffered in the run's input queue. */
-export interface PendingInput {
-  id: string;
-  message: string;
-  created_at: number;
 }
 
 /** A lifecycle event emitted by the orchestration engine during a run. */
@@ -244,7 +259,6 @@ export interface TaskEventBatch {
   interaction?: RunInteraction;
   logs: TaskLogEntry[];
   run_events: RunEvent[];
-  pending_inputs: PendingInput[];
   next_log_cursor: number;
   next_run_event_cursor: number;
 }

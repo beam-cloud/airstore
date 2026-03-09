@@ -358,10 +358,55 @@ func (s *WorkerService) UpdateTaskState(ctx context.Context, req *pb.UpdateTaskS
 		return nil, status.Errorf(codes.InvalidArgument, "only waiting/running transitions are allowed, got %q", state)
 	}
 
-	if _, err := s.backend.UpdateTaskStateIfCurrentRun(ctx, taskID, runID, state, nil, nil); err != nil {
+	inputKind := types.InputKind(strings.TrimSpace(req.InputKind))
+	if _, err := s.backend.UpdateTaskStateIfCurrentRun(ctx, taskID, runID, state, nil, nil, inputKind); err != nil {
 		return nil, status.Errorf(codes.Internal, "update task state: %v", err)
 	}
 	return &pb.UpdateTaskStateResponse{}, nil
+}
+
+func (s *WorkerService) ClaimTaskInput(ctx context.Context, req *pb.ClaimTaskInputRequest) (*pb.ClaimTaskInputResponse, error) {
+	if s.backend == nil {
+		return nil, status.Errorf(codes.Unavailable, "task persistence not available")
+	}
+	taskID := strings.TrimSpace(req.TaskId)
+	runID := strings.TrimSpace(req.RunId)
+	executionID := strings.TrimSpace(req.ExecutionId)
+	if taskID == "" || runID == "" || executionID == "" {
+		return nil, status.Error(codes.InvalidArgument, "task_id, run_id, and execution_id are required")
+	}
+	input, err := s.backend.ClaimNextTaskInput(ctx, taskID, runID, executionID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "claim task input: %v", err)
+	}
+	if input == nil {
+		return &pb.ClaimTaskInputResponse{Found: false}, nil
+	}
+	resp := &pb.ClaimTaskInputResponse{
+		Found:   true,
+		InputId: input.ID,
+		Message: input.Message,
+		Kind:    string(input.Kind),
+		Seq:     int32(input.Seq),
+	}
+	if input.Action != nil {
+		resp.Action = string(*input.Action)
+	}
+	return resp, nil
+}
+
+func (s *WorkerService) AckTaskInput(ctx context.Context, req *pb.AckTaskInputRequest) (*pb.AckTaskInputResponse, error) {
+	if s.backend == nil {
+		return nil, status.Errorf(codes.Unavailable, "task persistence not available")
+	}
+	inputID := strings.TrimSpace(req.InputId)
+	if inputID == "" {
+		return nil, status.Error(codes.InvalidArgument, "input_id is required")
+	}
+	if err := s.backend.AckTaskInputConsumed(ctx, inputID); err != nil {
+		return nil, status.Errorf(codes.Internal, "ack task input: %v", err)
+	}
+	return &pb.AckTaskInputResponse{}, nil
 }
 
 func isRunAttemptNotFound(err error) bool {
@@ -442,6 +487,7 @@ func (s *WorkerService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, 
 		nextState,
 		nil,
 		&targetRunID,
+		"",
 	)
 	if err != nil {
 		return err

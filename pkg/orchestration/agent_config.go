@@ -15,6 +15,7 @@ const (
 	agentConfigKeyModel        = "model"
 	agentConfigKeySystemPrompt = "system_prompt"
 	agentConfigKeyWorkspaceDir = "workspace_dir"
+	agentConfigKeySkills       = "skills"
 
 	agentPayloadKeyAgentConfig = "agent_config"
 

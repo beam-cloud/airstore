@@ -22,6 +22,10 @@ service WorkerService {
   rpc AllocateIP(AllocateIPRequest) returns (AllocateIPResponse);
   rpc ReleaseIP(ReleaseIPRequest) returns (ReleaseIPResponse);
 
+  // Task input inbox (durable follow-up claims)
+  rpc ClaimTaskInput(ClaimTaskInputRequest) returns (ClaimTaskInputResponse);
+  rpc AckTaskInput(AckTaskInputRequest) returns (AckTaskInputResponse);
+
   // Task outputs
   rpc CreateTaskOutput(CreateTaskOutputRequest) returns (CreateTaskOutputResponse);
   rpc AppendTaskOutputRows(AppendTaskOutputRowsRequest) returns (AppendTaskOutputRowsResponse);
@@ -116,9 +120,32 @@ message UpdateTaskStateRequest {
   string task_id = 1;
   string state = 2;
   string run_id = 3;
+  string input_kind = 4;
 }
 
 message UpdateTaskStateResponse {}
+
+// Task input inbox
+message ClaimTaskInputRequest {
+  string task_id = 1;
+  string run_id = 2;
+  string execution_id = 3;
+}
+
+message ClaimTaskInputResponse {
+  bool found = 1;
+  string input_id = 2;
+  string message = 3;
+  string kind = 4;
+  string action = 5;
+  int32 seq = 6;
+}
+
+message AckTaskInputRequest {
+  string input_id = 1;
+}
+
+message AckTaskInputResponse {}
 
 // IP allocation for sandbox networking
 message AllocateIPRequest {

@@ -333,12 +333,15 @@ func (s *WorkerService) recoverOrphanedRun(ctx context.Context, run *types.Agent
 
 	errorMsg := fmt.Sprintf("orphaned run recovered automatically: %s", reason)
 
-	// Close the interaction state so the UI doesn't show a stale
-	// "waiting for input" / "working" indicator for a dead session.
+	if err := s.backend.ReleaseStaleTaskInputClaims(ctx, run.ID); err != nil {
+		log.Warn().Err(err).Str("run_id", run.ID).
+			Msg("worker recovery loop: failed to release stale task input claims")
+	}
+
 	if s.terminalIO != nil {
 		if err := s.terminalIO.SetRunInteraction(
 			ctx, run.WorkspaceID, run.ID,
-			types.RunInteractionStateClosed, "",
+			types.RunInteraction{State: types.RunInteractionStateClosed},
 			5*time.Minute,
 		); err != nil {
 			log.Warn().Err(err).Str("run_id", run.ID).

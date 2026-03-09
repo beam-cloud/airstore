@@ -51,9 +51,8 @@ type TaskQueue interface {
 // TerminalIORepository manages interactive terminal I/O transport.
 // Implementations encapsulate broker/channel details (e.g., Redis pub/sub).
 type TerminalIORepository interface {
-	PublishInput(ctx context.Context, taskID string, data []byte) error
-	SubscribeInput(ctx context.Context, taskID string) (<-chan []byte, func(), error)
-	ListPendingInputs(ctx context.Context, taskID string) ([]types.PendingInput, error)
+	PublishInputWake(ctx context.Context, taskID string) error
+	SubscribeInputWake(ctx context.Context, taskID string) (<-chan struct{}, func(), error)
 
 	PublishOutput(ctx context.Context, taskID string, data []byte) error
 	SubscribeOutput(ctx context.Context, taskID string) (<-chan []byte, func(), error)
@@ -70,9 +69,8 @@ type TerminalIORepository interface {
 	GetSessionCheckpoint(ctx context.Context, workspaceID uint, sessionID string) (*types.SessionCheckpoint, error)
 
 	// Run interaction state: backend-owned state for working/waiting/closed.
-	SetRunInteraction(ctx context.Context, workspaceID uint, runID string, state types.RunInteractionState, activeExecutionID string, ttl time.Duration) error
+	SetRunInteraction(ctx context.Context, workspaceID uint, runID string, interaction types.RunInteraction, ttl time.Duration) error
 	GetRunInteraction(ctx context.Context, workspaceID uint, runID string) (*types.RunInteraction, error)
-	ClearRunInteraction(ctx context.Context, workspaceID uint, runID string) error
 }
 
 // MemberRepository manages workspace members
@@ -206,17 +204,27 @@ type BackendRepository interface {
 	GetTaskByIdempotency(ctx context.Context, workspaceId uint, agentId *string, idempotencyKey string) (*types.AgentTask, error)
 	ClaimQueuedTaskForDispatch(ctx context.Context, taskID string, staleAfter time.Duration) (*types.AgentTask, bool, error)
 	UpdateTaskState(ctx context.Context, taskId string, state types.AgentTaskState, droppedReason *string, targetRunID *string) error
-	UpdateTaskStateIfCurrentRun(ctx context.Context, taskID string, expectedRunID string, state types.AgentTaskState, droppedReason *string, targetRunID *string) (bool, error)
+	UpdateTaskStateIfCurrentRun(ctx context.Context, taskID string, expectedRunID string, state types.AgentTaskState, droppedReason *string, targetRunID *string, inputKind types.InputKind) (bool, error)
 	SleepTaskWithOutbox(ctx context.Context, taskID string, expectedRunID string, wakeAt time.Time, wakeReason string, outboxEvent *types.OrchestrationOutboxEvent) (bool, error)
+	RequeueTaskWithOutboxIfCurrentRun(ctx context.Context, task *types.AgentTask, expectedRunID string, outboxEvent *types.OrchestrationOutboxEvent) (bool, error)
 	CancelPendingOutboxEventsForTask(ctx context.Context, taskID string) error
 	UpdateTask(ctx context.Context, task *types.AgentTask) error
 	UpdateTaskCost(ctx context.Context, taskID string, costUSD float64) error
 	ArchiveTask(ctx context.Context, taskId string) error
+
+	// Task input inbox
+	AppendTaskInput(ctx context.Context, input *types.TaskInput) error
+	ListPendingTaskInputs(ctx context.Context, taskID string, limit int) ([]*types.TaskInput, error)
+	ClaimNextTaskInput(ctx context.Context, taskID string, runID string, executionID string) (*types.TaskInput, error)
+	AckTaskInputConsumed(ctx context.Context, inputID string) error
+	ReleaseStaleTaskInputClaims(ctx context.Context, runID string) error
+	CountPendingTaskInputs(ctx context.Context, taskID string) (int, error)
 	CreateScheduledTask(ctx context.Context, st *types.ScheduledTask) error
 	GetScheduledTask(ctx context.Context, workspaceID uint, externalID string) (*types.ScheduledTask, error)
 	ListScheduledTasks(ctx context.Context, workspaceID uint) ([]*types.ScheduledTask, error)
 	UpdateScheduledTask(ctx context.Context, st *types.ScheduledTask) error
 	DeleteScheduledTask(ctx context.Context, workspaceID uint, externalID string) error
+	DeleteScheduledTasksByAgent(ctx context.Context, workspaceID uint, agentID string) error
 	ListDueScheduledTasks(ctx context.Context, now time.Time, limit int) ([]*types.ScheduledTask, error)
 	AdvanceScheduledTask(ctx context.Context, id string, oldNextRunAt, newNextRunAt time.Time) (bool, error)
 	RevertScheduledTaskAdvance(ctx context.Context, id string, currentNextRunAt, revertTo time.Time) (bool, error)
