@@ -1252,11 +1252,11 @@ func (b *PostgresBackend) AppendTaskInput(ctx context.Context, input *types.Task
 		 _seq AS (
 		   SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq
 		     FROM task_input
-		    WHERE task_id = $2
+		    WHERE task_id = $2::uuid
 		 )
 		 INSERT INTO task_input (workspace_id, task_id, session_id, kind, action, message, idempotency_key, status,
 		   seq)
-		 SELECT $1, $2, $3, $4, $5, $6, $7, 'pending', next_seq
+		 SELECT $1::bigint, $2::uuid, $3, $4, $5, $6, $7, 'pending', next_seq
 		   FROM _lock, _seq
 		 ON CONFLICT (task_id, idempotency_key) DO NOTHING
 		 RETURNING id, seq, created_at`,
@@ -1283,7 +1283,7 @@ func (b *PostgresBackend) ListPendingTaskInputs(ctx context.Context, taskID stri
 		        idempotency_key, status, claimed_by_run_id, claimed_by_execution_id,
 		        created_at, claimed_at, consumed_at
 		   FROM task_input
-		  WHERE task_id = $1 AND status = 'pending'
+		  WHERE task_id = $1::uuid AND status = 'pending'
 		  ORDER BY seq ASC
 		  LIMIT $2`,
 		taskID, limit,
@@ -1313,7 +1313,7 @@ func (b *PostgresBackend) ClaimNextTaskInput(ctx context.Context, taskID string,
 		        claimed_at = CURRENT_TIMESTAMP
 		  WHERE id = (
 		    SELECT id FROM task_input
-		     WHERE task_id = $1 AND status = 'pending'
+		     WHERE task_id = $1::uuid AND status = 'pending'
 		     ORDER BY seq ASC
 		     LIMIT 1
 		     FOR UPDATE SKIP LOCKED
@@ -1339,7 +1339,7 @@ func (b *PostgresBackend) AckTaskInputConsumed(ctx context.Context, inputID stri
 		`UPDATE task_input
 		    SET status = 'consumed',
 		        consumed_at = CURRENT_TIMESTAMP
-		  WHERE id = $1 AND status = 'claimed'`,
+		  WHERE id = $1::uuid AND status = 'claimed'`,
 		inputID,
 	)
 	if err != nil {
@@ -1369,7 +1369,7 @@ func (b *PostgresBackend) CountPendingTaskInputs(ctx context.Context, taskID str
 	var count int
 	err := b.db.QueryRowContext(
 		ctx,
-		`SELECT COUNT(*) FROM task_input WHERE task_id = $1 AND status = 'pending'`,
+		`SELECT COUNT(*) FROM task_input WHERE task_id = $1::uuid AND status = 'pending'`,
 		taskID,
 	).Scan(&count)
 	if err != nil {
