@@ -502,7 +502,8 @@ func (s *AgentService) deliverTaskInput(ctx context.Context, task *types.AgentTa
 // requeueTaskForResume requeues a task via the outbox when no active run can
 // consume the pending input.
 func (s *AgentService) requeueTaskForResume(ctx context.Context, task *types.AgentTask, lastRun *types.AgentRun) error {
-	task.PayloadJSON = restartTaskPayload(task.PayloadJSON, lastRun, "")
+	inputMessage, _ := s.backend.ConsumeOldestPendingInput(ctx, task.ID)
+	task.PayloadJSON = restartTaskPayload(task.PayloadJSON, lastRun, inputMessage)
 	requeued, err := s.backend.RequeueTaskWithOutboxIfCurrentRun(
 		ctx,
 		task,

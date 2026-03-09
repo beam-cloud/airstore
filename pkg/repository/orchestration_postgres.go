@@ -1372,6 +1372,29 @@ func (b *PostgresBackend) ClaimNextTaskInput(ctx context.Context, taskID string,
 	return ti, nil
 }
 
+func (b *PostgresBackend) ConsumeOldestPendingInput(ctx context.Context, taskID string) (string, error) {
+	var message string
+	err := b.db.QueryRowContext(ctx,
+		`UPDATE task_input
+		    SET status = 'consumed', consumed_at = CURRENT_TIMESTAMP
+		  WHERE id = (
+		    SELECT id FROM task_input
+		     WHERE task_id = $1::uuid AND status = 'pending'
+		     ORDER BY seq ASC LIMIT 1
+		     FOR UPDATE SKIP LOCKED
+		  )
+		  RETURNING message`,
+		taskID,
+	).Scan(&message)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("consume oldest pending input: %w", err)
+	}
+	return strings.TrimSpace(message), nil
+}
+
 func (b *PostgresBackend) AckTaskInputConsumed(ctx context.Context, inputID string) error {
 	_, err := b.db.ExecContext(
 		ctx,

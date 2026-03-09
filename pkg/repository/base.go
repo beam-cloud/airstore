@@ -217,6 +217,7 @@ type BackendRepository interface {
 	ListPendingTaskInputs(ctx context.Context, taskID string, limit int) ([]*types.TaskInput, error)
 	ListOrphanedPendingInputs(ctx context.Context, maxAge time.Duration, limit int) ([]*types.TaskInput, error)
 	ClaimNextTaskInput(ctx context.Context, taskID string, runID string, executionID string) (*types.TaskInput, error)
+	ConsumeOldestPendingInput(ctx context.Context, taskID string) (string, error)
 	AckTaskInputConsumed(ctx context.Context, inputID string) error
 	ReleaseStaleTaskInputClaims(ctx context.Context, runID string) error
 	CountPendingTaskInputs(ctx context.Context, taskID string) (int, error)

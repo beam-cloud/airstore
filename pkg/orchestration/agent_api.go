@@ -532,11 +532,27 @@ func (a *AgentAPI) ListTaskLogs(
 		return nil, seqNum, err
 	}
 
-	if a.runtime == nil || a.runtime.s2 == nil || !a.runtime.s2.Enabled() || task.TargetRunID == nil {
+	if a.runtime == nil || a.runtime.s2 == nil || !a.runtime.s2.Enabled() {
 		return []common.TaskLogEntry{}, seqNum, nil
 	}
 
-	currentRunID := strings.TrimSpace(*task.TargetRunID)
+	currentRunID := ""
+	if task.TargetRunID != nil {
+		currentRunID = strings.TrimSpace(*task.TargetRunID)
+	}
+
+	// When TargetRunID is nil (task is between runs after requeue or input),
+	// fall back to the most recent run so we can still load history from s2.
+	if currentRunID == "" {
+		runs, runErr := a.backend.ListAgentRunsFiltered(ctx, workspaceID, types.AgentRunListFilter{
+			TaskID: &taskID,
+			Limit:  1,
+		})
+		if runErr != nil || len(runs) == 0 || runs[0] == nil {
+			return []common.TaskLogEntry{}, seqNum, nil
+		}
+		currentRunID = runs[0].ID
+	}
 	if currentRunID == "" {
 		return []common.TaskLogEntry{}, seqNum, nil
 	}
