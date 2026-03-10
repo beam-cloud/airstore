@@ -27,6 +27,12 @@ function ClassifyTurn(message: string) -> TurnClassification {
     - "Ready to merge — shall I create the PR?"
     - "I can delete these files. Should I proceed?"
     - "Would you like me to continue?"
+    - "Here's the draft email. Want me to send it?"
+    - "I've prepared the report. Should I publish it?"
+    - "Awaiting your approval before sending."
+    - "Please review and approve."
+    - Presenting a draft (email, report, document) and asking to send/publish/submit
+    - Any message where the user just needs to say yes/no/approve/reject to proceed
 
     NEEDS_INPUT + FREE_TEXT examples:
     - "Which option do you prefer? A, B, or C?"
@@ -34,6 +40,10 @@ function ClassifyTurn(message: string) -> TurnClassification {
     - "What email address should I use?"
     - "Could you clarify what you mean by X?"
     - "Let me know when you're ready"
+
+    When in doubt between APPROVE_REJECT and FREE_TEXT, prefer APPROVE_REJECT
+    if the agent is presenting finished work (a draft, a plan, a list of actions)
+    and asking the user to greenlight it.
 
     COMPLETE examples:
     - Delivers a final result ("Here's the report...")

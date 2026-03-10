@@ -20,6 +20,54 @@ import (
 	"github.com/boundaryml/baml/engine/language_client_go/pkg/cffi"
 )
 
+type ApprovalSummary struct {
+	Summary string `json:"summary"`
+	Details string `json:"details"`
+}
+
+func (c *ApprovalSummary) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "ApprovalSummary" {
+		panic(fmt.Sprintf("expected ApprovalSummary, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "summary":
+			c.Summary = baml.Decode(valueHolder).Interface().(string)
+
+		case "details":
+			c.Details = baml.Decode(valueHolder).Interface().(string)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class ApprovalSummary", key))
+
+		}
+	}
+
+}
+
+func (c ApprovalSummary) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["summary"] = c.Summary
+
+	fields["details"] = c.Details
+
+	return baml.EncodeClass("ApprovalSummary", fields, nil)
+}
+
+func (c ApprovalSummary) BamlTypeName() string {
+	return "ApprovalSummary"
+}
+
 type ExtractedOutput struct {
 	Kind    OutputKind `json:"kind"`
 	Title   string     `json:"title"`
@@ -147,8 +195,8 @@ func (c FollowUpSignal) BamlTypeName() string {
 }
 
 type TurnClassification struct {
-	Outcome   TurnOutcome `json:"outcome"`
-	InputKind *InputKind  `json:"input_kind"`
+	Outcome    TurnOutcome `json:"outcome"`
+	Input_kind *InputKind  `json:"input_kind"`
 }
 
 func (c *TurnClassification) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
@@ -164,20 +212,29 @@ func (c *TurnClassification) Decode(holder *cffi.CFFIValueClass, typeMap baml.Ty
 		key := field.Key
 		valueHolder := field.Value
 		switch key {
+
 		case "outcome":
 			c.Outcome = baml.Decode(valueHolder).Interface().(TurnOutcome)
+
 		case "input_kind":
-			c.InputKind = baml.Decode(valueHolder).Interface().(*InputKind)
+			c.Input_kind = baml.Decode(valueHolder).Interface().(*InputKind)
+
 		default:
+
 			panic(fmt.Sprintf("unexpected field: %s in class TurnClassification", key))
+
 		}
 	}
+
 }
 
 func (c TurnClassification) Encode() (*cffi.HostValue, error) {
 	fields := map[string]any{}
+
 	fields["outcome"] = c.Outcome
-	fields["input_kind"] = c.InputKind
+
+	fields["input_kind"] = c.Input_kind
+
 	return baml.EncodeClass("TurnClassification", fields, nil)
 }
 

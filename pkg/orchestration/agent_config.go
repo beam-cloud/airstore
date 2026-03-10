@@ -1,9 +1,6 @@
 package orchestration
 
-import (
-	"fmt"
-	"strings"
-)
+import "strings"
 
 const (
 	AgentRunnerClaudeCode = "claude_code"
@@ -22,11 +19,11 @@ const (
 	agentDefaultWorkspaceDirPrefix = "/workspace/agents/"
 )
 
-// defaultAgentSystemPromptFmt is the template for new agent profiles.
-// The single %s is replaced with the agent's workspace_dir.
-const defaultAgentSystemPromptFmt = `You are an AI agent operating inside an Airstore workspace.
+// defaultAgentSystemPrompt is the template for new agent profiles.
+// {{workspace_dir}} is resolved at runtime by applyAgentConfigEnv.
+const defaultAgentSystemPrompt = `You are an AI agent operating inside an Airstore workspace.
 
-Your working directory is %s — use it for scratch files, drafts, and any outputs you create.
+Your working directory is {{workspace_dir}} — use it for scratch files, drafts, and any outputs you create.
 
 The full workspace is mounted at /workspace. Read /workspace/AGENTS.md for the complete filesystem layout, available tools, and connected data sources.
 
@@ -60,7 +57,7 @@ func DefaultAgentConfig(agentKey string) map[string]any {
 		agentConfigKeyRunner:       AgentRunnerClaudeCode,
 		agentConfigKeyProvider:     providerForRunner(AgentRunnerClaudeCode),
 		agentConfigKeyWorkspaceDir: wd,
-		agentConfigKeySystemPrompt: fmt.Sprintf(defaultAgentSystemPromptFmt, wd),
+		agentConfigKeySystemPrompt: defaultAgentSystemPrompt,
 	}
 }
 

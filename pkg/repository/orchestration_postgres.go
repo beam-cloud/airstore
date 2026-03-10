@@ -923,6 +923,7 @@ func (b *PostgresBackend) UpdateTaskStateIfCurrentRun(
 	droppedReason *string,
 	targetRunID *string,
 	inputKind types.InputKind,
+	waitingSummary *string,
 ) (bool, error) {
 	now := time.Now()
 	var inputKindVal *string
@@ -930,7 +931,7 @@ func (b *PostgresBackend) UpdateTaskStateIfCurrentRun(
 		s := string(inputKind)
 		inputKindVal = &s
 	}
-	baseArgs := []any{taskID, state, now, droppedReason, targetRunID, inputKindVal}
+	baseArgs := []any{taskID, state, now, droppedReason, targetRunID, inputKindVal, waitingSummary}
 	expectedRunID = strings.TrimSpace(expectedRunID)
 
 	query := `
@@ -945,6 +946,7 @@ func (b *PostgresBackend) UpdateTaskStateIfCurrentRun(
 		    dropped_reason = CASE WHEN $2::agent_task_state = 'dropped'::agent_task_state THEN $4 ELSE dropped_reason END,
 		    target_run_id = COALESCE($5::uuid, target_run_id),
 		    input_kind = CASE WHEN $2::agent_task_state = 'waiting'::agent_task_state THEN COALESCE($6, input_kind) ELSE $6 END,
+		    waiting_summary = CASE WHEN $2::agent_task_state = 'waiting'::agent_task_state THEN $7 ELSE NULL END,
 		    wake_at = CASE WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN wake_at ELSE NULL END,
 		    wake_reason = CASE WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN wake_reason ELSE NULL END,
 		    wake_count = CASE WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN wake_count ELSE 0 END,
@@ -957,7 +959,7 @@ func (b *PostgresBackend) UpdateTaskStateIfCurrentRun(
 		query += " AND target_run_id IS NULL"
 		args = baseArgs
 	} else {
-		query += " AND target_run_id = $7::uuid"
+		query += " AND target_run_id = $8::uuid"
 		args = append(baseArgs, expectedRunID)
 	}
 

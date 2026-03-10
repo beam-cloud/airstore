@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -63,12 +64,16 @@ func (w *Worker) setRunInteractionState(ctx context.Context, task types.RunExecu
 
 // setOriginTaskState transitions the origin task's state via the gateway.
 // Used to eagerly reflect waiting/running in the UI during a live session.
-func (w *Worker) setOriginTaskState(ctx context.Context, task types.RunExecution, state types.AgentTaskState, inputKind types.InputKind) {
+func (w *Worker) setOriginTaskState(ctx context.Context, task types.RunExecution, state types.AgentTaskState, inputKind types.InputKind, waitingSummary ...string) {
 	execCtx := executionContextFromTask(task)
 	if execCtx.originTaskID == "" || execCtx.runID == "" {
 		return
 	}
-	if err := w.gatewayClient.UpdateTaskState(ctx, execCtx.originTaskID, string(state), execCtx.runID, string(inputKind)); err != nil {
+	var summary string
+	if len(waitingSummary) > 0 {
+		summary = waitingSummary[0]
+	}
+	if err := w.gatewayClient.UpdateTaskState(ctx, execCtx.originTaskID, string(state), execCtx.runID, string(inputKind), summary); err != nil {
 		addTaskExecutionContext(log.Warn().Err(err).Str("target_state", string(state)), task).
 			Msg("failed to eagerly update origin task state")
 	}
@@ -255,9 +260,10 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 
 	var checkHeartbeat func() bool
 	var touchHeartbeat func()
-	var checkNeedsInput func() (bool, types.InputKind)
+	var checkNeedsInput func() (bool, types.InputKind, string)
 	var needsInputRunner NeedsInputRunner
 	var needsInputMarkerPath string
+	var terminalWriter *terminalOutputWriter
 	bamlEnv := w.sandboxManager.BamlEnv()
 
 	if heartbeatRunner, ok := runner.(HeartbeatRunner); ok && mountSource != "" {
@@ -284,24 +290,40 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 		} else {
 			needsInputRunner = ir
 			needsInputMarkerPath = markerPath
-			checkNeedsInput = func() (bool, types.InputKind) {
+			checkNeedsInput = func() (bool, types.InputKind, string) {
 				msg := ir.ReadLastMessage(markerPath)
 				if msg == "" {
-					return false, ""
+					return false, "", ""
 				}
 				classification, err := agentsignal.ClassifyTurn(ctx, msg, agentsignal.WithEnv(bamlEnv))
 				if err != nil {
 					addTaskExecutionContext(log.Warn().Err(err), task).
 						Msg("BAML ClassifyTurn failed, defaulting to complete")
-					return false, ""
+					return false, "", ""
 				}
 				if classification.Outcome != signaltypes.TurnOutcomeNEEDS_INPUT {
-					return false, ""
+					return false, "", ""
 				}
-				if classification.InputKind == nil {
-					return true, types.InputKindFreeText
+				inputKind := types.InputKindFreeText
+				if classification.Input_kind != nil {
+					inputKind = types.InputKind(strings.ToLower(string(*classification.Input_kind)))
 				}
-				return true, types.InputKind(strings.ToLower(string(*classification.InputKind)))
+
+				var waitingSummary string
+				if inputKind == types.InputKindApproveReject && terminalWriter.ringBuf != nil {
+					assistantText := extractAssistantText(terminalWriter.ringBuf.Bytes(), 4000)
+					if assistantText != "" {
+						summary, extractErr := agentsignal.ExtractApprovalSummary(ctx, assistantText, agentsignal.WithEnv(bamlEnv))
+						if extractErr != nil {
+							addTaskExecutionContext(log.Warn().Err(extractErr), task).
+								Msg("BAML ExtractApprovalSummary failed, proceeding without summary")
+						} else {
+							waitingSummary = marshalApprovalSummary(summary)
+						}
+					}
+				}
+
+				return true, inputKind, waitingSummary
 			}
 
 			addTaskExecutionContext(log.Info().Str("runner", runner.Name()), task).
@@ -332,7 +354,7 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	interactiveMirror := NewTaskOutput(task.ExternalId, "stdout", w.sandboxManager.taskOutputWriters(sessionCtx, task, env)...)
 	defer interactiveMirror.Flush()
 
-	terminalWriter := &terminalOutputWriter{
+	terminalWriter = &terminalOutputWriter{
 		ctx:          sessionCtx,
 		taskID:       task.ExternalId,
 		terminalIO:   w.terminalIO,
@@ -343,7 +365,8 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 				touchHeartbeat()
 			}
 		},
-		mirror: interactiveMirror,
+		mirror:  interactiveMirror,
+		ringBuf: newRingBuffer(terminalRingBufSize),
 	}
 
 	start := time.Now()
@@ -413,7 +436,7 @@ func (w *Worker) runTurnSession(
 	env map[string]string,
 	stdout io.Writer,
 	activityCh chan<- struct{},
-	checkNeedsInput func() (bool, types.InputKind),
+	checkNeedsInput func() (bool, types.InputKind, string),
 ) (error, bool) {
 	prompt := strings.TrimSpace(task.Prompt)
 	isFirstTurn := true
@@ -449,13 +472,13 @@ func (w *Worker) runTurnSession(
 		if checkNeedsInput == nil {
 			return nil, false
 		}
-		needsInput, inputKind := checkNeedsInput()
+		needsInput, inputKind, waitingSummary := checkNeedsInput()
 		if !needsInput {
 			return nil, false
 		}
 
 		w.setRunInteractionState(ctx, task, types.RunInteractionStateWaitingForInput)
-		w.setOriginTaskState(ctx, task, types.AgentTaskStateWaiting, inputKind)
+		w.setOriginTaskState(ctx, task, types.AgentTaskStateWaiting, inputKind, waitingSummary)
 		addTaskExecutionContext(log.Info(), task).Msg("turn complete, agent is waiting for input")
 		prompt = w.waitForFollowupInput(ctx, task, DefaultBetweenTurnsTimeout, activityCh)
 	}
@@ -742,6 +765,8 @@ func interactiveResult(err error, idleTimedOut bool) (int, string, types.RunExec
 	return -1, err.Error(), types.RunExecutionStatusFailed
 }
 
+const terminalRingBufSize = 256 * 1024 // 256KB
+
 type terminalOutputWriter struct {
 	ctx          context.Context
 	taskID       string
@@ -749,11 +774,16 @@ type terminalOutputWriter struct {
 	executionCtx taskExecutionContext
 	onActivity   func()
 	mirror       io.Writer
+	ringBuf      *ringBuffer
 }
 
 func (w *terminalOutputWriter) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
+	}
+
+	if w.ringBuf != nil {
+		_, _ = w.ringBuf.Write(p)
 	}
 
 	if w.mirror != nil {
@@ -768,6 +798,17 @@ func (w *terminalOutputWriter) Write(p []byte) (int, error) {
 	}
 
 	return len(p), nil
+}
+
+func marshalApprovalSummary(s signaltypes.ApprovalSummary) string {
+	b, err := json.Marshal(map[string]string{
+		"summary": s.Summary,
+		"details": s.Details,
+	})
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 func signalActivity(activityCh chan<- struct{}) {

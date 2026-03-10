@@ -372,7 +372,11 @@ func (s *WorkerService) UpdateTaskState(ctx context.Context, req *pb.UpdateTaskS
 	}
 
 	inputKind := types.InputKind(strings.TrimSpace(req.InputKind))
-	if _, err := s.backend.UpdateTaskStateIfCurrentRun(ctx, taskID, runID, state, nil, nil, inputKind); err != nil {
+	var waitingSummary *string
+	if s := strings.TrimSpace(req.WaitingSummary); s != "" {
+		waitingSummary = &s
+	}
+	if _, err := s.backend.UpdateTaskStateIfCurrentRun(ctx, taskID, runID, state, nil, nil, inputKind, waitingSummary); err != nil {
 		return nil, status.Errorf(codes.Internal, "update task state: %v", err)
 	}
 	if run, err := s.backend.GetAgentRunByID(ctx, runID); err == nil && run != nil {
@@ -504,6 +508,7 @@ func (s *WorkerService) settleOriginTask(ctx context.Context, runID string) erro
 		nil,
 		&targetRunID,
 		"",
+		nil,
 	)
 	if err != nil {
 		return err

@@ -15,6 +15,42 @@ package type_builder
 
 import baml "github.com/boundaryml/baml/engine/language_client_go/pkg"
 
+type ApprovalSummaryClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *ApprovalSummaryClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *ApprovalSummaryClassView) PropertySummary() (ClassPropertyView, error) {
+	return t.inner.Property("summary")
+}
+
+func (t *ApprovalSummaryClassView) PropertyDetails() (ClassPropertyView, error) {
+	return t.inner.Property("details")
+}
+
+func (t *TypeBuilder) ApprovalSummary() (*ApprovalSummaryClassView, error) {
+	bld, err := t.inner.Class("ApprovalSummary")
+	if err != nil {
+		return nil, err
+	}
+	return &ApprovalSummaryClassView{inner: bld}, nil
+}
+
+func (t *ApprovalSummaryClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
 type ExtractedOutputClassView struct {
 	inner baml.ClassBuilder
 }
@@ -104,5 +140,41 @@ func (t *TypeBuilder) FollowUpSignal() (*FollowUpSignalClassView, error) {
 }
 
 func (t *FollowUpSignalClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
+type TurnClassificationClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *TurnClassificationClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *TurnClassificationClassView) PropertyOutcome() (ClassPropertyView, error) {
+	return t.inner.Property("outcome")
+}
+
+func (t *TurnClassificationClassView) PropertyInput_kind() (ClassPropertyView, error) {
+	return t.inner.Property("input_kind")
+}
+
+func (t *TypeBuilder) TurnClassification() (*TurnClassificationClassView, error) {
+	bld, err := t.inner.Class("TurnClassification")
+	if err != nil {
+		return nil, err
+	}
+	return &TurnClassificationClassView{inner: bld}, nil
+}
+
+func (t *TurnClassificationClassView) Type() (baml.Type, error) {
 	return t.inner.Type()
 }

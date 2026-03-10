@@ -51,6 +51,42 @@ func (t *FollowUpIntentEnumView) Type() (baml.Type, error) {
 	return t.inner.Type()
 }
 
+type InputKindEnumView struct {
+	inner baml.EnumBuilder
+}
+
+func (t *InputKindEnumView) ListValues() ([]EnumValueView, error) {
+	result, err := t.inner.ListValues()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]EnumValueView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *InputKindEnumView) ValueAPPROVE_REJECT() (EnumValueView, error) {
+	return t.inner.Value("APPROVE_REJECT")
+}
+
+func (t *InputKindEnumView) ValueFREE_TEXT() (EnumValueView, error) {
+	return t.inner.Value("FREE_TEXT")
+}
+
+func (t *TypeBuilder) InputKind() (*InputKindEnumView, error) {
+	bld, err := t.inner.Enum("InputKind")
+	if err != nil {
+		return nil, err
+	}
+	return &InputKindEnumView{inner: bld}, nil
+}
+
+func (t *InputKindEnumView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
 type OutputKindEnumView struct {
 	inner baml.EnumBuilder
 }
