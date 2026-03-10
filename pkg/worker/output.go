@@ -380,6 +380,11 @@ func extractAssistantText(raw []byte, limit int) string {
 	s := buf.String()
 	if limit > 0 && len(s) > limit {
 		s = s[len(s)-limit:]
+		// The byte slice may start mid-rune; advance past any
+		// continuation bytes (10xxxxxx) to the next valid rune boundary.
+		for len(s) > 0 && s[0]&0xC0 == 0x80 {
+			s = s[1:]
+		}
 	}
 	return s
 }
