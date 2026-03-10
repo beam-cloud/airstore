@@ -373,8 +373,9 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 
 	var runErr error
 	var needsInput bool
+	var lastUserPrompt string
 	if tr, ok := runner.(TurnRunner); ok {
-		runErr, needsInput = w.runTurnSession(sessionCtx, task, sandboxID, tr, env, terminalWriter, activityCh, checkNeedsInput)
+		runErr, needsInput, lastUserPrompt = w.runTurnSession(sessionCtx, task, sandboxID, tr, env, terminalWriter, activityCh, checkNeedsInput)
 	} else {
 		runErr = w.runGenericPTYSession(sessionCtx, task, sandboxID, terminalWriter, activityCh)
 	}
@@ -390,7 +391,11 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	var wakeSignal *types.RunExecutionWakeSignal
 	if !needsInput && runErr == nil && needsInputRunner != nil && needsInputMarkerPath != "" {
 		if msg := needsInputRunner.ReadLastMessage(needsInputMarkerPath); msg != "" {
-			followUp, err := agentsignal.ClassifyFollowUp(ctx, msg, agentsignal.WithEnv(bamlEnv))
+			var userMsg *string
+			if lastUserPrompt != "" {
+				userMsg = &lastUserPrompt
+			}
+			followUp, err := agentsignal.ClassifyFollowUp(ctx, msg, userMsg, agentsignal.WithEnv(bamlEnv))
 			if err != nil {
 				addTaskExecutionContext(log.Warn().Err(err), task).
 					Msg("BAML ClassifyFollowUp failed, treating as no follow-up")
@@ -437,7 +442,7 @@ func (w *Worker) runTurnSession(
 	stdout io.Writer,
 	activityCh chan<- struct{},
 	checkNeedsInput func() (bool, types.InputKind, string),
-) (error, bool) {
+) (error, bool, string) {
 	prompt := strings.TrimSpace(task.Prompt)
 	isFirstTurn := true
 	sessionEnv := cloneTurnEnv(env)
@@ -445,7 +450,7 @@ func (w *Worker) runTurnSession(
 
 	for prompt != "" {
 		if ctx.Err() != nil {
-			return ctx.Err(), false
+			return ctx.Err(), false, ""
 		}
 		w.setRunInteractionState(ctx, task, types.RunInteractionStateWorking)
 		if !isFirstTurn {
@@ -457,24 +462,24 @@ func (w *Worker) runTurnSession(
 				ctx, task, sandboxID, runner, sessionEnv, stdout, prompt, firstTurnStrategies,
 			)
 			if err != nil {
-				return err, false
+				return err, false, ""
 			}
 			sessionEnv = nextEnv
 			isFirstTurn = false
 		} else {
 			if err := w.executeTurn(ctx, task, sandboxID, runner, sessionEnv, stdout, prompt, TurnArgModeFollowup, 1, 1, ""); err != nil {
-				return err, false
+				return err, false, ""
 			}
 		}
 
 		signalActivity(activityCh)
 
 		if checkNeedsInput == nil {
-			return nil, false
+			return nil, false, prompt
 		}
 		needsInput, inputKind, waitingSummary := checkNeedsInput()
 		if !needsInput {
-			return nil, false
+			return nil, false, prompt
 		}
 
 		w.setRunInteractionState(ctx, task, types.RunInteractionStateWaitingForInput)
@@ -483,7 +488,7 @@ func (w *Worker) runTurnSession(
 		prompt = w.waitForFollowupInput(ctx, task, DefaultBetweenTurnsTimeout, activityCh)
 	}
 
-	return nil, true
+	return nil, true, ""
 }
 
 // waitForFollowupInput claims the next durable task_input via the gateway,

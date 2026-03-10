@@ -21,7 +21,7 @@ import (
 	baml "github.com/boundaryml/baml/engine/language_client_go/pkg"
 )
 
-func ClassifyFollowUp(ctx context.Context, message string, opts ...CallOptionFunc) (types.FollowUpSignal, error) {
+func ClassifyFollowUp(ctx context.Context, message string, user_message *string, opts ...CallOptionFunc) (types.FollowUpSignal, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -37,7 +37,7 @@ func ClassifyFollowUp(ctx context.Context, message string, opts ...CallOptionFun
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"message": message},
+		Kwargs: map[string]any{"message": message, "user_message": user_message},
 		Env:    getEnvVars(callOpts.env),
 	}
 

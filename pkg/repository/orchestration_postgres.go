@@ -745,7 +745,7 @@ func (b *PostgresBackend) ListTasksFiltered(ctx context.Context, workspaceId uin
 
 	query := agentTaskSelect + `
 		WHERE workspace_id = $1
-		  AND archived_at IS NULL
+		  AND ($9::boolean OR archived_at IS NULL)
 		  AND ($2::uuid IS NULL OR agent_id = $2::uuid)
 		  AND kind::text = $3
 		  AND ($4::text[] IS NULL OR state::text = ANY($4::text[]))
@@ -766,6 +766,7 @@ func (b *PostgresBackend) ListTasksFiltered(ctx context.Context, workspaceId uin
 		filter.CreatedBefore,
 		limit,
 		offset,
+		filter.IncludeArchived,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list filtered agent tasks: %w", err)

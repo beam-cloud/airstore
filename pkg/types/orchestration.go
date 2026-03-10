@@ -578,12 +578,13 @@ type AgentRunSnapshot struct {
 }
 
 type AgentTaskListFilter struct {
-	AgentID       *string
-	States        []AgentTaskState
-	CreatedAfter  *time.Time
-	CreatedBefore *time.Time
-	Limit         int
-	Offset        int
+	AgentID        *string
+	States         []AgentTaskState
+	CreatedAfter   *time.Time
+	CreatedBefore  *time.Time
+	IncludeArchived bool
+	Limit          int
+	Offset         int
 }
 
 type AgentRunListFilter struct {

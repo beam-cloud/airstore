@@ -42,7 +42,7 @@ type WorkspaceLiveBatch struct {
 }
 
 const (
-	defaultWorkspaceStreamTaskLimit   = 100
+	defaultWorkspaceStreamTaskLimit   = 500
 	defaultWorkspaceStreamOutputLimit = 60
 )
 
@@ -242,7 +242,7 @@ func (a *AgentAPI) ListTasksFiltered(
 	workspaceID uint,
 	filter types.AgentTaskListFilter,
 ) ([]*types.AgentTask, string, bool, error) {
-	limit, offset := normalizeOffsetPage(filter.Limit, filter.Offset, 50, 200)
+	limit, offset := normalizeOffsetPage(filter.Limit, filter.Offset, 50, 500)
 	filter.Limit = limit + 1
 	filter.Offset = offset
 
@@ -739,7 +739,8 @@ func (a *AgentAPI) StreamTaskEvents(
 
 func (a *AgentAPI) WorkspaceLiveBatch(ctx context.Context, workspaceID uint) (*WorkspaceLiveBatch, error) {
 	tasks, _, _, err := a.ListTasksFiltered(ctx, workspaceID, types.AgentTaskListFilter{
-		Limit: defaultWorkspaceStreamTaskLimit,
+		IncludeArchived: true,
+		Limit:           defaultWorkspaceStreamTaskLimit,
 	})
 	if err != nil {
 		return nil, err
