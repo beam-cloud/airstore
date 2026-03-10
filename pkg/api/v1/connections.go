@@ -189,7 +189,7 @@ func (cg *ConnectionsGroup) Delete(c echo.Context) error {
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
-	if conn == nil {
+	if conn == nil || conn.WorkspaceId != auth.WorkspaceId(ctx) {
 		return ErrorResponse(c, http.StatusNotFound, "connection not found")
 	}
 

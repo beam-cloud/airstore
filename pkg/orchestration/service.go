@@ -712,7 +712,9 @@ func applyDispatchPayload(task *types.AgentTask, values map[string]any, retryAtt
 		task.PayloadJSON = map[string]any{}
 	}
 	if prompt := dispatchPromptFromValues(values); prompt != "" {
-		task.PayloadJSON["message"] = prompt
+		if task.PayloadJSON["message"] == nil || task.PayloadJSON["message"] == "" {
+			task.PayloadJSON["message"] = prompt
+		}
 		task.PayloadJSON["prompt"] = prompt
 	}
 	if boolFromAny(values[types.OrchestrationOutboxPayloadResumeSession]) {
@@ -1122,6 +1124,7 @@ func (s *AgentService) settleOriginTask(ctx context.Context, runID string, waiti
 		nil,
 		&targetRunID,
 		"",
+		nil,
 	)
 	if err != nil {
 		return err
@@ -2488,14 +2491,18 @@ func applyAgentConfigEnv(env map[string]string, config map[string]any) {
 		}
 		env["AIRSTORE_AGENT_CONFIG_"+sanitized] = stringifyEnvValue(value)
 	}
+	wd := strings.TrimSpace(stringFromPayload(config, "workspace_dir"))
+	if wd != "" {
+		env["AIRSTORE_AGENT_WORKSPACE_DIR"] = wd
+	}
 	if sp := strings.TrimSpace(stringFromPayload(config, "system_prompt")); sp != "" {
+		if wd != "" {
+			sp = strings.ReplaceAll(sp, "{{workspace_dir}}", wd)
+		}
 		env["AIRSTORE_AGENT_SYSTEM_PROMPT"] = sp
 	}
 	if mode := strings.TrimSpace(stringFromPayload(config, "system_prompt_mode")); mode != "" {
 		env["AIRSTORE_AGENT_SYSTEM_PROMPT_MODE"] = mode
-	}
-	if wd := strings.TrimSpace(stringFromPayload(config, "workspace_dir")); wd != "" {
-		env["AIRSTORE_AGENT_WORKSPACE_DIR"] = wd
 	}
 }
 

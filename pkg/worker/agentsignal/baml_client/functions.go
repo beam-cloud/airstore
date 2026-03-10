@@ -169,6 +169,80 @@ func ClassifyTurn(ctx context.Context, message string, opts ...CallOptionFunc) (
 	}
 }
 
+func ExtractApprovalSummary(ctx context.Context, context string, opts ...CallOptionFunc) (types.ApprovalSummary, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	// Resolve client option to clientRegistry (client takes precedence)
+	if callOpts.client != nil {
+		if callOpts.clientRegistry == nil {
+			callOpts.clientRegistry = baml.NewClientRegistry()
+		}
+		callOpts.clientRegistry.SetPrimaryClient(*callOpts.client)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"context": context},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		panic(err)
+	}
+
+	if callOpts.onTick == nil {
+		result, err := bamlRuntime.CallFunction(ctx, "ExtractApprovalSummary", encoded, callOpts.onTick)
+		if err != nil {
+			return types.ApprovalSummary{}, err
+		}
+
+		if result.Error != nil {
+			return types.ApprovalSummary{}, result.Error
+		}
+
+		casted := (result.Data).(types.ApprovalSummary)
+
+		return casted, nil
+	} else {
+		channel, err := bamlRuntime.CallFunctionStream(ctx, "ExtractApprovalSummary", encoded, callOpts.onTick)
+		if err != nil {
+			return types.ApprovalSummary{}, err
+		}
+
+		for result := range channel {
+			if result.Error != nil {
+				return types.ApprovalSummary{}, result.Error
+			}
+
+			if result.HasData {
+				return result.Data.(types.ApprovalSummary), nil
+			}
+		}
+
+		return types.ApprovalSummary{}, fmt.Errorf("No data returned from stream")
+	}
+}
+
 func ExtractOutputs(ctx context.Context, tool_name string, tool_input string, tool_result string, opts ...CallOptionFunc) ([]types.ExtractedOutput, error) {
 
 	var callOpts callOption

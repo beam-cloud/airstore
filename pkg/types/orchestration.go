@@ -481,6 +481,7 @@ type AgentTask struct {
 	QueueMode      AgentQueueMode `json:"queue_mode" db:"queue_mode"`
 	State          AgentTaskState `json:"state" db:"state"`
 	InputKind      InputKind      `json:"input_kind,omitempty" db:"input_kind"`
+	WaitingSummary *string        `json:"waiting_summary,omitempty" db:"waiting_summary"`
 	IdempotencyKey string         `json:"idempotency_key" db:"idempotency_key"`
 	PayloadJSON    map[string]any `json:"payload_json" db:"-"`
 	RoutingJSON    map[string]any `json:"routing_json" db:"-"`

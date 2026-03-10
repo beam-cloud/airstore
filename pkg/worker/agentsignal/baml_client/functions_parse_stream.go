@@ -18,7 +18,6 @@ import (
 	"fmt"
 
 	"github.com/beam-cloud/airstore/pkg/worker/agentsignal/baml_client/stream_types"
-	"github.com/beam-cloud/airstore/pkg/worker/agentsignal/baml_client/types"
 	baml "github.com/boundaryml/baml/engine/language_client_go/pkg"
 )
 
@@ -73,8 +72,8 @@ func (*parse_stream) ClassifyFollowUp(text string, opts ...CallOptionFunc) (stre
 	return casted, nil
 }
 
-// / Parse version of ClassifyTurn (Takes in string and returns types.TurnOutcome)
-func (*parse_stream) ClassifyTurn(text string, opts ...CallOptionFunc) (types.TurnOutcome, error) {
+// / Parse version of ClassifyTurn (Takes in string and returns stream_types.TurnClassification)
+func (*parse_stream) ClassifyTurn(text string, opts ...CallOptionFunc) (stream_types.TurnClassification, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -112,10 +111,57 @@ func (*parse_stream) ClassifyTurn(text string, opts ...CallOptionFunc) (types.Tu
 
 	result, err := bamlRuntime.CallFunctionParse(context.Background(), "ClassifyTurn", encoded)
 	if err != nil {
-		return types.TurnOutcome(""), err
+		return stream_types.TurnClassification{}, err
 	}
 
-	casted := (result).(types.TurnOutcome)
+	casted := (result).(stream_types.TurnClassification)
+
+	return casted, nil
+}
+
+// / Parse version of ExtractApprovalSummary (Takes in string and returns stream_types.ApprovalSummary)
+func (*parse_stream) ExtractApprovalSummary(text string, opts ...CallOptionFunc) (stream_types.ApprovalSummary, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"text": text, "stream": true},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		// This should never happen. if it does, please file an issue at https://github.com/boundaryml/baml/issues
+		// and include the type of the args you're passing in.
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: ExtractApprovalSummary: %w", err)
+		panic(wrapped_err)
+	}
+
+	result, err := bamlRuntime.CallFunctionParse(context.Background(), "ExtractApprovalSummary", encoded)
+	if err != nil {
+		return stream_types.ApprovalSummary{}, err
+	}
+
+	casted := (result).(stream_types.ApprovalSummary)
 
 	return casted, nil
 }

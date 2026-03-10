@@ -21,3 +21,11 @@ client<llm> FollowUpClassifier {
     api_key env.ANTHROPIC_API_KEY
   }
 }
+
+client<llm> ApprovalSummarizer {
+  provider anthropic
+  options {
+    model claude-sonnet-4-5-20250929
+    api_key env.ANTHROPIC_API_KEY
+  }
+}

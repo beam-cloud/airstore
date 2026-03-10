@@ -278,15 +278,16 @@ func (c *GatewayClient) SetTaskResult(ctx context.Context, taskID string, exitCo
 	return nil
 }
 
-func (c *GatewayClient) UpdateTaskState(ctx context.Context, taskID string, state string, runID string, inputKind string) error {
+func (c *GatewayClient) UpdateTaskState(ctx context.Context, taskID string, state string, runID string, inputKind string, waitingSummary string) error {
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
 
 	_, err := c.client.UpdateTaskState(ctx, &pb.UpdateTaskStateRequest{
-		TaskId:    taskID,
-		State:     state,
-		RunId:     runID,
-		InputKind: inputKind,
+		TaskId:         taskID,
+		State:          state,
+		RunId:          runID,
+		InputKind:      inputKind,
+		WaitingSummary: waitingSummary,
 	})
 	if err != nil {
 		return fmt.Errorf("update task state failed: %w", err)

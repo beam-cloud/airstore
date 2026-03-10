@@ -121,6 +121,7 @@ message UpdateTaskStateRequest {
   string state = 2;
   string run_id = 3;
   string input_kind = 4;
+  string waiting_summary = 5;
 }
 
 message UpdateTaskStateResponse {}
