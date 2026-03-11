@@ -197,7 +197,7 @@ func generateTerrainMap() TerrainMap {
 
 func defaultPeaks() []LandmarkPeak {
 	return []LandmarkPeak{
-		{X: 75, Z: 30, Height: 22, Radius: 12},
+		{X: 75, Z: 30, Height: 100, Radius: 12},
 		{X: -70, Z: -40, Height: 25, Radius: 14},
 		{X: 40, Z: 70, Height: 18, Radius: 10},
 		{X: -60, Z: 55, Height: 20, Radius: 11},
@@ -216,20 +216,43 @@ func defaultPeaks() []LandmarkPeak {
 
 func DefaultWorldMap() *WorldMap {
 	terrain := generateTerrainMap()
+	peaks := terrain.Peaks
+
 	spawnX, spawnZ := 0.0, 35.0
-	spawnY := TerrainHeight(spawnX, spawnZ, terrain.Peaks) + 0.6
+	spawnY := TerrainHeight(spawnX, spawnZ, peaks) + 0.6
+
+	zones := defaultZones()
+	placeOnTerrain(zones, peaks)
+
+	decorations := defaultDecorations()
+	for i := range decorations {
+		d := &decorations[i]
+		d.Position.Y = TerrainHeight(d.Position.X, d.Position.Z, peaks)
+	}
 
 	return &WorldMap{
-		Terrain: terrain,
-		Spawn:   WorldVec3{X: spawnX, Y: spawnY, Z: spawnZ},
-		Zones:   defaultZones(),
-		Decorations: defaultDecorations(),
+		Terrain:     terrain,
+		Spawn:       WorldVec3{X: spawnX, Y: spawnY, Z: spawnZ},
+		Zones:       zones,
+		Decorations: decorations,
 		EntityTypes: []EntityTypeDef{
 			{Kind: company.EntityKindAgent, Shape: "cube", Size: 0.5, FloatY: 1.4},
 			{Kind: company.EntityKindSource, Shape: "octahedron", Size: 0.35, FloatY: 1.0},
 			{Kind: company.EntityKindResult, Shape: "octahedron", Size: 0.35, FloatY: 1.0},
 			{Kind: company.EntityKindSchedule, Shape: "octahedron", Size: 0.35, FloatY: 1.0},
 		},
+	}
+}
+
+// placeOnTerrain sets zone and entity slot Y positions to terrain height.
+func placeOnTerrain(zones []ZoneDefinition, peaks []LandmarkPeak) {
+	for i := range zones {
+		z := &zones[i]
+		z.Position.Y = TerrainHeight(z.Position.X, z.Position.Z, peaks)
+		for j := range z.EntitySlots {
+			s := &z.EntitySlots[j]
+			s.Y = TerrainHeight(s.X, s.Z, peaks)
+		}
 	}
 }
 
