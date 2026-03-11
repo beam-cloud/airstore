@@ -95,6 +95,9 @@ func NewWorkspaceAuthMiddleware(cfg WorkspaceAuthConfig) echo.MiddlewareFunc {
 
 			ctx := c.Request().Context()
 			token := strings.TrimPrefix(c.Request().Header.Get("Authorization"), "Bearer ")
+			if token == "" {
+				token = c.QueryParam("token")
+			}
 
 			// Fast path: no admin token configured — treat as open access.
 			if cfg.AdminToken == "" && token == "" {

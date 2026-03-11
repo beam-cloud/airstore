@@ -32,6 +32,8 @@ import (
 	"github.com/beam-cloud/airstore/pkg/channels/inbound"
 	"github.com/beam-cloud/airstore/pkg/clients"
 	"github.com/beam-cloud/airstore/pkg/common"
+	"github.com/beam-cloud/airstore/pkg/company"
+	companygame "github.com/beam-cloud/airstore/pkg/company/game"
 	"github.com/beam-cloud/airstore/pkg/compression"
 	"github.com/beam-cloud/airstore/pkg/gateway/services"
 	"github.com/beam-cloud/airstore/pkg/hooks"
@@ -651,6 +653,14 @@ func (g *Gateway) registerServices() error {
 		apiv1.NewTaskOutputsGroup(agentAPIRoot.Group("/tasks/:task_id/outputs"), g.BackendRepo, g.RedisClient)
 		apiv1.NewRunsGroup(agentAPIRoot.Group("/runs"), agentAPI)
 		apiv1.NewWorkspaceChannelsGroup(agentAPIRoot.Group("/channels"), channelRegistry, agentAPI, emailChannel)
+
+		// Company Copilot API (workspace-scoped)
+		companyCopilot := company.NewCopilot(g.s2Client, agentAPI, g.BackendRepo, g.BackendRepo)
+		companyWorld := companygame.NewWorldRuntime(g.s2Client, agentAPI, g.BackendRepo, g.BackendRepo)
+		companyStore := repository.NewOrchestrationStore(g.BackendRepo, g.RedisClient)
+		companyGroup := agentAPIRoot.Group("/company")
+		apiv1.NewCompanyGroup(companyGroup, companyCopilot, companyWorld, agentAPI, g.BackendRepo, g.BackendRepo, companyStore)
+		log.Info().Msg("company API registered at /api/v1/workspaces/:workspace_id/company")
 
 		// Inbound channel webhooks (global, no workspace auth -- resolved via channel bindings)
 		inboundProcessor := inbound.NewProcessor(g.s2Client, agentAPI)
