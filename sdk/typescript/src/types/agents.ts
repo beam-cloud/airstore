@@ -12,6 +12,7 @@ export interface AgentConfig {
   system_prompt?: string;
   system_prompt_mode?: string;
   workspace_dir?: string;
+  skills?: string[];
   [key: string]: unknown;
 }
 
@@ -21,6 +22,10 @@ export interface AgentProfile {
   workspace_id: number;
   agent_key: string;
   name: string;
+  role: string;
+  memory_scope: string;
+  quality_score?: number;
+  cost_budget_usd?: number;
   config_json: AgentConfig;
   active: boolean;
   created_at: string;
@@ -39,6 +44,53 @@ export interface AgentCreateParams {
 /** Parameters for updating an existing agent profile. All fields are optional. */
 export interface AgentUpdateParams {
   name?: string;
+  role?: string;
+  memoryScope?: string;
+  qualityScore?: number;
+  costBudgetUsd?: number;
   config?: AgentConfig;
   active?: boolean;
+}
+
+/**
+ * A channel binding that routes inbound messages (email, SMS) to an agent or workspace.
+ *
+ * When `agent_id` is set, the binding is scoped to that specific agent —
+ * inbound messages go directly to that agent as tasks.
+ *
+ * When `agent_id` is null, the binding is workspace-level — inbound
+ * messages are routed to agents automatically via BAML classification.
+ */
+export interface ChannelBinding {
+  id: number;
+  workspace_id: number;
+  agent_id: string | null;
+  channel_type: 'email' | 'sms';
+  address: string;
+  config_json: Record<string, unknown>;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Aggregated task metrics for an agent. */
+export interface AgentStats {
+  total: number;
+  by_state: Record<string, number>;
+  avg_run_sec?: number;
+  quality_score?: number;
+  total_cost_usd: number;
+  running_count: number;
+  completed_count: number;
+  failed_count: number;
+}
+
+/** Parameters for upserting channel bindings. */
+export interface UpdateChannelsParams {
+  channels: Array<{
+    channel_type: string;
+    address: string;
+    active?: boolean;
+    config_json?: Record<string, unknown>;
+  }>;
 }

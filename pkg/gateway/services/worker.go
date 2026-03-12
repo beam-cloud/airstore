@@ -2,11 +2,13 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/common"
+	"github.com/beam-cloud/airstore/pkg/orchestration"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/scheduler"
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -18,22 +20,24 @@ import (
 
 type WorkerService struct {
 	pb.UnimplementedWorkerServiceServer
-	scheduler           *scheduler.Scheduler
-	backend             repository.BackendRepository
-	workerRepo          repository.WorkerRepository
-	taskQueue           repository.TaskQueue
-	redisClient         *common.RedisClient
-	terminalIO          repository.TerminalIORepository
-	claimLeaseTTL       time.Duration
-	recoveryLoopEnabled bool
-	recoveryInterval    time.Duration
-	recoveryBatchSize   int
+	scheduler              *scheduler.Scheduler
+	backend                repository.BackendRepository
+	workerRepo             repository.WorkerRepository
+	taskQueue              repository.TaskQueue
+	redisClient            *common.RedisClient
+	terminalIO             repository.TerminalIORepository
+	claimLeaseTTL          time.Duration
+	unclaimedRunStaleAfter time.Duration
+	recoveryLoopEnabled    bool
+	recoveryInterval       time.Duration
+	recoveryBatchSize      int
 }
 
 const (
-	defaultRunClaimLeaseTTL      = 45 * time.Second
-	defaultRecoveryLoopInterval  = 10 * time.Second
-	defaultRecoveryLoopBatchSize = 50
+	defaultRunClaimLeaseTTL       = 45 * time.Second
+	defaultUnclaimedRunStaleAfter = 2 * time.Minute
+	defaultRecoveryLoopInterval   = 10 * time.Second
+	defaultRecoveryLoopBatchSize  = 50
 )
 
 func NewWorkerService(
@@ -47,6 +51,10 @@ func NewWorkerService(
 	claimLeaseTTL := schedulerConfig.RunClaimLeaseTTL
 	if claimLeaseTTL <= 0 {
 		claimLeaseTTL = defaultRunClaimLeaseTTL
+	}
+	unclaimedRunStaleAfter := schedulerConfig.UnclaimedRunStaleAfter
+	if unclaimedRunStaleAfter <= 0 {
+		unclaimedRunStaleAfter = defaultUnclaimedRunStaleAfter
 	}
 	recoveryInterval := schedulerConfig.RecoveryLoopInterval
 	if recoveryInterval <= 0 {
@@ -63,16 +71,30 @@ func NewWorkerService(
 	}
 
 	return &WorkerService{
-		scheduler:           sched,
-		backend:             backend,
-		workerRepo:          workerRepo,
-		taskQueue:           taskQueue,
-		redisClient:         redisClient,
-		terminalIO:          terminalIO,
-		claimLeaseTTL:       claimLeaseTTL,
-		recoveryLoopEnabled: schedulerConfig.RecoveryLoopEnabled,
-		recoveryInterval:    recoveryInterval,
-		recoveryBatchSize:   recoveryBatchSize,
+		scheduler:              sched,
+		backend:                backend,
+		workerRepo:             workerRepo,
+		taskQueue:              taskQueue,
+		redisClient:            redisClient,
+		terminalIO:             terminalIO,
+		claimLeaseTTL:          claimLeaseTTL,
+		unclaimedRunStaleAfter: unclaimedRunStaleAfter,
+		recoveryLoopEnabled:    schedulerConfig.RecoveryLoopEnabled,
+		recoveryInterval:       recoveryInterval,
+		recoveryBatchSize:      recoveryBatchSize,
+	}
+}
+
+func (s *WorkerService) publishTaskUpdate(ctx context.Context, workspaceID uint, taskID string) {
+	if s == nil || s.redisClient == nil || strings.TrimSpace(taskID) == "" {
+		return
+	}
+	store := repository.NewOrchestrationStore(s.backend, s.redisClient)
+	if err := store.PublishTaskLive(ctx, taskID); err != nil {
+		log.Debug().Err(err).Str("task_id", taskID).Msg("failed to publish task live update")
+	}
+	if err := store.PublishWorkspaceLive(ctx, workspaceID); err != nil {
+		log.Debug().Err(err).Uint("workspace_id", workspaceID).Msg("failed to publish workspace live update")
 	}
 }
 
@@ -225,7 +247,7 @@ func (s *WorkerService) SetTaskStarted(ctx context.Context, req *pb.SetTaskStart
 			types.AgentRunEventPayloadKeyTaskID:    req.TaskId,
 			types.AgentRunEventPayloadKeyEvent:     string(types.AgentRunEventStartRejectedTerminalRun),
 		})
-		_ = s.markOriginTaskTerminalIfCurrentRun(ctx, attempt.RunID)
+		_ = s.settleOriginTask(ctx, attempt.RunID)
 		return nil, status.Errorf(codes.FailedPrecondition, "run is already terminal")
 	}
 
@@ -284,7 +306,7 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 	if attempt == nil {
 		return nil, status.Errorf(codes.FailedPrecondition, "run attempt mapping not found")
 	}
-	if !isRunAttemptActive(attempt) {
+	if !attempt.IsActive() {
 		log.Debug().
 			Str("task_id", req.TaskId).
 			Str("run_id", attempt.RunID).
@@ -324,7 +346,7 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 }
 
 func buildRunResultOutboxPayload(req *pb.SetTaskResultRequest, attemptID string, resultKey string) map[string]any {
-	return map[string]any{
+	payload := map[string]any{
 		types.OrchestrationOutboxPayloadTaskID:                      strings.TrimSpace(req.TaskId),
 		types.OrchestrationOutboxPayloadAttemptID:                   attemptID,
 		types.OrchestrationOutboxPayloadExitCode:                    int(req.ExitCode),
@@ -337,17 +359,86 @@ func buildRunResultOutboxPayload(req *pb.SetTaskResultRequest, attemptID string,
 		types.OrchestrationOutboxPayloadTotalCostUSD:                req.TotalCostUsd,
 		types.OrchestrationOutboxPayloadLLMModelUsageJSON:           req.LlmModelUsageJson,
 		types.OrchestrationOutboxPayloadIdempotency:                 resultKey,
+		types.OrchestrationOutboxPayloadWaitingForInput:             req.WaitingForInput,
 	}
+	if ws := req.WakeSignal; ws != nil {
+		payload[types.OrchestrationOutboxPayloadWakeDelayMinutes] = int(ws.DelayMinutes)
+		payload[types.OrchestrationOutboxPayloadWakeReason] = ws.Reason
+		payload[types.OrchestrationOutboxPayloadWakeFollowUpPrompt] = ws.FollowUpPrompt
+	}
+	return payload
 }
 
-func isRunAttemptActive(attempt *types.AgentRunAttempt) bool {
-	if attempt == nil {
-		return false
+func (s *WorkerService) UpdateTaskState(ctx context.Context, req *pb.UpdateTaskStateRequest) (*pb.UpdateTaskStateResponse, error) {
+	if s.backend == nil {
+		return nil, status.Errorf(codes.Unavailable, "task persistence not available")
 	}
-	if attempt.EndedAt != nil {
-		return false
+	taskID := strings.TrimSpace(req.TaskId)
+	runID := strings.TrimSpace(req.RunId)
+	state := types.AgentTaskState(strings.TrimSpace(req.State))
+	if taskID == "" || runID == "" || state == "" {
+		return nil, status.Error(codes.InvalidArgument, "task_id, state, and run_id are required")
 	}
-	return attempt.Status.IsInFlight()
+	if state != types.AgentTaskStateWaiting && state != types.AgentTaskStateRunning {
+		return nil, status.Errorf(codes.InvalidArgument, "only waiting/running transitions are allowed, got %q", state)
+	}
+
+	inputKind := types.InputKind(strings.TrimSpace(req.InputKind))
+	var waitingSummary *string
+	if s := strings.TrimSpace(req.WaitingSummary); s != "" {
+		waitingSummary = &s
+	}
+	if _, err := s.backend.UpdateTaskStateIfCurrentRun(ctx, taskID, runID, state, nil, nil, inputKind, waitingSummary); err != nil {
+		return nil, status.Errorf(codes.Internal, "update task state: %v", err)
+	}
+	if run, err := s.backend.GetAgentRunByID(ctx, runID); err == nil && run != nil {
+		s.publishTaskUpdate(ctx, run.WorkspaceID, taskID)
+	}
+	return &pb.UpdateTaskStateResponse{}, nil
+}
+
+func (s *WorkerService) ClaimTaskInput(ctx context.Context, req *pb.ClaimTaskInputRequest) (*pb.ClaimTaskInputResponse, error) {
+	if s.backend == nil {
+		return nil, status.Errorf(codes.Unavailable, "task persistence not available")
+	}
+	taskID := strings.TrimSpace(req.TaskId)
+	runID := strings.TrimSpace(req.RunId)
+	executionID := strings.TrimSpace(req.ExecutionId)
+	if taskID == "" || runID == "" || executionID == "" {
+		return nil, status.Error(codes.InvalidArgument, "task_id, run_id, and execution_id are required")
+	}
+	input, err := s.backend.ClaimNextTaskInput(ctx, taskID, runID, executionID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "claim task input: %v", err)
+	}
+	if input == nil {
+		return &pb.ClaimTaskInputResponse{Found: false}, nil
+	}
+	resp := &pb.ClaimTaskInputResponse{
+		Found:   true,
+		InputId: input.ID,
+		Message: input.Message,
+		Kind:    string(input.Kind),
+		Seq:     int32(input.Seq),
+	}
+	if input.Action != nil {
+		resp.Action = string(*input.Action)
+	}
+	return resp, nil
+}
+
+func (s *WorkerService) AckTaskInput(ctx context.Context, req *pb.AckTaskInputRequest) (*pb.AckTaskInputResponse, error) {
+	if s.backend == nil {
+		return nil, status.Errorf(codes.Unavailable, "task persistence not available")
+	}
+	inputID := strings.TrimSpace(req.InputId)
+	if inputID == "" {
+		return nil, status.Error(codes.InvalidArgument, "input_id is required")
+	}
+	if err := s.backend.AckTaskInputConsumed(ctx, inputID); err != nil {
+		return nil, status.Errorf(codes.Internal, "ack task input: %v", err)
+	}
+	return &pb.AckTaskInputResponse{}, nil
 }
 
 func isRunAttemptNotFound(err error) bool {
@@ -399,7 +490,7 @@ func (s *WorkerService) claimLeaseDuration() time.Duration {
 	return defaultRunClaimLeaseTTL
 }
 
-func (s *WorkerService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, runID string) error {
+func (s *WorkerService) settleOriginTask(ctx context.Context, runID string) error {
 	if s.backend == nil || strings.TrimSpace(runID) == "" {
 		return nil
 	}
@@ -420,7 +511,7 @@ func (s *WorkerService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, 
 		return nil
 	}
 	targetRunID := run.ID
-	nextState := types.TaskTerminalStateForRun(run.Status, run.Interactive)
+	nextState := types.TaskTerminalStateForRun(run.Status)
 	updated, err := s.backend.UpdateTaskStateIfCurrentRun(
 		ctx,
 		run.OriginTaskID,
@@ -428,6 +519,8 @@ func (s *WorkerService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, 
 		nextState,
 		nil,
 		&targetRunID,
+		"",
+		nil,
 	)
 	if err != nil {
 		return err
@@ -435,7 +528,9 @@ func (s *WorkerService) markOriginTaskTerminalIfCurrentRun(ctx context.Context, 
 	if !updated {
 		return nil
 	}
-	return nil
+	task.State = nextState
+	task.TargetRunID = &targetRunID
+	return orchestration.SyncTaskOutcome(ctx, s.backend, task, run)
 }
 
 func appendRunSnapshot(
@@ -489,6 +584,78 @@ func updateExecutionInstanceCounts(ctx context.Context, backend repository.Backe
 	}
 	now := time.Now()
 	return backend.AdjustExecutionInstanceRunningAttempts(ctx, instanceKey, runningDelta, &now)
+}
+
+// ── Task Outputs ────────────────────────────────────────────────────────────
+
+func (s *WorkerService) CreateTaskOutput(ctx context.Context, req *pb.CreateTaskOutputRequest) (*pb.CreateTaskOutputResponse, error) {
+	if s.backend == nil {
+		return nil, status.Errorf(codes.Unavailable, "task persistence not available")
+	}
+
+	output := &types.TaskOutput{
+		WorkspaceID: uint(req.WorkspaceId),
+		TaskID:      req.TaskId,
+		OutputType:  req.OutputType,
+		Title:       req.Title,
+	}
+	if req.RunId != "" {
+		output.RunID = &req.RunId
+	}
+	if req.AgentId != "" {
+		output.AgentID = &req.AgentId
+	}
+	if req.SchemaJson != "" {
+		if err := json.Unmarshal([]byte(req.SchemaJson), &output.Schema); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid schema_json: %v", err)
+		}
+	}
+	if req.DataJson != "" {
+		if err := json.Unmarshal([]byte(req.DataJson), &output.Data); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid data_json: %v", err)
+		}
+	} else {
+		output.Data = map[string]any{}
+	}
+	if req.MetadataJson != "" {
+		if err := json.Unmarshal([]byte(req.MetadataJson), &output.Metadata); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid metadata_json: %v", err)
+		}
+	}
+	if req.Uri != "" {
+		output.URI = &req.Uri
+	}
+
+	if err := s.backend.CreateTaskOutput(ctx, output); err != nil {
+		return nil, status.Errorf(codes.Internal, "create output: %v", err)
+	}
+	s.publishTaskUpdate(ctx, output.WorkspaceID, output.TaskID)
+	return &pb.CreateTaskOutputResponse{Id: output.ID}, nil
+}
+
+func (s *WorkerService) AppendTaskOutputRows(ctx context.Context, req *pb.AppendTaskOutputRowsRequest) (*pb.AppendTaskOutputRowsResponse, error) {
+	if s.backend == nil {
+		return nil, status.Errorf(codes.Unavailable, "task persistence not available")
+	}
+	if err := s.backend.AppendTaskOutputRows(ctx, uint(req.WorkspaceId), req.OutputId, []byte(req.RowsJson)); err != nil {
+		if _, ok := err.(*types.ErrTaskOutputNotFound); ok {
+			return nil, status.Errorf(codes.NotFound, "output not found: %s", req.OutputId)
+		}
+		return nil, status.Errorf(codes.Internal, "append rows: %v", err)
+	}
+	return &pb.AppendTaskOutputRowsResponse{}, nil
+}
+
+func (s *WorkerService) FinalizeTaskOutput(ctx context.Context, req *pb.FinalizeTaskOutputRequest) (*pb.FinalizeTaskOutputResponse, error) {
+	if s.backend == nil {
+		return nil, status.Errorf(codes.Unavailable, "task persistence not available")
+	}
+	if req.Summary != "" {
+		if err := s.backend.UpdateTaskOutputSummary(ctx, uint(req.WorkspaceId), req.OutputId, req.Summary); err != nil {
+			return nil, status.Errorf(codes.Internal, "finalize output: %v", err)
+		}
+	}
+	return &pb.FinalizeTaskOutputResponse{}, nil
 }
 
 func (s *WorkerService) AllocateIP(ctx context.Context, req *pb.AllocateIPRequest) (*pb.AllocateIPResponse, error) {

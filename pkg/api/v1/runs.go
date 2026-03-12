@@ -50,6 +50,7 @@ func (g *RunsGroup) ListRuns(c echo.Context) error {
 	cursorQuery := strings.TrimSpace(c.QueryParam("cursor"))
 	statusQuery := strings.TrimSpace(c.QueryParam("status"))
 	agentQuery := strings.TrimSpace(c.QueryParam("agent_id"))
+	taskQuery := strings.TrimSpace(c.QueryParam("task_id"))
 	sessionQuery := strings.TrimSpace(c.QueryParam("session_id"))
 	createdAfterQuery := strings.TrimSpace(c.QueryParam("created_after"))
 	createdBeforeQuery := strings.TrimSpace(c.QueryParam("created_before"))
@@ -57,7 +58,7 @@ func (g *RunsGroup) ListRuns(c echo.Context) error {
 	updatedBeforeQuery := strings.TrimSpace(c.QueryParam("updated_before"))
 	if isSimpleListRunsQuery(
 		limitQuery, cursorQuery, statusQuery,
-		agentQuery, sessionQuery,
+		agentQuery, taskQuery, sessionQuery,
 		createdAfterQuery, createdBeforeQuery,
 		updatedAfterQuery, updatedBeforeQuery,
 	) {
@@ -96,6 +97,7 @@ func (g *RunsGroup) ListRuns(c echo.Context) error {
 
 	filter := types.AgentRunListFilter{
 		AgentID:       strPtrMaybeQuery(agentQuery),
+		TaskID:        strPtrMaybeQuery(taskQuery),
 		Statuses:      statuses,
 		SessionID:     strPtrMaybeQuery(sessionQuery),
 		CreatedAfter:  createdAfter,

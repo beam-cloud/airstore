@@ -10,14 +10,6 @@ import (
 
 const AgentTaskKindAgentCommand = "agent_command"
 
-// PendingInput represents a user message buffered in the run's input
-// queue, waiting to be consumed by the worker session.
-type PendingInput struct {
-	ID        string `json:"id"`
-	Message   string `json:"message"`
-	CreatedAt int64  `json:"created_at"`
-}
-
 type AgentQueueMode string
 
 const (
@@ -49,13 +41,64 @@ const (
 	RunInteractionStateClosed          RunInteractionState = "closed"
 )
 
-// RunInteraction is the canonical interaction view consumed by clients.
+// InputKind distinguishes what sort of user input an agent is waiting for.
+type InputKind string
+
+const (
+	InputKindApproveReject InputKind = "approve_reject"
+	InputKindFreeText      InputKind = "free_text"
+)
+
+// TaskInputAction is a structured reply action (e.g. approve/reject).
+type TaskInputAction string
+
+const (
+	TaskInputActionApprove TaskInputAction = "approve"
+	TaskInputActionReject  TaskInputAction = "reject"
+)
+
+// TaskInputStatus tracks the lifecycle of a durable follow-up input row.
+type TaskInputStatus string
+
+const (
+	TaskInputStatusPending  TaskInputStatus = "pending"
+	TaskInputStatusClaimed  TaskInputStatus = "claimed"
+	TaskInputStatusConsumed TaskInputStatus = "consumed"
+)
+
+// TaskInput is a durable follow-up input row owned by a task and consumed
+// by whichever run is active for the task/session at delivery time.
+type TaskInput struct {
+	ID                 string           `json:"id" db:"id"`
+	WorkspaceID        uint             `json:"workspace_id" db:"workspace_id"`
+	TaskID             string           `json:"task_id" db:"task_id"`
+	SessionID          string           `json:"session_id" db:"session_id"`
+	Seq                int              `json:"seq" db:"seq"`
+	Kind               InputKind        `json:"kind" db:"kind"`
+	Action             *TaskInputAction `json:"action,omitempty" db:"action"`
+	Message            string           `json:"message" db:"message"`
+	IdempotencyKey     string           `json:"idempotency_key" db:"idempotency_key"`
+	Status             TaskInputStatus  `json:"status" db:"status"`
+	ClaimedByRunID     *string          `json:"claimed_by_run_id,omitempty" db:"claimed_by_run_id"`
+	ClaimedByExecID    *string          `json:"claimed_by_execution_id,omitempty" db:"claimed_by_execution_id"`
+	CreatedAt          time.Time        `json:"created_at" db:"created_at"`
+	ClaimedAt          *time.Time       `json:"claimed_at,omitempty" db:"claimed_at"`
+	ConsumedAt         *time.Time       `json:"consumed_at,omitempty" db:"consumed_at"`
+}
+
+// RunInteraction is the runtime interaction state of an active run.
 type RunInteraction struct {
 	State             RunInteractionState `json:"state"`
 	ActiveExecutionID string              `json:"active_execution_id,omitempty"`
-	PendingCount      int                 `json:"pending_count"`
-	PendingInputs     []PendingInput      `json:"pending_inputs,omitempty"`
 	UpdatedAt         int64               `json:"updated_at,omitempty"`
+}
+
+// SessionCheckpoint records the most recent interactive run that fully
+// flushed its Claude session state and is safe to resume from.
+type SessionCheckpoint struct {
+	RunID       string `json:"run_id"`
+	ExecutionID string `json:"execution_id,omitempty"`
+	UpdatedAt   int64  `json:"updated_at"`
 }
 
 func NormalizeRunInputQueueMode(mode AgentQueueMode) AgentQueueMode {
@@ -91,15 +134,35 @@ type AgentTaskState string
 const (
 	AgentTaskStateQueued    AgentTaskState = "queued"
 	AgentTaskStateRunning   AgentTaskState = "running"
-	AgentTaskStateIdle      AgentTaskState = "idle"
+	AgentTaskStateWaiting   AgentTaskState = "waiting"
+	AgentTaskStateSleeping  AgentTaskState = "sleeping"
 	AgentTaskStateDone      AgentTaskState = "done"
+	AgentTaskStateError     AgentTaskState = "error"
 	AgentTaskStateDropped   AgentTaskState = "dropped"
 	AgentTaskStateCancelled AgentTaskState = "cancelled"
 )
 
+type AgentTaskPriority string
+
+const (
+	AgentTaskPriorityLow    AgentTaskPriority = "low"
+	AgentTaskPriorityNormal AgentTaskPriority = "normal"
+	AgentTaskPriorityHigh   AgentTaskPriority = "high"
+	AgentTaskPriorityUrgent AgentTaskPriority = "urgent"
+)
+
+func (p AgentTaskPriority) IsValid() bool {
+	switch p {
+	case AgentTaskPriorityLow, AgentTaskPriorityNormal, AgentTaskPriorityHigh, AgentTaskPriorityUrgent:
+		return true
+	default:
+		return false
+	}
+}
+
 func (s AgentTaskState) IsDispatchable() bool {
 	switch s {
-	case AgentTaskStateQueued:
+	case AgentTaskStateQueued, AgentTaskStateWaiting, AgentTaskStateSleeping:
 		return true
 	default:
 		return false
@@ -108,21 +171,24 @@ func (s AgentTaskState) IsDispatchable() bool {
 
 func (s AgentTaskState) IsTerminal() bool {
 	switch s {
-	case AgentTaskStateDone, AgentTaskStateDropped, AgentTaskStateCancelled:
+	case AgentTaskStateDone, AgentTaskStateError, AgentTaskStateDropped, AgentTaskStateCancelled:
 		return true
 	default:
 		return false
 	}
 }
 
-func TaskTerminalStateForRun(runStatus AgentRunStatus, interactive bool) AgentTaskState {
-	if runStatus == AgentRunStatusCancelled {
+func TaskTerminalStateForRun(runStatus AgentRunStatus) AgentTaskState {
+	switch runStatus {
+	case AgentRunStatusOK:
+		return AgentTaskStateDone
+	case AgentRunStatusCancelled:
 		return AgentTaskStateCancelled
+	case AgentRunStatusError, AgentRunStatusTimeout:
+		return AgentTaskStateError
+	default:
+		return AgentTaskStateError
 	}
-	if interactive && runStatus == AgentRunStatusOK {
-		return AgentTaskStateIdle
-	}
-	return AgentTaskStateDone
 }
 
 type AgentRunStatus string
@@ -328,6 +394,7 @@ const (
 	AgentExecutionMetaKeyRunID            = "run_id"
 	AgentExecutionMetaKeyRunAttemptID     = "run_attempt_id"
 	AgentExecutionMetaKeyOriginTaskID     = "origin_task_id"
+	AgentExecutionMetaKeyAgentID          = "agent_id"
 )
 
 type OrchestrationOutboxEventType string
@@ -356,6 +423,14 @@ const (
 	OrchestrationOutboxPayloadSessionID                   = "session_id"
 	OrchestrationOutboxPayloadStreamID                    = "stream_id"
 	OrchestrationOutboxPayloadIdempotency                 = "idempotency_key"
+	OrchestrationOutboxPayloadDispatchPrompt              = "dispatch_prompt"
+	OrchestrationOutboxPayloadResumeSession               = "resume_session"
+	OrchestrationOutboxPayloadResumeExcludeRunID          = "resume_exclude_run_id"
+	OrchestrationOutboxPayloadResumeCheckpointRunID       = "resume_checkpoint_run_id"
+	OrchestrationOutboxPayloadWaitingForInput             = "waiting_for_input"
+	OrchestrationOutboxPayloadWakeDelayMinutes            = "wake_delay_minutes"
+	OrchestrationOutboxPayloadWakeReason                  = "wake_reason"
+	OrchestrationOutboxPayloadWakeFollowUpPrompt          = "wake_follow_up_prompt"
 )
 
 type OrchestrationOutboxEvent struct {
@@ -380,10 +455,26 @@ const (
 )
 
 type AgentProfile struct {
-	ID          string         `json:"id" db:"id"`
+	ID            string         `json:"id" db:"id"`
+	WorkspaceID   uint           `json:"workspace_id" db:"workspace_id"`
+	AgentKey      string         `json:"agent_key" db:"agent_key"`
+	Name          string         `json:"name" db:"name"`
+	Role          string         `json:"role" db:"role"`
+	MemoryScope   string         `json:"memory_scope" db:"memory_scope"`
+	QualityScore  *float64       `json:"quality_score,omitempty" db:"quality_score"`
+	CostBudgetUSD *float64       `json:"cost_budget_usd,omitempty" db:"cost_budget_usd"`
+	ConfigJSON    map[string]any `json:"config_json" db:"-"`
+	Active        bool           `json:"active" db:"active"`
+	CreatedAt     time.Time      `json:"created_at" db:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at" db:"updated_at"`
+}
+
+type ChannelBinding struct {
+	ID          int64          `json:"id" db:"id"`
 	WorkspaceID uint           `json:"workspace_id" db:"workspace_id"`
-	AgentKey    string         `json:"agent_key" db:"agent_key"`
-	Name        string         `json:"name" db:"name"`
+	AgentID     *string        `json:"agent_id" db:"agent_id"`
+	ChannelType string         `json:"channel_type" db:"channel_type"`
+	Address     string         `json:"address" db:"address"`
 	ConfigJSON  map[string]any `json:"config_json" db:"-"`
 	Active      bool           `json:"active" db:"active"`
 	CreatedAt   time.Time      `json:"created_at" db:"created_at"`
@@ -398,6 +489,8 @@ type AgentTask struct {
 	AgentName      string         `json:"agent_name,omitempty" db:"-"`
 	QueueMode      AgentQueueMode `json:"queue_mode" db:"queue_mode"`
 	State          AgentTaskState `json:"state" db:"state"`
+	InputKind      InputKind      `json:"input_kind,omitempty" db:"input_kind"`
+	WaitingSummary *string        `json:"waiting_summary,omitempty" db:"waiting_summary"`
 	IdempotencyKey string         `json:"idempotency_key" db:"idempotency_key"`
 	PayloadJSON    map[string]any `json:"payload_json" db:"-"`
 	RoutingJSON    map[string]any `json:"routing_json" db:"-"`
@@ -406,8 +499,15 @@ type AgentTask struct {
 	AcceptedAt     time.Time      `json:"accepted_at" db:"accepted_at"`
 	QueuedAt       *time.Time     `json:"queued_at,omitempty" db:"queued_at"`
 	DispatchedAt   *time.Time     `json:"dispatched_at,omitempty" db:"dispatched_at"`
+	Deadline       *time.Time     `json:"deadline,omitempty" db:"deadline"`
 	DroppedReason  *string        `json:"dropped_reason,omitempty" db:"dropped_reason"`
+	Priority       string         `json:"priority" db:"priority"`
+	BudgetUSD      *float64       `json:"budget_usd,omitempty" db:"budget_usd"`
+	CostUSD        float64        `json:"cost_usd" db:"cost_usd"`
 	ArchivedAt     *time.Time     `json:"archived_at,omitempty" db:"archived_at"`
+	WakeAt         *time.Time     `json:"wake_at,omitempty" db:"wake_at"`
+	WakeReason     *string        `json:"wake_reason,omitempty" db:"wake_reason"`
+	WakeCount      int            `json:"wake_count,omitempty" db:"wake_count"`
 	CreatedAt      time.Time      `json:"created_at" db:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at" db:"updated_at"`
 }
@@ -438,6 +538,7 @@ type AgentRun struct {
 	ClaimExpiresAt   *time.Time     `json:"claim_expires_at,omitempty" db:"claim_expires_at"`
 	Error            *string        `json:"error,omitempty" db:"error"`
 	SnapshotTS       int64          `json:"snapshot_ts" db:"snapshot_ts"`
+	CostUSD          float64        `json:"cost_usd" db:"cost_usd"`
 	UsageJSON        map[string]any `json:"usage_json" db:"-"`
 	DeliveryJSON     map[string]any `json:"delivery_json" db:"-"`
 	CreatedAt        time.Time      `json:"created_at" db:"created_at"`
@@ -468,6 +569,10 @@ type AgentRunAttempt struct {
 	UpdatedAt       time.Time          `json:"updated_at" db:"updated_at"`
 }
 
+func (a *AgentRunAttempt) IsActive() bool {
+	return a != nil && a.EndedAt == nil && a.Status.IsInFlight()
+}
+
 type AgentRunSnapshot struct {
 	ID          int64          `json:"id" db:"id"`
 	RunID       string         `json:"run_id" db:"run_id"`
@@ -482,16 +587,18 @@ type AgentRunSnapshot struct {
 }
 
 type AgentTaskListFilter struct {
-	AgentID       *string
-	States        []AgentTaskState
-	CreatedAfter  *time.Time
-	CreatedBefore *time.Time
-	Limit         int
-	Offset        int
+	AgentID        *string
+	States         []AgentTaskState
+	CreatedAfter   *time.Time
+	CreatedBefore  *time.Time
+	IncludeArchived bool
+	Limit          int
+	Offset         int
 }
 
 type AgentRunListFilter struct {
 	AgentID       *string
+	TaskID        *string
 	Statuses      []AgentRunStatus
 	SessionID     *string
 	CreatedAfter  *time.Time
@@ -966,24 +1073,41 @@ type RunExecutionState struct {
 }
 
 // RunExecutionResult contains the result of a completed run execution
+type RunExecutionWakeSignal struct {
+	DelayMinutes   int    `json:"delay_minutes"`
+	Reason         string `json:"reason,omitempty"`
+	FollowUpPrompt string `json:"follow_up_prompt,omitempty"`
+}
+
 type RunExecutionResult struct {
-	// ID is the run execution identifier
-	ID string `json:"id"`
-
-	// ExitCode is the exit code of the run execution
-	ExitCode int `json:"exit_code"`
-
-	// Output is the stdout/stderr output (if captured)
-	Output []byte `json:"output,omitempty"`
-
-	// Error contains error message if failed
-	Error string `json:"error,omitempty"`
+	ID              string                  `json:"id"`
+	ExitCode        int                     `json:"exit_code"`
+	Output          []byte                  `json:"output,omitempty"`
+	Error           string                  `json:"error,omitempty"`
+	Duration        time.Duration           `json:"duration"`
+	WaitingForInput bool                    `json:"waiting_for_input,omitempty"`
+	WakeSignal      *RunExecutionWakeSignal `json:"wake_signal,omitempty"`
 
 	// Usage contains aggregated LLM token usage when available.
 	Usage *LLMUsage `json:"usage,omitempty"`
+}
 
-	// Duration is how long the task ran
-	Duration time.Duration `json:"duration"`
+type ErrTaskNotCancellable struct {
+	ID    string
+	State AgentTaskState
+}
+
+func (e *ErrTaskNotCancellable) Error() string {
+	return fmt.Sprintf("task %s cannot be cancelled (state: %s)", e.ID, e.State)
+}
+
+type ErrTaskNotArchivable struct {
+	ID    string
+	State AgentTaskState
+}
+
+func (e *ErrTaskNotArchivable) Error() string {
+	return fmt.Sprintf("task %s cannot be archived (state: %s)", e.ID, e.State)
 }
 
 type ErrAgentProfileNotFound struct {
@@ -1016,4 +1140,50 @@ type ErrAgentRunAttemptNotFound struct {
 
 func (e *ErrAgentRunAttemptNotFound) Error() string {
 	return "agent run attempt not found: " + e.ID
+}
+
+// TaskOutput is a structured output produced by an agent during a task.
+type TaskOutput struct {
+	ID          string         `json:"id"`
+	WorkspaceID uint           `json:"workspace_id"`
+	TaskID      string         `json:"task_id"`
+	RunID       *string        `json:"run_id,omitempty"`
+	AgentID     *string        `json:"agent_id,omitempty"`
+	AgentName   string         `json:"agent_name,omitempty"`
+	OutputType  string         `json:"output_type"`
+	Title       string         `json:"title"`
+	Summary     *string        `json:"summary,omitempty"`
+	URI         *string        `json:"uri,omitempty"`
+	Schema      map[string]any `json:"schema,omitempty"`
+	Data        map[string]any `json:"data"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
+	ArchivedAt  *time.Time     `json:"archived_at,omitempty"`
+	CreatedAt   time.Time      `json:"created_at"`
+}
+
+type TaskOutputListFilter struct {
+	TaskID          *string `json:"task_id,omitempty"`
+	AgentID         *string `json:"agent_id,omitempty"`
+	OutputType      *string `json:"output_type,omitempty"`
+	ExcludeArchived bool    `json:"exclude_archived,omitempty"`
+	Limit           int     `json:"limit,omitempty"`
+}
+
+type ErrTaskOutputNotFound struct {
+	ID string
+}
+
+func (e *ErrTaskOutputNotFound) Error() string {
+	return "task output not found: " + e.ID
+}
+
+type AgentStats struct {
+	Total          int            `json:"total"`
+	ByState        map[string]int `json:"by_state"`
+	AvgRunSec      *float64       `json:"avg_run_sec,omitempty"`
+	QualityScore   *float64       `json:"quality_score,omitempty"`
+	TotalCostUSD   float64        `json:"total_cost_usd"`
+	RunningCount   int            `json:"running_count"`
+	CompletedCount int            `json:"completed_count"`
+	FailedCount    int            `json:"failed_count"`
 }

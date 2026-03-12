@@ -267,6 +267,8 @@ func (c *GatewayClient) SetTaskResult(
 	errorMsg string,
 	attemptID string,
 	usage *types.LLMUsage,
+	waitingForInput bool,
+	wakeSignal *pb.WakeSignal,
 ) error {
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
@@ -307,11 +309,60 @@ func (c *GatewayClient) SetTaskResult(
 		LlmTotalTokens:              llmTotalTokens,
 		TotalCostUsd:                totalCostUSD,
 		LlmModelUsageJson:           llmModelUsageJSON,
+		WaitingForInput:             waitingForInput,
+		WakeSignal:                  wakeSignal,
 	})
 	if err != nil {
 		return fmt.Errorf("set task result failed: %w", err)
 	}
 
+	return nil
+}
+
+func (c *GatewayClient) UpdateTaskState(ctx context.Context, taskID string, state string, runID string, inputKind string, waitingSummary string) error {
+	ctx, cancel := c.withTimeout(ctx)
+	defer cancel()
+
+	_, err := c.client.UpdateTaskState(ctx, &pb.UpdateTaskStateRequest{
+		TaskId:         taskID,
+		State:          state,
+		RunId:          runID,
+		InputKind:      inputKind,
+		WaitingSummary: waitingSummary,
+	})
+	if err != nil {
+		return fmt.Errorf("update task state failed: %w", err)
+	}
+	return nil
+}
+
+// ClaimTaskInput claims the next pending durable input for a task.
+func (c *GatewayClient) ClaimTaskInput(ctx context.Context, taskID, runID, executionID string) (*pb.ClaimTaskInputResponse, error) {
+	ctx, cancel := c.withTimeout(ctx)
+	defer cancel()
+
+	resp, err := c.client.ClaimTaskInput(ctx, &pb.ClaimTaskInputRequest{
+		TaskId:      taskID,
+		RunId:       runID,
+		ExecutionId: executionID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("claim task input failed: %w", err)
+	}
+	return resp, nil
+}
+
+// AckTaskInput acknowledges that a claimed input has been consumed.
+func (c *GatewayClient) AckTaskInput(ctx context.Context, inputID string) error {
+	ctx, cancel := c.withTimeout(ctx)
+	defer cancel()
+
+	_, err := c.client.AckTaskInput(ctx, &pb.AckTaskInputRequest{
+		InputId: inputID,
+	})
+	if err != nil {
+		return fmt.Errorf("ack task input failed: %w", err)
+	}
 	return nil
 }
 
@@ -350,6 +401,39 @@ func (c *GatewayClient) ReleaseIP(ctx context.Context, sandboxID string) error {
 		return fmt.Errorf("release IP failed: %w", err)
 	}
 
+	return nil
+}
+
+// CreateTaskOutput creates a structured output for a task via gRPC.
+func (c *GatewayClient) CreateTaskOutput(ctx context.Context, req *pb.CreateTaskOutputRequest) (string, error) {
+	ctx, cancel := c.withTimeout(ctx)
+	defer cancel()
+	resp, err := c.client.CreateTaskOutput(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("create task output: %w", err)
+	}
+	return resp.Id, nil
+}
+
+// AppendTaskOutputRows appends rows to a streaming table output via gRPC.
+func (c *GatewayClient) AppendTaskOutputRows(ctx context.Context, req *pb.AppendTaskOutputRowsRequest) error {
+	ctx, cancel := c.withTimeout(ctx)
+	defer cancel()
+	_, err := c.client.AppendTaskOutputRows(ctx, req)
+	if err != nil {
+		return fmt.Errorf("append task output rows: %w", err)
+	}
+	return nil
+}
+
+// FinalizeTaskOutput sets the summary on an output via gRPC.
+func (c *GatewayClient) FinalizeTaskOutput(ctx context.Context, req *pb.FinalizeTaskOutputRequest) error {
+	ctx, cancel := c.withTimeout(ctx)
+	defer cancel()
+	_, err := c.client.FinalizeTaskOutput(ctx, req)
+	if err != nil {
+		return fmt.Errorf("finalize task output: %w", err)
+	}
 	return nil
 }
 

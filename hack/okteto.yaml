@@ -17,5 +17,6 @@ dev:
     - 1993:1993
     - 6379:redis-master:6379
     - 5432:postgres:5432
+    - 4566:localstack:4566
     persistentVolume:
       enabled: false

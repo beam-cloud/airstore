@@ -13,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/rs/zerolog/log"
+
 	types "github.com/beam-cloud/airstore/pkg/types"
 	"github.com/opencontainers/runtime-spec/specs-go"
 )
@@ -45,9 +47,53 @@ func NewRunsc(cfg Config) (*Runsc, error) {
 		}
 	}
 
-	return &Runsc{
-		cfg: cfg,
-	}, nil
+	r := &Runsc{cfg: cfg}
+
+	// Log runsc version for diagnostics.
+	if out, err := exec.Command(cfg.RunscPath, "--version").CombinedOutput(); err == nil {
+		log.Info().Str("runsc_version", strings.TrimSpace(string(out))).Msg("gVisor runtime initialized")
+	}
+
+	// Purge any stale containers left from a previous worker lifecycle.
+	r.purgeStaleContainers()
+
+	return r, nil
+}
+
+// purgeStaleContainers force-deletes every container known to runsc.
+// Called once at startup to prevent "cannot read client sync file" errors
+// caused by leftover sandbox state from a previous process.
+func (r *Runsc) purgeStaleContainers() {
+	args := r.baseArgs(false)
+	args = append(args, "list", "-format=json")
+
+	var stdout bytes.Buffer
+	cmd := exec.Command(r.cfg.RunscPath, args...)
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err != nil {
+		// list may fail if root dir is empty — that's fine
+		return
+	}
+
+	type containerEntry struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	var entries []containerEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		return
+	}
+
+	for _, entry := range entries {
+		log.Info().
+			Str("container_id", entry.ID).
+			Str("status", entry.Status).
+			Msg("purging stale runsc container at startup")
+
+		deleteArgs := r.baseArgs(false)
+		deleteArgs = append(deleteArgs, "delete", "--force", entry.ID)
+		_ = exec.Command(r.cfg.RunscPath, deleteArgs...).Run()
+	}
 }
 
 func (r *Runsc) Name() string {
@@ -138,9 +184,8 @@ func (r *Runsc) Run(ctx context.Context, containerID, bundlePath string, opts *R
 	args = append(args, "run", "--bundle", bundlePath, containerID)
 
 	cmd := exec.CommandContext(ctx, r.cfg.RunscPath, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // Kill entire process tree
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	// Capture stderr for better error reporting
 	var stderr bytes.Buffer
 	if opts != nil && opts.OutputWriter != nil {
 		cmd.Stdout = opts.OutputWriter
@@ -157,7 +202,6 @@ func (r *Runsc) Run(ctx context.Context, containerID, bundlePath string, opts *R
 		opts.Started <- cmd.Process.Pid
 	}
 
-	// Handle cancellation by killing process group
 	go func() {
 		<-ctx.Done()
 		if pgid, _ := syscall.Getpgid(cmd.Process.Pid); pgid > 0 {
@@ -165,11 +209,8 @@ func (r *Runsc) Run(ctx context.Context, containerID, bundlePath string, opts *R
 		}
 	}()
 
-	// Wait for exit
 	err := cmd.Wait()
 
-	// If the context was cancelled, the process was killed by our own
-	// signal — the exit code does not reflect the container's real result.
 	if ctx.Err() != nil {
 		return -1, ctx.Err()
 	}

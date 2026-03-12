@@ -31,6 +31,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/beam-cloud/airstore/pkg/bamlregistry"
 	"github.com/beam-cloud/airstore/pkg/sources/queries/baml_client/type_builder"
 	baml "github.com/boundaryml/baml/engine/language_client_go/pkg"
 )
@@ -55,7 +56,7 @@ func getEnvVars(overrides map[string]string) map[string]string {
 }
 
 func init() {
-	baml.SetTypeMap(typeMap)
+	bamlregistry.RegisterTypeMap(typeMap)
 	runtime, err := baml.CreateRuntime("./baml_src", getBamlFiles(), getEnvVars(nil))
 	if err != nil {
 		panic(err)

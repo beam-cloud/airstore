@@ -38,3 +38,26 @@ export interface TreeListing {
   truncated: boolean;
   continuation_token?: string;
 }
+
+/**
+ * Search result.
+ */
+export interface SearchResult {
+  query: string;
+  results: VirtualFile[];
+}
+
+/**
+ * Presigned upload URL response.
+ */
+export interface UploadUrlResponse {
+  upload_url: string;
+  key: string;
+}
+
+/**
+ * Presigned download URL response.
+ */
+export interface DownloadUrlResponse {
+  download_url: string;
+}

@@ -1,13 +1,18 @@
 package worker
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"strings"
 	"sync"
 
 	"github.com/beam-cloud/airstore/pkg/common"
+	gatewayclient "github.com/beam-cloud/airstore/pkg/gateway/client"
+	"github.com/beam-cloud/airstore/pkg/types"
+	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
@@ -44,7 +49,7 @@ func (o *TaskOutput) Write(p []byte) (int, error) {
 
 	// Process complete lines
 	for {
-		idx := indexByte(o.lineBuf, '\n')
+		idx := bytes.IndexByte(o.lineBuf, '\n')
 		if idx < 0 {
 			break
 		}
@@ -75,15 +80,6 @@ func (o *TaskOutput) emit(line string) {
 	for _, w := range o.writers {
 		w.Write([]byte(line))
 	}
-}
-
-func indexByte(b []byte, c byte) int {
-	for i, v := range b {
-		if v == c {
-			return i
-		}
-	}
-	return -1
 }
 
 // --- Writers ---
@@ -162,6 +158,133 @@ func (w *FileWriter) Close() error {
 	return w.file.Close()
 }
 
+// OutputWriter intercepts structured output messages from agent stdout
+// (type=output, output_append, output_done) and sends them to the gateway via gRPC.
+type OutputWriter struct {
+	ctx         context.Context
+	client      *gatewayclient.GatewayClient
+	workspaceID uint32
+	taskID      string
+	runID       string
+	agentID     string
+	outputIDs   map[string]string // local output_id -> server-generated UUID
+	mu          sync.Mutex
+}
+
+func NewOutputWriter(ctx context.Context, client *gatewayclient.GatewayClient, task types.RunExecution) *OutputWriter {
+	ids := outputIDsFromTask(task)
+	return &OutputWriter{
+		ctx:         ctx,
+		client:      client,
+		workspaceID: ids.workspaceID,
+		taskID:      ids.taskID,
+		runID:       ids.runID,
+		agentID:     ids.agentID,
+		outputIDs:   make(map[string]string),
+	}
+}
+
+func (w *OutputWriter) Write(p []byte) (int, error) {
+	if w.taskID == "" || w.client == nil {
+		return len(p), nil
+	}
+	line := strings.TrimSpace(string(p))
+	if line == "" || line[0] != '{' {
+		return len(p), nil
+	}
+	var payload map[string]any
+	if json.Unmarshal([]byte(line), &payload) != nil {
+		return len(p), nil
+	}
+	switch anyToTrimmedString(payload["type"]) {
+	case "output":
+		go w.createOutput(payload)
+	case "output_append":
+		go w.appendRows(payload)
+	case "output_done":
+		go w.finalizeOutput(payload)
+	}
+	return len(p), nil
+}
+
+func (w *OutputWriter) createOutput(payload map[string]any) {
+	localID := anyToTrimmedString(payload["output_id"])
+	req := &pb.CreateTaskOutputRequest{
+		WorkspaceId: w.workspaceID,
+		TaskId:      w.taskID,
+		RunId:       w.runID,
+		AgentId:     w.agentID,
+		OutputType:  anyToTrimmedString(payload["output_type"]),
+		Title:       anyToTrimmedString(payload["title"]),
+	}
+	if v := payload["schema"]; v != nil {
+		if b, err := json.Marshal(v); err == nil {
+			req.SchemaJson = string(b)
+		}
+	}
+	if v := payload["data"]; v != nil {
+		if b, err := json.Marshal(v); err == nil {
+			req.DataJson = string(b)
+		}
+	}
+	if v := payload["metadata"]; v != nil {
+		if b, err := json.Marshal(v); err == nil {
+			req.MetadataJson = string(b)
+		}
+	}
+
+	serverID, err := w.client.CreateTaskOutput(w.ctx, req)
+	if err != nil {
+		log.Warn().Err(err).Str("task", w.taskID).Msg("output create failed")
+		return
+	}
+	if localID != "" && serverID != "" {
+		w.mu.Lock()
+		w.outputIDs[localID] = serverID
+		w.mu.Unlock()
+	}
+}
+
+func (w *OutputWriter) appendRows(payload map[string]any) {
+	localID := anyToTrimmedString(payload["output_id"])
+	w.mu.Lock()
+	serverID := w.outputIDs[localID]
+	w.mu.Unlock()
+	if serverID == "" {
+		log.Warn().Str("output_id", localID).Msg("output_append for unknown output_id")
+		return
+	}
+	rowsJSON, _ := json.Marshal(payload["rows"])
+	if err := w.client.AppendTaskOutputRows(w.ctx, &pb.AppendTaskOutputRowsRequest{
+		WorkspaceId: w.workspaceID,
+		OutputId:    serverID,
+		RowsJson:    string(rowsJSON),
+	}); err != nil {
+		log.Warn().Err(err).Str("output", serverID).Msg("output append failed")
+	}
+}
+
+func (w *OutputWriter) finalizeOutput(payload map[string]any) {
+	localID := anyToTrimmedString(payload["output_id"])
+	w.mu.Lock()
+	serverID := w.outputIDs[localID]
+	w.mu.Unlock()
+	if serverID == "" {
+		return
+	}
+	summary := anyToTrimmedString(payload["summary"])
+	if summary == "" {
+		return
+	}
+	if err := w.client.FinalizeTaskOutput(w.ctx, &pb.FinalizeTaskOutputRequest{
+		WorkspaceId: w.workspaceID,
+		OutputId:    serverID,
+		Summary:     summary,
+	}); err != nil {
+		log.Warn().Err(err).Str("output", serverID).Msg("output finalize failed")
+	}
+}
+
 // --- Factory ---
 
 // OutputConfig configures task output destinations.
@@ -189,4 +312,79 @@ func NewOutputPair(ctx context.Context, cfg OutputConfig) (stdout, stderr *TaskO
 
 	return NewTaskOutput(cfg.TaskID, "stdout", stdoutWriters...),
 		NewTaskOutput(cfg.TaskID, "stderr", stderrWriters...)
+}
+
+// extractAssistantText scans raw stream-json output (from claude --print
+// --output-format stream-json), pulls out assistant text blocks, and returns
+// the last `limit` characters of concatenated text.  This is used to build
+// context for approval summary extraction without sending tool call / tool
+// result noise to the summariser.
+func extractAssistantText(raw []byte, limit int) string {
+	var texts []string
+	totalLen := 0
+
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 || line[0] != '{' {
+			continue
+		}
+
+		var envelope struct {
+			Type    string `json:"type"`
+			Message *struct {
+				Content []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"message"`
+			// "result" type messages carry a top-level result string.
+			Result  string `json:"result"`
+			IsError bool   `json:"is_error"`
+		}
+		if err := json.Unmarshal(line, &envelope); err != nil {
+			continue
+		}
+
+		switch envelope.Type {
+		case "assistant":
+			if envelope.Message == nil {
+				continue
+			}
+			for _, block := range envelope.Message.Content {
+				if block.Type == "text" && block.Text != "" {
+					texts = append(texts, block.Text)
+					totalLen += len(block.Text)
+				}
+			}
+		case "result":
+			if !envelope.IsError && envelope.Result != "" {
+				texts = append(texts, envelope.Result)
+				totalLen += len(envelope.Result)
+			}
+		}
+	}
+
+	if totalLen == 0 {
+		return ""
+	}
+
+	// Concatenate all texts with double-newline separators, then take the
+	// last `limit` characters so the most recent content is preserved.
+	var buf bytes.Buffer
+	for i, t := range texts {
+		if i > 0 {
+			buf.WriteString("\n\n")
+		}
+		buf.WriteString(t)
+	}
+	s := buf.String()
+	if limit > 0 && len(s) > limit {
+		s = s[len(s)-limit:]
+		// The byte slice may start mid-rune; advance past any
+		// continuation bytes (10xxxxxx) to the next valid rune boundary.
+		for len(s) > 0 && s[0]&0xC0 == 0x80 {
+			s = s[1:]
+		}
+	}
+	return s
 }

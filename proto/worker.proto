@@ -16,10 +16,20 @@ service WorkerService {
   // Task lifecycle
   rpc SetTaskStarted(SetTaskStartedRequest) returns (SetTaskStartedResponse);
   rpc SetTaskResult(SetTaskResultRequest) returns (SetTaskResultResponse);
+  rpc UpdateTaskState(UpdateTaskStateRequest) returns (UpdateTaskStateResponse);
 
   // Network/IP management for sandboxes
   rpc AllocateIP(AllocateIPRequest) returns (AllocateIPResponse);
   rpc ReleaseIP(ReleaseIPRequest) returns (ReleaseIPResponse);
+
+  // Task input inbox (durable follow-up claims)
+  rpc ClaimTaskInput(ClaimTaskInputRequest) returns (ClaimTaskInputResponse);
+  rpc AckTaskInput(AckTaskInputRequest) returns (AckTaskInputResponse);
+
+  // Task outputs
+  rpc CreateTaskOutput(CreateTaskOutputRequest) returns (CreateTaskOutputResponse);
+  rpc AppendTaskOutputRows(AppendTaskOutputRowsRequest) returns (AppendTaskOutputRowsResponse);
+  rpc FinalizeTaskOutput(FinalizeTaskOutputRequest) returns (FinalizeTaskOutputResponse);
 }
 
 // Worker registration
@@ -89,6 +99,12 @@ message SetTaskStartedRequest {
 
 message SetTaskStartedResponse {}
 
+message WakeSignal {
+  int32  delay_minutes    = 1;
+  string reason           = 2;
+  string follow_up_prompt = 3;
+}
+
 message SetTaskResultRequest {
   string task_id = 1;
   int32 exit_code = 2;
@@ -101,9 +117,43 @@ message SetTaskResultRequest {
   int64 llm_total_tokens = 9;
   double total_cost_usd = 10;
   string llm_model_usage_json = 11;
+  bool waiting_for_input = 12;
+  WakeSignal wake_signal = 13;
 }
 
 message SetTaskResultResponse {}
+
+message UpdateTaskStateRequest {
+  string task_id = 1;
+  string state = 2;
+  string run_id = 3;
+  string input_kind = 4;
+  string waiting_summary = 5;
+}
+
+message UpdateTaskStateResponse {}
+
+// Task input inbox
+message ClaimTaskInputRequest {
+  string task_id = 1;
+  string run_id = 2;
+  string execution_id = 3;
+}
+
+message ClaimTaskInputResponse {
+  bool found = 1;
+  string input_id = 2;
+  string message = 3;
+  string kind = 4;
+  string action = 5;
+  int32 seq = 6;
+}
+
+message AckTaskInputRequest {
+  string input_id = 1;
+}
+
+message AckTaskInputResponse {}
 
 // IP allocation for sandbox networking
 message AllocateIPRequest {
@@ -125,3 +175,37 @@ message ReleaseIPRequest {
 }
 
 message ReleaseIPResponse {}
+
+// Task output messages
+message CreateTaskOutputRequest {
+  uint32 workspace_id = 1;
+  string task_id = 2;
+  string run_id = 3;
+  string output_type = 4;
+  string title = 5;
+  string schema_json = 6;   // JSON-encoded schema
+  string data_json = 7;     // JSON-encoded initial data
+  string metadata_json = 8; // JSON-encoded metadata
+  string uri = 9;            // External deep-link URI
+  string agent_id = 10;
+}
+
+message CreateTaskOutputResponse {
+  string id = 1;
+}
+
+message AppendTaskOutputRowsRequest {
+  uint32 workspace_id = 1;
+  string output_id = 2;
+  string rows_json = 3; // JSON-encoded array of rows
+}
+
+message AppendTaskOutputRowsResponse {}
+
+message FinalizeTaskOutputRequest {
+  uint32 workspace_id = 1;
+  string output_id = 2;
+  string summary = 3;
+}
+
+message FinalizeTaskOutputResponse {}

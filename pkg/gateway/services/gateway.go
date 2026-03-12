@@ -382,13 +382,9 @@ func (s *GatewayService) RemoveConnection(ctx context.Context, req *pb.RemoveCon
 		return &pb.DeleteResponse{Ok: false, Error: "connection not found"}, nil
 	}
 
-	// Check authorization: shared connections require admin, personal require admin or owner
-	if conn.IsShared() {
-		if !auth.IsAdmin(ctx) {
-			return &pb.DeleteResponse{Ok: false, Error: "admin access required for shared connections"}, nil
-		}
-	} else {
-		// Personal connection
+	// Check authorization: any workspace member can disconnect shared connections;
+	// personal connections require admin or the owning member.
+	if !conn.IsShared() {
 		if !auth.IsAdmin(ctx) && *conn.MemberId != auth.MemberId(ctx) {
 			return &pb.DeleteResponse{Ok: false, Error: "cannot delete another member's connection"}, nil
 		}

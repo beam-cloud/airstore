@@ -12,6 +12,9 @@ func (r *PostgresBackend) CreateMember(ctx context.Context, workspaceId uint, em
 	query := `
 		INSERT INTO workspace_member (workspace_id, email, name, role)
 		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (workspace_id, email) DO UPDATE SET
+			name = COALESCE(NULLIF(EXCLUDED.name, ''), workspace_member.name),
+			updated_at = CURRENT_TIMESTAMP
 		RETURNING id, external_id, workspace_id, email, name, role, created_at, updated_at
 	`
 

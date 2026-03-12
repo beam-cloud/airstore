@@ -32,6 +32,7 @@ export interface AgentRun {
   ended_at?: string;
   error?: string;
   snapshot_ts: number;
+  cost_usd: number;
   usage_json: Record<string, unknown>;
   delivery_json: Record<string, unknown>;
   created_at: string;
@@ -59,6 +60,7 @@ export interface RunCancelResponse {
 /** Filters for listing runs. */
 export interface RunListParams {
   agentId?: string;
+  taskId?: string;
   status?: RunStatus | RunStatus[];
   sessionId?: string;
   createdAfter?: string;

@@ -127,8 +127,30 @@ func (c *StorageClient) CreateWorkspaceBucket(ctx context.Context, workspaceExte
 		return "", err
 	}
 
+	if err := c.SetBucketCORS(ctx, bucket); err != nil {
+		log.Warn().Err(err).Str("bucket", bucket).Msg("failed to set bucket CORS — presigned uploads from browsers may fail")
+	}
+
 	log.Info().Str("bucket", bucket).Str("workspace", workspaceExternalId).Msg("workspace bucket ready")
 	return bucket, nil
+}
+
+func (c *StorageClient) SetBucketCORS(ctx context.Context, bucket string) error {
+	_, err := c.s3.PutBucketCors(ctx, &s3.PutBucketCorsInput{
+		Bucket: aws.String(bucket),
+		CORSConfiguration: &s3types.CORSConfiguration{
+			CORSRules: []s3types.CORSRule{
+				{
+					AllowedOrigins: []string{"*"},
+					AllowedMethods: []string{"GET", "PUT", "POST", "DELETE", "HEAD"},
+					AllowedHeaders: []string{"*"},
+					ExposeHeaders:  []string{"ETag"},
+					MaxAgeSeconds:  aws.Int32(3600),
+				},
+			},
+		},
+	})
+	return err
 }
 
 // Object operations
@@ -214,6 +236,17 @@ func isNotFoundError(err error) bool {
 
 // Presigned URL operations
 
+// rewritePresignedURL replaces the internal S3 endpoint with the public one
+// so that presigned URLs are reachable from browsers.
+func (c *StorageClient) rewritePresignedURL(raw string) string {
+	pub := c.cfg.PublicEndpointUrl
+	priv := c.cfg.DefaultEndpointUrl
+	if pub != "" && priv != "" && pub != priv {
+		return strings.Replace(raw, priv, pub, 1)
+	}
+	return raw
+}
+
 // PresignUpload generates a presigned PUT URL for uploading a file
 func (c *StorageClient) PresignUpload(ctx context.Context, bucket, key, contentType string, expires time.Duration) (string, error) {
 	input := &s3.PutObjectInput{
@@ -230,7 +263,7 @@ func (c *StorageClient) PresignUpload(ctx context.Context, bucket, key, contentT
 	if err != nil {
 		return "", fmt.Errorf("presign upload: %w", err)
 	}
-	return resp.URL, nil
+	return c.rewritePresignedURL(resp.URL), nil
 }
 
 // PresignDownload generates a presigned GET URL for downloading a file
@@ -244,5 +277,5 @@ func (c *StorageClient) PresignDownload(ctx context.Context, bucket, key string,
 	if err != nil {
 		return "", fmt.Errorf("presign download: %w", err)
 	}
-	return resp.URL, nil
+	return c.rewritePresignedURL(resp.URL), nil
 }

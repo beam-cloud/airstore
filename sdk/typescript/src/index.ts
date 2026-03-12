@@ -105,7 +105,7 @@ export {
 export type { Token, TokenCreateParams, TokenCreated } from './types/tokens.js';
 export type { Member, MemberCreateParams } from './types/members.js';
 export type { OAuthSession, OAuthSessionCreateParams, OAuthSessionStatus, OAuthPollOptions } from './types/oauth.js';
-export type { VirtualFile, DirectoryListing, TreeListing } from './types/filesystem.js';
+export type { VirtualFile, DirectoryListing, TreeListing, SearchResult, UploadUrlResponse, DownloadUrlResponse } from './types/filesystem.js';
 export type {
   AgentProfile,
   AgentCreateParams,
@@ -113,6 +113,9 @@ export type {
   AgentRunner,
   AgentProvider,
   AgentConfig,
+  AgentStats,
+  ChannelBinding,
+  UpdateChannelsParams,
 } from './types/agents.js';
 export type {
   QueueMode,
@@ -125,10 +128,16 @@ export type {
   RunExecutionPolicy,
   TaskKind,
   TaskState,
+  TaskPriority,
   InputProvenance,
   RoutingContext,
   AgentTask,
   AgentCommandCreateParams,
+  TaskUpdateParams,
+  TaskInputAction,
+  TaskInputKind,
+  SubmitTaskInputParams,
+  SubmitTaskInputResponse,
   TaskListParams,
   TaskListResponse,
   TaskCancelResponse,
@@ -139,9 +148,16 @@ export type {
   TaskLogListResponse,
   TaskEventStreamParams,
   TaskEventBatch,
+  RunInteraction,
+  RunEvent,
   Schedule,
   ScheduleCreateParams,
   ScheduleUpdateParams,
+  OutputType,
+  TaskOutput,
+  TableColumn,
+  CreateTaskOutputParams,
+  AppendRowsParams,
 } from './types/tasks.js';
 export type {
   RunStatus,
