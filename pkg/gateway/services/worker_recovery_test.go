@@ -52,15 +52,12 @@ func TestProcessStaleUnclaimedRunRequeuesLostExecution(t *testing.T) {
 		taskQueue: queue,
 	}
 
-	outcome, err := svc.processStaleUnclaimedRun(context.Background(), &types.AgentRun{
+	detected, recovered := svc.processStaleUnclaimedRun(context.Background(), &types.AgentRun{
 		ID:     "run-123",
 		Status: types.AgentRunStatusAccepted,
 	})
-	if err != nil {
-		t.Fatalf("process stale unclaimed run: %v", err)
-	}
-	if !outcome.detected || !outcome.recovered {
-		t.Fatalf("unexpected recovery outcome: %#v", outcome)
+	if !detected || !recovered {
+		t.Fatalf("unexpected recovery outcome: detected=%t recovered=%t", detected, recovered)
 	}
 	if queue.requeued == nil || queue.requeued.ExternalId != "run-123" {
 		t.Fatalf("expected run to be requeued, got %#v", queue.requeued)
@@ -84,15 +81,12 @@ func TestProcessStaleUnclaimedRunSkipsAlreadyPendingQueueState(t *testing.T) {
 		taskQueue: queue,
 	}
 
-	outcome, err := svc.processStaleUnclaimedRun(context.Background(), &types.AgentRun{
+	detected, recovered := svc.processStaleUnclaimedRun(context.Background(), &types.AgentRun{
 		ID:     "run-123",
 		Status: types.AgentRunStatusAccepted,
 	})
-	if err != nil {
-		t.Fatalf("process stale unclaimed run: %v", err)
-	}
-	if outcome.detected || outcome.recovered {
-		t.Fatalf("expected already-pending run to be ignored, got %#v", outcome)
+	if detected || recovered {
+		t.Fatalf("expected already-pending run to be ignored, got detected=%t recovered=%t", detected, recovered)
 	}
 	if queue.requeued != nil {
 		t.Fatalf("did not expect requeue, got %#v", queue.requeued)
