@@ -2,6 +2,8 @@ package types
 
 import (
 	"fmt"
+	"math"
+	"sort"
 	"strings"
 	"time"
 )
@@ -345,6 +347,8 @@ const (
 	OrchestrationOutboxPayloadLLMCacheCreationInputTokens = "llm_cache_creation_input_tokens"
 	OrchestrationOutboxPayloadLLMCacheReadInputTokens     = "llm_cache_read_input_tokens"
 	OrchestrationOutboxPayloadLLMTotalTokens              = "llm_total_tokens"
+	OrchestrationOutboxPayloadTotalCostUSD                = "total_cost_usd"
+	OrchestrationOutboxPayloadLLMModelUsageJSON           = "llm_model_usage_json"
 	OrchestrationOutboxPayloadReason                      = "reason"
 	OrchestrationOutboxPayloadRetryDelay                  = "retry_delay_ms"
 	OrchestrationOutboxPayloadDispatchAttempt             = "dispatch_attempt"
@@ -499,22 +503,52 @@ type AgentRunListFilter struct {
 }
 
 const (
-	AgentRunUsageVersion                   = 1
-	AgentRunUsageKeyVersion                = "usage_version"
-	AgentRunUsageKeyLLMInputTokens         = "llm_input_tokens"
-	AgentRunUsageKeyLLMOutputTokens        = "llm_output_tokens"
-	AgentRunUsageKeyLLMCacheCreationTokens = "llm_cache_creation_input_tokens"
-	AgentRunUsageKeyLLMCacheReadTokens     = "llm_cache_read_input_tokens"
-	AgentRunUsageKeyLLMTotalTokens         = "llm_total_tokens"
-	AgentRunUsageKeyBillingTotalTokens     = "billing_total_tokens"
+	AgentRunUsageVersion                     = 2
+	AgentRunUsageKeyVersion                  = "usage_version"
+	AgentRunUsageKeyLLMInputTokens           = "llm_input_tokens"
+	AgentRunUsageKeyLLMOutputTokens          = "llm_output_tokens"
+	AgentRunUsageKeyLLMCacheCreationTokens   = "llm_cache_creation_input_tokens"
+	AgentRunUsageKeyLLMCacheReadTokens       = "llm_cache_read_input_tokens"
+	AgentRunUsageKeyLLMTotalTokens           = "llm_total_tokens"
+	AgentRunUsageKeyTotalCostUSD             = "total_cost_usd"
+	AgentRunUsageKeyBillingTotalCostMicrousd = "billing_total_cost_microusd"
+	AgentRunUsageKeyModelUsage               = "model_usage"
+	AgentRunUsageKeyLegacyBillingTotalTokens = "billing_total_tokens"
 )
 
+type LLMModelUsage struct {
+	InputTokens              int64   `json:"input_tokens,omitempty"`
+	OutputTokens             int64   `json:"output_tokens,omitempty"`
+	CacheCreationInputTokens int64   `json:"cache_creation_input_tokens,omitempty"`
+	CacheReadInputTokens     int64   `json:"cache_read_input_tokens,omitempty"`
+	TotalTokens              int64   `json:"total_tokens,omitempty"`
+	CostUSD                  float64 `json:"cost_usd,omitempty"`
+	WebSearchRequests        int64   `json:"web_search_requests,omitempty"`
+	ContextWindow            int64   `json:"context_window,omitempty"`
+	MaxOutputTokens          int64   `json:"max_output_tokens,omitempty"`
+}
+
+func (m LLMModelUsage) NormalizedTotalTokens() int64 {
+	if m.TotalTokens > 0 {
+		return m.TotalTokens
+	}
+	return m.InputTokens + m.OutputTokens + m.CacheCreationInputTokens + m.CacheReadInputTokens
+}
+
+func (m LLMModelUsage) Normalized() LLMModelUsage {
+	m.TotalTokens = m.NormalizedTotalTokens()
+	return m
+}
+
 type LLMUsage struct {
-	InputTokens              int64 `json:"llm_input_tokens,omitempty"`
-	OutputTokens             int64 `json:"llm_output_tokens,omitempty"`
-	CacheCreationInputTokens int64 `json:"llm_cache_creation_input_tokens,omitempty"`
-	CacheReadInputTokens     int64 `json:"llm_cache_read_input_tokens,omitempty"`
-	TotalTokens              int64 `json:"llm_total_tokens,omitempty"`
+	InputTokens              int64                    `json:"llm_input_tokens,omitempty"`
+	OutputTokens             int64                    `json:"llm_output_tokens,omitempty"`
+	CacheCreationInputTokens int64                    `json:"llm_cache_creation_input_tokens,omitempty"`
+	CacheReadInputTokens     int64                    `json:"llm_cache_read_input_tokens,omitempty"`
+	TotalTokens              int64                    `json:"llm_total_tokens,omitempty"`
+	TotalCostUSD             float64                  `json:"total_cost_usd,omitempty"`
+	BillingTotalCostMicrousd int64                    `json:"billing_total_cost_microusd,omitempty"`
+	ModelUsage               map[string]LLMModelUsage `json:"model_usage,omitempty"`
 }
 
 func (u *LLMUsage) IsZero() bool {
@@ -525,7 +559,10 @@ func (u *LLMUsage) IsZero() bool {
 		u.OutputTokens == 0 &&
 		u.CacheCreationInputTokens == 0 &&
 		u.CacheReadInputTokens == 0 &&
-		u.TotalTokens == 0
+		u.TotalTokens == 0 &&
+		u.TotalCostUSD == 0 &&
+		u.BillingTotalCostMicrousd == 0 &&
+		len(u.ModelUsage) == 0
 }
 
 func (u *LLMUsage) NormalizedTotal() int64 {
@@ -535,7 +572,164 @@ func (u *LLMUsage) NormalizedTotal() int64 {
 	if u.TotalTokens > 0 {
 		return u.TotalTokens
 	}
-	return u.InputTokens + u.OutputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
+	scalarTotal := u.InputTokens + u.OutputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
+	if scalarTotal > 0 {
+		return scalarTotal
+	}
+	if len(u.ModelUsage) > 0 {
+		var total int64
+		for _, model := range u.ModelUsage {
+			total += model.NormalizedTotalTokens()
+		}
+		if total > 0 {
+			return total
+		}
+	}
+	return 0
+}
+
+func (u *LLMUsage) NormalizedTotalCostUSD() float64 {
+	if u == nil {
+		return 0
+	}
+	if u.TotalCostUSD != 0 {
+		return u.TotalCostUSD
+	}
+	if len(u.ModelUsage) == 0 {
+		return 0
+	}
+	keys := make([]string, 0, len(u.ModelUsage))
+	for key := range u.ModelUsage {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var total float64
+	for _, key := range keys {
+		total += u.ModelUsage[key].CostUSD
+	}
+	return total
+}
+
+func (u *LLMUsage) NormalizedBillingTotalCostMicrousd() int64 {
+	if u == nil {
+		return 0
+	}
+	if u.BillingTotalCostMicrousd != 0 {
+		return u.BillingTotalCostMicrousd
+	}
+	return CostUSDToMicrousd(u.NormalizedTotalCostUSD())
+}
+
+func (u *LLMUsage) Normalized() *LLMUsage {
+	if u == nil {
+		return &LLMUsage{}
+	}
+
+	normalized := *u
+	normalized.ModelUsage = cloneLLMModelUsageMap(u.ModelUsage)
+	if len(normalized.ModelUsage) > 0 {
+		needsAggregateFromModelUsage := normalized.InputTokens == 0 &&
+			normalized.OutputTokens == 0 &&
+			normalized.CacheCreationInputTokens == 0 &&
+			normalized.CacheReadInputTokens == 0 &&
+			normalized.TotalTokens == 0
+		var modelInput int64
+		var modelOutput int64
+		var modelCacheCreate int64
+		var modelCacheRead int64
+		for key, model := range normalized.ModelUsage {
+			model = model.Normalized()
+			normalized.ModelUsage[key] = model
+			modelInput += model.InputTokens
+			modelOutput += model.OutputTokens
+			modelCacheCreate += model.CacheCreationInputTokens
+			modelCacheRead += model.CacheReadInputTokens
+		}
+		if needsAggregateFromModelUsage {
+			normalized.InputTokens = modelInput
+			normalized.OutputTokens = modelOutput
+			normalized.CacheCreationInputTokens = modelCacheCreate
+			normalized.CacheReadInputTokens = modelCacheRead
+		}
+	}
+	normalized.TotalTokens = normalized.NormalizedTotal()
+	normalized.TotalCostUSD = normalized.NormalizedTotalCostUSD()
+	normalized.BillingTotalCostMicrousd = normalized.NormalizedBillingTotalCostMicrousd()
+	return &normalized
+}
+
+func MergeLLMUsage(current *LLMUsage, delta *LLMUsage) *LLMUsage {
+	if delta == nil {
+		return current
+	}
+	normalizedDelta := delta.Normalized()
+	if normalizedDelta.IsZero() {
+		return current
+	}
+	if current == nil {
+		return normalizedDelta
+	}
+
+	normalizedCurrent := current.Normalized()
+	merged := *normalizedCurrent
+	merged.InputTokens += normalizedDelta.InputTokens
+	merged.OutputTokens += normalizedDelta.OutputTokens
+	merged.CacheCreationInputTokens += normalizedDelta.CacheCreationInputTokens
+	merged.CacheReadInputTokens += normalizedDelta.CacheReadInputTokens
+	merged.TotalTokens = normalizedCurrent.TotalTokens + normalizedDelta.TotalTokens
+	merged.TotalCostUSD += normalizedDelta.TotalCostUSD
+	merged.BillingTotalCostMicrousd += normalizedDelta.BillingTotalCostMicrousd
+	merged.ModelUsage = mergeLLMModelUsageMaps(normalizedCurrent.ModelUsage, normalizedDelta.ModelUsage)
+	return merged.Normalized()
+}
+
+func CostUSDToMicrousd(value float64) int64 {
+	if value == 0 {
+		return 0
+	}
+	return int64(math.Round(value * 1_000_000))
+}
+
+func cloneLLMModelUsageMap(src map[string]LLMModelUsage) map[string]LLMModelUsage {
+	if len(src) == 0 {
+		return map[string]LLMModelUsage{}
+	}
+	out := make(map[string]LLMModelUsage, len(src))
+	for key, value := range src {
+		out[key] = value
+	}
+	return out
+}
+
+func mergeLLMModelUsageMaps(base map[string]LLMModelUsage, delta map[string]LLMModelUsage) map[string]LLMModelUsage {
+	if len(base) == 0 && len(delta) == 0 {
+		return map[string]LLMModelUsage{}
+	}
+	out := cloneLLMModelUsageMap(base)
+	for key, value := range delta {
+		normalizedDelta := value.Normalized()
+		existing, ok := out[key]
+		if !ok {
+			out[key] = normalizedDelta
+			continue
+		}
+		existing = existing.Normalized()
+		existing.InputTokens += normalizedDelta.InputTokens
+		existing.OutputTokens += normalizedDelta.OutputTokens
+		existing.CacheCreationInputTokens += normalizedDelta.CacheCreationInputTokens
+		existing.CacheReadInputTokens += normalizedDelta.CacheReadInputTokens
+		existing.TotalTokens = existing.NormalizedTotalTokens() + normalizedDelta.NormalizedTotalTokens()
+		existing.CostUSD += normalizedDelta.CostUSD
+		existing.WebSearchRequests += normalizedDelta.WebSearchRequests
+		if normalizedDelta.ContextWindow != 0 {
+			existing.ContextWindow = normalizedDelta.ContextWindow
+		}
+		if normalizedDelta.MaxOutputTokens != 0 {
+			existing.MaxOutputTokens = normalizedDelta.MaxOutputTokens
+		}
+		out[key] = existing.Normalized()
+	}
+	return out
 }
 
 type AgentExecutionInstance struct {

@@ -2,6 +2,7 @@ package gatewayclient
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"time"
@@ -275,12 +276,23 @@ func (c *GatewayClient) SetTaskResult(
 	var llmCacheCreationInputTokens int64
 	var llmCacheReadInputTokens int64
 	var llmTotalTokens int64
+	var totalCostUSD float64
+	var llmModelUsageJSON string
 	if usage != nil {
-		llmInputTokens = usage.InputTokens
-		llmOutputTokens = usage.OutputTokens
-		llmCacheCreationInputTokens = usage.CacheCreationInputTokens
-		llmCacheReadInputTokens = usage.CacheReadInputTokens
-		llmTotalTokens = usage.NormalizedTotal()
+		normalized := usage.Normalized()
+		llmInputTokens = normalized.InputTokens
+		llmOutputTokens = normalized.OutputTokens
+		llmCacheCreationInputTokens = normalized.CacheCreationInputTokens
+		llmCacheReadInputTokens = normalized.CacheReadInputTokens
+		llmTotalTokens = normalized.TotalTokens
+		totalCostUSD = normalized.TotalCostUSD
+		if len(normalized.ModelUsage) > 0 {
+			rawModelUsage, err := json.Marshal(normalized.ModelUsage)
+			if err != nil {
+				return fmt.Errorf("marshal llm model usage: %w", err)
+			}
+			llmModelUsageJSON = string(rawModelUsage)
+		}
 	}
 
 	_, err := c.client.SetTaskResult(ctx, &pb.SetTaskResultRequest{
@@ -293,6 +305,8 @@ func (c *GatewayClient) SetTaskResult(
 		LlmCacheCreationInputTokens: llmCacheCreationInputTokens,
 		LlmCacheReadInputTokens:     llmCacheReadInputTokens,
 		LlmTotalTokens:              llmTotalTokens,
+		TotalCostUsd:                totalCostUSD,
+		LlmModelUsageJson:           llmModelUsageJSON,
 	})
 	if err != nil {
 		return fmt.Errorf("set task result failed: %w", err)

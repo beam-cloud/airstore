@@ -19,6 +19,8 @@ func TestBuildRunResultOutboxPayloadIncludesLLMUsage(t *testing.T) {
 		LlmCacheCreationInputTokens: 3,
 		LlmCacheReadInputTokens:     2,
 		LlmTotalTokens:              23,
+		TotalCostUsd:                2.1530685,
+		LlmModelUsageJson:           `{"claude-haiku-4-5-20251001":{"input_tokens":10}}`,
 	}
 	payload := buildRunResultOutboxPayload(req, req.AttemptId, "dedupe-key")
 
@@ -28,4 +30,6 @@ func TestBuildRunResultOutboxPayloadIncludesLLMUsage(t *testing.T) {
 	require.Equal(t, int64(3), payload[types.OrchestrationOutboxPayloadLLMCacheCreationInputTokens])
 	require.Equal(t, int64(2), payload[types.OrchestrationOutboxPayloadLLMCacheReadInputTokens])
 	require.Equal(t, int64(23), payload[types.OrchestrationOutboxPayloadLLMTotalTokens])
+	require.Equal(t, 2.1530685, payload[types.OrchestrationOutboxPayloadTotalCostUSD])
+	require.Equal(t, `{"claude-haiku-4-5-20251001":{"input_tokens":10}}`, payload[types.OrchestrationOutboxPayloadLLMModelUsageJSON])
 }

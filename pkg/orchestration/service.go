@@ -788,6 +788,12 @@ func (s *AgentService) processRunResultMessage(ctx context.Context, message redi
 	if err := s.applyRunResultProjectorMessage(ctx, result); err != nil {
 		if s.orchestrationStore != nil {
 			usage := normalizeLLMUsage(result.llmUsage)
+			modelUsageJSON := ""
+			if len(usage.ModelUsage) > 0 {
+				if rawModelUsage, marshalErr := json.Marshal(usage.ModelUsage); marshalErr == nil {
+					modelUsageJSON = string(rawModelUsage)
+				}
+			}
 			_, _ = s.orchestrationStore.PublishRunResultDLQ(ctx, map[string]any{
 				types.OrchestrationOutboxPayloadTaskID:                      result.taskID,
 				types.OrchestrationOutboxPayloadAttemptID:                   result.attemptID,
@@ -798,6 +804,8 @@ func (s *AgentService) processRunResultMessage(ctx context.Context, message redi
 				types.OrchestrationOutboxPayloadLLMCacheCreationInputTokens: usage.CacheCreationInputTokens,
 				types.OrchestrationOutboxPayloadLLMCacheReadInputTokens:     usage.CacheReadInputTokens,
 				types.OrchestrationOutboxPayloadLLMTotalTokens:              usage.NormalizedTotal(),
+				types.OrchestrationOutboxPayloadTotalCostUSD:                usage.TotalCostUSD,
+				types.OrchestrationOutboxPayloadLLMModelUsageJSON:           modelUsageJSON,
 				types.OrchestrationOutboxPayloadReason:                      err.Error(),
 				types.OrchestrationOutboxPayloadDispatchAttempt:             result.retryAttempt,
 				types.OrchestrationOutboxPayloadIdempotency:                 result.resultKey,
@@ -915,6 +923,7 @@ func (s *AgentService) finalizeRunAttempt(
 		payload[types.OrchestrationOutboxPayloadLLMCacheCreationInputTokens] = usage.CacheCreationInputTokens
 		payload[types.OrchestrationOutboxPayloadLLMCacheReadInputTokens] = usage.CacheReadInputTokens
 		payload[types.OrchestrationOutboxPayloadLLMTotalTokens] = usage.NormalizedTotal()
+		payload[types.OrchestrationOutboxPayloadTotalCostUSD] = usage.TotalCostUSD
 	}
 	if err := s.backend.UpdateAgentRunLifecycle(ctx, attempt.RunID, runStatus, nil, &now, errMsg); err != nil {
 		return fmt.Errorf("update run lifecycle: %w", err)
@@ -1006,21 +1015,21 @@ func llmUsageFromStreamValues(values map[string]any) *types.LLMUsage {
 		CacheCreationInputTokens: int64(intFromAny(values[types.OrchestrationOutboxPayloadLLMCacheCreationInputTokens])),
 		CacheReadInputTokens:     int64(intFromAny(values[types.OrchestrationOutboxPayloadLLMCacheReadInputTokens])),
 		TotalTokens:              int64(intFromAny(values[types.OrchestrationOutboxPayloadLLMTotalTokens])),
+		TotalCostUSD:             float64FromAny(values[types.OrchestrationOutboxPayloadTotalCostUSD]),
+		ModelUsage:               modelUsageFromValue(values[types.OrchestrationOutboxPayloadLLMModelUsageJSON]),
 	}
-	if usage.IsZero() {
+	normalized := usage.Normalized()
+	if normalized.IsZero() {
 		return nil
 	}
-	usage.TotalTokens = usage.NormalizedTotal()
-	return usage
+	return normalized
 }
 
 func normalizeLLMUsage(raw *types.LLMUsage) *types.LLMUsage {
 	if raw == nil {
 		return &types.LLMUsage{}
 	}
-	normalized := *raw
-	normalized.TotalTokens = normalized.NormalizedTotal()
-	return &normalized
+	return raw.Normalized()
 }
 
 func (s *AgentService) persistRunUsageDelta(ctx context.Context, runID string, delta *types.LLMUsage) error {
@@ -1043,18 +1052,27 @@ func mergeRunUsageJSON(base map[string]any, delta *types.LLMUsage) map[string]an
 	out := cloneAnyMap(base)
 	out[types.AgentRunUsageKeyVersion] = types.AgentRunUsageVersion
 
-	updatedInput := usageValueFromMap(out, types.AgentRunUsageKeyLLMInputTokens) + delta.InputTokens
-	updatedOutput := usageValueFromMap(out, types.AgentRunUsageKeyLLMOutputTokens) + delta.OutputTokens
-	updatedCacheCreate := usageValueFromMap(out, types.AgentRunUsageKeyLLMCacheCreationTokens) + delta.CacheCreationInputTokens
-	updatedCacheRead := usageValueFromMap(out, types.AgentRunUsageKeyLLMCacheReadTokens) + delta.CacheReadInputTokens
-	updatedTotal := usageValueFromMap(out, types.AgentRunUsageKeyLLMTotalTokens) + delta.NormalizedTotal()
+	baseUsage := (&types.LLMUsage{
+		InputTokens:              usageValueFromMap(out, types.AgentRunUsageKeyLLMInputTokens),
+		OutputTokens:             usageValueFromMap(out, types.AgentRunUsageKeyLLMOutputTokens),
+		CacheCreationInputTokens: usageValueFromMap(out, types.AgentRunUsageKeyLLMCacheCreationTokens),
+		CacheReadInputTokens:     usageValueFromMap(out, types.AgentRunUsageKeyLLMCacheReadTokens),
+		TotalTokens:              usageValueFromMap(out, types.AgentRunUsageKeyLLMTotalTokens),
+		TotalCostUSD:             float64ValueFromMap(out, types.AgentRunUsageKeyTotalCostUSD),
+		BillingTotalCostMicrousd: usageValueFromMap(out, types.AgentRunUsageKeyBillingTotalCostMicrousd),
+		ModelUsage:               modelUsageFromValue(out[types.AgentRunUsageKeyModelUsage]),
+	}).Normalized()
+	merged := types.MergeLLMUsage(baseUsage, delta)
 
-	out[types.AgentRunUsageKeyLLMInputTokens] = updatedInput
-	out[types.AgentRunUsageKeyLLMOutputTokens] = updatedOutput
-	out[types.AgentRunUsageKeyLLMCacheCreationTokens] = updatedCacheCreate
-	out[types.AgentRunUsageKeyLLMCacheReadTokens] = updatedCacheRead
-	out[types.AgentRunUsageKeyLLMTotalTokens] = updatedTotal
-	out[types.AgentRunUsageKeyBillingTotalTokens] = updatedTotal
+	out[types.AgentRunUsageKeyLLMInputTokens] = merged.InputTokens
+	out[types.AgentRunUsageKeyLLMOutputTokens] = merged.OutputTokens
+	out[types.AgentRunUsageKeyLLMCacheCreationTokens] = merged.CacheCreationInputTokens
+	out[types.AgentRunUsageKeyLLMCacheReadTokens] = merged.CacheReadInputTokens
+	out[types.AgentRunUsageKeyLLMTotalTokens] = merged.TotalTokens
+	out[types.AgentRunUsageKeyTotalCostUSD] = merged.TotalCostUSD
+	out[types.AgentRunUsageKeyBillingTotalCostMicrousd] = merged.BillingTotalCostMicrousd
+	out[types.AgentRunUsageKeyModelUsage] = merged.ModelUsage
+	delete(out, types.AgentRunUsageKeyLegacyBillingTotalTokens)
 	return out
 }
 
@@ -1063,6 +1081,66 @@ func usageValueFromMap(source map[string]any, key string) int64 {
 		return 0
 	}
 	return int64(intFromAny(source[key]))
+}
+
+func float64ValueFromMap(source map[string]any, key string) float64 {
+	if len(source) == 0 {
+		return 0
+	}
+	return float64FromAny(source[key])
+}
+
+func modelUsageFromValue(value any) map[string]types.LLMModelUsage {
+	if value == nil {
+		return map[string]types.LLMModelUsage{}
+	}
+
+	var raw map[string]any
+	switch typed := value.(type) {
+	case string:
+		if strings.TrimSpace(typed) == "" {
+			return map[string]types.LLMModelUsage{}
+		}
+		if err := json.Unmarshal([]byte(typed), &raw); err != nil {
+			return map[string]types.LLMModelUsage{}
+		}
+	case map[string]any:
+		raw = typed
+	default:
+		marshaled, err := json.Marshal(typed)
+		if err != nil {
+			return map[string]types.LLMModelUsage{}
+		}
+		if err := json.Unmarshal(marshaled, &raw); err != nil {
+			return map[string]types.LLMModelUsage{}
+		}
+	}
+
+	out := make(map[string]types.LLMModelUsage, len(raw))
+	for key, rawModel := range raw {
+		modelMap, ok := rawModel.(map[string]any)
+		if !ok {
+			marshaled, err := json.Marshal(rawModel)
+			if err != nil {
+				continue
+			}
+			if err := json.Unmarshal(marshaled, &modelMap); err != nil {
+				continue
+			}
+		}
+		out[key] = types.LLMModelUsage{
+			InputTokens:              int64(intFromAny(modelMap["input_tokens"])),
+			OutputTokens:             int64(intFromAny(modelMap["output_tokens"])),
+			CacheCreationInputTokens: int64(intFromAny(modelMap["cache_creation_input_tokens"])),
+			CacheReadInputTokens:     int64(intFromAny(modelMap["cache_read_input_tokens"])),
+			TotalTokens:              int64(intFromAny(modelMap["total_tokens"])),
+			CostUSD:                  float64FromAny(modelMap["cost_usd"]),
+			WebSearchRequests:        int64(intFromAny(modelMap["web_search_requests"])),
+			ContextWindow:            int64(intFromAny(modelMap["context_window"])),
+			MaxOutputTokens:          int64(intFromAny(modelMap["max_output_tokens"])),
+		}.Normalized()
+	}
+	return out
 }
 
 func streamValueAsString(values map[string]any, key string) string {
@@ -2561,6 +2639,29 @@ func intFromAny(value any) int {
 	case string:
 		var parsed int
 		if _, err := fmt.Sscanf(strings.TrimSpace(typed), "%d", &parsed); err == nil {
+			return parsed
+		}
+		return 0
+	default:
+		return 0
+	}
+}
+
+func float64FromAny(value any) float64 {
+	switch typed := value.(type) {
+	case int:
+		return float64(typed)
+	case int32:
+		return float64(typed)
+	case int64:
+		return float64(typed)
+	case float32:
+		return float64(typed)
+	case float64:
+		return typed
+	case string:
+		var parsed float64
+		if _, err := fmt.Sscanf(strings.TrimSpace(typed), "%f", &parsed); err == nil {
 			return parsed
 		}
 		return 0

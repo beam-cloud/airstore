@@ -334,6 +334,8 @@ func buildRunResultOutboxPayload(req *pb.SetTaskResultRequest, attemptID string,
 		types.OrchestrationOutboxPayloadLLMCacheCreationInputTokens: req.LlmCacheCreationInputTokens,
 		types.OrchestrationOutboxPayloadLLMCacheReadInputTokens:     req.LlmCacheReadInputTokens,
 		types.OrchestrationOutboxPayloadLLMTotalTokens:              req.LlmTotalTokens,
+		types.OrchestrationOutboxPayloadTotalCostUSD:                req.TotalCostUsd,
+		types.OrchestrationOutboxPayloadLLMModelUsageJSON:           req.LlmModelUsageJson,
 		types.OrchestrationOutboxPayloadIdempotency:                 resultKey,
 	}
 }

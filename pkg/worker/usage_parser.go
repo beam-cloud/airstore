@@ -16,6 +16,8 @@ const (
 	usageFieldCacheCreationInputTokens = "cache_creation_input_tokens"
 	usageFieldCacheReadInputTokens     = "cache_read_input_tokens"
 	usageFieldTotalTokens              = "total_tokens"
+	usageFieldTotalCostUSD             = "total_cost_usd"
+	usageFieldModelUsage               = "modelUsage"
 )
 
 // ClaudeStreamUsageParser parses Claude stream-json output and captures the
@@ -66,29 +68,11 @@ func (p *ClaudeStreamUsageParser) Snapshot() *types.LLMUsage {
 	if !p.hasLatest {
 		return nil
 	}
-	usage := p.latest
-	usage.TotalTokens = usage.NormalizedTotal()
-	return &usage
+	return p.latest.Normalized()
 }
 
 func AddLLMUsage(current *types.LLMUsage, delta *types.LLMUsage) *types.LLMUsage {
-	if delta == nil || delta.IsZero() {
-		return current
-	}
-	deltaTotal := delta.NormalizedTotal()
-	if current == nil {
-		copied := *delta
-		copied.TotalTokens = deltaTotal
-		return &copied
-	}
-
-	merged := *current
-	merged.InputTokens += delta.InputTokens
-	merged.OutputTokens += delta.OutputTokens
-	merged.CacheCreationInputTokens += delta.CacheCreationInputTokens
-	merged.CacheReadInputTokens += delta.CacheReadInputTokens
-	merged.TotalTokens = current.NormalizedTotal() + deltaTotal
-	return &merged
+	return types.MergeLLMUsage(current, delta)
 }
 
 func splitFirstLine(buffer []byte) (line []byte, rest []byte, ok bool) {
@@ -114,25 +98,35 @@ func (p *ClaudeStreamUsageParser) consumeLine(line []byte) {
 	if !ok || usage.IsZero() {
 		return
 	}
-	usage.TotalTokens = usage.NormalizedTotal()
-	p.latest = *usage
+	p.latest = *usage.Normalized()
 	p.hasLatest = true
 }
 
 func extractLLMUsage(payload map[string]any) (*types.LLMUsage, bool) {
-	usageMap, ok := findUsageMap(payload)
-	if !ok {
-		return nil, false
+	modelUsageMap, hasModelUsage := findModelUsageMap(payload)
+	usageMap, hasUsage := findUsageMap(payload)
+
+	usage := &types.LLMUsage{}
+	if hasModelUsage {
+		usage.ModelUsage = parseModelUsage(modelUsageMap)
+	}
+	if hasUsage && !hasModelUsage {
+		usage.InputTokens = int64FromAny(usageMap[usageFieldInputTokens], int64FromAny(usageMap["llm_input_tokens"], 0))
+		usage.OutputTokens = int64FromAny(usageMap[usageFieldOutputTokens], int64FromAny(usageMap["llm_output_tokens"], 0))
+		usage.CacheCreationInputTokens = int64FromAny(usageMap[usageFieldCacheCreationInputTokens], int64FromAny(usageMap["llm_cache_creation_input_tokens"], 0))
+		usage.CacheReadInputTokens = int64FromAny(usageMap[usageFieldCacheReadInputTokens], int64FromAny(usageMap["llm_cache_read_input_tokens"], 0))
+		usage.TotalTokens = int64FromAny(usageMap[usageFieldTotalTokens], int64FromAny(usageMap["llm_total_tokens"], 0))
 	}
 
-	usage := &types.LLMUsage{
-		InputTokens:              int64FromAny(usageMap[usageFieldInputTokens], int64FromAny(usageMap["llm_input_tokens"], 0)),
-		OutputTokens:             int64FromAny(usageMap[usageFieldOutputTokens], int64FromAny(usageMap["llm_output_tokens"], 0)),
-		CacheCreationInputTokens: int64FromAny(usageMap[usageFieldCacheCreationInputTokens], int64FromAny(usageMap["llm_cache_creation_input_tokens"], 0)),
-		CacheReadInputTokens:     int64FromAny(usageMap[usageFieldCacheReadInputTokens], int64FromAny(usageMap["llm_cache_read_input_tokens"], 0)),
-		TotalTokens:              int64FromAny(usageMap[usageFieldTotalTokens], int64FromAny(usageMap["llm_total_tokens"], 0)),
+	if cost, ok := findFloat64ByKey(payload, usageFieldTotalCostUSD); ok {
+		usage.TotalCostUSD = cost
 	}
-	return usage, true
+
+	normalized := usage.Normalized()
+	if normalized.IsZero() {
+		return nil, false
+	}
+	return normalized, true
 }
 
 func findUsageMap(value any) (map[string]any, bool) {
@@ -161,6 +155,34 @@ func findUsageMap(value any) (map[string]any, bool) {
 	return nil, false
 }
 
+func findModelUsageMap(value any) (map[string]any, bool) {
+	switch typed := value.(type) {
+	case map[string]any:
+		if rawUsage, ok := typed[usageFieldModelUsage]; ok {
+			if usageMap := normalizeAnyMap(rawUsage); len(usageMap) > 0 {
+				return usageMap, true
+			}
+		}
+		if rawUsage, ok := typed[types.AgentRunUsageKeyModelUsage]; ok {
+			if usageMap := normalizeAnyMap(rawUsage); len(usageMap) > 0 {
+				return usageMap, true
+			}
+		}
+		for _, child := range typed {
+			if usage, ok := findModelUsageMap(child); ok {
+				return usage, true
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if usage, ok := findModelUsageMap(child); ok {
+				return usage, true
+			}
+		}
+	}
+	return nil, false
+}
+
 func normalizeAnyMap(value any) map[string]any {
 	if value == nil {
 		return map[string]any{}
@@ -177,6 +199,47 @@ func normalizeAnyMap(value any) map[string]any {
 		return map[string]any{}
 	}
 	return out
+}
+
+func parseModelUsage(raw map[string]any) map[string]types.LLMModelUsage {
+	if len(raw) == 0 {
+		return map[string]types.LLMModelUsage{}
+	}
+
+	out := make(map[string]types.LLMModelUsage, len(raw))
+	for modelName, value := range raw {
+		entry := normalizeAnyMap(value)
+		if len(entry) == 0 {
+			continue
+		}
+		modelUsage := types.LLMModelUsage{
+			InputTokens:              int64FromAny(entry["inputTokens"], int64FromAny(entry[usageFieldInputTokens], 0)),
+			OutputTokens:             int64FromAny(entry["outputTokens"], int64FromAny(entry[usageFieldOutputTokens], 0)),
+			CacheCreationInputTokens: int64FromAny(entry["cacheCreationInputTokens"], int64FromAny(entry[usageFieldCacheCreationInputTokens], 0)),
+			CacheReadInputTokens:     int64FromAny(entry["cacheReadInputTokens"], int64FromAny(entry[usageFieldCacheReadInputTokens], 0)),
+			TotalTokens:              int64FromAny(entry["totalTokens"], int64FromAny(entry[usageFieldTotalTokens], 0)),
+			CostUSD:                  float64FromAny(entry["costUSD"], float64FromAny(entry["cost_usd"], 0)),
+			WebSearchRequests:        int64FromAny(entry["webSearchRequests"], int64FromAny(entry["web_search_requests"], 0)),
+			ContextWindow:            int64FromAny(entry["contextWindow"], int64FromAny(entry["context_window"], 0)),
+			MaxOutputTokens:          int64FromAny(entry["maxOutputTokens"], int64FromAny(entry["max_output_tokens"], 0)),
+		}
+		if modelUsageHasData(modelUsage) {
+			out[modelName] = modelUsage.Normalized()
+		}
+	}
+	return out
+}
+
+func modelUsageHasData(value types.LLMModelUsage) bool {
+	return value.InputTokens != 0 ||
+		value.OutputTokens != 0 ||
+		value.CacheCreationInputTokens != 0 ||
+		value.CacheReadInputTokens != 0 ||
+		value.TotalTokens != 0 ||
+		value.CostUSD != 0 ||
+		value.WebSearchRequests != 0 ||
+		value.ContextWindow != 0 ||
+		value.MaxOutputTokens != 0
 }
 
 func hasUsageTokenField(value map[string]any) bool {
@@ -200,6 +263,27 @@ func hasUsageTokenField(value map[string]any) bool {
 		}
 	}
 	return false
+}
+
+func findFloat64ByKey(value any, key string) (float64, bool) {
+	switch typed := value.(type) {
+	case map[string]any:
+		if raw, ok := typed[key]; ok {
+			return float64FromAny(raw, 0), true
+		}
+		for _, child := range typed {
+			if found, ok := findFloat64ByKey(child, key); ok {
+				return found, true
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if found, ok := findFloat64ByKey(child, key); ok {
+				return found, true
+			}
+		}
+	}
+	return 0, false
 }
 
 func int64FromAny(value any, fallback int64) int64 {
@@ -233,6 +317,36 @@ func int64FromAny(value any, fallback int64) int64 {
 		}
 		if parsed, err := strconv.ParseFloat(trimmed, 64); err == nil {
 			return int64(parsed)
+		}
+	}
+	return fallback
+}
+
+func float64FromAny(value any, fallback float64) float64 {
+	switch typed := value.(type) {
+	case nil:
+		return fallback
+	case int:
+		return float64(typed)
+	case int32:
+		return float64(typed)
+	case int64:
+		return float64(typed)
+	case float32:
+		return float64(typed)
+	case float64:
+		return typed
+	case json.Number:
+		if parsed, err := typed.Float64(); err == nil {
+			return parsed
+		}
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed == "" {
+			return fallback
+		}
+		if parsed, err := strconv.ParseFloat(trimmed, 64); err == nil {
+			return parsed
 		}
 	}
 	return fallback

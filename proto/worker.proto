@@ -99,6 +99,8 @@ message SetTaskResultRequest {
   int64 llm_cache_creation_input_tokens = 7;
   int64 llm_cache_read_input_tokens = 8;
   int64 llm_total_tokens = 9;
+  double total_cost_usd = 10;
+  string llm_model_usage_json = 11;
 }
 
 message SetTaskResultResponse {}
