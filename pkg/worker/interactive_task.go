@@ -106,8 +106,11 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.RunExecution
 	}()
 
 	sessionID := strings.TrimSpace(task.Env[agentSessionIDEnvKey])
-	release := w.acquireSessionLease(runCtx, task, sessionID, runCancel)
+	release, leaseErr := w.acquireSessionLease(runCtx, task, sessionID, runCancel)
 	if release == nil && sessionID != "" {
+		if leaseErr != nil {
+			return nil, fmt.Errorf("session lease: %w", leaseErr)
+		}
 		return nil, fmt.Errorf("session %s already in use", sessionID)
 	}
 	defer release()
@@ -154,16 +157,20 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.RunExecution
 	return result, nil
 }
 
-// acquireSessionLease returns a release func (call it when done).
-// Returns a no-op func if sessionID is empty. Returns nil if lease acquisition fails.
-func (w *Worker) acquireSessionLease(ctx context.Context, task types.RunExecution, sessionID string, onLost func()) func() {
+// acquireSessionLease returns a release func (call it when done) and an error.
+// Returns a no-op func and nil error if sessionID is empty.
+// Returns (nil, err) on infrastructure failure, (nil, nil) if the lease is contested.
+func (w *Worker) acquireSessionLease(ctx context.Context, task types.RunExecution, sessionID string, onLost func()) (func(), error) {
 	if sessionID == "" {
-		return func() {}
+		return func() {}, nil
 	}
 	ownerID := fmt.Sprintf("%s:%s", strings.TrimSpace(w.workerId), task.ExternalId)
 	acquired, err := w.terminalIO.AcquireSessionLease(ctx, task.WorkspaceId, sessionID, ownerID, sessionLeaseTTL)
-	if err != nil || !acquired {
-		return nil
+	if err != nil {
+		return nil, fmt.Errorf("acquire session lease: %w", err)
+	}
+	if !acquired {
+		return nil, nil
 	}
 	leaseCtx, leaseCancel := context.WithCancel(ctx)
 	go w.heartbeatSessionLease(leaseCtx, task, sessionID, ownerID, onLost)
@@ -175,7 +182,7 @@ func (w *Worker) acquireSessionLease(ctx context.Context, task types.RunExecutio
 			defer cancel()
 			_ = w.terminalIO.ReleaseSessionLease(c, task.WorkspaceId, sessionID, ownerID)
 		})
-	}
+	}, nil
 }
 
 func (w *Worker) heartbeatSessionLease(ctx context.Context, task types.RunExecution, sessionID, ownerID string, onLost func()) {

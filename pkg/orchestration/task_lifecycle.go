@@ -135,6 +135,9 @@ func (lc *TaskLifecycle) Settle(ctx context.Context, runID string, opts *SettleO
 		if fresh.TargetRunID != nil {
 			return nil // another run took over
 		}
+		if !isValidTransition(fresh.State, nextState) {
+			return nil
+		}
 		if err := lc.backend.UpdateTaskState(ctx, fresh.ID, nextState, nil, &targetRunID); err != nil {
 			return err
 		}

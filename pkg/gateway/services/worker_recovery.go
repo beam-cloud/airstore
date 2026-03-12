@@ -144,7 +144,7 @@ func (s *WorkerService) processClaimedRun(ctx context.Context, run *types.AgentR
 	if err != nil || state == nil || !isTerminalQueueState(state.Status) {
 		return false, false
 	}
-	if state.FinishedAt.IsZero() || time.Since(state.FinishedAt) < terminalQueueReconcileGracePeriod {
+	if !state.FinishedAt.IsZero() && time.Since(state.FinishedAt) < terminalQueueReconcileGracePeriod {
 		return false, false
 	}
 

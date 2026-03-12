@@ -210,32 +210,17 @@ func derefStr(p *string) string {
 	return ""
 }
 
-// isIntermediatePath returns true for file paths that are clearly
-// intermediate scratch work and should never be surfaced as outputs.
+// isIntermediatePath returns true for local file paths that won't be
+// accessible via the UI. Only files under /workspace/ have working
+// presigned URLs; everything else is undownloadable.
 func isIntermediatePath(path string) bool {
 	if path == "" {
 		return false
 	}
-	lp := strings.ToLower(path)
-
-	if strings.HasPrefix(lp, "/tmp/") || lp == "/tmp" {
-		return true
+	if !strings.HasPrefix(path, "/") {
+		return false // not an absolute path (could be a URL or relative ref)
 	}
-
-	// Images outside of /workspace/ are always intermediate (screenshots, etc.)
-	for _, ext := range []string{".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"} {
-		if strings.HasSuffix(lp, ext) && !strings.Contains(lp, "/workspace/") {
-			return true
-		}
-	}
-
-	// JSON files in the workspace are almost always internal state/config, not deliverables.
-	// Real deliverables go to external systems (Google Drive, GitHub, etc.)
-	if strings.HasSuffix(lp, ".json") {
-		return true
-	}
-
-	return false
+	return !strings.Contains(strings.ToLower(path), "/workspace/")
 }
 
 func kindToOutputType(kind signaltypes.OutputKind) string {
