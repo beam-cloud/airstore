@@ -470,12 +470,14 @@ func (w *Worker) runTurnSession(
 				ctx, task, sandboxID, runner, sessionEnv, turnStdout, prompt, firstTurnStrategies,
 			)
 			if err != nil {
+				totalUsage = AddLLMUsage(totalUsage, turnUsageParser.Snapshot())
 				return totalUsage, err, false, ""
 			}
 			sessionEnv = nextEnv
 			isFirstTurn = false
 		} else {
 			if err := w.executeTurn(ctx, task, sandboxID, runner, sessionEnv, turnStdout, prompt, TurnArgModeFollowup, 1, 1, ""); err != nil {
+				totalUsage = AddLLMUsage(totalUsage, turnUsageParser.Snapshot())
 				return totalUsage, err, false, ""
 			}
 		}

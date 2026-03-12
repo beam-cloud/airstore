@@ -110,15 +110,15 @@ message SetTaskResultRequest {
   int32 exit_code = 2;
   string error = 3;
   string attempt_id = 4;
-  int64 llm_input_tokens = 5;
-  int64 llm_output_tokens = 6;
-  int64 llm_cache_creation_input_tokens = 7;
-  int64 llm_cache_read_input_tokens = 8;
-  int64 llm_total_tokens = 9;
-  double total_cost_usd = 10;
-  string llm_model_usage_json = 11;
-  bool waiting_for_input = 12;
-  WakeSignal wake_signal = 13;
+  bool waiting_for_input = 5;
+  WakeSignal wake_signal = 6;
+  int64 llm_input_tokens = 7;
+  int64 llm_output_tokens = 8;
+  int64 llm_cache_creation_input_tokens = 9;
+  int64 llm_cache_read_input_tokens = 10;
+  int64 llm_total_tokens = 11;
+  double total_cost_usd = 12;
+  string llm_model_usage_json = 13;
 }
 
 message SetTaskResultResponse {}
