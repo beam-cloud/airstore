@@ -149,3 +149,109 @@ func TestSaveConnectionSkipsCreatedEventOnUpdate(t *testing.T) {
 		t.Fatalf("unmet sql expectations: %v", err)
 	}
 }
+
+func TestGetAgentStatsTotalCostUsesUsageJSONWhenRunCostMissing(t *testing.T) {
+	backend, mock, cleanup := newStatsBackend(t)
+	defer cleanup()
+
+	workspaceID := uint(42)
+	agentID := "agent-1"
+	expectGetAgentStatsBaseQueries(mock, workspaceID, agentID)
+	mock.ExpectQuery(agentStatsTotalCostQueryPattern).
+		WithArgs(workspaceID, agentID).
+		WillReturnRows(sqlmock.NewRows([]string{"total_cost"}).AddRow(2.1530685))
+
+	stats, err := backend.GetAgentStats(context.Background(), workspaceID, agentID)
+	if err != nil {
+		t.Fatalf("GetAgentStats returned error: %v", err)
+	}
+	if stats == nil {
+		t.Fatal("GetAgentStats returned nil stats")
+	}
+	if stats.TotalCostUSD < 2.153068499 || stats.TotalCostUSD > 2.153068501 {
+		t.Fatalf("expected usage-backed total cost 2.1530685, got %v", stats.TotalCostUSD)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestGetAgentStatsTotalCostCombinesLegacyAndUsageBackedRuns(t *testing.T) {
+	backend, mock, cleanup := newStatsBackend(t)
+	defer cleanup()
+
+	workspaceID := uint(42)
+	agentID := "agent-1"
+	expectGetAgentStatsBaseQueries(mock, workspaceID, agentID)
+	mock.ExpectQuery(agentStatsTotalCostQueryPattern).
+		WithArgs(workspaceID, agentID).
+		WillReturnRows(sqlmock.NewRows([]string{"total_cost"}).AddRow(5.4030685))
+
+	stats, err := backend.GetAgentStats(context.Background(), workspaceID, agentID)
+	if err != nil {
+		t.Fatalf("GetAgentStats returned error: %v", err)
+	}
+	if stats == nil {
+		t.Fatal("GetAgentStats returned nil stats")
+	}
+	if stats.TotalCostUSD < 5.403068499 || stats.TotalCostUSD > 5.403068501 {
+		t.Fatalf("expected mixed total cost 5.4030685, got %v", stats.TotalCostUSD)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestGetAgentStatsTotalCostTreatsMalformedUsageValuesAsZero(t *testing.T) {
+	backend, mock, cleanup := newStatsBackend(t)
+	defer cleanup()
+
+	workspaceID := uint(42)
+	agentID := "agent-1"
+	expectGetAgentStatsBaseQueries(mock, workspaceID, agentID)
+	mock.ExpectQuery(agentStatsTotalCostQueryPattern).
+		WithArgs(workspaceID, agentID).
+		WillReturnRows(sqlmock.NewRows([]string{"total_cost"}).AddRow(0))
+
+	stats, err := backend.GetAgentStats(context.Background(), workspaceID, agentID)
+	if err != nil {
+		t.Fatalf("GetAgentStats returned error: %v", err)
+	}
+	if stats == nil {
+		t.Fatal("GetAgentStats returned nil stats")
+	}
+	if stats.TotalCostUSD != 0 {
+		t.Fatalf("expected malformed usage-backed total cost to be treated as zero, got %v", stats.TotalCostUSD)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func newStatsBackend(t *testing.T) (*PostgresBackend, sqlmock.Sqlmock, func()) {
+	t.Helper()
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+
+	return &PostgresBackend{db: db}, mock, func() { _ = db.Close() }
+}
+
+func expectGetAgentStatsBaseQueries(mock sqlmock.Sqlmock, workspaceID uint, agentID string) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT state::text, COUNT(*) FROM agent_task")).
+		WithArgs(workspaceID, agentID).
+		WillReturnRows(sqlmock.NewRows([]string{"state", "count"}))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT AVG(EXTRACT(EPOCH FROM (COALESCE(ended_at, updated_at) - COALESCE(started_at, created_at))))")).
+		WithArgs(workspaceID, agentID).
+		WillReturnRows(sqlmock.NewRows([]string{"avg_run_sec"}).AddRow(nil))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT quality_score")).
+		WithArgs(workspaceID, agentID).
+		WillReturnRows(sqlmock.NewRows([]string{"quality_score"}).AddRow(nil))
+}
+
+const agentStatsTotalCostQueryPattern = `(?s)SELECT COALESCE\(SUM\(.*WHEN ar\.cost_usd > 0 THEN ar\.cost_usd.*->>'billing_total_cost_microusd'.*->>'total_cost_usd'.*->>'cost_usd'.*->>'usd_cost'.*->>'cost'.*FROM agent_run ar.*WHERE ar\.workspace_id = \$1 AND ar\.agent_id = \$2`

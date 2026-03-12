@@ -150,25 +150,36 @@ func (s *WorkerService) processClaimedRun(ctx context.Context, run *types.AgentR
 
 	exitCode := state.ExitCode
 	errText := strings.TrimSpace(state.Error)
+	var usage *types.LLMUsage
 	if result, err := s.taskQueue.GetResult(ctx, run.ID); err == nil && result != nil {
 		if e := strings.TrimSpace(result.Error); e != "" || errText == "" {
 			errText = e
 		}
 		exitCode = result.ExitCode
+		usage = result.Usage
 	}
 
 	attempt, err := s.lookupRunAttemptByExecutionID(ctx, run.ID)
 	if err != nil || attempt == nil || attempt.ID == "" {
 		return false, false
 	}
-	if _, err := s.SetTaskResult(ctx, &pb.SetTaskResultRequest{
+	pf := usage.ProtoFields()
+	req := &pb.SetTaskResultRequest{
 		TaskId: run.ID, AttemptId: attempt.ID,
 		ExitCode: int32(exitCode), Error: errText,
-	}); err != nil {
+		LlmInputTokens:              pf.InputTokens,
+		LlmOutputTokens:             pf.OutputTokens,
+		LlmCacheCreationInputTokens: pf.CacheCreationInputTokens,
+		LlmCacheReadInputTokens:     pf.CacheReadInputTokens,
+		LlmTotalTokens:              pf.TotalTokens,
+		TotalCostUsd:                pf.TotalCostUSD,
+		LlmModelUsageJson:           pf.ModelUsageJSON,
+	}
+	if _, err := s.SetTaskResult(ctx, req); err != nil {
 		return false, false
 	}
 	_ = s.taskQueue.Complete(ctx, run.ID, &types.RunExecutionResult{
-		ID: run.ID, ExitCode: exitCode, Error: errText,
+		ID: run.ID, ExitCode: exitCode, Error: errText, Usage: usage,
 	})
 	return true, true
 }

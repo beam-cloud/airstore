@@ -131,6 +131,44 @@ func usageCostUSD(usage map[string]any) float64 {
 	return 0
 }
 
+func numericTextToNumericSQL(expr string) string {
+	trimmed := fmt.Sprintf("NULLIF(BTRIM(%s), '')", expr)
+	return fmt.Sprintf(
+		"CASE WHEN %s ~ '^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$' THEN %s::numeric END",
+		trimmed,
+		trimmed,
+	)
+}
+
+func agentRunEffectiveCostSQL(alias string) string {
+	costExpr := "cost_usd"
+	usageExpr := "usage_json"
+	if trimmed := strings.TrimSpace(alias); trimmed != "" {
+		costExpr = trimmed + ".cost_usd"
+		usageExpr = trimmed + ".usage_json"
+	}
+
+	billingCostExpr := numericTextToNumericSQL(fmt.Sprintf("%s->>'billing_total_cost_microusd'", usageExpr))
+	totalCostExpr := numericTextToNumericSQL(fmt.Sprintf("%s->>'total_cost_usd'", usageExpr))
+	costUSDExpr := numericTextToNumericSQL(fmt.Sprintf("%s->>'cost_usd'", usageExpr))
+	usdCostExpr := numericTextToNumericSQL(fmt.Sprintf("%s->>'usd_cost'", usageExpr))
+	legacyCostExpr := numericTextToNumericSQL(fmt.Sprintf("%s->>'cost'", usageExpr))
+
+	return fmt.Sprintf(`
+		CASE
+			WHEN %s > 0 THEN %s
+			ELSE COALESCE(
+				(%s / 1000000.0),
+				%s,
+				%s,
+				%s,
+				%s,
+				0
+			)
+		END
+	`, costExpr, costExpr, billingCostExpr, totalCostExpr, costUSDExpr, usdCostExpr, legacyCostExpr)
+}
+
 func normalizeLimitOffset(limit, offset, defaultLimit, maxLimit int) (int, int) {
 	if limit <= 0 {
 		limit = defaultLimit
@@ -3835,10 +3873,11 @@ func (b *PostgresBackend) GetAgentStats(ctx context.Context, workspaceId uint, a
 	}
 
 	var totalCost sql.NullFloat64
-	_ = b.db.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(cost_usd), 0)
-		FROM agent_run
-		WHERE workspace_id = $1 AND agent_id = $2`, workspaceId, agentID).Scan(&totalCost)
+	totalCostQuery := fmt.Sprintf(`
+		SELECT COALESCE(SUM(%s), 0)
+		FROM agent_run ar
+		WHERE ar.workspace_id = $1 AND ar.agent_id = $2`, agentRunEffectiveCostSQL("ar"))
+	_ = b.db.QueryRowContext(ctx, totalCostQuery, workspaceId, agentID).Scan(&totalCost)
 	if totalCost.Valid {
 		stats.TotalCostUSD = totalCost.Float64
 	}

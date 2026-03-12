@@ -1,9 +1,9 @@
 package types
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
-	"sort"
 	"strings"
 	"time"
 )
@@ -705,14 +705,9 @@ func (u *LLMUsage) NormalizedTotalCostUSD() float64 {
 	if len(u.ModelUsage) == 0 {
 		return 0
 	}
-	keys := make([]string, 0, len(u.ModelUsage))
-	for key := range u.ModelUsage {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
 	var total float64
-	for _, key := range keys {
-		total += u.ModelUsage[key].CostUSD
+	for _, model := range u.ModelUsage {
+		total += model.CostUSD
 	}
 	return total
 }
@@ -763,6 +758,40 @@ func (u *LLMUsage) Normalized() *LLMUsage {
 	normalized.TotalCostUSD = normalized.NormalizedTotalCostUSD()
 	normalized.BillingTotalCostMicrousd = normalized.NormalizedBillingTotalCostMicrousd()
 	return &normalized
+}
+
+// LLMUsageProtoFields holds the flat fields needed for pb.SetTaskResultRequest.
+type LLMUsageProtoFields struct {
+	InputTokens              int64
+	OutputTokens             int64
+	CacheCreationInputTokens int64
+	CacheReadInputTokens     int64
+	TotalTokens              int64
+	TotalCostUSD             float64
+	ModelUsageJSON           string
+}
+
+// ProtoFields returns the normalized usage fields ready for proto serialization.
+// Returns zero-value fields when the receiver is nil.
+func (u *LLMUsage) ProtoFields() LLMUsageProtoFields {
+	if u == nil {
+		return LLMUsageProtoFields{}
+	}
+	n := u.Normalized()
+	pf := LLMUsageProtoFields{
+		InputTokens:              n.InputTokens,
+		OutputTokens:             n.OutputTokens,
+		CacheCreationInputTokens: n.CacheCreationInputTokens,
+		CacheReadInputTokens:     n.CacheReadInputTokens,
+		TotalTokens:              n.TotalTokens,
+		TotalCostUSD:             n.TotalCostUSD,
+	}
+	if len(n.ModelUsage) > 0 {
+		if b, err := json.Marshal(n.ModelUsage); err == nil {
+			pf.ModelUsageJSON = string(b)
+		}
+	}
+	return pf
 }
 
 func MergeLLMUsage(current *LLMUsage, delta *LLMUsage) *LLMUsage {

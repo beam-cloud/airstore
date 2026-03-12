@@ -99,13 +99,13 @@ func TestClaudeStreamUsageParser_SnapshotPreservesPartialBuffer(t *testing.T) {
 	require.EqualValues(t, 10, usage.TotalTokens)
 }
 
-func TestAddLLMUsage_SumsUsage(t *testing.T) {
+func TestMergeLLMUsage_SumsUsage(t *testing.T) {
 	var usage *types.LLMUsage
-	usage = AddLLMUsage(usage, &types.LLMUsage{
+	usage = types.MergeLLMUsage(usage, &types.LLMUsage{
 		InputTokens:  10,
 		OutputTokens: 3,
 	})
-	usage = AddLLMUsage(usage, &types.LLMUsage{
+	usage = types.MergeLLMUsage(usage, &types.LLMUsage{
 		InputTokens:              2,
 		OutputTokens:             5,
 		CacheCreationInputTokens: 1,
@@ -122,7 +122,7 @@ func TestAddLLMUsage_SumsUsage(t *testing.T) {
 			},
 		},
 	})
-	usage = AddLLMUsage(usage, &types.LLMUsage{
+	usage = types.MergeLLMUsage(usage, &types.LLMUsage{
 		TotalCostUSD:             0.5,
 		BillingTotalCostMicrousd: 500000,
 		ModelUsage: map[string]types.LLMModelUsage{

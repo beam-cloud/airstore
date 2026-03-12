@@ -18,6 +18,10 @@ const (
 	usageFieldTotalTokens              = "total_tokens"
 	usageFieldTotalCostUSD             = "total_cost_usd"
 	usageFieldModelUsage               = "modelUsage"
+
+	// maxParserBufferSize caps the internal buffer to prevent unbounded growth
+	// when the stream contains very long lines without newlines.
+	maxParserBufferSize = 1 << 20 // 1 MB
 )
 
 // ClaudeStreamUsageParser parses Claude stream-json output and captures the
@@ -50,6 +54,14 @@ func (p *ClaudeStreamUsageParser) Write(chunk []byte) (int, error) {
 		p.buffer = rest
 		p.consumeLine(line)
 	}
+	if len(p.buffer) > maxParserBufferSize {
+		// Discard oldest data up to the last newline to keep partial JSON intact.
+		if idx := bytes.LastIndexByte(p.buffer, '\n'); idx >= 0 {
+			p.buffer = p.buffer[idx+1:]
+		} else {
+			p.buffer = p.buffer[len(p.buffer)-maxParserBufferSize:]
+		}
+	}
 	return len(chunk), nil
 }
 
@@ -68,11 +80,9 @@ func (p *ClaudeStreamUsageParser) Snapshot() *types.LLMUsage {
 	if !p.hasLatest {
 		return nil
 	}
-	return p.latest.Normalized()
-}
-
-func AddLLMUsage(current *types.LLMUsage, delta *types.LLMUsage) *types.LLMUsage {
-	return types.MergeLLMUsage(current, delta)
+	copy := p.latest
+	copy.ModelUsage = cloneLLMModelUsageMap(p.latest.ModelUsage)
+	return &copy
 }
 
 func splitFirstLine(buffer []byte) (line []byte, rest []byte, ok bool) {
@@ -98,7 +108,7 @@ func (p *ClaudeStreamUsageParser) consumeLine(line []byte) {
 	if !ok || usage.IsZero() {
 		return
 	}
-	p.latest = *usage.Normalized()
+	p.latest = *usage
 	p.hasLatest = true
 }
 
@@ -226,6 +236,17 @@ func parseModelUsage(raw map[string]any) map[string]types.LLMModelUsage {
 		if modelUsageHasData(modelUsage) {
 			out[modelName] = modelUsage.Normalized()
 		}
+	}
+	return out
+}
+
+func cloneLLMModelUsageMap(src map[string]types.LLMModelUsage) map[string]types.LLMModelUsage {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string]types.LLMModelUsage, len(src))
+	for k, v := range src {
+		out[k] = v
 	}
 	return out
 }

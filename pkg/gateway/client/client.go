@@ -2,7 +2,6 @@ package gatewayclient
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
 	"time"
@@ -273,42 +272,19 @@ func (c *GatewayClient) SetTaskResult(
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
 
-	var llmInputTokens int64
-	var llmOutputTokens int64
-	var llmCacheCreationInputTokens int64
-	var llmCacheReadInputTokens int64
-	var llmTotalTokens int64
-	var totalCostUSD float64
-	var llmModelUsageJSON string
-	if usage != nil {
-		normalized := usage.Normalized()
-		llmInputTokens = normalized.InputTokens
-		llmOutputTokens = normalized.OutputTokens
-		llmCacheCreationInputTokens = normalized.CacheCreationInputTokens
-		llmCacheReadInputTokens = normalized.CacheReadInputTokens
-		llmTotalTokens = normalized.TotalTokens
-		totalCostUSD = normalized.TotalCostUSD
-		if len(normalized.ModelUsage) > 0 {
-			rawModelUsage, err := json.Marshal(normalized.ModelUsage)
-			if err != nil {
-				return fmt.Errorf("marshal llm model usage: %w", err)
-			}
-			llmModelUsageJSON = string(rawModelUsage)
-		}
-	}
-
+	pf := usage.ProtoFields()
 	_, err := c.client.SetTaskResult(ctx, &pb.SetTaskResultRequest{
 		TaskId:                      taskID,
 		ExitCode:                    int32(exitCode),
 		Error:                       errorMsg,
 		AttemptId:                   attemptID,
-		LlmInputTokens:              llmInputTokens,
-		LlmOutputTokens:             llmOutputTokens,
-		LlmCacheCreationInputTokens: llmCacheCreationInputTokens,
-		LlmCacheReadInputTokens:     llmCacheReadInputTokens,
-		LlmTotalTokens:              llmTotalTokens,
-		TotalCostUsd:                totalCostUSD,
-		LlmModelUsageJson:           llmModelUsageJSON,
+		LlmInputTokens:              pf.InputTokens,
+		LlmOutputTokens:             pf.OutputTokens,
+		LlmCacheCreationInputTokens: pf.CacheCreationInputTokens,
+		LlmCacheReadInputTokens:     pf.CacheReadInputTokens,
+		LlmTotalTokens:              pf.TotalTokens,
+		TotalCostUsd:                pf.TotalCostUSD,
+		LlmModelUsageJson:           pf.ModelUsageJSON,
 		WaitingForInput:             waitingForInput,
 		WakeSignal:                  wakeSignal,
 	})

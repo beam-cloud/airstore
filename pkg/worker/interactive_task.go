@@ -394,17 +394,17 @@ func (w *Worker) runTurnSession(
 
 		if isFirst {
 			if err := w.executeFirstTurn(ctx, task, sandboxID, runner, sessionEnv, turnStdout, prompt); err != nil {
-				totalUsage = AddLLMUsage(totalUsage, turnUsageParser.Snapshot())
+				totalUsage = types.MergeLLMUsage(totalUsage, turnUsageParser.Snapshot())
 				return totalUsage, err, false, ""
 			}
 			isFirst = false
 		} else {
 			if err := w.executeTurn(ctx, task, sandboxID, runner, sessionEnv, turnStdout, prompt, TurnArgModeFollowup); err != nil {
-				totalUsage = AddLLMUsage(totalUsage, turnUsageParser.Snapshot())
+				totalUsage = types.MergeLLMUsage(totalUsage, turnUsageParser.Snapshot())
 				return totalUsage, err, false, ""
 			}
 		}
-		totalUsage = AddLLMUsage(totalUsage, turnUsageParser.Snapshot())
+		totalUsage = types.MergeLLMUsage(totalUsage, turnUsageParser.Snapshot())
 		signalActivity(activityCh)
 
 		if w.waitForSubagents(ctx, task, sandboxID, activityCh) {
@@ -413,10 +413,10 @@ func (w *Worker) runTurnSession(
 			if err := w.executeTurn(ctx, task, sandboxID, runner, sessionEnv, subStdout,
 				"Your background tasks / subagents have completed. Please collect and report their results.",
 				TurnArgModeFollowup); err != nil {
-				totalUsage = AddLLMUsage(totalUsage, subUsageParser.Snapshot())
+				totalUsage = types.MergeLLMUsage(totalUsage, subUsageParser.Snapshot())
 				return totalUsage, err, false, ""
 			}
-			totalUsage = AddLLMUsage(totalUsage, subUsageParser.Snapshot())
+			totalUsage = types.MergeLLMUsage(totalUsage, subUsageParser.Snapshot())
 			signalActivity(activityCh)
 		}
 
