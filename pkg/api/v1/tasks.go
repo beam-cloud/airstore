@@ -446,15 +446,22 @@ func (g *WorkspaceTasksGroup) streamTaskEventsSSE(c echo.Context) error {
 		return batch, nil
 	}
 
+	var lastBatch *orchestration.TaskEventBatch
 	emit := func(event string) error {
 		batch, err := loadBatch()
 		if err != nil {
 			return err
 		}
 		if resetSubscriptions(batch) {
-			// The task switched runs or executions. Fetch once more after
-			// rewiring subscriptions so we don't miss logs/events that landed
-			// during the handoff window.
+			// Run changed — re-subscribe happened above. Do a catchup load
+			// to pick up events that arrived after the subscription. Reset
+			// cursors so the catchup returns the full session history
+			// (the first loadBatch already advanced cursors, so without a
+			// reset the catchup would return empty incremental data and
+			// discard the history batch that contained user inputs).
+			logCursor = 0
+			runEventCursor = 0
+			cursorRunID = ""
 			catchup, err := loadBatch()
 			if err != nil {
 				return err
@@ -462,6 +469,7 @@ func (g *WorkspaceTasksGroup) streamTaskEventsSSE(c echo.Context) error {
 			batch = catchup
 			_ = resetSubscriptions(batch)
 		}
+		lastBatch = batch
 		return writer.send(event, batch)
 	}
 	if err := emit(sseEventSnapshot); err != nil {
@@ -477,6 +485,10 @@ func (g *WorkspaceTasksGroup) streamTaskEventsSSE(c echo.Context) error {
 
 	emitBatch := func() error { return emit(sseEventBatch) }
 
+	isTerminalBatch := func() bool {
+		return lastBatch != nil && lastBatch.Task != nil && lastBatch.Task.State.IsTerminal()
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -489,11 +501,17 @@ func (g *WorkspaceTasksGroup) streamTaskEventsSSE(c echo.Context) error {
 			if err := emitBatch(); err != nil {
 				return nil
 			}
+			if isTerminalBatch() {
+				return nil
+			}
 		case _, ok := <-taskLiveCh:
 			if !ok {
 				return nil
 			}
 			if err := emitBatch(); err != nil {
+				return nil
+			}
+			if isTerminalBatch() {
 				return nil
 			}
 		case _, ok := <-runEventCh:
@@ -502,6 +520,9 @@ func (g *WorkspaceTasksGroup) streamTaskEventsSSE(c echo.Context) error {
 				continue
 			}
 			if err := emitBatch(); err != nil {
+				return nil
+			}
+			if isTerminalBatch() {
 				return nil
 			}
 		}

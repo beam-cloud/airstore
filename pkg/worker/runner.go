@@ -293,21 +293,28 @@ func (r *ClaudeCodeRunner) ReadLastMessage(markerPath string) string {
 	return strings.TrimSpace(string(data))
 }
 
-// stopMessageDumpScript returns a Node.js script that reads the Stop hook
-// JSON from stdin and writes the last 1000 chars of last_assistant_message
-// to markerPath. The Go worker then classifies this via BAML.
+// stopMessageDumpScript returns a Node.js script invoked by Claude Code's
+// "Stop" hook. Claude pipes JSON with last_assistant_message on stdin.
+// We extract the tail of that message and write it to markerPath so the
+// Go worker can classify the turn via BAML.
 func stopMessageDumpScript(markerPath string) []byte {
-	return []byte(fmt.Sprintf(`const fs=require("fs");
-let b=Buffer.alloc(0);
-process.stdin.on("data",c=>{b=Buffer.concat([b,c])});
-process.stdin.on("end",()=>{
+	const maxChars = 4000
+	return []byte(fmt.Sprintf(`"use strict";
+
+const fs = require("fs");
+const MARKER = %q;
+const chunks = [];
+
+process.stdin.on("data", (chunk) => chunks.push(chunk));
+process.stdin.on("end", () => {
   try {
-    const m=(JSON.parse(b).last_assistant_message||"").trim();
-    fs.writeFileSync(%q,m.slice(-1000));
-  } catch(e) {
-    fs.writeFileSync(%q,"");
+    const msg = (JSON.parse(Buffer.concat(chunks)).last_assistant_message || "").trim();
+    fs.writeFileSync(MARKER, msg.slice(-%d));
+  } catch (_) {
+    fs.writeFileSync(MARKER, "");
   }
-});`, markerPath, markerPath))
+});
+`, markerPath, maxChars))
 }
 
 func buildClaudeHookSettings(paths *claudeHookPaths, includeClassify bool) []byte {
