@@ -23,8 +23,8 @@ var (
 )
 
 const (
-	pendingInputSweepInterval = 15 * time.Second
-	pendingInputSweepMaxAge   = 30 * time.Second
+	pendingInputSweepInterval = 5 * time.Second
+	pendingInputSweepMaxAge   = 10 * time.Second
 	pendingInputSweepBatch    = 100
 )
 
@@ -38,6 +38,7 @@ type AgentService struct {
 	dispatchConsumerID string
 	resultConsumerID   string
 	instanceController *ExecutionInstanceController
+	lifecycle          *TaskLifecycle
 }
 
 func NewAgentService(
@@ -63,6 +64,7 @@ func NewAgentService(
 		dispatchConsumerID: "dispatch-" + uuid.NewString(),
 		resultConsumerID:   "result-" + uuid.NewString(),
 		instanceController: NewExecutionInstanceController(ctx, backend, orchestrationStore, common.Keys.AgentInstanceLock),
+		lifecycle:          NewTaskLifecycle(backend, orchestrationStore, terminalIO),
 	}
 }
 
@@ -446,13 +448,12 @@ func (s *AgentService) AcceptTaskInput(
 		return nil, fmt.Errorf("append task input: %w", err)
 	}
 
+	s.persistUserInputLog(ctx, task, message)
+
 	if err := s.deliverTaskInput(ctx, task); err != nil {
 		log.Warn().Err(err).Str("task_id", taskID).Msg("task input delivery failed (input is durable, will be claimed on next wake)")
 	}
 
-	if task.TargetRunID != nil {
-		s.persistUserInputLog(ctx, *task.TargetRunID, message)
-	}
 	s.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
 
 	updated, uerr := s.backend.GetTask(ctx, workspaceID, taskID)
@@ -486,15 +487,20 @@ func (s *AgentService) deliverTaskInput(ctx context.Context, task *types.AgentTa
 	if err != nil {
 		return err
 	}
+	if !hasActiveAttempt {
+		return s.requeueTaskForResume(ctx, task, run)
+	}
 	if execID != "" && s.terminalIO != nil {
 		if err := s.terminalIO.PublishInputWake(ctx, execID); err != nil {
 			return err
 		}
+		// Re-check: the run may have become terminal between our first check
+		// and the wake publish. If so, the wake went to a dead worker.
+		if freshRun, err := s.backend.GetAgentRun(ctx, task.WorkspaceID, *task.TargetRunID); err == nil && freshRun.Status.IsTerminal() {
+			return s.requeueTaskForResume(ctx, task, freshRun)
+		}
 		s.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
 		return nil
-	}
-	if !hasActiveAttempt {
-		return s.requeueTaskForResume(ctx, task, run)
 	}
 	return nil
 }
@@ -1015,161 +1021,12 @@ func wakeBackoffDelay(wakeCount, ceilingMinutes int) int {
 	return delay
 }
 
-func (s *AgentService) scheduleRunResumeRetry(
-	ctx context.Context,
-	task *types.AgentTask,
-	run *types.AgentRun,
-) (bool, error) {
-	if s == nil || s.backend == nil || task == nil || run == nil || run.Status != types.AgentRunStatusError {
-		return false, nil
-	}
-	if run.Error == nil || !isRetryableError(*run.Error) {
-		return false, nil
-	}
-
-	retryAttempt := intFromAny(run.DeliveryJSON[types.OrchestrationOutboxPayloadDispatchAttempt])
-	payload := s.buildRetryPayload(ctx, task, run)
-	delay := computeDispatchRetryDelay(retryAttempt)
-
-	if err := s.scheduleDispatchRetry(ctx, task, retryAttempt, "transient", delay, payload); err != nil {
-		return true, err
-	}
-	log.Info().
-		Str("task_id", task.ID).
-		Str("run_id", run.ID).
-		Str("error", *run.Error).
-		Int("retry_attempt", retryAttempt+1).
-		Dur("delay", delay).
-		Msg("requeued task after transient failure")
-	return true, nil
-}
-
-func (s *AgentService) buildRetryPayload(ctx context.Context, task *types.AgentTask, run *types.AgentRun) map[string]any {
-	payload := map[string]any{}
-
-	prompt := ""
-	if exec, err := s.backend.GetRunExecution(ctx, run.ID); err == nil && exec != nil {
-		prompt = strings.TrimSpace(exec.Prompt)
-	}
-	if prompt == "" {
-		prompt = runInputPrompt(task.PayloadJSON)
-	}
-	if prompt != "" {
-		payload[types.OrchestrationOutboxPayloadDispatchPrompt] = prompt
-	}
-
-	if run.Interactive {
-		payload[types.OrchestrationOutboxPayloadResumeSession] = true
-		payload[types.OrchestrationOutboxPayloadResumeExcludeRunID] = run.ID
-		if cpID := strings.TrimSpace(stringFromPayload(run.DeliveryJSON, types.OrchestrationOutboxPayloadResumeCheckpointRunID)); cpID != "" {
-			payload[types.OrchestrationOutboxPayloadResumeCheckpointRunID] = cpID
-		} else if s.terminalIO != nil {
-			if cp, err := s.terminalIO.GetSessionCheckpoint(ctx, run.WorkspaceID, run.SessionID); err == nil && cp != nil && cp.RunID != "" {
-				payload[types.OrchestrationOutboxPayloadResumeCheckpointRunID] = cp.RunID
-			}
-		}
-	}
-	return payload
-}
 
 func (s *AgentService) settleOriginTask(ctx context.Context, runID string, waitingForInput bool, wakeSignal *types.RunExecutionWakeSignal) error {
-	if s.backend == nil || strings.TrimSpace(runID) == "" {
-		return nil
-	}
-
-	run, err := s.backend.GetAgentRunByID(ctx, runID)
-	if err != nil {
-		return err
-	}
-	if run == nil {
-		return nil
-	}
-	task, err := s.backend.GetTaskByID(ctx, run.OriginTaskID)
-	if err != nil {
-		return err
-	}
-	if task == nil {
-		return nil
-	}
-	if task.State.IsTerminal() {
-		return nil
-	}
-	if run.EndedAt != nil && task.UpdatedAt.After(*run.EndedAt) {
-		return nil
-	}
-	if retried, err := s.scheduleRunResumeRetry(ctx, task, run); err != nil {
-		return err
-	} else if retried {
-		return nil
-	}
-	targetRunID := run.ID
-	nextState := types.TaskTerminalStateForRun(run.Status)
-	if waitingForInput && nextState == types.AgentTaskStateDone {
-		nextState = types.AgentTaskStateWaiting
-	}
-
-	// Agent requested a follow-up: transition to sleeping with a deferred
-	// dispatch instead of marking the task done. The delay uses exponential
-	// backoff: first check is quick (5 min), doubling each cycle until it
-	// reaches the LLM's suggested ceiling.
-	if wakeSignal != nil && nextState == types.AgentTaskStateDone {
-		delayMin := wakeBackoffDelay(task.WakeCount, wakeSignal.DelayMinutes)
-		wakeAt := time.Now().Add(time.Duration(delayMin) * time.Minute)
-		dedupeKey := fmt.Sprintf("wake_dispatch:%s:%s", task.ID, run.ID)
-		outboxEvent := &types.OrchestrationOutboxEvent{
-			EventType: types.OrchestrationOutboxEventTypeTaskDispatch,
-			DedupeKey: dedupeKey,
-			PayloadJSON: map[string]any{
-				types.OrchestrationOutboxPayloadTaskID:                task.ID,
-				types.OrchestrationOutboxPayloadDispatchPrompt:        wakeSignal.FollowUpPrompt,
-				types.OrchestrationOutboxPayloadWakeFollowUpPrompt:    wakeSignal.FollowUpPrompt,
-				types.OrchestrationOutboxPayloadResumeSession:         true,
-				types.OrchestrationOutboxPayloadResumeExcludeRunID:    run.ID,
-				types.OrchestrationOutboxPayloadResumeCheckpointRunID: run.ID,
-			},
-			AvailableAt: wakeAt,
-		}
-		ok, err := s.backend.SleepTaskWithOutbox(ctx, task.ID, run.ID, wakeAt, wakeSignal.Reason, outboxEvent)
-		if err != nil {
-			return fmt.Errorf("sleep task with outbox: %w", err)
-		}
-		if ok {
-			log.Info().
-				Str("task_id", task.ID).
-				Str("run_id", run.ID).
-				Int("llm_delay", wakeSignal.DelayMinutes).
-				Int("actual_delay", delayMin).
-				Int("wake_count", task.WakeCount).
-				Time("wake_at", wakeAt).
-				Msg("task transitioned to sleeping")
-			s.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
-		}
-		return nil
-	}
-
-	updated, err := s.backend.UpdateTaskStateIfCurrentRun(
-		ctx,
-		run.OriginTaskID,
-		run.ID,
-		nextState,
-		nil,
-		&targetRunID,
-		"",
-		nil,
-	)
-	if err != nil {
-		return err
-	}
-	if !updated {
-		return nil
-	}
-	task.State = nextState
-	task.TargetRunID = &targetRunID
-	if err := SyncTaskOutcome(ctx, s.backend, task, run); err != nil {
-		return err
-	}
-	s.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
-	return nil
+	return s.lifecycle.Settle(ctx, runID, &SettleOpts{
+		WaitingForInput: waitingForInput,
+		WakeSignal:      wakeSignal,
+	})
 }
 
 func (s *AgentService) updateExecutionInstanceCounts(ctx context.Context, runID string, runningDelta int) error {
@@ -1360,7 +1217,7 @@ func (s *AgentService) dispatchTask(ctx context.Context, task *types.AgentTask) 
 func (s *AgentService) handleInterruptTask(ctx context.Context, task *types.AgentTask) error {
 	if task.TargetRunID == nil {
 		reason := types.AgentTaskDropReasonInterruptMissingTarget
-		if err := s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDropped, &reason, nil); err != nil {
+		if err := s.lifecycle.Drop(ctx, task.ID, reason); err != nil {
 			return err
 		}
 		s.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
@@ -1395,6 +1252,7 @@ func (s *AgentService) handleInterruptTask(ctx context.Context, task *types.Agen
 	s.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
 	return nil
 }
+
 
 func (s *AgentService) cancelInFlightRunExecutions(ctx context.Context, runID string) (bool, error) {
 	attempts, err := s.backend.ListAgentRunAttempts(ctx, runID)
@@ -1573,7 +1431,7 @@ func (s *AgentService) scheduleDispatchRetry(
 	nextAttempt := retryAttempt + 1
 	if nextAttempt > dispatchRetryMaxAttempts {
 		dropReason := types.AgentTaskDropReasonDispatchRetryExhausted
-		if err := s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDropped, &dropReason, task.TargetRunID); err != nil {
+		if err := s.lifecycle.Drop(ctx, task.ID, dropReason); err != nil {
 			return err
 		}
 		s.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
@@ -1783,6 +1641,8 @@ var retryablePatterns = []string{
 	"connection refused", "connection reset", "i/o timeout", "no such host", // network
 	"tls handshake timeout", "service unavailable", "503", "temporary failure", // infra
 	"failed to fetch image", "failed to pull", "failed to prepare rootfs", // image pull
+	"sandbox exited before startup", "failed to start sandbox", // sandbox startup
+	"no conversation found", // claude session not found (stale resume)
 }
 
 func isRetryableError(errText string) bool {
@@ -1852,7 +1712,7 @@ func (s *AgentService) handleExecutionTask(ctx context.Context, task *types.Agen
 			}
 		}
 		reason := types.AgentTaskDropReasonRunMaterializationFail
-		_ = s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDropped, &reason, task.TargetRunID)
+		_ = s.lifecycle.Drop(ctx, task.ID, reason)
 		s.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
 		return nil
 	}
@@ -1869,18 +1729,37 @@ func (s *AgentService) handleExecutionTask(ctx context.Context, task *types.Agen
 }
 
 // persistUserInputLog writes the user's follow-up message to the S2 log
-// stream of the given run's most recent execution. This ensures the message
-// is part of the persisted session timeline and survives copilot re-hydration.
-func (s *AgentService) persistUserInputLog(ctx context.Context, runID, message string) {
+// stream so it appears in the event timeline. It tries the task's current
+// TargetRunID first, then falls back to the most recent run for the task.
+func (s *AgentService) persistUserInputLog(ctx context.Context, task *types.AgentTask, message string) {
 	if s.s2 == nil || !s.s2.Enabled() {
 		return
 	}
+
+	runID := ""
+	if task.TargetRunID != nil {
+		runID = strings.TrimSpace(*task.TargetRunID)
+	}
+	if runID == "" {
+		runs, err := s.backend.ListAgentRunsFiltered(ctx, task.WorkspaceID, types.AgentRunListFilter{
+			TaskID: &task.ID,
+			Limit:  1,
+		})
+		if err != nil || len(runs) == 0 || runs[0] == nil {
+			log.Warn().Str("task_id", task.ID).Msg("persistUserInputLog: no run found")
+			return
+		}
+		runID = runs[0].ID
+	}
+
 	attempts, err := s.backend.ListAgentRunAttempts(ctx, runID)
 	if err != nil {
+		log.Warn().Err(err).Str("run_id", runID).Msg("persistUserInputLog: list attempts failed")
 		return
 	}
 	execID := newestExecutionID(attempts)
 	if execID == "" {
+		log.Warn().Str("run_id", runID).Msg("persistUserInputLog: no execution found")
 		return
 	}
 	entry := common.TaskLogEntry{
@@ -1890,11 +1769,20 @@ func (s *AgentService) persistUserInputLog(ctx context.Context, runID, message s
 		Data:      message,
 		ChunkType: "user_input",
 	}
-	_ = s.s2.Append(ctx, common.Streams.TaskLogs(execID), entry)
+	if err := s.s2.Append(ctx, common.Streams.TaskLogs(execID), entry); err != nil {
+		log.Warn().Err(err).Str("exec_id", execID).Msg("persistUserInputLog: S2 append failed")
+	} else {
+		log.Info().Str("task_id", task.ID).Str("exec_id", execID).Str("stream", common.Streams.TaskLogs(execID)).Int("msg_len", len(message)).Msg("persistUserInputLog: wrote user_input to S2")
+	}
 }
 
 func restartTaskPayload(basePayload map[string]any, terminalRun *types.AgentRun, message string) map[string]any {
 	payload := cloneAnyMap(basePayload)
+	if _, exists := payload["original_message"]; !exists {
+		if orig, ok := payload["message"].(string); ok && orig != "" {
+			payload["original_message"] = orig
+		}
+	}
 	if message != "" {
 		payload["message"] = message
 		payload["prompt"] = message
@@ -2208,7 +2096,7 @@ func (s *AgentService) materializeRun(
 	if err := s.backend.CreateAgentRun(ctx, run); err != nil {
 		return nil, RunExecutionPolicy{}, "", err
 	}
-	if err := s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateRunning, nil, &run.ID); err != nil {
+	if err := s.lifecycle.Dispatch(ctx, task.ID, run.ID); err != nil {
 		return nil, RunExecutionPolicy{}, "", err
 	}
 	s.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)

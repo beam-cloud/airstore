@@ -1437,6 +1437,21 @@ func (m *SandboxManager) ExecPTY(
 }
 
 
+// ExecCheck runs a short-lived command inside a sandbox and returns nil if
+// the command exits 0. This is useful for probing container state (e.g.
+// checking whether specific processes are still running via pgrep).
+func (m *SandboxManager) ExecCheck(ctx context.Context, sandboxID string, args []string) error {
+	proc := specs.Process{
+		Args: args,
+		Cwd:  types.ContainerWorkDir,
+		Env:  []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
+		User: specs.User{UID: types.SandboxUserUID, GID: types.SandboxUserGID},
+	}
+	return m.runtime.Exec(ctx, sandboxID, proc, &runtime.ExecOpts{
+		OutputWriter: io.Discard,
+	})
+}
+
 func shellJoinArgs(args []string) string {
 	parts := make([]string, len(args))
 	for i, arg := range args {

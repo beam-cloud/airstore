@@ -429,8 +429,14 @@ func (a *AgentAPI) CancelTask(ctx context.Context, workspaceID uint, taskID stri
 		}
 	}
 
-	if err := a.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateCancelled, nil, task.TargetRunID); err != nil {
-		return err
+	if a.runtime != nil {
+		if err := a.runtime.lifecycle.Cancel(ctx, task.ID); err != nil {
+			return err
+		}
+	} else {
+		if err := a.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateCancelled, nil, task.TargetRunID); err != nil {
+			return err
+		}
 	}
 
 	if err := a.backend.CancelPendingOutboxEventsForTask(ctx, task.ID); err != nil {
@@ -636,16 +642,23 @@ func (a *AgentAPI) listTaskSessionHistoryLogs(
 		return a.listTaskLogsForRun(ctx, currentRunID, 0)
 	}
 
+	// Query all runs for this task. When session ID is available, filter by it
+	// for efficiency. When the current run hasn't been claimed yet (no session
+	// ID), fall back to querying by task ID so we don't lose history from
+	// previous runs (including user input logs).
 	sessionID := strings.TrimSpace(currentRun.SessionID)
-	if sessionID == "" {
-		return a.listTaskLogsForRun(ctx, currentRunID, 0)
-	}
-
-	filter := types.AgentRunListFilter{
-		AgentID:   task.AgentID,
-		SessionID: &sessionID,
-		Limit:     500,
-		Offset:    0,
+	var filter types.AgentRunListFilter
+	if sessionID != "" {
+		filter = types.AgentRunListFilter{
+			AgentID:   task.AgentID,
+			SessionID: &sessionID,
+			Limit:     500,
+		}
+	} else {
+		filter = types.AgentRunListFilter{
+			TaskID: &task.ID,
+			Limit:  500,
+		}
 	}
 	runs, err := a.backend.ListAgentRunsFiltered(ctx, workspaceID, filter)
 	if err != nil {
@@ -658,7 +671,7 @@ func (a *AgentAPI) listTaskSessionHistoryLogs(
 		if run == nil {
 			continue
 		}
-		if strings.TrimSpace(run.OriginTaskID) != task.ID {
+		if sessionID != "" && strings.TrimSpace(run.OriginTaskID) != task.ID {
 			continue
 		}
 		runID := strings.TrimSpace(run.ID)

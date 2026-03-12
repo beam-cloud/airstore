@@ -26,6 +26,7 @@ type WorkerService struct {
 	taskQueue              repository.TaskQueue
 	redisClient            *common.RedisClient
 	terminalIO             repository.TerminalIORepository
+	lifecycle              *orchestration.TaskLifecycle
 	claimLeaseTTL          time.Duration
 	unclaimedRunStaleAfter time.Duration
 	recoveryLoopEnabled    bool
@@ -70,6 +71,11 @@ func NewWorkerService(
 		terminalIO = repository.NewRedisTerminalIORepository(redisClient)
 	}
 
+	var orchStore *repository.OrchestrationStore
+	if redisClient != nil {
+		orchStore = repository.NewOrchestrationStore(backend, redisClient)
+	}
+
 	return &WorkerService{
 		scheduler:              sched,
 		backend:                backend,
@@ -77,6 +83,7 @@ func NewWorkerService(
 		taskQueue:              taskQueue,
 		redisClient:            redisClient,
 		terminalIO:             terminalIO,
+		lifecycle:              orchestration.NewTaskLifecycle(backend, orchStore, terminalIO),
 		claimLeaseTTL:          claimLeaseTTL,
 		unclaimedRunStaleAfter: unclaimedRunStaleAfter,
 		recoveryLoopEnabled:    schedulerConfig.RecoveryLoopEnabled,
@@ -385,10 +392,10 @@ func (s *WorkerService) UpdateTaskState(ctx context.Context, req *pb.UpdateTaskS
 
 	inputKind := types.InputKind(strings.TrimSpace(req.InputKind))
 	var waitingSummary *string
-	if s := strings.TrimSpace(req.WaitingSummary); s != "" {
-		waitingSummary = &s
+	if ws := strings.TrimSpace(req.WaitingSummary); ws != "" {
+		waitingSummary = &ws
 	}
-	if _, err := s.backend.UpdateTaskStateIfCurrentRun(ctx, taskID, runID, state, nil, nil, inputKind, waitingSummary); err != nil {
+	if _, err := s.lifecycle.TransitionLive(ctx, taskID, runID, state, inputKind, waitingSummary); err != nil {
 		return nil, status.Errorf(codes.Internal, "update task state: %v", err)
 	}
 	if run, err := s.backend.GetAgentRunByID(ctx, runID); err == nil && run != nil {
@@ -491,46 +498,7 @@ func (s *WorkerService) claimLeaseDuration() time.Duration {
 }
 
 func (s *WorkerService) settleOriginTask(ctx context.Context, runID string) error {
-	if s.backend == nil || strings.TrimSpace(runID) == "" {
-		return nil
-	}
-
-	run, err := s.backend.GetAgentRunByID(ctx, runID)
-	if err != nil {
-		return err
-	}
-	task, err := s.backend.GetTaskByID(ctx, run.OriginTaskID)
-	if err != nil {
-		return err
-	}
-	if task.State.IsTerminal() {
-		return nil
-	}
-	if run.EndedAt != nil && task.UpdatedAt.After(*run.EndedAt) {
-		// Task state was reopened after this run had already ended.
-		return nil
-	}
-	targetRunID := run.ID
-	nextState := types.TaskTerminalStateForRun(run.Status)
-	updated, err := s.backend.UpdateTaskStateIfCurrentRun(
-		ctx,
-		run.OriginTaskID,
-		run.ID,
-		nextState,
-		nil,
-		&targetRunID,
-		"",
-		nil,
-	)
-	if err != nil {
-		return err
-	}
-	if !updated {
-		return nil
-	}
-	task.State = nextState
-	task.TargetRunID = &targetRunID
-	return orchestration.SyncTaskOutcome(ctx, s.backend, task, run)
+	return s.lifecycle.Settle(ctx, runID, nil)
 }
 
 func appendRunSnapshot(

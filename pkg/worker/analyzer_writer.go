@@ -157,6 +157,10 @@ func (w *AnalyzerWriter) createOutput(out signaltypes.ExtractedOutput, toolName 
 	uri := derefStr(out.Uri)
 	summary := derefStr(out.Summary)
 
+	if isIntermediatePath(path) {
+		return
+	}
+
 	data := map[string]any{}
 	metadata := map[string]any{"tool": toolName}
 	setIfNonEmpty := func(m map[string]any, key, val string) {
@@ -204,6 +208,19 @@ func derefStr(p *string) string {
 		return *p
 	}
 	return ""
+}
+
+// isIntermediatePath returns true for local file paths that won't be
+// accessible via the UI. Only files under /workspace/ have working
+// presigned URLs; everything else is undownloadable.
+func isIntermediatePath(path string) bool {
+	if path == "" {
+		return false
+	}
+	if !strings.HasPrefix(path, "/") {
+		return false // not an absolute path (could be a URL or relative ref)
+	}
+	return !strings.Contains(strings.ToLower(path), "/workspace/")
 }
 
 func kindToOutputType(kind signaltypes.OutputKind) string {
