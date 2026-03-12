@@ -40,6 +40,8 @@ function ExtractOutputs(tool_name: string, tool_input: string, tool_result: stri
     THESE ARE NOT OUTPUTS — return an empty array:
     - Opening, visiting, reading, or browsing a URL or webpage
     - Writing intermediate/scratch files, scripts, or configs as part of doing work
+    - Screenshots (saving a .png/.jpg to /tmp or anywhere) — these are internal tools
+    - Any file written to /tmp/ — these are ephemeral scratch files, not deliverables
     - Editing source code files (these are routine development, not deliverables)
     - Installing packages or dependencies
     - Running shell commands (git add, npm install, docker build, etc.)
@@ -48,6 +50,7 @@ function ExtractOutputs(tool_name: string, tool_input: string, tool_result: stri
     - Searching, listing, or querying anything
     - Logging, printing, or echoing to stdout
     - ANY read-only or navigational action
+    - Internal state files (JSON trackers, next-actions files, etc.)
 
     When in doubt, return an empty array. Be very conservative.
 

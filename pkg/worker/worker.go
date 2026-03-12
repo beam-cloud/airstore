@@ -422,6 +422,9 @@ func (w *Worker) executeTask(task types.RunExecution) {
 		result = &types.RunExecutionResult{ID: task.ExternalId, ExitCode: -1, Error: err.Error()}
 	}
 
+	// Eager report before cleanup so the UI updates immediately.
+	reported := w.reportTaskResult(task, result)
+
 	addTaskExecutionContext(
 		log.Info().
 			Str("worker_id", w.workerId).
@@ -429,22 +432,25 @@ func (w *Worker) executeTask(task types.RunExecution) {
 		task,
 	).Msg("task finished, returning capacity")
 
-	w.finishTask(task, result)
+	w.finishTask(task, result, reported)
 }
 
-// eagerReportResult sends the task result to the gateway before cleanup so
-// the UI reflects the state change immediately. The subsequent call in
-// finishTask is a no-op thanks to the outbox dedupe key.
-func (w *Worker) reportTaskResult(task types.RunExecution, result *types.RunExecutionResult) {
+// reportTaskResult sends the task result to the gateway before cleanup so
+// the UI reflects the state change immediately. Returns true if the report
+// succeeded (so finishTask can skip the redundant call).
+func (w *Worker) reportTaskResult(task types.RunExecution, result *types.RunExecutionResult) bool {
 	err := setTaskResultWithRetry(w.ctx, task, result, w.gatewayClient.SetTaskResult, contextSleep)
 	if err != nil && !isNonRetriableSetTaskResultError(err) {
 		addTaskExecutionContext(log.Warn().Err(err), task).
 			Msg("eager result report failed, finishTask will retry")
+		return false
 	}
+	return err == nil
 }
 
-// finishTask records the result in Redis and Postgres. Single path for both success and failure.
-func (w *Worker) finishTask(task types.RunExecution, result *types.RunExecutionResult) {
+// finishTask records the result in Redis/Postgres and reports to the gateway
+// if not already reported via reportTaskResult.
+func (w *Worker) finishTask(task types.RunExecution, result *types.RunExecutionResult, alreadyReported bool) {
 	taskID := task.ExternalId
 	var qErr error
 	if result.ExitCode == 0 && result.Error == "" {
@@ -456,14 +462,16 @@ func (w *Worker) finishTask(task types.RunExecution, result *types.RunExecutionR
 		addTaskExecutionContext(log.Warn().Err(qErr), task).Msg("failed to update task queue")
 	}
 
-	reportErr := setTaskResultWithRetry(w.ctx, task, result, w.gatewayClient.SetTaskResult, contextSleep)
-	if reportErr != nil {
-		if isNonRetriableSetTaskResultError(reportErr) {
-			addTaskExecutionContext(log.Warn().Err(reportErr), task).
-				Msg("failed to report result to gateway, not retrying non-retriable error")
-		} else {
-			addTaskExecutionContext(log.Error().Err(reportErr), task).
-				Msg("failed to report result to gateway after retries")
+	if !alreadyReported {
+		reportErr := setTaskResultWithRetry(w.ctx, task, result, w.gatewayClient.SetTaskResult, contextSleep)
+		if reportErr != nil {
+			if isNonRetriableSetTaskResultError(reportErr) {
+				addTaskExecutionContext(log.Warn().Err(reportErr), task).
+					Msg("failed to report result to gateway, not retrying non-retriable error")
+			} else {
+				addTaskExecutionContext(log.Error().Err(reportErr), task).
+					Msg("failed to report result to gateway after retries")
+			}
 		}
 	}
 

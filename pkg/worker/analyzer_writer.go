@@ -157,6 +157,10 @@ func (w *AnalyzerWriter) createOutput(out signaltypes.ExtractedOutput, toolName 
 	uri := derefStr(out.Uri)
 	summary := derefStr(out.Summary)
 
+	if isIntermediatePath(path) {
+		return
+	}
+
 	data := map[string]any{}
 	metadata := map[string]any{"tool": toolName}
 	setIfNonEmpty := func(m map[string]any, key, val string) {
@@ -204,6 +208,34 @@ func derefStr(p *string) string {
 		return *p
 	}
 	return ""
+}
+
+// isIntermediatePath returns true for file paths that are clearly
+// intermediate scratch work and should never be surfaced as outputs.
+func isIntermediatePath(path string) bool {
+	if path == "" {
+		return false
+	}
+	lp := strings.ToLower(path)
+
+	if strings.HasPrefix(lp, "/tmp/") || lp == "/tmp" {
+		return true
+	}
+
+	// Images outside of /workspace/ are always intermediate (screenshots, etc.)
+	for _, ext := range []string{".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"} {
+		if strings.HasSuffix(lp, ext) && !strings.Contains(lp, "/workspace/") {
+			return true
+		}
+	}
+
+	// JSON files in the workspace are almost always internal state/config, not deliverables.
+	// Real deliverables go to external systems (Google Drive, GitHub, etc.)
+	if strings.HasSuffix(lp, ".json") {
+		return true
+	}
+
+	return false
 }
 
 func kindToOutputType(kind signaltypes.OutputKind) string {
