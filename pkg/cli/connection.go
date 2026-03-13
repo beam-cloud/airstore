@@ -66,6 +66,9 @@ Examples:
 			if !strings.HasPrefix(connToken, "ghp_") && !strings.HasPrefix(connToken, "github_pat_") {
 				PrintWarning("Token doesn't look like a GitHub PAT (expected ghp_* or github_pat_*)")
 			}
+		case "confluence":
+			PrintErrorMsg("Confluence uses OAuth — use 'airstore connection connect confluence' instead")
+			return nil
 		case "gmail", "gdrive":
 			if connToken == "" {
 				PrintErrorMsg(fmt.Sprintf("%s requires --token (OAuth access token)", integrationType))
