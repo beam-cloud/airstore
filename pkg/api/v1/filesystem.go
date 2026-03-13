@@ -119,6 +119,10 @@ func (g *FilesystemGroup) List(c echo.Context) error {
 	showHidden := c.QueryParam("show_hidden") == "true"
 	refresh := c.QueryParam("refresh") == "true"
 
+	if err := validatePath(path); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+	}
+
 	// Root directory - return virtual root folders
 	if path == "" || path == "/" {
 		// If refresh requested, invalidate root cache first
@@ -158,6 +162,10 @@ func (g *FilesystemGroup) Stat(c echo.Context) error {
 	path := cleanPath(c.QueryParam("path"))
 	showHidden := c.QueryParam("show_hidden") == "true"
 
+	if err := validatePath(path); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+	}
+
 	// Root directory
 	if path == "" || path == "/" {
 		return SuccessResponse(c, types.NewRootFolder("", "/"))
@@ -186,6 +194,10 @@ func (g *FilesystemGroup) Read(c echo.Context) error {
 	ctx := c.Request().Context()
 	path := cleanPath(c.QueryParam("path"))
 
+	if err := validatePath(path); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+	}
+
 	if path == "" || path == "/" {
 		return ErrorResponse(c, http.StatusBadRequest, "cannot read directory")
 	}
@@ -195,6 +207,12 @@ func (g *FilesystemGroup) Read(c echo.Context) error {
 	// Parse optional offset and length
 	offset, _ := strconv.ParseInt(c.QueryParam("offset"), 10, 64)
 	length, _ := strconv.ParseInt(c.QueryParam("length"), 10, 64)
+	if offset < 0 {
+		return ErrorResponse(c, http.StatusBadRequest, "offset must not be negative")
+	}
+	if length < 0 {
+		return ErrorResponse(c, http.StatusBadRequest, "length must not be negative")
+	}
 
 	// Inject compression strategy into gRPC-compatible metadata on the context
 	// so that SourceService.readViewResult() can pick it up.
@@ -223,9 +241,17 @@ func (g *FilesystemGroup) Read(c echo.Context) error {
 func (g *FilesystemGroup) Tree(c echo.Context) error {
 	ctx := c.Request().Context()
 	path := cleanPath(c.QueryParam("path"))
+
+	if err := validatePath(path); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+	}
+
 	maxKeys, _ := strconv.ParseInt(c.QueryParam("max_keys"), 10, 32)
 	if maxKeys <= 0 {
 		maxKeys = 1000
+	}
+	if maxKeys > 10000 {
+		maxKeys = 10000
 	}
 	continuationToken := c.QueryParam("continuation_token")
 	showHidden := c.QueryParam("show_hidden") == "true"
@@ -318,6 +344,10 @@ func (g *FilesystemGroup) Search(c echo.Context) error {
 	query := c.QueryParam("q")
 	limitStr := c.QueryParam("limit")
 	showHidden := c.QueryParam("show_hidden") == "true"
+
+	if len(query) > 500 {
+		return ErrorResponse(c, http.StatusBadRequest, "query too long")
+	}
 
 	limit := 50
 	if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 100 {
