@@ -39,6 +39,7 @@ Supported integration types:
   gmail     - Gmail (use --token with OAuth access token)
   notion    - Notion (use --token with integration token)
   gdrive    - Google Drive (use --token with OAuth access token)
+  confluence - Confluence (use 'connection connect confluence' for OAuth)
   weather   - OpenWeatherMap (use --api-key)
   exa       - Exa AI search (use --api-key)
   posthog   - PostHog analytics (use --api-key with personal API key)
@@ -90,7 +91,7 @@ Examples:
 			}
 		default:
 			PrintErrorMsg(fmt.Sprintf("Unknown integration type: %s", integrationType))
-			PrintHint("Supported: github, gmail, notion, gdrive, weather, exa, posthog")
+			PrintHint("Supported: github, gmail, notion, gdrive, confluence, weather, exa, posthog")
 			return nil
 		}
 
@@ -244,12 +245,14 @@ var connectionConnectCmd = &cobra.Command{
 The workspace is determined by your token (--token or AIRSTORE_TOKEN).
 
 Supported OAuth integrations:
-  gmail     - Gmail (read-only access)
-  gdrive    - Google Drive (read-only access)
+  gmail      - Gmail (read-only access)
+  gdrive     - Google Drive (read-only access)
+  confluence - Confluence (read-only access to wiki pages and spaces)
 
 Examples:
   airstore connection connect gmail
   airstore connection connect gdrive
+  airstore connection connect confluence
   airstore connection connect gmail --token <workspace-token>`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -257,7 +260,7 @@ Examples:
 
 		// Validate integration type
 		switch integrationType {
-		case "gmail", "gdrive":
+		case "gmail", "gdrive", "confluence":
 			// OK - these use OAuth
 		default:
 			PrintErrorMsg(fmt.Sprintf("%s does not use OAuth", integrationType))
