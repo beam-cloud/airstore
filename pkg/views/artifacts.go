@@ -1,9 +1,6 @@
 package views
 
 import (
-	"crypto/sha1"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"path/filepath"
@@ -82,19 +79,6 @@ func (a Artifact) MatchesKey(artifactKey string) bool {
 // ---------------------------------------------------------------------------
 // Private derivation helpers
 // ---------------------------------------------------------------------------
-
-func (a Artifact) schemaKey() string {
-	keys := sortedMapKeys(a.o.Data)
-	if len(keys) == 0 {
-		return ""
-	}
-	raw, err := json.Marshal(keys)
-	if err != nil {
-		return ""
-	}
-	sum := sha1.Sum(raw)
-	return hex.EncodeToString(sum[:])[:8]
-}
 
 func (a Artifact) filePath() string {
 	for _, path := range []string{
@@ -264,20 +248,3 @@ func pluralize(label string) string {
 	return label + "s"
 }
 
-func isGenericKey(key string) bool {
-	switch normalizeToken(key) {
-	case "", "file", "text", "json", "link", "email", "report":
-		return true
-	default:
-		return false
-	}
-}
-
-func isGenericToken(value string) bool {
-	switch normalizeToken(value) {
-	case "", "file", "text", "json", "link", "email", "report", "output", "outputs", "result", "results", "artifact":
-		return true
-	default:
-		return false
-	}
-}

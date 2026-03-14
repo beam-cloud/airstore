@@ -2,9 +2,12 @@ package views
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -14,7 +17,14 @@ import (
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
+
+	baml "github.com/beam-cloud/airstore/pkg/views/baml_client"
+	bamltypes "github.com/beam-cloud/airstore/pkg/views/baml_client/types"
 )
+
+// ---------------------------------------------------------------------------
+// DataResolver
+// ---------------------------------------------------------------------------
 
 type DataResolver struct {
 	backend dataResolverBackend
@@ -170,126 +180,6 @@ func (r *DataResolver) fetchOutputs(ctx context.Context, workspaceID uint, ds *t
 }
 
 // ---------------------------------------------------------------------------
-// Rule resolution
-// ---------------------------------------------------------------------------
-
-func resolveRules(comp types.ComponentSpec, outputs []*types.TaskOutput) []types.TransformRule {
-	if comp.DataSource != nil && len(comp.DataSource.Transform) > 0 {
-		return comp.DataSource.Transform
-	}
-	return inferRules(outputs)
-}
-
-func inferRules(outputs []*types.TaskOutput) []types.TransformRule {
-	rules := []types.TransformRule{{Column: "title", Source: "title", Type: "text"}}
-	seen := map[string]struct{}{"title": {}, "created_at": {}}
-
-	for _, o := range outputs {
-		if o == nil {
-			continue
-		}
-		for _, key := range sortedMapKeys(o.Data) {
-			if _, skip := seen[key]; skip || isExcludedDataKey(key) {
-				continue
-			}
-			seen[key] = struct{}{}
-			rules = append(rules, types.TransformRule{
-				Column: key,
-				Source:  "data." + key,
-				Type:    inferTypeFromKey(key),
-			})
-			if len(rules) >= 6 {
-				rules = append(rules, types.TransformRule{Column: "created_at", Source: "created_at", Type: "date"})
-				return rules
-			}
-		}
-	}
-
-	rules = append(rules, types.TransformRule{Column: "created_at", Source: "created_at", Type: "date"})
-	return rules
-}
-
-// ---------------------------------------------------------------------------
-// Transform application
-// ---------------------------------------------------------------------------
-
-func applyTransform(outputs []*types.TaskOutput, rules []types.TransformRule) *types.ResolvedData {
-	columns := make([]string, len(rules)+2)
-	for i, rule := range rules {
-		columns[i] = rule.Column
-	}
-	columns[len(rules)] = "task_id"
-	columns[len(rules)+1] = "output_id"
-
-	rows := make([][]any, 0, len(outputs))
-	for _, o := range outputs {
-		row := make([]any, len(rules)+2)
-		for i, rule := range rules {
-			row[i] = extractField(o, rule)
-		}
-		row[len(rules)] = o.TaskID
-		row[len(rules)+1] = o.ID
-		rows = append(rows, row)
-	}
-	return &types.ResolvedData{Columns: columns, Rows: rows, Total: len(rows)}
-}
-
-func extractField(o *types.TaskOutput, rule types.TransformRule) any {
-	for _, src := range strings.Split(rule.Source, "|") {
-		if val := resolveSource(o, strings.TrimSpace(src)); val != nil && val != "" {
-			if rule.Extract != "" {
-				val = applyExtract(fmt.Sprintf("%v", val), rule.Extract)
-			}
-			return val
-		}
-	}
-	return nil
-}
-
-func resolveSource(o *types.TaskOutput, source string) any {
-	switch source {
-	case "title":
-		return o.Title
-	case "artifact_key":
-		return ArtifactOf(o).Key()
-	case "artifact_label":
-		return ArtifactOf(o).Label()
-	case "artifact_kind":
-		return ArtifactOf(o).Kind()
-	case "output_type":
-		return o.OutputType
-	case "uri":
-		if o.URI != nil {
-			return *o.URI
-		}
-		return nil
-	case "summary":
-		if o.Summary != nil {
-			return *o.Summary
-		}
-		return nil
-	case "created_at":
-		return o.CreatedAt.Format(time.RFC3339)
-	case "task_id":
-		return o.TaskID
-	case "agent_id":
-		if o.AgentID != nil {
-			return *o.AgentID
-		}
-		return nil
-	case "agent_name":
-		return o.AgentName
-	}
-	if strings.HasPrefix(source, "data.") {
-		return dotGet(o.Data, strings.TrimPrefix(source, "data."))
-	}
-	if strings.HasPrefix(source, "metadata.") {
-		return dotGet(o.Metadata, strings.TrimPrefix(source, "metadata."))
-	}
-	return nil
-}
-
-// ---------------------------------------------------------------------------
 // Filtering
 // ---------------------------------------------------------------------------
 
@@ -351,7 +241,297 @@ func parseTimeRange(raw string) (time.Duration, bool) {
 }
 
 // ---------------------------------------------------------------------------
-// Dot-path navigation
+// BAML mapping
+// ---------------------------------------------------------------------------
+
+func mapOutputsToSchema(
+	ctx context.Context,
+	comp types.ComponentSpec,
+	outputs []*types.TaskOutput,
+) (*types.ResolvedData, error) {
+	columns := buildColumnSchemas(comp)
+	if len(columns) == 0 {
+		return &types.ResolvedData{
+			Columns: []string{}, Rows: [][]any{},
+			Status: types.ResolvedDataStatusEmpty,
+			Error:  "No column schema defined for this component",
+		}, nil
+	}
+
+	outputsJSON, err := serializeOutputsForMapping(outputs)
+	if err != nil {
+		return nil, fmt.Errorf("serialize outputs: %w", err)
+	}
+
+	artifactKeyFilter := ""
+	if comp.DataSource != nil {
+		artifactKeyFilter = comp.DataSource.ArtifactKey
+	}
+
+	result, err := baml.MapOutputsToSchema(
+		ctx,
+		comp.Title,
+		comp.Type,
+		columns,
+		outputsJSON,
+		artifactKeyFilter,
+	)
+	if err != nil {
+		log.Warn().Err(err).Str("component", comp.ID).Msg("BAML MapOutputsToSchema failed")
+		return &types.ResolvedData{
+			Columns: []string{}, Rows: [][]any{},
+			Status: types.ResolvedDataStatusEmpty,
+			Error:  "Failed to map outputs to schema",
+		}, nil
+	}
+
+	return convertMappedResult(result, columns)
+}
+
+func buildColumnSchemas(comp types.ComponentSpec) []bamltypes.ColumnSchema {
+	if comp.DataSource == nil || len(comp.DataSource.Transform) == 0 {
+		configCols := parseConfigColumns(comp.Config)
+		if len(configCols) == 0 {
+			return nil
+		}
+		schemas := make([]bamltypes.ColumnSchema, 0, len(configCols))
+		for _, col := range configCols {
+			schemas = append(schemas, bamltypes.ColumnSchema{
+				Key:         col.Key,
+				Type:        col.Type,
+				Description: col.Label,
+			})
+		}
+		return schemas
+	}
+
+	schemas := make([]bamltypes.ColumnSchema, 0, len(comp.DataSource.Transform))
+	configCols := parseConfigColumns(comp.Config)
+	configByKey := make(map[string]configColumn, len(configCols))
+	for _, cc := range configCols {
+		configByKey[cc.Key] = cc
+	}
+
+	for _, rule := range comp.DataSource.Transform {
+		desc := humanizeColumn(rule.Column)
+		if cc, ok := configByKey[rule.Column]; ok && cc.Label != "" {
+			desc = cc.Label
+		}
+		if rule.Source != "" {
+			desc += " (hint: " + rule.Source + ")"
+		}
+		schemas = append(schemas, bamltypes.ColumnSchema{
+			Key:         rule.Column,
+			Type:        rule.Type,
+			Description: desc,
+		})
+	}
+	return schemas
+}
+
+func serializeOutputsForMapping(outputs []*types.TaskOutput) (string, error) {
+	type compactOutput struct {
+		ID         string         `json:"id"`
+		Title      string         `json:"title"`
+		OutputType string         `json:"output_type"`
+		Summary    *string        `json:"summary,omitempty"`
+		URI        *string        `json:"uri,omitempty"`
+		Data       map[string]any `json:"data,omitempty"`
+		Metadata   map[string]any `json:"metadata,omitempty"`
+		CreatedAt  string         `json:"created_at"`
+	}
+
+	compact := make([]compactOutput, 0, len(outputs))
+	for _, o := range outputs {
+		if o == nil {
+			continue
+		}
+		compact = append(compact, compactOutput{
+			ID:         o.ID,
+			Title:      o.Title,
+			OutputType: o.OutputType,
+			Summary:    o.Summary,
+			URI:        o.URI,
+			Data:       filterDataForMapping(o.Data),
+			Metadata:   filterMetadataForMapping(o.Metadata),
+			CreatedAt:  o.CreatedAt.Format(time.RFC3339),
+		})
+	}
+
+	raw, err := json.Marshal(compact)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
+func filterDataForMapping(data map[string]any) map[string]any {
+	if len(data) == 0 {
+		return nil
+	}
+	filtered := make(map[string]any, len(data))
+	for k, v := range data {
+		if isExcludedDataKey(k) {
+			continue
+		}
+		filtered[k] = v
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
+}
+
+var mappingMetadataKeys = map[string]bool{
+	"artifact_key": true, "artifact_label": true, "artifact_kind": true,
+	"artifact_role": true, "tags": true, "deeplink": true,
+}
+
+func filterMetadataForMapping(metadata map[string]any) map[string]any {
+	if len(metadata) == 0 {
+		return nil
+	}
+	filtered := make(map[string]any)
+	for k, v := range metadata {
+		if mappingMetadataKeys[k] {
+			filtered[k] = v
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
+}
+
+func convertMappedResult(result bamltypes.MappedResult, columns []bamltypes.ColumnSchema) (*types.ResolvedData, error) {
+	colNames := make([]string, len(columns)+2)
+	for i, col := range columns {
+		colNames[i] = col.Key
+	}
+	colNames[len(columns)] = "task_id"
+	colNames[len(columns)+1] = "output_id"
+
+	colIndex := make(map[string]int, len(columns))
+	for i, col := range columns {
+		colIndex[col.Key] = i
+	}
+
+	meta := make([]types.ColumnMeta, len(colNames))
+	for i, col := range columns {
+		meta[i] = types.ColumnMeta{
+			Key:   col.Key,
+			Label: col.Description,
+			Type:  normalizeColumnType(col.Type),
+		}
+	}
+	meta[len(columns)] = types.ColumnMeta{Key: "task_id", Type: "text", Hidden: true}
+	meta[len(columns)+1] = types.ColumnMeta{Key: "output_id", Type: "text", Hidden: true}
+
+	rows := make([][]any, 0, len(result.Rows))
+	for _, mappedRow := range result.Rows {
+		row := make([]any, len(colNames))
+		for _, cell := range mappedRow.Cells {
+			if idx, ok := colIndex[cell.Column]; ok {
+				if cell.Value != "" {
+					row[idx] = cell.Value
+				}
+			}
+		}
+		row[len(columns)] = ""
+		row[len(columns)+1] = mappedRow.Output_id
+		rows = append(rows, row)
+	}
+
+	return &types.ResolvedData{
+		Columns:    colNames,
+		ColumnMeta: meta,
+		Rows:       rows,
+		Total:      len(rows),
+		Status:     types.ResolvedDataStatusOK,
+	}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Mapping cache
+// ---------------------------------------------------------------------------
+
+const (
+	mappingCacheTTL    = 5 * time.Minute
+	mappingCachePrefix = "view:mapping:"
+)
+
+type mappingCache struct {
+	rdb *common.RedisClient
+}
+
+func newMappingCache(rdb *common.RedisClient) *mappingCache {
+	return &mappingCache{rdb: rdb}
+}
+
+func (c *mappingCache) cacheKey(outputIDs []string, sh string) string {
+	sorted := make([]string, len(outputIDs))
+	copy(sorted, outputIDs)
+	sort.Strings(sorted)
+
+	h := sha256.New()
+	for _, id := range sorted {
+		h.Write([]byte(id))
+		h.Write([]byte{0})
+	}
+	h.Write([]byte(sh))
+	return mappingCachePrefix + hex.EncodeToString(h.Sum(nil))[:24]
+}
+
+func (c *mappingCache) get(ctx context.Context, key string) (*cachedMapping, bool) {
+	if c.rdb == nil {
+		return nil, false
+	}
+	raw, err := c.rdb.Get(ctx, key).Bytes()
+	if err != nil {
+		return nil, false
+	}
+	var cached cachedMapping
+	if json.Unmarshal(raw, &cached) != nil {
+		return nil, false
+	}
+	return &cached, true
+}
+
+func (c *mappingCache) set(ctx context.Context, key string, value *cachedMapping) {
+	if c.rdb == nil {
+		return
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return
+	}
+	c.rdb.Set(ctx, key, raw, mappingCacheTTL)
+}
+
+type cachedMapping struct {
+	Columns    []string          `json:"columns"`
+	ColumnMeta []types.ColumnMeta `json:"column_meta"`
+	Rows       [][]any           `json:"rows"`
+	CachedAt   time.Time         `json:"cached_at"`
+}
+
+func schemaHash(comp types.ComponentSpec) string {
+	payload := struct {
+		Transform []types.TransformRule `json:"t,omitempty"`
+		Config    map[string]any       `json:"c,omitempty"`
+	}{
+		Config: comp.Config,
+	}
+	if comp.DataSource != nil {
+		payload.Transform = comp.DataSource.Transform
+	}
+	raw, _ := json.Marshal(payload)
+	h := sha256.Sum256(raw)
+	return hex.EncodeToString(h[:])[:16]
+}
+
+// ---------------------------------------------------------------------------
+// Dot-path navigation (used by Artifact)
 // ---------------------------------------------------------------------------
 
 func dotGet(m map[string]any, path string) any {
@@ -416,7 +596,7 @@ func pathGetFromArray(items []any, part string, rest []string) any {
 		}
 		return nil
 	}
-	return firstNonEmptyValue(collectArrayValues(items, append([]string{part}, rest...)))
+	return firstNonEmpty(collectArrayValues(items, append([]string{part}, rest...)))
 }
 
 func collectArrayValues(items []any, parts []string) []any {
@@ -428,7 +608,7 @@ func collectArrayValues(items []any, parts []string) []any {
 		case []any:
 			values = append(values, collectArrayValues(typed, nil)...)
 		default:
-			if !isEmptyValue(typed) {
+			if !isEmpty(typed) {
 				values = append(values, typed)
 			}
 		}
@@ -436,16 +616,16 @@ func collectArrayValues(items []any, parts []string) []any {
 	return values
 }
 
-func firstNonEmptyValue(values []any) any {
+func firstNonEmpty(values []any) any {
 	for _, v := range values {
-		if !isEmptyValue(v) {
+		if !isEmpty(v) {
 			return v
 		}
 	}
 	return nil
 }
 
-func isEmptyValue(value any) bool {
+func isEmpty(value any) bool {
 	switch typed := value.(type) {
 	case nil:
 		return true
@@ -461,77 +641,8 @@ func isEmptyValue(value any) bool {
 }
 
 // ---------------------------------------------------------------------------
-// Extract / column meta
+// Shared helpers
 // ---------------------------------------------------------------------------
-
-func applyExtract(val, pattern string) any {
-	re, err := regexp.Compile(pattern)
-	if err != nil {
-		return val
-	}
-	matches := re.FindStringSubmatch(val)
-	if len(matches) > 1 {
-		return matches[1]
-	}
-	if len(matches) == 1 {
-		return matches[0]
-	}
-	return val
-}
-
-func buildColumnMeta(columns []string, rules []types.TransformRule, config map[string]any) []ColumnMeta {
-	hiddenCols := map[string]bool{"task_id": true, "output_id": true}
-	ruleByCol := make(map[string]types.TransformRule, len(rules))
-	for _, r := range rules {
-		ruleByCol[r.Column] = r
-	}
-
-	configCols := parseConfigColumns(config)
-	configByKey := make(map[string]configColumn, len(configCols))
-	for _, cc := range configCols {
-		configByKey[cc.Key] = cc
-	}
-
-	meta := make([]ColumnMeta, 0, len(columns))
-	for _, col := range columns {
-		cm := ColumnMeta{
-			Key:    col,
-			Label:  humanizeColumn(col),
-			Type:   "text",
-			Hidden: hiddenCols[col],
-		}
-		if rule, ok := ruleByCol[col]; ok {
-			if rule.Type != "" {
-				cm.Type = normalizeColumnType(rule.Type)
-			}
-			if rule.Format != "" {
-				cm.Format = rule.Format
-			}
-		}
-		if cc, ok := configByKey[col]; ok {
-			if cc.Label != "" {
-				cm.Label = cc.Label
-			}
-			if cc.Type != "" {
-				cm.Type = normalizeColumnType(cc.Type)
-			}
-			if cc.Format != "" {
-				cm.Format = cc.Format
-			}
-			cm.Frozen = cc.Frozen
-			if len(cc.Options) > 0 {
-				cm.Options = cc.Options
-			}
-		}
-		if col == "created_at" && cm.Type == "text" {
-			cm.Type = "date"
-		}
-		meta = append(meta, cm)
-	}
-	return meta
-}
-
-type ColumnMeta = types.ColumnMeta
 
 type configColumn struct {
 	Key     string               `json:"key"`

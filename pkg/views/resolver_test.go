@@ -144,66 +144,46 @@ func TestResolveReturnsBindingErrorWhenArtifactKeyMatchesNothing(t *testing.T) {
 	}
 }
 
-func TestResolveUsesExplicitTransforms(t *testing.T) {
-	backend := &fakeResolverBackend{
-		workspaceOutputs: []*types.TaskOutput{newRecipeOutput("recipe-1")},
-	}
-	resolver := &DataResolver{backend: backend, cache: newMappingCache(nil)}
-
-	result, err := resolver.Resolve(context.Background(), 7, types.ComponentSpec{
-		ID:    "recipe-table",
-		Type:  "table",
-		Title: "Recipe Table",
-		DataSource: &types.DataSource{
-			ArtifactKey: "recipes",
-			Transform: []types.TransformRule{
-				{Column: "recipe_name", Source: "data.recipe_name", Type: "text"},
-				{Column: "video_url", Source: "data.video_url", Type: "link"},
-			},
+func TestFilterOutputsByArtifactKey(t *testing.T) {
+	outputs := []*types.TaskOutput{
+		newRecipeOutput("recipe-1"),
+		{
+			ID: "other-1", OutputType: "text", Title: "Not a recipe",
+			Metadata:  map[string]any{types.TaskOutputMetadataArtifactKey: "emails"},
+			CreatedAt: time.Now(),
 		},
-	})
-	if err != nil {
-		t.Fatalf("Resolve returned error: %v", err)
 	}
-	if got, want := result.Status, types.ResolvedDataStatusOK; got != want {
-		t.Fatalf("status = %q, want %q", got, want)
-	}
-	if got := result.Rows[0][0]; got != "Spaghetti in Tomato Water" {
-		t.Fatalf("recipe_name = %#v, want recipe title", got)
-	}
-	if got := result.Rows[0][1]; got != "https://example.com/video" {
-		t.Fatalf("video_url = %#v, want url", got)
+
+	filtered := filterOutputsByArtifactKey(outputs, "recipes")
+	if len(filtered) != 1 || filtered[0].ID != "recipe-1" {
+		t.Fatalf("expected 1 recipe output, got %d", len(filtered))
 	}
 }
 
-func TestResolveInfersRulesWhenNoTransforms(t *testing.T) {
-	backend := &fakeResolverBackend{
-		workspaceOutputs: []*types.TaskOutput{newRecipeOutput("recipe-1")},
-	}
-	resolver := &DataResolver{backend: backend, cache: newMappingCache(nil)}
-
-	result, err := resolver.Resolve(context.Background(), 7, types.ComponentSpec{
-		ID:    "recipe-table",
-		Type:  "table",
-		Title: "Recipe Table",
+func TestBuildColumnSchemas(t *testing.T) {
+	comp := types.ComponentSpec{
 		DataSource: &types.DataSource{
-			ArtifactKey: "recipes",
+			Transform: []types.TransformRule{
+				{Column: "name", Source: "data.recipe_name", Type: "text"},
+				{Column: "url", Source: "data.video_url", Type: "link"},
+			},
 		},
-	})
-	if err != nil {
-		t.Fatalf("Resolve returned error: %v", err)
+		Config: map[string]any{
+			"columns": []any{
+				map[string]any{"key": "name", "label": "Recipe Name"},
+			},
+		},
 	}
-	if got, want := result.Status, types.ResolvedDataStatusOK; got != want {
-		t.Fatalf("status = %q, want %q", got, want)
+
+	schemas := buildColumnSchemas(comp)
+	if len(schemas) != 2 {
+		t.Fatalf("expected 2 schemas, got %d", len(schemas))
 	}
-	if len(result.Columns) < 3 {
-		t.Fatalf("expected inferred columns, got %v", result.Columns)
+	if schemas[0].Key != "name" {
+		t.Fatalf("first schema key = %q, want 'name'", schemas[0].Key)
 	}
-	if result.Columns[0] != "title" {
-		t.Fatalf("first column should be title, got %q", result.Columns[0])
-	}
-	if result.Columns[len(result.Columns)-3] != "created_at" {
-		t.Fatalf("expected created_at before task_id/output_id, got %v", result.Columns)
+	if schemas[0].Description != "Recipe Name (hint: data.recipe_name)" {
+		t.Fatalf("first schema desc = %q, unexpected", schemas[0].Description)
 	}
 }
 

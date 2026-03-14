@@ -164,8 +164,9 @@ function WriteView(
     - Use action widget — renders as a compact CTA card with a button
     - Clicking the button opens a modal dialog with the form fields
     - Keep the CTA small (colSpan 3-4) alongside related data
-    - prompt_template ONLY supports simple {{field_name}} placeholders.
-      NEVER use block syntax ({{#if}}, {{/if}}, {{#each}}, etc.).
+    - prompt_template ONLY supports simple double-brace field placeholders.
+      NEVER use block helpers like #if, /if, #each, else, or any other
+      Handlebars/Mustache control-flow syntax in prompt_template values.
 
     Example: email review workflow
     ┌──────────────────────────────────┬────────────────┐
