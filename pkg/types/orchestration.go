@@ -910,7 +910,6 @@ type TaskOutput struct {
 	Title       string         `json:"title"`
 	Summary     *string        `json:"summary,omitempty"`
 	URI         *string        `json:"uri,omitempty"`
-	Schema      map[string]any `json:"schema,omitempty"`
 	Data        map[string]any `json:"data"`
 	Metadata    map[string]any `json:"metadata,omitempty"`
 	ArchivedAt  *time.Time     `json:"archived_at,omitempty"`

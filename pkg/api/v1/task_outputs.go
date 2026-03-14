@@ -196,7 +196,6 @@ type createOutputRequest struct {
 	OutputID   string         `json:"output_id,omitempty"`
 	Summary    *string        `json:"summary,omitempty"`
 	URI        *string        `json:"uri,omitempty"`
-	Schema     map[string]any `json:"schema,omitempty"`
 	Data       map[string]any `json:"data"`
 	Metadata   map[string]any `json:"metadata,omitempty"`
 	RunID      *string        `json:"run_id,omitempty"`
@@ -227,7 +226,6 @@ func (g *TaskOutputsGroup) CreateOutput(c echo.Context) error {
 		Title:       req.Title,
 		Summary:     req.Summary,
 		URI:         req.URI,
-		Schema:      req.Schema,
 		Data:        req.Data,
 		Metadata:    req.Metadata,
 	}

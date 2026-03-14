@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/types"
+	"github.com/google/uuid"
 	"github.com/lib/pq"
 )
 
@@ -244,6 +245,17 @@ type scanner interface {
 }
 
 func (b *PostgresBackend) GetAgentProfile(ctx context.Context, workspaceId uint, agentId string) (*types.AgentProfile, error) {
+	if _, err := uuid.Parse(agentId); err != nil {
+		profile, keyErr := b.GetAgentProfileByKey(ctx, workspaceId, agentId)
+		if keyErr == nil {
+			return profile, nil
+		}
+		profile, fuzzyErr := b.getAgentProfileFuzzy(ctx, workspaceId, agentId)
+		if fuzzyErr == nil {
+			return profile, nil
+		}
+		return nil, &types.ErrAgentProfileNotFound{ID: agentId}
+	}
 	query := `
 		SELECT id, workspace_id, agent_key, name, role, memory_scope, quality_score, cost_budget_usd, config_json, active, created_at, updated_at
 		FROM agent_profile
@@ -257,6 +269,21 @@ func (b *PostgresBackend) GetAgentProfile(ctx context.Context, workspaceId uint,
 		return nil, fmt.Errorf("get agent profile: %w", err)
 	}
 	return profile, nil
+}
+
+func (b *PostgresBackend) getAgentProfileFuzzy(ctx context.Context, workspaceId uint, ref string) (*types.AgentProfile, error) {
+	normalized := strings.TrimSuffix(strings.TrimSuffix(strings.ToLower(ref), "-agent"), "_agent")
+	asName := strings.ReplaceAll(normalized, "-", " ")
+	asName = strings.ReplaceAll(asName, "_", " ")
+	query := `
+		SELECT id, workspace_id, agent_key, name, role, memory_scope, quality_score, cost_budget_usd, config_json, active, created_at, updated_at
+		FROM agent_profile
+		WHERE workspace_id = $1 AND active = true
+		  AND (LOWER(name) = LOWER($2) OR LOWER(agent_key) = LOWER($3)
+		       OR LOWER(name) = LOWER($3) OR LOWER(agent_key) = LOWER($2))
+		LIMIT 1
+	`
+	return b.scanAgentProfile(b.db.QueryRowContext(ctx, query, workspaceId, asName, normalized))
 }
 
 func (b *PostgresBackend) GetAgentProfileByKey(ctx context.Context, workspaceId uint, agentKey string) (*types.AgentProfile, error) {
@@ -3825,7 +3852,7 @@ func (b *PostgresBackend) ListTaskOutputs(ctx context.Context, workspaceId uint,
 	rows, err := b.db.QueryContext(ctx, `
 		SELECT o.id, o.workspace_id, o.task_id, o.run_id, o.agent_id,
 		       COALESCE(ap.name, ''), o.output_type, o.title,
-		       o.summary, o.uri, o.schema_json, o.data_json, o.metadata_json, o.archived_at, o.created_at
+		       o.summary, o.uri, o.data_json, o.metadata_json, o.archived_at, o.created_at
 		FROM task_output o
 		LEFT JOIN agent_profile ap ON ap.id = o.agent_id
 		WHERE o.workspace_id = $1 AND o.task_id = $2
@@ -3858,7 +3885,7 @@ func (b *PostgresBackend) ListWorkspaceTaskOutputs(
 	rows, err := b.db.QueryContext(ctx, `
 		SELECT o.id, o.workspace_id, o.task_id, o.run_id, o.agent_id,
 		       COALESCE(ap.name, ''), o.output_type, o.title,
-		       o.summary, o.uri, o.schema_json, o.data_json, o.metadata_json, o.archived_at, o.created_at
+		       o.summary, o.uri, o.data_json, o.metadata_json, o.archived_at, o.created_at
 		FROM task_output o
 		LEFT JOIN agent_profile ap ON ap.id = o.agent_id
 		WHERE o.workspace_id = $1
@@ -3892,14 +3919,9 @@ func (b *PostgresBackend) ListWorkspaceTaskOutputs(
 }
 
 func (b *PostgresBackend) CreateTaskOutput(ctx context.Context, output *types.TaskOutput) error {
-	var schemaBytes, dataBytes, metaBytes []byte
+	var dataBytes, metaBytes []byte
 	var err error
 
-	if output.Schema != nil {
-		if schemaBytes, err = json.Marshal(output.Schema); err != nil {
-			return fmt.Errorf("marshal schema: %w", err)
-		}
-	}
 	if dataBytes, err = json.Marshal(output.Data); err != nil {
 		return fmt.Errorf("marshal data: %w", err)
 	}
@@ -3909,12 +3931,12 @@ func (b *PostgresBackend) CreateTaskOutput(ctx context.Context, output *types.Ta
 		}
 	}
 	return b.db.QueryRowContext(ctx, `
-		INSERT INTO task_output (workspace_id, task_id, run_id, agent_id, output_type, title, summary, uri, schema_json, data_json, metadata_json)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		INSERT INTO task_output (workspace_id, task_id, run_id, agent_id, output_type, title, summary, uri, data_json, metadata_json)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		RETURNING id, created_at`,
 		output.WorkspaceID, output.TaskID, nilIfEmpty(output.RunID), nilIfEmpty(output.AgentID),
 		output.OutputType, output.Title, output.Summary, nilIfEmpty(output.URI),
-		nullableJSONB(schemaBytes), dataBytes, nullableJSONB(metaBytes),
+		dataBytes, nullableJSONB(metaBytes),
 	).Scan(&output.ID, &output.CreatedAt)
 }
 
@@ -3922,7 +3944,7 @@ func (b *PostgresBackend) GetTaskOutput(ctx context.Context, workspaceId uint, o
 	row := b.db.QueryRowContext(ctx, `
 		SELECT o.id, o.workspace_id, o.task_id, o.run_id, o.agent_id,
 		       COALESCE(ap.name, ''), o.output_type, o.title,
-		       o.summary, o.uri, o.schema_json, o.data_json, o.metadata_json, o.archived_at, o.created_at
+		       o.summary, o.uri, o.data_json, o.metadata_json, o.archived_at, o.created_at
 		FROM task_output o
 		LEFT JOIN agent_profile ap ON ap.id = o.agent_id
 		WHERE o.workspace_id = $1 AND o.id = $2`, workspaceId, outputID)
@@ -4008,10 +4030,10 @@ func scanTaskOutput(s scanner) (*types.TaskOutput, error) {
 	o := &types.TaskOutput{}
 	var runID, agentID sql.NullString
 	var summary, uri sql.NullString
-	var schemaBytes, dataBytes, metaBytes []byte
+	var dataBytes, metaBytes []byte
 	if err := s.Scan(&o.ID, &o.WorkspaceID, &o.TaskID, &runID, &agentID,
 		&o.AgentName, &o.OutputType, &o.Title, &summary, &uri,
-		&schemaBytes, &dataBytes, &metaBytes, &o.ArchivedAt, &o.CreatedAt); err != nil {
+		&dataBytes, &metaBytes, &o.ArchivedAt, &o.CreatedAt); err != nil {
 		return nil, err
 	}
 	if runID.Valid {
@@ -4026,7 +4048,6 @@ func scanTaskOutput(s scanner) (*types.TaskOutput, error) {
 	if uri.Valid {
 		o.URI = &uri.String
 	}
-	json.Unmarshal(schemaBytes, &o.Schema)
 	json.Unmarshal(dataBytes, &o.Data)
 	json.Unmarshal(metaBytes, &o.Metadata)
 	return o, nil
@@ -4044,4 +4065,136 @@ func nullableJSONB(b []byte) interface{} {
 		return nil
 	}
 	return b
+}
+
+// ---------------------------------------------------------------------------
+// Views
+// ---------------------------------------------------------------------------
+
+func (b *PostgresBackend) CreateView(ctx context.Context, v *types.View) error {
+	defJSON, err := json.Marshal(v.Definition)
+	if err != nil {
+		return fmt.Errorf("marshal view definition: %w", err)
+	}
+	return b.db.QueryRowContext(ctx, `
+		INSERT INTO workspace_view (workspace_id, name, description, definition_json)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id, created_at, updated_at`,
+		v.WorkspaceID, v.Name, v.Description, defJSON,
+	).Scan(&v.ID, &v.CreatedAt, &v.UpdatedAt)
+}
+
+func (b *PostgresBackend) GetView(ctx context.Context, workspaceID uint, viewID string) (*types.View, error) {
+	v := &types.View{}
+	var defBytes []byte
+	err := b.db.QueryRowContext(ctx, `
+		SELECT id, workspace_id, name, description, definition_json, created_at, updated_at
+		FROM workspace_view WHERE id = $1 AND workspace_id = $2`,
+		viewID, workspaceID,
+	).Scan(&v.ID, &v.WorkspaceID, &v.Name, &v.Description, &defBytes, &v.CreatedAt, &v.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("view not found")
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(defBytes, &v.Definition); err != nil {
+		return nil, fmt.Errorf("unmarshal view definition: %w", err)
+	}
+	return v, nil
+}
+
+func (b *PostgresBackend) ListViews(ctx context.Context, workspaceID uint) ([]*types.View, error) {
+	rows, err := b.db.QueryContext(ctx, `
+		SELECT id, workspace_id, name, description, definition_json, created_at, updated_at
+		FROM workspace_view WHERE workspace_id = $1
+		ORDER BY created_at DESC`,
+		workspaceID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []*types.View
+	for rows.Next() {
+		v := &types.View{}
+		var defBytes []byte
+		if err := rows.Scan(&v.ID, &v.WorkspaceID, &v.Name, &v.Description, &defBytes, &v.CreatedAt, &v.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(defBytes, &v.Definition); err != nil {
+			return nil, fmt.Errorf("unmarshal view definition: %w", err)
+		}
+		result = append(result, v)
+	}
+	return result, rows.Err()
+}
+
+func (b *PostgresBackend) UpdateView(ctx context.Context, v *types.View) error {
+	defJSON, err := json.Marshal(v.Definition)
+	if err != nil {
+		return fmt.Errorf("marshal view definition: %w", err)
+	}
+	err = b.db.QueryRowContext(ctx, `
+		UPDATE workspace_view
+		SET name = $1, description = $2, definition_json = $3, updated_at = CURRENT_TIMESTAMP
+		WHERE id = $4 AND workspace_id = $5
+		RETURNING updated_at`,
+		v.Name, v.Description, defJSON, v.ID, v.WorkspaceID,
+	).Scan(&v.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("view not found")
+	}
+	return err
+}
+
+func (b *PostgresBackend) DeleteView(ctx context.Context, workspaceID uint, viewID string) error {
+	result, err := b.db.ExecContext(ctx,
+		`DELETE FROM workspace_view WHERE id = $1 AND workspace_id = $2`,
+		viewID, workspaceID,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("view not found")
+	}
+	return nil
+}
+
+// ── View Formatted Outputs ─────────────────────────────────────────────────
+
+func (b *PostgresBackend) GetFormattedOutput(ctx context.Context, viewID, outputID string) (*types.FormattedOutput, error) {
+	fo := &types.FormattedOutput{}
+	var fmtBytes []byte
+	err := b.db.QueryRowContext(ctx, `
+		SELECT id, view_id, output_id, formatted_json, created_at
+		FROM view_formatted_output
+		WHERE view_id = $1 AND output_id = $2`,
+		viewID, outputID,
+	).Scan(&fo.ID, &fo.ViewID, &fo.OutputID, &fmtBytes, &fo.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(fmtBytes, &fo.Formatted); err != nil {
+		return nil, fmt.Errorf("unmarshal formatted_json: %w", err)
+	}
+	return fo, nil
+}
+
+func (b *PostgresBackend) UpsertFormattedOutput(ctx context.Context, viewID, outputID string, formatted map[string]any) error {
+	fmtBytes, err := json.Marshal(formatted)
+	if err != nil {
+		return fmt.Errorf("marshal formatted_json: %w", err)
+	}
+	_, err = b.db.ExecContext(ctx, `
+		INSERT INTO view_formatted_output (view_id, output_id, formatted_json)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (view_id, output_id)
+		DO UPDATE SET formatted_json = EXCLUDED.formatted_json, created_at = CURRENT_TIMESTAMP`,
+		viewID, outputID, fmtBytes,
+	)
+	return err
 }

@@ -243,6 +243,80 @@ func ExtractApprovalSummary(ctx context.Context, context string, opts ...CallOpt
 	}
 }
 
+func ExtractFinalResponseOutput(ctx context.Context, user_message *string, assistant_message string, opts ...CallOptionFunc) (types.ExtractedOutput, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	// Resolve client option to clientRegistry (client takes precedence)
+	if callOpts.client != nil {
+		if callOpts.clientRegistry == nil {
+			callOpts.clientRegistry = baml.NewClientRegistry()
+		}
+		callOpts.clientRegistry.SetPrimaryClient(*callOpts.client)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"user_message": user_message, "assistant_message": assistant_message},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		panic(err)
+	}
+
+	if callOpts.onTick == nil {
+		result, err := bamlRuntime.CallFunction(ctx, "ExtractFinalResponseOutput", encoded, callOpts.onTick)
+		if err != nil {
+			return types.ExtractedOutput{}, err
+		}
+
+		if result.Error != nil {
+			return types.ExtractedOutput{}, result.Error
+		}
+
+		casted := (result.Data).(types.ExtractedOutput)
+
+		return casted, nil
+	} else {
+		channel, err := bamlRuntime.CallFunctionStream(ctx, "ExtractFinalResponseOutput", encoded, callOpts.onTick)
+		if err != nil {
+			return types.ExtractedOutput{}, err
+		}
+
+		for result := range channel {
+			if result.Error != nil {
+				return types.ExtractedOutput{}, result.Error
+			}
+
+			if result.HasData {
+				return result.Data.(types.ExtractedOutput), nil
+			}
+		}
+
+		return types.ExtractedOutput{}, fmt.Errorf("No data returned from stream")
+	}
+}
+
 func ExtractOutputs(ctx context.Context, tool_name string, tool_input string, tool_result string, opts ...CallOptionFunc) ([]types.ExtractedOutput, error) {
 
 	var callOpts callOption

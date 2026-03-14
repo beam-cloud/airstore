@@ -561,11 +561,6 @@ func (s *WorkerService) CreateTaskOutput(ctx context.Context, req *pb.CreateTask
 	if req.AgentId != "" {
 		output.AgentID = &req.AgentId
 	}
-	if req.SchemaJson != "" {
-		if err := json.Unmarshal([]byte(req.SchemaJson), &output.Schema); err != nil {
-			return nil, status.Errorf(codes.InvalidArgument, "invalid schema_json: %v", err)
-		}
-	}
 	if req.DataJson != "" {
 		if err := json.Unmarshal([]byte(req.DataJson), &output.Data); err != nil {
 			return nil, status.Errorf(codes.InvalidArgument, "invalid data_json: %v", err)
@@ -599,6 +594,7 @@ func (s *WorkerService) AppendTaskOutputRows(ctx context.Context, req *pb.Append
 		}
 		return nil, status.Errorf(codes.Internal, "append rows: %v", err)
 	}
+	s.publishOutputTaskUpdate(ctx, uint(req.WorkspaceId), req.OutputId)
 	return &pb.AppendTaskOutputRowsResponse{}, nil
 }
 
@@ -611,7 +607,20 @@ func (s *WorkerService) FinalizeTaskOutput(ctx context.Context, req *pb.Finalize
 			return nil, status.Errorf(codes.Internal, "finalize output: %v", err)
 		}
 	}
+	s.publishOutputTaskUpdate(ctx, uint(req.WorkspaceId), req.OutputId)
 	return &pb.FinalizeTaskOutputResponse{}, nil
+}
+
+func (s *WorkerService) publishOutputTaskUpdate(ctx context.Context, workspaceID uint, outputID string) {
+	if s.backend == nil {
+		return
+	}
+	output, err := s.backend.GetTaskOutput(ctx, workspaceID, outputID)
+	if err != nil {
+		log.Warn().Err(err).Str("output_id", outputID).Msg("lookup task output for publish failed")
+		return
+	}
+	s.publishTaskUpdate(ctx, output.WorkspaceID, output.TaskID)
 }
 
 func (s *WorkerService) AllocateIP(ctx context.Context, req *pb.AllocateIPRequest) (*pb.AllocateIPResponse, error) {

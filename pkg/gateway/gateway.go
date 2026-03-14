@@ -42,6 +42,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/scheduler"
 	"github.com/beam-cloud/airstore/pkg/skills"
 	"github.com/beam-cloud/airstore/pkg/sources"
+	"github.com/beam-cloud/airstore/pkg/views"
 	"github.com/beam-cloud/airstore/pkg/sources/providers"
 	"github.com/beam-cloud/airstore/pkg/tools"
 	_ "github.com/beam-cloud/airstore/pkg/tools/builtin" // self-registering tools
@@ -578,6 +579,8 @@ func (g *Gateway) registerServices() error {
 			log.Info().Msg("skills API registered at /api/v1/workspaces/:workspace_id/skills")
 		}
 
+		// Views API — registered after agentAPI is created below (see viewsGroup block)
+
 		// Filesystem API (nested under workspaces, workspace-scoped auth)
 		filesystemGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/fs")
 		filesystemGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
@@ -605,6 +608,14 @@ func (g *Gateway) registerServices() error {
 		)
 		orchestratorSvc.Start(g.ctx)
 		agentAPI := orchestration.NewAgentAPI(g.BackendRepo, orchestratorSvc)
+
+		// Views API (deferred to here so agentAPI is available for the copilot)
+		viewCopilot := views.NewCopilot(g.s2Client, g.BackendRepo, g.storageClient, agentAPI)
+		viewsGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/views")
+		viewsGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
+		apiv1.NewViewsGroup(viewsGroup, g.BackendRepo, viewCopilot, g.RedisClient)
+		log.Info().Msg("views API registered at /api/v1/workspaces/:workspace_id/views")
+
 		var mailClient *clients.AgentMailClient
 		if g.Config.Channels.AgentMail.APIKey != "" {
 			mailClient = clients.NewAgentMailClient(clients.AgentMailConfig{

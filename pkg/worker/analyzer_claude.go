@@ -26,44 +26,49 @@ func NewClaudeCodeAnalyzer() *ClaudeCodeAnalyzer {
 
 // Tools that never produce extractable outputs (read-only, navigational, or routine).
 var readOnlyTools = map[string]bool{
-	"Read":                 true,
-	"ReadFile":             true,
-	"ReadLints":            true,
-	"Grep":                 true,
-	"GrepTool":             true,
-	"Search":               true,
-	"SemanticSearch":       true,
-	"WebSearch":            true,
-	"WebFetch":             true,
-	"ListDir":              true,
-	"Glob":                 true,
-	"LS":                   true,
-	"TodoWrite":            true,
-	"EnterPlanMode":        true,
-	"ExitPlanMode":         true,
-	"ToolSearch":           true,
-	"browser_navigate":     true,
-	"browser_click":        true,
-	"browser_snapshot":     true,
-	"browser_screenshot":   true,
-	"browser_scroll":       true,
-	"browser_tabs":         true,
-	"browser_type":         true,
-	"browser_wait":         true,
-	"browser_back":         true,
-	"browser_forward":      true,
-	"browser_hover":        true,
-	"browser_select":       true,
-	"browser_lock":         true,
-	"browser_unlock":       true,
-	"browser_fill":         true,
-	"browser_press_key":    true,
+	"Read":                  true,
+	"ReadFile":              true,
+	"ReadLints":             true,
+	"Grep":                  true,
+	"GrepTool":              true,
+	"Search":                true,
+	"SemanticSearch":        true,
+	"WebSearch":             true,
+	"WebFetch":              true,
+	"ListDir":               true,
+	"Glob":                  true,
+	"LS":                    true,
+	"TodoWrite":             true,
+	"EnterPlanMode":         true,
+	"ExitPlanMode":          true,
+	"ToolSearch":            true,
+	"browser_navigate":      true,
+	"browser_click":         true,
+	"browser_snapshot":      true,
+	"browser_screenshot":    true,
+	"browser_scroll":        true,
+	"browser_tabs":          true,
+	"browser_type":          true,
+	"browser_wait":          true,
+	"browser_back":          true,
+	"browser_forward":       true,
+	"browser_hover":         true,
+	"browser_select":        true,
+	"browser_lock":          true,
+	"browser_unlock":        true,
+	"browser_fill":          true,
+	"browser_press_key":     true,
 	"browser_handle_dialog": true,
-	"SwitchMode":           true,
-	"AskQuestion":          true,
-	"Task":                 true,
-	"GenerateImage":        true,
+	"SwitchMode":            true,
+	"AskQuestion":           true,
+	"Task":                  true,
+	"GenerateImage":         true,
 }
+
+const (
+	maxAnalyzedToolInputLen  = 8000
+	maxAnalyzedToolResultLen = 8000
+)
 
 func (a *ClaudeCodeAnalyzer) ShouldAnalyze(payload map[string]any) bool {
 	msgType, _ := payload["type"].(string)
@@ -95,7 +100,7 @@ func (a *ClaudeCodeAnalyzer) ShouldAnalyze(payload map[string]any) bool {
 			inputJSON := "{}"
 			if inp, ok := bm["input"]; ok {
 				if b, err := json.Marshal(inp); err == nil {
-					inputJSON = truncate(string(b), 2000)
+					inputJSON = truncate(string(b), maxAnalyzedToolInputLen)
 				}
 			}
 			a.mu.Lock()
@@ -163,7 +168,7 @@ func (a *ClaudeCodeAnalyzer) PrepareInput(payload map[string]any) (toolName, too
 		}
 
 		resultStr := extractResultContent(bm)
-		return entry.name, entry.input, truncate(resultStr, 2000), true
+		return entry.name, entry.input, truncate(resultStr, maxAnalyzedToolResultLen), true
 	}
 
 	return "", "", "", false

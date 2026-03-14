@@ -252,13 +252,19 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	defer cancelCleanup()
 
 	// Output writers
-	outputWriters := w.sandboxManager.taskOutputWriters(sessionCtx, task, env)
-	mirror := NewTaskOutput(task.ExternalId, "stdout", outputWriters...)
+	outputPipeline := w.sandboxManager.taskOutputPipeline(sessionCtx, task, env)
+	mirror := NewTaskOutput(task.ExternalId, "stdout", outputPipeline.writers...)
+	defer outputPipeline.Wait()
 	defer mirror.Flush()
 	tw := &terminalOutputWriter{
 		ctx: sessionCtx, taskID: task.ExternalId,
 		terminalIO: w.terminalIO, executionCtx: executionContextFromTask(task),
-		onActivity: func() { signalActivity(activityCh); if touchHeartbeat != nil { touchHeartbeat() } },
+		onActivity: func() {
+			signalActivity(activityCh)
+			if touchHeartbeat != nil {
+				touchHeartbeat()
+			}
+		},
 		mirror: mirror, ringBuf: newRingBuffer(terminalRingBufSize),
 	}
 
@@ -277,6 +283,31 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 		runErr, needsInput, lastPrompt = w.runTurnSession(sessionCtx, task, sandboxID, tr, env, tw, activityCh, checkNeedsInput)
 	} else {
 		runErr = w.runGenericPTYSession(sessionCtx, task, sandboxID, tw, activityCh)
+	}
+
+	mirror.Flush()
+	outputPipeline.Wait()
+
+	if !needsInput && runErr == nil && tw.ringBuf != nil {
+		assistantMessage := extractAssistantText(tw.ringBuf.Bytes(), 24000)
+		if assistantMessage != "" {
+			var userMessage *string
+			if trimmed := strings.TrimSpace(lastPrompt); trimmed != "" {
+				userMessage = &trimmed
+			}
+			if err := persistFinalResponseOutput(
+				sessionCtx,
+				w.gatewayClient,
+				task,
+				outputPipeline.tracker,
+				userMessage,
+				assistantMessage,
+				bamlEnv,
+				nil,
+			); err != nil {
+				addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to persist final response output")
+			}
+		}
 	}
 
 	exitCode, errMsg, st := interactiveResult(runErr, idleTimedOut.Load())

@@ -233,10 +233,17 @@ func (s *AgentService) AcceptAgentCommand(
 		if err != nil {
 			return nil, false, err
 		}
+		resolved := profile.ID
+		params.AgentID = &resolved
 		agentConfig = cloneAnyMap(profile.ConfigJSON)
+		if agentConfig == nil {
+			agentConfig = DefaultAgentConfig(profile.AgentKey)
+		}
 		agentProvider = providerFromAgentConfig(agentConfig)
 		if agentProvider == "" {
-			return nil, false, fmt.Errorf("agent provider is required in profile config")
+			agentProvider = providerForRunner(AgentRunnerClaudeCode)
+			agentConfig[agentConfigKeyRunner] = AgentRunnerClaudeCode
+			agentConfig[agentConfigKeyProvider] = agentProvider
 		}
 		if !isClaudeCompatibleProvider(agentProvider) {
 			return nil, false, fmt.Errorf("agent provider %q is not supported", agentProvider)
@@ -1789,18 +1796,32 @@ func skillNamesFromConfig(config map[string]any) []string {
 	if !ok || raw == nil {
 		return nil
 	}
-	arr, ok := raw.([]any)
-	if !ok {
-		return nil
+	out := make([]string, 0)
+	seen := map[string]struct{}{}
+	appendSkill := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
 	}
-	out := make([]string, 0, len(arr))
-	for _, v := range arr {
-		if s, ok := v.(string); ok {
-			s = strings.TrimSpace(s)
-			if s != "" {
-				out = append(out, s)
+	switch typed := raw.(type) {
+	case []string:
+		for _, value := range typed {
+			appendSkill(value)
+		}
+	case []any:
+		for _, value := range typed {
+			if text, ok := value.(string); ok {
+				appendSkill(text)
 			}
 		}
+	case string:
+		appendSkill(typed)
 	}
 	return out
 }

@@ -9,12 +9,25 @@ enum OutputKind {
   NONE           @description("No deliverable artifact was produced")
 }
 
+class DataField {
+  key string @description("Snake_case field key, e.g. 'recipe_name', 'video_url', 'total_price'")
+  value string @description("The extracted value as a string. For arrays/lists, join with ', '.")
+  type string @description("Display type: text, number, date, link, email, status, tags, boolean, currency")
+  label string @description("Human-readable column header, e.g. 'Recipe Name', 'Video URL'")
+}
+
 class ExtractedOutput {
   kind OutputKind
   title string @description("Short human-readable title, e.g. 'Created README.md'")
   path string? @description("Local file path if a file was created or modified")
   uri string? @description("If the tool result contains a 'url', 'html_url', or 'permalink' field for a resource the agent CREATED, copy it here. Never set this for URLs that were merely visited, read, or referenced.")
   summary string? @description("One-sentence description of the artifact that was produced")
+  content string? @description("Full human-readable body for REPORT outputs when the deliverable only exists inline in the response rather than as a saved file")
+  artifact_key string? @description("Stable artifact family key for dashboards/views, e.g. 'recipe-pdf', 'drive-link', 'extracted-recipes'. Reuse the same key across runs for the same family. Never include instance-specific values like dates, UUIDs, or recipe titles.")
+  artifact_label string? @description("Human-readable plural label for the artifact family, e.g. 'Recipe PDFs', 'Drive Links', 'Extracted Recipes'")
+  artifact_kind string? @description("Short subtype like pdf, html, drive-link, report, recipe, csv")
+  tags string[] @description("Categorical tags for browsing and filtering, e.g. ['italian', 'pasta', 'dinner']. Use lowercase, short descriptors. Empty array if not applicable.")
+  data_fields DataField[] @description("The 3-8 most important fields extracted from the tool result for dashboard display. Empty array if kind is NONE.")
 }
 
 function ExtractOutputs(tool_name: string, tool_input: string, tool_result: string) -> ExtractedOutput[] {
@@ -37,7 +50,31 @@ function ExtractOutputs(tool_name: string, tool_input: string, tool_result: stri
     - Writing a final report, analysis, or document to disk
     - Creating or updating records in external databases or systems
 
-    THESE ARE NOT OUTPUTS — return an empty array:
+    ARTIFACT METADATA — REQUIRED when kind is not NONE:
+    - artifact_key: STABLE lowercase-dash-case family key that groups equivalent
+      deliverables across runs. Examples: 'recipe-pdf', 'drive-link',
+      'extracted-recipes', 'github-pr', 'email-sent'. Never include instance
+      values (dates, UUIDs, titles). Derive from the output type and content.
+    - artifact_label: Human-readable plural label for the family. Examples:
+      'Recipe PDFs', 'Drive Links', 'Extracted Recipes', 'Pull Requests'.
+    - artifact_kind: Short lowercase subtype. Examples: pdf, html, csv,
+      drive-link, report, recipe, email, pr, issue. For files, use the
+      file extension. For links, describe the destination.
+
+    DATA FIELDS — extract the important fields from the tool result:
+    - Pick the 3-8 most useful fields a user would want to see in a dashboard table
+    - Assign display types semantically: URLs → "link", emails → "email",
+      dates/timestamps → "date", monetary values → "currency", true/false → "boolean",
+      comma-separated lists → "tags", counts/quantities → "number"
+    - Provide clean human-readable labels (e.g. 'Recipe Name', not 'recipe_name')
+    - Skip internal/debug fields, raw HTML, large text blobs, and IDs
+    - For arrays of strings, join values with ", " and set type to "tags"
+
+    TAGS — add categorical tags useful for browsing and filtering:
+    - Short lowercase descriptors like "recipe", "italian", "quick", "report"
+    - Derive from the content/context, not from field names
+
+    THESE ARE NOT OUTPUTS — return kind=NONE (empty array):
     - Opening, visiting, reading, or browsing a URL or webpage
     - Writing intermediate/scratch files, scripts, or configs as part of doing work
     - Screenshots (saving a .png/.jpg to /tmp or anywhere) — these are internal tools
@@ -51,12 +88,68 @@ function ExtractOutputs(tool_name: string, tool_input: string, tool_result: stri
     - Logging, printing, or echoing to stdout
     - ANY read-only or navigational action
     - Internal state files (JSON trackers, next-actions files, etc.)
+    - Downloading or fetching content from external sources (this is INPUT, not output)
+    - Saving raw API responses or data dumps to files
+    - Creating directories or folder structures
 
     When in doubt, return an empty array. Be very conservative.
 
     Tool name: {{ tool_name }}
     Tool input (truncated): {{ tool_input }}
     Tool result (truncated): {{ tool_result }}
+
+    {{ ctx.output_format }}
+  "#
+}
+
+function ExtractFinalResponseOutput(user_message: string?, assistant_message: string) -> ExtractedOutput {
+  client OutputClassifier
+  prompt #"
+    An AI agent has finished a task. Decide whether the FINAL ASSISTANT
+    RESPONSE itself contains a durable deliverable that should be persisted
+    as a task output, even though no file or external side effect was created.
+
+    PERSIST THE RESPONSE ONLY WHEN:
+    - The response itself is the work product a user would want to revisit in
+      dashboards or views
+    - The response contains substantive, reusable content such as an extracted
+      recipe, research brief, analysis, summary report, plan, transcript
+      synthesis, structured instructions, or another polished deliverable
+
+    DO NOT PERSIST:
+    - Brief confirmations or acknowledgements
+    - "Done", "completed", or other status-only replies
+    - Questions, clarification requests, or approval requests
+    - Partial progress updates or notes that are not a finished deliverable
+    - Generic conversational responses with little durable value
+
+    If the response SHOULD be persisted:
+    - Set kind = REPORT
+    - Set title to a short, specific human-readable title
+    - Set summary to a one-sentence description of the deliverable
+    - Set content to the full deliverable content, cleaned up but faithful to
+      the response, preserving important headings, lists, and structure
+    - Set artifact_key to a stable lowercase-dash-case family key such as
+      'extracted-recipes', 'research-briefs', or 'meeting-summaries' — never
+      an instance title. Derive from the content type and purpose.
+    - Set artifact_label to a human-readable plural family label such as
+      'Extracted Recipes' or 'Research Briefs'
+    - Set artifact_kind to a short lowercase subtype like recipe, report,
+      brief, summary, analysis
+    - Leave path and uri empty
+    - Extract data_fields from the response content — pick the 3-8 most
+      important structured values a user would want in a dashboard table
+    - Add categorical tags for browsing/filtering
+
+    If the response should NOT be persisted:
+    - Set kind = NONE
+    - Leave other fields empty unless needed by the schema
+
+    User message / task context:
+    {{ user_message }}
+
+    Final assistant response:
+    {{ assistant_message }}
 
     {{ ctx.output_format }}
   "#

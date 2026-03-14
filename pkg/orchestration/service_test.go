@@ -2,6 +2,7 @@ package orchestration
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -132,5 +133,25 @@ func TestIsRetryableError(t *testing.T) {
 		if isRetryableError(msg) {
 			t.Fatalf("expected permanent: %s", msg)
 		}
+	}
+}
+
+func TestSkillNamesFromConfigHandlesStringSlices(t *testing.T) {
+	config := map[string]any{
+		agentConfigKeySkills: []string{"triage", " review ", "triage", ""},
+	}
+
+	if got, want := skillNamesFromConfig(config), []string{"triage", "review"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("skillNamesFromConfig = %#v, want %#v", got, want)
+	}
+}
+
+func TestSkillNamesFromConfigHandlesInterfaceSlices(t *testing.T) {
+	config := map[string]any{
+		agentConfigKeySkills: []any{"triage", " review ", "triage", "", 42},
+	}
+
+	if got, want := skillNamesFromConfig(config), []string{"triage", "review"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("skillNamesFromConfig = %#v, want %#v", got, want)
 	}
 }

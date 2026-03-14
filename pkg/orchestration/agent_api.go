@@ -759,7 +759,10 @@ func (a *AgentAPI) WorkspaceLiveBatch(ctx context.Context, workspaceID uint) (*W
 		return nil, err
 	}
 	outputs, err := a.backend.ListWorkspaceTaskOutputs(ctx, workspaceID, types.TaskOutputListFilter{
-		ExcludeArchived: true,
+		// Archived outputs remain view-visible data. The work surface still hides
+		// them locally, but workspace live snapshots should preserve them so
+		// dashboards do not lose historical artifacts when users dismiss items.
+		ExcludeArchived: false,
 		Limit:           defaultWorkspaceStreamOutputLimit,
 	})
 	if err != nil {

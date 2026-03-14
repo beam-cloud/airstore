@@ -381,8 +381,7 @@ func (c *Copilot) InstallDraft(ctx context.Context, draft *Draft) (*SkillManifes
 		return nil, fmt.Errorf("draft has no skill content")
 	}
 
-	manifest, err := Parse([]byte(draft.SkillContent))
-	if err != nil {
+	if _, _, err := ResolveInstallName("", []byte(draft.SkillContent)); err != nil {
 		return nil, fmt.Errorf("invalid skill: %w", err)
 	}
 
@@ -390,11 +389,9 @@ func (c *Copilot) InstallDraft(ctx context.Context, draft *Draft) (*SkillManifes
 		return nil, fmt.Errorf("storage not configured")
 	}
 
-	bucket := c.storage.WorkspaceBucketName(draft.WorkspaceID)
-	key := ManifestKey(manifest.Name)
-
-	if err := c.storage.Upload(ctx, bucket, key, []byte(draft.SkillContent)); err != nil {
-		return nil, fmt.Errorf("upload skill: %w", err)
+	manifest, _, err := InstallContent(ctx, c.storage, draft.WorkspaceID, "", []byte(draft.SkillContent))
+	if err != nil {
+		return nil, err
 	}
 
 	_ = c.PersistStatus(ctx, draft.ID, "installed")

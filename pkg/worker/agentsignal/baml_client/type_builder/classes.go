@@ -51,6 +51,50 @@ func (t *ApprovalSummaryClassView) Type() (baml.Type, error) {
 	return t.inner.Type()
 }
 
+type DataFieldClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *DataFieldClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *DataFieldClassView) PropertyKey() (ClassPropertyView, error) {
+	return t.inner.Property("key")
+}
+
+func (t *DataFieldClassView) PropertyValue() (ClassPropertyView, error) {
+	return t.inner.Property("value")
+}
+
+func (t *DataFieldClassView) PropertyType() (ClassPropertyView, error) {
+	return t.inner.Property("type")
+}
+
+func (t *DataFieldClassView) PropertyLabel() (ClassPropertyView, error) {
+	return t.inner.Property("label")
+}
+
+func (t *TypeBuilder) DataField() (*DataFieldClassView, error) {
+	bld, err := t.inner.Class("DataField")
+	if err != nil {
+		return nil, err
+	}
+	return &DataFieldClassView{inner: bld}, nil
+}
+
+func (t *DataFieldClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
 type ExtractedOutputClassView struct {
 	inner baml.ClassBuilder
 }
@@ -85,6 +129,30 @@ func (t *ExtractedOutputClassView) PropertyUri() (ClassPropertyView, error) {
 
 func (t *ExtractedOutputClassView) PropertySummary() (ClassPropertyView, error) {
 	return t.inner.Property("summary")
+}
+
+func (t *ExtractedOutputClassView) PropertyContent() (ClassPropertyView, error) {
+	return t.inner.Property("content")
+}
+
+func (t *ExtractedOutputClassView) PropertyArtifact_key() (ClassPropertyView, error) {
+	return t.inner.Property("artifact_key")
+}
+
+func (t *ExtractedOutputClassView) PropertyArtifact_label() (ClassPropertyView, error) {
+	return t.inner.Property("artifact_label")
+}
+
+func (t *ExtractedOutputClassView) PropertyArtifact_kind() (ClassPropertyView, error) {
+	return t.inner.Property("artifact_kind")
+}
+
+func (t *ExtractedOutputClassView) PropertyTags() (ClassPropertyView, error) {
+	return t.inner.Property("tags")
+}
+
+func (t *ExtractedOutputClassView) PropertyData_fields() (ClassPropertyView, error) {
+	return t.inner.Property("data_fields")
 }
 
 func (t *TypeBuilder) ExtractedOutput() (*ExtractedOutputClassView, error) {

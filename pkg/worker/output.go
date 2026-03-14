@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/beam-cloud/airstore/pkg/common"
 	gatewayclient "github.com/beam-cloud/airstore/pkg/gateway/client"
@@ -162,18 +163,104 @@ func (w *FileWriter) Close() error {
 // (type=output, output_append, output_done) and sends them to the gateway via gRPC.
 type OutputWriter struct {
 	ctx         context.Context
-	client      *gatewayclient.GatewayClient
+	client      taskOutputClient
 	workspaceID uint32
 	taskID      string
 	runID       string
 	agentID     string
 	outputIDs   map[string]string // local output_id -> server-generated UUID
-	mu          sync.Mutex
+	events      chan outputEvent
+	tracker     *taskOutputTracker
+	done        chan struct{}
+	closed      atomic.Bool
+	closeOnce   sync.Once
+}
+
+type taskOutputClient interface {
+	CreateTaskOutput(ctx context.Context, req *pb.CreateTaskOutputRequest) (string, error)
+	AppendTaskOutputRows(ctx context.Context, req *pb.AppendTaskOutputRowsRequest) error
+	FinalizeTaskOutput(ctx context.Context, req *pb.FinalizeTaskOutputRequest) error
+}
+
+type outputEvent struct {
+	kind    string
+	payload map[string]any
+}
+
+type taskOutputTracker struct {
+	created atomic.Bool
+	mu      sync.Mutex
+	seen    map[string]struct{}
+	primary map[string]struct{}
+}
+
+func (t *taskOutputTracker) MarkCreated() {
+	if t != nil {
+		t.created.Store(true)
+	}
+}
+
+func (t *taskOutputTracker) HasCreated() bool {
+	return t != nil && t.created.Load()
+}
+
+func (t *taskOutputTracker) HasEquivalent(candidate outputCandidate) bool {
+	if t == nil {
+		return false
+	}
+	identity := candidate.identityKey()
+	key := candidate.artifactKey()
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if identity != "" {
+		if _, ok := t.seen[identity]; ok {
+			return true
+		}
+	}
+	if key != "" && candidate.isPrimaryDeliverable() {
+		_, ok := t.primary[key]
+		return ok
+	}
+	return false
+}
+
+func (t *taskOutputTracker) Remember(candidate outputCandidate) {
+	if t == nil {
+		return
+	}
+	t.created.Store(true)
+	identity := candidate.identityKey()
+	key := candidate.artifactKey()
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.seen == nil {
+		t.seen = make(map[string]struct{})
+	}
+	if t.primary == nil {
+		t.primary = make(map[string]struct{})
+	}
+	if identity != "" {
+		t.seen[identity] = struct{}{}
+	}
+	if key != "" && candidate.isPrimaryDeliverable() {
+		t.primary[key] = struct{}{}
+	}
 }
 
 func NewOutputWriter(ctx context.Context, client *gatewayclient.GatewayClient, task types.RunExecution) *OutputWriter {
+	return newOutputWriter(ctx, client, task, nil)
+}
+
+func newOutputWriter(
+	ctx context.Context,
+	client taskOutputClient,
+	task types.RunExecution,
+	tracker *taskOutputTracker,
+) *OutputWriter {
 	ids := outputIDsFromTask(task)
-	return &OutputWriter{
+	writer := &OutputWriter{
 		ctx:         ctx,
 		client:      client,
 		workspaceID: ids.workspaceID,
@@ -181,11 +268,19 @@ func NewOutputWriter(ctx context.Context, client *gatewayclient.GatewayClient, t
 		runID:       ids.runID,
 		agentID:     ids.agentID,
 		outputIDs:   make(map[string]string),
+		events:      make(chan outputEvent, 64),
+		tracker:     tracker,
+		done:        make(chan struct{}),
 	}
+	go writer.run()
+	return writer
 }
 
 func (w *OutputWriter) Write(p []byte) (int, error) {
 	if w.taskID == "" || w.client == nil {
+		return len(p), nil
+	}
+	if w.closed.Load() {
 		return len(p), nil
 	}
 	line := strings.TrimSpace(string(p))
@@ -198,58 +293,107 @@ func (w *OutputWriter) Write(p []byte) (int, error) {
 	}
 	switch anyToTrimmedString(payload["type"]) {
 	case "output":
-		go w.createOutput(payload)
+		select {
+		case <-w.ctx.Done():
+			return len(p), nil
+		case w.events <- outputEvent{kind: "output", payload: payload}:
+		}
 	case "output_append":
-		go w.appendRows(payload)
+		select {
+		case <-w.ctx.Done():
+			return len(p), nil
+		case w.events <- outputEvent{kind: "output_append", payload: payload}:
+		}
 	case "output_done":
-		go w.finalizeOutput(payload)
+		select {
+		case <-w.ctx.Done():
+			return len(p), nil
+		case w.events <- outputEvent{kind: "output_done", payload: payload}:
+		}
 	}
 	return len(p), nil
 }
 
+func (w *OutputWriter) run() {
+	defer close(w.done)
+	for evt := range w.events {
+		switch evt.kind {
+		case "output":
+			w.createOutput(evt.payload)
+		case "output_append":
+			w.appendRows(evt.payload)
+		case "output_done":
+			w.finalizeOutput(evt.payload)
+		}
+	}
+}
+
+func (w *OutputWriter) Wait() {
+	if w == nil {
+		return
+	}
+	w.closed.Store(true)
+	w.closeOnce.Do(func() {
+		close(w.events)
+	})
+	<-w.done
+}
+
 func (w *OutputWriter) createOutput(payload map[string]any) {
 	localID := anyToTrimmedString(payload["output_id"])
-	req := &pb.CreateTaskOutputRequest{
-		WorkspaceId: w.workspaceID,
-		TaskId:      w.taskID,
-		RunId:       w.runID,
-		AgentId:     w.agentID,
-		OutputType:  anyToTrimmedString(payload["output_type"]),
-		Title:       anyToTrimmedString(payload["title"]),
+	outputType := anyToTrimmedString(payload["output_type"])
+	title := anyToTrimmedString(payload["title"])
+	data := mapFromAny(payload["data"])
+	metadata := mapFromAny(payload["metadata"])
+	uri := anyToTrimmedString(payload["uri"])
+	path := anyToTrimmedString(payload["path"])
+	if path == "" {
+		path = anyToTrimmedString(data["path"])
 	}
-	if v := payload["schema"]; v != nil {
-		if b, err := json.Marshal(v); err == nil {
-			req.SchemaJson = string(b)
+	for _, key := range []string{
+		types.TaskOutputMetadataArtifactKey,
+		types.TaskOutputMetadataArtifactLabel,
+		types.TaskOutputMetadataArtifactKind,
+		types.TaskOutputMetadataArtifactRole,
+	} {
+		if payload[key] == nil {
+			continue
 		}
-	}
-	if v := payload["data"]; v != nil {
-		if b, err := json.Marshal(v); err == nil {
-			req.DataJson = string(b)
+		if metadata == nil {
+			metadata = map[string]any{}
 		}
-	}
-	if v := payload["metadata"]; v != nil {
-		if b, err := json.Marshal(v); err == nil {
-			req.MetadataJson = string(b)
+		if _, exists := metadata[key]; !exists {
+			metadata[key] = payload[key]
 		}
 	}
 
-	serverID, err := w.client.CreateTaskOutput(w.ctx, req)
+	serverID, err := publishOutputCandidate(w.ctx, w.client, taskOutputIDs{
+		workspaceID: w.workspaceID,
+		taskID:      w.taskID,
+		runID:       w.runID,
+		agentID:     w.agentID,
+	}, w.tracker, outputCandidate{
+		LocalID:    localID,
+		OutputType: outputType,
+		Title:      title,
+		URI:        uri,
+		Path:       path,
+		Data:       data,
+		Metadata:   metadata,
+		Role:       types.TaskOutputArtifactRolePrimary,
+	})
 	if err != nil {
 		log.Warn().Err(err).Str("task", w.taskID).Msg("output create failed")
 		return
 	}
 	if localID != "" && serverID != "" {
-		w.mu.Lock()
 		w.outputIDs[localID] = serverID
-		w.mu.Unlock()
 	}
 }
 
 func (w *OutputWriter) appendRows(payload map[string]any) {
 	localID := anyToTrimmedString(payload["output_id"])
-	w.mu.Lock()
 	serverID := w.outputIDs[localID]
-	w.mu.Unlock()
 	if serverID == "" {
 		log.Warn().Str("output_id", localID).Msg("output_append for unknown output_id")
 		return
@@ -266,10 +410,9 @@ func (w *OutputWriter) appendRows(payload map[string]any) {
 
 func (w *OutputWriter) finalizeOutput(payload map[string]any) {
 	localID := anyToTrimmedString(payload["output_id"])
-	w.mu.Lock()
 	serverID := w.outputIDs[localID]
-	w.mu.Unlock()
 	if serverID == "" {
+		log.Warn().Str("output_id", localID).Msg("output_done for unknown output_id")
 		return
 	}
 	summary := anyToTrimmedString(payload["summary"])

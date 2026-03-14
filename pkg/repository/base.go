@@ -289,6 +289,15 @@ type BackendRepository interface {
 	ArchiveAllTaskOutputs(ctx context.Context, workspaceId uint) (int64, error)
 	DeleteTaskOutput(ctx context.Context, workspaceId uint, outputID string) error
 
+	// Views
+	CreateView(ctx context.Context, v *types.View) error
+	GetView(ctx context.Context, workspaceID uint, viewID string) (*types.View, error)
+	ListViews(ctx context.Context, workspaceID uint) ([]*types.View, error)
+	UpdateView(ctx context.Context, v *types.View) error
+	DeleteView(ctx context.Context, workspaceID uint, viewID string) error
+	GetFormattedOutput(ctx context.Context, viewID, outputID string) (*types.FormattedOutput, error)
+	UpsertFormattedOutput(ctx context.Context, viewID, outputID string, formatted map[string]any) error
+
 	// Database access
 	DB() *sql.DB
 
