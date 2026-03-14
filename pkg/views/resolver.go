@@ -72,9 +72,9 @@ func (r *DataResolver) Resolve(ctx context.Context, workspaceID uint, viewID str
 
 	sh := schemaHash(comp)
 	key := r.cache.componentKey(viewID, comp.ID)
-	tids := sortedTaskIDs(outputs)
+	oids := sortedOutputIDs(outputs)
 
-	if cached, ok := r.cache.get(ctx, key); ok && cached.SchemaHash == sh && taskIDsMatch(cached.TaskIDs, tids) {
+	if cached, ok := r.cache.get(ctx, key); ok && cached.SchemaHash == sh && slicesMatch(cached.OutputIDs, oids) {
 		cachedAt := cached.CachedAt
 		return &types.ResolvedData{
 			Columns:    cached.Columns,
@@ -86,6 +86,7 @@ func (r *DataResolver) Resolve(ctx context.Context, workspaceID uint, viewID str
 		}, nil
 	}
 
+	tids := sortedTaskIDs(outputs)
 	taskPrompts := r.fetchTaskPrompts(ctx, tids)
 
 	result, err := mapOutputsToSchema(ctx, comp, outputs, taskPrompts)
@@ -95,7 +96,7 @@ func (r *DataResolver) Resolve(ctx context.Context, workspaceID uint, viewID str
 
 	r.cache.set(ctx, key, &cachedMapping{
 		SchemaHash: sh,
-		TaskIDs:    tids,
+		OutputIDs:  oids,
 		Columns:    result.Columns,
 		ColumnMeta: result.ColumnMeta,
 		Rows:       result.Rows,
@@ -289,8 +290,8 @@ func (r *DataResolver) fetchTaskPrompts(ctx context.Context, taskIDs []string) m
 		if err != nil || task == nil {
 			continue
 		}
-		if p, _ := task.PayloadJSON["prompt"].(string); p != "" {
-			prompts[tid] = p
+		if m, _ := task.PayloadJSON["message"].(string); m != "" {
+			prompts[tid] = m
 		}
 	}
 	return prompts
@@ -567,7 +568,7 @@ func (c *mappingCache) set(ctx context.Context, key string, value *cachedMapping
 
 type cachedMapping struct {
 	SchemaHash string             `json:"sh"`
-	TaskIDs    []string           `json:"task_ids"`
+	OutputIDs  []string           `json:"output_ids"`
 	Columns    []string           `json:"columns"`
 	ColumnMeta []types.ColumnMeta `json:"column_meta"`
 	Rows       [][]any            `json:"rows"`
@@ -591,7 +592,17 @@ func schemaHash(comp types.ComponentSpec) string {
 	return hex.EncodeToString(h[:])[:16]
 }
 
-// sortedTaskIDs extracts unique task IDs from outputs in sorted order.
+func sortedOutputIDs(outputs []*types.TaskOutput) []string {
+	ids := make([]string, 0, len(outputs))
+	for _, o := range outputs {
+		if o != nil {
+			ids = append(ids, o.ID)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
 func sortedTaskIDs(outputs []*types.TaskOutput) []string {
 	seen := make(map[string]struct{}, len(outputs))
 	ids := make([]string, 0, len(outputs))
@@ -608,7 +619,7 @@ func sortedTaskIDs(outputs []*types.TaskOutput) []string {
 	return ids
 }
 
-func taskIDsMatch(a, b []string) bool {
+func slicesMatch(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
 	}

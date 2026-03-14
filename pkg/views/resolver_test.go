@@ -192,7 +192,7 @@ func TestBuildColumnSchemas(t *testing.T) {
 func TestCacheRoundTrip(t *testing.T) {
 	cached := &cachedMapping{
 		SchemaHash: "testhash123",
-		TaskIDs:    []string{"task-1", "task-2"},
+		OutputIDs:  []string{"out-1", "out-2"},
 		Columns:    []string{"recipe_name", "video_url", "task_id"},
 		ColumnMeta: []types.ColumnMeta{
 			{Key: "recipe_name", Type: "text", Label: "Recipe Name"},
@@ -221,8 +221,8 @@ func TestCacheRoundTrip(t *testing.T) {
 	if restored.SchemaHash != "testhash123" {
 		t.Fatalf("round-trip: schema hash = %q, want testhash123", restored.SchemaHash)
 	}
-	if !taskIDsMatch(restored.TaskIDs, []string{"task-1", "task-2"}) {
-		t.Fatalf("round-trip: task IDs mismatch: %v", restored.TaskIDs)
+	if !slicesMatch(restored.OutputIDs, []string{"out-1", "out-2"}) {
+		t.Fatalf("round-trip: output IDs mismatch: %v", restored.OutputIDs)
 	}
 	if restored.Rows[0][0] != "Spaghetti" {
 		t.Fatalf("row 0 col 0 = %v, want Spaghetti", restored.Rows[0][0])
@@ -269,24 +269,29 @@ func TestSchemaHashStable(t *testing.T) {
 	}
 }
 
-func TestSortedTaskIDsAndMatch(t *testing.T) {
+func TestSortedOutputIDsAndSlicesMatch(t *testing.T) {
 	outputs := []*types.TaskOutput{
-		{ID: "out-1", TaskID: "task-b"},
-		{ID: "out-2", TaskID: "task-a"},
 		{ID: "out-3", TaskID: "task-b"},
-		{ID: "out-4", TaskID: "task-c"},
+		{ID: "out-1", TaskID: "task-a"},
+		{ID: "out-2", TaskID: "task-b"},
 	}
 
-	ids := sortedTaskIDs(outputs)
-	expected := []string{"task-a", "task-b", "task-c"}
-	if !taskIDsMatch(ids, expected) {
-		t.Fatalf("sortedTaskIDs = %v, want %v", ids, expected)
+	oids := sortedOutputIDs(outputs)
+	expected := []string{"out-1", "out-2", "out-3"}
+	if !slicesMatch(oids, expected) {
+		t.Fatalf("sortedOutputIDs = %v, want %v", oids, expected)
 	}
 
-	if taskIDsMatch(ids, []string{"task-a", "task-b"}) {
+	tids := sortedTaskIDs(outputs)
+	expectedTasks := []string{"task-a", "task-b"}
+	if !slicesMatch(tids, expectedTasks) {
+		t.Fatalf("sortedTaskIDs = %v, want %v", tids, expectedTasks)
+	}
+
+	if slicesMatch(oids, []string{"out-1", "out-2"}) {
 		t.Fatal("should not match shorter list")
 	}
-	if taskIDsMatch(ids, []string{"task-a", "task-b", "task-d"}) {
+	if slicesMatch(oids, []string{"out-1", "out-2", "out-4"}) {
 		t.Fatal("should not match different list")
 	}
 }

@@ -65,7 +65,11 @@ function MapOutputsToSchema(
     4. Use semantic understanding — don't just match field names literally.
        For example, if a column asks for "Recipe Name" and an output has
        data.recipe_name or data.title with a recipe name, use it.
-    5. For link columns, look for URLs in data, metadata.deeplink, or URI.
+    5. For link columns, look for URLs in data, metadata.deeplink, URI, AND
+       the prompt. The prompt often contains the source URL (e.g. a YouTube
+       link) that is distinct from output URLs (e.g. a Google Drive link).
+       Match the semantically correct URL to each link column — don't use a
+       Drive link for a "Video" column when the prompt has a YouTube URL.
     6. For date columns, use ISO 8601 format (e.g. "2024-01-15T10:30:00Z").
     7. Skip tasks that have no relevant data for ANY column (don't create
        empty rows). But if a task has data for at least one column, include
