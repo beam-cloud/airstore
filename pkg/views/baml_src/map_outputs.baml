@@ -47,7 +47,7 @@ function MapOutputsToSchema(
     {% endfor %}
 
     TASK OUTPUTS (JSON array of outputs with their data and metadata):
-    {{ outputs_json }}
+    <outputs>{{ outputs_json }}</outputs>
 
     INSTRUCTIONS:
     1. For each task output, inspect its data fields, metadata, title, summary,

@@ -285,7 +285,7 @@ func mapOutputsToSchema(
 		}, nil
 	}
 
-	return convertMappedResult(result, columns)
+	return convertMappedResult(result, columns, outputs)
 }
 
 func buildColumnSchemas(comp types.ComponentSpec) []bamltypes.ColumnSchema {
@@ -403,7 +403,14 @@ func filterMetadataForMapping(metadata map[string]any) map[string]any {
 	return filtered
 }
 
-func convertMappedResult(result bamltypes.MappedResult, columns []bamltypes.ColumnSchema) (*types.ResolvedData, error) {
+func convertMappedResult(result bamltypes.MappedResult, columns []bamltypes.ColumnSchema, outputs []*types.TaskOutput) (*types.ResolvedData, error) {
+	taskByOutput := make(map[string]string, len(outputs))
+	for _, o := range outputs {
+		if o != nil {
+			taskByOutput[o.ID] = o.TaskID
+		}
+	}
+
 	colNames := make([]string, len(columns)+2)
 	for i, col := range columns {
 		colNames[i] = col.Key
@@ -437,7 +444,7 @@ func convertMappedResult(result bamltypes.MappedResult, columns []bamltypes.Colu
 				}
 			}
 		}
-		row[len(columns)] = ""
+		row[len(columns)] = taskByOutput[mappedRow.Output_id]
 		row[len(columns)+1] = mappedRow.Output_id
 		rows = append(rows, row)
 	}
@@ -517,9 +524,13 @@ type cachedMapping struct {
 
 func schemaHash(comp types.ComponentSpec) string {
 	payload := struct {
+		Title     string               `json:"n,omitempty"`
+		Type      string               `json:"w,omitempty"`
 		Transform []types.TransformRule `json:"t,omitempty"`
 		Config    map[string]any       `json:"c,omitempty"`
 	}{
+		Title:  comp.Title,
+		Type:   comp.Type,
 		Config: comp.Config,
 	}
 	if comp.DataSource != nil {
@@ -534,6 +545,8 @@ func schemaHash(comp types.ComponentSpec) string {
 // Dot-path navigation (used by Artifact)
 // ---------------------------------------------------------------------------
 
+var indexBracketRe = regexp.MustCompile(`\[(\d+|\*)\]`)
+
 func dotGet(m map[string]any, path string) any {
 	if m == nil {
 		return nil
@@ -543,7 +556,7 @@ func dotGet(m map[string]any, path string) any {
 
 func splitPath(path string) []string {
 	normalized := strings.ReplaceAll(path, "[]", ".[].")
-	normalized = regexp.MustCompile(`\[(\d+|\*)\]`).ReplaceAllString(normalized, `.$1`)
+	normalized = indexBracketRe.ReplaceAllString(normalized, `.$1`)
 	rawParts := strings.Split(normalized, ".")
 	parts := make([]string, 0, len(rawParts))
 	for _, part := range rawParts {

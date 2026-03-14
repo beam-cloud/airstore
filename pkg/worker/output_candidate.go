@@ -7,6 +7,7 @@ import (
 
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
+	"github.com/rs/zerolog/log"
 )
 
 // outputCandidate is the canonical worker-side shape for a TaskOutput before
@@ -27,7 +28,7 @@ type outputCandidate struct {
 func (c outputCandidate) identityKey() string {
 	key := normalizeArtifactToken(anyToTrimmedString(c.Metadata[types.TaskOutputMetadataArtifactKey]))
 	title := normalizeArtifactToken(c.Title)
-	path := strings.ToLower(firstNonEmptyTrimmed(c.Path, anyToTrimmedString(c.Data[keyPath])))
+	path := firstNonEmptyTrimmed(c.Path, anyToTrimmedString(c.Data[keyPath]))
 	uri := strings.ToLower(firstNonEmptyTrimmed(c.URI, anyToTrimmedString(c.Data[keyURI]), anyToTrimmedString(c.Metadata[keyDeeplink])))
 
 	switch {
@@ -149,7 +150,7 @@ func publishOutputCandidate(
 			OutputId:    serverID,
 			Summary:     normalized.Summary,
 		}); err != nil {
-			return "", err
+			log.Warn().Err(err).Str("task", ids.taskID).Str("output", serverID).Msg("output finalize failed after create")
 		}
 	}
 

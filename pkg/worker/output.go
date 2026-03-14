@@ -174,6 +174,7 @@ type OutputWriter struct {
 	done        chan struct{}
 	closed      atomic.Bool
 	closeOnce   sync.Once
+	sendMu      sync.Mutex
 }
 
 type taskOutputClient interface {
@@ -291,25 +292,27 @@ func (w *OutputWriter) Write(p []byte) (int, error) {
 	if json.Unmarshal([]byte(line), &payload) != nil {
 		return len(p), nil
 	}
+
+	var evt outputEvent
 	switch anyToTrimmedString(payload["type"]) {
 	case "output":
-		select {
-		case <-w.ctx.Done():
-			return len(p), nil
-		case w.events <- outputEvent{kind: "output", payload: payload}:
-		}
+		evt = outputEvent{kind: "output", payload: payload}
 	case "output_append":
-		select {
-		case <-w.ctx.Done():
-			return len(p), nil
-		case w.events <- outputEvent{kind: "output_append", payload: payload}:
-		}
+		evt = outputEvent{kind: "output_append", payload: payload}
 	case "output_done":
-		select {
-		case <-w.ctx.Done():
-			return len(p), nil
-		case w.events <- outputEvent{kind: "output_done", payload: payload}:
-		}
+		evt = outputEvent{kind: "output_done", payload: payload}
+	default:
+		return len(p), nil
+	}
+
+	w.sendMu.Lock()
+	defer w.sendMu.Unlock()
+	if w.closed.Load() {
+		return len(p), nil
+	}
+	select {
+	case <-w.ctx.Done():
+	case w.events <- evt:
 	}
 	return len(p), nil
 }
@@ -332,10 +335,12 @@ func (w *OutputWriter) Wait() {
 	if w == nil {
 		return
 	}
+	w.sendMu.Lock()
 	w.closed.Store(true)
 	w.closeOnce.Do(func() {
 		close(w.events)
 	})
+	w.sendMu.Unlock()
 	<-w.done
 }
 

@@ -43,7 +43,8 @@ func InstallContent(
 	if isNilWorkspaceSkillStore(storage) {
 		return nil, "", fmt.Errorf("storage not configured")
 	}
-	if strings.TrimSpace(workspaceExternalID) == "" {
+	workspaceExternalID = strings.TrimSpace(workspaceExternalID)
+	if workspaceExternalID == "" {
 		return nil, "", fmt.Errorf("workspace not found")
 	}
 	if len(content) == 0 {

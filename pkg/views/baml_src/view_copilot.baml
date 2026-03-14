@@ -244,10 +244,12 @@ function WriteView(
     3. If agents or skills need to be created, populate the operations array.
        The system will execute these before applying the view definition.
        CRITICAL: Every agent reference in the view (in agents[], dataSource.agent_id,
-       and config.agent_id for action forms) MUST use the EXACT same kebab-case key
-       you used in the CREATE_AGENT payload. For example, if you create an agent with
-       key "email-outreach", use "email-outreach" everywhere — never "email-outreach-agent",
-       never "emailOutreach", never the display name. Consistency is mandatory.
+       and config.agent_id for action forms) MUST use the kebab-case key derived from
+       the agent name you provided in the CREATE_AGENT payload. The runtime converts
+       the name to a key by lowercasing and replacing spaces/underscores with hyphens.
+       For example, if you create an agent with name "Email Outreach", the key becomes
+       "email-outreach" — use "email-outreach" everywhere. Never use the display name,
+       camelCase, or suffixed variants. Consistency is mandatory.
 
     4. In view_content, always provide the COMPLETE view definition JSON —
        never a partial update or diff. Include all components, even unchanged ones.

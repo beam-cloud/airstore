@@ -20,8 +20,6 @@ func upViewFormattedOutput(tx *sql.Tx) error {
 			created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			UNIQUE(view_id, output_id)
 		)`,
-		`CREATE INDEX IF NOT EXISTS idx_vfo_lookup
-		 ON view_formatted_output (view_id, output_id)`,
 	}
 
 	for _, stmt := range stmts {
@@ -34,7 +32,6 @@ func upViewFormattedOutput(tx *sql.Tx) error {
 
 func downViewFormattedOutput(tx *sql.Tx) error {
 	stmts := []string{
-		`DROP INDEX IF EXISTS idx_vfo_lookup`,
 		`DROP TABLE IF EXISTS view_formatted_output`,
 	}
 	for _, stmt := range stmts {

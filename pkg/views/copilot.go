@@ -164,7 +164,9 @@ func (c *Copilot) LoadDraft(ctx context.Context, workspaceID, draftID string) (*
 }
 
 func (c *Copilot) DeleteDraft(ctx context.Context, workspaceID, draftID string) error {
-	_ = c.persistDraft(ctx, draftID, "status", "discarded", "", "")
+	if err := c.persistDraft(ctx, draftID, "status", "discarded", "", ""); err != nil {
+		return fmt.Errorf("persist draft status: %w", err)
+	}
 	return c.indexDraft(ctx, workspaceID, "discarded", draftID, "", "", "")
 }
 

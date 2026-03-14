@@ -4193,7 +4193,7 @@ func (b *PostgresBackend) UpsertFormattedOutput(ctx context.Context, viewID, out
 		INSERT INTO view_formatted_output (view_id, output_id, formatted_json)
 		VALUES ($1, $2, $3)
 		ON CONFLICT (view_id, output_id)
-		DO UPDATE SET formatted_json = EXCLUDED.formatted_json, created_at = CURRENT_TIMESTAMP`,
+		DO UPDATE SET formatted_json = EXCLUDED.formatted_json`,
 		viewID, outputID, fmtBytes,
 	)
 	return err

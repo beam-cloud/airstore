@@ -129,7 +129,10 @@ func (sg *SkillsGroup) Get(c echo.Context) error {
 	bucket := sg.storage.WorkspaceBucketName(ws.ExternalId)
 	content, err := sg.storage.Download(ctx, bucket, skills.ManifestKey(name))
 	if err != nil {
-		return ErrorResponse(c, http.StatusNotFound, "skill not found")
+		if clients.IsNotFoundError(err) {
+			return ErrorResponse(c, http.StatusNotFound, "skill not found")
+		}
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to retrieve skill")
 	}
 
 	manifest, err := skills.Parse(content)

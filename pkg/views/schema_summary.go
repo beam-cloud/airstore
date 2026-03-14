@@ -20,7 +20,6 @@ type outputSchemaSummary struct {
 	ArtifactKey   string
 	ArtifactLabel string
 	OutputType    string
-	Signature     string
 	Fields        []schemaFieldSummary
 }
 
@@ -86,16 +85,10 @@ func summarizeOutputSchema(outputs []*types.TaskOutput) outputSchemaSummary {
 		return fields[i].Source < fields[j].Source
 	})
 
-	sigPayload := make([]map[string]any, len(fields))
-	for i, f := range fields {
-		sigPayload[i] = map[string]any{"source": f.Source, "type": f.Type}
-	}
-
 	return outputSchemaSummary{
 		ArtifactKey:   artifactKey,
 		ArtifactLabel: artifactLabel,
 		OutputType:    outputType,
-		Signature:     types.SchemaSignature(sigPayload),
 		Fields:        fields,
 	}
 }
@@ -126,23 +119,38 @@ func summarizeWorkspaceSchemas(outputs []*types.TaskOutput) []outputSchemaSummar
 }
 
 // fieldsForOutput extracts the bindable field list from a single output
-// by inspecting its data keys.
+// by inspecting its data keys, flattening nested maps up to 3 levels deep.
 func fieldsForOutput(output *types.TaskOutput) []schemaFieldSummary {
 	base := make([]schemaFieldSummary, len(topLevelFields))
 	copy(base, topLevelFields)
+	flattenDataFields(output.Data, "data", &base, 0)
+	return dedupeBySource(base)
+}
 
-	for _, key := range sortedMapKeys(output.Data) {
+func flattenDataFields(m map[string]any, prefix string, out *[]schemaFieldSummary, depth int) {
+	if depth > 2 {
+		return
+	}
+	for _, key := range sortedMapKeys(m) {
 		if isExcludedDataKey(key) {
 			continue
 		}
-		base = append(base, schemaFieldSummary{
-			Key:    key,
-			Source: "data." + key,
+		source := prefix + "." + key
+		*out = append(*out, schemaFieldSummary{
+			Key:    fallbackFieldKey(source),
+			Source: source,
 			Type:   inferTypeFromKey(key),
 			Label:  humanizeColumn(key),
 		})
+		if nested, ok := m[key].(map[string]any); ok {
+			flattenDataFields(nested, source, out, depth+1)
+		}
+		if arr, ok := m[key].([]any); ok && len(arr) > 0 {
+			if nested, ok := arr[0].(map[string]any); ok {
+				flattenDataFields(nested, source+".[]", out, depth+1)
+			}
+		}
 	}
-	return dedupeBySource(base)
 }
 
 var excludedDataKeys = map[string]bool{

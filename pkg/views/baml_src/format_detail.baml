@@ -49,11 +49,11 @@ function FormatOutputDetail(
       lists or tables rather than raw JSON
     - Typically 2-5 sections is ideal
 
-    Output type: {{ output_type }}
-    Title: {{ output_title }}
-    Summary: {{ output_summary }}
-    Data: {{ output_data }}
-    Metadata: {{ output_metadata }}
+    <output_type>{{ output_type }}</output_type>
+    <output_title>{{ output_title }}</output_title>
+    <output_summary>{{ output_summary }}</output_summary>
+    <output_data>{{ output_data }}</output_data>
+    <output_metadata>{{ output_metadata }}</output_metadata>
 
     {{ ctx.output_format }}
   "#

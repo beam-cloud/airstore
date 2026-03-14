@@ -21,7 +21,7 @@ func defaultArtifactMetadata(metadata map[string]any, role string) map[string]an
 		m[types.TaskOutputMetadataArtifactKind] = normalizeArtifactToken(kind)
 	}
 
-	if r := normalizeArtifactRole(firstNonEmptyTrimmed(role, anyToTrimmedString(m[types.TaskOutputMetadataArtifactRole]))); r != "" {
+	if r := normalizeArtifactRole(firstNonEmptyTrimmed(anyToTrimmedString(m[types.TaskOutputMetadataArtifactRole]), role)); r != "" {
 		m[types.TaskOutputMetadataArtifactRole] = r
 	} else {
 		m[types.TaskOutputMetadataArtifactRole] = types.TaskOutputArtifactRoleSupporting

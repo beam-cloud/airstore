@@ -252,6 +252,7 @@ func (s *AgentService) AcceptAgentCommand(
 			agentConfig,
 			agentConfigKeyModel,
 		)
+		instanceKey = ExecutionClassKey(workspaceID, params.AgentID, params.Lane, runPolicy)
 	}
 
 	if params.HookID == nil {

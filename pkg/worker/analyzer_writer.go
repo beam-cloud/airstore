@@ -263,13 +263,25 @@ func (r extractedResult) candidate(role string) outputCandidate {
 		metadata[keyDeeplink] = u
 	}
 
-	for _, f := range r.out.Data_fields {
-		key := strings.TrimSpace(f.Key)
-		val := strings.TrimSpace(f.Value)
-		if key != "" && val != "" {
+	if len(r.out.Data_fields) > 0 {
+		var fieldsMeta []map[string]string
+		for _, f := range r.out.Data_fields {
+			key := strings.TrimSpace(f.Key)
+			val := strings.TrimSpace(f.Value)
+			if key == "" || val == "" {
+				continue
+			}
 			if _, exists := data[key]; !exists {
 				data[key] = val
 			}
+			fieldsMeta = append(fieldsMeta, map[string]string{
+				"key":   key,
+				"type":  strings.TrimSpace(f.Type),
+				"label": strings.TrimSpace(f.Label),
+			})
+		}
+		if len(fieldsMeta) > 0 {
+			metadata["data_fields"] = fieldsMeta
 		}
 	}
 	if len(r.out.Tags) > 0 {
@@ -474,20 +486,18 @@ func decodeStructuredPayload(raw string) (any, bool) {
 }
 
 func firstMatchingString(value any, keys ...string) string {
-	keySet := make(map[string]struct{}, len(keys))
-	for _, key := range keys {
-		keySet[strings.ToLower(key)] = struct{}{}
-	}
-	return firstMatchingStringRecursive(value, keySet)
+	return firstMatchingStringRecursive(value, keys)
 }
 
-func firstMatchingStringRecursive(value any, keys map[string]struct{}) string {
+func firstMatchingStringRecursive(value any, keys []string) string {
 	switch typed := value.(type) {
 	case map[string]any:
-		for key, child := range typed {
-			if _, ok := keys[strings.ToLower(key)]; ok {
-				if text, ok := child.(string); ok && strings.TrimSpace(text) != "" {
-					return strings.TrimSpace(text)
+		for _, key := range keys {
+			for k, child := range typed {
+				if strings.EqualFold(k, key) {
+					if text, ok := child.(string); ok && strings.TrimSpace(text) != "" {
+						return strings.TrimSpace(text)
+					}
 				}
 			}
 		}

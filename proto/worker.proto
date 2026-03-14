@@ -177,6 +177,7 @@ message CreateTaskOutputRequest {
   string output_type = 4;
   string title = 5;
   reserved 6;
+  reserved "schema_json";
   string data_json = 7;     // JSON-encoded initial data
   string metadata_json = 8; // JSON-encoded metadata
   string uri = 9;            // External deep-link URI

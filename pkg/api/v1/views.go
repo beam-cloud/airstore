@@ -470,14 +470,23 @@ func (vg *ViewsGroup) CreateDraft(c echo.Context) error {
 	}
 
 	draft := vg.copilot.CreateDraft(workspaceID)
-	_ = vg.copilot.PersistMeta(c.Request().Context(), draft)
+	if err := vg.copilot.PersistMeta(c.Request().Context(), draft); err != nil {
+		log.Error().Err(err).Str("workspace_id", workspaceID).Str("draft_id", draft.ID).Msg("persist draft meta failed")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to persist draft")
+	}
 	if strings.TrimSpace(req.ViewContent) != "" {
 		draft.ViewContent = req.ViewContent
-		_ = vg.copilot.PersistViewContent(c.Request().Context(), draft.ID, req.ViewContent)
+		if err := vg.copilot.PersistViewContent(c.Request().Context(), draft.ID, req.ViewContent); err != nil {
+			log.Error().Err(err).Str("draft_id", draft.ID).Msg("persist draft view content failed")
+			return ErrorResponse(c, http.StatusInternalServerError, "failed to persist draft content")
+		}
 	}
 	if strings.TrimSpace(req.ViewID) != "" {
 		draft.PublishedViewID = req.ViewID
-		_ = vg.copilot.PersistPublishedViewID(c.Request().Context(), draft.ID, req.ViewID)
+		if err := vg.copilot.PersistPublishedViewID(c.Request().Context(), draft.ID, req.ViewID); err != nil {
+			log.Error().Err(err).Str("draft_id", draft.ID).Msg("persist draft published view ID failed")
+			return ErrorResponse(c, http.StatusInternalServerError, "failed to persist draft published view ID")
+		}
 	}
 	_ = vg.copilot.IndexDraftCreated(
 		c.Request().Context(),

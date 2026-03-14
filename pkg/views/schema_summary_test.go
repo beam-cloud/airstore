@@ -25,10 +25,6 @@ func TestSummarizeOutputSchemaFromDataKeys(t *testing.T) {
 	if got, want := summary.ArtifactKey, "recipes"; got != want {
 		t.Fatalf("artifact key = %q, want %q", got, want)
 	}
-	if summary.Signature == "" {
-		t.Fatal("expected non-empty schema signature")
-	}
-
 	fieldSources := map[string]bool{}
 	for _, f := range summary.Fields {
 		fieldSources[f.Source] = true
