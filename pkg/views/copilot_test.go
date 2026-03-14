@@ -17,7 +17,7 @@ func TestNormalizeViewDefinitionUsesReferencedAgents(t *testing.T) {
 		Components: []types.ComponentSpec{
 			{
 				ID:       "table-1",
-				Type:     "table",
+				Type:     types.ComponentTypeTable,
 				Position: types.Position{Col: 0, Row: 0, ColSpan: 6, RowSpan: 1},
 				DataSource: &types.DataSource{
 					AgentID:  " campaign-beta ",
@@ -26,7 +26,7 @@ func TestNormalizeViewDefinitionUsesReferencedAgents(t *testing.T) {
 			},
 			{
 				ID:       "action-1",
-				Type:     "action",
+				Type:     types.ComponentTypeAction,
 				Position: types.Position{Col: 6, Row: 0, ColSpan: 6, RowSpan: 1},
 				Config: map[string]any{
 					"agent_id":  "campaign-beta",
@@ -61,7 +61,7 @@ func TestNormalizeViewDefinitionKeepsExplicitAgentsWhenComponentsDoNotReferenceA
 		Components: []types.ComponentSpec{
 			{
 				ID:       "metric-1",
-				Type:     "metric",
+				Type:     types.ComponentTypeMetric,
 				Position: types.Position{Col: 0, Row: 0, ColSpan: 6, RowSpan: 1},
 			},
 		},
@@ -126,7 +126,7 @@ func TestCanonicalizeViewAgentRefsResolvesNamesAndKeys(t *testing.T) {
 		Components: []types.ComponentSpec{
 			{
 				ID:       "action-1",
-				Type:     "action",
+				Type:     types.ComponentTypeAction,
 				Position: types.Position{Col: 0, Row: 0, ColSpan: 4, RowSpan: 1},
 				Config: map[string]any{
 					"agent_id": "YouTube Recipe Extractor",
@@ -134,7 +134,7 @@ func TestCanonicalizeViewAgentRefsResolvesNamesAndKeys(t *testing.T) {
 			},
 			{
 				ID:       "table-1",
-				Type:     "table",
+				Type:     types.ComponentTypeTable,
 				Position: types.Position{Col: 4, Row: 0, ColSpan: 8, RowSpan: 1},
 				DataSource: &types.DataSource{
 					AgentID: "youtube-recipe-extractor",
@@ -172,7 +172,7 @@ func TestCanonicalizeViewAgentRefsUsesOperationResultsForNewAgents(t *testing.T)
 		Components: []types.ComponentSpec{
 			{
 				ID:       "action-1",
-				Type:     "action",
+				Type:     types.ComponentTypeAction,
 				Position: types.Position{Col: 0, Row: 0, ColSpan: 4, RowSpan: 1},
 				Config: map[string]any{
 					"agent_id": "YouTube Recipe Extractor",

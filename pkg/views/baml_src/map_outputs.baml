@@ -29,8 +29,7 @@ function MapOutputsToSchema(
   widget_title: string,
   widget_type: string,
   columns: ColumnSchema[],
-  outputs_json: string,
-  artifact_key_filter: string
+  outputs_json: string
 ) -> MappedResult {
   client OutputMapperClient
   prompt #"
@@ -38,9 +37,6 @@ function MapOutputsToSchema(
     dashboard view.
 
     WIDGET: {{ widget_title }} (type: {{ widget_type }})
-    {% if artifact_key_filter != "" %}
-    ARTIFACT KEY FILTER: {{ artifact_key_filter }}
-    {% endif %}
 
     COLUMN SCHEMA (the columns the widget expects):
     {% for col in columns %}
@@ -60,20 +56,19 @@ function MapOutputsToSchema(
     2. Produce ONE row per task_id by synthesizing the best value for each
        column from ANY output in that task's group. Use the prompt for
        additional context when output data alone is ambiguous.
-    3. When multiple outputs have a value for the same column, prefer outputs
+    3. IMPORTANT: produce a row for EVERY task. Each task_id in the input
+       should have a corresponding row in the output. Do not skip tasks.
+    4. When multiple outputs have a value for the same column, prefer outputs
        with artifact_role "primary" over "supporting" or "incidental".
-    4. Use semantic understanding — don't just match field names literally.
+    5. Use semantic understanding — don't just match field names literally.
        For example, if a column asks for "Recipe Name" and an output has
        data.recipe_name or data.title with a recipe name, use it.
-    5. For link columns, look for URLs in data, metadata.deeplink, URI, AND
+    6. For link columns, look for URLs in data, metadata.deeplink, URI, AND
        the prompt. The prompt often contains the source URL (e.g. a YouTube
        link) that is distinct from output URLs (e.g. a Google Drive link).
        Match the semantically correct URL to each link column — don't use a
        Drive link for a "Video" column when the prompt has a YouTube URL.
-    6. For date columns, use ISO 8601 format (e.g. "2024-01-15T10:30:00Z").
-    7. Skip tasks that have no relevant data for ANY column (don't create
-       empty rows). But if a task has data for at least one column, include
-       it with empty strings for missing columns.
+    7. For date columns, use ISO 8601 format (e.g. "2024-01-15T10:30:00Z").
     8. Preserve the original values — don't summarize or reformat unless
        the column type requires it (e.g. extracting a date from a string).
     9. For tags columns, join multiple values with ", ".

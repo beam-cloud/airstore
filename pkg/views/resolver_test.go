@@ -129,36 +129,66 @@ func TestFetchOutputsSkipsUnresolvedAgentRefs(t *testing.T) {
 	}
 }
 
-func TestResolveMetricReturnsOutputCount(t *testing.T) {
-	backend := &fakeResolverBackend{
-		workspaceOutputs: []*types.TaskOutput{
-			newRecipeOutput("recipe-1"),
-			newRecipeOutput("recipe-2"),
-			newRecipeOutput("recipe-3"),
-		},
+func TestTaskMatchesDataSource(t *testing.T) {
+	agentID := "agent-1"
+	mkOutput := func(id, artifactKey string) *types.TaskOutput {
+		o := newRecipeOutput(id)
+		o.AgentID = &agentID
+		o.Metadata = map[string]any{"artifact_key": artifactKey}
+		return o
 	}
-	resolver := &DataResolver{backend: backend, cache: newMappingCache(nil)}
 
-	result, err := resolver.Resolve(context.Background(), 7, "test-view", types.ComponentSpec{
-		ID:    "recipe-count",
-		Type:  "metric",
-		Title: "Recipes Extracted",
-		Config: map[string]any{
-			"label":  "Total Recipes",
-			"suffix": " recipes",
-		},
-		DataSource: &types.DataSource{
-			OutputType: "text",
-		},
-	})
-	if err != nil {
-		t.Fatalf("Resolve returned error: %v", err)
+	outputs := []*types.TaskOutput{
+		mkOutput("out-1", "extracted-recipes"),
+		mkOutput("out-2", "drive-recipe-pdf"),
 	}
-	if got, want := result.Status, types.ResolvedDataStatusOK; got != want {
-		t.Fatalf("status = %q, want %q", got, want)
+
+	if !taskMatchesDataSource(outputs, &types.DataSource{}, []string{agentID}) {
+		t.Fatal("expected match for correct agent")
 	}
-	if got, want := result.Total, 3; got != want {
-		t.Fatalf("total = %d, want %d", got, want)
+	if taskMatchesDataSource(outputs, &types.DataSource{}, []string{"other-agent"}) {
+		t.Fatal("expected no match for wrong agent")
+	}
+	if !taskMatchesDataSource(outputs, nil, nil) {
+		t.Fatal("nil data source should match everything")
+	}
+}
+
+func TestBuildUnifiedSchema(t *testing.T) {
+	comps := []types.ComponentSpec{
+		{
+			Type: types.ComponentTypeTable,
+			DataSource: &types.DataSource{
+				Transform: []types.TransformRule{
+					{Column: "name", Source: "data.name", Type: "text"},
+					{Column: "url", Source: "data.url", Type: "link"},
+				},
+			},
+		},
+		{
+			Type: types.ComponentTypeTable,
+			DataSource: &types.DataSource{
+				Transform: []types.TransformRule{
+					{Column: "name", Source: "data.name", Type: "text"},
+					{Column: "price", Source: "data.price", Type: "currency"},
+				},
+			},
+		},
+		{Type: types.ComponentTypeMetric, DataSource: &types.DataSource{ArtifactKey: "recipes"}},
+	}
+
+	cols := buildUnifiedSchema(comps)
+	if len(cols) != 3 {
+		t.Fatalf("expected 3 unified columns (name deduped), got %d", len(cols))
+	}
+	keys := make(map[string]bool)
+	for _, c := range cols {
+		keys[c.Key] = true
+	}
+	for _, want := range []string{"name", "url", "price"} {
+		if !keys[want] {
+			t.Fatalf("missing unified column %q", want)
+		}
 	}
 }
 
@@ -189,19 +219,13 @@ func TestBuildColumnSchemas(t *testing.T) {
 	}
 }
 
-func TestCacheRoundTrip(t *testing.T) {
-	cached := &cachedMapping{
+func TestTaskCacheRoundTrip(t *testing.T) {
+	cached := &cachedTaskMapping{
 		SchemaHash: "testhash123",
 		OutputIDs:  []string{"out-1", "out-2"},
-		Columns:    []string{"recipe_name", "video_url", "task_id"},
-		ColumnMeta: []types.ColumnMeta{
-			{Key: "recipe_name", Type: "text", Label: "Recipe Name"},
-			{Key: "video_url", Type: "link", Label: "Video"},
-			{Key: "task_id", Type: "text", Hidden: true},
-		},
-		Rows: [][]any{
-			{"Spaghetti", "https://yt.com/1", "task-1"},
-			{"Brownies", nil, "task-2"},
+		Cells: map[string]string{
+			"recipe_name": "Spaghetti",
+			"video_url":   "https://yt.com/1",
 		},
 		CachedAt: time.Now(),
 	}
@@ -211,12 +235,9 @@ func TestCacheRoundTrip(t *testing.T) {
 		t.Fatalf("json.Marshal failed: %v", err)
 	}
 
-	var restored cachedMapping
+	var restored cachedTaskMapping
 	if err := json.Unmarshal(raw, &restored); err != nil {
 		t.Fatalf("json.Unmarshal failed: %v", err)
-	}
-	if len(restored.Rows) != 2 {
-		t.Fatalf("round-trip: expected 2 rows, got %d", len(restored.Rows))
 	}
 	if restored.SchemaHash != "testhash123" {
 		t.Fatalf("round-trip: schema hash = %q, want testhash123", restored.SchemaHash)
@@ -224,48 +245,41 @@ func TestCacheRoundTrip(t *testing.T) {
 	if !slicesMatch(restored.OutputIDs, []string{"out-1", "out-2"}) {
 		t.Fatalf("round-trip: output IDs mismatch: %v", restored.OutputIDs)
 	}
-	if restored.Rows[0][0] != "Spaghetti" {
-		t.Fatalf("row 0 col 0 = %v, want Spaghetti", restored.Rows[0][0])
+	if restored.Cells["recipe_name"] != "Spaghetti" {
+		t.Fatalf("round-trip: recipe_name = %q, want Spaghetti", restored.Cells["recipe_name"])
 	}
-	if restored.Rows[1][1] != nil {
-		t.Fatalf("row 1 col 1 = %v, want nil", restored.Rows[1][1])
+	if restored.Cells["video_url"] != "https://yt.com/1" {
+		t.Fatalf("round-trip: video_url = %q, want https://yt.com/1", restored.Cells["video_url"])
 	}
 }
 
-func TestSchemaHashStable(t *testing.T) {
-	comp := types.ComponentSpec{
-		ID:    "recipe-table",
-		Title: "Recipe PDFs in Google Drive",
-		Type:  "data-table",
-		DataSource: &types.DataSource{
-			AgentIDs:    []string{"youtube-recipe-extractor"},
-			ArtifactKey: "recipes",
-			Transform: []types.TransformRule{
-				{Column: "file_name", Source: "data.file_name", Type: "text"},
-				{Column: "video_url", Source: "data.video_url", Type: "link"},
-			},
-		},
-		Config: map[string]any{
-			"columns": []any{
-				map[string]any{"key": "file_name", "label": "File Name"},
-				map[string]any{"key": "video_url", "label": "Video"},
+func TestHashColumnsStable(t *testing.T) {
+	comps := []types.ComponentSpec{
+		{
+			Type: types.ComponentTypeTable,
+			DataSource: &types.DataSource{
+				Transform: []types.TransformRule{
+					{Column: "file_name", Source: "data.file_name", Type: "text"},
+					{Column: "video_url", Source: "data.video_url", Type: "link"},
+				},
 			},
 		},
 	}
 
-	h1 := schemaHash(comp)
-	h2 := schemaHash(comp)
-	h3 := schemaHash(comp)
-	if h1 != h2 || h2 != h3 {
-		t.Fatalf("schemaHash not stable: %q, %q, %q", h1, h2, h3)
+	cols := buildUnifiedSchema(comps)
+	h1 := hashColumns(cols)
+	h2 := hashColumns(cols)
+	if h1 != h2 {
+		t.Fatalf("hashColumns not stable: %q vs %q", h1, h2)
 	}
 
-	compJSON, _ := json.Marshal(comp)
-	var comp2 types.ComponentSpec
-	json.Unmarshal(compJSON, &comp2)
-	h4 := schemaHash(comp2)
-	if h1 != h4 {
-		t.Fatalf("schemaHash not stable across JSON round-trip: %q vs %q", h1, h4)
+	compsJSON, _ := json.Marshal(comps)
+	var comps2 []types.ComponentSpec
+	json.Unmarshal(compsJSON, &comps2)
+	cols2 := buildUnifiedSchema(comps2)
+	h3 := hashColumns(cols2)
+	if h1 != h3 {
+		t.Fatalf("hashColumns not stable across JSON round-trip: %q vs %q", h1, h3)
 	}
 }
 
@@ -281,13 +295,6 @@ func TestSortedOutputIDsAndSlicesMatch(t *testing.T) {
 	if !slicesMatch(oids, expected) {
 		t.Fatalf("sortedOutputIDs = %v, want %v", oids, expected)
 	}
-
-	tids := sortedTaskIDs(outputs)
-	expectedTasks := []string{"task-a", "task-b"}
-	if !slicesMatch(tids, expectedTasks) {
-		t.Fatalf("sortedTaskIDs = %v, want %v", tids, expectedTasks)
-	}
-
 	if slicesMatch(oids, []string{"out-1", "out-2"}) {
 		t.Fatal("should not match shorter list")
 	}

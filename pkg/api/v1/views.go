@@ -178,7 +178,7 @@ func (vg *ViewsGroup) ResolveData(c echo.Context) error {
 	}
 
 	resolver := views.NewDataResolver(vg.backend, vg.rdb)
-	data, err := resolver.Resolve(ctx, workspaceID, v.ID, *comp)
+	data, err := resolver.Resolve(ctx, workspaceID, v.ID, *comp, v.Definition.Components)
 	if err != nil {
 		log.Error().Err(err).Str("view_id", v.ID).Str("component", componentID).Msg("data resolve failed")
 		return ErrorResponse(c, http.StatusInternalServerError, "failed to resolve data")

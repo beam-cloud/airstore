@@ -27,10 +27,12 @@
 package baml_client
 
 import (
+	"fmt"
 	"os"
 	"strings"
 
 	"github.com/beam-cloud/airstore/pkg/bamlregistry"
+	"github.com/beam-cloud/airstore/pkg/worker/agentsignal/baml_client/type_builder"
 	baml "github.com/boundaryml/baml/engine/language_client_go/pkg"
 )
 

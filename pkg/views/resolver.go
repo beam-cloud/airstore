@@ -42,74 +42,244 @@ type dataResolverBackend interface {
 	GetTaskByID(ctx context.Context, taskId string) (*types.AgentTask, error)
 }
 
-// Resolve fetches task outputs and maps them to the component's column schema
-// using BAML. Results are cached in Redis keyed by view_id:component_id.
-func (r *DataResolver) Resolve(ctx context.Context, workspaceID uint, viewID string, comp types.ComponentSpec) (*types.ResolvedData, error) {
-	ds := comp.DataSource
-	if ds == nil {
-		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusOK}, nil
+// Resolve maps task outputs to a view component's schema using BAML.
+//
+// All outputs across every component in the view are fetched and mapped in a
+// single BAML call. Results are cached per-task — only tasks whose output set
+// has changed (or whose schema hash is stale) are re-mapped. Both tables and
+// metrics derive their data from this shared mapped result.
+func (r *DataResolver) Resolve(ctx context.Context, workspaceID uint, viewID string, comp types.ComponentSpec, allComponents []types.ComponentSpec) (*types.ResolvedData, error) {
+	unifiedCols := buildUnifiedSchema(allComponents)
+	if len(unifiedCols) == 0 {
+		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}, nil
 	}
+	schemaH := hashColumns(unifiedCols)
 
-	outputs, err := r.fetchOutputs(ctx, workspaceID, ds)
+	allOutputs, err := r.fetchViewOutputs(ctx, workspaceID, allComponents)
 	if err != nil {
-		return nil, fmt.Errorf("fetch outputs: %w", err)
+		return nil, fmt.Errorf("fetch view outputs: %w", err)
 	}
-
-	outputs = filterOutputsByTimeRange(outputs, ds.TimeRange)
-
-	if len(outputs) == 0 {
+	if len(allOutputs) == 0 {
 		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}, nil
 	}
 
-	// Metrics are strict counts for a specific agent-produced artifact.
-	// No untagged outputs, artifact_key required for meaningful scoping.
-	if comp.Type == "metric" {
-		if ds.ArtifactKey != "" {
-			outputs = filterByArtifactKey(outputs, ds.ArtifactKey)
+	taskGroups := groupOutputsByTask(allOutputs)
+
+	uncachedIDs := make(map[string]bool)
+	mappedTasks := make(map[string]map[string]string, len(taskGroups))
+	for taskID, outputs := range taskGroups {
+		taskOIDs := sortedOutputIDs(outputs)
+		if cached, ok := r.cache.getTask(ctx, viewID, taskID); ok &&
+			cached.SchemaHash == schemaH &&
+			slicesMatch(cached.OutputIDs, taskOIDs) {
+			mappedTasks[taskID] = cached.Cells
+		} else {
+			uncachedIDs[taskID] = true
 		}
-		return resolveMetric(comp, outputs), nil
 	}
 
-	sh := schemaHash(comp)
-	key := r.cache.componentKey(viewID, comp.ID)
-	oids := sortedOutputIDs(outputs)
+	if len(uncachedIDs) > 0 {
+		uncachedTIDs := make([]string, 0, len(uncachedIDs))
+		for tid := range uncachedIDs {
+			uncachedTIDs = append(uncachedTIDs, tid)
+		}
+		sort.Strings(uncachedTIDs)
 
-	if cached, ok := r.cache.get(ctx, key); ok && cached.SchemaHash == sh && slicesMatch(cached.OutputIDs, oids) {
-		cachedAt := cached.CachedAt
-		return &types.ResolvedData{
-			Columns:    cached.Columns,
-			ColumnMeta: cached.ColumnMeta,
-			Rows:       cached.Rows,
-			Total:      len(cached.Rows),
-			CachedAt:   &cachedAt,
-			Status:     types.ResolvedDataStatusOK,
-		}, nil
+		taskPrompts := r.fetchTaskPrompts(ctx, uncachedTIDs)
+		uncachedOutputs := outputsForTasks(allOutputs, uncachedIDs)
+		outputsJSON, err := serializeOutputsForMapping(uncachedOutputs, taskPrompts)
+		if err != nil {
+			return nil, fmt.Errorf("serialize outputs: %w", err)
+		}
+
+		result, err := baml.MapOutputsToSchema(ctx, "View Mapping", "data-table", unifiedCols, outputsJSON)
+		if err != nil {
+			log.Warn().Err(err).Str("view_id", viewID).Int("tasks", len(uncachedIDs)).Msg("BAML mapping failed")
+			if len(mappedTasks) == 0 {
+				return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty, Error: "Failed to map outputs"}, nil
+			}
+		} else {
+			for _, row := range result.Rows {
+				cells := make(map[string]string, len(row.Cells))
+				for _, cell := range row.Cells {
+					if cell.Value != "" {
+						cells[cell.Column] = cell.Value
+					}
+				}
+				taskID := row.Task_id
+				if _, ok := taskGroups[taskID]; !ok {
+					continue
+				}
+				mappedTasks[taskID] = cells
+				r.cache.setTask(ctx, viewID, taskID, &cachedTaskMapping{
+					SchemaHash: schemaH,
+					OutputIDs:  sortedOutputIDs(taskGroups[taskID]),
+					Cells:      cells,
+					CachedAt:   time.Now(),
+				})
+			}
+		}
 	}
 
-	tids := sortedTaskIDs(outputs)
-	taskPrompts := r.fetchTaskPrompts(ctx, tids)
+	resolvedAgents := r.resolveAgentIDsForDS(ctx, workspaceID, comp.DataSource)
 
-	result, err := mapOutputsToSchema(ctx, comp, outputs, taskPrompts)
-	if err != nil {
-		return nil, fmt.Errorf("map outputs to schema: %w", err)
+	switch {
+	case comp.IsTable():
+		return assembleTable(comp, mappedTasks, taskGroups, resolvedAgents), nil
+	case comp.Type == types.ComponentTypeMetric:
+		return assembleMetric(comp, mappedTasks, taskGroups, resolvedAgents), nil
+	default:
+		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}, nil
 	}
-
-	r.cache.set(ctx, key, &cachedMapping{
-		SchemaHash: sh,
-		OutputIDs:  oids,
-		Columns:    result.Columns,
-		ColumnMeta: result.ColumnMeta,
-		Rows:       result.Rows,
-		CachedAt:   time.Now(),
-	})
-	return result, nil
 }
 
-// resolveMetric produces a simple result for metric components without BAML.
-// The frontend uses data.total for "count", data.rows[0][0] for "latest",
-// and sums over rows for "sum".
-func resolveMetric(comp types.ComponentSpec, outputs []*types.TaskOutput) *types.ResolvedData {
-	if len(outputs) == 0 {
+// ---------------------------------------------------------------------------
+// View-level helpers
+// ---------------------------------------------------------------------------
+
+func buildUnifiedSchema(allComponents []types.ComponentSpec) []bamltypes.ColumnSchema {
+	seen := make(map[string]bool)
+	var cols []bamltypes.ColumnSchema
+	for _, comp := range allComponents {
+		if !comp.IsTable() {
+			continue
+		}
+		for _, col := range buildColumnSchemas(comp) {
+			if !seen[col.Key] {
+				seen[col.Key] = true
+				cols = append(cols, col)
+			}
+		}
+	}
+	return cols
+}
+
+func (r *DataResolver) fetchViewOutputs(ctx context.Context, workspaceID uint, allComponents []types.ComponentSpec) ([]*types.TaskOutput, error) {
+	var all []*types.TaskOutput
+	seen := make(map[string]bool)
+	for _, comp := range allComponents {
+		if comp.DataSource == nil {
+			continue
+		}
+		dsKey := fmt.Sprintf("%s:%s", comp.DataSource.AgentID, strings.Join(comp.DataSource.AgentIDs, ","))
+		if seen[dsKey] {
+			continue
+		}
+		seen[dsKey] = true
+		outputs, err := r.fetchOutputs(ctx, workspaceID, comp.DataSource)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, outputs...)
+	}
+	return dedupeOutputs(all), nil
+}
+
+func groupOutputsByTask(outputs []*types.TaskOutput) map[string][]*types.TaskOutput {
+	groups := make(map[string][]*types.TaskOutput)
+	for _, o := range outputs {
+		if o != nil {
+			groups[o.TaskID] = append(groups[o.TaskID], o)
+		}
+	}
+	return groups
+}
+
+func outputsForTasks(outputs []*types.TaskOutput, taskIDs map[string]bool) []*types.TaskOutput {
+	var result []*types.TaskOutput
+	for _, o := range outputs {
+		if o != nil && taskIDs[o.TaskID] {
+			result = append(result, o)
+		}
+	}
+	return result
+}
+
+func (r *DataResolver) resolveAgentIDsForDS(ctx context.Context, workspaceID uint, ds *types.DataSource) []string {
+	if ds == nil {
+		return nil
+	}
+	refs := ds.AgentIDs
+	if ds.AgentID != "" && len(refs) == 0 {
+		refs = []string{ds.AgentID}
+	}
+	var ids []string
+	for _, ref := range refs {
+		if aid, ok := r.resolveAgentRef(ctx, workspaceID, ref); ok {
+			ids = append(ids, aid)
+		}
+	}
+	return ids
+}
+
+// ---------------------------------------------------------------------------
+// Component assembly
+// ---------------------------------------------------------------------------
+
+func assembleTable(comp types.ComponentSpec, mappedTasks map[string]map[string]string, taskGroups map[string][]*types.TaskOutput, resolvedAgentIDs []string) *types.ResolvedData {
+	tableCols := buildColumnSchemas(comp)
+	if len(tableCols) == 0 {
+		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}
+	}
+
+	colNames := make([]string, len(tableCols)+1)
+	for i, col := range tableCols {
+		colNames[i] = col.Key
+	}
+	colNames[len(tableCols)] = "task_id"
+
+	meta := make([]types.ColumnMeta, len(colNames))
+	for i, col := range tableCols {
+		meta[i] = types.ColumnMeta{
+			Key:   col.Key,
+			Label: stripHint(col.Description),
+			Type:  normalizeColumnType(col.Type),
+		}
+	}
+	meta[len(tableCols)] = types.ColumnMeta{Key: "task_id", Type: "text", Hidden: true}
+
+	var rows [][]any
+	for taskID, cells := range mappedTasks {
+		outputs := taskGroups[taskID]
+		if !taskMatchesDataSource(outputs, comp.DataSource, resolvedAgentIDs) {
+			continue
+		}
+		row := make([]any, len(colNames))
+		hasValue := false
+		for i, col := range tableCols {
+			if v, ok := cells[col.Key]; ok && v != "" {
+				row[i] = v
+				hasValue = true
+			}
+		}
+		row[len(tableCols)] = taskID
+		if hasValue {
+			rows = append(rows, row)
+		}
+	}
+
+	if len(rows) == 0 {
+		return &types.ResolvedData{Columns: colNames, ColumnMeta: meta, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}
+	}
+	return &types.ResolvedData{
+		Columns:    colNames,
+		ColumnMeta: meta,
+		Rows:       rows,
+		Total:      len(rows),
+		Status:     types.ResolvedDataStatusOK,
+	}
+}
+
+func assembleMetric(comp types.ComponentSpec, mappedTasks map[string]map[string]string, taskGroups map[string][]*types.TaskOutput, resolvedAgentIDs []string) *types.ResolvedData {
+	count := 0
+	for taskID := range mappedTasks {
+		outputs := taskGroups[taskID]
+		if taskMatchesDataSource(outputs, comp.DataSource, resolvedAgentIDs) {
+			count++
+		}
+	}
+
+	if count == 0 {
 		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Total: 0, Status: types.ResolvedDataStatusEmpty}
 	}
 
@@ -122,24 +292,63 @@ func resolveMetric(comp types.ComponentSpec, outputs []*types.TaskOutput) *types
 
 	switch aggregate {
 	case "latest":
-		val := outputs[0].Title
-		if outputs[0].Summary != nil && *outputs[0].Summary != "" {
-			val = *outputs[0].Summary
+		var latest *types.TaskOutput
+		for taskID := range mappedTasks {
+			for _, o := range taskGroups[taskID] {
+				if latest == nil || o.CreatedAt.After(latest.CreatedAt) {
+					latest = o
+				}
+			}
+		}
+		val := ""
+		if latest != nil {
+			val = latest.Title
+			if latest.Summary != nil && *latest.Summary != "" {
+				val = *latest.Summary
+			}
 		}
 		return &types.ResolvedData{
 			Columns: []string{"value"},
 			Rows:    [][]any{{val}},
-			Total:   len(outputs),
+			Total:   count,
 			Status:  types.ResolvedDataStatusOK,
 		}
 	default:
 		return &types.ResolvedData{
 			Columns: []string{},
 			Rows:    [][]any{},
-			Total:   len(outputs),
+			Total:   count,
 			Status:  types.ResolvedDataStatusOK,
 		}
 	}
+}
+
+func taskMatchesDataSource(outputs []*types.TaskOutput, ds *types.DataSource, resolvedAgentIDs []string) bool {
+	if ds == nil || len(outputs) == 0 {
+		return true
+	}
+	if len(resolvedAgentIDs) > 0 {
+		agentSet := make(map[string]bool, len(resolvedAgentIDs))
+		for _, id := range resolvedAgentIDs {
+			agentSet[id] = true
+		}
+		match := false
+		for _, o := range outputs {
+			if o.AgentID != nil && agentSet[*o.AgentID] {
+				match = true
+				break
+			}
+		}
+		if !match {
+			return false
+		}
+	}
+	if ds.TimeRange != "" {
+		if len(filterOutputsByTimeRange(outputs, ds.TimeRange)) == 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // ---------------------------------------------------------------------------
@@ -220,19 +429,6 @@ func dedupeOutputs(all []*types.TaskOutput) []*types.TaskOutput {
 // Filtering
 // ---------------------------------------------------------------------------
 
-func filterByArtifactKey(outputs []*types.TaskOutput, key string) []*types.TaskOutput {
-	filtered := make([]*types.TaskOutput, 0, len(outputs))
-	for _, o := range outputs {
-		if o == nil || o.Metadata == nil {
-			continue
-		}
-		if k, _ := o.Metadata[types.TaskOutputMetadataArtifactKey].(string); k == key {
-			filtered = append(filtered, o)
-		}
-	}
-	return filtered
-}
-
 func filterOutputsByTimeRange(outputs []*types.TaskOutput, raw string) []*types.TaskOutput {
 	if len(outputs) == 0 {
 		return outputs
@@ -295,51 +491,6 @@ func (r *DataResolver) fetchTaskPrompts(ctx context.Context, taskIDs []string) m
 		}
 	}
 	return prompts
-}
-
-func mapOutputsToSchema(
-	ctx context.Context,
-	comp types.ComponentSpec,
-	outputs []*types.TaskOutput,
-	taskPrompts map[string]string,
-) (*types.ResolvedData, error) {
-	columns := buildColumnSchemas(comp)
-	if len(columns) == 0 {
-		return &types.ResolvedData{
-			Columns: []string{}, Rows: [][]any{},
-			Status: types.ResolvedDataStatusEmpty,
-			Error:  "No column schema defined for this component",
-		}, nil
-	}
-
-	outputsJSON, err := serializeOutputsForMapping(outputs, taskPrompts)
-	if err != nil {
-		return nil, fmt.Errorf("serialize outputs: %w", err)
-	}
-
-	artifactKeyFilter := ""
-	if comp.DataSource != nil {
-		artifactKeyFilter = comp.DataSource.ArtifactKey
-	}
-
-	result, err := baml.MapOutputsToSchema(
-		ctx,
-		comp.Title,
-		comp.Type,
-		columns,
-		outputsJSON,
-		artifactKeyFilter,
-	)
-	if err != nil {
-		log.Warn().Err(err).Str("component", comp.ID).Msg("BAML MapOutputsToSchema failed")
-		return &types.ResolvedData{
-			Columns: []string{}, Rows: [][]any{},
-			Status: types.ResolvedDataStatusEmpty,
-			Error:  "Failed to map outputs to schema",
-		}, nil
-	}
-
-	return convertMappedResult(result, columns)
 }
 
 func buildColumnSchemas(comp types.ComponentSpec) []bamltypes.ColumnSchema {
@@ -470,58 +621,13 @@ func filterMetadataForMapping(metadata map[string]any) map[string]any {
 	return filtered
 }
 
-func convertMappedResult(result bamltypes.MappedResult, columns []bamltypes.ColumnSchema) (*types.ResolvedData, error) {
-	colNames := make([]string, len(columns)+1)
-	for i, col := range columns {
-		colNames[i] = col.Key
-	}
-	colNames[len(columns)] = "task_id"
-
-	colIndex := make(map[string]int, len(columns))
-	for i, col := range columns {
-		colIndex[col.Key] = i
-	}
-
-	meta := make([]types.ColumnMeta, len(colNames))
-	for i, col := range columns {
-		meta[i] = types.ColumnMeta{
-			Key:   col.Key,
-			Label: stripHint(col.Description),
-			Type:  normalizeColumnType(col.Type),
-		}
-	}
-	meta[len(columns)] = types.ColumnMeta{Key: "task_id", Type: "text", Hidden: true}
-
-	rows := make([][]any, 0, len(result.Rows))
-	for _, mappedRow := range result.Rows {
-		row := make([]any, len(colNames))
-		for _, cell := range mappedRow.Cells {
-			if idx, ok := colIndex[cell.Column]; ok {
-				if cell.Value != "" {
-					row[idx] = cell.Value
-				}
-			}
-		}
-		row[len(columns)] = mappedRow.Task_id
-		rows = append(rows, row)
-	}
-
-	return &types.ResolvedData{
-		Columns:    colNames,
-		ColumnMeta: meta,
-		Rows:       rows,
-		Total:      len(rows),
-		Status:     types.ResolvedDataStatusOK,
-	}, nil
-}
-
 // ---------------------------------------------------------------------------
-// Mapping cache
+// Task-level mapping cache
 // ---------------------------------------------------------------------------
 
 const (
-	mappingCacheTTL    = 5 * time.Minute
-	mappingCachePrefix = "view:mapping:"
+	taskCacheTTL    = 10 * time.Minute
+	taskCachePrefix = "view:task:"
 )
 
 type mappingCache struct {
@@ -532,62 +638,45 @@ func newMappingCache(rdb *common.RedisClient) *mappingCache {
 	return &mappingCache{rdb: rdb}
 }
 
-func (c *mappingCache) componentKey(viewID, componentID string) string {
-	return fmt.Sprintf("%s%s:%s", mappingCachePrefix, viewID, componentID)
+func (c *mappingCache) taskKey(viewID, taskID string) string {
+	return fmt.Sprintf("%s%s:%s", taskCachePrefix, viewID, taskID)
 }
 
-func (c *mappingCache) get(ctx context.Context, key string) (*cachedMapping, bool) {
+func (c *mappingCache) getTask(ctx context.Context, viewID, taskID string) (*cachedTaskMapping, bool) {
 	if c.rdb == nil {
 		return nil, false
 	}
-	raw, err := c.rdb.Get(ctx, key).Bytes()
+	raw, err := c.rdb.Get(ctx, c.taskKey(viewID, taskID)).Bytes()
 	if err != nil {
 		return nil, false
 	}
-	var cached cachedMapping
+	var cached cachedTaskMapping
 	if err := json.Unmarshal(raw, &cached); err != nil {
-		log.Warn().Err(err).Str("key", key).Int("bytes", len(raw)).Msg("view cache: unmarshal failed")
 		return nil, false
 	}
 	return &cached, true
 }
 
-func (c *mappingCache) set(ctx context.Context, key string, value *cachedMapping) {
+func (c *mappingCache) setTask(ctx context.Context, viewID, taskID string, value *cachedTaskMapping) {
 	if c.rdb == nil {
 		return
 	}
 	raw, err := json.Marshal(value)
 	if err != nil {
-		log.Warn().Err(err).Str("key", key).Msg("view cache: marshal failed")
 		return
 	}
-	if err := c.rdb.Set(ctx, key, raw, mappingCacheTTL).Err(); err != nil {
-		log.Warn().Err(err).Str("key", key).Msg("view cache: redis set failed")
-	}
+	c.rdb.Set(ctx, c.taskKey(viewID, taskID), raw, taskCacheTTL)
 }
 
-type cachedMapping struct {
-	SchemaHash string             `json:"sh"`
-	OutputIDs  []string           `json:"output_ids"`
-	Columns    []string           `json:"columns"`
-	ColumnMeta []types.ColumnMeta `json:"column_meta"`
-	Rows       [][]any            `json:"rows"`
-	CachedAt   time.Time          `json:"cached_at"`
+type cachedTaskMapping struct {
+	SchemaHash string            `json:"sh"`
+	OutputIDs  []string          `json:"oids"`
+	Cells      map[string]string `json:"cells"`
+	CachedAt   time.Time         `json:"ca"`
 }
 
-func schemaHash(comp types.ComponentSpec) string {
-	payload := struct {
-		Title      string            `json:"n,omitempty"`
-		Type       string            `json:"w,omitempty"`
-		DataSource *types.DataSource `json:"d,omitempty"`
-		Config     map[string]any    `json:"c,omitempty"`
-	}{
-		Title:      comp.Title,
-		Type:       comp.Type,
-		DataSource: comp.DataSource,
-		Config:     comp.Config,
-	}
-	raw, _ := json.Marshal(payload)
+func hashColumns(columns []bamltypes.ColumnSchema) string {
+	raw, _ := json.Marshal(columns)
 	h := sha256.Sum256(raw)
 	return hex.EncodeToString(h[:])[:16]
 }
@@ -597,22 +686,6 @@ func sortedOutputIDs(outputs []*types.TaskOutput) []string {
 	for _, o := range outputs {
 		if o != nil {
 			ids = append(ids, o.ID)
-		}
-	}
-	sort.Strings(ids)
-	return ids
-}
-
-func sortedTaskIDs(outputs []*types.TaskOutput) []string {
-	seen := make(map[string]struct{}, len(outputs))
-	ids := make([]string, 0, len(outputs))
-	for _, o := range outputs {
-		if o == nil {
-			continue
-		}
-		if _, ok := seen[o.TaskID]; !ok {
-			seen[o.TaskID] = struct{}{}
-			ids = append(ids, o.TaskID)
 		}
 	}
 	sort.Strings(ids)

@@ -604,7 +604,7 @@ func normalizeTransformColumns(comp *types.ComponentSpec) {
 		rule.Format = strings.TrimSpace(rule.Format)
 	}
 
-	if comp.Type == "table" {
+	if comp.IsTable() {
 		if comp.Config == nil {
 			comp.Config = map[string]any{}
 		}

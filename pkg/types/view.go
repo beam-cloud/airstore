@@ -16,7 +16,16 @@ const (
 	ResolvedDataStatusEmpty        = "empty"
 	ResolvedDataStatusBindingError = "binding_error"
 	ResolvedDataStatusRequestError = "request_error"
+
+	ComponentTypeTable    = "table"
+	ComponentTypeMetric   = "metric"
+	ComponentTypeAction   = "action"
+	ComponentTypeTaskList = "task_list"
 )
+
+func (c ComponentSpec) IsTable() bool {
+	return c.Type == ComponentTypeTable || c.Type == "data-table"
+}
 
 // View is the persisted representation of a published view.
 type View struct {

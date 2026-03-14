@@ -43,7 +43,7 @@ func (s *StreamValue[TStream, TFinal]) Stream() *TStream {
 }
 
 // / Streaming version of MapOutputsToSchema
-func (*stream) MapOutputsToSchema(ctx context.Context, widget_title string, widget_type string, columns []types.ColumnSchema, outputs_json string, artifact_key_filter string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.MappedResult, types.MappedResult], error) {
+func (*stream) MapOutputsToSchema(ctx context.Context, widget_title string, widget_type string, columns []types.ColumnSchema, outputs_json string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.MappedResult, types.MappedResult], error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -51,7 +51,7 @@ func (*stream) MapOutputsToSchema(ctx context.Context, widget_title string, widg
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"widget_title": widget_title, "widget_type": widget_type, "columns": columns, "outputs_json": outputs_json, "artifact_key_filter": artifact_key_filter},
+		Kwargs: map[string]any{"widget_title": widget_title, "widget_type": widget_type, "columns": columns, "outputs_json": outputs_json},
 		Env:    getEnvVars(callOpts.env),
 	}
 
