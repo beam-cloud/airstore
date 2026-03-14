@@ -3893,6 +3893,7 @@ func (b *PostgresBackend) ListWorkspaceTaskOutputs(
 		  AND ($3::text IS NULL OR o.agent_id = $3::uuid)
 		  AND ($4::text IS NULL OR o.output_type = $4)
 		  AND ($5::boolean IS FALSE OR o.archived_at IS NULL)
+		  AND ($7::boolean IS FALSE OR o.agent_id IS NULL)
 		ORDER BY o.created_at DESC
 		LIMIT $6`,
 		workspaceId,
@@ -3901,6 +3902,7 @@ func (b *PostgresBackend) ListWorkspaceTaskOutputs(
 		nilIfEmpty(filter.OutputType),
 		filter.ExcludeArchived,
 		limit,
+		filter.AgentIDIsNull,
 	)
 	if err != nil {
 		return nil, err
@@ -4162,39 +4164,4 @@ func (b *PostgresBackend) DeleteView(ctx context.Context, workspaceID uint, view
 		return fmt.Errorf("view not found")
 	}
 	return nil
-}
-
-// ── View Formatted Outputs ─────────────────────────────────────────────────
-
-func (b *PostgresBackend) GetFormattedOutput(ctx context.Context, viewID, outputID string) (*types.FormattedOutput, error) {
-	fo := &types.FormattedOutput{}
-	var fmtBytes []byte
-	err := b.db.QueryRowContext(ctx, `
-		SELECT id, view_id, output_id, formatted_json, created_at
-		FROM view_formatted_output
-		WHERE view_id = $1 AND output_id = $2`,
-		viewID, outputID,
-	).Scan(&fo.ID, &fo.ViewID, &fo.OutputID, &fmtBytes, &fo.CreatedAt)
-	if err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal(fmtBytes, &fo.Formatted); err != nil {
-		return nil, fmt.Errorf("unmarshal formatted_json: %w", err)
-	}
-	return fo, nil
-}
-
-func (b *PostgresBackend) UpsertFormattedOutput(ctx context.Context, viewID, outputID string, formatted map[string]any) error {
-	fmtBytes, err := json.Marshal(formatted)
-	if err != nil {
-		return fmt.Errorf("marshal formatted_json: %w", err)
-	}
-	_, err = b.db.ExecContext(ctx, `
-		INSERT INTO view_formatted_output (view_id, output_id, formatted_json)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (view_id, output_id)
-		DO UPDATE SET formatted_json = EXCLUDED.formatted_json`,
-		viewID, outputID, fmtBytes,
-	)
-	return err
 }

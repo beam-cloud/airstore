@@ -110,14 +110,3 @@ type ResolvedData struct {
 	Error       string         `json:"error,omitempty"`
 	Diagnostics map[string]any `json:"diagnostics,omitempty"`
 }
-
-// FormattedOutput is a cached BAML-formatted detail for a specific
-// (view, output) pair. The same TaskOutput may be formatted differently
-// depending on the view's purpose.
-type FormattedOutput struct {
-	ID        string         `json:"id"`
-	ViewID    string         `json:"view_id"`
-	OutputID  string         `json:"output_id"`
-	Formatted map[string]any `json:"formatted"`
-	CreatedAt time.Time      `json:"created_at"`
-}

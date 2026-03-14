@@ -2,9 +2,6 @@ package apiv1
 
 import (
 	"context"
-	"crypto/sha256"
-	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -16,7 +13,6 @@ import (
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/beam-cloud/airstore/pkg/views"
-	baml "github.com/beam-cloud/airstore/pkg/views/baml_client"
 	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog/log"
 )
@@ -36,7 +32,6 @@ func NewViewsGroup(g *echo.Group, backend repository.BackendRepository, copilot 
 	vg.g.PATCH("/:view_id", vg.Update)
 	vg.g.DELETE("/:view_id", vg.Delete)
 	vg.g.GET("/:view_id/data", vg.ResolveData)
-	vg.g.GET("/:view_id/outputs/:output_id/detail", vg.FormattedDetail)
 	vg.g.POST("/drafts", vg.CreateDraft)
 	vg.g.GET("/drafts", vg.ListDrafts)
 	vg.g.GET("/drafts/:draft_id", vg.GetDraft)
@@ -190,160 +185,6 @@ func (vg *ViewsGroup) ResolveData(c echo.Context) error {
 	}
 
 	return SuccessResponse(c, data)
-}
-
-// ---------------------------------------------------------------------------
-// Formatted detail — BAML formatting with view-specific cache
-// ---------------------------------------------------------------------------
-
-const formattedOutputCacheKeyField = "__cache_key"
-
-func (vg *ViewsGroup) FormattedDetail(c echo.Context) error {
-	workspaceID, err := vg.workspaceID(c)
-	if err != nil {
-		return ErrorResponse(c, http.StatusBadRequest, err.Error())
-	}
-
-	viewID := c.Param("view_id")
-	outputID := c.Param("output_id")
-	ctx := c.Request().Context()
-
-	v, err := vg.backend.GetView(ctx, workspaceID, viewID)
-	if err != nil {
-		return ErrorResponse(c, http.StatusNotFound, "view not found")
-	}
-
-	output, err := vg.backend.GetTaskOutput(ctx, workspaceID, outputID)
-	if err != nil {
-		return ErrorResponse(c, http.StatusNotFound, "output not found")
-	}
-	component := resolveFormattedDetailComponent(v, output, c.QueryParam("component"))
-
-	dataJSON, _ := json.Marshal(output.Data)
-	metaJSON, _ := json.Marshal(output.Metadata)
-	summary := ""
-	if output.Summary != nil {
-		summary = *output.Summary
-	}
-	cacheKey := formattedOutputCacheKey(v, output, summary, component)
-
-	if cached, err := vg.backend.GetFormattedOutput(ctx, viewID, outputID); err == nil {
-		if formatted, ok := readFormattedCache(cached.Formatted, cacheKey); ok {
-			return SuccessResponse(c, formatted)
-		}
-	} else if err != sql.ErrNoRows {
-		log.Warn().Err(err).Str("view_id", viewID).Str("output_id", outputID).Msg("formatted output lookup error")
-	}
-
-	viewDesc := formattedDetailContext(v, component)
-
-	result, err := baml.FormatOutputDetail(
-		ctx,
-		viewDesc,
-		output.OutputType,
-		output.Title,
-		string(dataJSON),
-		string(metaJSON),
-		summary,
-	)
-	if err != nil {
-		log.Error().Err(err).Str("view_id", viewID).Str("output_id", outputID).Msg("BAML format failed")
-		return ErrorResponse(c, http.StatusInternalServerError, "failed to format output")
-	}
-
-	formatted := map[string]any{
-		"title":    result.Title,
-		"sections": result.Sections,
-	}
-
-	if err := vg.backend.UpsertFormattedOutput(ctx, viewID, outputID, writeFormattedCache(formatted, cacheKey)); err != nil {
-		log.Warn().Err(err).Msg("failed to cache formatted output")
-	}
-
-	return SuccessResponse(c, formatted)
-}
-
-func formattedOutputCacheKey(view *types.View, output *types.TaskOutput, summary string, component *types.ComponentSpec) string {
-	payload := map[string]any{
-		"view_name":        view.Name,
-		"view_description": view.Description,
-		"view_definition":  view.Definition,
-		"view_component":   component,
-		"output_type":      output.OutputType,
-		"output_title":     output.Title,
-		"output_uri":       output.URI,
-		"output_summary":   summary,
-		"output_data":      output.Data,
-		"output_metadata":  output.Metadata,
-	}
-	raw, _ := json.Marshal(payload)
-	sum := sha256.Sum256(raw)
-	return hex.EncodeToString(sum[:])
-}
-
-func resolveFormattedDetailComponent(view *types.View, output *types.TaskOutput, componentID string) *types.ComponentSpec {
-	if view == nil {
-		return nil
-	}
-	if componentID != "" {
-		for i := range view.Definition.Components {
-			if view.Definition.Components[i].ID == componentID {
-				return &view.Definition.Components[i]
-			}
-		}
-	}
-	for i := range view.Definition.Components {
-		comp := &view.Definition.Components[i]
-		if views.OutputMatchesDataSource(output, comp.DataSource) {
-			return comp
-		}
-	}
-	return nil
-}
-
-func formattedDetailContext(view *types.View, component *types.ComponentSpec) string {
-	base := strings.TrimSpace(view.Description)
-	if base == "" {
-		base = strings.TrimSpace(view.Name)
-	}
-	if component == nil {
-		return base
-	}
-	title := strings.TrimSpace(component.Title)
-	switch {
-	case title == "":
-		return base
-	case base == "" || base == title:
-		return title
-	default:
-		return title + ": " + base
-	}
-}
-
-func readFormattedCache(cached map[string]any, cacheKey string) (map[string]any, bool) {
-	if cached == nil {
-		return nil, false
-	}
-	if cachedKey, _ := cached[formattedOutputCacheKeyField].(string); cachedKey != cacheKey {
-		return nil, false
-	}
-	out := make(map[string]any, len(cached))
-	for key, value := range cached {
-		if key == formattedOutputCacheKeyField {
-			continue
-		}
-		out[key] = value
-	}
-	return out, true
-}
-
-func writeFormattedCache(formatted map[string]any, cacheKey string) map[string]any {
-	out := make(map[string]any, len(formatted)+1)
-	for key, value := range formatted {
-		out[key] = value
-	}
-	out[formattedOutputCacheKeyField] = cacheKey
-	return out
 }
 
 // ---------------------------------------------------------------------------

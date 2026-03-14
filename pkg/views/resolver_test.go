@@ -118,45 +118,36 @@ func TestFetchOutputsSkipsUnresolvedAgentRefs(t *testing.T) {
 	}
 }
 
-func TestResolveReturnsBindingErrorWhenArtifactKeyMatchesNothing(t *testing.T) {
+func TestResolveMetricReturnsOutputCount(t *testing.T) {
 	backend := &fakeResolverBackend{
-		workspaceOutputs: []*types.TaskOutput{newRecipeOutput("recipe-1")},
+		workspaceOutputs: []*types.TaskOutput{
+			newRecipeOutput("recipe-1"),
+			newRecipeOutput("recipe-2"),
+			newRecipeOutput("recipe-3"),
+		},
 	}
 	resolver := &DataResolver{backend: backend, cache: newMappingCache(nil)}
 
 	result, err := resolver.Resolve(context.Background(), 7, types.ComponentSpec{
-		ID:    "recipe-table",
-		Type:  "table",
-		Title: "Recipe Table",
+		ID:    "recipe-count",
+		Type:  "metric",
+		Title: "Recipes Extracted",
+		Config: map[string]any{
+			"label":  "Total Recipes",
+			"suffix": " recipes",
+		},
 		DataSource: &types.DataSource{
-			OutputType:  "text",
-			ArtifactKey: "wrong-key",
-			Transform: []types.TransformRule{
-				{Column: "recipe_name", Source: "data.recipe_name", Type: "text"},
-			},
+			OutputType: "text",
 		},
 	})
 	if err != nil {
 		t.Fatalf("Resolve returned error: %v", err)
 	}
-	if got, want := result.Status, types.ResolvedDataStatusBindingError; got != want {
+	if got, want := result.Status, types.ResolvedDataStatusOK; got != want {
 		t.Fatalf("status = %q, want %q", got, want)
 	}
-}
-
-func TestFilterOutputsByArtifactKey(t *testing.T) {
-	outputs := []*types.TaskOutput{
-		newRecipeOutput("recipe-1"),
-		{
-			ID: "other-1", OutputType: "text", Title: "Not a recipe",
-			Metadata:  map[string]any{types.TaskOutputMetadataArtifactKey: "emails"},
-			CreatedAt: time.Now(),
-		},
-	}
-
-	filtered := filterOutputsByArtifactKey(outputs, "recipes")
-	if len(filtered) != 1 || filtered[0].ID != "recipe-1" {
-		t.Fatalf("expected 1 recipe output, got %d", len(filtered))
+	if got, want := result.Total, 3; got != want {
+		t.Fatalf("total = %d, want %d", got, want)
 	}
 }
 

@@ -29,9 +29,13 @@ commands:
 
       - name: content
         type: string
-        required: true
         position: 1
-        description: "File content"
+        description: "File content (text). Provide this or content_base64, not both"
+
+      - name: content_base64
+        type: string
+        flag: --content-base64
+        description: "Base64-encoded file content (for binary files like PDFs, images)"
 
       - name: parent_id
         type: string
@@ -57,9 +61,13 @@ commands:
 
       - name: content
         type: string
-        required: true
         position: 1
-        description: "New file content"
+        description: "New file content (text). Provide this or content_base64, not both"
+
+      - name: content_base64
+        type: string
+        flag: --content-base64
+        description: "Base64-encoded file content (for binary files like PDFs, images)"
 
       - name: mime_type
         type: string

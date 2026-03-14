@@ -27,8 +27,45 @@ const (
 	runInteractionTTL          = 30 * time.Minute
 	subagentPollInterval       = 10 * time.Second
 	subagentMaxWait            = 30 * time.Minute
+	subagentProbeTimeout       = 15 * time.Second
 	terminalRingBufSize        = 256 * 1024
 )
+
+// subagentWaitOutcome describes why waitForSubagents returned.
+type subagentWaitOutcome int
+
+const (
+	subagentNoneDetected     subagentWaitOutcome = iota
+	subagentFinished
+	subagentMaxWaitReached
+	subagentSessionCancelled
+)
+
+func (o subagentWaitOutcome) String() string {
+	switch o {
+	case subagentNoneDetected:
+		return "none_detected"
+	case subagentFinished:
+		return "finished"
+	case subagentMaxWaitReached:
+		return "max_wait_reached"
+	case subagentSessionCancelled:
+		return "session_cancelled"
+	default:
+		return "unknown"
+	}
+}
+
+// subagentProbeArgs detects real background Claude processes while excluding
+// helper hooks that live under .claude/ (e.g. dump-stop-message.js) and the
+// probe shell itself.
+var subagentProbeArgs = []string{"/bin/sh", "-c",
+	`mypid=$$; for pid in $(pgrep -f claude 2>/dev/null); do ` +
+		`[ "$pid" = "$mypid" ] && continue; ` +
+		`cmdline=$(tr '\0' ' ' < /proc/$pid/cmdline 2>/dev/null); ` +
+		`case "$cmdline" in */.claude/*) continue;; *) exit 0;; esac; ` +
+		`done; exit 1`,
+}
 
 // ---------------------------------------------------------------------------
 // Interaction & task state helpers
@@ -428,7 +465,7 @@ func (w *Worker) runTurnSession(
 		}
 		signalActivity(activityCh)
 
-		if w.waitForSubagents(ctx, task, sandboxID, activityCh) {
+		if w.waitForSubagents(ctx, task, sandboxID) == subagentFinished {
 			if err := w.executeTurn(ctx, task, sandboxID, runner, sessionEnv, stdout,
 				"Your background tasks / subagents have completed. Please collect and report their results.",
 				TurnArgModeFollowup); err != nil {
@@ -465,24 +502,50 @@ func (w *Worker) runTurnSession(
 // Subagent monitoring
 // ---------------------------------------------------------------------------
 
-func (w *Worker) waitForSubagents(ctx context.Context, task types.RunExecution, sandboxID string, activityCh chan<- struct{}) bool {
-	pgrepArgs := []string{"/usr/bin/pgrep", "-f", "claude"}
-	if err := w.sandboxManager.ExecCheck(ctx, sandboxID, pgrepArgs); err != nil {
-		return false
+func (w *Worker) waitForSubagents(ctx context.Context, task types.RunExecution, sandboxID string) subagentWaitOutcome {
+	return w.waitForSubagentsWithTiming(ctx, task, sandboxID, subagentPollInterval, subagentMaxWait, subagentProbeTimeout)
+}
+
+func (w *Worker) waitForSubagentsWithTiming(
+	ctx context.Context, task types.RunExecution, sandboxID string,
+	pollInterval, maxWait, probeTimeout time.Duration,
+) subagentWaitOutcome {
+	probeCtx, probeCancel := context.WithTimeout(ctx, probeTimeout)
+	err := w.sandboxManager.ExecCheck(probeCtx, sandboxID, subagentProbeArgs)
+	probeCancel()
+	if err != nil {
+		return subagentNoneDetected
 	}
+
 	addTaskExecutionContext(log.Info(), task).Msg("waiting for subagent processes")
-	deadline := time.After(subagentMaxWait)
+	deadline := time.After(maxWait)
 	for {
 		select {
 		case <-ctx.Done():
-			return true
+			addTaskExecutionContext(log.Info(), task).
+				Str("outcome", subagentSessionCancelled.String()).
+				Msg("subagent wait ended")
+			return subagentSessionCancelled
 		case <-deadline:
-			return true
-		case <-time.After(subagentPollInterval):
-			signalActivity(activityCh)
-			if err := w.sandboxManager.ExecCheck(ctx, sandboxID, pgrepArgs); err != nil {
-				addTaskExecutionContext(log.Info(), task).Msg("subagent processes finished")
-				return true
+			addTaskExecutionContext(log.Warn(), task).
+				Str("outcome", subagentMaxWaitReached.String()).
+				Dur("max_wait", maxWait).
+				Msg("subagent wait ended")
+			return subagentMaxWaitReached
+		case <-time.After(pollInterval):
+			probeCtx, probeCancel := context.WithTimeout(ctx, probeTimeout)
+			err := w.sandboxManager.ExecCheck(probeCtx, sandboxID, subagentProbeArgs)
+			probeTimedOut := probeCtx.Err() != nil && ctx.Err() == nil
+			probeCancel()
+			if probeTimedOut {
+				addTaskExecutionContext(log.Warn(), task).Msg("subagent probe timed out, will retry")
+				continue
+			}
+			if err != nil {
+				addTaskExecutionContext(log.Info(), task).
+					Str("outcome", subagentFinished.String()).
+					Msg("subagent wait ended")
+				return subagentFinished
 			}
 		}
 	}

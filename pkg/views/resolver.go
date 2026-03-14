@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -53,45 +52,73 @@ func (r *DataResolver) Resolve(ctx context.Context, workspaceID uint, comp types
 	if err != nil {
 		return nil, fmt.Errorf("fetch outputs: %w", err)
 	}
-	if len(outputs) == 0 {
-		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}, nil
-	}
-
-	if ds.ArtifactKey != "" {
-		filtered := filterOutputsByArtifactKey(outputs, ds.ArtifactKey)
-		if len(filtered) == 0 {
-			return &types.ResolvedData{
-				Columns: []string{}, Rows: [][]any{},
-				Status:      types.ResolvedDataStatusBindingError,
-				Error:       "No outputs match this component's artifact_key",
-				Diagnostics: map[string]any{"artifact_key": ds.ArtifactKey},
-			}, nil
-		}
-		outputs = filtered
-	}
 
 	outputs = filterOutputsByTimeRange(outputs, ds.TimeRange)
 	if len(outputs) == 0 {
 		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}, nil
 	}
 
-	outputIDs := make([]string, len(outputs))
-	for i, o := range outputs {
-		outputIDs[i] = o.ID
+	if comp.Type == "metric" {
+		if ds.ArtifactKey != "" {
+			outputs = filterByArtifactKey(outputs, ds.ArtifactKey)
+		}
+		return resolveMetric(comp, outputs), nil
 	}
-	sh := schemaHash(comp)
-	cacheKey := r.cache.cacheKey(outputIDs, sh)
 
-	if cached, ok := r.cache.get(ctx, cacheKey); ok {
-		cachedAt := cached.CachedAt
-		return &types.ResolvedData{
-			Columns:    cached.Columns,
-			ColumnMeta: cached.ColumnMeta,
-			Rows:       cached.Rows,
-			Total:      len(cached.Rows),
-			CachedAt:   &cachedAt,
-			Status:     types.ResolvedDataStatusOK,
-		}, nil
+	// For tables/BAML mapping: also include orphaned outputs (NULL agent_id)
+	// so BAML can determine relevance across all workspace outputs.
+	if ds.AgentID != "" || len(ds.AgentIDs) > 0 {
+		untagged, uErr := r.backend.ListWorkspaceTaskOutputs(ctx, workspaceID, types.TaskOutputListFilter{
+			ExcludeArchived: false, Limit: 200, AgentIDIsNull: true,
+		})
+		if uErr == nil && len(untagged) > 0 {
+			outputs = dedupeOutputs(append(outputs, filterOutputsByTimeRange(untagged, ds.TimeRange)...))
+		}
+	}
+
+	sh := schemaHash(comp)
+	key := r.cache.componentKey(workspaceID, sh)
+
+	cached, hit := r.cache.get(ctx, key)
+	if hit {
+		currentIDs := make(map[string]struct{}, len(outputs))
+		for _, o := range outputs {
+			currentIDs[o.ID] = struct{}{}
+		}
+
+		var newOutputs []*types.TaskOutput
+		for _, o := range outputs {
+			if _, ok := cached.RowsByOutput[o.ID]; !ok {
+				newOutputs = append(newOutputs, o)
+			}
+		}
+
+		for id := range cached.RowsByOutput {
+			if _, ok := currentIDs[id]; !ok {
+				delete(cached.RowsByOutput, id)
+			}
+		}
+
+		if len(newOutputs) == 0 {
+			return assembleFromCache(cached, outputs), nil
+		}
+
+		incResult, incErr := mapOutputsToSchema(ctx, comp, newOutputs)
+		if incErr != nil {
+			log.Warn().Err(incErr).Msg("incremental BAML mapping failed, falling back to full remap")
+			fullResult, fullErr := mapOutputsToSchema(ctx, comp, outputs)
+			if fullErr != nil {
+				return nil, fmt.Errorf("map outputs to schema: %w", fullErr)
+			}
+			cached = resultToCache(fullResult)
+			r.cache.set(ctx, key, cached)
+			return fullResult, nil
+		}
+
+		mergeBAMLResult(cached, incResult)
+		cached.CachedAt = time.Now()
+		r.cache.set(ctx, key, cached)
+		return assembleFromCache(cached, outputs), nil
 	}
 
 	result, err := mapOutputsToSchema(ctx, comp, outputs)
@@ -99,14 +126,45 @@ func (r *DataResolver) Resolve(ctx context.Context, workspaceID uint, comp types
 		return nil, fmt.Errorf("map outputs to schema: %w", err)
 	}
 
-	r.cache.set(ctx, cacheKey, &cachedMapping{
-		Columns:    result.Columns,
-		ColumnMeta: result.ColumnMeta,
-		Rows:       result.Rows,
-		CachedAt:   time.Now(),
-	})
-
+	r.cache.set(ctx, key, resultToCache(result))
 	return result, nil
+}
+
+// resolveMetric produces a simple result for metric components without BAML.
+// The frontend uses data.total for "count", data.rows[0][0] for "latest",
+// and sums over rows for "sum".
+func resolveMetric(comp types.ComponentSpec, outputs []*types.TaskOutput) *types.ResolvedData {
+	if len(outputs) == 0 {
+		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Total: 0, Status: types.ResolvedDataStatusEmpty}
+	}
+
+	aggregate := "count"
+	if comp.Config != nil {
+		if a, ok := comp.Config["aggregate"].(string); ok && a != "" {
+			aggregate = a
+		}
+	}
+
+	switch aggregate {
+	case "latest":
+		val := outputs[0].Title
+		if outputs[0].Summary != nil && *outputs[0].Summary != "" {
+			val = *outputs[0].Summary
+		}
+		return &types.ResolvedData{
+			Columns: []string{"value"},
+			Rows:    [][]any{{val}},
+			Total:   len(outputs),
+			Status:  types.ResolvedDataStatusOK,
+		}
+	default:
+		return &types.ResolvedData{
+			Columns: []string{},
+			Rows:    [][]any{},
+			Total:   len(outputs),
+			Status:  types.ResolvedDataStatusOK,
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -164,6 +222,10 @@ func (r *DataResolver) fetchOutputs(ctx context.Context, workspaceID uint, ds *t
 		all = append(all, outputs...)
 	}
 
+	return dedupeOutputs(all), nil
+}
+
+func dedupeOutputs(all []*types.TaskOutput) []*types.TaskOutput {
 	seen := make(map[string]struct{}, len(all))
 	deduped := make([]*types.TaskOutput, 0, len(all))
 	for _, o := range all {
@@ -176,20 +238,20 @@ func (r *DataResolver) fetchOutputs(ctx context.Context, workspaceID uint, ds *t
 		seen[o.ID] = struct{}{}
 		deduped = append(deduped, o)
 	}
-	return deduped, nil
+	return deduped
 }
 
 // ---------------------------------------------------------------------------
 // Filtering
 // ---------------------------------------------------------------------------
 
-func filterOutputsByArtifactKey(outputs []*types.TaskOutput, artifactKey string) []*types.TaskOutput {
-	if len(outputs) == 0 || strings.TrimSpace(artifactKey) == "" {
-		return outputs
-	}
+func filterByArtifactKey(outputs []*types.TaskOutput, key string) []*types.TaskOutput {
 	filtered := make([]*types.TaskOutput, 0, len(outputs))
 	for _, o := range outputs {
-		if o != nil && ArtifactOf(o).MatchesKey(artifactKey) {
+		if o == nil || o.Metadata == nil {
+			continue
+		}
+		if k, _ := o.Metadata[types.TaskOutputMetadataArtifactKey].(string); k == key {
 			filtered = append(filtered, o)
 		}
 	}
@@ -427,7 +489,7 @@ func convertMappedResult(result bamltypes.MappedResult, columns []bamltypes.Colu
 	for i, col := range columns {
 		meta[i] = types.ColumnMeta{
 			Key:   col.Key,
-			Label: col.Description,
+			Label: stripHint(col.Description),
 			Type:  normalizeColumnType(col.Type),
 		}
 	}
@@ -475,18 +537,11 @@ func newMappingCache(rdb *common.RedisClient) *mappingCache {
 	return &mappingCache{rdb: rdb}
 }
 
-func (c *mappingCache) cacheKey(outputIDs []string, sh string) string {
-	sorted := make([]string, len(outputIDs))
-	copy(sorted, outputIDs)
-	sort.Strings(sorted)
-
-	h := sha256.New()
-	for _, id := range sorted {
-		h.Write([]byte(id))
-		h.Write([]byte{0})
-	}
-	h.Write([]byte(sh))
-	return mappingCachePrefix + hex.EncodeToString(h.Sum(nil))[:24]
+// componentKey produces a stable cache key scoped to the component's schema
+// and data-source configuration. It does NOT include output IDs, so adding
+// a new output doesn't invalidate the cache — only schema changes do.
+func (c *mappingCache) componentKey(workspaceID uint, sh string) string {
+	return fmt.Sprintf("%s%d:%s", mappingCachePrefix, workspaceID, sh)
 }
 
 func (c *mappingCache) get(ctx context.Context, key string) (*cachedMapping, bool) {
@@ -515,30 +570,90 @@ func (c *mappingCache) set(ctx context.Context, key string, value *cachedMapping
 	c.rdb.Set(ctx, key, raw, mappingCacheTTL)
 }
 
+// cachedMapping stores per-output mapped rows so new outputs can be
+// incrementally mapped without remapping existing ones.
 type cachedMapping struct {
-	Columns    []string          `json:"columns"`
-	ColumnMeta []types.ColumnMeta `json:"column_meta"`
-	Rows       [][]any           `json:"rows"`
-	CachedAt   time.Time         `json:"cached_at"`
+	Columns      []string              `json:"columns"`
+	ColumnMeta   []types.ColumnMeta    `json:"column_meta"`
+	RowsByOutput map[string][]any      `json:"rows_by_output"`
+	CachedAt     time.Time             `json:"cached_at"`
 }
 
 func schemaHash(comp types.ComponentSpec) string {
 	payload := struct {
-		Title     string               `json:"n,omitempty"`
-		Type      string               `json:"w,omitempty"`
-		Transform []types.TransformRule `json:"t,omitempty"`
-		Config    map[string]any       `json:"c,omitempty"`
+		Title      string            `json:"n,omitempty"`
+		Type       string            `json:"w,omitempty"`
+		DataSource *types.DataSource `json:"d,omitempty"`
+		Config     map[string]any    `json:"c,omitempty"`
 	}{
-		Title:  comp.Title,
-		Type:   comp.Type,
-		Config: comp.Config,
-	}
-	if comp.DataSource != nil {
-		payload.Transform = comp.DataSource.Transform
+		Title:      comp.Title,
+		Type:       comp.Type,
+		DataSource: comp.DataSource,
+		Config:     comp.Config,
 	}
 	raw, _ := json.Marshal(payload)
 	h := sha256.Sum256(raw)
 	return hex.EncodeToString(h[:])[:16]
+}
+
+// resultToCache converts a full BAML mapping result into the per-output cache format.
+func resultToCache(result *types.ResolvedData) *cachedMapping {
+	rows := make(map[string][]any, len(result.Rows))
+	if len(result.Columns) >= 1 {
+		outputIDIdx := len(result.Columns) - 1
+		for _, row := range result.Rows {
+			if outputIDIdx < len(row) {
+				if outputID, ok := row[outputIDIdx].(string); ok && outputID != "" {
+					rows[outputID] = row
+				}
+			}
+		}
+	}
+	return &cachedMapping{
+		Columns:      result.Columns,
+		ColumnMeta:   result.ColumnMeta,
+		RowsByOutput: rows,
+		CachedAt:     time.Now(),
+	}
+}
+
+// assembleFromCache builds a ResolvedData from the per-output cache,
+// preserving the output creation order from the outputs slice.
+func assembleFromCache(cached *cachedMapping, outputs []*types.TaskOutput) *types.ResolvedData {
+	rows := make([][]any, 0, len(cached.RowsByOutput))
+	for _, o := range outputs {
+		if row, ok := cached.RowsByOutput[o.ID]; ok {
+			rows = append(rows, row)
+		}
+	}
+	cachedAt := cached.CachedAt
+	return &types.ResolvedData{
+		Columns:    cached.Columns,
+		ColumnMeta: cached.ColumnMeta,
+		Rows:       rows,
+		Total:      len(rows),
+		CachedAt:   &cachedAt,
+		Status:     types.ResolvedDataStatusOK,
+	}
+}
+
+// mergeBAMLResult adds rows from an incremental BAML mapping into the cache.
+func mergeBAMLResult(cached *cachedMapping, result *types.ResolvedData) {
+	if len(result.Columns) < 1 {
+		return
+	}
+	outputIDIdx := len(result.Columns) - 1
+	for _, row := range result.Rows {
+		if outputIDIdx < len(row) {
+			if outputID, ok := row[outputIDIdx].(string); ok && outputID != "" {
+				cached.RowsByOutput[outputID] = row
+			}
+		}
+	}
+	if len(cached.Columns) == 0 {
+		cached.Columns = result.Columns
+		cached.ColumnMeta = result.ColumnMeta
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -701,4 +816,11 @@ func humanizeColumn(col string) string {
 		}
 	}
 	return strings.Join(parts, " ")
+}
+
+func stripHint(desc string) string {
+	if idx := strings.Index(desc, " (hint:"); idx > 0 {
+		return strings.TrimSpace(desc[:idx])
+	}
+	return desc
 }

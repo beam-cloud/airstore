@@ -23,10 +23,6 @@ import (
 var typeMap = map[string]reflect.Type{
 	"TYPES.ColumnSchema":             reflect.TypeOf(types.ColumnSchema{}),
 	"STREAM_TYPES.ColumnSchema":      reflect.TypeOf(stream_types.ColumnSchema{}),
-	"TYPES.FormattedDetail":          reflect.TypeOf(types.FormattedDetail{}),
-	"STREAM_TYPES.FormattedDetail":   reflect.TypeOf(stream_types.FormattedDetail{}),
-	"TYPES.FormattedSection":         reflect.TypeOf(types.FormattedSection{}),
-	"STREAM_TYPES.FormattedSection":  reflect.TypeOf(stream_types.FormattedSection{}),
 	"TYPES.MappedCell":               reflect.TypeOf(types.MappedCell{}),
 	"STREAM_TYPES.MappedCell":        reflect.TypeOf(stream_types.MappedCell{}),
 	"TYPES.MappedResult":             reflect.TypeOf(types.MappedResult{}),

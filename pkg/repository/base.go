@@ -295,8 +295,6 @@ type BackendRepository interface {
 	ListViews(ctx context.Context, workspaceID uint) ([]*types.View, error)
 	UpdateView(ctx context.Context, v *types.View) error
 	DeleteView(ctx context.Context, workspaceID uint, viewID string) error
-	GetFormattedOutput(ctx context.Context, viewID, outputID string) (*types.FormattedOutput, error)
-	UpsertFormattedOutput(ctx context.Context, viewID, outputID string, formatted map[string]any) error
 
 	// Database access
 	DB() *sql.DB
