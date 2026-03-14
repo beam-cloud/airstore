@@ -93,7 +93,7 @@ func (b *fakeResolverBackend) ListWorkspaceTaskOutputs(_ context.Context, _ uint
 	return b.workspaceOutputs, nil
 }
 
-func TestFetchOutputsSkipsUnresolvedAgentRefs(t *testing.T) {
+func TestFetchViewOutputsSkipsUnresolvedAgentRefs(t *testing.T) {
 	backend := &fakeResolverBackend{
 		profilesByKey: map[string]*types.AgentProfile{
 			"chef-agent": {ID: "0c34c8c3-0af0-4e21-a553-5d3f7c88a4e2"},
@@ -109,11 +109,14 @@ func TestFetchOutputsSkipsUnresolvedAgentRefs(t *testing.T) {
 	}
 	resolver := &DataResolver{backend: backend, cache: newMappingCache(nil)}
 
-	outputs, err := resolver.fetchOutputs(context.Background(), 7, &types.DataSource{
-		AgentIDs: []string{"deleted-agent-key", "chef-agent"},
-	})
+	comps := []types.ComponentSpec{
+		{ID: "t1", Type: types.ComponentTypeTable, DataSource: &types.DataSource{
+			AgentIDs: []string{"deleted-agent-key", "chef-agent"},
+		}},
+	}
+	outputs, err := resolver.fetchViewOutputs(context.Background(), 7, comps)
 	if err != nil {
-		t.Fatalf("fetchOutputs returned error: %v", err)
+		t.Fatalf("fetchViewOutputs returned error: %v", err)
 	}
 	if got, want := len(outputs), 1; got != want {
 		t.Fatalf("output count = %d, want %d", got, want)

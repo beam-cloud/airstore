@@ -17,6 +17,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
+	"golang.org/x/sync/singleflight"
 
 	baml "github.com/beam-cloud/airstore/pkg/views/baml_client"
 	bamltypes "github.com/beam-cloud/airstore/pkg/views/baml_client/types"
@@ -25,6 +26,13 @@ import (
 // ---------------------------------------------------------------------------
 // DataResolver
 // ---------------------------------------------------------------------------
+
+var viewMappingFlight singleflight.Group
+
+type viewMappingResult struct {
+	MappedTasks map[string]map[string]string
+	TaskGroups  map[string][]*types.TaskOutput
+}
 
 type DataResolver struct {
 	backend dataResolverBackend
@@ -44,15 +52,57 @@ type dataResolverBackend interface {
 
 // Resolve maps task outputs to a view component's schema using BAML.
 //
-// All outputs across every component in the view are fetched and mapped in a
-// single BAML call. Results are cached per-task — only tasks whose output set
-// has changed (or whose schema hash is stale) are re-mapped. Both tables and
-// metrics derive their data from this shared mapped result.
+// The mapping is done once per view via singleflight — concurrent requests for
+// different components in the same view share a single BAML call. Results are
+// cached per-task; only tasks whose output set has changed (or whose schema
+// hash is stale) are re-mapped.
 func (r *DataResolver) Resolve(ctx context.Context, workspaceID uint, viewID string, comp types.ComponentSpec, allComponents []types.ComponentSpec) (*types.ResolvedData, error) {
 	unifiedCols := buildUnifiedSchema(allComponents)
 	if len(unifiedCols) == 0 {
 		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}, nil
 	}
+
+	result, err := r.ensureViewMapped(ctx, workspaceID, viewID, allComponents, unifiedCols)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}, nil
+	}
+
+	resolvedAgents := r.resolveAgentIDsForDS(ctx, workspaceID, comp.DataSource)
+
+	switch {
+	case comp.IsTable():
+		return assembleTable(comp, result.MappedTasks, result.TaskGroups, resolvedAgents), nil
+	case comp.Type == types.ComponentTypeMetric:
+		return assembleMetric(comp, result.MappedTasks, result.TaskGroups, resolvedAgents), nil
+	default:
+		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}, nil
+	}
+}
+
+// ensureViewMapped uses singleflight to guarantee that concurrent Resolve
+// calls for the same view share a single mapping operation instead of each
+// firing its own BAML call.
+func (r *DataResolver) ensureViewMapped(ctx context.Context, workspaceID uint, viewID string, allComponents []types.ComponentSpec, unifiedCols []bamltypes.ColumnSchema) (*viewMappingResult, error) {
+	flightKey := fmt.Sprintf("%d:%s", workspaceID, viewID)
+
+	val, err, shared := viewMappingFlight.Do(flightKey, func() (any, error) {
+		return r.mapView(ctx, workspaceID, viewID, allComponents, unifiedCols)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	result := val.(*viewMappingResult)
+	log.Debug().Str("view_id", viewID).Bool("shared", shared).Int("mapped_tasks", len(result.MappedTasks)).Msg("view mapping resolved")
+	return result, nil
+}
+
+// mapView does the actual work: fetch outputs, check cache, call BAML for
+// uncached tasks, and cache the results.
+func (r *DataResolver) mapView(ctx context.Context, workspaceID uint, viewID string, allComponents []types.ComponentSpec, unifiedCols []bamltypes.ColumnSchema) (*viewMappingResult, error) {
 	schemaH := hashColumns(unifiedCols)
 
 	allOutputs, err := r.fetchViewOutputs(ctx, workspaceID, allComponents)
@@ -60,7 +110,10 @@ func (r *DataResolver) Resolve(ctx context.Context, workspaceID uint, viewID str
 		return nil, fmt.Errorf("fetch view outputs: %w", err)
 	}
 	if len(allOutputs) == 0 {
-		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}, nil
+		return &viewMappingResult{
+			MappedTasks: map[string]map[string]string{},
+			TaskGroups:  map[string][]*types.TaskOutput{},
+		}, nil
 	}
 
 	taskGroups := groupOutputsByTask(allOutputs)
@@ -79,6 +132,8 @@ func (r *DataResolver) Resolve(ctx context.Context, workspaceID uint, viewID str
 	}
 
 	if len(uncachedIDs) > 0 {
+		log.Info().Str("view_id", viewID).Str("schema_hash", schemaH).Int("tasks", len(taskGroups)).Int("cached", len(taskGroups)-len(uncachedIDs)).Int("uncached", len(uncachedIDs)).Msg("BAML mapping required")
+
 		uncachedTIDs := make([]string, 0, len(uncachedIDs))
 		for tid := range uncachedIDs {
 			uncachedTIDs = append(uncachedTIDs, tid)
@@ -95,9 +150,6 @@ func (r *DataResolver) Resolve(ctx context.Context, workspaceID uint, viewID str
 		result, err := baml.MapOutputsToSchema(ctx, "View Mapping", "data-table", unifiedCols, outputsJSON)
 		if err != nil {
 			log.Warn().Err(err).Str("view_id", viewID).Int("tasks", len(uncachedIDs)).Msg("BAML mapping failed")
-			if len(mappedTasks) == 0 {
-				return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty, Error: "Failed to map outputs"}, nil
-			}
 		} else {
 			for _, row := range result.Rows {
 				cells := make(map[string]string, len(row.Cells))
@@ -119,18 +171,23 @@ func (r *DataResolver) Resolve(ctx context.Context, workspaceID uint, viewID str
 				})
 			}
 		}
+
+		// Cache tasks that BAML didn't return rows for so they don't
+		// trigger re-mapping on subsequent loads.
+		for tid := range uncachedIDs {
+			if _, ok := mappedTasks[tid]; !ok {
+				mappedTasks[tid] = map[string]string{}
+				r.cache.setTask(ctx, viewID, tid, &cachedTaskMapping{
+					SchemaHash: schemaH,
+					OutputIDs:  sortedOutputIDs(taskGroups[tid]),
+					Cells:      map[string]string{},
+					CachedAt:   time.Now(),
+				})
+			}
+		}
 	}
 
-	resolvedAgents := r.resolveAgentIDsForDS(ctx, workspaceID, comp.DataSource)
-
-	switch {
-	case comp.IsTable():
-		return assembleTable(comp, mappedTasks, taskGroups, resolvedAgents), nil
-	case comp.Type == types.ComponentTypeMetric:
-		return assembleMetric(comp, mappedTasks, taskGroups, resolvedAgents), nil
-	default:
-		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}, nil
-	}
+	return &viewMappingResult{MappedTasks: mappedTasks, TaskGroups: taskGroups}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -154,19 +211,41 @@ func buildUnifiedSchema(allComponents []types.ComponentSpec) []bamltypes.ColumnS
 	return cols
 }
 
+// fetchViewOutputs gathers outputs for every unique agent referenced by any
+// component in the view. OutputType filtering is intentionally omitted — BAML
+// handles semantic relevance. This ensures that when multiple widgets share
+// the same tasks/outputs, all widgets see the full picture.
 func (r *DataResolver) fetchViewOutputs(ctx context.Context, workspaceID uint, allComponents []types.ComponentSpec) ([]*types.TaskOutput, error) {
-	var all []*types.TaskOutput
-	seen := make(map[string]bool)
+	agentRefs := make(map[string]bool)
 	for _, comp := range allComponents {
 		if comp.DataSource == nil {
 			continue
 		}
-		dsKey := fmt.Sprintf("%s:%s", comp.DataSource.AgentID, strings.Join(comp.DataSource.AgentIDs, ","))
-		if seen[dsKey] {
+		if comp.DataSource.AgentID != "" {
+			agentRefs[comp.DataSource.AgentID] = true
+		}
+		for _, ref := range comp.DataSource.AgentIDs {
+			agentRefs[ref] = true
+		}
+	}
+
+	if len(agentRefs) == 0 {
+		return r.backend.ListWorkspaceTaskOutputs(ctx, workspaceID, types.TaskOutputListFilter{
+			ExcludeArchived: false, Limit: 200,
+		})
+	}
+
+	var all []*types.TaskOutput
+	resolved := make(map[string]bool)
+	for ref := range agentRefs {
+		aid, ok := r.resolveAgentRef(ctx, workspaceID, ref)
+		if !ok || resolved[aid] {
 			continue
 		}
-		seen[dsKey] = true
-		outputs, err := r.fetchOutputs(ctx, workspaceID, comp.DataSource)
+		resolved[aid] = true
+		outputs, err := r.backend.ListWorkspaceTaskOutputs(ctx, workspaceID, types.TaskOutputListFilter{
+			AgentID: &aid, ExcludeArchived: false, Limit: 200,
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -375,39 +454,6 @@ func (r *DataResolver) resolveAgentRef(ctx context.Context, workspaceID uint, re
 	return "", false
 }
 
-func (r *DataResolver) fetchOutputs(ctx context.Context, workspaceID uint, ds *types.DataSource) ([]*types.TaskOutput, error) {
-	agentIDs := ds.AgentIDs
-	if ds.AgentID != "" && len(agentIDs) == 0 {
-		agentIDs = []string{ds.AgentID}
-	}
-
-	if len(agentIDs) == 0 {
-		filter := types.TaskOutputListFilter{ExcludeArchived: false, Limit: 200}
-		if ds.OutputType != "" {
-			filter.OutputType = &ds.OutputType
-		}
-		return r.backend.ListWorkspaceTaskOutputs(ctx, workspaceID, filter)
-	}
-
-	var all []*types.TaskOutput
-	for _, ref := range agentIDs {
-		aid, ok := r.resolveAgentRef(ctx, workspaceID, ref)
-		if !ok {
-			continue
-		}
-		filter := types.TaskOutputListFilter{AgentID: &aid, ExcludeArchived: false, Limit: 200}
-		if ds.OutputType != "" {
-			filter.OutputType = &ds.OutputType
-		}
-		outputs, err := r.backend.ListWorkspaceTaskOutputs(ctx, workspaceID, filter)
-		if err != nil {
-			return nil, err
-		}
-		all = append(all, outputs...)
-	}
-
-	return dedupeOutputs(all), nil
-}
 
 func dedupeOutputs(all []*types.TaskOutput) []*types.TaskOutput {
 	seen := make(map[string]struct{}, len(all))
@@ -626,7 +672,7 @@ func filterMetadataForMapping(metadata map[string]any) map[string]any {
 // ---------------------------------------------------------------------------
 
 const (
-	taskCacheTTL    = 10 * time.Minute
+	taskCacheTTL    = 1 * time.Hour
 	taskCachePrefix = "view:task:"
 )
 
