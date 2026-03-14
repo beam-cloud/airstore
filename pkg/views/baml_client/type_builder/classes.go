@@ -139,8 +139,8 @@ func (t *MappedRowClassView) ListProperties() ([]ClassPropertyView, error) {
 	return builders, nil
 }
 
-func (t *MappedRowClassView) PropertyOutput_id() (ClassPropertyView, error) {
-	return t.inner.Property("output_id")
+func (t *MappedRowClassView) PropertyTask_id() (ClassPropertyView, error) {
+	return t.inner.Property("task_id")
 }
 
 func (t *MappedRowClassView) PropertyCells() (ClassPropertyView, error) {

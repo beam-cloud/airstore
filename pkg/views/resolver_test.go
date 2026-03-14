@@ -2,6 +2,7 @@ package views
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -58,8 +59,18 @@ type fakeResolverBackend struct {
 	profiles         []*types.AgentProfile
 	outputsByAgent   map[string][]*types.TaskOutput
 	workspaceOutputs []*types.TaskOutput
+	tasks            map[string]*types.AgentTask
 	queriedAgentIDs  []string
 	filters          []types.TaskOutputListFilter
+}
+
+func (b *fakeResolverBackend) GetTaskByID(_ context.Context, taskID string) (*types.AgentTask, error) {
+	if b.tasks != nil {
+		if t, ok := b.tasks[taskID]; ok {
+			return t, nil
+		}
+	}
+	return nil, fmt.Errorf("task not found")
 }
 
 func (b *fakeResolverBackend) GetAgentProfileByKey(_ context.Context, _ uint, agentKey string) (*types.AgentProfile, error) {
@@ -128,7 +139,7 @@ func TestResolveMetricReturnsOutputCount(t *testing.T) {
 	}
 	resolver := &DataResolver{backend: backend, cache: newMappingCache(nil)}
 
-	result, err := resolver.Resolve(context.Background(), 7, types.ComponentSpec{
+	result, err := resolver.Resolve(context.Background(), 7, "test-view", types.ComponentSpec{
 		ID:    "recipe-count",
 		Type:  "metric",
 		Title: "Recipes Extracted",
@@ -175,6 +186,108 @@ func TestBuildColumnSchemas(t *testing.T) {
 	}
 	if schemas[0].Description != "Recipe Name (hint: data.recipe_name)" {
 		t.Fatalf("first schema desc = %q, unexpected", schemas[0].Description)
+	}
+}
+
+func TestCacheRoundTrip(t *testing.T) {
+	cached := &cachedMapping{
+		SchemaHash: "testhash123",
+		TaskIDs:    []string{"task-1", "task-2"},
+		Columns:    []string{"recipe_name", "video_url", "task_id"},
+		ColumnMeta: []types.ColumnMeta{
+			{Key: "recipe_name", Type: "text", Label: "Recipe Name"},
+			{Key: "video_url", Type: "link", Label: "Video"},
+			{Key: "task_id", Type: "text", Hidden: true},
+		},
+		Rows: [][]any{
+			{"Spaghetti", "https://yt.com/1", "task-1"},
+			{"Brownies", nil, "task-2"},
+		},
+		CachedAt: time.Now(),
+	}
+
+	raw, err := json.Marshal(cached)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+
+	var restored cachedMapping
+	if err := json.Unmarshal(raw, &restored); err != nil {
+		t.Fatalf("json.Unmarshal failed: %v", err)
+	}
+	if len(restored.Rows) != 2 {
+		t.Fatalf("round-trip: expected 2 rows, got %d", len(restored.Rows))
+	}
+	if restored.SchemaHash != "testhash123" {
+		t.Fatalf("round-trip: schema hash = %q, want testhash123", restored.SchemaHash)
+	}
+	if !taskIDsMatch(restored.TaskIDs, []string{"task-1", "task-2"}) {
+		t.Fatalf("round-trip: task IDs mismatch: %v", restored.TaskIDs)
+	}
+	if restored.Rows[0][0] != "Spaghetti" {
+		t.Fatalf("row 0 col 0 = %v, want Spaghetti", restored.Rows[0][0])
+	}
+	if restored.Rows[1][1] != nil {
+		t.Fatalf("row 1 col 1 = %v, want nil", restored.Rows[1][1])
+	}
+}
+
+func TestSchemaHashStable(t *testing.T) {
+	comp := types.ComponentSpec{
+		ID:    "recipe-table",
+		Title: "Recipe PDFs in Google Drive",
+		Type:  "data-table",
+		DataSource: &types.DataSource{
+			AgentIDs:    []string{"youtube-recipe-extractor"},
+			ArtifactKey: "recipes",
+			Transform: []types.TransformRule{
+				{Column: "file_name", Source: "data.file_name", Type: "text"},
+				{Column: "video_url", Source: "data.video_url", Type: "link"},
+			},
+		},
+		Config: map[string]any{
+			"columns": []any{
+				map[string]any{"key": "file_name", "label": "File Name"},
+				map[string]any{"key": "video_url", "label": "Video"},
+			},
+		},
+	}
+
+	h1 := schemaHash(comp)
+	h2 := schemaHash(comp)
+	h3 := schemaHash(comp)
+	if h1 != h2 || h2 != h3 {
+		t.Fatalf("schemaHash not stable: %q, %q, %q", h1, h2, h3)
+	}
+
+	compJSON, _ := json.Marshal(comp)
+	var comp2 types.ComponentSpec
+	json.Unmarshal(compJSON, &comp2)
+	h4 := schemaHash(comp2)
+	if h1 != h4 {
+		t.Fatalf("schemaHash not stable across JSON round-trip: %q vs %q", h1, h4)
+	}
+}
+
+func TestSortedTaskIDsAndMatch(t *testing.T) {
+	outputs := []*types.TaskOutput{
+		{ID: "out-1", TaskID: "task-b"},
+		{ID: "out-2", TaskID: "task-a"},
+		{ID: "out-3", TaskID: "task-b"},
+		{ID: "out-4", TaskID: "task-c"},
+	}
+
+	ids := sortedTaskIDs(outputs)
+	expected := []string{"task-a", "task-b", "task-c"}
+	if !taskIDsMatch(ids, expected) {
+		t.Fatalf("sortedTaskIDs = %v, want %v", ids, expected)
+	}
+
+	if taskIDsMatch(ids, []string{"task-a", "task-b"}) {
+		t.Fatal("should not match shorter list")
+	}
+	if taskIDsMatch(ids, []string{"task-a", "task-b", "task-d"}) {
+		t.Fatal("should not match different list")
 	}
 }
 

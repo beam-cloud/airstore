@@ -165,8 +165,8 @@ func (c MappedResult) BamlTypeName() string {
 }
 
 type MappedRow struct {
-	Output_id string       `json:"output_id"`
-	Cells     []MappedCell `json:"cells"`
+	Task_id string       `json:"task_id"`
+	Cells   []MappedCell `json:"cells"`
 }
 
 func (c *MappedRow) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
@@ -183,8 +183,8 @@ func (c *MappedRow) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
 		valueHolder := field.Value
 		switch key {
 
-		case "output_id":
-			c.Output_id = baml.Decode(valueHolder).Interface().(string)
+		case "task_id":
+			c.Task_id = baml.Decode(valueHolder).Interface().(string)
 
 		case "cells":
 			c.Cells = baml.Decode(valueHolder).Interface().([]MappedCell)
@@ -201,7 +201,7 @@ func (c *MappedRow) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
 func (c MappedRow) Encode() (*cffi.HostValue, error) {
 	fields := map[string]any{}
 
-	fields["output_id"] = c.Output_id
+	fields["task_id"] = c.Task_id
 
 	fields["cells"] = c.Cells
 

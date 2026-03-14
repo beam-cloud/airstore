@@ -1,7 +1,8 @@
 // =============================================================================
 // MapOutputsToSchema
-// Maps task outputs (with rich BAML-generated metadata) into the column schema
-// of a view widget. Called at view render time, results are cached.
+// Maps task outputs (grouped by task_id) into the column schema of a view
+// widget. Multiple outputs from the same task are synthesized into one row.
+// Called at view render time, results are cached.
 // =============================================================================
 
 class ColumnSchema {
@@ -16,12 +17,12 @@ class MappedCell {
 }
 
 class MappedRow {
-  output_id string @description("The TaskOutput ID this row was derived from")
+  task_id string @description("The task ID this row was synthesized from")
   cells MappedCell[] @description("One cell per column in the schema, matched by column key")
 }
 
 class MappedResult {
-  rows MappedRow[] @description("One row per task output that has relevant data for this widget")
+  rows MappedRow[] @description("One row per task that has relevant data for this widget")
 }
 
 function MapOutputsToSchema(
@@ -46,26 +47,34 @@ function MapOutputsToSchema(
     - {{ col.key }} ({{ col.type }}): {{ col.description }}
     {% endfor %}
 
-    TASK OUTPUTS (JSON array of outputs with their data and metadata):
+    TASK OUTPUTS (JSON object, keyed by task_id. Each entry has an optional
+    "prompt" field with the user's original request and an "outputs" array of
+    the outputs that task produced):
     <outputs>{{ outputs_json }}</outputs>
 
     INSTRUCTIONS:
-    1. For each task output, inspect its data fields, metadata, title, summary,
-       and URI to find values that match the column descriptions.
-    2. Map each output to a row with cells matching the column schema.
-    3. Use semantic understanding — don't just match field names literally.
-       For example, if a column asks for "Recipe Name" and the output has
+    1. Each top-level key is a task_id. The "prompt" field (when present)
+       contains the user's original request that triggered the task — use it
+       as context to better understand what the outputs represent. The
+       "outputs" array contains all outputs that task produced.
+    2. Produce ONE row per task_id by synthesizing the best value for each
+       column from ANY output in that task's group. Use the prompt for
+       additional context when output data alone is ambiguous.
+    3. When multiple outputs have a value for the same column, prefer outputs
+       with artifact_role "primary" over "supporting" or "incidental".
+    4. Use semantic understanding — don't just match field names literally.
+       For example, if a column asks for "Recipe Name" and an output has
        data.recipe_name or data.title with a recipe name, use it.
-    4. For link columns, look for URLs in data, metadata.deeplink, or URI.
-    5. For date columns, use ISO 8601 format (e.g. "2024-01-15T10:30:00Z").
-    6. Skip outputs that have no relevant data for ANY column (don't create
-       empty rows). But if an output has data for at least one column,
-       include it with empty strings for missing columns.
-    7. Preserve the original values — don't summarize or reformat unless
+    5. For link columns, look for URLs in data, metadata.deeplink, or URI.
+    6. For date columns, use ISO 8601 format (e.g. "2024-01-15T10:30:00Z").
+    7. Skip tasks that have no relevant data for ANY column (don't create
+       empty rows). But if a task has data for at least one column, include
+       it with empty strings for missing columns.
+    8. Preserve the original values — don't summarize or reformat unless
        the column type requires it (e.g. extracting a date from a string).
-    8. For tags columns, join multiple values with ", ".
-    9. For boolean columns, use "true" or "false".
-    10. Every row MUST include the output_id from the source task output.
+    9. For tags columns, join multiple values with ", ".
+    10. For boolean columns, use "true" or "false".
+    11. Every row MUST include the task_id.
 
     {{ ctx.output_format }}
   "#
