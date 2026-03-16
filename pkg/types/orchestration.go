@@ -69,21 +69,21 @@ const (
 // TaskInput is a durable follow-up input row owned by a task and consumed
 // by whichever run is active for the task/session at delivery time.
 type TaskInput struct {
-	ID                 string           `json:"id" db:"id"`
-	WorkspaceID        uint             `json:"workspace_id" db:"workspace_id"`
-	TaskID             string           `json:"task_id" db:"task_id"`
-	SessionID          string           `json:"session_id" db:"session_id"`
-	Seq                int              `json:"seq" db:"seq"`
-	Kind               InputKind        `json:"kind" db:"kind"`
-	Action             *TaskInputAction `json:"action,omitempty" db:"action"`
-	Message            string           `json:"message" db:"message"`
-	IdempotencyKey     string           `json:"idempotency_key" db:"idempotency_key"`
-	Status             TaskInputStatus  `json:"status" db:"status"`
-	ClaimedByRunID     *string          `json:"claimed_by_run_id,omitempty" db:"claimed_by_run_id"`
-	ClaimedByExecID    *string          `json:"claimed_by_execution_id,omitempty" db:"claimed_by_execution_id"`
-	CreatedAt          time.Time        `json:"created_at" db:"created_at"`
-	ClaimedAt          *time.Time       `json:"claimed_at,omitempty" db:"claimed_at"`
-	ConsumedAt         *time.Time       `json:"consumed_at,omitempty" db:"consumed_at"`
+	ID              string           `json:"id" db:"id"`
+	WorkspaceID     uint             `json:"workspace_id" db:"workspace_id"`
+	TaskID          string           `json:"task_id" db:"task_id"`
+	SessionID       string           `json:"session_id" db:"session_id"`
+	Seq             int              `json:"seq" db:"seq"`
+	Kind            InputKind        `json:"kind" db:"kind"`
+	Action          *TaskInputAction `json:"action,omitempty" db:"action"`
+	Message         string           `json:"message" db:"message"`
+	IdempotencyKey  string           `json:"idempotency_key" db:"idempotency_key"`
+	Status          TaskInputStatus  `json:"status" db:"status"`
+	ClaimedByRunID  *string          `json:"claimed_by_run_id,omitempty" db:"claimed_by_run_id"`
+	ClaimedByExecID *string          `json:"claimed_by_execution_id,omitempty" db:"claimed_by_execution_id"`
+	CreatedAt       time.Time        `json:"created_at" db:"created_at"`
+	ClaimedAt       *time.Time       `json:"claimed_at,omitempty" db:"claimed_at"`
+	ConsumedAt      *time.Time       `json:"consumed_at,omitempty" db:"consumed_at"`
 }
 
 // RunInteraction is the runtime interaction state of an active run.
@@ -431,6 +431,7 @@ const (
 	OrchestrationOutboxPayloadWakeDelayMinutes            = "wake_delay_minutes"
 	OrchestrationOutboxPayloadWakeReason                  = "wake_reason"
 	OrchestrationOutboxPayloadWakeFollowUpPrompt          = "wake_follow_up_prompt"
+	OrchestrationOutboxPayloadWakeAgenda                  = "wake_agenda"
 )
 
 type OrchestrationOutboxEvent struct {
@@ -481,35 +482,43 @@ type ChannelBinding struct {
 	UpdatedAt   time.Time      `json:"updated_at" db:"updated_at"`
 }
 
+type TaskWakeAgendaItem struct {
+	Seq    int    `json:"seq" db:"seq"`
+	Type   string `json:"type,omitempty" db:"item_type"`
+	Title  string `json:"title" db:"title"`
+	Reason string `json:"reason,omitempty" db:"reason"`
+}
+
 // AgentTask is the high-level orchestration task (agent -> task -> run).
 type AgentTask struct {
-	ID             string         `json:"id" db:"id"`
-	WorkspaceID    uint           `json:"workspace_id" db:"workspace_id"`
-	AgentID        *string        `json:"agent_id,omitempty" db:"agent_id"`
-	AgentName      string         `json:"agent_name,omitempty" db:"-"`
-	QueueMode      AgentQueueMode `json:"queue_mode" db:"queue_mode"`
-	State          AgentTaskState `json:"state" db:"state"`
-	InputKind      InputKind      `json:"input_kind,omitempty" db:"input_kind"`
-	WaitingSummary *string        `json:"waiting_summary,omitempty" db:"waiting_summary"`
-	IdempotencyKey string         `json:"idempotency_key" db:"idempotency_key"`
-	PayloadJSON    map[string]any `json:"payload_json" db:"-"`
-	RoutingJSON    map[string]any `json:"routing_json" db:"-"`
-	ParentTaskID   *string        `json:"parent_task_id,omitempty" db:"parent_envelope_id"`
-	TargetRunID    *string        `json:"target_run_id,omitempty" db:"target_run_id"`
-	AcceptedAt     time.Time      `json:"accepted_at" db:"accepted_at"`
-	QueuedAt       *time.Time     `json:"queued_at,omitempty" db:"queued_at"`
-	DispatchedAt   *time.Time     `json:"dispatched_at,omitempty" db:"dispatched_at"`
-	Deadline       *time.Time     `json:"deadline,omitempty" db:"deadline"`
-	DroppedReason  *string        `json:"dropped_reason,omitempty" db:"dropped_reason"`
-	Priority       string         `json:"priority" db:"priority"`
-	BudgetUSD      *float64       `json:"budget_usd,omitempty" db:"budget_usd"`
-	CostUSD        float64        `json:"cost_usd" db:"cost_usd"`
-	ArchivedAt     *time.Time     `json:"archived_at,omitempty" db:"archived_at"`
-	WakeAt         *time.Time     `json:"wake_at,omitempty" db:"wake_at"`
-	WakeReason     *string        `json:"wake_reason,omitempty" db:"wake_reason"`
-	WakeCount      int            `json:"wake_count,omitempty" db:"wake_count"`
-	CreatedAt      time.Time      `json:"created_at" db:"created_at"`
-	UpdatedAt      time.Time      `json:"updated_at" db:"updated_at"`
+	ID             string                `json:"id" db:"id"`
+	WorkspaceID    uint                  `json:"workspace_id" db:"workspace_id"`
+	AgentID        *string               `json:"agent_id,omitempty" db:"agent_id"`
+	AgentName      string                `json:"agent_name,omitempty" db:"-"`
+	QueueMode      AgentQueueMode        `json:"queue_mode" db:"queue_mode"`
+	State          AgentTaskState        `json:"state" db:"state"`
+	InputKind      InputKind             `json:"input_kind,omitempty" db:"input_kind"`
+	WaitingSummary *string               `json:"waiting_summary,omitempty" db:"waiting_summary"`
+	IdempotencyKey string                `json:"idempotency_key" db:"idempotency_key"`
+	PayloadJSON    map[string]any        `json:"payload_json" db:"-"`
+	RoutingJSON    map[string]any        `json:"routing_json" db:"-"`
+	ParentTaskID   *string               `json:"parent_task_id,omitempty" db:"parent_envelope_id"`
+	TargetRunID    *string               `json:"target_run_id,omitempty" db:"target_run_id"`
+	AcceptedAt     time.Time             `json:"accepted_at" db:"accepted_at"`
+	QueuedAt       *time.Time            `json:"queued_at,omitempty" db:"queued_at"`
+	DispatchedAt   *time.Time            `json:"dispatched_at,omitempty" db:"dispatched_at"`
+	Deadline       *time.Time            `json:"deadline,omitempty" db:"deadline"`
+	DroppedReason  *string               `json:"dropped_reason,omitempty" db:"dropped_reason"`
+	Priority       string                `json:"priority" db:"priority"`
+	BudgetUSD      *float64              `json:"budget_usd,omitempty" db:"budget_usd"`
+	CostUSD        float64               `json:"cost_usd" db:"cost_usd"`
+	ArchivedAt     *time.Time            `json:"archived_at,omitempty" db:"archived_at"`
+	WakeAt         *time.Time            `json:"wake_at,omitempty" db:"wake_at"`
+	WakeReason     *string               `json:"wake_reason,omitempty" db:"wake_reason"`
+	WakeAgenda     []*TaskWakeAgendaItem `json:"wake_agenda,omitempty" db:"-"`
+	WakeCount      int                   `json:"wake_count,omitempty" db:"wake_count"`
+	CreatedAt      time.Time             `json:"created_at" db:"created_at"`
+	UpdatedAt      time.Time             `json:"updated_at" db:"updated_at"`
 }
 
 type AgentRun struct {
@@ -587,13 +596,13 @@ type AgentRunSnapshot struct {
 }
 
 type AgentTaskListFilter struct {
-	AgentID        *string
-	States         []AgentTaskState
-	CreatedAfter   *time.Time
-	CreatedBefore  *time.Time
+	AgentID         *string
+	States          []AgentTaskState
+	CreatedAfter    *time.Time
+	CreatedBefore   *time.Time
 	IncludeArchived bool
-	Limit          int
-	Offset         int
+	Limit           int
+	Offset          int
 }
 
 type AgentRunListFilter struct {
@@ -1103,9 +1112,10 @@ type RunExecutionState struct {
 
 // RunExecutionResult contains the result of a completed run execution
 type RunExecutionWakeSignal struct {
-	DelayMinutes   int    `json:"delay_minutes"`
-	Reason         string `json:"reason,omitempty"`
-	FollowUpPrompt string `json:"follow_up_prompt,omitempty"`
+	DelayMinutes   int                   `json:"delay_minutes"`
+	Reason         string                `json:"reason,omitempty"`
+	FollowUpPrompt string                `json:"follow_up_prompt,omitempty"`
+	WakeAgenda     []*TaskWakeAgendaItem `json:"wake_agenda,omitempty"`
 }
 
 type RunExecutionResult struct {
@@ -1183,7 +1193,6 @@ type TaskOutput struct {
 	Title       string         `json:"title"`
 	Summary     *string        `json:"summary,omitempty"`
 	URI         *string        `json:"uri,omitempty"`
-	Schema      map[string]any `json:"schema,omitempty"`
 	Data        map[string]any `json:"data"`
 	Metadata    map[string]any `json:"metadata,omitempty"`
 	ArchivedAt  *time.Time     `json:"archived_at,omitempty"`
@@ -1193,6 +1202,7 @@ type TaskOutput struct {
 type TaskOutputListFilter struct {
 	TaskID          *string `json:"task_id,omitempty"`
 	AgentID         *string `json:"agent_id,omitempty"`
+	AgentIDIsNull   bool    `json:"agent_id_is_null,omitempty"`
 	OutputType      *string `json:"output_type,omitempty"`
 	ExcludeArchived bool    `json:"exclude_archived,omitempty"`
 	Limit           int     `json:"limit,omitempty"`

@@ -261,6 +261,23 @@ func (p *SchemaProvider) parseArgs(cmd *CommandSchema, args []string) (map[strin
 		}
 	}
 
+	for _, group := range cmd.OneOfRequired {
+		present := make([]string, 0, len(group))
+		for _, name := range group {
+			if _, ok := result[name]; ok {
+				present = append(present, name)
+			}
+		}
+		switch len(present) {
+		case 1:
+			// valid
+		case 0:
+			return nil, fmt.Errorf("one of [%s] is required", strings.Join(group, ", "))
+		default:
+			return nil, fmt.Errorf("only one of [%s] may be provided", strings.Join(group, ", "))
+		}
+	}
+
 	return result, nil
 }
 

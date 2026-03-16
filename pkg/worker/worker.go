@@ -14,10 +14,10 @@ import (
 
 	"github.com/beam-cloud/airstore/pkg/common"
 	gatewayclient "github.com/beam-cloud/airstore/pkg/gateway/client"
-	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/runtime"
 	"github.com/beam-cloud/airstore/pkg/types"
+	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -505,10 +505,22 @@ func setTaskResultWithRetry(
 
 	var protoWake *pb.WakeSignal
 	if ws := result.WakeSignal; ws != nil {
+		wakeAgenda := make([]*pb.WakeAgendaItem, 0, len(ws.WakeAgenda))
+		for _, item := range ws.WakeAgenda {
+			if item == nil {
+				continue
+			}
+			wakeAgenda = append(wakeAgenda, &pb.WakeAgendaItem{
+				Type:   item.Type,
+				Title:  item.Title,
+				Reason: item.Reason,
+			})
+		}
 		protoWake = &pb.WakeSignal{
 			DelayMinutes:   int32(ws.DelayMinutes),
 			Reason:         ws.Reason,
 			FollowUpPrompt: ws.FollowUpPrompt,
+			WakeAgenda:     wakeAgenda,
 		}
 	}
 

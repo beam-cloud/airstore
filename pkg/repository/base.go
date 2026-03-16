@@ -205,7 +205,7 @@ type BackendRepository interface {
 	ClaimQueuedTaskForDispatch(ctx context.Context, taskID string, staleAfter time.Duration) (*types.AgentTask, bool, error)
 	UpdateTaskState(ctx context.Context, taskId string, state types.AgentTaskState, droppedReason *string, targetRunID *string) error
 	UpdateTaskStateIfCurrentRun(ctx context.Context, taskID string, expectedRunID string, state types.AgentTaskState, droppedReason *string, targetRunID *string, inputKind types.InputKind, waitingSummary *string) (bool, error)
-	SleepTaskWithOutbox(ctx context.Context, taskID string, expectedRunID string, wakeAt time.Time, wakeReason string, outboxEvent *types.OrchestrationOutboxEvent) (bool, error)
+	SleepTaskWithOutbox(ctx context.Context, taskID string, expectedRunID string, wakeAt time.Time, wakeReason string, wakeAgenda []*types.TaskWakeAgendaItem, outboxEvent *types.OrchestrationOutboxEvent) (bool, error)
 	RequeueTaskWithOutboxIfCurrentRun(ctx context.Context, task *types.AgentTask, expectedRunID string, outboxEvent *types.OrchestrationOutboxEvent) (bool, error)
 	CancelPendingOutboxEventsForTask(ctx context.Context, taskID string) error
 	UpdateTask(ctx context.Context, task *types.AgentTask) error
@@ -289,6 +289,13 @@ type BackendRepository interface {
 	ArchiveTaskOutput(ctx context.Context, workspaceId uint, outputID string) error
 	ArchiveAllTaskOutputs(ctx context.Context, workspaceId uint) (int64, error)
 	DeleteTaskOutput(ctx context.Context, workspaceId uint, outputID string) error
+
+	// Views
+	CreateView(ctx context.Context, v *types.View) error
+	GetView(ctx context.Context, workspaceID uint, viewID string) (*types.View, error)
+	ListViews(ctx context.Context, workspaceID uint) ([]*types.View, error)
+	UpdateView(ctx context.Context, v *types.View) error
+	DeleteView(ctx context.Context, workspaceID uint, viewID string) error
 
 	// Database access
 	DB() *sql.DB

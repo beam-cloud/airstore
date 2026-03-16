@@ -2,6 +2,7 @@ package orchestration
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -100,6 +101,26 @@ func TestApplyDispatchPayloadIncludesResumeMetadata(t *testing.T) {
 	}
 }
 
+func TestRunInputPromptPrefersDispatchPrompt(t *testing.T) {
+	payload := map[string]any{
+		"message": "original task instruction",
+		"prompt":  "wake-specific follow-up prompt",
+	}
+
+	if got := runInputPrompt(payload); got != "wake-specific follow-up prompt" {
+		t.Fatalf("runInputPrompt = %q, want wake-specific follow-up prompt", got)
+	}
+}
+
+func TestWakeBackoffDelayHonorsRequestedDelay(t *testing.T) {
+	if got := wakeBackoffDelay(0, 2880); got != 2880 {
+		t.Fatalf("wakeBackoffDelay = %d, want 2880", got)
+	}
+	if got := wakeBackoffDelay(3, 0); got != 5 {
+		t.Fatalf("wakeBackoffDelay with invalid delay = %d, want 5", got)
+	}
+}
+
 func TestIsRetryableError(t *testing.T) {
 	retryable := []string{
 		"session abc checkpoint for run xyz not durable yet",
@@ -132,5 +153,25 @@ func TestIsRetryableError(t *testing.T) {
 		if isRetryableError(msg) {
 			t.Fatalf("expected permanent: %s", msg)
 		}
+	}
+}
+
+func TestSkillNamesFromConfigHandlesStringSlices(t *testing.T) {
+	config := map[string]any{
+		agentConfigKeySkills: []string{"triage", " review ", "triage", ""},
+	}
+
+	if got, want := skillNamesFromConfig(config), []string{"triage", "review"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("skillNamesFromConfig = %#v, want %#v", got, want)
+	}
+}
+
+func TestSkillNamesFromConfigHandlesInterfaceSlices(t *testing.T) {
+	config := map[string]any{
+		agentConfigKeySkills: []any{"triage", " review ", "triage", "", 42},
+	}
+
+	if got, want := skillNamesFromConfig(config), []string{"triage", "review"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("skillNamesFromConfig = %#v, want %#v", got, want)
 	}
 }

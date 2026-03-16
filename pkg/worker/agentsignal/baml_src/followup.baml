@@ -3,14 +3,21 @@ enum FollowUpIntent {
   FOLLOW_UP  @description("The task should be revisited later — either the agent is waiting on an external event, or the user explicitly requested a delay/pause.")
 }
 
-class FollowUpSignal {
-  intent FollowUpIntent
-  delay_minutes int        @description("Minutes to wait before the next check-in. Only meaningful when intent is FOLLOW_UP. Choose a reasonable interval: 5-15 min for fast APIs, 30-120 min for emails, 1440 for next-day checks, 2880 for 'a couple days', 10080 for 'next week'.")
-  reason string?           @description("One line: what the agent is waiting for, e.g. 'email replies from 3 real-estate agents' or 'user requested a pause for a couple days'")
-  follow_up_prompt string? @description("Instruction the agent should receive when it wakes up, e.g. 'Check inbox for new replies and respond to any that arrived'")
+class WakeAgendaItem {
+  type string           @description("Short snake_case action type such as check_replies, follow_up, send_digest, verify_result, scrape, or other.")
+  title string          @description("Short imperative label for what the agent should do when it wakes, e.g. 'Check inbox for new replies'.")
+  reason string?        @description("Why this action belongs in the next wake agenda.")
 }
 
-function ClassifyFollowUp(message: string, user_message: string?) -> FollowUpSignal {
+class FollowUpSignal {
+  intent FollowUpIntent
+  delay_minutes int        @description("Exact minutes to wait before the next wake. Respect explicit user delays and active skill cadence/rules. Do not return a placeholder or backoff delay.")
+  reason string?           @description("One-line summary of why the task will wake next.")
+  follow_up_prompt string? @description("Instruction the agent should receive when it wakes up. It should explicitly reflect the wake agenda and any active skill rules.")
+  wake_agenda WakeAgendaItem[] @description("Ordered agenda for what the agent should do on its next wake.")
+}
+
+function ClassifyFollowUp(message: string, user_message: string?, now_rfc3339: string, active_skill_context: string?, handoff_context: string?) -> FollowUpSignal {
   client FollowUpClassifier
   prompt #"
     An AI agent just finished a turn with outcome COMPLETE — it is not
@@ -41,10 +48,51 @@ function ClassifyFollowUp(message: string, user_message: string?) -> FollowUpSig
     - User: "looks good, thanks!" / Agent: "Happy to help!"
     - Agent delivers a final artifact with no pending event or delay.
 
-    If the intent is FOLLOW_UP, pick a **delay_minutes** that matches
-    the expected wait (don't guess wildly — use common sense about how
-    long emails, APIs, deployments, etc. typically take).  For
-    user-requested delays, honour the timeframe they specified.
+    If the intent is FOLLOW_UP:
+
+    1. Pick the exact **delay_minutes** for the next wake.
+    2. Write a one-line **reason** summarizing why the task is waking.
+    3. Return an ordered **wake_agenda** describing what should happen
+       when it wakes. Multiple things can happen on the same wake.
+    4. Return a **follow_up_prompt** that turns that agenda into a clear
+       instruction for the next run.
+
+    IMPORTANT RULES:
+    - Respect explicit user-requested delays.
+    - If active skill context is present, treat it as the source of truth
+      for cadence and follow-up policy. Do not wake earlier than the
+      skill allows.
+    - If the skill implies recurring checks ("check replies every run",
+      "follow up in 3 business days", "send digest every 2-3 days"),
+      convert those into the next wake's exact delay and agenda.
+    - If handoff context is present, preserve any still-relevant planned
+      actions from it unless the just-completed turn clearly made them
+      obsolete.
+    - If the next wake would involve approval-gated work, include the
+      drafting/review step in the agenda. Do not describe it as already sent.
+    - Use concise agenda items. The title should be imperative and easy
+      to show in a UI.
+    - Return 0 delay_minutes, empty wake_agenda, and no follow_up_prompt
+      when intent is NONE.
+
+    Current time (RFC3339 UTC):
+    ---
+    {{ now_rfc3339 }}
+    ---
+
+    {% if active_skill_context %}
+    Active skill context:
+    ---
+    {{ active_skill_context }}
+    ---
+    {% endif %}
+
+    {% if handoff_context %}
+    Skill-authored handoff context:
+    ---
+    {{ handoff_context }}
+    ---
+    {% endif %}
 
     {% if user_message %}
     User's preceding message:

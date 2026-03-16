@@ -43,7 +43,7 @@ func (s *StreamValue[TStream, TFinal]) Stream() *TStream {
 }
 
 // / Streaming version of ClassifyFollowUp
-func (*stream) ClassifyFollowUp(ctx context.Context, message string, user_message *string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.FollowUpSignal, types.FollowUpSignal], error) {
+func (*stream) ClassifyFollowUp(ctx context.Context, message string, user_message *string, now_rfc3339 string, active_skill_context *string, handoff_context *string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.FollowUpSignal, types.FollowUpSignal], error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -51,7 +51,7 @@ func (*stream) ClassifyFollowUp(ctx context.Context, message string, user_messag
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"message": message, "user_message": user_message},
+		Kwargs: map[string]any{"message": message, "user_message": user_message, "now_rfc3339": now_rfc3339, "active_skill_context": active_skill_context, "handoff_context": handoff_context},
 		Env:    getEnvVars(callOpts.env),
 	}
 
@@ -252,6 +252,80 @@ func (*stream) ExtractApprovalSummary(ctx context.Context, context string, opts 
 			} else {
 				data := (result.StreamData).(stream_types.ApprovalSummary)
 				channel <- StreamValue[stream_types.ApprovalSummary, types.ApprovalSummary]{
+					IsFinal:   false,
+					as_stream: &data,
+				}
+			}
+		}
+
+		// when internal_channel is closed, close the output too
+		close(channel)
+	}()
+	return channel, nil
+}
+
+// / Streaming version of ExtractFinalResponseOutput
+func (*stream) ExtractFinalResponseOutput(ctx context.Context, user_message *string, assistant_message string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.ExtractedOutput, types.ExtractedOutput], error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"user_message": user_message, "assistant_message": assistant_message},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		// This should never happen. if it does, please file an issue at https://github.com/boundaryml/baml/issues
+		// and include the type of the args you're passing in.
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: ExtractFinalResponseOutput: %w", err)
+		panic(wrapped_err)
+	}
+
+	internal_channel, err := bamlRuntime.CallFunctionStream(ctx, "ExtractFinalResponseOutput", encoded, callOpts.onTick)
+	if err != nil {
+		return nil, err
+	}
+
+	channel := make(chan StreamValue[stream_types.ExtractedOutput, types.ExtractedOutput])
+	go func() {
+		for result := range internal_channel {
+			if result.Error != nil {
+				channel <- StreamValue[stream_types.ExtractedOutput, types.ExtractedOutput]{
+					IsError: true,
+					Error:   result.Error,
+				}
+				close(channel)
+				return
+			}
+			if result.HasData {
+				data := (result.Data).(types.ExtractedOutput)
+				channel <- StreamValue[stream_types.ExtractedOutput, types.ExtractedOutput]{
+					IsFinal:  true,
+					as_final: &data,
+				}
+			} else {
+				data := (result.StreamData).(stream_types.ExtractedOutput)
+				channel <- StreamValue[stream_types.ExtractedOutput, types.ExtractedOutput]{
 					IsFinal:   false,
 					as_stream: &data,
 				}

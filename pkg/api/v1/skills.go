@@ -26,6 +26,7 @@ type SkillsGroup struct {
 func NewSkillsGroup(g *echo.Group, backend repository.BackendRepository, storage *clients.StorageClient, copilot *skills.Copilot) *SkillsGroup {
 	sg := &SkillsGroup{g: g, backend: backend, storage: storage, copilot: copilot}
 	sg.g.GET("", sg.List)
+	sg.g.GET("/:name", sg.Get)
 	sg.g.POST("/install", sg.Install)
 	sg.g.DELETE("/:name", sg.Uninstall)
 	sg.g.POST("/generate", sg.Generate)
@@ -100,6 +101,53 @@ func (sg *SkillsGroup) List(c echo.Context) error {
 	return SuccessResponse(c, infos)
 }
 
+// SkillDetail includes the full SKILL.md content alongside basic info.
+type SkillDetail struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Path        string `json:"path"`
+	Content     string `json:"content"`
+}
+
+// Get returns a single installed skill including its full content.
+func (sg *SkillsGroup) Get(c echo.Context) error {
+	ctx := c.Request().Context()
+
+	ws, err := sg.backend.GetWorkspaceByExternalId(ctx, c.Param("workspace_id"))
+	if err != nil || ws == nil {
+		return ErrorResponse(c, http.StatusNotFound, "workspace not found")
+	}
+	if sg.storage == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "storage not configured")
+	}
+
+	name := c.Param("name")
+	if name == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "name is required")
+	}
+
+	bucket := sg.storage.WorkspaceBucketName(ws.ExternalId)
+	content, err := sg.storage.Download(ctx, bucket, skills.ManifestKey(name))
+	if err != nil {
+		if clients.IsNotFoundError(err) {
+			return ErrorResponse(c, http.StatusNotFound, "skill not found")
+		}
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to retrieve skill")
+	}
+
+	manifest, err := skills.Parse(content)
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to parse skill")
+	}
+
+	return SuccessResponse(c, SkillDetail{
+		Name:        manifest.Name,
+		Description: manifest.Description,
+		Path:        skills.NameToPath(name),
+		Content:     string(content),
+	})
+}
+
 // InstallRequest is the payload for installing a skill from catalog content.
 type InstallRequest struct {
 	Name    string `json:"name"`
@@ -122,26 +170,23 @@ func (sg *SkillsGroup) Install(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
 	}
-	if req.Name == "" || req.Content == "" {
-		return ErrorResponse(c, http.StatusBadRequest, "name and content are required")
+	if req.Content == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "content is required")
 	}
 
-	manifest, err := skills.Parse([]byte(req.Content))
+	manifest, skillName, err := skills.InstallContent(ctx, sg.storage, ws.ExternalId, req.Name, []byte(req.Content))
 	if err != nil {
-		return ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("invalid SKILL.md: %s", err))
-	}
-
-	bucket := sg.storage.WorkspaceBucketName(ws.ExternalId)
-	key := skills.ManifestKey(req.Name)
-
-	if err := sg.storage.Upload(ctx, bucket, key, []byte(req.Content)); err != nil {
-		return ErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("failed to install skill: %s", err))
+		status := http.StatusInternalServerError
+		if strings.Contains(err.Error(), "invalid SKILL.md") || strings.Contains(err.Error(), "does not match") {
+			status = http.StatusBadRequest
+		}
+		return ErrorResponse(c, status, fmt.Sprintf("failed to install skill: %s", err))
 	}
 
 	return SuccessResponse(c, SkillInfo{
 		Name:        manifest.Name,
 		Description: manifest.Description,
-		Path:        skills.NameToPath(req.Name),
+		Path:        skills.NameToPath(skillName),
 	})
 }
 

@@ -75,6 +75,12 @@ func (c *AppConfig) IsLocalMode() bool {
 type DatabaseConfig struct {
 	Redis    RedisConfig    `key:"redis" json:"redis"`
 	Postgres PostgresConfig `key:"postgres" json:"postgres"`
+	Mongo    MongoConfig    `key:"mongo" json:"mongo"`
+}
+
+type MongoConfig struct {
+	URI      string `key:"uri" json:"uri"`
+	Database string `key:"database" json:"database"`
 }
 
 type RedisMode string

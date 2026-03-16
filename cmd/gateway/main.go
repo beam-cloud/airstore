@@ -22,10 +22,13 @@ func main() {
 		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stdout})
 	}
 
-	// Set ANTHROPIC_API_KEY from config for BAML inference
-	// This must happen before gateway.NewGateway() which imports the BAML package
+	// Set LLM API keys from config for BAML inference.
+	// This must happen before gateway.NewGateway() which imports the BAML package.
 	if key := config.AnthropicAPIKey(); key != "" {
 		os.Setenv("ANTHROPIC_API_KEY", key)
+	}
+	if key := config.CerebrasAPIKey(); key != "" {
+		os.Setenv("CEREBRAS_API_KEY", key)
 	}
 
 	gw, err := gateway.NewGateway()

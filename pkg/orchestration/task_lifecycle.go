@@ -200,6 +200,22 @@ func (lc *TaskLifecycle) Drop(ctx context.Context, taskID string, reason string)
 func (lc *TaskLifecycle) sleepWithWake(ctx context.Context, task *types.AgentTask, run *types.AgentRun, ws *types.RunExecutionWakeSignal) error {
 	delayMin := wakeBackoffDelay(task.WakeCount, ws.DelayMinutes)
 	wakeAt := time.Now().Add(time.Duration(delayMin) * time.Minute)
+	wakeReason := strings.TrimSpace(ws.Reason)
+	if wakeReason == "" {
+		for _, item := range ws.WakeAgenda {
+			if item == nil {
+				continue
+			}
+			if title := strings.TrimSpace(item.Title); title != "" {
+				wakeReason = title
+				break
+			}
+			if reason := strings.TrimSpace(item.Reason); reason != "" {
+				wakeReason = reason
+				break
+			}
+		}
+	}
 	dedupeKey := fmt.Sprintf("wake_dispatch:%s:%s", task.ID, run.ID)
 	outboxEvent := &types.OrchestrationOutboxEvent{
 		EventType: types.OrchestrationOutboxEventTypeTaskDispatch,
@@ -211,10 +227,11 @@ func (lc *TaskLifecycle) sleepWithWake(ctx context.Context, task *types.AgentTas
 			types.OrchestrationOutboxPayloadResumeSession:         true,
 			types.OrchestrationOutboxPayloadResumeExcludeRunID:    run.ID,
 			types.OrchestrationOutboxPayloadResumeCheckpointRunID: run.ID,
+			types.OrchestrationOutboxPayloadWakeReason:            wakeReason,
 		},
 		AvailableAt: wakeAt,
 	}
-	ok, err := lc.backend.SleepTaskWithOutbox(ctx, task.ID, run.ID, wakeAt, ws.Reason, outboxEvent)
+	ok, err := lc.backend.SleepTaskWithOutbox(ctx, task.ID, run.ID, wakeAt, wakeReason, ws.WakeAgenda, outboxEvent)
 	if err != nil {
 		return fmt.Errorf("sleep task with outbox: %w", err)
 	}

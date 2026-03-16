@@ -57,7 +57,7 @@ func TestProcessStaleUnclaimedRunRequeuesLostExecution(t *testing.T) {
 		Status: types.AgentRunStatusAccepted,
 	})
 	if !detected || !recovered {
-		t.Fatalf("unexpected recovery outcome: detected=%t recovered=%t", detected, recovered)
+		t.Fatalf("unexpected recovery outcome: detected=%v recovered=%v", detected, recovered)
 	}
 	if queue.requeued == nil || queue.requeued.ExternalId != "run-123" {
 		t.Fatalf("expected run to be requeued, got %#v", queue.requeued)
@@ -86,7 +86,7 @@ func TestProcessStaleUnclaimedRunSkipsAlreadyPendingQueueState(t *testing.T) {
 		Status: types.AgentRunStatusAccepted,
 	})
 	if detected || recovered {
-		t.Fatalf("expected already-pending run to be ignored, got detected=%t recovered=%t", detected, recovered)
+		t.Fatalf("expected already-pending run to be ignored: detected=%v recovered=%v", detected, recovered)
 	}
 	if queue.requeued != nil {
 		t.Fatalf("did not expect requeue, got %#v", queue.requeued)
