@@ -284,9 +284,29 @@ func (c *Copilot) PublishView(ctx context.Context, draft *Draft, workspaceID uin
 	if err := json.Unmarshal([]byte(draft.ViewContent), &def); err != nil {
 		return nil, fmt.Errorf("invalid view definition: %w", err)
 	}
+	agents := c.loadWorkspaceAgents(ctx, workspaceID)
+	preCanonAgents := append([]string{}, def.Agents...)
 	normalizeViewDefinition(&def)
-	canonicalizeViewAgentRefs(&def, c.loadWorkspaceAgents(ctx, workspaceID), nil)
+
+	canonicalizeViewAgentRefs(&def, agents, nil)
+
 	normalizeViewDefinition(&def)
+	log.Info().
+		Strs("pre_canon_agents", preCanonAgents).
+		Strs("post_canon_agents", def.Agents).
+		Int("workspace_agents", len(agents)).
+		Str("draft_id", draft.ID).
+		Str("view_name", def.Name).
+		Msg("view: publishing definition")
+
+	// Re-read the draft from S2 if we think no view has been published yet.
+	// This prevents a race where two gateway pods both see an empty
+	// PublishedViewID and each create a new view.
+	if draft.PublishedViewID == "" {
+		if fresh, err := c.LoadDraft(ctx, draft.WorkspaceID, draft.ID); err == nil && fresh != nil && fresh.PublishedViewID != "" {
+			draft.PublishedViewID = fresh.PublishedViewID
+		}
+	}
 
 	var published *types.View
 	if draft.PublishedViewID != "" {
@@ -308,14 +328,18 @@ func (c *Copilot) PublishView(ctx context.Context, draft *Draft, workspaceID uin
 
 	draft.PublishedViewID = published.ID
 	draft.Status = "published"
-	if err := c.persistDraft(ctx, draft.ID, "published_view_id", published.ID, "", ""); err != nil {
+
+	// Use a detached context so these writes survive client disconnect.
+	persistCtx, persistCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer persistCancel()
+	if err := c.persistDraft(persistCtx, draft.ID, "published_view_id", published.ID, "", ""); err != nil {
 		log.Warn().
 			Err(err).
 			Str("draft_id", draft.ID).
 			Str("view_id", published.ID).
 			Msg("failed to persist published view id after publish")
 	}
-	if err := c.persistDraft(ctx, draft.ID, "status", "published", "", ""); err != nil {
+	if err := c.persistDraft(persistCtx, draft.ID, "status", "published", "", ""); err != nil {
 		log.Warn().
 			Err(err).
 			Str("draft_id", draft.ID).
