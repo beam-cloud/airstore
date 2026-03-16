@@ -33,8 +33,9 @@ var ErrNoOutputsForTask = errors.New("no outputs found for task")
 var viewMappingFlight singleflight.Group
 
 type viewMappingResult struct {
-	Rows     []resolvedSheetRow
-	TaskMeta map[string]*types.AgentTask
+	Rows        []resolvedSheetRow
+	TaskMeta    map[string]*types.AgentTask
+	Diagnostics map[string]any
 }
 
 type resolvedSheetRow struct {
@@ -83,6 +84,13 @@ func buildMappingSpec(sheetName string, comp types.ComponentSpec) mappingSpec {
 	}
 }
 
+func MappingSchemaHash(sheet types.SheetSpec, comp types.ComponentSpec) string {
+	if !comp.IsTable() {
+		return ""
+	}
+	return buildMappingSpec(sheet.Name, comp).schemaHash
+}
+
 func NewDataResolver(backend repository.BackendRepository, store *ViewStore) *DataResolver {
 	return &DataResolver{backend: backend, store: store}
 }
@@ -124,7 +132,11 @@ func (r *DataResolver) Resolve(ctx context.Context, workspaceID uint, viewID str
 		}
 	}
 
-	return assembleTable(sheet.ID, comp, rows, result.TaskMeta), nil
+	data := assembleTable(sheet.ID, comp, rows, result.TaskMeta)
+	if data != nil && len(result.Diagnostics) > 0 {
+		data.Diagnostics = result.Diagnostics
+	}
+	return data, nil
 }
 
 // RegenerateRow re-maps a single task's outputs through BAML for one sheet,
@@ -178,10 +190,10 @@ func (r *DataResolver) RegenerateRow(ctx context.Context, workspaceID uint, view
 		if row.Task_id != taskID {
 			continue
 		}
-		persisted = append(persisted, mappedRowToViewRow(sheet.ID, taskID, spec.schemaHash, outputs, row, now))
+		persisted = append(persisted, mappedRowToViewRow(sheet.ID, comp.ID, taskID, spec.schemaHash, outputs, row, now))
 	}
 	if len(persisted) == 0 {
-		persisted = []ViewRow{fallbackViewRow(sheet.ID, taskID, spec.schemaHash, outputs, now)}
+		persisted = []ViewRow{fallbackViewRow(sheet.ID, comp.ID, taskID, spec.schemaHash, outputs, now)}
 	}
 
 	var keepRowIDs []string
@@ -191,7 +203,7 @@ func (r *DataResolver) RegenerateRow(ctx context.Context, workspaceID uint, view
 	if err := r.store.UpsertRows(ctx, viewID, persisted); err != nil {
 		return nil, fmt.Errorf("persist regenerated rows: %w", err)
 	}
-	if err := r.store.DeleteRowsNotInGroups(ctx, viewID, sheet.ID, []string{taskID}, keepRowIDs); err != nil {
+	if err := r.store.DeleteRowsNotInGroups(ctx, viewID, sheet.ID, comp.ID, []string{taskID}, keepRowIDs); err != nil {
 		log.Warn().Err(err).Str("view_id", viewID).Str("task_id", taskID).Msg("failed to delete stale rows after regeneration")
 	}
 
@@ -240,7 +252,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 
 	var existingRows []ViewRow
 	if r.store != nil {
-		existingRows, err = r.store.GetRows(ctx, viewID, sheet.ID)
+		existingRows, err = r.store.GetRows(ctx, viewID, sheet.ID, comp.ID)
 		if err != nil {
 			log.Warn().Err(err).Str("view_id", viewID).Str("sheet_id", sheet.ID).Msg("failed to load stored rows, treating all as uncached")
 			existingRows = nil
@@ -253,6 +265,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 	}
 
 	uncachedIDs := make(map[string]bool)
+	uncachedReasonCounts := map[string]int{}
 	var resolvedRows []resolvedSheetRow
 	applyManualEdits := !opts.ForceRefresh
 
@@ -260,6 +273,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 		log.Info().
 			Str("view_id", viewID).
 			Str("sheet_id", sheet.ID).
+			Str("component_id", comp.ID).
 			Str("schema_hash", spec.schemaHash).
 			Int("tasks", len(taskGroups)).
 			Msg("view: force refresh requested")
@@ -268,21 +282,35 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 	for taskID, outputs := range taskGroups {
 		if opts.ForceRefresh {
 			uncachedIDs[taskID] = true
+			uncachedReasonCounts["force_refresh"]++
 			continue
 		}
 
 		taskOIDs := sortedOutputIDs(outputs)
 		storedRows := rowsByGroup[taskID]
-		if groupRowsFresh(storedRows, spec.schemaHash, taskOIDs) {
+		if ok, reason := groupRowsFresh(storedRows, comp.ID, spec.schemaHash, taskOIDs); ok {
 			resolvedRows = append(resolvedRows, resolvedRowsFromStored(storedRows, applyManualEdits)...)
 			continue
+		} else {
+			uncachedReasonCounts[reason]++
 		}
 		uncachedIDs[taskID] = true
 	}
 
+	diagnostics := map[string]any{
+		"cache": map[string]any{
+			"component_id":           comp.ID,
+			"loaded_rows":            len(existingRows),
+			"tasks":                  len(taskGroups),
+			"cached":                 len(taskGroups) - len(uncachedIDs),
+			"uncached":               len(uncachedIDs),
+			"uncached_reason_counts": uncachedReasonCounts,
+		},
+	}
+
 	if len(uncachedIDs) == 0 {
 		sortResolvedRows(resolvedRows, taskMeta)
-		return &viewMappingResult{Rows: resolvedRows, TaskMeta: taskMeta}, nil
+		return &viewMappingResult{Rows: resolvedRows, TaskMeta: taskMeta, Diagnostics: diagnostics}, nil
 	}
 
 	uncachedTIDs := make([]string, 0, len(uncachedIDs))
@@ -298,6 +326,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 	log.Info().
 		Str("view_id", viewID).
 		Str("sheet_id", sheet.ID).
+		Str("component_id", comp.ID).
 		Str("sheet_name", sheet.Name).
 		Str("schema_hash", spec.schemaHash).
 		Bool("force_refresh", opts.ForceRefresh).
@@ -308,6 +337,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 		Int("mapping_columns", len(spec.mappingCols)).
 		Strs("column_keys", colKeys).
 		Str("row_mode", spec.rowStrategy.Mode).
+		Interface("uncached_reason_counts", uncachedReasonCounts).
 		Msg("view: mapping required")
 
 	persistedByGroup := make(map[string][]ViewRow)
@@ -316,7 +346,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 
 	if len(spec.mappingCols) == 0 {
 		for _, taskID := range uncachedTIDs {
-			row := fallbackViewRow(sheet.ID, taskID, spec.schemaHash, taskGroups[taskID], now)
+			row := fallbackViewRow(sheet.ID, comp.ID, taskID, spec.schemaHash, taskGroups[taskID], now)
 			persistedByGroup[taskID] = []ViewRow{row}
 			mappedByGroup[taskID] = resolvedRowsFromStored([]ViewRow{row}, applyManualEdits)
 		}
@@ -354,18 +384,18 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 						Msg("BAML returned row for unknown task_id, skipping")
 					continue
 				}
-				persisted := mappedRowToViewRow(sheet.ID, taskID, spec.schemaHash, taskGroups[taskID], row, now)
+				persisted := mappedRowToViewRow(sheet.ID, comp.ID, taskID, spec.schemaHash, taskGroups[taskID], row, now)
 				persistedByGroup[taskID] = append(persistedByGroup[taskID], persisted)
 			}
 		}
 
 		for _, taskID := range uncachedTIDs {
 			if len(persistedByGroup[taskID]) == 0 {
-				if !opts.ForceRefresh && len(rowsByGroup[taskID]) > 0 {
-					mappedByGroup[taskID] = resolvedRowsFromStored(rowsByGroup[taskID], true)
-				}
-				// BAML intentionally omitted this task — it has no relevant
-				// data for this sheet. Don't create a fallback empty row.
+				// Persist an empty marker row so repeated GETs do not remap
+				// forever when this task currently contributes no rows.
+				row := fallbackViewRow(sheet.ID, comp.ID, taskID, spec.schemaHash, taskGroups[taskID], now)
+				persistedByGroup[taskID] = []ViewRow{row}
+				mappedByGroup[taskID] = nil
 				continue
 			}
 			mappedByGroup[taskID] = resolvedRowsFromStored(persistedByGroup[taskID], applyManualEdits)
@@ -401,14 +431,14 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 			}
 		}
 		if persistedOK && len(cleanupGroupIDs) > 0 {
-			if err := r.store.DeleteRowsNotInGroups(ctx, viewID, sheet.ID, cleanupGroupIDs, keepRowIDs); err != nil {
+			if err := r.store.DeleteRowsNotInGroups(ctx, viewID, sheet.ID, comp.ID, cleanupGroupIDs, keepRowIDs); err != nil {
 				log.Error().Err(err).Str("view_id", viewID).Str("sheet_id", sheet.ID).Int("groups", len(cleanupGroupIDs)).Msg("failed to delete stale rows from MongoDB")
 				if opts.ForceRefresh {
 					return nil, fmt.Errorf("delete stale force refresh rows: %w", err)
 				}
 			}
 			if opts.ForceRefresh {
-				if err := r.store.ClearManualCells(ctx, viewID, sheet.ID, keepRowIDs, schemaKeyList(spec.mappingCols)); err != nil {
+				if err := r.store.ClearManualCells(ctx, viewID, sheet.ID, comp.ID, keepRowIDs, schemaKeyList(spec.mappingCols)); err != nil {
 					return nil, fmt.Errorf("clear manual cells after force refresh: %w", err)
 				}
 			}
@@ -422,7 +452,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 	}
 
 	sortResolvedRows(resolvedRows, taskMeta)
-	return &viewMappingResult{Rows: resolvedRows, TaskMeta: taskMeta}, nil
+	return &viewMappingResult{Rows: resolvedRows, TaskMeta: taskMeta, Diagnostics: diagnostics}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -489,16 +519,22 @@ func taskSetFromOutputs(outputs []*types.TaskOutput) map[string]bool {
 	return taskIDs
 }
 
-func groupRowsFresh(rows []ViewRow, schemaH string, outputIDs []string) bool {
+func groupRowsFresh(rows []ViewRow, componentID, schemaH string, outputIDs []string) (bool, string) {
 	if len(rows) == 0 {
-		return false
+		return false, "missing_rows"
 	}
 	for _, row := range rows {
-		if row.SchemaHash != schemaH || !slicesMatch(row.OutputIDs, outputIDs) {
-			return false
+		if strings.TrimSpace(componentID) != "" && row.ComponentID != componentID {
+			return false, "component_scope_mismatch"
+		}
+		if row.SchemaHash != schemaH {
+			return false, "schema_hash_mismatch"
+		}
+		if !slicesMatch(row.OutputIDs, outputIDs) {
+			return false, "output_ids_mismatch"
 		}
 	}
-	return true
+	return true, ""
 }
 
 func (r *DataResolver) resolveAgentIDsForDS(ctx context.Context, workspaceID uint, ds *types.DataSource) []string {
@@ -826,7 +862,7 @@ func resolvedRowsFromStored(rows []ViewRow, applyManual bool) []resolvedSheetRow
 	return result
 }
 
-func mappedRowToViewRow(sheetID, taskID, schemaH string, groupOutputs []*types.TaskOutput, row bamltypes.MappedRow, now time.Time) ViewRow {
+func mappedRowToViewRow(sheetID, componentID, taskID, schemaH string, groupOutputs []*types.TaskOutput, row bamltypes.MappedRow, now time.Time) ViewRow {
 	rowKey := normalizeToken(strings.TrimSpace(row.Row_key))
 	if rowKey == "" {
 		rowKey = "task"
@@ -840,8 +876,9 @@ func mappedRowToViewRow(sheetID, taskID, schemaH string, groupOutputs []*types.T
 		}
 	}
 	return ViewRow{
-		ID:              stableRowID(sheetID, taskID, rowKey),
+		ID:              stableRowID(sheetID, componentID, taskID, rowKey),
 		SheetID:         sheetID,
+		ComponentID:     componentID,
 		GroupID:         taskID,
 		TaskID:          taskID,
 		RowKey:          rowKey,
@@ -874,10 +911,11 @@ func sanitizeSourceOutputIDs(sourceOutputIDs, outputIDs []string) []string {
 	return filtered
 }
 
-func fallbackViewRow(sheetID, taskID, schemaH string, groupOutputs []*types.TaskOutput, now time.Time) ViewRow {
+func fallbackViewRow(sheetID, componentID, taskID, schemaH string, groupOutputs []*types.TaskOutput, now time.Time) ViewRow {
 	return ViewRow{
-		ID:              stableRowID(sheetID, taskID, "task"),
+		ID:              stableRowID(sheetID, componentID, taskID, "task"),
 		SheetID:         sheetID,
+		ComponentID:     componentID,
 		GroupID:         taskID,
 		TaskID:          taskID,
 		RowKey:          "task",
@@ -889,12 +927,16 @@ func fallbackViewRow(sheetID, taskID, schemaH string, groupOutputs []*types.Task
 	}
 }
 
-func stableRowID(sheetID, taskID, rowKey string) string {
+func stableRowID(sheetID, componentID, taskID, rowKey string) string {
 	key := normalizeToken(strings.TrimSpace(rowKey))
 	if key == "" {
 		key = "task"
 	}
-	return fmt.Sprintf("%s:%s:%s", sheetID, taskID, key)
+	componentKey := normalizeToken(strings.TrimSpace(componentID))
+	if componentKey == "" {
+		componentKey = "component"
+	}
+	return fmt.Sprintf("%s:%s:%s:%s", sheetID, componentKey, taskID, key)
 }
 
 func firstSourceOutputID(outputIDs []string) string {
@@ -1021,22 +1063,16 @@ func (r *DataResolver) fetchTaskMetadata(ctx context.Context, taskIDs []string) 
 }
 
 func buildColumnSchemas(comp types.ComponentSpec) []bamltypes.ColumnSchema {
+	configCols := parseConfigColumns(comp.Config)
+	configByKey, configOrder := normalizeConfigColumnsForSchema(configCols)
+
 	if comp.DataSource == nil || len(comp.DataSource.Transform) == 0 {
-		configCols := parseConfigColumns(comp.Config)
-		if len(configCols) == 0 {
+		if len(configByKey) == 0 {
 			return nil
 		}
-		schemas := make([]bamltypes.ColumnSchema, 0, len(configCols))
-		seen := make(map[string]struct{}, len(configCols))
-		for _, col := range configCols {
-			key := strings.TrimSpace(col.Key)
-			if key == "" {
-				continue
-			}
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
+		schemas := make([]bamltypes.ColumnSchema, 0, len(configByKey))
+		for _, key := range configOrder {
+			col := configByKey[key]
 			name := schemaColumnName(key, col.Label)
 			schemas = append(schemas, bamltypes.ColumnSchema{
 				Name:        name,
@@ -1049,23 +1085,13 @@ func buildColumnSchemas(comp types.ComponentSpec) []bamltypes.ColumnSchema {
 	}
 
 	schemas := make([]bamltypes.ColumnSchema, 0, len(comp.DataSource.Transform))
-	configCols := parseConfigColumns(comp.Config)
-	configByKey := make(map[string]configColumn, len(configCols))
-	for _, cc := range configCols {
-		key := strings.TrimSpace(cc.Key)
-		if key == "" {
-			continue
-		}
-		cc.Key = key
-		if _, exists := configByKey[key]; exists {
-			continue
-		}
-		configByKey[key] = cc
-	}
 	seen := make(map[string]bool, len(comp.DataSource.Transform))
 
 	for _, rule := range comp.DataSource.Transform {
-		key := strings.TrimSpace(rule.Column)
+		key := canonicalSchemaColumnKey(rule.Column)
+		if key == "" {
+			key = canonicalSchemaColumnKey(sourceColumnHint(rule.Source))
+		}
 		if key == "" || seen[key] {
 			continue
 		}
@@ -1085,11 +1111,11 @@ func buildColumnSchemas(comp types.ComponentSpec) []bamltypes.ColumnSchema {
 		})
 		seen[key] = true
 	}
-	for _, cc := range configCols {
-		key := strings.TrimSpace(cc.Key)
+	for _, key := range configOrder {
 		if key == "" || seen[key] {
 			continue
 		}
+		cc := configByKey[key]
 		name := schemaColumnName(key, cc.Label)
 		schemas = append(schemas, bamltypes.ColumnSchema{
 			Name:        name,
@@ -1570,6 +1596,63 @@ func schemaColumnName(key, label string) string {
 		return trimmed
 	}
 	return humanizeColumn(key)
+}
+
+func canonicalSchemaColumnKey(raw string) string {
+	key := strings.TrimSpace(raw)
+	if key == "" {
+		return ""
+	}
+	if normalized := normalizeColumnKey(key); normalized != "" {
+		if isReservedViewColumnKey(normalized) {
+			return normalized + "_value"
+		}
+		return normalized
+	}
+	return key
+}
+
+func mergeSchemaConfigColumn(existing, next configColumn) configColumn {
+	if strings.TrimSpace(existing.Label) == "" && strings.TrimSpace(next.Label) != "" {
+		existing.Label = strings.TrimSpace(next.Label)
+	}
+	if strings.TrimSpace(existing.Type) == "" && strings.TrimSpace(next.Type) != "" {
+		existing.Type = normalizeColumnType(next.Type)
+	}
+	if strings.TrimSpace(existing.Format) == "" && strings.TrimSpace(next.Format) != "" {
+		existing.Format = strings.TrimSpace(next.Format)
+	}
+	if !existing.Frozen && next.Frozen {
+		existing.Frozen = true
+	}
+	if len(existing.Options) == 0 && len(next.Options) > 0 {
+		existing.Options = next.Options
+	}
+	return existing
+}
+
+func normalizeConfigColumnsForSchema(configCols []configColumn) (map[string]configColumn, []string) {
+	configByKey := make(map[string]configColumn, len(configCols))
+	order := make([]string, 0, len(configCols))
+	for _, cc := range configCols {
+		key := canonicalSchemaColumnKey(cc.Key)
+		if key == "" {
+			continue
+		}
+		cc.Key = key
+		cc.Label = strings.TrimSpace(cc.Label)
+		if strings.TrimSpace(cc.Type) != "" {
+			cc.Type = normalizeColumnType(cc.Type)
+		}
+		cc.Format = strings.TrimSpace(cc.Format)
+		if existing, ok := configByKey[key]; ok {
+			configByKey[key] = mergeSchemaConfigColumn(existing, cc)
+			continue
+		}
+		configByKey[key] = cc
+		order = append(order, key)
+	}
+	return configByKey, order
 }
 
 func sortedOutputIDs(outputs []*types.TaskOutput) []string {

@@ -37,6 +37,7 @@ func mongoColumnFieldPath(prefix, key string) (string, error) {
 type ViewRow struct {
 	ID              string            `bson:"_id"`
 	SheetID         string            `bson:"sheet_id"`
+	ComponentID     string            `bson:"component_id,omitempty"`
 	GroupID         string            `bson:"group_id"`
 	TaskID          string            `bson:"task_id"`
 	RowKey          string            `bson:"row_key"`
@@ -79,15 +80,23 @@ func (s *ViewStore) Available() bool {
 	return s != nil && s.mongo != nil
 }
 
-func (s *ViewStore) GetRows(ctx context.Context, viewID, sheetID string) ([]ViewRow, error) {
+func rowScopeFilter(sheetID, componentID string) bson.D {
+	filter := bson.D{}
+	if strings.TrimSpace(sheetID) != "" {
+		filter = append(filter, bson.E{Key: "sheet_id", Value: sheetID})
+	}
+	if strings.TrimSpace(componentID) != "" {
+		filter = append(filter, bson.E{Key: "component_id", Value: componentID})
+	}
+	return filter
+}
+
+func (s *ViewStore) GetRows(ctx context.Context, viewID, sheetID, componentID string) ([]ViewRow, error) {
 	if !s.Available() {
 		return nil, nil
 	}
 	coll := s.mongo.Collection(s.collectionName(viewID))
-	filter := bson.D{}
-	if sheetID != "" {
-		filter = append(filter, bson.E{Key: "sheet_id", Value: sheetID})
-	}
+	filter := rowScopeFilter(sheetID, componentID)
 	cursor, err := coll.Find(ctx, filter)
 	if err != nil {
 		return nil, fmt.Errorf("find rows: %w", err)
@@ -107,6 +116,7 @@ func (s *ViewStore) GetRows(ctx context.Context, viewID, sheetID string) ([]View
 	log.Info().
 		Str("view_id", viewID).
 		Str("sheet_id", sheetID).
+		Str("component_id", componentID).
 		Str("collection", s.collectionName(viewID)).
 		Int("rows", len(rows)).
 		Msg("view: loaded rows")
@@ -143,6 +153,7 @@ func (s *ViewStore) UpsertRows(ctx context.Context, viewID string, rows []ViewRo
 	for _, row := range rows {
 		setFields := bson.D{
 			{Key: "sheet_id", Value: row.SheetID},
+			{Key: "component_id", Value: row.ComponentID},
 			{Key: "group_id", Value: row.GroupID},
 			{Key: "task_id", Value: row.TaskID},
 			{Key: "row_key", Value: row.RowKey},
@@ -179,15 +190,13 @@ func (s *ViewStore) UpsertRows(ctx context.Context, viewID string, rows []ViewRo
 }
 
 // DeleteRowsNotInGroups removes stale rows for the remapped groups.
-func (s *ViewStore) DeleteRowsNotInGroups(ctx context.Context, viewID, sheetID string, groupIDs, keepRowIDs []string) error {
+func (s *ViewStore) DeleteRowsNotInGroups(ctx context.Context, viewID, sheetID, componentID string, groupIDs, keepRowIDs []string) error {
 	if !s.Available() || len(groupIDs) == 0 {
 		return nil
 	}
 	coll := s.mongo.Collection(s.collectionName(viewID))
-	filter := bson.D{
-		{Key: "sheet_id", Value: sheetID},
-		{Key: "group_id", Value: bson.D{{Key: "$in", Value: groupIDs}}},
-	}
+	filter := rowScopeFilter(sheetID, componentID)
+	filter = append(filter, bson.E{Key: "group_id", Value: bson.D{{Key: "$in", Value: groupIDs}}})
 	if len(keepRowIDs) > 0 {
 		filter = append(filter, bson.E{Key: "_id", Value: bson.D{{Key: "$nin", Value: keepRowIDs}}})
 	}
@@ -198,6 +207,7 @@ func (s *ViewStore) DeleteRowsNotInGroups(ctx context.Context, viewID, sheetID s
 	log.Info().
 		Str("view_id", viewID).
 		Str("sheet_id", sheetID).
+		Str("component_id", componentID).
 		Int("groups", len(groupIDs)).
 		Int64("deleted", res.DeletedCount).
 		Msg("view: deleted stale rows")
@@ -246,7 +256,7 @@ func (s *ViewStore) UpdateCells(ctx context.Context, viewID, sheetID, rowID stri
 }
 
 // ClearManualCells removes manual overlays for the given rows and columns.
-func (s *ViewStore) ClearManualCells(ctx context.Context, viewID, sheetID string, rowIDs, columnKeys []string) error {
+func (s *ViewStore) ClearManualCells(ctx context.Context, viewID, sheetID, componentID string, rowIDs, columnKeys []string) error {
 	if !s.Available() || len(rowIDs) == 0 || len(columnKeys) == 0 {
 		return nil
 	}
@@ -262,10 +272,7 @@ func (s *ViewStore) ClearManualCells(ctx context.Context, viewID, sheetID string
 	}
 
 	res, err := coll.UpdateMany(ctx,
-		bson.D{
-			{Key: "sheet_id", Value: sheetID},
-			{Key: "_id", Value: bson.D{{Key: "$in", Value: rowIDs}}},
-		},
+		append(rowScopeFilter(sheetID, componentID), bson.E{Key: "_id", Value: bson.D{{Key: "$in", Value: rowIDs}}}),
 		bson.D{
 			{Key: "$unset", Value: unsetFields},
 			{Key: "$set", Value: bson.D{{Key: "updated_at", Value: time.Now()}}},
@@ -277,6 +284,7 @@ func (s *ViewStore) ClearManualCells(ctx context.Context, viewID, sheetID string
 	log.Info().
 		Str("view_id", viewID).
 		Str("sheet_id", sheetID).
+		Str("component_id", componentID).
 		Int("rows", len(rowIDs)).
 		Int("columns", len(columnKeys)).
 		Int64("matched", res.MatchedCount).
@@ -285,8 +293,8 @@ func (s *ViewStore) ClearManualCells(ctx context.Context, viewID, sheetID string
 	return nil
 }
 
-// RenameColumn renames a column key in cells and manual across a sheet.
-func (s *ViewStore) RenameColumn(ctx context.Context, viewID, sheetID, oldKey, newKey string) error {
+// RenameColumn renames a column key in cells and manual across a component scope.
+func (s *ViewStore) RenameColumn(ctx context.Context, viewID, sheetID, componentID, oldKey, newKey, schemaHash string) error {
 	if !s.Available() {
 		return nil
 	}
@@ -307,12 +315,16 @@ func (s *ViewStore) RenameColumn(ctx context.Context, viewID, sheetID, oldKey, n
 	if err != nil {
 		return err
 	}
+	update := bson.D{{Key: "$rename", Value: bson.D{
+		{Key: cellsOldPath, Value: cellsNewPath},
+		{Key: manualOldPath, Value: manualNewPath},
+	}}}
+	if strings.TrimSpace(schemaHash) != "" {
+		update = append(update, bson.E{Key: "$set", Value: bson.D{{Key: "schema_hash", Value: schemaHash}}})
+	}
 	_, err = coll.UpdateMany(ctx,
-		bson.D{{Key: "sheet_id", Value: sheetID}},
-		bson.D{{Key: "$rename", Value: bson.D{
-			{Key: cellsOldPath, Value: cellsNewPath},
-			{Key: manualOldPath, Value: manualNewPath},
-		}}},
+		rowScopeFilter(sheetID, componentID),
+		update,
 	)
 	if err != nil {
 		return fmt.Errorf("rename column: %w", err)
@@ -320,8 +332,8 @@ func (s *ViewStore) RenameColumn(ctx context.Context, viewID, sheetID, oldKey, n
 	return nil
 }
 
-// DeleteColumn removes a column key from cells and manual across a sheet.
-func (s *ViewStore) DeleteColumn(ctx context.Context, viewID, sheetID, key string) error {
+// DeleteColumn removes a column key from cells and manual across a component scope.
+func (s *ViewStore) DeleteColumn(ctx context.Context, viewID, sheetID, componentID, key, schemaHash string) error {
 	if !s.Available() {
 		return nil
 	}
@@ -334,12 +346,16 @@ func (s *ViewStore) DeleteColumn(ctx context.Context, viewID, sheetID, key strin
 	if err != nil {
 		return err
 	}
+	update := bson.D{{Key: "$unset", Value: bson.D{
+		{Key: cellsPath, Value: ""},
+		{Key: manualPath, Value: ""},
+	}}}
+	if strings.TrimSpace(schemaHash) != "" {
+		update = append(update, bson.E{Key: "$set", Value: bson.D{{Key: "schema_hash", Value: schemaHash}}})
+	}
 	_, err = coll.UpdateMany(ctx,
-		bson.D{{Key: "sheet_id", Value: sheetID}},
-		bson.D{{Key: "$unset", Value: bson.D{
-			{Key: cellsPath, Value: ""},
-			{Key: manualPath, Value: ""},
-		}}},
+		rowScopeFilter(sheetID, componentID),
+		update,
 	)
 	if err != nil {
 		return fmt.Errorf("delete column: %w", err)

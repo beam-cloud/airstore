@@ -384,6 +384,56 @@ func TestBuildColumnSchemasSkipsDuplicateKeys(t *testing.T) {
 	}
 }
 
+func TestBuildColumnSchemasCanonicalizesAliasKeys(t *testing.T) {
+	compAlias := types.ComponentSpec{
+		Type:  types.ComponentTypeTable,
+		Title: "Recipes",
+		DataSource: &types.DataSource{
+			Transform: []types.TransformRule{
+				{Column: "source_url", Source: "data.primary_url", Type: "link"},
+			},
+		},
+		Config: map[string]any{
+			"columns": []any{
+				map[string]any{"key": "Source URL", "label": "Source URL", "type": "link"},
+				map[string]any{"key": "source_url", "label": "Canonical Source URL", "type": "link"},
+			},
+		},
+	}
+	compCanonical := types.ComponentSpec{
+		Type:  types.ComponentTypeTable,
+		Title: "Recipes",
+		DataSource: &types.DataSource{
+			Transform: []types.TransformRule{
+				{Column: "source_url", Source: "data.primary_url", Type: "link"},
+			},
+		},
+		Config: map[string]any{
+			"columns": []any{
+				map[string]any{"key": "source_url", "label": "Source URL", "type": "link"},
+			},
+		},
+	}
+
+	aliasSchemas := buildColumnSchemas(compAlias)
+	if got, want := len(aliasSchemas), 1; got != want {
+		t.Fatalf("alias schema count = %d, want %d", got, want)
+	}
+	if got, want := aliasSchemas[0].Key, "source_url"; got != want {
+		t.Fatalf("alias schema key = %q, want %q", got, want)
+	}
+	if got, want := aliasSchemas[0].Name, "Source URL"; got != want {
+		t.Fatalf("alias schema name = %q, want %q", got, want)
+	}
+
+	canonicalSchemas := buildColumnSchemas(compCanonical)
+	hashAlias := hashColumns(aliasSchemas, types.RowStrategy{Mode: types.RowStrategyModeTask}, "recipes", compAlias.Title, compAlias.Type)
+	hashCanonical := hashColumns(canonicalSchemas, types.RowStrategy{Mode: types.RowStrategyModeTask}, "recipes", compCanonical.Title, compCanonical.Type)
+	if hashAlias != hashCanonical {
+		t.Fatalf("alias hash = %q, canonical hash = %q, want match", hashAlias, hashCanonical)
+	}
+}
+
 func TestAssembleTableIncludesTaskWakeMetadata(t *testing.T) {
 	wakeAt := time.Date(2026, 3, 15, 18, 30, 0, 0, time.UTC)
 	wakeReason := "Check inbox for new broker replies"
@@ -445,13 +495,14 @@ func TestAssembleTableIncludesTaskWakeMetadata(t *testing.T) {
 
 func TestViewRowMergedCells(t *testing.T) {
 	row := &ViewRow{
-		ID:         "sheet-1:task-1:task",
-		SheetID:    "sheet-1",
-		GroupID:    "task-1",
-		TaskID:     "task-1",
-		RowKey:     "task",
-		SchemaHash: "testhash123",
-		OutputIDs:  []string{"out-1", "out-2"},
+		ID:          "sheet-1:c1:task-1:task",
+		SheetID:     "sheet-1",
+		ComponentID: "c1",
+		GroupID:     "task-1",
+		TaskID:      "task-1",
+		RowKey:      "task",
+		SchemaHash:  "testhash123",
+		OutputIDs:   []string{"out-1", "out-2"},
 		Cells: map[string]string{
 			"recipe_name": "Spaghetti",
 			"video_url":   "https://yt.com/1",
@@ -697,7 +748,7 @@ func TestMappedRowToViewRowSanitizesSourceOutputIDs(t *testing.T) {
 		{ID: "out-1"},
 	}
 
-	row := mappedRowToViewRow("sheet-1", "task-1", "schema", outputs, bamltypes.MappedRow{
+	row := mappedRowToViewRow("sheet-1", "c1", "task-1", "schema", outputs, bamltypes.MappedRow{
 		Row_key:           "task",
 		Source_output_ids: []string{"out-2", "foreign-id"},
 		Cells:             []bamltypes.MappedCell{{Column: "name", Value: "Alice"}},
@@ -705,13 +756,44 @@ func TestMappedRowToViewRowSanitizesSourceOutputIDs(t *testing.T) {
 	if got, want := row.SourceOutputIDs, []string{"out-2"}; !slicesMatch(got, want) {
 		t.Fatalf("sanitized source ids = %v, want %v", got, want)
 	}
+	if got, want := row.ComponentID, "c1"; got != want {
+		t.Fatalf("component id = %q, want %q", got, want)
+	}
 
-	fallback := mappedRowToViewRow("sheet-1", "task-1", "schema", outputs, bamltypes.MappedRow{
+	fallback := mappedRowToViewRow("sheet-1", "c1", "task-1", "schema", outputs, bamltypes.MappedRow{
 		Row_key:           "task",
 		Source_output_ids: []string{"foreign-id"},
 	}, now)
 	if got, want := fallback.SourceOutputIDs, []string{"out-1", "out-2"}; !slicesMatch(got, want) {
 		t.Fatalf("fallback source ids = %v, want %v", got, want)
+	}
+}
+
+func TestStableRowIDIncludesComponentScope(t *testing.T) {
+	first := stableRowID("sheet-1", "c1", "task-1", "task")
+	second := stableRowID("sheet-1", "c2", "task-1", "task")
+	if first == second {
+		t.Fatalf("stable row ids should differ by component: %q", first)
+	}
+}
+
+func TestGroupRowsFreshReportsMismatchReasons(t *testing.T) {
+	row := fallbackViewRow("sheet-1", "c1", "task-1", "schema-1", []*types.TaskOutput{{ID: "out-1"}}, time.Now())
+
+	if ok, reason := groupRowsFresh([]ViewRow{row}, "c1", "schema-1", []string{"out-1"}); !ok || reason != "" {
+		t.Fatalf("expected fresh rows, got ok=%v reason=%q", ok, reason)
+	}
+	if ok, reason := groupRowsFresh([]ViewRow{row}, "c2", "schema-1", []string{"out-1"}); ok || reason != "component_scope_mismatch" {
+		t.Fatalf("expected component mismatch, got ok=%v reason=%q", ok, reason)
+	}
+	if ok, reason := groupRowsFresh([]ViewRow{row}, "c1", "schema-2", []string{"out-1"}); ok || reason != "schema_hash_mismatch" {
+		t.Fatalf("expected schema mismatch, got ok=%v reason=%q", ok, reason)
+	}
+	if ok, reason := groupRowsFresh([]ViewRow{row}, "c1", "schema-1", []string{"out-2"}); ok || reason != "output_ids_mismatch" {
+		t.Fatalf("expected output mismatch, got ok=%v reason=%q", ok, reason)
+	}
+	if ok, reason := groupRowsFresh(nil, "c1", "schema-1", []string{"out-1"}); ok || reason != "missing_rows" {
+		t.Fatalf("expected missing rows, got ok=%v reason=%q", ok, reason)
 	}
 }
 

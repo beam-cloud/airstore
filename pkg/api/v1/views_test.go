@@ -5,8 +5,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/beam-cloud/airstore/pkg/types"
+	"github.com/beam-cloud/airstore/pkg/views"
 	"github.com/labstack/echo/v4"
 )
 
@@ -173,6 +175,126 @@ func TestApplyColumnRenamesToDefinitionDoesNotChainOverlappingRenames(t *testing
 	}
 }
 
+func TestApplyColumnRenamesToDefinitionScopesRenameToComponent(t *testing.T) {
+	def := types.ViewDefinition{
+		Sheets: []types.SheetSpec{
+			{
+				ID: "sheet-a",
+				Components: []types.ComponentSpec{
+					{
+						ID: "table-a",
+						DataSource: &types.DataSource{
+							Transform: []types.TransformRule{
+								{Column: "shared", Source: "shared", Type: "text"},
+							},
+						},
+						Config: map[string]any{
+							"columns": []any{
+								map[string]any{"key": "shared", "label": "Shared A", "type": "text"},
+							},
+						},
+					},
+					{
+						ID: "table-b",
+						DataSource: &types.DataSource{
+							Transform: []types.TransformRule{
+								{Column: "shared", Source: "shared", Type: "text"},
+							},
+						},
+						Config: map[string]any{
+							"columns": []any{
+								map[string]any{"key": "shared", "label": "Shared B", "type": "text"},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	applyColumnRenamesToDefinition(&def, []columnRename{
+		{SheetID: "sheet-a", ComponentID: "table-a", OldKey: "shared", NewKey: "renamed_shared", NewLabel: "Renamed Shared"},
+	})
+
+	if got := def.Sheets[0].Components[0].DataSource.Transform[0].Column; got != "renamed_shared" {
+		t.Fatalf("table-a transform column = %q, want renamed_shared", got)
+	}
+	if got := def.Sheets[0].Components[1].DataSource.Transform[0].Column; got != "shared" {
+		t.Fatalf("table-b transform column = %q, want shared", got)
+	}
+}
+
+func TestDeletedViewColumnsScopesColumnsByComponent(t *testing.T) {
+	previous := types.ViewDefinition{
+		Sheets: []types.SheetSpec{
+			{
+				ID: "sheet-a",
+				Components: []types.ComponentSpec{
+					{
+						ID:   "table-a",
+						Type: types.ComponentTypeTable,
+						Config: map[string]any{"columns": []any{
+							map[string]any{"key": "shared", "label": "Shared", "type": "text"},
+							map[string]any{"key": "only_a", "label": "Only A", "type": "text"},
+						}},
+						DataSource: &types.DataSource{Transform: []types.TransformRule{
+							{Column: "shared", Source: "shared", Type: "text"},
+							{Column: "only_a", Source: "only_a", Type: "text"},
+						}},
+					},
+					{
+						ID:   "table-b",
+						Type: types.ComponentTypeTable,
+						Config: map[string]any{"columns": []any{
+							map[string]any{"key": "shared", "label": "Shared", "type": "text"},
+						}},
+						DataSource: &types.DataSource{Transform: []types.TransformRule{
+							{Column: "shared", Source: "shared", Type: "text"},
+						}},
+					},
+				},
+			},
+		},
+	}
+	next := types.ViewDefinition{
+		Sheets: []types.SheetSpec{
+			{
+				ID: "sheet-a",
+				Components: []types.ComponentSpec{
+					{
+						ID:   "table-a",
+						Type: types.ComponentTypeTable,
+						Config: map[string]any{"columns": []any{
+							map[string]any{"key": "shared", "label": "Shared", "type": "text"},
+						}},
+						DataSource: &types.DataSource{Transform: []types.TransformRule{
+							{Column: "shared", Source: "shared", Type: "text"},
+						}},
+					},
+					{
+						ID:   "table-b",
+						Type: types.ComponentTypeTable,
+						Config: map[string]any{"columns": []any{
+							map[string]any{"key": "shared", "label": "Shared", "type": "text"},
+						}},
+						DataSource: &types.DataSource{Transform: []types.TransformRule{
+							{Column: "shared", Source: "shared", Type: "text"},
+						}},
+					},
+				},
+			},
+		},
+	}
+
+	deleted := deletedViewColumns(previous, next)
+	if got, want := len(deleted), 1; got != want {
+		t.Fatalf("deleted column count = %d, want %d", got, want)
+	}
+	if got := deleted[0]; got.SheetID != "sheet-a" || got.ComponentID != "table-a" || got.Key != "only_a" {
+		t.Fatalf("deleted column = %#v, want sheet-a/table-a/only_a", got)
+	}
+}
+
 func TestDraftsRouteReturnsServiceUnavailableWhenDisabled(t *testing.T) {
 	e := echo.New()
 	NewViewsGroup(e.Group("/workspaces/:workspace_id/views"), nil, nil, nil)
@@ -226,5 +348,69 @@ func TestSyncNameDescriptionFallsBackToDefinition(t *testing.T) {
 	}
 	if got := view.Definition.Name; got != "Def name" {
 		t.Fatalf("view.Definition.Name = %q, want %q", got, "Def name")
+	}
+}
+
+func TestMergeCachedViewDraftSummariesPrefersCachedSessionState(t *testing.T) {
+	viewDraftsStore.Lock()
+	previous := viewDraftsStore.m
+	viewDraftsStore.m = map[string]*viewDraftSession{
+		"draft-1": {
+			draft: &views.Draft{
+				ID:              "draft-1",
+				WorkspaceID:     "ws-1",
+				Status:          "published",
+				PublishedViewID: "view-1",
+				CreatedAt:       10,
+				UpdatedAt:       20,
+			},
+			lastTouched: time.Now(),
+		},
+		"draft-2": {
+			draft: &views.Draft{
+				ID:          "draft-2",
+				WorkspaceID: "ws-1",
+				Status:      "active",
+				CreatedAt:   15,
+				UpdatedAt:   25,
+			},
+			lastTouched: time.Now(),
+		},
+		"other-workspace": {
+			draft: &views.Draft{
+				ID:          "draft-3",
+				WorkspaceID: "ws-2",
+				Status:      "active",
+				CreatedAt:   30,
+				UpdatedAt:   30,
+			},
+			lastTouched: time.Now(),
+		},
+	}
+	viewDraftsStore.Unlock()
+	defer func() {
+		viewDraftsStore.Lock()
+		viewDraftsStore.m = previous
+		viewDraftsStore.Unlock()
+	}()
+
+	got := mergeCachedViewDraftSummaries("ws-1", []views.DraftSummary{
+		{ID: "draft-1", Status: "active", CreatedAt: 10, UpdatedAt: 11},
+	})
+
+	if len(got) != 2 {
+		t.Fatalf("summary count = %d, want 2", len(got))
+	}
+	if got[0].ID != "draft-2" {
+		t.Fatalf("first summary id = %q, want draft-2", got[0].ID)
+	}
+	if got[1].ID != "draft-1" {
+		t.Fatalf("second summary id = %q, want draft-1", got[1].ID)
+	}
+	if got[1].Status != "published" {
+		t.Fatalf("draft-1 status = %q, want published", got[1].Status)
+	}
+	if got[1].ViewID != "view-1" {
+		t.Fatalf("draft-1 view id = %q, want view-1", got[1].ViewID)
 	}
 }
