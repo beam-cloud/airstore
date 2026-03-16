@@ -33,13 +33,14 @@ func (c ComponentSpec) IsTable() bool {
 
 // View is the persisted representation of a published view.
 type View struct {
-	ID          string         `json:"id"`
-	WorkspaceID uint           `json:"workspace_id"`
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	Definition  ViewDefinition `json:"definition"`
-	CreatedAt   time.Time      `json:"created_at"`
-	UpdatedAt   time.Time      `json:"updated_at"`
+	ID            string         `json:"id"`
+	WorkspaceID   uint           `json:"workspace_id"`
+	Name          string         `json:"name"`
+	Description   string         `json:"description"`
+	SourceDraftID string         `json:"source_draft_id,omitempty"`
+	Definition    ViewDefinition `json:"definition"`
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
 }
 
 // ViewDefinition is the JSON-serializable workbook schema for a view.

@@ -39,14 +39,14 @@ type viewMappingResult struct {
 }
 
 type resolvedSheetRow struct {
-	SheetID        string
-	TaskID         string
-	RowID          string
-	RowKey         string
-	OutputID       string
-	OutputStatus   string
+	SheetID         string
+	TaskID          string
+	RowID           string
+	RowKey          string
+	OutputID        string
+	OutputStatus    string
 	SourceOutputIDs string
-	Cells          map[string]string
+	Cells           map[string]string
 }
 
 const (
@@ -595,8 +595,19 @@ func dataSourceNarrowsTaskSelection(ds *types.DataSource) bool {
 	if ds == nil {
 		return false
 	}
+	if dataSourceOutputTypeFallback(ds) != "" {
+		return true
+	}
 	return strings.TrimSpace(ds.ArtifactKey) != "" ||
-		strings.TrimSpace(ds.TimeRange) != ""
+		strings.TrimSpace(ds.TimeRange) != "" ||
+		len(ds.Statuses) > 0
+}
+
+func dataSourceOutputTypeFallback(ds *types.DataSource) string {
+	if ds == nil || strings.TrimSpace(ds.ArtifactKey) != "" {
+		return ""
+	}
+	return strings.TrimSpace(ds.OutputType)
 }
 
 func (r *DataResolver) resolveScopedAgentIDs(ctx context.Context, workspaceID uint, ds *types.DataSource, viewAgentRefs []string) ([]string, bool) {
@@ -606,6 +617,9 @@ func (r *DataResolver) resolveScopedAgentIDs(ctx context.Context, workspaceID ui
 	}
 	if len(resolvedAgentIDs) == 0 && len(viewAgentRefs) > 0 {
 		resolvedAgentIDs = r.resolveAgentIDsFromRefs(ctx, workspaceID, viewAgentRefs)
+		if len(resolvedAgentIDs) == 0 {
+			return nil, false
+		}
 	}
 	return resolvedAgentIDs, true
 }
@@ -634,6 +648,9 @@ func (r *DataResolver) listScopedOutputs(ctx context.Context, workspaceID uint, 
 
 func (r *DataResolver) fetchOutputsForScope(ctx context.Context, workspaceID uint, ds *types.DataSource, agentIDs []string) ([]*types.TaskOutput, error) {
 	filter := baseTaskOutputFilter()
+	if outputType := dataSourceOutputTypeFallback(ds); outputType != "" {
+		filter.OutputType = &outputType
+	}
 	outputs, err := r.listScopedOutputs(ctx, workspaceID, filter, agentIDs)
 	if err != nil {
 		return nil, err
@@ -685,12 +702,16 @@ func filterOutputsForDataSource(outputs []*types.TaskOutput, ds *types.DataSourc
 	}
 
 	hasArtifactKey := strings.TrimSpace(ds.ArtifactKey) != ""
+	outputTypeFallback := dataSourceOutputTypeFallback(ds)
 	filtered := make([]*types.TaskOutput, 0, len(outputs))
 	for _, output := range outputs {
 		if output == nil {
 			continue
 		}
 		if len(agentSet) > 0 && (output.AgentID == nil || !agentSet[strings.TrimSpace(*output.AgentID)]) {
+			continue
+		}
+		if outputTypeFallback != "" && !strings.EqualFold(strings.TrimSpace(output.OutputType), outputTypeFallback) {
 			continue
 		}
 		if hasArtifactKey && !ArtifactOf(output).MatchesKey(ds.ArtifactKey) {

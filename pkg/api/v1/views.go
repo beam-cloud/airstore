@@ -955,6 +955,15 @@ func mergeCachedViewDraftSummaries(workspaceID string, drafts []views.DraftSumma
 	return merged
 }
 
+func isTerminalDraftStatus(status string) bool {
+	switch strings.TrimSpace(status) {
+	case "published", "discarded":
+		return true
+	default:
+		return false
+	}
+}
+
 func applyCachedDraftSummary(summary *views.DraftSummary, draft *views.Draft) {
 	if summary == nil || draft == nil {
 		return
@@ -962,12 +971,16 @@ func applyCachedDraftSummary(summary *views.DraftSummary, draft *views.Draft) {
 	if draft.UpdatedAt > summary.UpdatedAt {
 		summary.UpdatedAt = draft.UpdatedAt
 	}
-	if status := strings.TrimSpace(draft.Status); status != "" {
-		summary.Status = status
-	}
 	if publishedViewID := strings.TrimSpace(draft.PublishedViewID); publishedViewID != "" {
 		summary.Status = "published"
 		summary.ViewID = publishedViewID
+		return
+	}
+	if status := strings.TrimSpace(draft.Status); status != "" {
+		if isTerminalDraftStatus(summary.Status) && !isTerminalDraftStatus(status) {
+			return
+		}
+		summary.Status = status
 	}
 }
 
@@ -984,13 +997,10 @@ func (vg *ViewsGroup) GetDraft(c echo.Context) error {
 	if vg.copilot == nil || !vg.copilot.DraftsAvailable() {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "view copilot not configured")
 	}
-	session, err := vg.getViewDraftSession(c, c.Param("draft_id"))
+	draft, err := vg.copilot.LoadDraft(c.Request().Context(), c.Param("workspace_id"), c.Param("draft_id"))
 	if err != nil {
 		return ErrorResponse(c, http.StatusNotFound, "draft not found")
 	}
-	session.mu.Lock()
-	draft := cloneViewDraft(session.draft)
-	session.mu.Unlock()
 	return SuccessResponse(c, draft)
 }
 
@@ -1217,15 +1227,10 @@ func (vg *ViewsGroup) PublishDraft(c echo.Context) error {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 
-	indexCtx, indexCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer indexCancel()
-	if err := vg.copilot.IndexDraftPublished(indexCtx, wsID, draftID, v.Name, v.ID); err != nil {
-		log.Warn().Err(err).
-			Str("workspace_id", wsID).
-			Str("draft_id", draftID).
-			Str("view_id", v.ID).
-			Msg("failed to index published draft")
-	}
+	// Publish success is determined by the view write plus the durable draft
+	// stream update inside PublishView. The workspace draft index is a
+	// secondary projection, so keep its append off the request path.
+	vg.copilot.IndexDraftPublishedAsync(wsID, draftID, v.Name, v.ID)
 
 	return SuccessResponse(c, v)
 }

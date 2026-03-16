@@ -959,6 +959,33 @@ func (e *ErrTaskOutputNotFound) Error() string {
 	return "task output not found: " + e.ID
 }
 
+type ErrTaskOutputConflict struct {
+	ID                  string
+	WorkspaceID         uint
+	TaskID              string
+	ExistingWorkspaceID uint
+	ExistingTaskID      string
+}
+
+func (e *ErrTaskOutputConflict) Error() string {
+	return fmt.Sprintf(
+		"task output id %s for workspace %d task %s conflicts with existing output in workspace %d task %s",
+		e.ID,
+		e.WorkspaceID,
+		e.TaskID,
+		e.ExistingWorkspaceID,
+		e.ExistingTaskID,
+	)
+}
+
+type ErrInvalidTaskInput struct {
+	Message string
+}
+
+func (e *ErrInvalidTaskInput) Error() string {
+	return e.Message
+}
+
 type AgentStats struct {
 	Total          int            `json:"total"`
 	ByState        map[string]int `json:"by_state"`

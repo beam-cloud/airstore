@@ -3,8 +3,10 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -154,10 +156,11 @@ func (w *AnalyzerWriter) enqueue(job analyzerJob) {
 func (w *AnalyzerWriter) process(job analyzerJob) {
 	defer w.finishProcess()
 
-	outputs, err := agentsignal.ExtractOutputs(
-		w.ctx, job.toolName, job.toolInput, job.toolResult,
-		agentsignal.WithEnv(w.bamlEnv),
-	)
+	job.toolName = sanitizeUTF8(job.toolName)
+	job.toolInput = sanitizeUTF8(job.toolInput)
+	job.toolResult = sanitizeUTF8(job.toolResult)
+
+	outputs, err := w.callExtractOutputs(job)
 	if err != nil {
 		log.Warn().Err(err).Str("task", w.taskID).Str("tool", job.toolName).
 			Msg("BAML ExtractOutputs failed")
@@ -396,7 +399,12 @@ func defaultFinalResponseExtractor(
 	userMessage *string,
 	assistantMessage string,
 	bamlEnv map[string]string,
-) (signaltypes.ExtractedOutput, error) {
+) (out signaltypes.ExtractedOutput, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("ExtractFinalResponseOutput panicked: %v", r)
+		}
+	}()
 	return agentsignal.ExtractFinalResponseOutput(
 		ctx, userMessage, assistantMessage,
 		agentsignal.WithEnv(bamlEnv),
@@ -416,9 +424,13 @@ func persistFinalResponseOutput(
 	if client == nil {
 		return nil
 	}
-	assistantMessage = strings.TrimSpace(assistantMessage)
+	assistantMessage = strings.TrimSpace(sanitizeUTF8(assistantMessage))
 	if assistantMessage == "" {
 		return nil
+	}
+	if userMessage != nil {
+		sanitized := sanitizeUTF8(*userMessage)
+		userMessage = &sanitized
 	}
 	if extract == nil {
 		extract = defaultFinalResponseExtractor
@@ -454,6 +466,28 @@ func persistFinalResponseOutput(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// callExtractOutputs wraps the BAML ExtractOutputs call with panic recovery.
+// The generated BAML client panics on encoding errors (e.g. invalid UTF-8 in
+// protobuf string fields) instead of returning an error.
+func (w *AnalyzerWriter) callExtractOutputs(job analyzerJob) (outputs []signaltypes.ExtractedOutput, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("ExtractOutputs panicked: %v", r)
+		}
+	}()
+	return agentsignal.ExtractOutputs(
+		w.ctx, job.toolName, job.toolInput, job.toolResult,
+		agentsignal.WithEnv(w.bamlEnv),
+	)
+}
+
+func sanitizeUTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	return strings.ToValidUTF8(s, "\uFFFD")
+}
 
 func derefStr(p *string) string {
 	if p != nil {

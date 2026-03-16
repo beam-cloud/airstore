@@ -406,7 +406,11 @@ func (s *AgentService) AcceptTaskInput(
 	}
 
 	if len(items) > 0 {
-		message = s.processItemDecisions(ctx, workspaceID, taskID, items, message)
+		processedMessage, err := s.processItemDecisions(ctx, workspaceID, taskID, items, message)
+		if err != nil {
+			return nil, err
+		}
+		message = processedMessage
 		if action == nil {
 			approve := types.TaskInputActionApprove
 			action = &approve
@@ -476,34 +480,71 @@ func (s *AgentService) AcceptTaskInput(
 	return task, nil
 }
 
+type itemDecisionUpdate struct {
+	item           types.ItemDecision
+	output         *types.TaskOutput
+	originalStatus string
+	targetStatus   string
+}
+
 // processItemDecisions updates output statuses and builds a composite message
 // from per-item approval/rejection decisions.
-func (s *AgentService) processItemDecisions(ctx context.Context, workspaceID uint, taskID string, items []types.ItemDecision, userMessage string) string {
+func (s *AgentService) processItemDecisions(ctx context.Context, workspaceID uint, taskID string, items []types.ItemDecision, userMessage string) (string, error) {
 	buckets := map[string][]string{"Approved": nil, "Rejected": nil}
+	updates := make([]itemDecisionUpdate, 0, len(items))
 	for _, item := range items {
-		output, err := s.backend.GetTaskOutput(ctx, workspaceID, item.OutputID)
+		outputID := strings.TrimSpace(item.OutputID)
+		if outputID == "" {
+			return "", &types.ErrInvalidTaskInput{Message: "item output_id is required"}
+		}
+
+		targetStatus, err := taskOutputStatusForDecision(item)
 		if err != nil {
-			log.Warn().Err(err).Str("output_id", item.OutputID).Msg("item output not found")
-			continue
+			return "", err
+		}
+
+		output, err := s.backend.GetTaskOutput(ctx, workspaceID, outputID)
+		if err != nil {
+			var notFound *types.ErrTaskOutputNotFound
+			if errors.As(err, &notFound) {
+				return "", &types.ErrInvalidTaskInput{Message: fmt.Sprintf("item output %s not found", outputID)}
+			}
+			return "", fmt.Errorf("get task output %s: %w", outputID, err)
 		}
 		if output.TaskID != taskID {
-			log.Warn().Str("output_id", item.OutputID).Str("task_id", taskID).Msg("item does not belong to task")
-			continue
+			return "", &types.ErrInvalidTaskInput{
+				Message: fmt.Sprintf("item output %s does not belong to task %s", outputID, taskID),
+			}
 		}
-		status := types.TaskOutputStatusApproved
-		if item.Action == types.TaskInputActionReject {
-			status = types.TaskOutputStatusRejected
+
+		updates = append(updates, itemDecisionUpdate{
+			item:           item,
+			output:         output,
+			originalStatus: output.Status,
+			targetStatus:   targetStatus,
+		})
+	}
+
+	applied := make([]itemDecisionUpdate, 0, len(updates))
+	for _, update := range updates {
+		if err := s.backend.UpdateTaskOutputStatus(ctx, workspaceID, update.output.ID, update.targetStatus); err != nil {
+			for i := len(applied) - 1; i >= 0; i-- {
+				previous := applied[i]
+				if rollbackErr := s.backend.UpdateTaskOutputStatus(ctx, workspaceID, previous.output.ID, previous.originalStatus); rollbackErr != nil {
+					log.Error().Err(rollbackErr).Str("output_id", previous.output.ID).Msg("failed to roll back item decision status")
+				}
+			}
+			return "", fmt.Errorf("update output status %s: %w", update.output.ID, err)
 		}
-		if err := s.backend.UpdateTaskOutputStatus(ctx, workspaceID, item.OutputID, status); err != nil {
-			log.Warn().Err(err).Str("output_id", item.OutputID).Msg("failed to update output status")
-			continue
-		}
-		label := output.Title
-		if item.Action == types.TaskInputActionReject && item.Reason != "" {
-			label += " — " + item.Reason
+		update.output.Status = update.targetStatus
+		applied = append(applied, update)
+
+		label := update.output.Title
+		if update.item.Action == types.TaskInputActionReject && update.item.Reason != "" {
+			label += " — " + update.item.Reason
 		}
 		bucket := "Approved"
-		if item.Action == types.TaskInputActionReject {
+		if update.item.Action == types.TaskInputActionReject {
 			bucket = "Rejected"
 		}
 		buckets[bucket] = append(buckets[bucket], label)
@@ -523,9 +564,22 @@ func (s *AgentService) processItemDecisions(ctx context.Context, workspaceID uin
 		parts = append(parts, userMessage)
 	}
 	if len(parts) == 0 {
-		return "Approved. Please proceed."
+		return "Approved. Please proceed.", nil
 	}
-	return strings.Join(parts, "\n")
+	return strings.Join(parts, "\n"), nil
+}
+
+func taskOutputStatusForDecision(item types.ItemDecision) (string, error) {
+	switch item.Action {
+	case types.TaskInputActionApprove:
+		return types.TaskOutputStatusApproved, nil
+	case types.TaskInputActionReject:
+		return types.TaskOutputStatusRejected, nil
+	default:
+		return "", &types.ErrInvalidTaskInput{
+			Message: fmt.Sprintf("invalid action %q for item %s", item.Action, strings.TrimSpace(item.OutputID)),
+		}
+	}
 }
 
 // deliverTaskInput attempts to wake the active run or requeue the task.

@@ -2,6 +2,7 @@ package apiv1
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/beam-cloud/airstore/pkg/common"
@@ -234,6 +235,10 @@ func (g *TaskOutputsGroup) CreateOutput(c echo.Context) error {
 	}
 
 	if err := g.backend.CreateTaskOutput(c.Request().Context(), output); err != nil {
+		var conflictErr *types.ErrTaskOutputConflict
+		if errors.As(err, &conflictErr) {
+			return ErrorResponse(c, http.StatusConflict, err.Error())
+		}
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 	publishTaskLive(c, g.live, workspaceID, taskID)
