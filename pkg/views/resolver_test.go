@@ -131,6 +131,90 @@ func TestFetchComponentOutputsSkipsUnresolvedAgentRefs(t *testing.T) {
 	}
 }
 
+func TestFetchMappingOutputsExpandsTaskContextForSelectedTasks(t *testing.T) {
+	agentID := "agent-1"
+	primary := newRecipeOutput("out-1")
+	primary.AgentID = &agentID
+	primary.TaskID = "task-1"
+	primary.Metadata = map[string]any{"artifact_key": "extracted-recipes"}
+
+	sibling := newRecipeOutput("out-2")
+	sibling.AgentID = &agentID
+	sibling.TaskID = "task-1"
+	sibling.Metadata = map[string]any{"artifact_key": "drive-recipe-pdf"}
+
+	otherTask := newRecipeOutput("out-3")
+	otherTask.AgentID = &agentID
+	otherTask.TaskID = "task-2"
+	otherTask.Metadata = map[string]any{"artifact_key": "drive-recipe-pdf"}
+
+	backend := &fakeResolverBackend{
+		profilesByKey: map[string]*types.AgentProfile{
+			"chef-agent": {ID: agentID},
+		},
+		outputsByAgent: map[string][]*types.TaskOutput{
+			agentID: {primary, sibling, otherTask},
+		},
+	}
+	resolver := &DataResolver{backend: backend, store: nil}
+
+	outputs, err := resolver.fetchMappingOutputs(
+		context.Background(),
+		7,
+		&types.DataSource{ArtifactKey: "extracted-recipes"},
+		[]string{"chef-agent"},
+	)
+	if err != nil {
+		t.Fatalf("fetchMappingOutputs returned error: %v", err)
+	}
+	if got, want := len(outputs), 2; got != want {
+		t.Fatalf("output count = %d, want %d", got, want)
+	}
+	if got, want := sortedOutputIDs(outputs), []string{"out-1", "out-2"}; !slicesMatch(got, want) {
+		t.Fatalf("output ids = %v, want %v", got, want)
+	}
+	if got, want := len(backend.queriedAgentIDs), 2; got != want {
+		t.Fatalf("query count = %d, want %d", got, want)
+	}
+}
+
+func TestFetchMappingOutputsAvoidsExtraExpansionWhenSelectionIsAlreadyFull(t *testing.T) {
+	agentID := "agent-1"
+	first := newRecipeOutput("out-1")
+	first.AgentID = &agentID
+	first.TaskID = "task-1"
+
+	second := newRecipeOutput("out-2")
+	second.AgentID = &agentID
+	second.TaskID = "task-2"
+
+	backend := &fakeResolverBackend{
+		profilesByKey: map[string]*types.AgentProfile{
+			"chef-agent": {ID: agentID},
+		},
+		outputsByAgent: map[string][]*types.TaskOutput{
+			agentID: {first, second},
+		},
+	}
+	resolver := &DataResolver{backend: backend, store: nil}
+
+	outputs, err := resolver.fetchMappingOutputs(
+		context.Background(),
+		7,
+		&types.DataSource{},
+		[]string{"chef-agent"},
+	)
+	if err != nil {
+		t.Fatalf("fetchMappingOutputs returned error: %v", err)
+	}
+	if got, want := len(outputs), 2; got != want {
+		t.Fatalf("output count = %d, want %d", got, want)
+	}
+	if got, want := len(backend.queriedAgentIDs), 1; got != want {
+		t.Fatalf("query count = %d, want %d", got, want)
+	}
+}
+
 func TestFilterOutputsForDataSource(t *testing.T) {
 	agentID := "agent-1"
 	mkOutput := func(id, artifactKey string) *types.TaskOutput {
