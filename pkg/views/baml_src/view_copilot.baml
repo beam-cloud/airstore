@@ -24,13 +24,14 @@ enum OperationType {
 
 class Operation {
   type OperationType @description("The type of workspace mutation to perform")
-  payload string @description("JSON payload with operation-specific fields. For CREATE_AGENT: {name, role, model?, skills?[]}. For UPDATE_AGENT: {agent_id, name?, role?, model?, skills?[]}. For CREATE_SKILL: {name, content}. For ASSIGN_SKILL: {agent_id, skill_name}. IMPORTANT: Do NOT include system_prompt — the system generates it automatically with proper Airstore context. model must be one of: 'claude-sonnet-4-6' (default, omit if unsure) or 'claude-opus-4-6'. role must be 1-2 words max (e.g. 'Research', 'Engineering', 'Outreach'). For CREATE_SKILL, content must be valid SKILL.md with YAML frontmatter (---\\nname: ...\\ndescription: ...\\n---).")
+  payload string @description("JSON payload with operation-specific fields. For CREATE_AGENT: {name, role, model?, skills?[]}. For UPDATE_AGENT: {agent_id, name?, role?, model?, skills?[]}. For CREATE_SKILL: {name, content}. For INSTALL_SKILL: {skill_name} to install an existing workspace skill, or {name, content} / {skill_name, content} to install or update skill content. For ASSIGN_SKILL: {agent_id, skill_name}. IMPORTANT: Do NOT include system_prompt — the system generates it automatically with proper Airstore context. model must be one of: 'claude-sonnet-4-6' (default, omit if unsure) or 'claude-opus-4-6'. role must be 1-2 words max (e.g. 'Research', 'Engineering', 'Outreach'). For CREATE_SKILL, content must be valid SKILL.md with YAML frontmatter (---\\nname: ...\\ndescription: ...\\n---).")
 }
 
 class ViewDraftResponse {
   update_type ViewUpdateType @description("What kind of change this response represents")
   message string @description("Conversational response explaining what was done or asking for clarification")
   view_content string @description("The complete JSON view definition. Empty string when update_type is CONVERSATION.")
+  removed_sheet_ids string[] @description("Sheet IDs intentionally removed from the current view. Use only when the user explicitly asked to remove those sheets. Empty array otherwise.")
   operations Operation[] @description("Workspace mutations to execute (create agents, install skills, etc). Empty array when no infrastructure changes are needed.")
 }
 
@@ -85,6 +86,7 @@ function WriteView(
                 "agent_id": "single-agent-id",
                 "agent_ids": ["agent-1", "agent-2"],
                 "output_type": "json|file|email|link|text",
+                "artifact_key": "optional-artifact-family-key",
                 "time_range": "24h|7d|30d",
                 "row_strategy": {
                   "mode": "task|split",
@@ -101,7 +103,11 @@ function WriteView(
               "type": "action",
               "title": "Action Name",
               "position": {"col": 0, "row": 1, "colSpan": 4, "rowSpan": 1},
-              "config": {}
+              "config": {
+                "agent_id": "single-agent-id",
+                "button_label": "Run Action",
+                "prompt_template": "Use the current row context to perform the requested action."
+              }
             }
           ]
         }
@@ -121,7 +127,9 @@ function WriteView(
       user gave no meaningful distinction.
     - Use relations when a row in one sheet should connect to rows in another
       sheet through stable keys like task_id, email, company_id, listing_id, etc.
-    - NO sections, NO metrics, NO charts, NO task_list components.
+    - Do NOT add NEW sections, metrics, charts, or task_list components.
+      Preserve any existing legacy components unless the user explicitly asks
+      to remove or replace them.
     - The canvas automatically renders assigned agents and live task counts
       for the active sheet — you do NOT need to create components for those.
 
@@ -192,12 +200,14 @@ function WriteView(
        Example: name "Email Outreach" → key "email-outreach". Use consistently.
 
     4. In view_content, always provide the COMPLETE view definition JSON.
-       If update_type is CONVERSATION, set view_content to empty string "".
+       If update_type is CONVERSATION, set view_content to empty string ""
+       and removed_sheet_ids to [].
        CRITICAL: The output MUST include ALL existing sheets, components,
        columns, and relations from the current view — even ones you did not
        modify. Users add sheets and columns manually outside the copilot.
        Never drop, rename, or reorganize sheets the user did not ask to change.
-       Only omit a sheet if the user explicitly asks to remove it.
+       Only omit a sheet if the user explicitly asks to remove it, and when
+       you do, include that existing sheet ID in removed_sheet_ids.
 
     5. In message, briefly explain what you did (1-3 sentences).
 
@@ -211,7 +221,9 @@ function WriteView(
     8. When creating transform rules, inspect the ARTIFACT DESCRIPTORS in
        workspace_context. Use exact dot-path field names from schemas as
        source hints. Keep transform[].column machine-stable and put the
-       visible header in config.columns[].label.
+       visible header in config.columns[].label. If an existing sheet already
+       has dataSource.artifact_key, preserve it unless the user explicitly asks
+       to rebind that sheet to a different artifact family.
 
     9. When no artifact schemas exist yet, define columns with descriptive
        names and types. The BAML mapper resolves dynamically at render time.

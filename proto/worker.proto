@@ -99,10 +99,17 @@ message SetTaskStartedRequest {
 
 message SetTaskStartedResponse {}
 
+message WakeAgendaItem {
+  string type = 1;
+  string title = 2;
+  string reason = 3;
+}
+
 message WakeSignal {
   int32  delay_minutes    = 1;
   string reason           = 2;
   string follow_up_prompt = 3;
+  repeated WakeAgendaItem wake_agenda = 4;
 }
 
 message SetTaskResultRequest {

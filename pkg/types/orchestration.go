@@ -422,6 +422,7 @@ const (
 	OrchestrationOutboxPayloadWakeDelayMinutes      = "wake_delay_minutes"
 	OrchestrationOutboxPayloadWakeReason            = "wake_reason"
 	OrchestrationOutboxPayloadWakeFollowUpPrompt    = "wake_follow_up_prompt"
+	OrchestrationOutboxPayloadWakeAgenda            = "wake_agenda"
 )
 
 type OrchestrationOutboxEvent struct {

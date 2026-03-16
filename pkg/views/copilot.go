@@ -93,6 +93,10 @@ func NewCopilot(s2 *common.S2Client, backend repository.BackendRepository, stora
 	return &Copilot{s2: s2, backend: backend, storage: storage, agentAPI: agentAPI}
 }
 
+func (c *Copilot) DraftsAvailable() bool {
+	return c != nil && c.s2 != nil && c.s2.Enabled()
+}
+
 // s2Append is the single write path for all S2 operations.
 func (c *Copilot) s2Append(ctx context.Context, stream string, entry any) error {
 	if c.s2 == nil || !c.s2.Enabled() {
@@ -277,26 +281,33 @@ func (c *Copilot) PublishView(ctx context.Context, draft *Draft, workspaceID uin
 	canonicalizeViewAgentRefs(&def, c.loadWorkspaceAgents(ctx, workspaceID), nil)
 	normalizeViewDefinition(&def)
 
+	var published *types.View
 	if draft.PublishedViewID != "" {
 		if existing, err := c.backend.GetView(ctx, workspaceID, draft.PublishedViewID); err == nil && existing != nil {
 			existing.Name, existing.Description, existing.Definition = def.Name, def.Description, def
 			if err := c.backend.UpdateView(ctx, existing); err != nil {
 				return nil, fmt.Errorf("update view: %w", err)
 			}
-			return existing, nil
+			published = existing
 		}
 	}
 
-	v := &types.View{WorkspaceID: workspaceID, Name: def.Name, Description: def.Description, Definition: def}
-	if err := c.backend.CreateView(ctx, v); err != nil {
-		return nil, fmt.Errorf("create view: %w", err)
+	if published == nil {
+		published = &types.View{WorkspaceID: workspaceID, Name: def.Name, Description: def.Description, Definition: def}
+		if err := c.backend.CreateView(ctx, published); err != nil {
+			return nil, fmt.Errorf("create view: %w", err)
+		}
 	}
 
-	draft.PublishedViewID = v.ID
+	draft.PublishedViewID = published.ID
 	draft.Status = "published"
-	_ = c.persistDraft(ctx, draft.ID, "published_view_id", v.ID, "", "")
-	_ = c.persistDraft(ctx, draft.ID, "status", "published", "", "")
-	return v, nil
+	if err := c.persistDraft(ctx, draft.ID, "published_view_id", published.ID, "", ""); err != nil {
+		return nil, fmt.Errorf("persist published view id: %w", err)
+	}
+	if err := c.persistDraft(ctx, draft.ID, "status", "published", "", ""); err != nil {
+		return nil, fmt.Errorf("persist published draft status: %w", err)
+	}
+	return published, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -360,7 +371,7 @@ func (c *Copilot) GenerateStream(
 			final.View_content = normalized
 		}
 		if draft.ViewContent != "" {
-			if merged, err := mergePreserveSheets(draft.ViewContent, final.View_content); err == nil {
+			if merged, err := mergePreserveSheets(draft.ViewContent, final.View_content, final.Removed_sheet_ids); err == nil {
 				final.View_content = merged
 			}
 		}
@@ -493,9 +504,9 @@ func (c *Copilot) ReconcileViewContent(ctx context.Context, workspaceID uint, vi
 }
 
 // mergePreserveSheets ensures that sheets present in the previous view
-// definition but absent from the new one are carried forward. This prevents
-// the LLM from accidentally dropping user-added sheets or components.
-func mergePreserveSheets(previousContent, newContent string) (string, error) {
+// definition but absent from the new one are carried forward, unless the
+// model explicitly marked them for removal.
+func mergePreserveSheets(previousContent, newContent string, removedSheetIDs []string) (string, error) {
 	var prev, next types.ViewDefinition
 	if err := json.Unmarshal([]byte(previousContent), &prev); err != nil {
 		return newContent, nil
@@ -508,9 +519,19 @@ func mergePreserveSheets(previousContent, newContent string) (string, error) {
 	for _, s := range next.Sheets {
 		newSheetIDs[s.ID] = true
 	}
+	explicitRemovals := make(map[string]bool, len(removedSheetIDs))
+	for _, id := range removedSheetIDs {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			explicitRemovals[id] = true
+		}
+	}
 
 	changed := false
 	for _, oldSheet := range prev.Sheets {
+		if explicitRemovals[oldSheet.ID] {
+			continue
+		}
 		if !newSheetIDs[oldSheet.ID] {
 			next.Sheets = append(next.Sheets, oldSheet)
 			changed = true
@@ -550,6 +571,8 @@ func normalizeViewDefinition(def *types.ViewDefinition) {
 	if def == nil {
 		return
 	}
+	def.Name = strings.TrimSpace(def.Name)
+	def.Description = strings.TrimSpace(def.Description)
 	def.Agents = uniqueTrimmedStrings(def.Agents)
 	referenced := collectSheetAgentRefs(def.Sheets)
 	if len(referenced) > 0 {

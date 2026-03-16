@@ -351,6 +351,13 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 		payload[types.OrchestrationOutboxPayloadWakeDelayMinutes] = int(ws.DelayMinutes)
 		payload[types.OrchestrationOutboxPayloadWakeReason] = ws.Reason
 		payload[types.OrchestrationOutboxPayloadWakeFollowUpPrompt] = ws.FollowUpPrompt
+		if len(ws.WakeAgenda) > 0 {
+			agendaJSON, err := json.Marshal(ws.WakeAgenda)
+			if err != nil {
+				return nil, status.Errorf(codes.Internal, "failed to encode wake agenda: %v", err)
+			}
+			payload[types.OrchestrationOutboxPayloadWakeAgenda] = string(agendaJSON)
+		}
 	}
 	if err := s.backend.EnqueueOrchestrationOutboxEvent(ctx, &types.OrchestrationOutboxEvent{
 		EventType:   types.OrchestrationOutboxEventTypeRunResult,

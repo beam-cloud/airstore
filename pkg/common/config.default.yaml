@@ -23,6 +23,7 @@ database:
     maxOpenConns: 25
     maxIdleConns: 5
   mongo:
+    # Optional. Required for persisted view rows, manual row edits, and row regeneration.
     uri: ""
     database: airstore_views
 

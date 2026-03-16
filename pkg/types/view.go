@@ -1,6 +1,9 @@
 package types
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 const (
 	TaskOutputMetadataArtifactKey   = "artifact_key"
@@ -45,6 +48,29 @@ type ViewDefinition struct {
 	Description string      `json:"description"`
 	Agents      []string    `json:"agents"`
 	Sheets      []SheetSpec `json:"sheets"`
+}
+
+// SyncNameDescription keeps the top-level view metadata and definition metadata
+// aligned, preferring explicit top-level values when present.
+func (v *View) SyncNameDescription() {
+	if v == nil {
+		return
+	}
+
+	name := strings.TrimSpace(v.Name)
+	if name == "" {
+		name = strings.TrimSpace(v.Definition.Name)
+	}
+
+	description := strings.TrimSpace(v.Description)
+	if description == "" {
+		description = strings.TrimSpace(v.Definition.Description)
+	}
+
+	v.Name = name
+	v.Description = description
+	v.Definition.Name = name
+	v.Definition.Description = description
 }
 
 type SheetSpec struct {

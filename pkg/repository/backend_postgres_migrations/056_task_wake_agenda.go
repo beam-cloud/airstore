@@ -21,8 +21,6 @@ func upTaskWakeAgenda(tx *sql.Tx) error {
 		   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		   PRIMARY KEY (task_id, seq)
 		 )`,
-		`CREATE INDEX IF NOT EXISTS idx_task_wake_agenda_task_seq
-		   ON task_wake_agenda_item(task_id, seq)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := tx.Exec(stmt); err != nil {

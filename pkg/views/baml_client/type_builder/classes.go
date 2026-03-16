@@ -231,6 +231,10 @@ func (t *ViewDraftResponseClassView) PropertyView_content() (ClassPropertyView, 
 	return t.inner.Property("view_content")
 }
 
+func (t *ViewDraftResponseClassView) PropertyRemoved_sheet_ids() (ClassPropertyView, error) {
+	return t.inner.Property("removed_sheet_ids")
+}
+
 func (t *ViewDraftResponseClassView) PropertyOperations() (ClassPropertyView, error) {
 	return t.inner.Property("operations")
 }

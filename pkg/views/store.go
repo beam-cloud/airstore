@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/common"
@@ -13,6 +14,23 @@ import (
 )
 
 var ErrViewRowNotFound = errors.New("view row not found")
+var ErrInvalidViewColumnKey = errors.New("invalid view column key")
+
+func mongoColumnFieldPath(prefix, key string) (string, error) {
+	key = strings.TrimSpace(key)
+	switch {
+	case key == "":
+		return "", fmt.Errorf("%w: empty key", ErrInvalidViewColumnKey)
+	case strings.Contains(key, "."):
+		return "", fmt.Errorf("%w: %q contains '.'", ErrInvalidViewColumnKey, key)
+	case strings.Contains(key, "$"):
+		return "", fmt.Errorf("%w: %q contains '$'", ErrInvalidViewColumnKey, key)
+	case strings.ContainsRune(key, 0):
+		return "", fmt.Errorf("%w: %q contains NUL", ErrInvalidViewColumnKey, key)
+	default:
+		return fmt.Sprintf("%s.%s", prefix, key), nil
+	}
+}
 
 // ViewRow is the MongoDB document schema for a single rendered row in a sheet.
 type ViewRow struct {
@@ -188,7 +206,11 @@ func (s *ViewStore) UpdateCells(ctx context.Context, viewID, sheetID, rowID stri
 
 	setFields := bson.D{}
 	for k, v := range cells {
-		setFields = append(setFields, bson.E{Key: fmt.Sprintf("manual.%s", k), Value: v})
+		fieldPath, err := mongoColumnFieldPath("manual", k)
+		if err != nil {
+			return err
+		}
+		setFields = append(setFields, bson.E{Key: fieldPath, Value: v})
 	}
 	setFields = append(setFields, bson.E{Key: "updated_at", Value: time.Now()})
 
@@ -225,7 +247,11 @@ func (s *ViewStore) ClearManualCells(ctx context.Context, viewID, sheetID string
 
 	unsetFields := bson.D{}
 	for _, key := range columnKeys {
-		unsetFields = append(unsetFields, bson.E{Key: fmt.Sprintf("manual.%s", key), Value: ""})
+		fieldPath, err := mongoColumnFieldPath("manual", key)
+		if err != nil {
+			return err
+		}
+		unsetFields = append(unsetFields, bson.E{Key: fieldPath, Value: ""})
 	}
 
 	res, err := coll.UpdateMany(ctx,
@@ -258,11 +284,27 @@ func (s *ViewStore) RenameColumn(ctx context.Context, viewID, sheetID, oldKey, n
 		return nil
 	}
 	coll := s.mongo.Collection(s.collectionName(viewID))
-	_, err := coll.UpdateMany(ctx,
+	cellsOldPath, err := mongoColumnFieldPath("cells", oldKey)
+	if err != nil {
+		return err
+	}
+	cellsNewPath, err := mongoColumnFieldPath("cells", newKey)
+	if err != nil {
+		return err
+	}
+	manualOldPath, err := mongoColumnFieldPath("manual", oldKey)
+	if err != nil {
+		return err
+	}
+	manualNewPath, err := mongoColumnFieldPath("manual", newKey)
+	if err != nil {
+		return err
+	}
+	_, err = coll.UpdateMany(ctx,
 		bson.D{{Key: "sheet_id", Value: sheetID}},
 		bson.D{{Key: "$rename", Value: bson.D{
-			{Key: fmt.Sprintf("cells.%s", oldKey), Value: fmt.Sprintf("cells.%s", newKey)},
-			{Key: fmt.Sprintf("manual.%s", oldKey), Value: fmt.Sprintf("manual.%s", newKey)},
+			{Key: cellsOldPath, Value: cellsNewPath},
+			{Key: manualOldPath, Value: manualNewPath},
 		}}},
 	)
 	if err != nil {
@@ -277,11 +319,19 @@ func (s *ViewStore) DeleteColumn(ctx context.Context, viewID, sheetID, key strin
 		return nil
 	}
 	coll := s.mongo.Collection(s.collectionName(viewID))
-	_, err := coll.UpdateMany(ctx,
+	cellsPath, err := mongoColumnFieldPath("cells", key)
+	if err != nil {
+		return err
+	}
+	manualPath, err := mongoColumnFieldPath("manual", key)
+	if err != nil {
+		return err
+	}
+	_, err = coll.UpdateMany(ctx,
 		bson.D{{Key: "sheet_id", Value: sheetID}},
 		bson.D{{Key: "$unset", Value: bson.D{
-			{Key: fmt.Sprintf("cells.%s", key), Value: ""},
-			{Key: fmt.Sprintf("manual.%s", key), Value: ""},
+			{Key: cellsPath, Value: ""},
+			{Key: manualPath, Value: ""},
 		}}},
 	)
 	if err != nil {

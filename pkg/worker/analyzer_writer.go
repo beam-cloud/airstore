@@ -486,29 +486,32 @@ func decodeStructuredPayload(raw string) (any, bool) {
 }
 
 func firstMatchingString(value any, keys ...string) string {
-	return firstMatchingStringRecursive(value, keys)
+	for _, key := range keys {
+		if match := firstMatchingStringRecursive(value, key); match != "" {
+			return match
+		}
+	}
+	return ""
 }
 
-func firstMatchingStringRecursive(value any, keys []string) string {
+func firstMatchingStringRecursive(value any, key string) string {
 	switch typed := value.(type) {
 	case map[string]any:
-		for _, key := range keys {
-			for k, child := range typed {
-				if strings.EqualFold(k, key) {
-					if text, ok := child.(string); ok && strings.TrimSpace(text) != "" {
-						return strings.TrimSpace(text)
-					}
+		for k, child := range typed {
+			if strings.EqualFold(k, key) {
+				if text, ok := child.(string); ok && strings.TrimSpace(text) != "" {
+					return strings.TrimSpace(text)
 				}
 			}
 		}
 		for _, child := range typed {
-			if match := firstMatchingStringRecursive(child, keys); match != "" {
+			if match := firstMatchingStringRecursive(child, key); match != "" {
 				return match
 			}
 		}
 	case []any:
 		for _, child := range typed {
-			if match := firstMatchingStringRecursive(child, keys); match != "" {
+			if match := firstMatchingStringRecursive(child, key); match != "" {
 				return match
 			}
 		}

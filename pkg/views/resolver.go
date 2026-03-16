@@ -75,7 +75,7 @@ func buildMappingSpec(sheetName string, comp types.ComponentSpec) mappingSpec {
 		tableCols:   tableCols,
 		mappingCols: mappingCols,
 		rowStrategy: rowStrategy,
-		schemaHash:  hashColumns(mappingCols, rowStrategy, sheetName),
+		schemaHash:  hashColumns(mappingCols, rowStrategy, sheetName, comp.Title, comp.Type),
 	}
 }
 
@@ -402,7 +402,24 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 // ---------------------------------------------------------------------------
 
 func viewMappingFlightKey(workspaceID uint, viewID, sheetID, componentID string, opts ResolveOptions) string {
-	return fmt.Sprintf("%d:%s:%s:%s:%t", workspaceID, viewID, sheetID, componentID, opts.ForceRefresh)
+	return fmt.Sprintf(
+		"%d:%s:%s:%s:%t:%s",
+		workspaceID,
+		viewID,
+		sheetID,
+		componentID,
+		opts.ForceRefresh,
+		normalizedViewAgentRefsKey(opts.ViewAgentRefs),
+	)
+}
+
+func normalizedViewAgentRefsKey(refs []string) string {
+	normalized := uniqueTrimmedStrings(refs)
+	if len(normalized) == 0 {
+		return "-"
+	}
+	sort.Strings(normalized)
+	return strings.Join(normalized, ",")
 }
 
 func schemaKeySet(cols []bamltypes.ColumnSchema) map[string]bool {
@@ -1227,9 +1244,9 @@ func (r *DataResolver) Store() *ViewStore {
 // mappingVersion should be bumped whenever the BAML prompt, serialization
 // logic, mapping scope, or output processing changes. This invalidates all
 // cached rows.
-const mappingVersion = "v4"
+const mappingVersion = "v5"
 
-func hashColumns(columns []bamltypes.ColumnSchema, rowStrategy types.RowStrategy, sheetName string) string {
+func hashColumns(columns []bamltypes.ColumnSchema, rowStrategy types.RowStrategy, sheetName, tableTitle, tableType string) string {
 	type hashEntry struct {
 		Key         string `json:"k"`
 		Type        string `json:"t"`
@@ -1238,12 +1255,16 @@ func hashColumns(columns []bamltypes.ColumnSchema, rowStrategy types.RowStrategy
 	payload := struct {
 		Version     string      `json:"v"`
 		Sheet       string      `json:"s"`
+		Title       string      `json:"t"`
+		TableType   string      `json:"tt"`
 		Mode        string      `json:"m"`
 		Description string      `json:"d"`
 		Columns     []hashEntry `json:"c"`
 	}{
 		Version:     mappingVersion,
 		Sheet:       sheetName,
+		Title:       strings.TrimSpace(tableTitle),
+		TableType:   strings.TrimSpace(tableType),
 		Mode:        rowStrategy.Mode,
 		Description: rowStrategy.Description,
 		Columns:     make([]hashEntry, len(columns)),

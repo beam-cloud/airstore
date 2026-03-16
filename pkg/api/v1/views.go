@@ -41,14 +41,18 @@ func NewViewsGroup(g *echo.Group, backend repository.BackendRepository, copilot 
 	vg.g.PATCH("/:view_id", vg.Update)
 	vg.g.DELETE("/:view_id", vg.Delete)
 	vg.g.GET("/:view_id/data", vg.ResolveData)
-	vg.g.PATCH("/:view_id/sheets/:sheet_id/rows/:row_id", vg.UpdateRow)
-	vg.g.POST("/:view_id/sheets/:sheet_id/rows/:row_id/regenerate", vg.RegenerateRow)
-	vg.g.POST("/drafts", vg.CreateDraft)
-	vg.g.GET("/drafts", vg.ListDrafts)
-	vg.g.GET("/drafts/:draft_id", vg.GetDraft)
-	vg.g.DELETE("/drafts/:draft_id", vg.DeleteDraft)
-	vg.g.POST("/drafts/:draft_id/chat", vg.ChatDraft)
-	vg.g.POST("/drafts/:draft_id/publish", vg.PublishDraft)
+	if store.Available() {
+		vg.g.PATCH("/:view_id/sheets/:sheet_id/rows/:row_id", vg.UpdateRow)
+		vg.g.POST("/:view_id/sheets/:sheet_id/rows/:row_id/regenerate", vg.RegenerateRow)
+	}
+	if copilot != nil && copilot.DraftsAvailable() {
+		vg.g.POST("/drafts", vg.CreateDraft)
+		vg.g.GET("/drafts", vg.ListDrafts)
+		vg.g.GET("/drafts/:draft_id", vg.GetDraft)
+		vg.g.DELETE("/drafts/:draft_id", vg.DeleteDraft)
+		vg.g.POST("/drafts/:draft_id/chat", vg.ChatDraft)
+		vg.g.POST("/drafts/:draft_id/publish", vg.PublishDraft)
+	}
 	return vg
 }
 
@@ -117,10 +121,10 @@ type columnRename struct {
 }
 
 type updateViewRequest struct {
-	Name           *string               `json:"name,omitempty"`
-	Description    *string               `json:"description,omitempty"`
-	Definition     *types.ViewDefinition `json:"definition,omitempty"`
-	ColumnRenames  []columnRename        `json:"column_renames,omitempty"`
+	Name          *string               `json:"name,omitempty"`
+	Description   *string               `json:"description,omitempty"`
+	Definition    *types.ViewDefinition `json:"definition,omitempty"`
+	ColumnRenames []columnRename        `json:"column_renames,omitempty"`
 }
 
 func (vg *ViewsGroup) Update(c echo.Context) error {
@@ -352,6 +356,9 @@ type updateRowRequest struct {
 }
 
 func (vg *ViewsGroup) UpdateRow(c echo.Context) error {
+	if vg.store == nil || !vg.store.Available() {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "view row persistence not configured")
+	}
 	workspaceID, err := vg.workspaceID(c)
 	if err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, err.Error())
@@ -386,6 +393,9 @@ func (vg *ViewsGroup) UpdateRow(c echo.Context) error {
 	}
 
 	if err := vg.store.UpdateCells(ctx, viewID, sheetID, rowID, req.Cells); err != nil {
+		if errors.Is(err, views.ErrInvalidViewColumnKey) {
+			return ErrorResponse(c, http.StatusBadRequest, "invalid column key")
+		}
 		if errors.Is(err, views.ErrViewRowNotFound) {
 			return ErrorResponse(c, http.StatusNotFound, "row not found")
 		}
@@ -409,6 +419,9 @@ func (vg *ViewsGroup) UpdateRow(c echo.Context) error {
 // ---------------------------------------------------------------------------
 
 func (vg *ViewsGroup) RegenerateRow(c echo.Context) error {
+	if vg.store == nil || !vg.store.Available() {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "view row persistence not configured")
+	}
 	workspaceID, err := vg.workspaceID(c)
 	if err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, err.Error())
@@ -584,7 +597,7 @@ func (vg *ViewsGroup) getViewDraftSession(c echo.Context, draftID string) (*view
 }
 
 func (vg *ViewsGroup) CreateDraft(c echo.Context) error {
-	if vg.copilot == nil {
+	if vg.copilot == nil || !vg.copilot.DraftsAvailable() {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "view copilot not configured")
 	}
 	workspaceID := c.Param("workspace_id")
@@ -627,7 +640,7 @@ func (vg *ViewsGroup) CreateDraft(c echo.Context) error {
 }
 
 func (vg *ViewsGroup) ListDrafts(c echo.Context) error {
-	if vg.copilot == nil {
+	if vg.copilot == nil || !vg.copilot.DraftsAvailable() {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "view copilot not configured")
 	}
 	workspaceID := c.Param("workspace_id")
@@ -643,7 +656,7 @@ func (vg *ViewsGroup) ListDrafts(c echo.Context) error {
 }
 
 func (vg *ViewsGroup) GetDraft(c echo.Context) error {
-	if vg.copilot == nil {
+	if vg.copilot == nil || !vg.copilot.DraftsAvailable() {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "view copilot not configured")
 	}
 	session, err := vg.getViewDraftSession(c, c.Param("draft_id"))
@@ -657,7 +670,7 @@ func (vg *ViewsGroup) GetDraft(c echo.Context) error {
 }
 
 func (vg *ViewsGroup) DeleteDraft(c echo.Context) error {
-	if vg.copilot == nil {
+	if vg.copilot == nil || !vg.copilot.DraftsAvailable() {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "view copilot not configured")
 	}
 	workspaceID := c.Param("workspace_id")
@@ -675,7 +688,7 @@ func (vg *ViewsGroup) DeleteDraft(c echo.Context) error {
 
 // ChatDraft streams view draft updates over SSE while the copilot edits the view.
 func (vg *ViewsGroup) ChatDraft(c echo.Context) error {
-	if vg.copilot == nil {
+	if vg.copilot == nil || !vg.copilot.DraftsAvailable() {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "view copilot not configured")
 	}
 
@@ -796,7 +809,7 @@ func (vg *ViewsGroup) ChatDraft(c echo.Context) error {
 }
 
 func (vg *ViewsGroup) PublishDraft(c echo.Context) error {
-	if vg.copilot == nil {
+	if vg.copilot == nil || !vg.copilot.DraftsAvailable() {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "view copilot not configured")
 	}
 

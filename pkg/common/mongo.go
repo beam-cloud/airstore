@@ -30,6 +30,11 @@ func NewMongoClient(cfg types.MongoConfig) (*MongoClient, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := client.Ping(ctx, nil); err != nil {
+		disconnectCtx, disconnectCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer disconnectCancel()
+		if disconnectErr := client.Disconnect(disconnectCtx); disconnectErr != nil {
+			log.Warn().Err(disconnectErr).Msg("mongo disconnect after ping failure")
+		}
 		return nil, fmt.Errorf("mongo ping: %w", err)
 	}
 

@@ -778,6 +778,41 @@ type runResultProjectorMessage struct {
 	wakeDelayMinutes   int
 	wakeReason         string
 	wakeFollowUpPrompt string
+	wakeAgenda         []*types.TaskWakeAgendaItem
+}
+
+func parseWakeAgendaPayload(raw string) []*types.TaskWakeAgendaItem {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+
+	type wakeAgendaPayloadItem struct {
+		Type   string `json:"type"`
+		Title  string `json:"title"`
+		Reason string `json:"reason"`
+	}
+
+	var payload []wakeAgendaPayloadItem
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return nil
+	}
+
+	items := make([]*types.TaskWakeAgendaItem, 0, len(payload))
+	for idx, item := range payload {
+		title := strings.TrimSpace(item.Title)
+		reason := strings.TrimSpace(item.Reason)
+		if title == "" && reason == "" {
+			continue
+		}
+		items = append(items, &types.TaskWakeAgendaItem{
+			Seq:    idx + 1,
+			Type:   strings.TrimSpace(item.Type),
+			Title:  title,
+			Reason: reason,
+		})
+	}
+	return items
 }
 
 func (s *AgentService) resultProjectorLoop(ctx context.Context) {
@@ -842,6 +877,7 @@ func (s *AgentService) processRunResultMessage(ctx context.Context, message redi
 		wakeDelayMinutes:   intFromAny(message.Values[types.OrchestrationOutboxPayloadWakeDelayMinutes]),
 		wakeReason:         streamValueAsString(message.Values, types.OrchestrationOutboxPayloadWakeReason),
 		wakeFollowUpPrompt: streamValueAsString(message.Values, types.OrchestrationOutboxPayloadWakeFollowUpPrompt),
+		wakeAgenda:         parseWakeAgendaPayload(streamValueAsString(message.Values, types.OrchestrationOutboxPayloadWakeAgenda)),
 	}
 	if result.taskID == "" || result.attemptID == "" {
 		_ = s.orchestrationStore.AckRunResults(ctx, message.ID)
@@ -901,11 +937,12 @@ func (s *AgentService) applyRunResultProjectorMessage(ctx context.Context, resul
 		return nil
 	}
 	var wakeSignal *types.RunExecutionWakeSignal
-	if result.wakeDelayMinutes > 0 {
+	if result.wakeDelayMinutes > 0 || result.wakeReason != "" || result.wakeFollowUpPrompt != "" || len(result.wakeAgenda) > 0 {
 		wakeSignal = &types.RunExecutionWakeSignal{
 			DelayMinutes:   result.wakeDelayMinutes,
 			Reason:         result.wakeReason,
 			FollowUpPrompt: result.wakeFollowUpPrompt,
+			WakeAgenda:     result.wakeAgenda,
 		}
 	}
 

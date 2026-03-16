@@ -648,7 +648,13 @@ func readWakePlannerFile(mountSource, containerPath string, limit int) (string, 
 	if err != nil {
 		return "", err
 	}
-	data, err := os.ReadFile(hostPath)
+	f, err := os.Open(hostPath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, int64(limit+1)))
 	if err != nil {
 		return "", err
 	}

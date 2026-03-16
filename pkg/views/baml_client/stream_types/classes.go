@@ -275,10 +275,11 @@ func (c Operation) BamlTypeName() string {
 }
 
 type ViewDraftResponse struct {
-	Update_type  *types.ViewUpdateType `json:"update_type"`
-	Message      *string               `json:"message"`
-	View_content *string               `json:"view_content"`
-	Operations   []Operation           `json:"operations"`
+	Update_type       *types.ViewUpdateType `json:"update_type"`
+	Message           *string               `json:"message"`
+	View_content      *string               `json:"view_content"`
+	Removed_sheet_ids []string              `json:"removed_sheet_ids"`
+	Operations        []Operation           `json:"operations"`
 }
 
 func (c *ViewDraftResponse) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
@@ -304,6 +305,9 @@ func (c *ViewDraftResponse) Decode(holder *cffi.CFFIValueClass, typeMap baml.Typ
 		case "view_content":
 			c.View_content = baml.Decode(valueHolder).Interface().(*string)
 
+		case "removed_sheet_ids":
+			c.Removed_sheet_ids = baml.Decode(valueHolder).Interface().([]string)
+
 		case "operations":
 			c.Operations = baml.Decode(valueHolder).Interface().([]Operation)
 
@@ -324,6 +328,8 @@ func (c ViewDraftResponse) Encode() (*cffi.HostValue, error) {
 	fields["message"] = c.Message
 
 	fields["view_content"] = c.View_content
+
+	fields["removed_sheet_ids"] = c.Removed_sheet_ids
 
 	fields["operations"] = c.Operations
 

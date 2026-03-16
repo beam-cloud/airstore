@@ -703,7 +703,7 @@ func (b *PostgresBackend) scanAgentTask(row scanner) (*types.AgentTask, error) {
 	if inputKind.Valid {
 		task.InputKind = types.InputKind(inputKind.String)
 	}
-	if waitingSummary.Valid {
+	if task.State == types.AgentTaskStateWaiting && waitingSummary.Valid {
 		task.WaitingSummary = &waitingSummary.String
 	}
 	task.PayloadJSON = unmarshalJSONMap(payloadJSON)
@@ -971,6 +971,12 @@ func (b *PostgresBackend) ClaimQueuedTaskForDispatch(
 	}
 
 	staleCutoff := time.Now().Add(-staleAfter)
+	tx, err := b.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, false, fmt.Errorf("begin claim queued task tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	query := `
 		UPDATE agent_task
 		SET state = 'running'::agent_task_state,
@@ -978,6 +984,7 @@ func (b *PostgresBackend) ClaimQueuedTaskForDispatch(
 		    wake_at = NULL,
 		    wake_reason = NULL,
 		    input_kind = NULL,
+		    waiting_summary = NULL,
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = $1
 		  AND (
@@ -994,14 +1001,17 @@ func (b *PostgresBackend) ClaimQueuedTaskForDispatch(
 	`
 
 	var claimedID string
-	if err := b.db.QueryRowContext(ctx, query, taskID, staleCutoff).Scan(&claimedID); err != nil {
+	if err := tx.QueryRowContext(ctx, query, taskID, staleCutoff).Scan(&claimedID); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, false, nil
 		}
 		return nil, false, fmt.Errorf("claim queued task for dispatch: %w", err)
 	}
-	if _, err := b.db.ExecContext(ctx, `DELETE FROM task_wake_agenda_item WHERE task_id = $1`, claimedID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM task_wake_agenda_item WHERE task_id = $1`, claimedID); err != nil {
 		return nil, false, fmt.Errorf("clear wake agenda on dispatch claim: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, false, fmt.Errorf("commit claim queued task tx: %w", err)
 	}
 
 	task, err := b.GetTaskByID(ctx, claimedID)
@@ -1025,6 +1035,7 @@ func (b *PostgresBackend) UpdateTaskState(ctx context.Context, taskID string, st
 		    dropped_reason = CASE WHEN $2::agent_task_state = 'dropped'::agent_task_state THEN $4 ELSE dropped_reason END,
 		    target_run_id = COALESCE($5::uuid, target_run_id),
 		    input_kind = NULL,
+		    waiting_summary = NULL,
 		    wake_at = CASE WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN wake_at ELSE NULL END,
 		    wake_reason = CASE WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN wake_reason ELSE NULL END,
 		    wake_count = CASE WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN wake_count ELSE 0 END,
@@ -1121,6 +1132,7 @@ func (b *PostgresBackend) SleepTaskWithOutbox(
 		    wake_count = wake_count + 1,
 		    dispatched_at = NULL,
 		    input_kind = NULL,
+		    waiting_summary = NULL,
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = $1
 		  AND target_run_id = $4::uuid
@@ -1232,6 +1244,7 @@ func (b *PostgresBackend) RequeueTaskWithOutboxIfCurrentRun(
 		        dropped_reason = NULL,
 		        target_run_id = NULL,
 		        input_kind = NULL,
+		        waiting_summary = NULL,
 		        wake_at = NULL,
 		        wake_reason = NULL,
 		        wake_count = 0,
@@ -4205,6 +4218,7 @@ func nullableJSONB(b []byte) interface{} {
 // ---------------------------------------------------------------------------
 
 func (b *PostgresBackend) CreateView(ctx context.Context, v *types.View) error {
+	v.SyncNameDescription()
 	defJSON, err := json.Marshal(v.Definition)
 	if err != nil {
 		return fmt.Errorf("marshal view definition: %w", err)
@@ -4234,6 +4248,7 @@ func (b *PostgresBackend) GetView(ctx context.Context, workspaceID uint, viewID 
 	if err := json.Unmarshal(defBytes, &v.Definition); err != nil {
 		return nil, fmt.Errorf("unmarshal view definition: %w", err)
 	}
+	v.SyncNameDescription()
 	return v, nil
 }
 
@@ -4259,12 +4274,14 @@ func (b *PostgresBackend) ListViews(ctx context.Context, workspaceID uint) ([]*t
 		if err := json.Unmarshal(defBytes, &v.Definition); err != nil {
 			return nil, fmt.Errorf("unmarshal view definition: %w", err)
 		}
+		v.SyncNameDescription()
 		result = append(result, v)
 	}
 	return result, rows.Err()
 }
 
 func (b *PostgresBackend) UpdateView(ctx context.Context, v *types.View) error {
+	v.SyncNameDescription()
 	defJSON, err := json.Marshal(v.Definition)
 	if err != nil {
 		return fmt.Errorf("marshal view definition: %w", err)

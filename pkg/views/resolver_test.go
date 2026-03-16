@@ -494,8 +494,8 @@ func TestHashColumnsStable(t *testing.T) {
 	}
 
 	cols := buildUnifiedSchema(comps)
-	h1 := hashColumns(cols, types.RowStrategy{Mode: types.RowStrategyModeTask}, "test-sheet")
-	h2 := hashColumns(cols, types.RowStrategy{Mode: types.RowStrategyModeTask}, "test-sheet")
+	h1 := hashColumns(cols, types.RowStrategy{Mode: types.RowStrategyModeTask}, "test-sheet", comps[0].Title, comps[0].Type)
+	h2 := hashColumns(cols, types.RowStrategy{Mode: types.RowStrategyModeTask}, "test-sheet", comps[0].Title, comps[0].Type)
 	if h1 != h2 {
 		t.Fatalf("hashColumns not stable: %q vs %q", h1, h2)
 	}
@@ -504,9 +504,14 @@ func TestHashColumnsStable(t *testing.T) {
 	var comps2 []types.ComponentSpec
 	json.Unmarshal(compsJSON, &comps2)
 	cols2 := buildUnifiedSchema(comps2)
-	h3 := hashColumns(cols2, types.RowStrategy{Mode: types.RowStrategyModeTask}, "test-sheet")
+	h3 := hashColumns(cols2, types.RowStrategy{Mode: types.RowStrategyModeTask}, "test-sheet", comps2[0].Title, comps2[0].Type)
 	if h1 != h3 {
 		t.Fatalf("hashColumns not stable across JSON round-trip: %q vs %q", h1, h3)
+	}
+
+	h4 := hashColumns(cols, types.RowStrategy{Mode: types.RowStrategyModeTask}, "test-sheet", "Renamed Table", comps[0].Type)
+	if h1 == h4 {
+		t.Fatalf("hashColumns should change when title changes: %q", h1)
 	}
 }
 
