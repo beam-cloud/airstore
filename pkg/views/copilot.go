@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -261,6 +262,12 @@ func (c *Copilot) ListDrafts(ctx context.Context, workspaceID string) ([]DraftSu
 	for _, d := range drafts {
 		result = append(result, *d)
 	}
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].UpdatedAt != result[j].UpdatedAt {
+			return result[i].UpdatedAt > result[j].UpdatedAt
+		}
+		return result[i].CreatedAt > result[j].CreatedAt
+	})
 	return result, nil
 }
 

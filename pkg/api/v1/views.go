@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +51,7 @@ func NewViewsGroup(g *echo.Group, backend repository.BackendRepository, copilot 
 	vg.g.POST("/drafts", vg.CreateDraft)
 	vg.g.GET("/drafts", vg.ListDrafts)
 	vg.g.GET("/drafts/:draft_id", vg.GetDraft)
+	vg.g.PATCH("/drafts/:draft_id", vg.UpdateDraft)
 	vg.g.DELETE("/drafts/:draft_id", vg.DeleteDraft)
 	vg.g.POST("/drafts/:draft_id/chat", vg.ChatDraft)
 	vg.g.POST("/drafts/:draft_id/publish", vg.PublishDraft)
@@ -117,10 +119,11 @@ func (vg *ViewsGroup) Get(c echo.Context) error {
 }
 
 type columnRename struct {
-	SheetID  string `json:"sheet_id"`
-	OldKey   string `json:"old_key"`
-	NewKey   string `json:"new_key"`
-	NewLabel string `json:"new_label,omitempty"`
+	SheetID     string `json:"sheet_id"`
+	ComponentID string `json:"component_id,omitempty"`
+	OldKey      string `json:"old_key"`
+	NewKey      string `json:"new_key"`
+	NewLabel    string `json:"new_label,omitempty"`
 }
 
 type updateViewRequest struct {
@@ -176,10 +179,12 @@ func (vg *ViewsGroup) Update(c echo.Context) error {
 			if rename.SheetID == "" || rename.OldKey == "" || rename.NewKey == "" || rename.OldKey == rename.NewKey {
 				continue
 			}
-			if err := vg.store.RenameColumn(ctx, v.ID, rename.SheetID, rename.OldKey, rename.NewKey); err != nil {
+			schemaHash := schemaHashForComponent(v.Definition, rename.SheetID, rename.ComponentID)
+			if err := vg.store.RenameColumn(ctx, v.ID, rename.SheetID, rename.ComponentID, rename.OldKey, rename.NewKey, schemaHash); err != nil {
 				log.Warn().Err(err).
 					Str("view_id", v.ID).
 					Str("sheet_id", rename.SheetID).
+					Str("component_id", rename.ComponentID).
 					Str("old_key", rename.OldKey).
 					Str("new_key", rename.NewKey).
 					Msg("failed to rename column in MongoDB view store")
@@ -192,10 +197,12 @@ func (vg *ViewsGroup) Update(c echo.Context) error {
 				}
 			}
 			for _, deleted := range deletedViewColumns(previousDefinition, v.Definition) {
-				if err := vg.store.DeleteColumn(ctx, v.ID, deleted.SheetID, deleted.Key); err != nil {
+				schemaHash := schemaHashForComponent(v.Definition, deleted.SheetID, deleted.ComponentID)
+				if err := vg.store.DeleteColumn(ctx, v.ID, deleted.SheetID, deleted.ComponentID, deleted.Key, schemaHash); err != nil {
 					log.Warn().Err(err).
 						Str("view_id", v.ID).
 						Str("sheet_id", deleted.SheetID).
+						Str("component_id", deleted.ComponentID).
 						Str("column", deleted.Key).
 						Msg("failed to delete column from MongoDB view store")
 				}
@@ -290,8 +297,9 @@ func queryBool(value string) bool {
 }
 
 type deletedSheetColumn struct {
-	SheetID string
-	Key     string
+	SheetID     string
+	ComponentID string
+	Key         string
 }
 
 func deletedViewSheets(previous, next types.ViewDefinition) []string {
@@ -309,38 +317,76 @@ func deletedViewSheets(previous, next types.ViewDefinition) []string {
 }
 
 func deletedViewColumns(previous, next types.ViewDefinition) []deletedSheetColumn {
-	nextKeys := viewColumnKeys(next)
 	var deleted []deletedSheetColumn
-	for sheetID, keys := range viewColumnKeys(previous) {
-		current := nextKeys[sheetID]
-		for key := range keys {
-			if current == nil || !current[key] {
-				deleted = append(deleted, deletedSheetColumn{SheetID: sheetID, Key: key})
+	for _, sheet := range previous.Sheets {
+		for _, component := range sheet.Components {
+			if !component.IsTable() {
+				continue
+			}
+			nextComponent := findComponent(next, sheet.ID, component.ID)
+			if nextComponent == nil || !nextComponent.IsTable() {
+				continue
+			}
+			current := componentColumnKeys(*nextComponent)
+			for key := range componentColumnKeys(component) {
+				if !current[key] {
+					deleted = append(deleted, deletedSheetColumn{
+						SheetID:     sheet.ID,
+						ComponentID: component.ID,
+						Key:         key,
+					})
+				}
 			}
 		}
 	}
 	return deleted
 }
 
-func viewColumnKeys(def types.ViewDefinition) map[string]map[string]bool {
-	keys := make(map[string]map[string]bool)
-	for _, sheet := range def.Sheets {
-		sheetKeys := make(map[string]bool)
-		for _, component := range sheet.Components {
-			if !component.IsTable() {
-				continue
-			}
-			addConfigColumnKeys(sheetKeys, component.Config)
-			if component.DataSource == nil {
-				continue
-			}
-			for _, rule := range component.DataSource.Transform {
-				if strings.TrimSpace(rule.Column) != "" {
-					sheetKeys[rule.Column] = true
-				}
+func findComponent(def types.ViewDefinition, sheetID, componentID string) *types.ComponentSpec {
+	for i := range def.Sheets {
+		if def.Sheets[i].ID != sheetID {
+			continue
+		}
+		for j := range def.Sheets[i].Components {
+			if def.Sheets[i].Components[j].ID == componentID {
+				return &def.Sheets[i].Components[j]
 			}
 		}
-		keys[sheet.ID] = sheetKeys
+	}
+	return nil
+}
+
+func findSheet(def types.ViewDefinition, sheetID string) *types.SheetSpec {
+	for i := range def.Sheets {
+		if def.Sheets[i].ID == sheetID {
+			return &def.Sheets[i]
+		}
+	}
+	return nil
+}
+
+func schemaHashForComponent(def types.ViewDefinition, sheetID, componentID string) string {
+	sheet := findSheet(def, sheetID)
+	if sheet == nil {
+		return ""
+	}
+	component := findComponent(def, sheetID, componentID)
+	if component == nil {
+		return ""
+	}
+	return views.MappingSchemaHash(*sheet, *component)
+}
+
+func componentColumnKeys(component types.ComponentSpec) map[string]bool {
+	keys := make(map[string]bool)
+	addConfigColumnKeys(keys, component.Config)
+	if component.DataSource == nil {
+		return keys
+	}
+	for _, rule := range component.DataSource.Transform {
+		if strings.TrimSpace(rule.Column) != "" {
+			keys[rule.Column] = true
+		}
 	}
 	return keys
 }
@@ -398,6 +444,7 @@ func buildColumnRenameMap(renames []columnRename) map[string]map[string]columnRe
 	bySheet := make(map[string]map[string]columnRename)
 	for _, rename := range renames {
 		sheetID := strings.TrimSpace(rename.SheetID)
+		componentID := strings.TrimSpace(rename.ComponentID)
 		oldKey := strings.TrimSpace(rename.OldKey)
 		newKey := strings.TrimSpace(rename.NewKey)
 		newLabel := strings.TrimSpace(rename.NewLabel)
@@ -408,10 +455,11 @@ func buildColumnRenameMap(renames []columnRename) map[string]map[string]columnRe
 			bySheet[sheetID] = make(map[string]columnRename)
 		}
 		bySheet[sheetID][oldKey] = columnRename{
-			SheetID:  sheetID,
-			OldKey:   oldKey,
-			NewKey:   newKey,
-			NewLabel: newLabel,
+			SheetID:     sheetID,
+			ComponentID: componentID,
+			OldKey:      oldKey,
+			NewKey:      newKey,
+			NewLabel:    newLabel,
 		}
 	}
 	return bySheet
@@ -431,8 +479,26 @@ func renameSheetColumns(sheet *types.SheetSpec, renames map[string]columnRename)
 	}
 	for i := range sheet.Components {
 		component := &sheet.Components[i]
-		renameComponentColumns(component, renames)
+		filtered := renamesForComponent(renames, component.ID)
+		if len(filtered) == 0 {
+			continue
+		}
+		renameComponentColumns(component, filtered)
 	}
+}
+
+func renamesForComponent(renames map[string]columnRename, componentID string) map[string]columnRename {
+	if len(renames) == 0 {
+		return nil
+	}
+	filtered := make(map[string]columnRename)
+	for key, rename := range renames {
+		if rename.ComponentID != "" && rename.ComponentID != componentID {
+			continue
+		}
+		filtered[key] = rename
+	}
+	return filtered
 }
 
 func renameComponentColumns(component *types.ComponentSpec, renames map[string]columnRename) {
@@ -628,6 +694,12 @@ func (vg *ViewsGroup) RegenerateRow(c echo.Context) error {
 
 	var comp *types.ComponentSpec
 	for i := range sheet.Components {
+		if !sheet.Components[i].IsTable() {
+			continue
+		}
+		if row.ComponentID != "" && sheet.Components[i].ID != row.ComponentID {
+			continue
+		}
 		if sheet.Components[i].IsTable() {
 			comp = &sheet.Components[i]
 			break
@@ -825,7 +897,86 @@ func (vg *ViewsGroup) ListDrafts(c echo.Context) error {
 	if drafts == nil {
 		drafts = []views.DraftSummary{}
 	}
+	drafts = mergeCachedViewDraftSummaries(workspaceID, drafts)
 	return SuccessResponse(c, drafts)
+}
+
+func mergeCachedViewDraftSummaries(workspaceID string, drafts []views.DraftSummary) []views.DraftSummary {
+	now := time.Now()
+	viewDraftsStore.Lock()
+	pruneViewDraftSessionsLocked(now)
+	cached := make(map[string]*views.Draft, len(viewDraftsStore.m))
+	for draftID, session := range viewDraftsStore.m {
+		if session == nil || session.draft == nil {
+			continue
+		}
+		if session.draft.WorkspaceID != workspaceID {
+			continue
+		}
+		cached[draftID] = cloneViewDraft(session.draft)
+	}
+	viewDraftsStore.Unlock()
+
+	if len(cached) == 0 {
+		return drafts
+	}
+
+	merged := make([]views.DraftSummary, 0, len(drafts))
+	seen := make(map[string]bool, len(drafts))
+	for _, draft := range drafts {
+		if cachedDraft := cached[draft.ID]; cachedDraft != nil {
+			applyCachedDraftSummary(&draft, cachedDraft)
+		}
+		merged = append(merged, draft)
+		seen[draft.ID] = true
+	}
+
+	for _, cachedDraft := range cached {
+		if seen[cachedDraft.ID] {
+			continue
+		}
+		summary := views.DraftSummary{
+			ID:        cachedDraft.ID,
+			Status:    firstNonEmptyString(cachedDraft.Status, "active"),
+			ViewID:    strings.TrimSpace(cachedDraft.PublishedViewID),
+			CreatedAt: cachedDraft.CreatedAt,
+			UpdatedAt: cachedDraft.UpdatedAt,
+		}
+		merged = append(merged, summary)
+	}
+
+	sort.SliceStable(merged, func(i, j int) bool {
+		if merged[i].UpdatedAt != merged[j].UpdatedAt {
+			return merged[i].UpdatedAt > merged[j].UpdatedAt
+		}
+		return merged[i].CreatedAt > merged[j].CreatedAt
+	})
+	return merged
+}
+
+func applyCachedDraftSummary(summary *views.DraftSummary, draft *views.Draft) {
+	if summary == nil || draft == nil {
+		return
+	}
+	if draft.UpdatedAt > summary.UpdatedAt {
+		summary.UpdatedAt = draft.UpdatedAt
+	}
+	if status := strings.TrimSpace(draft.Status); status != "" {
+		summary.Status = status
+	}
+	if publishedViewID := strings.TrimSpace(draft.PublishedViewID); publishedViewID != "" {
+		summary.Status = "published"
+		summary.ViewID = publishedViewID
+	}
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func (vg *ViewsGroup) GetDraft(c echo.Context) error {
@@ -840,6 +991,41 @@ func (vg *ViewsGroup) GetDraft(c echo.Context) error {
 	draft := cloneViewDraft(session.draft)
 	session.mu.Unlock()
 	return SuccessResponse(c, draft)
+}
+
+type updateViewDraftRequest struct {
+	ViewContent string `json:"view_content"`
+}
+
+func (vg *ViewsGroup) UpdateDraft(c echo.Context) error {
+	if vg.copilot == nil || !vg.copilot.DraftsAvailable() {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "view copilot not configured")
+	}
+	session, err := vg.getViewDraftSession(c, c.Param("draft_id"))
+	if err != nil {
+		return ErrorResponse(c, http.StatusNotFound, "draft not found")
+	}
+
+	var req updateViewDraftRequest
+	if err := decodeStrictBody(c, &req); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
+	}
+	trimmed := strings.TrimSpace(req.ViewContent)
+	if trimmed == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "view_content is required")
+	}
+
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if trimmed != session.draft.ViewContent {
+		if err := vg.copilot.PersistViewContent(c.Request().Context(), session.draft.ID, trimmed); err != nil {
+			log.Error().Err(err).Str("draft_id", session.draft.ID).Msg("persist draft view content failed")
+			return ErrorResponse(c, http.StatusInternalServerError, "failed to persist draft content")
+		}
+		session.draft.ViewContent = trimmed
+		session.draft.UpdatedAt = time.Now().UnixMilli()
+	}
+	return SuccessResponse(c, cloneViewDraft(session.draft))
 }
 
 func (vg *ViewsGroup) DeleteDraft(c echo.Context) error {
@@ -1011,7 +1197,13 @@ func (vg *ViewsGroup) PublishDraft(c echo.Context) error {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 
-	_ = vg.copilot.IndexDraftPublished(c.Request().Context(), c.Param("workspace_id"), session.draft.ID, v.Name, v.ID)
+	if err := vg.copilot.IndexDraftPublished(c.Request().Context(), c.Param("workspace_id"), session.draft.ID, v.Name, v.ID); err != nil {
+		log.Warn().Err(err).
+			Str("workspace_id", c.Param("workspace_id")).
+			Str("draft_id", session.draft.ID).
+			Str("view_id", v.ID).
+			Msg("failed to index published draft")
+	}
 
 	return SuccessResponse(c, v)
 }
