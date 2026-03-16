@@ -4090,9 +4090,23 @@ func (b *PostgresBackend) CreateTaskOutput(ctx context.Context, output *types.Ta
 			dataBytes, nullableJSONB(metaBytes), output.Status,
 		).Scan(&output.CreatedAt)
 		if err == sql.ErrNoRows {
-			return b.db.QueryRowContext(ctx,
-				`SELECT created_at FROM task_output WHERE id = $1`, output.ID,
-			).Scan(&output.CreatedAt)
+			var existingWorkspaceID uint
+			var existingTaskID string
+			if lookupErr := b.db.QueryRowContext(ctx,
+				`SELECT created_at, workspace_id, task_id FROM task_output WHERE id = $1`, output.ID,
+			).Scan(&output.CreatedAt, &existingWorkspaceID, &existingTaskID); lookupErr != nil {
+				return lookupErr
+			}
+			if existingWorkspaceID != output.WorkspaceID || existingTaskID != output.TaskID {
+				return &types.ErrTaskOutputConflict{
+					ID:                  output.ID,
+					WorkspaceID:         output.WorkspaceID,
+					TaskID:              output.TaskID,
+					ExistingWorkspaceID: existingWorkspaceID,
+					ExistingTaskID:      existingTaskID,
+				}
+			}
+			return nil
 		}
 		return err
 	}
@@ -4258,10 +4272,10 @@ func (b *PostgresBackend) CreateView(ctx context.Context, v *types.View) error {
 		return fmt.Errorf("marshal view definition: %w", err)
 	}
 	return b.db.QueryRowContext(ctx, `
-		INSERT INTO workspace_view (workspace_id, name, description, definition_json)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO workspace_view (workspace_id, name, description, source_draft_id, definition_json)
+		VALUES ($1, $2, $3, $4, $5)
 		RETURNING id, created_at, updated_at`,
-		v.WorkspaceID, v.Name, v.Description, defJSON,
+		v.WorkspaceID, v.Name, v.Description, nullableString(v.SourceDraftID), defJSON,
 	).Scan(&v.ID, &v.CreatedAt, &v.UpdatedAt)
 }
 
@@ -4269,10 +4283,10 @@ func (b *PostgresBackend) GetView(ctx context.Context, workspaceID uint, viewID 
 	v := &types.View{}
 	var defBytes []byte
 	err := b.db.QueryRowContext(ctx, `
-		SELECT id, workspace_id, name, description, definition_json, created_at, updated_at
+		SELECT id, workspace_id, name, description, COALESCE(source_draft_id, ''), definition_json, created_at, updated_at
 		FROM workspace_view WHERE id = $1 AND workspace_id = $2`,
 		viewID, workspaceID,
-	).Scan(&v.ID, &v.WorkspaceID, &v.Name, &v.Description, &defBytes, &v.CreatedAt, &v.UpdatedAt)
+	).Scan(&v.ID, &v.WorkspaceID, &v.Name, &v.Description, &v.SourceDraftID, &defBytes, &v.CreatedAt, &v.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("view not found")
 	}
@@ -4288,7 +4302,7 @@ func (b *PostgresBackend) GetView(ctx context.Context, workspaceID uint, viewID 
 
 func (b *PostgresBackend) ListViews(ctx context.Context, workspaceID uint) ([]*types.View, error) {
 	rows, err := b.db.QueryContext(ctx, `
-		SELECT id, workspace_id, name, description, definition_json, created_at, updated_at
+		SELECT id, workspace_id, name, description, COALESCE(source_draft_id, ''), definition_json, created_at, updated_at
 		FROM workspace_view WHERE workspace_id = $1
 		ORDER BY created_at DESC`,
 		workspaceID,
@@ -4302,7 +4316,7 @@ func (b *PostgresBackend) ListViews(ctx context.Context, workspaceID uint) ([]*t
 	for rows.Next() {
 		v := &types.View{}
 		var defBytes []byte
-		if err := rows.Scan(&v.ID, &v.WorkspaceID, &v.Name, &v.Description, &defBytes, &v.CreatedAt, &v.UpdatedAt); err != nil {
+		if err := rows.Scan(&v.ID, &v.WorkspaceID, &v.Name, &v.Description, &v.SourceDraftID, &defBytes, &v.CreatedAt, &v.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(defBytes, &v.Definition); err != nil {
@@ -4322,10 +4336,10 @@ func (b *PostgresBackend) UpdateView(ctx context.Context, v *types.View) error {
 	}
 	err = b.db.QueryRowContext(ctx, `
 		UPDATE workspace_view
-		SET name = $1, description = $2, definition_json = $3, updated_at = CURRENT_TIMESTAMP
-		WHERE id = $4 AND workspace_id = $5
+		SET name = $1, description = $2, source_draft_id = $3, definition_json = $4, updated_at = CURRENT_TIMESTAMP
+		WHERE id = $5 AND workspace_id = $6
 		RETURNING updated_at`,
-		v.Name, v.Description, defJSON, v.ID, v.WorkspaceID,
+		v.Name, v.Description, nullableString(v.SourceDraftID), defJSON, v.ID, v.WorkspaceID,
 	).Scan(&v.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return fmt.Errorf("view not found")

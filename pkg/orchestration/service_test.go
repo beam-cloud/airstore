@@ -2,10 +2,13 @@ package orchestration
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 )
 
@@ -173,5 +176,146 @@ func TestSkillNamesFromConfigHandlesInterfaceSlices(t *testing.T) {
 
 	if got, want := skillNamesFromConfig(config), []string{"triage", "review"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("skillNamesFromConfig = %#v, want %#v", got, want)
+	}
+}
+
+type acceptTaskInputBackend struct {
+	repository.BackendRepository
+	task                *types.AgentTask
+	outputs             map[string]*types.TaskOutput
+	appendedInputs      []*types.TaskInput
+	statusUpdateErrByID map[string]error
+}
+
+func (b *acceptTaskInputBackend) GetTask(_ context.Context, _ uint, taskID string) (*types.AgentTask, error) {
+	if b.task != nil && b.task.ID == taskID {
+		return b.task, nil
+	}
+	return nil, &types.ErrAgentTaskNotFound{ID: taskID}
+}
+
+func (b *acceptTaskInputBackend) GetTaskOutput(_ context.Context, _ uint, outputID string) (*types.TaskOutput, error) {
+	if output, ok := b.outputs[outputID]; ok {
+		return output, nil
+	}
+	return nil, &types.ErrTaskOutputNotFound{ID: outputID}
+}
+
+func (b *acceptTaskInputBackend) UpdateTaskOutputStatus(_ context.Context, _ uint, outputID string, status string) error {
+	if err := b.statusUpdateErrByID[outputID]; err != nil {
+		return err
+	}
+	output, ok := b.outputs[outputID]
+	if !ok {
+		return &types.ErrTaskOutputNotFound{ID: outputID}
+	}
+	output.Status = status
+	return nil
+}
+
+func (b *acceptTaskInputBackend) AppendTaskInput(_ context.Context, input *types.TaskInput) error {
+	copied := *input
+	b.appendedInputs = append(b.appendedInputs, &copied)
+	return nil
+}
+
+func TestAcceptTaskInputRejectsCrossTaskItemDecisions(t *testing.T) {
+	backend := &acceptTaskInputBackend{
+		task: &types.AgentTask{
+			ID:          "task-1",
+			WorkspaceID: 7,
+		},
+		outputs: map[string]*types.TaskOutput{
+			"out-foreign": {
+				ID:     "out-foreign",
+				TaskID: "task-2",
+				Title:  "Foreign approval item",
+				Status: types.TaskOutputStatusPending,
+			},
+		},
+	}
+	service := &AgentService{backend: backend}
+
+	_, err := service.AcceptTaskInput(
+		context.Background(),
+		7,
+		"task-1",
+		types.InputKindApproveReject,
+		nil,
+		"",
+		"idem-1",
+		[]types.ItemDecision{{
+			OutputID: "out-foreign",
+			Action:   types.TaskInputActionApprove,
+		}},
+	)
+	if err == nil {
+		t.Fatal("expected invalid task input error")
+	}
+	var invalidInputErr *types.ErrInvalidTaskInput
+	if !errors.As(err, &invalidInputErr) {
+		t.Fatalf("expected invalid task input error, got %T: %v", err, err)
+	}
+	if want := "does not belong to task task-1"; !strings.Contains(err.Error(), want) {
+		t.Fatalf("error = %q, want substring %q", err.Error(), want)
+	}
+	if got := len(backend.appendedInputs); got != 0 {
+		t.Fatalf("append count = %d, want 0", got)
+	}
+	if got := backend.outputs["out-foreign"].Status; got != types.TaskOutputStatusPending {
+		t.Fatalf("foreign output status = %q, want pending", got)
+	}
+}
+
+func TestAcceptTaskInputRollsBackItemStatusesOnUpdateError(t *testing.T) {
+	backend := &acceptTaskInputBackend{
+		task: &types.AgentTask{
+			ID:          "task-1",
+			WorkspaceID: 7,
+		},
+		outputs: map[string]*types.TaskOutput{
+			"out-1": {
+				ID:     "out-1",
+				TaskID: "task-1",
+				Title:  "First item",
+				Status: types.TaskOutputStatusPending,
+			},
+			"out-2": {
+				ID:     "out-2",
+				TaskID: "task-1",
+				Title:  "Second item",
+				Status: types.TaskOutputStatusPending,
+			},
+		},
+		statusUpdateErrByID: map[string]error{
+			"out-2": fmt.Errorf("boom"),
+		},
+	}
+	service := &AgentService{backend: backend}
+
+	_, err := service.AcceptTaskInput(
+		context.Background(),
+		7,
+		"task-1",
+		types.InputKindApproveReject,
+		nil,
+		"",
+		"idem-2",
+		[]types.ItemDecision{
+			{OutputID: "out-1", Action: types.TaskInputActionApprove},
+			{OutputID: "out-2", Action: types.TaskInputActionApprove},
+		},
+	)
+	if err == nil {
+		t.Fatal("expected status update error")
+	}
+	if got := backend.outputs["out-1"].Status; got != types.TaskOutputStatusPending {
+		t.Fatalf("out-1 status = %q, want pending after rollback", got)
+	}
+	if got := backend.outputs["out-2"].Status; got != types.TaskOutputStatusPending {
+		t.Fatalf("out-2 status = %q, want pending after failure", got)
+	}
+	if got := len(backend.appendedInputs); got != 0 {
+		t.Fatalf("append count = %d, want 0", got)
 	}
 }

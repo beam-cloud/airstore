@@ -106,11 +106,21 @@ func (b *fakeResolverBackend) ListAgentProfiles(_ context.Context, _ uint) ([]*t
 
 func (b *fakeResolverBackend) ListWorkspaceTaskOutputs(_ context.Context, _ uint, filter types.TaskOutputListFilter) ([]*types.TaskOutput, error) {
 	b.filters = append(b.filters, filter)
+	outputs := b.workspaceOutputs
 	if filter.AgentID != nil {
 		b.queriedAgentIDs = append(b.queriedAgentIDs, *filter.AgentID)
-		return b.outputsByAgent[*filter.AgentID], nil
+		outputs = b.outputsByAgent[*filter.AgentID]
 	}
-	return b.workspaceOutputs, nil
+	if filter.OutputType != nil {
+		filtered := make([]*types.TaskOutput, 0, len(outputs))
+		for _, output := range outputs {
+			if output != nil && strings.EqualFold(strings.TrimSpace(output.OutputType), strings.TrimSpace(*filter.OutputType)) {
+				filtered = append(filtered, output)
+			}
+		}
+		return filtered, nil
+	}
+	return outputs, nil
 }
 
 func TestFetchComponentOutputsSkipsUnresolvedAgentRefs(t *testing.T) {
@@ -148,6 +158,37 @@ func TestFetchComponentOutputsSkipsUnresolvedAgentRefs(t *testing.T) {
 	}
 	if got := backend.filters[0].ExcludeArchived; got {
 		t.Fatal("expected views resolver to include archived outputs")
+	}
+}
+
+func TestFetchMappingOutputsDoesNotFallBackToWorkspaceForUnresolvedViewAgentRefs(t *testing.T) {
+	otherAgentID := "other-agent"
+	other := newRecipeOutput("out-1")
+	other.AgentID = &otherAgentID
+	other.TaskID = "task-1"
+
+	backend := &fakeResolverBackend{
+		workspaceOutputs: []*types.TaskOutput{other},
+	}
+	resolver := &DataResolver{backend: backend, store: nil}
+
+	outputs, err := resolver.fetchMappingOutputs(
+		context.Background(),
+		7,
+		&types.DataSource{},
+		[]string{"missing-agent"},
+	)
+	if err != nil {
+		t.Fatalf("fetchMappingOutputs returned error: %v", err)
+	}
+	if len(outputs) != 0 {
+		t.Fatalf("expected no outputs, got %#v", outputs)
+	}
+	if got := len(backend.filters); got != 0 {
+		t.Fatalf("expected no workspace queries, got %d", got)
+	}
+	if got := len(backend.queriedTaskIDs); got != 0 {
+		t.Fatalf("expected no task expansion, got %d task queries", got)
 	}
 }
 
@@ -204,6 +245,109 @@ func TestFetchMappingOutputsExpandsTaskContextForSelectedTasks(t *testing.T) {
 	}
 	if got, want := backend.queriedTaskIDs[0], "task-1"; got != want {
 		t.Fatalf("queried task id = %q, want %q", got, want)
+	}
+}
+
+func TestFetchMappingOutputsExpandsTaskContextForStatusScopedTasks(t *testing.T) {
+	agentID := "agent-1"
+	pending := newRecipeOutput("out-1")
+	pending.AgentID = &agentID
+	pending.TaskID = "task-1"
+	pending.Status = types.TaskOutputStatusPending
+
+	approvedSibling := newRecipeOutput("out-2")
+	approvedSibling.AgentID = &agentID
+	approvedSibling.TaskID = "task-1"
+	approvedSibling.Status = types.TaskOutputStatusApproved
+
+	otherTask := newRecipeOutput("out-3")
+	otherTask.AgentID = &agentID
+	otherTask.TaskID = "task-2"
+	otherTask.Status = types.TaskOutputStatusApproved
+
+	backend := &fakeResolverBackend{
+		profilesByKey: map[string]*types.AgentProfile{
+			"chef-agent": {ID: agentID},
+		},
+		outputsByAgent: map[string][]*types.TaskOutput{
+			agentID: {pending, approvedSibling, otherTask},
+		},
+		taskOutputsByTask: map[string][]*types.TaskOutput{
+			"task-1": {pending, approvedSibling},
+		},
+	}
+	resolver := &DataResolver{backend: backend, store: nil}
+
+	outputs, err := resolver.fetchMappingOutputs(
+		context.Background(),
+		7,
+		&types.DataSource{Statuses: []string{types.TaskOutputStatusPending}},
+		[]string{"chef-agent"},
+	)
+	if err != nil {
+		t.Fatalf("fetchMappingOutputs returned error: %v", err)
+	}
+	if got, want := sortedOutputIDs(outputs), []string{"out-1", "out-2"}; !slicesMatch(got, want) {
+		t.Fatalf("output ids = %v, want %v", got, want)
+	}
+	if got, want := len(backend.queriedTaskIDs), 1; got != want {
+		t.Fatalf("task query count = %d, want %d", got, want)
+	}
+	if got, want := backend.queriedTaskIDs[0], "task-1"; got != want {
+		t.Fatalf("queried task id = %q, want %q", got, want)
+	}
+}
+
+func TestFetchMappingOutputsUsesOutputTypeFallbackWhenArtifactKeyUnset(t *testing.T) {
+	agentID := "agent-1"
+	jsonPrimary := newRecipeOutput("out-1")
+	jsonPrimary.AgentID = &agentID
+	jsonPrimary.TaskID = "task-1"
+	jsonPrimary.OutputType = "json"
+
+	textSibling := newRecipeOutput("out-2")
+	textSibling.AgentID = &agentID
+	textSibling.TaskID = "task-1"
+	textSibling.OutputType = "text"
+
+	textOtherTask := newRecipeOutput("out-3")
+	textOtherTask.AgentID = &agentID
+	textOtherTask.TaskID = "task-2"
+	textOtherTask.OutputType = "text"
+
+	backend := &fakeResolverBackend{
+		profilesByKey: map[string]*types.AgentProfile{
+			"chef-agent": {ID: agentID},
+		},
+		outputsByAgent: map[string][]*types.TaskOutput{
+			agentID: {jsonPrimary, textSibling, textOtherTask},
+		},
+		taskOutputsByTask: map[string][]*types.TaskOutput{
+			"task-1": {jsonPrimary, textSibling},
+		},
+	}
+	resolver := &DataResolver{backend: backend, store: nil}
+
+	outputs, err := resolver.fetchMappingOutputs(
+		context.Background(),
+		7,
+		&types.DataSource{OutputType: "json"},
+		[]string{"chef-agent"},
+	)
+	if err != nil {
+		t.Fatalf("fetchMappingOutputs returned error: %v", err)
+	}
+	if got, want := sortedOutputIDs(outputs), []string{"out-1", "out-2"}; !slicesMatch(got, want) {
+		t.Fatalf("output ids = %v, want %v", got, want)
+	}
+	if got, want := len(backend.queriedTaskIDs), 1; got != want {
+		t.Fatalf("task query count = %d, want %d", got, want)
+	}
+	if got, want := backend.queriedTaskIDs[0], "task-1"; got != want {
+		t.Fatalf("queried task id = %q, want %q", got, want)
+	}
+	if got := backend.filters[0].OutputType; got == nil || *got != "json" {
+		t.Fatalf("expected output type filter to be forwarded, got %#v", got)
 	}
 }
 
@@ -281,6 +425,7 @@ func TestFilterOutputsForDataSource(t *testing.T) {
 	// artifact_key narrows to matching outputs regardless of output_type.
 	filtered = filterOutputsForDataSource(outputs, &types.DataSource{
 		ArtifactKey: "extracted-recipes",
+		OutputType:  "json",
 	}, []string{agentID})
 	if len(filtered) != 1 || filtered[0].ID != "out-1" {
 		t.Fatalf("artifact_key should narrow to matching outputs, got %d results", len(filtered))

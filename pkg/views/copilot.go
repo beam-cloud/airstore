@@ -79,6 +79,13 @@ type draftStreamEntry struct {
 	Timestamp   int64  `json:"ts"`
 }
 
+const releaseViewPublishLockScript = `
+if redis.call('get', KEYS[1]) == ARGV[1] then
+	return redis.call('del', KEYS[1])
+end
+return 0
+`
+
 // ---------------------------------------------------------------------------
 // Copilot
 // ---------------------------------------------------------------------------
@@ -222,6 +229,25 @@ func (c *Copilot) IndexDraftPublished(ctx context.Context, workspaceID, draftID,
 	return c.indexDraft(ctx, workspaceID, "published", draftID, "", viewName, viewID)
 }
 
+func (c *Copilot) IndexDraftPublishedAsync(workspaceID, draftID, viewName, viewID string) {
+	if c == nil || strings.TrimSpace(workspaceID) == "" || strings.TrimSpace(draftID) == "" || strings.TrimSpace(viewID) == "" {
+		return
+	}
+
+	viewName = strings.TrimSpace(viewName)
+	go func() {
+		indexCtx, indexCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer indexCancel()
+		if err := c.IndexDraftPublished(indexCtx, workspaceID, draftID, viewName, viewID); err != nil {
+			log.Warn().Err(err).
+				Str("workspace_id", workspaceID).
+				Str("draft_id", draftID).
+				Str("view_id", viewID).
+				Msg("failed to index published draft")
+		}
+	}()
+}
+
 // ---------------------------------------------------------------------------
 // Draft listing
 // ---------------------------------------------------------------------------
@@ -257,6 +283,88 @@ func (c *Copilot) ListDrafts(ctx context.Context, workspaceID string) ([]DraftSu
 				d.Status, d.UpdatedAt = "discarded", e.Timestamp
 			}
 		}
+	}
+
+	// The workspace index is a secondary projection. If the async publish-index
+	// append lags or is dropped, fall back to the authoritative draft stream so
+	// published drafts still surface correctly across replicas, then repair the
+	// index opportunistically in the background.
+	reconcileCtx, reconcileCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer reconcileCancel()
+
+	var numericWorkspaceID uint
+	workspaceResolved := false
+	resolveWorkspaceID := func() (uint, bool) {
+		if workspaceResolved {
+			return numericWorkspaceID, numericWorkspaceID != 0
+		}
+		workspaceResolved = true
+		if c.backend == nil {
+			return 0, false
+		}
+		ws, err := c.backend.GetWorkspaceByExternalId(reconcileCtx, workspaceID)
+		if err != nil || ws == nil {
+			return 0, false
+		}
+		numericWorkspaceID = ws.Id
+		return numericWorkspaceID, true
+	}
+
+	viewBySourceDraftID := map[string]*types.View{}
+	loadViewsBySourceDraftID := func() map[string]*types.View {
+		if len(viewBySourceDraftID) > 0 || c.backend == nil {
+			return viewBySourceDraftID
+		}
+		wsID, ok := resolveWorkspaceID()
+		if !ok {
+			return viewBySourceDraftID
+		}
+		views, err := c.backend.ListViews(reconcileCtx, wsID)
+		if err != nil {
+			return viewBySourceDraftID
+		}
+		for _, view := range views {
+			if view == nil || strings.TrimSpace(view.SourceDraftID) == "" {
+				continue
+			}
+			viewBySourceDraftID[strings.TrimSpace(view.SourceDraftID)] = view
+		}
+		return viewBySourceDraftID
+	}
+
+	for _, d := range drafts {
+		if d == nil || d.Status == "published" || d.Status == "discarded" {
+			continue
+		}
+		draft, err := c.LoadDraft(reconcileCtx, workspaceID, d.ID)
+		if err != nil || draft == nil {
+			continue
+		}
+
+		publishedViewID := strings.TrimSpace(draft.PublishedViewID)
+		if publishedViewID == "" {
+			if view := loadViewsBySourceDraftID()[d.ID]; view != nil {
+				publishedViewID = strings.TrimSpace(view.ID)
+				d.ViewName = strings.TrimSpace(view.Name)
+			}
+		}
+		if publishedViewID == "" {
+			continue
+		}
+
+		d.Status = "published"
+		d.ViewID = publishedViewID
+		if draft.UpdatedAt > d.UpdatedAt {
+			d.UpdatedAt = draft.UpdatedAt
+		}
+		if d.ViewName == "" {
+			if wsID, ok := resolveWorkspaceID(); ok {
+				if view, err := c.backend.GetView(reconcileCtx, wsID, publishedViewID); err == nil && view != nil {
+					d.ViewName = strings.TrimSpace(view.Name)
+				}
+			}
+		}
+		c.IndexDraftPublishedAsync(workspaceID, d.ID, d.ViewName, publishedViewID)
 	}
 
 	result := make([]DraftSummary, 0, len(drafts))
@@ -305,7 +413,8 @@ func (c *Copilot) PublishView(ctx context.Context, draft *Draft, workspaceID uin
 	const publishLockTTL = 30 * time.Second
 	if c.redis != nil {
 		lockKey := common.Keys.ViewPublishLock(draft.ID)
-		acquired, err := c.redis.SetNX(ctx, lockKey, "1", publishLockTTL).Result()
+		lockToken := uuid.NewString()
+		acquired, err := c.redis.SetNX(ctx, lockKey, lockToken, publishLockTTL).Result()
 		if err != nil {
 			return nil, fmt.Errorf("publish lock: %w", err)
 		}
@@ -320,13 +429,27 @@ func (c *Copilot) PublishView(ctx context.Context, draft *Draft, workspaceID uin
 					return v, nil
 				}
 			}
+			if existingViews, err := c.backend.ListViews(ctx, workspaceID); err == nil {
+				for _, existing := range existingViews {
+					if existing != nil && strings.TrimSpace(existing.SourceDraftID) == draft.ID {
+						return existing, nil
+					}
+				}
+			}
 			return nil, fmt.Errorf("draft is being published by another replica")
 		}
 		defer func() {
-		delCtx, delCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer delCancel()
-		c.redis.Del(delCtx, lockKey)
-	}()
+			delCtx, delCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer delCancel()
+			if _, err := c.redis.Eval(
+				delCtx,
+				releaseViewPublishLockScript,
+				[]string{lockKey},
+				lockToken,
+			).Int64(); err != nil {
+				log.Warn().Err(err).Str("draft_id", draft.ID).Msg("failed to release publish lock")
+			}
+		}()
 	}
 
 	// Refresh PublishedViewID from S2 in case the in-memory session is stale
@@ -336,11 +459,21 @@ func (c *Copilot) PublishView(ctx context.Context, draft *Draft, workspaceID uin
 			draft.PublishedViewID = fresh.PublishedViewID
 		}
 	}
+	if draft.PublishedViewID == "" {
+		if existingViews, err := c.backend.ListViews(ctx, workspaceID); err == nil {
+			for _, existing := range existingViews {
+				if existing != nil && strings.TrimSpace(existing.SourceDraftID) == draft.ID {
+					draft.PublishedViewID = existing.ID
+					break
+				}
+			}
+		}
+	}
 
 	var published *types.View
 	if draft.PublishedViewID != "" {
 		if existing, err := c.backend.GetView(ctx, workspaceID, draft.PublishedViewID); err == nil && existing != nil {
-			existing.Name, existing.Description, existing.Definition = def.Name, def.Description, def
+			existing.Name, existing.Description, existing.SourceDraftID, existing.Definition = def.Name, def.Description, draft.ID, def
 			if err := c.backend.UpdateView(ctx, existing); err != nil {
 				return nil, fmt.Errorf("update view: %w", err)
 			}
@@ -349,7 +482,13 @@ func (c *Copilot) PublishView(ctx context.Context, draft *Draft, workspaceID uin
 	}
 
 	if published == nil {
-		published = &types.View{WorkspaceID: workspaceID, Name: def.Name, Description: def.Description, Definition: def}
+		published = &types.View{
+			WorkspaceID:   workspaceID,
+			Name:          def.Name,
+			Description:   def.Description,
+			SourceDraftID: draft.ID,
+			Definition:    def,
+		}
 		if err := c.backend.CreateView(ctx, published); err != nil {
 			return nil, fmt.Errorf("create view: %w", err)
 		}
@@ -710,7 +849,7 @@ func normalizeDataSource(ds *types.DataSource) {
 	}
 	ds.AgentID = strings.TrimSpace(ds.AgentID)
 	ds.AgentIDs = uniqueTrimmedStrings(ds.AgentIDs)
-	ds.OutputType = "" // output_type is not used for filtering; the BAML mapper handles all types
+	ds.OutputType = strings.TrimSpace(ds.OutputType)
 	ds.ArtifactKey = normalizeToken(ds.ArtifactKey)
 	ds.TimeRange = strings.TrimSpace(ds.TimeRange)
 	ds.Statuses = uniqueTrimmedStrings(ds.Statuses)

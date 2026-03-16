@@ -887,6 +887,10 @@ func (g *WorkspaceTasksGroup) SubmitInput(c echo.Context) error {
 		if errors.As(err, &taskErr) {
 			return ErrorResponse(c, http.StatusNotFound, "task not found")
 		}
+		var invalidInputErr *types.ErrInvalidTaskInput
+		if errors.As(err, &invalidInputErr) {
+			return ErrorResponse(c, http.StatusBadRequest, invalidInputErr.Error())
+		}
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 

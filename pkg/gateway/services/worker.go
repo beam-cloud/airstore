@@ -13,6 +13,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/scheduler"
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
+	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -551,6 +552,18 @@ func updateExecutionInstanceCounts(ctx context.Context, backend repository.Backe
 
 // ── Task Outputs ────────────────────────────────────────────────────────────
 
+func scopedIdempotentTaskOutputID(workspaceID uint32, taskID, rawID string) string {
+	taskID = strings.TrimSpace(taskID)
+	rawID = strings.TrimSpace(rawID)
+	if rawID == "" {
+		return ""
+	}
+	return uuid.NewSHA1(
+		uuid.NameSpaceOID,
+		[]byte(fmt.Sprintf("task-output:%d:%s:%s", workspaceID, taskID, rawID)),
+	).String()
+}
+
 func (s *WorkerService) CreateTaskOutput(ctx context.Context, req *pb.CreateTaskOutputRequest) (*pb.CreateTaskOutputResponse, error) {
 	if s.backend == nil {
 		return nil, status.Errorf(codes.Unavailable, "task persistence not available")
@@ -582,7 +595,7 @@ func (s *WorkerService) CreateTaskOutput(ctx context.Context, req *pb.CreateTask
 	}
 	if output.Metadata != nil {
 		if idempID, ok := output.Metadata["_idempotent_output_id"].(string); ok && idempID != "" {
-			output.ID = idempID
+			output.ID = scopedIdempotentTaskOutputID(req.WorkspaceId, req.TaskId, idempID)
 			delete(output.Metadata, "_idempotent_output_id")
 		}
 	}
@@ -594,6 +607,9 @@ func (s *WorkerService) CreateTaskOutput(ctx context.Context, req *pb.CreateTask
 	}
 
 	if err := s.backend.CreateTaskOutput(ctx, output); err != nil {
+		if _, ok := err.(*types.ErrTaskOutputConflict); ok {
+			return nil, status.Errorf(codes.AlreadyExists, "create output: %v", err)
+		}
 		return nil, status.Errorf(codes.Internal, "create output: %v", err)
 	}
 	s.publishTaskUpdate(ctx, output.WorkspaceID, output.TaskID)
