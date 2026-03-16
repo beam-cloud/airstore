@@ -197,7 +197,7 @@ func (c *StorageClient) Exists(ctx context.Context, bucket, key string) (bool, e
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		if isNotFoundError(err) {
+		if IsNotFoundError(err) {
 			return false, nil
 		}
 		return false, err
@@ -225,7 +225,7 @@ func (c *StorageClient) CopyObject(ctx context.Context, srcBucket, srcKey, dstBu
 	return err
 }
 
-func isNotFoundError(err error) bool {
+func IsNotFoundError(err error) bool {
 	var notFound *s3types.NotFound
 	if errors.As(err, &notFound) {
 		return true

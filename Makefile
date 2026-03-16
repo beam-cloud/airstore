@@ -118,6 +118,10 @@ baml:
 	@echo "Generating BAML client..."
 	@baml-cli generate --from pkg/sources/queries/baml_src
 	@goimports -w pkg/sources/queries/baml_client/
+	@baml-cli generate --from pkg/worker/agentsignal/baml_src
+	@goimports -w pkg/worker/agentsignal/baml_client/
+	@baml-cli generate --from pkg/views/baml_src
+	@goimports -w pkg/views/baml_client/
 
 fmt: check-go
 	go fmt ./...

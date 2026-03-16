@@ -211,16 +211,6 @@ func (s *AgentService) AcceptAgentCommand(
 	if err := ValidateAgentCommandParams(&params); err != nil {
 		return nil, false, err
 	}
-	existing, err := s.backend.GetTaskByIdempotency(ctx, workspaceID, params.AgentID, params.IdempotencyKey)
-	if err == nil {
-		return existing, true, nil
-	}
-
-	runPolicy := DefaultRunExecutionPolicy()
-	if params.Policy != nil {
-		runPolicy = NormalizeRunExecutionPolicy(*params.Policy)
-	}
-	instanceKey := ExecutionClassKey(workspaceID, params.AgentID, params.Lane, runPolicy)
 	agentConfig := map[string]any{}
 	agentProvider := ""
 	agentModel := ""
@@ -233,11 +223,13 @@ func (s *AgentService) AcceptAgentCommand(
 		if err != nil {
 			return nil, false, err
 		}
-		agentConfig = cloneAnyMap(profile.ConfigJSON)
-		agentProvider = providerFromAgentConfig(agentConfig)
-		if agentProvider == "" {
-			return nil, false, fmt.Errorf("agent provider is required in profile config")
+		resolved := profile.ID
+		params.AgentID = &resolved
+		agentConfig, err = normalizeAgentProfileConfig(profile.ConfigJSON, profile.AgentKey)
+		if err != nil {
+			return nil, false, err
 		}
+		agentProvider = providerFromAgentConfig(agentConfig)
 		if !isClaudeCompatibleProvider(agentProvider) {
 			return nil, false, fmt.Errorf("agent provider %q is not supported", agentProvider)
 		}
@@ -246,6 +238,17 @@ func (s *AgentService) AcceptAgentCommand(
 			agentConfigKeyModel,
 		)
 	}
+
+	existing, err := s.backend.GetTaskByIdempotency(ctx, workspaceID, params.AgentID, params.IdempotencyKey)
+	if err == nil {
+		return existing, true, nil
+	}
+
+	runPolicy := DefaultRunExecutionPolicy()
+	if params.Policy != nil {
+		runPolicy = NormalizeRunExecutionPolicy(*params.Policy)
+	}
+	instanceKey := ExecutionClassKey(workspaceID, params.AgentID, params.Lane, runPolicy)
 
 	if params.HookID == nil {
 		latestRun, err := s.latestRunForSessionAgent(ctx, workspaceID, params.AgentID, params.SessionID)
@@ -718,9 +721,7 @@ func applyDispatchPayload(task *types.AgentTask, values map[string]any, retryAtt
 		task.PayloadJSON = map[string]any{}
 	}
 	if prompt := dispatchPromptFromValues(values); prompt != "" {
-		if task.PayloadJSON["message"] == nil || task.PayloadJSON["message"] == "" {
-			task.PayloadJSON["message"] = prompt
-		}
+		task.PayloadJSON["message"] = prompt
 		task.PayloadJSON["prompt"] = prompt
 	}
 	if boolFromAny(values[types.OrchestrationOutboxPayloadResumeSession]) {
@@ -772,6 +773,41 @@ type runResultProjectorMessage struct {
 	wakeDelayMinutes   int
 	wakeReason         string
 	wakeFollowUpPrompt string
+	wakeAgenda         []*types.TaskWakeAgendaItem
+}
+
+func parseWakeAgendaPayload(raw string) []*types.TaskWakeAgendaItem {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+
+	type wakeAgendaPayloadItem struct {
+		Type   string `json:"type"`
+		Title  string `json:"title"`
+		Reason string `json:"reason"`
+	}
+
+	var payload []wakeAgendaPayloadItem
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return nil
+	}
+
+	items := make([]*types.TaskWakeAgendaItem, 0, len(payload))
+	for idx, item := range payload {
+		title := strings.TrimSpace(item.Title)
+		reason := strings.TrimSpace(item.Reason)
+		if title == "" && reason == "" {
+			continue
+		}
+		items = append(items, &types.TaskWakeAgendaItem{
+			Seq:    idx + 1,
+			Type:   strings.TrimSpace(item.Type),
+			Title:  title,
+			Reason: reason,
+		})
+	}
+	return items
 }
 
 func (s *AgentService) resultProjectorLoop(ctx context.Context) {
@@ -836,6 +872,7 @@ func (s *AgentService) processRunResultMessage(ctx context.Context, message redi
 		wakeDelayMinutes:   intFromAny(message.Values[types.OrchestrationOutboxPayloadWakeDelayMinutes]),
 		wakeReason:         streamValueAsString(message.Values, types.OrchestrationOutboxPayloadWakeReason),
 		wakeFollowUpPrompt: streamValueAsString(message.Values, types.OrchestrationOutboxPayloadWakeFollowUpPrompt),
+		wakeAgenda:         parseWakeAgendaPayload(streamValueAsString(message.Values, types.OrchestrationOutboxPayloadWakeAgenda)),
 	}
 	if result.taskID == "" || result.attemptID == "" {
 		_ = s.orchestrationStore.AckRunResults(ctx, message.ID)
@@ -895,11 +932,12 @@ func (s *AgentService) applyRunResultProjectorMessage(ctx context.Context, resul
 		return nil
 	}
 	var wakeSignal *types.RunExecutionWakeSignal
-	if result.wakeDelayMinutes > 0 {
+	if result.wakeDelayMinutes > 0 || result.wakeReason != "" || result.wakeFollowUpPrompt != "" || len(result.wakeAgenda) > 0 {
 		wakeSignal = &types.RunExecutionWakeSignal{
 			DelayMinutes:   result.wakeDelayMinutes,
 			Reason:         result.wakeReason,
 			FollowUpPrompt: result.wakeFollowUpPrompt,
+			WakeAgenda:     result.wakeAgenda,
 		}
 	}
 
@@ -975,21 +1013,16 @@ func (s *AgentService) finalizeRunAttempt(
 	return nil
 }
 
-// wakeBackoffDelay computes the actual delay using exponential backoff.
-// Starts at 5 minutes, doubling each cycle, capped at the LLM's suggested delay.
+// wakeBackoffDelay normalizes the requested wake delay.
+// Self-scheduled wakes must respect the planner's chosen delay rather than
+// using a shorter exponential backoff placeholder.
 func wakeBackoffDelay(wakeCount, ceilingMinutes int) int {
-	const initialMinutes = 5
-	const maxShift = 30 // 5 << 30 ≈ 5 billion, safely fits int on all platforms
-	if wakeCount > maxShift {
-		wakeCount = maxShift
+	_ = wakeCount
+	if ceilingMinutes <= 0 {
+		return 5
 	}
-	delay := initialMinutes << wakeCount // 5, 10, 20, 40, 80, ...
-	if delay > ceilingMinutes {
-		return ceilingMinutes
-	}
-	return delay
+	return ceilingMinutes
 }
-
 
 func (s *AgentService) settleOriginTask(ctx context.Context, runID string, waitingForInput bool, wakeSignal *types.RunExecutionWakeSignal) error {
 	return s.lifecycle.Settle(ctx, runID, &SettleOpts{
@@ -1083,7 +1116,6 @@ func (s *AgentService) handleInterruptTask(ctx context.Context, task *types.Agen
 	s.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
 	return nil
 }
-
 
 func (s *AgentService) cancelInFlightRunExecutions(ctx context.Context, runID string) (bool, error) {
 	attempts, err := s.backend.ListAgentRunAttempts(ctx, runID)
@@ -1789,18 +1821,32 @@ func skillNamesFromConfig(config map[string]any) []string {
 	if !ok || raw == nil {
 		return nil
 	}
-	arr, ok := raw.([]any)
-	if !ok {
-		return nil
+	out := make([]string, 0)
+	seen := map[string]struct{}{}
+	appendSkill := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
 	}
-	out := make([]string, 0, len(arr))
-	for _, v := range arr {
-		if s, ok := v.(string); ok {
-			s = strings.TrimSpace(s)
-			if s != "" {
-				out = append(out, s)
+	switch typed := raw.(type) {
+	case []string:
+		for _, value := range typed {
+			appendSkill(value)
+		}
+	case []any:
+		for _, value := range typed {
+			if text, ok := value.(string); ok {
+				appendSkill(text)
 			}
 		}
+	case string:
+		appendSkill(typed)
 	}
 	return out
 }
@@ -1834,9 +1880,9 @@ func injectSkillsSection(agentConfig map[string]any, skills []string) {
 }
 
 func runInputPrompt(payload map[string]any) string {
-	prompt := strings.TrimSpace(stringFromPayload(payload, "message"))
+	prompt := strings.TrimSpace(stringFromPayload(payload, "prompt"))
 	if prompt == "" {
-		prompt = strings.TrimSpace(stringFromPayload(payload, "prompt"))
+		prompt = strings.TrimSpace(stringFromPayload(payload, "message"))
 	}
 	return prompt
 }

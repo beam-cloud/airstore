@@ -99,10 +99,17 @@ message SetTaskStartedRequest {
 
 message SetTaskStartedResponse {}
 
+message WakeAgendaItem {
+  string type = 1;
+  string title = 2;
+  string reason = 3;
+}
+
 message WakeSignal {
   int32  delay_minutes    = 1;
   string reason           = 2;
   string follow_up_prompt = 3;
+  repeated WakeAgendaItem wake_agenda = 4;
 }
 
 message SetTaskResultRequest {
@@ -176,7 +183,8 @@ message CreateTaskOutputRequest {
   string run_id = 3;
   string output_type = 4;
   string title = 5;
-  string schema_json = 6;   // JSON-encoded schema
+  reserved 6;
+  reserved "schema_json";
   string data_json = 7;     // JSON-encoded initial data
   string metadata_json = 8; // JSON-encoded metadata
   string uri = 9;            // External deep-link URI

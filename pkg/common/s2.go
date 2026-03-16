@@ -111,6 +111,16 @@ func (StreamNames) SkillDraftIndex(workspaceID string) string {
 	return fmt.Sprintf("skill-draft-index.%s", workspaceID)
 }
 
+// ViewDraft returns the stream name for a view draft conversation.
+func (StreamNames) ViewDraft(draftID string) string {
+	return fmt.Sprintf("view-draft.%s", draftID)
+}
+
+// ViewDraftIndex returns the stream name for a workspace's view draft index.
+func (StreamNames) ViewDraftIndex(workspaceID string) string {
+	return fmt.Sprintf("view-draft-index.%s", workspaceID)
+}
+
 // Streams provides access to stream names
 var Streams = StreamNames{}
 

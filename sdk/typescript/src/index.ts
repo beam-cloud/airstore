@@ -153,6 +153,7 @@ export type {
   Schedule,
   ScheduleCreateParams,
   ScheduleUpdateParams,
+  WakeAgendaItem,
   OutputType,
   TaskOutput,
   TableColumn,

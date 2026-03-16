@@ -42,6 +42,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/scheduler"
 	"github.com/beam-cloud/airstore/pkg/skills"
 	"github.com/beam-cloud/airstore/pkg/sources"
+	"github.com/beam-cloud/airstore/pkg/views"
 	"github.com/beam-cloud/airstore/pkg/sources/providers"
 	"github.com/beam-cloud/airstore/pkg/tools"
 	_ "github.com/beam-cloud/airstore/pkg/tools/builtin" // self-registering tools
@@ -54,6 +55,7 @@ import (
 type Gateway struct {
 	Config      types.AppConfig
 	RedisClient *common.RedisClient
+	MongoClient *common.MongoClient
 	BackendRepo repository.BackendRepository
 	httpServer  *http.Server
 	grpcServer  *grpc.Server
@@ -130,6 +132,16 @@ func NewGateway() (*Gateway, error) {
 		}
 	}
 
+	// Initialize MongoDB (optional — gated on config)
+	var mongoClient *common.MongoClient
+	if config.Database.Mongo.URI != "" {
+		mongoClient, err = common.NewMongoClient(config.Database.Mongo)
+		if err != nil {
+			log.Warn().Err(err).Msg("MongoDB init failed — views will not persist to MongoDB")
+			mongoClient = nil
+		}
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Initialize OAuth registry - providers self-register their integrations
@@ -163,6 +175,7 @@ func NewGateway() (*Gateway, error) {
 	gateway := &Gateway{
 		Config:         config,
 		RedisClient:    redisClient,
+		MongoClient:    mongoClient,
 		BackendRepo:    backendRepo,
 		ctx:            ctx,
 		cancelFunc:     cancel,
@@ -578,6 +591,8 @@ func (g *Gateway) registerServices() error {
 			log.Info().Msg("skills API registered at /api/v1/workspaces/:workspace_id/skills")
 		}
 
+		// Views API — registered after agentAPI is created below (see viewsGroup block)
+
 		// Filesystem API (nested under workspaces, workspace-scoped auth)
 		filesystemGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/fs")
 		filesystemGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
@@ -605,6 +620,18 @@ func (g *Gateway) registerServices() error {
 		)
 		orchestratorSvc.Start(g.ctx)
 		agentAPI := orchestration.NewAgentAPI(g.BackendRepo, orchestratorSvc)
+
+		// Views API (deferred to here so agentAPI is available for the copilot)
+		viewCopilot := views.NewCopilot(g.s2Client, g.BackendRepo, g.storageClient, agentAPI)
+		var viewStore *views.ViewStore
+		if g.MongoClient != nil {
+			viewStore = views.NewViewStore(g.MongoClient)
+		}
+		viewsGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/views")
+		viewsGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
+		apiv1.NewViewsGroup(viewsGroup, g.BackendRepo, viewCopilot, viewStore)
+		log.Info().Msg("views API registered at /api/v1/workspaces/:workspace_id/views")
+
 		var mailClient *clients.AgentMailClient
 		if g.Config.Channels.AgentMail.APIKey != "" {
 			mailClient = clients.NewAgentMailClient(clients.AgentMailConfig{
@@ -829,6 +856,13 @@ func (g *Gateway) shutdown() {
 	if g.mcpManager != nil {
 		eg.Go(func() error {
 			return g.mcpManager.Close()
+		})
+	}
+
+	// Close MongoDB
+	if g.MongoClient != nil {
+		eg.Go(func() error {
+			return g.MongoClient.Close(ctx)
 		})
 	}
 

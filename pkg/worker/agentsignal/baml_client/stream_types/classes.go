@@ -70,12 +70,78 @@ func (c ApprovalSummary) BamlTypeName() string {
 	return "ApprovalSummary"
 }
 
+type DataField struct {
+	Key   *string `json:"key"`
+	Value *string `json:"value"`
+	Type  *string `json:"type"`
+	Label *string `json:"label"`
+}
+
+func (c *DataField) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_STREAM_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_STREAM_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "DataField" {
+		panic(fmt.Sprintf("expected DataField, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "key":
+			c.Key = baml.Decode(valueHolder).Interface().(*string)
+
+		case "value":
+			c.Value = baml.Decode(valueHolder).Interface().(*string)
+
+		case "type":
+			c.Type = baml.Decode(valueHolder).Interface().(*string)
+
+		case "label":
+			c.Label = baml.Decode(valueHolder).Interface().(*string)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class DataField", key))
+
+		}
+	}
+
+}
+
+func (c DataField) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["key"] = c.Key
+
+	fields["value"] = c.Value
+
+	fields["type"] = c.Type
+
+	fields["label"] = c.Label
+
+	return baml.EncodeClass("DataField", fields, nil)
+}
+
+func (c DataField) BamlTypeName() string {
+	return "DataField"
+}
+
 type ExtractedOutput struct {
-	Kind    *types.OutputKind `json:"kind"`
-	Title   *string           `json:"title"`
-	Path    *string           `json:"path"`
-	Uri     *string           `json:"uri"`
-	Summary *string           `json:"summary"`
+	Kind           *types.OutputKind `json:"kind"`
+	Title          *string           `json:"title"`
+	Path           *string           `json:"path"`
+	Uri            *string           `json:"uri"`
+	Summary        *string           `json:"summary"`
+	Content        *string           `json:"content"`
+	Artifact_key   *string           `json:"artifact_key"`
+	Artifact_label *string           `json:"artifact_label"`
+	Artifact_kind  *string           `json:"artifact_kind"`
+	Tags           []string          `json:"tags"`
+	Data_fields    []DataField       `json:"data_fields"`
 }
 
 func (c *ExtractedOutput) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
@@ -107,6 +173,24 @@ func (c *ExtractedOutput) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeM
 		case "summary":
 			c.Summary = baml.Decode(valueHolder).Interface().(*string)
 
+		case "content":
+			c.Content = baml.Decode(valueHolder).Interface().(*string)
+
+		case "artifact_key":
+			c.Artifact_key = baml.Decode(valueHolder).Interface().(*string)
+
+		case "artifact_label":
+			c.Artifact_label = baml.Decode(valueHolder).Interface().(*string)
+
+		case "artifact_kind":
+			c.Artifact_kind = baml.Decode(valueHolder).Interface().(*string)
+
+		case "tags":
+			c.Tags = baml.Decode(valueHolder).Interface().([]string)
+
+		case "data_fields":
+			c.Data_fields = baml.Decode(valueHolder).Interface().([]DataField)
+
 		default:
 
 			panic(fmt.Sprintf("unexpected field: %s in class ExtractedOutput", key))
@@ -129,6 +213,18 @@ func (c ExtractedOutput) Encode() (*cffi.HostValue, error) {
 
 	fields["summary"] = c.Summary
 
+	fields["content"] = c.Content
+
+	fields["artifact_key"] = c.Artifact_key
+
+	fields["artifact_label"] = c.Artifact_label
+
+	fields["artifact_kind"] = c.Artifact_kind
+
+	fields["tags"] = c.Tags
+
+	fields["data_fields"] = c.Data_fields
+
 	return baml.EncodeClass("ExtractedOutput", fields, nil)
 }
 
@@ -141,6 +237,7 @@ type FollowUpSignal struct {
 	Delay_minutes    *int64                `json:"delay_minutes"`
 	Reason           *string               `json:"reason"`
 	Follow_up_prompt *string               `json:"follow_up_prompt"`
+	Wake_agenda      []WakeAgendaItem      `json:"wake_agenda"`
 }
 
 func (c *FollowUpSignal) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
@@ -169,6 +266,9 @@ func (c *FollowUpSignal) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMa
 		case "follow_up_prompt":
 			c.Follow_up_prompt = baml.Decode(valueHolder).Interface().(*string)
 
+		case "wake_agenda":
+			c.Wake_agenda = baml.Decode(valueHolder).Interface().([]WakeAgendaItem)
+
 		default:
 
 			panic(fmt.Sprintf("unexpected field: %s in class FollowUpSignal", key))
@@ -188,6 +288,8 @@ func (c FollowUpSignal) Encode() (*cffi.HostValue, error) {
 	fields["reason"] = c.Reason
 
 	fields["follow_up_prompt"] = c.Follow_up_prompt
+
+	fields["wake_agenda"] = c.Wake_agenda
 
 	return baml.EncodeClass("FollowUpSignal", fields, nil)
 }
@@ -242,4 +344,58 @@ func (c TurnClassification) Encode() (*cffi.HostValue, error) {
 
 func (c TurnClassification) BamlTypeName() string {
 	return "TurnClassification"
+}
+
+type WakeAgendaItem struct {
+	Type   *string `json:"type"`
+	Title  *string `json:"title"`
+	Reason *string `json:"reason"`
+}
+
+func (c *WakeAgendaItem) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_STREAM_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_STREAM_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "WakeAgendaItem" {
+		panic(fmt.Sprintf("expected WakeAgendaItem, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "type":
+			c.Type = baml.Decode(valueHolder).Interface().(*string)
+
+		case "title":
+			c.Title = baml.Decode(valueHolder).Interface().(*string)
+
+		case "reason":
+			c.Reason = baml.Decode(valueHolder).Interface().(*string)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class WakeAgendaItem", key))
+
+		}
+	}
+
+}
+
+func (c WakeAgendaItem) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["type"] = c.Type
+
+	fields["title"] = c.Title
+
+	fields["reason"] = c.Reason
+
+	return baml.EncodeClass("WakeAgendaItem", fields, nil)
+}
+
+func (c WakeAgendaItem) BamlTypeName() string {
+	return "WakeAgendaItem"
 }

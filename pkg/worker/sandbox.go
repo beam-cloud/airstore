@@ -1228,19 +1228,46 @@ func (m *SandboxManager) BamlEnv() map[string]string {
 	return env
 }
 
-// taskOutputWriters builds the standard set of io.Writers for capturing
-// task stdout: S2 stream, console logging, structured output capture,
-// and (when applicable) BAML output analysis.
-func (m *SandboxManager) taskOutputWriters(ctx context.Context, task types.RunExecution, env map[string]string) []io.Writer {
-	writers := []io.Writer{
-		NewS2Writer(ctx, m.s2, task.ExternalId, "stdout"),
-		NewConsoleWriter(task.ExternalId, "stdout"),
-		NewOutputWriter(ctx, m.gatewayClient, task),
+// taskOutputPipeline builds the standard set of writers for capturing task
+// stdout: S2 streaming, console logging, structured output capture, and
+// (when applicable) BAML output analysis.
+type outputWaiter interface {
+	Wait()
+}
+
+type taskOutputPipeline struct {
+	writers []io.Writer
+	waiters []outputWaiter
+	tracker *taskOutputTracker
+}
+
+func (p taskOutputPipeline) Wait() {
+	for _, waiter := range p.waiters {
+		if waiter != nil {
+			waiter.Wait()
+		}
+	}
+}
+
+func (m *SandboxManager) taskOutputPipeline(ctx context.Context, task types.RunExecution, env map[string]string) taskOutputPipeline {
+	tracker := &taskOutputTracker{}
+	outputWriter := newOutputWriter(ctx, m.gatewayClient, task, tracker)
+
+	pipeline := taskOutputPipeline{
+		writers: []io.Writer{
+			NewS2Writer(ctx, m.s2, task.ExternalId, "stdout"),
+			NewConsoleWriter(task.ExternalId, "stdout"),
+			outputWriter,
+		},
+		waiters: []outputWaiter{outputWriter},
+		tracker: tracker,
 	}
 	if analyzer := m.analyzerForTask(task, env); analyzer != nil {
-		writers = append(writers, NewAnalyzerWriter(ctx, analyzer, m.gatewayClient, task, m.BamlEnv()))
+		analyzerWriter := newAnalyzerWriter(ctx, analyzer, m.gatewayClient, task, m.BamlEnv(), tracker)
+		pipeline.writers = append(pipeline.writers, analyzerWriter)
+		pipeline.waiters = append(pipeline.waiters, analyzerWriter)
 	}
-	return writers
+	return pipeline
 }
 
 func (m *SandboxManager) copyTaskEnv(task types.RunExecution) map[string]string {
@@ -1436,7 +1463,6 @@ func (m *SandboxManager) ExecPTY(
 	})
 }
 
-
 // ExecCheck runs a short-lived command inside a sandbox and returns nil if
 // the command exits 0. This is useful for probing container state (e.g.
 // checking whether specific processes are still running via pgrep).
@@ -1483,8 +1509,6 @@ func (m *SandboxManager) ResolveRunner(task types.RunExecution, env map[string]s
 	return m.resolvePromptRunner(task, env)
 }
 
-
-
 // RunTask creates and runs a sandbox for a task, returning when complete
 func (m *SandboxManager) RunTask(ctx context.Context, task types.RunExecution) (*types.RunExecutionResult, error) {
 	sandboxID := fmt.Sprintf("task-%s", task.ExternalId)
@@ -1509,7 +1533,10 @@ func (m *SandboxManager) RunTask(ctx context.Context, task types.RunExecution) (
 	// Ensure cleanup
 	defer m.Delete(sandboxID, true)
 
-	taskOutput := NewTaskOutput(task.ExternalId, "stdout", m.taskOutputWriters(ctx, task, env)...)
+	pipeline := m.taskOutputPipeline(ctx, task, env)
+	taskOutput := NewTaskOutput(task.ExternalId, "stdout", pipeline.writers...)
+	defer pipeline.Wait()
+	defer taskOutput.Flush()
 	if err := m.SetOutput(sandboxID, taskOutput, taskOutput.Flush); err != nil {
 		addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to set output")
 	}
@@ -1553,6 +1580,7 @@ func (m *SandboxManager) RunTask(ctx context.Context, task types.RunExecution) (
 			if state.Status == types.SandboxStatusStopped || state.Status == types.SandboxStatusFailed {
 				// Flush any remaining output
 				taskOutput.Flush()
+				pipeline.Wait()
 
 				// Publish completion status
 				status := types.RunExecutionStatusComplete

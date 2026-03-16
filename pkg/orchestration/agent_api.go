@@ -759,6 +759,8 @@ func (a *AgentAPI) WorkspaceLiveBatch(ctx context.Context, workspaceID uint) (*W
 		return nil, err
 	}
 	outputs, err := a.backend.ListWorkspaceTaskOutputs(ctx, workspaceID, types.TaskOutputListFilter{
+		// Live snapshots are capped; archived outputs would displace active items
+		// and cause current workspace activity to fall out of the stream.
 		ExcludeArchived: true,
 		Limit:           defaultWorkspaceStreamOutputLimit,
 	})

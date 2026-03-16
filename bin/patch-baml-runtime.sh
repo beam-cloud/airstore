@@ -27,4 +27,19 @@ if enums_path.exists():
         enums_text,
     )
     enums_path.write_text(enums_text)
+
+resolve_client_block = '''\n\t// Resolve client option to clientRegistry (client takes precedence)\n\tif callOpts.client != nil {\n\t\tif callOpts.clientRegistry == nil {\n\t\t\tcallOpts.clientRegistry = baml.NewClientRegistry()\n\t\t}\n\t\tcallOpts.clientRegistry.SetPrimaryClient(*callOpts.client)\n\t}\n'''
+
+for parse_path in (Path("functions_parse.go"), Path("functions_parse_stream.go")):
+    if not parse_path.exists():
+        continue
+    parse_text = parse_path.read_text()
+    if resolve_client_block not in parse_text:
+        parse_text = re.sub(
+            r'(\tfor _, opt := range opts \{\n\t\topt\(&callOpts\)\n\t\}\n)',
+            r'\1' + resolve_client_block,
+            parse_text,
+            count=1,
+        )
+    parse_path.write_text(parse_text)
 PY

@@ -21,7 +21,6 @@ func upTaskOutputs(tx *sql.Tx) error {
 		   output_type TEXT NOT NULL,
 		   title TEXT NOT NULL,
 		   summary TEXT,
-		   schema_json JSONB,
 		   data_json JSONB NOT NULL DEFAULT '{}'::jsonb,
 		   metadata_json JSONB,
 		   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
