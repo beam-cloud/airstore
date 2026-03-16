@@ -277,6 +277,14 @@ func TestFilterOutputsForDataSource(t *testing.T) {
 	if len(filtered) != 2 {
 		t.Fatalf("nil data source should keep everything, got %d", len(filtered))
 	}
+
+	// artifact_key narrows to matching outputs regardless of output_type.
+	filtered = filterOutputsForDataSource(outputs, &types.DataSource{
+		ArtifactKey: "extracted-recipes",
+	}, []string{agentID})
+	if len(filtered) != 1 || filtered[0].ID != "out-1" {
+		t.Fatalf("artifact_key should narrow to matching outputs, got %d results", len(filtered))
+	}
 }
 
 func TestBuildColumnSchemas(t *testing.T) {

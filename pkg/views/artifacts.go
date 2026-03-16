@@ -152,9 +152,6 @@ func OutputMatchesDataSource(output *types.TaskOutput, ds *types.DataSource) boo
 	if output == nil || ds == nil {
 		return false
 	}
-	if ds.OutputType != "" && !strings.EqualFold(strings.TrimSpace(ds.OutputType), strings.TrimSpace(output.OutputType)) {
-		return false
-	}
 	if ds.ArtifactKey != "" && !ArtifactOf(output).MatchesKey(ds.ArtifactKey) {
 		return false
 	}

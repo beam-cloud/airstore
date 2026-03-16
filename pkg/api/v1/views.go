@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -1184,26 +1185,44 @@ func (vg *ViewsGroup) PublishDraft(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, err.Error())
 	}
 
+	var req struct {
+		ViewContent string `json:"view_content"`
+	}
+	if err := decodeStrictBody(c, &req); err != nil && !errors.Is(err, io.EOF) {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
+	}
+
 	session, err := vg.getViewDraftSession(c, c.Param("draft_id"))
 	if err != nil {
 		return ErrorResponse(c, http.StatusNotFound, "draft not found")
 	}
 
 	session.mu.Lock()
-	defer session.mu.Unlock()
+
+	// The frontend publishes mid-stream before the chat endpoint persists
+	// ViewContent to S2.  When this request lands on a different pod the
+	// draft loaded from S2 will have empty ViewContent.  The caller can
+	// supply it in the request body to bridge the gap.
+	if vc := strings.TrimSpace(req.ViewContent); vc != "" && session.draft.ViewContent != vc {
+		session.draft.ViewContent = vc
+		_ = vg.copilot.PersistViewContent(c.Request().Context(), session.draft.ID, vc)
+	}
 
 	v, err := vg.copilot.PublishView(c.Request().Context(), session.draft, workspaceID)
+	wsID := c.Param("workspace_id")
+	draftID := session.draft.ID
+	session.mu.Unlock()
+
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 
-	// Use a detached context so the index write survives client disconnect.
 	indexCtx, indexCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer indexCancel()
-	if err := vg.copilot.IndexDraftPublished(indexCtx, c.Param("workspace_id"), session.draft.ID, v.Name, v.ID); err != nil {
+	if err := vg.copilot.IndexDraftPublished(indexCtx, wsID, draftID, v.Name, v.ID); err != nil {
 		log.Warn().Err(err).
-			Str("workspace_id", c.Param("workspace_id")).
-			Str("draft_id", session.draft.ID).
+			Str("workspace_id", wsID).
+			Str("draft_id", draftID).
 			Str("view_id", v.ID).
 			Msg("failed to index published draft")
 	}

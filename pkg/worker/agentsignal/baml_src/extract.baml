@@ -94,6 +94,25 @@ function ExtractOutputs(tool_name: string, tool_input: string, tool_result: stri
 
     When in doubt, return an empty array. Be very conservative.
 
+    MULTI-ENTITY DECOMPOSITION:
+    When a tool call produces data for multiple distinct entities, return
+    one ExtractedOutput per entity — NOT one aggregate output.
+
+    Common patterns to decompose:
+    - Spreadsheet/CSV with rows for different companies, people, or items
+    - Batch API response with multiple records
+    - Research results covering multiple topics, companies, or subjects
+    - Scraped data from multiple listings, profiles, or pages
+    - File containing structured data about multiple distinct things
+
+    Each entity output should have:
+    - Its own title (e.g. "Global Pointe Pricing" not "Pricing Spreadsheet")
+    - Its own data_fields with entity-specific values
+    - The same artifact_key to group them (e.g. all get "company-research")
+
+    Do NOT decompose a single narrative report into sections.
+    Cap at 20 entities per tool call — aggregate if more.
+
     Tool name: {{ tool_name }}
     Tool input (truncated): {{ tool_input }}
     Tool result (truncated): {{ tool_result }}

@@ -399,10 +399,20 @@ func (s *AgentService) AcceptTaskInput(
 	action *types.TaskInputAction,
 	message string,
 	idempotencyKey string,
+	items []types.ItemDecision,
 ) (*types.AgentTask, error) {
 	if strings.TrimSpace(taskID) == "" {
 		return nil, fmt.Errorf("task_id is required")
 	}
+
+	if len(items) > 0 {
+		message = s.processItemDecisions(ctx, workspaceID, taskID, items, message)
+		if action == nil {
+			approve := types.TaskInputActionApprove
+			action = &approve
+		}
+	}
+
 	if strings.TrimSpace(message) == "" && action != nil {
 		switch *action {
 		case types.TaskInputActionApprove:
@@ -464,6 +474,58 @@ func (s *AgentService) AcceptTaskInput(
 		return updated, nil
 	}
 	return task, nil
+}
+
+// processItemDecisions updates output statuses and builds a composite message
+// from per-item approval/rejection decisions.
+func (s *AgentService) processItemDecisions(ctx context.Context, workspaceID uint, taskID string, items []types.ItemDecision, userMessage string) string {
+	buckets := map[string][]string{"Approved": nil, "Rejected": nil}
+	for _, item := range items {
+		output, err := s.backend.GetTaskOutput(ctx, workspaceID, item.OutputID)
+		if err != nil {
+			log.Warn().Err(err).Str("output_id", item.OutputID).Msg("item output not found")
+			continue
+		}
+		if output.TaskID != taskID {
+			log.Warn().Str("output_id", item.OutputID).Str("task_id", taskID).Msg("item does not belong to task")
+			continue
+		}
+		status := types.TaskOutputStatusApproved
+		if item.Action == types.TaskInputActionReject {
+			status = types.TaskOutputStatusRejected
+		}
+		if err := s.backend.UpdateTaskOutputStatus(ctx, workspaceID, item.OutputID, status); err != nil {
+			log.Warn().Err(err).Str("output_id", item.OutputID).Msg("failed to update output status")
+			continue
+		}
+		label := output.Title
+		if item.Action == types.TaskInputActionReject && item.Reason != "" {
+			label += " — " + item.Reason
+		}
+		bucket := "Approved"
+		if item.Action == types.TaskInputActionReject {
+			bucket = "Rejected"
+		}
+		buckets[bucket] = append(buckets[bucket], label)
+	}
+
+	var parts []string
+	for _, header := range []string{"Approved", "Rejected"} {
+		if list := buckets[header]; len(list) > 0 {
+			lines := header + ":\n"
+			for i, l := range list {
+				lines += fmt.Sprintf("%d. %s\n", i+1, l)
+			}
+			parts = append(parts, lines)
+		}
+	}
+	if userMessage != "" {
+		parts = append(parts, userMessage)
+	}
+	if len(parts) == 0 {
+		return "Approved. Please proceed."
+	}
+	return strings.Join(parts, "\n")
 }
 
 // deliverTaskInput attempts to wake the active run or requeue the task.
@@ -609,7 +671,7 @@ func (s *AgentService) AcceptRunInput(
 		return nil, false, "", fmt.Errorf("run %s has no origin task", run.ID)
 	}
 
-	task, err := s.AcceptTaskInput(ctx, workspaceID, run.OriginTaskID, types.InputKindFreeText, nil, message, idempotencyKey)
+	task, err := s.AcceptTaskInput(ctx, workspaceID, run.OriginTaskID, types.InputKindFreeText, nil, message, idempotencyKey, nil)
 	if err != nil {
 		return nil, false, "", err
 	}

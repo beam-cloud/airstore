@@ -39,12 +39,14 @@ type viewMappingResult struct {
 }
 
 type resolvedSheetRow struct {
-	SheetID  string
-	TaskID   string
-	RowID    string
-	RowKey   string
-	OutputID string
-	Cells    map[string]string
+	SheetID        string
+	TaskID         string
+	RowID          string
+	RowKey         string
+	OutputID       string
+	OutputStatus   string
+	SourceOutputIDs string
+	Cells          map[string]string
 }
 
 const (
@@ -316,6 +318,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 	}
 
 	if len(uncachedIDs) == 0 {
+		enrichRowsWithOutputStatus(resolvedRows, allOutputs)
 		sortResolvedRows(resolvedRows, taskMeta)
 		return &viewMappingResult{Rows: resolvedRows, TaskMeta: taskMeta, Diagnostics: diagnostics}, nil
 	}
@@ -458,6 +461,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 		}
 	}
 
+	enrichRowsWithOutputStatus(resolvedRows, allOutputs)
 	sortResolvedRows(resolvedRows, taskMeta)
 	return &viewMappingResult{Rows: resolvedRows, TaskMeta: taskMeta, Diagnostics: diagnostics}, nil
 }
@@ -591,8 +595,7 @@ func dataSourceNarrowsTaskSelection(ds *types.DataSource) bool {
 	if ds == nil {
 		return false
 	}
-	return strings.TrimSpace(ds.OutputType) != "" ||
-		strings.TrimSpace(ds.ArtifactKey) != "" ||
+	return strings.TrimSpace(ds.ArtifactKey) != "" ||
 		strings.TrimSpace(ds.TimeRange) != ""
 }
 
@@ -631,11 +634,6 @@ func (r *DataResolver) listScopedOutputs(ctx context.Context, workspaceID uint, 
 
 func (r *DataResolver) fetchOutputsForScope(ctx context.Context, workspaceID uint, ds *types.DataSource, agentIDs []string) ([]*types.TaskOutput, error) {
 	filter := baseTaskOutputFilter()
-	if ds != nil && strings.TrimSpace(ds.OutputType) != "" {
-		outputType := strings.TrimSpace(ds.OutputType)
-		filter.OutputType = &outputType
-	}
-
 	outputs, err := r.listScopedOutputs(ctx, workspaceID, filter, agentIDs)
 	if err != nil {
 		return nil, err
@@ -686,21 +684,29 @@ func filterOutputsForDataSource(outputs []*types.TaskOutput, ds *types.DataSourc
 		agentSet[id] = true
 	}
 
+	hasArtifactKey := strings.TrimSpace(ds.ArtifactKey) != ""
 	filtered := make([]*types.TaskOutput, 0, len(outputs))
 	for _, output := range outputs {
 		if output == nil {
 			continue
 		}
-		if len(agentSet) > 0 {
-			if output.AgentID == nil || !agentSet[strings.TrimSpace(*output.AgentID)] {
+		if len(agentSet) > 0 && (output.AgentID == nil || !agentSet[strings.TrimSpace(*output.AgentID)]) {
+			continue
+		}
+		if hasArtifactKey && !ArtifactOf(output).MatchesKey(ds.ArtifactKey) {
+			continue
+		}
+		if len(ds.Statuses) > 0 {
+			match := false
+			for _, s := range ds.Statuses {
+				if strings.EqualFold(strings.TrimSpace(s), strings.TrimSpace(output.Status)) {
+					match = true
+					break
+				}
+			}
+			if !match {
 				continue
 			}
-		}
-		if ds.OutputType != "" && !strings.EqualFold(strings.TrimSpace(ds.OutputType), strings.TrimSpace(output.OutputType)) {
-			continue
-		}
-		if ds.ArtifactKey != "" && !ArtifactOf(output).MatchesKey(ds.ArtifactKey) {
-			continue
 		}
 		filtered = append(filtered, output)
 	}
@@ -734,28 +740,18 @@ func assembleTable(sheetID string, comp types.ComponentSpec, mappedRows []resolv
 		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}
 	}
 
+	hiddenKeys := []string{"task_id", "row_id", "sheet_id", "output_id", "output_status", "source_output_ids"}
 	hiddenStart := len(tableCols)
-	colNames := make([]string, hiddenStart+4)
-	for i, col := range tableCols {
-		colNames[i] = col.Key
-	}
-	colNames[hiddenStart] = "task_id"
-	colNames[hiddenStart+1] = "row_id"
-	colNames[hiddenStart+2] = "sheet_id"
-	colNames[hiddenStart+3] = "output_id"
-
+	colNames := make([]string, hiddenStart+len(hiddenKeys))
 	meta := make([]types.ColumnMeta, len(colNames))
 	for i, col := range tableCols {
-		meta[i] = types.ColumnMeta{
-			Key:   col.Key,
-			Label: stripHint(col.Description),
-			Type:  normalizeColumnType(col.Type),
-		}
+		colNames[i] = col.Key
+		meta[i] = types.ColumnMeta{Key: col.Key, Label: stripHint(col.Description), Type: normalizeColumnType(col.Type)}
 	}
-	meta[hiddenStart] = types.ColumnMeta{Key: "task_id", Type: "text", Hidden: true}
-	meta[hiddenStart+1] = types.ColumnMeta{Key: "row_id", Type: "text", Hidden: true}
-	meta[hiddenStart+2] = types.ColumnMeta{Key: "sheet_id", Type: "text", Hidden: true}
-	meta[hiddenStart+3] = types.ColumnMeta{Key: "output_id", Type: "text", Hidden: true}
+	for i, key := range hiddenKeys {
+		colNames[hiddenStart+i] = key
+		meta[hiddenStart+i] = types.ColumnMeta{Key: key, Type: "text", Hidden: true}
+	}
 
 	var rows [][]any
 	for _, mapped := range mappedRows {
@@ -774,10 +770,9 @@ func assembleTable(sheetID string, comp types.ComponentSpec, mappedRows []resolv
 				}
 			}
 		}
-		row[hiddenStart] = mapped.TaskID
-		row[hiddenStart+1] = mapped.RowID
-		row[hiddenStart+2] = sheetID
-		row[hiddenStart+3] = mapped.OutputID
+		for i, v := range []any{mapped.TaskID, mapped.RowID, sheetID, mapped.OutputID, mapped.OutputStatus, mapped.SourceOutputIDs} {
+			row[hiddenStart+i] = v
+		}
 		if hasValue {
 			rows = append(rows, row)
 		}
@@ -858,12 +853,13 @@ func resolvedRowsFromStored(rows []ViewRow, applyManual bool) []resolvedSheetRow
 			cells = copyStringMap(row.MergedCells())
 		}
 		result = append(result, resolvedSheetRow{
-			SheetID:  row.SheetID,
-			TaskID:   row.TaskID,
-			RowID:    row.ID,
-			RowKey:   row.RowKey,
-			OutputID: firstSourceOutputID(row.SourceOutputIDs),
-			Cells:    cells,
+			SheetID:         row.SheetID,
+			TaskID:          row.TaskID,
+			RowID:           row.ID,
+			RowKey:          row.RowKey,
+			OutputID:        firstSourceOutputID(row.SourceOutputIDs),
+			SourceOutputIDs: strings.Join(row.SourceOutputIDs, ","),
+			Cells:           cells,
 		})
 	}
 	return result
@@ -962,6 +958,20 @@ func copyStringMap(values map[string]string) map[string]string {
 		cloned[key] = value
 	}
 	return cloned
+}
+
+func enrichRowsWithOutputStatus(rows []resolvedSheetRow, outputs []*types.TaskOutput) {
+	statusMap := make(map[string]string, len(outputs))
+	for _, o := range outputs {
+		if o != nil {
+			statusMap[o.ID] = o.Status
+		}
+	}
+	for i := range rows {
+		if rows[i].OutputID != "" {
+			rows[i].OutputStatus = statusMap[rows[i].OutputID]
+		}
+	}
 }
 
 func sortResolvedRows(rows []resolvedSheetRow, taskMeta map[string]*types.AgentTask) {
@@ -1195,6 +1205,9 @@ func writeTaskOutputForMapping(b *strings.Builder, output *types.TaskOutput) {
 	b.WriteString("<<<BEGIN_OUTPUT id=")
 	b.WriteString(output.ID)
 	b.WriteString(">>>\n")
+	if output.Status != "" && output.Status != types.TaskOutputStatusActive {
+		writeMappingLine(b, "STATUS", output.Status)
+	}
 	writeMappingLine(b, "TITLE", output.Title)
 	writeMappingLine(b, "OUTPUT_TYPE", output.OutputType)
 	writeMappingLine(b, "AGENT_NAME", output.AgentName)

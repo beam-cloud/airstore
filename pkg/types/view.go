@@ -117,6 +117,7 @@ type DataSource struct {
 	OutputType  string          `json:"output_type,omitempty"`
 	ArtifactKey string          `json:"artifact_key,omitempty"`
 	TimeRange   string          `json:"time_range,omitempty"`
+	Statuses    []string        `json:"statuses,omitempty"`
 	RowStrategy *RowStrategy    `json:"row_strategy,omitempty"`
 	Transform   []TransformRule `json:"transform,omitempty"`
 }

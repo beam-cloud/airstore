@@ -30,6 +30,7 @@ service WorkerService {
   rpc CreateTaskOutput(CreateTaskOutputRequest) returns (CreateTaskOutputResponse);
   rpc AppendTaskOutputRows(AppendTaskOutputRowsRequest) returns (AppendTaskOutputRowsResponse);
   rpc FinalizeTaskOutput(FinalizeTaskOutputRequest) returns (FinalizeTaskOutputResponse);
+  rpc UpdateTaskOutputStatus(UpdateTaskOutputStatusRequest) returns (UpdateTaskOutputStatusResponse);
 }
 
 // Worker registration
@@ -189,6 +190,7 @@ message CreateTaskOutputRequest {
   string metadata_json = 8; // JSON-encoded metadata
   string uri = 9;            // External deep-link URI
   string agent_id = 10;
+  string status = 11;       // Lifecycle status (active, pending, approved, rejected, superseded)
 }
 
 message CreateTaskOutputResponse {
@@ -210,4 +212,12 @@ message FinalizeTaskOutputRequest {
 }
 
 message FinalizeTaskOutputResponse {}
+
+message UpdateTaskOutputStatusRequest {
+  uint32 workspace_id = 1;
+  string output_id = 2;
+  string status = 3;
+}
+
+message UpdateTaskOutputStatusResponse {}
 

@@ -202,12 +202,21 @@ export type TaskInputAction = 'approve' | 'reject';
 /** Kind of input the agent is waiting for. */
 export type TaskInputKind = 'approve_reject' | 'free_text';
 
+/** Per-item approval/rejection decision. */
+export interface ItemDecision {
+  outputId: string;
+  action: TaskInputAction;
+  reason?: string;
+}
+
 /** Shared optional fields for task-input submissions. */
 interface SubmitTaskInputBase {
   /** Kind of input. Inferred from action if omitted. */
   kind?: TaskInputKind;
   /** Idempotency key to prevent duplicate submissions. */
   idempotencyKey?: string;
+  /** Per-item decisions for multi-item approval. */
+  items?: ItemDecision[];
 }
 
 /**
@@ -345,6 +354,7 @@ export interface TaskOutput {
   schema?: TableColumn[];
   data: Record<string, unknown>;
   metadata?: Record<string, unknown>;
+  status?: string;
   archived_at?: string;
   created_at: string;
 }

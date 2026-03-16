@@ -55,6 +55,13 @@ const (
 	TaskInputActionReject  TaskInputAction = "reject"
 )
 
+// ItemDecision represents a per-item approval/rejection decision.
+type ItemDecision struct {
+	OutputID string          `json:"output_id"`
+	Action   TaskInputAction `json:"action"`
+	Reason   string          `json:"reason,omitempty"`
+}
+
 // TaskInputStatus tracks the lifecycle of a durable follow-up input row.
 type TaskInputStatus string
 
@@ -922,9 +929,18 @@ type TaskOutput struct {
 	URI         *string        `json:"uri,omitempty"`
 	Data        map[string]any `json:"data"`
 	Metadata    map[string]any `json:"metadata,omitempty"`
+	Status      string         `json:"status"`
 	ArchivedAt  *time.Time     `json:"archived_at,omitempty"`
 	CreatedAt   time.Time      `json:"created_at"`
 }
+
+const (
+	TaskOutputStatusActive     = "active"
+	TaskOutputStatusPending    = "pending"
+	TaskOutputStatusApproved   = "approved"
+	TaskOutputStatusRejected   = "rejected"
+	TaskOutputStatusSuperseded = "superseded"
+)
 
 type TaskOutputListFilter struct {
 	TaskID          *string `json:"task_id,omitempty"`

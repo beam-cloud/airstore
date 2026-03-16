@@ -19,22 +19,23 @@ import (
 const _ = grpc.SupportPackageIsVersion7
 
 const (
-	WorkerService_RegisterWorker_FullMethodName       = "/worker.WorkerService/RegisterWorker"
-	WorkerService_Heartbeat_FullMethodName            = "/worker.WorkerService/Heartbeat"
-	WorkerService_UpdateStatus_FullMethodName         = "/worker.WorkerService/UpdateStatus"
-	WorkerService_Deregister_FullMethodName           = "/worker.WorkerService/Deregister"
-	WorkerService_GetWorker_FullMethodName            = "/worker.WorkerService/GetWorker"
-	WorkerService_ListWorkers_FullMethodName          = "/worker.WorkerService/ListWorkers"
-	WorkerService_SetTaskStarted_FullMethodName       = "/worker.WorkerService/SetTaskStarted"
-	WorkerService_SetTaskResult_FullMethodName        = "/worker.WorkerService/SetTaskResult"
-	WorkerService_UpdateTaskState_FullMethodName      = "/worker.WorkerService/UpdateTaskState"
-	WorkerService_AllocateIP_FullMethodName           = "/worker.WorkerService/AllocateIP"
-	WorkerService_ReleaseIP_FullMethodName            = "/worker.WorkerService/ReleaseIP"
-	WorkerService_ClaimTaskInput_FullMethodName       = "/worker.WorkerService/ClaimTaskInput"
-	WorkerService_AckTaskInput_FullMethodName         = "/worker.WorkerService/AckTaskInput"
-	WorkerService_CreateTaskOutput_FullMethodName     = "/worker.WorkerService/CreateTaskOutput"
-	WorkerService_AppendTaskOutputRows_FullMethodName = "/worker.WorkerService/AppendTaskOutputRows"
-	WorkerService_FinalizeTaskOutput_FullMethodName   = "/worker.WorkerService/FinalizeTaskOutput"
+	WorkerService_RegisterWorker_FullMethodName         = "/worker.WorkerService/RegisterWorker"
+	WorkerService_Heartbeat_FullMethodName              = "/worker.WorkerService/Heartbeat"
+	WorkerService_UpdateStatus_FullMethodName           = "/worker.WorkerService/UpdateStatus"
+	WorkerService_Deregister_FullMethodName             = "/worker.WorkerService/Deregister"
+	WorkerService_GetWorker_FullMethodName              = "/worker.WorkerService/GetWorker"
+	WorkerService_ListWorkers_FullMethodName            = "/worker.WorkerService/ListWorkers"
+	WorkerService_SetTaskStarted_FullMethodName         = "/worker.WorkerService/SetTaskStarted"
+	WorkerService_SetTaskResult_FullMethodName          = "/worker.WorkerService/SetTaskResult"
+	WorkerService_UpdateTaskState_FullMethodName        = "/worker.WorkerService/UpdateTaskState"
+	WorkerService_AllocateIP_FullMethodName             = "/worker.WorkerService/AllocateIP"
+	WorkerService_ReleaseIP_FullMethodName              = "/worker.WorkerService/ReleaseIP"
+	WorkerService_ClaimTaskInput_FullMethodName         = "/worker.WorkerService/ClaimTaskInput"
+	WorkerService_AckTaskInput_FullMethodName           = "/worker.WorkerService/AckTaskInput"
+	WorkerService_CreateTaskOutput_FullMethodName       = "/worker.WorkerService/CreateTaskOutput"
+	WorkerService_AppendTaskOutputRows_FullMethodName   = "/worker.WorkerService/AppendTaskOutputRows"
+	WorkerService_FinalizeTaskOutput_FullMethodName     = "/worker.WorkerService/FinalizeTaskOutput"
+	WorkerService_UpdateTaskOutputStatus_FullMethodName = "/worker.WorkerService/UpdateTaskOutputStatus"
 )
 
 // WorkerServiceClient is the client API for WorkerService service.
@@ -62,6 +63,7 @@ type WorkerServiceClient interface {
 	CreateTaskOutput(ctx context.Context, in *CreateTaskOutputRequest, opts ...grpc.CallOption) (*CreateTaskOutputResponse, error)
 	AppendTaskOutputRows(ctx context.Context, in *AppendTaskOutputRowsRequest, opts ...grpc.CallOption) (*AppendTaskOutputRowsResponse, error)
 	FinalizeTaskOutput(ctx context.Context, in *FinalizeTaskOutputRequest, opts ...grpc.CallOption) (*FinalizeTaskOutputResponse, error)
+	UpdateTaskOutputStatus(ctx context.Context, in *UpdateTaskOutputStatusRequest, opts ...grpc.CallOption) (*UpdateTaskOutputStatusResponse, error)
 }
 
 type workerServiceClient struct {
@@ -216,6 +218,15 @@ func (c *workerServiceClient) FinalizeTaskOutput(ctx context.Context, in *Finali
 	return out, nil
 }
 
+func (c *workerServiceClient) UpdateTaskOutputStatus(ctx context.Context, in *UpdateTaskOutputStatusRequest, opts ...grpc.CallOption) (*UpdateTaskOutputStatusResponse, error) {
+	out := new(UpdateTaskOutputStatusResponse)
+	err := c.cc.Invoke(ctx, WorkerService_UpdateTaskOutputStatus_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // WorkerServiceServer is the server API for WorkerService service.
 // All implementations must embed UnimplementedWorkerServiceServer
 // for forward compatibility
@@ -241,6 +252,7 @@ type WorkerServiceServer interface {
 	CreateTaskOutput(context.Context, *CreateTaskOutputRequest) (*CreateTaskOutputResponse, error)
 	AppendTaskOutputRows(context.Context, *AppendTaskOutputRowsRequest) (*AppendTaskOutputRowsResponse, error)
 	FinalizeTaskOutput(context.Context, *FinalizeTaskOutputRequest) (*FinalizeTaskOutputResponse, error)
+	UpdateTaskOutputStatus(context.Context, *UpdateTaskOutputStatusRequest) (*UpdateTaskOutputStatusResponse, error)
 	mustEmbedUnimplementedWorkerServiceServer()
 }
 
@@ -295,6 +307,9 @@ func (UnimplementedWorkerServiceServer) AppendTaskOutputRows(context.Context, *A
 }
 func (UnimplementedWorkerServiceServer) FinalizeTaskOutput(context.Context, *FinalizeTaskOutputRequest) (*FinalizeTaskOutputResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method FinalizeTaskOutput not implemented")
+}
+func (UnimplementedWorkerServiceServer) UpdateTaskOutputStatus(context.Context, *UpdateTaskOutputStatusRequest) (*UpdateTaskOutputStatusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UpdateTaskOutputStatus not implemented")
 }
 func (UnimplementedWorkerServiceServer) mustEmbedUnimplementedWorkerServiceServer() {}
 
@@ -597,6 +612,24 @@ func _WorkerService_FinalizeTaskOutput_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _WorkerService_UpdateTaskOutputStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateTaskOutputStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkerServiceServer).UpdateTaskOutputStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkerService_UpdateTaskOutputStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkerServiceServer).UpdateTaskOutputStatus(ctx, req.(*UpdateTaskOutputStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // WorkerService_ServiceDesc is the grpc.ServiceDesc for WorkerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -667,6 +700,10 @@ var WorkerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "FinalizeTaskOutput",
 			Handler:    _WorkerService_FinalizeTaskOutput_Handler,
+		},
+		{
+			MethodName: "UpdateTaskOutputStatus",
+			Handler:    _WorkerService_UpdateTaskOutputStatus_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

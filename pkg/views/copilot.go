@@ -85,13 +85,14 @@ type draftStreamEntry struct {
 
 type Copilot struct {
 	s2       *common.S2Client
+	redis    *common.RedisClient
 	backend  repository.BackendRepository
 	storage  *clients.StorageClient
 	agentAPI *orchestration.AgentAPI
 }
 
-func NewCopilot(s2 *common.S2Client, backend repository.BackendRepository, storage *clients.StorageClient, agentAPI *orchestration.AgentAPI) *Copilot {
-	return &Copilot{s2: s2, backend: backend, storage: storage, agentAPI: agentAPI}
+func NewCopilot(s2 *common.S2Client, redis *common.RedisClient, backend repository.BackendRepository, storage *clients.StorageClient, agentAPI *orchestration.AgentAPI) *Copilot {
+	return &Copilot{s2: s2, redis: redis, backend: backend, storage: storage, agentAPI: agentAPI}
 }
 
 func (c *Copilot) DraftsAvailable() bool {
@@ -287,10 +288,9 @@ func (c *Copilot) PublishView(ctx context.Context, draft *Draft, workspaceID uin
 	agents := c.loadWorkspaceAgents(ctx, workspaceID)
 	preCanonAgents := append([]string{}, def.Agents...)
 	normalizeViewDefinition(&def)
-
 	canonicalizeViewAgentRefs(&def, agents, nil)
-
 	normalizeViewDefinition(&def)
+
 	log.Info().
 		Strs("pre_canon_agents", preCanonAgents).
 		Strs("post_canon_agents", def.Agents).
@@ -299,9 +299,38 @@ func (c *Copilot) PublishView(ctx context.Context, draft *Draft, workspaceID uin
 		Str("view_name", def.Name).
 		Msg("view: publishing definition")
 
-	// Re-read the draft from S2 if we think no view has been published yet.
-	// This prevents a race where two gateway pods both see an empty
-	// PublishedViewID and each create a new view.
+	// Distributed lock: only one pod publishes this draft at a time.
+	// The 30s TTL is generous — publish typically takes <1s. If the lock
+	// holder crashes, it auto-expires and retries succeed.
+	const publishLockTTL = 30 * time.Second
+	if c.redis != nil {
+		lockKey := common.Keys.ViewPublishLock(draft.ID)
+		acquired, err := c.redis.SetNX(ctx, lockKey, "1", publishLockTTL).Result()
+		if err != nil {
+			return nil, fmt.Errorf("publish lock: %w", err)
+		}
+		if !acquired {
+			// Another pod is publishing. Re-read draft to get the view ID
+			// it will (or already did) persist, then return that view.
+			time.Sleep(500 * time.Millisecond)
+			if fresh, err := c.LoadDraft(ctx, draft.WorkspaceID, draft.ID); err == nil && fresh != nil && fresh.PublishedViewID != "" {
+				draft.PublishedViewID = fresh.PublishedViewID
+				draft.Status = "published"
+				if v, err := c.backend.GetView(ctx, workspaceID, fresh.PublishedViewID); err == nil && v != nil {
+					return v, nil
+				}
+			}
+			return nil, fmt.Errorf("draft is being published by another replica")
+		}
+		defer func() {
+		delCtx, delCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer delCancel()
+		c.redis.Del(delCtx, lockKey)
+	}()
+	}
+
+	// Refresh PublishedViewID from S2 in case the in-memory session is stale
+	// (e.g. another pod published before we acquired the lock).
 	if draft.PublishedViewID == "" {
 		if fresh, err := c.LoadDraft(ctx, draft.WorkspaceID, draft.ID); err == nil && fresh != nil && fresh.PublishedViewID != "" {
 			draft.PublishedViewID = fresh.PublishedViewID
@@ -329,23 +358,17 @@ func (c *Copilot) PublishView(ctx context.Context, draft *Draft, workspaceID uin
 	draft.PublishedViewID = published.ID
 	draft.Status = "published"
 
-	// Use a detached context so these writes survive client disconnect.
 	persistCtx, persistCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer persistCancel()
 	if err := c.persistDraft(persistCtx, draft.ID, "published_view_id", published.ID, "", ""); err != nil {
-		log.Warn().
-			Err(err).
-			Str("draft_id", draft.ID).
-			Str("view_id", published.ID).
-			Msg("failed to persist published view id after publish")
+		log.Warn().Err(err).Str("draft_id", draft.ID).Str("view_id", published.ID).
+			Msg("failed to persist published view id")
 	}
 	if err := c.persistDraft(persistCtx, draft.ID, "status", "published", "", ""); err != nil {
-		log.Warn().
-			Err(err).
-			Str("draft_id", draft.ID).
-			Str("view_id", published.ID).
-			Msg("failed to persist published draft status after publish")
+		log.Warn().Err(err).Str("draft_id", draft.ID).Str("view_id", published.ID).
+			Msg("failed to persist published draft status")
 	}
+
 	return published, nil
 }
 
@@ -687,9 +710,10 @@ func normalizeDataSource(ds *types.DataSource) {
 	}
 	ds.AgentID = strings.TrimSpace(ds.AgentID)
 	ds.AgentIDs = uniqueTrimmedStrings(ds.AgentIDs)
-	ds.OutputType = strings.TrimSpace(ds.OutputType)
+	ds.OutputType = "" // output_type is not used for filtering; the BAML mapper handles all types
 	ds.ArtifactKey = normalizeToken(ds.ArtifactKey)
 	ds.TimeRange = strings.TrimSpace(ds.TimeRange)
+	ds.Statuses = uniqueTrimmedStrings(ds.Statuses)
 	if ds.RowStrategy != nil {
 		ds.RowStrategy.Description = strings.TrimSpace(ds.RowStrategy.Description)
 		switch strings.ToLower(strings.TrimSpace(ds.RowStrategy.Mode)) {
@@ -873,7 +897,7 @@ func sourceColumnHint(source string) string {
 
 func isReservedViewColumnKey(key string) bool {
 	switch strings.TrimSpace(key) {
-	case "task_id", "output_id":
+	case "task_id", "output_id", "row_id", "sheet_id", "output_status", "source_output_ids":
 		return true
 	default:
 		return false
@@ -1596,6 +1620,13 @@ COMPONENT TYPES (only two):
   - column: machine-stable key (snake_case) describing what the column shows
   - source: dot-path hint (e.g. "data.recipe_name", "title", "uri")
   - type: display type (text, number, currency, date, link, email, status, tags, boolean)
+
+  DataSource fields (on each component):
+  - agent_id or agent_ids: which agent(s) produce data for this table (REQUIRED)
+  - time_range: recency window, e.g. "30d", "7d" (default "30d")
+  - artifact_key: filter to a specific artifact family (e.g. "company-research").
+    Use when an agent produces multiple artifact families and you need a
+    specific one. Omit to include all outputs from the agent.
   - row_strategy:
     - mode: "task" (default): synthesize one row per task — works great
       for most use cases. Omit row_strategy entirely to use this default.
@@ -1605,6 +1636,8 @@ COMPONENT TYPES (only two):
     - description: REQUIRED for split mode. Clearly describe what one row
       represents, e.g. "one row per email recipient" or "one row per property
       listing". This guides the mapper to separate entities correctly.
+  - statuses: optional status filter. Values: "active", "pending", "approved",
+    "rejected", "superseded". Omit to include all (default).
 
   Config: {
     columns: [{
@@ -1630,6 +1663,23 @@ COMPONENT TYPES (only two):
     Colors: blue, green, red, yellow, orange, purple, gray
   - tags: comma-separated pills
   - boolean: Yes/No badge
+
+  LIFECYCLE & APPROVAL:
+  For workflows with approvals or multi-stage tracking, add a status
+  column (type: "status") to reflect lifecycle state. The mapper derives
+  it from output_status. The UI auto-shows inline approve/reject buttons
+  for pending rows and an entity detail modal for multi-output rows.
+
+  RESEARCH / MULTI-ENTITY:
+  Use split mode when a single task produces many distinct findings:
+  - "one row per company researched"
+  - "one row per candidate profiled"
+  - "one row per topic analyzed"
+  The system decomposes tool results into per-entity outputs and the
+  mapper populates one row per entity with full column coverage.
+
+  Hidden columns (auto-injected, do NOT define):
+  task_id, row_id, sheet_id, output_id, output_status, source_output_ids
 
 - action: Button in the active sheet header bar. Opens a modal form that submits a task.
   Config: {

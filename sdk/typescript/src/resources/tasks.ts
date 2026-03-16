@@ -185,15 +185,23 @@ export class Tasks {
     params: SubmitTaskInputParams,
     options?: RequestOptions,
   ): Promise<SubmitTaskInputResponse> {
+    const body: Record<string, unknown> = {
+      message: params.message,
+      action: params.action,
+      kind: params.kind,
+      idempotency_key: params.idempotencyKey,
+    }
+    if (params.items?.length) {
+      body.items = params.items.map(i => ({
+        output_id: i.outputId,
+        action: i.action,
+        reason: i.reason,
+      }))
+    }
     return this.client.request<SubmitTaskInputResponse>(
       'POST',
       `/workspaces/${workspaceId}/tasks/${taskId}/input`,
-      {
-        message: params.message,
-        action: params.action,
-        kind: params.kind,
-        idempotency_key: params.idempotencyKey,
-      },
+      body,
       undefined,
       options,
     );

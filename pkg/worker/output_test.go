@@ -36,6 +36,11 @@ func (s *stubOutputClient) FinalizeTaskOutput(_ context.Context, _ *pb.FinalizeT
 	return nil
 }
 
+func (s *stubOutputClient) UpdateTaskOutputStatus(_ context.Context, _ *pb.UpdateTaskOutputStatusRequest) error {
+	s.calls = append(s.calls, "update_status")
+	return nil
+}
+
 func TestOutputWriterSerializesCreateAppendFinalize(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
