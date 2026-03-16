@@ -1197,7 +1197,10 @@ func (vg *ViewsGroup) PublishDraft(c echo.Context) error {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 
-	if err := vg.copilot.IndexDraftPublished(c.Request().Context(), c.Param("workspace_id"), session.draft.ID, v.Name, v.ID); err != nil {
+	// Use a detached context so the index write survives client disconnect.
+	indexCtx, indexCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer indexCancel()
+	if err := vg.copilot.IndexDraftPublished(indexCtx, c.Param("workspace_id"), session.draft.ID, v.Name, v.ID); err != nil {
 		log.Warn().Err(err).
 			Str("workspace_id", c.Param("workspace_id")).
 			Str("draft_id", session.draft.ID).

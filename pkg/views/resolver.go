@@ -244,6 +244,13 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 		return nil, fmt.Errorf("fetch mapping outputs: %w", err)
 	}
 	if len(allOutputs) == 0 {
+		log.Info().
+			Str("view_id", viewID).
+			Str("sheet_id", sheet.ID).
+			Str("component_id", comp.ID).
+			Strs("view_agent_refs", opts.ViewAgentRefs).
+			Bool("has_data_source", comp.DataSource != nil).
+			Msg("view: no outputs resolved for component")
 		return &viewMappingResult{Rows: nil, TaskMeta: map[string]*types.AgentTask{}}, nil
 	}
 
