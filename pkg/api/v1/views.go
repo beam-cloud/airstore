@@ -45,14 +45,12 @@ func NewViewsGroup(g *echo.Group, backend repository.BackendRepository, copilot 
 		vg.g.PATCH("/:view_id/sheets/:sheet_id/rows/:row_id", vg.UpdateRow)
 		vg.g.POST("/:view_id/sheets/:sheet_id/rows/:row_id/regenerate", vg.RegenerateRow)
 	}
-	if copilot != nil && copilot.DraftsAvailable() {
-		vg.g.POST("/drafts", vg.CreateDraft)
-		vg.g.GET("/drafts", vg.ListDrafts)
-		vg.g.GET("/drafts/:draft_id", vg.GetDraft)
-		vg.g.DELETE("/drafts/:draft_id", vg.DeleteDraft)
-		vg.g.POST("/drafts/:draft_id/chat", vg.ChatDraft)
-		vg.g.POST("/drafts/:draft_id/publish", vg.PublishDraft)
-	}
+	vg.g.POST("/drafts", vg.CreateDraft)
+	vg.g.GET("/drafts", vg.ListDrafts)
+	vg.g.GET("/drafts/:draft_id", vg.GetDraft)
+	vg.g.DELETE("/drafts/:draft_id", vg.DeleteDraft)
+	vg.g.POST("/drafts/:draft_id/chat", vg.ChatDraft)
+	vg.g.POST("/drafts/:draft_id/publish", vg.PublishDraft)
 	return vg
 }
 
@@ -152,6 +150,7 @@ func (vg *ViewsGroup) Update(c echo.Context) error {
 	}
 	if req.Definition != nil {
 		v.Definition = *req.Definition
+		syncViewMetadataFromPatchedDefinition(v, req)
 	}
 	if len(req.ColumnRenames) > 0 {
 		applyColumnRenamesToDefinition(&v.Definition, req.ColumnRenames)
@@ -208,6 +207,18 @@ func (vg *ViewsGroup) Delete(c echo.Context) error {
 		}
 	}
 	return SuccessResponse(c, nil)
+}
+
+func syncViewMetadataFromPatchedDefinition(v *types.View, req updateViewRequest) {
+	if v == nil || req.Definition == nil {
+		return
+	}
+	if req.Name == nil && strings.TrimSpace(req.Definition.Name) != "" {
+		v.Name = req.Definition.Name
+	}
+	if req.Description == nil && strings.TrimSpace(req.Definition.Description) != "" {
+		v.Description = req.Definition.Description
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -361,6 +372,29 @@ func applyColumnRenamesToDefinition(def *types.ViewDefinition, renames []columnR
 	if def == nil || len(renames) == 0 {
 		return
 	}
+	renamesBySheet := buildColumnRenameMap(renames)
+	if len(renamesBySheet) == 0 {
+		return
+	}
+	for i := range def.Sheets {
+		sheet := &def.Sheets[i]
+		if sheetRenames := renamesBySheet[sheet.ID]; len(sheetRenames) > 0 {
+			renameSheetColumns(sheet, sheetRenames)
+		}
+		for j := range sheet.Relations {
+			relation := &sheet.Relations[j]
+			if next, ok := renamedColumnKey(renamesBySheet[sheet.ID], relation.FromColumn); ok {
+				relation.FromColumn = next.NewKey
+			}
+			if next, ok := renamedColumnKey(renamesBySheet[relation.ToSheetID], relation.ToColumn); ok {
+				relation.ToColumn = next.NewKey
+			}
+		}
+	}
+}
+
+func buildColumnRenameMap(renames []columnRename) map[string]map[string]columnRename {
+	bySheet := make(map[string]map[string]columnRename)
 	for _, rename := range renames {
 		sheetID := strings.TrimSpace(rename.SheetID)
 		oldKey := strings.TrimSpace(rename.OldKey)
@@ -369,48 +403,51 @@ func applyColumnRenamesToDefinition(def *types.ViewDefinition, renames []columnR
 		if sheetID == "" || oldKey == "" || newKey == "" || oldKey == newKey {
 			continue
 		}
-		for i := range def.Sheets {
-			sheet := &def.Sheets[i]
-			if sheet.ID == sheetID {
-				renameSheetColumns(sheet, oldKey, newKey, newLabel)
-			}
-			for j := range sheet.Relations {
-				relation := &sheet.Relations[j]
-				if sheet.ID == sheetID && relation.FromColumn == oldKey {
-					relation.FromColumn = newKey
-				}
-				if relation.ToSheetID == sheetID && relation.ToColumn == oldKey {
-					relation.ToColumn = newKey
-				}
-			}
+		if bySheet[sheetID] == nil {
+			bySheet[sheetID] = make(map[string]columnRename)
+		}
+		bySheet[sheetID][oldKey] = columnRename{
+			SheetID:  sheetID,
+			OldKey:   oldKey,
+			NewKey:   newKey,
+			NewLabel: newLabel,
 		}
 	}
+	return bySheet
 }
 
-func renameSheetColumns(sheet *types.SheetSpec, oldKey, newKey, newLabel string) {
+func renamedColumnKey(renames map[string]columnRename, key string) (columnRename, bool) {
+	if len(renames) == 0 {
+		return columnRename{}, false
+	}
+	rename, ok := renames[strings.TrimSpace(key)]
+	return rename, ok
+}
+
+func renameSheetColumns(sheet *types.SheetSpec, renames map[string]columnRename) {
 	if sheet == nil {
 		return
 	}
 	for i := range sheet.Components {
 		component := &sheet.Components[i]
-		renameComponentColumns(component, oldKey, newKey, newLabel)
+		renameComponentColumns(component, renames)
 	}
 }
 
-func renameComponentColumns(component *types.ComponentSpec, oldKey, newKey, newLabel string) {
+func renameComponentColumns(component *types.ComponentSpec, renames map[string]columnRename) {
 	if component == nil {
 		return
 	}
 	if component.DataSource != nil {
 		for i := range component.DataSource.Transform {
 			rule := &component.DataSource.Transform[i]
-			if rule.Column == oldKey {
-				rule.Column = newKey
+			if next, ok := renamedColumnKey(renames, rule.Column); ok {
+				rule.Column = next.NewKey
 			}
 			// User-added columns often use source == column key as a placeholder hint.
 			// Keep that hint aligned with the renamed schema key.
-			if strings.TrimSpace(rule.Source) == oldKey {
-				rule.Source = newKey
+			if next, ok := renamedColumnKey(renames, rule.Source); ok {
+				rule.Source = next.NewKey
 			}
 		}
 	}
@@ -431,12 +468,13 @@ func renameComponentColumns(component *types.ComponentSpec, oldKey, newKey, newL
 	}
 	changed := false
 	for i := range columns {
-		if strings.TrimSpace(columns[i].Key) != oldKey {
+		next, ok := renamedColumnKey(renames, columns[i].Key)
+		if !ok {
 			continue
 		}
-		columns[i].Key = newKey
-		if newLabel != "" {
-			columns[i].Label = newLabel
+		columns[i].Key = next.NewKey
+		if next.NewLabel != "" {
+			columns[i].Label = next.NewLabel
 		}
 		changed = true
 	}

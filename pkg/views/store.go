@@ -17,9 +17,8 @@ var ErrViewRowNotFound = errors.New("view row not found")
 var ErrInvalidViewColumnKey = errors.New("invalid view column key")
 
 func mongoColumnFieldPath(prefix, key string) (string, error) {
-	key = strings.TrimSpace(key)
 	switch {
-	case key == "":
+	case strings.TrimSpace(key) == "":
 		return "", fmt.Errorf("%w: empty key", ErrInvalidViewColumnKey)
 	case strings.Contains(key, "."):
 		return "", fmt.Errorf("%w: %q contains '.'", ErrInvalidViewColumnKey, key)

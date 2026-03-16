@@ -35,6 +35,11 @@ var topLevelFields = []schemaFieldSummary{
 	{Key: "agent_id", Source: "agent_id", Type: "text", Label: "Agent ID"},
 }
 
+// Schema summaries are heuristic hints for copilot binding, not authoritative
+// extraction inputs. Bound array sampling keeps large homogeneous payloads from
+// turning a single summary pass into O(n) repeated tree walks.
+const maxArrayObjectSchemaSamples = 8
+
 func summarizeOutputSchema(outputs []*types.TaskOutput) outputSchemaSummary {
 	merged := make(map[string]*schemaFieldSummary)
 	var artifactKey, artifactLabel, outputType string
@@ -146,12 +151,17 @@ func flattenDataFields(m map[string]any, prefix string, out *[]schemaFieldSummar
 			flattenDataFields(nested, source, out, depth+1)
 		}
 		if arr, ok := m[key].([]any); ok && len(arr) > 0 {
+			sampled := 0
 			for _, item := range arr {
 				nested, ok := item.(map[string]any)
 				if !ok {
 					continue
 				}
 				flattenDataFields(nested, source+".[]", out, depth+1)
+				sampled++
+				if sampled >= maxArrayObjectSchemaSamples {
+					break
+				}
 			}
 		}
 	}

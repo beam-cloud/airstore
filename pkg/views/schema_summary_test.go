@@ -28,6 +28,31 @@ func TestFieldsForOutputScansAllArrayObjects(t *testing.T) {
 		}
 	}
 }
+
+func TestFieldsForOutputCapsArrayObjectSampling(t *testing.T) {
+	items := make([]any, 0, maxArrayObjectSchemaSamples+1)
+	for i := 0; i < maxArrayObjectSchemaSamples; i++ {
+		items = append(items, map[string]any{"name": "alpha"})
+	}
+	items = append(items, map[string]any{"late_field": "value"})
+
+	output := &types.TaskOutput{
+		Data: map[string]any{
+			"items": items,
+		},
+	}
+
+	fields := fieldsForOutput(output)
+	sources := make(map[string]bool, len(fields))
+	for _, field := range fields {
+		sources[field.Source] = true
+	}
+
+	if sources["data.items.[].late_field"] {
+		t.Fatalf("unexpected late sampled field in %#v", fields)
+	}
+}
+
 func TestSummarizeOutputSchemaFromDataKeys(t *testing.T) {
 	output := &types.TaskOutput{
 		ID:         "out-1",

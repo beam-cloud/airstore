@@ -302,10 +302,18 @@ func (c *Copilot) PublishView(ctx context.Context, draft *Draft, workspaceID uin
 	draft.PublishedViewID = published.ID
 	draft.Status = "published"
 	if err := c.persistDraft(ctx, draft.ID, "published_view_id", published.ID, "", ""); err != nil {
-		return nil, fmt.Errorf("persist published view id: %w", err)
+		log.Warn().
+			Err(err).
+			Str("draft_id", draft.ID).
+			Str("view_id", published.ID).
+			Msg("failed to persist published view id after publish")
 	}
 	if err := c.persistDraft(ctx, draft.ID, "status", "published", "", ""); err != nil {
-		return nil, fmt.Errorf("persist published draft status: %w", err)
+		log.Warn().
+			Err(err).
+			Str("draft_id", draft.ID).
+			Str("view_id", published.ID).
+			Msg("failed to persist published draft status after publish")
 	}
 	return published, nil
 }

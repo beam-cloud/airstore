@@ -30,16 +30,13 @@ func NewMongoClient(cfg types.MongoConfig) (*MongoClient, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := client.Ping(ctx, nil); err != nil {
-		disconnectCtx, disconnectCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer disconnectCancel()
-		if disconnectErr := client.Disconnect(disconnectCtx); disconnectErr != nil {
-			log.Warn().Err(disconnectErr).Msg("mongo disconnect after ping failure")
-		}
+		disconnectMongoClient(client, "mongo disconnect after ping failure")
 		return nil, fmt.Errorf("mongo ping: %w", err)
 	}
 
 	dbName := cfg.Database
 	if dbName == "" {
+		disconnectMongoClient(client, "mongo disconnect after empty database name")
 		return nil, fmt.Errorf("mongo database is empty")
 	}
 
@@ -53,4 +50,15 @@ func (m *MongoClient) Collection(name string) *mongo.Collection {
 
 func (m *MongoClient) Close(ctx context.Context) error {
 	return m.client.Disconnect(ctx)
+}
+
+func disconnectMongoClient(client *mongo.Client, warningMsg string) {
+	if client == nil {
+		return
+	}
+	disconnectCtx, disconnectCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer disconnectCancel()
+	if err := client.Disconnect(disconnectCtx); err != nil {
+		log.Warn().Err(err).Msg(warningMsg)
+	}
 }

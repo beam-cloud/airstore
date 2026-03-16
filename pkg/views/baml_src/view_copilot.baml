@@ -106,7 +106,11 @@ function WriteView(
               "config": {
                 "agent_id": "single-agent-id",
                 "button_label": "Run Action",
-                "prompt_template": "Use the current row context to perform the requested action."
+                "fields": [
+                  {"name": "company_name", "label": "Company name", "type": "text", "required": true},
+                  {"name": "website", "label": "Website", "type": "text"}
+                ],
+                "prompt_template": "{% raw %}Research {{company_name}} using {{website}} and summarize the findings.{% endraw %}"
               }
             }
           ]
