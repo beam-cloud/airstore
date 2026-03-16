@@ -137,16 +137,9 @@ func publishOutputCandidate(
 	if err != nil {
 		return "", err
 	}
+	var predID string
 	if tracker != nil {
-		if predID := tracker.PredecessorID(normalized); predID != "" {
-			if err := client.UpdateTaskOutputStatus(ctx, &pb.UpdateTaskOutputStatusRequest{
-				WorkspaceId: ids.workspaceID,
-				OutputId:    predID,
-				Status:      types.TaskOutputStatusSuperseded,
-			}); err != nil {
-				log.Warn().Err(err).Str("predecessor", predID).Msg("failed to supersede predecessor output")
-			}
-		}
+		predID = tracker.PredecessorID(normalized)
 	}
 
 	serverID, err := client.CreateTaskOutput(ctx, req)
@@ -155,6 +148,16 @@ func publishOutputCandidate(
 	}
 	if tracker != nil {
 		tracker.RememberWithID(normalized, serverID)
+	}
+
+	if predID != "" {
+		if err := client.UpdateTaskOutputStatus(ctx, &pb.UpdateTaskOutputStatusRequest{
+			WorkspaceId: ids.workspaceID,
+			OutputId:    predID,
+			Status:      types.TaskOutputStatusSuperseded,
+		}); err != nil {
+			log.Warn().Err(err).Str("predecessor", predID).Msg("failed to supersede predecessor output")
+		}
 	}
 
 	if normalized.Summary != "" {

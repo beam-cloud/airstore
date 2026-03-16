@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -1187,7 +1188,9 @@ func (vg *ViewsGroup) PublishDraft(c echo.Context) error {
 	var req struct {
 		ViewContent string `json:"view_content"`
 	}
-	_ = decodeStrictBody(c, &req)
+	if err := decodeStrictBody(c, &req); err != nil && !errors.Is(err, io.EOF) {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
+	}
 
 	session, err := vg.getViewDraftSession(c, c.Param("draft_id"))
 	if err != nil {
@@ -1214,19 +1217,15 @@ func (vg *ViewsGroup) PublishDraft(c echo.Context) error {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 
-	// Fire the index write as a goroutine so it doesn't hold session.mu
-	// and block retries if the client disconnects.
-	go func() {
-		indexCtx, indexCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer indexCancel()
-		if err := vg.copilot.IndexDraftPublished(indexCtx, wsID, draftID, v.Name, v.ID); err != nil {
-			log.Warn().Err(err).
-				Str("workspace_id", wsID).
-				Str("draft_id", draftID).
-				Str("view_id", v.ID).
-				Msg("failed to index published draft")
-		}
-	}()
+	indexCtx, indexCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer indexCancel()
+	if err := vg.copilot.IndexDraftPublished(indexCtx, wsID, draftID, v.Name, v.ID); err != nil {
+		log.Warn().Err(err).
+			Str("workspace_id", wsID).
+			Str("draft_id", draftID).
+			Str("view_id", v.ID).
+			Msg("failed to index published draft")
+	}
 
 	return SuccessResponse(c, v)
 }

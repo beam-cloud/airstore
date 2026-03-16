@@ -985,7 +985,7 @@ func (w *Worker) buildApprovalSummaryWithItems(
 	}
 
 	ids := outputIDsFromTask(task)
-	batchID := uuid.NewString()
+	batchID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("approval:"+ids.taskID+":"+ids.runID)).String()
 	var itemSummaries []approvalItemSummary
 
 	for _, item := range items {
@@ -995,9 +995,11 @@ func (w *Worker) buildApprovalSummaryWithItems(
 		}
 		dataMap["details"] = item.Details
 
+		itemOutputID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(batchID+":"+item.Item_key)).String()
 		metaJSON, _ := json.Marshal(map[string]any{
-			"approval_batch_id": batchID,
-			"item_key":          item.Item_key,
+			"approval_batch_id":      batchID,
+			"item_key":               item.Item_key,
+			"_idempotent_output_id":  itemOutputID,
 		})
 		dataJSON, _ := json.Marshal(dataMap)
 

@@ -864,6 +864,14 @@ func (g *WorkspaceTasksGroup) SubmitInput(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
 	}
 
+	for _, item := range req.Items {
+		switch item.Action {
+		case types.TaskInputActionApprove, types.TaskInputActionReject:
+		default:
+			return ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("invalid action %q for item %s", item.Action, item.OutputID))
+		}
+	}
+
 	task, err := g.agents.SubmitTaskInput(
 		c.Request().Context(),
 		workspaceID,

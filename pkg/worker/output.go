@@ -218,6 +218,9 @@ func (t *taskOutputTracker) HasEquivalent(candidate outputCandidate) bool {
 	defer t.mu.Unlock()
 	if identity != "" {
 		if _, ok := t.seen[identity]; ok {
+			if _, hasServerID := t.outputByIdentity[identity]; hasServerID {
+				return false
+			}
 			return true
 		}
 	}

@@ -166,14 +166,15 @@ func (w *AnalyzerWriter) process(job analyzerJob) {
 
 	fallbackURI := extractDeepLink(job.toolResult)
 
-	nonNone := 0
+	publishable := 0
 	for _, out := range outputs {
-		if out.Kind != signaltypes.OutputKindNONE {
-			nonNone++
+		r := extractedResult{out}
+		if !r.isNone() && !r.isIntermediate() {
+			publishable++
 		}
 	}
 	var batchID string
-	if nonNone > 1 {
+	if publishable > 1 {
 		batchID = uuid.NewString()
 	}
 
@@ -327,10 +328,6 @@ func (r extractedResult) candidate(role string) outputCandidate {
 // ---------------------------------------------------------------------------
 // Output creation
 // ---------------------------------------------------------------------------
-
-func (w *AnalyzerWriter) createOutput(out signaltypes.ExtractedOutput, toolName, toolInput, toolResult string) {
-	w.createOutputWithBatch(out, toolName, toolInput, toolResult, "")
-}
 
 func (w *AnalyzerWriter) createOutputWithBatch(out signaltypes.ExtractedOutput, toolName, toolInput, toolResult, batchID string) {
 	r := extractedResult{out}

@@ -4076,9 +4076,25 @@ func (b *PostgresBackend) CreateTaskOutput(ctx context.Context, output *types.Ta
 			return fmt.Errorf("marshal metadata: %w", err)
 		}
 	}
-	status := output.Status
-	if status == "" {
-		status = types.TaskOutputStatusActive
+	if output.Status == "" {
+		output.Status = types.TaskOutputStatusActive
+	}
+	if output.ID != "" {
+		err = b.db.QueryRowContext(ctx, `
+			INSERT INTO task_output (id, workspace_id, task_id, run_id, agent_id, output_type, title, summary, uri, data_json, metadata_json, status)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			ON CONFLICT (id) DO NOTHING
+			RETURNING created_at`,
+			output.ID, output.WorkspaceID, output.TaskID, nilIfEmpty(output.RunID), nilIfEmpty(output.AgentID),
+			output.OutputType, output.Title, output.Summary, nilIfEmpty(output.URI),
+			dataBytes, nullableJSONB(metaBytes), output.Status,
+		).Scan(&output.CreatedAt)
+		if err == sql.ErrNoRows {
+			return b.db.QueryRowContext(ctx,
+				`SELECT created_at FROM task_output WHERE id = $1`, output.ID,
+			).Scan(&output.CreatedAt)
+		}
+		return err
 	}
 	return b.db.QueryRowContext(ctx, `
 		INSERT INTO task_output (workspace_id, task_id, run_id, agent_id, output_type, title, summary, uri, data_json, metadata_json, status)
@@ -4086,7 +4102,7 @@ func (b *PostgresBackend) CreateTaskOutput(ctx context.Context, output *types.Ta
 		RETURNING id, created_at`,
 		output.WorkspaceID, output.TaskID, nilIfEmpty(output.RunID), nilIfEmpty(output.AgentID),
 		output.OutputType, output.Title, output.Summary, nilIfEmpty(output.URI),
-		dataBytes, nullableJSONB(metaBytes), status,
+		dataBytes, nullableJSONB(metaBytes), output.Status,
 	).Scan(&output.ID, &output.CreatedAt)
 }
 

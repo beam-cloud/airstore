@@ -318,6 +318,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 	}
 
 	if len(uncachedIDs) == 0 {
+		enrichRowsWithOutputStatus(resolvedRows, allOutputs)
 		sortResolvedRows(resolvedRows, taskMeta)
 		return &viewMappingResult{Rows: resolvedRows, TaskMeta: taskMeta, Diagnostics: diagnostics}, nil
 	}
@@ -594,8 +595,7 @@ func dataSourceNarrowsTaskSelection(ds *types.DataSource) bool {
 	if ds == nil {
 		return false
 	}
-	return strings.TrimSpace(ds.OutputType) != "" ||
-		strings.TrimSpace(ds.ArtifactKey) != "" ||
+	return strings.TrimSpace(ds.ArtifactKey) != "" ||
 		strings.TrimSpace(ds.TimeRange) != ""
 }
 
@@ -634,16 +634,6 @@ func (r *DataResolver) listScopedOutputs(ctx context.Context, workspaceID uint, 
 
 func (r *DataResolver) fetchOutputsForScope(ctx context.Context, workspaceID uint, ds *types.DataSource, agentIDs []string) ([]*types.TaskOutput, error) {
 	filter := baseTaskOutputFilter()
-	if ds != nil && strings.TrimSpace(ds.OutputType) != "" && strings.TrimSpace(ds.ArtifactKey) == "" {
-		// Only push output_type into the SQL filter when there is no
-		// artifact_key.  The artifact_key is the authoritative selector;
-		// output_type is a BAML hint that can be wrong (e.g. "file" vs
-		// "link").  When artifact_key is set, let filterOutputsForDataSource
-		// handle narrowing after the DB fetch.
-		outputType := strings.TrimSpace(ds.OutputType)
-		filter.OutputType = &outputType
-	}
-
 	outputs, err := r.listScopedOutputs(ctx, workspaceID, filter, agentIDs)
 	if err != nil {
 		return nil, err
@@ -700,21 +690,11 @@ func filterOutputsForDataSource(outputs []*types.TaskOutput, ds *types.DataSourc
 		if output == nil {
 			continue
 		}
-		if len(agentSet) > 0 {
-			if output.AgentID == nil || !agentSet[strings.TrimSpace(*output.AgentID)] {
-				continue
-			}
+		if len(agentSet) > 0 && (output.AgentID == nil || !agentSet[strings.TrimSpace(*output.AgentID)]) {
+			continue
 		}
-		if hasArtifactKey {
-			// artifact_key is the authoritative selector — skip the
-			// output_type check since BAML can hallucinate the wrong type.
-			if !ArtifactOf(output).MatchesKey(ds.ArtifactKey) {
-				continue
-			}
-		} else {
-			if ds.OutputType != "" && !strings.EqualFold(strings.TrimSpace(ds.OutputType), strings.TrimSpace(output.OutputType)) {
-				continue
-			}
+		if hasArtifactKey && !ArtifactOf(output).MatchesKey(ds.ArtifactKey) {
+			continue
 		}
 		if len(ds.Statuses) > 0 {
 			match := false

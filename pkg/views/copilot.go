@@ -322,7 +322,11 @@ func (c *Copilot) PublishView(ctx context.Context, draft *Draft, workspaceID uin
 			}
 			return nil, fmt.Errorf("draft is being published by another replica")
 		}
-		defer c.redis.Del(ctx, lockKey)
+		defer func() {
+		delCtx, delCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer delCancel()
+		c.redis.Del(delCtx, lockKey)
+	}()
 	}
 
 	// Refresh PublishedViewID from S2 in case the in-memory session is stale
@@ -706,7 +710,7 @@ func normalizeDataSource(ds *types.DataSource) {
 	}
 	ds.AgentID = strings.TrimSpace(ds.AgentID)
 	ds.AgentIDs = uniqueTrimmedStrings(ds.AgentIDs)
-	ds.OutputType = strings.TrimSpace(ds.OutputType)
+	ds.OutputType = "" // output_type is not used for filtering; the BAML mapper handles all types
 	ds.ArtifactKey = normalizeToken(ds.ArtifactKey)
 	ds.TimeRange = strings.TrimSpace(ds.TimeRange)
 	ds.Statuses = uniqueTrimmedStrings(ds.Statuses)
@@ -1616,6 +1620,13 @@ COMPONENT TYPES (only two):
   - column: machine-stable key (snake_case) describing what the column shows
   - source: dot-path hint (e.g. "data.recipe_name", "title", "uri")
   - type: display type (text, number, currency, date, link, email, status, tags, boolean)
+
+  DataSource fields (on each component):
+  - agent_id or agent_ids: which agent(s) produce data for this table (REQUIRED)
+  - time_range: recency window, e.g. "30d", "7d" (default "30d")
+  - artifact_key: filter to a specific artifact family (e.g. "company-research").
+    Use when an agent produces multiple artifact families and you need a
+    specific one. Omit to include all outputs from the agent.
   - row_strategy:
     - mode: "task" (default): synthesize one row per task — works great
       for most use cases. Omit row_strategy entirely to use this default.

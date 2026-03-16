@@ -278,14 +278,12 @@ func TestFilterOutputsForDataSource(t *testing.T) {
 		t.Fatalf("nil data source should keep everything, got %d", len(filtered))
 	}
 
-	// When artifact_key is set, output_type mismatches should be ignored —
-	// BAML can hallucinate the wrong output_type (e.g. "file" vs "link").
+	// artifact_key narrows to matching outputs regardless of output_type.
 	filtered = filterOutputsForDataSource(outputs, &types.DataSource{
 		ArtifactKey: "extracted-recipes",
-		OutputType:  "link",
 	}, []string{agentID})
 	if len(filtered) != 1 || filtered[0].ID != "out-1" {
-		t.Fatalf("artifact_key should take precedence over wrong output_type, got %d results", len(filtered))
+		t.Fatalf("artifact_key should narrow to matching outputs, got %d results", len(filtered))
 	}
 }
 

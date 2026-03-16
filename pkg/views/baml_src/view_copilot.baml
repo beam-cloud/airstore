@@ -85,7 +85,6 @@ function WriteView(
               "dataSource": {
                 "agent_id": "single-agent-id",
                 "agent_ids": ["agent-1", "agent-2"],
-                "output_type": "json|file|email|link|text",
                 "artifact_key": "optional-artifact-family-key",
                 "time_range": "24h|7d|30d",
                 "row_strategy": {

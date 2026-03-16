@@ -580,6 +580,12 @@ func (s *WorkerService) CreateTaskOutput(ctx context.Context, req *pb.CreateTask
 			return nil, status.Errorf(codes.InvalidArgument, "invalid metadata_json: %v", err)
 		}
 	}
+	if output.Metadata != nil {
+		if idempID, ok := output.Metadata["_idempotent_output_id"].(string); ok && idempID != "" {
+			output.ID = idempID
+			delete(output.Metadata, "_idempotent_output_id")
+		}
+	}
 	if req.Uri != "" {
 		output.URI = &req.Uri
 	}

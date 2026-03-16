@@ -406,7 +406,7 @@ func (s *AgentService) AcceptTaskInput(
 	}
 
 	if len(items) > 0 {
-		message = s.processItemDecisions(ctx, workspaceID, items, message)
+		message = s.processItemDecisions(ctx, workspaceID, taskID, items, message)
 		if action == nil {
 			approve := types.TaskInputActionApprove
 			action = &approve
@@ -478,9 +478,18 @@ func (s *AgentService) AcceptTaskInput(
 
 // processItemDecisions updates output statuses and builds a composite message
 // from per-item approval/rejection decisions.
-func (s *AgentService) processItemDecisions(ctx context.Context, workspaceID uint, items []types.ItemDecision, userMessage string) string {
+func (s *AgentService) processItemDecisions(ctx context.Context, workspaceID uint, taskID string, items []types.ItemDecision, userMessage string) string {
 	buckets := map[string][]string{"Approved": nil, "Rejected": nil}
 	for _, item := range items {
+		output, err := s.backend.GetTaskOutput(ctx, workspaceID, item.OutputID)
+		if err != nil {
+			log.Warn().Err(err).Str("output_id", item.OutputID).Msg("item output not found")
+			continue
+		}
+		if output.TaskID != taskID {
+			log.Warn().Str("output_id", item.OutputID).Str("task_id", taskID).Msg("item does not belong to task")
+			continue
+		}
 		status := types.TaskOutputStatusApproved
 		if item.Action == types.TaskInputActionReject {
 			status = types.TaskOutputStatusRejected
@@ -489,10 +498,7 @@ func (s *AgentService) processItemDecisions(ctx context.Context, workspaceID uin
 			log.Warn().Err(err).Str("output_id", item.OutputID).Msg("failed to update output status")
 			continue
 		}
-		label := item.OutputID
-		if output, err := s.backend.GetTaskOutput(ctx, workspaceID, item.OutputID); err == nil {
-			label = output.Title
-		}
+		label := output.Title
 		if item.Action == types.TaskInputActionReject && item.Reason != "" {
 			label += " — " + item.Reason
 		}
