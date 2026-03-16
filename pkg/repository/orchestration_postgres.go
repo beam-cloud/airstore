@@ -3996,7 +3996,7 @@ func (b *PostgresBackend) ListTaskOutputs(ctx context.Context, workspaceId uint,
 	rows, err := b.db.QueryContext(ctx, `
 		SELECT o.id, o.workspace_id, o.task_id, o.run_id, o.agent_id,
 		       COALESCE(ap.name, ''), o.output_type, o.title,
-		       o.summary, o.uri, o.data_json, o.metadata_json, o.archived_at, o.created_at
+		       o.summary, o.uri, o.data_json, o.metadata_json, o.status, o.archived_at, o.created_at
 		FROM task_output o
 		LEFT JOIN agent_profile ap ON ap.id = o.agent_id
 		WHERE o.workspace_id = $1 AND o.task_id = $2
@@ -4029,7 +4029,7 @@ func (b *PostgresBackend) ListWorkspaceTaskOutputs(
 	rows, err := b.db.QueryContext(ctx, `
 		SELECT o.id, o.workspace_id, o.task_id, o.run_id, o.agent_id,
 		       COALESCE(ap.name, ''), o.output_type, o.title,
-		       o.summary, o.uri, o.data_json, o.metadata_json, o.archived_at, o.created_at
+		       o.summary, o.uri, o.data_json, o.metadata_json, o.status, o.archived_at, o.created_at
 		FROM task_output o
 		LEFT JOIN agent_profile ap ON ap.id = o.agent_id
 		WHERE o.workspace_id = $1
@@ -4076,13 +4076,17 @@ func (b *PostgresBackend) CreateTaskOutput(ctx context.Context, output *types.Ta
 			return fmt.Errorf("marshal metadata: %w", err)
 		}
 	}
+	status := output.Status
+	if status == "" {
+		status = types.TaskOutputStatusActive
+	}
 	return b.db.QueryRowContext(ctx, `
-		INSERT INTO task_output (workspace_id, task_id, run_id, agent_id, output_type, title, summary, uri, data_json, metadata_json)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		INSERT INTO task_output (workspace_id, task_id, run_id, agent_id, output_type, title, summary, uri, data_json, metadata_json, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		RETURNING id, created_at`,
 		output.WorkspaceID, output.TaskID, nilIfEmpty(output.RunID), nilIfEmpty(output.AgentID),
 		output.OutputType, output.Title, output.Summary, nilIfEmpty(output.URI),
-		dataBytes, nullableJSONB(metaBytes),
+		dataBytes, nullableJSONB(metaBytes), status,
 	).Scan(&output.ID, &output.CreatedAt)
 }
 
@@ -4090,7 +4094,7 @@ func (b *PostgresBackend) GetTaskOutput(ctx context.Context, workspaceId uint, o
 	row := b.db.QueryRowContext(ctx, `
 		SELECT o.id, o.workspace_id, o.task_id, o.run_id, o.agent_id,
 		       COALESCE(ap.name, ''), o.output_type, o.title,
-		       o.summary, o.uri, o.data_json, o.metadata_json, o.archived_at, o.created_at
+		       o.summary, o.uri, o.data_json, o.metadata_json, o.status, o.archived_at, o.created_at
 		FROM task_output o
 		LEFT JOIN agent_profile ap ON ap.id = o.agent_id
 		WHERE o.workspace_id = $1 AND o.id = $2`, workspaceId, outputID)
@@ -4124,6 +4128,20 @@ func (b *PostgresBackend) UpdateTaskOutputSummary(ctx context.Context, workspace
 	res, err := b.db.ExecContext(ctx, `
 		UPDATE task_output SET summary = $1
 		WHERE id = $2 AND workspace_id = $3`, summary, outputID, workspaceId)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return &types.ErrTaskOutputNotFound{ID: outputID}
+	}
+	return nil
+}
+
+func (b *PostgresBackend) UpdateTaskOutputStatus(ctx context.Context, workspaceId uint, outputID string, status string) error {
+	res, err := b.db.ExecContext(ctx, `
+		UPDATE task_output SET status = $1
+		WHERE id = $2 AND workspace_id = $3`, status, outputID, workspaceId)
 	if err != nil {
 		return err
 	}
@@ -4179,7 +4197,7 @@ func scanTaskOutput(s scanner) (*types.TaskOutput, error) {
 	var dataBytes, metaBytes []byte
 	if err := s.Scan(&o.ID, &o.WorkspaceID, &o.TaskID, &runID, &agentID,
 		&o.AgentName, &o.OutputType, &o.Title, &summary, &uri,
-		&dataBytes, &metaBytes, &o.ArchivedAt, &o.CreatedAt); err != nil {
+		&dataBytes, &metaBytes, &o.Status, &o.ArchivedAt, &o.CreatedAt); err != nil {
 		return nil, err
 	}
 	if runID.Valid {

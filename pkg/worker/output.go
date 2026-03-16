@@ -181,6 +181,7 @@ type taskOutputClient interface {
 	CreateTaskOutput(ctx context.Context, req *pb.CreateTaskOutputRequest) (string, error)
 	AppendTaskOutputRows(ctx context.Context, req *pb.AppendTaskOutputRowsRequest) error
 	FinalizeTaskOutput(ctx context.Context, req *pb.FinalizeTaskOutputRequest) error
+	UpdateTaskOutputStatus(ctx context.Context, req *pb.UpdateTaskOutputStatusRequest) error
 }
 
 type outputEvent struct {
@@ -193,6 +194,7 @@ type taskOutputTracker struct {
 	mu      sync.Mutex
 	seen    map[string]struct{}
 	primary map[string]struct{}
+	outputByIdentity map[string]string // identity key -> server output ID
 }
 
 func (t *taskOutputTracker) MarkCreated() {
@@ -227,6 +229,10 @@ func (t *taskOutputTracker) HasEquivalent(candidate outputCandidate) bool {
 }
 
 func (t *taskOutputTracker) Remember(candidate outputCandidate) {
+	t.RememberWithID(candidate, "")
+}
+
+func (t *taskOutputTracker) RememberWithID(candidate outputCandidate, serverID string) {
 	if t == nil {
 		return
 	}
@@ -242,12 +248,33 @@ func (t *taskOutputTracker) Remember(candidate outputCandidate) {
 	if t.primary == nil {
 		t.primary = make(map[string]struct{})
 	}
+	if t.outputByIdentity == nil {
+		t.outputByIdentity = make(map[string]string)
+	}
 	if identity != "" {
 		t.seen[identity] = struct{}{}
+		if serverID != "" {
+			t.outputByIdentity[identity] = serverID
+		}
 	}
 	if key != "" && candidate.isPrimaryDeliverable() {
 		t.primary[key] = struct{}{}
 	}
+}
+
+// PredecessorID returns the server output ID of a previously tracked output
+// matching the same identity key as candidate, if any.
+func (t *taskOutputTracker) PredecessorID(candidate outputCandidate) string {
+	if t == nil {
+		return ""
+	}
+	identity := candidate.identityKey()
+	if identity == "" {
+		return ""
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.outputByIdentity[identity]
 }
 
 func NewOutputWriter(ctx context.Context, client *gatewayclient.GatewayClient, task types.RunExecution) *OutputWriter {

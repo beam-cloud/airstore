@@ -843,6 +843,7 @@ type submitTaskInputRequest struct {
 	Action         *types.TaskInputAction `json:"action,omitempty"`
 	Kind           types.InputKind        `json:"kind,omitempty"`
 	IdempotencyKey string                 `json:"idempotency_key,omitempty"`
+	Items          []types.ItemDecision   `json:"items,omitempty"`
 }
 
 func (g *WorkspaceTasksGroup) SubmitInput(c echo.Context) error {
@@ -871,6 +872,7 @@ func (g *WorkspaceTasksGroup) SubmitInput(c echo.Context) error {
 		req.Action,
 		req.Message,
 		req.IdempotencyKey,
+		req.Items,
 	)
 	if err != nil {
 		var taskErr *types.ErrAgentTaskNotFound

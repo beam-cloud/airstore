@@ -23,6 +23,7 @@ type outputCandidate struct {
 	Data       map[string]any
 	Metadata   map[string]any
 	Role       string
+	Status     string
 }
 
 func (c outputCandidate) identityKey() string {
@@ -136,12 +137,24 @@ func publishOutputCandidate(
 	if err != nil {
 		return "", err
 	}
+	if tracker != nil {
+		if predID := tracker.PredecessorID(normalized); predID != "" {
+			if err := client.UpdateTaskOutputStatus(ctx, &pb.UpdateTaskOutputStatusRequest{
+				WorkspaceId: ids.workspaceID,
+				OutputId:    predID,
+				Status:      types.TaskOutputStatusSuperseded,
+			}); err != nil {
+				log.Warn().Err(err).Str("predecessor", predID).Msg("failed to supersede predecessor output")
+			}
+		}
+	}
+
 	serverID, err := client.CreateTaskOutput(ctx, req)
 	if err != nil {
 		return "", err
 	}
 	if tracker != nil {
-		tracker.Remember(normalized)
+		tracker.RememberWithID(normalized, serverID)
 	}
 
 	if normalized.Summary != "" {
@@ -183,6 +196,9 @@ func (c outputCandidate) buildRequest(ids taskOutputIDs) (*pb.CreateTaskOutputRe
 	}
 	if c.URI != "" {
 		req.Uri = c.URI
+	}
+	if c.Status != "" {
+		req.Status = c.Status
 	}
 
 	return req, nil

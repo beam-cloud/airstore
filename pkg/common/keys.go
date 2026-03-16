@@ -88,6 +88,9 @@ var (
 	// Run interaction state — backend-owned working/waiting/closed snapshot.
 	runInteraction = "airstore:run:interaction:%d:%s" // workspaceId, runId
 
+	// View publish lock — prevents concurrent cross-pod publishes for the same draft.
+	viewPublishLock = "airstore:view:publish:%s" // draftId
+
 	// Compression keys — include strategy so each compressor caches independently
 	fsCompressedPointer = "airstore:compressed:%d:%s:%s:%s" // workspaceId, pathHash, resultId, strategy
 	fsCompressedContent = "airstore:cc:%d:%s:%s:%s"         // workspaceId, pathHash, resultId, strategy
@@ -341,6 +344,12 @@ func (rk *redisKeys) SessionCheckpoint(workspaceId uint, sessionId string) strin
 
 func (rk *redisKeys) RunInteraction(workspaceId uint, runId string) string {
 	return fmt.Sprintf(runInteraction, workspaceId, runId)
+}
+
+// --- View keys ---
+
+func (rk *redisKeys) ViewPublishLock(draftID string) string {
+	return fmt.Sprintf(viewPublishLock, draftID)
 }
 
 // --- Compression keys ---

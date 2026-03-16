@@ -15,6 +15,58 @@ package type_builder
 
 import baml "github.com/boundaryml/baml/engine/language_client_go/pkg"
 
+type ApprovalItemClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *ApprovalItemClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *ApprovalItemClassView) PropertyItem_key() (ClassPropertyView, error) {
+	return t.inner.Property("item_key")
+}
+
+func (t *ApprovalItemClassView) PropertyKind() (ClassPropertyView, error) {
+	return t.inner.Property("kind")
+}
+
+func (t *ApprovalItemClassView) PropertyTitle() (ClassPropertyView, error) {
+	return t.inner.Property("title")
+}
+
+func (t *ApprovalItemClassView) PropertyDescription() (ClassPropertyView, error) {
+	return t.inner.Property("description")
+}
+
+func (t *ApprovalItemClassView) PropertyDetails() (ClassPropertyView, error) {
+	return t.inner.Property("details")
+}
+
+func (t *ApprovalItemClassView) PropertyData_fields() (ClassPropertyView, error) {
+	return t.inner.Property("data_fields")
+}
+
+func (t *TypeBuilder) ApprovalItem() (*ApprovalItemClassView, error) {
+	bld, err := t.inner.Class("ApprovalItem")
+	if err != nil {
+		return nil, err
+	}
+	return &ApprovalItemClassView{inner: bld}, nil
+}
+
+func (t *ApprovalItemClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
 type ApprovalSummaryClassView struct {
 	inner baml.ClassBuilder
 }

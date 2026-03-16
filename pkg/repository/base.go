@@ -285,6 +285,7 @@ type BackendRepository interface {
 	GetTaskOutput(ctx context.Context, workspaceId uint, outputID string) (*types.TaskOutput, error)
 	AppendTaskOutputRows(ctx context.Context, workspaceId uint, outputID string, rows []byte) error
 	UpdateTaskOutputSummary(ctx context.Context, workspaceId uint, outputID string, summary string) error
+	UpdateTaskOutputStatus(ctx context.Context, workspaceId uint, outputID string, status string) error
 	ArchiveTaskOutput(ctx context.Context, workspaceId uint, outputID string) error
 	ArchiveAllTaskOutputs(ctx context.Context, workspaceId uint) (int64, error)
 	DeleteTaskOutput(ctx context.Context, workspaceId uint, outputID string) error

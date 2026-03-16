@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/google/uuid"
+
 	gatewayclient "github.com/beam-cloud/airstore/pkg/gateway/client"
 	"github.com/beam-cloud/airstore/pkg/types"
 	agentsignal "github.com/beam-cloud/airstore/pkg/worker/agentsignal/baml_client"
@@ -163,6 +165,18 @@ func (w *AnalyzerWriter) process(job analyzerJob) {
 	}
 
 	fallbackURI := extractDeepLink(job.toolResult)
+
+	nonNone := 0
+	for _, out := range outputs {
+		if out.Kind != signaltypes.OutputKindNONE {
+			nonNone++
+		}
+	}
+	var batchID string
+	if nonNone > 1 {
+		batchID = uuid.NewString()
+	}
+
 	for _, out := range outputs {
 		if out.Kind == signaltypes.OutputKindNONE {
 			continue
@@ -170,7 +184,7 @@ func (w *AnalyzerWriter) process(job analyzerJob) {
 		if derefStr(out.Uri) == "" && fallbackURI != "" {
 			out.Uri = &fallbackURI
 		}
-		w.createOutput(out, job.toolName, job.toolInput, job.toolResult)
+		w.createOutputWithBatch(out, job.toolName, job.toolInput, job.toolResult, batchID)
 	}
 }
 
@@ -315,6 +329,10 @@ func (r extractedResult) candidate(role string) outputCandidate {
 // ---------------------------------------------------------------------------
 
 func (w *AnalyzerWriter) createOutput(out signaltypes.ExtractedOutput, toolName, toolInput, toolResult string) {
+	w.createOutputWithBatch(out, toolName, toolInput, toolResult, "")
+}
+
+func (w *AnalyzerWriter) createOutputWithBatch(out signaltypes.ExtractedOutput, toolName, toolInput, toolResult, batchID string) {
 	r := extractedResult{out}
 	if r.isIntermediate() {
 		return
@@ -322,6 +340,9 @@ func (w *AnalyzerWriter) createOutput(out signaltypes.ExtractedOutput, toolName,
 
 	c := r.candidate(types.TaskOutputArtifactRoleSupporting)
 	c.Metadata[keyTool] = toolName
+	if batchID != "" {
+		c.Metadata["batch_id"] = batchID
+	}
 
 	if content := r.content(); content != "" {
 		c.Data[keyContent] = content

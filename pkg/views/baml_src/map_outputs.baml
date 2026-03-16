@@ -118,9 +118,27 @@ function MapOutputsToSchema(
       row_key = "task".
     - If mode is "split": emit MULTIPLE rows per task_id. The description
       tells you what entity each row represents (e.g. one row per email
-      recipient, per listing, per item). Use stable, slug-like row_key values
-      (e.g. "alice-smith", "listing-42"). If no distinct entities exist,
-      fall back to one row with row_key = "task".
+      recipient, per listing, per company researched). Use stable, slug-like
+      row_key values (e.g. "alice-smith", "listing-42", "acme-corp").
+      If no distinct entities exist, fall back to one row with row_key = "task".
+      For research tasks: each distinct finding, company, person, or topic
+      that has its own output should become its own row. Populate ALL columns
+      for each entity from its corresponding output(s).
+
+    ENTITY LIFECYCLE:
+    Some outputs have a STATUS field (pending, approved, rejected, superseded).
+    When multiple outputs represent different stages of the same entity
+    (e.g. draft -> sent -> replied for the same email recipient), synthesize
+    ONE row per entity with the latest state. Use the STATUS field to
+    determine precedence:
+    - superseded outputs provide historical context but are not current
+    - active outputs represent the current state
+    - pending outputs are awaiting approval
+    - For status columns, derive from the most recent non-superseded output
+      (e.g. "Replied" if there is a reply, "Sent" if just sent, "Pending"
+      if still awaiting approval, "Rejected" if rejected)
+    Include ALL contributing output IDs in source_output_ids regardless of
+    status, so the full entity history is accessible.
 
     SHEET CONTEXT: The sheet name "{{ sheet_name }}" gives context for
     disambiguation (e.g. which URL or label to pick when multiple exist)

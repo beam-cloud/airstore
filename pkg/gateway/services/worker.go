@@ -583,6 +583,9 @@ func (s *WorkerService) CreateTaskOutput(ctx context.Context, req *pb.CreateTask
 	if req.Uri != "" {
 		output.URI = &req.Uri
 	}
+	if req.Status != "" {
+		output.Status = req.Status
+	}
 
 	if err := s.backend.CreateTaskOutput(ctx, output); err != nil {
 		return nil, status.Errorf(codes.Internal, "create output: %v", err)
@@ -616,6 +619,20 @@ func (s *WorkerService) FinalizeTaskOutput(ctx context.Context, req *pb.Finalize
 	}
 	s.publishOutputTaskUpdate(ctx, uint(req.WorkspaceId), req.OutputId)
 	return &pb.FinalizeTaskOutputResponse{}, nil
+}
+
+func (s *WorkerService) UpdateTaskOutputStatus(ctx context.Context, req *pb.UpdateTaskOutputStatusRequest) (*pb.UpdateTaskOutputStatusResponse, error) {
+	if s.backend == nil {
+		return nil, status.Errorf(codes.Unavailable, "task persistence not available")
+	}
+	if err := s.backend.UpdateTaskOutputStatus(ctx, uint(req.WorkspaceId), req.OutputId, req.Status); err != nil {
+		if _, ok := err.(*types.ErrTaskOutputNotFound); ok {
+			return nil, status.Errorf(codes.NotFound, "output not found: %s", req.OutputId)
+		}
+		return nil, status.Errorf(codes.Internal, "update output status: %v", err)
+	}
+	s.publishOutputTaskUpdate(ctx, uint(req.WorkspaceId), req.OutputId)
+	return &pb.UpdateTaskOutputStatusResponse{}, nil
 }
 
 func (s *WorkerService) publishOutputTaskUpdate(ctx context.Context, workspaceID uint, outputID string) {

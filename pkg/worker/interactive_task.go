@@ -14,10 +14,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	agentsignal "github.com/beam-cloud/airstore/pkg/worker/agentsignal/baml_client"
 	signaltypes "github.com/beam-cloud/airstore/pkg/worker/agentsignal/baml_client/types"
+	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/rs/zerolog/log"
 )
 
@@ -397,7 +400,7 @@ func (w *Worker) buildNeedsInputChecker(
 		if kind == types.InputKindApproveReject && tw.ringBuf != nil {
 			if text := extractAssistantText(tw.ringBuf.Bytes(), 4000); text != "" {
 				if s, err := agentsignal.ExtractApprovalSummary(ctx, text, agentsignal.WithEnv(bamlEnv)); err == nil {
-					summary = marshalApprovalSummary(s)
+					summary = w.buildApprovalSummaryWithItems(ctx, task, text, s, bamlEnv)
 				}
 			}
 		}
@@ -965,8 +968,76 @@ func signalActivity(ch chan<- struct{}) {
 	}
 }
 
-func marshalApprovalSummary(s signaltypes.ApprovalSummary) string {
-	b, err := json.Marshal(map[string]string{"summary": s.Summary, "details": s.Details})
+type approvalItemSummary struct {
+	OutputID string `json:"output_id"`
+	Title    string `json:"title"`
+	ItemKey  string `json:"item_key"`
+}
+
+func (w *Worker) buildApprovalSummaryWithItems(
+	ctx context.Context, task types.RunExecution,
+	text string, summary signaltypes.ApprovalSummary,
+	bamlEnv map[string]string,
+) string {
+	items, err := agentsignal.ExtractApprovalItems(ctx, text, agentsignal.WithEnv(bamlEnv))
+	if err != nil || len(items) == 0 {
+		return marshalApprovalSummary(summary, nil)
+	}
+
+	ids := outputIDsFromTask(task)
+	batchID := uuid.NewString()
+	var itemSummaries []approvalItemSummary
+
+	for _, item := range items {
+		dataMap := map[string]any{}
+		for _, df := range item.Data_fields {
+			dataMap[df.Key] = df.Value
+		}
+		dataMap["details"] = item.Details
+
+		metaJSON, _ := json.Marshal(map[string]any{
+			"approval_batch_id": batchID,
+			"item_key":          item.Item_key,
+		})
+		dataJSON, _ := json.Marshal(dataMap)
+
+		req := &pb.CreateTaskOutputRequest{
+			WorkspaceId:  ids.workspaceID,
+			TaskId:       ids.taskID,
+			RunId:        ids.runID,
+			AgentId:      ids.agentID,
+			OutputType:   kindToOutputType(item.Kind),
+			Title:        item.Title,
+			DataJson:     string(dataJSON),
+			MetadataJson: string(metaJSON),
+			Status:       types.TaskOutputStatusPending,
+		}
+
+		serverID, createErr := w.gatewayClient.CreateTaskOutput(ctx, req)
+		if createErr != nil {
+			log.Warn().Err(createErr).Str("item_key", item.Item_key).Msg("failed to create pending approval output")
+			continue
+		}
+
+		itemSummaries = append(itemSummaries, approvalItemSummary{
+			OutputID: serverID,
+			Title:    item.Title,
+			ItemKey:  item.Item_key,
+		})
+	}
+
+	return marshalApprovalSummary(summary, itemSummaries)
+}
+
+func marshalApprovalSummary(s signaltypes.ApprovalSummary, items []approvalItemSummary) string {
+	payload := map[string]any{
+		"summary": s.Summary,
+		"details": s.Details,
+	}
+	if len(items) > 0 {
+		payload["items"] = items
+	}
+	b, err := json.Marshal(payload)
 	if err != nil {
 		return ""
 	}
