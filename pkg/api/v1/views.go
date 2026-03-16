@@ -96,6 +96,8 @@ func (vg *ViewsGroup) Create(c echo.Context) error {
 		Description: req.Description,
 		Definition:  req.Definition,
 	}
+	views.NormalizeDefinition(&v.Definition)
+	v.SyncNameDescription()
 	if err := vg.backend.CreateView(c.Request().Context(), v); err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
@@ -159,10 +161,13 @@ func (vg *ViewsGroup) Update(c echo.Context) error {
 			v.Description = v.Definition.Description
 		}
 	}
-	v.SyncNameDescription()
 	if len(req.ColumnRenames) > 0 {
 		applyColumnRenamesToDefinition(&v.Definition, req.ColumnRenames)
 	}
+	if req.Definition != nil || len(req.ColumnRenames) > 0 {
+		views.NormalizeDefinition(&v.Definition)
+	}
+	v.SyncNameDescription()
 	if err := vg.backend.UpdateView(ctx, v); err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
@@ -680,7 +685,8 @@ type createViewDraftResponse struct {
 }
 
 type viewChatRequest struct {
-	Message string `json:"message"`
+	Message     string `json:"message"`
+	ViewContent string `json:"view_content,omitempty"`
 }
 
 type viewSSEEvent struct {
@@ -912,6 +918,13 @@ func (vg *ViewsGroup) ChatDraft(c echo.Context) error {
 
 	session.mu.Lock()
 	defer session.mu.Unlock()
+
+	if trimmed := strings.TrimSpace(req.ViewContent); trimmed != "" && trimmed != session.draft.ViewContent {
+		session.draft.ViewContent = trimmed
+		if err := vg.copilot.PersistViewContent(genCtx, session.draft.ID, trimmed); err != nil {
+			log.Warn().Err(err).Str("draft_id", session.draft.ID).Msg("failed to persist latest view content before chat")
+		}
+	}
 
 	resp, err := vg.copilot.GenerateStream(
 		genCtx,

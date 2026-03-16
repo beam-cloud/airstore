@@ -43,7 +43,7 @@ func (s *StreamValue[TStream, TFinal]) Stream() *TStream {
 }
 
 // / Streaming version of MapOutputsToSchema
-func (*stream) MapOutputsToSchema(ctx context.Context, sheet_name string, table_title string, table_type string, row_strategy_mode string, row_strategy_description string, columns []types.ColumnSchema, outputs_json string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.MappedResult, types.MappedResult], error) {
+func (*stream) MapOutputsToSchema(ctx context.Context, sheet_name string, table_title string, table_type string, row_strategy_mode string, row_strategy_description string, columns []types.ColumnSchema, outputs_payload string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.MappedResult, types.MappedResult], error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -51,7 +51,7 @@ func (*stream) MapOutputsToSchema(ctx context.Context, sheet_name string, table_
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"sheet_name": sheet_name, "table_title": table_title, "table_type": table_type, "row_strategy_mode": row_strategy_mode, "row_strategy_description": row_strategy_description, "columns": columns, "outputs_json": outputs_json},
+		Kwargs: map[string]any{"sheet_name": sheet_name, "table_title": table_title, "table_type": table_type, "row_strategy_mode": row_strategy_mode, "row_strategy_description": row_strategy_description, "columns": columns, "outputs_payload": outputs_payload},
 		Env:    getEnvVars(callOpts.env),
 	}
 

@@ -109,7 +109,7 @@ func (s *ViewStore) GetRows(ctx context.Context, viewID, sheetID string) ([]View
 		Str("sheet_id", sheetID).
 		Str("collection", s.collectionName(viewID)).
 		Int("rows", len(rows)).
-		Msg("mongo: loaded rows")
+		Msg("view: loaded rows")
 	return rows, nil
 }
 
@@ -174,7 +174,7 @@ func (s *ViewStore) UpsertRows(ctx context.Context, viewID string, rows []ViewRo
 		Int("rows", len(rows)).
 		Int64("upserted", result.UpsertedCount).
 		Int64("modified", result.ModifiedCount).
-		Msg("mongo: upserted rows")
+		Msg("view: upserted rows")
 	return nil
 }
 
@@ -200,7 +200,7 @@ func (s *ViewStore) DeleteRowsNotInGroups(ctx context.Context, viewID, sheetID s
 		Str("sheet_id", sheetID).
 		Int("groups", len(groupIDs)).
 		Int64("deleted", res.DeletedCount).
-		Msg("mongo: deleted stale rows")
+		Msg("view: deleted stale rows")
 	return nil
 }
 
@@ -241,7 +241,7 @@ func (s *ViewStore) UpdateCells(ctx context.Context, viewID, sheetID, rowID stri
 		Int("fields", len(cells)).
 		Int64("matched", res.MatchedCount).
 		Int64("modified", res.ModifiedCount).
-		Msg("mongo: manual cell edit")
+		Msg("view: manual cell edit")
 	return nil
 }
 
@@ -281,7 +281,7 @@ func (s *ViewStore) ClearManualCells(ctx context.Context, viewID, sheetID string
 		Int("columns", len(columnKeys)).
 		Int64("matched", res.MatchedCount).
 		Int64("modified", res.ModifiedCount).
-		Msg("mongo: cleared manual cell overlays")
+		Msg("view: cleared manual cell overlays")
 	return nil
 }
 

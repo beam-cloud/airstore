@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/types"
+	bamltypes "github.com/beam-cloud/airstore/pkg/views/baml_client/types"
 )
 
 func TestDotGetSupportsImplicitArrayTraversal(t *testing.T) {
@@ -55,13 +57,15 @@ func TestFilterOutputsByTimeRange(t *testing.T) {
 }
 
 type fakeResolverBackend struct {
-	profilesByKey    map[string]*types.AgentProfile
-	profiles         []*types.AgentProfile
-	outputsByAgent   map[string][]*types.TaskOutput
-	workspaceOutputs []*types.TaskOutput
-	tasks            map[string]*types.AgentTask
-	queriedAgentIDs  []string
-	filters          []types.TaskOutputListFilter
+	profilesByKey     map[string]*types.AgentProfile
+	profiles          []*types.AgentProfile
+	outputsByAgent    map[string][]*types.TaskOutput
+	taskOutputsByTask map[string][]*types.TaskOutput
+	workspaceOutputs  []*types.TaskOutput
+	tasks             map[string]*types.AgentTask
+	queriedAgentIDs   []string
+	queriedTaskIDs    []string
+	filters           []types.TaskOutputListFilter
 }
 
 func (b *fakeResolverBackend) GetTaskByID(_ context.Context, taskID string) (*types.AgentTask, error) {
@@ -71,6 +75,22 @@ func (b *fakeResolverBackend) GetTaskByID(_ context.Context, taskID string) (*ty
 		}
 	}
 	return nil, fmt.Errorf("task not found")
+}
+
+func (b *fakeResolverBackend) ListTaskOutputs(_ context.Context, _ uint, taskID string) ([]*types.TaskOutput, error) {
+	b.queriedTaskIDs = append(b.queriedTaskIDs, taskID)
+	if b.taskOutputsByTask != nil {
+		if outputs, ok := b.taskOutputsByTask[taskID]; ok {
+			return outputs, nil
+		}
+	}
+	var outputs []*types.TaskOutput
+	for _, output := range b.workspaceOutputs {
+		if output != nil && output.TaskID == taskID {
+			outputs = append(outputs, output)
+		}
+	}
+	return outputs, nil
 }
 
 func (b *fakeResolverBackend) GetAgentProfileByKey(_ context.Context, _ uint, agentKey string) (*types.AgentProfile, error) {
@@ -155,6 +175,9 @@ func TestFetchMappingOutputsExpandsTaskContextForSelectedTasks(t *testing.T) {
 		outputsByAgent: map[string][]*types.TaskOutput{
 			agentID: {primary, sibling, otherTask},
 		},
+		taskOutputsByTask: map[string][]*types.TaskOutput{
+			"task-1": {primary, sibling},
+		},
 	}
 	resolver := &DataResolver{backend: backend, store: nil}
 
@@ -173,8 +196,14 @@ func TestFetchMappingOutputsExpandsTaskContextForSelectedTasks(t *testing.T) {
 	if got, want := sortedOutputIDs(outputs), []string{"out-1", "out-2"}; !slicesMatch(got, want) {
 		t.Fatalf("output ids = %v, want %v", got, want)
 	}
-	if got, want := len(backend.queriedAgentIDs), 2; got != want {
-		t.Fatalf("query count = %d, want %d", got, want)
+	if got, want := len(backend.queriedAgentIDs), 1; got != want {
+		t.Fatalf("agent query count = %d, want %d", got, want)
+	}
+	if got, want := len(backend.queriedTaskIDs), 1; got != want {
+		t.Fatalf("task query count = %d, want %d", got, want)
+	}
+	if got, want := backend.queriedTaskIDs[0], "task-1"; got != want {
+		t.Fatalf("queried task id = %q, want %q", got, want)
 	}
 }
 
@@ -212,6 +241,9 @@ func TestFetchMappingOutputsAvoidsExtraExpansionWhenSelectionIsAlreadyFull(t *te
 	}
 	if got, want := len(backend.queriedAgentIDs), 1; got != want {
 		t.Fatalf("query count = %d, want %d", got, want)
+	}
+	if got := len(backend.queriedTaskIDs); got != 0 {
+		t.Fatalf("expected no task-level expansion, got %d task queries", got)
 	}
 }
 
@@ -308,6 +340,47 @@ func TestBuildColumnSchemasIncludesTaskMetadataColumnsFromConfig(t *testing.T) {
 	}
 	if got := schemas[2].Key; got != "next_wake_summary" {
 		t.Fatalf("third schema key = %q, want next_wake_summary", got)
+	}
+}
+
+func TestBuildColumnSchemasSkipsDuplicateKeys(t *testing.T) {
+	comp := types.ComponentSpec{
+		DataSource: &types.DataSource{
+			Transform: []types.TransformRule{
+				{Column: "source_url", Source: "data.primary_url", Type: "link"},
+				{Column: "source_url", Source: "data.secondary_url", Type: "link"},
+				{Column: "recipe_name", Source: "data.recipe_name", Type: "text"},
+			},
+		},
+		Config: map[string]any{
+			"columns": []any{
+				map[string]any{"key": "source_url", "label": "Video", "type": "link"},
+				map[string]any{"key": "source_url", "label": "Duplicate Video", "type": "link"},
+				map[string]any{"key": "recipe_name", "label": "Recipe", "type": "text"},
+			},
+		},
+	}
+
+	schemas := buildColumnSchemas(comp)
+	if got, want := len(schemas), 2; got != want {
+		t.Fatalf("schema count = %d, want %d", got, want)
+	}
+	if got, want := schemas[0].Key, "source_url"; got != want {
+		t.Fatalf("first schema key = %q, want %q", got, want)
+	}
+	if got, want := schemas[1].Key, "recipe_name"; got != want {
+		t.Fatalf("second schema key = %q, want %q", got, want)
+	}
+
+	keys := schemaKeyList(schemas)
+	if got, want := len(keys), 2; got != want {
+		t.Fatalf("schemaKeyList length = %d, want %d", got, want)
+	}
+	if got, want := keys[0], "source_url"; got != want {
+		t.Fatalf("first schema key list item = %q, want %q", got, want)
+	}
+	if got, want := keys[1], "recipe_name"; got != want {
+		t.Fatalf("second schema key list item = %q, want %q", got, want)
 	}
 }
 
@@ -457,6 +530,188 @@ func TestSortedOutputIDsAndSlicesMatch(t *testing.T) {
 	}
 	if slicesMatch(oids, []string{"out-1", "out-2", "out-4"}) {
 		t.Fatal("should not match different list")
+	}
+}
+
+func TestSerializeOutputsForMappingSortsOutputsDeterministically(t *testing.T) {
+	older := newRecipeOutput("out-b")
+	older.TaskID = "task-1"
+	older.CreatedAt = time.Date(2026, 3, 16, 10, 0, 0, 0, time.UTC)
+	older.Title = "Older"
+
+	newer := newRecipeOutput("out-a")
+	newer.TaskID = "task-1"
+	newer.CreatedAt = time.Date(2026, 3, 16, 11, 0, 0, 0, time.UTC)
+	newer.Title = "Newer"
+
+	raw, err := serializeOutputsForMapping([]*types.TaskOutput{newer, older}, map[string]string{"task-1": "prompt"})
+	if err != nil {
+		t.Fatalf("serializeOutputsForMapping returned error: %v", err)
+	}
+	if !strings.Contains(raw, "<<<BEGIN_TASK id=task-1>>>") {
+		t.Fatalf("serialized payload missing task marker: %s", raw)
+	}
+	if !strings.Contains(raw, "PROMPT: prompt") {
+		t.Fatalf("serialized payload missing prompt: %s", raw)
+	}
+
+	first := strings.Index(raw, "<<<BEGIN_OUTPUT id=out-b>>>")
+	second := strings.Index(raw, "<<<BEGIN_OUTPUT id=out-a>>>")
+	if first < 0 || second < 0 {
+		t.Fatalf("serialized payload missing ordered output markers: %s", raw)
+	}
+	if first >= second {
+		t.Fatalf("output order was not deterministic: %s", raw)
+	}
+}
+
+func TestSerializeOutputsForMappingSanitizesNoisyMarkup(t *testing.T) {
+	output := newRecipeOutput("out-1")
+	output.TaskID = "task-1"
+	output.Data = map[string]any{
+		"recipe_name": "Top 4 Lemon Hacks",
+	}
+	output.Metadata = map[string]any{
+		"source_input": map[string]any{
+			"content": "<li>Cut lemon</li><li>Freeze zest</li>",
+		},
+		"source_excerpt": "\u001b[32m✓\u001b[0m PDF saved to /workspace/file.pdf",
+		"data_fields": []any{
+			map[string]any{"key": "recipe_name", "label": "Recipe Name", "type": "text"},
+		},
+	}
+
+	raw, err := serializeOutputsForMapping([]*types.TaskOutput{output}, map[string]string{"task-1": "Prompt"})
+	if err != nil {
+		t.Fatalf("serializeOutputsForMapping returned error: %v", err)
+	}
+	if strings.Contains(raw, "\\u003c") {
+		t.Fatalf("serialized payload should not contain escaped HTML tags: %s", raw)
+	}
+	if strings.Contains(raw, "<li>") {
+		t.Fatalf("serialized payload should strip markup tags: %s", raw)
+	}
+	if strings.Contains(raw, "\u001b[32m") {
+		t.Fatalf("serialized payload should strip ANSI escapes: %s", raw)
+	}
+	if !strings.Contains(raw, "source_input_excerpt: Cut lemon Freeze zest") {
+		t.Fatalf("serialized payload missing condensed source input excerpt: %s", raw)
+	}
+	if !strings.Contains(raw, "data_fields: recipe_name [Recipe Name: text]") {
+		t.Fatalf("serialized payload missing summarized data_fields: %s", raw)
+	}
+}
+
+func TestCanonicalizeMappedRowsMergesDuplicateRowKeysDeterministically(t *testing.T) {
+	rows := canonicalizeMappedRows(
+		[]bamltypes.ColumnSchema{
+			{Key: "name"},
+			{Key: "email"},
+		},
+		[]bamltypes.MappedRow{
+			{
+				Task_id:           "task-1",
+				Row_key:           "Alice Smith",
+				Source_output_ids: []string{"out-2"},
+				Cells: []bamltypes.MappedCell{
+					{Column: "name", Value: ""},
+					{Column: "email", Value: "alice@example.com"},
+				},
+			},
+			{
+				Task_id:           "task-1",
+				Row_key:           "alice-smith",
+				Source_output_ids: []string{"out-1"},
+				Cells: []bamltypes.MappedCell{
+					{Column: "name", Value: "Alice Smith"},
+					{Column: "email", Value: ""},
+				},
+			},
+		},
+	)
+
+	if got, want := len(rows), 1; got != want {
+		t.Fatalf("row count = %d, want %d", got, want)
+	}
+	if got, want := rows[0].Row_key, "alice-smith"; got != want {
+		t.Fatalf("row key = %q, want %q", got, want)
+	}
+	if got, want := rows[0].Source_output_ids, []string{"out-1", "out-2"}; !slicesMatch(got, want) {
+		t.Fatalf("source output ids = %v, want %v", got, want)
+	}
+	if got, want := len(rows[0].Cells), 2; got != want {
+		t.Fatalf("cell count = %d, want %d", got, want)
+	}
+	if got, want := rows[0].Cells[0].Column, "name"; got != want {
+		t.Fatalf("first cell column = %q, want %q", got, want)
+	}
+	if got, want := rows[0].Cells[0].Value, "Alice Smith"; got != want {
+		t.Fatalf("first cell value = %q, want %q", got, want)
+	}
+	if got, want := rows[0].Cells[1].Column, "email"; got != want {
+		t.Fatalf("second cell column = %q, want %q", got, want)
+	}
+	if got, want := rows[0].Cells[1].Value, "alice@example.com"; got != want {
+		t.Fatalf("second cell value = %q, want %q", got, want)
+	}
+}
+
+func TestCanonicalizeMappedRowsResolvesUniqueColumnAliases(t *testing.T) {
+	rows := canonicalizeMappedRows(
+		[]bamltypes.ColumnSchema{
+			{Key: "recipe_name", Name: "Recipe"},
+			{Key: "source_url", Name: "Video"},
+		},
+		[]bamltypes.MappedRow{
+			{
+				Task_id: "task-1",
+				Cells: []bamltypes.MappedCell{
+					{Column: "recipe", Value: "Top 4 Lemon Hacks"},
+					{Column: "video", Value: "https://example.com/video"},
+				},
+			},
+		},
+	)
+
+	if got, want := len(rows), 1; got != want {
+		t.Fatalf("row count = %d, want %d", got, want)
+	}
+	if got, want := rows[0].Cells[0].Column, "recipe_name"; got != want {
+		t.Fatalf("first cell column = %q, want %q", got, want)
+	}
+	if got, want := rows[0].Cells[0].Value, "Top 4 Lemon Hacks"; got != want {
+		t.Fatalf("first cell value = %q, want %q", got, want)
+	}
+	if got, want := rows[0].Cells[1].Column, "source_url"; got != want {
+		t.Fatalf("second cell column = %q, want %q", got, want)
+	}
+	if got, want := rows[0].Cells[1].Value, "https://example.com/video"; got != want {
+		t.Fatalf("second cell value = %q, want %q", got, want)
+	}
+}
+
+func TestMappedRowToViewRowSanitizesSourceOutputIDs(t *testing.T) {
+	now := time.Now()
+	outputs := []*types.TaskOutput{
+		{ID: "out-2"},
+		{ID: "out-1"},
+	}
+
+	row := mappedRowToViewRow("sheet-1", "task-1", "schema", outputs, bamltypes.MappedRow{
+		Row_key:           "task",
+		Source_output_ids: []string{"out-2", "foreign-id"},
+		Cells:             []bamltypes.MappedCell{{Column: "name", Value: "Alice"}},
+	}, now)
+	if got, want := row.SourceOutputIDs, []string{"out-2"}; !slicesMatch(got, want) {
+		t.Fatalf("sanitized source ids = %v, want %v", got, want)
+	}
+
+	fallback := mappedRowToViewRow("sheet-1", "task-1", "schema", outputs, bamltypes.MappedRow{
+		Row_key:           "task",
+		Source_output_ids: []string{"foreign-id"},
+	}, now)
+	if got, want := fallback.SourceOutputIDs, []string{"out-1", "out-2"}; !slicesMatch(got, want) {
+		t.Fatalf("fallback source ids = %v, want %v", got, want)
 	}
 }
 

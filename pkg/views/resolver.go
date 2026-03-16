@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
+	"html"
 	"regexp"
 	"sort"
 	"strconv"
@@ -81,16 +81,6 @@ func buildMappingSpec(sheetName string, comp types.ComponentSpec) mappingSpec {
 		rowStrategy: rowStrategy,
 		schemaHash:  hashColumns(mappingCols, rowStrategy, sheetName, comp.Title, comp.Type),
 	}
-}
-
-func outputMapperCallOptions() []baml.CallOptionFunc {
-	if strings.TrimSpace(os.Getenv("CEREBRAS_API_KEY")) != "" {
-		return nil
-	}
-	if strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")) != "" {
-		return []baml.CallOptionFunc{baml.WithClient("OutputMapperFallbackClient")}
-	}
-	return nil
 }
 
 func NewDataResolver(backend repository.BackendRepository, store *ViewStore) *DataResolver {
@@ -176,7 +166,6 @@ func (r *DataResolver) RegenerateRow(ctx context.Context, workspaceID uint, view
 		spec.rowStrategy.Description,
 		spec.mappingCols,
 		outputsJSON,
-		outputMapperCallOptions()...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("BAML mapping: %w", err)
@@ -249,10 +238,13 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 	taskGroups := groupOutputsByTask(allOutputs)
 	taskMeta := r.fetchTaskMetadata(ctx, taskIDsFromGroups(taskGroups))
 
-	existingRows, err := r.store.GetRows(ctx, viewID, sheet.ID)
-	if err != nil {
-		log.Warn().Err(err).Str("view_id", viewID).Str("sheet_id", sheet.ID).Msg("failed to load stored rows, treating all as uncached")
-		existingRows = nil
+	var existingRows []ViewRow
+	if r.store != nil {
+		existingRows, err = r.store.GetRows(ctx, viewID, sheet.ID)
+		if err != nil {
+			log.Warn().Err(err).Str("view_id", viewID).Str("sheet_id", sheet.ID).Msg("failed to load stored rows, treating all as uncached")
+			existingRows = nil
+		}
 	}
 	rowsByGroup := make(map[string][]ViewRow)
 	for i := range existingRows {
@@ -270,7 +262,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 			Str("sheet_id", sheet.ID).
 			Str("schema_hash", spec.schemaHash).
 			Int("tasks", len(taskGroups)).
-			Msg("mongo: force refresh requested")
+			Msg("view: force refresh requested")
 	}
 
 	for taskID, outputs := range taskGroups {
@@ -345,7 +337,6 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 			spec.rowStrategy.Description,
 			spec.mappingCols,
 			outputsJSON,
-			outputMapperCallOptions()...,
 		)
 		if err != nil {
 			if opts.ForceRefresh {
@@ -381,7 +372,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 		}
 	}
 
-	{
+	if r.store != nil {
 		var toUpsert []ViewRow
 		var keepRowIDs []string
 		var cleanupGroupIDs []string
@@ -464,7 +455,7 @@ func schemaKeyList(cols []bamltypes.ColumnSchema) []string {
 	for _, col := range cols {
 		keys = append(keys, col.Key)
 	}
-	return keys
+	return uniqueTrimmedStrings(keys)
 }
 
 func groupOutputsByTask(outputs []*types.TaskOutput) map[string][]*types.TaskOutput {
@@ -840,11 +831,8 @@ func mappedRowToViewRow(sheetID, taskID, schemaH string, groupOutputs []*types.T
 	if rowKey == "" {
 		rowKey = "task"
 	}
-	sourceOutputIDs := uniqueTrimmedStrings(row.Source_output_ids)
-	sort.Strings(sourceOutputIDs)
-	if len(sourceOutputIDs) == 0 {
-		sourceOutputIDs = sortedOutputIDs(groupOutputs)
-	}
+	outputIDs := sortedOutputIDs(groupOutputs)
+	sourceOutputIDs := sanitizeSourceOutputIDs(row.Source_output_ids, outputIDs)
 	cells := make(map[string]string, len(row.Cells))
 	for _, cell := range row.Cells {
 		if cell.Value != "" {
@@ -858,11 +846,32 @@ func mappedRowToViewRow(sheetID, taskID, schemaH string, groupOutputs []*types.T
 		TaskID:          taskID,
 		RowKey:          rowKey,
 		SchemaHash:      schemaH,
-		OutputIDs:       sortedOutputIDs(groupOutputs),
+		OutputIDs:       outputIDs,
 		SourceOutputIDs: sourceOutputIDs,
 		Cells:           cells,
 		UpdatedAt:       now,
 	}
+}
+
+func sanitizeSourceOutputIDs(sourceOutputIDs, outputIDs []string) []string {
+	if len(outputIDs) == 0 {
+		return nil
+	}
+	allowed := make(map[string]struct{}, len(outputIDs))
+	for _, id := range outputIDs {
+		allowed[id] = struct{}{}
+	}
+	var filtered []string
+	for _, id := range uniqueTrimmedStrings(sourceOutputIDs) {
+		if _, ok := allowed[id]; ok {
+			filtered = append(filtered, id)
+		}
+	}
+	sort.Strings(filtered)
+	if len(filtered) == 0 {
+		return append([]string(nil), outputIDs...)
+	}
+	return filtered
 }
 
 func fallbackViewRow(sheetID, taskID, schemaH string, groupOutputs []*types.TaskOutput, now time.Time) ViewRow {
@@ -1018,12 +1027,21 @@ func buildColumnSchemas(comp types.ComponentSpec) []bamltypes.ColumnSchema {
 			return nil
 		}
 		schemas := make([]bamltypes.ColumnSchema, 0, len(configCols))
+		seen := make(map[string]struct{}, len(configCols))
 		for _, col := range configCols {
-			name := schemaColumnName(col.Key, col.Label)
+			key := strings.TrimSpace(col.Key)
+			if key == "" {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			name := schemaColumnName(key, col.Label)
 			schemas = append(schemas, bamltypes.ColumnSchema{
 				Name:        name,
-				Key:         col.Key,
-				Type:        columnTypeForKey(col.Key, col.Type),
+				Key:         key,
+				Type:        columnTypeForKey(key, col.Type),
 				Description: name,
 			})
 		}
@@ -1034,121 +1052,405 @@ func buildColumnSchemas(comp types.ComponentSpec) []bamltypes.ColumnSchema {
 	configCols := parseConfigColumns(comp.Config)
 	configByKey := make(map[string]configColumn, len(configCols))
 	for _, cc := range configCols {
-		configByKey[cc.Key] = cc
+		key := strings.TrimSpace(cc.Key)
+		if key == "" {
+			continue
+		}
+		cc.Key = key
+		if _, exists := configByKey[key]; exists {
+			continue
+		}
+		configByKey[key] = cc
 	}
 	seen := make(map[string]bool, len(comp.DataSource.Transform))
 
 	for _, rule := range comp.DataSource.Transform {
-		desc := humanizeColumn(rule.Column)
-		if cc, ok := configByKey[rule.Column]; ok && cc.Label != "" {
+		key := strings.TrimSpace(rule.Column)
+		if key == "" || seen[key] {
+			continue
+		}
+		desc := humanizeColumn(key)
+		if cc, ok := configByKey[key]; ok && cc.Label != "" {
 			desc = cc.Label
 		}
-		name := schemaColumnName(rule.Column, desc)
+		name := schemaColumnName(key, desc)
 		if rule.Source != "" {
 			desc += " (hint: " + rule.Source + ")"
 		}
 		schemas = append(schemas, bamltypes.ColumnSchema{
 			Name:        name,
-			Key:         rule.Column,
-			Type:        columnTypeForKey(rule.Column, rule.Type),
+			Key:         key,
+			Type:        columnTypeForKey(key, rule.Type),
 			Description: desc,
 		})
-		seen[rule.Column] = true
+		seen[key] = true
 	}
 	for _, cc := range configCols {
-		if cc.Key == "" || seen[cc.Key] {
+		key := strings.TrimSpace(cc.Key)
+		if key == "" || seen[key] {
 			continue
 		}
-		name := schemaColumnName(cc.Key, cc.Label)
+		name := schemaColumnName(key, cc.Label)
 		schemas = append(schemas, bamltypes.ColumnSchema{
 			Name:        name,
-			Key:         cc.Key,
-			Type:        columnTypeForKey(cc.Key, cc.Type),
+			Key:         key,
+			Type:        columnTypeForKey(key, cc.Type),
 			Description: name,
 		})
+		seen[key] = true
 	}
 	return schemas
 }
 
-// serializeOutputsForMapping groups outputs by task_id and serializes as a
-// JSON object keyed by task_id. Each entry contains the initial user prompt
-// (when available) and an array of compact outputs produced by that task.
+// serializeOutputsForMapping groups outputs by task_id and formats them as a
+// deterministic text payload with explicit task/output boundaries. The mapper
+// gets cleaned, high-signal evidence rather than a raw transport dump.
 func serializeOutputsForMapping(outputs []*types.TaskOutput, taskPrompts map[string]string) (string, error) {
-	type compactOutput struct {
-		ID         string         `json:"id"`
-		Title      string         `json:"title"`
-		OutputType string         `json:"output_type"`
-		AgentName  string         `json:"agent_name,omitempty"`
-		Summary    *string        `json:"summary,omitempty"`
-		URI        *string        `json:"uri,omitempty"`
-		Data       map[string]any `json:"data,omitempty"`
-		Metadata   map[string]any `json:"metadata,omitempty"`
-		CreatedAt  string         `json:"created_at"`
-	}
-
-	type taskGroup struct {
-		Prompt  string          `json:"prompt,omitempty"`
-		Outputs []compactOutput `json:"outputs"`
-	}
-
-	grouped := make(map[string]*taskGroup)
+	grouped := make(map[string][]*types.TaskOutput)
 	for _, o := range outputs {
 		if o == nil {
 			continue
 		}
-		g, ok := grouped[o.TaskID]
-		if !ok {
-			g = &taskGroup{Prompt: taskPrompts[o.TaskID]}
-			grouped[o.TaskID] = g
-		}
-		g.Outputs = append(g.Outputs, compactOutput{
-			ID:         o.ID,
-			Title:      o.Title,
-			OutputType: o.OutputType,
-			AgentName:  o.AgentName,
-			Summary:    o.Summary,
-			URI:        o.URI,
-			Data:       truncateLargeValues(o.Data),
-			Metadata:   o.Metadata,
-			CreatedAt:  o.CreatedAt.Format(time.RFC3339),
-		})
-	}
-	for _, group := range grouped {
-		sort.SliceStable(group.Outputs, func(i, j int) bool {
-			if group.Outputs[i].CreatedAt != group.Outputs[j].CreatedAt {
-				return group.Outputs[i].CreatedAt < group.Outputs[j].CreatedAt
-			}
-			return group.Outputs[i].ID < group.Outputs[j].ID
-		})
+		grouped[o.TaskID] = append(grouped[o.TaskID], o)
 	}
 
-	raw, err := json.Marshal(grouped)
-	if err != nil {
-		return "", err
+	taskIDs := make([]string, 0, len(grouped))
+	for taskID := range grouped {
+		taskIDs = append(taskIDs, taskID)
 	}
-	return string(raw), nil
+	sort.Strings(taskIDs)
+
+	var b strings.Builder
+	for i, taskID := range taskIDs {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString("<<<BEGIN_TASK id=")
+		b.WriteString(taskID)
+		b.WriteString(">>>\n")
+		writeMappingLine(&b, "PROMPT", taskPrompts[taskID])
+
+		group := grouped[taskID]
+		sort.SliceStable(group, func(i, j int) bool {
+			if !group[i].CreatedAt.Equal(group[j].CreatedAt) {
+				return group[i].CreatedAt.Before(group[j].CreatedAt)
+			}
+			return group[i].ID < group[j].ID
+		})
+		for _, output := range group {
+			writeTaskOutputForMapping(&b, output)
+		}
+		b.WriteString("<<<END_TASK>>>\n")
+	}
+	return b.String(), nil
 }
 
-const maxFieldValueLen = 2000
+type mappingField struct {
+	Path  string
+	Value string
+}
 
-func truncateLargeValues(m map[string]any) map[string]any {
-	if len(m) == 0 {
+const (
+	maxMappingFieldValueLen = 600
+	maxMappingNestedItems   = 6
+)
+
+func writeTaskOutputForMapping(b *strings.Builder, output *types.TaskOutput) {
+	if output == nil {
+		return
+	}
+	b.WriteString("<<<BEGIN_OUTPUT id=")
+	b.WriteString(output.ID)
+	b.WriteString(">>>\n")
+	writeMappingLine(b, "TITLE", output.Title)
+	writeMappingLine(b, "OUTPUT_TYPE", output.OutputType)
+	writeMappingLine(b, "AGENT_NAME", output.AgentName)
+	writeMappingLine(b, "CREATED_AT", output.CreatedAt.Format(time.RFC3339))
+	if output.Summary != nil {
+		writeMappingLine(b, "SUMMARY", *output.Summary)
+	}
+	if output.URI != nil {
+		writeMappingLine(b, "URI", *output.URI)
+	}
+	writeMappingSection(b, "DATA_FIELDS", collectMappingFields(output.Data))
+	writeMappingSection(b, "METADATA_FIELDS", collectMappingFields(output.Metadata))
+	b.WriteString("<<<END_OUTPUT>>>\n")
+}
+
+func writeMappingLine(b *strings.Builder, key, value string) {
+	if b == nil {
+		return
+	}
+	value = sanitizeMappingScalar(value)
+	if value == "" {
+		return
+	}
+	b.WriteString(key)
+	b.WriteString(": ")
+	b.WriteString(value)
+	b.WriteByte('\n')
+}
+
+func writeMappingSection(b *strings.Builder, title string, fields []mappingField) {
+	if b == nil || len(fields) == 0 {
+		return
+	}
+	b.WriteString(title)
+	b.WriteString(":\n")
+	for _, field := range fields {
+		if strings.TrimSpace(field.Path) == "" || strings.TrimSpace(field.Value) == "" {
+			continue
+		}
+		b.WriteString("- ")
+		b.WriteString(field.Path)
+		b.WriteString(": ")
+		b.WriteString(field.Value)
+		b.WriteByte('\n')
+	}
+}
+
+func collectMappingFields(values map[string]any) []mappingField {
+	if len(values) == 0 {
 		return nil
 	}
-	out := make(map[string]any, len(m))
-	for k, v := range m {
-		switch val := v.(type) {
-		case string:
-			if len(val) > maxFieldValueLen {
-				out[k] = val[:maxFieldValueLen] + "…"
-			} else {
-				out[k] = val
+	var out []mappingField
+	collectMappingFieldsFromValue(&out, "", values)
+	return out
+}
+
+func collectMappingFieldsFromValue(out *[]mappingField, path string, value any) {
+	switch val := value.(type) {
+	case nil:
+		return
+	case map[string]any:
+		if path != "" && shouldCondenseMappingPath(path) {
+			if excerpt := summarizeMappingExcerpt(val); excerpt != "" {
+				*out = append(*out, mappingField{Path: path + "_excerpt", Value: excerpt})
 			}
-		default:
-			out[k] = v
+			return
+		}
+		keys := make([]string, 0, len(val))
+		for key := range val {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			childPath := key
+			if path != "" {
+				childPath = path + "." + key
+			}
+			collectMappingFieldsFromValue(out, childPath, val[key])
+		}
+	case []string:
+		if summary := summarizeScalarSlice(val); summary != "" {
+			*out = append(*out, mappingField{Path: path, Value: summary})
+		}
+	case []map[string]any:
+		if path != "" && shouldCondenseMappingPath(path) {
+			if excerpt := summarizeMappingExcerpt(val); excerpt != "" {
+				*out = append(*out, mappingField{Path: path + "_excerpt", Value: excerpt})
+			}
+			return
+		}
+		if strings.HasSuffix(path, "data_fields") {
+			if summary := summarizeDataFields(val); summary != "" {
+				*out = append(*out, mappingField{Path: path, Value: summary})
+			}
+			return
+		}
+		for i, item := range val {
+			if i >= maxMappingNestedItems {
+				break
+			}
+			childPath := fmt.Sprintf("%s[%d]", path, i)
+			collectMappingFieldsFromValue(out, childPath, item)
+		}
+	case []any:
+		if path != "" && shouldCondenseMappingPath(path) {
+			if excerpt := summarizeMappingExcerpt(val); excerpt != "" {
+				*out = append(*out, mappingField{Path: path + "_excerpt", Value: excerpt})
+			}
+			return
+		}
+		if strings.HasSuffix(path, "data_fields") {
+			if summary := summarizeDataFields(val); summary != "" {
+				*out = append(*out, mappingField{Path: path, Value: summary})
+			}
+			return
+		}
+		if summary := summarizeScalarSlice(val); summary != "" {
+			*out = append(*out, mappingField{Path: path, Value: summary})
+			return
+		}
+		for i, item := range val {
+			if i >= maxMappingNestedItems {
+				break
+			}
+			childPath := fmt.Sprintf("%s[%d]", path, i)
+			collectMappingFieldsFromValue(out, childPath, item)
+		}
+	default:
+		if path != "" && shouldCondenseMappingPath(path) {
+			if excerpt := summarizeMappingExcerpt(val); excerpt != "" {
+				*out = append(*out, mappingField{Path: path + "_excerpt", Value: excerpt})
+			}
+			return
+		}
+		if text := sanitizeMappingScalar(fmt.Sprint(val)); text != "" && text != "<nil>" {
+			*out = append(*out, mappingField{Path: path, Value: text})
 		}
 	}
-	return out
+}
+
+func shouldCondenseMappingPath(path string) bool {
+	return path == "source_input" ||
+		path == "source_input_text" ||
+		path == "source_excerpt" ||
+		strings.HasSuffix(path, ".source_input") ||
+		strings.HasSuffix(path, ".source_input_text") ||
+		strings.HasSuffix(path, ".source_excerpt")
+}
+
+func summarizeDataFields(value any) string {
+	var items []any
+	switch fields := value.(type) {
+	case []any:
+		items = fields
+	case []map[string]any:
+		items = make([]any, 0, len(fields))
+		for _, field := range fields {
+			items = append(items, field)
+		}
+	default:
+		return ""
+	}
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		field, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		key := sanitizeMappingScalar(fmt.Sprint(field["key"]))
+		if key == "" {
+			continue
+		}
+		label := sanitizeMappingScalar(fmt.Sprint(field["label"]))
+		typ := sanitizeMappingScalar(fmt.Sprint(field["type"]))
+		part := key
+		if label != "" || typ != "" {
+			part += " ["
+			if label != "" {
+				part += label
+			}
+			if typ != "" {
+				if label != "" {
+					part += ": "
+				}
+				part += typ
+			}
+			part += "]"
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, "; ")
+}
+
+func summarizeScalarSlice(values any) string {
+	var items []string
+	switch vals := values.(type) {
+	case []string:
+		items = vals
+	case []any:
+		items = make([]string, 0, len(vals))
+		for _, raw := range vals {
+			switch v := raw.(type) {
+			case nil:
+				continue
+			case map[string]any, []any:
+				return ""
+			default:
+				if text := sanitizeMappingScalar(fmt.Sprint(v)); text != "" {
+					items = append(items, text)
+				}
+			}
+		}
+	default:
+		return ""
+	}
+	if len(items) == 0 {
+		return ""
+	}
+	if len(items) > maxMappingNestedItems {
+		items = items[:maxMappingNestedItems]
+	}
+	return strings.Join(items, ", ")
+}
+
+func summarizeMappingExcerpt(value any) string {
+	switch val := value.(type) {
+	case string:
+		return sanitizeMappingScalar(val)
+	case map[string]any:
+		for _, key := range []string{"content", "command", "description", "path", "file_path"} {
+			if child, ok := val[key]; ok {
+				if excerpt := summarizeMappingExcerpt(child); excerpt != "" {
+					return excerpt
+				}
+			}
+		}
+		keys := make([]string, 0, len(val))
+		for key := range val {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys))
+		for _, key := range keys {
+			if len(parts) == 4 {
+				break
+			}
+			if excerpt := summarizeMappingExcerpt(val[key]); excerpt != "" {
+				parts = append(parts, key+": "+excerpt)
+			}
+		}
+		return strings.Join(parts, " | ")
+	case []string:
+		return summarizeScalarSlice(val)
+	case []map[string]any:
+		if summary := summarizeDataFields(val); summary != "" {
+			return summary
+		}
+		return ""
+	case []any:
+		return summarizeScalarSlice(val)
+	default:
+		if value == nil {
+			return ""
+		}
+		return sanitizeMappingScalar(fmt.Sprint(value))
+	}
+}
+
+func sanitizeMappingScalar(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	value = html.UnescapeString(value)
+	value = ansiEscapeRe.ReplaceAllString(value, "")
+	value = strings.ReplaceAll(value, "\u00a0", " ")
+	if markupTagRe.MatchString(value) {
+		value = markupTagRe.ReplaceAllString(value, " ")
+	}
+	value = whitespaceRe.ReplaceAllString(value, " ")
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) > maxMappingFieldValueLen {
+		return string(runes[:maxMappingFieldValueLen]) + "…"
+	}
+	return value
 }
 
 func filterBamlColumns(cols []bamltypes.ColumnSchema) []bamltypes.ColumnSchema {
@@ -1226,7 +1528,7 @@ func (r *DataResolver) Store() *ViewStore {
 // mappingVersion should be bumped whenever the BAML prompt, serialization
 // logic, mapping scope, or output processing changes. This invalidates all
 // cached rows.
-const mappingVersion = "v5"
+const mappingVersion = "v6"
 
 func hashColumns(columns []bamltypes.ColumnSchema, rowStrategy types.RowStrategy, sheetName, tableTitle, tableType string) string {
 	type hashEntry struct {
@@ -1356,6 +1658,8 @@ func canonicalizeMappedRows(columns []bamltypes.ColumnSchema, rows []bamltypes.M
 	}
 	columnKeys := make([]string, 0, len(columns))
 	columnSet := make(map[string]struct{}, len(columns))
+	columnAliases := make(map[string]string, len(columns)*3)
+	ambiguousAliases := make(map[string]bool)
 	for _, column := range columns {
 		key := strings.TrimSpace(column.Key)
 		if key == "" {
@@ -1366,6 +1670,9 @@ func canonicalizeMappedRows(columns []bamltypes.ColumnSchema, rows []bamltypes.M
 		}
 		columnSet[key] = struct{}{}
 		columnKeys = append(columnKeys, key)
+		registerColumnAlias(columnAliases, ambiguousAliases, key, key)
+		registerColumnAlias(columnAliases, ambiguousAliases, humanizeColumn(key), key)
+		registerColumnAlias(columnAliases, ambiguousAliases, column.Name, key)
 	}
 
 	type candidateRow struct {
@@ -1388,8 +1695,8 @@ func canonicalizeMappedRows(columns []bamltypes.ColumnSchema, rows []bamltypes.M
 		cells := make(map[string]string, len(columnKeys))
 		filledCount := 0
 		for _, cell := range row.Cells {
-			columnKey := strings.TrimSpace(cell.Column)
-			if _, ok := columnSet[columnKey]; !ok {
+			columnKey := resolveMappedColumnKey(cell.Column, columnSet, columnAliases, ambiguousAliases)
+			if columnKey == "" {
 				continue
 			}
 			if _, exists := cells[columnKey]; exists {
@@ -1489,6 +1796,42 @@ func canonicalizeMappedRows(columns []bamltypes.ColumnSchema, rows []bamltypes.M
 	return result
 }
 
+func registerColumnAlias(aliasToKey map[string]string, ambiguous map[string]bool, alias, key string) {
+	normalized := normalizeColumnKey(alias)
+	if normalized == "" {
+		return
+	}
+	if existing, ok := aliasToKey[normalized]; ok && existing != key {
+		delete(aliasToKey, normalized)
+		ambiguous[normalized] = true
+		return
+	}
+	if !ambiguous[normalized] {
+		aliasToKey[normalized] = key
+	}
+}
+
+func resolveMappedColumnKey(raw string, columnSet map[string]struct{}, aliasToKey map[string]string, ambiguous map[string]bool) string {
+	key := strings.TrimSpace(raw)
+	if key == "" {
+		return ""
+	}
+	if _, ok := columnSet[key]; ok {
+		return key
+	}
+	normalized := normalizeColumnKey(key)
+	if normalized == "" {
+		return ""
+	}
+	if _, ok := columnSet[normalized]; ok {
+		return normalized
+	}
+	if ambiguous[normalized] {
+		return ""
+	}
+	return aliasToKey[normalized]
+}
+
 func mergeSortedStrings(left, right []string) []string {
 	if len(left) == 0 {
 		return append([]string(nil), right...)
@@ -1518,6 +1861,9 @@ func slicesMatch(a, b []string) bool {
 // Dot-path navigation (used by Artifact)
 // ---------------------------------------------------------------------------
 
+var ansiEscapeRe = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
+var markupTagRe = regexp.MustCompile(`(?s)<[^>]+>`)
+var whitespaceRe = regexp.MustCompile(`\s+`)
 var indexBracketRe = regexp.MustCompile(`\[(\d+|\*)\]`)
 
 func dotGet(m map[string]any, path string) any {

@@ -83,6 +83,66 @@ func TestNormalizeViewDefinitionKeepsExplicitAgentsWhenComponentsDoNotReferenceA
 	}
 }
 
+func TestNormalizeViewDefinitionAssignsUniqueSheetAndComponentIDs(t *testing.T) {
+	def := types.ViewDefinition{
+		Sheets: []types.SheetSpec{
+			{
+				ID:     "sheet-1",
+				Name:   "One",
+				Layout: types.LayoutConfig{Columns: 12},
+				Components: []types.ComponentSpec{
+					{ID: "c1", Type: types.ComponentTypeTable},
+					{ID: "c1", Type: types.ComponentTypeTable},
+				},
+			},
+			{
+				ID:     "sheet-1",
+				Name:   "Two",
+				Layout: types.LayoutConfig{Columns: 12},
+				Components: []types.ComponentSpec{
+					{ID: "", Type: types.ComponentTypeAction},
+				},
+			},
+			{
+				ID:     "",
+				Name:   "Three",
+				Layout: types.LayoutConfig{Columns: 12},
+			},
+		},
+	}
+
+	normalizeViewDefinition(&def)
+
+	if got, want := def.Sheets[0].ID, "sheet-1"; got != want {
+		t.Fatalf("first sheet id = %q, want %q", got, want)
+	}
+	seenSheetIDs := map[string]bool{}
+	for i, sheet := range def.Sheets {
+		if sheet.ID == "" {
+			t.Fatalf("sheet %d id should not be empty", i)
+		}
+		if seenSheetIDs[sheet.ID] {
+			t.Fatalf("duplicate sheet id %q after normalization", sheet.ID)
+		}
+		seenSheetIDs[sheet.ID] = true
+	}
+	if got := def.Sheets[1].ID; got == "sheet-1" {
+		t.Fatalf("duplicate sheet id was not rewritten: %q", got)
+	}
+	if got := def.Sheets[2].ID; got == "" {
+		t.Fatal("empty sheet id was not rewritten")
+	}
+	if got := def.Sheets[0].Components[0].ID; got != "c1" {
+		t.Fatalf("first component id = %q, want %q", got, "c1")
+	}
+	if got := def.Sheets[0].Components[1].ID; got == "" || got == "c1" {
+		t.Fatalf("duplicate component id was not rewritten: %q", got)
+	}
+	if got := def.Sheets[1].Components[0].ID; got == "" {
+		t.Fatal("empty component id was not rewritten")
+	}
+}
+
 func TestExtractStringSliceHandlesStringArrays(t *testing.T) {
 	m := map[string]any{
 		"skills": []string{"triage", " review ", "triage", ""},
