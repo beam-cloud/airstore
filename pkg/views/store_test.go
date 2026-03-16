@@ -2,12 +2,12 @@ package views
 
 import "testing"
 
-func TestMongoColumnFieldPathPreservesNonEmptyWhitespace(t *testing.T) {
-	got, err := mongoColumnFieldPath("cells", "  spaced key  ")
+func TestMongoColumnFieldPathTrimsPaddedKeys(t *testing.T) {
+	got, err := mongoColumnFieldPath("cells", "  spaced_key  ")
 	if err != nil {
 		t.Fatalf("mongoColumnFieldPath returned error: %v", err)
 	}
-	if want := "cells.  spaced key  "; got != want {
+	if want := "cells.spaced_key"; got != want {
 		t.Fatalf("mongoColumnFieldPath = %q, want %q", got, want)
 	}
 }

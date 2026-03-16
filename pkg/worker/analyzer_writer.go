@@ -497,15 +497,19 @@ func firstMatchingString(value any, keys ...string) string {
 				}
 			}
 		}
-		for _, child := range typed {
-			if match := firstMatchingString(child, keys...); match != "" {
-				return match
+		for _, key := range keys {
+			for _, child := range typed {
+				if match := firstMatchingString(child, key); match != "" {
+					return match
+				}
 			}
 		}
 	case []any:
-		for _, child := range typed {
-			if match := firstMatchingString(child, keys...); match != "" {
-				return match
+		for _, key := range keys {
+			for _, child := range typed {
+				if match := firstMatchingString(child, key); match != "" {
+					return match
+				}
 			}
 		}
 	}

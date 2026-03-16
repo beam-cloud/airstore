@@ -93,7 +93,7 @@ function WriteView(
                   "description": "For split mode, describe what one row represents. Example: one row per emailed contact."
                 },
                 "transform": [
-                  {"column": "stable_key", "source": "data.field|title|metadata.key", "type": "text|number|currency|datetime|link|email|status|tags|boolean"}
+                  {"column": "stable_key", "source": "data.field|title|metadata.key", "type": "text|number|currency|date|link|email|status|tags|boolean"}
                 ]
               },
               "config": {}
@@ -144,7 +144,7 @@ function WriteView(
       Put the visible header in config.columns[].label.
     - source: dot-path hint into task_output fields (e.g. "data.recipe_name",
       "title", "uri"). Guidance, not rigid binding.
-    - type: text (default), number, currency, datetime, link, email, status,
+    - type: text (default), number, currency, date, link, email, status,
       tags, boolean. Guides both display and mapping.
     - row_strategy.mode:
       - "task" (default): synthesize one row per task. This is the strong

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -22,6 +23,8 @@ import (
 	baml "github.com/beam-cloud/airstore/pkg/views/baml_client"
 	bamltypes "github.com/beam-cloud/airstore/pkg/views/baml_client/types"
 )
+
+var ErrNoOutputsForTask = errors.New("no outputs found for task")
 
 // ---------------------------------------------------------------------------
 // DataResolver
@@ -85,7 +88,7 @@ func outputMapperCallOptions() []baml.CallOptionFunc {
 		return nil
 	}
 	if strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")) != "" {
-		return []baml.CallOptionFunc{baml.WithClient("ViewCopilotClient")}
+		return []baml.CallOptionFunc{baml.WithClient("OutputMapperFallbackClient")}
 	}
 	return nil
 }
@@ -97,6 +100,7 @@ func NewDataResolver(backend repository.BackendRepository, store *ViewStore) *Da
 type dataResolverBackend interface {
 	GetAgentProfileByKey(ctx context.Context, workspaceId uint, agentKey string) (*types.AgentProfile, error)
 	ListAgentProfiles(ctx context.Context, workspaceId uint) ([]*types.AgentProfile, error)
+	ListTaskOutputs(ctx context.Context, workspaceId uint, taskID string) ([]*types.TaskOutput, error)
 	ListWorkspaceTaskOutputs(ctx context.Context, workspaceId uint, filter types.TaskOutputListFilter) ([]*types.TaskOutput, error)
 	GetTaskByID(ctx context.Context, taskId string) (*types.AgentTask, error)
 }
@@ -113,7 +117,24 @@ func (r *DataResolver) Resolve(ctx context.Context, workspaceID uint, viewID str
 	if result == nil {
 		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}, nil
 	}
-	return assembleTable(sheet.ID, comp, result.Rows, result.TaskMeta), nil
+
+	rows := result.Rows
+	if r.store != nil {
+		excluded, err := r.store.GetExcludedRowIDs(ctx, viewID, sheet.ID)
+		if err != nil {
+			log.Warn().Err(err).Str("view_id", viewID).Str("sheet_id", sheet.ID).Msg("failed to load row exclusions")
+		} else if len(excluded) > 0 {
+			filtered := make([]resolvedSheetRow, 0, len(rows))
+			for _, row := range rows {
+				if !excluded[row.RowID] {
+					filtered = append(filtered, row)
+				}
+			}
+			rows = filtered
+		}
+	}
+
+	return assembleTable(sheet.ID, comp, rows, result.TaskMeta), nil
 }
 
 // RegenerateRow re-maps a single task's outputs through BAML for one sheet,
@@ -127,16 +148,18 @@ func (r *DataResolver) RegenerateRow(ctx context.Context, workspaceID uint, view
 		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}, nil
 	}
 
-	allOutputs, err := r.fetchMappingOutputs(ctx, workspaceID, comp.DataSource, opts.ViewAgentRefs)
+	agentIDs, ok := r.resolveScopedAgentIDs(ctx, workspaceID, comp.DataSource, opts.ViewAgentRefs)
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrNoOutputsForTask, taskID)
+	}
+	allOutputs, err := r.fetchTaskOutputs(ctx, workspaceID, []string{taskID}, agentIDs)
 	if err != nil {
 		return nil, fmt.Errorf("fetch mapping outputs: %w", err)
 	}
-
-	taskGroups := groupOutputsByTask(allOutputs)
-	outputs, ok := taskGroups[taskID]
-	if !ok || len(outputs) == 0 {
-		return nil, fmt.Errorf("no outputs found for task %s", taskID)
+	if len(allOutputs) == 0 {
+		return nil, fmt.Errorf("%w: %s", ErrNoOutputsForTask, taskID)
 	}
+	outputs := allOutputs
 
 	taskPrompts := r.fetchTaskPrompts(ctx, []string{taskID})
 	outputsJSON, err := serializeOutputsForMapping(outputs, taskPrompts)
@@ -159,9 +182,10 @@ func (r *DataResolver) RegenerateRow(ctx context.Context, workspaceID uint, view
 		return nil, fmt.Errorf("BAML mapping: %w", err)
 	}
 
+	canonicalRows := canonicalizeMappedRows(spec.mappingCols, result.Rows)
 	now := time.Now()
 	var persisted []ViewRow
-	for _, row := range result.Rows {
+	for _, row := range canonicalRows {
 		if row.Task_id != taskID {
 			continue
 		}
@@ -329,7 +353,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 			}
 			log.Warn().Err(err).Str("view_id", viewID).Str("sheet_id", sheet.ID).Int("tasks", len(uncachedIDs)).Msg("BAML mapping failed")
 		} else {
-			for _, row := range result.Rows {
+			for _, row := range canonicalizeMappedRows(spec.mappingCols, result.Rows) {
 				taskID := row.Task_id
 				if _, ok := taskGroups[taskID]; !ok {
 					log.Warn().
@@ -612,11 +636,11 @@ func (r *DataResolver) fetchMappingOutputs(ctx context.Context, workspaceID uint
 		return nil, nil
 	}
 
-	allTaskOutputs, err := r.fetchOutputsForScope(ctx, workspaceID, nil, agentIDs)
+	allTaskOutputs, err := r.fetchTaskOutputs(ctx, workspaceID, sortedTaskIDSet(taskIDs), agentIDs)
 	if err != nil {
 		return nil, err
 	}
-	return outputsForTasks(allTaskOutputs, taskIDs), nil
+	return allTaskOutputs, nil
 }
 
 func filterOutputsForDataSource(outputs []*types.TaskOutput, ds *types.DataSource, resolvedAgentIDs []string) []*types.TaskOutput {
@@ -774,6 +798,7 @@ func dedupeOutputs(all []*types.TaskOutput) []*types.TaskOutput {
 		seen[o.ID] = struct{}{}
 		deduped = append(deduped, o)
 	}
+	sortTaskOutputs(deduped)
 	return deduped
 }
 
@@ -816,6 +841,7 @@ func mappedRowToViewRow(sheetID, taskID, schemaH string, groupOutputs []*types.T
 		rowKey = "task"
 	}
 	sourceOutputIDs := uniqueTrimmedStrings(row.Source_output_ids)
+	sort.Strings(sourceOutputIDs)
 	if len(sourceOutputIDs) == 0 {
 		sourceOutputIDs = sortedOutputIDs(groupOutputs)
 	}
@@ -1087,6 +1113,14 @@ func serializeOutputsForMapping(outputs []*types.TaskOutput, taskPrompts map[str
 			CreatedAt:  o.CreatedAt.Format(time.RFC3339),
 		})
 	}
+	for _, group := range grouped {
+		sort.SliceStable(group.Outputs, func(i, j int) bool {
+			if group.Outputs[i].CreatedAt != group.Outputs[j].CreatedAt {
+				return group.Outputs[i].CreatedAt < group.Outputs[j].CreatedAt
+			}
+			return group.Outputs[i].ID < group.Outputs[j].ID
+		})
+	}
 
 	raw, err := json.Marshal(grouped)
 	if err != nil {
@@ -1245,6 +1279,227 @@ func sortedOutputIDs(outputs []*types.TaskOutput) []string {
 	}
 	sort.Strings(ids)
 	return ids
+}
+
+func sortedTaskIDSet(taskIDs map[string]bool) []string {
+	ids := make([]string, 0, len(taskIDs))
+	for taskID := range taskIDs {
+		ids = append(ids, taskID)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func sortTaskOutputs(outputs []*types.TaskOutput) {
+	sort.SliceStable(outputs, func(i, j int) bool {
+		left := outputs[i]
+		right := outputs[j]
+		if left == nil || right == nil {
+			return left != nil
+		}
+		if left.TaskID != right.TaskID {
+			return left.TaskID < right.TaskID
+		}
+		if !left.CreatedAt.Equal(right.CreatedAt) {
+			return left.CreatedAt.Before(right.CreatedAt)
+		}
+		if left.ID != right.ID {
+			return left.ID < right.ID
+		}
+		if left.OutputType != right.OutputType {
+			return left.OutputType < right.OutputType
+		}
+		return left.Title < right.Title
+	})
+}
+
+func filterOutputsByAgentIDs(outputs []*types.TaskOutput, agentIDs []string) []*types.TaskOutput {
+	if len(agentIDs) == 0 {
+		return outputs
+	}
+	agentSet := make(map[string]struct{}, len(agentIDs))
+	for _, agentID := range agentIDs {
+		if trimmed := strings.TrimSpace(agentID); trimmed != "" {
+			agentSet[trimmed] = struct{}{}
+		}
+	}
+	filtered := make([]*types.TaskOutput, 0, len(outputs))
+	for _, output := range outputs {
+		if output == nil || output.AgentID == nil {
+			continue
+		}
+		if _, ok := agentSet[strings.TrimSpace(*output.AgentID)]; ok {
+			filtered = append(filtered, output)
+		}
+	}
+	return filtered
+}
+
+func (r *DataResolver) fetchTaskOutputs(ctx context.Context, workspaceID uint, taskIDs []string, agentIDs []string) ([]*types.TaskOutput, error) {
+	var outputs []*types.TaskOutput
+	for _, taskID := range taskIDs {
+		if strings.TrimSpace(taskID) == "" {
+			continue
+		}
+		taskOutputs, err := r.backend.ListTaskOutputs(ctx, workspaceID, taskID)
+		if err != nil {
+			return nil, err
+		}
+		outputs = append(outputs, filterOutputsByAgentIDs(taskOutputs, agentIDs)...)
+	}
+	return dedupeOutputs(outputs), nil
+}
+
+func canonicalizeMappedRows(columns []bamltypes.ColumnSchema, rows []bamltypes.MappedRow) []bamltypes.MappedRow {
+	if len(rows) == 0 {
+		return nil
+	}
+	columnKeys := make([]string, 0, len(columns))
+	columnSet := make(map[string]struct{}, len(columns))
+	for _, column := range columns {
+		key := strings.TrimSpace(column.Key)
+		if key == "" {
+			continue
+		}
+		if _, exists := columnSet[key]; exists {
+			continue
+		}
+		columnSet[key] = struct{}{}
+		columnKeys = append(columnKeys, key)
+	}
+
+	type candidateRow struct {
+		TaskID          string
+		RowKey          string
+		SourceOutputIDs []string
+		Cells           map[string]string
+		FilledCount     int
+	}
+	candidates := make([]candidateRow, 0, len(rows))
+	for _, row := range rows {
+		taskID := strings.TrimSpace(row.Task_id)
+		if taskID == "" {
+			continue
+		}
+		rowKey := normalizeToken(strings.TrimSpace(row.Row_key))
+		if rowKey == "" {
+			rowKey = "task"
+		}
+		cells := make(map[string]string, len(columnKeys))
+		filledCount := 0
+		for _, cell := range row.Cells {
+			columnKey := strings.TrimSpace(cell.Column)
+			if _, ok := columnSet[columnKey]; !ok {
+				continue
+			}
+			if _, exists := cells[columnKey]; exists {
+				continue
+			}
+			cells[columnKey] = cell.Value
+			if strings.TrimSpace(cell.Value) != "" {
+				filledCount++
+			}
+		}
+		if filledCount == 0 {
+			continue
+		}
+		sourceOutputIDs := uniqueTrimmedStrings(row.Source_output_ids)
+		sort.Strings(sourceOutputIDs)
+		candidates = append(candidates, candidateRow{
+			TaskID:          taskID,
+			RowKey:          rowKey,
+			SourceOutputIDs: sourceOutputIDs,
+			Cells:           cells,
+			FilledCount:     filledCount,
+		})
+	}
+
+	sort.SliceStable(candidates, func(i, j int) bool {
+		left := candidates[i]
+		right := candidates[j]
+		if left.TaskID != right.TaskID {
+			return left.TaskID < right.TaskID
+		}
+		if left.RowKey != right.RowKey {
+			return left.RowKey < right.RowKey
+		}
+		if left.FilledCount != right.FilledCount {
+			return left.FilledCount > right.FilledCount
+		}
+		leftSources := strings.Join(left.SourceOutputIDs, ",")
+		rightSources := strings.Join(right.SourceOutputIDs, ",")
+		if leftSources != rightSources {
+			return leftSources < rightSources
+		}
+		for _, key := range columnKeys {
+			if left.Cells[key] != right.Cells[key] {
+				return left.Cells[key] < right.Cells[key]
+			}
+		}
+		return false
+	})
+
+	type mergedRow struct {
+		TaskID          string
+		RowKey          string
+		SourceOutputIDs []string
+		Cells           map[string]string
+	}
+	mergedByKey := make(map[string]*mergedRow, len(candidates))
+	order := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		mergeKey := candidate.TaskID + "\x00" + candidate.RowKey
+		current, ok := mergedByKey[mergeKey]
+		if !ok {
+			current = &mergedRow{
+				TaskID:          candidate.TaskID,
+				RowKey:          candidate.RowKey,
+				SourceOutputIDs: append([]string(nil), candidate.SourceOutputIDs...),
+				Cells:           make(map[string]string, len(columnKeys)),
+			}
+			mergedByKey[mergeKey] = current
+			order = append(order, mergeKey)
+		} else {
+			current.SourceOutputIDs = mergeSortedStrings(current.SourceOutputIDs, candidate.SourceOutputIDs)
+		}
+		for _, key := range columnKeys {
+			if strings.TrimSpace(current.Cells[key]) == "" && strings.TrimSpace(candidate.Cells[key]) != "" {
+				current.Cells[key] = candidate.Cells[key]
+			}
+		}
+	}
+
+	result := make([]bamltypes.MappedRow, 0, len(order))
+	for _, mergeKey := range order {
+		row := mergedByKey[mergeKey]
+		cells := make([]bamltypes.MappedCell, 0, len(columnKeys))
+		for _, key := range columnKeys {
+			cells = append(cells, bamltypes.MappedCell{
+				Column: key,
+				Value:  row.Cells[key],
+			})
+		}
+		result = append(result, bamltypes.MappedRow{
+			Task_id:           row.TaskID,
+			Row_key:           row.RowKey,
+			Source_output_ids: row.SourceOutputIDs,
+			Cells:             cells,
+		})
+	}
+	return result
+}
+
+func mergeSortedStrings(left, right []string) []string {
+	if len(left) == 0 {
+		return append([]string(nil), right...)
+	}
+	if len(right) == 0 {
+		return append([]string(nil), left...)
+	}
+	merged := append(append([]string(nil), left...), right...)
+	merged = uniqueTrimmedStrings(merged)
+	sort.Strings(merged)
+	return merged
 }
 
 func slicesMatch(a, b []string) bool {

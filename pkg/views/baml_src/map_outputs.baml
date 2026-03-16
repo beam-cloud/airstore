@@ -98,6 +98,16 @@ function MapOutputsToSchema(
     10. If a task's outputs have NO relevant data for ANY column in the schema,
        OMIT that task entirely — do not emit an empty row. But if at least one
        column can be filled, emit the row with all extractable values.
+    11. CONSISTENCY IS CRITICAL. Given the same schema and the same task outputs,
+        you must return the same row count, the same row_key values, and the
+        same cell values on every run.
+    12. Outputs inside each task are provided in deterministic chronological
+        order. When multiple candidate values are equally plausible, break ties
+        deterministically by preferring: artifact_role primary > supporting >
+        incidental, then the newest created_at, then the lexicographically
+        smallest output.id.
+    13. For split rows, row_key must come from a stable identifier in the data
+        itself. Never invent alternate row_keys for the same entity across runs.
 
     ROW STRATEGY:
     - If mode is "task": produce ONE row per task_id that has relevant data.
@@ -126,5 +136,6 @@ client<llm> OutputMapperClient {
     base_url "https://api.cerebras.ai/v1"
     api_key env.CEREBRAS_API_KEY
     model "gpt-oss-120b"
+    temperature 0
   }
 }

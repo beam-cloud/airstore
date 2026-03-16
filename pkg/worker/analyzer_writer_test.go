@@ -39,3 +39,17 @@ func TestFirstMatchingStringFallsBackToNestedMatch(t *testing.T) {
 		t.Fatalf("firstMatchingString = %q, want %q", got, "Nested title")
 	}
 }
+
+func TestFirstMatchingStringPrefersHighPriorityKeyAcrossSiblings(t *testing.T) {
+	value := map[string]any{
+		"source":  map[string]any{"name": "Low-priority name"},
+		"details": map[string]any{"title": "High-priority title"},
+	}
+
+	for range 20 {
+		got := firstMatchingString(value, "title", "name")
+		if got != "High-priority title" {
+			t.Fatalf("firstMatchingString = %q, want %q (key priority violated)", got, "High-priority title")
+		}
+	}
+}
