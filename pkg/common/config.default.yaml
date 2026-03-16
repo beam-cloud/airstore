@@ -25,6 +25,7 @@ database:
   mongo:
     # Optional. Required for persisted view rows, manual row edits, and row regeneration.
     uri: ""
+    # Required whenever mongo.uri is set.
     database: airstore_views
 
 # Storage

@@ -211,16 +211,6 @@ func (s *AgentService) AcceptAgentCommand(
 	if err := ValidateAgentCommandParams(&params); err != nil {
 		return nil, false, err
 	}
-	existing, err := s.backend.GetTaskByIdempotency(ctx, workspaceID, params.AgentID, params.IdempotencyKey)
-	if err == nil {
-		return existing, true, nil
-	}
-
-	runPolicy := DefaultRunExecutionPolicy()
-	if params.Policy != nil {
-		runPolicy = NormalizeRunExecutionPolicy(*params.Policy)
-	}
-	instanceKey := ExecutionClassKey(workspaceID, params.AgentID, params.Lane, runPolicy)
 	agentConfig := map[string]any{}
 	agentProvider := ""
 	agentModel := ""
@@ -235,16 +225,11 @@ func (s *AgentService) AcceptAgentCommand(
 		}
 		resolved := profile.ID
 		params.AgentID = &resolved
-		agentConfig = cloneAnyMap(profile.ConfigJSON)
-		if agentConfig == nil {
-			agentConfig = DefaultAgentConfig(profile.AgentKey)
+		agentConfig, err = normalizeAgentProfileConfig(profile.ConfigJSON, profile.AgentKey)
+		if err != nil {
+			return nil, false, err
 		}
 		agentProvider = providerFromAgentConfig(agentConfig)
-		if agentProvider == "" {
-			agentProvider = providerForRunner(AgentRunnerClaudeCode)
-			agentConfig[agentConfigKeyRunner] = AgentRunnerClaudeCode
-			agentConfig[agentConfigKeyProvider] = agentProvider
-		}
 		if !isClaudeCompatibleProvider(agentProvider) {
 			return nil, false, fmt.Errorf("agent provider %q is not supported", agentProvider)
 		}
@@ -252,8 +237,18 @@ func (s *AgentService) AcceptAgentCommand(
 			agentConfig,
 			agentConfigKeyModel,
 		)
-		instanceKey = ExecutionClassKey(workspaceID, params.AgentID, params.Lane, runPolicy)
 	}
+
+	existing, err := s.backend.GetTaskByIdempotency(ctx, workspaceID, params.AgentID, params.IdempotencyKey)
+	if err == nil {
+		return existing, true, nil
+	}
+
+	runPolicy := DefaultRunExecutionPolicy()
+	if params.Policy != nil {
+		runPolicy = NormalizeRunExecutionPolicy(*params.Policy)
+	}
+	instanceKey := ExecutionClassKey(workspaceID, params.AgentID, params.Lane, runPolicy)
 
 	if params.HookID == nil {
 		latestRun, err := s.latestRunForSessionAgent(ctx, workspaceID, params.AgentID, params.SessionID)

@@ -31,6 +31,10 @@ func (t *ColumnSchemaClassView) ListProperties() ([]ClassPropertyView, error) {
 	return builders, nil
 }
 
+func (t *ColumnSchemaClassView) PropertyName() (ClassPropertyView, error) {
+	return t.inner.Property("name")
+}
+
 func (t *ColumnSchemaClassView) PropertyKey() (ClassPropertyView, error) {
 	return t.inner.Property("key")
 }

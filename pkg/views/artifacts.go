@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/beam-cloud/airstore/pkg/types"
+	"golang.org/x/net/publicsuffix"
 )
 
 // Artifact derives stable identity and display properties from a TaskOutput.
@@ -114,8 +115,15 @@ func (a Artifact) linkKind() string {
 	case strings.Contains(host, "drive.google.com"):
 		return "drive-link"
 	case host != "":
-		parts := strings.Split(host, ".")
-		return normalizeToken(parts[0] + "-link")
+		domain := host
+		if registrable, err := publicsuffix.EffectiveTLDPlusOne(host); err == nil && strings.TrimSpace(registrable) != "" {
+			domain = registrable
+		}
+		parts := strings.Split(domain, ".")
+		if len(parts) > 0 && strings.TrimSpace(parts[0]) != "" {
+			return normalizeToken(parts[0] + "-link")
+		}
+		return "link"
 	default:
 		return "link"
 	}
@@ -247,4 +255,3 @@ func pluralize(label string) string {
 	}
 	return label + "s"
 }
-

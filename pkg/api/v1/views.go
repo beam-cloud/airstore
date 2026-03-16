@@ -115,9 +115,10 @@ func (vg *ViewsGroup) Get(c echo.Context) error {
 }
 
 type columnRename struct {
-	SheetID string `json:"sheet_id"`
-	OldKey  string `json:"old_key"`
-	NewKey  string `json:"new_key"`
+	SheetID  string `json:"sheet_id"`
+	OldKey   string `json:"old_key"`
+	NewKey   string `json:"new_key"`
+	NewLabel string `json:"new_label,omitempty"`
 }
 
 type updateViewRequest struct {
@@ -151,6 +152,9 @@ func (vg *ViewsGroup) Update(c echo.Context) error {
 	}
 	if req.Definition != nil {
 		v.Definition = *req.Definition
+	}
+	if len(req.ColumnRenames) > 0 {
+		applyColumnRenamesToDefinition(&v.Definition, req.ColumnRenames)
 	}
 	if err := vg.backend.UpdateView(ctx, v); err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
@@ -330,20 +334,114 @@ func viewColumnKeys(def types.ViewDefinition) map[string]map[string]bool {
 }
 
 func addConfigColumnKeys(keys map[string]bool, config map[string]any) {
-	rawColumns, ok := config["columns"].([]any)
+	if len(config) == 0 {
+		return
+	}
+	rawColumns, ok := config["columns"]
 	if !ok {
 		return
 	}
-	for _, rawColumn := range rawColumns {
-		column, ok := rawColumn.(map[string]any)
-		if !ok {
-			continue
-		}
-		key, _ := column["key"].(string)
-		key = strings.TrimSpace(key)
+	data, err := json.Marshal(rawColumns)
+	if err != nil {
+		return
+	}
+	var columns []types.ColumnMeta
+	if err := json.Unmarshal(data, &columns); err != nil {
+		return
+	}
+	for _, column := range columns {
+		key := strings.TrimSpace(column.Key)
 		if key != "" {
 			keys[key] = true
 		}
+	}
+}
+
+func applyColumnRenamesToDefinition(def *types.ViewDefinition, renames []columnRename) {
+	if def == nil || len(renames) == 0 {
+		return
+	}
+	for _, rename := range renames {
+		sheetID := strings.TrimSpace(rename.SheetID)
+		oldKey := strings.TrimSpace(rename.OldKey)
+		newKey := strings.TrimSpace(rename.NewKey)
+		newLabel := strings.TrimSpace(rename.NewLabel)
+		if sheetID == "" || oldKey == "" || newKey == "" || oldKey == newKey {
+			continue
+		}
+		for i := range def.Sheets {
+			sheet := &def.Sheets[i]
+			if sheet.ID == sheetID {
+				renameSheetColumns(sheet, oldKey, newKey, newLabel)
+			}
+			for j := range sheet.Relations {
+				relation := &sheet.Relations[j]
+				if sheet.ID == sheetID && relation.FromColumn == oldKey {
+					relation.FromColumn = newKey
+				}
+				if relation.ToSheetID == sheetID && relation.ToColumn == oldKey {
+					relation.ToColumn = newKey
+				}
+			}
+		}
+	}
+}
+
+func renameSheetColumns(sheet *types.SheetSpec, oldKey, newKey, newLabel string) {
+	if sheet == nil {
+		return
+	}
+	for i := range sheet.Components {
+		component := &sheet.Components[i]
+		renameComponentColumns(component, oldKey, newKey, newLabel)
+	}
+}
+
+func renameComponentColumns(component *types.ComponentSpec, oldKey, newKey, newLabel string) {
+	if component == nil {
+		return
+	}
+	if component.DataSource != nil {
+		for i := range component.DataSource.Transform {
+			rule := &component.DataSource.Transform[i]
+			if rule.Column == oldKey {
+				rule.Column = newKey
+			}
+			// User-added columns often use source == column key as a placeholder hint.
+			// Keep that hint aligned with the renamed schema key.
+			if strings.TrimSpace(rule.Source) == oldKey {
+				rule.Source = newKey
+			}
+		}
+	}
+	if len(component.Config) == 0 {
+		return
+	}
+	rawColumns, ok := component.Config["columns"]
+	if !ok {
+		return
+	}
+	data, err := json.Marshal(rawColumns)
+	if err != nil {
+		return
+	}
+	var columns []types.ColumnMeta
+	if err := json.Unmarshal(data, &columns); err != nil {
+		return
+	}
+	changed := false
+	for i := range columns {
+		if strings.TrimSpace(columns[i].Key) != oldKey {
+			continue
+		}
+		columns[i].Key = newKey
+		if newLabel != "" {
+			columns[i].Label = newLabel
+		}
+		changed = true
+	}
+	if changed {
+		component.Config["columns"] = columns
 	}
 }
 

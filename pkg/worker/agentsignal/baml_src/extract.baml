@@ -5,7 +5,7 @@ enum OutputKind {
   EMAIL_DRAFT    @description("Agent drafted an email via an external email API or service")
   LINK_CREATED   @description("Agent created a NEW resource in an external system that now has its own URL — e.g. opened a pull request, created a Jira ticket, published a page, created a GitHub issue")
   API_CALL       @description("Agent created or permanently mutated a record in an external system of record via an API call — e.g. updated a database, created a deployment, posted to Slack")
-  REPORT         @description("Agent produced a structured report or analysis document and saved it")
+  REPORT         @description("Agent produced a structured report or analysis deliverable, either saved to disk or persisted inline from the final response")
   NONE           @description("No deliverable artifact was produced")
 }
 

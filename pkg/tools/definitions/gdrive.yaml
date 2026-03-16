@@ -20,6 +20,8 @@ commands:
 
   write-file:
     description: Create a new file in Google Drive
+    one_of_required:
+      - [content, content_base64]
     params:
       - name: name
         type: string
@@ -52,6 +54,8 @@ commands:
 
   update-file:
     description: Overwrite an existing Google Drive file by ID
+    one_of_required:
+      - [content, content_base64]
     params:
       - name: file_id
         type: string

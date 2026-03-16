@@ -23,6 +23,7 @@ import (
 )
 
 type ColumnSchema struct {
+	Name        *string `json:"name"`
 	Key         *string `json:"key"`
 	Type        *string `json:"type"`
 	Description *string `json:"description"`
@@ -41,6 +42,9 @@ func (c *ColumnSchema) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap)
 		key := field.Key
 		valueHolder := field.Value
 		switch key {
+
+		case "name":
+			c.Name = baml.Decode(valueHolder).Interface().(*string)
 
 		case "key":
 			c.Key = baml.Decode(valueHolder).Interface().(*string)
@@ -62,6 +66,8 @@ func (c *ColumnSchema) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap)
 
 func (c ColumnSchema) Encode() (*cffi.HostValue, error) {
 	fields := map[string]any{}
+
+	fields["name"] = c.Name
 
 	fields["key"] = c.Key
 

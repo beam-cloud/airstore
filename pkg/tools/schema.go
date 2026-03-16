@@ -19,9 +19,10 @@ type ToolSchema struct {
 
 // CommandSchema defines a single command within a tool
 type CommandSchema struct {
-	Description string         `yaml:"description"`
-	Params      []*ParamSchema `yaml:"params,omitempty"`
-	Internal    bool           `yaml:"internal,omitempty"`
+	Description   string         `yaml:"description"`
+	Params        []*ParamSchema `yaml:"params,omitempty"`
+	OneOfRequired [][]string     `yaml:"one_of_required,omitempty"`
+	Internal      bool           `yaml:"internal,omitempty"`
 }
 
 // ParamSchema defines a parameter for a command
@@ -123,6 +124,21 @@ func (c *CommandSchema) ValidateParams() error {
 		// Required params should have position or flag
 		if p.Required && p.Position == nil && p.Flag == "" {
 			return fmt.Errorf("param %q: required param must have position or flag", p.Name)
+		}
+	}
+
+	paramNames := make(map[string]bool, len(c.Params))
+	for _, p := range c.Params {
+		paramNames[p.Name] = true
+	}
+	for _, group := range c.OneOfRequired {
+		if len(group) < 2 {
+			return fmt.Errorf("one_of_required groups must contain at least two params")
+		}
+		for _, name := range group {
+			if !paramNames[name] {
+				return fmt.Errorf("one_of_required references unknown param %q", name)
+			}
 		}
 	}
 

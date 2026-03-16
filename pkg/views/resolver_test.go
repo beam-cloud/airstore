@@ -247,44 +247,6 @@ func TestFilterOutputsForDataSource(t *testing.T) {
 	}
 }
 
-func TestBuildUnifiedSchema(t *testing.T) {
-	comps := []types.ComponentSpec{
-		{
-			Type: types.ComponentTypeTable,
-			DataSource: &types.DataSource{
-				Transform: []types.TransformRule{
-					{Column: "name", Source: "data.name", Type: "text"},
-					{Column: "url", Source: "data.url", Type: "link"},
-				},
-			},
-		},
-		{
-			Type: types.ComponentTypeTable,
-			DataSource: &types.DataSource{
-				Transform: []types.TransformRule{
-					{Column: "name", Source: "data.name", Type: "text"},
-					{Column: "price", Source: "data.price", Type: "currency"},
-				},
-			},
-		},
-		{Type: types.ComponentTypeTable, DataSource: &types.DataSource{ArtifactKey: "recipes"}},
-	}
-
-	cols := buildUnifiedSchema(comps)
-	if len(cols) != 3 {
-		t.Fatalf("expected 3 unified columns (name deduped), got %d", len(cols))
-	}
-	keys := make(map[string]bool)
-	for _, c := range cols {
-		keys[c.Key] = true
-	}
-	for _, want := range []string{"name", "url", "price"} {
-		if !keys[want] {
-			t.Fatalf("missing unified column %q", want)
-		}
-	}
-}
-
 func TestBuildColumnSchemas(t *testing.T) {
 	comp := types.ComponentSpec{
 		DataSource: &types.DataSource{
@@ -306,6 +268,9 @@ func TestBuildColumnSchemas(t *testing.T) {
 	}
 	if schemas[0].Key != "name" {
 		t.Fatalf("first schema key = %q, want 'name'", schemas[0].Key)
+	}
+	if schemas[0].Name != "Recipe Name" {
+		t.Fatalf("first schema name = %q, want 'Recipe Name'", schemas[0].Name)
 	}
 	if schemas[0].Description != "Recipe Name (hint: data.recipe_name)" {
 		t.Fatalf("first schema desc = %q, unexpected", schemas[0].Description)
@@ -334,6 +299,9 @@ func TestBuildColumnSchemasIncludesTaskMetadataColumnsFromConfig(t *testing.T) {
 	}
 	if got := schemas[1].Key; got != "next_wake_at" {
 		t.Fatalf("second schema key = %q, want next_wake_at", got)
+	}
+	if got := schemas[1].Name; got != "Next wake" {
+		t.Fatalf("second schema name = %q, want 'Next wake'", got)
 	}
 	if got := schemas[1].Type; got != "date" {
 		t.Fatalf("next_wake_at type = %q, want date", got)
@@ -438,78 +406,35 @@ func TestViewRowMergedCells(t *testing.T) {
 	}
 }
 
-func TestCarryStoredRowAndResolvedCells(t *testing.T) {
-	row := &ViewRow{
-		Cells: map[string]string{
-			"name":   "Base Name",
-			"status": "queued",
-			"extra":  "ignored",
-		},
-		Manual: map[string]string{
-			"name": "Edited Name",
-		},
-	}
-	keys := map[string]bool{
-		"name":   true,
-		"status": true,
-	}
-
-	if !canCarryStoredRow(row, keys) {
-		t.Fatal("expected stored row to be reusable when missing values are satisfied by cells or manual edits")
-	}
-
-	filtered := filterStoredCells(row.Cells, keys)
-	if _, ok := filtered["extra"]; ok {
-		t.Fatalf("unexpected extra field in filtered cells: %v", filtered)
-	}
-	if filtered["name"] != "Base Name" || filtered["status"] != "queued" {
-		t.Fatalf("filtered base cells incorrect: %v", filtered)
-	}
-
-	withoutManual := composeResolvedCells(filtered, row.Manual, keys, false)
-	if withoutManual["name"] != "Base Name" {
-		t.Fatalf("force refresh should not reapply manual value: %v", withoutManual)
-	}
-
-	merged := composeResolvedCells(filtered, row.Manual, keys, true)
-	if merged["name"] != "Edited Name" {
-		t.Fatalf("manual value should win in merged cells: %v", merged)
-	}
-	if filtered["name"] != "Base Name" {
-		t.Fatalf("base cells should remain unchanged after merge: %v", filtered)
-	}
-}
-
 func TestHashColumnsStable(t *testing.T) {
-	comps := []types.ComponentSpec{
-		{
-			Type: types.ComponentTypeTable,
-			DataSource: &types.DataSource{
-				Transform: []types.TransformRule{
-					{Column: "file_name", Source: "data.file_name", Type: "text"},
-					{Column: "video_url", Source: "data.video_url", Type: "link"},
-				},
+	comp := types.ComponentSpec{
+		Type:  types.ComponentTypeTable,
+		Title: "Output Table",
+		DataSource: &types.DataSource{
+			Transform: []types.TransformRule{
+				{Column: "file_name", Source: "data.file_name", Type: "text"},
+				{Column: "video_url", Source: "data.video_url", Type: "link"},
 			},
 		},
 	}
 
-	cols := buildUnifiedSchema(comps)
-	h1 := hashColumns(cols, types.RowStrategy{Mode: types.RowStrategyModeTask}, "test-sheet", comps[0].Title, comps[0].Type)
-	h2 := hashColumns(cols, types.RowStrategy{Mode: types.RowStrategyModeTask}, "test-sheet", comps[0].Title, comps[0].Type)
+	cols := buildColumnSchemas(comp)
+	h1 := hashColumns(cols, types.RowStrategy{Mode: types.RowStrategyModeTask}, "test-sheet", comp.Title, comp.Type)
+	h2 := hashColumns(cols, types.RowStrategy{Mode: types.RowStrategyModeTask}, "test-sheet", comp.Title, comp.Type)
 	if h1 != h2 {
 		t.Fatalf("hashColumns not stable: %q vs %q", h1, h2)
 	}
 
-	compsJSON, _ := json.Marshal(comps)
-	var comps2 []types.ComponentSpec
-	json.Unmarshal(compsJSON, &comps2)
-	cols2 := buildUnifiedSchema(comps2)
-	h3 := hashColumns(cols2, types.RowStrategy{Mode: types.RowStrategyModeTask}, "test-sheet", comps2[0].Title, comps2[0].Type)
+	compJSON, _ := json.Marshal(comp)
+	var comp2 types.ComponentSpec
+	json.Unmarshal(compJSON, &comp2)
+	cols2 := buildColumnSchemas(comp2)
+	h3 := hashColumns(cols2, types.RowStrategy{Mode: types.RowStrategyModeTask}, "test-sheet", comp2.Title, comp2.Type)
 	if h1 != h3 {
 		t.Fatalf("hashColumns not stable across JSON round-trip: %q vs %q", h1, h3)
 	}
 
-	h4 := hashColumns(cols, types.RowStrategy{Mode: types.RowStrategyModeTask}, "test-sheet", "Renamed Table", comps[0].Type)
+	h4 := hashColumns(cols, types.RowStrategy{Mode: types.RowStrategyModeTask}, "test-sheet", "Renamed Table", comp.Type)
 	if h1 == h4 {
 		t.Fatalf("hashColumns should change when title changes: %q", h1)
 	}

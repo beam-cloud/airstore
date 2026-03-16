@@ -76,21 +76,6 @@ func cloneAnyMap(metadata map[string]any) map[string]any {
 	return cloned
 }
 
-func boolFromAny(value any) (bool, bool) {
-	switch typed := value.(type) {
-	case bool:
-		return typed, true
-	case string:
-		switch strings.ToLower(strings.TrimSpace(typed)) {
-		case "true", "1", "yes":
-			return true, true
-		case "false", "0", "no":
-			return false, true
-		}
-	}
-	return false, false
-}
-
 func firstNonEmptyTrimmed(values ...string) string {
 	for _, value := range values {
 		if trimmed := strings.TrimSpace(value); trimmed != "" {

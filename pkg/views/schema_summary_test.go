@@ -6,6 +6,28 @@ import (
 	"github.com/beam-cloud/airstore/pkg/types"
 )
 
+func TestFieldsForOutputScansAllArrayObjects(t *testing.T) {
+	output := &types.TaskOutput{
+		Data: map[string]any{
+			"items": []any{
+				map[string]any{"name": "alpha"},
+				map[string]any{"price": "10"},
+			},
+		},
+	}
+
+	fields := fieldsForOutput(output)
+	sources := make(map[string]bool, len(fields))
+	for _, field := range fields {
+		sources[field.Source] = true
+	}
+
+	for _, want := range []string{"data.items", "data.items.[].name", "data.items.[].price"} {
+		if !sources[want] {
+			t.Fatalf("missing schema source %q in %#v", want, fields)
+		}
+	}
+}
 func TestSummarizeOutputSchemaFromDataKeys(t *testing.T) {
 	output := &types.TaskOutput{
 		ID:         "out-1",

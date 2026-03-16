@@ -24,7 +24,7 @@ func (b *workspaceLiveBackend) ListWorkspaceTaskOutputs(_ context.Context, _ uin
 	return []*types.TaskOutput{}, nil
 }
 
-func TestWorkspaceLiveBatchIncludesArchivedOutputs(t *testing.T) {
+func TestWorkspaceLiveBatchExcludesArchivedOutputs(t *testing.T) {
 	backend := &workspaceLiveBackend{}
 	api := NewAgentAPI(backend, nil)
 
@@ -35,8 +35,8 @@ func TestWorkspaceLiveBatchIncludesArchivedOutputs(t *testing.T) {
 	if batch == nil {
 		t.Fatal("expected workspace batch")
 	}
-	if backend.lastOutputFilter.ExcludeArchived {
-		t.Fatal("expected workspace live batch to include archived outputs")
+	if !backend.lastOutputFilter.ExcludeArchived {
+		t.Fatal("expected workspace live batch to exclude archived outputs")
 	}
 	if !backend.lastTaskFilter.IncludeArchived {
 		t.Fatal("expected workspace live batch to include archived tasks")

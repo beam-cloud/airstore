@@ -77,16 +77,16 @@ func (g *GDriveClient) Execute(ctx context.Context, command string, args map[str
 // resolveContent extracts file content from either "content" (text) or
 // "content_base64" (base64-encoded binary). Exactly one must be provided.
 func resolveContent(args map[string]any) ([]byte, error) {
-	text := GetStringArg(args, "content", "")
-	b64 := GetStringArg(args, "content_base64", "")
+	text, hasText := stringArgValue(args, "content")
+	b64, hasB64 := stringArgValue(args, "content_base64")
 
-	if text == "" && b64 == "" {
+	if !hasText && !hasB64 {
 		return nil, fmt.Errorf("content or content_base64 is required")
 	}
-	if text != "" && b64 != "" {
+	if hasText && hasB64 {
 		return nil, fmt.Errorf("provide content or content_base64, not both")
 	}
-	if b64 != "" {
+	if hasB64 {
 		data, err := base64.StdEncoding.DecodeString(b64)
 		if err != nil {
 			return nil, fmt.Errorf("decode content_base64: %w", err)
@@ -94,6 +94,18 @@ func resolveContent(args map[string]any) ([]byte, error) {
 		return data, nil
 	}
 	return []byte(text), nil
+}
+
+func stringArgValue(args map[string]any, key string) (string, bool) {
+	value, ok := args[key]
+	if !ok {
+		return "", false
+	}
+	s, ok := value.(string)
+	if !ok {
+		return "", false
+	}
+	return s, true
 }
 
 func (g *GDriveClient) createFolder(ctx context.Context, token, name, parentID string) (map[string]any, error) {

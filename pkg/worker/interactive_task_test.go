@@ -74,7 +74,7 @@ func TestWaitForSubagents_NoneDetected(t *testing.T) {
 	task := types.RunExecution{ExternalId: "test-none"}
 
 	outcome := w.waitForSubagentsWithTiming(
-		context.Background(), task, "sandbox-1",
+		context.Background(), task, "sandbox-1", nil,
 		10*time.Millisecond, 100*time.Millisecond, 50*time.Millisecond,
 	)
 	if outcome != subagentNoneDetected {
@@ -96,7 +96,7 @@ func TestWaitForSubagents_Finished(t *testing.T) {
 	task := types.RunExecution{ExternalId: "test-finished"}
 
 	outcome := w.waitForSubagentsWithTiming(
-		context.Background(), task, "sandbox-1",
+		context.Background(), task, "sandbox-1", nil,
 		10*time.Millisecond, 5*time.Second, 50*time.Millisecond,
 	)
 	if outcome != subagentFinished {
@@ -120,7 +120,7 @@ func TestWaitForSubagents_SessionCancelled(t *testing.T) {
 	}()
 
 	outcome := w.waitForSubagentsWithTiming(
-		ctx, task, "sandbox-1",
+		ctx, task, "sandbox-1", nil,
 		10*time.Millisecond, 5*time.Second, 50*time.Millisecond,
 	)
 	if outcome != subagentSessionCancelled {
@@ -138,7 +138,7 @@ func TestWaitForSubagents_MaxWaitReached(t *testing.T) {
 	task := types.RunExecution{ExternalId: "test-maxwait"}
 
 	outcome := w.waitForSubagentsWithTiming(
-		context.Background(), task, "sandbox-1",
+		context.Background(), task, "sandbox-1", nil,
 		10*time.Millisecond, 50*time.Millisecond, 50*time.Millisecond,
 	)
 	if outcome != subagentMaxWaitReached {
@@ -165,7 +165,7 @@ func TestWaitForSubagents_ProbeTimeoutRetries(t *testing.T) {
 	task := types.RunExecution{ExternalId: "test-probe-timeout"}
 
 	outcome := w.waitForSubagentsWithTiming(
-		context.Background(), task, "sandbox-1",
+		context.Background(), task, "sandbox-1", nil,
 		10*time.Millisecond, 5*time.Second, 30*time.Millisecond,
 	)
 	if outcome != subagentFinished {
@@ -188,11 +188,37 @@ func TestWaitForSubagents_FollowUpOnlyOnFinished(t *testing.T) {
 	task := types.RunExecution{ExternalId: "test-no-followup"}
 
 	outcome := w.waitForSubagentsWithTiming(
-		context.Background(), task, "sandbox-1",
+		context.Background(), task, "sandbox-1", nil,
 		10*time.Millisecond, 40*time.Millisecond, 50*time.Millisecond,
 	)
 	if outcome == subagentFinished {
 		t.Fatalf("expected non-finished outcome on max wait, got %s", outcome)
+	}
+}
+
+func TestWaitForSubagents_SignalsActivityWhilePolling(t *testing.T) {
+	var calls atomic.Int32
+	rt := &subagentProbeTestRuntime{
+		execFunc: func(_ context.Context, _ specs.Process) error {
+			if calls.Add(1) < 3 {
+				return nil
+			}
+			return fmt.Errorf("exit status 1")
+		},
+	}
+	w := newTestWorkerForSubagents(rt)
+	task := types.RunExecution{ExternalId: "test-activity"}
+	activityCh := make(chan struct{}, 8)
+
+	outcome := w.waitForSubagentsWithTiming(
+		context.Background(), task, "sandbox-1", activityCh,
+		10*time.Millisecond, 5*time.Second, 50*time.Millisecond,
+	)
+	if outcome != subagentFinished {
+		t.Fatalf("expected subagentFinished, got %s", outcome)
+	}
+	if len(activityCh) == 0 {
+		t.Fatal("expected subagent polling to signal activity")
 	}
 }
 

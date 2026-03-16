@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -79,6 +80,16 @@ func buildMappingSpec(sheetName string, comp types.ComponentSpec) mappingSpec {
 	}
 }
 
+func outputMapperCallOptions() []baml.CallOptionFunc {
+	if strings.TrimSpace(os.Getenv("CEREBRAS_API_KEY")) != "" {
+		return nil
+	}
+	if strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")) != "" {
+		return []baml.CallOptionFunc{baml.WithClient("ViewCopilotClient")}
+	}
+	return nil
+}
+
 func NewDataResolver(backend repository.BackendRepository, store *ViewStore) *DataResolver {
 	return &DataResolver{backend: backend, store: store}
 }
@@ -142,6 +153,7 @@ func (r *DataResolver) RegenerateRow(ctx context.Context, workspaceID uint, view
 		spec.rowStrategy.Description,
 		spec.mappingCols,
 		outputsJSON,
+		outputMapperCallOptions()...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("BAML mapping: %w", err)
@@ -309,6 +321,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 			spec.rowStrategy.Description,
 			spec.mappingCols,
 			outputsJSON,
+			outputMapperCallOptions()...,
 		)
 		if err != nil {
 			if opts.ForceRefresh {
@@ -422,83 +435,12 @@ func normalizedViewAgentRefsKey(refs []string) string {
 	return strings.Join(normalized, ",")
 }
 
-func schemaKeySet(cols []bamltypes.ColumnSchema) map[string]bool {
-	keys := make(map[string]bool, len(cols))
-	for _, col := range cols {
-		keys[col.Key] = true
-	}
-	return keys
-}
-
 func schemaKeyList(cols []bamltypes.ColumnSchema) []string {
 	keys := make([]string, 0, len(cols))
 	for _, col := range cols {
 		keys = append(keys, col.Key)
 	}
 	return keys
-}
-
-func canCarryStoredRow(stored *ViewRow, schemaKeys map[string]bool) bool {
-	for key := range schemaKeys {
-		if _, ok := stored.Cells[key]; ok {
-			continue
-		}
-		if _, ok := stored.Manual[key]; ok {
-			continue
-		}
-		return false
-	}
-	return true
-}
-
-func filterStoredCells(cells map[string]string, schemaKeys map[string]bool) map[string]string {
-	filtered := make(map[string]string, len(cells))
-	for key, value := range cells {
-		if schemaKeys[key] {
-			filtered[key] = value
-		}
-	}
-	return filtered
-}
-
-func composeResolvedCells(cells, manual map[string]string, schemaKeys map[string]bool, applyManual bool) map[string]string {
-	filtered := filterStoredCells(cells, schemaKeys)
-	if !applyManual {
-		return filtered
-	}
-	return mergeManualCells(filtered, manual, schemaKeys)
-}
-
-func mergeManualCells(cells, manual map[string]string, schemaKeys map[string]bool) map[string]string {
-	merged := make(map[string]string, len(cells)+len(manual))
-	for key, value := range cells {
-		if schemaKeys[key] {
-			merged[key] = value
-		}
-	}
-	for key, value := range manual {
-		if schemaKeys[key] {
-			merged[key] = value
-		}
-	}
-	return merged
-}
-
-func buildUnifiedSchema(allComponents []types.ComponentSpec) []bamltypes.ColumnSchema {
-	seen := make(map[string]bool)
-	var cols []bamltypes.ColumnSchema
-	for _, comp := range allComponents {
-		if !comp.IsTable() {
-			continue
-		}
-		for _, col := range buildColumnSchemas(comp) {
-			if !seen[col.Key] {
-				seen[col.Key] = true
-				cols = append(cols, col)
-			}
-		}
-	}
-	return cols
 }
 
 func groupOutputsByTask(outputs []*types.TaskOutput) map[string][]*types.TaskOutput {
@@ -1051,10 +993,12 @@ func buildColumnSchemas(comp types.ComponentSpec) []bamltypes.ColumnSchema {
 		}
 		schemas := make([]bamltypes.ColumnSchema, 0, len(configCols))
 		for _, col := range configCols {
+			name := schemaColumnName(col.Key, col.Label)
 			schemas = append(schemas, bamltypes.ColumnSchema{
+				Name:        name,
 				Key:         col.Key,
 				Type:        columnTypeForKey(col.Key, col.Type),
-				Description: col.Label,
+				Description: name,
 			})
 		}
 		return schemas
@@ -1073,10 +1017,12 @@ func buildColumnSchemas(comp types.ComponentSpec) []bamltypes.ColumnSchema {
 		if cc, ok := configByKey[rule.Column]; ok && cc.Label != "" {
 			desc = cc.Label
 		}
+		name := schemaColumnName(rule.Column, desc)
 		if rule.Source != "" {
 			desc += " (hint: " + rule.Source + ")"
 		}
 		schemas = append(schemas, bamltypes.ColumnSchema{
+			Name:        name,
 			Key:         rule.Column,
 			Type:        columnTypeForKey(rule.Column, rule.Type),
 			Description: desc,
@@ -1087,10 +1033,12 @@ func buildColumnSchemas(comp types.ComponentSpec) []bamltypes.ColumnSchema {
 		if cc.Key == "" || seen[cc.Key] {
 			continue
 		}
+		name := schemaColumnName(cc.Key, cc.Label)
 		schemas = append(schemas, bamltypes.ColumnSchema{
+			Name:        name,
 			Key:         cc.Key,
 			Type:        columnTypeForKey(cc.Key, cc.Type),
-			Description: cc.Label,
+			Description: name,
 		})
 	}
 	return schemas
@@ -1248,6 +1196,7 @@ const mappingVersion = "v5"
 
 func hashColumns(columns []bamltypes.ColumnSchema, rowStrategy types.RowStrategy, sheetName, tableTitle, tableType string) string {
 	type hashEntry struct {
+		Name        string `json:"n"`
 		Key         string `json:"k"`
 		Type        string `json:"t"`
 		Description string `json:"d"`
@@ -1270,11 +1219,21 @@ func hashColumns(columns []bamltypes.ColumnSchema, rowStrategy types.RowStrategy
 		Columns:     make([]hashEntry, len(columns)),
 	}
 	for i, c := range columns {
-		payload.Columns[i] = hashEntry{Key: c.Key, Type: c.Type, Description: c.Description}
+		payload.Columns[i] = hashEntry{Name: c.Name, Key: c.Key, Type: c.Type, Description: c.Description}
 	}
-	raw, _ := json.Marshal(payload)
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		panic(fmt.Errorf("hashColumns marshal payload: %w", err))
+	}
 	h := sha256.Sum256(raw)
 	return hex.EncodeToString(h[:])[:16]
+}
+
+func schemaColumnName(key, label string) string {
+	if trimmed := strings.TrimSpace(label); trimmed != "" {
+		return trimmed
+	}
+	return humanizeColumn(key)
 }
 
 func sortedOutputIDs(outputs []*types.TaskOutput) []string {

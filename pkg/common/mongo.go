@@ -40,7 +40,7 @@ func NewMongoClient(cfg types.MongoConfig) (*MongoClient, error) {
 
 	dbName := cfg.Database
 	if dbName == "" {
-		dbName = "airstore_views"
+		return nil, fmt.Errorf("mongo database is empty")
 	}
 
 	log.Info().Str("database", dbName).Msg("MongoDB connected")

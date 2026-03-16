@@ -205,6 +205,18 @@ func TestGDriveWriteFileRequiresArguments(t *testing.T) {
 	}
 }
 
+func TestResolveContentAllowsZeroByteBase64(t *testing.T) {
+	data, err := resolveContent(map[string]any{
+		"content_base64": "",
+	})
+	if err != nil {
+		t.Fatalf("resolveContent returned error: %v", err)
+	}
+	if len(data) != 0 {
+		t.Fatalf("expected zero-byte payload, got %d bytes", len(data))
+	}
+}
+
 func TestNotionCommandRequiresArguments(t *testing.T) {
 	client := NewNotionClient()
 	tests := []struct {

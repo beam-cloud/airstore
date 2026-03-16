@@ -211,9 +211,11 @@ function WriteView(
 
     5. In message, briefly explain what you did (1-3 sentences).
 
-    6. Generate unique sheet IDs (`sheet-1`, `sheet-2`), relation IDs
-       (`rel-1`, `rel-2`), and component IDs (`c1`, `c2` for tables;
-       `a1`, `a2` for actions).
+    6. PRESERVE IDs on edits. If a sheet, relation, or component already exists
+       in the current view and is still present after your edit, keep its
+       existing `id` unchanged. Only generate new IDs for newly added sheets
+       (`sheet-1`, `sheet-2`), relations (`rel-1`, `rel-2`), and components
+       (`c1`, `c2` for tables; `a1`, `a2` for actions).
 
     7. NAMING: Never use "dashboard" or "app" in the view name. Use short,
        goal-oriented names (e.g. "Outreach Pipeline", "Content Calendar").

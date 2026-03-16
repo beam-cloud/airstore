@@ -146,7 +146,11 @@ func flattenDataFields(m map[string]any, prefix string, out *[]schemaFieldSummar
 			flattenDataFields(nested, source, out, depth+1)
 		}
 		if arr, ok := m[key].([]any); ok && len(arr) > 0 {
-			if nested, ok := arr[0].(map[string]any); ok {
+			for _, item := range arr {
+				nested, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
 				flattenDataFields(nested, source+".[]", out, depth+1)
 			}
 		}

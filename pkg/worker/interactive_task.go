@@ -713,7 +713,7 @@ func (w *Worker) runTurnSession(
 		}
 		signalActivity(activityCh)
 
-		if w.waitForSubagents(ctx, task, sandboxID) == subagentFinished {
+		if w.waitForSubagents(ctx, task, sandboxID, activityCh) == subagentFinished {
 			if err := w.executeTurn(ctx, task, sandboxID, runner, sessionEnv, stdout,
 				"Your background tasks / subagents have completed. Please collect and report their results.",
 				TurnArgModeFollowup); err != nil {
@@ -750,12 +750,12 @@ func (w *Worker) runTurnSession(
 // Subagent monitoring
 // ---------------------------------------------------------------------------
 
-func (w *Worker) waitForSubagents(ctx context.Context, task types.RunExecution, sandboxID string) subagentWaitOutcome {
-	return w.waitForSubagentsWithTiming(ctx, task, sandboxID, subagentPollInterval, subagentMaxWait, subagentProbeTimeout)
+func (w *Worker) waitForSubagents(ctx context.Context, task types.RunExecution, sandboxID string, activityCh chan<- struct{}) subagentWaitOutcome {
+	return w.waitForSubagentsWithTiming(ctx, task, sandboxID, activityCh, subagentPollInterval, subagentMaxWait, subagentProbeTimeout)
 }
 
 func (w *Worker) waitForSubagentsWithTiming(
-	ctx context.Context, task types.RunExecution, sandboxID string,
+	ctx context.Context, task types.RunExecution, sandboxID string, activityCh chan<- struct{},
 	pollInterval, maxWait, probeTimeout time.Duration,
 ) subagentWaitOutcome {
 	probeCtx, probeCancel := context.WithTimeout(ctx, probeTimeout)
@@ -781,6 +781,7 @@ func (w *Worker) waitForSubagentsWithTiming(
 				Msg("subagent wait ended")
 			return subagentMaxWaitReached
 		case <-time.After(pollInterval):
+			signalActivity(activityCh)
 			probeCtx, probeCancel := context.WithTimeout(ctx, probeTimeout)
 			err := w.sandboxManager.ExecCheck(probeCtx, sandboxID, subagentProbeArgs)
 			probeTimedOut := probeCtx.Err() != nil && ctx.Err() == nil
