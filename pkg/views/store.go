@@ -11,14 +11,16 @@ import (
 	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 var ErrViewRowNotFound = errors.New("view row not found")
 var ErrInvalidViewColumnKey = errors.New("invalid view column key")
 
 func mongoColumnFieldPath(prefix, key string) (string, error) {
+	key = strings.TrimSpace(key)
 	switch {
-	case strings.TrimSpace(key) == "":
+	case key == "":
 		return "", fmt.Errorf("%w: empty key", ErrInvalidViewColumnKey)
 	case strings.Contains(key, "."):
 		return "", fmt.Errorf("%w: %q contains '.'", ErrInvalidViewColumnKey, key)
@@ -92,16 +94,22 @@ func (s *ViewStore) GetRows(ctx context.Context, viewID, sheetID string) ([]View
 	}
 	defer cursor.Close(ctx)
 
-	var rows []ViewRow
-	if err := cursor.All(ctx, &rows); err != nil {
+	var all []ViewRow
+	if err := cursor.All(ctx, &all); err != nil {
 		return nil, fmt.Errorf("decode rows: %w", err)
+	}
+	rows := make([]ViewRow, 0, len(all))
+	for _, r := range all {
+		if !strings.HasPrefix(r.ID, "__") {
+			rows = append(rows, r)
+		}
 	}
 	log.Info().
 		Str("view_id", viewID).
 		Str("sheet_id", sheetID).
 		Str("collection", s.collectionName(viewID)).
 		Int("rows", len(rows)).
-		Msg("mongo: loaded rows")
+		Msg("view: loaded rows")
 	return rows, nil
 }
 
@@ -166,7 +174,7 @@ func (s *ViewStore) UpsertRows(ctx context.Context, viewID string, rows []ViewRo
 		Int("rows", len(rows)).
 		Int64("upserted", result.UpsertedCount).
 		Int64("modified", result.ModifiedCount).
-		Msg("mongo: upserted rows")
+		Msg("view: upserted rows")
 	return nil
 }
 
@@ -192,7 +200,7 @@ func (s *ViewStore) DeleteRowsNotInGroups(ctx context.Context, viewID, sheetID s
 		Str("sheet_id", sheetID).
 		Int("groups", len(groupIDs)).
 		Int64("deleted", res.DeletedCount).
-		Msg("mongo: deleted stale rows")
+		Msg("view: deleted stale rows")
 	return nil
 }
 
@@ -233,7 +241,7 @@ func (s *ViewStore) UpdateCells(ctx context.Context, viewID, sheetID, rowID stri
 		Int("fields", len(cells)).
 		Int64("matched", res.MatchedCount).
 		Int64("modified", res.ModifiedCount).
-		Msg("mongo: manual cell edit")
+		Msg("view: manual cell edit")
 	return nil
 }
 
@@ -273,7 +281,7 @@ func (s *ViewStore) ClearManualCells(ctx context.Context, viewID, sheetID string
 		Int("columns", len(columnKeys)).
 		Int64("matched", res.MatchedCount).
 		Int64("modified", res.ModifiedCount).
-		Msg("mongo: cleared manual cell overlays")
+		Msg("view: cleared manual cell overlays")
 	return nil
 }
 
@@ -337,6 +345,82 @@ func (s *ViewStore) DeleteColumn(ctx context.Context, viewID, sheetID, key strin
 		return fmt.Errorf("delete column: %w", err)
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Row exclusions
+// ---------------------------------------------------------------------------
+
+func exclusionDocID(sheetID string) string {
+	return "__excluded:" + sheetID
+}
+
+// ExcludeRow adds a row ID to the per-sheet exclusion set.
+func (s *ViewStore) ExcludeRow(ctx context.Context, viewID, sheetID, rowID string) error {
+	if !s.Available() {
+		return fmt.Errorf("MongoDB not configured")
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+	_, err := coll.UpdateOne(ctx,
+		bson.D{{Key: "_id", Value: exclusionDocID(sheetID)}},
+		bson.D{
+			{Key: "$addToSet", Value: bson.D{{Key: "row_ids", Value: rowID}}},
+			{Key: "$set", Value: bson.D{
+				{Key: "sheet_id", Value: sheetID},
+				{Key: "updated_at", Value: time.Now()},
+			}},
+		},
+		options.UpdateOne().SetUpsert(true),
+	)
+	if err != nil {
+		return fmt.Errorf("exclude row: %w", err)
+	}
+	return nil
+}
+
+// RestoreRow removes a row ID from the per-sheet exclusion set.
+func (s *ViewStore) RestoreRow(ctx context.Context, viewID, sheetID, rowID string) error {
+	if !s.Available() {
+		return fmt.Errorf("MongoDB not configured")
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+	_, err := coll.UpdateOne(ctx,
+		bson.D{{Key: "_id", Value: exclusionDocID(sheetID)}},
+		bson.D{
+			{Key: "$pull", Value: bson.D{{Key: "row_ids", Value: rowID}}},
+			{Key: "$set", Value: bson.D{{Key: "updated_at", Value: time.Now()}}},
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("restore row: %w", err)
+	}
+	return nil
+}
+
+// GetExcludedRowIDs returns the set of excluded row IDs for a sheet.
+func (s *ViewStore) GetExcludedRowIDs(ctx context.Context, viewID, sheetID string) (map[string]bool, error) {
+	if !s.Available() {
+		return nil, nil
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+	var doc struct {
+		RowIDs []string `bson:"row_ids"`
+	}
+	err := coll.FindOne(ctx, bson.D{{Key: "_id", Value: exclusionDocID(sheetID)}}).Decode(&doc)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get excluded rows: %w", err)
+	}
+	if len(doc.RowIDs) == 0 {
+		return nil, nil
+	}
+	excluded := make(map[string]bool, len(doc.RowIDs))
+	for _, id := range doc.RowIDs {
+		excluded[id] = true
+	}
+	return excluded, nil
 }
 
 // DeleteSheet removes all rows for a sheet.

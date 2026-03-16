@@ -5,8 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
+	"html"
 	"regexp"
 	"sort"
 	"strconv"
@@ -22,6 +23,8 @@ import (
 	baml "github.com/beam-cloud/airstore/pkg/views/baml_client"
 	bamltypes "github.com/beam-cloud/airstore/pkg/views/baml_client/types"
 )
+
+var ErrNoOutputsForTask = errors.New("no outputs found for task")
 
 // ---------------------------------------------------------------------------
 // DataResolver
@@ -80,16 +83,6 @@ func buildMappingSpec(sheetName string, comp types.ComponentSpec) mappingSpec {
 	}
 }
 
-func outputMapperCallOptions() []baml.CallOptionFunc {
-	if strings.TrimSpace(os.Getenv("CEREBRAS_API_KEY")) != "" {
-		return nil
-	}
-	if strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")) != "" {
-		return []baml.CallOptionFunc{baml.WithClient("ViewCopilotClient")}
-	}
-	return nil
-}
-
 func NewDataResolver(backend repository.BackendRepository, store *ViewStore) *DataResolver {
 	return &DataResolver{backend: backend, store: store}
 }
@@ -97,6 +90,7 @@ func NewDataResolver(backend repository.BackendRepository, store *ViewStore) *Da
 type dataResolverBackend interface {
 	GetAgentProfileByKey(ctx context.Context, workspaceId uint, agentKey string) (*types.AgentProfile, error)
 	ListAgentProfiles(ctx context.Context, workspaceId uint) ([]*types.AgentProfile, error)
+	ListTaskOutputs(ctx context.Context, workspaceId uint, taskID string) ([]*types.TaskOutput, error)
 	ListWorkspaceTaskOutputs(ctx context.Context, workspaceId uint, filter types.TaskOutputListFilter) ([]*types.TaskOutput, error)
 	GetTaskByID(ctx context.Context, taskId string) (*types.AgentTask, error)
 }
@@ -113,7 +107,24 @@ func (r *DataResolver) Resolve(ctx context.Context, workspaceID uint, viewID str
 	if result == nil {
 		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}, nil
 	}
-	return assembleTable(sheet.ID, comp, result.Rows, result.TaskMeta), nil
+
+	rows := result.Rows
+	if r.store != nil {
+		excluded, err := r.store.GetExcludedRowIDs(ctx, viewID, sheet.ID)
+		if err != nil {
+			log.Warn().Err(err).Str("view_id", viewID).Str("sheet_id", sheet.ID).Msg("failed to load row exclusions")
+		} else if len(excluded) > 0 {
+			filtered := make([]resolvedSheetRow, 0, len(rows))
+			for _, row := range rows {
+				if !excluded[row.RowID] {
+					filtered = append(filtered, row)
+				}
+			}
+			rows = filtered
+		}
+	}
+
+	return assembleTable(sheet.ID, comp, rows, result.TaskMeta), nil
 }
 
 // RegenerateRow re-maps a single task's outputs through BAML for one sheet,
@@ -127,16 +138,18 @@ func (r *DataResolver) RegenerateRow(ctx context.Context, workspaceID uint, view
 		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}, nil
 	}
 
-	allOutputs, err := r.fetchMappingOutputs(ctx, workspaceID, comp.DataSource, opts.ViewAgentRefs)
+	agentIDs, ok := r.resolveScopedAgentIDs(ctx, workspaceID, comp.DataSource, opts.ViewAgentRefs)
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrNoOutputsForTask, taskID)
+	}
+	allOutputs, err := r.fetchTaskOutputs(ctx, workspaceID, []string{taskID}, agentIDs)
 	if err != nil {
 		return nil, fmt.Errorf("fetch mapping outputs: %w", err)
 	}
-
-	taskGroups := groupOutputsByTask(allOutputs)
-	outputs, ok := taskGroups[taskID]
-	if !ok || len(outputs) == 0 {
-		return nil, fmt.Errorf("no outputs found for task %s", taskID)
+	if len(allOutputs) == 0 {
+		return nil, fmt.Errorf("%w: %s", ErrNoOutputsForTask, taskID)
 	}
+	outputs := allOutputs
 
 	taskPrompts := r.fetchTaskPrompts(ctx, []string{taskID})
 	outputsJSON, err := serializeOutputsForMapping(outputs, taskPrompts)
@@ -153,15 +166,15 @@ func (r *DataResolver) RegenerateRow(ctx context.Context, workspaceID uint, view
 		spec.rowStrategy.Description,
 		spec.mappingCols,
 		outputsJSON,
-		outputMapperCallOptions()...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("BAML mapping: %w", err)
 	}
 
+	canonicalRows := canonicalizeMappedRows(spec.mappingCols, result.Rows)
 	now := time.Now()
 	var persisted []ViewRow
-	for _, row := range result.Rows {
+	for _, row := range canonicalRows {
 		if row.Task_id != taskID {
 			continue
 		}
@@ -225,10 +238,13 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 	taskGroups := groupOutputsByTask(allOutputs)
 	taskMeta := r.fetchTaskMetadata(ctx, taskIDsFromGroups(taskGroups))
 
-	existingRows, err := r.store.GetRows(ctx, viewID, sheet.ID)
-	if err != nil {
-		log.Warn().Err(err).Str("view_id", viewID).Str("sheet_id", sheet.ID).Msg("failed to load stored rows, treating all as uncached")
-		existingRows = nil
+	var existingRows []ViewRow
+	if r.store != nil {
+		existingRows, err = r.store.GetRows(ctx, viewID, sheet.ID)
+		if err != nil {
+			log.Warn().Err(err).Str("view_id", viewID).Str("sheet_id", sheet.ID).Msg("failed to load stored rows, treating all as uncached")
+			existingRows = nil
+		}
 	}
 	rowsByGroup := make(map[string][]ViewRow)
 	for i := range existingRows {
@@ -246,7 +262,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 			Str("sheet_id", sheet.ID).
 			Str("schema_hash", spec.schemaHash).
 			Int("tasks", len(taskGroups)).
-			Msg("mongo: force refresh requested")
+			Msg("view: force refresh requested")
 	}
 
 	for taskID, outputs := range taskGroups {
@@ -292,7 +308,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 		Int("mapping_columns", len(spec.mappingCols)).
 		Strs("column_keys", colKeys).
 		Str("row_mode", spec.rowStrategy.Mode).
-		Msg("BAML mapping required")
+		Msg("view: mapping required")
 
 	persistedByGroup := make(map[string][]ViewRow)
 	mappedByGroup := make(map[string][]resolvedSheetRow)
@@ -321,7 +337,6 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 			spec.rowStrategy.Description,
 			spec.mappingCols,
 			outputsJSON,
-			outputMapperCallOptions()...,
 		)
 		if err != nil {
 			if opts.ForceRefresh {
@@ -329,7 +344,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 			}
 			log.Warn().Err(err).Str("view_id", viewID).Str("sheet_id", sheet.ID).Int("tasks", len(uncachedIDs)).Msg("BAML mapping failed")
 		} else {
-			for _, row := range result.Rows {
+			for _, row := range canonicalizeMappedRows(spec.mappingCols, result.Rows) {
 				taskID := row.Task_id
 				if _, ok := taskGroups[taskID]; !ok {
 					log.Warn().
@@ -357,7 +372,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 		}
 	}
 
-	{
+	if r.store != nil {
 		var toUpsert []ViewRow
 		var keepRowIDs []string
 		var cleanupGroupIDs []string
@@ -440,7 +455,7 @@ func schemaKeyList(cols []bamltypes.ColumnSchema) []string {
 	for _, col := range cols {
 		keys = append(keys, col.Key)
 	}
-	return keys
+	return uniqueTrimmedStrings(keys)
 }
 
 func groupOutputsByTask(outputs []*types.TaskOutput) map[string][]*types.TaskOutput {
@@ -612,11 +627,11 @@ func (r *DataResolver) fetchMappingOutputs(ctx context.Context, workspaceID uint
 		return nil, nil
 	}
 
-	allTaskOutputs, err := r.fetchOutputsForScope(ctx, workspaceID, nil, agentIDs)
+	allTaskOutputs, err := r.fetchTaskOutputs(ctx, workspaceID, sortedTaskIDSet(taskIDs), agentIDs)
 	if err != nil {
 		return nil, err
 	}
-	return outputsForTasks(allTaskOutputs, taskIDs), nil
+	return allTaskOutputs, nil
 }
 
 func filterOutputsForDataSource(outputs []*types.TaskOutput, ds *types.DataSource, resolvedAgentIDs []string) []*types.TaskOutput {
@@ -774,6 +789,7 @@ func dedupeOutputs(all []*types.TaskOutput) []*types.TaskOutput {
 		seen[o.ID] = struct{}{}
 		deduped = append(deduped, o)
 	}
+	sortTaskOutputs(deduped)
 	return deduped
 }
 
@@ -815,10 +831,8 @@ func mappedRowToViewRow(sheetID, taskID, schemaH string, groupOutputs []*types.T
 	if rowKey == "" {
 		rowKey = "task"
 	}
-	sourceOutputIDs := uniqueTrimmedStrings(row.Source_output_ids)
-	if len(sourceOutputIDs) == 0 {
-		sourceOutputIDs = sortedOutputIDs(groupOutputs)
-	}
+	outputIDs := sortedOutputIDs(groupOutputs)
+	sourceOutputIDs := sanitizeSourceOutputIDs(row.Source_output_ids, outputIDs)
 	cells := make(map[string]string, len(row.Cells))
 	for _, cell := range row.Cells {
 		if cell.Value != "" {
@@ -832,11 +846,32 @@ func mappedRowToViewRow(sheetID, taskID, schemaH string, groupOutputs []*types.T
 		TaskID:          taskID,
 		RowKey:          rowKey,
 		SchemaHash:      schemaH,
-		OutputIDs:       sortedOutputIDs(groupOutputs),
+		OutputIDs:       outputIDs,
 		SourceOutputIDs: sourceOutputIDs,
 		Cells:           cells,
 		UpdatedAt:       now,
 	}
+}
+
+func sanitizeSourceOutputIDs(sourceOutputIDs, outputIDs []string) []string {
+	if len(outputIDs) == 0 {
+		return nil
+	}
+	allowed := make(map[string]struct{}, len(outputIDs))
+	for _, id := range outputIDs {
+		allowed[id] = struct{}{}
+	}
+	var filtered []string
+	for _, id := range uniqueTrimmedStrings(sourceOutputIDs) {
+		if _, ok := allowed[id]; ok {
+			filtered = append(filtered, id)
+		}
+	}
+	sort.Strings(filtered)
+	if len(filtered) == 0 {
+		return append([]string(nil), outputIDs...)
+	}
+	return filtered
 }
 
 func fallbackViewRow(sheetID, taskID, schemaH string, groupOutputs []*types.TaskOutput, now time.Time) ViewRow {
@@ -992,12 +1027,21 @@ func buildColumnSchemas(comp types.ComponentSpec) []bamltypes.ColumnSchema {
 			return nil
 		}
 		schemas := make([]bamltypes.ColumnSchema, 0, len(configCols))
+		seen := make(map[string]struct{}, len(configCols))
 		for _, col := range configCols {
-			name := schemaColumnName(col.Key, col.Label)
+			key := strings.TrimSpace(col.Key)
+			if key == "" {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			name := schemaColumnName(key, col.Label)
 			schemas = append(schemas, bamltypes.ColumnSchema{
 				Name:        name,
-				Key:         col.Key,
-				Type:        columnTypeForKey(col.Key, col.Type),
+				Key:         key,
+				Type:        columnTypeForKey(key, col.Type),
 				Description: name,
 			})
 		}
@@ -1008,113 +1052,405 @@ func buildColumnSchemas(comp types.ComponentSpec) []bamltypes.ColumnSchema {
 	configCols := parseConfigColumns(comp.Config)
 	configByKey := make(map[string]configColumn, len(configCols))
 	for _, cc := range configCols {
-		configByKey[cc.Key] = cc
+		key := strings.TrimSpace(cc.Key)
+		if key == "" {
+			continue
+		}
+		cc.Key = key
+		if _, exists := configByKey[key]; exists {
+			continue
+		}
+		configByKey[key] = cc
 	}
 	seen := make(map[string]bool, len(comp.DataSource.Transform))
 
 	for _, rule := range comp.DataSource.Transform {
-		desc := humanizeColumn(rule.Column)
-		if cc, ok := configByKey[rule.Column]; ok && cc.Label != "" {
+		key := strings.TrimSpace(rule.Column)
+		if key == "" || seen[key] {
+			continue
+		}
+		desc := humanizeColumn(key)
+		if cc, ok := configByKey[key]; ok && cc.Label != "" {
 			desc = cc.Label
 		}
-		name := schemaColumnName(rule.Column, desc)
+		name := schemaColumnName(key, desc)
 		if rule.Source != "" {
 			desc += " (hint: " + rule.Source + ")"
 		}
 		schemas = append(schemas, bamltypes.ColumnSchema{
 			Name:        name,
-			Key:         rule.Column,
-			Type:        columnTypeForKey(rule.Column, rule.Type),
+			Key:         key,
+			Type:        columnTypeForKey(key, rule.Type),
 			Description: desc,
 		})
-		seen[rule.Column] = true
+		seen[key] = true
 	}
 	for _, cc := range configCols {
-		if cc.Key == "" || seen[cc.Key] {
+		key := strings.TrimSpace(cc.Key)
+		if key == "" || seen[key] {
 			continue
 		}
-		name := schemaColumnName(cc.Key, cc.Label)
+		name := schemaColumnName(key, cc.Label)
 		schemas = append(schemas, bamltypes.ColumnSchema{
 			Name:        name,
-			Key:         cc.Key,
-			Type:        columnTypeForKey(cc.Key, cc.Type),
+			Key:         key,
+			Type:        columnTypeForKey(key, cc.Type),
 			Description: name,
 		})
+		seen[key] = true
 	}
 	return schemas
 }
 
-// serializeOutputsForMapping groups outputs by task_id and serializes as a
-// JSON object keyed by task_id. Each entry contains the initial user prompt
-// (when available) and an array of compact outputs produced by that task.
+// serializeOutputsForMapping groups outputs by task_id and formats them as a
+// deterministic text payload with explicit task/output boundaries. The mapper
+// gets cleaned, high-signal evidence rather than a raw transport dump.
 func serializeOutputsForMapping(outputs []*types.TaskOutput, taskPrompts map[string]string) (string, error) {
-	type compactOutput struct {
-		ID         string         `json:"id"`
-		Title      string         `json:"title"`
-		OutputType string         `json:"output_type"`
-		AgentName  string         `json:"agent_name,omitempty"`
-		Summary    *string        `json:"summary,omitempty"`
-		URI        *string        `json:"uri,omitempty"`
-		Data       map[string]any `json:"data,omitempty"`
-		Metadata   map[string]any `json:"metadata,omitempty"`
-		CreatedAt  string         `json:"created_at"`
-	}
-
-	type taskGroup struct {
-		Prompt  string          `json:"prompt,omitempty"`
-		Outputs []compactOutput `json:"outputs"`
-	}
-
-	grouped := make(map[string]*taskGroup)
+	grouped := make(map[string][]*types.TaskOutput)
 	for _, o := range outputs {
 		if o == nil {
 			continue
 		}
-		g, ok := grouped[o.TaskID]
-		if !ok {
-			g = &taskGroup{Prompt: taskPrompts[o.TaskID]}
-			grouped[o.TaskID] = g
-		}
-		g.Outputs = append(g.Outputs, compactOutput{
-			ID:         o.ID,
-			Title:      o.Title,
-			OutputType: o.OutputType,
-			AgentName:  o.AgentName,
-			Summary:    o.Summary,
-			URI:        o.URI,
-			Data:       truncateLargeValues(o.Data),
-			Metadata:   o.Metadata,
-			CreatedAt:  o.CreatedAt.Format(time.RFC3339),
-		})
+		grouped[o.TaskID] = append(grouped[o.TaskID], o)
 	}
 
-	raw, err := json.Marshal(grouped)
-	if err != nil {
-		return "", err
+	taskIDs := make([]string, 0, len(grouped))
+	for taskID := range grouped {
+		taskIDs = append(taskIDs, taskID)
 	}
-	return string(raw), nil
+	sort.Strings(taskIDs)
+
+	var b strings.Builder
+	for i, taskID := range taskIDs {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString("<<<BEGIN_TASK id=")
+		b.WriteString(taskID)
+		b.WriteString(">>>\n")
+		writeMappingLine(&b, "PROMPT", taskPrompts[taskID])
+
+		group := grouped[taskID]
+		sort.SliceStable(group, func(i, j int) bool {
+			if !group[i].CreatedAt.Equal(group[j].CreatedAt) {
+				return group[i].CreatedAt.Before(group[j].CreatedAt)
+			}
+			return group[i].ID < group[j].ID
+		})
+		for _, output := range group {
+			writeTaskOutputForMapping(&b, output)
+		}
+		b.WriteString("<<<END_TASK>>>\n")
+	}
+	return b.String(), nil
 }
 
-const maxFieldValueLen = 2000
+type mappingField struct {
+	Path  string
+	Value string
+}
 
-func truncateLargeValues(m map[string]any) map[string]any {
-	if len(m) == 0 {
+const (
+	maxMappingFieldValueLen = 600
+	maxMappingNestedItems   = 6
+)
+
+func writeTaskOutputForMapping(b *strings.Builder, output *types.TaskOutput) {
+	if output == nil {
+		return
+	}
+	b.WriteString("<<<BEGIN_OUTPUT id=")
+	b.WriteString(output.ID)
+	b.WriteString(">>>\n")
+	writeMappingLine(b, "TITLE", output.Title)
+	writeMappingLine(b, "OUTPUT_TYPE", output.OutputType)
+	writeMappingLine(b, "AGENT_NAME", output.AgentName)
+	writeMappingLine(b, "CREATED_AT", output.CreatedAt.Format(time.RFC3339))
+	if output.Summary != nil {
+		writeMappingLine(b, "SUMMARY", *output.Summary)
+	}
+	if output.URI != nil {
+		writeMappingLine(b, "URI", *output.URI)
+	}
+	writeMappingSection(b, "DATA_FIELDS", collectMappingFields(output.Data))
+	writeMappingSection(b, "METADATA_FIELDS", collectMappingFields(output.Metadata))
+	b.WriteString("<<<END_OUTPUT>>>\n")
+}
+
+func writeMappingLine(b *strings.Builder, key, value string) {
+	if b == nil {
+		return
+	}
+	value = sanitizeMappingScalar(value)
+	if value == "" {
+		return
+	}
+	b.WriteString(key)
+	b.WriteString(": ")
+	b.WriteString(value)
+	b.WriteByte('\n')
+}
+
+func writeMappingSection(b *strings.Builder, title string, fields []mappingField) {
+	if b == nil || len(fields) == 0 {
+		return
+	}
+	b.WriteString(title)
+	b.WriteString(":\n")
+	for _, field := range fields {
+		if strings.TrimSpace(field.Path) == "" || strings.TrimSpace(field.Value) == "" {
+			continue
+		}
+		b.WriteString("- ")
+		b.WriteString(field.Path)
+		b.WriteString(": ")
+		b.WriteString(field.Value)
+		b.WriteByte('\n')
+	}
+}
+
+func collectMappingFields(values map[string]any) []mappingField {
+	if len(values) == 0 {
 		return nil
 	}
-	out := make(map[string]any, len(m))
-	for k, v := range m {
-		switch val := v.(type) {
-		case string:
-			if len(val) > maxFieldValueLen {
-				out[k] = val[:maxFieldValueLen] + "…"
-			} else {
-				out[k] = val
+	var out []mappingField
+	collectMappingFieldsFromValue(&out, "", values)
+	return out
+}
+
+func collectMappingFieldsFromValue(out *[]mappingField, path string, value any) {
+	switch val := value.(type) {
+	case nil:
+		return
+	case map[string]any:
+		if path != "" && shouldCondenseMappingPath(path) {
+			if excerpt := summarizeMappingExcerpt(val); excerpt != "" {
+				*out = append(*out, mappingField{Path: path + "_excerpt", Value: excerpt})
 			}
-		default:
-			out[k] = v
+			return
+		}
+		keys := make([]string, 0, len(val))
+		for key := range val {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			childPath := key
+			if path != "" {
+				childPath = path + "." + key
+			}
+			collectMappingFieldsFromValue(out, childPath, val[key])
+		}
+	case []string:
+		if summary := summarizeScalarSlice(val); summary != "" {
+			*out = append(*out, mappingField{Path: path, Value: summary})
+		}
+	case []map[string]any:
+		if path != "" && shouldCondenseMappingPath(path) {
+			if excerpt := summarizeMappingExcerpt(val); excerpt != "" {
+				*out = append(*out, mappingField{Path: path + "_excerpt", Value: excerpt})
+			}
+			return
+		}
+		if strings.HasSuffix(path, "data_fields") {
+			if summary := summarizeDataFields(val); summary != "" {
+				*out = append(*out, mappingField{Path: path, Value: summary})
+			}
+			return
+		}
+		for i, item := range val {
+			if i >= maxMappingNestedItems {
+				break
+			}
+			childPath := fmt.Sprintf("%s[%d]", path, i)
+			collectMappingFieldsFromValue(out, childPath, item)
+		}
+	case []any:
+		if path != "" && shouldCondenseMappingPath(path) {
+			if excerpt := summarizeMappingExcerpt(val); excerpt != "" {
+				*out = append(*out, mappingField{Path: path + "_excerpt", Value: excerpt})
+			}
+			return
+		}
+		if strings.HasSuffix(path, "data_fields") {
+			if summary := summarizeDataFields(val); summary != "" {
+				*out = append(*out, mappingField{Path: path, Value: summary})
+			}
+			return
+		}
+		if summary := summarizeScalarSlice(val); summary != "" {
+			*out = append(*out, mappingField{Path: path, Value: summary})
+			return
+		}
+		for i, item := range val {
+			if i >= maxMappingNestedItems {
+				break
+			}
+			childPath := fmt.Sprintf("%s[%d]", path, i)
+			collectMappingFieldsFromValue(out, childPath, item)
+		}
+	default:
+		if path != "" && shouldCondenseMappingPath(path) {
+			if excerpt := summarizeMappingExcerpt(val); excerpt != "" {
+				*out = append(*out, mappingField{Path: path + "_excerpt", Value: excerpt})
+			}
+			return
+		}
+		if text := sanitizeMappingScalar(fmt.Sprint(val)); text != "" && text != "<nil>" {
+			*out = append(*out, mappingField{Path: path, Value: text})
 		}
 	}
-	return out
+}
+
+func shouldCondenseMappingPath(path string) bool {
+	return path == "source_input" ||
+		path == "source_input_text" ||
+		path == "source_excerpt" ||
+		strings.HasSuffix(path, ".source_input") ||
+		strings.HasSuffix(path, ".source_input_text") ||
+		strings.HasSuffix(path, ".source_excerpt")
+}
+
+func summarizeDataFields(value any) string {
+	var items []any
+	switch fields := value.(type) {
+	case []any:
+		items = fields
+	case []map[string]any:
+		items = make([]any, 0, len(fields))
+		for _, field := range fields {
+			items = append(items, field)
+		}
+	default:
+		return ""
+	}
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		field, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		key := sanitizeMappingScalar(fmt.Sprint(field["key"]))
+		if key == "" {
+			continue
+		}
+		label := sanitizeMappingScalar(fmt.Sprint(field["label"]))
+		typ := sanitizeMappingScalar(fmt.Sprint(field["type"]))
+		part := key
+		if label != "" || typ != "" {
+			part += " ["
+			if label != "" {
+				part += label
+			}
+			if typ != "" {
+				if label != "" {
+					part += ": "
+				}
+				part += typ
+			}
+			part += "]"
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, "; ")
+}
+
+func summarizeScalarSlice(values any) string {
+	var items []string
+	switch vals := values.(type) {
+	case []string:
+		items = vals
+	case []any:
+		items = make([]string, 0, len(vals))
+		for _, raw := range vals {
+			switch v := raw.(type) {
+			case nil:
+				continue
+			case map[string]any, []any:
+				return ""
+			default:
+				if text := sanitizeMappingScalar(fmt.Sprint(v)); text != "" {
+					items = append(items, text)
+				}
+			}
+		}
+	default:
+		return ""
+	}
+	if len(items) == 0 {
+		return ""
+	}
+	if len(items) > maxMappingNestedItems {
+		items = items[:maxMappingNestedItems]
+	}
+	return strings.Join(items, ", ")
+}
+
+func summarizeMappingExcerpt(value any) string {
+	switch val := value.(type) {
+	case string:
+		return sanitizeMappingScalar(val)
+	case map[string]any:
+		for _, key := range []string{"content", "command", "description", "path", "file_path"} {
+			if child, ok := val[key]; ok {
+				if excerpt := summarizeMappingExcerpt(child); excerpt != "" {
+					return excerpt
+				}
+			}
+		}
+		keys := make([]string, 0, len(val))
+		for key := range val {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys))
+		for _, key := range keys {
+			if len(parts) == 4 {
+				break
+			}
+			if excerpt := summarizeMappingExcerpt(val[key]); excerpt != "" {
+				parts = append(parts, key+": "+excerpt)
+			}
+		}
+		return strings.Join(parts, " | ")
+	case []string:
+		return summarizeScalarSlice(val)
+	case []map[string]any:
+		if summary := summarizeDataFields(val); summary != "" {
+			return summary
+		}
+		return ""
+	case []any:
+		return summarizeScalarSlice(val)
+	default:
+		if value == nil {
+			return ""
+		}
+		return sanitizeMappingScalar(fmt.Sprint(value))
+	}
+}
+
+func sanitizeMappingScalar(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	value = html.UnescapeString(value)
+	value = ansiEscapeRe.ReplaceAllString(value, "")
+	value = strings.ReplaceAll(value, "\u00a0", " ")
+	if markupTagRe.MatchString(value) {
+		value = markupTagRe.ReplaceAllString(value, " ")
+	}
+	value = whitespaceRe.ReplaceAllString(value, " ")
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) > maxMappingFieldValueLen {
+		return string(runes[:maxMappingFieldValueLen]) + "…"
+	}
+	return value
 }
 
 func filterBamlColumns(cols []bamltypes.ColumnSchema) []bamltypes.ColumnSchema {
@@ -1192,7 +1528,7 @@ func (r *DataResolver) Store() *ViewStore {
 // mappingVersion should be bumped whenever the BAML prompt, serialization
 // logic, mapping scope, or output processing changes. This invalidates all
 // cached rows.
-const mappingVersion = "v5"
+const mappingVersion = "v6"
 
 func hashColumns(columns []bamltypes.ColumnSchema, rowStrategy types.RowStrategy, sheetName, tableTitle, tableType string) string {
 	type hashEntry struct {
@@ -1247,6 +1583,268 @@ func sortedOutputIDs(outputs []*types.TaskOutput) []string {
 	return ids
 }
 
+func sortedTaskIDSet(taskIDs map[string]bool) []string {
+	ids := make([]string, 0, len(taskIDs))
+	for taskID := range taskIDs {
+		ids = append(ids, taskID)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func sortTaskOutputs(outputs []*types.TaskOutput) {
+	sort.SliceStable(outputs, func(i, j int) bool {
+		left := outputs[i]
+		right := outputs[j]
+		if left == nil || right == nil {
+			return left != nil
+		}
+		if left.TaskID != right.TaskID {
+			return left.TaskID < right.TaskID
+		}
+		if !left.CreatedAt.Equal(right.CreatedAt) {
+			return left.CreatedAt.Before(right.CreatedAt)
+		}
+		if left.ID != right.ID {
+			return left.ID < right.ID
+		}
+		if left.OutputType != right.OutputType {
+			return left.OutputType < right.OutputType
+		}
+		return left.Title < right.Title
+	})
+}
+
+func filterOutputsByAgentIDs(outputs []*types.TaskOutput, agentIDs []string) []*types.TaskOutput {
+	if len(agentIDs) == 0 {
+		return outputs
+	}
+	agentSet := make(map[string]struct{}, len(agentIDs))
+	for _, agentID := range agentIDs {
+		if trimmed := strings.TrimSpace(agentID); trimmed != "" {
+			agentSet[trimmed] = struct{}{}
+		}
+	}
+	filtered := make([]*types.TaskOutput, 0, len(outputs))
+	for _, output := range outputs {
+		if output == nil || output.AgentID == nil {
+			continue
+		}
+		if _, ok := agentSet[strings.TrimSpace(*output.AgentID)]; ok {
+			filtered = append(filtered, output)
+		}
+	}
+	return filtered
+}
+
+func (r *DataResolver) fetchTaskOutputs(ctx context.Context, workspaceID uint, taskIDs []string, agentIDs []string) ([]*types.TaskOutput, error) {
+	var outputs []*types.TaskOutput
+	for _, taskID := range taskIDs {
+		if strings.TrimSpace(taskID) == "" {
+			continue
+		}
+		taskOutputs, err := r.backend.ListTaskOutputs(ctx, workspaceID, taskID)
+		if err != nil {
+			return nil, err
+		}
+		outputs = append(outputs, filterOutputsByAgentIDs(taskOutputs, agentIDs)...)
+	}
+	return dedupeOutputs(outputs), nil
+}
+
+func canonicalizeMappedRows(columns []bamltypes.ColumnSchema, rows []bamltypes.MappedRow) []bamltypes.MappedRow {
+	if len(rows) == 0 {
+		return nil
+	}
+	columnKeys := make([]string, 0, len(columns))
+	columnSet := make(map[string]struct{}, len(columns))
+	columnAliases := make(map[string]string, len(columns)*3)
+	ambiguousAliases := make(map[string]bool)
+	for _, column := range columns {
+		key := strings.TrimSpace(column.Key)
+		if key == "" {
+			continue
+		}
+		if _, exists := columnSet[key]; exists {
+			continue
+		}
+		columnSet[key] = struct{}{}
+		columnKeys = append(columnKeys, key)
+		registerColumnAlias(columnAliases, ambiguousAliases, key, key)
+		registerColumnAlias(columnAliases, ambiguousAliases, humanizeColumn(key), key)
+		registerColumnAlias(columnAliases, ambiguousAliases, column.Name, key)
+	}
+
+	type candidateRow struct {
+		TaskID          string
+		RowKey          string
+		SourceOutputIDs []string
+		Cells           map[string]string
+		FilledCount     int
+	}
+	candidates := make([]candidateRow, 0, len(rows))
+	for _, row := range rows {
+		taskID := strings.TrimSpace(row.Task_id)
+		if taskID == "" {
+			continue
+		}
+		rowKey := normalizeToken(strings.TrimSpace(row.Row_key))
+		if rowKey == "" {
+			rowKey = "task"
+		}
+		cells := make(map[string]string, len(columnKeys))
+		filledCount := 0
+		for _, cell := range row.Cells {
+			columnKey := resolveMappedColumnKey(cell.Column, columnSet, columnAliases, ambiguousAliases)
+			if columnKey == "" {
+				continue
+			}
+			if _, exists := cells[columnKey]; exists {
+				continue
+			}
+			cells[columnKey] = cell.Value
+			if strings.TrimSpace(cell.Value) != "" {
+				filledCount++
+			}
+		}
+		if filledCount == 0 {
+			continue
+		}
+		sourceOutputIDs := uniqueTrimmedStrings(row.Source_output_ids)
+		sort.Strings(sourceOutputIDs)
+		candidates = append(candidates, candidateRow{
+			TaskID:          taskID,
+			RowKey:          rowKey,
+			SourceOutputIDs: sourceOutputIDs,
+			Cells:           cells,
+			FilledCount:     filledCount,
+		})
+	}
+
+	sort.SliceStable(candidates, func(i, j int) bool {
+		left := candidates[i]
+		right := candidates[j]
+		if left.TaskID != right.TaskID {
+			return left.TaskID < right.TaskID
+		}
+		if left.RowKey != right.RowKey {
+			return left.RowKey < right.RowKey
+		}
+		if left.FilledCount != right.FilledCount {
+			return left.FilledCount > right.FilledCount
+		}
+		leftSources := strings.Join(left.SourceOutputIDs, ",")
+		rightSources := strings.Join(right.SourceOutputIDs, ",")
+		if leftSources != rightSources {
+			return leftSources < rightSources
+		}
+		for _, key := range columnKeys {
+			if left.Cells[key] != right.Cells[key] {
+				return left.Cells[key] < right.Cells[key]
+			}
+		}
+		return false
+	})
+
+	type mergedRow struct {
+		TaskID          string
+		RowKey          string
+		SourceOutputIDs []string
+		Cells           map[string]string
+	}
+	mergedByKey := make(map[string]*mergedRow, len(candidates))
+	order := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		mergeKey := candidate.TaskID + "\x00" + candidate.RowKey
+		current, ok := mergedByKey[mergeKey]
+		if !ok {
+			current = &mergedRow{
+				TaskID:          candidate.TaskID,
+				RowKey:          candidate.RowKey,
+				SourceOutputIDs: append([]string(nil), candidate.SourceOutputIDs...),
+				Cells:           make(map[string]string, len(columnKeys)),
+			}
+			mergedByKey[mergeKey] = current
+			order = append(order, mergeKey)
+		} else {
+			current.SourceOutputIDs = mergeSortedStrings(current.SourceOutputIDs, candidate.SourceOutputIDs)
+		}
+		for _, key := range columnKeys {
+			if strings.TrimSpace(current.Cells[key]) == "" && strings.TrimSpace(candidate.Cells[key]) != "" {
+				current.Cells[key] = candidate.Cells[key]
+			}
+		}
+	}
+
+	result := make([]bamltypes.MappedRow, 0, len(order))
+	for _, mergeKey := range order {
+		row := mergedByKey[mergeKey]
+		cells := make([]bamltypes.MappedCell, 0, len(columnKeys))
+		for _, key := range columnKeys {
+			cells = append(cells, bamltypes.MappedCell{
+				Column: key,
+				Value:  row.Cells[key],
+			})
+		}
+		result = append(result, bamltypes.MappedRow{
+			Task_id:           row.TaskID,
+			Row_key:           row.RowKey,
+			Source_output_ids: row.SourceOutputIDs,
+			Cells:             cells,
+		})
+	}
+	return result
+}
+
+func registerColumnAlias(aliasToKey map[string]string, ambiguous map[string]bool, alias, key string) {
+	normalized := normalizeColumnKey(alias)
+	if normalized == "" {
+		return
+	}
+	if existing, ok := aliasToKey[normalized]; ok && existing != key {
+		delete(aliasToKey, normalized)
+		ambiguous[normalized] = true
+		return
+	}
+	if !ambiguous[normalized] {
+		aliasToKey[normalized] = key
+	}
+}
+
+func resolveMappedColumnKey(raw string, columnSet map[string]struct{}, aliasToKey map[string]string, ambiguous map[string]bool) string {
+	key := strings.TrimSpace(raw)
+	if key == "" {
+		return ""
+	}
+	if _, ok := columnSet[key]; ok {
+		return key
+	}
+	normalized := normalizeColumnKey(key)
+	if normalized == "" {
+		return ""
+	}
+	if _, ok := columnSet[normalized]; ok {
+		return normalized
+	}
+	if ambiguous[normalized] {
+		return ""
+	}
+	return aliasToKey[normalized]
+}
+
+func mergeSortedStrings(left, right []string) []string {
+	if len(left) == 0 {
+		return append([]string(nil), right...)
+	}
+	if len(right) == 0 {
+		return append([]string(nil), left...)
+	}
+	merged := append(append([]string(nil), left...), right...)
+	merged = uniqueTrimmedStrings(merged)
+	sort.Strings(merged)
+	return merged
+}
+
 func slicesMatch(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -1263,6 +1861,9 @@ func slicesMatch(a, b []string) bool {
 // Dot-path navigation (used by Artifact)
 // ---------------------------------------------------------------------------
 
+var ansiEscapeRe = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
+var markupTagRe = regexp.MustCompile(`(?s)<[^>]+>`)
+var whitespaceRe = regexp.MustCompile(`\s+`)
 var indexBracketRe = regexp.MustCompile(`\[(\d+|\*)\]`)
 
 func dotGet(m map[string]any, path string) any {

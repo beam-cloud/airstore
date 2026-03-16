@@ -4000,7 +4000,7 @@ func (b *PostgresBackend) ListTaskOutputs(ctx context.Context, workspaceId uint,
 		FROM task_output o
 		LEFT JOIN agent_profile ap ON ap.id = o.agent_id
 		WHERE o.workspace_id = $1 AND o.task_id = $2
-		ORDER BY o.created_at ASC`, workspaceId, taskID)
+		ORDER BY o.created_at ASC, o.id ASC`, workspaceId, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -4038,7 +4038,7 @@ func (b *PostgresBackend) ListWorkspaceTaskOutputs(
 		  AND ($4::text IS NULL OR o.output_type = $4)
 		  AND ($5::boolean IS FALSE OR o.archived_at IS NULL)
 		  AND ($7::boolean IS FALSE OR o.agent_id IS NULL)
-		ORDER BY o.created_at DESC
+		ORDER BY o.created_at DESC, o.id DESC
 		LIMIT $6`,
 		workspaceId,
 		nilIfEmpty(filter.TaskID),

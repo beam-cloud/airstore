@@ -187,54 +187,44 @@ func TestDraftsRouteReturnsServiceUnavailableWhenDisabled(t *testing.T) {
 	}
 }
 
-func TestSyncViewMetadataFromPatchedDefinitionUsesDefinitionValues(t *testing.T) {
+func TestSyncNameDescriptionPrefersTopLevelOverDefinition(t *testing.T) {
 	view := &types.View{
-		Name:        "Old name",
-		Description: "Old description",
+		Name:        "Top name",
+		Description: "Top desc",
 		Definition: types.ViewDefinition{
-			Name:        "Old name",
-			Description: "Old description",
+			Name:        "Def name",
+			Description: "Def desc",
 		},
 	}
-	req := updateViewRequest{
-		Definition: &types.ViewDefinition{
-			Name:        "New nested name",
-			Description: "New nested description",
-		},
-	}
+	view.SyncNameDescription()
 
-	syncViewMetadataFromPatchedDefinition(view, req)
-
-	if got := view.Name; got != "New nested name" {
-		t.Fatalf("view name = %q, want %q", got, "New nested name")
+	if got := view.Name; got != "Top name" {
+		t.Fatalf("view.Name = %q, want %q", got, "Top name")
 	}
-	if got := view.Description; got != "New nested description" {
-		t.Fatalf("view description = %q, want %q", got, "New nested description")
+	if got := view.Definition.Name; got != "Top name" {
+		t.Fatalf("view.Definition.Name = %q, want %q", got, "Top name")
+	}
+	if got := view.Description; got != "Top desc" {
+		t.Fatalf("view.Description = %q, want %q", got, "Top desc")
+	}
+	if got := view.Definition.Description; got != "Top desc" {
+		t.Fatalf("view.Definition.Description = %q, want %q", got, "Top desc")
 	}
 }
 
-func TestSyncViewMetadataFromPatchedDefinitionRespectsExplicitTopLevelPatch(t *testing.T) {
-	topLevelName := "Explicit top-level"
-	topLevelDescription := "Explicit description"
+func TestSyncNameDescriptionFallsBackToDefinition(t *testing.T) {
 	view := &types.View{
-		Name:        "Old name",
-		Description: "Old description",
-	}
-	req := updateViewRequest{
-		Name:        &topLevelName,
-		Description: &topLevelDescription,
-		Definition: &types.ViewDefinition{
-			Name:        "Nested name",
-			Description: "Nested description",
+		Definition: types.ViewDefinition{
+			Name:        "Def name",
+			Description: "Def desc",
 		},
 	}
+	view.SyncNameDescription()
 
-	syncViewMetadataFromPatchedDefinition(view, req)
-
-	if got := view.Name; got != "Old name" {
-		t.Fatalf("view name = %q, want unchanged old value", got)
+	if got := view.Name; got != "Def name" {
+		t.Fatalf("view.Name = %q, want %q", got, "Def name")
 	}
-	if got := view.Description; got != "Old description" {
-		t.Fatalf("view description = %q, want unchanged old value", got)
+	if got := view.Definition.Name; got != "Def name" {
+		t.Fatalf("view.Definition.Name = %q, want %q", got, "Def name")
 	}
 }

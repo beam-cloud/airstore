@@ -44,6 +44,8 @@ func NewViewsGroup(g *echo.Group, backend repository.BackendRepository, copilot 
 	if store.Available() {
 		vg.g.PATCH("/:view_id/sheets/:sheet_id/rows/:row_id", vg.UpdateRow)
 		vg.g.POST("/:view_id/sheets/:sheet_id/rows/:row_id/regenerate", vg.RegenerateRow)
+		vg.g.DELETE("/:view_id/sheets/:sheet_id/rows/:row_id", vg.ExcludeRow)
+		vg.g.POST("/:view_id/sheets/:sheet_id/rows/:row_id/restore", vg.RestoreRow)
 	}
 	vg.g.POST("/drafts", vg.CreateDraft)
 	vg.g.GET("/drafts", vg.ListDrafts)
@@ -94,6 +96,8 @@ func (vg *ViewsGroup) Create(c echo.Context) error {
 		Description: req.Description,
 		Definition:  req.Definition,
 	}
+	views.NormalizeDefinition(&v.Definition)
+	v.SyncNameDescription()
 	if err := vg.backend.CreateView(c.Request().Context(), v); err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
@@ -150,11 +154,20 @@ func (vg *ViewsGroup) Update(c echo.Context) error {
 	}
 	if req.Definition != nil {
 		v.Definition = *req.Definition
-		syncViewMetadataFromPatchedDefinition(v, req)
+		if req.Name == nil && strings.TrimSpace(v.Definition.Name) != "" {
+			v.Name = v.Definition.Name
+		}
+		if req.Description == nil && strings.TrimSpace(v.Definition.Description) != "" {
+			v.Description = v.Definition.Description
+		}
 	}
 	if len(req.ColumnRenames) > 0 {
 		applyColumnRenamesToDefinition(&v.Definition, req.ColumnRenames)
 	}
+	if req.Definition != nil || len(req.ColumnRenames) > 0 {
+		views.NormalizeDefinition(&v.Definition)
+	}
+	v.SyncNameDescription()
 	if err := vg.backend.UpdateView(ctx, v); err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
@@ -207,18 +220,6 @@ func (vg *ViewsGroup) Delete(c echo.Context) error {
 		}
 	}
 	return SuccessResponse(c, nil)
-}
-
-func syncViewMetadataFromPatchedDefinition(v *types.View, req updateViewRequest) {
-	if v == nil || req.Definition == nil {
-		return
-	}
-	if req.Name == nil && strings.TrimSpace(req.Definition.Name) != "" {
-		v.Name = req.Definition.Name
-	}
-	if req.Description == nil && strings.TrimSpace(req.Definition.Description) != "" {
-		v.Description = req.Definition.Description
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -551,6 +552,38 @@ func (vg *ViewsGroup) UpdateRow(c echo.Context) error {
 }
 
 // ---------------------------------------------------------------------------
+// Row exclusion (soft-delete)
+// ---------------------------------------------------------------------------
+
+func (vg *ViewsGroup) ExcludeRow(c echo.Context) error {
+	if vg.store == nil || !vg.store.Available() {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "view row persistence not configured")
+	}
+	viewID := c.Param("view_id")
+	sheetID := c.Param("sheet_id")
+	rowID := c.Param("row_id")
+	if err := vg.store.ExcludeRow(c.Request().Context(), viewID, sheetID, rowID); err != nil {
+		log.Error().Err(err).Str("view_id", viewID).Str("sheet_id", sheetID).Str("row_id", rowID).Msg("failed to exclude row")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to exclude row")
+	}
+	return SuccessResponse(c, map[string]any{"sheet_id": sheetID, "row_id": rowID, "excluded": true})
+}
+
+func (vg *ViewsGroup) RestoreRow(c echo.Context) error {
+	if vg.store == nil || !vg.store.Available() {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "view row persistence not configured")
+	}
+	viewID := c.Param("view_id")
+	sheetID := c.Param("sheet_id")
+	rowID := c.Param("row_id")
+	if err := vg.store.RestoreRow(c.Request().Context(), viewID, sheetID, rowID); err != nil {
+		log.Error().Err(err).Str("view_id", viewID).Str("sheet_id", sheetID).Str("row_id", rowID).Msg("failed to restore row")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to restore row")
+	}
+	return SuccessResponse(c, map[string]any{"sheet_id": sheetID, "row_id": rowID, "excluded": false})
+}
+
+// ---------------------------------------------------------------------------
 // Row regeneration
 // ---------------------------------------------------------------------------
 
@@ -608,6 +641,9 @@ func (vg *ViewsGroup) RegenerateRow(c echo.Context) error {
 		ViewAgentRefs: v.Definition.Agents,
 	})
 	if err != nil {
+		if errors.Is(err, views.ErrNoOutputsForTask) {
+			return ErrorResponse(c, http.StatusNotFound, "no outputs found for this task")
+		}
 		log.Error().Err(err).
 			Str("view_id", viewID).
 			Str("sheet_id", sheetID).
@@ -649,7 +685,8 @@ type createViewDraftResponse struct {
 }
 
 type viewChatRequest struct {
-	Message string `json:"message"`
+	Message     string `json:"message"`
+	ViewContent string `json:"view_content,omitempty"`
 }
 
 type viewSSEEvent struct {
@@ -881,6 +918,13 @@ func (vg *ViewsGroup) ChatDraft(c echo.Context) error {
 
 	session.mu.Lock()
 	defer session.mu.Unlock()
+
+	if trimmed := strings.TrimSpace(req.ViewContent); trimmed != "" && trimmed != session.draft.ViewContent {
+		session.draft.ViewContent = trimmed
+		if err := vg.copilot.PersistViewContent(genCtx, session.draft.ID, trimmed); err != nil {
+			log.Warn().Err(err).Str("draft_id", session.draft.ID).Msg("failed to persist latest view content before chat")
+		}
+	}
 
 	resp, err := vg.copilot.GenerateStream(
 		genCtx,

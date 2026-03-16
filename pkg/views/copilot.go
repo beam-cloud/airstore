@@ -586,28 +586,67 @@ func normalizeViewDefinition(def *types.ViewDefinition) {
 	if len(referenced) > 0 {
 		def.Agents = referenced
 	}
+	seenSheetIDs := make(map[string]struct{}, len(def.Sheets))
 	for i := range def.Sheets {
 		sheet := &def.Sheets[i]
-		sheet.ID = strings.TrimSpace(sheet.ID)
+		sheet.ID = ensureUniqueViewScopedID("sheet", sheet.ID, seenSheetIDs)
 		sheet.Name = strings.TrimSpace(sheet.Name)
 		sheet.Description = strings.TrimSpace(sheet.Description)
 		if sheet.Layout.Columns <= 0 {
 			sheet.Layout.Columns = 12
 		}
+		seenRelationIDs := make(map[string]struct{}, len(sheet.Relations))
 		for j := range sheet.Relations {
-			sheet.Relations[j].ID = strings.TrimSpace(sheet.Relations[j].ID)
+			sheet.Relations[j].ID = ensureUniqueViewScopedID("relation", sheet.Relations[j].ID, seenRelationIDs)
 			sheet.Relations[j].Name = strings.TrimSpace(sheet.Relations[j].Name)
 			sheet.Relations[j].ToSheetID = strings.TrimSpace(sheet.Relations[j].ToSheetID)
 			sheet.Relations[j].FromColumn = normalizeColumnKey(sheet.Relations[j].FromColumn)
 			sheet.Relations[j].ToColumn = normalizeColumnKey(sheet.Relations[j].ToColumn)
 		}
+		seenComponentIDs := make(map[string]struct{}, len(sheet.Components))
 		for j := range sheet.Components {
+			sheet.Components[j].ID = ensureUniqueViewScopedID(componentIDPrefix(sheet.Components[j].Type), sheet.Components[j].ID, seenComponentIDs)
 			if ds := sheet.Components[j].DataSource; ds != nil {
 				normalizeDataSource(ds)
 			}
 			normalizeAgentConfig(sheet.Components[j].Config)
 			normalizeComponentConfig(&sheet.Components[j])
 		}
+	}
+}
+
+// NormalizeDefinition canonicalizes a view definition for persistence.
+// It enforces the same schema invariants used by the copilot publish path.
+func NormalizeDefinition(def *types.ViewDefinition) {
+	normalizeViewDefinition(def)
+}
+
+func ensureUniqueViewScopedID(prefix, raw string, seen map[string]struct{}) string {
+	id := strings.TrimSpace(raw)
+	if id != "" {
+		if _, exists := seen[id]; !exists {
+			seen[id] = struct{}{}
+			return id
+		}
+	}
+	for {
+		candidate := prefix + "-" + uuid.NewString()
+		if _, exists := seen[candidate]; exists {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		return candidate
+	}
+}
+
+func componentIDPrefix(componentType string) string {
+	switch strings.TrimSpace(strings.ToLower(componentType)) {
+	case types.ComponentTypeTable:
+		return "table"
+	case types.ComponentTypeAction:
+		return "action"
+	default:
+		return "component"
 	}
 }
 
