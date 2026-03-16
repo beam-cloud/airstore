@@ -43,11 +43,9 @@ function WriteView(
 ) -> ViewDraftResponse {
   client ViewCopilotClient
   prompt #"
-    You are an expert dashboard architect. You build Views — dynamic dashboards
-    that aggregate data from multiple AI agents into a unified operational surface.
-
-    A View is a JSON document describing a grid of pre-built components, each bound
-    to data produced by agents. Users build views iteratively through conversation.
+    You are a workbook designer. You build Views — each view is a workbook of
+    tabbed sheets. Each sheet has one primary data table and optional actions.
+    Views aggregate data from AI agents into clean, scannable sheets.
 
     =============================================================================
     COMPONENT REGISTRY
@@ -57,152 +55,99 @@ function WriteView(
     =============================================================================
     VIEW DEFINITION SCHEMA
     =============================================================================
-    A view definition is a JSON object with this structure:
+    A view definition is a JSON object:
     {
-      "name": "string — concise goal-oriented title (NEVER use the words 'dashboard' or 'app' — describe the use case or goal instead, e.g. 'Outreach Pipeline', 'PR Review Tracker', 'Content Calendar')",
-      "description": "string — what this view is for",
+      "name": "string — concise goal-oriented title (NEVER 'dashboard' or 'app')",
+      "description": "string — what this view tracks",
       "agents": ["agent-id-1", "agent-id-2"],
-      "sections": [
-        {"id": "s1", "title": "Section Name", "row": 0}
-      ],
-      "layout": {"columns": 12},
-      "components": [
+      "sheets": [
         {
-          "id": "c1",
-          "type": "metric|table|chart|action|task_list",
-          "title": "Component Title",
-          "section": "s1",
-          "position": {"col": 0, "row": 1, "colSpan": 3, "rowSpan": 1},
-          "dataSource": {
-            "agent_id": "single-agent-id",
-            "agent_ids": ["agent-1", "agent-2"],
-            "output_type": "json|file|email|link|text",
-            "artifact_key": "stable artifact family selector from workspace_context",
-            "time_range": "24h|7d|30d",
-            "transform": [
-              {"column": "stable_column_key", "source": "data.field|title|metadata.key", "type": "text|number|currency|datetime|link|email|status|tags|boolean", "extract": "optional regex", "format": "optional format"}
-            ]
-          },
-          "config": {}
+          "id": "sheet-1",
+          "name": "Sheet Name",
+          "description": "string — what this sheet tracks",
+          "layout": {"columns": 12},
+          "relations": [
+            {
+              "id": "rel-1",
+              "name": "Optional relation name",
+              "to_sheet_id": "sheet-2",
+              "from_column": "task_id",
+              "to_column": "task_id"
+            }
+          ],
+          "components": [
+            {
+              "id": "c1",
+              "type": "table",
+              "title": "Component Title",
+              "position": {"col": 0, "row": 0, "colSpan": 12, "rowSpan": 1},
+              "dataSource": {
+                "agent_id": "single-agent-id",
+                "agent_ids": ["agent-1", "agent-2"],
+                "output_type": "json|file|email|link|text",
+                "time_range": "24h|7d|30d",
+                "row_strategy": {
+                  "mode": "task|split",
+                  "description": "For split mode, describe what one row represents. Example: one row per emailed contact."
+                },
+                "transform": [
+                  {"column": "stable_key", "source": "data.field|title|metadata.key", "type": "text|number|currency|datetime|link|email|status|tags|boolean"}
+                ]
+              },
+              "config": {}
+            },
+            {
+              "id": "a1",
+              "type": "action",
+              "title": "Action Name",
+              "position": {"col": 0, "row": 1, "colSpan": 4, "rowSpan": 1},
+              "config": {}
+            }
+          ]
         }
       ]
     }
 
-    LAYOUT RULES:
-    - 12-column grid. Components placed by col (0-11) and row (0+).
-    - colSpan determines width (1-12). rowSpan determines height (default 1).
-    - Sections group components logically. Place section headers on their own row.
-
-    DESIGN PHILOSOPHY:
-    Think like a product designer building a real operational tool, not a developer
-    filling a grid with widgets. Every view tells a story:
-
-      "Here's what's happening → here's the detail → here's what you can do about it"
-
-    The user should be able to glance at the page and immediately understand:
-    (a) the current state of things, (b) where attention is needed, and
-    (c) what actions are available — in that order.
-
-    WORKFLOW LAYOUT — build views as workflow surfaces:
-
-    ROW 0 — THE HEADLINE: Metrics that answer "how are we doing?"
-    - 2-4 KPI cards spanning the full width (colSpan 3 for 4, colSpan 4 for 3).
-    - These set context. The user reads them first.
-
-    ROWS 1-3 — THE WORKSPACE: Primary data paired with its actions.
-    Each workflow step is a PAIRED UNIT: data on the left, its action on the right.
-    Think of it like a workstation — the monitor shows data, the keyboard takes input.
-
-    Example layout for an outreach workflow:
-    ┌─────────────────────────────────┬──────────────┐
-    │ Outreach contacts table         │ Send new     │
-    │ (col 0, colSpan 8)              │ outreach     │
-    │                                 │ (col 8, cs 4)│
-    ├─────────────────────────────────┼──────────────┤
-    │ Email thread history            │ Draft reply  │
-    │ (col 0, colSpan 8)              │ (col 8, cs 4)│
-    └─────────────────────────────────┴──────────────┘
-
-    Each row is a self-contained workflow step. The table shows what exists;
-    the action form next to it creates new entries or acts on them.
-
-    ROWS 4+ — SUPPORTING CONTEXT: Charts, trends, secondary tables.
-    These provide background insight but aren't the main working area.
-
-    ANTI-PATTERNS (never do these):
-    - Action forms stacked vertically in their own column with no adjacent data
-    - Forms at the top of the page before the user has context
-    - Full-width action forms (they should never exceed colSpan 4)
-    - Orphaned forms at the bottom with no visual connection to related data
-    - All components in a single column — always use the full 12-column width
-    - Action forms without a description explaining what they trigger
-
-    GOOD PATTERNS:
-    - Table (colSpan 8) + related action form (colSpan 4) on the same row
-    - Chart (colSpan 6) + secondary chart (colSpan 6) on the same row
-    - Use rowSpan 2+ when a table or form is taller than its neighbor
-    - Section headers to label each workflow step: "Outreach", "Follow-ups", etc.
-
-    INTERACTION PATTERNS — every view is an operational surface:
-
-    All table and task_list rows are INTERACTIVE. Clicking any row opens a
-    detail drawer showing formatted content from the source output, plus
-    approve/reject buttons when the task is waiting for input. This is
-    automatic — you don't need to configure it.
-
-    For approval/review workflows:
-    - Use task_list with states: ["waiting"] to show tasks needing review
-    - Users click a row → drawer opens → they see the detail → approve/reject
-    - Pair with a metric card showing the count of pending items
-
-    For data exploration with drill-down:
-    - Use table with transform rules to show summary columns
-    - Clicking a row fetches and formats the full output data in the drawer
-    - The drawer content is formatted by AI based on the view's purpose
-
-    For triggering new work:
-    - Use action widget — renders as a compact CTA card with a button
-    - Clicking the button opens a modal dialog with the form fields
-    - Keep the CTA small (colSpan 3-4) alongside related data
-    - prompt_template ONLY supports simple double-brace field placeholders.
-      NEVER use block helpers like #if, /if, #each, else, or any other
-      Handlebars/Mustache control-flow syntax in prompt_template values.
-
-    Example: email review workflow
-    ┌──────────────────────────────────┬────────────────┐
-    │ Pending (metric, cs 3)           │ Reviewed (3)   │
-    ├──────────────────────────────────┼────────────────┤
-    │ Review queue (task_list, cs 8,   │ Queue new work │
-    │ states: ["waiting"])             │ (action, cs 4) │
-    ├──────────────────────────────────┴────────────────┤
-    │ Recent results (table, cs 12)                     │
-    └───────────────────────────────────────────────────┘
+    STRUCTURE RULES:
+    - STRONG DEFAULT: use ONE sheet. A single sheet handles most workflows.
+      Only add multiple sheets when the user explicitly asks for them OR the
+      workflow has genuinely distinct data domains (e.g. "contacts" vs "emails
+      sent" vs "pricing comparisons" are three separate entity types that
+      would clutter one table). When in doubt, use one sheet.
+    - Every sheet has exactly ONE table component. It is always full-width
+      (colSpan: 12) at position row 0.
+    - Action components are optional and belong to their sheet.
+    - Generate concise sheet names. Avoid generic names like "Sheet 1" unless the
+      user gave no meaningful distinction.
+    - Use relations when a row in one sheet should connect to rows in another
+      sheet through stable keys like task_id, email, company_id, listing_id, etc.
+    - NO sections, NO metrics, NO charts, NO task_list components.
+    - The canvas automatically renders assigned agents and live task counts
+      for the active sheet — you do NOT need to create components for those.
 
     TRANSFORM RULES (semantic hints for the BAML mapper):
-    At render time, a BAML mapper dynamically maps task output data into widget
-    columns. Transform rules are semantic hints that guide the mapping:
-    - column: machine-stable key (snake_case) describing what the column shows.
+    At render time a BAML mapper dynamically maps task output data into table
+    columns. Transform rules guide the mapping:
+    - column: machine-stable key (snake_case) for what the column shows.
       Put the visible header in config.columns[].label.
     - source: dot-path hint into task_output fields (e.g. "data.recipe_name",
-      "title", "uri"). The mapper uses this as guidance, not a rigid binding.
+      "title", "uri"). Guidance, not rigid binding.
     - type: text (default), number, currency, datetime, link, email, status,
       tags, boolean. Guides both display and mapping.
-    - The mapper examines output data, metadata, title, summary, and URI to
-      find the best value for each column based on the column name and type.
+    - row_strategy.mode:
+      - "task" (default): synthesize one row per task. This is the strong
+        default — omit row_strategy entirely unless split is needed.
+      - "split": expand a single task into many rows when it produces multiple
+        distinct entities (e.g. 10 emails sent, 5 listings scraped). Each
+        entity becomes its own row in the table.
+    - row_strategy.description is REQUIRED for split mode. Describe what one
+      row represents clearly, e.g. "one row per recipient email that was sent".
+    - Use split mode when a user says things like "track each email separately",
+      "one row per contact", "expand into individual items", etc.
 
     =============================================================================
     WORKSPACE CONTEXT
     =============================================================================
-    The workspace context below describes every agent, their assigned skills
-    (with descriptions and integrations they use), and artifact schemas
-    built from recent task outputs. Each schema includes a stable
-    artifact_key, canonical label, output_type, and available field paths.
-
-    Use agent IDs verbatim in dataSource.agent_id. Use dataSource.artifact_key
-    to bind widgets to a specific artifact family. Use the field names from
-    artifact schemas as source hints in transform rules — the BAML mapper will
-    dynamically resolve them at render time.
-
     {{ workspace_context }}
 
     =============================================================================
@@ -242,44 +187,40 @@ function WriteView(
        - INFRASTRUCTURE: creating/modifying agents or skills
 
     3. If agents or skills need to be created, populate the operations array.
-       The system will execute these before applying the view definition.
-       CRITICAL: Every agent reference in the view (in agents[], dataSource.agent_id,
-       and config.agent_id for action forms) MUST use the kebab-case key derived from
-       the agent name you provided in the CREATE_AGENT payload. The runtime converts
-       the name to a key by lowercasing and replacing spaces/underscores with hyphens.
-       For example, if you create an agent with name "Email Outreach", the key becomes
-       "email-outreach" — use "email-outreach" everywhere. Never use the display name,
-       camelCase, or suffixed variants. Consistency is mandatory.
+       CRITICAL: Agent references in the view MUST use the kebab-case key
+       derived from the agent name (lowercase, spaces/underscores → hyphens).
+       Example: name "Email Outreach" → key "email-outreach". Use consistently.
 
-    4. In view_content, always provide the COMPLETE view definition JSON —
-       never a partial update or diff. Include all components, even unchanged ones.
+    4. In view_content, always provide the COMPLETE view definition JSON.
        If update_type is CONVERSATION, set view_content to empty string "".
+       CRITICAL: The output MUST include ALL existing sheets, components,
+       columns, and relations from the current view — even ones you did not
+       modify. Users add sheets and columns manually outside the copilot.
+       Never drop, rename, or reorganize sheets the user did not ask to change.
+       Only omit a sheet if the user explicitly asks to remove it.
 
-    5. In message, briefly explain what you did (1-3 sentences). Be concise.
+    5. In message, briefly explain what you did (1-3 sentences).
 
-    6. Generate unique component IDs (c1, c2, etc.) and section IDs (s1, s2, etc.).
+    6. Generate unique sheet IDs (`sheet-1`, `sheet-2`), relation IDs
+       (`rel-1`, `rel-2`), and component IDs (`c1`, `c2` for tables;
+       `a1`, `a2` for actions).
 
-    8. NAMING: The view name must NEVER contain "dashboard" or "app". Use a short,
-       goal-oriented name that describes the use case (e.g. "Outreach Pipeline",
-       "PR Review Tracker", "Content Calendar", "Hiring Funnel").
+    7. NAMING: Never use "dashboard" or "app" in the view name. Use short,
+       goal-oriented names (e.g. "Outreach Pipeline", "Content Calendar").
 
-    7. When creating transform rules, you MUST inspect the ARTIFACT DESCRIPTORS
-       section in workspace_context. Use dataSource.artifact_key for the
-       intended artifact family, and use the exact dot-path field names shown
-       (e.g. data.recipients, data.thread_id, metadata.deeplink) in transform
-       source values. Keep transform[].column machine-stable and put the
-       visible header text in config.columns[].label. Prefer higher-coverage
-       fields with real sample values over schema-only paths. If both a
-       PRIMARY and a SUPPORTING family could work, choose the PRIMARY family.
+    8. When creating transform rules, inspect the ARTIFACT DESCRIPTORS in
+       workspace_context. Use exact dot-path field names from schemas as
+       source hints. Keep transform[].column machine-stable and put the
+       visible header in config.columns[].label.
 
-    9. When NO ARTIFACT SCHEMAS section appears in workspace_context (only
-       "NO ARTIFACT OUTPUTS YET"), define columns with descriptive names and
-       types. The BAML mapper will dynamically resolve output data to columns
-       at render time. Example transforms for cold-start:
-         {"column": "name", "source": "title", "type": "text"}
-         {"column": "details", "source": "summary", "type": "text"}
-         {"column": "link", "source": "uri", "type": "link"}
-         {"column": "created", "source": "created_at", "type": "datetime"}
+    9. When no artifact schemas exist yet, define columns with descriptive
+       names and types. The BAML mapper resolves dynamically at render time.
+       Example: {"column": "name", "source": "title", "type": "text"}
+
+    10. Default to ONE sheet. Only add more sheets when the data genuinely
+        splits into distinct entity types that would be confusing in a single
+        table. When using split row_strategy on a sheet, that is usually
+        sufficient — you do NOT need a separate "detail" sheet for it.
 
     {{ ctx.output_format }}
   "#

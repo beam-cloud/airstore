@@ -143,6 +143,14 @@ func (t *MappedRowClassView) PropertyTask_id() (ClassPropertyView, error) {
 	return t.inner.Property("task_id")
 }
 
+func (t *MappedRowClassView) PropertyRow_key() (ClassPropertyView, error) {
+	return t.inner.Property("row_key")
+}
+
+func (t *MappedRowClassView) PropertySource_output_ids() (ClassPropertyView, error) {
+	return t.inner.Property("source_output_ids")
+}
+
 func (t *MappedRowClassView) PropertyCells() (ClassPropertyView, error) {
 	return t.inner.Property("cells")
 }

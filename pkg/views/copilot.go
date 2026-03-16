@@ -359,6 +359,11 @@ func (c *Copilot) GenerateStream(
 		if normalized, err := normalizeViewContent(final.View_content, workspaceAgents); err == nil {
 			final.View_content = normalized
 		}
+		if draft.ViewContent != "" {
+			if merged, err := mergePreserveSheets(draft.ViewContent, final.View_content); err == nil {
+				final.View_content = merged
+			}
+		}
 	}
 
 	_ = c.persistDraft(ctx, draft.ID, "message", final.Message, "assistant", "")
@@ -487,21 +492,91 @@ func (c *Copilot) ReconcileViewContent(ctx context.Context, workspaceID uint, vi
 	return string(normalized), nil
 }
 
+// mergePreserveSheets ensures that sheets present in the previous view
+// definition but absent from the new one are carried forward. This prevents
+// the LLM from accidentally dropping user-added sheets or components.
+func mergePreserveSheets(previousContent, newContent string) (string, error) {
+	var prev, next types.ViewDefinition
+	if err := json.Unmarshal([]byte(previousContent), &prev); err != nil {
+		return newContent, nil
+	}
+	if err := json.Unmarshal([]byte(newContent), &next); err != nil {
+		return newContent, nil
+	}
+
+	newSheetIDs := make(map[string]bool, len(next.Sheets))
+	for _, s := range next.Sheets {
+		newSheetIDs[s.ID] = true
+	}
+
+	changed := false
+	for _, oldSheet := range prev.Sheets {
+		if !newSheetIDs[oldSheet.ID] {
+			next.Sheets = append(next.Sheets, oldSheet)
+			changed = true
+			log.Info().
+				Str("sheet_id", oldSheet.ID).
+				Str("sheet_name", oldSheet.Name).
+				Msg("copilot merge: restored user-added sheet dropped by LLM")
+		}
+	}
+
+	// Preserve agents from old definition that aren't in the new one.
+	if len(prev.Agents) > 0 {
+		agentSet := make(map[string]bool, len(next.Agents))
+		for _, a := range next.Agents {
+			agentSet[a] = true
+		}
+		for _, a := range prev.Agents {
+			if !agentSet[a] {
+				next.Agents = append(next.Agents, a)
+				changed = true
+			}
+		}
+	}
+
+	if !changed {
+		return newContent, nil
+	}
+
+	merged, err := json.Marshal(next)
+	if err != nil {
+		return newContent, nil
+	}
+	return string(merged), nil
+}
+
 func normalizeViewDefinition(def *types.ViewDefinition) {
 	if def == nil {
 		return
 	}
 	def.Agents = uniqueTrimmedStrings(def.Agents)
-	referenced := collectComponentAgentRefs(def.Components)
+	referenced := collectSheetAgentRefs(def.Sheets)
 	if len(referenced) > 0 {
 		def.Agents = referenced
 	}
-	for i := range def.Components {
-		if ds := def.Components[i].DataSource; ds != nil {
-			normalizeDataSource(ds)
+	for i := range def.Sheets {
+		sheet := &def.Sheets[i]
+		sheet.ID = strings.TrimSpace(sheet.ID)
+		sheet.Name = strings.TrimSpace(sheet.Name)
+		sheet.Description = strings.TrimSpace(sheet.Description)
+		if sheet.Layout.Columns <= 0 {
+			sheet.Layout.Columns = 12
 		}
-		normalizeAgentConfig(def.Components[i].Config)
-		normalizeComponentConfig(&def.Components[i])
+		for j := range sheet.Relations {
+			sheet.Relations[j].ID = strings.TrimSpace(sheet.Relations[j].ID)
+			sheet.Relations[j].Name = strings.TrimSpace(sheet.Relations[j].Name)
+			sheet.Relations[j].ToSheetID = strings.TrimSpace(sheet.Relations[j].ToSheetID)
+			sheet.Relations[j].FromColumn = normalizeColumnKey(sheet.Relations[j].FromColumn)
+			sheet.Relations[j].ToColumn = normalizeColumnKey(sheet.Relations[j].ToColumn)
+		}
+		for j := range sheet.Components {
+			if ds := sheet.Components[j].DataSource; ds != nil {
+				normalizeDataSource(ds)
+			}
+			normalizeAgentConfig(sheet.Components[j].Config)
+			normalizeComponentConfig(&sheet.Components[j])
+		}
 	}
 }
 
@@ -514,22 +589,39 @@ func normalizeDataSource(ds *types.DataSource) {
 	ds.OutputType = strings.TrimSpace(ds.OutputType)
 	ds.ArtifactKey = normalizeToken(ds.ArtifactKey)
 	ds.TimeRange = strings.TrimSpace(ds.TimeRange)
+	if ds.RowStrategy != nil {
+		ds.RowStrategy.Description = strings.TrimSpace(ds.RowStrategy.Description)
+		switch strings.ToLower(strings.TrimSpace(ds.RowStrategy.Mode)) {
+		case "", types.RowStrategyModeTask:
+			if ds.RowStrategy.Description == "" {
+				ds.RowStrategy = nil
+			} else {
+				ds.RowStrategy.Mode = types.RowStrategyModeTask
+			}
+		case types.RowStrategyModeSplit:
+			ds.RowStrategy.Mode = types.RowStrategyModeSplit
+		default:
+			ds.RowStrategy = nil
+		}
+	}
 }
 
-func collectComponentAgentRefs(components []types.ComponentSpec) []string {
+func collectSheetAgentRefs(sheets []types.SheetSpec) []string {
 	var refs []string
-	for _, comp := range components {
-		if ds := comp.DataSource; ds != nil {
-			refs = append(refs, ds.AgentID)
-			refs = append(refs, ds.AgentIDs...)
+	for _, sheet := range sheets {
+		for _, comp := range sheet.Components {
+			if ds := comp.DataSource; ds != nil {
+				refs = append(refs, ds.AgentID)
+				refs = append(refs, ds.AgentIDs...)
+			}
+			if comp.Config == nil {
+				continue
+			}
+			if ref, _ := comp.Config["agent_id"].(string); ref != "" {
+				refs = append(refs, ref)
+			}
+			refs = append(refs, configAgentIDs(comp.Config["agent_ids"])...)
 		}
-		if comp.Config == nil {
-			continue
-		}
-		if ref, _ := comp.Config["agent_id"].(string); ref != "" {
-			refs = append(refs, ref)
-		}
-		refs = append(refs, configAgentIDs(comp.Config["agent_ids"])...)
 	}
 	return uniqueTrimmedStrings(refs)
 }
@@ -550,11 +642,11 @@ func normalizeComponentConfig(comp *types.ComponentSpec) {
 	if comp == nil {
 		return
 	}
-	normalizeLegacyWidgetConfig(comp.Config)
+	normalizeLegacyComponentConfig(comp.Config)
 	normalizeTransformColumns(comp)
 }
 
-func normalizeLegacyWidgetConfig(config map[string]any) {
+func normalizeLegacyComponentConfig(config map[string]any) {
 	if config == nil {
 		return
 	}
@@ -802,21 +894,23 @@ func canonicalizeViewAgentRefs(def *types.ViewDefinition, agents []*types.AgentP
 	}
 	resolver := buildAgentReferenceResolver(agents, opResults)
 	def.Agents = canonicalizeAgentRefList(def.Agents, resolver)
-	for i := range def.Components {
-		if ds := def.Components[i].DataSource; ds != nil {
-			ds.AgentID = canonicalizeAgentRef(ds.AgentID, resolver)
-			ds.AgentIDs = canonicalizeAgentRefList(ds.AgentIDs, resolver)
-		}
-		if def.Components[i].Config == nil {
-			continue
-		}
-		if ref, ok := def.Components[i].Config["agent_id"].(string); ok {
-			if canonical := canonicalizeAgentRef(ref, resolver); canonical != "" {
-				def.Components[i].Config["agent_id"] = canonical
+	for i := range def.Sheets {
+		for j := range def.Sheets[i].Components {
+			if ds := def.Sheets[i].Components[j].DataSource; ds != nil {
+				ds.AgentID = canonicalizeAgentRef(ds.AgentID, resolver)
+				ds.AgentIDs = canonicalizeAgentRefList(ds.AgentIDs, resolver)
 			}
-		}
-		if ids := configAgentIDs(def.Components[i].Config["agent_ids"]); len(ids) > 0 {
-			def.Components[i].Config["agent_ids"] = canonicalizeAgentRefList(ids, resolver)
+			if def.Sheets[i].Components[j].Config == nil {
+				continue
+			}
+			if ref, ok := def.Sheets[i].Components[j].Config["agent_id"].(string); ok {
+				if canonical := canonicalizeAgentRef(ref, resolver); canonical != "" {
+					def.Sheets[i].Components[j].Config["agent_id"] = canonical
+				}
+			}
+			if ids := configAgentIDs(def.Sheets[i].Components[j].Config["agent_ids"]); len(ids) > 0 {
+				def.Sheets[i].Components[j].Config["agent_ids"] = canonicalizeAgentRefList(ids, resolver)
+			}
 		}
 	}
 }
@@ -1388,87 +1482,76 @@ func describeFields(m map[string]any, prefix string, out map[string]string, dept
 // Component registry documentation — injected into BAML prompt
 // ---------------------------------------------------------------------------
 
-const ComponentRegistryDoc = `Available component types:
+const ComponentRegistryDoc = `A view is a workbook of tabbed sheets.
+Each sheet has a header bar that shows assigned agents, live task counts, and action buttons.
+Each sheet has exactly one primary table.
 
-- metric: Single KPI card. Config: {label, format?, prefix?, suffix?}. Data: expects single value from first output.
+COMPONENT TYPES (only two):
 
-- table: Rich data table with sorting, filtering, pagination, and typed columns.
-  Clicking any row opens a detail drawer with formatted content (automatic).
-
-  DataSource: prefer artifact_key to bind the table to a single artifact family.
-
-  COLUMN MAPPING: At render time, a BAML mapper dynamically maps task output
-  data into the widget's column schema. Transform rules serve as semantic hints:
-  - column: machine-stable key (snake_case) describing what the column represents
-  - source: dot-path hint for the mapper (e.g. "data.recipe_name", "title")
-  - type: display type hint (text, number, link, date, etc.)
-  The mapper uses the column name, type, and source hint along with the actual
-  output data/metadata to find the best value for each cell.
+- table: The sheet's data table. Full-width, always present.
+  At render time a BAML mapper dynamically maps task output data into the
+  column schema. Transform rules and row strategy are semantic hints that guide
+  the mapping:
+  - column: machine-stable key (snake_case) describing what the column shows
+  - source: dot-path hint (e.g. "data.recipe_name", "title", "uri")
+  - type: display type (text, number, currency, date, link, email, status, tags, boolean)
+  - row_strategy:
+    - mode: "task" (default): synthesize one row per task — works great
+      for most use cases. Omit row_strategy entirely to use this default.
+    - mode: "split": expand a single task into many rows when the task
+      produces multiple distinct entities (e.g. 10 emails sent, 5 listings
+      scraped, 8 contacts researched). Each entity becomes its own row.
+    - description: REQUIRED for split mode. Clearly describe what one row
+      represents, e.g. "one row per email recipient" or "one row per property
+      listing". This guides the mapper to separate entities correctly.
 
   Config: {
     columns: [{
-      key: "column_name",       // stable key matching transform rule column
-      label: "Display Name",    // human-readable header — guides the BAML mapper
+      key: "column_name",
+      label: "Display Name",
       type: "text|number|currency|date|link|email|status|tags|boolean",
       format?: "$" | "relative" | "short_date",
-      frozen?: true,            // sticky first column for primary identifier
-      options?: [               // only for type: "status"
-        {"value": "Lead", "color": "blue"},
-        {"value": "Contacted", "color": "yellow"},
-        {"value": "Won", "color": "green"},
-        {"value": "Lost", "color": "red"}
-      ]
+      frozen?: true,
+      options?: [{"value": "Lead", "color": "blue"}]
     }],
     pageSize?: 25,
     defaultSort?: {"column": "created_at", "direction": "desc"}
   }
 
-  Column types and when to use them:
-  - text: default. Truncated with copy button for long values.
-  - number: right-aligned, locale-formatted (1,234).
-  - currency: number with prefix symbol. Set format to "$", "EUR", etc.
-  - date: shows relative time ("2h ago") with full date on hover.
-  - link: clickable external link showing domain name.
-  - email: clickable mailto link with mail icon.
-  - status: colored pill/badge. MUST include options array with value+color pairs.
-    Colors: blue, green, red, yellow, orange, purple, gray.
-  - tags: comma-separated values rendered as individual pills.
-  - boolean: Yes/No badge.
+  Column types:
+  - text: default, truncated with copy for long values
+  - number: right-aligned, locale-formatted
+  - currency: number with prefix symbol (format: "$", "EUR")
+  - date: relative time with full date on hover
+  - link: clickable external link showing domain
+  - email: clickable mailto link
+  - status: colored pill — MUST include options [{value, color}]
+    Colors: blue, green, red, yellow, orange, purple, gray
+  - tags: comma-separated pills
+  - boolean: Yes/No badge
 
-  CRM / pipeline best practices:
-  - Set frozen: true on the primary identifier column (name, company, title).
-  - Use type: "status" with options for pipeline stages, deal status, etc.
-  - Use type: "currency" for deal values, revenue, costs.
-  - Use type: "email" for contact email addresses.
-  - Use type: "date" for all timestamps.
-  - Use type: "tags" for multi-value fields like skills, labels, categories.
-  - Always provide a columns array so headers are human-readable.
-
-- chart: Bar/line chart. Config: {chart_type: "bar"|"line", xKey, yKey, color?}. Data: array of data points.
-
-- task_list: Live task feed via SSE. Clickable rows open detail drawer.
-  Tasks in "waiting" state show a "Needs review" badge.
-  Config: {agent_ids?: [...], states?: [...]}. No dataSource needed.
-
-- action: CTA card + modal form. Submits a task to a specific agent.
+- action: Button in the active sheet header bar. Opens a modal form that submits a task.
   Config: {
     agent_id, description, prompt_template (with {{field}} placeholders),
     button_label (verb-oriented), fields: [{name, label, required?, type?, placeholder?, options?}]
   }
   PROMPT TEMPLATE RULES:
-  - ONLY use simple {{field_name}} placeholders matching a field's name property.
-  - NEVER use block syntax like {{#if}}, {{/if}}, {{#each}}, {{else}}, etc.
-  - Every placeholder must correspond to exactly one field in the fields array.
-  - If a field is optional, still include it as {{field_name}} — the system handles
-    empty values automatically. Do NOT try to conditionally include/exclude text.
-  Mark required: true for inputs the user must fill before the prompt is valid.
-  Only leave a field optional when an empty value still produces a clean prompt.
-
-INTERACTION MODEL:
-All table and task_list rows are interactive — clicking opens a detail drawer
-with formatted content and contextual actions. This is automatic.
+  - ONLY use simple {{field_name}} placeholders matching a field's name.
+  - NEVER use block syntax ({{#if}}, {{/if}}, {{#each}}, {{else}}).
+  - Every placeholder must match a field in the fields array.
+  - If a field is optional, still use {{field_name}} — empty values are handled.
+  Mark required: true for mandatory inputs.
 
 AGENT SELECTION:
-Keep definition.agents minimal. Only include the concrete agents actually used
-by the view's components. If several agents share the same skill set, choose
-one representative unless the user explicitly asks for multiple distinct agents.`
+Keep definition.agents minimal — only include agents actually used.
+If several agents share the same skills, pick one unless the user wants multiple.
+
+SHEET DESIGN:
+- STRONG DEFAULT: use ONE sheet. Most workflows fit a single table.
+  Only create multiple sheets when the user explicitly requests them or the data
+  has genuinely distinct entity types (e.g. contacts vs emails vs pricing).
+- When using split row_strategy on a sheet, that handles item-level detail
+  within the same sheet — you do NOT need a separate detail sheet.
+- Generate concise sheet names tied to the workflow, not generic labels.
+- Use sheet relations when rows should connect across sheets via stable keys
+  like task_id, email, company_id, listing_id, or similar identifiers.`

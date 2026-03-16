@@ -1,7 +1,8 @@
 // =============================================================================
 // MapOutputsToSchema
-// Maps task outputs (grouped by task_id) into the column schema of a view
-// widget. Multiple outputs from the same task are synthesized into one row.
+// Maps task outputs (grouped by task_id) into the column schema of a sheet's
+// table component. Multiple outputs from the same task can be synthesized into
+// one row or expanded into multiple rows, depending on the sheet's row strategy.
 // Called at view render time, results are cached.
 // =============================================================================
 
@@ -18,72 +19,106 @@ class MappedCell {
 
 class MappedRow {
   task_id string @description("The task ID this row was synthesized from")
-  cells MappedCell[] @description("One cell per column in the schema, matched by column key")
+  row_key string @description("Machine-stable identifier unique within the task group. Use 'task' for task-level rows. For split rows, derive it from the unique entity, like an email address, listing id, or contact slug.")
+  source_output_ids string[] @description("The IDs of the outputs that most directly contributed to this row")
+  cells MappedCell[] @description("MUST contain exactly one MappedCell for EVERY column in the schema. Never skip columns — use empty string value for missing data.")
 }
 
 class MappedResult {
-  rows MappedRow[] @description("One row per task that has relevant data for this widget")
+  rows MappedRow[] @description("One or more rows per task that have relevant data for this table")
 }
 
 function MapOutputsToSchema(
-  widget_title: string,
-  widget_type: string,
+  sheet_name: string,
+  table_title: string,
+  table_type: string,
+  row_strategy_mode: string,
+  row_strategy_description: string,
   columns: ColumnSchema[],
   outputs_json: string
 ) -> MappedResult {
   client OutputMapperClient
   prompt #"
-    You are mapping task output data into a widget's column schema for a
-    dashboard view.
+    You are an extraction engine. Your job is to find values in task outputs
+    and map them into a table's column schema. Extract aggressively — your
+    goal is to fill as many cells as possible with real data from the outputs.
 
-    WIDGET: {{ widget_title }} (type: {{ widget_type }})
+    SHEET: {{ sheet_name }}
+    TABLE: {{ table_title }} (type: {{ table_type }})
+    ROW STRATEGY MODE: {{ row_strategy_mode }}
+    ROW STRATEGY DESCRIPTION: {{ row_strategy_description }}
 
-    COLUMN SCHEMA (the columns the widget expects):
+    COLUMN SCHEMA:
     {% for col in columns %}
     - {{ col.key }} ({{ col.type }}): {{ col.description }}
     {% endfor %}
 
-    TASK OUTPUTS (JSON object, keyed by task_id. Each entry has an optional
-    "prompt" field with the user's original request and an "outputs" array of
-    the outputs that task produced):
+    TASK OUTPUTS:
     <outputs>{{ outputs_json }}</outputs>
 
-    INSTRUCTIONS:
-    1. Each top-level key is a task_id. The "prompt" field (when present)
-       contains the user's original request that triggered the task — use it
-       as context to better understand what the outputs represent. The
-       "outputs" array contains all outputs that task produced.
-    2. Produce ONE row per task_id by synthesizing the best value for each
-       column from ANY output in that task's group. Use the prompt for
-       additional context when output data alone is ambiguous.
-    3. IMPORTANT: produce a row for EVERY task. Each task_id in the input
-       should have a corresponding row in the output. Do not skip tasks.
+    WHERE TO FIND VALUES — search ALL of these for each column:
+    - output.title — often contains the main label or name
+    - output.summary — a text summary of what the output contains
+    - output.data.* — the richest source; look at ALL keys AND nested values
+    - output.uri — file or resource URLs
+    - output.output_type — the type/category of the output
+    - output.agent_name — which agent produced this output
+    - output.metadata — ALL metadata fields (deeplink, artifact_label, tags,
+      artifact_role, artifact_key, artifact_kind, and any other keys present)
+    - prompt — the user's original request, often contains source URLs or names
+    Search EVERY field in the output object — not just the ones listed above.
+
+    EXTRACTION RULES:
+    1. Each top-level key in the outputs JSON is a task_id. Search ALL outputs
+       within each task group thoroughly before deciding a column has no value.
+    2. CRITICAL: Every row's cells array MUST contain one MappedCell for EVERY
+       column listed in the COLUMN SCHEMA above. There are {{ columns|length }}
+       columns — so each row must have exactly {{ columns|length }} cells.
+       Use "" for columns where no value is found, but DO NOT skip columns.
+    3. Use semantic matching, not just literal field names. A column asking for
+       "Contact Name" could match data.name, data.full_name, data.recipient,
+       title, or even a name embedded in a summary string. Try hard to match.
     4. When multiple outputs have a value for the same column, prefer outputs
        with artifact_role "primary" over "supporting" or "incidental".
-    5. Use semantic understanding — don't just match field names literally.
-       For example, if a column asks for "Recipe Name" and an output has
-       data.recipe_name or data.title with a recipe name, use it.
-    6. For link columns, look for URLs in data, metadata.deeplink, URI, AND
-       the prompt. The prompt often contains the source URL (e.g. a YouTube
-       link) that is distinct from output URLs (e.g. a Google Drive link).
-       Match the semantically correct URL to each link column — don't use a
-       Drive link for a "Video" column when the prompt has a YouTube URL.
-    7. For date columns, use ISO 8601 format (e.g. "2024-01-15T10:30:00Z").
-    8. Preserve the original values — don't summarize or reformat unless
-       the column type requires it (e.g. extracting a date from a string).
-    9. For tags columns, join multiple values with ", ".
-    10. For boolean columns, use "true" or "false".
-    11. Every row MUST include the task_id.
+    5. For link columns: check data.*, uri, metadata.deeplink, AND the prompt.
+       Match the semantically correct URL to each column.
+    6. Preserve original values. Don't summarize unless the column type needs
+       it (e.g. extracting a date). For tags, join with ", ". For booleans,
+       use "true" or "false". For dates, use ISO 8601.
+    7. Do NOT fabricate values. If after searching all outputs thoroughly you
+       genuinely cannot find a value for a column, use "". But exhaust all
+       options first — an empty cell should be rare, not the default.
+    8. Every row MUST include a task_id and row_key.
+    9. If a task's outputs have NO relevant data for ANY column in the schema,
+       OMIT that task entirely — do not emit an empty row. But if at least one
+       column can be filled, emit the row with all extractable values.
+
+    ROW STRATEGY:
+    - If mode is "task": produce ONE row per task_id that has relevant data.
+      Synthesize the best value for each column from any output in the group.
+      row_key = "task".
+    - If mode is "split": emit MULTIPLE rows per task_id. The description
+      tells you what entity each row represents (e.g. one row per email
+      recipient, per listing, per item). Use stable, slug-like row_key values
+      (e.g. "alice-smith", "listing-42"). If no distinct entities exist,
+      fall back to one row with row_key = "task".
+
+    SHEET CONTEXT: The sheet name "{{ sheet_name }}" gives context for
+    disambiguation (e.g. which URL or label to pick when multiple exist)
+    and for deciding whether a task is relevant to this sheet at all.
+    It must NOT suppress individual cell extraction — if a column has a
+    matching value in the outputs, extract it. Two sheets with the same
+    column must get the same value for the same task.
 
     {{ ctx.output_format }}
   "#
 }
 
 client<llm> OutputMapperClient {
-  provider anthropic
+  provider "openai-generic"
   options {
-    model claude-sonnet-4-20250514
-    api_key env.ANTHROPIC_API_KEY
-    max_tokens 8192
+    base_url "https://api.cerebras.ai/v1"
+    api_key env.CEREBRAS_API_KEY
+    model "gpt-oss-120b"
   }
 }

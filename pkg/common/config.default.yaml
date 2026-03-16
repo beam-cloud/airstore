@@ -22,6 +22,9 @@ database:
     sslMode: disable
     maxOpenConns: 25
     maxIdleConns: 5
+  mongo:
+    uri: ""
+    database: airstore_views
 
 # Storage
 image:

@@ -3,13 +3,13 @@ package apiv1
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/beam-cloud/airstore/pkg/views"
@@ -18,20 +18,31 @@ import (
 )
 
 type ViewsGroup struct {
-	g       *echo.Group
-	backend repository.BackendRepository
-	copilot *views.Copilot
-	rdb     *common.RedisClient
+	g        *echo.Group
+	backend  repository.BackendRepository
+	copilot  *views.Copilot
+	store    *views.ViewStore
+	resolver *views.DataResolver
 }
 
-func NewViewsGroup(g *echo.Group, backend repository.BackendRepository, copilot *views.Copilot, rdb *common.RedisClient) *ViewsGroup {
-	vg := &ViewsGroup{g: g, backend: backend, copilot: copilot, rdb: rdb}
+const viewRefreshQueryParam = "refresh"
+
+func NewViewsGroup(g *echo.Group, backend repository.BackendRepository, copilot *views.Copilot, store *views.ViewStore) *ViewsGroup {
+	vg := &ViewsGroup{
+		g:        g,
+		backend:  backend,
+		copilot:  copilot,
+		store:    store,
+		resolver: views.NewDataResolver(backend, store),
+	}
 	vg.g.GET("", vg.List)
 	vg.g.POST("", vg.Create)
 	vg.g.GET("/:view_id", vg.Get)
 	vg.g.PATCH("/:view_id", vg.Update)
 	vg.g.DELETE("/:view_id", vg.Delete)
 	vg.g.GET("/:view_id/data", vg.ResolveData)
+	vg.g.PATCH("/:view_id/sheets/:sheet_id/rows/:row_id", vg.UpdateRow)
+	vg.g.POST("/:view_id/sheets/:sheet_id/rows/:row_id/regenerate", vg.RegenerateRow)
 	vg.g.POST("/drafts", vg.CreateDraft)
 	vg.g.GET("/drafts", vg.ListDrafts)
 	vg.g.GET("/drafts/:draft_id", vg.GetDraft)
@@ -99,10 +110,17 @@ func (vg *ViewsGroup) Get(c echo.Context) error {
 	return SuccessResponse(c, v)
 }
 
+type columnRename struct {
+	SheetID string `json:"sheet_id"`
+	OldKey  string `json:"old_key"`
+	NewKey  string `json:"new_key"`
+}
+
 type updateViewRequest struct {
-	Name        *string               `json:"name,omitempty"`
-	Description *string               `json:"description,omitempty"`
-	Definition  *types.ViewDefinition `json:"definition,omitempty"`
+	Name           *string               `json:"name,omitempty"`
+	Description    *string               `json:"description,omitempty"`
+	Definition     *types.ViewDefinition `json:"definition,omitempty"`
+	ColumnRenames  []columnRename        `json:"column_renames,omitempty"`
 }
 
 func (vg *ViewsGroup) Update(c echo.Context) error {
@@ -115,6 +133,7 @@ func (vg *ViewsGroup) Update(c echo.Context) error {
 	if err != nil {
 		return ErrorResponse(c, http.StatusNotFound, "view not found")
 	}
+	previousDefinition := v.Definition
 
 	var req updateViewRequest
 	if err := decodeStrictBody(c, &req); err != nil {
@@ -132,6 +151,37 @@ func (vg *ViewsGroup) Update(c echo.Context) error {
 	if err := vg.backend.UpdateView(ctx, v); err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
+	if vg.store != nil {
+		for _, rename := range req.ColumnRenames {
+			if rename.SheetID == "" || rename.OldKey == "" || rename.NewKey == "" || rename.OldKey == rename.NewKey {
+				continue
+			}
+			if err := vg.store.RenameColumn(ctx, v.ID, rename.SheetID, rename.OldKey, rename.NewKey); err != nil {
+				log.Warn().Err(err).
+					Str("view_id", v.ID).
+					Str("sheet_id", rename.SheetID).
+					Str("old_key", rename.OldKey).
+					Str("new_key", rename.NewKey).
+					Msg("failed to rename column in MongoDB view store")
+			}
+		}
+		if req.Definition != nil {
+			for _, sheetID := range deletedViewSheets(previousDefinition, v.Definition) {
+				if err := vg.store.DeleteSheet(ctx, v.ID, sheetID); err != nil {
+					log.Warn().Err(err).Str("view_id", v.ID).Str("sheet_id", sheetID).Msg("failed to delete sheet rows from MongoDB view store")
+				}
+			}
+			for _, deleted := range deletedViewColumns(previousDefinition, v.Definition) {
+				if err := vg.store.DeleteColumn(ctx, v.ID, deleted.SheetID, deleted.Key); err != nil {
+					log.Warn().Err(err).
+						Str("view_id", v.ID).
+						Str("sheet_id", deleted.SheetID).
+						Str("column", deleted.Key).
+						Msg("failed to delete column from MongoDB view store")
+				}
+			}
+		}
+	}
 	return SuccessResponse(c, v)
 }
 
@@ -140,8 +190,14 @@ func (vg *ViewsGroup) Delete(c echo.Context) error {
 	if err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, err.Error())
 	}
-	if err := vg.backend.DeleteView(c.Request().Context(), workspaceID, c.Param("view_id")); err != nil {
+	viewID := c.Param("view_id")
+	if err := vg.backend.DeleteView(c.Request().Context(), workspaceID, viewID); err != nil {
 		return ErrorResponse(c, http.StatusNotFound, "view not found")
+	}
+	if vg.store != nil {
+		if err := vg.store.DropView(c.Request().Context(), viewID); err != nil {
+			log.Warn().Err(err).Str("view_id", viewID).Msg("failed to drop view MongoDB collection on delete")
+		}
 	}
 	return SuccessResponse(c, nil)
 }
@@ -161,27 +217,255 @@ func (vg *ViewsGroup) ResolveData(c echo.Context) error {
 	if err != nil {
 		return ErrorResponse(c, http.StatusNotFound, "view not found")
 	}
+	sheetID := c.QueryParam("sheet")
 	componentID := c.QueryParam("component")
+	if sheetID == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "sheet query parameter is required")
+	}
 	if componentID == "" {
 		return ErrorResponse(c, http.StatusBadRequest, "component query parameter is required")
 	}
 
+	var sheet *types.SheetSpec
+	for i := range v.Definition.Sheets {
+		if v.Definition.Sheets[i].ID == sheetID {
+			sheet = &v.Definition.Sheets[i]
+			break
+		}
+	}
+	if sheet == nil {
+		return ErrorResponse(c, http.StatusNotFound, "sheet not found in view")
+	}
+
 	var comp *types.ComponentSpec
-	for i := range v.Definition.Components {
-		if v.Definition.Components[i].ID == componentID {
-			comp = &v.Definition.Components[i]
+	for i := range sheet.Components {
+		if sheet.Components[i].ID == componentID {
+			comp = &sheet.Components[i]
 			break
 		}
 	}
 	if comp == nil {
-		return ErrorResponse(c, http.StatusNotFound, "component not found in view")
+		return ErrorResponse(c, http.StatusNotFound, "component not found in sheet")
 	}
 
-	resolver := views.NewDataResolver(vg.backend, vg.rdb)
-	data, err := resolver.Resolve(ctx, workspaceID, v.ID, *comp, v.Definition.Components)
+	data, err := vg.resolver.Resolve(ctx, workspaceID, v.ID, *sheet, *comp, views.ResolveOptions{
+		ForceRefresh:  queryBool(c.QueryParam(viewRefreshQueryParam)),
+		ViewAgentRefs: v.Definition.Agents,
+	})
 	if err != nil {
-		log.Error().Err(err).Str("view_id", v.ID).Str("component", componentID).Msg("data resolve failed")
+		log.Error().Err(err).Str("view_id", v.ID).Str("sheet_id", sheetID).Str("component", componentID).Msg("data resolve failed")
 		return ErrorResponse(c, http.StatusInternalServerError, "failed to resolve data")
+	}
+
+	return SuccessResponse(c, data)
+}
+
+func queryBool(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "t", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+type deletedSheetColumn struct {
+	SheetID string
+	Key     string
+}
+
+func deletedViewSheets(previous, next types.ViewDefinition) []string {
+	nextSheetIDs := make(map[string]bool, len(next.Sheets))
+	for _, sheet := range next.Sheets {
+		nextSheetIDs[sheet.ID] = true
+	}
+	var deleted []string
+	for _, sheet := range previous.Sheets {
+		if !nextSheetIDs[sheet.ID] {
+			deleted = append(deleted, sheet.ID)
+		}
+	}
+	return deleted
+}
+
+func deletedViewColumns(previous, next types.ViewDefinition) []deletedSheetColumn {
+	nextKeys := viewColumnKeys(next)
+	var deleted []deletedSheetColumn
+	for sheetID, keys := range viewColumnKeys(previous) {
+		current := nextKeys[sheetID]
+		for key := range keys {
+			if current == nil || !current[key] {
+				deleted = append(deleted, deletedSheetColumn{SheetID: sheetID, Key: key})
+			}
+		}
+	}
+	return deleted
+}
+
+func viewColumnKeys(def types.ViewDefinition) map[string]map[string]bool {
+	keys := make(map[string]map[string]bool)
+	for _, sheet := range def.Sheets {
+		sheetKeys := make(map[string]bool)
+		for _, component := range sheet.Components {
+			if !component.IsTable() {
+				continue
+			}
+			addConfigColumnKeys(sheetKeys, component.Config)
+			if component.DataSource == nil {
+				continue
+			}
+			for _, rule := range component.DataSource.Transform {
+				if strings.TrimSpace(rule.Column) != "" {
+					sheetKeys[rule.Column] = true
+				}
+			}
+		}
+		keys[sheet.ID] = sheetKeys
+	}
+	return keys
+}
+
+func addConfigColumnKeys(keys map[string]bool, config map[string]any) {
+	rawColumns, ok := config["columns"].([]any)
+	if !ok {
+		return
+	}
+	for _, rawColumn := range rawColumns {
+		column, ok := rawColumn.(map[string]any)
+		if !ok {
+			continue
+		}
+		key, _ := column["key"].(string)
+		key = strings.TrimSpace(key)
+		if key != "" {
+			keys[key] = true
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Row-level cell edits
+// ---------------------------------------------------------------------------
+
+type updateRowRequest struct {
+	Cells map[string]string `json:"cells"`
+}
+
+func (vg *ViewsGroup) UpdateRow(c echo.Context) error {
+	workspaceID, err := vg.workspaceID(c)
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+	}
+
+	ctx := c.Request().Context()
+	viewID := c.Param("view_id")
+	sheetID := c.Param("sheet_id")
+	rowID := c.Param("row_id")
+
+	v, err := vg.backend.GetView(ctx, workspaceID, viewID)
+	if err != nil {
+		return ErrorResponse(c, http.StatusNotFound, "view not found")
+	}
+	sheetExists := false
+	for _, sheet := range v.Definition.Sheets {
+		if sheet.ID == sheetID {
+			sheetExists = true
+			break
+		}
+	}
+	if !sheetExists {
+		return ErrorResponse(c, http.StatusNotFound, "sheet not found")
+	}
+
+	var req updateRowRequest
+	if err := decodeStrictBody(c, &req); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
+	}
+	if len(req.Cells) == 0 {
+		return ErrorResponse(c, http.StatusBadRequest, "cells is required")
+	}
+
+	if err := vg.store.UpdateCells(ctx, viewID, sheetID, rowID, req.Cells); err != nil {
+		if errors.Is(err, views.ErrViewRowNotFound) {
+			return ErrorResponse(c, http.StatusNotFound, "row not found")
+		}
+		log.Error().Err(err).Str("view_id", viewID).Str("sheet_id", sheetID).Str("row_id", rowID).Msg("failed to update row cells")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to update cells")
+	}
+
+	row, err := vg.store.GetRow(ctx, viewID, sheetID, rowID)
+	if err != nil || row == nil {
+		return SuccessResponse(c, map[string]any{"sheet_id": sheetID, "row_id": rowID, "cells": req.Cells})
+	}
+	return SuccessResponse(c, map[string]any{
+		"sheet_id": sheetID,
+		"row_id":   rowID,
+		"cells":    row.MergedCells(),
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Row regeneration
+// ---------------------------------------------------------------------------
+
+func (vg *ViewsGroup) RegenerateRow(c echo.Context) error {
+	workspaceID, err := vg.workspaceID(c)
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+	}
+
+	ctx := c.Request().Context()
+	viewID := c.Param("view_id")
+	sheetID := c.Param("sheet_id")
+	rowID := c.Param("row_id")
+
+	v, err := vg.backend.GetView(ctx, workspaceID, viewID)
+	if err != nil {
+		return ErrorResponse(c, http.StatusNotFound, "view not found")
+	}
+
+	var sheet *types.SheetSpec
+	for i := range v.Definition.Sheets {
+		if v.Definition.Sheets[i].ID == sheetID {
+			sheet = &v.Definition.Sheets[i]
+			break
+		}
+	}
+	if sheet == nil {
+		return ErrorResponse(c, http.StatusNotFound, "sheet not found")
+	}
+
+	row, err := vg.store.GetRow(ctx, viewID, sheetID, rowID)
+	if err != nil || row == nil {
+		return ErrorResponse(c, http.StatusNotFound, "row not found")
+	}
+	taskID := row.TaskID
+	if taskID == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "row has no task association")
+	}
+
+	var comp *types.ComponentSpec
+	for i := range sheet.Components {
+		if sheet.Components[i].IsTable() {
+			comp = &sheet.Components[i]
+			break
+		}
+	}
+	if comp == nil {
+		return ErrorResponse(c, http.StatusNotFound, "no table component in sheet")
+	}
+
+	data, err := vg.resolver.RegenerateRow(ctx, workspaceID, viewID, *sheet, *comp, taskID, views.ResolveOptions{
+		ViewAgentRefs: v.Definition.Agents,
+	})
+	if err != nil {
+		log.Error().Err(err).
+			Str("view_id", viewID).
+			Str("sheet_id", sheetID).
+			Str("row_id", rowID).
+			Str("task_id", taskID).
+			Msg("failed to regenerate row")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to regenerate row")
 	}
 
 	return SuccessResponse(c, data)

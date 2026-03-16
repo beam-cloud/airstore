@@ -31,6 +31,8 @@ var typeMap = map[string]reflect.Type{
 	"STREAM_TYPES.FollowUpSignal":     reflect.TypeOf(stream_types.FollowUpSignal{}),
 	"TYPES.TurnClassification":        reflect.TypeOf(types.TurnClassification{}),
 	"STREAM_TYPES.TurnClassification": reflect.TypeOf(stream_types.TurnClassification{}),
+	"TYPES.WakeAgendaItem":            reflect.TypeOf(types.WakeAgendaItem{}),
+	"STREAM_TYPES.WakeAgendaItem":     reflect.TypeOf(stream_types.WakeAgendaItem{}),
 
 	"TYPES.FollowUpIntent": reflect.TypeOf(types.FollowUpIntent("")),
 	"TYPES.InputKind":      reflect.TypeOf(types.InputKind("")),

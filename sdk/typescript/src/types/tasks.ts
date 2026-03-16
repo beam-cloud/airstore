@@ -90,6 +90,13 @@ export interface InputProvenance {
 
 export type TaskPriority = 'urgent' | 'high' | 'normal' | 'low';
 
+export interface WakeAgendaItem {
+  seq: number;
+  type?: string;
+  title: string;
+  reason?: string;
+}
+
 /** A task representing a unit of intent sent to an agent. */
 export interface AgentTask {
   id: string;
@@ -116,6 +123,7 @@ export interface AgentTask {
   archived_at?: string;
   wake_at?: string;
   wake_reason?: string;
+  wake_agenda?: WakeAgendaItem[];
   wake_count?: number;
   created_at: string;
   updated_at: string;

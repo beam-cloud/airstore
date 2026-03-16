@@ -55,6 +55,7 @@ import (
 type Gateway struct {
 	Config      types.AppConfig
 	RedisClient *common.RedisClient
+	MongoClient *common.MongoClient
 	BackendRepo repository.BackendRepository
 	httpServer  *http.Server
 	grpcServer  *grpc.Server
@@ -131,6 +132,16 @@ func NewGateway() (*Gateway, error) {
 		}
 	}
 
+	// Initialize MongoDB (optional — gated on config)
+	var mongoClient *common.MongoClient
+	if config.Database.Mongo.URI != "" {
+		mongoClient, err = common.NewMongoClient(config.Database.Mongo)
+		if err != nil {
+			log.Warn().Err(err).Msg("MongoDB init failed — views will not persist to MongoDB")
+			mongoClient = nil
+		}
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Initialize OAuth registry - providers self-register their integrations
@@ -164,6 +175,7 @@ func NewGateway() (*Gateway, error) {
 	gateway := &Gateway{
 		Config:         config,
 		RedisClient:    redisClient,
+		MongoClient:    mongoClient,
 		BackendRepo:    backendRepo,
 		ctx:            ctx,
 		cancelFunc:     cancel,
@@ -611,9 +623,13 @@ func (g *Gateway) registerServices() error {
 
 		// Views API (deferred to here so agentAPI is available for the copilot)
 		viewCopilot := views.NewCopilot(g.s2Client, g.BackendRepo, g.storageClient, agentAPI)
+		var viewStore *views.ViewStore
+		if g.MongoClient != nil {
+			viewStore = views.NewViewStore(g.MongoClient)
+		}
 		viewsGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/views")
 		viewsGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
-		apiv1.NewViewsGroup(viewsGroup, g.BackendRepo, viewCopilot, g.RedisClient)
+		apiv1.NewViewsGroup(viewsGroup, g.BackendRepo, viewCopilot, viewStore)
 		log.Info().Msg("views API registered at /api/v1/workspaces/:workspace_id/views")
 
 		var mailClient *clients.AgentMailClient
@@ -840,6 +856,13 @@ func (g *Gateway) shutdown() {
 	if g.mcpManager != nil {
 		eg.Go(func() error {
 			return g.mcpManager.Close()
+		})
+	}
+
+	// Close MongoDB
+	if g.MongoClient != nil {
+		eg.Go(func() error {
+			return g.MongoClient.Close(ctx)
 		})
 	}
 

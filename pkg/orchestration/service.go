@@ -726,9 +726,7 @@ func applyDispatchPayload(task *types.AgentTask, values map[string]any, retryAtt
 		task.PayloadJSON = map[string]any{}
 	}
 	if prompt := dispatchPromptFromValues(values); prompt != "" {
-		if task.PayloadJSON["message"] == nil || task.PayloadJSON["message"] == "" {
-			task.PayloadJSON["message"] = prompt
-		}
+		task.PayloadJSON["message"] = prompt
 		task.PayloadJSON["prompt"] = prompt
 	}
 	if boolFromAny(values[types.OrchestrationOutboxPayloadResumeSession]) {
@@ -983,21 +981,16 @@ func (s *AgentService) finalizeRunAttempt(
 	return nil
 }
 
-// wakeBackoffDelay computes the actual delay using exponential backoff.
-// Starts at 5 minutes, doubling each cycle, capped at the LLM's suggested delay.
+// wakeBackoffDelay normalizes the requested wake delay.
+// Self-scheduled wakes must respect the planner's chosen delay rather than
+// using a shorter exponential backoff placeholder.
 func wakeBackoffDelay(wakeCount, ceilingMinutes int) int {
-	const initialMinutes = 5
-	const maxShift = 30 // 5 << 30 ≈ 5 billion, safely fits int on all platforms
-	if wakeCount > maxShift {
-		wakeCount = maxShift
+	_ = wakeCount
+	if ceilingMinutes <= 0 {
+		return 5
 	}
-	delay := initialMinutes << wakeCount // 5, 10, 20, 40, 80, ...
-	if delay > ceilingMinutes {
-		return ceilingMinutes
-	}
-	return delay
+	return ceilingMinutes
 }
-
 
 func (s *AgentService) settleOriginTask(ctx context.Context, runID string, waitingForInput bool, wakeSignal *types.RunExecutionWakeSignal) error {
 	return s.lifecycle.Settle(ctx, runID, &SettleOpts{
@@ -1091,7 +1084,6 @@ func (s *AgentService) handleInterruptTask(ctx context.Context, task *types.Agen
 	s.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
 	return nil
 }
-
 
 func (s *AgentService) cancelInFlightRunExecutions(ctx context.Context, runID string) (bool, error) {
 	attempts, err := s.backend.ListAgentRunAttempts(ctx, runID)
@@ -1856,9 +1848,9 @@ func injectSkillsSection(agentConfig map[string]any, skills []string) {
 }
 
 func runInputPrompt(payload map[string]any) string {
-	prompt := strings.TrimSpace(stringFromPayload(payload, "message"))
+	prompt := strings.TrimSpace(stringFromPayload(payload, "prompt"))
 	if prompt == "" {
-		prompt = strings.TrimSpace(stringFromPayload(payload, "prompt"))
+		prompt = strings.TrimSpace(stringFromPayload(payload, "message"))
 	}
 	return prompt
 }

@@ -3,6 +3,8 @@ package worker
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -20,9 +22,11 @@ type subagentProbeTestRuntime struct {
 	execFunc func(ctx context.Context, proc specs.Process) error
 }
 
-func (r *subagentProbeTestRuntime) Name() string                                         { return "test" }
-func (r *subagentProbeTestRuntime) Capabilities() runtimepkg.Capabilities                { return runtimepkg.Capabilities{} }
-func (r *subagentProbeTestRuntime) Prepare(_ context.Context, _ *specs.Spec) error       { return nil }
+func (r *subagentProbeTestRuntime) Name() string { return "test" }
+func (r *subagentProbeTestRuntime) Capabilities() runtimepkg.Capabilities {
+	return runtimepkg.Capabilities{}
+}
+func (r *subagentProbeTestRuntime) Prepare(_ context.Context, _ *specs.Spec) error { return nil }
 func (r *subagentProbeTestRuntime) Run(_ context.Context, _ string, _ string, _ *runtimepkg.RunOpts) (int, error) {
 	return 0, nil
 }
@@ -223,5 +227,45 @@ func TestSubagentWaitOutcomeStringer(t *testing.T) {
 		if got := tt.o.String(); got != tt.want {
 			t.Errorf("subagentWaitOutcome(%d).String() = %q, want %q", tt.o, got, tt.want)
 		}
+	}
+}
+
+func TestBuildWakePlannerContextReadsActiveSkillAndHandoffFiles(t *testing.T) {
+	mountSource := t.TempDir()
+	skillDir := filepath.Join(mountSource, "skills", "prospect-followup")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir skill dir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(mountSource, "notes"), 0o755); err != nil {
+		t.Fatalf("mkdir handoff dir: %v", err)
+	}
+
+	skillBody := strings.Join([]string{
+		"# Prospect follow-up",
+		"",
+		"Always check replies before sending another email.",
+		"Use `notes/next-actions.json` to track what should happen on the next wake.",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillBody), 0o644); err != nil {
+		t.Fatalf("write skill file: %v", err)
+	}
+
+	handoffBody := `{"next":"check replies, then draft the second follow-up if nobody responded"}`
+	if err := os.WriteFile(filepath.Join(mountSource, "notes", "next-actions.json"), []byte(handoffBody), 0o644); err != nil {
+		t.Fatalf("write handoff file: %v", err)
+	}
+
+	skillContext, handoffContext := buildWakePlannerContext(mountSource, map[string]string{
+		"AIRSTORE_AGENT_SYSTEM_PROMPT": strings.Join([]string{
+			"## MANDATORY - Active Skills",
+			"1. cat /workspace/skills/prospect-followup/SKILL.md",
+		}, "\n"),
+	})
+
+	if !strings.Contains(skillContext, "Always check replies before sending another email.") {
+		t.Fatalf("expected skill context to include skill file contents, got:\n%s", skillContext)
+	}
+	if !strings.Contains(handoffContext, handoffBody) {
+		t.Fatalf("expected handoff context to include referenced file contents, got:\n%s", handoffContext)
 	}
 }

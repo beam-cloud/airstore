@@ -18,7 +18,7 @@ const agentTaskSelect = `
 	SELECT id, workspace_id, agent_id, agent_name, queue_mode, state,
 	       idempotency_key, payload_json, routing_json, parent_envelope_id, target_run_id,
 	       accepted_at, queued_at, dispatched_at, deadline, dropped_reason, priority, budget_usd, cost_usd, archived_at,
-	       created_at, updated_at, wake_at, wake_reason, wake_count, input_kind
+	       created_at, updated_at, wake_at, wake_reason, wake_count, input_kind, waiting_summary
 	FROM (
 		SELECT
 			t.id,
@@ -47,7 +47,8 @@ const agentTaskSelect = `
 			t.wake_at,
 			t.wake_reason,
 			t.wake_count,
-			t.input_kind
+			t.input_kind,
+			t.waiting_summary
 		FROM agent_task t
 		LEFT JOIN agent_profile ap ON ap.id = t.agent_id
 	) task_view
@@ -624,6 +625,7 @@ func (b *PostgresBackend) scanAgentTask(row scanner) (*types.AgentTask, error) {
 	var wakeAt sql.NullTime
 	var wakeReason sql.NullString
 	var inputKind sql.NullString
+	var waitingSummary sql.NullString
 	err := row.Scan(
 		&task.ID,
 		&task.WorkspaceID,
@@ -651,6 +653,7 @@ func (b *PostgresBackend) scanAgentTask(row scanner) (*types.AgentTask, error) {
 		&wakeReason,
 		&task.WakeCount,
 		&inputKind,
+		&waitingSummary,
 	)
 	if err == sql.ErrNoRows {
 		return nil, &types.ErrAgentTaskNotFound{}
@@ -700,9 +703,87 @@ func (b *PostgresBackend) scanAgentTask(row scanner) (*types.AgentTask, error) {
 	if inputKind.Valid {
 		task.InputKind = types.InputKind(inputKind.String)
 	}
+	if waitingSummary.Valid {
+		task.WaitingSummary = &waitingSummary.String
+	}
 	task.PayloadJSON = unmarshalJSONMap(payloadJSON)
 	task.RoutingJSON = unmarshalJSONMap(routingJSON)
 	return task, nil
+}
+
+func wakeAgendaSummary(items []*types.TaskWakeAgendaItem) string {
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		if title := strings.TrimSpace(item.Title); title != "" {
+			return title
+		}
+		if reason := strings.TrimSpace(item.Reason); reason != "" {
+			return reason
+		}
+	}
+	return ""
+}
+
+func (b *PostgresBackend) attachWakeAgenda(ctx context.Context, tasks []*types.AgentTask) error {
+	if len(tasks) == 0 {
+		return nil
+	}
+
+	taskByID := make(map[string]*types.AgentTask, len(tasks))
+	taskIDs := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		if task == nil {
+			continue
+		}
+		task.WakeAgenda = nil
+		if task.State != types.AgentTaskStateSleeping || task.WakeAt == nil {
+			continue
+		}
+		taskByID[task.ID] = task
+		taskIDs = append(taskIDs, task.ID)
+	}
+	if len(taskIDs) == 0 {
+		return nil
+	}
+
+	rows, err := b.db.QueryContext(ctx, `
+		SELECT task_id, seq, item_type, title, reason
+		FROM task_wake_agenda_item
+		WHERE task_id = ANY($1::uuid[])
+		ORDER BY task_id, seq
+	`, pq.Array(taskIDs))
+	if err != nil {
+		return fmt.Errorf("list wake agenda items: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var taskID string
+		item := &types.TaskWakeAgendaItem{}
+		if err := rows.Scan(&taskID, &item.Seq, &item.Type, &item.Title, &item.Reason); err != nil {
+			return fmt.Errorf("scan wake agenda item: %w", err)
+		}
+		task, ok := taskByID[taskID]
+		if !ok {
+			continue
+		}
+		task.WakeAgenda = append(task.WakeAgenda, item)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate wake agenda items: %w", err)
+	}
+
+	for _, task := range taskByID {
+		if task == nil || task.WakeReason != nil {
+			continue
+		}
+		if summary := wakeAgendaSummary(task.WakeAgenda); summary != "" {
+			task.WakeReason = &summary
+		}
+	}
+	return nil
 }
 
 func (b *PostgresBackend) GetTask(ctx context.Context, workspaceId uint, taskID string) (*types.AgentTask, error) {
@@ -715,6 +796,9 @@ func (b *PostgresBackend) GetTask(ctx context.Context, workspaceId uint, taskID 
 			return nil, &types.ErrAgentTaskNotFound{ID: taskID}
 		}
 		return nil, fmt.Errorf("get agent task: %w", err)
+	}
+	if err := b.attachWakeAgenda(ctx, []*types.AgentTask{task}); err != nil {
+		return nil, err
 	}
 	return task, nil
 }
@@ -749,6 +833,9 @@ func (b *PostgresBackend) ListTasks(ctx context.Context, workspaceId uint, limit
 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate agent task rows: %w", err)
+	}
+	if err := b.attachWakeAgenda(ctx, tasks); err != nil {
+		return nil, err
 	}
 
 	return tasks, nil
@@ -812,6 +899,9 @@ func (b *PostgresBackend) ListTasksFiltered(ctx context.Context, workspaceId uin
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate filtered agent task rows: %w", err)
 	}
+	if err := b.attachWakeAgenda(ctx, tasks); err != nil {
+		return nil, err
+	}
 
 	return tasks, nil
 }
@@ -826,6 +916,9 @@ func (b *PostgresBackend) GetTaskByID(ctx context.Context, taskID string) (*type
 			return nil, &types.ErrAgentTaskNotFound{ID: taskID}
 		}
 		return nil, fmt.Errorf("get task by id: %w", err)
+	}
+	if err := b.attachWakeAgenda(ctx, []*types.AgentTask{task}); err != nil {
+		return nil, err
 	}
 	return task, nil
 }
@@ -858,6 +951,9 @@ func (b *PostgresBackend) GetTaskByIdempotency(ctx context.Context, workspaceId 
 			return nil, &types.ErrAgentTaskNotFound{ID: idempotencyKey}
 		}
 		return nil, fmt.Errorf("get task by idempotency: %w", err)
+	}
+	if err := b.attachWakeAgenda(ctx, []*types.AgentTask{task}); err != nil {
+		return nil, err
 	}
 	return task, nil
 }
@@ -903,6 +999,9 @@ func (b *PostgresBackend) ClaimQueuedTaskForDispatch(
 			return nil, false, nil
 		}
 		return nil, false, fmt.Errorf("claim queued task for dispatch: %w", err)
+	}
+	if _, err := b.db.ExecContext(ctx, `DELETE FROM task_wake_agenda_item WHERE task_id = $1`, claimedID); err != nil {
+		return nil, false, fmt.Errorf("clear wake agenda on dispatch claim: %w", err)
 	}
 
 	task, err := b.GetTaskByID(ctx, claimedID)
@@ -1005,6 +1104,7 @@ func (b *PostgresBackend) SleepTaskWithOutbox(
 	expectedRunID string,
 	wakeAt time.Time,
 	wakeReason string,
+	wakeAgenda []*types.TaskWakeAgendaItem,
 	outboxEvent *types.OrchestrationOutboxEvent,
 ) (bool, error) {
 	tx, err := b.db.BeginTx(ctx, nil)
@@ -1032,6 +1132,37 @@ func (b *PostgresBackend) SleepTaskWithOutbox(
 	affected, _ := res.RowsAffected()
 	if affected == 0 {
 		return false, nil
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM task_wake_agenda_item WHERE task_id = $1`, taskID); err != nil {
+		return false, fmt.Errorf("clear prior wake agenda: %w", err)
+	}
+	for idx, item := range wakeAgenda {
+		if item == nil {
+			continue
+		}
+		seq := item.Seq
+		if seq <= 0 {
+			seq = idx + 1
+		}
+		title := strings.TrimSpace(item.Title)
+		reason := strings.TrimSpace(item.Reason)
+		if title == "" {
+			title = reason
+		}
+		if title == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO task_wake_agenda_item (task_id, seq, item_type, title, reason)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (task_id, seq) DO UPDATE
+			SET item_type = EXCLUDED.item_type,
+			    title = EXCLUDED.title,
+			    reason = EXCLUDED.reason
+		`, taskID, seq, strings.TrimSpace(item.Type), title, reason); err != nil {
+			return false, fmt.Errorf("insert wake agenda item: %w", err)
+		}
 	}
 
 	payloadJSON, err := marshalJSONMap(outboxEvent.PayloadJSON)

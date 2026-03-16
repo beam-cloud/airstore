@@ -93,30 +93,29 @@ func (b *fakeResolverBackend) ListWorkspaceTaskOutputs(_ context.Context, _ uint
 	return b.workspaceOutputs, nil
 }
 
-func TestFetchViewOutputsSkipsUnresolvedAgentRefs(t *testing.T) {
+func TestFetchComponentOutputsSkipsUnresolvedAgentRefs(t *testing.T) {
+	agentID := "0c34c8c3-0af0-4e21-a553-5d3f7c88a4e2"
 	backend := &fakeResolverBackend{
 		profilesByKey: map[string]*types.AgentProfile{
-			"chef-agent": {ID: "0c34c8c3-0af0-4e21-a553-5d3f7c88a4e2"},
+			"chef-agent": {ID: agentID},
 		},
 		profiles: []*types.AgentProfile{
-			{ID: "0c34c8c3-0af0-4e21-a553-5d3f7c88a4e2", Name: "Chef Agent"},
+			{ID: agentID, Name: "Chef Agent"},
 		},
 		outputsByAgent: map[string][]*types.TaskOutput{
-			"0c34c8c3-0af0-4e21-a553-5d3f7c88a4e2": {
-				{ID: "out-1", Title: "Recipe output"},
+			agentID: {
+				{ID: "out-1", Title: "Recipe output", AgentID: &agentID},
 			},
 		},
 	}
-	resolver := &DataResolver{backend: backend, cache: newMappingCache(nil)}
+	resolver := &DataResolver{backend: backend, store: nil}
 
-	comps := []types.ComponentSpec{
-		{ID: "t1", Type: types.ComponentTypeTable, DataSource: &types.DataSource{
-			AgentIDs: []string{"deleted-agent-key", "chef-agent"},
-		}},
+	ds := &types.DataSource{
+		AgentIDs: []string{"deleted-agent-key", "chef-agent"},
 	}
-	outputs, err := resolver.fetchViewOutputs(context.Background(), 7, comps)
+	outputs, err := resolver.fetchComponentOutputs(context.Background(), 7, ds, nil)
 	if err != nil {
-		t.Fatalf("fetchViewOutputs returned error: %v", err)
+		t.Fatalf("fetchComponentOutputs returned error: %v", err)
 	}
 	if got, want := len(outputs), 1; got != want {
 		t.Fatalf("output count = %d, want %d", got, want)
@@ -132,7 +131,7 @@ func TestFetchViewOutputsSkipsUnresolvedAgentRefs(t *testing.T) {
 	}
 }
 
-func TestTaskMatchesDataSource(t *testing.T) {
+func TestFilterOutputsForDataSource(t *testing.T) {
 	agentID := "agent-1"
 	mkOutput := func(id, artifactKey string) *types.TaskOutput {
 		o := newRecipeOutput(id)
@@ -146,14 +145,21 @@ func TestTaskMatchesDataSource(t *testing.T) {
 		mkOutput("out-2", "drive-recipe-pdf"),
 	}
 
-	if !taskMatchesDataSource(outputs, &types.DataSource{}, []string{agentID}) {
-		t.Fatal("expected match for correct agent")
+	filtered := filterOutputsForDataSource(outputs, &types.DataSource{}, []string{agentID})
+	if len(filtered) != 2 {
+		t.Fatalf("expected both outputs for matching agent, got %d", len(filtered))
 	}
-	if taskMatchesDataSource(outputs, &types.DataSource{}, []string{"other-agent"}) {
-		t.Fatal("expected no match for wrong agent")
+	filtered = filterOutputsForDataSource(outputs, &types.DataSource{}, []string{"other-agent"})
+	if len(filtered) != 0 {
+		t.Fatalf("expected no outputs for wrong agent, got %d", len(filtered))
 	}
-	if !taskMatchesDataSource(outputs, nil, nil) {
-		t.Fatal("nil data source should match everything")
+	filtered = filterOutputsForDataSource(outputs, &types.DataSource{ArtifactKey: "extracted-recipes"}, []string{agentID})
+	if len(filtered) != 1 || filtered[0].ID != "out-1" {
+		t.Fatalf("expected artifact key filter to keep out-1, got %#v", filtered)
+	}
+	filtered = filterOutputsForDataSource(outputs, nil, nil)
+	if len(filtered) != 2 {
+		t.Fatalf("nil data source should keep everything, got %d", len(filtered))
 	}
 }
 
@@ -177,7 +183,7 @@ func TestBuildUnifiedSchema(t *testing.T) {
 				},
 			},
 		},
-		{Type: types.ComponentTypeMetric, DataSource: &types.DataSource{ArtifactKey: "recipes"}},
+		{Type: types.ComponentTypeTable, DataSource: &types.DataSource{ArtifactKey: "recipes"}},
 	}
 
 	cols := buildUnifiedSchema(comps)
@@ -222,37 +228,171 @@ func TestBuildColumnSchemas(t *testing.T) {
 	}
 }
 
-func TestTaskCacheRoundTrip(t *testing.T) {
-	cached := &cachedTaskMapping{
+func TestBuildColumnSchemasIncludesTaskMetadataColumnsFromConfig(t *testing.T) {
+	comp := types.ComponentSpec{
+		DataSource: &types.DataSource{
+			Transform: []types.TransformRule{
+				{Column: "name", Source: "data.recipe_name", Type: "text"},
+			},
+		},
+		Config: map[string]any{
+			"columns": []any{
+				map[string]any{"key": "name", "label": "Recipe Name"},
+				map[string]any{"key": "next_wake_at", "label": "Next wake"},
+				map[string]any{"key": "next_wake_summary", "label": "Planned wake"},
+			},
+		},
+	}
+
+	schemas := buildColumnSchemas(comp)
+	if len(schemas) != 3 {
+		t.Fatalf("expected transform columns plus task metadata columns, got %d", len(schemas))
+	}
+	if got := schemas[1].Key; got != "next_wake_at" {
+		t.Fatalf("second schema key = %q, want next_wake_at", got)
+	}
+	if got := schemas[1].Type; got != "date" {
+		t.Fatalf("next_wake_at type = %q, want date", got)
+	}
+	if got := schemas[2].Key; got != "next_wake_summary" {
+		t.Fatalf("third schema key = %q, want next_wake_summary", got)
+	}
+}
+
+func TestAssembleTableIncludesTaskWakeMetadata(t *testing.T) {
+	wakeAt := time.Date(2026, 3, 15, 18, 30, 0, 0, time.UTC)
+	wakeReason := "Check inbox for new broker replies"
+	comp := types.ComponentSpec{
+		Config: map[string]any{
+			"columns": []any{
+				map[string]any{"key": "name", "label": "Name", "type": "text"},
+				map[string]any{"key": "next_wake_at", "label": "Next wake"},
+				map[string]any{"key": "next_wake_summary", "label": "Planned wake"},
+			},
+		},
+		DataSource: &types.DataSource{
+			Transform: []types.TransformRule{
+				{Column: "name", Source: "title", Type: "text"},
+			},
+		},
+	}
+
+	resolved := assembleTable(
+		"sheet-1",
+		comp,
+		[]resolvedSheetRow{
+			{
+				SheetID: "sheet-1",
+				TaskID:  "task-1",
+				RowID:   "sheet-1:task-1:task",
+				RowKey:  "task",
+				Cells:   map[string]string{"name": "Prospect outreach"},
+			},
+		},
+		map[string]*types.AgentTask{
+			"task-1": {
+				ID:         "task-1",
+				State:      types.AgentTaskStateSleeping,
+				WakeAt:     &wakeAt,
+				WakeReason: &wakeReason,
+				WakeAgenda: []*types.TaskWakeAgendaItem{
+					{Seq: 1, Type: "check_replies", Title: "Check inbox for new broker replies"},
+					{Seq: 2, Type: "follow_up", Title: "Send the next follow-up if nobody replied"},
+				},
+			},
+		},
+	)
+
+	if got, want := resolved.Status, types.ResolvedDataStatusOK; got != want {
+		t.Fatalf("status = %q, want %q", got, want)
+	}
+	if len(resolved.Rows) != 1 {
+		t.Fatalf("expected one row, got %d", len(resolved.Rows))
+	}
+	row := resolved.Rows[0]
+	if got := row[1]; got != wakeAt.Format(time.RFC3339) {
+		t.Fatalf("next_wake_at cell = %#v, want %q", got, wakeAt.Format(time.RFC3339))
+	}
+	if got := row[2]; got != wakeReason {
+		t.Fatalf("next_wake_summary cell = %#v, want %q", got, wakeReason)
+	}
+}
+
+func TestViewRowMergedCells(t *testing.T) {
+	row := &ViewRow{
+		ID:         "sheet-1:task-1:task",
+		SheetID:    "sheet-1",
+		GroupID:    "task-1",
+		TaskID:     "task-1",
+		RowKey:     "task",
 		SchemaHash: "testhash123",
 		OutputIDs:  []string{"out-1", "out-2"},
 		Cells: map[string]string{
 			"recipe_name": "Spaghetti",
 			"video_url":   "https://yt.com/1",
 		},
-		CachedAt: time.Now(),
+		Manual: map[string]string{
+			"recipe_name": "Updated Spaghetti",
+		},
+		UpdatedAt: time.Now(),
 	}
 
-	raw, err := json.Marshal(cached)
-	if err != nil {
-		t.Fatalf("json.Marshal failed: %v", err)
+	merged := row.MergedCells()
+	if merged["recipe_name"] != "Updated Spaghetti" {
+		t.Fatalf("manual edit should override: got %q", merged["recipe_name"])
+	}
+	if merged["video_url"] != "https://yt.com/1" {
+		t.Fatalf("non-edited cell should be preserved: got %q", merged["video_url"])
 	}
 
-	var restored cachedTaskMapping
-	if err := json.Unmarshal(raw, &restored); err != nil {
-		t.Fatalf("json.Unmarshal failed: %v", err)
+	rowNoManual := &ViewRow{
+		Cells: map[string]string{"a": "1", "b": "2"},
 	}
-	if restored.SchemaHash != "testhash123" {
-		t.Fatalf("round-trip: schema hash = %q, want testhash123", restored.SchemaHash)
+	m2 := rowNoManual.MergedCells()
+	if m2["a"] != "1" || m2["b"] != "2" {
+		t.Fatalf("no manual edits should return cells as-is: %v", m2)
 	}
-	if !slicesMatch(restored.OutputIDs, []string{"out-1", "out-2"}) {
-		t.Fatalf("round-trip: output IDs mismatch: %v", restored.OutputIDs)
+}
+
+func TestCarryStoredRowAndResolvedCells(t *testing.T) {
+	row := &ViewRow{
+		Cells: map[string]string{
+			"name":   "Base Name",
+			"status": "queued",
+			"extra":  "ignored",
+		},
+		Manual: map[string]string{
+			"name": "Edited Name",
+		},
 	}
-	if restored.Cells["recipe_name"] != "Spaghetti" {
-		t.Fatalf("round-trip: recipe_name = %q, want Spaghetti", restored.Cells["recipe_name"])
+	keys := map[string]bool{
+		"name":   true,
+		"status": true,
 	}
-	if restored.Cells["video_url"] != "https://yt.com/1" {
-		t.Fatalf("round-trip: video_url = %q, want https://yt.com/1", restored.Cells["video_url"])
+
+	if !canCarryStoredRow(row, keys) {
+		t.Fatal("expected stored row to be reusable when missing values are satisfied by cells or manual edits")
+	}
+
+	filtered := filterStoredCells(row.Cells, keys)
+	if _, ok := filtered["extra"]; ok {
+		t.Fatalf("unexpected extra field in filtered cells: %v", filtered)
+	}
+	if filtered["name"] != "Base Name" || filtered["status"] != "queued" {
+		t.Fatalf("filtered base cells incorrect: %v", filtered)
+	}
+
+	withoutManual := composeResolvedCells(filtered, row.Manual, keys, false)
+	if withoutManual["name"] != "Base Name" {
+		t.Fatalf("force refresh should not reapply manual value: %v", withoutManual)
+	}
+
+	merged := composeResolvedCells(filtered, row.Manual, keys, true)
+	if merged["name"] != "Edited Name" {
+		t.Fatalf("manual value should win in merged cells: %v", merged)
+	}
+	if filtered["name"] != "Base Name" {
+		t.Fatalf("base cells should remain unchanged after merge: %v", filtered)
 	}
 }
 
@@ -270,8 +410,8 @@ func TestHashColumnsStable(t *testing.T) {
 	}
 
 	cols := buildUnifiedSchema(comps)
-	h1 := hashColumns(cols)
-	h2 := hashColumns(cols)
+	h1 := hashColumns(cols, types.RowStrategy{Mode: types.RowStrategyModeTask}, "test-sheet")
+	h2 := hashColumns(cols, types.RowStrategy{Mode: types.RowStrategyModeTask}, "test-sheet")
 	if h1 != h2 {
 		t.Fatalf("hashColumns not stable: %q vs %q", h1, h2)
 	}
@@ -280,7 +420,7 @@ func TestHashColumnsStable(t *testing.T) {
 	var comps2 []types.ComponentSpec
 	json.Unmarshal(compsJSON, &comps2)
 	cols2 := buildUnifiedSchema(comps2)
-	h3 := hashColumns(cols2)
+	h3 := hashColumns(cols2, types.RowStrategy{Mode: types.RowStrategyModeTask}, "test-sheet")
 	if h1 != h3 {
 		t.Fatalf("hashColumns not stable across JSON round-trip: %q vs %q", h1, h3)
 	}

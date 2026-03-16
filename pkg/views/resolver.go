@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/google/uuid"
@@ -30,17 +29,38 @@ import (
 var viewMappingFlight singleflight.Group
 
 type viewMappingResult struct {
-	MappedTasks map[string]map[string]string
-	TaskGroups  map[string][]*types.TaskOutput
+	Rows     []resolvedSheetRow
+	TaskMeta map[string]*types.AgentTask
 }
+
+type resolvedSheetRow struct {
+	SheetID  string
+	TaskID   string
+	RowID    string
+	RowKey   string
+	OutputID string
+	Cells    map[string]string
+}
+
+const (
+	taskMetadataColumnNextWakeAt      = "next_wake_at"
+	taskMetadataColumnNextWakeSummary = "next_wake_summary"
+	taskMetadataColumnWakeAt          = "wake_at"
+	taskMetadataColumnWakeReason      = "wake_reason"
+)
 
 type DataResolver struct {
 	backend dataResolverBackend
-	cache   *mappingCache
+	store   *ViewStore
 }
 
-func NewDataResolver(backend repository.BackendRepository, rdb *common.RedisClient) *DataResolver {
-	return &DataResolver{backend: backend, cache: newMappingCache(rdb)}
+type ResolveOptions struct {
+	ForceRefresh  bool
+	ViewAgentRefs []string
+}
+
+func NewDataResolver(backend repository.BackendRepository, store *ViewStore) *DataResolver {
+	return &DataResolver{backend: backend, store: store}
 }
 
 type dataResolverBackend interface {
@@ -50,96 +70,215 @@ type dataResolverBackend interface {
 	GetTaskByID(ctx context.Context, taskId string) (*types.AgentTask, error)
 }
 
-// Resolve maps task outputs to a view component's schema using BAML.
-//
-// The mapping is done once per view via singleflight — concurrent requests for
-// different components in the same view share a single BAML call. Results are
-// cached per-task; only tasks whose output set has changed (or whose schema
-// hash is stale) are re-mapped.
-func (r *DataResolver) Resolve(ctx context.Context, workspaceID uint, viewID string, comp types.ComponentSpec, allComponents []types.ComponentSpec) (*types.ResolvedData, error) {
-	unifiedCols := buildUnifiedSchema(allComponents)
-	if len(unifiedCols) == 0 {
+// Resolve maps task outputs to a sheet table's schema using BAML.
+func (r *DataResolver) Resolve(ctx context.Context, workspaceID uint, viewID string, sheet types.SheetSpec, comp types.ComponentSpec, opts ResolveOptions) (*types.ResolvedData, error) {
+	if !comp.IsTable() {
 		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}, nil
 	}
-
-	result, err := r.ensureViewMapped(ctx, workspaceID, viewID, allComponents, unifiedCols)
+	result, err := r.ensureSheetMapped(ctx, workspaceID, viewID, sheet, comp, opts)
 	if err != nil {
 		return nil, err
 	}
 	if result == nil {
 		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}, nil
 	}
-
-	resolvedAgents := r.resolveAgentIDsForDS(ctx, workspaceID, comp.DataSource)
-
-	switch {
-	case comp.IsTable():
-		return assembleTable(comp, result.MappedTasks, result.TaskGroups, resolvedAgents), nil
-	case comp.Type == types.ComponentTypeMetric:
-		return assembleMetric(comp, result.MappedTasks, result.TaskGroups, resolvedAgents), nil
-	default:
-		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}, nil
-	}
+	return assembleTable(sheet.ID, comp, result.Rows, result.TaskMeta), nil
 }
 
-// ensureViewMapped uses singleflight to guarantee that concurrent Resolve
-// calls for the same view share a single mapping operation instead of each
-// firing its own BAML call.
-func (r *DataResolver) ensureViewMapped(ctx context.Context, workspaceID uint, viewID string, allComponents []types.ComponentSpec, unifiedCols []bamltypes.ColumnSchema) (*viewMappingResult, error) {
-	flightKey := fmt.Sprintf("%d:%s", workspaceID, viewID)
+// RegenerateRow re-maps a single task's outputs through BAML for one sheet,
+// replacing the cached rows for that task. Returns the full re-assembled table.
+func (r *DataResolver) RegenerateRow(ctx context.Context, workspaceID uint, viewID string, sheet types.SheetSpec, comp types.ComponentSpec, taskID string, opts ResolveOptions) (*types.ResolvedData, error) {
+	if !comp.IsTable() {
+		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}, nil
+	}
+	tableCols := buildColumnSchemas(comp)
+	if len(tableCols) == 0 {
+		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}, nil
+	}
+	rowStrategy := effectiveRowStrategy(comp.DataSource)
+	mappingCols := filterBamlColumns(tableCols)
+	schemaH := hashColumns(mappingCols, rowStrategy, sheet.Name)
 
-	val, err, shared := viewMappingFlight.Do(flightKey, func() (any, error) {
-		return r.mapView(ctx, workspaceID, viewID, allComponents, unifiedCols)
+	allOutputs, err := r.fetchComponentOutputs(ctx, workspaceID, comp.DataSource, opts.ViewAgentRefs)
+	if err != nil {
+		return nil, fmt.Errorf("fetch component outputs: %w", err)
+	}
+
+	taskGroups := groupOutputsByTask(allOutputs)
+	outputs, ok := taskGroups[taskID]
+	if !ok || len(outputs) == 0 {
+		return nil, fmt.Errorf("no outputs found for task %s", taskID)
+	}
+
+	taskPrompts := r.fetchTaskPrompts(ctx, []string{taskID})
+	singleGroup := map[string][]*types.TaskOutput{taskID: outputs}
+	outputsJSON, err := serializeOutputsForMapping(outputs, taskPrompts)
+	if err != nil {
+		return nil, fmt.Errorf("serialize outputs: %w", err)
+	}
+
+	result, err := baml.MapOutputsToSchema(
+		ctx,
+		sheet.Name,
+		comp.Title,
+		comp.Type,
+		rowStrategy.Mode,
+		rowStrategy.Description,
+		mappingCols,
+		outputsJSON,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("BAML mapping: %w", err)
+	}
+
+	now := time.Now()
+	var persisted []ViewRow
+	for _, row := range result.Rows {
+		if row.Task_id != taskID {
+			continue
+		}
+		persisted = append(persisted, mappedRowToViewRow(sheet.ID, taskID, schemaH, singleGroup[taskID], row, now))
+	}
+	if len(persisted) == 0 {
+		persisted = []ViewRow{fallbackViewRow(sheet.ID, taskID, schemaH, singleGroup[taskID], now)}
+	}
+
+	var keepRowIDs []string
+	for _, row := range persisted {
+		keepRowIDs = append(keepRowIDs, row.ID)
+	}
+	if err := r.store.UpsertRows(ctx, viewID, persisted); err != nil {
+		return nil, fmt.Errorf("persist regenerated rows: %w", err)
+	}
+	if err := r.store.DeleteRowsNotInGroups(ctx, viewID, sheet.ID, []string{taskID}, keepRowIDs); err != nil {
+		log.Warn().Err(err).Str("view_id", viewID).Str("task_id", taskID).Msg("failed to delete stale rows after regeneration")
+	}
+
+	fullResult, err := r.Resolve(ctx, workspaceID, viewID, sheet, comp, ResolveOptions{ViewAgentRefs: opts.ViewAgentRefs})
+	if err != nil {
+		return nil, fmt.Errorf("re-resolve after regeneration: %w", err)
+	}
+	return fullResult, nil
+}
+
+// ensureSheetMapped uses singleflight to guarantee that concurrent Resolve
+// calls for the same sheet table share a single mapping operation.
+func (r *DataResolver) ensureSheetMapped(ctx context.Context, workspaceID uint, viewID string, sheet types.SheetSpec, comp types.ComponentSpec, opts ResolveOptions) (*viewMappingResult, error) {
+	flightKey := viewMappingFlightKey(workspaceID, viewID, sheet.ID, comp.ID, opts)
+
+	val, err, _ := viewMappingFlight.Do(flightKey, func() (any, error) {
+		return r.mapSheet(ctx, workspaceID, viewID, sheet, comp, opts)
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	result := val.(*viewMappingResult)
-	log.Debug().Str("view_id", viewID).Bool("shared", shared).Int("mapped_tasks", len(result.MappedTasks)).Msg("view mapping resolved")
-	return result, nil
+	return val.(*viewMappingResult), nil
 }
 
-// mapView does the actual work: fetch outputs, check cache, call BAML for
-// uncached tasks, and cache the results.
-func (r *DataResolver) mapView(ctx context.Context, workspaceID uint, viewID string, allComponents []types.ComponentSpec, unifiedCols []bamltypes.ColumnSchema) (*viewMappingResult, error) {
-	schemaH := hashColumns(unifiedCols)
+// mapSheet does the actual work: fetch outputs for the sheet's table binding,
+// check stored rows in MongoDB, call BAML for uncached/stale task groups, and
+// persist results back.
+func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID string, sheet types.SheetSpec, comp types.ComponentSpec, opts ResolveOptions) (*viewMappingResult, error) {
+	tableCols := buildColumnSchemas(comp)
+	if len(tableCols) == 0 {
+		return &viewMappingResult{Rows: nil, TaskMeta: map[string]*types.AgentTask{}}, nil
+	}
+	rowStrategy := effectiveRowStrategy(comp.DataSource)
+	mappingCols := filterBamlColumns(tableCols)
+	schemaH := hashColumns(mappingCols, rowStrategy, sheet.Name)
 
-	allOutputs, err := r.fetchViewOutputs(ctx, workspaceID, allComponents)
+	allOutputs, err := r.fetchComponentOutputs(ctx, workspaceID, comp.DataSource, opts.ViewAgentRefs)
 	if err != nil {
-		return nil, fmt.Errorf("fetch view outputs: %w", err)
+		return nil, fmt.Errorf("fetch component outputs: %w", err)
 	}
 	if len(allOutputs) == 0 {
-		return &viewMappingResult{
-			MappedTasks: map[string]map[string]string{},
-			TaskGroups:  map[string][]*types.TaskOutput{},
-		}, nil
+		return &viewMappingResult{Rows: nil, TaskMeta: map[string]*types.AgentTask{}}, nil
 	}
 
 	taskGroups := groupOutputsByTask(allOutputs)
+	taskMeta := r.fetchTaskMetadata(ctx, taskIDsFromGroups(taskGroups))
 
-	uncachedIDs := make(map[string]bool)
-	mappedTasks := make(map[string]map[string]string, len(taskGroups))
-	for taskID, outputs := range taskGroups {
-		taskOIDs := sortedOutputIDs(outputs)
-		if cached, ok := r.cache.getTask(ctx, viewID, taskID); ok &&
-			cached.SchemaHash == schemaH &&
-			slicesMatch(cached.OutputIDs, taskOIDs) {
-			mappedTasks[taskID] = cached.Cells
-		} else {
-			uncachedIDs[taskID] = true
-		}
+	existingRows, err := r.store.GetRows(ctx, viewID, sheet.ID)
+	if err != nil {
+		log.Warn().Err(err).Str("view_id", viewID).Str("sheet_id", sheet.ID).Msg("failed to load stored rows, treating all as uncached")
+		existingRows = nil
+	}
+	rowsByGroup := make(map[string][]ViewRow)
+	for i := range existingRows {
+		row := existingRows[i]
+		rowsByGroup[row.GroupID] = append(rowsByGroup[row.GroupID], row)
 	}
 
-	if len(uncachedIDs) > 0 {
-		log.Info().Str("view_id", viewID).Str("schema_hash", schemaH).Int("tasks", len(taskGroups)).Int("cached", len(taskGroups)-len(uncachedIDs)).Int("uncached", len(uncachedIDs)).Msg("BAML mapping required")
+	uncachedIDs := make(map[string]bool)
+	var resolvedRows []resolvedSheetRow
+	applyManualEdits := !opts.ForceRefresh
 
-		uncachedTIDs := make([]string, 0, len(uncachedIDs))
-		for tid := range uncachedIDs {
-			uncachedTIDs = append(uncachedTIDs, tid)
+	if opts.ForceRefresh {
+		log.Info().
+			Str("view_id", viewID).
+			Str("sheet_id", sheet.ID).
+			Str("schema_hash", schemaH).
+			Int("tasks", len(taskGroups)).
+			Msg("mongo: force refresh requested")
+	}
+
+	for taskID, outputs := range taskGroups {
+		if opts.ForceRefresh {
+			uncachedIDs[taskID] = true
+			continue
 		}
-		sort.Strings(uncachedTIDs)
 
+		taskOIDs := sortedOutputIDs(outputs)
+		storedRows := rowsByGroup[taskID]
+		if groupRowsFresh(storedRows, schemaH, taskOIDs) {
+			resolvedRows = append(resolvedRows, resolvedRowsFromStored(storedRows, applyManualEdits)...)
+			continue
+		}
+		uncachedIDs[taskID] = true
+	}
+
+	if len(uncachedIDs) == 0 {
+		sortResolvedRows(resolvedRows, taskMeta)
+		return &viewMappingResult{Rows: resolvedRows, TaskMeta: taskMeta}, nil
+	}
+
+	uncachedTIDs := make([]string, 0, len(uncachedIDs))
+	for tid := range uncachedIDs {
+		uncachedTIDs = append(uncachedTIDs, tid)
+	}
+	sort.Strings(uncachedTIDs)
+
+	colKeys := make([]string, 0, len(mappingCols))
+	for _, c := range mappingCols {
+		colKeys = append(colKeys, c.Key)
+	}
+	log.Info().
+		Str("view_id", viewID).
+		Str("sheet_id", sheet.ID).
+		Str("sheet_name", sheet.Name).
+		Str("schema_hash", schemaH).
+		Bool("force_refresh", opts.ForceRefresh).
+		Int("tasks", len(taskGroups)).
+		Int("cached", len(taskGroups)-len(uncachedIDs)).
+		Int("uncached", len(uncachedIDs)).
+		Int("total_columns", len(tableCols)).
+		Int("mapping_columns", len(mappingCols)).
+		Strs("column_keys", colKeys).
+		Str("row_mode", rowStrategy.Mode).
+		Msg("BAML mapping required")
+
+	persistedByGroup := make(map[string][]ViewRow)
+	mappedByGroup := make(map[string][]resolvedSheetRow)
+	now := time.Now()
+
+	if len(mappingCols) == 0 {
+		for _, taskID := range uncachedTIDs {
+			row := fallbackViewRow(sheet.ID, taskID, schemaH, taskGroups[taskID], now)
+			persistedByGroup[taskID] = []ViewRow{row}
+			mappedByGroup[taskID] = resolvedRowsFromStored([]ViewRow{row}, applyManualEdits)
+		}
+	} else {
 		taskPrompts := r.fetchTaskPrompts(ctx, uncachedTIDs)
 		uncachedOutputs := outputsForTasks(allOutputs, uncachedIDs)
 		outputsJSON, err := serializeOutputsForMapping(uncachedOutputs, taskPrompts)
@@ -147,52 +286,167 @@ func (r *DataResolver) mapView(ctx context.Context, workspaceID uint, viewID str
 			return nil, fmt.Errorf("serialize outputs: %w", err)
 		}
 
-		result, err := baml.MapOutputsToSchema(ctx, "View Mapping", "data-table", unifiedCols, outputsJSON)
+		result, err := baml.MapOutputsToSchema(
+			ctx,
+			sheet.Name,
+			comp.Title,
+			comp.Type,
+			rowStrategy.Mode,
+			rowStrategy.Description,
+			mappingCols,
+			outputsJSON,
+		)
 		if err != nil {
-			log.Warn().Err(err).Str("view_id", viewID).Int("tasks", len(uncachedIDs)).Msg("BAML mapping failed")
+			if opts.ForceRefresh {
+				return nil, fmt.Errorf("force refresh BAML mapping: %w", err)
+			}
+			log.Warn().Err(err).Str("view_id", viewID).Str("sheet_id", sheet.ID).Int("tasks", len(uncachedIDs)).Msg("BAML mapping failed")
 		} else {
 			for _, row := range result.Rows {
-				cells := make(map[string]string, len(row.Cells))
-				for _, cell := range row.Cells {
-					if cell.Value != "" {
-						cells[cell.Column] = cell.Value
-					}
-				}
 				taskID := row.Task_id
 				if _, ok := taskGroups[taskID]; !ok {
 					continue
 				}
-				mappedTasks[taskID] = cells
-				r.cache.setTask(ctx, viewID, taskID, &cachedTaskMapping{
-					SchemaHash: schemaH,
-					OutputIDs:  sortedOutputIDs(taskGroups[taskID]),
-					Cells:      cells,
-					CachedAt:   time.Now(),
-				})
+				persisted := mappedRowToViewRow(sheet.ID, taskID, schemaH, taskGroups[taskID], row, now)
+				persistedByGroup[taskID] = append(persistedByGroup[taskID], persisted)
 			}
 		}
 
-		// Cache tasks that BAML didn't return rows for so they don't
-		// trigger re-mapping on subsequent loads.
-		for tid := range uncachedIDs {
-			if _, ok := mappedTasks[tid]; !ok {
-				mappedTasks[tid] = map[string]string{}
-				r.cache.setTask(ctx, viewID, tid, &cachedTaskMapping{
-					SchemaHash: schemaH,
-					OutputIDs:  sortedOutputIDs(taskGroups[tid]),
-					Cells:      map[string]string{},
-					CachedAt:   time.Now(),
-				})
+		for _, taskID := range uncachedTIDs {
+			if len(persistedByGroup[taskID]) == 0 {
+				if !opts.ForceRefresh && len(rowsByGroup[taskID]) > 0 {
+					mappedByGroup[taskID] = resolvedRowsFromStored(rowsByGroup[taskID], true)
+				}
+				// BAML intentionally omitted this task — it has no relevant
+				// data for this sheet. Don't create a fallback empty row.
+				continue
+			}
+			mappedByGroup[taskID] = resolvedRowsFromStored(persistedByGroup[taskID], applyManualEdits)
+		}
+	}
+
+	{
+		var toUpsert []ViewRow
+		var keepRowIDs []string
+		var cleanupGroupIDs []string
+		for _, taskID := range uncachedTIDs {
+			rows := persistedByGroup[taskID]
+			if len(rows) > 0 {
+				for _, row := range rows {
+					toUpsert = append(toUpsert, row)
+					keepRowIDs = append(keepRowIDs, row.ID)
+				}
+				cleanupGroupIDs = append(cleanupGroupIDs, taskID)
+			} else if opts.ForceRefresh {
+				// BAML intentionally omitted this task on force refresh —
+				// delete any old rows for it (no keepRowIDs → all deleted).
+				cleanupGroupIDs = append(cleanupGroupIDs, taskID)
+			}
+		}
+		persistedOK := true
+		if len(toUpsert) > 0 {
+			if err := r.store.UpsertRows(ctx, viewID, toUpsert); err != nil {
+				persistedOK = false
+				log.Error().Err(err).Str("view_id", viewID).Str("sheet_id", sheet.ID).Int("rows", len(toUpsert)).Msg("failed to persist mapped rows to MongoDB")
+				if opts.ForceRefresh {
+					return nil, fmt.Errorf("persist force refresh rows: %w", err)
+				}
+			}
+		}
+		if persistedOK && len(cleanupGroupIDs) > 0 {
+			if err := r.store.DeleteRowsNotInGroups(ctx, viewID, sheet.ID, cleanupGroupIDs, keepRowIDs); err != nil {
+				log.Error().Err(err).Str("view_id", viewID).Str("sheet_id", sheet.ID).Int("groups", len(cleanupGroupIDs)).Msg("failed to delete stale rows from MongoDB")
+				if opts.ForceRefresh {
+					return nil, fmt.Errorf("delete stale force refresh rows: %w", err)
+				}
+			}
+			if opts.ForceRefresh {
+				if err := r.store.ClearManualCells(ctx, viewID, sheet.ID, keepRowIDs, schemaKeyList(mappingCols)); err != nil {
+					return nil, fmt.Errorf("clear manual cells after force refresh: %w", err)
+				}
 			}
 		}
 	}
 
-	return &viewMappingResult{MappedTasks: mappedTasks, TaskGroups: taskGroups}, nil
+	for _, taskID := range uncachedTIDs {
+		if rows := mappedByGroup[taskID]; len(rows) > 0 {
+			resolvedRows = append(resolvedRows, rows...)
+		}
+	}
+
+	sortResolvedRows(resolvedRows, taskMeta)
+	return &viewMappingResult{Rows: resolvedRows, TaskMeta: taskMeta}, nil
 }
 
 // ---------------------------------------------------------------------------
 // View-level helpers
 // ---------------------------------------------------------------------------
+
+func viewMappingFlightKey(workspaceID uint, viewID, sheetID, componentID string, opts ResolveOptions) string {
+	return fmt.Sprintf("%d:%s:%s:%s:%t", workspaceID, viewID, sheetID, componentID, opts.ForceRefresh)
+}
+
+func schemaKeySet(cols []bamltypes.ColumnSchema) map[string]bool {
+	keys := make(map[string]bool, len(cols))
+	for _, col := range cols {
+		keys[col.Key] = true
+	}
+	return keys
+}
+
+func schemaKeyList(cols []bamltypes.ColumnSchema) []string {
+	keys := make([]string, 0, len(cols))
+	for _, col := range cols {
+		keys = append(keys, col.Key)
+	}
+	return keys
+}
+
+func canCarryStoredRow(stored *ViewRow, schemaKeys map[string]bool) bool {
+	for key := range schemaKeys {
+		if _, ok := stored.Cells[key]; ok {
+			continue
+		}
+		if _, ok := stored.Manual[key]; ok {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func filterStoredCells(cells map[string]string, schemaKeys map[string]bool) map[string]string {
+	filtered := make(map[string]string, len(cells))
+	for key, value := range cells {
+		if schemaKeys[key] {
+			filtered[key] = value
+		}
+	}
+	return filtered
+}
+
+func composeResolvedCells(cells, manual map[string]string, schemaKeys map[string]bool, applyManual bool) map[string]string {
+	filtered := filterStoredCells(cells, schemaKeys)
+	if !applyManual {
+		return filtered
+	}
+	return mergeManualCells(filtered, manual, schemaKeys)
+}
+
+func mergeManualCells(cells, manual map[string]string, schemaKeys map[string]bool) map[string]string {
+	merged := make(map[string]string, len(cells)+len(manual))
+	for key, value := range cells {
+		if schemaKeys[key] {
+			merged[key] = value
+		}
+	}
+	for key, value := range manual {
+		if schemaKeys[key] {
+			merged[key] = value
+		}
+	}
+	return merged
+}
 
 func buildUnifiedSchema(allComponents []types.ComponentSpec) []bamltypes.ColumnSchema {
 	seen := make(map[string]bool)
@@ -209,49 +463,6 @@ func buildUnifiedSchema(allComponents []types.ComponentSpec) []bamltypes.ColumnS
 		}
 	}
 	return cols
-}
-
-// fetchViewOutputs gathers outputs for every unique agent referenced by any
-// component in the view. OutputType filtering is intentionally omitted — BAML
-// handles semantic relevance. This ensures that when multiple widgets share
-// the same tasks/outputs, all widgets see the full picture.
-func (r *DataResolver) fetchViewOutputs(ctx context.Context, workspaceID uint, allComponents []types.ComponentSpec) ([]*types.TaskOutput, error) {
-	agentRefs := make(map[string]bool)
-	for _, comp := range allComponents {
-		if comp.DataSource == nil {
-			continue
-		}
-		if comp.DataSource.AgentID != "" {
-			agentRefs[comp.DataSource.AgentID] = true
-		}
-		for _, ref := range comp.DataSource.AgentIDs {
-			agentRefs[ref] = true
-		}
-	}
-
-	if len(agentRefs) == 0 {
-		return r.backend.ListWorkspaceTaskOutputs(ctx, workspaceID, types.TaskOutputListFilter{
-			ExcludeArchived: false, Limit: 200,
-		})
-	}
-
-	var all []*types.TaskOutput
-	resolved := make(map[string]bool)
-	for ref := range agentRefs {
-		aid, ok := r.resolveAgentRef(ctx, workspaceID, ref)
-		if !ok || resolved[aid] {
-			continue
-		}
-		resolved[aid] = true
-		outputs, err := r.backend.ListWorkspaceTaskOutputs(ctx, workspaceID, types.TaskOutputListFilter{
-			AgentID: &aid, ExcludeArchived: false, Limit: 200,
-		})
-		if err != nil {
-			return nil, err
-		}
-		all = append(all, outputs...)
-	}
-	return dedupeOutputs(all), nil
 }
 
 func groupOutputsByTask(outputs []*types.TaskOutput) map[string][]*types.TaskOutput {
@@ -274,14 +485,27 @@ func outputsForTasks(outputs []*types.TaskOutput, taskIDs map[string]bool) []*ty
 	return result
 }
 
+func groupRowsFresh(rows []ViewRow, schemaH string, outputIDs []string) bool {
+	if len(rows) == 0 {
+		return false
+	}
+	for _, row := range rows {
+		if row.SchemaHash != schemaH || !slicesMatch(row.OutputIDs, outputIDs) {
+			return false
+		}
+	}
+	return true
+}
+
 func (r *DataResolver) resolveAgentIDsForDS(ctx context.Context, workspaceID uint, ds *types.DataSource) []string {
 	if ds == nil {
 		return nil
 	}
-	refs := ds.AgentIDs
-	if ds.AgentID != "" && len(refs) == 0 {
-		refs = []string{ds.AgentID}
+	refs := append([]string{}, ds.AgentIDs...)
+	if ds.AgentID != "" {
+		refs = append(refs, ds.AgentID)
 	}
+	refs = uniqueTrimmedStrings(refs)
 	var ids []string
 	for _, ref := range refs {
 		if aid, ok := r.resolveAgentRef(ctx, workspaceID, ref); ok {
@@ -291,21 +515,124 @@ func (r *DataResolver) resolveAgentIDsForDS(ctx context.Context, workspaceID uin
 	return ids
 }
 
+func (r *DataResolver) resolveAgentIDsFromRefs(ctx context.Context, workspaceID uint, refs []string) []string {
+	trimmed := uniqueTrimmedStrings(refs)
+	var ids []string
+	for _, ref := range trimmed {
+		if aid, ok := r.resolveAgentRef(ctx, workspaceID, ref); ok {
+			ids = append(ids, aid)
+		}
+	}
+	return ids
+}
+
+func (r *DataResolver) fetchComponentOutputs(ctx context.Context, workspaceID uint, ds *types.DataSource, viewAgentRefs []string) ([]*types.TaskOutput, error) {
+	filter := types.TaskOutputListFilter{
+		ExcludeArchived: false,
+		Limit:           200,
+	}
+	if ds != nil && strings.TrimSpace(ds.OutputType) != "" {
+		outputType := strings.TrimSpace(ds.OutputType)
+		filter.OutputType = &outputType
+	}
+
+	resolvedAgentIDs := r.resolveAgentIDsForDS(ctx, workspaceID, ds)
+	if ds != nil && (strings.TrimSpace(ds.AgentID) != "" || len(ds.AgentIDs) > 0) && len(resolvedAgentIDs) == 0 {
+		return nil, nil
+	}
+
+	// Fall back to view-level agents when the component has no explicit agent filter.
+	if len(resolvedAgentIDs) == 0 && len(viewAgentRefs) > 0 {
+		resolvedAgentIDs = r.resolveAgentIDsFromRefs(ctx, workspaceID, viewAgentRefs)
+	}
+
+	if len(resolvedAgentIDs) == 0 {
+		outputs, err := r.backend.ListWorkspaceTaskOutputs(ctx, workspaceID, filter)
+		if err != nil {
+			return nil, err
+		}
+		return filterOutputsForDataSource(dedupeOutputs(outputs), ds, nil), nil
+	}
+
+	var all []*types.TaskOutput
+	for _, agentID := range resolvedAgentIDs {
+		localFilter := filter
+		localFilter.AgentID = &agentID
+		outputs, err := r.backend.ListWorkspaceTaskOutputs(ctx, workspaceID, localFilter)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, outputs...)
+	}
+	return filterOutputsForDataSource(dedupeOutputs(all), ds, resolvedAgentIDs), nil
+}
+
+func filterOutputsForDataSource(outputs []*types.TaskOutput, ds *types.DataSource, resolvedAgentIDs []string) []*types.TaskOutput {
+	if len(outputs) == 0 || ds == nil {
+		return outputs
+	}
+	agentSet := make(map[string]bool, len(resolvedAgentIDs))
+	for _, id := range resolvedAgentIDs {
+		agentSet[id] = true
+	}
+
+	filtered := make([]*types.TaskOutput, 0, len(outputs))
+	for _, output := range outputs {
+		if output == nil {
+			continue
+		}
+		if len(agentSet) > 0 {
+			if output.AgentID == nil || !agentSet[strings.TrimSpace(*output.AgentID)] {
+				continue
+			}
+		}
+		if ds.OutputType != "" && !strings.EqualFold(strings.TrimSpace(ds.OutputType), strings.TrimSpace(output.OutputType)) {
+			continue
+		}
+		if ds.ArtifactKey != "" && !ArtifactOf(output).MatchesKey(ds.ArtifactKey) {
+			continue
+		}
+		filtered = append(filtered, output)
+	}
+	if ds.TimeRange != "" {
+		filtered = filterOutputsByTimeRange(filtered, ds.TimeRange)
+	}
+	return filtered
+}
+
+func effectiveRowStrategy(ds *types.DataSource) types.RowStrategy {
+	if ds == nil || ds.RowStrategy == nil {
+		return types.RowStrategy{Mode: types.RowStrategyModeTask}
+	}
+	mode := strings.ToLower(strings.TrimSpace(ds.RowStrategy.Mode))
+	if mode != types.RowStrategyModeSplit {
+		mode = types.RowStrategyModeTask
+	}
+	return types.RowStrategy{
+		Mode:        mode,
+		Description: strings.TrimSpace(ds.RowStrategy.Description),
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Component assembly
 // ---------------------------------------------------------------------------
 
-func assembleTable(comp types.ComponentSpec, mappedTasks map[string]map[string]string, taskGroups map[string][]*types.TaskOutput, resolvedAgentIDs []string) *types.ResolvedData {
+func assembleTable(sheetID string, comp types.ComponentSpec, mappedRows []resolvedSheetRow, taskMeta map[string]*types.AgentTask) *types.ResolvedData {
 	tableCols := buildColumnSchemas(comp)
 	if len(tableCols) == 0 {
 		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}
 	}
 
-	colNames := make([]string, len(tableCols)+1)
+	hiddenStart := len(tableCols)
+	colNames := make([]string, hiddenStart+4)
 	for i, col := range tableCols {
 		colNames[i] = col.Key
 	}
-	colNames[len(tableCols)] = "task_id"
+	colNames[hiddenStart] = "task_id"
+	colNames[hiddenStart+1] = "row_id"
+	colNames[hiddenStart+2] = "sheet_id"
+	colNames[hiddenStart+3] = "output_id"
 
 	meta := make([]types.ColumnMeta, len(colNames))
 	for i, col := range tableCols {
@@ -315,23 +642,32 @@ func assembleTable(comp types.ComponentSpec, mappedTasks map[string]map[string]s
 			Type:  normalizeColumnType(col.Type),
 		}
 	}
-	meta[len(tableCols)] = types.ColumnMeta{Key: "task_id", Type: "text", Hidden: true}
+	meta[hiddenStart] = types.ColumnMeta{Key: "task_id", Type: "text", Hidden: true}
+	meta[hiddenStart+1] = types.ColumnMeta{Key: "row_id", Type: "text", Hidden: true}
+	meta[hiddenStart+2] = types.ColumnMeta{Key: "sheet_id", Type: "text", Hidden: true}
+	meta[hiddenStart+3] = types.ColumnMeta{Key: "output_id", Type: "text", Hidden: true}
 
 	var rows [][]any
-	for taskID, cells := range mappedTasks {
-		outputs := taskGroups[taskID]
-		if !taskMatchesDataSource(outputs, comp.DataSource, resolvedAgentIDs) {
-			continue
-		}
+	for _, mapped := range mappedRows {
 		row := make([]any, len(colNames))
 		hasValue := false
 		for i, col := range tableCols {
-			if v, ok := cells[col.Key]; ok && v != "" {
+			if v, ok := mapped.Cells[col.Key]; ok && v != "" {
 				row[i] = v
 				hasValue = true
+				continue
+			}
+			if task, ok := taskMeta[mapped.TaskID]; ok {
+				if v, ok := taskMetadataValue(task, col.Key); ok && v != "" {
+					row[i] = v
+					hasValue = true
+				}
 			}
 		}
-		row[len(tableCols)] = taskID
+		row[hiddenStart] = mapped.TaskID
+		row[hiddenStart+1] = mapped.RowID
+		row[hiddenStart+2] = sheetID
+		row[hiddenStart+3] = mapped.OutputID
 		if hasValue {
 			rows = append(rows, row)
 		}
@@ -347,87 +683,6 @@ func assembleTable(comp types.ComponentSpec, mappedTasks map[string]map[string]s
 		Total:      len(rows),
 		Status:     types.ResolvedDataStatusOK,
 	}
-}
-
-func assembleMetric(comp types.ComponentSpec, mappedTasks map[string]map[string]string, taskGroups map[string][]*types.TaskOutput, resolvedAgentIDs []string) *types.ResolvedData {
-	count := 0
-	for taskID := range mappedTasks {
-		outputs := taskGroups[taskID]
-		if taskMatchesDataSource(outputs, comp.DataSource, resolvedAgentIDs) {
-			count++
-		}
-	}
-
-	if count == 0 {
-		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Total: 0, Status: types.ResolvedDataStatusEmpty}
-	}
-
-	aggregate := "count"
-	if comp.Config != nil {
-		if a, ok := comp.Config["aggregate"].(string); ok && a != "" {
-			aggregate = a
-		}
-	}
-
-	switch aggregate {
-	case "latest":
-		var latest *types.TaskOutput
-		for taskID := range mappedTasks {
-			for _, o := range taskGroups[taskID] {
-				if latest == nil || o.CreatedAt.After(latest.CreatedAt) {
-					latest = o
-				}
-			}
-		}
-		val := ""
-		if latest != nil {
-			val = latest.Title
-			if latest.Summary != nil && *latest.Summary != "" {
-				val = *latest.Summary
-			}
-		}
-		return &types.ResolvedData{
-			Columns: []string{"value"},
-			Rows:    [][]any{{val}},
-			Total:   count,
-			Status:  types.ResolvedDataStatusOK,
-		}
-	default:
-		return &types.ResolvedData{
-			Columns: []string{},
-			Rows:    [][]any{},
-			Total:   count,
-			Status:  types.ResolvedDataStatusOK,
-		}
-	}
-}
-
-func taskMatchesDataSource(outputs []*types.TaskOutput, ds *types.DataSource, resolvedAgentIDs []string) bool {
-	if ds == nil || len(outputs) == 0 {
-		return true
-	}
-	if len(resolvedAgentIDs) > 0 {
-		agentSet := make(map[string]bool, len(resolvedAgentIDs))
-		for _, id := range resolvedAgentIDs {
-			agentSet[id] = true
-		}
-		match := false
-		for _, o := range outputs {
-			if o.AgentID != nil && agentSet[*o.AgentID] {
-				match = true
-				break
-			}
-		}
-		if !match {
-			return false
-		}
-	}
-	if ds.TimeRange != "" {
-		if len(filterOutputsByTimeRange(outputs, ds.TimeRange)) == 0 {
-			return false
-		}
-	}
-	return true
 }
 
 // ---------------------------------------------------------------------------
@@ -454,7 +709,6 @@ func (r *DataResolver) resolveAgentRef(ctx context.Context, workspaceID uint, re
 	return "", false
 }
 
-
 func dedupeOutputs(all []*types.TaskOutput) []*types.TaskOutput {
 	seen := make(map[string]struct{}, len(all))
 	deduped := make([]*types.TaskOutput, 0, len(all))
@@ -469,6 +723,134 @@ func dedupeOutputs(all []*types.TaskOutput) []*types.TaskOutput {
 		deduped = append(deduped, o)
 	}
 	return deduped
+}
+
+func resolvedRowsFromStored(rows []ViewRow, applyManual bool) []resolvedSheetRow {
+	if len(rows) == 0 {
+		return nil
+	}
+	cloned := append([]ViewRow(nil), rows...)
+	sort.SliceStable(cloned, func(i, j int) bool {
+		if cloned[i].TaskID != cloned[j].TaskID {
+			return cloned[i].TaskID < cloned[j].TaskID
+		}
+		if cloned[i].RowKey != cloned[j].RowKey {
+			return cloned[i].RowKey < cloned[j].RowKey
+		}
+		return cloned[i].ID < cloned[j].ID
+	})
+
+	result := make([]resolvedSheetRow, 0, len(cloned))
+	for _, row := range cloned {
+		cells := copyStringMap(row.Cells)
+		if applyManual {
+			cells = copyStringMap(row.MergedCells())
+		}
+		result = append(result, resolvedSheetRow{
+			SheetID:  row.SheetID,
+			TaskID:   row.TaskID,
+			RowID:    row.ID,
+			RowKey:   row.RowKey,
+			OutputID: firstSourceOutputID(row.SourceOutputIDs),
+			Cells:    cells,
+		})
+	}
+	return result
+}
+
+func mappedRowToViewRow(sheetID, taskID, schemaH string, groupOutputs []*types.TaskOutput, row bamltypes.MappedRow, now time.Time) ViewRow {
+	rowKey := normalizeToken(strings.TrimSpace(row.Row_key))
+	if rowKey == "" {
+		rowKey = "task"
+	}
+	sourceOutputIDs := uniqueTrimmedStrings(row.Source_output_ids)
+	if len(sourceOutputIDs) == 0 {
+		sourceOutputIDs = sortedOutputIDs(groupOutputs)
+	}
+	cells := make(map[string]string, len(row.Cells))
+	for _, cell := range row.Cells {
+		if cell.Value != "" {
+			cells[cell.Column] = cell.Value
+		}
+	}
+	return ViewRow{
+		ID:              stableRowID(sheetID, taskID, rowKey),
+		SheetID:         sheetID,
+		GroupID:         taskID,
+		TaskID:          taskID,
+		RowKey:          rowKey,
+		SchemaHash:      schemaH,
+		OutputIDs:       sortedOutputIDs(groupOutputs),
+		SourceOutputIDs: sourceOutputIDs,
+		Cells:           cells,
+		UpdatedAt:       now,
+	}
+}
+
+func fallbackViewRow(sheetID, taskID, schemaH string, groupOutputs []*types.TaskOutput, now time.Time) ViewRow {
+	return ViewRow{
+		ID:              stableRowID(sheetID, taskID, "task"),
+		SheetID:         sheetID,
+		GroupID:         taskID,
+		TaskID:          taskID,
+		RowKey:          "task",
+		SchemaHash:      schemaH,
+		OutputIDs:       sortedOutputIDs(groupOutputs),
+		SourceOutputIDs: sortedOutputIDs(groupOutputs),
+		Cells:           map[string]string{},
+		UpdatedAt:       now,
+	}
+}
+
+func stableRowID(sheetID, taskID, rowKey string) string {
+	key := normalizeToken(strings.TrimSpace(rowKey))
+	if key == "" {
+		key = "task"
+	}
+	return fmt.Sprintf("%s:%s:%s", sheetID, taskID, key)
+}
+
+func firstSourceOutputID(outputIDs []string) string {
+	if len(outputIDs) == 1 {
+		return outputIDs[0]
+	}
+	return ""
+}
+
+func copyStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return map[string]string{}
+	}
+	cloned := make(map[string]string, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func sortResolvedRows(rows []resolvedSheetRow, taskMeta map[string]*types.AgentTask) {
+	sort.SliceStable(rows, func(i, j int) bool {
+		leftTask := taskMeta[rows[i].TaskID]
+		rightTask := taskMeta[rows[j].TaskID]
+		leftCreated := time.Time{}
+		rightCreated := time.Time{}
+		if leftTask != nil {
+			leftCreated = leftTask.CreatedAt
+		}
+		if rightTask != nil {
+			rightCreated = rightTask.CreatedAt
+		}
+		if !leftCreated.Equal(rightCreated) {
+			return leftCreated.After(rightCreated)
+		}
+		if rows[i].TaskID != rows[j].TaskID {
+			return rows[i].TaskID < rows[j].TaskID
+		}
+		if rows[i].RowKey != rows[j].RowKey {
+			return rows[i].RowKey < rows[j].RowKey
+		}
+		return rows[i].RowID < rows[j].RowID
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -539,6 +921,18 @@ func (r *DataResolver) fetchTaskPrompts(ctx context.Context, taskIDs []string) m
 	return prompts
 }
 
+func (r *DataResolver) fetchTaskMetadata(ctx context.Context, taskIDs []string) map[string]*types.AgentTask {
+	meta := make(map[string]*types.AgentTask, len(taskIDs))
+	for _, tid := range taskIDs {
+		task, err := r.backend.GetTaskByID(ctx, tid)
+		if err != nil || task == nil {
+			continue
+		}
+		meta[tid] = task
+	}
+	return meta
+}
+
 func buildColumnSchemas(comp types.ComponentSpec) []bamltypes.ColumnSchema {
 	if comp.DataSource == nil || len(comp.DataSource.Transform) == 0 {
 		configCols := parseConfigColumns(comp.Config)
@@ -549,7 +943,7 @@ func buildColumnSchemas(comp types.ComponentSpec) []bamltypes.ColumnSchema {
 		for _, col := range configCols {
 			schemas = append(schemas, bamltypes.ColumnSchema{
 				Key:         col.Key,
-				Type:        col.Type,
+				Type:        columnTypeForKey(col.Key, col.Type),
 				Description: col.Label,
 			})
 		}
@@ -562,6 +956,7 @@ func buildColumnSchemas(comp types.ComponentSpec) []bamltypes.ColumnSchema {
 	for _, cc := range configCols {
 		configByKey[cc.Key] = cc
 	}
+	seen := make(map[string]bool, len(comp.DataSource.Transform))
 
 	for _, rule := range comp.DataSource.Transform {
 		desc := humanizeColumn(rule.Column)
@@ -573,8 +968,19 @@ func buildColumnSchemas(comp types.ComponentSpec) []bamltypes.ColumnSchema {
 		}
 		schemas = append(schemas, bamltypes.ColumnSchema{
 			Key:         rule.Column,
-			Type:        rule.Type,
+			Type:        columnTypeForKey(rule.Column, rule.Type),
 			Description: desc,
+		})
+		seen[rule.Column] = true
+	}
+	for _, cc := range configCols {
+		if cc.Key == "" || seen[cc.Key] {
+			continue
+		}
+		schemas = append(schemas, bamltypes.ColumnSchema{
+			Key:         cc.Key,
+			Type:        columnTypeForKey(cc.Key, cc.Type),
+			Description: cc.Label,
 		})
 	}
 	return schemas
@@ -588,6 +994,7 @@ func serializeOutputsForMapping(outputs []*types.TaskOutput, taskPrompts map[str
 		ID         string         `json:"id"`
 		Title      string         `json:"title"`
 		OutputType string         `json:"output_type"`
+		AgentName  string         `json:"agent_name,omitempty"`
 		Summary    *string        `json:"summary,omitempty"`
 		URI        *string        `json:"uri,omitempty"`
 		Data       map[string]any `json:"data,omitempty"`
@@ -614,10 +1021,11 @@ func serializeOutputsForMapping(outputs []*types.TaskOutput, taskPrompts map[str
 			ID:         o.ID,
 			Title:      o.Title,
 			OutputType: o.OutputType,
+			AgentName:  o.AgentName,
 			Summary:    o.Summary,
 			URI:        o.URI,
-			Data:       filterDataForMapping(o.Data),
-			Metadata:   filterMetadataForMapping(o.Metadata),
+			Data:       truncateLargeValues(o.Data),
+			Metadata:   o.Metadata,
 			CreatedAt:  o.CreatedAt.Format(time.RFC3339),
 		})
 	}
@@ -629,100 +1037,121 @@ func serializeOutputsForMapping(outputs []*types.TaskOutput, taskPrompts map[str
 	return string(raw), nil
 }
 
-func filterDataForMapping(data map[string]any) map[string]any {
-	if len(data) == 0 {
+const maxFieldValueLen = 2000
+
+func truncateLargeValues(m map[string]any) map[string]any {
+	if len(m) == 0 {
 		return nil
 	}
-	filtered := make(map[string]any, len(data))
-	for k, v := range data {
-		if isExcludedDataKey(k) {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		switch val := v.(type) {
+		case string:
+			if len(val) > maxFieldValueLen {
+				out[k] = val[:maxFieldValueLen] + "…"
+			} else {
+				out[k] = val
+			}
+		default:
+			out[k] = v
+		}
+	}
+	return out
+}
+
+func filterBamlColumns(cols []bamltypes.ColumnSchema) []bamltypes.ColumnSchema {
+	filtered := make([]bamltypes.ColumnSchema, 0, len(cols))
+	for _, col := range cols {
+		if isTaskMetadataColumn(col.Key) {
 			continue
 		}
-		filtered[k] = v
-	}
-	if len(filtered) == 0 {
-		return nil
+		filtered = append(filtered, col)
 	}
 	return filtered
 }
 
-var mappingMetadataKeys = map[string]bool{
-	"artifact_key": true, "artifact_label": true, "artifact_kind": true,
-	"artifact_role": true, "tags": true, "deeplink": true,
+func taskIDsFromGroups(taskGroups map[string][]*types.TaskOutput) []string {
+	ids := make([]string, 0, len(taskGroups))
+	for taskID := range taskGroups {
+		ids = append(ids, taskID)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
-func filterMetadataForMapping(metadata map[string]any) map[string]any {
-	if len(metadata) == 0 {
-		return nil
+func isTaskMetadataColumn(key string) bool {
+	switch key {
+	case taskMetadataColumnNextWakeAt, taskMetadataColumnNextWakeSummary, taskMetadataColumnWakeAt, taskMetadataColumnWakeReason:
+		return true
+	default:
+		return false
 	}
-	filtered := make(map[string]any)
-	for k, v := range metadata {
-		if mappingMetadataKeys[k] {
-			filtered[k] = v
+}
+
+func taskMetadataValue(task *types.AgentTask, key string) (string, bool) {
+	if task == nil {
+		return "", false
+	}
+	switch key {
+	case taskMetadataColumnNextWakeAt, taskMetadataColumnWakeAt:
+		if task.WakeAt == nil {
+			return "", true
+		}
+		return task.WakeAt.Format(time.RFC3339), true
+	case taskMetadataColumnNextWakeSummary, taskMetadataColumnWakeReason:
+		if task.WakeReason != nil && strings.TrimSpace(*task.WakeReason) != "" {
+			return strings.TrimSpace(*task.WakeReason), true
+		}
+		return wakeAgendaSummary(task.WakeAgenda), true
+	default:
+		return "", false
+	}
+}
+
+func wakeAgendaSummary(items []*types.TaskWakeAgendaItem) string {
+	titles := make([]string, 0, len(items))
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		if title := strings.TrimSpace(item.Title); title != "" {
+			titles = append(titles, title)
+		} else if reason := strings.TrimSpace(item.Reason); reason != "" {
+			titles = append(titles, reason)
+		}
+		if len(titles) == 3 {
+			break
 		}
 	}
-	if len(filtered) == 0 {
-		return nil
+	return strings.Join(titles, " | ")
+}
+
+// Store returns the ViewStore for direct access (used by the views API for cell edits).
+func (r *DataResolver) Store() *ViewStore {
+	return r.store
+}
+
+func hashColumns(columns []bamltypes.ColumnSchema, rowStrategy types.RowStrategy, sheetName string) string {
+	type hashEntry struct {
+		Key         string `json:"k"`
+		Type        string `json:"t"`
+		Description string `json:"d"`
 	}
-	return filtered
-}
-
-// ---------------------------------------------------------------------------
-// Task-level mapping cache
-// ---------------------------------------------------------------------------
-
-const (
-	taskCacheTTL    = 1 * time.Hour
-	taskCachePrefix = "view:task:"
-)
-
-type mappingCache struct {
-	rdb *common.RedisClient
-}
-
-func newMappingCache(rdb *common.RedisClient) *mappingCache {
-	return &mappingCache{rdb: rdb}
-}
-
-func (c *mappingCache) taskKey(viewID, taskID string) string {
-	return fmt.Sprintf("%s%s:%s", taskCachePrefix, viewID, taskID)
-}
-
-func (c *mappingCache) getTask(ctx context.Context, viewID, taskID string) (*cachedTaskMapping, bool) {
-	if c.rdb == nil {
-		return nil, false
+	payload := struct {
+		Sheet       string      `json:"s"`
+		Mode        string      `json:"m"`
+		Description string      `json:"d"`
+		Columns     []hashEntry `json:"c"`
+	}{
+		Sheet:       sheetName,
+		Mode:        rowStrategy.Mode,
+		Description: rowStrategy.Description,
+		Columns:     make([]hashEntry, len(columns)),
 	}
-	raw, err := c.rdb.Get(ctx, c.taskKey(viewID, taskID)).Bytes()
-	if err != nil {
-		return nil, false
+	for i, c := range columns {
+		payload.Columns[i] = hashEntry{Key: c.Key, Type: c.Type, Description: c.Description}
 	}
-	var cached cachedTaskMapping
-	if err := json.Unmarshal(raw, &cached); err != nil {
-		return nil, false
-	}
-	return &cached, true
-}
-
-func (c *mappingCache) setTask(ctx context.Context, viewID, taskID string, value *cachedTaskMapping) {
-	if c.rdb == nil {
-		return
-	}
-	raw, err := json.Marshal(value)
-	if err != nil {
-		return
-	}
-	c.rdb.Set(ctx, c.taskKey(viewID, taskID), raw, taskCacheTTL)
-}
-
-type cachedTaskMapping struct {
-	SchemaHash string            `json:"sh"`
-	OutputIDs  []string          `json:"oids"`
-	Cells      map[string]string `json:"cells"`
-	CachedAt   time.Time         `json:"ca"`
-}
-
-func hashColumns(columns []bamltypes.ColumnSchema) string {
-	raw, _ := json.Marshal(columns)
+	raw, _ := json.Marshal(payload)
 	h := sha256.Sum256(raw)
 	return hex.EncodeToString(h[:])[:16]
 }
@@ -897,6 +1326,22 @@ func normalizeColumnType(t string) string {
 		return "date"
 	case "text", "number", "currency", "date", "link", "email", "status", "tags", "boolean":
 		return strings.ToLower(strings.TrimSpace(t))
+	default:
+		return "text"
+	}
+}
+
+func columnTypeForKey(key, rawType string) string {
+	if strings.TrimSpace(rawType) != "" {
+		return normalizeColumnType(rawType)
+	}
+	switch {
+	case strings.HasSuffix(key, "_at"), key == "date", key == "created", key == "updated":
+		return "date"
+	case key == "email", strings.HasSuffix(key, "_email"):
+		return "email"
+	case key == "url", key == "link", strings.HasSuffix(key, "_url"), strings.HasSuffix(key, "_link"):
+		return "link"
 	default:
 		return "text"
 	}

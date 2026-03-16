@@ -219,8 +219,7 @@ func writeWorkspaceSchemaSummaries(sb *strings.Builder, summaries []outputSchema
 	}
 	sb.WriteString("\n" + strings.Repeat("─", 60) + "\n")
 	sb.WriteString("ARTIFACT SCHEMAS (from persisted outputs)\n")
-	sb.WriteString("Use dataSource.artifact_key to bind a component to one artifact family.\n")
-	sb.WriteString("At render time, a BAML mapper dynamically maps output data into widget columns.\n")
+	sb.WriteString("At render time, a BAML mapper dynamically maps output data into table columns.\n")
 	sb.WriteString("Transform rules serve as semantic hints — column names and types guide the mapper.\n")
 	sb.WriteString(strings.Repeat("─", 60) + "\n")
 

@@ -13,24 +13,30 @@ func TestNormalizeViewDefinitionUsesReferencedAgents(t *testing.T) {
 		Name:        "Mystery shopping",
 		Description: "Track campaign progress",
 		Agents:      []string{"campaign-alpha", "campaign-beta", "campaign-gamma"},
-		Layout:      types.LayoutConfig{Columns: 12},
-		Components: []types.ComponentSpec{
+		Sheets: []types.SheetSpec{
 			{
-				ID:       "table-1",
-				Type:     types.ComponentTypeTable,
-				Position: types.Position{Col: 0, Row: 0, ColSpan: 6, RowSpan: 1},
-				DataSource: &types.DataSource{
-					AgentID:  " campaign-beta ",
-					AgentIDs: []string{"campaign-beta", "campaign-beta", ""},
-				},
-			},
-			{
-				ID:       "action-1",
-				Type:     types.ComponentTypeAction,
-				Position: types.Position{Col: 6, Row: 0, ColSpan: 6, RowSpan: 1},
-				Config: map[string]any{
-					"agent_id":  "campaign-beta",
-					"agent_ids": []any{"campaign-beta", "campaign-beta", " "},
+				ID:     "sheet-1",
+				Name:   "Campaign summary",
+				Layout: types.LayoutConfig{Columns: 12},
+				Components: []types.ComponentSpec{
+					{
+						ID:       "table-1",
+						Type:     types.ComponentTypeTable,
+						Position: types.Position{Col: 0, Row: 0, ColSpan: 6, RowSpan: 1},
+						DataSource: &types.DataSource{
+							AgentID:  " campaign-beta ",
+							AgentIDs: []string{"campaign-beta", "campaign-beta", ""},
+						},
+					},
+					{
+						ID:       "action-1",
+						Type:     types.ComponentTypeAction,
+						Position: types.Position{Col: 6, Row: 0, ColSpan: 6, RowSpan: 1},
+						Config: map[string]any{
+							"agent_id":  "campaign-beta",
+							"agent_ids": []any{"campaign-beta", "campaign-beta", " "},
+						},
+					},
 				},
 			},
 		},
@@ -41,13 +47,13 @@ func TestNormalizeViewDefinitionUsesReferencedAgents(t *testing.T) {
 	if got, want := def.Agents, []string{"campaign-beta"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("Agents = %#v, want %#v", got, want)
 	}
-	if got, want := def.Components[0].DataSource.AgentID, "campaign-beta"; got != want {
+	if got, want := def.Sheets[0].Components[0].DataSource.AgentID, "campaign-beta"; got != want {
 		t.Fatalf("DataSource.AgentID = %q, want %q", got, want)
 	}
-	if got, want := def.Components[0].DataSource.AgentIDs, []string{"campaign-beta"}; !reflect.DeepEqual(got, want) {
+	if got, want := def.Sheets[0].Components[0].DataSource.AgentIDs, []string{"campaign-beta"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("DataSource.AgentIDs = %#v, want %#v", got, want)
 	}
-	if got, want := def.Components[1].Config["agent_ids"], []string{"campaign-beta"}; !reflect.DeepEqual(got, want) {
+	if got, want := def.Sheets[0].Components[1].Config["agent_ids"], []string{"campaign-beta"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("Config agent_ids = %#v, want %#v", got, want)
 	}
 }
@@ -57,14 +63,17 @@ func TestNormalizeViewDefinitionKeepsExplicitAgentsWhenComponentsDoNotReferenceA
 		Name:        "Overview",
 		Description: "Workspace summary",
 		Agents:      []string{"ops-agent", "ops-agent", "", "qa-agent"},
-		Layout:      types.LayoutConfig{Columns: 12},
-		Components: []types.ComponentSpec{
-			{
-				ID:       "metric-1",
-				Type:     types.ComponentTypeMetric,
-				Position: types.Position{Col: 0, Row: 0, ColSpan: 6, RowSpan: 1},
-			},
-		},
+		Sheets: []types.SheetSpec{{
+			ID:     "sheet-1",
+			Name:   "Overview",
+			Layout: types.LayoutConfig{Columns: 12},
+			Components: []types.ComponentSpec{
+				{
+					ID:       "metric-1",
+					Type:     types.ComponentTypeTable,
+					Position: types.Position{Col: 0, Row: 0, ColSpan: 6, RowSpan: 1},
+				},
+			}}},
 	}
 
 	normalizeViewDefinition(&def)
@@ -122,25 +131,29 @@ func TestCanonicalizeViewAgentRefsResolvesNamesAndKeys(t *testing.T) {
 		Name:        "Recipe extraction",
 		Description: "Process videos",
 		Agents:      []string{"YouTube Recipe Extractor"},
-		Layout:      types.LayoutConfig{Columns: 12},
-		Components: []types.ComponentSpec{
-			{
-				ID:       "action-1",
-				Type:     types.ComponentTypeAction,
-				Position: types.Position{Col: 0, Row: 0, ColSpan: 4, RowSpan: 1},
-				Config: map[string]any{
-					"agent_id": "YouTube Recipe Extractor",
+		Sheets: []types.SheetSpec{{
+			ID:     "sheet-1",
+			Name:   "Recipe extraction",
+			Layout: types.LayoutConfig{Columns: 12},
+			Components: []types.ComponentSpec{
+				{
+					ID:       "action-1",
+					Type:     types.ComponentTypeAction,
+					Position: types.Position{Col: 0, Row: 0, ColSpan: 4, RowSpan: 1},
+					Config: map[string]any{
+						"agent_id": "YouTube Recipe Extractor",
+					},
+				},
+				{
+					ID:       "table-1",
+					Type:     types.ComponentTypeTable,
+					Position: types.Position{Col: 4, Row: 0, ColSpan: 8, RowSpan: 1},
+					DataSource: &types.DataSource{
+						AgentID: "youtube-recipe-extractor",
+					},
 				},
 			},
-			{
-				ID:       "table-1",
-				Type:     types.ComponentTypeTable,
-				Position: types.Position{Col: 4, Row: 0, ColSpan: 8, RowSpan: 1},
-				DataSource: &types.DataSource{
-					AgentID: "youtube-recipe-extractor",
-				},
-			},
-		},
+		}},
 	}
 
 	canonicalizeViewAgentRefs(&def, []*types.AgentProfile{
@@ -155,10 +168,10 @@ func TestCanonicalizeViewAgentRefsResolvesNamesAndKeys(t *testing.T) {
 	if got, want := def.Agents, []string{"agent-uuid-1"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("Agents = %#v, want %#v", got, want)
 	}
-	if got, want := def.Components[0].Config["agent_id"], any("agent-uuid-1"); got != want {
+	if got, want := def.Sheets[0].Components[0].Config["agent_id"], any("agent-uuid-1"); got != want {
 		t.Fatalf("Config agent_id = %#v, want %#v", got, want)
 	}
-	if got, want := def.Components[1].DataSource.AgentID, "agent-uuid-1"; got != want {
+	if got, want := def.Sheets[0].Components[1].DataSource.AgentID, "agent-uuid-1"; got != want {
 		t.Fatalf("DataSource.AgentID = %q, want %q", got, want)
 	}
 }
@@ -168,17 +181,21 @@ func TestCanonicalizeViewAgentRefsUsesOperationResultsForNewAgents(t *testing.T)
 		Name:        "Recipe extraction",
 		Description: "Process videos",
 		Agents:      []string{"YouTube Recipe Extractor"},
-		Layout:      types.LayoutConfig{Columns: 12},
-		Components: []types.ComponentSpec{
-			{
-				ID:       "action-1",
-				Type:     types.ComponentTypeAction,
-				Position: types.Position{Col: 0, Row: 0, ColSpan: 4, RowSpan: 1},
-				Config: map[string]any{
-					"agent_id": "YouTube Recipe Extractor",
+		Sheets: []types.SheetSpec{{
+			ID:     "sheet-1",
+			Name:   "Recipe extraction",
+			Layout: types.LayoutConfig{Columns: 12},
+			Components: []types.ComponentSpec{
+				{
+					ID:       "action-1",
+					Type:     types.ComponentTypeAction,
+					Position: types.Position{Col: 0, Row: 0, ColSpan: 4, RowSpan: 1},
+					Config: map[string]any{
+						"agent_id": "YouTube Recipe Extractor",
+					},
 				},
 			},
-		},
+		}},
 	}
 
 	canonicalizeViewAgentRefs(&def, nil, []OperationResult{
@@ -194,7 +211,7 @@ func TestCanonicalizeViewAgentRefsUsesOperationResultsForNewAgents(t *testing.T)
 	if got, want := def.Agents, []string{"agent-uuid-2"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("Agents = %#v, want %#v", got, want)
 	}
-	if got, want := def.Components[0].Config["agent_id"], any("agent-uuid-2"); got != want {
+	if got, want := def.Sheets[0].Components[0].Config["agent_id"], any("agent-uuid-2"); got != want {
 		t.Fatalf("Config agent_id = %#v, want %#v", got, want)
 	}
 }

@@ -43,7 +43,7 @@ func (s *StreamValue[TStream, TFinal]) Stream() *TStream {
 }
 
 // / Streaming version of ClassifyFollowUp
-func (*stream) ClassifyFollowUp(ctx context.Context, message string, user_message *string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.FollowUpSignal, types.FollowUpSignal], error) {
+func (*stream) ClassifyFollowUp(ctx context.Context, message string, user_message *string, now_rfc3339 string, active_skill_context *string, handoff_context *string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.FollowUpSignal, types.FollowUpSignal], error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -51,7 +51,7 @@ func (*stream) ClassifyFollowUp(ctx context.Context, message string, user_messag
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"message": message, "user_message": user_message},
+		Kwargs: map[string]any{"message": message, "user_message": user_message, "now_rfc3339": now_rfc3339, "active_skill_context": active_skill_context, "handoff_context": handoff_context},
 		Env:    getEnvVars(callOpts.env),
 	}
 

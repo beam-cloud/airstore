@@ -199,6 +199,10 @@ func (t *FollowUpSignalClassView) PropertyFollow_up_prompt() (ClassPropertyView,
 	return t.inner.Property("follow_up_prompt")
 }
 
+func (t *FollowUpSignalClassView) PropertyWake_agenda() (ClassPropertyView, error) {
+	return t.inner.Property("wake_agenda")
+}
+
 func (t *TypeBuilder) FollowUpSignal() (*FollowUpSignalClassView, error) {
 	bld, err := t.inner.Class("FollowUpSignal")
 	if err != nil {
@@ -244,5 +248,45 @@ func (t *TypeBuilder) TurnClassification() (*TurnClassificationClassView, error)
 }
 
 func (t *TurnClassificationClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
+type WakeAgendaItemClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *WakeAgendaItemClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *WakeAgendaItemClassView) PropertyType() (ClassPropertyView, error) {
+	return t.inner.Property("type")
+}
+
+func (t *WakeAgendaItemClassView) PropertyTitle() (ClassPropertyView, error) {
+	return t.inner.Property("title")
+}
+
+func (t *WakeAgendaItemClassView) PropertyReason() (ClassPropertyView, error) {
+	return t.inner.Property("reason")
+}
+
+func (t *TypeBuilder) WakeAgendaItem() (*WakeAgendaItemClassView, error) {
+	bld, err := t.inner.Class("WakeAgendaItem")
+	if err != nil {
+		return nil, err
+	}
+	return &WakeAgendaItemClassView{inner: bld}, nil
+}
+
+func (t *WakeAgendaItemClassView) Type() (baml.Type, error) {
 	return t.inner.Type()
 }

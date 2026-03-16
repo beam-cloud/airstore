@@ -17,10 +17,11 @@ const (
 	ResolvedDataStatusBindingError = "binding_error"
 	ResolvedDataStatusRequestError = "request_error"
 
-	ComponentTypeTable    = "table"
-	ComponentTypeMetric   = "metric"
-	ComponentTypeAction   = "action"
-	ComponentTypeTaskList = "task_list"
+	ComponentTypeTable  = "table"
+	ComponentTypeAction = "action"
+
+	RowStrategyModeTask  = "task"
+	RowStrategyModeSplit = "split"
 )
 
 func (c ComponentSpec) IsTable() bool {
@@ -38,21 +39,29 @@ type View struct {
 	UpdatedAt   time.Time      `json:"updated_at"`
 }
 
-// ViewDefinition is the JSON-serializable view layout and component configuration.
+// ViewDefinition is the JSON-serializable workbook schema for a view.
 type ViewDefinition struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	Agents      []string        `json:"agents"`
-	Sections    []SectionSpec   `json:"sections,omitempty"`
-	Layout      LayoutConfig    `json:"layout"`
-	Components  []ComponentSpec `json:"components"`
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+	Agents      []string    `json:"agents"`
+	Sheets      []SheetSpec `json:"sheets"`
 }
 
-// SectionSpec groups related components under a heading within a multi-workflow view.
-type SectionSpec struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
-	Row   int    `json:"row"`
+type SheetSpec struct {
+	ID          string          `json:"id"`
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Layout      LayoutConfig    `json:"layout"`
+	Components  []ComponentSpec `json:"components"`
+	Relations   []SheetRelation `json:"relations,omitempty"`
+}
+
+type SheetRelation struct {
+	ID         string `json:"id"`
+	Name       string `json:"name,omitempty"`
+	ToSheetID  string `json:"to_sheet_id"`
+	FromColumn string `json:"from_column"`
+	ToColumn   string `json:"to_column"`
 }
 
 type LayoutConfig struct {
@@ -82,7 +91,13 @@ type DataSource struct {
 	OutputType  string          `json:"output_type,omitempty"`
 	ArtifactKey string          `json:"artifact_key,omitempty"`
 	TimeRange   string          `json:"time_range,omitempty"`
+	RowStrategy *RowStrategy    `json:"row_strategy,omitempty"`
 	Transform   []TransformRule `json:"transform,omitempty"`
+}
+
+type RowStrategy struct {
+	Mode        string `json:"mode"`
+	Description string `json:"description,omitempty"`
 }
 
 type TransformRule struct {
