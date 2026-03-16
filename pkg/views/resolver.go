@@ -308,7 +308,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 		Int("mapping_columns", len(spec.mappingCols)).
 		Strs("column_keys", colKeys).
 		Str("row_mode", spec.rowStrategy.Mode).
-		Msg("BAML mapping required")
+		Msg("view: mapping required")
 
 	persistedByGroup := make(map[string][]ViewRow)
 	mappedByGroup := make(map[string][]resolvedSheetRow)
