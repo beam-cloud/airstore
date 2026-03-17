@@ -36,7 +36,9 @@ function MapOutputsToSchema(
   row_strategy_mode: string,
   row_strategy_description: string,
   columns: ColumnSchema[],
-  outputs_payload: string
+  outputs_payload: string,
+  existing_rows: string,
+  excluded_rows: string
 ) -> MappedResult {
   client OutputMapperClient
   prompt #"
@@ -58,6 +60,33 @@ function MapOutputsToSchema(
     <task_outputs>
     {{ outputs_payload }}
     </task_outputs>
+
+    {% if existing_rows %}
+    EXISTING TABLE STATE (previous mapping result with user corrections):
+    <existing_data>
+    {{ existing_rows }}
+    </existing_data>
+
+    USER EDIT RULES:
+    - Values marked [USER EDIT] were manually corrected by the user.
+    - ALWAYS preserve user-edited values exactly as-is in the output.
+      These take absolute priority over anything extracted from the outputs.
+    - For non-edited cells, re-extract normally from the outputs.
+    - Maintain the same row_key values from the existing data when possible.
+    {% endif %}
+
+    {% if excluded_rows %}
+    EXCLUDED ROWS (the user has explicitly deleted these — DO NOT regenerate):
+    <excluded_rows>
+    {{ excluded_rows }}
+    </excluded_rows>
+
+    EXCLUSION RULES:
+    - NEVER emit a row that matches an excluded row. A match means the same
+      task_id AND substantially the same cell values.
+    - This takes absolute priority. Even if the task outputs contain data for
+      an excluded row, you must OMIT it from the results entirely.
+    {% endif %}
 
     WHERE TO FIND VALUES — search ALL of these for each column:
     - PROMPT — the user's original request, often contains source URLs or names
