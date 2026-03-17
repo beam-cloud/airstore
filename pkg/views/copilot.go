@@ -989,21 +989,6 @@ func normalizeDataSource(ds *types.DataSource) {
 	ds.ArtifactKey = normalizeToken(ds.ArtifactKey)
 	ds.TimeRange = strings.TrimSpace(ds.TimeRange)
 	ds.Statuses = uniqueTrimmedStrings(ds.Statuses)
-	if ds.RowStrategy != nil {
-		ds.RowStrategy.Description = strings.TrimSpace(ds.RowStrategy.Description)
-		switch strings.ToLower(strings.TrimSpace(ds.RowStrategy.Mode)) {
-		case "", types.RowStrategyModeTask:
-			if ds.RowStrategy.Description == "" {
-				ds.RowStrategy = nil
-			} else {
-				ds.RowStrategy.Mode = types.RowStrategyModeTask
-			}
-		case types.RowStrategyModeSplit:
-			ds.RowStrategy.Mode = types.RowStrategyModeSplit
-		default:
-			ds.RowStrategy = nil
-		}
-	}
 }
 
 func collectSheetAgentRefs(sheets []types.SheetSpec) []string {
@@ -1890,8 +1875,7 @@ COMPONENT TYPES (only two):
 
 - table: The sheet's data table. Full-width, always present.
   At render time a BAML mapper dynamically maps task output data into the
-  column schema. Transform rules and row strategy are semantic hints that guide
-  the mapping:
+  column schema. Transform rules are semantic hints that guide the mapping:
   - column: machine-stable key (snake_case) describing what the column shows
   - source: dot-path hint (e.g. "data.recipe_name", "title", "uri")
   - type: display type (text, number, currency, date, link, email, status, tags, boolean)
@@ -1902,15 +1886,6 @@ COMPONENT TYPES (only two):
   - artifact_key: filter to a specific artifact family (e.g. "company-research").
     Use when an agent produces multiple artifact families and you need a
     specific one. Omit to include all outputs from the agent.
-  - row_strategy:
-    - mode: "task" (default): synthesize one row per task — works great
-      for most use cases. Omit row_strategy entirely to use this default.
-    - mode: "split": expand a single task into many rows when the task
-      produces multiple distinct entities (e.g. 10 emails sent, 5 listings
-      scraped, 8 contacts researched). Each entity becomes its own row.
-    - description: REQUIRED for split mode. Clearly describe what one row
-      represents, e.g. "one row per email recipient" or "one row per property
-      listing". This guides the mapper to separate entities correctly.
   - statuses: optional status filter. Values: "active", "pending", "approved",
     "rejected", "superseded". Omit to include all (default).
 
@@ -1945,13 +1920,12 @@ COMPONENT TYPES (only two):
   it from output_status. The UI auto-shows inline approve/reject buttons
   for pending rows and an entity detail modal for multi-output rows.
 
-  RESEARCH / MULTI-ENTITY:
-  Use split mode when a single task produces many distinct findings:
-  - "one row per company researched"
-  - "one row per candidate profiled"
-  - "one row per topic analyzed"
-  The system decomposes tool results into per-entity outputs and the
-  mapper populates one row per entity with full column coverage.
+  MULTI-ENTITY (automatic):
+  When a task produces multiple outputs sharing the same artifact_key
+  (e.g. 10 emails sent, 5 listings scraped, 8 contacts researched),
+  the mapper automatically creates one row per entity — no configuration
+  needed. Design columns for per-entity fields (name, email, status),
+  not aggregate summaries (total_count, top_picks).
 
   Hidden columns (auto-injected, do NOT define):
   task_id, row_id, sheet_id, output_id, output_status, source_output_ids
@@ -1976,8 +1950,6 @@ SHEET DESIGN:
 - STRONG DEFAULT: use ONE sheet. Most workflows fit a single table.
   Only create multiple sheets when the user explicitly requests them or the data
   has genuinely distinct entity types (e.g. contacts vs emails vs pricing).
-- When using split row_strategy on a sheet, that handles item-level detail
-  within the same sheet — you do NOT need a separate detail sheet.
 - Generate concise sheet names tied to the workflow, not generic labels.
 - Use sheet relations when rows should connect across sheets via stable keys
   like task_id, email, company_id, listing_id, or similar identifiers.`

@@ -213,8 +213,8 @@ func (*parse) ExtractApprovalSummary(text string, opts ...CallOptionFunc) (types
 	return casted, nil
 }
 
-// / Parse version of ExtractFinalResponseOutput (Takes in string and returns types.ExtractedOutput)
-func (*parse) ExtractFinalResponseOutput(text string, opts ...CallOptionFunc) (types.ExtractedOutput, error) {
+// / Parse version of ExtractFinalResponseOutput (Takes in string and returns []types.ExtractedOutput)
+func (*parse) ExtractFinalResponseOutput(text string, opts ...CallOptionFunc) ([]types.ExtractedOutput, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -252,10 +252,10 @@ func (*parse) ExtractFinalResponseOutput(text string, opts ...CallOptionFunc) (t
 
 	result, err := bamlRuntime.CallFunctionParse(context.Background(), "ExtractFinalResponseOutput", encoded)
 	if err != nil {
-		return types.ExtractedOutput{}, err
+		return nil, err
 	}
 
-	casted := (result).(types.ExtractedOutput)
+	casted := (result).([]types.ExtractedOutput)
 
 	return casted, nil
 }

@@ -22,9 +22,6 @@ const (
 
 	ComponentTypeTable  = "table"
 	ComponentTypeAction = "action"
-
-	RowStrategyModeTask  = "task"
-	RowStrategyModeSplit = "split"
 )
 
 func (c ComponentSpec) IsTable() bool {
@@ -131,13 +128,7 @@ type DataSource struct {
 	ArtifactKey string          `json:"artifact_key,omitempty"`
 	TimeRange   string          `json:"time_range,omitempty"`
 	Statuses    []string        `json:"statuses,omitempty"`
-	RowStrategy *RowStrategy    `json:"row_strategy,omitempty"`
 	Transform   []TransformRule `json:"transform,omitempty"`
-}
-
-type RowStrategy struct {
-	Mode        string `json:"mode"`
-	Description string `json:"description,omitempty"`
 }
 
 type TransformRule struct {

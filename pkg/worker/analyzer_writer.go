@@ -24,9 +24,8 @@ const (
 	keyURI             = "uri"
 	keyTags            = "tags"
 	keyTool            = "tool"
-	keyDeeplink        = "deeplink"
-	keyClassifierKind  = "classifier_kind"
-	keySource          = "source"
+	keyDeeplink = "deeplink"
+	keySource   = "source"
 	keySourcePrompt    = "source_prompt"
 	keySourceInput     = "source_input"
 	keySourceInputText = "source_input_text"
@@ -265,9 +264,7 @@ func (r extractedResult) isIntermediate() bool {
 // assistant content, etc.) before publishing.
 func (r extractedResult) candidate(role string) outputCandidate {
 	data := map[string]any{}
-	metadata := map[string]any{
-		keyClassifierKind: string(r.out.Kind),
-	}
+	metadata := map[string]any{}
 
 	if s := r.summary(); s != "" {
 		data[keySummary] = s
@@ -392,14 +389,14 @@ type finalResponseExtractor func(
 	userMessage *string,
 	assistantMessage string,
 	bamlEnv map[string]string,
-) (signaltypes.ExtractedOutput, error)
+) ([]signaltypes.ExtractedOutput, error)
 
 func defaultFinalResponseExtractor(
 	ctx context.Context,
 	userMessage *string,
 	assistantMessage string,
 	bamlEnv map[string]string,
-) (out signaltypes.ExtractedOutput, err error) {
+) (out []signaltypes.ExtractedOutput, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("ExtractFinalResponseOutput panicked: %v", r)
@@ -436,14 +433,9 @@ func persistFinalResponseOutput(
 		extract = defaultFinalResponseExtractor
 	}
 
-	out, err := extract(ctx, userMessage, assistantMessage, bamlEnv)
+	outputs, err := extract(ctx, userMessage, assistantMessage, bamlEnv)
 	if err != nil {
 		return err
-	}
-
-	r := extractedResult{out}
-	if r.isNone() || r.title() == "" || r.content() == "" {
-		return nil
 	}
 
 	ids := outputIDsFromTask(task)
@@ -451,16 +443,57 @@ func persistFinalResponseOutput(
 		return nil
 	}
 
-	c := r.candidate(types.TaskOutputArtifactRolePrimary)
-	c.OutputType = "text"
-	c.Data[keyContent] = r.content()
-	c.Metadata[keySource] = sourceAssistantResponse
-	if userMessage != nil && strings.TrimSpace(*userMessage) != "" {
-		c.Metadata[keySourcePrompt] = strings.TrimSpace(*userMessage)
+	count := 0
+	for _, out := range outputs {
+		r := extractedResult{out}
+		if !r.isNone() && r.title() != "" && r.content() != "" {
+			count++
+		}
+	}
+	if count == 0 {
+		return nil
 	}
 
-	_, err = publishOutputCandidate(ctx, client, ids, tracker, c)
-	return err
+	var batchID string
+	if count > 1 {
+		batchID = uuid.NewString()
+	}
+
+	promptMeta := ""
+	if userMessage != nil {
+		promptMeta = strings.TrimSpace(*userMessage)
+	}
+
+	published := 0
+	for _, out := range outputs {
+		r := extractedResult{out}
+		if r.isNone() || r.title() == "" || r.content() == "" {
+			continue
+		}
+
+		role := types.TaskOutputArtifactRoleSupporting
+		if published == 0 {
+			role = types.TaskOutputArtifactRolePrimary
+		}
+		published++
+
+		c := r.candidate(role)
+		c.OutputType = "text"
+		c.Data[keyContent] = r.content()
+		c.Metadata[keySource] = sourceAssistantResponse
+		if promptMeta != "" {
+			c.Metadata[keySourcePrompt] = promptMeta
+		}
+		if batchID != "" {
+			c.Metadata["batch_id"] = batchID
+		}
+
+		if _, err := publishOutputCandidate(ctx, client, ids, tracker, c); err != nil {
+			log.Warn().Err(err).Str("task", ids.taskID).Str("title", r.title()).
+				Msg("final response output create failed")
+		}
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
