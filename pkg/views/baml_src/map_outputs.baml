@@ -93,7 +93,7 @@ function MapOutputsToSchema(
     - DATA_FIELDS — cleaned key/value evidence from output.data
     - METADATA_FIELDS — cleaned key/value evidence from output.metadata,
       including deeplink, artifact_label, tags, artifact_role, artifact_key,
-      artifact_kind, classifier_kind, and similar fields
+      artifact_kind, and similar fields
     - Any *_excerpt field — a condensed snippet from a larger raw field such as
       source_input/source_excerpt. Use it as evidence, but do not treat it as
       higher priority than explicit structured fields.

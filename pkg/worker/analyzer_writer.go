@@ -24,9 +24,8 @@ const (
 	keyURI             = "uri"
 	keyTags            = "tags"
 	keyTool            = "tool"
-	keyDeeplink        = "deeplink"
-	keyClassifierKind  = "classifier_kind"
-	keySource          = "source"
+	keyDeeplink = "deeplink"
+	keySource   = "source"
 	keySourcePrompt    = "source_prompt"
 	keySourceInput     = "source_input"
 	keySourceInputText = "source_input_text"
@@ -265,9 +264,7 @@ func (r extractedResult) isIntermediate() bool {
 // assistant content, etc.) before publishing.
 func (r extractedResult) candidate(role string) outputCandidate {
 	data := map[string]any{}
-	metadata := map[string]any{
-		keyClassifierKind: string(r.out.Kind),
-	}
+	metadata := map[string]any{}
 
 	if s := r.summary(); s != "" {
 		data[keySummary] = s
@@ -446,19 +443,19 @@ func persistFinalResponseOutput(
 		return nil
 	}
 
-	var publishable []extractedResult
+	count := 0
 	for _, out := range outputs {
 		r := extractedResult{out}
 		if !r.isNone() && r.title() != "" && r.content() != "" {
-			publishable = append(publishable, r)
+			count++
 		}
 	}
-	if len(publishable) == 0 {
+	if count == 0 {
 		return nil
 	}
 
 	var batchID string
-	if len(publishable) > 1 {
+	if count > 1 {
 		batchID = uuid.NewString()
 	}
 
@@ -467,11 +464,18 @@ func persistFinalResponseOutput(
 		promptMeta = strings.TrimSpace(*userMessage)
 	}
 
-	for i, r := range publishable {
+	published := 0
+	for _, out := range outputs {
+		r := extractedResult{out}
+		if r.isNone() || r.title() == "" || r.content() == "" {
+			continue
+		}
+
 		role := types.TaskOutputArtifactRoleSupporting
-		if i == 0 {
+		if published == 0 {
 			role = types.TaskOutputArtifactRolePrimary
 		}
+		published++
 
 		c := r.candidate(role)
 		c.OutputType = "text"

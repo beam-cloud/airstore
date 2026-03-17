@@ -61,9 +61,6 @@ func (a Artifact) Kind() string {
 	if kind := normalizeToken(meta(a.o, types.TaskOutputMetadataArtifactKind)); kind != "" {
 		return kind
 	}
-	if kind := normalizeToken(meta(a.o, "classifier_kind")); kind != "" {
-		return kind
-	}
 	if ext := a.fileExt(); ext != "" {
 		return ext
 	}

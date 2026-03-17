@@ -62,7 +62,7 @@ function ExtractOutputs(tool_name: string, tool_input: string, tool_result: stri
       file extension. For links, describe the destination.
 
     DATA FIELDS — extract the important fields from the tool result:
-    - Pick the 3-8 most useful fields a user would want to see in a dashboard table
+    - Pick the 5-10 most useful fields a user would want to see in a dashboard table
     - Assign display types semantically: URLs → "link", emails → "email",
       dates/timestamps → "date", monetary values → "currency", true/false → "boolean",
       comma-separated lists → "tags", counts/quantities → "number"
@@ -95,7 +95,7 @@ function ExtractOutputs(tool_name: string, tool_input: string, tool_result: stri
     When in doubt, return an empty array. Be very conservative.
 
     MULTI-ENTITY DECOMPOSITION:
-    When a tool call produces data for multiple distinct entities, return
+    When a result contains data for multiple distinct entities, return
     one ExtractedOutput per entity — NOT one aggregate output.
 
     Common patterns to decompose:

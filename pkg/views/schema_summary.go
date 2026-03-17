@@ -243,14 +243,13 @@ func writeWorkspaceSchemaSummaries(sb *strings.Builder, summaries []outputSchema
 	if len(summaries) == 0 {
 		return
 	}
-	sb.WriteString("\n" + strings.Repeat("─", 60) + "\n")
-	sb.WriteString("ARTIFACT SCHEMAS (from persisted outputs)\n")
-	sb.WriteString("At render time, a BAML mapper dynamically maps output data into table columns.\n")
-	sb.WriteString("Transform rules serve as semantic hints — column names and types guide the mapper.\n")
-	sb.WriteString("When entity_density=multi, design columns for per-entity fields (name, address,\n")
-	sb.WriteString("price) not aggregate summaries (total_count, top_picks). The mapper automatically\n")
-	sb.WriteString("creates one row per entity output.\n")
-	sb.WriteString(strings.Repeat("─", 60) + "\n")
+	divider := strings.Repeat("─", 60)
+	fmt.Fprintf(sb, "\n%s\nARTIFACT SCHEMAS (from persisted outputs)\n"+
+		"At render time, a BAML mapper dynamically maps output data into table columns.\n"+
+		"Transform rules serve as semantic hints — column names and types guide the mapper.\n"+
+		"When entity_density=multi, design columns for per-entity fields (name, address,\n"+
+		"price) not aggregate summaries (total_count, top_picks). The mapper automatically\n"+
+		"creates one row per entity output.\n%s\n", divider, divider)
 
 	for _, s := range summaries {
 		label := s.ArtifactLabel

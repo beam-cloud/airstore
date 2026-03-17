@@ -1875,8 +1875,7 @@ COMPONENT TYPES (only two):
 
 - table: The sheet's data table. Full-width, always present.
   At render time a BAML mapper dynamically maps task output data into the
-  column schema. Transform rules and row strategy are semantic hints that guide
-  the mapping:
+  column schema. Transform rules are semantic hints that guide the mapping:
   - column: machine-stable key (snake_case) describing what the column shows
   - source: dot-path hint (e.g. "data.recipe_name", "title", "uri")
   - type: display type (text, number, currency, date, link, email, status, tags, boolean)
