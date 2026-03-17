@@ -43,6 +43,7 @@ func NewViewsGroup(g *echo.Group, backend repository.BackendRepository, copilot 
 	vg.g.PATCH("/:view_id", vg.Update)
 	vg.g.DELETE("/:view_id", vg.Delete)
 	vg.g.GET("/:view_id/data", vg.ResolveData)
+	vg.g.GET("/:view_id/sheets/:sheet_id/widgets", vg.ResolveWidgets)
 	if store.Available() {
 		vg.g.PATCH("/:view_id/sheets/:sheet_id/rows/:row_id", vg.UpdateRow)
 		vg.g.POST("/:view_id/sheets/:sheet_id/rows/:row_id/regenerate", vg.RegenerateRow)
@@ -286,6 +287,61 @@ func (vg *ViewsGroup) ResolveData(c echo.Context) error {
 	}
 
 	return SuccessResponse(c, data)
+}
+
+func (vg *ViewsGroup) ResolveWidgets(c echo.Context) error {
+	workspaceID, err := vg.workspaceID(c)
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+	}
+
+	ctx := c.Request().Context()
+	v, err := vg.backend.GetView(ctx, workspaceID, c.Param("view_id"))
+	if err != nil {
+		return ErrorResponse(c, http.StatusNotFound, "view not found")
+	}
+
+	sheetID := c.Param("sheet_id")
+	if sheetID == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "sheet_id is required")
+	}
+
+	var sheet *types.SheetSpec
+	for i := range v.Definition.Sheets {
+		if v.Definition.Sheets[i].ID == sheetID {
+			sheet = &v.Definition.Sheets[i]
+			break
+		}
+	}
+	if sheet == nil {
+		return ErrorResponse(c, http.StatusNotFound, "sheet not found in view")
+	}
+
+	if len(sheet.Widgets) == 0 {
+		return SuccessResponse(c, []types.WidgetData{})
+	}
+
+	var comp *types.ComponentSpec
+	for i := range sheet.Components {
+		if sheet.Components[i].IsTable() {
+			comp = &sheet.Components[i]
+			break
+		}
+	}
+	if comp == nil {
+		return SuccessResponse(c, []types.WidgetData{})
+	}
+
+	widgets, err := vg.resolver.ResolveWidgets(ctx, workspaceID, v.ID, *sheet, *comp, views.ResolveOptions{
+		ForceRefresh:  queryBool(c.QueryParam(viewRefreshQueryParam)),
+		ViewAgentRefs: v.Definition.Agents,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("view_id", v.ID).Str("sheet_id", sheetID).Msg("widget resolve failed")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to resolve widgets")
+	}
+
+	return SuccessResponse(c, widgets)
 }
 
 func queryBool(value string) bool {
@@ -760,17 +816,25 @@ type createViewDraftResponse struct {
 type viewChatRequest struct {
 	Message     string `json:"message"`
 	ViewContent string `json:"view_content,omitempty"`
+	ViewID      string `json:"view_id,omitempty"`
+}
+
+type viewSSECitation struct {
+	SheetID string `json:"sheet_id"`
+	RowID   string `json:"row_id"`
+	Label   string `json:"label"`
 }
 
 type viewSSEEvent struct {
-	Event       string `json:"event"`
-	Message     string `json:"message,omitempty"`
-	ViewContent string `json:"view_content,omitempty"`
-	UpdateType  string `json:"update_type,omitempty"`
-	Error       string `json:"error,omitempty"`
-	OpType      string `json:"type,omitempty"`
-	OpName      string `json:"name,omitempty"`
-	OpStatus    string `json:"status,omitempty"`
+	Event       string            `json:"event"`
+	Message     string            `json:"message,omitempty"`
+	ViewContent string            `json:"view_content,omitempty"`
+	UpdateType  string            `json:"update_type,omitempty"`
+	Error       string            `json:"error,omitempty"`
+	OpType      string            `json:"type,omitempty"`
+	OpName      string            `json:"name,omitempty"`
+	OpStatus    string            `json:"status,omitempty"`
+	Citations   []viewSSECitation `json:"citations,omitempty"`
 }
 
 func getCachedViewDraftSession(draftID string) *viewDraftSession {
@@ -1123,11 +1187,17 @@ func (vg *ViewsGroup) ChatDraft(c echo.Context) error {
 		}
 	}
 
+	viewID := strings.TrimSpace(req.ViewID)
+	if viewID == "" {
+		viewID = strings.TrimSpace(session.draft.PublishedViewID)
+	}
+
 	resp, err := vg.copilot.GenerateStream(
 		genCtx,
 		session.draft,
 		workspaceID,
 		strings.TrimSpace(req.Message),
+		viewID,
 		func(partial *views.PartialViewDraftResponse) {
 			writeSSE(viewSSEEvent{
 				Event:       "chunk",
@@ -1175,11 +1245,25 @@ func (vg *ViewsGroup) ChatDraft(c echo.Context) error {
 		}
 	}
 
+	var citations []viewSSECitation
+	for _, cr := range resp.Cited_rows {
+		parts := strings.SplitN(cr.Row_ref, ":", 3)
+		if len(parts) != 3 || parts[0] != "row" {
+			continue
+		}
+		citations = append(citations, viewSSECitation{
+			SheetID: parts[1],
+			RowID:   parts[2],
+			Label:   cr.Label,
+		})
+	}
+
 	writeSSE(viewSSEEvent{
 		Event:       "done",
 		Message:     resp.Message,
 		ViewContent: resp.View_content,
 		UpdateType:  string(resp.Update_type),
+		Citations:   citations,
 	})
 
 	return nil

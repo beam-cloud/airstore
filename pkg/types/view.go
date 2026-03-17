@@ -81,6 +81,18 @@ type SheetSpec struct {
 	Layout      LayoutConfig    `json:"layout"`
 	Components  []ComponentSpec `json:"components"`
 	Relations   []SheetRelation `json:"relations,omitempty"`
+	Widgets     []WidgetSpec    `json:"widgets,omitempty"`
+}
+
+type WidgetSpec struct {
+	ID          string         `json:"id"`
+	Type        string         `json:"type"`
+	Title       string         `json:"title"`
+	Description string         `json:"description,omitempty"`
+	Config      map[string]any `json:"config,omitempty"`
+	Size        string         `json:"size,omitempty"`
+	W           int            `json:"w,omitempty"`
+	H           int            `json:"h,omitempty"`
 }
 
 type SheetRelation struct {
@@ -161,4 +173,43 @@ type ResolvedData struct {
 	Status      string         `json:"status,omitempty"`
 	Error       string         `json:"error,omitempty"`
 	Diagnostics map[string]any `json:"diagnostics,omitempty"`
+}
+
+// WidgetData is the resolved data for a single widget tile.
+type WidgetData struct {
+	WidgetID string          `json:"widget_id"`
+	Type     string          `json:"type"`
+	Metric   *MetricData     `json:"metric,omitempty"`
+	MapData  *MapWidgetData  `json:"map_data,omitempty"`
+	ListData *ListWidgetData `json:"list_data,omitempty"`
+	Status   string          `json:"status,omitempty"`
+	Error    string          `json:"error,omitempty"`
+	CachedAt *time.Time      `json:"cached_at,omitempty"`
+}
+
+type MetricData struct {
+	Value      string `json:"value"`
+	Label      string `json:"label"`
+	Comparison string `json:"comparison,omitempty"`
+}
+
+type MapWidgetData struct {
+	Markers []MapMarker `json:"markers"`
+}
+
+type MapMarker struct {
+	Lat    float64 `json:"lat"`
+	Lng    float64 `json:"lng"`
+	Label  string  `json:"label"`
+	Detail string  `json:"detail,omitempty"`
+}
+
+type ListWidgetData struct {
+	Items []ListItem `json:"items"`
+}
+
+type ListItem struct {
+	Label  string `json:"label"`
+	Value  string `json:"value"`
+	Detail string `json:"detail,omitempty"`
 }

@@ -96,10 +96,11 @@ type Copilot struct {
 	backend  repository.BackendRepository
 	storage  *clients.StorageClient
 	agentAPI *orchestration.AgentAPI
+	store    *ViewStore
 }
 
-func NewCopilot(s2 *common.S2Client, redis *common.RedisClient, backend repository.BackendRepository, storage *clients.StorageClient, agentAPI *orchestration.AgentAPI) *Copilot {
-	return &Copilot{s2: s2, redis: redis, backend: backend, storage: storage, agentAPI: agentAPI}
+func NewCopilot(s2 *common.S2Client, redis *common.RedisClient, backend repository.BackendRepository, storage *clients.StorageClient, agentAPI *orchestration.AgentAPI, store *ViewStore) *Copilot {
+	return &Copilot{s2: s2, redis: redis, backend: backend, storage: storage, agentAPI: agentAPI, store: store}
 }
 
 func (c *Copilot) DraftsAvailable() bool {
@@ -535,6 +536,7 @@ func (c *Copilot) GenerateStream(
 	draft *Draft,
 	workspaceID uint,
 	userMessage string,
+	viewID string,
 	onChunk func(partial *PartialViewDraftResponse),
 ) (*bamltypes.ViewDraftResponse, error) {
 	_ = c.persistDraft(ctx, draft.ID, "message", userMessage, "user", "")
@@ -543,8 +545,9 @@ func (c *Copilot) GenerateStream(
 	history := c.FormatHistory(draft.Messages[:len(draft.Messages)-1])
 	workspaceAgents := c.loadWorkspaceAgents(ctx, workspaceID)
 	workspaceCtx := c.BuildWorkspaceContext(ctx, workspaceID)
+	viewData := c.BuildViewDataContext(ctx, viewID, draft.ViewContent)
 
-	ch, err := baml.Stream.WriteView(ctx, userMessage, history, draft.ViewContent, workspaceCtx, ComponentRegistryDoc)
+	ch, err := baml.Stream.WriteView(ctx, userMessage, history, draft.ViewContent, workspaceCtx, ComponentRegistryDoc, viewData)
 	if err != nil {
 		return nil, fmt.Errorf("BAML WriteView stream: %w", err)
 	}
@@ -672,6 +675,139 @@ func writeColdStartGuidance(sb *strings.Builder) {
 	sb.WriteString("- Use source hints like \"title\", \"summary\", \"uri\", \"created_at\"\n")
 	sb.WriteString("- The BAML mapper will dynamically resolve output data to columns at render time\n")
 	sb.WriteString("- Keep column definitions semantic and minimal (3-5 columns)\n")
+}
+
+// BuildViewDataContext loads row data from MongoDB for a published view and
+// formats it as a readable text table that can be injected into the BAML prompt.
+func (c *Copilot) BuildViewDataContext(ctx context.Context, viewID string, viewContent string) string {
+	if c.store == nil || !c.store.Available() || viewID == "" || viewContent == "" {
+		return ""
+	}
+
+	var def types.ViewDefinition
+	if err := json.Unmarshal([]byte(viewContent), &def); err != nil {
+		return ""
+	}
+
+	const maxRowsPerSheet = 100
+	const maxTotalChars = 50000
+
+	var sb strings.Builder
+	totalRows := 0
+
+	for _, sheet := range def.Sheets {
+		var tableComp *types.ComponentSpec
+		for i := range sheet.Components {
+			if sheet.Components[i].Type == "table" {
+				tableComp = &sheet.Components[i]
+				break
+			}
+		}
+		if tableComp == nil {
+			continue
+		}
+
+		rows, err := c.store.GetRows(ctx, viewID, sheet.ID, tableComp.ID)
+		if err != nil || len(rows) == 0 {
+			continue
+		}
+
+		columns := extractColumnKeys(tableComp)
+		if len(columns) == 0 {
+			continue
+		}
+
+		fmt.Fprintf(&sb, "\n── Sheet: %s (%d rows) ──\n", sheet.Name, len(rows))
+
+		sb.WriteString("# | ")
+		for _, col := range columns {
+			sb.WriteString(col.label)
+			sb.WriteString(" | ")
+		}
+		sb.WriteString("\n")
+		sb.WriteString("--- | ")
+		for range columns {
+			sb.WriteString("--- | ")
+		}
+		sb.WriteString("\n")
+
+		limit := len(rows)
+		if limit > maxRowsPerSheet {
+			limit = maxRowsPerSheet
+		}
+		for _, row := range rows[:limit] {
+			fmt.Fprintf(&sb, "row:%s:%s | ", row.SheetID, row.ID)
+			cells := row.MergedCells()
+			for _, col := range columns {
+				val := cells[col.key]
+				if len(val) > 120 {
+					val = val[:117] + "..."
+				}
+				sb.WriteString(val)
+				sb.WriteString(" | ")
+			}
+			sb.WriteString("\n")
+			totalRows++
+		}
+		if len(rows) > limit {
+			fmt.Fprintf(&sb, "... and %d more rows\n", len(rows)-limit)
+		}
+
+		if sb.Len() > maxTotalChars {
+			sb.WriteString("\n(data truncated for context limit)\n")
+			break
+		}
+	}
+
+	if totalRows == 0 {
+		return ""
+	}
+	return sb.String()
+}
+
+type columnInfo struct {
+	key   string
+	label string
+}
+
+func extractColumnKeys(comp *types.ComponentSpec) []columnInfo {
+	if comp == nil || comp.Config == nil {
+		return nil
+	}
+	rawCols, ok := comp.Config["columns"]
+	if !ok {
+		return nil
+	}
+
+	var columns []columnInfo
+	switch typed := rawCols.(type) {
+	case []any:
+		for _, item := range typed {
+			if m, ok := item.(map[string]any); ok {
+				key, _ := m["key"].(string)
+				label, _ := m["label"].(string)
+				if key == "" {
+					continue
+				}
+				if label == "" {
+					label = key
+				}
+				columns = append(columns, columnInfo{key: key, label: label})
+			}
+		}
+	case []configColumn:
+		for _, col := range typed {
+			if col.Key == "" {
+				continue
+			}
+			label := col.Label
+			if label == "" {
+				label = col.Key
+			}
+			columns = append(columns, columnInfo{key: col.Key, label: label})
+		}
+	}
+	return columns
 }
 
 func normalizeViewContent(viewContent string, agents []*types.AgentProfile) (string, error) {

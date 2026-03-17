@@ -80,6 +80,252 @@ func (c ColumnSchema) BamlTypeName() string {
 	return "ColumnSchema"
 }
 
+type DataCitation struct {
+	Row_ref string `json:"row_ref"`
+	Label   string `json:"label"`
+}
+
+func (c *DataCitation) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "DataCitation" {
+		panic(fmt.Sprintf("expected DataCitation, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "row_ref":
+			c.Row_ref = baml.Decode(valueHolder).Interface().(string)
+
+		case "label":
+			c.Label = baml.Decode(valueHolder).Interface().(string)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class DataCitation", key))
+
+		}
+	}
+
+}
+
+func (c DataCitation) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["row_ref"] = c.Row_ref
+
+	fields["label"] = c.Label
+
+	return baml.EncodeClass("DataCitation", fields, nil)
+}
+
+func (c DataCitation) BamlTypeName() string {
+	return "DataCitation"
+}
+
+type ListItemResult struct {
+	Label  string `json:"label"`
+	Value  string `json:"value"`
+	Detail string `json:"detail"`
+}
+
+func (c *ListItemResult) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "ListItemResult" {
+		panic(fmt.Sprintf("expected ListItemResult, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "label":
+			c.Label = baml.Decode(valueHolder).Interface().(string)
+
+		case "value":
+			c.Value = baml.Decode(valueHolder).Interface().(string)
+
+		case "detail":
+			c.Detail = baml.Decode(valueHolder).Interface().(string)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class ListItemResult", key))
+
+		}
+	}
+
+}
+
+func (c ListItemResult) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["label"] = c.Label
+
+	fields["value"] = c.Value
+
+	fields["detail"] = c.Detail
+
+	return baml.EncodeClass("ListItemResult", fields, nil)
+}
+
+func (c ListItemResult) BamlTypeName() string {
+	return "ListItemResult"
+}
+
+type ListResult struct {
+	Items []ListItemResult `json:"items"`
+}
+
+func (c *ListResult) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "ListResult" {
+		panic(fmt.Sprintf("expected ListResult, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "items":
+			c.Items = baml.Decode(valueHolder).Interface().([]ListItemResult)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class ListResult", key))
+
+		}
+	}
+
+}
+
+func (c ListResult) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["items"] = c.Items
+
+	return baml.EncodeClass("ListResult", fields, nil)
+}
+
+func (c ListResult) BamlTypeName() string {
+	return "ListResult"
+}
+
+type MapMarkerResult struct {
+	Lat    float64 `json:"lat"`
+	Lng    float64 `json:"lng"`
+	Label  string  `json:"label"`
+	Detail string  `json:"detail"`
+}
+
+func (c *MapMarkerResult) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "MapMarkerResult" {
+		panic(fmt.Sprintf("expected MapMarkerResult, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "lat":
+			c.Lat = baml.Decode(valueHolder).Float()
+
+		case "lng":
+			c.Lng = baml.Decode(valueHolder).Float()
+
+		case "label":
+			c.Label = baml.Decode(valueHolder).Interface().(string)
+
+		case "detail":
+			c.Detail = baml.Decode(valueHolder).Interface().(string)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class MapMarkerResult", key))
+
+		}
+	}
+
+}
+
+func (c MapMarkerResult) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["lat"] = c.Lat
+
+	fields["lng"] = c.Lng
+
+	fields["label"] = c.Label
+
+	fields["detail"] = c.Detail
+
+	return baml.EncodeClass("MapMarkerResult", fields, nil)
+}
+
+func (c MapMarkerResult) BamlTypeName() string {
+	return "MapMarkerResult"
+}
+
+type MapResult struct {
+	Markers []MapMarkerResult `json:"markers"`
+}
+
+func (c *MapResult) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "MapResult" {
+		panic(fmt.Sprintf("expected MapResult, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "markers":
+			c.Markers = baml.Decode(valueHolder).Interface().([]MapMarkerResult)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class MapResult", key))
+
+		}
+	}
+
+}
+
+func (c MapResult) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["markers"] = c.Markers
+
+	return baml.EncodeClass("MapResult", fields, nil)
+}
+
+func (c MapResult) BamlTypeName() string {
+	return "MapResult"
+}
+
 type MappedCell struct {
 	Column string `json:"column"`
 	Value  string `json:"value"`
@@ -230,6 +476,60 @@ func (c MappedRow) BamlTypeName() string {
 	return "MappedRow"
 }
 
+type MetricResult struct {
+	Value      string `json:"value"`
+	Label      string `json:"label"`
+	Comparison string `json:"comparison"`
+}
+
+func (c *MetricResult) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "MetricResult" {
+		panic(fmt.Sprintf("expected MetricResult, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "value":
+			c.Value = baml.Decode(valueHolder).Interface().(string)
+
+		case "label":
+			c.Label = baml.Decode(valueHolder).Interface().(string)
+
+		case "comparison":
+			c.Comparison = baml.Decode(valueHolder).Interface().(string)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class MetricResult", key))
+
+		}
+	}
+
+}
+
+func (c MetricResult) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["value"] = c.Value
+
+	fields["label"] = c.Label
+
+	fields["comparison"] = c.Comparison
+
+	return baml.EncodeClass("MetricResult", fields, nil)
+}
+
+func (c MetricResult) BamlTypeName() string {
+	return "MetricResult"
+}
+
 type Operation struct {
 	Type    OperationType `json:"type"`
 	Payload string        `json:"payload"`
@@ -284,6 +584,7 @@ type ViewDraftResponse struct {
 	View_content      string         `json:"view_content"`
 	Removed_sheet_ids []string       `json:"removed_sheet_ids"`
 	Operations        []Operation    `json:"operations"`
+	Cited_rows        []DataCitation `json:"cited_rows"`
 }
 
 func (c *ViewDraftResponse) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
@@ -315,6 +616,9 @@ func (c *ViewDraftResponse) Decode(holder *cffi.CFFIValueClass, typeMap baml.Typ
 		case "operations":
 			c.Operations = baml.Decode(valueHolder).Interface().([]Operation)
 
+		case "cited_rows":
+			c.Cited_rows = baml.Decode(valueHolder).Interface().([]DataCitation)
+
 		default:
 
 			panic(fmt.Sprintf("unexpected field: %s in class ViewDraftResponse", key))
@@ -337,9 +641,71 @@ func (c ViewDraftResponse) Encode() (*cffi.HostValue, error) {
 
 	fields["operations"] = c.Operations
 
+	fields["cited_rows"] = c.Cited_rows
+
 	return baml.EncodeClass("ViewDraftResponse", fields, nil)
 }
 
 func (c ViewDraftResponse) BamlTypeName() string {
 	return "ViewDraftResponse"
+}
+
+type WidgetResult struct {
+	Widget_type string        `json:"widget_type"`
+	Metric      *MetricResult `json:"metric"`
+	Map_data    *MapResult    `json:"map_data"`
+	List_data   *ListResult   `json:"list_data"`
+}
+
+func (c *WidgetResult) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "WidgetResult" {
+		panic(fmt.Sprintf("expected WidgetResult, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "widget_type":
+			c.Widget_type = baml.Decode(valueHolder).Interface().(string)
+
+		case "metric":
+			c.Metric = baml.Decode(valueHolder).Interface().(*MetricResult)
+
+		case "map_data":
+			c.Map_data = baml.Decode(valueHolder).Interface().(*MapResult)
+
+		case "list_data":
+			c.List_data = baml.Decode(valueHolder).Interface().(*ListResult)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class WidgetResult", key))
+
+		}
+	}
+
+}
+
+func (c WidgetResult) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["widget_type"] = c.Widget_type
+
+	fields["metric"] = c.Metric
+
+	fields["map_data"] = c.Map_data
+
+	fields["list_data"] = c.List_data
+
+	return baml.EncodeClass("WidgetResult", fields, nil)
+}
+
+func (c WidgetResult) BamlTypeName() string {
+	return "WidgetResult"
 }
