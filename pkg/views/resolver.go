@@ -69,20 +69,17 @@ type ResolveOptions struct {
 type mappingSpec struct {
 	tableCols   []bamltypes.ColumnSchema
 	mappingCols []bamltypes.ColumnSchema
-	rowStrategy types.RowStrategy
 	schemaHash  string
 }
 
 func buildMappingSpec(sheetName string, comp types.ComponentSpec) mappingSpec {
 	tableCols := buildColumnSchemas(comp)
 	mappingCols := filterBamlColumns(tableCols)
-	rowStrategy := effectiveRowStrategy(comp.DataSource)
 
 	return mappingSpec{
 		tableCols:   tableCols,
 		mappingCols: mappingCols,
-		rowStrategy: rowStrategy,
-		schemaHash:  hashColumns(mappingCols, rowStrategy, sheetName, comp.Title, comp.Type),
+		schemaHash:  hashColumns(mappingCols, sheetName, comp.Title, comp.Type),
 	}
 }
 
@@ -180,8 +177,6 @@ func (r *DataResolver) RegenerateRow(ctx context.Context, workspaceID uint, view
 		sheet.Name,
 		comp.Title,
 		comp.Type,
-		spec.rowStrategy.Mode,
-		spec.rowStrategy.Description,
 		spec.mappingCols,
 		outputsJSON,
 		existingData,
@@ -383,7 +378,6 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 		Int("total_columns", len(spec.tableCols)).
 		Int("mapping_columns", len(spec.mappingCols)).
 		Strs("column_keys", colKeys).
-		Str("row_mode", spec.rowStrategy.Mode).
 		Interface("uncached_reason_counts", uncachedReasonCounts).
 		Msg("view: mapping required")
 
@@ -417,8 +411,6 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 			sheet.Name,
 			comp.Title,
 			comp.Type,
-			spec.rowStrategy.Mode,
-			spec.rowStrategy.Description,
 			spec.mappingCols,
 			outputsJSON,
 			existingData,
@@ -783,19 +775,6 @@ func filterOutputsForDataSource(outputs []*types.TaskOutput, ds *types.DataSourc
 	return filtered
 }
 
-func effectiveRowStrategy(ds *types.DataSource) types.RowStrategy {
-	if ds == nil || ds.RowStrategy == nil {
-		return types.RowStrategy{Mode: types.RowStrategyModeTask}
-	}
-	mode := strings.ToLower(strings.TrimSpace(ds.RowStrategy.Mode))
-	if mode != types.RowStrategyModeSplit {
-		mode = types.RowStrategyModeTask
-	}
-	return types.RowStrategy{
-		Mode:        mode,
-		Description: strings.TrimSpace(ds.RowStrategy.Description),
-	}
-}
 
 // ---------------------------------------------------------------------------
 // Component assembly
@@ -1316,6 +1295,9 @@ func writeTaskOutputForMapping(b *strings.Builder, output *types.TaskOutput) {
 	if output.Status != "" && output.Status != types.TaskOutputStatusActive {
 		writeMappingLine(b, "STATUS", output.Status)
 	}
+	if ak, _ := output.Metadata[types.TaskOutputMetadataArtifactKey].(string); ak != "" {
+		writeMappingLine(b, "ARTIFACT_KEY", ak)
+	}
 	writeMappingLine(b, "TITLE", output.Title)
 	writeMappingLine(b, "OUTPUT_TYPE", output.OutputType)
 	writeMappingLine(b, "AGENT_NAME", output.AgentName)
@@ -1682,9 +1664,9 @@ func (r *DataResolver) Store() *ViewStore {
 // mappingVersion should be bumped whenever the BAML prompt, serialization
 // logic, mapping scope, or output processing changes. This invalidates all
 // cached rows.
-const mappingVersion = "v6"
+const mappingVersion = "v7"
 
-func hashColumns(columns []bamltypes.ColumnSchema, rowStrategy types.RowStrategy, sheetName, tableTitle, tableType string) string {
+func hashColumns(columns []bamltypes.ColumnSchema, sheetName, tableTitle, tableType string) string {
 	type hashEntry struct {
 		Name        string `json:"n"`
 		Key         string `json:"k"`
@@ -1692,21 +1674,17 @@ func hashColumns(columns []bamltypes.ColumnSchema, rowStrategy types.RowStrategy
 		Description string `json:"d"`
 	}
 	payload := struct {
-		Version     string      `json:"v"`
-		Sheet       string      `json:"s"`
-		Title       string      `json:"t"`
-		TableType   string      `json:"tt"`
-		Mode        string      `json:"m"`
-		Description string      `json:"d"`
-		Columns     []hashEntry `json:"c"`
+		Version   string      `json:"v"`
+		Sheet     string      `json:"s"`
+		Title     string      `json:"t"`
+		TableType string      `json:"tt"`
+		Columns   []hashEntry `json:"c"`
 	}{
-		Version:     mappingVersion,
-		Sheet:       sheetName,
-		Title:       strings.TrimSpace(tableTitle),
-		TableType:   strings.TrimSpace(tableType),
-		Mode:        rowStrategy.Mode,
-		Description: rowStrategy.Description,
-		Columns:     make([]hashEntry, len(columns)),
+		Version:   mappingVersion,
+		Sheet:     sheetName,
+		Title:     strings.TrimSpace(tableTitle),
+		TableType: strings.TrimSpace(tableType),
+		Columns:   make([]hashEntry, len(columns)),
 	}
 	for i, c := range columns {
 		payload.Columns[i] = hashEntry{Name: c.Name, Key: c.Key, Type: c.Type, Description: c.Description}

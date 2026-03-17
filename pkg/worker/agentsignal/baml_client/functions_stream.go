@@ -339,7 +339,7 @@ func (*stream) ExtractApprovalSummary(ctx context.Context, context string, opts 
 }
 
 // / Streaming version of ExtractFinalResponseOutput
-func (*stream) ExtractFinalResponseOutput(ctx context.Context, user_message *string, assistant_message string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.ExtractedOutput, types.ExtractedOutput], error) {
+func (*stream) ExtractFinalResponseOutput(ctx context.Context, user_message *string, assistant_message string, opts ...CallOptionFunc) (<-chan StreamValue[[]stream_types.ExtractedOutput, []types.ExtractedOutput], error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -380,11 +380,11 @@ func (*stream) ExtractFinalResponseOutput(ctx context.Context, user_message *str
 		return nil, err
 	}
 
-	channel := make(chan StreamValue[stream_types.ExtractedOutput, types.ExtractedOutput])
+	channel := make(chan StreamValue[[]stream_types.ExtractedOutput, []types.ExtractedOutput])
 	go func() {
 		for result := range internal_channel {
 			if result.Error != nil {
-				channel <- StreamValue[stream_types.ExtractedOutput, types.ExtractedOutput]{
+				channel <- StreamValue[[]stream_types.ExtractedOutput, []types.ExtractedOutput]{
 					IsError: true,
 					Error:   result.Error,
 				}
@@ -392,14 +392,14 @@ func (*stream) ExtractFinalResponseOutput(ctx context.Context, user_message *str
 				return
 			}
 			if result.HasData {
-				data := (result.Data).(types.ExtractedOutput)
-				channel <- StreamValue[stream_types.ExtractedOutput, types.ExtractedOutput]{
+				data := (result.Data).([]types.ExtractedOutput)
+				channel <- StreamValue[[]stream_types.ExtractedOutput, []types.ExtractedOutput]{
 					IsFinal:  true,
 					as_final: &data,
 				}
 			} else {
-				data := (result.StreamData).(stream_types.ExtractedOutput)
-				channel <- StreamValue[stream_types.ExtractedOutput, types.ExtractedOutput]{
+				data := (result.StreamData).([]stream_types.ExtractedOutput)
+				channel <- StreamValue[[]stream_types.ExtractedOutput, []types.ExtractedOutput]{
 					IsFinal:   false,
 					as_stream: &data,
 				}

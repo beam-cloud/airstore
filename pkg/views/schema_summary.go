@@ -20,6 +20,7 @@ type outputSchemaSummary struct {
 	ArtifactKey   string
 	ArtifactLabel string
 	OutputType    string
+	EntityDensity string // "single" or "multi" — indicates outputs-per-task ratio
 	Fields        []schemaFieldSummary
 }
 
@@ -43,6 +44,7 @@ const maxArrayObjectSchemaSamples = 8
 func summarizeOutputSchema(outputs []*types.TaskOutput) outputSchemaSummary {
 	merged := make(map[string]*schemaFieldSummary)
 	var artifactKey, artifactLabel, outputType string
+	taskIDs := make(map[string]struct{})
 
 	for _, output := range outputs {
 		if output == nil {
@@ -58,6 +60,7 @@ func summarizeOutputSchema(outputs []*types.TaskOutput) outputSchemaSummary {
 		if outputType == "" {
 			outputType = strings.TrimSpace(output.OutputType)
 		}
+		taskIDs[output.TaskID] = struct{}{}
 
 		for _, f := range fieldsForOutput(output) {
 			if existing, ok := merged[f.Source]; ok {
@@ -90,10 +93,19 @@ func summarizeOutputSchema(outputs []*types.TaskOutput) outputSchemaSummary {
 		return fields[i].Source < fields[j].Source
 	})
 
+	density := "single"
+	if numTasks := len(taskIDs); numTasks > 0 && len(outputs) > numTasks {
+		avgPerTask := float64(len(outputs)) / float64(numTasks)
+		if avgPerTask > 1.5 {
+			density = "multi"
+		}
+	}
+
 	return outputSchemaSummary{
 		ArtifactKey:   artifactKey,
 		ArtifactLabel: artifactLabel,
 		OutputType:    outputType,
+		EntityDensity: density,
 		Fields:        fields,
 	}
 }
@@ -235,6 +247,9 @@ func writeWorkspaceSchemaSummaries(sb *strings.Builder, summaries []outputSchema
 	sb.WriteString("ARTIFACT SCHEMAS (from persisted outputs)\n")
 	sb.WriteString("At render time, a BAML mapper dynamically maps output data into table columns.\n")
 	sb.WriteString("Transform rules serve as semantic hints — column names and types guide the mapper.\n")
+	sb.WriteString("When entity_density=multi, design columns for per-entity fields (name, address,\n")
+	sb.WriteString("price) not aggregate summaries (total_count, top_picks). The mapper automatically\n")
+	sb.WriteString("creates one row per entity output.\n")
 	sb.WriteString(strings.Repeat("─", 60) + "\n")
 
 	for _, s := range summaries {
@@ -242,7 +257,8 @@ func writeWorkspaceSchemaSummaries(sb *strings.Builder, summaries []outputSchema
 		if label == "" {
 			label = humanizeToken(s.ArtifactKey)
 		}
-		fmt.Fprintf(sb, "\n  artifact_key=%q  label=%q  output_type=%q\n", s.ArtifactKey, label, s.OutputType)
+		fmt.Fprintf(sb, "\n  artifact_key=%q  label=%q  output_type=%q  entity_density=%s\n",
+			s.ArtifactKey, label, s.OutputType, s.EntityDensity)
 		sb.WriteString("    available fields:\n")
 		for _, f := range s.Fields {
 			fmt.Fprintf(sb, "      %s (%s, coverage=%d) — %s\n", f.Source, f.Type, f.Coverage, f.Label)

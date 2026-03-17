@@ -21,7 +21,7 @@ import (
 	baml "github.com/boundaryml/baml/engine/language_client_go/pkg"
 )
 
-func MapOutputsToSchema(ctx context.Context, sheet_name string, table_title string, table_type string, row_strategy_mode string, row_strategy_description string, columns []types.ColumnSchema, outputs_payload string, existing_rows string, excluded_rows string, opts ...CallOptionFunc) (types.MappedResult, error) {
+func MapOutputsToSchema(ctx context.Context, sheet_name string, table_title string, table_type string, columns []types.ColumnSchema, outputs_payload string, existing_rows string, excluded_rows string, opts ...CallOptionFunc) (types.MappedResult, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -37,7 +37,7 @@ func MapOutputsToSchema(ctx context.Context, sheet_name string, table_title stri
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"sheet_name": sheet_name, "table_title": table_title, "table_type": table_type, "row_strategy_mode": row_strategy_mode, "row_strategy_description": row_strategy_description, "columns": columns, "outputs_payload": outputs_payload, "existing_rows": existing_rows, "excluded_rows": excluded_rows},
+		Kwargs: map[string]any{"sheet_name": sheet_name, "table_title": table_title, "table_type": table_type, "columns": columns, "outputs_payload": outputs_payload, "existing_rows": existing_rows, "excluded_rows": excluded_rows},
 		Env:    getEnvVars(callOpts.env),
 	}
 

@@ -94,10 +94,6 @@ function WriteView(
                 "agent_ids": ["agent-1", "agent-2"],
                 "artifact_key": "optional-artifact-family-key",
                 "time_range": "24h|7d|30d",
-                "row_strategy": {
-                  "mode": "task|split",
-                  "description": "For split mode, describe what one row represents. Example: one row per emailed contact."
-                },
                 "transform": [
                   {"column": "stable_key", "source": "data.field|title|metadata.key", "type": "text|number|currency|date|link|email|status|tags|boolean"}
                 ]
@@ -155,16 +151,14 @@ function WriteView(
       "title", "uri"). Guidance, not rigid binding.
     - type: text (default), number, currency, date, link, email, status,
       tags, boolean. Guides both display and mapping.
-    - row_strategy.mode:
-      - "task" (default): synthesize one row per task. This is the strong
-        default — omit row_strategy entirely unless split is needed.
-      - "split": expand a single task into many rows when it produces multiple
-        distinct entities (e.g. 10 emails sent, 5 listings scraped). Each
-        entity becomes its own row in the table.
-    - row_strategy.description is REQUIRED for split mode. Describe what one
-      row represents clearly, e.g. "one row per recipient email that was sent".
-    - Use split mode when a user says things like "track each email separately",
-      "one row per contact", "expand into individual items", etc.
+
+    MULTI-ENTITY (automatic row expansion):
+    The mapper automatically creates one row per entity when a task produces
+    multiple outputs sharing the same artifact_key. No configuration needed.
+    When an artifact schema shows multi-entity density (many outputs per task),
+    design columns for PER-ENTITY fields (e.g. restaurant_name, cuisine,
+    price_range) — NOT aggregate summaries (total_count, top_picks).
+    Single-output tasks always produce one row.
 
     =============================================================================
     WORKSPACE CONTEXT
@@ -261,8 +255,7 @@ function WriteView(
 
     10. Default to ONE sheet. Only add more sheets when the data genuinely
         splits into distinct entity types that would be confusing in a single
-        table. When using split row_strategy on a sheet, that is usually
-        sufficient — you do NOT need a separate "detail" sheet for it.
+        table.
 
     {{ ctx.output_format }}
   "#

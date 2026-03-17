@@ -317,7 +317,7 @@ func ExtractApprovalSummary(ctx context.Context, context string, opts ...CallOpt
 	}
 }
 
-func ExtractFinalResponseOutput(ctx context.Context, user_message *string, assistant_message string, opts ...CallOptionFunc) (types.ExtractedOutput, error) {
+func ExtractFinalResponseOutput(ctx context.Context, user_message *string, assistant_message string, opts ...CallOptionFunc) ([]types.ExtractedOutput, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -361,33 +361,33 @@ func ExtractFinalResponseOutput(ctx context.Context, user_message *string, assis
 	if callOpts.onTick == nil {
 		result, err := bamlRuntime.CallFunction(ctx, "ExtractFinalResponseOutput", encoded, callOpts.onTick)
 		if err != nil {
-			return types.ExtractedOutput{}, err
+			return nil, err
 		}
 
 		if result.Error != nil {
-			return types.ExtractedOutput{}, result.Error
+			return nil, result.Error
 		}
 
-		casted := (result.Data).(types.ExtractedOutput)
+		casted := (result.Data).([]types.ExtractedOutput)
 
 		return casted, nil
 	} else {
 		channel, err := bamlRuntime.CallFunctionStream(ctx, "ExtractFinalResponseOutput", encoded, callOpts.onTick)
 		if err != nil {
-			return types.ExtractedOutput{}, err
+			return nil, err
 		}
 
 		for result := range channel {
 			if result.Error != nil {
-				return types.ExtractedOutput{}, result.Error
+				return nil, result.Error
 			}
 
 			if result.HasData {
-				return result.Data.(types.ExtractedOutput), nil
+				return result.Data.([]types.ExtractedOutput), nil
 			}
 		}
 
-		return types.ExtractedOutput{}, fmt.Errorf("No data returned from stream")
+		return nil, fmt.Errorf("No data returned from stream")
 	}
 }
 

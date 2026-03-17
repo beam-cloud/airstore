@@ -580,8 +580,8 @@ func TestBuildColumnSchemasCanonicalizesAliasKeys(t *testing.T) {
 	}
 
 	canonicalSchemas := buildColumnSchemas(compCanonical)
-	hashAlias := hashColumns(aliasSchemas, types.RowStrategy{Mode: types.RowStrategyModeTask}, "recipes", compAlias.Title, compAlias.Type)
-	hashCanonical := hashColumns(canonicalSchemas, types.RowStrategy{Mode: types.RowStrategyModeTask}, "recipes", compCanonical.Title, compCanonical.Type)
+	hashAlias := hashColumns(aliasSchemas, "recipes", compAlias.Title, compAlias.Type)
+	hashCanonical := hashColumns(canonicalSchemas, "recipes", compCanonical.Title, compCanonical.Type)
 	if hashAlias != hashCanonical {
 		t.Fatalf("alias hash = %q, canonical hash = %q, want match", hashAlias, hashCanonical)
 	}
@@ -696,8 +696,8 @@ func TestHashColumnsStable(t *testing.T) {
 	}
 
 	cols := buildColumnSchemas(comp)
-	h1 := hashColumns(cols, types.RowStrategy{Mode: types.RowStrategyModeTask}, "test-sheet", comp.Title, comp.Type)
-	h2 := hashColumns(cols, types.RowStrategy{Mode: types.RowStrategyModeTask}, "test-sheet", comp.Title, comp.Type)
+	h1 := hashColumns(cols, "test-sheet", comp.Title, comp.Type)
+	h2 := hashColumns(cols, "test-sheet", comp.Title, comp.Type)
 	if h1 != h2 {
 		t.Fatalf("hashColumns not stable: %q vs %q", h1, h2)
 	}
@@ -706,12 +706,12 @@ func TestHashColumnsStable(t *testing.T) {
 	var comp2 types.ComponentSpec
 	json.Unmarshal(compJSON, &comp2)
 	cols2 := buildColumnSchemas(comp2)
-	h3 := hashColumns(cols2, types.RowStrategy{Mode: types.RowStrategyModeTask}, "test-sheet", comp2.Title, comp2.Type)
+	h3 := hashColumns(cols2, "test-sheet", comp2.Title, comp2.Type)
 	if h1 != h3 {
 		t.Fatalf("hashColumns not stable across JSON round-trip: %q vs %q", h1, h3)
 	}
 
-	h4 := hashColumns(cols, types.RowStrategy{Mode: types.RowStrategyModeTask}, "test-sheet", "Renamed Table", comp.Type)
+	h4 := hashColumns(cols, "test-sheet", "Renamed Table", comp.Type)
 	if h1 == h4 {
 		t.Fatalf("hashColumns should change when title changes: %q", h1)
 	}

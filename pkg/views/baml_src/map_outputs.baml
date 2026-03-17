@@ -1,8 +1,9 @@
 // =============================================================================
 // MapOutputsToSchema
 // Maps task outputs (grouped by task_id) into the column schema of a sheet's
-// table component. Multiple outputs from the same task can be synthesized into
-// one row or expanded into multiple rows, depending on the sheet's row strategy.
+// table component. Automatically determines row cardinality from output
+// structure: multiple outputs sharing the same artifact_key become separate
+// rows, while outputs with different keys are synthesized into one row.
 // Called at view render time, results are cached.
 // =============================================================================
 
@@ -20,7 +21,7 @@ class MappedCell {
 
 class MappedRow {
   task_id string @description("The task ID this row was synthesized from")
-  row_key string @description("Machine-stable identifier unique within the task group. Use 'task' for task-level rows. For split rows, derive it from the unique entity, like an email address, listing id, or contact slug.")
+  row_key string @description("Machine-stable identifier unique within the task group. Use 'task' for single-row tasks. For multi-entity tasks, derive from a stable entity identifier like a name slug, email, or listing id.")
   source_output_ids string[] @description("The IDs of the outputs that most directly contributed to this row")
   cells MappedCell[] @description("MUST contain exactly one MappedCell for EVERY column in the schema. Never skip columns — use empty string value for missing data.")
 }
@@ -33,8 +34,6 @@ function MapOutputsToSchema(
   sheet_name: string,
   table_title: string,
   table_type: string,
-  row_strategy_mode: string,
-  row_strategy_description: string,
   columns: ColumnSchema[],
   outputs_payload: string,
   existing_rows: string,
@@ -48,8 +47,6 @@ function MapOutputsToSchema(
 
     SHEET: {{ sheet_name }}
     TABLE: {{ table_title }} (type: {{ table_type }})
-    ROW STRATEGY MODE: {{ row_strategy_mode }}
-    ROW STRATEGY DESCRIPTION: {{ row_strategy_description }}
 
     COLUMN SCHEMA:
     {% for col in columns %}
@@ -138,21 +135,29 @@ function MapOutputsToSchema(
         deterministically by preferring: artifact_role primary > supporting >
         incidental, then the newest created_at, then the lexicographically
         smallest output.id.
-    13. For split rows, row_key must come from a stable identifier in the data
-        itself. Never invent alternate row_keys for the same entity across runs.
+    13. row_key must come from a stable identifier in the data itself. Never
+        invent alternate row_keys for the same entity across runs.
 
-    ROW STRATEGY:
-    - If mode is "task": produce ONE row per task_id that has relevant data.
-      Synthesize the best value for each column from any output in the group.
-      row_key = "task".
-    - If mode is "split": emit MULTIPLE rows per task_id. The description
-      tells you what entity each row represents (e.g. one row per email
-      recipient, per listing, per company researched). Use stable, slug-like
-      row_key values (e.g. "alice-smith", "listing-42", "acme-corp").
-      If no distinct entities exist, fall back to one row with row_key = "task".
-      For research tasks: each distinct finding, company, person, or topic
-      that has its own output should become its own row. Populate ALL columns
-      for each entity from its corresponding output(s).
+    AUTOMATIC ROW GROUPING:
+    Determine how many rows to produce for each task by examining the outputs:
+
+    1. MULTI-ENTITY (most common for tasks with many outputs):
+       When a task has multiple outputs sharing the SAME ARTIFACT_KEY, each
+       output represents a distinct entity (e.g. one restaurant, one contact,
+       one company). Produce ONE ROW PER OUTPUT. Each row's data comes
+       primarily from its corresponding output. Use a stable slug derived from
+       the entity as row_key (e.g. "bistrot-ha", "alice-smith", "acme-corp").
+       Include only that output's ID in source_output_ids.
+
+    2. SYNTHESIS (outputs with different artifact keys):
+       When a task has outputs with DIFFERENT ARTIFACT_KEY values (or no
+       artifact key), they represent different facets of the same work (e.g.
+       a PR created + an email sent). Synthesize into a SINGLE ROW with
+       row_key = "task", picking the best value for each column across all
+       outputs.
+
+    3. SINGLE OUTPUT:
+       If a task has exactly one output, produce one row with row_key = "task".
 
     ENTITY LIFECYCLE:
     Some outputs have a STATUS field (active, pending, approved, rejected, superseded).
