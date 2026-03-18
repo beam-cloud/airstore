@@ -3,26 +3,19 @@ package worker
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"path"
-	"regexp"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	agentsignal "github.com/beam-cloud/airstore/pkg/worker/agentsignal/baml_client"
 	signaltypes "github.com/beam-cloud/airstore/pkg/worker/agentsignal/baml_client/types"
-	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/rs/zerolog/log"
 )
 
@@ -36,12 +29,7 @@ const (
 	subagentMaxWait            = 30 * time.Minute
 	subagentProbeTimeout       = 15 * time.Second
 	terminalRingBufSize        = 256 * 1024
-	maxWakePlannerSkillChars   = 24_000
-	maxWakePlannerHandoffChars = 12_000
-	maxWakePlannerContextFiles = 4
 )
-
-var wakePlannerFilePathRE = regexp.MustCompile(`(?:/workspace/)?[A-Za-z0-9][A-Za-z0-9._/-]*\.(?:json|md|txt|csv|ya?ml)`)
 
 // subagentWaitOutcome describes why waitForSubagents returned.
 type subagentWaitOutcome int
@@ -103,16 +91,12 @@ func (w *Worker) setRunInteractionState(ctx context.Context, task types.RunExecu
 	}
 }
 
-func (w *Worker) setOriginTaskState(ctx context.Context, task types.RunExecution, state types.AgentTaskState, inputKind types.InputKind, waitingSummary ...string) {
+func (w *Worker) setOriginTaskState(ctx context.Context, task types.RunExecution, state types.AgentTaskState, inputKind types.InputKind, waitingSummary string) {
 	ec := executionContextFromTask(task)
 	if ec.originTaskID == "" || ec.runID == "" {
 		return
 	}
-	var summary string
-	if len(waitingSummary) > 0 {
-		summary = waitingSummary[0]
-	}
-	if err := w.gatewayClient.UpdateTaskState(ctx, ec.originTaskID, string(state), ec.runID, string(inputKind), summary); err != nil {
+	if err := w.gatewayClient.UpdateTaskState(ctx, ec.originTaskID, string(state), ec.runID, string(inputKind), waitingSummary); err != nil {
 		addTaskExecutionContext(log.Warn().Err(err).Str("target_state", string(state)), task).
 			Msg("failed to update origin task state")
 	}
@@ -329,7 +313,7 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	var lastPrompt string
 
 	if tr, ok := runner.(TurnRunner); ok {
-		runErr, needsInput, lastPrompt = w.runTurnSession(sessionCtx, task, sandboxID, tr, env, tw, activityCh, checkNeedsInput)
+		runErr, needsInput, lastPrompt = w.runTurnSession(sessionCtx, task, sandboxID, tr, env, tw, activityCh, checkNeedsInput, bamlEnv)
 	} else {
 		runErr = w.runGenericPTYSession(sessionCtx, task, sandboxID, tw, activityCh)
 	}
@@ -405,283 +389,13 @@ func (w *Worker) buildNeedsInputChecker(
 
 		var summary string
 		if kind == types.InputKindApproveReject && tw.ringBuf != nil {
-			if text := extractAssistantText(tw.ringBuf.Bytes(), 4000); text != "" {
-				if s, err := agentsignal.ExtractApprovalSummary(ctx, text, agentsignal.WithEnv(bamlEnv)); err == nil {
-					summary = w.buildApprovalSummaryWithItems(ctx, task, currentPrompt, text, s, bamlEnv)
-				}
-			}
+			text := extractAssistantText(tw.ringBuf.Bytes(), 4000)
+			summary = w.tryBuildApprovalSummary(ctx, task, currentPrompt, text, bamlEnv)
 		}
 		return true, kind, summary
 	}
 }
 
-func (w *Worker) classifyFollowUp(
-	ctx context.Context, task types.RunExecution,
-	runner NeedsInputRunner, markerPath, lastPrompt, mountSource string,
-	env map[string]string,
-	bamlEnv map[string]string,
-) *types.RunExecutionWakeSignal {
-	msg := runner.ReadLastMessage(markerPath)
-	if msg == "" {
-		return nil
-	}
-	var userMsg *string
-	if lastPrompt != "" {
-		userMsg = &lastPrompt
-	}
-	skillContext, handoffContext := buildWakePlannerContext(mountSource, env)
-	var skillContextPtr *string
-	if skillContext != "" {
-		skillContextPtr = &skillContext
-	}
-	var handoffContextPtr *string
-	if handoffContext != "" {
-		handoffContextPtr = &handoffContext
-	}
-	fu, err := agentsignal.ClassifyFollowUp(
-		ctx,
-		msg,
-		userMsg,
-		time.Now().UTC().Format(time.RFC3339),
-		skillContextPtr,
-		handoffContextPtr,
-		agentsignal.WithEnv(bamlEnv),
-	)
-	if err != nil || fu.Intent != signaltypes.FollowUpIntentFOLLOW_UP {
-		return nil
-	}
-	ws := &types.RunExecutionWakeSignal{DelayMinutes: int(fu.Delay_minutes)}
-	if fu.Reason != nil {
-		ws.Reason = strings.TrimSpace(*fu.Reason)
-	}
-	if fu.Follow_up_prompt != nil {
-		ws.FollowUpPrompt = strings.TrimSpace(*fu.Follow_up_prompt)
-	}
-	for idx, item := range fu.Wake_agenda {
-		agendaItem := &types.TaskWakeAgendaItem{
-			Seq:   idx + 1,
-			Type:  strings.TrimSpace(item.Type),
-			Title: strings.TrimSpace(item.Title),
-		}
-		if item.Reason != nil {
-			agendaItem.Reason = strings.TrimSpace(*item.Reason)
-		}
-		if agendaItem.Title == "" {
-			agendaItem.Title = agendaItem.Reason
-		}
-		if agendaItem.Title == "" {
-			continue
-		}
-		ws.WakeAgenda = append(ws.WakeAgenda, agendaItem)
-	}
-	if len(ws.WakeAgenda) == 0 && ws.Reason != "" {
-		ws.WakeAgenda = []*types.TaskWakeAgendaItem{{
-			Seq:    1,
-			Type:   "follow_up",
-			Title:  ws.Reason,
-			Reason: ws.Reason,
-		}}
-	}
-	if ws.Reason == "" {
-		ws.Reason = wakeAgendaSummary(ws.WakeAgenda)
-	}
-	if ws.FollowUpPrompt == "" {
-		ws.FollowUpPrompt = synthesizeWakePrompt(ws.WakeAgenda, ws.Reason)
-	}
-	if ws.DelayMinutes <= 0 {
-		ws.DelayMinutes = 5
-	}
-	return ws
-}
-
-func wakeAgendaSummary(items []*types.TaskWakeAgendaItem) string {
-	for _, item := range items {
-		if item == nil {
-			continue
-		}
-		if title := strings.TrimSpace(item.Title); title != "" {
-			return title
-		}
-		if reason := strings.TrimSpace(item.Reason); reason != "" {
-			return reason
-		}
-	}
-	return ""
-}
-
-func synthesizeWakePrompt(items []*types.TaskWakeAgendaItem, reason string) string {
-	if len(items) == 0 {
-		if strings.TrimSpace(reason) == "" {
-			return ""
-		}
-		return "Resume this task and continue based on the latest context."
-	}
-	lines := []string{
-		"Resume this task and work through the following next-wake agenda in order:",
-	}
-	for idx, item := range items {
-		if item == nil {
-			continue
-		}
-		line := fmt.Sprintf("%d. %s", idx+1, strings.TrimSpace(item.Title))
-		if detail := strings.TrimSpace(item.Reason); detail != "" && detail != strings.TrimSpace(item.Title) {
-			line += " -- " + detail
-		}
-		lines = append(lines, line)
-	}
-	return strings.Join(lines, "\n")
-}
-
-func buildWakePlannerContext(mountSource string, env map[string]string) (string, string) {
-	skillContext := readActiveSkillContext(mountSource, env)
-	if skillContext == "" {
-		return "", ""
-	}
-	return skillContext, readWakePlannerHandoffContext(mountSource, skillContext)
-}
-
-func readActiveSkillContext(mountSource string, env map[string]string) string {
-	systemPrompt := strings.TrimSpace(env["AIRSTORE_AGENT_SYSTEM_PROMPT"])
-	if systemPrompt == "" {
-		return ""
-	}
-	paths := extractActiveSkillPaths(systemPrompt)
-	if len(paths) == 0 || strings.TrimSpace(mountSource) == "" {
-		return trimWakePlannerContext(systemPrompt, maxWakePlannerSkillChars)
-	}
-
-	blocks := make([]string, 0, len(paths))
-	total := 0
-	for _, skillPath := range paths {
-		if len(blocks) >= maxWakePlannerContextFiles || total >= maxWakePlannerSkillChars {
-			break
-		}
-		content, err := readWakePlannerFile(mountSource, path.Join(skillPath, "SKILL.md"), maxWakePlannerSkillChars-total)
-		if err != nil || content == "" {
-			continue
-		}
-		block := fmt.Sprintf("Skill file: %s/SKILL.md\n%s", skillPath, content)
-		total += len(block)
-		blocks = append(blocks, block)
-	}
-	if len(blocks) == 0 {
-		return trimWakePlannerContext(systemPrompt, maxWakePlannerSkillChars)
-	}
-	return trimWakePlannerContext(strings.Join(blocks, "\n\n"), maxWakePlannerSkillChars)
-}
-
-func readWakePlannerHandoffContext(mountSource, skillContext string) string {
-	if strings.TrimSpace(mountSource) == "" || strings.TrimSpace(skillContext) == "" {
-		return ""
-	}
-	blocks := make([]string, 0, maxWakePlannerContextFiles)
-	total := 0
-	for _, filePath := range extractWakePlannerHandoffPaths(skillContext) {
-		if len(blocks) >= maxWakePlannerContextFiles || total >= maxWakePlannerHandoffChars {
-			break
-		}
-		content, err := readWakePlannerFile(mountSource, filePath, maxWakePlannerHandoffChars-total)
-		if err != nil || content == "" {
-			continue
-		}
-		block := fmt.Sprintf("Handoff file: %s\n%s", filePath, content)
-		total += len(block)
-		blocks = append(blocks, block)
-	}
-	return trimWakePlannerContext(strings.Join(blocks, "\n\n"), maxWakePlannerHandoffChars)
-}
-
-func extractActiveSkillPaths(systemPrompt string) []string {
-	lines := strings.Split(systemPrompt, "\n")
-	seen := make(map[string]struct{}, len(lines))
-	paths := make([]string, 0, len(lines))
-	for _, line := range lines {
-		idx := strings.Index(line, "/workspace/skills/")
-		if idx < 0 {
-			continue
-		}
-		fields := strings.Fields(line[idx:])
-		if len(fields) == 0 {
-			continue
-		}
-		skillPath := strings.TrimSuffix(strings.TrimSpace(fields[0]), "/SKILL.md")
-		if !strings.HasPrefix(skillPath, "/workspace/skills/") {
-			continue
-		}
-		if _, ok := seen[skillPath]; ok {
-			continue
-		}
-		seen[skillPath] = struct{}{}
-		paths = append(paths, skillPath)
-	}
-	return paths
-}
-
-func extractWakePlannerHandoffPaths(skillContext string) []string {
-	matches := wakePlannerFilePathRE.FindAllString(skillContext, -1)
-	seen := make(map[string]struct{}, len(matches))
-	paths := make([]string, 0, len(matches))
-	for _, match := range matches {
-		filePath := normalizeWakePlannerPath(match)
-		if filePath == "" || strings.HasPrefix(filePath, "/workspace/skills/") {
-			continue
-		}
-		if _, ok := seen[filePath]; ok {
-			continue
-		}
-		seen[filePath] = struct{}{}
-		paths = append(paths, filePath)
-	}
-	return paths
-}
-
-func normalizeWakePlannerPath(raw string) string {
-	raw = strings.TrimSpace(raw)
-	raw = strings.Trim(raw, "`'\"()[]{}.,:;")
-	if raw == "" {
-		return ""
-	}
-	if strings.HasPrefix(raw, "/workspace/") {
-		return path.Clean(raw)
-	}
-	if strings.HasPrefix(raw, "/") {
-		return ""
-	}
-	return path.Clean(path.Join("/workspace", raw))
-}
-
-func readWakePlannerFile(mountSource, containerPath string, limit int) (string, error) {
-	if strings.TrimSpace(mountSource) == "" || strings.TrimSpace(containerPath) == "" || limit <= 0 {
-		return "", nil
-	}
-	hostPath, err := vfsHostPathWithinMount(mountSource, containerPath)
-	if err != nil {
-		return "", err
-	}
-	f, err := os.Open(hostPath)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	data, err := io.ReadAll(io.LimitReader(f, int64(limit+1)))
-	if err != nil {
-		return "", err
-	}
-	return trimWakePlannerContext(string(data), limit), nil
-}
-
-func trimWakePlannerContext(raw string, limit int) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" || limit <= 0 || len(raw) <= limit {
-		return raw
-	}
-	const suffix = "\n...[truncated]"
-	if limit <= len(suffix) {
-		return raw[:limit]
-	}
-	return raw[:limit-len(suffix)] + suffix
-}
 
 // ---------------------------------------------------------------------------
 // Turn session: the core turn loop
@@ -696,6 +410,7 @@ func (w *Worker) runTurnSession(
 	stdout io.Writer,
 	activityCh chan<- struct{},
 	checkNeedsInput func(string) (bool, types.InputKind, string),
+	bamlEnv map[string]string,
 ) (error, bool, string) {
 	prompt := strings.TrimSpace(task.Prompt)
 	sessionEnv := cloneMap(env)
@@ -711,7 +426,7 @@ func (w *Worker) runTurnSession(
 
 		w.setRunInteractionState(ctx, task, types.RunInteractionStateWorking)
 		if !isFirst {
-			w.setOriginTaskState(ctx, task, types.AgentTaskStateRunning, "")
+			w.setOriginTaskState(ctx, task, types.AgentTaskStateRunning, "", "")
 		}
 
 		turnOut := stdout
@@ -741,34 +456,26 @@ func (w *Worker) runTurnSession(
 			signalActivity(activityCh)
 		}
 
-		// Output-parsing runners (e.g. air) carry needs_input/response directly in
-		// their stdout JSON trace — no file markers or BAML classification needed.
+		// Determine if the agent needs user input before continuing.
+		var needsInput bool
+		var inputKind types.InputKind
+		var waitingSummary string
+
 		if outputParser != nil {
-			needsInput, inputKind, response, err := outputParser.ParseTurnOutput(turnBuf.Bytes())
+			var err error
+			needsInput, inputKind, waitingSummary, err = outputParser.ParseTurnOutput(turnBuf.Bytes())
 			if err != nil {
 				addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to parse turn output")
 			}
-			if !needsInput {
-				if pending := w.claimPendingInput(ctx, task); pending != "" {
-					prompt = pending
-					continue
+			if needsInput && inputKind == types.InputKindApproveReject {
+				if s := w.tryBuildApprovalSummary(ctx, task, prompt, waitingSummary, bamlEnv); s != "" {
+					waitingSummary = s
 				}
-				return nil, false, prompt
 			}
-			w.setRunInteractionState(ctx, task, types.RunInteractionStateWaitingForInput)
-			w.setOriginTaskState(ctx, task, types.AgentTaskStateWaiting, inputKind, response)
-			prompt = w.waitForFollowupInput(ctx, task, DefaultBetweenTurnsTimeout, activityCh)
-			if prompt == "" {
-				return nil, true, ""
-			}
-			continue
+		} else if checkNeedsInput != nil {
+			needsInput, inputKind, waitingSummary = checkNeedsInput(prompt)
 		}
 
-		if checkNeedsInput == nil {
-			return nil, false, prompt
-		}
-
-		needsInput, inputKind, waitingSummary := checkNeedsInput(prompt)
 		if !needsInput {
 			if pending := w.claimPendingInput(ctx, task); pending != "" {
 				prompt = pending
@@ -779,7 +486,6 @@ func (w *Worker) runTurnSession(
 
 		w.setRunInteractionState(ctx, task, types.RunInteractionStateWaitingForInput)
 		w.setOriginTaskState(ctx, task, types.AgentTaskStateWaiting, inputKind, waitingSummary)
-
 		prompt = w.waitForFollowupInput(ctx, task, DefaultBetweenTurnsTimeout, activityCh)
 		if prompt == "" {
 			return nil, true, ""
@@ -1005,191 +711,6 @@ func signalActivity(ch chan<- struct{}) {
 	case ch <- struct{}{}:
 	default:
 	}
-}
-
-type approvalItemSummary struct {
-	OutputID string `json:"output_id"`
-	Title    string `json:"title"`
-	ItemKey  string `json:"item_key"`
-}
-
-type approvalBatchFingerprint struct {
-	TaskID  string                    `json:"task_id"`
-	RunID   string                    `json:"run_id"`
-	Prompt  string                    `json:"prompt"`
-	Summary string                    `json:"summary"`
-	Details string                    `json:"details"`
-	Items   []approvalItemFingerprint `json:"items"`
-}
-
-type approvalItemFingerprint struct {
-	ItemKey     string                         `json:"item_key"`
-	Kind        string                         `json:"kind"`
-	Title       string                         `json:"title"`
-	Description string                         `json:"description"`
-	Details     string                         `json:"details"`
-	DataFields  []approvalDataFieldFingerprint `json:"data_fields"`
-}
-
-type approvalDataFieldFingerprint struct {
-	Key   string `json:"key"`
-	Value string `json:"value"`
-	Type  string `json:"type"`
-	Label string `json:"label"`
-}
-
-func approvalBatchID(
-	ids taskOutputIDs,
-	prompt string,
-	summary signaltypes.ApprovalSummary,
-	items []signaltypes.ApprovalItem,
-) string {
-	fp := approvalBatchFingerprint{
-		TaskID:  strings.TrimSpace(ids.taskID),
-		RunID:   strings.TrimSpace(ids.runID),
-		Prompt:  strings.TrimSpace(prompt),
-		Summary: strings.TrimSpace(summary.Summary),
-		Details: strings.TrimSpace(summary.Details),
-		Items:   make([]approvalItemFingerprint, 0, len(items)),
-	}
-
-	for _, item := range items {
-		itemFP := approvalItemFingerprint{
-			ItemKey:     strings.TrimSpace(item.Item_key),
-			Kind:        string(item.Kind),
-			Title:       strings.TrimSpace(item.Title),
-			Description: strings.TrimSpace(item.Description),
-			Details:     strings.TrimSpace(item.Details),
-			DataFields:  make([]approvalDataFieldFingerprint, 0, len(item.Data_fields)),
-		}
-		for _, field := range item.Data_fields {
-			itemFP.DataFields = append(itemFP.DataFields, approvalDataFieldFingerprint{
-				Key:   strings.TrimSpace(field.Key),
-				Value: strings.TrimSpace(field.Value),
-				Type:  strings.TrimSpace(field.Type),
-				Label: strings.TrimSpace(field.Label),
-			})
-		}
-		sort.Slice(itemFP.DataFields, func(i, j int) bool {
-			left := itemFP.DataFields[i]
-			right := itemFP.DataFields[j]
-			if left.Key != right.Key {
-				return left.Key < right.Key
-			}
-			if left.Label != right.Label {
-				return left.Label < right.Label
-			}
-			if left.Type != right.Type {
-				return left.Type < right.Type
-			}
-			return left.Value < right.Value
-		})
-		fp.Items = append(fp.Items, itemFP)
-	}
-
-	sort.Slice(fp.Items, func(i, j int) bool {
-		left := fp.Items[i]
-		right := fp.Items[j]
-		if left.ItemKey != right.ItemKey {
-			return left.ItemKey < right.ItemKey
-		}
-		if left.Kind != right.Kind {
-			return left.Kind < right.Kind
-		}
-		if left.Title != right.Title {
-			return left.Title < right.Title
-		}
-		if left.Description != right.Description {
-			return left.Description < right.Description
-		}
-		return left.Details < right.Details
-	})
-
-	payload, err := json.Marshal(fp)
-	if err != nil {
-		payload = []byte(fmt.Sprintf("approval:%s:%s:%s", fp.TaskID, fp.RunID, fp.Prompt))
-	}
-	return uuid.NewSHA1(uuid.NameSpaceOID, payload).String()
-}
-
-func approvalItemOutputID(batchID, itemKey string) string {
-	return uuid.NewSHA1(
-		uuid.NameSpaceOID,
-		[]byte("approval-item:"+strings.TrimSpace(batchID)+":"+strings.TrimSpace(itemKey)),
-	).String()
-}
-
-func (w *Worker) buildApprovalSummaryWithItems(
-	ctx context.Context, task types.RunExecution,
-	currentPrompt string,
-	text string, summary signaltypes.ApprovalSummary,
-	bamlEnv map[string]string,
-) string {
-	items, err := agentsignal.ExtractApprovalItems(ctx, text, agentsignal.WithEnv(bamlEnv))
-	if err != nil || len(items) == 0 {
-		return marshalApprovalSummary(summary, nil)
-	}
-
-	ids := outputIDsFromTask(task)
-	batchID := approvalBatchID(ids, currentPrompt, summary, items)
-	var itemSummaries []approvalItemSummary
-
-	for _, item := range items {
-		dataMap := map[string]any{}
-		for _, df := range item.Data_fields {
-			dataMap[df.Key] = df.Value
-		}
-		dataMap["details"] = item.Details
-
-		itemOutputID := approvalItemOutputID(batchID, item.Item_key)
-		metaJSON, _ := json.Marshal(map[string]any{
-			"approval_batch_id":     batchID,
-			"item_key":              item.Item_key,
-			"_idempotent_output_id": itemOutputID,
-		})
-		dataJSON, _ := json.Marshal(dataMap)
-
-		req := &pb.CreateTaskOutputRequest{
-			WorkspaceId:  ids.workspaceID,
-			TaskId:       ids.taskID,
-			RunId:        ids.runID,
-			AgentId:      ids.agentID,
-			OutputType:   kindToOutputType(item.Kind),
-			Title:        item.Title,
-			DataJson:     string(dataJSON),
-			MetadataJson: string(metaJSON),
-			Status:       types.TaskOutputStatusPending,
-		}
-
-		serverID, createErr := w.gatewayClient.CreateTaskOutput(ctx, req)
-		if createErr != nil {
-			log.Warn().Err(createErr).Str("item_key", item.Item_key).Msg("failed to create pending approval output")
-			continue
-		}
-
-		itemSummaries = append(itemSummaries, approvalItemSummary{
-			OutputID: serverID,
-			Title:    item.Title,
-			ItemKey:  item.Item_key,
-		})
-	}
-
-	return marshalApprovalSummary(summary, itemSummaries)
-}
-
-func marshalApprovalSummary(s signaltypes.ApprovalSummary, items []approvalItemSummary) string {
-	payload := map[string]any{
-		"summary": s.Summary,
-		"details": s.Details,
-	}
-	if len(items) > 0 {
-		payload["items"] = items
-	}
-	b, err := json.Marshal(payload)
-	if err != nil {
-		return ""
-	}
-	return string(b)
 }
 
 // ---------------------------------------------------------------------------

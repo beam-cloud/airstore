@@ -110,7 +110,11 @@ func (r *AirRunner) ParseTurnOutput(output []byte) (bool, types.InputKind, strin
 
 	kind := types.InputKind("")
 	if trace.NeedsInput {
-		kind = types.InputKindFreeText
+		if trace.InputKind != "" {
+			kind = types.InputKind(trace.InputKind)
+		} else {
+			kind = types.InputKindFreeText
+		}
 	}
 	return trace.NeedsInput, kind, trace.Response, nil
 }
@@ -142,5 +146,6 @@ type airTrace struct {
 	Status     string `json:"status"`
 	NeedsInput bool   `json:"needs_input"`
 	Response   string `json:"response"`
+	InputKind  string `json:"input_kind"`
 	SessionID  string `json:"session_id"`
 }

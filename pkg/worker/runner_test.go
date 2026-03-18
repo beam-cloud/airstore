@@ -460,6 +460,31 @@ func TestAirRunnerParseTurnOutput_MultiTurn(t *testing.T) {
 	}
 }
 
+func TestAirRunnerParseTurnOutput_ApproveReject(t *testing.T) {
+	runner := NewAirRunner(AirRunnerOptions{})
+
+	output := `{"event":"run_start","ts":0.001,"session_id":"s1","client":"claude"}
+{"event":"step","ts":5.0,"session_id":"s1","n":2,"reasoning":"Drafting email for review"}
+{"event":"signal","ts":9.0,"session_id":"s1","step":2,"kind":"CONFIRMATION","message":"Here's the draft -- should I send it?"}
+{"event":"response","ts":9.0,"session_id":"s1","step":2,"message":"Here's the draft -- should I send it?"}
+{"event":"run_end","ts":9.5,"session_id":"s1","total_steps":2,"status":"waiting_for_input","needs_input":true}
+{"status":"waiting_for_input","needs_input":true,"input_kind":"approve_reject","session_id":"s1","response":"Here's the draft -- should I send it?"}
+`
+	needsInput, kind, response, err := runner.ParseTurnOutput([]byte(output))
+	if err != nil {
+		t.Fatalf("ParseTurnOutput: %v", err)
+	}
+	if !needsInput {
+		t.Fatal("expected needs_input=true")
+	}
+	if kind != types.InputKindApproveReject {
+		t.Fatalf("kind = %q, want %q", kind, types.InputKindApproveReject)
+	}
+	if response != "Here's the draft -- should I send it?" {
+		t.Fatalf("response = %q", response)
+	}
+}
+
 func TestAirRunnerEntrypointAndTurnArgs_Integration(t *testing.T) {
 	runner := NewAirRunner(AirRunnerOptions{
 		AnthropicAPIKey: "sk-test",
