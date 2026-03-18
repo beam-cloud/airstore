@@ -4,8 +4,10 @@ import "strings"
 
 const (
 	AgentRunnerClaudeCode = "claude_code"
+	AgentRunnerAir        = "air"
 
 	AgentProviderClaude = "claude"
+	AgentProviderAir    = "air"
 
 	agentConfigKeyRunner       = "runner"
 	agentConfigKeyProvider     = "provider"
@@ -65,14 +67,16 @@ func providerForRunner(runner string) string {
 	switch strings.ToLower(strings.TrimSpace(runner)) {
 	case AgentRunnerClaudeCode:
 		return AgentProviderClaude
+	case AgentRunnerAir:
+		return AgentProviderAir
 	default:
 		return ""
 	}
 }
 
-func isClaudeCompatibleProvider(provider string) bool {
+func isSupportedProvider(provider string) bool {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case AgentProviderClaude:
+	case AgentProviderClaude, AgentProviderAir:
 		return true
 	default:
 		return false

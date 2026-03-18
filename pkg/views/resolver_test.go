@@ -776,10 +776,10 @@ func TestSerializeOutputsForMappingSanitizesNoisyMarkup(t *testing.T) {
 		"recipe_name": "Top 4 Lemon Hacks",
 	}
 	output.Metadata = map[string]any{
-		"source_input": map[string]any{
+		"_source_input": map[string]any{
 			"content": "<li>Cut lemon</li><li>Freeze zest</li>",
 		},
-		"source_excerpt": "\u001b[32m✓\u001b[0m PDF saved to /workspace/file.pdf",
+		"_source_excerpt": "\u001b[32m✓\u001b[0m PDF saved to /workspace/file.pdf",
 		"data_fields": []any{
 			map[string]any{"key": "recipe_name", "label": "Recipe Name", "type": "text"},
 		},
@@ -798,8 +798,8 @@ func TestSerializeOutputsForMappingSanitizesNoisyMarkup(t *testing.T) {
 	if strings.Contains(raw, "\u001b[32m") {
 		t.Fatalf("serialized payload should strip ANSI escapes: %s", raw)
 	}
-	if !strings.Contains(raw, "source_input_excerpt: Cut lemon Freeze zest") {
-		t.Fatalf("serialized payload missing condensed source input excerpt: %s", raw)
+	if strings.Contains(raw, "source_input") {
+		t.Fatalf("serialized payload should exclude _-prefixed internal metadata: %s", raw)
 	}
 	if !strings.Contains(raw, "data_fields: recipe_name [Recipe Name: text]") {
 		t.Fatalf("serialized payload missing summarized data_fields: %s", raw)

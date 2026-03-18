@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -337,7 +338,12 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	outputPipeline.Wait()
 
 	if !needsInput && runErr == nil && tw.ringBuf != nil {
-		assistantMessage := extractAssistantText(tw.ringBuf.Bytes(), 24000)
+		var assistantMessage string
+		if extractor, ok := runner.(ResponseExtractor); ok {
+			assistantMessage = extractor.ExtractResponseText(tw.ringBuf.Bytes(), 24000)
+		} else {
+			assistantMessage = extractAssistantText(tw.ringBuf.Bytes(), 24000)
+		}
 		if assistantMessage != "" {
 			var userMessage *string
 			if trimmed := strings.TrimSpace(lastPrompt); trimmed != "" {
@@ -695,6 +701,9 @@ func (w *Worker) runTurnSession(
 	sessionEnv := cloneMap(env)
 	isFirst := true
 
+	outputParser, _ := runner.(OutputParsingRunner)
+	var turnBuf bytes.Buffer
+
 	for prompt != "" {
 		if ctx.Err() != nil {
 			return ctx.Err(), false, ""
@@ -705,25 +714,54 @@ func (w *Worker) runTurnSession(
 			w.setOriginTaskState(ctx, task, types.AgentTaskStateRunning, "")
 		}
 
+		turnOut := stdout
+		if outputParser != nil {
+			turnBuf.Reset()
+			turnOut = io.MultiWriter(stdout, &turnBuf)
+		}
+
 		if isFirst {
-			if err := w.executeFirstTurn(ctx, task, sandboxID, runner, sessionEnv, stdout, prompt); err != nil {
+			if err := w.executeFirstTurn(ctx, task, sandboxID, runner, sessionEnv, turnOut, prompt); err != nil {
 				return err, false, ""
 			}
 			isFirst = false
 		} else {
-			if err := w.executeTurn(ctx, task, sandboxID, runner, sessionEnv, stdout, prompt, TurnArgModeFollowup); err != nil {
+			if err := w.executeTurn(ctx, task, sandboxID, runner, sessionEnv, turnOut, prompt, TurnArgModeFollowup); err != nil {
 				return err, false, ""
 			}
 		}
 		signalActivity(activityCh)
 
 		if w.waitForSubagents(ctx, task, sandboxID, activityCh) == subagentFinished {
-			if err := w.executeTurn(ctx, task, sandboxID, runner, sessionEnv, stdout,
+			if err := w.executeTurn(ctx, task, sandboxID, runner, sessionEnv, turnOut,
 				"Your background tasks / subagents have completed. Please collect and report their results.",
 				TurnArgModeFollowup); err != nil {
 				return err, false, ""
 			}
 			signalActivity(activityCh)
+		}
+
+		// Output-parsing runners (e.g. air) carry needs_input/response directly in
+		// their stdout JSON trace — no file markers or BAML classification needed.
+		if outputParser != nil {
+			needsInput, inputKind, response, err := outputParser.ParseTurnOutput(turnBuf.Bytes())
+			if err != nil {
+				addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to parse turn output")
+			}
+			if !needsInput {
+				if pending := w.claimPendingInput(ctx, task); pending != "" {
+					prompt = pending
+					continue
+				}
+				return nil, false, prompt
+			}
+			w.setRunInteractionState(ctx, task, types.RunInteractionStateWaitingForInput)
+			w.setOriginTaskState(ctx, task, types.AgentTaskStateWaiting, inputKind, response)
+			prompt = w.waitForFollowupInput(ctx, task, DefaultBetweenTurnsTimeout, activityCh)
+			if prompt == "" {
+				return nil, true, ""
+			}
+			continue
 		}
 
 		if checkNeedsInput == nil {

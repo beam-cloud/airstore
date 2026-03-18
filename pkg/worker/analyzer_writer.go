@@ -18,21 +18,24 @@ import (
 )
 
 const (
-	keyContent         = "content"
-	keySummary         = "summary"
-	keyPath            = "path"
-	keyURI             = "uri"
-	keyTags            = "tags"
-	keyTool            = "tool"
-	keyDeeplink = "deeplink"
-	keySource   = "source"
-	keySourcePrompt    = "source_prompt"
-	keySourceInput     = "source_input"
-	keySourceInputText = "source_input_text"
-	keySourceResult    = "source_result"
-	keySourceTitle     = "source_title"
-	keySourceURL       = "source_url"
-	keySourceExcerpt   = "source_excerpt"
+	keyContent     = "content"
+	keySummary     = "summary"
+	keyPath        = "path"
+	keyURI         = "uri"
+	keyTags        = "tags"
+	keyDeeplink    = "deeplink"
+	keySourceTitle = "source_title"
+	keySourceURL   = "source_url"
+
+	// Internal bookkeeping keys — prefixed with _ so the mapper skips them.
+	keyTool            = "_tool"
+	keySource          = "_source"
+	keySourcePrompt    = "_source_prompt"
+	keySourceInput     = "_source_input"
+	keySourceInputText = "_source_input_text"
+	keySourceResult    = "_source_result"
+	keySourceExcerpt   = "_source_excerpt"
+	keyBatchID         = "_batch_id"
 
 	sourceAssistantResponse = "assistant_response"
 )
@@ -338,7 +341,7 @@ func (w *AnalyzerWriter) createOutputWithBatch(out signaltypes.ExtractedOutput, 
 	c := r.candidate(types.TaskOutputArtifactRoleSupporting)
 	c.Metadata[keyTool] = toolName
 	if batchID != "" {
-		c.Metadata["batch_id"] = batchID
+		c.Metadata[keyBatchID] = batchID
 	}
 
 	if content := r.content(); content != "" {
@@ -356,7 +359,6 @@ func (w *AnalyzerWriter) createOutputWithBatch(out signaltypes.ExtractedOutput, 
 
 		if sourceTitle := firstMatchingString(parsedResult, "video_title", "title", "name", "subject"); sourceTitle != "" {
 			c.Data[keySourceTitle] = sourceTitle
-			c.Metadata[keySourceTitle] = sourceTitle
 			if shouldPreferSourceTitle(c.Title, sourceTitle) {
 				c.Title = sourceTitle
 			}
@@ -368,7 +370,6 @@ func (w *AnalyzerWriter) createOutputWithBatch(out signaltypes.ExtractedOutput, 
 				c.Metadata[keyDeeplink] = sourceURL
 			}
 			c.Data[keySourceURL] = sourceURL
-			c.Metadata[keySourceURL] = sourceURL
 		}
 
 		if len(out.Data_fields) == 0 {
@@ -485,7 +486,7 @@ func persistFinalResponseOutput(
 			c.Metadata[keySourcePrompt] = promptMeta
 		}
 		if batchID != "" {
-			c.Metadata["batch_id"] = batchID
+			c.Metadata[keyBatchID] = batchID
 		}
 
 		if _, err := publishOutputCandidate(ctx, client, ids, tracker, c); err != nil {

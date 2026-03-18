@@ -1006,10 +1006,10 @@ func normalizeAgentProfileConfig(config map[string]any, agentKey string) (map[st
 		runner = AgentRunnerClaudeCode
 		provider = providerForRunner(runner)
 	}
-	if runner != "" && runner != AgentRunnerClaudeCode {
+	if runner != "" && runner != AgentRunnerClaudeCode && runner != AgentRunnerAir {
 		return nil, fmt.Errorf("runner %q is not supported", runner)
 	}
-	if provider != "" && !isClaudeCompatibleProvider(provider) {
+	if provider != "" && !isSupportedProvider(provider) {
 		return nil, fmt.Errorf("provider %q is not supported", provider)
 	}
 	if runner == "" {

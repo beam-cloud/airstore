@@ -109,6 +109,7 @@ type Config struct {
 	// API keys
 	AnthropicAPIKey string
 	KernelAPIKey    string
+	CerebrasAPIKey  string
 }
 
 func NewSandboxManager(ctx context.Context, cfg Config) (*SandboxManager, error) {
@@ -201,9 +202,16 @@ func NewSandboxManager(ctx context.Context, cfg Config) (*SandboxManager, error)
 		AnthropicAPIKey: cfg.AnthropicAPIKey,
 		KernelAPIKey:    cfg.KernelAPIKey,
 	})
+	airRunner := NewAirRunner(AirRunnerOptions{
+		AnthropicAPIKey: cfg.AnthropicAPIKey,
+		CerebrasAPIKey:  cfg.CerebrasAPIKey,
+		S2Key:           cfg.S2Token,
+		S2Basin:         cfg.S2Basin,
+	})
 	manager.defaultPromptRunner = claudeRunner
 	manager.promptRunners = map[string]AgentExecutionRunner{
 		"claude": claudeRunner,
+		"air":    airRunner,
 	}
 
 	// Bring up the global worker mount during initialization so the first task
@@ -1211,10 +1219,14 @@ func (m *SandboxManager) analyzerForTask(task types.RunExecution, env map[string
 		return nil
 	}
 	runner := m.resolvePromptRunner(task, env)
-	if _, ok := runner.(*ClaudeCodeRunner); ok {
+	switch runner.(type) {
+	case *ClaudeCodeRunner:
 		return NewClaudeCodeAnalyzer()
+	case *AirRunner:
+		return NewAirAnalyzer()
+	default:
+		return nil
 	}
-	return nil
 }
 
 // BamlEnv returns the environment variables needed for BAML classifier
@@ -1383,7 +1395,7 @@ fi
 `
 
 const (
-	ptyDefaultPATH = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	ptyDefaultPATH = "PATH=/home/sandbox/airstore-runners/.venv/bin:/home/sandbox/.npm-global/bin:/home/sandbox/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 	ptyDefaultCols = "180"
 	ptyDefaultRows = "40"
 )
@@ -1470,7 +1482,7 @@ func (m *SandboxManager) ExecCheck(ctx context.Context, sandboxID string, args [
 	proc := specs.Process{
 		Args: args,
 		Cwd:  types.ContainerWorkDir,
-		Env:  []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
+		Env:  []string{ptyDefaultPATH},
 		User: specs.User{UID: types.SandboxUserUID, GID: types.SandboxUserGID},
 	}
 	return m.runtime.Exec(ctx, sandboxID, proc, &runtime.ExecOpts{

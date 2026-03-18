@@ -91,7 +91,7 @@ func (vg *ViewsGroup) Create(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, err.Error())
 	}
 	var req createViewRequest
-	if err := decodeStrictBody(c, &req); err != nil {
+	if err := json.NewDecoder(c.Request().Body).Decode(&req); err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
 	}
 	v := &types.View{
@@ -148,7 +148,7 @@ func (vg *ViewsGroup) Update(c echo.Context) error {
 	previousDefinition := v.Definition
 
 	var req updateViewRequest
-	if err := decodeStrictBody(c, &req); err != nil {
+	if err := json.NewDecoder(c.Request().Body).Decode(&req); err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
 	}
 	if req.Name != nil {

@@ -775,7 +775,6 @@ func filterOutputsForDataSource(outputs []*types.TaskOutput, ds *types.DataSourc
 	return filtered
 }
 
-
 // ---------------------------------------------------------------------------
 // Component assembly
 // ---------------------------------------------------------------------------
@@ -1308,9 +1307,25 @@ func writeTaskOutputForMapping(b *strings.Builder, output *types.TaskOutput) {
 	if output.URI != nil {
 		writeMappingLine(b, "URI", *output.URI)
 	}
-	writeMappingSection(b, "DATA_FIELDS", collectMappingFields(output.Data))
-	writeMappingSection(b, "METADATA_FIELDS", collectMappingFields(output.Metadata))
+	writeMappingSection(b, "DATA_FIELDS", collectMappingFields(filterInternalKeys(output.Data)))
+	writeMappingSection(b, "METADATA_FIELDS", collectMappingFields(filterInternalKeys(output.Metadata)))
 	b.WriteString("<<<END_OUTPUT>>>\n")
+}
+
+// filterInternalKeys strips keys prefixed with "_" — these are worker
+// bookkeeping fields (e.g. _source, _tool, _batch_id) that should not
+// reach the mapper.
+func filterInternalKeys(m map[string]any) map[string]any {
+	if len(m) == 0 {
+		return m
+	}
+	filtered := make(map[string]any, len(m))
+	for k, v := range m {
+		if !strings.HasPrefix(k, "_") {
+			filtered[k] = v
+		}
+	}
+	return filtered
 }
 
 func writeMappingLine(b *strings.Builder, key, value string) {
@@ -1438,13 +1453,16 @@ func collectMappingFieldsFromValue(out *[]mappingField, path string, value any) 
 	}
 }
 
+// shouldCondenseMappingPath returns true for large internal blobs that should
+// be summarized rather than serialized in full. Only legacy (unprefixed) keys
+// need handling here — new outputs use _-prefixed keys that are filtered out
+// before reaching collectMappingFields.
 func shouldCondenseMappingPath(path string) bool {
-	return path == "source_input" ||
-		path == "source_input_text" ||
-		path == "source_excerpt" ||
-		strings.HasSuffix(path, ".source_input") ||
-		strings.HasSuffix(path, ".source_input_text") ||
-		strings.HasSuffix(path, ".source_excerpt")
+	leaf := path
+	if i := strings.LastIndexByte(path, '.'); i >= 0 {
+		leaf = path[i+1:]
+	}
+	return leaf == "source_input" || leaf == "source_input_text" || leaf == "source_excerpt"
 }
 
 func summarizeDataFields(value any) string {

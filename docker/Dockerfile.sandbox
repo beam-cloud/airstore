@@ -76,12 +76,20 @@ ENV HOME=/home/sandbox
 # Install Claude Code (native installer)
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
+# Install uv (Python package manager for air runner)
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install air runner (source copied into context by build script)
+COPY --chown=sandbox:sandbox .airstore-runners/ /home/sandbox/airstore-runners/
+RUN cd /home/sandbox/airstore-runners && /home/sandbox/.local/bin/uv sync --frozen
+ENV PATH="/home/sandbox/airstore-runners/.venv/bin:$PATH"
+
 # Set up shell
 ENV SHELL=/bin/bash
 WORKDIR /workspace
 
-# Verify installation
-RUN claude --version
+# Verify installations
+RUN claude --version && air --version
 
 # Default to bash
 CMD ["/bin/bash"]

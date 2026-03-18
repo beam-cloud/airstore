@@ -159,6 +159,7 @@ func NewWorker() (*Worker, error) {
 		S2Basin:           config.Streams.Basin,
 		AnthropicAPIKey:   config.AnthropicAPIKey(),
 		KernelAPIKey:      config.KernelAPIKey(),
+		CerebrasAPIKey:    config.CerebrasAPIKey(),
 	})
 	if err != nil {
 		cancel()

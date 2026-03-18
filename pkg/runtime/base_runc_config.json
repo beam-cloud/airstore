@@ -11,7 +11,7 @@
 		],
 		"env": [
 			"TERM=xterm",
-			"PATH=/home/sandbox/.npm-global/bin:/home/sandbox/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+			"PATH=/home/sandbox/airstore-runners/.venv/bin:/home/sandbox/.npm-global/bin:/home/sandbox/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 			"HOME=/home/sandbox",
 			"USER=sandbox"
 		],

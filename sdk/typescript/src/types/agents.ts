@@ -1,8 +1,8 @@
 /** Runner implementation that executes the agent. */
-export type AgentRunner = 'claude_code';
+export type AgentRunner = 'claude_code' | 'air';
 
 /** LLM provider backing the runner. Inferred from the runner (e.g. claude_code -> claude). */
-export type AgentProvider = 'claude';
+export type AgentProvider = 'claude' | 'air';
 
 /** Agent configuration: runner, model, system prompt, and workspace settings. */
 export interface AgentConfig {

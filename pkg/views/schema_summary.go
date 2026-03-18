@@ -179,13 +179,15 @@ func flattenDataFields(m map[string]any, prefix string, out *[]schemaFieldSummar
 	}
 }
 
+// Legacy (unprefixed) internal keys still present in older outputs.
+// New outputs use _-prefixed keys, caught by the HasPrefix check.
 var excludedDataKeys = map[string]bool{
 	"source_result": true, "source_excerpt": true,
 	"source_input": true, "source_input_text": true,
 }
 
 func isExcludedDataKey(key string) bool {
-	return excludedDataKeys[strings.ToLower(key)]
+	return strings.HasPrefix(key, "_") || excludedDataKeys[strings.ToLower(key)]
 }
 
 func inferTypeFromKey(key string) string {

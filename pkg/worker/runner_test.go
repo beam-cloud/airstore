@@ -1,7 +1,9 @@
 package worker
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -206,6 +208,304 @@ func TestVFSHostPathWithinMountRejectsEscapingPath(t *testing.T) {
 		t.Fatal("expected escaping path to be rejected")
 	}
 }
+
+// -- Air runner tests ---------------------------------------------------------
+
+func TestAirRunnerName(t *testing.T) {
+	r := NewAirRunner(AirRunnerOptions{})
+	if got := r.Name(); got != "air" {
+		t.Fatalf("Name() = %q, want %q", got, "air")
+	}
+}
+
+func TestAirRunnerBuildEntrypoint(t *testing.T) {
+	r := NewAirRunner(AirRunnerOptions{
+		AnthropicAPIKey: "sk-ant-test",
+		CerebrasAPIKey:  "sk-cer-test",
+		S2Key:           "s2key",
+		S2Basin:         "s2basin",
+	})
+	env := map[string]string{
+		agentSessionIDEnvKey: "sess-123",
+	}
+	task := types.RunExecution{Prompt: "do something useful"}
+	args := r.BuildEntrypoint(task, env)
+
+	if args[0] != "air" {
+		t.Fatalf("binary = %q, want %q", args[0], "air")
+	}
+	if !argPairExists(args, "--format", "json") {
+		t.Fatalf("expected --format json, got %v", args)
+	}
+	if !argPairExists(args, "--session", "sess-123") {
+		t.Fatalf("expected --session sess-123, got %v", args)
+	}
+	if !argPairExists(args, "-p", "do something useful") {
+		t.Fatalf("expected prompt in args, got %v", args)
+	}
+	if env["ANTHROPIC_API_KEY"] != "sk-ant-test" {
+		t.Fatalf("expected ANTHROPIC_API_KEY injected, got %q", env["ANTHROPIC_API_KEY"])
+	}
+	if env["S2_KEY"] != "s2key" {
+		t.Fatalf("expected S2_KEY injected, got %q", env["S2_KEY"])
+	}
+}
+
+func TestAirRunnerBuildEntrypoint_ModelPassthrough(t *testing.T) {
+	r := NewAirRunner(AirRunnerOptions{})
+	env := map[string]string{
+		agentModelEnvKey: "airstore-thinking",
+	}
+	task := types.RunExecution{Prompt: "plan something"}
+	args := r.BuildEntrypoint(task, env)
+
+	if !argPairExists(args, "--model", "airstore-thinking") {
+		t.Fatalf("expected --model airstore-thinking, got %v", args)
+	}
+}
+
+func TestAirRunnerBuildTurnArgs_Followup(t *testing.T) {
+	r := NewAirRunner(AirRunnerOptions{AnthropicAPIKey: "sk-ant"})
+	env := map[string]string{agentSessionIDEnvKey: "sess-abc"}
+	args := r.BuildTurnArgs("next prompt", env, TurnArgModeFollowup)
+
+	if !argPairExists(args, "--session", "sess-abc") {
+		t.Fatalf("expected --session in follow-up, got %v", args)
+	}
+	if !argPairExists(args, "-p", "next prompt") {
+		t.Fatalf("expected prompt in args, got %v", args)
+	}
+}
+
+func TestAirRunnerBuildEntrypoint_SystemPrompt(t *testing.T) {
+	r := NewAirRunner(AirRunnerOptions{})
+	env := map[string]string{
+		agentSystemPromptEnvKey: "You are a helpful agent.",
+	}
+	task := types.RunExecution{Prompt: "hello"}
+	args := r.BuildEntrypoint(task, env)
+
+	if !argPairExists(args, "--system", "You are a helpful agent.") {
+		t.Fatalf("expected --system flag, got %v", args)
+	}
+}
+
+func TestAirRunnerInjectEnv_NoOverwrite(t *testing.T) {
+	r := NewAirRunner(AirRunnerOptions{
+		AnthropicAPIKey: "from-runner",
+		CerebrasAPIKey:  "from-runner",
+	})
+	env := map[string]string{
+		"ANTHROPIC_API_KEY": "already-set",
+	}
+	task := types.RunExecution{Prompt: "test"}
+	r.BuildEntrypoint(task, env)
+
+	if env["ANTHROPIC_API_KEY"] != "already-set" {
+		t.Fatalf("injectEnv should not overwrite existing keys, got %q", env["ANTHROPIC_API_KEY"])
+	}
+	if env["CEREBRAS_API_KEY"] != "from-runner" {
+		t.Fatalf("expected CEREBRAS_API_KEY to be injected, got %q", env["CEREBRAS_API_KEY"])
+	}
+}
+
+func TestAirRunnerParseTurnOutput_NeedsInput(t *testing.T) {
+	output := []byte(`{"event":"run_start","ts":0.001}
+{"event":"step","ts":1.5,"n":1}
+{"event":"response","ts":2.0,"step":1,"message":"What email?"}
+{"event":"run_end","ts":2.0,"total_steps":1,"status":"waiting_for_input","needs_input":true}
+{"status":"waiting_for_input","needs_input":true,"session_id":"abc","response":"What email?"}
+`)
+
+	r := NewAirRunner(AirRunnerOptions{})
+	needsInput, kind, response, err := r.ParseTurnOutput(output)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !needsInput {
+		t.Fatal("expected needs_input=true")
+	}
+	if kind != types.InputKindFreeText {
+		t.Fatalf("expected InputKindFreeText, got %q", kind)
+	}
+	if response != "What email?" {
+		t.Fatalf("expected response=%q, got %q", "What email?", response)
+	}
+}
+
+func TestAirRunnerParseTurnOutput_Complete(t *testing.T) {
+	output := []byte(`{"event":"run_start","ts":0.001}
+{"event":"step","ts":3.0,"n":2}
+{"event":"run_end","ts":3.0,"total_steps":2,"status":"complete","needs_input":false}
+{"status":"complete","needs_input":false,"session_id":"def"}
+`)
+
+	r := NewAirRunner(AirRunnerOptions{})
+	needsInput, _, _, err := r.ParseTurnOutput(output)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if needsInput {
+		t.Fatal("expected needs_input=false for complete status")
+	}
+}
+
+func TestAirRunnerParseTurnOutput_NoTrace(t *testing.T) {
+	output := []byte("some random output\nwithout json trace\n")
+
+	r := NewAirRunner(AirRunnerOptions{})
+	needsInput, _, _, err := r.ParseTurnOutput(output)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if needsInput {
+		t.Fatal("expected needs_input=false when no trace found")
+	}
+}
+
+func TestAirRunnerImplementsInterfaces(t *testing.T) {
+	r := NewAirRunner(AirRunnerOptions{})
+
+	var _ AgentExecutionRunner = r
+	var _ TurnRunner = r
+	var _ OutputParsingRunner = r
+	var _ ResponseExtractor = r
+}
+
+func TestAirRunnerExtractResponseText(t *testing.T) {
+	r := NewAirRunner(AirRunnerOptions{})
+
+	raw := []byte(`{"event":"run_start","ts":0.001,"client":"claude"}
+{"event":"step","ts":1.0,"n":1,"reasoning":"thinking"}
+{"event":"response","ts":2.0,"step":1,"message":"Here is the answer."}
+{"event":"run_end","ts":2.0,"status":"waiting_for_input","needs_input":true}
+{"status":"waiting_for_input","needs_input":true,"response":"Here is the answer."}
+`)
+
+	got := r.ExtractResponseText(raw, 24000)
+	if got != "Here is the answer." {
+		t.Fatalf("ExtractResponseText = %q, want %q", got, "Here is the answer.")
+	}
+}
+
+func TestAirRunnerExtractResponseText_Empty(t *testing.T) {
+	r := NewAirRunner(AirRunnerOptions{})
+
+	raw := []byte(`{"event":"run_start","ts":0.001}
+{"event":"step","ts":1.0,"n":1,"reasoning":"doing work"}
+{"event":"run_end","ts":2.0,"status":"complete","needs_input":false}
+{"status":"complete","needs_input":false}
+`)
+
+	got := r.ExtractResponseText(raw, 24000)
+	if got != "" {
+		t.Fatalf("ExtractResponseText = %q, want empty", got)
+	}
+}
+
+func TestAirRunnerParseTurnOutput_MultiTurn(t *testing.T) {
+	runner := NewAirRunner(AirRunnerOptions{
+		AnthropicAPIKey: "test-key",
+		S2Key:           "s2-key",
+		S2Basin:         "s2-basin",
+	})
+
+	var turnBuf bytes.Buffer
+	var primary bytes.Buffer
+	mw := io.MultiWriter(&primary, &turnBuf)
+
+	airOutput := `{"event":"run_start","ts":0.001,"session_id":"s1","client":"claude"}
+{"event":"user_message","ts":0.0,"session_id":"s1","prompt":"send an email"}
+{"event":"step","ts":2.5,"session_id":"s1","n":1,"reasoning":"Need recipient details"}
+{"event":"response","ts":2.5,"session_id":"s1","step":1,"message":"Who should I send it to?"}
+{"event":"run_end","ts":2.5,"session_id":"s1","total_steps":1,"status":"waiting_for_input","needs_input":true}
+{"status":"waiting_for_input","needs_input":true,"session_id":"s1","response":"Who should I send it to?","client":"claude","total_steps":1,"elapsed_s":2.5}
+`
+	mw.Write([]byte(airOutput))
+
+	if primary.Len() != len(airOutput) {
+		t.Fatalf("primary writer received %d bytes, want %d", primary.Len(), len(airOutput))
+	}
+
+	needsInput, kind, response, err := runner.ParseTurnOutput(turnBuf.Bytes())
+	if err != nil {
+		t.Fatalf("ParseTurnOutput: %v", err)
+	}
+	if !needsInput {
+		t.Fatal("expected needs_input=true")
+	}
+	if kind != types.InputKindFreeText {
+		t.Fatalf("kind = %q, want %q", kind, types.InputKindFreeText)
+	}
+	if response != "Who should I send it to?" {
+		t.Fatalf("response = %q, want %q", response, "Who should I send it to?")
+	}
+
+	turnBuf.Reset()
+	secondTurn := `{"event":"run_start","ts":0.001,"session_id":"s1","client":"claude"}
+{"event":"step","ts":1.2,"session_id":"s1","n":1,"reasoning":"Sending email"}
+{"event":"tool_call","ts":1.2,"session_id":"s1","step":1,"tool":"Bash","args":{"command":"gmail send ..."}}
+{"event":"tool_result","ts":2.0,"session_id":"s1","step":1,"exit_code":0,"stdout":"sent"}
+{"event":"run_end","ts":3.0,"session_id":"s1","total_steps":2,"status":"complete","needs_input":false}
+{"status":"complete","needs_input":false,"session_id":"s1","client":"claude","total_steps":2,"elapsed_s":3.0}
+`
+	mw.Write([]byte(secondTurn))
+
+	needsInput, _, _, err = runner.ParseTurnOutput(turnBuf.Bytes())
+	if err != nil {
+		t.Fatalf("ParseTurnOutput second turn: %v", err)
+	}
+	if needsInput {
+		t.Fatal("expected needs_input=false for completed task")
+	}
+}
+
+func TestAirRunnerEntrypointAndTurnArgs_Integration(t *testing.T) {
+	runner := NewAirRunner(AirRunnerOptions{
+		AnthropicAPIKey: "sk-test",
+		S2Key:           "s2key",
+		S2Basin:         "basin",
+	})
+	sessionID := "sess-integration-test"
+	env := map[string]string{
+		agentSessionIDEnvKey:    sessionID,
+		agentSystemPromptEnvKey: "You help with emails.",
+	}
+
+	task := types.RunExecution{Prompt: "send an email"}
+	args := runner.BuildEntrypoint(task, env)
+
+	if args[0] != "air" {
+		t.Fatalf("entrypoint binary = %q, want %q", args[0], "air")
+	}
+	if !argPairExists(args, "--format", "json") {
+		t.Fatalf("missing --format json in %v", args)
+	}
+	if !argPairExists(args, "--session", sessionID) {
+		t.Fatalf("missing --session in %v", args)
+	}
+	if !argPairExists(args, "--system", "You help with emails.") {
+		t.Fatalf("missing --system in %v", args)
+	}
+
+	followUp := runner.BuildTurnArgs("to luke@beam.cloud", env, TurnArgModeFollowup)
+
+	if !argPairExists(followUp, "--session", sessionID) {
+		t.Fatalf("follow-up missing --session in %v", followUp)
+	}
+	if !argPairExists(followUp, "-p", "to luke@beam.cloud") {
+		t.Fatalf("follow-up missing prompt in %v", followUp)
+	}
+
+	if env["ANTHROPIC_API_KEY"] != "sk-test" {
+		t.Fatalf("ANTHROPIC_API_KEY = %q, want %q", env["ANTHROPIC_API_KEY"], "sk-test")
+	}
+	if env["S2_KEY"] != "s2key" {
+		t.Fatalf("S2_KEY = %q, want %q", env["S2_KEY"], "s2key")
+	}
+}
+
+// -- helpers ------------------------------------------------------------------
 
 func argExists(args []string, want string) bool {
 	for _, arg := range args {

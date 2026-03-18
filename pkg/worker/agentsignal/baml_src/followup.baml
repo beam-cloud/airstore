@@ -13,7 +13,7 @@ class FollowUpSignal {
   intent FollowUpIntent
   delay_minutes int        @description("Exact minutes to wait before the next wake. Respect explicit user delays and active skill cadence/rules. Do not return a placeholder or backoff delay.")
   reason string?           @description("One-line summary of why the task will wake next.")
-  follow_up_prompt string? @description("Instruction the agent should receive when it wakes up. It should explicitly reflect the wake agenda and any active skill rules.")
+  follow_up_prompt string? @description("Instruction the agent should receive when it wakes up. It should explicitly reflect the wake agenda and any active skill rules, as well a reference to the thread or conversation to follow up on.")
   wake_agenda WakeAgendaItem[] @description("Ordered agenda for what the agent should do on its next wake.")
 }
 

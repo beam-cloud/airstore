@@ -230,7 +230,7 @@ func (s *AgentService) AcceptAgentCommand(
 			return nil, false, err
 		}
 		agentProvider = providerFromAgentConfig(agentConfig)
-		if !isClaudeCompatibleProvider(agentProvider) {
+		if !isSupportedProvider(agentProvider) {
 			return nil, false, fmt.Errorf("agent provider %q is not supported", agentProvider)
 		}
 		agentModel = agentConfigString(
@@ -2030,7 +2030,7 @@ func (s *AgentService) materializeRun(
 	if provider == nil {
 		return nil, RunExecutionPolicy{}, "", fmt.Errorf("agent provider is required in task payload")
 	}
-	if !isClaudeCompatibleProvider(*provider) {
+	if !isSupportedProvider(*provider) {
 		return nil, RunExecutionPolicy{}, "", fmt.Errorf("agent provider %q is not supported", *provider)
 	}
 	runPolicy.Interactive = true
