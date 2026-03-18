@@ -409,6 +409,8 @@ func defaultFinalResponseExtractor(
 	)
 }
 
+const minResponseOutputLen = 200
+
 func persistFinalResponseOutput(
 	ctx context.Context,
 	client taskOutputClient,
@@ -423,7 +425,7 @@ func persistFinalResponseOutput(
 		return nil
 	}
 	assistantMessage = strings.TrimSpace(sanitizeUTF8(assistantMessage))
-	if assistantMessage == "" {
+	if len(assistantMessage) < minResponseOutputLen {
 		return nil
 	}
 	if userMessage != nil {
