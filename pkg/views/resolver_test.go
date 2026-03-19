@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	bamltypes "github.com/beam-cloud/airstore/pkg/views/baml_client/types"
 )
@@ -75,6 +76,10 @@ func (b *fakeResolverBackend) GetTaskByID(_ context.Context, taskID string) (*ty
 		}
 	}
 	return nil, fmt.Errorf("task not found")
+}
+
+func (b *fakeResolverBackend) ListSpawnBindingsForOutputs(_ context.Context, _ []string) ([]repository.SpawnBinding, error) {
+	return nil, nil
 }
 
 func (b *fakeResolverBackend) ListTaskOutputs(_ context.Context, _ uint, taskID string) ([]*types.TaskOutput, error) {
@@ -248,6 +253,67 @@ func TestFetchMappingOutputsExpandsTaskContextForSelectedTasks(t *testing.T) {
 	}
 }
 
+func TestSelectRowBlockerTreatsInputKindOnlyPendingOutputsAsBlockers(t *testing.T) {
+	cases := []struct {
+		name         string
+		inputKind    types.InputKind
+		wantApproval bool
+	}{
+		{
+			name:         "approve reject",
+			inputKind:    types.InputKindApproveReject,
+			wantApproval: true,
+		},
+		{
+			name:         "free text",
+			inputKind:    types.InputKindFreeText,
+			wantApproval: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			output := &types.TaskOutput{
+				ID:        "out-1",
+				Status:    types.TaskOutputStatusPending,
+				CreatedAt: time.Unix(10, 0),
+				Metadata: map[string]any{
+					types.TaskOutputMetadataInputKind:   string(tc.inputKind),
+					types.TaskOutputMetadataWaitGroupID: "wait-1",
+				},
+			}
+
+			signal := classifyPendingOutputSignal(output)
+			got := selectRowBlocker([]*types.TaskOutput{output})
+
+			if !signal.IsBlocker {
+				t.Fatal("expected pending output to be classified as blocker")
+			}
+			if signal.IsApproval != tc.wantApproval {
+				t.Fatalf("IsApproval = %v, want %v", signal.IsApproval, tc.wantApproval)
+			}
+			if signal.IsInput == tc.wantApproval {
+				t.Fatalf("IsInput = %v, want opposite of IsApproval", signal.IsInput)
+			}
+			if got.OutputID != output.ID {
+				t.Fatalf("OutputID = %q, want %q", got.OutputID, output.ID)
+			}
+			if got.WaitGroupID != "wait-1" {
+				t.Fatalf("WaitGroupID = %q, want %q", got.WaitGroupID, "wait-1")
+			}
+			if got.InputKind != string(tc.inputKind) {
+				t.Fatalf("InputKind = %q, want %q", got.InputKind, tc.inputKind)
+			}
+			if got.ApprovalSurface {
+				t.Fatalf("ApprovalSurface = %v, want false without approval UI metadata", got.ApprovalSurface)
+			}
+			if len(got.OutputIDs) != 1 || got.OutputIDs[0] != output.ID {
+				t.Fatalf("OutputIDs = %#v, want [%q]", got.OutputIDs, output.ID)
+			}
+		})
+	}
+}
+
 func TestFetchMappingOutputsExpandsTaskContextForStatusScopedTasks(t *testing.T) {
 	agentID := "agent-1"
 	pending := newRecipeOutput("out-1")
@@ -295,6 +361,173 @@ func TestFetchMappingOutputsExpandsTaskContextForStatusScopedTasks(t *testing.T)
 	}
 	if got, want := backend.queriedTaskIDs[0], "task-1"; got != want {
 		t.Fatalf("queried task id = %q, want %q", got, want)
+	}
+}
+
+func TestFilterMappedRowsByExclusionsMatchesRowKeyWithinComponent(t *testing.T) {
+	snapshots := []ExcludedRowSnapshot{
+		{
+			ComponentID: "emails",
+			TaskID:      "task-1",
+			RowKey:      "luke",
+			Cells:       map[string]string{"recipient": "luke@sla.io"},
+		},
+	}
+	rows := []bamltypes.MappedRow{
+		{
+			Task_id: "task-1",
+			Row_key: "luke",
+			Cells: []bamltypes.MappedCell{
+				{Column: "recipient", Value: "luke@sla.io"},
+			},
+		},
+		{
+			Task_id: "task-1",
+			Row_key: "taylor",
+			Cells: []bamltypes.MappedCell{
+				{Column: "recipient", Value: "taylor@beam.cloud"},
+			},
+		},
+	}
+
+	filtered := filterMappedRowsByExclusions(rows, snapshots, "emails")
+	if got, want := len(filtered), 1; got != want {
+		t.Fatalf("filtered row count = %d, want %d", got, want)
+	}
+	if got, want := filtered[0].Row_key, "taylor"; got != want {
+		t.Fatalf("remaining row key = %q, want %q", got, want)
+	}
+
+	unscoped := filterMappedRowsByExclusions(rows, snapshots, "other-component")
+	if got, want := len(unscoped), 2; got != want {
+		t.Fatalf("other component row count = %d, want %d", got, want)
+	}
+}
+
+func TestFilterMappedRowsByExclusionsFallsBackToCellFingerprint(t *testing.T) {
+	snapshots := []ExcludedRowSnapshot{
+		{
+			ComponentID: "emails",
+			TaskID:      "task-1",
+			RowKey:      "old-key",
+			Cells: map[string]string{
+				"recipient": "luke@sla.io",
+				"subject":   "Faster dev environments for your team",
+			},
+		},
+	}
+	rows := []bamltypes.MappedRow{
+		{
+			Task_id: "task-1",
+			Row_key: "new-key",
+			Cells: []bamltypes.MappedCell{
+				{Column: "subject", Value: "Faster dev environments for your team"},
+				{Column: "recipient", Value: "luke@sla.io"},
+			},
+		},
+		{
+			Task_id: "task-1",
+			Row_key: "different",
+			Cells: []bamltypes.MappedCell{
+				{Column: "recipient", Value: "taylor@beam.cloud"},
+				{Column: "subject", Value: "Different row"},
+			},
+		},
+	}
+
+	filtered := filterMappedRowsByExclusions(rows, snapshots, "emails")
+	if got, want := len(filtered), 1; got != want {
+		t.Fatalf("filtered row count = %d, want %d", got, want)
+	}
+	if got, want := filtered[0].Row_key, "different"; got != want {
+		t.Fatalf("remaining row key = %q, want %q", got, want)
+	}
+}
+
+func TestFilterMappedRowsByExclusionsMatchesSourceOutputIDs(t *testing.T) {
+	snapshots := []ExcludedRowSnapshot{
+		{
+			ComponentID:     "emails",
+			TaskID:          "task-1",
+			RowKey:          "old-key",
+			SourceOutputIDs: []string{"out-1", "out-2"},
+			Cells: map[string]string{
+				"recipient": "luke@sla.io",
+			},
+		},
+	}
+	rows := []bamltypes.MappedRow{
+		{
+			Task_id:           "task-1",
+			Row_key:           "new-key",
+			Source_output_ids: []string{"out-2"},
+			Cells: []bamltypes.MappedCell{
+				{Column: "recipient", Value: "different@example.com"},
+			},
+		},
+		{
+			Task_id:           "task-1",
+			Row_key:           "keep-me",
+			Source_output_ids: []string{"out-3"},
+			Cells: []bamltypes.MappedCell{
+				{Column: "recipient", Value: "taylor@beam.cloud"},
+			},
+		},
+	}
+
+	filtered := filterMappedRowsByExclusions(rows, snapshots, "emails")
+	if got, want := len(filtered), 1; got != want {
+		t.Fatalf("filtered row count = %d, want %d", got, want)
+	}
+	if got, want := filtered[0].Row_key, "keep-me"; got != want {
+		t.Fatalf("remaining row key = %q, want %q", got, want)
+	}
+}
+
+func TestFilterStoredRowsByExclusionsPreservesMarkerRows(t *testing.T) {
+	snapshots := []ExcludedRowSnapshot{
+		{
+			ComponentID:     "emails",
+			TaskID:          "task-1",
+			RowKey:          "task",
+			SourceOutputIDs: []string{"out-1"},
+			Cells: map[string]string{
+				"recipient": "luke@sla.io",
+			},
+		},
+	}
+	rows := []ViewRow{
+		{
+			ID:              "marker-row",
+			ComponentID:     "emails",
+			Marker:          true,
+			GroupID:         "task-1",
+			TaskID:          "task-1",
+			RowKey:          "task",
+			SourceOutputIDs: []string{"out-1"},
+		},
+		{
+			ID:              "visible-row",
+			ComponentID:     "emails",
+			GroupID:         "task-1",
+			TaskID:          "task-1",
+			RowKey:          "task",
+			SourceOutputIDs: []string{"out-1"},
+			Cells: map[string]string{
+				"recipient": "luke@sla.io",
+			},
+		},
+	}
+
+	filtered := filterStoredRowsByExclusions(rows, snapshots, "emails")
+	if got, want := len(filtered), 1; got != want {
+		t.Fatalf("filtered row count = %d, want %d", got, want)
+	}
+	if got, want := filtered[0].ID, "marker-row"; got != want {
+		t.Fatalf("remaining row id = %q, want %q", got, want)
+	}
+	if !filtered[0].Marker {
+		t.Fatal("expected remaining row to be the marker row")
 	}
 }
 
@@ -610,11 +843,10 @@ func TestAssembleTableIncludesTaskWakeMetadata(t *testing.T) {
 		comp,
 		[]resolvedSheetRow{
 			{
-				SheetID: "sheet-1",
-				TaskID:  "task-1",
-				RowID:   "sheet-1:task-1:task",
-				RowKey:  "task",
-				Cells:   map[string]string{"name": "Prospect outreach"},
+				TaskID: "task-1",
+				RowID:  "sheet-1:task-1:task",
+				RowKey: "task",
+				Cells:  map[string]string{"name": "Prospect outreach"},
 			},
 		},
 		map[string]*types.AgentTask{
@@ -643,6 +875,41 @@ func TestAssembleTableIncludesTaskWakeMetadata(t *testing.T) {
 	}
 	if got := row[2]; got != wakeReason {
 		t.Fatalf("next_wake_summary cell = %#v, want %q", got, wakeReason)
+	}
+}
+
+func TestResolvedRowsFromStoredSkipsMarkerRows(t *testing.T) {
+	rows := resolvedRowsFromStored([]ViewRow{
+		{
+			ID:          "sheet-1:c1:task-1:task",
+			SheetID:     "sheet-1",
+			ComponentID: "c1",
+			Marker:      true,
+			GroupID:     "task-1",
+			TaskID:      "task-1",
+			RowKey:      "task",
+			SchemaHash:  "schema",
+			OutputIDs:   []string{"out-1"},
+			Cells:       map[string]string{},
+		},
+		{
+			ID:          "sheet-1:c1:task-1:row",
+			SheetID:     "sheet-1",
+			ComponentID: "c1",
+			GroupID:     "task-1",
+			TaskID:      "task-1",
+			RowKey:      "row",
+			SchemaHash:  "schema",
+			OutputIDs:   []string{"out-1"},
+			Cells:       map[string]string{"name": "Visible row"},
+		},
+	}, false)
+
+	if got, want := len(rows), 1; got != want {
+		t.Fatalf("resolved row count = %d, want %d", got, want)
+	}
+	if got, want := rows[0].RowID, "sheet-1:c1:task-1:row"; got != want {
+		t.Fatalf("resolved row id = %q, want %q", got, want)
 	}
 }
 
@@ -900,8 +1167,9 @@ func TestMappedRowToViewRowSanitizesSourceOutputIDs(t *testing.T) {
 		{ID: "out-2"},
 		{ID: "out-1"},
 	}
+	outputSignature := outputGroupSignature(outputs)
 
-	row := mappedRowToViewRow("sheet-1", "c1", "task-1", "schema", outputs, bamltypes.MappedRow{
+	row := mappedRowToViewRow("sheet-1", "c1", "task-1", "schema", outputSignature, outputs, bamltypes.MappedRow{
 		Row_key:           "task",
 		Source_output_ids: []string{"out-2", "foreign-id"},
 		Cells:             []bamltypes.MappedCell{{Column: "name", Value: "Alice"}},
@@ -913,7 +1181,7 @@ func TestMappedRowToViewRowSanitizesSourceOutputIDs(t *testing.T) {
 		t.Fatalf("component id = %q, want %q", got, want)
 	}
 
-	fallback := mappedRowToViewRow("sheet-1", "c1", "task-1", "schema", outputs, bamltypes.MappedRow{
+	fallback := mappedRowToViewRow("sheet-1", "c1", "task-1", "schema", outputSignature, outputs, bamltypes.MappedRow{
 		Row_key:           "task",
 		Source_output_ids: []string{"foreign-id"},
 	}, now)
@@ -931,21 +1199,27 @@ func TestStableRowIDIncludesComponentScope(t *testing.T) {
 }
 
 func TestGroupRowsFreshReportsMismatchReasons(t *testing.T) {
-	row := fallbackViewRow("sheet-1", "c1", "task-1", "schema-1", []*types.TaskOutput{{ID: "out-1"}}, time.Now())
+	outputs := []*types.TaskOutput{{ID: "out-1", Status: types.TaskOutputStatusPending}}
+	outputSignature := outputGroupSignature(outputs)
+	row := fallbackViewRow("sheet-1", "c1", "task-1", "schema-1", outputSignature, outputs, time.Now())
 
-	if ok, reason := groupRowsFresh([]ViewRow{row}, "c1", "schema-1", []string{"out-1"}); !ok || reason != "" {
+	if ok, reason := groupRowsFresh([]ViewRow{row}, "c1", "schema-1", []string{"out-1"}, outputSignature); !ok || reason != "" {
 		t.Fatalf("expected fresh rows, got ok=%v reason=%q", ok, reason)
 	}
-	if ok, reason := groupRowsFresh([]ViewRow{row}, "c2", "schema-1", []string{"out-1"}); ok || reason != "component_scope_mismatch" {
+	if ok, reason := groupRowsFresh([]ViewRow{row}, "c2", "schema-1", []string{"out-1"}, outputSignature); ok || reason != "component_scope_mismatch" {
 		t.Fatalf("expected component mismatch, got ok=%v reason=%q", ok, reason)
 	}
-	if ok, reason := groupRowsFresh([]ViewRow{row}, "c1", "schema-2", []string{"out-1"}); ok || reason != "schema_hash_mismatch" {
+	if ok, reason := groupRowsFresh([]ViewRow{row}, "c1", "schema-2", []string{"out-1"}, outputSignature); ok || reason != "schema_hash_mismatch" {
 		t.Fatalf("expected schema mismatch, got ok=%v reason=%q", ok, reason)
 	}
-	if ok, reason := groupRowsFresh([]ViewRow{row}, "c1", "schema-1", []string{"out-2"}); ok || reason != "output_ids_mismatch" {
+	if ok, reason := groupRowsFresh([]ViewRow{row}, "c1", "schema-1", []string{"out-2"}, outputSignature); ok || reason != "output_ids_mismatch" {
 		t.Fatalf("expected output mismatch, got ok=%v reason=%q", ok, reason)
 	}
-	if ok, reason := groupRowsFresh(nil, "c1", "schema-1", []string{"out-1"}); ok || reason != "missing_rows" {
+	cancelledSignature := outputGroupSignature([]*types.TaskOutput{{ID: "out-1", Status: types.TaskOutputStatusCancelled}})
+	if ok, reason := groupRowsFresh([]ViewRow{row}, "c1", "schema-1", []string{"out-1"}, cancelledSignature); ok || reason != "output_signature_mismatch" {
+		t.Fatalf("expected output signature mismatch, got ok=%v reason=%q", ok, reason)
+	}
+	if ok, reason := groupRowsFresh(nil, "c1", "schema-1", []string{"out-1"}, outputSignature); ok || reason != "missing_rows" {
 		t.Fatalf("expected missing rows, got ok=%v reason=%q", ok, reason)
 	}
 }

@@ -39,15 +39,25 @@ type viewMappingResult struct {
 }
 
 type resolvedSheetRow struct {
-	SheetID         string
-	TaskID          string
-	RowID           string
-	StableRef       string
-	RowKey          string
-	OutputID        string
-	OutputStatus    string
-	SourceOutputIDs string
-	Cells           map[string]string
+	TaskID             string
+	DetailTaskID       string
+	RowID              string
+	StableRef          string
+	RowKey             string
+	OutputID           string
+	OutputStatus       string
+	BlockerOutputIDs   string
+	BlockerKind        string
+	BlockerInputKind   string
+	BlockerWaitGroupID string
+	ApprovalSurface    string
+	SourceOutputIDs    string
+	Cells              map[string]string
+}
+
+type hiddenResolvedColumn struct {
+	Key   string
+	Value func(sheetID string, row resolvedSheetRow) any
 }
 
 const (
@@ -56,6 +66,22 @@ const (
 	taskMetadataColumnWakeAt          = "wake_at"
 	taskMetadataColumnWakeReason      = "wake_reason"
 )
+
+var hiddenResolvedColumns = []hiddenResolvedColumn{
+	{Key: "task_id", Value: func(_ string, row resolvedSheetRow) any { return row.TaskID }},
+	{Key: "detail_task_id", Value: func(_ string, row resolvedSheetRow) any { return row.DetailTaskID }},
+	{Key: "row_id", Value: func(_ string, row resolvedSheetRow) any { return row.RowID }},
+	{Key: "stable_ref", Value: func(_ string, row resolvedSheetRow) any { return row.StableRef }},
+	{Key: "sheet_id", Value: func(sheetID string, _ resolvedSheetRow) any { return sheetID }},
+	{Key: "output_id", Value: func(_ string, row resolvedSheetRow) any { return row.OutputID }},
+	{Key: "output_status", Value: func(_ string, row resolvedSheetRow) any { return row.OutputStatus }},
+	{Key: "blocker_output_ids", Value: func(_ string, row resolvedSheetRow) any { return row.BlockerOutputIDs }},
+	{Key: "blocker_kind", Value: func(_ string, row resolvedSheetRow) any { return row.BlockerKind }},
+	{Key: "blocker_input_kind", Value: func(_ string, row resolvedSheetRow) any { return row.BlockerInputKind }},
+	{Key: "blocker_wait_group_id", Value: func(_ string, row resolvedSheetRow) any { return row.BlockerWaitGroupID }},
+	{Key: "approval_surface", Value: func(_ string, row resolvedSheetRow) any { return row.ApprovalSurface }},
+	{Key: "source_output_ids", Value: func(_ string, row resolvedSheetRow) any { return row.SourceOutputIDs }},
+}
 
 type DataResolver struct {
 	backend dataResolverBackend
@@ -101,6 +127,7 @@ type dataResolverBackend interface {
 	ListTaskOutputs(ctx context.Context, workspaceId uint, taskID string) ([]*types.TaskOutput, error)
 	ListWorkspaceTaskOutputs(ctx context.Context, workspaceId uint, filter types.TaskOutputListFilter) ([]*types.TaskOutput, error)
 	GetTaskByID(ctx context.Context, taskId string) (*types.AgentTask, error)
+	ListSpawnBindingsForOutputs(ctx context.Context, outputIDs []string) ([]repository.SpawnBinding, error)
 }
 
 // Resolve maps task outputs to a sheet table's schema using BAML.
@@ -148,86 +175,14 @@ func (r *DataResolver) RegenerateRow(ctx context.Context, workspaceID uint, view
 	}
 	outputs := allOutputs
 
-	oldRows, _ := r.store.GetRows(ctx, viewID, sheet.ID, comp.ID)
-	excludedSnapshots, _ := r.store.GetExcludedRows(ctx, viewID, sheet.ID)
-
-	taskPrompts := r.fetchTaskPrompts(ctx, []string{taskID})
-	outputsJSON, err := serializeOutputsForMapping(outputs, taskPrompts)
+	oldRows, excludedSnapshots := r.loadStoredRowsAndExclusions(ctx, viewID, sheet.ID, comp.ID)
+	rowsByGroup := groupViewRowsByGroup(oldRows)
+	taskGroups := map[string][]*types.TaskOutput{taskID: outputs}
+	mappedRows, err := r.mapTaskGroupsWithBAML(ctx, viewID, sheet, comp, spec, []string{taskID}, taskGroups, rowsByGroup, excludedSnapshots)
 	if err != nil {
-		return nil, fmt.Errorf("serialize outputs: %w", err)
+		return nil, err
 	}
-
-	var existingForTask []ViewRow
-	for _, old := range oldRows {
-		if old.TaskID == taskID {
-			existingForTask = append(existingForTask, old)
-		}
-	}
-	existingData := serializeExistingRows(existingForTask, spec.mappingCols)
-
-	var excludedForTask []ExcludedRowSnapshot
-	for _, snap := range excludedSnapshots {
-		if snap.TaskID == taskID {
-			excludedForTask = append(excludedForTask, snap)
-		}
-	}
-	excludedData := serializeExcludedRows(excludedForTask)
-
-	result, err := baml.MapOutputsToSchema(
-		ctx,
-		sheet.Name,
-		comp.Title,
-		comp.Type,
-		spec.mappingCols,
-		outputsJSON,
-		existingData,
-		excludedData,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("BAML mapping: %w", err)
-	}
-
-	canonicalRows := canonicalizeMappedRows(spec.mappingCols, result.Rows)
-	now := time.Now()
-	var persisted []ViewRow
-	for _, row := range canonicalRows {
-		if row.Task_id != taskID {
-			continue
-		}
-		persisted = append(persisted, mappedRowToViewRow(sheet.ID, comp.ID, taskID, spec.schemaHash, outputs, row, now))
-	}
-	if len(persisted) == 0 {
-		persisted = []ViewRow{fallbackViewRow(sheet.ID, comp.ID, taskID, spec.schemaHash, outputs, now)}
-	}
-
-	// Carry forward manual edits as a safety net: if the schema is unchanged
-	// and BAML left a cell blank, re-apply the user's edit.
-	manualPool := make(map[string]string)
-	var oldSchemaHash string
-	for _, old := range existingForTask {
-		if len(old.Manual) == 0 {
-			continue
-		}
-		oldSchemaHash = old.SchemaHash
-		for k, v := range old.Manual {
-			if v != "" {
-				manualPool[k] = v
-			}
-		}
-	}
-	if oldSchemaHash == spec.schemaHash && len(manualPool) > 0 {
-		for i := range persisted {
-			carried := make(map[string]string)
-			for k, v := range manualPool {
-				if persisted[i].Cells[k] == "" {
-					carried[k] = v
-				}
-			}
-			if len(carried) > 0 {
-				persisted[i].Manual = carried
-			}
-		}
-	}
+	persisted := materializeTaskGroups(sheet.ID, comp.ID, spec, []string{taskID}, taskGroups, rowsByGroup, mappedRows, time.Now())[taskID]
 
 	var keepRowIDs []string
 	for _, row := range persisted {
@@ -290,21 +245,8 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 	taskGroups := groupOutputsByTask(allOutputs)
 	taskMeta := r.fetchTaskMetadata(ctx, taskIDsFromGroups(taskGroups))
 
-	var existingRows []ViewRow
-	var excludedSnapshots []ExcludedRowSnapshot
-	if r.store != nil {
-		existingRows, err = r.store.GetRows(ctx, viewID, sheet.ID, comp.ID)
-		if err != nil {
-			log.Warn().Err(err).Str("view_id", viewID).Str("sheet_id", sheet.ID).Msg("failed to load stored rows, treating all as uncached")
-			existingRows = nil
-		}
-		excludedSnapshots, _ = r.store.GetExcludedRows(ctx, viewID, sheet.ID)
-	}
-	rowsByGroup := make(map[string][]ViewRow)
-	for i := range existingRows {
-		row := existingRows[i]
-		rowsByGroup[row.GroupID] = append(rowsByGroup[row.GroupID], row)
-	}
+	existingRows, excludedSnapshots := r.loadStoredRowsAndExclusions(ctx, viewID, sheet.ID, comp.ID)
+	rowsByGroup := groupViewRowsByGroup(existingRows)
 
 	uncachedIDs := make(map[string]bool)
 	uncachedReasonCounts := map[string]int{}
@@ -321,7 +263,9 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 			Msg("view: force refresh requested")
 	}
 
+	outputSignaturesByTask := make(map[string]string, len(taskGroups))
 	for taskID, outputs := range taskGroups {
+		outputSignaturesByTask[taskID] = outputGroupSignature(outputs)
 		if opts.ForceRefresh {
 			uncachedIDs[taskID] = true
 			uncachedReasonCounts["force_refresh"]++
@@ -330,7 +274,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 
 		taskOIDs := sortedOutputIDs(outputs)
 		storedRows := rowsByGroup[taskID]
-		if ok, reason := groupRowsFresh(storedRows, comp.ID, spec.schemaHash, taskOIDs); ok {
+		if ok, reason := groupRowsFresh(storedRows, comp.ID, spec.schemaHash, taskOIDs, outputSignaturesByTask[taskID]); ok {
 			resolvedRows = append(resolvedRows, resolvedRowsFromStored(storedRows, applyManualEdits)...)
 			continue
 		} else {
@@ -350,8 +294,10 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 		},
 	}
 
+	boundDetailTaskByOutput, boundOutputsByTask := r.fetchBoundTaskContext(ctx, workspaceID, resolvedRows)
+
 	if len(uncachedIDs) == 0 {
-		enrichRowsWithOutputStatus(resolvedRows, allOutputs)
+		enrichRowsWithOutputState(resolvedRows, allOutputs, boundDetailTaskByOutput, boundOutputsByTask)
 		sortResolvedRows(resolvedRows, taskMeta)
 		return &viewMappingResult{Rows: resolvedRows, TaskMeta: taskMeta, Diagnostics: diagnostics}, nil
 	}
@@ -384,71 +330,16 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 
 	persistedByGroup := make(map[string][]ViewRow)
 	mappedByGroup := make(map[string][]resolvedSheetRow)
-	now := time.Now()
-
-	if len(spec.mappingCols) == 0 {
-		for _, taskID := range uncachedTIDs {
-			row := fallbackViewRow(sheet.ID, comp.ID, taskID, spec.schemaHash, taskGroups[taskID], now)
-			persistedByGroup[taskID] = []ViewRow{row}
-			mappedByGroup[taskID] = resolvedRowsFromStored([]ViewRow{row}, applyManualEdits)
+	mappedRows, err := r.mapTaskGroupsWithBAML(ctx, viewID, sheet, comp, spec, uncachedTIDs, taskGroups, rowsByGroup, excludedSnapshots)
+	if err != nil {
+		if opts.ForceRefresh {
+			return nil, fmt.Errorf("force refresh BAML mapping: %w", err)
 		}
-	} else {
-		taskPrompts := r.fetchTaskPrompts(ctx, uncachedTIDs)
-		uncachedOutputs := outputsForTasks(allOutputs, uncachedIDs)
-		outputsJSON, err := serializeOutputsForMapping(uncachedOutputs, taskPrompts)
-		if err != nil {
-			return nil, fmt.Errorf("serialize outputs: %w", err)
-		}
-
-		var existingForUncached []ViewRow
-		for _, taskID := range uncachedTIDs {
-			existingForUncached = append(existingForUncached, rowsByGroup[taskID]...)
-		}
-		existingData := serializeExistingRows(existingForUncached, spec.mappingCols)
-		excludedData := serializeExcludedRows(excludedSnapshots)
-
-		result, err := baml.MapOutputsToSchema(
-			ctx,
-			sheet.Name,
-			comp.Title,
-			comp.Type,
-			spec.mappingCols,
-			outputsJSON,
-			existingData,
-			excludedData,
-		)
-		if err != nil {
-			if opts.ForceRefresh {
-				return nil, fmt.Errorf("force refresh BAML mapping: %w", err)
-			}
-			log.Warn().Err(err).Str("view_id", viewID).Str("sheet_id", sheet.ID).Int("tasks", len(uncachedIDs)).Msg("BAML mapping failed")
-		} else {
-			for _, row := range canonicalizeMappedRows(spec.mappingCols, result.Rows) {
-				taskID := row.Task_id
-				if _, ok := taskGroups[taskID]; !ok {
-					log.Warn().
-						Str("view_id", viewID).
-						Str("sheet_id", sheet.ID).
-						Str("task_id", taskID).
-						Msg("BAML returned row for unknown task_id, skipping")
-					continue
-				}
-				persisted := mappedRowToViewRow(sheet.ID, comp.ID, taskID, spec.schemaHash, taskGroups[taskID], row, now)
-				persistedByGroup[taskID] = append(persistedByGroup[taskID], persisted)
-			}
-		}
-
-		for _, taskID := range uncachedTIDs {
-			if len(persistedByGroup[taskID]) == 0 {
-				// Persist an empty marker row so repeated GETs do not remap
-				// forever when this task currently contributes no rows.
-				row := fallbackViewRow(sheet.ID, comp.ID, taskID, spec.schemaHash, taskGroups[taskID], now)
-				persistedByGroup[taskID] = []ViewRow{row}
-				mappedByGroup[taskID] = nil
-				continue
-			}
-			mappedByGroup[taskID] = resolvedRowsFromStored(persistedByGroup[taskID], applyManualEdits)
-		}
+		log.Warn().Err(err).Str("view_id", viewID).Str("sheet_id", sheet.ID).Int("tasks", len(uncachedIDs)).Msg("BAML mapping failed")
+	}
+	persistedByGroup = materializeTaskGroups(sheet.ID, comp.ID, spec, uncachedTIDs, taskGroups, rowsByGroup, mappedRows, time.Now())
+	for _, taskID := range uncachedTIDs {
+		mappedByGroup[taskID] = resolvedRowsFromStored(persistedByGroup[taskID], applyManualEdits)
 	}
 
 	if r.store != nil {
@@ -500,7 +391,8 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 		}
 	}
 
-	enrichRowsWithOutputStatus(resolvedRows, allOutputs)
+	boundDetailTaskByOutput, boundOutputsByTask = r.fetchBoundTaskContext(ctx, workspaceID, resolvedRows)
+	enrichRowsWithOutputState(resolvedRows, allOutputs, boundDetailTaskByOutput, boundOutputsByTask)
 	sortResolvedRows(resolvedRows, taskMeta)
 	return &viewMappingResult{Rows: resolvedRows, TaskMeta: taskMeta, Diagnostics: diagnostics}, nil
 }
@@ -538,6 +430,22 @@ func schemaKeyList(cols []bamltypes.ColumnSchema) []string {
 	return uniqueTrimmedStrings(keys)
 }
 
+func groupViewRowsByGroup(rows []ViewRow) map[string][]ViewRow {
+	grouped := make(map[string][]ViewRow, len(rows))
+	for i := range rows {
+		row := rows[i]
+		groupID := strings.TrimSpace(row.GroupID)
+		if groupID == "" {
+			groupID = strings.TrimSpace(row.TaskID)
+		}
+		if groupID == "" {
+			continue
+		}
+		grouped[groupID] = append(grouped[groupID], row)
+	}
+	return grouped
+}
+
 func groupOutputsByTask(outputs []*types.TaskOutput) map[string][]*types.TaskOutput {
 	groups := make(map[string][]*types.TaskOutput)
 	for _, o := range outputs {
@@ -548,14 +456,212 @@ func groupOutputsByTask(outputs []*types.TaskOutput) map[string][]*types.TaskOut
 	return groups
 }
 
-func outputsForTasks(outputs []*types.TaskOutput, taskIDs map[string]bool) []*types.TaskOutput {
-	var result []*types.TaskOutput
-	for _, o := range outputs {
-		if o != nil && taskIDs[o.TaskID] {
-			result = append(result, o)
+func outputsForTaskIDs(taskGroups map[string][]*types.TaskOutput, taskIDs []string) []*types.TaskOutput {
+	if len(taskGroups) == 0 || len(taskIDs) == 0 {
+		return nil
+	}
+	var outputs []*types.TaskOutput
+	for _, taskID := range taskIDs {
+		outputs = append(outputs, taskGroups[taskID]...)
+	}
+	return outputs
+}
+
+func storedRowsForTaskIDs(rowsByGroup map[string][]ViewRow, taskIDs []string) []ViewRow {
+	if len(rowsByGroup) == 0 || len(taskIDs) == 0 {
+		return nil
+	}
+	rows := make([]ViewRow, 0, len(taskIDs))
+	for _, taskID := range taskIDs {
+		rows = append(rows, rowsByGroup[taskID]...)
+	}
+	return rows
+}
+
+func filterExcludedSnapshotsByTasks(snapshots []ExcludedRowSnapshot, taskIDs []string) []ExcludedRowSnapshot {
+	if len(snapshots) == 0 || len(taskIDs) == 0 {
+		return nil
+	}
+	taskSet := make(map[string]bool, len(taskIDs))
+	for _, taskID := range taskIDs {
+		taskID = strings.TrimSpace(taskID)
+		if taskID != "" {
+			taskSet[taskID] = true
 		}
 	}
-	return result
+	if len(taskSet) == 0 {
+		return nil
+	}
+	filtered := make([]ExcludedRowSnapshot, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		if taskSet[strings.TrimSpace(snapshot.TaskID)] {
+			filtered = append(filtered, snapshot)
+		}
+	}
+	return filtered
+}
+
+func (r *DataResolver) mapTaskGroupsWithBAML(
+	ctx context.Context,
+	viewID string,
+	sheet types.SheetSpec,
+	comp types.ComponentSpec,
+	spec mappingSpec,
+	taskIDs []string,
+	taskGroups map[string][]*types.TaskOutput,
+	rowsByGroup map[string][]ViewRow,
+	excludedSnapshots []ExcludedRowSnapshot,
+) ([]bamltypes.MappedRow, error) {
+	if len(taskIDs) == 0 || len(spec.mappingCols) == 0 {
+		return nil, nil
+	}
+	requestedTasks := make(map[string]bool, len(taskIDs))
+	for _, taskID := range taskIDs {
+		taskID = strings.TrimSpace(taskID)
+		if taskID != "" {
+			requestedTasks[taskID] = true
+		}
+	}
+	if len(requestedTasks) == 0 {
+		return nil, nil
+	}
+
+	taskPrompts := r.fetchTaskPrompts(ctx, taskIDs)
+	outputsJSON, err := serializeOutputsForMapping(outputsForTaskIDs(taskGroups, taskIDs), taskPrompts)
+	if err != nil {
+		return nil, fmt.Errorf("serialize outputs: %w", err)
+	}
+
+	existingData := serializeExistingRows(storedRowsForTaskIDs(rowsByGroup, taskIDs), spec.mappingCols)
+	excludedForTasks := filterExcludedSnapshotsByTasks(excludedSnapshots, taskIDs)
+	excludedData := serializeExcludedRows(excludedForTasks)
+
+	result, err := baml.MapOutputsToSchema(
+		ctx,
+		sheet.Name,
+		comp.Title,
+		comp.Type,
+		spec.mappingCols,
+		outputsJSON,
+		existingData,
+		excludedData,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("BAML mapping: %w", err)
+	}
+
+	rows := filterMappedRowsByExclusions(
+		canonicalizeMappedRows(spec.mappingCols, result.Rows),
+		excludedForTasks,
+		comp.ID,
+	)
+	filtered := make([]bamltypes.MappedRow, 0, len(rows))
+	for _, row := range rows {
+		taskID := strings.TrimSpace(row.Task_id)
+		if requestedTasks[taskID] {
+			filtered = append(filtered, row)
+			continue
+		}
+		log.Warn().
+			Str("view_id", viewID).
+			Str("sheet_id", sheet.ID).
+			Str("task_id", taskID).
+			Msg("BAML returned row for unknown task_id, skipping")
+	}
+	return filtered, nil
+}
+
+func materializeTaskGroups(
+	sheetID string,
+	componentID string,
+	spec mappingSpec,
+	taskIDs []string,
+	taskGroups map[string][]*types.TaskOutput,
+	rowsByGroup map[string][]ViewRow,
+	mappedRows []bamltypes.MappedRow,
+	now time.Time,
+) map[string][]ViewRow {
+	persistedByGroup := make(map[string][]ViewRow, len(taskIDs))
+	if len(taskIDs) == 0 {
+		return persistedByGroup
+	}
+	mappedByTask := make(map[string][]bamltypes.MappedRow, len(taskIDs))
+	for _, row := range mappedRows {
+		taskID := strings.TrimSpace(row.Task_id)
+		if taskID == "" {
+			continue
+		}
+		mappedByTask[taskID] = append(mappedByTask[taskID], row)
+	}
+	for _, taskID := range taskIDs {
+		persistedByGroup[taskID] = materializeTaskGroup(
+			sheetID,
+			componentID,
+			taskID,
+			spec.schemaHash,
+			taskGroups[taskID],
+			rowsByGroup[taskID],
+			mappedByTask[taskID],
+			now,
+		)
+	}
+	return persistedByGroup
+}
+
+func materializeTaskGroup(
+	sheetID string,
+	componentID string,
+	taskID string,
+	schemaHash string,
+	outputs []*types.TaskOutput,
+	existingRows []ViewRow,
+	mappedRows []bamltypes.MappedRow,
+	now time.Time,
+) []ViewRow {
+	outputSignature := outputGroupSignature(outputs)
+	persisted := make([]ViewRow, 0, len(mappedRows))
+	for _, row := range mappedRows {
+		persisted = append(persisted, mappedRowToViewRow(sheetID, componentID, taskID, schemaHash, outputSignature, outputs, row, now))
+	}
+	if len(persisted) == 0 {
+		persisted = []ViewRow{fallbackViewRow(sheetID, componentID, taskID, schemaHash, outputSignature, outputs, now)}
+	}
+	return carryForwardBlankManualEdits(existingRows, schemaHash, persisted)
+}
+
+func carryForwardBlankManualEdits(existingRows []ViewRow, schemaHash string, persisted []ViewRow) []ViewRow {
+	if len(existingRows) == 0 || len(persisted) == 0 || strings.TrimSpace(schemaHash) == "" {
+		return persisted
+	}
+	manualPool := make(map[string]string)
+	for _, row := range existingRows {
+		if row.SchemaHash != schemaHash {
+			continue
+		}
+		for key, value := range row.Manual {
+			if value != "" {
+				manualPool[key] = value
+			}
+		}
+	}
+	if len(manualPool) == 0 {
+		return persisted
+	}
+	for i := range persisted {
+		if persisted[i].Marker {
+			continue
+		}
+		for key, value := range manualPool {
+			if persisted[i].Cells[key] != "" {
+				continue
+			}
+			if persisted[i].Manual == nil {
+				persisted[i].Manual = make(map[string]string)
+			}
+			persisted[i].Manual[key] = value
+		}
+	}
+	return persisted
 }
 
 func taskSetFromOutputs(outputs []*types.TaskOutput) map[string]bool {
@@ -569,7 +675,7 @@ func taskSetFromOutputs(outputs []*types.TaskOutput) map[string]bool {
 	return taskIDs
 }
 
-func groupRowsFresh(rows []ViewRow, componentID, schemaH string, outputIDs []string) (bool, string) {
+func groupRowsFresh(rows []ViewRow, componentID, schemaH string, outputIDs []string, outputSignature string) (bool, string) {
 	if len(rows) == 0 {
 		return false, "missing_rows"
 	}
@@ -582,6 +688,9 @@ func groupRowsFresh(rows []ViewRow, componentID, schemaH string, outputIDs []str
 		}
 		if !slicesMatch(row.OutputIDs, outputIDs) {
 			return false, "output_ids_mismatch"
+		}
+		if strings.TrimSpace(row.OutputSignature) != strings.TrimSpace(outputSignature) {
+			return false, "output_signature_mismatch"
 		}
 	}
 	return true, ""
@@ -786,17 +895,16 @@ func assembleTable(sheetID string, comp types.ComponentSpec, mappedRows []resolv
 		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}
 	}
 
-	hiddenKeys := []string{"task_id", "row_id", "stable_ref", "sheet_id", "output_id", "output_status", "source_output_ids"}
 	hiddenStart := len(tableCols)
-	colNames := make([]string, hiddenStart+len(hiddenKeys))
+	colNames := make([]string, hiddenStart+len(hiddenResolvedColumns))
 	meta := make([]types.ColumnMeta, len(colNames))
 	for i, col := range tableCols {
 		colNames[i] = col.Key
 		meta[i] = types.ColumnMeta{Key: col.Key, Label: stripHint(col.Description), Type: normalizeColumnType(col.Type)}
 	}
-	for i, key := range hiddenKeys {
-		colNames[hiddenStart+i] = key
-		meta[hiddenStart+i] = types.ColumnMeta{Key: key, Type: "text", Hidden: true}
+	for i, hidden := range hiddenResolvedColumns {
+		colNames[hiddenStart+i] = hidden.Key
+		meta[hiddenStart+i] = types.ColumnMeta{Key: hidden.Key, Type: "text", Hidden: true}
 	}
 
 	var rows [][]any
@@ -816,8 +924,8 @@ func assembleTable(sheetID string, comp types.ComponentSpec, mappedRows []resolv
 				}
 			}
 		}
-		for i, v := range []any{mapped.TaskID, mapped.RowID, mapped.StableRef, sheetID, mapped.OutputID, mapped.OutputStatus, mapped.SourceOutputIDs} {
-			row[hiddenStart+i] = v
+		for i, hidden := range hiddenResolvedColumns {
+			row[hiddenStart+i] = hidden.Value(sheetID, mapped)
 		}
 		if hasValue {
 			rows = append(rows, row)
@@ -877,6 +985,58 @@ func dedupeOutputs(all []*types.TaskOutput) []*types.TaskOutput {
 	return deduped
 }
 
+func (r *DataResolver) fetchBoundTaskContext(ctx context.Context, workspaceID uint, rows []resolvedSheetRow) (map[string]string, map[string][]*types.TaskOutput) {
+	if r == nil || r.backend == nil || len(rows) == 0 {
+		return nil, nil
+	}
+	sourceOutputIDs := make([]string, 0, len(rows))
+	for _, row := range rows {
+		sourceOutputIDs = append(sourceOutputIDs, uniqueTrimmedStrings(strings.Split(row.SourceOutputIDs, ","))...)
+	}
+	sourceOutputIDs = uniqueTrimmedStrings(sourceOutputIDs)
+	if len(sourceOutputIDs) == 0 {
+		return nil, nil
+	}
+	bindings, err := r.backend.ListSpawnBindingsForOutputs(ctx, sourceOutputIDs)
+	if err != nil || len(bindings) == 0 {
+		return nil, nil
+	}
+
+	detailTaskByOutput := make(map[string]string, len(bindings))
+	latestBindingByOutput := make(map[string]repository.SpawnBinding, len(bindings))
+	taskIDs := make([]string, 0, len(bindings))
+	seenTasks := make(map[string]struct{}, len(bindings))
+	for _, binding := range bindings {
+		sourceOutputID := strings.TrimSpace(binding.SourceOutputID)
+		taskID := strings.TrimSpace(binding.TaskID)
+		if sourceOutputID == "" || taskID == "" {
+			continue
+		}
+		if existing, ok := latestBindingByOutput[sourceOutputID]; !ok || binding.CreatedAt.After(existing.CreatedAt) {
+			latestBindingByOutput[sourceOutputID] = binding
+			detailTaskByOutput[sourceOutputID] = taskID
+		}
+		if _, ok := seenTasks[taskID]; ok {
+			continue
+		}
+		seenTasks[taskID] = struct{}{}
+		taskIDs = append(taskIDs, taskID)
+	}
+	if len(taskIDs) == 0 {
+		return detailTaskByOutput, nil
+	}
+	sort.Strings(taskIDs)
+	outputsByTask := make(map[string][]*types.TaskOutput, len(taskIDs))
+	for _, taskID := range taskIDs {
+		outputs, err := r.backend.ListTaskOutputs(ctx, workspaceID, taskID)
+		if err != nil || len(outputs) == 0 {
+			continue
+		}
+		outputsByTask[taskID] = dedupeOutputs(outputs)
+	}
+	return detailTaskByOutput, outputsByTask
+}
+
 func resolvedRowsFromStored(rows []ViewRow, applyManual bool) []resolvedSheetRow {
 	if len(rows) == 0 {
 		return nil
@@ -894,13 +1054,16 @@ func resolvedRowsFromStored(rows []ViewRow, applyManual bool) []resolvedSheetRow
 
 	result := make([]resolvedSheetRow, 0, len(cloned))
 	for _, row := range cloned {
+		if row.Marker {
+			continue
+		}
 		cells := copyStringMap(row.Cells)
 		if applyManual {
 			cells = copyStringMap(row.MergedCells())
 		}
 		result = append(result, resolvedSheetRow{
-			SheetID:         row.SheetID,
 			TaskID:          row.TaskID,
+			DetailTaskID:    row.TaskID,
 			RowID:           row.ID,
 			StableRef:       row.StableRef,
 			RowKey:          row.RowKey,
@@ -912,7 +1075,7 @@ func resolvedRowsFromStored(rows []ViewRow, applyManual bool) []resolvedSheetRow
 	return result
 }
 
-func mappedRowToViewRow(sheetID, componentID, taskID, schemaH string, groupOutputs []*types.TaskOutput, row bamltypes.MappedRow, now time.Time) ViewRow {
+func mappedRowToViewRow(sheetID, componentID, taskID, schemaH, outputSignature string, groupOutputs []*types.TaskOutput, row bamltypes.MappedRow, now time.Time) ViewRow {
 	rowKey := normalizeToken(strings.TrimSpace(row.Row_key))
 	if rowKey == "" {
 		rowKey = "task"
@@ -929,11 +1092,13 @@ func mappedRowToViewRow(sheetID, componentID, taskID, schemaH string, groupOutpu
 		ID:              stableRowID(sheetID, componentID, taskID, rowKey),
 		SheetID:         sheetID,
 		ComponentID:     componentID,
+		Marker:          false,
 		GroupID:         taskID,
 		TaskID:          taskID,
 		RowKey:          rowKey,
 		SchemaHash:      schemaH,
 		OutputIDs:       outputIDs,
+		OutputSignature: outputSignature,
 		SourceOutputIDs: sourceOutputIDs,
 		Cells:           cells,
 		UpdatedAt:       now,
@@ -961,16 +1126,18 @@ func sanitizeSourceOutputIDs(sourceOutputIDs, outputIDs []string) []string {
 	return filtered
 }
 
-func fallbackViewRow(sheetID, componentID, taskID, schemaH string, groupOutputs []*types.TaskOutput, now time.Time) ViewRow {
+func fallbackViewRow(sheetID, componentID, taskID, schemaH, outputSignature string, groupOutputs []*types.TaskOutput, now time.Time) ViewRow {
 	return ViewRow{
 		ID:              stableRowID(sheetID, componentID, taskID, "task"),
 		SheetID:         sheetID,
 		ComponentID:     componentID,
+		Marker:          true,
 		GroupID:         taskID,
 		TaskID:          taskID,
 		RowKey:          "task",
 		SchemaHash:      schemaH,
 		OutputIDs:       sortedOutputIDs(groupOutputs),
+		OutputSignature: outputSignature,
 		SourceOutputIDs: sortedOutputIDs(groupOutputs),
 		Cells:           map[string]string{},
 		UpdatedAt:       now,
@@ -1007,17 +1174,148 @@ func copyStringMap(values map[string]string) map[string]string {
 	return cloned
 }
 
-func enrichRowsWithOutputStatus(rows []resolvedSheetRow, outputs []*types.TaskOutput) {
-	statusMap := make(map[string]string, len(outputs))
-	for _, o := range outputs {
-		if o != nil {
-			statusMap[o.ID] = o.Status
+type rowBlockerSummary struct {
+	OutputID        string
+	Status          string
+	OutputIDs       []string
+	Kind            string
+	InputKind       string
+	WaitGroupID     string
+	ApprovalSurface bool
+	LatestCreatedAt time.Time
+}
+
+func enrichRowsWithOutputState(
+	rows []resolvedSheetRow,
+	outputs []*types.TaskOutput,
+	detailTaskBySourceOutput map[string]string,
+	boundOutputsByTask map[string][]*types.TaskOutput,
+) {
+	outputByID := make(map[string]*types.TaskOutput, len(outputs))
+	for _, output := range outputs {
+		if output != nil {
+			outputByID[output.ID] = output
 		}
 	}
 	for i := range rows {
-		if rows[i].OutputID != "" {
-			rows[i].OutputStatus = statusMap[rows[i].OutputID]
+		sourceOutputIDs := uniqueTrimmedStrings(strings.Split(rows[i].SourceOutputIDs, ","))
+		if rows[i].DetailTaskID == "" {
+			rows[i].DetailTaskID = rows[i].TaskID
 		}
+		combined := make([]*types.TaskOutput, 0, len(sourceOutputIDs))
+		for _, outputID := range sourceOutputIDs {
+			if output := outputByID[outputID]; output != nil {
+				combined = append(combined, output)
+			}
+			if detailTaskID := strings.TrimSpace(detailTaskBySourceOutput[outputID]); detailTaskID != "" {
+				rows[i].DetailTaskID = detailTaskID
+				combined = append(combined, boundOutputsByTask[detailTaskID]...)
+				break
+			}
+		}
+		blocker := selectRowBlocker(combined)
+		if blocker.OutputID != "" {
+			rows[i].OutputID = blocker.OutputID
+			rows[i].OutputStatus = blocker.Status
+		}
+		if len(blocker.OutputIDs) > 0 {
+			rows[i].BlockerOutputIDs = strings.Join(blocker.OutputIDs, ",")
+		} else {
+			rows[i].BlockerOutputIDs = ""
+		}
+		rows[i].BlockerKind = blocker.Kind
+		rows[i].BlockerInputKind = blocker.InputKind
+		rows[i].BlockerWaitGroupID = blocker.WaitGroupID
+		if blocker.ApprovalSurface {
+			rows[i].ApprovalSurface = "true"
+		} else {
+			rows[i].ApprovalSurface = ""
+		}
+	}
+}
+
+func selectRowBlocker(outputs []*types.TaskOutput) rowBlockerSummary {
+	var fallback *types.TaskOutput
+	groups := make(map[string]*rowBlockerSummary)
+	latestGroupID := ""
+	latestCreatedAt := time.Time{}
+	for _, output := range dedupeOutputs(outputs) {
+		if output == nil {
+			continue
+		}
+		if fallback == nil {
+			fallback = output
+		}
+		if output.Status != types.TaskOutputStatusPending {
+			continue
+		}
+		signal := classifyPendingOutputSignal(output)
+		if !signal.IsBlocker {
+			continue
+		}
+		groupID := signal.WaitGroupID
+		if groupID == "" {
+			groupID = output.ID
+		}
+		group := groups[groupID]
+		if group == nil {
+			group = &rowBlockerSummary{
+				OutputID:        output.ID,
+				Status:          output.Status,
+				Kind:            signal.Kind,
+				InputKind:       signal.InputKind,
+				WaitGroupID:     groupID,
+				ApprovalSurface: signal.ApprovalSurface,
+				LatestCreatedAt: output.CreatedAt,
+			}
+			groups[groupID] = group
+		}
+		group.OutputIDs = append(group.OutputIDs, output.ID)
+		if output.CreatedAt.After(group.LatestCreatedAt) {
+			group.LatestCreatedAt = output.CreatedAt
+			group.OutputID = output.ID
+			if signal.Kind != "" {
+				group.Kind = signal.Kind
+			}
+			if signal.InputKind != "" {
+				group.InputKind = signal.InputKind
+			}
+			group.ApprovalSurface = signal.ApprovalSurface
+		}
+		if output.CreatedAt.After(latestCreatedAt) || (output.CreatedAt.Equal(latestCreatedAt) && groupID > latestGroupID) {
+			latestCreatedAt = output.CreatedAt
+			latestGroupID = groupID
+		}
+	}
+	if latestGroupID != "" && groups[latestGroupID] != nil {
+		selected := *groups[latestGroupID]
+		sort.Strings(selected.OutputIDs)
+		return selected
+	}
+	if fallback == nil {
+		return rowBlockerSummary{}
+	}
+	return rowBlockerSummary{
+		OutputID: fallback.ID,
+		Status:   fallback.Status,
+	}
+}
+
+func metadataStringValue(values map[string]any, key string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	raw, ok := values[key]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch typed := raw.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case fmt.Stringer:
+		return strings.TrimSpace(typed.String())
+	default:
+		return strings.TrimSpace(fmt.Sprintf("%v", typed))
 	}
 }
 
@@ -1192,6 +1490,42 @@ func buildColumnSchemas(comp types.ComponentSpec) []bamltypes.ColumnSchema {
 	return schemas
 }
 
+func (r *DataResolver) loadStoredRowsAndExclusions(
+	ctx context.Context,
+	viewID string,
+	sheetID string,
+	componentID string,
+) ([]ViewRow, []ExcludedRowSnapshot) {
+	if r == nil || r.store == nil {
+		return nil, nil
+	}
+
+	rows, err := r.store.GetRows(ctx, viewID, sheetID, componentID)
+	if err != nil {
+		log.Warn().
+			Err(err).
+			Str("view_id", viewID).
+			Str("sheet_id", sheetID).
+			Str("component_id", componentID).
+			Msg("failed to load stored rows, treating all as uncached")
+		rows = nil
+	}
+
+	excludedSnapshots, err := r.store.GetExcludedRows(ctx, viewID, sheetID)
+	if err != nil {
+		log.Warn().
+			Err(err).
+			Str("view_id", viewID).
+			Str("sheet_id", sheetID).
+			Str("component_id", componentID).
+			Msg("failed to load excluded rows")
+		excludedSnapshots = nil
+	}
+	excludedSnapshots = filterExcludedSnapshots(excludedSnapshots, componentID)
+	rows = filterStoredRowsByExclusions(rows, excludedSnapshots, componentID)
+	return rows, excludedSnapshots
+}
+
 // serializeExcludedRows formats excluded row snapshots so the BAML mapper
 // knows which rows the user has explicitly deleted and must not regenerate.
 func serializeExcludedRows(snapshots []ExcludedRowSnapshot) string {
@@ -1200,7 +1534,14 @@ func serializeExcludedRows(snapshots []ExcludedRowSnapshot) string {
 	}
 	var sb strings.Builder
 	for i, s := range snapshots {
-		fmt.Fprintf(&sb, "Excluded row %d (task_id=%s, row_key=%s):\n", i+1, s.TaskID, s.RowKey)
+		if strings.TrimSpace(s.ComponentID) != "" {
+			fmt.Fprintf(&sb, "Excluded row %d (component_id=%s, task_id=%s, row_key=%s):\n", i+1, s.ComponentID, s.TaskID, s.RowKey)
+		} else {
+			fmt.Fprintf(&sb, "Excluded row %d (task_id=%s, row_key=%s):\n", i+1, s.TaskID, s.RowKey)
+		}
+		if len(s.SourceOutputIDs) > 0 {
+			fmt.Fprintf(&sb, "  - source_output_ids: %q\n", strings.Join(s.SourceOutputIDs, ","))
+		}
 		for k, v := range s.Cells {
 			if v != "" {
 				fmt.Fprintf(&sb, "  - %s: %q\n", k, v)
@@ -1208,6 +1549,157 @@ func serializeExcludedRows(snapshots []ExcludedRowSnapshot) string {
 		}
 	}
 	return sb.String()
+}
+
+func filterExcludedSnapshots(snapshots []ExcludedRowSnapshot, componentID string) []ExcludedRowSnapshot {
+	if len(snapshots) == 0 {
+		return nil
+	}
+	componentID = strings.TrimSpace(componentID)
+	filtered := make([]ExcludedRowSnapshot, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		snapshotComponentID := strings.TrimSpace(snapshot.ComponentID)
+		if snapshotComponentID != "" && componentID != "" && snapshotComponentID != componentID {
+			continue
+		}
+		filtered = append(filtered, snapshot)
+	}
+	return filtered
+}
+
+func filterStoredRowsByExclusions(rows []ViewRow, snapshots []ExcludedRowSnapshot, componentID string) []ViewRow {
+	if len(rows) == 0 || len(snapshots) == 0 {
+		return rows
+	}
+	filtered := make([]ViewRow, 0, len(rows))
+	for _, row := range rows {
+		if row.Marker {
+			// Marker rows are the persisted cache entry for "this task currently
+			// has no visible rows". Keep them even when the corresponding visible
+			// row is excluded, otherwise the task remaps on every page load.
+			filtered = append(filtered, row)
+			continue
+		}
+		if rowMatchesExcludedSnapshot(snapshots, componentID, row.TaskID, row.RowKey, row.SourceOutputIDs, row.MergedCells()) {
+			continue
+		}
+		filtered = append(filtered, row)
+	}
+	return filtered
+}
+
+func filterMappedRowsByExclusions(rows []bamltypes.MappedRow, snapshots []ExcludedRowSnapshot, componentID string) []bamltypes.MappedRow {
+	if len(rows) == 0 || len(snapshots) == 0 {
+		return rows
+	}
+	filtered := make([]bamltypes.MappedRow, 0, len(rows))
+	for _, row := range rows {
+		cells := make(map[string]string, len(row.Cells))
+		for _, cell := range row.Cells {
+			if strings.TrimSpace(cell.Value) != "" {
+				cells[cell.Column] = cell.Value
+			}
+		}
+		if rowMatchesExcludedSnapshot(snapshots, componentID, row.Task_id, row.Row_key, row.Source_output_ids, cells) {
+			continue
+		}
+		filtered = append(filtered, row)
+	}
+	return filtered
+}
+
+func rowMatchesExcludedSnapshot(
+	snapshots []ExcludedRowSnapshot,
+	componentID,
+	taskID,
+	rowKey string,
+	sourceOutputIDs []string,
+	cells map[string]string,
+) bool {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" || len(snapshots) == 0 {
+		return false
+	}
+	componentID = strings.TrimSpace(componentID)
+	rowKey = normalizeToken(strings.TrimSpace(rowKey))
+	normalizedSources := uniqueTrimmedStrings(sourceOutputIDs)
+	sort.Strings(normalizedSources)
+	cellFingerprint := excludedRowCellsFingerprint(cells)
+	for _, snapshot := range snapshots {
+		if strings.TrimSpace(snapshot.TaskID) != taskID {
+			continue
+		}
+		snapshotComponentID := strings.TrimSpace(snapshot.ComponentID)
+		if snapshotComponentID != "" && componentID != "" && snapshotComponentID != componentID {
+			continue
+		}
+		if sourceOutputIDsMatch(normalizedSources, snapshot.SourceOutputIDs) {
+			return true
+		}
+		snapshotRowKey := normalizeToken(strings.TrimSpace(snapshot.RowKey))
+		if rowKey != "" && snapshotRowKey != "" && snapshotRowKey == rowKey {
+			return true
+		}
+		if cellFingerprint != "" && cellFingerprint == excludedRowCellsFingerprint(snapshot.Cells) {
+			return true
+		}
+	}
+	return false
+}
+
+func sourceOutputIDsMatch(left, right []string) bool {
+	left = uniqueTrimmedStrings(left)
+	right = uniqueTrimmedStrings(right)
+	if len(left) == 0 || len(right) == 0 {
+		return false
+	}
+	if slicesMatch(left, right) {
+		return true
+	}
+	rightSet := make(map[string]struct{}, len(right))
+	for _, id := range right {
+		rightSet[id] = struct{}{}
+	}
+	for _, id := range left {
+		if _, ok := rightSet[id]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func excludedRowCellsFingerprint(cells map[string]string) string {
+	if len(cells) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(cells))
+	normalizedValues := make(map[string]string, len(cells))
+	for key, value := range cells {
+		normalized := normalizeExcludedCellValue(value)
+		if normalized == "" {
+			continue
+		}
+		keys = append(keys, key)
+		normalizedValues[key] = normalized
+	}
+	if len(keys) == 0 {
+		return ""
+	}
+	sort.Strings(keys)
+	var sb strings.Builder
+	for _, key := range keys {
+		sb.WriteString(key)
+		sb.WriteByte('=')
+		sb.WriteString(normalizedValues[key])
+		sb.WriteByte('\n')
+	}
+	return sb.String()
+}
+
+func normalizeExcludedCellValue(value string) string {
+	value = html.UnescapeString(value)
+	value = whitespaceRe.ReplaceAllString(strings.TrimSpace(strings.ToLower(value)), " ")
+	return value
 }
 
 // serializeExistingRows formats stored rows (with merged manual edits) as a
@@ -1219,6 +1711,9 @@ func serializeExistingRows(rows []ViewRow, cols []bamltypes.ColumnSchema) string
 	}
 	var sb strings.Builder
 	for _, row := range rows {
+		if row.Marker {
+			continue
+		}
 		merged := row.MergedCells()
 		fmt.Fprintf(&sb, "Row (task_id=%s, row_key=%s):\n", row.TaskID, row.RowKey)
 		for _, col := range cols {
@@ -1312,6 +1807,28 @@ func writeTaskOutputForMapping(b *strings.Builder, output *types.TaskOutput) {
 	writeMappingSection(b, "DATA_FIELDS", collectMappingFields(filterInternalKeys(output.Data)))
 	writeMappingSection(b, "METADATA_FIELDS", collectMappingFields(filterInternalKeys(output.Metadata)))
 	b.WriteString("<<<END_OUTPUT>>>\n")
+}
+
+func outputGroupSignature(outputs []*types.TaskOutput) string {
+	if len(outputs) == 0 {
+		return ""
+	}
+	group := dedupeOutputs(outputs)
+	sort.SliceStable(group, func(i, j int) bool {
+		if !group[i].CreatedAt.Equal(group[j].CreatedAt) {
+			return group[i].CreatedAt.Before(group[j].CreatedAt)
+		}
+		return group[i].ID < group[j].ID
+	})
+	var b strings.Builder
+	for _, output := range group {
+		writeTaskOutputForMapping(&b, output)
+	}
+	if b.Len() == 0 {
+		return ""
+	}
+	h := sha256.Sum256([]byte(b.String()))
+	return hex.EncodeToString(h[:])[:16]
 }
 
 // filterInternalKeys strips keys prefixed with "_" — these are worker

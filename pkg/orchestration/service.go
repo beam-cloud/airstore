@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -412,6 +413,13 @@ func (s *AgentService) AcceptTaskInput(
 		return nil, fmt.Errorf("task_id is required")
 	}
 
+	if len(items) == 0 && action != nil && (kind == "" || kind == types.InputKindApproveReject) {
+		autoItems, err := s.pendingItemDecisions(ctx, workspaceID, taskID, *action)
+		if err != nil {
+			return nil, err
+		}
+		items = autoItems
+	}
 	if len(items) > 0 {
 		processedMessage, err := s.processItemDecisions(ctx, workspaceID, taskID, items, message)
 		if err != nil {
@@ -485,6 +493,95 @@ func (s *AgentService) AcceptTaskInput(
 		return updated, nil
 	}
 	return task, nil
+}
+
+func (s *AgentService) pendingItemDecisions(
+	ctx context.Context,
+	workspaceID uint,
+	taskID string,
+	action types.TaskInputAction,
+) ([]types.ItemDecision, error) {
+	outputs, err := s.backend.ListTaskOutputs(ctx, workspaceID, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("list task outputs for %s: %w", taskID, err)
+	}
+	selected := latestPendingApprovalGroup(outputs)
+	if len(selected) == 0 {
+		selected = pendingOutputs(outputs)
+	}
+	sort.SliceStable(selected, func(i, j int) bool {
+		if !selected[i].CreatedAt.Equal(selected[j].CreatedAt) {
+			return selected[i].CreatedAt.Before(selected[j].CreatedAt)
+		}
+		return selected[i].ID < selected[j].ID
+	})
+	items := make([]types.ItemDecision, 0, len(outputs))
+	for _, output := range selected {
+		items = append(items, types.ItemDecision{
+			OutputID: output.ID,
+			Action:   action,
+		})
+	}
+	return items, nil
+}
+
+func pendingOutputs(outputs []*types.TaskOutput) []*types.TaskOutput {
+	pending := make([]*types.TaskOutput, 0, len(outputs))
+	for _, output := range outputs {
+		if output == nil || strings.TrimSpace(output.ID) == "" {
+			continue
+		}
+		if output.Status != types.TaskOutputStatusPending {
+			continue
+		}
+		pending = append(pending, output)
+	}
+	return pending
+}
+
+func latestPendingApprovalGroup(outputs []*types.TaskOutput) []*types.TaskOutput {
+	groups := make(map[string][]*types.TaskOutput)
+	latestGroupID := ""
+	latestCreatedAt := time.Time{}
+	for _, output := range pendingOutputs(outputs) {
+		if output == nil {
+			continue
+		}
+		waitGroupID := metadataString(output.Metadata, types.TaskOutputMetadataWaitGroupID)
+		if waitGroupID == "" {
+			continue
+		}
+		blockingKind := metadataString(output.Metadata, types.TaskOutputMetadataBlockingKind)
+		if blockingKind == "" && !boolFromAny(output.Metadata[types.TaskOutputMetadataApprovalUI]) {
+			continue
+		}
+		groups[waitGroupID] = append(groups[waitGroupID], output)
+		if output.CreatedAt.After(latestCreatedAt) || (output.CreatedAt.Equal(latestCreatedAt) && waitGroupID > latestGroupID) {
+			latestCreatedAt = output.CreatedAt
+			latestGroupID = waitGroupID
+		}
+	}
+	if latestGroupID == "" {
+		return nil
+	}
+	return groups[latestGroupID]
+}
+
+func metadataString(values map[string]any, key string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	switch typed := values[key].(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case fmt.Stringer:
+		return strings.TrimSpace(typed.String())
+	default:
+		if typed == nil {
+			return ""
+		}
+		return strings.TrimSpace(fmt.Sprintf("%v", typed))
+	}
 }
 
 type itemDecisionUpdate struct {

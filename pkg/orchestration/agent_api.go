@@ -453,10 +453,32 @@ func (a *AgentAPI) CancelTask(ctx context.Context, workspaceID uint, taskID stri
 	if err := a.backend.CancelPendingOutboxEventsForTask(ctx, task.ID); err != nil {
 		log.Warn().Err(err).Str("task_id", task.ID).Msg("failed to cancel pending outbox events")
 	}
+	if err := a.supersedePendingTaskOutputs(ctx, workspaceID, task.ID); err != nil {
+		return err
+	}
 	if a.runtime != nil {
 		a.runtime.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
 	}
 
+	return nil
+}
+
+func (a *AgentAPI) supersedePendingTaskOutputs(ctx context.Context, workspaceID uint, taskID string) error {
+	outputs, err := a.backend.ListTaskOutputs(ctx, workspaceID, taskID)
+	if err != nil {
+		return fmt.Errorf("list task outputs for cancel %s: %w", taskID, err)
+	}
+	for _, output := range outputs {
+		if output == nil || strings.TrimSpace(output.ID) == "" {
+			continue
+		}
+		if output.Status != types.TaskOutputStatusPending && output.Status != types.TaskOutputStatusApproved {
+			continue
+		}
+		if err := a.backend.UpdateTaskOutputStatus(ctx, workspaceID, output.ID, types.TaskOutputStatusCancelled); err != nil {
+			return fmt.Errorf("cancel pending output %s: %w", output.ID, err)
+		}
+	}
 	return nil
 }
 
@@ -1033,7 +1055,12 @@ func normalizeAgentProfileConfig(config map[string]any, agentKey string) (map[st
 
 	runner := strings.ToLower(strings.TrimSpace(stringFromPayload(normalized, agentConfigKeyRunner)))
 	provider := strings.ToLower(strings.TrimSpace(stringFromPayload(normalized, agentConfigKeyProvider)))
+	model := strings.TrimSpace(stringFromPayload(normalized, agentConfigKeyModel))
 
+	if inferred := runnerForModel(model); inferred != "" && inferred != runner {
+		runner = inferred
+		provider = providerForRunner(runner)
+	}
 	if runner == "" && provider == "" {
 		runner = AgentRunnerClaudeCode
 		provider = providerForRunner(runner)

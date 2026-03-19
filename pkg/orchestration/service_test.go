@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -201,6 +202,16 @@ func (b *acceptTaskInputBackend) GetTaskOutput(_ context.Context, _ uint, output
 	return nil, &types.ErrTaskOutputNotFound{ID: outputID}
 }
 
+func (b *acceptTaskInputBackend) ListTaskOutputs(_ context.Context, _ uint, taskID string) ([]*types.TaskOutput, error) {
+	var outputs []*types.TaskOutput
+	for _, output := range b.outputs {
+		if output != nil && output.TaskID == taskID {
+			outputs = append(outputs, output)
+		}
+	}
+	return outputs, nil
+}
+
 func (b *acceptTaskInputBackend) UpdateTaskOutputStatus(_ context.Context, _ uint, outputID string, status string) error {
 	if err := b.statusUpdateErrByID[outputID]; err != nil {
 		return err
@@ -317,5 +328,79 @@ func TestAcceptTaskInputRollsBackItemStatusesOnUpdateError(t *testing.T) {
 	}
 	if got := len(backend.appendedInputs); got != 0 {
 		t.Fatalf("append count = %d, want 0", got)
+	}
+}
+
+func TestAcceptTaskInputAutoAppliesPendingOutputsForApproveReject(t *testing.T) {
+	backend := &acceptTaskInputBackend{
+		task: &types.AgentTask{
+			ID:          "task-1",
+			WorkspaceID: 7,
+		},
+		outputs: map[string]*types.TaskOutput{
+			"out-old": {
+				ID:        "out-old",
+				TaskID:    "task-1",
+				Title:     "Older approval item",
+				Status:    types.TaskOutputStatusPending,
+				CreatedAt: time.Unix(10, 0),
+				Metadata: map[string]any{
+					types.TaskOutputMetadataBlockingKind: types.TaskOutputBlockingKindApproval,
+					types.TaskOutputMetadataInputKind:    string(types.InputKindApproveReject),
+					types.TaskOutputMetadataWaitGroupID:  "wait-1",
+					types.TaskOutputMetadataApprovalUI:   true,
+				},
+			},
+			"out-pending": {
+				ID:     "out-pending",
+				TaskID: "task-1",
+				Title:  "Draft outreach email",
+				Status: types.TaskOutputStatusPending,
+				CreatedAt: time.Unix(20, 0),
+				Metadata: map[string]any{
+					types.TaskOutputMetadataBlockingKind: types.TaskOutputBlockingKindApproval,
+					types.TaskOutputMetadataInputKind:    string(types.InputKindApproveReject),
+					types.TaskOutputMetadataWaitGroupID:  "wait-2",
+					types.TaskOutputMetadataApprovalUI:   true,
+				},
+			},
+			"out-active": {
+				ID:     "out-active",
+				TaskID: "task-1",
+				Title:  "Sent outreach email",
+				Status: types.TaskOutputStatusActive,
+			},
+		},
+	}
+	service := &AgentService{backend: backend}
+	approve := types.TaskInputActionApprove
+
+	_, err := service.AcceptTaskInput(
+		context.Background(),
+		7,
+		"task-1",
+		types.InputKindApproveReject,
+		&approve,
+		"",
+		"idem-3",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("AcceptTaskInput returned error: %v", err)
+	}
+	if got := backend.outputs["out-pending"].Status; got != types.TaskOutputStatusApproved {
+		t.Fatalf("pending output status = %q, want approved", got)
+	}
+	if got := backend.outputs["out-old"].Status; got != types.TaskOutputStatusPending {
+		t.Fatalf("older wait-group output status = %q, want pending", got)
+	}
+	if got := backend.outputs["out-active"].Status; got != types.TaskOutputStatusActive {
+		t.Fatalf("active output status = %q, want active", got)
+	}
+	if got := len(backend.appendedInputs); got != 1 {
+		t.Fatalf("append count = %d, want 1", got)
+	}
+	if msg := backend.appendedInputs[0].Message; !strings.Contains(msg, "Approved:") || !strings.Contains(msg, "Draft outreach email") {
+		t.Fatalf("appended input message = %q, want approval summary for pending output", msg)
 	}
 }

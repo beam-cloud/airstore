@@ -309,6 +309,22 @@ func TestDraftsRouteReturnsServiceUnavailableWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestDecodeViewRowID(t *testing.T) {
+	got, err := decodeViewRowID("sheet-1%3Ac1%3Atask-1%3Atask")
+	if err != nil {
+		t.Fatalf("decodeViewRowID returned error: %v", err)
+	}
+	if want := "sheet-1:c1:task-1:task"; got != want {
+		t.Fatalf("decoded row id = %q, want %q", got, want)
+	}
+}
+
+func TestDecodeViewRowIDRejectsInvalidEscapes(t *testing.T) {
+	if _, err := decodeViewRowID("sheet-1%ZZ"); err == nil {
+		t.Fatal("expected invalid escape to return error")
+	}
+}
+
 func TestSyncNameDescriptionPrefersTopLevelOverDefinition(t *testing.T) {
 	view := &types.View{
 		Name:        "Top name",

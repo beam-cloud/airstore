@@ -10,10 +10,17 @@ const (
 	TaskOutputMetadataArtifactLabel = "artifact_label"
 	TaskOutputMetadataArtifactKind  = "artifact_kind"
 	TaskOutputMetadataArtifactRole  = "artifact_role"
+	TaskOutputMetadataBlockingKind  = "_blocking_kind"
+	TaskOutputMetadataInputKind     = "_input_kind"
+	TaskOutputMetadataWaitGroupID   = "_wait_group_id"
+	TaskOutputMetadataApprovalUI    = "_approval_surface"
 
 	TaskOutputArtifactRolePrimary    = "primary"
 	TaskOutputArtifactRoleSupporting = "supporting"
 	TaskOutputArtifactRoleIncidental = "incidental"
+
+	TaskOutputBlockingKindApproval = "approval"
+	TaskOutputBlockingKindInput    = "input"
 
 	ResolvedDataStatusOK           = "ok"
 	ResolvedDataStatusEmpty        = "empty"

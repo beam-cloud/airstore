@@ -948,7 +948,7 @@ const (
 	TaskOutputStatusPending    = "pending"
 	TaskOutputStatusApproved   = "approved"
 	TaskOutputStatusRejected   = "rejected"
-	TaskOutputStatusSuperseded = "superseded"
+	TaskOutputStatusCancelled = "cancelled"
 )
 
 type TaskOutputListFilter struct {

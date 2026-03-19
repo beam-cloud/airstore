@@ -8,9 +8,9 @@ import (
 	"os"
 	"strings"
 
+	"github.com/beam-cloud/airstore/pkg/types"
 	baml "github.com/beam-cloud/airstore/pkg/views/baml_client"
 	bamltypes "github.com/beam-cloud/airstore/pkg/views/baml_client/types"
-	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/rs/zerolog/log"
 )
 
@@ -32,10 +32,8 @@ const (
 	EmphasisSecondary = string(bamltypes.SectionEmphasisSECONDARY)
 	EmphasisCollapsed = string(bamltypes.SectionEmphasisCOLLAPSED)
 
-	ActionApprove = "APPROVE"
-	ActionReject  = "REJECT"
-	ActionRetry   = "RETRY"
-	ActionCancel  = "CANCEL"
+	ActionRetry  = "RETRY"
+	ActionCancel = "CANCEL"
 )
 
 // ---------------------------------------------------------------------------
@@ -58,6 +56,23 @@ type ActionSpecJSON struct {
 	Type    string `json:"type" bson:"type"`
 	Label   string `json:"label" bson:"label"`
 	Primary bool   `json:"primary" bson:"primary"`
+}
+
+var (
+	detailSectionConversation = newDetailSection(SectionEmailThread, "Conversation", EmphasisPrimary)
+	detailSectionApproval     = newDetailSection(SectionApproval, "Approval Required", EmphasisPrimary)
+	detailSectionInput        = newDetailSection(SectionInputForm, "Input Required", EmphasisPrimary)
+	detailSectionTaskStatus   = newDetailSection(SectionTaskProgress, "Task Status", EmphasisSecondary)
+	detailSectionOutputs      = newDetailSection(SectionOutputGallery, "Outputs", EmphasisCollapsed)
+	detailSectionSubtasks     = newDetailSection(SectionSubtasks, "Subtasks", EmphasisSecondary)
+)
+
+func newDetailSection(sectionType, title, emphasis string) DetailSectionJSON {
+	return DetailSectionJSON{Type: sectionType, Title: title, Emphasis: emphasis}
+}
+
+func detailSectionDetails(emphasis string) DetailSectionJSON {
+	return newDetailSection(SectionDataSummary, "Details", emphasis)
 }
 
 // ---------------------------------------------------------------------------
@@ -91,69 +106,215 @@ func ResolveLayout(
 	outputs []*types.TaskOutput,
 	subtasks []*types.AgentTask,
 ) DetailLayoutResponse {
-	hasEmail := false
-	hasOtherOutputs := false
-	for _, o := range outputs {
-		if o.OutputType == "email" {
-			hasEmail = true
-		} else {
-			hasOtherOutputs = true
-		}
-	}
-
-	isWaiting := task != nil && task.State == types.AgentTaskStateWaiting
-	isApproval := isWaiting && task.InputKind == types.InputKindApproveReject
-
+	runtime := deriveDetailRuntimeState(task, outputs, subtasks)
 	var sections []DetailSectionJSON
 	for _, s := range template.Sections {
-		switch s.Type {
-		case SectionEmailThread:
-			if hasEmail {
-				sections = append(sections, s)
-			}
-		case SectionApproval:
-			if isApproval {
-				sections = append(sections, s)
-			}
-		case SectionInputForm:
-			if isWaiting && !isApproval {
-				sections = append(sections, s)
-			}
-		case SectionTaskProgress:
-			if task != nil {
-				sections = append(sections, s)
-			}
-		case SectionOutputGallery:
-			if hasOtherOutputs {
-				sections = append(sections, s)
-			}
-		case SectionSubtasks:
-			if len(subtasks) > 0 {
-				sections = append(sections, s)
-			}
-		default:
+		if runtime.includesSection(s.Type) {
 			sections = append(sections, s)
 		}
 	}
+	sections = ensureDetailSections(sections, runtime.requiredSections()...)
+	return DetailLayoutResponse{Sections: sections, Actions: runtime.actions()}
+}
 
-	isTerminal := task != nil && task.State.IsTerminal()
-	isActive := task != nil && !isTerminal
+type detailRuntimeState struct {
+	hasTask            bool
+	isTaskWaiting      bool
+	isTaskError        bool
+	isTaskActive       bool
+	taskInputKind      types.InputKind
+	hasEmail           bool
+	hasOtherOutputs    bool
+	hasApprovalBlocker bool
+	hasInputBlocker    bool
+	hasSubtasks        bool
+}
 
-	var actions []ActionSpecJSON
-	if isApproval {
-		actions = append(actions,
-			ActionSpecJSON{Type: ActionApprove, Label: "Approve", Primary: true},
-			ActionSpecJSON{Type: ActionReject, Label: "Reject", Primary: false},
-		)
+type pendingOutputSignal struct {
+	IsBlocker       bool
+	IsApproval      bool
+	IsInput         bool
+	Kind            string
+	InputKind       string
+	WaitGroupID     string
+	ApprovalSurface bool
+}
+
+func deriveDetailRuntimeState(
+	task *types.AgentTask,
+	outputs []*types.TaskOutput,
+	subtasks []*types.AgentTask,
+) detailRuntimeState {
+	state := detailRuntimeState{
+		hasTask:     task != nil,
+		hasSubtasks: len(subtasks) > 0,
 	}
-	if task != nil && task.State == types.AgentTaskStateError {
+	if task != nil {
+		state.isTaskWaiting = task.State == types.AgentTaskStateWaiting
+		state.isTaskError = task.State == types.AgentTaskStateError
+		state.isTaskActive = !task.State.IsTerminal()
+		state.taskInputKind = task.InputKind
+	}
+	for _, output := range outputs {
+		if output == nil {
+			continue
+		}
+		if output.OutputType == "email" {
+			state.hasEmail = true
+		} else {
+			state.hasOtherOutputs = true
+		}
+		if output.Status != types.TaskOutputStatusPending {
+			continue
+		}
+		signal := classifyPendingOutputSignal(output)
+		switch {
+		case signal.IsApproval:
+			state.hasApprovalBlocker = true
+		case signal.IsInput:
+			state.hasInputBlocker = true
+		}
+	}
+	return state
+}
+
+func (s detailRuntimeState) isWaiting() bool {
+	return s.isTaskWaiting || s.hasApprovalBlocker || s.hasInputBlocker
+}
+
+func (s detailRuntimeState) needsApproval() bool {
+	return s.hasApprovalBlocker || (s.isTaskWaiting && s.taskInputKind == types.InputKindApproveReject)
+}
+
+func (s detailRuntimeState) needsInput() bool {
+	return s.isWaiting() && !s.needsApproval()
+}
+
+func (s detailRuntimeState) includesSection(sectionType string) bool {
+	switch sectionType {
+	case SectionEmailThread:
+		return s.hasEmail
+	case SectionApproval:
+		return s.needsApproval()
+	case SectionInputForm:
+		return s.needsInput()
+	case SectionTaskProgress:
+		return s.hasTask
+	case SectionOutputGallery:
+		return s.hasOtherOutputs
+	case SectionSubtasks:
+		return s.hasSubtasks
+	default:
+		return sectionType == SectionDataSummary
+	}
+}
+
+func (s detailRuntimeState) requiredSections() []DetailSectionJSON {
+	sections := []DetailSectionJSON{
+		detailSectionDetails(EmphasisSecondary),
+	}
+	if s.hasEmail {
+		sections = append(sections, detailSectionConversation)
+	}
+	if s.needsApproval() {
+		sections = append(sections, detailSectionApproval)
+	}
+	if s.needsInput() {
+		sections = append(sections, detailSectionInput)
+	}
+	if s.hasOtherOutputs {
+		sections = append(sections, detailSectionOutputs)
+	}
+	if s.hasSubtasks {
+		sections = append(sections, detailSectionSubtasks)
+	}
+	return sections
+}
+
+func (s detailRuntimeState) actions() []ActionSpecJSON {
+	actions := make([]ActionSpecJSON, 0, 2)
+	if s.isTaskError {
 		actions = append(actions, ActionSpecJSON{Type: ActionRetry, Label: "Retry", Primary: true})
 	}
-	if isActive {
+	if s.isTaskActive {
 		actions = append(actions, ActionSpecJSON{Type: ActionCancel, Label: "Cancel", Primary: false})
 	}
+	return actions
+}
 
-	return DetailLayoutResponse{Sections: sections, Actions: actions}
+func ensureDetailSections(sections []DetailSectionJSON, fallbacks ...DetailSectionJSON) []DetailSectionJSON {
+	for _, fallback := range fallbacks {
+		sections = ensureDetailSection(sections, fallback)
+	}
+	return sections
+}
+
+func ensureDetailSection(sections []DetailSectionJSON, fallback DetailSectionJSON) []DetailSectionJSON {
+	for _, section := range sections {
+		if section.Type == fallback.Type {
+			return sections
+		}
+	}
+	insertAt := len(sections)
+	for i, section := range sections {
+		if section.Type == SectionDataSummary {
+			insertAt = i
+			break
+		}
+	}
+	sections = append(sections, DetailSectionJSON{})
+	copy(sections[insertAt+1:], sections[insertAt:])
+	sections[insertAt] = fallback
+	return sections
+}
+
+func classifyPendingOutputSignal(output *types.TaskOutput) pendingOutputSignal {
+	if output == nil {
+		return pendingOutputSignal{}
+	}
+	blockingKind := metadataStringValue(output.Metadata, types.TaskOutputMetadataBlockingKind)
+	inputKind := metadataStringValue(output.Metadata, types.TaskOutputMetadataInputKind)
+	approvalSurface := metadataBoolValue(output.Metadata, types.TaskOutputMetadataApprovalUI)
+
+	signal := pendingOutputSignal{
+		Kind:            blockingKind,
+		InputKind:       inputKind,
+		WaitGroupID:     metadataStringValue(output.Metadata, types.TaskOutputMetadataWaitGroupID),
+		ApprovalSurface: approvalSurface,
+	}
+	switch {
+	case blockingKind == types.TaskOutputBlockingKindApproval || approvalSurface || inputKind == string(types.InputKindApproveReject):
+		signal.IsBlocker = true
+		signal.IsApproval = true
+	case blockingKind == types.TaskOutputBlockingKindInput || inputKind == string(types.InputKindFreeText):
+		signal.IsBlocker = true
+		signal.IsInput = true
+	}
+	return signal
+}
+
+func metadataBoolValue(values map[string]any, key string) bool {
+	switch typed := values[key].(type) {
+	case bool:
+		return typed
+	case int:
+		return typed != 0
+	case int32:
+		return typed != 0
+	case int64:
+		return typed != 0
+	case float32:
+		return typed != 0
+	case float64:
+		return typed != 0
+	default:
+		switch strings.ToLower(metadataStringValue(values, key)) {
+		case "1", "true", "yes", "on":
+			return true
+		default:
+			return false
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -185,14 +346,12 @@ func InferDetailTemplate(columns []types.ColumnMeta) DetailLayoutResponse {
 	var sections []DetailSectionJSON
 
 	if hasEmailColumns {
-		sections = append(sections, DetailSectionJSON{
-			Type: SectionEmailThread, Title: "Conversation", Emphasis: EmphasisPrimary,
-		})
+		sections = append(sections, detailSectionConversation)
 	}
 
 	sections = append(sections,
-		DetailSectionJSON{Type: SectionApproval, Title: "Approval Required", Emphasis: EmphasisPrimary},
-		DetailSectionJSON{Type: SectionInputForm, Title: "Input Required", Emphasis: EmphasisPrimary},
+		detailSectionApproval,
+		detailSectionInput,
 	)
 
 	dataEmphasis := EmphasisPrimary
@@ -200,10 +359,10 @@ func InferDetailTemplate(columns []types.ColumnMeta) DetailLayoutResponse {
 		dataEmphasis = EmphasisSecondary
 	}
 	sections = append(sections,
-		DetailSectionJSON{Type: SectionDataSummary, Title: "Details", Emphasis: dataEmphasis},
-		DetailSectionJSON{Type: SectionTaskProgress, Title: "Task Status", Emphasis: EmphasisSecondary},
-		DetailSectionJSON{Type: SectionOutputGallery, Title: "Outputs", Emphasis: EmphasisCollapsed},
-		DetailSectionJSON{Type: SectionSubtasks, Title: "Subtasks", Emphasis: EmphasisSecondary},
+		detailSectionDetails(dataEmphasis),
+		detailSectionTaskStatus,
+		detailSectionOutputs,
+		detailSectionSubtasks,
 	)
 
 	return DetailLayoutResponse{Sections: sections}

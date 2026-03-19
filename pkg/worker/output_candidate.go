@@ -154,7 +154,7 @@ func publishOutputCandidate(
 		if err := client.UpdateTaskOutputStatus(ctx, &pb.UpdateTaskOutputStatusRequest{
 			WorkspaceId: ids.workspaceID,
 			OutputId:    predID,
-			Status:      types.TaskOutputStatusSuperseded,
+			Status:      types.TaskOutputStatusCancelled,
 		}); err != nil {
 			log.Warn().Err(err).Str("predecessor", predID).Msg("failed to supersede predecessor output")
 		}

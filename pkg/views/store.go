@@ -40,11 +40,13 @@ type ViewRow struct {
 	StableRef       string            `bson:"stable_ref,omitempty"`
 	SheetID         string            `bson:"sheet_id"`
 	ComponentID     string            `bson:"component_id,omitempty"`
+	Marker          bool              `bson:"marker,omitempty"`
 	GroupID         string            `bson:"group_id"`
 	TaskID          string            `bson:"task_id"`
 	RowKey          string            `bson:"row_key"`
 	SchemaHash      string            `bson:"schema_hash"`
 	OutputIDs       []string          `bson:"output_ids"`
+	OutputSignature string            `bson:"output_signature,omitempty"`
 	SourceOutputIDs []string          `bson:"source_output_ids,omitempty"`
 	Cells           map[string]string `bson:"cells"`
 	Manual          map[string]string `bson:"manual,omitempty"`
@@ -54,9 +56,11 @@ type ViewRow struct {
 // ExcludedRowSnapshot is the data we store when a user deletes a row so the
 // BAML mapper knows not to regenerate it.
 type ExcludedRowSnapshot struct {
-	TaskID string            `bson:"task_id"`
-	RowKey string            `bson:"row_key"`
-	Cells  map[string]string `bson:"cells"`
+	ComponentID     string            `bson:"component_id,omitempty"`
+	TaskID          string            `bson:"task_id"`
+	RowKey          string            `bson:"row_key"`
+	SourceOutputIDs []string          `bson:"source_output_ids,omitempty"`
+	Cells           map[string]string `bson:"cells"`
 }
 
 // MergedCells returns cells with manual edits overlaid on top of BAML-mapped cells.
@@ -183,11 +187,13 @@ func (s *ViewStore) UpsertRows(ctx context.Context, viewID string, rows []ViewRo
 		setFields := bson.D{
 			{Key: "sheet_id", Value: row.SheetID},
 			{Key: "component_id", Value: row.ComponentID},
+			{Key: "marker", Value: row.Marker},
 			{Key: "group_id", Value: row.GroupID},
 			{Key: "task_id", Value: row.TaskID},
 			{Key: "row_key", Value: row.RowKey},
 			{Key: "schema_hash", Value: row.SchemaHash},
 			{Key: "output_ids", Value: row.OutputIDs},
+			{Key: "output_signature", Value: row.OutputSignature},
 			{Key: "source_output_ids", Value: row.SourceOutputIDs},
 			{Key: "cells", Value: row.Cells},
 			{Key: "updated_at", Value: row.UpdatedAt},
@@ -476,9 +482,11 @@ func (s *ViewStore) ExcludeRow(ctx context.Context, viewID, sheetID, rowID strin
 	}
 
 	snapshot := ExcludedRowSnapshot{
-		TaskID: row.TaskID,
-		RowKey: row.RowKey,
-		Cells:  row.MergedCells(),
+		ComponentID:     row.ComponentID,
+		TaskID:          row.TaskID,
+		RowKey:          row.RowKey,
+		SourceOutputIDs: append([]string(nil), row.SourceOutputIDs...),
+		Cells:           row.MergedCells(),
 	}
 
 	_, err := coll.UpdateOne(ctx,
@@ -592,17 +600,17 @@ func (s *ViewStore) DropView(ctx context.Context, viewID string) error {
 
 // WidgetRow is the MongoDB document for resolved widget data.
 type WidgetRow struct {
-	ID         string              `bson:"_id"`
-	SheetID    string              `bson:"sheet_id"`
-	WidgetID   string              `bson:"widget_id"`
-	Type       string              `bson:"type"`
-	Status     string              `bson:"status"`
-	Error      string              `bson:"error,omitempty"`
-	SchemaHash string              `bson:"schema_hash"`
-	Metric     *WidgetMetric       `bson:"metric,omitempty"`
-	MapData    *WidgetMapData      `bson:"map_data,omitempty"`
-	ListData   *WidgetListData     `bson:"list_data,omitempty"`
-	UpdatedAt  time.Time           `bson:"updated_at"`
+	ID         string          `bson:"_id"`
+	SheetID    string          `bson:"sheet_id"`
+	WidgetID   string          `bson:"widget_id"`
+	Type       string          `bson:"type"`
+	Status     string          `bson:"status"`
+	Error      string          `bson:"error,omitempty"`
+	SchemaHash string          `bson:"schema_hash"`
+	Metric     *WidgetMetric   `bson:"metric,omitempty"`
+	MapData    *WidgetMapData  `bson:"map_data,omitempty"`
+	ListData   *WidgetListData `bson:"list_data,omitempty"`
+	UpdatedAt  time.Time       `bson:"updated_at"`
 }
 
 type WidgetMetric struct {

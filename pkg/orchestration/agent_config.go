@@ -74,6 +74,17 @@ func providerForRunner(runner string) string {
 	}
 }
 
+func runnerForModel(model string) string {
+	m := strings.ToLower(strings.TrimSpace(model))
+	if strings.HasPrefix(m, "airstore-") {
+		return AgentRunnerAir
+	}
+	if strings.HasPrefix(m, "claude-") {
+		return AgentRunnerClaudeCode
+	}
+	return ""
+}
+
 func isSupportedProvider(provider string) bool {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case AgentProviderClaude, AgentProviderAir:

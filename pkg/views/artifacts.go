@@ -79,7 +79,32 @@ func (a Artifact) MatchesKey(artifactKey string) bool {
 	if ak == "" || bk == "" {
 		return false
 	}
+	if artifactKeysEquivalent(ak, bk) {
+		return true
+	}
 	return tokenSubset(ak, bk) || tokenSubset(bk, ak)
+}
+
+func artifactKeysEquivalent(left, right string) bool {
+	leftVariants := artifactKeyVariants(left)
+	rightVariants := artifactKeyVariants(right)
+	for variant := range leftVariants {
+		if _, ok := rightVariants[variant]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func artifactKeyVariants(key string) map[string]struct{} {
+	variants := map[string]struct{}{key: {}}
+	switch key {
+	case "sales-email", "outreach-email", "email-draft":
+		variants["sales-email"] = struct{}{}
+		variants["outreach-email"] = struct{}{}
+		variants["email-draft"] = struct{}{}
+	}
+	return variants
 }
 
 func tokenSubset(sub, super string) bool {

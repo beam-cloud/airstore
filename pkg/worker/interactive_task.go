@@ -310,10 +310,11 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	start := time.Now()
 	var runErr error
 	var needsInput bool
+	var inputKind types.InputKind
 	var lastPrompt string
 
 	if tr, ok := runner.(TurnRunner); ok {
-		runErr, needsInput, lastPrompt = w.runTurnSession(sessionCtx, task, sandboxID, tr, env, tw, activityCh, checkNeedsInput, bamlEnv)
+		runErr, needsInput, inputKind, lastPrompt = w.runTurnSession(sessionCtx, task, sandboxID, tr, env, tw, activityCh, checkNeedsInput, bamlEnv)
 	} else {
 		runErr = w.runGenericPTYSession(sessionCtx, task, sandboxID, tw, activityCh)
 	}
@@ -321,7 +322,7 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	mirror.Flush()
 	outputPipeline.Wait()
 
-	if !needsInput && runErr == nil && tw.ringBuf != nil {
+	if runErr == nil && tw.ringBuf != nil {
 		var assistantMessage string
 		if extractor, ok := runner.(ResponseExtractor); ok {
 			assistantMessage = extractor.ExtractResponseText(tw.ringBuf.Bytes(), 24000)
@@ -333,17 +334,32 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 			if trimmed := strings.TrimSpace(lastPrompt); trimmed != "" {
 				userMessage = &trimmed
 			}
-			if err := persistFinalResponseOutput(
-				sessionCtx,
-				w.gatewayClient,
-				task,
-				outputPipeline.tracker,
-				userMessage,
-				assistantMessage,
-				bamlEnv,
-				nil,
-			); err != nil {
-				addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to persist final response output")
+			switch {
+			case !needsInput:
+				if err := persistFinalResponseOutput(
+					sessionCtx,
+					w.gatewayClient,
+					task,
+					outputPipeline.tracker,
+					userMessage,
+					assistantMessage,
+					bamlEnv,
+					nil,
+				); err != nil {
+					addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to persist final response output")
+				}
+			case inputKind == types.InputKindApproveReject:
+				if err := persistApprovalResponseOutput(
+					sessionCtx,
+					w.gatewayClient,
+					task,
+					outputPipeline.tracker,
+					userMessage,
+					assistantMessage,
+					bamlEnv,
+				); err != nil {
+					addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to persist approval response output")
+				}
 			}
 		}
 	}
@@ -420,7 +436,7 @@ func (w *Worker) runTurnSession(
 	activityCh chan<- struct{},
 	checkNeedsInput func(string) (bool, types.InputKind, string),
 	bamlEnv map[string]string,
-) (error, bool, string) {
+) (error, bool, types.InputKind, string) {
 	prompt := strings.TrimSpace(task.Prompt)
 	sessionEnv := cloneMap(env)
 	isFirst := true
@@ -430,7 +446,7 @@ func (w *Worker) runTurnSession(
 
 	for prompt != "" {
 		if ctx.Err() != nil {
-			return ctx.Err(), false, ""
+			return ctx.Err(), false, "", ""
 		}
 
 		w.setRunInteractionState(ctx, task, types.RunInteractionStateWorking)
@@ -446,12 +462,12 @@ func (w *Worker) runTurnSession(
 
 		if isFirst {
 			if err := w.executeFirstTurn(ctx, task, sandboxID, runner, sessionEnv, turnOut, prompt); err != nil {
-				return err, false, ""
+				return err, false, "", ""
 			}
 			isFirst = false
 		} else {
 			if err := w.executeTurn(ctx, task, sandboxID, runner, sessionEnv, turnOut, prompt, TurnArgModeFollowup); err != nil {
-				return err, false, ""
+				return err, false, "", ""
 			}
 		}
 		signalActivity(activityCh)
@@ -460,7 +476,7 @@ func (w *Worker) runTurnSession(
 			if err := w.executeTurn(ctx, task, sandboxID, runner, sessionEnv, turnOut,
 				"Your background tasks / subagents have completed. Please collect and report their results.",
 				TurnArgModeFollowup); err != nil {
-				return err, false, ""
+				return err, false, "", ""
 			}
 			signalActivity(activityCh)
 		}
@@ -490,17 +506,17 @@ func (w *Worker) runTurnSession(
 				prompt = pending
 				continue
 			}
-			return nil, false, prompt
+			return nil, false, "", prompt
 		}
 
 		w.setRunInteractionState(ctx, task, types.RunInteractionStateWaitingForInput)
 		w.setOriginTaskState(ctx, task, types.AgentTaskStateWaiting, inputKind, waitingSummary)
 		prompt = w.waitForFollowupInput(ctx, task, DefaultBetweenTurnsTimeout, activityCh)
 		if prompt == "" {
-			return nil, true, ""
+			return nil, true, inputKind, ""
 		}
 	}
-	return nil, true, ""
+	return nil, true, "", ""
 }
 
 // ---------------------------------------------------------------------------

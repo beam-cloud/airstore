@@ -71,3 +71,58 @@ function ExtractApprovalSummary(context: string) -> ApprovalSummary {
     {{ ctx.output_format }}
   "#
 }
+
+function ExtractApprovalOutput(context: string) -> ExtractedOutput[] {
+  client OutputClassifier
+  prompt #"
+    An AI agent is blocked waiting for human approval. Extract the durable
+    artifact(s) the user is being asked to approve so they can appear in task
+    outputs before approval happens.
+
+    ONLY return outputs when the message contains the actual artifact content,
+    not just a bare yes/no question.
+
+    RETURN AN EMPTY ARRAY when:
+    - The agent only asks "should I proceed?" without showing the draft/content
+    - The message is a status update, question, or short acknowledgement
+    - There is no durable artifact the user would want to revisit
+
+    RETURN OUTPUTS when the message includes the full content being approved,
+    for example:
+    - Draft emails or replies with recipient / subject / body
+    - Draft outreach sequences or follow-up plans with concrete copy
+    - Draft reports, briefs, or documents awaiting approval
+
+    EMAIL DRAFTS:
+    - Set kind = EMAIL_DRAFT
+    - Title should identify the draft itself, ideally by recipient or subject
+    - Content should include only the draft body / material being approved,
+      not the approval request wrapper
+    - Use stable artifact families such as 'email-draft', 'sales-email',
+      'outreach-email', or another durable family key when clearly implied
+    - Include useful data_fields like recipient, subject, channel, company
+
+    NON-EMAIL DRAFTS:
+    - Set kind = REPORT
+    - Persist the full draft/report content in content
+    - Title and summary should describe the artifact, not the approval ask
+
+    MULTI-ENTITY:
+    - If the approval covers multiple distinct drafted artifacts, return one
+      ExtractedOutput per artifact
+    - Cap at 20 artifacts
+
+    General rules:
+    - Strip conversational wrappers like "should I send this?"
+    - Do not invent missing recipients, subjects, or fields
+    - Prefer specific, stable artifact_key values over generic ones when the
+      artifact family is clear from context
+
+    Approval context:
+    ---
+    {{ context }}
+    ---
+
+    {{ ctx.output_format }}
+  "#
+}

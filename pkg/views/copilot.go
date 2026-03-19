@@ -1914,7 +1914,7 @@ COMPONENT TYPES (only two):
     Use when an agent produces multiple artifact families and you need a
     specific one. Omit to include all outputs from the agent.
   - statuses: optional status filter. Values: "active", "pending", "approved",
-    "rejected", "superseded". Omit to include all (default).
+    "rejected", "cancelled". Omit to include all (default).
 
   Config: {
     columns: [{

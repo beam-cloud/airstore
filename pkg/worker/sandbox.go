@@ -1196,6 +1196,9 @@ func (m *SandboxManager) resolvePromptRunner(task types.RunExecution, env map[st
 
 	provider := runnerProviderFromEnv(env)
 	if provider == "" {
+		provider = inferProviderFromModel(env)
+	}
+	if provider == "" {
 		return defaultRunner
 	}
 

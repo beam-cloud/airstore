@@ -2,6 +2,8 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -392,6 +394,21 @@ type finalResponseExtractor func(
 	bamlEnv map[string]string,
 ) ([]signaltypes.ExtractedOutput, error)
 
+type blockingOutputMetadata struct {
+	Kind            string
+	InputKind       types.InputKind
+	WaitGroupID     string
+	ApprovalSurface bool
+}
+
+type assistantResponsePersistOptions struct {
+	Extract       finalResponseExtractor
+	MinLen        int
+	Status        string
+	Blocking      *blockingOutputMetadata
+	FallbackTitle string
+}
+
 func defaultFinalResponseExtractor(
 	ctx context.Context,
 	userMessage *string,
@@ -409,9 +426,27 @@ func defaultFinalResponseExtractor(
 	)
 }
 
-const minResponseOutputLen = 200
+func defaultApprovalResponseExtractor(
+	ctx context.Context,
+	_ *string,
+	assistantMessage string,
+	bamlEnv map[string]string,
+) (out []signaltypes.ExtractedOutput, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("ExtractApprovalOutput panicked: %v", r)
+		}
+	}()
+	return agentsignal.ExtractApprovalOutput(
+		ctx, assistantMessage,
+		agentsignal.WithEnv(bamlEnv),
+	)
+}
 
-func persistFinalResponseOutput(
+const minResponseOutputLen = 200
+const minApprovalOutputLen = 40
+
+func persistAssistantResponseOutputs(
 	ctx context.Context,
 	client taskOutputClient,
 	task types.RunExecution,
@@ -419,23 +454,24 @@ func persistFinalResponseOutput(
 	userMessage *string,
 	assistantMessage string,
 	bamlEnv map[string]string,
-	extract finalResponseExtractor,
+	opts assistantResponsePersistOptions,
 ) error {
 	if client == nil {
 		return nil
 	}
 	assistantMessage = strings.TrimSpace(sanitizeUTF8(assistantMessage))
-	if len(assistantMessage) < minResponseOutputLen {
+	if len(assistantMessage) < opts.MinLen {
 		return nil
 	}
 	if userMessage != nil {
 		sanitized := sanitizeUTF8(*userMessage)
 		userMessage = &sanitized
 	}
+
+	extract := opts.Extract
 	if extract == nil {
 		extract = defaultFinalResponseExtractor
 	}
-
 	outputs, err := extract(ctx, userMessage, assistantMessage, bamlEnv)
 	if err != nil {
 		return err
@@ -453,9 +489,6 @@ func persistFinalResponseOutput(
 			count++
 		}
 	}
-	if count == 0 {
-		return nil
-	}
 
 	var batchID string
 	if count > 1 {
@@ -465,6 +498,18 @@ func persistFinalResponseOutput(
 	promptMeta := ""
 	if userMessage != nil {
 		promptMeta = strings.TrimSpace(*userMessage)
+	}
+
+	if count == 0 {
+		fallback := fallbackAssistantResponseCandidate(assistantMessage, promptMeta, opts)
+		if fallback == nil {
+			return nil
+		}
+		if _, err := publishOutputCandidate(ctx, client, ids, tracker, *fallback); err != nil {
+			log.Warn().Err(err).Str("task", ids.taskID).Str("title", fallback.Title).
+				Msg("assistant response fallback output create failed")
+		}
+		return nil
 	}
 
 	published := 0
@@ -481,7 +526,9 @@ func persistFinalResponseOutput(
 		published++
 
 		c := r.candidate(role)
-		c.OutputType = "text"
+		if c.OutputType == "" {
+			c.OutputType = "text"
+		}
 		c.Data[keyContent] = r.content()
 		c.Metadata[keySource] = sourceAssistantResponse
 		if promptMeta != "" {
@@ -490,13 +537,137 @@ func persistFinalResponseOutput(
 		if batchID != "" {
 			c.Metadata[keyBatchID] = batchID
 		}
+		if opts.Status != "" {
+			c.Status = opts.Status
+		}
+		if opts.Blocking != nil {
+			applyBlockingMetadata(c.Metadata, opts.Blocking)
+		}
 
 		if _, err := publishOutputCandidate(ctx, client, ids, tracker, c); err != nil {
 			log.Warn().Err(err).Str("task", ids.taskID).Str("title", r.title()).
-				Msg("final response output create failed")
+				Msg("assistant response output create failed")
 		}
 	}
 	return nil
+}
+
+func fallbackAssistantResponseCandidate(
+	assistantMessage, promptMeta string,
+	opts assistantResponsePersistOptions,
+) *outputCandidate {
+	if opts.Blocking == nil {
+		return nil
+	}
+	title := strings.TrimSpace(opts.FallbackTitle)
+	if title == "" {
+		return nil
+	}
+	candidate := &outputCandidate{
+		OutputType: "text",
+		Title:      title,
+		Data: map[string]any{
+			keyContent: assistantMessage,
+		},
+		Metadata: map[string]any{
+			keySource: sourceAssistantResponse,
+		},
+		Role:   types.TaskOutputArtifactRolePrimary,
+		Status: opts.Status,
+	}
+	if promptMeta != "" {
+		candidate.Metadata[keySourcePrompt] = promptMeta
+	}
+	applyBlockingMetadata(candidate.Metadata, opts.Blocking)
+	return candidate
+}
+
+func persistFinalResponseOutput(
+	ctx context.Context,
+	client taskOutputClient,
+	task types.RunExecution,
+	tracker *taskOutputTracker,
+	userMessage *string,
+	assistantMessage string,
+	bamlEnv map[string]string,
+	extract finalResponseExtractor,
+) error {
+	if extract == nil {
+		extract = defaultFinalResponseExtractor
+	}
+	return persistAssistantResponseOutputs(
+		ctx,
+		client,
+		task,
+		tracker,
+		userMessage,
+		assistantMessage,
+		bamlEnv,
+		assistantResponsePersistOptions{
+			Extract: extract,
+			MinLen:  minResponseOutputLen,
+		},
+	)
+}
+
+func persistApprovalResponseOutput(
+	ctx context.Context,
+	client taskOutputClient,
+	task types.RunExecution,
+	tracker *taskOutputTracker,
+	userMessage *string,
+	assistantMessage string,
+	bamlEnv map[string]string,
+) error {
+	return persistAssistantResponseOutputs(
+		ctx,
+		client,
+		task,
+		tracker,
+		userMessage,
+		assistantMessage,
+		bamlEnv,
+		assistantResponsePersistOptions{
+			Extract: defaultApprovalResponseExtractor,
+			MinLen:  minApprovalOutputLen,
+			Status:  types.TaskOutputStatusPending,
+			Blocking: &blockingOutputMetadata{
+				Kind:            types.TaskOutputBlockingKindApproval,
+				InputKind:       types.InputKindApproveReject,
+				WaitGroupID:     approvalWaitGroupID(task, assistantMessage),
+				ApprovalSurface: true,
+			},
+			FallbackTitle: "Approval Required",
+		},
+	)
+}
+
+func approvalWaitGroupID(task types.RunExecution, assistantMessage string) string {
+	ids := outputIDsFromTask(task)
+	seed := firstNonEmptyTrimmed(ids.taskID, ids.runID, task.ExternalId)
+	if seed == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(seed + "\n" + strings.TrimSpace(sanitizeUTF8(assistantMessage))))
+	return hex.EncodeToString(sum[:8])
+}
+
+func applyBlockingMetadata(metadata map[string]any, block *blockingOutputMetadata) {
+	if block == nil || metadata == nil {
+		return
+	}
+	if kind := strings.TrimSpace(block.Kind); kind != "" {
+		metadata[types.TaskOutputMetadataBlockingKind] = kind
+	}
+	if inputKind := strings.TrimSpace(string(block.InputKind)); inputKind != "" {
+		metadata[types.TaskOutputMetadataInputKind] = inputKind
+	}
+	if waitGroupID := strings.TrimSpace(block.WaitGroupID); waitGroupID != "" {
+		metadata[types.TaskOutputMetadataWaitGroupID] = waitGroupID
+	}
+	if block.ApprovalSurface {
+		metadata[types.TaskOutputMetadataApprovalUI] = true
+	}
 }
 
 // ---------------------------------------------------------------------------

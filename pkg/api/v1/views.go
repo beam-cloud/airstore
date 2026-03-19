@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -669,6 +670,14 @@ type updateRowRequest struct {
 	Cells map[string]string `json:"cells"`
 }
 
+func decodeViewRowID(raw string) (string, error) {
+	decoded, err := url.PathUnescape(strings.TrimSpace(raw))
+	if err != nil {
+		return "", fmt.Errorf("decode row id: %w", err)
+	}
+	return decoded, nil
+}
+
 func (vg *ViewsGroup) UpdateRow(c echo.Context) error {
 	if vg.store == nil || !vg.store.Available() {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "view row persistence not configured")
@@ -681,7 +690,10 @@ func (vg *ViewsGroup) UpdateRow(c echo.Context) error {
 	ctx := c.Request().Context()
 	viewID := c.Param("view_id")
 	sheetID := c.Param("sheet_id")
-	rowID := c.Param("row_id")
+	rowID, err := decodeViewRowID(c.Param("row_id"))
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid row_id")
+	}
 
 	v, err := vg.backend.GetView(ctx, workspaceID, viewID)
 	if err != nil {
@@ -741,7 +753,10 @@ func (vg *ViewsGroup) RowDetail(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, err.Error())
 	}
 	viewID := c.Param("view_id")
-	rowID := c.Param("row_id")
+	rowID, err := decodeViewRowID(c.Param("row_id"))
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid row_id")
+	}
 	parentTaskID := c.QueryParam("task_id")
 	if parentTaskID == "" {
 		return ErrorResponse(c, http.StatusBadRequest, "task_id query param is required")
@@ -878,7 +893,10 @@ func (vg *ViewsGroup) ExcludeRow(c echo.Context) error {
 	}
 	viewID := c.Param("view_id")
 	sheetID := c.Param("sheet_id")
-	rowID := c.Param("row_id")
+	rowID, err := decodeViewRowID(c.Param("row_id"))
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid row_id")
+	}
 	if err := vg.store.ExcludeRow(c.Request().Context(), viewID, sheetID, rowID); err != nil {
 		log.Error().Err(err).Str("view_id", viewID).Str("sheet_id", sheetID).Str("row_id", rowID).Msg("failed to exclude row")
 		return ErrorResponse(c, http.StatusInternalServerError, "failed to exclude row")
@@ -892,7 +910,10 @@ func (vg *ViewsGroup) RestoreRow(c echo.Context) error {
 	}
 	viewID := c.Param("view_id")
 	sheetID := c.Param("sheet_id")
-	rowID := c.Param("row_id")
+	rowID, err := decodeViewRowID(c.Param("row_id"))
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid row_id")
+	}
 	if err := vg.store.RestoreRow(c.Request().Context(), viewID, sheetID, rowID); err != nil {
 		log.Error().Err(err).Str("view_id", viewID).Str("sheet_id", sheetID).Str("row_id", rowID).Msg("failed to restore row")
 		return ErrorResponse(c, http.StatusInternalServerError, "failed to restore row")
@@ -916,7 +937,10 @@ func (vg *ViewsGroup) RegenerateRow(c echo.Context) error {
 	ctx := c.Request().Context()
 	viewID := c.Param("view_id")
 	sheetID := c.Param("sheet_id")
-	rowID := c.Param("row_id")
+	rowID, err := decodeViewRowID(c.Param("row_id"))
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid row_id")
+	}
 
 	v, err := vg.backend.GetView(ctx, workspaceID, viewID)
 	if err != nil {

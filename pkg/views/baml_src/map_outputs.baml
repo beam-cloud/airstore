@@ -160,15 +160,15 @@ function MapOutputsToSchema(
        If a task has exactly one output, produce one row with row_key = "task".
 
     ENTITY LIFECYCLE:
-    Some outputs have a STATUS field (active, pending, approved, rejected, superseded).
+    Some outputs have a STATUS field (active, pending, approved, rejected, cancelled).
     When multiple outputs represent different stages of the same entity
     (e.g. draft -> sent -> replied for the same email recipient), synthesize
     ONE row per entity with the latest state. Use the STATUS field to
     determine precedence:
     - active outputs represent the current state (default status)
-    - superseded outputs provide historical context but are not current
+    - cancelled outputs are no longer relevant (replaced or task was cancelled)
     - pending outputs are awaiting approval
-    - For status columns, derive from the most recent non-superseded output
+    - For status columns, derive from the most recent non-cancelled output
       (e.g. "Replied" if there is a reply, "Sent" if just sent, "Pending"
       if still awaiting approval, "Rejected" if rejected)
     Include ALL contributing output IDs in source_output_ids regardless of

@@ -1,6 +1,8 @@
 package worker
 
 import (
+	"strings"
+
 	"github.com/beam-cloud/airstore/pkg/types"
 )
 
@@ -73,6 +75,14 @@ type OutputParsingRunner interface {
 // the default stream-json parser (Claude Code format).
 type ResponseExtractor interface {
 	ExtractResponseText(raw []byte, limit int) string
+}
+
+func inferProviderFromModel(env map[string]string) string {
+	model := strings.ToLower(strings.TrimSpace(env[agentModelEnvKey]))
+	if strings.HasPrefix(model, "airstore-") {
+		return "air"
+	}
+	return ""
 }
 
 type TurnArgMode string
