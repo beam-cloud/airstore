@@ -419,7 +419,16 @@ func (w *Worker) executeTask(task types.RunExecution) {
 
 	if err != nil {
 		addTaskExecutionContext(log.Error().Err(err), task).Msg("task execution failed")
-		result = &types.RunExecutionResult{ID: task.ExternalId, ExitCode: -1, Error: err.Error()}
+		if result == nil {
+			result = &types.RunExecutionResult{ID: task.ExternalId, ExitCode: -1, Error: err.Error()}
+		} else {
+			if result.ExitCode == 0 {
+				result.ExitCode = -1
+			}
+			if strings.TrimSpace(result.Error) == "" {
+				result.Error = err.Error()
+			}
+		}
 	}
 
 	// Eager report before cleanup so the UI updates immediately.
@@ -486,7 +495,7 @@ func setTaskResultWithRetry(
 	ctx context.Context,
 	task types.RunExecution,
 	result *types.RunExecutionResult,
-	reportFn func(ctx context.Context, taskID string, exitCode int, errMsg string, attemptID string, waitingForInput bool, wakeSignal *pb.WakeSignal) error,
+	reportFn func(ctx context.Context, taskID string, exitCode int, errMsg string, attemptID string, usage *types.LLMUsage, waitingForInput bool, wakeSignal *pb.WakeSignal) error,
 	sleepFn func(context.Context, time.Duration),
 ) error {
 	attemptID := ""
@@ -528,7 +537,7 @@ func setTaskResultWithRetry(
 		}
 
 		attemptCtx, cancel := context.WithTimeout(ctx, setTaskResultRetryTimeout)
-		lastErr = reportFn(attemptCtx, task.ExternalId, result.ExitCode, result.Error, attemptID, result.WaitingForInput, protoWake)
+		lastErr = reportFn(attemptCtx, task.ExternalId, result.ExitCode, result.Error, attemptID, result.Usage, result.WaitingForInput, protoWake)
 		cancel()
 		if lastErr == nil {
 			return nil

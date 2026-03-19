@@ -247,6 +247,7 @@ type BackendRepository interface {
 	ListAgentRunsFiltered(ctx context.Context, workspaceId uint, filter types.AgentRunListFilter) ([]*types.AgentRun, error)
 	ListActiveRunsBySession(ctx context.Context, workspaceId uint, sessionID string, excludeRunIDs []string, limit int) ([]*types.AgentRun, error)
 	UpdateAgentRunLifecycle(ctx context.Context, runId string, status types.AgentRunStatus, startedAt, endedAt *time.Time, errorMsg *string) error
+	SetAgentRunUsageJSON(ctx context.Context, runId string, usageJSON map[string]any) error
 	SetAgentRunClaim(ctx context.Context, runId string, workerId string, heartbeatAt time.Time, expiresAt time.Time) error
 	ClearAgentRunClaim(ctx context.Context, runId string) error
 	ClearExpiredAgentRunClaim(ctx context.Context, runId string, workerId string, expiresAt time.Time) (bool, error)

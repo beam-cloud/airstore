@@ -133,6 +133,44 @@ func usageCostUSD(usage map[string]any) float64 {
 	return 0
 }
 
+func numericTextToNumericSQL(expr string) string {
+	trimmed := fmt.Sprintf("NULLIF(BTRIM(%s), '')", expr)
+	return fmt.Sprintf(
+		"CASE WHEN %s ~ '^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$' THEN %s::numeric END",
+		trimmed,
+		trimmed,
+	)
+}
+
+func agentRunEffectiveCostSQL(alias string) string {
+	costExpr := "cost_usd"
+	usageExpr := "usage_json"
+	if trimmed := strings.TrimSpace(alias); trimmed != "" {
+		costExpr = trimmed + ".cost_usd"
+		usageExpr = trimmed + ".usage_json"
+	}
+
+	billingCostExpr := numericTextToNumericSQL(fmt.Sprintf("%s->>'billing_total_cost_microusd'", usageExpr))
+	totalCostExpr := numericTextToNumericSQL(fmt.Sprintf("%s->>'total_cost_usd'", usageExpr))
+	costUSDExpr := numericTextToNumericSQL(fmt.Sprintf("%s->>'cost_usd'", usageExpr))
+	usdCostExpr := numericTextToNumericSQL(fmt.Sprintf("%s->>'usd_cost'", usageExpr))
+	legacyCostExpr := numericTextToNumericSQL(fmt.Sprintf("%s->>'cost'", usageExpr))
+
+	return fmt.Sprintf(`
+		CASE
+			WHEN %s > 0 THEN %s
+			ELSE COALESCE(
+				(%s / 1000000.0),
+				%s,
+				%s,
+				%s,
+				%s,
+				0
+			)
+		END
+	`, costExpr, costExpr, billingCostExpr, totalCostExpr, costUSDExpr, usdCostExpr, legacyCostExpr)
+}
+
 func normalizeLimitOffset(limit, offset, defaultLimit, maxLimit int) (int, int) {
 	if limit <= 0 {
 		limit = defaultLimit
@@ -2108,8 +2146,10 @@ func (b *PostgresBackend) ListAgentRunsFiltered(ctx context.Context, workspaceId
 		  AND ($5::text IS NULL OR session_id = $5::text)
 		  AND ($6::timestamptz IS NULL OR created_at >= $6::timestamptz)
 		  AND ($7::timestamptz IS NULL OR created_at <= $7::timestamptz)
+		  AND ($8::timestamptz IS NULL OR updated_at >= $8::timestamptz)
+		  AND ($9::timestamptz IS NULL OR updated_at <= $9::timestamptz)
 		ORDER BY created_at DESC, id DESC
-		LIMIT $8 OFFSET $9
+		LIMIT $10 OFFSET $11
 	`
 
 	rows, err := b.db.QueryContext(
@@ -2122,6 +2162,8 @@ func (b *PostgresBackend) ListAgentRunsFiltered(ctx context.Context, workspaceId
 		optionalStringArg(filter.SessionID),
 		filter.CreatedAfter,
 		filter.CreatedBefore,
+		filter.UpdatedAfter,
+		filter.UpdatedBefore,
 		limit,
 		offset,
 	)
@@ -2222,6 +2264,29 @@ func (b *PostgresBackend) UpdateAgentRunLifecycle(ctx context.Context, runId str
 	res, err := b.db.ExecContext(ctx, query, runId, status, startedAt, endedAt, errorMsg)
 	if err != nil {
 		return fmt.Errorf("update run lifecycle: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return &types.ErrAgentRunNotFound{ID: runId}
+	}
+	return nil
+}
+
+func (b *PostgresBackend) SetAgentRunUsageJSON(ctx context.Context, runId string, usageJSON map[string]any) error {
+	serialized, err := marshalJSONMap(usageJSON)
+	if err != nil {
+		return fmt.Errorf("marshal run usage json: %w", err)
+	}
+
+	query := `
+		UPDATE agent_run
+		SET usage_json = $2,
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1
+	`
+	res, err := b.db.ExecContext(ctx, query, runId, serialized)
+	if err != nil {
+		return fmt.Errorf("set run usage json: %w", err)
 	}
 	affected, _ := res.RowsAffected()
 	if affected == 0 {
@@ -3979,10 +4044,11 @@ func (b *PostgresBackend) GetAgentStats(ctx context.Context, workspaceId uint, a
 	}
 
 	var totalCost sql.NullFloat64
-	_ = b.db.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(cost_usd), 0)
-		FROM agent_run
-		WHERE workspace_id = $1 AND agent_id = $2`, workspaceId, agentID).Scan(&totalCost)
+	totalCostQuery := fmt.Sprintf(`
+		SELECT COALESCE(SUM(%s), 0)
+		FROM agent_run ar
+		WHERE ar.workspace_id = $1 AND ar.agent_id = $2`, agentRunEffectiveCostSQL("ar"))
+	_ = b.db.QueryRowContext(ctx, totalCostQuery, workspaceId, agentID).Scan(&totalCost)
 	if totalCost.Valid {
 		stats.TotalCostUSD = totalCost.Float64
 	}

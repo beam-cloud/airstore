@@ -883,6 +883,7 @@ type runResultProjectorMessage struct {
 	attemptID          string
 	exitCode           int
 	errorText          string
+	llmUsage           *types.LLMUsage
 	resultKey          string
 	retryAttempt       int
 	waitingForInput    bool
@@ -982,6 +983,7 @@ func (s *AgentService) processRunResultMessage(ctx context.Context, message redi
 		attemptID:          strings.TrimSpace(streamValueAsString(message.Values, types.OrchestrationOutboxPayloadAttemptID)),
 		exitCode:           intFromAny(message.Values[types.OrchestrationOutboxPayloadExitCode]),
 		errorText:          streamValueAsString(message.Values, types.OrchestrationOutboxPayloadError),
+		llmUsage:           llmUsageFromStreamValues(message.Values),
 		resultKey:          strings.TrimSpace(streamValueAsString(message.Values, types.OrchestrationOutboxPayloadIdempotency)),
 		retryAttempt:       intFromAny(message.Values[types.OrchestrationOutboxPayloadDispatchAttempt]),
 		waitingForInput:    boolFromAny(message.Values[types.OrchestrationOutboxPayloadWaitingForInput]),
@@ -1000,14 +1002,28 @@ func (s *AgentService) processRunResultMessage(ctx context.Context, message redi
 
 	if err := s.applyRunResultProjectorMessage(ctx, result); err != nil {
 		if s.orchestrationStore != nil {
+			usage := normalizeLLMUsage(result.llmUsage)
+			modelUsageJSON := ""
+			if len(usage.ModelUsage) > 0 {
+				if rawModelUsage, marshalErr := json.Marshal(usage.ModelUsage); marshalErr == nil {
+					modelUsageJSON = string(rawModelUsage)
+				}
+			}
 			_, _ = s.orchestrationStore.PublishRunResultDLQ(ctx, map[string]any{
-				types.OrchestrationOutboxPayloadTaskID:          result.taskID,
-				types.OrchestrationOutboxPayloadAttemptID:       result.attemptID,
-				types.OrchestrationOutboxPayloadExitCode:        result.exitCode,
-				types.OrchestrationOutboxPayloadError:           result.errorText,
-				types.OrchestrationOutboxPayloadReason:          err.Error(),
-				types.OrchestrationOutboxPayloadDispatchAttempt: result.retryAttempt,
-				types.OrchestrationOutboxPayloadIdempotency:     result.resultKey,
+				types.OrchestrationOutboxPayloadTaskID:                      result.taskID,
+				types.OrchestrationOutboxPayloadAttemptID:                   result.attemptID,
+				types.OrchestrationOutboxPayloadExitCode:                    result.exitCode,
+				types.OrchestrationOutboxPayloadError:                       result.errorText,
+				types.OrchestrationOutboxPayloadLLMInputTokens:              usage.InputTokens,
+				types.OrchestrationOutboxPayloadLLMOutputTokens:             usage.OutputTokens,
+				types.OrchestrationOutboxPayloadLLMCacheCreationInputTokens: usage.CacheCreationInputTokens,
+				types.OrchestrationOutboxPayloadLLMCacheReadInputTokens:     usage.CacheReadInputTokens,
+				types.OrchestrationOutboxPayloadLLMTotalTokens:              usage.NormalizedTotal(),
+				types.OrchestrationOutboxPayloadTotalCostUSD:                usage.TotalCostUSD,
+				types.OrchestrationOutboxPayloadLLMModelUsageJSON:           modelUsageJSON,
+				types.OrchestrationOutboxPayloadReason:                      err.Error(),
+				types.OrchestrationOutboxPayloadDispatchAttempt:             result.retryAttempt,
+				types.OrchestrationOutboxPayloadIdempotency:                 result.resultKey,
 			})
 		}
 		_ = s.orchestrationStore.AckRunResults(ctx, message.ID)
@@ -1063,6 +1079,7 @@ func (s *AgentService) applyRunResultProjectorMessage(ctx context.Context, resul
 		result.taskID,
 		result.exitCode,
 		result.errorText,
+		result.llmUsage,
 		result.waitingForInput,
 		wakeSignal,
 	)
@@ -1082,6 +1099,7 @@ func (s *AgentService) finalizeRunAttempt(
 	taskID string,
 	exitCode int,
 	errText string,
+	llmUsage *types.LLMUsage,
 	waitingForInput bool,
 	wakeSignal *types.RunExecutionWakeSignal,
 ) error {
@@ -1117,8 +1135,23 @@ func (s *AgentService) finalizeRunAttempt(
 		types.AgentRunEventPayloadKeyError:     errText,
 		types.AgentRunEventPayloadKeyEvent:     string(types.AgentRunEventFinished),
 	}
+	usage := normalizeLLMUsage(llmUsage)
+	if !usage.IsZero() {
+		payload[types.OrchestrationOutboxPayloadLLMInputTokens] = usage.InputTokens
+		payload[types.OrchestrationOutboxPayloadLLMOutputTokens] = usage.OutputTokens
+		payload[types.OrchestrationOutboxPayloadLLMCacheCreationInputTokens] = usage.CacheCreationInputTokens
+		payload[types.OrchestrationOutboxPayloadLLMCacheReadInputTokens] = usage.CacheReadInputTokens
+		payload[types.OrchestrationOutboxPayloadLLMTotalTokens] = usage.NormalizedTotal()
+		payload[types.OrchestrationOutboxPayloadTotalCostUSD] = usage.TotalCostUSD
+	}
 	if err := s.backend.UpdateAgentRunLifecycle(ctx, attempt.RunID, runStatus, nil, &now, errMsg); err != nil {
 		return fmt.Errorf("update run lifecycle: %w", err)
+	}
+	if usageErr := s.persistRunUsageDelta(ctx, attempt.RunID, llmUsage); usageErr != nil {
+		log.Warn().
+			Err(usageErr).
+			Str("run_id", attempt.RunID).
+			Msg("failed to persist run usage")
 	}
 	if err := s.appendRunSnapshot(ctx, attempt.RunID, runStatus, nil, &now, errMsg, payload); err != nil {
 		return fmt.Errorf("append completion snapshot: %w", err)
@@ -1162,6 +1195,144 @@ func (s *AgentService) updateExecutionInstanceCounts(ctx context.Context, runID 
 	}
 	now := time.Now()
 	return s.backend.AdjustExecutionInstanceRunningAttempts(ctx, instanceKey, runningDelta, &now)
+}
+
+func llmUsageFromStreamValues(values map[string]any) *types.LLMUsage {
+	if len(values) == 0 {
+		return nil
+	}
+	usage := &types.LLMUsage{
+		InputTokens:              int64(intFromAny(values[types.OrchestrationOutboxPayloadLLMInputTokens])),
+		OutputTokens:             int64(intFromAny(values[types.OrchestrationOutboxPayloadLLMOutputTokens])),
+		CacheCreationInputTokens: int64(intFromAny(values[types.OrchestrationOutboxPayloadLLMCacheCreationInputTokens])),
+		CacheReadInputTokens:     int64(intFromAny(values[types.OrchestrationOutboxPayloadLLMCacheReadInputTokens])),
+		TotalTokens:              int64(intFromAny(values[types.OrchestrationOutboxPayloadLLMTotalTokens])),
+		TotalCostUSD:             float64FromAny(values[types.OrchestrationOutboxPayloadTotalCostUSD]),
+		ModelUsage:               modelUsageFromValue(values[types.OrchestrationOutboxPayloadLLMModelUsageJSON]),
+	}
+	normalized := usage.Normalized()
+	if normalized.IsZero() {
+		return nil
+	}
+	return normalized
+}
+
+func normalizeLLMUsage(raw *types.LLMUsage) *types.LLMUsage {
+	if raw == nil {
+		return &types.LLMUsage{}
+	}
+	return raw.Normalized()
+}
+
+func (s *AgentService) persistRunUsageDelta(ctx context.Context, runID string, delta *types.LLMUsage) error {
+	normalized := normalizeLLMUsage(delta)
+	if normalized.IsZero() {
+		return nil
+	}
+	run, err := s.backend.GetAgentRunByID(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if run == nil {
+		return nil
+	}
+	merged := mergeRunUsageJSON(run.UsageJSON, normalized)
+	return s.backend.SetAgentRunUsageJSON(ctx, runID, merged)
+}
+
+func mergeRunUsageJSON(base map[string]any, delta *types.LLMUsage) map[string]any {
+	out := cloneAnyMap(base)
+	out[types.AgentRunUsageKeyVersion] = types.AgentRunUsageVersion
+
+	baseUsage := (&types.LLMUsage{
+		InputTokens:              usageValueFromMap(out, types.AgentRunUsageKeyLLMInputTokens),
+		OutputTokens:             usageValueFromMap(out, types.AgentRunUsageKeyLLMOutputTokens),
+		CacheCreationInputTokens: usageValueFromMap(out, types.AgentRunUsageKeyLLMCacheCreationTokens),
+		CacheReadInputTokens:     usageValueFromMap(out, types.AgentRunUsageKeyLLMCacheReadTokens),
+		TotalTokens:              usageValueFromMap(out, types.AgentRunUsageKeyLLMTotalTokens),
+		TotalCostUSD:             float64ValueFromMap(out, types.AgentRunUsageKeyTotalCostUSD),
+		BillingTotalCostMicrousd: usageValueFromMap(out, types.AgentRunUsageKeyBillingTotalCostMicrousd),
+		ModelUsage:               modelUsageFromValue(out[types.AgentRunUsageKeyModelUsage]),
+	}).Normalized()
+	merged := types.MergeLLMUsage(baseUsage, delta)
+
+	out[types.AgentRunUsageKeyLLMInputTokens] = merged.InputTokens
+	out[types.AgentRunUsageKeyLLMOutputTokens] = merged.OutputTokens
+	out[types.AgentRunUsageKeyLLMCacheCreationTokens] = merged.CacheCreationInputTokens
+	out[types.AgentRunUsageKeyLLMCacheReadTokens] = merged.CacheReadInputTokens
+	out[types.AgentRunUsageKeyLLMTotalTokens] = merged.TotalTokens
+	out[types.AgentRunUsageKeyTotalCostUSD] = merged.TotalCostUSD
+	out[types.AgentRunUsageKeyBillingTotalCostMicrousd] = merged.BillingTotalCostMicrousd
+	out[types.AgentRunUsageKeyModelUsage] = merged.ModelUsage
+	delete(out, types.AgentRunUsageKeyLegacyBillingTotalTokens)
+	return out
+}
+
+func usageValueFromMap(source map[string]any, key string) int64 {
+	if len(source) == 0 {
+		return 0
+	}
+	return int64(intFromAny(source[key]))
+}
+
+func float64ValueFromMap(source map[string]any, key string) float64 {
+	if len(source) == 0 {
+		return 0
+	}
+	return float64FromAny(source[key])
+}
+
+func modelUsageFromValue(value any) map[string]types.LLMModelUsage {
+	if value == nil {
+		return map[string]types.LLMModelUsage{}
+	}
+
+	var raw map[string]any
+	switch typed := value.(type) {
+	case string:
+		if strings.TrimSpace(typed) == "" {
+			return map[string]types.LLMModelUsage{}
+		}
+		if err := json.Unmarshal([]byte(typed), &raw); err != nil {
+			return map[string]types.LLMModelUsage{}
+		}
+	case map[string]any:
+		raw = typed
+	default:
+		marshaled, err := json.Marshal(typed)
+		if err != nil {
+			return map[string]types.LLMModelUsage{}
+		}
+		if err := json.Unmarshal(marshaled, &raw); err != nil {
+			return map[string]types.LLMModelUsage{}
+		}
+	}
+
+	out := make(map[string]types.LLMModelUsage, len(raw))
+	for key, rawModel := range raw {
+		modelMap, ok := rawModel.(map[string]any)
+		if !ok {
+			marshaled, err := json.Marshal(rawModel)
+			if err != nil {
+				continue
+			}
+			if err := json.Unmarshal(marshaled, &modelMap); err != nil {
+				continue
+			}
+		}
+		out[key] = types.LLMModelUsage{
+			InputTokens:              int64(intFromAny(modelMap["input_tokens"])),
+			OutputTokens:             int64(intFromAny(modelMap["output_tokens"])),
+			CacheCreationInputTokens: int64(intFromAny(modelMap["cache_creation_input_tokens"])),
+			CacheReadInputTokens:     int64(intFromAny(modelMap["cache_read_input_tokens"])),
+			TotalTokens:              int64(intFromAny(modelMap["total_tokens"])),
+			CostUSD:                  float64FromAny(modelMap["cost_usd"]),
+			WebSearchRequests:        int64(intFromAny(modelMap["web_search_requests"])),
+			ContextWindow:            int64(intFromAny(modelMap["context_window"])),
+			MaxOutputTokens:          int64(intFromAny(modelMap["max_output_tokens"])),
+		}.Normalized()
+	}
+	return out
 }
 
 func streamValueAsString(values map[string]any, key string) string {
@@ -2821,6 +2992,29 @@ func intFromAny(value any) int {
 	case string:
 		var parsed int
 		if _, err := fmt.Sscanf(strings.TrimSpace(typed), "%d", &parsed); err == nil {
+			return parsed
+		}
+		return 0
+	default:
+		return 0
+	}
+}
+
+func float64FromAny(value any) float64 {
+	switch typed := value.(type) {
+	case int:
+		return float64(typed)
+	case int32:
+		return float64(typed)
+	case int64:
+		return float64(typed)
+	case float32:
+		return float64(typed)
+	case float64:
+		return typed
+	case string:
+		var parsed float64
+		if _, err := fmt.Sscanf(strings.TrimSpace(typed), "%f", &parsed); err == nil {
 			return parsed
 		}
 		return 0

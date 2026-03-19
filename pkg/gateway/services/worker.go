@@ -340,26 +340,7 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 	}
 
 	resultKey := fmt.Sprintf("run_result:%s:%s", strings.TrimSpace(req.TaskId), attemptID)
-	payload := map[string]any{
-		types.OrchestrationOutboxPayloadTaskID:          strings.TrimSpace(req.TaskId),
-		types.OrchestrationOutboxPayloadAttemptID:       attemptID,
-		types.OrchestrationOutboxPayloadExitCode:        int(req.ExitCode),
-		types.OrchestrationOutboxPayloadError:           req.Error,
-		types.OrchestrationOutboxPayloadIdempotency:     resultKey,
-		types.OrchestrationOutboxPayloadWaitingForInput: req.WaitingForInput,
-	}
-	if ws := req.WakeSignal; ws != nil {
-		payload[types.OrchestrationOutboxPayloadWakeDelayMinutes] = int(ws.DelayMinutes)
-		payload[types.OrchestrationOutboxPayloadWakeReason] = ws.Reason
-		payload[types.OrchestrationOutboxPayloadWakeFollowUpPrompt] = ws.FollowUpPrompt
-		if len(ws.WakeAgenda) > 0 {
-			agendaJSON, err := json.Marshal(ws.WakeAgenda)
-			if err != nil {
-				return nil, status.Errorf(codes.Internal, "failed to encode wake agenda: %v", err)
-			}
-			payload[types.OrchestrationOutboxPayloadWakeAgenda] = string(agendaJSON)
-		}
-	}
+	payload := buildRunResultOutboxPayload(req, attemptID, resultKey)
 	if err := s.backend.EnqueueOrchestrationOutboxEvent(ctx, &types.OrchestrationOutboxEvent{
 		EventType:   types.OrchestrationOutboxEventTypeRunResult,
 		DedupeKey:   resultKey,
@@ -370,6 +351,36 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 	}
 
 	return &pb.SetTaskResultResponse{}, nil
+}
+
+func buildRunResultOutboxPayload(req *pb.SetTaskResultRequest, attemptID string, resultKey string) map[string]any {
+	payload := map[string]any{
+		types.OrchestrationOutboxPayloadTaskID:                      strings.TrimSpace(req.TaskId),
+		types.OrchestrationOutboxPayloadAttemptID:                   attemptID,
+		types.OrchestrationOutboxPayloadExitCode:                    int(req.ExitCode),
+		types.OrchestrationOutboxPayloadError:                       req.Error,
+		types.OrchestrationOutboxPayloadLLMInputTokens:              req.LlmInputTokens,
+		types.OrchestrationOutboxPayloadLLMOutputTokens:             req.LlmOutputTokens,
+		types.OrchestrationOutboxPayloadLLMCacheCreationInputTokens: req.LlmCacheCreationInputTokens,
+		types.OrchestrationOutboxPayloadLLMCacheReadInputTokens:     req.LlmCacheReadInputTokens,
+		types.OrchestrationOutboxPayloadLLMTotalTokens:              req.LlmTotalTokens,
+		types.OrchestrationOutboxPayloadTotalCostUSD:                req.TotalCostUsd,
+		types.OrchestrationOutboxPayloadLLMModelUsageJSON:           req.LlmModelUsageJson,
+		types.OrchestrationOutboxPayloadIdempotency:                 resultKey,
+		types.OrchestrationOutboxPayloadWaitingForInput:             req.WaitingForInput,
+	}
+	if ws := req.WakeSignal; ws != nil {
+		payload[types.OrchestrationOutboxPayloadWakeDelayMinutes] = int(ws.DelayMinutes)
+		payload[types.OrchestrationOutboxPayloadWakeReason] = ws.Reason
+		payload[types.OrchestrationOutboxPayloadWakeFollowUpPrompt] = ws.FollowUpPrompt
+		if len(ws.WakeAgenda) > 0 {
+			agendaJSON, err := json.Marshal(ws.WakeAgenda)
+			if err == nil {
+				payload[types.OrchestrationOutboxPayloadWakeAgenda] = string(agendaJSON)
+			}
+		}
+	}
+	return payload
 }
 
 func (s *WorkerService) UpdateTaskState(ctx context.Context, req *pb.UpdateTaskStateRequest) (*pb.UpdateTaskStateResponse, error) {

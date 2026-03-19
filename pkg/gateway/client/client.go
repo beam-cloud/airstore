@@ -259,17 +259,34 @@ func (c *GatewayClient) SetTaskStarted(ctx context.Context, taskID string, attem
 }
 
 // SetTaskResult reports the result of a task to the gateway.
-func (c *GatewayClient) SetTaskResult(ctx context.Context, taskID string, exitCode int, errorMsg string, attemptID string, waitingForInput bool, wakeSignal *pb.WakeSignal) error {
+func (c *GatewayClient) SetTaskResult(
+	ctx context.Context,
+	taskID string,
+	exitCode int,
+	errorMsg string,
+	attemptID string,
+	usage *types.LLMUsage,
+	waitingForInput bool,
+	wakeSignal *pb.WakeSignal,
+) error {
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
 
+	pf := usage.ProtoFields()
 	_, err := c.client.SetTaskResult(ctx, &pb.SetTaskResultRequest{
-		TaskId:          taskID,
-		ExitCode:        int32(exitCode),
-		Error:           errorMsg,
-		AttemptId:       attemptID,
-		WaitingForInput: waitingForInput,
-		WakeSignal:      wakeSignal,
+		TaskId:                      taskID,
+		ExitCode:                    int32(exitCode),
+		Error:                       errorMsg,
+		AttemptId:                   attemptID,
+		LlmInputTokens:              pf.InputTokens,
+		LlmOutputTokens:             pf.OutputTokens,
+		LlmCacheCreationInputTokens: pf.CacheCreationInputTokens,
+		LlmCacheReadInputTokens:     pf.CacheReadInputTokens,
+		LlmTotalTokens:              pf.TotalTokens,
+		TotalCostUsd:                pf.TotalCostUSD,
+		LlmModelUsageJson:           pf.ModelUsageJSON,
+		WaitingForInput:             waitingForInput,
+		WakeSignal:                  wakeSignal,
 	})
 	if err != nil {
 		return fmt.Errorf("set task result failed: %w", err)

@@ -1533,11 +1533,14 @@ func (m *SandboxManager) RunTask(ctx context.Context, task types.RunExecution) (
 	// Ensure cleanup
 	defer m.Delete(sandboxID, true)
 
+	// Set up task output with usage tracking
+	usageParser := NewClaudeStreamUsageParser()
 	pipeline := m.taskOutputPipeline(ctx, task, env)
 	taskOutput := NewTaskOutput(task.ExternalId, "stdout", pipeline.writers...)
 	defer pipeline.Wait()
 	defer taskOutput.Flush()
-	if err := m.SetOutput(sandboxID, taskOutput, taskOutput.Flush); err != nil {
+	outputWriter := io.MultiWriter(taskOutput, usageParser)
+	if err := m.SetOutput(sandboxID, outputWriter, taskOutput.Flush); err != nil {
 		addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to set output")
 	}
 
@@ -1568,6 +1571,7 @@ func (m *SandboxManager) RunTask(ctx context.Context, task types.RunExecution) (
 				ID:       task.ExternalId,
 				ExitCode: exitCode,
 				Error:    errMsg,
+				Usage:    usageParser.Snapshot(),
 				Duration: time.Since(startTime),
 			}, nil
 
@@ -1593,6 +1597,7 @@ func (m *SandboxManager) RunTask(ctx context.Context, task types.RunExecution) (
 					ID:       task.ExternalId,
 					ExitCode: state.ExitCode,
 					Error:    state.Error,
+					Usage:    usageParser.Snapshot(),
 					Duration: time.Since(startTime),
 				}, nil
 			}

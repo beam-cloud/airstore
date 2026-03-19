@@ -326,11 +326,15 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	var runErr error
 	var needsInput bool
 	var lastPrompt string
+	var usage *types.LLMUsage
 
 	if tr, ok := runner.(TurnRunner); ok {
-		runErr, needsInput, lastPrompt = w.runTurnSession(sessionCtx, task, sandboxID, tr, env, tw, activityCh, checkNeedsInput)
+		usage, runErr, needsInput, lastPrompt = w.runTurnSession(sessionCtx, task, sandboxID, tr, env, tw, activityCh, checkNeedsInput)
 	} else {
-		runErr = w.runGenericPTYSession(sessionCtx, task, sandboxID, tw, activityCh)
+		genericParser := NewClaudeStreamUsageParser()
+		genericStdout := io.MultiWriter(tw, genericParser)
+		runErr = w.runGenericPTYSession(sessionCtx, task, sandboxID, genericStdout, activityCh)
+		usage = genericParser.Snapshot()
 	}
 
 	mirror.Flush()
@@ -368,7 +372,7 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	}
 
 	return &types.RunExecutionResult{
-		ID: task.ExternalId, ExitCode: exitCode, Error: errMsg,
+		ID: task.ExternalId, ExitCode: exitCode, Error: errMsg, Usage: usage,
 		Duration: time.Since(start), WaitingForInput: needsInput, WakeSignal: wakeSignal,
 	}
 }
@@ -690,44 +694,54 @@ func (w *Worker) runTurnSession(
 	stdout io.Writer,
 	activityCh chan<- struct{},
 	checkNeedsInput func(string) (bool, types.InputKind, string),
-) (error, bool, string) {
+) (*types.LLMUsage, error, bool, string) {
 	prompt := strings.TrimSpace(task.Prompt)
 	sessionEnv := cloneMap(env)
 	isFirst := true
+	var totalUsage *types.LLMUsage
 
 	for prompt != "" {
 		if ctx.Err() != nil {
-			return ctx.Err(), false, ""
+			return totalUsage, ctx.Err(), false, ""
 		}
 
 		w.setRunInteractionState(ctx, task, types.RunInteractionStateWorking)
 		if !isFirst {
 			w.setOriginTaskState(ctx, task, types.AgentTaskStateRunning, "")
 		}
+		turnUsageParser := NewClaudeStreamUsageParser()
+		turnStdout := io.MultiWriter(stdout, turnUsageParser)
 
 		if isFirst {
-			if err := w.executeFirstTurn(ctx, task, sandboxID, runner, sessionEnv, stdout, prompt); err != nil {
-				return err, false, ""
+			if err := w.executeFirstTurn(ctx, task, sandboxID, runner, sessionEnv, turnStdout, prompt); err != nil {
+				totalUsage = types.MergeLLMUsage(totalUsage, turnUsageParser.Snapshot())
+				return totalUsage, err, false, ""
 			}
 			isFirst = false
 		} else {
-			if err := w.executeTurn(ctx, task, sandboxID, runner, sessionEnv, stdout, prompt, TurnArgModeFollowup); err != nil {
-				return err, false, ""
+			if err := w.executeTurn(ctx, task, sandboxID, runner, sessionEnv, turnStdout, prompt, TurnArgModeFollowup); err != nil {
+				totalUsage = types.MergeLLMUsage(totalUsage, turnUsageParser.Snapshot())
+				return totalUsage, err, false, ""
 			}
 		}
+		totalUsage = types.MergeLLMUsage(totalUsage, turnUsageParser.Snapshot())
 		signalActivity(activityCh)
 
 		if w.waitForSubagents(ctx, task, sandboxID, activityCh) == subagentFinished {
-			if err := w.executeTurn(ctx, task, sandboxID, runner, sessionEnv, stdout,
+			subUsageParser := NewClaudeStreamUsageParser()
+			subStdout := io.MultiWriter(stdout, subUsageParser)
+			if err := w.executeTurn(ctx, task, sandboxID, runner, sessionEnv, subStdout,
 				"Your background tasks / subagents have completed. Please collect and report their results.",
 				TurnArgModeFollowup); err != nil {
-				return err, false, ""
+				totalUsage = types.MergeLLMUsage(totalUsage, subUsageParser.Snapshot())
+				return totalUsage, err, false, ""
 			}
+			totalUsage = types.MergeLLMUsage(totalUsage, subUsageParser.Snapshot())
 			signalActivity(activityCh)
 		}
 
 		if checkNeedsInput == nil {
-			return nil, false, prompt
+			return totalUsage, nil, false, prompt
 		}
 
 		needsInput, inputKind, waitingSummary := checkNeedsInput(prompt)
@@ -736,7 +750,7 @@ func (w *Worker) runTurnSession(
 				prompt = pending
 				continue
 			}
-			return nil, false, prompt
+			return totalUsage, nil, false, prompt
 		}
 
 		w.setRunInteractionState(ctx, task, types.RunInteractionStateWaitingForInput)
@@ -744,10 +758,10 @@ func (w *Worker) runTurnSession(
 
 		prompt = w.waitForFollowupInput(ctx, task, DefaultBetweenTurnsTimeout, activityCh)
 		if prompt == "" {
-			return nil, true, ""
+			return totalUsage, nil, true, ""
 		}
 	}
-	return nil, true, ""
+	return totalUsage, nil, true, ""
 }
 
 // ---------------------------------------------------------------------------
