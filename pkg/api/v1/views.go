@@ -50,9 +50,7 @@ func NewViewsGroup(g *echo.Group, backend repository.BackendRepository, copilot 
 		vg.g.DELETE("/:view_id/sheets/:sheet_id/rows/:row_id", vg.ExcludeRow)
 		vg.g.POST("/:view_id/sheets/:sheet_id/rows/:row_id/restore", vg.RestoreRow)
 	}
-	if store.Available() {
-		vg.g.GET("/:view_id/rows/:stable_ref/subtasks", vg.ListRowSubtasks)
-	}
+	vg.g.GET("/:view_id/rows/:row_id/detail", vg.RowDetail)
 	vg.g.POST("/drafts", vg.CreateDraft)
 	vg.g.GET("/drafts", vg.ListDrafts)
 	vg.g.GET("/drafts/:draft_id", vg.GetDraft)
@@ -731,30 +729,143 @@ func (vg *ViewsGroup) UpdateRow(c echo.Context) error {
 }
 
 // ---------------------------------------------------------------------------
-// Row subtasks
+// Row detail — reads the schema-level layout template from the component
+// config, resolves per-row section visibility, fetches row data.
+// No BAML per click.
 // ---------------------------------------------------------------------------
 
-func (vg *ViewsGroup) ListRowSubtasks(c echo.Context) error {
+func (vg *ViewsGroup) RowDetail(c echo.Context) error {
 	ctx := c.Request().Context()
+	workspaceID, err := vg.workspaceID(c)
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+	}
 	viewID := c.Param("view_id")
-	stableRef := c.Param("stable_ref")
+	rowID := c.Param("row_id")
+	parentTaskID := c.QueryParam("task_id")
+	if parentTaskID == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "task_id query param is required")
+	}
 
-	rows, err := vg.store.FindRowsByStableRef(ctx, viewID, stableRef)
+	// Single row fetch — used for both subtask binding and component lookup.
+	var row *views.ViewRow
+	if vg.store != nil && vg.store.Available() {
+		row, _ = vg.store.GetRowByID(ctx, viewID, rowID)
+	}
+
+	// Resolve the schema-level layout template from the component config.
+	template := vg.detailTemplateForRow(ctx, workspaceID, viewID, row)
+
+	// Resolve bound subtask: row.SourceOutputIDs → task_spawn_binding → subtask.
+	primaryTaskID := parentTaskID
+	var boundSubtasks []*types.AgentTask
+	if row != nil && len(row.SourceOutputIDs) > 0 {
+		if bound, _ := vg.backend.ListSubtasksByOutputIDs(ctx, row.SourceOutputIDs); len(bound) > 0 {
+			boundSubtasks = bound
+			primaryTaskID = bound[0].ID
+		}
+	}
+
+	task, err := vg.backend.GetTask(ctx, workspaceID, primaryTaskID)
 	if err != nil {
-		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+		return ErrorResponse(c, http.StatusNotFound, "task not found")
 	}
-	var allOutputIDs []string
-	for _, r := range rows {
-		allOutputIDs = append(allOutputIDs, r.SourceOutputIDs...)
+
+	outputs, _ := vg.backend.ListTaskOutputs(ctx, workspaceID, primaryTaskID)
+
+	var subtasks []*types.AgentTask
+	if len(boundSubtasks) > 0 {
+		subtasks = boundSubtasks
+	} else {
+		subtasks, _ = vg.backend.ListSubtasks(ctx, parentTaskID)
 	}
-	if len(allOutputIDs) == 0 {
-		return SuccessResponse(c, []*types.AgentTask{})
+
+	var emailThreads map[string][]views.ThreadMessage
+	if threadIDs := extractThreadIDs(outputs); len(threadIDs) > 0 {
+		fetcher := views.NewEmailThreadFetcher(vg.backend)
+		emailThreads = fetcher.FetchThreads(ctx, workspaceID, threadIDs)
 	}
-	tasks, err := vg.backend.ListSubtasksByOutputIDs(ctx, allOutputIDs)
-	if err != nil {
-		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+
+	layout := views.ResolveLayout(template, task, outputs, subtasks)
+
+	type subtaskSummary struct {
+		ID     string               `json:"id"`
+		State  types.AgentTaskState `json:"state"`
+		Label  string               `json:"label,omitempty"`
+		WakeAt *time.Time           `json:"wake_at,omitempty"`
 	}
-	return SuccessResponse(c, tasks)
+	subtaskList := make([]subtaskSummary, 0, len(subtasks))
+	for _, st := range subtasks {
+		label := ""
+		if st.PayloadJSON != nil {
+			if l, ok := st.PayloadJSON["label"].(string); ok {
+				label = l
+			}
+		}
+		subtaskList = append(subtaskList, subtaskSummary{
+			ID:     st.ID,
+			State:  st.State,
+			Label:  label,
+			WakeAt: st.WakeAt,
+		})
+	}
+
+	return SuccessResponse(c, map[string]any{
+		"layout":         layout,
+		"task":           task,
+		"outputs":        outputs,
+		"email_threads":  emailThreads,
+		"subtasks":       subtaskList,
+		"row_id":         rowID,
+		"parent_task_id": parentTaskID,
+	})
+}
+
+// detailTemplateForRow finds the table component that owns the row and
+// returns its cached or inferred detail layout template.
+func (vg *ViewsGroup) detailTemplateForRow(ctx context.Context, workspaceID uint, viewID string, row *views.ViewRow) views.DetailLayoutResponse {
+	view, err := vg.backend.GetView(ctx, workspaceID, viewID)
+	if err != nil || view == nil {
+		return views.InferDetailTemplate(nil)
+	}
+
+	componentID := ""
+	if row != nil {
+		componentID = row.ComponentID
+	}
+
+	for _, sheet := range view.Definition.Sheets {
+		for _, comp := range sheet.Components {
+			if componentID != "" && comp.ID != componentID {
+				continue
+			}
+			if !comp.IsTable() {
+				continue
+			}
+			return views.DetailTemplateForComponent(&comp)
+		}
+	}
+
+	return views.InferDetailTemplate(nil)
+}
+
+func extractThreadIDs(outputs []*types.TaskOutput) []string {
+	seen := make(map[string]bool)
+	var ids []string
+	for _, o := range outputs {
+		if o.OutputType != "email" {
+			continue
+		}
+		tid, _ := o.Data["thread_id"].(string)
+		if tid == "" {
+			continue
+		}
+		if !seen[tid] {
+			seen[tid] = true
+			ids = append(ids, tid)
+		}
+	}
+	return ids
 }
 
 // ---------------------------------------------------------------------------

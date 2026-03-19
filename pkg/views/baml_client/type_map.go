@@ -25,6 +25,10 @@ var typeMap = map[string]reflect.Type{
 	"STREAM_TYPES.ColumnSchema":      reflect.TypeOf(stream_types.ColumnSchema{}),
 	"TYPES.DataCitation":             reflect.TypeOf(types.DataCitation{}),
 	"STREAM_TYPES.DataCitation":      reflect.TypeOf(stream_types.DataCitation{}),
+	"TYPES.DetailLayout":             reflect.TypeOf(types.DetailLayout{}),
+	"STREAM_TYPES.DetailLayout":      reflect.TypeOf(stream_types.DetailLayout{}),
+	"TYPES.DetailSection":            reflect.TypeOf(types.DetailSection{}),
+	"STREAM_TYPES.DetailSection":     reflect.TypeOf(stream_types.DetailSection{}),
 	"TYPES.ListItemResult":           reflect.TypeOf(types.ListItemResult{}),
 	"STREAM_TYPES.ListItemResult":    reflect.TypeOf(stream_types.ListItemResult{}),
 	"TYPES.ListResult":               reflect.TypeOf(types.ListResult{}),
@@ -48,6 +52,8 @@ var typeMap = map[string]reflect.Type{
 	"TYPES.WidgetResult":             reflect.TypeOf(types.WidgetResult{}),
 	"STREAM_TYPES.WidgetResult":      reflect.TypeOf(stream_types.WidgetResult{}),
 
-	"TYPES.OperationType":  reflect.TypeOf(types.OperationType("")),
-	"TYPES.ViewUpdateType": reflect.TypeOf(types.ViewUpdateType("")),
+	"TYPES.OperationType":   reflect.TypeOf(types.OperationType("")),
+	"TYPES.SectionEmphasis": reflect.TypeOf(types.SectionEmphasis("")),
+	"TYPES.SectionType":     reflect.TypeOf(types.SectionType("")),
+	"TYPES.ViewUpdateType":  reflect.TypeOf(types.ViewUpdateType("")),
 }

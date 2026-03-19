@@ -399,6 +399,7 @@ func (c *Copilot) PublishView(ctx context.Context, draft *Draft, workspaceID uin
 	normalizeViewDefinition(&def)
 	canonicalizeViewAgentRefs(&def, agents, nil)
 	normalizeViewDefinition(&def)
+	classifyDetailTemplates(ctx, &def)
 
 	log.Info().
 		Strs("pre_canon_agents", preCanonAgents).
@@ -948,6 +949,32 @@ func normalizeViewDefinition(def *types.ViewDefinition) {
 // It enforces the same schema invariants used by the copilot publish path.
 func NormalizeDefinition(def *types.ViewDefinition) {
 	normalizeViewDefinition(def)
+}
+
+// classifyDetailTemplates runs BAML once per table component to determine the
+// optimal detail view layout template. The deterministic fallback from
+// normalizeComponentConfig is already in Config["detail_layout"]; this upgrades
+// it with BAML intelligence. Skipped if columns haven't changed.
+func classifyDetailTemplates(ctx context.Context, def *types.ViewDefinition) {
+	for i := range def.Sheets {
+		for j := range def.Sheets[i].Components {
+			comp := &def.Sheets[i].Components[j]
+			if !comp.IsTable() || comp.Config == nil {
+				continue
+			}
+			cols := ConfigColumnsToMeta(comp.Config)
+			if len(cols) == 0 {
+				continue
+			}
+			schemaHash := columnSchemaHash(cols)
+			if existing, ok := comp.Config["detail_layout_hash"].(string); ok && existing == schemaHash {
+				continue
+			}
+			layout := ClassifyDetailTemplate(ctx, comp.Title, cols)
+			comp.Config["detail_layout"] = layout
+			comp.Config["detail_layout_hash"] = schemaHash
+		}
+	}
 }
 
 func ensureUniqueViewScopedID(prefix, raw string, seen map[string]struct{}) string {

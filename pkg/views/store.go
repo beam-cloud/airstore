@@ -133,6 +133,24 @@ func (s *ViewStore) GetRows(ctx context.Context, viewID, sheetID, componentID st
 	return rows, nil
 }
 
+// GetRowByID loads a row by _id only (no sheet filter). Used for detail layout cache lookups.
+func (s *ViewStore) GetRowByID(ctx context.Context, viewID, rowID string) (*ViewRow, error) {
+	if !s.Available() {
+		return nil, nil
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+	var row ViewRow
+	if err := coll.FindOne(ctx, bson.D{
+		{Key: "_id", Value: rowID},
+	}).Decode(&row); err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("find row by id: %w", err)
+	}
+	return &row, nil
+}
+
 func (s *ViewStore) GetRow(ctx context.Context, viewID, sheetID, rowID string) (*ViewRow, error) {
 	if !s.Available() {
 		return nil, nil
@@ -149,23 +167,6 @@ func (s *ViewStore) GetRow(ctx context.Context, viewID, sheetID, rowID string) (
 		return nil, fmt.Errorf("find row: %w", err)
 	}
 	return &row, nil
-}
-
-func (s *ViewStore) FindRowsByStableRef(ctx context.Context, viewID, stableRef string) ([]ViewRow, error) {
-	if !s.Available() {
-		return nil, nil
-	}
-	coll := s.mongo.Collection(s.collectionName(viewID))
-	cursor, err := coll.Find(ctx, bson.D{{Key: "stable_ref", Value: stableRef}})
-	if err != nil {
-		return nil, fmt.Errorf("find rows by stable_ref: %w", err)
-	}
-	defer cursor.Close(ctx)
-	var rows []ViewRow
-	if err := cursor.All(ctx, &rows); err != nil {
-		return nil, fmt.Errorf("decode rows by stable_ref: %w", err)
-	}
-	return rows, nil
 }
 
 // UpsertRows bulk-upserts rows into the view collection.
