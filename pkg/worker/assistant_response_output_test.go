@@ -65,7 +65,7 @@ func TestPersistAssistantResponseOutputsPersistsPendingApprovalArtifact(t *testi
 		}}, nil
 	}
 
-	err := persistAssistantResponseOutputs(
+	created, err := persistAssistantResponseOutputs(
 		context.Background(),
 		client,
 		task,
@@ -87,6 +87,9 @@ func TestPersistAssistantResponseOutputsPersistsPendingApprovalArtifact(t *testi
 	)
 	if err != nil {
 		t.Fatalf("persistAssistantResponseOutputs returned error: %v", err)
+	}
+	if !created {
+		t.Fatal("expected approval artifact to be created")
 	}
 	if got := len(client.createReqs); got != 1 {
 		t.Fatalf("create req count = %d, want 1", got)
@@ -150,7 +153,7 @@ func TestPersistApprovalResponseOutputPublishesWhenTrackerAlreadyCreatedOutput(t
 		}}, nil
 	}
 
-	err := persistAssistantResponseOutputs(
+	created, err := persistAssistantResponseOutputs(
 		context.Background(),
 		client,
 		task,
@@ -174,6 +177,9 @@ func TestPersistApprovalResponseOutputPublishesWhenTrackerAlreadyCreatedOutput(t
 	if err != nil {
 		t.Fatalf("persistAssistantResponseOutputs returned error: %v", err)
 	}
+	if !created {
+		t.Fatal("expected approval artifact to be created")
+	}
 	if got := len(client.createReqs); got != 1 {
 		t.Fatalf("create req count = %d, want 1", got)
 	}
@@ -188,7 +194,7 @@ func TestPersistAssistantResponseOutputsFallsBackWhenApprovalExtractsNothing(t *
 		return nil, nil
 	}
 
-	err := persistAssistantResponseOutputs(
+	created, err := persistAssistantResponseOutputs(
 		context.Background(),
 		client,
 		task,
@@ -211,6 +217,9 @@ func TestPersistAssistantResponseOutputsFallsBackWhenApprovalExtractsNothing(t *
 	)
 	if err != nil {
 		t.Fatalf("persistAssistantResponseOutputs returned error: %v", err)
+	}
+	if !created {
+		t.Fatal("expected fallback approval artifact to be created")
 	}
 	if got := len(client.createReqs); got != 1 {
 		t.Fatalf("create req count = %d, want 1", got)
@@ -253,5 +262,81 @@ func TestPersistAssistantResponseOutputsFallsBackWhenApprovalExtractsNothing(t *
 	}
 	if got := metadata[keySource]; got != sourceAssistantResponse {
 		t.Fatalf("source metadata = %#v, want %q", got, sourceAssistantResponse)
+	}
+}
+
+func TestPersistApprovalOutputBeforeWaitingCreatesBlockingOutput(t *testing.T) {
+	client := &captureOutputClient{}
+	task := testRunExecution()
+	assistantMessage := "Here is the draft email for approval.\n\n**To:** Mike <luke@slai.io>\n**Subject:** Cleaner dev environments for your team\n\nHello Mike."
+
+	created := persistApprovalOutputBeforeWaitingWithFunc(
+		context.Background(),
+		client,
+		task,
+		nil,
+		"Draft a cold outreach email to Mike.",
+		assistantMessage,
+		nil,
+		func(
+			ctx context.Context,
+			client taskOutputClient,
+			task types.RunExecution,
+			tracker *taskOutputTracker,
+			userMessage *string,
+			assistantMessage string,
+			bamlEnv map[string]string,
+		) (bool, error) {
+			content := assistantMessage
+			return persistAssistantResponseOutputs(
+				ctx,
+				client,
+				task,
+				tracker,
+				userMessage,
+				assistantMessage,
+				bamlEnv,
+				assistantResponsePersistOptions{
+					Extract: func(_ context.Context, _ *string, _ string, _ map[string]string) ([]signaltypes.ExtractedOutput, error) {
+						return []signaltypes.ExtractedOutput{{
+							Kind:    signaltypes.OutputKindEMAIL_DRAFT,
+							Title:   "Draft outreach email",
+							Content: &content,
+						}}, nil
+					},
+					MinLen: 1,
+					Status: types.TaskOutputStatusPending,
+					Blocking: &blockingOutputMetadata{
+						Kind:            types.TaskOutputBlockingKindApproval,
+						InputKind:       types.InputKindApproveReject,
+						WaitGroupID:     "wait-now",
+						ApprovalSurface: true,
+					},
+					FallbackTitle: "Approval Required",
+				},
+			)
+		},
+	)
+	if !created {
+		t.Fatal("expected approval output to be persisted before waiting")
+	}
+	if got := len(client.createReqs); got != 1 {
+		t.Fatalf("create req count = %d, want 1", got)
+	}
+
+	req := client.createReqs[0]
+	if got := req.Status; got != types.TaskOutputStatusPending {
+		t.Fatalf("status = %q, want pending", got)
+	}
+
+	var metadata map[string]any
+	if err := json.Unmarshal([]byte(req.MetadataJson), &metadata); err != nil {
+		t.Fatalf("unmarshal metadata json: %v", err)
+	}
+	if got := metadata[types.TaskOutputMetadataBlockingKind]; got != types.TaskOutputBlockingKindApproval {
+		t.Fatalf("blocking_kind = %#v, want %q", got, types.TaskOutputBlockingKindApproval)
+	}
+	if got := metadata[types.TaskOutputMetadataApprovalUI]; got != true {
+		t.Fatalf("approval_surface = %#v, want true", got)
 	}
 }

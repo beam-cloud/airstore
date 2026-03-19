@@ -3,7 +3,7 @@ class ApprovalSummary {
   details string   @description("Clean, readable markdown of the content being approved, with generous spacing. Adapt the format to the content type — emails get To/Subject/Body, batch operations get a numbered list, reports get the full text, actions get a description of what will happen. No emoji, no markdown tables, no status updates, no preamble — only what the user needs to make an approve/reject decision.")
 }
 
-function ExtractApprovalSummary(context: string) -> ApprovalSummary {
+function ExtractApprovalSummary(assistant_text: string) -> ApprovalSummary {
   client ApprovalSummarizer
   prompt #"
     An AI agent is asking a human to approve something. Below is the
@@ -65,14 +65,14 @@ function ExtractApprovalSummary(context: string) -> ApprovalSummary {
 
     Agent output (most recent text):
     ---
-    {{ context }}
+    {{ assistant_text }}
     ---
 
     {{ ctx.output_format }}
   "#
 }
 
-function ExtractApprovalOutput(context: string) -> ExtractedOutput[] {
+function ExtractApprovalOutput(assistant_text: string) -> ExtractedOutput[] {
   client OutputClassifier
   prompt #"
     An AI agent is blocked waiting for human approval. Extract the durable
@@ -120,7 +120,7 @@ function ExtractApprovalOutput(context: string) -> ExtractedOutput[] {
 
     Approval context:
     ---
-    {{ context }}
+    {{ assistant_text }}
     ---
 
     {{ ctx.output_format }}

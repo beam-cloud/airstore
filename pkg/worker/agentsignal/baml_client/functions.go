@@ -243,7 +243,7 @@ func ClassifyTurn(ctx context.Context, message string, opts ...CallOptionFunc) (
 	}
 }
 
-func ExtractApprovalOutput(ctx context.Context, context string, opts ...CallOptionFunc) ([]types.ExtractedOutput, error) {
+func ExtractApprovalOutput(ctx context.Context, assistant_text string, opts ...CallOptionFunc) ([]types.ExtractedOutput, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -259,7 +259,7 @@ func ExtractApprovalOutput(ctx context.Context, context string, opts ...CallOpti
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"context": context},
+		Kwargs: map[string]any{"assistant_text": assistant_text},
 		Env:    getEnvVars(callOpts.env),
 	}
 
@@ -317,7 +317,7 @@ func ExtractApprovalOutput(ctx context.Context, context string, opts ...CallOpti
 	}
 }
 
-func ExtractApprovalSummary(ctx context.Context, context string, opts ...CallOptionFunc) (types.ApprovalSummary, error) {
+func ExtractApprovalSummary(ctx context.Context, assistant_text string, opts ...CallOptionFunc) (types.ApprovalSummary, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -333,7 +333,7 @@ func ExtractApprovalSummary(ctx context.Context, context string, opts ...CallOpt
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"context": context},
+		Kwargs: map[string]any{"assistant_text": assistant_text},
 		Env:    getEnvVars(callOpts.env),
 	}
 

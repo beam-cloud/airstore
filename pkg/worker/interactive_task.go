@@ -20,15 +20,16 @@ import (
 )
 
 const (
-	DefaultBetweenTurnsTimeout = 60 * time.Second
-	mountFlushGracePeriod      = 10 * time.Second
-	sessionLeaseTTL            = 30 * time.Second
-	sessionLeaseRenewInterval  = 10 * time.Second
-	runInteractionTTL          = 30 * time.Minute
-	subagentPollInterval       = 10 * time.Second
-	subagentMaxWait            = 30 * time.Minute
-	subagentProbeTimeout       = 15 * time.Second
-	terminalRingBufSize        = 256 * 1024
+	DefaultBetweenTurnsTimeout  = 60 * time.Second
+	mountFlushGracePeriod       = 10 * time.Second
+	sessionLeaseTTL             = 30 * time.Second
+	sessionLeaseRenewInterval   = 10 * time.Second
+	runInteractionTTL           = 30 * time.Minute
+	subagentPollInterval        = 10 * time.Second
+	subagentMaxWait             = 30 * time.Minute
+	subagentProbeTimeout        = 15 * time.Second
+	terminalRingBufSize         = 256 * 1024
+	approvalMessageExtractLimit = 24000
 )
 
 // subagentWaitOutcome describes why waitForSubagents returned.
@@ -302,7 +303,7 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	}
 
 	// Build the needs-input checker
-	var checkNeedsInput func(string) (bool, types.InputKind, string)
+	var checkNeedsInput func(string) (bool, types.InputKind, string, string)
 	if needsInputRunner != nil {
 		checkNeedsInput = w.buildNeedsInputChecker(sessionCtx, task, needsInputRunner, needsInputPath, tw, bamlEnv)
 	}
@@ -312,9 +313,12 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	var needsInput bool
 	var inputKind types.InputKind
 	var lastPrompt string
+	var approvalOutputPersisted bool
 
 	if tr, ok := runner.(TurnRunner); ok {
-		runErr, needsInput, inputKind, lastPrompt = w.runTurnSession(sessionCtx, task, sandboxID, tr, env, tw, activityCh, checkNeedsInput, bamlEnv)
+		runErr, needsInput, inputKind, lastPrompt, approvalOutputPersisted = w.runTurnSession(
+			sessionCtx, task, sandboxID, tr, env, tw, activityCh, checkNeedsInput, bamlEnv, outputPipeline.tracker,
+		)
 	} else {
 		runErr = w.runGenericPTYSession(sessionCtx, task, sandboxID, tw, activityCh)
 	}
@@ -336,7 +340,7 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 			}
 			switch {
 			case !needsInput:
-				if err := persistFinalResponseOutput(
+				if _, err := persistFinalResponseOutput(
 					sessionCtx,
 					w.gatewayClient,
 					task,
@@ -348,8 +352,8 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 				); err != nil {
 					addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to persist final response output")
 				}
-			case inputKind == types.InputKindApproveReject:
-				if err := persistApprovalResponseOutput(
+			case inputKind == types.InputKindApproveReject && !approvalOutputPersisted:
+				if _, err := persistApprovalResponseOutput(
 					sessionCtx,
 					w.gatewayClient,
 					task,
@@ -393,19 +397,19 @@ func (w *Worker) buildNeedsInputChecker(
 	ctx context.Context, task types.RunExecution,
 	runner NeedsInputRunner, markerPath string,
 	tw *terminalOutputWriter, bamlEnv map[string]string,
-) func(string) (bool, types.InputKind, string) {
-	return func(currentPrompt string) (bool, types.InputKind, string) {
+) func(string) (bool, types.InputKind, string, string) {
+	return func(currentPrompt string) (bool, types.InputKind, string, string) {
 		msg := runner.ReadLastMessage(markerPath)
 		if msg == "" {
-			return false, "", ""
+			return false, "", "", ""
 		}
 		cls, err := agentsignal.ClassifyTurn(ctx, msg, agentsignal.WithEnv(bamlEnv))
 		if err != nil {
-			return false, "", ""
+			return false, "", "", ""
 		}
 
 		if cls.Outcome != signaltypes.TurnOutcomeNEEDS_INPUT {
-			return false, "", ""
+			return false, "", "", ""
 		}
 
 		kind := types.InputKindFreeText
@@ -413,13 +417,69 @@ func (w *Worker) buildNeedsInputChecker(
 			kind = types.InputKind(strings.ToLower(string(*cls.Input_kind)))
 		}
 
+		assistantMessage := msg
 		var summary string
-		if kind == types.InputKindApproveReject && tw.ringBuf != nil {
-			text := extractAssistantText(tw.ringBuf.Bytes(), 4000)
-			summary = w.tryBuildApprovalSummary(ctx, text, bamlEnv)
+		if kind == types.InputKindApproveReject {
+			if tw.ringBuf != nil {
+				if text := extractAssistantText(tw.ringBuf.Bytes(), approvalMessageExtractLimit); text != "" {
+					assistantMessage = text
+				}
+			}
+			summary = w.tryBuildApprovalSummary(ctx, assistantMessage, bamlEnv)
 		}
-		return true, kind, summary
+		return true, kind, summary, assistantMessage
 	}
+}
+
+func persistApprovalOutputBeforeWaiting(
+	ctx context.Context,
+	client taskOutputClient,
+	task types.RunExecution,
+	tracker *taskOutputTracker,
+	prompt string,
+	assistantMessage string,
+	bamlEnv map[string]string,
+) bool {
+	return persistApprovalOutputBeforeWaitingWithFunc(
+		ctx, client, task, tracker, prompt, assistantMessage, bamlEnv, persistApprovalResponseOutput,
+	)
+}
+
+func persistApprovalOutputBeforeWaitingWithFunc(
+	ctx context.Context,
+	client taskOutputClient,
+	task types.RunExecution,
+	tracker *taskOutputTracker,
+	prompt string,
+	assistantMessage string,
+	bamlEnv map[string]string,
+	persist func(
+		context.Context,
+		taskOutputClient,
+		types.RunExecution,
+		*taskOutputTracker,
+		*string,
+		string,
+		map[string]string,
+	) (bool, error),
+) bool {
+	if client == nil {
+		return false
+	}
+	assistantMessage = strings.TrimSpace(assistantMessage)
+	if assistantMessage == "" || len(assistantMessage) < minApprovalOutputLen {
+		return false
+	}
+	var userMessage *string
+	if trimmed := strings.TrimSpace(prompt); trimmed != "" {
+		userMessage = &trimmed
+	}
+	created, err := persist(ctx, client, task, tracker, userMessage, assistantMessage, bamlEnv)
+	if err != nil {
+		addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to persist approval response output before waiting")
+		return false
+	}
+	return created
 }
 
 // ---------------------------------------------------------------------------
@@ -434,19 +494,21 @@ func (w *Worker) runTurnSession(
 	env map[string]string,
 	stdout io.Writer,
 	activityCh chan<- struct{},
-	checkNeedsInput func(string) (bool, types.InputKind, string),
+	checkNeedsInput func(string) (bool, types.InputKind, string, string),
 	bamlEnv map[string]string,
-) (error, bool, types.InputKind, string) {
+	tracker *taskOutputTracker,
+) (error, bool, types.InputKind, string, bool) {
 	prompt := strings.TrimSpace(task.Prompt)
 	sessionEnv := cloneMap(env)
 	isFirst := true
 
 	outputParser, _ := runner.(OutputParsingRunner)
 	var turnBuf bytes.Buffer
+	var approvalOutputPersisted bool
 
 	for prompt != "" {
 		if ctx.Err() != nil {
-			return ctx.Err(), false, "", ""
+			return ctx.Err(), false, "", "", approvalOutputPersisted
 		}
 
 		w.setRunInteractionState(ctx, task, types.RunInteractionStateWorking)
@@ -462,12 +524,12 @@ func (w *Worker) runTurnSession(
 
 		if isFirst {
 			if err := w.executeFirstTurn(ctx, task, sandboxID, runner, sessionEnv, turnOut, prompt); err != nil {
-				return err, false, "", ""
+				return err, false, "", "", approvalOutputPersisted
 			}
 			isFirst = false
 		} else {
 			if err := w.executeTurn(ctx, task, sandboxID, runner, sessionEnv, turnOut, prompt, TurnArgModeFollowup); err != nil {
-				return err, false, "", ""
+				return err, false, "", "", approvalOutputPersisted
 			}
 		}
 		signalActivity(activityCh)
@@ -476,7 +538,7 @@ func (w *Worker) runTurnSession(
 			if err := w.executeTurn(ctx, task, sandboxID, runner, sessionEnv, turnOut,
 				"Your background tasks / subagents have completed. Please collect and report their results.",
 				TurnArgModeFollowup); err != nil {
-				return err, false, "", ""
+				return err, false, "", "", approvalOutputPersisted
 			}
 			signalActivity(activityCh)
 		}
@@ -485,20 +547,22 @@ func (w *Worker) runTurnSession(
 		var needsInput bool
 		var inputKind types.InputKind
 		var waitingSummary string
+		var approvalAssistantMessage string
 
 		if outputParser != nil {
 			var err error
-			needsInput, inputKind, waitingSummary, err = outputParser.ParseTurnOutput(turnBuf.Bytes())
+			needsInput, inputKind, approvalAssistantMessage, err = outputParser.ParseTurnOutput(turnBuf.Bytes())
+			waitingSummary = approvalAssistantMessage
 			if err != nil {
 				addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to parse turn output")
 			}
 			if needsInput && inputKind == types.InputKindApproveReject {
-				if s := w.tryBuildApprovalSummary(ctx, waitingSummary, bamlEnv); s != "" {
+				if s := w.tryBuildApprovalSummary(ctx, approvalAssistantMessage, bamlEnv); s != "" {
 					waitingSummary = s
 				}
 			}
 		} else if checkNeedsInput != nil {
-			needsInput, inputKind, waitingSummary = checkNeedsInput(prompt)
+			needsInput, inputKind, waitingSummary, approvalAssistantMessage = checkNeedsInput(prompt)
 		}
 
 		if !needsInput {
@@ -506,17 +570,22 @@ func (w *Worker) runTurnSession(
 				prompt = pending
 				continue
 			}
-			return nil, false, "", prompt
+			return nil, false, "", prompt, approvalOutputPersisted
 		}
 
+		if inputKind == types.InputKindApproveReject {
+			approvalOutputPersisted = persistApprovalOutputBeforeWaiting(
+				ctx, w.gatewayClient, task, tracker, prompt, approvalAssistantMessage, bamlEnv,
+			)
+		}
 		w.setRunInteractionState(ctx, task, types.RunInteractionStateWaitingForInput)
 		w.setOriginTaskState(ctx, task, types.AgentTaskStateWaiting, inputKind, waitingSummary)
 		prompt = w.waitForFollowupInput(ctx, task, DefaultBetweenTurnsTimeout, activityCh)
 		if prompt == "" {
-			return nil, true, inputKind, ""
+			return nil, true, inputKind, "", approvalOutputPersisted
 		}
 	}
-	return nil, true, "", ""
+	return nil, true, "", "", approvalOutputPersisted
 }
 
 // ---------------------------------------------------------------------------

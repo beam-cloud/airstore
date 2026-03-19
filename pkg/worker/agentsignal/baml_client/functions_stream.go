@@ -265,7 +265,7 @@ func (*stream) ClassifyTurn(ctx context.Context, message string, opts ...CallOpt
 }
 
 // / Streaming version of ExtractApprovalOutput
-func (*stream) ExtractApprovalOutput(ctx context.Context, context string, opts ...CallOptionFunc) (<-chan StreamValue[[]stream_types.ExtractedOutput, []types.ExtractedOutput], error) {
+func (*stream) ExtractApprovalOutput(ctx context.Context, assistant_text string, opts ...CallOptionFunc) (<-chan StreamValue[[]stream_types.ExtractedOutput, []types.ExtractedOutput], error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -273,7 +273,7 @@ func (*stream) ExtractApprovalOutput(ctx context.Context, context string, opts .
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"context": context},
+		Kwargs: map[string]any{"assistant_text": assistant_text},
 		Env:    getEnvVars(callOpts.env),
 	}
 
@@ -339,7 +339,7 @@ func (*stream) ExtractApprovalOutput(ctx context.Context, context string, opts .
 }
 
 // / Streaming version of ExtractApprovalSummary
-func (*stream) ExtractApprovalSummary(ctx context.Context, context string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.ApprovalSummary, types.ApprovalSummary], error) {
+func (*stream) ExtractApprovalSummary(ctx context.Context, assistant_text string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.ApprovalSummary, types.ApprovalSummary], error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -347,7 +347,7 @@ func (*stream) ExtractApprovalSummary(ctx context.Context, context string, opts 
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"context": context},
+		Kwargs: map[string]any{"assistant_text": assistant_text},
 		Env:    getEnvVars(callOpts.env),
 	}
 

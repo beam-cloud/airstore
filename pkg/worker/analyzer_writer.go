@@ -455,13 +455,13 @@ func persistAssistantResponseOutputs(
 	assistantMessage string,
 	bamlEnv map[string]string,
 	opts assistantResponsePersistOptions,
-) error {
+) (bool, error) {
 	if client == nil {
-		return nil
+		return false, nil
 	}
 	assistantMessage = strings.TrimSpace(sanitizeUTF8(assistantMessage))
 	if len(assistantMessage) < opts.MinLen {
-		return nil
+		return false, nil
 	}
 	if userMessage != nil {
 		sanitized := sanitizeUTF8(*userMessage)
@@ -474,12 +474,12 @@ func persistAssistantResponseOutputs(
 	}
 	outputs, err := extract(ctx, userMessage, assistantMessage, bamlEnv)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	ids := outputIDsFromTask(task)
 	if ids.taskID == "" {
-		return nil
+		return false, nil
 	}
 
 	count := 0
@@ -503,16 +503,18 @@ func persistAssistantResponseOutputs(
 	if count == 0 {
 		fallback := fallbackAssistantResponseCandidate(assistantMessage, promptMeta, opts)
 		if fallback == nil {
-			return nil
+			return false, nil
 		}
 		if _, err := publishOutputCandidate(ctx, client, ids, tracker, *fallback); err != nil {
 			log.Warn().Err(err).Str("task", ids.taskID).Str("title", fallback.Title).
 				Msg("assistant response fallback output create failed")
+			return false, nil
 		}
-		return nil
+		return true, nil
 	}
 
 	published := 0
+	publishedAny := false
 	for _, out := range outputs {
 		r := extractedResult{out}
 		if r.isNone() || r.title() == "" || r.content() == "" {
@@ -547,9 +549,11 @@ func persistAssistantResponseOutputs(
 		if _, err := publishOutputCandidate(ctx, client, ids, tracker, c); err != nil {
 			log.Warn().Err(err).Str("task", ids.taskID).Str("title", r.title()).
 				Msg("assistant response output create failed")
+			continue
 		}
+		publishedAny = true
 	}
-	return nil
+	return publishedAny, nil
 }
 
 func fallbackAssistantResponseCandidate(
@@ -591,7 +595,7 @@ func persistFinalResponseOutput(
 	assistantMessage string,
 	bamlEnv map[string]string,
 	extract finalResponseExtractor,
-) error {
+) (bool, error) {
 	if extract == nil {
 		extract = defaultFinalResponseExtractor
 	}
@@ -618,7 +622,7 @@ func persistApprovalResponseOutput(
 	userMessage *string,
 	assistantMessage string,
 	bamlEnv map[string]string,
-) error {
+) (bool, error) {
 	return persistAssistantResponseOutputs(
 		ctx,
 		client,

@@ -800,6 +800,15 @@ func (vg *ViewsGroup) RowDetail(c echo.Context) error {
 		fetcher := views.NewEmailThreadFetcher(vg.backend)
 		emailThreads = fetcher.FetchThreads(ctx, workspaceID, threadIDs)
 	}
+	if synth := syntheticEmailThreads(outputs, emailThreads); len(synth) > 0 {
+		if emailThreads == nil {
+			emailThreads = synth
+		} else {
+			for k, v := range synth {
+				emailThreads[k] = v
+			}
+		}
+	}
 
 	layout := views.ResolveLayout(template, task, outputs, subtasks)
 
@@ -868,19 +877,104 @@ func extractThreadIDs(outputs []*types.TaskOutput) []string {
 	seen := make(map[string]bool)
 	var ids []string
 	for _, o := range outputs {
-		if o.OutputType != "email" {
+		if o == nil || o.OutputType != "email" {
 			continue
 		}
 		tid, _ := o.Data["thread_id"].(string)
 		if tid == "" {
+			tid = gmailThreadIDFromURL(dataString(o.Data, "email_link", "uri"))
+		}
+		if tid == "" {
+			tid = gmailThreadIDFromURL(metadataString(o.Metadata, "deeplink"))
+		}
+		if tid == "" || seen[tid] {
 			continue
 		}
-		if !seen[tid] {
-			seen[tid] = true
-			ids = append(ids, tid)
-		}
+		seen[tid] = true
+		ids = append(ids, tid)
 	}
 	return ids
+}
+
+func gmailThreadIDFromURL(u string) string {
+	u = strings.TrimSpace(u)
+	if !strings.Contains(u, "mail.google.com") {
+		return ""
+	}
+	if idx := strings.LastIndex(u, "/"); idx >= 0 && idx < len(u)-1 {
+		return u[idx+1:]
+	}
+	return ""
+}
+
+func dataString(data map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if v, ok := data[k].(string); ok && strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func metadataString(m map[string]any, key string) string {
+	if m == nil {
+		return ""
+	}
+	v, _ := m[key].(string)
+	return v
+}
+
+// syntheticEmailThreads builds thread messages from output data for email
+// outputs that don't have a real Gmail thread. This ensures the email thread
+// section always shows sent email content.
+func syntheticEmailThreads(outputs []*types.TaskOutput, existing map[string][]views.ThreadMessage) map[string][]views.ThreadMessage {
+	coveredOutputs := make(map[string]bool)
+	for _, msgs := range existing {
+		for _, m := range msgs {
+			coveredOutputs[m.ID] = true
+		}
+	}
+
+	synth := make(map[string][]views.ThreadMessage)
+	for _, o := range outputs {
+		if o == nil || o.OutputType != "email" {
+			continue
+		}
+		if o.Status == types.TaskOutputStatusPending || o.Status == types.TaskOutputStatusApproved {
+			continue
+		}
+		if coveredOutputs[o.ID] {
+			continue
+		}
+
+		recipient := dataString(o.Data, "recipient", "recipient_email", "to")
+		subject := dataString(o.Data, "subject")
+		body := dataString(o.Data, "content", "body", "snippet")
+		if recipient == "" && subject == "" && body == "" {
+			continue
+		}
+
+		threadKey := "output:" + o.ID
+		deeplink := dataString(o.Data, "email_link", "uri")
+		if deeplink == "" {
+			deeplink = metadataString(o.Metadata, "deeplink")
+		}
+
+		synth[threadKey] = []views.ThreadMessage{{
+			ID:         o.ID,
+			ThreadID:   threadKey,
+			From:       "me",
+			To:         recipient,
+			Subject:    subject,
+			Body:       body,
+			Snippet:    dataString(o.Data, "summary"),
+			Date:       o.CreatedAt.UTC().Format(time.RFC3339),
+			Timestamp:  o.CreatedAt.UnixMilli(),
+			IsOutbound: true,
+			Deeplink:   deeplink,
+		}}
+	}
+	return synth
 }
 
 // ---------------------------------------------------------------------------
