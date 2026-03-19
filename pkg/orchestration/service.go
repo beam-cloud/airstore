@@ -311,10 +311,17 @@ func (s *AgentService) AcceptAgentCommand(
 		IdempotencyKey: params.IdempotencyKey,
 		PayloadJSON:    payload,
 		RoutingJSON:    routingToMap(params.Routing),
+		ParentTaskID:   params.ParentTaskID,
 		Priority:       priority,
 		BudgetUSD:      params.BudgetUSD,
 	}
-	if err := s.backend.CreateTaskWithOutbox(ctx, task, nil); err != nil {
+	var dispatch *types.OrchestrationOutboxEvent
+	if params.DispatchDelay > 0 {
+		dispatch = &types.OrchestrationOutboxEvent{
+			AvailableAt: time.Now().Add(params.DispatchDelay),
+		}
+	}
+	if err := s.backend.CreateTaskWithOutbox(ctx, task, dispatch); err != nil {
 		if existing, lookupErr := s.backend.GetTaskByIdempotency(ctx, workspaceID, params.AgentID, params.IdempotencyKey); lookupErr == nil {
 			return existing, true, nil
 		}
@@ -890,6 +897,7 @@ type runResultProjectorMessage struct {
 	wakeReason         string
 	wakeFollowUpPrompt string
 	wakeAgenda         []*types.TaskWakeAgendaItem
+	subtaskRequests    []*types.SubtaskRequest
 }
 
 func parseWakeAgendaPayload(raw string) []*types.TaskWakeAgendaItem {
@@ -924,6 +932,24 @@ func parseWakeAgendaPayload(raw string) []*types.TaskWakeAgendaItem {
 		})
 	}
 	return items
+}
+
+func parseSubtaskRequestsPayload(raw string) []*types.SubtaskRequest {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var reqs []*types.SubtaskRequest
+	if err := json.Unmarshal([]byte(raw), &reqs); err != nil {
+		return nil
+	}
+	filtered := reqs[:0]
+	for _, r := range reqs {
+		if strings.TrimSpace(r.Prompt) != "" {
+			filtered = append(filtered, r)
+		}
+	}
+	return filtered
 }
 
 func (s *AgentService) resultProjectorLoop(ctx context.Context) {
@@ -989,6 +1015,7 @@ func (s *AgentService) processRunResultMessage(ctx context.Context, message redi
 		wakeReason:         streamValueAsString(message.Values, types.OrchestrationOutboxPayloadWakeReason),
 		wakeFollowUpPrompt: streamValueAsString(message.Values, types.OrchestrationOutboxPayloadWakeFollowUpPrompt),
 		wakeAgenda:         parseWakeAgendaPayload(streamValueAsString(message.Values, types.OrchestrationOutboxPayloadWakeAgenda)),
+		subtaskRequests:    parseSubtaskRequestsPayload(streamValueAsString(message.Values, types.OrchestrationOutboxPayloadSubtaskRequests)),
 	}
 	if result.taskID == "" || result.attemptID == "" {
 		_ = s.orchestrationStore.AckRunResults(ctx, message.ID)
@@ -1065,6 +1092,7 @@ func (s *AgentService) applyRunResultProjectorMessage(ctx context.Context, resul
 		result.errorText,
 		result.waitingForInput,
 		wakeSignal,
+		result.subtaskRequests,
 	)
 }
 
@@ -1084,6 +1112,7 @@ func (s *AgentService) finalizeRunAttempt(
 	errText string,
 	waitingForInput bool,
 	wakeSignal *types.RunExecutionWakeSignal,
+	subtaskReqs []*types.SubtaskRequest,
 ) error {
 	if s.backend == nil || attempt == nil {
 		return nil
@@ -1123,7 +1152,7 @@ func (s *AgentService) finalizeRunAttempt(
 	if err := s.appendRunSnapshot(ctx, attempt.RunID, runStatus, nil, &now, errMsg, payload); err != nil {
 		return fmt.Errorf("append completion snapshot: %w", err)
 	}
-	if err := s.settleOriginTask(ctx, attempt.RunID, waitingForInput, wakeSignal); err != nil {
+	if err := s.settleOriginTask(ctx, attempt.RunID, waitingForInput, wakeSignal, subtaskReqs); err != nil {
 		return fmt.Errorf("settle origin task: %w", err)
 	}
 	return nil
@@ -1140,11 +1169,52 @@ func wakeBackoffDelay(wakeCount, ceilingMinutes int) int {
 	return ceilingMinutes
 }
 
-func (s *AgentService) settleOriginTask(ctx context.Context, runID string, waitingForInput bool, wakeSignal *types.RunExecutionWakeSignal) error {
-	return s.lifecycle.Settle(ctx, runID, &SettleOpts{
+func (s *AgentService) settleOriginTask(ctx context.Context, runID string, waitingForInput bool, wakeSignal *types.RunExecutionWakeSignal, subtaskReqs []*types.SubtaskRequest) error {
+	settleWake := wakeSignal
+	if len(subtaskReqs) > 0 {
+		settleWake = nil
+	}
+	if err := s.lifecycle.Settle(ctx, runID, &SettleOpts{
 		WaitingForInput: waitingForInput,
-		WakeSignal:      wakeSignal,
-	})
+		WakeSignal:      settleWake,
+	}); err != nil {
+		return err
+	}
+	if len(subtaskReqs) == 0 {
+		return nil
+	}
+
+	run, err := s.backend.GetAgentRunByID(ctx, runID)
+	if err != nil || run == nil {
+		return fmt.Errorf("lookup run for subtask creation: %w", err)
+	}
+	task, err := s.backend.GetTaskByID(ctx, run.OriginTaskID)
+	if err != nil || task == nil {
+		return fmt.Errorf("lookup task for subtask creation: %w", err)
+	}
+
+	for _, req := range subtaskReqs {
+		parentID := task.ID
+		label := req.EntityLabel
+		child, _, err := s.AcceptAgentCommand(ctx, task.WorkspaceID, AgentCommandParams{
+			Message:        req.Prompt,
+			AgentID:        task.AgentID,
+			SessionID:      uuid.NewString(),
+			IdempotencyKey: uuid.NewString(),
+			ParentTaskID:   &parentID,
+			Label:          &label,
+			DispatchDelay:  time.Duration(req.WakeDelayMinutes) * time.Minute,
+		})
+		if err != nil {
+			log.Warn().Err(err).Str("entity", label).Msg("failed to create subtask")
+			continue
+		}
+		if err := s.backend.CreateSpawnBinding(ctx, child.ID, req.SourceOutputID, label); err != nil {
+			log.Warn().Err(err).Str("child_id", child.ID).Msg("spawn binding failed")
+		}
+		log.Info().Str("parent", task.ID).Str("child", child.ID).Str("entity", label).Msg("subtask created")
+	}
+	return nil
 }
 
 func (s *AgentService) updateExecutionInstanceCounts(ctx context.Context, runID string, runningDelta int) error {

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/common"
+	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -36,6 +37,7 @@ func mongoColumnFieldPath(prefix, key string) (string, error) {
 // ViewRow is the MongoDB document schema for a single rendered row in a sheet.
 type ViewRow struct {
 	ID              string            `bson:"_id"`
+	StableRef       string            `bson:"stable_ref,omitempty"`
 	SheetID         string            `bson:"sheet_id"`
 	ComponentID     string            `bson:"component_id,omitempty"`
 	GroupID         string            `bson:"group_id"`
@@ -149,6 +151,23 @@ func (s *ViewStore) GetRow(ctx context.Context, viewID, sheetID, rowID string) (
 	return &row, nil
 }
 
+func (s *ViewStore) FindRowsByStableRef(ctx context.Context, viewID, stableRef string) ([]ViewRow, error) {
+	if !s.Available() {
+		return nil, nil
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+	cursor, err := coll.Find(ctx, bson.D{{Key: "stable_ref", Value: stableRef}})
+	if err != nil {
+		return nil, fmt.Errorf("find rows by stable_ref: %w", err)
+	}
+	defer cursor.Close(ctx)
+	var rows []ViewRow
+	if err := cursor.All(ctx, &rows); err != nil {
+		return nil, fmt.Errorf("decode rows by stable_ref: %w", err)
+	}
+	return rows, nil
+}
+
 // UpsertRows bulk-upserts rows into the view collection.
 // Existing manual edits and excluded flags are preserved — only computed
 // row data is replaced.
@@ -177,11 +196,16 @@ func (s *ViewStore) UpsertRows(ctx context.Context, viewID string, rows []ViewRo
 			setFields = append(setFields, bson.E{Key: "manual", Value: row.Manual})
 		}
 
-		update := bson.D{{Key: "$set", Value: setFields}}
+		insertOnly := bson.D{
+			{Key: "stable_ref", Value: uuid.New().String()},
+		}
 		if len(row.Manual) == 0 {
-			update = append(update, bson.E{Key: "$setOnInsert", Value: bson.D{
-				{Key: "manual", Value: bson.M{}},
-			}})
+			insertOnly = append(insertOnly, bson.E{Key: "manual", Value: bson.M{}})
+		}
+
+		update := bson.D{
+			{Key: "$set", Value: setFields},
+			{Key: "$setOnInsert", Value: insertOnly},
 		}
 
 		models = append(models, mongo.NewUpdateOneModel().
@@ -202,6 +226,52 @@ func (s *ViewStore) UpsertRows(ctx context.Context, viewID string, rows []ViewRo
 		Int64("upserted", result.UpsertedCount).
 		Int64("modified", result.ModifiedCount).
 		Msg("view: upserted rows")
+	return nil
+}
+
+// UpdateSchemaHash stamps a new schema_hash on all rows in a component scope
+// without remapping cells. Used when columns are added — missing cell keys
+// render as empty so no cell mutation is needed.
+func (s *ViewStore) UpdateSchemaHash(ctx context.Context, viewID, sheetID, componentID, schemaHash string) error {
+	if !s.Available() || strings.TrimSpace(schemaHash) == "" {
+		return nil
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+	res, err := coll.UpdateMany(ctx,
+		rowScopeFilter(sheetID, componentID),
+		bson.D{{Key: "$set", Value: bson.D{
+			{Key: "schema_hash", Value: schemaHash},
+			{Key: "updated_at", Value: time.Now()},
+		}}},
+	)
+	if err != nil {
+		return fmt.Errorf("update schema hash: %w", err)
+	}
+	log.Info().
+		Str("view_id", viewID).
+		Str("sheet_id", sheetID).
+		Str("component_id", componentID).
+		Str("schema_hash", schemaHash).
+		Int64("matched", res.MatchedCount).
+		Int64("modified", res.ModifiedCount).
+		Msg("view: updated schema hash for column addition")
+	return nil
+}
+
+// EnsureIndexes creates indexes required for the view collection, including
+// a unique index on stable_ref.
+func (s *ViewStore) EnsureIndexes(ctx context.Context, viewID string) error {
+	if !s.Available() {
+		return nil
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+	_, err := coll.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "stable_ref", Value: 1}},
+		Options: options.Index().SetUnique(true).SetSparse(true),
+	})
+	if err != nil {
+		return fmt.Errorf("ensure stable_ref index: %w", err)
+	}
 	return nil
 }
 

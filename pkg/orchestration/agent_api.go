@@ -424,6 +424,16 @@ func (a *AgentAPI) CancelTask(ctx context.Context, workspaceID uint, taskID stri
 		return &types.ErrTaskNotCancellable{ID: taskID, State: task.State}
 	}
 
+	childIDs, err := a.backend.ListActiveChildTaskIDs(ctx, taskID)
+	if err != nil {
+		log.Warn().Err(err).Str("task_id", taskID).Msg("failed to list active child tasks for cascade cancel")
+	}
+	for _, childID := range childIDs {
+		if err := a.CancelTask(ctx, workspaceID, childID); err != nil {
+			log.Warn().Err(err).Str("parent_task_id", taskID).Str("child_task_id", childID).Msg("failed to cascade cancel child task")
+		}
+	}
+
 	if task.TargetRunID != nil && task.State == types.AgentTaskStateRunning {
 		if err := a.CancelRun(ctx, workspaceID, *task.TargetRunID); err != nil {
 			return err
@@ -521,6 +531,28 @@ func (a *AgentAPI) UpdateTask(ctx context.Context, workspaceID uint, taskID stri
 		a.runtime.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
 	}
 	return sanitizeTaskForResponse(task), nil
+}
+
+func (a *AgentAPI) ListSubtasks(ctx context.Context, parentTaskID string) ([]*types.AgentTask, error) {
+	tasks, err := a.backend.ListSubtasks(ctx, parentTaskID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range tasks {
+		tasks[i] = sanitizeTaskForResponse(tasks[i])
+	}
+	return tasks, nil
+}
+
+func (a *AgentAPI) ListSubtasksByOutputIDs(ctx context.Context, outputIDs []string) ([]*types.AgentTask, error) {
+	tasks, err := a.backend.ListSubtasksByOutputIDs(ctx, outputIDs)
+	if err != nil {
+		return nil, err
+	}
+	for i := range tasks {
+		tasks[i] = sanitizeTaskForResponse(tasks[i])
+	}
+	return tasks, nil
 }
 
 func (a *AgentAPI) GetTaskLogs(ctx context.Context, workspaceID uint, taskID string) ([]common.TaskLogEntry, error) {

@@ -15,58 +15,6 @@ package type_builder
 
 import baml "github.com/boundaryml/baml/engine/language_client_go/pkg"
 
-type ApprovalItemClassView struct {
-	inner baml.ClassBuilder
-}
-
-func (t *ApprovalItemClassView) ListProperties() ([]ClassPropertyView, error) {
-	result, err := t.inner.ListProperties()
-	if err != nil {
-		return nil, err
-	}
-	builders := make([]ClassPropertyView, len(result))
-	for i, p := range result {
-		builders[i] = p
-	}
-	return builders, nil
-}
-
-func (t *ApprovalItemClassView) PropertyItem_key() (ClassPropertyView, error) {
-	return t.inner.Property("item_key")
-}
-
-func (t *ApprovalItemClassView) PropertyKind() (ClassPropertyView, error) {
-	return t.inner.Property("kind")
-}
-
-func (t *ApprovalItemClassView) PropertyTitle() (ClassPropertyView, error) {
-	return t.inner.Property("title")
-}
-
-func (t *ApprovalItemClassView) PropertyDescription() (ClassPropertyView, error) {
-	return t.inner.Property("description")
-}
-
-func (t *ApprovalItemClassView) PropertyDetails() (ClassPropertyView, error) {
-	return t.inner.Property("details")
-}
-
-func (t *ApprovalItemClassView) PropertyData_fields() (ClassPropertyView, error) {
-	return t.inner.Property("data_fields")
-}
-
-func (t *TypeBuilder) ApprovalItem() (*ApprovalItemClassView, error) {
-	bld, err := t.inner.Class("ApprovalItem")
-	if err != nil {
-		return nil, err
-	}
-	return &ApprovalItemClassView{inner: bld}, nil
-}
-
-func (t *ApprovalItemClassView) Type() (baml.Type, error) {
-	return t.inner.Type()
-}
-
 type ApprovalSummaryClassView struct {
 	inner baml.ClassBuilder
 }
@@ -219,6 +167,46 @@ func (t *ExtractedOutputClassView) Type() (baml.Type, error) {
 	return t.inner.Type()
 }
 
+type FanOutSignalClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *FanOutSignalClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *FanOutSignalClassView) PropertyIntent() (ClassPropertyView, error) {
+	return t.inner.Property("intent")
+}
+
+func (t *FanOutSignalClassView) PropertySpecs() (ClassPropertyView, error) {
+	return t.inner.Property("specs")
+}
+
+func (t *FanOutSignalClassView) PropertyReason() (ClassPropertyView, error) {
+	return t.inner.Property("reason")
+}
+
+func (t *TypeBuilder) FanOutSignal() (*FanOutSignalClassView, error) {
+	bld, err := t.inner.Class("FanOutSignal")
+	if err != nil {
+		return nil, err
+	}
+	return &FanOutSignalClassView{inner: bld}, nil
+}
+
+func (t *FanOutSignalClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
 type FollowUpSignalClassView struct {
 	inner baml.ClassBuilder
 }
@@ -264,6 +252,50 @@ func (t *TypeBuilder) FollowUpSignal() (*FollowUpSignalClassView, error) {
 }
 
 func (t *FollowUpSignalClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
+type SubtaskSpecClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *SubtaskSpecClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *SubtaskSpecClassView) PropertySource_output_id() (ClassPropertyView, error) {
+	return t.inner.Property("source_output_id")
+}
+
+func (t *SubtaskSpecClassView) PropertyEntity_label() (ClassPropertyView, error) {
+	return t.inner.Property("entity_label")
+}
+
+func (t *SubtaskSpecClassView) PropertyPrompt() (ClassPropertyView, error) {
+	return t.inner.Property("prompt")
+}
+
+func (t *SubtaskSpecClassView) PropertyWake_delay_minutes() (ClassPropertyView, error) {
+	return t.inner.Property("wake_delay_minutes")
+}
+
+func (t *TypeBuilder) SubtaskSpec() (*SubtaskSpecClassView, error) {
+	bld, err := t.inner.Class("SubtaskSpec")
+	if err != nil {
+		return nil, err
+	}
+	return &SubtaskSpecClassView{inner: bld}, nil
+}
+
+func (t *SubtaskSpecClassView) Type() (baml.Type, error) {
 	return t.inner.Type()
 }
 

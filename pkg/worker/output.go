@@ -265,6 +265,28 @@ func (t *taskOutputTracker) RememberWithID(candidate outputCandidate, serverID s
 	}
 }
 
+// TrackedOutputSummaries returns a list of {serverID, identityKey} pairs
+// for all outputs that were published and have a server-generated ID.
+func (t *taskOutputTracker) TrackedOutputSummaries() []trackedOutputSummary {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var out []trackedOutputSummary
+	for identity, serverID := range t.outputByIdentity {
+		if serverID != "" {
+			out = append(out, trackedOutputSummary{OutputID: serverID, Identity: identity})
+		}
+	}
+	return out
+}
+
+type trackedOutputSummary struct {
+	OutputID string
+	Identity string
+}
+
 // PredecessorID returns the server output ID of a previously tracked output
 // matching the same identity key as candidate, if any.
 func (t *taskOutputTracker) PredecessorID(candidate outputCandidate) string {

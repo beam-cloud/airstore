@@ -50,6 +50,9 @@ func NewViewsGroup(g *echo.Group, backend repository.BackendRepository, copilot 
 		vg.g.DELETE("/:view_id/sheets/:sheet_id/rows/:row_id", vg.ExcludeRow)
 		vg.g.POST("/:view_id/sheets/:sheet_id/rows/:row_id/restore", vg.RestoreRow)
 	}
+	if store.Available() {
+		vg.g.GET("/:view_id/rows/:stable_ref/subtasks", vg.ListRowSubtasks)
+	}
 	vg.g.POST("/drafts", vg.CreateDraft)
 	vg.g.GET("/drafts", vg.ListDrafts)
 	vg.g.GET("/drafts/:draft_id", vg.GetDraft)
@@ -207,6 +210,16 @@ func (vg *ViewsGroup) Update(c echo.Context) error {
 						Str("component_id", deleted.ComponentID).
 						Str("column", deleted.Key).
 						Msg("failed to delete column from MongoDB view store")
+				}
+			}
+			for _, added := range addedViewColumns(previousDefinition, v.Definition) {
+				schemaHash := schemaHashForComponent(v.Definition, added.SheetID, added.ComponentID)
+				if err := vg.store.UpdateSchemaHash(ctx, v.ID, added.SheetID, added.ComponentID, schemaHash); err != nil {
+					log.Warn().Err(err).
+						Str("view_id", v.ID).
+						Str("sheet_id", added.SheetID).
+						Str("component_id", added.ComponentID).
+						Msg("failed to update schema hash for added columns in MongoDB view store")
 				}
 			}
 		}
@@ -397,6 +410,49 @@ func deletedViewColumns(previous, next types.ViewDefinition) []deletedSheetColum
 		}
 	}
 	return deleted
+}
+
+type addedSheetComponent struct {
+	SheetID     string
+	ComponentID string
+}
+
+// addedViewColumns detects components where new columns were added. Returns
+// one entry per affected (sheet, component) pair — the caller stamps the new
+// schema_hash on existing rows so the resolver treats them as fresh instead of
+// triggering a full BAML remap.
+func addedViewColumns(previous, next types.ViewDefinition) []addedSheetComponent {
+	seen := make(map[string]bool)
+	var added []addedSheetComponent
+	for _, sheet := range next.Sheets {
+		for _, component := range sheet.Components {
+			if !component.IsTable() {
+				continue
+			}
+			prevComponent := findComponent(previous, sheet.ID, component.ID)
+			if prevComponent == nil || !prevComponent.IsTable() {
+				continue
+			}
+			prevKeys := componentColumnKeys(*prevComponent)
+			if len(prevKeys) == 0 {
+				continue
+			}
+			for key := range componentColumnKeys(component) {
+				if !prevKeys[key] {
+					k := sheet.ID + ":" + component.ID
+					if !seen[k] {
+						seen[k] = true
+						added = append(added, addedSheetComponent{
+							SheetID:     sheet.ID,
+							ComponentID: component.ID,
+						})
+					}
+					break
+				}
+			}
+		}
+	}
+	return added
 }
 
 func findComponent(def types.ViewDefinition, sheetID, componentID string) *types.ComponentSpec {
@@ -672,6 +728,33 @@ func (vg *ViewsGroup) UpdateRow(c echo.Context) error {
 		"row_id":   rowID,
 		"cells":    row.MergedCells(),
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Row subtasks
+// ---------------------------------------------------------------------------
+
+func (vg *ViewsGroup) ListRowSubtasks(c echo.Context) error {
+	ctx := c.Request().Context()
+	viewID := c.Param("view_id")
+	stableRef := c.Param("stable_ref")
+
+	rows, err := vg.store.FindRowsByStableRef(ctx, viewID, stableRef)
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+	var allOutputIDs []string
+	for _, r := range rows {
+		allOutputIDs = append(allOutputIDs, r.SourceOutputIDs...)
+	}
+	if len(allOutputIDs) == 0 {
+		return SuccessResponse(c, []*types.AgentTask{})
+	}
+	tasks, err := vg.backend.ListSubtasksByOutputIDs(ctx, allOutputIDs)
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+	return SuccessResponse(c, tasks)
 }
 
 // ---------------------------------------------------------------------------

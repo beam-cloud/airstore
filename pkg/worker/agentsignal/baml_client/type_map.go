@@ -21,21 +21,24 @@ import (
 )
 
 var typeMap = map[string]reflect.Type{
-	"TYPES.ApprovalItem":              reflect.TypeOf(types.ApprovalItem{}),
-	"STREAM_TYPES.ApprovalItem":       reflect.TypeOf(stream_types.ApprovalItem{}),
 	"TYPES.ApprovalSummary":           reflect.TypeOf(types.ApprovalSummary{}),
 	"STREAM_TYPES.ApprovalSummary":    reflect.TypeOf(stream_types.ApprovalSummary{}),
 	"TYPES.DataField":                 reflect.TypeOf(types.DataField{}),
 	"STREAM_TYPES.DataField":          reflect.TypeOf(stream_types.DataField{}),
 	"TYPES.ExtractedOutput":           reflect.TypeOf(types.ExtractedOutput{}),
 	"STREAM_TYPES.ExtractedOutput":    reflect.TypeOf(stream_types.ExtractedOutput{}),
+	"TYPES.FanOutSignal":              reflect.TypeOf(types.FanOutSignal{}),
+	"STREAM_TYPES.FanOutSignal":       reflect.TypeOf(stream_types.FanOutSignal{}),
 	"TYPES.FollowUpSignal":            reflect.TypeOf(types.FollowUpSignal{}),
 	"STREAM_TYPES.FollowUpSignal":     reflect.TypeOf(stream_types.FollowUpSignal{}),
+	"TYPES.SubtaskSpec":               reflect.TypeOf(types.SubtaskSpec{}),
+	"STREAM_TYPES.SubtaskSpec":        reflect.TypeOf(stream_types.SubtaskSpec{}),
 	"TYPES.TurnClassification":        reflect.TypeOf(types.TurnClassification{}),
 	"STREAM_TYPES.TurnClassification": reflect.TypeOf(stream_types.TurnClassification{}),
 	"TYPES.WakeAgendaItem":            reflect.TypeOf(types.WakeAgendaItem{}),
 	"STREAM_TYPES.WakeAgendaItem":     reflect.TypeOf(stream_types.WakeAgendaItem{}),
 
+	"TYPES.FanOutIntent":   reflect.TypeOf(types.FanOutIntent("")),
 	"TYPES.FollowUpIntent": reflect.TypeOf(types.FollowUpIntent("")),
 	"TYPES.InputKind":      reflect.TypeOf(types.InputKind("")),
 	"TYPES.OutputKind":     reflect.TypeOf(types.OutputKind("")),

@@ -430,6 +430,7 @@ const (
 	OrchestrationOutboxPayloadWakeReason            = "wake_reason"
 	OrchestrationOutboxPayloadWakeFollowUpPrompt    = "wake_follow_up_prompt"
 	OrchestrationOutboxPayloadWakeAgenda            = "wake_agenda"
+	OrchestrationOutboxPayloadSubtaskRequests        = "subtask_requests"
 )
 
 type OrchestrationOutboxEvent struct {
@@ -855,14 +856,22 @@ type RunExecutionWakeSignal struct {
 	WakeAgenda     []*TaskWakeAgendaItem `json:"wake_agenda,omitempty"`
 }
 
+type SubtaskRequest struct {
+	SourceOutputID   string `json:"source_output_id"`
+	EntityLabel      string `json:"entity_label"`
+	Prompt           string `json:"prompt"`
+	WakeDelayMinutes int    `json:"wake_delay_minutes"`
+}
+
 type RunExecutionResult struct {
-	ID              string                  `json:"id"`
-	ExitCode        int                     `json:"exit_code"`
-	Output          []byte                  `json:"output,omitempty"`
-	Error           string                  `json:"error,omitempty"`
-	Duration        time.Duration           `json:"duration"`
-	WaitingForInput bool                    `json:"waiting_for_input,omitempty"`
-	WakeSignal      *RunExecutionWakeSignal `json:"wake_signal,omitempty"`
+	ID               string                  `json:"id"`
+	ExitCode         int                     `json:"exit_code"`
+	Output           []byte                  `json:"output,omitempty"`
+	Error            string                  `json:"error,omitempty"`
+	Duration         time.Duration           `json:"duration"`
+	WaitingForInput  bool                    `json:"waiting_for_input,omitempty"`
+	WakeSignal       *RunExecutionWakeSignal `json:"wake_signal,omitempty"`
+	SubtaskRequests  []*SubtaskRequest       `json:"subtask_requests,omitempty"`
 }
 
 type ErrTaskNotCancellable struct {

@@ -24,13 +24,12 @@ const (
 var wakePlannerFilePathRE = regexp.MustCompile(`(?:/workspace/)?[A-Za-z0-9][A-Za-z0-9._/-]*\.(?:json|md|txt|csv|ya?ml)`)
 
 func (w *Worker) classifyFollowUp(
-	ctx context.Context, task types.RunExecution,
-	runner NeedsInputRunner, markerPath, lastPrompt, mountSource string,
+	ctx context.Context,
+	agentMsg, lastPrompt, mountSource string,
 	env map[string]string,
 	bamlEnv map[string]string,
 ) *types.RunExecutionWakeSignal {
-	msg := runner.ReadLastMessage(markerPath)
-	if msg == "" {
+	if agentMsg == "" {
 		return nil
 	}
 	var userMsg *string
@@ -48,7 +47,7 @@ func (w *Worker) classifyFollowUp(
 	}
 	fu, err := agentsignal.ClassifyFollowUp(
 		ctx,
-		msg,
+		agentMsg,
 		userMsg,
 		time.Now().UTC().Format(time.RFC3339),
 		skillContextPtr,

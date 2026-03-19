@@ -351,15 +351,25 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	exitCode, errMsg, st := interactiveResult(runErr, idleTimedOut.Load())
 	w.sandboxManager.publishStatus(ctx, task.ExternalId, st, &exitCode, errMsg)
 
-	// Classify follow-up intent if the agent finished without needing input
+	var agentMsg string
+	if needsInputRunner != nil && needsInputPath != "" {
+		agentMsg = needsInputRunner.ReadLastMessage(needsInputPath)
+	}
+
 	var wakeSignal *types.RunExecutionWakeSignal
-	if !needsInput && runErr == nil && needsInputRunner != nil && needsInputPath != "" {
-		wakeSignal = w.classifyFollowUp(ctx, task, needsInputRunner, needsInputPath, lastPrompt, mountSource, env, bamlEnv)
+	if !needsInput && runErr == nil && agentMsg != "" {
+		wakeSignal = w.classifyFollowUp(ctx, agentMsg, lastPrompt, mountSource, env, bamlEnv)
+	}
+
+	var subtaskReqs []*types.SubtaskRequest
+	if wakeSignal != nil && outputPipeline.tracker != nil {
+		subtaskReqs = w.classifySubtasks(ctx, outputPipeline.tracker, agentMsg, lastPrompt, bamlEnv)
 	}
 
 	return &types.RunExecutionResult{
 		ID: task.ExternalId, ExitCode: exitCode, Error: errMsg,
-		Duration: time.Since(start), WaitingForInput: needsInput, WakeSignal: wakeSignal,
+		Duration: time.Since(start), WaitingForInput: needsInput,
+		WakeSignal: wakeSignal, SubtaskRequests: subtaskReqs,
 	}
 }
 
@@ -390,12 +400,11 @@ func (w *Worker) buildNeedsInputChecker(
 		var summary string
 		if kind == types.InputKindApproveReject && tw.ringBuf != nil {
 			text := extractAssistantText(tw.ringBuf.Bytes(), 4000)
-			summary = w.tryBuildApprovalSummary(ctx, task, currentPrompt, text, bamlEnv)
+			summary = w.tryBuildApprovalSummary(ctx, text, bamlEnv)
 		}
 		return true, kind, summary
 	}
 }
-
 
 // ---------------------------------------------------------------------------
 // Turn session: the core turn loop
@@ -468,7 +477,7 @@ func (w *Worker) runTurnSession(
 				addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to parse turn output")
 			}
 			if needsInput && inputKind == types.InputKindApproveReject {
-				if s := w.tryBuildApprovalSummary(ctx, task, prompt, waitingSummary, bamlEnv); s != "" {
+				if s := w.tryBuildApprovalSummary(ctx, waitingSummary, bamlEnv); s != "" {
 					waitingSummary = s
 				}
 			}

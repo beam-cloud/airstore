@@ -259,7 +259,7 @@ func (c *GatewayClient) SetTaskStarted(ctx context.Context, taskID string, attem
 }
 
 // SetTaskResult reports the result of a task to the gateway.
-func (c *GatewayClient) SetTaskResult(ctx context.Context, taskID string, exitCode int, errorMsg string, attemptID string, waitingForInput bool, wakeSignal *pb.WakeSignal) error {
+func (c *GatewayClient) SetTaskResult(ctx context.Context, taskID string, exitCode int, errorMsg string, attemptID string, waitingForInput bool, wakeSignal *pb.WakeSignal, subtaskReqs []*pb.SubtaskRequest) error {
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
 
@@ -270,6 +270,7 @@ func (c *GatewayClient) SetTaskResult(ctx context.Context, taskID string, exitCo
 		AttemptId:       attemptID,
 		WaitingForInput: waitingForInput,
 		WakeSignal:      wakeSignal,
+		SubtaskRequests: subtaskReqs,
 	})
 	if err != nil {
 		return fmt.Errorf("set task result failed: %w", err)

@@ -487,7 +487,7 @@ func setTaskResultWithRetry(
 	ctx context.Context,
 	task types.RunExecution,
 	result *types.RunExecutionResult,
-	reportFn func(ctx context.Context, taskID string, exitCode int, errMsg string, attemptID string, waitingForInput bool, wakeSignal *pb.WakeSignal) error,
+	reportFn func(ctx context.Context, taskID string, exitCode int, errMsg string, attemptID string, waitingForInput bool, wakeSignal *pb.WakeSignal, subtaskReqs []*pb.SubtaskRequest) error,
 	sleepFn func(context.Context, time.Duration),
 ) error {
 	attemptID := ""
@@ -516,6 +516,16 @@ func setTaskResultWithRetry(
 		}
 	}
 
+	var protoSubtasks []*pb.SubtaskRequest
+	for _, req := range result.SubtaskRequests {
+		protoSubtasks = append(protoSubtasks, &pb.SubtaskRequest{
+			SourceOutputId:   req.SourceOutputID,
+			EntityLabel:      req.EntityLabel,
+			Prompt:           req.Prompt,
+			WakeDelayMinutes: int32(req.WakeDelayMinutes),
+		})
+	}
+
 	var lastErr error
 	for attempt := range setTaskResultMaxAttempts {
 		if attempt > 0 {
@@ -529,7 +539,7 @@ func setTaskResultWithRetry(
 		}
 
 		attemptCtx, cancel := context.WithTimeout(ctx, setTaskResultRetryTimeout)
-		lastErr = reportFn(attemptCtx, task.ExternalId, result.ExitCode, result.Error, attemptID, result.WaitingForInput, protoWake)
+		lastErr = reportFn(attemptCtx, task.ExternalId, result.ExitCode, result.Error, attemptID, result.WaitingForInput, protoWake, protoSubtasks)
 		cancel()
 		if lastErr == nil {
 			return nil

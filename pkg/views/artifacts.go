@@ -71,7 +71,29 @@ func (a Artifact) Kind() string {
 }
 
 func (a Artifact) MatchesKey(artifactKey string) bool {
-	return normalizeToken(a.Key()) == normalizeToken(artifactKey)
+	ak := normalizeToken(a.Key())
+	bk := normalizeToken(artifactKey)
+	if ak == bk {
+		return true
+	}
+	if ak == "" || bk == "" {
+		return false
+	}
+	return tokenSubset(ak, bk) || tokenSubset(bk, ak)
+}
+
+func tokenSubset(sub, super string) bool {
+	subTokens := strings.Split(sub, "-")
+	superSet := make(map[string]struct{})
+	for _, t := range strings.Split(super, "-") {
+		superSet[t] = struct{}{}
+	}
+	for _, t := range subTokens {
+		if _, ok := superSet[t]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // ---------------------------------------------------------------------------

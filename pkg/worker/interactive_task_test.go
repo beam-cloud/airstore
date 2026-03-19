@@ -13,7 +13,6 @@ import (
 
 	runtimepkg "github.com/beam-cloud/airstore/pkg/runtime"
 	"github.com/beam-cloud/airstore/pkg/types"
-	signaltypes "github.com/beam-cloud/airstore/pkg/worker/agentsignal/baml_client/types"
 	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
@@ -297,67 +296,3 @@ func TestBuildWakePlannerContextReadsActiveSkillAndHandoffFiles(t *testing.T) {
 	}
 }
 
-func TestApprovalBatchIDScopesToApprovalStep(t *testing.T) {
-	ids := taskOutputIDs{
-		workspaceID: 7,
-		taskID:      "task-1",
-		runID:       "run-1",
-	}
-	summary := signaltypes.ApprovalSummary{
-		Summary: "Approve the outreach batch.",
-		Details: "Send two follow-up emails.",
-	}
-	items := []signaltypes.ApprovalItem{
-		{
-			Item_key:    "camila",
-			Kind:        signaltypes.OutputKindEMAIL_DRAFT,
-			Title:       "Send Camila follow-up",
-			Description: "Email draft",
-			Details:     "To: camila@example.com",
-			Data_fields: []signaltypes.DataField{
-				{Key: "subject", Value: "Quick follow-up", Type: "text", Label: "Subject"},
-				{Key: "to", Value: "camila@example.com", Type: "email", Label: "To"},
-			},
-		},
-	}
-	reorderedFields := []signaltypes.ApprovalItem{
-		{
-			Item_key:    "camila",
-			Kind:        signaltypes.OutputKindEMAIL_DRAFT,
-			Title:       "Send Camila follow-up",
-			Description: "Email draft",
-			Details:     "To: camila@example.com",
-			Data_fields: []signaltypes.DataField{
-				{Key: "to", Value: "camila@example.com", Type: "email", Label: "To"},
-				{Key: "subject", Value: "Quick follow-up", Type: "text", Label: "Subject"},
-			},
-		},
-	}
-
-	replayBatchID := approvalBatchID(ids, "Initial task prompt", summary, items)
-	sameStepBatchID := approvalBatchID(ids, "Initial task prompt", summary, reorderedFields)
-	if replayBatchID != sameStepBatchID {
-		t.Fatalf("expected replay batch id to stay stable, got %q and %q", replayBatchID, sameStepBatchID)
-	}
-
-	replayItemID := approvalItemOutputID(replayBatchID, items[0].Item_key)
-	if replayItemID != approvalItemOutputID(sameStepBatchID, items[0].Item_key) {
-		t.Fatal("expected replay item id to stay stable")
-	}
-
-	nextStepBatchID := approvalBatchID(ids, "Approved:\n1. Send Camila follow-up\n", summary, items)
-	if replayBatchID == nextStepBatchID {
-		t.Fatalf("expected later approval step to get a new batch id, got %q", nextStepBatchID)
-	}
-	if replayItemID == approvalItemOutputID(nextStepBatchID, items[0].Item_key) {
-		t.Fatal("expected later approval step to get a new item output id")
-	}
-
-	changedSummaryBatchID := approvalBatchID(ids, "Initial task prompt", signaltypes.ApprovalSummary{
-		Summary: "Approve the revised outreach batch.",
-		Details: "Send three follow-up emails.",
-	}, items)
-	if replayBatchID == changedSummaryBatchID {
-		t.Fatalf("expected changed approval content to get a new batch id, got %q", changedSummaryBatchID)
-	}
-}

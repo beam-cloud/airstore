@@ -42,6 +42,7 @@ type resolvedSheetRow struct {
 	SheetID         string
 	TaskID          string
 	RowID           string
+	StableRef       string
 	RowKey          string
 	OutputID        string
 	OutputStatus    string
@@ -785,7 +786,7 @@ func assembleTable(sheetID string, comp types.ComponentSpec, mappedRows []resolv
 		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}
 	}
 
-	hiddenKeys := []string{"task_id", "row_id", "sheet_id", "output_id", "output_status", "source_output_ids"}
+	hiddenKeys := []string{"task_id", "row_id", "stable_ref", "sheet_id", "output_id", "output_status", "source_output_ids"}
 	hiddenStart := len(tableCols)
 	colNames := make([]string, hiddenStart+len(hiddenKeys))
 	meta := make([]types.ColumnMeta, len(colNames))
@@ -815,7 +816,7 @@ func assembleTable(sheetID string, comp types.ComponentSpec, mappedRows []resolv
 				}
 			}
 		}
-		for i, v := range []any{mapped.TaskID, mapped.RowID, sheetID, mapped.OutputID, mapped.OutputStatus, mapped.SourceOutputIDs} {
+		for i, v := range []any{mapped.TaskID, mapped.RowID, mapped.StableRef, sheetID, mapped.OutputID, mapped.OutputStatus, mapped.SourceOutputIDs} {
 			row[hiddenStart+i] = v
 		}
 		if hasValue {
@@ -901,6 +902,7 @@ func resolvedRowsFromStored(rows []ViewRow, applyManual bool) []resolvedSheetRow
 			SheetID:         row.SheetID,
 			TaskID:          row.TaskID,
 			RowID:           row.ID,
+			StableRef:       row.StableRef,
 			RowKey:          row.RowKey,
 			OutputID:        firstSourceOutputID(row.SourceOutputIDs),
 			SourceOutputIDs: strings.Join(row.SourceOutputIDs, ","),

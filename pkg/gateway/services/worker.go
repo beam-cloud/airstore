@@ -360,6 +360,13 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 			payload[types.OrchestrationOutboxPayloadWakeAgenda] = string(agendaJSON)
 		}
 	}
+	if len(req.SubtaskRequests) > 0 {
+		subtaskJSON, err := json.Marshal(req.SubtaskRequests)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to encode subtask requests: %v", err)
+		}
+		payload[types.OrchestrationOutboxPayloadSubtaskRequests] = string(subtaskJSON)
+	}
 	if err := s.backend.EnqueueOrchestrationOutboxEvent(ctx, &types.OrchestrationOutboxEvent{
 		EventType:   types.OrchestrationOutboxEventTypeRunResult,
 		DedupeKey:   resultKey,

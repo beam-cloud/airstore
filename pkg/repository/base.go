@@ -211,6 +211,11 @@ type BackendRepository interface {
 	UpdateTask(ctx context.Context, task *types.AgentTask) error
 	UpdateTaskCost(ctx context.Context, taskID string, costUSD float64) error
 	ArchiveTask(ctx context.Context, taskId string) error
+	ListActiveChildTaskIDs(ctx context.Context, parentTaskID string) ([]string, error)
+	ListSubtasks(ctx context.Context, parentTaskID string) ([]*types.AgentTask, error)
+	ListSubtasksByOutputIDs(ctx context.Context, outputIDs []string) ([]*types.AgentTask, error)
+	CreateSpawnBinding(ctx context.Context, taskID, sourceOutputID, entityLabel string) error
+	ListSpawnBindingsForOutputs(ctx context.Context, outputIDs []string) ([]SpawnBinding, error)
 
 	// Task input inbox
 	AppendTaskInput(ctx context.Context, input *types.TaskInput) error

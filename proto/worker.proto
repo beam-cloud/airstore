@@ -113,6 +113,13 @@ message WakeSignal {
   repeated WakeAgendaItem wake_agenda = 4;
 }
 
+message SubtaskRequest {
+  string source_output_id = 1;
+  string entity_label = 2;
+  string prompt = 3;
+  int32  wake_delay_minutes = 4;
+}
+
 message SetTaskResultRequest {
   string task_id = 1;
   int32 exit_code = 2;
@@ -120,6 +127,7 @@ message SetTaskResultRequest {
   string attempt_id = 4;
   bool waiting_for_input = 5;
   WakeSignal wake_signal = 6;
+  repeated SubtaskRequest subtask_requests = 7;
 }
 
 message SetTaskResultResponse {}

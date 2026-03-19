@@ -20,78 +20,6 @@ import (
 	"github.com/boundaryml/baml/engine/language_client_go/pkg/cffi"
 )
 
-type ApprovalItem struct {
-	Item_key    string      `json:"item_key"`
-	Kind        OutputKind  `json:"kind"`
-	Title       string      `json:"title"`
-	Description string      `json:"description"`
-	Details     string      `json:"details"`
-	Data_fields []DataField `json:"data_fields"`
-}
-
-func (c *ApprovalItem) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
-	typeName := holder.Name
-	if typeName.Namespace != cffi.CFFITypeNamespace_TYPES {
-		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_TYPES, got %s", string(typeName.Namespace.String())))
-	}
-	if typeName.Name != "ApprovalItem" {
-		panic(fmt.Sprintf("expected ApprovalItem, got %s", typeName.Name))
-	}
-
-	for _, field := range holder.Fields {
-		key := field.Key
-		valueHolder := field.Value
-		switch key {
-
-		case "item_key":
-			c.Item_key = baml.Decode(valueHolder).Interface().(string)
-
-		case "kind":
-			c.Kind = baml.Decode(valueHolder).Interface().(OutputKind)
-
-		case "title":
-			c.Title = baml.Decode(valueHolder).Interface().(string)
-
-		case "description":
-			c.Description = baml.Decode(valueHolder).Interface().(string)
-
-		case "details":
-			c.Details = baml.Decode(valueHolder).Interface().(string)
-
-		case "data_fields":
-			c.Data_fields = baml.Decode(valueHolder).Interface().([]DataField)
-
-		default:
-
-			panic(fmt.Sprintf("unexpected field: %s in class ApprovalItem", key))
-
-		}
-	}
-
-}
-
-func (c ApprovalItem) Encode() (*cffi.HostValue, error) {
-	fields := map[string]any{}
-
-	fields["item_key"] = c.Item_key
-
-	fields["kind"] = c.Kind
-
-	fields["title"] = c.Title
-
-	fields["description"] = c.Description
-
-	fields["details"] = c.Details
-
-	fields["data_fields"] = c.Data_fields
-
-	return baml.EncodeClass("ApprovalItem", fields, nil)
-}
-
-func (c ApprovalItem) BamlTypeName() string {
-	return "ApprovalItem"
-}
-
 type ApprovalSummary struct {
 	Summary string `json:"summary"`
 	Details string `json:"details"`
@@ -302,6 +230,60 @@ func (c ExtractedOutput) BamlTypeName() string {
 	return "ExtractedOutput"
 }
 
+type FanOutSignal struct {
+	Intent FanOutIntent  `json:"intent"`
+	Specs  []SubtaskSpec `json:"specs"`
+	Reason *string       `json:"reason"`
+}
+
+func (c *FanOutSignal) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "FanOutSignal" {
+		panic(fmt.Sprintf("expected FanOutSignal, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "intent":
+			c.Intent = baml.Decode(valueHolder).Interface().(FanOutIntent)
+
+		case "specs":
+			c.Specs = baml.Decode(valueHolder).Interface().([]SubtaskSpec)
+
+		case "reason":
+			c.Reason = baml.Decode(valueHolder).Interface().(*string)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class FanOutSignal", key))
+
+		}
+	}
+
+}
+
+func (c FanOutSignal) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["intent"] = c.Intent
+
+	fields["specs"] = c.Specs
+
+	fields["reason"] = c.Reason
+
+	return baml.EncodeClass("FanOutSignal", fields, nil)
+}
+
+func (c FanOutSignal) BamlTypeName() string {
+	return "FanOutSignal"
+}
+
 type FollowUpSignal struct {
 	Intent           FollowUpIntent   `json:"intent"`
 	Delay_minutes    int64            `json:"delay_minutes"`
@@ -366,6 +348,66 @@ func (c FollowUpSignal) Encode() (*cffi.HostValue, error) {
 
 func (c FollowUpSignal) BamlTypeName() string {
 	return "FollowUpSignal"
+}
+
+type SubtaskSpec struct {
+	Source_output_id   string `json:"source_output_id"`
+	Entity_label       string `json:"entity_label"`
+	Prompt             string `json:"prompt"`
+	Wake_delay_minutes int64  `json:"wake_delay_minutes"`
+}
+
+func (c *SubtaskSpec) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "SubtaskSpec" {
+		panic(fmt.Sprintf("expected SubtaskSpec, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "source_output_id":
+			c.Source_output_id = baml.Decode(valueHolder).Interface().(string)
+
+		case "entity_label":
+			c.Entity_label = baml.Decode(valueHolder).Interface().(string)
+
+		case "prompt":
+			c.Prompt = baml.Decode(valueHolder).Interface().(string)
+
+		case "wake_delay_minutes":
+			c.Wake_delay_minutes = baml.Decode(valueHolder).Int()
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class SubtaskSpec", key))
+
+		}
+	}
+
+}
+
+func (c SubtaskSpec) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["source_output_id"] = c.Source_output_id
+
+	fields["entity_label"] = c.Entity_label
+
+	fields["prompt"] = c.Prompt
+
+	fields["wake_delay_minutes"] = c.Wake_delay_minutes
+
+	return baml.EncodeClass("SubtaskSpec", fields, nil)
+}
+
+func (c SubtaskSpec) BamlTypeName() string {
+	return "SubtaskSpec"
 }
 
 type TurnClassification struct {

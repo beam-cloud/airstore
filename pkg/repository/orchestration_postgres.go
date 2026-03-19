@@ -1331,6 +1331,117 @@ func (b *PostgresBackend) RequeueTaskWithOutboxIfCurrentRun(
 	return true, nil
 }
 
+func (b *PostgresBackend) ListActiveChildTaskIDs(ctx context.Context, parentTaskID string) ([]string, error) {
+	rows, err := b.db.QueryContext(ctx, `
+		SELECT id FROM agent_task
+		WHERE parent_envelope_id = $1
+		AND state NOT IN ('done', 'error', 'dropped', 'cancelled')
+	`, parentTaskID)
+	if err != nil {
+		return nil, fmt.Errorf("list active child task ids: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+func (b *PostgresBackend) ListSubtasks(ctx context.Context, parentTaskID string) ([]*types.AgentTask, error) {
+	query := agentTaskSelect + `
+		WHERE parent_envelope_id = $1
+		ORDER BY created_at DESC
+	`
+	rows, err := b.db.QueryContext(ctx, query, parentTaskID)
+	if err != nil {
+		return nil, fmt.Errorf("list subtasks: %w", err)
+	}
+	defer rows.Close()
+	var tasks []*types.AgentTask
+	for rows.Next() {
+		task, err := b.scanAgentTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, nil
+}
+
+func (b *PostgresBackend) ListSubtasksByOutputIDs(ctx context.Context, outputIDs []string) ([]*types.AgentTask, error) {
+	if len(outputIDs) == 0 {
+		return nil, nil
+	}
+	query := agentTaskSelect + `
+		WHERE id IN (
+			SELECT task_id FROM task_spawn_binding WHERE source_output_id = ANY($1)
+		)
+		ORDER BY created_at DESC
+	`
+	rows, err := b.db.QueryContext(ctx, query, pq.Array(outputIDs))
+	if err != nil {
+		return nil, fmt.Errorf("list subtasks by output IDs: %w", err)
+	}
+	defer rows.Close()
+	var tasks []*types.AgentTask
+	for rows.Next() {
+		task, err := b.scanAgentTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, nil
+}
+
+type SpawnBinding struct {
+	TaskID         string    `db:"task_id"`
+	SourceOutputID string    `db:"source_output_id"`
+	EntityLabel    string    `db:"entity_label"`
+	CreatedAt      time.Time `db:"created_at"`
+}
+
+func (b *PostgresBackend) CreateSpawnBinding(ctx context.Context, taskID, sourceOutputID, entityLabel string) error {
+	_, err := b.db.ExecContext(ctx, `
+		INSERT INTO task_spawn_binding (task_id, source_output_id, entity_label)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (task_id) DO NOTHING
+	`, taskID, sourceOutputID, entityLabel)
+	if err != nil {
+		return fmt.Errorf("create spawn binding: %w", err)
+	}
+	return nil
+}
+
+func (b *PostgresBackend) ListSpawnBindingsForOutputs(ctx context.Context, outputIDs []string) ([]SpawnBinding, error) {
+	if len(outputIDs) == 0 {
+		return nil, nil
+	}
+	rows, err := b.db.QueryContext(ctx, `
+		SELECT task_id, source_output_id, entity_label, created_at
+		FROM task_spawn_binding
+		WHERE source_output_id = ANY($1)
+	`, pq.Array(outputIDs))
+	if err != nil {
+		return nil, fmt.Errorf("list spawn bindings: %w", err)
+	}
+	defer rows.Close()
+	var bindings []SpawnBinding
+	for rows.Next() {
+		var b SpawnBinding
+		if err := rows.Scan(&b.TaskID, &b.SourceOutputID, &b.EntityLabel, &b.CreatedAt); err != nil {
+			return nil, err
+		}
+		bindings = append(bindings, b)
+	}
+	return bindings, nil
+}
+
 func (b *PostgresBackend) ArchiveTask(ctx context.Context, taskID string) error {
 	query := `
 		UPDATE agent_task
