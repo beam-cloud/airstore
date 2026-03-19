@@ -9,15 +9,19 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	agentsignal "github.com/beam-cloud/airstore/pkg/worker/agentsignal/baml_client"
 	signaltypes "github.com/beam-cloud/airstore/pkg/worker/agentsignal/baml_client/types"
+	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/rs/zerolog/log"
 )
 
@@ -313,7 +317,7 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	}
 
 	// Build the needs-input checker
-	var checkNeedsInput func() (bool, types.InputKind, string)
+	var checkNeedsInput func(string) (bool, types.InputKind, string)
 	if needsInputRunner != nil {
 		checkNeedsInput = w.buildNeedsInputChecker(sessionCtx, task, needsInputRunner, needsInputPath, tw, bamlEnv)
 	}
@@ -377,8 +381,8 @@ func (w *Worker) buildNeedsInputChecker(
 	ctx context.Context, task types.RunExecution,
 	runner NeedsInputRunner, markerPath string,
 	tw *terminalOutputWriter, bamlEnv map[string]string,
-) func() (bool, types.InputKind, string) {
-	return func() (bool, types.InputKind, string) {
+) func(string) (bool, types.InputKind, string) {
+	return func(currentPrompt string) (bool, types.InputKind, string) {
 		msg := runner.ReadLastMessage(markerPath)
 		if msg == "" {
 			return false, "", ""
@@ -401,7 +405,7 @@ func (w *Worker) buildNeedsInputChecker(
 		if kind == types.InputKindApproveReject && tw.ringBuf != nil {
 			if text := extractAssistantText(tw.ringBuf.Bytes(), 4000); text != "" {
 				if s, err := agentsignal.ExtractApprovalSummary(ctx, text, agentsignal.WithEnv(bamlEnv)); err == nil {
-					summary = marshalApprovalSummary(s)
+					summary = w.buildApprovalSummaryWithItems(ctx, task, currentPrompt, text, s, bamlEnv)
 				}
 			}
 		}
@@ -689,7 +693,7 @@ func (w *Worker) runTurnSession(
 	env map[string]string,
 	stdout io.Writer,
 	activityCh chan<- struct{},
-	checkNeedsInput func() (bool, types.InputKind, string),
+	checkNeedsInput func(string) (bool, types.InputKind, string),
 ) (*types.LLMUsage, error, bool, string) {
 	prompt := strings.TrimSpace(task.Prompt)
 	sessionEnv := cloneMap(env)
@@ -740,7 +744,7 @@ func (w *Worker) runTurnSession(
 			return totalUsage, nil, false, prompt
 		}
 
-		needsInput, inputKind, waitingSummary := checkNeedsInput()
+		needsInput, inputKind, waitingSummary := checkNeedsInput(prompt)
 		if !needsInput {
 			if pending := w.claimPendingInput(ctx, task); pending != "" {
 				prompt = pending
@@ -979,8 +983,185 @@ func signalActivity(ch chan<- struct{}) {
 	}
 }
 
-func marshalApprovalSummary(s signaltypes.ApprovalSummary) string {
-	b, err := json.Marshal(map[string]string{"summary": s.Summary, "details": s.Details})
+type approvalItemSummary struct {
+	OutputID string `json:"output_id"`
+	Title    string `json:"title"`
+	ItemKey  string `json:"item_key"`
+}
+
+type approvalBatchFingerprint struct {
+	TaskID  string                    `json:"task_id"`
+	RunID   string                    `json:"run_id"`
+	Prompt  string                    `json:"prompt"`
+	Summary string                    `json:"summary"`
+	Details string                    `json:"details"`
+	Items   []approvalItemFingerprint `json:"items"`
+}
+
+type approvalItemFingerprint struct {
+	ItemKey     string                         `json:"item_key"`
+	Kind        string                         `json:"kind"`
+	Title       string                         `json:"title"`
+	Description string                         `json:"description"`
+	Details     string                         `json:"details"`
+	DataFields  []approvalDataFieldFingerprint `json:"data_fields"`
+}
+
+type approvalDataFieldFingerprint struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+	Type  string `json:"type"`
+	Label string `json:"label"`
+}
+
+func approvalBatchID(
+	ids taskOutputIDs,
+	prompt string,
+	summary signaltypes.ApprovalSummary,
+	items []signaltypes.ApprovalItem,
+) string {
+	fp := approvalBatchFingerprint{
+		TaskID:  strings.TrimSpace(ids.taskID),
+		RunID:   strings.TrimSpace(ids.runID),
+		Prompt:  strings.TrimSpace(prompt),
+		Summary: strings.TrimSpace(summary.Summary),
+		Details: strings.TrimSpace(summary.Details),
+		Items:   make([]approvalItemFingerprint, 0, len(items)),
+	}
+
+	for _, item := range items {
+		itemFP := approvalItemFingerprint{
+			ItemKey:     strings.TrimSpace(item.Item_key),
+			Kind:        string(item.Kind),
+			Title:       strings.TrimSpace(item.Title),
+			Description: strings.TrimSpace(item.Description),
+			Details:     strings.TrimSpace(item.Details),
+			DataFields:  make([]approvalDataFieldFingerprint, 0, len(item.Data_fields)),
+		}
+		for _, field := range item.Data_fields {
+			itemFP.DataFields = append(itemFP.DataFields, approvalDataFieldFingerprint{
+				Key:   strings.TrimSpace(field.Key),
+				Value: strings.TrimSpace(field.Value),
+				Type:  strings.TrimSpace(field.Type),
+				Label: strings.TrimSpace(field.Label),
+			})
+		}
+		sort.Slice(itemFP.DataFields, func(i, j int) bool {
+			left := itemFP.DataFields[i]
+			right := itemFP.DataFields[j]
+			if left.Key != right.Key {
+				return left.Key < right.Key
+			}
+			if left.Label != right.Label {
+				return left.Label < right.Label
+			}
+			if left.Type != right.Type {
+				return left.Type < right.Type
+			}
+			return left.Value < right.Value
+		})
+		fp.Items = append(fp.Items, itemFP)
+	}
+
+	sort.Slice(fp.Items, func(i, j int) bool {
+		left := fp.Items[i]
+		right := fp.Items[j]
+		if left.ItemKey != right.ItemKey {
+			return left.ItemKey < right.ItemKey
+		}
+		if left.Kind != right.Kind {
+			return left.Kind < right.Kind
+		}
+		if left.Title != right.Title {
+			return left.Title < right.Title
+		}
+		if left.Description != right.Description {
+			return left.Description < right.Description
+		}
+		return left.Details < right.Details
+	})
+
+	payload, err := json.Marshal(fp)
+	if err != nil {
+		payload = []byte(fmt.Sprintf("approval:%s:%s:%s", fp.TaskID, fp.RunID, fp.Prompt))
+	}
+	return uuid.NewSHA1(uuid.NameSpaceOID, payload).String()
+}
+
+func approvalItemOutputID(batchID, itemKey string) string {
+	return uuid.NewSHA1(
+		uuid.NameSpaceOID,
+		[]byte("approval-item:"+strings.TrimSpace(batchID)+":"+strings.TrimSpace(itemKey)),
+	).String()
+}
+
+func (w *Worker) buildApprovalSummaryWithItems(
+	ctx context.Context, task types.RunExecution,
+	currentPrompt string,
+	text string, summary signaltypes.ApprovalSummary,
+	bamlEnv map[string]string,
+) string {
+	items, err := agentsignal.ExtractApprovalItems(ctx, text, agentsignal.WithEnv(bamlEnv))
+	if err != nil || len(items) == 0 {
+		return marshalApprovalSummary(summary, nil)
+	}
+
+	ids := outputIDsFromTask(task)
+	batchID := approvalBatchID(ids, currentPrompt, summary, items)
+	var itemSummaries []approvalItemSummary
+
+	for _, item := range items {
+		dataMap := map[string]any{}
+		for _, df := range item.Data_fields {
+			dataMap[df.Key] = df.Value
+		}
+		dataMap["details"] = item.Details
+
+		itemOutputID := approvalItemOutputID(batchID, item.Item_key)
+		metaJSON, _ := json.Marshal(map[string]any{
+			"approval_batch_id":     batchID,
+			"item_key":              item.Item_key,
+			"_idempotent_output_id": itemOutputID,
+		})
+		dataJSON, _ := json.Marshal(dataMap)
+
+		req := &pb.CreateTaskOutputRequest{
+			WorkspaceId:  ids.workspaceID,
+			TaskId:       ids.taskID,
+			RunId:        ids.runID,
+			AgentId:      ids.agentID,
+			OutputType:   kindToOutputType(item.Kind),
+			Title:        item.Title,
+			DataJson:     string(dataJSON),
+			MetadataJson: string(metaJSON),
+			Status:       types.TaskOutputStatusPending,
+		}
+
+		serverID, createErr := w.gatewayClient.CreateTaskOutput(ctx, req)
+		if createErr != nil {
+			log.Warn().Err(createErr).Str("item_key", item.Item_key).Msg("failed to create pending approval output")
+			continue
+		}
+
+		itemSummaries = append(itemSummaries, approvalItemSummary{
+			OutputID: serverID,
+			Title:    item.Title,
+			ItemKey:  item.Item_key,
+		})
+	}
+
+	return marshalApprovalSummary(summary, itemSummaries)
+}
+
+func marshalApprovalSummary(s signaltypes.ApprovalSummary, items []approvalItemSummary) string {
+	payload := map[string]any{
+		"summary": s.Summary,
+		"details": s.Details,
+	}
+	if len(items) > 0 {
+		payload["items"] = items
+	}
+	b, err := json.Marshal(payload)
 	if err != nil {
 		return ""
 	}

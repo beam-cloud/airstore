@@ -21,6 +21,8 @@ import (
 )
 
 var typeMap = map[string]reflect.Type{
+	"TYPES.ApprovalItem":              reflect.TypeOf(types.ApprovalItem{}),
+	"STREAM_TYPES.ApprovalItem":       reflect.TypeOf(stream_types.ApprovalItem{}),
 	"TYPES.ApprovalSummary":           reflect.TypeOf(types.ApprovalSummary{}),
 	"STREAM_TYPES.ApprovalSummary":    reflect.TypeOf(stream_types.ApprovalSummary{}),
 	"TYPES.DataField":                 reflect.TypeOf(types.DataField{}),

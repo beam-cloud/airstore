@@ -43,7 +43,7 @@ func (s *StreamValue[TStream, TFinal]) Stream() *TStream {
 }
 
 // / Streaming version of MapOutputsToSchema
-func (*stream) MapOutputsToSchema(ctx context.Context, sheet_name string, table_title string, table_type string, row_strategy_mode string, row_strategy_description string, columns []types.ColumnSchema, outputs_payload string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.MappedResult, types.MappedResult], error) {
+func (*stream) MapOutputsToSchema(ctx context.Context, sheet_name string, table_title string, table_type string, columns []types.ColumnSchema, outputs_payload string, existing_rows string, excluded_rows string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.MappedResult, types.MappedResult], error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -51,7 +51,7 @@ func (*stream) MapOutputsToSchema(ctx context.Context, sheet_name string, table_
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"sheet_name": sheet_name, "table_title": table_title, "table_type": table_type, "row_strategy_mode": row_strategy_mode, "row_strategy_description": row_strategy_description, "columns": columns, "outputs_payload": outputs_payload},
+		Kwargs: map[string]any{"sheet_name": sheet_name, "table_title": table_title, "table_type": table_type, "columns": columns, "outputs_payload": outputs_payload, "existing_rows": existing_rows, "excluded_rows": excluded_rows},
 		Env:    getEnvVars(callOpts.env),
 	}
 
@@ -116,8 +116,8 @@ func (*stream) MapOutputsToSchema(ctx context.Context, sheet_name string, table_
 	return channel, nil
 }
 
-// / Streaming version of WriteView
-func (*stream) WriteView(ctx context.Context, user_message string, conversation_history string, current_view string, workspace_context string, component_registry string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.ViewDraftResponse, types.ViewDraftResponse], error) {
+// / Streaming version of MapViewToWidget
+func (*stream) MapViewToWidget(ctx context.Context, sheet_name string, widget_type string, widget_title string, widget_description string, widget_config string, table_columns string, table_data string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.WidgetResult, types.WidgetResult], error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -125,7 +125,81 @@ func (*stream) WriteView(ctx context.Context, user_message string, conversation_
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"user_message": user_message, "conversation_history": conversation_history, "current_view": current_view, "workspace_context": workspace_context, "component_registry": component_registry},
+		Kwargs: map[string]any{"sheet_name": sheet_name, "widget_type": widget_type, "widget_title": widget_title, "widget_description": widget_description, "widget_config": widget_config, "table_columns": table_columns, "table_data": table_data},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		// This should never happen. if it does, please file an issue at https://github.com/boundaryml/baml/issues
+		// and include the type of the args you're passing in.
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: MapViewToWidget: %w", err)
+		panic(wrapped_err)
+	}
+
+	internal_channel, err := bamlRuntime.CallFunctionStream(ctx, "MapViewToWidget", encoded, callOpts.onTick)
+	if err != nil {
+		return nil, err
+	}
+
+	channel := make(chan StreamValue[stream_types.WidgetResult, types.WidgetResult])
+	go func() {
+		for result := range internal_channel {
+			if result.Error != nil {
+				channel <- StreamValue[stream_types.WidgetResult, types.WidgetResult]{
+					IsError: true,
+					Error:   result.Error,
+				}
+				close(channel)
+				return
+			}
+			if result.HasData {
+				data := (result.Data).(types.WidgetResult)
+				channel <- StreamValue[stream_types.WidgetResult, types.WidgetResult]{
+					IsFinal:  true,
+					as_final: &data,
+				}
+			} else {
+				data := (result.StreamData).(stream_types.WidgetResult)
+				channel <- StreamValue[stream_types.WidgetResult, types.WidgetResult]{
+					IsFinal:   false,
+					as_stream: &data,
+				}
+			}
+		}
+
+		// when internal_channel is closed, close the output too
+		close(channel)
+	}()
+	return channel, nil
+}
+
+// / Streaming version of WriteView
+func (*stream) WriteView(ctx context.Context, user_message string, conversation_history string, current_view string, workspace_context string, component_registry string, view_data string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.ViewDraftResponse, types.ViewDraftResponse], error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"user_message": user_message, "conversation_history": conversation_history, "current_view": current_view, "workspace_context": workspace_context, "component_registry": component_registry, "view_data": view_data},
 		Env:    getEnvVars(callOpts.env),
 	}
 

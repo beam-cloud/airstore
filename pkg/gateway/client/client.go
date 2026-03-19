@@ -413,6 +413,17 @@ func (c *GatewayClient) FinalizeTaskOutput(ctx context.Context, req *pb.Finalize
 	return nil
 }
 
+// UpdateTaskOutputStatus updates the lifecycle status of a task output via gRPC.
+func (c *GatewayClient) UpdateTaskOutputStatus(ctx context.Context, req *pb.UpdateTaskOutputStatusRequest) error {
+	ctx, cancel := c.withTimeout(ctx)
+	defer cancel()
+	_, err := c.client.UpdateTaskOutputStatus(ctx, req)
+	if err != nil {
+		return fmt.Errorf("update task output status: %w", err)
+	}
+	return nil
+}
+
 // isNotFound checks if the error is a gRPC NotFound status.
 func isNotFound(err error) bool {
 	if st, ok := status.FromError(err); ok {

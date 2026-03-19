@@ -39,12 +39,14 @@ type viewMappingResult struct {
 }
 
 type resolvedSheetRow struct {
-	SheetID  string
-	TaskID   string
-	RowID    string
-	RowKey   string
-	OutputID string
-	Cells    map[string]string
+	SheetID         string
+	TaskID          string
+	RowID           string
+	RowKey          string
+	OutputID        string
+	OutputStatus    string
+	SourceOutputIDs string
+	Cells           map[string]string
 }
 
 const (
@@ -67,20 +69,17 @@ type ResolveOptions struct {
 type mappingSpec struct {
 	tableCols   []bamltypes.ColumnSchema
 	mappingCols []bamltypes.ColumnSchema
-	rowStrategy types.RowStrategy
 	schemaHash  string
 }
 
 func buildMappingSpec(sheetName string, comp types.ComponentSpec) mappingSpec {
 	tableCols := buildColumnSchemas(comp)
 	mappingCols := filterBamlColumns(tableCols)
-	rowStrategy := effectiveRowStrategy(comp.DataSource)
 
 	return mappingSpec{
 		tableCols:   tableCols,
 		mappingCols: mappingCols,
-		rowStrategy: rowStrategy,
-		schemaHash:  hashColumns(mappingCols, rowStrategy, sheetName, comp.Title, comp.Type),
+		schemaHash:  hashColumns(mappingCols, sheetName, comp.Title, comp.Type),
 	}
 }
 
@@ -117,21 +116,6 @@ func (r *DataResolver) Resolve(ctx context.Context, workspaceID uint, viewID str
 	}
 
 	rows := result.Rows
-	if r.store != nil {
-		excluded, err := r.store.GetExcludedRowIDs(ctx, viewID, sheet.ID)
-		if err != nil {
-			log.Warn().Err(err).Str("view_id", viewID).Str("sheet_id", sheet.ID).Msg("failed to load row exclusions")
-		} else if len(excluded) > 0 {
-			filtered := make([]resolvedSheetRow, 0, len(rows))
-			for _, row := range rows {
-				if !excluded[row.RowID] {
-					filtered = append(filtered, row)
-				}
-			}
-			rows = filtered
-		}
-	}
-
 	data := assembleTable(sheet.ID, comp, rows, result.TaskMeta)
 	if data != nil && len(result.Diagnostics) > 0 {
 		data.Diagnostics = result.Diagnostics
@@ -163,21 +147,40 @@ func (r *DataResolver) RegenerateRow(ctx context.Context, workspaceID uint, view
 	}
 	outputs := allOutputs
 
+	oldRows, _ := r.store.GetRows(ctx, viewID, sheet.ID, comp.ID)
+	excludedSnapshots, _ := r.store.GetExcludedRows(ctx, viewID, sheet.ID)
+
 	taskPrompts := r.fetchTaskPrompts(ctx, []string{taskID})
 	outputsJSON, err := serializeOutputsForMapping(outputs, taskPrompts)
 	if err != nil {
 		return nil, fmt.Errorf("serialize outputs: %w", err)
 	}
 
+	var existingForTask []ViewRow
+	for _, old := range oldRows {
+		if old.TaskID == taskID {
+			existingForTask = append(existingForTask, old)
+		}
+	}
+	existingData := serializeExistingRows(existingForTask, spec.mappingCols)
+
+	var excludedForTask []ExcludedRowSnapshot
+	for _, snap := range excludedSnapshots {
+		if snap.TaskID == taskID {
+			excludedForTask = append(excludedForTask, snap)
+		}
+	}
+	excludedData := serializeExcludedRows(excludedForTask)
+
 	result, err := baml.MapOutputsToSchema(
 		ctx,
 		sheet.Name,
 		comp.Title,
 		comp.Type,
-		spec.rowStrategy.Mode,
-		spec.rowStrategy.Description,
 		spec.mappingCols,
 		outputsJSON,
+		existingData,
+		excludedData,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("BAML mapping: %w", err)
@@ -194,6 +197,35 @@ func (r *DataResolver) RegenerateRow(ctx context.Context, workspaceID uint, view
 	}
 	if len(persisted) == 0 {
 		persisted = []ViewRow{fallbackViewRow(sheet.ID, comp.ID, taskID, spec.schemaHash, outputs, now)}
+	}
+
+	// Carry forward manual edits as a safety net: if the schema is unchanged
+	// and BAML left a cell blank, re-apply the user's edit.
+	manualPool := make(map[string]string)
+	var oldSchemaHash string
+	for _, old := range existingForTask {
+		if len(old.Manual) == 0 {
+			continue
+		}
+		oldSchemaHash = old.SchemaHash
+		for k, v := range old.Manual {
+			if v != "" {
+				manualPool[k] = v
+			}
+		}
+	}
+	if oldSchemaHash == spec.schemaHash && len(manualPool) > 0 {
+		for i := range persisted {
+			carried := make(map[string]string)
+			for k, v := range manualPool {
+				if persisted[i].Cells[k] == "" {
+					carried[k] = v
+				}
+			}
+			if len(carried) > 0 {
+				persisted[i].Manual = carried
+			}
+		}
 	}
 
 	var keepRowIDs []string
@@ -258,12 +290,14 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 	taskMeta := r.fetchTaskMetadata(ctx, taskIDsFromGroups(taskGroups))
 
 	var existingRows []ViewRow
+	var excludedSnapshots []ExcludedRowSnapshot
 	if r.store != nil {
 		existingRows, err = r.store.GetRows(ctx, viewID, sheet.ID, comp.ID)
 		if err != nil {
 			log.Warn().Err(err).Str("view_id", viewID).Str("sheet_id", sheet.ID).Msg("failed to load stored rows, treating all as uncached")
 			existingRows = nil
 		}
+		excludedSnapshots, _ = r.store.GetExcludedRows(ctx, viewID, sheet.ID)
 	}
 	rowsByGroup := make(map[string][]ViewRow)
 	for i := range existingRows {
@@ -316,6 +350,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 	}
 
 	if len(uncachedIDs) == 0 {
+		enrichRowsWithOutputStatus(resolvedRows, allOutputs)
 		sortResolvedRows(resolvedRows, taskMeta)
 		return &viewMappingResult{Rows: resolvedRows, TaskMeta: taskMeta, Diagnostics: diagnostics}, nil
 	}
@@ -343,7 +378,6 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 		Int("total_columns", len(spec.tableCols)).
 		Int("mapping_columns", len(spec.mappingCols)).
 		Strs("column_keys", colKeys).
-		Str("row_mode", spec.rowStrategy.Mode).
 		Interface("uncached_reason_counts", uncachedReasonCounts).
 		Msg("view: mapping required")
 
@@ -365,15 +399,22 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 			return nil, fmt.Errorf("serialize outputs: %w", err)
 		}
 
+		var existingForUncached []ViewRow
+		for _, taskID := range uncachedTIDs {
+			existingForUncached = append(existingForUncached, rowsByGroup[taskID]...)
+		}
+		existingData := serializeExistingRows(existingForUncached, spec.mappingCols)
+		excludedData := serializeExcludedRows(excludedSnapshots)
+
 		result, err := baml.MapOutputsToSchema(
 			ctx,
 			sheet.Name,
 			comp.Title,
 			comp.Type,
-			spec.rowStrategy.Mode,
-			spec.rowStrategy.Description,
 			spec.mappingCols,
 			outputsJSON,
+			existingData,
+			excludedData,
 		)
 		if err != nil {
 			if opts.ForceRefresh {
@@ -458,6 +499,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 		}
 	}
 
+	enrichRowsWithOutputStatus(resolvedRows, allOutputs)
 	sortResolvedRows(resolvedRows, taskMeta)
 	return &viewMappingResult{Rows: resolvedRows, TaskMeta: taskMeta, Diagnostics: diagnostics}, nil
 }
@@ -591,9 +633,19 @@ func dataSourceNarrowsTaskSelection(ds *types.DataSource) bool {
 	if ds == nil {
 		return false
 	}
-	return strings.TrimSpace(ds.OutputType) != "" ||
-		strings.TrimSpace(ds.ArtifactKey) != "" ||
-		strings.TrimSpace(ds.TimeRange) != ""
+	if dataSourceOutputTypeFallback(ds) != "" {
+		return true
+	}
+	return strings.TrimSpace(ds.ArtifactKey) != "" ||
+		strings.TrimSpace(ds.TimeRange) != "" ||
+		len(ds.Statuses) > 0
+}
+
+func dataSourceOutputTypeFallback(ds *types.DataSource) string {
+	if ds == nil || strings.TrimSpace(ds.ArtifactKey) != "" {
+		return ""
+	}
+	return strings.TrimSpace(ds.OutputType)
 }
 
 func (r *DataResolver) resolveScopedAgentIDs(ctx context.Context, workspaceID uint, ds *types.DataSource, viewAgentRefs []string) ([]string, bool) {
@@ -603,6 +655,9 @@ func (r *DataResolver) resolveScopedAgentIDs(ctx context.Context, workspaceID ui
 	}
 	if len(resolvedAgentIDs) == 0 && len(viewAgentRefs) > 0 {
 		resolvedAgentIDs = r.resolveAgentIDsFromRefs(ctx, workspaceID, viewAgentRefs)
+		if len(resolvedAgentIDs) == 0 {
+			return nil, false
+		}
 	}
 	return resolvedAgentIDs, true
 }
@@ -631,11 +686,9 @@ func (r *DataResolver) listScopedOutputs(ctx context.Context, workspaceID uint, 
 
 func (r *DataResolver) fetchOutputsForScope(ctx context.Context, workspaceID uint, ds *types.DataSource, agentIDs []string) ([]*types.TaskOutput, error) {
 	filter := baseTaskOutputFilter()
-	if ds != nil && strings.TrimSpace(ds.OutputType) != "" {
-		outputType := strings.TrimSpace(ds.OutputType)
+	if outputType := dataSourceOutputTypeFallback(ds); outputType != "" {
 		filter.OutputType = &outputType
 	}
-
 	outputs, err := r.listScopedOutputs(ctx, workspaceID, filter, agentIDs)
 	if err != nil {
 		return nil, err
@@ -686,21 +739,33 @@ func filterOutputsForDataSource(outputs []*types.TaskOutput, ds *types.DataSourc
 		agentSet[id] = true
 	}
 
+	hasArtifactKey := strings.TrimSpace(ds.ArtifactKey) != ""
+	outputTypeFallback := dataSourceOutputTypeFallback(ds)
 	filtered := make([]*types.TaskOutput, 0, len(outputs))
 	for _, output := range outputs {
 		if output == nil {
 			continue
 		}
-		if len(agentSet) > 0 {
-			if output.AgentID == nil || !agentSet[strings.TrimSpace(*output.AgentID)] {
+		if len(agentSet) > 0 && (output.AgentID == nil || !agentSet[strings.TrimSpace(*output.AgentID)]) {
+			continue
+		}
+		if outputTypeFallback != "" && !strings.EqualFold(strings.TrimSpace(output.OutputType), outputTypeFallback) {
+			continue
+		}
+		if hasArtifactKey && !ArtifactOf(output).MatchesKey(ds.ArtifactKey) {
+			continue
+		}
+		if len(ds.Statuses) > 0 {
+			match := false
+			for _, s := range ds.Statuses {
+				if strings.EqualFold(strings.TrimSpace(s), strings.TrimSpace(output.Status)) {
+					match = true
+					break
+				}
+			}
+			if !match {
 				continue
 			}
-		}
-		if ds.OutputType != "" && !strings.EqualFold(strings.TrimSpace(ds.OutputType), strings.TrimSpace(output.OutputType)) {
-			continue
-		}
-		if ds.ArtifactKey != "" && !ArtifactOf(output).MatchesKey(ds.ArtifactKey) {
-			continue
 		}
 		filtered = append(filtered, output)
 	}
@@ -710,19 +775,6 @@ func filterOutputsForDataSource(outputs []*types.TaskOutput, ds *types.DataSourc
 	return filtered
 }
 
-func effectiveRowStrategy(ds *types.DataSource) types.RowStrategy {
-	if ds == nil || ds.RowStrategy == nil {
-		return types.RowStrategy{Mode: types.RowStrategyModeTask}
-	}
-	mode := strings.ToLower(strings.TrimSpace(ds.RowStrategy.Mode))
-	if mode != types.RowStrategyModeSplit {
-		mode = types.RowStrategyModeTask
-	}
-	return types.RowStrategy{
-		Mode:        mode,
-		Description: strings.TrimSpace(ds.RowStrategy.Description),
-	}
-}
 
 // ---------------------------------------------------------------------------
 // Component assembly
@@ -734,28 +786,18 @@ func assembleTable(sheetID string, comp types.ComponentSpec, mappedRows []resolv
 		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}
 	}
 
+	hiddenKeys := []string{"task_id", "row_id", "sheet_id", "output_id", "output_status", "source_output_ids"}
 	hiddenStart := len(tableCols)
-	colNames := make([]string, hiddenStart+4)
-	for i, col := range tableCols {
-		colNames[i] = col.Key
-	}
-	colNames[hiddenStart] = "task_id"
-	colNames[hiddenStart+1] = "row_id"
-	colNames[hiddenStart+2] = "sheet_id"
-	colNames[hiddenStart+3] = "output_id"
-
+	colNames := make([]string, hiddenStart+len(hiddenKeys))
 	meta := make([]types.ColumnMeta, len(colNames))
 	for i, col := range tableCols {
-		meta[i] = types.ColumnMeta{
-			Key:   col.Key,
-			Label: stripHint(col.Description),
-			Type:  normalizeColumnType(col.Type),
-		}
+		colNames[i] = col.Key
+		meta[i] = types.ColumnMeta{Key: col.Key, Label: stripHint(col.Description), Type: normalizeColumnType(col.Type)}
 	}
-	meta[hiddenStart] = types.ColumnMeta{Key: "task_id", Type: "text", Hidden: true}
-	meta[hiddenStart+1] = types.ColumnMeta{Key: "row_id", Type: "text", Hidden: true}
-	meta[hiddenStart+2] = types.ColumnMeta{Key: "sheet_id", Type: "text", Hidden: true}
-	meta[hiddenStart+3] = types.ColumnMeta{Key: "output_id", Type: "text", Hidden: true}
+	for i, key := range hiddenKeys {
+		colNames[hiddenStart+i] = key
+		meta[hiddenStart+i] = types.ColumnMeta{Key: key, Type: "text", Hidden: true}
+	}
 
 	var rows [][]any
 	for _, mapped := range mappedRows {
@@ -774,10 +816,9 @@ func assembleTable(sheetID string, comp types.ComponentSpec, mappedRows []resolv
 				}
 			}
 		}
-		row[hiddenStart] = mapped.TaskID
-		row[hiddenStart+1] = mapped.RowID
-		row[hiddenStart+2] = sheetID
-		row[hiddenStart+3] = mapped.OutputID
+		for i, v := range []any{mapped.TaskID, mapped.RowID, sheetID, mapped.OutputID, mapped.OutputStatus, mapped.SourceOutputIDs} {
+			row[hiddenStart+i] = v
+		}
 		if hasValue {
 			rows = append(rows, row)
 		}
@@ -858,12 +899,13 @@ func resolvedRowsFromStored(rows []ViewRow, applyManual bool) []resolvedSheetRow
 			cells = copyStringMap(row.MergedCells())
 		}
 		result = append(result, resolvedSheetRow{
-			SheetID:  row.SheetID,
-			TaskID:   row.TaskID,
-			RowID:    row.ID,
-			RowKey:   row.RowKey,
-			OutputID: firstSourceOutputID(row.SourceOutputIDs),
-			Cells:    cells,
+			SheetID:         row.SheetID,
+			TaskID:          row.TaskID,
+			RowID:           row.ID,
+			RowKey:          row.RowKey,
+			OutputID:        firstSourceOutputID(row.SourceOutputIDs),
+			SourceOutputIDs: strings.Join(row.SourceOutputIDs, ","),
+			Cells:           cells,
 		})
 	}
 	return result
@@ -962,6 +1004,20 @@ func copyStringMap(values map[string]string) map[string]string {
 		cloned[key] = value
 	}
 	return cloned
+}
+
+func enrichRowsWithOutputStatus(rows []resolvedSheetRow, outputs []*types.TaskOutput) {
+	statusMap := make(map[string]string, len(outputs))
+	for _, o := range outputs {
+		if o != nil {
+			statusMap[o.ID] = o.Status
+		}
+	}
+	for i := range rows {
+		if rows[i].OutputID != "" {
+			rows[i].OutputStatus = statusMap[rows[i].OutputID]
+		}
+	}
 }
 
 func sortResolvedRows(rows []resolvedSheetRow, taskMeta map[string]*types.AgentTask) {
@@ -1135,6 +1191,47 @@ func buildColumnSchemas(comp types.ComponentSpec) []bamltypes.ColumnSchema {
 	return schemas
 }
 
+// serializeExcludedRows formats excluded row snapshots so the BAML mapper
+// knows which rows the user has explicitly deleted and must not regenerate.
+func serializeExcludedRows(snapshots []ExcludedRowSnapshot) string {
+	if len(snapshots) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for i, s := range snapshots {
+		fmt.Fprintf(&sb, "Excluded row %d (task_id=%s, row_key=%s):\n", i+1, s.TaskID, s.RowKey)
+		for k, v := range s.Cells {
+			if v != "" {
+				fmt.Fprintf(&sb, "  - %s: %q\n", k, v)
+			}
+		}
+	}
+	return sb.String()
+}
+
+// serializeExistingRows formats stored rows (with merged manual edits) as a
+// text payload so the BAML mapper can see the current table state and preserve
+// user corrections.
+func serializeExistingRows(rows []ViewRow, cols []bamltypes.ColumnSchema) string {
+	if len(rows) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for _, row := range rows {
+		merged := row.MergedCells()
+		fmt.Fprintf(&sb, "Row (task_id=%s, row_key=%s):\n", row.TaskID, row.RowKey)
+		for _, col := range cols {
+			val := merged[col.Key]
+			if row.Manual[col.Key] != "" {
+				fmt.Fprintf(&sb, "  - %s [key=%s]: %q [USER EDIT]\n", col.Name, col.Key, val)
+			} else {
+				fmt.Fprintf(&sb, "  - %s [key=%s]: %q\n", col.Name, col.Key, val)
+			}
+		}
+	}
+	return sb.String()
+}
+
 // serializeOutputsForMapping groups outputs by task_id and formats them as a
 // deterministic text payload with explicit task/output boundaries. The mapper
 // gets cleaned, high-signal evidence rather than a raw transport dump.
@@ -1195,6 +1292,12 @@ func writeTaskOutputForMapping(b *strings.Builder, output *types.TaskOutput) {
 	b.WriteString("<<<BEGIN_OUTPUT id=")
 	b.WriteString(output.ID)
 	b.WriteString(">>>\n")
+	if output.Status != "" && output.Status != types.TaskOutputStatusActive {
+		writeMappingLine(b, "STATUS", output.Status)
+	}
+	if ak, _ := output.Metadata[types.TaskOutputMetadataArtifactKey].(string); ak != "" {
+		writeMappingLine(b, "ARTIFACT_KEY", ak)
+	}
 	writeMappingLine(b, "TITLE", output.Title)
 	writeMappingLine(b, "OUTPUT_TYPE", output.OutputType)
 	writeMappingLine(b, "AGENT_NAME", output.AgentName)
@@ -1561,9 +1664,9 @@ func (r *DataResolver) Store() *ViewStore {
 // mappingVersion should be bumped whenever the BAML prompt, serialization
 // logic, mapping scope, or output processing changes. This invalidates all
 // cached rows.
-const mappingVersion = "v6"
+const mappingVersion = "v7"
 
-func hashColumns(columns []bamltypes.ColumnSchema, rowStrategy types.RowStrategy, sheetName, tableTitle, tableType string) string {
+func hashColumns(columns []bamltypes.ColumnSchema, sheetName, tableTitle, tableType string) string {
 	type hashEntry struct {
 		Name        string `json:"n"`
 		Key         string `json:"k"`
@@ -1571,21 +1674,17 @@ func hashColumns(columns []bamltypes.ColumnSchema, rowStrategy types.RowStrategy
 		Description string `json:"d"`
 	}
 	payload := struct {
-		Version     string      `json:"v"`
-		Sheet       string      `json:"s"`
-		Title       string      `json:"t"`
-		TableType   string      `json:"tt"`
-		Mode        string      `json:"m"`
-		Description string      `json:"d"`
-		Columns     []hashEntry `json:"c"`
+		Version   string      `json:"v"`
+		Sheet     string      `json:"s"`
+		Title     string      `json:"t"`
+		TableType string      `json:"tt"`
+		Columns   []hashEntry `json:"c"`
 	}{
-		Version:     mappingVersion,
-		Sheet:       sheetName,
-		Title:       strings.TrimSpace(tableTitle),
-		TableType:   strings.TrimSpace(tableType),
-		Mode:        rowStrategy.Mode,
-		Description: rowStrategy.Description,
-		Columns:     make([]hashEntry, len(columns)),
+		Version:   mappingVersion,
+		Sheet:     sheetName,
+		Title:     strings.TrimSpace(tableTitle),
+		TableType: strings.TrimSpace(tableType),
+		Columns:   make([]hashEntry, len(columns)),
 	}
 	for i, c := range columns {
 		payload.Columns[i] = hashEntry{Name: c.Name, Key: c.Key, Type: c.Type, Description: c.Description}
@@ -2133,4 +2232,184 @@ func stripHint(desc string) string {
 		return strings.TrimSpace(desc[:idx])
 	}
 	return desc
+}
+
+// ---------------------------------------------------------------------------
+// Widget resolution
+// ---------------------------------------------------------------------------
+
+// ResolveWidgets maps the sheet's view rows through BAML into each widget's
+// data format.  Results are stored as WidgetRow documents in MongoDB, keyed
+// by a content hash so unchanged data skips BAML entirely.
+func (r *DataResolver) ResolveWidgets(ctx context.Context, workspaceID uint, viewID string, sheet types.SheetSpec, comp types.ComponentSpec, opts ResolveOptions) ([]types.WidgetData, error) {
+	if len(sheet.Widgets) == 0 {
+		return nil, nil
+	}
+
+	rows, err := r.store.GetRows(ctx, viewID, sheet.ID, comp.ID)
+	if err != nil {
+		return nil, fmt.Errorf("load view rows for widgets: %w", err)
+	}
+
+	tableCols := buildColumnSchemas(comp)
+	columnsStr := serializeWidgetColumns(tableCols)
+	dataStr := serializeWidgetRows(tableCols, rows)
+	dataHash := widgetDataHash(columnsStr, dataStr)
+
+	stored, err := r.store.GetWidgetRows(ctx, viewID, sheet.ID)
+	if err != nil {
+		log.Warn().Err(err).Str("view_id", viewID).Str("sheet_id", sheet.ID).Msg("widget row load failed")
+	}
+	byWidget := make(map[string]WidgetRow, len(stored))
+	for _, wr := range stored {
+		byWidget[wr.WidgetID] = wr
+	}
+
+	results := make([]types.WidgetData, 0, len(sheet.Widgets))
+	for _, widget := range sheet.Widgets {
+		if !opts.ForceRefresh {
+			if wr, ok := byWidget[widget.ID]; ok && wr.SchemaHash == dataHash {
+				results = append(results, widgetRowToData(wr))
+				continue
+			}
+		}
+
+		wr := resolveOneWidget(ctx, sheet.Name, sheet.ID, widget, columnsStr, dataStr, dataHash)
+		results = append(results, widgetRowToData(wr))
+
+		if err := r.store.UpsertWidgetRow(ctx, viewID, wr); err != nil {
+			log.Warn().Err(err).Str("widget_id", widget.ID).Msg("widget row write failed")
+		}
+	}
+	return results, nil
+}
+
+func resolveOneWidget(ctx context.Context, sheetName, sheetID string, widget types.WidgetSpec, columnsStr, dataStr, dataHash string) WidgetRow {
+	configJSON, _ := json.Marshal(widget.Config)
+	now := time.Now()
+
+	result, err := baml.MapViewToWidget(ctx, sheetName, widget.Type, widget.Title, widget.Description, string(configJSON), columnsStr, dataStr)
+	if err != nil {
+		log.Warn().Err(err).Str("widget_id", widget.ID).Str("type", widget.Type).Msg("BAML widget mapping failed")
+		return WidgetRow{
+			SheetID:    sheetID,
+			WidgetID:   widget.ID,
+			Type:       widget.Type,
+			Status:     types.ResolvedDataStatusRequestError,
+			Error:      "failed to resolve widget data",
+			SchemaHash: dataHash,
+			UpdatedAt:  now,
+		}
+	}
+
+	wr := WidgetRow{
+		SheetID:    sheetID,
+		WidgetID:   widget.ID,
+		Type:       widget.Type,
+		Status:     types.ResolvedDataStatusOK,
+		SchemaHash: dataHash,
+		UpdatedAt:  now,
+	}
+	switch widget.Type {
+	case "metric":
+		if result.Metric != nil {
+			wr.Metric = &WidgetMetric{Value: result.Metric.Value, Label: result.Metric.Label, Comparison: result.Metric.Comparison}
+		}
+	case "map":
+		if result.Map_data != nil {
+			markers := make([]WidgetMapMarker, 0, len(result.Map_data.Markers))
+			for _, m := range result.Map_data.Markers {
+				markers = append(markers, WidgetMapMarker{Lat: m.Lat, Lng: m.Lng, Label: m.Label, Detail: m.Detail})
+			}
+			wr.MapData = &WidgetMapData{Markers: markers}
+		}
+	case "list":
+		if result.List_data != nil {
+			items := make([]WidgetListItem, 0, len(result.List_data.Items))
+			for _, item := range result.List_data.Items {
+				items = append(items, WidgetListItem{Label: item.Label, Value: item.Value, Detail: item.Detail})
+			}
+			wr.ListData = &WidgetListData{Items: items}
+		}
+	}
+	return wr
+}
+
+// widgetRowToData converts a stored WidgetRow to the API response type.
+func widgetRowToData(wr WidgetRow) types.WidgetData {
+	wd := types.WidgetData{
+		WidgetID: wr.WidgetID,
+		Type:     wr.Type,
+		Status:   wr.Status,
+		Error:    wr.Error,
+		CachedAt: &wr.UpdatedAt,
+	}
+	if wr.Metric != nil {
+		wd.Metric = &types.MetricData{Value: wr.Metric.Value, Label: wr.Metric.Label, Comparison: wr.Metric.Comparison}
+	}
+	if wr.MapData != nil {
+		markers := make([]types.MapMarker, 0, len(wr.MapData.Markers))
+		for _, m := range wr.MapData.Markers {
+			markers = append(markers, types.MapMarker{Lat: m.Lat, Lng: m.Lng, Label: m.Label, Detail: m.Detail})
+		}
+		wd.MapData = &types.MapWidgetData{Markers: markers}
+	}
+	if wr.ListData != nil {
+		items := make([]types.ListItem, 0, len(wr.ListData.Items))
+		for _, item := range wr.ListData.Items {
+			items = append(items, types.ListItem{Label: item.Label, Value: item.Value, Detail: item.Detail})
+		}
+		wd.ListData = &types.ListWidgetData{Items: items}
+	}
+	return wd
+}
+
+func serializeWidgetColumns(cols []bamltypes.ColumnSchema) string {
+	var sb strings.Builder
+	for i, col := range cols {
+		if i > 0 {
+			sb.WriteString("\n")
+		}
+		fmt.Fprintf(&sb, "- %s [key=%s] (%s)", col.Name, col.Key, col.Type)
+	}
+	return sb.String()
+}
+
+func serializeWidgetRows(cols []bamltypes.ColumnSchema, rows []ViewRow) string {
+	if len(rows) == 0 {
+		return "(no data)"
+	}
+
+	var sb strings.Builder
+	keys := make([]string, len(cols))
+	for i, col := range cols {
+		keys[i] = col.Key
+	}
+
+	for i, row := range rows {
+		if i >= 100 {
+			fmt.Fprintf(&sb, "\n... and %d more rows", len(rows)-100)
+			break
+		}
+		cells := row.MergedCells()
+		if i > 0 {
+			sb.WriteString("\n")
+		}
+		fmt.Fprintf(&sb, "ROW %d:", i+1)
+		for _, key := range keys {
+			v := cells[key]
+			if v != "" {
+				fmt.Fprintf(&sb, " %s=%q", key, v)
+			}
+		}
+	}
+	return sb.String()
+}
+
+func widgetDataHash(columns, data string) string {
+	h := sha256.New()
+	h.Write([]byte(columns))
+	h.Write([]byte("\x00"))
+	h.Write([]byte(data))
+	return hex.EncodeToString(h.Sum(nil))[:16]
 }

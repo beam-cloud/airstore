@@ -22,9 +22,6 @@ const (
 
 	ComponentTypeTable  = "table"
 	ComponentTypeAction = "action"
-
-	RowStrategyModeTask  = "task"
-	RowStrategyModeSplit = "split"
 )
 
 func (c ComponentSpec) IsTable() bool {
@@ -33,13 +30,14 @@ func (c ComponentSpec) IsTable() bool {
 
 // View is the persisted representation of a published view.
 type View struct {
-	ID          string         `json:"id"`
-	WorkspaceID uint           `json:"workspace_id"`
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	Definition  ViewDefinition `json:"definition"`
-	CreatedAt   time.Time      `json:"created_at"`
-	UpdatedAt   time.Time      `json:"updated_at"`
+	ID            string         `json:"id"`
+	WorkspaceID   uint           `json:"workspace_id"`
+	Name          string         `json:"name"`
+	Description   string         `json:"description"`
+	SourceDraftID string         `json:"source_draft_id,omitempty"`
+	Definition    ViewDefinition `json:"definition"`
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
 }
 
 // ViewDefinition is the JSON-serializable workbook schema for a view.
@@ -80,6 +78,18 @@ type SheetSpec struct {
 	Layout      LayoutConfig    `json:"layout"`
 	Components  []ComponentSpec `json:"components"`
 	Relations   []SheetRelation `json:"relations,omitempty"`
+	Widgets     []WidgetSpec    `json:"widgets,omitempty"`
+}
+
+type WidgetSpec struct {
+	ID          string         `json:"id"`
+	Type        string         `json:"type"`
+	Title       string         `json:"title"`
+	Description string         `json:"description,omitempty"`
+	Config      map[string]any `json:"config,omitempty"`
+	Size        string         `json:"size,omitempty"`
+	W           int            `json:"w,omitempty"`
+	H           int            `json:"h,omitempty"`
 }
 
 type SheetRelation struct {
@@ -117,13 +127,8 @@ type DataSource struct {
 	OutputType  string          `json:"output_type,omitempty"`
 	ArtifactKey string          `json:"artifact_key,omitempty"`
 	TimeRange   string          `json:"time_range,omitempty"`
-	RowStrategy *RowStrategy    `json:"row_strategy,omitempty"`
+	Statuses    []string        `json:"statuses,omitempty"`
 	Transform   []TransformRule `json:"transform,omitempty"`
-}
-
-type RowStrategy struct {
-	Mode        string `json:"mode"`
-	Description string `json:"description,omitempty"`
 }
 
 type TransformRule struct {
@@ -159,4 +164,43 @@ type ResolvedData struct {
 	Status      string         `json:"status,omitempty"`
 	Error       string         `json:"error,omitempty"`
 	Diagnostics map[string]any `json:"diagnostics,omitempty"`
+}
+
+// WidgetData is the resolved data for a single widget tile.
+type WidgetData struct {
+	WidgetID string          `json:"widget_id"`
+	Type     string          `json:"type"`
+	Metric   *MetricData     `json:"metric,omitempty"`
+	MapData  *MapWidgetData  `json:"map_data,omitempty"`
+	ListData *ListWidgetData `json:"list_data,omitempty"`
+	Status   string          `json:"status,omitempty"`
+	Error    string          `json:"error,omitempty"`
+	CachedAt *time.Time      `json:"cached_at,omitempty"`
+}
+
+type MetricData struct {
+	Value      string `json:"value"`
+	Label      string `json:"label"`
+	Comparison string `json:"comparison,omitempty"`
+}
+
+type MapWidgetData struct {
+	Markers []MapMarker `json:"markers"`
+}
+
+type MapMarker struct {
+	Lat    float64 `json:"lat"`
+	Lng    float64 `json:"lng"`
+	Label  string  `json:"label"`
+	Detail string  `json:"detail,omitempty"`
+}
+
+type ListWidgetData struct {
+	Items []ListItem `json:"items"`
+}
+
+type ListItem struct {
+	Label  string `json:"label"`
+	Value  string `json:"value"`
+	Detail string `json:"detail,omitempty"`
 }

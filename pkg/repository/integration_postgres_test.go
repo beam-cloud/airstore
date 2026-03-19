@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"sync"
 	"testing"
@@ -255,3 +256,121 @@ func expectGetAgentStatsBaseQueries(mock sqlmock.Sqlmock, workspaceID uint, agen
 }
 
 const agentStatsTotalCostQueryPattern = `(?s)SELECT COALESCE\(SUM\(.*WHEN ar\.cost_usd > 0 THEN ar\.cost_usd.*->>'billing_total_cost_microusd'.*->>'total_cost_usd'.*->>'cost_usd'.*->>'usd_cost'.*->>'cost'.*FROM agent_run ar.*WHERE ar\.workspace_id = \$1 AND ar\.agent_id = \$2`
+
+func TestCreateTaskOutputTreatsSameTaskConflictAsIdempotent(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	backend := &PostgresBackend{db: db}
+	output := &types.TaskOutput{
+		ID:          "output-1",
+		WorkspaceID: 7,
+		TaskID:      "task-1",
+		OutputType:  "report",
+		Title:       "Report",
+		Data:        map[string]any{},
+		Status:      types.TaskOutputStatusPending,
+	}
+	createdAt := time.Now().UTC()
+
+	mock.ExpectQuery(regexp.QuoteMeta(`
+			INSERT INTO task_output (id, workspace_id, task_id, run_id, agent_id, output_type, title, summary, uri, data_json, metadata_json, status)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			ON CONFLICT (id) DO NOTHING
+			RETURNING created_at`)).
+		WithArgs(
+			"output-1",
+			uint(7),
+			"task-1",
+			nil,
+			nil,
+			"report",
+			"Report",
+			sqlmock.AnyArg(),
+			sqlmock.AnyArg(),
+			sqlmock.AnyArg(),
+			sqlmock.AnyArg(),
+			types.TaskOutputStatusPending,
+		).
+		WillReturnRows(sqlmock.NewRows([]string{"created_at"}))
+
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT created_at, workspace_id, task_id FROM task_output WHERE id = $1`)).
+		WithArgs("output-1").
+		WillReturnRows(sqlmock.NewRows([]string{"created_at", "workspace_id", "task_id"}).AddRow(createdAt, int64(7), "task-1"))
+
+	if err := backend.CreateTaskOutput(context.Background(), output); err != nil {
+		t.Fatalf("CreateTaskOutput returned error: %v", err)
+	}
+	if !output.CreatedAt.Equal(createdAt) {
+		t.Fatalf("expected created_at %v, got %v", createdAt, output.CreatedAt)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestCreateTaskOutputRejectsCrossTaskConflict(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	backend := &PostgresBackend{db: db}
+	output := &types.TaskOutput{
+		ID:          "output-1",
+		WorkspaceID: 7,
+		TaskID:      "task-1",
+		OutputType:  "report",
+		Title:       "Report",
+		Data:        map[string]any{},
+		Status:      types.TaskOutputStatusPending,
+	}
+	createdAt := time.Now().UTC()
+
+	mock.ExpectQuery(regexp.QuoteMeta(`
+			INSERT INTO task_output (id, workspace_id, task_id, run_id, agent_id, output_type, title, summary, uri, data_json, metadata_json, status)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			ON CONFLICT (id) DO NOTHING
+			RETURNING created_at`)).
+		WithArgs(
+			"output-1",
+			uint(7),
+			"task-1",
+			nil,
+			nil,
+			"report",
+			"Report",
+			sqlmock.AnyArg(),
+			sqlmock.AnyArg(),
+			sqlmock.AnyArg(),
+			sqlmock.AnyArg(),
+			types.TaskOutputStatusPending,
+		).
+		WillReturnRows(sqlmock.NewRows([]string{"created_at"}))
+
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT created_at, workspace_id, task_id FROM task_output WHERE id = $1`)).
+		WithArgs("output-1").
+		WillReturnRows(sqlmock.NewRows([]string{"created_at", "workspace_id", "task_id"}).AddRow(createdAt, int64(9), "task-2"))
+
+	err = backend.CreateTaskOutput(context.Background(), output)
+	if err == nil {
+		t.Fatal("expected CreateTaskOutput to return conflict error")
+	}
+
+	var conflictErr *types.ErrTaskOutputConflict
+	if !errors.As(err, &conflictErr) {
+		t.Fatalf("expected ErrTaskOutputConflict, got %T: %v", err, err)
+	}
+	if conflictErr.ExistingWorkspaceID != 9 || conflictErr.ExistingTaskID != "task-2" {
+		t.Fatalf("unexpected conflict scope: %+v", conflictErr)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}

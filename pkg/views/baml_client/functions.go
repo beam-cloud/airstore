@@ -21,7 +21,7 @@ import (
 	baml "github.com/boundaryml/baml/engine/language_client_go/pkg"
 )
 
-func MapOutputsToSchema(ctx context.Context, sheet_name string, table_title string, table_type string, row_strategy_mode string, row_strategy_description string, columns []types.ColumnSchema, outputs_payload string, opts ...CallOptionFunc) (types.MappedResult, error) {
+func MapOutputsToSchema(ctx context.Context, sheet_name string, table_title string, table_type string, columns []types.ColumnSchema, outputs_payload string, existing_rows string, excluded_rows string, opts ...CallOptionFunc) (types.MappedResult, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -37,7 +37,7 @@ func MapOutputsToSchema(ctx context.Context, sheet_name string, table_title stri
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"sheet_name": sheet_name, "table_title": table_title, "table_type": table_type, "row_strategy_mode": row_strategy_mode, "row_strategy_description": row_strategy_description, "columns": columns, "outputs_payload": outputs_payload},
+		Kwargs: map[string]any{"sheet_name": sheet_name, "table_title": table_title, "table_type": table_type, "columns": columns, "outputs_payload": outputs_payload, "existing_rows": existing_rows, "excluded_rows": excluded_rows},
 		Env:    getEnvVars(callOpts.env),
 	}
 
@@ -95,7 +95,7 @@ func MapOutputsToSchema(ctx context.Context, sheet_name string, table_title stri
 	}
 }
 
-func WriteView(ctx context.Context, user_message string, conversation_history string, current_view string, workspace_context string, component_registry string, opts ...CallOptionFunc) (types.ViewDraftResponse, error) {
+func MapViewToWidget(ctx context.Context, sheet_name string, widget_type string, widget_title string, widget_description string, widget_config string, table_columns string, table_data string, opts ...CallOptionFunc) (types.WidgetResult, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -111,7 +111,81 @@ func WriteView(ctx context.Context, user_message string, conversation_history st
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"user_message": user_message, "conversation_history": conversation_history, "current_view": current_view, "workspace_context": workspace_context, "component_registry": component_registry},
+		Kwargs: map[string]any{"sheet_name": sheet_name, "widget_type": widget_type, "widget_title": widget_title, "widget_description": widget_description, "widget_config": widget_config, "table_columns": table_columns, "table_data": table_data},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		panic(err)
+	}
+
+	if callOpts.onTick == nil {
+		result, err := bamlRuntime.CallFunction(ctx, "MapViewToWidget", encoded, callOpts.onTick)
+		if err != nil {
+			return types.WidgetResult{}, err
+		}
+
+		if result.Error != nil {
+			return types.WidgetResult{}, result.Error
+		}
+
+		casted := (result.Data).(types.WidgetResult)
+
+		return casted, nil
+	} else {
+		channel, err := bamlRuntime.CallFunctionStream(ctx, "MapViewToWidget", encoded, callOpts.onTick)
+		if err != nil {
+			return types.WidgetResult{}, err
+		}
+
+		for result := range channel {
+			if result.Error != nil {
+				return types.WidgetResult{}, result.Error
+			}
+
+			if result.HasData {
+				return result.Data.(types.WidgetResult), nil
+			}
+		}
+
+		return types.WidgetResult{}, fmt.Errorf("No data returned from stream")
+	}
+}
+
+func WriteView(ctx context.Context, user_message string, conversation_history string, current_view string, workspace_context string, component_registry string, view_data string, opts ...CallOptionFunc) (types.ViewDraftResponse, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	// Resolve client option to clientRegistry (client takes precedence)
+	if callOpts.client != nil {
+		if callOpts.clientRegistry == nil {
+			callOpts.clientRegistry = baml.NewClientRegistry()
+		}
+		callOpts.clientRegistry.SetPrimaryClient(*callOpts.client)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"user_message": user_message, "conversation_history": conversation_history, "current_view": current_view, "workspace_context": workspace_context, "component_registry": component_registry, "view_data": view_data},
 		Env:    getEnvVars(callOpts.env),
 	}
 

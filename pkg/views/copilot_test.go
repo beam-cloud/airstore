@@ -143,6 +143,30 @@ func TestNormalizeViewDefinitionAssignsUniqueSheetAndComponentIDs(t *testing.T) 
 	}
 }
 
+func TestNormalizeViewDefinitionPreservesExplicitOutputTypeFilter(t *testing.T) {
+	def := types.ViewDefinition{
+		Sheets: []types.SheetSpec{{
+			ID:     "sheet-1",
+			Name:   "Recipes",
+			Layout: types.LayoutConfig{Columns: 12},
+			Components: []types.ComponentSpec{{
+				ID:   "table-1",
+				Type: types.ComponentTypeTable,
+				DataSource: &types.DataSource{
+					AgentID:    "chef-agent",
+					OutputType: " json ",
+				},
+			}},
+		}},
+	}
+
+	normalizeViewDefinition(&def)
+
+	if got, want := def.Sheets[0].Components[0].DataSource.OutputType, "json"; got != want {
+		t.Fatalf("DataSource.OutputType = %q, want %q", got, want)
+	}
+}
+
 func TestExtractStringSliceHandlesStringArrays(t *testing.T) {
 	m := map[string]any{
 		"skills": []string{"triage", " review ", "triage", ""},

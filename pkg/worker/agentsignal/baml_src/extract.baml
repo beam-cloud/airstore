@@ -62,7 +62,7 @@ function ExtractOutputs(tool_name: string, tool_input: string, tool_result: stri
       file extension. For links, describe the destination.
 
     DATA FIELDS — extract the important fields from the tool result:
-    - Pick the 3-8 most useful fields a user would want to see in a dashboard table
+    - Pick the 5-10 most useful fields a user would want to see in a dashboard table
     - Assign display types semantically: URLs → "link", emails → "email",
       dates/timestamps → "date", monetary values → "currency", true/false → "boolean",
       comma-separated lists → "tags", counts/quantities → "number"
@@ -94,6 +94,25 @@ function ExtractOutputs(tool_name: string, tool_input: string, tool_result: stri
 
     When in doubt, return an empty array. Be very conservative.
 
+    MULTI-ENTITY DECOMPOSITION:
+    When a result contains data for multiple distinct entities, return
+    one ExtractedOutput per entity — NOT one aggregate output.
+
+    Common patterns to decompose:
+    - Spreadsheet/CSV with rows for different companies, people, or items
+    - Batch API response with multiple records
+    - Research results covering multiple topics, companies, or subjects
+    - Scraped data from multiple listings, profiles, or pages
+    - File containing structured data about multiple distinct things
+
+    Each entity output should have:
+    - Its own title (e.g. "Global Pointe Pricing" not "Pricing Spreadsheet")
+    - Its own data_fields with entity-specific values
+    - The same artifact_key to group them (e.g. all get "company-research")
+
+    Do NOT decompose a single narrative report into sections.
+    Cap at 20 entities per tool call — aggregate if more.
+
     Tool name: {{ tool_name }}
     Tool input (truncated): {{ tool_input }}
     Tool result (truncated): {{ tool_result }}
@@ -102,7 +121,7 @@ function ExtractOutputs(tool_name: string, tool_input: string, tool_result: stri
   "#
 }
 
-function ExtractFinalResponseOutput(user_message: string?, assistant_message: string) -> ExtractedOutput {
+function ExtractFinalResponseOutput(user_message: string?, assistant_message: string) -> ExtractedOutput[] {
   client OutputClassifier
   prompt #"
     An AI agent has finished a task. Decide whether the FINAL ASSISTANT
@@ -116,7 +135,7 @@ function ExtractFinalResponseOutput(user_message: string?, assistant_message: st
       recipe, research brief, analysis, summary report, plan, transcript
       synthesis, structured instructions, or another polished deliverable
 
-    DO NOT PERSIST:
+    DO NOT PERSIST (return an empty array):
     - Brief confirmations or acknowledgements
     - "Done", "completed", or other status-only replies
     - Questions, clarification requests, or approval requests
@@ -142,8 +161,32 @@ function ExtractFinalResponseOutput(user_message: string?, assistant_message: st
     - Add categorical tags for browsing/filtering
 
     If the response should NOT be persisted:
-    - Set kind = NONE
-    - Leave other fields empty unless needed by the schema
+    - Return an empty array
+
+    MULTI-ENTITY DECOMPOSITION:
+    When the response contains structured data about multiple distinct entities,
+    return one ExtractedOutput per entity — NOT one aggregate output.
+
+    Common patterns to decompose:
+    - A list of restaurants, each with name, cuisine, address, price range
+    - Research results covering multiple companies, people, or topics
+    - A collection of recipes, products, or listings with per-item details
+    - Recommendations or reviews for multiple distinct items
+
+    Each entity output should have:
+    - Its own title (e.g. "Bistrot Ha" not "Restaurant Guide")
+    - Its own data_fields with entity-specific values (e.g. cuisine, address,
+      price_range for that one restaurant)
+    - Its own content with just that entity's description/details
+    - The same artifact_key to group them (e.g. all get "restaurant-guides")
+    - The same artifact_label and artifact_kind across all entities
+
+    Do NOT decompose:
+    - A single narrative report, essay, or analysis that isn't a list of entities
+    - Content where the value is in the whole, not in individual items
+    Cap at 20 entities — if more, pick the 20 most notable and aggregate the rest.
+
+    For non-multi-entity responses, return a single-element array.
 
     User message / task context:
     {{ user_message }}

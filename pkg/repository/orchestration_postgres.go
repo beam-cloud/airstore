@@ -4062,7 +4062,7 @@ func (b *PostgresBackend) ListTaskOutputs(ctx context.Context, workspaceId uint,
 	rows, err := b.db.QueryContext(ctx, `
 		SELECT o.id, o.workspace_id, o.task_id, o.run_id, o.agent_id,
 		       COALESCE(ap.name, ''), o.output_type, o.title,
-		       o.summary, o.uri, o.data_json, o.metadata_json, o.archived_at, o.created_at
+		       o.summary, o.uri, o.data_json, o.metadata_json, o.status, o.archived_at, o.created_at
 		FROM task_output o
 		LEFT JOIN agent_profile ap ON ap.id = o.agent_id
 		WHERE o.workspace_id = $1 AND o.task_id = $2
@@ -4095,7 +4095,7 @@ func (b *PostgresBackend) ListWorkspaceTaskOutputs(
 	rows, err := b.db.QueryContext(ctx, `
 		SELECT o.id, o.workspace_id, o.task_id, o.run_id, o.agent_id,
 		       COALESCE(ap.name, ''), o.output_type, o.title,
-		       o.summary, o.uri, o.data_json, o.metadata_json, o.archived_at, o.created_at
+		       o.summary, o.uri, o.data_json, o.metadata_json, o.status, o.archived_at, o.created_at
 		FROM task_output o
 		LEFT JOIN agent_profile ap ON ap.id = o.agent_id
 		WHERE o.workspace_id = $1
@@ -4142,13 +4142,47 @@ func (b *PostgresBackend) CreateTaskOutput(ctx context.Context, output *types.Ta
 			return fmt.Errorf("marshal metadata: %w", err)
 		}
 	}
+	if output.Status == "" {
+		output.Status = types.TaskOutputStatusActive
+	}
+	if output.ID != "" {
+		err = b.db.QueryRowContext(ctx, `
+			INSERT INTO task_output (id, workspace_id, task_id, run_id, agent_id, output_type, title, summary, uri, data_json, metadata_json, status)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			ON CONFLICT (id) DO NOTHING
+			RETURNING created_at`,
+			output.ID, output.WorkspaceID, output.TaskID, nilIfEmpty(output.RunID), nilIfEmpty(output.AgentID),
+			output.OutputType, output.Title, output.Summary, nilIfEmpty(output.URI),
+			dataBytes, nullableJSONB(metaBytes), output.Status,
+		).Scan(&output.CreatedAt)
+		if err == sql.ErrNoRows {
+			var existingWorkspaceID uint
+			var existingTaskID string
+			if lookupErr := b.db.QueryRowContext(ctx,
+				`SELECT created_at, workspace_id, task_id FROM task_output WHERE id = $1`, output.ID,
+			).Scan(&output.CreatedAt, &existingWorkspaceID, &existingTaskID); lookupErr != nil {
+				return lookupErr
+			}
+			if existingWorkspaceID != output.WorkspaceID || existingTaskID != output.TaskID {
+				return &types.ErrTaskOutputConflict{
+					ID:                  output.ID,
+					WorkspaceID:         output.WorkspaceID,
+					TaskID:              output.TaskID,
+					ExistingWorkspaceID: existingWorkspaceID,
+					ExistingTaskID:      existingTaskID,
+				}
+			}
+			return nil
+		}
+		return err
+	}
 	return b.db.QueryRowContext(ctx, `
-		INSERT INTO task_output (workspace_id, task_id, run_id, agent_id, output_type, title, summary, uri, data_json, metadata_json)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		INSERT INTO task_output (workspace_id, task_id, run_id, agent_id, output_type, title, summary, uri, data_json, metadata_json, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		RETURNING id, created_at`,
 		output.WorkspaceID, output.TaskID, nilIfEmpty(output.RunID), nilIfEmpty(output.AgentID),
 		output.OutputType, output.Title, output.Summary, nilIfEmpty(output.URI),
-		dataBytes, nullableJSONB(metaBytes),
+		dataBytes, nullableJSONB(metaBytes), output.Status,
 	).Scan(&output.ID, &output.CreatedAt)
 }
 
@@ -4156,7 +4190,7 @@ func (b *PostgresBackend) GetTaskOutput(ctx context.Context, workspaceId uint, o
 	row := b.db.QueryRowContext(ctx, `
 		SELECT o.id, o.workspace_id, o.task_id, o.run_id, o.agent_id,
 		       COALESCE(ap.name, ''), o.output_type, o.title,
-		       o.summary, o.uri, o.data_json, o.metadata_json, o.archived_at, o.created_at
+		       o.summary, o.uri, o.data_json, o.metadata_json, o.status, o.archived_at, o.created_at
 		FROM task_output o
 		LEFT JOIN agent_profile ap ON ap.id = o.agent_id
 		WHERE o.workspace_id = $1 AND o.id = $2`, workspaceId, outputID)
@@ -4190,6 +4224,20 @@ func (b *PostgresBackend) UpdateTaskOutputSummary(ctx context.Context, workspace
 	res, err := b.db.ExecContext(ctx, `
 		UPDATE task_output SET summary = $1
 		WHERE id = $2 AND workspace_id = $3`, summary, outputID, workspaceId)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return &types.ErrTaskOutputNotFound{ID: outputID}
+	}
+	return nil
+}
+
+func (b *PostgresBackend) UpdateTaskOutputStatus(ctx context.Context, workspaceId uint, outputID string, status string) error {
+	res, err := b.db.ExecContext(ctx, `
+		UPDATE task_output SET status = $1
+		WHERE id = $2 AND workspace_id = $3`, status, outputID, workspaceId)
 	if err != nil {
 		return err
 	}
@@ -4245,7 +4293,7 @@ func scanTaskOutput(s scanner) (*types.TaskOutput, error) {
 	var dataBytes, metaBytes []byte
 	if err := s.Scan(&o.ID, &o.WorkspaceID, &o.TaskID, &runID, &agentID,
 		&o.AgentName, &o.OutputType, &o.Title, &summary, &uri,
-		&dataBytes, &metaBytes, &o.ArchivedAt, &o.CreatedAt); err != nil {
+		&dataBytes, &metaBytes, &o.Status, &o.ArchivedAt, &o.CreatedAt); err != nil {
 		return nil, err
 	}
 	if runID.Valid {
@@ -4290,10 +4338,10 @@ func (b *PostgresBackend) CreateView(ctx context.Context, v *types.View) error {
 		return fmt.Errorf("marshal view definition: %w", err)
 	}
 	return b.db.QueryRowContext(ctx, `
-		INSERT INTO workspace_view (workspace_id, name, description, definition_json)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO workspace_view (workspace_id, name, description, source_draft_id, definition_json)
+		VALUES ($1, $2, $3, $4, $5)
 		RETURNING id, created_at, updated_at`,
-		v.WorkspaceID, v.Name, v.Description, defJSON,
+		v.WorkspaceID, v.Name, v.Description, nullableString(v.SourceDraftID), defJSON,
 	).Scan(&v.ID, &v.CreatedAt, &v.UpdatedAt)
 }
 
@@ -4301,10 +4349,10 @@ func (b *PostgresBackend) GetView(ctx context.Context, workspaceID uint, viewID 
 	v := &types.View{}
 	var defBytes []byte
 	err := b.db.QueryRowContext(ctx, `
-		SELECT id, workspace_id, name, description, definition_json, created_at, updated_at
+		SELECT id, workspace_id, name, description, COALESCE(source_draft_id, ''), definition_json, created_at, updated_at
 		FROM workspace_view WHERE id = $1 AND workspace_id = $2`,
 		viewID, workspaceID,
-	).Scan(&v.ID, &v.WorkspaceID, &v.Name, &v.Description, &defBytes, &v.CreatedAt, &v.UpdatedAt)
+	).Scan(&v.ID, &v.WorkspaceID, &v.Name, &v.Description, &v.SourceDraftID, &defBytes, &v.CreatedAt, &v.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("view not found")
 	}
@@ -4320,7 +4368,7 @@ func (b *PostgresBackend) GetView(ctx context.Context, workspaceID uint, viewID 
 
 func (b *PostgresBackend) ListViews(ctx context.Context, workspaceID uint) ([]*types.View, error) {
 	rows, err := b.db.QueryContext(ctx, `
-		SELECT id, workspace_id, name, description, definition_json, created_at, updated_at
+		SELECT id, workspace_id, name, description, COALESCE(source_draft_id, ''), definition_json, created_at, updated_at
 		FROM workspace_view WHERE workspace_id = $1
 		ORDER BY created_at DESC`,
 		workspaceID,
@@ -4334,7 +4382,7 @@ func (b *PostgresBackend) ListViews(ctx context.Context, workspaceID uint) ([]*t
 	for rows.Next() {
 		v := &types.View{}
 		var defBytes []byte
-		if err := rows.Scan(&v.ID, &v.WorkspaceID, &v.Name, &v.Description, &defBytes, &v.CreatedAt, &v.UpdatedAt); err != nil {
+		if err := rows.Scan(&v.ID, &v.WorkspaceID, &v.Name, &v.Description, &v.SourceDraftID, &defBytes, &v.CreatedAt, &v.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(defBytes, &v.Definition); err != nil {
@@ -4354,10 +4402,10 @@ func (b *PostgresBackend) UpdateView(ctx context.Context, v *types.View) error {
 	}
 	err = b.db.QueryRowContext(ctx, `
 		UPDATE workspace_view
-		SET name = $1, description = $2, definition_json = $3, updated_at = CURRENT_TIMESTAMP
-		WHERE id = $4 AND workspace_id = $5
+		SET name = $1, description = $2, source_draft_id = $3, definition_json = $4, updated_at = CURRENT_TIMESTAMP
+		WHERE id = $5 AND workspace_id = $6
 		RETURNING updated_at`,
-		v.Name, v.Description, defJSON, v.ID, v.WorkspaceID,
+		v.Name, v.Description, nullableString(v.SourceDraftID), defJSON, v.ID, v.WorkspaceID,
 	).Scan(&v.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return fmt.Errorf("view not found")

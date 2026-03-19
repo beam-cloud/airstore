@@ -13,6 +13,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/scheduler"
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
+	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -562,6 +563,18 @@ func updateExecutionInstanceCounts(ctx context.Context, backend repository.Backe
 
 // ── Task Outputs ────────────────────────────────────────────────────────────
 
+func scopedIdempotentTaskOutputID(workspaceID uint32, taskID, rawID string) string {
+	taskID = strings.TrimSpace(taskID)
+	rawID = strings.TrimSpace(rawID)
+	if rawID == "" {
+		return ""
+	}
+	return uuid.NewSHA1(
+		uuid.NameSpaceOID,
+		[]byte(fmt.Sprintf("task-output:%d:%s:%s", workspaceID, taskID, rawID)),
+	).String()
+}
+
 func (s *WorkerService) CreateTaskOutput(ctx context.Context, req *pb.CreateTaskOutputRequest) (*pb.CreateTaskOutputResponse, error) {
 	if s.backend == nil {
 		return nil, status.Errorf(codes.Unavailable, "task persistence not available")
@@ -591,11 +604,23 @@ func (s *WorkerService) CreateTaskOutput(ctx context.Context, req *pb.CreateTask
 			return nil, status.Errorf(codes.InvalidArgument, "invalid metadata_json: %v", err)
 		}
 	}
+	if output.Metadata != nil {
+		if idempID, ok := output.Metadata["_idempotent_output_id"].(string); ok && idempID != "" {
+			output.ID = scopedIdempotentTaskOutputID(req.WorkspaceId, req.TaskId, idempID)
+			delete(output.Metadata, "_idempotent_output_id")
+		}
+	}
 	if req.Uri != "" {
 		output.URI = &req.Uri
 	}
+	if req.Status != "" {
+		output.Status = req.Status
+	}
 
 	if err := s.backend.CreateTaskOutput(ctx, output); err != nil {
+		if _, ok := err.(*types.ErrTaskOutputConflict); ok {
+			return nil, status.Errorf(codes.AlreadyExists, "create output: %v", err)
+		}
 		return nil, status.Errorf(codes.Internal, "create output: %v", err)
 	}
 	s.publishTaskUpdate(ctx, output.WorkspaceID, output.TaskID)
@@ -627,6 +652,20 @@ func (s *WorkerService) FinalizeTaskOutput(ctx context.Context, req *pb.Finalize
 	}
 	s.publishOutputTaskUpdate(ctx, uint(req.WorkspaceId), req.OutputId)
 	return &pb.FinalizeTaskOutputResponse{}, nil
+}
+
+func (s *WorkerService) UpdateTaskOutputStatus(ctx context.Context, req *pb.UpdateTaskOutputStatusRequest) (*pb.UpdateTaskOutputStatusResponse, error) {
+	if s.backend == nil {
+		return nil, status.Errorf(codes.Unavailable, "task persistence not available")
+	}
+	if err := s.backend.UpdateTaskOutputStatus(ctx, uint(req.WorkspaceId), req.OutputId, req.Status); err != nil {
+		if _, ok := err.(*types.ErrTaskOutputNotFound); ok {
+			return nil, status.Errorf(codes.NotFound, "output not found: %s", req.OutputId)
+		}
+		return nil, status.Errorf(codes.Internal, "update output status: %v", err)
+	}
+	s.publishOutputTaskUpdate(ctx, uint(req.WorkspaceId), req.OutputId)
+	return &pb.UpdateTaskOutputStatusResponse{}, nil
 }
 
 func (s *WorkerService) publishOutputTaskUpdate(ctx context.Context, workspaceID uint, outputID string) {

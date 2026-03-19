@@ -414,3 +414,32 @@ func TestMergeCachedViewDraftSummariesPrefersCachedSessionState(t *testing.T) {
 		t.Fatalf("draft-1 view id = %q, want view-1", got[1].ViewID)
 	}
 }
+
+func TestApplyCachedDraftSummaryDoesNotDowngradePublishedSummary(t *testing.T) {
+	summary := &views.DraftSummary{
+		ID:        "draft-1",
+		Status:    "published",
+		ViewID:    "view-1",
+		CreatedAt: 10,
+		UpdatedAt: 20,
+	}
+	cached := &views.Draft{
+		ID:          "draft-1",
+		WorkspaceID: "ws-1",
+		Status:      "active",
+		CreatedAt:   10,
+		UpdatedAt:   30,
+	}
+
+	applyCachedDraftSummary(summary, cached)
+
+	if summary.Status != "published" {
+		t.Fatalf("summary status = %q, want published", summary.Status)
+	}
+	if summary.ViewID != "view-1" {
+		t.Fatalf("summary view id = %q, want view-1", summary.ViewID)
+	}
+	if summary.UpdatedAt != 30 {
+		t.Fatalf("summary updated_at = %d, want 30", summary.UpdatedAt)
+	}
+}

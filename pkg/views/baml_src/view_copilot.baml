@@ -27,12 +27,18 @@ class Operation {
   payload string @description("JSON payload with operation-specific fields. For CREATE_AGENT: {name, role, model?, skills?[]}. For UPDATE_AGENT: {agent_id, name?, role?, model?, skills?[]}. For CREATE_SKILL: {name, content}. For INSTALL_SKILL: {skill_name} to install an existing workspace skill, or {name, content} / {skill_name, content} to install or update skill content. For ASSIGN_SKILL: {agent_id, skill_name}. IMPORTANT: Do NOT include system_prompt — the system generates it automatically with proper Airstore context. model must be one of: 'claude-sonnet-4-6' (default, omit if unsure) or 'claude-opus-4-6'. role must be 1-2 words max (e.g. 'Research', 'Engineering', 'Outreach'). For CREATE_SKILL, content must be valid SKILL.md with YAML frontmatter (---\\nname: ...\\ndescription: ...\\n---).")
 }
 
+class DataCitation {
+  row_ref string @description("Row reference from the # column in VIEW DATA, e.g. 'row:sheet-1:abc123'")
+  label string @description("Short label identifying this row for the user, e.g. 'Acme Corp' or 'Task #42'")
+}
+
 class ViewDraftResponse {
   update_type ViewUpdateType @description("What kind of change this response represents")
   message string @description("Conversational response explaining what was done or asking for clarification")
   view_content string @description("The complete JSON view definition. Empty string when update_type is CONVERSATION.")
   removed_sheet_ids string[] @description("Sheet IDs intentionally removed from the current view. Use only when the user explicitly asked to remove those sheets. Empty array otherwise.")
   operations Operation[] @description("Workspace mutations to execute (create agents, install skills, etc). Empty array when no infrastructure changes are needed.")
+  cited_rows DataCitation[] @description("Rows from VIEW DATA that were referenced when answering a data question. Use the # column values as row_ref. Empty array when not answering a data question.")
 }
 
 function WriteView(
@@ -40,7 +46,8 @@ function WriteView(
   conversation_history: string,
   current_view: string,
   workspace_context: string,
-  component_registry: string
+  component_registry: string,
+  view_data: string
 ) -> ViewDraftResponse {
   client ViewCopilotClient
   prompt #"
@@ -85,13 +92,8 @@ function WriteView(
               "dataSource": {
                 "agent_id": "single-agent-id",
                 "agent_ids": ["agent-1", "agent-2"],
-                "output_type": "json|file|email|link|text",
                 "artifact_key": "optional-artifact-family-key",
                 "time_range": "24h|7d|30d",
-                "row_strategy": {
-                  "mode": "task|split",
-                  "description": "For split mode, describe what one row represents. Example: one row per emailed contact."
-                },
                 "transform": [
                   {"column": "stable_key", "source": "data.field|title|metadata.key", "type": "text|number|currency|date|link|email|status|tags|boolean"}
                 ]
@@ -134,6 +136,9 @@ function WriteView(
     - Do NOT add NEW sections, metrics, charts, or task_list components.
       Preserve any existing legacy components unless the user explicitly asks
       to remove or replace them.
+    - Sheets may have a "widgets" array — these are user-managed widget tiles.
+      Always preserve existing widgets arrays unchanged. Never add, remove, or
+      modify widgets.
     - The canvas automatically renders assigned agents and live task counts
       for the active sheet — you do NOT need to create components for those.
 
@@ -146,16 +151,14 @@ function WriteView(
       "title", "uri"). Guidance, not rigid binding.
     - type: text (default), number, currency, date, link, email, status,
       tags, boolean. Guides both display and mapping.
-    - row_strategy.mode:
-      - "task" (default): synthesize one row per task. This is the strong
-        default — omit row_strategy entirely unless split is needed.
-      - "split": expand a single task into many rows when it produces multiple
-        distinct entities (e.g. 10 emails sent, 5 listings scraped). Each
-        entity becomes its own row in the table.
-    - row_strategy.description is REQUIRED for split mode. Describe what one
-      row represents clearly, e.g. "one row per recipient email that was sent".
-    - Use split mode when a user says things like "track each email separately",
-      "one row per contact", "expand into individual items", etc.
+
+    MULTI-ENTITY (automatic row expansion):
+    The mapper automatically creates one row per entity when a task produces
+    multiple outputs sharing the same artifact_key. No configuration needed.
+    When an artifact schema shows multi-entity density (many outputs per task),
+    design columns for PER-ENTITY fields (e.g. restaurant_name, cuisine,
+    price_range) — NOT aggregate summaries (total_count, top_picks).
+    Single-output tasks always produce one row.
 
     =============================================================================
     WORKSPACE CONTEXT
@@ -178,6 +181,13 @@ function WriteView(
     ---END VIEW---
     {% endif %}
 
+    {% if view_data != "" %}
+    =============================================================================
+    VIEW DATA (live table rows from the published view)
+    =============================================================================
+    {{ view_data }}
+    {% endif %}
+
     =============================================================================
     USER REQUEST
     =============================================================================
@@ -187,9 +197,17 @@ function WriteView(
     INSTRUCTIONS
     =============================================================================
     1. Read the user's request. Determine what kind of change is needed.
+       If the user is asking a question about their data (e.g. "who are we
+       waiting on?", "how many leads converted?", "summarize the pipeline"),
+       answer using the VIEW DATA above. Use CONVERSATION update_type for
+       data questions — do NOT modify the view definition.
+       When answering data questions, populate cited_rows with the specific
+       rows you referenced. Use the # column value from VIEW DATA as row_ref
+       and pick a short recognizable label (e.g. a name, company, or subject).
 
     2. Set update_type appropriately:
-       - CONVERSATION: answering questions, asking for clarification
+       - CONVERSATION: answering questions, asking for clarification, or
+         answering analytical questions about the view data
        - VIEW_CREATE: building a new view from scratch
        - LAYOUT_CHANGE: only repositioning/resizing components
        - COMPONENT_ADD: adding new components
@@ -237,8 +255,7 @@ function WriteView(
 
     10. Default to ONE sheet. Only add more sheets when the data genuinely
         splits into distinct entity types that would be confusing in a single
-        table. When using split row_strategy on a sheet, that is usually
-        sufficient — you do NOT need a separate "detail" sheet for it.
+        table.
 
     {{ ctx.output_format }}
   "#

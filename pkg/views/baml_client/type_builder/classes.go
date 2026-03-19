@@ -59,6 +59,190 @@ func (t *ColumnSchemaClassView) Type() (baml.Type, error) {
 	return t.inner.Type()
 }
 
+type DataCitationClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *DataCitationClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *DataCitationClassView) PropertyRow_ref() (ClassPropertyView, error) {
+	return t.inner.Property("row_ref")
+}
+
+func (t *DataCitationClassView) PropertyLabel() (ClassPropertyView, error) {
+	return t.inner.Property("label")
+}
+
+func (t *TypeBuilder) DataCitation() (*DataCitationClassView, error) {
+	bld, err := t.inner.Class("DataCitation")
+	if err != nil {
+		return nil, err
+	}
+	return &DataCitationClassView{inner: bld}, nil
+}
+
+func (t *DataCitationClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
+type ListItemResultClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *ListItemResultClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *ListItemResultClassView) PropertyLabel() (ClassPropertyView, error) {
+	return t.inner.Property("label")
+}
+
+func (t *ListItemResultClassView) PropertyValue() (ClassPropertyView, error) {
+	return t.inner.Property("value")
+}
+
+func (t *ListItemResultClassView) PropertyDetail() (ClassPropertyView, error) {
+	return t.inner.Property("detail")
+}
+
+func (t *TypeBuilder) ListItemResult() (*ListItemResultClassView, error) {
+	bld, err := t.inner.Class("ListItemResult")
+	if err != nil {
+		return nil, err
+	}
+	return &ListItemResultClassView{inner: bld}, nil
+}
+
+func (t *ListItemResultClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
+type ListResultClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *ListResultClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *ListResultClassView) PropertyItems() (ClassPropertyView, error) {
+	return t.inner.Property("items")
+}
+
+func (t *TypeBuilder) ListResult() (*ListResultClassView, error) {
+	bld, err := t.inner.Class("ListResult")
+	if err != nil {
+		return nil, err
+	}
+	return &ListResultClassView{inner: bld}, nil
+}
+
+func (t *ListResultClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
+type MapMarkerResultClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *MapMarkerResultClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *MapMarkerResultClassView) PropertyLat() (ClassPropertyView, error) {
+	return t.inner.Property("lat")
+}
+
+func (t *MapMarkerResultClassView) PropertyLng() (ClassPropertyView, error) {
+	return t.inner.Property("lng")
+}
+
+func (t *MapMarkerResultClassView) PropertyLabel() (ClassPropertyView, error) {
+	return t.inner.Property("label")
+}
+
+func (t *MapMarkerResultClassView) PropertyDetail() (ClassPropertyView, error) {
+	return t.inner.Property("detail")
+}
+
+func (t *TypeBuilder) MapMarkerResult() (*MapMarkerResultClassView, error) {
+	bld, err := t.inner.Class("MapMarkerResult")
+	if err != nil {
+		return nil, err
+	}
+	return &MapMarkerResultClassView{inner: bld}, nil
+}
+
+func (t *MapMarkerResultClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
+type MapResultClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *MapResultClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *MapResultClassView) PropertyMarkers() (ClassPropertyView, error) {
+	return t.inner.Property("markers")
+}
+
+func (t *TypeBuilder) MapResult() (*MapResultClassView, error) {
+	bld, err := t.inner.Class("MapResult")
+	if err != nil {
+		return nil, err
+	}
+	return &MapResultClassView{inner: bld}, nil
+}
+
+func (t *MapResultClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
 type MappedCellClassView struct {
 	inner baml.ClassBuilder
 }
@@ -171,6 +355,46 @@ func (t *MappedRowClassView) Type() (baml.Type, error) {
 	return t.inner.Type()
 }
 
+type MetricResultClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *MetricResultClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *MetricResultClassView) PropertyValue() (ClassPropertyView, error) {
+	return t.inner.Property("value")
+}
+
+func (t *MetricResultClassView) PropertyLabel() (ClassPropertyView, error) {
+	return t.inner.Property("label")
+}
+
+func (t *MetricResultClassView) PropertyComparison() (ClassPropertyView, error) {
+	return t.inner.Property("comparison")
+}
+
+func (t *TypeBuilder) MetricResult() (*MetricResultClassView, error) {
+	bld, err := t.inner.Class("MetricResult")
+	if err != nil {
+		return nil, err
+	}
+	return &MetricResultClassView{inner: bld}, nil
+}
+
+func (t *MetricResultClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
 type OperationClassView struct {
 	inner baml.ClassBuilder
 }
@@ -243,6 +467,10 @@ func (t *ViewDraftResponseClassView) PropertyOperations() (ClassPropertyView, er
 	return t.inner.Property("operations")
 }
 
+func (t *ViewDraftResponseClassView) PropertyCited_rows() (ClassPropertyView, error) {
+	return t.inner.Property("cited_rows")
+}
+
 func (t *TypeBuilder) ViewDraftResponse() (*ViewDraftResponseClassView, error) {
 	bld, err := t.inner.Class("ViewDraftResponse")
 	if err != nil {
@@ -252,5 +480,49 @@ func (t *TypeBuilder) ViewDraftResponse() (*ViewDraftResponseClassView, error) {
 }
 
 func (t *ViewDraftResponseClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
+type WidgetResultClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *WidgetResultClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *WidgetResultClassView) PropertyWidget_type() (ClassPropertyView, error) {
+	return t.inner.Property("widget_type")
+}
+
+func (t *WidgetResultClassView) PropertyMetric() (ClassPropertyView, error) {
+	return t.inner.Property("metric")
+}
+
+func (t *WidgetResultClassView) PropertyMap_data() (ClassPropertyView, error) {
+	return t.inner.Property("map_data")
+}
+
+func (t *WidgetResultClassView) PropertyList_data() (ClassPropertyView, error) {
+	return t.inner.Property("list_data")
+}
+
+func (t *TypeBuilder) WidgetResult() (*WidgetResultClassView, error) {
+	bld, err := t.inner.Class("WidgetResult")
+	if err != nil {
+		return nil, err
+	}
+	return &WidgetResultClassView{inner: bld}, nil
+}
+
+func (t *WidgetResultClassView) Type() (baml.Type, error) {
 	return t.inner.Type()
 }

@@ -843,6 +843,7 @@ type submitTaskInputRequest struct {
 	Action         *types.TaskInputAction `json:"action,omitempty"`
 	Kind           types.InputKind        `json:"kind,omitempty"`
 	IdempotencyKey string                 `json:"idempotency_key,omitempty"`
+	Items          []types.ItemDecision   `json:"items,omitempty"`
 }
 
 func (g *WorkspaceTasksGroup) SubmitInput(c echo.Context) error {
@@ -863,6 +864,14 @@ func (g *WorkspaceTasksGroup) SubmitInput(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
 	}
 
+	for _, item := range req.Items {
+		switch item.Action {
+		case types.TaskInputActionApprove, types.TaskInputActionReject:
+		default:
+			return ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("invalid action %q for item %s", item.Action, item.OutputID))
+		}
+	}
+
 	task, err := g.agents.SubmitTaskInput(
 		c.Request().Context(),
 		workspaceID,
@@ -871,11 +880,16 @@ func (g *WorkspaceTasksGroup) SubmitInput(c echo.Context) error {
 		req.Action,
 		req.Message,
 		req.IdempotencyKey,
+		req.Items,
 	)
 	if err != nil {
 		var taskErr *types.ErrAgentTaskNotFound
 		if errors.As(err, &taskErr) {
 			return ErrorResponse(c, http.StatusNotFound, "task not found")
+		}
+		var invalidInputErr *types.ErrInvalidTaskInput
+		if errors.As(err, &invalidInputErr) {
+			return ErrorResponse(c, http.StatusBadRequest, invalidInputErr.Error())
 		}
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}

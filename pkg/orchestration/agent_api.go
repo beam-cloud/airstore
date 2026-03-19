@@ -265,6 +265,7 @@ func (a *AgentAPI) SubmitTaskInput(
 	action *types.TaskInputAction,
 	message string,
 	idempotencyKey string,
+	items []types.ItemDecision,
 ) (*types.AgentTask, error) {
 	if a.runtime == nil {
 		return nil, fmt.Errorf("task service unavailable")
@@ -272,7 +273,7 @@ func (a *AgentAPI) SubmitTaskInput(
 	if strings.TrimSpace(taskID) == "" {
 		return nil, fmt.Errorf("task_id is required")
 	}
-	return a.runtime.AcceptTaskInput(ctx, workspaceID, taskID, kind, action, message, idempotencyKey)
+	return a.runtime.AcceptTaskInput(ctx, workspaceID, taskID, kind, action, message, idempotencyKey, items)
 }
 
 func (a *AgentAPI) EnqueueRunInput(

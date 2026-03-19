@@ -79,19 +79,28 @@ type draftStreamEntry struct {
 	Timestamp   int64  `json:"ts"`
 }
 
+const releaseViewPublishLockScript = `
+if redis.call('get', KEYS[1]) == ARGV[1] then
+	return redis.call('del', KEYS[1])
+end
+return 0
+`
+
 // ---------------------------------------------------------------------------
 // Copilot
 // ---------------------------------------------------------------------------
 
 type Copilot struct {
 	s2       *common.S2Client
+	redis    *common.RedisClient
 	backend  repository.BackendRepository
 	storage  *clients.StorageClient
 	agentAPI *orchestration.AgentAPI
+	store    *ViewStore
 }
 
-func NewCopilot(s2 *common.S2Client, backend repository.BackendRepository, storage *clients.StorageClient, agentAPI *orchestration.AgentAPI) *Copilot {
-	return &Copilot{s2: s2, backend: backend, storage: storage, agentAPI: agentAPI}
+func NewCopilot(s2 *common.S2Client, redis *common.RedisClient, backend repository.BackendRepository, storage *clients.StorageClient, agentAPI *orchestration.AgentAPI, store *ViewStore) *Copilot {
+	return &Copilot{s2: s2, redis: redis, backend: backend, storage: storage, agentAPI: agentAPI, store: store}
 }
 
 func (c *Copilot) DraftsAvailable() bool {
@@ -221,6 +230,25 @@ func (c *Copilot) IndexDraftPublished(ctx context.Context, workspaceID, draftID,
 	return c.indexDraft(ctx, workspaceID, "published", draftID, "", viewName, viewID)
 }
 
+func (c *Copilot) IndexDraftPublishedAsync(workspaceID, draftID, viewName, viewID string) {
+	if c == nil || strings.TrimSpace(workspaceID) == "" || strings.TrimSpace(draftID) == "" || strings.TrimSpace(viewID) == "" {
+		return
+	}
+
+	viewName = strings.TrimSpace(viewName)
+	go func() {
+		indexCtx, indexCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer indexCancel()
+		if err := c.IndexDraftPublished(indexCtx, workspaceID, draftID, viewName, viewID); err != nil {
+			log.Warn().Err(err).
+				Str("workspace_id", workspaceID).
+				Str("draft_id", draftID).
+				Str("view_id", viewID).
+				Msg("failed to index published draft")
+		}
+	}()
+}
+
 // ---------------------------------------------------------------------------
 // Draft listing
 // ---------------------------------------------------------------------------
@@ -258,6 +286,88 @@ func (c *Copilot) ListDrafts(ctx context.Context, workspaceID string) ([]DraftSu
 		}
 	}
 
+	// The workspace index is a secondary projection. If the async publish-index
+	// append lags or is dropped, fall back to the authoritative draft stream so
+	// published drafts still surface correctly across replicas, then repair the
+	// index opportunistically in the background.
+	reconcileCtx, reconcileCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer reconcileCancel()
+
+	var numericWorkspaceID uint
+	workspaceResolved := false
+	resolveWorkspaceID := func() (uint, bool) {
+		if workspaceResolved {
+			return numericWorkspaceID, numericWorkspaceID != 0
+		}
+		workspaceResolved = true
+		if c.backend == nil {
+			return 0, false
+		}
+		ws, err := c.backend.GetWorkspaceByExternalId(reconcileCtx, workspaceID)
+		if err != nil || ws == nil {
+			return 0, false
+		}
+		numericWorkspaceID = ws.Id
+		return numericWorkspaceID, true
+	}
+
+	viewBySourceDraftID := map[string]*types.View{}
+	loadViewsBySourceDraftID := func() map[string]*types.View {
+		if len(viewBySourceDraftID) > 0 || c.backend == nil {
+			return viewBySourceDraftID
+		}
+		wsID, ok := resolveWorkspaceID()
+		if !ok {
+			return viewBySourceDraftID
+		}
+		views, err := c.backend.ListViews(reconcileCtx, wsID)
+		if err != nil {
+			return viewBySourceDraftID
+		}
+		for _, view := range views {
+			if view == nil || strings.TrimSpace(view.SourceDraftID) == "" {
+				continue
+			}
+			viewBySourceDraftID[strings.TrimSpace(view.SourceDraftID)] = view
+		}
+		return viewBySourceDraftID
+	}
+
+	for _, d := range drafts {
+		if d == nil || d.Status == "published" || d.Status == "discarded" {
+			continue
+		}
+		draft, err := c.LoadDraft(reconcileCtx, workspaceID, d.ID)
+		if err != nil || draft == nil {
+			continue
+		}
+
+		publishedViewID := strings.TrimSpace(draft.PublishedViewID)
+		if publishedViewID == "" {
+			if view := loadViewsBySourceDraftID()[d.ID]; view != nil {
+				publishedViewID = strings.TrimSpace(view.ID)
+				d.ViewName = strings.TrimSpace(view.Name)
+			}
+		}
+		if publishedViewID == "" {
+			continue
+		}
+
+		d.Status = "published"
+		d.ViewID = publishedViewID
+		if draft.UpdatedAt > d.UpdatedAt {
+			d.UpdatedAt = draft.UpdatedAt
+		}
+		if d.ViewName == "" {
+			if wsID, ok := resolveWorkspaceID(); ok {
+				if view, err := c.backend.GetView(reconcileCtx, wsID, publishedViewID); err == nil && view != nil {
+					d.ViewName = strings.TrimSpace(view.Name)
+				}
+			}
+		}
+		c.IndexDraftPublishedAsync(workspaceID, d.ID, d.ViewName, publishedViewID)
+	}
+
 	result := make([]DraftSummary, 0, len(drafts))
 	for _, d := range drafts {
 		result = append(result, *d)
@@ -287,10 +397,9 @@ func (c *Copilot) PublishView(ctx context.Context, draft *Draft, workspaceID uin
 	agents := c.loadWorkspaceAgents(ctx, workspaceID)
 	preCanonAgents := append([]string{}, def.Agents...)
 	normalizeViewDefinition(&def)
-
 	canonicalizeViewAgentRefs(&def, agents, nil)
-
 	normalizeViewDefinition(&def)
+
 	log.Info().
 		Strs("pre_canon_agents", preCanonAgents).
 		Strs("post_canon_agents", def.Agents).
@@ -299,19 +408,73 @@ func (c *Copilot) PublishView(ctx context.Context, draft *Draft, workspaceID uin
 		Str("view_name", def.Name).
 		Msg("view: publishing definition")
 
-	// Re-read the draft from S2 if we think no view has been published yet.
-	// This prevents a race where two gateway pods both see an empty
-	// PublishedViewID and each create a new view.
+	// Distributed lock: only one pod publishes this draft at a time.
+	// The 30s TTL is generous — publish typically takes <1s. If the lock
+	// holder crashes, it auto-expires and retries succeed.
+	const publishLockTTL = 30 * time.Second
+	if c.redis != nil {
+		lockKey := common.Keys.ViewPublishLock(draft.ID)
+		lockToken := uuid.NewString()
+		acquired, err := c.redis.SetNX(ctx, lockKey, lockToken, publishLockTTL).Result()
+		if err != nil {
+			return nil, fmt.Errorf("publish lock: %w", err)
+		}
+		if !acquired {
+			// Another pod is publishing. Re-read draft to get the view ID
+			// it will (or already did) persist, then return that view.
+			time.Sleep(500 * time.Millisecond)
+			if fresh, err := c.LoadDraft(ctx, draft.WorkspaceID, draft.ID); err == nil && fresh != nil && fresh.PublishedViewID != "" {
+				draft.PublishedViewID = fresh.PublishedViewID
+				draft.Status = "published"
+				if v, err := c.backend.GetView(ctx, workspaceID, fresh.PublishedViewID); err == nil && v != nil {
+					return v, nil
+				}
+			}
+			if existingViews, err := c.backend.ListViews(ctx, workspaceID); err == nil {
+				for _, existing := range existingViews {
+					if existing != nil && strings.TrimSpace(existing.SourceDraftID) == draft.ID {
+						return existing, nil
+					}
+				}
+			}
+			return nil, fmt.Errorf("draft is being published by another replica")
+		}
+		defer func() {
+			delCtx, delCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer delCancel()
+			if _, err := c.redis.Eval(
+				delCtx,
+				releaseViewPublishLockScript,
+				[]string{lockKey},
+				lockToken,
+			).Int64(); err != nil {
+				log.Warn().Err(err).Str("draft_id", draft.ID).Msg("failed to release publish lock")
+			}
+		}()
+	}
+
+	// Refresh PublishedViewID from S2 in case the in-memory session is stale
+	// (e.g. another pod published before we acquired the lock).
 	if draft.PublishedViewID == "" {
 		if fresh, err := c.LoadDraft(ctx, draft.WorkspaceID, draft.ID); err == nil && fresh != nil && fresh.PublishedViewID != "" {
 			draft.PublishedViewID = fresh.PublishedViewID
+		}
+	}
+	if draft.PublishedViewID == "" {
+		if existingViews, err := c.backend.ListViews(ctx, workspaceID); err == nil {
+			for _, existing := range existingViews {
+				if existing != nil && strings.TrimSpace(existing.SourceDraftID) == draft.ID {
+					draft.PublishedViewID = existing.ID
+					break
+				}
+			}
 		}
 	}
 
 	var published *types.View
 	if draft.PublishedViewID != "" {
 		if existing, err := c.backend.GetView(ctx, workspaceID, draft.PublishedViewID); err == nil && existing != nil {
-			existing.Name, existing.Description, existing.Definition = def.Name, def.Description, def
+			existing.Name, existing.Description, existing.SourceDraftID, existing.Definition = def.Name, def.Description, draft.ID, def
 			if err := c.backend.UpdateView(ctx, existing); err != nil {
 				return nil, fmt.Errorf("update view: %w", err)
 			}
@@ -320,7 +483,13 @@ func (c *Copilot) PublishView(ctx context.Context, draft *Draft, workspaceID uin
 	}
 
 	if published == nil {
-		published = &types.View{WorkspaceID: workspaceID, Name: def.Name, Description: def.Description, Definition: def}
+		published = &types.View{
+			WorkspaceID:   workspaceID,
+			Name:          def.Name,
+			Description:   def.Description,
+			SourceDraftID: draft.ID,
+			Definition:    def,
+		}
 		if err := c.backend.CreateView(ctx, published); err != nil {
 			return nil, fmt.Errorf("create view: %w", err)
 		}
@@ -329,23 +498,17 @@ func (c *Copilot) PublishView(ctx context.Context, draft *Draft, workspaceID uin
 	draft.PublishedViewID = published.ID
 	draft.Status = "published"
 
-	// Use a detached context so these writes survive client disconnect.
 	persistCtx, persistCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer persistCancel()
 	if err := c.persistDraft(persistCtx, draft.ID, "published_view_id", published.ID, "", ""); err != nil {
-		log.Warn().
-			Err(err).
-			Str("draft_id", draft.ID).
-			Str("view_id", published.ID).
-			Msg("failed to persist published view id after publish")
+		log.Warn().Err(err).Str("draft_id", draft.ID).Str("view_id", published.ID).
+			Msg("failed to persist published view id")
 	}
 	if err := c.persistDraft(persistCtx, draft.ID, "status", "published", "", ""); err != nil {
-		log.Warn().
-			Err(err).
-			Str("draft_id", draft.ID).
-			Str("view_id", published.ID).
-			Msg("failed to persist published draft status after publish")
+		log.Warn().Err(err).Str("draft_id", draft.ID).Str("view_id", published.ID).
+			Msg("failed to persist published draft status")
 	}
+
 	return published, nil
 }
 
@@ -373,6 +536,7 @@ func (c *Copilot) GenerateStream(
 	draft *Draft,
 	workspaceID uint,
 	userMessage string,
+	viewID string,
 	onChunk func(partial *PartialViewDraftResponse),
 ) (*bamltypes.ViewDraftResponse, error) {
 	_ = c.persistDraft(ctx, draft.ID, "message", userMessage, "user", "")
@@ -381,8 +545,9 @@ func (c *Copilot) GenerateStream(
 	history := c.FormatHistory(draft.Messages[:len(draft.Messages)-1])
 	workspaceAgents := c.loadWorkspaceAgents(ctx, workspaceID)
 	workspaceCtx := c.BuildWorkspaceContext(ctx, workspaceID)
+	viewData := c.BuildViewDataContext(ctx, viewID, draft.ViewContent)
 
-	ch, err := baml.Stream.WriteView(ctx, userMessage, history, draft.ViewContent, workspaceCtx, ComponentRegistryDoc)
+	ch, err := baml.Stream.WriteView(ctx, userMessage, history, draft.ViewContent, workspaceCtx, ComponentRegistryDoc, viewData)
 	if err != nil {
 		return nil, fmt.Errorf("BAML WriteView stream: %w", err)
 	}
@@ -510,6 +675,139 @@ func writeColdStartGuidance(sb *strings.Builder) {
 	sb.WriteString("- Use source hints like \"title\", \"summary\", \"uri\", \"created_at\"\n")
 	sb.WriteString("- The BAML mapper will dynamically resolve output data to columns at render time\n")
 	sb.WriteString("- Keep column definitions semantic and minimal (3-5 columns)\n")
+}
+
+// BuildViewDataContext loads row data from MongoDB for a published view and
+// formats it as a readable text table that can be injected into the BAML prompt.
+func (c *Copilot) BuildViewDataContext(ctx context.Context, viewID string, viewContent string) string {
+	if c.store == nil || !c.store.Available() || viewID == "" || viewContent == "" {
+		return ""
+	}
+
+	var def types.ViewDefinition
+	if err := json.Unmarshal([]byte(viewContent), &def); err != nil {
+		return ""
+	}
+
+	const maxRowsPerSheet = 100
+	const maxTotalChars = 50000
+
+	var sb strings.Builder
+	totalRows := 0
+
+	for _, sheet := range def.Sheets {
+		var tableComp *types.ComponentSpec
+		for i := range sheet.Components {
+			if sheet.Components[i].Type == "table" {
+				tableComp = &sheet.Components[i]
+				break
+			}
+		}
+		if tableComp == nil {
+			continue
+		}
+
+		rows, err := c.store.GetRows(ctx, viewID, sheet.ID, tableComp.ID)
+		if err != nil || len(rows) == 0 {
+			continue
+		}
+
+		columns := extractColumnKeys(tableComp)
+		if len(columns) == 0 {
+			continue
+		}
+
+		fmt.Fprintf(&sb, "\n── Sheet: %s (%d rows) ──\n", sheet.Name, len(rows))
+
+		sb.WriteString("# | ")
+		for _, col := range columns {
+			sb.WriteString(col.label)
+			sb.WriteString(" | ")
+		}
+		sb.WriteString("\n")
+		sb.WriteString("--- | ")
+		for range columns {
+			sb.WriteString("--- | ")
+		}
+		sb.WriteString("\n")
+
+		limit := len(rows)
+		if limit > maxRowsPerSheet {
+			limit = maxRowsPerSheet
+		}
+		for _, row := range rows[:limit] {
+			fmt.Fprintf(&sb, "row:%s:%s | ", row.SheetID, row.ID)
+			cells := row.MergedCells()
+			for _, col := range columns {
+				val := cells[col.key]
+				if len(val) > 120 {
+					val = val[:117] + "..."
+				}
+				sb.WriteString(val)
+				sb.WriteString(" | ")
+			}
+			sb.WriteString("\n")
+			totalRows++
+		}
+		if len(rows) > limit {
+			fmt.Fprintf(&sb, "... and %d more rows\n", len(rows)-limit)
+		}
+
+		if sb.Len() > maxTotalChars {
+			sb.WriteString("\n(data truncated for context limit)\n")
+			break
+		}
+	}
+
+	if totalRows == 0 {
+		return ""
+	}
+	return sb.String()
+}
+
+type columnInfo struct {
+	key   string
+	label string
+}
+
+func extractColumnKeys(comp *types.ComponentSpec) []columnInfo {
+	if comp == nil || comp.Config == nil {
+		return nil
+	}
+	rawCols, ok := comp.Config["columns"]
+	if !ok {
+		return nil
+	}
+
+	var columns []columnInfo
+	switch typed := rawCols.(type) {
+	case []any:
+		for _, item := range typed {
+			if m, ok := item.(map[string]any); ok {
+				key, _ := m["key"].(string)
+				label, _ := m["label"].(string)
+				if key == "" {
+					continue
+				}
+				if label == "" {
+					label = key
+				}
+				columns = append(columns, columnInfo{key: key, label: label})
+			}
+		}
+	case []configColumn:
+		for _, col := range typed {
+			if col.Key == "" {
+				continue
+			}
+			label := col.Label
+			if label == "" {
+				label = col.Key
+			}
+			columns = append(columns, columnInfo{key: col.Key, label: label})
+		}
+	}
+	return columns
 }
 
 func normalizeViewContent(viewContent string, agents []*types.AgentProfile) (string, error) {
@@ -690,21 +988,7 @@ func normalizeDataSource(ds *types.DataSource) {
 	ds.OutputType = strings.TrimSpace(ds.OutputType)
 	ds.ArtifactKey = normalizeToken(ds.ArtifactKey)
 	ds.TimeRange = strings.TrimSpace(ds.TimeRange)
-	if ds.RowStrategy != nil {
-		ds.RowStrategy.Description = strings.TrimSpace(ds.RowStrategy.Description)
-		switch strings.ToLower(strings.TrimSpace(ds.RowStrategy.Mode)) {
-		case "", types.RowStrategyModeTask:
-			if ds.RowStrategy.Description == "" {
-				ds.RowStrategy = nil
-			} else {
-				ds.RowStrategy.Mode = types.RowStrategyModeTask
-			}
-		case types.RowStrategyModeSplit:
-			ds.RowStrategy.Mode = types.RowStrategyModeSplit
-		default:
-			ds.RowStrategy = nil
-		}
-	}
+	ds.Statuses = uniqueTrimmedStrings(ds.Statuses)
 }
 
 func collectSheetAgentRefs(sheets []types.SheetSpec) []string {
@@ -873,7 +1157,7 @@ func sourceColumnHint(source string) string {
 
 func isReservedViewColumnKey(key string) bool {
 	switch strings.TrimSpace(key) {
-	case "task_id", "output_id":
+	case "task_id", "output_id", "row_id", "sheet_id", "output_status", "source_output_ids":
 		return true
 	default:
 		return false
@@ -1591,20 +1875,19 @@ COMPONENT TYPES (only two):
 
 - table: The sheet's data table. Full-width, always present.
   At render time a BAML mapper dynamically maps task output data into the
-  column schema. Transform rules and row strategy are semantic hints that guide
-  the mapping:
+  column schema. Transform rules are semantic hints that guide the mapping:
   - column: machine-stable key (snake_case) describing what the column shows
   - source: dot-path hint (e.g. "data.recipe_name", "title", "uri")
   - type: display type (text, number, currency, date, link, email, status, tags, boolean)
-  - row_strategy:
-    - mode: "task" (default): synthesize one row per task — works great
-      for most use cases. Omit row_strategy entirely to use this default.
-    - mode: "split": expand a single task into many rows when the task
-      produces multiple distinct entities (e.g. 10 emails sent, 5 listings
-      scraped, 8 contacts researched). Each entity becomes its own row.
-    - description: REQUIRED for split mode. Clearly describe what one row
-      represents, e.g. "one row per email recipient" or "one row per property
-      listing". This guides the mapper to separate entities correctly.
+
+  DataSource fields (on each component):
+  - agent_id or agent_ids: which agent(s) produce data for this table (REQUIRED)
+  - time_range: recency window, e.g. "30d", "7d" (default "30d")
+  - artifact_key: filter to a specific artifact family (e.g. "company-research").
+    Use when an agent produces multiple artifact families and you need a
+    specific one. Omit to include all outputs from the agent.
+  - statuses: optional status filter. Values: "active", "pending", "approved",
+    "rejected", "superseded". Omit to include all (default).
 
   Config: {
     columns: [{
@@ -1631,6 +1914,22 @@ COMPONENT TYPES (only two):
   - tags: comma-separated pills
   - boolean: Yes/No badge
 
+  LIFECYCLE & APPROVAL:
+  For workflows with approvals or multi-stage tracking, add a status
+  column (type: "status") to reflect lifecycle state. The mapper derives
+  it from output_status. The UI auto-shows inline approve/reject buttons
+  for pending rows and an entity detail modal for multi-output rows.
+
+  MULTI-ENTITY (automatic):
+  When a task produces multiple outputs sharing the same artifact_key
+  (e.g. 10 emails sent, 5 listings scraped, 8 contacts researched),
+  the mapper automatically creates one row per entity — no configuration
+  needed. Design columns for per-entity fields (name, email, status),
+  not aggregate summaries (total_count, top_picks).
+
+  Hidden columns (auto-injected, do NOT define):
+  task_id, row_id, sheet_id, output_id, output_status, source_output_ids
+
 - action: Button in the active sheet header bar. Opens a modal form that submits a task.
   Config: {
     agent_id, description, prompt_template (with {{field}} placeholders),
@@ -1651,8 +1950,6 @@ SHEET DESIGN:
 - STRONG DEFAULT: use ONE sheet. Most workflows fit a single table.
   Only create multiple sheets when the user explicitly requests them or the data
   has genuinely distinct entity types (e.g. contacts vs emails vs pricing).
-- When using split row_strategy on a sheet, that handles item-level detail
-  within the same sheet — you do NOT need a separate detail sheet.
 - Generate concise sheet names tied to the workflow, not generic labels.
 - Use sheet relations when rows should connect across sheets via stable keys
   like task_id, email, company_id, listing_id, or similar identifiers.`

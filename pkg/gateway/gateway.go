@@ -622,11 +622,11 @@ func (g *Gateway) registerServices() error {
 		agentAPI := orchestration.NewAgentAPI(g.BackendRepo, orchestratorSvc)
 
 		// Views API (deferred to here so agentAPI is available for the copilot)
-		viewCopilot := views.NewCopilot(g.s2Client, g.BackendRepo, g.storageClient, agentAPI)
 		var viewStore *views.ViewStore
 		if g.MongoClient != nil {
 			viewStore = views.NewViewStore(g.MongoClient)
 		}
+		viewCopilot := views.NewCopilot(g.s2Client, g.RedisClient, g.BackendRepo, g.storageClient, agentAPI, viewStore)
 		viewsGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/views")
 		viewsGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
 		apiv1.NewViewsGroup(viewsGroup, g.BackendRepo, viewCopilot, viewStore)

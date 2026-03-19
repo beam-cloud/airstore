@@ -22,6 +22,78 @@ import (
 	"github.com/beam-cloud/airstore/pkg/worker/agentsignal/baml_client/types"
 )
 
+type ApprovalItem struct {
+	Item_key    *string           `json:"item_key"`
+	Kind        *types.OutputKind `json:"kind"`
+	Title       *string           `json:"title"`
+	Description *string           `json:"description"`
+	Details     *string           `json:"details"`
+	Data_fields []DataField       `json:"data_fields"`
+}
+
+func (c *ApprovalItem) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_STREAM_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_STREAM_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "ApprovalItem" {
+		panic(fmt.Sprintf("expected ApprovalItem, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "item_key":
+			c.Item_key = baml.Decode(valueHolder).Interface().(*string)
+
+		case "kind":
+			c.Kind = baml.Decode(valueHolder).Interface().(*types.OutputKind)
+
+		case "title":
+			c.Title = baml.Decode(valueHolder).Interface().(*string)
+
+		case "description":
+			c.Description = baml.Decode(valueHolder).Interface().(*string)
+
+		case "details":
+			c.Details = baml.Decode(valueHolder).Interface().(*string)
+
+		case "data_fields":
+			c.Data_fields = baml.Decode(valueHolder).Interface().([]DataField)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class ApprovalItem", key))
+
+		}
+	}
+
+}
+
+func (c ApprovalItem) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["item_key"] = c.Item_key
+
+	fields["kind"] = c.Kind
+
+	fields["title"] = c.Title
+
+	fields["description"] = c.Description
+
+	fields["details"] = c.Details
+
+	fields["data_fields"] = c.Data_fields
+
+	return baml.EncodeClass("ApprovalItem", fields, nil)
+}
+
+func (c ApprovalItem) BamlTypeName() string {
+	return "ApprovalItem"
+}
+
 type ApprovalSummary struct {
 	Summary *string `json:"summary"`
 	Details *string `json:"details"`
