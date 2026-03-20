@@ -634,6 +634,7 @@ func (r *RuntimeLoops) settleOriginTask(ctx context.Context, runID string, waiti
 	for _, req := range subtaskReqs {
 		parentID := task.ID
 		label := req.EntityLabel
+		spawnedBy := types.AgentTaskSpawnedByFanOut
 		child, _, err := r.taskFlows.AcceptAgentCommand(ctx, task.WorkspaceID, AgentCommandParams{
 			Message:        req.Prompt,
 			AgentID:        task.AgentID,
@@ -641,6 +642,7 @@ func (r *RuntimeLoops) settleOriginTask(ctx context.Context, runID string, waiti
 			IdempotencyKey: uuid.NewString(),
 			ParentTaskID:   &parentID,
 			Label:          &label,
+			SpawnedBy:      &spawnedBy,
 			DispatchDelay:  time.Duration(req.WakeDelayMinutes) * time.Minute,
 		})
 		if err != nil {

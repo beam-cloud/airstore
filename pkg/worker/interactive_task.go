@@ -512,7 +512,7 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 
 	var subtaskReqs []*types.SubtaskRequest
 	if wakeSignal != nil && outputPipeline.tracker != nil {
-		subtaskReqs = w.classifySubtasks(ctx, outputPipeline.tracker, agentMsg, lastPrompt, bamlEnv)
+		subtaskReqs = w.classifySubtasks(ctx, task, outputPipeline.tracker, agentMsg, lastPrompt, bamlEnv)
 	}
 
 	return &types.RunExecutionResult{

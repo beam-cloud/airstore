@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -14,12 +15,13 @@ import (
 
 func (w *Worker) classifySubtasks(
 	ctx context.Context,
+	task types.RunExecution,
 	tracker *taskOutputTracker,
 	agentMsg, userMsg string,
 	bamlEnv map[string]string,
 ) []*types.SubtaskRequest {
 	summaries := tracker.TrackedOutputSummaries()
-	if !shouldAttemptFanOut(summaries) {
+	if !shouldAttemptFanOut(task, summaries) {
 		return nil
 	}
 
@@ -66,8 +68,34 @@ func (w *Worker) classifySubtasks(
 	return reqs
 }
 
-func shouldAttemptFanOut(summaries []trackedOutputSummary) bool {
-	return distinctFanOutEntityCount(summaries) >= 2
+func shouldAttemptFanOut(task types.RunExecution, summaries []trackedOutputSummary) bool {
+	if distinctFanOutEntityCount(summaries) < 2 {
+		return false
+	}
+	return !isFanOutChildTask(task.ExecutionPolicy)
+}
+
+func isFanOutChildTask(executionPolicy map[string]any) bool {
+	return strings.EqualFold(
+		executionPolicyString(executionPolicy, "spawned_by"),
+		types.AgentTaskSpawnedByFanOut,
+	)
+}
+
+func executionPolicyString(executionPolicy map[string]any, key string) string {
+	if len(executionPolicy) == 0 {
+		return ""
+	}
+	raw, ok := executionPolicy[key]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch typed := raw.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	default:
+		return strings.TrimSpace(fmt.Sprintf("%v", typed))
+	}
 }
 
 func distinctFanOutEntityCount(summaries []trackedOutputSummary) int {

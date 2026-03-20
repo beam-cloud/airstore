@@ -53,7 +53,7 @@ func TestShouldAttemptFanOutSkipsSingleEmailEntity(t *testing.T) {
 	if got := distinctFanOutEntityCount(summaries); got != 1 {
 		t.Fatalf("distinctFanOutEntityCount = %d, want 1", got)
 	}
-	if shouldAttemptFanOut(summaries) {
+	if shouldAttemptFanOut(types.RunExecution{}, summaries) {
 		t.Fatal("shouldAttemptFanOut = true, want false for a single email thread")
 	}
 	for _, summary := range summaries {
@@ -97,8 +97,53 @@ func TestShouldAttemptFanOutAllowsDistinctEmailEntities(t *testing.T) {
 	if got := distinctFanOutEntityCount(summaries); got != 2 {
 		t.Fatalf("distinctFanOutEntityCount = %d, want 2", got)
 	}
-	if !shouldAttemptFanOut(summaries) {
+	if !shouldAttemptFanOut(types.RunExecution{}, summaries) {
 		t.Fatal("shouldAttemptFanOut = false, want true for distinct recipients")
+	}
+}
+
+func TestShouldAttemptFanOutSkipsFanOutSpawnedTask(t *testing.T) {
+	tracker := &taskOutputTracker{}
+
+	tracker.RememberWithID(outputCandidate{
+		OutputType: types.TaskOutputTypeEmail,
+		Title:      "Sent email to Luke",
+		URI:        "https://mail.google.com/mail/u/0/#inbox/luke-thread",
+		Data: map[string]any{
+			"to":      "luke@beam.cloud",
+			"subject": "Hello Luke",
+		},
+		Metadata: map[string]any{
+			types.TaskOutputMetadataArtifactKey:  "email-sent",
+			types.TaskOutputMetadataArtifactKind: "email",
+		},
+	}, "luke-output")
+	tracker.RememberWithID(outputCandidate{
+		OutputType: types.TaskOutputTypeEmail,
+		Title:      "Sent email to Jill",
+		URI:        "https://mail.google.com/mail/u/0/#inbox/jill-thread",
+		Data: map[string]any{
+			"to":      "jill@example.com",
+			"subject": "Hello Jill",
+		},
+		Metadata: map[string]any{
+			types.TaskOutputMetadataArtifactKey:  "email-sent",
+			types.TaskOutputMetadataArtifactKind: "email",
+		},
+	}, "jill-output")
+
+	summaries := tracker.TrackedOutputSummaries()
+	if got := distinctFanOutEntityCount(summaries); got != 2 {
+		t.Fatalf("distinctFanOutEntityCount = %d, want 2", got)
+	}
+
+	task := types.RunExecution{
+		ExecutionPolicy: map[string]any{
+			"spawned_by": types.AgentTaskSpawnedByFanOut,
+		},
+	}
+	if shouldAttemptFanOut(task, summaries) {
+		t.Fatal("shouldAttemptFanOut = true, want false for fan-out child tasks")
 	}
 }
 
@@ -138,7 +183,7 @@ func TestShouldAttemptFanOutIgnoresWorkspaceDraftFileAlongsideSentEmail(t *testi
 	if got := distinctFanOutEntityCount(summaries); got != 1 {
 		t.Fatalf("distinctFanOutEntityCount = %d, want 1", got)
 	}
-	if shouldAttemptFanOut(summaries) {
+	if shouldAttemptFanOut(types.RunExecution{}, summaries) {
 		t.Fatal("shouldAttemptFanOut = true, want false when only one real email thread exists")
 	}
 }

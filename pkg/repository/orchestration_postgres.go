@@ -532,8 +532,9 @@ func (b *PostgresBackend) CreateTaskWithOutbox(
 		INSERT INTO agent_task (
 			workspace_id, agent_id, kind, queue_mode, state,
 			idempotency_key, payload_json, routing_json, parent_envelope_id,
-			target_run_id, deadline, priority, budget_usd, cost_usd
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+			target_run_id, deadline, priority, budget_usd, cost_usd,
+			wake_at, wake_reason, wake_count
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 		RETURNING id, accepted_at, created_at, updated_at
 	`
 	if err := tx.QueryRowContext(
@@ -553,6 +554,9 @@ func (b *PostgresBackend) CreateTaskWithOutbox(
 		task.Priority,
 		task.BudgetUSD,
 		task.CostUSD,
+		task.WakeAt,
+		task.WakeReason,
+		task.WakeCount,
 	).Scan(&task.ID, &task.AcceptedAt, &task.CreatedAt, &task.UpdatedAt); err != nil {
 		return fmt.Errorf("create agent task: %w", err)
 	}

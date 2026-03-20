@@ -118,23 +118,35 @@ func (f *TaskFlows) AcceptAgentCommand(
 	payload := newTaskCommandPayload(params, runPolicy, instanceKey, agentConfig, agentProvider, agentModel)
 	payload.Priority = priority
 
+	taskState := types.AgentTaskStateQueued
+	var wakeAt *time.Time
+	var wakeReason *string
+	var dispatch *types.OrchestrationOutboxEvent
+	if params.DispatchDelay > 0 {
+		scheduledAt := time.Now().Add(params.DispatchDelay)
+		taskState = types.AgentTaskStateSleeping
+		wakeAt = &scheduledAt
+		if reason := initialDelayedTaskWakeReason(params); reason != "" {
+			wakeReason = &reason
+		}
+		dispatch = &types.OrchestrationOutboxEvent{
+			AvailableAt: scheduledAt,
+		}
+	}
+
 	task := &types.AgentTask{
 		WorkspaceID:    workspaceID,
 		AgentID:        params.AgentID,
 		QueueMode:      types.AgentQueueModeQueue,
-		State:          types.AgentTaskStateQueued,
+		State:          taskState,
 		IdempotencyKey: params.IdempotencyKey,
 		PayloadJSON:    payload.ToMap(),
 		RoutingJSON:    routingToMap(params.Routing),
 		ParentTaskID:   params.ParentTaskID,
 		Priority:       priority,
 		BudgetUSD:      params.BudgetUSD,
-	}
-	var dispatch *types.OrchestrationOutboxEvent
-	if params.DispatchDelay > 0 {
-		dispatch = &types.OrchestrationOutboxEvent{
-			AvailableAt: time.Now().Add(params.DispatchDelay),
-		}
+		WakeAt:         wakeAt,
+		WakeReason:     wakeReason,
 	}
 	if err := f.backend.CreateTaskWithOutbox(ctx, task, dispatch); err != nil {
 		if existing, lookupErr := f.backend.GetTaskByIdempotency(ctx, workspaceID, params.AgentID, params.IdempotencyKey); lookupErr == nil {
@@ -144,6 +156,13 @@ func (f *TaskFlows) AcceptAgentCommand(
 	}
 	f.notifyTaskUpdate(ctx, task.WorkspaceID, task.ID)
 	return task, false, nil
+}
+
+func initialDelayedTaskWakeReason(params AgentCommandParams) string {
+	if params.Label != nil && strings.TrimSpace(*params.Label) != "" {
+		return fmt.Sprintf("Follow up with %s", strings.TrimSpace(*params.Label))
+	}
+	return "Scheduled follow-up"
 }
 
 func (f *TaskFlows) AcceptTaskInput(

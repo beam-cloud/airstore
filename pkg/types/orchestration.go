@@ -400,6 +400,7 @@ const (
 	AgentExecutionMetaKeyRunAttemptID     = "run_attempt_id"
 	AgentExecutionMetaKeyOriginTaskID     = "origin_task_id"
 	AgentExecutionMetaKeyAgentID          = "agent_id"
+	AgentTaskSpawnedByFanOut              = "fanout_subtask"
 )
 
 type OrchestrationOutboxEventType string
