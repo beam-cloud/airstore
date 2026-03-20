@@ -393,18 +393,99 @@ func (s *WorkerService) UpdateTaskState(ctx context.Context, req *pb.UpdateTaskS
 		return nil, status.Errorf(codes.InvalidArgument, "only waiting/running transitions are allowed, got %q", state)
 	}
 
-	inputKind := types.InputKind(strings.TrimSpace(req.InputKind))
-	var waitingSummary *string
-	if ws := strings.TrimSpace(req.WaitingSummary); ws != "" {
-		waitingSummary = &ws
+	update, err := buildTaskLiveUpdate(taskID, runID, state, req)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "update task state: %v", err)
 	}
-	if _, err := s.lifecycle.TransitionLive(ctx, taskID, runID, state, inputKind, waitingSummary); err != nil {
+	if _, err := s.lifecycle.TransitionLive(ctx, update); err != nil {
 		return nil, status.Errorf(codes.Internal, "update task state: %v", err)
 	}
 	if run, err := s.backend.GetAgentRunByID(ctx, runID); err == nil && run != nil {
 		s.publishTaskUpdate(ctx, run.WorkspaceID, taskID)
 	}
 	return &pb.UpdateTaskStateResponse{}, nil
+}
+
+func buildTaskLiveUpdate(
+	taskID string,
+	runID string,
+	state types.AgentTaskState,
+	req *pb.UpdateTaskStateRequest,
+) (types.TaskLiveUpdate, error) {
+	update := types.TaskLiveUpdate{
+		TaskID: taskID,
+		RunID:  runID,
+		State:  state,
+	}
+	if state != types.AgentTaskStateWaiting {
+		return update, nil
+	}
+	blocker, err := buildTaskBlockerSpec(req)
+	if err != nil {
+		return update, err
+	}
+	update.Blocker = blocker
+	return update, nil
+}
+
+func buildTaskBlockerSpec(req *pb.UpdateTaskStateRequest) (*types.TaskBlockerSpec, error) {
+	if req == nil {
+		return nil, fmt.Errorf("request is required")
+	}
+	inputKind := types.InputKind(strings.TrimSpace(req.InputKind))
+	spec := &types.TaskBlockerSpec{
+		Kind:      types.TaskBlockerKind(strings.TrimSpace(req.BlockerKind)),
+		InputKind: inputKind,
+		OutputIDs: trimNonEmptyStrings(req.BlockerOutputIds),
+	}
+	if spec.Kind == "" {
+		spec.Kind = types.TaskBlockerKindForInputKind(inputKind)
+	}
+	if waitGroupID := strings.TrimSpace(req.BlockerWaitGroupId); waitGroupID != "" {
+		spec.WaitGroupID = &waitGroupID
+	}
+	if payload := strings.TrimSpace(req.BlockerPayloadJson); payload != "" {
+		if err := json.Unmarshal([]byte(payload), &spec.PayloadJSON); err != nil {
+			return nil, fmt.Errorf("invalid blocker payload: %w", err)
+		}
+	} else {
+		return nil, fmt.Errorf("waiting update requires blocker payload")
+	}
+	if spec.Kind == "" && spec.InputKind == "" {
+		return nil, fmt.Errorf("waiting update requires blocker kind or input kind")
+	}
+	if spec.InputKind == "" {
+		switch spec.Kind {
+		case types.TaskBlockerKindApproval:
+			spec.InputKind = types.InputKindApproveReject
+		default:
+			spec.InputKind = types.InputKindFreeText
+		}
+	}
+	if spec.Kind == "" {
+		spec.Kind = types.TaskBlockerKindForInputKind(spec.InputKind)
+	}
+	return spec, nil
+}
+
+func trimNonEmptyStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	return out
 }
 
 func (s *WorkerService) ClaimTaskInput(ctx context.Context, req *pb.ClaimTaskInputRequest) (*pb.ClaimTaskInputResponse, error) {

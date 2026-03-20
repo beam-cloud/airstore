@@ -268,3 +268,50 @@ func TestCreateTaskOutputRejectsCrossTaskConflict(t *testing.T) {
 		t.Fatalf("unmet sql expectations: %v", err)
 	}
 }
+
+func TestBindOutputsToBlockerTxUpdatesMetadataJSON(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("db.Begin: %v", err)
+	}
+
+	mock.ExpectExec(regexp.QuoteMeta(`
+		UPDATE task_output
+		SET metadata_json = COALESCE(metadata_json, '{}'::jsonb) || jsonb_build_object($3::text, $4::text)
+		WHERE workspace_id = $1
+		  AND id = ANY($2::uuid[])
+	`)).
+		WithArgs(
+			uint(7),
+			sqlmock.AnyArg(),
+			types.TaskOutputMetadataBlockerID,
+			"blocker-1",
+		).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+
+	if err := bindOutputsToBlockerTx(
+		context.Background(),
+		tx,
+		7,
+		"blocker-1",
+		[]string{"out-1", "out-2"},
+	); err != nil {
+		t.Fatalf("bindOutputsToBlockerTx returned error: %v", err)
+	}
+
+	mock.ExpectCommit()
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("tx.Commit: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}

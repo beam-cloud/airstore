@@ -106,137 +106,83 @@ func ResolveLayout(
 	outputs []*types.TaskOutput,
 	subtasks []*types.AgentTask,
 ) DetailLayoutResponse {
-	runtime := deriveDetailRuntimeState(task, outputs, subtasks)
+	return ResolveProjectedLayout(template, ProjectDetail(task, outputs, subtasks))
+}
+
+func ResolveProjectedLayout(template DetailLayoutResponse, projection DetailProjection) DetailLayoutResponse {
 	var sections []DetailSectionJSON
 	for _, s := range template.Sections {
-		if runtime.includesSection(s.Type) {
+		if projection.includesSection(s.Type) {
 			sections = append(sections, s)
 		}
 	}
-	sections = ensureDetailSections(sections, runtime.requiredSections()...)
-	return DetailLayoutResponse{Sections: sections, Actions: runtime.actions()}
+	sections = ensureDetailSections(sections, projection.requiredSections()...)
+	return DetailLayoutResponse{Sections: sections, Actions: projection.actions()}
 }
 
-type detailRuntimeState struct {
-	hasTask            bool
-	isTaskWaiting      bool
-	isTaskError        bool
-	isTaskActive       bool
-	taskInputKind      types.InputKind
-	hasEmail           bool
-	hasOtherOutputs    bool
-	hasApprovalBlocker bool
-	hasInputBlocker    bool
-	hasSubtasks        bool
+func (p DetailProjection) needsApproval() bool {
+	return p.Blocker != nil && p.Blocker.ApprovalSurface
 }
 
-type pendingOutputSignal struct {
-	IsBlocker       bool
-	IsApproval      bool
-	IsInput         bool
-	Kind            string
-	InputKind       string
-	WaitGroupID     string
-	ApprovalSurface bool
+func (p DetailProjection) needsInput() bool {
+	return p.Blocker != nil && !p.Blocker.ApprovalSurface
 }
 
-func deriveDetailRuntimeState(
-	task *types.AgentTask,
-	outputs []*types.TaskOutput,
-	subtasks []*types.AgentTask,
-) detailRuntimeState {
-	state := detailRuntimeState{
-		hasTask:     task != nil,
-		hasSubtasks: len(subtasks) > 0,
-	}
-	if task != nil {
-		state.isTaskWaiting = task.State == types.AgentTaskStateWaiting
-		state.isTaskError = task.State == types.AgentTaskStateError
-		state.isTaskActive = !task.State.IsTerminal()
-		state.taskInputKind = task.InputKind
-	}
-	for _, output := range outputs {
-		if output == nil {
-			continue
-		}
-		if output.OutputType == "email" {
-			state.hasEmail = true
-		} else {
-			state.hasOtherOutputs = true
-		}
-		if output.Status != types.TaskOutputStatusPending {
-			continue
-		}
-		signal := classifyPendingOutputSignal(output)
-		switch {
-		case signal.IsApproval:
-			state.hasApprovalBlocker = true
-		case signal.IsInput:
-			state.hasInputBlocker = true
-		}
-	}
-	return state
+func (p DetailProjection) hasConversation() bool {
+	return len(p.ThreadOutputs) > 0
 }
 
-func (s detailRuntimeState) isWaiting() bool {
-	return s.isTaskWaiting || s.hasApprovalBlocker || s.hasInputBlocker
+func (p DetailProjection) hasOutputGallery() bool {
+	return len(p.GalleryOutputs) > 0
 }
 
-func (s detailRuntimeState) needsApproval() bool {
-	return s.hasApprovalBlocker || (s.isTaskWaiting && s.taskInputKind == types.InputKindApproveReject)
-}
-
-func (s detailRuntimeState) needsInput() bool {
-	return s.isWaiting() && !s.needsApproval()
-}
-
-func (s detailRuntimeState) includesSection(sectionType string) bool {
+func (p DetailProjection) includesSection(sectionType string) bool {
 	switch sectionType {
 	case SectionEmailThread:
-		return s.hasEmail
+		return p.hasConversation()
 	case SectionApproval:
-		return s.needsApproval()
+		return p.needsApproval()
 	case SectionInputForm:
-		return s.needsInput()
+		return p.needsInput()
 	case SectionTaskProgress:
-		return s.hasTask
+		return p.HasTask
 	case SectionOutputGallery:
-		return s.hasOtherOutputs
+		return p.hasOutputGallery()
 	case SectionSubtasks:
-		return s.hasSubtasks
+		return p.HasSubtasks
 	default:
 		return sectionType == SectionDataSummary
 	}
 }
 
-func (s detailRuntimeState) requiredSections() []DetailSectionJSON {
+func (p DetailProjection) requiredSections() []DetailSectionJSON {
 	sections := []DetailSectionJSON{
 		detailSectionDetails(EmphasisSecondary),
 	}
-	if s.hasEmail {
+	if p.hasConversation() {
 		sections = append(sections, detailSectionConversation)
 	}
-	if s.needsApproval() {
+	if p.needsApproval() {
 		sections = append(sections, detailSectionApproval)
 	}
-	if s.needsInput() {
+	if p.needsInput() {
 		sections = append(sections, detailSectionInput)
 	}
-	if s.hasOtherOutputs {
+	if p.hasOutputGallery() {
 		sections = append(sections, detailSectionOutputs)
 	}
-	if s.hasSubtasks {
+	if p.HasSubtasks {
 		sections = append(sections, detailSectionSubtasks)
 	}
 	return sections
 }
 
-func (s detailRuntimeState) actions() []ActionSpecJSON {
+func (p DetailProjection) actions() []ActionSpecJSON {
 	actions := make([]ActionSpecJSON, 0, 2)
-	if s.isTaskError {
+	if p.IsTaskError {
 		actions = append(actions, ActionSpecJSON{Type: ActionRetry, Label: "Retry", Primary: true})
 	}
-	if s.isTaskActive {
+	if p.IsTaskActive {
 		actions = append(actions, ActionSpecJSON{Type: ActionCancel, Label: "Cancel", Primary: false})
 	}
 	return actions
@@ -266,55 +212,6 @@ func ensureDetailSection(sections []DetailSectionJSON, fallback DetailSectionJSO
 	copy(sections[insertAt+1:], sections[insertAt:])
 	sections[insertAt] = fallback
 	return sections
-}
-
-func classifyPendingOutputSignal(output *types.TaskOutput) pendingOutputSignal {
-	if output == nil {
-		return pendingOutputSignal{}
-	}
-	blockingKind := metadataStringValue(output.Metadata, types.TaskOutputMetadataBlockingKind)
-	inputKind := metadataStringValue(output.Metadata, types.TaskOutputMetadataInputKind)
-	approvalSurface := metadataBoolValue(output.Metadata, types.TaskOutputMetadataApprovalUI)
-
-	signal := pendingOutputSignal{
-		Kind:            blockingKind,
-		InputKind:       inputKind,
-		WaitGroupID:     metadataStringValue(output.Metadata, types.TaskOutputMetadataWaitGroupID),
-		ApprovalSurface: approvalSurface,
-	}
-	switch {
-	case blockingKind == types.TaskOutputBlockingKindApproval || approvalSurface || inputKind == string(types.InputKindApproveReject):
-		signal.IsBlocker = true
-		signal.IsApproval = true
-	case blockingKind == types.TaskOutputBlockingKindInput || inputKind == string(types.InputKindFreeText):
-		signal.IsBlocker = true
-		signal.IsInput = true
-	}
-	return signal
-}
-
-func metadataBoolValue(values map[string]any, key string) bool {
-	switch typed := values[key].(type) {
-	case bool:
-		return typed
-	case int:
-		return typed != 0
-	case int32:
-		return typed != 0
-	case int64:
-		return typed != 0
-	case float32:
-		return typed != 0
-	case float64:
-		return typed != 0
-	default:
-		switch strings.ToLower(metadataStringValue(values, key)) {
-		case "1", "true", "yes", "on":
-			return true
-		default:
-			return false
-		}
-	}
 }
 
 // ---------------------------------------------------------------------------

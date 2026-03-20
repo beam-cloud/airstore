@@ -138,6 +138,10 @@ message UpdateTaskStateRequest {
   string run_id = 3;
   string input_kind = 4;
   string waiting_summary = 5;
+  string blocker_kind = 6;
+  string blocker_wait_group_id = 7;
+  string blocker_payload_json = 8;
+  repeated string blocker_output_ids = 9;
 }
 
 message UpdateTaskStateResponse {}

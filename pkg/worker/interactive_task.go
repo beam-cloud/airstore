@@ -3,6 +3,7 @@ package worker
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -92,15 +93,113 @@ func (w *Worker) setRunInteractionState(ctx context.Context, task types.RunExecu
 	}
 }
 
-func (w *Worker) setOriginTaskState(ctx context.Context, task types.RunExecution, state types.AgentTaskState, inputKind types.InputKind, waitingSummary string) {
+func (w *Worker) setOriginTaskState(ctx context.Context, task types.RunExecution, update types.TaskLiveUpdate) {
 	ec := executionContextFromTask(task)
 	if ec.originTaskID == "" || ec.runID == "" {
 		return
 	}
-	if err := w.gatewayClient.UpdateTaskState(ctx, ec.originTaskID, string(state), ec.runID, string(inputKind), waitingSummary); err != nil {
-		addTaskExecutionContext(log.Warn().Err(err).Str("target_state", string(state)), task).
+	update.TaskID = ec.originTaskID
+	update.RunID = ec.runID
+	if err := w.gatewayClient.UpdateTaskState(ctx, update); err != nil {
+		addTaskExecutionContext(log.Warn().Err(err).Str("target_state", string(update.State)), task).
 			Msg("failed to update origin task state")
 	}
+}
+
+func waitingBlockerPayload(
+	inputKind types.InputKind,
+	waitingSummary string,
+	assistantMessage string,
+) map[string]any {
+	waitingSummary = strings.TrimSpace(waitingSummary)
+	assistantMessage = strings.TrimSpace(assistantMessage)
+	if waitingSummary != "" {
+		var parsed map[string]any
+		if json.Unmarshal([]byte(waitingSummary), &parsed) == nil && len(parsed) > 0 {
+			if assistantMessage != "" {
+				if _, ok := parsed["details"]; !ok {
+					parsed["details"] = assistantMessage
+				}
+			}
+			return parsed
+		}
+	}
+
+	payload := map[string]any{}
+	switch inputKind {
+	case types.InputKindApproveReject:
+		if waitingSummary != "" {
+			payload["summary"] = waitingSummary
+		}
+		if assistantMessage != "" {
+			payload["details"] = assistantMessage
+		}
+	default:
+		if assistantMessage != "" {
+			payload["details"] = assistantMessage
+		} else if waitingSummary != "" {
+			payload["details"] = waitingSummary
+		}
+		if waitingSummary != "" && waitingSummary != assistantMessage {
+			payload["summary"] = waitingSummary
+		}
+	}
+	return payload
+}
+
+func buildWaitingBlockerSpec(
+	task types.RunExecution,
+	inputKind types.InputKind,
+	waitingSummary string,
+	assistantMessage string,
+	outputIDs []string,
+) *types.TaskBlockerSpec {
+	if inputKind == "" {
+		return nil
+	}
+	spec := &types.TaskBlockerSpec{
+		Kind:        types.TaskBlockerKindForInputKind(inputKind),
+		InputKind:   inputKind,
+		PayloadJSON: waitingBlockerPayload(inputKind, waitingSummary, assistantMessage),
+		OutputIDs:   outputIDs,
+	}
+	if inputKind == types.InputKindApproveReject {
+		if waitGroupID := approvalWaitGroupID(task, assistantMessage); waitGroupID != "" {
+			spec.WaitGroupID = &waitGroupID
+		}
+	}
+	return spec
+}
+
+func trackedOutputIDSet(tracker *taskOutputTracker) map[string]struct{} {
+	seen := make(map[string]struct{})
+	if tracker == nil {
+		return seen
+	}
+	for _, summary := range tracker.TrackedOutputSummaries() {
+		if id := strings.TrimSpace(summary.OutputID); id != "" {
+			seen[id] = struct{}{}
+		}
+	}
+	return seen
+}
+
+func diffTrackedOutputIDs(tracker *taskOutputTracker, before map[string]struct{}) []string {
+	if tracker == nil {
+		return nil
+	}
+	var outputIDs []string
+	for _, summary := range tracker.TrackedOutputSummaries() {
+		id := strings.TrimSpace(summary.OutputID)
+		if id == "" {
+			continue
+		}
+		if _, ok := before[id]; ok {
+			continue
+		}
+		outputIDs = append(outputIDs, id)
+	}
+	return outputIDs
 }
 
 // ---------------------------------------------------------------------------
@@ -439,7 +538,7 @@ func persistApprovalOutputBeforeWaiting(
 	prompt string,
 	assistantMessage string,
 	bamlEnv map[string]string,
-) bool {
+) ([]string, bool) {
 	return persistApprovalOutputBeforeWaitingWithFunc(
 		ctx, client, task, tracker, prompt, assistantMessage, bamlEnv, persistApprovalResponseOutput,
 	)
@@ -462,24 +561,25 @@ func persistApprovalOutputBeforeWaitingWithFunc(
 		string,
 		map[string]string,
 	) (bool, error),
-) bool {
+) ([]string, bool) {
 	if client == nil {
-		return false
+		return nil, false
 	}
 	assistantMessage = strings.TrimSpace(assistantMessage)
 	if assistantMessage == "" || len(assistantMessage) < minApprovalOutputLen {
-		return false
+		return nil, false
 	}
 	var userMessage *string
 	if trimmed := strings.TrimSpace(prompt); trimmed != "" {
 		userMessage = &trimmed
 	}
+	before := trackedOutputIDSet(tracker)
 	created, err := persist(ctx, client, task, tracker, userMessage, assistantMessage, bamlEnv)
 	if err != nil {
 		addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to persist approval response output before waiting")
-		return false
+		return nil, false
 	}
-	return created
+	return diffTrackedOutputIDs(tracker, before), created
 }
 
 // ---------------------------------------------------------------------------
@@ -513,7 +613,9 @@ func (w *Worker) runTurnSession(
 
 		w.setRunInteractionState(ctx, task, types.RunInteractionStateWorking)
 		if !isFirst {
-			w.setOriginTaskState(ctx, task, types.AgentTaskStateRunning, "", "")
+			w.setOriginTaskState(ctx, task, types.TaskLiveUpdate{
+				State: types.AgentTaskStateRunning,
+			})
 		}
 
 		turnOut := stdout
@@ -548,6 +650,7 @@ func (w *Worker) runTurnSession(
 		var inputKind types.InputKind
 		var waitingSummary string
 		var approvalAssistantMessage string
+		var blockerOutputIDs []string
 
 		if outputParser != nil {
 			var err error
@@ -574,12 +677,15 @@ func (w *Worker) runTurnSession(
 		}
 
 		if inputKind == types.InputKindApproveReject {
-			approvalOutputPersisted = persistApprovalOutputBeforeWaiting(
+			blockerOutputIDs, approvalOutputPersisted = persistApprovalOutputBeforeWaiting(
 				ctx, w.gatewayClient, task, tracker, prompt, approvalAssistantMessage, bamlEnv,
 			)
 		}
 		w.setRunInteractionState(ctx, task, types.RunInteractionStateWaitingForInput)
-		w.setOriginTaskState(ctx, task, types.AgentTaskStateWaiting, inputKind, waitingSummary)
+		w.setOriginTaskState(ctx, task, types.TaskLiveUpdate{
+			State:   types.AgentTaskStateWaiting,
+			Blocker: buildWaitingBlockerSpec(task, inputKind, waitingSummary, approvalAssistantMessage, blockerOutputIDs),
+		})
 		prompt = w.waitForFollowupInput(ctx, task, DefaultBetweenTurnsTimeout, activityCh)
 		if prompt == "" {
 			return nil, true, inputKind, "", approvalOutputPersisted

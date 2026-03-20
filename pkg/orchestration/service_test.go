@@ -185,6 +185,7 @@ type acceptTaskInputBackend struct {
 	task                *types.AgentTask
 	outputs             map[string]*types.TaskOutput
 	appendedInputs      []*types.TaskInput
+	resolvedBlocker     *types.TaskBlockerResolution
 	statusUpdateErrByID map[string]error
 }
 
@@ -228,6 +229,27 @@ func (b *acceptTaskInputBackend) AppendTaskInput(_ context.Context, input *types
 	copied := *input
 	b.appendedInputs = append(b.appendedInputs, &copied)
 	return nil
+}
+
+func (b *acceptTaskInputBackend) ResolveCurrentTaskBlocker(_ context.Context, _ uint, taskID string, resolution *types.TaskBlockerResolution) (*types.TaskBlocker, error) {
+	if b.task == nil || b.task.ID != taskID {
+		return nil, &types.ErrAgentTaskNotFound{ID: taskID}
+	}
+	if resolution != nil {
+		copied := *resolution
+		if len(resolution.ResolutionJSON) > 0 {
+			copied.ResolutionJSON = make(map[string]any, len(resolution.ResolutionJSON))
+			for key, value := range resolution.ResolutionJSON {
+				copied.ResolutionJSON[key] = value
+			}
+		}
+		b.resolvedBlocker = &copied
+	}
+	b.task.CurrentBlocker = nil
+	b.task.CurrentBlockerID = nil
+	b.task.InputKind = ""
+	b.task.WaitingSummary = nil
+	return &types.TaskBlocker{ID: "blocker-1", Status: types.TaskBlockerStatusResolved}, nil
 }
 
 func TestAcceptTaskInputRejectsCrossTaskItemDecisions(t *testing.T) {
@@ -352,10 +374,10 @@ func TestAcceptTaskInputAutoAppliesPendingOutputsForApproveReject(t *testing.T) 
 				},
 			},
 			"out-pending": {
-				ID:     "out-pending",
-				TaskID: "task-1",
-				Title:  "Draft outreach email",
-				Status: types.TaskOutputStatusPending,
+				ID:        "out-pending",
+				TaskID:    "task-1",
+				Title:     "Draft outreach email",
+				Status:    types.TaskOutputStatusPending,
 				CreatedAt: time.Unix(20, 0),
 				Metadata: map[string]any{
 					types.TaskOutputMetadataBlockingKind: types.TaskOutputBlockingKindApproval,
@@ -403,4 +425,229 @@ func TestAcceptTaskInputAutoAppliesPendingOutputsForApproveReject(t *testing.T) 
 	if msg := backend.appendedInputs[0].Message; !strings.Contains(msg, "Approved:") || !strings.Contains(msg, "Draft outreach email") {
 		t.Fatalf("appended input message = %q, want approval summary for pending output", msg)
 	}
+}
+
+func TestAcceptTaskInputFreeTextSupersedesPendingApprovalOutputs(t *testing.T) {
+	backend := &acceptTaskInputBackend{
+		task: &types.AgentTask{
+			ID:          "task-1",
+			WorkspaceID: 7,
+			State:       types.AgentTaskStateWaiting,
+			InputKind:   types.InputKindApproveReject,
+		},
+		outputs: map[string]*types.TaskOutput{
+			"out-old": {
+				ID:        "out-old",
+				TaskID:    "task-1",
+				Title:     "Older approval draft",
+				Status:    types.TaskOutputStatusPending,
+				CreatedAt: time.Unix(10, 0),
+				Metadata: map[string]any{
+					types.TaskOutputMetadataBlockingKind: types.TaskOutputBlockingKindApproval,
+					types.TaskOutputMetadataInputKind:    string(types.InputKindApproveReject),
+					types.TaskOutputMetadataWaitGroupID:  "wait-1",
+					types.TaskOutputMetadataApprovalUI:   true,
+				},
+			},
+			"out-current": {
+				ID:        "out-current",
+				TaskID:    "task-1",
+				Title:     "Current approval draft",
+				Status:    types.TaskOutputStatusPending,
+				CreatedAt: time.Unix(20, 0),
+				Metadata: map[string]any{
+					types.TaskOutputMetadataBlockingKind: types.TaskOutputBlockingKindApproval,
+					types.TaskOutputMetadataInputKind:    string(types.InputKindApproveReject),
+					types.TaskOutputMetadataWaitGroupID:  "wait-2",
+					types.TaskOutputMetadataApprovalUI:   true,
+				},
+			},
+			"out-unrelated": {
+				ID:        "out-unrelated",
+				TaskID:    "task-1",
+				Title:     "Pending document upload",
+				Status:    types.TaskOutputStatusPending,
+				CreatedAt: time.Unix(30, 0),
+			},
+		},
+	}
+	service := &AgentService{backend: backend}
+
+	_, err := service.AcceptTaskInput(
+		context.Background(),
+		7,
+		"task-1",
+		"",
+		nil,
+		"Please revise the tone and tighten the CTA.",
+		"idem-4",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("AcceptTaskInput returned error: %v", err)
+	}
+	if got := backend.outputs["out-old"].Status; got != types.TaskOutputStatusCancelled {
+		t.Fatalf("older approval status = %q, want cancelled", got)
+	}
+	if got := backend.outputs["out-current"].Status; got != types.TaskOutputStatusCancelled {
+		t.Fatalf("current approval status = %q, want cancelled", got)
+	}
+	if got := backend.outputs["out-unrelated"].Status; got != types.TaskOutputStatusPending {
+		t.Fatalf("unrelated pending status = %q, want pending", got)
+	}
+	if got := len(backend.appendedInputs); got != 1 {
+		t.Fatalf("append count = %d, want 1", got)
+	}
+	if got := backend.appendedInputs[0].Kind; got != types.InputKindFreeText {
+		t.Fatalf("input kind = %q, want free_text", got)
+	}
+}
+
+func TestAcceptTaskInputUsesCurrentBlockerArtifactsForAutoApproval(t *testing.T) {
+	backend := &acceptTaskInputBackend{
+		task: &types.AgentTask{
+			ID:               "task-1",
+			WorkspaceID:      7,
+			State:            types.AgentTaskStateWaiting,
+			InputKind:        types.InputKindApproveReject,
+			CurrentBlockerID: stringPtr("blocker-1"),
+			CurrentBlocker: &types.TaskBlocker{
+				ID:        "blocker-1",
+				Kind:      types.TaskBlockerKindApproval,
+				InputKind: types.InputKindApproveReject,
+				Status:    types.TaskBlockerStatusOpen,
+				OutputIDs: []string{"out-current"},
+			},
+		},
+		outputs: map[string]*types.TaskOutput{
+			"out-old": {
+				ID:        "out-old",
+				TaskID:    "task-1",
+				Title:     "Older approval draft",
+				Status:    types.TaskOutputStatusPending,
+				CreatedAt: time.Unix(10, 0),
+				Metadata: map[string]any{
+					types.TaskOutputMetadataBlockerID:    "blocker-old",
+					types.TaskOutputMetadataBlockingKind: types.TaskOutputBlockingKindApproval,
+					types.TaskOutputMetadataInputKind:    string(types.InputKindApproveReject),
+				},
+			},
+			"out-current": {
+				ID:        "out-current",
+				TaskID:    "task-1",
+				Title:     "Current approval draft",
+				Status:    types.TaskOutputStatusPending,
+				CreatedAt: time.Unix(20, 0),
+				Metadata: map[string]any{
+					types.TaskOutputMetadataBlockerID:    "blocker-1",
+					types.TaskOutputMetadataBlockingKind: types.TaskOutputBlockingKindApproval,
+					types.TaskOutputMetadataInputKind:    string(types.InputKindApproveReject),
+				},
+			},
+		},
+	}
+	service := &AgentService{backend: backend}
+	approve := types.TaskInputActionApprove
+
+	_, err := service.AcceptTaskInput(
+		context.Background(),
+		7,
+		"task-1",
+		types.InputKindApproveReject,
+		&approve,
+		"",
+		"idem-blocker-approve",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("AcceptTaskInput returned error: %v", err)
+	}
+	if got := backend.outputs["out-current"].Status; got != types.TaskOutputStatusApproved {
+		t.Fatalf("current blocker output status = %q, want approved", got)
+	}
+	if got := backend.outputs["out-old"].Status; got != types.TaskOutputStatusPending {
+		t.Fatalf("older blocker output status = %q, want pending", got)
+	}
+	if backend.resolvedBlocker == nil {
+		t.Fatal("expected current blocker to be resolved")
+	}
+	if got := backend.resolvedBlocker.Status; got != types.TaskBlockerStatusResolved {
+		t.Fatalf("blocker status = %q, want resolved", got)
+	}
+}
+
+func TestAcceptTaskInputSupersedesOnlyCurrentBlockerArtifacts(t *testing.T) {
+	backend := &acceptTaskInputBackend{
+		task: &types.AgentTask{
+			ID:               "task-1",
+			WorkspaceID:      7,
+			State:            types.AgentTaskStateWaiting,
+			InputKind:        types.InputKindApproveReject,
+			CurrentBlockerID: stringPtr("blocker-1"),
+			CurrentBlocker: &types.TaskBlocker{
+				ID:        "blocker-1",
+				Kind:      types.TaskBlockerKindApproval,
+				InputKind: types.InputKindApproveReject,
+				Status:    types.TaskBlockerStatusOpen,
+				OutputIDs: []string{"out-current"},
+			},
+		},
+		outputs: map[string]*types.TaskOutput{
+			"out-old": {
+				ID:        "out-old",
+				TaskID:    "task-1",
+				Title:     "Older approval draft",
+				Status:    types.TaskOutputStatusPending,
+				CreatedAt: time.Unix(10, 0),
+				Metadata: map[string]any{
+					types.TaskOutputMetadataBlockerID:    "blocker-old",
+					types.TaskOutputMetadataBlockingKind: types.TaskOutputBlockingKindApproval,
+					types.TaskOutputMetadataInputKind:    string(types.InputKindApproveReject),
+				},
+			},
+			"out-current": {
+				ID:        "out-current",
+				TaskID:    "task-1",
+				Title:     "Current approval draft",
+				Status:    types.TaskOutputStatusPending,
+				CreatedAt: time.Unix(20, 0),
+				Metadata: map[string]any{
+					types.TaskOutputMetadataBlockerID:    "blocker-1",
+					types.TaskOutputMetadataBlockingKind: types.TaskOutputBlockingKindApproval,
+					types.TaskOutputMetadataInputKind:    string(types.InputKindApproveReject),
+				},
+			},
+		},
+	}
+	service := &AgentService{backend: backend}
+
+	_, err := service.AcceptTaskInput(
+		context.Background(),
+		7,
+		"task-1",
+		"",
+		nil,
+		"Please revise the CTA.",
+		"idem-blocker-supersede",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("AcceptTaskInput returned error: %v", err)
+	}
+	if got := backend.outputs["out-current"].Status; got != types.TaskOutputStatusCancelled {
+		t.Fatalf("current blocker output status = %q, want cancelled", got)
+	}
+	if got := backend.outputs["out-old"].Status; got != types.TaskOutputStatusPending {
+		t.Fatalf("older blocker output status = %q, want pending", got)
+	}
+	if backend.resolvedBlocker == nil {
+		t.Fatal("expected current blocker to be superseded")
+	}
+	if got := backend.resolvedBlocker.Status; got != types.TaskBlockerStatusSuperseded {
+		t.Fatalf("blocker status = %q, want superseded", got)
+	}
+}
+
+func stringPtr(value string) *string {
+	return &value
 }

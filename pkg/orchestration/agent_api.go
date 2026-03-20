@@ -14,6 +14,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
+	viewprojection "github.com/beam-cloud/airstore/pkg/views/projection"
 )
 
 // AgentAPI is the shared application layer for agent/task/run flows.
@@ -24,16 +25,17 @@ type AgentAPI struct {
 }
 
 type TaskEventBatch struct {
-	TaskID             string                `json:"task_id"`
-	RunID              *string               `json:"run_id,omitempty"`
-	Task               *types.AgentTask      `json:"task,omitempty"`
-	Run                *types.AgentRun       `json:"run,omitempty"`
-	Interaction        *types.RunInteraction `json:"interaction,omitempty"`
-	Logs               []common.TaskLogEntry `json:"logs"`
-	RunEvents          []map[string]any      `json:"run_events"`
-	Outputs            []*types.TaskOutput   `json:"outputs,omitempty"`
-	NextLogCursor      int64                 `json:"next_log_cursor"`
-	NextRunEventCursor int                   `json:"next_run_event_cursor"`
+	TaskID             string                 `json:"task_id"`
+	RunID              *string                `json:"run_id,omitempty"`
+	Task               *types.AgentTask       `json:"task,omitempty"`
+	Run                *types.AgentRun        `json:"run,omitempty"`
+	Interaction        *types.RunInteraction  `json:"interaction,omitempty"`
+	Blocker            *types.ResolvedBlocker `json:"blocker"`
+	Logs               []common.TaskLogEntry  `json:"logs"`
+	RunEvents          []map[string]any       `json:"run_events"`
+	Outputs            []*types.TaskOutput    `json:"outputs,omitempty"`
+	NextLogCursor      int64                  `json:"next_log_cursor"`
+	NextRunEventCursor int                    `json:"next_run_event_cursor"`
 }
 
 type WorkspaceLiveBatch struct {
@@ -445,7 +447,11 @@ func (a *AgentAPI) CancelTask(ctx context.Context, workspaceID uint, taskID stri
 			return err
 		}
 	} else {
-		if err := a.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateCancelled, nil, task.TargetRunID); err != nil {
+		if err := a.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
+			TaskID:      task.ID,
+			State:       types.AgentTaskStateCancelled,
+			TargetRunID: task.TargetRunID,
+		}); err != nil {
 			return err
 		}
 	}
@@ -917,6 +923,7 @@ func (a *AgentAPI) buildTaskEventBatch(
 	if outputs == nil {
 		outputs = []*types.TaskOutput{}
 	}
+	blocker := viewprojection.ProjectBlocker(task, outputs)
 
 	return &TaskEventBatch{
 		TaskID:             task.ID,
@@ -924,6 +931,7 @@ func (a *AgentAPI) buildTaskEventBatch(
 		Task:               task,
 		Run:                run,
 		Interaction:        interaction,
+		Blocker:            blocker,
 		Logs:               logs,
 		RunEvents:          runEvents,
 		Outputs:            outputs,

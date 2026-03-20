@@ -53,7 +53,7 @@ func TestPersistAssistantResponseOutputsPersistsPendingApprovalArtifact(t *testi
 		content := "Hi Luke,\n\nI wanted to reach out about Airstore.\n"
 		artifactKey := "sales-email"
 		artifactLabel := "Sales Emails"
-		artifactKind := "email"
+		artifactKind := types.TaskOutputTypeEmail
 		return []signaltypes.ExtractedOutput{{
 			Kind:           signaltypes.OutputKindEMAIL_DRAFT,
 			Title:          "Sales outreach email to Luke",
@@ -96,8 +96,8 @@ func TestPersistAssistantResponseOutputsPersistsPendingApprovalArtifact(t *testi
 	}
 
 	req := client.createReqs[0]
-	if got := req.OutputType; got != "email" {
-		t.Fatalf("output type = %q, want email", got)
+	if got := req.OutputType; got != types.TaskOutputTypeEmail {
+		t.Fatalf("output type = %q, want %q", got, types.TaskOutputTypeEmail)
 	}
 	if got := req.Status; got != types.TaskOutputStatusPending {
 		t.Fatalf("status = %q, want pending", got)
@@ -268,13 +268,14 @@ func TestPersistAssistantResponseOutputsFallsBackWhenApprovalExtractsNothing(t *
 func TestPersistApprovalOutputBeforeWaitingCreatesBlockingOutput(t *testing.T) {
 	client := &captureOutputClient{}
 	task := testRunExecution()
+	tracker := &taskOutputTracker{}
 	assistantMessage := "Here is the draft email for approval.\n\n**To:** Mike <luke@slai.io>\n**Subject:** Cleaner dev environments for your team\n\nHello Mike."
 
-	created := persistApprovalOutputBeforeWaitingWithFunc(
+	outputIDs, created := persistApprovalOutputBeforeWaitingWithFunc(
 		context.Background(),
 		client,
 		task,
-		nil,
+		tracker,
 		"Draft a cold outreach email to Mike.",
 		assistantMessage,
 		nil,
@@ -319,6 +320,9 @@ func TestPersistApprovalOutputBeforeWaitingCreatesBlockingOutput(t *testing.T) {
 	)
 	if !created {
 		t.Fatal("expected approval output to be persisted before waiting")
+	}
+	if len(outputIDs) != 1 {
+		t.Fatalf("output id count = %d, want 1", len(outputIDs))
 	}
 	if got := len(client.createReqs); got != 1 {
 		t.Fatalf("create req count = %d, want 1", got)

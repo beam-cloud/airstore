@@ -253,64 +253,107 @@ func TestFetchMappingOutputsExpandsTaskContextForSelectedTasks(t *testing.T) {
 	}
 }
 
-func TestSelectRowBlockerTreatsInputKindOnlyPendingOutputsAsBlockers(t *testing.T) {
-	cases := []struct {
-		name         string
-		inputKind    types.InputKind
-		wantApproval bool
-	}{
-		{
-			name:         "approve reject",
-			inputKind:    types.InputKindApproveReject,
-			wantApproval: true,
-		},
-		{
-			name:         "free text",
-			inputKind:    types.InputKindFreeText,
-			wantApproval: false,
+func TestProjectBlockerBuildsFallbackItemsFromOutputIDs(t *testing.T) {
+	waitGroupID := "wait-1"
+	output := &types.TaskOutput{
+		ID:        "out-1",
+		Title:     "Draft outreach email",
+		Status:    types.TaskOutputStatusPending,
+		CreatedAt: time.Unix(10, 0),
+	}
+	task := &types.AgentTask{
+		CurrentBlocker: &types.TaskBlocker{
+			ID:          "blocker-1",
+			Kind:        types.TaskBlockerKindApproval,
+			InputKind:   types.InputKindApproveReject,
+			Status:      types.TaskBlockerStatusOpen,
+			WaitGroupID: &waitGroupID,
+			OutputIDs:   []string{"out-1"},
 		},
 	}
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			output := &types.TaskOutput{
-				ID:        "out-1",
-				Status:    types.TaskOutputStatusPending,
-				CreatedAt: time.Unix(10, 0),
-				Metadata: map[string]any{
-					types.TaskOutputMetadataInputKind:   string(tc.inputKind),
-					types.TaskOutputMetadataWaitGroupID: "wait-1",
+	got := ProjectBlocker(task, []*types.TaskOutput{output})
+	if got == nil {
+		t.Fatal("expected projected blocker")
+	}
+	if got.OutputID != output.ID {
+		t.Fatalf("OutputID = %q, want %q", got.OutputID, output.ID)
+	}
+	if got.WaitGroupID != waitGroupID {
+		t.Fatalf("WaitGroupID = %q, want %q", got.WaitGroupID, waitGroupID)
+	}
+	if got.InputKind != string(types.InputKindApproveReject) {
+		t.Fatalf("InputKind = %q, want %q", got.InputKind, types.InputKindApproveReject)
+	}
+	if !got.ApprovalSurface {
+		t.Fatal("ApprovalSurface = false, want true")
+	}
+	if len(got.Items) != 1 {
+		t.Fatalf("item count = %d, want 1", len(got.Items))
+	}
+	if got.Items[0].OutputID != output.ID {
+		t.Fatalf("item output_id = %q, want %q", got.Items[0].OutputID, output.ID)
+	}
+	if got.Items[0].Title != output.Title {
+		t.Fatalf("item title = %q, want %q", got.Items[0].Title, output.Title)
+	}
+}
+
+func TestProjectBlockerPrefersExplicitPayloadForApprovalRevision(t *testing.T) {
+	older := &types.TaskOutput{
+		ID:        "out-1",
+		Title:     "Original outreach email",
+		Status:    types.TaskOutputStatusPending,
+		CreatedAt: time.Unix(10, 0),
+	}
+	revised := &types.TaskOutput{
+		ID:        "out-2",
+		Title:     "Revised outreach email",
+		Status:    types.TaskOutputStatusPending,
+		CreatedAt: time.Unix(20, 0),
+	}
+	task := &types.AgentTask{
+		CurrentBlocker: &types.TaskBlocker{
+			ID:        "blocker-2",
+			Kind:      types.TaskBlockerKindApproval,
+			InputKind: types.InputKindApproveReject,
+			Status:    types.TaskBlockerStatusOpen,
+			OutputIDs: []string{"out-1", "out-2"},
+			PayloadJSON: map[string]any{
+				"summary": "Approve the revised draft",
+				"details": "The explicit blocker payload should win.",
+				"items": []any{
+					map[string]any{
+						"output_id": "out-2",
+						"title":     "Revised outreach email",
+						"item_key":  "out-2",
+					},
 				},
-			}
+			},
+		},
+	}
 
-			signal := classifyPendingOutputSignal(output)
-			got := selectRowBlocker([]*types.TaskOutput{output})
-
-			if !signal.IsBlocker {
-				t.Fatal("expected pending output to be classified as blocker")
-			}
-			if signal.IsApproval != tc.wantApproval {
-				t.Fatalf("IsApproval = %v, want %v", signal.IsApproval, tc.wantApproval)
-			}
-			if signal.IsInput == tc.wantApproval {
-				t.Fatalf("IsInput = %v, want opposite of IsApproval", signal.IsInput)
-			}
-			if got.OutputID != output.ID {
-				t.Fatalf("OutputID = %q, want %q", got.OutputID, output.ID)
-			}
-			if got.WaitGroupID != "wait-1" {
-				t.Fatalf("WaitGroupID = %q, want %q", got.WaitGroupID, "wait-1")
-			}
-			if got.InputKind != string(tc.inputKind) {
-				t.Fatalf("InputKind = %q, want %q", got.InputKind, tc.inputKind)
-			}
-			if got.ApprovalSurface {
-				t.Fatalf("ApprovalSurface = %v, want false without approval UI metadata", got.ApprovalSurface)
-			}
-			if len(got.OutputIDs) != 1 || got.OutputIDs[0] != output.ID {
-				t.Fatalf("OutputIDs = %#v, want [%q]", got.OutputIDs, output.ID)
-			}
-		})
+	got := ProjectBlocker(task, []*types.TaskOutput{older, revised})
+	if got == nil {
+		t.Fatal("expected projected blocker")
+	}
+	if got.OutputID != revised.ID {
+		t.Fatalf("OutputID = %q, want %q", got.OutputID, revised.ID)
+	}
+	if got.Summary != "Approve the revised draft" {
+		t.Fatalf("Summary = %q, want revised summary", got.Summary)
+	}
+	if got.Details != "The explicit blocker payload should win." {
+		t.Fatalf("Details = %q, want explicit blocker details", got.Details)
+	}
+	if len(got.Items) != 1 {
+		t.Fatalf("item count = %d, want 1", len(got.Items))
+	}
+	if got.Items[0].OutputID != revised.ID {
+		t.Fatalf("item output_id = %q, want %q", got.Items[0].OutputID, revised.ID)
+	}
+	if got.Items[0].Title != revised.Title {
+		t.Fatalf("item title = %q, want %q", got.Items[0].Title, revised.Title)
 	}
 }
 

@@ -413,8 +413,13 @@ func (s *AgentService) AcceptTaskInput(
 		return nil, fmt.Errorf("task_id is required")
 	}
 
+	task, err := s.backend.GetTask(ctx, workspaceID, taskID)
+	if err != nil {
+		return nil, err
+	}
+
 	if len(items) == 0 && action != nil && (kind == "" || kind == types.InputKindApproveReject) {
-		autoItems, err := s.pendingItemDecisions(ctx, workspaceID, taskID, *action)
+		autoItems, err := s.pendingItemDecisions(ctx, workspaceID, task, *action)
 		if err != nil {
 			return nil, err
 		}
@@ -454,10 +459,12 @@ func (s *AgentService) AcceptTaskInput(
 		}
 	}
 
-	task, err := s.backend.GetTask(ctx, workspaceID, taskID)
-	if err != nil {
-		return nil, err
+	if shouldSupersedePendingApprovalOutputs(task, kind, action) {
+		if err := s.supersedePendingApprovalOutputs(ctx, workspaceID, task); err != nil {
+			return nil, err
+		}
 	}
+	resolution := taskBlockerResolutionForInput(task, kind, action, message, items)
 
 	sessionID := ""
 	if task.TargetRunID != nil {
@@ -479,6 +486,16 @@ func (s *AgentService) AcceptTaskInput(
 	if err := s.backend.AppendTaskInput(ctx, input); err != nil {
 		return nil, fmt.Errorf("append task input: %w", err)
 	}
+	if resolution != nil {
+		if _, err := s.backend.ResolveCurrentTaskBlocker(ctx, workspaceID, taskID, resolution); err != nil {
+			log.Warn().Err(err).Str("task_id", taskID).Msg("failed to resolve task blocker after storing input")
+		} else {
+			task.CurrentBlocker = nil
+			task.CurrentBlockerID = nil
+			task.InputKind = ""
+			task.WaitingSummary = nil
+		}
+	}
 
 	s.persistUserInputLog(ctx, task, message)
 
@@ -498,17 +515,17 @@ func (s *AgentService) AcceptTaskInput(
 func (s *AgentService) pendingItemDecisions(
 	ctx context.Context,
 	workspaceID uint,
-	taskID string,
+	task *types.AgentTask,
 	action types.TaskInputAction,
 ) ([]types.ItemDecision, error) {
-	outputs, err := s.backend.ListTaskOutputs(ctx, workspaceID, taskID)
+	if task == nil {
+		return nil, fmt.Errorf("task is required")
+	}
+	outputs, err := s.backend.ListTaskOutputs(ctx, workspaceID, task.ID)
 	if err != nil {
-		return nil, fmt.Errorf("list task outputs for %s: %w", taskID, err)
+		return nil, fmt.Errorf("list task outputs for %s: %w", task.ID, err)
 	}
-	selected := latestPendingApprovalGroup(outputs)
-	if len(selected) == 0 {
-		selected = pendingOutputs(outputs)
-	}
+	selected := pendingOutputsForCurrentBlocker(task, outputs)
 	sort.SliceStable(selected, func(i, j int) bool {
 		if !selected[i].CreatedAt.Equal(selected[j].CreatedAt) {
 			return selected[i].CreatedAt.Before(selected[j].CreatedAt)
@@ -539,56 +556,130 @@ func pendingOutputs(outputs []*types.TaskOutput) []*types.TaskOutput {
 	return pending
 }
 
-func latestPendingApprovalGroup(outputs []*types.TaskOutput) []*types.TaskOutput {
-	groups := make(map[string][]*types.TaskOutput)
-	latestGroupID := ""
-	latestCreatedAt := time.Time{}
+type taskOutputStatusUpdate struct {
+	output         *types.TaskOutput
+	originalStatus string
+	targetStatus   string
+}
+
+type itemDecisionUpdate struct {
+	item types.ItemDecision
+	taskOutputStatusUpdate
+}
+
+func applyOutputStatusUpdates(
+	ctx context.Context,
+	workspaceID uint,
+	backend repository.BackendRepository,
+	updates []taskOutputStatusUpdate,
+) error {
+	applied := make([]taskOutputStatusUpdate, 0, len(updates))
+	for _, update := range updates {
+		if err := backend.UpdateTaskOutputStatus(ctx, workspaceID, update.output.ID, update.targetStatus); err != nil {
+			for i := len(applied) - 1; i >= 0; i-- {
+				previous := applied[i]
+				if rollbackErr := backend.UpdateTaskOutputStatus(ctx, workspaceID, previous.output.ID, previous.originalStatus); rollbackErr != nil {
+					log.Error().Err(rollbackErr).Str("output_id", previous.output.ID).Msg("failed to roll back output status")
+				}
+			}
+			return fmt.Errorf("update output status %s: %w", update.output.ID, err)
+		}
+		update.output.Status = update.targetStatus
+		applied = append(applied, update)
+	}
+	return nil
+}
+
+func shouldSupersedePendingApprovalOutputs(
+	task *types.AgentTask,
+	kind types.InputKind,
+	action *types.TaskInputAction,
+) bool {
+	if task == nil || action != nil || task.CurrentBlocker == nil {
+		return false
+	}
+	return task.CurrentBlocker.Status == types.TaskBlockerStatusOpen &&
+		task.CurrentBlocker.Kind == types.TaskBlockerKindApproval &&
+		kind == types.InputKindFreeText
+}
+
+func pendingOutputsForCurrentBlocker(task *types.AgentTask, outputs []*types.TaskOutput) []*types.TaskOutput {
+	if task == nil || task.CurrentBlocker == nil || task.CurrentBlocker.Status != types.TaskBlockerStatusOpen {
+		return nil
+	}
+	selected := make([]*types.TaskOutput, 0, len(outputs))
+	outputByID := make(map[string]*types.TaskOutput, len(outputs))
 	for _, output := range pendingOutputs(outputs) {
 		if output == nil {
 			continue
 		}
-		waitGroupID := metadataString(output.Metadata, types.TaskOutputMetadataWaitGroupID)
-		if waitGroupID == "" {
-			continue
-		}
-		blockingKind := metadataString(output.Metadata, types.TaskOutputMetadataBlockingKind)
-		if blockingKind == "" && !boolFromAny(output.Metadata[types.TaskOutputMetadataApprovalUI]) {
-			continue
-		}
-		groups[waitGroupID] = append(groups[waitGroupID], output)
-		if output.CreatedAt.After(latestCreatedAt) || (output.CreatedAt.Equal(latestCreatedAt) && waitGroupID > latestGroupID) {
-			latestCreatedAt = output.CreatedAt
-			latestGroupID = waitGroupID
+		outputByID[output.ID] = output
+	}
+	for _, outputID := range task.CurrentBlocker.OutputIDs {
+		if output := outputByID[strings.TrimSpace(outputID)]; output != nil {
+			selected = append(selected, output)
 		}
 	}
-	if latestGroupID == "" {
+	if len(selected) > 0 {
+		return selected
+	}
+	return selected
+}
+
+func taskBlockerResolutionForInput(
+	task *types.AgentTask,
+	kind types.InputKind,
+	action *types.TaskInputAction,
+	message string,
+	items []types.ItemDecision,
+) *types.TaskBlockerResolution {
+	if task == nil || task.CurrentBlocker == nil || task.CurrentBlocker.Status != types.TaskBlockerStatusOpen {
 		return nil
 	}
-	return groups[latestGroupID]
+	status := types.TaskBlockerStatusResolved
+	if task.CurrentBlocker.Kind == types.TaskBlockerKindApproval && action == nil && kind == types.InputKindFreeText {
+		status = types.TaskBlockerStatusSuperseded
+	}
+	payload := map[string]any{
+		"kind":    string(kind),
+		"message": strings.TrimSpace(message),
+	}
+	if action != nil {
+		payload["action"] = string(*action)
+	}
+	if len(items) > 0 {
+		payload["items"] = items
+	}
+	return &types.TaskBlockerResolution{
+		Status:         status,
+		ResolutionJSON: payload,
+	}
 }
 
-func metadataString(values map[string]any, key string) string {
-	if len(values) == 0 {
-		return ""
+func (s *AgentService) supersedePendingApprovalOutputs(ctx context.Context, workspaceID uint, task *types.AgentTask) error {
+	if task == nil {
+		return nil
 	}
-	switch typed := values[key].(type) {
-	case string:
-		return strings.TrimSpace(typed)
-	case fmt.Stringer:
-		return strings.TrimSpace(typed.String())
-	default:
-		if typed == nil {
-			return ""
-		}
-		return strings.TrimSpace(fmt.Sprintf("%v", typed))
+	outputs, err := s.backend.ListTaskOutputs(ctx, workspaceID, task.ID)
+	if err != nil {
+		return fmt.Errorf("list task outputs for %s: %w", task.ID, err)
 	}
-}
-
-type itemDecisionUpdate struct {
-	item           types.ItemDecision
-	output         *types.TaskOutput
-	originalStatus string
-	targetStatus   string
+	selected := pendingOutputsForCurrentBlocker(task, outputs)
+	if len(selected) == 0 {
+		return nil
+	}
+	updates := make([]taskOutputStatusUpdate, 0, len(selected))
+	for _, output := range selected {
+		updates = append(updates, taskOutputStatusUpdate{
+			output:         output,
+			originalStatus: output.Status,
+			targetStatus:   types.TaskOutputStatusCancelled,
+		})
+	}
+	if err := applyOutputStatusUpdates(ctx, workspaceID, s.backend, updates); err != nil {
+		return err
+	}
+	return nil
 }
 
 // processItemDecisions updates output statuses and builds a composite message
@@ -622,27 +713,23 @@ func (s *AgentService) processItemDecisions(ctx context.Context, workspaceID uin
 		}
 
 		updates = append(updates, itemDecisionUpdate{
-			item:           item,
-			output:         output,
-			originalStatus: output.Status,
-			targetStatus:   targetStatus,
+			item: item,
+			taskOutputStatusUpdate: taskOutputStatusUpdate{
+				output:         output,
+				originalStatus: output.Status,
+				targetStatus:   targetStatus,
+			},
 		})
 	}
-
-	applied := make([]itemDecisionUpdate, 0, len(updates))
+	statusUpdates := make([]taskOutputStatusUpdate, 0, len(updates))
 	for _, update := range updates {
-		if err := s.backend.UpdateTaskOutputStatus(ctx, workspaceID, update.output.ID, update.targetStatus); err != nil {
-			for i := len(applied) - 1; i >= 0; i-- {
-				previous := applied[i]
-				if rollbackErr := s.backend.UpdateTaskOutputStatus(ctx, workspaceID, previous.output.ID, previous.originalStatus); rollbackErr != nil {
-					log.Error().Err(rollbackErr).Str("output_id", previous.output.ID).Msg("failed to roll back item decision status")
-				}
-			}
-			return "", fmt.Errorf("update output status %s: %w", update.output.ID, err)
-		}
-		update.output.Status = update.targetStatus
-		applied = append(applied, update)
+		statusUpdates = append(statusUpdates, update.taskOutputStatusUpdate)
+	}
+	if err := applyOutputStatusUpdates(ctx, workspaceID, s.backend, statusUpdates); err != nil {
+		return "", err
+	}
 
+	for _, update := range updates {
 		label := update.output.Title
 		if update.item.Action == types.TaskInputActionReject && update.item.Reason != "" {
 			label += " — " + update.item.Reason
@@ -721,6 +808,19 @@ func (s *AgentService) deliverTaskInput(ctx context.Context, task *types.AgentTa
 		// and the wake publish. If so, the wake went to a dead worker.
 		if freshRun, err := s.backend.GetAgentRun(ctx, task.WorkspaceID, *task.TargetRunID); err == nil && freshRun.Status.IsTerminal() {
 			return s.requeueTaskForResume(ctx, task, freshRun)
+		}
+		if updated, err := s.backend.UpdateTaskStateIfCurrentRun(ctx, types.CurrentRunTaskStateUpdate{
+			TaskID:        task.ID,
+			ExpectedRunID: *task.TargetRunID,
+			State:         types.AgentTaskStateRunning,
+		}); err != nil {
+			return err
+		} else if updated {
+			task.State = types.AgentTaskStateRunning
+			task.InputKind = ""
+			task.WaitingSummary = nil
+			task.CurrentBlocker = nil
+			task.CurrentBlockerID = nil
 		}
 		s.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
 		return nil
@@ -1393,7 +1493,11 @@ func (s *AgentService) handleInterruptTask(ctx context.Context, task *types.Agen
 	_ = s.publishRunEvent(ctx, run.ID, types.AgentRunEventInterrupted, map[string]any{
 		types.AgentRunEventPayloadKeyTaskID: task.ID,
 	})
-	if err := s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDone, nil, task.TargetRunID); err != nil {
+	if err := s.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
+		TaskID:      task.ID,
+		State:       types.AgentTaskStateDone,
+		TargetRunID: task.TargetRunID,
+	}); err != nil {
 		return err
 	}
 	s.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
@@ -1601,7 +1705,11 @@ func (s *AgentService) scheduleDispatchRetry(
 		return nil
 	}
 
-	if err := s.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateQueued, nil, task.TargetRunID); err != nil {
+	if err := s.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
+		TaskID:      task.ID,
+		State:       types.AgentTaskStateQueued,
+		TargetRunID: task.TargetRunID,
+	}); err != nil {
 		return err
 	}
 	s.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)

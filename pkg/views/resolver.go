@@ -294,10 +294,10 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 		},
 	}
 
-	boundDetailTaskByOutput, boundOutputsByTask := r.fetchBoundTaskContext(ctx, workspaceID, resolvedRows)
+	boundContext := r.fetchBoundTaskContext(ctx, workspaceID, resolvedRows)
 
 	if len(uncachedIDs) == 0 {
-		enrichRowsWithOutputState(resolvedRows, allOutputs, boundDetailTaskByOutput, boundOutputsByTask)
+		enrichRowsWithOutputState(resolvedRows, allOutputs, boundContext, taskMeta)
 		sortResolvedRows(resolvedRows, taskMeta)
 		return &viewMappingResult{Rows: resolvedRows, TaskMeta: taskMeta, Diagnostics: diagnostics}, nil
 	}
@@ -391,8 +391,8 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 		}
 	}
 
-	boundDetailTaskByOutput, boundOutputsByTask = r.fetchBoundTaskContext(ctx, workspaceID, resolvedRows)
-	enrichRowsWithOutputState(resolvedRows, allOutputs, boundDetailTaskByOutput, boundOutputsByTask)
+	boundContext = r.fetchBoundTaskContext(ctx, workspaceID, resolvedRows)
+	enrichRowsWithOutputState(resolvedRows, allOutputs, boundContext, taskMeta)
 	sortResolvedRows(resolvedRows, taskMeta)
 	return &viewMappingResult{Rows: resolvedRows, TaskMeta: taskMeta, Diagnostics: diagnostics}, nil
 }
@@ -985,9 +985,9 @@ func dedupeOutputs(all []*types.TaskOutput) []*types.TaskOutput {
 	return deduped
 }
 
-func (r *DataResolver) fetchBoundTaskContext(ctx context.Context, workspaceID uint, rows []resolvedSheetRow) (map[string]string, map[string][]*types.TaskOutput) {
+func (r *DataResolver) fetchBoundTaskContext(ctx context.Context, workspaceID uint, rows []resolvedSheetRow) boundDetailContext {
 	if r == nil || r.backend == nil || len(rows) == 0 {
-		return nil, nil
+		return boundDetailContext{}
 	}
 	sourceOutputIDs := make([]string, 0, len(rows))
 	for _, row := range rows {
@@ -995,46 +995,13 @@ func (r *DataResolver) fetchBoundTaskContext(ctx context.Context, workspaceID ui
 	}
 	sourceOutputIDs = uniqueTrimmedStrings(sourceOutputIDs)
 	if len(sourceOutputIDs) == 0 {
-		return nil, nil
+		return boundDetailContext{}
 	}
-	bindings, err := r.backend.ListSpawnBindingsForOutputs(ctx, sourceOutputIDs)
-	if err != nil || len(bindings) == 0 {
-		return nil, nil
+	bound, err := fetchBoundDetailContext(ctx, r.backend, workspaceID, sourceOutputIDs)
+	if err != nil {
+		return boundDetailContext{}
 	}
-
-	detailTaskByOutput := make(map[string]string, len(bindings))
-	latestBindingByOutput := make(map[string]repository.SpawnBinding, len(bindings))
-	taskIDs := make([]string, 0, len(bindings))
-	seenTasks := make(map[string]struct{}, len(bindings))
-	for _, binding := range bindings {
-		sourceOutputID := strings.TrimSpace(binding.SourceOutputID)
-		taskID := strings.TrimSpace(binding.TaskID)
-		if sourceOutputID == "" || taskID == "" {
-			continue
-		}
-		if existing, ok := latestBindingByOutput[sourceOutputID]; !ok || binding.CreatedAt.After(existing.CreatedAt) {
-			latestBindingByOutput[sourceOutputID] = binding
-			detailTaskByOutput[sourceOutputID] = taskID
-		}
-		if _, ok := seenTasks[taskID]; ok {
-			continue
-		}
-		seenTasks[taskID] = struct{}{}
-		taskIDs = append(taskIDs, taskID)
-	}
-	if len(taskIDs) == 0 {
-		return detailTaskByOutput, nil
-	}
-	sort.Strings(taskIDs)
-	outputsByTask := make(map[string][]*types.TaskOutput, len(taskIDs))
-	for _, taskID := range taskIDs {
-		outputs, err := r.backend.ListTaskOutputs(ctx, workspaceID, taskID)
-		if err != nil || len(outputs) == 0 {
-			continue
-		}
-		outputsByTask[taskID] = dedupeOutputs(outputs)
-	}
-	return detailTaskByOutput, outputsByTask
+	return bound
 }
 
 func resolvedRowsFromStored(rows []ViewRow, applyManual bool) []resolvedSheetRow {
@@ -1174,148 +1141,64 @@ func copyStringMap(values map[string]string) map[string]string {
 	return cloned
 }
 
-type rowBlockerSummary struct {
-	OutputID        string
-	Status          string
-	OutputIDs       []string
-	Kind            string
-	InputKind       string
-	WaitGroupID     string
-	ApprovalSurface bool
-	LatestCreatedAt time.Time
-}
-
 func enrichRowsWithOutputState(
 	rows []resolvedSheetRow,
 	outputs []*types.TaskOutput,
-	detailTaskBySourceOutput map[string]string,
-	boundOutputsByTask map[string][]*types.TaskOutput,
+	boundContext boundDetailContext,
+	taskMeta map[string]*types.AgentTask,
 ) {
-	outputByID := make(map[string]*types.TaskOutput, len(outputs))
-	for _, output := range outputs {
-		if output != nil {
-			outputByID[output.ID] = output
-		}
-	}
+	outputsByTask := groupOutputsByTask(outputs)
 	for i := range rows {
 		sourceOutputIDs := uniqueTrimmedStrings(strings.Split(rows[i].SourceOutputIDs, ","))
-		if rows[i].DetailTaskID == "" {
+		context := buildRowDetailContext(rowDetailContextInput{
+			ParentTaskID:    rows[i].TaskID,
+			ParentTask:      taskMeta[rows[i].TaskID],
+			ParentOutputs:   outputsByTask[rows[i].TaskID],
+			SourceOutputIDs: sourceOutputIDs,
+			Bound:           boundContext,
+		})
+		if context.DetailTaskID != "" {
+			rows[i].DetailTaskID = context.DetailTaskID
+		} else if rows[i].DetailTaskID == "" {
 			rows[i].DetailTaskID = rows[i].TaskID
 		}
-		combined := make([]*types.TaskOutput, 0, len(sourceOutputIDs))
-		for _, outputID := range sourceOutputIDs {
-			if output := outputByID[outputID]; output != nil {
-				combined = append(combined, output)
-			}
-			if detailTaskID := strings.TrimSpace(detailTaskBySourceOutput[outputID]); detailTaskID != "" {
-				rows[i].DetailTaskID = detailTaskID
-				combined = append(combined, boundOutputsByTask[detailTaskID]...)
-				break
-			}
+		task := context.Task
+		if task != nil && strings.TrimSpace(task.ID) != "" {
+			taskMeta[task.ID] = task
 		}
-		blocker := selectRowBlocker(combined)
-		if blocker.OutputID != "" {
+		if task == nil {
+			task = taskMeta[rows[i].DetailTaskID]
+		}
+		if task == nil {
+			task = taskMeta[rows[i].TaskID]
+		}
+		blocker := ProjectBlocker(task, context.Outputs)
+		if blocker != nil && blocker.OutputID != "" {
 			rows[i].OutputID = blocker.OutputID
-			rows[i].OutputStatus = blocker.Status
+			rows[i].OutputStatus = blocker.OutputStatus
+		} else {
+			rows[i].OutputID = ""
+			rows[i].OutputStatus = ""
 		}
-		if len(blocker.OutputIDs) > 0 {
+		if blocker != nil && len(blocker.OutputIDs) > 0 {
 			rows[i].BlockerOutputIDs = strings.Join(blocker.OutputIDs, ",")
 		} else {
 			rows[i].BlockerOutputIDs = ""
 		}
-		rows[i].BlockerKind = blocker.Kind
-		rows[i].BlockerInputKind = blocker.InputKind
-		rows[i].BlockerWaitGroupID = blocker.WaitGroupID
-		if blocker.ApprovalSurface {
+		if blocker != nil {
+			rows[i].BlockerKind = blocker.Kind
+			rows[i].BlockerInputKind = blocker.InputKind
+			rows[i].BlockerWaitGroupID = blocker.WaitGroupID
+		} else {
+			rows[i].BlockerKind = ""
+			rows[i].BlockerInputKind = ""
+			rows[i].BlockerWaitGroupID = ""
+		}
+		if blocker != nil && blocker.ApprovalSurface {
 			rows[i].ApprovalSurface = "true"
 		} else {
 			rows[i].ApprovalSurface = ""
 		}
-	}
-}
-
-func selectRowBlocker(outputs []*types.TaskOutput) rowBlockerSummary {
-	var fallback *types.TaskOutput
-	groups := make(map[string]*rowBlockerSummary)
-	latestGroupID := ""
-	latestCreatedAt := time.Time{}
-	for _, output := range dedupeOutputs(outputs) {
-		if output == nil {
-			continue
-		}
-		if fallback == nil {
-			fallback = output
-		}
-		if output.Status != types.TaskOutputStatusPending {
-			continue
-		}
-		signal := classifyPendingOutputSignal(output)
-		if !signal.IsBlocker {
-			continue
-		}
-		groupID := signal.WaitGroupID
-		if groupID == "" {
-			groupID = output.ID
-		}
-		group := groups[groupID]
-		if group == nil {
-			group = &rowBlockerSummary{
-				OutputID:        output.ID,
-				Status:          output.Status,
-				Kind:            signal.Kind,
-				InputKind:       signal.InputKind,
-				WaitGroupID:     groupID,
-				ApprovalSurface: signal.ApprovalSurface,
-				LatestCreatedAt: output.CreatedAt,
-			}
-			groups[groupID] = group
-		}
-		group.OutputIDs = append(group.OutputIDs, output.ID)
-		if output.CreatedAt.After(group.LatestCreatedAt) {
-			group.LatestCreatedAt = output.CreatedAt
-			group.OutputID = output.ID
-			if signal.Kind != "" {
-				group.Kind = signal.Kind
-			}
-			if signal.InputKind != "" {
-				group.InputKind = signal.InputKind
-			}
-			group.ApprovalSurface = signal.ApprovalSurface
-		}
-		if output.CreatedAt.After(latestCreatedAt) || (output.CreatedAt.Equal(latestCreatedAt) && groupID > latestGroupID) {
-			latestCreatedAt = output.CreatedAt
-			latestGroupID = groupID
-		}
-	}
-	if latestGroupID != "" && groups[latestGroupID] != nil {
-		selected := *groups[latestGroupID]
-		sort.Strings(selected.OutputIDs)
-		return selected
-	}
-	if fallback == nil {
-		return rowBlockerSummary{}
-	}
-	return rowBlockerSummary{
-		OutputID: fallback.ID,
-		Status:   fallback.Status,
-	}
-}
-
-func metadataStringValue(values map[string]any, key string) string {
-	if len(values) == 0 {
-		return ""
-	}
-	raw, ok := values[key]
-	if !ok || raw == nil {
-		return ""
-	}
-	switch typed := raw.(type) {
-	case string:
-		return strings.TrimSpace(typed)
-	case fmt.Stringer:
-		return strings.TrimSpace(typed.String())
-	default:
-		return strings.TrimSpace(fmt.Sprintf("%v", typed))
 	}
 }
 

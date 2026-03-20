@@ -117,9 +117,12 @@ func (lc *TaskLifecycle) Settle(ctx context.Context, runID string, opts *SettleO
 		return nil
 	}
 
-	updated, err := lc.backend.UpdateTaskStateIfCurrentRun(
-		ctx, run.OriginTaskID, run.ID, nextState, nil, &targetRunID, "", nil,
-	)
+	updated, err := lc.backend.UpdateTaskStateIfCurrentRun(ctx, types.CurrentRunTaskStateUpdate{
+		TaskID:        run.OriginTaskID,
+		ExpectedRunID: run.ID,
+		State:         nextState,
+		TargetRunID:   &targetRunID,
+	})
 	if err != nil {
 		return err
 	}
@@ -138,7 +141,11 @@ func (lc *TaskLifecycle) Settle(ctx context.Context, runID string, opts *SettleO
 		if !isValidTransition(fresh.State, nextState) {
 			return nil
 		}
-		if err := lc.backend.UpdateTaskState(ctx, fresh.ID, nextState, nil, &targetRunID); err != nil {
+		if err := lc.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
+			TaskID:      fresh.ID,
+			State:       nextState,
+			TargetRunID: &targetRunID,
+		}); err != nil {
 			return err
 		}
 		task = fresh
@@ -155,22 +162,37 @@ func (lc *TaskLifecycle) Settle(ctx context.Context, runID string, opts *SettleO
 
 // TransitionLive applies a non-terminal state change during execution
 // (running <-> waiting). Only the active worker should call this.
-func (lc *TaskLifecycle) TransitionLive(
-	ctx context.Context,
-	taskID, runID string,
-	state types.AgentTaskState,
-	inputKind types.InputKind,
-	waitingSummary *string,
-) (bool, error) {
+func (lc *TaskLifecycle) TransitionLive(ctx context.Context, update types.TaskLiveUpdate) (bool, error) {
 	if lc == nil || lc.backend == nil {
 		return false, nil
 	}
-	if state != types.AgentTaskStateWaiting && state != types.AgentTaskStateRunning {
-		return false, fmt.Errorf("task lifecycle: TransitionLive only supports waiting/running, got %s", state)
+	if update.State != types.AgentTaskStateWaiting && update.State != types.AgentTaskStateRunning {
+		return false, fmt.Errorf("task lifecycle: TransitionLive only supports waiting/running, got %s", update.State)
 	}
-	return lc.backend.UpdateTaskStateIfCurrentRun(
-		ctx, taskID, runID, state, nil, nil, inputKind, waitingSummary,
-	)
+	if update.State == types.AgentTaskStateWaiting {
+		if update.Blocker == nil {
+			return false, fmt.Errorf("task lifecycle: waiting update requires blocker")
+		}
+		run, err := lc.backend.GetAgentRunByID(ctx, update.RunID)
+		if err != nil {
+			return false, err
+		}
+		if run == nil {
+			return false, nil
+		}
+		updated, _, err := lc.backend.OpenTaskBlockerIfCurrentRun(ctx, types.TaskBlockerOpenRequest{
+			WorkspaceID:   run.WorkspaceID,
+			TaskID:        update.TaskID,
+			ExpectedRunID: update.RunID,
+			Blocker:       update.Blocker,
+		})
+		return updated, err
+	}
+	return lc.backend.UpdateTaskStateIfCurrentRun(ctx, types.CurrentRunTaskStateUpdate{
+		TaskID:        update.TaskID,
+		ExpectedRunID: update.RunID,
+		State:         update.State,
+	})
 }
 
 // Cancel transitions a task to cancelled. Allowed from any non-terminal state.
@@ -178,7 +200,10 @@ func (lc *TaskLifecycle) Cancel(ctx context.Context, taskID string) error {
 	if lc == nil || lc.backend == nil {
 		return nil
 	}
-	return lc.backend.UpdateTaskState(ctx, taskID, types.AgentTaskStateCancelled, nil, nil)
+	return lc.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
+		TaskID: taskID,
+		State:  types.AgentTaskStateCancelled,
+	})
 }
 
 // Dispatch transitions queued -> running when a run is materialized.
@@ -186,7 +211,11 @@ func (lc *TaskLifecycle) Dispatch(ctx context.Context, taskID, runID string) err
 	if lc == nil || lc.backend == nil {
 		return nil
 	}
-	return lc.backend.UpdateTaskState(ctx, taskID, types.AgentTaskStateRunning, nil, &runID)
+	return lc.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
+		TaskID:      taskID,
+		State:       types.AgentTaskStateRunning,
+		TargetRunID: &runID,
+	})
 }
 
 // Drop transitions a task to dropped with a reason.
@@ -194,7 +223,11 @@ func (lc *TaskLifecycle) Drop(ctx context.Context, taskID string, reason string)
 	if lc == nil || lc.backend == nil {
 		return nil
 	}
-	return lc.backend.UpdateTaskState(ctx, taskID, types.AgentTaskStateDropped, &reason, nil)
+	return lc.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
+		TaskID:        taskID,
+		State:         types.AgentTaskStateDropped,
+		DroppedReason: &reason,
+	})
 }
 
 func (lc *TaskLifecycle) sleepWithWake(ctx context.Context, task *types.AgentTask, run *types.AgentRun, ws *types.RunExecutionWakeSignal) error {
@@ -263,7 +296,12 @@ func (lc *TaskLifecycle) scheduleRetry(ctx context.Context, task *types.AgentTas
 	nextAttempt := retryAttempt + 1
 	if nextAttempt > dispatchRetryMaxAttempts {
 		dropReason := types.AgentTaskDropReasonDispatchRetryExhausted
-		if err := lc.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDropped, &dropReason, task.TargetRunID); err != nil {
+		if err := lc.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
+			TaskID:        task.ID,
+			State:         types.AgentTaskStateDropped,
+			DroppedReason: &dropReason,
+			TargetRunID:   task.TargetRunID,
+		}); err != nil {
 			return true, err
 		}
 		lc.publishUpdate(ctx, task.WorkspaceID, task.ID)
@@ -279,7 +317,11 @@ func (lc *TaskLifecycle) scheduleRetry(ctx context.Context, task *types.AgentTas
 		return true, nil
 	}
 
-	if err := lc.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateQueued, nil, task.TargetRunID); err != nil {
+	if err := lc.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
+		TaskID:      task.ID,
+		State:       types.AgentTaskStateQueued,
+		TargetRunID: task.TargetRunID,
+	}); err != nil {
 		return true, err
 	}
 	lc.publishUpdate(ctx, task.WorkspaceID, task.ID)

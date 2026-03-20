@@ -430,7 +430,7 @@ const (
 	OrchestrationOutboxPayloadWakeReason            = "wake_reason"
 	OrchestrationOutboxPayloadWakeFollowUpPrompt    = "wake_follow_up_prompt"
 	OrchestrationOutboxPayloadWakeAgenda            = "wake_agenda"
-	OrchestrationOutboxPayloadSubtaskRequests        = "subtask_requests"
+	OrchestrationOutboxPayloadSubtaskRequests       = "subtask_requests"
 )
 
 type OrchestrationOutboxEvent struct {
@@ -490,34 +490,36 @@ type TaskWakeAgendaItem struct {
 
 // AgentTask is the high-level orchestration task (agent -> task -> run).
 type AgentTask struct {
-	ID             string                `json:"id" db:"id"`
-	WorkspaceID    uint                  `json:"workspace_id" db:"workspace_id"`
-	AgentID        *string               `json:"agent_id,omitempty" db:"agent_id"`
-	AgentName      string                `json:"agent_name,omitempty" db:"-"`
-	QueueMode      AgentQueueMode        `json:"queue_mode" db:"queue_mode"`
-	State          AgentTaskState        `json:"state" db:"state"`
-	InputKind      InputKind             `json:"input_kind,omitempty" db:"input_kind"`
-	WaitingSummary *string               `json:"waiting_summary,omitempty" db:"waiting_summary"`
-	IdempotencyKey string                `json:"idempotency_key" db:"idempotency_key"`
-	PayloadJSON    map[string]any        `json:"payload_json" db:"-"`
-	RoutingJSON    map[string]any        `json:"routing_json" db:"-"`
-	ParentTaskID   *string               `json:"parent_task_id,omitempty" db:"parent_envelope_id"`
-	TargetRunID    *string               `json:"target_run_id,omitempty" db:"target_run_id"`
-	AcceptedAt     time.Time             `json:"accepted_at" db:"accepted_at"`
-	QueuedAt       *time.Time            `json:"queued_at,omitempty" db:"queued_at"`
-	DispatchedAt   *time.Time            `json:"dispatched_at,omitempty" db:"dispatched_at"`
-	Deadline       *time.Time            `json:"deadline,omitempty" db:"deadline"`
-	DroppedReason  *string               `json:"dropped_reason,omitempty" db:"dropped_reason"`
-	Priority       string                `json:"priority" db:"priority"`
-	BudgetUSD      *float64              `json:"budget_usd,omitempty" db:"budget_usd"`
-	CostUSD        float64               `json:"cost_usd" db:"cost_usd"`
-	ArchivedAt     *time.Time            `json:"archived_at,omitempty" db:"archived_at"`
-	WakeAt         *time.Time            `json:"wake_at,omitempty" db:"wake_at"`
-	WakeReason     *string               `json:"wake_reason,omitempty" db:"wake_reason"`
-	WakeAgenda     []*TaskWakeAgendaItem `json:"wake_agenda,omitempty" db:"-"`
-	WakeCount      int                   `json:"wake_count,omitempty" db:"wake_count"`
-	CreatedAt      time.Time             `json:"created_at" db:"created_at"`
-	UpdatedAt      time.Time             `json:"updated_at" db:"updated_at"`
+	ID               string                `json:"id" db:"id"`
+	WorkspaceID      uint                  `json:"workspace_id" db:"workspace_id"`
+	AgentID          *string               `json:"agent_id,omitempty" db:"agent_id"`
+	AgentName        string                `json:"agent_name,omitempty" db:"-"`
+	QueueMode        AgentQueueMode        `json:"queue_mode" db:"queue_mode"`
+	State            AgentTaskState        `json:"state" db:"state"`
+	InputKind        InputKind             `json:"input_kind,omitempty" db:"input_kind"`
+	WaitingSummary   *string               `json:"waiting_summary,omitempty" db:"waiting_summary"`
+	IdempotencyKey   string                `json:"idempotency_key" db:"idempotency_key"`
+	PayloadJSON      map[string]any        `json:"payload_json" db:"-"`
+	RoutingJSON      map[string]any        `json:"routing_json" db:"-"`
+	ParentTaskID     *string               `json:"parent_task_id,omitempty" db:"parent_envelope_id"`
+	TargetRunID      *string               `json:"target_run_id,omitempty" db:"target_run_id"`
+	CurrentBlockerID *string               `json:"current_blocker_id,omitempty" db:"current_blocker_id"`
+	CurrentBlocker   *TaskBlocker          `json:"current_blocker,omitempty" db:"-"`
+	AcceptedAt       time.Time             `json:"accepted_at" db:"accepted_at"`
+	QueuedAt         *time.Time            `json:"queued_at,omitempty" db:"queued_at"`
+	DispatchedAt     *time.Time            `json:"dispatched_at,omitempty" db:"dispatched_at"`
+	Deadline         *time.Time            `json:"deadline,omitempty" db:"deadline"`
+	DroppedReason    *string               `json:"dropped_reason,omitempty" db:"dropped_reason"`
+	Priority         string                `json:"priority" db:"priority"`
+	BudgetUSD        *float64              `json:"budget_usd,omitempty" db:"budget_usd"`
+	CostUSD          float64               `json:"cost_usd" db:"cost_usd"`
+	ArchivedAt       *time.Time            `json:"archived_at,omitempty" db:"archived_at"`
+	WakeAt           *time.Time            `json:"wake_at,omitempty" db:"wake_at"`
+	WakeReason       *string               `json:"wake_reason,omitempty" db:"wake_reason"`
+	WakeAgenda       []*TaskWakeAgendaItem `json:"wake_agenda,omitempty" db:"-"`
+	WakeCount        int                   `json:"wake_count,omitempty" db:"wake_count"`
+	CreatedAt        time.Time             `json:"created_at" db:"created_at"`
+	UpdatedAt        time.Time             `json:"updated_at" db:"updated_at"`
 }
 
 type AgentRun struct {
@@ -864,14 +866,14 @@ type SubtaskRequest struct {
 }
 
 type RunExecutionResult struct {
-	ID               string                  `json:"id"`
-	ExitCode         int                     `json:"exit_code"`
-	Output           []byte                  `json:"output,omitempty"`
-	Error            string                  `json:"error,omitempty"`
-	Duration         time.Duration           `json:"duration"`
-	WaitingForInput  bool                    `json:"waiting_for_input,omitempty"`
-	WakeSignal       *RunExecutionWakeSignal `json:"wake_signal,omitempty"`
-	SubtaskRequests  []*SubtaskRequest       `json:"subtask_requests,omitempty"`
+	ID              string                  `json:"id"`
+	ExitCode        int                     `json:"exit_code"`
+	Output          []byte                  `json:"output,omitempty"`
+	Error           string                  `json:"error,omitempty"`
+	Duration        time.Duration           `json:"duration"`
+	WaitingForInput bool                    `json:"waiting_for_input,omitempty"`
+	WakeSignal      *RunExecutionWakeSignal `json:"wake_signal,omitempty"`
+	SubtaskRequests []*SubtaskRequest       `json:"subtask_requests,omitempty"`
 }
 
 type ErrTaskNotCancellable struct {
@@ -944,10 +946,11 @@ type TaskOutput struct {
 }
 
 const (
-	TaskOutputStatusActive     = "active"
-	TaskOutputStatusPending    = "pending"
-	TaskOutputStatusApproved   = "approved"
-	TaskOutputStatusRejected   = "rejected"
+	TaskOutputTypeEmail     = "email"
+	TaskOutputStatusActive    = "active"
+	TaskOutputStatusPending   = "pending"
+	TaskOutputStatusApproved  = "approved"
+	TaskOutputStatusRejected  = "rejected"
 	TaskOutputStatusCancelled = "cancelled"
 )
 

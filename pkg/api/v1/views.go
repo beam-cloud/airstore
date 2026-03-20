@@ -771,36 +771,29 @@ func (vg *ViewsGroup) RowDetail(c echo.Context) error {
 	// Resolve the schema-level layout template from the component config.
 	template := vg.detailTemplateForRow(ctx, workspaceID, viewID, row)
 
-	// Resolve bound subtask: row.SourceOutputIDs → task_spawn_binding → subtask.
-	primaryTaskID := parentTaskID
-	var boundSubtasks []*types.AgentTask
-	if row != nil && len(row.SourceOutputIDs) > 0 {
-		if bound, _ := vg.backend.ListSubtasksByOutputIDs(ctx, row.SourceOutputIDs); len(bound) > 0 {
-			boundSubtasks = bound
-			primaryTaskID = bound[0].ID
-		}
-	}
-
-	task, err := vg.backend.GetTask(ctx, workspaceID, primaryTaskID)
+	parentTask, err := vg.backend.GetTask(ctx, workspaceID, parentTaskID)
 	if err != nil {
 		return ErrorResponse(c, http.StatusNotFound, "task not found")
 	}
 
-	outputs, _ := vg.backend.ListTaskOutputs(ctx, workspaceID, primaryTaskID)
-
-	var subtasks []*types.AgentTask
-	if len(boundSubtasks) > 0 {
-		subtasks = boundSubtasks
-	} else {
-		subtasks, _ = vg.backend.ListSubtasks(ctx, parentTaskID)
+	parentOutputs, err := vg.backend.ListTaskOutputs(ctx, workspaceID, parentTaskID)
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to load task outputs")
 	}
 
+	detailContext, err := views.ResolveRowDetailContext(ctx, vg.backend, workspaceID, parentTask, parentOutputs, row)
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to resolve row detail")
+	}
+
+	projection := views.ProjectDetail(detailContext.Task, detailContext.Outputs, detailContext.Subtasks)
+
 	var emailThreads map[string][]views.ThreadMessage
-	if threadIDs := extractThreadIDs(outputs); len(threadIDs) > 0 {
+	if threadIDs := extractThreadIDs(projection.ThreadOutputs); len(threadIDs) > 0 {
 		fetcher := views.NewEmailThreadFetcher(vg.backend)
 		emailThreads = fetcher.FetchThreads(ctx, workspaceID, threadIDs)
 	}
-	if synth := syntheticEmailThreads(outputs, emailThreads); len(synth) > 0 {
+	if synth := syntheticEmailThreads(projection.ThreadOutputs, emailThreads); len(synth) > 0 {
 		if emailThreads == nil {
 			emailThreads = synth
 		} else {
@@ -810,7 +803,8 @@ func (vg *ViewsGroup) RowDetail(c echo.Context) error {
 		}
 	}
 
-	layout := views.ResolveLayout(template, task, outputs, subtasks)
+	layout := views.ResolveProjectedLayout(template, projection)
+	blocker := projection.Blocker
 
 	type subtaskSummary struct {
 		ID     string               `json:"id"`
@@ -818,8 +812,8 @@ func (vg *ViewsGroup) RowDetail(c echo.Context) error {
 		Label  string               `json:"label,omitempty"`
 		WakeAt *time.Time           `json:"wake_at,omitempty"`
 	}
-	subtaskList := make([]subtaskSummary, 0, len(subtasks))
-	for _, st := range subtasks {
+	subtaskList := make([]subtaskSummary, 0, len(detailContext.Subtasks))
+	for _, st := range detailContext.Subtasks {
 		label := ""
 		if st.PayloadJSON != nil {
 			if l, ok := st.PayloadJSON["label"].(string); ok {
@@ -835,13 +829,15 @@ func (vg *ViewsGroup) RowDetail(c echo.Context) error {
 	}
 
 	return SuccessResponse(c, map[string]any{
-		"layout":         layout,
-		"task":           task,
-		"outputs":        outputs,
-		"email_threads":  emailThreads,
-		"subtasks":       subtaskList,
-		"row_id":         rowID,
-		"parent_task_id": parentTaskID,
+		"layout":          layout,
+		"blocker":         blocker,
+		"task":            detailContext.Task,
+		"outputs":         projection.Outputs,
+		"gallery_outputs": projection.GalleryOutputs,
+		"email_threads":   emailThreads,
+		"subtasks":        subtaskList,
+		"row_id":          rowID,
+		"parent_task_id":  parentTaskID,
 	})
 }
 
@@ -877,16 +873,7 @@ func extractThreadIDs(outputs []*types.TaskOutput) []string {
 	seen := make(map[string]bool)
 	var ids []string
 	for _, o := range outputs {
-		if o == nil || o.OutputType != "email" {
-			continue
-		}
-		tid, _ := o.Data["thread_id"].(string)
-		if tid == "" {
-			tid = gmailThreadIDFromURL(dataString(o.Data, "email_link", "uri"))
-		}
-		if tid == "" {
-			tid = gmailThreadIDFromURL(metadataString(o.Metadata, "deeplink"))
-		}
+		tid := emailOutputThreadID(o)
 		if tid == "" || seen[tid] {
 			continue
 		}
@@ -894,6 +881,20 @@ func extractThreadIDs(outputs []*types.TaskOutput) []string {
 		ids = append(ids, tid)
 	}
 	return ids
+}
+
+func emailOutputThreadID(o *types.TaskOutput) string {
+	if o == nil || o.OutputType != types.TaskOutputTypeEmail {
+		return ""
+	}
+	tid := strings.TrimSpace(dataString(o.Data, "thread_id"))
+	if tid == "" {
+		tid = gmailThreadIDFromURL(dataString(o.Data, "email_link", "uri"))
+	}
+	if tid == "" {
+		tid = gmailThreadIDFromURL(metadataString(o.Metadata, "deeplink"))
+	}
+	return strings.TrimSpace(tid)
 }
 
 func gmailThreadIDFromURL(u string) string {
@@ -928,22 +929,15 @@ func metadataString(m map[string]any, key string) string {
 // outputs that don't have a real Gmail thread. This ensures the email thread
 // section always shows sent email content.
 func syntheticEmailThreads(outputs []*types.TaskOutput, existing map[string][]views.ThreadMessage) map[string][]views.ThreadMessage {
-	coveredOutputs := make(map[string]bool)
-	for _, msgs := range existing {
-		for _, m := range msgs {
-			coveredOutputs[m.ID] = true
-		}
-	}
-
 	synth := make(map[string][]views.ThreadMessage)
 	for _, o := range outputs {
-		if o == nil || o.OutputType != "email" {
+		if o == nil || o.OutputType != types.TaskOutputTypeEmail {
 			continue
 		}
 		if o.Status == types.TaskOutputStatusPending || o.Status == types.TaskOutputStatusApproved {
 			continue
 		}
-		if coveredOutputs[o.ID] {
+		if threadID := emailOutputThreadID(o); threadID != "" && len(existing[threadID]) > 0 {
 			continue
 		}
 

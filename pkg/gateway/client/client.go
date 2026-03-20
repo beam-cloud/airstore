@@ -2,6 +2,7 @@ package gatewayclient
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"time"
@@ -279,17 +280,38 @@ func (c *GatewayClient) SetTaskResult(ctx context.Context, taskID string, exitCo
 	return nil
 }
 
-func (c *GatewayClient) UpdateTaskState(ctx context.Context, taskID string, state string, runID string, inputKind string, waitingSummary string) error {
+func (c *GatewayClient) UpdateTaskState(ctx context.Context, update types.TaskLiveUpdate) error {
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
 
-	_, err := c.client.UpdateTaskState(ctx, &pb.UpdateTaskStateRequest{
-		TaskId:         taskID,
-		State:          state,
-		RunId:          runID,
-		InputKind:      inputKind,
-		WaitingSummary: waitingSummary,
-	})
+	req := &pb.UpdateTaskStateRequest{
+		TaskId: update.TaskID,
+		State:  string(update.State),
+		RunId:  update.RunID,
+	}
+	if update.State == types.AgentTaskStateWaiting {
+		if update.Blocker == nil {
+			return fmt.Errorf("update task state: waiting update requires blocker")
+		}
+	}
+	if blocker := update.Blocker; blocker != nil {
+		req.InputKind = string(blocker.InputKind)
+		req.BlockerKind = string(blocker.Kind)
+		if blocker.WaitGroupID != nil {
+			req.BlockerWaitGroupId = *blocker.WaitGroupID
+		}
+		req.BlockerOutputIds = append(req.BlockerOutputIds, blocker.OutputIDs...)
+		payload := blocker.PayloadJSON
+		if payload == nil {
+			payload = map[string]any{}
+		}
+		payloadJSON, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("marshal blocker payload: %w", err)
+		}
+		req.BlockerPayloadJson = string(payloadJSON)
+	}
+	_, err := c.client.UpdateTaskState(ctx, req)
 	if err != nil {
 		return fmt.Errorf("update task state failed: %w", err)
 	}

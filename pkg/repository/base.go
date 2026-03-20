@@ -202,9 +202,13 @@ type BackendRepository interface {
 	GetTaskByID(ctx context.Context, taskId string) (*types.AgentTask, error)
 	GetTask(ctx context.Context, workspaceId uint, taskId string) (*types.AgentTask, error)
 	GetTaskByIdempotency(ctx context.Context, workspaceId uint, agentId *string, idempotencyKey string) (*types.AgentTask, error)
+	GetTaskBlocker(ctx context.Context, workspaceID uint, blockerID string) (*types.TaskBlocker, error)
+	GetCurrentTaskBlocker(ctx context.Context, workspaceID uint, taskID string) (*types.TaskBlocker, error)
 	ClaimQueuedTaskForDispatch(ctx context.Context, taskID string, staleAfter time.Duration) (*types.AgentTask, bool, error)
-	UpdateTaskState(ctx context.Context, taskId string, state types.AgentTaskState, droppedReason *string, targetRunID *string) error
-	UpdateTaskStateIfCurrentRun(ctx context.Context, taskID string, expectedRunID string, state types.AgentTaskState, droppedReason *string, targetRunID *string, inputKind types.InputKind, waitingSummary *string) (bool, error)
+	OpenTaskBlockerIfCurrentRun(ctx context.Context, request types.TaskBlockerOpenRequest) (bool, *types.TaskBlocker, error)
+	ResolveCurrentTaskBlocker(ctx context.Context, workspaceID uint, taskID string, resolution *types.TaskBlockerResolution) (*types.TaskBlocker, error)
+	UpdateTaskState(ctx context.Context, update types.TaskStateUpdate) error
+	UpdateTaskStateIfCurrentRun(ctx context.Context, update types.CurrentRunTaskStateUpdate) (bool, error)
 	SleepTaskWithOutbox(ctx context.Context, taskID string, expectedRunID string, wakeAt time.Time, wakeReason string, wakeAgenda []*types.TaskWakeAgendaItem, outboxEvent *types.OrchestrationOutboxEvent) (bool, error)
 	RequeueTaskWithOutboxIfCurrentRun(ctx context.Context, task *types.AgentTask, expectedRunID string, outboxEvent *types.OrchestrationOutboxEvent) (bool, error)
 	CancelPendingOutboxEventsForTask(ctx context.Context, taskID string) error

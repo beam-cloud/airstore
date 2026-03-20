@@ -57,9 +57,9 @@ func (b *cancelTaskBackend) ListActiveChildTaskIDs(_ context.Context, _ string) 
 	return nil, nil
 }
 
-func (b *cancelTaskBackend) UpdateTaskState(_ context.Context, taskID string, state types.AgentTaskState, _ *string, _ *string) error {
-	if b.task != nil && b.task.ID == taskID {
-		b.task.State = state
+func (b *cancelTaskBackend) UpdateTaskState(_ context.Context, update types.TaskStateUpdate) error {
+	if b.task != nil && b.task.ID == update.TaskID {
+		b.task.State = update.State
 	}
 	return nil
 }
