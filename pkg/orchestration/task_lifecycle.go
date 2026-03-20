@@ -17,6 +17,7 @@ type TaskLifecycle struct {
 	backend    repository.BackendRepository
 	store      *repository.OrchestrationStore
 	terminalIO repository.TerminalIORepository
+	outcomes   *OutcomeProjector
 }
 
 func NewTaskLifecycle(
@@ -24,7 +25,12 @@ func NewTaskLifecycle(
 	store *repository.OrchestrationStore,
 	terminalIO repository.TerminalIORepository,
 ) *TaskLifecycle {
-	return &TaskLifecycle{backend: backend, store: store, terminalIO: terminalIO}
+	return &TaskLifecycle{
+		backend:    backend,
+		store:      store,
+		terminalIO: terminalIO,
+		outcomes:   NewOutcomeProjector(backend),
+	}
 }
 
 // validTransitions defines the legal state machine edges.
@@ -153,10 +159,154 @@ func (lc *TaskLifecycle) Settle(ctx context.Context, runID string, opts *SettleO
 
 	task.State = nextState
 	task.TargetRunID = &targetRunID
-	if err := SyncTaskOutcome(ctx, lc.backend, task, run); err != nil {
-		return err
+	if lc.outcomes != nil {
+		if err := lc.outcomes.Sync(ctx, task, run); err != nil {
+			return err
+		}
 	}
 	lc.publishUpdate(ctx, task.WorkspaceID, task.ID)
+	return nil
+}
+
+func (lc *TaskLifecycle) Resume(ctx context.Context, taskID, runID string) (bool, error) {
+	if lc == nil || lc.backend == nil || strings.TrimSpace(taskID) == "" || strings.TrimSpace(runID) == "" {
+		return false, nil
+	}
+	return lc.backend.UpdateTaskStateIfCurrentRun(ctx, types.CurrentRunTaskStateUpdate{
+		TaskID:        taskID,
+		ExpectedRunID: runID,
+		State:         types.AgentTaskStateRunning,
+	})
+}
+
+func (lc *TaskLifecycle) Done(ctx context.Context, taskID string, targetRunID *string) error {
+	if lc == nil || lc.backend == nil || strings.TrimSpace(taskID) == "" {
+		return nil
+	}
+	return lc.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
+		TaskID:      taskID,
+		State:       types.AgentTaskStateDone,
+		TargetRunID: targetRunID,
+	})
+}
+
+func (lc *TaskLifecycle) Queue(ctx context.Context, taskID string, targetRunID *string) error {
+	if lc == nil || lc.backend == nil || strings.TrimSpace(taskID) == "" {
+		return nil
+	}
+	return lc.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
+		TaskID:      taskID,
+		State:       types.AgentTaskStateQueued,
+		TargetRunID: targetRunID,
+	})
+}
+
+func (lc *TaskLifecycle) updateWithRetryDrop(ctx context.Context, task *types.AgentTask, dropReason string) error {
+	if lc == nil || lc.backend == nil || task == nil {
+		return nil
+	}
+	return lc.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
+		TaskID:        task.ID,
+		State:         types.AgentTaskStateDropped,
+		DroppedReason: &dropReason,
+		TargetRunID:   task.TargetRunID,
+	})
+}
+
+func (lc *TaskLifecycle) queueForRetry(ctx context.Context, task *types.AgentTask) error {
+	if lc == nil || lc.backend == nil || task == nil {
+		return nil
+	}
+	return lc.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
+		TaskID:      task.ID,
+		State:       types.AgentTaskStateQueued,
+		TargetRunID: task.TargetRunID,
+	})
+}
+
+func (lc *TaskLifecycle) SetOutcomeProjector(projector *OutcomeProjector) {
+	if lc == nil {
+		return
+	}
+	lc.outcomes = projector
+}
+
+func (lc *TaskLifecycle) outcomeProjector() *OutcomeProjector {
+	if lc == nil {
+		return nil
+	}
+	return lc.outcomes
+}
+
+func (lc *TaskLifecycle) syncOutcome(ctx context.Context, task *types.AgentTask, run *types.AgentRun) error {
+	if lc.outcomes == nil {
+		return nil
+	}
+	return lc.outcomes.Sync(ctx, task, run)
+}
+
+type OutcomeProjector struct {
+	backend repository.BackendRepository
+}
+
+func NewOutcomeProjector(backend repository.BackendRepository) *OutcomeProjector {
+	return &OutcomeProjector{backend: backend}
+}
+
+func (p *OutcomeProjector) Sync(ctx context.Context, task *types.AgentTask, run *types.AgentRun) error {
+	if p == nil || p.backend == nil || task == nil || run == nil {
+		return nil
+	}
+	taskID := strings.TrimSpace(task.ID)
+	if taskID == "" {
+		return nil
+	}
+
+	if run.Status == types.AgentRunStatusOK {
+		if err := activateApprovedOutputs(ctx, p.backend, task); err != nil {
+			log.Warn().Err(err).Str("task_id", taskID).Msg("failed to activate approved outputs")
+		}
+	}
+
+	return syncTaskCost(ctx, p.backend, task)
+}
+
+func activateApprovedOutputs(ctx context.Context, backend repository.BackendRepository, task *types.AgentTask) error {
+	outputs, err := backend.ListTaskOutputs(ctx, task.WorkspaceID, task.ID)
+	if err != nil {
+		return fmt.Errorf("list outputs for activation: %w", err)
+	}
+	for _, out := range outputs {
+		if out == nil || out.Status != types.TaskOutputStatusApproved {
+			continue
+		}
+		if err := backend.UpdateTaskOutputStatus(ctx, task.WorkspaceID, out.ID, types.TaskOutputStatusActive); err != nil {
+			return fmt.Errorf("activate approved output %s: %w", out.ID, err)
+		}
+	}
+	return nil
+}
+
+func syncTaskCost(ctx context.Context, backend repository.BackendRepository, task *types.AgentTask) error {
+	taskID := strings.TrimSpace(task.ID)
+	runs, err := backend.ListAgentRunsFiltered(ctx, task.WorkspaceID, types.AgentRunListFilter{
+		TaskID: &taskID,
+		Limit:  500,
+	})
+	if err != nil {
+		return err
+	}
+	totalCost := 0.0
+	for _, run := range runs {
+		if run == nil {
+			continue
+		}
+		totalCost += run.CostUSD
+	}
+	if err := backend.UpdateTaskCost(ctx, task.ID, totalCost); err != nil {
+		return err
+	}
+	task.CostUSD = totalCost
 	return nil
 }
 

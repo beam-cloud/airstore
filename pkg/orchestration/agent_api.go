@@ -9,12 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rs/zerolog/log"
-
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	viewprojection "github.com/beam-cloud/airstore/pkg/views/projection"
+	"github.com/rs/zerolog/log"
 )
 
 // AgentAPI is the shared application layer for agent/task/run flows.
@@ -63,46 +62,7 @@ func filterWorkspaceOutputs(outputs []*types.TaskOutput) []*types.TaskOutput {
 }
 
 func shouldHideWorkspaceOutput(output *types.TaskOutput) bool {
-	if output == nil || strings.TrimSpace(output.OutputType) != types.TaskOutputTypeEmail {
-		return false
-	}
-	if outputMetadataBool(output.Metadata, types.TaskOutputMetadataApprovalUI) {
-		return true
-	}
-	if strings.EqualFold(strings.TrimSpace(output.Status), types.TaskOutputStatusPending) {
-		return true
-	}
-	return outputFieldString(output.Data, "draft_id", "draftId") != "" ||
-		outputFieldString(output.Metadata, "draft_id", "draftId") != ""
-}
-
-func outputMetadataBool(values map[string]any, keys ...string) bool {
-	for _, key := range keys {
-		value, ok := values[key]
-		if !ok {
-			continue
-		}
-		switch typed := value.(type) {
-		case bool:
-			return typed
-		case string:
-			return strings.EqualFold(strings.TrimSpace(typed), "true")
-		}
-	}
-	return false
-}
-
-func outputFieldString(values map[string]any, keys ...string) string {
-	for _, key := range keys {
-		value, ok := values[key]
-		if !ok {
-			continue
-		}
-		if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
-			return strings.TrimSpace(text)
-		}
-	}
-	return ""
+	return output != nil && output.ShouldHideInWorkspace()
 }
 
 func NewAgentAPI(
@@ -432,19 +392,19 @@ func (a *AgentAPI) ListRunEvents(ctx context.Context, workspaceID uint, runID st
 }
 
 func (a *AgentAPI) CancelRun(ctx context.Context, workspaceID uint, runID string) error {
-	run, err := a.GetRun(ctx, workspaceID, runID)
+	run, err := a.backend.GetAgentRun(ctx, workspaceID, runID)
 	if err != nil {
 		return err
 	}
 
-	// Cancel active execution(s) before marking the run terminal so the worker
-	// still sees an in-flight execution and receives an immediate cancel signal.
 	cancelled := false
-	if a.runtime != nil && a.runtime.backend != nil {
-		var cancelErr error
-		cancelled, cancelErr = a.runtime.cancelInFlightRunExecutions(ctx, run.ID)
-		if cancelErr != nil {
-			cancelled = false
+	if a.runtime != nil {
+		if loops := a.runtime.ensureRuntimeLoops(); loops != nil {
+			var cancelErr error
+			cancelled, cancelErr = loops.cancelInFlightRunExecutions(ctx, run.ID)
+			if cancelErr != nil {
+				cancelled = false
+			}
 		}
 	}
 
@@ -467,15 +427,11 @@ func (a *AgentAPI) CancelRun(ctx context.Context, workspaceID uint, runID string
 
 	now := time.Now()
 	errMsg := "cancelled by user"
-	if err := a.backend.UpdateAgentRunLifecycle(ctx, run.ID, types.AgentRunStatusCancelled, nil, &now, &errMsg); err != nil {
-		return err
-	}
-
-	return nil
+	return a.backend.UpdateAgentRunLifecycle(ctx, run.ID, types.AgentRunStatusCancelled, nil, &now, &errMsg)
 }
 
 func (a *AgentAPI) CancelTask(ctx context.Context, workspaceID uint, taskID string) error {
-	task, err := a.GetTask(ctx, workspaceID, taskID)
+	task, err := a.backend.GetTask(ctx, workspaceID, taskID)
 	if err != nil {
 		return err
 	}
@@ -499,18 +455,12 @@ func (a *AgentAPI) CancelTask(ctx context.Context, workspaceID uint, taskID stri
 		}
 	}
 
+	lifecycle := NewTaskLifecycle(a.backend, nil, nil)
 	if a.runtime != nil {
-		if err := a.runtime.lifecycle.Cancel(ctx, task.ID); err != nil {
-			return err
-		}
-	} else {
-		if err := a.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
-			TaskID:      task.ID,
-			State:       types.AgentTaskStateCancelled,
-			TargetRunID: task.TargetRunID,
-		}); err != nil {
-			return err
-		}
+		lifecycle = a.runtime.ensureLifecycle()
+	}
+	if err := lifecycle.Cancel(ctx, task.ID); err != nil {
+		return err
 	}
 
 	if err := a.backend.CancelPendingOutboxEventsForTask(ctx, task.ID); err != nil {
@@ -546,7 +496,7 @@ func (a *AgentAPI) supersedePendingTaskOutputs(ctx context.Context, workspaceID 
 }
 
 func (a *AgentAPI) ArchiveTask(ctx context.Context, workspaceID uint, taskID string) error {
-	task, err := a.GetTask(ctx, workspaceID, taskID)
+	task, err := a.backend.GetTask(ctx, workspaceID, taskID)
 	if err != nil {
 		return err
 	}
@@ -559,7 +509,7 @@ func (a *AgentAPI) ArchiveTask(ctx context.Context, workspaceID uint, taskID str
 				return err
 			}
 		}
-		task, err = a.GetTask(ctx, workspaceID, taskID)
+		task, err = a.backend.GetTask(ctx, workspaceID, taskID)
 		if err != nil {
 			return err
 		}
@@ -664,9 +614,6 @@ func (a *AgentAPI) ListTaskLogs(
 	if task.TargetRunID != nil {
 		currentRunID = strings.TrimSpace(*task.TargetRunID)
 	}
-
-	// When TargetRunID is nil (task is between runs after requeue or input),
-	// fall back to the most recent run so we can still load history from s2.
 	if currentRunID == "" {
 		runs, runErr := a.backend.ListAgentRunsFiltered(ctx, workspaceID, types.AgentRunListFilter{
 			TaskID: &taskID,
@@ -681,15 +628,11 @@ func (a *AgentAPI) ListTaskLogs(
 		return []common.TaskLogEntry{}, seqNum, nil
 	}
 
-	// Non-zero cursor means incremental polling for the currently bound run.
 	if seqNum > 0 {
 		logs, nextCursor, err := a.listTaskLogsForRun(ctx, currentRunID, seqNum)
 		if err != nil {
 			return nil, seqNum, err
 		}
-		// When the cursor rewinds (execution changed within the same run),
-		// replay the full session history so the frontend gets all prior runs
-		// instead of just the new execution's partial log stream.
 		if nextCursor > 0 && nextCursor < seqNum {
 			history, histNext, histErr := a.listTaskSessionHistoryLogs(ctx, workspaceID, task, currentRunID)
 			if histErr == nil {
@@ -700,8 +643,6 @@ func (a *AgentAPI) ListTaskLogs(
 		return logs, nextCursor, nil
 	}
 
-	// Cursor zero means "hydrate history". Return logs across all runs of this
-	// task session so resumed runs show the full timeline by default.
 	history, nextSeq, err := a.listTaskSessionHistoryLogs(ctx, workspaceID, task, currentRunID)
 	if err != nil {
 		return nil, seqNum, err
@@ -877,8 +818,6 @@ func (a *AgentAPI) WorkspaceLiveBatch(ctx context.Context, workspaceID uint) (*W
 		return nil, err
 	}
 	outputs, err := a.backend.ListWorkspaceTaskOutputs(ctx, workspaceID, types.TaskOutputListFilter{
-		// Live snapshots are capped; archived outputs would displace active items
-		// and cause current workspace activity to fall out of the stream.
 		ExcludeArchived: true,
 		Limit:           defaultWorkspaceStreamOutputLimit,
 	})

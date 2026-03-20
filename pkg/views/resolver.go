@@ -988,20 +988,7 @@ func blockerMappingOutput(task *types.AgentTask) *types.TaskOutput {
 		data["subject"] = subject
 	}
 
-	metadata := map[string]any{
-		types.TaskOutputMetadataArtifactKey:  blockerMappingArtifactKey(outputType, blocker),
-		types.TaskOutputMetadataArtifactRole: types.TaskOutputArtifactRolePrimary,
-		types.TaskOutputMetadataBlockingKind: blocker.Kind,
-		types.TaskOutputMetadataInputKind:    blocker.InputKind,
-	}
-	if blocker.ApprovalSurface {
-		metadata[types.TaskOutputMetadataApprovalUI] = true
-	}
-	if blocker.WaitGroupID != "" {
-		metadata[types.TaskOutputMetadataWaitGroupID] = blocker.WaitGroupID
-	}
-
-	return &types.TaskOutput{
+	output := &types.TaskOutput{
 		ID:          blockerMappingOutputID(task, blocker),
 		WorkspaceID: task.WorkspaceID,
 		TaskID:      task.ID,
@@ -1011,10 +998,20 @@ func blockerMappingOutput(task *types.AgentTask) *types.TaskOutput {
 		Title:       title,
 		Summary:     stringPtr(summary),
 		Data:        data,
-		Metadata:    metadata,
-		Status:      types.TaskOutputStatusPending,
-		CreatedAt:   createdAt,
+		Metadata: map[string]any{
+			types.TaskOutputMetadataArtifactKey:  blockerMappingArtifactKey(outputType, blocker),
+			types.TaskOutputMetadataArtifactRole: types.TaskOutputArtifactRolePrimary,
+		},
+		Status:    types.TaskOutputStatusPending,
+		CreatedAt: createdAt,
 	}
+	output.SetBlocking(types.TaskOutputBlockingMetadata{
+		Kind:            blocker.Kind,
+		InputKind:       types.InputKind(blocker.InputKind),
+		WaitGroupID:     blocker.WaitGroupID,
+		ApprovalSurface: blocker.ApprovalSurface,
+	})
+	return output
 }
 
 func blockerMappingOutputID(task *types.AgentTask, blocker *types.ResolvedBlocker) string {
@@ -1365,7 +1362,7 @@ func isCurrentOutputStatusForTableMapping(status string) bool {
 }
 
 func outputRoleRankForTableMapping(output *types.TaskOutput) int {
-	switch strings.TrimSpace(strings.ToLower(meta(output, types.TaskOutputMetadataArtifactRole))) {
+	switch output.ArtifactRole() {
 	case types.TaskOutputArtifactRolePrimary:
 		return 3
 	case types.TaskOutputArtifactRoleSupporting:

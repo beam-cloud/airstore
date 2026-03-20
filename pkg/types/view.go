@@ -6,23 +6,6 @@ import (
 )
 
 const (
-	TaskOutputMetadataArtifactKey   = "artifact_key"
-	TaskOutputMetadataArtifactLabel = "artifact_label"
-	TaskOutputMetadataArtifactKind  = "artifact_kind"
-	TaskOutputMetadataArtifactRole  = "artifact_role"
-	TaskOutputMetadataBlockerID     = "_blocker_id"
-	TaskOutputMetadataBlockingKind  = "_blocking_kind"
-	TaskOutputMetadataInputKind     = "_input_kind"
-	TaskOutputMetadataWaitGroupID   = "_wait_group_id"
-	TaskOutputMetadataApprovalUI    = "_approval_surface"
-
-	TaskOutputArtifactRolePrimary    = "primary"
-	TaskOutputArtifactRoleSupporting = "supporting"
-	TaskOutputArtifactRoleIncidental = "incidental"
-
-	TaskOutputBlockingKindApproval = "approval"
-	TaskOutputBlockingKindInput    = "input"
-
 	ResolvedDataStatusOK           = "ok"
 	ResolvedDataStatusEmpty        = "empty"
 	ResolvedDataStatusBindingError = "binding_error"
@@ -34,28 +17,6 @@ const (
 
 func (c ComponentSpec) IsTable() bool {
 	return c.Type == ComponentTypeTable || c.Type == "data-table"
-}
-
-type ResolvedBlockerItem struct {
-	OutputID string `json:"output_id"`
-	Title    string `json:"title,omitempty"`
-	ItemKey  string `json:"item_key,omitempty"`
-}
-
-type ResolvedBlocker struct {
-	ID              string         `json:"id,omitempty"`
-	Kind            string         `json:"kind,omitempty"`
-	InputKind       string         `json:"input_kind,omitempty"`
-	Status          string         `json:"status,omitempty"`
-	WaitGroupID     string         `json:"wait_group_id,omitempty"`
-	OutputID        string         `json:"output_id,omitempty"`
-	OutputStatus    string         `json:"output_status,omitempty"`
-	OutputIDs       []string       `json:"output_ids,omitempty"`
-	ApprovalSurface bool           `json:"approval_surface,omitempty"`
-	Summary         string         `json:"summary,omitempty"`
-	Details         string         `json:"details,omitempty"`
-	Items           []ResolvedBlockerItem `json:"items,omitempty"`
-	PayloadJSON     map[string]any `json:"payload_json,omitempty"`
 }
 
 // View is the persisted representation of a published view.

@@ -101,24 +101,6 @@ func addTaskExecutionContextFromEnv(event *zerolog.Event, taskID string, env map
 	return addTaskExecutionContextByID(event, taskID, executionContextFromEnv(env))
 }
 
-// taskOutputIDs extracts the IDs that output writers need from a task's execution policy.
-type taskOutputIDs struct {
-	workspaceID uint32
-	taskID      string
-	runID       string
-	agentID     string
-}
-
-func outputIDsFromTask(task types.RunExecution) taskOutputIDs {
-	ids := taskOutputIDs{workspaceID: uint32(task.WorkspaceId)}
-	if task.ExecutionPolicy != nil {
-		ids.taskID = anyToTrimmedString(task.ExecutionPolicy[types.AgentExecutionMetaKeyOriginTaskID])
-		ids.runID = anyToTrimmedString(task.ExecutionPolicy[types.AgentExecutionMetaKeyRunID])
-		ids.agentID = anyToTrimmedString(task.ExecutionPolicy[types.AgentExecutionMetaKeyAgentID])
-	}
-	return ids
-}
-
 func anyToTrimmedString(value any) string {
 	if value == nil {
 		return ""

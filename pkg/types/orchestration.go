@@ -927,69 +927,6 @@ func (e *ErrAgentRunAttemptNotFound) Error() string {
 }
 
 // TaskOutput is a structured output produced by an agent during a task.
-type TaskOutput struct {
-	ID          string         `json:"id"`
-	WorkspaceID uint           `json:"workspace_id"`
-	TaskID      string         `json:"task_id"`
-	RunID       *string        `json:"run_id,omitempty"`
-	AgentID     *string        `json:"agent_id,omitempty"`
-	AgentName   string         `json:"agent_name,omitempty"`
-	OutputType  string         `json:"output_type"`
-	Title       string         `json:"title"`
-	Summary     *string        `json:"summary,omitempty"`
-	URI         *string        `json:"uri,omitempty"`
-	Data        map[string]any `json:"data"`
-	Metadata    map[string]any `json:"metadata,omitempty"`
-	Status      string         `json:"status"`
-	ArchivedAt  *time.Time     `json:"archived_at,omitempty"`
-	CreatedAt   time.Time      `json:"created_at"`
-}
-
-const (
-	TaskOutputTypeEmail     = "email"
-	TaskOutputStatusActive    = "active"
-	TaskOutputStatusPending   = "pending"
-	TaskOutputStatusApproved  = "approved"
-	TaskOutputStatusRejected  = "rejected"
-	TaskOutputStatusCancelled = "cancelled"
-)
-
-type TaskOutputListFilter struct {
-	TaskID          *string `json:"task_id,omitempty"`
-	AgentID         *string `json:"agent_id,omitempty"`
-	AgentIDIsNull   bool    `json:"agent_id_is_null,omitempty"`
-	OutputType      *string `json:"output_type,omitempty"`
-	ExcludeArchived bool    `json:"exclude_archived,omitempty"`
-	Limit           int     `json:"limit,omitempty"`
-}
-
-type ErrTaskOutputNotFound struct {
-	ID string
-}
-
-func (e *ErrTaskOutputNotFound) Error() string {
-	return "task output not found: " + e.ID
-}
-
-type ErrTaskOutputConflict struct {
-	ID                  string
-	WorkspaceID         uint
-	TaskID              string
-	ExistingWorkspaceID uint
-	ExistingTaskID      string
-}
-
-func (e *ErrTaskOutputConflict) Error() string {
-	return fmt.Sprintf(
-		"task output id %s for workspace %d task %s conflicts with existing output in workspace %d task %s",
-		e.ID,
-		e.WorkspaceID,
-		e.TaskID,
-		e.ExistingWorkspaceID,
-		e.ExistingTaskID,
-	)
-}
-
 type ErrInvalidTaskInput struct {
 	Message string
 }

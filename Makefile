@@ -101,6 +101,8 @@ worker:
 	docker build . --target final -f ./docker/Dockerfile.worker -t localhost:5001/airstore-worker:$(workerTag)
 	docker push localhost:5001/airstore-worker:$(workerTag)
 	-kubectl delete pods -n airstore -l airstore.beam.cloud/role=worker --force --grace-period=0 2>/dev/null || true
+	-docker exec k3d-airstore-server-0 crictl rmi --prune 2>/dev/null || true
+	-docker exec k3d-registry.localhost registry garbage-collect /etc/docker/registry/config.yml --delete-untagged -q 2>/dev/null || true
 
 sandbox:
 	./bin/build_sandbox.sh $(tag)

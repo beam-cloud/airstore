@@ -1549,7 +1549,7 @@ func (m *SandboxManager) RunTask(ctx context.Context, task types.RunExecution) (
 	defer m.Delete(sandboxID, true)
 
 	pipeline := m.taskOutputPipeline(ctx, task, env)
-	taskOutput := NewTaskOutput(task.ExternalId, "stdout", pipeline.writers...)
+	taskOutput := NewTaskStreamOutput(task.ExternalId, "stdout", pipeline.writers...)
 	defer pipeline.Wait()
 	defer taskOutput.Flush()
 	if err := m.SetOutput(sandboxID, taskOutput, taskOutput.Flush); err != nil {

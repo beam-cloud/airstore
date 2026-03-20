@@ -74,11 +74,11 @@ func TestPersistAssistantResponseOutputsPersistsPendingApprovalArtifact(t *testi
 		nil,
 		"Please approve this outreach draft.",
 		nil,
-		assistantResponsePersistOptions{
+		responseArtifactPlan{
 			Extract: extract,
 			MinLen:  1,
 			Status:  types.TaskOutputStatusPending,
-			Blocking: &blockingOutputMetadata{
+			Blocking: &types.TaskOutputBlockingMetadata{
 				Kind:            types.TaskOutputBlockingKindApproval,
 				InputKind:       types.InputKindApproveReject,
 				WaitGroupID:     "wait-1",
@@ -139,11 +139,10 @@ func TestPersistAssistantResponseOutputsPersistsPendingApprovalArtifact(t *testi
 	}
 }
 
-func TestPersistApprovalResponseOutputPublishesWhenTrackerAlreadyCreatedOutput(t *testing.T) {
+func TestPersistApprovalResponseOutputPublishesWithTrackedState(t *testing.T) {
 	client := &captureOutputClient{}
 	task := testRunExecution()
 	tracker := &taskOutputTracker{}
-	tracker.MarkCreated()
 
 	extract := func(_ context.Context, _ *string, _ string, _ map[string]string) ([]signaltypes.ExtractedOutput, error) {
 		content := "Please review this approval copy before sending."
@@ -162,11 +161,11 @@ func TestPersistApprovalResponseOutputPublishesWhenTrackerAlreadyCreatedOutput(t
 		nil,
 		"Please approve this draft response.",
 		nil,
-		assistantResponsePersistOptions{
+		responseArtifactPlan{
 			Extract: extract,
 			MinLen:  1,
 			Status:  types.TaskOutputStatusPending,
-			Blocking: &blockingOutputMetadata{
+			Blocking: &types.TaskOutputBlockingMetadata{
 				Kind:            types.TaskOutputBlockingKindApproval,
 				InputKind:       types.InputKindApproveReject,
 				WaitGroupID:     "wait-existing-output",
@@ -203,11 +202,11 @@ func TestPersistAssistantResponseOutputsFallsBackWhenApprovalExtractsNothing(t *
 		nil,
 		assistantMessage,
 		nil,
-		assistantResponsePersistOptions{
+		responseArtifactPlan{
 			Extract: extract,
 			MinLen:  1,
 			Status:  types.TaskOutputStatusPending,
-			Blocking: &blockingOutputMetadata{
+			Blocking: &types.TaskOutputBlockingMetadata{
 				Kind:            types.TaskOutputBlockingKindApproval,
 				InputKind:       types.InputKindApproveReject,
 				WaitGroupID:     "wait-fallback",
@@ -298,7 +297,7 @@ func TestPersistApprovalOutputBeforeWaitingCreatesBlockingOutput(t *testing.T) {
 				userMessage,
 				assistantMessage,
 				bamlEnv,
-				assistantResponsePersistOptions{
+				responseArtifactPlan{
 					Extract: func(_ context.Context, _ *string, _ string, _ map[string]string) ([]signaltypes.ExtractedOutput, error) {
 						return []signaltypes.ExtractedOutput{{
 							Kind:    signaltypes.OutputKindEMAIL_DRAFT,
@@ -308,7 +307,7 @@ func TestPersistApprovalOutputBeforeWaitingCreatesBlockingOutput(t *testing.T) {
 					},
 					MinLen: 1,
 					Status: types.TaskOutputStatusPending,
-					Blocking: &blockingOutputMetadata{
+					Blocking: &types.TaskOutputBlockingMetadata{
 						Kind:            types.TaskOutputBlockingKindApproval,
 						InputKind:       types.InputKindApproveReject,
 						WaitGroupID:     "wait-now",
@@ -390,5 +389,52 @@ func TestPersistFinalResponseOutputSkipsEmailArtifacts(t *testing.T) {
 	}
 	if got := len(client.createReqs); got != 0 {
 		t.Fatalf("create req count = %d, want 0", got)
+	}
+}
+
+func TestDefaultArtifactMetadataPreservesBAMLValues(t *testing.T) {
+	metadata := map[string]any{
+		types.TaskOutputMetadataArtifactKey:   "extracted-recipes",
+		types.TaskOutputMetadataArtifactLabel: "Extracted Recipes",
+		types.TaskOutputMetadataArtifactKind:  "recipe",
+	}
+
+	result := defaultArtifactMetadata(metadata, types.TaskOutputArtifactRolePrimary)
+
+	if got := result[types.TaskOutputMetadataArtifactKey]; got != "extracted-recipes" {
+		t.Fatalf("artifact key = %#v, want %q", got, "extracted-recipes")
+	}
+	if got := result[types.TaskOutputMetadataArtifactLabel]; got != "Extracted Recipes" {
+		t.Fatalf("artifact label = %#v, want %q", got, "Extracted Recipes")
+	}
+	if got := result[types.TaskOutputMetadataArtifactKind]; got != "recipe" {
+		t.Fatalf("artifact kind = %#v, want %q", got, "recipe")
+	}
+	if got := result[types.TaskOutputMetadataArtifactRole]; got != types.TaskOutputArtifactRolePrimary {
+		t.Fatalf("role = %#v, want %q", got, types.TaskOutputArtifactRolePrimary)
+	}
+}
+
+func TestDefaultArtifactMetadataNormalizesTokens(t *testing.T) {
+	metadata := map[string]any{
+		types.TaskOutputMetadataArtifactKey:  "Extracted Recipes",
+		types.TaskOutputMetadataArtifactKind: "RECIPE",
+	}
+
+	result := defaultArtifactMetadata(metadata, "")
+
+	if got := result[types.TaskOutputMetadataArtifactKey]; got != "extracted-recipes" {
+		t.Fatalf("artifact key = %#v, want %q", got, "extracted-recipes")
+	}
+	if got := result[types.TaskOutputMetadataArtifactKind]; got != "recipe" {
+		t.Fatalf("artifact kind = %#v, want %q", got, "recipe")
+	}
+}
+
+func TestDefaultArtifactMetadataSetsRoleDefault(t *testing.T) {
+	result := defaultArtifactMetadata(nil, "")
+
+	if got := result[types.TaskOutputMetadataArtifactRole]; got != types.TaskOutputArtifactRoleSupporting {
+		t.Fatalf("role should default to supporting, got %#v", got)
 	}
 }

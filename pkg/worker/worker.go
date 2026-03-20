@@ -713,13 +713,3 @@ func (w *Worker) shutdown() error {
 	log.Info().Str("worker_id", w.workerId).Msg("worker stopped")
 	return nil
 }
-
-// WorkerId returns the worker's ID
-func (w *Worker) WorkerId() string {
-	return w.workerId
-}
-
-// PoolName returns the worker's pool name
-func (w *Worker) PoolName() string {
-	return w.poolName
-}

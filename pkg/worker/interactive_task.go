@@ -74,36 +74,11 @@ var subagentProbeArgs = []string{"/bin/sh", "-c",
 // ---------------------------------------------------------------------------
 
 func (w *Worker) setRunInteractionState(ctx context.Context, task types.RunExecution, state types.RunInteractionState) {
-	if w == nil || w.terminalIO == nil {
-		return
-	}
-	ec := executionContextFromTask(task)
-	if ec.runID == "" {
-		return
-	}
-	activeID := ""
-	if state != types.RunInteractionStateClosed {
-		activeID = task.ExternalId
-	}
-	if err := w.terminalIO.SetRunInteraction(ctx, task.WorkspaceId, ec.runID, types.RunInteraction{
-		State: state, ActiveExecutionID: activeID,
-	}, runInteractionTTL); err != nil {
-		addTaskExecutionContext(log.Warn().Err(err).Str("state", string(state)), task).
-			Msg("failed to persist run interaction state")
-	}
+	newSessionStateBridge(w).setRunInteractionState(ctx, task, state)
 }
 
 func (w *Worker) setOriginTaskState(ctx context.Context, task types.RunExecution, update types.TaskLiveUpdate) {
-	ec := executionContextFromTask(task)
-	if ec.originTaskID == "" || ec.runID == "" {
-		return
-	}
-	update.TaskID = ec.originTaskID
-	update.RunID = ec.runID
-	if err := w.gatewayClient.UpdateTaskState(ctx, update); err != nil {
-		addTaskExecutionContext(log.Warn().Err(err).Str("target_state", string(update.State)), task).
-			Msg("failed to update origin task state")
-	}
+	newSessionStateBridge(w).setOriginTaskState(ctx, task, update)
 }
 
 func waitingBlockerPayload(
@@ -111,40 +86,7 @@ func waitingBlockerPayload(
 	waitingSummary string,
 	assistantMessage string,
 ) map[string]any {
-	waitingSummary = strings.TrimSpace(waitingSummary)
-	assistantMessage = strings.TrimSpace(assistantMessage)
-	if waitingSummary != "" {
-		var parsed map[string]any
-		if json.Unmarshal([]byte(waitingSummary), &parsed) == nil && len(parsed) > 0 {
-			if assistantMessage != "" {
-				if _, ok := parsed["details"]; !ok {
-					parsed["details"] = assistantMessage
-				}
-			}
-			return parsed
-		}
-	}
-
-	payload := map[string]any{}
-	switch inputKind {
-	case types.InputKindApproveReject:
-		if waitingSummary != "" {
-			payload["summary"] = waitingSummary
-		}
-		if assistantMessage != "" {
-			payload["details"] = assistantMessage
-		}
-	default:
-		if assistantMessage != "" {
-			payload["details"] = assistantMessage
-		} else if waitingSummary != "" {
-			payload["details"] = waitingSummary
-		}
-		if waitingSummary != "" && waitingSummary != assistantMessage {
-			payload["summary"] = waitingSummary
-		}
-	}
-	return payload
+	return types.NewTaskBlockerPayload(inputKind, waitingSummary, assistantMessage).ToMap()
 }
 
 func buildWaitingBlockerSpec(
@@ -207,19 +149,7 @@ func diffTrackedOutputIDs(tracker *taskOutputTracker, before map[string]struct{}
 // ---------------------------------------------------------------------------
 
 func (w *Worker) recordSessionCheckpoint(ctx context.Context, task types.RunExecution, mountSource string, env map[string]string) error {
-	if w == nil || w.terminalIO == nil {
-		return nil
-	}
-	sessionID := strings.TrimSpace(env[agentSessionIDEnvKey])
-	ec := executionContextFromTask(task)
-	if sessionID == "" || ec.runID == "" {
-		return nil
-	}
-	cp := &types.SessionCheckpoint{RunID: ec.runID, ExecutionID: task.ExternalId, UpdatedAt: time.Now().UnixMilli()}
-	if err := writeClaudeSessionCheckpoint(mountSource, env, cp); err != nil {
-		return err
-	}
-	return w.terminalIO.SetSessionCheckpoint(ctx, task.WorkspaceId, sessionID, cp, 0)
+	return newSessionStateBridge(w).recordSessionCheckpoint(ctx, task, mountSource, env)
 }
 
 // ---------------------------------------------------------------------------
@@ -386,7 +316,7 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 
 	// Output writers
 	outputPipeline := w.sandboxManager.taskOutputPipeline(sessionCtx, task, env)
-	mirror := NewTaskOutput(task.ExternalId, "stdout", outputPipeline.writers...)
+	mirror := NewTaskStreamOutput(task.ExternalId, "stdout", outputPipeline.writers...)
 	defer outputPipeline.Wait()
 	defer mirror.Flush()
 	tw := &terminalOutputWriter{
@@ -510,42 +440,81 @@ func extractSessionAssistantMessage(runner AgentExecutionRunner, raw []byte) str
 	return strings.TrimSpace(extractAssistantText(raw, 24000))
 }
 
+// extractAssistantText scans raw stream-json output, pulls out assistant text
+// blocks, and returns the last `limit` characters of the concatenated text.
+// This keeps approval and follow-up classification focused on the assistant's
+// visible response instead of tool traffic.
+func extractAssistantText(raw []byte, limit int) string {
+	var texts []string
+	totalLen := 0
+
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 || line[0] != '{' {
+			continue
+		}
+
+		var envelope struct {
+			Type    string `json:"type"`
+			Message *struct {
+				Content []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"message"`
+			Result  string `json:"result"`
+			IsError bool   `json:"is_error"`
+		}
+		if err := json.Unmarshal(line, &envelope); err != nil {
+			continue
+		}
+
+		switch envelope.Type {
+		case "assistant":
+			if envelope.Message == nil {
+				continue
+			}
+			for _, block := range envelope.Message.Content {
+				if block.Type == "text" && block.Text != "" {
+					texts = append(texts, block.Text)
+					totalLen += len(block.Text)
+				}
+			}
+		case "result":
+			if !envelope.IsError && envelope.Result != "" {
+				texts = append(texts, envelope.Result)
+				totalLen += len(envelope.Result)
+			}
+		}
+	}
+
+	if totalLen == 0 {
+		return ""
+	}
+
+	var buf bytes.Buffer
+	for i, text := range texts {
+		if i > 0 {
+			buf.WriteString("\n\n")
+		}
+		buf.WriteString(text)
+	}
+	s := buf.String()
+	if limit > 0 && len(s) > limit {
+		s = s[len(s)-limit:]
+		for len(s) > 0 && s[0]&0xC0 == 0x80 {
+			s = s[1:]
+		}
+	}
+	return s
+}
+
 func (w *Worker) buildNeedsInputChecker(
 	ctx context.Context, task types.RunExecution,
 	runner NeedsInputRunner, markerPath string,
 	tw *terminalOutputWriter, bamlEnv map[string]string,
 ) func(string) (bool, types.InputKind, string, string) {
-	return func(currentPrompt string) (bool, types.InputKind, string, string) {
-		msg := runner.ReadLastMessage(markerPath)
-		if msg == "" {
-			return false, "", "", ""
-		}
-		cls, err := agentsignal.ClassifyTurn(ctx, msg, agentsignal.WithEnv(bamlEnv))
-		if err != nil {
-			return false, "", "", ""
-		}
-
-		if cls.Outcome != signaltypes.TurnOutcomeNEEDS_INPUT {
-			return false, "", "", ""
-		}
-
-		kind := types.InputKindFreeText
-		if cls.Input_kind != nil {
-			kind = types.InputKind(strings.ToLower(string(*cls.Input_kind)))
-		}
-
-		assistantMessage := msg
-		var summary string
-		if kind == types.InputKindApproveReject {
-			if tw.ringBuf != nil {
-				if text := extractAssistantText(tw.ringBuf.Bytes(), approvalMessageExtractLimit); text != "" {
-					assistantMessage = text
-				}
-			}
-			summary = w.tryBuildApprovalSummary(ctx, assistantMessage, bamlEnv)
-		}
-		return true, kind, summary, assistantMessage
-	}
+	return newWorkerSessionRunner(w).buildNeedsInputChecker(ctx, task, runner, markerPath, tw, bamlEnv)
 }
 
 type turnInputKindClassifier func(context.Context, string, map[string]string) types.InputKind
@@ -633,6 +602,24 @@ func persistApprovalOutputBeforeWaitingWithFunc(
 	return diffTrackedOutputIDs(tracker, before), created
 }
 
+// tryBuildApprovalSummary extracts a structured summary of what the agent is
+// asking the user to approve. Approval remains a single yes/no decision over
+// the whole action; per-entity granularity is expressed through subtasks.
+func (w *Worker) tryBuildApprovalSummary(ctx context.Context, assistantText string, bamlEnv map[string]string) string {
+	if assistantText == "" {
+		return ""
+	}
+	summary, err := agentsignal.ExtractApprovalSummary(ctx, assistantText, agentsignal.WithEnv(bamlEnv))
+	if err != nil {
+		return ""
+	}
+	b, _ := json.Marshal(map[string]string{
+		"summary": summary.Summary,
+		"details": summary.Details,
+	})
+	return string(b)
+}
+
 // ---------------------------------------------------------------------------
 // Turn session: the core turn loop
 // ---------------------------------------------------------------------------
@@ -649,109 +636,18 @@ func (w *Worker) runTurnSession(
 	bamlEnv map[string]string,
 	tracker *taskOutputTracker,
 ) (error, bool, types.InputKind, string, bool) {
-	prompt := strings.TrimSpace(task.Prompt)
-	sessionEnv := cloneMap(env)
-	isFirst := true
-
-	outputParser, _ := runner.(OutputParsingRunner)
-	var turnBuf bytes.Buffer
-	var approvalOutputPersisted bool
-
-	for prompt != "" {
-		if ctx.Err() != nil {
-			return ctx.Err(), false, "", "", approvalOutputPersisted
-		}
-
-		w.setRunInteractionState(ctx, task, types.RunInteractionStateWorking)
-		if !isFirst {
-			w.setOriginTaskState(ctx, task, types.TaskLiveUpdate{
-				State: types.AgentTaskStateRunning,
-			})
-		}
-
-		turnOut := stdout
-		if outputParser != nil {
-			turnBuf.Reset()
-			turnOut = io.MultiWriter(stdout, &turnBuf)
-		}
-
-		if isFirst {
-			if err := w.executeFirstTurn(ctx, task, sandboxID, runner, sessionEnv, turnOut, prompt); err != nil {
-				return err, false, "", "", approvalOutputPersisted
-			}
-			isFirst = false
-		} else {
-			if err := w.executeTurn(ctx, task, sandboxID, runner, sessionEnv, turnOut, prompt, TurnArgModeFollowup); err != nil {
-				return err, false, "", "", approvalOutputPersisted
-			}
-		}
-		signalActivity(activityCh)
-
-		if w.waitForSubagents(ctx, task, sandboxID, activityCh) == subagentFinished {
-			if err := w.executeTurn(ctx, task, sandboxID, runner, sessionEnv, turnOut,
-				"Your background tasks / subagents have completed. Please collect and report their results.",
-				TurnArgModeFollowup); err != nil {
-				return err, false, "", "", approvalOutputPersisted
-			}
-			signalActivity(activityCh)
-		}
-
-		// Determine if the agent needs user input before continuing.
-		var needsInput bool
-		var inputKind types.InputKind
-		var waitingSummary string
-		var approvalAssistantMessage string
-		var blockerOutputIDs []string
-
-		if outputParser != nil {
-			var err error
-			needsInput, inputKind, approvalAssistantMessage, err = outputParser.ParseTurnOutput(turnBuf.Bytes())
-			waitingSummary = approvalAssistantMessage
-			if err != nil {
-				addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to parse turn output")
-			}
-			if needsInput {
-				inputKind = classifyNeedsInputKindWithFallback(
-					ctx,
-					inputKind,
-					approvalAssistantMessage,
-					bamlEnv,
-					classifyNeedsInputKindWithBAML,
-				)
-			}
-			if needsInput && inputKind == types.InputKindApproveReject {
-				if s := w.tryBuildApprovalSummary(ctx, approvalAssistantMessage, bamlEnv); s != "" {
-					waitingSummary = s
-				}
-			}
-		} else if checkNeedsInput != nil {
-			needsInput, inputKind, waitingSummary, approvalAssistantMessage = checkNeedsInput(prompt)
-		}
-
-		if !needsInput {
-			if pending := w.claimPendingInput(ctx, task); pending != "" {
-				prompt = pending
-				continue
-			}
-			return nil, false, "", prompt, approvalOutputPersisted
-		}
-
-		if inputKind == types.InputKindApproveReject {
-			blockerOutputIDs, approvalOutputPersisted = persistApprovalOutputBeforeWaiting(
-				ctx, w.gatewayClient, task, tracker, prompt, approvalAssistantMessage, bamlEnv,
-			)
-		}
-		w.setRunInteractionState(ctx, task, types.RunInteractionStateWaitingForInput)
-		w.setOriginTaskState(ctx, task, types.TaskLiveUpdate{
-			State:   types.AgentTaskStateWaiting,
-			Blocker: buildWaitingBlockerSpec(task, inputKind, waitingSummary, approvalAssistantMessage, blockerOutputIDs),
-		})
-		prompt = w.waitForFollowupInput(ctx, task, DefaultBetweenTurnsTimeout, activityCh)
-		if prompt == "" {
-			return nil, true, inputKind, "", approvalOutputPersisted
-		}
-	}
-	return nil, true, "", "", approvalOutputPersisted
+	return newWorkerSessionRunner(w).runTurnSession(
+		ctx,
+		task,
+		sandboxID,
+		runner,
+		env,
+		stdout,
+		activityCh,
+		checkNeedsInput,
+		bamlEnv,
+		tracker,
+	)
 }
 
 // ---------------------------------------------------------------------------
@@ -759,53 +655,14 @@ func (w *Worker) runTurnSession(
 // ---------------------------------------------------------------------------
 
 func (w *Worker) waitForSubagents(ctx context.Context, task types.RunExecution, sandboxID string, activityCh chan<- struct{}) subagentWaitOutcome {
-	return w.waitForSubagentsWithTiming(ctx, task, sandboxID, activityCh, subagentPollInterval, subagentMaxWait, subagentProbeTimeout)
+	return newSubagentWatcher(w).waitForSubagents(ctx, task, sandboxID, activityCh)
 }
 
 func (w *Worker) waitForSubagentsWithTiming(
 	ctx context.Context, task types.RunExecution, sandboxID string, activityCh chan<- struct{},
 	pollInterval, maxWait, probeTimeout time.Duration,
 ) subagentWaitOutcome {
-	probeCtx, probeCancel := context.WithTimeout(ctx, probeTimeout)
-	err := w.sandboxManager.ExecCheck(probeCtx, sandboxID, subagentProbeArgs)
-	probeCancel()
-	if err != nil {
-		return subagentNoneDetected
-	}
-
-	addTaskExecutionContext(log.Info(), task).Msg("waiting for subagent processes")
-	deadline := time.After(maxWait)
-	for {
-		select {
-		case <-ctx.Done():
-			addTaskExecutionContext(log.Info(), task).
-				Str("outcome", subagentSessionCancelled.String()).
-				Msg("subagent wait ended")
-			return subagentSessionCancelled
-		case <-deadline:
-			addTaskExecutionContext(log.Warn(), task).
-				Str("outcome", subagentMaxWaitReached.String()).
-				Dur("max_wait", maxWait).
-				Msg("subagent wait ended")
-			return subagentMaxWaitReached
-		case <-time.After(pollInterval):
-			signalActivity(activityCh)
-			probeCtx, probeCancel := context.WithTimeout(ctx, probeTimeout)
-			err := w.sandboxManager.ExecCheck(probeCtx, sandboxID, subagentProbeArgs)
-			probeTimedOut := probeCtx.Err() != nil && ctx.Err() == nil
-			probeCancel()
-			if probeTimedOut {
-				addTaskExecutionContext(log.Warn(), task).Msg("subagent probe timed out, will retry")
-				continue
-			}
-			if err != nil {
-				addTaskExecutionContext(log.Info(), task).
-					Str("outcome", subagentFinished.String()).
-					Msg("subagent wait ended")
-				return subagentFinished
-			}
-		}
-	}
+	return newSubagentWatcher(w).waitForSubagentsWithTiming(ctx, task, sandboxID, activityCh, pollInterval, maxWait, probeTimeout)
 }
 
 // ---------------------------------------------------------------------------
@@ -813,6 +670,127 @@ func (w *Worker) waitForSubagentsWithTiming(
 // ---------------------------------------------------------------------------
 
 func (w *Worker) claimPendingInput(ctx context.Context, task types.RunExecution) string {
+	return newFollowupInputWaiter(w).claimPendingInput(ctx, task)
+}
+
+func (w *Worker) tryClaimInput(ctx context.Context, taskID, runID, execID string) string {
+	return newFollowupInputWaiter(w).tryClaimInput(ctx, taskID, runID, execID)
+}
+
+func (w *Worker) waitForFollowupInput(ctx context.Context, task types.RunExecution, timeout time.Duration, activityCh chan<- struct{}) string {
+	return newFollowupInputWaiter(w).waitForFollowupInput(ctx, task, timeout, activityCh)
+}
+
+// ---------------------------------------------------------------------------
+// Turn execution
+// ---------------------------------------------------------------------------
+
+func (w *Worker) executeFirstTurn(
+	ctx context.Context, task types.RunExecution, sandboxID string,
+	runner TurnRunner, env map[string]string, stdout io.Writer, prompt string,
+) error {
+	return newWorkerSessionRunner(w).executeFirstTurn(ctx, task, sandboxID, runner, env, stdout, prompt)
+}
+
+func (w *Worker) executeTurn(
+	ctx context.Context, task types.RunExecution, sandboxID string,
+	runner TurnRunner, env map[string]string, stdout io.Writer,
+	prompt string, mode TurnArgMode,
+) error {
+	return newWorkerSessionRunner(w).executeTurn(ctx, task, sandboxID, runner, env, stdout, prompt, mode)
+}
+
+func (w *Worker) runGenericPTYSession(ctx context.Context, task types.RunExecution, sandboxID string, stdout io.Writer, _ chan<- struct{}) error {
+	return newWorkerSessionRunner(w).runGenericPTYSession(ctx, task, sandboxID, stdout, nil)
+}
+
+type firstTurnStrategy struct {
+	mode TurnArgMode
+}
+
+func buildFirstTurnStrategies(env map[string]string) []firstTurnStrategy {
+	resume := strings.ToLower(strings.TrimSpace(env[agentResumeSessionEnvKey]))
+	if resume != "1" && resume != "true" && resume != "yes" && resume != "on" {
+		return []firstTurnStrategy{{mode: TurnArgModeFirstStart}}
+	}
+	if strings.TrimSpace(env[agentSessionIDEnvKey]) != "" {
+		return []firstTurnStrategy{
+			{mode: TurnArgModeFirstResumeByID},
+			{mode: TurnArgModeFirstResumeLatest},
+		}
+	}
+	return []firstTurnStrategy{{mode: TurnArgModeFirstResumeLatest}}
+}
+
+type sessionStateBridge struct {
+	worker *Worker
+}
+
+func newSessionStateBridge(worker *Worker) sessionStateBridge {
+	return sessionStateBridge{worker: worker}
+}
+
+func (b sessionStateBridge) setRunInteractionState(ctx context.Context, task types.RunExecution, state types.RunInteractionState) {
+	if b.worker == nil || b.worker.terminalIO == nil {
+		return
+	}
+	ec := executionContextFromTask(task)
+	if ec.runID == "" {
+		return
+	}
+	activeID := ""
+	if state != types.RunInteractionStateClosed {
+		activeID = task.ExternalId
+	}
+	if err := b.worker.terminalIO.SetRunInteraction(ctx, task.WorkspaceId, ec.runID, types.RunInteraction{
+		State: state, ActiveExecutionID: activeID,
+	}, runInteractionTTL); err != nil {
+		addTaskExecutionContext(log.Warn().Err(err).Str("state", string(state)), task).
+			Msg("failed to persist run interaction state")
+	}
+}
+
+func (b sessionStateBridge) setOriginTaskState(ctx context.Context, task types.RunExecution, update types.TaskLiveUpdate) {
+	if b.worker == nil {
+		return
+	}
+	ec := executionContextFromTask(task)
+	if ec.originTaskID == "" || ec.runID == "" {
+		return
+	}
+	update.TaskID = ec.originTaskID
+	update.RunID = ec.runID
+	if err := b.worker.gatewayClient.UpdateTaskState(ctx, update); err != nil {
+		addTaskExecutionContext(log.Warn().Err(err).Str("target_state", string(update.State)), task).
+			Msg("failed to update origin task state")
+	}
+}
+
+func (b sessionStateBridge) recordSessionCheckpoint(ctx context.Context, task types.RunExecution, mountSource string, env map[string]string) error {
+	if b.worker == nil || b.worker.terminalIO == nil {
+		return nil
+	}
+	sessionID := strings.TrimSpace(env[agentSessionIDEnvKey])
+	ec := executionContextFromTask(task)
+	if sessionID == "" || ec.runID == "" {
+		return nil
+	}
+	cp := &types.SessionCheckpoint{RunID: ec.runID, ExecutionID: task.ExternalId, UpdatedAt: time.Now().UnixMilli()}
+	if err := writeClaudeSessionCheckpoint(mountSource, env, cp); err != nil {
+		return err
+	}
+	return b.worker.terminalIO.SetSessionCheckpoint(ctx, task.WorkspaceId, sessionID, cp, 0)
+}
+
+type followupInputWaiter struct {
+	worker *Worker
+}
+
+func newFollowupInputWaiter(worker *Worker) followupInputWaiter {
+	return followupInputWaiter{worker: worker}
+}
+
+func (w followupInputWaiter) claimPendingInput(ctx context.Context, task types.RunExecution) string {
 	ec := executionContextFromTask(task)
 	if ec.originTaskID == "" || ec.runID == "" {
 		return ""
@@ -820,37 +798,41 @@ func (w *Worker) claimPendingInput(ctx context.Context, task types.RunExecution)
 	return w.tryClaimInput(ctx, ec.originTaskID, ec.runID, task.ExternalId)
 }
 
-func (w *Worker) tryClaimInput(ctx context.Context, taskID, runID, execID string) string {
-	resp, err := w.gatewayClient.ClaimTaskInput(ctx, taskID, runID, execID)
+func (w followupInputWaiter) tryClaimInput(ctx context.Context, taskID, runID, execID string) string {
+	if w.worker == nil {
+		return ""
+	}
+	resp, err := w.worker.gatewayClient.ClaimTaskInput(ctx, taskID, runID, execID)
 	if err != nil || !resp.Found {
 		return ""
 	}
 	prompt := strings.TrimSpace(resp.Message)
 	if prompt == "" {
-		_ = w.gatewayClient.AckTaskInput(ctx, resp.InputId)
+		_ = w.worker.gatewayClient.AckTaskInput(ctx, resp.InputId)
 		return ""
 	}
-	_ = w.gatewayClient.AckTaskInput(ctx, resp.InputId)
+	_ = w.worker.gatewayClient.AckTaskInput(ctx, resp.InputId)
 	return prompt
 }
 
-func (w *Worker) waitForFollowupInput(ctx context.Context, task types.RunExecution, timeout time.Duration, activityCh chan<- struct{}) string {
+func (w followupInputWaiter) waitForFollowupInput(ctx context.Context, task types.RunExecution, timeout time.Duration, activityCh chan<- struct{}) string {
+	if w.worker == nil {
+		return ""
+	}
 	ec := executionContextFromTask(task)
 	if ec.originTaskID == "" || ec.runID == "" {
 		<-ctx.Done()
 		return ""
 	}
 
-	// Try immediately
-	if p := w.tryClaimInput(ctx, ec.originTaskID, ec.runID, task.ExternalId); p != "" {
+	if prompt := w.tryClaimInput(ctx, ec.originTaskID, ec.runID, task.ExternalId); prompt != "" {
 		signalActivity(activityCh)
-		return p
+		return prompt
 	}
 
-	// Subscribe to Redis wake channel
 	var wakeCh <-chan struct{}
-	if w.terminalIO != nil {
-		if ch, cleanup, err := w.terminalIO.SubscribeInputWake(ctx, task.ExternalId); err == nil {
+	if w.worker.terminalIO != nil {
+		if ch, cleanup, err := w.worker.terminalIO.SubscribeInputWake(ctx, task.ExternalId); err == nil {
 			wakeCh = ch
 			defer cleanup()
 		}
@@ -875,24 +857,269 @@ func (w *Worker) waitForFollowupInput(ctx context.Context, task types.RunExecuti
 		case <-wakeCh:
 		case <-time.After(2 * time.Second):
 		}
-		if p := w.tryClaimInput(ctx, ec.originTaskID, ec.runID, task.ExternalId); p != "" {
+		if prompt := w.tryClaimInput(ctx, ec.originTaskID, ec.runID, task.ExternalId); prompt != "" {
 			signalActivity(activityCh)
-			return p
+			return prompt
 		}
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Turn execution
-// ---------------------------------------------------------------------------
+type subagentWatcher struct {
+	worker *Worker
+}
 
-func (w *Worker) executeFirstTurn(
-	ctx context.Context, task types.RunExecution, sandboxID string,
-	runner TurnRunner, env map[string]string, stdout io.Writer, prompt string,
+func newSubagentWatcher(worker *Worker) subagentWatcher {
+	return subagentWatcher{worker: worker}
+}
+
+func (m subagentWatcher) waitForSubagents(ctx context.Context, task types.RunExecution, sandboxID string, activityCh chan<- struct{}) subagentWaitOutcome {
+	return m.waitForSubagentsWithTiming(ctx, task, sandboxID, activityCh, subagentPollInterval, subagentMaxWait, subagentProbeTimeout)
+}
+
+func (m subagentWatcher) waitForSubagentsWithTiming(
+	ctx context.Context,
+	task types.RunExecution,
+	sandboxID string,
+	activityCh chan<- struct{},
+	pollInterval, maxWait, probeTimeout time.Duration,
+) subagentWaitOutcome {
+	if m.worker == nil || m.worker.sandboxManager == nil {
+		return subagentNoneDetected
+	}
+	probeCtx, probeCancel := context.WithTimeout(ctx, probeTimeout)
+	err := m.worker.sandboxManager.ExecCheck(probeCtx, sandboxID, subagentProbeArgs)
+	probeCancel()
+	if err != nil {
+		return subagentNoneDetected
+	}
+
+	addTaskExecutionContext(log.Info(), task).Msg("waiting for subagent processes")
+	deadline := time.After(maxWait)
+	for {
+		select {
+		case <-ctx.Done():
+			addTaskExecutionContext(log.Info(), task).
+				Str("outcome", subagentSessionCancelled.String()).
+				Msg("subagent wait ended")
+			return subagentSessionCancelled
+		case <-deadline:
+			addTaskExecutionContext(log.Warn(), task).
+				Str("outcome", subagentMaxWaitReached.String()).
+				Dur("max_wait", maxWait).
+				Msg("subagent wait ended")
+			return subagentMaxWaitReached
+		case <-time.After(pollInterval):
+			signalActivity(activityCh)
+			probeCtx, probeCancel := context.WithTimeout(ctx, probeTimeout)
+			err := m.worker.sandboxManager.ExecCheck(probeCtx, sandboxID, subagentProbeArgs)
+			probeTimedOut := probeCtx.Err() != nil && ctx.Err() == nil
+			probeCancel()
+			if probeTimedOut {
+				addTaskExecutionContext(log.Warn(), task).Msg("subagent probe timed out, will retry")
+				continue
+			}
+			if err != nil {
+				addTaskExecutionContext(log.Info(), task).
+					Str("outcome", subagentFinished.String()).
+					Msg("subagent wait ended")
+				return subagentFinished
+			}
+		}
+	}
+}
+
+type workerSessionRunner struct {
+	worker *Worker
+}
+
+func newWorkerSessionRunner(worker *Worker) workerSessionRunner {
+	return workerSessionRunner{worker: worker}
+}
+
+func (r workerSessionRunner) buildNeedsInputChecker(
+	ctx context.Context,
+	task types.RunExecution,
+	runner NeedsInputRunner,
+	markerPath string,
+	tw *terminalOutputWriter,
+	bamlEnv map[string]string,
+) func(string) (bool, types.InputKind, string, string) {
+	return func(currentPrompt string) (bool, types.InputKind, string, string) {
+		msg := runner.ReadLastMessage(markerPath)
+		if msg == "" {
+			return false, "", "", ""
+		}
+		cls, err := agentsignal.ClassifyTurn(ctx, msg, agentsignal.WithEnv(bamlEnv))
+		if err != nil {
+			return false, "", "", ""
+		}
+
+		if cls.Outcome != signaltypes.TurnOutcomeNEEDS_INPUT {
+			return false, "", "", ""
+		}
+
+		kind := types.InputKindFreeText
+		if cls.Input_kind != nil {
+			kind = types.InputKind(strings.ToLower(string(*cls.Input_kind)))
+		}
+
+		assistantMessage := msg
+		var summary string
+		if kind == types.InputKindApproveReject {
+			if tw.ringBuf != nil {
+				if text := extractAssistantText(tw.ringBuf.Bytes(), approvalMessageExtractLimit); text != "" {
+					assistantMessage = text
+				}
+			}
+			if r.worker != nil {
+				summary = r.worker.tryBuildApprovalSummary(ctx, assistantMessage, bamlEnv)
+			}
+		}
+		return true, kind, summary, assistantMessage
+	}
+}
+
+func (r workerSessionRunner) runTurnSession(
+	ctx context.Context,
+	task types.RunExecution,
+	sandboxID string,
+	runner TurnRunner,
+	env map[string]string,
+	stdout io.Writer,
+	activityCh chan<- struct{},
+	checkNeedsInput func(string) (bool, types.InputKind, string, string),
+	bamlEnv map[string]string,
+	tracker *taskOutputTracker,
+) (error, bool, types.InputKind, string, bool) {
+	if r.worker == nil {
+		return fmt.Errorf("worker is not configured"), false, "", "", false
+	}
+	prompt := strings.TrimSpace(task.Prompt)
+	sessionEnv := cloneMap(env)
+	isFirst := true
+
+	outputParser, _ := runner.(OutputParsingRunner)
+	var turnBuf bytes.Buffer
+	var approvalOutputPersisted bool
+	stateBridge := newSessionStateBridge(r.worker)
+	subagents := newSubagentWatcher(r.worker)
+	waiter := newFollowupInputWaiter(r.worker)
+
+	for prompt != "" {
+		if ctx.Err() != nil {
+			return ctx.Err(), false, "", "", approvalOutputPersisted
+		}
+
+		stateBridge.setRunInteractionState(ctx, task, types.RunInteractionStateWorking)
+		if !isFirst {
+			stateBridge.setOriginTaskState(ctx, task, types.TaskLiveUpdate{
+				State: types.AgentTaskStateRunning,
+			})
+		}
+
+		turnOut := stdout
+		if outputParser != nil {
+			turnBuf.Reset()
+			turnOut = io.MultiWriter(stdout, &turnBuf)
+		}
+
+		if isFirst {
+			if err := r.executeFirstTurn(ctx, task, sandboxID, runner, sessionEnv, turnOut, prompt); err != nil {
+				return err, false, "", "", approvalOutputPersisted
+			}
+			isFirst = false
+		} else {
+			if err := r.executeTurn(ctx, task, sandboxID, runner, sessionEnv, turnOut, prompt, TurnArgModeFollowup); err != nil {
+				return err, false, "", "", approvalOutputPersisted
+			}
+		}
+		signalActivity(activityCh)
+
+		if subagents.waitForSubagents(ctx, task, sandboxID, activityCh) == subagentFinished {
+			if err := r.executeTurn(
+				ctx,
+				task,
+				sandboxID,
+				runner,
+				sessionEnv,
+				turnOut,
+				"Your background tasks / subagents have completed. Please collect and report their results.",
+				TurnArgModeFollowup,
+			); err != nil {
+				return err, false, "", "", approvalOutputPersisted
+			}
+			signalActivity(activityCh)
+		}
+
+		var needsInput bool
+		var inputKind types.InputKind
+		var waitingSummary string
+		var approvalAssistantMessage string
+		var blockerOutputIDs []string
+
+		if outputParser != nil {
+			var err error
+			needsInput, inputKind, approvalAssistantMessage, err = outputParser.ParseTurnOutput(turnBuf.Bytes())
+			waitingSummary = approvalAssistantMessage
+			if err != nil {
+				addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to parse turn output")
+			}
+			if needsInput {
+				inputKind = classifyNeedsInputKindWithFallback(
+					ctx,
+					inputKind,
+					approvalAssistantMessage,
+					bamlEnv,
+					classifyNeedsInputKindWithBAML,
+				)
+			}
+			if needsInput && inputKind == types.InputKindApproveReject {
+				if summary := r.worker.tryBuildApprovalSummary(ctx, approvalAssistantMessage, bamlEnv); summary != "" {
+					waitingSummary = summary
+				}
+			}
+		} else if checkNeedsInput != nil {
+			needsInput, inputKind, waitingSummary, approvalAssistantMessage = checkNeedsInput(prompt)
+		}
+
+		if !needsInput {
+			if pending := waiter.claimPendingInput(ctx, task); pending != "" {
+				prompt = pending
+				continue
+			}
+			return nil, false, "", prompt, approvalOutputPersisted
+		}
+
+		if inputKind == types.InputKindApproveReject {
+			blockerOutputIDs, approvalOutputPersisted = persistApprovalOutputBeforeWaiting(
+				ctx, r.worker.gatewayClient, task, tracker, prompt, approvalAssistantMessage, bamlEnv,
+			)
+		}
+		stateBridge.setRunInteractionState(ctx, task, types.RunInteractionStateWaitingForInput)
+		stateBridge.setOriginTaskState(ctx, task, types.TaskLiveUpdate{
+			State:   types.AgentTaskStateWaiting,
+			Blocker: buildWaitingBlockerSpec(task, inputKind, waitingSummary, approvalAssistantMessage, blockerOutputIDs),
+		})
+		prompt = waiter.waitForFollowupInput(ctx, task, DefaultBetweenTurnsTimeout, activityCh)
+		if prompt == "" {
+			return nil, true, inputKind, "", approvalOutputPersisted
+		}
+	}
+	return nil, true, "", "", approvalOutputPersisted
+}
+
+func (r workerSessionRunner) executeFirstTurn(
+	ctx context.Context,
+	task types.RunExecution,
+	sandboxID string,
+	runner TurnRunner,
+	env map[string]string,
+	stdout io.Writer,
+	prompt string,
 ) error {
 	strategies := buildFirstTurnStrategies(env)
-	for i, s := range strategies {
-		err := w.executeTurn(ctx, task, sandboxID, runner, env, stdout, prompt, s.mode)
+	for i, strategy := range strategies {
+		err := r.executeTurn(ctx, task, sandboxID, runner, env, stdout, prompt, strategy.mode)
 		if err == nil {
 			return nil
 		}
@@ -902,43 +1129,36 @@ func (w *Worker) executeFirstTurn(
 		if i == len(strategies)-1 {
 			return err
 		}
-		addTaskExecutionContext(log.Warn().Err(err).Str("mode", string(s.mode)), task).
+		addTaskExecutionContext(log.Warn().Err(err).Str("mode", string(strategy.mode)), task).
 			Msg("first-turn strategy failed, trying next")
-		if s.mode == TurnArgModeFirstResumeByID {
+		if strategy.mode == TurnArgModeFirstResumeByID {
 			delete(env, agentSessionIDEnvKey)
 		}
 	}
 	return fmt.Errorf("no first-turn strategies")
 }
 
-func (w *Worker) executeTurn(
-	ctx context.Context, task types.RunExecution, sandboxID string,
-	runner TurnRunner, env map[string]string, stdout io.Writer,
-	prompt string, mode TurnArgMode,
+func (r workerSessionRunner) executeTurn(
+	ctx context.Context,
+	task types.RunExecution,
+	sandboxID string,
+	runner TurnRunner,
+	env map[string]string,
+	stdout io.Writer,
+	prompt string,
+	mode TurnArgMode,
 ) error {
-	return w.sandboxManager.ExecPTY(ctx, sandboxID, runner.BuildTurnArgs(prompt, env, mode), env, stdout)
-}
-
-func (w *Worker) runGenericPTYSession(ctx context.Context, task types.RunExecution, sandboxID string, stdout io.Writer, _ chan<- struct{}) error {
-	return w.sandboxManager.AttachPTY(ctx, sandboxID, nil, stdout)
-}
-
-type firstTurnStrategy struct {
-	mode TurnArgMode
-}
-
-func buildFirstTurnStrategies(env map[string]string) []firstTurnStrategy {
-	resume := strings.ToLower(strings.TrimSpace(env[agentResumeSessionEnvKey]))
-	if resume != "1" && resume != "true" && resume != "yes" && resume != "on" {
-		return []firstTurnStrategy{{mode: TurnArgModeFirstStart}}
+	if r.worker == nil || r.worker.sandboxManager == nil {
+		return fmt.Errorf("sandbox manager is not configured")
 	}
-	if strings.TrimSpace(env[agentSessionIDEnvKey]) != "" {
-		return []firstTurnStrategy{
-			{mode: TurnArgModeFirstResumeByID},
-			{mode: TurnArgModeFirstResumeLatest},
-		}
+	return r.worker.sandboxManager.ExecPTY(ctx, sandboxID, runner.BuildTurnArgs(prompt, env, mode), env, stdout)
+}
+
+func (r workerSessionRunner) runGenericPTYSession(ctx context.Context, task types.RunExecution, sandboxID string, stdout io.Writer, _ chan<- struct{}) error {
+	if r.worker == nil || r.worker.sandboxManager == nil {
+		return fmt.Errorf("sandbox manager is not configured")
 	}
-	return []firstTurnStrategy{{mode: TurnArgModeFirstResumeLatest}}
+	return r.worker.sandboxManager.AttachPTY(ctx, sandboxID, nil, stdout)
 }
 
 // ---------------------------------------------------------------------------
@@ -976,6 +1196,55 @@ func signalActivity(ch chan<- struct{}) {
 // ---------------------------------------------------------------------------
 // Terminal output writer
 // ---------------------------------------------------------------------------
+
+// ringBuffer is a fixed-size circular byte buffer that retains the most recent
+// N bytes written to it. It is only used to preserve interactive session text
+// for follow-up and approval classifiers.
+type ringBuffer struct {
+	buf  []byte
+	pos  int
+	full bool
+}
+
+func newRingBuffer(size int) *ringBuffer {
+	return &ringBuffer{buf: make([]byte, size)}
+}
+
+func (r *ringBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if n == 0 {
+		return 0, nil
+	}
+	cap := len(r.buf)
+	if n >= cap {
+		copy(r.buf, p[n-cap:])
+		r.pos = 0
+		r.full = true
+		return n, nil
+	}
+	space := cap - r.pos
+	if n <= space {
+		copy(r.buf[r.pos:], p)
+	} else {
+		copy(r.buf[r.pos:], p[:space])
+		copy(r.buf, p[space:])
+	}
+	r.pos = (r.pos + n) % cap
+	if !r.full && r.pos < n {
+		r.full = true
+	}
+	return n, nil
+}
+
+func (r *ringBuffer) Bytes() []byte {
+	if !r.full {
+		return append([]byte(nil), r.buf[:r.pos]...)
+	}
+	out := make([]byte, len(r.buf))
+	n := copy(out, r.buf[r.pos:])
+	copy(out[n:], r.buf[:r.pos])
+	return out
+}
 
 type terminalOutputWriter struct {
 	ctx          context.Context

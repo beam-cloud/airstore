@@ -2,45 +2,38 @@ package worker
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
-	"unicode/utf8"
 
 	"github.com/google/uuid"
 
-	gatewayclient "github.com/beam-cloud/airstore/pkg/gateway/client"
 	"github.com/beam-cloud/airstore/pkg/types"
 	agentsignal "github.com/beam-cloud/airstore/pkg/worker/agentsignal/baml_client"
 	signaltypes "github.com/beam-cloud/airstore/pkg/worker/agentsignal/baml_client/types"
 	"github.com/rs/zerolog/log"
 )
 
+// OutputAnalyzer decides which log lines may contain extractable outputs and
+// prepares them for the BAML classifier. Each runner provides its own
+// implementation because log formats differ across providers.
+type OutputAnalyzer interface {
+	ShouldAnalyze(payload map[string]any) bool
+	PrepareInput(payload map[string]any) (toolName, toolInput, toolResult string, ok bool)
+}
+
 const (
-	keyContent     = "content"
-	keySummary     = "summary"
-	keyPath        = "path"
-	keyURI         = "uri"
-	keyTags        = "tags"
-	keyDeeplink    = "deeplink"
-	keySourceTitle = "source_title"
-	keySourceURL   = "source_url"
-
-	// Internal bookkeeping keys — prefixed with _ so the mapper skips them.
-	keyTool            = "_tool"
-	keySource          = "_source"
-	keySourcePrompt    = "_source_prompt"
-	keySourceInput     = "_source_input"
-	keySourceInputText = "_source_input_text"
-	keySourceResult    = "_source_result"
-	keySourceExcerpt   = "_source_excerpt"
-	keyBatchID         = "_batch_id"
-
-	sourceAssistantResponse = "assistant_response"
+	maxAnalyzedToolInputLen  = 8000
+	maxAnalyzedToolResultLen = 8000
 )
+
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen]
+}
 
 // AnalyzerWriter is an io.Writer that inspects agent stdout lines,
 // runs qualifying tool completions through the BAML ExtractOutputs
@@ -51,7 +44,7 @@ const (
 type AnalyzerWriter struct {
 	ctx         context.Context
 	analyzer    OutputAnalyzer
-	client      *gatewayclient.GatewayClient
+	client      taskOutputClient
 	workspaceID uint32
 	taskID      string
 	runID       string
@@ -72,20 +65,10 @@ type analyzerJob struct {
 	toolResult string
 }
 
-func NewAnalyzerWriter(
-	ctx context.Context,
-	analyzer OutputAnalyzer,
-	client *gatewayclient.GatewayClient,
-	task types.RunExecution,
-	bamlEnv map[string]string,
-) *AnalyzerWriter {
-	return newAnalyzerWriter(ctx, analyzer, client, task, bamlEnv, nil)
-}
-
 func newAnalyzerWriter(
 	ctx context.Context,
 	analyzer OutputAnalyzer,
-	client *gatewayclient.GatewayClient,
+	client taskOutputClient,
 	task types.RunExecution,
 	bamlEnv map[string]string,
 	tracker *taskOutputTracker,
@@ -244,8 +227,7 @@ func extractDeepLink(toolResult string) string {
 }
 
 // ---------------------------------------------------------------------------
-// extractedResult wraps a BAML ExtractedOutput and provides methods for
-// deriving output candidates. Same pattern as Artifact wrapping TaskOutput.
+// extractedResult wraps a BAML ExtractedOutput and derives output candidates.
 // ---------------------------------------------------------------------------
 
 type extractedResult struct {
@@ -387,310 +369,6 @@ func (w *AnalyzerWriter) createOutputWithBatch(out signaltypes.ExtractedOutput, 
 	}
 }
 
-type finalResponseExtractor func(
-	ctx context.Context,
-	userMessage *string,
-	assistantMessage string,
-	bamlEnv map[string]string,
-) ([]signaltypes.ExtractedOutput, error)
-
-type blockingOutputMetadata struct {
-	Kind            string
-	InputKind       types.InputKind
-	WaitGroupID     string
-	ApprovalSurface bool
-}
-
-type assistantResponsePersistOptions struct {
-	Extract       finalResponseExtractor
-	MinLen        int
-	Status        string
-	Blocking      *blockingOutputMetadata
-	Filter        func(signaltypes.ExtractedOutput) bool
-	FallbackTitle string
-}
-
-func defaultFinalResponseExtractor(
-	ctx context.Context,
-	userMessage *string,
-	assistantMessage string,
-	bamlEnv map[string]string,
-) (out []signaltypes.ExtractedOutput, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("ExtractFinalResponseOutput panicked: %v", r)
-		}
-	}()
-	return agentsignal.ExtractFinalResponseOutput(
-		ctx, userMessage, assistantMessage,
-		agentsignal.WithEnv(bamlEnv),
-	)
-}
-
-func defaultApprovalResponseExtractor(
-	ctx context.Context,
-	_ *string,
-	assistantMessage string,
-	bamlEnv map[string]string,
-) (out []signaltypes.ExtractedOutput, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("ExtractApprovalOutput panicked: %v", r)
-		}
-	}()
-	return agentsignal.ExtractApprovalOutput(
-		ctx, assistantMessage,
-		agentsignal.WithEnv(bamlEnv),
-	)
-}
-
-const minResponseOutputLen = 200
-const minApprovalOutputLen = 40
-
-func persistAssistantResponseOutputs(
-	ctx context.Context,
-	client taskOutputClient,
-	task types.RunExecution,
-	tracker *taskOutputTracker,
-	userMessage *string,
-	assistantMessage string,
-	bamlEnv map[string]string,
-	opts assistantResponsePersistOptions,
-) (bool, error) {
-	if client == nil {
-		return false, nil
-	}
-	assistantMessage = strings.TrimSpace(sanitizeUTF8(assistantMessage))
-	if len(assistantMessage) < opts.MinLen {
-		return false, nil
-	}
-	if userMessage != nil {
-		sanitized := sanitizeUTF8(*userMessage)
-		userMessage = &sanitized
-	}
-
-	extract := opts.Extract
-	if extract == nil {
-		extract = defaultFinalResponseExtractor
-	}
-	outputs, err := extract(ctx, userMessage, assistantMessage, bamlEnv)
-	if err != nil {
-		return false, err
-	}
-
-	ids := outputIDsFromTask(task)
-	if ids.taskID == "" {
-		return false, nil
-	}
-
-	count := 0
-	for _, out := range outputs {
-		if opts.Filter != nil && !opts.Filter(out) {
-			continue
-		}
-		r := extractedResult{out}
-		if !r.isNone() && r.title() != "" && r.content() != "" {
-			count++
-		}
-	}
-
-	var batchID string
-	if count > 1 {
-		batchID = uuid.NewString()
-	}
-
-	promptMeta := ""
-	if userMessage != nil {
-		promptMeta = strings.TrimSpace(*userMessage)
-	}
-
-	if count == 0 {
-		fallback := fallbackAssistantResponseCandidate(assistantMessage, promptMeta, opts)
-		if fallback == nil {
-			return false, nil
-		}
-		if _, err := publishOutputCandidate(ctx, client, ids, tracker, *fallback); err != nil {
-			log.Warn().Err(err).Str("task", ids.taskID).Str("title", fallback.Title).
-				Msg("assistant response fallback output create failed")
-			return false, nil
-		}
-		return true, nil
-	}
-
-	published := 0
-	publishedAny := false
-	for _, out := range outputs {
-		if opts.Filter != nil && !opts.Filter(out) {
-			continue
-		}
-		r := extractedResult{out}
-		if r.isNone() || r.title() == "" || r.content() == "" {
-			continue
-		}
-
-		role := types.TaskOutputArtifactRoleSupporting
-		if published == 0 {
-			role = types.TaskOutputArtifactRolePrimary
-		}
-		published++
-
-		c := r.candidate(role)
-		if c.OutputType == "" {
-			c.OutputType = "text"
-		}
-		c.Data[keyContent] = r.content()
-		c.Metadata[keySource] = sourceAssistantResponse
-		if promptMeta != "" {
-			c.Metadata[keySourcePrompt] = promptMeta
-		}
-		if batchID != "" {
-			c.Metadata[keyBatchID] = batchID
-		}
-		if opts.Status != "" {
-			c.Status = opts.Status
-		}
-		if opts.Blocking != nil {
-			applyBlockingMetadata(c.Metadata, opts.Blocking)
-		}
-
-		if _, err := publishOutputCandidate(ctx, client, ids, tracker, c); err != nil {
-			log.Warn().Err(err).Str("task", ids.taskID).Str("title", r.title()).
-				Msg("assistant response output create failed")
-			continue
-		}
-		publishedAny = true
-	}
-	return publishedAny, nil
-}
-
-func fallbackAssistantResponseCandidate(
-	assistantMessage, promptMeta string,
-	opts assistantResponsePersistOptions,
-) *outputCandidate {
-	if opts.Blocking == nil {
-		return nil
-	}
-	title := strings.TrimSpace(opts.FallbackTitle)
-	if title == "" {
-		return nil
-	}
-	candidate := &outputCandidate{
-		OutputType: "text",
-		Title:      title,
-		Data: map[string]any{
-			keyContent: assistantMessage,
-		},
-		Metadata: map[string]any{
-			keySource: sourceAssistantResponse,
-		},
-		Role:   types.TaskOutputArtifactRolePrimary,
-		Status: opts.Status,
-	}
-	if promptMeta != "" {
-		candidate.Metadata[keySourcePrompt] = promptMeta
-	}
-	applyBlockingMetadata(candidate.Metadata, opts.Blocking)
-	return candidate
-}
-
-func isPublishableFinalResponseOutput(out signaltypes.ExtractedOutput) bool {
-	switch out.Kind {
-	case signaltypes.OutputKindEMAIL_DRAFT, signaltypes.OutputKindEMAIL_SENT:
-		return false
-	default:
-		return true
-	}
-}
-
-func persistFinalResponseOutput(
-	ctx context.Context,
-	client taskOutputClient,
-	task types.RunExecution,
-	tracker *taskOutputTracker,
-	userMessage *string,
-	assistantMessage string,
-	bamlEnv map[string]string,
-	extract finalResponseExtractor,
-) (bool, error) {
-	if extract == nil {
-		extract = defaultFinalResponseExtractor
-	}
-	return persistAssistantResponseOutputs(
-		ctx,
-		client,
-		task,
-		tracker,
-		userMessage,
-		assistantMessage,
-		bamlEnv,
-		assistantResponsePersistOptions{
-			Extract: extract,
-			MinLen:  minResponseOutputLen,
-			Filter:  isPublishableFinalResponseOutput,
-		},
-	)
-}
-
-func persistApprovalResponseOutput(
-	ctx context.Context,
-	client taskOutputClient,
-	task types.RunExecution,
-	tracker *taskOutputTracker,
-	userMessage *string,
-	assistantMessage string,
-	bamlEnv map[string]string,
-) (bool, error) {
-	return persistAssistantResponseOutputs(
-		ctx,
-		client,
-		task,
-		tracker,
-		userMessage,
-		assistantMessage,
-		bamlEnv,
-		assistantResponsePersistOptions{
-			Extract: defaultApprovalResponseExtractor,
-			MinLen:  minApprovalOutputLen,
-			Status:  types.TaskOutputStatusPending,
-			Blocking: &blockingOutputMetadata{
-				Kind:            types.TaskOutputBlockingKindApproval,
-				InputKind:       types.InputKindApproveReject,
-				WaitGroupID:     approvalWaitGroupID(task, assistantMessage),
-				ApprovalSurface: true,
-			},
-			FallbackTitle: "Approval Required",
-		},
-	)
-}
-
-func approvalWaitGroupID(task types.RunExecution, assistantMessage string) string {
-	ids := outputIDsFromTask(task)
-	seed := firstNonEmptyTrimmed(ids.taskID, ids.runID, task.ExternalId)
-	if seed == "" {
-		return ""
-	}
-	sum := sha256.Sum256([]byte(seed + "\n" + strings.TrimSpace(sanitizeUTF8(assistantMessage))))
-	return hex.EncodeToString(sum[:8])
-}
-
-func applyBlockingMetadata(metadata map[string]any, block *blockingOutputMetadata) {
-	if block == nil || metadata == nil {
-		return
-	}
-	if kind := strings.TrimSpace(block.Kind); kind != "" {
-		metadata[types.TaskOutputMetadataBlockingKind] = kind
-	}
-	if inputKind := strings.TrimSpace(string(block.InputKind)); inputKind != "" {
-		metadata[types.TaskOutputMetadataInputKind] = inputKind
-	}
-	if waitGroupID := strings.TrimSpace(block.WaitGroupID); waitGroupID != "" {
-		metadata[types.TaskOutputMetadataWaitGroupID] = waitGroupID
-	}
-	if block.ApprovalSurface {
-		metadata[types.TaskOutputMetadataApprovalUI] = true
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -708,13 +386,6 @@ func (w *AnalyzerWriter) callExtractOutputs(job analyzerJob) (outputs []signalty
 		w.ctx, job.toolName, job.toolInput, job.toolResult,
 		agentsignal.WithEnv(w.bamlEnv),
 	)
-}
-
-func sanitizeUTF8(s string) string {
-	if utf8.ValidString(s) {
-		return s
-	}
-	return strings.ToValidUTF8(s, "\uFFFD")
 }
 
 func derefStr(p *string) string {

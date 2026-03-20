@@ -85,6 +85,73 @@ func inferProviderFromModel(env map[string]string) string {
 	return ""
 }
 
+func runnerProviderFromEnv(env map[string]string) string {
+	if env == nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(env[agentProviderEnvKey]))
+}
+
+// promptEntrypointBuilder constructs a command-line argv for a CLI runner.
+type promptEntrypointBuilder struct {
+	binary string
+	args   []string
+}
+
+func newPromptEntrypointBuilder(binary string) *promptEntrypointBuilder {
+	return &promptEntrypointBuilder{
+		binary: strings.TrimSpace(binary),
+		args:   []string{},
+	}
+}
+
+func (b *promptEntrypointBuilder) withFlag(flag string) *promptEntrypointBuilder {
+	flag = strings.TrimSpace(flag)
+	if flag == "" {
+		return b
+	}
+	b.args = append(b.args, flag)
+	return b
+}
+
+func (b *promptEntrypointBuilder) withKeyValue(flag, value string) *promptEntrypointBuilder {
+	flag = strings.TrimSpace(flag)
+	value = strings.TrimSpace(value)
+	if flag == "" || value == "" {
+		return b
+	}
+	b.args = append(b.args, flag, value)
+	return b
+}
+
+func (b *promptEntrypointBuilder) withPrompt(prompt string) *promptEntrypointBuilder {
+	if strings.TrimSpace(prompt) == "" {
+		return b
+	}
+	b.args = append(b.args, "-p", prompt)
+	return b
+}
+
+func (b *promptEntrypointBuilder) build() []string {
+	argv := make([]string, 0, len(b.args)+1)
+	argv = append(argv, b.binary)
+	argv = append(argv, b.args...)
+	return argv
+}
+
+func applySystemPromptFlags(builder *promptEntrypointBuilder, env map[string]string) {
+	sp := strings.TrimSpace(env[agentSystemPromptEnvKey])
+	if sp == "" {
+		return
+	}
+	mode := strings.ToLower(strings.TrimSpace(env[agentSystemPromptModeEnvKey]))
+	if mode == systemPromptModeReplace {
+		builder.withKeyValue("--system-prompt", sp)
+	} else {
+		builder.withKeyValue("--append-system-prompt", sp)
+	}
+}
+
 type TurnArgMode string
 
 const (
