@@ -2,6 +2,8 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -57,6 +59,33 @@ func (r *subagentProbeTestRuntime) Restore(_ context.Context, _ string, _ *runti
 	return 0, nil
 }
 func (r *subagentProbeTestRuntime) Close() error { return nil }
+
+type stubSessionLeaseStore struct {
+	acquireFunc func(context.Context, uint, string, string, time.Duration) (bool, error)
+	renewFunc   func(context.Context, uint, string, string, time.Duration) (bool, error)
+	ownerFunc   func(context.Context, uint, string) (string, error)
+}
+
+func (s stubSessionLeaseStore) AcquireSessionLease(ctx context.Context, workspaceID uint, sessionID, ownerID string, ttl time.Duration) (bool, error) {
+	if s.acquireFunc != nil {
+		return s.acquireFunc(ctx, workspaceID, sessionID, ownerID, ttl)
+	}
+	return false, nil
+}
+
+func (s stubSessionLeaseStore) RenewSessionLease(ctx context.Context, workspaceID uint, sessionID, ownerID string, ttl time.Duration) (bool, error) {
+	if s.renewFunc != nil {
+		return s.renewFunc(ctx, workspaceID, sessionID, ownerID, ttl)
+	}
+	return false, nil
+}
+
+func (s stubSessionLeaseStore) GetSessionLeaseOwner(ctx context.Context, workspaceID uint, sessionID string) (string, error) {
+	if s.ownerFunc != nil {
+		return s.ownerFunc(ctx, workspaceID, sessionID)
+	}
+	return "", nil
+}
 
 func newTestWorkerForSubagents(rt runtimepkg.Runtime) *Worker {
 	return &Worker{
@@ -291,6 +320,156 @@ func TestClassifyNeedsInputKindWithFallback_PreservesCurrentKindWithoutAssistant
 	}
 }
 
+func TestClassifyNeedsInputFromAssistantMessage_UpgradesCompleteTurn(t *testing.T) {
+	classify := func(_ context.Context, _ string, _ map[string]string) types.InputKind {
+		return types.InputKindApproveReject
+	}
+
+	needsInput, kind := classifyNeedsInputFromAssistantMessage(
+		context.Background(),
+		"Awaiting your approval before I proceed.",
+		nil,
+		classify,
+	)
+	if !needsInput {
+		t.Fatal("expected classifier to upgrade turn to needs input")
+	}
+	if kind != types.InputKindApproveReject {
+		t.Fatalf("kind = %q, want %q", kind, types.InputKindApproveReject)
+	}
+}
+
+func TestBlockingInputKindFromArtifacts_UsesBlockingMetadata(t *testing.T) {
+	needsInput, kind := blockingInputKindFromArtifacts([]TurnArtifact{
+		{
+			Title: "Draft response",
+			Blocking: &types.TaskOutputBlockingMetadata{
+				Kind:            types.TaskOutputBlockingKindApproval,
+				InputKind:       types.InputKindApproveReject,
+				ApprovalSurface: true,
+			},
+		},
+	})
+	if !needsInput {
+		t.Fatal("expected blocking artifact to require input")
+	}
+	if kind != types.InputKindApproveReject {
+		t.Fatalf("kind = %q, want %q", kind, types.InputKindApproveReject)
+	}
+}
+
+func TestPersistParsedTurnArtifactsPublishesBlockingArtifacts(t *testing.T) {
+	client := &captureOutputClient{}
+	task := testRunExecution()
+	tracker := &taskOutputTracker{}
+
+	outputIDs, created := persistParsedTurnArtifacts(
+		context.Background(),
+		client,
+		task,
+		tracker,
+		"Draft a reply for review.",
+		"Awaiting your approval before sending.",
+		[]TurnArtifact{
+			{
+				OutputType: types.TaskOutputTypeEmail,
+				Title:      "Draft reply",
+				Summary:    "Drafted a reply for approval.",
+				Content:    "Hi Luke,\n\nDraft body.\n",
+				Data: map[string]any{
+					"to":      "luke@slai.io",
+					"subject": "Draft subject",
+				},
+				Metadata: map[string]any{
+					types.TaskOutputMetadataArtifactKey: "email-draft",
+				},
+				Blocking: &types.TaskOutputBlockingMetadata{
+					Kind:            types.TaskOutputBlockingKindApproval,
+					InputKind:       types.InputKindApproveReject,
+					ApprovalSurface: true,
+				},
+			},
+			{
+				OutputType: "text",
+				Title:      "Work log",
+				Content:    "Internal note",
+			},
+		},
+	)
+	if !created {
+		t.Fatal("expected blocking artifact to be published")
+	}
+	if got := len(outputIDs); got != 1 {
+		t.Fatalf("blocking output id count = %d, want 1", got)
+	}
+	if got := len(client.createReqs); got != 2 {
+		t.Fatalf("create req count = %d, want 2", got)
+	}
+
+	req := client.createReqs[0]
+	if got := req.Status; got != types.TaskOutputStatusPending {
+		t.Fatalf("status = %q, want pending", got)
+	}
+
+	var metadata map[string]any
+	if err := json.Unmarshal([]byte(req.MetadataJson), &metadata); err != nil {
+		t.Fatalf("unmarshal metadata json: %v", err)
+	}
+	if got := metadata[types.TaskOutputMetadataBlockingKind]; got != types.TaskOutputBlockingKindApproval {
+		t.Fatalf("blocking_kind = %#v, want %q", got, types.TaskOutputBlockingKindApproval)
+	}
+	if got := metadata[types.TaskOutputMetadataInputKind]; got != string(types.InputKindApproveReject) {
+		t.Fatalf("input_kind = %#v, want %q", got, types.InputKindApproveReject)
+	}
+	if got := metadata[types.TaskOutputMetadataApprovalUI]; got != true {
+		t.Fatalf("approval_surface = %#v, want true", got)
+	}
+	if got := metadata[keySourcePrompt]; got != "Draft a reply for review." {
+		t.Fatalf("source prompt = %#v", got)
+	}
+
+	reusedIDs, reused := persistParsedTurnArtifacts(
+		context.Background(),
+		client,
+		task,
+		tracker,
+		"Draft a reply for review.",
+		"Awaiting your approval before sending.",
+		[]TurnArtifact{
+			{
+				OutputType: types.TaskOutputTypeEmail,
+				Title:      "Draft reply",
+				Summary:    "Drafted a reply for approval.",
+				Content:    "Hi Luke,\n\nDraft body.\n",
+				Data: map[string]any{
+					"to":      "luke@slai.io",
+					"subject": "Draft subject",
+				},
+				Metadata: map[string]any{
+					types.TaskOutputMetadataArtifactKey: "email-draft",
+				},
+				Blocking: &types.TaskOutputBlockingMetadata{
+					Kind:            types.TaskOutputBlockingKindApproval,
+					InputKind:       types.InputKindApproveReject,
+					ApprovalSurface: true,
+				},
+			},
+		},
+	)
+	if !reused {
+		t.Fatal("expected equivalent blocking artifact to be treated as handled")
+	}
+	if got := len(reusedIDs); got != 1 {
+		t.Fatalf("reused blocking output id count = %d, want 1", got)
+	}
+	if reusedIDs[0] != outputIDs[0] {
+		t.Fatalf("expected stable blocking output id, got %q then %q", outputIDs[0], reusedIDs[0])
+	}
+	if got := len(client.createReqs); got != 2 {
+		t.Fatalf("create req count after reuse = %d, want 2", got)
+	}
+}
+
 func TestBuildWakePlannerContextReadsActiveSkillAndHandoffFiles(t *testing.T) {
 	mountSource := t.TempDir()
 	skillDir := filepath.Join(mountSource, "skills", "prospect-followup")
@@ -342,5 +521,116 @@ func TestExtractSessionAssistantMessagePrefersParsedCompletionSummary(t *testing
 	want := "Sent the outreach email to luke@beam.cloud and should check for replies later."
 	if got != want {
 		t.Fatalf("extractSessionAssistantMessage = %q, want %q", got, want)
+	}
+}
+
+func TestNextFollowupPromptReturnsContextErrorWhenCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	prompt, err := nextFollowupPrompt(ctx, "")
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got prompt=%q err=%v", prompt, err)
+	}
+}
+
+func TestNextFollowupPromptAllowsWaitingWhenContextActive(t *testing.T) {
+	prompt, err := nextFollowupPrompt(context.Background(), "")
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if prompt != "" {
+		t.Fatalf("expected empty prompt, got %q", prompt)
+	}
+}
+
+func TestSubagentOutcomeErrReturnsContextErrorForCancelledOutcome(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := subagentOutcomeErr(ctx, subagentSessionCancelled)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got %v", err)
+	}
+}
+
+func TestRefreshSessionLeaseStateHeldOnSuccessfulRenew(t *testing.T) {
+	store := stubSessionLeaseStore{
+		renewFunc: func(context.Context, uint, string, string, time.Duration) (bool, error) {
+			return true, nil
+		},
+	}
+
+	status, err := refreshSessionLeaseState(store, 42, "session-1", "owner-1")
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if status != sessionLeaseRefreshHeld {
+		t.Fatalf("status = %v, want %v", status, sessionLeaseRefreshHeld)
+	}
+}
+
+func TestRefreshSessionLeaseStateReacquiresExpiredLease(t *testing.T) {
+	var acquireCalls atomic.Int32
+	store := stubSessionLeaseStore{
+		renewFunc: func(context.Context, uint, string, string, time.Duration) (bool, error) {
+			return false, nil
+		},
+		ownerFunc: func(context.Context, uint, string) (string, error) {
+			return "", nil
+		},
+		acquireFunc: func(context.Context, uint, string, string, time.Duration) (bool, error) {
+			acquireCalls.Add(1)
+			return true, nil
+		},
+	}
+
+	status, err := refreshSessionLeaseState(store, 42, "session-1", "owner-1")
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if status != sessionLeaseRefreshRecovered {
+		t.Fatalf("status = %v, want %v", status, sessionLeaseRefreshRecovered)
+	}
+	if got := acquireCalls.Load(); got != 1 {
+		t.Fatalf("expected one reacquire attempt, got %d", got)
+	}
+}
+
+func TestRefreshSessionLeaseStateDetectsOwnerChange(t *testing.T) {
+	store := stubSessionLeaseStore{
+		renewFunc: func(context.Context, uint, string, string, time.Duration) (bool, error) {
+			return false, nil
+		},
+		ownerFunc: func(context.Context, uint, string) (string, error) {
+			return "other-owner", nil
+		},
+	}
+
+	status, err := refreshSessionLeaseState(store, 42, "session-1", "owner-1")
+	if status != sessionLeaseRefreshLost {
+		t.Fatalf("status = %v, want %v", status, sessionLeaseRefreshLost)
+	}
+	if err == nil || !strings.Contains(err.Error(), "other-owner") {
+		t.Fatalf("expected owner change error, got %v", err)
+	}
+}
+
+func TestRefreshSessionLeaseStateRetriesTransientFailure(t *testing.T) {
+	store := stubSessionLeaseStore{
+		renewFunc: func(context.Context, uint, string, string, time.Duration) (bool, error) {
+			return false, fmt.Errorf("redis timeout")
+		},
+		ownerFunc: func(context.Context, uint, string) (string, error) {
+			return "", fmt.Errorf("redis timeout")
+		},
+	}
+
+	status, err := refreshSessionLeaseState(store, 42, "session-1", "owner-1")
+	if status != sessionLeaseRefreshRetrying {
+		t.Fatalf("status = %v, want %v", status, sessionLeaseRefreshRetrying)
+	}
+	if err == nil || !strings.Contains(err.Error(), "redis timeout") {
+		t.Fatalf("expected transient redis error, got %v", err)
 	}
 }

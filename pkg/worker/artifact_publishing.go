@@ -69,9 +69,10 @@ func outputIDsFromTask(task types.RunExecution) taskOutputIDs {
 }
 
 type trackedOutputSummary struct {
-	OutputID  string
-	Identity  string
-	EntityKey string
+	OutputID    string
+	Identity    string
+	EntityKey   string
+	Fingerprint string
 }
 
 type taskOutputTracker struct {
@@ -81,28 +82,36 @@ type taskOutputTracker struct {
 	outputByIdentity map[string]trackedOutputSummary
 }
 
-func (t *taskOutputTracker) HasEquivalent(candidate outputCandidate) bool {
+func (t *taskOutputTracker) EquivalentOutputID(candidate outputCandidate) (string, bool) {
 	if t == nil {
-		return false
+		return "", false
 	}
 	identity := candidate.identityKey()
 	key := candidate.artifactKey()
+	fingerprint := candidate.fingerprintKey()
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if identity != "" {
-		if _, ok := t.seen[identity]; ok {
-			if summary, hasServerID := t.outputByIdentity[identity]; hasServerID && summary.OutputID != "" {
-				return false
+		if summary, ok := t.outputByIdentity[identity]; ok {
+			switch {
+			case summary.Fingerprint != "" && summary.Fingerprint == fingerprint:
+				return summary.OutputID, true
+			case summary.OutputID == "":
+				return "", true
+			default:
+				return "", false
 			}
-			return true
+		}
+		if _, ok := t.seen[identity]; ok {
+			return "", true
 		}
 	}
 	if key != "" && candidate.isPrimaryDeliverable() {
 		_, ok := t.primary[key]
-		return ok
+		return "", ok
 	}
-	return false
+	return "", false
 }
 
 func (t *taskOutputTracker) RememberWithID(candidate outputCandidate, serverID string) {
@@ -111,6 +120,7 @@ func (t *taskOutputTracker) RememberWithID(candidate outputCandidate, serverID s
 	}
 	identity := candidate.identityKey()
 	key := candidate.artifactKey()
+	fingerprint := candidate.fingerprintKey()
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -126,9 +136,10 @@ func (t *taskOutputTracker) RememberWithID(candidate outputCandidate, serverID s
 	if identity != "" {
 		t.seen[identity] = struct{}{}
 		t.outputByIdentity[identity] = trackedOutputSummary{
-			OutputID:  serverID,
-			Identity:  identity,
-			EntityKey: candidate.fanOutEntityKey(),
+			OutputID:    serverID,
+			Identity:    identity,
+			EntityKey:   candidate.fanOutEntityKey(),
+			Fingerprint: fingerprint,
 		}
 	}
 	if key != "" && candidate.isPrimaryDeliverable() {
@@ -252,6 +263,41 @@ func (c outputCandidate) artifactKey() string {
 	return normalizeArtifactToken(anyToTrimmedString(c.Metadata[types.TaskOutputMetadataArtifactKey]))
 }
 
+func (c outputCandidate) fingerprintKey() string {
+	materialMetadata := map[string]any{}
+	for _, key := range []string{
+		types.TaskOutputMetadataArtifactKey,
+		types.TaskOutputMetadataArtifactLabel,
+		types.TaskOutputMetadataArtifactKind,
+		types.TaskOutputMetadataArtifactRole,
+		types.TaskOutputMetadataBlockingKind,
+		types.TaskOutputMetadataInputKind,
+		types.TaskOutputMetadataWaitGroupID,
+		types.TaskOutputMetadataApprovalUI,
+	} {
+		if value, ok := c.Metadata[key]; ok {
+			materialMetadata[key] = value
+		}
+	}
+
+	payload := map[string]any{
+		"output_type": strings.TrimSpace(c.OutputType),
+		"title":       strings.TrimSpace(c.Title),
+		"summary":     strings.TrimSpace(c.Summary),
+		"uri":         strings.TrimSpace(c.URI),
+		"path":        strings.TrimSpace(c.Path),
+		"role":        normalizeArtifactRole(c.Role),
+		"status":      strings.TrimSpace(c.Status),
+		"data":        cloneAnyMap(c.Data),
+		"metadata":    materialMetadata,
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
 func (c outputCandidate) artifactRole() string {
 	role := normalizeArtifactRole(anyToTrimmedString(c.Metadata[types.TaskOutputMetadataArtifactRole]))
 	if role != "" {
@@ -358,8 +404,10 @@ func publishOutputCandidate(
 	if !normalized.shouldPersist() {
 		return "", nil
 	}
-	if tracker != nil && tracker.HasEquivalent(normalized) {
-		return "", nil
+	if tracker != nil {
+		if existingID, equivalent := tracker.EquivalentOutputID(normalized); equivalent {
+			return existingID, nil
+		}
 	}
 
 	req, err := normalized.buildRequest(ids)
@@ -457,6 +505,11 @@ type responseArtifactPlan struct {
 	FallbackTitle string
 }
 
+type responsePersistResult struct {
+	OutputIDs []string
+	Handled   bool
+}
+
 func persistAssistantResponseOutputs(
 	ctx context.Context,
 	client taskOutputClient,
@@ -467,6 +520,29 @@ func persistAssistantResponseOutputs(
 	bamlEnv map[string]string,
 	plan responseArtifactPlan,
 ) (bool, error) {
+	result, err := persistAssistantResponseOutputsDetailed(
+		ctx,
+		client,
+		task,
+		tracker,
+		userMessage,
+		assistantMessage,
+		bamlEnv,
+		plan,
+	)
+	return result.Handled, err
+}
+
+func persistAssistantResponseOutputsDetailed(
+	ctx context.Context,
+	client taskOutputClient,
+	task types.RunExecution,
+	tracker *taskOutputTracker,
+	userMessage *string,
+	assistantMessage string,
+	bamlEnv map[string]string,
+	plan responseArtifactPlan,
+) (responsePersistResult, error) {
 	pipeline := newResponseArtifactPipeline(ctx, client, task, tracker)
 	return pipeline.Persist(userMessage, assistantMessage, bamlEnv, plan)
 }
@@ -511,7 +587,28 @@ func persistApprovalResponseOutput(
 	assistantMessage string,
 	bamlEnv map[string]string,
 ) (bool, error) {
-	return persistAssistantResponseOutputs(
+	_, handled, err := persistApprovalResponseOutputDetailed(
+		ctx,
+		client,
+		task,
+		tracker,
+		userMessage,
+		assistantMessage,
+		bamlEnv,
+	)
+	return handled, err
+}
+
+func persistApprovalResponseOutputDetailed(
+	ctx context.Context,
+	client taskOutputClient,
+	task types.RunExecution,
+	tracker *taskOutputTracker,
+	userMessage *string,
+	assistantMessage string,
+	bamlEnv map[string]string,
+) ([]string, bool, error) {
+	result, err := persistAssistantResponseOutputsDetailed(
 		ctx,
 		client,
 		task,
@@ -521,6 +618,7 @@ func persistApprovalResponseOutput(
 		bamlEnv,
 		newApprovalResponseArtifactPlan(task, assistantMessage),
 	)
+	return result.OutputIDs, result.Handled, err
 }
 
 func approvalWaitGroupID(task types.RunExecution, assistantMessage string) string {
@@ -549,13 +647,13 @@ func newResponseArtifactPipeline(ctx context.Context, client taskOutputClient, t
 	}
 }
 
-func (p responseArtifactPipeline) Persist(userMessage *string, assistantMessage string, bamlEnv map[string]string, plan responseArtifactPlan) (bool, error) {
+func (p responseArtifactPipeline) Persist(userMessage *string, assistantMessage string, bamlEnv map[string]string, plan responseArtifactPlan) (responsePersistResult, error) {
 	if p.client == nil {
-		return false, nil
+		return responsePersistResult{}, nil
 	}
 	assistantMessage = strings.TrimSpace(sanitizeUTF8(assistantMessage))
 	if len(assistantMessage) < plan.MinLen {
-		return false, nil
+		return responsePersistResult{}, nil
 	}
 	if userMessage != nil {
 		sanitized := sanitizeUTF8(*userMessage)
@@ -568,10 +666,10 @@ func (p responseArtifactPipeline) Persist(userMessage *string, assistantMessage 
 	}
 	outputs, err := extract(p.ctx, userMessage, assistantMessage, bamlEnv)
 	if err != nil {
-		return false, err
+		return responsePersistResult{}, err
 	}
 	if p.ids.taskID == "" {
-		return false, nil
+		return responsePersistResult{}, nil
 	}
 
 	count := 0
@@ -598,18 +696,23 @@ func (p responseArtifactPipeline) Persist(userMessage *string, assistantMessage 
 	if count == 0 {
 		fallback := fallbackResponseArtifactCandidate(assistantMessage, promptMeta, plan)
 		if fallback == nil {
-			return false, nil
+			return responsePersistResult{}, nil
 		}
-		if _, err := publishOutputCandidate(p.ctx, p.client, p.ids, p.tracker, *fallback); err != nil {
+		outputID, err := publishOutputCandidate(p.ctx, p.client, p.ids, p.tracker, *fallback)
+		if err != nil {
 			log.Warn().Err(err).Str("task", p.ids.taskID).Str("title", fallback.Title).
 				Msg("assistant response fallback output create failed")
-			return false, nil
+			return responsePersistResult{}, nil
 		}
-		return true, nil
+		return responsePersistResult{
+			OutputIDs: appendOutputID(nil, outputID),
+			Handled:   true,
+		}, nil
 	}
 
 	published := 0
 	publishedAny := false
+	var outputIDs []string
 	for _, out := range outputs {
 		if plan.Filter != nil && !plan.Filter(out) {
 			continue
@@ -644,14 +747,19 @@ func (p responseArtifactPipeline) Persist(userMessage *string, assistantMessage 
 			plan.Blocking.Apply(c.Metadata)
 		}
 
-		if _, err := publishOutputCandidate(p.ctx, p.client, p.ids, p.tracker, c); err != nil {
+		outputID, err := publishOutputCandidate(p.ctx, p.client, p.ids, p.tracker, c)
+		if err != nil {
 			log.Warn().Err(err).Str("task", p.ids.taskID).Str("title", r.title()).
 				Msg("assistant response output create failed")
 			continue
 		}
+		outputIDs = appendOutputID(outputIDs, outputID)
 		publishedAny = true
 	}
-	return publishedAny, nil
+	return responsePersistResult{
+		OutputIDs: outputIDs,
+		Handled:   publishedAny,
+	}, nil
 }
 
 func fallbackResponseArtifactCandidate(
@@ -766,6 +874,19 @@ func normalizeArtifactRole(value string) string {
 	default:
 		return ""
 	}
+}
+
+func appendOutputID(outputIDs []string, outputID string) []string {
+	outputID = strings.TrimSpace(outputID)
+	if outputID == "" {
+		return outputIDs
+	}
+	for _, existing := range outputIDs {
+		if existing == outputID {
+			return outputIDs
+		}
+	}
+	return append(outputIDs, outputID)
 }
 
 func cloneAnyMap(metadata map[string]any) map[string]any {

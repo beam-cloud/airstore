@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -14,11 +15,12 @@ import (
 type captureOutputClient struct {
 	createReqs   []*pb.CreateTaskOutputRequest
 	finalizeReqs []*pb.FinalizeTaskOutputRequest
+	updateReqs   []*pb.UpdateTaskOutputStatusRequest
 }
 
 func (c *captureOutputClient) CreateTaskOutput(_ context.Context, req *pb.CreateTaskOutputRequest) (string, error) {
 	c.createReqs = append(c.createReqs, req)
-	return "output-1", nil
+	return fmt.Sprintf("output-%d", len(c.createReqs)), nil
 }
 
 func (c *captureOutputClient) AppendTaskOutputRows(_ context.Context, _ *pb.AppendTaskOutputRowsRequest) error {
@@ -30,7 +32,8 @@ func (c *captureOutputClient) FinalizeTaskOutput(_ context.Context, req *pb.Fina
 	return nil
 }
 
-func (c *captureOutputClient) UpdateTaskOutputStatus(_ context.Context, _ *pb.UpdateTaskOutputStatusRequest) error {
+func (c *captureOutputClient) UpdateTaskOutputStatus(_ context.Context, req *pb.UpdateTaskOutputStatusRequest) error {
+	c.updateReqs = append(c.updateReqs, req)
 	return nil
 }
 
@@ -287,9 +290,9 @@ func TestPersistApprovalOutputBeforeWaitingCreatesBlockingOutput(t *testing.T) {
 			userMessage *string,
 			assistantMessage string,
 			bamlEnv map[string]string,
-		) (bool, error) {
+		) ([]string, bool, error) {
 			content := assistantMessage
-			return persistAssistantResponseOutputs(
+			result, err := persistAssistantResponseOutputsDetailed(
 				ctx,
 				client,
 				task,
@@ -316,6 +319,7 @@ func TestPersistApprovalOutputBeforeWaitingCreatesBlockingOutput(t *testing.T) {
 					FallbackTitle: "Approval Required",
 				},
 			)
+			return result.OutputIDs, result.Handled, err
 		},
 	)
 	if !created {
@@ -342,6 +346,147 @@ func TestPersistApprovalOutputBeforeWaitingCreatesBlockingOutput(t *testing.T) {
 	}
 	if got := metadata[types.TaskOutputMetadataApprovalUI]; got != true {
 		t.Fatalf("approval_surface = %#v, want true", got)
+	}
+}
+
+func TestPersistApprovalOutputBeforeWaitingReusesEquivalentBlockingOutput(t *testing.T) {
+	client := &captureOutputClient{}
+	task := testRunExecution()
+	tracker := &taskOutputTracker{}
+	assistantMessage := "Please review this draft before sending.\n\nTo: luke@slai.io\nSubject: Beam sandboxes\n\nHi Luke,\n\nDraft body."
+
+	persist := func(
+		ctx context.Context,
+		client taskOutputClient,
+		task types.RunExecution,
+		tracker *taskOutputTracker,
+		userMessage *string,
+		assistantMessage string,
+		bamlEnv map[string]string,
+	) ([]string, bool, error) {
+		content := assistantMessage
+		result, err := persistAssistantResponseOutputsDetailed(
+			ctx,
+			client,
+			task,
+			tracker,
+			userMessage,
+			assistantMessage,
+			bamlEnv,
+			responseArtifactPlan{
+				Extract: func(_ context.Context, _ *string, _ string, _ map[string]string) ([]signaltypes.ExtractedOutput, error) {
+					return []signaltypes.ExtractedOutput{{
+						Kind:    signaltypes.OutputKindEMAIL_DRAFT,
+						Title:   "Draft outreach email",
+						Content: &content,
+					}}, nil
+				},
+				MinLen: 1,
+				Status: types.TaskOutputStatusPending,
+				Blocking: &types.TaskOutputBlockingMetadata{
+					Kind:            types.TaskOutputBlockingKindApproval,
+					InputKind:       types.InputKindApproveReject,
+					WaitGroupID:     "wait-stable",
+					ApprovalSurface: true,
+				},
+				FallbackTitle: "Approval Required",
+			},
+		)
+		return result.OutputIDs, result.Handled, err
+	}
+
+	firstIDs, firstHandled := persistApprovalOutputBeforeWaitingWithFunc(
+		context.Background(),
+		client,
+		task,
+		tracker,
+		"Draft the reply.",
+		assistantMessage,
+		nil,
+		persist,
+	)
+	secondIDs, secondHandled := persistApprovalOutputBeforeWaitingWithFunc(
+		context.Background(),
+		client,
+		task,
+		tracker,
+		"Draft the reply.",
+		assistantMessage,
+		nil,
+		persist,
+	)
+
+	if !firstHandled || !secondHandled {
+		t.Fatal("expected approval output handling on both passes")
+	}
+	if got := len(client.createReqs); got != 1 {
+		t.Fatalf("create req count = %d, want 1", got)
+	}
+	if got := len(firstIDs); got != 1 {
+		t.Fatalf("first output id count = %d, want 1", got)
+	}
+	if got := len(secondIDs); got != 1 {
+		t.Fatalf("second output id count = %d, want 1", got)
+	}
+	if firstIDs[0] != secondIDs[0] {
+		t.Fatalf("expected stable output id reuse, got %q then %q", firstIDs[0], secondIDs[0])
+	}
+	if got := len(client.updateReqs); got != 0 {
+		t.Fatalf("update req count = %d, want 0 for equivalent approval output", got)
+	}
+}
+
+func TestPublishOutputCandidateSupersedesChangedArtifact(t *testing.T) {
+	client := &captureOutputClient{}
+	task := testRunExecution()
+	tracker := &taskOutputTracker{}
+	ids := outputIDsFromTask(task)
+
+	base := outputCandidate{
+		OutputType: types.TaskOutputTypeEmail,
+		Title:      "Draft outreach email",
+		Summary:    "Drafted outreach email for approval.",
+		Data: map[string]any{
+			"to":       "luke@slai.io",
+			"subject":  "Beam sandboxes",
+			keyContent: "Hi Luke,\n\nFirst draft.\n",
+		},
+		Metadata: map[string]any{
+			types.TaskOutputMetadataArtifactKey:   "email-draft",
+			types.TaskOutputMetadataArtifactKind:  "email",
+			types.TaskOutputMetadataArtifactLabel: "Email Drafts",
+			types.TaskOutputMetadataArtifactRole:  types.TaskOutputArtifactRolePrimary,
+		},
+		Status: types.TaskOutputStatusPending,
+	}
+
+	firstID, err := publishOutputCandidate(context.Background(), client, ids, tracker, base)
+	if err != nil {
+		t.Fatalf("publishOutputCandidate first: %v", err)
+	}
+
+	updated := base
+	updated.Data = cloneAnyMap(base.Data)
+	updated.Data[keyContent] = "Hi Luke,\n\nUpdated draft.\n"
+	secondID, err := publishOutputCandidate(context.Background(), client, ids, tracker, updated)
+	if err != nil {
+		t.Fatalf("publishOutputCandidate second: %v", err)
+	}
+
+	if got := len(client.createReqs); got != 2 {
+		t.Fatalf("create req count = %d, want 2", got)
+	}
+	if firstID == secondID {
+		t.Fatalf("expected changed artifact to supersede with new id, got %q", firstID)
+	}
+	if got := len(client.updateReqs); got != 1 {
+		t.Fatalf("update req count = %d, want 1", got)
+	}
+	if got := client.updateReqs[0].OutputId; got != firstID {
+		t.Fatalf("updated predecessor = %q, want %q", got, firstID)
+	}
+	if got := client.updateReqs[0].Status; got != types.TaskOutputStatusCancelled {
+		t.Fatalf("updated status = %q, want %q", got, types.TaskOutputStatusCancelled)
 	}
 }
 

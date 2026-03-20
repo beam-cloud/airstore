@@ -318,18 +318,18 @@ func TestAirRunnerParseTurnOutput_NeedsInput(t *testing.T) {
 `)
 
 	r := NewAirRunner(AirRunnerOptions{})
-	needsInput, kind, response, err := r.ParseTurnOutput(output)
+	result, err := r.ParseTurnOutput(output)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !needsInput {
+	if !result.NeedsInput {
 		t.Fatal("expected needs_input=true")
 	}
-	if kind != types.InputKindFreeText {
-		t.Fatalf("expected InputKindFreeText, got %q", kind)
+	if result.InputKind != types.InputKindFreeText {
+		t.Fatalf("expected InputKindFreeText, got %q", result.InputKind)
 	}
-	if response != "What email?" {
-		t.Fatalf("expected response=%q, got %q", "What email?", response)
+	if result.Response != "What email?" {
+		t.Fatalf("expected response=%q, got %q", "What email?", result.Response)
 	}
 }
 
@@ -341,11 +341,11 @@ func TestAirRunnerParseTurnOutput_Complete(t *testing.T) {
 `)
 
 	r := NewAirRunner(AirRunnerOptions{})
-	needsInput, _, _, err := r.ParseTurnOutput(output)
+	result, err := r.ParseTurnOutput(output)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if needsInput {
+	if result.NeedsInput {
 		t.Fatal("expected needs_input=false for complete status")
 	}
 }
@@ -354,11 +354,11 @@ func TestAirRunnerParseTurnOutput_NoTrace(t *testing.T) {
 	output := []byte("some random output\nwithout json trace\n")
 
 	r := NewAirRunner(AirRunnerOptions{})
-	needsInput, _, _, err := r.ParseTurnOutput(output)
+	result, err := r.ParseTurnOutput(output)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if needsInput {
+	if result.NeedsInput {
 		t.Fatal("expected needs_input=false when no trace found")
 	}
 }
@@ -414,18 +414,47 @@ func TestAirRunnerParseTurnOutput_CompleteUsesOutputSummary(t *testing.T) {
 {"status":"complete","needs_input":false,"session_id":"s1","output":{"summary":"Sent the outreach email and should check for replies later."}}
 `
 
-	needsInput, kind, response, err := runner.ParseTurnOutput([]byte(output))
+	result, err := runner.ParseTurnOutput([]byte(output))
 	if err != nil {
 		t.Fatalf("ParseTurnOutput: %v", err)
 	}
-	if needsInput {
+	if result.NeedsInput {
 		t.Fatal("expected needs_input=false")
 	}
-	if kind != "" {
-		t.Fatalf("kind = %q, want empty", kind)
+	if result.InputKind != "" {
+		t.Fatalf("kind = %q, want empty", result.InputKind)
 	}
-	if response != "Sent the outreach email and should check for replies later." {
-		t.Fatalf("response = %q", response)
+	if result.Response != "Sent the outreach email and should check for replies later." {
+		t.Fatalf("response = %q", result.Response)
+	}
+}
+
+func TestAirRunnerParseTurnOutput_DraftArtifactsUpgradeResponse(t *testing.T) {
+	runner := NewAirRunner(AirRunnerOptions{})
+
+	output := `{"event":"run_end","ts":4.0,"session_id":"s1","total_steps":1,"status":"complete","needs_input":false}
+{"status":"complete","needs_input":false,"session_id":"s1","output":{"summary":"Drafted an outreach email.","next_step":"Awaiting your approval before sending.","drafted_responses":[{"channel":"gmail","to":"luke@slai.io","subject":"Beam sandboxes","body":"Hi Mike,\n\nHere is the draft.\n"}]}}
+`
+
+	result, err := runner.ParseTurnOutput([]byte(output))
+	if err != nil {
+		t.Fatalf("ParseTurnOutput: %v", err)
+	}
+	if result.Response != "Awaiting your approval before sending." {
+		t.Fatalf("response = %q", result.Response)
+	}
+	if got := len(result.Artifacts); got != 1 {
+		t.Fatalf("artifact count = %d, want 1", got)
+	}
+	artifact := result.Artifacts[0]
+	if artifact.OutputType != types.TaskOutputTypeEmail {
+		t.Fatalf("output_type = %q, want %q", artifact.OutputType, types.TaskOutputTypeEmail)
+	}
+	if artifact.Blocking == nil || !artifact.Blocking.IsApproval() {
+		t.Fatal("expected approval-blocking artifact")
+	}
+	if artifact.Data["to"] != "luke@slai.io" {
+		t.Fatalf("to = %#v", artifact.Data["to"])
 	}
 }
 
@@ -453,18 +482,18 @@ func TestAirRunnerParseTurnOutput_MultiTurn(t *testing.T) {
 		t.Fatalf("primary writer received %d bytes, want %d", primary.Len(), len(airOutput))
 	}
 
-	needsInput, kind, response, err := runner.ParseTurnOutput(turnBuf.Bytes())
+	result, err := runner.ParseTurnOutput(turnBuf.Bytes())
 	if err != nil {
 		t.Fatalf("ParseTurnOutput: %v", err)
 	}
-	if !needsInput {
+	if !result.NeedsInput {
 		t.Fatal("expected needs_input=true")
 	}
-	if kind != types.InputKindFreeText {
-		t.Fatalf("kind = %q, want %q", kind, types.InputKindFreeText)
+	if result.InputKind != types.InputKindFreeText {
+		t.Fatalf("kind = %q, want %q", result.InputKind, types.InputKindFreeText)
 	}
-	if response != "Who should I send it to?" {
-		t.Fatalf("response = %q, want %q", response, "Who should I send it to?")
+	if result.Response != "Who should I send it to?" {
+		t.Fatalf("response = %q, want %q", result.Response, "Who should I send it to?")
 	}
 
 	turnBuf.Reset()
@@ -477,11 +506,11 @@ func TestAirRunnerParseTurnOutput_MultiTurn(t *testing.T) {
 `
 	mw.Write([]byte(secondTurn))
 
-	needsInput, _, _, err = runner.ParseTurnOutput(turnBuf.Bytes())
+	result, err = runner.ParseTurnOutput(turnBuf.Bytes())
 	if err != nil {
 		t.Fatalf("ParseTurnOutput second turn: %v", err)
 	}
-	if needsInput {
+	if result.NeedsInput {
 		t.Fatal("expected needs_input=false for completed task")
 	}
 }
@@ -496,18 +525,18 @@ func TestAirRunnerParseTurnOutput_ApproveReject(t *testing.T) {
 {"event":"run_end","ts":9.5,"session_id":"s1","total_steps":2,"status":"waiting_for_input","needs_input":true}
 {"status":"waiting_for_input","needs_input":true,"input_kind":"approve_reject","session_id":"s1","response":"Here's the draft -- should I send it?"}
 `
-	needsInput, kind, response, err := runner.ParseTurnOutput([]byte(output))
+	result, err := runner.ParseTurnOutput([]byte(output))
 	if err != nil {
 		t.Fatalf("ParseTurnOutput: %v", err)
 	}
-	if !needsInput {
+	if !result.NeedsInput {
 		t.Fatal("expected needs_input=true")
 	}
-	if kind != types.InputKindApproveReject {
-		t.Fatalf("kind = %q, want %q", kind, types.InputKindApproveReject)
+	if result.InputKind != types.InputKindApproveReject {
+		t.Fatalf("kind = %q, want %q", result.InputKind, types.InputKindApproveReject)
 	}
-	if response != "Here's the draft -- should I send it?" {
-		t.Fatalf("response = %q", response)
+	if result.Response != "Here's the draft -- should I send it?" {
+		t.Fatalf("response = %q", result.Response)
 	}
 }
 

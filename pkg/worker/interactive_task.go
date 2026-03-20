@@ -25,6 +25,8 @@ const (
 	mountFlushGracePeriod       = 10 * time.Second
 	sessionLeaseTTL             = 30 * time.Second
 	sessionLeaseRenewInterval   = 10 * time.Second
+	sessionLeaseOpTimeout       = 3 * time.Second
+	sessionLeaseRenewGrace      = sessionLeaseTTL - sessionLeaseRenewInterval
 	runInteractionTTL           = 30 * time.Minute
 	subagentPollInterval        = 10 * time.Second
 	subagentMaxWait             = 30 * time.Minute
@@ -113,37 +115,6 @@ func buildWaitingBlockerSpec(
 	return spec
 }
 
-func trackedOutputIDSet(tracker *taskOutputTracker) map[string]struct{} {
-	seen := make(map[string]struct{})
-	if tracker == nil {
-		return seen
-	}
-	for _, summary := range tracker.TrackedOutputSummaries() {
-		if id := strings.TrimSpace(summary.OutputID); id != "" {
-			seen[id] = struct{}{}
-		}
-	}
-	return seen
-}
-
-func diffTrackedOutputIDs(tracker *taskOutputTracker, before map[string]struct{}) []string {
-	if tracker == nil {
-		return nil
-	}
-	var outputIDs []string
-	for _, summary := range tracker.TrackedOutputSummaries() {
-		id := strings.TrimSpace(summary.OutputID)
-		if id == "" {
-			continue
-		}
-		if _, ok := before[id]; ok {
-			continue
-		}
-		outputIDs = append(outputIDs, id)
-	}
-	return outputIDs
-}
-
 // ---------------------------------------------------------------------------
 // Session checkpoint
 // ---------------------------------------------------------------------------
@@ -162,10 +133,16 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.RunExecution
 	}
 	runCtx, runCancel := context.WithCancel(ctx)
 	defer runCancel()
+	var closeInteractionOnce sync.Once
+	closeRunInteraction := func() {
+		closeInteractionOnce.Do(func() {
+			c, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			w.setRunInteractionState(c, task, types.RunInteractionStateClosed)
+		})
+	}
 	defer func() {
-		c, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		w.setRunInteractionState(c, task, types.RunInteractionStateClosed)
+		closeRunInteraction()
 	}()
 
 	sessionID := strings.TrimSpace(task.Env[agentSessionIDEnvKey])
@@ -202,7 +179,7 @@ func (w *Worker) runInteractiveTask(ctx context.Context, task types.RunExecution
 	w.setRunInteractionState(runCtx, task, types.RunInteractionStateWorking)
 
 	result := w.runInteractiveSession(runCtx, task, sandboxID, mountSource)
-	w.setRunInteractionState(runCtx, task, types.RunInteractionStateClosed)
+	closeRunInteraction()
 
 	_ = w.sandboxManager.Delete(sandboxID, true)
 	time.Sleep(mountFlushGracePeriod)
@@ -251,13 +228,44 @@ func (w *Worker) acquireSessionLease(ctx context.Context, task types.RunExecutio
 func (w *Worker) heartbeatSessionLease(ctx context.Context, task types.RunExecution, sessionID, ownerID string, onLost func()) {
 	ticker := time.NewTicker(sessionLeaseRenewInterval)
 	defer ticker.Stop()
+	var lossDeadline time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			renewed, err := w.terminalIO.RenewSessionLease(ctx, task.WorkspaceId, sessionID, ownerID, sessionLeaseTTL)
-			if err != nil || !renewed {
+			if ctx.Err() != nil {
+				return
+			}
+			status, err := refreshSessionLeaseState(w.terminalIO, task.WorkspaceId, sessionID, ownerID)
+			if ctx.Err() != nil {
+				return
+			}
+			switch status {
+			case sessionLeaseRefreshHeld:
+				if !lossDeadline.IsZero() {
+					addTaskExecutionContext(log.Info(), task).Msg("session lease recovered")
+					lossDeadline = time.Time{}
+				}
+			case sessionLeaseRefreshRecovered:
+				addTaskExecutionContext(log.Info(), task).Msg("session lease recovered")
+				lossDeadline = time.Time{}
+			case sessionLeaseRefreshRetrying:
+				if lossDeadline.IsZero() {
+					lossDeadline = time.Now().Add(sessionLeaseRenewGrace)
+					addTaskExecutionContext(log.Warn().Err(err).Dur("grace_period", sessionLeaseRenewGrace), task).
+						Msg("session lease renew failed, retrying before cancel")
+					continue
+				}
+				if time.Now().Before(lossDeadline) {
+					continue
+				}
+				addTaskExecutionContext(log.Warn().Err(err), task).Msg("session lease lost")
+				if onLost != nil {
+					onLost()
+				}
+				return
+			case sessionLeaseRefreshLost:
 				addTaskExecutionContext(log.Warn().Err(err), task).Msg("session lease lost")
 				if onLost != nil {
 					onLost()
@@ -266,6 +274,92 @@ func (w *Worker) heartbeatSessionLease(ctx context.Context, task types.RunExecut
 			}
 		}
 	}
+}
+
+type sessionLeaseStore interface {
+	AcquireSessionLease(ctx context.Context, workspaceID uint, sessionID, ownerID string, ttl time.Duration) (bool, error)
+	RenewSessionLease(ctx context.Context, workspaceID uint, sessionID, ownerID string, ttl time.Duration) (bool, error)
+	GetSessionLeaseOwner(ctx context.Context, workspaceID uint, sessionID string) (string, error)
+}
+
+type sessionLeaseRefreshStatus int
+
+const (
+	sessionLeaseRefreshHeld sessionLeaseRefreshStatus = iota
+	sessionLeaseRefreshRecovered
+	sessionLeaseRefreshRetrying
+	sessionLeaseRefreshLost
+)
+
+func refreshSessionLeaseState(leaseStore sessionLeaseStore, workspaceID uint, sessionID, ownerID string) (sessionLeaseRefreshStatus, error) {
+	if leaseStore == nil {
+		return sessionLeaseRefreshLost, fmt.Errorf("session lease store is not configured")
+	}
+
+	renewCtx, cancel := context.WithTimeout(context.Background(), sessionLeaseOpTimeout)
+	renewed, renewErr := leaseStore.RenewSessionLease(renewCtx, workspaceID, sessionID, ownerID, sessionLeaseTTL)
+	cancel()
+	if renewErr == nil && renewed {
+		return sessionLeaseRefreshHeld, nil
+	}
+
+	owner, ownerErr := sessionLeaseOwner(leaseStore, workspaceID, sessionID)
+	if ownerErr == nil {
+		switch owner {
+		case ownerID:
+			return sessionLeaseRefreshHeld, nil
+		case "":
+			acquireCtx, acquireCancel := context.WithTimeout(context.Background(), sessionLeaseOpTimeout)
+			reacquired, acquireErr := leaseStore.AcquireSessionLease(acquireCtx, workspaceID, sessionID, ownerID, sessionLeaseTTL)
+			acquireCancel()
+			if acquireErr == nil && reacquired {
+				return sessionLeaseRefreshRecovered, nil
+			}
+
+			ownerAfter, ownerAfterErr := sessionLeaseOwner(leaseStore, workspaceID, sessionID)
+			if ownerAfterErr == nil {
+				switch ownerAfter {
+				case ownerID:
+					return sessionLeaseRefreshRecovered, nil
+				case "":
+					if acquireErr == nil {
+						return sessionLeaseRefreshRetrying, fmt.Errorf("session lease disappeared during renewal")
+					}
+				default:
+					return sessionLeaseRefreshLost, fmt.Errorf("session lease owner changed to %s", ownerAfter)
+				}
+			}
+
+			switch {
+			case acquireErr != nil && ownerAfterErr != nil:
+				return sessionLeaseRefreshRetrying, fmt.Errorf("reacquire session lease: %v (owner recheck: %v)", acquireErr, ownerAfterErr)
+			case acquireErr != nil:
+				return sessionLeaseRefreshRetrying, fmt.Errorf("reacquire session lease: %w", acquireErr)
+			case ownerAfterErr != nil:
+				return sessionLeaseRefreshRetrying, fmt.Errorf("recheck session lease owner: %w", ownerAfterErr)
+			default:
+				return sessionLeaseRefreshRetrying, fmt.Errorf("session lease disappeared during renewal")
+			}
+		default:
+			return sessionLeaseRefreshLost, fmt.Errorf("session lease owner changed to %s", owner)
+		}
+	}
+
+	switch {
+	case renewErr != nil && ownerErr != nil:
+		return sessionLeaseRefreshRetrying, fmt.Errorf("renew session lease: %v (owner check: %v)", renewErr, ownerErr)
+	case renewErr != nil:
+		return sessionLeaseRefreshRetrying, fmt.Errorf("renew session lease: %w", renewErr)
+	default:
+		return sessionLeaseRefreshRetrying, fmt.Errorf("check session lease owner: %w", ownerErr)
+	}
+}
+
+func sessionLeaseOwner(leaseStore sessionLeaseStore, workspaceID uint, sessionID string) (string, error) {
+	ownerCtx, cancel := context.WithTimeout(context.Background(), sessionLeaseOpTimeout)
+	defer cancel()
+	owner, err := leaseStore.GetSessionLeaseOwner(ownerCtx, workspaceID, sessionID)
+	return strings.TrimSpace(owner), err
 }
 
 // ---------------------------------------------------------------------------
@@ -343,10 +437,10 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	var needsInput bool
 	var inputKind types.InputKind
 	var lastPrompt string
-	var approvalOutputPersisted bool
+	var approvalOutputHandled bool
 
 	if tr, ok := runner.(TurnRunner); ok {
-		runErr, needsInput, inputKind, lastPrompt, approvalOutputPersisted = w.runTurnSession(
+		runErr, needsInput, inputKind, lastPrompt, approvalOutputHandled = w.runTurnSession(
 			sessionCtx, task, sandboxID, tr, env, tw, activityCh, checkNeedsInput, bamlEnv, outputPipeline.tracker,
 		)
 	} else {
@@ -378,7 +472,7 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 				); err != nil {
 					addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to persist final response output")
 				}
-			case inputKind == types.InputKindApproveReject && !approvalOutputPersisted:
+			case inputKind == types.InputKindApproveReject && !approvalOutputHandled:
 				if _, err := persistApprovalResponseOutput(
 					sessionCtx,
 					w.gatewayClient,
@@ -427,8 +521,8 @@ func extractSessionAssistantMessage(runner AgentExecutionRunner, raw []byte) str
 		return ""
 	}
 	if outputParser, ok := runner.(OutputParsingRunner); ok {
-		if _, _, response, err := outputParser.ParseTurnOutput(raw); err == nil {
-			if trimmed := strings.TrimSpace(response); trimmed != "" {
+		if result, err := outputParser.ParseTurnOutput(raw); err == nil {
+			if trimmed := strings.TrimSpace(result.Response); trimmed != "" {
 				return trimmed
 			}
 		}
@@ -539,6 +633,21 @@ func classifyNeedsInputKindWithFallback(
 	return current
 }
 
+func classifyNeedsInputFromAssistantMessage(
+	ctx context.Context,
+	assistantMessage string,
+	bamlEnv map[string]string,
+	classify turnInputKindClassifier,
+) (bool, types.InputKind) {
+	if strings.TrimSpace(assistantMessage) == "" || classify == nil {
+		return false, ""
+	}
+	if inferred := classify(ctx, assistantMessage, bamlEnv); inferred != "" {
+		return true, inferred
+	}
+	return false, ""
+}
+
 func classifyNeedsInputKindWithBAML(ctx context.Context, assistantMessage string, bamlEnv map[string]string) types.InputKind {
 	assistantMessage = strings.TrimSpace(assistantMessage)
 	if assistantMessage == "" {
@@ -551,6 +660,186 @@ func classifyNeedsInputKindWithBAML(ctx context.Context, assistantMessage string
 	return types.InputKind(strings.ToLower(string(*cls.Input_kind)))
 }
 
+func blockingInputKindFromArtifacts(artifacts []TurnArtifact) (bool, types.InputKind) {
+	sawBlocking := false
+	for _, artifact := range artifacts {
+		if artifact.Blocking == nil {
+			continue
+		}
+		sawBlocking = true
+		switch {
+		case artifact.Blocking.InputKind == types.InputKindApproveReject:
+			return true, types.InputKindApproveReject
+		case artifact.Blocking.InputKind != "":
+			return true, artifact.Blocking.InputKind
+		case artifact.Blocking.IsApproval():
+			return true, types.InputKindApproveReject
+		}
+	}
+	if sawBlocking {
+		return true, types.InputKindFreeText
+	}
+	return false, ""
+}
+
+func turnArtifactAssistantMessage(artifacts []TurnArtifact) string {
+	for _, artifact := range artifacts {
+		if trimmed := strings.TrimSpace(artifact.Content); trimmed != "" {
+			return trimmed
+		}
+		if trimmed := strings.TrimSpace(artifact.Summary); trimmed != "" {
+			return trimmed
+		}
+		if trimmed := strings.TrimSpace(artifact.Title); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func turnArtifactCandidate(artifact TurnArtifact, defaultRole string) outputCandidate {
+	candidate := outputCandidate{
+		OutputType: strings.TrimSpace(artifact.OutputType),
+		Title:      strings.TrimSpace(artifact.Title),
+		Summary:    strings.TrimSpace(artifact.Summary),
+		URI:        strings.TrimSpace(artifact.URI),
+		Path:       strings.TrimSpace(artifact.Path),
+		Data:       cloneAnyMap(artifact.Data),
+		Metadata:   cloneAnyMap(artifact.Metadata),
+		Role:       firstNonEmptyTrimmed(artifact.Role, defaultRole),
+		Status:     strings.TrimSpace(artifact.Status),
+	}
+	if content := strings.TrimSpace(artifact.Content); content != "" && anyToTrimmedString(candidate.Data[keyContent]) == "" {
+		candidate.Data[keyContent] = content
+	}
+	return candidate
+}
+
+func persistParsedTurnArtifacts(
+	ctx context.Context,
+	client taskOutputClient,
+	task types.RunExecution,
+	tracker *taskOutputTracker,
+	prompt string,
+	assistantMessage string,
+	artifacts []TurnArtifact,
+) ([]string, bool) {
+	if client == nil || len(artifacts) == 0 {
+		return nil, false
+	}
+	ids := outputIDsFromTask(task)
+	prompt = strings.TrimSpace(prompt)
+	assistantMessage = strings.TrimSpace(assistantMessage)
+	var blockingOutputIDs []string
+
+	for i, artifact := range artifacts {
+		defaultRole := types.TaskOutputArtifactRoleSupporting
+		if i == 0 {
+			defaultRole = types.TaskOutputArtifactRolePrimary
+		}
+		candidate := turnArtifactCandidate(artifact, defaultRole)
+		if candidate.Metadata == nil {
+			candidate.Metadata = map[string]any{}
+		}
+		candidate.Metadata[keySource] = sourceAssistantResponse
+		if prompt != "" {
+			candidate.Metadata[keySourcePrompt] = prompt
+		}
+		if artifact.Blocking != nil {
+			blocking := *artifact.Blocking
+			if blocking.IsApproval() && strings.TrimSpace(blocking.WaitGroupID) == "" {
+				blocking.WaitGroupID = approvalWaitGroupID(task, assistantMessage)
+			}
+			candidate.Metadata = blocking.Apply(candidate.Metadata)
+			if strings.TrimSpace(candidate.Status) == "" {
+				candidate.Status = types.TaskOutputStatusPending
+			}
+		}
+		outputID, err := publishOutputCandidate(ctx, client, ids, tracker, candidate)
+		if err != nil {
+			addTaskExecutionContext(log.Warn().Err(err).Str("title", candidate.Title), task).
+				Msg("failed to persist parsed turn artifact")
+			continue
+		}
+		if artifact.Blocking != nil && strings.TrimSpace(outputID) != "" {
+			blockingOutputIDs = appendOutputID(blockingOutputIDs, outputID)
+		}
+	}
+	return blockingOutputIDs, len(blockingOutputIDs) > 0
+}
+
+type parsedTurnOutcome struct {
+	needsInput            bool
+	inputKind             types.InputKind
+	waitingSummary        string
+	assistantMessage      string
+	blockerOutputIDs      []string
+	approvalOutputHandled bool
+}
+
+func (r workerSessionRunner) reconcileParsedTurnOutput(
+	ctx context.Context,
+	task types.RunExecution,
+	tracker *taskOutputTracker,
+	prompt string,
+	bamlEnv map[string]string,
+	result TurnParseResult,
+) parsedTurnOutcome {
+	outcome := parsedTurnOutcome{
+		needsInput:       result.NeedsInput,
+		inputKind:        result.InputKind,
+		assistantMessage: strings.TrimSpace(result.Response),
+	}
+	if outcome.assistantMessage == "" {
+		outcome.assistantMessage = turnArtifactAssistantMessage(result.Artifacts)
+	}
+	outcome.waitingSummary = outcome.assistantMessage
+	outcome.blockerOutputIDs, outcome.approvalOutputHandled = persistParsedTurnArtifacts(
+		ctx,
+		r.worker.gatewayClient,
+		task,
+		tracker,
+		prompt,
+		outcome.assistantMessage,
+		result.Artifacts,
+	)
+
+	if artifactNeedsInput, artifactInputKind := blockingInputKindFromArtifacts(result.Artifacts); artifactNeedsInput {
+		outcome.needsInput = true
+		switch {
+		case outcome.inputKind == "":
+			outcome.inputKind = artifactInputKind
+		case artifactInputKind == types.InputKindApproveReject:
+			outcome.inputKind = artifactInputKind
+		}
+	}
+
+	if outcome.needsInput {
+		outcome.inputKind = classifyNeedsInputKindWithFallback(
+			ctx,
+			outcome.inputKind,
+			outcome.assistantMessage,
+			bamlEnv,
+			classifyNeedsInputKindWithBAML,
+		)
+	} else if inferredNeedsInput, inferredInputKind := classifyNeedsInputFromAssistantMessage(
+		ctx,
+		outcome.assistantMessage,
+		bamlEnv,
+		classifyNeedsInputKindWithBAML,
+	); inferredNeedsInput {
+		outcome.needsInput = true
+		outcome.inputKind = inferredInputKind
+	}
+
+	if outcome.needsInput && outcome.inputKind == types.InputKindApproveReject {
+		if summary := r.worker.tryBuildApprovalSummary(ctx, outcome.assistantMessage, bamlEnv); summary != "" {
+			outcome.waitingSummary = summary
+		}
+	}
+	return outcome
+}
+
 func persistApprovalOutputBeforeWaiting(
 	ctx context.Context,
 	client taskOutputClient,
@@ -561,7 +850,7 @@ func persistApprovalOutputBeforeWaiting(
 	bamlEnv map[string]string,
 ) ([]string, bool) {
 	return persistApprovalOutputBeforeWaitingWithFunc(
-		ctx, client, task, tracker, prompt, assistantMessage, bamlEnv, persistApprovalResponseOutput,
+		ctx, client, task, tracker, prompt, assistantMessage, bamlEnv, persistApprovalResponseOutputDetailed,
 	)
 }
 
@@ -581,7 +870,7 @@ func persistApprovalOutputBeforeWaitingWithFunc(
 		*string,
 		string,
 		map[string]string,
-	) (bool, error),
+	) ([]string, bool, error),
 ) ([]string, bool) {
 	if client == nil {
 		return nil, false
@@ -594,13 +883,12 @@ func persistApprovalOutputBeforeWaitingWithFunc(
 	if trimmed := strings.TrimSpace(prompt); trimmed != "" {
 		userMessage = &trimmed
 	}
-	before := trackedOutputIDSet(tracker)
-	created, err := persist(ctx, client, task, tracker, userMessage, assistantMessage, bamlEnv)
+	outputIDs, handled, err := persist(ctx, client, task, tracker, userMessage, assistantMessage, bamlEnv)
 	if err != nil {
 		addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to persist approval response output before waiting")
 		return nil, false
 	}
-	return diffTrackedOutputIDs(tracker, before), created
+	return outputIDs, handled
 }
 
 // tryBuildApprovalSummary extracts a structured summary of what the agent is
@@ -1001,14 +1289,14 @@ func (r workerSessionRunner) runTurnSession(
 
 	outputParser, _ := runner.(OutputParsingRunner)
 	var turnBuf bytes.Buffer
-	var approvalOutputPersisted bool
+	var approvalOutputHandled bool
 	stateBridge := newSessionStateBridge(r.worker)
 	subagents := newSubagentWatcher(r.worker)
 	waiter := newFollowupInputWaiter(r.worker)
 
 	for prompt != "" {
 		if ctx.Err() != nil {
-			return ctx.Err(), false, "", "", approvalOutputPersisted
+			return ctx.Err(), false, "", "", approvalOutputHandled
 		}
 
 		stateBridge.setRunInteractionState(ctx, task, types.RunInteractionStateWorking)
@@ -1026,17 +1314,21 @@ func (r workerSessionRunner) runTurnSession(
 
 		if isFirst {
 			if err := r.executeFirstTurn(ctx, task, sandboxID, runner, sessionEnv, turnOut, prompt); err != nil {
-				return err, false, "", "", approvalOutputPersisted
+				return err, false, "", "", approvalOutputHandled
 			}
 			isFirst = false
 		} else {
 			if err := r.executeTurn(ctx, task, sandboxID, runner, sessionEnv, turnOut, prompt, TurnArgModeFollowup); err != nil {
-				return err, false, "", "", approvalOutputPersisted
+				return err, false, "", "", approvalOutputHandled
 			}
 		}
 		signalActivity(activityCh)
 
-		if subagents.waitForSubagents(ctx, task, sandboxID, activityCh) == subagentFinished {
+		subagentOutcome := subagents.waitForSubagents(ctx, task, sandboxID, activityCh)
+		if err := subagentOutcomeErr(ctx, subagentOutcome); err != nil {
+			return err, false, "", "", approvalOutputHandled
+		}
+		if subagentOutcome == subagentFinished {
 			if err := r.executeTurn(
 				ctx,
 				task,
@@ -1047,7 +1339,7 @@ func (r workerSessionRunner) runTurnSession(
 				"Your background tasks / subagents have completed. Please collect and report their results.",
 				TurnArgModeFollowup,
 			); err != nil {
-				return err, false, "", "", approvalOutputPersisted
+				return err, false, "", "", approvalOutputHandled
 			}
 			signalActivity(activityCh)
 		}
@@ -1059,25 +1351,17 @@ func (r workerSessionRunner) runTurnSession(
 		var blockerOutputIDs []string
 
 		if outputParser != nil {
-			var err error
-			needsInput, inputKind, approvalAssistantMessage, err = outputParser.ParseTurnOutput(turnBuf.Bytes())
-			waitingSummary = approvalAssistantMessage
+			result, err := outputParser.ParseTurnOutput(turnBuf.Bytes())
 			if err != nil {
 				addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to parse turn output")
-			}
-			if needsInput {
-				inputKind = classifyNeedsInputKindWithFallback(
-					ctx,
-					inputKind,
-					approvalAssistantMessage,
-					bamlEnv,
-					classifyNeedsInputKindWithBAML,
-				)
-			}
-			if needsInput && inputKind == types.InputKindApproveReject {
-				if summary := r.worker.tryBuildApprovalSummary(ctx, approvalAssistantMessage, bamlEnv); summary != "" {
-					waitingSummary = summary
-				}
+			} else {
+				resolved := r.reconcileParsedTurnOutput(ctx, task, tracker, prompt, bamlEnv, result)
+				needsInput = resolved.needsInput
+				inputKind = resolved.inputKind
+				waitingSummary = resolved.waitingSummary
+				approvalAssistantMessage = resolved.assistantMessage
+				blockerOutputIDs = resolved.blockerOutputIDs
+				approvalOutputHandled = resolved.approvalOutputHandled
 			}
 		} else if checkNeedsInput != nil {
 			needsInput, inputKind, waitingSummary, approvalAssistantMessage = checkNeedsInput(prompt)
@@ -1088,11 +1372,11 @@ func (r workerSessionRunner) runTurnSession(
 				prompt = pending
 				continue
 			}
-			return nil, false, "", prompt, approvalOutputPersisted
+			return nil, false, "", prompt, approvalOutputHandled
 		}
 
-		if inputKind == types.InputKindApproveReject {
-			blockerOutputIDs, approvalOutputPersisted = persistApprovalOutputBeforeWaiting(
+		if inputKind == types.InputKindApproveReject && !approvalOutputHandled {
+			blockerOutputIDs, approvalOutputHandled = persistApprovalOutputBeforeWaiting(
 				ctx, r.worker.gatewayClient, task, tracker, prompt, approvalAssistantMessage, bamlEnv,
 			)
 		}
@@ -1101,12 +1385,16 @@ func (r workerSessionRunner) runTurnSession(
 			State:   types.AgentTaskStateWaiting,
 			Blocker: buildWaitingBlockerSpec(task, inputKind, waitingSummary, approvalAssistantMessage, blockerOutputIDs),
 		})
-		prompt = waiter.waitForFollowupInput(ctx, task, DefaultBetweenTurnsTimeout, activityCh)
+		nextPrompt, err := nextFollowupPrompt(ctx, waiter.waitForFollowupInput(ctx, task, DefaultBetweenTurnsTimeout, activityCh))
+		if err != nil {
+			return err, false, "", "", approvalOutputHandled
+		}
+		prompt = nextPrompt
 		if prompt == "" {
-			return nil, true, inputKind, "", approvalOutputPersisted
+			return nil, true, inputKind, "", approvalOutputHandled
 		}
 	}
-	return nil, true, "", "", approvalOutputPersisted
+	return nil, true, "", "", approvalOutputHandled
 }
 
 func (r workerSessionRunner) executeFirstTurn(
@@ -1177,6 +1465,27 @@ func interactiveResult(err error, idleTimedOut bool) (int, string, types.RunExec
 		return -1, "interactive session cancelled", types.RunExecutionStatusCancelled
 	}
 	return -1, err.Error(), types.RunExecutionStatusFailed
+}
+
+func subagentOutcomeErr(ctx context.Context, outcome subagentWaitOutcome) error {
+	if outcome != subagentSessionCancelled {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return context.Canceled
+}
+
+func nextFollowupPrompt(ctx context.Context, prompt string) (string, error) {
+	prompt = strings.TrimSpace(prompt)
+	if prompt != "" {
+		return prompt, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return "", nil
 }
 
 func cloneMap(m map[string]string) map[string]string {

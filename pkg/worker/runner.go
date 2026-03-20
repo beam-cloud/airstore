@@ -59,13 +59,40 @@ type NeedsInputRunner interface {
 	ReadLastMessage(markerPath string) string
 }
 
+// TurnArtifact is a structured output emitted directly by a runner as part of
+// its turn result. The worker persists these artifacts before deciding whether
+// the task is complete or blocked.
+type TurnArtifact struct {
+	OutputType string
+	Title      string
+	Summary    string
+	Content    string
+	URI        string
+	Path       string
+	Data       map[string]any
+	Metadata   map[string]any
+	Role       string
+	Status     string
+	Blocking   *types.TaskOutputBlockingMetadata
+}
+
+// TurnParseResult is the normalized worker-side view of a runner's structured
+// turn output. The worker reconciles this with classifier output before it
+// settles a turn as complete or waiting for input.
+type TurnParseResult struct {
+	NeedsInput bool
+	InputKind  types.InputKind
+	Response   string
+	Artifacts  []TurnArtifact
+}
+
 // OutputParsingRunner extends TurnRunner for runners whose stdout carries
-// structured turn-outcome signals (needs_input, response) directly in the
-// process output. The worker calls ParseTurnOutput after each turn instead
-// of relying on file-based markers or BAML classification.
+// structured turn-outcome signals directly in the process output. The worker
+// calls ParseTurnOutput after each turn instead of relying solely on file-based
+// markers or a single needs-input bit from the runner.
 type OutputParsingRunner interface {
 	TurnRunner
-	ParseTurnOutput(output []byte) (needsInput bool, inputKind types.InputKind, response string, err error)
+	ParseTurnOutput(output []byte) (TurnParseResult, error)
 }
 
 // ResponseExtractor extends AgentExecutionRunner with response text

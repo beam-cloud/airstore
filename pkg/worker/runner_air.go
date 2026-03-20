@@ -24,7 +24,16 @@ type AirRunner struct {
 }
 
 type airTraceOutput struct {
-	Summary string `json:"summary"`
+	Summary          string                    `json:"summary"`
+	NextStep         string                    `json:"next_step"`
+	DraftedResponses []airTraceDraftedResponse `json:"drafted_responses"`
+}
+
+type airTraceDraftedResponse struct {
+	Channel string `json:"channel"`
+	To      string `json:"to"`
+	Subject string `json:"subject"`
+	Body    string `json:"body"`
 }
 
 func NewAirRunner(opts AirRunnerOptions) *AirRunner {
@@ -96,12 +105,12 @@ func (r *AirRunner) injectEnv(env map[string]string) {
 	inject("S2_BASIN", r.s2Basin)
 }
 
-// ParseTurnOutput extracts needs_input and response from air's JSON trace.
-// air emits JSONL events (with an "event" field) to stderr and a final JSON
-// trace summary (without an "event" field) to stdout; in a PTY they're
-// interleaved. We skip any line that has an "event" key and only consider
-// the trace summary.
-func (r *AirRunner) ParseTurnOutput(output []byte) (bool, types.InputKind, string, error) {
+// ParseTurnOutput extracts turn state, assistant response text, and any
+// structured artifacts from air's JSON trace. air emits JSONL events (with an
+// "event" field) to stderr and a final JSON trace summary (without an "event"
+// field) to stdout; in a PTY they're interleaved. We skip any line that has an
+// "event" key and only consider the trace summary.
+func (r *AirRunner) ParseTurnOutput(output []byte) (TurnParseResult, error) {
 	var trace airTrace
 	for _, line := range bytes.Split(output, []byte("\n")) {
 		line = bytes.TrimSpace(line)
@@ -121,7 +130,7 @@ func (r *AirRunner) ParseTurnOutput(output []byte) (bool, types.InputKind, strin
 		}
 	}
 	if trace.Status == "" {
-		return false, "", "", nil
+		return TurnParseResult{}, nil
 	}
 
 	kind := types.InputKind("")
@@ -133,10 +142,19 @@ func (r *AirRunner) ParseTurnOutput(output []byte) (bool, types.InputKind, strin
 		}
 	}
 	response := strings.TrimSpace(trace.Response)
-	if response == "" && trace.Output != nil {
-		response = strings.TrimSpace(trace.Output.Summary)
+	if trace.Output != nil {
+		if nextStep := strings.TrimSpace(trace.Output.NextStep); nextStep != "" {
+			response = nextStep
+		} else if response == "" {
+			response = strings.TrimSpace(trace.Output.Summary)
+		}
 	}
-	return trace.NeedsInput, kind, response, nil
+	return TurnParseResult{
+		NeedsInput: trace.NeedsInput,
+		InputKind:  kind,
+		Response:   response,
+		Artifacts:  airDraftedResponseArtifacts(trace.Output),
+	}, nil
 }
 
 // ExtractResponseText implements ResponseExtractor for air's JSONL output.
@@ -169,4 +187,104 @@ type airTrace struct {
 	InputKind  string          `json:"input_kind"`
 	SessionID  string          `json:"session_id"`
 	Output     *airTraceOutput `json:"output,omitempty"`
+}
+
+func airDraftedResponseArtifacts(output *airTraceOutput) []TurnArtifact {
+	if output == nil || len(output.DraftedResponses) == 0 {
+		return nil
+	}
+
+	summary := strings.TrimSpace(output.Summary)
+	var artifacts []TurnArtifact
+	for _, draft := range output.DraftedResponses {
+		outputType := airDraftedResponseOutputType(draft)
+		title := airDraftedResponseTitle(draft)
+		content := firstNonEmptyTrimmed(draft.Body, draft.Subject, draft.To)
+		if title == "" || content == "" {
+			continue
+		}
+
+		data := map[string]any{}
+		if channel := strings.TrimSpace(draft.Channel); channel != "" {
+			data["channel"] = channel
+		}
+		if to := strings.TrimSpace(draft.To); to != "" {
+			data["to"] = to
+			data["recipient"] = to
+			data["email"] = to
+		}
+		if subject := strings.TrimSpace(draft.Subject); subject != "" {
+			data["subject"] = subject
+		}
+
+		artifacts = append(artifacts, TurnArtifact{
+			OutputType: outputType,
+			Title:      title,
+			Summary:    summary,
+			Content:    content,
+			Data:       data,
+			Metadata: map[string]any{
+				types.TaskOutputMetadataArtifactKey:   airDraftedResponseArtifactKey(outputType),
+				types.TaskOutputMetadataArtifactLabel: airDraftedResponseArtifactLabel(outputType),
+				types.TaskOutputMetadataArtifactKind:  airDraftedResponseArtifactKind(outputType),
+			},
+			Status: types.TaskOutputStatusPending,
+			Blocking: &types.TaskOutputBlockingMetadata{
+				Kind:            types.TaskOutputBlockingKindApproval,
+				InputKind:       types.InputKindApproveReject,
+				ApprovalSurface: true,
+			},
+		})
+	}
+	return artifacts
+}
+
+func airDraftedResponseOutputType(draft airTraceDraftedResponse) string {
+	channel := strings.ToLower(strings.TrimSpace(draft.Channel))
+	switch {
+	case channel == "gmail":
+		return types.TaskOutputTypeEmail
+	case strings.Contains(channel, "mail"):
+		return types.TaskOutputTypeEmail
+	case strings.TrimSpace(draft.To) != "":
+		return types.TaskOutputTypeEmail
+	case strings.TrimSpace(draft.Subject) != "":
+		return types.TaskOutputTypeEmail
+	default:
+		return "text"
+	}
+}
+
+func airDraftedResponseArtifactKey(outputType string) string {
+	if outputType == types.TaskOutputTypeEmail {
+		return "email-draft"
+	}
+	return "draft-response"
+}
+
+func airDraftedResponseArtifactLabel(outputType string) string {
+	if outputType == types.TaskOutputTypeEmail {
+		return "Email Drafts"
+	}
+	return "Draft Responses"
+}
+
+func airDraftedResponseArtifactKind(outputType string) string {
+	if outputType == types.TaskOutputTypeEmail {
+		return "email"
+	}
+	return "draft"
+}
+
+func airDraftedResponseTitle(draft airTraceDraftedResponse) string {
+	if subject := strings.TrimSpace(draft.Subject); subject != "" {
+		return "Draft: " + subject
+	}
+	if to := strings.TrimSpace(draft.To); to != "" {
+		return "Draft response to " + to
+	}
+	if channel := strings.TrimSpace(draft.Channel); channel != "" {
+		return "Draft " + channel + " response"
+	}
+	return ""
 }
