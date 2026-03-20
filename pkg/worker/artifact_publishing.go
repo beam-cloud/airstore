@@ -196,12 +196,34 @@ type outputCandidate struct {
 }
 
 func (c outputCandidate) identityKey() string {
-	key := normalizeArtifactToken(anyToTrimmedString(c.Metadata[types.TaskOutputMetadataArtifactKey]))
+	key := types.CanonicalArtifactFamilyKey(
+		anyToTrimmedString(c.Metadata[types.TaskOutputMetadataArtifactKey]),
+		anyToTrimmedString(c.Metadata[types.TaskOutputMetadataArtifactKind]),
+		c.OutputType,
+	)
 	title := normalizeArtifactToken(c.Title)
 	path := firstNonEmptyTrimmed(c.Path, anyToTrimmedString(c.Data[keyPath]))
 	uri := strings.ToLower(firstNonEmptyTrimmed(c.URI, anyToTrimmedString(c.Data[keyURI]), anyToTrimmedString(c.Metadata[keyDeeplink])))
+	threadID := normalizeArtifactToken(firstNonEmptyTrimmed(
+		anyToTrimmedString(c.Data["thread_id"]),
+		anyToTrimmedString(c.Metadata["thread_id"]),
+	))
+	recipient := normalizeArtifactToken(firstNonEmptyTrimmed(
+		anyToTrimmedString(c.Data["recipient"]),
+		anyToTrimmedString(c.Data["to"]),
+		anyToTrimmedString(c.Metadata["recipient"]),
+		anyToTrimmedString(c.Metadata["to"]),
+	))
+	subject := normalizeArtifactToken(firstNonEmptyTrimmed(
+		anyToTrimmedString(c.Data["subject"]),
+		anyToTrimmedString(c.Metadata["subject"]),
+	))
 
 	switch {
+	case key != "" && threadID != "":
+		return "key:" + key + "|thread:" + threadID
+	case key != "" && recipient != "" && subject != "":
+		return "key:" + key + "|recipient:" + recipient + "|subject:" + subject
 	case key != "" && uri != "":
 		return "key:" + key + "|uri:" + uri
 	case key != "" && path != "":

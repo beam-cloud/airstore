@@ -224,6 +224,9 @@ func (f *TaskFlows) AcceptTaskInput(
 			kind = types.InputKindFreeText
 		}
 	}
+	if shouldTreatInputAsApprovalRevision(task, kind, action) {
+		message = f.rewriteApprovalRevisionMessage(ctx, workspaceID, task, message)
+	}
 
 	if shouldSupersedePendingApprovalOutputs(task, kind, action) {
 		if err := f.supersedePendingApprovalOutputs(ctx, workspaceID, task); err != nil {
@@ -276,6 +279,54 @@ func (f *TaskFlows) AcceptTaskInput(
 		return updated, nil
 	}
 	return task, nil
+}
+
+func (f *TaskFlows) rewriteApprovalRevisionMessage(
+	ctx context.Context,
+	workspaceID uint,
+	task *types.AgentTask,
+	userMessage string,
+) string {
+	userMessage = strings.TrimSpace(userMessage)
+	if f == nil || f.backend == nil || task == nil {
+		return userMessage
+	}
+
+	var titles []string
+	outputs, err := f.backend.ListTaskOutputs(ctx, workspaceID, task.ID)
+	if err == nil {
+		selected := pendingOutputsForCurrentBlocker(task, outputs)
+		for _, output := range selected {
+			if output == nil {
+				continue
+			}
+			title := strings.TrimSpace(output.Title)
+			if title != "" {
+				titles = append(titles, title)
+			}
+		}
+	}
+
+	var parts []string
+	parts = append(parts,
+		"Revision requested for the pending approval item. Update the proposed work to reflect the feedback below. Do not execute, deliver, publish, apply, or finalize it yet. Return an updated version for approval unless the user explicitly approves proceeding.",
+	)
+	if len(titles) > 0 {
+		var lines strings.Builder
+		lines.WriteString("Current approval item")
+		if len(titles) > 1 {
+			lines.WriteString("s")
+		}
+		lines.WriteString(":\n")
+		for i, title := range titles {
+			lines.WriteString(fmt.Sprintf("%d. %s\n", i+1, title))
+		}
+		parts = append(parts, strings.TrimSpace(lines.String()))
+	}
+	if userMessage != "" {
+		parts = append(parts, "User feedback:\n"+userMessage)
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 func (f *TaskFlows) AcceptRunInput(
@@ -433,7 +484,7 @@ func (f *TaskFlows) supersedePendingApprovalOutputs(ctx context.Context, workspa
 		updates = append(updates, taskOutputStatusUpdate{
 			output:         output,
 			originalStatus: output.Status,
-			targetStatus:   types.TaskOutputStatusCancelled,
+			targetStatus:   types.TaskOutputStatusRejected,
 		})
 	}
 	return applyOutputStatusUpdates(ctx, workspaceID, f.backend, updates)

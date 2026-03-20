@@ -1000,6 +1000,7 @@ func blockerMappingOutput(task *types.AgentTask) *types.TaskOutput {
 		Data:        data,
 		Metadata: map[string]any{
 			types.TaskOutputMetadataArtifactKey:  blockerMappingArtifactKey(outputType, blocker),
+			types.TaskOutputMetadataArtifactKind: normalizeToken(outputType),
 			types.TaskOutputMetadataArtifactRole: types.TaskOutputArtifactRolePrimary,
 		},
 		Status:    types.TaskOutputStatusPending,
@@ -1106,11 +1107,14 @@ func blockerMappingOutputType(channel, details, recipient, subject string) strin
 }
 
 func blockerMappingArtifactKey(outputType string, blocker *types.ResolvedBlocker) string {
+	outputType = normalizeToken(outputType)
 	switch {
-	case outputType == types.TaskOutputTypeEmail:
-		return "email-draft"
+	case blocker != nil && blocker.ApprovalSurface && outputType != "":
+		return "approval-" + outputType
 	case blocker != nil && blocker.ApprovalSurface:
 		return "approval-request"
+	case outputType != "":
+		return "blocked-" + outputType
 	case blocker != nil && strings.TrimSpace(blocker.InputKind) != "":
 		return normalizeToken(blocker.InputKind) + "-request"
 	default:
@@ -1379,7 +1383,7 @@ func mappingOutputIdentity(output *types.TaskOutput) string {
 		return ""
 	}
 	artifact := ArtifactOf(output)
-	key := normalizeToken(artifact.Key())
+	key := types.CanonicalArtifactFamilyKey(artifact.Key(), artifact.Kind(), output.OutputType)
 	title := normalizeToken(output.Title)
 	path := normalizeToken(artifact.filePath())
 	uri := strings.ToLower(strings.TrimSpace(artifact.uri()))

@@ -509,6 +509,31 @@ func shouldSupersedePendingApprovalOutputs(
 	return task.InputKind == types.InputKindApproveReject
 }
 
+func shouldTreatInputAsApprovalRevision(
+	task *types.AgentTask,
+	kind types.InputKind,
+	action *types.TaskInputAction,
+) bool {
+	if task == nil {
+		return false
+	}
+	isApproval := false
+	if task.CurrentBlocker != nil {
+		isApproval = task.CurrentBlocker.Status == types.TaskBlockerStatusOpen &&
+			task.CurrentBlocker.Kind == types.TaskBlockerKindApproval
+	}
+	if !isApproval {
+		isApproval = task.InputKind == types.InputKindApproveReject
+	}
+	if !isApproval {
+		return false
+	}
+	if action == nil {
+		return kind == "" || kind == types.InputKindFreeText
+	}
+	return *action == types.TaskInputActionReject
+}
+
 func pendingOutputsForCurrentBlocker(task *types.AgentTask, outputs []*types.TaskOutput) []*types.TaskOutput {
 	if task != nil && task.CurrentBlocker != nil && task.CurrentBlocker.Status == types.TaskBlockerStatusOpen {
 		selected := make([]*types.TaskOutput, 0, len(outputs))

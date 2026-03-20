@@ -514,11 +514,11 @@ func TestAcceptTaskInputFreeTextSupersedesPendingApprovalOutputs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AcceptTaskInput returned error: %v", err)
 	}
-	if got := backend.outputs["out-old"].Status; got != types.TaskOutputStatusCancelled {
-		t.Fatalf("older approval status = %q, want cancelled", got)
+	if got := backend.outputs["out-old"].Status; got != types.TaskOutputStatusRejected {
+		t.Fatalf("older approval status = %q, want rejected", got)
 	}
-	if got := backend.outputs["out-current"].Status; got != types.TaskOutputStatusCancelled {
-		t.Fatalf("current approval status = %q, want cancelled", got)
+	if got := backend.outputs["out-current"].Status; got != types.TaskOutputStatusRejected {
+		t.Fatalf("current approval status = %q, want rejected", got)
 	}
 	if got := backend.outputs["out-unrelated"].Status; got != types.TaskOutputStatusPending {
 		t.Fatalf("unrelated pending status = %q, want pending", got)
@@ -528,6 +528,9 @@ func TestAcceptTaskInputFreeTextSupersedesPendingApprovalOutputs(t *testing.T) {
 	}
 	if got := backend.appendedInputs[0].Kind; got != types.InputKindFreeText {
 		t.Fatalf("input kind = %q, want free_text", got)
+	}
+	if msg := backend.appendedInputs[0].Message; !strings.Contains(msg, "Return an updated version for approval unless the user explicitly approves proceeding.") {
+		t.Fatalf("appended input message = %q, want approval revision guardrail", msg)
 	}
 }
 
@@ -662,8 +665,8 @@ func TestAcceptTaskInputSupersedesOnlyCurrentBlockerArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AcceptTaskInput returned error: %v", err)
 	}
-	if got := backend.outputs["out-current"].Status; got != types.TaskOutputStatusCancelled {
-		t.Fatalf("current blocker output status = %q, want cancelled", got)
+	if got := backend.outputs["out-current"].Status; got != types.TaskOutputStatusRejected {
+		t.Fatalf("current blocker output status = %q, want rejected", got)
 	}
 	if got := backend.outputs["out-old"].Status; got != types.TaskOutputStatusPending {
 		t.Fatalf("older blocker output status = %q, want pending", got)

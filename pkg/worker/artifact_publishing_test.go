@@ -490,6 +490,69 @@ func TestPublishOutputCandidateSupersedesChangedArtifact(t *testing.T) {
 	}
 }
 
+func TestPublishOutputCandidateSentEmailSupersedesPriorDraftInSameThread(t *testing.T) {
+	client := &captureOutputClient{}
+	task := testRunExecution()
+	tracker := &taskOutputTracker{}
+	ids := outputIDsFromTask(task)
+
+	draft := outputCandidate{
+		OutputType: types.TaskOutputTypeEmail,
+		Title:      "Draft: Beam sandboxes",
+		Summary:    "Drafted outreach email for approval.",
+		Data: map[string]any{
+			"to":       "luke@example.com",
+			"subject":  "Beam sandboxes",
+			keyContent: "Hi Luke,\n\nDraft body.\n",
+		},
+		Metadata: map[string]any{
+			types.TaskOutputMetadataArtifactKey:  "email-draft",
+			types.TaskOutputMetadataArtifactKind: "email",
+			types.TaskOutputMetadataArtifactRole: types.TaskOutputArtifactRolePrimary,
+		},
+		Status: types.TaskOutputStatusPending,
+	}
+	draftID, err := publishOutputCandidate(context.Background(), client, ids, tracker, draft)
+	if err != nil {
+		t.Fatalf("publishOutputCandidate draft: %v", err)
+	}
+
+	sent := outputCandidate{
+		OutputType: types.TaskOutputTypeEmail,
+		Title:      "Sent: Beam sandboxes",
+		Summary:    "Sent outreach email.",
+		URI:        "https://mail.google.com/mail/u/0/#sent/msg-1",
+		Data: map[string]any{
+			"to":         "luke@example.com",
+			"subject":    "Beam sandboxes",
+			"message_id": "msg-1",
+		},
+		Metadata: map[string]any{
+			types.TaskOutputMetadataArtifactKey:  "email-sent",
+			types.TaskOutputMetadataArtifactKind: "email",
+			types.TaskOutputMetadataArtifactRole: types.TaskOutputArtifactRolePrimary,
+		},
+		Status: types.TaskOutputStatusActive,
+	}
+	sentID, err := publishOutputCandidate(context.Background(), client, ids, tracker, sent)
+	if err != nil {
+		t.Fatalf("publishOutputCandidate sent: %v", err)
+	}
+
+	if draftID == sentID {
+		t.Fatalf("expected sent email to create a new output, got %q", sentID)
+	}
+	if got := len(client.updateReqs); got != 1 {
+		t.Fatalf("update req count = %d, want 1", got)
+	}
+	if got := client.updateReqs[0].OutputId; got != draftID {
+		t.Fatalf("updated predecessor = %q, want %q", got, draftID)
+	}
+	if got := client.updateReqs[0].Status; got != types.TaskOutputStatusCancelled {
+		t.Fatalf("updated status = %q, want %q", got, types.TaskOutputStatusCancelled)
+	}
+}
+
 func TestPersistFinalResponseOutputSkipsEmailArtifacts(t *testing.T) {
 	client := &captureOutputClient{}
 	task := testRunExecution()

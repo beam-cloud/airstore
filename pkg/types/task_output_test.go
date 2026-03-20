@@ -84,3 +84,41 @@ func TestTaskOutputIsApprovalArtifact(t *testing.T) {
 		t.Fatal("expected pending approval artifact")
 	}
 }
+
+func TestCanonicalArtifactLifecycleKeyStripsLifecyclePhase(t *testing.T) {
+	cases := []struct {
+		key  string
+		want string
+	}{
+		{"approval-report", "report"},
+		{"blocked-email", "email"},
+		{"email-sent", "email"},
+		{"sales-email", "sales-email"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := CanonicalArtifactLifecycleKey(tc.key); got != tc.want {
+			t.Fatalf("CanonicalArtifactLifecycleKey(%q) = %q, want %q", tc.key, got, tc.want)
+		}
+	}
+}
+
+func TestCanonicalArtifactFamilyKeyPrefersBaseKindWhenKeyWrapsIt(t *testing.T) {
+	cases := []struct {
+		key, kind, outputType string
+		want                  string
+	}{
+		{"sales-email", "email", "email", "email"},
+		{"approval-report", "report", "text", "report"},
+		{"drive-link", "drive-link", "link", "drive-link"},
+		{"", "json", "json", "json"},
+	}
+	for _, tc := range cases {
+		if got := CanonicalArtifactFamilyKey(tc.key, tc.kind, tc.outputType); got != tc.want {
+			t.Fatalf(
+				"CanonicalArtifactFamilyKey(%q, %q, %q) = %q, want %q",
+				tc.key, tc.kind, tc.outputType, got, tc.want,
+			)
+		}
+	}
+}

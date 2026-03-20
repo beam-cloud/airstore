@@ -182,6 +182,51 @@ func (o *TaskOutput) ArtifactRole() string {
 	}
 }
 
+func CanonicalArtifactLifecycleKey(artifactKey string) string {
+	artifactKey = normalizeTaskOutputArtifactToken(artifactKey)
+	if artifactKey == "" {
+		return ""
+	}
+	tokens := strings.Split(artifactKey, "-")
+	filtered := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		token = normalizeTaskOutputArtifactToken(token)
+		if token == "" {
+			continue
+		}
+		if _, lifecycle := taskOutputArtifactLifecycleTokens[token]; lifecycle {
+			continue
+		}
+		filtered = append(filtered, token)
+	}
+	if len(filtered) == 0 {
+		return artifactKey
+	}
+	return strings.Join(filtered, "-")
+}
+
+func CanonicalArtifactFamilyKey(artifactKey, artifactKind, outputType string) string {
+	key := CanonicalArtifactLifecycleKey(artifactKey)
+	kind := normalizeTaskOutputArtifactToken(artifactKind)
+	outputType = normalizeTaskOutputArtifactToken(outputType)
+
+	if base := firstNonEmptyTaskOutputArtifactFamily(kind, outputType); base != "" {
+		if key == "" {
+			return base
+		}
+		if taskOutputArtifactTokenSubset(base, key) || taskOutputArtifactTokenSubset(key, base) {
+			return base
+		}
+	}
+	if key != "" {
+		return key
+	}
+	if kind != "" {
+		return kind
+	}
+	return outputType
+}
+
 func (o *TaskOutput) WaitGroupID() string {
 	return o.Blocking().WaitGroupID
 }
@@ -288,6 +333,78 @@ func (p TaskBlockerPayload) ToMap() map[string]any {
 	}
 
 	return payload
+}
+
+var taskOutputArtifactLifecycleTokens = map[string]struct{}{
+	"approval":  {},
+	"approved":  {},
+	"blocked":   {},
+	"cancelled": {},
+	"canceled":  {},
+	"complete":  {},
+	"completed": {},
+	"delivered": {},
+	"draft":     {},
+	"executed":  {},
+	"final":     {},
+	"finalized": {},
+	"pending":   {},
+	"queued":    {},
+	"rejected":  {},
+	"revised":   {},
+	"revision":  {},
+	"sent":      {},
+}
+
+func normalizeTaskOutputArtifactToken(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return ""
+	}
+	var b strings.Builder
+	lastDash := false
+	for _, r := range value {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+			lastDash = false
+		default:
+			if !lastDash {
+				b.WriteByte('-')
+				lastDash = true
+			}
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func taskOutputArtifactTokenSubset(sub, super string) bool {
+	sub = normalizeTaskOutputArtifactToken(sub)
+	super = normalizeTaskOutputArtifactToken(super)
+	if sub == "" || super == "" {
+		return false
+	}
+	subTokens := strings.Split(sub, "-")
+	superSet := make(map[string]struct{}, len(strings.Split(super, "-")))
+	for _, token := range strings.Split(super, "-") {
+		superSet[token] = struct{}{}
+	}
+	for _, token := range subTokens {
+		if _, ok := superSet[token]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func firstNonEmptyTaskOutputArtifactFamily(values ...string) string {
+	for _, value := range values {
+		value = normalizeTaskOutputArtifactToken(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 type ResolvedBlockerItem struct {

@@ -413,7 +413,7 @@ func TestFetchMappingOutputsIncludesSyntheticBlockerOutputForSalesEmailArtifactK
 	if got, want := outputs[0].TaskID, task.ID; got != want {
 		t.Fatalf("task id = %q, want %q", got, want)
 	}
-	if got, want := meta(outputs[0], types.TaskOutputMetadataArtifactKey), "email-draft"; got != want {
+	if got, want := meta(outputs[0], types.TaskOutputMetadataArtifactKey), "blocked-email"; got != want {
 		t.Fatalf("artifact key = %q, want %q", got, want)
 	}
 	if got := toString(outputs[0].Data["recipient"]); got != "Mike <mike@example.com>" {
@@ -588,6 +588,47 @@ func TestProjectBlockerPrefersExplicitPayloadForApprovalRevision(t *testing.T) {
 	}
 	if got.Items[0].Title != revised.Title {
 		t.Fatalf("item title = %q, want %q", got.Items[0].Title, revised.Title)
+	}
+}
+
+func TestNormalizeTaskOutputsForTableMappingPrefersSentEmailOverRejectedDraft(t *testing.T) {
+	draft := &types.TaskOutput{
+		ID:         "out-draft",
+		TaskID:     "task-1",
+		OutputType: types.TaskOutputTypeEmail,
+		Title:      "Draft: Beam sandboxes",
+		Status:     types.TaskOutputStatusRejected,
+		CreatedAt:  time.Unix(10, 0),
+		Data: map[string]any{
+			"to":      "luke@example.com",
+			"subject": "Beam sandboxes",
+		},
+		Metadata: map[string]any{
+			types.TaskOutputMetadataArtifactKey: "email-draft",
+		},
+	}
+	sent := &types.TaskOutput{
+		ID:         "out-sent",
+		TaskID:     "task-1",
+		OutputType: types.TaskOutputTypeEmail,
+		Title:      "Sent: Beam sandboxes",
+		Status:     types.TaskOutputStatusActive,
+		CreatedAt:  time.Unix(20, 0),
+		Data: map[string]any{
+			"to":      "luke@example.com",
+			"subject": "Beam sandboxes",
+		},
+		Metadata: map[string]any{
+			types.TaskOutputMetadataArtifactKey: "email-sent",
+		},
+	}
+
+	normalized := normalizeTaskOutputsForTableMapping([]*types.TaskOutput{draft, sent})
+	if got := len(normalized); got != 1 {
+		t.Fatalf("normalized output count = %d, want 1", got)
+	}
+	if got := normalized[0].ID; got != sent.ID {
+		t.Fatalf("normalized output id = %q, want %q", got, sent.ID)
 	}
 }
 
