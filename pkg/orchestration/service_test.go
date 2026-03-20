@@ -69,6 +69,20 @@ func TestDefaultAgentConfigPrioritizesAssignedSkills(t *testing.T) {
 	if !strings.Contains(prompt, "Explicitly assigned agent skills take priority over broader workspace-wide skills.") {
 		t.Fatalf("expected default prompt to treat broader skills as fallback context, got prompt:\n%s", prompt)
 	}
+	if !strings.Contains(prompt, runtimeSchedulingGuidanceHeader) {
+		t.Fatalf("expected default prompt to include runtime scheduling guidance, got prompt:\n%s", prompt)
+	}
+}
+
+func TestEnsureRuntimeSchedulingGuidanceIsIdempotent(t *testing.T) {
+	base := "You are a helpful agent."
+	got := ensureRuntimeSchedulingGuidance(base)
+	if !strings.Contains(got, runtimeSchedulingGuidanceHeader) {
+		t.Fatalf("expected scheduling guidance to be appended, got:\n%s", got)
+	}
+	if again := ensureRuntimeSchedulingGuidance(got); again != got {
+		t.Fatalf("expected scheduling guidance helper to be idempotent:\n%s", again)
+	}
 }
 
 func TestApplyDispatchPayloadIncludesResumeMetadata(t *testing.T) {
@@ -113,6 +127,20 @@ func TestRunInputPromptPrefersDispatchPrompt(t *testing.T) {
 
 	if got := runInputPrompt(payload); got != "wake-specific follow-up prompt" {
 		t.Fatalf("runInputPrompt = %q, want wake-specific follow-up prompt", got)
+	}
+}
+
+func TestDispatchPromptFromValuesWrapsWakeFollowUpPrompt(t *testing.T) {
+	got := dispatchPromptFromValues(map[string]any{
+		types.OrchestrationOutboxPayloadDispatchPrompt:     "plain dispatch prompt",
+		types.OrchestrationOutboxPayloadWakeFollowUpPrompt: "Check Gmail thread 123 for replies and report back.",
+	})
+
+	if !strings.Contains(got, wakeDispatchReminder) {
+		t.Fatalf("expected wake dispatch reminder in prompt, got:\n%s", got)
+	}
+	if !strings.Contains(got, "Check Gmail thread 123 for replies and report back.") {
+		t.Fatalf("expected original follow-up prompt in wrapped prompt, got:\n%s", got)
 	}
 }
 

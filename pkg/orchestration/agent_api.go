@@ -48,6 +48,63 @@ const (
 	defaultWorkspaceStreamOutputLimit = 60
 )
 
+func filterWorkspaceOutputs(outputs []*types.TaskOutput) []*types.TaskOutput {
+	if len(outputs) == 0 {
+		return outputs
+	}
+	filtered := make([]*types.TaskOutput, 0, len(outputs))
+	for _, output := range outputs {
+		if shouldHideWorkspaceOutput(output) {
+			continue
+		}
+		filtered = append(filtered, output)
+	}
+	return filtered
+}
+
+func shouldHideWorkspaceOutput(output *types.TaskOutput) bool {
+	if output == nil || strings.TrimSpace(output.OutputType) != types.TaskOutputTypeEmail {
+		return false
+	}
+	if outputMetadataBool(output.Metadata, types.TaskOutputMetadataApprovalUI) {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(output.Status), types.TaskOutputStatusPending) {
+		return true
+	}
+	return outputFieldString(output.Data, "draft_id", "draftId") != "" ||
+		outputFieldString(output.Metadata, "draft_id", "draftId") != ""
+}
+
+func outputMetadataBool(values map[string]any, keys ...string) bool {
+	for _, key := range keys {
+		value, ok := values[key]
+		if !ok {
+			continue
+		}
+		switch typed := value.(type) {
+		case bool:
+			return typed
+		case string:
+			return strings.EqualFold(strings.TrimSpace(typed), "true")
+		}
+	}
+	return false
+}
+
+func outputFieldString(values map[string]any, keys ...string) string {
+	for _, key := range keys {
+		value, ok := values[key]
+		if !ok {
+			continue
+		}
+		if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
+			return strings.TrimSpace(text)
+		}
+	}
+	return ""
+}
+
 func NewAgentAPI(
 	backend repository.BackendRepository,
 	runtime *AgentService,
@@ -828,6 +885,7 @@ func (a *AgentAPI) WorkspaceLiveBatch(ctx context.Context, workspaceID uint) (*W
 	if err != nil {
 		return nil, err
 	}
+	outputs = filterWorkspaceOutputs(outputs)
 	if outputs == nil {
 		outputs = []*types.TaskOutput{}
 	}

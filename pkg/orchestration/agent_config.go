@@ -21,6 +21,14 @@ const (
 	agentDefaultWorkspaceDirPrefix = "/workspace/agents/"
 )
 
+const runtimeSchedulingGuidanceHeader = "Deferred follow-up scheduling:"
+
+const runtimeSchedulingGuidance = `Deferred follow-up scheduling:
+- Airstore handles timers, sleeps, and future wakes outside your internal loop.
+- Do not create your own timers, background waits, sleep loops, reminder tasks, or polling jobs just to revisit work later.
+- Do not rely on background task IDs or timer handles to represent future follow-up work.
+- If work should resume later, say so explicitly in your final response, including the desired delay and what should happen on wake. The worker and BAML will classify that response and schedule the wake for you.`
+
 // defaultAgentSystemPrompt is the template for new agent profiles.
 // {{workspace_dir}} is resolved at runtime by applyAgentConfigEnv.
 const defaultAgentSystemPrompt = `You are an AI agent operating inside an Airstore workspace.
@@ -59,8 +67,19 @@ func DefaultAgentConfig(agentKey string) map[string]any {
 		agentConfigKeyRunner:       AgentRunnerClaudeCode,
 		agentConfigKeyProvider:     providerForRunner(AgentRunnerClaudeCode),
 		agentConfigKeyWorkspaceDir: wd,
-		agentConfigKeySystemPrompt: defaultAgentSystemPrompt,
+		agentConfigKeySystemPrompt: ensureRuntimeSchedulingGuidance(defaultAgentSystemPrompt),
 	}
+}
+
+func ensureRuntimeSchedulingGuidance(prompt string) string {
+	prompt = strings.TrimSpace(prompt)
+	if strings.Contains(prompt, runtimeSchedulingGuidanceHeader) {
+		return prompt
+	}
+	if prompt == "" {
+		return runtimeSchedulingGuidance
+	}
+	return prompt + "\n\n" + runtimeSchedulingGuidance
 }
 
 func providerForRunner(runner string) string {

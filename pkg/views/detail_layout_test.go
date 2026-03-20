@@ -185,6 +185,81 @@ func TestResolveLayoutInjectsInputSectionWithoutTemplateEntry(t *testing.T) {
 	if hasSection(layout.Sections, SectionApproval) {
 		t.Fatalf("did not expect approval section in %#v", layout.Sections)
 	}
+	if got := layout.Sections[0]; got.Type != SectionInputForm || got.Title != "Needs Attention" || got.Emphasis != EmphasisPrimary {
+		t.Fatalf("first section = %#v, want primary needs-attention input section", got)
+	}
+}
+
+func TestResolveLayoutPromotesTemplateInputSectionToPrimaryAttention(t *testing.T) {
+	template := DetailLayoutResponse{
+		Sections: []DetailSectionJSON{
+			{Type: SectionDataSummary, Title: "Email Details", Emphasis: EmphasisSecondary},
+			{Type: SectionInputForm, Title: "Additional Instructions", Emphasis: EmphasisSecondary},
+			{Type: SectionOutputGallery, Title: "Outputs", Emphasis: EmphasisCollapsed},
+		},
+	}
+	task := &types.AgentTask{
+		State: types.AgentTaskStateWaiting,
+		CurrentBlocker: &types.TaskBlocker{
+			ID:        "blocker-1",
+			Kind:      types.TaskBlockerKindInput,
+			InputKind: types.InputKindFreeText,
+			Status:    types.TaskBlockerStatusOpen,
+		},
+	}
+
+	layout := ResolveLayout(template, task, nil, nil)
+
+	if len(layout.Sections) < 2 {
+		t.Fatalf("expected multiple sections, got %#v", layout.Sections)
+	}
+	if got := layout.Sections[0]; got.Type != SectionInputForm || got.Title != "Needs Attention" || got.Emphasis != EmphasisPrimary {
+		t.Fatalf("first section = %#v, want primary needs-attention input section", got)
+	}
+	if got := layout.Sections[1]; got.Type != SectionDataSummary {
+		t.Fatalf("second section = %#v, want details after attention", got)
+	}
+}
+
+func TestResolveLayoutPromotesTemplateApprovalSectionToPrimaryAttention(t *testing.T) {
+	template := DetailLayoutResponse{
+		Sections: []DetailSectionJSON{
+			{Type: SectionDataSummary, Title: "Email Details", Emphasis: EmphasisSecondary},
+			{Type: SectionApproval, Title: "Approval Gate", Emphasis: EmphasisCollapsed},
+			{Type: SectionEmailThread, Title: "Conversation", Emphasis: EmphasisSecondary},
+		},
+	}
+	task := &types.AgentTask{
+		State: types.AgentTaskStateWaiting,
+		CurrentBlocker: &types.TaskBlocker{
+			ID:        "blocker-1",
+			Kind:      types.TaskBlockerKindApproval,
+			InputKind: types.InputKindApproveReject,
+			Status:    types.TaskBlockerStatusOpen,
+		},
+	}
+	outputs := []*types.TaskOutput{
+		{
+			ID:         "out-1",
+			OutputType: types.TaskOutputTypeEmail,
+			Status:     types.TaskOutputStatusActive,
+			Data: map[string]any{
+				"thread_id": "thread-1",
+			},
+		},
+	}
+
+	layout := ResolveLayout(template, task, outputs, nil)
+
+	if len(layout.Sections) < 3 {
+		t.Fatalf("expected multiple sections, got %#v", layout.Sections)
+	}
+	if got := layout.Sections[0]; got.Type != SectionApproval || got.Title != "Needs Approval" || got.Emphasis != EmphasisPrimary {
+		t.Fatalf("first section = %#v, want primary needs-approval section", got)
+	}
+	if got := layout.Sections[1]; got.Type != SectionDataSummary {
+		t.Fatalf("second section = %#v, want details after attention", got)
+	}
 }
 
 func TestResolveLayoutDoesNotInferApprovalWithoutExplicitBlocker(t *testing.T) {

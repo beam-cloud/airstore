@@ -403,6 +403,32 @@ func TestAirRunnerExtractResponseText_Empty(t *testing.T) {
 	}
 }
 
+func TestAirRunnerParseTurnOutput_CompleteUsesOutputSummary(t *testing.T) {
+	runner := NewAirRunner(AirRunnerOptions{})
+
+	output := `{"event":"run_start","ts":0.001,"session_id":"s1","client":"claude"}
+{"event":"step","ts":2.0,"session_id":"s1","n":1,"reasoning":"Sending email"}
+{"event":"tool_call","ts":2.0,"session_id":"s1","step":1,"tool":"Bash","args":{"command":"gmail send ..."}}
+{"event":"tool_result","ts":3.0,"session_id":"s1","step":1,"exit_code":0,"stdout":"sent"}
+{"event":"run_end","ts":4.0,"session_id":"s1","total_steps":1,"status":"complete","needs_input":false}
+{"status":"complete","needs_input":false,"session_id":"s1","output":{"summary":"Sent the outreach email and should check for replies later."}}
+`
+
+	needsInput, kind, response, err := runner.ParseTurnOutput([]byte(output))
+	if err != nil {
+		t.Fatalf("ParseTurnOutput: %v", err)
+	}
+	if needsInput {
+		t.Fatal("expected needs_input=false")
+	}
+	if kind != "" {
+		t.Fatalf("kind = %q, want empty", kind)
+	}
+	if response != "Sent the outreach email and should check for replies later." {
+		t.Fatalf("response = %q", response)
+	}
+}
+
 func TestAirRunnerParseTurnOutput_MultiTurn(t *testing.T) {
 	runner := NewAirRunner(AirRunnerOptions{
 		AnthropicAPIKey: "test-key",

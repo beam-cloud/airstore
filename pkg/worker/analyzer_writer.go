@@ -406,6 +406,7 @@ type assistantResponsePersistOptions struct {
 	MinLen        int
 	Status        string
 	Blocking      *blockingOutputMetadata
+	Filter        func(signaltypes.ExtractedOutput) bool
 	FallbackTitle string
 }
 
@@ -484,6 +485,9 @@ func persistAssistantResponseOutputs(
 
 	count := 0
 	for _, out := range outputs {
+		if opts.Filter != nil && !opts.Filter(out) {
+			continue
+		}
 		r := extractedResult{out}
 		if !r.isNone() && r.title() != "" && r.content() != "" {
 			count++
@@ -516,6 +520,9 @@ func persistAssistantResponseOutputs(
 	published := 0
 	publishedAny := false
 	for _, out := range outputs {
+		if opts.Filter != nil && !opts.Filter(out) {
+			continue
+		}
 		r := extractedResult{out}
 		if r.isNone() || r.title() == "" || r.content() == "" {
 			continue
@@ -586,6 +593,15 @@ func fallbackAssistantResponseCandidate(
 	return candidate
 }
 
+func isPublishableFinalResponseOutput(out signaltypes.ExtractedOutput) bool {
+	switch out.Kind {
+	case signaltypes.OutputKindEMAIL_DRAFT, signaltypes.OutputKindEMAIL_SENT:
+		return false
+	default:
+		return true
+	}
+}
+
 func persistFinalResponseOutput(
 	ctx context.Context,
 	client taskOutputClient,
@@ -610,6 +626,7 @@ func persistFinalResponseOutput(
 		assistantResponsePersistOptions{
 			Extract: extract,
 			MinLen:  minResponseOutputLen,
+			Filter:  isPublishableFinalResponseOutput,
 		},
 	)
 }

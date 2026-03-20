@@ -190,11 +190,11 @@ type outputEvent struct {
 }
 
 type taskOutputTracker struct {
-	created atomic.Bool
-	mu      sync.Mutex
-	seen    map[string]struct{}
-	primary map[string]struct{}
-	outputByIdentity map[string]string // identity key -> server output ID
+	created          atomic.Bool
+	mu               sync.Mutex
+	seen             map[string]struct{}
+	primary          map[string]struct{}
+	outputByIdentity map[string]trackedOutputSummary // identity key -> tracked summary
 }
 
 func (t *taskOutputTracker) MarkCreated() {
@@ -218,7 +218,7 @@ func (t *taskOutputTracker) HasEquivalent(candidate outputCandidate) bool {
 	defer t.mu.Unlock()
 	if identity != "" {
 		if _, ok := t.seen[identity]; ok {
-			if _, hasServerID := t.outputByIdentity[identity]; hasServerID {
+			if summary, hasServerID := t.outputByIdentity[identity]; hasServerID && summary.OutputID != "" {
 				return false
 			}
 			return true
@@ -252,12 +252,14 @@ func (t *taskOutputTracker) RememberWithID(candidate outputCandidate, serverID s
 		t.primary = make(map[string]struct{})
 	}
 	if t.outputByIdentity == nil {
-		t.outputByIdentity = make(map[string]string)
+		t.outputByIdentity = make(map[string]trackedOutputSummary)
 	}
 	if identity != "" {
 		t.seen[identity] = struct{}{}
-		if serverID != "" {
-			t.outputByIdentity[identity] = serverID
+		t.outputByIdentity[identity] = trackedOutputSummary{
+			OutputID:  serverID,
+			Identity:  identity,
+			EntityKey: candidate.fanOutEntityKey(),
 		}
 	}
 	if key != "" && candidate.isPrimaryDeliverable() {
@@ -274,17 +276,18 @@ func (t *taskOutputTracker) TrackedOutputSummaries() []trackedOutputSummary {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	var out []trackedOutputSummary
-	for identity, serverID := range t.outputByIdentity {
-		if serverID != "" {
-			out = append(out, trackedOutputSummary{OutputID: serverID, Identity: identity})
+	for _, summary := range t.outputByIdentity {
+		if summary.OutputID != "" {
+			out = append(out, summary)
 		}
 	}
 	return out
 }
 
 type trackedOutputSummary struct {
-	OutputID string
-	Identity string
+	OutputID  string
+	Identity  string
+	EntityKey string
 }
 
 // PredecessorID returns the server output ID of a previously tracked output
@@ -299,7 +302,7 @@ func (t *taskOutputTracker) PredecessorID(candidate outputCandidate) string {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.outputByIdentity[identity]
+	return t.outputByIdentity[identity].OutputID
 }
 
 func NewOutputWriter(ctx context.Context, client *gatewayclient.GatewayClient, task types.RunExecution) *OutputWriter {

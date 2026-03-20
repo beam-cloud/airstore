@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -342,5 +343,52 @@ func TestPersistApprovalOutputBeforeWaitingCreatesBlockingOutput(t *testing.T) {
 	}
 	if got := metadata[types.TaskOutputMetadataApprovalUI]; got != true {
 		t.Fatalf("approval_surface = %#v, want true", got)
+	}
+}
+
+func TestPersistFinalResponseOutputSkipsEmailArtifacts(t *testing.T) {
+	client := &captureOutputClient{}
+	task := testRunExecution()
+	assistantMessage := strings.Repeat("A", minResponseOutputLen)
+
+	extract := func(_ context.Context, _ *string, _ string, _ map[string]string) ([]signaltypes.ExtractedOutput, error) {
+		draftSummary := "Draft outreach email."
+		draftContent := "Draft body"
+		sentSummary := "Sent outreach email."
+		sentContent := "Sent body"
+		return []signaltypes.ExtractedOutput{
+			{
+				Kind:    signaltypes.OutputKindEMAIL_DRAFT,
+				Title:   "Draft outreach email",
+				Summary: &draftSummary,
+				Content: &draftContent,
+			},
+			{
+				Kind:    signaltypes.OutputKindEMAIL_SENT,
+				Title:   "Sent outreach email",
+				Summary: &sentSummary,
+				Content: &sentContent,
+			},
+		}, nil
+	}
+
+	created, err := persistFinalResponseOutput(
+		context.Background(),
+		client,
+		task,
+		nil,
+		nil,
+		assistantMessage,
+		nil,
+		extract,
+	)
+	if err != nil {
+		t.Fatalf("persistFinalResponseOutput returned error: %v", err)
+	}
+	if created {
+		t.Fatal("expected final response persistence to skip email artifacts")
+	}
+	if got := len(client.createReqs); got != 0 {
+		t.Fatalf("create req count = %d, want 0", got)
 	}
 }

@@ -256,6 +256,41 @@ func TestSubagentWaitOutcomeStringer(t *testing.T) {
 	}
 }
 
+func TestClassifyNeedsInputKindWithFallback_OverridesFreeTextWhenClassifierDetectsApproval(t *testing.T) {
+	classify := func(_ context.Context, _ string, _ map[string]string) types.InputKind {
+		return types.InputKindApproveReject
+	}
+
+	got := classifyNeedsInputKindWithFallback(
+		context.Background(),
+		types.InputKindFreeText,
+		"Please reply APPROVE to send.",
+		nil,
+		classify,
+	)
+	if got != types.InputKindApproveReject {
+		t.Fatalf("kind = %q, want %q", got, types.InputKindApproveReject)
+	}
+}
+
+func TestClassifyNeedsInputKindWithFallback_PreservesCurrentKindWithoutAssistantMessage(t *testing.T) {
+	classify := func(_ context.Context, _ string, _ map[string]string) types.InputKind {
+		t.Fatal("classifier should not be called for blank assistant messages")
+		return ""
+	}
+
+	got := classifyNeedsInputKindWithFallback(
+		context.Background(),
+		types.InputKindFreeText,
+		"",
+		nil,
+		classify,
+	)
+	if got != types.InputKindFreeText {
+		t.Fatalf("kind = %q, want %q", got, types.InputKindFreeText)
+	}
+}
+
 func TestBuildWakePlannerContextReadsActiveSkillAndHandoffFiles(t *testing.T) {
 	mountSource := t.TempDir()
 	skillDir := filepath.Join(mountSource, "skills", "prospect-followup")
@@ -296,3 +331,16 @@ func TestBuildWakePlannerContextReadsActiveSkillAndHandoffFiles(t *testing.T) {
 	}
 }
 
+func TestExtractSessionAssistantMessagePrefersParsedCompletionSummary(t *testing.T) {
+	runner := NewAirRunner(AirRunnerOptions{})
+	raw := []byte(`{"event":"response","ts":2.0,"step":1,"message":"Here's the draft cold outreach email for your approval."}
+{"event":"run_end","ts":4.0,"status":"complete","needs_input":false}
+{"status":"complete","needs_input":false,"output":{"summary":"Sent the outreach email to luke@beam.cloud and should check for replies later."}}
+`)
+
+	got := extractSessionAssistantMessage(runner, raw)
+	want := "Sent the outreach email to luke@beam.cloud and should check for replies later."
+	if got != want {
+		t.Fatalf("extractSessionAssistantMessage = %q, want %q", got, want)
+	}
+}

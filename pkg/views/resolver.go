@@ -124,6 +124,7 @@ func NewDataResolver(backend repository.BackendRepository, store *ViewStore) *Da
 type dataResolverBackend interface {
 	GetAgentProfileByKey(ctx context.Context, workspaceId uint, agentKey string) (*types.AgentProfile, error)
 	ListAgentProfiles(ctx context.Context, workspaceId uint) ([]*types.AgentProfile, error)
+	ListTasksFiltered(ctx context.Context, workspaceId uint, filter types.AgentTaskListFilter) ([]*types.AgentTask, error)
 	ListTaskOutputs(ctx context.Context, workspaceId uint, taskID string) ([]*types.TaskOutput, error)
 	ListWorkspaceTaskOutputs(ctx context.Context, workspaceId uint, filter types.TaskOutputListFilter) ([]*types.TaskOutput, error)
 	GetTaskByID(ctx context.Context, taskId string) (*types.AgentTask, error)
@@ -171,9 +172,17 @@ func (r *DataResolver) RegenerateRow(ctx context.Context, workspaceID uint, view
 		return nil, fmt.Errorf("fetch mapping outputs: %w", err)
 	}
 	if len(allOutputs) == 0 {
-		return nil, fmt.Errorf("%w: %s", ErrNoOutputsForTask, taskID)
+		task, taskErr := r.backend.GetTaskByID(ctx, taskID)
+		if taskErr != nil || task == nil {
+			return nil, fmt.Errorf("%w: %s", ErrNoOutputsForTask, taskID)
+		}
+		if synthetic := blockerMappingOutput(task); synthetic != nil {
+			allOutputs = []*types.TaskOutput{synthetic}
+		} else {
+			return nil, fmt.Errorf("%w: %s", ErrNoOutputsForTask, taskID)
+		}
 	}
-	outputs := allOutputs
+	outputs := normalizeOutputsForTableMapping(allOutputs)
 
 	oldRows, excludedSnapshots := r.loadStoredRowsAndExclusions(ctx, viewID, sheet.ID, comp.ID)
 	rowsByGroup := groupViewRowsByGroup(oldRows)
@@ -231,6 +240,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 	if err != nil {
 		return nil, fmt.Errorf("fetch mapping outputs: %w", err)
 	}
+	allOutputs = normalizeOutputsForTableMapping(allOutputs)
 	if len(allOutputs) == 0 {
 		log.Info().
 			Str("view_id", viewID).
@@ -794,6 +804,53 @@ func (r *DataResolver) listScopedOutputs(ctx context.Context, workspaceID uint, 
 	return dedupeOutputs(all), nil
 }
 
+func dedupeTasks(tasks []*types.AgentTask) []*types.AgentTask {
+	if len(tasks) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(tasks))
+	deduped := make([]*types.AgentTask, 0, len(tasks))
+	for _, task := range tasks {
+		if task == nil || strings.TrimSpace(task.ID) == "" {
+			continue
+		}
+		if _, ok := seen[task.ID]; ok {
+			continue
+		}
+		seen[task.ID] = struct{}{}
+		deduped = append(deduped, task)
+	}
+	sort.SliceStable(deduped, func(i, j int) bool {
+		if deduped[i].CreatedAt.Equal(deduped[j].CreatedAt) {
+			return strings.TrimSpace(deduped[i].ID) < strings.TrimSpace(deduped[j].ID)
+		}
+		return deduped[i].CreatedAt.Before(deduped[j].CreatedAt)
+	})
+	return deduped
+}
+
+func (r *DataResolver) listScopedTasks(ctx context.Context, workspaceID uint, filter types.AgentTaskListFilter, agentIDs []string) ([]*types.AgentTask, error) {
+	if len(agentIDs) == 0 {
+		tasks, err := r.backend.ListTasksFiltered(ctx, workspaceID, filter)
+		if err != nil {
+			return nil, err
+		}
+		return dedupeTasks(tasks), nil
+	}
+
+	var all []*types.AgentTask
+	for _, agentID := range agentIDs {
+		localFilter := filter
+		localFilter.AgentID = &agentID
+		tasks, err := r.backend.ListTasksFiltered(ctx, workspaceID, localFilter)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, tasks...)
+	}
+	return dedupeTasks(all), nil
+}
+
 func (r *DataResolver) fetchOutputsForScope(ctx context.Context, workspaceID uint, ds *types.DataSource, agentIDs []string) ([]*types.TaskOutput, error) {
 	filter := baseTaskOutputFilter()
 	if outputType := dataSourceOutputTypeFallback(ds); outputType != "" {
@@ -804,6 +861,36 @@ func (r *DataResolver) fetchOutputsForScope(ctx context.Context, workspaceID uin
 		return nil, err
 	}
 	return filterOutputsForDataSource(outputs, ds, agentIDs), nil
+}
+
+func (r *DataResolver) fetchBlockerOutputsForScope(
+	ctx context.Context,
+	workspaceID uint,
+	ds *types.DataSource,
+	agentIDs []string,
+	selectedOutputs []*types.TaskOutput,
+) ([]*types.TaskOutput, error) {
+	filter := types.AgentTaskListFilter{
+		States: []types.AgentTaskState{types.AgentTaskStateWaiting},
+		Limit:  200,
+	}
+	tasks, err := r.listScopedTasks(ctx, workspaceID, filter, agentIDs)
+	if err != nil || len(tasks) == 0 {
+		return nil, err
+	}
+
+	selectedTaskIDs := taskSetFromOutputs(selectedOutputs)
+	synthetic := make([]*types.TaskOutput, 0, len(tasks))
+	for _, task := range tasks {
+		if task == nil || selectedTaskIDs[strings.TrimSpace(task.ID)] {
+			continue
+		}
+		if output := blockerMappingOutput(task); output != nil {
+			synthetic = append(synthetic, output)
+		}
+	}
+	filtered := dedupeOutputs(filterOutputsForDataSource(synthetic, ds, agentIDs))
+	return filtered, nil
 }
 
 func (r *DataResolver) fetchComponentOutputs(ctx context.Context, workspaceID uint, ds *types.DataSource, viewAgentRefs []string) ([]*types.TaskOutput, error) {
@@ -823,21 +910,223 @@ func (r *DataResolver) fetchMappingOutputs(ctx context.Context, workspaceID uint
 		return nil, nil
 	}
 
-	selectedOutputs, err := r.fetchOutputsForScope(ctx, workspaceID, ds, agentIDs)
-	if err != nil || len(selectedOutputs) == 0 || !dataSourceNarrowsTaskSelection(ds) {
-		return selectedOutputs, err
+	realSelectedOutputs, err := r.fetchOutputsForScope(ctx, workspaceID, ds, agentIDs)
+	if err != nil {
+		return nil, err
+	}
+	blockerSelectedOutputs, err := r.fetchBlockerOutputsForScope(ctx, workspaceID, ds, agentIDs, realSelectedOutputs)
+	if err != nil {
+		return nil, err
+	}
+	selectedOutputs := dedupeOutputs(append(realSelectedOutputs, blockerSelectedOutputs...))
+	if len(selectedOutputs) == 0 || !dataSourceNarrowsTaskSelection(ds) {
+		return selectedOutputs, nil
 	}
 
-	taskIDs := taskSetFromOutputs(selectedOutputs)
+	taskIDs := taskSetFromOutputs(realSelectedOutputs)
 	if len(taskIDs) == 0 {
-		return nil, nil
+		return selectedOutputs, nil
 	}
 
 	allTaskOutputs, err := r.fetchTaskOutputs(ctx, workspaceID, sortedTaskIDSet(taskIDs), agentIDs)
 	if err != nil {
 		return nil, err
 	}
-	return allTaskOutputs, nil
+	return dedupeOutputs(append(allTaskOutputs, blockerSelectedOutputs...)), nil
+}
+
+func blockerMappingOutput(task *types.AgentTask) *types.TaskOutput {
+	if task == nil || strings.TrimSpace(task.ID) == "" {
+		return nil
+	}
+	blocker := ProjectBlocker(task, nil)
+	if blocker == nil {
+		return nil
+	}
+	if status := strings.TrimSpace(blocker.Status); status != "" && !strings.EqualFold(status, string(types.TaskBlockerStatusOpen)) {
+		return nil
+	}
+
+	title := blockerMappingTitle(task, blocker)
+	summary := strings.TrimSpace(blocker.Summary)
+	details := strings.TrimSpace(blocker.Details)
+	if title == "" && summary == "" && details == "" {
+		return nil
+	}
+
+	channel := blockerMappingChannel(task)
+	recipient, subject := blockerMappingEmailFields(blocker)
+	outputType := blockerMappingOutputType(channel, details, recipient, subject)
+	createdAt := task.CreatedAt
+	if task.CurrentBlocker != nil && !task.CurrentBlocker.CreatedAt.IsZero() {
+		createdAt = task.CurrentBlocker.CreatedAt
+	}
+
+	data := map[string]any{
+		"blocker_kind": blocker.Kind,
+		"input_kind":   blocker.InputKind,
+		"task_state":   string(task.State),
+	}
+	if summary != "" {
+		data["summary"] = summary
+	}
+	if details != "" {
+		data["details"] = details
+		data["content"] = details
+	}
+	if label := blockerMappingTaskLabel(task); label != "" {
+		data["task_label"] = label
+	}
+	if channel != "" {
+		data["channel"] = channel
+	}
+	if recipient != "" {
+		data["recipient"] = recipient
+		data["to"] = recipient
+	}
+	if subject != "" {
+		data["subject"] = subject
+	}
+
+	metadata := map[string]any{
+		types.TaskOutputMetadataArtifactKey:  blockerMappingArtifactKey(outputType, blocker),
+		types.TaskOutputMetadataArtifactRole: types.TaskOutputArtifactRolePrimary,
+		types.TaskOutputMetadataBlockingKind: blocker.Kind,
+		types.TaskOutputMetadataInputKind:    blocker.InputKind,
+	}
+	if blocker.ApprovalSurface {
+		metadata[types.TaskOutputMetadataApprovalUI] = true
+	}
+	if blocker.WaitGroupID != "" {
+		metadata[types.TaskOutputMetadataWaitGroupID] = blocker.WaitGroupID
+	}
+
+	return &types.TaskOutput{
+		ID:          blockerMappingOutputID(task, blocker),
+		WorkspaceID: task.WorkspaceID,
+		TaskID:      task.ID,
+		AgentID:     task.AgentID,
+		AgentName:   task.AgentName,
+		OutputType:  outputType,
+		Title:       title,
+		Summary:     stringPtr(summary),
+		Data:        data,
+		Metadata:    metadata,
+		Status:      types.TaskOutputStatusPending,
+		CreatedAt:   createdAt,
+	}
+}
+
+func blockerMappingOutputID(task *types.AgentTask, blocker *types.ResolvedBlocker) string {
+	seed := firstNonEmptyMappingString(
+		strings.TrimSpace(blocker.ID),
+		strings.TrimSpace(blocker.WaitGroupID),
+		strings.TrimSpace(task.ID),
+	)
+	return "blocker:" + normalizeToken(seed)
+}
+
+func blockerMappingTaskLabel(task *types.AgentTask) string {
+	if task == nil {
+		return ""
+	}
+	return strings.TrimSpace(firstNonEmptyMappingString(
+		toString(dotGet(task.PayloadJSON, "label")),
+		toString(dotGet(task.PayloadJSON, "original_message")),
+		toString(dotGet(task.PayloadJSON, "message")),
+	))
+}
+
+func blockerMappingTitle(task *types.AgentTask, blocker *types.ResolvedBlocker) string {
+	title := strings.TrimSpace(firstNonEmptyMappingString(
+		blocker.Summary,
+		blockerMappingTaskLabel(task),
+	))
+	if title != "" {
+		return title
+	}
+	if blocker != nil && blocker.ApprovalSurface {
+		return "Needs approval"
+	}
+	return "Needs input"
+}
+
+func blockerMappingChannel(task *types.AgentTask) string {
+	if task == nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(firstNonEmptyMappingString(
+		toString(dotGet(task.RoutingJSON, "channel")),
+		toString(dotGet(task.PayloadJSON, "channel")),
+	)))
+}
+
+func blockerMappingEmailFields(blocker *types.ResolvedBlocker) (string, string) {
+	if blocker == nil {
+		return "", ""
+	}
+	recipient := strings.TrimSpace(firstNonEmptyMappingString(
+		toString(dotGet(blocker.PayloadJSON, "recipient")),
+		toString(dotGet(blocker.PayloadJSON, "to")),
+	))
+	subject := strings.TrimSpace(toString(dotGet(blocker.PayloadJSON, "subject")))
+	if recipient != "" && subject != "" {
+		return recipient, subject
+	}
+	if details := strings.TrimSpace(blocker.Details); details != "" {
+		if recipient == "" {
+			recipient = blockerDetailsField(details, "To")
+		}
+		if subject == "" {
+			subject = blockerDetailsField(details, "Subject")
+		}
+	}
+	return recipient, subject
+}
+
+func blockerDetailsField(details, field string) string {
+	prefix := strings.ToLower(strings.TrimSpace(field)) + ":"
+	for _, line := range strings.Split(details, "\n") {
+		cleaned := strings.TrimSpace(strings.ReplaceAll(line, "*", ""))
+		lower := strings.ToLower(cleaned)
+		if !strings.HasPrefix(lower, prefix) {
+			continue
+		}
+		return strings.TrimSpace(cleaned[len(prefix):])
+	}
+	return ""
+}
+
+func blockerMappingOutputType(channel, details, recipient, subject string) string {
+	if strings.EqualFold(strings.TrimSpace(channel), "email") {
+		return types.TaskOutputTypeEmail
+	}
+	details = strings.ToLower(strings.TrimSpace(details))
+	if recipient != "" || subject != "" || strings.Contains(details, "to:") || strings.Contains(details, "subject:") {
+		return types.TaskOutputTypeEmail
+	}
+	return "text"
+}
+
+func blockerMappingArtifactKey(outputType string, blocker *types.ResolvedBlocker) string {
+	switch {
+	case outputType == types.TaskOutputTypeEmail:
+		return "email-draft"
+	case blocker != nil && blocker.ApprovalSurface:
+		return "approval-request"
+	case blocker != nil && strings.TrimSpace(blocker.InputKind) != "":
+		return normalizeToken(blocker.InputKind) + "-request"
+	default:
+		return "blocked-task"
+	}
+}
+
+func stringPtr(value string) *string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	return &value
 }
 
 func filterOutputsForDataSource(outputs []*types.TaskOutput, ds *types.DataSource, resolvedAgentIDs []string) []*types.TaskOutput {
@@ -983,6 +1272,168 @@ func dedupeOutputs(all []*types.TaskOutput) []*types.TaskOutput {
 	}
 	sortTaskOutputs(deduped)
 	return deduped
+}
+
+func normalizeOutputsForTableMapping(all []*types.TaskOutput) []*types.TaskOutput {
+	if len(all) == 0 {
+		return nil
+	}
+	grouped := groupOutputsByTask(dedupeOutputs(all))
+	taskIDs := taskIDsFromGroups(grouped)
+	normalized := make([]*types.TaskOutput, 0, len(all))
+	for _, taskID := range taskIDs {
+		normalized = append(normalized, normalizeTaskOutputsForTableMapping(grouped[taskID])...)
+	}
+	return dedupeOutputs(normalized)
+}
+
+func normalizeTaskOutputsForTableMapping(outputs []*types.TaskOutput) []*types.TaskOutput {
+	if len(outputs) == 0 {
+		return nil
+	}
+	byIdentity := make(map[string][]*types.TaskOutput, len(outputs))
+	var passthrough []*types.TaskOutput
+	for _, output := range outputs {
+		if output == nil {
+			continue
+		}
+		identity := mappingOutputIdentity(output)
+		if identity == "" {
+			passthrough = append(passthrough, output)
+			continue
+		}
+		byIdentity[identity] = append(byIdentity[identity], output)
+	}
+	normalized := append([]*types.TaskOutput{}, passthrough...)
+	identities := make([]string, 0, len(byIdentity))
+	for identity := range byIdentity {
+		identities = append(identities, identity)
+	}
+	sort.Strings(identities)
+	for _, identity := range identities {
+		if output := selectCurrentOutputForTableMapping(byIdentity[identity]); output != nil {
+			normalized = append(normalized, output)
+		}
+	}
+	sortTaskOutputs(normalized)
+	return normalized
+}
+
+func selectCurrentOutputForTableMapping(outputs []*types.TaskOutput) *types.TaskOutput {
+	if len(outputs) == 0 {
+		return nil
+	}
+	best := outputs[0]
+	for _, candidate := range outputs[1:] {
+		if preferOutputForTableMapping(candidate, best) {
+			best = candidate
+		}
+	}
+	return best
+}
+
+func preferOutputForTableMapping(candidate, current *types.TaskOutput) bool {
+	if candidate == nil {
+		return false
+	}
+	if current == nil {
+		return true
+	}
+	candidateCurrent := isCurrentOutputStatusForTableMapping(candidate.Status)
+	currentCurrent := isCurrentOutputStatusForTableMapping(current.Status)
+	if candidateCurrent != currentCurrent {
+		return candidateCurrent
+	}
+	if !candidate.CreatedAt.Equal(current.CreatedAt) {
+		return candidate.CreatedAt.After(current.CreatedAt)
+	}
+	candidateRole := outputRoleRankForTableMapping(candidate)
+	currentRole := outputRoleRankForTableMapping(current)
+	if candidateRole != currentRole {
+		return candidateRole > currentRole
+	}
+	return strings.TrimSpace(candidate.ID) < strings.TrimSpace(current.ID)
+}
+
+func isCurrentOutputStatusForTableMapping(status string) bool {
+	switch strings.TrimSpace(strings.ToLower(status)) {
+	case "", types.TaskOutputStatusActive, types.TaskOutputStatusApproved, types.TaskOutputStatusPending:
+		return true
+	default:
+		return false
+	}
+}
+
+func outputRoleRankForTableMapping(output *types.TaskOutput) int {
+	switch strings.TrimSpace(strings.ToLower(meta(output, types.TaskOutputMetadataArtifactRole))) {
+	case types.TaskOutputArtifactRolePrimary:
+		return 3
+	case types.TaskOutputArtifactRoleSupporting:
+		return 2
+	case types.TaskOutputArtifactRoleIncidental:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func mappingOutputIdentity(output *types.TaskOutput) string {
+	if output == nil {
+		return ""
+	}
+	artifact := ArtifactOf(output)
+	key := normalizeToken(artifact.Key())
+	title := normalizeToken(output.Title)
+	path := normalizeToken(artifact.filePath())
+	uri := strings.ToLower(strings.TrimSpace(artifact.uri()))
+	threadID := normalizeToken(firstNonEmptyMappingString(
+		toString(dotGet(output.Data, "thread_id")),
+		toString(dotGet(output.Metadata, "thread_id")),
+	))
+	recipient := normalizeToken(firstNonEmptyMappingString(
+		toString(dotGet(output.Data, "recipient")),
+		toString(dotGet(output.Data, "to")),
+		toString(dotGet(output.Metadata, "recipient")),
+		toString(dotGet(output.Metadata, "to")),
+	))
+	subject := normalizeToken(firstNonEmptyMappingString(
+		toString(dotGet(output.Data, "subject")),
+		toString(dotGet(output.Metadata, "subject")),
+	))
+
+	switch {
+	case key != "" && threadID != "":
+		return "key:" + key + "|thread:" + threadID
+	case key != "" && recipient != "" && subject != "":
+		return "key:" + key + "|recipient:" + recipient + "|subject:" + subject
+	case key != "" && uri != "":
+		return "key:" + key + "|uri:" + uri
+	case key != "" && path != "":
+		return "key:" + key + "|path:" + path
+	case key != "" && title != "":
+		return "key:" + key + "|title:" + title
+	case uri != "":
+		return "uri:" + uri
+	case path != "":
+		return "path:" + path
+	case recipient != "" && subject != "":
+		return "type:" + normalizeToken(output.OutputType) + "|recipient:" + recipient + "|subject:" + subject
+	case key != "":
+		return "key:" + key
+	case title != "":
+		return "type:" + normalizeToken(output.OutputType) + "|title:" + title
+	default:
+		return ""
+	}
+}
+
+func firstNonEmptyMappingString(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func (r *DataResolver) fetchBoundTaskContext(ctx context.Context, workspaceID uint, rows []resolvedSheetRow) boundDetailContext {

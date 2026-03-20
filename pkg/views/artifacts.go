@@ -99,10 +99,12 @@ func artifactKeysEquivalent(left, right string) bool {
 func artifactKeyVariants(key string) map[string]struct{} {
 	variants := map[string]struct{}{key: {}}
 	switch key {
-	case "sales-email", "outreach-email", "email-draft":
+	case "sales-email", "outreach-email", "email-draft", "approval-email", "blocked-email":
 		variants["sales-email"] = struct{}{}
 		variants["outreach-email"] = struct{}{}
 		variants["email-draft"] = struct{}{}
+		variants["approval-email"] = struct{}{}
+		variants["blocked-email"] = struct{}{}
 	}
 	return variants
 }

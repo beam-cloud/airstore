@@ -1058,11 +1058,24 @@ func applyDispatchPayload(task *types.AgentTask, values map[string]any, retryAtt
 	}
 }
 
+const wakeDispatchReminder = `IMPORTANT: This turn was resumed by Airstore's external wake scheduler. The timer has already fired outside the model loop. Do not inspect or manage your own timers, background waits, or background task IDs. There is no timer for you to poll. Use the current workspace state and perform the requested follow-up now.`
+
 func dispatchPromptFromValues(values map[string]any) string {
-	if prompt := strings.TrimSpace(streamValueAsString(values, types.OrchestrationOutboxPayloadDispatchPrompt)); prompt != "" {
+	if prompt := strings.TrimSpace(streamValueAsString(values, types.OrchestrationOutboxPayloadWakeFollowUpPrompt)); prompt != "" {
+		return normalizeWakeDispatchPrompt(prompt)
+	}
+	return strings.TrimSpace(streamValueAsString(values, types.OrchestrationOutboxPayloadDispatchPrompt))
+}
+
+func normalizeWakeDispatchPrompt(prompt string) string {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return wakeDispatchReminder
+	}
+	if strings.Contains(prompt, wakeDispatchReminder) {
 		return prompt
 	}
-	return strings.TrimSpace(streamValueAsString(values, types.OrchestrationOutboxPayloadWakeFollowUpPrompt))
+	return wakeDispatchReminder + "\n\n" + prompt
 }
 
 func dispatchRetryPayloadFromValues(values map[string]any) map[string]any {
@@ -2425,6 +2438,7 @@ func (s *AgentService) createAttemptExecutionTask(
 	applyRunExecutionContextEnv(taskEnv, run, attempt.ID)
 	applyAgentConfigEnv(taskEnv, agentConfig)
 	applyPayloadRuntimeEnv(taskEnv, payload)
+	ensureRuntimeSystemPromptEnv(taskEnv)
 	retryPolicy := RetryPolicyOrDefault(runPolicy.Retry)
 	executionPolicy := map[string]any{
 		"host":                               run.ExecHost,
@@ -2863,6 +2877,13 @@ func applyPayloadRuntimeEnv(env map[string]string, payload map[string]any) {
 	if boolFromAny(payload[types.OrchestrationOutboxPayloadResumeSession]) {
 		env["AIRSTORE_AGENT_RESUME_SESSION"] = "true"
 	}
+}
+
+func ensureRuntimeSystemPromptEnv(env map[string]string) {
+	if env == nil {
+		return
+	}
+	env["AIRSTORE_AGENT_SYSTEM_PROMPT"] = ensureRuntimeSchedulingGuidance(env["AIRSTORE_AGENT_SYSTEM_PROMPT"])
 }
 
 func applyPayloadExecutionMetadata(executionPolicy map[string]any, payload map[string]any) {

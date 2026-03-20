@@ -1855,41 +1855,6 @@ func extractStringSlice(m map[string]any, key string) []string {
 	return uniqueStringSlice(m[key])
 }
 
-func describeFields(m map[string]any, prefix string, out map[string]string, depth int) {
-	if depth > 2 {
-		return
-	}
-	for k, v := range m {
-		path := prefix + "." + k
-		switch val := v.(type) {
-		case map[string]any:
-			out[path] = "object"
-			describeFields(val, path, out, depth+1)
-		case []any:
-			if len(val) > 0 {
-				if nested, ok := val[0].(map[string]any); ok {
-					out[path] = "array of objects"
-					describeFields(nested, path+"[]", out, depth+1)
-				} else {
-					out[path] = fmt.Sprintf("array of %T", val[0])
-				}
-			} else {
-				out[path] = "array"
-			}
-		case string:
-			out[path] = "string"
-		case float64:
-			out[path] = "number"
-		case bool:
-			out[path] = "boolean"
-		case nil:
-			out[path] = "null"
-		default:
-			out[path] = fmt.Sprintf("%T", v)
-		}
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Component registry documentation — injected into BAML prompt
 // ---------------------------------------------------------------------------

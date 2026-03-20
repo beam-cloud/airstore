@@ -52,6 +52,55 @@ func (c outputCandidate) identityKey() string {
 	}
 }
 
+func (c outputCandidate) fanOutEntityKey() string {
+	key := normalizeArtifactToken(anyToTrimmedString(c.Metadata[types.TaskOutputMetadataArtifactKey]))
+	kind := normalizeArtifactToken(anyToTrimmedString(c.Metadata[types.TaskOutputMetadataArtifactKind]))
+	outputType := normalizeArtifactToken(c.OutputType)
+
+	if kind == "email" || strings.Contains(key, "email") || strings.Contains(outputType, "email") {
+		recipient := normalizeFanOutEntityValue(firstNonEmptyTrimmed(
+			anyToTrimmedString(c.Data["to"]),
+			anyToTrimmedString(c.Data["recipient"]),
+			anyToTrimmedString(c.Data["email"]),
+		))
+		if recipient != "" {
+			return "email:" + recipient
+		}
+		company := normalizeFanOutEntityValue(anyToTrimmedString(c.Data["company"]))
+		if company != "" {
+			return "company:" + company
+		}
+	}
+
+	path := firstNonEmptyTrimmed(c.Path, anyToTrimmedString(c.Data[keyPath]))
+	if path != "" {
+		return "path:" + path
+	}
+
+	uri := strings.ToLower(firstNonEmptyTrimmed(c.URI, anyToTrimmedString(c.Data[keyURI]), anyToTrimmedString(c.Metadata[keyDeeplink])))
+	if uri != "" {
+		return "uri:" + uri
+	}
+
+	title := normalizeArtifactToken(c.Title)
+	if title != "" {
+		return "title:" + title
+	}
+
+	return ""
+}
+
+func normalizeFanOutEntityValue(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if start := strings.Index(raw, "<"); start >= 0 && strings.HasSuffix(raw, ">") {
+		raw = raw[start+1 : len(raw)-1]
+	}
+	return strings.ToLower(strings.TrimSpace(raw))
+}
+
 func (c outputCandidate) artifactKey() string {
 	return normalizeArtifactToken(anyToTrimmedString(c.Metadata[types.TaskOutputMetadataArtifactKey]))
 }

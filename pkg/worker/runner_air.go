@@ -23,6 +23,10 @@ type AirRunner struct {
 	s2Basin         string
 }
 
+type airTraceOutput struct {
+	Summary string `json:"summary"`
+}
+
 func NewAirRunner(opts AirRunnerOptions) *AirRunner {
 	return &AirRunner{
 		anthropicAPIKey: strings.TrimSpace(opts.AnthropicAPIKey),
@@ -116,7 +120,11 @@ func (r *AirRunner) ParseTurnOutput(output []byte) (bool, types.InputKind, strin
 			kind = types.InputKindFreeText
 		}
 	}
-	return trace.NeedsInput, kind, trace.Response, nil
+	response := strings.TrimSpace(trace.Response)
+	if response == "" && trace.Output != nil {
+		response = strings.TrimSpace(trace.Output.Summary)
+	}
+	return trace.NeedsInput, kind, response, nil
 }
 
 // ExtractResponseText implements ResponseExtractor for air's JSONL output.
@@ -143,9 +151,10 @@ func (r *AirRunner) ExtractResponseText(raw []byte, limit int) string {
 }
 
 type airTrace struct {
-	Status     string `json:"status"`
-	NeedsInput bool   `json:"needs_input"`
-	Response   string `json:"response"`
-	InputKind  string `json:"input_kind"`
-	SessionID  string `json:"session_id"`
+	Status     string          `json:"status"`
+	NeedsInput bool            `json:"needs_input"`
+	Response   string          `json:"response"`
+	InputKind  string          `json:"input_kind"`
+	SessionID  string          `json:"session_id"`
+	Output     *airTraceOutput `json:"output,omitempty"`
 }

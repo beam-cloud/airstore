@@ -63,10 +63,13 @@ type fakeResolverBackend struct {
 	outputsByAgent    map[string][]*types.TaskOutput
 	taskOutputsByTask map[string][]*types.TaskOutput
 	workspaceOutputs  []*types.TaskOutput
+	tasksByAgent      map[string][]*types.AgentTask
+	workspaceTasks    []*types.AgentTask
 	tasks             map[string]*types.AgentTask
 	queriedAgentIDs   []string
 	queriedTaskIDs    []string
 	filters           []types.TaskOutputListFilter
+	taskFilters       []types.AgentTaskListFilter
 }
 
 func (b *fakeResolverBackend) GetTaskByID(_ context.Context, taskID string) (*types.AgentTask, error) {
@@ -126,6 +129,31 @@ func (b *fakeResolverBackend) ListWorkspaceTaskOutputs(_ context.Context, _ uint
 		return filtered, nil
 	}
 	return outputs, nil
+}
+
+func (b *fakeResolverBackend) ListTasksFiltered(_ context.Context, _ uint, filter types.AgentTaskListFilter) ([]*types.AgentTask, error) {
+	b.taskFilters = append(b.taskFilters, filter)
+	tasks := b.workspaceTasks
+	if filter.AgentID != nil {
+		tasks = b.tasksByAgent[*filter.AgentID]
+	}
+	if len(filter.States) == 0 {
+		return tasks, nil
+	}
+	allowed := make(map[types.AgentTaskState]struct{}, len(filter.States))
+	for _, state := range filter.States {
+		allowed[state] = struct{}{}
+	}
+	filtered := make([]*types.AgentTask, 0, len(tasks))
+	for _, task := range tasks {
+		if task == nil {
+			continue
+		}
+		if _, ok := allowed[task.State]; ok {
+			filtered = append(filtered, task)
+		}
+	}
+	return filtered, nil
 }
 
 func TestFetchComponentOutputsSkipsUnresolvedAgentRefs(t *testing.T) {
@@ -250,6 +278,212 @@ func TestFetchMappingOutputsExpandsTaskContextForSelectedTasks(t *testing.T) {
 	}
 	if got, want := backend.queriedTaskIDs[0], "task-1"; got != want {
 		t.Fatalf("queried task id = %q, want %q", got, want)
+	}
+}
+
+func TestFetchMappingOutputsIncludesSyntheticBlockerOutputWhenNoRealOutputsExist(t *testing.T) {
+	now := time.Now().UTC()
+	agentID := "agent-1"
+	task := &types.AgentTask{
+		ID:        "task-1",
+		AgentID:   &agentID,
+		State:     types.AgentTaskStateWaiting,
+		CreatedAt: now.Add(-time.Minute),
+		PayloadJSON: map[string]any{
+			"label":   "Cold outreach email to Mike",
+			"message": "Draft a cold outreach email to Mike",
+		},
+		RoutingJSON: map[string]any{
+			"channel": "email",
+		},
+		CurrentBlocker: &types.TaskBlocker{
+			ID:        "blocker-1",
+			Kind:      types.TaskBlockerKindApproval,
+			InputKind: types.InputKindApproveReject,
+			Status:    types.TaskBlockerStatusOpen,
+			CreatedAt: now,
+			PayloadJSON: map[string]any{
+				"summary": "Send outreach email to Mike",
+				"details": "**To:** Mike <mike@example.com>\n\n**Subject:** Beam sandboxes\n\nHello Mike,",
+			},
+		},
+	}
+
+	backend := &fakeResolverBackend{
+		profilesByKey: map[string]*types.AgentProfile{
+			"sales-agent": {ID: agentID},
+		},
+		tasksByAgent: map[string][]*types.AgentTask{
+			agentID: {task},
+		},
+		tasks: map[string]*types.AgentTask{
+			task.ID: task,
+		},
+	}
+	resolver := &DataResolver{backend: backend, store: nil}
+
+	outputs, err := resolver.fetchMappingOutputs(
+		context.Background(),
+		7,
+		&types.DataSource{OutputType: types.TaskOutputTypeEmail},
+		[]string{"sales-agent"},
+	)
+	if err != nil {
+		t.Fatalf("fetchMappingOutputs returned error: %v", err)
+	}
+	if got, want := len(outputs), 1; got != want {
+		t.Fatalf("output count = %d, want %d", got, want)
+	}
+	if got, want := outputs[0].TaskID, task.ID; got != want {
+		t.Fatalf("task id = %q, want %q", got, want)
+	}
+	if got, want := outputs[0].OutputType, types.TaskOutputTypeEmail; got != want {
+		t.Fatalf("output type = %q, want %q", got, want)
+	}
+	if got, want := outputs[0].Status, types.TaskOutputStatusPending; got != want {
+		t.Fatalf("status = %q, want %q", got, want)
+	}
+	if got, want := outputs[0].Title, "Send outreach email to Mike"; got != want {
+		t.Fatalf("title = %q, want %q", got, want)
+	}
+	if got := toString(outputs[0].Data["recipient"]); got != "Mike <mike@example.com>" {
+		t.Fatalf("recipient = %q, want Mike <mike@example.com>", got)
+	}
+	if got := toString(outputs[0].Data["subject"]); got != "Beam sandboxes" {
+		t.Fatalf("subject = %q, want Beam sandboxes", got)
+	}
+	if got := len(backend.queriedTaskIDs); got != 0 {
+		t.Fatalf("expected no real task-output expansion, got %d task queries", got)
+	}
+}
+
+func TestFetchMappingOutputsIncludesSyntheticBlockerOutputForSalesEmailArtifactKey(t *testing.T) {
+	now := time.Now().UTC()
+	agentID := "agent-1"
+	task := &types.AgentTask{
+		ID:        "task-1",
+		AgentID:   &agentID,
+		State:     types.AgentTaskStateWaiting,
+		CreatedAt: now.Add(-time.Minute),
+		PayloadJSON: map[string]any{
+			"label":   "Cold outreach email to Mike",
+			"message": "Draft a cold outreach email to Mike",
+		},
+		RoutingJSON: map[string]any{
+			"channel": "email",
+		},
+		CurrentBlocker: &types.TaskBlocker{
+			ID:        "blocker-1",
+			Kind:      types.TaskBlockerKindInput,
+			InputKind: types.InputKindFreeText,
+			Status:    types.TaskBlockerStatusOpen,
+			CreatedAt: now,
+			PayloadJSON: map[string]any{
+				"summary": "Send outreach email to Mike",
+				"details": "**To:** Mike <mike@example.com>\n\n**Subject:** Beam sandboxes\n\nHello Mike,",
+			},
+		},
+	}
+
+	backend := &fakeResolverBackend{
+		profilesByKey: map[string]*types.AgentProfile{
+			"sales-agent": {ID: agentID},
+		},
+		tasksByAgent: map[string][]*types.AgentTask{
+			agentID: {task},
+		},
+		tasks: map[string]*types.AgentTask{
+			task.ID: task,
+		},
+	}
+	resolver := &DataResolver{backend: backend, store: nil}
+
+	outputs, err := resolver.fetchMappingOutputs(
+		context.Background(),
+		7,
+		&types.DataSource{ArtifactKey: "sales-email"},
+		[]string{"sales-agent"},
+	)
+	if err != nil {
+		t.Fatalf("fetchMappingOutputs returned error: %v", err)
+	}
+	if got, want := len(outputs), 1; got != want {
+		t.Fatalf("output count = %d, want %d", got, want)
+	}
+	if got, want := outputs[0].TaskID, task.ID; got != want {
+		t.Fatalf("task id = %q, want %q", got, want)
+	}
+	if got, want := meta(outputs[0], types.TaskOutputMetadataArtifactKey), "email-draft"; got != want {
+		t.Fatalf("artifact key = %q, want %q", got, want)
+	}
+	if got := toString(outputs[0].Data["recipient"]); got != "Mike <mike@example.com>" {
+		t.Fatalf("recipient = %q, want Mike <mike@example.com>", got)
+	}
+	if got := toString(outputs[0].Data["subject"]); got != "Beam sandboxes" {
+		t.Fatalf("subject = %q, want Beam sandboxes", got)
+	}
+}
+
+func TestFetchMappingOutputsDoesNotAddSyntheticBlockerOutputWhenRealOutputExists(t *testing.T) {
+	now := time.Now().UTC()
+	agentID := "agent-1"
+	real := &types.TaskOutput{
+		ID:         "out-1",
+		TaskID:     "task-1",
+		AgentID:    &agentID,
+		OutputType: types.TaskOutputTypeEmail,
+		Title:      "Real pending draft",
+		Status:     types.TaskOutputStatusPending,
+		CreatedAt:  now,
+	}
+	task := &types.AgentTask{
+		ID:      "task-1",
+		AgentID: &agentID,
+		State:   types.AgentTaskStateWaiting,
+		CurrentBlocker: &types.TaskBlocker{
+			ID:        "blocker-1",
+			Kind:      types.TaskBlockerKindApproval,
+			InputKind: types.InputKindApproveReject,
+			Status:    types.TaskBlockerStatusOpen,
+			CreatedAt: now,
+			PayloadJSON: map[string]any{
+				"summary": "Send outreach email to Mike",
+			},
+		},
+	}
+	backend := &fakeResolverBackend{
+		profilesByKey: map[string]*types.AgentProfile{
+			"sales-agent": {ID: agentID},
+		},
+		outputsByAgent: map[string][]*types.TaskOutput{
+			agentID: {real},
+		},
+		taskOutputsByTask: map[string][]*types.TaskOutput{
+			"task-1": {real},
+		},
+		tasksByAgent: map[string][]*types.AgentTask{
+			agentID: {task},
+		},
+		tasks: map[string]*types.AgentTask{
+			task.ID: task,
+		},
+	}
+	resolver := &DataResolver{backend: backend, store: nil}
+
+	outputs, err := resolver.fetchMappingOutputs(
+		context.Background(),
+		7,
+		&types.DataSource{OutputType: types.TaskOutputTypeEmail},
+		[]string{"sales-agent"},
+	)
+	if err != nil {
+		t.Fatalf("fetchMappingOutputs returned error: %v", err)
+	}
+	if got, want := len(outputs), 1; got != want {
+		t.Fatalf("output count = %d, want %d", got, want)
+	}
+	if got, want := outputs[0].ID, real.ID; got != want {
+		t.Fatalf("output id = %q, want %q", got, want)
 	}
 }
 
@@ -705,6 +939,88 @@ func TestFilterOutputsForDataSource(t *testing.T) {
 	}, []string{agentID})
 	if len(filtered) != 1 || filtered[0].ID != "out-1" {
 		t.Fatalf("artifact_key should narrow to matching outputs, got %d results", len(filtered))
+	}
+}
+
+func TestNormalizeOutputsForTableMappingKeepsNewestCurrentOutputPerIdentity(t *testing.T) {
+	base := newRecipeOutput("out-1")
+	base.TaskID = "task-1"
+	base.Title = "Cold outreach email to Luke"
+	base.Metadata = map[string]any{
+		types.TaskOutputMetadataArtifactKey:   "sales-email",
+		types.TaskOutputMetadataArtifactLabel: "Sales Emails",
+		types.TaskOutputMetadataArtifactKind:  types.TaskOutputTypeEmail,
+		types.TaskOutputMetadataArtifactRole:  types.TaskOutputArtifactRolePrimary,
+	}
+	base.Data = map[string]any{
+		"recipient": "luke@slai.io",
+		"subject":   "Cleaner dev environments for SLAI",
+	}
+	base.CreatedAt = time.Unix(10, 0)
+	base.Status = types.TaskOutputStatusPending
+
+	active := *base
+	active.ID = "out-2"
+	active.Status = types.TaskOutputStatusActive
+	active.CreatedAt = time.Unix(20, 0)
+
+	rejected := *base
+	rejected.ID = "out-3"
+	rejected.Status = types.TaskOutputStatusRejected
+	rejected.CreatedAt = time.Unix(30, 0)
+
+	other := newRecipeOutput("out-4")
+	other.TaskID = "task-1"
+	other.Title = "Cold outreach email to Camila"
+	other.Metadata = map[string]any{
+		types.TaskOutputMetadataArtifactKey:   "sales-email",
+		types.TaskOutputMetadataArtifactLabel: "Sales Emails",
+		types.TaskOutputMetadataArtifactKind:  types.TaskOutputTypeEmail,
+		types.TaskOutputMetadataArtifactRole:  types.TaskOutputArtifactRolePrimary,
+	}
+	other.Data = map[string]any{
+		"recipient": "camila@example.com",
+		"subject":   "Cleaner dev environments for Beam",
+	}
+	other.CreatedAt = time.Unix(25, 0)
+	other.Status = types.TaskOutputStatusPending
+
+	normalized := normalizeOutputsForTableMapping([]*types.TaskOutput{base, &active, &rejected, other})
+
+	if got, want := sortedOutputIDs(normalized), []string{"out-2", "out-4"}; !slicesMatch(got, want) {
+		t.Fatalf("normalized output ids = %v, want %v", got, want)
+	}
+}
+
+func TestNormalizeOutputsForTableMappingKeepsSingleStaleOutputWhenNoCurrentExists(t *testing.T) {
+	rejected := newRecipeOutput("out-1")
+	rejected.TaskID = "task-1"
+	rejected.Title = "Cold outreach email to Luke"
+	rejected.Metadata = map[string]any{
+		types.TaskOutputMetadataArtifactKey:   "sales-email",
+		types.TaskOutputMetadataArtifactLabel: "Sales Emails",
+		types.TaskOutputMetadataArtifactKind:  types.TaskOutputTypeEmail,
+		types.TaskOutputMetadataArtifactRole:  types.TaskOutputArtifactRolePrimary,
+	}
+	rejected.Data = map[string]any{
+		"recipient": "luke@slai.io",
+		"subject":   "Cleaner dev environments for SLAI",
+	}
+	rejected.CreatedAt = time.Unix(10, 0)
+	rejected.Status = types.TaskOutputStatusRejected
+
+	cancelled := *rejected
+	cancelled.ID = "out-2"
+	cancelled.Status = types.TaskOutputStatusCancelled
+	cancelled.CreatedAt = time.Unix(20, 0)
+
+	normalized := normalizeOutputsForTableMapping([]*types.TaskOutput{rejected, &cancelled})
+
+	if got, want := len(normalized), 1; got != want {
+		t.Fatalf("normalized output count = %d, want %d", got, want)
+	}
+	if got, want := normalized[0].ID, "out-2"; got != want {
+		t.Fatalf("normalized output id = %q, want %q", got, want)
 	}
 }
 

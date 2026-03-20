@@ -60,8 +60,8 @@ type ActionSpecJSON struct {
 
 var (
 	detailSectionConversation = newDetailSection(SectionEmailThread, "Conversation", EmphasisPrimary)
-	detailSectionApproval     = newDetailSection(SectionApproval, "Approval Required", EmphasisPrimary)
-	detailSectionInput        = newDetailSection(SectionInputForm, "Input Required", EmphasisPrimary)
+	detailSectionApproval     = newDetailSection(SectionApproval, "Needs Approval", EmphasisPrimary)
+	detailSectionInput        = newDetailSection(SectionInputForm, "Needs Attention", EmphasisPrimary)
 	detailSectionTaskStatus   = newDetailSection(SectionTaskProgress, "Task Status", EmphasisSecondary)
 	detailSectionOutputs      = newDetailSection(SectionOutputGallery, "Outputs", EmphasisCollapsed)
 	detailSectionSubtasks     = newDetailSection(SectionSubtasks, "Subtasks", EmphasisSecondary)
@@ -113,10 +113,11 @@ func ResolveProjectedLayout(template DetailLayoutResponse, projection DetailProj
 	var sections []DetailSectionJSON
 	for _, s := range template.Sections {
 		if projection.includesSection(s.Type) {
-			sections = append(sections, s)
+			sections = append(sections, projection.normalizeSection(s))
 		}
 	}
 	sections = ensureDetailSections(sections, projection.requiredSections()...)
+	sections = projection.prioritizeSections(sections)
 	return DetailLayoutResponse{Sections: sections, Actions: projection.actions()}
 }
 
@@ -186,6 +187,52 @@ func (p DetailProjection) actions() []ActionSpecJSON {
 		actions = append(actions, ActionSpecJSON{Type: ActionCancel, Label: "Cancel", Primary: false})
 	}
 	return actions
+}
+
+func (p DetailProjection) normalizeSection(section DetailSectionJSON) DetailSectionJSON {
+	switch section.Type {
+	case SectionApproval:
+		if p.needsApproval() {
+			section.Title = detailSectionApproval.Title
+			section.Emphasis = EmphasisPrimary
+		}
+	case SectionInputForm:
+		if p.needsInput() {
+			section.Title = detailSectionInput.Title
+			section.Emphasis = EmphasisPrimary
+		}
+	}
+	return section
+}
+
+func (p DetailProjection) prioritizeSections(sections []DetailSectionJSON) []DetailSectionJSON {
+	if len(sections) <= 1 {
+		return sections
+	}
+	attention := make([]DetailSectionJSON, 0, 2)
+	rest := make([]DetailSectionJSON, 0, len(sections))
+	for _, section := range sections {
+		if p.isAttentionSection(section.Type) {
+			attention = append(attention, section)
+			continue
+		}
+		rest = append(rest, section)
+	}
+	if len(attention) == 0 {
+		return sections
+	}
+	return append(attention, rest...)
+}
+
+func (p DetailProjection) isAttentionSection(sectionType string) bool {
+	switch sectionType {
+	case SectionApproval:
+		return p.needsApproval()
+	case SectionInputForm:
+		return p.needsInput()
+	default:
+		return false
+	}
 }
 
 func ensureDetailSections(sections []DetailSectionJSON, fallbacks ...DetailSectionJSON) []DetailSectionJSON {

@@ -425,14 +425,10 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	mirror.Flush()
 	outputPipeline.Wait()
 
+	sessionAssistantMessage := ""
 	if runErr == nil && tw.ringBuf != nil {
-		var assistantMessage string
-		if extractor, ok := runner.(ResponseExtractor); ok {
-			assistantMessage = extractor.ExtractResponseText(tw.ringBuf.Bytes(), 24000)
-		} else {
-			assistantMessage = extractAssistantText(tw.ringBuf.Bytes(), 24000)
-		}
-		if assistantMessage != "" {
+		sessionAssistantMessage = extractSessionAssistantMessage(runner, tw.ringBuf.Bytes())
+		if sessionAssistantMessage != "" {
 			var userMessage *string
 			if trimmed := strings.TrimSpace(lastPrompt); trimmed != "" {
 				userMessage = &trimmed
@@ -445,7 +441,7 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 					task,
 					outputPipeline.tracker,
 					userMessage,
-					assistantMessage,
+					sessionAssistantMessage,
 					bamlEnv,
 					nil,
 				); err != nil {
@@ -458,7 +454,7 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 					task,
 					outputPipeline.tracker,
 					userMessage,
-					assistantMessage,
+					sessionAssistantMessage,
 					bamlEnv,
 				); err != nil {
 					addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to persist approval response output")
@@ -471,8 +467,11 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	w.sandboxManager.publishStatus(ctx, task.ExternalId, st, &exitCode, errMsg)
 
 	var agentMsg string
-	if needsInputRunner != nil && needsInputPath != "" {
+	if !needsInput && runErr == nil && needsInputRunner != nil && needsInputPath != "" {
 		agentMsg = needsInputRunner.ReadLastMessage(needsInputPath)
+	}
+	if strings.TrimSpace(agentMsg) == "" {
+		agentMsg = sessionAssistantMessage
 	}
 
 	var wakeSignal *types.RunExecutionWakeSignal
@@ -490,6 +489,25 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 		Duration: time.Since(start), WaitingForInput: needsInput,
 		WakeSignal: wakeSignal, SubtaskRequests: subtaskReqs,
 	}
+}
+
+func extractSessionAssistantMessage(runner AgentExecutionRunner, raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	if outputParser, ok := runner.(OutputParsingRunner); ok {
+		if _, _, response, err := outputParser.ParseTurnOutput(raw); err == nil {
+			if trimmed := strings.TrimSpace(response); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	if extractor, ok := runner.(ResponseExtractor); ok {
+		if trimmed := strings.TrimSpace(extractor.ExtractResponseText(raw, 24000)); trimmed != "" {
+			return trimmed
+		}
+	}
+	return strings.TrimSpace(extractAssistantText(raw, 24000))
 }
 
 func (w *Worker) buildNeedsInputChecker(
@@ -528,6 +546,39 @@ func (w *Worker) buildNeedsInputChecker(
 		}
 		return true, kind, summary, assistantMessage
 	}
+}
+
+type turnInputKindClassifier func(context.Context, string, map[string]string) types.InputKind
+
+func classifyNeedsInputKindWithFallback(
+	ctx context.Context,
+	current types.InputKind,
+	assistantMessage string,
+	bamlEnv map[string]string,
+	classify turnInputKindClassifier,
+) types.InputKind {
+	if current == types.InputKindApproveReject {
+		return current
+	}
+	if strings.TrimSpace(assistantMessage) == "" || classify == nil {
+		return current
+	}
+	if inferred := classify(ctx, assistantMessage, bamlEnv); inferred != "" {
+		return inferred
+	}
+	return current
+}
+
+func classifyNeedsInputKindWithBAML(ctx context.Context, assistantMessage string, bamlEnv map[string]string) types.InputKind {
+	assistantMessage = strings.TrimSpace(assistantMessage)
+	if assistantMessage == "" {
+		return ""
+	}
+	cls, err := agentsignal.ClassifyTurn(ctx, assistantMessage, agentsignal.WithEnv(bamlEnv))
+	if err != nil || cls.Outcome != signaltypes.TurnOutcomeNEEDS_INPUT || cls.Input_kind == nil {
+		return ""
+	}
+	return types.InputKind(strings.ToLower(string(*cls.Input_kind)))
 }
 
 func persistApprovalOutputBeforeWaiting(
@@ -658,6 +709,15 @@ func (w *Worker) runTurnSession(
 			waitingSummary = approvalAssistantMessage
 			if err != nil {
 				addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to parse turn output")
+			}
+			if needsInput {
+				inputKind = classifyNeedsInputKindWithFallback(
+					ctx,
+					inputKind,
+					approvalAssistantMessage,
+					bamlEnv,
+					classifyNeedsInputKindWithBAML,
+				)
 			}
 			if needsInput && inputKind == types.InputKindApproveReject {
 				if s := w.tryBuildApprovalSummary(ctx, approvalAssistantMessage, bamlEnv); s != "" {

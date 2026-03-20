@@ -12,6 +12,7 @@ type workspaceLiveBackend struct {
 	repository.BackendRepository
 	lastTaskFilter   types.AgentTaskListFilter
 	lastOutputFilter types.TaskOutputListFilter
+	outputs          []*types.TaskOutput
 }
 
 func (b *workspaceLiveBackend) ListTasksFiltered(_ context.Context, _ uint, filter types.AgentTaskListFilter) ([]*types.AgentTask, error) {
@@ -21,7 +22,7 @@ func (b *workspaceLiveBackend) ListTasksFiltered(_ context.Context, _ uint, filt
 
 func (b *workspaceLiveBackend) ListWorkspaceTaskOutputs(_ context.Context, _ uint, filter types.TaskOutputListFilter) ([]*types.TaskOutput, error) {
 	b.lastOutputFilter = filter
-	return []*types.TaskOutput{}, nil
+	return b.outputs, nil
 }
 
 func TestWorkspaceLiveBatchExcludesArchivedOutputs(t *testing.T) {
@@ -40,6 +41,57 @@ func TestWorkspaceLiveBatchExcludesArchivedOutputs(t *testing.T) {
 	}
 	if !backend.lastTaskFilter.IncludeArchived {
 		t.Fatal("expected workspace live batch to include archived tasks")
+	}
+}
+
+func TestWorkspaceLiveBatchHidesDraftEmailArtifacts(t *testing.T) {
+	backend := &workspaceLiveBackend{
+		outputs: []*types.TaskOutput{
+			{
+				ID:         "out-approval-email",
+				OutputType: types.TaskOutputTypeEmail,
+				Status:     types.TaskOutputStatusPending,
+				Metadata: map[string]any{
+					types.TaskOutputMetadataApprovalUI: true,
+				},
+			},
+			{
+				ID:         "out-draft-email",
+				OutputType: types.TaskOutputTypeEmail,
+				Status:     types.TaskOutputStatusActive,
+				Data: map[string]any{
+					"draft_id": "draft-123",
+				},
+			},
+			{
+				ID:         "out-sent-email",
+				OutputType: types.TaskOutputTypeEmail,
+				Status:     types.TaskOutputStatusActive,
+				Data: map[string]any{
+					"message_id": "msg-123",
+				},
+			},
+			{
+				ID:         "out-text",
+				OutputType: "text",
+				Status:     types.TaskOutputStatusActive,
+			},
+		},
+	}
+	api := NewAgentAPI(backend, nil)
+
+	batch, err := api.WorkspaceLiveBatch(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("WorkspaceLiveBatch returned error: %v", err)
+	}
+	if batch == nil {
+		t.Fatal("expected workspace batch")
+	}
+	if got := len(batch.Outputs); got != 2 {
+		t.Fatalf("workspace output count = %d, want 2", got)
+	}
+	if batch.Outputs[0].ID != "out-sent-email" || batch.Outputs[1].ID != "out-text" {
+		t.Fatalf("workspace outputs = %#v, want sent email and text only", []string{batch.Outputs[0].ID, batch.Outputs[1].ID})
 	}
 }
 

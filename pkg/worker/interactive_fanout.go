@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -18,17 +19,18 @@ func (w *Worker) classifySubtasks(
 	bamlEnv map[string]string,
 ) []*types.SubtaskRequest {
 	summaries := tracker.TrackedOutputSummaries()
-	if len(summaries) < 2 {
+	if !shouldAttemptFanOut(summaries) {
 		return nil
 	}
 
 	type outputEntry struct {
 		ID       string `json:"id"`
 		Identity string `json:"identity"`
+		Entity   string `json:"entity,omitempty"`
 	}
 	entries := make([]outputEntry, len(summaries))
 	for i, s := range summaries {
-		entries[i] = outputEntry{ID: s.OutputID, Identity: s.Identity}
+		entries[i] = outputEntry{ID: s.OutputID, Identity: s.Identity, Entity: s.EntityKey}
 	}
 	outputsJSON, err := json.Marshal(entries)
 	if err != nil {
@@ -62,4 +64,20 @@ func (w *Worker) classifySubtasks(
 	}
 	log.Info().Int("count", len(reqs)).Msg("subtask requests detected")
 	return reqs
+}
+
+func shouldAttemptFanOut(summaries []trackedOutputSummary) bool {
+	return distinctFanOutEntityCount(summaries) >= 2
+}
+
+func distinctFanOutEntityCount(summaries []trackedOutputSummary) int {
+	entities := make(map[string]struct{}, len(summaries))
+	for _, summary := range summaries {
+		entity := strings.TrimSpace(summary.EntityKey)
+		if entity == "" {
+			continue
+		}
+		entities[entity] = struct{}{}
+	}
+	return len(entities)
 }
