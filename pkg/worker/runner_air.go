@@ -133,27 +133,12 @@ func (r *AirRunner) ParseTurnOutput(output []byte) (TurnParseResult, error) {
 		return TurnParseResult{}, nil
 	}
 
-	kind := types.InputKind("")
-	if trace.NeedsInput {
-		if trace.InputKind != "" {
-			kind = types.InputKind(trace.InputKind)
-		} else {
-			kind = types.InputKindFreeText
-		}
-	}
-	response := strings.TrimSpace(trace.Response)
-	if trace.Output != nil {
-		if nextStep := strings.TrimSpace(trace.Output.NextStep); nextStep != "" {
-			response = nextStep
-		} else if response == "" {
-			response = strings.TrimSpace(trace.Output.Summary)
-		}
-	}
+	response := airTraceResponseText(trace)
+	blocker := airTraceBlockerDirective(trace, response)
 	return TurnParseResult{
-		NeedsInput: trace.NeedsInput,
-		InputKind:  kind,
-		Response:   response,
-		Artifacts:  airDraftedResponseArtifacts(trace.Output),
+		Response:  response,
+		Artifacts: airDraftedResponseArtifacts(trace.Output, airTurnArtifactBlockingMetadata(blocker)),
+		Control:   airTurnControl(blocker),
 	}, nil
 }
 
@@ -189,8 +174,89 @@ type airTrace struct {
 	Output     *airTraceOutput `json:"output,omitempty"`
 }
 
-func airDraftedResponseArtifacts(output *airTraceOutput) []TurnArtifact {
-	if output == nil || len(output.DraftedResponses) == 0 {
+func airTurnControl(blocker *TurnBlockerDirective) *TurnControl {
+	if blocker == nil {
+		return nil
+	}
+	return &TurnControl{Blocker: blocker}
+}
+
+func airTraceResponseText(trace airTrace) string {
+	response := strings.TrimSpace(trace.Response)
+	if trace.Output != nil {
+		if nextStep := strings.TrimSpace(trace.Output.NextStep); nextStep != "" {
+			return nextStep
+		}
+		if response == "" {
+			return strings.TrimSpace(trace.Output.Summary)
+		}
+	}
+	return response
+}
+
+func airTraceBlockerDirective(trace airTrace, response string) *TurnBlockerDirective {
+	if trace.NeedsInput {
+		inputKind := types.InputKind(strings.TrimSpace(trace.InputKind))
+		if inputKind == "" {
+			inputKind = types.InputKindFreeText
+		}
+		return &TurnBlockerDirective{
+			InputKind: inputKind,
+			Summary:   strings.TrimSpace(response),
+		}
+	}
+	if !airTraceDraftsNeedApproval(trace, response) {
+		return nil
+	}
+	return &TurnBlockerDirective{
+		InputKind: types.InputKindApproveReject,
+		Summary:   strings.TrimSpace(response),
+	}
+}
+
+func airTurnArtifactBlockingMetadata(blocker *TurnBlockerDirective) *types.TaskOutputBlockingMetadata {
+	if blocker == nil {
+		return nil
+	}
+	metadata := &types.TaskOutputBlockingMetadata{
+		InputKind: blocker.InputKind,
+	}
+	if blocker.InputKind == types.InputKindApproveReject {
+		metadata.Kind = types.TaskOutputBlockingKindApproval
+		metadata.ApprovalSurface = true
+		return metadata
+	}
+	metadata.Kind = types.TaskOutputBlockingKindInput
+	return metadata
+}
+
+// air includes drafted_responses in both approval waits and completed recaps.
+// Only project them as blocking approval artifacts when the assistant message
+// still reads like an approval gate; completed send/follow-up turns should
+// rely on concrete side-effect outputs instead of recreating pending drafts.
+func airTraceDraftsNeedApproval(trace airTrace, response string) bool {
+	if strings.EqualFold(strings.TrimSpace(trace.InputKind), string(types.InputKindApproveReject)) {
+		return true
+	}
+	return airMessageRequestsApproval(response)
+}
+
+func airMessageRequestsApproval(message string) bool {
+	message = strings.ToLower(strings.TrimSpace(message))
+	if message == "" {
+		return false
+	}
+	if strings.Contains(message, "approval") || strings.Contains(message, "approve") || strings.Contains(message, "reject") {
+		return true
+	}
+	if strings.Contains(message, "should i send") || strings.Contains(message, "before sending") || strings.Contains(message, "before i send") {
+		return true
+	}
+	return strings.Contains(message, "review") && (strings.Contains(message, "send") || strings.Contains(message, "draft"))
+}
+
+func airDraftedResponseArtifacts(output *airTraceOutput, blocking *types.TaskOutputBlockingMetadata) []TurnArtifact {
+	if output == nil || len(output.DraftedResponses) == 0 || blocking == nil {
 		return nil
 	}
 
@@ -228,12 +294,8 @@ func airDraftedResponseArtifacts(output *airTraceOutput) []TurnArtifact {
 				types.TaskOutputMetadataArtifactLabel: airDraftedResponseArtifactLabel(outputType),
 				types.TaskOutputMetadataArtifactKind:  airDraftedResponseArtifactKind(outputType),
 			},
-			Status: types.TaskOutputStatusPending,
-			Blocking: &types.TaskOutputBlockingMetadata{
-				Kind:            types.TaskOutputBlockingKindApproval,
-				InputKind:       types.InputKindApproveReject,
-				ApprovalSurface: true,
-			},
+			Status:   types.TaskOutputStatusPending,
+			Blocking: blocking,
 		})
 	}
 	return artifacts

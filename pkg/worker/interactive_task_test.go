@@ -320,27 +320,8 @@ func TestClassifyNeedsInputKindWithFallback_PreservesCurrentKindWithoutAssistant
 	}
 }
 
-func TestClassifyNeedsInputFromAssistantMessage_UpgradesCompleteTurn(t *testing.T) {
-	classify := func(_ context.Context, _ string, _ map[string]string) types.InputKind {
-		return types.InputKindApproveReject
-	}
-
-	needsInput, kind := classifyNeedsInputFromAssistantMessage(
-		context.Background(),
-		"Awaiting your approval before I proceed.",
-		nil,
-		classify,
-	)
-	if !needsInput {
-		t.Fatal("expected classifier to upgrade turn to needs input")
-	}
-	if kind != types.InputKindApproveReject {
-		t.Fatalf("kind = %q, want %q", kind, types.InputKindApproveReject)
-	}
-}
-
-func TestBlockingInputKindFromArtifacts_UsesBlockingMetadata(t *testing.T) {
-	needsInput, kind := blockingInputKindFromArtifacts([]TurnArtifact{
+func TestSanitizeParsedTurnArtifacts_StripsBlockingWithoutExplicitBlocker(t *testing.T) {
+	artifacts := sanitizeParsedTurnArtifacts([]TurnArtifact{
 		{
 			Title: "Draft response",
 			Blocking: &types.TaskOutputBlockingMetadata{
@@ -349,12 +330,27 @@ func TestBlockingInputKindFromArtifacts_UsesBlockingMetadata(t *testing.T) {
 				ApprovalSurface: true,
 			},
 		},
-	})
-	if !needsInput {
-		t.Fatal("expected blocking artifact to require input")
+	}, nil)
+	if artifacts[0].Blocking != nil {
+		t.Fatal("expected blocking metadata to be stripped without explicit blocker control")
 	}
-	if kind != types.InputKindApproveReject {
-		t.Fatalf("kind = %q, want %q", kind, types.InputKindApproveReject)
+}
+
+func TestSanitizeParsedTurnArtifacts_PreservesBlockingWithExplicitBlocker(t *testing.T) {
+	artifacts := sanitizeParsedTurnArtifacts([]TurnArtifact{
+		{
+			Title: "Draft response",
+			Blocking: &types.TaskOutputBlockingMetadata{
+				Kind:            types.TaskOutputBlockingKindApproval,
+				InputKind:       types.InputKindApproveReject,
+				ApprovalSurface: true,
+			},
+		},
+	}, &TurnControl{
+		Blocker: &TurnBlockerDirective{InputKind: types.InputKindApproveReject},
+	})
+	if artifacts[0].Blocking == nil {
+		t.Fatal("expected blocking metadata to be preserved with explicit blocker control")
 	}
 }
 

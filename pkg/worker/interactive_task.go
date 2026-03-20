@@ -438,11 +438,18 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	var inputKind types.InputKind
 	var lastPrompt string
 	var approvalOutputHandled bool
+	var wakeSignal *types.RunExecutionWakeSignal
 
 	if tr, ok := runner.(TurnRunner); ok {
-		runErr, needsInput, inputKind, lastPrompt, approvalOutputHandled = w.runTurnSession(
-			sessionCtx, task, sandboxID, tr, env, tw, activityCh, checkNeedsInput, bamlEnv, outputPipeline.tracker,
+		var turnResult turnSessionResult
+		turnResult, runErr = w.runTurnSession(
+			sessionCtx, task, sandboxID, tr, env, mountSource, tw, activityCh, checkNeedsInput, bamlEnv, outputPipeline.tracker,
 		)
+		needsInput = turnResult.waitingForInput
+		inputKind = turnResult.inputKind
+		lastPrompt = turnResult.lastPrompt
+		approvalOutputHandled = turnResult.approvalOutputHandled
+		wakeSignal = turnResult.wakeSignal
 	} else {
 		runErr = w.runGenericPTYSession(sessionCtx, task, sandboxID, tw, activityCh)
 	}
@@ -499,8 +506,7 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 		agentMsg = sessionAssistantMessage
 	}
 
-	var wakeSignal *types.RunExecutionWakeSignal
-	if !needsInput && runErr == nil && agentMsg != "" {
+	if wakeSignal == nil && !needsInput && runErr == nil && agentMsg != "" {
 		wakeSignal = w.classifyFollowUp(ctx, agentMsg, lastPrompt, mountSource, env, bamlEnv)
 	}
 
@@ -633,21 +639,6 @@ func classifyNeedsInputKindWithFallback(
 	return current
 }
 
-func classifyNeedsInputFromAssistantMessage(
-	ctx context.Context,
-	assistantMessage string,
-	bamlEnv map[string]string,
-	classify turnInputKindClassifier,
-) (bool, types.InputKind) {
-	if strings.TrimSpace(assistantMessage) == "" || classify == nil {
-		return false, ""
-	}
-	if inferred := classify(ctx, assistantMessage, bamlEnv); inferred != "" {
-		return true, inferred
-	}
-	return false, ""
-}
-
 func classifyNeedsInputKindWithBAML(ctx context.Context, assistantMessage string, bamlEnv map[string]string) types.InputKind {
 	assistantMessage = strings.TrimSpace(assistantMessage)
 	if assistantMessage == "" {
@@ -660,26 +651,55 @@ func classifyNeedsInputKindWithBAML(ctx context.Context, assistantMessage string
 	return types.InputKind(strings.ToLower(string(*cls.Input_kind)))
 }
 
-func blockingInputKindFromArtifacts(artifacts []TurnArtifact) (bool, types.InputKind) {
-	sawBlocking := false
+func hasBlockingArtifacts(artifacts []TurnArtifact) bool {
 	for _, artifact := range artifacts {
-		if artifact.Blocking == nil {
-			continue
-		}
-		sawBlocking = true
-		switch {
-		case artifact.Blocking.InputKind == types.InputKindApproveReject:
-			return true, types.InputKindApproveReject
-		case artifact.Blocking.InputKind != "":
-			return true, artifact.Blocking.InputKind
-		case artifact.Blocking.IsApproval():
-			return true, types.InputKindApproveReject
+		if artifact.Blocking != nil {
+			return true
 		}
 	}
-	if sawBlocking {
-		return true, types.InputKindFreeText
+	return false
+}
+
+func sanitizeParsedTurnArtifacts(artifacts []TurnArtifact, control *TurnControl) []TurnArtifact {
+	if len(artifacts) == 0 {
+		return nil
 	}
-	return false, ""
+	if control != nil && control.Blocker != nil {
+		return artifacts
+	}
+	sanitized := make([]TurnArtifact, len(artifacts))
+	for i, artifact := range artifacts {
+		sanitized[i] = artifact
+		sanitized[i].Blocking = nil
+	}
+	return sanitized
+}
+
+func normalizeTurnBlockerDirective(
+	ctx context.Context,
+	blocker *TurnBlockerDirective,
+	assistantMessage string,
+	bamlEnv map[string]string,
+) *TurnBlockerDirective {
+	if blocker == nil {
+		return nil
+	}
+	normalized := *blocker
+	normalized.Summary = strings.TrimSpace(normalized.Summary)
+	normalized.InputKind = classifyNeedsInputKindWithFallback(
+		ctx,
+		normalized.InputKind,
+		assistantMessage,
+		bamlEnv,
+		classifyNeedsInputKindWithBAML,
+	)
+	if normalized.InputKind == "" {
+		normalized.InputKind = types.InputKindFreeText
+	}
+	if normalized.Summary == "" {
+		normalized.Summary = strings.TrimSpace(assistantMessage)
+	}
+	return &normalized
 }
 
 func turnArtifactAssistantMessage(artifacts []TurnArtifact) string {
@@ -775,6 +795,7 @@ type parsedTurnOutcome struct {
 	assistantMessage      string
 	blockerOutputIDs      []string
 	approvalOutputHandled bool
+	wakeSignal            *types.RunExecutionWakeSignal
 }
 
 func (r workerSessionRunner) reconcileParsedTurnOutput(
@@ -782,18 +803,21 @@ func (r workerSessionRunner) reconcileParsedTurnOutput(
 	task types.RunExecution,
 	tracker *taskOutputTracker,
 	prompt string,
+	mountSource string,
+	env map[string]string,
 	bamlEnv map[string]string,
 	result TurnParseResult,
 ) parsedTurnOutcome {
-	outcome := parsedTurnOutcome{
-		needsInput:       result.NeedsInput,
-		inputKind:        result.InputKind,
-		assistantMessage: strings.TrimSpace(result.Response),
-	}
+	outcome := parsedTurnOutcome{assistantMessage: strings.TrimSpace(result.Response)}
 	if outcome.assistantMessage == "" {
 		outcome.assistantMessage = turnArtifactAssistantMessage(result.Artifacts)
 	}
-	outcome.waitingSummary = outcome.assistantMessage
+	control := result.Control
+	artifacts := sanitizeParsedTurnArtifacts(result.Artifacts, control)
+	if (control == nil || control.Blocker == nil) && hasBlockingArtifacts(result.Artifacts) {
+		addTaskExecutionContext(log.Warn(), task).
+			Msg("parsed turn emitted blocking artifacts without explicit blocker control; stripping blocking metadata")
+	}
 	outcome.blockerOutputIDs, outcome.approvalOutputHandled = persistParsedTurnArtifacts(
 		ctx,
 		r.worker.gatewayClient,
@@ -801,35 +825,31 @@ func (r workerSessionRunner) reconcileParsedTurnOutput(
 		tracker,
 		prompt,
 		outcome.assistantMessage,
-		result.Artifacts,
+		artifacts,
 	)
 
-	if artifactNeedsInput, artifactInputKind := blockingInputKindFromArtifacts(result.Artifacts); artifactNeedsInput {
-		outcome.needsInput = true
-		switch {
-		case outcome.inputKind == "":
-			outcome.inputKind = artifactInputKind
-		case artifactInputKind == types.InputKindApproveReject:
-			outcome.inputKind = artifactInputKind
+	if control != nil && control.Blocker != nil {
+		blocker := normalizeTurnBlockerDirective(ctx, control.Blocker, outcome.assistantMessage, bamlEnv)
+		outcome.needsInput = blocker != nil
+		if blocker != nil {
+			outcome.inputKind = blocker.InputKind
+			outcome.waitingSummary = blocker.Summary
 		}
 	}
 
-	if outcome.needsInput {
-		outcome.inputKind = classifyNeedsInputKindWithFallback(
+	if !outcome.needsInput && control != nil && control.WakeSignal != nil {
+		outcome.wakeSignal = control.WakeSignal
+	}
+
+	if !outcome.needsInput && outcome.wakeSignal == nil && strings.TrimSpace(outcome.assistantMessage) != "" {
+		outcome.wakeSignal = r.worker.classifyFollowUp(
 			ctx,
-			outcome.inputKind,
 			outcome.assistantMessage,
+			prompt,
+			mountSource,
+			env,
 			bamlEnv,
-			classifyNeedsInputKindWithBAML,
 		)
-	} else if inferredNeedsInput, inferredInputKind := classifyNeedsInputFromAssistantMessage(
-		ctx,
-		outcome.assistantMessage,
-		bamlEnv,
-		classifyNeedsInputKindWithBAML,
-	); inferredNeedsInput {
-		outcome.needsInput = true
-		outcome.inputKind = inferredInputKind
 	}
 
 	if outcome.needsInput && outcome.inputKind == types.InputKindApproveReject {
@@ -838,6 +858,14 @@ func (r workerSessionRunner) reconcileParsedTurnOutput(
 		}
 	}
 	return outcome
+}
+
+type turnSessionResult struct {
+	waitingForInput       bool
+	inputKind             types.InputKind
+	lastPrompt            string
+	approvalOutputHandled bool
+	wakeSignal            *types.RunExecutionWakeSignal
 }
 
 func persistApprovalOutputBeforeWaiting(
@@ -919,18 +947,20 @@ func (w *Worker) runTurnSession(
 	sandboxID string,
 	runner TurnRunner,
 	env map[string]string,
+	mountSource string,
 	stdout io.Writer,
 	activityCh chan<- struct{},
 	checkNeedsInput func(string) (bool, types.InputKind, string, string),
 	bamlEnv map[string]string,
 	tracker *taskOutputTracker,
-) (error, bool, types.InputKind, string, bool) {
+) (turnSessionResult, error) {
 	return newWorkerSessionRunner(w).runTurnSession(
 		ctx,
 		task,
 		sandboxID,
 		runner,
 		env,
+		mountSource,
 		stdout,
 		activityCh,
 		checkNeedsInput,
@@ -1274,14 +1304,15 @@ func (r workerSessionRunner) runTurnSession(
 	sandboxID string,
 	runner TurnRunner,
 	env map[string]string,
+	mountSource string,
 	stdout io.Writer,
 	activityCh chan<- struct{},
 	checkNeedsInput func(string) (bool, types.InputKind, string, string),
 	bamlEnv map[string]string,
 	tracker *taskOutputTracker,
-) (error, bool, types.InputKind, string, bool) {
+) (turnSessionResult, error) {
 	if r.worker == nil {
-		return fmt.Errorf("worker is not configured"), false, "", "", false
+		return turnSessionResult{}, fmt.Errorf("worker is not configured")
 	}
 	prompt := strings.TrimSpace(task.Prompt)
 	sessionEnv := cloneMap(env)
@@ -1289,14 +1320,14 @@ func (r workerSessionRunner) runTurnSession(
 
 	outputParser, _ := runner.(OutputParsingRunner)
 	var turnBuf bytes.Buffer
-	var approvalOutputHandled bool
 	stateBridge := newSessionStateBridge(r.worker)
 	subagents := newSubagentWatcher(r.worker)
 	waiter := newFollowupInputWaiter(r.worker)
 
 	for prompt != "" {
+		turnResult := turnSessionResult{lastPrompt: prompt}
 		if ctx.Err() != nil {
-			return ctx.Err(), false, "", "", approvalOutputHandled
+			return turnResult, ctx.Err()
 		}
 
 		stateBridge.setRunInteractionState(ctx, task, types.RunInteractionStateWorking)
@@ -1314,19 +1345,19 @@ func (r workerSessionRunner) runTurnSession(
 
 		if isFirst {
 			if err := r.executeFirstTurn(ctx, task, sandboxID, runner, sessionEnv, turnOut, prompt); err != nil {
-				return err, false, "", "", approvalOutputHandled
+				return turnResult, err
 			}
 			isFirst = false
 		} else {
 			if err := r.executeTurn(ctx, task, sandboxID, runner, sessionEnv, turnOut, prompt, TurnArgModeFollowup); err != nil {
-				return err, false, "", "", approvalOutputHandled
+				return turnResult, err
 			}
 		}
 		signalActivity(activityCh)
 
 		subagentOutcome := subagents.waitForSubagents(ctx, task, sandboxID, activityCh)
 		if err := subagentOutcomeErr(ctx, subagentOutcome); err != nil {
-			return err, false, "", "", approvalOutputHandled
+			return turnResult, err
 		}
 		if subagentOutcome == subagentFinished {
 			if err := r.executeTurn(
@@ -1339,7 +1370,7 @@ func (r workerSessionRunner) runTurnSession(
 				"Your background tasks / subagents have completed. Please collect and report their results.",
 				TurnArgModeFollowup,
 			); err != nil {
-				return err, false, "", "", approvalOutputHandled
+				return turnResult, err
 			}
 			signalActivity(activityCh)
 		}
@@ -1355,13 +1386,14 @@ func (r workerSessionRunner) runTurnSession(
 			if err != nil {
 				addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to parse turn output")
 			} else {
-				resolved := r.reconcileParsedTurnOutput(ctx, task, tracker, prompt, bamlEnv, result)
+				resolved := r.reconcileParsedTurnOutput(ctx, task, tracker, prompt, mountSource, sessionEnv, bamlEnv, result)
 				needsInput = resolved.needsInput
 				inputKind = resolved.inputKind
 				waitingSummary = resolved.waitingSummary
 				approvalAssistantMessage = resolved.assistantMessage
 				blockerOutputIDs = resolved.blockerOutputIDs
-				approvalOutputHandled = resolved.approvalOutputHandled
+				turnResult.approvalOutputHandled = resolved.approvalOutputHandled
+				turnResult.wakeSignal = resolved.wakeSignal
 			}
 		} else if checkNeedsInput != nil {
 			needsInput, inputKind, waitingSummary, approvalAssistantMessage = checkNeedsInput(prompt)
@@ -1372,11 +1404,11 @@ func (r workerSessionRunner) runTurnSession(
 				prompt = pending
 				continue
 			}
-			return nil, false, "", prompt, approvalOutputHandled
+			return turnResult, nil
 		}
 
-		if inputKind == types.InputKindApproveReject && !approvalOutputHandled {
-			blockerOutputIDs, approvalOutputHandled = persistApprovalOutputBeforeWaiting(
+		if inputKind == types.InputKindApproveReject && !turnResult.approvalOutputHandled {
+			blockerOutputIDs, turnResult.approvalOutputHandled = persistApprovalOutputBeforeWaiting(
 				ctx, r.worker.gatewayClient, task, tracker, prompt, approvalAssistantMessage, bamlEnv,
 			)
 		}
@@ -1387,14 +1419,17 @@ func (r workerSessionRunner) runTurnSession(
 		})
 		nextPrompt, err := nextFollowupPrompt(ctx, waiter.waitForFollowupInput(ctx, task, DefaultBetweenTurnsTimeout, activityCh))
 		if err != nil {
-			return err, false, "", "", approvalOutputHandled
+			return turnResult, err
 		}
 		prompt = nextPrompt
 		if prompt == "" {
-			return nil, true, inputKind, "", approvalOutputHandled
+			turnResult.waitingForInput = true
+			turnResult.inputKind = inputKind
+			turnResult.lastPrompt = ""
+			return turnResult, nil
 		}
 	}
-	return nil, true, "", "", approvalOutputHandled
+	return turnSessionResult{waitingForInput: true}, nil
 }
 
 func (r workerSessionRunner) executeFirstTurn(

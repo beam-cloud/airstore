@@ -101,3 +101,44 @@ func TestShouldAttemptFanOutAllowsDistinctEmailEntities(t *testing.T) {
 		t.Fatal("shouldAttemptFanOut = false, want true for distinct recipients")
 	}
 }
+
+func TestShouldAttemptFanOutIgnoresWorkspaceDraftFileAlongsideSentEmail(t *testing.T) {
+	tracker := &taskOutputTracker{}
+
+	tracker.RememberWithID(outputCandidate{
+		OutputType: types.TaskOutputTypeEmail,
+		Title:      "Sent email to luke@slai.io",
+		URI:        "https://mail.google.com/mail/u/0/#inbox/thread-1",
+		Data: map[string]any{
+			"to":      "luke@slai.io",
+			"subject": "Faster dev environments for your ML workflows?",
+		},
+		Metadata: map[string]any{
+			types.TaskOutputMetadataArtifactKey:  "outreach-email",
+			types.TaskOutputMetadataArtifactKind: "email",
+		},
+	}, "sent-output")
+
+	tracker.RememberWithID(outputCandidate{
+		OutputType: "file",
+		Title:      "Marked email draft as sent",
+		Path:       "/workspace/agents/email-outreach/draft-mike-slai.md",
+		Data: map[string]any{
+			"company":   "Mike (Slai)",
+			"recipient": "Mike (Slai)",
+			"status":    "sent",
+		},
+		Metadata: map[string]any{
+			types.TaskOutputMetadataArtifactKey:  "email-outreach",
+			types.TaskOutputMetadataArtifactKind: "md",
+		},
+	}, "workspace-draft-output")
+
+	summaries := tracker.TrackedOutputSummaries()
+	if got := distinctFanOutEntityCount(summaries); got != 1 {
+		t.Fatalf("distinctFanOutEntityCount = %d, want 1", got)
+	}
+	if shouldAttemptFanOut(summaries) {
+		t.Fatal("shouldAttemptFanOut = true, want false when only one real email thread exists")
+	}
+}

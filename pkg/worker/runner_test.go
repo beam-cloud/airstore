@@ -322,11 +322,9 @@ func TestAirRunnerParseTurnOutput_NeedsInput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !result.NeedsInput {
-		t.Fatal("expected needs_input=true")
-	}
-	if result.InputKind != types.InputKindFreeText {
-		t.Fatalf("expected InputKindFreeText, got %q", result.InputKind)
+	blocker := requireTurnBlocker(t, result)
+	if blocker.InputKind != types.InputKindFreeText {
+		t.Fatalf("expected InputKindFreeText, got %q", blocker.InputKind)
 	}
 	if result.Response != "What email?" {
 		t.Fatalf("expected response=%q, got %q", "What email?", result.Response)
@@ -345,9 +343,7 @@ func TestAirRunnerParseTurnOutput_Complete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.NeedsInput {
-		t.Fatal("expected needs_input=false for complete status")
-	}
+	requireNoTurnBlocker(t, result)
 }
 
 func TestAirRunnerParseTurnOutput_NoTrace(t *testing.T) {
@@ -358,9 +354,7 @@ func TestAirRunnerParseTurnOutput_NoTrace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.NeedsInput {
-		t.Fatal("expected needs_input=false when no trace found")
-	}
+	requireNoTurnBlocker(t, result)
 }
 
 func TestAirRunnerImplementsInterfaces(t *testing.T) {
@@ -418,12 +412,7 @@ func TestAirRunnerParseTurnOutput_CompleteUsesOutputSummary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseTurnOutput: %v", err)
 	}
-	if result.NeedsInput {
-		t.Fatal("expected needs_input=false")
-	}
-	if result.InputKind != "" {
-		t.Fatalf("kind = %q, want empty", result.InputKind)
-	}
+	requireNoTurnBlocker(t, result)
 	if result.Response != "Sent the outreach email and should check for replies later." {
 		t.Fatalf("response = %q", result.Response)
 	}
@@ -450,11 +439,35 @@ func TestAirRunnerParseTurnOutput_DraftArtifactsUpgradeResponse(t *testing.T) {
 	if artifact.OutputType != types.TaskOutputTypeEmail {
 		t.Fatalf("output_type = %q, want %q", artifact.OutputType, types.TaskOutputTypeEmail)
 	}
+	blocker := requireTurnBlocker(t, result)
+	if blocker.InputKind != types.InputKindApproveReject {
+		t.Fatalf("kind = %q, want %q", blocker.InputKind, types.InputKindApproveReject)
+	}
 	if artifact.Blocking == nil || !artifact.Blocking.IsApproval() {
 		t.Fatal("expected approval-blocking artifact")
 	}
 	if artifact.Data["to"] != "luke@slai.io" {
 		t.Fatalf("to = %#v", artifact.Data["to"])
+	}
+}
+
+func TestAirRunnerParseTurnOutput_CompletedDraftResponseDoesNotReblock(t *testing.T) {
+	runner := NewAirRunner(AirRunnerOptions{})
+
+	output := `{"event":"run_end","ts":32.0,"session_id":"s1","total_steps":6,"status":"complete","needs_input":false}
+{"status":"complete","needs_input":false,"session_id":"s1","output":{"summary":"Drafted and sent the outreach email.","next_step":"Monitor for a reply from Mike and follow up if no response within 3-5 business days.","drafted_responses":[{"channel":"gmail","to":"luke@slai.io","subject":"Beam sandboxes","body":"Hi Mike,\n\nHere is the draft.\n"}]}}
+`
+
+	result, err := runner.ParseTurnOutput([]byte(output))
+	if err != nil {
+		t.Fatalf("ParseTurnOutput: %v", err)
+	}
+	requireNoTurnBlocker(t, result)
+	if result.Response != "Monitor for a reply from Mike and follow up if no response within 3-5 business days." {
+		t.Fatalf("response = %q", result.Response)
+	}
+	if got := len(result.Artifacts); got != 0 {
+		t.Fatalf("artifact count = %d, want 0", got)
 	}
 }
 
@@ -486,11 +499,9 @@ func TestAirRunnerParseTurnOutput_MultiTurn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseTurnOutput: %v", err)
 	}
-	if !result.NeedsInput {
-		t.Fatal("expected needs_input=true")
-	}
-	if result.InputKind != types.InputKindFreeText {
-		t.Fatalf("kind = %q, want %q", result.InputKind, types.InputKindFreeText)
+	blocker := requireTurnBlocker(t, result)
+	if blocker.InputKind != types.InputKindFreeText {
+		t.Fatalf("kind = %q, want %q", blocker.InputKind, types.InputKindFreeText)
 	}
 	if result.Response != "Who should I send it to?" {
 		t.Fatalf("response = %q, want %q", result.Response, "Who should I send it to?")
@@ -510,9 +521,7 @@ func TestAirRunnerParseTurnOutput_MultiTurn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseTurnOutput second turn: %v", err)
 	}
-	if result.NeedsInput {
-		t.Fatal("expected needs_input=false for completed task")
-	}
+	requireNoTurnBlocker(t, result)
 }
 
 func TestAirRunnerParseTurnOutput_ApproveReject(t *testing.T) {
@@ -529,11 +538,9 @@ func TestAirRunnerParseTurnOutput_ApproveReject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseTurnOutput: %v", err)
 	}
-	if !result.NeedsInput {
-		t.Fatal("expected needs_input=true")
-	}
-	if result.InputKind != types.InputKindApproveReject {
-		t.Fatalf("kind = %q, want %q", result.InputKind, types.InputKindApproveReject)
+	blocker := requireTurnBlocker(t, result)
+	if blocker.InputKind != types.InputKindApproveReject {
+		t.Fatalf("kind = %q, want %q", blocker.InputKind, types.InputKindApproveReject)
 	}
 	if result.Response != "Here's the draft -- should I send it?" {
 		t.Fatalf("response = %q", result.Response)
@@ -586,6 +593,21 @@ func TestAirRunnerEntrypointAndTurnArgs_Integration(t *testing.T) {
 }
 
 // -- helpers ------------------------------------------------------------------
+
+func requireTurnBlocker(t *testing.T, result TurnParseResult) *TurnBlockerDirective {
+	t.Helper()
+	if result.Control == nil || result.Control.Blocker == nil {
+		t.Fatal("expected explicit turn blocker")
+	}
+	return result.Control.Blocker
+}
+
+func requireNoTurnBlocker(t *testing.T, result TurnParseResult) {
+	t.Helper()
+	if result.Control != nil && result.Control.Blocker != nil {
+		t.Fatalf("expected no turn blocker, got %#v", result.Control.Blocker)
+	}
+}
 
 func argExists(args []string, want string) bool {
 	for _, arg := range args {

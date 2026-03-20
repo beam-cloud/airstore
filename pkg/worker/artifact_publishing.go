@@ -222,11 +222,10 @@ func (c outputCandidate) identityKey() string {
 }
 
 func (c outputCandidate) fanOutEntityKey() string {
-	key := normalizeArtifactToken(anyToTrimmedString(c.Metadata[types.TaskOutputMetadataArtifactKey]))
 	kind := normalizeArtifactToken(anyToTrimmedString(c.Metadata[types.TaskOutputMetadataArtifactKind]))
 	outputType := normalizeArtifactToken(c.OutputType)
 
-	if kind == "email" || strings.Contains(key, "email") || strings.Contains(outputType, "email") {
+	if kind == normalizeArtifactToken(types.TaskOutputTypeEmail) || outputType == normalizeArtifactToken(types.TaskOutputTypeEmail) {
 		recipient := normalizeFanOutEntityValue(firstNonEmptyTrimmed(
 			anyToTrimmedString(c.Data["to"]),
 			anyToTrimmedString(c.Data["recipient"]),
@@ -241,14 +240,17 @@ func (c outputCandidate) fanOutEntityKey() string {
 		}
 	}
 
-	path := firstNonEmptyTrimmed(c.Path, anyToTrimmedString(c.Data[keyPath]))
-	if path != "" {
-		return "path:" + path
-	}
-
 	uri := strings.ToLower(firstNonEmptyTrimmed(c.URI, anyToTrimmedString(c.Data[keyURI]), anyToTrimmedString(c.Metadata[keyDeeplink])))
 	if uri != "" {
 		return "uri:" + uri
+	}
+
+	path := firstNonEmptyTrimmed(c.Path, anyToTrimmedString(c.Data[keyPath]))
+	if path != "" {
+		if strings.HasPrefix(strings.ToLower(path), "/workspace/") {
+			return ""
+		}
+		return "path:" + path
 	}
 
 	title := normalizeArtifactToken(c.Title)

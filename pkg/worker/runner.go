@@ -59,9 +59,10 @@ type NeedsInputRunner interface {
 	ReadLastMessage(markerPath string) string
 }
 
-// TurnArtifact is a structured output emitted directly by a runner as part of
-// its turn result. The worker persists these artifacts before deciding whether
-// the task is complete or blocked.
+// TurnArtifact is a first-class structured output emitted directly by a runner
+// as part of its turn result. Artifacts are persisted independently of control
+// flow so the worker can keep durable outputs and task-state transitions as
+// separate concerns.
 type TurnArtifact struct {
 	OutputType string
 	Title      string
@@ -76,14 +77,33 @@ type TurnArtifact struct {
 	Blocking   *types.TaskOutputBlockingMetadata
 }
 
+// TurnBlockerDirective is an explicit instruction that the current turn should
+// pause for user input. The worker projects it into blocker/task state after
+// persisting any first-class outputs emitted by the turn.
+type TurnBlockerDirective struct {
+	InputKind types.InputKind
+	Summary   string
+}
+
+// TurnControl carries the turn's control-flow directive independently from any
+// artifacts that were emitted. A turn can either block for input, schedule a
+// wake, or complete normally.
+type TurnControl struct {
+	Blocker    *TurnBlockerDirective
+	WakeSignal *types.RunExecutionWakeSignal
+}
+
+func (c *TurnControl) IsZero() bool {
+	return c == nil || (c.Blocker == nil && c.WakeSignal == nil)
+}
+
 // TurnParseResult is the normalized worker-side view of a runner's structured
-// turn output. The worker reconciles this with classifier output before it
-// settles a turn as complete or waiting for input.
+// turn output. Control flow is explicit via Control; artifacts remain durable
+// outputs rather than implicitly driving task state.
 type TurnParseResult struct {
-	NeedsInput bool
-	InputKind  types.InputKind
-	Response   string
-	Artifacts  []TurnArtifact
+	Response  string
+	Artifacts []TurnArtifact
+	Control   *TurnControl
 }
 
 // OutputParsingRunner extends TurnRunner for runners whose stdout carries
