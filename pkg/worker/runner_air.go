@@ -38,6 +38,18 @@ func NewAirRunner(opts AirRunnerOptions) *AirRunner {
 
 func (r *AirRunner) Name() string { return "air" }
 
+func (r *AirRunner) OutputAnalyzer() OutputAnalyzer {
+	return NewAirAnalyzer()
+}
+
+func (r *AirRunner) ClassifierEnv() map[string]string {
+	env := map[string]string{}
+	if key := strings.TrimSpace(r.anthropicAPIKey); key != "" {
+		env["ANTHROPIC_API_KEY"] = key
+	}
+	return env
+}
+
 func (r *AirRunner) BuildEntrypoint(task types.RunExecution, env map[string]string) []string {
 	r.injectEnv(env)
 

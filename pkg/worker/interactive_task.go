@@ -278,7 +278,8 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 
 	env := w.sandboxManager.copyTaskEnv(task)
 	runner := w.sandboxManager.ResolveRunner(task, env)
-	bamlEnv := w.sandboxManager.BamlEnv()
+	promptPlan := promptTaskPlanForRunner(runner)
+	bamlEnv := w.sandboxManager.BamlEnvForRunner(runner)
 	activityCh := make(chan struct{}, 1)
 	var idleTimedOut atomic.Bool
 
@@ -315,7 +316,7 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	defer cancelCleanup()
 
 	// Output writers
-	outputPipeline := w.sandboxManager.taskOutputPipeline(sessionCtx, task, env)
+	outputPipeline := w.sandboxManager.taskOutputPipeline(sessionCtx, task, promptPlan)
 	mirror := NewTaskStreamOutput(task.ExternalId, "stdout", outputPipeline.writers...)
 	defer outputPipeline.Wait()
 	defer mirror.Flush()

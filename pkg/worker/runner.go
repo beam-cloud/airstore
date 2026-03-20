@@ -77,6 +77,20 @@ type ResponseExtractor interface {
 	ExtractResponseText(raw []byte, limit int) string
 }
 
+// AnalyzerProvider exposes the structured-output analyzer that matches a
+// runner's stdout format.
+type AnalyzerProvider interface {
+	AgentExecutionRunner
+	OutputAnalyzer() OutputAnalyzer
+}
+
+// ClassifierEnvProvider exposes the environment needed for worker-side BAML
+// classifier calls associated with a runner.
+type ClassifierEnvProvider interface {
+	AgentExecutionRunner
+	ClassifierEnv() map[string]string
+}
+
 func inferProviderFromModel(env map[string]string) string {
 	model := strings.ToLower(strings.TrimSpace(env[agentModelEnvKey]))
 	if strings.HasPrefix(model, "airstore-") {

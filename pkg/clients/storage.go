@@ -29,9 +29,9 @@ const (
 
 // StorageClient manages S3 operations for workspace storage
 type StorageClient struct {
-	s3            *s3.Client
-	presign       *s3.PresignClient
-	cfg           types.WorkspaceStorageConfig
+	s3      *s3.Client
+	presign *s3.PresignClient
+	cfg     types.WorkspaceStorageConfig
 }
 
 // BucketPrefix returns the configured bucket name prefix.
@@ -77,9 +77,9 @@ func NewStorageClient(ctx context.Context, cfg types.WorkspaceStorageConfig) (*S
 	}, nil
 }
 
-func (c *StorageClient) S3Client() *s3.Client                      { return c.s3 }
-func (c *StorageClient) PresignClient() *s3.PresignClient          { return c.presign }
-func (c *StorageClient) Config() types.WorkspaceStorageConfig      { return c.cfg }
+func (c *StorageClient) S3Client() *s3.Client                 { return c.s3 }
+func (c *StorageClient) PresignClient() *s3.PresignClient     { return c.presign }
+func (c *StorageClient) Config() types.WorkspaceStorageConfig { return c.cfg }
 
 func (c *StorageClient) WorkspaceBucketName(workspaceExternalId string) string {
 	return types.WorkspaceBucketName(c.cfg.DefaultBucketPrefix, workspaceExternalId)
@@ -112,7 +112,7 @@ func (c *StorageClient) BucketExists(ctx context.Context, bucket string) (bool, 
 	_, err := c.s3.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(bucket)})
 	if err != nil {
 		var notFound *s3types.NotFound
-		if errors.As(err, &notFound) {
+		if errors.As(err, &notFound) || strings.Contains(err.Error(), "NoSuchBucket") || strings.Contains(err.Error(), "NotFound") {
 			return false, nil
 		}
 		return false, err

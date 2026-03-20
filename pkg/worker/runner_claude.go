@@ -48,6 +48,18 @@ func (r *ClaudeCodeRunner) Name() string {
 	return "claude"
 }
 
+func (r *ClaudeCodeRunner) OutputAnalyzer() OutputAnalyzer {
+	return NewClaudeCodeAnalyzer()
+}
+
+func (r *ClaudeCodeRunner) ClassifierEnv() map[string]string {
+	env := map[string]string{}
+	if key := strings.TrimSpace(r.anthropicAPIKey); key != "" {
+		env["ANTHROPIC_API_KEY"] = key
+	}
+	return env
+}
+
 func (r *ClaudeCodeRunner) BuildEntrypoint(task types.RunExecution, env map[string]string) []string {
 	r.injectEnv(env)
 
