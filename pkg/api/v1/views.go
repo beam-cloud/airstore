@@ -758,14 +758,17 @@ func (vg *ViewsGroup) RowDetail(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid row_id")
 	}
 	parentTaskID := c.QueryParam("task_id")
-	if parentTaskID == "" {
-		return ErrorResponse(c, http.StatusBadRequest, "task_id query param is required")
-	}
 
 	// Single row fetch — used for both subtask binding and component lookup.
 	var row *views.ViewRow
 	if vg.store != nil && vg.store.Available() {
 		row, _ = vg.store.GetRowByID(ctx, viewID, rowID)
+	}
+	if row != nil && strings.TrimSpace(row.TaskID) != "" {
+		parentTaskID = strings.TrimSpace(row.TaskID)
+	}
+	if parentTaskID == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "task_id query param is required")
 	}
 
 	// Resolve the schema-level layout template from the component config.

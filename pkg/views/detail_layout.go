@@ -94,21 +94,6 @@ func DetailTemplateForComponent(comp *types.ComponentSpec) DetailLayoutResponse 
 	return InferDetailTemplate(cols)
 }
 
-// ---------------------------------------------------------------------------
-// ResolveLayout filters a schema-level template down to sections that have
-// actual data, and generates the action bar from task state.
-// Pure logic — no BAML, no IO.
-// ---------------------------------------------------------------------------
-
-func ResolveLayout(
-	template DetailLayoutResponse,
-	task *types.AgentTask,
-	outputs []*types.TaskOutput,
-	subtasks []*types.AgentTask,
-) DetailLayoutResponse {
-	return ResolveProjectedLayout(template, ProjectDetail(task, outputs, subtasks))
-}
-
 func ResolveProjectedLayout(template DetailLayoutResponse, projection DetailProjection) DetailLayoutResponse {
 	var sections []DetailSectionJSON
 	for _, s := range template.Sections {

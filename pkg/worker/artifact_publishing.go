@@ -56,6 +56,7 @@ type taskOutputIDs struct {
 	taskID      string
 	runID       string
 	agentID     string
+	viewSchema  []types.ViewOutputSchemaContext
 }
 
 func outputIDsFromTask(task types.RunExecution) taskOutputIDs {
@@ -64,6 +65,7 @@ func outputIDsFromTask(task types.RunExecution) taskOutputIDs {
 		ids.taskID = anyToTrimmedString(task.ExecutionPolicy[types.AgentExecutionMetaKeyOriginTaskID])
 		ids.runID = anyToTrimmedString(task.ExecutionPolicy[types.AgentExecutionMetaKeyRunID])
 		ids.agentID = anyToTrimmedString(task.ExecutionPolicy[types.AgentExecutionMetaKeyAgentID])
+		ids.viewSchema = types.ParseViewOutputSchemaContexts(task.ExecutionPolicy[types.AgentExecutionMetaKeyViewSchema])
 	}
 	return ids
 }
@@ -425,6 +427,7 @@ func publishOutputCandidate(
 	}
 
 	normalized := candidate.normalize()
+	normalized = enrichOutputCandidateWithViewSchema(normalized, ids.viewSchema)
 	if !normalized.shouldPersist() {
 		return "", nil
 	}
@@ -472,6 +475,145 @@ func publishOutputCandidate(
 	}
 
 	return serverID, nil
+}
+
+func enrichOutputCandidateWithViewSchema(
+	candidate outputCandidate,
+	contexts []types.ViewOutputSchemaContext,
+) outputCandidate {
+	if len(contexts) == 0 {
+		return candidate
+	}
+	match, overlap, outputTypeMatched := bestViewSchemaContext(candidate, contexts)
+	if match == nil {
+		return candidate
+	}
+	strongMatch := overlap > 0 || outputTypeMatched
+	if !strongMatch {
+		return candidate
+	}
+	if candidate.Metadata == nil {
+		candidate.Metadata = map[string]any{}
+	}
+	if anyToTrimmedString(candidate.Metadata[types.TaskOutputMetadataArtifactKey]) == "" &&
+		strings.TrimSpace(match.ArtifactKey) != "" {
+		candidate.Metadata[types.TaskOutputMetadataArtifactKey] = strings.TrimSpace(match.ArtifactKey)
+	}
+	if anyToTrimmedString(candidate.Metadata[types.TaskOutputMetadataArtifactLabel]) == "" &&
+		strings.TrimSpace(match.ComponentTitle) != "" {
+		candidate.Metadata[types.TaskOutputMetadataArtifactLabel] = strings.TrimSpace(match.ComponentTitle)
+	}
+	if anyToTrimmedString(candidate.Metadata[types.TaskOutputMetadataArtifactKind]) == "" &&
+		(strings.TrimSpace(match.OutputType) != "" || strings.TrimSpace(candidate.OutputType) != "") {
+		candidate.Metadata[types.TaskOutputMetadataArtifactKind] = firstNonEmptyTrimmed(
+			strings.TrimSpace(match.OutputType),
+			strings.TrimSpace(candidate.OutputType),
+		)
+	}
+	if _, ok := candidate.Metadata[types.TaskOutputMetadataViewSchemaMatch]; !ok {
+		candidate.Metadata[types.TaskOutputMetadataViewSchemaMatch] = match.MatchLabel()
+	}
+	if _, ok := candidate.Metadata[types.TaskOutputMetadataViewSchemaViewID]; !ok && strings.TrimSpace(match.ViewID) != "" {
+		candidate.Metadata[types.TaskOutputMetadataViewSchemaViewID] = strings.TrimSpace(match.ViewID)
+	}
+	if _, ok := candidate.Metadata[types.TaskOutputMetadataViewSchemaSheetID]; !ok && strings.TrimSpace(match.SheetID) != "" {
+		candidate.Metadata[types.TaskOutputMetadataViewSchemaSheetID] = strings.TrimSpace(match.SheetID)
+	}
+	if _, ok := candidate.Metadata[types.TaskOutputMetadataViewSchemaComponentID]; !ok && strings.TrimSpace(match.ComponentID) != "" {
+		candidate.Metadata[types.TaskOutputMetadataViewSchemaComponentID] = strings.TrimSpace(match.ComponentID)
+	}
+	if _, ok := candidate.Metadata[types.TaskOutputMetadataViewSchemaKeys]; !ok {
+		if keys := match.ColumnKeys(); len(keys) > 0 {
+			candidate.Metadata[types.TaskOutputMetadataViewSchemaKeys] = keys
+		}
+	}
+	if _, ok := candidate.Metadata[types.TaskOutputMetadataViewSchemaColumns]; !ok {
+		if columns := match.CompactColumns(); len(columns) > 0 {
+			candidate.Metadata[types.TaskOutputMetadataViewSchemaColumns] = columns
+		}
+	}
+	return candidate
+}
+
+func bestViewSchemaContext(
+	candidate outputCandidate,
+	contexts []types.ViewOutputSchemaContext,
+) (*types.ViewOutputSchemaContext, int, bool) {
+	if len(contexts) == 0 {
+		return nil, 0, false
+	}
+	candidateArtifactKey := types.CanonicalArtifactFamilyKey(
+		anyToTrimmedString(candidate.Metadata[types.TaskOutputMetadataArtifactKey]),
+		anyToTrimmedString(candidate.Metadata[types.TaskOutputMetadataArtifactKind]),
+		candidate.OutputType,
+	)
+	candidateOutputType := normalizeArtifactToken(candidate.OutputType)
+	dataKeys := make(map[string]struct{}, len(candidate.Data))
+	for key := range candidate.Data {
+		if normalized := normalizeArtifactToken(key); normalized != "" {
+			dataKeys[normalized] = struct{}{}
+		}
+	}
+	metadataKeys := make(map[string]struct{}, len(candidate.Metadata))
+	for key := range candidate.Metadata {
+		if normalized := normalizeArtifactToken(key); normalized != "" {
+			metadataKeys[normalized] = struct{}{}
+		}
+	}
+
+	bestIndex := -1
+	bestScore := 0
+	bestOverlap := 0
+	bestOutputTypeMatch := false
+	for i, context := range contexts {
+		score := 0
+		overlap := 0
+		contextArtifactKey := types.CanonicalArtifactFamilyKey(
+			context.ArtifactKey,
+			context.OutputType,
+			context.OutputType,
+		)
+		if candidateArtifactKey != "" && contextArtifactKey != "" && candidateArtifactKey == contextArtifactKey {
+			score += 12
+		}
+		outputTypeMatched := candidateOutputType != "" &&
+			normalizeArtifactToken(context.OutputType) != "" &&
+			candidateOutputType == normalizeArtifactToken(context.OutputType)
+		if outputTypeMatched {
+			score += 6
+		}
+		for _, column := range context.Columns {
+			key := normalizeArtifactToken(column.Key)
+			if key == "" {
+				continue
+			}
+			if _, ok := dataKeys[key]; ok {
+				overlap++
+				score += 3
+				continue
+			}
+			if _, ok := metadataKeys[key]; ok {
+				overlap++
+				score += 2
+			}
+		}
+		if score == 0 && len(contexts) == 1 && strings.TrimSpace(context.ArtifactKey) != "" {
+			score = 1
+		}
+		if bestIndex < 0 ||
+			score > bestScore ||
+			(score == bestScore && overlap > bestOverlap) ||
+			(score == bestScore && overlap == bestOverlap && context.SortKey() < contexts[bestIndex].SortKey()) {
+			bestIndex = i
+			bestScore = score
+			bestOverlap = overlap
+			bestOutputTypeMatch = outputTypeMatched
+		}
+	}
+	if bestIndex < 0 || bestScore == 0 {
+		return nil, 0, false
+	}
+	return &contexts[bestIndex], bestOverlap, bestOutputTypeMatch
 }
 
 type finalResponseExtractor func(

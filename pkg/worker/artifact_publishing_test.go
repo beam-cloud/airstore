@@ -48,6 +48,65 @@ func testRunExecution() types.RunExecution {
 	}
 }
 
+func TestPublishOutputCandidateEnrichesArtifactMetadataFromViewSchemaContext(t *testing.T) {
+	client := &captureOutputClient{}
+	task := testRunExecution()
+	task.ExecutionPolicy[types.AgentExecutionMetaKeyViewSchema] = []map[string]any{
+		{
+			"view_id":         "view-1",
+			"view_name":       "Sales Dashboard",
+			"sheet_id":        "sheet-1",
+			"sheet_name":      "Pipeline",
+			"component_id":    "table-1",
+			"component_title": "Outbound Emails",
+			"artifact_key":    "sales-email",
+			"output_type":     types.TaskOutputTypeEmail,
+			"columns": []map[string]any{
+				{"key": "recipient", "label": "Recipient", "type": "email"},
+				{"key": "subject", "label": "Subject", "type": "text"},
+				{"key": "status", "label": "Status", "type": "status"},
+			},
+		},
+	}
+
+	_, err := publishOutputCandidate(context.Background(), client, outputIDsFromTask(task), nil, outputCandidate{
+		OutputType: types.TaskOutputTypeEmail,
+		Title:      "Draft outreach email",
+		Data: map[string]any{
+			"recipient": "luke@example.com",
+			"subject":   "Beam sandboxes",
+			"status":    "draft",
+		},
+		Metadata: map[string]any{},
+		Role:     types.TaskOutputArtifactRolePrimary,
+		Status:   types.TaskOutputStatusPending,
+	})
+	if err != nil {
+		t.Fatalf("publishOutputCandidate returned error: %v", err)
+	}
+	if got, want := len(client.createReqs), 1; got != want {
+		t.Fatalf("create req count = %d, want %d", got, want)
+	}
+
+	var metadata map[string]any
+	if err := json.Unmarshal([]byte(client.createReqs[0].MetadataJson), &metadata); err != nil {
+		t.Fatalf("unmarshal metadata json: %v", err)
+	}
+	if got, want := metadata[types.TaskOutputMetadataArtifactKey], "sales-email"; got != want {
+		t.Fatalf("artifact_key = %#v, want %q", got, want)
+	}
+	if got, want := metadata[types.TaskOutputMetadataArtifactLabel], "Outbound Emails"; got != want {
+		t.Fatalf("artifact_label = %#v, want %q", got, want)
+	}
+	if got, want := metadata[types.TaskOutputMetadataViewSchemaComponentID], "table-1"; got != want {
+		t.Fatalf("view schema component id = %#v, want %q", got, want)
+	}
+	keys, ok := metadata[types.TaskOutputMetadataViewSchemaKeys].([]any)
+	if !ok || len(keys) != 3 {
+		t.Fatalf("view schema keys = %#v, want 3 entries", metadata[types.TaskOutputMetadataViewSchemaKeys])
+	}
+}
+
 func TestPersistAssistantResponseOutputsPersistsPendingApprovalArtifact(t *testing.T) {
 	client := &captureOutputClient{}
 	task := testRunExecution()

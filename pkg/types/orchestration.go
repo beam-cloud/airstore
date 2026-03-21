@@ -400,6 +400,7 @@ const (
 	AgentExecutionMetaKeyRunAttemptID     = "run_attempt_id"
 	AgentExecutionMetaKeyOriginTaskID     = "origin_task_id"
 	AgentExecutionMetaKeyAgentID          = "agent_id"
+	AgentExecutionMetaKeyViewSchema       = "view_schema_context"
 	AgentTaskSpawnedByFanOut              = "fanout_subtask"
 )
 

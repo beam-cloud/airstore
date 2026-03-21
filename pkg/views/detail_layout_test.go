@@ -33,7 +33,7 @@ func TestResolveLayoutSuppressesEmailSectionForCurrentApprovalDraft(t *testing.T
 		},
 	}
 
-	layout := ResolveLayout(template, task, outputs, nil)
+	layout := ResolveProjectedLayout(template, ProjectDetail(task, outputs, nil))
 
 	if !hasSection(layout.Sections, SectionApproval) {
 		t.Fatalf("expected approval section in %#v", layout.Sections)
@@ -78,7 +78,7 @@ func TestResolveLayoutKeepsHistoricalEmailSectionAlongsideCurrentApproval(t *tes
 		},
 	}
 
-	layout := ResolveLayout(template, task, outputs, nil)
+	layout := ResolveProjectedLayout(template, ProjectDetail(task, outputs, nil))
 
 	if !hasSection(layout.Sections, SectionApproval) {
 		t.Fatalf("expected approval section in %#v", layout.Sections)
@@ -177,7 +177,7 @@ func TestResolveLayoutInjectsInputSectionWithoutTemplateEntry(t *testing.T) {
 		},
 	}
 
-	layout := ResolveLayout(template, task, outputs, nil)
+	layout := ResolveProjectedLayout(template, ProjectDetail(task, outputs, nil))
 
 	if !hasSection(layout.Sections, SectionInputForm) {
 		t.Fatalf("expected input section in %#v", layout.Sections)
@@ -208,7 +208,7 @@ func TestResolveLayoutPromotesTemplateInputSectionToPrimaryAttention(t *testing.
 		},
 	}
 
-	layout := ResolveLayout(template, task, nil, nil)
+	layout := ResolveProjectedLayout(template, ProjectDetail(task, nil, nil))
 
 	if len(layout.Sections) < 2 {
 		t.Fatalf("expected multiple sections, got %#v", layout.Sections)
@@ -249,7 +249,7 @@ func TestResolveLayoutPromotesTemplateApprovalSectionToPrimaryAttention(t *testi
 		},
 	}
 
-	layout := ResolveLayout(template, task, outputs, nil)
+	layout := ResolveProjectedLayout(template, ProjectDetail(task, outputs, nil))
 
 	if len(layout.Sections) < 3 {
 		t.Fatalf("expected multiple sections, got %#v", layout.Sections)
@@ -285,7 +285,7 @@ func TestResolveLayoutDoesNotInferApprovalWithoutExplicitBlocker(t *testing.T) {
 		},
 	}
 
-	layout := ResolveLayout(template, task, outputs, nil)
+	layout := ResolveProjectedLayout(template, ProjectDetail(task, outputs, nil))
 
 	if hasSection(layout.Sections, SectionApproval) {
 		t.Fatalf("did not expect approval section in %#v", layout.Sections)
@@ -313,7 +313,7 @@ func TestResolveLayoutUsesCurrentTaskBlockerWithoutOutputs(t *testing.T) {
 		},
 	}
 
-	layout := ResolveLayout(template, task, nil, nil)
+	layout := ResolveProjectedLayout(template, ProjectDetail(task, nil, nil))
 
 	if !hasSection(layout.Sections, SectionApproval) {
 		t.Fatalf("expected approval section in %#v", layout.Sections)
@@ -331,7 +331,7 @@ func TestResolveLayoutDropsUnknownSections(t *testing.T) {
 		},
 	}
 
-	layout := ResolveLayout(template, nil, nil, nil)
+	layout := ResolveProjectedLayout(template, ProjectDetail(nil, nil, nil))
 
 	if hasSection(layout.Sections, "UNKNOWN_SECTION") {
 		t.Fatalf("unexpected unknown section in %#v", layout.Sections)

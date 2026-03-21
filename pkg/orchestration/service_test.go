@@ -2,6 +2,7 @@ package orchestration
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -82,6 +83,158 @@ func TestEnsureRuntimeSchedulingGuidanceIsIdempotent(t *testing.T) {
 	}
 	if again := ensureRuntimeSchedulingGuidance(got); again != got {
 		t.Fatalf("expected scheduling guidance helper to be idempotent:\n%s", again)
+	}
+}
+
+type viewSchemaBackend struct {
+	repository.BackendRepository
+	profile *types.AgentProfile
+	views   []*types.View
+}
+
+func (b *viewSchemaBackend) GetAgentProfile(_ context.Context, _ uint, _ string) (*types.AgentProfile, error) {
+	return b.profile, nil
+}
+
+func (b *viewSchemaBackend) ListViews(_ context.Context, _ uint) ([]*types.View, error) {
+	return b.views, nil
+}
+
+func TestLoadViewOutputSchemaContextFindsAgentBoundTables(t *testing.T) {
+	backend := &viewSchemaBackend{
+		profile: &types.AgentProfile{
+			ID:       "agent-1",
+			AgentKey: "sales-agent",
+			Name:     "Sales Agent",
+		},
+		views: []*types.View{{
+			ID:   "view-1",
+			Name: "Sales Dashboard",
+			Definition: types.ViewDefinition{
+				Agents: []string{"other-agent"},
+				Sheets: []types.SheetSpec{{
+					ID:   "sheet-1",
+					Name: "Pipeline",
+					Components: []types.ComponentSpec{
+						{
+							ID:    "table-1",
+							Type:  types.ComponentTypeTable,
+							Title: "Outbound Emails",
+							DataSource: &types.DataSource{
+								AgentIDs:    []string{"sales-agent"},
+								ArtifactKey: "sales-email",
+								OutputType:  types.TaskOutputTypeEmail,
+								Transform: []types.TransformRule{
+									{Column: "recipient", Source: "data.to", Type: "email"},
+									{Column: "status", Source: "metadata.status", Type: "status"},
+								},
+							},
+							Config: map[string]any{
+								"columns": []map[string]any{
+									{"key": "recipient", "label": "Recipient", "type": "email"},
+									{"key": "status", "label": "Status", "type": "status", "options": []map[string]any{
+										{"value": "draft", "color": "yellow"},
+										{"value": "sent", "color": "green"},
+									}},
+								},
+							},
+						},
+						{
+							ID:    "table-2",
+							Type:  types.ComponentTypeTable,
+							Title: "Ignore Me",
+							DataSource: &types.DataSource{
+								AgentIDs: []string{"another-agent"},
+							},
+							Config: map[string]any{
+								"columns": []map[string]any{
+									{"key": "title", "label": "Title", "type": "text"},
+								},
+							},
+						},
+					},
+				}},
+			},
+		}},
+	}
+	service := &AgentService{backend: backend}
+
+	agentID := "agent-1"
+	contexts := service.loadViewOutputSchemaContext(context.Background(), 7, &agentID)
+	if got, want := len(contexts), 1; got != want {
+		t.Fatalf("schema context count = %d, want %d", got, want)
+	}
+	if got, want := contexts[0].ComponentID, "table-1"; got != want {
+		t.Fatalf("component id = %q, want %q", got, want)
+	}
+	if got, want := contexts[0].ArtifactKey, "sales-email"; got != want {
+		t.Fatalf("artifact key = %q, want %q", got, want)
+	}
+	if got, want := contexts[0].OutputType, types.TaskOutputTypeEmail; got != want {
+		t.Fatalf("output type = %q, want %q", got, want)
+	}
+	if got, want := len(contexts[0].Columns), 2; got != want {
+		t.Fatalf("column count = %d, want %d", got, want)
+	}
+	if got, want := contexts[0].Columns[0].Key, "recipient"; got != want {
+		t.Fatalf("first column key = %q, want %q", got, want)
+	}
+	if got, want := contexts[0].Columns[1].Options[0].Value, "draft"; got != want {
+		t.Fatalf("status option value = %q, want %q", got, want)
+	}
+	if got, want := contexts[0].TransformHints, []string{"data.to", "metadata.status"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("transform hints = %#v, want %#v", got, want)
+	}
+}
+
+func TestApplyViewSchemaRuntimeContextAddsEnvPromptAndExecutionMetadata(t *testing.T) {
+	env := map[string]string{
+		"AIRSTORE_AGENT_SYSTEM_PROMPT": "You are a helpful agent.",
+	}
+	executionPolicy := map[string]any{}
+	contexts := []types.ViewOutputSchemaContext{{
+		ViewID:         "view-1",
+		ViewName:       "Sales Dashboard",
+		SheetID:        "sheet-1",
+		SheetName:      "Pipeline",
+		ComponentID:    "table-1",
+		ComponentTitle: "Outbound Emails",
+		ArtifactKey:    "sales-email",
+		OutputType:     types.TaskOutputTypeEmail,
+		Columns: []types.ViewOutputSchemaColumn{
+			{Key: "recipient", Label: "Recipient", Type: "email"},
+			{Key: "status", Label: "Status", Type: "status"},
+		},
+	}}
+
+	applyViewSchemaRuntimeContext(env, executionPolicy, contexts)
+
+	if got := env[agentViewSchemaEnvKey]; got == "" {
+		t.Fatal("expected schema context env to be populated")
+	}
+	if !strings.Contains(env["AIRSTORE_AGENT_SYSTEM_PROMPT"], runtimeViewSchemaGuidanceHeader) {
+		t.Fatalf("expected runtime view schema guidance in prompt, got:\n%s", env["AIRSTORE_AGENT_SYSTEM_PROMPT"])
+	}
+	if !strings.Contains(env["AIRSTORE_AGENT_SYSTEM_PROMPT"], "artifact_key=sales-email") {
+		t.Fatalf("expected artifact key guidance in prompt, got:\n%s", env["AIRSTORE_AGENT_SYSTEM_PROMPT"])
+	}
+	raw, ok := executionPolicy[types.AgentExecutionMetaKeyViewSchema]
+	if !ok {
+		t.Fatal("expected execution policy view schema context")
+	}
+	body, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatalf("marshal execution policy schema context: %v", err)
+	}
+	var decoded []types.ViewOutputSchemaContext
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("unmarshal execution policy schema context: %v", err)
+	}
+	if got, want := len(decoded), 1; got != want {
+		t.Fatalf("decoded schema context count = %d, want %d", got, want)
+	}
+	if got, want := decoded[0].ComponentID, "table-1"; got != want {
+		t.Fatalf("decoded component id = %q, want %q", got, want)
 	}
 }
 

@@ -222,3 +222,33 @@ func TestEnrichRowsWithOutputStateUsesCanonicalBoundTaskContext(t *testing.T) {
 		t.Fatal("expected enrichRowsWithOutputState to cache canonical detail task metadata")
 	}
 }
+
+func TestSelectedDetailTaskIDPrefersOpenAndNewestBoundTask(t *testing.T) {
+	now := time.Now().UTC()
+	openTask := &types.AgentTask{
+		ID:        "task-open",
+		CreatedAt: now.Add(-time.Minute),
+		CurrentBlocker: &types.TaskBlocker{
+			ID:     "blocker-1",
+			Status: types.TaskBlockerStatusOpen,
+		},
+	}
+	olderTask := &types.AgentTask{
+		ID:        "task-old",
+		CreatedAt: now.Add(-2 * time.Hour),
+	}
+	bound := boundDetailContext{
+		DetailTaskBySourceOutput: map[string]string{
+			"source-1": olderTask.ID,
+			"source-2": openTask.ID,
+		},
+		TasksByID: map[string]*types.AgentTask{
+			openTask.ID:  openTask,
+			olderTask.ID: olderTask,
+		},
+	}
+
+	if got, want := selectedDetailTaskID([]string{"source-1", "source-2"}, bound), openTask.ID; got != want {
+		t.Fatalf("selected detail task = %q, want %q", got, want)
+	}
+}

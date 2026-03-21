@@ -13,6 +13,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
+	viewschema "github.com/beam-cloud/airstore/pkg/viewschema"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 )
@@ -1643,6 +1644,7 @@ func (s *AgentService) createAttemptExecutionTask(
 	applyAgentConfigEnv(taskEnv, agentConfig)
 	applyPayloadRuntimeEnv(taskEnv, payload)
 	ensureRuntimeSystemPromptEnv(taskEnv)
+	viewSchemaContext := s.loadViewOutputSchemaContext(ctx, run.WorkspaceID, run.AgentID)
 	retryPolicy := RetryPolicyOrDefault(runPolicy.Retry)
 	executionPolicy := map[string]any{
 		"host":                               run.ExecHost,
@@ -1666,6 +1668,7 @@ func (s *AgentService) createAttemptExecutionTask(
 		executionPolicy[agentConfigKeyModel] = *run.Model
 	}
 	applyPayloadExecutionMetadata(executionPolicy, payload)
+	applyViewSchemaRuntimeContext(taskEnv, executionPolicy, viewSchemaContext)
 
 	execTask := &types.RunExecution{
 		WorkspaceId:       run.WorkspaceID,
@@ -2102,6 +2105,98 @@ func applyPayloadExecutionMetadata(executionPolicy map[string]any, payload map[s
 	if value, ok := payload["attachments"]; ok && value != nil {
 		executionPolicy["attachments"] = value
 	}
+}
+
+const (
+	agentViewSchemaEnvKey           = "AIRSTORE_AGENT_VIEW_SCHEMA_JSON"
+	runtimeViewSchemaGuidanceHeader = "Active view schema context:"
+	maxRuntimeViewSchemas           = 8
+)
+
+func (s *AgentService) loadViewOutputSchemaContext(
+	ctx context.Context,
+	workspaceID uint,
+	agentID *string,
+) []types.ViewOutputSchemaContext {
+	if s == nil || s.backend == nil || agentID == nil || strings.TrimSpace(*agentID) == "" {
+		return nil
+	}
+	contexts, err := viewschema.LoadViewOutputSchemaContexts(ctx, s.backend, workspaceID, strings.TrimSpace(*agentID))
+	if err != nil {
+		log.Warn().
+			Err(err).
+			Uint("workspace_id", workspaceID).
+			Str("agent_id", strings.TrimSpace(*agentID)).
+			Msg("failed to load dependent views for agent view-schema context")
+		return nil
+	}
+	if len(contexts) > maxRuntimeViewSchemas {
+		contexts = contexts[:maxRuntimeViewSchemas]
+	}
+	return contexts
+}
+
+func applyViewSchemaRuntimeContext(
+	env map[string]string,
+	executionPolicy map[string]any,
+	contexts []types.ViewOutputSchemaContext,
+) {
+	if len(contexts) == 0 {
+		return
+	}
+	if encoded, err := json.Marshal(contexts); err == nil && len(encoded) > 0 {
+		if env != nil {
+			env[agentViewSchemaEnvKey] = string(encoded)
+			env["AIRSTORE_AGENT_SYSTEM_PROMPT"] = ensureRuntimeViewSchemaGuidance(env["AIRSTORE_AGENT_SYSTEM_PROMPT"], contexts)
+		}
+		if executionPolicy != nil {
+			if policyValue := types.ViewOutputSchemaPolicyValue(contexts); policyValue != nil {
+				executionPolicy[types.AgentExecutionMetaKeyViewSchema] = policyValue
+			}
+		}
+	}
+}
+
+func ensureRuntimeViewSchemaGuidance(prompt string, contexts []types.ViewOutputSchemaContext) string {
+	prompt = strings.TrimSpace(prompt)
+	if len(contexts) == 0 || strings.Contains(prompt, runtimeViewSchemaGuidanceHeader) {
+		return prompt
+	}
+	var lines []string
+	lines = append(lines, runtimeViewSchemaGuidanceHeader)
+	lines = append(lines, "- These table views actively depend on this agent.")
+	lines = append(lines, "- When you emit durable task outputs that clearly belong to one of them, align the structure with the matching schema, keep output_type accurate, and set artifact_key when the match is obvious.")
+	lines = append(lines, "- Treat this as advisory context. Do not invent uncertain fields just to satisfy a schema.")
+	for _, context := range contexts {
+		var parts []string
+		if context.ViewName != "" {
+			parts = append(parts, "view="+context.ViewName)
+		}
+		if context.SheetName != "" {
+			parts = append(parts, "sheet="+context.SheetName)
+		}
+		if context.ComponentTitle != "" {
+			parts = append(parts, "table="+context.ComponentTitle)
+		}
+		if context.ArtifactKey != "" {
+			parts = append(parts, "artifact_key="+context.ArtifactKey)
+		}
+		if context.OutputType != "" {
+			parts = append(parts, "output_type="+context.OutputType)
+		}
+		if keys := context.ColumnKeys(); len(keys) > 0 {
+			parts = append(parts, "columns="+strings.Join(keys, ", "))
+		}
+		if len(parts) == 0 {
+			continue
+		}
+		lines = append(lines, "- "+strings.Join(parts, "; "))
+	}
+	block := strings.Join(lines, "\n")
+	if prompt == "" {
+		return block
+	}
+	return prompt + "\n\n" + block
 }
 
 func sanitizeEnvSegment(value string) string {

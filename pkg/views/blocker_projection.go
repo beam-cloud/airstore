@@ -62,10 +62,6 @@ func ProjectDetail(task *types.AgentTask, outputs []*types.TaskOutput, subtasks 
 	return projection
 }
 
-func ProjectBlocker(task *types.AgentTask, outputs []*types.TaskOutput) *types.ResolvedBlocker {
-	return viewprojection.ProjectBlocker(task, outputs)
-}
-
 func blockerOutputIDSet(blocker *types.ResolvedBlocker) map[string]struct{} {
 	if blocker == nil || len(blocker.OutputIDs) == 0 {
 		return nil

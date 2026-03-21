@@ -1,6 +1,7 @@
 package projection
 
 import (
+	"maps"
 	"strings"
 
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -64,11 +65,7 @@ func cloneBlockerPayload(in map[string]any) map[string]any {
 	if len(in) == 0 {
 		return nil
 	}
-	out := make(map[string]any, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
-	return out
+	return maps.Clone(in)
 }
 
 func blockerPayloadString(payload map[string]any, key string) string {

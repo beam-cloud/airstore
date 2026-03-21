@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -140,7 +141,7 @@ func buildRowDetailContext(input rowDetailContextInput) RowDetailContext {
 		Task:            input.ParentTask,
 	}
 
-	detailTaskID := selectedDetailTaskID(sourceOutputIDs, input.Bound.DetailTaskBySourceOutput)
+	detailTaskID := selectedDetailTaskID(sourceOutputIDs, input.Bound)
 	if detailTaskID != "" {
 		context.DetailTaskID = detailTaskID
 	}
@@ -172,14 +173,48 @@ func rowDetailSourceOutputIDs(row *ViewRow) []string {
 	return uniqueTrimmedStrings(row.SourceOutputIDs)
 }
 
-func selectedDetailTaskID(sourceOutputIDs []string, detailTaskBySourceOutput map[string]string) string {
-	for _, outputID := range sourceOutputIDs {
-		taskID := strings.TrimSpace(detailTaskBySourceOutput[outputID])
-		if taskID != "" {
-			return taskID
-		}
+func selectedDetailTaskID(sourceOutputIDs []string, bound boundDetailContext) string {
+	if len(sourceOutputIDs) == 0 || len(bound.DetailTaskBySourceOutput) == 0 {
+		return ""
 	}
-	return ""
+	candidates := make([]string, 0, len(sourceOutputIDs))
+	seen := make(map[string]struct{}, len(sourceOutputIDs))
+	for _, outputID := range sourceOutputIDs {
+		taskID := strings.TrimSpace(bound.DetailTaskBySourceOutput[outputID])
+		if taskID == "" {
+			continue
+		}
+		if _, ok := seen[taskID]; ok {
+			continue
+		}
+		seen[taskID] = struct{}{}
+		candidates = append(candidates, taskID)
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		leftTask := bound.TasksByID[candidates[i]]
+		rightTask := bound.TasksByID[candidates[j]]
+		leftOpen := leftTask != nil && leftTask.CurrentBlocker != nil && leftTask.CurrentBlocker.Status == types.TaskBlockerStatusOpen
+		rightOpen := rightTask != nil && rightTask.CurrentBlocker != nil && rightTask.CurrentBlocker.Status == types.TaskBlockerStatusOpen
+		if leftOpen != rightOpen {
+			return leftOpen
+		}
+		leftCreated := time.Time{}
+		rightCreated := time.Time{}
+		if leftTask != nil {
+			leftCreated = leftTask.CreatedAt
+		}
+		if rightTask != nil {
+			rightCreated = rightTask.CreatedAt
+		}
+		if !leftCreated.Equal(rightCreated) {
+			return leftCreated.After(rightCreated)
+		}
+		return candidates[i] < candidates[j]
+	})
+	return candidates[0]
 }
 
 func rowSourceOutputs(parentOutputs []*types.TaskOutput, sourceOutputIDs []string) []*types.TaskOutput {

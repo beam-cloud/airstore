@@ -11,6 +11,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	bamltypes "github.com/beam-cloud/airstore/pkg/views/baml_client/types"
+	viewprojection "github.com/beam-cloud/airstore/pkg/views/projection"
 )
 
 func TestDotGetSupportsImplicitArrayTraversal(t *testing.T) {
@@ -506,7 +507,7 @@ func TestProjectBlockerBuildsFallbackItemsFromOutputIDs(t *testing.T) {
 		},
 	}
 
-	got := ProjectBlocker(task, []*types.TaskOutput{output})
+	got := viewprojection.ProjectBlocker(task, []*types.TaskOutput{output})
 	if got == nil {
 		t.Fatal("expected projected blocker")
 	}
@@ -567,7 +568,7 @@ func TestProjectBlockerPrefersExplicitPayloadForApprovalRevision(t *testing.T) {
 		},
 	}
 
-	got := ProjectBlocker(task, []*types.TaskOutput{older, revised})
+	got := viewprojection.ProjectBlocker(task, []*types.TaskOutput{older, revised})
 	if got == nil {
 		t.Fatal("expected projected blocker")
 	}
@@ -1621,6 +1622,103 @@ func TestGroupRowsFreshReportsMismatchReasons(t *testing.T) {
 	}
 	if ok, reason := groupRowsFresh(nil, "c1", "schema-1", []string{"out-1"}, outputSignature); ok || reason != "missing_rows" {
 		t.Fatalf("expected missing rows, got ok=%v reason=%q", ok, reason)
+	}
+}
+
+func TestGroupRowsFreshRejectsMixedMarkerState(t *testing.T) {
+	outputs := []*types.TaskOutput{{ID: "out-1", Status: types.TaskOutputStatusPending}}
+	outputSignature := outputGroupSignature(outputs)
+	now := time.Now()
+	rows := []ViewRow{
+		fallbackViewRow("sheet-1", "c1", "task-1", "schema-1", outputSignature, outputs, now),
+		mappedRowToViewRow("sheet-1", "c1", "task-1", "schema-1", outputSignature, outputs, bamltypes.MappedRow{
+			Row_key:           "visible-row",
+			Source_output_ids: []string{"out-1"},
+			Cells:             []bamltypes.MappedCell{{Column: "name", Value: "Alice"}},
+		}, now),
+	}
+
+	if ok, reason := groupRowsFresh(rows, "c1", "schema-1", []string{"out-1"}, outputSignature); ok || reason != "mixed_marker_state" {
+		t.Fatalf("expected mixed marker state, got ok=%v reason=%q", ok, reason)
+	}
+}
+
+func TestMaterializeTaskGroupPreservesStableIdentityAcrossRowKeyChurn(t *testing.T) {
+	now := time.Now().UTC()
+	outputs := []*types.TaskOutput{{ID: "out-1", TaskID: "task-1", OutputType: "text", CreatedAt: now}}
+	existing := []ViewRow{{
+		ID:              "sheet-1:c1:task-1:task",
+		StableRef:       "stable-ref-1",
+		SheetID:         "sheet-1",
+		ComponentID:     "c1",
+		TaskID:          "task-1",
+		GroupID:         "task-1",
+		RowKey:          "task",
+		SchemaHash:      "schema-1",
+		OutputIDs:       []string{"out-1"},
+		OutputSignature: outputGroupSignature(outputs),
+		SourceOutputIDs: []string{"out-1"},
+		Cells:           map[string]string{"name": "Alice"},
+		Manual:          map[string]string{"status": "Pending"},
+	}}
+
+	persisted := materializeTaskGroup(
+		"sheet-1",
+		"c1",
+		"task-1",
+		"schema-1",
+		outputs,
+		existing,
+		[]bamltypes.MappedRow{{
+			Task_id:           "task-1",
+			Row_key:           "customer-alice",
+			Source_output_ids: []string{"out-1"},
+			Cells: []bamltypes.MappedCell{
+				{Column: "name", Value: "Alice"},
+				{Column: "status", Value: ""},
+			},
+		}},
+		now,
+	)
+
+	if got, want := len(persisted), 1; got != want {
+		t.Fatalf("persisted row count = %d, want %d", got, want)
+	}
+	if got, want := persisted[0].ID, existing[0].ID; got != want {
+		t.Fatalf("row id = %q, want %q", got, want)
+	}
+	if got, want := persisted[0].StableRef, existing[0].StableRef; got != want {
+		t.Fatalf("stable ref = %q, want %q", got, want)
+	}
+	if got, want := persisted[0].Manual["status"], "Pending"; got != want {
+		t.Fatalf("manual status = %q, want %q", got, want)
+	}
+}
+
+func TestCanonicalizeMappedRowsMergesSemanticDuplicatesAcrossRowKeys(t *testing.T) {
+	rows := canonicalizeMappedRows(
+		[]bamltypes.ColumnSchema{{Key: "name", Name: "Name", Type: "text"}},
+		[]bamltypes.MappedRow{
+			{
+				Task_id:           "task-1",
+				Row_key:           "task",
+				Source_output_ids: []string{"out-1"},
+				Cells:             []bamltypes.MappedCell{{Column: "name", Value: "Alice"}},
+			},
+			{
+				Task_id:           "task-1",
+				Row_key:           "alice",
+				Source_output_ids: []string{"out-1"},
+				Cells:             []bamltypes.MappedCell{{Column: "name", Value: "Alice"}},
+			},
+		},
+	)
+
+	if got, want := len(rows), 1; got != want {
+		t.Fatalf("canonical row count = %d, want %d", got, want)
+	}
+	if got, want := rows[0].Row_key, "alice"; got != want {
+		t.Fatalf("canonical row_key = %q, want %q", got, want)
 	}
 }
 

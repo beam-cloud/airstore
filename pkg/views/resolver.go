@@ -22,6 +22,7 @@ import (
 
 	baml "github.com/beam-cloud/airstore/pkg/views/baml_client"
 	bamltypes "github.com/beam-cloud/airstore/pkg/views/baml_client/types"
+	viewprojection "github.com/beam-cloud/airstore/pkg/views/projection"
 )
 
 var ErrNoOutputsForTask = errors.New("no outputs found for task")
@@ -303,6 +304,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 			"uncached_reason_counts": uncachedReasonCounts,
 		},
 	}
+	diagnosticsCache, _ := diagnostics["cache"].(map[string]any)
 
 	boundContext := r.fetchBoundTaskContext(ctx, workspaceID, resolvedRows)
 
@@ -341,18 +343,31 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 	persistedByGroup := make(map[string][]ViewRow)
 	mappedByGroup := make(map[string][]resolvedSheetRow)
 	mappedRows, err := r.mapTaskGroupsWithBAML(ctx, viewID, sheet, comp, spec, uncachedTIDs, taskGroups, rowsByGroup, excludedSnapshots)
+	mappingFailed := false
 	if err != nil {
 		if opts.ForceRefresh {
 			return nil, fmt.Errorf("force refresh BAML mapping: %w", err)
 		}
 		log.Warn().Err(err).Str("view_id", viewID).Str("sheet_id", sheet.ID).Int("tasks", len(uncachedIDs)).Msg("BAML mapping failed")
+		mappingFailed = true
+		if diagnosticsCache != nil {
+			diagnosticsCache["mapping_failed"] = true
+		}
 	}
-	persistedByGroup = materializeTaskGroups(sheet.ID, comp.ID, spec, uncachedTIDs, taskGroups, rowsByGroup, mappedRows, time.Now())
-	for _, taskID := range uncachedTIDs {
-		mappedByGroup[taskID] = resolvedRowsFromStored(persistedByGroup[taskID], applyManualEdits)
+	if !mappingFailed {
+		persistedByGroup = materializeTaskGroups(sheet.ID, comp.ID, spec, uncachedTIDs, taskGroups, rowsByGroup, mappedRows, time.Now())
+		for _, taskID := range uncachedTIDs {
+			mappedByGroup[taskID] = resolvedRowsFromStored(persistedByGroup[taskID], applyManualEdits)
+		}
+	} else {
+		for _, taskID := range uncachedTIDs {
+			if stored := rowsByGroup[taskID]; len(stored) > 0 {
+				mappedByGroup[taskID] = resolvedRowsFromStored(stored, applyManualEdits)
+			}
+		}
 	}
 
-	if r.store != nil {
+	if !mappingFailed && r.store != nil {
 		var toUpsert []ViewRow
 		var keepRowIDs []string
 		var cleanupGroupIDs []string
@@ -636,7 +651,75 @@ func materializeTaskGroup(
 	if len(persisted) == 0 {
 		persisted = []ViewRow{fallbackViewRow(sheetID, componentID, taskID, schemaHash, outputSignature, outputs, now)}
 	}
+	persisted = stabilizeMaterializedRows(existingRows, persisted)
 	return carryForwardBlankManualEdits(existingRows, schemaHash, persisted)
+}
+
+func stabilizeMaterializedRows(existingRows, persisted []ViewRow) []ViewRow {
+	if len(existingRows) == 0 || len(persisted) == 0 {
+		return persisted
+	}
+	availableBySemanticKey := make(map[string][]ViewRow, len(existingRows))
+	availableByRowKey := make(map[string][]ViewRow, len(existingRows))
+	usedExistingIDs := make(map[string]struct{}, len(existingRows))
+	for _, row := range existingRows {
+		availableBySemanticKey[viewRowSemanticKey(row)] = append(availableBySemanticKey[viewRowSemanticKey(row)], row)
+		availableByRowKey[strings.TrimSpace(row.RowKey)] = append(availableByRowKey[strings.TrimSpace(row.RowKey)], row)
+	}
+	for i := range persisted {
+		semanticKey := viewRowSemanticKey(persisted[i])
+		if existing, ok := firstUnusedExistingRow(availableBySemanticKey[semanticKey], usedExistingIDs); ok {
+			persisted[i] = reuseMaterializedRowIdentity(existing, persisted[i])
+			usedExistingIDs[strings.TrimSpace(existing.ID)] = struct{}{}
+			continue
+		}
+		rowKey := strings.TrimSpace(persisted[i].RowKey)
+		if existing, ok := firstUnusedExistingRow(availableByRowKey[rowKey], usedExistingIDs); ok {
+			persisted[i] = reuseMaterializedRowIdentity(existing, persisted[i])
+			usedExistingIDs[strings.TrimSpace(existing.ID)] = struct{}{}
+			continue
+		}
+	}
+	if len(existingRows) == 1 && len(persisted) == 1 {
+		persisted[0] = reuseMaterializedRowIdentity(existingRows[0], persisted[0])
+	}
+	return persisted
+}
+
+func firstUnusedExistingRow(rows []ViewRow, used map[string]struct{}) (ViewRow, bool) {
+	for _, row := range rows {
+		if _, ok := used[strings.TrimSpace(row.ID)]; ok {
+			continue
+		}
+		return row, true
+	}
+	return ViewRow{}, false
+}
+
+func reuseMaterializedRowIdentity(existing, persisted ViewRow) ViewRow {
+	if strings.TrimSpace(existing.ID) != "" {
+		persisted.ID = existing.ID
+	}
+	if strings.TrimSpace(existing.StableRef) != "" {
+		persisted.StableRef = existing.StableRef
+	}
+	if existing.SchemaHash == persisted.SchemaHash && len(existing.Manual) > 0 {
+		persisted.Manual = copyStringMap(existing.Manual)
+	}
+	return persisted
+}
+
+func viewRowSemanticKey(row ViewRow) string {
+	sourceOutputIDs := append([]string(nil), row.SourceOutputIDs...)
+	sort.Strings(sourceOutputIDs)
+	cellFingerprint := excludedRowCellsFingerprint(row.Cells)
+	if row.Marker {
+		return "marker\x00" + strings.Join(sourceOutputIDs, ",") + "\x00" + strings.TrimSpace(row.OutputSignature)
+	}
+	if cellFingerprint == "" {
+		cellFingerprint = strings.TrimSpace(row.RowKey)
+	}
+	return "row\x00" + strings.Join(sourceOutputIDs, ",") + "\x00" + cellFingerprint
 }
 
 func carryForwardBlankManualEdits(existingRows []ViewRow, schemaHash string, persisted []ViewRow) []ViewRow {
@@ -689,7 +772,21 @@ func groupRowsFresh(rows []ViewRow, componentID, schemaH string, outputIDs []str
 	if len(rows) == 0 {
 		return false, "missing_rows"
 	}
+	markerCount := 0
+	seenRowIDs := make(map[string]struct{}, len(rows))
+	seenSemantics := make(map[string]struct{}, len(rows))
 	for _, row := range rows {
+		rowID := strings.TrimSpace(row.ID)
+		if rowID == "" {
+			return false, "missing_row_id"
+		}
+		if _, ok := seenRowIDs[rowID]; ok {
+			return false, "duplicate_row_id"
+		}
+		seenRowIDs[rowID] = struct{}{}
+		if row.Marker {
+			markerCount++
+		}
 		if strings.TrimSpace(componentID) != "" && row.ComponentID != componentID {
 			return false, "component_scope_mismatch"
 		}
@@ -702,6 +799,17 @@ func groupRowsFresh(rows []ViewRow, componentID, schemaH string, outputIDs []str
 		if strings.TrimSpace(row.OutputSignature) != strings.TrimSpace(outputSignature) {
 			return false, "output_signature_mismatch"
 		}
+		semanticKey := viewRowSemanticKey(row)
+		if _, ok := seenSemantics[semanticKey]; ok {
+			return false, "duplicate_row_signature"
+		}
+		seenSemantics[semanticKey] = struct{}{}
+	}
+	if markerCount > 1 {
+		return false, "duplicate_markers"
+	}
+	if markerCount > 0 && markerCount != len(rows) {
+		return false, "mixed_marker_state"
 	}
 	return true, ""
 }
@@ -939,7 +1047,7 @@ func blockerMappingOutput(task *types.AgentTask) *types.TaskOutput {
 	if task == nil || strings.TrimSpace(task.ID) == "" {
 		return nil
 	}
-	blocker := ProjectBlocker(task, nil)
+	blocker := viewprojection.ProjectBlocker(task, nil)
 	if blocker == nil {
 		return nil
 	}
@@ -1624,7 +1732,7 @@ func enrichRowsWithOutputState(
 		if task == nil {
 			task = taskMeta[rows[i].TaskID]
 		}
-		blocker := ProjectBlocker(task, context.Outputs)
+		blocker := viewprojection.ProjectBlocker(task, context.Outputs)
 		if blocker != nil && blocker.OutputID != "" {
 			rows[i].OutputID = blocker.OutputID
 			rows[i].OutputStatus = blocker.OutputStatus
@@ -2050,7 +2158,11 @@ func serializeExistingRows(rows []ViewRow, cols []bamltypes.ColumnSchema) string
 			continue
 		}
 		merged := row.MergedCells()
-		fmt.Fprintf(&sb, "Row (task_id=%s, row_key=%s):\n", row.TaskID, row.RowKey)
+		if stableRef := strings.TrimSpace(row.StableRef); stableRef != "" {
+			fmt.Fprintf(&sb, "Row (task_id=%s, row_key=%s, stable_ref=%s):\n", row.TaskID, row.RowKey, stableRef)
+		} else {
+			fmt.Fprintf(&sb, "Row (task_id=%s, row_key=%s):\n", row.TaskID, row.RowKey)
+		}
 		for _, col := range cols {
 			val := merged[col.Key]
 			if row.Manual[col.Key] != "" {
@@ -2837,9 +2949,39 @@ func canonicalizeMappedRows(columns []bamltypes.ColumnSchema, rows []bamltypes.M
 		}
 	}
 
-	result := make([]bamltypes.MappedRow, 0, len(order))
+	semanticByKey := make(map[string]*mergedRow, len(order))
+	semanticOrder := make([]string, 0, len(order))
 	for _, mergeKey := range order {
 		row := mergedByKey[mergeKey]
+		semanticKey := mergeKey
+		if fingerprint := excludedRowCellsFingerprint(row.Cells); len(row.SourceOutputIDs) > 0 || fingerprint != "" {
+			semanticKey = row.TaskID + "\x00" + strings.Join(row.SourceOutputIDs, ",") + "\x00" + fingerprint
+		}
+		current, ok := semanticByKey[semanticKey]
+		if !ok {
+			semanticByKey[semanticKey] = &mergedRow{
+				TaskID:          row.TaskID,
+				RowKey:          row.RowKey,
+				SourceOutputIDs: append([]string(nil), row.SourceOutputIDs...),
+				Cells:           copyStringMap(row.Cells),
+			}
+			semanticOrder = append(semanticOrder, semanticKey)
+			continue
+		}
+		current.SourceOutputIDs = mergeSortedStrings(current.SourceOutputIDs, row.SourceOutputIDs)
+		if prefersMappedRowKey(row.RowKey, current.RowKey) {
+			current.RowKey = row.RowKey
+		}
+		for _, key := range columnKeys {
+			if strings.TrimSpace(current.Cells[key]) == "" && strings.TrimSpace(row.Cells[key]) != "" {
+				current.Cells[key] = row.Cells[key]
+			}
+		}
+	}
+
+	result := make([]bamltypes.MappedRow, 0, len(semanticOrder))
+	for _, semanticKey := range semanticOrder {
+		row := semanticByKey[semanticKey]
 		cells := make([]bamltypes.MappedCell, 0, len(columnKeys))
 		for _, key := range columnKeys {
 			cells = append(cells, bamltypes.MappedCell{
@@ -2855,6 +2997,23 @@ func canonicalizeMappedRows(columns []bamltypes.ColumnSchema, rows []bamltypes.M
 		})
 	}
 	return result
+}
+
+func prefersMappedRowKey(candidate, current string) bool {
+	candidate = normalizeToken(strings.TrimSpace(candidate))
+	current = normalizeToken(strings.TrimSpace(current))
+	switch {
+	case candidate == "" || candidate == current:
+		return false
+	case current == "":
+		return true
+	case current == "task" && candidate != "task":
+		return true
+	case candidate == "task":
+		return false
+	default:
+		return candidate < current
+	}
 }
 
 func registerColumnAlias(aliasToKey map[string]string, ambiguous map[string]bool, alias, key string) {
