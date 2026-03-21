@@ -439,6 +439,7 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	var lastPrompt string
 	var approvalOutputHandled bool
 	var wakeSignal *types.RunExecutionWakeSignal
+	var subtaskReqs []*types.SubtaskRequest
 
 	if tr, ok := runner.(TurnRunner); ok {
 		var turnResult turnSessionResult
@@ -450,6 +451,7 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 		lastPrompt = turnResult.lastPrompt
 		approvalOutputHandled = turnResult.approvalOutputHandled
 		wakeSignal = turnResult.wakeSignal
+		subtaskReqs = turnResult.subtaskRequests
 	} else {
 		runErr = w.runGenericPTYSession(sessionCtx, task, sandboxID, tw, activityCh)
 	}
@@ -507,12 +509,9 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	}
 
 	if wakeSignal == nil && !needsInput && runErr == nil && agentMsg != "" {
-		wakeSignal = w.classifyFollowUp(ctx, agentMsg, lastPrompt, mountSource, env, bamlEnv)
-	}
-
-	var subtaskReqs []*types.SubtaskRequest
-	if wakeSignal != nil && outputPipeline.tracker != nil {
-		subtaskReqs = w.classifySubtasks(ctx, task, outputPipeline.tracker, agentMsg, lastPrompt, bamlEnv)
+		plan := w.planFollowUp(ctx, task, outputPipeline.tracker, agentMsg, lastPrompt, mountSource, env, bamlEnv)
+		wakeSignal = plan.wakeSignal
+		subtaskReqs = plan.subtaskRequests
 	}
 
 	return &types.RunExecutionResult{
@@ -796,6 +795,7 @@ type parsedTurnOutcome struct {
 	blockerOutputIDs      []string
 	approvalOutputHandled bool
 	wakeSignal            *types.RunExecutionWakeSignal
+	subtaskRequests       []*types.SubtaskRequest
 }
 
 func (r workerSessionRunner) reconcileParsedTurnOutput(
@@ -841,15 +841,32 @@ func (r workerSessionRunner) reconcileParsedTurnOutput(
 		outcome.wakeSignal = control.WakeSignal
 	}
 
-	if !outcome.needsInput && outcome.wakeSignal == nil && strings.TrimSpace(outcome.assistantMessage) != "" {
-		outcome.wakeSignal = r.worker.classifyFollowUp(
-			ctx,
-			outcome.assistantMessage,
-			prompt,
-			mountSource,
-			env,
-			bamlEnv,
-		)
+	if !outcome.needsInput {
+		switch {
+		case outcome.wakeSignal != nil:
+			outcome.subtaskRequests = r.worker.classifySubtasks(
+				ctx,
+				task,
+				tracker,
+				outcome.assistantMessage,
+				prompt,
+				outcome.wakeSignal,
+				bamlEnv,
+			)
+		case strings.TrimSpace(outcome.assistantMessage) != "":
+			plan := r.worker.planFollowUp(
+				ctx,
+				task,
+				tracker,
+				outcome.assistantMessage,
+				prompt,
+				mountSource,
+				env,
+				bamlEnv,
+			)
+			outcome.wakeSignal = plan.wakeSignal
+			outcome.subtaskRequests = plan.subtaskRequests
+		}
 	}
 
 	if outcome.needsInput && outcome.inputKind == types.InputKindApproveReject {
@@ -866,6 +883,7 @@ type turnSessionResult struct {
 	lastPrompt            string
 	approvalOutputHandled bool
 	wakeSignal            *types.RunExecutionWakeSignal
+	subtaskRequests       []*types.SubtaskRequest
 }
 
 func persistApprovalOutputBeforeWaiting(
@@ -1394,6 +1412,7 @@ func (r workerSessionRunner) runTurnSession(
 				blockerOutputIDs = resolved.blockerOutputIDs
 				turnResult.approvalOutputHandled = resolved.approvalOutputHandled
 				turnResult.wakeSignal = resolved.wakeSignal
+				turnResult.subtaskRequests = resolved.subtaskRequests
 			}
 		} else if checkNeedsInput != nil {
 			needsInput, inputKind, waitingSummary, approvalAssistantMessage = checkNeedsInput(prompt)

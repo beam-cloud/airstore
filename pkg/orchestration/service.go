@@ -13,7 +13,6 @@ import (
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
-	viewschema "github.com/beam-cloud/airstore/pkg/viewschema"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 )
@@ -2121,7 +2120,7 @@ func (s *AgentService) loadViewOutputSchemaContext(
 	if s == nil || s.backend == nil || agentID == nil || strings.TrimSpace(*agentID) == "" {
 		return nil
 	}
-	contexts, err := viewschema.LoadViewOutputSchemaContexts(ctx, s.backend, workspaceID, strings.TrimSpace(*agentID))
+	contexts, err := types.LoadViewOutputSchemaContexts(ctx, s.backend, workspaceID, strings.TrimSpace(*agentID))
 	if err != nil {
 		log.Warn().
 			Err(err).

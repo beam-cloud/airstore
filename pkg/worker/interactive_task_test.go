@@ -506,6 +506,34 @@ func TestBuildWakePlannerContextReadsActiveSkillAndHandoffFiles(t *testing.T) {
 	}
 }
 
+func TestFanOutPlannerPromptPrefersWakeFollowUpPrompt(t *testing.T) {
+	wakeSignal := &types.RunExecutionWakeSignal{
+		DelayMinutes:   90,
+		Reason:         "Check for any replies",
+		FollowUpPrompt: "Check only Luke's email thread for replies and draft a response if needed.",
+	}
+
+	got := fanOutPlannerPrompt(wakeSignal, "Follow up with everyone from the campaign.")
+	want := "Check only Luke's email thread for replies and draft a response if needed."
+	if got != want {
+		t.Fatalf("fanOutPlannerPrompt = %q, want %q", got, want)
+	}
+}
+
+func TestNormalizeSubtaskWakeDelayMinutesFallsBackToParentWake(t *testing.T) {
+	wakeSignal := &types.RunExecutionWakeSignal{DelayMinutes: 120}
+
+	if got := normalizeSubtaskWakeDelayMinutes(wakeSignal, 0); got != 120 {
+		t.Fatalf("normalizeSubtaskWakeDelayMinutes = %d, want 120", got)
+	}
+	if got := normalizeSubtaskWakeDelayMinutes(wakeSignal, 45); got != 45 {
+		t.Fatalf("normalizeSubtaskWakeDelayMinutes should preserve explicit delay, got %d", got)
+	}
+	if got := normalizeSubtaskWakeDelayMinutes(nil, 0); got != 5 {
+		t.Fatalf("normalizeSubtaskWakeDelayMinutes default = %d, want 5", got)
+	}
+}
+
 func TestExtractSessionAssistantMessagePrefersParsedCompletionSummary(t *testing.T) {
 	runner := NewAirRunner(AirRunnerOptions{})
 	raw := []byte(`{"event":"response","ts":2.0,"step":1,"message":"Here's the draft cold outreach email for your approval."}

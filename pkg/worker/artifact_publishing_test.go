@@ -48,6 +48,14 @@ func testRunExecution() types.RunExecution {
 	}
 }
 
+func trackedSummaries(outputs ...outputCandidate) []trackedOutputSummary {
+	tracker := &taskOutputTracker{}
+	for i, output := range outputs {
+		tracker.RememberWithID(output, fmt.Sprintf("output-%d", i+1))
+	}
+	return tracker.TrackedOutputSummaries()
+}
+
 func TestPublishOutputCandidateEnrichesArtifactMetadataFromViewSchemaContext(t *testing.T) {
 	client := &captureOutputClient{}
 	task := testRunExecution()
@@ -609,6 +617,222 @@ func TestPublishOutputCandidateSentEmailSupersedesPriorDraftInSameThread(t *test
 	}
 	if got := client.updateReqs[0].Status; got != types.TaskOutputStatusCancelled {
 		t.Fatalf("updated status = %q, want %q", got, types.TaskOutputStatusCancelled)
+	}
+}
+
+func TestShouldAttemptFanOutSkipsSingleEmailEntity(t *testing.T) {
+	summaries := trackedSummaries(
+		outputCandidate{
+			OutputType: "email",
+			Title:      "Cold outreach email to Luke at Beam",
+			Data: map[string]any{
+				"recipient": "luke@beam.cloud",
+				"subject":   "Airstore scheduling test March 20",
+			},
+			Metadata: map[string]any{
+				types.TaskOutputMetadataArtifactKey:  "outreach-email",
+				types.TaskOutputMetadataArtifactKind: "email",
+				types.TaskOutputMetadataArtifactRole: types.TaskOutputArtifactRolePrimary,
+			},
+		},
+		outputCandidate{
+			OutputType: "email",
+			Title:      "Sent email to luke@beam.cloud",
+			URI:        "https://mail.google.com/mail/u/0/#inbox/sent-message",
+			Data: map[string]any{
+				"to":      "luke@beam.cloud",
+				"subject": "Airstore scheduling test March 20",
+			},
+			Metadata: map[string]any{
+				types.TaskOutputMetadataArtifactKey:  "email-sent",
+				types.TaskOutputMetadataArtifactKind: "email",
+			},
+		},
+		outputCandidate{
+			OutputType: "email",
+			Title:      "Drafted follow-up email to Luke",
+			URI:        "https://mail.google.com/mail/u/0/#inbox/followup-draft",
+			Data: map[string]any{
+				"to":      "luke@beam.cloud",
+				"subject": "Re: Airstore scheduling test March 20",
+			},
+			Metadata: map[string]any{
+				types.TaskOutputMetadataArtifactKey:  "gmail-draft",
+				types.TaskOutputMetadataArtifactKind: "email",
+			},
+		},
+	)
+
+	if got := distinctFanOutEntityCount(summaries); got != 1 {
+		t.Fatalf("distinctFanOutEntityCount = %d, want 1", got)
+	}
+	if shouldAttemptFanOut(types.RunExecution{}, summaries) {
+		t.Fatal("shouldAttemptFanOut = true, want false for a single email thread")
+	}
+	for _, summary := range summaries {
+		if got := summary.EntityKey; got != "email:luke@beam.cloud" {
+			t.Fatalf("EntityKey = %q, want %q", got, "email:luke@beam.cloud")
+		}
+	}
+}
+
+func TestShouldAttemptFanOutAllowsDistinctEmailEntities(t *testing.T) {
+	summaries := trackedSummaries(
+		outputCandidate{
+			OutputType: "email",
+			Title:      "Sent email to Luke",
+			URI:        "https://mail.google.com/mail/u/0/#inbox/luke-thread",
+			Data: map[string]any{
+				"to":      "luke@beam.cloud",
+				"subject": "Hello Luke",
+			},
+			Metadata: map[string]any{
+				types.TaskOutputMetadataArtifactKey:  "email-sent",
+				types.TaskOutputMetadataArtifactKind: "email",
+			},
+		},
+		outputCandidate{
+			OutputType: "email",
+			Title:      "Sent email to Jill",
+			URI:        "https://mail.google.com/mail/u/0/#inbox/jill-thread",
+			Data: map[string]any{
+				"to":      "jill@example.com",
+				"subject": "Hello Jill",
+			},
+			Metadata: map[string]any{
+				types.TaskOutputMetadataArtifactKey:  "email-sent",
+				types.TaskOutputMetadataArtifactKind: "email",
+			},
+		},
+	)
+
+	if got := distinctFanOutEntityCount(summaries); got != 2 {
+		t.Fatalf("distinctFanOutEntityCount = %d, want 2", got)
+	}
+	if !shouldAttemptFanOut(types.RunExecution{}, summaries) {
+		t.Fatal("shouldAttemptFanOut = false, want true for distinct recipients")
+	}
+}
+
+func TestShouldAttemptFanOutSkipsFanOutSpawnedTask(t *testing.T) {
+	summaries := trackedSummaries(
+		outputCandidate{
+			OutputType: types.TaskOutputTypeEmail,
+			Title:      "Sent email to Luke",
+			URI:        "https://mail.google.com/mail/u/0/#inbox/luke-thread",
+			Data: map[string]any{
+				"to":      "luke@beam.cloud",
+				"subject": "Hello Luke",
+			},
+			Metadata: map[string]any{
+				types.TaskOutputMetadataArtifactKey:  "email-sent",
+				types.TaskOutputMetadataArtifactKind: "email",
+			},
+		},
+		outputCandidate{
+			OutputType: types.TaskOutputTypeEmail,
+			Title:      "Sent email to Jill",
+			URI:        "https://mail.google.com/mail/u/0/#inbox/jill-thread",
+			Data: map[string]any{
+				"to":      "jill@example.com",
+				"subject": "Hello Jill",
+			},
+			Metadata: map[string]any{
+				types.TaskOutputMetadataArtifactKey:  "email-sent",
+				types.TaskOutputMetadataArtifactKind: "email",
+			},
+		},
+	)
+
+	if got := distinctFanOutEntityCount(summaries); got != 2 {
+		t.Fatalf("distinctFanOutEntityCount = %d, want 2", got)
+	}
+
+	task := types.RunExecution{
+		ExecutionPolicy: map[string]any{
+			"spawned_by": types.AgentTaskSpawnedByFanOut,
+		},
+	}
+	if shouldAttemptFanOut(task, summaries) {
+		t.Fatal("shouldAttemptFanOut = true, want false for fan-out child tasks")
+	}
+}
+
+func TestShouldAttemptFanOutIgnoresWorkspaceDraftFileAlongsideSentEmail(t *testing.T) {
+	summaries := trackedSummaries(
+		outputCandidate{
+			OutputType: types.TaskOutputTypeEmail,
+			Title:      "Sent email to luke@slai.io",
+			URI:        "https://mail.google.com/mail/u/0/#inbox/thread-1",
+			Data: map[string]any{
+				"to":      "luke@slai.io",
+				"subject": "Faster dev environments for your ML workflows?",
+			},
+			Metadata: map[string]any{
+				types.TaskOutputMetadataArtifactKey:  "outreach-email",
+				types.TaskOutputMetadataArtifactKind: "email",
+			},
+		},
+		outputCandidate{
+			OutputType: "file",
+			Title:      "Marked email draft as sent",
+			Path:       "/workspace/agents/email-outreach/draft-mike-slai.md",
+			Data: map[string]any{
+				"company":   "Mike (Slai)",
+				"recipient": "Mike (Slai)",
+				"status":    "sent",
+			},
+			Metadata: map[string]any{
+				types.TaskOutputMetadataArtifactKey:  "email-outreach",
+				types.TaskOutputMetadataArtifactKind: "md",
+			},
+		},
+	)
+
+	if got := distinctFanOutEntityCount(summaries); got != 1 {
+		t.Fatalf("distinctFanOutEntityCount = %d, want 1", got)
+	}
+	if shouldAttemptFanOut(types.RunExecution{}, summaries) {
+		t.Fatal("shouldAttemptFanOut = true, want false when only one real email thread exists")
+	}
+}
+
+func TestShouldAttemptFanOutIgnoresNamedEmailDraftWithoutAddress(t *testing.T) {
+	summaries := trackedSummaries(
+		outputCandidate{
+			OutputType: types.TaskOutputTypeEmail,
+			Title:      "Sent outreach email",
+			URI:        "https://mail.google.com/mail/u/0/#inbox/thread-1",
+			Data: map[string]any{
+				"thread_id": "19d0e84bed0c8846",
+				"to":        "luke@beam.cloud",
+				"subject":   "A faster way to spin up dev sandboxes",
+			},
+			Metadata: map[string]any{
+				types.TaskOutputMetadataArtifactKey:  "email-sent",
+				types.TaskOutputMetadataArtifactKind: "email",
+			},
+		},
+		outputCandidate{
+			OutputType: types.TaskOutputTypeEmail,
+			Title:      "Draft outreach email",
+			Path:       "/workspace/agents/email-outreach/draft-mike-beam.md",
+			Data: map[string]any{
+				"recipient": "Mike Beam",
+				"subject":   "A faster way to spin up dev sandboxes",
+			},
+			Metadata: map[string]any{
+				types.TaskOutputMetadataArtifactKey:  "email-draft",
+				types.TaskOutputMetadataArtifactKind: "email",
+			},
+		},
+	)
+
+	if got := distinctFanOutEntityCount(summaries); got != 1 {
+		t.Fatalf("distinctFanOutEntityCount = %d, want 1", got)
+	}
+	if shouldAttemptFanOut(types.RunExecution{}, summaries) {
+		t.Fatal("shouldAttemptFanOut = true, want false when only one real email thread exists")
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/mail"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -250,18 +251,25 @@ func (c outputCandidate) fanOutEntityKey() string {
 	outputType := normalizeArtifactToken(c.OutputType)
 
 	if kind == normalizeArtifactToken(types.TaskOutputTypeEmail) || outputType == normalizeArtifactToken(types.TaskOutputTypeEmail) {
-		recipient := normalizeFanOutEntityValue(firstNonEmptyTrimmed(
+		threadID := normalizeFanOutEntityValue(firstNonEmptyTrimmed(
+			anyToTrimmedString(c.Data["thread_id"]),
+			anyToTrimmedString(c.Metadata["thread_id"]),
+		))
+		if threadID != "" {
+			return "email-thread:" + threadID
+		}
+		recipient := normalizeFanOutEmailAddress(firstNonEmptyTrimmed(
 			anyToTrimmedString(c.Data["to"]),
-			anyToTrimmedString(c.Data["recipient"]),
+			anyToTrimmedString(c.Metadata["to"]),
 			anyToTrimmedString(c.Data["email"]),
+			anyToTrimmedString(c.Metadata["email"]),
+			anyToTrimmedString(c.Data["recipient"]),
+			anyToTrimmedString(c.Metadata["recipient"]),
 		))
 		if recipient != "" {
 			return "email:" + recipient
 		}
-		company := normalizeFanOutEntityValue(anyToTrimmedString(c.Data["company"]))
-		if company != "" {
-			return "company:" + company
-		}
+		return ""
 	}
 
 	uri := strings.ToLower(firstNonEmptyTrimmed(c.URI, anyToTrimmedString(c.Data[keyURI]), anyToTrimmedString(c.Metadata[keyDeeplink])))
@@ -1103,6 +1111,24 @@ func normalizeFanOutEntityValue(raw string) string {
 		raw = raw[start+1 : len(raw)-1]
 	}
 	return strings.ToLower(strings.TrimSpace(raw))
+}
+
+func normalizeFanOutEmailAddress(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if addresses, err := mail.ParseAddressList(raw); err == nil && len(addresses) == 1 {
+		return strings.ToLower(strings.TrimSpace(addresses[0].Address))
+	}
+	if address, err := mail.ParseAddress(raw); err == nil && address != nil {
+		return strings.ToLower(strings.TrimSpace(address.Address))
+	}
+	normalized := normalizeFanOutEntityValue(raw)
+	if strings.Count(normalized, "@") == 1 && !strings.ContainsAny(normalized, " ,;") {
+		return normalized
+	}
+	return ""
 }
 
 func sanitizeUTF8(s string) string {
