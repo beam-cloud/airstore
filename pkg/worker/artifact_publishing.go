@@ -76,6 +76,9 @@ type trackedOutputSummary struct {
 	Identity    string
 	EntityKey   string
 	Fingerprint string
+	OutputType  string
+	ArtifactKey string
+	Title       string
 }
 
 type taskOutputTracker struct {
@@ -143,6 +146,9 @@ func (t *taskOutputTracker) RememberWithID(candidate outputCandidate, serverID s
 			Identity:    identity,
 			EntityKey:   candidate.fanOutEntityKey(),
 			Fingerprint: fingerprint,
+			OutputType:  strings.TrimSpace(candidate.OutputType),
+			ArtifactKey: candidate.artifactKey(),
+			Title:       strings.TrimSpace(candidate.Title),
 		}
 	}
 	if key != "" && candidate.isPrimaryDeliverable() {

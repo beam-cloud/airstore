@@ -168,7 +168,13 @@ func (a Artifact) uri() string {
 	}
 	for _, v := range []string{
 		toString(dotGet(a.o.Data, "uri")),
+		toString(dotGet(a.o.Data, "source_url")),
+		toString(dotGet(a.o.Data, "video_url")),
+		toString(dotGet(a.o.Data, "url")),
 		toString(dotGet(a.o.Metadata, "deeplink")),
+		toString(dotGet(a.o.Metadata, "source_url")),
+		toString(dotGet(a.o.Metadata, "video_url")),
+		toString(dotGet(a.o.Metadata, "uri")),
 	} {
 		if strings.TrimSpace(v) != "" {
 			return strings.TrimSpace(v)

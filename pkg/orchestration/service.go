@@ -78,7 +78,6 @@ func NewAgentService(
 		lifecycle,
 		service.publishTaskUpdate,
 		service.resolveRunInteraction,
-		service.activeAttemptExecutionID,
 	)
 	service.resumeBarrier = NewResumeBarrier(backend, terminalIO)
 	service.runFactory = NewRunFactory(RunFactoryConfig{
@@ -150,7 +149,6 @@ func (s *AgentService) ensureTaskFlows() *TaskFlows {
 			s.ensureLifecycle(),
 			s.publishTaskUpdate,
 			s.resolveRunInteraction,
-			s.activeAttemptExecutionID,
 		)
 	}
 	return s.taskFlows
@@ -1227,8 +1225,6 @@ func (s *AgentService) persistUserInputLog(ctx context.Context, task *types.Agen
 	}
 	if err := s.s2.Append(ctx, common.Streams.TaskLogs(execID), entry); err != nil {
 		log.Warn().Err(err).Str("exec_id", execID).Msg("persistUserInputLog: S2 append failed")
-	} else {
-		log.Info().Str("task_id", task.ID).Str("exec_id", execID).Str("stream", common.Streams.TaskLogs(execID)).Int("msg_len", len(message)).Msg("persistUserInputLog: wrote user_input to S2")
 	}
 }
 

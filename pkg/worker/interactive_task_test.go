@@ -534,6 +534,36 @@ func TestNormalizeSubtaskWakeDelayMinutesFallsBackToParentWake(t *testing.T) {
 	}
 }
 
+func TestFollowUpPlanningMessageFallsBackToTrackedOutputs(t *testing.T) {
+	tracker := &taskOutputTracker{}
+	tracker.RememberWithID(outputCandidate{
+		OutputType: types.TaskOutputTypeEmail,
+		Title:      "Quick question about Beam sandboxes",
+		Data: map[string]any{
+			"thread_id": "19d10b2877583e69",
+			"to":        "luke@beam.cloud",
+		},
+		Metadata: map[string]any{
+			types.TaskOutputMetadataArtifactKey:  "email-sent",
+			types.TaskOutputMetadataArtifactKind: "email",
+		},
+	}, "output-1")
+
+	got := followUpPlanningMessage("", tracker)
+	if !strings.Contains(got, "did not emit a final natural-language summary") {
+		t.Fatalf("expected fallback explanation, got:\n%s", got)
+	}
+	if !strings.Contains(got, "email-sent") {
+		t.Fatalf("expected artifact key in fallback message, got:\n%s", got)
+	}
+	if !strings.Contains(got, "email-thread:19d10b2877583e69") {
+		t.Fatalf("expected entity key in fallback message, got:\n%s", got)
+	}
+	if !strings.Contains(got, "Quick question about Beam sandboxes") {
+		t.Fatalf("expected title in fallback message, got:\n%s", got)
+	}
+}
+
 func TestExtractSessionAssistantMessagePrefersParsedCompletionSummary(t *testing.T) {
 	runner := NewAirRunner(AirRunnerOptions{})
 	raw := []byte(`{"event":"response","ts":2.0,"step":1,"message":"Here's the draft cold outreach email for your approval."}

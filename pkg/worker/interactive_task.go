@@ -508,7 +508,7 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 		agentMsg = sessionAssistantMessage
 	}
 
-	if wakeSignal == nil && !needsInput && runErr == nil && agentMsg != "" {
+	if wakeSignal == nil && !needsInput && runErr == nil {
 		plan := w.planFollowUp(ctx, task, outputPipeline.tracker, agentMsg, lastPrompt, mountSource, env, bamlEnv)
 		wakeSignal = plan.wakeSignal
 		subtaskReqs = plan.subtaskRequests
@@ -853,7 +853,7 @@ func (r workerSessionRunner) reconcileParsedTurnOutput(
 				outcome.wakeSignal,
 				bamlEnv,
 			)
-		case strings.TrimSpace(outcome.assistantMessage) != "":
+		default:
 			plan := r.worker.planFollowUp(
 				ctx,
 				task,

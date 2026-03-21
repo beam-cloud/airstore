@@ -56,7 +56,7 @@ func TestAcceptAgentCommandCreatesSleepingTaskForDelayedDispatch(t *testing.T) {
 			ConfigJSON: map[string]any{agentConfigKeyRunner: AgentRunnerClaudeCode},
 		},
 	}
-	flows := NewTaskFlows(backend, nil, nil, nil, nil, nil, nil)
+	flows := NewTaskFlows(backend, nil, nil, nil, nil, nil)
 
 	agentID := "agent-1"
 	label := "luke@beam.cloud"
@@ -108,5 +108,170 @@ func TestAcceptAgentCommandCreatesSleepingTaskForDelayedDispatch(t *testing.T) {
 	}
 	if got := task.WakeAt.Sub(before); got < delay || got > delay+2*time.Second {
 		t.Fatalf("wake delay = %s, want approximately %s", got, delay)
+	}
+}
+
+type resumeRequeueBackend struct {
+	repository.BackendRepository
+	run                  *types.AgentRun
+	pending              []*types.TaskInput
+	requeueResult        bool
+	requeueCalled        bool
+	requeueExpectedRunID string
+	requeuedTask         *types.AgentTask
+	consumeCalls         int
+}
+
+func (b *resumeRequeueBackend) GetAgentRun(_ context.Context, _ uint, _ string) (*types.AgentRun, error) {
+	return b.run, nil
+}
+
+func (b *resumeRequeueBackend) ListPendingTaskInputs(_ context.Context, _ string, _ int) ([]*types.TaskInput, error) {
+	return b.pending, nil
+}
+
+func (b *resumeRequeueBackend) RequeueTaskWithOutboxIfCurrentRun(
+	_ context.Context,
+	task *types.AgentTask,
+	expectedRunID string,
+	_ *types.OrchestrationOutboxEvent,
+) (bool, error) {
+	b.requeueCalled = true
+	b.requeueExpectedRunID = expectedRunID
+	copied := *task
+	copied.PayloadJSON = cloneAnyMap(task.PayloadJSON)
+	b.requeuedTask = &copied
+	return b.requeueResult, nil
+}
+
+func (b *resumeRequeueBackend) ConsumeOldestPendingInput(_ context.Context, _ string) (string, error) {
+	b.consumeCalls++
+	if len(b.pending) == 0 || b.pending[0] == nil {
+		return "", nil
+	}
+	message := b.pending[0].Message
+	b.pending = b.pending[1:]
+	return message, nil
+}
+
+type leaseTerminalIO struct {
+	repository.TerminalIORepository
+	owner     string
+	wakeCalls []string
+}
+
+func (t *leaseTerminalIO) GetSessionLeaseOwner(_ context.Context, _ uint, _ string) (string, error) {
+	return t.owner, nil
+}
+
+func (t *leaseTerminalIO) PublishInputWake(_ context.Context, taskID string) error {
+	t.wakeCalls = append(t.wakeCalls, taskID)
+	return nil
+}
+
+func TestRequeueTaskForResumeDoesNotConsumeInputBeforeCAS(t *testing.T) {
+	timeoutMs := 30_000
+	run := &types.AgentRun{
+		ID:          "run-1",
+		WorkspaceID: 7,
+		SessionID:   "session-1",
+		TimeoutMs:   timeoutMs,
+	}
+	backend := &resumeRequeueBackend{
+		run:           run,
+		requeueResult: false,
+		pending: []*types.TaskInput{{
+			Message: "new follow-up",
+		}},
+	}
+	flows := NewTaskFlows(backend, nil, nil, nil, nil, nil)
+	task := &types.AgentTask{
+		ID:          "task-1",
+		WorkspaceID: 7,
+		PayloadJSON: map[string]any{
+			"message": "original prompt",
+			"prompt":  "original prompt",
+		},
+	}
+
+	if err := flows.requeueTaskForResume(context.Background(), task, run); err == nil {
+		t.Fatal("expected requeueTaskForResume to fail when compare-and-set misses")
+	}
+	if backend.consumeCalls != 0 {
+		t.Fatalf("consume oldest pending input calls = %d, want 0", backend.consumeCalls)
+	}
+	if got := stringFromPayload(task.PayloadJSON, "message"); got != "original prompt" {
+		t.Fatalf("task payload message = %q, want original prompt", got)
+	}
+}
+
+func TestDeliverTaskInputRequeuesWhenSessionLeaseIsGone(t *testing.T) {
+	timeoutMs := 30_000
+	runID := "run-1"
+	run := &types.AgentRun{
+		ID:          runID,
+		WorkspaceID: 7,
+		Status:      types.AgentRunStatusRunning,
+		SessionID:   "session-1",
+		TimeoutMs:   timeoutMs,
+	}
+	backend := &resumeRequeueBackend{
+		run:           run,
+		requeueResult: true,
+		pending: []*types.TaskInput{{
+			Message: "please try again tomorrow",
+		}},
+	}
+	terminalIO := &leaseTerminalIO{}
+	flows := NewTaskFlows(
+		backend,
+		terminalIO,
+		nil,
+		nil,
+		nil,
+		func(context.Context, *types.AgentRun) (*types.RunInteraction, error) {
+			return &types.RunInteraction{
+				State:             types.RunInteractionStateWorking,
+				ActiveExecutionID: "exec-1",
+			}, nil
+		},
+	)
+	task := &types.AgentTask{
+		ID:          "task-1",
+		WorkspaceID: 7,
+		TargetRunID: &runID,
+		PayloadJSON: map[string]any{
+			"message": "original prompt",
+			"prompt":  "original prompt",
+		},
+	}
+
+	if err := flows.deliverTaskInput(context.Background(), task); err != nil {
+		t.Fatalf("deliverTaskInput returned error: %v", err)
+	}
+	if !backend.requeueCalled {
+		t.Fatal("expected follow-up input to be requeued for resume")
+	}
+	if backend.requeueExpectedRunID != run.ID {
+		t.Fatalf("expected run id = %q, want %q", backend.requeueExpectedRunID, run.ID)
+	}
+	if backend.consumeCalls != 1 {
+		t.Fatalf("consume oldest pending input calls = %d, want 1", backend.consumeCalls)
+	}
+	if len(terminalIO.wakeCalls) != 0 {
+		t.Fatalf("expected no wake to be published, got %d wake(s)", len(terminalIO.wakeCalls))
+	}
+	if backend.requeuedTask == nil {
+		t.Fatal("expected requeue payload to be captured")
+	}
+	spec := parseTaskCommandPayload(backend.requeuedTask.PayloadJSON)
+	if !spec.Resume.Enabled {
+		t.Fatal("expected requeued payload to enable resume mode")
+	}
+	if spec.Resume.CheckpointRunID != run.ID {
+		t.Fatalf("checkpoint run id = %q, want %q", spec.Resume.CheckpointRunID, run.ID)
+	}
+	if spec.Message != "please try again tomorrow" {
+		t.Fatalf("resume message = %q, want %q", spec.Message, "please try again tomorrow")
 	}
 }

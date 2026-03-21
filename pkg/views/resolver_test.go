@@ -1722,6 +1722,126 @@ func TestCanonicalizeMappedRowsMergesSemanticDuplicatesAcrossRowKeys(t *testing.
 	}
 }
 
+func TestCollapseResolvedRowsMergesSiblingTasksForSameSourceEntity(t *testing.T) {
+	now := time.Now().UTC()
+	taskMeta := map[string]*types.AgentTask{
+		"task-1": {ID: "task-1", CreatedAt: now.Add(-time.Minute)},
+		"task-2": {ID: "task-2", CreatedAt: now},
+	}
+	outputs := []*types.TaskOutput{
+		{
+			ID:     "out-1",
+			TaskID: "task-1",
+			Data: map[string]any{
+				"source_url": "https://youtube.com/watch?v=abc",
+			},
+		},
+		{
+			ID:     "out-2",
+			TaskID: "task-2",
+			Data: map[string]any{
+				"source_url": "https://youtube.com/watch?v=abc",
+			},
+		},
+	}
+	rows := collapseResolvedRows(
+		[]bamltypes.ColumnSchema{
+			{Key: "recipe_name", Type: "text"},
+			{Key: "creator", Type: "text"},
+			{Key: "servings", Type: "text"},
+		},
+		[]resolvedSheetRow{
+			{
+				TaskID:          "task-1",
+				RowID:           "row-1",
+				RowKey:          "alton-browns-pancakes",
+				SourceOutputIDs: "out-1",
+				Cells: map[string]string{
+					"recipe_name": "Alton Brown's Pancakes",
+					"creator":     "",
+				},
+			},
+			{
+				TaskID:          "task-2",
+				RowID:           "row-2",
+				RowKey:          "alton-browns-pancakes",
+				SourceOutputIDs: "out-2",
+				Cells: map[string]string{
+					"recipe_name": "Alton Brown's Pancakes",
+					"creator":     "Alton Brown",
+					"servings":    "~8 pancakes per batch",
+				},
+			},
+		},
+		outputs,
+		taskMeta,
+	)
+
+	if got, want := len(rows), 1; got != want {
+		t.Fatalf("collapsed row count = %d, want %d", got, want)
+	}
+	if got, want := rows[0].TaskID, "task-2"; got != want {
+		t.Fatalf("merged task id = %q, want %q", got, want)
+	}
+	if got, want := rows[0].Cells["creator"], "Alton Brown"; got != want {
+		t.Fatalf("creator = %q, want %q", got, want)
+	}
+	if got, want := rows[0].Cells["servings"], "~8 pancakes per batch"; got != want {
+		t.Fatalf("servings = %q, want %q", got, want)
+	}
+	if got, want := uniqueTrimmedStrings(strings.Split(rows[0].SourceOutputIDs, ",")), []string{"out-1", "out-2"}; !slicesMatch(got, want) {
+		t.Fatalf("source output ids = %v, want %v", got, want)
+	}
+}
+
+func TestCollapseResolvedRowsKeepsSameEntitySeparateAcrossDifferentSources(t *testing.T) {
+	outputs := []*types.TaskOutput{
+		{
+			ID:     "out-1",
+			TaskID: "task-1",
+			Data: map[string]any{
+				"source_url": "https://youtube.com/watch?v=abc",
+			},
+		},
+		{
+			ID:     "out-2",
+			TaskID: "task-2",
+			Data: map[string]any{
+				"source_url": "https://youtube.com/watch?v=xyz",
+			},
+		},
+	}
+	rows := collapseResolvedRows(
+		[]bamltypes.ColumnSchema{{Key: "recipe_name", Type: "text"}},
+		[]resolvedSheetRow{
+			{
+				TaskID:          "task-1",
+				RowID:           "row-1",
+				RowKey:          "alton-browns-pancakes",
+				SourceOutputIDs: "out-1",
+				Cells: map[string]string{
+					"recipe_name": "Alton Brown's Pancakes",
+				},
+			},
+			{
+				TaskID:          "task-2",
+				RowID:           "row-2",
+				RowKey:          "alton-browns-pancakes",
+				SourceOutputIDs: "out-2",
+				Cells: map[string]string{
+					"recipe_name": "Alton Brown's Pancakes",
+				},
+			},
+		},
+		outputs,
+		nil,
+	)
+
+	if got, want := len(rows), 2; got != want {
+		t.Fatalf("collapsed row count = %d, want %d", got, want)
+	}
+}
+
 func newRecipeOutput(id string) *types.TaskOutput {
 	return &types.TaskOutput{
 		ID:         id,

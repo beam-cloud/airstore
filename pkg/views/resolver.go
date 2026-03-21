@@ -309,6 +309,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 	boundContext := r.fetchBoundTaskContext(ctx, workspaceID, resolvedRows)
 
 	if len(uncachedIDs) == 0 {
+		resolvedRows = collapseResolvedRows(spec.tableCols, resolvedRows, allOutputs, taskMeta)
 		enrichRowsWithOutputState(resolvedRows, allOutputs, boundContext, taskMeta)
 		sortResolvedRows(resolvedRows, taskMeta)
 		return &viewMappingResult{Rows: resolvedRows, TaskMeta: taskMeta, Diagnostics: diagnostics}, nil
@@ -416,6 +417,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 		}
 	}
 
+	resolvedRows = collapseResolvedRows(spec.tableCols, resolvedRows, allOutputs, taskMeta)
 	boundContext = r.fetchBoundTaskContext(ctx, workspaceID, resolvedRows)
 	enrichRowsWithOutputState(resolvedRows, allOutputs, boundContext, taskMeta)
 	sortResolvedRows(resolvedRows, taskMeta)
@@ -526,6 +528,8 @@ func filterExcludedSnapshotsByTasks(snapshots []ExcludedRowSnapshot, taskIDs []s
 	return filtered
 }
 
+const maxTasksPerMappingBatch = 5
+
 func (r *DataResolver) mapTaskGroupsWithBAML(
 	ctx context.Context,
 	viewID string,
@@ -551,14 +555,65 @@ func (r *DataResolver) mapTaskGroupsWithBAML(
 		return nil, nil
 	}
 
+	batches := splitTaskIDBatches(taskIDs, maxTasksPerMappingBatch)
 	taskPrompts := r.fetchTaskPrompts(ctx, taskIDs)
-	outputsJSON, err := serializeOutputsForMapping(outputsForTaskIDs(taskGroups, taskIDs), taskPrompts)
+
+	var allRows []bamltypes.MappedRow
+	var lastErr error
+	successBatches := 0
+
+	for batchIdx, batch := range batches {
+		rows, err := r.mapTaskBatchWithBAML(ctx, viewID, sheet, comp, spec, batch, taskGroups, rowsByGroup, excludedSnapshots, taskPrompts, requestedTasks)
+		if err != nil {
+			log.Warn().Err(err).
+				Str("view_id", viewID).
+				Str("sheet_id", sheet.ID).
+				Int("batch", batchIdx+1).
+				Int("total_batches", len(batches)).
+				Int("batch_tasks", len(batch)).
+				Msg("BAML mapping batch failed")
+			lastErr = err
+			continue
+		}
+		successBatches++
+		allRows = append(allRows, rows...)
+	}
+
+	if successBatches == 0 && lastErr != nil {
+		return nil, fmt.Errorf("BAML mapping: all %d batches failed: %w", len(batches), lastErr)
+	}
+	if lastErr != nil {
+		log.Warn().
+			Str("view_id", viewID).
+			Str("sheet_id", sheet.ID).
+			Int("succeeded", successBatches).
+			Int("failed", len(batches)-successBatches).
+			Msg("BAML mapping partially succeeded")
+	}
+
+	return allRows, nil
+}
+
+func (r *DataResolver) mapTaskBatchWithBAML(
+	ctx context.Context,
+	viewID string,
+	sheet types.SheetSpec,
+	comp types.ComponentSpec,
+	spec mappingSpec,
+	batchTaskIDs []string,
+	taskGroups map[string][]*types.TaskOutput,
+	rowsByGroup map[string][]ViewRow,
+	excludedSnapshots []ExcludedRowSnapshot,
+	taskPrompts map[string]string,
+	requestedTasks map[string]bool,
+) ([]bamltypes.MappedRow, error) {
+	outputsJSON, err := serializeOutputsForMapping(outputsForTaskIDs(taskGroups, batchTaskIDs), taskPrompts)
 	if err != nil {
 		return nil, fmt.Errorf("serialize outputs: %w", err)
 	}
 
-	existingData := serializeExistingRows(storedRowsForTaskIDs(rowsByGroup, taskIDs), spec.mappingCols)
-	excludedForTasks := filterExcludedSnapshotsByTasks(excludedSnapshots, taskIDs)
+	existingData := serializeExistingRows(storedRowsForTaskIDs(rowsByGroup, batchTaskIDs), spec.mappingCols)
+	excludedForTasks := filterExcludedSnapshotsByTasks(excludedSnapshots, batchTaskIDs)
 	excludedData := serializeExcludedRows(excludedForTasks)
 
 	result, err := baml.MapOutputsToSchema(
@@ -594,6 +649,24 @@ func (r *DataResolver) mapTaskGroupsWithBAML(
 			Msg("BAML returned row for unknown task_id, skipping")
 	}
 	return filtered, nil
+}
+
+func splitTaskIDBatches(taskIDs []string, batchSize int) [][]string {
+	if batchSize <= 0 {
+		batchSize = maxTasksPerMappingBatch
+	}
+	if len(taskIDs) <= batchSize {
+		return [][]string{taskIDs}
+	}
+	var batches [][]string
+	for i := 0; i < len(taskIDs); i += batchSize {
+		end := i + batchSize
+		if end > len(taskIDs) {
+			end = len(taskIDs)
+		}
+		batches = append(batches, taskIDs[i:end])
+	}
+	return batches
 }
 
 func materializeTaskGroups(
@@ -1311,13 +1384,13 @@ func assembleTable(sheetID string, comp types.ComponentSpec, mappedRows []resolv
 		hasValue := false
 		for i, col := range tableCols {
 			if v, ok := mapped.Cells[col.Key]; ok && v != "" {
-				row[i] = v
+				row[i] = normalizeStatusCellValue(col.Type, v)
 				hasValue = true
 				continue
 			}
 			if task, ok := taskMeta[mapped.TaskID]; ok {
 				if v, ok := taskMetadataValue(task, col.Key); ok && v != "" {
-					row[i] = v
+					row[i] = normalizeStatusCellValue(col.Type, v)
 					hasValue = true
 				}
 			}
@@ -1759,6 +1832,189 @@ func enrichRowsWithOutputState(
 		} else {
 			rows[i].ApprovalSurface = ""
 		}
+	}
+}
+
+func collapseResolvedRows(
+	columns []bamltypes.ColumnSchema,
+	rows []resolvedSheetRow,
+	outputs []*types.TaskOutput,
+	taskMeta map[string]*types.AgentTask,
+) []resolvedSheetRow {
+	if len(rows) < 2 {
+		return rows
+	}
+	columnTypes := make(map[string]string, len(columns))
+	for _, column := range columns {
+		key := strings.TrimSpace(column.Key)
+		if key == "" {
+			continue
+		}
+		columnTypes[key] = normalizeColumnType(column.Type)
+	}
+	outputByID := make(map[string]*types.TaskOutput, len(outputs))
+	for _, output := range outputs {
+		if output != nil && strings.TrimSpace(output.ID) != "" {
+			outputByID[strings.TrimSpace(output.ID)] = output
+		}
+	}
+
+	mergedByKey := make(map[string]*resolvedSheetRow, len(rows))
+	order := make([]string, 0, len(rows))
+	for _, row := range rows {
+		mergeKey := resolvedRowMergeKey(row, columnTypes, outputByID)
+		if mergeKey == "" {
+			mergeKey = "row:" + strings.TrimSpace(row.RowID)
+		}
+		current, ok := mergedByKey[mergeKey]
+		if !ok {
+			cloned := row
+			cloned.Cells = copyStringMap(row.Cells)
+			cloned.SourceOutputIDs = strings.Join(uniqueTrimmedStrings(strings.Split(row.SourceOutputIDs, ",")), ",")
+			cloned.BlockerOutputIDs = strings.Join(uniqueTrimmedStrings(strings.Split(row.BlockerOutputIDs, ",")), ",")
+			mergedByKey[mergeKey] = &cloned
+			order = append(order, mergeKey)
+			continue
+		}
+
+		candidate := row
+		candidate.Cells = copyStringMap(row.Cells)
+		if preferResolvedRow(candidate, *current, taskMeta) {
+			mergeResolvedRow(&candidate, *current)
+			*current = candidate
+			continue
+		}
+		mergeResolvedRow(current, candidate)
+	}
+
+	collapsed := make([]resolvedSheetRow, 0, len(order))
+	for _, key := range order {
+		if row := mergedByKey[key]; row != nil {
+			collapsed = append(collapsed, *row)
+		}
+	}
+	return collapsed
+}
+
+func resolvedRowMergeKey(
+	row resolvedSheetRow,
+	columnTypes map[string]string,
+	outputByID map[string]*types.TaskOutput,
+) string {
+	rowKey := normalizeToken(strings.TrimSpace(row.RowKey))
+	if rowKey == "task" {
+		rowKey = ""
+	}
+	label := firstNonEmptyMappingString(
+		rowKey,
+		normalizeToken(strings.TrimSpace(row.Cells["recipe_name"])),
+		normalizeToken(strings.TrimSpace(row.Cells["name"])),
+		normalizeToken(strings.TrimSpace(row.Cells["title"])),
+	)
+	source := ""
+	for _, outputID := range uniqueTrimmedStrings(strings.Split(row.SourceOutputIDs, ",")) {
+		output := outputByID[outputID]
+		if output == nil {
+			continue
+		}
+		if uri := strings.ToLower(strings.TrimSpace(ArtifactOf(output).uri())); uri != "" {
+			source = uri
+			break
+		}
+	}
+	if source == "" {
+		for key, value := range row.Cells {
+			if strings.TrimSpace(value) == "" {
+				continue
+			}
+			columnType := columnTypes[key]
+			if columnType == "link" || strings.HasSuffix(key, "_url") || strings.HasSuffix(key, "_uri") || strings.HasSuffix(key, "_link") {
+				source = strings.ToLower(strings.TrimSpace(value))
+				break
+			}
+		}
+	}
+	if source == "" || label == "" {
+		return ""
+	}
+	return source + "\x00" + label
+}
+
+func preferResolvedRow(candidate, current resolvedSheetRow, taskMeta map[string]*types.AgentTask) bool {
+	candidateBlocked := strings.TrimSpace(candidate.BlockerOutputIDs) != "" || strings.TrimSpace(candidate.OutputID) != ""
+	currentBlocked := strings.TrimSpace(current.BlockerOutputIDs) != "" || strings.TrimSpace(current.OutputID) != ""
+	if candidateBlocked != currentBlocked {
+		return candidateBlocked
+	}
+	candidateFilled := 0
+	for _, value := range candidate.Cells {
+		if strings.TrimSpace(value) != "" {
+			candidateFilled++
+		}
+	}
+	currentFilled := 0
+	for _, value := range current.Cells {
+		if strings.TrimSpace(value) != "" {
+			currentFilled++
+		}
+	}
+	if candidateFilled != currentFilled {
+		return candidateFilled > currentFilled
+	}
+	candidateCreated := time.Time{}
+	if task := taskMeta[candidate.TaskID]; task != nil {
+		candidateCreated = task.CreatedAt
+	}
+	currentCreated := time.Time{}
+	if task := taskMeta[current.TaskID]; task != nil {
+		currentCreated = task.CreatedAt
+	}
+	if !candidateCreated.Equal(currentCreated) {
+		return candidateCreated.After(currentCreated)
+	}
+	return strings.TrimSpace(candidate.RowID) < strings.TrimSpace(current.RowID)
+}
+
+func mergeResolvedRow(dst *resolvedSheetRow, src resolvedSheetRow) {
+	if dst == nil {
+		return
+	}
+	dst.SourceOutputIDs = strings.Join(
+		mergeSortedStrings(
+			uniqueTrimmedStrings(strings.Split(dst.SourceOutputIDs, ",")),
+			uniqueTrimmedStrings(strings.Split(src.SourceOutputIDs, ",")),
+		),
+		",",
+	)
+	dst.BlockerOutputIDs = strings.Join(
+		mergeSortedStrings(
+			uniqueTrimmedStrings(strings.Split(dst.BlockerOutputIDs, ",")),
+			uniqueTrimmedStrings(strings.Split(src.BlockerOutputIDs, ",")),
+		),
+		",",
+	)
+	if prefersMappedRowKey(src.RowKey, dst.RowKey) {
+		dst.RowKey = src.RowKey
+	}
+	for key, value := range src.Cells {
+		if strings.TrimSpace(dst.Cells[key]) == "" && strings.TrimSpace(value) != "" {
+			dst.Cells[key] = value
+		}
+	}
+	if strings.TrimSpace(dst.OutputID) == "" && strings.TrimSpace(src.OutputID) != "" {
+		dst.OutputID = src.OutputID
+		dst.OutputStatus = src.OutputStatus
+	}
+	if strings.TrimSpace(dst.BlockerKind) == "" && strings.TrimSpace(src.BlockerKind) != "" {
+		dst.BlockerKind = src.BlockerKind
+		dst.BlockerInputKind = src.BlockerInputKind
+		dst.BlockerWaitGroupID = src.BlockerWaitGroupID
+	}
+	if strings.TrimSpace(dst.ApprovalSurface) == "" && strings.TrimSpace(src.ApprovalSurface) != "" {
+		dst.ApprovalSurface = src.ApprovalSurface
+	}
+	if strings.TrimSpace(dst.DetailTaskID) == "" && strings.TrimSpace(src.DetailTaskID) != "" {
+		dst.DetailTaskID = src.DetailTaskID
 	}
 }
 
@@ -3219,6 +3475,16 @@ func parseConfigColumns(config map[string]any) []configColumn {
 		return nil
 	}
 	return cols
+}
+
+func normalizeStatusCellValue(colType string, v any) any {
+	if colType != "status" {
+		return v
+	}
+	if s, ok := v.(string); ok {
+		return strings.ToLower(strings.TrimSpace(s))
+	}
+	return v
 }
 
 func normalizeColumnType(t string) string {

@@ -22,7 +22,6 @@ type TaskFlows struct {
 	lifecycle         *TaskLifecycle
 	publishTaskUpdate func(context.Context, uint, string)
 	resolveRunState   func(context.Context, *types.AgentRun) (*types.RunInteraction, error)
-	activeExecutionID func(context.Context, string) (string, bool, error)
 }
 
 func NewTaskFlows(
@@ -32,7 +31,6 @@ func NewTaskFlows(
 	lifecycle *TaskLifecycle,
 	publishTaskUpdate func(context.Context, uint, string),
 	resolveRunState func(context.Context, *types.AgentRun) (*types.RunInteraction, error),
-	activeExecutionID func(context.Context, string) (string, bool, error),
 ) *TaskFlows {
 	return &TaskFlows{
 		backend:           backend,
@@ -41,8 +39,13 @@ func NewTaskFlows(
 		lifecycle:         lifecycle,
 		publishTaskUpdate: publishTaskUpdate,
 		resolveRunState:   resolveRunState,
-		activeExecutionID: activeExecutionID,
 	}
+}
+
+type taskInputDelivery struct {
+	run          *types.AgentRun
+	executionID  string
+	shouldResume bool
 }
 
 func (f *TaskFlows) AcceptAgentCommand(
@@ -567,68 +570,57 @@ func (f *TaskFlows) processItemDecisions(ctx context.Context, workspaceID uint, 
 }
 
 func (f *TaskFlows) deliverTaskInput(ctx context.Context, task *types.AgentTask) error {
-	if task.TargetRunID == nil || strings.TrimSpace(*task.TargetRunID) == "" {
-		return nil
-	}
-
-	run, err := f.backend.GetAgentRun(ctx, task.WorkspaceID, *task.TargetRunID)
+	delivery, err := f.resolveTaskInputDelivery(ctx, task)
 	if err != nil {
 		return err
 	}
-
-	if run.Status.IsTerminal() {
-		return f.requeueTaskForResume(ctx, task, run)
-	}
-
-	if f.resolveRunState != nil {
-		interaction, _ := f.resolveRunState(ctx, run)
-		if interaction != nil && interaction.State == types.RunInteractionStateClosed {
-			return f.requeueTaskForResume(ctx, task, run)
-		}
-	}
-
-	if f.activeExecutionID == nil {
+	if delivery == nil || delivery.run == nil {
 		return nil
 	}
-	execID, hasActiveAttempt, err := f.activeExecutionID(ctx, run.ID)
-	if err != nil {
+	if delivery.shouldResume {
+		return f.requeueTaskForResume(ctx, task, delivery.run)
+	}
+	if delivery.executionID == "" || f.terminalIO == nil {
+		return nil
+	}
+	if err := f.terminalIO.PublishInputWake(ctx, delivery.executionID); err != nil {
 		return err
 	}
-	if !hasActiveAttempt {
-		return f.requeueTaskForResume(ctx, task, run)
+	if freshRun, err := f.backend.GetAgentRun(ctx, task.WorkspaceID, *task.TargetRunID); err == nil && freshRun.Status.IsTerminal() {
+		return f.requeueTaskForResume(ctx, task, freshRun)
 	}
-	if execID != "" && f.terminalIO != nil {
-		if err := f.terminalIO.PublishInputWake(ctx, execID); err != nil {
+	if f.lifecycle != nil {
+		updated, err := f.lifecycle.Resume(ctx, task.ID, *task.TargetRunID)
+		if err != nil {
 			return err
 		}
-		if freshRun, err := f.backend.GetAgentRun(ctx, task.WorkspaceID, *task.TargetRunID); err == nil && freshRun.Status.IsTerminal() {
-			return f.requeueTaskForResume(ctx, task, freshRun)
+		if updated {
+			task.State = types.AgentTaskStateRunning
+			task.InputKind = ""
+			task.WaitingSummary = nil
+			task.CurrentBlocker = nil
+			task.CurrentBlockerID = nil
 		}
-		if f.lifecycle != nil {
-			updated, err := f.lifecycle.Resume(ctx, task.ID, *task.TargetRunID)
-			if err != nil {
-				return err
-			}
-			if updated {
-				task.State = types.AgentTaskStateRunning
-				task.InputKind = ""
-				task.WaitingSummary = nil
-				task.CurrentBlocker = nil
-				task.CurrentBlockerID = nil
-			}
-		}
-		f.notifyTaskUpdate(ctx, task.WorkspaceID, task.ID)
-		return nil
 	}
+	f.notifyTaskUpdate(ctx, task.WorkspaceID, task.ID)
 	return nil
 }
 
 func (f *TaskFlows) requeueTaskForResume(ctx context.Context, task *types.AgentTask, lastRun *types.AgentRun) error {
-	inputMessage, _ := f.backend.ConsumeOldestPendingInput(ctx, task.ID)
-	task.PayloadJSON = restartTaskPayload(task.PayloadJSON, lastRun, inputMessage)
+	inputMessage := ""
+	consumePendingInput := false
+	if pendingInputs, err := f.backend.ListPendingTaskInputs(ctx, task.ID, 1); err != nil {
+		return err
+	} else if len(pendingInputs) > 0 && pendingInputs[0] != nil {
+		inputMessage = strings.TrimSpace(pendingInputs[0].Message)
+		consumePendingInput = true
+	}
+	nextPayload := restartTaskPayload(task.PayloadJSON, lastRun, inputMessage)
+	requeueTask := *task
+	requeueTask.PayloadJSON = nextPayload
 	requeued, err := f.backend.RequeueTaskWithOutboxIfCurrentRun(
 		ctx,
-		task,
+		&requeueTask,
 		lastRun.ID,
 		&types.OrchestrationOutboxEvent{
 			EventType: types.OrchestrationOutboxEventTypeTaskDispatch,
@@ -644,8 +636,71 @@ func (f *TaskFlows) requeueTaskForResume(ctx context.Context, task *types.AgentT
 	if !requeued {
 		return fmt.Errorf("task %s is no longer attached to run %s", task.ID, lastRun.ID)
 	}
+	if consumePendingInput {
+		if _, err := f.backend.ConsumeOldestPendingInput(ctx, task.ID); err != nil {
+			return err
+		}
+	}
+	task.PayloadJSON = nextPayload
 	f.notifyTaskUpdate(ctx, task.WorkspaceID, task.ID)
 	return nil
+}
+
+func (f *TaskFlows) resolveTaskInputDelivery(ctx context.Context, task *types.AgentTask) (*taskInputDelivery, error) {
+	if task == nil || task.TargetRunID == nil || strings.TrimSpace(*task.TargetRunID) == "" {
+		return nil, nil
+	}
+	run, err := f.backend.GetAgentRun(ctx, task.WorkspaceID, *task.TargetRunID)
+	if err != nil {
+		return nil, err
+	}
+	delivery := &taskInputDelivery{run: run}
+	if run.Status.IsTerminal() {
+		delivery.shouldResume = true
+		return delivery, nil
+	}
+	if f.resolveRunState != nil {
+		interaction, err := f.resolveRunState(ctx, run)
+		if err != nil {
+			return nil, err
+		}
+		if interaction != nil {
+			if interaction.State == types.RunInteractionStateClosed {
+				delivery.shouldResume = true
+				return delivery, nil
+			}
+			delivery.executionID = strings.TrimSpace(interaction.ActiveExecutionID)
+		}
+	}
+	if delivery.executionID == "" {
+		delivery.shouldResume = true
+		return delivery, nil
+	}
+	if f.terminalIO == nil || strings.TrimSpace(run.SessionID) == "" {
+		return delivery, nil
+	}
+	owner, err := f.terminalIO.GetSessionLeaseOwner(ctx, run.WorkspaceID, run.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	if owner != "" && ReconcileStaleSessionLease(ctx, f.backend, f.terminalIO, run.WorkspaceID, run.SessionID, owner) {
+		owner = ""
+	}
+	leaseExecutionID := strings.TrimSpace(ExtractLeaseExecutionID(owner))
+	if owner == "" || leaseExecutionID == "" {
+		delivery.shouldResume = true
+		return delivery, nil
+	}
+	if leaseExecutionID != delivery.executionID {
+		log.Warn().
+			Str("task_id", task.ID).
+			Str("run_id", run.ID).
+			Str("lease_execution_id", leaseExecutionID).
+			Str("active_execution_id", delivery.executionID).
+			Msg("requeueing follow-up input for stale run execution")
+		delivery.shouldResume = true
+	}
+	return delivery, nil
 }
 
 func (f *TaskFlows) retryOrphanedPendingInputs(ctx context.Context) error {
@@ -723,8 +778,6 @@ func (f *TaskFlows) persistUserInputLog(ctx context.Context, task *types.AgentTa
 	}
 	if err := f.s2.Append(ctx, common.Streams.TaskLogs(execID), entry); err != nil {
 		log.Warn().Err(err).Str("exec_id", execID).Msg("persistUserInputLog: S2 append failed")
-	} else {
-		log.Info().Str("task_id", task.ID).Str("exec_id", execID).Str("stream", common.Streams.TaskLogs(execID)).Int("msg_len", len(message)).Msg("persistUserInputLog: wrote user_input to S2")
 	}
 }
 

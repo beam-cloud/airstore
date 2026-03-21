@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -38,7 +39,7 @@ func (w *Worker) planFollowUp(
 	env map[string]string,
 	bamlEnv map[string]string,
 ) followUpPlan {
-	agentMsg = strings.TrimSpace(agentMsg)
+	agentMsg = followUpPlanningMessage(agentMsg, tracker)
 	if agentMsg == "" {
 		return followUpPlan{}
 	}
@@ -327,6 +328,10 @@ func (w *Worker) classifySubtasks(
 	wakeSignal *types.RunExecutionWakeSignal,
 	bamlEnv map[string]string,
 ) []*types.SubtaskRequest {
+	agentMsg = followUpPlanningMessage(agentMsg, tracker)
+	if agentMsg == "" {
+		return nil
+	}
 	summaries := tracker.TrackedOutputSummaries()
 	if !shouldAttemptFanOut(task, summaries) {
 		return nil
@@ -395,6 +400,59 @@ func fanOutPlannerPrompt(wakeSignal *types.RunExecutionWakeSignal, fallback stri
 		}
 	}
 	return strings.TrimSpace(fallback)
+}
+
+func followUpPlanningMessage(agentMsg string, tracker *taskOutputTracker) string {
+	if trimmed := strings.TrimSpace(agentMsg); trimmed != "" {
+		return trimmed
+	}
+	if tracker == nil {
+		return ""
+	}
+	summaries := tracker.TrackedOutputSummaries()
+	if len(summaries) == 0 {
+		return ""
+	}
+	sort.SliceStable(summaries, func(i, j int) bool {
+		left := strings.Join([]string{
+			strings.TrimSpace(summaries[i].EntityKey),
+			strings.TrimSpace(summaries[i].ArtifactKey),
+			strings.TrimSpace(summaries[i].Title),
+			strings.TrimSpace(summaries[i].OutputID),
+		}, "\x00")
+		right := strings.Join([]string{
+			strings.TrimSpace(summaries[j].EntityKey),
+			strings.TrimSpace(summaries[j].ArtifactKey),
+			strings.TrimSpace(summaries[j].Title),
+			strings.TrimSpace(summaries[j].OutputID),
+		}, "\x00")
+		return left < right
+	})
+
+	lines := []string{
+		"The agent completed the turn but did not emit a final natural-language summary.",
+		"Infer any needed follow-up from these persisted outputs and the active skill context:",
+	}
+	for i, summary := range summaries {
+		if i >= 8 {
+			lines = append(lines, fmt.Sprintf("- ...and %d more output(s)", len(summaries)-i))
+			break
+		}
+		label := firstNonEmptyTrimmed(
+			strings.TrimSpace(summary.ArtifactKey),
+			strings.TrimSpace(summary.OutputType),
+			"output",
+		)
+		line := "- " + label
+		if entity := strings.TrimSpace(summary.EntityKey); entity != "" {
+			line += " for " + entity
+		}
+		if title := strings.TrimSpace(summary.Title); title != "" {
+			line += ": " + title
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func normalizeSubtaskWakeDelayMinutes(wakeSignal *types.RunExecutionWakeSignal, requested int) int {

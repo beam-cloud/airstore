@@ -8,6 +8,7 @@ import (
 
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
+	"github.com/rs/zerolog/log"
 )
 
 type RunFactoryConfig struct {
@@ -198,10 +199,15 @@ func (f *RunFactory) CreateAttemptExecutionTask(
 	if attempt.Status == types.AgentAttemptStatusBlocked {
 		return attempt, nil
 	}
-
-	_, memberToken, err := f.backend.EnsureWorkspaceServiceToken(ctx, run.WorkspaceID)
-	if err != nil {
+	failProvisioning := func(err error) (*types.AgentRunAttempt, error) {
+		markAttemptProvisioningFailed(ctx, f.backend, run, attempt, err)
 		return nil, err
+	}
+
+	var memberToken string
+	_, memberToken, err = f.backend.EnsureWorkspaceServiceToken(ctx, run.WorkspaceID)
+	if err != nil {
+		return failProvisioning(err)
 	}
 	taskEnv := map[string]string{}
 	applyRunExecutionContextEnv(taskEnv, run, attempt.ID)
@@ -256,17 +262,20 @@ func (f *RunFactory) CreateAttemptExecutionTask(
 		CreatedByMemberId: nil,
 		HookId:            run.HookID,
 	}
-	if err := f.backend.CreateRunExecution(ctx, execTask); err != nil {
-		return nil, err
+	err = f.backend.CreateRunExecution(ctx, execTask)
+	if err != nil {
+		return failProvisioning(err)
 	}
-	if err := f.backend.BindAttemptExecutionTask(ctx, attempt.ID, execTask.ExternalId); err != nil {
-		return nil, err
+	err = f.backend.BindAttemptExecutionTask(ctx, attempt.ID, execTask.ExternalId)
+	if err != nil {
+		return failProvisioning(err)
 	}
 	if f.taskQueue == nil {
-		return nil, fmt.Errorf("task queue is unavailable")
+		return failProvisioning(fmt.Errorf("task queue is unavailable"))
 	}
-	if err := f.taskQueue.Push(ctx, execTask); err != nil {
-		return nil, err
+	err = f.taskQueue.Push(ctx, execTask)
+	if err != nil {
+		return failProvisioning(err)
 	}
 	if f.publishTaskUpdate != nil {
 		f.publishTaskUpdate(ctx, run.WorkspaceID, run.OriginTaskID)
@@ -337,6 +346,55 @@ func appendRunSnapshotWithBackend(
 		TS:          time.Now().UnixMilli(),
 		PayloadJSON: payload,
 	})
+}
+
+func markAttemptProvisioningFailed(
+	ctx context.Context,
+	backend repository.BackendRepository,
+	run *types.AgentRun,
+	attempt *types.AgentRunAttempt,
+	cause error,
+) {
+	if backend == nil || run == nil || attempt == nil || cause == nil {
+		return
+	}
+	errText := strings.TrimSpace(cause.Error())
+	if errText == "" {
+		errText = "failed to provision run attempt"
+	}
+	now := time.Now()
+	if err := backend.UpdateAgentRunAttemptResult(
+		ctx,
+		attempt.ID,
+		types.AgentAttemptStatusError,
+		nil,
+		now,
+		&errText,
+	); err != nil {
+		log.Warn().
+			Err(err).
+			Str("run_id", run.ID).
+			Str("attempt_id", attempt.ID).
+			Msg("failed to mark provisioning attempt as errored")
+	}
+	if err := appendRunSnapshotWithBackend(
+		ctx,
+		backend,
+		run.ID,
+		types.AgentRunStatusError,
+		nil,
+		&now,
+		&errText,
+		map[string]any{
+			types.AgentRunEventPayloadKeyTaskID: run.OriginTaskID,
+		},
+	); err != nil {
+		log.Warn().
+			Err(err).
+			Str("run_id", run.ID).
+			Str("attempt_id", attempt.ID).
+			Msg("failed to append provisioning failure snapshot")
+	}
 }
 
 type ResumeBarrier struct {

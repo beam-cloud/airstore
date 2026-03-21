@@ -49,3 +49,23 @@ func TestArtifactLinkKindUsesRegistrableDomain(t *testing.T) {
 		t.Fatalf("google link kind = %q, want google-link", got)
 	}
 }
+
+func TestArtifactURIFallsBackToSourceFields(t *testing.T) {
+	output := &types.TaskOutput{
+		Data: map[string]any{
+			"source_url": "https://example.com/source",
+		},
+	}
+	if got := ArtifactOf(output).uri(); got != "https://example.com/source" {
+		t.Fatalf("artifact uri = %q, want source_url fallback", got)
+	}
+
+	output = &types.TaskOutput{
+		Data: map[string]any{
+			"video_url": "https://youtube.com/watch?v=abc",
+		},
+	}
+	if got := ArtifactOf(output).uri(); got != "https://youtube.com/watch?v=abc" {
+		t.Fatalf("artifact uri = %q, want video_url fallback", got)
+	}
+}
