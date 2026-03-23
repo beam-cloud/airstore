@@ -1124,6 +1124,11 @@ func (r *DataResolver) fetchComponentOutputs(ctx context.Context, workspaceID ui
 // fetchMappingOutputs lets the data source select which tasks belong to the
 // sheet, then expands each selected task back to its full output set so BAML
 // sees complete task context instead of a filtered artifact slice.
+//
+// When the data source targets specific outputs (via statuses + artifact_key),
+// expansion is skipped so BAML maps exactly the outputs the user selected.
+// Expansion is only done when the filter selects tasks broadly (output_type
+// or time_range alone) so BAML can synthesize a full-context row per task.
 func (r *DataResolver) fetchMappingOutputs(ctx context.Context, workspaceID uint, ds *types.DataSource, viewAgentRefs []string) ([]*types.TaskOutput, error) {
 	agentIDs, ok := r.resolveScopedAgentIDs(ctx, workspaceID, ds, viewAgentRefs)
 	if !ok {
@@ -1143,6 +1148,10 @@ func (r *DataResolver) fetchMappingOutputs(ctx context.Context, workspaceID uint
 		return selectedOutputs, nil
 	}
 
+	if dataSourceTargetsSpecificOutputs(ds) {
+		return selectedOutputs, nil
+	}
+
 	taskIDs := taskSetFromOutputs(realSelectedOutputs)
 	if len(taskIDs) == 0 {
 		return selectedOutputs, nil
@@ -1153,6 +1162,17 @@ func (r *DataResolver) fetchMappingOutputs(ctx context.Context, workspaceID uint
 		return nil, err
 	}
 	return dedupeOutputs(append(allTaskOutputs, blockerSelectedOutputs...)), nil
+}
+
+// dataSourceTargetsSpecificOutputs returns true when the filter selects a
+// narrow slice of outputs rather than broadly selecting tasks. When statuses
+// are specified alongside a type or artifact key filter, the user wants BAML
+// to map exactly those outputs — not the full task context.
+func dataSourceTargetsSpecificOutputs(ds *types.DataSource) bool {
+	if ds == nil || len(ds.Statuses) == 0 {
+		return false
+	}
+	return strings.TrimSpace(ds.ArtifactKey) != "" || strings.TrimSpace(ds.OutputType) != ""
 }
 
 func blockerMappingOutput(task *types.AgentTask) *types.TaskOutput {
@@ -2532,7 +2552,7 @@ type mappingField struct {
 }
 
 const (
-	maxMappingFieldValueLen = 600
+	maxMappingFieldValueLen = 1200
 	maxMappingNestedItems   = 6
 )
 

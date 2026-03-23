@@ -50,6 +50,12 @@ const filesystemQuerySelectColumns = `
 	created_at, updated_at, last_executed
 `
 
+const filesystemQueryQualifiedSelectColumns = `
+	q.id, q.external_id, q.workspace_id, q.credential_member_id, q.system_managed, q.lifecycle, q.owner_task_id, q.owner_run_id,
+	q.integration, q.path, q.name, q.query_spec, q.guidance, q.output_format, q.file_ext, q.filename_format, q.cache_ttl, q.mode, q.filter,
+	q.created_at, q.updated_at, q.last_executed
+`
+
 type rowScanner interface {
 	Scan(dest ...any) error
 }
@@ -1153,15 +1159,36 @@ func (s *filesystemStore) GetWatchedSourceQueries(ctx context.Context, staleAfte
 
 	// Use ILIKE for case-insensitive path matching (handles old lowercase paths)
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT DISTINCT `+filesystemQuerySelectColumns+`
-		FROM filesystem_queries q
-		JOIN filesystem_hooks h
-		  ON h.workspace_id = q.workspace_id
-		  AND h.active = true
-		  AND (LOWER(q.path) = LOWER(h.path) OR LOWER(q.path) LIKE LOWER(replace(replace(h.path, '%', '\%'), '_', '\_') || '/%'))
-		WHERE q.last_executed IS NULL
-		   OR q.last_executed < NOW() - $1::interval
-		ORDER BY q.last_executed ASC NULLS FIRST
+		WITH watched_queries AS (
+			SELECT DISTINCT ON (q.id)
+				q.id,
+				CASE WHEN q.lifecycle = 'task_followup' THEN 0 ELSE 1 END AS lifecycle_rank,
+				CASE WHEN q.system_managed THEN 0 ELSE 1 END AS managed_rank,
+				q.last_executed,
+				q.updated_at
+			FROM filesystem_queries q
+			JOIN filesystem_hooks h
+			  ON h.workspace_id = q.workspace_id
+			  AND h.active = true
+			  AND (LOWER(q.path) = LOWER(h.path) OR LOWER(q.path) LIKE LOWER(replace(replace(h.path, '%', '\%'), '_', '\_') || '/%'))
+			WHERE q.last_executed IS NULL
+			   OR q.last_executed < NOW() - $1::interval
+			ORDER BY
+				q.id,
+				CASE WHEN q.lifecycle = 'task_followup' THEN 0 ELSE 1 END,
+				CASE WHEN q.system_managed THEN 0 ELSE 1 END,
+				q.last_executed ASC NULLS FIRST,
+				q.updated_at DESC
+		)
+		SELECT `+filesystemQueryQualifiedSelectColumns+`
+		FROM watched_queries w
+		JOIN filesystem_queries q ON q.id = w.id
+		ORDER BY
+			w.lifecycle_rank,
+			w.managed_rank,
+			w.last_executed ASC NULLS FIRST,
+			w.updated_at DESC,
+			w.id ASC
 		LIMIT $2
 	`, fmt.Sprintf("%d seconds", int(staleAfter.Seconds())), limit)
 	if err != nil {

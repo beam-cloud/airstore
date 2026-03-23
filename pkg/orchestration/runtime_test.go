@@ -427,6 +427,20 @@ func TestFinalizeRunAttemptSynthesizesWakeForSourceWatchFollowUp(t *testing.T) {
 	}
 }
 
+func TestSourceWatchWakePromptPinsGmailThreadForReplies(t *testing.T) {
+	prompt := sourceWatchWakePrompt([]*types.SourceWatchRequest{{
+		Integration: string(types.SourceGmail),
+		ThreadID:    "thread-123",
+		EntityLabel: "Reply from luke@beam.cloud to Beam outreach",
+	}}, "")
+	if !strings.Contains(prompt, "exact Gmail thread `thread-123`") {
+		t.Fatalf("prompt missing exact thread guidance: %q", prompt)
+	}
+	if !strings.Contains(prompt, "--thread-id thread-123") {
+		t.Fatalf("prompt missing Gmail thread-id guidance: %q", prompt)
+	}
+}
+
 func TestFinalizeRunAttemptForcesTaskErrorWhenCurrentRunUpdateMisses(t *testing.T) {
 	runID := "run-2"
 	task := &types.AgentTask{

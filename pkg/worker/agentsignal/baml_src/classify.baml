@@ -67,18 +67,41 @@ function ClassifyTurn(message: string) -> TurnClassification {
       (vague, no specific proposed action)
     The test: does the agent propose one or more CONCRETE actions it could
     perform next? If yes → NEEDS_INPUT. If it's just a generic offer → COMPLETE.
+    EXCEPTION: post-send monitoring / wake plans are still COMPLETE. A message
+    can describe future steps like "on wake I will check the thread, read the
+    attachment, produce a report, and draft a reply" without needing user input
+    right now, as long as the external send already happened and the agent is
+    just waiting for a timer or source change.
 
     When in doubt between APPROVE_REJECT and FREE_TEXT, prefer APPROVE_REJECT
     if the agent is presenting finished work (a draft, a plan, a list of actions)
     and asking the user to greenlight it.
 
-    IMPORTANT: If the message mentions drafting, composing, preparing, OR SENDING
-    an email, form submission, or outreach, classify as NEEDS_INPUT + APPROVE_REJECT.
-    This applies whether the email is about to be sent OR was already sent.
-    Sending external communications on behalf of the user should always require
-    explicit approval. Even if the agent says "I sent the email," the user still
-    needs to approve it. The only exception is if the user explicitly pre-approved
-    sending in their original prompt.
+    IMPORTANT:
+    - If the message is asking the user to approve a NEW external action that
+      has not happened yet (send/submit/publish/delete/deploy/etc.), classify
+      as NEEDS_INPUT + APPROVE_REJECT.
+    - If the message says an external action ALREADY happened successfully and
+      the remaining work is to monitor, sleep, wait for replies, or wake later,
+      classify as COMPLETE.
+    - If the message is a pure monitoring declaration tied to a specific thread,
+      inbox, conversation, deployment, or source, and it does NOT ask the user
+      to do anything right now, classify as COMPLETE even if it does not
+      explicitly restate that the prior external action already happened.
+    - A post-send monitoring plan is NOT a fresh approval gate. Treat messages
+      like "Email sent successfully ... I'm monitoring this thread ... please
+      wake me in X minutes" as COMPLETE, not NEEDS_INPUT.
+    - Do NOT classify a message as NEEDS_INPUT just because it says
+      "please wake me", "on wake I will", "requested follow-up cadence", or
+      includes a numbered monitoring plan after a completed send.
+    - Mentioning that a FUTURE reply or draft will need approval later does not
+      make the current message NEEDS_INPUT.
+    - Future-conditional approval language like "when a reply arrives, draft
+      the next response for user approval before sending" describes what will
+      happen later, not a current approval gate.
+    - Monitoring-only cadence statements like "Follow up in 1 minute unless a
+      source-watch wake fires sooner" are COMPLETE unless they also include a
+      present-tense request for user action.
 
     COMPLETE examples:
     - Delivers a final result with NO follow-up question or proposed actions
@@ -93,6 +116,21 @@ function ClassifyTurn(message: string) -> TurnClassification {
     - NOTE: If the agent presents results AND THEN proposes specific next
       steps ("Let me know if you'd like to X"), that is NEEDS_INPUT, not
       COMPLETE. Results + proposed actions = NEEDS_INPUT.
+    - "Email sent successfully. I'm now monitoring this thread for replies.
+      Please wake me in 5 minutes to check thread 123 for replies."
+    - "The email was sent. I'll keep monitoring this Gmail thread and draft the
+      next reply for approval if anything new arrives."
+    - "Email sent successfully. The task is not complete — awaiting reply
+      monitoring."
+    - "Email sent successfully. Now monitoring for replies. Please wake me in
+      1 minute (or sooner if a source-watch fires). On wake, I will check the
+      thread, read any attachment, produce a structured report, and draft a
+      reply for approval."
+    - "Monitoring Gmail thread 123 for replies. Follow up in 1 minute unless a
+      source-watch wake on this thread fires sooner. When a reply arrives,
+      draft the next response for user approval before sending."
+    - "Monitoring thread 123 for replies; follow up in 5 minutes if nothing
+      changes sooner."
 
     Agent's message (last ~4000 chars):
     ---

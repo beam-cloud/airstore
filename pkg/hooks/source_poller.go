@@ -13,8 +13,11 @@ import (
 )
 
 const (
-	sourcePollTick    = 30 * time.Second // how often the poller checks for stale queries
-	sourcePollStale   = 2 * time.Minute  // query is stale if not executed in this window
+	// Follow-up watches should refresh quickly enough to beat minute-scale
+	// fallback wakes even when a query is created just after a poll cycle.
+	sourcePollTick    = 15 * time.Second
+	sourcePollStale   = 5 * time.Second
+	sourcePollLockTTL = 2 * time.Minute // long enough to cover slow provider refreshes
 	sourcePollBatch   = 50               // max queries per poll cycle
 	sourcePollWorkers = 5                // concurrent refresh workers
 )
@@ -76,7 +79,7 @@ func (p *SourcePoller) Poll(ctx context.Context) {
 	for _, q := range queries {
 		// Distributed lock: only one replica refreshes this query per interval.
 		lockKey := common.Keys.HookPollLock(q.ExternalId)
-		acquired, err := p.rdb.SetNX(ctx, lockKey, "1", sourcePollStale).Result()
+		acquired, err := p.rdb.SetNX(ctx, lockKey, "1", sourcePollLockTTL).Result()
 		if err != nil || !acquired {
 			locked.Add(1)
 			continue

@@ -421,8 +421,8 @@ func TestAirRunnerParseTurnOutput_CompleteUsesOutputSummary(t *testing.T) {
 func TestAirRunnerParseTurnOutput_DraftArtifactsUpgradeResponse(t *testing.T) {
 	runner := NewAirRunner(AirRunnerOptions{})
 
-	output := `{"event":"run_end","ts":4.0,"session_id":"s1","total_steps":1,"status":"complete","needs_input":false}
-{"status":"complete","needs_input":false,"session_id":"s1","output":{"summary":"Drafted an outreach email.","next_step":"Awaiting your approval before sending.","drafted_responses":[{"channel":"gmail","to":"luke@slai.io","subject":"Beam sandboxes","body":"Hi Mike,\n\nHere is the draft.\n"}]}}
+	output := `{"event":"run_end","ts":4.0,"session_id":"s1","total_steps":1,"status":"complete","needs_input":true}
+{"status":"complete","needs_input":true,"input_kind":"approve_reject","session_id":"s1","output":{"summary":"Drafted an outreach email.","next_step":"Awaiting your approval before sending.","drafted_responses":[{"channel":"gmail","to":"luke@slai.io","subject":"Beam sandboxes","body":"Hi Mike,\n\nHere is the draft.\n"}]}}
 `
 
 	result, err := runner.ParseTurnOutput([]byte(output))
@@ -436,8 +436,8 @@ func TestAirRunnerParseTurnOutput_DraftArtifactsUpgradeResponse(t *testing.T) {
 		t.Fatalf("artifact count = %d, want 1", got)
 	}
 	artifact := result.Artifacts[0]
-	if artifact.OutputType != types.TaskOutputTypeEmail {
-		t.Fatalf("output_type = %q, want %q", artifact.OutputType, types.TaskOutputTypeEmail)
+	if artifact.OutputType != "gmail" {
+		t.Fatalf("output_type = %q, want %q", artifact.OutputType, "gmail")
 	}
 	blocker := requireTurnBlocker(t, result)
 	if blocker.InputKind != types.InputKindApproveReject {
@@ -468,6 +468,43 @@ func TestAirRunnerParseTurnOutput_CompletedDraftResponseDoesNotReblock(t *testin
 	}
 	if got := len(result.Artifacts); got != 0 {
 		t.Fatalf("artifact count = %d, want 0", got)
+	}
+}
+
+func TestAirRunnerParseTurnOutput_FollowUpMentionsFutureApprovalWithoutBlocking(t *testing.T) {
+	runner := NewAirRunner(AirRunnerOptions{})
+
+	output := `{"event":"run_end","ts":18.0,"session_id":"s1","total_steps":3,"status":"complete","needs_input":false}
+{"status":"complete","needs_input":false,"session_id":"s1","response":"Email sent successfully. I'm now monitoring this thread for replies. If a reply arrives, I'll read it, summarize it, and draft a response for your approval. Please wake me in 5 minutes to check thread 123 for replies.","output":{"summary":"Sent the outreach email.","drafted_responses":[{"channel":"gmail","to":"luke@slai.io","subject":"Beam sandboxes","body":"Hi Mike,\n\nHere is the draft.\n"}]}}
+`
+
+	result, err := runner.ParseTurnOutput([]byte(output))
+	if err != nil {
+		t.Fatalf("ParseTurnOutput: %v", err)
+	}
+	requireNoTurnBlocker(t, result)
+	if result.Response != "Email sent successfully. I'm now monitoring this thread for replies. If a reply arrives, I'll read it, summarize it, and draft a response for your approval. Please wake me in 5 minutes to check thread 123 for replies." {
+		t.Fatalf("response = %q", result.Response)
+	}
+	if got := len(result.Artifacts); got != 0 {
+		t.Fatalf("artifact count = %d, want 0", got)
+	}
+}
+
+func TestAirRunnerParseTurnOutput_CompletePrefersExplicitResponse(t *testing.T) {
+	runner := NewAirRunner(AirRunnerOptions{})
+
+	output := `{"event":"run_end","ts":18.0,"session_id":"s1","total_steps":3,"status":"complete","needs_input":false}
+{"status":"complete","needs_input":false,"session_id":"s1","response":"Email sent successfully. Please wake me in 5 minutes to check thread 123 for replies.","output":{"summary":"Sent the outreach email.","next_step":"Monitor for replies later."}}
+`
+
+	result, err := runner.ParseTurnOutput([]byte(output))
+	if err != nil {
+		t.Fatalf("ParseTurnOutput: %v", err)
+	}
+	requireNoTurnBlocker(t, result)
+	if result.Response != "Email sent successfully. Please wake me in 5 minutes to check thread 123 for replies." {
+		t.Fatalf("response = %q", result.Response)
 	}
 }
 

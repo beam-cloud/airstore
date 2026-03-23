@@ -39,7 +39,8 @@ func (g *GmailClient) Execute(ctx context.Context, command string, args map[stri
 			if err != nil {
 				return nil, err
 			}
-			return g.createDraft(ctx, token, required["to"], required["subject"], required["body"])
+			threadID := GetStringArg(args, "thread_id", "")
+			return g.createDraft(ctx, token, required["to"], required["subject"], required["body"], threadID)
 		},
 		gmailCmdSendEmail: func(ctx context.Context, token string, args map[string]any) (any, error) {
 			required, err := RequireStringArgs(args, "to", "subject", "body")
@@ -52,12 +53,15 @@ func (g *GmailClient) Execute(ctx context.Context, command string, args map[stri
 	}, stdout)
 }
 
-func (g *GmailClient) createDraft(ctx context.Context, token, to, subject, body string) (map[string]any, error) {
+func (g *GmailClient) createDraft(ctx context.Context, token, to, subject, body, threadID string) (map[string]any, error) {
 	encoded := base64.RawURLEncoding.EncodeToString([]byte(buildRawEmail(to, subject, body)))
 	payload := map[string]any{
 		"message": map[string]any{
 			"raw": encoded,
 		},
+	}
+	if threadID != "" {
+		payload["message"].(map[string]any)["threadId"] = threadID
 	}
 
 	var result map[string]any
@@ -74,6 +78,9 @@ func (g *GmailClient) createDraft(ctx context.Context, token, to, subject, body 
 		for key, value := range msg {
 			out[key] = value
 		}
+	}
+	if threadID != "" && getString(out, "thread_id") == "" {
+		out["thread_id"] = threadID
 	}
 	return out, nil
 }

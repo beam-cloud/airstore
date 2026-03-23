@@ -620,7 +620,7 @@ func TestRegisterTaskSourceWatchesUsesOriginRunMemberToDisambiguateConnections(t
 	}
 }
 
-func TestRegisterTaskSourceWatchesLeavesWatchArmedWhenBootstrapFails(t *testing.T) {
+func TestRegisterTaskSourceWatchesFailsWhenBootstrapFails(t *testing.T) {
 	rdb, err := repository.NewRedisClientForTest()
 	if err != nil {
 		t.Fatalf("failed to create test redis: %v", err)
@@ -645,11 +645,208 @@ func TestRegisterTaskSourceWatchesLeavesWatchArmedWhenBootstrapFails(t *testing.
 		Query:       "site:example.com status",
 		EntityLabel: "status page",
 	}})
+	if err == nil {
+		t.Fatal("expected bootstrap failure to abort registration")
+	}
+	if blocker != nil {
+		t.Fatal("blocker = non-nil, want nil")
+	}
+
+	queries, err := fsStore.ListQueries(context.Background(), task.WorkspaceID, types.PathSources+"/"+string(types.SourceWeb))
+	if err != nil {
+		t.Fatalf("ListQueries returned error: %v", err)
+	}
+	if len(queries) != 0 {
+		t.Fatalf("query count = %d, want 0", len(queries))
+	}
+
+	hooks, err := fsStore.ListHooks(context.Background(), task.WorkspaceID)
+	if err != nil {
+		t.Fatalf("ListHooks returned error: %v", err)
+	}
+	if len(hooks) != 0 {
+		t.Fatalf("hook count = %d, want 0", len(hooks))
+	}
+	if len(emitter.events) != 0 {
+		t.Fatalf("event count = %d, want 0", len(emitter.events))
+	}
+}
+
+func TestRegisterTaskSourceWatchesAllowsExactGmailQueryWithoutFallback(t *testing.T) {
+	rdb, err := repository.NewRedisClientForTest()
+	if err != nil {
+		t.Fatalf("failed to create test redis: %v", err)
+	}
+	memberID := uint(42)
+	creds, err := json.Marshal(&types.IntegrationCredentials{AccessToken: "token-a"})
+	if err != nil {
+		t.Fatalf("failed to marshal credentials: %v", err)
+	}
+	provider := &fakeSourceWatchProvider{
+		name: string(types.SourceGmail),
+		results: []sources.QueryResult{
+			{ID: "msg-1", Filename: "reply.txt", Metadata: map[string]string{"id": "msg-1"}},
+		},
+	}
+	registry := sources.NewRegistry()
+	registry.Register(provider)
+	fsStore := repository.NewMemoryFilesystemStore()
+	backend := &fakeSourceWatchConnectionBackend{
+		connections: []types.IntegrationConnection{{
+			WorkspaceId:     13,
+			MemberId:        &memberID,
+			IntegrationType: string(types.SourceGmail),
+			Credentials:     creds,
+		}},
+	}
+	svc := &SourceService{
+		registry:    registry,
+		backend:     backend,
+		fsStore:     fsStore,
+		seenTracker: hookspkg.NewSeenTracker(rdb),
+	}
+	task := &types.AgentTask{ID: "task-exact-gmail-watch", WorkspaceID: 13}
+
+	blocker, err := svc.RegisterTaskSourceWatches(context.Background(), task, nil, []*types.SourceWatchRequest{{
+		Integration: string(types.SourceGmail),
+		ThreadID:    "thread-123",
+	}})
 	if err != nil {
 		t.Fatalf("RegisterTaskSourceWatches returned error: %v", err)
 	}
 	if blocker == nil {
 		t.Fatal("expected blocker spec")
+	}
+	if provider.executeCalls != 1 {
+		t.Fatalf("executeCalls = %d, want 1", provider.executeCalls)
+	}
+	if got := provider.executedSpecs[0].Query; got != "" {
+		t.Fatalf("query = %q, want empty thread-targeted query", got)
+	}
+	if got := provider.executedSpecs[0].Metadata["thread_id"]; got != "thread-123" {
+		t.Fatalf("thread_id metadata = %q, want %q", got, "thread-123")
+	}
+
+	queries, err := fsStore.ListQueries(context.Background(), task.WorkspaceID, types.PathSources+"/"+string(types.SourceGmail))
+	if err != nil {
+		t.Fatalf("ListQueries returned error: %v", err)
+	}
+	if len(queries) != 1 {
+		t.Fatalf("query count = %d, want 1", len(queries))
+	}
+	if sourceWatchBaselinePending(queries[0]) {
+		t.Fatal("expected bootstrap to clear pending baseline")
+	}
+}
+
+func TestRegisterTaskSourceWatchesReusesExistingThreadContext(t *testing.T) {
+	rdb, err := repository.NewRedisClientForTest()
+	if err != nil {
+		t.Fatalf("failed to create test redis: %v", err)
+	}
+	memberID := uint(42)
+	creds, err := json.Marshal(&types.IntegrationCredentials{AccessToken: "token-a"})
+	if err != nil {
+		t.Fatalf("failed to marshal credentials: %v", err)
+	}
+	provider := &fakeSourceWatchProvider{
+		name: string(types.SourceGmail),
+		results: []sources.QueryResult{
+			{ID: "msg-1", Filename: "reply.txt", Metadata: map[string]string{"id": "msg-1"}},
+		},
+	}
+	registry := sources.NewRegistry()
+	registry.Register(provider)
+	fsStore := repository.NewMemoryFilesystemStore()
+	backend := &fakeSourceWatchConnectionBackend{
+		connections: []types.IntegrationConnection{{
+			WorkspaceId:     15,
+			MemberId:        &memberID,
+			IntegrationType: string(types.SourceGmail),
+			Credentials:     creds,
+		}},
+	}
+	svc := &SourceService{
+		registry:    registry,
+		backend:     backend,
+		fsStore:     fsStore,
+		seenTracker: hookspkg.NewSeenTracker(rdb),
+	}
+	task := &types.AgentTask{ID: "task-reuse-thread-context", WorkspaceID: 15}
+
+	if _, err := svc.RegisterTaskSourceWatches(context.Background(), task, nil, []*types.SourceWatchRequest{{
+		Integration: string(types.SourceGmail),
+		ThreadID:    "thread-123",
+		EntityLabel: "Live soak thread",
+	}}); err != nil {
+		t.Fatalf("initial RegisterTaskSourceWatches returned error: %v", err)
+	}
+
+	if _, err := svc.RegisterTaskSourceWatches(context.Background(), task, nil, []*types.SourceWatchRequest{{
+		Integration: string(types.SourceGmail),
+		Query:       `subject:"Live soak 9b8c239b"`,
+		EntityLabel: "Live soak thread",
+	}}); err != nil {
+		t.Fatalf("second RegisterTaskSourceWatches returned error: %v", err)
+	}
+
+	if provider.executeCalls != 2 {
+		t.Fatalf("executeCalls = %d, want 2", provider.executeCalls)
+	}
+	second := provider.executedSpecs[1]
+	if got := second.Metadata["thread_id"]; got != "thread-123" {
+		t.Fatalf("thread_id metadata = %q, want %q", got, "thread-123")
+	}
+	if got := second.Query; got != `subject:"Live soak 9b8c239b"` {
+		t.Fatalf("query = %q, want subject-scoped follow-up query", got)
+	}
+
+	queries, err := fsStore.ListQueries(context.Background(), task.WorkspaceID, types.PathSources+"/"+string(types.SourceGmail))
+	if err != nil {
+		t.Fatalf("ListQueries returned error: %v", err)
+	}
+	if len(queries) != 1 {
+		t.Fatalf("query count = %d, want 1", len(queries))
+	}
+	parsed := parseQuerySpec(string(types.SourceGmail), queries[0].QuerySpec)
+	if got := parsed.Metadata["thread_id"]; got != "thread-123" {
+		t.Fatalf("persisted thread_id = %q, want %q", got, "thread-123")
+	}
+}
+
+func TestRegisterTaskSourceWatchesReplacesExistingTaskWatches(t *testing.T) {
+	rdb, err := repository.NewRedisClientForTest()
+	if err != nil {
+		t.Fatalf("failed to create test redis: %v", err)
+	}
+	provider := &fakeSourceWatchProvider{
+		results: []sources.QueryResult{
+			{ID: "doc-1", Filename: "alpha.md", Metadata: map[string]string{"title": "alpha"}},
+		},
+	}
+	registry := sources.NewRegistry()
+	registry.Register(provider)
+	fsStore := repository.NewMemoryFilesystemStore()
+	svc := &SourceService{
+		registry:    registry,
+		fsStore:     fsStore,
+		seenTracker: hookspkg.NewSeenTracker(rdb),
+	}
+	task := &types.AgentTask{ID: "task-replace-watches", WorkspaceID: 14}
+
+	if _, err := svc.RegisterTaskSourceWatches(context.Background(), task, nil, []*types.SourceWatchRequest{{
+		Integration: string(types.SourceWeb),
+		Query:       "site:example.com first",
+		EntityLabel: "first watch",
+	}}); err != nil {
+		t.Fatalf("first RegisterTaskSourceWatches returned error: %v", err)
+	}
+	if _, err := svc.RegisterTaskSourceWatches(context.Background(), task, nil, []*types.SourceWatchRequest{{
+		Integration: string(types.SourceWeb),
+		Query:       "site:example.com second",
+		EntityLabel: "second watch",
+	}}); err != nil {
+		t.Fatalf("second RegisterTaskSourceWatches returned error: %v", err)
 	}
 
 	queries, err := fsStore.ListQueries(context.Background(), task.WorkspaceID, types.PathSources+"/"+string(types.SourceWeb))
@@ -659,8 +856,9 @@ func TestRegisterTaskSourceWatchesLeavesWatchArmedWhenBootstrapFails(t *testing.
 	if len(queries) != 1 {
 		t.Fatalf("query count = %d, want 1", len(queries))
 	}
-	if !sourceWatchBaselinePending(queries[0]) {
-		t.Fatal("expected source watch baseline to remain pending after bootstrap failure")
+	spec := parseQuerySpec(string(types.SourceWeb), queries[0].QuerySpec)
+	if got := spec.Query; got != "site:example.com second" {
+		t.Fatalf("query = %q, want %q", got, "site:example.com second")
 	}
 
 	hooks, err := fsStore.ListHooks(context.Background(), task.WorkspaceID)
@@ -670,49 +868,7 @@ func TestRegisterTaskSourceWatchesLeavesWatchArmedWhenBootstrapFails(t *testing.
 	if len(hooks) != 1 {
 		t.Fatalf("hook count = %d, want 1", len(hooks))
 	}
-
-	provider.executeErr = nil
-	provider.results = []sources.QueryResult{
-		{ID: "doc-1", Filename: "alpha.md", Metadata: map[string]string{"title": "alpha"}},
-	}
-	if err := svc.RefreshQuery(context.Background(), queries[0]); err != nil {
-		t.Fatalf("RefreshQuery returned error: %v", err)
-	}
-	if len(emitter.events) != 0 {
-		t.Fatalf("expected first successful refresh to seed baseline only, got %d events", len(emitter.events))
-	}
-
-	queries, err = fsStore.ListQueries(context.Background(), task.WorkspaceID, types.PathSources+"/"+string(types.SourceWeb))
-	if err != nil {
-		t.Fatalf("ListQueries returned error after refresh: %v", err)
-	}
-	if len(queries) != 1 {
-		t.Fatalf("query count after refresh = %d, want 1", len(queries))
-	}
-	if sourceWatchBaselinePending(queries[0]) {
-		t.Fatal("expected source watch baseline to clear after first successful refresh")
-	}
-
-	seenKey := common.Keys.HookSeen(task.WorkspaceID, types.GeneratePathID(hookspkg.NormalizePath(queries[0].Path)))
-	diff, err := svc.seenTracker.Compare(context.Background(), seenKey, []string{"doc-1"})
-	if err != nil {
-		t.Fatalf("seen tracker compare returned error: %v", err)
-	}
-	if diff != nil && (len(diff.Added) != 0 || len(diff.Removed) != 0) {
-		t.Fatalf("expected seeded baseline after recovery, got %#v", diff)
-	}
-
-	provider.results = []sources.QueryResult{
-		{ID: "doc-1", Filename: "alpha.md", Metadata: map[string]string{"title": "alpha"}},
-		{ID: "doc-2", Filename: "beta.md", Metadata: map[string]string{"title": "beta"}},
-	}
-	if err := svc.RefreshQuery(context.Background(), queries[0]); err != nil {
-		t.Fatalf("RefreshQuery second call returned error: %v", err)
-	}
-	if len(emitter.events) != 1 {
-		t.Fatalf("expected one event after new item arrived, got %d", len(emitter.events))
-	}
-	if gotEvent, _ := emitter.events[0]["event"].(string); gotEvent != hookspkg.EventFsCreate {
-		t.Fatalf("expected fs.create after baseline recovery, got %q", gotEvent)
+	if hooks[0].Path != queries[0].Path {
+		t.Fatalf("hook path = %q, want %q", hooks[0].Path, queries[0].Path)
 	}
 }

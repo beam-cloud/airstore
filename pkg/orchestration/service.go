@@ -29,20 +29,20 @@ const (
 )
 
 type AgentService struct {
-	backend            repository.BackendRepository
-	taskQueue          repository.TaskQueue
-	orchestrationStore *repository.OrchestrationStore
-	terminalIO         repository.TerminalIORepository
-	s2                 *common.S2Client
-	defaultImage       string
-	dispatchConsumerID string
-	resultConsumerID   string
-	instanceController *ExecutionInstanceController
-	lifecycle          *TaskLifecycle
-	taskFlows          *TaskFlows
-	resumeBarrier      *ResumeBarrier
-	runFactory         *RunFactory
-	runtimeLoops       *RuntimeLoops
+	backend              repository.BackendRepository
+	taskQueue            repository.TaskQueue
+	orchestrationStore   *repository.OrchestrationStore
+	terminalIO           repository.TerminalIORepository
+	s2                   *common.S2Client
+	defaultImage         string
+	dispatchConsumerID   string
+	resultConsumerID     string
+	instanceController   *ExecutionInstanceController
+	lifecycle            *TaskLifecycle
+	taskFlows            *TaskFlows
+	resumeBarrier        *ResumeBarrier
+	runFactory           *RunFactory
+	runtimeLoops         *RuntimeLoops
 	sourceWatchRegistrar SourceWatchRegistrar
 }
 
@@ -1021,7 +1021,85 @@ const (
 var (
 	dispatchCapacityRequeueDelay = 500 * time.Millisecond
 	sessionBusyRequeueDelay      = 2 * time.Second
+	sessionStateCallTimeout      = 2 * time.Second
 )
+
+func sessionStateCallContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if sessionStateCallTimeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, sessionStateCallTimeout)
+}
+
+func getSessionLeaseOwnerWithTimeout(
+	ctx context.Context,
+	terminalIO repository.TerminalIORepository,
+	workspaceID uint,
+	sessionID string,
+) (string, error) {
+	if terminalIO == nil || strings.TrimSpace(sessionID) == "" {
+		return "", nil
+	}
+	callCtx, cancel := sessionStateCallContext(ctx)
+	defer cancel()
+	owner, err := terminalIO.GetSessionLeaseOwner(callCtx, workspaceID, sessionID)
+	if err != nil {
+		return "", fmt.Errorf("get session lease owner: %w", err)
+	}
+	return owner, nil
+}
+
+func getSessionCheckpointWithTimeout(
+	ctx context.Context,
+	terminalIO repository.TerminalIORepository,
+	workspaceID uint,
+	sessionID string,
+) (*types.SessionCheckpoint, error) {
+	if terminalIO == nil || strings.TrimSpace(sessionID) == "" {
+		return nil, nil
+	}
+	callCtx, cancel := sessionStateCallContext(ctx)
+	defer cancel()
+	checkpoint, err := terminalIO.GetSessionCheckpoint(callCtx, workspaceID, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("get session checkpoint: %w", err)
+	}
+	return checkpoint, nil
+}
+
+func releaseSessionLeaseWithTimeout(
+	ctx context.Context,
+	terminalIO repository.TerminalIORepository,
+	workspaceID uint,
+	sessionID, owner string,
+) error {
+	if terminalIO == nil || strings.TrimSpace(sessionID) == "" || strings.TrimSpace(owner) == "" {
+		return nil
+	}
+	callCtx, cancel := sessionStateCallContext(ctx)
+	defer cancel()
+	if err := terminalIO.ReleaseSessionLease(callCtx, workspaceID, sessionID, owner); err != nil {
+		return fmt.Errorf("release session lease: %w", err)
+	}
+	return nil
+}
+
+func getRunExecutionWithTimeout(
+	ctx context.Context,
+	backend repository.BackendRepository,
+	executionID string,
+) (*types.RunExecution, error) {
+	if backend == nil || strings.TrimSpace(executionID) == "" {
+		return nil, nil
+	}
+	callCtx, cancel := sessionStateCallContext(ctx)
+	defer cancel()
+	exec, err := backend.GetRunExecution(callCtx, executionID)
+	if err != nil {
+		return nil, fmt.Errorf("get run execution: %w", err)
+	}
+	return exec, nil
+}
 
 type dispatchRetryRequest struct {
 	reason string
@@ -1064,7 +1142,7 @@ func ReconcileStaleSessionLease(
 	if executionID == "" {
 		return false
 	}
-	exec, err := backend.GetRunExecution(ctx, executionID)
+	exec, err := getRunExecutionWithTimeout(ctx, backend, executionID)
 	if err != nil {
 		log.Warn().
 			Err(err).
@@ -1080,7 +1158,7 @@ func ReconcileStaleSessionLease(
 			Str("lease_owner", owner).
 			Str("execution_id", executionID).
 			Msg("force-releasing stale session lease")
-		if releaseErr := terminalIO.ReleaseSessionLease(ctx, workspaceID, sessionID, owner); releaseErr != nil {
+		if releaseErr := releaseSessionLeaseWithTimeout(ctx, terminalIO, workspaceID, sessionID, owner); releaseErr != nil {
 			log.Warn().Err(releaseErr).
 				Str("session_id", sessionID).
 				Str("lease_owner", owner).
@@ -1172,16 +1250,18 @@ func (s *AgentService) handleExecutionTask(ctx context.Context, task *types.Agen
 
 	run, runPolicy, prompt, err := s.materializeRun(ctx, task)
 	if err != nil {
-		if isSessionBusyError(err) {
-			return &dispatchRetryRequest{
-				reason: "session_busy",
-				delay:  sessionBusyRequeueDelay,
-			}
-		}
-		reason := types.AgentTaskDropReasonRunMaterializationFail
-		_ = s.lifecycle.Drop(ctx, task.ID, reason)
-		s.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
-		return nil
+		return handleRunMaterializationError(
+			ctx,
+			task,
+			err,
+			func(ctx context.Context, taskID string, reason string) error {
+				if s.lifecycle == nil {
+					return fmt.Errorf("task lifecycle is unavailable")
+				}
+				return s.lifecycle.Drop(ctx, taskID, reason)
+			},
+			s.publishTaskUpdate,
+		)
 	}
 
 	_, err = s.createAttemptExecutionTask(
@@ -1308,7 +1388,7 @@ func (s *AgentService) ensureSessionAvailableForNewRun(
 	}
 
 	if s.terminalIO != nil {
-		if owner, _ := s.terminalIO.GetSessionLeaseOwner(ctx, workspaceID, sessionID); owner != "" {
+		if owner, _ := getSessionLeaseOwnerWithTimeout(ctx, s.terminalIO, workspaceID, sessionID); owner != "" {
 			if !s.tryReconcileStaleSessionLease(ctx, workspaceID, sessionID, owner) {
 				return fmt.Errorf("session ID %s is already in use (lease: %s)", sessionID, owner)
 			}

@@ -416,12 +416,27 @@ func (b *ResumeBarrier) WaitForResume(
 	expectedCheckpointRunID string,
 	excludeRunIDs ...string,
 ) error {
+	log.Debug().
+		Uint("workspace_id", workspaceID).
+		Str("session_id", strings.TrimSpace(sessionID)).
+		Str("checkpoint_run_id", strings.TrimSpace(expectedCheckpointRunID)).
+		Strs("exclude_run_ids", excludeRunIDs).
+		Msg("resume barrier: waiting for session state")
 	if err := b.waitForSessionLeaseDrain(ctx, workspaceID, sessionID); err != nil {
 		return err
 	}
+	log.Debug().
+		Uint("workspace_id", workspaceID).
+		Str("session_id", strings.TrimSpace(sessionID)).
+		Msg("resume barrier: session lease drained")
 	if err := b.waitForSessionCheckpoint(ctx, workspaceID, sessionID, expectedCheckpointRunID); err != nil {
 		return err
 	}
+	log.Debug().
+		Uint("workspace_id", workspaceID).
+		Str("session_id", strings.TrimSpace(sessionID)).
+		Str("checkpoint_run_id", strings.TrimSpace(expectedCheckpointRunID)).
+		Msg("resume barrier: session checkpoint confirmed")
 	return b.ensureSessionAvailableForNewRun(ctx, workspaceID, sessionID, excludeRunIDs...)
 }
 
@@ -445,7 +460,7 @@ func (b *ResumeBarrier) waitForSessionCheckpoint(
 	defer tick.Stop()
 
 	for {
-		checkpoint, err := b.terminalIO.GetSessionCheckpoint(ctx, workspaceID, sessionID)
+		checkpoint, err := getSessionCheckpointWithTimeout(ctx, b.terminalIO, workspaceID, sessionID)
 		if err != nil {
 			return fmt.Errorf("check session checkpoint: %w", err)
 		}
@@ -480,7 +495,7 @@ func (b *ResumeBarrier) waitForSessionLeaseDrain(ctx context.Context, workspaceI
 
 	reconciled := false
 	for {
-		owner, err := b.terminalIO.GetSessionLeaseOwner(ctx, workspaceID, sessionID)
+		owner, err := getSessionLeaseOwnerWithTimeout(ctx, b.terminalIO, workspaceID, sessionID)
 		if err != nil {
 			return fmt.Errorf("check session lease: %w", err)
 		}
@@ -517,8 +532,13 @@ func (b *ResumeBarrier) ensureSessionAvailableForNewRun(
 		return nil
 	}
 
+	log.Debug().
+		Uint("workspace_id", workspaceID).
+		Str("session_id", sessionID).
+		Strs("exclude_run_ids", excludeRunIDs).
+		Msg("resume barrier: validating session availability")
 	if b.terminalIO != nil {
-		if owner, _ := b.terminalIO.GetSessionLeaseOwner(ctx, workspaceID, sessionID); owner != "" {
+		if owner, _ := getSessionLeaseOwnerWithTimeout(ctx, b.terminalIO, workspaceID, sessionID); owner != "" {
 			if !b.tryReconcileStaleSessionLease(ctx, workspaceID, sessionID, owner) {
 				return fmt.Errorf("session ID %s is already in use (lease: %s)", sessionID, owner)
 			}

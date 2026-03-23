@@ -183,33 +183,28 @@ func airTurnControl(blocker *TurnBlockerDirective) *TurnControl {
 
 func airTraceResponseText(trace airTrace) string {
 	response := strings.TrimSpace(trace.Response)
+	if response != "" {
+		return response
+	}
 	if trace.Output != nil {
 		if nextStep := strings.TrimSpace(trace.Output.NextStep); nextStep != "" {
 			return nextStep
 		}
-		if response == "" {
-			return strings.TrimSpace(trace.Output.Summary)
-		}
+		return strings.TrimSpace(trace.Output.Summary)
 	}
 	return response
 }
 
 func airTraceBlockerDirective(trace airTrace, response string) *TurnBlockerDirective {
-	if trace.NeedsInput {
-		inputKind := types.InputKind(strings.TrimSpace(trace.InputKind))
-		if inputKind == "" {
-			inputKind = types.InputKindFreeText
-		}
-		return &TurnBlockerDirective{
-			InputKind: inputKind,
-			Summary:   strings.TrimSpace(response),
-		}
-	}
-	if !airTraceDraftsNeedApproval(trace, response) {
+	if !trace.NeedsInput {
 		return nil
 	}
+	inputKind := types.InputKind(strings.TrimSpace(trace.InputKind))
+	if inputKind == "" {
+		inputKind = types.InputKindFreeText
+	}
 	return &TurnBlockerDirective{
-		InputKind: types.InputKindApproveReject,
+		InputKind: inputKind,
 		Summary:   strings.TrimSpace(response),
 	}
 }
@@ -230,31 +225,6 @@ func airTurnArtifactBlockingMetadata(blocker *TurnBlockerDirective) *types.TaskO
 	return metadata
 }
 
-// air includes drafted_responses in both approval waits and completed recaps.
-// Only project them as blocking approval artifacts when the assistant message
-// still reads like an approval gate; completed send/follow-up turns should
-// rely on concrete side-effect outputs instead of recreating pending drafts.
-func airTraceDraftsNeedApproval(trace airTrace, response string) bool {
-	if strings.EqualFold(strings.TrimSpace(trace.InputKind), string(types.InputKindApproveReject)) {
-		return true
-	}
-	return airMessageRequestsApproval(response)
-}
-
-func airMessageRequestsApproval(message string) bool {
-	message = strings.ToLower(strings.TrimSpace(message))
-	if message == "" {
-		return false
-	}
-	if strings.Contains(message, "approval") || strings.Contains(message, "approve") || strings.Contains(message, "reject") {
-		return true
-	}
-	if strings.Contains(message, "should i send") || strings.Contains(message, "before sending") || strings.Contains(message, "before i send") {
-		return true
-	}
-	return strings.Contains(message, "review") && (strings.Contains(message, "send") || strings.Contains(message, "draft"))
-}
-
 func airDraftedResponseArtifacts(output *airTraceOutput, blocking *types.TaskOutputBlockingMetadata) []TurnArtifact {
 	if output == nil || len(output.DraftedResponses) == 0 || blocking == nil {
 		return nil
@@ -263,90 +233,41 @@ func airDraftedResponseArtifacts(output *airTraceOutput, blocking *types.TaskOut
 	summary := strings.TrimSpace(output.Summary)
 	var artifacts []TurnArtifact
 	for _, draft := range output.DraftedResponses {
-		outputType := airDraftedResponseOutputType(draft)
-		title := airDraftedResponseTitle(draft)
+		channel := strings.ToLower(strings.TrimSpace(draft.Channel))
+		if channel == "" {
+			channel = "draft"
+		}
+		title := firstNonEmptyTrimmed(draft.Subject, draft.To, draft.Channel)
 		content := firstNonEmptyTrimmed(draft.Body, draft.Subject, draft.To)
 		if title == "" || content == "" {
 			continue
 		}
 
 		data := map[string]any{}
-		if channel := strings.TrimSpace(draft.Channel); channel != "" {
-			data["channel"] = channel
+		if c := strings.TrimSpace(draft.Channel); c != "" {
+			data["channel"] = c
 		}
 		if to := strings.TrimSpace(draft.To); to != "" {
 			data["to"] = to
-			data["recipient"] = to
-			data["email"] = to
 		}
 		if subject := strings.TrimSpace(draft.Subject); subject != "" {
 			data["subject"] = subject
 		}
 
 		artifacts = append(artifacts, TurnArtifact{
-			OutputType: outputType,
+			OutputType: channel,
 			Title:      title,
 			Summary:    summary,
 			Content:    content,
 			Data:       data,
 			Metadata: map[string]any{
-				types.TaskOutputMetadataArtifactKey:   airDraftedResponseArtifactKey(outputType),
-				types.TaskOutputMetadataArtifactLabel: airDraftedResponseArtifactLabel(outputType),
-				types.TaskOutputMetadataArtifactKind:  airDraftedResponseArtifactKind(outputType),
+				types.TaskOutputMetadataArtifactKey:   channel + "-draft",
+				types.TaskOutputMetadataArtifactLabel: strings.Title(channel) + " Drafts",
+				types.TaskOutputMetadataArtifactKind:  channel,
 			},
 			Status:   types.TaskOutputStatusPending,
 			Blocking: blocking,
 		})
 	}
 	return artifacts
-}
-
-func airDraftedResponseOutputType(draft airTraceDraftedResponse) string {
-	channel := strings.ToLower(strings.TrimSpace(draft.Channel))
-	switch {
-	case channel == "gmail":
-		return types.TaskOutputTypeEmail
-	case strings.Contains(channel, "mail"):
-		return types.TaskOutputTypeEmail
-	case strings.TrimSpace(draft.To) != "":
-		return types.TaskOutputTypeEmail
-	case strings.TrimSpace(draft.Subject) != "":
-		return types.TaskOutputTypeEmail
-	default:
-		return "text"
-	}
-}
-
-func airDraftedResponseArtifactKey(outputType string) string {
-	if outputType == types.TaskOutputTypeEmail {
-		return "email-draft"
-	}
-	return "draft-response"
-}
-
-func airDraftedResponseArtifactLabel(outputType string) string {
-	if outputType == types.TaskOutputTypeEmail {
-		return "Email Drafts"
-	}
-	return "Draft Responses"
-}
-
-func airDraftedResponseArtifactKind(outputType string) string {
-	if outputType == types.TaskOutputTypeEmail {
-		return "email"
-	}
-	return "draft"
-}
-
-func airDraftedResponseTitle(draft airTraceDraftedResponse) string {
-	if subject := strings.TrimSpace(draft.Subject); subject != "" {
-		return "Draft: " + subject
-	}
-	if to := strings.TrimSpace(draft.To); to != "" {
-		return "Draft response to " + to
-	}
-	if channel := strings.TrimSpace(draft.Channel); channel != "" {
-		return "Draft " + channel + " response"
-	}
-	return ""
 }

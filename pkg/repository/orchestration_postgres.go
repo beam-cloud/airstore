@@ -1006,6 +1006,7 @@ func (b *PostgresBackend) ClaimQueuedTaskForDispatch(
 		UPDATE agent_task
 		SET state = 'running'::agent_task_state,
 		    dispatched_at = CURRENT_TIMESTAMP,
+		    target_run_id = NULL,
 		    wake_at = NULL,
 		    wake_reason = NULL,
 		    current_blocker_id = NULL,

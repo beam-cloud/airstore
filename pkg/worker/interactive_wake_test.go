@@ -165,6 +165,39 @@ func TestNormalizeSourceWatchRequestsAcceptsDuplicateTrackedSameThread(t *testin
 	}
 }
 
+func TestNormalizeSourceWatchRequestsMergesSameThreadTrackedMessages(t *testing.T) {
+	reason := "Check for replies to cold outreach email sent to luke@beam.cloud"
+	threadID := "thread-1"
+
+	tracker := &taskOutputTracker{}
+	rememberTrackedEmailOutputWithArtifactKey(tracker, "out-1", "email-sent", threadID, "msg-1", "luke@beam.cloud", "Quick question about your dev environments")
+	rememberTrackedEmailOutputWithArtifactKey(tracker, "out-2", "gmail-reply", threadID, "msg-2", "luke@beam.cloud", "Quick question about your dev environments")
+
+	got := normalizeSourceWatchRequests([]signaltypes.SourceWatchRequest{{
+		Integration: string(types.SourceGmail),
+		Reason:      &reason,
+		Thread_id:   &threadID,
+	}}, tracker, &reason)
+	if got == nil || len(got) != 1 {
+		t.Fatalf("normalizeSourceWatchRequests() len = %d, want 1", len(got))
+	}
+	if got[0].ThreadID != threadID {
+		t.Fatalf("thread_id = %q, want %q", got[0].ThreadID, threadID)
+	}
+	if got[0].MessageID != "" {
+		t.Fatalf("message_id = %q, want empty for thread-level merge", got[0].MessageID)
+	}
+	if got[0].SourceOutputID != "" {
+		t.Fatalf("source_output_id = %q, want empty for thread-level merge", got[0].SourceOutputID)
+	}
+	if got[0].Query == "" {
+		t.Fatal("expected merged thread watch to retain fallback query")
+	}
+	if !got[0].IncludeAttachments {
+		t.Fatal("expected merged thread watch to retain attachment reads")
+	}
+}
+
 func trackedEmailOutput(
 	outputID, threadID, messageID, recipient, subject string,
 ) *taskOutputTracker {
@@ -177,6 +210,13 @@ func rememberTrackedEmailOutput(
 	tracker *taskOutputTracker,
 	outputID, threadID, messageID, recipient, subject string,
 ) {
+	rememberTrackedEmailOutputWithArtifactKey(tracker, outputID, "email-sent", threadID, messageID, recipient, subject)
+}
+
+func rememberTrackedEmailOutputWithArtifactKey(
+	tracker *taskOutputTracker,
+	outputID, artifactKey, threadID, messageID, recipient, subject string,
+) {
 	tracker.RememberWithID(outputCandidate{
 		OutputType: types.TaskOutputTypeEmail,
 		Title:      subject,
@@ -187,7 +227,7 @@ func rememberTrackedEmailOutput(
 			"subject":    subject,
 		},
 		Metadata: map[string]any{
-			types.TaskOutputMetadataArtifactKey: "email-sent",
+			types.TaskOutputMetadataArtifactKey: artifactKey,
 		},
 	}, outputID)
 }

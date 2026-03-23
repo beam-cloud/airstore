@@ -85,6 +85,14 @@ func (c *taskSourceWatchController) Register(
 	if len(normalized) == 0 {
 		return nil, fmt.Errorf("no valid source watch requests")
 	}
+	merged, err := c.mergeExistingWatchContext(ctx, normalized)
+	if err != nil {
+		return nil, err
+	}
+	normalized = merged
+	if err := c.Cleanup(ctx); err != nil {
+		return nil, err
+	}
 
 	registrations := make([]*sourceWatchRegistration, 0, len(normalized))
 	for _, req := range normalized {
@@ -100,6 +108,40 @@ func (c *taskSourceWatchController) Register(
 		return nil, fmt.Errorf("source watch registration produced no materialized views")
 	}
 	return buildSourceWatchBlockerSpec(wakeSignal, registrations), nil
+}
+
+func (c *taskSourceWatchController) mergeExistingWatchContext(
+	ctx context.Context,
+	requests []*types.SourceWatchRequest,
+) ([]*types.SourceWatchRequest, error) {
+	existing, err := c.existingWatchRequests(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(existing) == 0 {
+		return requests, nil
+	}
+
+	merged := make([]*types.SourceWatchRequest, 0, len(requests))
+	for _, req := range requests {
+		merged = append(merged, mergeSourceWatchRequestWithFallback(req, bestMatchingExistingSourceWatchRequest(req, existing)))
+	}
+	return normalizeSourceWatchRequestsForRegistration(merged), nil
+}
+
+func (c *taskSourceWatchController) existingWatchRequests(ctx context.Context) ([]*types.SourceWatchRequest, error) {
+	taskQueries, err := c.service.fsStore.ListTaskOwnedQueries(ctx, c.task.WorkspaceID, c.task.ID)
+	if err != nil {
+		return nil, fmt.Errorf("list existing task source watches: %w", err)
+	}
+
+	requests := make([]*types.SourceWatchRequest, 0, len(taskQueries))
+	for _, query := range taskQueries {
+		if req := sourceWatchRequestFromQuery(query); req != nil {
+			requests = append(requests, req)
+		}
+	}
+	return requests, nil
 }
 
 func (c *taskSourceWatchController) Cleanup(ctx context.Context) error {
@@ -162,12 +204,8 @@ func (c *taskSourceWatchController) register(
 
 	results, err := c.service.bootstrapSourceWatchBaseline(ctx, c.task.WorkspaceID, query)
 	if err != nil {
-		log.Warn().
-			Err(err).
-			Str("task_id", c.task.ID).
-			Str("path", query.Path).
-			Str("integration", query.Integration).
-			Msg("source watch bootstrap failed; watch remains armed with pending baseline")
+		_ = c.service.cleanupSourceWatchResources(ctx, c.task.WorkspaceID, hook)
+		return nil, fmt.Errorf("bootstrap source watch baseline %s: %w", query.Path, err)
 	}
 
 	return &sourceWatchRegistration{
@@ -422,6 +460,106 @@ func normalizeSourceWatchRequestsForRegistration(requests []*types.SourceWatchRe
 	return out
 }
 
+func sourceWatchRequestFromQuery(query *types.FilesystemQuery) *types.SourceWatchRequest {
+	if query == nil {
+		return nil
+	}
+	spec := parseQuerySpec(query.Integration, query.QuerySpec)
+	return types.NormalizeSourceWatchRequest(&types.SourceWatchRequest{
+		Integration:        query.Integration,
+		Query:              spec.Query,
+		FilenameFormat:     spec.FilenameFormat,
+		EntityLabel:        strings.TrimSpace(query.Name),
+		ThreadID:           strings.TrimSpace(spec.Metadata["thread_id"]),
+		MessageID:          strings.TrimSpace(spec.Metadata["message_id"]),
+		IncludeAttachments: strings.EqualFold(spec.Metadata["include_attachments"], "true"),
+		IncludeInline:      strings.EqualFold(spec.Metadata["include_inline"], "true"),
+		IncludeMessageBody: strings.EqualFold(spec.Metadata["include_message_body"], "true"),
+	})
+}
+
+func bestMatchingExistingSourceWatchRequest(
+	req *types.SourceWatchRequest,
+	existing []*types.SourceWatchRequest,
+) *types.SourceWatchRequest {
+	req = types.CanonicalizeSourceWatchRequest(req)
+	if req == nil || len(existing) == 0 {
+		return nil
+	}
+
+	bestScore := 0
+	var best *types.SourceWatchRequest
+	sameIntegrationCount := 0
+	var sole *types.SourceWatchRequest
+	for _, candidate := range existing {
+		candidate = types.CanonicalizeSourceWatchRequest(candidate)
+		if candidate == nil || !strings.EqualFold(req.Integration, candidate.Integration) {
+			continue
+		}
+		sameIntegrationCount++
+		sole = candidate
+
+		score := 0
+		if req.ThreadID != "" && req.ThreadID == candidate.ThreadID {
+			score += 100
+		}
+		if req.MessageID != "" && req.MessageID == candidate.MessageID {
+			score += 90
+		}
+		if req.SourceOutputID != "" && req.SourceOutputID == candidate.SourceOutputID {
+			score += 80
+		}
+		if req.Query != "" && req.Query == candidate.Query {
+			score += 70
+		}
+		if req.EntityKey != "" && req.EntityKey == candidate.EntityKey {
+			score += 60
+		}
+		if req.EntityLabel != "" && req.EntityLabel == candidate.EntityLabel {
+			score += 50
+		}
+		if score > bestScore {
+			bestScore = score
+			best = candidate
+		}
+	}
+	if best != nil {
+		return best
+	}
+	if sameIntegrationCount == 1 {
+		return sole
+	}
+	return nil
+}
+
+func mergeSourceWatchRequestWithFallback(req, fallback *types.SourceWatchRequest) *types.SourceWatchRequest {
+	req = types.CanonicalizeSourceWatchRequest(req)
+	fallback = types.CanonicalizeSourceWatchRequest(fallback)
+	if req == nil {
+		return types.NormalizeSourceWatchRequest(fallback)
+	}
+	if fallback == nil {
+		return types.NormalizeSourceWatchRequest(req)
+	}
+
+	merged := *req
+	merged.Reason = firstNonEmptyWatchValue(req.Reason, fallback.Reason)
+	merged.Query = firstNonEmptyWatchValue(req.Query, fallback.Query)
+	merged.FilenameFormat = firstNonEmptyWatchValue(req.FilenameFormat, fallback.FilenameFormat)
+	merged.EntityKey = firstNonEmptyWatchValue(req.EntityKey, fallback.EntityKey)
+	merged.EntityLabel = firstNonEmptyWatchValue(req.EntityLabel, fallback.EntityLabel)
+	merged.SourceOutputID = firstNonEmptyWatchValue(req.SourceOutputID, fallback.SourceOutputID)
+	merged.ThreadID = firstNonEmptyWatchValue(req.ThreadID, fallback.ThreadID)
+	merged.MessageID = firstNonEmptyWatchValue(req.MessageID, fallback.MessageID)
+	merged.IncludeAttachments = req.IncludeAttachments || fallback.IncludeAttachments
+	merged.IncludeInline = req.IncludeInline || fallback.IncludeInline
+	merged.IncludeMessageBody = req.IncludeMessageBody || fallback.IncludeMessageBody
+	if len(req.EventTypes) == 0 {
+		merged.EventTypes = fallback.EventTypes
+	}
+	return types.NormalizeSourceWatchRequest(&merged)
+}
+
 func buildSourceWatchQuerySpec(
 	req *types.SourceWatchRequest,
 	credentialMemberID *uint,
@@ -603,7 +741,8 @@ func systemManagedSourceWatchGuidance(taskID string, req *types.SourceWatchReque
 
 func systemManagedSourceWatchPath(taskID string, req *types.SourceWatchRequest) string {
 	integration := strings.ToLower(strings.TrimSpace(req.Integration))
-	sum := sha1.Sum([]byte(types.SourceWatchRequestSignature(req)))
+	identity := sourceWatchPathIdentity(integration, req)
+	sum := sha1.Sum([]byte(identity))
 	hash := hex.EncodeToString(sum[:])[:12]
 	taskPrefix := strings.TrimSpace(taskID)
 	if len(taskPrefix) > 12 {
@@ -611,6 +750,24 @@ func systemManagedSourceWatchPath(taskID string, req *types.SourceWatchRequest) 
 	}
 	name := fmt.Sprintf("__followup__%s__%s", taskPrefix, hash)
 	return path.Join(types.PathSources, integration, name)
+}
+
+// sourceWatchPathIdentity returns a stable identity string for path generation.
+// Uses only the fields that form a true stable identity for the watch:
+//   - ThreadID anchors Gmail watches (query text may be reformulated)
+//   - EntityKey anchors entity-scoped watches
+//   - Query is used only as last resort when no structural identity exists
+func sourceWatchPathIdentity(integration string, req *types.SourceWatchRequest) string {
+	threadID := strings.TrimSpace(req.ThreadID)
+	entityKey := strings.TrimSpace(req.EntityKey)
+	if threadID != "" {
+		return strings.Join([]string{integration, threadID}, "\x00")
+	}
+	if entityKey != "" {
+		return strings.Join([]string{integration, entityKey}, "\x00")
+	}
+	query := strings.TrimSpace(req.Query)
+	return strings.Join([]string{integration, query}, "\x00")
 }
 
 func firstNonEmptyWatchValue(values ...string) string {

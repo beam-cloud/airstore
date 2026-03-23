@@ -49,6 +49,9 @@ function ClassifyFollowUp(message: string, user_message: string?, now_rfc3339: s
     - "The deployment is in progress. We should verify in 30 minutes."
     - "Waiting for the webhook to fire once the payment clears."
     - "I submitted the form; the confirmation email should arrive soon."
+    - "Email sent successfully. I am now monitoring this thread for replies. Please wake me in 3 minutes to check for the first reply."
+    - "Monitoring Gmail thread 123 for replies. Follow up in 1 minute unless a source-watch wake on this thread fires sooner. When a reply arrives, draft the next response for user approval before sending."
+    - "A new reply arrived on thread 123. Keep monitoring this same thread for additional replies while I wait for the user's decision."
 
     FOLLOW_UP examples (user-requested delay):
     - User: "let's sleep on this for a day or two" / Agent: "Sure, I'll pause."
@@ -82,6 +85,10 @@ function ClassifyFollowUp(message: string, user_message: string?, now_rfc3339: s
     - If active skill context is present, treat it as the source of truth
       for cadence and follow-up policy. Do not wake earlier than the
       skill allows.
+    - If the agent explicitly says it is monitoring, will check back,
+      needs to wake later, or gives a future monitoring/check schedule,
+      that is FOLLOW_UP even if the message also includes a completion
+      summary.
     - If the skill implies recurring checks ("check replies every run",
       "follow up in 3 business days", "send digest every 2-3 days"),
       convert those into the next wake's exact delay and agenda.
@@ -97,6 +104,15 @@ function ClassifyFollowUp(message: string, user_message: string?, now_rfc3339: s
     - Use source_watch_requests only when a concrete source change should
       resume the task. Timed follow-up and source watches can both be used
       when appropriate.
+    - If the agent mentions monitoring an email thread or checking later
+      for Gmail replies, and a thread ID or message ID appears anywhere in
+      the agent message, preserve that exact Gmail identifier in
+      source_watch_requests instead of broadening to a generic inbox query.
+    - Do not classify "Email sent successfully ... I am now monitoring this
+      thread ... wake me in X minutes / check for replies later" as NONE.
+    - A monitoring-only declaration tied to a specific thread or source is
+      still FOLLOW_UP even if it does not explicitly restate that the send or
+      prior action already happened.
 
     Current time (RFC3339 UTC):
     ---

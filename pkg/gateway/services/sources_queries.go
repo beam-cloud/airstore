@@ -333,7 +333,7 @@ func (s *SourceService) executeAndCacheQuery(ctx context.Context, pctx *sources.
 	}
 
 	spec := parseQuerySpec(query.Integration, query.QuerySpec)
-	if spec.Query == "" && !emptyQueryAllowed(query.Integration) {
+	if spec.Query == "" && !querySpecAllowsEmptyQuery(query.Integration, spec) {
 		return nil, fmt.Errorf("empty query spec for %s", query.Integration)
 	}
 
@@ -490,7 +490,7 @@ func (s *SourceService) CreateView(ctx context.Context, req *pb.CreateViewReques
 		}
 		// Validate the filter produces a non-empty query for integrations that need it.
 		spec := parseQuerySpec(req.Integration, querySpec)
-		if spec.Query == "" && !emptyQueryAllowed(req.Integration) {
+		if spec.Query == "" && !querySpecAllowsEmptyQuery(req.Integration, spec) {
 			return &pb.CreateViewResponse{Ok: false, Error: "filter produces no query criteria"}, nil
 		}
 		filenameFormat = sources.DefaultFilenameFormat(req.Integration)
@@ -948,7 +948,7 @@ func (s *SourceService) resolveQuerySpec(ctx context.Context, integration, name,
 	}
 
 	spec := parseQuerySpec(integration, querySpec)
-	if spec.Query == "" && !emptyQueryAllowed(integration) {
+	if spec.Query == "" && !querySpecAllowsEmptyQuery(integration, spec) {
 		return "", "", fmt.Errorf("invalid query spec from inference")
 	}
 	if filenameFormat == "" {
@@ -1259,6 +1259,19 @@ func emptyQueryAllowed(integration string) bool {
 	switch types.SourceType(integration) {
 	case types.SourceLinear, types.SourcePostHog:
 		return true
+	default:
+		return false
+	}
+}
+
+func querySpecAllowsEmptyQuery(integration string, spec sources.QuerySpec) bool {
+	if emptyQueryAllowed(integration) {
+		return true
+	}
+	switch types.SourceType(integration) {
+	case types.SourceGmail:
+		return strings.TrimSpace(spec.Metadata["thread_id"]) != "" ||
+			strings.TrimSpace(spec.Metadata["message_id"]) != ""
 	default:
 		return false
 	}

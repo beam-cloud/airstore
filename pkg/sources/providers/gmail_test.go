@@ -96,6 +96,79 @@ func TestExecuteQuery_ExactThreadWatchIncludesAttachments(t *testing.T) {
 	}
 }
 
+func TestExecuteQuery_ThreadWatchDoesNotCollapseToAnchorMessage(t *testing.T) {
+	provider := NewGmailProvider()
+	provider.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Path != "/gmail/v1/users/me/threads/thread-123" {
+				t.Fatalf("unexpected request path: %s", req.URL.Path)
+			}
+			return jsonHTTPResponse(`{
+				"messages": [
+					{
+						"id": "msg-1",
+						"threadId": "thread-123",
+						"snippet": "Initial message",
+						"sizeEstimate": 64,
+						"internalDate": "1710000000000",
+						"payload": {
+							"headers": [
+								{"name":"From","value":"Alice Example <alice@example.com>"},
+								{"name":"To","value":"me@example.com"},
+								{"name":"Subject","value":"Quarterly report"},
+								{"name":"Date","value":"Mon, 04 Mar 2024 12:00:00 +0000"}
+							],
+							"body": {"data":"SW5pdGlhbA=="}
+						}
+					},
+					{
+						"id": "msg-2",
+						"threadId": "thread-123",
+						"snippet": "Follow-up reply",
+						"sizeEstimate": 72,
+						"internalDate": "1710000001000",
+						"payload": {
+							"headers": [
+								{"name":"From","value":"Bob Example <bob@example.com>"},
+								{"name":"To","value":"me@example.com"},
+								{"name":"Subject","value":"Re: Quarterly report"},
+								{"name":"Date","value":"Mon, 04 Mar 2024 12:05:00 +0000"}
+							],
+							"body": {"data":"Rm9sbG93LXVw"}
+						}
+					}
+				]
+			}`), nil
+		}),
+	}
+
+	resp, err := provider.ExecuteQuery(context.Background(), &sources.ProviderContext{
+		Credentials: &types.IntegrationCredentials{AccessToken: "token"},
+	}, sources.QuerySpec{
+		Query:          `subject:"Quarterly report"`,
+		FilenameFormat: "{subject}_{id}.txt",
+		Metadata: map[string]string{
+			"thread_id":            "thread-123",
+			"message_id":           "msg-1",
+			"include_message_body": "true",
+		},
+		Limit:      50,
+		MaxResults: 500,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteQuery returned error: %v", err)
+	}
+	if len(resp.Results) != 2 {
+		t.Fatalf("result count = %d, want 2", len(resp.Results))
+	}
+	if got := resp.Results[0].ID; got != "msg:msg-1" {
+		t.Fatalf("first result id = %q, want msg:msg-1", got)
+	}
+	if got := resp.Results[1].ID; got != "msg:msg-2" {
+		t.Fatalf("second result id = %q, want msg:msg-2", got)
+	}
+}
+
 func TestExecuteQuery_ExactMessageWatchFetchesSingleMessage(t *testing.T) {
 	provider := NewGmailProvider()
 	provider.httpClient = &http.Client{

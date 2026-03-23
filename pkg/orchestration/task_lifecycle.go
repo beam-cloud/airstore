@@ -469,7 +469,7 @@ func (lc *TaskLifecycle) scheduleRetry(ctx context.Context, task *types.AgentTas
 		return true, nil
 	}
 
-	guardKey := fmt.Sprintf("dispatch_retry:%s:%d", task.ID, nextAttempt)
+	guardKey := dispatchRetryGuardKey(task, run, nextAttempt)
 	acquired, err := lc.backend.AcquireOrchestrationRetryGuard(ctx, guardKey)
 	if err != nil {
 		return true, err
@@ -496,7 +496,7 @@ func (lc *TaskLifecycle) scheduleRetry(ctx context.Context, task *types.AgentTas
 
 	outboxEvent := &types.OrchestrationOutboxEvent{
 		EventType:   types.OrchestrationOutboxEventTypeTaskDispatch,
-		DedupeKey:   fmt.Sprintf("dispatch_retry:%s:%d", task.ID, nextAttempt),
+		DedupeKey:   guardKey,
 		PayloadJSON: retryPayload,
 		AvailableAt: time.Now().Add(delay),
 	}

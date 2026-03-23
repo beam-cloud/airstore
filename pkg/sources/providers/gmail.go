@@ -508,7 +508,6 @@ func (g *GmailProvider) executeThreadQuery(ctx context.Context, token, threadID 
 	includeAttachments, includeInline, includeMessageBody := gmailQueryResultModes(spec)
 	messages := make([]gmailMessage, 0, len(rawMessages))
 	attachmentsByMessage := make(map[string][]gmailAttachment, len(rawMessages))
-	messageFilter := strings.TrimSpace(spec.Metadata["message_id"])
 	for _, raw := range rawMessages {
 		msgResult, ok := raw.(map[string]any)
 		if !ok {
@@ -516,9 +515,6 @@ func (g *GmailProvider) executeThreadQuery(ctx context.Context, token, threadID 
 		}
 		msg := g.parseMessage(msgResult)
 		if msg.ID == "" {
-			continue
-		}
-		if messageFilter != "" && msg.ID != messageFilter {
 			continue
 		}
 		messages = append(messages, msg)

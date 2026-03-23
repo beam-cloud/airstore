@@ -86,6 +86,34 @@ func TestEnsureRuntimeSchedulingGuidanceIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestEnsureRuntimeSchedulingGuidanceReplacesLegacyBlock(t *testing.T) {
+	legacy := strings.Join([]string{
+		"You are a helpful agent.",
+		"",
+		runtimeSchedulingGuidanceHeader,
+		"- Airstore handles timers, sleeps, and future wakes outside your internal loop.",
+		"- If work should resume later, say so explicitly in your final response, including the desired delay and what should happen on wake. The worker and BAML will classify that response and schedule the wake for you.",
+		"",
+		runtimeViewSchemaGuidanceHeader,
+		"- view=Deals; columns=monthly_rent",
+	}, "\n")
+
+	got := ensureRuntimeSchedulingGuidance(legacy)
+
+	if strings.Contains(got, "what should happen on wake") {
+		t.Fatalf("expected legacy wake-request copy to be removed, got:\n%s", got)
+	}
+	if !strings.Contains(got, "NEVER create your own timers") {
+		t.Fatalf("expected new declarative scheduling guidance, got:\n%s", got)
+	}
+	if strings.Count(got, runtimeSchedulingGuidanceHeader) != 1 {
+		t.Fatalf("expected exactly one scheduling guidance block, got:\n%s", got)
+	}
+	if !strings.Contains(got, runtimeViewSchemaGuidanceHeader) {
+		t.Fatalf("expected view schema context to be preserved, got:\n%s", got)
+	}
+}
+
 type viewSchemaBackend struct {
 	repository.BackendRepository
 	profile *types.AgentProfile

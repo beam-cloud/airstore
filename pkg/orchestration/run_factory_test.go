@@ -76,6 +76,32 @@ func (q *failingPushQueue) Push(_ context.Context, _ *types.RunExecution) error 
 	return q.pushErr
 }
 
+type blockingResumeTerminalIO struct {
+	repository.TerminalIORepository
+	blockLeaseOwner bool
+	blockCheckpoint bool
+	checkpointRunID string
+}
+
+func (t *blockingResumeTerminalIO) GetSessionLeaseOwner(ctx context.Context, _ uint, _ string) (string, error) {
+	if !t.blockLeaseOwner {
+		return "", nil
+	}
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+func (t *blockingResumeTerminalIO) GetSessionCheckpoint(ctx context.Context, _ uint, _ string) (*types.SessionCheckpoint, error) {
+	if t.blockCheckpoint {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	if t.checkpointRunID == "" {
+		return nil, nil
+	}
+	return &types.SessionCheckpoint{RunID: t.checkpointRunID}, nil
+}
+
 func TestCreateAttemptExecutionTaskMarksProvisioningFailuresAsErrored(t *testing.T) {
 	backend := &attemptProvisionBackend{}
 	queue := &failingPushQueue{pushErr: errors.New("failed to push task: temporary queue outage")}
@@ -122,5 +148,45 @@ func TestCreateAttemptExecutionTaskMarksProvisioningFailuresAsErrored(t *testing
 	}
 	if backend.snapshots[0].Status != types.AgentRunStatusError {
 		t.Fatalf("snapshot status = %q, want %q", backend.snapshots[0].Status, types.AgentRunStatusError)
+	}
+}
+
+func TestResumeBarrierTimesOutBlockingLeaseProbe(t *testing.T) {
+	prevTimeout := sessionStateCallTimeout
+	sessionStateCallTimeout = 20 * time.Millisecond
+	defer func() { sessionStateCallTimeout = prevTimeout }()
+
+	barrier := NewResumeBarrier(nil, &blockingResumeTerminalIO{blockLeaseOwner: true})
+	start := time.Now()
+	err := barrier.WaitForResume(context.Background(), 7, "session-1", "run-1")
+	if err == nil {
+		t.Fatal("expected resume barrier to fail when lease probe blocks")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline exceeded, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
+		t.Fatalf("lease probe timeout took too long: %s", elapsed)
+	}
+}
+
+func TestResumeBarrierTimesOutBlockingCheckpointProbe(t *testing.T) {
+	prevTimeout := sessionStateCallTimeout
+	sessionStateCallTimeout = 20 * time.Millisecond
+	defer func() { sessionStateCallTimeout = prevTimeout }()
+
+	barrier := NewResumeBarrier(nil, &blockingResumeTerminalIO{
+		blockCheckpoint: true,
+	})
+	start := time.Now()
+	err := barrier.WaitForResume(context.Background(), 7, "session-1", "run-1")
+	if err == nil {
+		t.Fatal("expected resume barrier to fail when checkpoint probe blocks")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline exceeded, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
+		t.Fatalf("checkpoint probe timeout took too long: %s", elapsed)
 	}
 }

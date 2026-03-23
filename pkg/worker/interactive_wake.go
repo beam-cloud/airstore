@@ -64,6 +64,7 @@ func (w *Worker) classifyFollowUp(
 	if agentMsg == "" {
 		return nil
 	}
+	debugFollowUp := shouldLogFollowUpDecision(agentMsg)
 	var userMsg *string
 	if lastPrompt != "" {
 		userMsg = &lastPrompt
@@ -86,7 +87,26 @@ func (w *Worker) classifyFollowUp(
 		handoffContextPtr,
 		agentsignal.WithEnv(bamlEnv),
 	)
-	if err != nil || fu.Intent != signaltypes.FollowUpIntentFOLLOW_UP {
+	if err != nil {
+		if debugFollowUp {
+			log.Warn().
+				Err(err).
+				Str("message_excerpt", trimWakePlannerContext(agentMsg, 600)).
+				Msg("follow-up classification failed")
+		}
+		return nil
+	}
+	if debugFollowUp {
+		log.Info().
+			Str("intent", string(fu.Intent)).
+			Int("delay_minutes", int(fu.Delay_minutes)).
+			Int("source_watch_requests", len(fu.Source_watch_requests)).
+			Str("reason", derefString(fu.Reason)).
+			Str("follow_up_prompt", trimWakePlannerContext(derefString(fu.Follow_up_prompt), 300)).
+			Str("message_excerpt", trimWakePlannerContext(agentMsg, 600)).
+			Msg("follow-up classification result")
+	}
+	if fu.Intent != signaltypes.FollowUpIntentFOLLOW_UP {
 		return nil
 	}
 
@@ -228,10 +248,7 @@ func bestMatchingTrackedSourceWatchRequest(
 	if len(best) == 0 {
 		return nil
 	}
-	if len(best) == 1 || trackedSourceWatchCandidatesAgree(best) {
-		return best[0]
-	}
-	return nil
+	return mergeTrackedSourceWatchCandidates(best)
 }
 
 func trackedSourceWatchMatchScore(req, candidate *types.SourceWatchRequest) int {
@@ -271,31 +288,60 @@ func trackedSourceWatchMatchScore(req, candidate *types.SourceWatchRequest) int 
 	return score
 }
 
-func trackedSourceWatchCandidatesAgree(candidates []*types.SourceWatchRequest) bool {
+func mergeTrackedSourceWatchCandidates(candidates []*types.SourceWatchRequest) *types.SourceWatchRequest {
+	if len(candidates) == 0 {
+		return nil
+	}
+	merged := types.CanonicalizeSourceWatchRequest(candidates[0])
+	if merged == nil {
+		return nil
+	}
+	threadID := strings.TrimSpace(merged.ThreadID)
+	sourceOutputID := strings.TrimSpace(merged.SourceOutputID)
+	for _, candidate := range candidates[1:] {
+		candidate = types.CanonicalizeSourceWatchRequest(candidate)
+		if candidate == nil {
+			return nil
+		}
+		if !strings.EqualFold(candidate.Integration, merged.Integration) {
+			return nil
+		}
+		if threadID != "" {
+			if strings.TrimSpace(candidate.ThreadID) != threadID {
+				return nil
+			}
+		} else if sourceOutputID != "" {
+			if strings.TrimSpace(candidate.SourceOutputID) != sourceOutputID {
+				return nil
+			}
+		} else {
+			return nil
+		}
+		merged = types.MergeSourceWatchRequests(merged, candidate)
+	}
+	if threadID == "" {
+		return merged
+	}
+	if !trackedSourceWatchFieldMatches(candidates, func(req *types.SourceWatchRequest) string { return req.MessageID }) {
+		merged.MessageID = ""
+	}
+	if !trackedSourceWatchFieldMatches(candidates, func(req *types.SourceWatchRequest) string { return req.SourceOutputID }) {
+		merged.SourceOutputID = ""
+	}
+	return types.NormalizeSourceWatchRequest(merged)
+}
+
+func trackedSourceWatchFieldMatches(candidates []*types.SourceWatchRequest, value func(*types.SourceWatchRequest) string) bool {
 	if len(candidates) <= 1 {
 		return true
 	}
-	threadID := strings.TrimSpace(candidates[0].ThreadID)
-	messageID := strings.TrimSpace(candidates[0].MessageID)
-	if threadID != "" || messageID != "" {
-		for _, candidate := range candidates[1:] {
-			if strings.TrimSpace(candidate.ThreadID) != threadID {
-				return false
-			}
-			if strings.TrimSpace(candidate.MessageID) != messageID {
-				return false
-			}
-		}
-		return true
-	}
-
-	sourceOutputID := strings.TrimSpace(candidates[0].SourceOutputID)
+	first := strings.TrimSpace(value(candidates[0]))
 	for _, candidate := range candidates[1:] {
-		if strings.TrimSpace(candidate.SourceOutputID) != sourceOutputID {
+		if strings.TrimSpace(value(candidate)) != first {
 			return false
 		}
 	}
-	return sourceOutputID != ""
+	return first != ""
 }
 
 func trackedSourceWatchEmailMatches(req, candidate *types.SourceWatchRequest) bool {
@@ -410,6 +456,11 @@ func normalizePlannedSourceWatchRequest(req *types.SourceWatchRequest, fallbackR
 		return nil
 	}
 	normalized.Reason = firstNonEmptyTrimmed(normalized.Reason, derefString(fallbackReason))
+	if strings.EqualFold(normalized.Integration, string(types.SourceGmail)) &&
+		(normalized.ThreadID != "" || normalized.MessageID != "") {
+		normalized.IncludeAttachments = true
+		normalized.IncludeMessageBody = true
+	}
 	return types.NormalizeSourceWatchRequest(normalized)
 }
 
@@ -754,6 +805,25 @@ func followUpPlanningMessage(agentMsg string, tracker *taskOutputTracker) string
 		lines = append(lines, line)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func shouldLogFollowUpDecision(message string) bool {
+	message = strings.ToLower(strings.TrimSpace(message))
+	if message == "" {
+		return false
+	}
+	for _, token := range []string{
+		"wake me",
+		"monitoring this thread",
+		"follow-up monitoring schedule",
+		"check for replies",
+		"thread id",
+	} {
+		if strings.Contains(message, token) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeSubtaskWakeDelayMinutes(wakeSignal *types.RunExecutionWakeSignal, requested int) int {

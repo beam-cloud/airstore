@@ -24,10 +24,12 @@ const (
 const runtimeSchedulingGuidanceHeader = "Deferred follow-up scheduling:"
 
 const runtimeSchedulingGuidance = `Deferred follow-up scheduling:
-- Airstore handles timers, sleeps, and future wakes outside your internal loop.
-- Do not create your own timers, background waits, sleep loops, reminder tasks, or polling jobs just to revisit work later.
-- Do not rely on background task IDs or timer handles to represent future follow-up work.
-- If work should resume later, say so explicitly in your final response, including the desired delay and what should happen on wake. The worker and BAML will classify that response and schedule the wake for you.`
+- Airstore handles timers, sleeps, future wakes, and source-triggered resumes COMPLETELY OUTSIDE your sandbox.
+- NEVER create your own timers, background waits, sleep loops, BashDaemon timers, polling jobs, or any form of active waiting to check for changes later. These waste your entire execution budget and the system already handles this for you.
+- NEVER use "sleep" or BashDaemon to wait for replies, changes, or external events. Instead, END YOUR TURN immediately after completing the action.
+- When work should resume later, state it declaratively in your FINAL response and then stop. The orchestration layer reads your output and automatically creates source watches, hooks, and wake timers.
+- Example: after sending an email, output "Email sent to luke@beam.cloud (thread 19d1b06e831bda5c). Monitoring this thread for replies; follow up in 1 minute." and STOP. Do NOT start checking /workspace/sources/ in a loop — the system will wake you when new data arrives.
+- After a successful external action, do not turn monitoring or waiting into a new approval gate. Only ask for user input if you need a real decision or new information right now.`
 
 // defaultAgentSystemPrompt is the template for new agent profiles.
 // {{workspace_dir}} is resolved at runtime by applyAgentConfigEnv.
@@ -72,14 +74,33 @@ func DefaultAgentConfig(agentKey string) map[string]any {
 }
 
 func ensureRuntimeSchedulingGuidance(prompt string) string {
-	prompt = strings.TrimSpace(prompt)
-	if strings.Contains(prompt, runtimeSchedulingGuidanceHeader) {
-		return prompt
-	}
+	prompt = strings.TrimSpace(stripRuntimeSchedulingGuidance(prompt))
 	if prompt == "" {
 		return runtimeSchedulingGuidance
 	}
 	return prompt + "\n\n" + runtimeSchedulingGuidance
+}
+
+func stripRuntimeSchedulingGuidance(prompt string) string {
+	prompt = strings.TrimSpace(prompt)
+	start := strings.Index(prompt, runtimeSchedulingGuidanceHeader)
+	if start < 0 {
+		return prompt
+	}
+	before := strings.TrimSpace(prompt[:start])
+	after := ""
+	tail := prompt[start:]
+	if next := strings.Index(tail, runtimeViewSchemaGuidanceHeader); next >= 0 {
+		after = strings.TrimSpace(tail[next:])
+	}
+	switch {
+	case before == "":
+		return after
+	case after == "":
+		return before
+	default:
+		return before + "\n\n" + after
+	}
 }
 
 func providerForRunner(runner string) string {
