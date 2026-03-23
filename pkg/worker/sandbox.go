@@ -1768,7 +1768,8 @@ func (m *SandboxManager) RunTask(ctx context.Context, task types.RunExecution) (
 	taskOutput := NewTaskStreamOutput(task.ExternalId, "stdout", pipeline.writers...)
 	defer pipeline.Wait()
 	defer taskOutput.Flush()
-	if err := m.SetOutput(sandboxID, taskOutput, taskOutput.Flush); err != nil {
+	outputWriter := io.Writer(taskOutput)
+	if err := m.SetOutput(sandboxID, outputWriter, taskOutput.Flush); err != nil {
 		addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to set output")
 	}
 

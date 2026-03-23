@@ -145,6 +145,13 @@ message SetTaskResultRequest {
   WakeSignal wake_signal = 6;
   repeated SubtaskRequest subtask_requests = 7;
   repeated SourceWatchRequest source_watch_requests = 8;
+  int64 llm_input_tokens = 9;
+  int64 llm_output_tokens = 10;
+  int64 llm_cache_creation_input_tokens = 11;
+  int64 llm_cache_read_input_tokens = 12;
+  int64 llm_total_tokens = 13;
+  double total_cost_usd = 14;
+  string llm_model_usage_json = 15;
 }
 
 message SetTaskResultResponse {}
@@ -249,4 +256,3 @@ message UpdateTaskOutputStatusRequest {
 }
 
 message UpdateTaskOutputStatusResponse {}
-
