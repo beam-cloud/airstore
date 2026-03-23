@@ -290,7 +290,14 @@ func (v *SourcesVNode) getQuery(ctx context.Context, path string) *types.SourceV
 		return nil
 	}
 	if resp == nil || !resp.Ok || resp.View == nil {
-		v.setCachedQuery(path, nil)
+		// Only negatively cache paths that are NOT system-managed
+		// followup views. Followup views are frequently deleted and
+		// recreated during source watch re-registration; negative
+		// caching would make them appear "not found" for up to
+		// queryDefCacheTTL after re-creation.
+		if !strings.Contains(path, "__followup__") {
+			v.setCachedQuery(path, nil)
+		}
 		return nil
 	}
 

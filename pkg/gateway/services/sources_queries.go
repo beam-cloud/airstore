@@ -27,6 +27,13 @@ import (
 const (
 	defaultPageSize   = 50
 	defaultMaxResults = 500
+
+	// sourceWatchBaselineGracePeriod is how long after query creation
+	// the poller re-seeds the SeenTracker baseline without emitting
+	// events. This covers source API eventual consistency — e.g. a
+	// Gmail message sent by the agent may not appear in the thread
+	// listing for several seconds. Three poller cycles (15s each) ≈ 45s.
+	sourceWatchBaselineGracePeriod = 45 * time.Second
 )
 
 // SyncResult is the outcome of a view sync operation.
@@ -133,6 +140,13 @@ func (s *SourceService) SyncViewByExternalId(ctx context.Context, externalId str
 
 // RefreshQuery re-executes a query and emits hook events for new results.
 // Called by the source poller.
+//
+// Unlike manual sync operations, the poller does NOT pre-invalidate the
+// listing cache. StoreQueryResults atomically replaces the listing via
+// Redis SET, so pre-invalidation would only create an empty window where
+// concurrent readers see no results — causing transient "directory not
+// found" errors in the agent sandbox and triggering the SeenTracker
+// oscillation (empty → items reappear → spurious hook fire).
 func (s *SourceService) RefreshQuery(ctx context.Context, query *types.FilesystemQuery) error {
 	query, err := s.refreshQueryDefinition(ctx, query)
 	if err != nil {
@@ -148,11 +162,30 @@ func (s *SourceService) RefreshQuery(ctx context.Context, query *types.Filesyste
 		return fmt.Errorf("not connected to %s (workspace %d)", query.Integration, query.WorkspaceId)
 	}
 
-	results, err := s.invalidateAndExecute(ctx, pctx, query, "poller_refresh")
+	results, err := s.executeAndCacheQuery(ctx, pctx, query)
 	if err != nil {
 		return err
 	}
 	if sourceWatchBaselinePending(query) {
+		// Re-seed the baseline on each poller cycle during the grace
+		// period. This captures any messages the agent sent that may
+		// not have been visible in the source API immediately after
+		// registration (Gmail API eventual consistency). Events are
+		// NOT emitted during this window.
+		if err := s.seedSourceWatchBaselineFromResults(ctx, query, results); err != nil {
+			return err
+		}
+
+		age := time.Since(query.UpdatedAt)
+		if age < sourceWatchBaselineGracePeriod {
+			log.Debug().
+				Str("path", query.Path).
+				Dur("age", age).
+				Dur("grace", sourceWatchBaselineGracePeriod).
+				Int("results", len(results)).
+				Msg("source watch baseline grace period — re-seeding")
+			return nil
+		}
 		if err := s.completePendingSourceWatchBaseline(ctx, query, results); err != nil {
 			return err
 		}
@@ -227,6 +260,18 @@ func (s *SourceService) emitSourceHookEvents(ctx context.Context, workspaceId ui
 	diff, compareErr := s.seenTracker.Compare(ctx, seenKey, ids)
 	if compareErr != nil {
 		log.Warn().Err(compareErr).Str("path", queryPath).Msg("seen tracker compare failed, skipping commit")
+		return 0
+	}
+
+	// Guard against transient empty results: if the source returned zero
+	// items but the tracker previously had data (all items "removed"),
+	// skip both emit and commit. This prevents an oscillation pattern
+	// where transient API failures return empty → baseline resets →
+	// items reappear as "new" → spurious hook fires → task wakes for
+	// nothing → re-registers watch → repeat.
+	if len(ids) == 0 && diff != nil && len(diff.Removed) > 0 {
+		log.Warn().Str("path", queryPath).Int("previously_tracked", len(diff.Removed)).
+			Msg("source returned 0 results but tracker had items; skipping commit to prevent re-trigger oscillation")
 		return 0
 	}
 
