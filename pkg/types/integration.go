@@ -122,11 +122,6 @@ var integrations = map[IntegrationName]IntegrationMeta{
 		Scope:       ScopeShared,
 		Capabilities: []IntegrationCapability{
 			CapabilitySourceRead,
-			CapabilitySourceWrite,
-		},
-		OAuthWriteScopeHint: []string{
-			"https://www.googleapis.com/auth/drive.file",
-			"https://www.googleapis.com/auth/drive",
 		},
 	},
 	Slack: {

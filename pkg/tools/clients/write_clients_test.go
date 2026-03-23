@@ -23,14 +23,15 @@ func TestOAuthWriteClientsRequireConnection(t *testing.T) {
 				}, nil, stdout, &bytes.Buffer{})
 			},
 		},
-		{
-			name: "gdrive",
-			execFn: func(stdout *bytes.Buffer) error {
-				return NewGDriveClient().Execute(context.Background(), gdriveCmdCreateFolder, map[string]any{
-					"name": "docs",
-				}, nil, stdout, &bytes.Buffer{})
-			},
-		},
+		// GDrive write tests commented out — using drive.readonly scope.
+		// {
+		// 	name: "gdrive",
+		// 	execFn: func(stdout *bytes.Buffer) error {
+		// 		return NewGDriveClient().Execute(context.Background(), gdriveCmdCreateFolder, map[string]any{
+		// 			"name": "docs",
+		// 		}, nil, stdout, &bytes.Buffer{})
+		// 	},
+		// },
 		{
 			name: "slack",
 			execFn: func(stdout *bytes.Buffer) error {
@@ -191,31 +192,32 @@ func TestBuildRawEmailSanitizesHeaderInjection(t *testing.T) {
 	}
 }
 
-func TestGDriveWriteFileRequiresArguments(t *testing.T) {
-	client := NewGDriveClient()
-	var stdout bytes.Buffer
-	err := client.Execute(context.Background(), gdriveCmdWriteFile, map[string]any{
-		"name": "notes.txt",
-	}, &types.IntegrationCredentials{AccessToken: "token"}, &stdout, &bytes.Buffer{})
-	if err != nil {
-		t.Fatalf("expected structured JSON error, got hard error: %v", err)
-	}
-	if !bytes.Contains(stdout.Bytes(), []byte(`"error"`)) {
-		t.Fatalf("expected JSON error output, got %q", stdout.String())
-	}
-}
-
-func TestResolveContentAllowsZeroByteBase64(t *testing.T) {
-	data, err := resolveContent(map[string]any{
-		"content_base64": "",
-	})
-	if err != nil {
-		t.Fatalf("resolveContent returned error: %v", err)
-	}
-	if len(data) != 0 {
-		t.Fatalf("expected zero-byte payload, got %d bytes", len(data))
-	}
-}
+// GDrive write tests commented out — using drive.readonly scope.
+// func TestGDriveWriteFileRequiresArguments(t *testing.T) {
+// 	client := NewGDriveClient()
+// 	var stdout bytes.Buffer
+// 	err := client.Execute(context.Background(), gdriveCmdWriteFile, map[string]any{
+// 		"name": "notes.txt",
+// 	}, &types.IntegrationCredentials{AccessToken: "token"}, &stdout, &bytes.Buffer{})
+// 	if err != nil {
+// 		t.Fatalf("expected structured JSON error, got hard error: %v", err)
+// 	}
+// 	if !bytes.Contains(stdout.Bytes(), []byte(`"error"`)) {
+// 		t.Fatalf("expected JSON error output, got %q", stdout.String())
+// 	}
+// }
+//
+// func TestResolveContentAllowsZeroByteBase64(t *testing.T) {
+// 	data, err := resolveContent(map[string]any{
+// 		"content_base64": "",
+// 	})
+// 	if err != nil {
+// 		t.Fatalf("resolveContent returned error: %v", err)
+// 	}
+// 	if len(data) != 0 {
+// 		t.Fatalf("expected zero-byte payload, got %d bytes", len(data))
+// 	}
+// }
 
 func TestNotionCommandRequiresArguments(t *testing.T) {
 	client := NewNotionClient()
