@@ -44,6 +44,78 @@ func nullableStringPtr(s *string) sql.NullString {
 	return sql.NullString{String: trimmed, Valid: true}
 }
 
+const filesystemQuerySelectColumns = `
+	id, external_id, workspace_id, credential_member_id, system_managed, lifecycle, owner_task_id, owner_run_id,
+	integration, path, name, query_spec, guidance, output_format, file_ext, filename_format, cache_ttl, mode, filter,
+	created_at, updated_at, last_executed
+`
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func trimStringPtr(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	trimmed := strings.TrimSpace(*value)
+	if trimmed == "" {
+		return nil
+	}
+	return &trimmed
+}
+
+func normalizeFilesystemQuery(query *types.FilesystemQuery) *types.FilesystemQuery {
+	if query == nil {
+		return nil
+	}
+	query.OwnerTaskID = trimStringPtr(query.OwnerTaskID)
+	query.OwnerRunID = trimStringPtr(query.OwnerRunID)
+	query.NormalizeOwnership()
+	return query
+}
+
+func scanFilesystemQuery(scanner rowScanner, query *types.FilesystemQuery) error {
+	if query == nil {
+		return fmt.Errorf("filesystem query is required")
+	}
+	var lastExecuted sql.NullTime
+	var filenameFormat sql.NullString
+	var filterStr sql.NullString
+	var ownerTaskID sql.NullString
+	var ownerRunID sql.NullString
+	if err := scanner.Scan(
+		&query.Id, &query.ExternalId, &query.WorkspaceId, &query.CredentialMemberID,
+		&query.SystemManaged, &query.Lifecycle, &ownerTaskID, &ownerRunID,
+		&query.Integration, &query.Path, &query.Name, &query.QuerySpec, &query.Guidance,
+		&query.OutputFormat, &query.FileExt, &filenameFormat, &query.CacheTTL,
+		&query.Mode, &filterStr, &query.CreatedAt, &query.UpdatedAt, &lastExecuted,
+	); err != nil {
+		return err
+	}
+	if filenameFormat.Valid {
+		query.FilenameFormat = filenameFormat.String
+	}
+	if filterStr.Valid {
+		query.Filter = filterStr.String
+	}
+	if ownerTaskID.Valid {
+		if trimmed := strings.TrimSpace(ownerTaskID.String); trimmed != "" {
+			query.OwnerTaskID = &trimmed
+		}
+	}
+	if ownerRunID.Valid {
+		if trimmed := strings.TrimSpace(ownerRunID.String); trimmed != "" {
+			query.OwnerRunID = &trimmed
+		}
+	}
+	if lastExecuted.Valid {
+		query.LastExecuted = &lastExecuted.Time
+	}
+	normalizeFilesystemQuery(query)
+	return nil
+}
+
 // ElasticsearchClient is an optional interface for Elasticsearch operations.
 type ElasticsearchClient interface {
 	Index(ctx context.Context, index, docID string, body []byte) error
@@ -120,6 +192,7 @@ func (s *filesystemStore) elasticIndex(workspaceId uint) string {
 // ===== Query Definitions =====
 
 func (s *filesystemStore) CreateQuery(ctx context.Context, query *types.FilesystemQuery) (*types.FilesystemQuery, error) {
+	normalizeFilesystemQuery(query)
 	query.ExternalId = uuid.New().String()
 	query.CreatedAt = time.Now()
 	query.UpdatedAt = time.Now()
@@ -144,12 +217,17 @@ func (s *filesystemStore) CreateQuery(ctx context.Context, query *types.Filesyst
 	}
 
 	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO filesystem_queries (external_id, workspace_id, integration, path, name, query_spec, guidance, output_format, file_ext, filename_format, cache_ttl, mode, filter, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+		INSERT INTO filesystem_queries (
+			external_id, workspace_id, credential_member_id, system_managed, lifecycle, owner_task_id, owner_run_id,
+			integration, path, name, query_spec, guidance, output_format, file_ext, filename_format, cache_ttl, mode, filter,
+			created_at, updated_at
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
 		RETURNING id
-	`, query.ExternalId, query.WorkspaceId, query.Integration, query.Path, query.Name,
-		query.QuerySpec, query.Guidance, query.OutputFormat, query.FileExt, query.FilenameFormat, query.CacheTTL,
-		query.Mode, nullableString(query.Filter),
+	`, query.ExternalId, query.WorkspaceId, query.CredentialMemberID, query.SystemManaged, query.Lifecycle,
+		nullableStringPtr(query.OwnerTaskID), nullableStringPtr(query.OwnerRunID),
+		query.Integration, query.Path, query.Name, query.QuerySpec, query.Guidance, query.OutputFormat, query.FileExt,
+		query.FilenameFormat, query.CacheTTL, query.Mode, nullableString(query.Filter),
 		query.CreatedAt, query.UpdatedAt).Scan(&query.Id)
 	if err != nil {
 		return nil, fmt.Errorf("create filesystem query: %w", err)
@@ -181,42 +259,20 @@ func (s *filesystemStore) GetQuery(ctx context.Context, workspaceId uint, path s
 		}
 		q := s.memQueries[extId]
 		if q != nil && q.WorkspaceId == workspaceId {
-			return q, nil
+			return normalizeFilesystemQuery(q), nil
 		}
 		return nil, nil
 	}
 
 	query := &types.FilesystemQuery{}
-	var lastExecuted sql.NullTime
-	var filenameFormat sql.NullString
-
-	// Use ILIKE for case-insensitive path matching (handles old lowercase paths)
-	var filterStr sql.NullString
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id, external_id, workspace_id, integration, path, name, query_spec, guidance, output_format, file_ext, filename_format, cache_ttl, mode, filter, created_at, updated_at, last_executed
+	if err := scanFilesystemQuery(s.db.QueryRowContext(ctx, `
+		SELECT `+filesystemQuerySelectColumns+`
 		FROM filesystem_queries WHERE workspace_id = $1 AND LOWER(path) = LOWER($2)
-	`, workspaceId, path).Scan(
-		&query.Id, &query.ExternalId, &query.WorkspaceId, &query.Integration,
-		&query.Path, &query.Name, &query.QuerySpec, &query.Guidance,
-		&query.OutputFormat, &query.FileExt, &filenameFormat, &query.CacheTTL,
-		&query.Mode, &filterStr,
-		&query.CreatedAt, &query.UpdatedAt, &lastExecuted,
-	)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
+	`, workspaceId, path), query); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("get filesystem query: %w", err)
-	}
-
-	if lastExecuted.Valid {
-		query.LastExecuted = &lastExecuted.Time
-	}
-	if filenameFormat.Valid {
-		query.FilenameFormat = filenameFormat.String
-	}
-	if filterStr.Valid {
-		query.Filter = filterStr.String
 	}
 	return query, nil
 }
@@ -225,39 +281,19 @@ func (s *filesystemStore) GetQueryByExternalId(ctx context.Context, externalId s
 	if s.isMemoryMode() {
 		s.mu.RLock()
 		defer s.mu.RUnlock()
-		return s.memQueries[externalId], nil
+		return normalizeFilesystemQuery(s.memQueries[externalId]), nil
 	}
 
 	query := &types.FilesystemQuery{}
-	var lastExecuted sql.NullTime
-	var filenameFormat sql.NullString
-
-	var filterStr sql.NullString
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id, external_id, workspace_id, integration, path, name, query_spec, guidance, output_format, file_ext, filename_format, cache_ttl, mode, filter, created_at, updated_at, last_executed
+	err := scanFilesystemQuery(s.db.QueryRowContext(ctx, `
+		SELECT `+filesystemQuerySelectColumns+`
 		FROM filesystem_queries WHERE external_id = $1
-	`, externalId).Scan(
-		&query.Id, &query.ExternalId, &query.WorkspaceId, &query.Integration,
-		&query.Path, &query.Name, &query.QuerySpec, &query.Guidance,
-		&query.OutputFormat, &query.FileExt, &filenameFormat, &query.CacheTTL,
-		&query.Mode, &filterStr,
-		&query.CreatedAt, &query.UpdatedAt, &lastExecuted,
-	)
+	`, externalId), query)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get filesystem query by external id: %w", err)
-	}
-
-	if lastExecuted.Valid {
-		query.LastExecuted = &lastExecuted.Time
-	}
-	if filenameFormat.Valid {
-		query.FilenameFormat = filenameFormat.String
-	}
-	if filterStr.Valid {
-		query.Filter = filterStr.String
 	}
 	return query, nil
 }
@@ -275,7 +311,7 @@ func (s *filesystemStore) ListQueries(ctx context.Context, workspaceId uint, par
 				// Ensure it's a direct child (no additional /)
 				rel := strings.ToLower(q.Path)[len(prefixLower):]
 				if !strings.Contains(rel, "/") {
-					queries = append(queries, q)
+					queries = append(queries, normalizeFilesystemQuery(q))
 				}
 			}
 		}
@@ -287,7 +323,7 @@ func (s *filesystemStore) ListQueries(ctx context.Context, workspaceId uint, par
 	excludePattern := parentPath + "/%/%"
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, external_id, workspace_id, integration, path, name, query_spec, guidance, output_format, file_ext, filename_format, cache_ttl, mode, filter, created_at, updated_at, last_executed
+		SELECT `+filesystemQuerySelectColumns+`
 		FROM filesystem_queries 
 		WHERE workspace_id = $1 AND path ILIKE $2 AND path NOT ILIKE $3
 		ORDER BY name
@@ -300,31 +336,59 @@ func (s *filesystemStore) ListQueries(ctx context.Context, workspaceId uint, par
 	var queries []*types.FilesystemQuery
 	for rows.Next() {
 		query := &types.FilesystemQuery{}
-		var lastExecuted sql.NullTime
-		var filenameFormat sql.NullString
-		var filterStr sql.NullString
-		err := rows.Scan(
-			&query.Id, &query.ExternalId, &query.WorkspaceId, &query.Integration,
-			&query.Path, &query.Name, &query.QuerySpec, &query.Guidance,
-			&query.OutputFormat, &query.FileExt, &filenameFormat, &query.CacheTTL,
-			&query.Mode, &filterStr,
-			&query.CreatedAt, &query.UpdatedAt, &lastExecuted,
-		)
-		if err != nil {
+		if err := scanFilesystemQuery(rows, query); err != nil {
 			return nil, fmt.Errorf("scan filesystem query: %w", err)
-		}
-		if lastExecuted.Valid {
-			query.LastExecuted = &lastExecuted.Time
-		}
-		if filenameFormat.Valid {
-			query.FilenameFormat = filenameFormat.String
-		}
-		if filterStr.Valid {
-			query.Filter = filterStr.String
 		}
 		queries = append(queries, query)
 	}
 
+	return queries, rows.Err()
+}
+
+func (s *filesystemStore) ListTaskOwnedQueries(ctx context.Context, workspaceId uint, taskID string) ([]*types.FilesystemQuery, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return nil, nil
+	}
+	if s.isMemoryMode() {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+
+		var queries []*types.FilesystemQuery
+		for _, q := range s.memQueries {
+			if q.WorkspaceId != workspaceId || !q.IsTaskFollowUp() || q.OwnerTaskID == nil || strings.TrimSpace(*q.OwnerTaskID) != taskID {
+				continue
+			}
+			queries = append(queries, normalizeFilesystemQuery(q))
+		}
+		sort.Slice(queries, func(i, j int) bool {
+			return queries[i].CreatedAt.Before(queries[j].CreatedAt)
+		})
+		return queries, nil
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT `+filesystemQuerySelectColumns+`
+		FROM filesystem_queries
+		WHERE workspace_id = $1
+		  AND system_managed = TRUE
+		  AND lifecycle = $2
+		  AND owner_task_id = $3
+		ORDER BY created_at
+	`, workspaceId, types.FilesystemQueryLifecycleTaskFollowUp, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("list task owned filesystem queries: %w", err)
+	}
+	defer rows.Close()
+
+	var queries []*types.FilesystemQuery
+	for rows.Next() {
+		query := &types.FilesystemQuery{}
+		if err := scanFilesystemQuery(rows, query); err != nil {
+			return nil, fmt.Errorf("scan task owned filesystem query: %w", err)
+		}
+		queries = append(queries, query)
+	}
 	return queries, rows.Err()
 }
 
@@ -354,6 +418,7 @@ func (s *filesystemStore) CountQueries(ctx context.Context, workspaceId uint) (i
 }
 
 func (s *filesystemStore) UpdateQuery(ctx context.Context, query *types.FilesystemQuery) error {
+	normalizeFilesystemQuery(query)
 	query.UpdatedAt = time.Now()
 
 	if s.isMemoryMode() {
@@ -369,6 +434,11 @@ func (s *filesystemStore) UpdateQuery(ctx context.Context, query *types.Filesyst
 
 			existing.Name = query.Name
 			existing.Path = query.Path
+			existing.CredentialMemberID = query.CredentialMemberID
+			existing.SystemManaged = query.SystemManaged
+			existing.Lifecycle = query.Lifecycle
+			existing.OwnerTaskID = query.OwnerTaskID
+			existing.OwnerRunID = query.OwnerRunID
 			existing.QuerySpec = query.QuerySpec
 			existing.Guidance = query.Guidance
 			existing.OutputFormat = query.OutputFormat
@@ -385,10 +455,13 @@ func (s *filesystemStore) UpdateQuery(ctx context.Context, query *types.Filesyst
 
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE filesystem_queries SET
-			name = $1, path = $2, query_spec = $3, guidance = $4, output_format = $5, 
-			file_ext = $6, filename_format = $7, cache_ttl = $8, mode = $9, filter = $10, updated_at = $11, last_executed = $12
-		WHERE external_id = $13
-	`, query.Name, query.Path, query.QuerySpec, query.Guidance, query.OutputFormat,
+			name = $1, path = $2, credential_member_id = $3, system_managed = $4, lifecycle = $5,
+			owner_task_id = $6, owner_run_id = $7, query_spec = $8, guidance = $9, output_format = $10,
+			file_ext = $11, filename_format = $12, cache_ttl = $13, mode = $14, filter = $15, updated_at = $16, last_executed = $17
+		WHERE external_id = $18
+	`, query.Name, query.Path, query.CredentialMemberID, query.SystemManaged, query.Lifecycle,
+		nullableStringPtr(query.OwnerTaskID), nullableStringPtr(query.OwnerRunID),
+		query.QuerySpec, query.Guidance, query.OutputFormat,
 		query.FileExt, query.FilenameFormat, query.CacheTTL, query.Mode, nullableString(query.Filter),
 		query.UpdatedAt, query.LastExecuted, query.ExternalId)
 	if err != nil {
@@ -1080,9 +1153,7 @@ func (s *filesystemStore) GetWatchedSourceQueries(ctx context.Context, staleAfte
 
 	// Use ILIKE for case-insensitive path matching (handles old lowercase paths)
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT DISTINCT q.id, q.external_id, q.workspace_id, q.integration, q.path, q.name,
-		       q.query_spec, q.guidance, q.output_format, q.file_ext, q.filename_format,
-		       q.cache_ttl, q.created_at, q.updated_at, q.last_executed
+		SELECT DISTINCT `+filesystemQuerySelectColumns+`
 		FROM filesystem_queries q
 		JOIN filesystem_hooks h
 		  ON h.workspace_id = q.workspace_id
@@ -1101,21 +1172,8 @@ func (s *filesystemStore) GetWatchedSourceQueries(ctx context.Context, staleAfte
 	var queries []*types.FilesystemQuery
 	for rows.Next() {
 		q := &types.FilesystemQuery{}
-		var lastExecuted sql.NullTime
-		var filenameFormat sql.NullString
-		if err := rows.Scan(
-			&q.Id, &q.ExternalId, &q.WorkspaceId, &q.Integration,
-			&q.Path, &q.Name, &q.QuerySpec, &q.Guidance,
-			&q.OutputFormat, &q.FileExt, &filenameFormat, &q.CacheTTL,
-			&q.CreatedAt, &q.UpdatedAt, &lastExecuted,
-		); err != nil {
+		if err := scanFilesystemQuery(rows, q); err != nil {
 			return nil, fmt.Errorf("scan watched query: %w", err)
-		}
-		if lastExecuted.Valid {
-			q.LastExecuted = &lastExecuted.Time
-		}
-		if filenameFormat.Valid {
-			q.FilenameFormat = filenameFormat.String
 		}
 		queries = append(queries, q)
 	}
@@ -1139,13 +1197,15 @@ func (s *filesystemStore) CreateHook(ctx context.Context, hook *types.Hook) (*ty
 	}
 
 	agentID := nullableStringPtr(hook.AgentId)
+	targetTaskID := nullableStringPtr(hook.TargetTaskID)
 	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO filesystem_hooks (external_id, workspace_id, path, prompt, skill_path, skill_paths, agent_id, active, event_types, created_by_member_id, token_id, encrypted_token, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		INSERT INTO filesystem_hooks (external_id, workspace_id, path, prompt, skill_path, skill_paths, agent_id, active, event_types, delivery_mode, target_task_id, system_managed, one_shot, created_by_member_id, token_id, encrypted_token, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 		RETURNING id
 	`, hook.ExternalId, hook.WorkspaceId, hook.Path, hook.Prompt, hook.SkillPath,
 		pq.Array(hook.SkillPaths), agentID,
-		hook.Active, pq.Array(hook.EventTypes), hook.CreatedByMemberId, hook.TokenId, hook.EncryptedToken,
+		hook.Active, pq.Array(hook.EventTypes), hook.DeliveryMode, targetTaskID, hook.SystemManaged, hook.OneShot,
+		hook.CreatedByMemberId, hook.TokenId, hook.EncryptedToken,
 		hook.CreatedAt, hook.UpdatedAt).Scan(&hook.Id)
 	if err != nil {
 		return nil, fmt.Errorf("create hook: %w", err)
@@ -1169,13 +1229,16 @@ func (s *filesystemStore) GetHook(ctx context.Context, externalId string) (*type
 	var skillPaths pq.StringArray
 	var eventTypes pq.StringArray
 	var agentID sql.NullString
+	var targetTaskID sql.NullString
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, external_id, workspace_id, path, prompt, skill_path, skill_paths, agent_id, active,
-		       event_types, created_by_member_id, token_id, encrypted_token, created_at, updated_at
+		       event_types, delivery_mode, target_task_id, system_managed, one_shot,
+		       created_by_member_id, token_id, encrypted_token, created_at, updated_at
 		FROM filesystem_hooks WHERE external_id = $1
 	`, externalId).Scan(
 		&h.Id, &h.ExternalId, &h.WorkspaceId, &h.Path, &h.Prompt, &h.SkillPath, &skillPaths, &agentID,
-		&h.Active, &eventTypes, &h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
+		&h.Active, &eventTypes, &h.DeliveryMode, &targetTaskID, &h.SystemManaged, &h.OneShot,
+		&h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
 		&h.CreatedAt, &h.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -1190,6 +1253,12 @@ func (s *filesystemStore) GetHook(ctx context.Context, externalId string) (*type
 		v := strings.TrimSpace(agentID.String)
 		if v != "" {
 			h.AgentId = &v
+		}
+	}
+	if targetTaskID.Valid {
+		v := strings.TrimSpace(targetTaskID.String)
+		if v != "" {
+			h.TargetTaskID = &v
 		}
 	}
 	normalizeHookSkillFields(h)
@@ -1212,13 +1281,16 @@ func (s *filesystemStore) GetHookById(ctx context.Context, id uint) (*types.Hook
 	var skillPaths pq.StringArray
 	var eventTypes pq.StringArray
 	var agentID sql.NullString
+	var targetTaskID sql.NullString
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, external_id, workspace_id, path, prompt, skill_path, skill_paths, agent_id, active,
-		       event_types, created_by_member_id, token_id, encrypted_token, created_at, updated_at
+		       event_types, delivery_mode, target_task_id, system_managed, one_shot,
+		       created_by_member_id, token_id, encrypted_token, created_at, updated_at
 		FROM filesystem_hooks WHERE id = $1
 	`, id).Scan(
 		&h.Id, &h.ExternalId, &h.WorkspaceId, &h.Path, &h.Prompt, &h.SkillPath, &skillPaths, &agentID,
-		&h.Active, &eventTypes, &h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
+		&h.Active, &eventTypes, &h.DeliveryMode, &targetTaskID, &h.SystemManaged, &h.OneShot,
+		&h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
 		&h.CreatedAt, &h.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -1233,6 +1305,12 @@ func (s *filesystemStore) GetHookById(ctx context.Context, id uint) (*types.Hook
 		v := strings.TrimSpace(agentID.String)
 		if v != "" {
 			h.AgentId = &v
+		}
+	}
+	if targetTaskID.Valid {
+		v := strings.TrimSpace(targetTaskID.String)
+		if v != "" {
+			h.TargetTaskID = &v
 		}
 	}
 	normalizeHookSkillFields(h)
@@ -1257,7 +1335,8 @@ func (s *filesystemStore) ListHooks(ctx context.Context, workspaceId uint) ([]*t
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, external_id, workspace_id, path, prompt, skill_path, skill_paths, agent_id, active,
-		       event_types, created_by_member_id, token_id, encrypted_token, created_at, updated_at
+		       event_types, delivery_mode, target_task_id, system_managed, one_shot,
+		       created_by_member_id, token_id, encrypted_token, created_at, updated_at
 		FROM filesystem_hooks WHERE workspace_id = $1
 		ORDER BY created_at
 	`, workspaceId)
@@ -1272,9 +1351,11 @@ func (s *filesystemStore) ListHooks(ctx context.Context, workspaceId uint) ([]*t
 		var skillPaths pq.StringArray
 		var eventTypes pq.StringArray
 		var agentID sql.NullString
+		var targetTaskID sql.NullString
 		err := rows.Scan(
 			&h.Id, &h.ExternalId, &h.WorkspaceId, &h.Path, &h.Prompt, &h.SkillPath, &skillPaths, &agentID,
-			&h.Active, &eventTypes, &h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
+			&h.Active, &eventTypes, &h.DeliveryMode, &targetTaskID, &h.SystemManaged, &h.OneShot,
+			&h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
 			&h.CreatedAt, &h.UpdatedAt,
 		)
 		if err != nil {
@@ -1286,6 +1367,12 @@ func (s *filesystemStore) ListHooks(ctx context.Context, workspaceId uint) ([]*t
 			v := strings.TrimSpace(agentID.String)
 			if v != "" {
 				h.AgentId = &v
+			}
+		}
+		if targetTaskID.Valid {
+			v := strings.TrimSpace(targetTaskID.String)
+			if v != "" {
+				h.TargetTaskID = &v
 			}
 		}
 		normalizeHookSkillFields(h)
@@ -1308,17 +1395,22 @@ func (s *filesystemStore) UpdateHook(ctx context.Context, hook *types.Hook) erro
 			existing.EventTypes = append([]string(nil), hook.EventTypes...)
 			existing.AgentId = hook.AgentId
 			existing.Active = hook.Active
+			existing.DeliveryMode = hook.DeliveryMode
+			existing.TargetTaskID = hook.TargetTaskID
+			existing.SystemManaged = hook.SystemManaged
+			existing.OneShot = hook.OneShot
 			existing.UpdatedAt = hook.UpdatedAt
 		}
 		return nil
 	}
 
 	agentID := nullableStringPtr(hook.AgentId)
+	targetTaskID := nullableStringPtr(hook.TargetTaskID)
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE filesystem_hooks SET
-			prompt = $1, skill_path = $2, skill_paths = $3, agent_id = $4, active = $5, event_types = $6, updated_at = $7
-		WHERE external_id = $8
-	`, hook.Prompt, hook.SkillPath, pq.Array(hook.SkillPaths), agentID, hook.Active, pq.Array(hook.EventTypes), hook.UpdatedAt, hook.ExternalId)
+			prompt = $1, skill_path = $2, skill_paths = $3, agent_id = $4, active = $5, event_types = $6, delivery_mode = $7, target_task_id = $8, system_managed = $9, one_shot = $10, updated_at = $11
+		WHERE external_id = $12
+	`, hook.Prompt, hook.SkillPath, pq.Array(hook.SkillPaths), agentID, hook.Active, pq.Array(hook.EventTypes), hook.DeliveryMode, targetTaskID, hook.SystemManaged, hook.OneShot, hook.UpdatedAt, hook.ExternalId)
 	if err != nil {
 		return fmt.Errorf("update hook: %w", err)
 	}
@@ -1349,6 +1441,17 @@ func normalizeHookSkillFields(hook *types.Hook) {
 		hook.SkillPath = hook.SkillPaths[0]
 	} else {
 		hook.SkillPath = ""
+	}
+	if hook.DeliveryMode == "" {
+		hook.DeliveryMode = types.HookDeliveryModeSpawnTask
+	}
+	if hook.TargetTaskID != nil {
+		trimmed := strings.TrimSpace(*hook.TargetTaskID)
+		if trimmed == "" {
+			hook.TargetTaskID = nil
+		} else {
+			hook.TargetTaskID = &trimmed
+		}
 	}
 }
 

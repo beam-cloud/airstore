@@ -410,6 +410,12 @@ func (g *GmailProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provider
 	}
 
 	token := pctx.Credentials.AccessToken
+	if threadID := strings.TrimSpace(spec.Metadata["thread_id"]); threadID != "" {
+		return g.executeThreadQuery(ctx, token, threadID, spec)
+	}
+	if messageID := strings.TrimSpace(spec.Metadata["message_id"]); messageID != "" {
+		return g.executeMessageQuery(ctx, token, messageID, spec)
+	}
 
 	// Build path with optional pageToken for pagination
 	path := fmt.Sprintf("/users/me/messages?q=%s&maxResults=%d", url.QueryEscape(spec.Query), limit)
@@ -452,12 +458,125 @@ func (g *GmailProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provider
 	if err != nil {
 		return nil, err
 	}
+	results, err := g.buildQueryResultsFromMetadataResults(ctx, token, spec, metadataResults)
+	if err != nil {
+		return nil, err
+	}
 
+	return &sources.QueryResponse{
+		Results:       results,
+		NextPageToken: nextPageToken,
+		HasMore:       nextPageToken != "",
+	}, nil
+}
+
+// ReadResult fetches content for message and attachment query results.
+// Supported ID formats:
+//   - msg:<messageId>                   (message body)
+//   - att:<messageId>:<attachmentId>    (attachment bytes)
+//   - <messageId>                       (legacy message format)
+//
+// This implements the sources.QueryExecutor interface.
+func (g *GmailProvider) ReadResult(ctx context.Context, pctx *sources.ProviderContext, resultID string) ([]byte, error) {
+	if err := checkAuth(pctx); err != nil {
+		return nil, err
+	}
+
+	messageID, attachmentID, err := parseGmailResultID(resultID)
+	if err != nil {
+		return nil, err
+	}
+
+	token := pctx.Credentials.AccessToken
+	if attachmentID != "" {
+		return g.fetchAttachment(ctx, token, messageID, attachmentID)
+	}
+	return g.fetchMessageBody(ctx, token, messageID)
+}
+
+func (g *GmailProvider) executeThreadQuery(ctx context.Context, token, threadID string, spec sources.QuerySpec) (*sources.QueryResponse, error) {
+	var threadResult map[string]any
+	path := fmt.Sprintf("/users/me/threads/%s?format=full", url.QueryEscape(threadID))
+	if err := g.request(ctx, token, path, &threadResult); err != nil {
+		return nil, err
+	}
+	rawMessages, _ := threadResult["messages"].([]any)
+	if len(rawMessages) == 0 {
+		return &sources.QueryResponse{Results: []sources.QueryResult{}}, nil
+	}
+
+	includeAttachments, includeInline, includeMessageBody := gmailQueryResultModes(spec)
+	messages := make([]gmailMessage, 0, len(rawMessages))
+	attachmentsByMessage := make(map[string][]gmailAttachment, len(rawMessages))
+	messageFilter := strings.TrimSpace(spec.Metadata["message_id"])
+	for _, raw := range rawMessages {
+		msgResult, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		msg := g.parseMessage(msgResult)
+		if msg.ID == "" {
+			continue
+		}
+		if messageFilter != "" && msg.ID != messageFilter {
+			continue
+		}
+		messages = append(messages, msg)
+		if includeAttachments {
+			attachmentsByMessage[msg.ID] = extractMessageAttachments(msgResult, includeInline)
+		}
+	}
+	if !includeAttachments && !includeMessageBody {
+		includeMessageBody = true
+	}
+	results := g.buildQueryResultsFromMessages(spec, messages, attachmentsByMessage, includeAttachments, includeMessageBody)
+	return &sources.QueryResponse{Results: results}, nil
+}
+
+func (g *GmailProvider) executeMessageQuery(ctx context.Context, token, messageID string, spec sources.QuerySpec) (*sources.QueryResponse, error) {
+	var msgResult map[string]any
+	path := fmt.Sprintf("/users/me/messages/%s?format=full", url.QueryEscape(messageID))
+	if err := g.request(ctx, token, path, &msgResult); err != nil {
+		return nil, err
+	}
+	includeAttachments, includeInline, includeMessageBody := gmailQueryResultModes(spec)
+	msg := g.parseMessage(msgResult)
+	if msg.ID == "" {
+		return &sources.QueryResponse{Results: []sources.QueryResult{}}, nil
+	}
+	attachmentsByMessage := map[string][]gmailAttachment{}
+	if includeAttachments {
+		attachmentsByMessage[msg.ID] = extractMessageAttachments(msgResult, includeInline)
+	}
+	if !includeAttachments && !includeMessageBody {
+		includeMessageBody = true
+	}
+	results := g.buildQueryResultsFromMessages(spec, []gmailMessage{msg}, attachmentsByMessage, includeAttachments, includeMessageBody)
+	return &sources.QueryResponse{Results: results}, nil
+}
+
+func shouldIncludeAttachments(spec sources.QuerySpec) bool {
+	if value, ok := spec.Metadata["include_attachments"]; ok {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			return parsed
+		}
+	}
+
+	// Smart views can opt in implicitly by including Gmail attachment operators.
+	query := strings.ToLower(spec.Query)
+	return strings.Contains(query, "has:attachment") || strings.Contains(query, "filename:")
+}
+
+func gmailQueryResultModes(spec sources.QuerySpec) (bool, bool, bool) {
 	includeAttachments := shouldIncludeAttachments(spec)
 	includeInline := boolMetadataOrDefault(spec.Metadata, "include_inline", false)
 	includeMessageBody := boolMetadataOrDefault(spec.Metadata, "include_message_body", true)
+	return includeAttachments, includeInline, includeMessageBody
+}
+
+func (g *GmailProvider) buildQueryResultsFromMetadataResults(ctx context.Context, token string, spec sources.QuerySpec, metadataResults []map[string]any) ([]sources.QueryResult, error) {
+	includeAttachments, includeInline, includeMessageBody := gmailQueryResultModes(spec)
 	if !includeAttachments && !includeMessageBody {
-		// Keep at least one output mode enabled to avoid empty views by mistake.
 		includeMessageBody = true
 	}
 
@@ -479,6 +598,16 @@ func (g *GmailProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provider
 		attachmentsByMessage = g.fetchAttachmentsForMessages(ctx, token, messageIDs, includeInline)
 	}
 
+	return g.buildQueryResultsFromMessages(spec, messages, attachmentsByMessage, includeAttachments, includeMessageBody), nil
+}
+
+func (g *GmailProvider) buildQueryResultsFromMessages(
+	spec sources.QuerySpec,
+	messages []gmailMessage,
+	attachmentsByMessage map[string][]gmailAttachment,
+	includeAttachments bool,
+	includeMessageBody bool,
+) []sources.QueryResult {
 	results := make([]sources.QueryResult, 0, len(messages))
 	filenameFormat := spec.FilenameFormat
 	if filenameFormat == "" {
@@ -488,12 +617,13 @@ func (g *GmailProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provider
 
 	for _, msg := range messages {
 		metadata := map[string]string{
-			"id":      msg.ID,
-			"from":    extractSenderName(msg.From),
-			"to":      msg.To,
-			"subject": sources.SanitizeFilename(truncateSubject(msg.Subject, 40)),
-			"date":    parseEmailDate(msg.Date),
-			"snippet": msg.Snippet,
+			"id":        msg.ID,
+			"from":      extractSenderName(msg.From),
+			"to":        msg.To,
+			"subject":   sources.SanitizeFilename(truncateSubject(msg.Subject, 40)),
+			"date":      parseEmailDate(msg.Date),
+			"snippet":   msg.Snippet,
+			"thread_id": msg.ThreadID,
 		}
 
 		messageFilename := g.FormatFilename(filenameFormat, metadata)
@@ -530,48 +660,7 @@ func (g *GmailProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provider
 			})
 		}
 	}
-
-	return &sources.QueryResponse{
-		Results:       results,
-		NextPageToken: nextPageToken,
-		HasMore:       nextPageToken != "",
-	}, nil
-}
-
-// ReadResult fetches content for message and attachment query results.
-// Supported ID formats:
-//   - msg:<messageId>                   (message body)
-//   - att:<messageId>:<attachmentId>    (attachment bytes)
-//   - <messageId>                       (legacy message format)
-//
-// This implements the sources.QueryExecutor interface.
-func (g *GmailProvider) ReadResult(ctx context.Context, pctx *sources.ProviderContext, resultID string) ([]byte, error) {
-	if err := checkAuth(pctx); err != nil {
-		return nil, err
-	}
-
-	messageID, attachmentID, err := parseGmailResultID(resultID)
-	if err != nil {
-		return nil, err
-	}
-
-	token := pctx.Credentials.AccessToken
-	if attachmentID != "" {
-		return g.fetchAttachment(ctx, token, messageID, attachmentID)
-	}
-	return g.fetchMessageBody(ctx, token, messageID)
-}
-
-func shouldIncludeAttachments(spec sources.QuerySpec) bool {
-	if value, ok := spec.Metadata["include_attachments"]; ok {
-		if parsed, err := strconv.ParseBool(value); err == nil {
-			return parsed
-		}
-	}
-
-	// Smart views can opt in implicitly by including Gmail attachment operators.
-	query := strings.ToLower(spec.Query)
-	return strings.Contains(query, "has:attachment") || strings.Contains(query, "filename:")
+	return results
 }
 
 func boolMetadataOrDefault(metadata map[string]string, key string, defaultValue bool) bool {

@@ -15,7 +15,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/beam-cloud/airstore/pkg/cli"
 	"github.com/beam-cloud/airstore/pkg/common"
 	gatewayclient "github.com/beam-cloud/airstore/pkg/gateway/client"
 	"github.com/beam-cloud/airstore/pkg/runtime"
@@ -24,6 +23,7 @@ import (
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 )
 
 // SandboxManager manages the lifecycle of sandboxes on a worker.
@@ -85,11 +85,33 @@ type sandboxContextClient interface {
 }
 
 var newSandboxContextClient = func(addr, token string) (sandboxContextClient, func() error, error) {
-	client, err := cli.NewClient(addr, token)
+	opts := []grpc.DialOption{
+		grpc.WithTransportCredentials(common.TransportCredentials(addr)),
+	}
+	if token != "" {
+		opts = append(opts, grpc.WithUnaryInterceptor(sandboxAuthInterceptor(token)))
+		opts = append(opts, grpc.WithStreamInterceptor(sandboxStreamAuthInterceptor(token)))
+	}
+
+	conn, err := grpc.NewClient(addr, opts...)
 	if err != nil {
 		return nil, nil, err
 	}
-	return client.Context, client.Close, nil
+	return pb.NewContextServiceClient(conn), conn.Close, nil
+}
+
+func sandboxAuthInterceptor(token string) grpc.UnaryClientInterceptor {
+	return func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+token)
+		return invoker(ctx, method, req, reply, cc, opts...)
+	}
+}
+
+func sandboxStreamAuthInterceptor(token string) grpc.StreamClientInterceptor {
+	return func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+token)
+		return streamer(ctx, desc, cc, method, opts...)
+	}
 }
 
 // Config for creating a SandboxManager.

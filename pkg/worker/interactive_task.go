@@ -438,8 +438,8 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	var inputKind types.InputKind
 	var lastPrompt string
 	var approvalOutputHandled bool
-	var wakeSignal *types.RunExecutionWakeSignal
-	var subtaskReqs []*types.SubtaskRequest
+	var postRun *types.RunExecutionPostRun
+	var explicitWake *types.RunExecutionWakeSignal
 
 	if tr, ok := runner.(TurnRunner); ok {
 		var turnResult turnSessionResult
@@ -450,8 +450,7 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 		inputKind = turnResult.inputKind
 		lastPrompt = turnResult.lastPrompt
 		approvalOutputHandled = turnResult.approvalOutputHandled
-		wakeSignal = turnResult.wakeSignal
-		subtaskReqs = turnResult.subtaskRequests
+		explicitWake = turnResult.explicitWake
 	} else {
 		runErr = w.runGenericPTYSession(sessionCtx, task, sandboxID, tw, activityCh)
 	}
@@ -508,17 +507,16 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 		agentMsg = sessionAssistantMessage
 	}
 
-	if wakeSignal == nil && !needsInput && runErr == nil {
-		plan := w.planFollowUp(ctx, task, outputPipeline.tracker, agentMsg, lastPrompt, mountSource, env, bamlEnv)
-		wakeSignal = plan.wakeSignal
-		subtaskReqs = plan.subtaskRequests
+	if !needsInput && runErr == nil {
+		postRun = w.buildPostRunPlan(ctx, task, outputPipeline.tracker, agentMsg, lastPrompt, mountSource, env, bamlEnv, explicitWake)
 	}
 
-	return &types.RunExecutionResult{
+	result := &types.RunExecutionResult{
 		ID: task.ExternalId, ExitCode: exitCode, Error: errMsg,
-		Duration: time.Since(start), WaitingForInput: needsInput,
-		WakeSignal: wakeSignal, SubtaskRequests: subtaskReqs,
+		Duration: time.Since(start),
 	}
+	result.SetPostRun(postRun)
+	return result
 }
 
 func extractSessionAssistantMessage(runner AgentExecutionRunner, raw []byte) string {
@@ -794,8 +792,7 @@ type parsedTurnOutcome struct {
 	assistantMessage      string
 	blockerOutputIDs      []string
 	approvalOutputHandled bool
-	wakeSignal            *types.RunExecutionWakeSignal
-	subtaskRequests       []*types.SubtaskRequest
+	explicitWake          *types.RunExecutionWakeSignal
 }
 
 func (r workerSessionRunner) reconcileParsedTurnOutput(
@@ -803,8 +800,6 @@ func (r workerSessionRunner) reconcileParsedTurnOutput(
 	task types.RunExecution,
 	tracker *taskOutputTracker,
 	prompt string,
-	mountSource string,
-	env map[string]string,
 	bamlEnv map[string]string,
 	result TurnParseResult,
 ) parsedTurnOutcome {
@@ -837,36 +832,8 @@ func (r workerSessionRunner) reconcileParsedTurnOutput(
 		}
 	}
 
-	if !outcome.needsInput && control != nil && control.WakeSignal != nil {
-		outcome.wakeSignal = control.WakeSignal
-	}
-
-	if !outcome.needsInput {
-		switch {
-		case outcome.wakeSignal != nil:
-			outcome.subtaskRequests = r.worker.classifySubtasks(
-				ctx,
-				task,
-				tracker,
-				outcome.assistantMessage,
-				prompt,
-				outcome.wakeSignal,
-				bamlEnv,
-			)
-		default:
-			plan := r.worker.planFollowUp(
-				ctx,
-				task,
-				tracker,
-				outcome.assistantMessage,
-				prompt,
-				mountSource,
-				env,
-				bamlEnv,
-			)
-			outcome.wakeSignal = plan.wakeSignal
-			outcome.subtaskRequests = plan.subtaskRequests
-		}
+	if !outcome.needsInput && control != nil {
+		outcome.explicitWake = control.WakeSignal
 	}
 
 	if outcome.needsInput && outcome.inputKind == types.InputKindApproveReject {
@@ -882,8 +849,7 @@ type turnSessionResult struct {
 	inputKind             types.InputKind
 	lastPrompt            string
 	approvalOutputHandled bool
-	wakeSignal            *types.RunExecutionWakeSignal
-	subtaskRequests       []*types.SubtaskRequest
+	explicitWake          *types.RunExecutionWakeSignal
 }
 
 func persistApprovalOutputBeforeWaiting(
@@ -1404,15 +1370,14 @@ func (r workerSessionRunner) runTurnSession(
 			if err != nil {
 				addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to parse turn output")
 			} else {
-				resolved := r.reconcileParsedTurnOutput(ctx, task, tracker, prompt, mountSource, sessionEnv, bamlEnv, result)
+				resolved := r.reconcileParsedTurnOutput(ctx, task, tracker, prompt, bamlEnv, result)
 				needsInput = resolved.needsInput
 				inputKind = resolved.inputKind
 				waitingSummary = resolved.waitingSummary
 				approvalAssistantMessage = resolved.assistantMessage
 				blockerOutputIDs = resolved.blockerOutputIDs
 				turnResult.approvalOutputHandled = resolved.approvalOutputHandled
-				turnResult.wakeSignal = resolved.wakeSignal
-				turnResult.subtaskRequests = resolved.subtaskRequests
+				turnResult.explicitWake = resolved.explicitWake
 			}
 		} else if checkNeedsInput != nil {
 			needsInput, inputKind, waitingSummary, approvalAssistantMessage = checkNeedsInput(prompt)

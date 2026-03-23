@@ -42,13 +42,13 @@ import (
 	"github.com/beam-cloud/airstore/pkg/scheduler"
 	"github.com/beam-cloud/airstore/pkg/skills"
 	"github.com/beam-cloud/airstore/pkg/sources"
-	"github.com/beam-cloud/airstore/pkg/views"
 	"github.com/beam-cloud/airstore/pkg/sources/providers"
 	"github.com/beam-cloud/airstore/pkg/tools"
 	_ "github.com/beam-cloud/airstore/pkg/tools/builtin" // self-registering tools
 	toolclients "github.com/beam-cloud/airstore/pkg/tools/clients"
 	"github.com/beam-cloud/airstore/pkg/tools/definitions"
 	"github.com/beam-cloud/airstore/pkg/types"
+	"github.com/beam-cloud/airstore/pkg/views"
 	pb "github.com/beam-cloud/airstore/proto"
 )
 
@@ -618,6 +618,7 @@ func (g *Gateway) registerServices() error {
 			g.s2Client,
 			g.Config.Sandbox.GetDefaultImage(),
 		)
+		wireSourceWatchRegistrar(orchestratorSvc, sourceService)
 		orchestratorSvc.Start(g.ctx)
 		agentAPI := orchestration.NewAgentAPI(g.BackendRepo, orchestratorSvc)
 
@@ -733,6 +734,17 @@ func (g *Gateway) registerServices() error {
 	}
 
 	return nil
+}
+
+type sourceWatchRegistrarTarget interface {
+	SetSourceWatchRegistrar(orchestration.SourceWatchRegistrar)
+}
+
+func wireSourceWatchRegistrar(target sourceWatchRegistrarTarget, registrar orchestration.SourceWatchRegistrar) {
+	if target == nil || registrar == nil {
+		return
+	}
+	target.SetSourceWatchRegistrar(registrar)
 }
 
 // Start is the gateway entry point

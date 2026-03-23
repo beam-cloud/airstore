@@ -5,6 +5,13 @@ import (
 	"time"
 )
 
+type HookDeliveryMode string
+
+const (
+	HookDeliveryModeSpawnTask HookDeliveryMode = "spawn_task"
+	HookDeliveryModeTaskInput HookDeliveryMode = "task_input"
+)
+
 // Hook is metadata on a filesystem path that creates tasks when something
 // changes at that path. A hook on "/skills" fires when files are created
 // or modified there. A hook on "/sources/gmail/inbox" fires when new
@@ -24,6 +31,10 @@ type Hook struct {
 	AgentConfig       map[string]any `json:"agent_config,omitempty" db:"-"`
 	Active            bool           `json:"active" db:"active"`
 	EventTypes        []string       `json:"event_types,omitempty" db:"event_types"`
+	DeliveryMode      HookDeliveryMode `json:"delivery_mode" db:"delivery_mode"`
+	TargetTaskID      *string        `json:"target_task_id,omitempty" db:"target_task_id"`
+	SystemManaged     bool           `json:"system_managed" db:"system_managed"`
+	OneShot           bool           `json:"one_shot" db:"one_shot"`
 	CreatedByMemberId *uint          `json:"created_by_member_id,omitempty" db:"created_by_member_id"`
 	TokenId           *uint          `json:"-" db:"token_id"`
 	EncryptedToken    []byte         `json:"-" db:"encrypted_token"`

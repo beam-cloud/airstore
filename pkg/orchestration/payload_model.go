@@ -110,13 +110,19 @@ func parseSubtaskRequestsPayload(raw string) []*types.SubtaskRequest {
 	if err := json.Unmarshal([]byte(raw), &reqs); err != nil {
 		return nil
 	}
-	filtered := reqs[:0]
-	for _, r := range reqs {
-		if strings.TrimSpace(r.Prompt) != "" {
-			filtered = append(filtered, r)
-		}
+	return types.NormalizeSubtaskRequests(reqs)
+}
+
+func parseSourceWatchRequestsPayload(raw string) []*types.SourceWatchRequest {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
 	}
-	return filtered
+	var reqs []*types.SourceWatchRequest
+	if err := json.Unmarshal([]byte(raw), &reqs); err != nil {
+		return nil
+	}
+	return types.NormalizeSourceWatchRequestList(reqs)
 }
 
 func (w WakeDirective) signal() *types.RunExecutionWakeSignal {
@@ -148,6 +154,19 @@ func (w WakeDirective) apply(values map[string]any) {
 		if body, err := json.Marshal(w.Agenda); err == nil {
 			values[types.OrchestrationOutboxPayloadWakeAgenda] = string(body)
 		}
+	}
+}
+
+func wakeDirectiveFromSignal(signal *types.RunExecutionWakeSignal) WakeDirective {
+	signal = types.NormalizeRunExecutionWakeSignal(signal)
+	if signal == nil {
+		return WakeDirective{}
+	}
+	return WakeDirective{
+		DelayMinutes:   signal.DelayMinutes,
+		Reason:         signal.Reason,
+		FollowUpPrompt: signal.FollowUpPrompt,
+		Agenda:         signal.WakeAgenda,
 	}
 }
 
@@ -349,37 +368,50 @@ func (e DispatchEnvelope) ToMap() map[string]any {
 }
 
 type RunResultEnvelope struct {
-	TaskID          string
-	AttemptID       string
-	ExitCode        int
-	ErrorText       string
-	ResultKey       string
-	RetryAttempt    int
-	WaitingForInput bool
-	Wake            WakeDirective
-	SubtaskRequests []*types.SubtaskRequest
+	TaskID              string
+	AttemptID           string
+	ExitCode            int
+	ErrorText           string
+	ResultKey           string
+	RetryAttempt        int
+	PostRun             *types.RunExecutionPostRun
+	WaitingForInput     bool
+	Wake                WakeDirective
+	SubtaskRequests     []*types.SubtaskRequest
+	SourceWatchRequests []*types.SourceWatchRequest
 }
 
 func parseRunResultEnvelope(values map[string]any) RunResultEnvelope {
-	return RunResultEnvelope{
-		TaskID:          strings.TrimSpace(streamValueAsString(values, types.OrchestrationOutboxPayloadTaskID)),
-		AttemptID:       strings.TrimSpace(streamValueAsString(values, types.OrchestrationOutboxPayloadAttemptID)),
-		ExitCode:        intFromAny(values[types.OrchestrationOutboxPayloadExitCode]),
-		ErrorText:       streamValueAsString(values, types.OrchestrationOutboxPayloadError),
-		ResultKey:       strings.TrimSpace(streamValueAsString(values, types.OrchestrationOutboxPayloadIdempotency)),
-		RetryAttempt:    intFromAny(values[types.OrchestrationOutboxPayloadDispatchAttempt]),
-		WaitingForInput: boolFromAny(values[types.OrchestrationOutboxPayloadWaitingForInput]),
-		Wake:            parseWakeDirective(values),
-		SubtaskRequests: parseSubtaskRequestsPayload(streamValueAsString(values, types.OrchestrationOutboxPayloadSubtaskRequests)),
+	postRun := types.NormalizeRunExecutionPostRun(&types.RunExecutionPostRun{
+		WaitingForInput:     boolFromAny(values[types.OrchestrationOutboxPayloadWaitingForInput]),
+		WakeSignal:          parseWakeDirective(values).signal(),
+		SubtaskRequests:     parseSubtaskRequestsPayload(streamValueAsString(values, types.OrchestrationOutboxPayloadSubtaskRequests)),
+		SourceWatchRequests: parseSourceWatchRequestsPayload(streamValueAsString(values, types.OrchestrationOutboxPayloadSourceWatchRequests)),
+	})
+
+	envelope := RunResultEnvelope{
+		TaskID:       strings.TrimSpace(streamValueAsString(values, types.OrchestrationOutboxPayloadTaskID)),
+		AttemptID:    strings.TrimSpace(streamValueAsString(values, types.OrchestrationOutboxPayloadAttemptID)),
+		ExitCode:     intFromAny(values[types.OrchestrationOutboxPayloadExitCode]),
+		ErrorText:    streamValueAsString(values, types.OrchestrationOutboxPayloadError),
+		ResultKey:    strings.TrimSpace(streamValueAsString(values, types.OrchestrationOutboxPayloadIdempotency)),
+		RetryAttempt: intFromAny(values[types.OrchestrationOutboxPayloadDispatchAttempt]),
+		PostRun:      postRun,
 	}
+	if postRun != nil {
+		envelope.WaitingForInput = postRun.WaitingForInput
+		envelope.Wake = wakeDirectiveFromSignal(postRun.WakeSignal)
+		envelope.SubtaskRequests = postRun.SubtaskRequests
+		envelope.SourceWatchRequests = postRun.SourceWatchRequests
+	}
+	return envelope
 }
 
 func (e RunResultEnvelope) ToMap() map[string]any {
 	values := map[string]any{
-		types.OrchestrationOutboxPayloadTaskID:          strings.TrimSpace(e.TaskID),
-		types.OrchestrationOutboxPayloadAttemptID:       strings.TrimSpace(e.AttemptID),
-		types.OrchestrationOutboxPayloadExitCode:        e.ExitCode,
-		types.OrchestrationOutboxPayloadWaitingForInput: e.WaitingForInput,
+		types.OrchestrationOutboxPayloadTaskID:    strings.TrimSpace(e.TaskID),
+		types.OrchestrationOutboxPayloadAttemptID: strings.TrimSpace(e.AttemptID),
+		types.OrchestrationOutboxPayloadExitCode:  e.ExitCode,
 	}
 	if errText := strings.TrimSpace(e.ErrorText); errText != "" {
 		values[types.OrchestrationOutboxPayloadError] = errText
@@ -390,13 +422,36 @@ func (e RunResultEnvelope) ToMap() map[string]any {
 	if e.RetryAttempt > 0 {
 		values[types.OrchestrationOutboxPayloadDispatchAttempt] = e.RetryAttempt
 	}
-	e.Wake.apply(values)
-	if len(e.SubtaskRequests) > 0 {
-		if body, err := json.Marshal(e.SubtaskRequests); err == nil {
-			values[types.OrchestrationOutboxPayloadSubtaskRequests] = string(body)
+	postRun := e.normalizedPostRun()
+	if postRun != nil {
+		values[types.OrchestrationOutboxPayloadWaitingForInput] = postRun.WaitingForInput
+		wakeDirectiveFromSignal(postRun.WakeSignal).apply(values)
+		if len(postRun.SubtaskRequests) > 0 {
+			if body, err := json.Marshal(postRun.SubtaskRequests); err == nil {
+				values[types.OrchestrationOutboxPayloadSubtaskRequests] = string(body)
+			}
 		}
+		if len(postRun.SourceWatchRequests) > 0 {
+			if body, err := json.Marshal(postRun.SourceWatchRequests); err == nil {
+				values[types.OrchestrationOutboxPayloadSourceWatchRequests] = string(body)
+			}
+		}
+	} else if e.WaitingForInput {
+		values[types.OrchestrationOutboxPayloadWaitingForInput] = true
 	}
 	return values
+}
+
+func (e RunResultEnvelope) normalizedPostRun() *types.RunExecutionPostRun {
+	if normalized := types.NormalizeRunExecutionPostRun(e.PostRun); normalized != nil {
+		return normalized
+	}
+	return types.NormalizeRunExecutionPostRun(&types.RunExecutionPostRun{
+		WaitingForInput:     e.WaitingForInput,
+		WakeSignal:          e.Wake.signal(),
+		SubtaskRequests:     e.SubtaskRequests,
+		SourceWatchRequests: e.SourceWatchRequests,
+	})
 }
 
 func decodeInputProvenance(value any) *InputProvenance {

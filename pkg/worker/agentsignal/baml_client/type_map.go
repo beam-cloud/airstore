@@ -31,6 +31,8 @@ var typeMap = map[string]reflect.Type{
 	"STREAM_TYPES.FanOutSignal":       reflect.TypeOf(stream_types.FanOutSignal{}),
 	"TYPES.FollowUpSignal":            reflect.TypeOf(types.FollowUpSignal{}),
 	"STREAM_TYPES.FollowUpSignal":     reflect.TypeOf(stream_types.FollowUpSignal{}),
+	"TYPES.SourceWatchRequest":        reflect.TypeOf(types.SourceWatchRequest{}),
+	"STREAM_TYPES.SourceWatchRequest": reflect.TypeOf(stream_types.SourceWatchRequest{}),
 	"TYPES.SubtaskSpec":               reflect.TypeOf(types.SubtaskSpec{}),
 	"STREAM_TYPES.SubtaskSpec":        reflect.TypeOf(stream_types.SubtaskSpec{}),
 	"TYPES.TurnClassification":        reflect.TypeOf(types.TurnClassification{}),

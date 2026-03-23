@@ -722,10 +722,49 @@ func materializeTaskGroup(
 		persisted = append(persisted, mappedRowToViewRow(sheetID, componentID, taskID, schemaHash, outputSignature, outputs, row, now))
 	}
 	if len(persisted) == 0 {
-		persisted = []ViewRow{fallbackViewRow(sheetID, componentID, taskID, schemaHash, outputSignature, outputs, now)}
+		if carried := carryForwardStableVisibleRows(existingRows, schemaHash, sortedOutputIDs(outputs), outputSignature, now); len(carried) > 0 {
+			persisted = carried
+		} else {
+			persisted = []ViewRow{fallbackViewRow(sheetID, componentID, taskID, schemaHash, outputSignature, outputs, now)}
+		}
 	}
 	persisted = stabilizeMaterializedRows(existingRows, persisted)
 	return carryForwardBlankManualEdits(existingRows, schemaHash, persisted)
+}
+
+func carryForwardStableVisibleRows(
+	existingRows []ViewRow,
+	schemaHash string,
+	outputIDs []string,
+	outputSignature string,
+	now time.Time,
+) []ViewRow {
+	if len(existingRows) == 0 {
+		return nil
+	}
+	carried := make([]ViewRow, 0, len(existingRows))
+	for _, row := range existingRows {
+		if row.Marker {
+			return nil
+		}
+		if strings.TrimSpace(row.SchemaHash) != strings.TrimSpace(schemaHash) {
+			return nil
+		}
+		if !slicesMatch(row.OutputIDs, outputIDs) {
+			return nil
+		}
+		if strings.TrimSpace(row.OutputSignature) != strings.TrimSpace(outputSignature) {
+			return nil
+		}
+		cloned := row
+		cloned.OutputIDs = append([]string(nil), row.OutputIDs...)
+		cloned.SourceOutputIDs = append([]string(nil), row.SourceOutputIDs...)
+		cloned.Cells = copyStringMap(row.Cells)
+		cloned.Manual = copyStringMap(row.Manual)
+		cloned.UpdatedAt = now
+		carried = append(carried, cloned)
+	}
+	return carried
 }
 
 func stabilizeMaterializedRows(existingRows, persisted []ViewRow) []ViewRow {
@@ -2332,14 +2371,27 @@ func rowMatchesExcludedSnapshot(
 		if snapshotComponentID != "" && componentID != "" && snapshotComponentID != componentID {
 			continue
 		}
-		if sourceOutputIDsMatch(normalizedSources, snapshot.SourceOutputIDs) {
+		snapshotSources := uniqueTrimmedStrings(snapshot.SourceOutputIDs)
+		sort.Strings(snapshotSources)
+		if sourceOutputIDsMatch(normalizedSources, snapshotSources) {
 			return true
+		}
+		snapshotFingerprint := excludedRowCellsFingerprint(snapshot.Cells)
+		if len(normalizedSources) > 0 && len(snapshotSources) > 0 {
+			// If both sides have concrete source identity and they do not overlap,
+			// treat this as a new row instance even if the mapper reused the same row_key.
+			continue
+		}
+		if cellFingerprint != "" && snapshotFingerprint != "" {
+			if cellFingerprint == snapshotFingerprint {
+				return true
+			}
+			// When both sides have meaningful cell identity and it changed, do not
+			// let a recycled row_key suppress the fresh row.
+			continue
 		}
 		snapshotRowKey := normalizeToken(strings.TrimSpace(snapshot.RowKey))
 		if rowKey != "" && snapshotRowKey != "" && snapshotRowKey == rowKey {
-			return true
-		}
-		if cellFingerprint != "" && cellFingerprint == excludedRowCellsFingerprint(snapshot.Cells) {
 			return true
 		}
 	}

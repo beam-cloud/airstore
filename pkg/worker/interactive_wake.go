@@ -25,40 +25,42 @@ const (
 )
 
 var wakePlannerFilePathRE = regexp.MustCompile(`(?:/workspace/)?[A-Za-z0-9][A-Za-z0-9._/-]*\.(?:json|md|txt|csv|ya?ml)`)
+var sourceWatchEmailRE = regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`)
 
-type followUpPlan struct {
-	wakeSignal      *types.RunExecutionWakeSignal
-	subtaskRequests []*types.SubtaskRequest
-}
-
-func (w *Worker) planFollowUp(
+func (w *Worker) buildPostRunPlan(
 	ctx context.Context,
 	task types.RunExecution,
 	tracker *taskOutputTracker,
 	agentMsg, lastPrompt, mountSource string,
 	env map[string]string,
 	bamlEnv map[string]string,
-) followUpPlan {
-	agentMsg = followUpPlanningMessage(agentMsg, tracker)
-	if agentMsg == "" {
-		return followUpPlan{}
+	explicitWake *types.RunExecutionWakeSignal,
+) *types.RunExecutionPostRun {
+	planned := w.classifyFollowUp(ctx, tracker, agentMsg, lastPrompt, mountSource, env, bamlEnv)
+	if planned == nil && explicitWake == nil {
+		return nil
 	}
-	wakeSignal := w.classifyFollowUp(ctx, agentMsg, lastPrompt, mountSource, env, bamlEnv)
-	if wakeSignal == nil {
-		return followUpPlan{}
+
+	if planned == nil {
+		planned = &types.RunExecutionPostRun{}
 	}
-	return followUpPlan{
-		wakeSignal:      wakeSignal,
-		subtaskRequests: w.classifySubtasks(ctx, task, tracker, agentMsg, lastPrompt, wakeSignal, bamlEnv),
+	if explicitWake != nil {
+		planned.WakeSignal = explicitWake
 	}
+	if planned.WakeSignal != nil {
+		planned.SubtaskRequests = w.classifySubtasks(ctx, task, tracker, agentMsg, lastPrompt, planned.WakeSignal, bamlEnv)
+	}
+	return types.NormalizeRunExecutionPostRun(planned)
 }
 
 func (w *Worker) classifyFollowUp(
 	ctx context.Context,
+	tracker *taskOutputTracker,
 	agentMsg, lastPrompt, mountSource string,
 	env map[string]string,
 	bamlEnv map[string]string,
-) *types.RunExecutionWakeSignal {
+) *types.RunExecutionPostRun {
+	agentMsg = followUpPlanningMessage(agentMsg, tracker)
 	if agentMsg == "" {
 		return nil
 	}
@@ -87,6 +89,16 @@ func (w *Worker) classifyFollowUp(
 	if err != nil || fu.Intent != signaltypes.FollowUpIntentFOLLOW_UP {
 		return nil
 	}
+
+	result := &types.RunExecutionPostRun{
+		SourceWatchRequests: normalizeSourceWatchRequests(fu.Source_watch_requests, tracker, fu.Reason),
+	}
+
+	shouldCreateWakeSignal := int(fu.Delay_minutes) > 0 || fu.Reason != nil || fu.Follow_up_prompt != nil || len(fu.Wake_agenda) > 0 || len(result.SourceWatchRequests) == 0
+	if !shouldCreateWakeSignal {
+		return types.NormalizeRunExecutionPostRun(result)
+	}
+
 	ws := &types.RunExecutionWakeSignal{DelayMinutes: int(fu.Delay_minutes)}
 	if fu.Reason != nil {
 		ws.Reason = strings.TrimSpace(*fu.Reason)
@@ -128,7 +140,284 @@ func (w *Worker) classifyFollowUp(
 	if ws.DelayMinutes <= 0 {
 		ws.DelayMinutes = 5
 	}
-	return ws
+	result.WakeSignal = ws
+	return types.NormalizeRunExecutionPostRun(result)
+}
+
+func normalizeSourceWatchRequests(
+	raw []signaltypes.SourceWatchRequest,
+	tracker *taskOutputTracker,
+	fallbackReason *string,
+) []*types.SourceWatchRequest {
+	var normalized []*types.SourceWatchRequest
+	seen := make(map[string]int)
+	trackedFallbacks := deriveTrackedOutputSourceWatchRequests(tracker, fallbackReason)
+
+	add := func(req *types.SourceWatchRequest) {
+		req = normalizePlannedSourceWatchRequest(req, fallbackReason)
+		if req == nil {
+			return
+		}
+		key := types.SourceWatchRequestMergeKey(req)
+		if idx, exists := seen[key]; exists {
+			normalized[idx] = types.MergeSourceWatchRequests(normalized[idx], req)
+			return
+		}
+		seen[key] = len(normalized)
+		normalized = append(normalized, req)
+	}
+
+	for _, item := range raw {
+		req := &types.SourceWatchRequest{
+			Integration:        item.Integration,
+			Reason:             derefString(item.Reason),
+			Query:              derefString(item.Query),
+			EntityKey:          derefString(item.Entity_key),
+			EntityLabel:        derefString(item.Entity_label),
+			SourceOutputID:     derefString(item.Source_output_id),
+			ThreadID:           derefString(item.Thread_id),
+			MessageID:          derefString(item.Message_id),
+			IncludeAttachments: item.Include_attachments,
+			IncludeInline:      item.Include_inline,
+			IncludeMessageBody: item.Include_message_body,
+		}
+		if tracked := bestMatchingTrackedSourceWatchRequest(req, trackedFallbacks); tracked != nil {
+			req = types.MergeSourceWatchRequests(req, tracked)
+		}
+		add(req)
+	}
+	// Tracked outputs are a fallback when the classifier did not materialize a
+	// concrete watch. Appending them unconditionally can arm unrelated watches
+	// from older draft/sent artifacts in the same task.
+	if len(normalized) == 0 {
+		for _, req := range trackedFallbacks {
+			add(req)
+		}
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
+}
+
+func bestMatchingTrackedSourceWatchRequest(
+	req *types.SourceWatchRequest,
+	tracked []*types.SourceWatchRequest,
+) *types.SourceWatchRequest {
+	req = types.CanonicalizeSourceWatchRequest(req)
+	if req == nil || len(tracked) == 0 {
+		return nil
+	}
+
+	bestScore := 0
+	var best []*types.SourceWatchRequest
+	for _, candidate := range tracked {
+		score := trackedSourceWatchMatchScore(req, candidate)
+		if score <= 0 {
+			continue
+		}
+		if score > bestScore {
+			bestScore = score
+			best = []*types.SourceWatchRequest{candidate}
+			continue
+		}
+		if score == bestScore {
+			best = append(best, candidate)
+		}
+	}
+	if len(best) == 0 {
+		return nil
+	}
+	if len(best) == 1 || trackedSourceWatchCandidatesAgree(best) {
+		return best[0]
+	}
+	return nil
+}
+
+func trackedSourceWatchMatchScore(req, candidate *types.SourceWatchRequest) int {
+	candidate = types.CanonicalizeSourceWatchRequest(candidate)
+	if req == nil || candidate == nil {
+		return 0
+	}
+	if !strings.EqualFold(req.Integration, candidate.Integration) {
+		return 0
+	}
+
+	score := 0
+	if req.SourceOutputID != "" && req.SourceOutputID == candidate.SourceOutputID {
+		score += 100
+	}
+	if req.ThreadID != "" && req.ThreadID == candidate.ThreadID {
+		score += 90
+	}
+	if req.MessageID != "" && req.MessageID == candidate.MessageID {
+		score += 80
+	}
+	if req.EntityKey != "" && req.EntityKey == candidate.EntityKey {
+		score += 70
+	}
+	if trackedSourceWatchEmailMatches(req, candidate) {
+		score += 60
+	}
+	if trackedSourceWatchSubjectMatches(req, candidate) {
+		score += 25
+	}
+	if req.EntityLabel != "" && req.EntityLabel == candidate.EntityLabel {
+		score += 20
+	}
+	if req.Query != "" && req.Query == candidate.Query {
+		score += 15
+	}
+	return score
+}
+
+func trackedSourceWatchCandidatesAgree(candidates []*types.SourceWatchRequest) bool {
+	if len(candidates) <= 1 {
+		return true
+	}
+	threadID := strings.TrimSpace(candidates[0].ThreadID)
+	messageID := strings.TrimSpace(candidates[0].MessageID)
+	if threadID != "" || messageID != "" {
+		for _, candidate := range candidates[1:] {
+			if strings.TrimSpace(candidate.ThreadID) != threadID {
+				return false
+			}
+			if strings.TrimSpace(candidate.MessageID) != messageID {
+				return false
+			}
+		}
+		return true
+	}
+
+	sourceOutputID := strings.TrimSpace(candidates[0].SourceOutputID)
+	for _, candidate := range candidates[1:] {
+		if strings.TrimSpace(candidate.SourceOutputID) != sourceOutputID {
+			return false
+		}
+	}
+	return sourceOutputID != ""
+}
+
+func trackedSourceWatchEmailMatches(req, candidate *types.SourceWatchRequest) bool {
+	recipients := sourceWatchEmails(candidate.EntityKey, candidate.EntityLabel, candidate.Query)
+	if len(recipients) == 0 {
+		return false
+	}
+	for _, email := range sourceWatchEmails(req.EntityKey, req.EntityLabel, req.Query) {
+		for _, recipient := range recipients {
+			if email == recipient {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func trackedSourceWatchSubjectMatches(req, candidate *types.SourceWatchRequest) bool {
+	subject := normalizeArtifactToken(firstNonEmptyTrimmed(candidate.EntityLabel))
+	if subject == "" {
+		return false
+	}
+	for _, value := range []string{req.EntityLabel, req.Query} {
+		if strings.Contains(normalizeArtifactToken(value), subject) {
+			return true
+		}
+	}
+	return false
+}
+
+func sourceWatchEmails(values ...string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if email := normalizeFanOutEmailAddress(value); email != "" {
+			if _, exists := seen[email]; !exists {
+				seen[email] = struct{}{}
+				out = append(out, email)
+			}
+		}
+		for _, match := range sourceWatchEmailRE.FindAllString(value, -1) {
+			if email := normalizeFanOutEmailAddress(match); email != "" {
+				if _, exists := seen[email]; !exists {
+					seen[email] = struct{}{}
+					out = append(out, email)
+				}
+			}
+		}
+	}
+	return out
+}
+
+func deriveTrackedOutputSourceWatchRequests(
+	tracker *taskOutputTracker,
+	fallbackReason *string,
+) []*types.SourceWatchRequest {
+	if tracker == nil {
+		return nil
+	}
+	summaries := tracker.TrackedOutputSummaries()
+	if len(summaries) == 0 {
+		return nil
+	}
+	out := make([]*types.SourceWatchRequest, 0, len(summaries))
+	for _, summary := range summaries {
+		threadID := strings.TrimSpace(summary.ThreadID)
+		if threadID == "" {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(summary.OutputType), types.TaskOutputTypeEmail) &&
+			!strings.Contains(strings.ToLower(strings.TrimSpace(summary.ArtifactKey)), "email") {
+			continue
+		}
+		query := buildGmailWatchFallbackQuery(summary)
+		out = append(out, &types.SourceWatchRequest{
+			Integration:        "gmail",
+			Reason:             derefString(fallbackReason),
+			Query:              query,
+			EventTypes:         []string{"fs.create"},
+			EntityKey:          strings.TrimSpace(summary.EntityKey),
+			EntityLabel:        firstNonEmptyTrimmed(summary.Subject, summary.Title, summary.EntityKey),
+			SourceOutputID:     strings.TrimSpace(summary.OutputID),
+			ThreadID:           threadID,
+			MessageID:          strings.TrimSpace(summary.MessageID),
+			IncludeAttachments: true,
+			IncludeMessageBody: true,
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func buildGmailWatchFallbackQuery(summary trackedOutputSummary) string {
+	parts := make([]string, 0, 3)
+	if recipient := strings.TrimSpace(summary.Recipient); recipient != "" {
+		parts = append(parts, fmt.Sprintf("to:%q", recipient))
+	}
+	if subject := strings.TrimSpace(summary.Subject); subject != "" {
+		parts = append(parts, fmt.Sprintf("subject:%q", subject))
+	}
+	return strings.TrimSpace(strings.Join(parts, " "))
+}
+
+func normalizePlannedSourceWatchRequest(req *types.SourceWatchRequest, fallbackReason *string) *types.SourceWatchRequest {
+	if req == nil {
+		return nil
+	}
+	normalized := types.CanonicalizeSourceWatchRequest(req)
+	if normalized == nil {
+		return nil
+	}
+	normalized.Reason = firstNonEmptyTrimmed(normalized.Reason, derefString(fallbackReason))
+	return types.NormalizeSourceWatchRequest(normalized)
+}
+
+func derefString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(*value)
 }
 
 func wakeAgendaSummary(items []*types.TaskWakeAgendaItem) string {
@@ -449,6 +738,18 @@ func followUpPlanningMessage(agentMsg string, tracker *taskOutputTracker) string
 		}
 		if title := strings.TrimSpace(summary.Title); title != "" {
 			line += ": " + title
+		}
+		if threadID := strings.TrimSpace(summary.ThreadID); threadID != "" {
+			line += fmt.Sprintf(" [thread_id=%s]", threadID)
+		}
+		if messageID := strings.TrimSpace(summary.MessageID); messageID != "" {
+			line += fmt.Sprintf(" [message_id=%s]", messageID)
+		}
+		if recipient := strings.TrimSpace(summary.Recipient); recipient != "" {
+			line += fmt.Sprintf(" [recipient=%s]", recipient)
+		}
+		if subject := strings.TrimSpace(summary.Subject); subject != "" && subject != strings.TrimSpace(summary.Title) {
+			line += fmt.Sprintf(" [subject=%s]", subject)
 		}
 		lines = append(lines, line)
 	}

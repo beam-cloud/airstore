@@ -1125,6 +1125,8 @@ func (g *FilesystemGroup) listSources(c echo.Context, ctx context.Context, relPa
 }
 
 func (g *FilesystemGroup) statSources(c echo.Context, ctx context.Context, fullPath, relPath string) error {
+	fullPath = types.SourcePath(relPath)
+
 	// Root /sources — count only connected integrations
 	if relPath == "" {
 		childCount := 0
@@ -1142,6 +1144,7 @@ func (g *FilesystemGroup) statSources(c echo.Context, ctx context.Context, fullP
 	}
 
 	integration, subPath := splitFirstPath(relPath)
+	var sourceInfo *pb.SourceFileInfo
 
 	// Delegate to SourceService which handles connection visibility
 	if g.sourceService != nil {
@@ -1152,39 +1155,58 @@ func (g *FilesystemGroup) statSources(c echo.Context, ctx context.Context, fullP
 		if !resp.Ok {
 			return ErrorResponse(c, http.StatusNotFound, resp.Error)
 		}
+		sourceInfo = resp.Info
 	} else if g.sourceRegistry != nil && g.sourceRegistry.Get(integration) == nil {
 		return ErrorResponse(c, http.StatusNotFound, "integration not found")
 	}
 
-	// Integration root
-	if subPath == "" {
+	buildSourceVirtualFile := func(name string) *types.VirtualFile {
 		vf := types.NewVirtualFile(
 			hashPath(fullPath),
-			integration,
+			name,
 			fullPath,
 			types.VFTypeSource,
-		).WithFolder(true).WithReadOnly(true).WithMetadata(types.MetaKeyProvider, integration)
+		).WithReadOnly(true).WithMetadata(types.MetaKeyProvider, integration)
+
+		if sourceInfo == nil {
+			return vf
+		}
+
+		isDir := sourceInfo.GetIsDir() || sourceInfo.GetMode()&uint32(syscall.S_IFDIR) != 0
+		vf = vf.WithFolder(isDir)
+		if sourceInfo.GetSize() > 0 {
+			vf = vf.WithSize(sourceInfo.GetSize())
+		}
+		if sourceInfo.GetMtime() > 0 {
+			vf = vf.WithModifiedAt(time.Unix(sourceInfo.GetMtime(), 0))
+		}
+		return vf
+	}
+
+	// Integration root
+	if subPath == "" {
+		vf := buildSourceVirtualFile(integration).WithFolder(true)
 		return SuccessResponse(c, vf)
 	}
 
 	// README.md
 	if subPath == types.SourceStatusFile {
-		vf := types.NewVirtualFile(
-			hashPath(fullPath),
-			types.SourceStatusFile,
-			fullPath,
-			types.VFTypeSource,
-		).WithFolder(false).WithReadOnly(true).WithMetadata(types.MetaKeyProvider, integration)
+		vf := buildSourceVirtualFile(types.SourceStatusFile).WithFolder(false)
 		return SuccessResponse(c, vf)
 	}
 
-	// Other paths - return generic source file
-	vf := types.NewVirtualFile(
-		hashPath(fullPath),
-		pathName(subPath),
-		fullPath,
-		types.VFTypeSource,
-	).WithReadOnly(true).WithMetadata(types.MetaKeyProvider, integration)
+	vf := buildSourceVirtualFile(pathName(subPath))
+	if sourceInfo != nil && sourceInfo.GetIsDir() && g.sourceService != nil {
+		if resp, err := g.sourceService.GetView(ctx, &pb.GetViewRequest{Path: types.SourcePath(relPath)}); err == nil && resp.Ok && resp.View != nil {
+			vf = vf.WithMetadata(types.MetaKeyExternalID, resp.View.ExternalId)
+			if resp.View.Guidance != "" {
+				vf = vf.WithMetadata(types.MetaKeyGuidance, resp.View.Guidance)
+			}
+		}
+		if resp, err := g.sourceService.ReadDir(ctx, &pb.SourceReadDirRequest{Path: relPath}); err == nil && resp.Ok {
+			vf = vf.WithChildCount(len(resp.Entries))
+		}
+	}
 	return SuccessResponse(c, vf)
 }
 

@@ -15,17 +15,30 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+type SourceWatchRegistrar interface {
+	RegisterTaskSourceWatches(ctx context.Context, task *types.AgentTask, wakeSignal *types.RunExecutionWakeSignal, requests []*types.SourceWatchRequest) (*types.TaskBlockerSpec, error)
+	CleanupTaskSourceWatches(ctx context.Context, task *types.AgentTask) error
+}
+
+type runSettlement struct {
+	waitingForInput bool
+	wakeSignal      *types.RunExecutionWakeSignal
+	blocker         *types.TaskBlockerSpec
+	subtaskRequests []*types.SubtaskRequest
+}
+
 type RuntimeLoops struct {
-	backend            repository.BackendRepository
-	store              *repository.OrchestrationStore
-	terminalIO         repository.TerminalIORepository
-	lifecycle          *TaskLifecycle
-	instanceController *ExecutionInstanceController
-	runFactory         *RunFactory
-	taskFlows          *TaskFlows
-	dispatchConsumerID string
-	resultConsumerID   string
-	publishTaskUpdate  func(context.Context, uint, string)
+	backend              repository.BackendRepository
+	store                *repository.OrchestrationStore
+	terminalIO           repository.TerminalIORepository
+	lifecycle            *TaskLifecycle
+	instanceController   *ExecutionInstanceController
+	runFactory           *RunFactory
+	taskFlows            *TaskFlows
+	sourceWatchRegistrar SourceWatchRegistrar
+	dispatchConsumerID   string
+	resultConsumerID     string
+	publishTaskUpdate    func(context.Context, uint, string)
 }
 
 func NewRuntimeLoops(
@@ -52,6 +65,13 @@ func NewRuntimeLoops(
 		resultConsumerID:   resultConsumerID,
 		publishTaskUpdate:  publishTaskUpdate,
 	}
+}
+
+func (r *RuntimeLoops) SetSourceWatchRegistrar(registrar SourceWatchRegistrar) {
+	if r == nil {
+		return
+	}
+	r.sourceWatchRegistrar = registrar
 }
 
 func (r *RuntimeLoops) RunOutboxLoop(ctx context.Context) {
@@ -551,9 +571,7 @@ func (r *RuntimeLoops) applyRunResult(ctx context.Context, result RunResultEnvel
 		result.TaskID,
 		result.ExitCode,
 		result.ErrorText,
-		result.WaitingForInput,
-		result.Wake.signal(),
-		result.SubtaskRequests,
+		result.normalizedPostRun(),
 	)
 }
 
@@ -563,9 +581,7 @@ func (r *RuntimeLoops) finalizeRunAttempt(
 	taskID string,
 	exitCode int,
 	errText string,
-	waitingForInput bool,
-	wakeSignal *types.RunExecutionWakeSignal,
-	subtaskReqs []*types.SubtaskRequest,
+	postRun *types.RunExecutionPostRun,
 ) error {
 	if r.backend == nil || attempt == nil {
 		return nil
@@ -574,9 +590,30 @@ func (r *RuntimeLoops) finalizeRunAttempt(
 		return nil
 	}
 
+	task, err := r.originTaskForRun(ctx, attempt.RunID)
+	if err != nil {
+		return fmt.Errorf("lookup origin task: %w", err)
+	}
 	now := time.Now()
 	attemptStatus, runStatus, errMsg := types.ClassifyExecutionOutcome(exitCode, errText)
 
+	if err := r.persistRunCompletion(ctx, attempt, taskID, exitCode, errText, now, attemptStatus, runStatus, errMsg); err != nil {
+		return err
+	}
+	return r.applyPostRunSettlement(ctx, task, attempt.RunID, postRun)
+}
+
+func (r *RuntimeLoops) persistRunCompletion(
+	ctx context.Context,
+	attempt *types.AgentRunAttempt,
+	taskID string,
+	exitCode int,
+	errText string,
+	now time.Time,
+	attemptStatus types.AgentAttemptStatus,
+	runStatus types.AgentRunStatus,
+	errMsg *string,
+) error {
 	if err := r.backend.UpdateAgentRunAttemptResult(ctx, attempt.ID, attemptStatus, &exitCode, now, errMsg); err != nil {
 		return fmt.Errorf("update run attempt result: %w", err)
 	}
@@ -599,39 +636,141 @@ func (r *RuntimeLoops) finalizeRunAttempt(
 	if err := appendRunSnapshotWithBackend(ctx, r.backend, attempt.RunID, runStatus, nil, &now, errMsg, payload); err != nil {
 		return fmt.Errorf("append completion snapshot: %w", err)
 	}
-	if err := r.settleOriginTask(ctx, attempt.RunID, waitingForInput, wakeSignal, subtaskReqs); err != nil {
-		return fmt.Errorf("settle origin task: %w", err)
+	return nil
+}
+
+func (r *RuntimeLoops) applyPostRunSettlement(
+	ctx context.Context,
+	task *types.AgentTask,
+	runID string,
+	postRun *types.RunExecutionPostRun,
+) error {
+	postRun = types.NormalizeRunExecutionPostRun(postRun)
+	settlement := r.resolveRunSettlement(postRun)
+	sourceWatchArmed := postRun != nil && len(postRun.SourceWatchRequests) > 0
+	if sourceWatchArmed {
+		if task == nil {
+			return r.handleRunSettlementFailure(ctx, task, runID, fmt.Errorf("apply source watch follow-up: origin task is required"))
+		}
+		if r.sourceWatchRegistrar == nil {
+			return r.handleRunSettlementFailure(ctx, task, runID, fmt.Errorf("apply source watch follow-up: source watch registrar is unavailable"))
+		}
+		blocker, err := r.sourceWatchRegistrar.RegisterTaskSourceWatches(ctx, task, postRun.WakeSignal, postRun.SourceWatchRequests)
+		if err != nil {
+			return r.handleRunSettlementFailure(ctx, task, runID, fmt.Errorf("apply source watch follow-up: %w", err))
+		}
+		if blocker == nil {
+			return r.handleRunSettlementFailure(ctx, task, runID, fmt.Errorf("apply source watch follow-up: did not materialize any source views"))
+		}
+		// Source-driven follow-ups are sleeps, not human-input waits. Keep the
+		// watch metadata for registration, but let lifecycle park the task in
+		// sleeping so the UI and wake plumbing stay aligned.
+		settlement.wakeSignal = sourceWatchWakeSignal(settlement.wakeSignal, postRun.SourceWatchRequests)
+		settlement.blocker = nil
+		settlement.waitingForInput = false
+	}
+	if err := r.settleOriginTask(ctx, runID, task, settlement); err != nil {
+		return r.handleRunSettlementFailure(ctx, task, runID, fmt.Errorf("settle origin task: %w", err))
+	}
+	if !sourceWatchArmed && !settlement.waitingForInput {
+		if err := r.cleanupTaskSourceWatches(ctx, task); err != nil {
+			log.Warn().Err(err).Str("run_id", runID).Msg("failed to clean up source watches")
+		}
 	}
 	return nil
 }
 
-func (r *RuntimeLoops) settleOriginTask(ctx context.Context, runID string, waitingForInput bool, wakeSignal *types.RunExecutionWakeSignal, subtaskReqs []*types.SubtaskRequest) error {
-	settleWake := wakeSignal
-	if len(subtaskReqs) > 0 {
-		settleWake = nil
+func (r *RuntimeLoops) handleRunSettlementFailure(
+	ctx context.Context,
+	task *types.AgentTask,
+	runID string,
+	err error,
+) error {
+	if task == nil {
+		return err
+	}
+	if cleanupErr := r.cleanupTaskSourceWatches(ctx, task); cleanupErr != nil {
+		log.Warn().Err(cleanupErr).Str("run_id", runID).Str("task_id", task.ID).
+			Msg("failed to clean up source watches after settlement failure")
+	}
+	if r.backend == nil {
+		return err
+	}
+	updated, updateErr := r.backend.UpdateTaskStateIfCurrentRun(ctx, types.CurrentRunTaskStateUpdate{
+		TaskID:        task.ID,
+		ExpectedRunID: runID,
+		State:         types.AgentTaskStateError,
+		TargetRunID:   &runID,
+	})
+	if updateErr != nil {
+		log.Warn().Err(updateErr).Str("run_id", runID).Str("task_id", task.ID).
+			Msg("failed to mark task errored after settlement failure")
+		return err
+	}
+	if !updated {
+		fresh, refetchErr := r.backend.GetTaskByID(ctx, task.ID)
+		if refetchErr != nil {
+			log.Warn().Err(refetchErr).Str("run_id", runID).Str("task_id", task.ID).
+				Msg("failed to refetch task after settlement failure state miss")
+			return err
+		}
+		if fresh == nil || fresh.State.IsTerminal() {
+			return err
+		}
+		if fresh.TargetRunID != nil && strings.TrimSpace(*fresh.TargetRunID) != "" && *fresh.TargetRunID != runID {
+			return err
+		}
+		if isValidTransition(fresh.State, types.AgentTaskStateError) {
+			if updateErr := r.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
+				TaskID:      fresh.ID,
+				State:       types.AgentTaskStateError,
+				TargetRunID: &runID,
+			}); updateErr != nil {
+				log.Warn().Err(updateErr).Str("run_id", runID).Str("task_id", task.ID).
+					Msg("failed to force task errored after settlement failure")
+				return err
+			}
+			task = fresh
+			updated = true
+		}
+	}
+	if updated {
+		task.State = types.AgentTaskStateError
+		task.TargetRunID = &runID
+		task.InputKind = ""
+		task.WaitingSummary = nil
+		task.CurrentBlocker = nil
+		task.CurrentBlockerID = nil
+		r.notifyTaskUpdate(ctx, task.WorkspaceID, task.ID)
+	}
+	return err
+}
+
+func (r *RuntimeLoops) settleOriginTask(ctx context.Context, runID string, task *types.AgentTask, settlement runSettlement) error {
+	if task == nil && len(settlement.subtaskRequests) > 0 {
+		var err error
+		task, err = r.originTaskForRun(ctx, runID)
+		if err != nil {
+			return fmt.Errorf("lookup task for subtask creation: %w", err)
+		}
 	}
 	if r.lifecycle != nil {
 		if err := r.lifecycle.Settle(ctx, runID, &SettleOpts{
-			WaitingForInput: waitingForInput,
-			WakeSignal:      settleWake,
+			WaitingForInput: settlement.waitingForInput,
+			WakeSignal:      settlement.wakeSignal,
+			Blocker:         settlement.blocker,
 		}); err != nil {
 			return err
 		}
 	}
-	if len(subtaskReqs) == 0 || r.taskFlows == nil {
+	if len(settlement.subtaskRequests) == 0 || r.taskFlows == nil {
+		return nil
+	}
+	if task == nil {
 		return nil
 	}
 
-	run, err := r.backend.GetAgentRunByID(ctx, runID)
-	if err != nil || run == nil {
-		return fmt.Errorf("lookup run for subtask creation: %w", err)
-	}
-	task, err := r.backend.GetTaskByID(ctx, run.OriginTaskID)
-	if err != nil || task == nil {
-		return fmt.Errorf("lookup task for subtask creation: %w", err)
-	}
-
-	for _, req := range subtaskReqs {
+	for _, req := range settlement.subtaskRequests {
 		parentID := task.ID
 		label := req.EntityLabel
 		spawnedBy := types.AgentTaskSpawnedByFanOut
@@ -655,6 +794,135 @@ func (r *RuntimeLoops) settleOriginTask(ctx context.Context, runID string, waiti
 		log.Info().Str("parent", task.ID).Str("child", child.ID).Str("entity", label).Msg("subtask created")
 	}
 	return nil
+}
+
+func (r *RuntimeLoops) resolveRunSettlement(postRun *types.RunExecutionPostRun) runSettlement {
+	if postRun == nil {
+		return runSettlement{}
+	}
+
+	settlement := runSettlement{
+		waitingForInput: postRun.WaitingForInput,
+		wakeSignal:      postRun.WakeSignal,
+		subtaskRequests: postRun.SubtaskRequests,
+	}
+	if len(settlement.subtaskRequests) > 0 {
+		settlement.wakeSignal = nil
+	}
+	return settlement
+}
+
+func sourceWatchWakeSignal(
+	existing *types.RunExecutionWakeSignal,
+	requests []*types.SourceWatchRequest,
+) *types.RunExecutionWakeSignal {
+	if existing != nil {
+		return existing
+	}
+	reason := sourceWatchWakeReason(requests)
+	return &types.RunExecutionWakeSignal{
+		DelayMinutes:   5,
+		Reason:         reason,
+		FollowUpPrompt: sourceWatchWakePrompt(requests, reason),
+		WakeAgenda: []*types.TaskWakeAgendaItem{{
+			Seq:    1,
+			Type:   "check_source_updates",
+			Title:  reason,
+			Reason: reason,
+		}},
+	}
+}
+
+func sourceWatchWakeReason(requests []*types.SourceWatchRequest) string {
+	for _, req := range requests {
+		normalized := types.NormalizeSourceWatchRequest(req)
+		if normalized == nil {
+			continue
+		}
+		if reason := strings.TrimSpace(normalized.Reason); reason != "" {
+			return reason
+		}
+	}
+	if len(requests) == 1 {
+		req := types.NormalizeSourceWatchRequest(requests[0])
+		if req != nil {
+			label := firstNonEmptySourceWatchValue(req.EntityLabel, req.EntityKey)
+			if label != "" {
+				return fmt.Sprintf("Check for updates to %s.", label)
+			}
+			if integration := strings.TrimSpace(req.Integration); integration != "" {
+				return fmt.Sprintf("Check %s for new updates.", integration)
+			}
+		}
+	}
+	return "Check watched sources for new updates."
+}
+
+func sourceWatchWakePrompt(requests []*types.SourceWatchRequest, reason string) string {
+	labels := make([]string, 0, len(requests))
+	seen := make(map[string]struct{}, len(requests))
+	for _, req := range requests {
+		normalized := types.NormalizeSourceWatchRequest(req)
+		if normalized == nil {
+			continue
+		}
+		label := firstNonEmptySourceWatchValue(normalized.EntityLabel, normalized.EntityKey)
+		if label == "" {
+			continue
+		}
+		if _, exists := seen[label]; exists {
+			continue
+		}
+		seen[label] = struct{}{}
+		labels = append(labels, label)
+	}
+	if len(labels) == 1 {
+		return fmt.Sprintf("Resume this task, inspect %s for any new source updates, and continue the follow-up based on the latest data.", labels[0])
+	}
+	if len(labels) > 1 {
+		return fmt.Sprintf("Resume this task, inspect the watched sources (%s) for any new updates, and continue the follow-up based on the latest data.", strings.Join(labels, ", "))
+	}
+	if strings.TrimSpace(reason) != "" {
+		return fmt.Sprintf("Resume this task, inspect the watched sources for any new updates, and continue based on the latest data. %s", reason)
+	}
+	return "Resume this task, inspect the watched sources for any new updates, and continue the follow-up based on the latest data."
+}
+
+func firstNonEmptySourceWatchValue(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func (r *RuntimeLoops) cleanupTaskSourceWatches(ctx context.Context, task *types.AgentTask) error {
+	if r.sourceWatchRegistrar == nil {
+		return nil
+	}
+	if task == nil {
+		return nil
+	}
+	return r.sourceWatchRegistrar.CleanupTaskSourceWatches(ctx, task)
+}
+
+func (r *RuntimeLoops) originTaskForRun(ctx context.Context, runID string) (*types.AgentTask, error) {
+	if r.backend == nil || strings.TrimSpace(runID) == "" {
+		return nil, nil
+	}
+	run, err := r.backend.GetAgentRunByID(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	if run == nil {
+		return nil, nil
+	}
+	task, err := r.backend.GetTaskByID(ctx, run.OriginTaskID)
+	if err != nil {
+		return nil, err
+	}
+	return task, nil
 }
 
 func (r *RuntimeLoops) updateExecutionInstanceCounts(ctx context.Context, runID string, runningDelta int) error {

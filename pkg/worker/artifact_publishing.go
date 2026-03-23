@@ -79,6 +79,10 @@ type trackedOutputSummary struct {
 	OutputType  string
 	ArtifactKey string
 	Title       string
+	ThreadID    string
+	MessageID   string
+	Recipient   string
+	Subject     string
 }
 
 type taskOutputTracker struct {
@@ -149,6 +153,25 @@ func (t *taskOutputTracker) RememberWithID(candidate outputCandidate, serverID s
 			OutputType:  strings.TrimSpace(candidate.OutputType),
 			ArtifactKey: candidate.artifactKey(),
 			Title:       strings.TrimSpace(candidate.Title),
+			ThreadID: strings.TrimSpace(firstNonEmptyTrimmed(
+				anyToTrimmedString(candidate.Data["thread_id"]),
+				anyToTrimmedString(candidate.Metadata["thread_id"]),
+			)),
+			MessageID: strings.TrimSpace(firstNonEmptyTrimmed(
+				anyToTrimmedString(candidate.Data["message_id"]),
+				anyToTrimmedString(candidate.Metadata["message_id"]),
+			)),
+			Recipient: strings.TrimSpace(firstNonEmptyTrimmed(
+				anyToTrimmedString(candidate.Data["recipient"]),
+				anyToTrimmedString(candidate.Data["to"]),
+				anyToTrimmedString(candidate.Metadata["recipient"]),
+				anyToTrimmedString(candidate.Metadata["to"]),
+			)),
+			Subject: strings.TrimSpace(firstNonEmptyTrimmed(
+				anyToTrimmedString(candidate.Data["subject"]),
+				anyToTrimmedString(candidate.Metadata["subject"]),
+				candidate.Title,
+			)),
 		}
 	}
 	if key != "" && candidate.isPrimaryDeliverable() {

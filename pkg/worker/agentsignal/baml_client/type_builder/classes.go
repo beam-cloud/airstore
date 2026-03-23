@@ -243,6 +243,10 @@ func (t *FollowUpSignalClassView) PropertyWake_agenda() (ClassPropertyView, erro
 	return t.inner.Property("wake_agenda")
 }
 
+func (t *FollowUpSignalClassView) PropertySource_watch_requests() (ClassPropertyView, error) {
+	return t.inner.Property("source_watch_requests")
+}
+
 func (t *TypeBuilder) FollowUpSignal() (*FollowUpSignalClassView, error) {
 	bld, err := t.inner.Class("FollowUpSignal")
 	if err != nil {
@@ -252,6 +256,78 @@ func (t *TypeBuilder) FollowUpSignal() (*FollowUpSignalClassView, error) {
 }
 
 func (t *FollowUpSignalClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
+type SourceWatchRequestClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *SourceWatchRequestClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *SourceWatchRequestClassView) PropertyIntegration() (ClassPropertyView, error) {
+	return t.inner.Property("integration")
+}
+
+func (t *SourceWatchRequestClassView) PropertyReason() (ClassPropertyView, error) {
+	return t.inner.Property("reason")
+}
+
+func (t *SourceWatchRequestClassView) PropertyQuery() (ClassPropertyView, error) {
+	return t.inner.Property("query")
+}
+
+func (t *SourceWatchRequestClassView) PropertyEntity_key() (ClassPropertyView, error) {
+	return t.inner.Property("entity_key")
+}
+
+func (t *SourceWatchRequestClassView) PropertyEntity_label() (ClassPropertyView, error) {
+	return t.inner.Property("entity_label")
+}
+
+func (t *SourceWatchRequestClassView) PropertySource_output_id() (ClassPropertyView, error) {
+	return t.inner.Property("source_output_id")
+}
+
+func (t *SourceWatchRequestClassView) PropertyThread_id() (ClassPropertyView, error) {
+	return t.inner.Property("thread_id")
+}
+
+func (t *SourceWatchRequestClassView) PropertyMessage_id() (ClassPropertyView, error) {
+	return t.inner.Property("message_id")
+}
+
+func (t *SourceWatchRequestClassView) PropertyInclude_attachments() (ClassPropertyView, error) {
+	return t.inner.Property("include_attachments")
+}
+
+func (t *SourceWatchRequestClassView) PropertyInclude_inline() (ClassPropertyView, error) {
+	return t.inner.Property("include_inline")
+}
+
+func (t *SourceWatchRequestClassView) PropertyInclude_message_body() (ClassPropertyView, error) {
+	return t.inner.Property("include_message_body")
+}
+
+func (t *TypeBuilder) SourceWatchRequest() (*SourceWatchRequestClassView, error) {
+	bld, err := t.inner.Class("SourceWatchRequest")
+	if err != nil {
+		return nil, err
+	}
+	return &SourceWatchRequestClassView{inner: bld}, nil
+}
+
+func (t *SourceWatchRequestClassView) Type() (baml.Type, error) {
 	return t.inner.Type()
 }
 

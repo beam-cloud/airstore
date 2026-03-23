@@ -433,6 +433,7 @@ const (
 	OrchestrationOutboxPayloadWakeFollowUpPrompt    = "wake_follow_up_prompt"
 	OrchestrationOutboxPayloadWakeAgenda            = "wake_agenda"
 	OrchestrationOutboxPayloadSubtaskRequests       = "subtask_requests"
+	OrchestrationOutboxPayloadSourceWatchRequests   = "source_watch_requests"
 )
 
 type OrchestrationOutboxEvent struct {
@@ -525,36 +526,37 @@ type AgentTask struct {
 }
 
 type AgentRun struct {
-	ID               string         `json:"id" db:"id"`
-	WorkspaceID      uint           `json:"workspace_id" db:"workspace_id"`
-	AgentID          *string        `json:"agent_id,omitempty" db:"agent_id"`
-	OriginTaskID     string         `json:"origin_task_id" db:"origin_task_id"`
-	HookID           *uint          `json:"hook_id,omitempty" db:"hook_id"`
-	Status           AgentRunStatus `json:"status" db:"status"`
-	SessionID        string         `json:"session_id" db:"session_id"`
-	SessionKey       *string        `json:"session_key,omitempty" db:"session_key"`
-	Provider         *string        `json:"provider,omitempty" db:"provider"`
-	Model            *string        `json:"model,omitempty" db:"model"`
-	ExecHost         string         `json:"exec_host" db:"exec_host"`
-	ExecSecurity     string         `json:"exec_security" db:"exec_security"`
-	ExecAsk          string         `json:"exec_ask" db:"exec_ask"`
-	RuntimeType      string         `json:"runtime_type" db:"runtime_type"`
-	WorkspaceAccess  string         `json:"workspace_access" db:"workspace_access"`
-	NetworkEnabled   bool           `json:"network_enabled" db:"network_enabled"`
-	Interactive      bool           `json:"interactive" db:"interactive"`
-	TimeoutMs        int            `json:"timeout_ms" db:"timeout_ms"`
-	StartedAt        *time.Time     `json:"started_at,omitempty" db:"started_at"`
-	EndedAt          *time.Time     `json:"ended_at,omitempty" db:"ended_at"`
-	ClaimedByWorker  *string        `json:"claimed_by_worker_id,omitempty" db:"claimed_by_worker_id"`
-	ClaimHeartbeatAt *time.Time     `json:"claim_heartbeat_at,omitempty" db:"claim_heartbeat_at"`
-	ClaimExpiresAt   *time.Time     `json:"claim_expires_at,omitempty" db:"claim_expires_at"`
-	Error            *string        `json:"error,omitempty" db:"error"`
-	SnapshotTS       int64          `json:"snapshot_ts" db:"snapshot_ts"`
-	CostUSD          float64        `json:"cost_usd" db:"cost_usd"`
-	UsageJSON        map[string]any `json:"usage_json" db:"-"`
-	DeliveryJSON     map[string]any `json:"delivery_json" db:"-"`
-	CreatedAt        time.Time      `json:"created_at" db:"created_at"`
-	UpdatedAt        time.Time      `json:"updated_at" db:"updated_at"`
+	ID                string         `json:"id" db:"id"`
+	WorkspaceID       uint           `json:"workspace_id" db:"workspace_id"`
+	AgentID           *string        `json:"agent_id,omitempty" db:"agent_id"`
+	CreatedByMemberID *uint          `json:"created_by_member_id,omitempty" db:"created_by_member_id"`
+	OriginTaskID      string         `json:"origin_task_id" db:"origin_task_id"`
+	HookID            *uint          `json:"hook_id,omitempty" db:"hook_id"`
+	Status            AgentRunStatus `json:"status" db:"status"`
+	SessionID         string         `json:"session_id" db:"session_id"`
+	SessionKey        *string        `json:"session_key,omitempty" db:"session_key"`
+	Provider          *string        `json:"provider,omitempty" db:"provider"`
+	Model             *string        `json:"model,omitempty" db:"model"`
+	ExecHost          string         `json:"exec_host" db:"exec_host"`
+	ExecSecurity      string         `json:"exec_security" db:"exec_security"`
+	ExecAsk           string         `json:"exec_ask" db:"exec_ask"`
+	RuntimeType       string         `json:"runtime_type" db:"runtime_type"`
+	WorkspaceAccess   string         `json:"workspace_access" db:"workspace_access"`
+	NetworkEnabled    bool           `json:"network_enabled" db:"network_enabled"`
+	Interactive       bool           `json:"interactive" db:"interactive"`
+	TimeoutMs         int            `json:"timeout_ms" db:"timeout_ms"`
+	StartedAt         *time.Time     `json:"started_at,omitempty" db:"started_at"`
+	EndedAt           *time.Time     `json:"ended_at,omitempty" db:"ended_at"`
+	ClaimedByWorker   *string        `json:"claimed_by_worker_id,omitempty" db:"claimed_by_worker_id"`
+	ClaimHeartbeatAt  *time.Time     `json:"claim_heartbeat_at,omitempty" db:"claim_heartbeat_at"`
+	ClaimExpiresAt    *time.Time     `json:"claim_expires_at,omitempty" db:"claim_expires_at"`
+	Error             *string        `json:"error,omitempty" db:"error"`
+	SnapshotTS        int64          `json:"snapshot_ts" db:"snapshot_ts"`
+	CostUSD           float64        `json:"cost_usd" db:"cost_usd"`
+	UsageJSON         map[string]any `json:"usage_json" db:"-"`
+	DeliveryJSON      map[string]any `json:"delivery_json" db:"-"`
+	CreatedAt         time.Time      `json:"created_at" db:"created_at"`
+	UpdatedAt         time.Time      `json:"updated_at" db:"updated_at"`
 }
 
 type AgentRunAttempt struct {
@@ -867,15 +869,33 @@ type SubtaskRequest struct {
 	WakeDelayMinutes int    `json:"wake_delay_minutes"`
 }
 
+type SourceWatchRequest struct {
+	Integration        string   `json:"integration"`
+	Reason             string   `json:"reason,omitempty"`
+	Query              string   `json:"query,omitempty"`
+	FilenameFormat     string   `json:"filename_format,omitempty"`
+	EventTypes         []string `json:"event_types,omitempty"`
+	EntityKey          string   `json:"entity_key,omitempty"`
+	EntityLabel        string   `json:"entity_label,omitempty"`
+	SourceOutputID     string   `json:"source_output_id,omitempty"`
+	ThreadID           string   `json:"thread_id,omitempty"`
+	MessageID          string   `json:"message_id,omitempty"`
+	IncludeAttachments bool     `json:"include_attachments,omitempty"`
+	IncludeInline      bool     `json:"include_inline,omitempty"`
+	IncludeMessageBody bool     `json:"include_message_body,omitempty"`
+}
+
 type RunExecutionResult struct {
-	ID              string                  `json:"id"`
-	ExitCode        int                     `json:"exit_code"`
-	Output          []byte                  `json:"output,omitempty"`
-	Error           string                  `json:"error,omitempty"`
-	Duration        time.Duration           `json:"duration"`
-	WaitingForInput bool                    `json:"waiting_for_input,omitempty"`
-	WakeSignal      *RunExecutionWakeSignal `json:"wake_signal,omitempty"`
-	SubtaskRequests []*SubtaskRequest       `json:"subtask_requests,omitempty"`
+	ID                  string                  `json:"id"`
+	ExitCode            int                     `json:"exit_code"`
+	Output              []byte                  `json:"output,omitempty"`
+	Error               string                  `json:"error,omitempty"`
+	Duration            time.Duration           `json:"duration"`
+	PostRun             *RunExecutionPostRun    `json:"post_run,omitempty"`
+	WaitingForInput     bool                    `json:"waiting_for_input,omitempty"`
+	WakeSignal          *RunExecutionWakeSignal `json:"wake_signal,omitempty"`
+	SubtaskRequests     []*SubtaskRequest       `json:"subtask_requests,omitempty"`
+	SourceWatchRequests []*SourceWatchRequest   `json:"source_watch_requests,omitempty"`
 }
 
 type ErrTaskNotCancellable struct {

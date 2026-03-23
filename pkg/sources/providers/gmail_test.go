@@ -2,12 +2,153 @@ package providers
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/beam-cloud/airstore/pkg/sources"
+	"github.com/beam-cloud/airstore/pkg/types"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
+
+func jsonHTTPResponse(body string) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
+
+func TestExecuteQuery_ExactThreadWatchIncludesAttachments(t *testing.T) {
+	provider := NewGmailProvider()
+	provider.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Path != "/gmail/v1/users/me/threads/thread-123" {
+				t.Fatalf("unexpected request path: %s", req.URL.Path)
+			}
+			if got := req.URL.Query().Get("format"); got != "full" {
+				t.Fatalf("expected full format request, got %q", got)
+			}
+			return jsonHTTPResponse(`{
+				"messages": [
+					{
+						"id": "msg-1",
+						"threadId": "thread-123",
+						"snippet": "Quarterly report attached",
+						"sizeEstimate": 128,
+						"internalDate": "1710000000000",
+						"payload": {
+							"headers": [
+								{"name":"From","value":"Alice Example <alice@example.com>"},
+								{"name":"To","value":"me@example.com"},
+								{"name":"Subject","value":"Quarterly report"},
+								{"name":"Date","value":"Mon, 04 Mar 2024 12:00:00 +0000"}
+							],
+							"parts": [
+								{"mimeType":"text/plain","body":{"data":"SGVsbG8="}},
+								{"mimeType":"application/pdf","filename":"report.pdf","body":{"attachmentId":"att-1","size":1234}}
+							]
+						}
+					}
+				]
+			}`), nil
+		}),
+	}
+
+	resp, err := provider.ExecuteQuery(context.Background(), &sources.ProviderContext{
+		Credentials: &types.IntegrationCredentials{AccessToken: "token"},
+	}, sources.QuerySpec{
+		Query:          `subject:"Quarterly report"`,
+		FilenameFormat: "{subject}_{id}.txt",
+		Metadata: map[string]string{
+			"thread_id":            "thread-123",
+			"include_attachments":  "true",
+			"include_message_body": "true",
+		},
+		Limit:      50,
+		MaxResults: 500,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteQuery returned error: %v", err)
+	}
+	if len(resp.Results) != 2 {
+		t.Fatalf("result count = %d, want 2", len(resp.Results))
+	}
+	if resp.Results[0].ID != "msg:msg-1" {
+		t.Fatalf("first result id = %q, want message result", resp.Results[0].ID)
+	}
+	if resp.Results[1].ID != "att:msg-1:att-1" {
+		t.Fatalf("second result id = %q, want attachment result", resp.Results[1].ID)
+	}
+	if got := resp.Results[1].Metadata["attachment_name"]; got != "report.pdf" {
+		t.Fatalf("attachment_name = %q, want report.pdf", got)
+	}
+	if got := resp.Results[0].Metadata["thread_id"]; got != "thread-123" {
+		t.Fatalf("thread_id = %q, want thread-123", got)
+	}
+}
+
+func TestExecuteQuery_ExactMessageWatchFetchesSingleMessage(t *testing.T) {
+	provider := NewGmailProvider()
+	provider.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Path != "/gmail/v1/users/me/messages/msg-456" {
+				t.Fatalf("unexpected request path: %s", req.URL.Path)
+			}
+			if got := req.URL.Query().Get("format"); got != "full" {
+				t.Fatalf("expected full format request, got %q", got)
+			}
+			return jsonHTTPResponse(`{
+				"id": "msg-456",
+				"threadId": "thread-456",
+				"snippet": "Single watched message",
+				"sizeEstimate": 64,
+				"internalDate": "1710000000001",
+				"payload": {
+					"headers": [
+						{"name":"From","value":"Bob Example <bob@example.com>"},
+						{"name":"To","value":"me@example.com"},
+						{"name":"Subject","value":"Follow up"},
+						{"name":"Date","value":"Tue, 05 Mar 2024 12:00:00 +0000"}
+					],
+					"body": {"data":"U2luZ2xlIG1lc3NhZ2U="}
+				}
+			}`), nil
+		}),
+	}
+
+	resp, err := provider.ExecuteQuery(context.Background(), &sources.ProviderContext{
+		Credentials: &types.IntegrationCredentials{AccessToken: "token"},
+	}, sources.QuerySpec{
+		FilenameFormat: "{subject}_{id}.txt",
+		Metadata: map[string]string{
+			"message_id":           "msg-456",
+			"include_message_body": "true",
+		},
+		Limit:      50,
+		MaxResults: 500,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteQuery returned error: %v", err)
+	}
+	if len(resp.Results) != 1 {
+		t.Fatalf("result count = %d, want 1", len(resp.Results))
+	}
+	if got := resp.Results[0].ID; got != "msg:msg-456" {
+		t.Fatalf("result id = %q, want msg:msg-456", got)
+	}
+	if got := resp.Results[0].Metadata["thread_id"]; got != "thread-456" {
+		t.Fatalf("thread_id = %q, want thread-456", got)
+	}
+}
 
 func TestExtractMimePartRecursive_PlainTextDirect(t *testing.T) {
 	// Simple message with text/plain directly on payload

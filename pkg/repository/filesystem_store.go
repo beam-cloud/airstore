@@ -44,6 +44,9 @@ type FilesystemStore interface {
 	// ListQueries returns all queries under a parent path.
 	ListQueries(ctx context.Context, workspaceId uint, parentPath string) ([]*types.FilesystemQuery, error)
 
+	// ListTaskOwnedQueries returns system-managed follow-up queries owned by a task.
+	ListTaskOwnedQueries(ctx context.Context, workspaceId uint, taskID string) ([]*types.FilesystemQuery, error)
+
 	// CountQueries returns the count of queries in a workspace.
 	CountQueries(ctx context.Context, workspaceId uint) (int, error)
 

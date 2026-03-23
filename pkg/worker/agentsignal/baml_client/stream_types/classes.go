@@ -287,11 +287,12 @@ func (c FanOutSignal) BamlTypeName() string {
 }
 
 type FollowUpSignal struct {
-	Intent           *types.FollowUpIntent `json:"intent"`
-	Delay_minutes    *int64                `json:"delay_minutes"`
-	Reason           *string               `json:"reason"`
-	Follow_up_prompt *string               `json:"follow_up_prompt"`
-	Wake_agenda      []WakeAgendaItem      `json:"wake_agenda"`
+	Intent                *types.FollowUpIntent `json:"intent"`
+	Delay_minutes         *int64                `json:"delay_minutes"`
+	Reason                *string               `json:"reason"`
+	Follow_up_prompt      *string               `json:"follow_up_prompt"`
+	Wake_agenda           []WakeAgendaItem      `json:"wake_agenda"`
+	Source_watch_requests []SourceWatchRequest  `json:"source_watch_requests"`
 }
 
 func (c *FollowUpSignal) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
@@ -323,6 +324,9 @@ func (c *FollowUpSignal) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMa
 		case "wake_agenda":
 			c.Wake_agenda = baml.Decode(valueHolder).Interface().([]WakeAgendaItem)
 
+		case "source_watch_requests":
+			c.Source_watch_requests = baml.Decode(valueHolder).Interface().([]SourceWatchRequest)
+
 		default:
 
 			panic(fmt.Sprintf("unexpected field: %s in class FollowUpSignal", key))
@@ -345,11 +349,115 @@ func (c FollowUpSignal) Encode() (*cffi.HostValue, error) {
 
 	fields["wake_agenda"] = c.Wake_agenda
 
+	fields["source_watch_requests"] = c.Source_watch_requests
+
 	return baml.EncodeClass("FollowUpSignal", fields, nil)
 }
 
 func (c FollowUpSignal) BamlTypeName() string {
 	return "FollowUpSignal"
+}
+
+type SourceWatchRequest struct {
+	Integration          *string `json:"integration"`
+	Reason               *string `json:"reason"`
+	Query                *string `json:"query"`
+	Entity_key           *string `json:"entity_key"`
+	Entity_label         *string `json:"entity_label"`
+	Source_output_id     *string `json:"source_output_id"`
+	Thread_id            *string `json:"thread_id"`
+	Message_id           *string `json:"message_id"`
+	Include_attachments  *bool   `json:"include_attachments"`
+	Include_inline       *bool   `json:"include_inline"`
+	Include_message_body *bool   `json:"include_message_body"`
+}
+
+func (c *SourceWatchRequest) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_STREAM_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_STREAM_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "SourceWatchRequest" {
+		panic(fmt.Sprintf("expected SourceWatchRequest, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "integration":
+			c.Integration = baml.Decode(valueHolder).Interface().(*string)
+
+		case "reason":
+			c.Reason = baml.Decode(valueHolder).Interface().(*string)
+
+		case "query":
+			c.Query = baml.Decode(valueHolder).Interface().(*string)
+
+		case "entity_key":
+			c.Entity_key = baml.Decode(valueHolder).Interface().(*string)
+
+		case "entity_label":
+			c.Entity_label = baml.Decode(valueHolder).Interface().(*string)
+
+		case "source_output_id":
+			c.Source_output_id = baml.Decode(valueHolder).Interface().(*string)
+
+		case "thread_id":
+			c.Thread_id = baml.Decode(valueHolder).Interface().(*string)
+
+		case "message_id":
+			c.Message_id = baml.Decode(valueHolder).Interface().(*string)
+
+		case "include_attachments":
+			c.Include_attachments = baml.Decode(valueHolder).Interface().(*bool)
+
+		case "include_inline":
+			c.Include_inline = baml.Decode(valueHolder).Interface().(*bool)
+
+		case "include_message_body":
+			c.Include_message_body = baml.Decode(valueHolder).Interface().(*bool)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class SourceWatchRequest", key))
+
+		}
+	}
+
+}
+
+func (c SourceWatchRequest) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["integration"] = c.Integration
+
+	fields["reason"] = c.Reason
+
+	fields["query"] = c.Query
+
+	fields["entity_key"] = c.Entity_key
+
+	fields["entity_label"] = c.Entity_label
+
+	fields["source_output_id"] = c.Source_output_id
+
+	fields["thread_id"] = c.Thread_id
+
+	fields["message_id"] = c.Message_id
+
+	fields["include_attachments"] = c.Include_attachments
+
+	fields["include_inline"] = c.Include_inline
+
+	fields["include_message_body"] = c.Include_message_body
+
+	return baml.EncodeClass("SourceWatchRequest", fields, nil)
+}
+
+func (c SourceWatchRequest) BamlTypeName() string {
+	return "SourceWatchRequest"
 }
 
 type SubtaskSpec struct {

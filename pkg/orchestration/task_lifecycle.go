@@ -36,8 +36,8 @@ func NewTaskLifecycle(
 // validTransitions defines the legal state machine edges.
 var validTransitions = map[types.AgentTaskState][]types.AgentTaskState{
 	types.AgentTaskStateQueued:   {types.AgentTaskStateRunning, types.AgentTaskStateDropped, types.AgentTaskStateCancelled},
-	types.AgentTaskStateRunning:  {types.AgentTaskStateWaiting, types.AgentTaskStateDone, types.AgentTaskStateSleeping, types.AgentTaskStateDropped, types.AgentTaskStateQueued, types.AgentTaskStateCancelled},
-	types.AgentTaskStateWaiting:  {types.AgentTaskStateRunning, types.AgentTaskStateDone, types.AgentTaskStateQueued, types.AgentTaskStateCancelled},
+	types.AgentTaskStateRunning:  {types.AgentTaskStateWaiting, types.AgentTaskStateDone, types.AgentTaskStateError, types.AgentTaskStateSleeping, types.AgentTaskStateDropped, types.AgentTaskStateQueued, types.AgentTaskStateCancelled},
+	types.AgentTaskStateWaiting:  {types.AgentTaskStateRunning, types.AgentTaskStateDone, types.AgentTaskStateError, types.AgentTaskStateQueued, types.AgentTaskStateCancelled},
 	types.AgentTaskStateSleeping: {types.AgentTaskStateQueued, types.AgentTaskStateCancelled},
 }
 
@@ -54,6 +54,7 @@ func isValidTransition(from, to types.AgentTaskState) bool {
 type SettleOpts struct {
 	WaitingForInput bool
 	WakeSignal      *types.RunExecutionWakeSignal
+	Blocker         *types.TaskBlockerSpec
 }
 
 // Settle derives the correct task state from a completed run and applies it.
@@ -123,12 +124,22 @@ func (lc *TaskLifecycle) Settle(ctx context.Context, runID string, opts *SettleO
 		return nil
 	}
 
-	updated, err := lc.backend.UpdateTaskStateIfCurrentRun(ctx, types.CurrentRunTaskStateUpdate{
-		TaskID:        run.OriginTaskID,
-		ExpectedRunID: run.ID,
-		State:         nextState,
-		TargetRunID:   &targetRunID,
-	})
+	var updated bool
+	if nextState == types.AgentTaskStateWaiting && opts.Blocker != nil {
+		updated, _, err = lc.backend.OpenTaskBlockerIfCurrentRun(ctx, types.TaskBlockerOpenRequest{
+			WorkspaceID:   task.WorkspaceID,
+			TaskID:        run.OriginTaskID,
+			ExpectedRunID: run.ID,
+			Blocker:       opts.Blocker,
+		})
+	} else {
+		updated, err = lc.backend.UpdateTaskStateIfCurrentRun(ctx, types.CurrentRunTaskStateUpdate{
+			TaskID:        run.OriginTaskID,
+			ExpectedRunID: run.ID,
+			State:         nextState,
+			TargetRunID:   &targetRunID,
+		})
+	}
 	if err != nil {
 		return err
 	}

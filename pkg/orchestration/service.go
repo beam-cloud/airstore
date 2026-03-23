@@ -43,6 +43,7 @@ type AgentService struct {
 	resumeBarrier      *ResumeBarrier
 	runFactory         *RunFactory
 	runtimeLoops       *RuntimeLoops
+	sourceWatchRegistrar SourceWatchRegistrar
 }
 
 func NewAgentService(
@@ -101,6 +102,7 @@ func NewAgentService(
 		service.resultConsumerID,
 		service.publishTaskUpdate,
 	)
+	service.runtimeLoops.SetSourceWatchRegistrar(service.sourceWatchRegistrar)
 	return service
 }
 
@@ -199,8 +201,19 @@ func (s *AgentService) ensureRuntimeLoops() *RuntimeLoops {
 			s.resultConsumerID,
 			s.publishTaskUpdate,
 		)
+		s.runtimeLoops.SetSourceWatchRegistrar(s.sourceWatchRegistrar)
 	}
 	return s.runtimeLoops
+}
+
+func (s *AgentService) SetSourceWatchRegistrar(registrar SourceWatchRegistrar) {
+	if s == nil {
+		return
+	}
+	s.sourceWatchRegistrar = registrar
+	if s.runtimeLoops != nil {
+		s.runtimeLoops.SetSourceWatchRegistrar(registrar)
+	}
 }
 
 func defaultRunInteractionState(run *types.AgentRun) types.RunInteractionState {

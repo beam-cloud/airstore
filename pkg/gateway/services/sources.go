@@ -186,6 +186,56 @@ func (s *SourceService) Stat(ctx context.Context, req *pb.SourceStatRequest) (*p
 		}, nil
 	}
 
+	// .query.as metadata files (folder-level).
+	if relPath == ".query.as" || strings.HasSuffix(relPath, "/.query.as") {
+		queryPath := types.PathSources + "/" + integration
+		if relPath != ".query.as" {
+			queryPath = types.PathSources + "/" + integration + "/" + strings.TrimSuffix(relPath, "/.query.as")
+		}
+		query, err := s.fsStore.GetQuery(ctx, pctx.WorkspaceId, queryPath)
+		if err == nil && query != nil {
+			mtime := query.UpdatedAt.Unix()
+			if mtime == 0 {
+				mtime = sources.NowUnix()
+			}
+			return &pb.SourceStatResponse{
+				Ok: true,
+				Info: &pb.SourceFileInfo{
+					Size:  int64(len(s.generateQueryMetaJSON(query))),
+					Mode:  sources.ModeFile,
+					Mtime: mtime,
+				},
+			}, nil
+		}
+	}
+
+	// .{filename}.query.as metadata files (single-file queries).
+	base := path.Base(relPath)
+	if strings.HasPrefix(base, ".") && strings.HasSuffix(base, ".query.as") {
+		filename := strings.TrimPrefix(strings.TrimSuffix(base, ".query.as"), ".")
+		dir := path.Dir(relPath)
+		queryPath := types.PathSources + "/" + integration
+		if dir != "." && dir != "" {
+			queryPath += "/" + dir
+		}
+		queryPath += "/" + filename
+		query, err := s.fsStore.GetQuery(ctx, pctx.WorkspaceId, queryPath)
+		if err == nil && query != nil && query.OutputFormat == types.ViewOutputFile {
+			mtime := query.UpdatedAt.Unix()
+			if mtime == 0 {
+				mtime = sources.NowUnix()
+			}
+			return &pb.SourceStatResponse{
+				Ok: true,
+				Info: &pb.SourceFileInfo{
+					Size:  int64(len(s.generateQueryMetaJSON(query))),
+					Mode:  sources.ModeFile,
+					Mtime: mtime,
+				},
+			}, nil
+		}
+	}
+
 	// Source view result file or view folder.
 	queryPath, filename := s.findQueryAndFilename(ctx, pctx.WorkspaceId, integration, relPath)
 	if queryPath != "" {
@@ -208,9 +258,17 @@ func (s *SourceService) Stat(ctx context.Context, req *pb.SourceStatRequest) (*p
 		// Check if the path itself is a source view folder.
 		qp := types.PathSources + "/" + integration + "/" + relPath
 		if q, err := s.fsStore.GetQuery(ctx, pctx.WorkspaceId, qp); err == nil && q != nil {
+			mtime := q.UpdatedAt.Unix()
+			if mtime == 0 {
+				mtime = sources.NowUnix()
+			}
 			return &pb.SourceStatResponse{
-				Ok:   true,
-				Info: &pb.SourceFileInfo{Mode: sources.ModeDir, IsDir: true, Mtime: sources.NowUnix()},
+				Ok: true,
+				Info: &pb.SourceFileInfo{
+					Mode:  sources.ModeDir,
+					IsDir: true,
+					Mtime: mtime,
+				},
 			}, nil
 		}
 	}
@@ -546,6 +604,7 @@ func (s *SourceService) readDirView(ctx context.Context, pctx *sources.ProviderC
 		{Name: ".query.as", Mode: sources.ModeFile | 0444, Size: int64(len(queryMeta)), Mtime: query.UpdatedAt.Unix()},
 	}
 
+	pctx, connected = s.loadQueryCredentials(ctx, pctx, query)
 	if !connected {
 		return &pb.SourceReadDirResponse{Ok: true, Entries: entries}, nil
 	}
@@ -577,20 +636,25 @@ func (s *SourceService) getQueryChildCount(ctx context.Context, workspaceId uint
 
 func (s *SourceService) generateQueryMetaJSON(query *types.FilesystemQuery) []byte {
 	data, _ := json.MarshalIndent(map[string]interface{}{
-		"id":              query.Id,
-		"external_id":     query.ExternalId,
-		"workspace_id":    query.WorkspaceId,
-		"integration":     query.Integration,
-		"path":            query.Path,
-		"name":            query.Name,
-		"query_spec":      query.QuerySpec,
-		"filename_format": query.FilenameFormat,
-		"guidance":        query.Guidance,
-		"output_format":   query.OutputFormat,
-		"file_ext":        query.FileExt,
-		"cache_ttl":       query.CacheTTL,
-		"created_at":      query.CreatedAt,
-		"updated_at":      query.UpdatedAt,
+		"id":                   query.Id,
+		"external_id":          query.ExternalId,
+		"workspace_id":         query.WorkspaceId,
+		"credential_member_id": query.CredentialMemberID,
+		"system_managed":       query.SystemManaged,
+		"lifecycle":            query.Lifecycle,
+		"owner_task_id":        query.OwnerTaskID,
+		"owner_run_id":         query.OwnerRunID,
+		"integration":          query.Integration,
+		"path":                 query.Path,
+		"name":                 query.Name,
+		"query_spec":           query.QuerySpec,
+		"filename_format":      query.FilenameFormat,
+		"guidance":             query.Guidance,
+		"output_format":        query.OutputFormat,
+		"file_ext":             query.FileExt,
+		"cache_ttl":            query.CacheTTL,
+		"created_at":           query.CreatedAt,
+		"updated_at":           query.UpdatedAt,
 	}, "", "  ")
 	return data
 }
@@ -605,6 +669,10 @@ func (s *SourceService) readViewResult(ctx context.Context, pctx *sources.Provid
 	query, err := s.fsStore.GetQuery(ctx, pctx.WorkspaceId, queryPath)
 	if err != nil || query == nil {
 		return &pb.SourceReadResponse{Ok: false, Error: "query not found"}, nil
+	}
+	pctx, connected := s.loadQueryCredentials(ctx, pctx, query)
+	if !connected {
+		return &pb.SourceReadResponse{Ok: false, Error: "not connected"}, nil
 	}
 
 	provider := s.registry.Get(query.Integration)
@@ -788,23 +856,31 @@ func (s *SourceService) loadCredentials(ctx context.Context, pctx *sources.Provi
 		return pctx, false
 	}
 
-	cacheKey := fmt.Sprintf("%d:%s", pctx.WorkspaceId, integration)
-	if cached, ok := s.credCache.Load(cacheKey); ok {
-		c := cached.(*cachedCreds)
-		if time.Now().Before(c.expiresAt) {
-			pctx.Credentials = c.creds
-			return pctx, true
+	requestedMemberID := pctx.MemberId
+	if requestedMemberID != 0 {
+		cacheKey := credentialCacheKey(pctx.WorkspaceId, requestedMemberID, integration)
+		if cached, ok := s.credCache.Load(cacheKey); ok {
+			c := cached.(*cachedCreds)
+			if time.Now().Before(c.expiresAt) {
+				pctx.Credentials = c.creds
+				return pctx, true
+			}
+			s.credCache.Delete(cacheKey)
 		}
-		s.credCache.Delete(cacheKey)
 	}
 
-	conn, err := s.backend.GetConnection(ctx, pctx.WorkspaceId, pctx.MemberId, integration)
+	conn, err := s.resolveConnection(ctx, pctx.WorkspaceId, requestedMemberID, integration)
 	if err != nil {
 		log.Warn().Str("integration", integration).Err(err).Msg("connection lookup failed")
 		return pctx, false
 	}
 	if conn == nil {
 		return pctx, false
+	}
+	if conn.MemberId != nil {
+		pctx.MemberId = *conn.MemberId
+	} else {
+		pctx.MemberId = 0
 	}
 
 	creds, err := repository.DecryptCredentials(conn)
@@ -835,7 +911,12 @@ func (s *SourceService) loadCredentials(ctx context.Context, pctx *sources.Provi
 		}
 	}
 
-	s.credCache.Store(cacheKey, &cachedCreds{creds: creds, expiresAt: time.Now().Add(credCacheTTL)})
+	if requestedMemberID != 0 || conn.MemberId == nil {
+		s.credCache.Store(
+			credentialCacheKey(pctx.WorkspaceId, pctx.MemberId, integration),
+			&cachedCreds{creds: creds, expiresAt: time.Now().Add(credCacheTTL)},
+		)
+	}
 	pctx.Credentials = creds
 	return pctx, true
 }

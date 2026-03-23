@@ -683,13 +683,12 @@ func TestFetchMappingOutputsExpandsTaskContextForStatusScopedTasks(t *testing.T)
 	}
 }
 
-func TestFilterMappedRowsByExclusionsMatchesRowKeyWithinComponent(t *testing.T) {
+func TestFilterMappedRowsByExclusionsFallsBackToRowKeyWithinComponent(t *testing.T) {
 	snapshots := []ExcludedRowSnapshot{
 		{
 			ComponentID: "emails",
 			TaskID:      "task-1",
 			RowKey:      "luke",
-			Cells:       map[string]string{"recipient": "luke@sla.io"},
 		},
 	}
 	rows := []bamltypes.MappedRow{
@@ -720,6 +719,64 @@ func TestFilterMappedRowsByExclusionsMatchesRowKeyWithinComponent(t *testing.T) 
 	unscoped := filterMappedRowsByExclusions(rows, snapshots, "other-component")
 	if got, want := len(unscoped), 2; got != want {
 		t.Fatalf("other component row count = %d, want %d", got, want)
+	}
+}
+
+func TestFilterMappedRowsByExclusionsDoesNotMatchRowKeyWhenSourceOutputsChanged(t *testing.T) {
+	snapshots := []ExcludedRowSnapshot{
+		{
+			ComponentID:     "emails",
+			TaskID:          "task-1",
+			RowKey:          "task",
+			SourceOutputIDs: []string{"out-1"},
+			Cells: map[string]string{
+				"recipient": "luke@sla.io",
+			},
+		},
+	}
+	rows := []bamltypes.MappedRow{
+		{
+			Task_id:           "task-1",
+			Row_key:           "task",
+			Source_output_ids: []string{"out-2"},
+			Cells: []bamltypes.MappedCell{
+				{Column: "recipient", Value: "new@example.com"},
+			},
+		},
+	}
+
+	filtered := filterMappedRowsByExclusions(rows, snapshots, "emails")
+	if got, want := len(filtered), 1; got != want {
+		t.Fatalf("filtered row count = %d, want %d", got, want)
+	}
+}
+
+func TestFilterMappedRowsByExclusionsDoesNotMatchRowKeyWhenCellsChanged(t *testing.T) {
+	snapshots := []ExcludedRowSnapshot{
+		{
+			ComponentID: "emails",
+			TaskID:      "task-1",
+			RowKey:      "task",
+			Cells: map[string]string{
+				"recipient": "luke@sla.io",
+				"subject":   "Old subject",
+			},
+		},
+	}
+	rows := []bamltypes.MappedRow{
+		{
+			Task_id: "task-1",
+			Row_key: "task",
+			Cells: []bamltypes.MappedCell{
+				{Column: "recipient", Value: "new@example.com"},
+				{Column: "subject", Value: "Fresh subject"},
+			},
+		},
+	}
+
+	filtered := filterMappedRowsByExclusions(rows, snapshots, "emails")
+	if got, want := len(filtered), 1; got != want {
+		t.Fatalf("filtered row count = %d, want %d", got, want)
 	}
 }
 
@@ -1692,6 +1749,87 @@ func TestMaterializeTaskGroupPreservesStableIdentityAcrossRowKeyChurn(t *testing
 	}
 	if got, want := persisted[0].Manual["status"], "Pending"; got != want {
 		t.Fatalf("manual status = %q, want %q", got, want)
+	}
+}
+
+func TestMaterializeTaskGroupKeepsVisibleRowsWhenEmptyRefreshMatchesCurrentOutputs(t *testing.T) {
+	now := time.Now().UTC()
+	outputs := []*types.TaskOutput{{ID: "out-1", TaskID: "task-1", OutputType: "text", CreatedAt: now}}
+	existing := []ViewRow{{
+		ID:              "sheet-1:c1:task-1:task",
+		StableRef:       "stable-ref-1",
+		SheetID:         "sheet-1",
+		ComponentID:     "c1",
+		TaskID:          "task-1",
+		GroupID:         "task-1",
+		RowKey:          "task",
+		SchemaHash:      "schema-1",
+		OutputIDs:       []string{"out-1"},
+		OutputSignature: outputGroupSignature(outputs),
+		SourceOutputIDs: []string{"out-1"},
+		Cells:           map[string]string{"name": "Alice"},
+	}}
+
+	persisted := materializeTaskGroup(
+		"sheet-1",
+		"c1",
+		"task-1",
+		"schema-1",
+		outputs,
+		existing,
+		nil,
+		now,
+	)
+
+	if got, want := len(persisted), 1; got != want {
+		t.Fatalf("persisted row count = %d, want %d", got, want)
+	}
+	if persisted[0].Marker {
+		t.Fatal("expected visible row to be carried forward, got marker row")
+	}
+	if got, want := persisted[0].ID, existing[0].ID; got != want {
+		t.Fatalf("row id = %q, want %q", got, want)
+	}
+	if got, want := persisted[0].Cells["name"], "Alice"; got != want {
+		t.Fatalf("name cell = %q, want %q", got, want)
+	}
+}
+
+func TestMaterializeTaskGroupFallsBackToMarkerWhenOutputsChanged(t *testing.T) {
+	now := time.Now().UTC()
+	existingOutputs := []*types.TaskOutput{{ID: "out-1", TaskID: "task-1", OutputType: "text", CreatedAt: now}}
+	currentOutputs := []*types.TaskOutput{{ID: "out-2", TaskID: "task-1", OutputType: "text", CreatedAt: now.Add(time.Minute)}}
+	existing := []ViewRow{{
+		ID:              "sheet-1:c1:task-1:task",
+		StableRef:       "stable-ref-1",
+		SheetID:         "sheet-1",
+		ComponentID:     "c1",
+		TaskID:          "task-1",
+		GroupID:         "task-1",
+		RowKey:          "task",
+		SchemaHash:      "schema-1",
+		OutputIDs:       []string{"out-1"},
+		OutputSignature: outputGroupSignature(existingOutputs),
+		SourceOutputIDs: []string{"out-1"},
+		Cells:           map[string]string{"name": "Alice"},
+	}}
+
+	persisted := materializeTaskGroup(
+		"sheet-1",
+		"c1",
+		"task-1",
+		"schema-1",
+		currentOutputs,
+		existing,
+		nil,
+		now,
+	)
+
+	if got, want := len(persisted), 1; got != want {
+		t.Fatalf("persisted row count = %d, want %d", got, want)
+	}
+	if !persisted[0].Marker {
+		t.Fatal("expected changed outputs to fall back to marker row")
 	}
 }
 

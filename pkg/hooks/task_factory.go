@@ -39,9 +39,6 @@ func (f *TaskFactory) CreateTask(
 	if hook == nil {
 		return fmt.Errorf("hook is required")
 	}
-	if hook.AgentId == nil || strings.TrimSpace(*hook.AgentId) == "" {
-		return fmt.Errorf("hook agent_id is required")
-	}
 	if strings.TrimSpace(prompt) == "" {
 		return fmt.Errorf("prompt is required")
 	}
@@ -50,8 +47,28 @@ func (f *TaskFactory) CreateTask(
 	if normalizedEventID == "" {
 		normalizedEventID = fmt.Sprintf("%d", time.Now().UnixNano())
 	}
-
 	idempotencyKey := hookIdempotencyKey(hook.ExternalId, normalizedEventID, data)
+
+	switch hook.DeliveryMode {
+	case types.HookDeliveryModeTaskInput:
+		return f.deliverTaskInput(ctx, hook, prompt, idempotencyKey)
+	case "", types.HookDeliveryModeSpawnTask:
+		return f.spawnTask(ctx, hook, normalizedEventID, event, prompt, data, idempotencyKey)
+	default:
+		return fmt.Errorf("unsupported hook delivery mode %q", hook.DeliveryMode)
+	}
+}
+
+func (f *TaskFactory) spawnTask(
+	ctx context.Context,
+	hook *types.Hook,
+	normalizedEventID, event, prompt string,
+	data map[string]any,
+	idempotencyKey string,
+) error {
+	if hook.AgentId == nil || strings.TrimSpace(*hook.AgentId) == "" {
+		return fmt.Errorf("hook agent_id is required")
+	}
 	sessionID := hookSessionID(hook.ExternalId, normalizedEventID)
 	lane := hookLane(hook.ExternalId, normalizedEventID)
 	source := hookInputSource
@@ -86,6 +103,31 @@ func (f *TaskFactory) CreateTask(
 	}
 	if deduped {
 		log.Debug().Str("hook", hook.ExternalId).Str("event_id", normalizedEventID).Msg("hook task deduped")
+	}
+	return nil
+}
+
+func (f *TaskFactory) deliverTaskInput(
+	ctx context.Context,
+	hook *types.Hook,
+	prompt string,
+	idempotencyKey string,
+) error {
+	if hook.TargetTaskID == nil || strings.TrimSpace(*hook.TargetTaskID) == "" {
+		return fmt.Errorf("hook target_task_id is required for task input delivery")
+	}
+	_, err := f.agents.SubmitTaskInput(
+		ctx,
+		hook.WorkspaceId,
+		strings.TrimSpace(*hook.TargetTaskID),
+		types.InputKindFreeText,
+		nil,
+		prompt,
+		idempotencyKey,
+		nil,
+	)
+	if err != nil {
+		return fmt.Errorf("deliver hook task input: %w", err)
 	}
 	return nil
 }

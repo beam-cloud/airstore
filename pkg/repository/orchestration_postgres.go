@@ -56,7 +56,7 @@ const agentTaskSelect = `
 `
 
 const agentRunSelect = `
-	SELECT id, workspace_id, agent_id, origin_task_id, hook_id, status, session_id, session_key, provider, model,
+	SELECT id, workspace_id, agent_id, created_by_member_id, origin_task_id, hook_id, status, session_id, session_key, provider, model,
 	       exec_host, exec_security, exec_ask, runtime_type, workspace_access, network_enabled, interactive,
 	       timeout_ms, started_at, ended_at, claimed_by_worker_id, claim_heartbeat_at, claim_expires_at,
 	       error, snapshot_ts, cost_usd, usage_json, delivery_json, created_at, updated_at
@@ -2073,6 +2073,7 @@ func (b *PostgresBackend) scanAgentRun(row scanner) (*types.AgentRun, error) {
 	var usageJSON []byte
 	var deliveryJSON []byte
 	var agentID sql.NullString
+	var createdByMemberID sql.NullInt64
 	var hookID sql.NullInt64
 	var sessionKey sql.NullString
 	var provider sql.NullString
@@ -2088,6 +2089,7 @@ func (b *PostgresBackend) scanAgentRun(row scanner) (*types.AgentRun, error) {
 		&run.ID,
 		&run.WorkspaceID,
 		&agentID,
+		&createdByMemberID,
 		&run.OriginTaskID,
 		&hookID,
 		&run.Status,
@@ -2124,6 +2126,10 @@ func (b *PostgresBackend) scanAgentRun(row scanner) (*types.AgentRun, error) {
 	}
 	if agentID.Valid {
 		run.AgentID = &agentID.String
+	}
+	if createdByMemberID.Valid {
+		value := uint(createdByMemberID.Int64)
+		run.CreatedByMemberID = &value
 	}
 	if hookID.Valid {
 		v := uint(hookID.Int64)

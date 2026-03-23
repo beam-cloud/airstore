@@ -85,21 +85,26 @@ func TestDispatchEnvelopeRoundTrip(t *testing.T) {
 
 func TestRunResultEnvelopeRoundTrip(t *testing.T) {
 	envelope := RunResultEnvelope{
-		TaskID:          "exec-1",
-		AttemptID:       "attempt-1",
-		ExitCode:        0,
-		ResultKey:       "result-1",
-		WaitingForInput: true,
-		Wake: WakeDirective{
-			DelayMinutes:   15,
-			Reason:         "Wait for a reply",
-			FollowUpPrompt: "Check the thread again.",
-			Agenda: []*types.TaskWakeAgendaItem{
-				{Seq: 1, Title: "Check thread", Reason: "Need the user's reply"},
+		TaskID:    "exec-1",
+		AttemptID: "attempt-1",
+		ExitCode:  0,
+		ResultKey: "result-1",
+		PostRun: &types.RunExecutionPostRun{
+			WaitingForInput: true,
+			WakeSignal: &types.RunExecutionWakeSignal{
+				DelayMinutes:   15,
+				Reason:         "Wait for a reply",
+				FollowUpPrompt: "Check the thread again.",
+				WakeAgenda: []*types.TaskWakeAgendaItem{
+					{Seq: 1, Title: "Check thread", Reason: "Need the user's reply"},
+				},
 			},
-		},
-		SubtaskRequests: []*types.SubtaskRequest{
-			{SourceOutputID: "out-1", EntityLabel: "customer", Prompt: "Reach out", WakeDelayMinutes: 5},
+			SubtaskRequests: []*types.SubtaskRequest{
+				{SourceOutputID: "out-1", EntityLabel: "customer", Prompt: "Reach out", WakeDelayMinutes: 5},
+			},
+			SourceWatchRequests: []*types.SourceWatchRequest{
+				{Integration: "gmail", ThreadID: "thread-1"},
+			},
 		},
 	}
 
@@ -110,10 +115,16 @@ func TestRunResultEnvelopeRoundTrip(t *testing.T) {
 	if decoded.AttemptID != envelope.AttemptID {
 		t.Fatalf("attempt_id = %q, want %q", decoded.AttemptID, envelope.AttemptID)
 	}
-	if decoded.Wake.DelayMinutes != envelope.Wake.DelayMinutes {
-		t.Fatalf("wake delay = %d, want %d", decoded.Wake.DelayMinutes, envelope.Wake.DelayMinutes)
+	if decoded.Wake.DelayMinutes != envelope.PostRun.WakeSignal.DelayMinutes {
+		t.Fatalf("wake delay = %d, want %d", decoded.Wake.DelayMinutes, envelope.PostRun.WakeSignal.DelayMinutes)
 	}
 	if len(decoded.SubtaskRequests) != 1 || decoded.SubtaskRequests[0].Prompt != "Reach out" {
 		t.Fatalf("subtask requests = %#v, want one preserved request", decoded.SubtaskRequests)
+	}
+	if decoded.PostRun == nil || !decoded.PostRun.WaitingForInput {
+		t.Fatalf("post_run = %#v, want waiting post-run plan", decoded.PostRun)
+	}
+	if len(decoded.PostRun.SourceWatchRequests) != 1 || decoded.PostRun.SourceWatchRequests[0].ThreadID != "thread-1" {
+		t.Fatalf("source watch requests = %#v, want preserved source watch", decoded.PostRun.SourceWatchRequests)
 	}
 }

@@ -340,33 +340,14 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 	}
 
 	resultKey := fmt.Sprintf("run_result:%s:%s", strings.TrimSpace(req.TaskId), attemptID)
-	payload := map[string]any{
-		types.OrchestrationOutboxPayloadTaskID:          strings.TrimSpace(req.TaskId),
-		types.OrchestrationOutboxPayloadAttemptID:       attemptID,
-		types.OrchestrationOutboxPayloadExitCode:        int(req.ExitCode),
-		types.OrchestrationOutboxPayloadError:           req.Error,
-		types.OrchestrationOutboxPayloadIdempotency:     resultKey,
-		types.OrchestrationOutboxPayloadWaitingForInput: req.WaitingForInput,
-	}
-	if ws := req.WakeSignal; ws != nil {
-		payload[types.OrchestrationOutboxPayloadWakeDelayMinutes] = int(ws.DelayMinutes)
-		payload[types.OrchestrationOutboxPayloadWakeReason] = ws.Reason
-		payload[types.OrchestrationOutboxPayloadWakeFollowUpPrompt] = ws.FollowUpPrompt
-		if len(ws.WakeAgenda) > 0 {
-			agendaJSON, err := json.Marshal(ws.WakeAgenda)
-			if err != nil {
-				return nil, status.Errorf(codes.Internal, "failed to encode wake agenda: %v", err)
-			}
-			payload[types.OrchestrationOutboxPayloadWakeAgenda] = string(agendaJSON)
-		}
-	}
-	if len(req.SubtaskRequests) > 0 {
-		subtaskJSON, err := json.Marshal(req.SubtaskRequests)
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "failed to encode subtask requests: %v", err)
-		}
-		payload[types.OrchestrationOutboxPayloadSubtaskRequests] = string(subtaskJSON)
-	}
+	payload := orchestration.RunResultEnvelope{
+		TaskID:    strings.TrimSpace(req.TaskId),
+		AttemptID: attemptID,
+		ExitCode:  int(req.ExitCode),
+		ErrorText: req.Error,
+		ResultKey: resultKey,
+		PostRun:   postRunFromProto(req),
+	}.ToMap()
 	if err := s.backend.EnqueueOrchestrationOutboxEvent(ctx, &types.OrchestrationOutboxEvent{
 		EventType:   types.OrchestrationOutboxEventTypeRunResult,
 		DedupeKey:   resultKey,
@@ -377,6 +358,91 @@ func (s *WorkerService) SetTaskResult(ctx context.Context, req *pb.SetTaskResult
 	}
 
 	return &pb.SetTaskResultResponse{}, nil
+}
+
+func postRunFromProto(req *pb.SetTaskResultRequest) *types.RunExecutionPostRun {
+	if req == nil {
+		return nil
+	}
+	return types.NormalizeRunExecutionPostRun(&types.RunExecutionPostRun{
+		WaitingForInput:     req.WaitingForInput,
+		WakeSignal:          wakeSignalFromProto(req.WakeSignal),
+		SubtaskRequests:     subtaskRequestsFromProto(req.SubtaskRequests),
+		SourceWatchRequests: sourceWatchRequestsFromProto(req.SourceWatchRequests),
+	})
+}
+
+func wakeSignalFromProto(signal *pb.WakeSignal) *types.RunExecutionWakeSignal {
+	if signal == nil {
+		return nil
+	}
+
+	agenda := make([]*types.TaskWakeAgendaItem, 0, len(signal.WakeAgenda))
+	for idx, item := range signal.WakeAgenda {
+		if item == nil {
+			continue
+		}
+		agenda = append(agenda, &types.TaskWakeAgendaItem{
+			Seq:    idx + 1,
+			Type:   item.Type,
+			Title:  item.Title,
+			Reason: item.Reason,
+		})
+	}
+
+	return types.NormalizeRunExecutionWakeSignal(&types.RunExecutionWakeSignal{
+		DelayMinutes:   int(signal.DelayMinutes),
+		Reason:         signal.Reason,
+		FollowUpPrompt: signal.FollowUpPrompt,
+		WakeAgenda:     agenda,
+	})
+}
+
+func subtaskRequestsFromProto(requests []*pb.SubtaskRequest) []*types.SubtaskRequest {
+	if len(requests) == 0 {
+		return nil
+	}
+	out := make([]*types.SubtaskRequest, 0, len(requests))
+	for _, req := range requests {
+		if req == nil {
+			continue
+		}
+		out = append(out, &types.SubtaskRequest{
+			SourceOutputID:   req.SourceOutputId,
+			EntityLabel:      req.EntityLabel,
+			Prompt:           req.Prompt,
+			WakeDelayMinutes: int(req.WakeDelayMinutes),
+		})
+	}
+	return out
+}
+
+func sourceWatchRequestsFromProto(requests []*pb.SourceWatchRequest) []*types.SourceWatchRequest {
+	if len(requests) == 0 {
+		return nil
+	}
+	out := make([]*types.SourceWatchRequest, 0, len(requests))
+	for _, req := range requests {
+		if req == nil {
+			continue
+		}
+		out = append(out, &types.SourceWatchRequest{
+			Integration:        req.Integration,
+			Reason:             req.Reason,
+			Query:              req.Query,
+			FilenameFormat:     req.FilenameFormat,
+			EventTypes:         append([]string{}, req.EventTypes...),
+			EntityKey:          req.EntityKey,
+			EntityLabel:        req.EntityLabel,
+			SourceOutputID:     req.SourceOutputId,
+			ThreadID:           req.ThreadId,
+			MessageID:          req.MessageId,
+			IncludeAttachments: req.IncludeAttachments,
+			IncludeInline:      req.IncludeInline,
+			IncludeMessageBody: req.IncludeMessageBody,
+		})
+	}
+	return out
 }
 
 func (s *WorkerService) UpdateTaskState(ctx context.Context, req *pb.UpdateTaskStateRequest) (*pb.UpdateTaskStateResponse, error) {

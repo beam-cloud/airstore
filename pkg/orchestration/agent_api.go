@@ -462,6 +462,13 @@ func (a *AgentAPI) CancelTask(ctx context.Context, workspaceID uint, taskID stri
 	if err := lifecycle.Cancel(ctx, task.ID); err != nil {
 		return err
 	}
+	if a.runtime != nil {
+		if loops := a.runtime.ensureRuntimeLoops(); loops != nil {
+			if err := loops.cleanupTaskSourceWatches(ctx, task); err != nil {
+				log.Warn().Err(err).Str("task_id", task.ID).Msg("failed to clean up task source watches during cancel")
+			}
+		}
+	}
 
 	if err := a.backend.CancelPendingOutboxEventsForTask(ctx, task.ID); err != nil {
 		log.Warn().Err(err).Str("task_id", task.ID).Msg("failed to cancel pending outbox events")

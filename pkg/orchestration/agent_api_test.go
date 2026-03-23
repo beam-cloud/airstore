@@ -137,6 +137,19 @@ func (b *cancelTaskBackend) UpdateTaskOutputStatus(_ context.Context, _ uint, ou
 	return nil
 }
 
+type cancelCleanupRegistrar struct {
+	calls []*types.AgentTask
+}
+
+func (r *cancelCleanupRegistrar) RegisterTaskSourceWatches(context.Context, *types.AgentTask, *types.RunExecutionWakeSignal, []*types.SourceWatchRequest) (*types.TaskBlockerSpec, error) {
+	return nil, nil
+}
+
+func (r *cancelCleanupRegistrar) CleanupTaskSourceWatches(_ context.Context, task *types.AgentTask) error {
+	r.calls = append(r.calls, task)
+	return nil
+}
+
 func TestCancelTaskSupersedesPendingOutputs(t *testing.T) {
 	task := &types.AgentTask{
 		ID:          "task-1",
@@ -163,5 +176,36 @@ func TestCancelTaskSupersedesPendingOutputs(t *testing.T) {
 	}
 	if got := backend.outputs["out-active"].Status; got != types.TaskOutputStatusActive {
 		t.Fatalf("expected active output unchanged, got %s", got)
+	}
+}
+
+func TestCancelTaskCleansUpSourceWatches(t *testing.T) {
+	task := &types.AgentTask{
+		ID:          "task-1",
+		WorkspaceID: 7,
+		State:       types.AgentTaskStateWaiting,
+	}
+	backend := &cancelTaskBackend{
+		task:    task,
+		outputs: map[string]*types.TaskOutput{},
+	}
+	registrar := &cancelCleanupRegistrar{}
+	runtime := &AgentService{
+		backend: backend,
+		runtimeLoops: &RuntimeLoops{
+			backend:              backend,
+			sourceWatchRegistrar: registrar,
+		},
+	}
+	api := NewAgentAPI(backend, runtime)
+
+	if err := api.CancelTask(context.Background(), task.WorkspaceID, task.ID); err != nil {
+		t.Fatalf("CancelTask returned error: %v", err)
+	}
+	if len(registrar.calls) != 1 {
+		t.Fatalf("cleanup calls = %d, want 1", len(registrar.calls))
+	}
+	if registrar.calls[0] == nil || registrar.calls[0].WorkspaceID != task.WorkspaceID || registrar.calls[0].ID != task.ID {
+		t.Fatalf("cleanup called with %#v, want task %q in workspace %d", registrar.calls[0], task.ID, task.WorkspaceID)
 	}
 }
