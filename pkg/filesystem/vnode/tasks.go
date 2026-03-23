@@ -20,7 +20,6 @@ const tasksCacheTTL = 5 * time.Second
 
 // TasksVNode provides /tasks directory listing tasks as files.
 // Each task appears as a file named {task_id}.task
-// Reading the file returns the task logs.
 type TasksVNode struct {
 	ReadOnlyBase
 
@@ -55,7 +54,6 @@ func NewTasksVNodeGRPC(conn *grpc.ClientConn, token string) *TasksVNode {
 		token:       token,
 		bearerToken: BearerToken(token),
 	}
-	// Pre-warm cache in background
 	go t.warmCache()
 	return t
 }

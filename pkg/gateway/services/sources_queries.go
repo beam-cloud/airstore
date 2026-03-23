@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -73,7 +74,7 @@ func (s *SourceService) SyncViewByPath(ctx context.Context, queryPath string) ([
 		return nil, fmt.Errorf("query not found: %s", queryPath)
 	}
 
-	pctx, connected := s.loadCredentials(ctx, pctx, query.Integration)
+	pctx, connected := s.loadQueryCredentials(ctx, pctx, query)
 	if !connected {
 		return nil, fmt.Errorf("not connected to %s", query.Integration)
 	}
@@ -110,7 +111,7 @@ func (s *SourceService) SyncViewByExternalId(ctx context.Context, externalId str
 		return nil, fmt.Errorf("unauthorized")
 	}
 
-	pctx, connected := s.loadCredentials(ctx, pctx, query.Integration)
+	pctx, connected := s.loadQueryCredentials(ctx, pctx, query)
 	if !connected {
 		return nil, fmt.Errorf("not connected to %s", query.Integration)
 	}
@@ -133,8 +134,16 @@ func (s *SourceService) SyncViewByExternalId(ctx context.Context, externalId str
 // RefreshQuery re-executes a query and emits hook events for new results.
 // Called by the source poller.
 func (s *SourceService) RefreshQuery(ctx context.Context, query *types.FilesystemQuery) error {
+	query, err := s.refreshQueryDefinition(ctx, query)
+	if err != nil {
+		return err
+	}
+	if query == nil {
+		return fmt.Errorf("query not found")
+	}
+
 	pctx := &sources.ProviderContext{WorkspaceId: query.WorkspaceId}
-	pctx, connected := s.loadCredentials(ctx, pctx, query.Integration)
+	pctx, connected := s.loadQueryCredentials(ctx, pctx, query)
 	if !connected {
 		return fmt.Errorf("not connected to %s (workspace %d)", query.Integration, query.WorkspaceId)
 	}
@@ -143,9 +152,49 @@ func (s *SourceService) RefreshQuery(ctx context.Context, query *types.Filesyste
 	if err != nil {
 		return err
 	}
+	if sourceWatchBaselinePending(query) {
+		if err := s.completePendingSourceWatchBaseline(ctx, query, results); err != nil {
+			return err
+		}
+		log.Info().
+			Str("path", query.Path).
+			Str("integration", query.Integration).
+			Int("results", len(results)).
+			Msg("source watch baseline established")
+		return nil
+	}
 
 	s.emitSourceHookEvents(ctx, pctx.WorkspaceId, query, results)
 	return nil
+}
+
+func (s *SourceService) refreshQueryDefinition(
+	ctx context.Context,
+	query *types.FilesystemQuery,
+) (*types.FilesystemQuery, error) {
+	if s == nil || s.fsStore == nil || query == nil {
+		return query, nil
+	}
+	if externalID := strings.TrimSpace(query.ExternalId); externalID != "" {
+		refreshed, err := s.fsStore.GetQueryByExternalId(ctx, externalID)
+		if err != nil {
+			return nil, fmt.Errorf("refresh query definition %s: %w", externalID, err)
+		}
+		if refreshed != nil {
+			return refreshed, nil
+		}
+	}
+	if query.WorkspaceId == 0 || strings.TrimSpace(query.Path) == "" {
+		return query, nil
+	}
+	refreshed, err := s.fsStore.GetQuery(ctx, query.WorkspaceId, query.Path)
+	if err != nil {
+		return nil, fmt.Errorf("refresh query definition %s: %w", query.Path, err)
+	}
+	if refreshed != nil {
+		return refreshed, nil
+	}
+	return query, nil
 }
 
 // emitSourceHookEvents detects new and removed results via the seen tracker
@@ -220,12 +269,12 @@ func (s *SourceService) emitSourceHookEvents(ctx context.Context, workspaceId ui
 			}
 		}
 		if emitErr := s.hookStream.Emit(ctx, map[string]any{
-			"event":          hooks.EventFsDelete,
-			"workspace_id":   fmt.Sprintf("%d", workspaceId),
-			"path":           queryPath,
-			"integration":    query.Integration,
-			"removed_count":  fmt.Sprintf("%d", len(diff.Removed)),
-			"removed_items":  strings.Join(removedPaths, ", "),
+			"event":         hooks.EventFsDelete,
+			"workspace_id":  fmt.Sprintf("%d", workspaceId),
+			"path":          queryPath,
+			"integration":   query.Integration,
+			"removed_count": fmt.Sprintf("%d", len(diff.Removed)),
+			"removed_items": strings.Join(removedPaths, ", "),
 		}); emitErr != nil {
 			log.Error().Err(emitErr).Str("path", queryPath).Int("removed_results", len(diff.Removed)).
 				Msg("failed to emit source fs.delete event, will retry next poll")
@@ -284,7 +333,7 @@ func (s *SourceService) executeAndCacheQuery(ctx context.Context, pctx *sources.
 	}
 
 	spec := parseQuerySpec(query.Integration, query.QuerySpec)
-	if spec.Query == "" && !emptyQueryAllowed(query.Integration) {
+	if spec.Query == "" && !querySpecAllowsEmptyQuery(query.Integration, spec) {
 		return nil, fmt.Errorf("empty query spec for %s", query.Integration)
 	}
 
@@ -441,7 +490,7 @@ func (s *SourceService) CreateView(ctx context.Context, req *pb.CreateViewReques
 		}
 		// Validate the filter produces a non-empty query for integrations that need it.
 		spec := parseQuerySpec(req.Integration, querySpec)
-		if spec.Query == "" && !emptyQueryAllowed(req.Integration) {
+		if spec.Query == "" && !querySpecAllowsEmptyQuery(req.Integration, spec) {
 			return &pb.CreateViewResponse{Ok: false, Error: "filter produces no query criteria"}, nil
 		}
 		filenameFormat = sources.DefaultFilenameFormat(req.Integration)
@@ -453,22 +502,26 @@ func (s *SourceService) CreateView(ctx context.Context, req *pb.CreateViewReques
 		querySpec = s.refineQueryIfNeeded(ctx, req.Integration, req.Guidance, querySpec, filenameFormat)
 	}
 
-	query := &types.FilesystemQuery{
-		WorkspaceId:    workspaceId,
-		Integration:    req.Integration,
-		Path:           path,
-		Name:           req.Name,
-		QuerySpec:      querySpec,
-		Guidance:       req.Guidance,
-		OutputFormat:   types.ViewOutputFormat(req.OutputFormat),
-		FileExt:        req.FileExt,
-		FilenameFormat: filenameFormat,
-		CacheTTL:       0,
-		Mode:           mode,
-		Filter:         req.Filter,
+	var credentialMemberID *uint
+	if memberID := auth.MemberId(ctx); memberID != 0 {
+		credentialMemberID = &memberID
 	}
 
-	created, err := s.fsStore.CreateQuery(ctx, query)
+	created, _, err := s.saveViewDefinition(ctx, &types.FilesystemQuery{
+		WorkspaceId:        workspaceId,
+		CredentialMemberID: credentialMemberID,
+		Integration:        req.Integration,
+		Path:               path,
+		Name:               req.Name,
+		QuerySpec:          querySpec,
+		Guidance:           req.Guidance,
+		OutputFormat:       types.ViewOutputFormat(req.OutputFormat),
+		FileExt:            req.FileExt,
+		FilenameFormat:     filenameFormat,
+		CacheTTL:           0,
+		Mode:               mode,
+		Filter:             req.Filter,
+	}, false)
 	if err != nil {
 		log.Error().Err(err).Str("path", path).Msg("failed to create view")
 		return &pb.CreateViewResponse{Ok: false, Error: err.Error()}, nil
@@ -476,6 +529,62 @@ func (s *SourceService) CreateView(ctx context.Context, req *pb.CreateViewReques
 
 	log.Info().Str("path", path).Str("mode", string(mode)).Str("query", querySpec).Msg("created source view")
 	return &pb.CreateViewResponse{Ok: true, View: viewToProto(created)}, nil
+}
+
+func (s *SourceService) saveViewDefinition(
+	ctx context.Context,
+	query *types.FilesystemQuery,
+	allowUpdate bool,
+) (*types.FilesystemQuery, bool, error) {
+	if s == nil || s.fsStore == nil {
+		return nil, false, fmt.Errorf("source service is unavailable")
+	}
+	if query == nil {
+		return nil, false, fmt.Errorf("source view is required")
+	}
+	query.Path = strings.TrimSpace(query.Path)
+	if query.Path == "" {
+		return nil, false, fmt.Errorf("view path is required")
+	}
+	if strings.TrimSpace(query.Name) == "" {
+		query.Name = path.Base(query.Path)
+	}
+
+	existing, err := s.fsStore.GetQuery(ctx, query.WorkspaceId, query.Path)
+	if err != nil {
+		return nil, false, fmt.Errorf("get source view: %w", err)
+	}
+	if existing == nil {
+		created, err := s.fsStore.CreateQuery(ctx, query)
+		if err != nil {
+			return nil, false, err
+		}
+		return created, true, nil
+	}
+	if !allowUpdate {
+		return nil, false, fmt.Errorf("query already exists at path: %s", query.Path)
+	}
+
+	existing.CredentialMemberID = query.CredentialMemberID
+	existing.SystemManaged = query.SystemManaged
+	existing.Lifecycle = query.Lifecycle
+	existing.OwnerTaskID = query.OwnerTaskID
+	existing.OwnerRunID = query.OwnerRunID
+	existing.Integration = query.Integration
+	existing.Path = query.Path
+	existing.Name = query.Name
+	existing.QuerySpec = query.QuerySpec
+	existing.Guidance = query.Guidance
+	existing.OutputFormat = query.OutputFormat
+	existing.FileExt = query.FileExt
+	existing.FilenameFormat = query.FilenameFormat
+	existing.CacheTTL = query.CacheTTL
+	existing.Mode = query.Mode
+	existing.Filter = query.Filter
+	if err := s.fsStore.UpdateQuery(ctx, existing); err != nil {
+		return nil, false, fmt.Errorf("update source view: %w", err)
+	}
+	return existing, false, nil
 }
 
 func (s *SourceService) GetView(ctx context.Context, req *pb.GetViewRequest) (*pb.GetViewResponse, error) {
@@ -649,7 +758,7 @@ func (s *SourceService) ExecuteView(ctx context.Context, req *pb.ExecuteViewRequ
 	if err != nil {
 		return &pb.ExecuteViewResponse{Ok: false, Error: err.Error()}, nil
 	}
-	pctx, connected := s.loadCredentials(ctx, pctx, query.Integration)
+	pctx, connected := s.loadQueryCredentials(ctx, pctx, query)
 	if !connected {
 		return &pb.ExecuteViewResponse{Ok: false, Error: "not connected"}, nil
 	}
@@ -839,7 +948,7 @@ func (s *SourceService) resolveQuerySpec(ctx context.Context, integration, name,
 	}
 
 	spec := parseQuerySpec(integration, querySpec)
-	if spec.Query == "" && !emptyQueryAllowed(integration) {
+	if spec.Query == "" && !querySpecAllowsEmptyQuery(integration, spec) {
 		return "", "", fmt.Errorf("invalid query spec from inference")
 	}
 	if filenameFormat == "" {
@@ -998,6 +1107,9 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 		IncludeAttachments *bool    `json:"include_attachments"`
 		IncludeInline      *bool    `json:"include_inline"`
 		IncludeMessageBody *bool    `json:"include_message_body"`
+		ThreadID           string   `json:"thread_id"`
+		MessageID          string   `json:"message_id"`
+		CredentialMemberID string   `json:"credential_member_id"`
 		Limit              int      `json:"limit"`
 		MaxResults         int      `json:"max_results"`
 		FilenameFormat     string   `json:"filename_format"`
@@ -1074,6 +1186,15 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 	if spec.IncludeMessageBody != nil {
 		metadata["include_message_body"] = strconv.FormatBool(*spec.IncludeMessageBody)
 	}
+	if spec.ThreadID != "" {
+		metadata["thread_id"] = strings.TrimSpace(spec.ThreadID)
+	}
+	if spec.MessageID != "" {
+		metadata["message_id"] = strings.TrimSpace(spec.MessageID)
+	}
+	if spec.CredentialMemberID != "" {
+		metadata[legacyQueryCredentialMemberIDKey] = strings.TrimSpace(spec.CredentialMemberID)
+	}
 
 	return sources.QuerySpec{
 		Query:          query,
@@ -1138,6 +1259,19 @@ func emptyQueryAllowed(integration string) bool {
 	switch types.SourceType(integration) {
 	case types.SourceLinear, types.SourcePostHog:
 		return true
+	default:
+		return false
+	}
+}
+
+func querySpecAllowsEmptyQuery(integration string, spec sources.QuerySpec) bool {
+	if emptyQueryAllowed(integration) {
+		return true
+	}
+	switch types.SourceType(integration) {
+	case types.SourceGmail:
+		return strings.TrimSpace(spec.Metadata["thread_id"]) != "" ||
+			strings.TrimSpace(spec.Metadata["message_id"]) != ""
 	default:
 		return false
 	}

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/oauth"
+	"github.com/beam-cloud/airstore/pkg/orchestration"
 	"github.com/beam-cloud/airstore/pkg/sources"
 	"github.com/beam-cloud/airstore/pkg/tools"
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -48,6 +49,42 @@ func TestStartAsyncClosesHTTPListenerIfGRPCBindFails(t *testing.T) {
 	rebind, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", httpPort))
 	require.NoError(t, err)
 	_ = rebind.Close()
+}
+
+type fakeSourceWatchRegistrarTarget struct {
+	registrar orchestration.SourceWatchRegistrar
+}
+
+func (f *fakeSourceWatchRegistrarTarget) SetSourceWatchRegistrar(registrar orchestration.SourceWatchRegistrar) {
+	f.registrar = registrar
+}
+
+type fakeSourceWatchRegistrar struct{}
+
+func (f *fakeSourceWatchRegistrar) RegisterTaskSourceWatches(context.Context, *types.AgentTask, *types.RunExecutionWakeSignal, []*types.SourceWatchRequest) (*types.TaskBlockerSpec, error) {
+	return nil, nil
+}
+
+func (f *fakeSourceWatchRegistrar) CleanupTaskSourceWatches(context.Context, *types.AgentTask) error {
+	return nil
+}
+
+func TestWireSourceWatchRegistrar(t *testing.T) {
+	target := &fakeSourceWatchRegistrarTarget{}
+	registrar := &fakeSourceWatchRegistrar{}
+
+	wireSourceWatchRegistrar(target, registrar)
+
+	require.Same(t, registrar, target.registrar)
+}
+
+func TestWireSourceWatchRegistrarSkipsNil(t *testing.T) {
+	target := &fakeSourceWatchRegistrarTarget{}
+
+	wireSourceWatchRegistrar(target, nil)
+	wireSourceWatchRegistrar(nil, &fakeSourceWatchRegistrar{})
+
+	require.Nil(t, target.registrar)
 }
 
 func newGatewayForBindTest(t *testing.T, httpPort, grpcPort int) *Gateway {

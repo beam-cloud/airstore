@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -12,7 +14,9 @@ import (
 
 	runtimepkg "github.com/beam-cloud/airstore/pkg/runtime"
 	"github.com/beam-cloud/airstore/pkg/types"
+	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/opencontainers/runtime-spec/specs-go"
+	"google.golang.org/grpc"
 )
 
 type startProbeRuntime struct {
@@ -107,6 +111,27 @@ func (r *startProbeRuntime) lastKillSignal() syscall.Signal {
 	return syscall.Signal(r.lastKill.Load())
 }
 
+type stubSandboxContextClient struct {
+	mkdir func(ctx context.Context, req *pb.ContextMkdirRequest) (*pb.ContextMkdirResponse, error)
+	stat  func(ctx context.Context, req *pb.ContextStatRequest) (*pb.ContextStatResponse, error)
+}
+
+func (s *stubSandboxContextClient) Mkdir(ctx context.Context, req *pb.ContextMkdirRequest, _ ...grpc.CallOption) (*pb.ContextMkdirResponse, error) {
+	return s.mkdir(ctx, req)
+}
+
+func (s *stubSandboxContextClient) Stat(ctx context.Context, req *pb.ContextStatRequest, _ ...grpc.CallOption) (*pb.ContextStatResponse, error) {
+	return s.stat(ctx, req)
+}
+
+type stubPromptRunner struct{}
+
+func (stubPromptRunner) Name() string { return "stub" }
+
+func (stubPromptRunner) BuildEntrypoint(_ types.RunExecution, _ map[string]string) []string {
+	return []string{"stub"}
+}
+
 func TestSandboxStartWaitsForRuntimeReady(t *testing.T) {
 	runtime := &startProbeRuntime{readyAfter: 120 * time.Millisecond}
 	manager := &SandboxManager{
@@ -171,6 +196,150 @@ func TestResolveSandboxResolvConfSourceReturnsKnownFallbackPath(t *testing.T) {
 	source := resolveSandboxResolvConfSource(false)
 	if source != "/workspace/etc/resolv.conf" && source != "/etc/resolv.conf" {
 		t.Fatalf("unexpected resolv.conf source: %s", source)
+	}
+}
+
+func TestEnsureSandboxWorkingDirOnMountCreatesMissingDir(t *testing.T) {
+	mountSource := t.TempDir()
+	prev := newSandboxContextClient
+	newSandboxContextClient = func(addr, token string) (sandboxContextClient, func() error, error) {
+		client := &stubSandboxContextClient{
+			mkdir: func(_ context.Context, req *pb.ContextMkdirRequest) (*pb.ContextMkdirResponse, error) {
+				if err := os.MkdirAll(filepath.Join(mountSource, strings.TrimPrefix(req.Path, "/")), 0o755); err != nil {
+					return nil, err
+				}
+				return &pb.ContextMkdirResponse{Ok: true}, nil
+			},
+			stat: func(_ context.Context, req *pb.ContextStatRequest) (*pb.ContextStatResponse, error) {
+				info, err := os.Stat(filepath.Join(mountSource, strings.TrimPrefix(req.Path, "/")))
+				if err != nil {
+					return &pb.ContextStatResponse{Ok: false, Error: err.Error()}, nil
+				}
+				return &pb.ContextStatResponse{Ok: true, Info: &pb.FileInfo{IsDir: info.IsDir()}}, nil
+			},
+		}
+		return client, func() error { return nil }, nil
+	}
+	t.Cleanup(func() { newSandboxContextClient = prev })
+
+	manager := &SandboxManager{
+		ctx:         context.Background(),
+		gatewayAddr: "gateway.test.internal:1993",
+		authToken:   "token",
+	}
+	cfg := types.SandboxConfig{
+		FilesystemMount: mountSource,
+		WorkingDir:      "/workspace/agents/email-outreach",
+		Env:             map[string]string{"AIRSTORE_TOKEN": "task-token"},
+	}
+
+	if err := manager.ensureSandboxWorkingDirOnMount(cfg); err != nil {
+		t.Fatalf("ensureSandboxWorkingDirOnMount returned error: %v", err)
+	}
+
+	hostPath := filepath.Join(mountSource, "agents", "email-outreach")
+	info, err := os.Stat(hostPath)
+	if err != nil {
+		t.Fatalf("expected workdir to exist: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("expected %s to be a directory", hostPath)
+	}
+}
+
+func TestEnsureSandboxWorkingDirOnMountFailsForMissingDirOnReadOnlyMount(t *testing.T) {
+	prev := newSandboxContextClient
+	newSandboxContextClient = func(addr, token string) (sandboxContextClient, func() error, error) {
+		client := &stubSandboxContextClient{
+			mkdir: func(_ context.Context, req *pb.ContextMkdirRequest) (*pb.ContextMkdirResponse, error) {
+				return &pb.ContextMkdirResponse{Ok: false, Error: "unexpected mkdir"}, nil
+			},
+			stat: func(_ context.Context, req *pb.ContextStatRequest) (*pb.ContextStatResponse, error) {
+				return &pb.ContextStatResponse{Ok: false, Error: "not found"}, nil
+			},
+		}
+		return client, func() error { return nil }, nil
+	}
+	t.Cleanup(func() { newSandboxContextClient = prev })
+
+	manager := &SandboxManager{
+		ctx:         context.Background(),
+		gatewayAddr: "gateway.test.internal:1993",
+		authToken:   "token",
+	}
+	cfg := types.SandboxConfig{
+		FilesystemMount:    t.TempDir(),
+		FilesystemReadOnly: true,
+		WorkingDir:         "/workspace/agents/email-outreach",
+		Env:                map[string]string{"AIRSTORE_TOKEN": "task-token"},
+	}
+
+	err := manager.ensureSandboxWorkingDirOnMount(cfg)
+	if err == nil {
+		t.Fatal("expected missing read-only workdir to fail")
+	}
+	if !strings.Contains(err.Error(), "read-only mount") {
+		t.Fatalf("expected read-only mount error, got %v", err)
+	}
+}
+
+func TestResolvePromptTaskPlanUsesSelectedRunnerCapabilities(t *testing.T) {
+	claudeRunner := NewClaudeCodeRunner(ClaudeCodeRunnerOptions{AnthropicAPIKey: "claude-key"})
+	airRunner := NewAirRunner(AirRunnerOptions{AnthropicAPIKey: "air-key"})
+	manager := &SandboxManager{
+		defaultPromptRunner: claudeRunner,
+		promptRunners: map[string]AgentExecutionRunner{
+			"claude": claudeRunner,
+			"air":    airRunner,
+		},
+	}
+
+	plan := manager.resolvePromptTaskPlan(types.RunExecution{Prompt: "hi"}, map[string]string{
+		agentProviderEnvKey: "air",
+	})
+
+	if _, ok := plan.runner.(*AirRunner); !ok {
+		t.Fatalf("expected air runner, got %T", plan.runner)
+	}
+	if _, ok := plan.analyzer.(*AirAnalyzer); !ok {
+		t.Fatalf("expected air analyzer, got %T", plan.analyzer)
+	}
+	if got := plan.bamlEnv["ANTHROPIC_API_KEY"]; got != "air-key" {
+		t.Fatalf("expected air classifier env, got %q", got)
+	}
+}
+
+func TestResolvePromptTaskPlanFallsBackToDefaultRunner(t *testing.T) {
+	claudeRunner := NewClaudeCodeRunner(ClaudeCodeRunnerOptions{AnthropicAPIKey: "claude-key"})
+	manager := &SandboxManager{
+		defaultPromptRunner: claudeRunner,
+		promptRunners: map[string]AgentExecutionRunner{
+			"claude": claudeRunner,
+		},
+	}
+
+	plan := manager.resolvePromptTaskPlan(types.RunExecution{Prompt: "hi"}, map[string]string{
+		agentProviderEnvKey: "unknown",
+	})
+
+	if _, ok := plan.runner.(*ClaudeCodeRunner); !ok {
+		t.Fatalf("expected claude fallback runner, got %T", plan.runner)
+	}
+	if _, ok := plan.analyzer.(*ClaudeCodeAnalyzer); !ok {
+		t.Fatalf("expected claude analyzer, got %T", plan.analyzer)
+	}
+	if got := plan.bamlEnv["ANTHROPIC_API_KEY"]; got != "claude-key" {
+		t.Fatalf("expected default classifier env, got %q", got)
+	}
+}
+
+func TestBamlEnvForRunnerFallsBackToDefaultRunnerEnv(t *testing.T) {
+	defaultRunner := NewClaudeCodeRunner(ClaudeCodeRunnerOptions{AnthropicAPIKey: "claude-key"})
+	manager := &SandboxManager{defaultPromptRunner: defaultRunner}
+
+	env := manager.BamlEnvForRunner(stubPromptRunner{})
+	if got := env["ANTHROPIC_API_KEY"]; got != "claude-key" {
+		t.Fatalf("expected default classifier env fallback, got %q", got)
 	}
 }
 

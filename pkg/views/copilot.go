@@ -399,6 +399,7 @@ func (c *Copilot) PublishView(ctx context.Context, draft *Draft, workspaceID uin
 	normalizeViewDefinition(&def)
 	canonicalizeViewAgentRefs(&def, agents, nil)
 	normalizeViewDefinition(&def)
+	classifyDetailTemplates(ctx, &def)
 
 	log.Info().
 		Strs("pre_canon_agents", preCanonAgents).
@@ -948,6 +949,32 @@ func normalizeViewDefinition(def *types.ViewDefinition) {
 // It enforces the same schema invariants used by the copilot publish path.
 func NormalizeDefinition(def *types.ViewDefinition) {
 	normalizeViewDefinition(def)
+}
+
+// classifyDetailTemplates runs BAML once per table component to determine the
+// optimal detail view layout template. The deterministic fallback from
+// normalizeComponentConfig is already in Config["detail_layout"]; this upgrades
+// it with BAML intelligence. Skipped if columns haven't changed.
+func classifyDetailTemplates(ctx context.Context, def *types.ViewDefinition) {
+	for i := range def.Sheets {
+		for j := range def.Sheets[i].Components {
+			comp := &def.Sheets[i].Components[j]
+			if !comp.IsTable() || comp.Config == nil {
+				continue
+			}
+			cols := ConfigColumnsToMeta(comp.Config)
+			if len(cols) == 0 {
+				continue
+			}
+			schemaHash := columnSchemaHash(cols)
+			if existing, ok := comp.Config["detail_layout_hash"].(string); ok && existing == schemaHash {
+				continue
+			}
+			layout := ClassifyDetailTemplate(ctx, comp.Title, cols)
+			comp.Config["detail_layout"] = layout
+			comp.Config["detail_layout_hash"] = schemaHash
+		}
+	}
 }
 
 func ensureUniqueViewScopedID(prefix, raw string, seen map[string]struct{}) string {
@@ -1828,41 +1855,6 @@ func extractStringSlice(m map[string]any, key string) []string {
 	return uniqueStringSlice(m[key])
 }
 
-func describeFields(m map[string]any, prefix string, out map[string]string, depth int) {
-	if depth > 2 {
-		return
-	}
-	for k, v := range m {
-		path := prefix + "." + k
-		switch val := v.(type) {
-		case map[string]any:
-			out[path] = "object"
-			describeFields(val, path, out, depth+1)
-		case []any:
-			if len(val) > 0 {
-				if nested, ok := val[0].(map[string]any); ok {
-					out[path] = "array of objects"
-					describeFields(nested, path+"[]", out, depth+1)
-				} else {
-					out[path] = fmt.Sprintf("array of %T", val[0])
-				}
-			} else {
-				out[path] = "array"
-			}
-		case string:
-			out[path] = "string"
-		case float64:
-			out[path] = "number"
-		case bool:
-			out[path] = "boolean"
-		case nil:
-			out[path] = "null"
-		default:
-			out[path] = fmt.Sprintf("%T", v)
-		}
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Component registry documentation — injected into BAML prompt
 // ---------------------------------------------------------------------------
@@ -1887,7 +1879,7 @@ COMPONENT TYPES (only two):
     Use when an agent produces multiple artifact families and you need a
     specific one. Omit to include all outputs from the agent.
   - statuses: optional status filter. Values: "active", "pending", "approved",
-    "rejected", "superseded". Omit to include all (default).
+    "rejected", "cancelled". Omit to include all (default).
 
   Config: {
     columns: [{

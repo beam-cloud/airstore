@@ -3,6 +3,7 @@ package orchestration
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/beam-cloud/airstore/pkg/types"
 )
@@ -47,6 +48,8 @@ type AgentCommandParams struct {
 	SpawnedBy         *string             `json:"spawned_by,omitempty"`
 	Priority          string              `json:"priority,omitempty"`
 	BudgetUSD         *float64            `json:"budget_usd,omitempty"`
+	ParentTaskID      *string             `json:"parent_task_id,omitempty"`
+	DispatchDelay     time.Duration       `json:"-"`
 }
 
 type ExecHost string

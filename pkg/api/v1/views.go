@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -50,6 +51,7 @@ func NewViewsGroup(g *echo.Group, backend repository.BackendRepository, copilot 
 		vg.g.DELETE("/:view_id/sheets/:sheet_id/rows/:row_id", vg.ExcludeRow)
 		vg.g.POST("/:view_id/sheets/:sheet_id/rows/:row_id/restore", vg.RestoreRow)
 	}
+	vg.g.GET("/:view_id/rows/:row_id/detail", vg.RowDetail)
 	vg.g.POST("/drafts", vg.CreateDraft)
 	vg.g.GET("/drafts", vg.ListDrafts)
 	vg.g.GET("/drafts/:draft_id", vg.GetDraft)
@@ -91,7 +93,7 @@ func (vg *ViewsGroup) Create(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, err.Error())
 	}
 	var req createViewRequest
-	if err := decodeStrictBody(c, &req); err != nil {
+	if err := json.NewDecoder(c.Request().Body).Decode(&req); err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
 	}
 	v := &types.View{
@@ -148,7 +150,7 @@ func (vg *ViewsGroup) Update(c echo.Context) error {
 	previousDefinition := v.Definition
 
 	var req updateViewRequest
-	if err := decodeStrictBody(c, &req); err != nil {
+	if err := json.NewDecoder(c.Request().Body).Decode(&req); err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
 	}
 	if req.Name != nil {
@@ -207,6 +209,16 @@ func (vg *ViewsGroup) Update(c echo.Context) error {
 						Str("component_id", deleted.ComponentID).
 						Str("column", deleted.Key).
 						Msg("failed to delete column from MongoDB view store")
+				}
+			}
+			for _, added := range addedViewColumns(previousDefinition, v.Definition) {
+				schemaHash := schemaHashForComponent(v.Definition, added.SheetID, added.ComponentID)
+				if err := vg.store.UpdateSchemaHash(ctx, v.ID, added.SheetID, added.ComponentID, schemaHash); err != nil {
+					log.Warn().Err(err).
+						Str("view_id", v.ID).
+						Str("sheet_id", added.SheetID).
+						Str("component_id", added.ComponentID).
+						Msg("failed to update schema hash for added columns in MongoDB view store")
 				}
 			}
 		}
@@ -397,6 +409,49 @@ func deletedViewColumns(previous, next types.ViewDefinition) []deletedSheetColum
 		}
 	}
 	return deleted
+}
+
+type addedSheetComponent struct {
+	SheetID     string
+	ComponentID string
+}
+
+// addedViewColumns detects components where new columns were added. Returns
+// one entry per affected (sheet, component) pair — the caller stamps the new
+// schema_hash on existing rows so the resolver treats them as fresh instead of
+// triggering a full BAML remap.
+func addedViewColumns(previous, next types.ViewDefinition) []addedSheetComponent {
+	seen := make(map[string]bool)
+	var added []addedSheetComponent
+	for _, sheet := range next.Sheets {
+		for _, component := range sheet.Components {
+			if !component.IsTable() {
+				continue
+			}
+			prevComponent := findComponent(previous, sheet.ID, component.ID)
+			if prevComponent == nil || !prevComponent.IsTable() {
+				continue
+			}
+			prevKeys := componentColumnKeys(*prevComponent)
+			if len(prevKeys) == 0 {
+				continue
+			}
+			for key := range componentColumnKeys(component) {
+				if !prevKeys[key] {
+					k := sheet.ID + ":" + component.ID
+					if !seen[k] {
+						seen[k] = true
+						added = append(added, addedSheetComponent{
+							SheetID:     sheet.ID,
+							ComponentID: component.ID,
+						})
+					}
+					break
+				}
+			}
+		}
+	}
+	return added
 }
 
 func findComponent(def types.ViewDefinition, sheetID, componentID string) *types.ComponentSpec {
@@ -615,6 +670,14 @@ type updateRowRequest struct {
 	Cells map[string]string `json:"cells"`
 }
 
+func decodeViewRowID(raw string) (string, error) {
+	decoded, err := url.PathUnescape(strings.TrimSpace(raw))
+	if err != nil {
+		return "", fmt.Errorf("decode row id: %w", err)
+	}
+	return decoded, nil
+}
+
 func (vg *ViewsGroup) UpdateRow(c echo.Context) error {
 	if vg.store == nil || !vg.store.Available() {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "view row persistence not configured")
@@ -627,7 +690,10 @@ func (vg *ViewsGroup) UpdateRow(c echo.Context) error {
 	ctx := c.Request().Context()
 	viewID := c.Param("view_id")
 	sheetID := c.Param("sheet_id")
-	rowID := c.Param("row_id")
+	rowID, err := decodeViewRowID(c.Param("row_id"))
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid row_id")
+	}
 
 	v, err := vg.backend.GetView(ctx, workspaceID, viewID)
 	if err != nil {
@@ -675,6 +741,240 @@ func (vg *ViewsGroup) UpdateRow(c echo.Context) error {
 }
 
 // ---------------------------------------------------------------------------
+// Row detail — reads the schema-level layout template from the component
+// config, resolves per-row section visibility, fetches row data.
+// No BAML per click.
+// ---------------------------------------------------------------------------
+
+func (vg *ViewsGroup) RowDetail(c echo.Context) error {
+	ctx := c.Request().Context()
+	workspaceID, err := vg.workspaceID(c)
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+	}
+	viewID := c.Param("view_id")
+	rowID, err := decodeViewRowID(c.Param("row_id"))
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid row_id")
+	}
+	parentTaskID := c.QueryParam("task_id")
+
+	// Single row fetch — used for both subtask binding and component lookup.
+	var row *views.ViewRow
+	if vg.store != nil && vg.store.Available() {
+		row, _ = vg.store.GetRowByID(ctx, viewID, rowID)
+	}
+	if row != nil && strings.TrimSpace(row.TaskID) != "" {
+		parentTaskID = strings.TrimSpace(row.TaskID)
+	}
+	if parentTaskID == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "task_id query param is required")
+	}
+
+	// Resolve the schema-level layout template from the component config.
+	template := vg.detailTemplateForRow(ctx, workspaceID, viewID, row)
+
+	parentTask, err := vg.backend.GetTask(ctx, workspaceID, parentTaskID)
+	if err != nil {
+		return ErrorResponse(c, http.StatusNotFound, "task not found")
+	}
+
+	parentOutputs, err := vg.backend.ListTaskOutputs(ctx, workspaceID, parentTaskID)
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to load task outputs")
+	}
+
+	detailContext, err := views.ResolveRowDetailContext(ctx, vg.backend, workspaceID, parentTask, parentOutputs, row)
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to resolve row detail")
+	}
+
+	projection := views.ProjectDetail(detailContext.Task, detailContext.Outputs, detailContext.Subtasks)
+
+	var emailThreads map[string][]views.ThreadMessage
+	if threadIDs := extractThreadIDs(projection.ThreadOutputs); len(threadIDs) > 0 {
+		fetcher := views.NewEmailThreadFetcher(vg.backend)
+		emailThreads = fetcher.FetchThreads(ctx, workspaceID, threadIDs)
+	}
+	if synth := syntheticEmailThreads(projection.ThreadOutputs, emailThreads); len(synth) > 0 {
+		if emailThreads == nil {
+			emailThreads = synth
+		} else {
+			for k, v := range synth {
+				emailThreads[k] = v
+			}
+		}
+	}
+
+	layout := views.ResolveProjectedLayout(template, projection)
+	blocker := projection.Blocker
+
+	type subtaskSummary struct {
+		ID     string               `json:"id"`
+		State  types.AgentTaskState `json:"state"`
+		Label  string               `json:"label,omitempty"`
+		WakeAt *time.Time           `json:"wake_at,omitempty"`
+	}
+	subtaskList := make([]subtaskSummary, 0, len(detailContext.Subtasks))
+	for _, st := range detailContext.Subtasks {
+		label := ""
+		if st.PayloadJSON != nil {
+			if l, ok := st.PayloadJSON["label"].(string); ok {
+				label = l
+			}
+		}
+		subtaskList = append(subtaskList, subtaskSummary{
+			ID:     st.ID,
+			State:  st.State,
+			Label:  label,
+			WakeAt: st.WakeAt,
+		})
+	}
+
+	return SuccessResponse(c, map[string]any{
+		"layout":          layout,
+		"blocker":         blocker,
+		"task":            detailContext.Task,
+		"outputs":         projection.Outputs,
+		"gallery_outputs": projection.GalleryOutputs,
+		"email_threads":   emailThreads,
+		"subtasks":        subtaskList,
+		"row_id":          rowID,
+		"parent_task_id":  parentTaskID,
+	})
+}
+
+// detailTemplateForRow finds the table component that owns the row and
+// returns its cached or inferred detail layout template.
+func (vg *ViewsGroup) detailTemplateForRow(ctx context.Context, workspaceID uint, viewID string, row *views.ViewRow) views.DetailLayoutResponse {
+	view, err := vg.backend.GetView(ctx, workspaceID, viewID)
+	if err != nil || view == nil {
+		return views.InferDetailTemplate(nil)
+	}
+
+	componentID := ""
+	if row != nil {
+		componentID = row.ComponentID
+	}
+
+	for _, sheet := range view.Definition.Sheets {
+		for _, comp := range sheet.Components {
+			if componentID != "" && comp.ID != componentID {
+				continue
+			}
+			if !comp.IsTable() {
+				continue
+			}
+			return views.DetailTemplateForComponent(&comp)
+		}
+	}
+
+	return views.InferDetailTemplate(nil)
+}
+
+func extractThreadIDs(outputs []*types.TaskOutput) []string {
+	seen := make(map[string]bool)
+	var ids []string
+	for _, o := range outputs {
+		tid := emailOutputThreadID(o)
+		if tid == "" || seen[tid] {
+			continue
+		}
+		seen[tid] = true
+		ids = append(ids, tid)
+	}
+	return ids
+}
+
+func emailOutputThreadID(o *types.TaskOutput) string {
+	if o == nil || o.OutputType != types.TaskOutputTypeEmail {
+		return ""
+	}
+	tid := strings.TrimSpace(dataString(o.Data, "thread_id"))
+	if tid == "" {
+		tid = gmailThreadIDFromURL(dataString(o.Data, "email_link", "uri"))
+	}
+	if tid == "" {
+		tid = gmailThreadIDFromURL(metadataString(o.Metadata, "deeplink"))
+	}
+	return strings.TrimSpace(tid)
+}
+
+func gmailThreadIDFromURL(u string) string {
+	u = strings.TrimSpace(u)
+	if !strings.Contains(u, "mail.google.com") {
+		return ""
+	}
+	if idx := strings.LastIndex(u, "/"); idx >= 0 && idx < len(u)-1 {
+		return u[idx+1:]
+	}
+	return ""
+}
+
+func dataString(data map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if v, ok := data[k].(string); ok && strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func metadataString(m map[string]any, key string) string {
+	if m == nil {
+		return ""
+	}
+	v, _ := m[key].(string)
+	return v
+}
+
+// syntheticEmailThreads builds thread messages from output data for email
+// outputs that don't have a real Gmail thread. This ensures the email thread
+// section always shows sent email content.
+func syntheticEmailThreads(outputs []*types.TaskOutput, existing map[string][]views.ThreadMessage) map[string][]views.ThreadMessage {
+	synth := make(map[string][]views.ThreadMessage)
+	for _, o := range outputs {
+		if o == nil || o.OutputType != types.TaskOutputTypeEmail {
+			continue
+		}
+		if o.Status == types.TaskOutputStatusPending || o.Status == types.TaskOutputStatusApproved {
+			continue
+		}
+		if threadID := emailOutputThreadID(o); threadID != "" && len(existing[threadID]) > 0 {
+			continue
+		}
+
+		recipient := dataString(o.Data, "recipient", "recipient_email", "to")
+		subject := dataString(o.Data, "subject")
+		body := dataString(o.Data, "content", "body", "snippet")
+		if recipient == "" && subject == "" && body == "" {
+			continue
+		}
+
+		threadKey := "output:" + o.ID
+		deeplink := dataString(o.Data, "email_link", "uri")
+		if deeplink == "" {
+			deeplink = metadataString(o.Metadata, "deeplink")
+		}
+
+		synth[threadKey] = []views.ThreadMessage{{
+			ID:         o.ID,
+			ThreadID:   threadKey,
+			From:       "me",
+			To:         recipient,
+			Subject:    subject,
+			Body:       body,
+			Snippet:    dataString(o.Data, "summary"),
+			Date:       o.CreatedAt.UTC().Format(time.RFC3339),
+			Timestamp:  o.CreatedAt.UnixMilli(),
+			IsOutbound: true,
+			Deeplink:   deeplink,
+		}}
+	}
+	return synth
+}
+
+// ---------------------------------------------------------------------------
 // Row exclusion (soft-delete)
 // ---------------------------------------------------------------------------
 
@@ -684,7 +984,10 @@ func (vg *ViewsGroup) ExcludeRow(c echo.Context) error {
 	}
 	viewID := c.Param("view_id")
 	sheetID := c.Param("sheet_id")
-	rowID := c.Param("row_id")
+	rowID, err := decodeViewRowID(c.Param("row_id"))
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid row_id")
+	}
 	if err := vg.store.ExcludeRow(c.Request().Context(), viewID, sheetID, rowID); err != nil {
 		log.Error().Err(err).Str("view_id", viewID).Str("sheet_id", sheetID).Str("row_id", rowID).Msg("failed to exclude row")
 		return ErrorResponse(c, http.StatusInternalServerError, "failed to exclude row")
@@ -698,7 +1001,10 @@ func (vg *ViewsGroup) RestoreRow(c echo.Context) error {
 	}
 	viewID := c.Param("view_id")
 	sheetID := c.Param("sheet_id")
-	rowID := c.Param("row_id")
+	rowID, err := decodeViewRowID(c.Param("row_id"))
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid row_id")
+	}
 	if err := vg.store.RestoreRow(c.Request().Context(), viewID, sheetID, rowID); err != nil {
 		log.Error().Err(err).Str("view_id", viewID).Str("sheet_id", sheetID).Str("row_id", rowID).Msg("failed to restore row")
 		return ErrorResponse(c, http.StatusInternalServerError, "failed to restore row")
@@ -722,7 +1028,10 @@ func (vg *ViewsGroup) RegenerateRow(c echo.Context) error {
 	ctx := c.Request().Context()
 	viewID := c.Param("view_id")
 	sheetID := c.Param("sheet_id")
-	rowID := c.Param("row_id")
+	rowID, err := decodeViewRowID(c.Param("row_id"))
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid row_id")
+	}
 
 	v, err := vg.backend.GetView(ctx, workspaceID, viewID)
 	if err != nil {

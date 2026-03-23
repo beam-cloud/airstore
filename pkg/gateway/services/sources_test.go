@@ -173,6 +173,21 @@ func TestParseQuerySpec_GmailAttachmentMetadata(t *testing.T) {
 	}
 }
 
+func TestParseQuerySpec_GmailExactWatchMetadata(t *testing.T) {
+	queryJSON := `{"gmail_query":"subject:\"Quarterly report\"","thread_id":"thread-123","message_id":"msg-456","include_attachments":true}`
+	spec := parseQuerySpec("gmail", queryJSON)
+
+	if got := spec.Metadata["thread_id"]; got != "thread-123" {
+		t.Errorf("Expected thread_id metadata, got %q", got)
+	}
+	if got := spec.Metadata["message_id"]; got != "msg-456" {
+		t.Errorf("Expected message_id metadata, got %q", got)
+	}
+	if got := spec.Metadata["include_attachments"]; got != "true" {
+		t.Errorf("Expected include_attachments=true metadata, got %q", got)
+	}
+}
+
 func TestParseQuerySpec_GDrive(t *testing.T) {
 	queryJSON := `{"gdrive_query": "mimeType='application/pdf'", "limit": 50}`
 	spec := parseQuerySpec("gdrive", queryJSON)
@@ -324,6 +339,56 @@ func TestEmitSourceHookEvents_FirstObservationEmits(t *testing.T) {
 	}
 	if len(emitter.events) != 1 {
 		t.Fatalf("expected still 1 emitted event, got %d", len(emitter.events))
+	}
+}
+
+func TestQueryCredentialMemberIDPrefersFirstClassField(t *testing.T) {
+	stored := uint(7)
+	query := &types.FilesystemQuery{
+		Integration:        string(types.SourceGmail),
+		CredentialMemberID: &stored,
+		QuerySpec:          `{"gmail_query":"is:unread","credential_member_id":"9"}`,
+	}
+	got := queryCredentialMemberID(query)
+	if got == nil || *got != 7 {
+		t.Fatalf("member id = %v, want 7", got)
+	}
+}
+
+func TestQueryCredentialMemberIDFallsBackToLegacyQuerySpec(t *testing.T) {
+	query := &types.FilesystemQuery{
+		Integration: string(types.SourceGmail),
+		QuerySpec:   `{"gmail_query":"is:unread","credential_member_id":"7"}`,
+	}
+	got := queryCredentialMemberID(query)
+	if got == nil || *got != 7 {
+		t.Fatalf("member id = %v, want 7", got)
+	}
+}
+
+func TestSelectBackgroundConnectionPrefersShared(t *testing.T) {
+	memberID := uint(7)
+	conn, err := selectBackgroundConnection([]types.IntegrationConnection{
+		{WorkspaceId: 1, IntegrationType: string(types.SourceGmail)},
+		{WorkspaceId: 1, MemberId: &memberID, IntegrationType: string(types.SourceGmail)},
+	}, string(types.SourceGmail))
+	if err != nil {
+		t.Fatalf("selectBackgroundConnection returned error: %v", err)
+	}
+	if conn == nil || conn.MemberId != nil {
+		t.Fatalf("expected shared connection, got %#v", conn)
+	}
+}
+
+func TestSelectBackgroundConnectionRejectsAmbiguousMemberScopedConnections(t *testing.T) {
+	memberA := uint(7)
+	memberB := uint(8)
+	conn, err := selectBackgroundConnection([]types.IntegrationConnection{
+		{WorkspaceId: 1, MemberId: &memberA, IntegrationType: string(types.SourceGmail)},
+		{WorkspaceId: 1, MemberId: &memberB, IntegrationType: string(types.SourceGmail)},
+	}, string(types.SourceGmail))
+	if err == nil {
+		t.Fatalf("expected ambiguity error, got connection %#v", conn)
 	}
 }
 

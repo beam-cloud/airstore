@@ -65,11 +65,6 @@ var readOnlyTools = map[string]bool{
 	"GenerateImage":         true,
 }
 
-const (
-	maxAnalyzedToolInputLen  = 8000
-	maxAnalyzedToolResultLen = 8000
-)
-
 func (a *ClaudeCodeAnalyzer) ShouldAnalyze(payload map[string]any) bool {
 	msgType, _ := payload["type"].(string)
 	msg, ok := payload["message"].(map[string]any)
@@ -193,11 +188,4 @@ func extractResultContent(block map[string]any) string {
 		return string(b)
 	}
 	return ""
-}
-
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen]
 }

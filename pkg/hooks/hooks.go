@@ -129,6 +129,9 @@ func (eng *Engine) submit(ctx context.Context, h *types.Hook, eventID, event str
 		log.Warn().Err(err).Str("hook", h.ExternalId).Msg("hook engine: failed to enqueue agent task")
 		return
 	}
+	if h.OneShot {
+		eng.disableOneShotHook(ctx, h)
+	}
 
 	log.Info().
 		Str("hook", h.ExternalId).
@@ -363,6 +366,9 @@ func (eng *Engine) ensureHookAgent(ctx context.Context, hook *types.Hook) bool {
 	if hook == nil {
 		return false
 	}
+	if hook.DeliveryMode == types.HookDeliveryModeTaskInput {
+		return hook.TargetTaskID != nil && strings.TrimSpace(*hook.TargetTaskID) != ""
+	}
 	if hook.AgentId != nil && strings.TrimSpace(*hook.AgentId) != "" {
 		return true
 	}
@@ -385,6 +391,19 @@ func (eng *Engine) ensureHookAgent(ctx context.Context, hook *types.Hook) bool {
 		}
 	}
 	return true
+}
+
+func (eng *Engine) disableOneShotHook(ctx context.Context, hook *types.Hook) {
+	if eng == nil || eng.store == nil || hook == nil || !hook.OneShot || !hook.Active {
+		return
+	}
+	hook.Active = false
+	hook.UpdatedAt = time.Now()
+	if err := eng.store.UpdateHook(ctx, hook); err != nil {
+		log.Warn().Err(err).Str("hook", hook.ExternalId).Msg("failed to deactivate one-shot hook")
+		return
+	}
+	eng.InvalidateCache(hook.WorkspaceId)
 }
 
 // Hook cache (in-memory, invalidated on CRUD)

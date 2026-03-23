@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rs/zerolog/log"
-
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
+	viewprojection "github.com/beam-cloud/airstore/pkg/views/projection"
+	"github.com/rs/zerolog/log"
 )
 
 // AgentAPI is the shared application layer for agent/task/run flows.
@@ -24,16 +24,17 @@ type AgentAPI struct {
 }
 
 type TaskEventBatch struct {
-	TaskID             string                `json:"task_id"`
-	RunID              *string               `json:"run_id,omitempty"`
-	Task               *types.AgentTask      `json:"task,omitempty"`
-	Run                *types.AgentRun       `json:"run,omitempty"`
-	Interaction        *types.RunInteraction `json:"interaction,omitempty"`
-	Logs               []common.TaskLogEntry `json:"logs"`
-	RunEvents          []map[string]any      `json:"run_events"`
-	Outputs            []*types.TaskOutput   `json:"outputs,omitempty"`
-	NextLogCursor      int64                 `json:"next_log_cursor"`
-	NextRunEventCursor int                   `json:"next_run_event_cursor"`
+	TaskID             string                 `json:"task_id"`
+	RunID              *string                `json:"run_id,omitempty"`
+	Task               *types.AgentTask       `json:"task,omitempty"`
+	Run                *types.AgentRun        `json:"run,omitempty"`
+	Interaction        *types.RunInteraction  `json:"interaction,omitempty"`
+	Blocker            *types.ResolvedBlocker `json:"blocker"`
+	Logs               []common.TaskLogEntry  `json:"logs"`
+	RunEvents          []map[string]any       `json:"run_events"`
+	Outputs            []*types.TaskOutput    `json:"outputs,omitempty"`
+	NextLogCursor      int64                  `json:"next_log_cursor"`
+	NextRunEventCursor int                    `json:"next_run_event_cursor"`
 }
 
 type WorkspaceLiveBatch struct {
@@ -45,6 +46,24 @@ const (
 	defaultWorkspaceStreamTaskLimit   = 500
 	defaultWorkspaceStreamOutputLimit = 60
 )
+
+func filterWorkspaceOutputs(outputs []*types.TaskOutput) []*types.TaskOutput {
+	if len(outputs) == 0 {
+		return outputs
+	}
+	filtered := make([]*types.TaskOutput, 0, len(outputs))
+	for _, output := range outputs {
+		if shouldHideWorkspaceOutput(output) {
+			continue
+		}
+		filtered = append(filtered, output)
+	}
+	return filtered
+}
+
+func shouldHideWorkspaceOutput(output *types.TaskOutput) bool {
+	return output != nil && output.ShouldHideInWorkspace()
+}
 
 func NewAgentAPI(
 	backend repository.BackendRepository,
@@ -373,19 +392,19 @@ func (a *AgentAPI) ListRunEvents(ctx context.Context, workspaceID uint, runID st
 }
 
 func (a *AgentAPI) CancelRun(ctx context.Context, workspaceID uint, runID string) error {
-	run, err := a.GetRun(ctx, workspaceID, runID)
+	run, err := a.backend.GetAgentRun(ctx, workspaceID, runID)
 	if err != nil {
 		return err
 	}
 
-	// Cancel active execution(s) before marking the run terminal so the worker
-	// still sees an in-flight execution and receives an immediate cancel signal.
 	cancelled := false
-	if a.runtime != nil && a.runtime.backend != nil {
-		var cancelErr error
-		cancelled, cancelErr = a.runtime.cancelInFlightRunExecutions(ctx, run.ID)
-		if cancelErr != nil {
-			cancelled = false
+	if a.runtime != nil {
+		if loops := a.runtime.ensureRuntimeLoops(); loops != nil {
+			var cancelErr error
+			cancelled, cancelErr = loops.cancelInFlightRunExecutions(ctx, run.ID)
+			if cancelErr != nil {
+				cancelled = false
+			}
 		}
 	}
 
@@ -408,20 +427,26 @@ func (a *AgentAPI) CancelRun(ctx context.Context, workspaceID uint, runID string
 
 	now := time.Now()
 	errMsg := "cancelled by user"
-	if err := a.backend.UpdateAgentRunLifecycle(ctx, run.ID, types.AgentRunStatusCancelled, nil, &now, &errMsg); err != nil {
-		return err
-	}
-
-	return nil
+	return a.backend.UpdateAgentRunLifecycle(ctx, run.ID, types.AgentRunStatusCancelled, nil, &now, &errMsg)
 }
 
 func (a *AgentAPI) CancelTask(ctx context.Context, workspaceID uint, taskID string) error {
-	task, err := a.GetTask(ctx, workspaceID, taskID)
+	task, err := a.backend.GetTask(ctx, workspaceID, taskID)
 	if err != nil {
 		return err
 	}
 	if task.State.IsTerminal() {
 		return &types.ErrTaskNotCancellable{ID: taskID, State: task.State}
+	}
+
+	childIDs, err := a.backend.ListActiveChildTaskIDs(ctx, taskID)
+	if err != nil {
+		log.Warn().Err(err).Str("task_id", taskID).Msg("failed to list active child tasks for cascade cancel")
+	}
+	for _, childID := range childIDs {
+		if err := a.CancelTask(ctx, workspaceID, childID); err != nil {
+			log.Warn().Err(err).Str("parent_task_id", taskID).Str("child_task_id", childID).Msg("failed to cascade cancel child task")
+		}
 	}
 
 	if task.TargetRunID != nil && task.State == types.AgentTaskStateRunning {
@@ -430,18 +455,26 @@ func (a *AgentAPI) CancelTask(ctx context.Context, workspaceID uint, taskID stri
 		}
 	}
 
+	lifecycle := NewTaskLifecycle(a.backend, nil, nil)
 	if a.runtime != nil {
-		if err := a.runtime.lifecycle.Cancel(ctx, task.ID); err != nil {
-			return err
-		}
-	} else {
-		if err := a.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateCancelled, nil, task.TargetRunID); err != nil {
-			return err
+		lifecycle = a.runtime.ensureLifecycle()
+	}
+	if err := lifecycle.Cancel(ctx, task.ID); err != nil {
+		return err
+	}
+	if a.runtime != nil {
+		if loops := a.runtime.ensureRuntimeLoops(); loops != nil {
+			if err := loops.cleanupTaskSourceWatches(ctx, task); err != nil {
+				log.Warn().Err(err).Str("task_id", task.ID).Msg("failed to clean up task source watches during cancel")
+			}
 		}
 	}
 
 	if err := a.backend.CancelPendingOutboxEventsForTask(ctx, task.ID); err != nil {
 		log.Warn().Err(err).Str("task_id", task.ID).Msg("failed to cancel pending outbox events")
+	}
+	if err := a.supersedePendingTaskOutputs(ctx, workspaceID, task.ID); err != nil {
+		return err
 	}
 	if a.runtime != nil {
 		a.runtime.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
@@ -450,8 +483,27 @@ func (a *AgentAPI) CancelTask(ctx context.Context, workspaceID uint, taskID stri
 	return nil
 }
 
+func (a *AgentAPI) supersedePendingTaskOutputs(ctx context.Context, workspaceID uint, taskID string) error {
+	outputs, err := a.backend.ListTaskOutputs(ctx, workspaceID, taskID)
+	if err != nil {
+		return fmt.Errorf("list task outputs for cancel %s: %w", taskID, err)
+	}
+	for _, output := range outputs {
+		if output == nil || strings.TrimSpace(output.ID) == "" {
+			continue
+		}
+		if output.Status != types.TaskOutputStatusPending && output.Status != types.TaskOutputStatusApproved {
+			continue
+		}
+		if err := a.backend.UpdateTaskOutputStatus(ctx, workspaceID, output.ID, types.TaskOutputStatusCancelled); err != nil {
+			return fmt.Errorf("cancel pending output %s: %w", output.ID, err)
+		}
+	}
+	return nil
+}
+
 func (a *AgentAPI) ArchiveTask(ctx context.Context, workspaceID uint, taskID string) error {
-	task, err := a.GetTask(ctx, workspaceID, taskID)
+	task, err := a.backend.GetTask(ctx, workspaceID, taskID)
 	if err != nil {
 		return err
 	}
@@ -464,7 +516,7 @@ func (a *AgentAPI) ArchiveTask(ctx context.Context, workspaceID uint, taskID str
 				return err
 			}
 		}
-		task, err = a.GetTask(ctx, workspaceID, taskID)
+		task, err = a.backend.GetTask(ctx, workspaceID, taskID)
 		if err != nil {
 			return err
 		}
@@ -523,6 +575,28 @@ func (a *AgentAPI) UpdateTask(ctx context.Context, workspaceID uint, taskID stri
 	return sanitizeTaskForResponse(task), nil
 }
 
+func (a *AgentAPI) ListSubtasks(ctx context.Context, parentTaskID string) ([]*types.AgentTask, error) {
+	tasks, err := a.backend.ListSubtasks(ctx, parentTaskID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range tasks {
+		tasks[i] = sanitizeTaskForResponse(tasks[i])
+	}
+	return tasks, nil
+}
+
+func (a *AgentAPI) ListSubtasksByOutputIDs(ctx context.Context, outputIDs []string) ([]*types.AgentTask, error) {
+	tasks, err := a.backend.ListSubtasksByOutputIDs(ctx, outputIDs)
+	if err != nil {
+		return nil, err
+	}
+	for i := range tasks {
+		tasks[i] = sanitizeTaskForResponse(tasks[i])
+	}
+	return tasks, nil
+}
+
 func (a *AgentAPI) GetTaskLogs(ctx context.Context, workspaceID uint, taskID string) ([]common.TaskLogEntry, error) {
 	logs, _, err := a.ListTaskLogs(ctx, workspaceID, taskID, 0)
 	return logs, err
@@ -547,9 +621,6 @@ func (a *AgentAPI) ListTaskLogs(
 	if task.TargetRunID != nil {
 		currentRunID = strings.TrimSpace(*task.TargetRunID)
 	}
-
-	// When TargetRunID is nil (task is between runs after requeue or input),
-	// fall back to the most recent run so we can still load history from s2.
 	if currentRunID == "" {
 		runs, runErr := a.backend.ListAgentRunsFiltered(ctx, workspaceID, types.AgentRunListFilter{
 			TaskID: &taskID,
@@ -564,15 +635,11 @@ func (a *AgentAPI) ListTaskLogs(
 		return []common.TaskLogEntry{}, seqNum, nil
 	}
 
-	// Non-zero cursor means incremental polling for the currently bound run.
 	if seqNum > 0 {
 		logs, nextCursor, err := a.listTaskLogsForRun(ctx, currentRunID, seqNum)
 		if err != nil {
 			return nil, seqNum, err
 		}
-		// When the cursor rewinds (execution changed within the same run),
-		// replay the full session history so the frontend gets all prior runs
-		// instead of just the new execution's partial log stream.
 		if nextCursor > 0 && nextCursor < seqNum {
 			history, histNext, histErr := a.listTaskSessionHistoryLogs(ctx, workspaceID, task, currentRunID)
 			if histErr == nil {
@@ -583,8 +650,6 @@ func (a *AgentAPI) ListTaskLogs(
 		return logs, nextCursor, nil
 	}
 
-	// Cursor zero means "hydrate history". Return logs across all runs of this
-	// task session so resumed runs show the full timeline by default.
 	history, nextSeq, err := a.listTaskSessionHistoryLogs(ctx, workspaceID, task, currentRunID)
 	if err != nil {
 		return nil, seqNum, err
@@ -760,14 +825,13 @@ func (a *AgentAPI) WorkspaceLiveBatch(ctx context.Context, workspaceID uint) (*W
 		return nil, err
 	}
 	outputs, err := a.backend.ListWorkspaceTaskOutputs(ctx, workspaceID, types.TaskOutputListFilter{
-		// Live snapshots are capped; archived outputs would displace active items
-		// and cause current workspace activity to fall out of the stream.
 		ExcludeArchived: true,
 		Limit:           defaultWorkspaceStreamOutputLimit,
 	})
 	if err != nil {
 		return nil, err
 	}
+	outputs = filterWorkspaceOutputs(outputs)
 	if outputs == nil {
 		outputs = []*types.TaskOutput{}
 	}
@@ -863,6 +927,7 @@ func (a *AgentAPI) buildTaskEventBatch(
 	if outputs == nil {
 		outputs = []*types.TaskOutput{}
 	}
+	blocker := viewprojection.ProjectBlocker(task, outputs)
 
 	return &TaskEventBatch{
 		TaskID:             task.ID,
@@ -870,6 +935,7 @@ func (a *AgentAPI) buildTaskEventBatch(
 		Task:               task,
 		Run:                run,
 		Interaction:        interaction,
+		Blocker:            blocker,
 		Logs:               logs,
 		RunEvents:          runEvents,
 		Outputs:            outputs,
@@ -1001,15 +1067,20 @@ func normalizeAgentProfileConfig(config map[string]any, agentKey string) (map[st
 
 	runner := strings.ToLower(strings.TrimSpace(stringFromPayload(normalized, agentConfigKeyRunner)))
 	provider := strings.ToLower(strings.TrimSpace(stringFromPayload(normalized, agentConfigKeyProvider)))
+	model := strings.TrimSpace(stringFromPayload(normalized, agentConfigKeyModel))
 
+	if inferred := runnerForModel(model); inferred != "" && inferred != runner {
+		runner = inferred
+		provider = providerForRunner(runner)
+	}
 	if runner == "" && provider == "" {
 		runner = AgentRunnerClaudeCode
 		provider = providerForRunner(runner)
 	}
-	if runner != "" && runner != AgentRunnerClaudeCode {
+	if runner != "" && runner != AgentRunnerClaudeCode && runner != AgentRunnerAir {
 		return nil, fmt.Errorf("runner %q is not supported", runner)
 	}
-	if provider != "" && !isClaudeCompatibleProvider(provider) {
+	if provider != "" && !isSupportedProvider(provider) {
 		return nil, fmt.Errorf("provider %q is not supported", provider)
 	}
 	if runner == "" {

@@ -220,7 +220,7 @@ func (r *Runsc) Run(ctx context.Context, containerID, bundlePath string, opts *R
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok {
 				exitCode := ws.ExitStatus()
-				if stderrStr != "" {
+				if shouldLogRunscExitStderr(exitCode, stderrStr) {
 					fmt.Fprintf(os.Stderr, "runsc exited with code %d, stderr: %s\n", exitCode, stderrStr)
 				}
 				return exitCode, nil
@@ -230,6 +230,19 @@ func (r *Runsc) Run(ctx context.Context, containerID, bundlePath string, opts *R
 	}
 
 	return 0, nil
+}
+
+func shouldLogRunscExitStderr(exitCode int, stderr string) bool {
+	if strings.TrimSpace(stderr) == "" {
+		return false
+	}
+
+	switch exitCode {
+	case 128 + int(syscall.SIGKILL), 128 + int(syscall.SIGTERM):
+		return false
+	default:
+		return true
+	}
 }
 
 func (r *Runsc) Exec(ctx context.Context, containerID string, proc specs.Process, opts *ExecOpts) error {

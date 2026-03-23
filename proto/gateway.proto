@@ -285,6 +285,7 @@ message CreateTaskRequest {
   repeated google.protobuf.Struct attachments = 13;
   string label = 14;
   string spawned_by = 15;
+  string parent_task_id = 16;
 }
 
 message DeleteTaskRequest {

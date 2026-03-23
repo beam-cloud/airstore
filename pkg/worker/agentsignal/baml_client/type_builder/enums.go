@@ -15,6 +15,42 @@ package type_builder
 
 import baml "github.com/boundaryml/baml/engine/language_client_go/pkg"
 
+type FanOutIntentEnumView struct {
+	inner baml.EnumBuilder
+}
+
+func (t *FanOutIntentEnumView) ListValues() ([]EnumValueView, error) {
+	result, err := t.inner.ListValues()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]EnumValueView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *FanOutIntentEnumView) ValueNONE() (EnumValueView, error) {
+	return t.inner.Value("NONE")
+}
+
+func (t *FanOutIntentEnumView) ValueFAN_OUT() (EnumValueView, error) {
+	return t.inner.Value("FAN_OUT")
+}
+
+func (t *TypeBuilder) FanOutIntent() (*FanOutIntentEnumView, error) {
+	bld, err := t.inner.Enum("FanOutIntent")
+	if err != nil {
+		return nil, err
+	}
+	return &FanOutIntentEnumView{inner: bld}, nil
+}
+
+func (t *FanOutIntentEnumView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
 type FollowUpIntentEnumView struct {
 	inner baml.EnumBuilder
 }

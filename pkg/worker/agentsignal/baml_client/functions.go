@@ -21,6 +21,80 @@ import (
 	baml "github.com/boundaryml/baml/engine/language_client_go/pkg"
 )
 
+func ClassifyFanOut(ctx context.Context, extracted_outputs string, agent_message string, user_prompt string, current_time string, opts ...CallOptionFunc) (types.FanOutSignal, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	// Resolve client option to clientRegistry (client takes precedence)
+	if callOpts.client != nil {
+		if callOpts.clientRegistry == nil {
+			callOpts.clientRegistry = baml.NewClientRegistry()
+		}
+		callOpts.clientRegistry.SetPrimaryClient(*callOpts.client)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"extracted_outputs": extracted_outputs, "agent_message": agent_message, "user_prompt": user_prompt, "current_time": current_time},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		panic(err)
+	}
+
+	if callOpts.onTick == nil {
+		result, err := bamlRuntime.CallFunction(ctx, "ClassifyFanOut", encoded, callOpts.onTick)
+		if err != nil {
+			return types.FanOutSignal{}, err
+		}
+
+		if result.Error != nil {
+			return types.FanOutSignal{}, result.Error
+		}
+
+		casted := (result.Data).(types.FanOutSignal)
+
+		return casted, nil
+	} else {
+		channel, err := bamlRuntime.CallFunctionStream(ctx, "ClassifyFanOut", encoded, callOpts.onTick)
+		if err != nil {
+			return types.FanOutSignal{}, err
+		}
+
+		for result := range channel {
+			if result.Error != nil {
+				return types.FanOutSignal{}, result.Error
+			}
+
+			if result.HasData {
+				return result.Data.(types.FanOutSignal), nil
+			}
+		}
+
+		return types.FanOutSignal{}, fmt.Errorf("No data returned from stream")
+	}
+}
+
 func ClassifyFollowUp(ctx context.Context, message string, user_message *string, now_rfc3339 string, active_skill_context *string, handoff_context *string, opts ...CallOptionFunc) (types.FollowUpSignal, error) {
 
 	var callOpts callOption
@@ -169,7 +243,7 @@ func ClassifyTurn(ctx context.Context, message string, opts ...CallOptionFunc) (
 	}
 }
 
-func ExtractApprovalItems(ctx context.Context, context string, opts ...CallOptionFunc) ([]types.ApprovalItem, error) {
+func ExtractApprovalOutput(ctx context.Context, assistant_text string, opts ...CallOptionFunc) ([]types.ExtractedOutput, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -185,7 +259,7 @@ func ExtractApprovalItems(ctx context.Context, context string, opts ...CallOptio
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"context": context},
+		Kwargs: map[string]any{"assistant_text": assistant_text},
 		Env:    getEnvVars(callOpts.env),
 	}
 
@@ -211,7 +285,7 @@ func ExtractApprovalItems(ctx context.Context, context string, opts ...CallOptio
 	}
 
 	if callOpts.onTick == nil {
-		result, err := bamlRuntime.CallFunction(ctx, "ExtractApprovalItems", encoded, callOpts.onTick)
+		result, err := bamlRuntime.CallFunction(ctx, "ExtractApprovalOutput", encoded, callOpts.onTick)
 		if err != nil {
 			return nil, err
 		}
@@ -220,11 +294,11 @@ func ExtractApprovalItems(ctx context.Context, context string, opts ...CallOptio
 			return nil, result.Error
 		}
 
-		casted := (result.Data).([]types.ApprovalItem)
+		casted := (result.Data).([]types.ExtractedOutput)
 
 		return casted, nil
 	} else {
-		channel, err := bamlRuntime.CallFunctionStream(ctx, "ExtractApprovalItems", encoded, callOpts.onTick)
+		channel, err := bamlRuntime.CallFunctionStream(ctx, "ExtractApprovalOutput", encoded, callOpts.onTick)
 		if err != nil {
 			return nil, err
 		}
@@ -235,7 +309,7 @@ func ExtractApprovalItems(ctx context.Context, context string, opts ...CallOptio
 			}
 
 			if result.HasData {
-				return result.Data.([]types.ApprovalItem), nil
+				return result.Data.([]types.ExtractedOutput), nil
 			}
 		}
 
@@ -243,7 +317,7 @@ func ExtractApprovalItems(ctx context.Context, context string, opts ...CallOptio
 	}
 }
 
-func ExtractApprovalSummary(ctx context.Context, context string, opts ...CallOptionFunc) (types.ApprovalSummary, error) {
+func ExtractApprovalSummary(ctx context.Context, assistant_text string, opts ...CallOptionFunc) (types.ApprovalSummary, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -259,7 +333,7 @@ func ExtractApprovalSummary(ctx context.Context, context string, opts ...CallOpt
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"context": context},
+		Kwargs: map[string]any{"assistant_text": assistant_text},
 		Env:    getEnvVars(callOpts.env),
 	}
 

@@ -9,12 +9,27 @@ class WakeAgendaItem {
   reason string?        @description("Why this action belongs in the next wake agenda.")
 }
 
+class SourceWatchRequest {
+  integration string            @description("Integration to watch, such as gmail.")
+  reason string?                @description("Why this watch exists.")
+  query string?                 @description("Fallback provider query if an exact identifier is unavailable.")
+  entity_key string?            @description("Stable entity key for deduping related watches, if known.")
+  entity_label string?          @description("Human-friendly label for the watched entity, such as an email thread subject.")
+  source_output_id string?      @description("Output ID that produced this watch, if known.")
+  thread_id string?             @description("Provider-native thread identifier when following an email thread.")
+  message_id string?            @description("Provider-native message identifier when following a single message.")
+  include_attachments bool      @description("Whether attachment files should be included in the watch results.")
+  include_inline bool           @description("Whether inline attachments should be included in the watch results.")
+  include_message_body bool     @description("Whether the message body should be fetched for watched messages.")
+}
+
 class FollowUpSignal {
   intent FollowUpIntent
   delay_minutes int        @description("Exact minutes to wait before the next wake. Respect explicit user delays and active skill cadence/rules. Do not return a placeholder or backoff delay.")
   reason string?           @description("One-line summary of why the task will wake next.")
-  follow_up_prompt string? @description("Instruction the agent should receive when it wakes up. It should explicitly reflect the wake agenda and any active skill rules.")
+  follow_up_prompt string? @description("Instruction the agent should receive when it wakes up. It should explicitly reflect the wake agenda and any active skill rules, as well a reference to the thread or conversation to follow up on.")
   wake_agenda WakeAgendaItem[] @description("Ordered agenda for what the agent should do on its next wake.")
+  source_watch_requests SourceWatchRequest[] @description("Optional event-driven source watches to register before the task is parked in waiting. Use exact provider identifiers like gmail thread_id/message_id whenever available; include attachments when the follow-up should notice them.")
 }
 
 function ClassifyFollowUp(message: string, user_message: string?, now_rfc3339: string, active_skill_context: string?, handoff_context: string?) -> FollowUpSignal {
@@ -34,6 +49,9 @@ function ClassifyFollowUp(message: string, user_message: string?, now_rfc3339: s
     - "The deployment is in progress. We should verify in 30 minutes."
     - "Waiting for the webhook to fire once the payment clears."
     - "I submitted the form; the confirmation email should arrive soon."
+    - "Email sent successfully. I am now monitoring this thread for replies. Please wake me in 3 minutes to check for the first reply."
+    - "Monitoring Gmail thread 123 for replies. Follow up in 1 minute unless a source-watch wake on this thread fires sooner. When a reply arrives, draft the next response for user approval before sending."
+    - "A new reply arrived on thread 123. Keep monitoring this same thread for additional replies while I wait for the user's decision."
 
     FOLLOW_UP examples (user-requested delay):
     - User: "let's sleep on this for a day or two" / Agent: "Sure, I'll pause."
@@ -56,12 +74,21 @@ function ClassifyFollowUp(message: string, user_message: string?, now_rfc3339: s
        when it wakes. Multiple things can happen on the same wake.
     4. Return a **follow_up_prompt** that turns that agenda into a clear
        instruction for the next run.
+    5. When the follow-up is really waiting on source data to change,
+       return **source_watch_requests** that can be registered against the
+       relevant integration. Prefer exact provider identifiers like Gmail
+       thread IDs or message IDs over broad text queries. If attachments or
+       inline files matter, request them explicitly.
 
     IMPORTANT RULES:
     - Respect explicit user-requested delays.
     - If active skill context is present, treat it as the source of truth
       for cadence and follow-up policy. Do not wake earlier than the
       skill allows.
+    - If the agent explicitly says it is monitoring, will check back,
+      needs to wake later, or gives a future monitoring/check schedule,
+      that is FOLLOW_UP even if the message also includes a completion
+      summary.
     - If the skill implies recurring checks ("check replies every run",
       "follow up in 3 business days", "send digest every 2-3 days"),
       convert those into the next wake's exact delay and agenda.
@@ -74,6 +101,18 @@ function ClassifyFollowUp(message: string, user_message: string?, now_rfc3339: s
       to show in a UI.
     - Return 0 delay_minutes, empty wake_agenda, and no follow_up_prompt
       when intent is NONE.
+    - Use source_watch_requests only when a concrete source change should
+      resume the task. Timed follow-up and source watches can both be used
+      when appropriate.
+    - If the agent mentions monitoring an email thread or checking later
+      for Gmail replies, and a thread ID or message ID appears anywhere in
+      the agent message, preserve that exact Gmail identifier in
+      source_watch_requests instead of broadening to a generic inbox query.
+    - Do not classify "Email sent successfully ... I am now monitoring this
+      thread ... wake me in X minutes / check for replies later" as NONE.
+    - A monitoring-only declaration tied to a specific thread or source is
+      still FOLLOW_UP even if it does not explicitly restate that the send or
+      prior action already happened.
 
     Current time (RFC3339 UTC):
     ---

@@ -42,6 +42,80 @@ func (s *StreamValue[TStream, TFinal]) Stream() *TStream {
 	return s.as_stream
 }
 
+// / Streaming version of ClassifyFanOut
+func (*stream) ClassifyFanOut(ctx context.Context, extracted_outputs string, agent_message string, user_prompt string, current_time string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.FanOutSignal, types.FanOutSignal], error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"extracted_outputs": extracted_outputs, "agent_message": agent_message, "user_prompt": user_prompt, "current_time": current_time},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		// This should never happen. if it does, please file an issue at https://github.com/boundaryml/baml/issues
+		// and include the type of the args you're passing in.
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: ClassifyFanOut: %w", err)
+		panic(wrapped_err)
+	}
+
+	internal_channel, err := bamlRuntime.CallFunctionStream(ctx, "ClassifyFanOut", encoded, callOpts.onTick)
+	if err != nil {
+		return nil, err
+	}
+
+	channel := make(chan StreamValue[stream_types.FanOutSignal, types.FanOutSignal])
+	go func() {
+		for result := range internal_channel {
+			if result.Error != nil {
+				channel <- StreamValue[stream_types.FanOutSignal, types.FanOutSignal]{
+					IsError: true,
+					Error:   result.Error,
+				}
+				close(channel)
+				return
+			}
+			if result.HasData {
+				data := (result.Data).(types.FanOutSignal)
+				channel <- StreamValue[stream_types.FanOutSignal, types.FanOutSignal]{
+					IsFinal:  true,
+					as_final: &data,
+				}
+			} else {
+				data := (result.StreamData).(stream_types.FanOutSignal)
+				channel <- StreamValue[stream_types.FanOutSignal, types.FanOutSignal]{
+					IsFinal:   false,
+					as_stream: &data,
+				}
+			}
+		}
+
+		// when internal_channel is closed, close the output too
+		close(channel)
+	}()
+	return channel, nil
+}
+
 // / Streaming version of ClassifyFollowUp
 func (*stream) ClassifyFollowUp(ctx context.Context, message string, user_message *string, now_rfc3339 string, active_skill_context *string, handoff_context *string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.FollowUpSignal, types.FollowUpSignal], error) {
 
@@ -190,8 +264,8 @@ func (*stream) ClassifyTurn(ctx context.Context, message string, opts ...CallOpt
 	return channel, nil
 }
 
-// / Streaming version of ExtractApprovalItems
-func (*stream) ExtractApprovalItems(ctx context.Context, context string, opts ...CallOptionFunc) (<-chan StreamValue[[]stream_types.ApprovalItem, []types.ApprovalItem], error) {
+// / Streaming version of ExtractApprovalOutput
+func (*stream) ExtractApprovalOutput(ctx context.Context, assistant_text string, opts ...CallOptionFunc) (<-chan StreamValue[[]stream_types.ExtractedOutput, []types.ExtractedOutput], error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -199,7 +273,7 @@ func (*stream) ExtractApprovalItems(ctx context.Context, context string, opts ..
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"context": context},
+		Kwargs: map[string]any{"assistant_text": assistant_text},
 		Env:    getEnvVars(callOpts.env),
 	}
 
@@ -223,20 +297,20 @@ func (*stream) ExtractApprovalItems(ctx context.Context, context string, opts ..
 	if err != nil {
 		// This should never happen. if it does, please file an issue at https://github.com/boundaryml/baml/issues
 		// and include the type of the args you're passing in.
-		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: ExtractApprovalItems: %w", err)
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: ExtractApprovalOutput: %w", err)
 		panic(wrapped_err)
 	}
 
-	internal_channel, err := bamlRuntime.CallFunctionStream(ctx, "ExtractApprovalItems", encoded, callOpts.onTick)
+	internal_channel, err := bamlRuntime.CallFunctionStream(ctx, "ExtractApprovalOutput", encoded, callOpts.onTick)
 	if err != nil {
 		return nil, err
 	}
 
-	channel := make(chan StreamValue[[]stream_types.ApprovalItem, []types.ApprovalItem])
+	channel := make(chan StreamValue[[]stream_types.ExtractedOutput, []types.ExtractedOutput])
 	go func() {
 		for result := range internal_channel {
 			if result.Error != nil {
-				channel <- StreamValue[[]stream_types.ApprovalItem, []types.ApprovalItem]{
+				channel <- StreamValue[[]stream_types.ExtractedOutput, []types.ExtractedOutput]{
 					IsError: true,
 					Error:   result.Error,
 				}
@@ -244,14 +318,14 @@ func (*stream) ExtractApprovalItems(ctx context.Context, context string, opts ..
 				return
 			}
 			if result.HasData {
-				data := (result.Data).([]types.ApprovalItem)
-				channel <- StreamValue[[]stream_types.ApprovalItem, []types.ApprovalItem]{
+				data := (result.Data).([]types.ExtractedOutput)
+				channel <- StreamValue[[]stream_types.ExtractedOutput, []types.ExtractedOutput]{
 					IsFinal:  true,
 					as_final: &data,
 				}
 			} else {
-				data := (result.StreamData).([]stream_types.ApprovalItem)
-				channel <- StreamValue[[]stream_types.ApprovalItem, []types.ApprovalItem]{
+				data := (result.StreamData).([]stream_types.ExtractedOutput)
+				channel <- StreamValue[[]stream_types.ExtractedOutput, []types.ExtractedOutput]{
 					IsFinal:   false,
 					as_stream: &data,
 				}
@@ -265,7 +339,7 @@ func (*stream) ExtractApprovalItems(ctx context.Context, context string, opts ..
 }
 
 // / Streaming version of ExtractApprovalSummary
-func (*stream) ExtractApprovalSummary(ctx context.Context, context string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.ApprovalSummary, types.ApprovalSummary], error) {
+func (*stream) ExtractApprovalSummary(ctx context.Context, assistant_text string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.ApprovalSummary, types.ApprovalSummary], error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -273,7 +347,7 @@ func (*stream) ExtractApprovalSummary(ctx context.Context, context string, opts 
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"context": context},
+		Kwargs: map[string]any{"assistant_text": assistant_text},
 		Env:    getEnvVars(callOpts.env),
 	}
 

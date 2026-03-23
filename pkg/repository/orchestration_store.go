@@ -30,11 +30,11 @@ func NewOrchestrationStore(backend BackendRepository, redis *common.RedisClient)
 	}
 }
 
-func (s *OrchestrationStore) UpdateTaskState(ctx context.Context, taskID string, state types.AgentTaskState, dropReason *string, targetRunID *string) error {
+func (s *OrchestrationStore) UpdateTaskState(ctx context.Context, update types.TaskStateUpdate) error {
 	if s == nil || s.backend == nil {
 		return fmt.Errorf("backend is required for task state updates")
 	}
-	return s.backend.UpdateTaskState(ctx, taskID, state, dropReason, targetRunID)
+	return s.backend.UpdateTaskState(ctx, update)
 }
 
 func (s *OrchestrationStore) EnsureTaskDispatchGroup(ctx context.Context) error {

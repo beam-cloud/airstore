@@ -95,6 +95,82 @@ func (t *DataCitationClassView) Type() (baml.Type, error) {
 	return t.inner.Type()
 }
 
+type DetailLayoutClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *DetailLayoutClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *DetailLayoutClassView) PropertySections() (ClassPropertyView, error) {
+	return t.inner.Property("sections")
+}
+
+func (t *TypeBuilder) DetailLayout() (*DetailLayoutClassView, error) {
+	bld, err := t.inner.Class("DetailLayout")
+	if err != nil {
+		return nil, err
+	}
+	return &DetailLayoutClassView{inner: bld}, nil
+}
+
+func (t *DetailLayoutClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
+type DetailSectionClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *DetailSectionClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *DetailSectionClassView) PropertyType() (ClassPropertyView, error) {
+	return t.inner.Property("type")
+}
+
+func (t *DetailSectionClassView) PropertyTitle() (ClassPropertyView, error) {
+	return t.inner.Property("title")
+}
+
+func (t *DetailSectionClassView) PropertyDescription() (ClassPropertyView, error) {
+	return t.inner.Property("description")
+}
+
+func (t *DetailSectionClassView) PropertyEmphasis() (ClassPropertyView, error) {
+	return t.inner.Property("emphasis")
+}
+
+func (t *TypeBuilder) DetailSection() (*DetailSectionClassView, error) {
+	bld, err := t.inner.Class("DetailSection")
+	if err != nil {
+		return nil, err
+	}
+	return &DetailSectionClassView{inner: bld}, nil
+}
+
+func (t *DetailSectionClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
 type ListItemResultClassView struct {
 	inner baml.ClassBuilder
 }

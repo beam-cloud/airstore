@@ -1,5 +1,5 @@
 enum OutputKind {
-  FILE_CREATED   @description("Agent created a new file that is a FINAL DELIVERABLE — a report, document, asset, or artifact explicitly requested or clearly intended as a work product")
+  FILE_CREATED   @description("Agent created a new file that is a FINAL DELIVERABLE — a report, document, asset, or artifact explicitly requested or clearly intended as a work product. Do not use this for local staging files that are only inputs to some later tool.")
   FILE_MODIFIED  @description("Agent made a SIGNIFICANT change to an important file — not routine edits, config tweaks, or dependency updates")
   EMAIL_SENT     @description("Agent sent an email via an external email API or service")
   EMAIL_DRAFT    @description("Agent drafted an email via an external email API or service")
@@ -77,6 +77,8 @@ function ExtractOutputs(tool_name: string, tool_input: string, tool_result: stri
     THESE ARE NOT OUTPUTS — return kind=NONE (empty array):
     - Opening, visiting, reading, or browsing a URL or webpage
     - Writing intermediate/scratch files, scripts, or configs as part of doing work
+    - Writing local staging files that are only used as inputs to a later side effect, such as email/message draft bodies, generated prompts, or temporary payload files
+    - Local draft files like email-body.txt, message.txt, draft.md, or similar files under the workspace when the real artifact is an eventual email/message/API action
     - Screenshots (saving a .png/.jpg to /tmp or anywhere) — these are internal tools
     - Any file written to /tmp/ — these are ephemeral scratch files, not deliverables
     - Editing source code files (these are routine development, not deliverables)

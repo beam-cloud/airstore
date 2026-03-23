@@ -17,6 +17,7 @@ type TaskLifecycle struct {
 	backend    repository.BackendRepository
 	store      *repository.OrchestrationStore
 	terminalIO repository.TerminalIORepository
+	outcomes   *OutcomeProjector
 }
 
 func NewTaskLifecycle(
@@ -24,14 +25,19 @@ func NewTaskLifecycle(
 	store *repository.OrchestrationStore,
 	terminalIO repository.TerminalIORepository,
 ) *TaskLifecycle {
-	return &TaskLifecycle{backend: backend, store: store, terminalIO: terminalIO}
+	return &TaskLifecycle{
+		backend:    backend,
+		store:      store,
+		terminalIO: terminalIO,
+		outcomes:   NewOutcomeProjector(backend),
+	}
 }
 
 // validTransitions defines the legal state machine edges.
 var validTransitions = map[types.AgentTaskState][]types.AgentTaskState{
 	types.AgentTaskStateQueued:   {types.AgentTaskStateRunning, types.AgentTaskStateDropped, types.AgentTaskStateCancelled},
-	types.AgentTaskStateRunning:  {types.AgentTaskStateWaiting, types.AgentTaskStateDone, types.AgentTaskStateSleeping, types.AgentTaskStateDropped, types.AgentTaskStateQueued, types.AgentTaskStateCancelled},
-	types.AgentTaskStateWaiting:  {types.AgentTaskStateRunning, types.AgentTaskStateDone, types.AgentTaskStateQueued, types.AgentTaskStateCancelled},
+	types.AgentTaskStateRunning:  {types.AgentTaskStateWaiting, types.AgentTaskStateDone, types.AgentTaskStateError, types.AgentTaskStateSleeping, types.AgentTaskStateDropped, types.AgentTaskStateQueued, types.AgentTaskStateCancelled},
+	types.AgentTaskStateWaiting:  {types.AgentTaskStateRunning, types.AgentTaskStateDone, types.AgentTaskStateError, types.AgentTaskStateQueued, types.AgentTaskStateCancelled},
 	types.AgentTaskStateSleeping: {types.AgentTaskStateQueued, types.AgentTaskStateCancelled},
 }
 
@@ -48,6 +54,7 @@ func isValidTransition(from, to types.AgentTaskState) bool {
 type SettleOpts struct {
 	WaitingForInput bool
 	WakeSignal      *types.RunExecutionWakeSignal
+	Blocker         *types.TaskBlockerSpec
 }
 
 // Settle derives the correct task state from a completed run and applies it.
@@ -117,9 +124,22 @@ func (lc *TaskLifecycle) Settle(ctx context.Context, runID string, opts *SettleO
 		return nil
 	}
 
-	updated, err := lc.backend.UpdateTaskStateIfCurrentRun(
-		ctx, run.OriginTaskID, run.ID, nextState, nil, &targetRunID, "", nil,
-	)
+	var updated bool
+	if nextState == types.AgentTaskStateWaiting && opts.Blocker != nil {
+		updated, _, err = lc.backend.OpenTaskBlockerIfCurrentRun(ctx, types.TaskBlockerOpenRequest{
+			WorkspaceID:   task.WorkspaceID,
+			TaskID:        run.OriginTaskID,
+			ExpectedRunID: run.ID,
+			Blocker:       opts.Blocker,
+		})
+	} else {
+		updated, err = lc.backend.UpdateTaskStateIfCurrentRun(ctx, types.CurrentRunTaskStateUpdate{
+			TaskID:        run.OriginTaskID,
+			ExpectedRunID: run.ID,
+			State:         nextState,
+			TargetRunID:   &targetRunID,
+		})
+	}
 	if err != nil {
 		return err
 	}
@@ -138,7 +158,11 @@ func (lc *TaskLifecycle) Settle(ctx context.Context, runID string, opts *SettleO
 		if !isValidTransition(fresh.State, nextState) {
 			return nil
 		}
-		if err := lc.backend.UpdateTaskState(ctx, fresh.ID, nextState, nil, &targetRunID); err != nil {
+		if err := lc.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
+			TaskID:      fresh.ID,
+			State:       nextState,
+			TargetRunID: &targetRunID,
+		}); err != nil {
 			return err
 		}
 		task = fresh
@@ -146,31 +170,190 @@ func (lc *TaskLifecycle) Settle(ctx context.Context, runID string, opts *SettleO
 
 	task.State = nextState
 	task.TargetRunID = &targetRunID
-	if err := SyncTaskOutcome(ctx, lc.backend, task, run); err != nil {
-		return err
+	if lc.outcomes != nil {
+		if err := lc.outcomes.Sync(ctx, task, run); err != nil {
+			return err
+		}
 	}
 	lc.publishUpdate(ctx, task.WorkspaceID, task.ID)
 	return nil
 }
 
+func (lc *TaskLifecycle) Resume(ctx context.Context, taskID, runID string) (bool, error) {
+	if lc == nil || lc.backend == nil || strings.TrimSpace(taskID) == "" || strings.TrimSpace(runID) == "" {
+		return false, nil
+	}
+	return lc.backend.UpdateTaskStateIfCurrentRun(ctx, types.CurrentRunTaskStateUpdate{
+		TaskID:        taskID,
+		ExpectedRunID: runID,
+		State:         types.AgentTaskStateRunning,
+	})
+}
+
+func (lc *TaskLifecycle) Done(ctx context.Context, taskID string, targetRunID *string) error {
+	if lc == nil || lc.backend == nil || strings.TrimSpace(taskID) == "" {
+		return nil
+	}
+	return lc.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
+		TaskID:      taskID,
+		State:       types.AgentTaskStateDone,
+		TargetRunID: targetRunID,
+	})
+}
+
+func (lc *TaskLifecycle) Queue(ctx context.Context, taskID string, targetRunID *string) error {
+	if lc == nil || lc.backend == nil || strings.TrimSpace(taskID) == "" {
+		return nil
+	}
+	return lc.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
+		TaskID:      taskID,
+		State:       types.AgentTaskStateQueued,
+		TargetRunID: targetRunID,
+	})
+}
+
+func (lc *TaskLifecycle) updateWithRetryDrop(ctx context.Context, task *types.AgentTask, dropReason string) error {
+	if lc == nil || lc.backend == nil || task == nil {
+		return nil
+	}
+	return lc.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
+		TaskID:        task.ID,
+		State:         types.AgentTaskStateDropped,
+		DroppedReason: &dropReason,
+		TargetRunID:   task.TargetRunID,
+	})
+}
+
+func (lc *TaskLifecycle) queueForRetry(ctx context.Context, task *types.AgentTask) error {
+	if lc == nil || lc.backend == nil || task == nil {
+		return nil
+	}
+	return lc.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
+		TaskID:      task.ID,
+		State:       types.AgentTaskStateQueued,
+		TargetRunID: task.TargetRunID,
+	})
+}
+
+func (lc *TaskLifecycle) SetOutcomeProjector(projector *OutcomeProjector) {
+	if lc == nil {
+		return
+	}
+	lc.outcomes = projector
+}
+
+func (lc *TaskLifecycle) outcomeProjector() *OutcomeProjector {
+	if lc == nil {
+		return nil
+	}
+	return lc.outcomes
+}
+
+func (lc *TaskLifecycle) syncOutcome(ctx context.Context, task *types.AgentTask, run *types.AgentRun) error {
+	if lc.outcomes == nil {
+		return nil
+	}
+	return lc.outcomes.Sync(ctx, task, run)
+}
+
+type OutcomeProjector struct {
+	backend repository.BackendRepository
+}
+
+func NewOutcomeProjector(backend repository.BackendRepository) *OutcomeProjector {
+	return &OutcomeProjector{backend: backend}
+}
+
+func (p *OutcomeProjector) Sync(ctx context.Context, task *types.AgentTask, run *types.AgentRun) error {
+	if p == nil || p.backend == nil || task == nil || run == nil {
+		return nil
+	}
+	taskID := strings.TrimSpace(task.ID)
+	if taskID == "" {
+		return nil
+	}
+
+	if run.Status == types.AgentRunStatusOK {
+		if err := activateApprovedOutputs(ctx, p.backend, task); err != nil {
+			log.Warn().Err(err).Str("task_id", taskID).Msg("failed to activate approved outputs")
+		}
+	}
+
+	return syncTaskCost(ctx, p.backend, task)
+}
+
+func activateApprovedOutputs(ctx context.Context, backend repository.BackendRepository, task *types.AgentTask) error {
+	outputs, err := backend.ListTaskOutputs(ctx, task.WorkspaceID, task.ID)
+	if err != nil {
+		return fmt.Errorf("list outputs for activation: %w", err)
+	}
+	for _, out := range outputs {
+		if out == nil || out.Status != types.TaskOutputStatusApproved {
+			continue
+		}
+		if err := backend.UpdateTaskOutputStatus(ctx, task.WorkspaceID, out.ID, types.TaskOutputStatusActive); err != nil {
+			return fmt.Errorf("activate approved output %s: %w", out.ID, err)
+		}
+	}
+	return nil
+}
+
+func syncTaskCost(ctx context.Context, backend repository.BackendRepository, task *types.AgentTask) error {
+	taskID := strings.TrimSpace(task.ID)
+	runs, err := backend.ListAgentRunsFiltered(ctx, task.WorkspaceID, types.AgentRunListFilter{
+		TaskID: &taskID,
+		Limit:  500,
+	})
+	if err != nil {
+		return err
+	}
+	totalCost := 0.0
+	for _, run := range runs {
+		if run == nil {
+			continue
+		}
+		totalCost += run.CostUSD
+	}
+	if err := backend.UpdateTaskCost(ctx, task.ID, totalCost); err != nil {
+		return err
+	}
+	task.CostUSD = totalCost
+	return nil
+}
+
 // TransitionLive applies a non-terminal state change during execution
 // (running <-> waiting). Only the active worker should call this.
-func (lc *TaskLifecycle) TransitionLive(
-	ctx context.Context,
-	taskID, runID string,
-	state types.AgentTaskState,
-	inputKind types.InputKind,
-	waitingSummary *string,
-) (bool, error) {
+func (lc *TaskLifecycle) TransitionLive(ctx context.Context, update types.TaskLiveUpdate) (bool, error) {
 	if lc == nil || lc.backend == nil {
 		return false, nil
 	}
-	if state != types.AgentTaskStateWaiting && state != types.AgentTaskStateRunning {
-		return false, fmt.Errorf("task lifecycle: TransitionLive only supports waiting/running, got %s", state)
+	if update.State != types.AgentTaskStateWaiting && update.State != types.AgentTaskStateRunning {
+		return false, fmt.Errorf("task lifecycle: TransitionLive only supports waiting/running, got %s", update.State)
 	}
-	return lc.backend.UpdateTaskStateIfCurrentRun(
-		ctx, taskID, runID, state, nil, nil, inputKind, waitingSummary,
-	)
+	if update.State == types.AgentTaskStateWaiting {
+		if update.Blocker == nil {
+			return false, fmt.Errorf("task lifecycle: waiting update requires blocker")
+		}
+		run, err := lc.backend.GetAgentRunByID(ctx, update.RunID)
+		if err != nil {
+			return false, err
+		}
+		if run == nil {
+			return false, nil
+		}
+		updated, _, err := lc.backend.OpenTaskBlockerIfCurrentRun(ctx, types.TaskBlockerOpenRequest{
+			WorkspaceID:   run.WorkspaceID,
+			TaskID:        update.TaskID,
+			ExpectedRunID: update.RunID,
+			Blocker:       update.Blocker,
+		})
+		return updated, err
+	}
+	return lc.backend.UpdateTaskStateIfCurrentRun(ctx, types.CurrentRunTaskStateUpdate{
+		TaskID:        update.TaskID,
+		ExpectedRunID: update.RunID,
+		State:         update.State,
+	})
 }
 
 // Cancel transitions a task to cancelled. Allowed from any non-terminal state.
@@ -178,7 +361,10 @@ func (lc *TaskLifecycle) Cancel(ctx context.Context, taskID string) error {
 	if lc == nil || lc.backend == nil {
 		return nil
 	}
-	return lc.backend.UpdateTaskState(ctx, taskID, types.AgentTaskStateCancelled, nil, nil)
+	return lc.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
+		TaskID: taskID,
+		State:  types.AgentTaskStateCancelled,
+	})
 }
 
 // Dispatch transitions queued -> running when a run is materialized.
@@ -186,7 +372,11 @@ func (lc *TaskLifecycle) Dispatch(ctx context.Context, taskID, runID string) err
 	if lc == nil || lc.backend == nil {
 		return nil
 	}
-	return lc.backend.UpdateTaskState(ctx, taskID, types.AgentTaskStateRunning, nil, &runID)
+	return lc.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
+		TaskID:      taskID,
+		State:       types.AgentTaskStateRunning,
+		TargetRunID: &runID,
+	})
 }
 
 // Drop transitions a task to dropped with a reason.
@@ -194,7 +384,11 @@ func (lc *TaskLifecycle) Drop(ctx context.Context, taskID string, reason string)
 	if lc == nil || lc.backend == nil {
 		return nil
 	}
-	return lc.backend.UpdateTaskState(ctx, taskID, types.AgentTaskStateDropped, &reason, nil)
+	return lc.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
+		TaskID:        taskID,
+		State:         types.AgentTaskStateDropped,
+		DroppedReason: &reason,
+	})
 }
 
 func (lc *TaskLifecycle) sleepWithWake(ctx context.Context, task *types.AgentTask, run *types.AgentRun, ws *types.RunExecutionWakeSignal) error {
@@ -263,14 +457,19 @@ func (lc *TaskLifecycle) scheduleRetry(ctx context.Context, task *types.AgentTas
 	nextAttempt := retryAttempt + 1
 	if nextAttempt > dispatchRetryMaxAttempts {
 		dropReason := types.AgentTaskDropReasonDispatchRetryExhausted
-		if err := lc.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateDropped, &dropReason, task.TargetRunID); err != nil {
+		if err := lc.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
+			TaskID:        task.ID,
+			State:         types.AgentTaskStateDropped,
+			DroppedReason: &dropReason,
+			TargetRunID:   task.TargetRunID,
+		}); err != nil {
 			return true, err
 		}
 		lc.publishUpdate(ctx, task.WorkspaceID, task.ID)
 		return true, nil
 	}
 
-	guardKey := fmt.Sprintf("dispatch_retry:%s:%d", task.ID, nextAttempt)
+	guardKey := dispatchRetryGuardKey(task, run, nextAttempt)
 	acquired, err := lc.backend.AcquireOrchestrationRetryGuard(ctx, guardKey)
 	if err != nil {
 		return true, err
@@ -279,7 +478,11 @@ func (lc *TaskLifecycle) scheduleRetry(ctx context.Context, task *types.AgentTas
 		return true, nil
 	}
 
-	if err := lc.backend.UpdateTaskState(ctx, task.ID, types.AgentTaskStateQueued, nil, task.TargetRunID); err != nil {
+	if err := lc.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
+		TaskID:      task.ID,
+		State:       types.AgentTaskStateQueued,
+		TargetRunID: task.TargetRunID,
+	}); err != nil {
 		return true, err
 	}
 	lc.publishUpdate(ctx, task.WorkspaceID, task.ID)
@@ -293,7 +496,7 @@ func (lc *TaskLifecycle) scheduleRetry(ctx context.Context, task *types.AgentTas
 
 	outboxEvent := &types.OrchestrationOutboxEvent{
 		EventType:   types.OrchestrationOutboxEventTypeTaskDispatch,
-		DedupeKey:   fmt.Sprintf("dispatch_retry:%s:%d", task.ID, nextAttempt),
+		DedupeKey:   guardKey,
 		PayloadJSON: retryPayload,
 		AvailableAt: time.Now().Add(delay),
 	}

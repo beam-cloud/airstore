@@ -109,6 +109,7 @@ func (m *mockBackend) setRetryable(tasks []*types.RunExecution) {
 type mockStore struct {
 	repository.FilesystemStore // embed
 	hooks                      []*types.Hook
+	updatedHooks               []*types.Hook
 	existingPaths              map[string]bool
 	statErr                    error
 	listErrCount               int
@@ -145,6 +146,21 @@ func (m *mockStore) StatPath(_ context.Context, path string) (*types.DirMeta, *t
 		return nil, &types.FileMeta{Path: path}, "", nil
 	}
 	return nil, nil, "", nil
+}
+
+func (m *mockStore) UpdateHook(_ context.Context, hook *types.Hook) error {
+	if hook == nil {
+		return nil
+	}
+	copied := *hook
+	m.updatedHooks = append(m.updatedHooks, &copied)
+	for idx, existing := range m.hooks {
+		if existing != nil && existing.ExternalId == hook.ExternalId {
+			m.hooks[idx] = &copied
+			break
+		}
+	}
+	return nil
 }
 
 // --- Helpers ---
@@ -206,6 +222,45 @@ func TestEngine_Submit_CreatesTask(t *testing.T) {
 	}
 	if task.Event != EventFsCreate {
 		t.Errorf("expected event=%s, got %s", EventFsCreate, task.Event)
+	}
+}
+
+func TestEngine_Submit_TaskInputOneShotDisablesHookAfterFire(t *testing.T) {
+	targetTaskID := "task-123"
+	hook := makeHook(1, 10, "/sources/gmail/thread-watch", "resume this task")
+	hook.AgentId = nil
+	hook.DeliveryMode = types.HookDeliveryModeTaskInput
+	hook.TargetTaskID = &targetTaskID
+	hook.OneShot = true
+
+	store := &mockStore{hooks: []*types.Hook{hook}}
+	creator := &mockCreator{}
+	backend := &mockBackend{}
+	eng := NewEngine(store, creator, backend, nil)
+	delay := setShortDebounce(eng)
+
+	event := map[string]any{
+		"event":        EventFsCreate,
+		"workspace_id": "10",
+		"path":         "/sources/gmail/thread-watch",
+		"integration":  "gmail",
+		"new_count":    "2",
+		"new_items":    "/sources/gmail/thread-watch/message.txt, /sources/gmail/thread-watch/report.pdf",
+	}
+	eng.Handle("1", event)
+	waitForDebounce(delay)
+
+	if creator.count() != 1 {
+		t.Fatalf("expected 1 delivered task input, got %d", creator.count())
+	}
+	if hook.Active {
+		t.Fatal("expected one-shot hook to be deactivated after firing")
+	}
+	if got := len(store.updatedHooks); got != 1 {
+		t.Fatalf("expected 1 hook update, got %d", got)
+	}
+	if store.updatedHooks[0].Active {
+		t.Fatal("expected persisted hook update to mark hook inactive")
 	}
 }
 
@@ -655,12 +710,12 @@ func TestBuildTriggerContext_SourceCreateWithoutItems(t *testing.T) {
 
 func TestBuildTriggerContext_SourceDelete(t *testing.T) {
 	data := map[string]any{
-		"event":          EventFsDelete,
-		"workspace_id":   "10",
-		"path":           "/sources/linear/issues",
-		"integration":    "linear",
-		"removed_count":  "2",
-		"removed_items":  "issue-1, issue-2",
+		"event":         EventFsDelete,
+		"workspace_id":  "10",
+		"path":          "/sources/linear/issues",
+		"integration":   "linear",
+		"removed_count": "2",
+		"removed_items": "issue-1, issue-2",
 	}
 	got := buildTriggerContext(EventFsDelete, data)
 

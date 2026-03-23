@@ -21,6 +21,71 @@ import (
 	"github.com/boundaryml/baml/engine/language_client_go/pkg/cffi"
 )
 
+type FanOutIntent string
+
+const (
+	FanOutIntentNONE    FanOutIntent = "NONE"
+	FanOutIntentFAN_OUT FanOutIntent = "FAN_OUT"
+)
+
+// Values returns all allowed values for the FanOutIntent type.
+func (FanOutIntent) Values() []FanOutIntent {
+	return []FanOutIntent{
+		FanOutIntentNONE,
+		FanOutIntentFAN_OUT,
+	}
+}
+
+// IsValid checks whether the given FanOutIntent value is valid.
+func (e FanOutIntent) IsValid() bool {
+
+	for _, v := range e.Values() {
+		if e == v {
+			return true
+		}
+	}
+	return false
+
+}
+
+// MarshalJSON customizes JSON marshaling for FanOutIntent.
+func (e FanOutIntent) MarshalJSON() ([]byte, error) {
+	if !e.IsValid() {
+		return nil, fmt.Errorf("invalid FanOutIntent: %q", e)
+	}
+	return json.Marshal(string(e))
+}
+
+// UnmarshalJSON customizes JSON unmarshaling for FanOutIntent.
+func (e *FanOutIntent) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	*e = FanOutIntent(s)
+	if !e.IsValid() {
+		return fmt.Errorf("invalid FanOutIntent: %q", s)
+	}
+	return nil
+}
+
+func (e *FanOutIntent) Decode(holder *cffi.CFFIValueEnum, typeMap baml.TypeMap) {
+	name := holder.Name
+	if name.Name != "FanOutIntent" || name.Namespace != cffi.CFFITypeNamespace_TYPES {
+		panic(fmt.Sprintf("expected types.FanOutIntent, got %s.%s", string(name.Namespace.String()), string(name.Name)))
+	}
+	value := holder.Value
+	*e = FanOutIntent(value)
+}
+
+func (e FanOutIntent) Encode() (*cffi.HostValue, error) {
+	return baml.EncodeEnum("FanOutIntent", string(e), false)
+}
+
+func (e FanOutIntent) BamlTypeName() string {
+	return "FanOutIntent"
+}
+
 type FollowUpIntent string
 
 const (

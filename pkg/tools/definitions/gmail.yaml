@@ -24,6 +24,12 @@ commands:
         position: 2
         description: "Email body text"
 
+      - name: thread_id
+        type: string
+        short: -t
+        flag: --thread-id
+        description: "Optional Gmail thread ID to draft within"
+
   send-email:
     description: Send a Gmail email immediately
     params:

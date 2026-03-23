@@ -71,7 +71,43 @@ func (a Artifact) Kind() string {
 }
 
 func (a Artifact) MatchesKey(artifactKey string) bool {
-	return normalizeToken(a.Key()) == normalizeToken(artifactKey)
+	ak := normalizeToken(a.Key())
+	bk := normalizeToken(artifactKey)
+	if ak == bk {
+		return true
+	}
+	if ak == "" || bk == "" {
+		return false
+	}
+	if artifactKeysEquivalent(ak, bk) {
+		return true
+	}
+	return tokenSubset(ak, bk) || tokenSubset(bk, ak)
+}
+
+func artifactKeysEquivalent(left, right string) bool {
+	leftCanonical := types.CanonicalArtifactLifecycleKey(left)
+	rightCanonical := types.CanonicalArtifactLifecycleKey(right)
+	if leftCanonical == "" || rightCanonical == "" {
+		return false
+	}
+	return leftCanonical == rightCanonical ||
+		tokenSubset(leftCanonical, rightCanonical) ||
+		tokenSubset(rightCanonical, leftCanonical)
+}
+
+func tokenSubset(sub, super string) bool {
+	subTokens := strings.Split(sub, "-")
+	superSet := make(map[string]struct{})
+	for _, t := range strings.Split(super, "-") {
+		superSet[t] = struct{}{}
+	}
+	for _, t := range subTokens {
+		if _, ok := superSet[t]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // ---------------------------------------------------------------------------
@@ -132,7 +168,13 @@ func (a Artifact) uri() string {
 	}
 	for _, v := range []string{
 		toString(dotGet(a.o.Data, "uri")),
+		toString(dotGet(a.o.Data, "source_url")),
+		toString(dotGet(a.o.Data, "video_url")),
+		toString(dotGet(a.o.Data, "url")),
 		toString(dotGet(a.o.Metadata, "deeplink")),
+		toString(dotGet(a.o.Metadata, "source_url")),
+		toString(dotGet(a.o.Metadata, "video_url")),
+		toString(dotGet(a.o.Metadata, "uri")),
 	} {
 		if strings.TrimSpace(v) != "" {
 			return strings.TrimSpace(v)

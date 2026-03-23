@@ -17,7 +17,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.51.2
 	github.com/beam-cloud/clip v0.0.0-20260126181811-a2a14fb37f70
 	github.com/beam-cloud/go-runc v0.0.0-20250911154456-bb45084abfe1
-	github.com/boundaryml/baml v0.218.1
+	github.com/boundaryml/baml v0.220.0
 	github.com/bsm/redislock v0.9.4
 	github.com/charmbracelet/huh/spinner v0.0.0-20260202112050-cf338358ac5c
 	github.com/charmbracelet/lipgloss v1.1.0
@@ -49,6 +49,7 @@ require (
 	github.com/winfsp/cgofuse v1.6.1-0.20250813110601-7d90b0992471
 	go.mongodb.org/mongo-driver/v2 v2.5.0
 	golang.org/x/crypto v0.45.0
+	golang.org/x/net v0.47.0
 	golang.org/x/oauth2 v0.32.0
 	golang.org/x/sync v0.18.0
 	golang.org/x/sys v0.38.0
@@ -160,7 +161,6 @@ require (
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	golang.org/x/net v0.47.0 // indirect
 	golang.org/x/term v0.37.0 // indirect
 	golang.org/x/text v0.31.0 // indirect
 	golang.org/x/time v0.12.0 // indirect

@@ -63,6 +63,102 @@ func (t *OperationTypeEnumView) Type() (baml.Type, error) {
 	return t.inner.Type()
 }
 
+type SectionEmphasisEnumView struct {
+	inner baml.EnumBuilder
+}
+
+func (t *SectionEmphasisEnumView) ListValues() ([]EnumValueView, error) {
+	result, err := t.inner.ListValues()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]EnumValueView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *SectionEmphasisEnumView) ValuePRIMARY() (EnumValueView, error) {
+	return t.inner.Value("PRIMARY")
+}
+
+func (t *SectionEmphasisEnumView) ValueSECONDARY() (EnumValueView, error) {
+	return t.inner.Value("SECONDARY")
+}
+
+func (t *SectionEmphasisEnumView) ValueCOLLAPSED() (EnumValueView, error) {
+	return t.inner.Value("COLLAPSED")
+}
+
+func (t *TypeBuilder) SectionEmphasis() (*SectionEmphasisEnumView, error) {
+	bld, err := t.inner.Enum("SectionEmphasis")
+	if err != nil {
+		return nil, err
+	}
+	return &SectionEmphasisEnumView{inner: bld}, nil
+}
+
+func (t *SectionEmphasisEnumView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
+type SectionTypeEnumView struct {
+	inner baml.EnumBuilder
+}
+
+func (t *SectionTypeEnumView) ListValues() ([]EnumValueView, error) {
+	result, err := t.inner.ListValues()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]EnumValueView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *SectionTypeEnumView) ValueEMAIL_THREAD() (EnumValueView, error) {
+	return t.inner.Value("EMAIL_THREAD")
+}
+
+func (t *SectionTypeEnumView) ValueAPPROVAL() (EnumValueView, error) {
+	return t.inner.Value("APPROVAL")
+}
+
+func (t *SectionTypeEnumView) ValueINPUT_FORM() (EnumValueView, error) {
+	return t.inner.Value("INPUT_FORM")
+}
+
+func (t *SectionTypeEnumView) ValueTASK_PROGRESS() (EnumValueView, error) {
+	return t.inner.Value("TASK_PROGRESS")
+}
+
+func (t *SectionTypeEnumView) ValueOUTPUT_GALLERY() (EnumValueView, error) {
+	return t.inner.Value("OUTPUT_GALLERY")
+}
+
+func (t *SectionTypeEnumView) ValueDATA_SUMMARY() (EnumValueView, error) {
+	return t.inner.Value("DATA_SUMMARY")
+}
+
+func (t *SectionTypeEnumView) ValueSUBTASKS() (EnumValueView, error) {
+	return t.inner.Value("SUBTASKS")
+}
+
+func (t *TypeBuilder) SectionType() (*SectionTypeEnumView, error) {
+	bld, err := t.inner.Enum("SectionType")
+	if err != nil {
+		return nil, err
+	}
+	return &SectionTypeEnumView{inner: bld}, nil
+}
+
+func (t *SectionTypeEnumView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
 type ViewUpdateTypeEnumView struct {
 	inner baml.EnumBuilder
 }

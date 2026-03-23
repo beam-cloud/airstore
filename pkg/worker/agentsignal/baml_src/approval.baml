@@ -3,16 +3,7 @@ class ApprovalSummary {
   details string   @description("Clean, readable markdown of the content being approved, with generous spacing. Adapt the format to the content type — emails get To/Subject/Body, batch operations get a numbered list, reports get the full text, actions get a description of what will happen. No emoji, no markdown tables, no status updates, no preamble — only what the user needs to make an approve/reject decision.")
 }
 
-class ApprovalItem {
-  item_key string   @description("Stable slug identifier derived from the item content, e.g. 'lisa-zehner', 'talamore-woodbury', 'quarterly-report'. Use lowercase with hyphens.")
-  kind OutputKind   @description("The type of action: EMAIL_DRAFT, EMAIL_SENT, FILE_CREATED, API_CALL, REPORT, LINK_CREATED, etc.")
-  title string      @description("Short descriptive title, e.g. 'Email to Lisa Zehner', 'Deploy staging v2.3'")
-  description string @description("One-sentence description of what this item does or contains")
-  details string    @description("Clean markdown of the item content — email body, report text, action description, etc. No preamble or commentary.")
-  data_fields DataField[] @description("Structured key-value fields extracted from this item: to, subject, company, amount, etc.")
-}
-
-function ExtractApprovalSummary(context: string) -> ApprovalSummary {
+function ExtractApprovalSummary(assistant_text: string) -> ApprovalSummary {
   client ApprovalSummarizer
   prompt #"
     An AI agent is asking a human to approve something. Below is the
@@ -74,42 +65,62 @@ function ExtractApprovalSummary(context: string) -> ApprovalSummary {
 
     Agent output (most recent text):
     ---
-    {{ context }}
+    {{ assistant_text }}
     ---
 
     {{ ctx.output_format }}
   "#
 }
 
-function ExtractApprovalItems(context: string) -> ApprovalItem[] {
-  client ApprovalSummarizer
+function ExtractApprovalOutput(assistant_text: string) -> ExtractedOutput[] {
+  client OutputClassifier
   prompt #"
-    An AI agent is asking a human to approve one or more actions. Below
-    is the agent's recent text output. Your job: decompose the approval
-    request into individual actionable items that can each be independently
-    approved or rejected.
+    An AI agent is blocked waiting for human approval. Extract the durable
+    artifact(s) the user is being asked to approve so they can appear in task
+    outputs before approval happens.
 
-    DECOMPOSITION RULES:
-    - Each distinct action the agent wants to perform gets its own ApprovalItem
-    - For batch emails: one item per recipient
-    - For batch operations: one item per target/entity
-    - For a single action: return an array of one item
-    - If the agent is asking about a single decision (not per-item), return
-      one item representing the whole action
+    ONLY return outputs when the message contains the actual artifact content,
+    not just a bare yes/no question.
 
-    ITEM FIELDS:
-    - item_key: stable slug from the content (recipient name, entity ID, etc.)
-    - kind: the OutputKind that best matches (EMAIL_DRAFT for emails to send,
-      FILE_CREATED for files, API_CALL for API operations, etc.)
-    - title: short, specific — "Email to Lisa Zehner", not "Draft email"
-    - description: one sentence about what this item does
-    - details: the actual content being approved (email body, report text, etc.)
-      Use clean markdown, no preamble. For emails include To/Subject/Body.
-    - data_fields: structured fields like to, subject, company, amount
+    RETURN AN EMPTY ARRAY when:
+    - The agent only asks "should I proceed?" without showing the draft/content
+    - The message is a status update, question, or short acknowledgement
+    - There is no durable artifact the user would want to revisit
 
-    Agent output (most recent text):
+    RETURN OUTPUTS when the message includes the full content being approved,
+    for example:
+    - Draft emails or replies with recipient / subject / body
+    - Draft outreach sequences or follow-up plans with concrete copy
+    - Draft reports, briefs, or documents awaiting approval
+
+    EMAIL DRAFTS:
+    - Set kind = EMAIL_DRAFT
+    - Title should identify the draft itself, ideally by recipient or subject
+    - Content should include only the draft body / material being approved,
+      not the approval request wrapper
+    - Use stable artifact families such as 'email-draft', 'sales-email',
+      'outreach-email', or another durable family key when clearly implied
+    - Include useful data_fields like recipient, subject, channel, company
+
+    NON-EMAIL DRAFTS:
+    - Set kind = REPORT
+    - Persist the full draft/report content in content
+    - Title and summary should describe the artifact, not the approval ask
+
+    MULTI-ENTITY:
+    - If the approval covers multiple distinct drafted artifacts, return one
+      ExtractedOutput per artifact
+    - Cap at 20 artifacts
+
+    General rules:
+    - Strip conversational wrappers like "should I send this?"
+    - Do not invent missing recipients, subjects, or fields
+    - Prefer specific, stable artifact_key values over generic ones when the
+      artifact family is clear from context
+
+    Approval context:
     ---
-    {{ context }}
+    {{ assistant_text }}
     ---
 
     {{ ctx.output_format }}

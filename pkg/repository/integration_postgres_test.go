@@ -374,3 +374,159 @@ func TestCreateTaskOutputRejectsCrossTaskConflict(t *testing.T) {
 		t.Fatalf("unmet sql expectations: %v", err)
 	}
 }
+
+func TestClaimQueuedTaskForDispatchClearsTargetRunID(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	backend := &PostgresBackend{db: db}
+
+	taskID := "7ab0d8a4-7f2b-4fc5-b08a-08dcf6cc4fb1"
+	now := time.Now().UTC()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)UPDATE agent_task.*SET state = 'running'::agent_task_state,.*target_run_id = NULL.*RETURNING id`).
+		WithArgs(taskID, sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(taskID))
+	mock.ExpectExec(regexp.QuoteMeta(`
+		DELETE FROM task_wake_agenda_item WHERE task_id = $1
+	`)).
+		WithArgs(taskID).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	mock.ExpectQuery(`(?s)SELECT id, workspace_id, agent_id, agent_name, queue_mode, state,.*WHERE id = \$1`).
+		WithArgs(taskID).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "workspace_id", "agent_id", "agent_name", "queue_mode", "state",
+			"idempotency_key", "payload_json", "routing_json", "parent_envelope_id", "target_run_id", "current_blocker_id",
+			"accepted_at", "queued_at", "dispatched_at", "deadline", "dropped_reason", "priority", "budget_usd", "cost_usd", "archived_at",
+			"created_at", "updated_at", "wake_at", "wake_reason", "wake_count", "input_kind", "waiting_summary",
+		}).AddRow(
+			taskID,
+			uint(347),
+			nil,
+			"",
+			string(types.AgentQueueModeQueue),
+			string(types.AgentTaskStateRunning),
+			"claim-test",
+			[]byte(`{}`),
+			[]byte(`{}`),
+			nil,
+			nil,
+			nil,
+			now,
+			now,
+			now,
+			nil,
+			nil,
+			string(types.AgentTaskPriorityNormal),
+			nil,
+			nil,
+			nil,
+			now,
+			now,
+			nil,
+			nil,
+			0,
+			nil,
+			nil,
+		))
+
+	task, claimed, err := backend.ClaimQueuedTaskForDispatch(context.Background(), taskID, 45*time.Second)
+	if err != nil {
+		t.Fatalf("ClaimQueuedTaskForDispatch returned error: %v", err)
+	}
+	if !claimed {
+		t.Fatal("claimed = false, want true")
+	}
+	if task == nil {
+		t.Fatal("task = nil, want task")
+	}
+	if task.TargetRunID != nil {
+		t.Fatalf("target_run_id = %v, want nil", *task.TargetRunID)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestGetWatchedSourceQueriesPrioritizesTaskFollowups(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	store := &filesystemStore{db: db}
+
+	mock.ExpectQuery(`(?s)WITH watched_queries AS .*SELECT DISTINCT ON \(q.id\).*CASE WHEN q.lifecycle = 'task_followup' THEN 0 ELSE 1 END AS lifecycle_rank.*CASE WHEN q.system_managed THEN 0 ELSE 1 END AS managed_rank.*FROM watched_queries w.*ORDER BY.*w.lifecycle_rank.*w.managed_rank.*LIMIT \$2`).
+		WithArgs("120 seconds", 5).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "external_id", "workspace_id", "credential_member_id", "system_managed", "lifecycle", "owner_task_id", "owner_run_id",
+			"integration", "path", "name", "query_spec", "guidance", "output_format", "file_ext", "filename_format", "cache_ttl", "mode", "filter",
+			"created_at", "updated_at", "last_executed",
+		}))
+
+	queries, err := store.GetWatchedSourceQueries(context.Background(), 2*time.Minute, 5)
+	if err != nil {
+		t.Fatalf("GetWatchedSourceQueries returned error: %v", err)
+	}
+	if len(queries) != 0 {
+		t.Fatalf("query count = %d, want 0", len(queries))
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestBindOutputsToBlockerTxUpdatesMetadataJSON(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("db.Begin: %v", err)
+	}
+
+	mock.ExpectExec(regexp.QuoteMeta(`
+		UPDATE task_output
+		SET metadata_json = COALESCE(metadata_json, '{}'::jsonb) || jsonb_build_object($3::text, $4::text)
+		WHERE workspace_id = $1
+		  AND id = ANY($2::uuid[])
+	`)).
+		WithArgs(
+			uint(7),
+			sqlmock.AnyArg(),
+			types.TaskOutputMetadataBlockerID,
+			"blocker-1",
+		).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+
+	if err := bindOutputsToBlockerTx(
+		context.Background(),
+		tx,
+		7,
+		"blocker-1",
+		[]string{"out-1", "out-2"},
+	); err != nil {
+		t.Fatalf("bindOutputsToBlockerTx returned error: %v", err)
+	}
+
+	mock.ExpectCommit()
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("tx.Commit: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}

@@ -8,8 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	bamltypes "github.com/beam-cloud/airstore/pkg/views/baml_client/types"
+	viewprojection "github.com/beam-cloud/airstore/pkg/views/projection"
 )
 
 func TestDotGetSupportsImplicitArrayTraversal(t *testing.T) {
@@ -62,10 +64,13 @@ type fakeResolverBackend struct {
 	outputsByAgent    map[string][]*types.TaskOutput
 	taskOutputsByTask map[string][]*types.TaskOutput
 	workspaceOutputs  []*types.TaskOutput
+	tasksByAgent      map[string][]*types.AgentTask
+	workspaceTasks    []*types.AgentTask
 	tasks             map[string]*types.AgentTask
 	queriedAgentIDs   []string
 	queriedTaskIDs    []string
 	filters           []types.TaskOutputListFilter
+	taskFilters       []types.AgentTaskListFilter
 }
 
 func (b *fakeResolverBackend) GetTaskByID(_ context.Context, taskID string) (*types.AgentTask, error) {
@@ -75,6 +80,10 @@ func (b *fakeResolverBackend) GetTaskByID(_ context.Context, taskID string) (*ty
 		}
 	}
 	return nil, fmt.Errorf("task not found")
+}
+
+func (b *fakeResolverBackend) ListSpawnBindingsForOutputs(_ context.Context, _ []string) ([]repository.SpawnBinding, error) {
+	return nil, nil
 }
 
 func (b *fakeResolverBackend) ListTaskOutputs(_ context.Context, _ uint, taskID string) ([]*types.TaskOutput, error) {
@@ -121,6 +130,31 @@ func (b *fakeResolverBackend) ListWorkspaceTaskOutputs(_ context.Context, _ uint
 		return filtered, nil
 	}
 	return outputs, nil
+}
+
+func (b *fakeResolverBackend) ListTasksFiltered(_ context.Context, _ uint, filter types.AgentTaskListFilter) ([]*types.AgentTask, error) {
+	b.taskFilters = append(b.taskFilters, filter)
+	tasks := b.workspaceTasks
+	if filter.AgentID != nil {
+		tasks = b.tasksByAgent[*filter.AgentID]
+	}
+	if len(filter.States) == 0 {
+		return tasks, nil
+	}
+	allowed := make(map[types.AgentTaskState]struct{}, len(filter.States))
+	for _, state := range filter.States {
+		allowed[state] = struct{}{}
+	}
+	filtered := make([]*types.AgentTask, 0, len(tasks))
+	for _, task := range tasks {
+		if task == nil {
+			continue
+		}
+		if _, ok := allowed[task.State]; ok {
+			filtered = append(filtered, task)
+		}
+	}
+	return filtered, nil
 }
 
 func TestFetchComponentOutputsSkipsUnresolvedAgentRefs(t *testing.T) {
@@ -248,6 +282,357 @@ func TestFetchMappingOutputsExpandsTaskContextForSelectedTasks(t *testing.T) {
 	}
 }
 
+func TestFetchMappingOutputsIncludesSyntheticBlockerOutputWhenNoRealOutputsExist(t *testing.T) {
+	now := time.Now().UTC()
+	agentID := "agent-1"
+	task := &types.AgentTask{
+		ID:        "task-1",
+		AgentID:   &agentID,
+		State:     types.AgentTaskStateWaiting,
+		CreatedAt: now.Add(-time.Minute),
+		PayloadJSON: map[string]any{
+			"label":   "Cold outreach email to Mike",
+			"message": "Draft a cold outreach email to Mike",
+		},
+		RoutingJSON: map[string]any{
+			"channel": "email",
+		},
+		CurrentBlocker: &types.TaskBlocker{
+			ID:        "blocker-1",
+			Kind:      types.TaskBlockerKindApproval,
+			InputKind: types.InputKindApproveReject,
+			Status:    types.TaskBlockerStatusOpen,
+			CreatedAt: now,
+			PayloadJSON: map[string]any{
+				"summary": "Send outreach email to Mike",
+				"details": "**To:** Mike <mike@example.com>\n\n**Subject:** Beam sandboxes\n\nHello Mike,",
+			},
+		},
+	}
+
+	backend := &fakeResolverBackend{
+		profilesByKey: map[string]*types.AgentProfile{
+			"sales-agent": {ID: agentID},
+		},
+		tasksByAgent: map[string][]*types.AgentTask{
+			agentID: {task},
+		},
+		tasks: map[string]*types.AgentTask{
+			task.ID: task,
+		},
+	}
+	resolver := &DataResolver{backend: backend, store: nil}
+
+	outputs, err := resolver.fetchMappingOutputs(
+		context.Background(),
+		7,
+		&types.DataSource{OutputType: types.TaskOutputTypeEmail},
+		[]string{"sales-agent"},
+	)
+	if err != nil {
+		t.Fatalf("fetchMappingOutputs returned error: %v", err)
+	}
+	if got, want := len(outputs), 1; got != want {
+		t.Fatalf("output count = %d, want %d", got, want)
+	}
+	if got, want := outputs[0].TaskID, task.ID; got != want {
+		t.Fatalf("task id = %q, want %q", got, want)
+	}
+	if got, want := outputs[0].OutputType, types.TaskOutputTypeEmail; got != want {
+		t.Fatalf("output type = %q, want %q", got, want)
+	}
+	if got, want := outputs[0].Status, types.TaskOutputStatusPending; got != want {
+		t.Fatalf("status = %q, want %q", got, want)
+	}
+	if got, want := outputs[0].Title, "Send outreach email to Mike"; got != want {
+		t.Fatalf("title = %q, want %q", got, want)
+	}
+	if got := toString(outputs[0].Data["recipient"]); got != "Mike <mike@example.com>" {
+		t.Fatalf("recipient = %q, want Mike <mike@example.com>", got)
+	}
+	if got := toString(outputs[0].Data["subject"]); got != "Beam sandboxes" {
+		t.Fatalf("subject = %q, want Beam sandboxes", got)
+	}
+	if got := len(backend.queriedTaskIDs); got != 0 {
+		t.Fatalf("expected no real task-output expansion, got %d task queries", got)
+	}
+}
+
+func TestFetchMappingOutputsIncludesSyntheticBlockerOutputForSalesEmailArtifactKey(t *testing.T) {
+	now := time.Now().UTC()
+	agentID := "agent-1"
+	task := &types.AgentTask{
+		ID:        "task-1",
+		AgentID:   &agentID,
+		State:     types.AgentTaskStateWaiting,
+		CreatedAt: now.Add(-time.Minute),
+		PayloadJSON: map[string]any{
+			"label":   "Cold outreach email to Mike",
+			"message": "Draft a cold outreach email to Mike",
+		},
+		RoutingJSON: map[string]any{
+			"channel": "email",
+		},
+		CurrentBlocker: &types.TaskBlocker{
+			ID:        "blocker-1",
+			Kind:      types.TaskBlockerKindInput,
+			InputKind: types.InputKindFreeText,
+			Status:    types.TaskBlockerStatusOpen,
+			CreatedAt: now,
+			PayloadJSON: map[string]any{
+				"summary": "Send outreach email to Mike",
+				"details": "**To:** Mike <mike@example.com>\n\n**Subject:** Beam sandboxes\n\nHello Mike,",
+			},
+		},
+	}
+
+	backend := &fakeResolverBackend{
+		profilesByKey: map[string]*types.AgentProfile{
+			"sales-agent": {ID: agentID},
+		},
+		tasksByAgent: map[string][]*types.AgentTask{
+			agentID: {task},
+		},
+		tasks: map[string]*types.AgentTask{
+			task.ID: task,
+		},
+	}
+	resolver := &DataResolver{backend: backend, store: nil}
+
+	outputs, err := resolver.fetchMappingOutputs(
+		context.Background(),
+		7,
+		&types.DataSource{ArtifactKey: "sales-email"},
+		[]string{"sales-agent"},
+	)
+	if err != nil {
+		t.Fatalf("fetchMappingOutputs returned error: %v", err)
+	}
+	if got, want := len(outputs), 1; got != want {
+		t.Fatalf("output count = %d, want %d", got, want)
+	}
+	if got, want := outputs[0].TaskID, task.ID; got != want {
+		t.Fatalf("task id = %q, want %q", got, want)
+	}
+	if got, want := meta(outputs[0], types.TaskOutputMetadataArtifactKey), "blocked-email"; got != want {
+		t.Fatalf("artifact key = %q, want %q", got, want)
+	}
+	if got := toString(outputs[0].Data["recipient"]); got != "Mike <mike@example.com>" {
+		t.Fatalf("recipient = %q, want Mike <mike@example.com>", got)
+	}
+	if got := toString(outputs[0].Data["subject"]); got != "Beam sandboxes" {
+		t.Fatalf("subject = %q, want Beam sandboxes", got)
+	}
+}
+
+func TestFetchMappingOutputsDoesNotAddSyntheticBlockerOutputWhenRealOutputExists(t *testing.T) {
+	now := time.Now().UTC()
+	agentID := "agent-1"
+	real := &types.TaskOutput{
+		ID:         "out-1",
+		TaskID:     "task-1",
+		AgentID:    &agentID,
+		OutputType: types.TaskOutputTypeEmail,
+		Title:      "Real pending draft",
+		Status:     types.TaskOutputStatusPending,
+		CreatedAt:  now,
+	}
+	task := &types.AgentTask{
+		ID:      "task-1",
+		AgentID: &agentID,
+		State:   types.AgentTaskStateWaiting,
+		CurrentBlocker: &types.TaskBlocker{
+			ID:        "blocker-1",
+			Kind:      types.TaskBlockerKindApproval,
+			InputKind: types.InputKindApproveReject,
+			Status:    types.TaskBlockerStatusOpen,
+			CreatedAt: now,
+			PayloadJSON: map[string]any{
+				"summary": "Send outreach email to Mike",
+			},
+		},
+	}
+	backend := &fakeResolverBackend{
+		profilesByKey: map[string]*types.AgentProfile{
+			"sales-agent": {ID: agentID},
+		},
+		outputsByAgent: map[string][]*types.TaskOutput{
+			agentID: {real},
+		},
+		taskOutputsByTask: map[string][]*types.TaskOutput{
+			"task-1": {real},
+		},
+		tasksByAgent: map[string][]*types.AgentTask{
+			agentID: {task},
+		},
+		tasks: map[string]*types.AgentTask{
+			task.ID: task,
+		},
+	}
+	resolver := &DataResolver{backend: backend, store: nil}
+
+	outputs, err := resolver.fetchMappingOutputs(
+		context.Background(),
+		7,
+		&types.DataSource{OutputType: types.TaskOutputTypeEmail},
+		[]string{"sales-agent"},
+	)
+	if err != nil {
+		t.Fatalf("fetchMappingOutputs returned error: %v", err)
+	}
+	if got, want := len(outputs), 1; got != want {
+		t.Fatalf("output count = %d, want %d", got, want)
+	}
+	if got, want := outputs[0].ID, real.ID; got != want {
+		t.Fatalf("output id = %q, want %q", got, want)
+	}
+}
+
+func TestProjectBlockerBuildsFallbackItemsFromOutputIDs(t *testing.T) {
+	waitGroupID := "wait-1"
+	output := &types.TaskOutput{
+		ID:        "out-1",
+		Title:     "Draft outreach email",
+		Status:    types.TaskOutputStatusPending,
+		CreatedAt: time.Unix(10, 0),
+	}
+	task := &types.AgentTask{
+		CurrentBlocker: &types.TaskBlocker{
+			ID:          "blocker-1",
+			Kind:        types.TaskBlockerKindApproval,
+			InputKind:   types.InputKindApproveReject,
+			Status:      types.TaskBlockerStatusOpen,
+			WaitGroupID: &waitGroupID,
+			OutputIDs:   []string{"out-1"},
+		},
+	}
+
+	got := viewprojection.ProjectBlocker(task, []*types.TaskOutput{output})
+	if got == nil {
+		t.Fatal("expected projected blocker")
+	}
+	if got.OutputID != output.ID {
+		t.Fatalf("OutputID = %q, want %q", got.OutputID, output.ID)
+	}
+	if got.WaitGroupID != waitGroupID {
+		t.Fatalf("WaitGroupID = %q, want %q", got.WaitGroupID, waitGroupID)
+	}
+	if got.InputKind != string(types.InputKindApproveReject) {
+		t.Fatalf("InputKind = %q, want %q", got.InputKind, types.InputKindApproveReject)
+	}
+	if !got.ApprovalSurface {
+		t.Fatal("ApprovalSurface = false, want true")
+	}
+	if len(got.Items) != 1 {
+		t.Fatalf("item count = %d, want 1", len(got.Items))
+	}
+	if got.Items[0].OutputID != output.ID {
+		t.Fatalf("item output_id = %q, want %q", got.Items[0].OutputID, output.ID)
+	}
+	if got.Items[0].Title != output.Title {
+		t.Fatalf("item title = %q, want %q", got.Items[0].Title, output.Title)
+	}
+}
+
+func TestProjectBlockerPrefersExplicitPayloadForApprovalRevision(t *testing.T) {
+	older := &types.TaskOutput{
+		ID:        "out-1",
+		Title:     "Original outreach email",
+		Status:    types.TaskOutputStatusPending,
+		CreatedAt: time.Unix(10, 0),
+	}
+	revised := &types.TaskOutput{
+		ID:        "out-2",
+		Title:     "Revised outreach email",
+		Status:    types.TaskOutputStatusPending,
+		CreatedAt: time.Unix(20, 0),
+	}
+	task := &types.AgentTask{
+		CurrentBlocker: &types.TaskBlocker{
+			ID:        "blocker-2",
+			Kind:      types.TaskBlockerKindApproval,
+			InputKind: types.InputKindApproveReject,
+			Status:    types.TaskBlockerStatusOpen,
+			OutputIDs: []string{"out-1", "out-2"},
+			PayloadJSON: map[string]any{
+				"summary": "Approve the revised draft",
+				"details": "The explicit blocker payload should win.",
+				"items": []any{
+					map[string]any{
+						"output_id": "out-2",
+						"title":     "Revised outreach email",
+						"item_key":  "out-2",
+					},
+				},
+			},
+		},
+	}
+
+	got := viewprojection.ProjectBlocker(task, []*types.TaskOutput{older, revised})
+	if got == nil {
+		t.Fatal("expected projected blocker")
+	}
+	if got.OutputID != revised.ID {
+		t.Fatalf("OutputID = %q, want %q", got.OutputID, revised.ID)
+	}
+	if got.Summary != "Approve the revised draft" {
+		t.Fatalf("Summary = %q, want revised summary", got.Summary)
+	}
+	if got.Details != "The explicit blocker payload should win." {
+		t.Fatalf("Details = %q, want explicit blocker details", got.Details)
+	}
+	if len(got.Items) != 1 {
+		t.Fatalf("item count = %d, want 1", len(got.Items))
+	}
+	if got.Items[0].OutputID != revised.ID {
+		t.Fatalf("item output_id = %q, want %q", got.Items[0].OutputID, revised.ID)
+	}
+	if got.Items[0].Title != revised.Title {
+		t.Fatalf("item title = %q, want %q", got.Items[0].Title, revised.Title)
+	}
+}
+
+func TestNormalizeTaskOutputsForTableMappingPrefersSentEmailOverRejectedDraft(t *testing.T) {
+	draft := &types.TaskOutput{
+		ID:         "out-draft",
+		TaskID:     "task-1",
+		OutputType: types.TaskOutputTypeEmail,
+		Title:      "Draft: Beam sandboxes",
+		Status:     types.TaskOutputStatusRejected,
+		CreatedAt:  time.Unix(10, 0),
+		Data: map[string]any{
+			"to":      "luke@example.com",
+			"subject": "Beam sandboxes",
+		},
+		Metadata: map[string]any{
+			types.TaskOutputMetadataArtifactKey: "email-draft",
+		},
+	}
+	sent := &types.TaskOutput{
+		ID:         "out-sent",
+		TaskID:     "task-1",
+		OutputType: types.TaskOutputTypeEmail,
+		Title:      "Sent: Beam sandboxes",
+		Status:     types.TaskOutputStatusActive,
+		CreatedAt:  time.Unix(20, 0),
+		Data: map[string]any{
+			"to":      "luke@example.com",
+			"subject": "Beam sandboxes",
+		},
+		Metadata: map[string]any{
+			types.TaskOutputMetadataArtifactKey: "email-sent",
+		},
+	}
+
+	normalized := normalizeTaskOutputsForTableMapping([]*types.TaskOutput{draft, sent})
+	if got := len(normalized); got != 1 {
+		t.Fatalf("normalized output count = %d, want 1", got)
+	}
+	if got := normalized[0].ID; got != sent.ID {
+		t.Fatalf("normalized output id = %q, want %q", got, sent.ID)
+	}
+}
+
 func TestFetchMappingOutputsExpandsTaskContextForStatusScopedTasks(t *testing.T) {
 	agentID := "agent-1"
 	pending := newRecipeOutput("out-1")
@@ -295,6 +680,230 @@ func TestFetchMappingOutputsExpandsTaskContextForStatusScopedTasks(t *testing.T)
 	}
 	if got, want := backend.queriedTaskIDs[0], "task-1"; got != want {
 		t.Fatalf("queried task id = %q, want %q", got, want)
+	}
+}
+
+func TestFilterMappedRowsByExclusionsFallsBackToRowKeyWithinComponent(t *testing.T) {
+	snapshots := []ExcludedRowSnapshot{
+		{
+			ComponentID: "emails",
+			TaskID:      "task-1",
+			RowKey:      "luke",
+		},
+	}
+	rows := []bamltypes.MappedRow{
+		{
+			Task_id: "task-1",
+			Row_key: "luke",
+			Cells: []bamltypes.MappedCell{
+				{Column: "recipient", Value: "luke@sla.io"},
+			},
+		},
+		{
+			Task_id: "task-1",
+			Row_key: "taylor",
+			Cells: []bamltypes.MappedCell{
+				{Column: "recipient", Value: "taylor@beam.cloud"},
+			},
+		},
+	}
+
+	filtered := filterMappedRowsByExclusions(rows, snapshots, "emails")
+	if got, want := len(filtered), 1; got != want {
+		t.Fatalf("filtered row count = %d, want %d", got, want)
+	}
+	if got, want := filtered[0].Row_key, "taylor"; got != want {
+		t.Fatalf("remaining row key = %q, want %q", got, want)
+	}
+
+	unscoped := filterMappedRowsByExclusions(rows, snapshots, "other-component")
+	if got, want := len(unscoped), 2; got != want {
+		t.Fatalf("other component row count = %d, want %d", got, want)
+	}
+}
+
+func TestFilterMappedRowsByExclusionsDoesNotMatchRowKeyWhenSourceOutputsChanged(t *testing.T) {
+	snapshots := []ExcludedRowSnapshot{
+		{
+			ComponentID:     "emails",
+			TaskID:          "task-1",
+			RowKey:          "task",
+			SourceOutputIDs: []string{"out-1"},
+			Cells: map[string]string{
+				"recipient": "luke@sla.io",
+			},
+		},
+	}
+	rows := []bamltypes.MappedRow{
+		{
+			Task_id:           "task-1",
+			Row_key:           "task",
+			Source_output_ids: []string{"out-2"},
+			Cells: []bamltypes.MappedCell{
+				{Column: "recipient", Value: "new@example.com"},
+			},
+		},
+	}
+
+	filtered := filterMappedRowsByExclusions(rows, snapshots, "emails")
+	if got, want := len(filtered), 1; got != want {
+		t.Fatalf("filtered row count = %d, want %d", got, want)
+	}
+}
+
+func TestFilterMappedRowsByExclusionsDoesNotMatchRowKeyWhenCellsChanged(t *testing.T) {
+	snapshots := []ExcludedRowSnapshot{
+		{
+			ComponentID: "emails",
+			TaskID:      "task-1",
+			RowKey:      "task",
+			Cells: map[string]string{
+				"recipient": "luke@sla.io",
+				"subject":   "Old subject",
+			},
+		},
+	}
+	rows := []bamltypes.MappedRow{
+		{
+			Task_id: "task-1",
+			Row_key: "task",
+			Cells: []bamltypes.MappedCell{
+				{Column: "recipient", Value: "new@example.com"},
+				{Column: "subject", Value: "Fresh subject"},
+			},
+		},
+	}
+
+	filtered := filterMappedRowsByExclusions(rows, snapshots, "emails")
+	if got, want := len(filtered), 1; got != want {
+		t.Fatalf("filtered row count = %d, want %d", got, want)
+	}
+}
+
+func TestFilterMappedRowsByExclusionsFallsBackToCellFingerprint(t *testing.T) {
+	snapshots := []ExcludedRowSnapshot{
+		{
+			ComponentID: "emails",
+			TaskID:      "task-1",
+			RowKey:      "old-key",
+			Cells: map[string]string{
+				"recipient": "luke@sla.io",
+				"subject":   "Faster dev environments for your team",
+			},
+		},
+	}
+	rows := []bamltypes.MappedRow{
+		{
+			Task_id: "task-1",
+			Row_key: "new-key",
+			Cells: []bamltypes.MappedCell{
+				{Column: "subject", Value: "Faster dev environments for your team"},
+				{Column: "recipient", Value: "luke@sla.io"},
+			},
+		},
+		{
+			Task_id: "task-1",
+			Row_key: "different",
+			Cells: []bamltypes.MappedCell{
+				{Column: "recipient", Value: "taylor@beam.cloud"},
+				{Column: "subject", Value: "Different row"},
+			},
+		},
+	}
+
+	filtered := filterMappedRowsByExclusions(rows, snapshots, "emails")
+	if got, want := len(filtered), 1; got != want {
+		t.Fatalf("filtered row count = %d, want %d", got, want)
+	}
+	if got, want := filtered[0].Row_key, "different"; got != want {
+		t.Fatalf("remaining row key = %q, want %q", got, want)
+	}
+}
+
+func TestFilterMappedRowsByExclusionsMatchesSourceOutputIDs(t *testing.T) {
+	snapshots := []ExcludedRowSnapshot{
+		{
+			ComponentID:     "emails",
+			TaskID:          "task-1",
+			RowKey:          "old-key",
+			SourceOutputIDs: []string{"out-1", "out-2"},
+			Cells: map[string]string{
+				"recipient": "luke@sla.io",
+			},
+		},
+	}
+	rows := []bamltypes.MappedRow{
+		{
+			Task_id:           "task-1",
+			Row_key:           "new-key",
+			Source_output_ids: []string{"out-2"},
+			Cells: []bamltypes.MappedCell{
+				{Column: "recipient", Value: "different@example.com"},
+			},
+		},
+		{
+			Task_id:           "task-1",
+			Row_key:           "keep-me",
+			Source_output_ids: []string{"out-3"},
+			Cells: []bamltypes.MappedCell{
+				{Column: "recipient", Value: "taylor@beam.cloud"},
+			},
+		},
+	}
+
+	filtered := filterMappedRowsByExclusions(rows, snapshots, "emails")
+	if got, want := len(filtered), 1; got != want {
+		t.Fatalf("filtered row count = %d, want %d", got, want)
+	}
+	if got, want := filtered[0].Row_key, "keep-me"; got != want {
+		t.Fatalf("remaining row key = %q, want %q", got, want)
+	}
+}
+
+func TestFilterStoredRowsByExclusionsPreservesMarkerRows(t *testing.T) {
+	snapshots := []ExcludedRowSnapshot{
+		{
+			ComponentID:     "emails",
+			TaskID:          "task-1",
+			RowKey:          "task",
+			SourceOutputIDs: []string{"out-1"},
+			Cells: map[string]string{
+				"recipient": "luke@sla.io",
+			},
+		},
+	}
+	rows := []ViewRow{
+		{
+			ID:              "marker-row",
+			ComponentID:     "emails",
+			Marker:          true,
+			GroupID:         "task-1",
+			TaskID:          "task-1",
+			RowKey:          "task",
+			SourceOutputIDs: []string{"out-1"},
+		},
+		{
+			ID:              "visible-row",
+			ComponentID:     "emails",
+			GroupID:         "task-1",
+			TaskID:          "task-1",
+			RowKey:          "task",
+			SourceOutputIDs: []string{"out-1"},
+			Cells: map[string]string{
+				"recipient": "luke@sla.io",
+			},
+		},
+	}
+
+	filtered := filterStoredRowsByExclusions(rows, snapshots, "emails")
+	if got, want := len(filtered), 1; got != want {
+		t.Fatalf("filtered row count = %d, want %d", got, want)
+	}
+	if got, want := filtered[0].ID, "marker-row"; got != want {
+		t.Fatalf("remaining row id = %q, want %q", got, want)
+	}
+	if !filtered[0].Marker {
+		t.Fatal("expected remaining row to be the marker row")
 	}
 }
 
@@ -429,6 +1038,88 @@ func TestFilterOutputsForDataSource(t *testing.T) {
 	}, []string{agentID})
 	if len(filtered) != 1 || filtered[0].ID != "out-1" {
 		t.Fatalf("artifact_key should narrow to matching outputs, got %d results", len(filtered))
+	}
+}
+
+func TestNormalizeOutputsForTableMappingKeepsNewestCurrentOutputPerIdentity(t *testing.T) {
+	base := newRecipeOutput("out-1")
+	base.TaskID = "task-1"
+	base.Title = "Cold outreach email to Luke"
+	base.Metadata = map[string]any{
+		types.TaskOutputMetadataArtifactKey:   "sales-email",
+		types.TaskOutputMetadataArtifactLabel: "Sales Emails",
+		types.TaskOutputMetadataArtifactKind:  types.TaskOutputTypeEmail,
+		types.TaskOutputMetadataArtifactRole:  types.TaskOutputArtifactRolePrimary,
+	}
+	base.Data = map[string]any{
+		"recipient": "luke@slai.io",
+		"subject":   "Cleaner dev environments for SLAI",
+	}
+	base.CreatedAt = time.Unix(10, 0)
+	base.Status = types.TaskOutputStatusPending
+
+	active := *base
+	active.ID = "out-2"
+	active.Status = types.TaskOutputStatusActive
+	active.CreatedAt = time.Unix(20, 0)
+
+	rejected := *base
+	rejected.ID = "out-3"
+	rejected.Status = types.TaskOutputStatusRejected
+	rejected.CreatedAt = time.Unix(30, 0)
+
+	other := newRecipeOutput("out-4")
+	other.TaskID = "task-1"
+	other.Title = "Cold outreach email to Camila"
+	other.Metadata = map[string]any{
+		types.TaskOutputMetadataArtifactKey:   "sales-email",
+		types.TaskOutputMetadataArtifactLabel: "Sales Emails",
+		types.TaskOutputMetadataArtifactKind:  types.TaskOutputTypeEmail,
+		types.TaskOutputMetadataArtifactRole:  types.TaskOutputArtifactRolePrimary,
+	}
+	other.Data = map[string]any{
+		"recipient": "camila@example.com",
+		"subject":   "Cleaner dev environments for Beam",
+	}
+	other.CreatedAt = time.Unix(25, 0)
+	other.Status = types.TaskOutputStatusPending
+
+	normalized := normalizeOutputsForTableMapping([]*types.TaskOutput{base, &active, &rejected, other})
+
+	if got, want := sortedOutputIDs(normalized), []string{"out-2", "out-4"}; !slicesMatch(got, want) {
+		t.Fatalf("normalized output ids = %v, want %v", got, want)
+	}
+}
+
+func TestNormalizeOutputsForTableMappingKeepsSingleStaleOutputWhenNoCurrentExists(t *testing.T) {
+	rejected := newRecipeOutput("out-1")
+	rejected.TaskID = "task-1"
+	rejected.Title = "Cold outreach email to Luke"
+	rejected.Metadata = map[string]any{
+		types.TaskOutputMetadataArtifactKey:   "sales-email",
+		types.TaskOutputMetadataArtifactLabel: "Sales Emails",
+		types.TaskOutputMetadataArtifactKind:  types.TaskOutputTypeEmail,
+		types.TaskOutputMetadataArtifactRole:  types.TaskOutputArtifactRolePrimary,
+	}
+	rejected.Data = map[string]any{
+		"recipient": "luke@slai.io",
+		"subject":   "Cleaner dev environments for SLAI",
+	}
+	rejected.CreatedAt = time.Unix(10, 0)
+	rejected.Status = types.TaskOutputStatusRejected
+
+	cancelled := *rejected
+	cancelled.ID = "out-2"
+	cancelled.Status = types.TaskOutputStatusCancelled
+	cancelled.CreatedAt = time.Unix(20, 0)
+
+	normalized := normalizeOutputsForTableMapping([]*types.TaskOutput{rejected, &cancelled})
+
+	if got, want := len(normalized), 1; got != want {
+		t.Fatalf("normalized output count = %d, want %d", got, want)
+	}
+	if got, want := normalized[0].ID, "out-2"; got != want {
+		t.Fatalf("normalized output id = %q, want %q", got, want)
 	}
 }
 
@@ -610,11 +1301,10 @@ func TestAssembleTableIncludesTaskWakeMetadata(t *testing.T) {
 		comp,
 		[]resolvedSheetRow{
 			{
-				SheetID: "sheet-1",
-				TaskID:  "task-1",
-				RowID:   "sheet-1:task-1:task",
-				RowKey:  "task",
-				Cells:   map[string]string{"name": "Prospect outreach"},
+				TaskID: "task-1",
+				RowID:  "sheet-1:task-1:task",
+				RowKey: "task",
+				Cells:  map[string]string{"name": "Prospect outreach"},
 			},
 		},
 		map[string]*types.AgentTask{
@@ -643,6 +1333,41 @@ func TestAssembleTableIncludesTaskWakeMetadata(t *testing.T) {
 	}
 	if got := row[2]; got != wakeReason {
 		t.Fatalf("next_wake_summary cell = %#v, want %q", got, wakeReason)
+	}
+}
+
+func TestResolvedRowsFromStoredSkipsMarkerRows(t *testing.T) {
+	rows := resolvedRowsFromStored([]ViewRow{
+		{
+			ID:          "sheet-1:c1:task-1:task",
+			SheetID:     "sheet-1",
+			ComponentID: "c1",
+			Marker:      true,
+			GroupID:     "task-1",
+			TaskID:      "task-1",
+			RowKey:      "task",
+			SchemaHash:  "schema",
+			OutputIDs:   []string{"out-1"},
+			Cells:       map[string]string{},
+		},
+		{
+			ID:          "sheet-1:c1:task-1:row",
+			SheetID:     "sheet-1",
+			ComponentID: "c1",
+			GroupID:     "task-1",
+			TaskID:      "task-1",
+			RowKey:      "row",
+			SchemaHash:  "schema",
+			OutputIDs:   []string{"out-1"},
+			Cells:       map[string]string{"name": "Visible row"},
+		},
+	}, false)
+
+	if got, want := len(rows), 1; got != want {
+		t.Fatalf("resolved row count = %d, want %d", got, want)
+	}
+	if got, want := rows[0].RowID, "sheet-1:c1:task-1:row"; got != want {
+		t.Fatalf("resolved row id = %q, want %q", got, want)
 	}
 }
 
@@ -776,10 +1501,10 @@ func TestSerializeOutputsForMappingSanitizesNoisyMarkup(t *testing.T) {
 		"recipe_name": "Top 4 Lemon Hacks",
 	}
 	output.Metadata = map[string]any{
-		"source_input": map[string]any{
+		"_source_input": map[string]any{
 			"content": "<li>Cut lemon</li><li>Freeze zest</li>",
 		},
-		"source_excerpt": "\u001b[32m✓\u001b[0m PDF saved to /workspace/file.pdf",
+		"_source_excerpt": "\u001b[32m✓\u001b[0m PDF saved to /workspace/file.pdf",
 		"data_fields": []any{
 			map[string]any{"key": "recipe_name", "label": "Recipe Name", "type": "text"},
 		},
@@ -798,8 +1523,8 @@ func TestSerializeOutputsForMappingSanitizesNoisyMarkup(t *testing.T) {
 	if strings.Contains(raw, "\u001b[32m") {
 		t.Fatalf("serialized payload should strip ANSI escapes: %s", raw)
 	}
-	if !strings.Contains(raw, "source_input_excerpt: Cut lemon Freeze zest") {
-		t.Fatalf("serialized payload missing condensed source input excerpt: %s", raw)
+	if strings.Contains(raw, "source_input") {
+		t.Fatalf("serialized payload should exclude _-prefixed internal metadata: %s", raw)
 	}
 	if !strings.Contains(raw, "data_fields: recipe_name [Recipe Name: text]") {
 		t.Fatalf("serialized payload missing summarized data_fields: %s", raw)
@@ -900,8 +1625,9 @@ func TestMappedRowToViewRowSanitizesSourceOutputIDs(t *testing.T) {
 		{ID: "out-2"},
 		{ID: "out-1"},
 	}
+	outputSignature := outputGroupSignature(outputs)
 
-	row := mappedRowToViewRow("sheet-1", "c1", "task-1", "schema", outputs, bamltypes.MappedRow{
+	row := mappedRowToViewRow("sheet-1", "c1", "task-1", "schema", outputSignature, outputs, bamltypes.MappedRow{
 		Row_key:           "task",
 		Source_output_ids: []string{"out-2", "foreign-id"},
 		Cells:             []bamltypes.MappedCell{{Column: "name", Value: "Alice"}},
@@ -913,7 +1639,7 @@ func TestMappedRowToViewRowSanitizesSourceOutputIDs(t *testing.T) {
 		t.Fatalf("component id = %q, want %q", got, want)
 	}
 
-	fallback := mappedRowToViewRow("sheet-1", "c1", "task-1", "schema", outputs, bamltypes.MappedRow{
+	fallback := mappedRowToViewRow("sheet-1", "c1", "task-1", "schema", outputSignature, outputs, bamltypes.MappedRow{
 		Row_key:           "task",
 		Source_output_ids: []string{"foreign-id"},
 	}, now)
@@ -931,22 +1657,326 @@ func TestStableRowIDIncludesComponentScope(t *testing.T) {
 }
 
 func TestGroupRowsFreshReportsMismatchReasons(t *testing.T) {
-	row := fallbackViewRow("sheet-1", "c1", "task-1", "schema-1", []*types.TaskOutput{{ID: "out-1"}}, time.Now())
+	outputs := []*types.TaskOutput{{ID: "out-1", Status: types.TaskOutputStatusPending}}
+	outputSignature := outputGroupSignature(outputs)
+	row := fallbackViewRow("sheet-1", "c1", "task-1", "schema-1", outputSignature, outputs, time.Now())
 
-	if ok, reason := groupRowsFresh([]ViewRow{row}, "c1", "schema-1", []string{"out-1"}); !ok || reason != "" {
+	if ok, reason := groupRowsFresh([]ViewRow{row}, "c1", "schema-1", []string{"out-1"}, outputSignature); !ok || reason != "" {
 		t.Fatalf("expected fresh rows, got ok=%v reason=%q", ok, reason)
 	}
-	if ok, reason := groupRowsFresh([]ViewRow{row}, "c2", "schema-1", []string{"out-1"}); ok || reason != "component_scope_mismatch" {
+	if ok, reason := groupRowsFresh([]ViewRow{row}, "c2", "schema-1", []string{"out-1"}, outputSignature); ok || reason != "component_scope_mismatch" {
 		t.Fatalf("expected component mismatch, got ok=%v reason=%q", ok, reason)
 	}
-	if ok, reason := groupRowsFresh([]ViewRow{row}, "c1", "schema-2", []string{"out-1"}); ok || reason != "schema_hash_mismatch" {
+	if ok, reason := groupRowsFresh([]ViewRow{row}, "c1", "schema-2", []string{"out-1"}, outputSignature); ok || reason != "schema_hash_mismatch" {
 		t.Fatalf("expected schema mismatch, got ok=%v reason=%q", ok, reason)
 	}
-	if ok, reason := groupRowsFresh([]ViewRow{row}, "c1", "schema-1", []string{"out-2"}); ok || reason != "output_ids_mismatch" {
+	if ok, reason := groupRowsFresh([]ViewRow{row}, "c1", "schema-1", []string{"out-2"}, outputSignature); ok || reason != "output_ids_mismatch" {
 		t.Fatalf("expected output mismatch, got ok=%v reason=%q", ok, reason)
 	}
-	if ok, reason := groupRowsFresh(nil, "c1", "schema-1", []string{"out-1"}); ok || reason != "missing_rows" {
+	cancelledSignature := outputGroupSignature([]*types.TaskOutput{{ID: "out-1", Status: types.TaskOutputStatusCancelled}})
+	if ok, reason := groupRowsFresh([]ViewRow{row}, "c1", "schema-1", []string{"out-1"}, cancelledSignature); ok || reason != "output_signature_mismatch" {
+		t.Fatalf("expected output signature mismatch, got ok=%v reason=%q", ok, reason)
+	}
+	if ok, reason := groupRowsFresh(nil, "c1", "schema-1", []string{"out-1"}, outputSignature); ok || reason != "missing_rows" {
 		t.Fatalf("expected missing rows, got ok=%v reason=%q", ok, reason)
+	}
+}
+
+func TestGroupRowsFreshRejectsMixedMarkerState(t *testing.T) {
+	outputs := []*types.TaskOutput{{ID: "out-1", Status: types.TaskOutputStatusPending}}
+	outputSignature := outputGroupSignature(outputs)
+	now := time.Now()
+	rows := []ViewRow{
+		fallbackViewRow("sheet-1", "c1", "task-1", "schema-1", outputSignature, outputs, now),
+		mappedRowToViewRow("sheet-1", "c1", "task-1", "schema-1", outputSignature, outputs, bamltypes.MappedRow{
+			Row_key:           "visible-row",
+			Source_output_ids: []string{"out-1"},
+			Cells:             []bamltypes.MappedCell{{Column: "name", Value: "Alice"}},
+		}, now),
+	}
+
+	if ok, reason := groupRowsFresh(rows, "c1", "schema-1", []string{"out-1"}, outputSignature); ok || reason != "mixed_marker_state" {
+		t.Fatalf("expected mixed marker state, got ok=%v reason=%q", ok, reason)
+	}
+}
+
+func TestMaterializeTaskGroupPreservesStableIdentityAcrossRowKeyChurn(t *testing.T) {
+	now := time.Now().UTC()
+	outputs := []*types.TaskOutput{{ID: "out-1", TaskID: "task-1", OutputType: "text", CreatedAt: now}}
+	existing := []ViewRow{{
+		ID:              "sheet-1:c1:task-1:task",
+		StableRef:       "stable-ref-1",
+		SheetID:         "sheet-1",
+		ComponentID:     "c1",
+		TaskID:          "task-1",
+		GroupID:         "task-1",
+		RowKey:          "task",
+		SchemaHash:      "schema-1",
+		OutputIDs:       []string{"out-1"},
+		OutputSignature: outputGroupSignature(outputs),
+		SourceOutputIDs: []string{"out-1"},
+		Cells:           map[string]string{"name": "Alice"},
+		Manual:          map[string]string{"status": "Pending"},
+	}}
+
+	persisted := materializeTaskGroup(
+		"sheet-1",
+		"c1",
+		"task-1",
+		"schema-1",
+		outputs,
+		existing,
+		[]bamltypes.MappedRow{{
+			Task_id:           "task-1",
+			Row_key:           "customer-alice",
+			Source_output_ids: []string{"out-1"},
+			Cells: []bamltypes.MappedCell{
+				{Column: "name", Value: "Alice"},
+				{Column: "status", Value: ""},
+			},
+		}},
+		now,
+	)
+
+	if got, want := len(persisted), 1; got != want {
+		t.Fatalf("persisted row count = %d, want %d", got, want)
+	}
+	if got, want := persisted[0].ID, existing[0].ID; got != want {
+		t.Fatalf("row id = %q, want %q", got, want)
+	}
+	if got, want := persisted[0].StableRef, existing[0].StableRef; got != want {
+		t.Fatalf("stable ref = %q, want %q", got, want)
+	}
+	if got, want := persisted[0].Manual["status"], "Pending"; got != want {
+		t.Fatalf("manual status = %q, want %q", got, want)
+	}
+}
+
+func TestMaterializeTaskGroupKeepsVisibleRowsWhenEmptyRefreshMatchesCurrentOutputs(t *testing.T) {
+	now := time.Now().UTC()
+	outputs := []*types.TaskOutput{{ID: "out-1", TaskID: "task-1", OutputType: "text", CreatedAt: now}}
+	existing := []ViewRow{{
+		ID:              "sheet-1:c1:task-1:task",
+		StableRef:       "stable-ref-1",
+		SheetID:         "sheet-1",
+		ComponentID:     "c1",
+		TaskID:          "task-1",
+		GroupID:         "task-1",
+		RowKey:          "task",
+		SchemaHash:      "schema-1",
+		OutputIDs:       []string{"out-1"},
+		OutputSignature: outputGroupSignature(outputs),
+		SourceOutputIDs: []string{"out-1"},
+		Cells:           map[string]string{"name": "Alice"},
+	}}
+
+	persisted := materializeTaskGroup(
+		"sheet-1",
+		"c1",
+		"task-1",
+		"schema-1",
+		outputs,
+		existing,
+		nil,
+		now,
+	)
+
+	if got, want := len(persisted), 1; got != want {
+		t.Fatalf("persisted row count = %d, want %d", got, want)
+	}
+	if persisted[0].Marker {
+		t.Fatal("expected visible row to be carried forward, got marker row")
+	}
+	if got, want := persisted[0].ID, existing[0].ID; got != want {
+		t.Fatalf("row id = %q, want %q", got, want)
+	}
+	if got, want := persisted[0].Cells["name"], "Alice"; got != want {
+		t.Fatalf("name cell = %q, want %q", got, want)
+	}
+}
+
+func TestMaterializeTaskGroupFallsBackToMarkerWhenOutputsChanged(t *testing.T) {
+	now := time.Now().UTC()
+	existingOutputs := []*types.TaskOutput{{ID: "out-1", TaskID: "task-1", OutputType: "text", CreatedAt: now}}
+	currentOutputs := []*types.TaskOutput{{ID: "out-2", TaskID: "task-1", OutputType: "text", CreatedAt: now.Add(time.Minute)}}
+	existing := []ViewRow{{
+		ID:              "sheet-1:c1:task-1:task",
+		StableRef:       "stable-ref-1",
+		SheetID:         "sheet-1",
+		ComponentID:     "c1",
+		TaskID:          "task-1",
+		GroupID:         "task-1",
+		RowKey:          "task",
+		SchemaHash:      "schema-1",
+		OutputIDs:       []string{"out-1"},
+		OutputSignature: outputGroupSignature(existingOutputs),
+		SourceOutputIDs: []string{"out-1"},
+		Cells:           map[string]string{"name": "Alice"},
+	}}
+
+	persisted := materializeTaskGroup(
+		"sheet-1",
+		"c1",
+		"task-1",
+		"schema-1",
+		currentOutputs,
+		existing,
+		nil,
+		now,
+	)
+
+	if got, want := len(persisted), 1; got != want {
+		t.Fatalf("persisted row count = %d, want %d", got, want)
+	}
+	if !persisted[0].Marker {
+		t.Fatal("expected changed outputs to fall back to marker row")
+	}
+}
+
+func TestCanonicalizeMappedRowsMergesSemanticDuplicatesAcrossRowKeys(t *testing.T) {
+	rows := canonicalizeMappedRows(
+		[]bamltypes.ColumnSchema{{Key: "name", Name: "Name", Type: "text"}},
+		[]bamltypes.MappedRow{
+			{
+				Task_id:           "task-1",
+				Row_key:           "task",
+				Source_output_ids: []string{"out-1"},
+				Cells:             []bamltypes.MappedCell{{Column: "name", Value: "Alice"}},
+			},
+			{
+				Task_id:           "task-1",
+				Row_key:           "alice",
+				Source_output_ids: []string{"out-1"},
+				Cells:             []bamltypes.MappedCell{{Column: "name", Value: "Alice"}},
+			},
+		},
+	)
+
+	if got, want := len(rows), 1; got != want {
+		t.Fatalf("canonical row count = %d, want %d", got, want)
+	}
+	if got, want := rows[0].Row_key, "alice"; got != want {
+		t.Fatalf("canonical row_key = %q, want %q", got, want)
+	}
+}
+
+func TestCollapseResolvedRowsMergesSiblingTasksForSameSourceEntity(t *testing.T) {
+	now := time.Now().UTC()
+	taskMeta := map[string]*types.AgentTask{
+		"task-1": {ID: "task-1", CreatedAt: now.Add(-time.Minute)},
+		"task-2": {ID: "task-2", CreatedAt: now},
+	}
+	outputs := []*types.TaskOutput{
+		{
+			ID:     "out-1",
+			TaskID: "task-1",
+			Data: map[string]any{
+				"source_url": "https://youtube.com/watch?v=abc",
+			},
+		},
+		{
+			ID:     "out-2",
+			TaskID: "task-2",
+			Data: map[string]any{
+				"source_url": "https://youtube.com/watch?v=abc",
+			},
+		},
+	}
+	rows := collapseResolvedRows(
+		[]bamltypes.ColumnSchema{
+			{Key: "recipe_name", Type: "text"},
+			{Key: "creator", Type: "text"},
+			{Key: "servings", Type: "text"},
+		},
+		[]resolvedSheetRow{
+			{
+				TaskID:          "task-1",
+				RowID:           "row-1",
+				RowKey:          "alton-browns-pancakes",
+				SourceOutputIDs: "out-1",
+				Cells: map[string]string{
+					"recipe_name": "Alton Brown's Pancakes",
+					"creator":     "",
+				},
+			},
+			{
+				TaskID:          "task-2",
+				RowID:           "row-2",
+				RowKey:          "alton-browns-pancakes",
+				SourceOutputIDs: "out-2",
+				Cells: map[string]string{
+					"recipe_name": "Alton Brown's Pancakes",
+					"creator":     "Alton Brown",
+					"servings":    "~8 pancakes per batch",
+				},
+			},
+		},
+		outputs,
+		taskMeta,
+	)
+
+	if got, want := len(rows), 1; got != want {
+		t.Fatalf("collapsed row count = %d, want %d", got, want)
+	}
+	if got, want := rows[0].TaskID, "task-2"; got != want {
+		t.Fatalf("merged task id = %q, want %q", got, want)
+	}
+	if got, want := rows[0].Cells["creator"], "Alton Brown"; got != want {
+		t.Fatalf("creator = %q, want %q", got, want)
+	}
+	if got, want := rows[0].Cells["servings"], "~8 pancakes per batch"; got != want {
+		t.Fatalf("servings = %q, want %q", got, want)
+	}
+	if got, want := uniqueTrimmedStrings(strings.Split(rows[0].SourceOutputIDs, ",")), []string{"out-1", "out-2"}; !slicesMatch(got, want) {
+		t.Fatalf("source output ids = %v, want %v", got, want)
+	}
+}
+
+func TestCollapseResolvedRowsKeepsSameEntitySeparateAcrossDifferentSources(t *testing.T) {
+	outputs := []*types.TaskOutput{
+		{
+			ID:     "out-1",
+			TaskID: "task-1",
+			Data: map[string]any{
+				"source_url": "https://youtube.com/watch?v=abc",
+			},
+		},
+		{
+			ID:     "out-2",
+			TaskID: "task-2",
+			Data: map[string]any{
+				"source_url": "https://youtube.com/watch?v=xyz",
+			},
+		},
+	}
+	rows := collapseResolvedRows(
+		[]bamltypes.ColumnSchema{{Key: "recipe_name", Type: "text"}},
+		[]resolvedSheetRow{
+			{
+				TaskID:          "task-1",
+				RowID:           "row-1",
+				RowKey:          "alton-browns-pancakes",
+				SourceOutputIDs: "out-1",
+				Cells: map[string]string{
+					"recipe_name": "Alton Brown's Pancakes",
+				},
+			},
+			{
+				TaskID:          "task-2",
+				RowID:           "row-2",
+				RowKey:          "alton-browns-pancakes",
+				SourceOutputIDs: "out-2",
+				Cells: map[string]string{
+					"recipe_name": "Alton Brown's Pancakes",
+				},
+			},
+		},
+		outputs,
+		nil,
+	)
+
+	if got, want := len(rows), 2; got != want {
+		t.Fatalf("collapsed row count = %d, want %d", got, want)
 	}
 }
 

@@ -130,6 +130,108 @@ func (c DataCitation) BamlTypeName() string {
 	return "DataCitation"
 }
 
+type DetailLayout struct {
+	Sections []DetailSection `json:"sections"`
+}
+
+func (c *DetailLayout) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_STREAM_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_STREAM_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "DetailLayout" {
+		panic(fmt.Sprintf("expected DetailLayout, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "sections":
+			c.Sections = baml.Decode(valueHolder).Interface().([]DetailSection)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class DetailLayout", key))
+
+		}
+	}
+
+}
+
+func (c DetailLayout) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["sections"] = c.Sections
+
+	return baml.EncodeClass("DetailLayout", fields, nil)
+}
+
+func (c DetailLayout) BamlTypeName() string {
+	return "DetailLayout"
+}
+
+type DetailSection struct {
+	Type        *types.SectionType     `json:"type"`
+	Title       *string                `json:"title"`
+	Description *string                `json:"description"`
+	Emphasis    *types.SectionEmphasis `json:"emphasis"`
+}
+
+func (c *DetailSection) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_STREAM_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_STREAM_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "DetailSection" {
+		panic(fmt.Sprintf("expected DetailSection, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "type":
+			c.Type = baml.Decode(valueHolder).Interface().(*types.SectionType)
+
+		case "title":
+			c.Title = baml.Decode(valueHolder).Interface().(*string)
+
+		case "description":
+			c.Description = baml.Decode(valueHolder).Interface().(*string)
+
+		case "emphasis":
+			c.Emphasis = baml.Decode(valueHolder).Interface().(*types.SectionEmphasis)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class DetailSection", key))
+
+		}
+	}
+
+}
+
+func (c DetailSection) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["type"] = c.Type
+
+	fields["title"] = c.Title
+
+	fields["description"] = c.Description
+
+	fields["emphasis"] = c.Emphasis
+
+	return baml.EncodeClass("DetailSection", fields, nil)
+}
+
+func (c DetailSection) BamlTypeName() string {
+	return "DetailSection"
+}
+
 type ListItemResult struct {
 	Label  *string `json:"label"`
 	Value  *string `json:"value"`

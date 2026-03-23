@@ -49,6 +49,13 @@ type StorageService struct {
 	eventBus   *common.EventBus
 	hookStream common.EventEmitter
 	recorder   instrumentation.EventRecorder
+
+	bucketReady sync.Map
+	bucketGroup singleflight.Group
+
+	bucketExistsFn  func(context.Context, string) (bool, error)
+	createBucketFn  func(context.Context, string) error
+	setBucketCORSFn func(context.Context, string) error
 }
 
 // SetEventRecorder sets the product analytics event recorder.
@@ -165,12 +172,81 @@ func (s *StorageService) bucket(ctx context.Context) (string, error) {
 	wsExt := auth.WorkspaceExtId(ctx)
 	if wsExt == "" {
 		if rc.IsClusterAdmin() {
-			return s.client.WorkspaceBucketName("_gateway"), nil
+			bucket := s.client.WorkspaceBucketName("_gateway")
+			if err := s.ensureBucketReady(ctx, bucket); err != nil {
+				return "", err
+			}
+			return bucket, nil
 		}
 		return "", fmt.Errorf("no workspace")
 	}
 
-	return s.client.WorkspaceBucketName(wsExt), nil
+	bucket := s.client.WorkspaceBucketName(wsExt)
+	if err := s.ensureBucketReady(ctx, bucket); err != nil {
+		return "", err
+	}
+	return bucket, nil
+}
+
+func (s *StorageService) ensureBucketReady(ctx context.Context, bucket string) error {
+	if strings.TrimSpace(bucket) == "" {
+		return nil
+	}
+	if s.bucketExistsFn == nil && s.createBucketFn == nil && s.setBucketCORSFn == nil &&
+		(s.client == nil || s.client.S3Client() == nil) {
+		return nil
+	}
+	if _, ok := s.bucketReady.Load(bucket); ok {
+		return nil
+	}
+
+	_, err, _ := s.bucketGroup.Do(bucket, func() (any, error) {
+		if _, ok := s.bucketReady.Load(bucket); ok {
+			return nil, nil
+		}
+
+		readyCtx, cancel := s.timeout(ctx)
+		defer cancel()
+
+		exists, err := s.bucketExists(readyCtx, bucket)
+		if err != nil {
+			return nil, fmt.Errorf("check bucket %q: %w", bucket, err)
+		}
+		if !exists {
+			if err := s.createBucket(readyCtx, bucket); err != nil {
+				return nil, fmt.Errorf("create bucket %q: %w", bucket, err)
+			}
+			if err := s.setBucketCORS(readyCtx, bucket); err != nil {
+				log.Warn().Err(err).Str("bucket", bucket).Msg("failed to set bucket CORS after on-demand creation")
+			}
+			log.Info().Str("bucket", bucket).Msg("created workspace storage bucket on demand")
+		}
+
+		s.bucketReady.Store(bucket, struct{}{})
+		return nil, nil
+	})
+	return err
+}
+
+func (s *StorageService) bucketExists(ctx context.Context, bucket string) (bool, error) {
+	if s.bucketExistsFn != nil {
+		return s.bucketExistsFn(ctx, bucket)
+	}
+	return s.client.BucketExists(ctx, bucket)
+}
+
+func (s *StorageService) createBucket(ctx context.Context, bucket string) error {
+	if s.createBucketFn != nil {
+		return s.createBucketFn(ctx, bucket)
+	}
+	return s.client.CreateBucket(ctx, bucket)
+}
+
+func (s *StorageService) setBucketCORS(ctx context.Context, bucket string) error {
+	if s.setBucketCORSFn != nil {
+		return s.setBucketCORSFn(ctx, bucket)
+	}
+	return s.client.SetBucketCORS(ctx, bucket)
 }
 
 func (s *StorageService) key(path string) string {

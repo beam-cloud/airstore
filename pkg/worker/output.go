@@ -5,22 +5,20 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 
 	"github.com/beam-cloud/airstore/pkg/common"
-	gatewayclient "github.com/beam-cloud/airstore/pkg/gateway/client"
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
 
-// TaskOutput handles task stdout/stderr with multiple destinations.
+// TaskStreamOutput handles task stdout/stderr with multiple destinations.
 // Zero allocation for the common case of just writing.
-type TaskOutput struct {
+type TaskStreamOutput struct {
 	taskID  string
 	stream  string // "stdout" or "stderr"
 	writers []io.Writer
@@ -28,9 +26,9 @@ type TaskOutput struct {
 	mu      sync.Mutex
 }
 
-// NewTaskOutput creates an output handler for a task stream.
-func NewTaskOutput(taskID, stream string, writers ...io.Writer) *TaskOutput {
-	return &TaskOutput{
+// NewTaskStreamOutput creates an output handler for a task stream.
+func NewTaskStreamOutput(taskID, stream string, writers ...io.Writer) *TaskStreamOutput {
+	return &TaskStreamOutput{
 		taskID:  taskID,
 		stream:  stream,
 		writers: writers,
@@ -38,7 +36,7 @@ func NewTaskOutput(taskID, stream string, writers ...io.Writer) *TaskOutput {
 }
 
 // Write implements io.Writer. Buffers partial lines, flushes complete ones.
-func (o *TaskOutput) Write(p []byte) (int, error) {
+func (o *TaskStreamOutput) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
@@ -67,7 +65,7 @@ func (o *TaskOutput) Write(p []byte) (int, error) {
 }
 
 // Flush writes any remaining buffered content.
-func (o *TaskOutput) Flush() {
+func (o *TaskStreamOutput) Flush() {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
@@ -77,7 +75,7 @@ func (o *TaskOutput) Flush() {
 	}
 }
 
-func (o *TaskOutput) emit(line string) {
+func (o *TaskStreamOutput) emit(line string) {
 	for _, w := range o.writers {
 		w.Write([]byte(line))
 	}
@@ -137,28 +135,6 @@ func (w *S2Writer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// FileWriter writes to a file (useful for debugging).
-type FileWriter struct {
-	file *os.File
-}
-
-// NewFileWriter creates a writer that appends to a file.
-func NewFileWriter(path string) (*FileWriter, error) {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return nil, err
-	}
-	return &FileWriter{file: f}, nil
-}
-
-func (w *FileWriter) Write(p []byte) (int, error) {
-	return w.file.Write(append(p, '\n'))
-}
-
-func (w *FileWriter) Close() error {
-	return w.file.Close()
-}
-
 // OutputWriter intercepts structured output messages from agent stdout
 // (type=output, output_append, output_done) and sends them to the gateway via gRPC.
 type OutputWriter struct {
@@ -177,111 +153,9 @@ type OutputWriter struct {
 	sendMu      sync.Mutex
 }
 
-type taskOutputClient interface {
-	CreateTaskOutput(ctx context.Context, req *pb.CreateTaskOutputRequest) (string, error)
-	AppendTaskOutputRows(ctx context.Context, req *pb.AppendTaskOutputRowsRequest) error
-	FinalizeTaskOutput(ctx context.Context, req *pb.FinalizeTaskOutputRequest) error
-	UpdateTaskOutputStatus(ctx context.Context, req *pb.UpdateTaskOutputStatusRequest) error
-}
-
 type outputEvent struct {
 	kind    string
 	payload map[string]any
-}
-
-type taskOutputTracker struct {
-	created atomic.Bool
-	mu      sync.Mutex
-	seen    map[string]struct{}
-	primary map[string]struct{}
-	outputByIdentity map[string]string // identity key -> server output ID
-}
-
-func (t *taskOutputTracker) MarkCreated() {
-	if t != nil {
-		t.created.Store(true)
-	}
-}
-
-func (t *taskOutputTracker) HasCreated() bool {
-	return t != nil && t.created.Load()
-}
-
-func (t *taskOutputTracker) HasEquivalent(candidate outputCandidate) bool {
-	if t == nil {
-		return false
-	}
-	identity := candidate.identityKey()
-	key := candidate.artifactKey()
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if identity != "" {
-		if _, ok := t.seen[identity]; ok {
-			if _, hasServerID := t.outputByIdentity[identity]; hasServerID {
-				return false
-			}
-			return true
-		}
-	}
-	if key != "" && candidate.isPrimaryDeliverable() {
-		_, ok := t.primary[key]
-		return ok
-	}
-	return false
-}
-
-func (t *taskOutputTracker) Remember(candidate outputCandidate) {
-	t.RememberWithID(candidate, "")
-}
-
-func (t *taskOutputTracker) RememberWithID(candidate outputCandidate, serverID string) {
-	if t == nil {
-		return
-	}
-	t.created.Store(true)
-	identity := candidate.identityKey()
-	key := candidate.artifactKey()
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.seen == nil {
-		t.seen = make(map[string]struct{})
-	}
-	if t.primary == nil {
-		t.primary = make(map[string]struct{})
-	}
-	if t.outputByIdentity == nil {
-		t.outputByIdentity = make(map[string]string)
-	}
-	if identity != "" {
-		t.seen[identity] = struct{}{}
-		if serverID != "" {
-			t.outputByIdentity[identity] = serverID
-		}
-	}
-	if key != "" && candidate.isPrimaryDeliverable() {
-		t.primary[key] = struct{}{}
-	}
-}
-
-// PredecessorID returns the server output ID of a previously tracked output
-// matching the same identity key as candidate, if any.
-func (t *taskOutputTracker) PredecessorID(candidate outputCandidate) string {
-	if t == nil {
-		return ""
-	}
-	identity := candidate.identityKey()
-	if identity == "" {
-		return ""
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.outputByIdentity[identity]
-}
-
-func NewOutputWriter(ctx context.Context, client *gatewayclient.GatewayClient, task types.RunExecution) *OutputWriter {
-	return newOutputWriter(ctx, client, task, nil)
 }
 
 func newOutputWriter(
@@ -461,108 +335,4 @@ func (w *OutputWriter) finalizeOutput(payload map[string]any) {
 	}); err != nil {
 		log.Warn().Err(err).Str("output", serverID).Msg("output finalize failed")
 	}
-}
-
-// --- Factory ---
-
-// OutputConfig configures task output destinations.
-type OutputConfig struct {
-	TaskID   string
-	S2Client *common.S2Client
-	Console  bool // Write to worker stdout
-}
-
-// NewOutputPair creates stdout and stderr writers for a task.
-func NewOutputPair(ctx context.Context, cfg OutputConfig) (stdout, stderr *TaskOutput) {
-	var stdoutWriters, stderrWriters []io.Writer
-
-	// S2 streams
-	if cfg.S2Client != nil && cfg.S2Client.Enabled() {
-		stdoutWriters = append(stdoutWriters, NewS2Writer(ctx, cfg.S2Client, cfg.TaskID, "stdout"))
-		stderrWriters = append(stderrWriters, NewS2Writer(ctx, cfg.S2Client, cfg.TaskID, "stderr"))
-	}
-
-	// Console output
-	if cfg.Console {
-		stdoutWriters = append(stdoutWriters, NewConsoleWriter(cfg.TaskID, "stdout"))
-		stderrWriters = append(stderrWriters, NewConsoleWriter(cfg.TaskID, "stderr"))
-	}
-
-	return NewTaskOutput(cfg.TaskID, "stdout", stdoutWriters...),
-		NewTaskOutput(cfg.TaskID, "stderr", stderrWriters...)
-}
-
-// extractAssistantText scans raw stream-json output (from claude --print
-// --output-format stream-json), pulls out assistant text blocks, and returns
-// the last `limit` characters of concatenated text.  This is used to build
-// context for approval summary extraction without sending tool call / tool
-// result noise to the summariser.
-func extractAssistantText(raw []byte, limit int) string {
-	var texts []string
-	totalLen := 0
-
-	for _, line := range bytes.Split(raw, []byte("\n")) {
-		line = bytes.TrimSpace(line)
-		if len(line) == 0 || line[0] != '{' {
-			continue
-		}
-
-		var envelope struct {
-			Type    string `json:"type"`
-			Message *struct {
-				Content []struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
-				} `json:"content"`
-			} `json:"message"`
-			// "result" type messages carry a top-level result string.
-			Result  string `json:"result"`
-			IsError bool   `json:"is_error"`
-		}
-		if err := json.Unmarshal(line, &envelope); err != nil {
-			continue
-		}
-
-		switch envelope.Type {
-		case "assistant":
-			if envelope.Message == nil {
-				continue
-			}
-			for _, block := range envelope.Message.Content {
-				if block.Type == "text" && block.Text != "" {
-					texts = append(texts, block.Text)
-					totalLen += len(block.Text)
-				}
-			}
-		case "result":
-			if !envelope.IsError && envelope.Result != "" {
-				texts = append(texts, envelope.Result)
-				totalLen += len(envelope.Result)
-			}
-		}
-	}
-
-	if totalLen == 0 {
-		return ""
-	}
-
-	// Concatenate all texts with double-newline separators, then take the
-	// last `limit` characters so the most recent content is preserved.
-	var buf bytes.Buffer
-	for i, t := range texts {
-		if i > 0 {
-			buf.WriteString("\n\n")
-		}
-		buf.WriteString(t)
-	}
-	s := buf.String()
-	if limit > 0 && len(s) > limit {
-		s = s[len(s)-limit:]
-		// The byte slice may start mid-rune; advance past any
-		// continuation bytes (10xxxxxx) to the next valid rune boundary.
-		for len(s) > 0 && s[0]&0xC0 == 0x80 {
-			s = s[1:]
-		}
-	}
-	return s
 }

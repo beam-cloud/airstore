@@ -2,6 +2,8 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,7 +15,6 @@ import (
 
 	runtimepkg "github.com/beam-cloud/airstore/pkg/runtime"
 	"github.com/beam-cloud/airstore/pkg/types"
-	signaltypes "github.com/beam-cloud/airstore/pkg/worker/agentsignal/baml_client/types"
 	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
@@ -58,6 +59,33 @@ func (r *subagentProbeTestRuntime) Restore(_ context.Context, _ string, _ *runti
 	return 0, nil
 }
 func (r *subagentProbeTestRuntime) Close() error { return nil }
+
+type stubSessionLeaseStore struct {
+	acquireFunc func(context.Context, uint, string, string, time.Duration) (bool, error)
+	renewFunc   func(context.Context, uint, string, string, time.Duration) (bool, error)
+	ownerFunc   func(context.Context, uint, string) (string, error)
+}
+
+func (s stubSessionLeaseStore) AcquireSessionLease(ctx context.Context, workspaceID uint, sessionID, ownerID string, ttl time.Duration) (bool, error) {
+	if s.acquireFunc != nil {
+		return s.acquireFunc(ctx, workspaceID, sessionID, ownerID, ttl)
+	}
+	return false, nil
+}
+
+func (s stubSessionLeaseStore) RenewSessionLease(ctx context.Context, workspaceID uint, sessionID, ownerID string, ttl time.Duration) (bool, error) {
+	if s.renewFunc != nil {
+		return s.renewFunc(ctx, workspaceID, sessionID, ownerID, ttl)
+	}
+	return false, nil
+}
+
+func (s stubSessionLeaseStore) GetSessionLeaseOwner(ctx context.Context, workspaceID uint, sessionID string) (string, error) {
+	if s.ownerFunc != nil {
+		return s.ownerFunc(ctx, workspaceID, sessionID)
+	}
+	return "", nil
+}
 
 func newTestWorkerForSubagents(rt runtimepkg.Runtime) *Worker {
 	return &Worker{
@@ -257,6 +285,187 @@ func TestSubagentWaitOutcomeStringer(t *testing.T) {
 	}
 }
 
+func TestClassifyNeedsInputKindWithFallback_OverridesFreeTextWhenClassifierDetectsApproval(t *testing.T) {
+	classify := func(_ context.Context, _ string, _ map[string]string) types.InputKind {
+		return types.InputKindApproveReject
+	}
+
+	got := classifyNeedsInputKindWithFallback(
+		context.Background(),
+		types.InputKindFreeText,
+		"Please reply APPROVE to send.",
+		nil,
+		classify,
+	)
+	if got != types.InputKindApproveReject {
+		t.Fatalf("kind = %q, want %q", got, types.InputKindApproveReject)
+	}
+}
+
+func TestClassifyNeedsInputKindWithFallback_PreservesCurrentKindWithoutAssistantMessage(t *testing.T) {
+	classify := func(_ context.Context, _ string, _ map[string]string) types.InputKind {
+		t.Fatal("classifier should not be called for blank assistant messages")
+		return ""
+	}
+
+	got := classifyNeedsInputKindWithFallback(
+		context.Background(),
+		types.InputKindFreeText,
+		"",
+		nil,
+		classify,
+	)
+	if got != types.InputKindFreeText {
+		t.Fatalf("kind = %q, want %q", got, types.InputKindFreeText)
+	}
+}
+
+func TestSanitizeParsedTurnArtifacts_StripsBlockingWithoutExplicitBlocker(t *testing.T) {
+	artifacts := sanitizeParsedTurnArtifacts([]TurnArtifact{
+		{
+			Title: "Draft response",
+			Blocking: &types.TaskOutputBlockingMetadata{
+				Kind:            types.TaskOutputBlockingKindApproval,
+				InputKind:       types.InputKindApproveReject,
+				ApprovalSurface: true,
+			},
+		},
+	}, nil)
+	if artifacts[0].Blocking != nil {
+		t.Fatal("expected blocking metadata to be stripped without explicit blocker control")
+	}
+}
+
+func TestSanitizeParsedTurnArtifacts_PreservesBlockingWithExplicitBlocker(t *testing.T) {
+	artifacts := sanitizeParsedTurnArtifacts([]TurnArtifact{
+		{
+			Title: "Draft response",
+			Blocking: &types.TaskOutputBlockingMetadata{
+				Kind:            types.TaskOutputBlockingKindApproval,
+				InputKind:       types.InputKindApproveReject,
+				ApprovalSurface: true,
+			},
+		},
+	}, &TurnControl{
+		Blocker: &TurnBlockerDirective{InputKind: types.InputKindApproveReject},
+	})
+	if artifacts[0].Blocking == nil {
+		t.Fatal("expected blocking metadata to be preserved with explicit blocker control")
+	}
+}
+
+func TestPersistParsedTurnArtifactsPublishesBlockingArtifacts(t *testing.T) {
+	client := &captureOutputClient{}
+	task := testRunExecution()
+	tracker := &taskOutputTracker{}
+
+	outputIDs, created := persistParsedTurnArtifacts(
+		context.Background(),
+		client,
+		task,
+		tracker,
+		"Draft a reply for review.",
+		"Awaiting your approval before sending.",
+		[]TurnArtifact{
+			{
+				OutputType: types.TaskOutputTypeEmail,
+				Title:      "Draft reply",
+				Summary:    "Drafted a reply for approval.",
+				Content:    "Hi Luke,\n\nDraft body.\n",
+				Data: map[string]any{
+					"to":      "luke@slai.io",
+					"subject": "Draft subject",
+				},
+				Metadata: map[string]any{
+					types.TaskOutputMetadataArtifactKey: "email-draft",
+				},
+				Blocking: &types.TaskOutputBlockingMetadata{
+					Kind:            types.TaskOutputBlockingKindApproval,
+					InputKind:       types.InputKindApproveReject,
+					ApprovalSurface: true,
+				},
+			},
+			{
+				OutputType: "text",
+				Title:      "Work log",
+				Content:    "Internal note",
+			},
+		},
+	)
+	if !created {
+		t.Fatal("expected blocking artifact to be published")
+	}
+	if got := len(outputIDs); got != 1 {
+		t.Fatalf("blocking output id count = %d, want 1", got)
+	}
+	if got := len(client.createReqs); got != 2 {
+		t.Fatalf("create req count = %d, want 2", got)
+	}
+
+	req := client.createReqs[0]
+	if got := req.Status; got != types.TaskOutputStatusPending {
+		t.Fatalf("status = %q, want pending", got)
+	}
+
+	var metadata map[string]any
+	if err := json.Unmarshal([]byte(req.MetadataJson), &metadata); err != nil {
+		t.Fatalf("unmarshal metadata json: %v", err)
+	}
+	if got := metadata[types.TaskOutputMetadataBlockingKind]; got != types.TaskOutputBlockingKindApproval {
+		t.Fatalf("blocking_kind = %#v, want %q", got, types.TaskOutputBlockingKindApproval)
+	}
+	if got := metadata[types.TaskOutputMetadataInputKind]; got != string(types.InputKindApproveReject) {
+		t.Fatalf("input_kind = %#v, want %q", got, types.InputKindApproveReject)
+	}
+	if got := metadata[types.TaskOutputMetadataApprovalUI]; got != true {
+		t.Fatalf("approval_surface = %#v, want true", got)
+	}
+	if got := metadata[keySourcePrompt]; got != "Draft a reply for review." {
+		t.Fatalf("source prompt = %#v", got)
+	}
+
+	reusedIDs, reused := persistParsedTurnArtifacts(
+		context.Background(),
+		client,
+		task,
+		tracker,
+		"Draft a reply for review.",
+		"Awaiting your approval before sending.",
+		[]TurnArtifact{
+			{
+				OutputType: types.TaskOutputTypeEmail,
+				Title:      "Draft reply",
+				Summary:    "Drafted a reply for approval.",
+				Content:    "Hi Luke,\n\nDraft body.\n",
+				Data: map[string]any{
+					"to":      "luke@slai.io",
+					"subject": "Draft subject",
+				},
+				Metadata: map[string]any{
+					types.TaskOutputMetadataArtifactKey: "email-draft",
+				},
+				Blocking: &types.TaskOutputBlockingMetadata{
+					Kind:            types.TaskOutputBlockingKindApproval,
+					InputKind:       types.InputKindApproveReject,
+					ApprovalSurface: true,
+				},
+			},
+		},
+	)
+	if !reused {
+		t.Fatal("expected equivalent blocking artifact to be treated as handled")
+	}
+	if got := len(reusedIDs); got != 1 {
+		t.Fatalf("reused blocking output id count = %d, want 1", got)
+	}
+	if reusedIDs[0] != outputIDs[0] {
+		t.Fatalf("expected stable blocking output id, got %q then %q", outputIDs[0], reusedIDs[0])
+	}
+	if got := len(client.createReqs); got != 2 {
+		t.Fatalf("create req count after reuse = %d, want 2", got)
+	}
+}
+
 func TestBuildWakePlannerContextReadsActiveSkillAndHandoffFiles(t *testing.T) {
 	mountSource := t.TempDir()
 	skillDir := filepath.Join(mountSource, "skills", "prospect-followup")
@@ -297,67 +506,185 @@ func TestBuildWakePlannerContextReadsActiveSkillAndHandoffFiles(t *testing.T) {
 	}
 }
 
-func TestApprovalBatchIDScopesToApprovalStep(t *testing.T) {
-	ids := taskOutputIDs{
-		workspaceID: 7,
-		taskID:      "task-1",
-		runID:       "run-1",
+func TestFanOutPlannerPromptPrefersWakeFollowUpPrompt(t *testing.T) {
+	wakeSignal := &types.RunExecutionWakeSignal{
+		DelayMinutes:   90,
+		Reason:         "Check for any replies",
+		FollowUpPrompt: "Check only Luke's email thread for replies and draft a response if needed.",
 	}
-	summary := signaltypes.ApprovalSummary{
-		Summary: "Approve the outreach batch.",
-		Details: "Send two follow-up emails.",
+
+	got := fanOutPlannerPrompt(wakeSignal, "Follow up with everyone from the campaign.")
+	want := "Check only Luke's email thread for replies and draft a response if needed."
+	if got != want {
+		t.Fatalf("fanOutPlannerPrompt = %q, want %q", got, want)
 	}
-	items := []signaltypes.ApprovalItem{
-		{
-			Item_key:    "camila",
-			Kind:        signaltypes.OutputKindEMAIL_DRAFT,
-			Title:       "Send Camila follow-up",
-			Description: "Email draft",
-			Details:     "To: camila@example.com",
-			Data_fields: []signaltypes.DataField{
-				{Key: "subject", Value: "Quick follow-up", Type: "text", Label: "Subject"},
-				{Key: "to", Value: "camila@example.com", Type: "email", Label: "To"},
-			},
+}
+
+func TestNormalizeSubtaskWakeDelayMinutesFallsBackToParentWake(t *testing.T) {
+	wakeSignal := &types.RunExecutionWakeSignal{DelayMinutes: 120}
+
+	if got := normalizeSubtaskWakeDelayMinutes(wakeSignal, 0); got != 120 {
+		t.Fatalf("normalizeSubtaskWakeDelayMinutes = %d, want 120", got)
+	}
+	if got := normalizeSubtaskWakeDelayMinutes(wakeSignal, 45); got != 45 {
+		t.Fatalf("normalizeSubtaskWakeDelayMinutes should preserve explicit delay, got %d", got)
+	}
+	if got := normalizeSubtaskWakeDelayMinutes(nil, 0); got != 5 {
+		t.Fatalf("normalizeSubtaskWakeDelayMinutes default = %d, want 5", got)
+	}
+}
+
+func TestFollowUpPlanningMessageFallsBackToTrackedOutputs(t *testing.T) {
+	tracker := &taskOutputTracker{}
+	tracker.RememberWithID(outputCandidate{
+		OutputType: types.TaskOutputTypeEmail,
+		Title:      "Quick question about Beam sandboxes",
+		Data: map[string]any{
+			"thread_id": "19d10b2877583e69",
+			"to":        "luke@beam.cloud",
+		},
+		Metadata: map[string]any{
+			types.TaskOutputMetadataArtifactKey:  "email-sent",
+			types.TaskOutputMetadataArtifactKind: "email",
+		},
+	}, "output-1")
+
+	got := followUpPlanningMessage("", tracker)
+	if !strings.Contains(got, "did not emit a final natural-language summary") {
+		t.Fatalf("expected fallback explanation, got:\n%s", got)
+	}
+	if !strings.Contains(got, "email-sent") {
+		t.Fatalf("expected artifact key in fallback message, got:\n%s", got)
+	}
+	if !strings.Contains(got, "email-thread:19d10b2877583e69") {
+		t.Fatalf("expected entity key in fallback message, got:\n%s", got)
+	}
+	if !strings.Contains(got, "Quick question about Beam sandboxes") {
+		t.Fatalf("expected title in fallback message, got:\n%s", got)
+	}
+}
+
+func TestExtractSessionAssistantMessagePrefersParsedCompletionSummary(t *testing.T) {
+	runner := NewAirRunner(AirRunnerOptions{})
+	raw := []byte(`{"event":"response","ts":2.0,"step":1,"message":"Here's the draft cold outreach email for your approval."}
+{"event":"run_end","ts":4.0,"status":"complete","needs_input":false}
+{"status":"complete","needs_input":false,"output":{"summary":"Sent the outreach email to luke@beam.cloud and should check for replies later."}}
+`)
+
+	got := extractSessionAssistantMessage(runner, raw)
+	want := "Sent the outreach email to luke@beam.cloud and should check for replies later."
+	if got != want {
+		t.Fatalf("extractSessionAssistantMessage = %q, want %q", got, want)
+	}
+}
+
+func TestNextFollowupPromptReturnsContextErrorWhenCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	prompt, err := nextFollowupPrompt(ctx, "")
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got prompt=%q err=%v", prompt, err)
+	}
+}
+
+func TestNextFollowupPromptAllowsWaitingWhenContextActive(t *testing.T) {
+	prompt, err := nextFollowupPrompt(context.Background(), "")
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if prompt != "" {
+		t.Fatalf("expected empty prompt, got %q", prompt)
+	}
+}
+
+func TestSubagentOutcomeErrReturnsContextErrorForCancelledOutcome(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := subagentOutcomeErr(ctx, subagentSessionCancelled)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got %v", err)
+	}
+}
+
+func TestRefreshSessionLeaseStateHeldOnSuccessfulRenew(t *testing.T) {
+	store := stubSessionLeaseStore{
+		renewFunc: func(context.Context, uint, string, string, time.Duration) (bool, error) {
+			return true, nil
 		},
 	}
-	reorderedFields := []signaltypes.ApprovalItem{
-		{
-			Item_key:    "camila",
-			Kind:        signaltypes.OutputKindEMAIL_DRAFT,
-			Title:       "Send Camila follow-up",
-			Description: "Email draft",
-			Details:     "To: camila@example.com",
-			Data_fields: []signaltypes.DataField{
-				{Key: "to", Value: "camila@example.com", Type: "email", Label: "To"},
-				{Key: "subject", Value: "Quick follow-up", Type: "text", Label: "Subject"},
-			},
+
+	status, err := refreshSessionLeaseState(store, 42, "session-1", "owner-1")
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if status != sessionLeaseRefreshHeld {
+		t.Fatalf("status = %v, want %v", status, sessionLeaseRefreshHeld)
+	}
+}
+
+func TestRefreshSessionLeaseStateReacquiresExpiredLease(t *testing.T) {
+	var acquireCalls atomic.Int32
+	store := stubSessionLeaseStore{
+		renewFunc: func(context.Context, uint, string, string, time.Duration) (bool, error) {
+			return false, nil
+		},
+		ownerFunc: func(context.Context, uint, string) (string, error) {
+			return "", nil
+		},
+		acquireFunc: func(context.Context, uint, string, string, time.Duration) (bool, error) {
+			acquireCalls.Add(1)
+			return true, nil
 		},
 	}
 
-	replayBatchID := approvalBatchID(ids, "Initial task prompt", summary, items)
-	sameStepBatchID := approvalBatchID(ids, "Initial task prompt", summary, reorderedFields)
-	if replayBatchID != sameStepBatchID {
-		t.Fatalf("expected replay batch id to stay stable, got %q and %q", replayBatchID, sameStepBatchID)
+	status, err := refreshSessionLeaseState(store, 42, "session-1", "owner-1")
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if status != sessionLeaseRefreshRecovered {
+		t.Fatalf("status = %v, want %v", status, sessionLeaseRefreshRecovered)
+	}
+	if got := acquireCalls.Load(); got != 1 {
+		t.Fatalf("expected one reacquire attempt, got %d", got)
+	}
+}
+
+func TestRefreshSessionLeaseStateDetectsOwnerChange(t *testing.T) {
+	store := stubSessionLeaseStore{
+		renewFunc: func(context.Context, uint, string, string, time.Duration) (bool, error) {
+			return false, nil
+		},
+		ownerFunc: func(context.Context, uint, string) (string, error) {
+			return "other-owner", nil
+		},
 	}
 
-	replayItemID := approvalItemOutputID(replayBatchID, items[0].Item_key)
-	if replayItemID != approvalItemOutputID(sameStepBatchID, items[0].Item_key) {
-		t.Fatal("expected replay item id to stay stable")
+	status, err := refreshSessionLeaseState(store, 42, "session-1", "owner-1")
+	if status != sessionLeaseRefreshLost {
+		t.Fatalf("status = %v, want %v", status, sessionLeaseRefreshLost)
+	}
+	if err == nil || !strings.Contains(err.Error(), "other-owner") {
+		t.Fatalf("expected owner change error, got %v", err)
+	}
+}
+
+func TestRefreshSessionLeaseStateRetriesTransientFailure(t *testing.T) {
+	store := stubSessionLeaseStore{
+		renewFunc: func(context.Context, uint, string, string, time.Duration) (bool, error) {
+			return false, fmt.Errorf("redis timeout")
+		},
+		ownerFunc: func(context.Context, uint, string) (string, error) {
+			return "", fmt.Errorf("redis timeout")
+		},
 	}
 
-	nextStepBatchID := approvalBatchID(ids, "Approved:\n1. Send Camila follow-up\n", summary, items)
-	if replayBatchID == nextStepBatchID {
-		t.Fatalf("expected later approval step to get a new batch id, got %q", nextStepBatchID)
+	status, err := refreshSessionLeaseState(store, 42, "session-1", "owner-1")
+	if status != sessionLeaseRefreshRetrying {
+		t.Fatalf("status = %v, want %v", status, sessionLeaseRefreshRetrying)
 	}
-	if replayItemID == approvalItemOutputID(nextStepBatchID, items[0].Item_key) {
-		t.Fatal("expected later approval step to get a new item output id")
-	}
-
-	changedSummaryBatchID := approvalBatchID(ids, "Initial task prompt", signaltypes.ApprovalSummary{
-		Summary: "Approve the revised outreach batch.",
-		Details: "Send three follow-up emails.",
-	}, items)
-	if replayBatchID == changedSummaryBatchID {
-		t.Fatalf("expected changed approval content to get a new batch id, got %q", changedSummaryBatchID)
+	if err == nil || !strings.Contains(err.Error(), "redis timeout") {
+		t.Fatalf("expected transient redis error, got %v", err)
 	}
 }

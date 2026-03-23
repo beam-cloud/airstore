@@ -16,7 +16,7 @@ import (
 
 const agentTaskSelect = `
 	SELECT id, workspace_id, agent_id, agent_name, queue_mode, state,
-	       idempotency_key, payload_json, routing_json, parent_envelope_id, target_run_id,
+	       idempotency_key, payload_json, routing_json, parent_envelope_id, target_run_id, current_blocker_id,
 	       accepted_at, queued_at, dispatched_at, deadline, dropped_reason, priority, budget_usd, cost_usd, archived_at,
 	       created_at, updated_at, wake_at, wake_reason, wake_count, input_kind, waiting_summary
 	FROM (
@@ -33,6 +33,7 @@ const agentTaskSelect = `
 			t.routing_json,
 			t.parent_envelope_id,
 			t.target_run_id,
+			t.current_blocker_id,
 			t.accepted_at,
 			t.queued_at,
 			t.dispatched_at,
@@ -55,7 +56,7 @@ const agentTaskSelect = `
 `
 
 const agentRunSelect = `
-	SELECT id, workspace_id, agent_id, origin_task_id, hook_id, status, session_id, session_key, provider, model,
+	SELECT id, workspace_id, agent_id, created_by_member_id, origin_task_id, hook_id, status, session_id, session_key, provider, model,
 	       exec_host, exec_security, exec_ask, runtime_type, workspace_access, network_enabled, interactive,
 	       timeout_ms, started_at, ended_at, claimed_by_worker_id, claim_heartbeat_at, claim_expires_at,
 	       error, snapshot_ts, cost_usd, usage_json, delivery_json, created_at, updated_at
@@ -569,8 +570,9 @@ func (b *PostgresBackend) CreateTaskWithOutbox(
 		INSERT INTO agent_task (
 			workspace_id, agent_id, kind, queue_mode, state,
 			idempotency_key, payload_json, routing_json, parent_envelope_id,
-			target_run_id, deadline, priority, budget_usd, cost_usd
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+			target_run_id, deadline, priority, budget_usd, cost_usd,
+			wake_at, wake_reason, wake_count
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 		RETURNING id, accepted_at, created_at, updated_at
 	`
 	if err := tx.QueryRowContext(
@@ -590,6 +592,9 @@ func (b *PostgresBackend) CreateTaskWithOutbox(
 		task.Priority,
 		task.BudgetUSD,
 		task.CostUSD,
+		task.WakeAt,
+		task.WakeReason,
+		task.WakeCount,
 	).Scan(&task.ID, &task.AcceptedAt, &task.CreatedAt, &task.UpdatedAt); err != nil {
 		return fmt.Errorf("create agent task: %w", err)
 	}
@@ -653,6 +658,7 @@ func (b *PostgresBackend) scanAgentTask(row scanner) (*types.AgentTask, error) {
 	var agentName sql.NullString
 	var parentID sql.NullString
 	var targetRunID sql.NullString
+	var currentBlockerID sql.NullString
 	var queuedAt sql.NullTime
 	var dispatchedAt sql.NullTime
 	var deadline sql.NullTime
@@ -676,6 +682,7 @@ func (b *PostgresBackend) scanAgentTask(row scanner) (*types.AgentTask, error) {
 		&routingJSON,
 		&parentID,
 		&targetRunID,
+		&currentBlockerID,
 		&task.AcceptedAt,
 		&queuedAt,
 		&dispatchedAt,
@@ -710,6 +717,9 @@ func (b *PostgresBackend) scanAgentTask(row scanner) (*types.AgentTask, error) {
 	}
 	if targetRunID.Valid {
 		task.TargetRunID = &targetRunID.String
+	}
+	if currentBlockerID.Valid {
+		task.CurrentBlockerID = &currentBlockerID.String
 	}
 	if queuedAt.Valid {
 		task.QueuedAt = &queuedAt.Time
@@ -838,6 +848,9 @@ func (b *PostgresBackend) GetTask(ctx context.Context, workspaceId uint, taskID 
 	if err := b.attachWakeAgenda(ctx, []*types.AgentTask{task}); err != nil {
 		return nil, err
 	}
+	if err := b.attachCurrentBlockers(ctx, []*types.AgentTask{task}); err != nil {
+		return nil, err
+	}
 	return task, nil
 }
 
@@ -873,6 +886,9 @@ func (b *PostgresBackend) ListTasks(ctx context.Context, workspaceId uint, limit
 		return nil, fmt.Errorf("iterate agent task rows: %w", err)
 	}
 	if err := b.attachWakeAgenda(ctx, tasks); err != nil {
+		return nil, err
+	}
+	if err := b.attachCurrentBlockers(ctx, tasks); err != nil {
 		return nil, err
 	}
 
@@ -940,6 +956,9 @@ func (b *PostgresBackend) ListTasksFiltered(ctx context.Context, workspaceId uin
 	if err := b.attachWakeAgenda(ctx, tasks); err != nil {
 		return nil, err
 	}
+	if err := b.attachCurrentBlockers(ctx, tasks); err != nil {
+		return nil, err
+	}
 
 	return tasks, nil
 }
@@ -956,6 +975,9 @@ func (b *PostgresBackend) GetTaskByID(ctx context.Context, taskID string) (*type
 		return nil, fmt.Errorf("get task by id: %w", err)
 	}
 	if err := b.attachWakeAgenda(ctx, []*types.AgentTask{task}); err != nil {
+		return nil, err
+	}
+	if err := b.attachCurrentBlockers(ctx, []*types.AgentTask{task}); err != nil {
 		return nil, err
 	}
 	return task, nil
@@ -993,6 +1015,9 @@ func (b *PostgresBackend) GetTaskByIdempotency(ctx context.Context, workspaceId 
 	if err := b.attachWakeAgenda(ctx, []*types.AgentTask{task}); err != nil {
 		return nil, err
 	}
+	if err := b.attachCurrentBlockers(ctx, []*types.AgentTask{task}); err != nil {
+		return nil, err
+	}
 	return task, nil
 }
 
@@ -1019,8 +1044,10 @@ func (b *PostgresBackend) ClaimQueuedTaskForDispatch(
 		UPDATE agent_task
 		SET state = 'running'::agent_task_state,
 		    dispatched_at = CURRENT_TIMESTAMP,
+		    target_run_id = NULL,
 		    wake_at = NULL,
 		    wake_reason = NULL,
+		    current_blocker_id = NULL,
 		    input_kind = NULL,
 		    waiting_summary = NULL,
 		    updated_at = CURRENT_TIMESTAMP
@@ -1059,7 +1086,7 @@ func (b *PostgresBackend) ClaimQueuedTaskForDispatch(
 	return task, true, nil
 }
 
-func (b *PostgresBackend) UpdateTaskState(ctx context.Context, taskID string, state types.AgentTaskState, droppedReason *string, targetRunID *string) error {
+func (b *PostgresBackend) UpdateTaskState(ctx context.Context, update types.TaskStateUpdate) error {
 	now := time.Now()
 	query := `
 		UPDATE agent_task
@@ -1072,6 +1099,7 @@ func (b *PostgresBackend) UpdateTaskState(ctx context.Context, taskID string, st
 		    END,
 		    dropped_reason = CASE WHEN $2::agent_task_state = 'dropped'::agent_task_state THEN $4 ELSE dropped_reason END,
 		    target_run_id = COALESCE($5::uuid, target_run_id),
+		    current_blocker_id = NULL,
 		    input_kind = NULL,
 		    waiting_summary = NULL,
 		    wake_at = CASE WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN wake_at ELSE NULL END,
@@ -1080,35 +1108,24 @@ func (b *PostgresBackend) UpdateTaskState(ctx context.Context, taskID string, st
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = $1
 	`
-	res, err := b.db.ExecContext(ctx, query, taskID, state, now, droppedReason, targetRunID)
+	res, err := b.db.ExecContext(ctx, query, update.TaskID, update.State, now, update.DroppedReason, update.TargetRunID)
 	if err != nil {
 		return fmt.Errorf("update task state: %w", err)
 	}
 	affected, _ := res.RowsAffected()
 	if affected == 0 {
-		return &types.ErrAgentTaskNotFound{ID: taskID}
+		return &types.ErrAgentTaskNotFound{ID: update.TaskID}
 	}
 	return nil
 }
 
-func (b *PostgresBackend) UpdateTaskStateIfCurrentRun(
-	ctx context.Context,
-	taskID string,
-	expectedRunID string,
-	state types.AgentTaskState,
-	droppedReason *string,
-	targetRunID *string,
-	inputKind types.InputKind,
-	waitingSummary *string,
-) (bool, error) {
-	now := time.Now()
-	var inputKindVal *string
-	if state == types.AgentTaskStateWaiting && inputKind != "" {
-		s := string(inputKind)
-		inputKindVal = &s
+func (b *PostgresBackend) UpdateTaskStateIfCurrentRun(ctx context.Context, update types.CurrentRunTaskStateUpdate) (bool, error) {
+	if update.State == types.AgentTaskStateWaiting {
+		return false, fmt.Errorf("update task state if current run does not support waiting without blocker")
 	}
-	baseArgs := []any{taskID, state, now, droppedReason, targetRunID, inputKindVal, waitingSummary}
-	expectedRunID = strings.TrimSpace(expectedRunID)
+	now := time.Now()
+	baseArgs := []any{update.TaskID, update.State, now, update.DroppedReason, update.TargetRunID}
+	expectedRunID := strings.TrimSpace(update.ExpectedRunID)
 
 	query := `
 		UPDATE agent_task
@@ -1121,8 +1138,9 @@ func (b *PostgresBackend) UpdateTaskStateIfCurrentRun(
 		    END,
 		    dropped_reason = CASE WHEN $2::agent_task_state = 'dropped'::agent_task_state THEN $4 ELSE dropped_reason END,
 		    target_run_id = COALESCE($5::uuid, target_run_id),
-		    input_kind = CASE WHEN $2::agent_task_state = 'waiting'::agent_task_state THEN COALESCE($6, input_kind) ELSE $6 END,
-		    waiting_summary = CASE WHEN $2::agent_task_state = 'waiting'::agent_task_state THEN $7 ELSE NULL END,
+		    current_blocker_id = NULL,
+		    input_kind = NULL,
+		    waiting_summary = NULL,
 		    wake_at = CASE WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN wake_at ELSE NULL END,
 		    wake_reason = CASE WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN wake_reason ELSE NULL END,
 		    wake_count = CASE WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN wake_count ELSE 0 END,
@@ -1135,7 +1153,7 @@ func (b *PostgresBackend) UpdateTaskStateIfCurrentRun(
 		query += " AND target_run_id IS NULL"
 		args = baseArgs
 	} else {
-		query += " AND target_run_id = $8::uuid"
+		query += " AND target_run_id = $6::uuid"
 		args = append(baseArgs, expectedRunID)
 	}
 
@@ -1169,6 +1187,7 @@ func (b *PostgresBackend) SleepTaskWithOutbox(
 		    wake_reason = $3,
 		    wake_count = wake_count + 1,
 		    dispatched_at = NULL,
+		    current_blocker_id = NULL,
 		    input_kind = NULL,
 		    waiting_summary = NULL,
 		    updated_at = CURRENT_TIMESTAMP
@@ -1281,6 +1300,7 @@ func (b *PostgresBackend) RequeueTaskWithOutboxIfCurrentRun(
 		        dispatched_at = NULL,
 		        dropped_reason = NULL,
 		        target_run_id = NULL,
+		        current_blocker_id = NULL,
 		        input_kind = NULL,
 		        waiting_summary = NULL,
 		        wake_at = NULL,
@@ -1367,6 +1387,123 @@ func (b *PostgresBackend) RequeueTaskWithOutboxIfCurrentRun(
 	task.WakeReason = nil
 	task.WakeCount = 0
 	return true, nil
+}
+
+func (b *PostgresBackend) ListActiveChildTaskIDs(ctx context.Context, parentTaskID string) ([]string, error) {
+	rows, err := b.db.QueryContext(ctx, `
+		SELECT id FROM agent_task
+		WHERE parent_envelope_id = $1
+		AND state NOT IN ('done', 'error', 'dropped', 'cancelled')
+	`, parentTaskID)
+	if err != nil {
+		return nil, fmt.Errorf("list active child task ids: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+func (b *PostgresBackend) ListSubtasks(ctx context.Context, parentTaskID string) ([]*types.AgentTask, error) {
+	query := agentTaskSelect + `
+		WHERE parent_envelope_id = $1
+		ORDER BY created_at DESC
+	`
+	rows, err := b.db.QueryContext(ctx, query, parentTaskID)
+	if err != nil {
+		return nil, fmt.Errorf("list subtasks: %w", err)
+	}
+	defer rows.Close()
+	var tasks []*types.AgentTask
+	for rows.Next() {
+		task, err := b.scanAgentTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+	if err := b.attachCurrentBlockers(ctx, tasks); err != nil {
+		return nil, err
+	}
+	return tasks, nil
+}
+
+func (b *PostgresBackend) ListSubtasksByOutputIDs(ctx context.Context, outputIDs []string) ([]*types.AgentTask, error) {
+	if len(outputIDs) == 0 {
+		return nil, nil
+	}
+	query := agentTaskSelect + `
+		WHERE id IN (
+			SELECT task_id FROM task_spawn_binding WHERE source_output_id = ANY($1)
+		)
+		ORDER BY created_at DESC
+	`
+	rows, err := b.db.QueryContext(ctx, query, pq.Array(outputIDs))
+	if err != nil {
+		return nil, fmt.Errorf("list subtasks by output IDs: %w", err)
+	}
+	defer rows.Close()
+	var tasks []*types.AgentTask
+	for rows.Next() {
+		task, err := b.scanAgentTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+	if err := b.attachCurrentBlockers(ctx, tasks); err != nil {
+		return nil, err
+	}
+	return tasks, nil
+}
+
+type SpawnBinding struct {
+	TaskID         string    `db:"task_id"`
+	SourceOutputID string    `db:"source_output_id"`
+	EntityLabel    string    `db:"entity_label"`
+	CreatedAt      time.Time `db:"created_at"`
+}
+
+func (b *PostgresBackend) CreateSpawnBinding(ctx context.Context, taskID, sourceOutputID, entityLabel string) error {
+	_, err := b.db.ExecContext(ctx, `
+		INSERT INTO task_spawn_binding (task_id, source_output_id, entity_label)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (task_id) DO NOTHING
+	`, taskID, sourceOutputID, entityLabel)
+	if err != nil {
+		return fmt.Errorf("create spawn binding: %w", err)
+	}
+	return nil
+}
+
+func (b *PostgresBackend) ListSpawnBindingsForOutputs(ctx context.Context, outputIDs []string) ([]SpawnBinding, error) {
+	if len(outputIDs) == 0 {
+		return nil, nil
+	}
+	rows, err := b.db.QueryContext(ctx, `
+		SELECT task_id, source_output_id, entity_label, created_at
+		FROM task_spawn_binding
+		WHERE source_output_id = ANY($1)
+	`, pq.Array(outputIDs))
+	if err != nil {
+		return nil, fmt.Errorf("list spawn bindings: %w", err)
+	}
+	defer rows.Close()
+	var bindings []SpawnBinding
+	for rows.Next() {
+		var b SpawnBinding
+		if err := rows.Scan(&b.TaskID, &b.SourceOutputID, &b.EntityLabel, &b.CreatedAt); err != nil {
+			return nil, err
+		}
+		bindings = append(bindings, b)
+	}
+	return bindings, nil
 }
 
 func (b *PostgresBackend) ArchiveTask(ctx context.Context, taskID string) error {
@@ -1975,6 +2112,7 @@ func (b *PostgresBackend) scanAgentRun(row scanner) (*types.AgentRun, error) {
 	var usageJSON []byte
 	var deliveryJSON []byte
 	var agentID sql.NullString
+	var createdByMemberID sql.NullInt64
 	var hookID sql.NullInt64
 	var sessionKey sql.NullString
 	var provider sql.NullString
@@ -1990,6 +2128,7 @@ func (b *PostgresBackend) scanAgentRun(row scanner) (*types.AgentRun, error) {
 		&run.ID,
 		&run.WorkspaceID,
 		&agentID,
+		&createdByMemberID,
 		&run.OriginTaskID,
 		&hookID,
 		&run.Status,
@@ -2026,6 +2165,10 @@ func (b *PostgresBackend) scanAgentRun(row scanner) (*types.AgentRun, error) {
 	}
 	if agentID.Valid {
 		run.AgentID = &agentID.String
+	}
+	if createdByMemberID.Valid {
+		value := uint(createdByMemberID.Int64)
+		run.CreatedByMemberID = &value
 	}
 	if hookID.Valid {
 		v := uint(hookID.Int64)

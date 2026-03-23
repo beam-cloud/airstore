@@ -25,6 +25,53 @@ type parse struct{}
 
 var Parse = &parse{}
 
+// / Parse version of ClassifyFanOut (Takes in string and returns types.FanOutSignal)
+func (*parse) ClassifyFanOut(text string, opts ...CallOptionFunc) (types.FanOutSignal, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"text": text, "stream": false},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		// This should never happen. if it does, please file an issue at https://github.com/boundaryml/baml/issues
+		// and include the type of the args you're passing in.
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: ClassifyFanOut: %w", err)
+		panic(wrapped_err)
+	}
+
+	result, err := bamlRuntime.CallFunctionParse(context.Background(), "ClassifyFanOut", encoded)
+	if err != nil {
+		return types.FanOutSignal{}, err
+	}
+
+	casted := (result).(types.FanOutSignal)
+
+	return casted, nil
+}
+
 // / Parse version of ClassifyFollowUp (Takes in string and returns types.FollowUpSignal)
 func (*parse) ClassifyFollowUp(text string, opts ...CallOptionFunc) (types.FollowUpSignal, error) {
 
@@ -119,8 +166,8 @@ func (*parse) ClassifyTurn(text string, opts ...CallOptionFunc) (types.TurnClass
 	return casted, nil
 }
 
-// / Parse version of ExtractApprovalItems (Takes in string and returns []types.ApprovalItem)
-func (*parse) ExtractApprovalItems(text string, opts ...CallOptionFunc) ([]types.ApprovalItem, error) {
+// / Parse version of ExtractApprovalOutput (Takes in string and returns []types.ExtractedOutput)
+func (*parse) ExtractApprovalOutput(text string, opts ...CallOptionFunc) ([]types.ExtractedOutput, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -152,16 +199,16 @@ func (*parse) ExtractApprovalItems(text string, opts ...CallOptionFunc) ([]types
 	if err != nil {
 		// This should never happen. if it does, please file an issue at https://github.com/boundaryml/baml/issues
 		// and include the type of the args you're passing in.
-		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: ExtractApprovalItems: %w", err)
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: ExtractApprovalOutput: %w", err)
 		panic(wrapped_err)
 	}
 
-	result, err := bamlRuntime.CallFunctionParse(context.Background(), "ExtractApprovalItems", encoded)
+	result, err := bamlRuntime.CallFunctionParse(context.Background(), "ExtractApprovalOutput", encoded)
 	if err != nil {
 		return nil, err
 	}
 
-	casted := (result).([]types.ApprovalItem)
+	casted := (result).([]types.ExtractedOutput)
 
 	return casted, nil
 }

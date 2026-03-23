@@ -295,6 +295,59 @@ func TestDeletedViewColumnsScopesColumnsByComponent(t *testing.T) {
 	}
 }
 
+func TestSyntheticEmailThreadsSkipsOutputsWhenRealThreadExists(t *testing.T) {
+	outputs := []*types.TaskOutput{
+		{
+			ID:         "out-1",
+			OutputType: types.TaskOutputTypeEmail,
+			Status:     types.TaskOutputStatusActive,
+			Data: map[string]any{
+				"thread_id": "thread-1",
+				"recipient": "Mike <mike@example.com>",
+				"subject":   "A faster way to spin up dev environments",
+				"content":   "Hey Mike, ...",
+			},
+		},
+	}
+	existing := map[string][]views.ThreadMessage{
+		"thread-1": {{
+			ID:       "gmail-msg-1",
+			ThreadID: "thread-1",
+			Subject:  "A faster way to spin up dev environments",
+		}},
+	}
+
+	got := syntheticEmailThreads(outputs, existing)
+	if len(got) != 0 {
+		t.Fatalf("expected no synthetic threads when gmail thread exists, got %#v", got)
+	}
+}
+
+func TestSyntheticEmailThreadsFallsBackWhenNoRealThreadExists(t *testing.T) {
+	outputs := []*types.TaskOutput{
+		{
+			ID:         "out-1",
+			OutputType: types.TaskOutputTypeEmail,
+			Status:     types.TaskOutputStatusActive,
+			Data: map[string]any{
+				"thread_id": "thread-1",
+				"recipient": "Mike <mike@example.com>",
+				"subject":   "A faster way to spin up dev environments",
+				"content":   "Hey Mike, ...",
+			},
+		},
+	}
+
+	got := syntheticEmailThreads(outputs, nil)
+	thread := got["output:out-1"]
+	if len(thread) != 1 {
+		t.Fatalf("expected one synthetic thread message, got %#v", got)
+	}
+	if thread[0].ThreadID != "output:out-1" {
+		t.Fatalf("thread id = %q, want output:out-1", thread[0].ThreadID)
+	}
+}
+
 func TestDraftsRouteReturnsServiceUnavailableWhenDisabled(t *testing.T) {
 	e := echo.New()
 	NewViewsGroup(e.Group("/workspaces/:workspace_id/views"), nil, nil, nil)
@@ -306,6 +359,22 @@ func TestDraftsRouteReturnsServiceUnavailableWhenDisabled(t *testing.T) {
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("GET /drafts status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestDecodeViewRowID(t *testing.T) {
+	got, err := decodeViewRowID("sheet-1%3Ac1%3Atask-1%3Atask")
+	if err != nil {
+		t.Fatalf("decodeViewRowID returned error: %v", err)
+	}
+	if want := "sheet-1:c1:task-1:task"; got != want {
+		t.Fatalf("decoded row id = %q, want %q", got, want)
+	}
+}
+
+func TestDecodeViewRowIDRejectsInvalidEscapes(t *testing.T) {
+	if _, err := decodeViewRowID("sheet-1%ZZ"); err == nil {
+		t.Fatal("expected invalid escape to return error")
 	}
 }
 

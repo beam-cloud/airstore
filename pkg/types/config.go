@@ -153,7 +153,7 @@ type SandboxSettings struct {
 }
 
 // DefaultSandboxImage is the fallback image if not configured
-const DefaultSandboxImage = "public.ecr.aws/n4e0e1y0/airstore-default-sandbox:latest"
+const DefaultSandboxImage = "public.ecr.aws/n4e0e1y0/airstore-default-sandbox:0.1.15"
 const DefaultInteractiveIdleTimeout = 3 * time.Minute
 
 // GetDefaultImage returns the configured default image or the fallback

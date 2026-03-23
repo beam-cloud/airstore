@@ -2,6 +2,7 @@ package gatewayclient
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"time"
@@ -259,35 +260,11 @@ func (c *GatewayClient) SetTaskStarted(ctx context.Context, taskID string, attem
 }
 
 // SetTaskResult reports the result of a task to the gateway.
-func (c *GatewayClient) SetTaskResult(
-	ctx context.Context,
-	taskID string,
-	exitCode int,
-	errorMsg string,
-	attemptID string,
-	usage *types.LLMUsage,
-	waitingForInput bool,
-	wakeSignal *pb.WakeSignal,
-) error {
+func (c *GatewayClient) SetTaskResult(ctx context.Context, taskID string, attemptID string, result *types.RunExecutionResult) error {
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
 
-	pf := usage.ProtoFields()
-	_, err := c.client.SetTaskResult(ctx, &pb.SetTaskResultRequest{
-		TaskId:                      taskID,
-		ExitCode:                    int32(exitCode),
-		Error:                       errorMsg,
-		AttemptId:                   attemptID,
-		LlmInputTokens:              pf.InputTokens,
-		LlmOutputTokens:             pf.OutputTokens,
-		LlmCacheCreationInputTokens: pf.CacheCreationInputTokens,
-		LlmCacheReadInputTokens:     pf.CacheReadInputTokens,
-		LlmTotalTokens:              pf.TotalTokens,
-		TotalCostUsd:                pf.TotalCostUSD,
-		LlmModelUsageJson:           pf.ModelUsageJSON,
-		WaitingForInput:             waitingForInput,
-		WakeSignal:                  wakeSignal,
-	})
+	_, err := c.client.SetTaskResult(ctx, buildSetTaskResultRequest(taskID, attemptID, result))
 	if err != nil {
 		return fmt.Errorf("set task result failed: %w", err)
 	}
@@ -295,17 +272,136 @@ func (c *GatewayClient) SetTaskResult(
 	return nil
 }
 
-func (c *GatewayClient) UpdateTaskState(ctx context.Context, taskID string, state string, runID string, inputKind string, waitingSummary string) error {
+func buildSetTaskResultRequest(taskID string, attemptID string, result *types.RunExecutionResult) *pb.SetTaskResultRequest {
+	req := &pb.SetTaskResultRequest{
+		TaskId:    taskID,
+		AttemptId: attemptID,
+	}
+	if result == nil {
+		return req
+	}
+
+	postRun := result.NormalizedPostRun()
+	req.ExitCode = int32(result.ExitCode)
+	req.Error = result.Error
+	if postRun != nil {
+		req.WaitingForInput = postRun.WaitingForInput
+		req.WakeSignal = wakeSignalToProto(postRun.WakeSignal)
+		req.SubtaskRequests = subtaskRequestsToProto(postRun.SubtaskRequests)
+		req.SourceWatchRequests = sourceWatchRequestsToProto(postRun.SourceWatchRequests)
+	}
+	return req
+}
+
+func wakeSignalToProto(signal *types.RunExecutionWakeSignal) *pb.WakeSignal {
+	signal = types.NormalizeRunExecutionWakeSignal(signal)
+	if signal == nil {
+		return nil
+	}
+
+	agenda := make([]*pb.WakeAgendaItem, 0, len(signal.WakeAgenda))
+	for _, item := range signal.WakeAgenda {
+		if item == nil {
+			continue
+		}
+		agenda = append(agenda, &pb.WakeAgendaItem{
+			Type:   item.Type,
+			Title:  item.Title,
+			Reason: item.Reason,
+		})
+	}
+
+	return &pb.WakeSignal{
+		DelayMinutes:   int32(signal.DelayMinutes),
+		Reason:         signal.Reason,
+		FollowUpPrompt: signal.FollowUpPrompt,
+		WakeAgenda:     agenda,
+	}
+}
+
+func subtaskRequestsToProto(requests []*types.SubtaskRequest) []*pb.SubtaskRequest {
+	requests = types.NormalizeSubtaskRequests(requests)
+	if len(requests) == 0 {
+		return nil
+	}
+
+	out := make([]*pb.SubtaskRequest, 0, len(requests))
+	for _, req := range requests {
+		if req == nil {
+			continue
+		}
+		out = append(out, &pb.SubtaskRequest{
+			SourceOutputId:   req.SourceOutputID,
+			EntityLabel:      req.EntityLabel,
+			Prompt:           req.Prompt,
+			WakeDelayMinutes: int32(req.WakeDelayMinutes),
+		})
+	}
+	return out
+}
+
+func sourceWatchRequestsToProto(requests []*types.SourceWatchRequest) []*pb.SourceWatchRequest {
+	requests = types.NormalizeSourceWatchRequestList(requests)
+	if len(requests) == 0 {
+		return nil
+	}
+
+	out := make([]*pb.SourceWatchRequest, 0, len(requests))
+	for _, req := range requests {
+		if req == nil {
+			continue
+		}
+		out = append(out, &pb.SourceWatchRequest{
+			Integration:        req.Integration,
+			Reason:             req.Reason,
+			Query:              req.Query,
+			FilenameFormat:     req.FilenameFormat,
+			EventTypes:         append([]string{}, req.EventTypes...),
+			EntityKey:          req.EntityKey,
+			EntityLabel:        req.EntityLabel,
+			SourceOutputId:     req.SourceOutputID,
+			ThreadId:           req.ThreadID,
+			MessageId:          req.MessageID,
+			IncludeAttachments: req.IncludeAttachments,
+			IncludeInline:      req.IncludeInline,
+			IncludeMessageBody: req.IncludeMessageBody,
+		})
+	}
+	return out
+}
+
+func (c *GatewayClient) UpdateTaskState(ctx context.Context, update types.TaskLiveUpdate) error {
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
 
-	_, err := c.client.UpdateTaskState(ctx, &pb.UpdateTaskStateRequest{
-		TaskId:         taskID,
-		State:          state,
-		RunId:          runID,
-		InputKind:      inputKind,
-		WaitingSummary: waitingSummary,
-	})
+	req := &pb.UpdateTaskStateRequest{
+		TaskId: update.TaskID,
+		State:  string(update.State),
+		RunId:  update.RunID,
+	}
+	if update.State == types.AgentTaskStateWaiting {
+		if update.Blocker == nil {
+			return fmt.Errorf("update task state: waiting update requires blocker")
+		}
+	}
+	if blocker := update.Blocker; blocker != nil {
+		req.InputKind = string(blocker.InputKind)
+		req.BlockerKind = string(blocker.Kind)
+		if blocker.WaitGroupID != nil {
+			req.BlockerWaitGroupId = *blocker.WaitGroupID
+		}
+		req.BlockerOutputIds = append(req.BlockerOutputIds, blocker.OutputIDs...)
+		payload := blocker.PayloadJSON
+		if payload == nil {
+			payload = map[string]any{}
+		}
+		payloadJSON, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("marshal blocker payload: %w", err)
+		}
+		req.BlockerPayloadJson = string(payloadJSON)
+	}
+	_, err := c.client.UpdateTaskState(ctx, req)
 	if err != nil {
 		return fmt.Errorf("update task state failed: %w", err)
 	}

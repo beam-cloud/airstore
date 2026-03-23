@@ -17,7 +17,6 @@ import (
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/runtime"
 	"github.com/beam-cloud/airstore/pkg/types"
-	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -159,6 +158,7 @@ func NewWorker() (*Worker, error) {
 		S2Basin:           config.Streams.Basin,
 		AnthropicAPIKey:   config.AnthropicAPIKey(),
 		KernelAPIKey:      config.KernelAPIKey(),
+		CerebrasAPIKey:    config.CerebrasAPIKey(),
 	})
 	if err != nil {
 		cancel()
@@ -495,33 +495,12 @@ func setTaskResultWithRetry(
 	ctx context.Context,
 	task types.RunExecution,
 	result *types.RunExecutionResult,
-	reportFn func(ctx context.Context, taskID string, exitCode int, errMsg string, attemptID string, usage *types.LLMUsage, waitingForInput bool, wakeSignal *pb.WakeSignal) error,
+	reportFn func(context.Context, string, string, *types.RunExecutionResult) error,
 	sleepFn func(context.Context, time.Duration),
 ) error {
 	attemptID := ""
 	if task.RunAttemptID != nil {
 		attemptID = *task.RunAttemptID
-	}
-
-	var protoWake *pb.WakeSignal
-	if ws := result.WakeSignal; ws != nil {
-		wakeAgenda := make([]*pb.WakeAgendaItem, 0, len(ws.WakeAgenda))
-		for _, item := range ws.WakeAgenda {
-			if item == nil {
-				continue
-			}
-			wakeAgenda = append(wakeAgenda, &pb.WakeAgendaItem{
-				Type:   item.Type,
-				Title:  item.Title,
-				Reason: item.Reason,
-			})
-		}
-		protoWake = &pb.WakeSignal{
-			DelayMinutes:   int32(ws.DelayMinutes),
-			Reason:         ws.Reason,
-			FollowUpPrompt: ws.FollowUpPrompt,
-			WakeAgenda:     wakeAgenda,
-		}
 	}
 
 	var lastErr error
@@ -537,7 +516,7 @@ func setTaskResultWithRetry(
 		}
 
 		attemptCtx, cancel := context.WithTimeout(ctx, setTaskResultRetryTimeout)
-		lastErr = reportFn(attemptCtx, task.ExternalId, result.ExitCode, result.Error, attemptID, result.Usage, result.WaitingForInput, protoWake)
+		lastErr = reportFn(attemptCtx, task.ExternalId, attemptID, result)
 		cancel()
 		if lastErr == nil {
 			return nil
@@ -710,14 +689,4 @@ func (w *Worker) shutdown() error {
 
 	log.Info().Str("worker_id", w.workerId).Msg("worker stopped")
 	return nil
-}
-
-// WorkerId returns the worker's ID
-func (w *Worker) WorkerId() string {
-	return w.workerId
-}
-
-// PoolName returns the worker's pool name
-func (w *Worker) PoolName() string {
-	return w.poolName
 }

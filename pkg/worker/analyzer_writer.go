@@ -6,36 +6,34 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"unicode/utf8"
 
 	"github.com/google/uuid"
 
-	gatewayclient "github.com/beam-cloud/airstore/pkg/gateway/client"
 	"github.com/beam-cloud/airstore/pkg/types"
 	agentsignal "github.com/beam-cloud/airstore/pkg/worker/agentsignal/baml_client"
 	signaltypes "github.com/beam-cloud/airstore/pkg/worker/agentsignal/baml_client/types"
 	"github.com/rs/zerolog/log"
 )
 
-const (
-	keyContent         = "content"
-	keySummary         = "summary"
-	keyPath            = "path"
-	keyURI             = "uri"
-	keyTags            = "tags"
-	keyTool            = "tool"
-	keyDeeplink = "deeplink"
-	keySource   = "source"
-	keySourcePrompt    = "source_prompt"
-	keySourceInput     = "source_input"
-	keySourceInputText = "source_input_text"
-	keySourceResult    = "source_result"
-	keySourceTitle     = "source_title"
-	keySourceURL       = "source_url"
-	keySourceExcerpt   = "source_excerpt"
+// OutputAnalyzer decides which log lines may contain extractable outputs and
+// prepares them for the BAML classifier. Each runner provides its own
+// implementation because log formats differ across providers.
+type OutputAnalyzer interface {
+	ShouldAnalyze(payload map[string]any) bool
+	PrepareInput(payload map[string]any) (toolName, toolInput, toolResult string, ok bool)
+}
 
-	sourceAssistantResponse = "assistant_response"
+const (
+	maxAnalyzedToolInputLen  = 8000
+	maxAnalyzedToolResultLen = 8000
 )
+
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen]
+}
 
 // AnalyzerWriter is an io.Writer that inspects agent stdout lines,
 // runs qualifying tool completions through the BAML ExtractOutputs
@@ -46,7 +44,7 @@ const (
 type AnalyzerWriter struct {
 	ctx         context.Context
 	analyzer    OutputAnalyzer
-	client      *gatewayclient.GatewayClient
+	client      taskOutputClient
 	workspaceID uint32
 	taskID      string
 	runID       string
@@ -67,20 +65,10 @@ type analyzerJob struct {
 	toolResult string
 }
 
-func NewAnalyzerWriter(
-	ctx context.Context,
-	analyzer OutputAnalyzer,
-	client *gatewayclient.GatewayClient,
-	task types.RunExecution,
-	bamlEnv map[string]string,
-) *AnalyzerWriter {
-	return newAnalyzerWriter(ctx, analyzer, client, task, bamlEnv, nil)
-}
-
 func newAnalyzerWriter(
 	ctx context.Context,
 	analyzer OutputAnalyzer,
-	client *gatewayclient.GatewayClient,
+	client taskOutputClient,
 	task types.RunExecution,
 	bamlEnv map[string]string,
 	tracker *taskOutputTracker,
@@ -239,8 +227,7 @@ func extractDeepLink(toolResult string) string {
 }
 
 // ---------------------------------------------------------------------------
-// extractedResult wraps a BAML ExtractedOutput and provides methods for
-// deriving output candidates. Same pattern as Artifact wrapping TaskOutput.
+// extractedResult wraps a BAML ExtractedOutput and derives output candidates.
 // ---------------------------------------------------------------------------
 
 type extractedResult struct {
@@ -338,7 +325,7 @@ func (w *AnalyzerWriter) createOutputWithBatch(out signaltypes.ExtractedOutput, 
 	c := r.candidate(types.TaskOutputArtifactRoleSupporting)
 	c.Metadata[keyTool] = toolName
 	if batchID != "" {
-		c.Metadata["batch_id"] = batchID
+		c.Metadata[keyBatchID] = batchID
 	}
 
 	if content := r.content(); content != "" {
@@ -356,7 +343,6 @@ func (w *AnalyzerWriter) createOutputWithBatch(out signaltypes.ExtractedOutput, 
 
 		if sourceTitle := firstMatchingString(parsedResult, "video_title", "title", "name", "subject"); sourceTitle != "" {
 			c.Data[keySourceTitle] = sourceTitle
-			c.Metadata[keySourceTitle] = sourceTitle
 			if shouldPreferSourceTitle(c.Title, sourceTitle) {
 				c.Title = sourceTitle
 			}
@@ -368,7 +354,6 @@ func (w *AnalyzerWriter) createOutputWithBatch(out signaltypes.ExtractedOutput, 
 				c.Metadata[keyDeeplink] = sourceURL
 			}
 			c.Data[keySourceURL] = sourceURL
-			c.Metadata[keySourceURL] = sourceURL
 		}
 
 		if len(out.Data_fields) == 0 {
@@ -382,118 +367,6 @@ func (w *AnalyzerWriter) createOutputWithBatch(out signaltypes.ExtractedOutput, 
 		log.Warn().Err(err).Str("task", w.taskID).Str("title", out.Title).
 			Msg("analyzer: output create failed")
 	}
-}
-
-type finalResponseExtractor func(
-	ctx context.Context,
-	userMessage *string,
-	assistantMessage string,
-	bamlEnv map[string]string,
-) ([]signaltypes.ExtractedOutput, error)
-
-func defaultFinalResponseExtractor(
-	ctx context.Context,
-	userMessage *string,
-	assistantMessage string,
-	bamlEnv map[string]string,
-) (out []signaltypes.ExtractedOutput, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("ExtractFinalResponseOutput panicked: %v", r)
-		}
-	}()
-	return agentsignal.ExtractFinalResponseOutput(
-		ctx, userMessage, assistantMessage,
-		agentsignal.WithEnv(bamlEnv),
-	)
-}
-
-func persistFinalResponseOutput(
-	ctx context.Context,
-	client taskOutputClient,
-	task types.RunExecution,
-	tracker *taskOutputTracker,
-	userMessage *string,
-	assistantMessage string,
-	bamlEnv map[string]string,
-	extract finalResponseExtractor,
-) error {
-	if client == nil {
-		return nil
-	}
-	assistantMessage = strings.TrimSpace(sanitizeUTF8(assistantMessage))
-	if assistantMessage == "" {
-		return nil
-	}
-	if userMessage != nil {
-		sanitized := sanitizeUTF8(*userMessage)
-		userMessage = &sanitized
-	}
-	if extract == nil {
-		extract = defaultFinalResponseExtractor
-	}
-
-	outputs, err := extract(ctx, userMessage, assistantMessage, bamlEnv)
-	if err != nil {
-		return err
-	}
-
-	ids := outputIDsFromTask(task)
-	if ids.taskID == "" {
-		return nil
-	}
-
-	count := 0
-	for _, out := range outputs {
-		r := extractedResult{out}
-		if !r.isNone() && r.title() != "" && r.content() != "" {
-			count++
-		}
-	}
-	if count == 0 {
-		return nil
-	}
-
-	var batchID string
-	if count > 1 {
-		batchID = uuid.NewString()
-	}
-
-	promptMeta := ""
-	if userMessage != nil {
-		promptMeta = strings.TrimSpace(*userMessage)
-	}
-
-	published := 0
-	for _, out := range outputs {
-		r := extractedResult{out}
-		if r.isNone() || r.title() == "" || r.content() == "" {
-			continue
-		}
-
-		role := types.TaskOutputArtifactRoleSupporting
-		if published == 0 {
-			role = types.TaskOutputArtifactRolePrimary
-		}
-		published++
-
-		c := r.candidate(role)
-		c.OutputType = "text"
-		c.Data[keyContent] = r.content()
-		c.Metadata[keySource] = sourceAssistantResponse
-		if promptMeta != "" {
-			c.Metadata[keySourcePrompt] = promptMeta
-		}
-		if batchID != "" {
-			c.Metadata["batch_id"] = batchID
-		}
-
-		if _, err := publishOutputCandidate(ctx, client, ids, tracker, c); err != nil {
-			log.Warn().Err(err).Str("task", ids.taskID).Str("title", r.title()).
-				Msg("final response output create failed")
-		}
-	}
-	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -513,13 +386,6 @@ func (w *AnalyzerWriter) callExtractOutputs(job analyzerJob) (outputs []signalty
 		w.ctx, job.toolName, job.toolInput, job.toolResult,
 		agentsignal.WithEnv(w.bamlEnv),
 	)
-}
-
-func sanitizeUTF8(s string) string {
-	if utf8.ValidString(s) {
-		return s
-	}
-	return strings.ToValidUTF8(s, "\uFFFD")
 }
 
 func derefStr(p *string) string {

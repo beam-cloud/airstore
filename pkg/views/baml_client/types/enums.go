@@ -92,6 +92,148 @@ func (e OperationType) BamlTypeName() string {
 	return "OperationType"
 }
 
+type SectionEmphasis string
+
+const (
+	SectionEmphasisPRIMARY   SectionEmphasis = "PRIMARY"
+	SectionEmphasisSECONDARY SectionEmphasis = "SECONDARY"
+	SectionEmphasisCOLLAPSED SectionEmphasis = "COLLAPSED"
+)
+
+// Values returns all allowed values for the SectionEmphasis type.
+func (SectionEmphasis) Values() []SectionEmphasis {
+	return []SectionEmphasis{
+		SectionEmphasisPRIMARY,
+		SectionEmphasisSECONDARY,
+		SectionEmphasisCOLLAPSED,
+	}
+}
+
+// IsValid checks whether the given SectionEmphasis value is valid.
+func (e SectionEmphasis) IsValid() bool {
+
+	for _, v := range e.Values() {
+		if e == v {
+			return true
+		}
+	}
+	return false
+
+}
+
+// MarshalJSON customizes JSON marshaling for SectionEmphasis.
+func (e SectionEmphasis) MarshalJSON() ([]byte, error) {
+	if !e.IsValid() {
+		return nil, fmt.Errorf("invalid SectionEmphasis: %q", e)
+	}
+	return json.Marshal(string(e))
+}
+
+// UnmarshalJSON customizes JSON unmarshaling for SectionEmphasis.
+func (e *SectionEmphasis) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	*e = SectionEmphasis(s)
+	if !e.IsValid() {
+		return fmt.Errorf("invalid SectionEmphasis: %q", s)
+	}
+	return nil
+}
+
+func (e *SectionEmphasis) Decode(holder *cffi.CFFIValueEnum, typeMap baml.TypeMap) {
+	name := holder.Name
+	if name.Name != "SectionEmphasis" || name.Namespace != cffi.CFFITypeNamespace_TYPES {
+		panic(fmt.Sprintf("expected types.SectionEmphasis, got %s.%s", string(name.Namespace.String()), string(name.Name)))
+	}
+	value := holder.Value
+	*e = SectionEmphasis(value)
+}
+
+func (e SectionEmphasis) Encode() (*cffi.HostValue, error) {
+	return baml.EncodeEnum("SectionEmphasis", string(e), false)
+}
+
+func (e SectionEmphasis) BamlTypeName() string {
+	return "SectionEmphasis"
+}
+
+type SectionType string
+
+const (
+	SectionTypeEMAIL_THREAD   SectionType = "EMAIL_THREAD"
+	SectionTypeAPPROVAL       SectionType = "APPROVAL"
+	SectionTypeINPUT_FORM     SectionType = "INPUT_FORM"
+	SectionTypeTASK_PROGRESS  SectionType = "TASK_PROGRESS"
+	SectionTypeOUTPUT_GALLERY SectionType = "OUTPUT_GALLERY"
+	SectionTypeDATA_SUMMARY   SectionType = "DATA_SUMMARY"
+	SectionTypeSUBTASKS       SectionType = "SUBTASKS"
+)
+
+// Values returns all allowed values for the SectionType type.
+func (SectionType) Values() []SectionType {
+	return []SectionType{
+		SectionTypeEMAIL_THREAD,
+		SectionTypeAPPROVAL,
+		SectionTypeINPUT_FORM,
+		SectionTypeTASK_PROGRESS,
+		SectionTypeOUTPUT_GALLERY,
+		SectionTypeDATA_SUMMARY,
+		SectionTypeSUBTASKS,
+	}
+}
+
+// IsValid checks whether the given SectionType value is valid.
+func (e SectionType) IsValid() bool {
+
+	for _, v := range e.Values() {
+		if e == v {
+			return true
+		}
+	}
+	return false
+
+}
+
+// MarshalJSON customizes JSON marshaling for SectionType.
+func (e SectionType) MarshalJSON() ([]byte, error) {
+	if !e.IsValid() {
+		return nil, fmt.Errorf("invalid SectionType: %q", e)
+	}
+	return json.Marshal(string(e))
+}
+
+// UnmarshalJSON customizes JSON unmarshaling for SectionType.
+func (e *SectionType) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	*e = SectionType(s)
+	if !e.IsValid() {
+		return fmt.Errorf("invalid SectionType: %q", s)
+	}
+	return nil
+}
+
+func (e *SectionType) Decode(holder *cffi.CFFIValueEnum, typeMap baml.TypeMap) {
+	name := holder.Name
+	if name.Name != "SectionType" || name.Namespace != cffi.CFFITypeNamespace_TYPES {
+		panic(fmt.Sprintf("expected types.SectionType, got %s.%s", string(name.Namespace.String()), string(name.Name)))
+	}
+	value := holder.Value
+	*e = SectionType(value)
+}
+
+func (e SectionType) Encode() (*cffi.HostValue, error) {
+	return baml.EncodeEnum("SectionType", string(e), false)
+}
+
+func (e SectionType) BamlTypeName() string {
+	return "SectionType"
+}
+
 type ViewUpdateType string
 
 const (

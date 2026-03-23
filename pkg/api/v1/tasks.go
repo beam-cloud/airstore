@@ -43,6 +43,7 @@ func (g *WorkspaceTasksGroup) registerRoutes() {
 	g.routerGroup.POST("/:task_id/input", g.SubmitInput)
 	g.routerGroup.POST("/:task_id/cancel", g.CancelTask)
 	g.routerGroup.POST("/:task_id/archive", g.ArchiveTask)
+	g.routerGroup.GET("/:task_id/subtasks", g.ListSubtasks)
 
 	sched := g.routerGroup.Group("/schedules")
 	sched.POST("", g.CreateSchedule)
@@ -569,6 +570,18 @@ func (g *WorkspaceTasksGroup) ArchiveTask(c echo.Context) error {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 	return SuccessResponse(c, map[string]any{"status": "archived"})
+}
+
+func (g *WorkspaceTasksGroup) ListSubtasks(c echo.Context) error {
+	if g.agents == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "task service unavailable")
+	}
+	taskID := c.Param("task_id")
+	tasks, err := g.agents.ListSubtasks(c.Request().Context(), taskID)
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+	return SuccessResponse(c, tasks)
 }
 
 func (g *WorkspaceTasksGroup) UpdateTask(c echo.Context) error {

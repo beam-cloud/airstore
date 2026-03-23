@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/common"
+	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -36,13 +37,16 @@ func mongoColumnFieldPath(prefix, key string) (string, error) {
 // ViewRow is the MongoDB document schema for a single rendered row in a sheet.
 type ViewRow struct {
 	ID              string            `bson:"_id"`
+	StableRef       string            `bson:"stable_ref,omitempty"`
 	SheetID         string            `bson:"sheet_id"`
 	ComponentID     string            `bson:"component_id,omitempty"`
+	Marker          bool              `bson:"marker,omitempty"`
 	GroupID         string            `bson:"group_id"`
 	TaskID          string            `bson:"task_id"`
 	RowKey          string            `bson:"row_key"`
 	SchemaHash      string            `bson:"schema_hash"`
 	OutputIDs       []string          `bson:"output_ids"`
+	OutputSignature string            `bson:"output_signature,omitempty"`
 	SourceOutputIDs []string          `bson:"source_output_ids,omitempty"`
 	Cells           map[string]string `bson:"cells"`
 	Manual          map[string]string `bson:"manual,omitempty"`
@@ -52,9 +56,11 @@ type ViewRow struct {
 // ExcludedRowSnapshot is the data we store when a user deletes a row so the
 // BAML mapper knows not to regenerate it.
 type ExcludedRowSnapshot struct {
-	TaskID string            `bson:"task_id"`
-	RowKey string            `bson:"row_key"`
-	Cells  map[string]string `bson:"cells"`
+	ComponentID     string            `bson:"component_id,omitempty"`
+	TaskID          string            `bson:"task_id"`
+	RowKey          string            `bson:"row_key"`
+	SourceOutputIDs []string          `bson:"source_output_ids,omitempty"`
+	Cells           map[string]string `bson:"cells"`
 }
 
 // MergedCells returns cells with manual edits overlaid on top of BAML-mapped cells.
@@ -131,6 +137,24 @@ func (s *ViewStore) GetRows(ctx context.Context, viewID, sheetID, componentID st
 	return rows, nil
 }
 
+// GetRowByID loads a row by _id only (no sheet filter). Used for detail layout cache lookups.
+func (s *ViewStore) GetRowByID(ctx context.Context, viewID, rowID string) (*ViewRow, error) {
+	if !s.Available() {
+		return nil, nil
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+	var row ViewRow
+	if err := coll.FindOne(ctx, bson.D{
+		{Key: "_id", Value: rowID},
+	}).Decode(&row); err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("find row by id: %w", err)
+	}
+	return &row, nil
+}
+
 func (s *ViewStore) GetRow(ctx context.Context, viewID, sheetID, rowID string) (*ViewRow, error) {
 	if !s.Available() {
 		return nil, nil
@@ -163,11 +187,13 @@ func (s *ViewStore) UpsertRows(ctx context.Context, viewID string, rows []ViewRo
 		setFields := bson.D{
 			{Key: "sheet_id", Value: row.SheetID},
 			{Key: "component_id", Value: row.ComponentID},
+			{Key: "marker", Value: row.Marker},
 			{Key: "group_id", Value: row.GroupID},
 			{Key: "task_id", Value: row.TaskID},
 			{Key: "row_key", Value: row.RowKey},
 			{Key: "schema_hash", Value: row.SchemaHash},
 			{Key: "output_ids", Value: row.OutputIDs},
+			{Key: "output_signature", Value: row.OutputSignature},
 			{Key: "source_output_ids", Value: row.SourceOutputIDs},
 			{Key: "cells", Value: row.Cells},
 			{Key: "updated_at", Value: row.UpdatedAt},
@@ -177,11 +203,16 @@ func (s *ViewStore) UpsertRows(ctx context.Context, viewID string, rows []ViewRo
 			setFields = append(setFields, bson.E{Key: "manual", Value: row.Manual})
 		}
 
-		update := bson.D{{Key: "$set", Value: setFields}}
+		insertOnly := bson.D{
+			{Key: "stable_ref", Value: uuid.New().String()},
+		}
 		if len(row.Manual) == 0 {
-			update = append(update, bson.E{Key: "$setOnInsert", Value: bson.D{
-				{Key: "manual", Value: bson.M{}},
-			}})
+			insertOnly = append(insertOnly, bson.E{Key: "manual", Value: bson.M{}})
+		}
+
+		update := bson.D{
+			{Key: "$set", Value: setFields},
+			{Key: "$setOnInsert", Value: insertOnly},
 		}
 
 		models = append(models, mongo.NewUpdateOneModel().
@@ -202,6 +233,52 @@ func (s *ViewStore) UpsertRows(ctx context.Context, viewID string, rows []ViewRo
 		Int64("upserted", result.UpsertedCount).
 		Int64("modified", result.ModifiedCount).
 		Msg("view: upserted rows")
+	return nil
+}
+
+// UpdateSchemaHash stamps a new schema_hash on all rows in a component scope
+// without remapping cells. Used when columns are added — missing cell keys
+// render as empty so no cell mutation is needed.
+func (s *ViewStore) UpdateSchemaHash(ctx context.Context, viewID, sheetID, componentID, schemaHash string) error {
+	if !s.Available() || strings.TrimSpace(schemaHash) == "" {
+		return nil
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+	res, err := coll.UpdateMany(ctx,
+		rowScopeFilter(sheetID, componentID),
+		bson.D{{Key: "$set", Value: bson.D{
+			{Key: "schema_hash", Value: schemaHash},
+			{Key: "updated_at", Value: time.Now()},
+		}}},
+	)
+	if err != nil {
+		return fmt.Errorf("update schema hash: %w", err)
+	}
+	log.Info().
+		Str("view_id", viewID).
+		Str("sheet_id", sheetID).
+		Str("component_id", componentID).
+		Str("schema_hash", schemaHash).
+		Int64("matched", res.MatchedCount).
+		Int64("modified", res.ModifiedCount).
+		Msg("view: updated schema hash for column addition")
+	return nil
+}
+
+// EnsureIndexes creates indexes required for the view collection, including
+// a unique index on stable_ref.
+func (s *ViewStore) EnsureIndexes(ctx context.Context, viewID string) error {
+	if !s.Available() {
+		return nil
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+	_, err := coll.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "stable_ref", Value: 1}},
+		Options: options.Index().SetUnique(true).SetSparse(true),
+	})
+	if err != nil {
+		return fmt.Errorf("ensure stable_ref index: %w", err)
+	}
 	return nil
 }
 
@@ -405,9 +482,11 @@ func (s *ViewStore) ExcludeRow(ctx context.Context, viewID, sheetID, rowID strin
 	}
 
 	snapshot := ExcludedRowSnapshot{
-		TaskID: row.TaskID,
-		RowKey: row.RowKey,
-		Cells:  row.MergedCells(),
+		ComponentID:     row.ComponentID,
+		TaskID:          row.TaskID,
+		RowKey:          row.RowKey,
+		SourceOutputIDs: append([]string(nil), row.SourceOutputIDs...),
+		Cells:           row.MergedCells(),
 	}
 
 	_, err := coll.UpdateOne(ctx,
@@ -521,17 +600,17 @@ func (s *ViewStore) DropView(ctx context.Context, viewID string) error {
 
 // WidgetRow is the MongoDB document for resolved widget data.
 type WidgetRow struct {
-	ID         string              `bson:"_id"`
-	SheetID    string              `bson:"sheet_id"`
-	WidgetID   string              `bson:"widget_id"`
-	Type       string              `bson:"type"`
-	Status     string              `bson:"status"`
-	Error      string              `bson:"error,omitempty"`
-	SchemaHash string              `bson:"schema_hash"`
-	Metric     *WidgetMetric       `bson:"metric,omitempty"`
-	MapData    *WidgetMapData      `bson:"map_data,omitempty"`
-	ListData   *WidgetListData     `bson:"list_data,omitempty"`
-	UpdatedAt  time.Time           `bson:"updated_at"`
+	ID         string          `bson:"_id"`
+	SheetID    string          `bson:"sheet_id"`
+	WidgetID   string          `bson:"widget_id"`
+	Type       string          `bson:"type"`
+	Status     string          `bson:"status"`
+	Error      string          `bson:"error,omitempty"`
+	SchemaHash string          `bson:"schema_hash"`
+	Metric     *WidgetMetric   `bson:"metric,omitempty"`
+	MapData    *WidgetMapData  `bson:"map_data,omitempty"`
+	ListData   *WidgetListData `bson:"list_data,omitempty"`
+	UpdatedAt  time.Time       `bson:"updated_at"`
 }
 
 type WidgetMetric struct {

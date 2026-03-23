@@ -113,6 +113,29 @@ message WakeSignal {
   repeated WakeAgendaItem wake_agenda = 4;
 }
 
+message SubtaskRequest {
+  string source_output_id = 1;
+  string entity_label = 2;
+  string prompt = 3;
+  int32  wake_delay_minutes = 4;
+}
+
+message SourceWatchRequest {
+  string integration = 1;
+  string reason = 2;
+  string query = 3;
+  string filename_format = 4;
+  repeated string event_types = 5;
+  string entity_key = 6;
+  string entity_label = 7;
+  string source_output_id = 8;
+  string thread_id = 9;
+  string message_id = 10;
+  bool include_attachments = 11;
+  bool include_inline = 12;
+  bool include_message_body = 13;
+}
+
 message SetTaskResultRequest {
   string task_id = 1;
   int32 exit_code = 2;
@@ -120,13 +143,15 @@ message SetTaskResultRequest {
   string attempt_id = 4;
   bool waiting_for_input = 5;
   WakeSignal wake_signal = 6;
-  int64 llm_input_tokens = 7;
-  int64 llm_output_tokens = 8;
-  int64 llm_cache_creation_input_tokens = 9;
-  int64 llm_cache_read_input_tokens = 10;
-  int64 llm_total_tokens = 11;
-  double total_cost_usd = 12;
-  string llm_model_usage_json = 13;
+  repeated SubtaskRequest subtask_requests = 7;
+  repeated SourceWatchRequest source_watch_requests = 8;
+  int64 llm_input_tokens = 9;
+  int64 llm_output_tokens = 10;
+  int64 llm_cache_creation_input_tokens = 11;
+  int64 llm_cache_read_input_tokens = 12;
+  int64 llm_total_tokens = 13;
+  double total_cost_usd = 14;
+  string llm_model_usage_json = 15;
 }
 
 message SetTaskResultResponse {}
@@ -137,6 +162,10 @@ message UpdateTaskStateRequest {
   string run_id = 3;
   string input_kind = 4;
   string waiting_summary = 5;
+  string blocker_kind = 6;
+  string blocker_wait_group_id = 7;
+  string blocker_payload_json = 8;
+  repeated string blocker_output_ids = 9;
 }
 
 message UpdateTaskStateResponse {}

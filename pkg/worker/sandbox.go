@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -18,8 +19,11 @@ import (
 	gatewayclient "github.com/beam-cloud/airstore/pkg/gateway/client"
 	"github.com/beam-cloud/airstore/pkg/runtime"
 	"github.com/beam-cloud/airstore/pkg/types"
+	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/rs/zerolog/log"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 )
 
 // SandboxManager manages the lifecycle of sandboxes on a worker.
@@ -75,6 +79,41 @@ const (
 	sandboxForceDrainTimeout = 2 * time.Second
 )
 
+type sandboxContextClient interface {
+	Mkdir(ctx context.Context, in *pb.ContextMkdirRequest, opts ...grpc.CallOption) (*pb.ContextMkdirResponse, error)
+	Stat(ctx context.Context, in *pb.ContextStatRequest, opts ...grpc.CallOption) (*pb.ContextStatResponse, error)
+}
+
+var newSandboxContextClient = func(addr, token string) (sandboxContextClient, func() error, error) {
+	opts := []grpc.DialOption{
+		grpc.WithTransportCredentials(common.TransportCredentials(addr)),
+	}
+	if token != "" {
+		opts = append(opts, grpc.WithUnaryInterceptor(sandboxAuthInterceptor(token)))
+		opts = append(opts, grpc.WithStreamInterceptor(sandboxStreamAuthInterceptor(token)))
+	}
+
+	conn, err := grpc.NewClient(addr, opts...)
+	if err != nil {
+		return nil, nil, err
+	}
+	return pb.NewContextServiceClient(conn), conn.Close, nil
+}
+
+func sandboxAuthInterceptor(token string) grpc.UnaryClientInterceptor {
+	return func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+token)
+		return invoker(ctx, method, req, reply, cc, opts...)
+	}
+}
+
+func sandboxStreamAuthInterceptor(token string) grpc.StreamClientInterceptor {
+	return func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+token)
+		return streamer(ctx, desc, cc, method, opts...)
+	}
+}
+
 // Config for creating a SandboxManager.
 type Config struct {
 	// Paths
@@ -109,6 +148,7 @@ type Config struct {
 	// API keys
 	AnthropicAPIKey string
 	KernelAPIKey    string
+	CerebrasAPIKey  string
 }
 
 func NewSandboxManager(ctx context.Context, cfg Config) (*SandboxManager, error) {
@@ -201,9 +241,16 @@ func NewSandboxManager(ctx context.Context, cfg Config) (*SandboxManager, error)
 		AnthropicAPIKey: cfg.AnthropicAPIKey,
 		KernelAPIKey:    cfg.KernelAPIKey,
 	})
+	airRunner := NewAirRunner(AirRunnerOptions{
+		AnthropicAPIKey: cfg.AnthropicAPIKey,
+		CerebrasAPIKey:  cfg.CerebrasAPIKey,
+		S2Key:           cfg.S2Token,
+		S2Basin:         cfg.S2Basin,
+	})
 	manager.defaultPromptRunner = claudeRunner
 	manager.promptRunners = map[string]AgentExecutionRunner{
 		"claude": claudeRunner,
+		"air":    airRunner,
 	}
 
 	// Bring up the global worker mount during initialization so the first task
@@ -418,6 +465,13 @@ func (m *SandboxManager) Create(cfg types.SandboxConfig) (*types.SandboxState, e
 		cleanupRootfs()
 		os.RemoveAll(bundlePath)
 		return nil, fmt.Errorf("rootfs verification failed at %s: %w", overlayRootfs, err)
+	}
+
+	if err := m.ensureSandboxWorkingDirOnMount(cfg); err != nil {
+		overlay.Cleanup()
+		cleanupRootfs()
+		os.RemoveAll(bundlePath)
+		return nil, fmt.Errorf("prepare working directory: %w", err)
 	}
 
 	// Generate OCI spec using the overlay rootfs
@@ -1083,6 +1137,158 @@ func resolveSandboxResolvConfSource(useHostResolvConf bool) string {
 	return "/etc/resolv.conf"
 }
 
+func (m *SandboxManager) ensureSandboxWorkingDirOnMount(cfg types.SandboxConfig) error {
+	if strings.TrimSpace(cfg.FilesystemMount) == "" {
+		return nil
+	}
+
+	workDir := path.Clean(strings.TrimSpace(cfg.WorkingDir))
+	switch workDir {
+	case "", ".", "/", types.ContainerWorkDir:
+		return nil
+	}
+
+	if workDir != types.ContainerWorkDir && !strings.HasPrefix(workDir, types.ContainerWorkDir+"/") {
+		return nil
+	}
+
+	storagePath := strings.TrimPrefix(workDir, types.ContainerWorkDir)
+	if storagePath == "" {
+		return nil
+	}
+	if !strings.HasPrefix(storagePath, "/") {
+		storagePath = "/" + storagePath
+	}
+
+	hostPath, err := vfsHostPathWithinMount(cfg.FilesystemMount, workDir)
+	if err != nil {
+		return fmt.Errorf("resolve working directory %q within mount %q: %w", workDir, cfg.FilesystemMount, err)
+	}
+
+	if cfg.FilesystemReadOnly {
+		if err := m.ensureContextDirectoryVisible(cfg, storagePath, hostPath, false); err != nil {
+			return fmt.Errorf("working directory %q does not exist on read-only mount %q: %w", workDir, cfg.FilesystemMount, err)
+		}
+		return nil
+	}
+
+	log.Debug().
+		Str("container_workdir", workDir).
+		Str("storage_path", storagePath).
+		Str("host_path", hostPath).
+		Msg("preparing sandbox working directory on mounted workspace")
+	if err := m.ensureContextDirectoryVisible(cfg, storagePath, hostPath, true); err != nil {
+		return fmt.Errorf("ensure working directory %q via gateway context service: %w", workDir, err)
+	}
+	return nil
+}
+
+func (m *SandboxManager) ensureContextDirectoryVisible(
+	cfg types.SandboxConfig,
+	storagePath string,
+	hostPath string,
+	create bool,
+) error {
+	token := strings.TrimSpace(cfg.Env["AIRSTORE_TOKEN"])
+	if token == "" {
+		token = strings.TrimSpace(m.authToken)
+	}
+	if token == "" {
+		return fmt.Errorf("no auth token available for workspace directory preparation")
+	}
+	if strings.TrimSpace(m.gatewayAddr) == "" {
+		return fmt.Errorf("gateway address unavailable for workspace directory preparation")
+	}
+
+	client, closeClient, err := newSandboxContextClient(m.gatewayAddr, token)
+	if err != nil {
+		return fmt.Errorf("connect context client: %w", err)
+	}
+	defer closeClient()
+
+	ctx, cancel := context.WithTimeout(m.ctx, 15*time.Second)
+	defer cancel()
+
+	if create {
+		if err := ensureContextPath(ctx, client, storagePath); err != nil {
+			return err
+		}
+	} else {
+		if err := statContextPath(ctx, client, storagePath); err != nil {
+			return err
+		}
+	}
+
+	if err := waitForWorkspacePath(hostPath, 2*time.Second); err != nil {
+		return fmt.Errorf("path not visible on mount after context update: %w", err)
+	}
+	return nil
+}
+
+func ensureContextPath(ctx context.Context, client sandboxContextClient, storagePath string) error {
+	current := ""
+	for _, segment := range strings.Split(strings.TrimPrefix(storagePath, "/"), "/") {
+		segment = strings.TrimSpace(segment)
+		if segment == "" {
+			continue
+		}
+		current += "/" + segment
+		resp, err := client.Mkdir(ctx, &pb.ContextMkdirRequest{
+			Path: current,
+			Mode: uint32(syscall.S_IFDIR | 0o755),
+		})
+		if err != nil {
+			return fmt.Errorf("mkdir %q: %w", current, err)
+		}
+		if !resp.Ok {
+			return fmt.Errorf("mkdir %q rejected: %s", current, strings.TrimSpace(resp.Error))
+		}
+	}
+	return nil
+}
+
+func statContextPath(ctx context.Context, client sandboxContextClient, storagePath string) error {
+	resp, err := client.Stat(ctx, &pb.ContextStatRequest{Path: storagePath})
+	if err != nil {
+		return fmt.Errorf("stat %q: %w", storagePath, err)
+	}
+	if !resp.Ok {
+		return fmt.Errorf("stat %q rejected: %s", storagePath, strings.TrimSpace(resp.Error))
+	}
+	if resp.Info == nil || !resp.Info.IsDir {
+		return fmt.Errorf("path %q is not a directory", storagePath)
+	}
+	return nil
+}
+
+func waitForWorkspacePath(hostPath string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		info, err := os.Stat(hostPath)
+		switch {
+		case err == nil:
+			if !info.IsDir() {
+				return fmt.Errorf("%q is not a directory", hostPath)
+			}
+			return nil
+		case !errors.Is(err, os.ErrNotExist):
+			lastErr = err
+		default:
+			lastErr = err
+		}
+
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if lastErr == nil {
+		lastErr = os.ErrNotExist
+	}
+	return fmt.Errorf("stat %q: %w", hostPath, lastErr)
+}
+
 // addFilesystemMount bind-mounts a FUSE filesystem into the sandbox at /workspace.
 func (m *SandboxManager) addFilesystemMount(spec *specs.Spec, source string, readOnly bool) error {
 	// Verify the mount exists and includes required system roots.
@@ -1164,20 +1370,40 @@ func verifyRootfs(rootfsPath string) error {
 	return nil
 }
 
+type promptTaskPlan struct {
+	runner   AgentExecutionRunner
+	analyzer OutputAnalyzer
+	bamlEnv  map[string]string
+}
+
 // buildEntrypoint constructs the entrypoint for a task.
 // Prompt tasks are resolved through prompt runner entrypoints; all other tasks
 // use their explicit task entrypoint.
-func (m *SandboxManager) buildEntrypoint(task types.RunExecution, env map[string]string) []string {
+func (m *SandboxManager) buildEntrypoint(task types.RunExecution, env map[string]string, promptPlan promptTaskPlan) []string {
 	if task.Prompt == "" {
 		return task.Entrypoint
 	}
 
-	return m.buildPromptTaskEntrypoint(task, env)
+	return m.buildPromptTaskEntrypoint(task, env, promptPlan.runner)
 }
 
-func (m *SandboxManager) buildPromptTaskEntrypoint(task types.RunExecution, env map[string]string) []string {
-	runner := m.resolvePromptRunner(task, env)
+func (m *SandboxManager) buildPromptTaskEntrypoint(task types.RunExecution, env map[string]string, runner AgentExecutionRunner) []string {
+	if runner == nil {
+		runner = m.resolvePromptRunner(task, env)
+	}
 	return runner.BuildEntrypoint(task, env)
+}
+
+func (m *SandboxManager) resolvePromptTaskPlan(task types.RunExecution, env map[string]string) promptTaskPlan {
+	return promptTaskPlanForRunner(m.resolvePromptRunner(task, env))
+}
+
+func promptTaskPlanForRunner(runner AgentExecutionRunner) promptTaskPlan {
+	return promptTaskPlan{
+		runner:   runner,
+		analyzer: analyzerForRunner(runner),
+		bamlEnv:  bamlEnvForRunner(runner),
+	}
 }
 
 func (m *SandboxManager) resolvePromptRunner(task types.RunExecution, env map[string]string) AgentExecutionRunner {
@@ -1186,7 +1412,7 @@ func (m *SandboxManager) resolvePromptRunner(task types.RunExecution, env map[st
 		defaultRunner = NewClaudeCodeRunner(ClaudeCodeRunnerOptions{})
 	}
 
-	provider := runnerProviderFromEnv(env)
+	provider := promptTaskProvider(env)
 	if provider == "" {
 		return defaultRunner
 	}
@@ -1204,28 +1430,36 @@ func (m *SandboxManager) resolvePromptRunner(task types.RunExecution, env map[st
 	return runner
 }
 
-// analyzerForTask returns an OutputAnalyzer appropriate for the task's
-// runner, or nil if no analyzer applies (e.g. non-prompt tasks).
-func (m *SandboxManager) analyzerForTask(task types.RunExecution, env map[string]string) OutputAnalyzer {
-	if task.Prompt == "" {
-		return nil
+func promptTaskProvider(env map[string]string) string {
+	if provider := runnerProviderFromEnv(env); provider != "" {
+		return provider
 	}
-	runner := m.resolvePromptRunner(task, env)
-	if _, ok := runner.(*ClaudeCodeRunner); ok {
-		return NewClaudeCodeAnalyzer()
+	return inferProviderFromModel(env)
+}
+
+func analyzerForRunner(runner AgentExecutionRunner) OutputAnalyzer {
+	if provider, ok := runner.(AnalyzerProvider); ok {
+		return provider.OutputAnalyzer()
 	}
 	return nil
 }
 
-// BamlEnv returns the environment variables needed for BAML classifier
-// calls (e.g. ExtractOutputs, ClassifyTurn). The worker's own config
-// is the source of truth — no extraction from task env needed.
-func (m *SandboxManager) BamlEnv() map[string]string {
-	env := map[string]string{}
-	if cr, ok := m.defaultPromptRunner.(*ClaudeCodeRunner); ok && cr.anthropicAPIKey != "" {
-		env["ANTHROPIC_API_KEY"] = cr.anthropicAPIKey
+func bamlEnvForRunner(runner AgentExecutionRunner) map[string]string {
+	if provider, ok := runner.(ClassifierEnvProvider); ok {
+		return cloneMap(provider.ClassifierEnv())
 	}
-	return env
+	if runner == nil {
+		return nil
+	}
+	return map[string]string{}
+}
+
+func (m *SandboxManager) BamlEnvForRunner(runner AgentExecutionRunner) map[string]string {
+	env := bamlEnvForRunner(runner)
+	if len(env) > 0 || runner == m.defaultPromptRunner {
+		return env
+	}
+	return bamlEnvForRunner(m.defaultPromptRunner)
 }
 
 // taskOutputPipeline builds the standard set of writers for capturing task
@@ -1249,7 +1483,7 @@ func (p taskOutputPipeline) Wait() {
 	}
 }
 
-func (m *SandboxManager) taskOutputPipeline(ctx context.Context, task types.RunExecution, env map[string]string) taskOutputPipeline {
+func (m *SandboxManager) taskOutputPipeline(ctx context.Context, task types.RunExecution, promptPlan promptTaskPlan) taskOutputPipeline {
 	tracker := &taskOutputTracker{}
 	outputWriter := newOutputWriter(ctx, m.gatewayClient, task, tracker)
 
@@ -1262,8 +1496,8 @@ func (m *SandboxManager) taskOutputPipeline(ctx context.Context, task types.RunE
 		waiters: []outputWaiter{outputWriter},
 		tracker: tracker,
 	}
-	if analyzer := m.analyzerForTask(task, env); analyzer != nil {
-		analyzerWriter := newAnalyzerWriter(ctx, analyzer, m.gatewayClient, task, m.BamlEnv(), tracker)
+	if analyzer := promptPlan.analyzer; analyzer != nil {
+		analyzerWriter := newAnalyzerWriter(ctx, analyzer, m.gatewayClient, task, promptPlan.bamlEnv, tracker)
 		pipeline.writers = append(pipeline.writers, analyzerWriter)
 		pipeline.waiters = append(pipeline.waiters, analyzerWriter)
 	}
@@ -1271,11 +1505,7 @@ func (m *SandboxManager) taskOutputPipeline(ctx context.Context, task types.RunE
 }
 
 func (m *SandboxManager) copyTaskEnv(task types.RunExecution) map[string]string {
-	env := make(map[string]string, len(task.Env)+1)
-	for key, value := range task.Env {
-		env[key] = value
-	}
-	return env
+	return cloneMap(task.Env)
 }
 
 func (m *SandboxManager) buildTaskSandboxConfig(task types.RunExecution, entrypoint []string, env map[string]string, mountSource string) types.SandboxConfig {
@@ -1383,7 +1613,7 @@ fi
 `
 
 const (
-	ptyDefaultPATH = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	ptyDefaultPATH = "PATH=/home/sandbox/airstore-runners/.venv/bin:/home/sandbox/.npm-global/bin:/home/sandbox/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 	ptyDefaultCols = "180"
 	ptyDefaultRows = "40"
 )
@@ -1470,7 +1700,7 @@ func (m *SandboxManager) ExecCheck(ctx context.Context, sandboxID string, args [
 	proc := specs.Process{
 		Args: args,
 		Cwd:  types.ContainerWorkDir,
-		Env:  []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
+		Env:  []string{ptyDefaultPATH},
 		User: specs.User{UID: types.SandboxUserUID, GID: types.SandboxUserGID},
 	}
 	return m.runtime.Exec(ctx, sandboxID, proc, &runtime.ExecOpts{
@@ -1506,7 +1736,7 @@ func (m *SandboxManager) sandboxEnv(sandboxID string) (map[string]string, error)
 
 // ResolveRunner returns the AgentExecutionRunner for the given task.
 func (m *SandboxManager) ResolveRunner(task types.RunExecution, env map[string]string) AgentExecutionRunner {
-	return m.resolvePromptRunner(task, env)
+	return m.resolvePromptTaskPlan(task, env).runner
 }
 
 // RunTask creates and runs a sandbox for a task, returning when complete
@@ -1514,9 +1744,10 @@ func (m *SandboxManager) RunTask(ctx context.Context, task types.RunExecution) (
 	sandboxID := fmt.Sprintf("task-%s", task.ExternalId)
 
 	env := m.copyTaskEnv(task)
+	promptPlan := m.resolvePromptTaskPlan(task, env)
 
 	// Build entrypoint
-	entrypoint := m.buildEntrypoint(task, env)
+	entrypoint := m.buildEntrypoint(task, env, promptPlan)
 
 	// Mount filesystem for task
 	taskMountSource := m.mountFilesystem(ctx, task)
@@ -1533,13 +1764,11 @@ func (m *SandboxManager) RunTask(ctx context.Context, task types.RunExecution) (
 	// Ensure cleanup
 	defer m.Delete(sandboxID, true)
 
-	// Set up task output with usage tracking
-	usageParser := NewClaudeStreamUsageParser()
-	pipeline := m.taskOutputPipeline(ctx, task, env)
-	taskOutput := NewTaskOutput(task.ExternalId, "stdout", pipeline.writers...)
+	pipeline := m.taskOutputPipeline(ctx, task, promptPlan)
+	taskOutput := NewTaskStreamOutput(task.ExternalId, "stdout", pipeline.writers...)
 	defer pipeline.Wait()
 	defer taskOutput.Flush()
-	outputWriter := io.MultiWriter(taskOutput, usageParser)
+	outputWriter := io.Writer(taskOutput)
 	if err := m.SetOutput(sandboxID, outputWriter, taskOutput.Flush); err != nil {
 		addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to set output")
 	}
@@ -1571,7 +1800,6 @@ func (m *SandboxManager) RunTask(ctx context.Context, task types.RunExecution) (
 				ID:       task.ExternalId,
 				ExitCode: exitCode,
 				Error:    errMsg,
-				Usage:    usageParser.Snapshot(),
 				Duration: time.Since(startTime),
 			}, nil
 
@@ -1597,7 +1825,6 @@ func (m *SandboxManager) RunTask(ctx context.Context, task types.RunExecution) (
 					ID:       task.ExternalId,
 					ExitCode: state.ExitCode,
 					Error:    state.Error,
-					Usage:    usageParser.Snapshot(),
 					Duration: time.Since(startTime),
 				}, nil
 			}

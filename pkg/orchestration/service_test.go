@@ -2,11 +2,13 @@ package orchestration
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -68,6 +70,200 @@ func TestDefaultAgentConfigPrioritizesAssignedSkills(t *testing.T) {
 	if !strings.Contains(prompt, "Explicitly assigned agent skills take priority over broader workspace-wide skills.") {
 		t.Fatalf("expected default prompt to treat broader skills as fallback context, got prompt:\n%s", prompt)
 	}
+	if !strings.Contains(prompt, runtimeSchedulingGuidanceHeader) {
+		t.Fatalf("expected default prompt to include runtime scheduling guidance, got prompt:\n%s", prompt)
+	}
+}
+
+func TestEnsureRuntimeSchedulingGuidanceIsIdempotent(t *testing.T) {
+	base := "You are a helpful agent."
+	got := ensureRuntimeSchedulingGuidance(base)
+	if !strings.Contains(got, runtimeSchedulingGuidanceHeader) {
+		t.Fatalf("expected scheduling guidance to be appended, got:\n%s", got)
+	}
+	if again := ensureRuntimeSchedulingGuidance(got); again != got {
+		t.Fatalf("expected scheduling guidance helper to be idempotent:\n%s", again)
+	}
+}
+
+func TestEnsureRuntimeSchedulingGuidanceReplacesLegacyBlock(t *testing.T) {
+	legacy := strings.Join([]string{
+		"You are a helpful agent.",
+		"",
+		runtimeSchedulingGuidanceHeader,
+		"- Airstore handles timers, sleeps, and future wakes outside your internal loop.",
+		"- If work should resume later, say so explicitly in your final response, including the desired delay and what should happen on wake. The worker and BAML will classify that response and schedule the wake for you.",
+		"",
+		runtimeViewSchemaGuidanceHeader,
+		"- view=Deals; columns=monthly_rent",
+	}, "\n")
+
+	got := ensureRuntimeSchedulingGuidance(legacy)
+
+	if strings.Contains(got, "what should happen on wake") {
+		t.Fatalf("expected legacy wake-request copy to be removed, got:\n%s", got)
+	}
+	if !strings.Contains(got, "NEVER create your own timers") {
+		t.Fatalf("expected new declarative scheduling guidance, got:\n%s", got)
+	}
+	if strings.Count(got, runtimeSchedulingGuidanceHeader) != 1 {
+		t.Fatalf("expected exactly one scheduling guidance block, got:\n%s", got)
+	}
+	if !strings.Contains(got, runtimeViewSchemaGuidanceHeader) {
+		t.Fatalf("expected view schema context to be preserved, got:\n%s", got)
+	}
+}
+
+type viewSchemaBackend struct {
+	repository.BackendRepository
+	profile *types.AgentProfile
+	views   []*types.View
+}
+
+func (b *viewSchemaBackend) GetAgentProfile(_ context.Context, _ uint, _ string) (*types.AgentProfile, error) {
+	return b.profile, nil
+}
+
+func (b *viewSchemaBackend) ListViews(_ context.Context, _ uint) ([]*types.View, error) {
+	return b.views, nil
+}
+
+func TestLoadViewOutputSchemaContextFindsAgentBoundTables(t *testing.T) {
+	backend := &viewSchemaBackend{
+		profile: &types.AgentProfile{
+			ID:       "agent-1",
+			AgentKey: "sales-agent",
+			Name:     "Sales Agent",
+		},
+		views: []*types.View{{
+			ID:   "view-1",
+			Name: "Sales Dashboard",
+			Definition: types.ViewDefinition{
+				Agents: []string{"other-agent"},
+				Sheets: []types.SheetSpec{{
+					ID:   "sheet-1",
+					Name: "Pipeline",
+					Components: []types.ComponentSpec{
+						{
+							ID:    "table-1",
+							Type:  types.ComponentTypeTable,
+							Title: "Outbound Emails",
+							DataSource: &types.DataSource{
+								AgentIDs:    []string{"sales-agent"},
+								ArtifactKey: "sales-email",
+								OutputType:  types.TaskOutputTypeEmail,
+								Transform: []types.TransformRule{
+									{Column: "recipient", Source: "data.to", Type: "email"},
+									{Column: "status", Source: "metadata.status", Type: "status"},
+								},
+							},
+							Config: map[string]any{
+								"columns": []map[string]any{
+									{"key": "recipient", "label": "Recipient", "type": "email"},
+									{"key": "status", "label": "Status", "type": "status", "options": []map[string]any{
+										{"value": "draft", "color": "yellow"},
+										{"value": "sent", "color": "green"},
+									}},
+								},
+							},
+						},
+						{
+							ID:    "table-2",
+							Type:  types.ComponentTypeTable,
+							Title: "Ignore Me",
+							DataSource: &types.DataSource{
+								AgentIDs: []string{"another-agent"},
+							},
+							Config: map[string]any{
+								"columns": []map[string]any{
+									{"key": "title", "label": "Title", "type": "text"},
+								},
+							},
+						},
+					},
+				}},
+			},
+		}},
+	}
+	service := &AgentService{backend: backend}
+
+	agentID := "agent-1"
+	contexts := service.loadViewOutputSchemaContext(context.Background(), 7, &agentID)
+	if got, want := len(contexts), 1; got != want {
+		t.Fatalf("schema context count = %d, want %d", got, want)
+	}
+	if got, want := contexts[0].ComponentID, "table-1"; got != want {
+		t.Fatalf("component id = %q, want %q", got, want)
+	}
+	if got, want := contexts[0].ArtifactKey, "sales-email"; got != want {
+		t.Fatalf("artifact key = %q, want %q", got, want)
+	}
+	if got, want := contexts[0].OutputType, types.TaskOutputTypeEmail; got != want {
+		t.Fatalf("output type = %q, want %q", got, want)
+	}
+	if got, want := len(contexts[0].Columns), 2; got != want {
+		t.Fatalf("column count = %d, want %d", got, want)
+	}
+	if got, want := contexts[0].Columns[0].Key, "recipient"; got != want {
+		t.Fatalf("first column key = %q, want %q", got, want)
+	}
+	if got, want := contexts[0].Columns[1].Options[0].Value, "draft"; got != want {
+		t.Fatalf("status option value = %q, want %q", got, want)
+	}
+	if got, want := contexts[0].TransformHints, []string{"data.to", "metadata.status"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("transform hints = %#v, want %#v", got, want)
+	}
+}
+
+func TestApplyViewSchemaRuntimeContextAddsEnvPromptAndExecutionMetadata(t *testing.T) {
+	env := map[string]string{
+		"AIRSTORE_AGENT_SYSTEM_PROMPT": "You are a helpful agent.",
+	}
+	executionPolicy := map[string]any{}
+	contexts := []types.ViewOutputSchemaContext{{
+		ViewID:         "view-1",
+		ViewName:       "Sales Dashboard",
+		SheetID:        "sheet-1",
+		SheetName:      "Pipeline",
+		ComponentID:    "table-1",
+		ComponentTitle: "Outbound Emails",
+		ArtifactKey:    "sales-email",
+		OutputType:     types.TaskOutputTypeEmail,
+		Columns: []types.ViewOutputSchemaColumn{
+			{Key: "recipient", Label: "Recipient", Type: "email"},
+			{Key: "status", Label: "Status", Type: "status"},
+		},
+	}}
+
+	applyViewSchemaRuntimeContext(env, executionPolicy, contexts)
+
+	if got := env[agentViewSchemaEnvKey]; got == "" {
+		t.Fatal("expected schema context env to be populated")
+	}
+	if !strings.Contains(env["AIRSTORE_AGENT_SYSTEM_PROMPT"], runtimeViewSchemaGuidanceHeader) {
+		t.Fatalf("expected runtime view schema guidance in prompt, got:\n%s", env["AIRSTORE_AGENT_SYSTEM_PROMPT"])
+	}
+	if !strings.Contains(env["AIRSTORE_AGENT_SYSTEM_PROMPT"], "artifact_key=sales-email") {
+		t.Fatalf("expected artifact key guidance in prompt, got:\n%s", env["AIRSTORE_AGENT_SYSTEM_PROMPT"])
+	}
+	raw, ok := executionPolicy[types.AgentExecutionMetaKeyViewSchema]
+	if !ok {
+		t.Fatal("expected execution policy view schema context")
+	}
+	body, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatalf("marshal execution policy schema context: %v", err)
+	}
+	var decoded []types.ViewOutputSchemaContext
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("unmarshal execution policy schema context: %v", err)
+	}
+	if got, want := len(decoded), 1; got != want {
+		t.Fatalf("decoded schema context count = %d, want %d", got, want)
+	}
+	if got, want := decoded[0].ComponentID, "table-1"; got != want {
+		t.Fatalf("decoded component id = %q, want %q", got, want)
+	}
 }
 
 func TestApplyDispatchPayloadIncludesResumeMetadata(t *testing.T) {
@@ -112,6 +308,20 @@ func TestRunInputPromptPrefersDispatchPrompt(t *testing.T) {
 
 	if got := runInputPrompt(payload); got != "wake-specific follow-up prompt" {
 		t.Fatalf("runInputPrompt = %q, want wake-specific follow-up prompt", got)
+	}
+}
+
+func TestDispatchPromptFromValuesWrapsWakeFollowUpPrompt(t *testing.T) {
+	got := dispatchPromptFromValues(map[string]any{
+		types.OrchestrationOutboxPayloadDispatchPrompt:     "plain dispatch prompt",
+		types.OrchestrationOutboxPayloadWakeFollowUpPrompt: "Check Gmail thread 123 for replies and report back.",
+	})
+
+	if !strings.Contains(got, wakeDispatchReminder) {
+		t.Fatalf("expected wake dispatch reminder in prompt, got:\n%s", got)
+	}
+	if !strings.Contains(got, "Check Gmail thread 123 for replies and report back.") {
+		t.Fatalf("expected original follow-up prompt in wrapped prompt, got:\n%s", got)
 	}
 }
 
@@ -184,6 +394,7 @@ type acceptTaskInputBackend struct {
 	task                *types.AgentTask
 	outputs             map[string]*types.TaskOutput
 	appendedInputs      []*types.TaskInput
+	resolvedBlocker     *types.TaskBlockerResolution
 	statusUpdateErrByID map[string]error
 }
 
@@ -199,6 +410,16 @@ func (b *acceptTaskInputBackend) GetTaskOutput(_ context.Context, _ uint, output
 		return output, nil
 	}
 	return nil, &types.ErrTaskOutputNotFound{ID: outputID}
+}
+
+func (b *acceptTaskInputBackend) ListTaskOutputs(_ context.Context, _ uint, taskID string) ([]*types.TaskOutput, error) {
+	var outputs []*types.TaskOutput
+	for _, output := range b.outputs {
+		if output != nil && output.TaskID == taskID {
+			outputs = append(outputs, output)
+		}
+	}
+	return outputs, nil
 }
 
 func (b *acceptTaskInputBackend) UpdateTaskOutputStatus(_ context.Context, _ uint, outputID string, status string) error {
@@ -217,6 +438,27 @@ func (b *acceptTaskInputBackend) AppendTaskInput(_ context.Context, input *types
 	copied := *input
 	b.appendedInputs = append(b.appendedInputs, &copied)
 	return nil
+}
+
+func (b *acceptTaskInputBackend) ResolveCurrentTaskBlocker(_ context.Context, _ uint, taskID string, resolution *types.TaskBlockerResolution) (*types.TaskBlocker, error) {
+	if b.task == nil || b.task.ID != taskID {
+		return nil, &types.ErrAgentTaskNotFound{ID: taskID}
+	}
+	if resolution != nil {
+		copied := *resolution
+		if len(resolution.ResolutionJSON) > 0 {
+			copied.ResolutionJSON = make(map[string]any, len(resolution.ResolutionJSON))
+			for key, value := range resolution.ResolutionJSON {
+				copied.ResolutionJSON[key] = value
+			}
+		}
+		b.resolvedBlocker = &copied
+	}
+	b.task.CurrentBlocker = nil
+	b.task.CurrentBlockerID = nil
+	b.task.InputKind = ""
+	b.task.WaitingSummary = nil
+	return &types.TaskBlocker{ID: "blocker-1", Status: types.TaskBlockerStatusResolved}, nil
 }
 
 func TestAcceptTaskInputRejectsCrossTaskItemDecisions(t *testing.T) {
@@ -318,4 +560,306 @@ func TestAcceptTaskInputRollsBackItemStatusesOnUpdateError(t *testing.T) {
 	if got := len(backend.appendedInputs); got != 0 {
 		t.Fatalf("append count = %d, want 0", got)
 	}
+}
+
+func TestAcceptTaskInputAutoAppliesPendingOutputsForApproveReject(t *testing.T) {
+	backend := &acceptTaskInputBackend{
+		task: &types.AgentTask{
+			ID:          "task-1",
+			WorkspaceID: 7,
+		},
+		outputs: map[string]*types.TaskOutput{
+			"out-old": {
+				ID:        "out-old",
+				TaskID:    "task-1",
+				Title:     "Older approval item",
+				Status:    types.TaskOutputStatusPending,
+				CreatedAt: time.Unix(10, 0),
+				Metadata: map[string]any{
+					types.TaskOutputMetadataBlockingKind: types.TaskOutputBlockingKindApproval,
+					types.TaskOutputMetadataInputKind:    string(types.InputKindApproveReject),
+					types.TaskOutputMetadataWaitGroupID:  "wait-1",
+					types.TaskOutputMetadataApprovalUI:   true,
+				},
+			},
+			"out-pending": {
+				ID:        "out-pending",
+				TaskID:    "task-1",
+				Title:     "Draft outreach email",
+				Status:    types.TaskOutputStatusPending,
+				CreatedAt: time.Unix(20, 0),
+				Metadata: map[string]any{
+					types.TaskOutputMetadataBlockingKind: types.TaskOutputBlockingKindApproval,
+					types.TaskOutputMetadataInputKind:    string(types.InputKindApproveReject),
+					types.TaskOutputMetadataWaitGroupID:  "wait-2",
+					types.TaskOutputMetadataApprovalUI:   true,
+				},
+			},
+			"out-active": {
+				ID:     "out-active",
+				TaskID: "task-1",
+				Title:  "Sent outreach email",
+				Status: types.TaskOutputStatusActive,
+			},
+		},
+	}
+	service := &AgentService{backend: backend}
+	approve := types.TaskInputActionApprove
+
+	_, err := service.AcceptTaskInput(
+		context.Background(),
+		7,
+		"task-1",
+		types.InputKindApproveReject,
+		&approve,
+		"",
+		"idem-3",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("AcceptTaskInput returned error: %v", err)
+	}
+	if got := backend.outputs["out-pending"].Status; got != types.TaskOutputStatusApproved {
+		t.Fatalf("pending output status = %q, want approved", got)
+	}
+	if got := backend.outputs["out-old"].Status; got != types.TaskOutputStatusPending {
+		t.Fatalf("older wait-group output status = %q, want pending", got)
+	}
+	if got := backend.outputs["out-active"].Status; got != types.TaskOutputStatusActive {
+		t.Fatalf("active output status = %q, want active", got)
+	}
+	if got := len(backend.appendedInputs); got != 1 {
+		t.Fatalf("append count = %d, want 1", got)
+	}
+	if msg := backend.appendedInputs[0].Message; !strings.Contains(msg, "Approved:") || !strings.Contains(msg, "Draft outreach email") {
+		t.Fatalf("appended input message = %q, want approval summary for pending output", msg)
+	}
+}
+
+func TestAcceptTaskInputFreeTextSupersedesPendingApprovalOutputs(t *testing.T) {
+	backend := &acceptTaskInputBackend{
+		task: &types.AgentTask{
+			ID:          "task-1",
+			WorkspaceID: 7,
+			State:       types.AgentTaskStateWaiting,
+			InputKind:   types.InputKindApproveReject,
+		},
+		outputs: map[string]*types.TaskOutput{
+			"out-old": {
+				ID:        "out-old",
+				TaskID:    "task-1",
+				Title:     "Older approval draft",
+				Status:    types.TaskOutputStatusPending,
+				CreatedAt: time.Unix(10, 0),
+				Metadata: map[string]any{
+					types.TaskOutputMetadataBlockingKind: types.TaskOutputBlockingKindApproval,
+					types.TaskOutputMetadataInputKind:    string(types.InputKindApproveReject),
+					types.TaskOutputMetadataWaitGroupID:  "wait-1",
+					types.TaskOutputMetadataApprovalUI:   true,
+				},
+			},
+			"out-current": {
+				ID:        "out-current",
+				TaskID:    "task-1",
+				Title:     "Current approval draft",
+				Status:    types.TaskOutputStatusPending,
+				CreatedAt: time.Unix(20, 0),
+				Metadata: map[string]any{
+					types.TaskOutputMetadataBlockingKind: types.TaskOutputBlockingKindApproval,
+					types.TaskOutputMetadataInputKind:    string(types.InputKindApproveReject),
+					types.TaskOutputMetadataWaitGroupID:  "wait-2",
+					types.TaskOutputMetadataApprovalUI:   true,
+				},
+			},
+			"out-unrelated": {
+				ID:        "out-unrelated",
+				TaskID:    "task-1",
+				Title:     "Pending document upload",
+				Status:    types.TaskOutputStatusPending,
+				CreatedAt: time.Unix(30, 0),
+			},
+		},
+	}
+	service := &AgentService{backend: backend}
+
+	_, err := service.AcceptTaskInput(
+		context.Background(),
+		7,
+		"task-1",
+		"",
+		nil,
+		"Please revise the tone and tighten the CTA.",
+		"idem-4",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("AcceptTaskInput returned error: %v", err)
+	}
+	if got := backend.outputs["out-old"].Status; got != types.TaskOutputStatusRejected {
+		t.Fatalf("older approval status = %q, want rejected", got)
+	}
+	if got := backend.outputs["out-current"].Status; got != types.TaskOutputStatusRejected {
+		t.Fatalf("current approval status = %q, want rejected", got)
+	}
+	if got := backend.outputs["out-unrelated"].Status; got != types.TaskOutputStatusPending {
+		t.Fatalf("unrelated pending status = %q, want pending", got)
+	}
+	if got := len(backend.appendedInputs); got != 1 {
+		t.Fatalf("append count = %d, want 1", got)
+	}
+	if got := backend.appendedInputs[0].Kind; got != types.InputKindFreeText {
+		t.Fatalf("input kind = %q, want free_text", got)
+	}
+	if msg := backend.appendedInputs[0].Message; !strings.Contains(msg, "Return an updated version for approval unless the user explicitly approves proceeding.") {
+		t.Fatalf("appended input message = %q, want approval revision guardrail", msg)
+	}
+}
+
+func TestAcceptTaskInputUsesCurrentBlockerArtifactsForAutoApproval(t *testing.T) {
+	backend := &acceptTaskInputBackend{
+		task: &types.AgentTask{
+			ID:               "task-1",
+			WorkspaceID:      7,
+			State:            types.AgentTaskStateWaiting,
+			InputKind:        types.InputKindApproveReject,
+			CurrentBlockerID: stringPtr("blocker-1"),
+			CurrentBlocker: &types.TaskBlocker{
+				ID:        "blocker-1",
+				Kind:      types.TaskBlockerKindApproval,
+				InputKind: types.InputKindApproveReject,
+				Status:    types.TaskBlockerStatusOpen,
+				OutputIDs: []string{"out-current"},
+			},
+		},
+		outputs: map[string]*types.TaskOutput{
+			"out-old": {
+				ID:        "out-old",
+				TaskID:    "task-1",
+				Title:     "Older approval draft",
+				Status:    types.TaskOutputStatusPending,
+				CreatedAt: time.Unix(10, 0),
+				Metadata: map[string]any{
+					types.TaskOutputMetadataBlockerID:    "blocker-old",
+					types.TaskOutputMetadataBlockingKind: types.TaskOutputBlockingKindApproval,
+					types.TaskOutputMetadataInputKind:    string(types.InputKindApproveReject),
+				},
+			},
+			"out-current": {
+				ID:        "out-current",
+				TaskID:    "task-1",
+				Title:     "Current approval draft",
+				Status:    types.TaskOutputStatusPending,
+				CreatedAt: time.Unix(20, 0),
+				Metadata: map[string]any{
+					types.TaskOutputMetadataBlockerID:    "blocker-1",
+					types.TaskOutputMetadataBlockingKind: types.TaskOutputBlockingKindApproval,
+					types.TaskOutputMetadataInputKind:    string(types.InputKindApproveReject),
+				},
+			},
+		},
+	}
+	service := &AgentService{backend: backend}
+	approve := types.TaskInputActionApprove
+
+	_, err := service.AcceptTaskInput(
+		context.Background(),
+		7,
+		"task-1",
+		types.InputKindApproveReject,
+		&approve,
+		"",
+		"idem-blocker-approve",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("AcceptTaskInput returned error: %v", err)
+	}
+	if got := backend.outputs["out-current"].Status; got != types.TaskOutputStatusApproved {
+		t.Fatalf("current blocker output status = %q, want approved", got)
+	}
+	if got := backend.outputs["out-old"].Status; got != types.TaskOutputStatusPending {
+		t.Fatalf("older blocker output status = %q, want pending", got)
+	}
+	if backend.resolvedBlocker == nil {
+		t.Fatal("expected current blocker to be resolved")
+	}
+	if got := backend.resolvedBlocker.Status; got != types.TaskBlockerStatusResolved {
+		t.Fatalf("blocker status = %q, want resolved", got)
+	}
+}
+
+func TestAcceptTaskInputSupersedesOnlyCurrentBlockerArtifacts(t *testing.T) {
+	backend := &acceptTaskInputBackend{
+		task: &types.AgentTask{
+			ID:               "task-1",
+			WorkspaceID:      7,
+			State:            types.AgentTaskStateWaiting,
+			InputKind:        types.InputKindApproveReject,
+			CurrentBlockerID: stringPtr("blocker-1"),
+			CurrentBlocker: &types.TaskBlocker{
+				ID:        "blocker-1",
+				Kind:      types.TaskBlockerKindApproval,
+				InputKind: types.InputKindApproveReject,
+				Status:    types.TaskBlockerStatusOpen,
+				OutputIDs: []string{"out-current"},
+			},
+		},
+		outputs: map[string]*types.TaskOutput{
+			"out-old": {
+				ID:        "out-old",
+				TaskID:    "task-1",
+				Title:     "Older approval draft",
+				Status:    types.TaskOutputStatusPending,
+				CreatedAt: time.Unix(10, 0),
+				Metadata: map[string]any{
+					types.TaskOutputMetadataBlockerID:    "blocker-old",
+					types.TaskOutputMetadataBlockingKind: types.TaskOutputBlockingKindApproval,
+					types.TaskOutputMetadataInputKind:    string(types.InputKindApproveReject),
+				},
+			},
+			"out-current": {
+				ID:        "out-current",
+				TaskID:    "task-1",
+				Title:     "Current approval draft",
+				Status:    types.TaskOutputStatusPending,
+				CreatedAt: time.Unix(20, 0),
+				Metadata: map[string]any{
+					types.TaskOutputMetadataBlockerID:    "blocker-1",
+					types.TaskOutputMetadataBlockingKind: types.TaskOutputBlockingKindApproval,
+					types.TaskOutputMetadataInputKind:    string(types.InputKindApproveReject),
+				},
+			},
+		},
+	}
+	service := &AgentService{backend: backend}
+
+	_, err := service.AcceptTaskInput(
+		context.Background(),
+		7,
+		"task-1",
+		"",
+		nil,
+		"Please revise the CTA.",
+		"idem-blocker-supersede",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("AcceptTaskInput returned error: %v", err)
+	}
+	if got := backend.outputs["out-current"].Status; got != types.TaskOutputStatusRejected {
+		t.Fatalf("current blocker output status = %q, want rejected", got)
+	}
+	if got := backend.outputs["out-old"].Status; got != types.TaskOutputStatusPending {
+		t.Fatalf("older blocker output status = %q, want pending", got)
+	}
+	if backend.resolvedBlocker == nil {
+		t.Fatal("expected current blocker to be superseded")
+	}
+	if got := backend.resolvedBlocker.Status; got != types.TaskBlockerStatusSuperseded {
+		t.Fatalf("blocker status = %q, want superseded", got)
+	}
+}
+
+func stringPtr(value string) *string {
+	return &value
 }

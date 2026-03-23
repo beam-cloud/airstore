@@ -87,6 +87,7 @@ func agentCommandParamsFromProto(req *pb.CreateTaskRequest) (orchestration.Agent
 		Attachments:       attachments,
 		Label:             optionalStringPointer(req.GetLabel()),
 		SpawnedBy:         optionalStringPointer(req.GetSpawnedBy()),
+		ParentTaskID:      optionalStringPointer(req.GetParentTaskId()),
 	}, nil
 }
 

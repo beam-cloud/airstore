@@ -1,7 +1,7 @@
 generator target {
     output_type "go"
     output_dir "../"
-    version "0.218.1"
+    version "0.220.0"
 
     // 'baml-cli generate' will run this after generating go code
     // This command will be run from within $output_dir/baml_client
