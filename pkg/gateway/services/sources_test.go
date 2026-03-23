@@ -89,7 +89,7 @@ func TestEmitSourceHookEvents_DeleteFailureSkipsCommit(t *testing.T) {
 	}
 }
 
-func TestEmitSourceHookEvents_AllRemovedEmitsFsDelete(t *testing.T) {
+func TestEmitSourceHookEvents_AllRemovedSilentlyAbsorbed(t *testing.T) {
 	rdb, err := repository.NewRedisClientForTest()
 	if err != nil {
 		t.Fatalf("failed to create test redis: %v", err)
@@ -112,19 +112,71 @@ func TestEmitSourceHookEvents_AllRemovedEmitsFsDelete(t *testing.T) {
 	})
 	emitter.events = nil
 
-	// All items gone → should emit fs.delete for both
+	// All items gone → transient-empty guard absorbs (no emit, no commit)
 	newCount := svc.emitSourceHookEvents(context.Background(), 128, query, nil)
 	if newCount != 0 {
 		t.Fatalf("expected 0 new results, got %d", newCount)
 	}
+	if len(emitter.events) != 0 {
+		t.Fatalf("expected 0 emitted events (transient guard), got %d", len(emitter.events))
+	}
+
+	// Items reappear → baseline was NOT reset, so no diff → no spurious fire
+	newCount = svc.emitSourceHookEvents(context.Background(), 128, query, []repository.QueryResult{
+		{ID: "x"}, {ID: "y"},
+	})
+	if newCount != 0 {
+		t.Fatalf("expected 0 new results after reappearance (same items), got %d", newCount)
+	}
+	if len(emitter.events) != 0 {
+		t.Fatalf("expected no events after reappearance (baseline preserved), got %d", len(emitter.events))
+	}
+}
+
+func TestEmitSourceHookEvents_TransientEmptyThenGenuineNewItem(t *testing.T) {
+	rdb, err := repository.NewRedisClientForTest()
+	if err != nil {
+		t.Fatalf("failed to create test redis: %v", err)
+	}
+	emitter := &testHookEmitter{}
+	svc := &SourceService{
+		seenTracker: hookspkg.NewSeenTracker(rdb),
+		hookStream:  emitter,
+	}
+
+	query := &types.FilesystemQuery{
+		WorkspaceId: 129,
+		Integration: "gmail",
+		Path:        "/sources/gmail/transient-test",
+	}
+
+	// Bootstrap with {a, b}
+	svc.emitSourceHookEvents(context.Background(), 129, query, []repository.QueryResult{
+		{ID: "a"}, {ID: "b"},
+	})
+	emitter.events = nil
+
+	// Transient empty → absorbed, baseline preserved
+	svc.emitSourceHookEvents(context.Background(), 129, query, nil)
+	if len(emitter.events) != 0 {
+		t.Fatalf("expected 0 events for transient empty, got %d", len(emitter.events))
+	}
+
+	// Items return WITH a genuinely new item → only the new one fires
+	newCount := svc.emitSourceHookEvents(context.Background(), 129, query, []repository.QueryResult{
+		{ID: "a"}, {ID: "b"}, {ID: "c"},
+	})
+	if newCount != 1 {
+		t.Fatalf("expected 1 new result (only genuinely new item), got %d", newCount)
+	}
 	if len(emitter.events) != 1 {
-		t.Fatalf("expected 1 emitted event (fs.delete), got %d", len(emitter.events))
+		t.Fatalf("expected 1 event for genuine new item, got %d", len(emitter.events))
 	}
-	if gotEvent, _ := emitter.events[0]["event"].(string); gotEvent != hookspkg.EventFsDelete {
-		t.Fatalf("expected fs.delete event, got %q", gotEvent)
+	if gotEvent, _ := emitter.events[0]["event"].(string); gotEvent != hookspkg.EventFsCreate {
+		t.Fatalf("expected fs.create, got %q", gotEvent)
 	}
-	if gotCount, _ := emitter.events[0]["removed_count"].(string); gotCount != "2" {
-		t.Fatalf("expected removed_count=2, got %q", gotCount)
+	if gotCount, _ := emitter.events[0]["new_count"].(string); gotCount != "1" {
+		t.Fatalf("expected new_count=1 (only item c), got %q", gotCount)
 	}
 }
 

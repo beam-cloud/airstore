@@ -98,6 +98,8 @@ func (t *SeenTracker) Commit(ctx context.Context, key string, current []string) 
 
 	// Zero results: clear the stored set so stale IDs don't suppress
 	// future events when results reappear.
+	// NOTE: callers should guard against transient empty results before
+	// calling Commit with an empty slice — see emitSourceHookEvents.
 	pipe := t.rdb.Pipeline()
 	if len(current) == 0 {
 		pipe.Del(ctx, key)

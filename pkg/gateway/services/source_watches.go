@@ -90,7 +90,15 @@ func (c *taskSourceWatchController) Register(
 		return nil, err
 	}
 	normalized = merged
-	if err := c.Cleanup(ctx); err != nil {
+
+	// Compute paths that will be re-registered so Cleanup can preserve
+	// their SeenTracker baselines. Without this, the poller can race
+	// between the reset and re-seed, treating existing items as "new".
+	preservePaths := make(map[string]struct{}, len(normalized))
+	for _, req := range normalized {
+		preservePaths[systemManagedSourceWatchPath(c.task.ID, req)] = struct{}{}
+	}
+	if err := c.cleanupPreservingPaths(ctx, preservePaths); err != nil {
 		return nil, err
 	}
 
@@ -145,6 +153,13 @@ func (c *taskSourceWatchController) existingWatchRequests(ctx context.Context) (
 }
 
 func (c *taskSourceWatchController) Cleanup(ctx context.Context) error {
+	return c.cleanupPreservingPaths(ctx, nil)
+}
+
+// cleanupPreservingPaths removes task-owned source watches. Paths in
+// preservePaths skip the SeenTracker reset — their baseline data is
+// kept intact so the poller cannot race and treat existing items as new.
+func (c *taskSourceWatchController) cleanupPreservingPaths(ctx context.Context, preservePaths map[string]struct{}) error {
 	var cleanupErrs []string
 
 	taskQueries, err := c.service.fsStore.ListTaskOwnedQueries(ctx, c.task.WorkspaceID, c.task.ID)
@@ -152,7 +167,13 @@ func (c *taskSourceWatchController) Cleanup(ctx context.Context) error {
 		return fmt.Errorf("list task-owned source watches: %w", err)
 	}
 	for _, query := range taskQueries {
-		if err := c.cleanupOwnedQuery(ctx, query); err != nil {
+		resetSeen := true
+		if preservePaths != nil {
+			if _, keep := preservePaths[query.Path]; keep {
+				resetSeen = false
+			}
+		}
+		if err := c.cleanupOwnedQuery(ctx, query, resetSeen); err != nil {
 			cleanupErrs = append(cleanupErrs, err.Error())
 		}
 	}
@@ -168,7 +189,13 @@ func (c *taskSourceWatchController) Cleanup(ctx context.Context) error {
 		if hook.TargetTaskID == nil || strings.TrimSpace(*hook.TargetTaskID) != strings.TrimSpace(c.task.ID) {
 			continue
 		}
-		if err := c.service.cleanupSourceWatchResources(ctx, c.task.WorkspaceID, hook); err != nil {
+		resetSeen := true
+		if preservePaths != nil {
+			if _, keep := preservePaths[hook.Path]; keep {
+				resetSeen = false
+			}
+		}
+		if err := c.service.cleanupSourceWatchResources(ctx, c.task.WorkspaceID, hook, resetSeen); err != nil {
 			cleanupErrs = append(cleanupErrs, err.Error())
 		}
 	}
@@ -191,28 +218,23 @@ func (c *taskSourceWatchController) register(
 	hook, createdHook, err := c.upsertHook(ctx, query, req)
 	if err != nil {
 		if createdHook {
-			_ = c.service.cleanupSourceWatchResources(ctx, c.task.WorkspaceID, hook)
+			_ = c.service.cleanupSourceWatchResources(ctx, c.task.WorkspaceID, hook, true)
 		} else if createdQuery {
-			_ = c.service.cleanupQueryOnly(ctx, c.task.WorkspaceID, query)
+			_ = c.service.cleanupQueryOnly(ctx, c.task.WorkspaceID, query, true)
 		}
 		return nil, err
 	}
 
-	if err := c.service.resetSourceWatchBaseline(ctx, c.task.WorkspaceID, query.Path); err != nil {
-		return nil, fmt.Errorf("reset source watch baseline %s: %w", query.Path, err)
-	}
-
-	results, err := c.service.bootstrapSourceWatchBaseline(ctx, c.task.WorkspaceID, query)
-	if err != nil {
-		_ = c.service.cleanupSourceWatchResources(ctx, c.task.WorkspaceID, hook)
-		return nil, fmt.Errorf("bootstrap source watch baseline %s: %w", query.Path, err)
-	}
-
+	// Don't bootstrap the baseline inline — let the poller handle it
+	// via the baseline_pending flag in the query spec. This gives the
+	// source API time to reflect any messages the agent just sent
+	// before the SeenTracker baseline is established, preventing the
+	// agent's own sent messages from appearing as "new" items.
 	return &sourceWatchRegistration{
 		Query:   query,
 		Hook:    hook,
 		Request: req,
-		Results: results,
+		Results: nil,
 	}, nil
 }
 
@@ -329,33 +351,14 @@ func (s *SourceService) seedSourceWatchBaseline(ctx context.Context, workspaceID
 	return s.seenTracker.Commit(ctx, seenKey, ids)
 }
 
-func (s *SourceService) resetSourceWatchBaseline(ctx context.Context, workspaceID uint, queryPath string) error {
-	if s == nil || s.seenTracker == nil {
+// seedSourceWatchBaselineFromResults updates the SeenTracker for a
+// source watch query without clearing the baseline_pending flag.
+// Used during the grace period to keep the baseline current.
+func (s *SourceService) seedSourceWatchBaselineFromResults(ctx context.Context, query *types.FilesystemQuery, results []repository.QueryResult) error {
+	if query == nil {
 		return nil
 	}
-	return s.seenTracker.ResetPath(ctx, workspaceID, queryPath)
-}
-
-func (s *SourceService) bootstrapSourceWatchBaseline(
-	ctx context.Context,
-	workspaceID uint,
-	query *types.FilesystemQuery,
-) ([]repository.QueryResult, error) {
-	if query == nil {
-		return nil, fmt.Errorf("source watch query is required")
-	}
-	pctx, connected := s.loadQueryCredentials(ctx, &sources.ProviderContext{WorkspaceId: workspaceID}, query)
-	if !connected {
-		return nil, fmt.Errorf("not connected to %s", query.Integration)
-	}
-	results, err := s.invalidateAndExecute(ctx, pctx, query, "source_watch_register")
-	if err != nil {
-		return nil, fmt.Errorf("initial sync %s: %w", query.Path, err)
-	}
-	if err := s.completePendingSourceWatchBaseline(ctx, query, results); err != nil {
-		return nil, err
-	}
-	return results, nil
+	return s.seedSourceWatchBaseline(ctx, query.WorkspaceId, query.Path, results)
 }
 
 func (s *SourceService) completePendingSourceWatchBaseline(
@@ -382,7 +385,7 @@ func (s *SourceService) completePendingSourceWatchBaseline(
 	return nil
 }
 
-func (s *SourceService) cleanupSourceWatchResources(ctx context.Context, workspaceID uint, hook *types.Hook) error {
+func (s *SourceService) cleanupSourceWatchResources(ctx context.Context, workspaceID uint, hook *types.Hook, resetSeen bool) error {
 	if hook == nil {
 		return nil
 	}
@@ -394,10 +397,10 @@ func (s *SourceService) cleanupSourceWatchResources(ctx context.Context, workspa
 		return fmt.Errorf("delete source watch hook %s: %w", hook.ExternalId, err)
 	}
 	if query != nil {
-		if err := s.cleanupQueryOnly(ctx, workspaceID, query); err != nil {
+		if err := s.cleanupQueryOnly(ctx, workspaceID, query, resetSeen); err != nil {
 			return err
 		}
-	} else if s.seenTracker != nil {
+	} else if resetSeen && s.seenTracker != nil {
 		if err := s.seenTracker.ResetPath(ctx, workspaceID, hook.Path); err != nil {
 			return fmt.Errorf("reset seen tracker %s: %w", hook.Path, err)
 		}
@@ -405,7 +408,7 @@ func (s *SourceService) cleanupSourceWatchResources(ctx context.Context, workspa
 	return nil
 }
 
-func (c *taskSourceWatchController) cleanupOwnedQuery(ctx context.Context, query *types.FilesystemQuery) error {
+func (c *taskSourceWatchController) cleanupOwnedQuery(ctx context.Context, query *types.FilesystemQuery, resetSeen bool) error {
 	if query == nil {
 		return nil
 	}
@@ -418,10 +421,10 @@ func (c *taskSourceWatchController) cleanupOwnedQuery(ctx context.Context, query
 			return fmt.Errorf("delete source watch hook %s: %w", hook.ExternalId, err)
 		}
 	}
-	return c.service.cleanupQueryOnly(ctx, c.task.WorkspaceID, query)
+	return c.service.cleanupQueryOnly(ctx, c.task.WorkspaceID, query, resetSeen)
 }
 
-func (s *SourceService) cleanupQueryOnly(ctx context.Context, workspaceID uint, query *types.FilesystemQuery) error {
+func (s *SourceService) cleanupQueryOnly(ctx context.Context, workspaceID uint, query *types.FilesystemQuery, resetSeen bool) error {
 	if query == nil {
 		return nil
 	}
@@ -431,7 +434,7 @@ func (s *SourceService) cleanupQueryOnly(ctx context.Context, workspaceID uint, 
 	if err := s.fsStore.DeleteQuery(ctx, query.ExternalId); err != nil {
 		return fmt.Errorf("delete source watch query %s: %w", query.ExternalId, err)
 	}
-	if s.seenTracker != nil {
+	if resetSeen && s.seenTracker != nil {
 		if err := s.seenTracker.ResetPath(ctx, workspaceID, query.Path); err != nil {
 			return fmt.Errorf("reset seen tracker %s: %w", query.Path, err)
 		}

@@ -7,7 +7,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/beam-cloud/airstore/pkg/common"
 	hookspkg "github.com/beam-cloud/airstore/pkg/hooks"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/sources"
@@ -246,8 +245,8 @@ func TestRegisterTaskSourceWatchesSeedsBaselineAndDedupes(t *testing.T) {
 	if got, _ := blocker.PayloadJSON["source_watch_count"].(int); got != 1 {
 		t.Fatalf("source_watch_count = %d, want 1", got)
 	}
-	if provider.executeCalls != 1 {
-		t.Fatalf("execute calls = %d, want 1", provider.executeCalls)
+	if provider.executeCalls != 0 {
+		t.Fatalf("execute calls = %d, want 0 (baseline is lazy)", provider.executeCalls)
 	}
 
 	queries, err := fsStore.ListQueries(context.Background(), task.WorkspaceID, types.PathSources+"/"+string(types.SourceWeb))
@@ -266,19 +265,15 @@ func TestRegisterTaskSourceWatchesSeedsBaselineAndDedupes(t *testing.T) {
 	if queries[0].OwnerTaskID == nil || *queries[0].OwnerTaskID != task.ID {
 		t.Fatalf("query owner task id = %#v, want %q", queries[0].OwnerTaskID, task.ID)
 	}
+	if !sourceWatchBaselinePending(queries[0]) {
+		t.Fatal("expected baseline_pending=true (baseline is established lazily by poller)")
+	}
 	sourceWatches, ok := blocker.PayloadJSON["source_watches"].([]map[string]any)
 	if !ok || len(sourceWatches) != 1 {
 		t.Fatalf("source_watches payload = %#v, want one entry", blocker.PayloadJSON["source_watches"])
 	}
 	if gotPath, _ := sourceWatches[0]["path"].(string); gotPath != queries[0].Path {
 		t.Fatalf("blocker path = %q, want %q", gotPath, queries[0].Path)
-	}
-	results, err := fsStore.GetQueryResults(context.Background(), task.WorkspaceID, queries[0].Path)
-	if err != nil {
-		t.Fatalf("GetQueryResults returned error: %v", err)
-	}
-	if len(results) != 2 {
-		t.Fatalf("cached result count = %d, want 2", len(results))
 	}
 
 	hooks, err := fsStore.ListHooks(context.Background(), task.WorkspaceID)
@@ -293,15 +288,6 @@ func TestRegisterTaskSourceWatchesSeedsBaselineAndDedupes(t *testing.T) {
 	}
 	if hooks[0].TargetTaskID == nil || *hooks[0].TargetTaskID != task.ID {
 		t.Fatalf("hook target task id = %#v, want %q", hooks[0].TargetTaskID, task.ID)
-	}
-
-	seenKey := common.Keys.HookSeen(task.WorkspaceID, types.GeneratePathID(hookspkg.NormalizePath(queries[0].Path)))
-	diff, err := svc.seenTracker.Compare(context.Background(), seenKey, []string{"doc-1", "doc-2"})
-	if err != nil {
-		t.Fatalf("seen tracker compare returned error: %v", err)
-	}
-	if diff != nil && (len(diff.Added) != 0 || len(diff.Removed) != 0) {
-		t.Fatalf("expected seeded baseline with no diff, got %#v", diff)
 	}
 }
 
@@ -620,7 +606,7 @@ func TestRegisterTaskSourceWatchesUsesOriginRunMemberToDisambiguateConnections(t
 	}
 }
 
-func TestRegisterTaskSourceWatchesFailsWhenBootstrapFails(t *testing.T) {
+func TestRegisterTaskSourceWatchesSucceedsWithFailingProvider(t *testing.T) {
 	rdb, err := repository.NewRedisClientForTest()
 	if err != nil {
 		t.Fatalf("failed to create test redis: %v", err)
@@ -645,30 +631,33 @@ func TestRegisterTaskSourceWatchesFailsWhenBootstrapFails(t *testing.T) {
 		Query:       "site:example.com status",
 		EntityLabel: "status page",
 	}})
-	if err == nil {
-		t.Fatal("expected bootstrap failure to abort registration")
+	if err != nil {
+		t.Fatalf("registration should succeed (bootstrap is lazy): %v", err)
 	}
-	if blocker != nil {
-		t.Fatal("blocker = non-nil, want nil")
+	if blocker == nil {
+		t.Fatal("expected blocker spec")
 	}
 
 	queries, err := fsStore.ListQueries(context.Background(), task.WorkspaceID, types.PathSources+"/"+string(types.SourceWeb))
 	if err != nil {
 		t.Fatalf("ListQueries returned error: %v", err)
 	}
-	if len(queries) != 0 {
-		t.Fatalf("query count = %d, want 0", len(queries))
+	if len(queries) != 1 {
+		t.Fatalf("query count = %d, want 1", len(queries))
+	}
+	if !sourceWatchBaselinePending(queries[0]) {
+		t.Fatal("expected baseline_pending=true (poller will handle bootstrap)")
+	}
+	if provider.executeCalls != 0 {
+		t.Fatalf("execute calls = %d, want 0 (no inline bootstrap)", provider.executeCalls)
 	}
 
 	hooks, err := fsStore.ListHooks(context.Background(), task.WorkspaceID)
 	if err != nil {
 		t.Fatalf("ListHooks returned error: %v", err)
 	}
-	if len(hooks) != 0 {
-		t.Fatalf("hook count = %d, want 0", len(hooks))
-	}
-	if len(emitter.events) != 0 {
-		t.Fatalf("event count = %d, want 0", len(emitter.events))
+	if len(hooks) != 1 {
+		t.Fatalf("hook count = %d, want 1", len(hooks))
 	}
 }
 
@@ -717,14 +706,8 @@ func TestRegisterTaskSourceWatchesAllowsExactGmailQueryWithoutFallback(t *testin
 	if blocker == nil {
 		t.Fatal("expected blocker spec")
 	}
-	if provider.executeCalls != 1 {
-		t.Fatalf("executeCalls = %d, want 1", provider.executeCalls)
-	}
-	if got := provider.executedSpecs[0].Query; got != "" {
-		t.Fatalf("query = %q, want empty thread-targeted query", got)
-	}
-	if got := provider.executedSpecs[0].Metadata["thread_id"]; got != "thread-123" {
-		t.Fatalf("thread_id metadata = %q, want %q", got, "thread-123")
+	if provider.executeCalls != 0 {
+		t.Fatalf("executeCalls = %d, want 0 (baseline is lazy)", provider.executeCalls)
 	}
 
 	queries, err := fsStore.ListQueries(context.Background(), task.WorkspaceID, types.PathSources+"/"+string(types.SourceGmail))
@@ -734,8 +717,16 @@ func TestRegisterTaskSourceWatchesAllowsExactGmailQueryWithoutFallback(t *testin
 	if len(queries) != 1 {
 		t.Fatalf("query count = %d, want 1", len(queries))
 	}
-	if sourceWatchBaselinePending(queries[0]) {
-		t.Fatal("expected bootstrap to clear pending baseline")
+	if !sourceWatchBaselinePending(queries[0]) {
+		t.Fatal("expected baseline_pending=true (poller will establish baseline)")
+	}
+
+	parsed := parseQuerySpec(string(types.SourceGmail), queries[0].QuerySpec)
+	if got := parsed.Query; got != "" {
+		t.Fatalf("query = %q, want empty thread-targeted query", got)
+	}
+	if got := parsed.Metadata["thread_id"]; got != "thread-123" {
+		t.Fatalf("thread_id metadata = %q, want %q", got, "thread-123")
 	}
 }
 
@@ -790,15 +781,8 @@ func TestRegisterTaskSourceWatchesReusesExistingThreadContext(t *testing.T) {
 		t.Fatalf("second RegisterTaskSourceWatches returned error: %v", err)
 	}
 
-	if provider.executeCalls != 2 {
-		t.Fatalf("executeCalls = %d, want 2", provider.executeCalls)
-	}
-	second := provider.executedSpecs[1]
-	if got := second.Metadata["thread_id"]; got != "thread-123" {
-		t.Fatalf("thread_id metadata = %q, want %q", got, "thread-123")
-	}
-	if got := second.Query; got != `subject:"Live soak 9b8c239b"` {
-		t.Fatalf("query = %q, want subject-scoped follow-up query", got)
+	if provider.executeCalls != 0 {
+		t.Fatalf("executeCalls = %d, want 0 (baseline is lazy)", provider.executeCalls)
 	}
 
 	queries, err := fsStore.ListQueries(context.Background(), task.WorkspaceID, types.PathSources+"/"+string(types.SourceGmail))
@@ -811,6 +795,9 @@ func TestRegisterTaskSourceWatchesReusesExistingThreadContext(t *testing.T) {
 	parsed := parseQuerySpec(string(types.SourceGmail), queries[0].QuerySpec)
 	if got := parsed.Metadata["thread_id"]; got != "thread-123" {
 		t.Fatalf("persisted thread_id = %q, want %q", got, "thread-123")
+	}
+	if got := parsed.Query; got != `subject:"Live soak 9b8c239b"` {
+		t.Fatalf("query = %q, want subject-scoped follow-up query", got)
 	}
 }
 

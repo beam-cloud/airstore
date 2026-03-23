@@ -12,8 +12,8 @@ func init() {
 
 func up060(tx *sql.Tx) error {
 	stmts := []string{
-		`UPDATE task_output SET status = 'cancelled' WHERE status = 'superseded'`,
 		`ALTER TABLE task_output DROP CONSTRAINT IF EXISTS chk_task_output_status`,
+		`UPDATE task_output SET status = 'cancelled' WHERE status = 'superseded'`,
 		`ALTER TABLE task_output ADD CONSTRAINT chk_task_output_status CHECK (status IN ('active', 'pending', 'approved', 'rejected', 'cancelled'))`,
 	}
 	for _, stmt := range stmts {
