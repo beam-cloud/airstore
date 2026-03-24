@@ -34,6 +34,7 @@ const (
 	OperationTypeREJECT_TASK     OperationType = "REJECT_TASK"
 	OperationTypeCREATE_SCHEDULE OperationType = "CREATE_SCHEDULE"
 	OperationTypeDELETE_SCHEDULE OperationType = "DELETE_SCHEDULE"
+	OperationTypeIMPORT_DATA     OperationType = "IMPORT_DATA"
 )
 
 // Values returns all allowed values for the OperationType type.
@@ -49,6 +50,7 @@ func (OperationType) Values() []OperationType {
 		OperationTypeREJECT_TASK,
 		OperationTypeCREATE_SCHEDULE,
 		OperationTypeDELETE_SCHEDULE,
+		OperationTypeIMPORT_DATA,
 	}
 }
 

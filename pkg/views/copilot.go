@@ -1,9 +1,13 @@
 package views
 
 import (
+	"bytes"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -25,26 +29,27 @@ import (
 // Types
 // ---------------------------------------------------------------------------
 
-type DraftMessage struct {
+type ChatMessage struct {
 	Role      string `json:"role"`
 	Content   string `json:"content"`
 	Timestamp int64  `json:"ts"`
 }
 
 type AttachedFile struct {
-	Path string `json:"path"`
-	Name string `json:"name"`
+	Path        string `json:"path"`
+	Name        string `json:"name"`
+	ContentType string `json:"content_type,omitempty"`
 }
 
-type Draft struct {
-	ID              string         `json:"id"`
-	WorkspaceID     string         `json:"workspace_id"`
-	Status          string         `json:"status"`
-	ViewContent     string         `json:"view_content"`
-	PublishedViewID string         `json:"published_view_id,omitempty"`
-	Messages        []DraftMessage `json:"messages"`
-	CreatedAt       int64          `json:"created_at"`
-	UpdatedAt       int64          `json:"updated_at"`
+type ChatState struct {
+	ID              string        `json:"id"`
+	WorkspaceID     string        `json:"workspace_id"`
+	Status          string        `json:"status"`
+	ViewContent     string        `json:"view_content"`
+	PublishedViewID string        `json:"published_view_id,omitempty"`
+	Messages        []ChatMessage `json:"messages"`
+	CreatedAt       int64         `json:"created_at"`
+	UpdatedAt       int64         `json:"updated_at"`
 }
 
 type DraftSummary struct {
@@ -57,7 +62,7 @@ type DraftSummary struct {
 	UpdatedAt   int64  `json:"updated_at"`
 }
 
-type PartialViewDraftResponse struct {
+type PartialChatResponse struct {
 	Message     string
 	ViewContent string
 	UpdateType  string
@@ -112,7 +117,7 @@ func NewCopilot(s2 *common.S2Client, redis *common.RedisClient, backend reposito
 	return &Copilot{s2: s2, redis: redis, backend: backend, storage: storage, agentAPI: agentAPI, store: store}
 }
 
-func (c *Copilot) DraftsAvailable() bool {
+func (c *Copilot) ChatAvailable() bool {
 	return c != nil && c.s2 != nil && c.s2.Enabled()
 }
 
@@ -135,31 +140,31 @@ func nowMS() int64 { return time.Now().UnixMilli() }
 // Draft lifecycle
 // ---------------------------------------------------------------------------
 
-func (c *Copilot) CreateDraft(workspaceID string) *Draft {
+func (c *Copilot) CreateChatState(workspaceID string) *ChatState {
 	now := nowMS()
-	return &Draft{
+	return &ChatState{
 		ID:          uuid.New().String(),
 		WorkspaceID: workspaceID,
 		Status:      "active",
-		Messages:    []DraftMessage{},
+		Messages:    []ChatMessage{},
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
 }
 
-func (c *Copilot) LoadDraft(ctx context.Context, workspaceID, draftID string) (*Draft, error) {
+func (c *Copilot) LoadChatState(ctx context.Context, workspaceID, viewID string) (*ChatState, error) {
 	if c.s2 == nil || !c.s2.Enabled() {
 		return nil, fmt.Errorf("S2 not configured")
 	}
-	records, err := c.s2.Read(ctx, common.Streams.ViewDraft(draftID), 0, 1000)
+	records, err := c.s2.Read(ctx, common.Streams.ViewDraft(viewID), 0, 1000)
 	if err != nil {
-		return nil, fmt.Errorf("read draft stream: %w", err)
+		return nil, fmt.Errorf("read chat stream: %w", err)
 	}
 	if len(records) == 0 {
-		return nil, fmt.Errorf("draft not found")
+		return nil, fmt.Errorf("chat state not found")
 	}
 
-	draft := &Draft{ID: draftID, Status: "active", Messages: []DraftMessage{}}
+	state := &ChatState{ID: viewID, Status: "active", Messages: []ChatMessage{}}
 	for _, rec := range records {
 		var e draftStreamEntry
 		if err := json.Unmarshal([]byte(rec.Body), &e); err != nil {
@@ -167,43 +172,43 @@ func (c *Copilot) LoadDraft(ctx context.Context, workspaceID, draftID string) (*
 		}
 		switch e.Type {
 		case "meta":
-			draft.WorkspaceID = e.WorkspaceID
-			draft.CreatedAt = e.Timestamp
+			state.WorkspaceID = e.WorkspaceID
+			state.CreatedAt = e.Timestamp
 		case "message":
-			draft.Messages = append(draft.Messages, DraftMessage{Role: e.Role, Content: e.Content, Timestamp: e.Timestamp})
+			state.Messages = append(state.Messages, ChatMessage{Role: e.Role, Content: e.Content, Timestamp: e.Timestamp})
 		case "view":
-			draft.ViewContent = e.Content
+			state.ViewContent = e.Content
 		case "published_view_id":
-			draft.PublishedViewID = e.Content
+			state.PublishedViewID = e.Content
 		case "status":
-			draft.Status = e.Content
+			state.Status = e.Content
 		}
-		if e.Timestamp > draft.UpdatedAt {
-			draft.UpdatedAt = e.Timestamp
+		if e.Timestamp > state.UpdatedAt {
+			state.UpdatedAt = e.Timestamp
 		}
 	}
-	if draft.WorkspaceID == "" || (workspaceID != "" && draft.WorkspaceID != workspaceID) {
-		return nil, fmt.Errorf("draft not found")
+	if state.WorkspaceID == "" || (workspaceID != "" && state.WorkspaceID != workspaceID) {
+		return nil, fmt.Errorf("chat state not found")
 	}
-	if draft.UpdatedAt == 0 {
-		draft.UpdatedAt = draft.CreatedAt
+	if state.UpdatedAt == 0 {
+		state.UpdatedAt = state.CreatedAt
 	}
-	return draft, nil
+	return state, nil
 }
 
-func (c *Copilot) DeleteDraft(ctx context.Context, workspaceID, draftID string) error {
-	if err := c.persistDraft(ctx, draftID, "status", "discarded", "", ""); err != nil {
-		return fmt.Errorf("persist draft status: %w", err)
+func (c *Copilot) DeleteChatState(ctx context.Context, workspaceID, id string) error {
+	if err := c.persistChat(ctx, id, "status", "discarded", "", ""); err != nil {
+		return fmt.Errorf("persist status: %w", err)
 	}
-	return c.indexDraft(ctx, workspaceID, "discarded", draftID, "", "", "")
+	return c.indexDraft(ctx, workspaceID, "discarded", id, "", "", "")
 }
 
 // ---------------------------------------------------------------------------
-// Draft persistence — all S2 writes go through two helpers
+// Chat persistence — all S2 writes go through persistChat
 // ---------------------------------------------------------------------------
 
-func (c *Copilot) persistDraft(ctx context.Context, draftID, entryType, content, role, workspaceID string) error {
-	return c.s2Append(ctx, common.Streams.ViewDraft(draftID), draftStreamEntry{
+func (c *Copilot) persistChat(ctx context.Context, viewID, entryType, content, role, workspaceID string) error {
+	return c.s2Append(ctx, common.Streams.ViewDraft(viewID), draftStreamEntry{
 		Type:        entryType,
 		Content:     content,
 		Role:        role,
@@ -224,17 +229,17 @@ func (c *Copilot) indexDraft(ctx context.Context, workspaceID, eventType, draftI
 }
 
 // Public persistence API — thin wrappers for callers.
-func (c *Copilot) PersistMeta(ctx context.Context, draft *Draft) error {
-	return c.s2Append(ctx, common.Streams.ViewDraft(draft.ID), draftStreamEntry{
-		Type: "meta", WorkspaceID: draft.WorkspaceID, Timestamp: draft.CreatedAt,
+func (c *Copilot) PersistChatMeta(ctx context.Context, cs *ChatState) error {
+	return c.s2Append(ctx, common.Streams.ViewDraft(cs.ID), draftStreamEntry{
+		Type: "meta", WorkspaceID: cs.WorkspaceID, Timestamp: cs.CreatedAt,
 	})
 }
-func (c *Copilot) PersistViewContent(ctx context.Context, draftID, viewContent string) error {
-	return c.persistDraft(ctx, draftID, "view", viewContent, "", "")
+func (c *Copilot) PersistViewContent(ctx context.Context, viewID, viewContent string) error {
+	return c.persistChat(ctx, viewID, "view", viewContent, "", "")
 }
 
-func (c *Copilot) PersistPublishedViewID(ctx context.Context, draftID, viewID string) error {
-	return c.persistDraft(ctx, draftID, "published_view_id", viewID, "", "")
+func (c *Copilot) PersistPublishedViewID(ctx context.Context, chatID, viewID string) error {
+	return c.persistChat(ctx, chatID, "published_view_id", viewID, "", "")
 }
 
 func (c *Copilot) IndexDraftCreated(ctx context.Context, workspaceID, draftID, desc, viewName, viewID string) error {
@@ -351,7 +356,7 @@ func (c *Copilot) ListDrafts(ctx context.Context, workspaceID string) ([]DraftSu
 		if d == nil || d.Status == "published" || d.Status == "discarded" {
 			continue
 		}
-		draft, err := c.LoadDraft(reconcileCtx, workspaceID, d.ID)
+		draft, err := c.LoadChatState(reconcileCtx, workspaceID, d.ID)
 		if err != nil || draft == nil {
 			continue
 		}
@@ -399,13 +404,13 @@ func (c *Copilot) ListDrafts(ctx context.Context, workspaceID string) ([]DraftSu
 // Publishing
 // ---------------------------------------------------------------------------
 
-func (c *Copilot) PublishView(ctx context.Context, draft *Draft, workspaceID uint) (*types.View, error) {
-	if draft.ViewContent == "" {
-		return nil, fmt.Errorf("draft has no view content")
+func (c *Copilot) PublishView(ctx context.Context, cs *ChatState, workspaceID uint) (*types.View, error) {
+	if cs.ViewContent == "" {
+		return nil, fmt.Errorf("no view content to publish")
 	}
 
 	var def types.ViewDefinition
-	if err := json.Unmarshal([]byte(draft.ViewContent), &def); err != nil {
+	if err := json.Unmarshal([]byte(cs.ViewContent), &def); err != nil {
 		return nil, fmt.Errorf("invalid view definition: %w", err)
 	}
 	agents := c.loadWorkspaceAgents(ctx, workspaceID)
@@ -419,40 +424,35 @@ func (c *Copilot) PublishView(ctx context.Context, draft *Draft, workspaceID uin
 		Strs("pre_canon_agents", preCanonAgents).
 		Strs("post_canon_agents", def.Agents).
 		Int("workspace_agents", len(agents)).
-		Str("draft_id", draft.ID).
+		Str("chat_state_id", cs.ID).
 		Str("view_name", def.Name).
 		Msg("view: publishing definition")
 
-	// Distributed lock: only one pod publishes this draft at a time.
-	// The 30s TTL is generous — publish typically takes <1s. If the lock
-	// holder crashes, it auto-expires and retries succeed.
 	const publishLockTTL = 30 * time.Second
 	if c.redis != nil {
-		lockKey := common.Keys.ViewPublishLock(draft.ID)
+		lockKey := common.Keys.ViewPublishLock(cs.ID)
 		lockToken := uuid.NewString()
 		acquired, err := c.redis.SetNX(ctx, lockKey, lockToken, publishLockTTL).Result()
 		if err != nil {
 			return nil, fmt.Errorf("publish lock: %w", err)
 		}
 		if !acquired {
-			// Another pod is publishing. Re-read draft to get the view ID
-			// it will (or already did) persist, then return that view.
 			time.Sleep(500 * time.Millisecond)
-			if fresh, err := c.LoadDraft(ctx, draft.WorkspaceID, draft.ID); err == nil && fresh != nil && fresh.PublishedViewID != "" {
-				draft.PublishedViewID = fresh.PublishedViewID
-				draft.Status = "published"
+			if fresh, err := c.LoadChatState(ctx, cs.WorkspaceID, cs.ID); err == nil && fresh != nil && fresh.PublishedViewID != "" {
+				cs.PublishedViewID = fresh.PublishedViewID
+				cs.Status = "published"
 				if v, err := c.backend.GetView(ctx, workspaceID, fresh.PublishedViewID); err == nil && v != nil {
 					return v, nil
 				}
 			}
 			if existingViews, err := c.backend.ListViews(ctx, workspaceID); err == nil {
 				for _, existing := range existingViews {
-					if existing != nil && strings.TrimSpace(existing.SourceDraftID) == draft.ID {
+					if existing != nil && strings.TrimSpace(existing.SourceDraftID) == cs.ID {
 						return existing, nil
 					}
 				}
 			}
-			return nil, fmt.Errorf("draft is being published by another replica")
+			return nil, fmt.Errorf("view is being published by another replica")
 		}
 		defer func() {
 			delCtx, delCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -463,23 +463,21 @@ func (c *Copilot) PublishView(ctx context.Context, draft *Draft, workspaceID uin
 				[]string{lockKey},
 				lockToken,
 			).Int64(); err != nil {
-				log.Warn().Err(err).Str("draft_id", draft.ID).Msg("failed to release publish lock")
+				log.Warn().Err(err).Str("view_id", cs.ID).Msg("failed to release publish lock")
 			}
 		}()
 	}
 
-	// Refresh PublishedViewID from S2 in case the in-memory session is stale
-	// (e.g. another pod published before we acquired the lock).
-	if draft.PublishedViewID == "" {
-		if fresh, err := c.LoadDraft(ctx, draft.WorkspaceID, draft.ID); err == nil && fresh != nil && fresh.PublishedViewID != "" {
-			draft.PublishedViewID = fresh.PublishedViewID
+	if cs.PublishedViewID == "" {
+		if fresh, err := c.LoadChatState(ctx, cs.WorkspaceID, cs.ID); err == nil && fresh != nil && fresh.PublishedViewID != "" {
+			cs.PublishedViewID = fresh.PublishedViewID
 		}
 	}
-	if draft.PublishedViewID == "" {
+	if cs.PublishedViewID == "" {
 		if existingViews, err := c.backend.ListViews(ctx, workspaceID); err == nil {
 			for _, existing := range existingViews {
-				if existing != nil && strings.TrimSpace(existing.SourceDraftID) == draft.ID {
-					draft.PublishedViewID = existing.ID
+				if existing != nil && strings.TrimSpace(existing.SourceDraftID) == cs.ID {
+					cs.PublishedViewID = existing.ID
 					break
 				}
 			}
@@ -487,9 +485,9 @@ func (c *Copilot) PublishView(ctx context.Context, draft *Draft, workspaceID uin
 	}
 
 	var published *types.View
-	if draft.PublishedViewID != "" {
-		if existing, err := c.backend.GetView(ctx, workspaceID, draft.PublishedViewID); err == nil && existing != nil {
-			existing.Name, existing.Description, existing.SourceDraftID, existing.Definition = def.Name, def.Description, draft.ID, def
+	if cs.PublishedViewID != "" {
+		if existing, err := c.backend.GetView(ctx, workspaceID, cs.PublishedViewID); err == nil && existing != nil {
+			existing.Name, existing.Description, existing.SourceDraftID, existing.Definition = def.Name, def.Description, cs.ID, def
 			if err := c.backend.UpdateView(ctx, existing); err != nil {
 				return nil, fmt.Errorf("update view: %w", err)
 			}
@@ -502,7 +500,7 @@ func (c *Copilot) PublishView(ctx context.Context, draft *Draft, workspaceID uin
 			WorkspaceID:   workspaceID,
 			Name:          def.Name,
 			Description:   def.Description,
-			SourceDraftID: draft.ID,
+			SourceDraftID: cs.ID,
 			Definition:    def,
 		}
 		if err := c.backend.CreateView(ctx, published); err != nil {
@@ -510,18 +508,16 @@ func (c *Copilot) PublishView(ctx context.Context, draft *Draft, workspaceID uin
 		}
 	}
 
-	draft.PublishedViewID = published.ID
-	draft.Status = "published"
+	cs.PublishedViewID = published.ID
+	cs.Status = "published"
 
 	persistCtx, persistCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer persistCancel()
-	if err := c.persistDraft(persistCtx, draft.ID, "published_view_id", published.ID, "", ""); err != nil {
-		log.Warn().Err(err).Str("draft_id", draft.ID).Str("view_id", published.ID).
-			Msg("failed to persist published view id")
+	if err := c.persistChat(persistCtx, cs.ID, "published_view_id", published.ID, "", ""); err != nil {
+		log.Warn().Err(err).Str("view_id", published.ID).Msg("failed to persist published view id")
 	}
-	if err := c.persistDraft(persistCtx, draft.ID, "status", "published", "", ""); err != nil {
-		log.Warn().Err(err).Str("draft_id", draft.ID).Str("view_id", published.ID).
-			Msg("failed to persist published draft status")
+	if err := c.persistChat(persistCtx, cs.ID, "status", "published", "", ""); err != nil {
+		log.Warn().Err(err).Str("view_id", published.ID).Msg("failed to persist published status")
 	}
 
 	return published, nil
@@ -531,7 +527,7 @@ func (c *Copilot) PublishView(ctx context.Context, draft *Draft, workspaceID uin
 // BAML generation
 // ---------------------------------------------------------------------------
 
-func (c *Copilot) FormatHistory(messages []DraftMessage) string {
+func (c *Copilot) FormatHistory(messages []ChatMessage) string {
 	if len(messages) == 0 {
 		return ""
 	}
@@ -548,35 +544,31 @@ func (c *Copilot) FormatHistory(messages []DraftMessage) string {
 
 func (c *Copilot) GenerateStream(
 	ctx context.Context,
-	draft *Draft,
+	cs *ChatState,
 	workspaceID uint,
 	userMessage string,
 	viewID string,
 	attachedFiles []AttachedFile,
-	onChunk func(partial *PartialViewDraftResponse),
+	onChunk func(partial *PartialChatResponse),
 ) (*bamltypes.ViewDraftResponse, error) {
-	_ = c.persistDraft(ctx, draft.ID, "message", userMessage, "user", "")
-	draft.Messages = append(draft.Messages, DraftMessage{Role: "user", Content: userMessage, Timestamp: nowMS()})
+	_ = c.persistChat(ctx, cs.ID, "message", userMessage, "user", "")
+	cs.Messages = append(cs.Messages, ChatMessage{Role: "user", Content: userMessage, Timestamp: nowMS()})
 
 	promptMessage := userMessage
 	if len(attachedFiles) > 0 {
-		var sb strings.Builder
-		sb.WriteString("Attached files:\n")
-		for _, f := range attachedFiles {
-			fmt.Fprintf(&sb, "- %s (path: %s)\n", f.Name, f.Path)
+		fileContext := c.readAttachedFiles(ctx, workspaceID, attachedFiles)
+		if fileContext != "" {
+			promptMessage = fileContext + "\n" + userMessage
 		}
-		sb.WriteString("\n")
-		sb.WriteString(userMessage)
-		promptMessage = sb.String()
 	}
 
-	history := c.FormatHistory(draft.Messages[:len(draft.Messages)-1])
+	history := c.FormatHistory(cs.Messages[:len(cs.Messages)-1])
 	workspaceAgents := c.loadWorkspaceAgents(ctx, workspaceID)
 	workspaceCtx := c.BuildWorkspaceContext(ctx, workspaceID)
-	viewData := c.BuildViewDataContext(ctx, viewID, draft.ViewContent)
-	activeTasks := c.BuildActiveTasksContext(ctx, workspaceID, draft.ViewContent, draft.PublishedViewID)
+	viewData := c.BuildViewDataContext(ctx, viewID, cs.ViewContent)
+	activeTasks := c.BuildActiveTasksContext(ctx, workspaceID, cs.ViewContent, cs.PublishedViewID)
 
-	ch, err := baml.Stream.WriteView(ctx, promptMessage, history, draft.ViewContent, workspaceCtx, ComponentRegistryDoc, viewData, activeTasks)
+	ch, err := baml.Stream.WriteView(ctx, promptMessage, history, cs.ViewContent, workspaceCtx, ComponentRegistryDoc, viewData, activeTasks)
 	if err != nil {
 		return nil, fmt.Errorf("BAML WriteView stream: %w", err)
 	}
@@ -589,7 +581,7 @@ func (c *Copilot) GenerateStream(
 		if val.IsFinal {
 			final = val.Final()
 		} else if s := val.Stream(); s != nil && onChunk != nil {
-			onChunk(&PartialViewDraftResponse{
+			onChunk(&PartialChatResponse{
 				Message:     deref(s.Message),
 				ViewContent: deref(s.View_content),
 				UpdateType:  derefEnum(s.Update_type),
@@ -603,22 +595,241 @@ func (c *Copilot) GenerateStream(
 		if normalized, err := normalizeViewContent(final.View_content, workspaceAgents); err == nil {
 			final.View_content = normalized
 		}
-		if draft.ViewContent != "" {
-			if merged, err := mergePreserveSheets(draft.ViewContent, final.View_content, final.Removed_sheet_ids); err == nil {
+		if cs.ViewContent != "" {
+			if merged, err := mergePreserveSheets(cs.ViewContent, final.View_content, final.Removed_sheet_ids); err == nil {
 				final.View_content = merged
 			}
 		}
 	}
 
-	_ = c.persistDraft(ctx, draft.ID, "message", final.Message, "assistant", "")
+	_ = c.persistChat(ctx, cs.ID, "message", final.Message, "assistant", "")
 	if final.Update_type != bamltypes.ViewUpdateTypeCONVERSATION && final.View_content != "" {
-		_ = c.persistDraft(ctx, draft.ID, "view", final.View_content, "", "")
-		draft.ViewContent = final.View_content
+		_ = c.persistChat(ctx, cs.ID, "view", final.View_content, "", "")
+		cs.ViewContent = final.View_content
 	}
 
-	draft.Messages = append(draft.Messages, DraftMessage{Role: "assistant", Content: final.Message, Timestamp: nowMS()})
-	draft.UpdatedAt = nowMS()
+	cs.Messages = append(cs.Messages, ChatMessage{Role: "assistant", Content: final.Message, Timestamp: nowMS()})
+	cs.UpdatedAt = nowMS()
 	return final, nil
+}
+
+// ---------------------------------------------------------------------------
+// File attachment reading
+// ---------------------------------------------------------------------------
+
+const (
+	maxFileTextBytes  = 50 * 1024  // 50KB per text file
+	maxTotalTextBytes = 100 * 1024 // 100KB total across all text attachments
+	maxCSVPreviewRows = 200
+)
+
+var textExtensions = map[string]bool{
+	".txt": true, ".md": true, ".json": true, ".csv": true, ".tsv": true,
+	".xml": true, ".html": true, ".yml": true, ".yaml": true, ".log": true,
+}
+
+var imageExtensions = map[string]bool{
+	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true,
+}
+
+func isTextFile(name, contentType string) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	if textExtensions[ext] {
+		return true
+	}
+	return strings.HasPrefix(contentType, "text/") ||
+		contentType == "application/json" ||
+		contentType == "application/xml"
+}
+
+func isCSVFile(name, contentType string) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	return ext == ".csv" || ext == ".tsv" || contentType == "text/csv"
+}
+
+func isImageFile(name, contentType string) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	return imageExtensions[ext] || strings.HasPrefix(contentType, "image/")
+}
+
+func (c *Copilot) readAttachedFiles(ctx context.Context, workspaceID uint, files []AttachedFile) string {
+	if c.storage == nil || len(files) == 0 {
+		return ""
+	}
+	ws, err := c.backend.GetWorkspace(ctx, workspaceID)
+	if err != nil {
+		log.Warn().Err(err).Uint("workspace_id", workspaceID).Msg("cannot read attached files: workspace lookup failed")
+		return formatFileListFallback(files)
+	}
+	bucket := c.storage.WorkspaceBucketName(ws.ExternalId)
+
+	var sb strings.Builder
+	sb.WriteString("=== ATTACHED FILES ===\n\n")
+	totalTextBytes := 0
+	hasContent := false
+
+	for _, f := range files {
+		ct := f.ContentType
+		if ct == "" {
+			ct = inferContentType(f.Name)
+		}
+
+		if isImageFile(f.Name, ct) {
+			fmt.Fprintf(&sb, "── File: %s (image, path: %s) ──\n", f.Name, f.Path)
+			sb.WriteString("[Image file attached — content visible to the model as a reference.]\n\n")
+			hasContent = true
+			continue
+		}
+
+		if !isTextFile(f.Name, ct) {
+			fmt.Fprintf(&sb, "── File: %s (path: %s) ──\n", f.Name, f.Path)
+			sb.WriteString("[Binary or unsupported file format — content not readable.]\n\n")
+			hasContent = true
+			continue
+		}
+
+		key := strings.TrimPrefix(f.Path, "/")
+		data, err := c.storage.Download(ctx, bucket, key)
+		if err != nil {
+			log.Warn().Err(err).Str("path", f.Path).Msg("failed to download attached file")
+			fmt.Fprintf(&sb, "── File: %s (path: %s) ──\n", f.Name, f.Path)
+			sb.WriteString("[Could not read file content.]\n\n")
+			hasContent = true
+			continue
+		}
+
+		remaining := maxTotalTextBytes - totalTextBytes
+		if remaining <= 0 {
+			fmt.Fprintf(&sb, "── File: %s (path: %s) ──\n", f.Name, f.Path)
+			sb.WriteString("[Skipped — total attachment size limit reached.]\n\n")
+			hasContent = true
+			continue
+		}
+
+		if isCSVFile(f.Name, ct) {
+			content := formatCSVPreview(f.Name, f.Path, data)
+			if len(content) > remaining {
+				content = content[:remaining] + "\n... (truncated)\n"
+			}
+			sb.WriteString(content)
+			totalTextBytes += len(content)
+		} else {
+			text := string(data)
+			if len(text) > maxFileTextBytes {
+				text = text[:maxFileTextBytes] + "\n... (truncated)"
+			}
+			if len(text) > remaining {
+				text = text[:remaining] + "\n... (truncated)"
+			}
+			fmt.Fprintf(&sb, "── File: %s (path: %s) ──\n", f.Name, f.Path)
+			sb.WriteString(text)
+			sb.WriteString("\n\n")
+			totalTextBytes += len(text)
+		}
+		hasContent = true
+	}
+
+	if !hasContent {
+		return ""
+	}
+	sb.WriteString("=== END ATTACHED FILES ===\n\n")
+	return sb.String()
+}
+
+func formatCSVPreview(name, path string, data []byte) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "── File: %s (CSV, path: %s) ──\n", name, path)
+
+	r := csv.NewReader(bytes.NewReader(data))
+	r.LazyQuotes = true
+	r.FieldsPerRecord = -1
+
+	headers, err := r.Read()
+	if err != nil {
+		sb.WriteString("[Could not parse CSV headers.]\n\n")
+		return sb.String()
+	}
+
+	totalRows := 0
+	var rows [][]string
+	for {
+		record, err := r.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			break
+		}
+		totalRows++
+		if len(rows) < maxCSVPreviewRows {
+			rows = append(rows, record)
+		}
+	}
+
+	fmt.Fprintf(&sb, "Headers: %s\n", strings.Join(headers, " | "))
+	fmt.Fprintf(&sb, "Total rows: %d (showing first %d)\n\n", totalRows, len(rows))
+
+	sb.WriteString(strings.Join(headers, " | "))
+	sb.WriteString("\n")
+	for range headers {
+		sb.WriteString("--- | ")
+	}
+	sb.WriteString("\n")
+
+	for _, row := range rows {
+		for i, col := range row {
+			if i > 0 {
+				sb.WriteString(" | ")
+			}
+			if len(col) > 100 {
+				col = col[:97] + "..."
+			}
+			sb.WriteString(col)
+		}
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\n")
+	return sb.String()
+}
+
+func formatFileListFallback(files []AttachedFile) string {
+	var sb strings.Builder
+	sb.WriteString("Attached files:\n")
+	for _, f := range files {
+		fmt.Fprintf(&sb, "- %s (path: %s)\n", f.Name, f.Path)
+	}
+	sb.WriteString("\n")
+	return sb.String()
+}
+
+func inferContentType(name string) string {
+	ext := strings.ToLower(filepath.Ext(name))
+	switch ext {
+	case ".csv":
+		return "text/csv"
+	case ".tsv":
+		return "text/tab-separated-values"
+	case ".json":
+		return "application/json"
+	case ".txt", ".md", ".log":
+		return "text/plain"
+	case ".xml":
+		return "application/xml"
+	case ".html":
+		return "text/html"
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	case ".pdf":
+		return "application/pdf"
+	default:
+		return "application/octet-stream"
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -2005,16 +2216,34 @@ func (c *Copilot) executeOne(ctx context.Context, workspaceID uint, op bamltypes
 	case bamltypes.OperationTypeCREATE_SCHEDULE:
 		agentID := str("agent_id")
 		cronExpr := str("cron_expr")
+		if cronExpr == "" {
+			cronExpr = str("cron_expression")
+		}
+		if cronExpr == "" {
+			cronExpr = str("schedule")
+		}
 		prompt := str("prompt")
+		if prompt == "" {
+			prompt = str("message")
+		}
+		if prompt == "" {
+			prompt = str("task")
+		}
 		if agentID == "" || cronExpr == "" || prompt == "" {
 			return fail("", "agent_id, cron_expr, and prompt are required")
 		}
+		// Resolve agent key/name to UUID — the scheduled_task table requires a UUID FK.
+		profile, err := c.backend.GetAgentProfile(ctx, workspaceID, agentID)
+		if err != nil {
+			return fail(truncate(prompt, 60), fmt.Sprintf("agent not found: %s", agentID))
+		}
+		resolvedAgentID := profile.ID
 		tz := str("timezone")
 		var viewIDPtr *string
 		if state.viewID != "" {
 			viewIDPtr = &state.viewID
 		}
-		st, err := c.agentAPI.CreateSchedule(ctx, workspaceID, agentID, cronExpr, tz, prompt, nil, nil, nil, nil, viewIDPtr)
+		st, err := c.agentAPI.CreateSchedule(ctx, workspaceID, resolvedAgentID, cronExpr, tz, prompt, nil, nil, nil, nil, viewIDPtr)
 		if err != nil {
 			return fail(prompt, err.Error())
 		}
@@ -2044,9 +2273,176 @@ func (c *Copilot) executeOne(ctx context.Context, workspaceID uint, op bamltypes
 			ScheduleID: scheduleID,
 		}
 
+	case bamltypes.OperationTypeIMPORT_DATA:
+		filePath := str("file_path")
+		sheetID := str("sheet_id")
+		if filePath == "" {
+			return fail("", "file_path is required")
+		}
+		if sheetID == "" {
+			return fail("", "sheet_id is required")
+		}
+		result, err := c.executeImportData(ctx, workspaceID, state.viewID, sheetID, filePath, payload)
+		if err != nil {
+			return fail(filePath, err.Error())
+		}
+		log.Info().
+			Str("view_id", state.viewID).
+			Str("sheet_id", sheetID).
+			Str("import_id", result.ImportID).
+			Int("rows", result.RowCount).
+			Msg("copilot imported data")
+		return OperationResult{
+			Type:    opType,
+			Name:    filePath,
+			Status:  "done",
+			Message: fmt.Sprintf("Imported %d rows into sheet", result.RowCount),
+		}
+
 	default:
 		return fail("", "unknown operation type")
 	}
+}
+
+func (c *Copilot) executeImportData(ctx context.Context, workspaceID uint, viewID, sheetID, filePath string, payload map[string]any) (*importDataResult, error) {
+	if c.storage == nil {
+		return nil, fmt.Errorf("storage not configured")
+	}
+	if c.store == nil || !c.store.Available() {
+		return nil, fmt.Errorf("data store not configured")
+	}
+
+	v, err := c.backend.GetView(ctx, workspaceID, viewID)
+	if err != nil {
+		return nil, fmt.Errorf("view lookup: %w", err)
+	}
+	var componentID string
+	for _, sheet := range v.Definition.Sheets {
+		if sheet.ID == sheetID {
+			for _, comp := range sheet.Components {
+				if comp.IsTable() {
+					componentID = comp.ID
+					break
+				}
+			}
+			break
+		}
+	}
+
+	ws, err := c.backend.GetWorkspace(ctx, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("workspace lookup: %w", err)
+	}
+	bucket := c.storage.WorkspaceBucketName(ws.ExternalId)
+	key := strings.TrimPrefix(filePath, "/")
+	data, err := c.storage.Download(ctx, bucket, key)
+	if err != nil {
+		return nil, fmt.Errorf("download file: %w", err)
+	}
+
+	csvReader := csv.NewReader(bytes.NewReader(data))
+	csvReader.LazyQuotes = true
+	csvReader.FieldsPerRecord = -1
+
+	headers, err := csvReader.Read()
+	if err != nil {
+		return nil, fmt.Errorf("parse CSV headers: %w", err)
+	}
+
+	colMapping := make(map[string]string)
+	if cm, ok := payload["column_mapping"]; ok {
+		if mappingMap, ok := cm.(map[string]any); ok {
+			for k, v := range mappingMap {
+				if vs, ok := v.(string); ok {
+					colMapping[k] = vs
+				}
+			}
+		}
+	}
+	if len(colMapping) == 0 {
+		for _, h := range headers {
+			colMapping[h] = toImportColumnKey(h)
+		}
+	}
+
+	importID := uuid.New().String()
+	var rows []ViewRow
+	rowIndex := 0
+
+	for {
+		record, err := csvReader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			break
+		}
+
+		pinned := make(map[string]string, len(colMapping))
+		for i, header := range headers {
+			if i >= len(record) {
+				break
+			}
+			if colKey, ok := colMapping[header]; ok && strings.TrimSpace(record[i]) != "" {
+				pinned[colKey] = strings.TrimSpace(record[i])
+			}
+		}
+
+		if len(pinned) == 0 {
+			rowIndex++
+			continue
+		}
+
+		rowID := fmt.Sprintf("%s::%s:%d", sheetID, "import-"+importID, rowIndex)
+		rows = append(rows, ViewRow{
+			ID:          rowID,
+			SheetID:     sheetID,
+			ComponentID: componentID,
+			GroupID:     "import:" + importID,
+			RowKey:      fmt.Sprintf("import-%d", rowIndex),
+			Cells:       map[string]string{},
+			Pinned:      pinned,
+			Source:      "import",
+			ImportID:    importID,
+			UpdatedAt:   time.Now(),
+		})
+		rowIndex++
+	}
+
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("no data rows found in CSV")
+	}
+
+	if err := c.store.UpsertRows(ctx, viewID, rows); err != nil {
+		return nil, fmt.Errorf("upsert rows: %w", err)
+	}
+
+	return &importDataResult{
+		ImportID: importID,
+		RowCount: len(rows),
+	}, nil
+}
+
+type importDataResult struct {
+	ImportID string
+	RowCount int
+}
+
+func toImportColumnKey(header string) string {
+	key := strings.ToLower(strings.TrimSpace(header))
+	key = strings.ReplaceAll(key, " ", "_")
+	key = strings.ReplaceAll(key, "-", "_")
+	var clean strings.Builder
+	for _, r := range key {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+			clean.WriteRune(r)
+		}
+	}
+	result := clean.String()
+	if result == "" {
+		return "col"
+	}
+	return result
 }
 
 func (c *Copilot) installWorkspaceSkill(ctx context.Context, workspaceID uint, requestedName string, content []byte) (*skills.SkillManifest, string, error) {

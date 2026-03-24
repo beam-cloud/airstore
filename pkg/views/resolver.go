@@ -53,6 +53,7 @@ type resolvedSheetRow struct {
 	BlockerWaitGroupID string
 	ApprovalSurface    string
 	SourceOutputIDs    string
+	Source             string
 	Cells              map[string]string
 }
 
@@ -82,6 +83,7 @@ var hiddenResolvedColumns = []hiddenResolvedColumn{
 	{Key: "blocker_wait_group_id", Value: func(_ string, row resolvedSheetRow) any { return row.BlockerWaitGroupID }},
 	{Key: "approval_surface", Value: func(_ string, row resolvedSheetRow) any { return row.ApprovalSurface }},
 	{Key: "source_output_ids", Value: func(_ string, row resolvedSheetRow) any { return row.SourceOutputIDs }},
+	{Key: "source", Value: func(_ string, row resolvedSheetRow) any { return row.Source }},
 }
 
 type DataResolver struct {
@@ -250,7 +252,17 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 			Str("component_id", comp.ID).
 			Strs("view_agent_refs", opts.ViewAgentRefs).
 			Bool("has_data_source", comp.DataSource != nil).
-			Msg("view: no outputs resolved for component")
+			Msg("view: no task outputs resolved for component — checking for import rows")
+
+		importRows := r.loadAndMergeImportRows(ctx, viewID, sheet.ID, comp.ID, nil)
+		if len(importRows) > 0 {
+			log.Info().
+				Str("view_id", viewID).
+				Str("sheet_id", sheet.ID).
+				Int("import_rows", len(importRows)).
+				Msg("view: returning import rows (no task outputs)")
+			return &viewMappingResult{Rows: importRows, TaskMeta: map[string]*types.AgentTask{}}, nil
+		}
 		return &viewMappingResult{Rows: nil, TaskMeta: map[string]*types.AgentTask{}}, nil
 	}
 
@@ -418,11 +430,78 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 		}
 	}
 
+	importRows := r.loadAndMergeImportRows(ctx, viewID, sheet.ID, comp.ID, resolvedRows)
+	resolvedRows = append(resolvedRows, importRows...)
+
 	resolvedRows = collapseResolvedRows(spec.tableCols, resolvedRows, allOutputs, taskMeta)
 	boundContext = r.fetchBoundTaskContext(ctx, workspaceID, resolvedRows)
 	enrichRowsWithOutputState(resolvedRows, allOutputs, boundContext, taskMeta)
 	sortResolvedRows(resolvedRows, taskMeta)
 	return &viewMappingResult{Rows: resolvedRows, TaskMeta: taskMeta, Diagnostics: diagnostics}, nil
+}
+
+// loadAndMergeImportRows loads import-sourced rows from the store, applies any
+// enrichment from task-mapped rows that matched import row keys, and converts
+// them to resolvedSheetRows. Task-mapped rows that enriched an import row are
+// removed from the resolved set to prevent duplicates.
+func (r *DataResolver) loadAndMergeImportRows(ctx context.Context, viewID, sheetID, componentID string, taskRows []resolvedSheetRow) []resolvedSheetRow {
+	if r.store == nil || !r.store.Available() {
+		return nil
+	}
+
+	importRows, err := r.store.GetRowsBySource(ctx, viewID, sheetID, componentID, "import")
+	if err != nil {
+		log.Warn().Err(err).
+			Str("view_id", viewID).Str("sheet_id", sheetID).Str("component_id", componentID).
+			Msg("view resolver: failed to load import rows")
+		return nil
+	}
+	if len(importRows) == 0 {
+		log.Debug().
+			Str("view_id", viewID).Str("sheet_id", sheetID).Str("component_id", componentID).
+			Msg("view resolver: no import rows found")
+		return nil
+	}
+	log.Info().
+		Str("view_id", viewID).Str("sheet_id", sheetID).Str("component_id", componentID).
+		Int("import_rows", len(importRows)).Int("task_rows", len(taskRows)).
+		Msg("view resolver: loading import rows")
+
+	importByRowKey := make(map[string]*ViewRow, len(importRows))
+	for i := range importRows {
+		importByRowKey[strings.TrimSpace(importRows[i].RowKey)] = &importRows[i]
+	}
+
+	for i, taskRow := range taskRows {
+		rowKey := strings.TrimSpace(taskRow.RowKey)
+		if importRow, ok := importByRowKey[rowKey]; ok {
+			for colKey, val := range taskRow.Cells {
+				if val != "" {
+					if importRow.Cells == nil {
+						importRow.Cells = make(map[string]string)
+					}
+					importRow.Cells[colKey] = val
+				}
+			}
+			if taskRow.TaskID != "" {
+				importRow.TaskID = taskRow.TaskID
+			}
+			taskRows[i].Cells = nil
+		}
+	}
+
+	var resolved []resolvedSheetRow
+	for _, row := range importRows {
+		resolved = append(resolved, resolvedSheetRow{
+			TaskID:      row.TaskID,
+			RowID:       row.ID,
+			StableRef:   row.StableRef,
+			RowKey:      row.RowKey,
+			Source:      "import",
+			Cells:       row.MergedCells(),
+		})
+	}
+	return resolved
 }
 
 // ---------------------------------------------------------------------------
@@ -564,12 +643,17 @@ func (r *DataResolver) mapTaskGroupsWithBAML(
 	batches := splitTaskIDBatches(taskIDs, maxTasksPerMappingBatch)
 	taskPrompts := r.fetchTaskPrompts(ctx, taskIDs)
 
+	var importRows []ViewRow
+	if r.store != nil && r.store.Available() {
+		importRows, _ = r.store.GetRowsBySource(ctx, viewID, sheet.ID, comp.ID, "import")
+	}
+
 	var allRows []bamltypes.MappedRow
 	var lastErr error
 	successBatches := 0
 
 	for batchIdx, batch := range batches {
-		rows, err := r.mapTaskBatchWithBAML(ctx, viewID, sheet, comp, spec, batch, taskGroups, rowsByGroup, excludedSnapshots, taskPrompts, requestedTasks)
+		rows, err := r.mapTaskBatchWithBAML(ctx, viewID, sheet, comp, spec, batch, taskGroups, rowsByGroup, excludedSnapshots, taskPrompts, requestedTasks, importRows)
 		if err != nil {
 			log.Warn().Err(err).
 				Str("view_id", viewID).
@@ -612,13 +696,16 @@ func (r *DataResolver) mapTaskBatchWithBAML(
 	excludedSnapshots []ExcludedRowSnapshot,
 	taskPrompts map[string]string,
 	requestedTasks map[string]bool,
+	importRows []ViewRow,
 ) ([]bamltypes.MappedRow, error) {
 	outputsJSON, err := serializeOutputsForMapping(outputsForTaskIDs(taskGroups, batchTaskIDs), taskPrompts)
 	if err != nil {
 		return nil, fmt.Errorf("serialize outputs: %w", err)
 	}
 
-	existingData := serializeExistingRows(storedRowsForTaskIDs(rowsByGroup, batchTaskIDs), spec.mappingCols)
+	taskExistingRows := storedRowsForTaskIDs(rowsByGroup, batchTaskIDs)
+	allExistingRows := append(taskExistingRows, importRows...)
+	existingData := serializeExistingRows(allExistingRows, spec.mappingCols)
 	excludedForTasks := filterExcludedSnapshotsByTasks(excludedSnapshots, batchTaskIDs)
 	excludedData := serializeExcludedRows(excludedForTasks)
 
@@ -997,14 +1084,28 @@ func dataSourceOutputTypeFallback(ds *types.DataSource) string {
 func (r *DataResolver) resolveScopedAgentIDs(ctx context.Context, workspaceID uint, ds *types.DataSource, viewAgentRefs []string) ([]string, bool) {
 	resolvedAgentIDs := r.resolveAgentIDsForDS(ctx, workspaceID, ds)
 	if dataSourceHasExplicitAgentScope(ds) && len(resolvedAgentIDs) == 0 {
+		log.Warn().
+			Uint("workspace_id", workspaceID).
+			Bool("has_explicit_scope", dataSourceHasExplicitAgentScope(ds)).
+			Strs("view_agent_refs", viewAgentRefs).
+			Msg("view resolver: explicit agent scope resolved 0 agents")
 		return nil, false
 	}
 	if len(resolvedAgentIDs) == 0 && len(viewAgentRefs) > 0 {
 		resolvedAgentIDs = r.resolveAgentIDsFromRefs(ctx, workspaceID, viewAgentRefs)
 		if len(resolvedAgentIDs) == 0 {
+			log.Warn().
+				Uint("workspace_id", workspaceID).
+				Strs("view_agent_refs", viewAgentRefs).
+				Msg("view resolver: view agent refs resolved 0 agents")
 			return nil, false
 		}
 	}
+	log.Debug().
+		Uint("workspace_id", workspaceID).
+		Strs("resolved_agent_ids", resolvedAgentIDs).
+		Strs("view_agent_refs", viewAgentRefs).
+		Msg("view resolver: resolved agent IDs")
 	return resolvedAgentIDs, true
 }
 
@@ -1089,7 +1190,37 @@ func (r *DataResolver) fetchOutputsForScope(ctx context.Context, workspaceID uin
 	if err != nil {
 		return nil, err
 	}
-	return filterOutputsForDataSource(outputs, ds, agentIDs), nil
+
+	// If SourceViewID was set but yielded no outputs, retry without it.
+	// Tasks dispatched outside the view (manually, from other views, or
+	// via scheduled tasks) by assigned agents should still populate.
+	if len(outputs) == 0 && sourceViewID != "" {
+		fallbackFilter := filter
+		fallbackFilter.SourceViewID = nil
+		outputs, err = r.listScopedOutputs(ctx, workspaceID, fallbackFilter, agentIDs)
+		if err != nil {
+			return nil, err
+		}
+		if len(outputs) > 0 {
+			log.Info().
+				Uint("workspace_id", workspaceID).
+				Str("source_view_id", sourceViewID).
+				Int("outputs_without_filter", len(outputs)).
+				Msg("view resolver: SourceViewID filter returned 0 outputs; falling back to unscoped")
+		}
+	}
+
+	filtered := filterOutputsForDataSource(outputs, ds, agentIDs)
+	if len(outputs) > 0 && len(filtered) == 0 {
+		log.Warn().
+			Uint("workspace_id", workspaceID).
+			Strs("agent_ids", agentIDs).
+			Str("source_view_id", sourceViewID).
+			Int("pre_filter", len(outputs)).
+			Int("post_filter", len(filtered)).
+			Msg("view resolver: all outputs filtered out by data source criteria")
+	}
+	return filtered, nil
 }
 
 func (r *DataResolver) fetchBlockerOutputsForScope(
@@ -1141,6 +1272,11 @@ func (r *DataResolver) fetchComponentOutputs(ctx context.Context, workspaceID ui
 func (r *DataResolver) fetchMappingOutputs(ctx context.Context, workspaceID uint, ds *types.DataSource, viewAgentRefs []string, sourceViewID string) ([]*types.TaskOutput, error) {
 	agentIDs, ok := r.resolveScopedAgentIDs(ctx, workspaceID, ds, viewAgentRefs)
 	if !ok {
+		log.Info().
+			Uint("workspace_id", workspaceID).
+			Strs("view_agent_refs", viewAgentRefs).
+			Str("source_view_id", sourceViewID).
+			Msg("view resolver: agent scope resolution failed — no outputs")
 		return nil, nil
 	}
 
@@ -1153,6 +1289,16 @@ func (r *DataResolver) fetchMappingOutputs(ctx context.Context, workspaceID uint
 		return nil, err
 	}
 	selectedOutputs := dedupeOutputs(append(realSelectedOutputs, blockerSelectedOutputs...))
+
+	log.Info().
+		Uint("workspace_id", workspaceID).
+		Strs("agent_ids", agentIDs).
+		Str("source_view_id", sourceViewID).
+		Int("real_outputs", len(realSelectedOutputs)).
+		Int("blocker_outputs", len(blockerSelectedOutputs)).
+		Int("total_selected", len(selectedOutputs)).
+		Msg("view resolver: fetched mapping outputs")
+
 	if len(selectedOutputs) == 0 || !dataSourceNarrowsTaskSelection(ds) {
 		return selectedOutputs, nil
 	}
@@ -1737,6 +1883,7 @@ func resolvedRowsFromStored(rows []ViewRow, applyManual bool) []resolvedSheetRow
 			RowKey:          row.RowKey,
 			OutputID:        firstSourceOutputID(row.SourceOutputIDs),
 			SourceOutputIDs: strings.Join(row.SourceOutputIDs, ","),
+			Source:          row.Source,
 			Cells:           cells,
 		})
 	}
@@ -2520,7 +2667,7 @@ func normalizeExcludedCellValue(value string) string {
 
 // serializeExistingRows formats stored rows (with merged manual edits) as a
 // text payload so the BAML mapper can see the current table state and preserve
-// user corrections.
+// user corrections. Import-sourced values are marked [IMPORTED].
 func serializeExistingRows(rows []ViewRow, cols []bamltypes.ColumnSchema) string {
 	if len(rows) == 0 {
 		return ""
@@ -2531,7 +2678,11 @@ func serializeExistingRows(rows []ViewRow, cols []bamltypes.ColumnSchema) string
 			continue
 		}
 		merged := row.MergedCells()
-		if stableRef := strings.TrimSpace(row.StableRef); stableRef != "" {
+		isImport := row.IsImport()
+
+		if isImport {
+			fmt.Fprintf(&sb, "Row (row_key=%s, source=IMPORTED):\n", row.RowKey)
+		} else if stableRef := strings.TrimSpace(row.StableRef); stableRef != "" {
 			fmt.Fprintf(&sb, "Row (task_id=%s, row_key=%s, stable_ref=%s):\n", row.TaskID, row.RowKey, stableRef)
 		} else {
 			fmt.Fprintf(&sb, "Row (task_id=%s, row_key=%s):\n", row.TaskID, row.RowKey)
@@ -2540,6 +2691,8 @@ func serializeExistingRows(rows []ViewRow, cols []bamltypes.ColumnSchema) string
 			val := merged[col.Key]
 			if row.Manual[col.Key] != "" {
 				fmt.Fprintf(&sb, "  - %s [key=%s]: %q [USER EDIT]\n", col.Name, col.Key, val)
+			} else if isImport && row.Pinned[col.Key] != "" {
+				fmt.Fprintf(&sb, "  - %s [key=%s]: %q [IMPORTED]\n", col.Name, col.Key, val)
 			} else {
 				fmt.Fprintf(&sb, "  - %s [key=%s]: %q\n", col.Name, col.Key, val)
 			}

@@ -70,6 +70,26 @@ function MapOutputsToSchema(
       These take absolute priority over anything extracted from the outputs.
     - For non-edited cells, re-extract normally from the outputs.
     - Maintain the same row_key values from the existing data when possible.
+
+    ENRICHMENT RULES (imported data):
+    - Cell values marked [IMPORTED] are seed data the user uploaded (e.g. from
+      a CSV). These cells are ground truth — preserve them exactly as-is.
+    - Rows containing [IMPORTED] cells may also have empty columns that
+      should be filled from task outputs. This is enrichment: the row
+      combines user-provided seed data with agent-discovered data.
+    - If a task output clearly relates to an existing row with [IMPORTED]
+      cells (same entity: matching address, company, email, name, URL,
+      identifier, or other identifying field), REUSE that row's row_key
+      and fill in the empty columns with extracted data.
+    - NEVER duplicate a row that has [IMPORTED] cells. If output data
+      matches an existing row, enrich it. If it doesn't match any
+      existing row, create a new row.
+    - Only fill columns that are empty ("") on the existing row.
+      Never overwrite [IMPORTED] or [USER EDIT] values.
+    - When matching, use semantic identity: "123 Main St" matches
+      "123 Main Street", "Acme Corp" matches "Acme Corporation", etc.
+    - If no [IMPORTED] cells exist in the existing data, ignore these
+      rules entirely.
     {% endif %}
 
     {% if excluded_rows %}

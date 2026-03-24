@@ -71,6 +71,10 @@ func (t *OperationTypeEnumView) ValueDELETE_SCHEDULE() (EnumValueView, error) {
 	return t.inner.Value("DELETE_SCHEDULE")
 }
 
+func (t *OperationTypeEnumView) ValueIMPORT_DATA() (EnumValueView, error) {
+	return t.inner.Value("IMPORT_DATA")
+}
+
 func (t *TypeBuilder) OperationType() (*OperationTypeEnumView, error) {
 	bld, err := t.inner.Enum("OperationType")
 	if err != nil {

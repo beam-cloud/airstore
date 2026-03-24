@@ -25,11 +25,12 @@ enum OperationType {
   REJECT_TASK     @description("Reject a waiting/blocked task")
   CREATE_SCHEDULE @description("Create a recurring scheduled task for an agent")
   DELETE_SCHEDULE @description("Delete a scheduled task by its ID")
+  IMPORT_DATA     @description("Import data from an attached CSV file into a sheet table")
 }
 
 class Operation {
   type OperationType @description("The type of workspace mutation to perform")
-  payload string @description("JSON payload with operation-specific fields. For CREATE_AGENT: {name, role, model?, skills?[]}. For UPDATE_AGENT: {agent_id, name?, role?, model?, skills?[]}. For CREATE_SKILL: {name, content}. For INSTALL_SKILL: {skill_name} to install an existing workspace skill, or {name, content} / {skill_name, content} to install or update skill content. For ASSIGN_SKILL: {agent_id, skill_name}. For DISPATCH_TASK: {agent_id, message, label?} — dispatches a task to the specified agent. For APPROVE_TASK: {task_id} — approves a waiting task. For REJECT_TASK: {task_id, reason?} — rejects a waiting task. For CREATE_SCHEDULE: {agent_id, cron_expr, prompt, timezone?} — creates a recurring schedule (cron_expr uses standard 5-field cron syntax, e.g. '0 9 * * 1-5' for weekdays at 9am). For DELETE_SCHEDULE: {schedule_id} — deletes a scheduled task by external_id. IMPORTANT: Do NOT include system_prompt — the system generates it automatically with proper Airstore context. model must be one of: 'claude-sonnet-4-6' (default, omit if unsure) or 'claude-opus-4-6'. role must be 1-2 words max (e.g. 'Research', 'Engineering', 'Outreach'). For CREATE_SKILL, content must be valid SKILL.md with YAML frontmatter (---\\nname: ...\\ndescription: ...\\n---).")
+  payload string @description("JSON payload with operation-specific fields. For CREATE_AGENT: {name, role, model?, skills?[]}. For UPDATE_AGENT: {agent_id, name?, role?, model?, skills?[]}. For CREATE_SKILL: {name, content}. For INSTALL_SKILL: {skill_name} to install an existing workspace skill, or {name, content} / {skill_name, content} to install or update skill content. For ASSIGN_SKILL: {agent_id, skill_name}. For DISPATCH_TASK: {agent_id, message, label?} — dispatches a task to the specified agent. For APPROVE_TASK: {task_id} — approves a waiting task. For REJECT_TASK: {task_id, reason?} — rejects a waiting task. For CREATE_SCHEDULE: {agent_id, cron_expr, prompt, timezone?} — creates a recurring schedule (cron_expr uses standard 5-field cron syntax, e.g. '0 9 * * 1-5' for weekdays at 9am). For DELETE_SCHEDULE: {schedule_id} — deletes a scheduled task by external_id. For IMPORT_DATA: {file_path, sheet_id, column_mapping?} — imports CSV data from an attached file into the specified sheet. column_mapping maps CSV headers to table column keys (e.g. {\"Address\": \"address\", \"Price\": \"price\"}). If omitted, headers are auto-mapped. IMPORTANT: Do NOT include system_prompt — the system generates it automatically with proper Airstore context. model must be one of: 'claude-sonnet-4-6' (default, omit if unsure) or 'claude-opus-4-6'. role must be 1-2 words max (e.g. 'Research', 'Engineering', 'Outreach'). For CREATE_SKILL, content must be valid SKILL.md with YAML frontmatter (---\\nname: ...\\ndescription: ...\\n---).")
 }
 
 class DataCitation {
@@ -302,6 +303,22 @@ function WriteView(
         operation with a valid 5-field cron expression and a clear prompt.
         When the user wants to remove a schedule, emit DELETE_SCHEDULE with
         the schedule_id from ACTIVE TASKS / SCHEDULES context.
+
+    16. FILE ATTACHMENTS & DATA IMPORT: When the user attaches files, their
+        content appears in the ATTACHED FILES section of the user message.
+        - For CSV files: you can see the headers and data preview. If the
+          user asks to populate a sheet with this data, emit an IMPORT_DATA
+          operation with {file_path, sheet_id, column_mapping}. Inspect
+          the CSV headers and the sheet's table columns to build the
+          column_mapping (CSV header -> column key).
+        - If the sheet doesn't have columns matching the CSV data, ALSO
+          update view_content to add appropriate columns to the table's
+          config.columns and dataSource.transform arrays.
+        - For other files (text, JSON, images): use the content to answer
+          questions or inform view design decisions.
+        - Imported data rows persist in the sheet and can be enriched by
+          future agent task outputs. Agents can add data to columns that
+          the import left empty.
 
     {{ ctx.output_format }}
   "#

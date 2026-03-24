@@ -50,7 +50,14 @@ type ViewRow struct {
 	SourceOutputIDs []string          `bson:"source_output_ids,omitempty"`
 	Cells           map[string]string `bson:"cells"`
 	Manual          map[string]string `bson:"manual,omitempty"`
+	Pinned          map[string]string `bson:"pinned,omitempty"`
+	Source          string            `bson:"source,omitempty"`
+	ImportID        string            `bson:"import_id,omitempty"`
 	UpdatedAt       time.Time         `bson:"updated_at"`
+}
+
+func (r *ViewRow) IsImport() bool {
+	return r.Source == "import"
 }
 
 // ExcludedRowSnapshot is the data we store when a user deletes a row so the
@@ -63,12 +70,15 @@ type ExcludedRowSnapshot struct {
 	Cells           map[string]string `bson:"cells"`
 }
 
-// MergedCells returns cells with manual edits overlaid on top of BAML-mapped cells.
+// MergedCells returns the three-layer merge: pinned (import seed) -> cells (BAML-computed) -> manual (user edits).
 func (r *ViewRow) MergedCells() map[string]string {
-	if len(r.Manual) == 0 {
+	if len(r.Pinned) == 0 && len(r.Manual) == 0 {
 		return r.Cells
 	}
-	merged := make(map[string]string, len(r.Cells))
+	merged := make(map[string]string, len(r.Pinned)+len(r.Cells)+len(r.Manual))
+	for k, v := range r.Pinned {
+		merged[k] = v
+	}
 	for k, v := range r.Cells {
 		merged[k] = v
 	}
@@ -202,6 +212,15 @@ func (s *ViewStore) UpsertRows(ctx context.Context, viewID string, rows []ViewRo
 		if len(row.Manual) > 0 {
 			setFields = append(setFields, bson.E{Key: "manual", Value: row.Manual})
 		}
+		if row.Source != "" {
+			setFields = append(setFields, bson.E{Key: "source", Value: row.Source})
+		}
+		if row.ImportID != "" {
+			setFields = append(setFields, bson.E{Key: "import_id", Value: row.ImportID})
+		}
+		if len(row.Pinned) > 0 {
+			setFields = append(setFields, bson.E{Key: "pinned", Value: row.Pinned})
+		}
 
 		insertOnly := bson.D{
 			{Key: "stable_ref", Value: uuid.New().String()},
@@ -283,6 +302,7 @@ func (s *ViewStore) EnsureIndexes(ctx context.Context, viewID string) error {
 }
 
 // DeleteRowsNotInGroups removes stale rows for the remapped groups.
+// Import-sourced rows are always protected from deletion.
 func (s *ViewStore) DeleteRowsNotInGroups(ctx context.Context, viewID, sheetID, componentID string, groupIDs, keepRowIDs []string) error {
 	if !s.Available() || len(groupIDs) == 0 {
 		return nil
@@ -290,6 +310,7 @@ func (s *ViewStore) DeleteRowsNotInGroups(ctx context.Context, viewID, sheetID, 
 	coll := s.mongo.Collection(s.collectionName(viewID))
 	filter := rowScopeFilter(sheetID, componentID)
 	filter = append(filter, bson.E{Key: "group_id", Value: bson.D{{Key: "$in", Value: groupIDs}}})
+	filter = append(filter, bson.E{Key: "source", Value: bson.D{{Key: "$ne", Value: "import"}}})
 	if len(keepRowIDs) > 0 {
 		filter = append(filter, bson.E{Key: "_id", Value: bson.D{{Key: "$nin", Value: keepRowIDs}}})
 	}
@@ -317,6 +338,80 @@ func (s *ViewStore) DeleteRowsByIDs(ctx context.Context, viewID string, rowIDs [
 	_, err := coll.DeleteMany(ctx, filter)
 	if err != nil {
 		return fmt.Errorf("delete rows by IDs: %w", err)
+	}
+	return nil
+}
+
+// GetRowsBySource returns rows filtered by source (e.g. "import") within a component scope.
+func (s *ViewStore) GetRowsBySource(ctx context.Context, viewID, sheetID, componentID, source string) ([]ViewRow, error) {
+	if !s.Available() {
+		return nil, nil
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+	filter := rowScopeFilter(sheetID, componentID)
+	filter = append(filter, bson.E{Key: "source", Value: source})
+	cursor, err := coll.Find(ctx, filter)
+	if err != nil {
+		return nil, fmt.Errorf("find rows by source: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var rows []ViewRow
+	if err := cursor.All(ctx, &rows); err != nil {
+		return nil, fmt.Errorf("decode rows by source: %w", err)
+	}
+	return rows, nil
+}
+
+// DeleteImport removes all rows from a specific import batch.
+func (s *ViewStore) DeleteImport(ctx context.Context, viewID, sheetID, importID string) error {
+	if !s.Available() {
+		return nil
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+	filter := bson.D{
+		{Key: "sheet_id", Value: sheetID},
+		{Key: "source", Value: "import"},
+		{Key: "import_id", Value: importID},
+	}
+	res, err := coll.DeleteMany(ctx, filter)
+	if err != nil {
+		return fmt.Errorf("delete import: %w", err)
+	}
+	log.Info().
+		Str("view_id", viewID).
+		Str("sheet_id", sheetID).
+		Str("import_id", importID).
+		Int64("deleted", res.DeletedCount).
+		Msg("view: deleted import rows")
+	return nil
+}
+
+// EnrichImportRow updates the Cells and task association on an existing import row
+// without changing its Pinned values or identity.
+func (s *ViewStore) EnrichImportRow(ctx context.Context, viewID string, row ViewRow) error {
+	if !s.Available() {
+		return nil
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+	setFields := bson.D{
+		{Key: "cells", Value: row.Cells},
+		{Key: "task_id", Value: row.TaskID},
+		{Key: "source_output_ids", Value: row.SourceOutputIDs},
+		{Key: "output_ids", Value: row.OutputIDs},
+		{Key: "output_signature", Value: row.OutputSignature},
+		{Key: "schema_hash", Value: row.SchemaHash},
+		{Key: "updated_at", Value: time.Now()},
+	}
+	res, err := coll.UpdateOne(ctx,
+		bson.D{{Key: "_id", Value: row.ID}},
+		bson.D{{Key: "$set", Value: setFields}},
+	)
+	if err != nil {
+		return fmt.Errorf("enrich import row: %w", err)
+	}
+	if res.MatchedCount == 0 {
+		return ErrViewRowNotFound
 	}
 	return nil
 }
@@ -363,6 +458,7 @@ func (s *ViewStore) UpdateCells(ctx context.Context, viewID, sheetID, rowID stri
 }
 
 // ClearManualCells removes manual overlays for the given rows and columns.
+// Import-sourced rows are skipped — their pinned values are never cleared.
 func (s *ViewStore) ClearManualCells(ctx context.Context, viewID, sheetID, componentID string, rowIDs, columnKeys []string) error {
 	if !s.Available() || len(rowIDs) == 0 || len(columnKeys) == 0 {
 		return nil
@@ -378,8 +474,13 @@ func (s *ViewStore) ClearManualCells(ctx context.Context, viewID, sheetID, compo
 		unsetFields = append(unsetFields, bson.E{Key: fieldPath, Value: ""})
 	}
 
+	filter := append(rowScopeFilter(sheetID, componentID),
+		bson.E{Key: "_id", Value: bson.D{{Key: "$in", Value: rowIDs}}},
+		bson.E{Key: "source", Value: bson.D{{Key: "$ne", Value: "import"}}},
+	)
+
 	res, err := coll.UpdateMany(ctx,
-		append(rowScopeFilter(sheetID, componentID), bson.E{Key: "_id", Value: bson.D{{Key: "$in", Value: rowIDs}}}),
+		filter,
 		bson.D{
 			{Key: "$unset", Value: unsetFields},
 			{Key: "$set", Value: bson.D{{Key: "updated_at", Value: time.Now()}}},

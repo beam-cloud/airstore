@@ -2,14 +2,10 @@ package apiv1
 
 import (
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/beam-cloud/airstore/pkg/views"
-	"github.com/labstack/echo/v4"
 )
 
 func TestApplyColumnRenamesToDefinitionUpdatesSchemaHintsAndRelations(t *testing.T) {
@@ -348,20 +344,6 @@ func TestSyntheticEmailThreadsFallsBackWhenNoRealThreadExists(t *testing.T) {
 	}
 }
 
-func TestDraftsRouteReturnsServiceUnavailableWhenDisabled(t *testing.T) {
-	e := echo.New()
-	NewViewsGroup(e.Group("/workspaces/:workspace_id/views"), nil, nil, nil)
-
-	req := httptest.NewRequest(http.MethodGet, "/workspaces/ws-1/views/drafts", nil)
-	rec := httptest.NewRecorder()
-
-	e.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("GET /drafts status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
-	}
-}
-
 func TestDecodeViewRowID(t *testing.T) {
 	got, err := decodeViewRowID("sheet-1%3Ac1%3Atask-1%3Atask")
 	if err != nil {
@@ -420,95 +402,3 @@ func TestSyncNameDescriptionFallsBackToDefinition(t *testing.T) {
 	}
 }
 
-func TestMergeCachedViewDraftSummariesPrefersCachedSessionState(t *testing.T) {
-	viewDraftsStore.Lock()
-	previous := viewDraftsStore.m
-	viewDraftsStore.m = map[string]*viewDraftSession{
-		"draft-1": {
-			draft: &views.Draft{
-				ID:              "draft-1",
-				WorkspaceID:     "ws-1",
-				Status:          "published",
-				PublishedViewID: "view-1",
-				CreatedAt:       10,
-				UpdatedAt:       20,
-			},
-			lastTouched: time.Now(),
-		},
-		"draft-2": {
-			draft: &views.Draft{
-				ID:          "draft-2",
-				WorkspaceID: "ws-1",
-				Status:      "active",
-				CreatedAt:   15,
-				UpdatedAt:   25,
-			},
-			lastTouched: time.Now(),
-		},
-		"other-workspace": {
-			draft: &views.Draft{
-				ID:          "draft-3",
-				WorkspaceID: "ws-2",
-				Status:      "active",
-				CreatedAt:   30,
-				UpdatedAt:   30,
-			},
-			lastTouched: time.Now(),
-		},
-	}
-	viewDraftsStore.Unlock()
-	defer func() {
-		viewDraftsStore.Lock()
-		viewDraftsStore.m = previous
-		viewDraftsStore.Unlock()
-	}()
-
-	got := mergeCachedViewDraftSummaries("ws-1", []views.DraftSummary{
-		{ID: "draft-1", Status: "active", CreatedAt: 10, UpdatedAt: 11},
-	})
-
-	if len(got) != 2 {
-		t.Fatalf("summary count = %d, want 2", len(got))
-	}
-	if got[0].ID != "draft-2" {
-		t.Fatalf("first summary id = %q, want draft-2", got[0].ID)
-	}
-	if got[1].ID != "draft-1" {
-		t.Fatalf("second summary id = %q, want draft-1", got[1].ID)
-	}
-	if got[1].Status != "published" {
-		t.Fatalf("draft-1 status = %q, want published", got[1].Status)
-	}
-	if got[1].ViewID != "view-1" {
-		t.Fatalf("draft-1 view id = %q, want view-1", got[1].ViewID)
-	}
-}
-
-func TestApplyCachedDraftSummaryDoesNotDowngradePublishedSummary(t *testing.T) {
-	summary := &views.DraftSummary{
-		ID:        "draft-1",
-		Status:    "published",
-		ViewID:    "view-1",
-		CreatedAt: 10,
-		UpdatedAt: 20,
-	}
-	cached := &views.Draft{
-		ID:          "draft-1",
-		WorkspaceID: "ws-1",
-		Status:      "active",
-		CreatedAt:   10,
-		UpdatedAt:   30,
-	}
-
-	applyCachedDraftSummary(summary, cached)
-
-	if summary.Status != "published" {
-		t.Fatalf("summary status = %q, want published", summary.Status)
-	}
-	if summary.ViewID != "view-1" {
-		t.Fatalf("summary view id = %q, want view-1", summary.ViewID)
-	}
-	if summary.UpdatedAt != 30 {
-		t.Fatalf("summary updated_at = %d, want 30", summary.UpdatedAt)
-	}
-}

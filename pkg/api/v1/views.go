@@ -1,21 +1,24 @@
 package apiv1
 
 import (
+	"bytes"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/beam-cloud/airstore/pkg/clients"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/beam-cloud/airstore/pkg/views"
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog/log"
 )
@@ -26,17 +29,19 @@ type ViewsGroup struct {
 	copilot  *views.Copilot
 	store    *views.ViewStore
 	resolver *views.DataResolver
+	storage  *clients.StorageClient
 }
 
 const viewRefreshQueryParam = "refresh"
 
-func NewViewsGroup(g *echo.Group, backend repository.BackendRepository, copilot *views.Copilot, store *views.ViewStore) *ViewsGroup {
+func NewViewsGroup(g *echo.Group, backend repository.BackendRepository, copilot *views.Copilot, store *views.ViewStore, storage *clients.StorageClient) *ViewsGroup {
 	vg := &ViewsGroup{
 		g:        g,
 		backend:  backend,
 		copilot:  copilot,
 		store:    store,
 		resolver: views.NewDataResolver(backend, store),
+		storage:  storage,
 	}
 	vg.g.GET("", vg.List)
 	vg.g.POST("", vg.Create)
@@ -51,14 +56,10 @@ func NewViewsGroup(g *echo.Group, backend repository.BackendRepository, copilot 
 		vg.g.DELETE("/:view_id/sheets/:sheet_id/rows/:row_id", vg.ExcludeRow)
 		vg.g.POST("/:view_id/sheets/:sheet_id/rows/:row_id/restore", vg.RestoreRow)
 	}
+	vg.g.POST("/:view_id/sheets/:sheet_id/import", vg.ImportData)
 	vg.g.GET("/:view_id/rows/:row_id/detail", vg.RowDetail)
-	vg.g.POST("/drafts", vg.CreateDraft)
-	vg.g.GET("/drafts", vg.ListDrafts)
-	vg.g.GET("/drafts/:draft_id", vg.GetDraft)
-	vg.g.PATCH("/drafts/:draft_id", vg.UpdateDraft)
-	vg.g.DELETE("/drafts/:draft_id", vg.DeleteDraft)
-	vg.g.POST("/drafts/:draft_id/chat", vg.ChatDraft)
-	vg.g.POST("/drafts/:draft_id/publish", vg.PublishDraft)
+	vg.g.POST("/:view_id/chat", vg.ChatView)
+	vg.g.GET("/:view_id/chat/messages", vg.ChatMessages)
 	return vg
 }
 
@@ -1096,42 +1097,214 @@ func (vg *ViewsGroup) RegenerateRow(c echo.Context) error {
 }
 
 // ---------------------------------------------------------------------------
-// Draft management
+// Data import
 // ---------------------------------------------------------------------------
 
-const viewDraftSessionTTL = 30 * time.Minute
+type importDataRequest struct {
+	FilePath      string            `json:"file_path"`
+	ColumnMapping map[string]string `json:"column_mapping"`
+}
 
-type viewDraftSession struct {
+type importDataResponse struct {
+	ImportID    string `json:"import_id"`
+	RowCount    int    `json:"row_count"`
+	ColumnCount int    `json:"column_count"`
+}
+
+func (vg *ViewsGroup) ImportData(c echo.Context) error {
+	if !vg.store.Available() {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "data store not configured")
+	}
+	if vg.storage == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "storage not configured")
+	}
+
+	viewID := c.Param("view_id")
+	sheetID := c.Param("sheet_id")
+
+	workspaceID, err := vg.workspaceID(c)
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+	}
+
+	var req importDataRequest
+	if err := decodeStrictBody(c, &req); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
+	}
+	if strings.TrimSpace(req.FilePath) == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "file_path is required")
+	}
+
+	ctx := c.Request().Context()
+
+	v, err := vg.backend.GetView(ctx, workspaceID, viewID)
+	if err != nil {
+		return ErrorResponse(c, http.StatusNotFound, "view not found")
+	}
+
+	var sheet *types.SheetSpec
+	var comp *types.ComponentSpec
+	for i := range v.Definition.Sheets {
+		if v.Definition.Sheets[i].ID == sheetID {
+			sheet = &v.Definition.Sheets[i]
+			break
+		}
+	}
+	if sheet == nil {
+		return ErrorResponse(c, http.StatusNotFound, "sheet not found")
+	}
+	for i := range sheet.Components {
+		if sheet.Components[i].IsTable() {
+			comp = &sheet.Components[i]
+			break
+		}
+	}
+	if comp == nil {
+		return ErrorResponse(c, http.StatusNotFound, "no table component on sheet")
+	}
+
+	ws, err := vg.backend.GetWorkspace(ctx, workspaceID)
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, "workspace lookup failed")
+	}
+	bucket := vg.storage.WorkspaceBucketName(ws.ExternalId)
+	key := strings.TrimPrefix(req.FilePath, "/")
+	data, err := vg.storage.Download(ctx, bucket, key)
+	if err != nil {
+		log.Error().Err(err).Str("path", req.FilePath).Msg("import: failed to download file")
+		return ErrorResponse(c, http.StatusBadRequest, "could not read file")
+	}
+
+	csvReader := csv.NewReader(bytes.NewReader(data))
+	csvReader.LazyQuotes = true
+	csvReader.FieldsPerRecord = -1
+
+	headers, err := csvReader.Read()
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "could not parse CSV headers")
+	}
+
+	colMapping := req.ColumnMapping
+	if len(colMapping) == 0 {
+		colMapping = make(map[string]string, len(headers))
+		for _, h := range headers {
+			colMapping[h] = toColumnKey(h)
+		}
+	}
+
+	importID := uuid.New().String()
+	var rows []views.ViewRow
+	rowIndex := 0
+
+	for {
+		record, err := csvReader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			break
+		}
+
+		pinned := make(map[string]string, len(colMapping))
+		for i, header := range headers {
+			if i >= len(record) {
+				break
+			}
+			if colKey, ok := colMapping[header]; ok && strings.TrimSpace(record[i]) != "" {
+				pinned[colKey] = strings.TrimSpace(record[i])
+			}
+		}
+
+		if len(pinned) == 0 {
+			rowIndex++
+			continue
+		}
+
+		rowID := fmt.Sprintf("%s:%s:import-%s:%d", sheetID, comp.ID, importID, rowIndex)
+		rows = append(rows, views.ViewRow{
+			ID:          rowID,
+			SheetID:     sheetID,
+			ComponentID: comp.ID,
+			GroupID:     "import:" + importID,
+			TaskID:      "",
+			RowKey:      fmt.Sprintf("import-%d", rowIndex),
+			SchemaHash:  "",
+			Cells:       map[string]string{},
+			Pinned:      pinned,
+			Source:      "import",
+			ImportID:    importID,
+			UpdatedAt:   time.Now(),
+		})
+		rowIndex++
+	}
+
+	if len(rows) == 0 {
+		return ErrorResponse(c, http.StatusBadRequest, "no data rows found in CSV")
+	}
+
+	if err := vg.store.UpsertRows(ctx, viewID, rows); err != nil {
+		log.Error().Err(err).Str("view_id", viewID).Msg("import: failed to upsert rows")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to import data")
+	}
+
+	log.Info().
+		Str("view_id", viewID).
+		Str("sheet_id", sheetID).
+		Str("import_id", importID).
+		Int("rows", len(rows)).
+		Msg("import: CSV data imported")
+
+	return SuccessResponse(c, importDataResponse{
+		ImportID:    importID,
+		RowCount:    len(rows),
+		ColumnCount: len(colMapping),
+	})
+}
+
+func toColumnKey(header string) string {
+	key := strings.ToLower(strings.TrimSpace(header))
+	key = strings.ReplaceAll(key, " ", "_")
+	key = strings.ReplaceAll(key, "-", "_")
+	var clean strings.Builder
+	for _, r := range key {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+			clean.WriteRune(r)
+		}
+	}
+	result := clean.String()
+	if result == "" {
+		return "col"
+	}
+	return result
+}
+
+// ---------------------------------------------------------------------------
+// View copilot chat
+// ---------------------------------------------------------------------------
+
+const viewChatSessionTTL = 30 * time.Minute
+
+type viewChatSession struct {
 	mu          sync.Mutex
-	draft       *views.Draft
+	chatState   *views.ChatState
+	view        *types.View
 	lastTouched time.Time
 }
 
-var viewDraftsStore = struct {
+var viewChatStore = struct {
 	sync.Mutex
-	m map[string]*viewDraftSession
-}{m: make(map[string]*viewDraftSession)}
-
-type createViewDraftRequest struct {
-	Description string `json:"description"`
-	ViewID      string `json:"view_id,omitempty"`
-	ViewName    string `json:"view_name,omitempty"`
-	ViewContent string `json:"view_content,omitempty"`
-}
-
-type createViewDraftResponse struct {
-	DraftID string `json:"draft_id"`
-}
+	m map[string]*viewChatSession
+}{m: make(map[string]*viewChatSession)}
 
 type viewChatAttachedFile struct {
-	Path string `json:"path"`
-	Name string `json:"name"`
+	Path        string `json:"path"`
+	Name        string `json:"name"`
+	ContentType string `json:"content_type,omitempty"`
 }
 
 type viewChatRequest struct {
 	Message       string                 `json:"message"`
 	ViewContent   string                 `json:"view_content,omitempty"`
-	ViewID        string                 `json:"view_id,omitempty"`
 	AttachedFiles []viewChatAttachedFile `json:"attached_files,omitempty"`
 }
 
@@ -1155,296 +1328,78 @@ type viewSSEEvent struct {
 	OpAgentName  string            `json:"agent_name,omitempty"`
 	OpScheduleID string            `json:"schedule_id,omitempty"`
 	Citations    []viewSSECitation `json:"citations,omitempty"`
-	ViewID       string            `json:"view_id,omitempty"`
-	ViewName     string            `json:"view_name,omitempty"`
 }
 
-func getCachedViewDraftSession(draftID string) *viewDraftSession {
+func (vg *ViewsGroup) getViewChatSession(c echo.Context, viewID string) (*viewChatSession, error) {
 	now := time.Now()
-	viewDraftsStore.Lock()
-	defer viewDraftsStore.Unlock()
-	pruneViewDraftSessionsLocked(now)
-	session := viewDraftsStore.m[draftID]
-	if session != nil {
-		session.lastTouched = now
-	}
-	return session
-}
+	wsID := c.Param("workspace_id")
 
-func putViewDraftSession(draft *views.Draft) *viewDraftSession {
-	if draft == nil {
-		return nil
+	viewChatStore.Lock()
+	for id, s := range viewChatStore.m {
+		if s == nil || now.Sub(s.lastTouched) > viewChatSessionTTL {
+			delete(viewChatStore.m, id)
+		}
 	}
-	now := time.Now()
-	viewDraftsStore.Lock()
-	defer viewDraftsStore.Unlock()
-	pruneViewDraftSessionsLocked(now)
-
-	if existing := viewDraftsStore.m[draft.ID]; existing != nil {
-		existing.draft = draft
+	if existing := viewChatStore.m[viewID]; existing != nil {
 		existing.lastTouched = now
-		return existing
+		viewChatStore.Unlock()
+		return existing, nil
 	}
-	session := &viewDraftSession{draft: draft, lastTouched: now}
-	viewDraftsStore.m[draft.ID] = session
-	return session
-}
+	viewChatStore.Unlock()
 
-func pruneViewDraftSessionsLocked(now time.Time) {
-	for id, session := range viewDraftsStore.m {
-		if session == nil || now.Sub(session.lastTouched) > viewDraftSessionTTL {
-			delete(viewDraftsStore.m, id)
-		}
-	}
-}
-
-func cloneViewDraft(draft *views.Draft) *views.Draft {
-	if draft == nil {
-		return nil
-	}
-	out := *draft
-	out.Messages = append([]views.DraftMessage(nil), draft.Messages...)
-	return &out
-}
-
-func (vg *ViewsGroup) getViewDraftSession(c echo.Context, draftID string) (*viewDraftSession, error) {
-	workspaceID := c.Param("workspace_id")
-	if session := getCachedViewDraftSession(draftID); session != nil {
-		session.mu.Lock()
-		cachedWorkspaceID := session.draft.WorkspaceID
-		session.mu.Unlock()
-		if cachedWorkspaceID == workspaceID {
-			return session, nil
-		}
-		if cachedWorkspaceID != "" {
-			return nil, fmt.Errorf("draft not found")
-		}
-	}
-
-	draft, err := vg.copilot.LoadDraft(c.Request().Context(), workspaceID, draftID)
+	workspaceID, err := vg.workspaceID(c)
 	if err != nil {
 		return nil, err
 	}
-	return putViewDraftSession(draft), nil
-}
-
-func (vg *ViewsGroup) CreateDraft(c echo.Context) error {
-	if vg.copilot == nil || !vg.copilot.DraftsAvailable() {
-		return ErrorResponse(c, http.StatusServiceUnavailable, "view copilot not configured")
-	}
-	workspaceID := c.Param("workspace_id")
-
-	var req createViewDraftRequest
-	if err := decodeStrictBody(c, &req); err != nil {
-		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
-	}
-
-	draft := vg.copilot.CreateDraft(workspaceID)
-	if err := vg.copilot.PersistMeta(c.Request().Context(), draft); err != nil {
-		log.Error().Err(err).Str("workspace_id", workspaceID).Str("draft_id", draft.ID).Msg("persist draft meta failed")
-		return ErrorResponse(c, http.StatusInternalServerError, "failed to persist draft")
-	}
-	if strings.TrimSpace(req.ViewContent) != "" {
-		draft.ViewContent = req.ViewContent
-		if err := vg.copilot.PersistViewContent(c.Request().Context(), draft.ID, req.ViewContent); err != nil {
-			log.Error().Err(err).Str("draft_id", draft.ID).Msg("persist draft view content failed")
-			return ErrorResponse(c, http.StatusInternalServerError, "failed to persist draft content")
-		}
-	}
-	if strings.TrimSpace(req.ViewID) != "" {
-		draft.PublishedViewID = req.ViewID
-		if err := vg.copilot.PersistPublishedViewID(c.Request().Context(), draft.ID, req.ViewID); err != nil {
-			log.Error().Err(err).Str("draft_id", draft.ID).Msg("persist draft published view ID failed")
-			return ErrorResponse(c, http.StatusInternalServerError, "failed to persist draft published view ID")
-		}
-	}
-	_ = vg.copilot.IndexDraftCreated(
-		c.Request().Context(),
-		workspaceID,
-		draft.ID,
-		req.Description,
-		req.ViewName,
-		req.ViewID,
-	)
-	putViewDraftSession(draft)
-
-	return SuccessResponse(c, createViewDraftResponse{DraftID: draft.ID})
-}
-
-func (vg *ViewsGroup) ListDrafts(c echo.Context) error {
-	if vg.copilot == nil || !vg.copilot.DraftsAvailable() {
-		return ErrorResponse(c, http.StatusServiceUnavailable, "view copilot not configured")
-	}
-	workspaceID := c.Param("workspace_id")
-	drafts, err := vg.copilot.ListDrafts(c.Request().Context(), workspaceID)
+	v, err := vg.backend.GetView(c.Request().Context(), workspaceID, viewID)
 	if err != nil {
-		log.Warn().Err(err).Str("workspace_id", workspaceID).Msg("list drafts failed, returning empty list")
-		drafts = []views.DraftSummary{}
-	}
-	if drafts == nil {
-		drafts = []views.DraftSummary{}
-	}
-	drafts = mergeCachedViewDraftSummaries(workspaceID, drafts)
-	return SuccessResponse(c, drafts)
-}
-
-func mergeCachedViewDraftSummaries(workspaceID string, drafts []views.DraftSummary) []views.DraftSummary {
-	now := time.Now()
-	viewDraftsStore.Lock()
-	pruneViewDraftSessionsLocked(now)
-	cached := make(map[string]*views.Draft, len(viewDraftsStore.m))
-	for draftID, session := range viewDraftsStore.m {
-		if session == nil || session.draft == nil {
-			continue
-		}
-		if session.draft.WorkspaceID != workspaceID {
-			continue
-		}
-		cached[draftID] = cloneViewDraft(session.draft)
-	}
-	viewDraftsStore.Unlock()
-
-	if len(cached) == 0 {
-		return drafts
+		return nil, err
 	}
 
-	merged := make([]views.DraftSummary, 0, len(drafts))
-	seen := make(map[string]bool, len(drafts))
-	for _, draft := range drafts {
-		if cachedDraft := cached[draft.ID]; cachedDraft != nil {
-			applyCachedDraftSummary(&draft, cachedDraft)
-		}
-		merged = append(merged, draft)
-		seen[draft.ID] = true
-	}
-
-	for _, cachedDraft := range cached {
-		if seen[cachedDraft.ID] {
-			continue
-		}
-		summary := views.DraftSummary{
-			ID:        cachedDraft.ID,
-			Status:    firstNonEmptyString(cachedDraft.Status, "active"),
-			ViewID:    strings.TrimSpace(cachedDraft.PublishedViewID),
-			CreatedAt: cachedDraft.CreatedAt,
-			UpdatedAt: cachedDraft.UpdatedAt,
-		}
-		merged = append(merged, summary)
-	}
-
-	sort.SliceStable(merged, func(i, j int) bool {
-		if merged[i].UpdatedAt != merged[j].UpdatedAt {
-			return merged[i].UpdatedAt > merged[j].UpdatedAt
-		}
-		return merged[i].CreatedAt > merged[j].CreatedAt
-	})
-	return merged
-}
-
-func isTerminalDraftStatus(status string) bool {
-	switch strings.TrimSpace(status) {
-	case "published", "discarded":
-		return true
-	default:
-		return false
-	}
-}
-
-func applyCachedDraftSummary(summary *views.DraftSummary, draft *views.Draft) {
-	if summary == nil || draft == nil {
-		return
-	}
-	if draft.UpdatedAt > summary.UpdatedAt {
-		summary.UpdatedAt = draft.UpdatedAt
-	}
-	if publishedViewID := strings.TrimSpace(draft.PublishedViewID); publishedViewID != "" {
-		summary.Status = "published"
-		summary.ViewID = publishedViewID
-		return
-	}
-	if status := strings.TrimSpace(draft.Status); status != "" {
-		if isTerminalDraftStatus(summary.Status) && !isTerminalDraftStatus(status) {
-			return
-		}
-		summary.Status = status
-	}
-}
-
-func firstNonEmptyString(values ...string) string {
-	for _, value := range values {
-		if trimmed := strings.TrimSpace(value); trimmed != "" {
-			return trimmed
+	var messages []views.ChatMessage
+	if vg.copilot != nil && vg.copilot.ChatAvailable() {
+		if existing, loadErr := vg.copilot.LoadChatState(c.Request().Context(), wsID, viewID); loadErr == nil && existing != nil {
+			messages = existing.Messages
 		}
 	}
-	return ""
-}
-
-func (vg *ViewsGroup) GetDraft(c echo.Context) error {
-	if vg.copilot == nil || !vg.copilot.DraftsAvailable() {
-		return ErrorResponse(c, http.StatusServiceUnavailable, "view copilot not configured")
-	}
-	draft, err := vg.copilot.LoadDraft(c.Request().Context(), c.Param("workspace_id"), c.Param("draft_id"))
-	if err != nil {
-		return ErrorResponse(c, http.StatusNotFound, "draft not found")
-	}
-	return SuccessResponse(c, draft)
-}
-
-type updateViewDraftRequest struct {
-	ViewContent string `json:"view_content"`
-}
-
-func (vg *ViewsGroup) UpdateDraft(c echo.Context) error {
-	if vg.copilot == nil || !vg.copilot.DraftsAvailable() {
-		return ErrorResponse(c, http.StatusServiceUnavailable, "view copilot not configured")
-	}
-	session, err := vg.getViewDraftSession(c, c.Param("draft_id"))
-	if err != nil {
-		return ErrorResponse(c, http.StatusNotFound, "draft not found")
-	}
-
-	var req updateViewDraftRequest
-	if err := decodeStrictBody(c, &req); err != nil {
-		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
-	}
-	trimmed := strings.TrimSpace(req.ViewContent)
-	if trimmed == "" {
-		return ErrorResponse(c, http.StatusBadRequest, "view_content is required")
-	}
-
-	session.mu.Lock()
-	defer session.mu.Unlock()
-	if trimmed != session.draft.ViewContent {
-		if err := vg.copilot.PersistViewContent(c.Request().Context(), session.draft.ID, trimmed); err != nil {
-			log.Error().Err(err).Str("draft_id", session.draft.ID).Msg("persist draft view content failed")
-			return ErrorResponse(c, http.StatusInternalServerError, "failed to persist draft content")
+	if messages == nil {
+		messages = []views.ChatMessage{}
+		if vg.copilot != nil && vg.copilot.ChatAvailable() {
+			_ = vg.copilot.PersistChatMeta(c.Request().Context(), &views.ChatState{
+				ID:          viewID,
+				WorkspaceID: wsID,
+				CreatedAt:   v.CreatedAt.UnixMilli(),
+			})
 		}
-		session.draft.ViewContent = trimmed
-		session.draft.UpdatedAt = time.Now().UnixMilli()
 	}
-	return SuccessResponse(c, cloneViewDraft(session.draft))
+
+	viewContent, _ := json.Marshal(v.Definition)
+	cs := &views.ChatState{
+		ID:              viewID,
+		WorkspaceID:     wsID,
+		ViewContent:     string(viewContent),
+		PublishedViewID: viewID,
+		Messages:        messages,
+		CreatedAt:       v.CreatedAt.UnixMilli(),
+		UpdatedAt:       v.UpdatedAt.UnixMilli(),
+	}
+
+	session := &viewChatSession{
+		chatState:   cs,
+		view:        v,
+		lastTouched: now,
+	}
+
+	viewChatStore.Lock()
+	viewChatStore.m[viewID] = session
+	viewChatStore.Unlock()
+
+	return session, nil
 }
 
-func (vg *ViewsGroup) DeleteDraft(c echo.Context) error {
-	if vg.copilot == nil || !vg.copilot.DraftsAvailable() {
-		return ErrorResponse(c, http.StatusServiceUnavailable, "view copilot not configured")
-	}
-	workspaceID := c.Param("workspace_id")
-	draftID := c.Param("draft_id")
-	if err := vg.copilot.DeleteDraft(c.Request().Context(), workspaceID, draftID); err != nil {
-		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
-	}
-
-	viewDraftsStore.Lock()
-	delete(viewDraftsStore.m, draftID)
-	viewDraftsStore.Unlock()
-
-	return SuccessResponse(c, nil)
-}
-
-// ChatDraft streams view draft updates over SSE while the copilot edits the view.
-func (vg *ViewsGroup) ChatDraft(c echo.Context) error {
-	if vg.copilot == nil || !vg.copilot.DraftsAvailable() {
+// ChatView streams copilot updates over SSE for a published view.
+func (vg *ViewsGroup) ChatView(c echo.Context) error {
+	if vg.copilot == nil {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "view copilot not configured")
 	}
 
@@ -1456,9 +1411,10 @@ func (vg *ViewsGroup) ChatDraft(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, "message is required")
 	}
 
-	session, err := vg.getViewDraftSession(c, c.Param("draft_id"))
+	viewID := c.Param("view_id")
+	session, err := vg.getViewChatSession(c, viewID)
 	if err != nil {
-		return ErrorResponse(c, http.StatusNotFound, "draft not found")
+		return ErrorResponse(c, http.StatusNotFound, "view not found")
 	}
 
 	w := c.Response()
@@ -1502,31 +1458,23 @@ func (vg *ViewsGroup) ChatDraft(c echo.Context) error {
 	session.mu.Lock()
 	defer session.mu.Unlock()
 
-	if trimmed := strings.TrimSpace(req.ViewContent); trimmed != "" && trimmed != session.draft.ViewContent {
-		session.draft.ViewContent = trimmed
-		if err := vg.copilot.PersistViewContent(genCtx, session.draft.ID, trimmed); err != nil {
-			log.Warn().Err(err).Str("draft_id", session.draft.ID).Msg("failed to persist latest view content before chat")
-		}
-	}
-
-	viewID := strings.TrimSpace(req.ViewID)
-	if viewID == "" {
-		viewID = strings.TrimSpace(session.draft.PublishedViewID)
+	if trimmed := strings.TrimSpace(req.ViewContent); trimmed != "" {
+		session.chatState.ViewContent = trimmed
 	}
 
 	var attachedFiles []views.AttachedFile
 	for _, f := range req.AttachedFiles {
-		attachedFiles = append(attachedFiles, views.AttachedFile{Path: f.Path, Name: f.Name})
+		attachedFiles = append(attachedFiles, views.AttachedFile{Path: f.Path, Name: f.Name, ContentType: f.ContentType})
 	}
 
 	resp, err := vg.copilot.GenerateStream(
 		genCtx,
-		session.draft,
+		session.chatState,
 		workspaceID,
 		strings.TrimSpace(req.Message),
 		viewID,
 		attachedFiles,
-		func(partial *views.PartialViewDraftResponse) {
+		func(partial *views.PartialChatResponse) {
 			writeSSE(viewSSEEvent{
 				Event:       "chunk",
 				Message:     partial.Message,
@@ -1536,31 +1484,19 @@ func (vg *ViewsGroup) ChatDraft(c echo.Context) error {
 		},
 	)
 	if err != nil {
-		log.Error().Err(err).Str("draft_id", c.Param("draft_id")).Msg("view generation failed")
+		log.Error().Err(err).Str("view_id", viewID).Msg("view copilot generation failed")
 		writeSSE(viewSSEEvent{Event: "error", Error: err.Error()})
 		writeSSE(viewSSEEvent{Event: "done"})
 		return nil
 	}
 
-	// Auto-publish before executing operations so tasks get a source_view_id.
-	// On the first prompt of a new draft, viewID is empty and operations would
-	// otherwise be dispatched without any view association.
-	if viewID == "" && resp.View_content != "" && string(resp.Update_type) != views.UpdateTypeConversation {
-		session.draft.ViewContent = resp.View_content
-		if v, pubErr := vg.copilot.PublishView(genCtx, session.draft, workspaceID); pubErr == nil {
-			viewID = v.ID
-			writeSSE(viewSSEEvent{Event: "published", ViewID: v.ID, ViewName: v.Name, ViewContent: resp.View_content})
-			vg.copilot.IndexDraftPublishedAsync(c.Param("workspace_id"), session.draft.ID, v.Name, v.ID)
-		} else {
-			log.Warn().Err(pubErr).Str("draft_id", session.draft.ID).Msg("auto-publish before operations failed")
-		}
-	}
-
 	if len(resp.Operations) > 0 {
 		for _, op := range resp.Operations {
+			opName := operationPayloadName(op.Payload)
 			writeSSE(viewSSEEvent{
 				Event:    "operation",
 				OpType:   string(op.Type),
+				OpName:   opName,
 				OpStatus: "executing",
 			})
 		}
@@ -1582,13 +1518,30 @@ func (vg *ViewsGroup) ChatDraft(c echo.Context) error {
 				log.Warn().Str("type", r.Type).Str("name", r.Name).Str("error", r.Error).Msg("copilot operation failed")
 			}
 		}
-		if session.draft.ViewContent != "" {
-			if reconciled, reconcileErr := vg.copilot.ReconcileViewContent(genCtx, workspaceID, session.draft.ViewContent, results); reconcileErr != nil {
-				log.Warn().Err(reconcileErr).Str("draft_id", session.draft.ID).Msg("failed to reconcile generated view content")
-			} else if reconciled != "" && reconciled != session.draft.ViewContent {
-				session.draft.ViewContent = reconciled
+		if session.chatState.ViewContent != "" {
+			if reconciled, reconcileErr := vg.copilot.ReconcileViewContent(genCtx, workspaceID, session.chatState.ViewContent, results); reconcileErr != nil {
+				log.Warn().Err(reconcileErr).Str("view_id", viewID).Msg("failed to reconcile view content")
+			} else if reconciled != "" && reconciled != session.chatState.ViewContent {
+				session.chatState.ViewContent = reconciled
 				resp.View_content = reconciled
-				_ = vg.copilot.PersistViewContent(genCtx, session.draft.ID, reconciled)
+			}
+		}
+	}
+
+	if resp.View_content != "" && string(resp.Update_type) != views.UpdateTypeConversation {
+		var def types.ViewDefinition
+		if err := json.Unmarshal([]byte(resp.View_content), &def); err == nil {
+			views.NormalizeDefinition(&def)
+			session.view.Definition = def
+			if n := strings.TrimSpace(def.Name); n != "" {
+				session.view.Name = n
+			}
+			if d := strings.TrimSpace(def.Description); d != "" {
+				session.view.Description = d
+			}
+			session.view.SyncNameDescription()
+			if err := vg.backend.UpdateView(genCtx, session.view); err != nil {
+				log.Warn().Err(err).Str("view_id", viewID).Msg("failed to persist view definition after chat")
 			}
 		}
 	}
@@ -1617,54 +1570,35 @@ func (vg *ViewsGroup) ChatDraft(c echo.Context) error {
 	return nil
 }
 
-func (vg *ViewsGroup) PublishDraft(c echo.Context) error {
-	if vg.copilot == nil || !vg.copilot.DraftsAvailable() {
-		return ErrorResponse(c, http.StatusServiceUnavailable, "view copilot not configured")
-	}
 
-	workspaceID, err := vg.workspaceID(c)
-	if err != nil {
-		return ErrorResponse(c, http.StatusBadRequest, err.Error())
-	}
-
-	var req struct {
-		ViewContent string `json:"view_content"`
-	}
-	if err := decodeStrictBody(c, &req); err != nil && !errors.Is(err, io.EOF) {
-		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
-	}
-
-	session, err := vg.getViewDraftSession(c, c.Param("draft_id"))
-	if err != nil {
-		return ErrorResponse(c, http.StatusNotFound, "draft not found")
-	}
-
-	session.mu.Lock()
-
-	// The frontend publishes mid-stream before the chat endpoint persists
-	// ViewContent to S2.  When this request lands on a different pod the
-	// draft loaded from S2 will have empty ViewContent.  The caller can
-	// supply it in the request body to bridge the gap.
-	if vc := strings.TrimSpace(req.ViewContent); vc != "" && session.draft.ViewContent != vc {
-		session.draft.ViewContent = vc
-		_ = vg.copilot.PersistViewContent(c.Request().Context(), session.draft.ID, vc)
-	}
-
-	v, err := vg.copilot.PublishView(c.Request().Context(), session.draft, workspaceID)
+// ChatMessages returns the persisted chat history for a view.
+func (vg *ViewsGroup) ChatMessages(c echo.Context) error {
+	viewID := c.Param("view_id")
 	wsID := c.Param("workspace_id")
-	draftID := session.draft.ID
-	session.mu.Unlock()
 
-	if err != nil {
-		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	var messages []views.ChatMessage
+	if vg.copilot != nil && vg.copilot.ChatAvailable() {
+		if existing, err := vg.copilot.LoadChatState(c.Request().Context(), wsID, viewID); err == nil && existing != nil {
+			messages = existing.Messages
+		}
 	}
+	if messages == nil {
+		messages = []views.ChatMessage{}
+	}
+	return c.JSON(http.StatusOK, map[string]any{"success": true, "data": messages})
+}
 
-	// Publish success is determined by the view write plus the durable draft
-	// stream update inside PublishView. The workspace draft index is a
-	// secondary projection, so keep its append off the request path.
-	vg.copilot.IndexDraftPublishedAsync(wsID, draftID, v.Name, v.ID)
-
-	return SuccessResponse(c, v)
+func operationPayloadName(payload string) string {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(payload), &m); err != nil {
+		return ""
+	}
+	for _, key := range []string{"name", "task_name", "schedule_name", "agent_name", "skill_name", "prompt"} {
+		if v, ok := m[key].(string); ok && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------
