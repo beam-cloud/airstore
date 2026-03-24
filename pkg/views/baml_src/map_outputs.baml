@@ -158,41 +158,28 @@ function MapOutputsToSchema(
     13. row_key must come from a stable identifier in the data itself. Never
         invent alternate row_keys for the same entity across runs.
 
-    AUTOMATIC ROW GROUPING:
-    Determine how many rows to produce for each task by examining the outputs:
+    ROW CARDINALITY — how many rows to produce per task:
+    Decide based on the CONTENT of the outputs and the table's column schema,
+    NOT based on artifact keys or other metadata naming.
 
-    1. MULTI-ENTITY (most common for tasks with many outputs):
-       When a task has multiple outputs sharing the SAME ARTIFACT_KEY, each
-       output represents a distinct entity (e.g. one restaurant, one contact,
-       one company). Produce ONE ROW PER OUTPUT. Each row's data comes
-       primarily from its corresponding output. Use a stable slug derived from
-       the entity as row_key (e.g. "bistrot-ha", "alice-smith", "acme-corp").
+    1. Look at the outputs and ask: does each output describe a DISTINCT ENTITY
+       that the table is tracking (e.g. a different property, contact, company,
+       email thread)? If yes, produce ONE ROW PER ENTITY. Derive each row_key
+       from a stable identifier in the entity (e.g. "7-9-court-st", "alice-smith").
        Include only that output's ID in source_output_ids.
+    2. If multiple outputs describe DIFFERENT ASPECTS of the same entity or work
+       item (e.g. a PR + a notification about it, a draft + a sent version),
+       synthesize them into ONE ROW, row_key = "task".
+    3. If multiple outputs are clearly about the same entity at different stages
+       (e.g. draft → sent → replied for the same recipient), merge into ONE ROW
+       per entity using the latest state. For status columns, prefer the most
+       recent non-cancelled state.
+    4. If a task has a single output, produce one row with row_key = "task".
 
-    2. SYNTHESIS (outputs with different artifact keys):
-       When a task has outputs with DIFFERENT ARTIFACT_KEY values (or no
-       artifact key), they represent different facets of the same work (e.g.
-       a PR created + an email sent). Synthesize into a SINGLE ROW with
-       row_key = "task", picking the best value for each column across all
-       outputs.
-
-    3. SINGLE OUTPUT:
-       If a task has exactly one output, produce one row with row_key = "task".
-
-    ENTITY LIFECYCLE:
-    Some outputs have a STATUS field (active, pending, approved, rejected, cancelled).
-    When multiple outputs represent different stages of the same entity
-    (e.g. draft -> sent -> replied for the same email recipient), synthesize
-    ONE row per entity with the latest state. Use the STATUS field to
-    determine precedence:
-    - active outputs represent the current state (default status)
-    - cancelled outputs are no longer relevant (replaced or task was cancelled)
-    - pending outputs are awaiting approval
-    - For status columns, derive from the most recent non-cancelled output
-      (e.g. "Replied" if there is a reply, "Sent" if just sent, "Pending"
-      if still awaiting approval, "Rejected" if rejected)
-    Include ALL contributing output IDs in source_output_ids regardless of
-    status, so the full entity history is accessible.
+    The key question is always: "does the table want one row per entity, or one
+    row per task?" The column schema tells you — a "Property Listings" table
+    with an Address column wants one row per property; a "Task Log" table wants
+    one row per task. Use the sheet name and columns to decide.
 
     SHEET CONTEXT: The sheet name "{{ sheet_name }}" gives context for
     disambiguation (e.g. which URL or label to pick when multiple exist)

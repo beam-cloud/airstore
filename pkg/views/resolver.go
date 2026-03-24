@@ -1778,7 +1778,6 @@ func mappingOutputIdentity(output *types.TaskOutput) string {
 		return ""
 	}
 	artifact := ArtifactOf(output)
-	key := types.CanonicalArtifactFamilyKey(artifact.Key(), artifact.Kind(), output.OutputType)
 	title := normalizeToken(output.Title)
 	path := normalizeToken(artifact.filePath())
 	uri := strings.ToLower(strings.TrimSpace(artifact.uri()))
@@ -1798,26 +1797,16 @@ func mappingOutputIdentity(output *types.TaskOutput) string {
 	))
 
 	switch {
-	case key != "" && threadID != "":
-		return "key:" + key + "|thread:" + threadID
-	case key != "" && recipient != "" && subject != "":
-		return "key:" + key + "|recipient:" + recipient + "|subject:" + subject
-	case key != "" && uri != "":
-		return "key:" + key + "|uri:" + uri
-	case key != "" && path != "":
-		return "key:" + key + "|path:" + path
-	case key != "" && title != "":
-		return "key:" + key + "|title:" + title
+	case threadID != "":
+		return "thread:" + threadID
+	case recipient != "" && subject != "":
+		return "recipient:" + recipient + "|subject:" + subject
 	case uri != "":
 		return "uri:" + uri
 	case path != "":
 		return "path:" + path
-	case recipient != "" && subject != "":
-		return "type:" + normalizeToken(output.OutputType) + "|recipient:" + recipient + "|subject:" + subject
-	case key != "":
-		return "key:" + key
 	case title != "":
-		return "type:" + normalizeToken(output.OutputType) + "|title:" + title
+		return "title:" + title
 	default:
 		return ""
 	}
@@ -3980,3 +3969,4 @@ func widgetDataHash(columns, data string) string {
 	h.Write([]byte(data))
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
+
