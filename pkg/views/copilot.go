@@ -638,6 +638,7 @@ func (c *Copilot) BuildWorkspaceContext(ctx context.Context, workspaceID uint) s
 	sb.WriteString("If multiple agents share the same skills or output schema, treat them as alternatives.\n")
 	sb.WriteString("Only include multiple agents in a view when the user explicitly wants multiple distinct agents or different components truly depend on different agents.\n")
 
+	emittedSkills := make(map[string]bool)
 	for _, a := range agents {
 		fmt.Fprintf(&sb, "\n▸ Agent: %s (ID: %s)\n", a.Name, a.ID)
 		if strings.TrimSpace(a.AgentKey) != "" {
@@ -652,7 +653,8 @@ func (c *Copilot) BuildWorkspaceContext(ctx context.Context, workspaceID uint) s
 		} else {
 			sb.WriteString("  Skills:\n")
 			for _, sn := range agentSkills {
-				if m, ok := skillManifests[sn]; ok {
+				if ls, ok := skillManifests[sn]; ok {
+					m := ls.Manifest
 					fmt.Fprintf(&sb, "    • %s — %s\n", sn, m.Description)
 					meta := m.AirstoreMetadata()
 					if len(meta.Needs) > 0 {
@@ -661,10 +663,23 @@ func (c *Copilot) BuildWorkspaceContext(ctx context.Context, workspaceID uint) s
 					if len(meta.Writes) > 0 {
 						fmt.Fprintf(&sb, "      output paths: %s\n", strings.Join(meta.Writes, ", "))
 					}
+					emittedSkills[sn] = true
 				} else {
 					fmt.Fprintf(&sb, "    • %s\n", sn)
 				}
 			}
+		}
+	}
+
+	if len(emittedSkills) > 0 {
+		sb.WriteString("\n" + strings.Repeat("─", 60) + "\n")
+		sb.WriteString("SKILL DEFINITIONS\n")
+		sb.WriteString(strings.Repeat("─", 60) + "\n")
+		sb.WriteString("Full skill instructions for the agents assigned to this project.\n")
+		sb.WriteString("Use these to understand what the agents can do and how they work.\n\n")
+		for name := range emittedSkills {
+			ls := skillManifests[name]
+			fmt.Fprintf(&sb, "── %s ──\n%s\n\n", name, strings.TrimSpace(ls.Content))
 		}
 	}
 
@@ -1561,8 +1576,13 @@ func findUniqueAgentProfileByName(agents []*types.AgentProfile, name string) *ty
 	return match
 }
 
-func (c *Copilot) loadSkillManifests(ctx context.Context, workspaceID uint) map[string]*skills.SkillManifest {
-	result := make(map[string]*skills.SkillManifest)
+type loadedSkill struct {
+	Manifest *skills.SkillManifest
+	Content  string
+}
+
+func (c *Copilot) loadSkillManifests(ctx context.Context, workspaceID uint) map[string]*loadedSkill {
+	result := make(map[string]*loadedSkill)
 	if c.storage == nil {
 		return result
 	}
@@ -1591,7 +1611,7 @@ func (c *Copilot) loadSkillManifests(ctx context.Context, workspaceID uint) map[
 		if err != nil {
 			continue
 		}
-		result[name] = manifest
+		result[name] = &loadedSkill{Manifest: manifest, Content: string(content)}
 	}
 	return result
 }
