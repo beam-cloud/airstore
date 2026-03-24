@@ -211,6 +211,7 @@ func TestFetchMappingOutputsDoesNotFallBackToWorkspaceForUnresolvedViewAgentRefs
 		7,
 		&types.DataSource{},
 		[]string{"missing-agent"},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("fetchMappingOutputs returned error: %v", err)
@@ -261,6 +262,7 @@ func TestFetchMappingOutputsExpandsTaskContextForSelectedTasks(t *testing.T) {
 		7,
 		&types.DataSource{ArtifactKey: "extracted-recipes"},
 		[]string{"chef-agent"},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("fetchMappingOutputs returned error: %v", err)
@@ -328,6 +330,7 @@ func TestFetchMappingOutputsIncludesSyntheticBlockerOutputWhenNoRealOutputsExist
 		7,
 		&types.DataSource{OutputType: types.TaskOutputTypeEmail},
 		[]string{"sales-agent"},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("fetchMappingOutputs returned error: %v", err)
@@ -404,6 +407,7 @@ func TestFetchMappingOutputsIncludesSyntheticBlockerOutputForSalesEmailArtifactK
 		7,
 		&types.DataSource{ArtifactKey: "sales-email"},
 		[]string{"sales-agent"},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("fetchMappingOutputs returned error: %v", err)
@@ -476,6 +480,7 @@ func TestFetchMappingOutputsDoesNotAddSyntheticBlockerOutputWhenRealOutputExists
 		7,
 		&types.DataSource{OutputType: types.TaskOutputTypeEmail},
 		[]string{"sales-agent"},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("fetchMappingOutputs returned error: %v", err)
@@ -668,6 +673,7 @@ func TestFetchMappingOutputsExpandsTaskContextForStatusScopedTasks(t *testing.T)
 		7,
 		&types.DataSource{Statuses: []string{types.TaskOutputStatusPending}},
 		[]string{"chef-agent"},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("fetchMappingOutputs returned error: %v", err)
@@ -942,6 +948,7 @@ func TestFetchMappingOutputsUsesOutputTypeFallbackWhenArtifactKeyUnset(t *testin
 		7,
 		&types.DataSource{OutputType: "json"},
 		[]string{"chef-agent"},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("fetchMappingOutputs returned error: %v", err)
@@ -985,6 +992,7 @@ func TestFetchMappingOutputsAvoidsExtraExpansionWhenSelectionIsAlreadyFull(t *te
 		7,
 		&types.DataSource{},
 		[]string{"chef-agent"},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("fetchMappingOutputs returned error: %v", err)

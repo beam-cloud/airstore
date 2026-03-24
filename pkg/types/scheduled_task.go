@@ -17,6 +17,7 @@ type ScheduledTask struct {
 	TokenID           *uint      `json:"-" db:"token_id"`
 	EncryptedToken    []byte     `json:"-" db:"encrypted_token"`
 	CreatedByMemberID *uint      `json:"created_by_member_id,omitempty" db:"created_by_member_id"`
+	SourceViewID      *string    `json:"source_view_id,omitempty" db:"source_view_id"`
 	CreatedAt         time.Time  `json:"created_at" db:"created_at"`
 	UpdatedAt         time.Time  `json:"updated_at" db:"updated_at"`
 }

@@ -1123,10 +1123,16 @@ type createViewDraftResponse struct {
 	DraftID string `json:"draft_id"`
 }
 
+type viewChatAttachedFile struct {
+	Path string `json:"path"`
+	Name string `json:"name"`
+}
+
 type viewChatRequest struct {
-	Message     string `json:"message"`
-	ViewContent string `json:"view_content,omitempty"`
-	ViewID      string `json:"view_id,omitempty"`
+	Message       string                 `json:"message"`
+	ViewContent   string                 `json:"view_content,omitempty"`
+	ViewID        string                 `json:"view_id,omitempty"`
+	AttachedFiles []viewChatAttachedFile `json:"attached_files,omitempty"`
 }
 
 type viewSSECitation struct {
@@ -1136,15 +1142,21 @@ type viewSSECitation struct {
 }
 
 type viewSSEEvent struct {
-	Event       string            `json:"event"`
-	Message     string            `json:"message,omitempty"`
-	ViewContent string            `json:"view_content,omitempty"`
-	UpdateType  string            `json:"update_type,omitempty"`
-	Error       string            `json:"error,omitempty"`
-	OpType      string            `json:"type,omitempty"`
-	OpName      string            `json:"name,omitempty"`
-	OpStatus    string            `json:"status,omitempty"`
-	Citations   []viewSSECitation `json:"citations,omitempty"`
+	Event        string            `json:"event"`
+	Message      string            `json:"message,omitempty"`
+	ViewContent  string            `json:"view_content,omitempty"`
+	UpdateType   string            `json:"update_type,omitempty"`
+	Error        string            `json:"error,omitempty"`
+	OpType       string            `json:"type,omitempty"`
+	OpName       string            `json:"name,omitempty"`
+	OpStatus     string            `json:"status,omitempty"`
+	OpAgentID    string            `json:"agent_id,omitempty"`
+	OpTaskID     string            `json:"task_id,omitempty"`
+	OpAgentName  string            `json:"agent_name,omitempty"`
+	OpScheduleID string            `json:"schedule_id,omitempty"`
+	Citations    []viewSSECitation `json:"citations,omitempty"`
+	ViewID       string            `json:"view_id,omitempty"`
+	ViewName     string            `json:"view_name,omitempty"`
 }
 
 func getCachedViewDraftSession(draftID string) *viewDraftSession {
@@ -1502,12 +1514,18 @@ func (vg *ViewsGroup) ChatDraft(c echo.Context) error {
 		viewID = strings.TrimSpace(session.draft.PublishedViewID)
 	}
 
+	var attachedFiles []views.AttachedFile
+	for _, f := range req.AttachedFiles {
+		attachedFiles = append(attachedFiles, views.AttachedFile{Path: f.Path, Name: f.Name})
+	}
+
 	resp, err := vg.copilot.GenerateStream(
 		genCtx,
 		session.draft,
 		workspaceID,
 		strings.TrimSpace(req.Message),
 		viewID,
+		attachedFiles,
 		func(partial *views.PartialViewDraftResponse) {
 			writeSSE(viewSSEEvent{
 				Event:       "chunk",
@@ -1524,6 +1542,20 @@ func (vg *ViewsGroup) ChatDraft(c echo.Context) error {
 		return nil
 	}
 
+	// Auto-publish before executing operations so tasks get a source_view_id.
+	// On the first prompt of a new draft, viewID is empty and operations would
+	// otherwise be dispatched without any view association.
+	if viewID == "" && resp.View_content != "" && string(resp.Update_type) != views.UpdateTypeConversation {
+		session.draft.ViewContent = resp.View_content
+		if v, pubErr := vg.copilot.PublishView(genCtx, session.draft, workspaceID); pubErr == nil {
+			viewID = v.ID
+			writeSSE(viewSSEEvent{Event: "published", ViewID: v.ID, ViewName: v.Name, ViewContent: resp.View_content})
+			vg.copilot.IndexDraftPublishedAsync(c.Param("workspace_id"), session.draft.ID, v.Name, v.ID)
+		} else {
+			log.Warn().Err(pubErr).Str("draft_id", session.draft.ID).Msg("auto-publish before operations failed")
+		}
+	}
+
 	if len(resp.Operations) > 0 {
 		for _, op := range resp.Operations {
 			writeSSE(viewSSEEvent{
@@ -1532,13 +1564,19 @@ func (vg *ViewsGroup) ChatDraft(c echo.Context) error {
 				OpStatus: "executing",
 			})
 		}
-		results := vg.copilot.ExecuteOperations(genCtx, workspaceID, resp.Operations)
+		results := vg.copilot.ExecuteOperations(genCtx, workspaceID, resp.Operations, viewID)
 		for _, r := range results {
 			writeSSE(viewSSEEvent{
-				Event:    "operation",
-				OpType:   r.Type,
-				OpName:   r.Name,
-				OpStatus: r.Status,
+				Event:        "operation",
+				OpType:       r.Type,
+				OpName:       r.Name,
+				OpStatus:     r.Status,
+				OpAgentID:    r.AgentID,
+				OpTaskID:     r.TaskID,
+				OpAgentName:  r.AgentName,
+				OpScheduleID: r.ScheduleID,
+				Message:      r.Message,
+				Error:        r.Error,
 			})
 			if r.Status == "error" {
 				log.Warn().Str("type", r.Type).Str("name", r.Name).Str("error", r.Error).Msg("copilot operation failed")

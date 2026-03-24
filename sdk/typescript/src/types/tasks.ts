@@ -313,6 +313,7 @@ export interface Schedule {
   active: boolean;
   next_run_at: string;
   last_run_at?: string;
+  source_view_id?: string;
   created_at: string;
   updated_at: string;
 }

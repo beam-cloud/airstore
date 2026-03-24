@@ -760,6 +760,7 @@ func (g *WorkspaceTasksGroup) CreateSchedule(c echo.Context) error {
 	st, err := g.agents.CreateSchedule(
 		ctx, workspaceID, agent.ID, req.CronExpr, req.Timezone, req.Prompt,
 		req.SkillPaths, ptrUint(auth.MemberId(ctx)), ptrUint(auth.TokenId(ctx)), nil,
+		nil,
 	)
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
@@ -776,7 +777,12 @@ func (g *WorkspaceTasksGroup) ListSchedules(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	list, err := g.agents.ListSchedules(ctx, workspaceID)
+	var list []*types.ScheduledTask
+	if viewID := strings.TrimSpace(c.QueryParam("view_id")); viewID != "" {
+		list, err = g.agents.ListSchedulesByView(ctx, workspaceID, viewID)
+	} else {
+		list, err = g.agents.ListSchedules(ctx, workspaceID)
+	}
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
@@ -939,6 +945,9 @@ func (g *WorkspaceTasksGroup) scheduleResp(ctx context.Context, st *types.Schedu
 	}
 	if st.LastRunAt != nil {
 		resp["last_run_at"] = st.LastRunAt.Format(time.RFC3339)
+	}
+	if st.SourceViewID != nil {
+		resp["source_view_id"] = *st.SourceViewID
 	}
 	return resp
 }

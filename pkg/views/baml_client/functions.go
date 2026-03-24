@@ -243,7 +243,7 @@ func MapViewToWidget(ctx context.Context, sheet_name string, widget_type string,
 	}
 }
 
-func WriteView(ctx context.Context, user_message string, conversation_history string, current_view string, workspace_context string, component_registry string, view_data string, opts ...CallOptionFunc) (types.ViewDraftResponse, error) {
+func WriteView(ctx context.Context, user_message string, conversation_history string, current_view string, workspace_context string, component_registry string, view_data string, active_tasks string, opts ...CallOptionFunc) (types.ViewDraftResponse, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -259,7 +259,7 @@ func WriteView(ctx context.Context, user_message string, conversation_history st
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"user_message": user_message, "conversation_history": conversation_history, "current_view": current_view, "workspace_context": workspace_context, "component_registry": component_registry, "view_data": view_data},
+		Kwargs: map[string]any{"user_message": user_message, "conversation_history": conversation_history, "current_view": current_view, "workspace_context": workspace_context, "component_registry": component_registry, "view_data": view_data, "active_tasks": active_tasks},
 		Env:    getEnvVars(callOpts.env),
 	}
 

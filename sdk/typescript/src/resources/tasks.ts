@@ -245,9 +245,10 @@ export class Tasks {
     }, undefined, options);
   }
 
-  /** List all cron schedules in a workspace. */
-  async listSchedules(workspaceId: string, options?: RequestOptions): Promise<Schedule[]> {
-    return this.client.request<Schedule[]>('GET', this.schedulePath(workspaceId), undefined, undefined, options);
+  /** List cron schedules. Optionally filter by view_id. */
+  async listSchedules(workspaceId: string, params?: { viewId?: string }, options?: RequestOptions): Promise<Schedule[]> {
+    const qp = params?.viewId ? `?view_id=${encodeURIComponent(params.viewId)}` : '';
+    return this.client.request<Schedule[]>('GET', this.schedulePath(workspaceId) + qp, undefined, undefined, options);
   }
 
   /** Retrieve a single schedule by ID. */

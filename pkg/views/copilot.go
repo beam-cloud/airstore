@@ -31,6 +31,11 @@ type DraftMessage struct {
 	Timestamp int64  `json:"ts"`
 }
 
+type AttachedFile struct {
+	Path string `json:"path"`
+	Name string `json:"name"`
+}
+
 type Draft struct {
 	ID              string         `json:"id"`
 	WorkspaceID     string         `json:"workspace_id"`
@@ -59,11 +64,15 @@ type PartialViewDraftResponse struct {
 }
 
 type OperationResult struct {
-	Type    string `json:"type"`
-	Name    string `json:"name"`
-	Status  string `json:"status"`
-	Error   string `json:"error,omitempty"`
-	AgentID string `json:"agent_id,omitempty"`
+	Type       string `json:"type"`
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	Error      string `json:"error,omitempty"`
+	AgentID    string `json:"agent_id,omitempty"`
+	TaskID     string `json:"task_id,omitempty"`
+	AgentName  string `json:"agent_name,omitempty"`
+	Message    string `json:"message,omitempty"`
+	ScheduleID string `json:"schedule_id,omitempty"`
 }
 
 // S2 stream entry types — used for both draft log and draft index.
@@ -106,6 +115,11 @@ func NewCopilot(s2 *common.S2Client, redis *common.RedisClient, backend reposito
 func (c *Copilot) DraftsAvailable() bool {
 	return c != nil && c.s2 != nil && c.s2.Enabled()
 }
+
+// UpdateTypeConversation is the BAML enum value for conversation-only updates
+// (no view content changes). Exported so the API layer can reference it
+// without importing the generated baml_client/types package directly.
+const UpdateTypeConversation = string(bamltypes.ViewUpdateTypeCONVERSATION)
 
 // s2Append is the single write path for all S2 operations.
 func (c *Copilot) s2Append(ctx context.Context, stream string, entry any) error {
@@ -538,17 +552,31 @@ func (c *Copilot) GenerateStream(
 	workspaceID uint,
 	userMessage string,
 	viewID string,
+	attachedFiles []AttachedFile,
 	onChunk func(partial *PartialViewDraftResponse),
 ) (*bamltypes.ViewDraftResponse, error) {
 	_ = c.persistDraft(ctx, draft.ID, "message", userMessage, "user", "")
 	draft.Messages = append(draft.Messages, DraftMessage{Role: "user", Content: userMessage, Timestamp: nowMS()})
 
+	promptMessage := userMessage
+	if len(attachedFiles) > 0 {
+		var sb strings.Builder
+		sb.WriteString("Attached files:\n")
+		for _, f := range attachedFiles {
+			fmt.Fprintf(&sb, "- %s (path: %s)\n", f.Name, f.Path)
+		}
+		sb.WriteString("\n")
+		sb.WriteString(userMessage)
+		promptMessage = sb.String()
+	}
+
 	history := c.FormatHistory(draft.Messages[:len(draft.Messages)-1])
 	workspaceAgents := c.loadWorkspaceAgents(ctx, workspaceID)
 	workspaceCtx := c.BuildWorkspaceContext(ctx, workspaceID)
 	viewData := c.BuildViewDataContext(ctx, viewID, draft.ViewContent)
+	activeTasks := c.BuildActiveTasksContext(ctx, workspaceID, draft.ViewContent, draft.PublishedViewID)
 
-	ch, err := baml.Stream.WriteView(ctx, userMessage, history, draft.ViewContent, workspaceCtx, ComponentRegistryDoc, viewData)
+	ch, err := baml.Stream.WriteView(ctx, promptMessage, history, draft.ViewContent, workspaceCtx, ComponentRegistryDoc, viewData, activeTasks)
 	if err != nil {
 		return nil, fmt.Errorf("BAML WriteView stream: %w", err)
 	}
@@ -761,6 +789,94 @@ func (c *Copilot) BuildViewDataContext(ctx context.Context, viewID string, viewC
 	}
 
 	if totalRows == 0 {
+		return ""
+	}
+	return sb.String()
+}
+
+// BuildActiveTasksContext loads active/waiting tasks for the view's agents
+// and formats them for the BAML prompt so the model can reason about
+// what to approve, reject, or dispatch.
+func (c *Copilot) BuildActiveTasksContext(ctx context.Context, workspaceID uint, viewContent string, viewID string) string {
+	if c.agentAPI == nil || viewContent == "" {
+		return ""
+	}
+
+	var def types.ViewDefinition
+	if err := json.Unmarshal([]byte(viewContent), &def); err != nil || len(def.Agents) == 0 {
+		return ""
+	}
+
+	activeStates := []types.AgentTaskState{
+		types.AgentTaskStateQueued,
+		types.AgentTaskStateRunning,
+		types.AgentTaskStateWaiting,
+		types.AgentTaskStateSleeping,
+	}
+
+	var sb strings.Builder
+	totalTasks := 0
+	for _, agentRef := range def.Agents {
+		ref := strings.TrimSpace(agentRef)
+		if ref == "" {
+			continue
+		}
+		tasks, _, _, err := c.agentAPI.ListTasksFiltered(ctx, workspaceID, types.AgentTaskListFilter{
+			AgentID: &ref,
+			States:  activeStates,
+			Limit:   20,
+		})
+		if err != nil || len(tasks) == 0 {
+			continue
+		}
+
+		for _, task := range tasks {
+			totalTasks++
+			title := ""
+			if task.PayloadJSON != nil {
+				if msg, ok := task.PayloadJSON["message"].(string); ok {
+					title = msg
+					if len(title) > 100 {
+						title = title[:97] + "..."
+					}
+				}
+			}
+			agentName := task.AgentName
+			if agentName == "" {
+				agentName = ref
+			}
+			waitInfo := ""
+			if task.State == types.AgentTaskStateWaiting {
+				waitInfo = " [NEEDS ATTENTION]"
+				if task.WaitingSummary != nil {
+					waitInfo = fmt.Sprintf(" [NEEDS ATTENTION: %s]", *task.WaitingSummary)
+				}
+			}
+			fmt.Fprintf(&sb, "- Task %s | agent: %s | state: %s | %s%s\n",
+				task.ID, agentName, string(task.State), title, waitInfo)
+		}
+	}
+
+	if viewID != "" {
+		schedules, err := c.agentAPI.ListSchedulesByView(ctx, workspaceID, viewID)
+		if err == nil && len(schedules) > 0 {
+			sb.WriteString("\nSCHEDULES:\n")
+			for _, s := range schedules {
+				activeStr := "active"
+				if !s.Active {
+					activeStr = "paused"
+				}
+				prompt := s.Prompt
+				if len(prompt) > 80 {
+					prompt = prompt[:77] + "..."
+				}
+				fmt.Fprintf(&sb, "- Schedule %s | agent: %s | cron: %s (%s) | %s | %s\n",
+					s.ExternalID, s.AgentID, s.CronExpr, s.Timezone, activeStr, prompt)
+			}
+		}
+	}
+
+	if totalTasks == 0 && sb.Len() == 0 {
 		return ""
 	}
 	return sb.String()
@@ -1484,8 +1600,9 @@ func (c *Copilot) loadSkillManifests(ctx context.Context, workspaceID uint) map[
 // Operations — workspace mutations (agents, skills)
 // ---------------------------------------------------------------------------
 
-func (c *Copilot) ExecuteOperations(ctx context.Context, workspaceID uint, ops []bamltypes.Operation) []OperationResult {
+func (c *Copilot) ExecuteOperations(ctx context.Context, workspaceID uint, ops []bamltypes.Operation, viewID string) []OperationResult {
 	state := newOperationExecutionState(ops)
+	state.viewID = viewID
 	results := make([]OperationResult, 0, len(ops))
 	for _, op := range ops {
 		results = append(results, c.executeOne(ctx, workspaceID, op, state))
@@ -1495,6 +1612,7 @@ func (c *Copilot) ExecuteOperations(ctx context.Context, workspaceID uint, ops [
 
 type operationExecutionState struct {
 	skillAliases map[string]string
+	viewID       string
 }
 
 func newOperationExecutionState(ops []bamltypes.Operation) *operationExecutionState {
@@ -1783,6 +1901,129 @@ func (c *Copilot) executeOne(ctx context.Context, workspaceID uint, op bamltypes
 		log.Info().Str("agent_id", profile.ID).Str("skill", skillName).Msg("copilot assigned skill")
 		return done(skillName, profile.ID)
 
+	case bamltypes.OperationTypeDISPATCH_TASK:
+		agentID := str("agent_id")
+		message := str("message")
+		if agentID == "" {
+			return fail("", "agent_id is required")
+		}
+		if message == "" {
+			return fail("", "message is required")
+		}
+		var label *string
+		if l := str("label"); l != "" {
+			label = &l
+		}
+		var sourceViewID *string
+		if state.viewID != "" {
+			sourceViewID = &state.viewID
+		}
+		spawnedBy := "copilot"
+		task, _, err := c.agentAPI.AcceptAgentCommand(ctx, workspaceID, orchestration.AgentCommandParams{
+			Message:      message,
+			AgentID:      &agentID,
+			Label:        label,
+			SpawnedBy:    &spawnedBy,
+			SourceViewID: sourceViewID,
+		})
+		if err != nil {
+			return fail(message, err.Error())
+		}
+		agentName := task.AgentName
+		if agentName == "" {
+			agentName = agentID
+		}
+		log.Info().Str("task_id", task.ID).Str("agent_id", agentID).Msg("copilot dispatched task")
+		return OperationResult{
+			Type:      opType,
+			Name:      coalesceTrimmed(derefStr(label), truncate(message, 60)),
+			Status:    "done",
+			TaskID:    task.ID,
+			AgentName: agentName,
+			Message:   message,
+		}
+
+	case bamltypes.OperationTypeAPPROVE_TASK:
+		taskID := str("task_id")
+		if taskID == "" {
+			return fail("", "task_id is required")
+		}
+		action := types.TaskInputActionApprove
+		task, err := c.agentAPI.SubmitTaskInput(ctx, workspaceID, taskID, types.InputKindApproveReject, &action, "", "", nil)
+		if err != nil {
+			return fail(taskID, err.Error())
+		}
+		log.Info().Str("task_id", taskID).Msg("copilot approved task")
+		return OperationResult{
+			Type:      opType,
+			Name:      taskID,
+			Status:    "done",
+			TaskID:    taskID,
+			AgentName: task.AgentName,
+		}
+
+	case bamltypes.OperationTypeREJECT_TASK:
+		taskID := str("task_id")
+		if taskID == "" {
+			return fail("", "task_id is required")
+		}
+		reason := str("reason")
+		action := types.TaskInputActionReject
+		task, err := c.agentAPI.SubmitTaskInput(ctx, workspaceID, taskID, types.InputKindApproveReject, &action, reason, "", nil)
+		if err != nil {
+			return fail(taskID, err.Error())
+		}
+		log.Info().Str("task_id", taskID).Str("reason", reason).Msg("copilot rejected task")
+		return OperationResult{
+			Type:      opType,
+			Name:      taskID,
+			Status:    "done",
+			TaskID:    taskID,
+			AgentName: task.AgentName,
+		}
+
+	case bamltypes.OperationTypeCREATE_SCHEDULE:
+		agentID := str("agent_id")
+		cronExpr := str("cron_expr")
+		prompt := str("prompt")
+		if agentID == "" || cronExpr == "" || prompt == "" {
+			return fail("", "agent_id, cron_expr, and prompt are required")
+		}
+		tz := str("timezone")
+		var viewIDPtr *string
+		if state.viewID != "" {
+			viewIDPtr = &state.viewID
+		}
+		st, err := c.agentAPI.CreateSchedule(ctx, workspaceID, agentID, cronExpr, tz, prompt, nil, nil, nil, nil, viewIDPtr)
+		if err != nil {
+			return fail(prompt, err.Error())
+		}
+		log.Info().Str("schedule_id", st.ExternalID).Str("agent_id", agentID).Str("cron", cronExpr).Msg("copilot created schedule")
+		return OperationResult{
+			Type:       opType,
+			Name:       truncate(prompt, 60),
+			Status:     "done",
+			AgentID:    agentID,
+			ScheduleID: st.ExternalID,
+			Message:    cronExpr,
+		}
+
+	case bamltypes.OperationTypeDELETE_SCHEDULE:
+		scheduleID := str("schedule_id")
+		if scheduleID == "" {
+			return fail("", "schedule_id is required")
+		}
+		if err := c.agentAPI.DeleteSchedule(ctx, workspaceID, scheduleID); err != nil {
+			return fail(scheduleID, err.Error())
+		}
+		log.Info().Str("schedule_id", scheduleID).Msg("copilot deleted schedule")
+		return OperationResult{
+			Type:       opType,
+			Name:       scheduleID,
+			Status:     "done",
+			ScheduleID: scheduleID,
+		}
+
 	default:
 		return fail("", "unknown operation type")
 	}
@@ -1822,6 +2063,20 @@ func deref(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+func derefStr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return strings.TrimSpace(*s)
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-3] + "..."
 }
 
 func derefEnum(t *bamltypes.ViewUpdateType) string {
@@ -1866,8 +2121,10 @@ func extractStringSlice(m map[string]any, key string) []string {
 // ---------------------------------------------------------------------------
 
 const ComponentRegistryDoc = `A view is a workspace for an ongoing objective.
-Each sheet has a header bar that shows assigned agents, live task counts, and action buttons.
+Each sheet has a header bar that shows assigned agents and live task counts.
 Sheets can contain multiple components arranged in a 12-column grid.
+Actions are defined at the view level in the top-level "actions" array and
+rendered on the project overview page.
 
 COMPONENT TYPES:
 
@@ -1928,7 +2185,8 @@ COMPONENT TYPES:
   Hidden columns (auto-injected, do NOT define):
   task_id, row_id, sheet_id, output_id, output_status, source_output_ids
 
-- action: Button in the active sheet header bar. Opens a modal form that submits a task.
+- action: Button on the project overview page. Opens a modal form that submits a task.
+  Defined in the top-level "actions" array, NOT inside sheet components.
   Config: {
     agent_id, description, prompt_template (with {{field}} placeholders),
     button_label (verb-oriented), fields: [{name, label, required?, type?, placeholder?, options?}]

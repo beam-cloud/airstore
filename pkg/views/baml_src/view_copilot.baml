@@ -20,11 +20,16 @@ enum OperationType {
   CREATE_SKILL  @description("Write a new SKILL.md and install it")
   INSTALL_SKILL @description("Install an existing skill to the workspace")
   ASSIGN_SKILL  @description("Assign a skill to an agent")
+  DISPATCH_TASK   @description("Dispatch a new task to an agent")
+  APPROVE_TASK    @description("Approve a waiting/blocked task")
+  REJECT_TASK     @description("Reject a waiting/blocked task")
+  CREATE_SCHEDULE @description("Create a recurring scheduled task for an agent")
+  DELETE_SCHEDULE @description("Delete a scheduled task by its ID")
 }
 
 class Operation {
   type OperationType @description("The type of workspace mutation to perform")
-  payload string @description("JSON payload with operation-specific fields. For CREATE_AGENT: {name, role, model?, skills?[]}. For UPDATE_AGENT: {agent_id, name?, role?, model?, skills?[]}. For CREATE_SKILL: {name, content}. For INSTALL_SKILL: {skill_name} to install an existing workspace skill, or {name, content} / {skill_name, content} to install or update skill content. For ASSIGN_SKILL: {agent_id, skill_name}. IMPORTANT: Do NOT include system_prompt — the system generates it automatically with proper Airstore context. model must be one of: 'claude-sonnet-4-6' (default, omit if unsure) or 'claude-opus-4-6'. role must be 1-2 words max (e.g. 'Research', 'Engineering', 'Outreach'). For CREATE_SKILL, content must be valid SKILL.md with YAML frontmatter (---\\nname: ...\\ndescription: ...\\n---).")
+  payload string @description("JSON payload with operation-specific fields. For CREATE_AGENT: {name, role, model?, skills?[]}. For UPDATE_AGENT: {agent_id, name?, role?, model?, skills?[]}. For CREATE_SKILL: {name, content}. For INSTALL_SKILL: {skill_name} to install an existing workspace skill, or {name, content} / {skill_name, content} to install or update skill content. For ASSIGN_SKILL: {agent_id, skill_name}. For DISPATCH_TASK: {agent_id, message, label?} — dispatches a task to the specified agent. For APPROVE_TASK: {task_id} — approves a waiting task. For REJECT_TASK: {task_id, reason?} — rejects a waiting task. For CREATE_SCHEDULE: {agent_id, cron_expr, prompt, timezone?} — creates a recurring schedule (cron_expr uses standard 5-field cron syntax, e.g. '0 9 * * 1-5' for weekdays at 9am). For DELETE_SCHEDULE: {schedule_id} — deletes a scheduled task by external_id. IMPORTANT: Do NOT include system_prompt — the system generates it automatically with proper Airstore context. model must be one of: 'claude-sonnet-4-6' (default, omit if unsure) or 'claude-opus-4-6'. role must be 1-2 words max (e.g. 'Research', 'Engineering', 'Outreach'). For CREATE_SKILL, content must be valid SKILL.md with YAML frontmatter (---\\nname: ...\\ndescription: ...\\n---).")
 }
 
 class DataCitation {
@@ -47,14 +52,16 @@ function WriteView(
   current_view: string,
   workspace_context: string,
   component_registry: string,
-  view_data: string
+  view_data: string,
+  active_tasks: string
 ) -> ViewDraftResponse {
   client ViewCopilotClient
   prompt #"
     You are a workspace designer. You build Views — each view is a living
     workspace for an ongoing objective. Sheets can contain tables, templates,
-    config panels, sequences, and actions. Views also have automations that
-    wire agents into multi-step workflows with approval gates.
+    config panels, and sequences. Actions are defined at the view level in
+    the top-level `actions` array. You can also dispatch tasks to agents,
+    approve or reject blocked tasks, and create scheduled tasks.
 
     =============================================================================
     COMPONENT REGISTRY
@@ -99,39 +106,25 @@ function WriteView(
               "title": "Email Template",
               "position": {"col": 8, "row": 0, "colSpan": 4, "rowSpan": 1},
               "config": {"content": "Hi {%raw%}{{name}}{%endraw%},...", "variables": ["name"], "format": "markdown"}
-            },
-            {
-              "id": "a1",
-              "type": "action",
-              "title": "Action Name",
-              "position": {"col": 0, "row": 1, "colSpan": 4, "rowSpan": 1},
-              "config": {
-                "agent_id": "single-agent-id",
-                "button_label": "Run Action",
-                "fields": [
-                  {"name": "company_name", "label": "Company name", "type": "text", "required": true},
-                  {"name": "website", "label": "Website", "type": "text"}
-                ],
-                "prompt_template": "{% raw %}Research {{company_name}} using {{website}} and summarize the findings.{% endraw %}"
-              }
             }
           ]
         }
       ],
-      "automations": [
+      "actions": [
         {
-          "id": "auto-1",
-          "name": "Kickoff on publish",
-          "trigger": {"type": "on_publish"},
-          "action": {"type": "create_task", "agent_id": "agent-id-1", "prompt_template": "..."},
-          "enabled": true
-        },
-        {
-          "id": "auto-2",
-          "name": "Review before sending",
-          "trigger": {"type": "on_row_added", "sheet_id": "sheet-1"},
-          "action": {"type": "approval_gate"},
-          "enabled": true
+          "id": "a1",
+          "type": "action",
+          "title": "Action Name",
+          "position": {"col": 0, "row": 0, "colSpan": 4, "rowSpan": 1},
+          "config": {
+            "agent_id": "single-agent-id",
+            "button_label": "Run Action",
+            "fields": [
+              {"name": "company_name", "label": "Company name", "type": "text", "required": true},
+              {"name": "website", "label": "Website", "type": "text"}
+            ],
+            "prompt_template": "{% raw %}Research {{company_name}} using {{website}} and summarize the findings.{% endraw %}"
+          }
         }
       ]
     }
@@ -146,7 +139,8 @@ function WriteView(
     - Sheets can have multiple components arranged in the 12-column grid.
       Example: table at colSpan:8, template at colSpan:4 beside it,
       config-panel and sequence stacked in the remaining 4 columns.
-    - Action components are optional and belong to their sheet.
+    - Action components are optional and defined at the view level in the
+      top-level `actions` array, NOT inside sheets.
     - Generate concise sheet names. Avoid generic names like "Sheet 1" unless the
       user gave no meaningful distinction.
     - Use relations when a row in one sheet should connect to rows in another
@@ -159,16 +153,6 @@ function WriteView(
       modify widgets.
     - The canvas automatically renders assigned agents and live task counts
       for the active sheet — you do NOT need to create components for those.
-
-    AUTOMATION RULES:
-    - For workflows with side effects (sending emails, purchasing, posting),
-      ALWAYS include an approval_gate before the destructive action.
-    - Use on_publish for the initial kickoff task (e.g. finding contacts).
-    - Use on_row_added for per-row processing (e.g. drafting emails for each contact).
-    - Use on_approved for post-approval actions (e.g. sending approved emails).
-    - Use schedule for recurring work (e.g. weekly paper tracking).
-    - Prompt templates use {%raw%}{{column_key}}{%endraw%} for row data, {%raw%}{{config.key}}{%endraw%} for
-      config-panel values, and {%raw%}{{template.id}}{%endraw%} for template content.
 
     TRANSFORM RULES (semantic hints for the BAML mapper):
     At render time a BAML mapper dynamically maps task output data into table
@@ -214,6 +198,13 @@ function WriteView(
     VIEW DATA (live table rows from the published view)
     =============================================================================
     {{ view_data }}
+    {% endif %}
+
+    {% if active_tasks != "" %}
+    =============================================================================
+    ACTIVE TASKS (current tasks for this project's agents)
+    =============================================================================
+    {{ active_tasks }}
     {% endif %}
 
     =============================================================================
@@ -264,8 +255,8 @@ function WriteView(
     6. PRESERVE IDs on edits. If a sheet, relation, or component already exists
        in the current view and is still present after your edit, keep its
        existing `id` unchanged. Only generate new IDs for newly added sheets
-       (`sheet-1`, `sheet-2`), relations (`rel-1`, `rel-2`), and components
-       (`c1`, `c2` for tables; `a1`, `a2` for actions).
+       (`sheet-1`, `sheet-2`), relations (`rel-1`, `rel-2`), components
+       (`c1`, `c2` for tables), and top-level actions (`a1`, `a2`).
 
     7. NAMING: Never use "dashboard" or "app" in the view name. Use short,
        goal-oriented names (e.g. "Outreach Pipeline", "Content Calendar").
@@ -285,15 +276,32 @@ function WriteView(
         splits into distinct entity types that would be confusing in a single
         table.
 
-    11. For workflow requests (campaigns, pipelines, monitoring), generate
-        automations that wire the agents together. Include an approval_gate
-        before any destructive action. The user should see the full pipeline
-        working automatically after publishing.
+    11. For workflow requests (campaigns, pipelines, monitoring), use
+        DISPATCH_TASK operations to send tasks to the appropriate agents.
+        For recurring workflows, use CREATE_SCHEDULE operations. The user
+        should see tasks appearing on the board after dispatching.
 
     12. Use template, config-panel, and sequence components when the workflow
         benefits from them (e.g. email campaigns need a template; campaigns
         need settings; follow-up cadences need a sequence). Place them
         alongside the table using the 12-column grid.
+
+    13. TASK DISPATCH: When the user asks to "send", "run", "reach out",
+        "start", "kick off", or similar action-oriented commands, emit a
+        DISPATCH_TASK operation targeting the appropriate agent. Use the
+        agent_id from the workspace context. Include a clear message prompt.
+
+    14. TASK APPROVAL: When the user says "approve", "approve all", "accept",
+        "looks good", etc., emit APPROVE_TASK operations for the relevant
+        waiting tasks listed in ACTIVE TASKS. When the user says "reject",
+        "deny", "decline", emit REJECT_TASK operations. For bulk actions,
+        emit one operation per task.
+
+    15. SCHEDULED TASKS: When the user wants recurring/periodic work (e.g.
+        "every Monday", "daily at 9am", "weekly"), emit a CREATE_SCHEDULE
+        operation with a valid 5-field cron expression and a clear prompt.
+        When the user wants to remove a schedule, emit DELETE_SCHEDULE with
+        the schedule_id from ACTIVE TASKS / SCHEDULES context.
 
     {{ ctx.output_format }}
   "#

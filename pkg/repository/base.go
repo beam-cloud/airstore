@@ -233,6 +233,7 @@ type BackendRepository interface {
 	CreateScheduledTask(ctx context.Context, st *types.ScheduledTask) error
 	GetScheduledTask(ctx context.Context, workspaceID uint, externalID string) (*types.ScheduledTask, error)
 	ListScheduledTasks(ctx context.Context, workspaceID uint) ([]*types.ScheduledTask, error)
+	ListScheduledTasksByView(ctx context.Context, workspaceID uint, sourceViewID string) ([]*types.ScheduledTask, error)
 	UpdateScheduledTask(ctx context.Context, st *types.ScheduledTask) error
 	DeleteScheduledTask(ctx context.Context, workspaceID uint, externalID string) error
 	DeleteScheduledTasksByAgent(ctx context.Context, workspaceID uint, agentID string) error

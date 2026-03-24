@@ -430,14 +430,19 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 // ---------------------------------------------------------------------------
 
 func viewMappingFlightKey(workspaceID uint, viewID, sheetID, componentID string, opts ResolveOptions) string {
+	sourceView := strings.TrimSpace(opts.SourceViewID)
+	if sourceView == "" {
+		sourceView = "-"
+	}
 	return fmt.Sprintf(
-		"%d:%s:%s:%s:%t:%s",
+		"%d:%s:%s:%s:%t:%s:%s",
 		workspaceID,
 		viewID,
 		sheetID,
 		componentID,
 		opts.ForceRefresh,
 		normalizedViewAgentRefsKey(opts.ViewAgentRefs),
+		sourceView,
 	)
 }
 
