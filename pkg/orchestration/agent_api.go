@@ -1130,6 +1130,7 @@ func (a *AgentAPI) CreateSchedule(
 	memberID *uint,
 	tokenID *uint,
 	encryptedToken []byte,
+	sourceViewID *string,
 ) (*types.ScheduledTask, error) {
 	cronExpr = strings.TrimSpace(cronExpr)
 	if cronExpr == "" {
@@ -1170,6 +1171,7 @@ func (a *AgentAPI) CreateSchedule(
 		TokenID:           tokenID,
 		EncryptedToken:    encryptedToken,
 		CreatedByMemberID: memberID,
+		SourceViewID:      sourceViewID,
 	}
 	if err := a.backend.CreateScheduledTask(ctx, st); err != nil {
 		return nil, err
@@ -1195,6 +1197,10 @@ func (a *AgentAPI) GetSchedule(ctx context.Context, workspaceID uint, externalID
 
 func (a *AgentAPI) ListSchedules(ctx context.Context, workspaceID uint) ([]*types.ScheduledTask, error) {
 	return a.backend.ListScheduledTasks(ctx, workspaceID)
+}
+
+func (a *AgentAPI) ListSchedulesByView(ctx context.Context, workspaceID uint, sourceViewID string) ([]*types.ScheduledTask, error) {
+	return a.backend.ListScheduledTasksByView(ctx, workspaceID, sourceViewID)
 }
 
 func (a *AgentAPI) UpdateSchedule(

@@ -49,6 +49,7 @@ type AgentCommandParams struct {
 	Priority          string              `json:"priority,omitempty"`
 	BudgetUSD         *float64            `json:"budget_usd,omitempty"`
 	ParentTaskID      *string             `json:"parent_task_id,omitempty"`
+	SourceViewID      *string             `json:"source_view_id,omitempty"`
 	DispatchDelay     time.Duration       `json:"-"`
 }
 

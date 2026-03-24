@@ -24,11 +24,17 @@ import (
 type OperationType string
 
 const (
-	OperationTypeCREATE_AGENT  OperationType = "CREATE_AGENT"
-	OperationTypeUPDATE_AGENT  OperationType = "UPDATE_AGENT"
-	OperationTypeCREATE_SKILL  OperationType = "CREATE_SKILL"
-	OperationTypeINSTALL_SKILL OperationType = "INSTALL_SKILL"
-	OperationTypeASSIGN_SKILL  OperationType = "ASSIGN_SKILL"
+	OperationTypeCREATE_AGENT    OperationType = "CREATE_AGENT"
+	OperationTypeUPDATE_AGENT    OperationType = "UPDATE_AGENT"
+	OperationTypeCREATE_SKILL    OperationType = "CREATE_SKILL"
+	OperationTypeINSTALL_SKILL   OperationType = "INSTALL_SKILL"
+	OperationTypeASSIGN_SKILL    OperationType = "ASSIGN_SKILL"
+	OperationTypeDISPATCH_TASK   OperationType = "DISPATCH_TASK"
+	OperationTypeAPPROVE_TASK    OperationType = "APPROVE_TASK"
+	OperationTypeREJECT_TASK     OperationType = "REJECT_TASK"
+	OperationTypeCREATE_SCHEDULE OperationType = "CREATE_SCHEDULE"
+	OperationTypeDELETE_SCHEDULE OperationType = "DELETE_SCHEDULE"
+	OperationTypeIMPORT_DATA     OperationType = "IMPORT_DATA"
 )
 
 // Values returns all allowed values for the OperationType type.
@@ -39,6 +45,12 @@ func (OperationType) Values() []OperationType {
 		OperationTypeCREATE_SKILL,
 		OperationTypeINSTALL_SKILL,
 		OperationTypeASSIGN_SKILL,
+		OperationTypeDISPATCH_TASK,
+		OperationTypeAPPROVE_TASK,
+		OperationTypeREJECT_TASK,
+		OperationTypeCREATE_SCHEDULE,
+		OperationTypeDELETE_SCHEDULE,
+		OperationTypeIMPORT_DATA,
 	}
 }
 

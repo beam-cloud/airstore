@@ -192,6 +192,7 @@ type TaskCommandPayload struct {
 	Provider          *string
 	Model             *string
 	AgentConfig       map[string]any
+	SourceViewID      *string
 	Resume            ResumeDirective
 }
 
@@ -223,6 +224,7 @@ func newTaskCommandPayload(
 		Provider:          strPtrMaybe(agentProvider),
 		Model:             strPtrMaybe(agentModel),
 		AgentConfig:       cloneAnyMap(agentConfig),
+		SourceViewID:      trimOptionalString(params.SourceViewID),
 	}
 }
 
@@ -250,6 +252,7 @@ func parseTaskCommandPayload(payload map[string]any) TaskCommandPayload {
 		Provider:          provider,
 		Model:             model,
 		AgentConfig:       mapFromPayload(payload, agentPayloadKeyAgentConfig),
+		SourceViewID:      strPtrMaybe(stringFromPayload(payload, "source_view_id")),
 		Resume:            parseResumeDirective(payload),
 	}
 }
@@ -318,6 +321,9 @@ func (p TaskCommandPayload) ToMap() map[string]any {
 	}
 	if len(p.AgentConfig) > 0 {
 		payload[agentPayloadKeyAgentConfig] = cloneAnyMap(p.AgentConfig)
+	}
+	if p.SourceViewID != nil {
+		payload["source_view_id"] = strings.TrimSpace(*p.SourceViewID)
 	}
 	p.Resume.apply(payload)
 	return payload

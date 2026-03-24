@@ -36,10 +36,11 @@ type View struct {
 
 // ViewDefinition is the JSON-serializable workbook schema for a view.
 type ViewDefinition struct {
-	Name        string      `json:"name"`
-	Description string      `json:"description"`
-	Agents      []string    `json:"agents"`
-	Sheets      []SheetSpec `json:"sheets"`
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Agents      []string        `json:"agents"`
+	Sheets      []SheetSpec     `json:"sheets"`
+	Actions     []ComponentSpec `json:"actions,omitempty"`
 }
 
 // SyncNameDescription keeps the top-level view metadata and definition metadata

@@ -164,7 +164,7 @@ func (*build_request) MapViewToWidget(sheet_name string, widget_type string, wid
 }
 
 // Build HTTP request for WriteView (returns baml.HTTPRequest)
-func (*build_request) WriteView(user_message string, conversation_history string, current_view string, workspace_context string, component_registry string, view_data string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
+func (*build_request) WriteView(user_message string, conversation_history string, current_view string, workspace_context string, component_registry string, view_data string, active_tasks string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -180,7 +180,7 @@ func (*build_request) WriteView(user_message string, conversation_history string
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"user_message": user_message, "conversation_history": conversation_history, "current_view": current_view, "workspace_context": workspace_context, "component_registry": component_registry, "view_data": view_data, "stream": false},
+		Kwargs: map[string]any{"user_message": user_message, "conversation_history": conversation_history, "current_view": current_view, "workspace_context": workspace_context, "component_registry": component_registry, "view_data": view_data, "active_tasks": active_tasks, "stream": false},
 		Env:    getEnvVars(callOpts.env),
 	}
 

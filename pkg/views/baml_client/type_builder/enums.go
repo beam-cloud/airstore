@@ -51,6 +51,30 @@ func (t *OperationTypeEnumView) ValueASSIGN_SKILL() (EnumValueView, error) {
 	return t.inner.Value("ASSIGN_SKILL")
 }
 
+func (t *OperationTypeEnumView) ValueDISPATCH_TASK() (EnumValueView, error) {
+	return t.inner.Value("DISPATCH_TASK")
+}
+
+func (t *OperationTypeEnumView) ValueAPPROVE_TASK() (EnumValueView, error) {
+	return t.inner.Value("APPROVE_TASK")
+}
+
+func (t *OperationTypeEnumView) ValueREJECT_TASK() (EnumValueView, error) {
+	return t.inner.Value("REJECT_TASK")
+}
+
+func (t *OperationTypeEnumView) ValueCREATE_SCHEDULE() (EnumValueView, error) {
+	return t.inner.Value("CREATE_SCHEDULE")
+}
+
+func (t *OperationTypeEnumView) ValueDELETE_SCHEDULE() (EnumValueView, error) {
+	return t.inner.Value("DELETE_SCHEDULE")
+}
+
+func (t *OperationTypeEnumView) ValueIMPORT_DATA() (EnumValueView, error) {
+	return t.inner.Value("IMPORT_DATA")
+}
+
 func (t *TypeBuilder) OperationType() (*OperationTypeEnumView, error) {
 	bld, err := t.inner.Enum("OperationType")
 	if err != nil {

@@ -211,6 +211,7 @@ func TestFetchMappingOutputsDoesNotFallBackToWorkspaceForUnresolvedViewAgentRefs
 		7,
 		&types.DataSource{},
 		[]string{"missing-agent"},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("fetchMappingOutputs returned error: %v", err)
@@ -261,6 +262,7 @@ func TestFetchMappingOutputsExpandsTaskContextForSelectedTasks(t *testing.T) {
 		7,
 		&types.DataSource{ArtifactKey: "extracted-recipes"},
 		[]string{"chef-agent"},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("fetchMappingOutputs returned error: %v", err)
@@ -328,6 +330,7 @@ func TestFetchMappingOutputsIncludesSyntheticBlockerOutputWhenNoRealOutputsExist
 		7,
 		&types.DataSource{OutputType: types.TaskOutputTypeEmail},
 		[]string{"sales-agent"},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("fetchMappingOutputs returned error: %v", err)
@@ -404,6 +407,7 @@ func TestFetchMappingOutputsIncludesSyntheticBlockerOutputForSalesEmailArtifactK
 		7,
 		&types.DataSource{ArtifactKey: "sales-email"},
 		[]string{"sales-agent"},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("fetchMappingOutputs returned error: %v", err)
@@ -476,6 +480,7 @@ func TestFetchMappingOutputsDoesNotAddSyntheticBlockerOutputWhenRealOutputExists
 		7,
 		&types.DataSource{OutputType: types.TaskOutputTypeEmail},
 		[]string{"sales-agent"},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("fetchMappingOutputs returned error: %v", err)
@@ -668,6 +673,7 @@ func TestFetchMappingOutputsExpandsTaskContextForStatusScopedTasks(t *testing.T)
 		7,
 		&types.DataSource{Statuses: []string{types.TaskOutputStatusPending}},
 		[]string{"chef-agent"},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("fetchMappingOutputs returned error: %v", err)
@@ -942,6 +948,7 @@ func TestFetchMappingOutputsUsesOutputTypeFallbackWhenArtifactKeyUnset(t *testin
 		7,
 		&types.DataSource{OutputType: "json"},
 		[]string{"chef-agent"},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("fetchMappingOutputs returned error: %v", err)
@@ -985,6 +992,7 @@ func TestFetchMappingOutputsAvoidsExtraExpansionWhenSelectionIsAlreadyFull(t *te
 		7,
 		&types.DataSource{},
 		[]string{"chef-agent"},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("fetchMappingOutputs returned error: %v", err)
@@ -1977,6 +1985,284 @@ func TestCollapseResolvedRowsKeepsSameEntitySeparateAcrossDifferentSources(t *te
 
 	if got, want := len(rows), 2; got != want {
 		t.Fatalf("collapsed row count = %d, want %d", got, want)
+	}
+}
+
+// Property aggregation: same address from different tasks merges into one
+// row. Data from the newer task wins, but empty cells are filled from the
+// older task. This covers re-triggers, retry runs, and parallel research.
+func TestCollapsePropertyListingsMergesSameAddress(t *testing.T) {
+	now := time.Now().UTC()
+	taskMeta := map[string]*types.AgentTask{
+		"task-old": {ID: "task-old", CreatedAt: now.Add(-10 * time.Minute)},
+		"task-new": {ID: "task-new", CreatedAt: now},
+	}
+	rows := collapseResolvedRows(
+		[]bamltypes.ColumnSchema{
+			{Key: "address", Type: "text"},
+			{Key: "neighborhood", Type: "text"},
+			{Key: "sqft", Type: "text"},
+			{Key: "monthly_rent", Type: "text"},
+			{Key: "psf", Type: "text"},
+		},
+		[]resolvedSheetRow{
+			{
+				TaskID: "task-old",
+				RowID:  "row-old-1",
+				RowKey: "listing-1",
+				Cells: map[string]string{
+					"address":      "275 Park Ave, Brooklyn, NY",
+					"neighborhood": "Fort Greene",
+					"sqft":         "6162",
+					"monthly_rent": "$14,000",
+					"psf":          "$65 PSF",
+				},
+			},
+			{
+				TaskID: "task-new",
+				RowID:  "row-new-1",
+				RowKey: "listing-1",
+				Cells: map[string]string{
+					"address":      "275 Park Ave, Brooklyn, NY",
+					"neighborhood": "Fort Greene",
+					"sqft":         "6,162",
+					"monthly_rent": "$14,000/mo",
+					"psf":          "$65/sf",
+				},
+			},
+			{
+				TaskID: "task-new",
+				RowID:  "row-new-2",
+				RowKey: "listing-2",
+				Cells: map[string]string{
+					"address":      "196 Smith Street, Brooklyn, NY",
+					"neighborhood": "Cobble Hill",
+					"sqft":         "1,900",
+					"monthly_rent": "$13,500",
+				},
+			},
+		},
+		nil,
+		taskMeta,
+	)
+
+	if got, want := len(rows), 2; got != want {
+		t.Fatalf("expected 2 distinct properties, got %d", got)
+	}
+	addresses := map[string]bool{}
+	for _, r := range rows {
+		addresses[r.Cells["address"]] = true
+	}
+	if !addresses["275 Park Ave, Brooklyn, NY"] || !addresses["196 Smith Street, Brooklyn, NY"] {
+		t.Fatalf("expected both addresses, got %v", addresses)
+	}
+}
+
+// Outreach: same recipient across tasks merges — one row per contact
+// showing the latest status. Data from both rows is combined.
+func TestCollapseOutreachMergesSameRecipient(t *testing.T) {
+	now := time.Now().UTC()
+	taskMeta := map[string]*types.AgentTask{
+		"task-send":     {ID: "task-send", CreatedAt: now.Add(-5 * time.Minute)},
+		"task-followup": {ID: "task-followup", CreatedAt: now},
+	}
+	rows := collapseResolvedRows(
+		[]bamltypes.ColumnSchema{
+			{Key: "to", Type: "email"},
+			{Key: "subject", Type: "text"},
+			{Key: "status", Type: "status"},
+		},
+		[]resolvedSheetRow{
+			{
+				TaskID: "task-send",
+				RowID:  "row-1",
+				RowKey: "email-1",
+				Cells: map[string]string{
+					"to":      "luke@beam.cloud",
+					"subject": "Brooklyn Spaces Report",
+					"status":  "sent",
+				},
+			},
+			{
+				TaskID: "task-followup",
+				RowID:  "row-2",
+				RowKey: "email-1",
+				Cells: map[string]string{
+					"to":      "luke@beam.cloud",
+					"subject": "Re: Brooklyn Spaces Report",
+					"status":  "replied",
+				},
+			},
+		},
+		nil,
+		taskMeta,
+	)
+
+	if got, want := len(rows), 1; got != want {
+		t.Fatalf("same recipient = same contact, got %d rows", got)
+	}
+	if rows[0].Cells["status"] != "replied" {
+		t.Fatalf("newer task should win, got status=%q", rows[0].Cells["status"])
+	}
+}
+
+// Outreach: different recipients stay separate — never merge distinct contacts.
+func TestCollapseOutreachKeepsDifferentRecipientsSeparate(t *testing.T) {
+	rows := collapseResolvedRows(
+		[]bamltypes.ColumnSchema{
+			{Key: "to", Type: "email"},
+			{Key: "subject", Type: "text"},
+		},
+		[]resolvedSheetRow{
+			{
+				TaskID: "task-1",
+				RowID:  "row-1",
+				RowKey: "email-1",
+				Cells: map[string]string{
+					"to":      "alice@example.com",
+					"subject": "Intro",
+				},
+			},
+			{
+				TaskID: "task-1",
+				RowID:  "row-2",
+				RowKey: "email-2",
+				Cells: map[string]string{
+					"to":      "bob@example.com",
+					"subject": "Intro",
+				},
+			},
+		},
+		nil,
+		nil,
+	)
+
+	if got, want := len(rows), 2; got != want {
+		t.Fatalf("different recipients must stay separate: got %d, want %d", got, want)
+	}
+}
+
+// Research: rows with completely different identities stay separate.
+func TestCollapseKeepsDifferentEntitiesSeparate(t *testing.T) {
+	rows := collapseResolvedRows(
+		[]bamltypes.ColumnSchema{
+			{Key: "company", Type: "text"},
+			{Key: "revenue", Type: "text"},
+		},
+		[]resolvedSheetRow{
+			{
+				TaskID: "task-1",
+				RowID:  "row-1",
+				RowKey: "co-1",
+				Cells: map[string]string{
+					"company": "Acme Corp",
+					"revenue": "$10M",
+				},
+			},
+			{
+				TaskID: "task-1",
+				RowID:  "row-2",
+				RowKey: "co-2",
+				Cells: map[string]string{
+					"company": "Globex Inc",
+					"revenue": "$50M",
+				},
+			},
+		},
+		nil,
+		nil,
+	)
+
+	if got, want := len(rows), 2; got != want {
+		t.Fatalf("different companies must stay separate: got %d, want %d", got, want)
+	}
+}
+
+// Data enrichment: newer task fills gaps from older task's row. The merged
+// row has the union of data from both tasks.
+func TestCollapseMergesDataFromBothTasks(t *testing.T) {
+	now := time.Now().UTC()
+	taskMeta := map[string]*types.AgentTask{
+		"task-1": {ID: "task-1", CreatedAt: now.Add(-time.Minute)},
+		"task-2": {ID: "task-2", CreatedAt: now},
+	}
+	rows := collapseResolvedRows(
+		[]bamltypes.ColumnSchema{
+			{Key: "name", Type: "text"},
+			{Key: "phone", Type: "text"},
+			{Key: "website", Type: "text"},
+		},
+		[]resolvedSheetRow{
+			{
+				TaskID: "task-1",
+				RowID:  "row-1",
+				RowKey: "contact-1",
+				Cells: map[string]string{
+					"name":    "Jane Doe",
+					"phone":   "555-1234",
+					"website": "",
+				},
+			},
+			{
+				TaskID: "task-2",
+				RowID:  "row-2",
+				RowKey: "contact-1",
+				Cells: map[string]string{
+					"name":    "Jane Doe",
+					"phone":   "",
+					"website": "jane.example.com",
+				},
+			},
+		},
+		nil,
+		taskMeta,
+	)
+
+	if got, want := len(rows), 1; got != want {
+		t.Fatalf("same name = same entity, got %d rows", got)
+	}
+	if rows[0].Cells["phone"] != "555-1234" {
+		t.Fatalf("phone should be preserved from task-1, got %q", rows[0].Cells["phone"])
+	}
+	if rows[0].Cells["website"] != "jane.example.com" {
+		t.Fatalf("website should be filled from task-2, got %q", rows[0].Cells["website"])
+	}
+}
+
+// No identity columns: rows without any recognized identity column stay
+// separate — the system never guesses when it can't identify the entity.
+func TestCollapseNoIdentityKeepsRowsSeparate(t *testing.T) {
+	rows := collapseResolvedRows(
+		[]bamltypes.ColumnSchema{
+			{Key: "misc_data", Type: "text"},
+			{Key: "value", Type: "text"},
+		},
+		[]resolvedSheetRow{
+			{
+				TaskID: "task-1",
+				RowID:  "row-1",
+				RowKey: "task",
+				Cells: map[string]string{
+					"misc_data": "same content",
+					"value":     "100",
+				},
+			},
+			{
+				TaskID: "task-2",
+				RowID:  "row-2",
+				RowKey: "task",
+				Cells: map[string]string{
+					"misc_data": "same content",
+					"value":     "100",
+				},
+			},
+		},
+		nil,
+		nil,
+	)
+
+	if got, want := len(rows), 2; got != want {
+		t.Fatalf("no identity columns = no merge, got %d, want %d", got, want)
 	}
 }
 

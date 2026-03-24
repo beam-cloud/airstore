@@ -3991,13 +3991,15 @@ func (b *PostgresBackend) CreateScheduledTask(ctx context.Context, st *types.Sch
 	query := `
 		INSERT INTO scheduled_task (
 			workspace_id, agent_id, cron_expr, timezone, prompt, skill_paths,
-			active, next_run_at, token_id, encrypted_token, created_by_member_id
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			active, next_run_at, token_id, encrypted_token, created_by_member_id,
+			source_view_id
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		RETURNING id, external_id, created_at, updated_at
 	`
 	return b.db.QueryRowContext(ctx, query,
 		st.WorkspaceID, st.AgentID, st.CronExpr, st.Timezone, st.Prompt, pq.Array(st.SkillPaths),
 		st.Active, st.NextRunAt, st.TokenID, st.EncryptedToken, st.CreatedByMemberID,
+		st.SourceViewID,
 	).Scan(&st.ID, &st.ExternalID, &st.CreatedAt, &st.UpdatedAt)
 }
 
@@ -4007,14 +4009,14 @@ func (b *PostgresBackend) GetScheduledTask(ctx context.Context, workspaceID uint
 	query := `
 		SELECT id, external_id, workspace_id, agent_id, cron_expr, timezone, prompt, skill_paths,
 		       active, next_run_at, last_run_at, token_id, encrypted_token,
-		       created_by_member_id, created_at, updated_at
+		       created_by_member_id, source_view_id, created_at, updated_at
 		FROM scheduled_task WHERE external_id = $1 AND workspace_id = $2
 	`
 	err := b.db.QueryRowContext(ctx, query, externalID, workspaceID).Scan(
 		&st.ID, &st.ExternalID, &st.WorkspaceID, &st.AgentID,
 		&st.CronExpr, &st.Timezone, &st.Prompt, &skillPaths,
 		&st.Active, &st.NextRunAt, &st.LastRunAt, &st.TokenID, &st.EncryptedToken,
-		&st.CreatedByMemberID, &st.CreatedAt, &st.UpdatedAt,
+		&st.CreatedByMemberID, &st.SourceViewID, &st.CreatedAt, &st.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, &types.ErrScheduledTaskNotFound{ExternalID: externalID}
@@ -4030,11 +4032,27 @@ func (b *PostgresBackend) ListScheduledTasks(ctx context.Context, workspaceID ui
 	query := `
 		SELECT id, external_id, workspace_id, agent_id, cron_expr, timezone, prompt, skill_paths,
 		       active, next_run_at, last_run_at, token_id, encrypted_token,
-		       created_by_member_id, created_at, updated_at
+		       created_by_member_id, source_view_id, created_at, updated_at
 		FROM scheduled_task WHERE workspace_id = $1
 		ORDER BY created_at DESC
 	`
 	rows, err := b.db.QueryContext(ctx, query, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanScheduledTasks(rows)
+}
+
+func (b *PostgresBackend) ListScheduledTasksByView(ctx context.Context, workspaceID uint, sourceViewID string) ([]*types.ScheduledTask, error) {
+	query := `
+		SELECT id, external_id, workspace_id, agent_id, cron_expr, timezone, prompt, skill_paths,
+		       active, next_run_at, last_run_at, token_id, encrypted_token,
+		       created_by_member_id, source_view_id, created_at, updated_at
+		FROM scheduled_task WHERE workspace_id = $1 AND source_view_id = $2
+		ORDER BY created_at DESC
+	`
+	rows, err := b.db.QueryContext(ctx, query, workspaceID, sourceViewID)
 	if err != nil {
 		return nil, err
 	}
@@ -4081,7 +4099,7 @@ func (b *PostgresBackend) ListDueScheduledTasks(ctx context.Context, now time.Ti
 	query := `
 		SELECT id, external_id, workspace_id, agent_id, cron_expr, timezone, prompt, skill_paths,
 		       active, next_run_at, last_run_at, token_id, encrypted_token,
-		       created_by_member_id, created_at, updated_at
+		       created_by_member_id, source_view_id, created_at, updated_at
 		FROM scheduled_task
 		WHERE active = TRUE AND next_run_at <= $1
 		ORDER BY next_run_at ASC
@@ -4132,7 +4150,7 @@ func scanScheduledTasks(rows *sql.Rows) ([]*types.ScheduledTask, error) {
 			&st.ID, &st.ExternalID, &st.WorkspaceID, &st.AgentID,
 			&st.CronExpr, &st.Timezone, &st.Prompt, &skillPaths,
 			&st.Active, &st.NextRunAt, &st.LastRunAt, &st.TokenID, &st.EncryptedToken,
-			&st.CreatedByMemberID, &st.CreatedAt, &st.UpdatedAt,
+			&st.CreatedByMemberID, &st.SourceViewID, &st.CreatedAt, &st.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -4247,6 +4265,10 @@ func (b *PostgresBackend) ListWorkspaceTaskOutputs(
 		  AND ($4::text IS NULL OR o.output_type = $4)
 		  AND ($5::boolean IS FALSE OR o.archived_at IS NULL)
 		  AND ($7::boolean IS FALSE OR o.agent_id IS NULL)
+		  AND ($8::text IS NULL OR o.task_id IN (
+		      SELECT id FROM agent_task
+		      WHERE workspace_id = $1 AND payload_json->>'source_view_id' = $8
+		  ))
 		ORDER BY o.created_at DESC, o.id DESC
 		LIMIT $6`,
 		workspaceId,
@@ -4256,6 +4278,7 @@ func (b *PostgresBackend) ListWorkspaceTaskOutputs(
 		filter.ExcludeArchived,
 		limit,
 		filter.AgentIDIsNull,
+		nilIfEmpty(filter.SourceViewID),
 	)
 	if err != nil {
 		return nil, err

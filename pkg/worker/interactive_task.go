@@ -399,7 +399,9 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 
 	// Idle monitor
 	if timeout := w.config.Sandbox.GetInteractiveIdleTimeout(); timeout > 0 {
-		go monitorInteractiveSessionIdle(sessionCtx, task.ExternalId, executionContextFromTask(task), sessionCancel, timeout, activityCh, &idleTimedOut, checkHeartbeat)
+		go monitorInteractiveSessionIdle(sessionCtx, task.ExternalId, executionContextFromTask(task), sessionCancel, timeout, activityCh, &idleTimedOut, checkHeartbeat, func() {
+			w.sandboxManager.Stop(sandboxID, true)
+		})
 	}
 
 	// Cancellation watcher
@@ -1613,6 +1615,7 @@ func monitorInteractiveSessionIdle(
 	cancel context.CancelFunc, timeout time.Duration,
 	activityCh <-chan struct{}, idleTimedOut *atomic.Bool,
 	checkHeartbeat func() bool,
+	stopSandbox func(),
 ) {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
@@ -1637,6 +1640,9 @@ func monitorInteractiveSessionIdle(
 			addTaskExecutionContextByID(log.Info().Dur("idle_timeout", timeout), taskID, ec).
 				Msg("idle timeout reached, stopping")
 			cancel()
+			if stopSandbox != nil {
+				stopSandbox()
+			}
 			return
 		}
 	}
