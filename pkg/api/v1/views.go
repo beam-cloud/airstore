@@ -1526,6 +1526,9 @@ func (vg *ViewsGroup) ChatView(c echo.Context) error {
 				resp.View_content = reconciled
 			}
 		}
+		if vg.copilot != nil && vg.copilot.ChatAvailable() {
+			vg.copilot.PersistOperations(genCtx, viewID, results)
+		}
 	}
 
 	if resp.View_content != "" && string(resp.Update_type) != views.UpdateTypeConversation {

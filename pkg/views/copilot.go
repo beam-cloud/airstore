@@ -30,9 +30,10 @@ import (
 // ---------------------------------------------------------------------------
 
 type ChatMessage struct {
-	Role      string `json:"role"`
-	Content   string `json:"content"`
-	Timestamp int64  `json:"ts"`
+	Role       string            `json:"role"`
+	Content    string            `json:"content"`
+	Timestamp  int64             `json:"ts"`
+	Operations []OperationResult `json:"operations,omitempty"`
 }
 
 type AttachedFile struct {
@@ -176,6 +177,16 @@ func (c *Copilot) LoadChatState(ctx context.Context, workspaceID, viewID string)
 			state.CreatedAt = e.Timestamp
 		case "message":
 			state.Messages = append(state.Messages, ChatMessage{Role: e.Role, Content: e.Content, Timestamp: e.Timestamp})
+		case "operations":
+			var ops []OperationResult
+			if json.Unmarshal([]byte(e.Content), &ops) == nil && len(ops) > 0 {
+				for i := len(state.Messages) - 1; i >= 0; i-- {
+					if state.Messages[i].Role == "assistant" {
+						state.Messages[i].Operations = ops
+						break
+					}
+				}
+			}
 		case "view":
 			state.ViewContent = e.Content
 		case "published_view_id":
@@ -240,6 +251,14 @@ func (c *Copilot) PersistViewContent(ctx context.Context, viewID, viewContent st
 
 func (c *Copilot) PersistPublishedViewID(ctx context.Context, chatID, viewID string) error {
 	return c.persistChat(ctx, chatID, "published_view_id", viewID, "", "")
+}
+
+func (c *Copilot) PersistOperations(ctx context.Context, viewID string, results []OperationResult) {
+	opsJSON, err := json.Marshal(results)
+	if err != nil {
+		return
+	}
+	_ = c.persistChat(ctx, viewID, "operations", string(opsJSON), "", "")
 }
 
 func (c *Copilot) IndexDraftCreated(ctx context.Context, workspaceID, draftID, desc, viewName, viewID string) error {
@@ -1930,6 +1949,52 @@ func stringValue(payload map[string]any, key string) string {
 	return strings.TrimSpace(v)
 }
 
+// repairPayloadJSON tries to fix common JSON issues from LLM output — mainly
+// unescaped control characters (newlines/tabs) inside string values. Returns
+// empty string if repair is not possible.
+func repairPayloadJSON(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	var buf strings.Builder
+	buf.Grow(len(raw))
+	inString := false
+	escaped := false
+	for i := 0; i < len(raw); i++ {
+		ch := raw[i]
+		if escaped {
+			buf.WriteByte(ch)
+			escaped = false
+			continue
+		}
+		if ch == '\\' && inString {
+			buf.WriteByte(ch)
+			escaped = true
+			continue
+		}
+		if ch == '"' {
+			inString = !inString
+			buf.WriteByte(ch)
+			continue
+		}
+		if inString && ch == '\n' {
+			buf.WriteString(`\n`)
+			continue
+		}
+		if inString && ch == '\r' {
+			buf.WriteString(`\r`)
+			continue
+		}
+		if inString && ch == '\t' {
+			buf.WriteString(`\t`)
+			continue
+		}
+		buf.WriteByte(ch)
+	}
+	return buf.String()
+}
+
 func uniqueStringSlice(value any) []string {
 	var raw []string
 	switch typed := value.(type) {
@@ -2004,7 +2069,15 @@ func (c *Copilot) executeOne(ctx context.Context, workspaceID uint, op bamltypes
 
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(op.Payload), &payload); err != nil {
-		return fail("", "invalid payload JSON")
+		repaired := repairPayloadJSON(op.Payload)
+		if repaired == "" {
+			log.Warn().Str("op_type", opType).Str("raw_payload", truncate(op.Payload, 200)).Err(err).Msg("invalid payload JSON")
+			return fail("", "invalid payload JSON")
+		}
+		if err2 := json.Unmarshal([]byte(repaired), &payload); err2 != nil {
+			log.Warn().Str("op_type", opType).Str("raw_payload", truncate(op.Payload, 200)).Err(err2).Msg("payload JSON repair failed")
+			return fail("", "invalid payload JSON")
+		}
 	}
 	str := func(key string) string {
 		return stringValue(payload, key)
