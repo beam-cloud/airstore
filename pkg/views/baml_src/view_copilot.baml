@@ -51,9 +51,10 @@ function WriteView(
 ) -> ViewDraftResponse {
   client ViewCopilotClient
   prompt #"
-    You are a workbook designer. You build Views — each view is a workbook of
-    tabbed sheets. Each sheet has one primary data table and optional actions.
-    Views aggregate data from AI agents into clean, scannable sheets.
+    You are a workspace designer. You build Views — each view is a living
+    workspace for an ongoing objective. Sheets can contain tables, templates,
+    config panels, sequences, and actions. Views also have automations that
+    wire agents into multi-step workflows with approval gates.
 
     =============================================================================
     COMPONENT REGISTRY
@@ -74,21 +75,13 @@ function WriteView(
           "name": "Sheet Name",
           "description": "string — what this sheet tracks",
           "layout": {"columns": 12},
-          "relations": [
-            {
-              "id": "rel-1",
-              "name": "Optional relation name",
-              "to_sheet_id": "sheet-2",
-              "from_column": "task_id",
-              "to_column": "task_id"
-            }
-          ],
+          "relations": [],
           "components": [
             {
               "id": "c1",
               "type": "table",
               "title": "Component Title",
-              "position": {"col": 0, "row": 0, "colSpan": 12, "rowSpan": 1},
+              "position": {"col": 0, "row": 0, "colSpan": 8, "rowSpan": 1},
               "dataSource": {
                 "agent_id": "single-agent-id",
                 "agent_ids": ["agent-1", "agent-2"],
@@ -99,6 +92,13 @@ function WriteView(
                 ]
               },
               "config": {}
+            },
+            {
+              "id": "t1",
+              "type": "template",
+              "title": "Email Template",
+              "position": {"col": 8, "row": 0, "colSpan": 4, "rowSpan": 1},
+              "config": {"content": "Hi {%raw%}{{name}}{%endraw%},...", "variables": ["name"], "format": "markdown"}
             },
             {
               "id": "a1",
@@ -117,6 +117,22 @@ function WriteView(
             }
           ]
         }
+      ],
+      "automations": [
+        {
+          "id": "auto-1",
+          "name": "Kickoff on publish",
+          "trigger": {"type": "on_publish"},
+          "action": {"type": "create_task", "agent_id": "agent-id-1", "prompt_template": "..."},
+          "enabled": true
+        },
+        {
+          "id": "auto-2",
+          "name": "Review before sending",
+          "trigger": {"type": "on_row_added", "sheet_id": "sheet-1"},
+          "action": {"type": "approval_gate"},
+          "enabled": true
+        }
       ]
     }
 
@@ -126,8 +142,10 @@ function WriteView(
       workflow has genuinely distinct data domains (e.g. "contacts" vs "emails
       sent" vs "pricing comparisons" are three separate entity types that
       would clutter one table). When in doubt, use one sheet.
-    - Every sheet has exactly ONE table component. It is always full-width
-      (colSpan: 12) at position row 0.
+    - Every sheet must have at least one table component.
+    - Sheets can have multiple components arranged in the 12-column grid.
+      Example: table at colSpan:8, template at colSpan:4 beside it,
+      config-panel and sequence stacked in the remaining 4 columns.
     - Action components are optional and belong to their sheet.
     - Generate concise sheet names. Avoid generic names like "Sheet 1" unless the
       user gave no meaningful distinction.
@@ -141,6 +159,16 @@ function WriteView(
       modify widgets.
     - The canvas automatically renders assigned agents and live task counts
       for the active sheet — you do NOT need to create components for those.
+
+    AUTOMATION RULES:
+    - For workflows with side effects (sending emails, purchasing, posting),
+      ALWAYS include an approval_gate before the destructive action.
+    - Use on_publish for the initial kickoff task (e.g. finding contacts).
+    - Use on_row_added for per-row processing (e.g. drafting emails for each contact).
+    - Use on_approved for post-approval actions (e.g. sending approved emails).
+    - Use schedule for recurring work (e.g. weekly paper tracking).
+    - Prompt templates use {%raw%}{{column_key}}{%endraw%} for row data, {%raw%}{{config.key}}{%endraw%} for
+      config-panel values, and {%raw%}{{template.id}}{%endraw%} for template content.
 
     TRANSFORM RULES (semantic hints for the BAML mapper):
     At render time a BAML mapper dynamically maps task output data into table
@@ -256,6 +284,16 @@ function WriteView(
     10. Default to ONE sheet. Only add more sheets when the data genuinely
         splits into distinct entity types that would be confusing in a single
         table.
+
+    11. For workflow requests (campaigns, pipelines, monitoring), generate
+        automations that wire the agents together. Include an approval_gate
+        before any destructive action. The user should see the full pipeline
+        working automatically after publishing.
+
+    12. Use template, config-panel, and sequence components when the workflow
+        benefits from them (e.g. email campaigns need a template; campaigns
+        need settings; follow-up cadences need a sequence). Place them
+        alongside the table using the 12-column grid.
 
     {{ ctx.output_format }}
   "#

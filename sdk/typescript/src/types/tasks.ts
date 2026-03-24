@@ -154,6 +154,8 @@ export interface AgentCommandCreateParams {
   spawnedBy?: string;
   priority?: TaskPriority;
   budgetUsd?: number;
+  /** View/project ID that originated this task, for scoping outputs. */
+  sourceViewId?: string;
 }
 
 /** Response from task creation. Contains the task and whether it was a duplicate. */

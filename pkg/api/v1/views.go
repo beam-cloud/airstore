@@ -292,6 +292,7 @@ func (vg *ViewsGroup) ResolveData(c echo.Context) error {
 	data, err := vg.resolver.Resolve(ctx, workspaceID, v.ID, *sheet, *comp, views.ResolveOptions{
 		ForceRefresh:  queryBool(c.QueryParam(viewRefreshQueryParam)),
 		ViewAgentRefs: v.Definition.Agents,
+		SourceViewID:  v.ID,
 	})
 	if err != nil {
 		log.Error().Err(err).Str("view_id", v.ID).Str("sheet_id", sheetID).Str("component", componentID).Msg("data resolve failed")

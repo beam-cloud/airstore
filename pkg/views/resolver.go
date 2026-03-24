@@ -92,6 +92,7 @@ type DataResolver struct {
 type ResolveOptions struct {
 	ForceRefresh  bool
 	ViewAgentRefs []string
+	SourceViewID  string
 }
 
 type mappingSpec struct {
@@ -237,7 +238,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 		return &viewMappingResult{Rows: nil, TaskMeta: map[string]*types.AgentTask{}}, nil
 	}
 
-	allOutputs, err := r.fetchMappingOutputs(ctx, workspaceID, comp.DataSource, opts.ViewAgentRefs)
+	allOutputs, err := r.fetchMappingOutputs(ctx, workspaceID, comp.DataSource, opts.ViewAgentRefs, opts.SourceViewID)
 	if err != nil {
 		return nil, fmt.Errorf("fetch mapping outputs: %w", err)
 	}
@@ -1071,10 +1072,13 @@ func (r *DataResolver) listScopedTasks(ctx context.Context, workspaceID uint, fi
 	return dedupeTasks(all), nil
 }
 
-func (r *DataResolver) fetchOutputsForScope(ctx context.Context, workspaceID uint, ds *types.DataSource, agentIDs []string) ([]*types.TaskOutput, error) {
+func (r *DataResolver) fetchOutputsForScope(ctx context.Context, workspaceID uint, ds *types.DataSource, agentIDs []string, sourceViewID string) ([]*types.TaskOutput, error) {
 	filter := baseTaskOutputFilter()
 	if outputType := dataSourceOutputTypeFallback(ds); outputType != "" {
 		filter.OutputType = &outputType
+	}
+	if sourceViewID != "" {
+		filter.SourceViewID = &sourceViewID
 	}
 	outputs, err := r.listScopedOutputs(ctx, workspaceID, filter, agentIDs)
 	if err != nil {
@@ -1118,7 +1122,7 @@ func (r *DataResolver) fetchComponentOutputs(ctx context.Context, workspaceID ui
 	if !ok {
 		return nil, nil
 	}
-	return r.fetchOutputsForScope(ctx, workspaceID, ds, agentIDs)
+	return r.fetchOutputsForScope(ctx, workspaceID, ds, agentIDs, "")
 }
 
 // fetchMappingOutputs lets the data source select which tasks belong to the
@@ -1129,13 +1133,13 @@ func (r *DataResolver) fetchComponentOutputs(ctx context.Context, workspaceID ui
 // expansion is skipped so BAML maps exactly the outputs the user selected.
 // Expansion is only done when the filter selects tasks broadly (output_type
 // or time_range alone) so BAML can synthesize a full-context row per task.
-func (r *DataResolver) fetchMappingOutputs(ctx context.Context, workspaceID uint, ds *types.DataSource, viewAgentRefs []string) ([]*types.TaskOutput, error) {
+func (r *DataResolver) fetchMappingOutputs(ctx context.Context, workspaceID uint, ds *types.DataSource, viewAgentRefs []string, sourceViewID string) ([]*types.TaskOutput, error) {
 	agentIDs, ok := r.resolveScopedAgentIDs(ctx, workspaceID, ds, viewAgentRefs)
 	if !ok {
 		return nil, nil
 	}
 
-	realSelectedOutputs, err := r.fetchOutputsForScope(ctx, workspaceID, ds, agentIDs)
+	realSelectedOutputs, err := r.fetchOutputsForScope(ctx, workspaceID, ds, agentIDs, sourceViewID)
 	if err != nil {
 		return nil, err
 	}
@@ -1955,21 +1959,41 @@ func collapseResolvedRows(
 	return collapsed
 }
 
+// resolvedRowIdentityLabel extracts a human-meaningful identity label from a
+// row's cells. The label identifies the real-world entity the row represents
+// (a property address, a person's name, a recipe, etc.) so that rows from
+// different tasks describing the same entity can be collapsed in the display
+// without losing information.
+func resolvedRowIdentityLabel(row resolvedSheetRow) string {
+	rowKey := normalizeToken(strings.TrimSpace(row.RowKey))
+	if rowKey == "task" {
+		rowKey = ""
+	}
+	return firstNonEmptyMappingString(
+		rowKey,
+		normalizeToken(strings.TrimSpace(row.Cells["address"])),
+		normalizeToken(strings.TrimSpace(row.Cells["recipe_name"])),
+		normalizeToken(strings.TrimSpace(row.Cells["name"])),
+		normalizeToken(strings.TrimSpace(row.Cells["title"])),
+		normalizeToken(strings.TrimSpace(row.Cells["company"])),
+		normalizeToken(strings.TrimSpace(row.Cells["email"])),
+		normalizeToken(strings.TrimSpace(row.Cells["to"])),
+		normalizeToken(strings.TrimSpace(row.Cells["subject"])),
+		normalizeToken(strings.TrimSpace(row.Cells["url"])),
+		normalizeToken(strings.TrimSpace(row.Cells["website"])),
+		normalizeToken(strings.TrimSpace(row.Cells["ticker"])),
+		normalizeToken(strings.TrimSpace(row.Cells["id"])),
+	)
+}
+
 func resolvedRowMergeKey(
 	row resolvedSheetRow,
 	columnTypes map[string]string,
 	outputByID map[string]*types.TaskOutput,
 ) string {
-	rowKey := normalizeToken(strings.TrimSpace(row.RowKey))
-	if rowKey == "task" {
-		rowKey = ""
-	}
-	label := firstNonEmptyMappingString(
-		rowKey,
-		normalizeToken(strings.TrimSpace(row.Cells["recipe_name"])),
-		normalizeToken(strings.TrimSpace(row.Cells["name"])),
-		normalizeToken(strings.TrimSpace(row.Cells["title"])),
-	)
+	label := resolvedRowIdentityLabel(row)
+
+	// Try to find a source URI from the output artifact or link columns.
 	source := ""
 	for _, outputID := range uniqueTrimmedStrings(strings.Split(row.SourceOutputIDs, ",")) {
 		output := outputByID[outputID]
@@ -1993,10 +2017,26 @@ func resolvedRowMergeKey(
 			}
 		}
 	}
-	if source == "" || label == "" {
-		return ""
+
+	// Best case: source URI + label — unambiguous identity.
+	if source != "" && label != "" {
+		return source + "\x00" + label
 	}
-	return source + "\x00" + label
+
+	// Good case: label alone. Two rows with the same address/name/email
+	// across different tasks represent the same entity. Merge them —
+	// mergeResolvedRow preserves data from both sides.
+	if label != "" {
+		return "entity\x00" + label
+	}
+
+	// Source URI alone (no label) — still a strong identity signal.
+	if source != "" {
+		return "source\x00" + source
+	}
+
+	// No identity signal at all — don't merge. Each row stays separate.
+	return ""
 }
 
 func preferResolvedRow(candidate, current resolvedSheetRow, taskMeta map[string]*types.AgentTask) bool {

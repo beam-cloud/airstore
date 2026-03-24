@@ -1001,6 +1001,12 @@ func componentIDPrefix(componentType string) string {
 		return "table"
 	case types.ComponentTypeAction:
 		return "action"
+	case "template":
+		return "tmpl"
+	case "config-panel":
+		return "cfg"
+	case "sequence":
+		return "seq"
 	default:
 		return "component"
 	}
@@ -1859,13 +1865,13 @@ func extractStringSlice(m map[string]any, key string) []string {
 // Component registry documentation — injected into BAML prompt
 // ---------------------------------------------------------------------------
 
-const ComponentRegistryDoc = `A view is a workbook of tabbed sheets.
+const ComponentRegistryDoc = `A view is a workspace for an ongoing objective.
 Each sheet has a header bar that shows assigned agents, live task counts, and action buttons.
-Each sheet has exactly one primary table.
+Sheets can contain multiple components arranged in a 12-column grid.
 
-COMPONENT TYPES (only two):
+COMPONENT TYPES:
 
-- table: The sheet's data table. Full-width, always present.
+- table: The sheet's primary data table.
   At render time a BAML mapper dynamically maps task output data into the
   column schema. Transform rules are semantic hints that guide the mapping:
   - column: machine-stable key (snake_case) describing what the column shows
@@ -1934,6 +1940,39 @@ COMPONENT TYPES (only two):
   - If a field is optional, still use {{field_name}} — empty values are handled.
   Mark required: true for mandatory inputs.
 
+- template: Editable rich text with {{variable}} placeholders. For email
+  drafts, message templates, or documents. Placed alongside the table.
+  Config: {
+    content: "Hi {{name}},\n\nI'm reaching out because...",
+    variables: ["name", "company", "reason"],
+    format: "markdown"
+  }
+  Variables can reference table column keys so agents can interpolate
+  per-row values when sending. Position next to the table (e.g. colSpan: 4,
+  col: 8) for side-by-side layout.
+
+- config-panel: Settings form with typed fields. For campaign parameters,
+  search criteria, or workflow configuration.
+  Config: {
+    fields: [
+      {"key": "target_criteria", "label": "Target Criteria", "type": "textarea", "value": "Series A+ VCs"},
+      {"key": "tone", "label": "Tone", "type": "select", "options": ["Professional", "Casual"], "value": "Professional"},
+      {"key": "max_contacts", "label": "Max Contacts", "type": "number", "value": 50}
+    ]
+  }
+  Field types: text, textarea, select, number.
+  Agents receive config-panel values as context when executing tasks.
+
+- sequence: Ordered steps showing a process or cadence. For follow-up
+  timelines, workflow stages, or process documentation.
+  Config: {
+    steps: [
+      {"label": "Initial outreach", "delay": "Day 0", "description": "Send personalized intro email"},
+      {"label": "Follow up", "delay": "Day 3", "description": "Short check-in if no reply"},
+      {"label": "Final touch", "delay": "Day 7", "description": "Last message, offer to reconnect later"}
+    ]
+  }
+
 AGENT SELECTION:
 Keep definition.agents minimal — only include agents actually used.
 If several agents share the same skills, pick one unless the user wants multiple.
@@ -1942,6 +1981,11 @@ SHEET DESIGN:
 - STRONG DEFAULT: use ONE sheet. Most workflows fit a single table.
   Only create multiple sheets when the user explicitly requests them or the data
   has genuinely distinct entity types (e.g. contacts vs emails vs pricing).
+- Sheets can have multiple components. Place the table as the primary component
+  (full-width or partial), with template/config-panel/sequence alongside.
+  Example layout for email outreach:
+    table at col:0 colSpan:8, template at col:8 colSpan:4,
+    config-panel at col:8 colSpan:4 row:1, sequence at col:8 colSpan:4 row:2
 - Generate concise sheet names tied to the workflow, not generic labels.
 - Use sheet relations when rows should connect across sheets via stable keys
   like task_id, email, company_id, listing_id, or similar identifiers.`

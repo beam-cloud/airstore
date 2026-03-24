@@ -65,6 +65,7 @@ type TaskOutputListFilter struct {
 	AgentIDIsNull   bool    `json:"agent_id_is_null,omitempty"`
 	OutputType      *string `json:"output_type,omitempty"`
 	ExcludeArchived bool    `json:"exclude_archived,omitempty"`
+	SourceViewID    *string `json:"source_view_id,omitempty"`
 	Limit           int     `json:"limit,omitempty"`
 }
 

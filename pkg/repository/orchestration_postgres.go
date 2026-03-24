@@ -4247,6 +4247,10 @@ func (b *PostgresBackend) ListWorkspaceTaskOutputs(
 		  AND ($4::text IS NULL OR o.output_type = $4)
 		  AND ($5::boolean IS FALSE OR o.archived_at IS NULL)
 		  AND ($7::boolean IS FALSE OR o.agent_id IS NULL)
+		  AND ($8::text IS NULL OR o.task_id IN (
+		      SELECT id FROM agent_task
+		      WHERE workspace_id = $1 AND payload_json->>'source_view_id' = $8
+		  ))
 		ORDER BY o.created_at DESC, o.id DESC
 		LIMIT $6`,
 		workspaceId,
@@ -4256,6 +4260,7 @@ func (b *PostgresBackend) ListWorkspaceTaskOutputs(
 		filter.ExcludeArchived,
 		limit,
 		filter.AgentIDIsNull,
+		nilIfEmpty(filter.SourceViewID),
 	)
 	if err != nil {
 		return nil, err

@@ -66,6 +66,7 @@ export class Tasks {
         spawned_by: params.spawnedBy,
         priority: params.priority,
         budget_usd: params.budgetUsd,
+        source_view_id: params.sourceViewId,
       },
       undefined,
       options,

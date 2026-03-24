@@ -307,6 +307,20 @@ func (s *ViewStore) DeleteRowsNotInGroups(ctx context.Context, viewID, sheetID, 
 	return nil
 }
 
+// DeleteRowsByIDs removes specific rows by their document IDs.
+func (s *ViewStore) DeleteRowsByIDs(ctx context.Context, viewID string, rowIDs []string) error {
+	if !s.Available() || len(rowIDs) == 0 {
+		return nil
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+	filter := bson.D{{Key: "_id", Value: bson.D{{Key: "$in", Value: rowIDs}}}}
+	_, err := coll.DeleteMany(ctx, filter)
+	if err != nil {
+		return fmt.Errorf("delete rows by IDs: %w", err)
+	}
+	return nil
+}
+
 // UpdateCells writes user-edited values into the manual overlay.
 func (s *ViewStore) UpdateCells(ctx context.Context, viewID, sheetID, rowID string, cells map[string]string) error {
 	if !s.Available() {
