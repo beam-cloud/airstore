@@ -509,7 +509,9 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 		agentMsg = sessionAssistantMessage
 	}
 
-	if !needsInput && runErr == nil {
+	if needsInput {
+		postRun = &types.RunExecutionPostRun{WaitingForInput: true}
+	} else if runErr == nil {
 		postRun = w.buildPostRunPlan(ctx, task, outputPipeline.tracker, agentMsg, lastPrompt, mountSource, env, bamlEnv, explicitWake)
 	}
 
