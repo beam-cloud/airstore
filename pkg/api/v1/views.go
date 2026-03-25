@@ -1490,6 +1490,7 @@ func (vg *ViewsGroup) ChatView(c echo.Context) error {
 		return nil
 	}
 
+	var opResults []views.OperationResult
 	if len(resp.Operations) > 0 {
 		for _, op := range resp.Operations {
 			opName := operationPayloadName(op.Payload)
@@ -1500,8 +1501,8 @@ func (vg *ViewsGroup) ChatView(c echo.Context) error {
 				OpStatus: "executing",
 			})
 		}
-		results := vg.copilot.ExecuteOperations(genCtx, workspaceID, resp.Operations, viewID)
-		for _, r := range results {
+		opResults = vg.copilot.ExecuteOperations(genCtx, workspaceID, resp.Operations, viewID)
+		for _, r := range opResults {
 			writeSSE(viewSSEEvent{
 				Event:        "operation",
 				OpType:       r.Type,
@@ -1518,16 +1519,19 @@ func (vg *ViewsGroup) ChatView(c echo.Context) error {
 				log.Warn().Str("type", r.Type).Str("name", r.Name).Str("error", r.Error).Msg("copilot operation failed")
 			}
 		}
-		if session.chatState.ViewContent != "" {
-			if reconciled, reconcileErr := vg.copilot.ReconcileViewContent(genCtx, workspaceID, session.chatState.ViewContent, results); reconcileErr != nil {
-				log.Warn().Err(reconcileErr).Str("view_id", viewID).Msg("failed to reconcile view content")
-			} else if reconciled != "" && reconciled != session.chatState.ViewContent {
-				session.chatState.ViewContent = reconciled
-				resp.View_content = reconciled
-			}
-		}
 		if vg.copilot != nil && vg.copilot.ChatAvailable() {
-			vg.copilot.PersistOperations(genCtx, viewID, results)
+			vg.copilot.PersistOperations(genCtx, viewID, opResults)
+		}
+	}
+
+	// Always reconcile view content with fresh agents from the DB so agent
+	// references are resolved to real UUIDs — not just when operations ran.
+	if session.chatState.ViewContent != "" {
+		if reconciled, reconcileErr := vg.copilot.ReconcileViewContent(genCtx, workspaceID, session.chatState.ViewContent, opResults); reconcileErr != nil {
+			log.Warn().Err(reconcileErr).Str("view_id", viewID).Msg("failed to reconcile view content")
+		} else if reconciled != "" && reconciled != session.chatState.ViewContent {
+			session.chatState.ViewContent = reconciled
+			resp.View_content = reconciled
 		}
 	}
 
