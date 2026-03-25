@@ -12,6 +12,7 @@ import (
 type AirRunnerOptions struct {
 	AnthropicAPIKey string
 	CerebrasAPIKey  string
+	KernelAPIKey    string
 	S2Key           string
 	S2Basin         string
 }
@@ -19,6 +20,7 @@ type AirRunnerOptions struct {
 type AirRunner struct {
 	anthropicAPIKey string
 	cerebrasAPIKey  string
+	kernelAPIKey    string
 	s2Key           string
 	s2Basin         string
 }
@@ -40,6 +42,7 @@ func NewAirRunner(opts AirRunnerOptions) *AirRunner {
 	return &AirRunner{
 		anthropicAPIKey: strings.TrimSpace(opts.AnthropicAPIKey),
 		cerebrasAPIKey:  strings.TrimSpace(opts.CerebrasAPIKey),
+		kernelAPIKey:    strings.TrimSpace(opts.KernelAPIKey),
 		s2Key:           strings.TrimSpace(opts.S2Key),
 		s2Basin:         strings.TrimSpace(opts.S2Basin),
 	}
@@ -94,15 +97,12 @@ func (r *AirRunner) buildArgs(env map[string]string, prompt string) []string {
 }
 
 func (r *AirRunner) injectEnv(env map[string]string) {
-	inject := func(key, value string) {
-		if value != "" && env[key] == "" {
-			env[key] = value
-		}
-	}
-	inject("ANTHROPIC_API_KEY", r.anthropicAPIKey)
-	inject("CEREBRAS_API_KEY", r.cerebrasAPIKey)
-	inject("S2_KEY", r.s2Key)
-	inject("S2_BASIN", r.s2Basin)
+	setEnvDefault(env, "ANTHROPIC_API_KEY", r.anthropicAPIKey)
+	setEnvDefault(env, "CEREBRAS_API_KEY", r.cerebrasAPIKey)
+	setEnvDefault(env, "KERNEL_API_KEY", r.kernelAPIKey)
+	setEnvDefault(env, "S2_KEY", r.s2Key)
+	setEnvDefault(env, "S2_BASIN", r.s2Basin)
+	injectKernelBrowserEnv(env)
 }
 
 // ParseTurnOutput extracts turn state, assistant response text, and any

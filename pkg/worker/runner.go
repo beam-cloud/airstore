@@ -213,6 +213,34 @@ func applySystemPromptFlags(builder *promptEntrypointBuilder, env map[string]str
 	}
 }
 
+// setEnvDefault sets env[key] = value when value is non-empty and the
+// key is not already present. Used by all runners for credential and
+// config injection.
+func setEnvDefault(env map[string]string, key, value string) {
+	if value != "" && env[key] == "" {
+		env[key] = value
+	}
+}
+
+// injectKernelBrowserEnv configures the agent-browser daemon for Kernel
+// session reuse. No-op when KERNEL_API_KEY is absent from env.
+func injectKernelBrowserEnv(env map[string]string) {
+	if env["KERNEL_API_KEY"] == "" {
+		return
+	}
+	setEnvDefault(env, "AGENT_BROWSER_PROVIDER", "kernel")
+
+	// Place daemon socket on tmpfs (/tmp) instead of the overlay filesystem
+	// (~/.agent-browser/). gVisor's overlay doesn't reliably support Unix
+	// domain sockets, causing the CLI to think no daemon is running and
+	// spawning a new one (with a new Kernel session) on every invocation.
+	setEnvDefault(env, "AGENT_BROWSER_SOCKET_DIR", "/tmp/agent-browser")
+
+	// Default Kernel timeout is 300s (5 min). Increase to 30 min so the
+	// cloud browser session survives between turns in interactive tasks.
+	setEnvDefault(env, "KERNEL_TIMEOUT_SECONDS", "1800")
+}
+
 type TurnArgMode string
 
 const (
