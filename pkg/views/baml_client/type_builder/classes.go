@@ -15,6 +15,78 @@ package type_builder
 
 import baml "github.com/boundaryml/baml/engine/language_client_go/pkg"
 
+type ColumnMappingClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *ColumnMappingClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *ColumnMappingClassView) PropertyHeader() (ClassPropertyView, error) {
+	return t.inner.Property("header")
+}
+
+func (t *ColumnMappingClassView) PropertyColumn_key() (ClassPropertyView, error) {
+	return t.inner.Property("column_key")
+}
+
+func (t *ColumnMappingClassView) PropertyIs_new() (ClassPropertyView, error) {
+	return t.inner.Property("is_new")
+}
+
+func (t *TypeBuilder) ColumnMapping() (*ColumnMappingClassView, error) {
+	bld, err := t.inner.Class("ColumnMapping")
+	if err != nil {
+		return nil, err
+	}
+	return &ColumnMappingClassView{inner: bld}, nil
+}
+
+func (t *ColumnMappingClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
+type ColumnMappingResultClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *ColumnMappingResultClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *ColumnMappingResultClassView) PropertyMappings() (ClassPropertyView, error) {
+	return t.inner.Property("mappings")
+}
+
+func (t *TypeBuilder) ColumnMappingResult() (*ColumnMappingResultClassView, error) {
+	bld, err := t.inner.Class("ColumnMappingResult")
+	if err != nil {
+		return nil, err
+	}
+	return &ColumnMappingResultClassView{inner: bld}, nil
+}
+
+func (t *ColumnMappingResultClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
 type ColumnSchemaClassView struct {
 	inner baml.ClassBuilder
 }

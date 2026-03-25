@@ -9,6 +9,9 @@ import (
 	"strings"
 	"time"
 
+	baml "github.com/beam-cloud/airstore/pkg/views/baml_client"
+	bamltypes "github.com/beam-cloud/airstore/pkg/views/baml_client/types"
+
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/google/uuid"
@@ -76,15 +79,16 @@ func ImportData(ctx context.Context, p ImportParams) (*ImportResult, error) {
 
 	colMapping := p.ColMapping
 	if len(colMapping) == 0 {
-		colMapping = make(map[string]string, len(headers))
-		for _, h := range headers {
-			colMapping[h] = importColumnKey(h)
-		}
+		colMapping = resolveColumnMapping(ctx, p.Backend, p.WorkspaceID, p.ViewID, p.SheetID, p.ComponentID, headers)
 	}
 
 	newCols, err := syncColumnsToView(ctx, p.Backend, p.WorkspaceID, p.ViewID, p.SheetID, p.ComponentID, headers, colMapping)
 	if err != nil {
 		log.Warn().Err(err).Str("view_id", p.ViewID).Msg("import: failed to sync columns to view definition (data will still be imported)")
+	}
+
+	if len(newCols) > 0 {
+		stampSchemaHash(ctx, p.Store, p.Backend, p.WorkspaceID, p.ViewID, p.SheetID, p.ComponentID)
 	}
 
 	importID := uuid.New().String()
@@ -118,18 +122,20 @@ func parseCSV(data []byte, delimiter rune) ([]string, []map[string]string, []str
 	reader.FieldsPerRecord = -1
 	reader.Comma = delimiter
 
-	headers, err := reader.Read()
+	rawHeaders, err := reader.Read()
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("read headers: %w", err)
 	}
-	var cleaned []string
-	for _, h := range headers {
-		h = strings.TrimSpace(h)
+	for i := range rawHeaders {
+		rawHeaders[i] = strings.TrimSpace(rawHeaders[i])
+	}
+
+	var headers []string
+	for _, h := range rawHeaders {
 		if h != "" {
-			cleaned = append(cleaned, h)
+			headers = append(headers, h)
 		}
 	}
-	headers = cleaned
 
 	var records []map[string]string
 	var parseErrors []string
@@ -148,9 +154,9 @@ func parseCSV(data []byte, delimiter rune) ([]string, []map[string]string, []str
 
 		row := make(map[string]string, len(headers))
 		hasValue := false
-		for i, header := range headers {
-			if i >= len(record) {
-				break
+		for i, header := range rawHeaders {
+			if i >= len(record) || header == "" {
+				continue
 			}
 			val := strings.TrimSpace(record[i])
 			if val != "" {
@@ -415,4 +421,143 @@ func importColumnKey(header string) string {
 		return "col"
 	}
 	return result
+}
+
+// resolveColumnMapping uses BAML to semantically map CSV headers to existing
+// view columns when columns are already defined, falling back to naive string
+// normalization if no existing columns exist or if BAML fails.
+func resolveColumnMapping(ctx context.Context, backend repository.BackendRepository, workspaceID uint, viewID, sheetID, componentID string, headers []string) map[string]string {
+	existing := loadExistingColumnSchemas(ctx, backend, workspaceID, viewID, sheetID, componentID)
+
+	if len(existing) > 0 {
+		result, err := baml.MapImportColumns(ctx, headers, existing)
+		if err == nil && len(result.Mappings) == len(headers) {
+			mapping := make(map[string]string, len(result.Mappings))
+			seen := make(map[string]bool, len(result.Mappings))
+			valid := true
+			for _, m := range result.Mappings {
+				key := strings.TrimSpace(m.Column_key)
+				if key == "" || seen[key] {
+					valid = false
+					break
+				}
+				seen[key] = true
+				mapping[m.Header] = key
+			}
+			if valid {
+				log.Info().
+					Str("view_id", viewID).
+					Int("headers", len(headers)).
+					Int("existing_cols", len(existing)).
+					Msg("import: BAML column mapping succeeded")
+				return mapping
+			}
+		}
+		if err != nil {
+			log.Warn().Err(err).Str("view_id", viewID).Msg("import: BAML column mapping failed, falling back to string normalization")
+		} else {
+			log.Warn().Str("view_id", viewID).Msg("import: BAML column mapping returned invalid result, falling back")
+		}
+	}
+
+	mapping := make(map[string]string, len(headers))
+	for _, h := range headers {
+		mapping[h] = importColumnKey(h)
+	}
+	return mapping
+}
+
+// loadExistingColumnSchemas reads the view definition and extracts column
+// schemas from the target component, formatted for the BAML mapper.
+func loadExistingColumnSchemas(ctx context.Context, backend repository.BackendRepository, workspaceID uint, viewID, sheetID, componentID string) []bamltypes.ColumnSchema {
+	if backend == nil {
+		return nil
+	}
+	v, err := backend.GetView(ctx, workspaceID, viewID)
+	if err != nil {
+		return nil
+	}
+	for _, sheet := range v.Definition.Sheets {
+		if sheet.ID != sheetID {
+			continue
+		}
+		for _, comp := range sheet.Components {
+			if comp.ID != componentID {
+				continue
+			}
+			return extractColumnSchemas(comp.Config)
+		}
+	}
+	return nil
+}
+
+func extractColumnSchemas(config map[string]any) []bamltypes.ColumnSchema {
+	if config == nil {
+		return nil
+	}
+	cols, ok := config["columns"].([]any)
+	if !ok {
+		return nil
+	}
+	var schemas []bamltypes.ColumnSchema
+	for _, c := range cols {
+		m, ok := c.(map[string]any)
+		if !ok {
+			continue
+		}
+		key, _ := m["key"].(string)
+		if key == "" {
+			continue
+		}
+		label, _ := m["label"].(string)
+		if label == "" {
+			label = key
+		}
+		colType, _ := m["type"].(string)
+		if colType == "" {
+			colType = "text"
+		}
+		schemas = append(schemas, bamltypes.ColumnSchema{
+			Name:        label,
+			Key:         key,
+			Type:        colType,
+			Description: label,
+		})
+	}
+	return schemas
+}
+
+// stampSchemaHash re-reads the view definition after column changes and
+// stamps the new schema hash onto all existing rows for the component.
+// Without this, every cached task-mapped row looks "stale" after an import
+// adds columns, triggering a full BAML re-map on the next data fetch.
+func stampSchemaHash(ctx context.Context, store *ViewStore, backend repository.BackendRepository, workspaceID uint, viewID, sheetID, componentID string) {
+	if store == nil || backend == nil {
+		return
+	}
+
+	v, err := backend.GetView(ctx, workspaceID, viewID)
+	if err != nil {
+		log.Warn().Err(err).Str("view_id", viewID).Msg("import: could not re-read view for schema hash stamp")
+		return
+	}
+
+	for _, sheet := range v.Definition.Sheets {
+		if sheet.ID != sheetID {
+			continue
+		}
+		for _, comp := range sheet.Components {
+			if comp.ID != componentID || !comp.IsTable() {
+				continue
+			}
+			newHash := MappingSchemaHash(sheet, comp)
+			if newHash == "" {
+				return
+			}
+			if err := store.UpdateSchemaHash(ctx, viewID, sheetID, componentID, newHash); err != nil {
+				log.Warn().Err(err).Str("view_id", viewID).Str("hash", newHash).Msg("import: failed to stamp schema hash")
+			}
+			return
+		}
+	}
 }

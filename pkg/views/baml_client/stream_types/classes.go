@@ -22,6 +22,102 @@ import (
 	"github.com/beam-cloud/airstore/pkg/views/baml_client/types"
 )
 
+type ColumnMapping struct {
+	Header     *string `json:"header"`
+	Column_key *string `json:"column_key"`
+	Is_new     *bool   `json:"is_new"`
+}
+
+func (c *ColumnMapping) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_STREAM_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_STREAM_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "ColumnMapping" {
+		panic(fmt.Sprintf("expected ColumnMapping, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "header":
+			c.Header = baml.Decode(valueHolder).Interface().(*string)
+
+		case "column_key":
+			c.Column_key = baml.Decode(valueHolder).Interface().(*string)
+
+		case "is_new":
+			c.Is_new = baml.Decode(valueHolder).Interface().(*bool)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class ColumnMapping", key))
+
+		}
+	}
+
+}
+
+func (c ColumnMapping) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["header"] = c.Header
+
+	fields["column_key"] = c.Column_key
+
+	fields["is_new"] = c.Is_new
+
+	return baml.EncodeClass("ColumnMapping", fields, nil)
+}
+
+func (c ColumnMapping) BamlTypeName() string {
+	return "ColumnMapping"
+}
+
+type ColumnMappingResult struct {
+	Mappings []ColumnMapping `json:"mappings"`
+}
+
+func (c *ColumnMappingResult) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_STREAM_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_STREAM_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "ColumnMappingResult" {
+		panic(fmt.Sprintf("expected ColumnMappingResult, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "mappings":
+			c.Mappings = baml.Decode(valueHolder).Interface().([]ColumnMapping)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class ColumnMappingResult", key))
+
+		}
+	}
+
+}
+
+func (c ColumnMappingResult) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["mappings"] = c.Mappings
+
+	return baml.EncodeClass("ColumnMappingResult", fields, nil)
+}
+
+func (c ColumnMappingResult) BamlTypeName() string {
+	return "ColumnMappingResult"
+}
+
 type ColumnSchema struct {
 	Name        *string `json:"name"`
 	Key         *string `json:"key"`

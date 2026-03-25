@@ -755,26 +755,56 @@ func (vg *ViewsGroup) RowDetail(c echo.Context) error {
 	if err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid row_id")
 	}
-	parentTaskID := c.QueryParam("task_id")
 
-	// Single row fetch — used for both subtask binding and component lookup.
+	// Row is the primary entity. Task context is optional enrichment.
 	var row *views.ViewRow
 	if vg.store != nil && vg.store.Available() {
 		row, _ = vg.store.GetRowByID(ctx, viewID, rowID)
 	}
+
+	// Row cell data is always included — this is a data store, not just a task viewer.
+	var rowCells map[string]string
+	if row != nil {
+		rowCells = row.MergedCells()
+	}
+
+	// Resolve task ID from the row or query param. Either can be absent.
+	parentTaskID := c.QueryParam("task_id")
 	if row != nil && strings.TrimSpace(row.TaskID) != "" {
 		parentTaskID = strings.TrimSpace(row.TaskID)
 	}
-	if parentTaskID == "" {
-		return ErrorResponse(c, http.StatusBadRequest, "task_id query param is required")
+
+	// Base response — always valid, even with no task.
+	resp := map[string]any{
+		"row_id":          rowID,
+		"row_data":        rowCells,
+		"task":            nil,
+		"outputs":         []any{},
+		"gallery_outputs": []any{},
+		"email_threads":   map[string]any{},
+		"subtasks":        []any{},
+		"blocker":         nil,
+		"layout": views.DetailLayoutResponse{
+			Sections: []views.DetailSectionJSON{
+				{Type: "data", Title: "Record", Emphasis: "standard"},
+			},
+			Actions: []views.ActionSpecJSON{},
+		},
 	}
 
-	// Resolve the schema-level layout template from the component config.
+	// If no task is associated, return the row data as-is.
+	if parentTaskID == "" {
+		return SuccessResponse(c, resp)
+	}
+
+	// Enrich with task context.
 	template := vg.detailTemplateForRow(ctx, workspaceID, viewID, row)
 
 	parentTask, err := vg.backend.GetTask(ctx, workspaceID, parentTaskID)
 	if err != nil {
-		return ErrorResponse(c, http.StatusNotFound, "task not found")
+		// Task not found — still return the row data rather than 404.
+		log.Warn().Err(err).Str("task_id", parentTaskID).Msg("row detail: task not found, returning row data only")
+		return SuccessResponse(c, resp)
 	}
 
 	parentOutputs, err := vg.backend.ListTaskOutputs(ctx, workspaceID, parentTaskID)
@@ -805,7 +835,6 @@ func (vg *ViewsGroup) RowDetail(c echo.Context) error {
 	}
 
 	layout := views.ResolveProjectedLayout(template, projection)
-	blocker := projection.Blocker
 
 	type subtaskSummary struct {
 		ID     string               `json:"id"`
@@ -829,17 +858,16 @@ func (vg *ViewsGroup) RowDetail(c echo.Context) error {
 		})
 	}
 
-	return SuccessResponse(c, map[string]any{
-		"layout":          layout,
-		"blocker":         blocker,
-		"task":            detailContext.Task,
-		"outputs":         projection.Outputs,
-		"gallery_outputs": projection.GalleryOutputs,
-		"email_threads":   emailThreads,
-		"subtasks":        subtaskList,
-		"row_id":          rowID,
-		"parent_task_id":  parentTaskID,
-	})
+	resp["layout"] = layout
+	resp["blocker"] = projection.Blocker
+	resp["task"] = detailContext.Task
+	resp["outputs"] = projection.Outputs
+	resp["gallery_outputs"] = projection.GalleryOutputs
+	resp["email_threads"] = emailThreads
+	resp["subtasks"] = subtaskList
+	resp["parent_task_id"] = parentTaskID
+
+	return SuccessResponse(c, resp)
 }
 
 // detailTemplateForRow finds the table component that owns the row and
