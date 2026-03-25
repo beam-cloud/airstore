@@ -621,6 +621,21 @@ func (c *Copilot) GenerateStream(
 	if final == nil {
 		return nil, fmt.Errorf("no final response from BAML stream")
 	}
+	// Drop truncated view_content — don't serve a half-built definition.
+	// max_tokens on the BAML client (16384) should prevent this; if it still
+	// happens the model generated an unusually large view.
+	if final.View_content != "" && !json.Valid([]byte(final.View_content)) {
+		log.Error().Int("len", len(final.View_content)).Msg("copilot view_content is invalid JSON (likely truncated) — discarding")
+		final.View_content = ""
+	}
+	// When the view is empty (new project) the model must not return CONVERSATION —
+	// that would discard the view_content. Override to VIEW_CREATE so the definition
+	// is persisted. This guards against the LLM seeing existing workspace agents and
+	// mistakenly treating a new project as an already-configured workspace.
+	if final.Update_type == bamltypes.ViewUpdateTypeCONVERSATION && final.View_content != "" && !viewHasSheets(cs.ViewContent) {
+		log.Warn().Msg("copilot returned CONVERSATION with view_content for empty view — overriding to VIEW_CREATE")
+		final.Update_type = bamltypes.ViewUpdateTypeVIEW_CREATE
+	}
 	if final.Update_type != bamltypes.ViewUpdateTypeCONVERSATION && final.View_content != "" {
 		if normalized, err := normalizeViewContent(final.View_content, workspaceAgents); err == nil {
 			final.View_content = normalized
@@ -1181,6 +1196,17 @@ func extractColumnKeys(comp *types.ComponentSpec) []columnInfo {
 		}
 	}
 	return columns
+}
+
+func viewHasSheets(viewContent string) bool {
+	if viewContent == "" {
+		return false
+	}
+	var def types.ViewDefinition
+	if err := json.Unmarshal([]byte(viewContent), &def); err != nil {
+		return false
+	}
+	return len(def.Sheets) > 0
 }
 
 func normalizeViewContent(viewContent string, agents []*types.AgentProfile) (string, error) {

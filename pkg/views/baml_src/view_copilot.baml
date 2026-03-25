@@ -234,6 +234,11 @@ function WriteView(
        - COMPONENT_REMOVE: removing components
        - DATA_REBIND: changing data sources without layout changes
        - INFRASTRUCTURE: creating/modifying agents or skills
+       CRITICAL: If the current view is EMPTY or MISSING (no sheets, no
+       ---BEGIN VIEW--- block), you MUST use VIEW_CREATE and generate a
+       complete view definition — even if agents already exist in the
+       workspace. Existing workspace agents may belong to OTHER projects.
+       Never use CONVERSATION when there is no current view definition.
 
     3. If agents or skills need to be created, populate the operations array.
        CRITICAL: Agent references in the view MUST use the kebab-case key
