@@ -72,6 +72,53 @@ func (*parse_stream) ClassifyDetailTemplate(text string, opts ...CallOptionFunc)
 	return casted, nil
 }
 
+// / Parse version of MapImportColumns (Takes in string and returns stream_types.ImportMappingResult)
+func (*parse_stream) MapImportColumns(text string, opts ...CallOptionFunc) (stream_types.ImportMappingResult, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"text": text, "stream": true},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		// This should never happen. if it does, please file an issue at https://github.com/boundaryml/baml/issues
+		// and include the type of the args you're passing in.
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: MapImportColumns: %w", err)
+		panic(wrapped_err)
+	}
+
+	result, err := bamlRuntime.CallFunctionParse(context.Background(), "MapImportColumns", encoded)
+	if err != nil {
+		return stream_types.ImportMappingResult{}, err
+	}
+
+	casted := (result).(stream_types.ImportMappingResult)
+
+	return casted, nil
+}
+
 // / Parse version of MapOutputsToSchema (Takes in string and returns stream_types.MappedResult)
 func (*parse_stream) MapOutputsToSchema(text string, opts ...CallOptionFunc) (stream_types.MappedResult, error) {
 

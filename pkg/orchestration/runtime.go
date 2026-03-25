@@ -682,12 +682,17 @@ func (r *RuntimeLoops) applyPostRunSettlement(
 		settlement.blocker = nil
 		settlement.waitingForInput = false
 	}
+	if !sourceWatchArmed && !settlement.waitingForInput {
+		if settlement.wakeSignal != nil {
+			log.Info().Str("run_id", runID).Str("task_id", taskIDOrEmpty(task)).
+				Msg("classifier requested sleep but no source watches materialized; completing instead")
+			settlement.wakeSignal = nil
+		}
+	}
 	if err := r.settleOriginTask(ctx, runID, task, settlement); err != nil {
 		return r.handleRunSettlementFailure(ctx, task, runID, fmt.Errorf("settle origin task: %w", err))
 	}
 	if !sourceWatchArmed && !settlement.waitingForInput {
-		log.Info().Str("run_id", runID).Str("task_id", taskIDOrEmpty(task)).
-			Msg("no source watches armed and not waiting for input; cleaning up task source watches")
 		if err := r.cleanupTaskSourceWatches(ctx, task); err != nil {
 			log.Warn().Err(err).Str("run_id", runID).Msg("failed to clean up source watches")
 		}
@@ -829,6 +834,8 @@ func (r *RuntimeLoops) settleOriginTask(ctx context.Context, runID string, task 
 		return nil
 	}
 
+	parentSourceViewID := strPtrMaybe(stringFromPayload(task.PayloadJSON, "source_view_id"))
+
 	for _, req := range settlement.subtaskRequests {
 		parentID := task.ID
 		label := req.EntityLabel
@@ -841,6 +848,7 @@ func (r *RuntimeLoops) settleOriginTask(ctx context.Context, runID string, task 
 			ParentTaskID:   &parentID,
 			Label:          &label,
 			SpawnedBy:      &spawnedBy,
+			SourceViewID:   parentSourceViewID,
 			DispatchDelay:  time.Duration(req.WakeDelayMinutes) * time.Minute,
 		})
 		if err != nil {

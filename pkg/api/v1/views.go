@@ -1,13 +1,10 @@
 package apiv1
 
 import (
-	"bytes"
 	"context"
-	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -18,7 +15,6 @@ import (
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/beam-cloud/airstore/pkg/views"
-	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog/log"
 )
@@ -759,26 +755,56 @@ func (vg *ViewsGroup) RowDetail(c echo.Context) error {
 	if err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid row_id")
 	}
-	parentTaskID := c.QueryParam("task_id")
 
-	// Single row fetch — used for both subtask binding and component lookup.
+	// Row is the primary entity. Task context is optional enrichment.
 	var row *views.ViewRow
 	if vg.store != nil && vg.store.Available() {
 		row, _ = vg.store.GetRowByID(ctx, viewID, rowID)
 	}
+
+	// Row cell data is always included — this is a data store, not just a task viewer.
+	var rowCells map[string]string
+	if row != nil {
+		rowCells = row.MergedCells()
+	}
+
+	// Resolve task ID from the row or query param. Either can be absent.
+	parentTaskID := c.QueryParam("task_id")
 	if row != nil && strings.TrimSpace(row.TaskID) != "" {
 		parentTaskID = strings.TrimSpace(row.TaskID)
 	}
-	if parentTaskID == "" {
-		return ErrorResponse(c, http.StatusBadRequest, "task_id query param is required")
+
+	// Base response — always valid, even with no task.
+	resp := map[string]any{
+		"row_id":          rowID,
+		"row_data":        rowCells,
+		"task":            nil,
+		"outputs":         []any{},
+		"gallery_outputs": []any{},
+		"email_threads":   map[string]any{},
+		"subtasks":        []any{},
+		"blocker":         nil,
+		"layout": views.DetailLayoutResponse{
+			Sections: []views.DetailSectionJSON{
+				{Type: "data", Title: "Record", Emphasis: "standard"},
+			},
+			Actions: []views.ActionSpecJSON{},
+		},
 	}
 
-	// Resolve the schema-level layout template from the component config.
+	// If no task is associated, return the row data as-is.
+	if parentTaskID == "" {
+		return SuccessResponse(c, resp)
+	}
+
+	// Enrich with task context.
 	template := vg.detailTemplateForRow(ctx, workspaceID, viewID, row)
 
 	parentTask, err := vg.backend.GetTask(ctx, workspaceID, parentTaskID)
 	if err != nil {
-		return ErrorResponse(c, http.StatusNotFound, "task not found")
+		// Task not found — still return the row data rather than 404.
+		log.Warn().Err(err).Str("task_id", parentTaskID).Msg("row detail: task not found, returning row data only")
+		return SuccessResponse(c, resp)
 	}
 
 	parentOutputs, err := vg.backend.ListTaskOutputs(ctx, workspaceID, parentTaskID)
@@ -809,7 +835,6 @@ func (vg *ViewsGroup) RowDetail(c echo.Context) error {
 	}
 
 	layout := views.ResolveProjectedLayout(template, projection)
-	blocker := projection.Blocker
 
 	type subtaskSummary struct {
 		ID     string               `json:"id"`
@@ -833,17 +858,16 @@ func (vg *ViewsGroup) RowDetail(c echo.Context) error {
 		})
 	}
 
-	return SuccessResponse(c, map[string]any{
-		"layout":          layout,
-		"blocker":         blocker,
-		"task":            detailContext.Task,
-		"outputs":         projection.Outputs,
-		"gallery_outputs": projection.GalleryOutputs,
-		"email_threads":   emailThreads,
-		"subtasks":        subtaskList,
-		"row_id":          rowID,
-		"parent_task_id":  parentTaskID,
-	})
+	resp["layout"] = layout
+	resp["blocker"] = projection.Blocker
+	resp["task"] = detailContext.Task
+	resp["outputs"] = projection.Outputs
+	resp["gallery_outputs"] = projection.GalleryOutputs
+	resp["email_threads"] = emailThreads
+	resp["subtasks"] = subtaskList
+	resp["parent_task_id"] = parentTaskID
+
+	return SuccessResponse(c, resp)
 }
 
 // detailTemplateForRow finds the table component that owns the row and
@@ -1105,12 +1129,6 @@ type importDataRequest struct {
 	ColumnMapping map[string]string `json:"column_mapping"`
 }
 
-type importDataResponse struct {
-	ImportID    string `json:"import_id"`
-	RowCount    int    `json:"row_count"`
-	ColumnCount int    `json:"column_count"`
-}
-
 func (vg *ViewsGroup) ImportData(c echo.Context) error {
 	if !vg.store.Available() {
 		return ErrorResponse(c, http.StatusServiceUnavailable, "data store not configured")
@@ -1142,20 +1160,15 @@ func (vg *ViewsGroup) ImportData(c echo.Context) error {
 		return ErrorResponse(c, http.StatusNotFound, "view not found")
 	}
 
-	var sheet *types.SheetSpec
 	var comp *types.ComponentSpec
 	for i := range v.Definition.Sheets {
 		if v.Definition.Sheets[i].ID == sheetID {
-			sheet = &v.Definition.Sheets[i]
-			break
-		}
-	}
-	if sheet == nil {
-		return ErrorResponse(c, http.StatusNotFound, "sheet not found")
-	}
-	for i := range sheet.Components {
-		if sheet.Components[i].IsTable() {
-			comp = &sheet.Components[i]
+			for j := range v.Definition.Sheets[i].Components {
+				if v.Definition.Sheets[i].Components[j].IsTable() {
+					comp = &v.Definition.Sheets[i].Components[j]
+					break
+				}
+			}
 			break
 		}
 	}
@@ -1175,107 +1188,23 @@ func (vg *ViewsGroup) ImportData(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, "could not read file")
 	}
 
-	csvReader := csv.NewReader(bytes.NewReader(data))
-	csvReader.LazyQuotes = true
-	csvReader.FieldsPerRecord = -1
-
-	headers, err := csvReader.Read()
-	if err != nil {
-		return ErrorResponse(c, http.StatusBadRequest, "could not parse CSV headers")
-	}
-
-	colMapping := req.ColumnMapping
-	if len(colMapping) == 0 {
-		colMapping = make(map[string]string, len(headers))
-		for _, h := range headers {
-			colMapping[h] = toColumnKey(h)
-		}
-	}
-
-	importID := uuid.New().String()
-	var rows []views.ViewRow
-	rowIndex := 0
-
-	for {
-		record, err := csvReader.Read()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			break
-		}
-
-		pinned := make(map[string]string, len(colMapping))
-		for i, header := range headers {
-			if i >= len(record) {
-				break
-			}
-			if colKey, ok := colMapping[header]; ok && strings.TrimSpace(record[i]) != "" {
-				pinned[colKey] = strings.TrimSpace(record[i])
-			}
-		}
-
-		if len(pinned) == 0 {
-			rowIndex++
-			continue
-		}
-
-		rowID := fmt.Sprintf("%s:%s:import-%s:%d", sheetID, comp.ID, importID, rowIndex)
-		rows = append(rows, views.ViewRow{
-			ID:          rowID,
-			SheetID:     sheetID,
-			ComponentID: comp.ID,
-			GroupID:     "import:" + importID,
-			TaskID:      "",
-			RowKey:      fmt.Sprintf("import-%d", rowIndex),
-			SchemaHash:  "",
-			Cells:       map[string]string{},
-			Pinned:      pinned,
-			Source:      "import",
-			ImportID:    importID,
-			UpdatedAt:   time.Now(),
-		})
-		rowIndex++
-	}
-
-	if len(rows) == 0 {
-		return ErrorResponse(c, http.StatusBadRequest, "no data rows found in CSV")
-	}
-
-	if err := vg.store.UpsertRows(ctx, viewID, rows); err != nil {
-		log.Error().Err(err).Str("view_id", viewID).Msg("import: failed to upsert rows")
-		return ErrorResponse(c, http.StatusInternalServerError, "failed to import data")
-	}
-
-	log.Info().
-		Str("view_id", viewID).
-		Str("sheet_id", sheetID).
-		Str("import_id", importID).
-		Int("rows", len(rows)).
-		Msg("import: CSV data imported")
-
-	return SuccessResponse(c, importDataResponse{
-		ImportID:    importID,
-		RowCount:    len(rows),
-		ColumnCount: len(colMapping),
+	result, err := views.ImportData(ctx, views.ImportParams{
+		Store:       vg.store,
+		Backend:     vg.backend,
+		Data:        data,
+		FilePath:    req.FilePath,
+		ViewID:      viewID,
+		WorkspaceID: workspaceID,
+		SheetID:     sheetID,
+		ComponentID: comp.ID,
+		ColMapping:  req.ColumnMapping,
 	})
-}
+	if err != nil {
+		log.Error().Err(err).Str("view_id", viewID).Msg("import: failed")
+		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+	}
 
-func toColumnKey(header string) string {
-	key := strings.ToLower(strings.TrimSpace(header))
-	key = strings.ReplaceAll(key, " ", "_")
-	key = strings.ReplaceAll(key, "-", "_")
-	var clean strings.Builder
-	for _, r := range key {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
-			clean.WriteRune(r)
-		}
-	}
-	result := clean.String()
-	if result == "" {
-		return "col"
-	}
-	return result
+	return SuccessResponse(c, result)
 }
 
 // ---------------------------------------------------------------------------

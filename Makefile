@@ -163,7 +163,8 @@ dev-worker: check-go
 	WORKER_ID=test-worker-1 GATEWAY_GRPC_ADDR=localhost:1993 go run ./cmd/worker
 
 start:
-	cd hack && okteto up --file okteto.yaml
+	@mkdir -p logs
+	cd hack && okteto up --file okteto.yaml 2>&1 | tee ../logs/gateway.log
 
 stop:
 	cd hack && okteto down --file okteto.yaml

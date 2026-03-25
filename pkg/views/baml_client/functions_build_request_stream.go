@@ -71,6 +71,52 @@ func (*build_request_stream) ClassifyDetailTemplate(table_title string, column_s
 	return bamlRuntime.BuildRequest(context.Background(), "ClassifyDetailTemplate", encoded)
 }
 
+// Build streaming HTTP request for MapImportColumns (returns baml.HTTPRequest)
+func (*build_request_stream) MapImportColumns(sheet_name string, existing_columns []types.ColumnSchema, headers []string, data_preview string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	// Resolve client option to clientRegistry (client takes precedence)
+	if callOpts.client != nil {
+		if callOpts.clientRegistry == nil {
+			callOpts.clientRegistry = baml.NewClientRegistry()
+		}
+		callOpts.clientRegistry.SetPrimaryClient(*callOpts.client)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"sheet_name": sheet_name, "existing_columns": existing_columns, "headers": headers, "data_preview": data_preview, "stream": true},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: MapImportColumns: %w", err)
+		panic(wrapped_err)
+	}
+
+	return bamlRuntime.BuildRequest(context.Background(), "MapImportColumns", encoded)
+}
+
 // Build streaming HTTP request for MapOutputsToSchema (returns baml.HTTPRequest)
 func (*build_request_stream) MapOutputsToSchema(sheet_name string, table_title string, table_type string, columns []types.ColumnSchema, outputs_payload string, existing_rows string, excluded_rows string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
 

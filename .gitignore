@@ -13,3 +13,4 @@ airstore.code-workspace
 config.gw.yaml
 .DS_Store
 .airstore-runners
+logs/

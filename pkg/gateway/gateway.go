@@ -466,6 +466,9 @@ func (g *Gateway) registerServices() error {
 	if seenTracker != nil {
 		hookOpts = append(hookOpts, services.WithSeenTracker(seenTracker))
 	}
+	if g.eventBus != nil {
+		hookOpts = append(hookOpts, services.WithEventBus(g.eventBus))
+	}
 
 	// Set model API keys as env vars so BAML clients (clients.baml) can pick them up.
 	if key := g.Config.AnthropicAPIKey(); key != "" {

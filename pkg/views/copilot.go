@@ -2591,12 +2591,9 @@ func (c *Copilot) executeOne(ctx context.Context, workspaceID uint, op bamltypes
 	}
 }
 
-func (c *Copilot) executeImportData(ctx context.Context, workspaceID uint, viewID, sheetID, filePath string, payload map[string]any) (*importDataResult, error) {
+func (c *Copilot) executeImportData(ctx context.Context, workspaceID uint, viewID, sheetID, filePath string, payload map[string]any) (*ImportResult, error) {
 	if c.storage == nil {
 		return nil, fmt.Errorf("storage not configured")
-	}
-	if c.store == nil || !c.store.Available() {
-		return nil, fmt.Errorf("data store not configured")
 	}
 
 	v, err := c.backend.GetView(ctx, workspaceID, viewID)
@@ -2627,18 +2624,10 @@ func (c *Copilot) executeImportData(ctx context.Context, workspaceID uint, viewI
 		return nil, fmt.Errorf("download file: %w", err)
 	}
 
-	csvReader := csv.NewReader(bytes.NewReader(data))
-	csvReader.LazyQuotes = true
-	csvReader.FieldsPerRecord = -1
-
-	headers, err := csvReader.Read()
-	if err != nil {
-		return nil, fmt.Errorf("parse CSV headers: %w", err)
-	}
-
-	colMapping := make(map[string]string)
+	var colMapping map[string]string
 	if cm, ok := payload["column_mapping"]; ok {
 		if mappingMap, ok := cm.(map[string]any); ok {
+			colMapping = make(map[string]string, len(mappingMap))
 			for k, v := range mappingMap {
 				if vs, ok := v.(string); ok {
 					colMapping[k] = vs
@@ -2646,90 +2635,18 @@ func (c *Copilot) executeImportData(ctx context.Context, workspaceID uint, viewI
 			}
 		}
 	}
-	if len(colMapping) == 0 {
-		for _, h := range headers {
-			colMapping[h] = toImportColumnKey(h)
-		}
-	}
 
-	importID := uuid.New().String()
-	var rows []ViewRow
-	rowIndex := 0
-
-	for {
-		record, err := csvReader.Read()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			break
-		}
-
-		pinned := make(map[string]string, len(colMapping))
-		for i, header := range headers {
-			if i >= len(record) {
-				break
-			}
-			if colKey, ok := colMapping[header]; ok && strings.TrimSpace(record[i]) != "" {
-				pinned[colKey] = strings.TrimSpace(record[i])
-			}
-		}
-
-		if len(pinned) == 0 {
-			rowIndex++
-			continue
-		}
-
-		rowID := fmt.Sprintf("%s::%s:%d", sheetID, "import-"+importID, rowIndex)
-		rows = append(rows, ViewRow{
-			ID:          rowID,
-			SheetID:     sheetID,
-			ComponentID: componentID,
-			GroupID:     "import:" + importID,
-			RowKey:      fmt.Sprintf("import-%d", rowIndex),
-			Cells:       map[string]string{},
-			Pinned:      pinned,
-			Source:      "import",
-			ImportID:    importID,
-			UpdatedAt:   time.Now(),
-		})
-		rowIndex++
-	}
-
-	if len(rows) == 0 {
-		return nil, fmt.Errorf("no data rows found in CSV")
-	}
-
-	if err := c.store.UpsertRows(ctx, viewID, rows); err != nil {
-		return nil, fmt.Errorf("upsert rows: %w", err)
-	}
-
-	return &importDataResult{
-		ImportID: importID,
-		RowCount: len(rows),
-	}, nil
-}
-
-type importDataResult struct {
-	ImportID string
-	RowCount int
-}
-
-func toImportColumnKey(header string) string {
-	key := strings.ToLower(strings.TrimSpace(header))
-	key = strings.ReplaceAll(key, " ", "_")
-	key = strings.ReplaceAll(key, "-", "_")
-	var clean strings.Builder
-	for _, r := range key {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
-			clean.WriteRune(r)
-		}
-	}
-	result := clean.String()
-	if result == "" {
-		return "col"
-	}
-	return result
+	return ImportData(ctx, ImportParams{
+		Store:       c.store,
+		Backend:     c.backend,
+		Data:        data,
+		FilePath:    filePath,
+		ViewID:      viewID,
+		WorkspaceID: workspaceID,
+		SheetID:     sheetID,
+		ComponentID: componentID,
+		ColMapping:  colMapping,
+	})
 }
 
 func (c *Copilot) installWorkspaceSkill(ctx context.Context, workspaceID uint, requestedName string, content []byte) (*skills.SkillManifest, string, error) {

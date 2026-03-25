@@ -363,6 +363,27 @@ func (s *ViewStore) GetRowsBySource(ctx context.Context, viewID, sheetID, compon
 	return rows, nil
 }
 
+// CleanupStaleImportRows removes import-source rows that weren't part of the
+// current import batch. Called after upsert so valid rows are already written —
+// this cleans up orphans from previous imports (different row count or legacy
+// ID format) without a destructive delete-before-insert window.
+func (s *ViewStore) CleanupStaleImportRows(ctx context.Context, viewID, sheetID, componentID string, keepIDs []string) (int64, error) {
+	if !s.Available() || len(keepIDs) == 0 {
+		return 0, nil
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+	filter := rowScopeFilter(sheetID, componentID)
+	filter = append(filter,
+		bson.E{Key: "source", Value: "import"},
+		bson.E{Key: "_id", Value: bson.D{{Key: "$nin", Value: keepIDs}}},
+	)
+	res, err := coll.DeleteMany(ctx, filter)
+	if err != nil {
+		return 0, fmt.Errorf("cleanup stale import rows: %w", err)
+	}
+	return res.DeletedCount, nil
+}
+
 // DeleteImport removes all rows from a specific import batch.
 func (s *ViewStore) DeleteImport(ctx context.Context, viewID, sheetID, importID string) error {
 	if !s.Available() {

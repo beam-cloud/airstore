@@ -7,6 +7,16 @@ client<llm> ViewCopilotClient {
   }
 }
 
+client<llm> FastMappingClient {
+  provider "openai-generic"
+  options {
+    base_url "https://api.cerebras.ai/v1"
+    api_key env.CEREBRAS_API_KEY
+    model "gpt-oss-120b"
+    temperature 0
+  }
+}
+
 client<llm> DetailClassifier {
   provider anthropic
   options {

@@ -230,6 +230,102 @@ func (c DetailSection) BamlTypeName() string {
 	return "DetailSection"
 }
 
+type ImportColumnMatch struct {
+	Header       string `json:"header"`
+	Existing_key string `json:"existing_key"`
+}
+
+func (c *ImportColumnMatch) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "ImportColumnMatch" {
+		panic(fmt.Sprintf("expected ImportColumnMatch, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "header":
+			c.Header = baml.Decode(valueHolder).Interface().(string)
+
+		case "existing_key":
+			c.Existing_key = baml.Decode(valueHolder).Interface().(string)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class ImportColumnMatch", key))
+
+		}
+	}
+
+}
+
+func (c ImportColumnMatch) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["header"] = c.Header
+
+	fields["existing_key"] = c.Existing_key
+
+	return baml.EncodeClass("ImportColumnMatch", fields, nil)
+}
+
+func (c ImportColumnMatch) BamlTypeName() string {
+	return "ImportColumnMatch"
+}
+
+type ImportMappingResult struct {
+	Matches []ImportColumnMatch `json:"matches"`
+	Skip    []string            `json:"skip"`
+}
+
+func (c *ImportMappingResult) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "ImportMappingResult" {
+		panic(fmt.Sprintf("expected ImportMappingResult, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "matches":
+			c.Matches = baml.Decode(valueHolder).Interface().([]ImportColumnMatch)
+
+		case "skip":
+			c.Skip = baml.Decode(valueHolder).Interface().([]string)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class ImportMappingResult", key))
+
+		}
+	}
+
+}
+
+func (c ImportMappingResult) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["matches"] = c.Matches
+
+	fields["skip"] = c.Skip
+
+	return baml.EncodeClass("ImportMappingResult", fields, nil)
+}
+
+func (c ImportMappingResult) BamlTypeName() string {
+	return "ImportMappingResult"
+}
+
 type ListItemResult struct {
 	Label  string `json:"label"`
 	Value  string `json:"value"`
