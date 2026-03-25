@@ -584,6 +584,16 @@ func (c *Copilot) GenerateStream(
 
 	history := c.FormatHistory(cs.Messages[:len(cs.Messages)-1])
 	workspaceAgents := c.loadWorkspaceAgents(ctx, workspaceID)
+
+	// Canonicalize agent refs in the current view against fresh DB state so the
+	// model always sees real UUIDs — never stale names or kebab-keys from a prior
+	// turn or from the frontend.
+	if cs.ViewContent != "" {
+		if canonical, err := normalizeViewContent(cs.ViewContent, workspaceAgents); err == nil {
+			cs.ViewContent = canonical
+		}
+	}
+
 	workspaceCtx := c.BuildWorkspaceContext(ctx, workspaceID)
 	viewData := c.BuildViewDataContext(ctx, viewID, cs.ViewContent)
 	activeTasks := c.BuildActiveTasksContext(ctx, workspaceID, cs.ViewContent, cs.PublishedViewID)
@@ -1852,10 +1862,16 @@ func (c *Copilot) loadSkillManifests(ctx context.Context, workspaceID uint) map[
 // ---------------------------------------------------------------------------
 
 func (c *Copilot) ExecuteOperations(ctx context.Context, workspaceID uint, ops []bamltypes.Operation, viewID string) []OperationResult {
-	state := newOperationExecutionState(ops)
+	sorted := make([]bamltypes.Operation, len(ops))
+	copy(sorted, ops)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return operationPhase(sorted[i].Type) < operationPhase(sorted[j].Type)
+	})
+
+	state := newOperationExecutionState(sorted)
 	state.viewID = viewID
-	results := make([]OperationResult, 0, len(ops))
-	for _, op := range ops {
+	results := make([]OperationResult, 0, len(sorted))
+	for _, op := range sorted {
 		results = append(results, c.executeOne(ctx, workspaceID, op, state))
 	}
 	return results
@@ -1863,6 +1879,7 @@ func (c *Copilot) ExecuteOperations(ctx context.Context, workspaceID uint, ops [
 
 type operationExecutionState struct {
 	skillAliases map[string]string
+	agentAliases map[string]string // name/key → UUID, populated as CREATE_AGENT ops execute
 	viewID       string
 }
 
@@ -1925,6 +1942,47 @@ func (s *operationExecutionState) resolveSkillAlias(ref string) string {
 		}
 	}
 	return trimmed
+}
+
+func (s *operationExecutionState) rememberAgent(name, key, id string) {
+	if s == nil || strings.TrimSpace(id) == "" {
+		return
+	}
+	if s.agentAliases == nil {
+		s.agentAliases = map[string]string{}
+	}
+	id = strings.TrimSpace(id)
+	s.agentAliases[id] = id
+	if name = strings.TrimSpace(name); name != "" {
+		s.agentAliases[strings.ToLower(name)] = id
+	}
+	if key = strings.TrimSpace(key); key != "" {
+		s.agentAliases[strings.ToLower(key)] = id
+	}
+}
+
+func (s *operationExecutionState) resolveAgentAlias(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return ""
+	}
+	if s != nil && s.agentAliases != nil {
+		if id := s.agentAliases[strings.ToLower(ref)]; id != "" {
+			return id
+		}
+	}
+	return ref
+}
+
+func operationPhase(opType bamltypes.OperationType) int {
+	switch opType {
+	case bamltypes.OperationTypeCREATE_AGENT:
+		return 0
+	case bamltypes.OperationTypeCREATE_SKILL, bamltypes.OperationTypeINSTALL_SKILL:
+		return 1
+	default:
+		return 2
+	}
 }
 
 func normalizeSkillReference(ref string) string {
@@ -2135,6 +2193,7 @@ func (c *Copilot) executeOne(ctx context.Context, workspaceID uint, op bamltypes
 		if err != nil {
 			return fail(name, err.Error())
 		}
+		state.rememberAgent(name, key, profile.ID)
 		if role := coalesceTrimmed(str("role"), str("description")); role != "" && role != "generalist" {
 			c.agentAPI.UpdateAgent(ctx, workspaceID, profile.ID, nil, &role, nil, nil, nil, nil, nil) //nolint:errcheck
 		}
@@ -2142,7 +2201,7 @@ func (c *Copilot) executeOne(ctx context.Context, workspaceID uint, op bamltypes
 		return done(name, profile.ID)
 
 	case bamltypes.OperationTypeUPDATE_AGENT:
-		agentID := str("agent_id")
+		agentID := state.resolveAgentAlias(str("agent_id"))
 		if agentID == "" {
 			return fail("", "agent_id is required")
 		}
@@ -2198,7 +2257,7 @@ func (c *Copilot) executeOne(ctx context.Context, workspaceID uint, op bamltypes
 		return done(installedName, "")
 
 	case bamltypes.OperationTypeASSIGN_SKILL:
-		agentID := str("agent_id")
+		agentID := state.resolveAgentAlias(str("agent_id"))
 		rawSkillName := coalesceTrimmed(str("skill_name"), str("name"))
 		skillName := state.resolveSkillAlias(rawSkillName)
 		if agentID == "" || skillName == "" {
@@ -2245,7 +2304,7 @@ func (c *Copilot) executeOne(ctx context.Context, workspaceID uint, op bamltypes
 		return done(skillName, profile.ID)
 
 	case bamltypes.OperationTypeDISPATCH_TASK:
-		agentID := str("agent_id")
+		agentID := state.resolveAgentAlias(str("agent_id"))
 		message := str("message")
 		if agentID == "" {
 			return fail("", "agent_id is required")
@@ -2326,7 +2385,7 @@ func (c *Copilot) executeOne(ctx context.Context, workspaceID uint, op bamltypes
 		}
 
 	case bamltypes.OperationTypeCREATE_SCHEDULE:
-		agentID := str("agent_id")
+		agentID := state.resolveAgentAlias(str("agent_id"))
 		cronExpr := str("cron_expr")
 		if cronExpr == "" {
 			cronExpr = str("cron_expression")

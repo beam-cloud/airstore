@@ -260,6 +260,47 @@ func TestCanonicalizeViewAgentRefsResolvesNamesAndKeys(t *testing.T) {
 	}
 }
 
+func TestOperationPhaseSortsCreateAgentFirst(t *testing.T) {
+	if got := operationPhase(bamltypes.OperationTypeCREATE_AGENT); got != 0 {
+		t.Fatalf("CREATE_AGENT phase = %d, want 0", got)
+	}
+	if got := operationPhase(bamltypes.OperationTypeCREATE_SKILL); got != 1 {
+		t.Fatalf("CREATE_SKILL phase = %d, want 1", got)
+	}
+	if got := operationPhase(bamltypes.OperationTypeINSTALL_SKILL); got != 1 {
+		t.Fatalf("INSTALL_SKILL phase = %d, want 1", got)
+	}
+	if got := operationPhase(bamltypes.OperationTypeASSIGN_SKILL); got != 2 {
+		t.Fatalf("ASSIGN_SKILL phase = %d, want 2", got)
+	}
+	if got := operationPhase(bamltypes.OperationTypeDISPATCH_TASK); got != 2 {
+		t.Fatalf("DISPATCH_TASK phase = %d, want 2", got)
+	}
+}
+
+func TestAgentAliasResolution(t *testing.T) {
+	state := &operationExecutionState{
+		agentAliases: map[string]string{},
+	}
+	state.rememberAgent("Email Outreach", "email-outreach", "uuid-123")
+
+	if got, want := state.resolveAgentAlias("uuid-123"), "uuid-123"; got != want {
+		t.Fatalf("resolve by ID = %q, want %q", got, want)
+	}
+	if got, want := state.resolveAgentAlias("email-outreach"), "uuid-123"; got != want {
+		t.Fatalf("resolve by key = %q, want %q", got, want)
+	}
+	if got, want := state.resolveAgentAlias("Email Outreach"), "uuid-123"; got != want {
+		t.Fatalf("resolve by name = %q, want %q", got, want)
+	}
+	if got, want := state.resolveAgentAlias("unknown-agent"), "unknown-agent"; got != want {
+		t.Fatalf("resolve unknown = %q, want %q (should pass through)", got, want)
+	}
+	if got := state.resolveAgentAlias(""); got != "" {
+		t.Fatalf("resolve empty = %q, want empty", got)
+	}
+}
+
 func TestCanonicalizeViewAgentRefsUsesOperationResultsForNewAgents(t *testing.T) {
 	def := types.ViewDefinition{
 		Name:        "Recipe extraction",
