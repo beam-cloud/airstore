@@ -20,126 +20,6 @@ import (
 	"github.com/boundaryml/baml/engine/language_client_go/pkg/cffi"
 )
 
-type ColumnMapping struct {
-	Header      string       `json:"header"`
-	Column_key  string       `json:"column_key"`
-	Action      ColumnAction `json:"action"`
-	Label       string       `json:"label"`
-	Column_type string       `json:"column_type"`
-}
-
-func (c *ColumnMapping) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
-	typeName := holder.Name
-	if typeName.Namespace != cffi.CFFITypeNamespace_TYPES {
-		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_TYPES, got %s", string(typeName.Namespace.String())))
-	}
-	if typeName.Name != "ColumnMapping" {
-		panic(fmt.Sprintf("expected ColumnMapping, got %s", typeName.Name))
-	}
-
-	for _, field := range holder.Fields {
-		key := field.Key
-		valueHolder := field.Value
-		switch key {
-
-		case "header":
-			c.Header = baml.Decode(valueHolder).Interface().(string)
-
-		case "column_key":
-			c.Column_key = baml.Decode(valueHolder).Interface().(string)
-
-		case "action":
-			c.Action = baml.Decode(valueHolder).Interface().(ColumnAction)
-
-		case "label":
-			c.Label = baml.Decode(valueHolder).Interface().(string)
-
-		case "column_type":
-			c.Column_type = baml.Decode(valueHolder).Interface().(string)
-
-		default:
-
-			panic(fmt.Sprintf("unexpected field: %s in class ColumnMapping", key))
-
-		}
-	}
-
-}
-
-func (c ColumnMapping) Encode() (*cffi.HostValue, error) {
-	fields := map[string]any{}
-
-	fields["header"] = c.Header
-
-	fields["column_key"] = c.Column_key
-
-	fields["action"] = c.Action
-
-	fields["label"] = c.Label
-
-	fields["column_type"] = c.Column_type
-
-	return baml.EncodeClass("ColumnMapping", fields, nil)
-}
-
-func (c ColumnMapping) BamlTypeName() string {
-	return "ColumnMapping"
-}
-
-type ColumnMappingResult struct {
-	Mappings       []ColumnMapping `json:"mappings"`
-	Column_order   []string        `json:"column_order"`
-	Remove_columns []string        `json:"remove_columns"`
-}
-
-func (c *ColumnMappingResult) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
-	typeName := holder.Name
-	if typeName.Namespace != cffi.CFFITypeNamespace_TYPES {
-		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_TYPES, got %s", string(typeName.Namespace.String())))
-	}
-	if typeName.Name != "ColumnMappingResult" {
-		panic(fmt.Sprintf("expected ColumnMappingResult, got %s", typeName.Name))
-	}
-
-	for _, field := range holder.Fields {
-		key := field.Key
-		valueHolder := field.Value
-		switch key {
-
-		case "mappings":
-			c.Mappings = baml.Decode(valueHolder).Interface().([]ColumnMapping)
-
-		case "column_order":
-			c.Column_order = baml.Decode(valueHolder).Interface().([]string)
-
-		case "remove_columns":
-			c.Remove_columns = baml.Decode(valueHolder).Interface().([]string)
-
-		default:
-
-			panic(fmt.Sprintf("unexpected field: %s in class ColumnMappingResult", key))
-
-		}
-	}
-
-}
-
-func (c ColumnMappingResult) Encode() (*cffi.HostValue, error) {
-	fields := map[string]any{}
-
-	fields["mappings"] = c.Mappings
-
-	fields["column_order"] = c.Column_order
-
-	fields["remove_columns"] = c.Remove_columns
-
-	return baml.EncodeClass("ColumnMappingResult", fields, nil)
-}
-
-func (c ColumnMappingResult) BamlTypeName() string {
-	return "ColumnMappingResult"
-}
-
 type ColumnSchema struct {
 	Name        string `json:"name"`
 	Key         string `json:"key"`
@@ -348,6 +228,102 @@ func (c DetailSection) Encode() (*cffi.HostValue, error) {
 
 func (c DetailSection) BamlTypeName() string {
 	return "DetailSection"
+}
+
+type ImportColumnMatch struct {
+	Header       string `json:"header"`
+	Existing_key string `json:"existing_key"`
+}
+
+func (c *ImportColumnMatch) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "ImportColumnMatch" {
+		panic(fmt.Sprintf("expected ImportColumnMatch, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "header":
+			c.Header = baml.Decode(valueHolder).Interface().(string)
+
+		case "existing_key":
+			c.Existing_key = baml.Decode(valueHolder).Interface().(string)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class ImportColumnMatch", key))
+
+		}
+	}
+
+}
+
+func (c ImportColumnMatch) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["header"] = c.Header
+
+	fields["existing_key"] = c.Existing_key
+
+	return baml.EncodeClass("ImportColumnMatch", fields, nil)
+}
+
+func (c ImportColumnMatch) BamlTypeName() string {
+	return "ImportColumnMatch"
+}
+
+type ImportMappingResult struct {
+	Matches []ImportColumnMatch `json:"matches"`
+	Skip    []string            `json:"skip"`
+}
+
+func (c *ImportMappingResult) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "ImportMappingResult" {
+		panic(fmt.Sprintf("expected ImportMappingResult, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "matches":
+			c.Matches = baml.Decode(valueHolder).Interface().([]ImportColumnMatch)
+
+		case "skip":
+			c.Skip = baml.Decode(valueHolder).Interface().([]string)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class ImportMappingResult", key))
+
+		}
+	}
+
+}
+
+func (c ImportMappingResult) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["matches"] = c.Matches
+
+	fields["skip"] = c.Skip
+
+	return baml.EncodeClass("ImportMappingResult", fields, nil)
+}
+
+func (c ImportMappingResult) BamlTypeName() string {
+	return "ImportMappingResult"
 }
 
 type ListItemResult struct {

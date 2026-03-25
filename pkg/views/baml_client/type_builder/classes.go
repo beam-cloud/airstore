@@ -15,94 +15,6 @@ package type_builder
 
 import baml "github.com/boundaryml/baml/engine/language_client_go/pkg"
 
-type ColumnMappingClassView struct {
-	inner baml.ClassBuilder
-}
-
-func (t *ColumnMappingClassView) ListProperties() ([]ClassPropertyView, error) {
-	result, err := t.inner.ListProperties()
-	if err != nil {
-		return nil, err
-	}
-	builders := make([]ClassPropertyView, len(result))
-	for i, p := range result {
-		builders[i] = p
-	}
-	return builders, nil
-}
-
-func (t *ColumnMappingClassView) PropertyHeader() (ClassPropertyView, error) {
-	return t.inner.Property("header")
-}
-
-func (t *ColumnMappingClassView) PropertyColumn_key() (ClassPropertyView, error) {
-	return t.inner.Property("column_key")
-}
-
-func (t *ColumnMappingClassView) PropertyAction() (ClassPropertyView, error) {
-	return t.inner.Property("action")
-}
-
-func (t *ColumnMappingClassView) PropertyLabel() (ClassPropertyView, error) {
-	return t.inner.Property("label")
-}
-
-func (t *ColumnMappingClassView) PropertyColumn_type() (ClassPropertyView, error) {
-	return t.inner.Property("column_type")
-}
-
-func (t *TypeBuilder) ColumnMapping() (*ColumnMappingClassView, error) {
-	bld, err := t.inner.Class("ColumnMapping")
-	if err != nil {
-		return nil, err
-	}
-	return &ColumnMappingClassView{inner: bld}, nil
-}
-
-func (t *ColumnMappingClassView) Type() (baml.Type, error) {
-	return t.inner.Type()
-}
-
-type ColumnMappingResultClassView struct {
-	inner baml.ClassBuilder
-}
-
-func (t *ColumnMappingResultClassView) ListProperties() ([]ClassPropertyView, error) {
-	result, err := t.inner.ListProperties()
-	if err != nil {
-		return nil, err
-	}
-	builders := make([]ClassPropertyView, len(result))
-	for i, p := range result {
-		builders[i] = p
-	}
-	return builders, nil
-}
-
-func (t *ColumnMappingResultClassView) PropertyMappings() (ClassPropertyView, error) {
-	return t.inner.Property("mappings")
-}
-
-func (t *ColumnMappingResultClassView) PropertyColumn_order() (ClassPropertyView, error) {
-	return t.inner.Property("column_order")
-}
-
-func (t *ColumnMappingResultClassView) PropertyRemove_columns() (ClassPropertyView, error) {
-	return t.inner.Property("remove_columns")
-}
-
-func (t *TypeBuilder) ColumnMappingResult() (*ColumnMappingResultClassView, error) {
-	bld, err := t.inner.Class("ColumnMappingResult")
-	if err != nil {
-		return nil, err
-	}
-	return &ColumnMappingResultClassView{inner: bld}, nil
-}
-
-func (t *ColumnMappingResultClassView) Type() (baml.Type, error) {
-	return t.inner.Type()
-}
-
 type ColumnSchemaClassView struct {
 	inner baml.ClassBuilder
 }
@@ -256,6 +168,78 @@ func (t *TypeBuilder) DetailSection() (*DetailSectionClassView, error) {
 }
 
 func (t *DetailSectionClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
+type ImportColumnMatchClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *ImportColumnMatchClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *ImportColumnMatchClassView) PropertyHeader() (ClassPropertyView, error) {
+	return t.inner.Property("header")
+}
+
+func (t *ImportColumnMatchClassView) PropertyExisting_key() (ClassPropertyView, error) {
+	return t.inner.Property("existing_key")
+}
+
+func (t *TypeBuilder) ImportColumnMatch() (*ImportColumnMatchClassView, error) {
+	bld, err := t.inner.Class("ImportColumnMatch")
+	if err != nil {
+		return nil, err
+	}
+	return &ImportColumnMatchClassView{inner: bld}, nil
+}
+
+func (t *ImportColumnMatchClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
+type ImportMappingResultClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *ImportMappingResultClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *ImportMappingResultClassView) PropertyMatches() (ClassPropertyView, error) {
+	return t.inner.Property("matches")
+}
+
+func (t *ImportMappingResultClassView) PropertySkip() (ClassPropertyView, error) {
+	return t.inner.Property("skip")
+}
+
+func (t *TypeBuilder) ImportMappingResult() (*ImportMappingResultClassView, error) {
+	bld, err := t.inner.Class("ImportMappingResult")
+	if err != nil {
+		return nil, err
+	}
+	return &ImportMappingResultClassView{inner: bld}, nil
+}
+
+func (t *ImportMappingResultClassView) Type() (baml.Type, error) {
 	return t.inner.Type()
 }
 

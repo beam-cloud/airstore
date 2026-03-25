@@ -21,10 +21,6 @@ import (
 )
 
 var typeMap = map[string]reflect.Type{
-	"TYPES.ColumnMapping":              reflect.TypeOf(types.ColumnMapping{}),
-	"STREAM_TYPES.ColumnMapping":       reflect.TypeOf(stream_types.ColumnMapping{}),
-	"TYPES.ColumnMappingResult":        reflect.TypeOf(types.ColumnMappingResult{}),
-	"STREAM_TYPES.ColumnMappingResult": reflect.TypeOf(stream_types.ColumnMappingResult{}),
 	"TYPES.ColumnSchema":               reflect.TypeOf(types.ColumnSchema{}),
 	"STREAM_TYPES.ColumnSchema":        reflect.TypeOf(stream_types.ColumnSchema{}),
 	"TYPES.DataCitation":               reflect.TypeOf(types.DataCitation{}),
@@ -33,6 +29,10 @@ var typeMap = map[string]reflect.Type{
 	"STREAM_TYPES.DetailLayout":        reflect.TypeOf(stream_types.DetailLayout{}),
 	"TYPES.DetailSection":              reflect.TypeOf(types.DetailSection{}),
 	"STREAM_TYPES.DetailSection":       reflect.TypeOf(stream_types.DetailSection{}),
+	"TYPES.ImportColumnMatch":          reflect.TypeOf(types.ImportColumnMatch{}),
+	"STREAM_TYPES.ImportColumnMatch":   reflect.TypeOf(stream_types.ImportColumnMatch{}),
+	"TYPES.ImportMappingResult":        reflect.TypeOf(types.ImportMappingResult{}),
+	"STREAM_TYPES.ImportMappingResult": reflect.TypeOf(stream_types.ImportMappingResult{}),
 	"TYPES.ListItemResult":             reflect.TypeOf(types.ListItemResult{}),
 	"STREAM_TYPES.ListItemResult":      reflect.TypeOf(stream_types.ListItemResult{}),
 	"TYPES.ListResult":                 reflect.TypeOf(types.ListResult{}),
@@ -56,7 +56,6 @@ var typeMap = map[string]reflect.Type{
 	"TYPES.WidgetResult":               reflect.TypeOf(types.WidgetResult{}),
 	"STREAM_TYPES.WidgetResult":        reflect.TypeOf(stream_types.WidgetResult{}),
 
-	"TYPES.ColumnAction":    reflect.TypeOf(types.ColumnAction("")),
 	"TYPES.OperationType":   reflect.TypeOf(types.OperationType("")),
 	"TYPES.SectionEmphasis": reflect.TypeOf(types.SectionEmphasis("")),
 	"TYPES.SectionType":     reflect.TypeOf(types.SectionType("")),

@@ -72,8 +72,8 @@ func (*parse_stream) ClassifyDetailTemplate(text string, opts ...CallOptionFunc)
 	return casted, nil
 }
 
-// / Parse version of MapImportColumns (Takes in string and returns stream_types.ColumnMappingResult)
-func (*parse_stream) MapImportColumns(text string, opts ...CallOptionFunc) (stream_types.ColumnMappingResult, error) {
+// / Parse version of MapImportColumns (Takes in string and returns stream_types.ImportMappingResult)
+func (*parse_stream) MapImportColumns(text string, opts ...CallOptionFunc) (stream_types.ImportMappingResult, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -111,10 +111,10 @@ func (*parse_stream) MapImportColumns(text string, opts ...CallOptionFunc) (stre
 
 	result, err := bamlRuntime.CallFunctionParse(context.Background(), "MapImportColumns", encoded)
 	if err != nil {
-		return stream_types.ColumnMappingResult{}, err
+		return stream_types.ImportMappingResult{}, err
 	}
 
-	casted := (result).(stream_types.ColumnMappingResult)
+	casted := (result).(stream_types.ImportMappingResult)
 
 	return casted, nil
 }

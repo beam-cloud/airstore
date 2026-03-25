@@ -117,7 +117,7 @@ func (*stream) ClassifyDetailTemplate(ctx context.Context, table_title string, c
 }
 
 // / Streaming version of MapImportColumns
-func (*stream) MapImportColumns(ctx context.Context, sheet_name string, headers []string, existing_columns []types.ColumnSchema, data_preview string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.ColumnMappingResult, types.ColumnMappingResult], error) {
+func (*stream) MapImportColumns(ctx context.Context, sheet_name string, existing_columns []types.ColumnSchema, headers []string, data_preview string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.ImportMappingResult, types.ImportMappingResult], error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -125,7 +125,7 @@ func (*stream) MapImportColumns(ctx context.Context, sheet_name string, headers 
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"sheet_name": sheet_name, "headers": headers, "existing_columns": existing_columns, "data_preview": data_preview},
+		Kwargs: map[string]any{"sheet_name": sheet_name, "existing_columns": existing_columns, "headers": headers, "data_preview": data_preview},
 		Env:    getEnvVars(callOpts.env),
 	}
 
@@ -158,11 +158,11 @@ func (*stream) MapImportColumns(ctx context.Context, sheet_name string, headers 
 		return nil, err
 	}
 
-	channel := make(chan StreamValue[stream_types.ColumnMappingResult, types.ColumnMappingResult])
+	channel := make(chan StreamValue[stream_types.ImportMappingResult, types.ImportMappingResult])
 	go func() {
 		for result := range internal_channel {
 			if result.Error != nil {
-				channel <- StreamValue[stream_types.ColumnMappingResult, types.ColumnMappingResult]{
+				channel <- StreamValue[stream_types.ImportMappingResult, types.ImportMappingResult]{
 					IsError: true,
 					Error:   result.Error,
 				}
@@ -170,14 +170,14 @@ func (*stream) MapImportColumns(ctx context.Context, sheet_name string, headers 
 				return
 			}
 			if result.HasData {
-				data := (result.Data).(types.ColumnMappingResult)
-				channel <- StreamValue[stream_types.ColumnMappingResult, types.ColumnMappingResult]{
+				data := (result.Data).(types.ImportMappingResult)
+				channel <- StreamValue[stream_types.ImportMappingResult, types.ImportMappingResult]{
 					IsFinal:  true,
 					as_final: &data,
 				}
 			} else {
-				data := (result.StreamData).(stream_types.ColumnMappingResult)
-				channel <- StreamValue[stream_types.ColumnMappingResult, types.ColumnMappingResult]{
+				data := (result.StreamData).(stream_types.ImportMappingResult)
+				channel <- StreamValue[stream_types.ImportMappingResult, types.ImportMappingResult]{
 					IsFinal:   false,
 					as_stream: &data,
 				}

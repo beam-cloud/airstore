@@ -72,7 +72,7 @@ func (*build_request) ClassifyDetailTemplate(table_title string, column_schema s
 }
 
 // Build HTTP request for MapImportColumns (returns baml.HTTPRequest)
-func (*build_request) MapImportColumns(sheet_name string, headers []string, existing_columns []types.ColumnSchema, data_preview string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
+func (*build_request) MapImportColumns(sheet_name string, existing_columns []types.ColumnSchema, headers []string, data_preview string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -88,7 +88,7 @@ func (*build_request) MapImportColumns(sheet_name string, headers []string, exis
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"sheet_name": sheet_name, "headers": headers, "existing_columns": existing_columns, "data_preview": data_preview, "stream": false},
+		Kwargs: map[string]any{"sheet_name": sheet_name, "existing_columns": existing_columns, "headers": headers, "data_preview": data_preview, "stream": false},
 		Env:    getEnvVars(callOpts.env),
 	}
 

@@ -19,7 +19,11 @@ import (
 	"golang.org/x/net/context"
 )
 
-const MaxVisibleColumns = 25
+const (
+	dataPreviewRows       = 5
+	importRowChunkMinSize = 5
+	importRowChunkMaxSize = 50
+)
 
 type ImportParams struct {
 	Store       *ViewStore
@@ -48,9 +52,20 @@ type columnCreateSpec struct {
 }
 
 type schemaUpdate struct {
-	NewCols       []columnCreateSpec
-	RemoveCols    []string
-	ColumnOrder   []string
+	NewCols     []columnCreateSpec
+	RemoveCols  []string
+	ColumnOrder []string
+}
+
+type schemaSyncResult struct {
+	NewColumns []string
+	Changed    bool
+}
+
+type parsedImportData struct {
+	Headers     []string
+	Records     []map[string]string
+	ParseErrors []string
 }
 
 func ImportData(ctx context.Context, p ImportParams) (*ImportResult, error) {
@@ -61,54 +76,33 @@ func ImportData(ctx context.Context, p ImportParams) (*ImportResult, error) {
 		return nil, fmt.Errorf("empty file")
 	}
 
-	ext := strings.ToLower(filepath.Ext(p.FilePath))
-	var records []map[string]string
-	var headers []string
-	var parseErrors []string
-
-	switch ext {
-	case ".json":
-		h, recs, errs, err := parseJSON(p.Data)
-		if err != nil {
-			return nil, fmt.Errorf("parse JSON: %w", err)
-		}
-		headers, records, parseErrors = h, recs, errs
-	default:
-		delimiter := ','
-		if ext == ".tsv" || ext == ".tab" {
-			delimiter = '\t'
-		}
-		h, recs, errs, err := parseCSV(p.Data, delimiter)
-		if err != nil {
-			return nil, fmt.Errorf("parse CSV: %w", err)
-		}
-		headers, records, parseErrors = h, recs, errs
+	parsed, err := parseImportData(p.Data, p.FilePath)
+	if err != nil {
+		return nil, err
 	}
-
-	if len(records) == 0 {
+	if len(parsed.Records) == 0 {
 		return nil, fmt.Errorf("no data rows found")
 	}
 
+	importID := uuid.New().String()
 	colMapping := p.ColMapping
 	var update schemaUpdate
 	if len(colMapping) == 0 {
-		colMapping, update = resolveColumnMapping(ctx, p.Backend, p.WorkspaceID, p.ViewID, p.SheetID, p.ComponentID, headers, records)
+		colMapping, update = resolveColumnMapping(ctx, p.Backend, p.WorkspaceID, p.ViewID, p.SheetID, p.ComponentID, parsed.Headers, parsed.Records)
 	}
 
-	newCols, err := syncColumnsToView(ctx, p.Backend, p.WorkspaceID, p.ViewID, p.SheetID, p.ComponentID, update)
+	syncResult, err := syncColumnsToView(ctx, p.Backend, p.WorkspaceID, p.ViewID, p.SheetID, p.ComponentID, update)
 	if err != nil {
 		log.Warn().Err(err).Str("view_id", p.ViewID).Msg("import: failed to sync columns to view definition (data will still be imported)")
 	}
 
-	if len(newCols) > 0 {
+	if syncResult.Changed {
 		stampSchemaHash(ctx, p.Store, p.Backend, p.WorkspaceID, p.ViewID, p.SheetID, p.ComponentID)
 	}
 
-	importID := uuid.New().String()
-	rows := buildImportRows(records, colMapping, p.SheetID, p.ComponentID, importID)
-
-	if err := p.Store.UpsertRows(ctx, p.ViewID, rows); err != nil {
-		return nil, fmt.Errorf("upsert rows: %w", err)
+	rowCount, err := upsertImportRowsInChunks(ctx, p.Store, p.ViewID, p.SheetID, p.ComponentID, importID, parsed.Records, colMapping)
+	if err != nil {
+		return nil, err
 	}
 
 	log.Info().
@@ -116,17 +110,47 @@ func ImportData(ctx context.Context, p ImportParams) (*ImportResult, error) {
 		Str("sheet_id", p.SheetID).
 		Str("component_id", p.ComponentID).
 		Str("import_id", importID).
-		Int("rows", len(rows)).
-		Int("new_columns", len(newCols)).
+		Int("rows", rowCount).
+		Int("new_columns", len(syncResult.NewColumns)).
 		Msg("import: data imported")
 
 	return &ImportResult{
 		ImportID:    importID,
-		RowCount:    len(rows),
+		RowCount:    rowCount,
 		ColumnCount: len(colMapping),
-		NewColumns:  newCols,
-		ParseErrors: parseErrors,
+		NewColumns:  syncResult.NewColumns,
+		ParseErrors: parsed.ParseErrors,
 	}, nil
+}
+
+func parseImportData(data []byte, filePath string) (*parsedImportData, error) {
+	ext := strings.ToLower(filepath.Ext(filePath))
+	switch ext {
+	case ".json":
+		headers, records, parseErrors, err := parseJSON(data)
+		if err != nil {
+			return nil, fmt.Errorf("parse JSON: %w", err)
+		}
+		return &parsedImportData{
+			Headers:     headers,
+			Records:     records,
+			ParseErrors: parseErrors,
+		}, nil
+	default:
+		delimiter := ','
+		if ext == ".tsv" || ext == ".tab" {
+			delimiter = '\t'
+		}
+		headers, records, parseErrors, err := parseCSV(data, delimiter)
+		if err != nil {
+			return nil, fmt.Errorf("parse CSV: %w", err)
+		}
+		return &parsedImportData{
+			Headers:     headers,
+			Records:     records,
+			ParseErrors: parseErrors,
+		}, nil
+	}
 }
 
 func parseCSV(data []byte, delimiter rune) ([]string, []map[string]string, []string, error) {
@@ -244,7 +268,7 @@ func flattenJSON(prefix string, obj map[string]any, out map[string]string) {
 	}
 }
 
-func buildImportRows(records []map[string]string, colMapping map[string]string, sheetID, componentID, importID string) []ViewRow {
+func buildImportRows(records []map[string]string, colMapping map[string]string, sheetID, componentID, importID string, rowOffset int) []ViewRow {
 	rows := make([]ViewRow, 0, len(records))
 	for i, record := range records {
 		pinned := make(map[string]string, len(record))
@@ -257,13 +281,14 @@ func buildImportRows(records []map[string]string, colMapping map[string]string, 
 			continue
 		}
 
-		rowID := fmt.Sprintf("%s:%s:import-%s:%d", sheetID, componentID, importID, i)
+		rowIndex := rowOffset + i
+		rowID := fmt.Sprintf("%s:%s:import-%s:%d", sheetID, componentID, importID, rowIndex)
 		rows = append(rows, ViewRow{
 			ID:          rowID,
 			SheetID:     sheetID,
 			ComponentID: componentID,
 			GroupID:     "import:" + importID,
-			RowKey:      fmt.Sprintf("import-%d", i),
+			RowKey:      fmt.Sprintf("import-%d", rowIndex),
 			SchemaHash:  "",
 			Cells:       map[string]string{},
 			Pinned:      pinned,
@@ -275,20 +300,68 @@ func buildImportRows(records []map[string]string, colMapping map[string]string, 
 	return rows
 }
 
-// syncColumnsToView applies a schema update to the view's table component:
-// removes redundant columns, adds new columns, and reorders everything per
-// the BAML mapper's recommendation. Returns the list of newly added column keys.
-func syncColumnsToView(ctx context.Context, backend repository.BackendRepository, workspaceID uint, viewID, sheetID, componentID string, update schemaUpdate) ([]string, error) {
-	if backend == nil {
-		return nil, nil
+func upsertImportRowsInChunks(ctx context.Context, store *ViewStore, viewID, sheetID, componentID, importID string, records []map[string]string, colMapping map[string]string) (int, error) {
+	if len(records) == 0 {
+		return 0, nil
 	}
-	if len(update.NewCols) == 0 && len(update.RemoveCols) == 0 && len(update.ColumnOrder) == 0 {
-		return nil, nil
+
+	chunkSize := importRowChunkSize(len(records))
+	totalRows := 0
+	for start := 0; start < len(records); start += chunkSize {
+		end := start + chunkSize
+		if end > len(records) {
+			end = len(records)
+		}
+
+		rows := buildImportRows(records[start:end], colMapping, sheetID, componentID, importID, start)
+		if err := store.UpsertRows(ctx, viewID, rows); err != nil {
+			return totalRows, fmt.Errorf("upsert rows %d-%d: %w", start, end-1, err)
+		}
+		totalRows += len(rows)
+
+		log.Debug().
+			Str("view_id", viewID).
+			Str("sheet_id", sheetID).
+			Str("component_id", componentID).
+			Str("import_id", importID).
+			Int("chunk_start", start).
+			Int("chunk_end", end).
+			Int("chunk_rows", len(rows)).
+			Int("rows_written", totalRows).
+			Msg("import: upserted row chunk")
+	}
+
+	return totalRows, nil
+}
+
+func importRowChunkSize(total int) int {
+	if total <= 0 {
+		return 1
+	}
+	size := total / 4
+	if size < importRowChunkMinSize {
+		size = importRowChunkMinSize
+	}
+	if size > importRowChunkMaxSize {
+		size = importRowChunkMaxSize
+	}
+	return size
+}
+
+// syncColumnsToView adds new columns to the view's table component and
+// persists the updated definition. Existing columns keep their position;
+// new columns are appended in the order provided by the schema update.
+func syncColumnsToView(ctx context.Context, backend repository.BackendRepository, workspaceID uint, viewID, sheetID, componentID string, update schemaUpdate) (schemaSyncResult, error) {
+	if backend == nil {
+		return schemaSyncResult{}, nil
+	}
+	if len(update.NewCols) == 0 {
+		return schemaSyncResult{}, nil
 	}
 
 	v, err := backend.GetView(ctx, workspaceID, viewID)
 	if err != nil {
-		return nil, fmt.Errorf("get view: %w", err)
+		return schemaSyncResult{}, fmt.Errorf("get view: %w", err)
 	}
 
 	var targetComp *types.ComponentSpec
@@ -304,98 +377,46 @@ func syncColumnsToView(ctx context.Context, backend repository.BackendRepository
 		}
 	}
 	if targetComp == nil {
-		return nil, fmt.Errorf("component %s not found in sheet %s", componentID, sheetID)
+		return schemaSyncResult{}, fmt.Errorf("component %s not found in sheet %s", componentID, sheetID)
 	}
 
 	if targetComp.Config == nil {
 		targetComp.Config = make(map[string]any)
 	}
 
-	// Build a map of all column entries keyed by column key for fast lookup.
-	colsByKey := make(map[string]map[string]any)
+	existingKeys := make(map[string]bool)
 	existing, _ := targetComp.Config["columns"].([]any)
 	for _, c := range existing {
 		if m, ok := c.(map[string]any); ok {
 			if k, ok := m["key"].(string); ok && k != "" {
-				colsByKey[k] = m
+				existingKeys[k] = true
 			}
 		}
 	}
 
-	// Remove redundant columns.
-	removeSet := make(map[string]bool, len(update.RemoveCols))
-	for _, k := range update.RemoveCols {
-		if _, exists := colsByKey[k]; exists {
-			removeSet[k] = true
-			delete(colsByKey, k)
-		}
-	}
-
-	// Add new columns (that don't already exist).
 	var newKeys []string
+	ordered := append([]any(nil), existing...)
 	for _, spec := range update.NewCols {
-		if _, exists := colsByKey[spec.Key]; exists {
+		if existingKeys[spec.Key] {
 			continue
 		}
-		entry := map[string]any{
+		ordered = append(ordered, map[string]any{
 			"key":   spec.Key,
 			"label": spec.Label,
 			"type":  spec.ColType,
-		}
-		colsByKey[spec.Key] = entry
+		})
 		newKeys = append(newKeys, spec.Key)
+		existingKeys[spec.Key] = true
 	}
 
-	// Cap total visible columns.
-	if len(colsByKey) > MaxVisibleColumns {
-		excess := len(colsByKey) - MaxVisibleColumns
-		if excess > len(newKeys) {
-			excess = len(newKeys)
-		}
-		for i := len(newKeys) - 1; i >= 0 && excess > 0; i-- {
-			delete(colsByKey, newKeys[i])
-			newKeys = newKeys[:i]
-			excess--
-		}
+	if len(newKeys) == 0 {
+		return schemaSyncResult{}, nil
 	}
 
-	// Reorder: use BAML's suggested order, appending any keys it missed.
-	var ordered []any
-	seen := make(map[string]bool, len(colsByKey))
-	for _, key := range update.ColumnOrder {
-		if removeSet[key] || seen[key] {
-			continue
-		}
-		if entry, ok := colsByKey[key]; ok {
-			ordered = append(ordered, entry)
-			seen[key] = true
-		}
-	}
-	for _, c := range existing {
-		if m, ok := c.(map[string]any); ok {
-			if k, ok := m["key"].(string); ok && !seen[k] && !removeSet[k] {
-				if entry, exists := colsByKey[k]; exists {
-					ordered = append(ordered, entry)
-					seen[k] = true
-					_ = entry
-				}
-			}
-		}
-	}
-	for _, spec := range update.NewCols {
-		if !seen[spec.Key] {
-			if entry, exists := colsByKey[spec.Key]; exists {
-				ordered = append(ordered, entry)
-				seen[spec.Key] = true
-				_ = entry
-			}
-		}
-	}
 	targetComp.Config["columns"] = ordered
-
 	NormalizeDefinition(&v.Definition)
 	if err := backend.UpdateView(ctx, v); err != nil {
-		return nil, fmt.Errorf("update view: %w", err)
+		return schemaSyncResult{}, fmt.Errorf("update view: %w", err)
 	}
 
 	log.Info().
@@ -403,36 +424,13 @@ func syncColumnsToView(ctx context.Context, backend repository.BackendRepository
 		Str("sheet_id", sheetID).
 		Str("component_id", componentID).
 		Int("added", len(newKeys)).
-		Int("removed", len(removeSet)).
 		Int("total", len(ordered)).
-		Strs("new_columns", newKeys).
-		Strs("removed_columns", update.RemoveCols).
 		Msg("import: synced columns to view definition")
 
-	return newKeys, nil
-}
-
-func existingColumnKeys(config map[string]any) map[string]bool {
-	keys := make(map[string]bool)
-	if config == nil {
-		return keys
-	}
-	raw, ok := config["columns"]
-	if !ok {
-		return keys
-	}
-	cols, ok := raw.([]any)
-	if !ok {
-		return keys
-	}
-	for _, c := range cols {
-		if m, ok := c.(map[string]any); ok {
-			if k, ok := m["key"].(string); ok {
-				keys[strings.TrimSpace(k)] = true
-			}
-		}
-	}
-	return keys
+	return schemaSyncResult{
+		NewColumns: newKeys,
+		Changed:    true,
+	}, nil
 }
 
 func importColumnKey(header string) string {
@@ -452,92 +450,135 @@ func importColumnKey(header string) string {
 	return result
 }
 
-const dataPreviewRows = 5
-
-// resolveColumnMapping uses BAML to semantically map CSV headers to existing
-// view columns. The BAML mapper sees the sheet name, existing columns, all
-// headers, AND a sample of actual data rows — enabling fuzzy matching by
-// content, not just header names. Also returns schema cleanup instructions:
-// redundant columns to remove and a recommended column order.
+// resolveColumnMapping runs a single BAML call to match headers against
+// existing columns, then deterministically creates columns for everything
+// that wasn't matched or skipped. Fast path: one LLM call regardless of
+// header count.
 func resolveColumnMapping(ctx context.Context, backend repository.BackendRepository, workspaceID uint, viewID, sheetID, componentID string, headers []string, records []map[string]string) (map[string]string, schemaUpdate) {
 	sheetName, existing := loadImportContext(ctx, backend, workspaceID, viewID, sheetID, componentID)
 	preview := buildDataPreview(headers, records, dataPreviewRows)
 
-	result, err := baml.MapImportColumns(ctx, sheetName, headers, existing, preview)
-	if err != nil {
-		log.Warn().Err(err).Str("view_id", viewID).Msg("import: BAML column mapping failed, falling back to string normalization")
-		return fallbackMapping(headers)
-	}
-	if len(result.Mappings) != len(headers) {
-		log.Warn().Str("view_id", viewID).Int("expected", len(headers)).Int("got", len(result.Mappings)).Msg("import: BAML returned wrong mapping count, falling back")
-		return fallbackMapping(headers)
+	matchMap, skipSet := callImportMapper(ctx, viewID, sheetName, existing, headers, preview)
+
+	existingKeys := make(map[string]bool, len(existing))
+	for _, col := range existing {
+		existingKeys[col.Key] = true
 	}
 
-	mapping := make(map[string]string, len(result.Mappings))
-	seen := make(map[string]bool, len(result.Mappings))
-	var specs []columnCreateSpec
-	valid := true
+	mapping := make(map[string]string, len(headers))
+	seenKeys := make(map[string]bool, len(headers))
+	var newCols []columnCreateSpec
+	matched, skipped, created := 0, 0, 0
 
-	for _, m := range result.Mappings {
-		key := strings.TrimSpace(m.Column_key)
-		if key == "" || seen[key] {
-			valid = false
-			break
-		}
-		seen[key] = true
-		mapping[m.Header] = key
-
-		if m.Action == bamltypes.ColumnActionCreate {
-			label := m.Label
-			if label == "" {
-				label = m.Header
-			}
-			colType := m.Column_type
-			if colType == "" {
-				colType = "text"
-			}
-			specs = append(specs, columnCreateSpec{Key: key, Label: label, ColType: colType})
-		}
-	}
-
-	if !valid {
-		log.Warn().Str("view_id", viewID).Msg("import: BAML returned duplicate or empty keys, falling back")
-		return fallbackMapping(headers)
-	}
-
-	matched, created, skipped := 0, 0, 0
-	for _, m := range result.Mappings {
-		switch m.Action {
-		case bamltypes.ColumnActionMatch:
+	for _, header := range headers {
+		if existingKey, ok := matchMap[header]; ok {
+			mapping[header] = existingKey
+			seenKeys[existingKey] = true
 			matched++
-		case bamltypes.ColumnActionCreate:
-			created++
-		case bamltypes.ColumnActionSkip:
-			skipped++
+			continue
 		}
+		if skipSet[header] {
+			key := uniqueKey(importColumnKey(header), seenKeys)
+			mapping[header] = key
+			skipped++
+			continue
+		}
+
+		key := uniqueKey(importColumnKey(header), seenKeys)
+		mapping[header] = key
+		if !existingKeys[key] {
+			newCols = append(newCols, columnCreateSpec{Key: key, Label: header, ColType: "text"})
+		}
+		created++
 	}
+
+	order := make([]string, 0, len(existing)+len(newCols))
+	for _, col := range existing {
+		order = append(order, col.Key)
+	}
+	for _, spec := range newCols {
+		order = append(order, spec.Key)
+	}
+
 	log.Info().
 		Str("view_id", viewID).
 		Str("sheet", sheetName).
 		Int("headers", len(headers)).
 		Int("matched", matched).
-		Int("created", created).
 		Int("skipped", skipped).
-		Int("remove", len(result.Remove_columns)).
-		Int("order_len", len(result.Column_order)).
-		Msg("import: BAML column mapping succeeded")
+		Int("created", created).
+		Msg("import: resolved column mapping")
 
-	return mapping, schemaUpdate{
-		NewCols:     specs,
-		RemoveCols:  result.Remove_columns,
-		ColumnOrder: result.Column_order,
+	return mapping, schemaUpdate{NewCols: newCols, ColumnOrder: order}
+}
+
+// callImportMapper calls the single-pass BAML function to match headers
+// to existing columns and identify headers to skip. Falls back to
+// all-create on error.
+func callImportMapper(ctx context.Context, viewID, sheetName string, existing []bamltypes.ColumnSchema, headers []string, preview string) (matchMap map[string]string, skipSet map[string]bool) {
+	matchMap = make(map[string]string)
+	skipSet = make(map[string]bool)
+
+	if len(existing) == 0 {
+		return
 	}
+
+	result, err := baml.MapImportColumns(ctx, sheetName, existing, headers, preview)
+	if err != nil {
+		log.Warn().Err(err).Str("view_id", viewID).Msg("import: BAML mapper failed, falling back to deterministic mapping")
+		return
+	}
+
+	existingKeys := make(map[string]bool, len(existing))
+	for _, col := range existing {
+		existingKeys[col.Key] = true
+	}
+
+	usedKeys := make(map[string]bool)
+	for _, m := range result.Matches {
+		header := strings.TrimSpace(m.Header)
+		key := strings.TrimSpace(m.Existing_key)
+		if header == "" || key == "" || !existingKeys[key] || usedKeys[key] {
+			continue
+		}
+		matchMap[header] = key
+		usedKeys[key] = true
+	}
+
+	for _, h := range result.Skip {
+		h = strings.TrimSpace(h)
+		if h != "" {
+			skipSet[h] = true
+		}
+	}
+	return
+}
+
+func uniqueKey(base string, seen map[string]bool) string {
+	if base == "" {
+		base = "col"
+	}
+	key := base
+	for seen[key] {
+		key += "_"
+	}
+	seen[key] = true
+	return key
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // buildDataPreview formats the first N rows as a compact table so the BAML
 // mapper can see actual values and make data-informed matching decisions.
 func buildDataPreview(headers []string, records []map[string]string, maxRows int) string {
-	if len(records) == 0 {
+	if len(records) == 0 || len(headers) == 0 {
 		return ""
 	}
 	n := maxRows
@@ -545,34 +586,34 @@ func buildDataPreview(headers []string, records []map[string]string, maxRows int
 		n = len(records)
 	}
 
-	var b strings.Builder
-	for i, h := range headers {
-		if i > 0 {
-			b.WriteString(" | ")
-		}
-		b.WriteString(h)
+	previewHeaders := headers
+	if len(previewHeaders) > 40 {
+		previewHeaders = previewHeaders[:40]
 	}
-	b.WriteByte('\n')
 
-	for i, h := range headers {
+	var b strings.Builder
+	for i, h := range previewHeaders {
 		if i > 0 {
 			b.WriteString(" | ")
 		}
-		for j := 0; j < len(h) && j < 20; j++ {
-			b.WriteByte('-')
+		if len(h) > 25 {
+			b.WriteString(h[:22])
+			b.WriteString("...")
+		} else {
+			b.WriteString(h)
 		}
 	}
 	b.WriteByte('\n')
 
 	for row := 0; row < n; row++ {
 		rec := records[row]
-		for i, h := range headers {
+		for i, h := range previewHeaders {
 			if i > 0 {
 				b.WriteString(" | ")
 			}
 			val := rec[h]
-			if len(val) > 80 {
-				val = val[:77] + "..."
+			if len(val) > 30 {
+				val = val[:27] + "..."
 			}
 			b.WriteString(val)
 		}
@@ -580,17 +621,6 @@ func buildDataPreview(headers []string, records []map[string]string, maxRows int
 	}
 
 	return b.String()
-}
-
-func fallbackMapping(headers []string) (map[string]string, schemaUpdate) {
-	mapping := make(map[string]string, len(headers))
-	specs := make([]columnCreateSpec, 0, len(headers))
-	for _, h := range headers {
-		key := importColumnKey(h)
-		mapping[h] = key
-		specs = append(specs, columnCreateSpec{Key: key, Label: h, ColType: "text"})
-	}
-	return mapping, schemaUpdate{NewCols: specs}
 }
 
 // loadImportContext reads the view definition once and extracts both the sheet

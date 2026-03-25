@@ -95,7 +95,7 @@ func ClassifyDetailTemplate(ctx context.Context, table_title string, column_sche
 	}
 }
 
-func MapImportColumns(ctx context.Context, sheet_name string, headers []string, existing_columns []types.ColumnSchema, data_preview string, opts ...CallOptionFunc) (types.ColumnMappingResult, error) {
+func MapImportColumns(ctx context.Context, sheet_name string, existing_columns []types.ColumnSchema, headers []string, data_preview string, opts ...CallOptionFunc) (types.ImportMappingResult, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -111,7 +111,7 @@ func MapImportColumns(ctx context.Context, sheet_name string, headers []string, 
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"sheet_name": sheet_name, "headers": headers, "existing_columns": existing_columns, "data_preview": data_preview},
+		Kwargs: map[string]any{"sheet_name": sheet_name, "existing_columns": existing_columns, "headers": headers, "data_preview": data_preview},
 		Env:    getEnvVars(callOpts.env),
 	}
 
@@ -139,33 +139,33 @@ func MapImportColumns(ctx context.Context, sheet_name string, headers []string, 
 	if callOpts.onTick == nil {
 		result, err := bamlRuntime.CallFunction(ctx, "MapImportColumns", encoded, callOpts.onTick)
 		if err != nil {
-			return types.ColumnMappingResult{}, err
+			return types.ImportMappingResult{}, err
 		}
 
 		if result.Error != nil {
-			return types.ColumnMappingResult{}, result.Error
+			return types.ImportMappingResult{}, result.Error
 		}
 
-		casted := (result.Data).(types.ColumnMappingResult)
+		casted := (result.Data).(types.ImportMappingResult)
 
 		return casted, nil
 	} else {
 		channel, err := bamlRuntime.CallFunctionStream(ctx, "MapImportColumns", encoded, callOpts.onTick)
 		if err != nil {
-			return types.ColumnMappingResult{}, err
+			return types.ImportMappingResult{}, err
 		}
 
 		for result := range channel {
 			if result.Error != nil {
-				return types.ColumnMappingResult{}, result.Error
+				return types.ImportMappingResult{}, result.Error
 			}
 
 			if result.HasData {
-				return result.Data.(types.ColumnMappingResult), nil
+				return result.Data.(types.ImportMappingResult), nil
 			}
 		}
 
-		return types.ColumnMappingResult{}, fmt.Errorf("No data returned from stream")
+		return types.ImportMappingResult{}, fmt.Errorf("No data returned from stream")
 	}
 }
 
