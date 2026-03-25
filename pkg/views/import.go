@@ -16,6 +16,8 @@ import (
 	"golang.org/x/net/context"
 )
 
+const MaxVisibleColumns = 25
+
 type ImportParams struct {
 	Store       *ViewStore
 	Backend     repository.BackendRepository
@@ -120,9 +122,14 @@ func parseCSV(data []byte, delimiter rune) ([]string, []map[string]string, []str
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("read headers: %w", err)
 	}
-	for i := range headers {
-		headers[i] = strings.TrimSpace(headers[i])
+	var cleaned []string
+	for _, h := range headers {
+		h = strings.TrimSpace(h)
+		if h != "" {
+			cleaned = append(cleaned, h)
+		}
 	}
+	headers = cleaned
 
 	var records []map[string]string
 	var parseErrors []string
@@ -249,6 +256,16 @@ func buildImportRows(records []map[string]string, colMapping map[string]string, 
 	return rows
 }
 
+// capColumns returns at most maxVisible keys, preserving the original order
+// from the source file. No domain-specific heuristics — the file author's
+// column ordering is respected as-is.
+func capColumns(keys []string, maxVisible int) []string {
+	if len(keys) <= maxVisible {
+		return keys
+	}
+	return keys[:maxVisible]
+}
+
 // syncColumnsToView adds any missing column definitions to the view's table
 // component config so that the resolver can render imported data. Returns the
 // list of newly added column keys.
@@ -281,29 +298,58 @@ func syncColumnsToView(ctx context.Context, backend repository.BackendRepository
 	}
 
 	existingKeys := existingColumnKeys(targetComp.Config)
+	existingCount := len(existingKeys)
 
-	var newKeys []string
-	var newColEntries []map[string]any
-
+	var candidateKeys []string
+	labelByKey := make(map[string]string)
 	for _, header := range headers {
 		key := colMapping[header]
-		if key == "" {
-			continue
-		}
-		if existingKeys[key] {
+		if key == "" || existingKeys[key] {
 			continue
 		}
 		existingKeys[key] = true
+		candidateKeys = append(candidateKeys, key)
+		labelByKey[key] = header
+	}
+
+	if len(candidateKeys) == 0 {
+		return nil, nil
+	}
+
+	budget := MaxVisibleColumns - existingCount
+	if budget < 0 {
+		budget = 0
+	}
+	visibleKeys := capColumns(candidateKeys, budget)
+	visibleSet := make(map[string]bool, len(visibleKeys))
+	for _, k := range visibleKeys {
+		visibleSet[k] = true
+	}
+
+	var newKeys []string
+	var newColEntries []map[string]any
+	for _, key := range candidateKeys {
+		if !visibleSet[key] {
+			continue
+		}
 		newKeys = append(newKeys, key)
 		newColEntries = append(newColEntries, map[string]any{
 			"key":   key,
-			"label": header,
+			"label": labelByKey[key],
 			"type":  "text",
 		})
 	}
 
 	if len(newColEntries) == 0 {
 		return nil, nil
+	}
+
+	if len(candidateKeys) > len(newColEntries) {
+		log.Info().
+			Str("view_id", viewID).
+			Int("total_columns", len(candidateKeys)).
+			Int("visible_columns", len(newColEntries)).
+			Msg("import: capped visible columns (all data stored in MongoDB)")
 	}
 
 	if targetComp.Config == nil {

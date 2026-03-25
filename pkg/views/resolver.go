@@ -163,9 +163,6 @@ func (r *DataResolver) RegenerateRow(ctx context.Context, workspaceID uint, view
 		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}, nil
 	}
 	spec := buildMappingSpec(sheet.Name, comp)
-	if len(spec.tableCols) == 0 {
-		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}, nil
-	}
 
 	agentIDs, ok := r.resolveScopedAgentIDs(ctx, workspaceID, comp.DataSource, opts.ViewAgentRefs)
 	if !ok {
@@ -234,14 +231,12 @@ func (r *DataResolver) ensureSheetMapped(ctx context.Context, workspaceID uint, 
 // persist results back.
 func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID string, sheet types.SheetSpec, comp types.ComponentSpec, opts ResolveOptions) (*viewMappingResult, error) {
 	spec := buildMappingSpec(sheet.Name, comp)
-	if len(spec.tableCols) == 0 {
-		return &viewMappingResult{Rows: nil, TaskMeta: map[string]*types.AgentTask{}}, nil
-	}
 
 	allOutputs, err := r.fetchMappingOutputs(ctx, workspaceID, comp.DataSource, opts.ViewAgentRefs, opts.SourceViewID)
 	if err != nil {
 		return nil, fmt.Errorf("fetch mapping outputs: %w", err)
 	}
+
 	if len(allOutputs) == 0 {
 		log.Info().
 			Str("view_id", viewID).
@@ -261,6 +256,16 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 			return &viewMappingResult{Rows: importRows, TaskMeta: map[string]*types.AgentTask{}}, nil
 		}
 		return &viewMappingResult{Rows: nil, TaskMeta: map[string]*types.AgentTask{}}, nil
+	}
+
+	if len(spec.tableCols) == 0 {
+		log.Info().
+			Str("view_id", viewID).
+			Str("sheet_id", sheet.ID).
+			Msg("view: no column schema defined — skipping BAML mapping, returning import rows only")
+
+		importRows := r.loadAndMergeImportRows(ctx, viewID, sheet.ID, comp.ID, nil)
+		return &viewMappingResult{Rows: importRows, TaskMeta: map[string]*types.AgentTask{}}, nil
 	}
 
 	taskGroups := groupOutputsByTask(allOutputs)
@@ -1429,6 +1434,9 @@ func filterOutputsForDataSource(outputs []*types.TaskOutput, ds *types.DataSourc
 func assembleTable(sheetID string, comp types.ComponentSpec, mappedRows []resolvedSheetRow, taskMeta map[string]*types.AgentTask) *types.ResolvedData {
 	tableCols := buildColumnSchemas(comp)
 	if len(tableCols) == 0 {
+		tableCols = discoverColumnsFromRows(mappedRows)
+	}
+	if len(tableCols) == 0 {
 		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}
 	}
 
@@ -1479,6 +1487,40 @@ func assembleTable(sheetID string, comp types.ComponentSpec, mappedRows []resolv
 		Total:      len(rows),
 		Status:     types.ResolvedDataStatusOK,
 	}
+}
+
+// discoverColumnsFromRows derives column schemas from the cell keys present
+// in the resolved rows. Used as a fallback when no schema is pre-defined,
+// so import data is always visible regardless of LLM state.
+func discoverColumnsFromRows(rows []resolvedSheetRow) []bamltypes.ColumnSchema {
+	if len(rows) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]bool)
+	var keys []string
+	for _, row := range rows {
+		for key := range row.Cells {
+			if key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+
+	schemas := make([]bamltypes.ColumnSchema, 0, len(keys))
+	for _, key := range keys {
+		label := humanizeColumn(key)
+		schemas = append(schemas, bamltypes.ColumnSchema{
+			Name:        label,
+			Key:         key,
+			Type:        columnTypeForKey(key, ""),
+			Description: label,
+		})
+	}
+	return schemas
 }
 
 // ---------------------------------------------------------------------------
