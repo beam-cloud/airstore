@@ -308,6 +308,11 @@ type BackendRepository interface {
 	UpdateView(ctx context.Context, v *types.View) error
 	DeleteView(ctx context.Context, workspaceID uint, viewID string) error
 
+	// Source watches (correlation-key based routing for sleeping tasks)
+	UpsertTaskSourceWatches(ctx context.Context, workspaceID uint, taskID string, watches []TaskSourceWatch) error
+	FindTasksByCorrelationKeys(ctx context.Context, integration string, keys []string) ([]TaskSourceWatchMatch, error)
+	DeleteTaskSourceWatches(ctx context.Context, taskID string) error
+
 	// Database access
 	DB() *sql.DB
 
@@ -315,4 +320,17 @@ type BackendRepository interface {
 	Ping(ctx context.Context) error
 	Close() error
 	RunMigrations() error
+}
+
+type TaskSourceWatch struct {
+	Integration    string
+	CorrelationKey string
+	Reason         string
+}
+
+type TaskSourceWatchMatch struct {
+	WorkspaceID    uint
+	TaskID         string
+	CorrelationKey string
+	Reason         string
 }

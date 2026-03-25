@@ -12,7 +12,7 @@ client<llm> TurnClassifier {
   provider anthropic
   retry_policy Retry
   options {
-    model claude-opus-4-5-20251101
+    model claude-opus-4-6
     api_key env.ANTHROPIC_API_KEY
   }
 }
@@ -21,7 +21,7 @@ client<llm> OutputClassifier {
   provider anthropic
   retry_policy Retry
   options {
-    model claude-opus-4-5-20251101
+    model claude-opus-4-6
     api_key env.ANTHROPIC_API_KEY
   }
 }
@@ -30,7 +30,7 @@ client<llm> FollowUpClassifier {
   provider anthropic
   retry_policy Retry
   options {
-    model claude-opus-4-5-20251101
+    model claude-opus-4-6
     api_key env.ANTHROPIC_API_KEY
   }
 }
@@ -39,7 +39,7 @@ client<llm> ApprovalSummarizer {
   provider anthropic
   retry_policy Retry
   options {
-    model claude-opus-4-5-20251101
+    model claude-opus-4-6
     api_key env.ANTHROPIC_API_KEY
   }
 }
@@ -48,7 +48,7 @@ client<llm> FanOutClassifier {
   provider anthropic
   retry_policy Retry
   options {
-    model claude-opus-4-5-20251101
+    model claude-opus-4-6
     api_key env.ANTHROPIC_API_KEY
   }
 }

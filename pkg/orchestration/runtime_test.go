@@ -23,6 +23,9 @@ type finalizeRunAttemptBackend struct {
 	currentRunUpdated bool
 	sleepCalls        int
 	sleptWakeReason   string
+	upsertWatchCalls  int
+	upsertWatchErr    error
+	deleteWatchCalls  int
 }
 
 func (b *finalizeRunAttemptBackend) GetAgentRunByID(_ context.Context, runID string) (*types.AgentRun, error) {
@@ -134,6 +137,16 @@ func (b *finalizeRunAttemptBackend) SleepTaskWithOutbox(
 		b.task.WakeReason = &wakeReason
 	}
 	return b.run != nil && b.run.ID == expectedRunID, nil
+}
+
+func (b *finalizeRunAttemptBackend) UpsertTaskSourceWatches(_ context.Context, _ uint, _ string, _ []repository.TaskSourceWatch) error {
+	b.upsertWatchCalls++
+	return b.upsertWatchErr
+}
+
+func (b *finalizeRunAttemptBackend) DeleteTaskSourceWatches(_ context.Context, _ string) error {
+	b.deleteWatchCalls++
+	return nil
 }
 
 type failingRuntimeSourceWatchRegistrar struct {
@@ -359,6 +372,9 @@ func TestFinalizeRunAttemptSleepsWhenSourceWatchFollowUpHasWakeSignal(t *testing
 	if err != nil {
 		t.Fatalf("finalizeRunAttempt returned error: %v", err)
 	}
+	if got, want := backend.upsertWatchCalls, 1; got != want {
+		t.Fatalf("upsert watch calls (correlation index) = %d, want %d", got, want)
+	}
 	if got, want := backend.sleepCalls, 1; got != want {
 		t.Fatalf("sleep calls = %d, want %d", got, want)
 	}
@@ -367,6 +383,9 @@ func TestFinalizeRunAttemptSleepsWhenSourceWatchFollowUpHasWakeSignal(t *testing
 	}
 	if got, want := registrar.cleanupCalls, 0; got != want {
 		t.Fatalf("cleanup calls = %d, want %d", got, want)
+	}
+	if got, want := backend.deleteWatchCalls, 0; got != want {
+		t.Fatalf("delete watch calls = %d, want %d", got, want)
 	}
 	if got, want := backend.sleptWakeReason, "Check for replies to cold outreach email sent to luke@beam.cloud"; got != want {
 		t.Fatalf("wake reason = %q, want %q", got, want)
@@ -413,6 +432,9 @@ func TestFinalizeRunAttemptSynthesizesWakeForSourceWatchFollowUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("finalizeRunAttempt returned error: %v", err)
 	}
+	if got, want := backend.upsertWatchCalls, 1; got != want {
+		t.Fatalf("upsert watch calls (correlation index) = %d, want %d", got, want)
+	}
 	if got, want := backend.sleepCalls, 1; got != want {
 		t.Fatalf("sleep calls = %d, want %d", got, want)
 	}
@@ -424,6 +446,9 @@ func TestFinalizeRunAttemptSynthesizesWakeForSourceWatchFollowUp(t *testing.T) {
 	}
 	if got, want := registrar.cleanupCalls, 0; got != want {
 		t.Fatalf("cleanup calls = %d, want %d", got, want)
+	}
+	if got, want := backend.deleteWatchCalls, 0; got != want {
+		t.Fatalf("delete watch calls = %d, want %d", got, want)
 	}
 }
 
@@ -458,7 +483,7 @@ func TestFinalizeRunAttemptForcesTaskErrorWhenCurrentRunUpdateMisses(t *testing.
 		task:              task,
 		currentRunUpdated: false,
 	}
-	registrar := &failingRuntimeSourceWatchRegistrar{err: fmt.Errorf("watch registration failed")}
+	registrar := &failingRuntimeSourceWatchRegistrar{err: fmt.Errorf("registration error")}
 	loops := &RuntimeLoops{
 		backend:              backend,
 		sourceWatchRegistrar: registrar,

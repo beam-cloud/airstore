@@ -27,13 +27,6 @@ import (
 const (
 	defaultPageSize   = 50
 	defaultMaxResults = 500
-
-	// sourceWatchBaselineGracePeriod is how long after query creation
-	// the poller re-seeds the SeenTracker baseline without emitting
-	// events. This covers source API eventual consistency — e.g. a
-	// Gmail message sent by the agent may not appear in the thread
-	// listing for several seconds. Three poller cycles (15s each) ≈ 45s.
-	sourceWatchBaselineGracePeriod = 45 * time.Second
 )
 
 // SyncResult is the outcome of a view sync operation.
@@ -166,36 +159,6 @@ func (s *SourceService) RefreshQuery(ctx context.Context, query *types.Filesyste
 	if err != nil {
 		return err
 	}
-	if sourceWatchBaselinePending(query) {
-		// Re-seed the baseline on each poller cycle during the grace
-		// period. This captures any messages the agent sent that may
-		// not have been visible in the source API immediately after
-		// registration (Gmail API eventual consistency). Events are
-		// NOT emitted during this window.
-		if err := s.seedSourceWatchBaselineFromResults(ctx, query, results); err != nil {
-			return err
-		}
-
-		age := time.Since(query.UpdatedAt)
-		if age < sourceWatchBaselineGracePeriod {
-			log.Debug().
-				Str("path", query.Path).
-				Dur("age", age).
-				Dur("grace", sourceWatchBaselineGracePeriod).
-				Int("results", len(results)).
-				Msg("source watch baseline grace period — re-seeding")
-			return nil
-		}
-		if err := s.completePendingSourceWatchBaseline(ctx, query, results); err != nil {
-			return err
-		}
-		log.Info().
-			Str("path", query.Path).
-			Str("integration", query.Integration).
-			Int("results", len(results)).
-			Msg("source watch baseline established")
-		return nil
-	}
 
 	s.emitSourceHookEvents(ctx, pctx.WorkspaceId, query, results)
 	return nil
@@ -230,6 +193,18 @@ func (s *SourceService) refreshQueryDefinition(
 	return query, nil
 }
 
+// extractCorrelationKey returns the stable entity identifier from result
+// metadata for a given integration. This is the only integration-aware
+// mapping in the source watch system.
+func extractCorrelationKey(integration string, metadata map[string]string) string {
+	switch types.SourceType(strings.ToLower(integration)) {
+	case types.SourceGmail:
+		return strings.TrimSpace(metadata["thread_id"])
+	default:
+		return strings.TrimSpace(metadata["id"])
+	}
+}
+
 // emitSourceHookEvents detects new and removed results via the seen tracker
 // and emits fs.create / fs.delete events with source metadata attached.
 // Returns the count of newly detected results.
@@ -241,11 +216,11 @@ func (s *SourceService) emitSourceHookEvents(ctx context.Context, workspaceId ui
 	queryPath := hooks.NormalizePath(query.Path)
 	seenKey := common.Keys.HookSeen(workspaceId, types.GeneratePathID(queryPath))
 
-	// Build ID list for seen-tracking and an ID→filepath map so hooks
-	// report readable paths (e.g. "/sources/linear/my-view/LIN-123_title.md")
-	// instead of opaque provider IDs.
+	// Build ID list for seen-tracking, ID→filepath map, and collect
+	// correlation keys for spawn-time routing.
 	ids := make([]string, 0, len(results))
 	idToPath := make(map[string]string, len(results))
+	idToCorrelationKey := make(map[string]string, len(results))
 	for _, r := range results {
 		id := strings.TrimSpace(r.ID)
 		if id == "" {
@@ -254,6 +229,9 @@ func (s *SourceService) emitSourceHookEvents(ctx context.Context, workspaceId ui
 		ids = append(ids, id)
 		if r.Filename != "" {
 			idToPath[id] = queryPath + "/" + r.Filename
+		}
+		if ck := extractCorrelationKey(query.Integration, r.Metadata); ck != "" {
+			idToCorrelationKey[id] = ck
 		}
 	}
 
@@ -276,32 +254,56 @@ func (s *SourceService) emitSourceHookEvents(ctx context.Context, workspaceId ui
 	}
 
 	if diff != nil && len(diff.Added) > 0 {
-		newItemsHash := hashHookItemIDs(diff.Added)
-		newPaths := make([]string, 0, len(diff.Added))
-		for _, id := range diff.Added {
-			if p, ok := idToPath[id]; ok {
-				newPaths = append(newPaths, p)
-			} else {
-				newPaths = append(newPaths, id)
+		addedForEmit := diff.Added
+
+		if len(addedForEmit) > 0 {
+			newItemsHash := hashHookItemIDs(addedForEmit)
+			newPaths := make([]string, 0, len(addedForEmit))
+			for _, id := range addedForEmit {
+				if p, ok := idToPath[id]; ok {
+					newPaths = append(newPaths, p)
+				} else {
+					newPaths = append(newPaths, id)
+				}
 			}
+
+			// Collect unique correlation keys for new items so
+			// TaskFactory can route to sleeping tasks at spawn time.
+			correlationKeysSet := make(map[string]struct{})
+			for _, id := range addedForEmit {
+				if ck, ok := idToCorrelationKey[id]; ok && ck != "" {
+					correlationKeysSet[ck] = struct{}{}
+				}
+			}
+			correlationKeys := make([]string, 0, len(correlationKeysSet))
+			for ck := range correlationKeysSet {
+				correlationKeys = append(correlationKeys, ck)
+			}
+
+			eventPayload := map[string]any{
+				"event":          hooks.EventFsCreate,
+				"workspace_id":   fmt.Sprintf("%d", workspaceId),
+				"path":           queryPath,
+				"integration":    query.Integration,
+				"new_count":      fmt.Sprintf("%d", len(addedForEmit)),
+				"new_items":      strings.Join(newPaths, ", "),
+				"new_items_hash": newItemsHash,
+			}
+			if len(correlationKeys) > 0 {
+				eventPayload["correlation_keys"] = strings.Join(correlationKeys, ",")
+			}
+
+			if emitErr := s.hookStream.Emit(ctx, eventPayload); emitErr != nil {
+				log.Error().Err(emitErr).Str("path", queryPath).Int("new_results", len(addedForEmit)).
+					Msg("failed to emit source fs.create event, will retry next poll")
+				return 0
+			}
+			log.Info().
+				Str("path", queryPath).Str("integration", query.Integration).
+				Int("new_results", len(addedForEmit)).
+				Int("correlation_keys", len(correlationKeys)).
+				Msg("source items created, fs.create event emitted")
 		}
-		if emitErr := s.hookStream.Emit(ctx, map[string]any{
-			"event":          hooks.EventFsCreate,
-			"workspace_id":   fmt.Sprintf("%d", workspaceId),
-			"path":           queryPath,
-			"integration":    query.Integration,
-			"new_count":      fmt.Sprintf("%d", len(diff.Added)),
-			"new_items":      strings.Join(newPaths, ", "),
-			"new_items_hash": newItemsHash,
-		}); emitErr != nil {
-			log.Error().Err(emitErr).Str("path", queryPath).Int("new_results", len(diff.Added)).
-				Msg("failed to emit source fs.create event, will retry next poll")
-			return 0
-		}
-		log.Info().
-			Str("path", queryPath).Str("integration", query.Integration).
-			Int("new_results", len(diff.Added)).
-			Msg("source items created, fs.create event emitted")
 	}
 
 	if diff != nil && len(diff.Removed) > 0 {

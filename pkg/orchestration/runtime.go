@@ -652,6 +652,8 @@ func (r *RuntimeLoops) applyPostRunSettlement(
 		if task == nil {
 			return r.handleRunSettlementFailure(ctx, task, runID, fmt.Errorf("apply source watch follow-up: origin task is required"))
 		}
+
+		// Primary path: create __followup__ queries and task_input hooks via registrar
 		if r.sourceWatchRegistrar == nil {
 			return r.handleRunSettlementFailure(ctx, task, runID, fmt.Errorf("apply source watch follow-up: source watch registrar is unavailable"))
 		}
@@ -662,9 +664,20 @@ func (r *RuntimeLoops) applyPostRunSettlement(
 		if blocker == nil {
 			return r.handleRunSettlementFailure(ctx, task, runID, fmt.Errorf("apply source watch follow-up: did not materialize any source views"))
 		}
-		// Source-driven follow-ups are sleeps, not human-input waits. Keep the
-		// watch metadata for registration, but let lifecycle park the task in
-		// sleeping so the UI and wake plumbing stay aligned.
+
+		// Backup path: write correlation index for cross-workspace routing
+		if r.backend != nil {
+			watches := correlationWatchesFromRequests(postRun.SourceWatchRequests)
+			if len(watches) > 0 {
+				if dbErr := r.backend.UpsertTaskSourceWatches(ctx, task.WorkspaceID, task.ID, watches); dbErr != nil {
+					log.Warn().Err(dbErr).Str("task_id", task.ID).Msg("failed to write correlation index (primary path succeeded)")
+				} else {
+					log.Info().Str("task_id", task.ID).Int("watches", len(watches)).
+						Msg("source watches written to task_source_watches correlation index")
+				}
+			}
+		}
+
 		settlement.wakeSignal = sourceWatchWakeSignal(settlement.wakeSignal, postRun.SourceWatchRequests)
 		settlement.blocker = nil
 		settlement.waitingForInput = false
@@ -673,11 +686,49 @@ func (r *RuntimeLoops) applyPostRunSettlement(
 		return r.handleRunSettlementFailure(ctx, task, runID, fmt.Errorf("settle origin task: %w", err))
 	}
 	if !sourceWatchArmed && !settlement.waitingForInput {
+		log.Info().Str("run_id", runID).Str("task_id", taskIDOrEmpty(task)).
+			Msg("no source watches armed and not waiting for input; cleaning up task source watches")
 		if err := r.cleanupTaskSourceWatches(ctx, task); err != nil {
 			log.Warn().Err(err).Str("run_id", runID).Msg("failed to clean up source watches")
 		}
 	}
 	return nil
+}
+
+func correlationKeyForWatch(req *types.SourceWatchRequest) string {
+	if req.ThreadID != "" {
+		return req.ThreadID
+	}
+	if req.EntityKey != "" {
+		return req.EntityKey
+	}
+	return ""
+}
+
+func correlationWatchesFromRequests(requests []*types.SourceWatchRequest) []repository.TaskSourceWatch {
+	watches := make([]repository.TaskSourceWatch, 0, len(requests))
+	seen := make(map[string]struct{})
+	for _, req := range requests {
+		normalized := types.NormalizeSourceWatchRequest(req)
+		if normalized == nil {
+			continue
+		}
+		key := correlationKeyForWatch(normalized)
+		if key == "" {
+			continue
+		}
+		dedup := strings.ToLower(normalized.Integration) + "\x00" + key
+		if _, exists := seen[dedup]; exists {
+			continue
+		}
+		seen[dedup] = struct{}{}
+		watches = append(watches, repository.TaskSourceWatch{
+			Integration:    strings.ToLower(strings.TrimSpace(normalized.Integration)),
+			CorrelationKey: key,
+			Reason:         strings.TrimSpace(normalized.Reason),
+		})
+	}
+	return watches
 }
 
 func (r *RuntimeLoops) handleRunSettlementFailure(
@@ -923,13 +974,22 @@ func firstNonEmptySourceWatchValue(values ...string) string {
 }
 
 func (r *RuntimeLoops) cleanupTaskSourceWatches(ctx context.Context, task *types.AgentTask) error {
-	if r.sourceWatchRegistrar == nil {
-		return nil
-	}
 	if task == nil {
 		return nil
 	}
-	return r.sourceWatchRegistrar.CleanupTaskSourceWatches(ctx, task)
+	// Clean up primary path (queries + hooks)
+	if r.sourceWatchRegistrar != nil {
+		if err := r.sourceWatchRegistrar.CleanupTaskSourceWatches(ctx, task); err != nil {
+			log.Warn().Err(err).Str("task_id", task.ID).Msg("failed to clean up source watch queries/hooks")
+		}
+	}
+	// Clean up backup path (correlation index)
+	if r.backend != nil {
+		if err := r.backend.DeleteTaskSourceWatches(ctx, task.ID); err != nil {
+			log.Warn().Err(err).Str("task_id", task.ID).Msg("failed to clean up source watch correlation index")
+		}
+	}
+	return nil
 }
 
 func (r *RuntimeLoops) originTaskForRun(ctx context.Context, runID string) (*types.AgentTask, error) {

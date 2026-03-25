@@ -114,6 +114,16 @@ function ClassifyFollowUp(message: string, user_message: string?, now_rfc3339: s
       still FOLLOW_UP even if it does not explicitly restate that the send or
       prior action already happened.
 
+    GROUNDING (critical):
+    - ONLY reference thread IDs, message IDs, contacts, addresses, and
+      entities that explicitly appear in the agent's message above.
+    - NEVER invent, extrapolate, or fabricate additional threads, contacts,
+      or entities beyond what the agent actually mentions.
+    - If the agent sent one email to one recipient, return exactly one
+      source_watch_request and one agenda item — not more.
+    - The follow_up_prompt must only mention real threads and contacts
+      from the agent's message. Do not pad it with hypothetical entries.
+
     Current time (RFC3339 UTC):
     ---
     {{ now_rfc3339 }}

@@ -38,12 +38,12 @@ type AgentService struct {
 	dispatchConsumerID   string
 	resultConsumerID     string
 	instanceController   *ExecutionInstanceController
-	lifecycle            *TaskLifecycle
-	taskFlows            *TaskFlows
-	resumeBarrier        *ResumeBarrier
-	runFactory           *RunFactory
-	runtimeLoops         *RuntimeLoops
 	sourceWatchRegistrar SourceWatchRegistrar
+	lifecycle    *TaskLifecycle
+	taskFlows    *TaskFlows
+	resumeBarrier *ResumeBarrier
+	runFactory    *RunFactory
+	runtimeLoops  *RuntimeLoops
 }
 
 func NewAgentService(

@@ -1649,6 +1649,61 @@ func TestMaterializeTaskGroupFallsBackToMarkerWhenOutputsChanged(t *testing.T) {
 	}
 }
 
+func TestCollectMappingFieldsPropertyListingData(t *testing.T) {
+	data := map[string]any{
+		"address":       "512 Lyell Ave, Rochester, NY 14606",
+		"market":        "Rochester, NY",
+		"sq_ft":         float64(2000),
+		"rent":          float64(1200),
+		"rent_per_sqft": float64(0.60),
+		"rent_note":     "$0.60/SF/month (~$7.20/SF/year)",
+		"lease_type":    "NNN",
+		"broker":        "Jane Smith",
+		"broker_phone":  "555-1234",
+		"broker_email":  "jane@example.com",
+	}
+
+	fields := collectMappingFields(data)
+	if len(fields) == 0 {
+		t.Fatal("expected non-empty fields from property listing data")
+	}
+
+	fieldsByPath := make(map[string]string)
+	for _, f := range fields {
+		fieldsByPath[f.Path] = f.Value
+	}
+
+	for _, key := range []string{"address", "market", "sq_ft", "rent", "lease_type", "broker", "broker_phone", "broker_email"} {
+		if _, ok := fieldsByPath[key]; !ok {
+			t.Errorf("expected field %q to be collected, but it was missing", key)
+		}
+	}
+}
+
+func TestCollectMappingFieldsFiltersInternalKeys(t *testing.T) {
+	data := map[string]any{
+		"_source_result": map[string]any{"raw": "data"},
+		"_source_input":  "hidden",
+		"address":        "512 Lyell Ave",
+		"rent":           float64(1200),
+	}
+
+	filtered := filterInternalKeys(data)
+	fields := collectMappingFields(filtered)
+
+	fieldsByPath := make(map[string]string)
+	for _, f := range fields {
+		fieldsByPath[f.Path] = f.Value
+	}
+
+	if _, ok := fieldsByPath["_source_result"]; ok {
+		t.Error("internal key _source_result should have been filtered")
+	}
+	if _, ok := fieldsByPath["address"]; !ok {
+		t.Error("expected address field to survive filtering")
+	}
+}
+
 func newRecipeOutput(id string) *types.TaskOutput {
 	return &types.TaskOutput{
 		ID:         id,

@@ -113,6 +113,14 @@ func (w *Worker) classifyFollowUp(
 	result := &types.RunExecutionPostRun{
 		SourceWatchRequests: normalizeSourceWatchRequests(fu.Source_watch_requests, tracker, fu.Reason),
 	}
+	droppedCount := len(fu.Source_watch_requests) - len(result.SourceWatchRequests)
+	if debugFollowUp && droppedCount > 0 {
+		log.Warn().
+			Int("raw", len(fu.Source_watch_requests)).
+			Int("survived", len(result.SourceWatchRequests)).
+			Int("dropped", droppedCount).
+			Msg("source watch normalization dropped hallucinated watches")
+	}
 
 	shouldCreateWakeSignal := int(fu.Delay_minutes) > 0 || fu.Reason != nil || fu.Follow_up_prompt != nil || len(fu.Wake_agenda) > 0 || len(result.SourceWatchRequests) == 0
 	if !shouldCreateWakeSignal {
@@ -125,6 +133,9 @@ func (w *Worker) classifyFollowUp(
 	}
 	if fu.Follow_up_prompt != nil {
 		ws.FollowUpPrompt = strings.TrimSpace(*fu.Follow_up_prompt)
+	}
+	if droppedCount > 0 {
+		ws.FollowUpPrompt = sanitizeFollowUpPrompt(ws.FollowUpPrompt, result.SourceWatchRequests)
 	}
 	for idx, item := range fu.Wake_agenda {
 		agendaItem := &types.TaskWakeAgendaItem{
@@ -201,8 +212,13 @@ func normalizeSourceWatchRequests(
 			IncludeInline:      item.Include_inline,
 			IncludeMessageBody: item.Include_message_body,
 		}
-		if tracked := bestMatchingTrackedSourceWatchRequest(req, trackedFallbacks); tracked != nil {
+		tracked := bestMatchingTrackedSourceWatchRequest(req, trackedFallbacks)
+		if tracked != nil {
 			req = types.MergeSourceWatchRequests(req, tracked)
+		} else if req.ThreadID != "" || req.MessageID != "" {
+			// Classifier returned a specific thread/message ID that doesn't
+			// match any tracked output -- likely a hallucination. Drop it.
+			continue
 		}
 		add(req)
 	}
@@ -462,6 +478,69 @@ func normalizePlannedSourceWatchRequest(req *types.SourceWatchRequest, fallbackR
 		normalized.IncludeMessageBody = true
 	}
 	return types.NormalizeSourceWatchRequest(normalized)
+}
+
+var threadIDLikeRE = regexp.MustCompile(`[0-9a-fA-F]{12,}`)
+
+// sanitizeFollowUpPrompt strips references to thread IDs that are NOT in the
+// surviving source watch requests. This prevents hallucinated thread references
+// from the BAML classifier from leaking into the agent's wake prompt.
+func sanitizeFollowUpPrompt(prompt string, surviving []*types.SourceWatchRequest) string {
+	if strings.TrimSpace(prompt) == "" || len(surviving) == 0 {
+		return prompt
+	}
+	validThreadIDs := make(map[string]struct{}, len(surviving))
+	for _, req := range surviving {
+		if tid := strings.TrimSpace(req.ThreadID); tid != "" {
+			validThreadIDs[tid] = struct{}{}
+		}
+	}
+	if len(validThreadIDs) == 0 {
+		return prompt
+	}
+	lines := strings.Split(prompt, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		ids := threadIDLikeRE.FindAllString(line, -1)
+		if len(ids) == 0 {
+			kept = append(kept, line)
+			continue
+		}
+		hasValid := false
+		hasInvalid := false
+		for _, id := range ids {
+			if _, ok := validThreadIDs[id]; ok {
+				hasValid = true
+			} else {
+				hasInvalid = true
+			}
+		}
+		if hasInvalid && !hasValid {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	result := strings.TrimSpace(strings.Join(kept, "\n"))
+	if result == "" {
+		return rebuildFollowUpPromptFromWatches(surviving)
+	}
+	return result
+}
+
+func rebuildFollowUpPromptFromWatches(watches []*types.SourceWatchRequest) string {
+	if len(watches) == 0 {
+		return ""
+	}
+	lines := []string{"Resume this task and check the following watched sources for updates:"}
+	for _, w := range watches {
+		label := firstNonEmptyTrimmed(w.EntityLabel, w.EntityKey)
+		if w.ThreadID != "" {
+			lines = append(lines, fmt.Sprintf("- %s thread %s: check for new replies and continue the follow-up", w.Integration, w.ThreadID))
+		} else if label != "" {
+			lines = append(lines, fmt.Sprintf("- %s: %s", w.Integration, label))
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func derefString(value *string) string {
