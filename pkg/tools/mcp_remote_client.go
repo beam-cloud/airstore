@@ -28,6 +28,9 @@ type MCPRemoteClient struct {
 	// Transport mode
 	useHTTPTransport bool // true = Streamable HTTP, false = SSE
 
+	// resolvedURL is the URL after environment variable expansion
+	resolvedURL string
+
 	// Session ID for Streamable HTTP transport
 	sessionId string
 
@@ -74,12 +77,15 @@ func (c *MCPRemoteClient) Start(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Expand environment variables in the URL
+	c.resolvedURL = os.ExpandEnv(c.config.URL)
+
 	transport := c.config.GetTransport()
 	c.useHTTPTransport = transport == types.MCPTransportHTTP
 
 	// For HTTP transport, use the URL directly as the message endpoint
 	if c.useHTTPTransport {
-		c.messageEndpoint = c.config.URL
+		c.messageEndpoint = c.resolvedURL
 	} else {
 		// SSE transport: connect to SSE endpoint
 		if err := c.connectSSE(ctx); err != nil {
@@ -101,7 +107,7 @@ func (c *MCPRemoteClient) Start(ctx context.Context) error {
 
 // connectSSE establishes the SSE connection (for SSE transport)
 func (c *MCPRemoteClient) connectSSE(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", c.config.URL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", c.resolvedURL, nil)
 	if err != nil {
 		return fmt.Errorf("create SSE request: %w", err)
 	}
@@ -183,7 +189,7 @@ func (c *MCPRemoteClient) readEndpointEvent(ctx context.Context) error {
 			// Handle relative URLs
 			if strings.HasPrefix(c.messageEndpoint, "/") {
 				// Extract base URL from SSE URL
-				baseURL := c.config.URL
+				baseURL := c.resolvedURL
 				if idx := strings.Index(baseURL, "://"); idx != -1 {
 					if slashIdx := strings.Index(baseURL[idx+3:], "/"); slashIdx != -1 {
 						baseURL = baseURL[:idx+3+slashIdx]

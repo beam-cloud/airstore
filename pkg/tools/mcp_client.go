@@ -90,18 +90,25 @@ func (c *MCPStdioClient) Start(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Expand environment variables in command fields
+	command := os.ExpandEnv(c.config.Command)
+	args := make([]string, len(c.config.Args))
+	for i, arg := range c.config.Args {
+		args[i] = os.ExpandEnv(arg)
+	}
+
 	// Build command
-	c.cmd = exec.CommandContext(ctx, c.config.Command, c.config.Args...)
+	c.cmd = exec.CommandContext(ctx, command, args...)
 
 	log.Debug().
 		Str("server", c.name).
-		Str("command", c.config.Command).
-		Strs("args", c.config.Args).
+		Str("command", command).
+		Strs("args", args).
 		Msg("starting MCP server process")
 
 	// Set working directory if specified
 	if c.config.WorkingDir != "" {
-		c.cmd.Dir = c.config.WorkingDir
+		c.cmd.Dir = os.ExpandEnv(c.config.WorkingDir)
 	}
 
 	// Set environment

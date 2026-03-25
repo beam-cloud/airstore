@@ -383,6 +383,85 @@ func TestMCPRemoteClient_IsRemote(t *testing.T) {
 	}
 }
 
+func TestMCPRemoteClient_EnvVarExpansionInAuth(t *testing.T) {
+	const (
+		tokenEnvKey   = "MCP_TEST_REMOTE_TOKEN"
+		tokenEnvValue = "remote-secret-abc"
+		headerEnvKey  = "MCP_TEST_REMOTE_HEADER"
+		headerEnvValue = "header-value-xyz"
+	)
+	t.Setenv(tokenEnvKey, tokenEnvValue)
+	t.Setenv(headerEnvKey, headerEnvValue)
+
+	var receivedAuth string
+	var receivedCustomHeader string
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sse", func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		receivedCustomHeader = r.Header.Get("X-Custom-Token")
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "event: endpoint\ndata: /message\n\n")
+		time.Sleep(100 * time.Millisecond)
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := NewMCPRemoteClient("test-env-auth", types.MCPServerConfig{
+		URL: server.URL + "/sse",
+		Auth: &types.MCPAuthConfig{
+			Token: fmt.Sprintf("${%s}", tokenEnvKey),
+			Headers: map[string]string{
+				"X-Custom-Token": fmt.Sprintf("${%s}", headerEnvKey),
+			},
+		},
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Start will fail at the MCP protocol level but auth headers will be sent
+	client.Start(ctx)
+	client.Close()
+
+	expectedAuth := "Bearer " + tokenEnvValue
+	if receivedAuth != expectedAuth {
+		t.Errorf("auth token expansion: expected %q, got %q", expectedAuth, receivedAuth)
+	}
+
+	if receivedCustomHeader != headerEnvValue {
+		t.Errorf("auth header expansion: expected %q, got %q", headerEnvValue, receivedCustomHeader)
+	}
+}
+
+func TestMCPRemoteClient_EnvVarExpansionInURL(t *testing.T) {
+	server := newMockMCPServer(t)
+	defer server.Close()
+
+	// Store the server URL in an env var and reference it via ${} syntax
+	urlEnvKey := "MCP_TEST_SERVER_URL"
+	t.Setenv(urlEnvKey, server.URL())
+
+	client := NewMCPRemoteClient("test-url-expand", types.MCPServerConfig{
+		URL: fmt.Sprintf("${%s}", urlEnvKey),
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := client.Start(ctx); err != nil {
+		t.Fatalf("URL env var expansion failed: %v", err)
+	}
+	defer client.Close()
+
+	info := client.ServerInfo()
+	if info == nil || info.Name != "mock-server" {
+		t.Errorf("unexpected server info after URL expansion: %+v", info)
+	}
+}
+
 func TestMCPRemoteClient_CloseIdempotent(t *testing.T) {
 	server := newMockMCPServer(t)
 	defer server.Close()
