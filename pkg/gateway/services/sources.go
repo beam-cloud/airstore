@@ -55,6 +55,7 @@ type SourceService struct {
 	connCache     sync.Map           // map[uint]*cachedConnSet
 	queryGroup    singleflight.Group // deduplicates synchronous query execution
 	hookStream    common.EventEmitter
+	eventBus      *common.EventBus
 	seenTracker   *hooks.SeenTracker
 
 	// Compression middleware (optional).
@@ -70,6 +71,10 @@ type SourceServiceOption func(*SourceService)
 
 func WithHookStream(emitter common.EventEmitter) SourceServiceOption {
 	return func(s *SourceService) { s.hookStream = emitter }
+}
+
+func WithEventBus(bus *common.EventBus) SourceServiceOption {
+	return func(s *SourceService) { s.eventBus = bus }
 }
 
 func WithSeenTracker(tracker *hooks.SeenTracker) SourceServiceOption {

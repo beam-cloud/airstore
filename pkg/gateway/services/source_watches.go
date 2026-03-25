@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/hooks"
 	"github.com/beam-cloud/airstore/pkg/orchestration"
 	"github.com/beam-cloud/airstore/pkg/repository"
@@ -222,6 +223,10 @@ func (c *taskSourceWatchController) register(
 		return nil, err
 	}
 
+	if createdQuery {
+		c.service.SeedSeenBaseline(ctx, c.task.WorkspaceID, query)
+	}
+
 	return &sourceWatchRegistration{
 		Query:   query,
 		Hook:    hook,
@@ -291,6 +296,7 @@ func (c *taskSourceWatchController) upsertHook(
 		if err := c.service.fsStore.UpdateHook(ctx, existing); err != nil {
 			return nil, false, fmt.Errorf("update source watch hook: %w", err)
 		}
+		c.service.invalidateHookCache(c.task.WorkspaceID)
 		return existing, false, nil
 	}
 
@@ -310,7 +316,21 @@ func (c *taskSourceWatchController) upsertHook(
 	if err != nil {
 		return nil, false, fmt.Errorf("create source watch hook: %w", err)
 	}
+	c.service.invalidateHookCache(c.task.WorkspaceID)
 	return created, true, nil
+}
+
+func (s *SourceService) invalidateHookCache(workspaceID uint) {
+	if s.eventBus == nil {
+		return
+	}
+	s.eventBus.Emit(common.Event{
+		Type: common.EventCacheInvalidate,
+		Data: map[string]any{
+			"scope":        "hooks",
+			"workspace_id": workspaceID,
+		},
+	})
 }
 
 func (s *SourceService) findHookByPath(ctx context.Context, workspaceID uint, queryPath string) (*types.Hook, error) {

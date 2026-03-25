@@ -339,6 +339,45 @@ func (s *SourceService) emitSourceHookEvents(ctx context.Context, workspaceId ui
 	return newCount
 }
 
+// SeedSeenBaseline marks a query path as "initialized" in the SeenTracker
+// with its current results so the first poller run diffs properly instead
+// of treating all existing items as new (the bootstrap-emit path).
+func (s *SourceService) SeedSeenBaseline(ctx context.Context, workspaceID uint, query *types.FilesystemQuery) {
+	if s.seenTracker == nil {
+		return
+	}
+
+	queryPath := hooks.NormalizePath(query.Path)
+
+	pctx := &sources.ProviderContext{WorkspaceId: query.WorkspaceId}
+	pctx, connected := s.loadQueryCredentials(ctx, pctx, query)
+	if !connected {
+		log.Warn().Str("path", queryPath).Msg("seed baseline: not connected, skipping")
+		return
+	}
+
+	results, err := s.executeAndCacheQuery(ctx, pctx, query)
+	if err != nil {
+		log.Warn().Err(err).Str("path", queryPath).Msg("seed baseline: query failed, skipping")
+		return
+	}
+
+	seenKey := common.Keys.HookSeen(workspaceID, types.GeneratePathID(queryPath))
+	ids := make([]string, 0, len(results))
+	for _, r := range results {
+		if id := strings.TrimSpace(r.ID); id != "" {
+			ids = append(ids, id)
+		}
+	}
+
+	if err := s.seenTracker.Commit(ctx, seenKey, ids); err != nil {
+		log.Warn().Err(err).Str("path", queryPath).Msg("seed baseline: commit failed")
+		return
+	}
+	log.Info().Str("path", queryPath).Int("baseline_items", len(ids)).
+		Msg("seeded seen baseline from actual query results")
+}
+
 func hashHookItemIDs(ids []string) string {
 	if len(ids) == 0 {
 		return ""
