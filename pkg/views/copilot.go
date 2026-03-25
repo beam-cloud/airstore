@@ -1796,6 +1796,96 @@ func canonicalizeAgentRef(ref string, resolver agentReferenceResolver) string {
 	return trimmed
 }
 
+// findOrCreateAgent returns the existing agent for the given key, or creates
+// one if it doesn't exist. This is the agent equivalent of installWorkspaceSkill
+// — idempotent so the model can emit CREATE_AGENT freely without worrying about
+// duplicates.
+func (c *Copilot) findOrCreateAgent(ctx context.Context, workspaceID uint, key, name string, config map[string]any) (*types.AgentProfile, error) {
+	if profile, err := c.backend.GetAgentProfileByKey(ctx, workspaceID, key); err == nil && profile != nil {
+		if len(config) > 0 {
+			if updated, err := c.agentAPI.UpdateAgent(ctx, workspaceID, profile.ID, nil, nil, nil, nil, nil, config, nil); err == nil {
+				return updated, nil
+			}
+		}
+		return profile, nil
+	}
+	return c.agentAPI.CreateAgent(ctx, workspaceID, key, name, config, nil)
+}
+
+// EnsureViewAgentsExist creates any agents referenced in the view that don't
+// exist yet — handles the case where the model puts agent names in the view
+// without emitting CREATE_AGENT operations.
+func (c *Copilot) EnsureViewAgentsExist(ctx context.Context, workspaceID uint, viewContent string) []OperationResult {
+	if c.agentAPI == nil || viewContent == "" {
+		return nil
+	}
+	var def types.ViewDefinition
+	if err := json.Unmarshal([]byte(viewContent), &def); err != nil {
+		return nil
+	}
+
+	agents := c.loadWorkspaceAgents(ctx, workspaceID)
+	resolver := buildAgentReferenceResolver(agents, nil)
+
+	var results []OperationResult
+	for _, ref := range collectAllViewAgentRefs(&def) {
+		if canonicalizeAgentRef(ref, resolver) != ref {
+			continue
+		}
+		if _, err := uuid.Parse(ref); err == nil {
+			continue
+		}
+		name := agentNameFromKey(ref)
+		profile, err := c.findOrCreateAgent(ctx, workspaceID, toAgentKey(name), name, nil)
+		if err != nil {
+			continue
+		}
+		results = append(results, OperationResult{
+			Type: string(bamltypes.OperationTypeCREATE_AGENT), Name: name, Status: "done", AgentID: profile.ID,
+		})
+		resolver.byID[profile.ID] = profile.ID
+		resolver.byKey[strings.ToLower(toAgentKey(name))] = profile.ID
+	}
+	return results
+}
+
+func collectAllViewAgentRefs(def *types.ViewDefinition) []string {
+	refs := append([]string{}, def.Agents...)
+	for _, sheet := range def.Sheets {
+		for _, comp := range sheet.Components {
+			if ds := comp.DataSource; ds != nil {
+				refs = append(refs, ds.AgentID)
+				refs = append(refs, ds.AgentIDs...)
+			}
+			if comp.Config != nil {
+				if ref, _ := comp.Config["agent_id"].(string); ref != "" {
+					refs = append(refs, ref)
+				}
+				refs = append(refs, configAgentIDs(comp.Config["agent_ids"])...)
+			}
+		}
+	}
+	for _, action := range def.Actions {
+		if action.Config != nil {
+			if ref, _ := action.Config["agent_id"].(string); ref != "" {
+				refs = append(refs, ref)
+			}
+			refs = append(refs, configAgentIDs(action.Config["agent_ids"])...)
+		}
+	}
+	return uniqueTrimmedStrings(refs)
+}
+
+func agentNameFromKey(key string) string {
+	words := strings.Split(strings.TrimSpace(key), "-")
+	for i, w := range words {
+		if w != "" {
+			words[i] = strings.ToUpper(w[:1]) + w[1:]
+		}
+	}
+	return strings.Join(words, " ")
+}
+
 func findUniqueAgentProfileByName(agents []*types.AgentProfile, name string) *types.AgentProfile {
 	normalized := strings.ToLower(strings.TrimSpace(name))
 	if normalized == "" {
@@ -2189,7 +2279,7 @@ func (c *Copilot) executeOne(ctx context.Context, workspaceID uint, op bamltypes
 		key := toAgentKey(name)
 		config := configFromPayload(payload, state)
 
-		profile, err := c.agentAPI.CreateAgent(ctx, workspaceID, key, name, config, nil)
+		profile, err := c.findOrCreateAgent(ctx, workspaceID, key, name, config)
 		if err != nil {
 			return fail(name, err.Error())
 		}

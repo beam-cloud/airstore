@@ -301,6 +301,66 @@ func TestAgentAliasResolution(t *testing.T) {
 	}
 }
 
+func TestAgentNameFromKey(t *testing.T) {
+	tests := []struct {
+		key  string
+		want string
+	}{
+		{"email-outreach", "Email Outreach"},
+		{"research", "Research"},
+		{"lead-gen-agent", "Lead Gen Agent"},
+		{"", ""},
+		{"  hiring-pipeline  ", "Hiring Pipeline"},
+	}
+	for _, tt := range tests {
+		if got := agentNameFromKey(tt.key); got != tt.want {
+			t.Errorf("agentNameFromKey(%q) = %q, want %q", tt.key, got, tt.want)
+		}
+	}
+}
+
+func TestCollectAllViewAgentRefs(t *testing.T) {
+	def := &types.ViewDefinition{
+		Agents: []string{"agent-a"},
+		Sheets: []types.SheetSpec{{
+			ID: "sheet-1",
+			Components: []types.ComponentSpec{
+				{
+					ID:   "table-1",
+					Type: types.ComponentTypeTable,
+					DataSource: &types.DataSource{
+						AgentID: "agent-b",
+					},
+				},
+				{
+					ID:   "action-1",
+					Type: types.ComponentTypeAction,
+					Config: map[string]any{
+						"agent_id": "agent-c",
+					},
+				},
+			},
+		}},
+		Actions: []types.ComponentSpec{{
+			ID:   "a1",
+			Type: types.ComponentTypeAction,
+			Config: map[string]any{
+				"agent_id": "agent-d",
+			},
+		}},
+	}
+
+	refs := collectAllViewAgentRefs(def)
+	want := map[string]bool{"agent-a": true, "agent-b": true, "agent-c": true, "agent-d": true}
+	got := map[string]bool{}
+	for _, r := range refs {
+		got[r] = true
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("collectAllViewAgentRefs = %v, want %v", refs, want)
+	}
+}
+
 func TestCanonicalizeViewAgentRefsUsesOperationResultsForNewAgents(t *testing.T) {
 	def := types.ViewDefinition{
 		Name:        "Recipe extraction",
