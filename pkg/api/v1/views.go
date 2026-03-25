@@ -1524,8 +1524,24 @@ func (vg *ViewsGroup) ChatView(c echo.Context) error {
 		}
 	}
 
-	// Always reconcile view content with fresh agents from the DB so agent
-	// references are resolved to real UUIDs — not just when operations ran.
+	// Ensure all agents referenced in the view actually exist. The model may
+	// reference agents by name/key without emitting CREATE_AGENT operations.
+	if session.chatState.ViewContent != "" {
+		ensured := vg.copilot.EnsureViewAgentsExist(genCtx, workspaceID, session.chatState.ViewContent)
+		for _, r := range ensured {
+			writeSSE(viewSSEEvent{
+				Event:     "operation",
+				OpType:    r.Type,
+				OpName:    r.Name,
+				OpStatus:  r.Status,
+				OpAgentID: r.AgentID,
+			})
+		}
+		opResults = append(opResults, ensured...)
+	}
+
+	// Reconcile view content with fresh agents from the DB so agent
+	// references are resolved to real UUIDs.
 	if session.chatState.ViewContent != "" {
 		if reconciled, reconcileErr := vg.copilot.ReconcileViewContent(genCtx, workspaceID, session.chatState.ViewContent, opResults); reconcileErr != nil {
 			log.Warn().Err(reconcileErr).Str("view_id", viewID).Msg("failed to reconcile view content")
