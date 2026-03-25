@@ -29,9 +29,10 @@ const (
 
 // StorageClient manages S3 operations for workspace storage
 type StorageClient struct {
-	s3      *s3.Client
-	presign *s3.PresignClient
-	cfg     types.WorkspaceStorageConfig
+	s3            *s3.Client
+	presign       *s3.PresignClient
+	presignPublic *s3.PresignClient // signed against the public endpoint for browser-facing URLs
+	cfg           types.WorkspaceStorageConfig
 }
 
 // BucketPrefix returns the configured bucket name prefix.
@@ -64,16 +65,34 @@ func NewStorageClient(ctx context.Context, cfg types.WorkspaceStorageConfig) (*S
 		}
 	})
 
+	presignClient := s3.NewPresignClient(s3Client)
+
+	// When a public endpoint differs from the internal one, create a separate
+	// presign client bound to the public host. Presigned URLs include the host
+	// in the signature — if we sign with the internal host and then rewrite the
+	// URL, the signature is invalid. This way the signature is computed against
+	// the host the browser will actually connect to.
+	presignPublicClient := presignClient
+	if cfg.PublicEndpointUrl != "" && cfg.PublicEndpointUrl != cfg.DefaultEndpointUrl {
+		publicS3 := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+			o.BaseEndpoint = &cfg.PublicEndpointUrl
+			o.UsePathStyle = true
+		})
+		presignPublicClient = s3.NewPresignClient(publicS3)
+	}
+
 	log.Info().
 		Str("region", cfg.DefaultRegion).
 		Str("endpoint", cfg.DefaultEndpointUrl).
+		Str("public_endpoint", cfg.PublicEndpointUrl).
 		Str("bucket_prefix", cfg.DefaultBucketPrefix).
 		Msg("storage client initialized")
 
 	return &StorageClient{
-		s3:      s3Client,
-		presign: s3.NewPresignClient(s3Client),
-		cfg:     cfg,
+		s3:            s3Client,
+		presign:       presignClient,
+		presignPublic: presignPublicClient,
+		cfg:           cfg,
 	}, nil
 }
 
@@ -234,20 +253,9 @@ func IsNotFoundError(err error) bool {
 	return strings.Contains(errStr, "NotFound") || strings.Contains(errStr, "NoSuchKey")
 }
 
-// Presigned URL operations
+// Presigned URL operations — use presignPublic so the signature is computed
+// against the host the browser will actually connect to.
 
-// rewritePresignedURL replaces the internal S3 endpoint with the public one
-// so that presigned URLs are reachable from browsers.
-func (c *StorageClient) rewritePresignedURL(raw string) string {
-	pub := c.cfg.PublicEndpointUrl
-	priv := c.cfg.DefaultEndpointUrl
-	if pub != "" && priv != "" && pub != priv {
-		return strings.Replace(raw, priv, pub, 1)
-	}
-	return raw
-}
-
-// PresignUpload generates a presigned PUT URL for uploading a file
 func (c *StorageClient) PresignUpload(ctx context.Context, bucket, key, contentType string, expires time.Duration) (string, error) {
 	input := &s3.PutObjectInput{
 		Bucket: aws.String(bucket),
@@ -257,18 +265,17 @@ func (c *StorageClient) PresignUpload(ctx context.Context, bucket, key, contentT
 		input.ContentType = aws.String(contentType)
 	}
 
-	resp, err := c.presign.PresignPutObject(ctx, input, func(opts *s3.PresignOptions) {
+	resp, err := c.presignPublic.PresignPutObject(ctx, input, func(opts *s3.PresignOptions) {
 		opts.Expires = expires
 	})
 	if err != nil {
 		return "", fmt.Errorf("presign upload: %w", err)
 	}
-	return c.rewritePresignedURL(resp.URL), nil
+	return resp.URL, nil
 }
 
-// PresignDownload generates a presigned GET URL for downloading a file
 func (c *StorageClient) PresignDownload(ctx context.Context, bucket, key string, expires time.Duration) (string, error) {
-	resp, err := c.presign.PresignGetObject(ctx, &s3.GetObjectInput{
+	resp, err := c.presignPublic.PresignGetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
 	}, func(opts *s3.PresignOptions) {
@@ -277,5 +284,5 @@ func (c *StorageClient) PresignDownload(ctx context.Context, bucket, key string,
 	if err != nil {
 		return "", fmt.Errorf("presign download: %w", err)
 	}
-	return c.rewritePresignedURL(resp.URL), nil
+	return resp.URL, nil
 }
