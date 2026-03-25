@@ -41,6 +41,18 @@ type ImportResult struct {
 	ParseErrors []string `json:"parse_errors,omitempty"`
 }
 
+type columnCreateSpec struct {
+	Key     string
+	Label   string
+	ColType string
+}
+
+type schemaUpdate struct {
+	NewCols       []columnCreateSpec
+	RemoveCols    []string
+	ColumnOrder   []string
+}
+
 func ImportData(ctx context.Context, p ImportParams) (*ImportResult, error) {
 	if p.Store == nil || !p.Store.Available() {
 		return nil, fmt.Errorf("data store not configured")
@@ -78,11 +90,12 @@ func ImportData(ctx context.Context, p ImportParams) (*ImportResult, error) {
 	}
 
 	colMapping := p.ColMapping
+	var update schemaUpdate
 	if len(colMapping) == 0 {
-		colMapping = resolveColumnMapping(ctx, p.Backend, p.WorkspaceID, p.ViewID, p.SheetID, p.ComponentID, headers)
+		colMapping, update = resolveColumnMapping(ctx, p.Backend, p.WorkspaceID, p.ViewID, p.SheetID, p.ComponentID, headers, records)
 	}
 
-	newCols, err := syncColumnsToView(ctx, p.Backend, p.WorkspaceID, p.ViewID, p.SheetID, p.ComponentID, headers, colMapping)
+	newCols, err := syncColumnsToView(ctx, p.Backend, p.WorkspaceID, p.ViewID, p.SheetID, p.ComponentID, update)
 	if err != nil {
 		log.Warn().Err(err).Str("view_id", p.ViewID).Msg("import: failed to sync columns to view definition (data will still be imported)")
 	}
@@ -262,21 +275,14 @@ func buildImportRows(records []map[string]string, colMapping map[string]string, 
 	return rows
 }
 
-// capColumns returns at most maxVisible keys, preserving the original order
-// from the source file. No domain-specific heuristics — the file author's
-// column ordering is respected as-is.
-func capColumns(keys []string, maxVisible int) []string {
-	if len(keys) <= maxVisible {
-		return keys
-	}
-	return keys[:maxVisible]
-}
-
-// syncColumnsToView adds any missing column definitions to the view's table
-// component config so that the resolver can render imported data. Returns the
-// list of newly added column keys.
-func syncColumnsToView(ctx context.Context, backend repository.BackendRepository, workspaceID uint, viewID, sheetID, componentID string, headers []string, colMapping map[string]string) ([]string, error) {
+// syncColumnsToView applies a schema update to the view's table component:
+// removes redundant columns, adds new columns, and reorders everything per
+// the BAML mapper's recommendation. Returns the list of newly added column keys.
+func syncColumnsToView(ctx context.Context, backend repository.BackendRepository, workspaceID uint, viewID, sheetID, componentID string, update schemaUpdate) ([]string, error) {
 	if backend == nil {
+		return nil, nil
+	}
+	if len(update.NewCols) == 0 && len(update.RemoveCols) == 0 && len(update.ColumnOrder) == 0 {
 		return nil, nil
 	}
 
@@ -285,14 +291,12 @@ func syncColumnsToView(ctx context.Context, backend repository.BackendRepository
 		return nil, fmt.Errorf("get view: %w", err)
 	}
 
-	var targetSheet *types.SheetSpec
 	var targetComp *types.ComponentSpec
 	for si := range v.Definition.Sheets {
 		if v.Definition.Sheets[si].ID == sheetID {
-			targetSheet = &v.Definition.Sheets[si]
-			for ci := range targetSheet.Components {
-				if targetSheet.Components[ci].ID == componentID {
-					targetComp = &targetSheet.Components[ci]
+			for ci := range v.Definition.Sheets[si].Components {
+				if v.Definition.Sheets[si].Components[ci].ID == componentID {
+					targetComp = &v.Definition.Sheets[si].Components[ci]
 					break
 				}
 			}
@@ -303,70 +307,91 @@ func syncColumnsToView(ctx context.Context, backend repository.BackendRepository
 		return nil, fmt.Errorf("component %s not found in sheet %s", componentID, sheetID)
 	}
 
-	existingKeys := existingColumnKeys(targetComp.Config)
-	existingCount := len(existingKeys)
-
-	var candidateKeys []string
-	labelByKey := make(map[string]string)
-	for _, header := range headers {
-		key := colMapping[header]
-		if key == "" || existingKeys[key] {
-			continue
-		}
-		existingKeys[key] = true
-		candidateKeys = append(candidateKeys, key)
-		labelByKey[key] = header
-	}
-
-	if len(candidateKeys) == 0 {
-		return nil, nil
-	}
-
-	budget := MaxVisibleColumns - existingCount
-	if budget < 0 {
-		budget = 0
-	}
-	visibleKeys := capColumns(candidateKeys, budget)
-	visibleSet := make(map[string]bool, len(visibleKeys))
-	for _, k := range visibleKeys {
-		visibleSet[k] = true
-	}
-
-	var newKeys []string
-	var newColEntries []map[string]any
-	for _, key := range candidateKeys {
-		if !visibleSet[key] {
-			continue
-		}
-		newKeys = append(newKeys, key)
-		newColEntries = append(newColEntries, map[string]any{
-			"key":   key,
-			"label": labelByKey[key],
-			"type":  "text",
-		})
-	}
-
-	if len(newColEntries) == 0 {
-		return nil, nil
-	}
-
-	if len(candidateKeys) > len(newColEntries) {
-		log.Info().
-			Str("view_id", viewID).
-			Int("total_columns", len(candidateKeys)).
-			Int("visible_columns", len(newColEntries)).
-			Msg("import: capped visible columns (all data stored in MongoDB)")
-	}
-
 	if targetComp.Config == nil {
 		targetComp.Config = make(map[string]any)
 	}
 
+	// Build a map of all column entries keyed by column key for fast lookup.
+	colsByKey := make(map[string]map[string]any)
 	existing, _ := targetComp.Config["columns"].([]any)
-	for _, entry := range newColEntries {
-		existing = append(existing, entry)
+	for _, c := range existing {
+		if m, ok := c.(map[string]any); ok {
+			if k, ok := m["key"].(string); ok && k != "" {
+				colsByKey[k] = m
+			}
+		}
 	}
-	targetComp.Config["columns"] = existing
+
+	// Remove redundant columns.
+	removeSet := make(map[string]bool, len(update.RemoveCols))
+	for _, k := range update.RemoveCols {
+		if _, exists := colsByKey[k]; exists {
+			removeSet[k] = true
+			delete(colsByKey, k)
+		}
+	}
+
+	// Add new columns (that don't already exist).
+	var newKeys []string
+	for _, spec := range update.NewCols {
+		if _, exists := colsByKey[spec.Key]; exists {
+			continue
+		}
+		entry := map[string]any{
+			"key":   spec.Key,
+			"label": spec.Label,
+			"type":  spec.ColType,
+		}
+		colsByKey[spec.Key] = entry
+		newKeys = append(newKeys, spec.Key)
+	}
+
+	// Cap total visible columns.
+	if len(colsByKey) > MaxVisibleColumns {
+		excess := len(colsByKey) - MaxVisibleColumns
+		if excess > len(newKeys) {
+			excess = len(newKeys)
+		}
+		for i := len(newKeys) - 1; i >= 0 && excess > 0; i-- {
+			delete(colsByKey, newKeys[i])
+			newKeys = newKeys[:i]
+			excess--
+		}
+	}
+
+	// Reorder: use BAML's suggested order, appending any keys it missed.
+	var ordered []any
+	seen := make(map[string]bool, len(colsByKey))
+	for _, key := range update.ColumnOrder {
+		if removeSet[key] || seen[key] {
+			continue
+		}
+		if entry, ok := colsByKey[key]; ok {
+			ordered = append(ordered, entry)
+			seen[key] = true
+		}
+	}
+	for _, c := range existing {
+		if m, ok := c.(map[string]any); ok {
+			if k, ok := m["key"].(string); ok && !seen[k] && !removeSet[k] {
+				if entry, exists := colsByKey[k]; exists {
+					ordered = append(ordered, entry)
+					seen[k] = true
+					_ = entry
+				}
+			}
+		}
+	}
+	for _, spec := range update.NewCols {
+		if !seen[spec.Key] {
+			if entry, exists := colsByKey[spec.Key]; exists {
+				ordered = append(ordered, entry)
+				seen[spec.Key] = true
+				_ = entry
+			}
+		}
+	}
+	targetComp.Config["columns"] = ordered
 
 	NormalizeDefinition(&v.Definition)
 	if err := backend.UpdateView(ctx, v); err != nil {
@@ -377,7 +402,11 @@ func syncColumnsToView(ctx context.Context, backend repository.BackendRepository
 		Str("view_id", viewID).
 		Str("sheet_id", sheetID).
 		Str("component_id", componentID).
+		Int("added", len(newKeys)).
+		Int("removed", len(removeSet)).
+		Int("total", len(ordered)).
 		Strs("new_columns", newKeys).
+		Strs("removed_columns", update.RemoveCols).
 		Msg("import: synced columns to view definition")
 
 	return newKeys, nil
@@ -423,59 +452,156 @@ func importColumnKey(header string) string {
 	return result
 }
 
+const dataPreviewRows = 5
+
 // resolveColumnMapping uses BAML to semantically map CSV headers to existing
-// view columns when columns are already defined, falling back to naive string
-// normalization if no existing columns exist or if BAML fails.
-func resolveColumnMapping(ctx context.Context, backend repository.BackendRepository, workspaceID uint, viewID, sheetID, componentID string, headers []string) map[string]string {
-	existing := loadExistingColumnSchemas(ctx, backend, workspaceID, viewID, sheetID, componentID)
+// view columns. The BAML mapper sees the sheet name, existing columns, all
+// headers, AND a sample of actual data rows — enabling fuzzy matching by
+// content, not just header names. Also returns schema cleanup instructions:
+// redundant columns to remove and a recommended column order.
+func resolveColumnMapping(ctx context.Context, backend repository.BackendRepository, workspaceID uint, viewID, sheetID, componentID string, headers []string, records []map[string]string) (map[string]string, schemaUpdate) {
+	sheetName, existing := loadImportContext(ctx, backend, workspaceID, viewID, sheetID, componentID)
+	preview := buildDataPreview(headers, records, dataPreviewRows)
 
-	if len(existing) > 0 {
-		result, err := baml.MapImportColumns(ctx, headers, existing)
-		if err == nil && len(result.Mappings) == len(headers) {
-			mapping := make(map[string]string, len(result.Mappings))
-			seen := make(map[string]bool, len(result.Mappings))
-			valid := true
-			for _, m := range result.Mappings {
-				key := strings.TrimSpace(m.Column_key)
-				if key == "" || seen[key] {
-					valid = false
-					break
-				}
-				seen[key] = true
-				mapping[m.Header] = key
-			}
-			if valid {
-				log.Info().
-					Str("view_id", viewID).
-					Int("headers", len(headers)).
-					Int("existing_cols", len(existing)).
-					Msg("import: BAML column mapping succeeded")
-				return mapping
-			}
+	result, err := baml.MapImportColumns(ctx, sheetName, headers, existing, preview)
+	if err != nil {
+		log.Warn().Err(err).Str("view_id", viewID).Msg("import: BAML column mapping failed, falling back to string normalization")
+		return fallbackMapping(headers)
+	}
+	if len(result.Mappings) != len(headers) {
+		log.Warn().Str("view_id", viewID).Int("expected", len(headers)).Int("got", len(result.Mappings)).Msg("import: BAML returned wrong mapping count, falling back")
+		return fallbackMapping(headers)
+	}
+
+	mapping := make(map[string]string, len(result.Mappings))
+	seen := make(map[string]bool, len(result.Mappings))
+	var specs []columnCreateSpec
+	valid := true
+
+	for _, m := range result.Mappings {
+		key := strings.TrimSpace(m.Column_key)
+		if key == "" || seen[key] {
+			valid = false
+			break
 		}
-		if err != nil {
-			log.Warn().Err(err).Str("view_id", viewID).Msg("import: BAML column mapping failed, falling back to string normalization")
-		} else {
-			log.Warn().Str("view_id", viewID).Msg("import: BAML column mapping returned invalid result, falling back")
+		seen[key] = true
+		mapping[m.Header] = key
+
+		if m.Action == bamltypes.ColumnActionCreate {
+			label := m.Label
+			if label == "" {
+				label = m.Header
+			}
+			colType := m.Column_type
+			if colType == "" {
+				colType = "text"
+			}
+			specs = append(specs, columnCreateSpec{Key: key, Label: label, ColType: colType})
 		}
 	}
 
-	mapping := make(map[string]string, len(headers))
-	for _, h := range headers {
-		mapping[h] = importColumnKey(h)
+	if !valid {
+		log.Warn().Str("view_id", viewID).Msg("import: BAML returned duplicate or empty keys, falling back")
+		return fallbackMapping(headers)
 	}
-	return mapping
+
+	matched, created, skipped := 0, 0, 0
+	for _, m := range result.Mappings {
+		switch m.Action {
+		case bamltypes.ColumnActionMatch:
+			matched++
+		case bamltypes.ColumnActionCreate:
+			created++
+		case bamltypes.ColumnActionSkip:
+			skipped++
+		}
+	}
+	log.Info().
+		Str("view_id", viewID).
+		Str("sheet", sheetName).
+		Int("headers", len(headers)).
+		Int("matched", matched).
+		Int("created", created).
+		Int("skipped", skipped).
+		Int("remove", len(result.Remove_columns)).
+		Int("order_len", len(result.Column_order)).
+		Msg("import: BAML column mapping succeeded")
+
+	return mapping, schemaUpdate{
+		NewCols:     specs,
+		RemoveCols:  result.Remove_columns,
+		ColumnOrder: result.Column_order,
+	}
 }
 
-// loadExistingColumnSchemas reads the view definition and extracts column
-// schemas from the target component, formatted for the BAML mapper.
-func loadExistingColumnSchemas(ctx context.Context, backend repository.BackendRepository, workspaceID uint, viewID, sheetID, componentID string) []bamltypes.ColumnSchema {
+// buildDataPreview formats the first N rows as a compact table so the BAML
+// mapper can see actual values and make data-informed matching decisions.
+func buildDataPreview(headers []string, records []map[string]string, maxRows int) string {
+	if len(records) == 0 {
+		return ""
+	}
+	n := maxRows
+	if n > len(records) {
+		n = len(records)
+	}
+
+	var b strings.Builder
+	for i, h := range headers {
+		if i > 0 {
+			b.WriteString(" | ")
+		}
+		b.WriteString(h)
+	}
+	b.WriteByte('\n')
+
+	for i, h := range headers {
+		if i > 0 {
+			b.WriteString(" | ")
+		}
+		for j := 0; j < len(h) && j < 20; j++ {
+			b.WriteByte('-')
+		}
+	}
+	b.WriteByte('\n')
+
+	for row := 0; row < n; row++ {
+		rec := records[row]
+		for i, h := range headers {
+			if i > 0 {
+				b.WriteString(" | ")
+			}
+			val := rec[h]
+			if len(val) > 80 {
+				val = val[:77] + "..."
+			}
+			b.WriteString(val)
+		}
+		b.WriteByte('\n')
+	}
+
+	return b.String()
+}
+
+func fallbackMapping(headers []string) (map[string]string, schemaUpdate) {
+	mapping := make(map[string]string, len(headers))
+	specs := make([]columnCreateSpec, 0, len(headers))
+	for _, h := range headers {
+		key := importColumnKey(h)
+		mapping[h] = key
+		specs = append(specs, columnCreateSpec{Key: key, Label: h, ColType: "text"})
+	}
+	return mapping, schemaUpdate{NewCols: specs}
+}
+
+// loadImportContext reads the view definition once and extracts both the sheet
+// name and existing column schemas for the BAML mapper.
+func loadImportContext(ctx context.Context, backend repository.BackendRepository, workspaceID uint, viewID, sheetID, componentID string) (string, []bamltypes.ColumnSchema) {
 	if backend == nil {
-		return nil
+		return "", nil
 	}
 	v, err := backend.GetView(ctx, workspaceID, viewID)
 	if err != nil {
-		return nil
+		return "", nil
 	}
 	for _, sheet := range v.Definition.Sheets {
 		if sheet.ID != sheetID {
@@ -485,10 +611,11 @@ func loadExistingColumnSchemas(ctx context.Context, backend repository.BackendRe
 			if comp.ID != componentID {
 				continue
 			}
-			return extractColumnSchemas(comp.Config)
+			return sheet.Name, extractColumnSchemas(comp.Config)
 		}
+		return sheet.Name, nil
 	}
-	return nil
+	return "", nil
 }
 
 func extractColumnSchemas(config map[string]any) []bamltypes.ColumnSchema {

@@ -39,8 +39,16 @@ func (t *ColumnMappingClassView) PropertyColumn_key() (ClassPropertyView, error)
 	return t.inner.Property("column_key")
 }
 
-func (t *ColumnMappingClassView) PropertyIs_new() (ClassPropertyView, error) {
-	return t.inner.Property("is_new")
+func (t *ColumnMappingClassView) PropertyAction() (ClassPropertyView, error) {
+	return t.inner.Property("action")
+}
+
+func (t *ColumnMappingClassView) PropertyLabel() (ClassPropertyView, error) {
+	return t.inner.Property("label")
+}
+
+func (t *ColumnMappingClassView) PropertyColumn_type() (ClassPropertyView, error) {
+	return t.inner.Property("column_type")
 }
 
 func (t *TypeBuilder) ColumnMapping() (*ColumnMappingClassView, error) {
@@ -73,6 +81,14 @@ func (t *ColumnMappingResultClassView) ListProperties() ([]ClassPropertyView, er
 
 func (t *ColumnMappingResultClassView) PropertyMappings() (ClassPropertyView, error) {
 	return t.inner.Property("mappings")
+}
+
+func (t *ColumnMappingResultClassView) PropertyColumn_order() (ClassPropertyView, error) {
+	return t.inner.Property("column_order")
+}
+
+func (t *ColumnMappingResultClassView) PropertyRemove_columns() (ClassPropertyView, error) {
+	return t.inner.Property("remove_columns")
 }
 
 func (t *TypeBuilder) ColumnMappingResult() (*ColumnMappingResultClassView, error) {

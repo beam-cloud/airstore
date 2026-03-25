@@ -117,7 +117,7 @@ func (*stream) ClassifyDetailTemplate(ctx context.Context, table_title string, c
 }
 
 // / Streaming version of MapImportColumns
-func (*stream) MapImportColumns(ctx context.Context, headers []string, existing_columns []types.ColumnSchema, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.ColumnMappingResult, types.ColumnMappingResult], error) {
+func (*stream) MapImportColumns(ctx context.Context, sheet_name string, headers []string, existing_columns []types.ColumnSchema, data_preview string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.ColumnMappingResult, types.ColumnMappingResult], error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -125,7 +125,7 @@ func (*stream) MapImportColumns(ctx context.Context, headers []string, existing_
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"headers": headers, "existing_columns": existing_columns},
+		Kwargs: map[string]any{"sheet_name": sheet_name, "headers": headers, "existing_columns": existing_columns, "data_preview": data_preview},
 		Env:    getEnvVars(callOpts.env),
 	}
 

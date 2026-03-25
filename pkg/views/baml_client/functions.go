@@ -95,7 +95,7 @@ func ClassifyDetailTemplate(ctx context.Context, table_title string, column_sche
 	}
 }
 
-func MapImportColumns(ctx context.Context, headers []string, existing_columns []types.ColumnSchema, opts ...CallOptionFunc) (types.ColumnMappingResult, error) {
+func MapImportColumns(ctx context.Context, sheet_name string, headers []string, existing_columns []types.ColumnSchema, data_preview string, opts ...CallOptionFunc) (types.ColumnMappingResult, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -111,7 +111,7 @@ func MapImportColumns(ctx context.Context, headers []string, existing_columns []
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"headers": headers, "existing_columns": existing_columns},
+		Kwargs: map[string]any{"sheet_name": sheet_name, "headers": headers, "existing_columns": existing_columns, "data_preview": data_preview},
 		Env:    getEnvVars(callOpts.env),
 	}
 

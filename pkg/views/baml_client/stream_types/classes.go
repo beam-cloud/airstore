@@ -23,9 +23,11 @@ import (
 )
 
 type ColumnMapping struct {
-	Header     *string `json:"header"`
-	Column_key *string `json:"column_key"`
-	Is_new     *bool   `json:"is_new"`
+	Header      *string             `json:"header"`
+	Column_key  *string             `json:"column_key"`
+	Action      *types.ColumnAction `json:"action"`
+	Label       *string             `json:"label"`
+	Column_type *string             `json:"column_type"`
 }
 
 func (c *ColumnMapping) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
@@ -48,8 +50,14 @@ func (c *ColumnMapping) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap
 		case "column_key":
 			c.Column_key = baml.Decode(valueHolder).Interface().(*string)
 
-		case "is_new":
-			c.Is_new = baml.Decode(valueHolder).Interface().(*bool)
+		case "action":
+			c.Action = baml.Decode(valueHolder).Interface().(*types.ColumnAction)
+
+		case "label":
+			c.Label = baml.Decode(valueHolder).Interface().(*string)
+
+		case "column_type":
+			c.Column_type = baml.Decode(valueHolder).Interface().(*string)
 
 		default:
 
@@ -67,7 +75,11 @@ func (c ColumnMapping) Encode() (*cffi.HostValue, error) {
 
 	fields["column_key"] = c.Column_key
 
-	fields["is_new"] = c.Is_new
+	fields["action"] = c.Action
+
+	fields["label"] = c.Label
+
+	fields["column_type"] = c.Column_type
 
 	return baml.EncodeClass("ColumnMapping", fields, nil)
 }
@@ -77,7 +89,9 @@ func (c ColumnMapping) BamlTypeName() string {
 }
 
 type ColumnMappingResult struct {
-	Mappings []ColumnMapping `json:"mappings"`
+	Mappings       []ColumnMapping `json:"mappings"`
+	Column_order   []string        `json:"column_order"`
+	Remove_columns []string        `json:"remove_columns"`
 }
 
 func (c *ColumnMappingResult) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
@@ -97,6 +111,12 @@ func (c *ColumnMappingResult) Decode(holder *cffi.CFFIValueClass, typeMap baml.T
 		case "mappings":
 			c.Mappings = baml.Decode(valueHolder).Interface().([]ColumnMapping)
 
+		case "column_order":
+			c.Column_order = baml.Decode(valueHolder).Interface().([]string)
+
+		case "remove_columns":
+			c.Remove_columns = baml.Decode(valueHolder).Interface().([]string)
+
 		default:
 
 			panic(fmt.Sprintf("unexpected field: %s in class ColumnMappingResult", key))
@@ -110,6 +130,10 @@ func (c ColumnMappingResult) Encode() (*cffi.HostValue, error) {
 	fields := map[string]any{}
 
 	fields["mappings"] = c.Mappings
+
+	fields["column_order"] = c.Column_order
+
+	fields["remove_columns"] = c.Remove_columns
 
 	return baml.EncodeClass("ColumnMappingResult", fields, nil)
 }

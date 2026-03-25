@@ -56,6 +56,7 @@ var typeMap = map[string]reflect.Type{
 	"TYPES.WidgetResult":               reflect.TypeOf(types.WidgetResult{}),
 	"STREAM_TYPES.WidgetResult":        reflect.TypeOf(stream_types.WidgetResult{}),
 
+	"TYPES.ColumnAction":    reflect.TypeOf(types.ColumnAction("")),
 	"TYPES.OperationType":   reflect.TypeOf(types.OperationType("")),
 	"TYPES.SectionEmphasis": reflect.TypeOf(types.SectionEmphasis("")),
 	"TYPES.SectionType":     reflect.TypeOf(types.SectionType("")),

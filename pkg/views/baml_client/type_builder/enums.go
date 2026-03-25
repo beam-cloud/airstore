@@ -15,6 +15,46 @@ package type_builder
 
 import baml "github.com/boundaryml/baml/engine/language_client_go/pkg"
 
+type ColumnActionEnumView struct {
+	inner baml.EnumBuilder
+}
+
+func (t *ColumnActionEnumView) ListValues() ([]EnumValueView, error) {
+	result, err := t.inner.ListValues()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]EnumValueView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *ColumnActionEnumView) ValueMatch() (EnumValueView, error) {
+	return t.inner.Value("Match")
+}
+
+func (t *ColumnActionEnumView) ValueCreate() (EnumValueView, error) {
+	return t.inner.Value("Create")
+}
+
+func (t *ColumnActionEnumView) ValueSkip() (EnumValueView, error) {
+	return t.inner.Value("Skip")
+}
+
+func (t *TypeBuilder) ColumnAction() (*ColumnActionEnumView, error) {
+	bld, err := t.inner.Enum("ColumnAction")
+	if err != nil {
+		return nil, err
+	}
+	return &ColumnActionEnumView{inner: bld}, nil
+}
+
+func (t *ColumnActionEnumView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
 type OperationTypeEnumView struct {
 	inner baml.EnumBuilder
 }

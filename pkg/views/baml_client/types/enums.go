@@ -21,6 +21,73 @@ import (
 	"github.com/boundaryml/baml/engine/language_client_go/pkg/cffi"
 )
 
+type ColumnAction string
+
+const (
+	ColumnActionMatch  ColumnAction = "Match"
+	ColumnActionCreate ColumnAction = "Create"
+	ColumnActionSkip   ColumnAction = "Skip"
+)
+
+// Values returns all allowed values for the ColumnAction type.
+func (ColumnAction) Values() []ColumnAction {
+	return []ColumnAction{
+		ColumnActionMatch,
+		ColumnActionCreate,
+		ColumnActionSkip,
+	}
+}
+
+// IsValid checks whether the given ColumnAction value is valid.
+func (e ColumnAction) IsValid() bool {
+
+	for _, v := range e.Values() {
+		if e == v {
+			return true
+		}
+	}
+	return false
+
+}
+
+// MarshalJSON customizes JSON marshaling for ColumnAction.
+func (e ColumnAction) MarshalJSON() ([]byte, error) {
+	if !e.IsValid() {
+		return nil, fmt.Errorf("invalid ColumnAction: %q", e)
+	}
+	return json.Marshal(string(e))
+}
+
+// UnmarshalJSON customizes JSON unmarshaling for ColumnAction.
+func (e *ColumnAction) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	*e = ColumnAction(s)
+	if !e.IsValid() {
+		return fmt.Errorf("invalid ColumnAction: %q", s)
+	}
+	return nil
+}
+
+func (e *ColumnAction) Decode(holder *cffi.CFFIValueEnum, typeMap baml.TypeMap) {
+	name := holder.Name
+	if name.Name != "ColumnAction" || name.Namespace != cffi.CFFITypeNamespace_TYPES {
+		panic(fmt.Sprintf("expected types.ColumnAction, got %s.%s", string(name.Namespace.String()), string(name.Name)))
+	}
+	value := holder.Value
+	*e = ColumnAction(value)
+}
+
+func (e ColumnAction) Encode() (*cffi.HostValue, error) {
+	return baml.EncodeEnum("ColumnAction", string(e), false)
+}
+
+func (e ColumnAction) BamlTypeName() string {
+	return "ColumnAction"
+}
+
 type OperationType string
 
 const (
