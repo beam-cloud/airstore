@@ -8,11 +8,12 @@ client<llm> ViewCopilotClient {
 }
 
 client<llm> FastMappingClient {
-  provider anthropic
+  provider "openai-generic"
   options {
-    model claude-sonnet-4-20250514
-    api_key env.ANTHROPIC_API_KEY
-    max_tokens 16384
+    base_url "https://api.cerebras.ai/v1"
+    api_key env.CEREBRAS_API_KEY
+    model "gpt-oss-120b"
+    temperature 0
   }
 }
 
