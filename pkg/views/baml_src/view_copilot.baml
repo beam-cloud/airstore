@@ -93,7 +93,6 @@ function WriteView(
               "dataSource": {
                 "agent_id": "single-agent-id",
                 "agent_ids": ["agent-1", "agent-2"],
-                "artifact_key": "optional-artifact-family-key",
                 "time_range": "24h|7d|30d",
                 "transform": [
                   {"column": "stable_key", "source": "data.field|title|metadata.key", "type": "text|number|currency|date|link|email|status|tags|boolean"}
@@ -166,12 +165,12 @@ function WriteView(
       tags, boolean. Guides both display and mapping.
 
     MULTI-ENTITY (automatic row expansion):
-    The mapper automatically creates one row per entity when a task produces
-    multiple outputs sharing the same artifact_key. No configuration needed.
-    When an artifact schema shows multi-entity density (many outputs per task),
-    design columns for PER-ENTITY fields (e.g. restaurant_name, cuisine,
-    price_range) — NOT aggregate summaries (total_count, top_picks).
-    Single-output tasks always produce one row.
+    The mapper automatically creates one row per distinct entity when a task
+    produces multiple outputs representing different items. No configuration
+    needed. When a task is likely to produce multi-entity results (e.g.
+    "find properties", "list contacts"), design columns for PER-ENTITY fields
+    (e.g. restaurant_name, cuisine, price_range) — NOT aggregate summaries
+    (total_count, top_picks). Single-output tasks always produce one row.
 
     =============================================================================
     WORKSPACE CONTEXT
@@ -265,9 +264,9 @@ function WriteView(
     8. When creating transform rules, inspect the ARTIFACT DESCRIPTORS in
        workspace_context. Use exact dot-path field names from schemas as
        source hints. Keep transform[].column machine-stable and put the
-       visible header in config.columns[].label. If an existing sheet already
-       has dataSource.artifact_key, preserve it unless the user explicitly asks
-       to rebind that sheet to a different artifact family.
+       visible header in config.columns[].label. Do NOT include artifact_key
+       in dataSource — the mapper determines relevance from content, not
+       artifact naming.
 
     9. When no artifact schemas exist yet, define columns with descriptive
        names and types. The BAML mapper resolves dynamically at render time.

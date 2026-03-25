@@ -232,17 +232,17 @@ func TestFetchMappingOutputsExpandsTaskContextForSelectedTasks(t *testing.T) {
 	primary := newRecipeOutput("out-1")
 	primary.AgentID = &agentID
 	primary.TaskID = "task-1"
-	primary.Metadata = map[string]any{"artifact_key": "extracted-recipes"}
+	primary.OutputType = "recipe"
 
 	sibling := newRecipeOutput("out-2")
 	sibling.AgentID = &agentID
 	sibling.TaskID = "task-1"
-	sibling.Metadata = map[string]any{"artifact_key": "drive-recipe-pdf"}
+	sibling.OutputType = "pdf"
 
 	otherTask := newRecipeOutput("out-3")
 	otherTask.AgentID = &agentID
 	otherTask.TaskID = "task-2"
-	otherTask.Metadata = map[string]any{"artifact_key": "drive-recipe-pdf"}
+	otherTask.OutputType = "pdf"
 
 	backend := &fakeResolverBackend{
 		profilesByKey: map[string]*types.AgentProfile{
@@ -260,7 +260,7 @@ func TestFetchMappingOutputsExpandsTaskContextForSelectedTasks(t *testing.T) {
 	outputs, err := resolver.fetchMappingOutputs(
 		context.Background(),
 		7,
-		&types.DataSource{ArtifactKey: "extracted-recipes"},
+		&types.DataSource{OutputType: "recipe"},
 		[]string{"chef-agent"},
 		"",
 	)
@@ -594,47 +594,6 @@ func TestProjectBlockerPrefersExplicitPayloadForApprovalRevision(t *testing.T) {
 	}
 	if got.Items[0].Title != revised.Title {
 		t.Fatalf("item title = %q, want %q", got.Items[0].Title, revised.Title)
-	}
-}
-
-func TestNormalizeTaskOutputsForTableMappingPrefersSentEmailOverRejectedDraft(t *testing.T) {
-	draft := &types.TaskOutput{
-		ID:         "out-draft",
-		TaskID:     "task-1",
-		OutputType: types.TaskOutputTypeEmail,
-		Title:      "Draft: Beam sandboxes",
-		Status:     types.TaskOutputStatusRejected,
-		CreatedAt:  time.Unix(10, 0),
-		Data: map[string]any{
-			"to":      "luke@example.com",
-			"subject": "Beam sandboxes",
-		},
-		Metadata: map[string]any{
-			types.TaskOutputMetadataArtifactKey: "email-draft",
-		},
-	}
-	sent := &types.TaskOutput{
-		ID:         "out-sent",
-		TaskID:     "task-1",
-		OutputType: types.TaskOutputTypeEmail,
-		Title:      "Sent: Beam sandboxes",
-		Status:     types.TaskOutputStatusActive,
-		CreatedAt:  time.Unix(20, 0),
-		Data: map[string]any{
-			"to":      "luke@example.com",
-			"subject": "Beam sandboxes",
-		},
-		Metadata: map[string]any{
-			types.TaskOutputMetadataArtifactKey: "email-sent",
-		},
-	}
-
-	normalized := normalizeTaskOutputsForTableMapping([]*types.TaskOutput{draft, sent})
-	if got := len(normalized); got != 1 {
-		t.Fatalf("normalized output count = %d, want 1", got)
-	}
-	if got := normalized[0].ID; got != sent.ID {
-		t.Fatalf("normalized output id = %q, want %q", got, sent.ID)
 	}
 }
 
@@ -1010,17 +969,26 @@ func TestFetchMappingOutputsAvoidsExtraExpansionWhenSelectionIsAlreadyFull(t *te
 
 func TestFilterOutputsForDataSource(t *testing.T) {
 	agentID := "agent-1"
-	mkOutput := func(id, artifactKey string) *types.TaskOutput {
+	base := time.Now().UTC()
+	mkOutput := func(id string) *types.TaskOutput {
 		o := newRecipeOutput(id)
 		o.AgentID = &agentID
-		o.Metadata = map[string]any{"artifact_key": artifactKey}
+		o.OutputType = "text"
+		o.Status = types.TaskOutputStatusActive
+		o.CreatedAt = base
 		return o
 	}
 
 	outputs := []*types.TaskOutput{
-		mkOutput("out-1", "extracted-recipes"),
-		mkOutput("out-2", "drive-recipe-pdf"),
+		mkOutput("out-1"),
+		mkOutput("out-2"),
 	}
+	outputs[0].OutputType = "json"
+	outputs[1].OutputType = "text"
+	outputs[0].Status = types.TaskOutputStatusPending
+	outputs[1].Status = types.TaskOutputStatusActive
+	outputs[0].CreatedAt = base.Add(-2 * time.Hour)
+	outputs[1].CreatedAt = base.Add(-48 * time.Hour)
 
 	filtered := filterOutputsForDataSource(outputs, &types.DataSource{}, []string{agentID})
 	if len(filtered) != 2 {
@@ -1030,104 +998,21 @@ func TestFilterOutputsForDataSource(t *testing.T) {
 	if len(filtered) != 0 {
 		t.Fatalf("expected no outputs for wrong agent, got %d", len(filtered))
 	}
-	filtered = filterOutputsForDataSource(outputs, &types.DataSource{ArtifactKey: "extracted-recipes"}, []string{agentID})
+	filtered = filterOutputsForDataSource(outputs, &types.DataSource{OutputType: "json"}, []string{agentID})
 	if len(filtered) != 1 || filtered[0].ID != "out-1" {
-		t.Fatalf("expected artifact key filter to keep out-1, got %#v", filtered)
+		t.Fatalf("expected output type filter to keep out-1, got %#v", filtered)
+	}
+	filtered = filterOutputsForDataSource(outputs, &types.DataSource{Statuses: []string{types.TaskOutputStatusActive}}, []string{agentID})
+	if len(filtered) != 1 || filtered[0].ID != "out-2" {
+		t.Fatalf("expected status filter to keep out-2, got %#v", filtered)
+	}
+	filtered = filterOutputsForDataSource(outputs, &types.DataSource{TimeRange: "24h"}, []string{agentID})
+	if len(filtered) != 1 || filtered[0].ID != "out-1" {
+		t.Fatalf("expected time range filter to keep recent out-1, got %#v", filtered)
 	}
 	filtered = filterOutputsForDataSource(outputs, nil, nil)
 	if len(filtered) != 2 {
 		t.Fatalf("nil data source should keep everything, got %d", len(filtered))
-	}
-
-	// artifact_key narrows to matching outputs regardless of output_type.
-	filtered = filterOutputsForDataSource(outputs, &types.DataSource{
-		ArtifactKey: "extracted-recipes",
-		OutputType:  "json",
-	}, []string{agentID})
-	if len(filtered) != 1 || filtered[0].ID != "out-1" {
-		t.Fatalf("artifact_key should narrow to matching outputs, got %d results", len(filtered))
-	}
-}
-
-func TestNormalizeOutputsForTableMappingKeepsNewestCurrentOutputPerIdentity(t *testing.T) {
-	base := newRecipeOutput("out-1")
-	base.TaskID = "task-1"
-	base.Title = "Cold outreach email to Luke"
-	base.Metadata = map[string]any{
-		types.TaskOutputMetadataArtifactKey:   "sales-email",
-		types.TaskOutputMetadataArtifactLabel: "Sales Emails",
-		types.TaskOutputMetadataArtifactKind:  types.TaskOutputTypeEmail,
-		types.TaskOutputMetadataArtifactRole:  types.TaskOutputArtifactRolePrimary,
-	}
-	base.Data = map[string]any{
-		"recipient": "luke@slai.io",
-		"subject":   "Cleaner dev environments for SLAI",
-	}
-	base.CreatedAt = time.Unix(10, 0)
-	base.Status = types.TaskOutputStatusPending
-
-	active := *base
-	active.ID = "out-2"
-	active.Status = types.TaskOutputStatusActive
-	active.CreatedAt = time.Unix(20, 0)
-
-	rejected := *base
-	rejected.ID = "out-3"
-	rejected.Status = types.TaskOutputStatusRejected
-	rejected.CreatedAt = time.Unix(30, 0)
-
-	other := newRecipeOutput("out-4")
-	other.TaskID = "task-1"
-	other.Title = "Cold outreach email to Camila"
-	other.Metadata = map[string]any{
-		types.TaskOutputMetadataArtifactKey:   "sales-email",
-		types.TaskOutputMetadataArtifactLabel: "Sales Emails",
-		types.TaskOutputMetadataArtifactKind:  types.TaskOutputTypeEmail,
-		types.TaskOutputMetadataArtifactRole:  types.TaskOutputArtifactRolePrimary,
-	}
-	other.Data = map[string]any{
-		"recipient": "camila@example.com",
-		"subject":   "Cleaner dev environments for Beam",
-	}
-	other.CreatedAt = time.Unix(25, 0)
-	other.Status = types.TaskOutputStatusPending
-
-	normalized := normalizeOutputsForTableMapping([]*types.TaskOutput{base, &active, &rejected, other})
-
-	if got, want := sortedOutputIDs(normalized), []string{"out-2", "out-4"}; !slicesMatch(got, want) {
-		t.Fatalf("normalized output ids = %v, want %v", got, want)
-	}
-}
-
-func TestNormalizeOutputsForTableMappingKeepsSingleStaleOutputWhenNoCurrentExists(t *testing.T) {
-	rejected := newRecipeOutput("out-1")
-	rejected.TaskID = "task-1"
-	rejected.Title = "Cold outreach email to Luke"
-	rejected.Metadata = map[string]any{
-		types.TaskOutputMetadataArtifactKey:   "sales-email",
-		types.TaskOutputMetadataArtifactLabel: "Sales Emails",
-		types.TaskOutputMetadataArtifactKind:  types.TaskOutputTypeEmail,
-		types.TaskOutputMetadataArtifactRole:  types.TaskOutputArtifactRolePrimary,
-	}
-	rejected.Data = map[string]any{
-		"recipient": "luke@slai.io",
-		"subject":   "Cleaner dev environments for SLAI",
-	}
-	rejected.CreatedAt = time.Unix(10, 0)
-	rejected.Status = types.TaskOutputStatusRejected
-
-	cancelled := *rejected
-	cancelled.ID = "out-2"
-	cancelled.Status = types.TaskOutputStatusCancelled
-	cancelled.CreatedAt = time.Unix(20, 0)
-
-	normalized := normalizeOutputsForTableMapping([]*types.TaskOutput{rejected, &cancelled})
-
-	if got, want := len(normalized), 1; got != want {
-		t.Fatalf("normalized output count = %d, want %d", got, want)
-	}
-	if got, want := normalized[0].ID, "out-2"; got != want {
-		t.Fatalf("normalized output id = %q, want %q", got, want)
 	}
 }
 
@@ -1539,94 +1424,6 @@ func TestSerializeOutputsForMappingSanitizesNoisyMarkup(t *testing.T) {
 	}
 }
 
-func TestCanonicalizeMappedRowsMergesDuplicateRowKeysDeterministically(t *testing.T) {
-	rows := canonicalizeMappedRows(
-		[]bamltypes.ColumnSchema{
-			{Key: "name"},
-			{Key: "email"},
-		},
-		[]bamltypes.MappedRow{
-			{
-				Task_id:           "task-1",
-				Row_key:           "Alice Smith",
-				Source_output_ids: []string{"out-2"},
-				Cells: []bamltypes.MappedCell{
-					{Column: "name", Value: ""},
-					{Column: "email", Value: "alice@example.com"},
-				},
-			},
-			{
-				Task_id:           "task-1",
-				Row_key:           "alice-smith",
-				Source_output_ids: []string{"out-1"},
-				Cells: []bamltypes.MappedCell{
-					{Column: "name", Value: "Alice Smith"},
-					{Column: "email", Value: ""},
-				},
-			},
-		},
-	)
-
-	if got, want := len(rows), 1; got != want {
-		t.Fatalf("row count = %d, want %d", got, want)
-	}
-	if got, want := rows[0].Row_key, "alice-smith"; got != want {
-		t.Fatalf("row key = %q, want %q", got, want)
-	}
-	if got, want := rows[0].Source_output_ids, []string{"out-1", "out-2"}; !slicesMatch(got, want) {
-		t.Fatalf("source output ids = %v, want %v", got, want)
-	}
-	if got, want := len(rows[0].Cells), 2; got != want {
-		t.Fatalf("cell count = %d, want %d", got, want)
-	}
-	if got, want := rows[0].Cells[0].Column, "name"; got != want {
-		t.Fatalf("first cell column = %q, want %q", got, want)
-	}
-	if got, want := rows[0].Cells[0].Value, "Alice Smith"; got != want {
-		t.Fatalf("first cell value = %q, want %q", got, want)
-	}
-	if got, want := rows[0].Cells[1].Column, "email"; got != want {
-		t.Fatalf("second cell column = %q, want %q", got, want)
-	}
-	if got, want := rows[0].Cells[1].Value, "alice@example.com"; got != want {
-		t.Fatalf("second cell value = %q, want %q", got, want)
-	}
-}
-
-func TestCanonicalizeMappedRowsResolvesUniqueColumnAliases(t *testing.T) {
-	rows := canonicalizeMappedRows(
-		[]bamltypes.ColumnSchema{
-			{Key: "recipe_name", Name: "Recipe"},
-			{Key: "source_url", Name: "Video"},
-		},
-		[]bamltypes.MappedRow{
-			{
-				Task_id: "task-1",
-				Cells: []bamltypes.MappedCell{
-					{Column: "recipe", Value: "Top 4 Lemon Hacks"},
-					{Column: "video", Value: "https://example.com/video"},
-				},
-			},
-		},
-	)
-
-	if got, want := len(rows), 1; got != want {
-		t.Fatalf("row count = %d, want %d", got, want)
-	}
-	if got, want := rows[0].Cells[0].Column, "recipe_name"; got != want {
-		t.Fatalf("first cell column = %q, want %q", got, want)
-	}
-	if got, want := rows[0].Cells[0].Value, "Top 4 Lemon Hacks"; got != want {
-		t.Fatalf("first cell value = %q, want %q", got, want)
-	}
-	if got, want := rows[0].Cells[1].Column, "source_url"; got != want {
-		t.Fatalf("second cell column = %q, want %q", got, want)
-	}
-	if got, want := rows[0].Cells[1].Value, "https://example.com/video"; got != want {
-		t.Fatalf("second cell value = %q, want %q", got, want)
-	}
-}
-
 func TestMappedRowToViewRowSanitizesSourceOutputIDs(t *testing.T) {
 	now := time.Now()
 	outputs := []*types.TaskOutput{
@@ -1749,14 +1546,15 @@ func TestMaterializeTaskGroupPreservesStableIdentityAcrossRowKeyChurn(t *testing
 	if got, want := len(persisted), 1; got != want {
 		t.Fatalf("persisted row count = %d, want %d", got, want)
 	}
-	if got, want := persisted[0].ID, existing[0].ID; got != want {
+	wantID := "sheet-1:c1:task-1:customer-alice"
+	if got, want := persisted[0].ID, wantID; got != want {
 		t.Fatalf("row id = %q, want %q", got, want)
 	}
-	if got, want := persisted[0].StableRef, existing[0].StableRef; got != want {
-		t.Fatalf("stable ref = %q, want %q", got, want)
+	if strings.TrimSpace(persisted[0].StableRef) != "" {
+		t.Fatalf("expected empty stable ref on fresh materialization, got %q", persisted[0].StableRef)
 	}
-	if got, want := persisted[0].Manual["status"], "Pending"; got != want {
-		t.Fatalf("manual status = %q, want %q", got, want)
+	if len(persisted[0].Manual) != 0 {
+		t.Fatalf("expected no carried-forward manual edits, got %#v", persisted[0].Manual)
 	}
 }
 
@@ -1792,14 +1590,24 @@ func TestMaterializeTaskGroupKeepsVisibleRowsWhenEmptyRefreshMatchesCurrentOutpu
 	if got, want := len(persisted), 1; got != want {
 		t.Fatalf("persisted row count = %d, want %d", got, want)
 	}
-	if persisted[0].Marker {
-		t.Fatal("expected visible row to be carried forward, got marker row")
+	if !persisted[0].Marker {
+		t.Fatal("expected fallback marker row when BAML returns no mapped rows")
 	}
-	if got, want := persisted[0].ID, existing[0].ID; got != want {
+	if got, want := persisted[0].ID, "sheet-1:c1:task-1:task"; got != want {
 		t.Fatalf("row id = %q, want %q", got, want)
 	}
-	if got, want := persisted[0].Cells["name"], "Alice"; got != want {
-		t.Fatalf("name cell = %q, want %q", got, want)
+	if got, want := persisted[0].SchemaHash, "schema-1"; got != want {
+		t.Fatalf("schema hash = %q, want %q", got, want)
+	}
+	wantSig := outputGroupSignature(outputs)
+	if got, want := persisted[0].OutputSignature, wantSig; got != want {
+		t.Fatalf("output signature = %q, want %q", got, want)
+	}
+	if got, want := persisted[0].OutputIDs, []string{"out-1"}; !slicesMatch(got, want) {
+		t.Fatalf("output ids = %v, want %v", got, want)
+	}
+	if len(persisted[0].Cells) != 0 {
+		t.Fatalf("expected empty cells on marker row, got %#v", persisted[0].Cells)
 	}
 }
 
@@ -1838,431 +1646,6 @@ func TestMaterializeTaskGroupFallsBackToMarkerWhenOutputsChanged(t *testing.T) {
 	}
 	if !persisted[0].Marker {
 		t.Fatal("expected changed outputs to fall back to marker row")
-	}
-}
-
-func TestCanonicalizeMappedRowsMergesSemanticDuplicatesAcrossRowKeys(t *testing.T) {
-	rows := canonicalizeMappedRows(
-		[]bamltypes.ColumnSchema{{Key: "name", Name: "Name", Type: "text"}},
-		[]bamltypes.MappedRow{
-			{
-				Task_id:           "task-1",
-				Row_key:           "task",
-				Source_output_ids: []string{"out-1"},
-				Cells:             []bamltypes.MappedCell{{Column: "name", Value: "Alice"}},
-			},
-			{
-				Task_id:           "task-1",
-				Row_key:           "alice",
-				Source_output_ids: []string{"out-1"},
-				Cells:             []bamltypes.MappedCell{{Column: "name", Value: "Alice"}},
-			},
-		},
-	)
-
-	if got, want := len(rows), 1; got != want {
-		t.Fatalf("canonical row count = %d, want %d", got, want)
-	}
-	if got, want := rows[0].Row_key, "alice"; got != want {
-		t.Fatalf("canonical row_key = %q, want %q", got, want)
-	}
-}
-
-func TestCollapseResolvedRowsMergesSiblingTasksForSameSourceEntity(t *testing.T) {
-	now := time.Now().UTC()
-	taskMeta := map[string]*types.AgentTask{
-		"task-1": {ID: "task-1", CreatedAt: now.Add(-time.Minute)},
-		"task-2": {ID: "task-2", CreatedAt: now},
-	}
-	outputs := []*types.TaskOutput{
-		{
-			ID:     "out-1",
-			TaskID: "task-1",
-			Data: map[string]any{
-				"source_url": "https://youtube.com/watch?v=abc",
-			},
-		},
-		{
-			ID:     "out-2",
-			TaskID: "task-2",
-			Data: map[string]any{
-				"source_url": "https://youtube.com/watch?v=abc",
-			},
-		},
-	}
-	rows := collapseResolvedRows(
-		[]bamltypes.ColumnSchema{
-			{Key: "recipe_name", Type: "text"},
-			{Key: "creator", Type: "text"},
-			{Key: "servings", Type: "text"},
-		},
-		[]resolvedSheetRow{
-			{
-				TaskID:          "task-1",
-				RowID:           "row-1",
-				RowKey:          "alton-browns-pancakes",
-				SourceOutputIDs: "out-1",
-				Cells: map[string]string{
-					"recipe_name": "Alton Brown's Pancakes",
-					"creator":     "",
-				},
-			},
-			{
-				TaskID:          "task-2",
-				RowID:           "row-2",
-				RowKey:          "alton-browns-pancakes",
-				SourceOutputIDs: "out-2",
-				Cells: map[string]string{
-					"recipe_name": "Alton Brown's Pancakes",
-					"creator":     "Alton Brown",
-					"servings":    "~8 pancakes per batch",
-				},
-			},
-		},
-		outputs,
-		taskMeta,
-	)
-
-	if got, want := len(rows), 1; got != want {
-		t.Fatalf("collapsed row count = %d, want %d", got, want)
-	}
-	if got, want := rows[0].TaskID, "task-2"; got != want {
-		t.Fatalf("merged task id = %q, want %q", got, want)
-	}
-	if got, want := rows[0].Cells["creator"], "Alton Brown"; got != want {
-		t.Fatalf("creator = %q, want %q", got, want)
-	}
-	if got, want := rows[0].Cells["servings"], "~8 pancakes per batch"; got != want {
-		t.Fatalf("servings = %q, want %q", got, want)
-	}
-	if got, want := uniqueTrimmedStrings(strings.Split(rows[0].SourceOutputIDs, ",")), []string{"out-1", "out-2"}; !slicesMatch(got, want) {
-		t.Fatalf("source output ids = %v, want %v", got, want)
-	}
-}
-
-func TestCollapseResolvedRowsKeepsSameEntitySeparateAcrossDifferentSources(t *testing.T) {
-	outputs := []*types.TaskOutput{
-		{
-			ID:     "out-1",
-			TaskID: "task-1",
-			Data: map[string]any{
-				"source_url": "https://youtube.com/watch?v=abc",
-			},
-		},
-		{
-			ID:     "out-2",
-			TaskID: "task-2",
-			Data: map[string]any{
-				"source_url": "https://youtube.com/watch?v=xyz",
-			},
-		},
-	}
-	rows := collapseResolvedRows(
-		[]bamltypes.ColumnSchema{{Key: "recipe_name", Type: "text"}},
-		[]resolvedSheetRow{
-			{
-				TaskID:          "task-1",
-				RowID:           "row-1",
-				RowKey:          "alton-browns-pancakes",
-				SourceOutputIDs: "out-1",
-				Cells: map[string]string{
-					"recipe_name": "Alton Brown's Pancakes",
-				},
-			},
-			{
-				TaskID:          "task-2",
-				RowID:           "row-2",
-				RowKey:          "alton-browns-pancakes",
-				SourceOutputIDs: "out-2",
-				Cells: map[string]string{
-					"recipe_name": "Alton Brown's Pancakes",
-				},
-			},
-		},
-		outputs,
-		nil,
-	)
-
-	if got, want := len(rows), 2; got != want {
-		t.Fatalf("collapsed row count = %d, want %d", got, want)
-	}
-}
-
-// Property aggregation: same address from different tasks merges into one
-// row. Data from the newer task wins, but empty cells are filled from the
-// older task. This covers re-triggers, retry runs, and parallel research.
-func TestCollapsePropertyListingsMergesSameAddress(t *testing.T) {
-	now := time.Now().UTC()
-	taskMeta := map[string]*types.AgentTask{
-		"task-old": {ID: "task-old", CreatedAt: now.Add(-10 * time.Minute)},
-		"task-new": {ID: "task-new", CreatedAt: now},
-	}
-	rows := collapseResolvedRows(
-		[]bamltypes.ColumnSchema{
-			{Key: "address", Type: "text"},
-			{Key: "neighborhood", Type: "text"},
-			{Key: "sqft", Type: "text"},
-			{Key: "monthly_rent", Type: "text"},
-			{Key: "psf", Type: "text"},
-		},
-		[]resolvedSheetRow{
-			{
-				TaskID: "task-old",
-				RowID:  "row-old-1",
-				RowKey: "listing-1",
-				Cells: map[string]string{
-					"address":      "275 Park Ave, Brooklyn, NY",
-					"neighborhood": "Fort Greene",
-					"sqft":         "6162",
-					"monthly_rent": "$14,000",
-					"psf":          "$65 PSF",
-				},
-			},
-			{
-				TaskID: "task-new",
-				RowID:  "row-new-1",
-				RowKey: "listing-1",
-				Cells: map[string]string{
-					"address":      "275 Park Ave, Brooklyn, NY",
-					"neighborhood": "Fort Greene",
-					"sqft":         "6,162",
-					"monthly_rent": "$14,000/mo",
-					"psf":          "$65/sf",
-				},
-			},
-			{
-				TaskID: "task-new",
-				RowID:  "row-new-2",
-				RowKey: "listing-2",
-				Cells: map[string]string{
-					"address":      "196 Smith Street, Brooklyn, NY",
-					"neighborhood": "Cobble Hill",
-					"sqft":         "1,900",
-					"monthly_rent": "$13,500",
-				},
-			},
-		},
-		nil,
-		taskMeta,
-	)
-
-	if got, want := len(rows), 2; got != want {
-		t.Fatalf("expected 2 distinct properties, got %d", got)
-	}
-	addresses := map[string]bool{}
-	for _, r := range rows {
-		addresses[r.Cells["address"]] = true
-	}
-	if !addresses["275 Park Ave, Brooklyn, NY"] || !addresses["196 Smith Street, Brooklyn, NY"] {
-		t.Fatalf("expected both addresses, got %v", addresses)
-	}
-}
-
-// Outreach: same recipient across tasks merges — one row per contact
-// showing the latest status. Data from both rows is combined.
-func TestCollapseOutreachMergesSameRecipient(t *testing.T) {
-	now := time.Now().UTC()
-	taskMeta := map[string]*types.AgentTask{
-		"task-send":     {ID: "task-send", CreatedAt: now.Add(-5 * time.Minute)},
-		"task-followup": {ID: "task-followup", CreatedAt: now},
-	}
-	rows := collapseResolvedRows(
-		[]bamltypes.ColumnSchema{
-			{Key: "to", Type: "email"},
-			{Key: "subject", Type: "text"},
-			{Key: "status", Type: "status"},
-		},
-		[]resolvedSheetRow{
-			{
-				TaskID: "task-send",
-				RowID:  "row-1",
-				RowKey: "email-1",
-				Cells: map[string]string{
-					"to":      "luke@beam.cloud",
-					"subject": "Brooklyn Spaces Report",
-					"status":  "sent",
-				},
-			},
-			{
-				TaskID: "task-followup",
-				RowID:  "row-2",
-				RowKey: "email-1",
-				Cells: map[string]string{
-					"to":      "luke@beam.cloud",
-					"subject": "Re: Brooklyn Spaces Report",
-					"status":  "replied",
-				},
-			},
-		},
-		nil,
-		taskMeta,
-	)
-
-	if got, want := len(rows), 1; got != want {
-		t.Fatalf("same recipient = same contact, got %d rows", got)
-	}
-	if rows[0].Cells["status"] != "replied" {
-		t.Fatalf("newer task should win, got status=%q", rows[0].Cells["status"])
-	}
-}
-
-// Outreach: different recipients stay separate — never merge distinct contacts.
-func TestCollapseOutreachKeepsDifferentRecipientsSeparate(t *testing.T) {
-	rows := collapseResolvedRows(
-		[]bamltypes.ColumnSchema{
-			{Key: "to", Type: "email"},
-			{Key: "subject", Type: "text"},
-		},
-		[]resolvedSheetRow{
-			{
-				TaskID: "task-1",
-				RowID:  "row-1",
-				RowKey: "email-1",
-				Cells: map[string]string{
-					"to":      "alice@example.com",
-					"subject": "Intro",
-				},
-			},
-			{
-				TaskID: "task-1",
-				RowID:  "row-2",
-				RowKey: "email-2",
-				Cells: map[string]string{
-					"to":      "bob@example.com",
-					"subject": "Intro",
-				},
-			},
-		},
-		nil,
-		nil,
-	)
-
-	if got, want := len(rows), 2; got != want {
-		t.Fatalf("different recipients must stay separate: got %d, want %d", got, want)
-	}
-}
-
-// Research: rows with completely different identities stay separate.
-func TestCollapseKeepsDifferentEntitiesSeparate(t *testing.T) {
-	rows := collapseResolvedRows(
-		[]bamltypes.ColumnSchema{
-			{Key: "company", Type: "text"},
-			{Key: "revenue", Type: "text"},
-		},
-		[]resolvedSheetRow{
-			{
-				TaskID: "task-1",
-				RowID:  "row-1",
-				RowKey: "co-1",
-				Cells: map[string]string{
-					"company": "Acme Corp",
-					"revenue": "$10M",
-				},
-			},
-			{
-				TaskID: "task-1",
-				RowID:  "row-2",
-				RowKey: "co-2",
-				Cells: map[string]string{
-					"company": "Globex Inc",
-					"revenue": "$50M",
-				},
-			},
-		},
-		nil,
-		nil,
-	)
-
-	if got, want := len(rows), 2; got != want {
-		t.Fatalf("different companies must stay separate: got %d, want %d", got, want)
-	}
-}
-
-// Data enrichment: newer task fills gaps from older task's row. The merged
-// row has the union of data from both tasks.
-func TestCollapseMergesDataFromBothTasks(t *testing.T) {
-	now := time.Now().UTC()
-	taskMeta := map[string]*types.AgentTask{
-		"task-1": {ID: "task-1", CreatedAt: now.Add(-time.Minute)},
-		"task-2": {ID: "task-2", CreatedAt: now},
-	}
-	rows := collapseResolvedRows(
-		[]bamltypes.ColumnSchema{
-			{Key: "name", Type: "text"},
-			{Key: "phone", Type: "text"},
-			{Key: "website", Type: "text"},
-		},
-		[]resolvedSheetRow{
-			{
-				TaskID: "task-1",
-				RowID:  "row-1",
-				RowKey: "contact-1",
-				Cells: map[string]string{
-					"name":    "Jane Doe",
-					"phone":   "555-1234",
-					"website": "",
-				},
-			},
-			{
-				TaskID: "task-2",
-				RowID:  "row-2",
-				RowKey: "contact-1",
-				Cells: map[string]string{
-					"name":    "Jane Doe",
-					"phone":   "",
-					"website": "jane.example.com",
-				},
-			},
-		},
-		nil,
-		taskMeta,
-	)
-
-	if got, want := len(rows), 1; got != want {
-		t.Fatalf("same name = same entity, got %d rows", got)
-	}
-	if rows[0].Cells["phone"] != "555-1234" {
-		t.Fatalf("phone should be preserved from task-1, got %q", rows[0].Cells["phone"])
-	}
-	if rows[0].Cells["website"] != "jane.example.com" {
-		t.Fatalf("website should be filled from task-2, got %q", rows[0].Cells["website"])
-	}
-}
-
-// No identity columns: rows without any recognized identity column stay
-// separate — the system never guesses when it can't identify the entity.
-func TestCollapseNoIdentityKeepsRowsSeparate(t *testing.T) {
-	rows := collapseResolvedRows(
-		[]bamltypes.ColumnSchema{
-			{Key: "misc_data", Type: "text"},
-			{Key: "value", Type: "text"},
-		},
-		[]resolvedSheetRow{
-			{
-				TaskID: "task-1",
-				RowID:  "row-1",
-				RowKey: "task",
-				Cells: map[string]string{
-					"misc_data": "same content",
-					"value":     "100",
-				},
-			},
-			{
-				TaskID: "task-2",
-				RowID:  "row-2",
-				RowKey: "task",
-				Cells: map[string]string{
-					"misc_data": "same content",
-					"value":     "100",
-				},
-			},
-		},
-		nil,
-		nil,
-	)
-
-	if got, want := len(rows), 2; got != want {
-		t.Fatalf("no identity columns = no merge, got %d, want %d", got, want)
 	}
 }
 

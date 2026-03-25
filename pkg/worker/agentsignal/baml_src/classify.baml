@@ -81,6 +81,19 @@ function ClassifyTurn(message: string) -> TurnClassification {
     - If the message is asking the user to approve a NEW external action that
       has not happened yet (send/submit/publish/delete/deploy/etc.), classify
       as NEEDS_INPUT + APPROVE_REJECT.
+    - DRAFT vs SEND distinction: Creating a draft (email draft, document draft,
+      PR draft) is NOT the same as sending/publishing. If the agent says it
+      created a draft and provides a link to review it, classify as
+      NEEDS_INPUT + APPROVE_REJECT — the draft still needs user approval to
+      send. Only classify as COMPLETE if the message says the email/document
+      was actually SENT, PUBLISHED, or SUBMITTED (not just drafted).
+      Examples that are NEEDS_INPUT:
+      - "Gmail draft created successfully. You can review and send it here: [link]"
+      - "I've created a draft email. Here's the link to review: [link]"
+      - "Draft saved. Review it at [link] and let me know if I should send."
+      Examples that are COMPLETE:
+      - "Email sent successfully to john@example.com"
+      - "Message delivered. Monitoring for replies."
     - If the message says an external action ALREADY happened successfully and
       the remaining work is to monitor, sleep, wait for replies, or wake later,
       classify as COMPLETE.

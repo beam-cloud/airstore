@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -1949,6 +1950,34 @@ func stringValue(payload map[string]any, key string) string {
 	return strings.TrimSpace(v)
 }
 
+// extractSkillNameFromRaw pulls a skill name out of a broken payload string.
+// It handles cases like: bare name, "skill_name": "foo", name: foo, etc.
+func extractSkillNameFromRaw(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	// Try to find skill_name or name value in broken JSON
+	for _, key := range []string{"skill_name", "name"} {
+		re := regexp.MustCompile(`"?` + key + `"?\s*[:=]\s*"?([a-zA-Z0-9_-]+)"?`)
+		if m := re.FindStringSubmatch(raw); len(m) > 1 {
+			return strings.TrimSpace(m[1])
+		}
+	}
+	// If the raw string looks like a bare slug (skill name), use it directly.
+	trimmed := strings.Trim(raw, `"' {}`)
+	trimmed = strings.TrimSpace(trimmed)
+	if len(trimmed) > 0 && len(trimmed) < 100 && !strings.ContainsAny(trimmed, "{}[]:\n") {
+		slug := strings.ToLower(trimmed)
+		slug = strings.ReplaceAll(slug, " ", "-")
+		slug = strings.ReplaceAll(slug, "_", "-")
+		if matched, _ := regexp.MatchString(`^[a-z0-9][a-z0-9-]*$`, slug); matched {
+			return slug
+		}
+	}
+	return ""
+}
+
 // repairPayloadJSON tries to fix common JSON issues from LLM output — mainly
 // unescaped control characters (newlines/tabs) inside string values. Returns
 // empty string if repair is not possible.
@@ -2070,13 +2099,23 @@ func (c *Copilot) executeOne(ctx context.Context, workspaceID uint, op bamltypes
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(op.Payload), &payload); err != nil {
 		repaired := repairPayloadJSON(op.Payload)
-		if repaired == "" {
-			log.Warn().Str("op_type", opType).Str("raw_payload", truncate(op.Payload, 200)).Err(err).Msg("invalid payload JSON")
-			return fail("", "invalid payload JSON")
+		if repaired != "" {
+			if err2 := json.Unmarshal([]byte(repaired), &payload); err2 != nil {
+				repaired = ""
+			}
 		}
-		if err2 := json.Unmarshal([]byte(repaired), &payload); err2 != nil {
-			log.Warn().Str("op_type", opType).Str("raw_payload", truncate(op.Payload, 200)).Err(err2).Msg("payload JSON repair failed")
-			return fail("", "invalid payload JSON")
+		if repaired == "" {
+			// For skill operations, salvage the skill name from the raw payload.
+			if op.Type == bamltypes.OperationTypeINSTALL_SKILL || op.Type == bamltypes.OperationTypeCREATE_SKILL || op.Type == bamltypes.OperationTypeASSIGN_SKILL {
+				if name := extractSkillNameFromRaw(op.Payload); name != "" {
+					payload = map[string]any{"skill_name": name}
+					log.Info().Str("op_type", opType).Str("extracted_name", name).Msg("salvaged skill name from invalid payload")
+				}
+			}
+			if payload == nil {
+				log.Warn().Str("op_type", opType).Str("raw_payload", truncate(op.Payload, 200)).Err(err).Msg("invalid payload JSON")
+				return fail("", "invalid payload JSON")
+			}
 		}
 	}
 	str := func(key string) string {
