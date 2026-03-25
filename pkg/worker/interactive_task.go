@@ -1164,6 +1164,7 @@ func (w followupInputWaiter) waitForFollowupInput(ctx context.Context, task type
 		case <-wakeCh:
 		case <-time.After(2 * time.Second):
 		}
+		signalActivity(activityCh)
 		if prompt := w.tryClaimInput(ctx, ec.originTaskID, ec.runID, task.ExternalId); prompt != "" {
 			signalActivity(activityCh)
 			return prompt
@@ -1271,13 +1272,19 @@ func (r workerSessionRunner) buildNeedsInputChecker(
 		}
 
 		assistantMessage := msg
+		if tw.ringBuf != nil {
+			if text := extractAssistantText(tw.ringBuf.Bytes(), approvalMessageExtractLimit); text != "" {
+				assistantMessage = text
+			}
+		}
+
+		kind = classifyNeedsInputKindWithFallback(
+			ctx, kind, assistantMessage, bamlEnv,
+			classifyNeedsInputKindWithBAML,
+		)
+
 		var summary string
 		if kind == types.InputKindApproveReject {
-			if tw.ringBuf != nil {
-				if text := extractAssistantText(tw.ringBuf.Bytes(), approvalMessageExtractLimit); text != "" {
-					assistantMessage = text
-				}
-			}
 			if r.worker != nil {
 				summary = r.worker.tryBuildApprovalSummary(ctx, assistantMessage, bamlEnv)
 			}

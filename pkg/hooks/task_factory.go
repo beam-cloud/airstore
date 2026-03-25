@@ -17,13 +17,26 @@ import (
 
 const hookInputSource = "filesystem_hook"
 
+// SourceWatchFinder looks up sleeping tasks that have registered interest
+// in a particular integration entity via correlation keys (cross-workspace).
+type SourceWatchFinder interface {
+	FindTasksByCorrelationKeys(ctx context.Context, integration string, keys []string) ([]repository.TaskSourceWatchMatch, error)
+}
+
 // TaskFactory bridges hook events into the agent orchestration pipeline.
 type TaskFactory struct {
-	agents *orchestration.AgentAPI
+	agents             *orchestration.AgentAPI
+	sourceWatchFinder  SourceWatchFinder
 }
 
 func NewTaskFactory(_ repository.BackendRepository, _ repository.TaskQueue, _ string, agents *orchestration.AgentAPI) *TaskFactory {
 	return &TaskFactory{agents: agents}
+}
+
+func (f *TaskFactory) SetSourceWatchFinder(finder SourceWatchFinder) {
+	if f != nil {
+		f.sourceWatchFinder = finder
+	}
 }
 
 // CreateTask implements hooks.TaskCreator.
@@ -69,6 +82,13 @@ func (f *TaskFactory) spawnTask(
 	if hook.AgentId == nil || strings.TrimSpace(*hook.AgentId) == "" {
 		return fmt.Errorf("hook agent_id is required")
 	}
+
+	// Check if any sleeping tasks are watching for entities in this event.
+	// If ALL correlation keys match sleeping tasks, wake them and skip spawn.
+	if routed := f.routeToSleepingTasks(ctx, hook, data); routed {
+		return nil
+	}
+
 	sessionID := hookSessionID(hook.ExternalId, normalizedEventID)
 	lane := hookLane(hook.ExternalId, normalizedEventID)
 	source := hookInputSource
@@ -105,6 +125,114 @@ func (f *TaskFactory) spawnTask(
 		log.Debug().Str("hook", hook.ExternalId).Str("event_id", normalizedEventID).Msg("hook task deduped")
 	}
 	return nil
+}
+
+// routeToSleepingTasks checks if any sleeping tasks have registered
+// source watches matching this event's correlation keys. If matches
+// are found, delivers input to wake those tasks and returns true if
+// ALL keys were matched (meaning no new task spawn is needed).
+func (f *TaskFactory) routeToSleepingTasks(ctx context.Context, hook *types.Hook, data map[string]any) bool {
+	if f.sourceWatchFinder == nil || f.agents == nil {
+		return false
+	}
+
+	integration := strings.ToLower(strings.TrimSpace(anyToString(data["integration"])))
+	keysCSV := strings.TrimSpace(anyToString(data["correlation_keys"]))
+	if integration == "" || keysCSV == "" {
+		return false
+	}
+
+	keys := splitCorrelationKeys(keysCSV)
+	if len(keys) == 0 {
+		return false
+	}
+
+	matches, err := f.sourceWatchFinder.FindTasksByCorrelationKeys(ctx, integration, keys)
+	if err != nil {
+		log.Warn().Err(err).Str("integration", integration).
+			Msg("source watch lookup failed, falling through to spawn")
+		return false
+	}
+	if len(matches) == 0 {
+		return false
+	}
+
+	newItems := strings.TrimSpace(anyToString(data["new_items"]))
+	matchedKeys := make(map[string]struct{}, len(matches))
+	wokeCount := 0
+	for _, match := range matches {
+		if _, done := matchedKeys[match.CorrelationKey]; done {
+			continue
+		}
+		matchedKeys[match.CorrelationKey] = struct{}{}
+
+		wakePrompt := buildSourceWakePrompt(match, integration, newItems)
+		wakeIdempotency := fmt.Sprintf("source_wake:%s:%s:%s",
+			match.TaskID, match.CorrelationKey, anyToString(data["new_items_hash"]))
+
+		_, err := f.agents.SubmitTaskInput(
+			ctx,
+			match.WorkspaceID,
+			match.TaskID,
+			types.InputKindFreeText,
+			nil,
+			wakePrompt,
+			wakeIdempotency,
+			nil,
+		)
+		if err != nil {
+			log.Warn().Err(err).
+				Str("task_id", match.TaskID).Str("correlation_key", match.CorrelationKey).
+				Msg("failed to wake sleeping task via source watch")
+			continue
+		}
+		wokeCount++
+		log.Info().
+			Str("task_id", match.TaskID).Str("integration", integration).
+			Str("correlation_key", match.CorrelationKey).Str("reason", match.Reason).
+			Msg("woke sleeping task via source watch correlation")
+	}
+
+	allMatched := len(matchedKeys) >= len(keys)
+	if wokeCount > 0 && allMatched {
+		log.Info().
+			Int("woke", wokeCount).Int("keys", len(keys)).
+			Str("integration", integration).
+			Msg("all event correlation keys matched sleeping tasks, skipping spawn")
+		return true
+	}
+	return false
+}
+
+func splitCorrelationKeys(csv string) []string {
+	raw := strings.Split(csv, ",")
+	out := make([]string, 0, len(raw))
+	for _, s := range raw {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func buildSourceWakePrompt(match repository.TaskSourceWatchMatch, integration, newItems string) string {
+	var b strings.Builder
+	b.WriteString("New activity detected on ")
+	b.WriteString(integration)
+	b.WriteString(" entity you were watching.\n")
+	if newItems != "" {
+		b.WriteString("New items: ")
+		b.WriteString(newItems)
+		b.WriteString("\n")
+	}
+	if match.Reason != "" {
+		b.WriteString("Original watch reason: ")
+		b.WriteString(match.Reason)
+		b.WriteString("\n")
+	}
+	b.WriteString("Resume your task and process the new information.")
+	return b.String()
 }
 
 func (f *TaskFactory) deliverTaskInput(

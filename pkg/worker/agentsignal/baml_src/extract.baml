@@ -27,7 +27,7 @@ class ExtractedOutput {
   artifact_label string? @description("Human-readable plural label for the artifact family, e.g. 'Recipe PDFs', 'Drive Links', 'Extracted Recipes'")
   artifact_kind string? @description("Short subtype like pdf, html, drive-link, report, recipe, csv")
   tags string[] @description("Categorical tags for browsing and filtering, e.g. ['italian', 'pasta', 'dinner']. Use lowercase, short descriptors. Empty array if not applicable.")
-  data_fields DataField[] @description("The 3-8 most important fields extracted from the tool result for dashboard display. Empty array if kind is NONE.")
+  data_fields DataField[] @description("The 5-15 most important fields extracted from the tool result for dashboard display. Empty array if kind is NONE.")
 }
 
 function ExtractOutputs(tool_name: string, tool_input: string, tool_result: string) -> ExtractedOutput[] {
@@ -158,7 +158,7 @@ function ExtractFinalResponseOutput(user_message: string?, assistant_message: st
     - Set artifact_kind to a short lowercase subtype like recipe, report,
       brief, summary, analysis
     - Leave path and uri empty
-    - Extract data_fields from the response content — pick the 3-8 most
+    - Extract data_fields from the response content — pick the 5-15 most
       important structured values a user would want in a dashboard table
     - Add categorical tags for browsing/filtering
 

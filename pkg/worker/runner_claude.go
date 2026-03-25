@@ -249,7 +249,7 @@ func (r *ClaudeCodeRunner) ReadLastMessage(markerPath string) string {
 // We extract the tail of that message and write it to markerPath so the
 // Go worker can classify the turn via BAML.
 func stopMessageDumpScript(markerPath string) []byte {
-	const maxChars = 4000
+	const maxChars = 8000
 	return []byte(fmt.Sprintf(`"use strict";
 
 const fs = require("fs");

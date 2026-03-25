@@ -24,7 +24,7 @@ type OutputAnalyzer interface {
 }
 
 const (
-	maxAnalyzedToolInputLen  = 8000
+	maxAnalyzedToolInputLen  = 64000
 	maxAnalyzedToolResultLen = 8000
 )
 
@@ -334,6 +334,7 @@ func (w *AnalyzerWriter) createOutputWithBatch(out signaltypes.ExtractedOutput, 
 
 	if parsedInput, ok := decodeStructuredPayload(toolInput); ok {
 		c.Metadata[keySourceInput] = parsedInput
+		promoteToolInputContent(c.Data, parsedInput)
 	} else if strings.TrimSpace(toolInput) != "" {
 		c.Metadata[keySourceInputText] = strings.TrimSpace(toolInput)
 	}
@@ -356,9 +357,7 @@ func (w *AnalyzerWriter) createOutputWithBatch(out signaltypes.ExtractedOutput, 
 			c.Data[keySourceURL] = sourceURL
 		}
 
-		if len(out.Data_fields) == 0 {
-			promoteToolResultFields(c.Data, parsedResult)
-		}
+		promoteToolResultFields(c.Data, parsedResult)
 	} else if strings.TrimSpace(toolResult) != "" {
 		c.Data[keySourceExcerpt] = strings.TrimSpace(toolResult)
 	}
@@ -477,6 +476,62 @@ func promoteToolResultFields(data map[string]any, parsedResult any) {
 		return
 	}
 	for key, val := range resultMap {
+		if _, exists := data[key]; exists {
+			continue
+		}
+		switch v := val.(type) {
+		case string:
+			if v != "" {
+				data[key] = v
+			}
+		case float64, bool:
+			data[key] = v
+		case []any:
+			if len(v) > 0 {
+				if _, isStr := v[0].(string); isStr {
+					data[key] = v
+				}
+			}
+		}
+	}
+}
+
+// promoteToolInputContent extracts structured data from a file-write tool's
+// input payload. For tools like Write, the actual data lives in the "content"
+// field of the tool input, not in the tool result (which is just a
+// confirmation). Parses the content as JSON and promotes scalar fields.
+func promoteToolInputContent(data map[string]any, parsedInput any) {
+	inputMap, ok := parsedInput.(map[string]any)
+	if !ok {
+		return
+	}
+	contentStr, ok := inputMap["content"].(string)
+	if !ok || strings.TrimSpace(contentStr) == "" {
+		return
+	}
+	contentStr = strings.TrimSpace(contentStr)
+
+	var parsed any
+	if err := json.Unmarshal([]byte(contentStr), &parsed); err != nil {
+		return
+	}
+
+	var target map[string]any
+	switch v := parsed.(type) {
+	case map[string]any:
+		target = v
+	case []any:
+		if len(v) > 0 {
+			if first, ok := v[0].(map[string]any); ok {
+				target = first
+			}
+		}
+	}
+	if target == nil {
+		return
+	}
+
+	for key, val := range target {
 		if _, exists := data[key]; exists {
 			continue
 		}

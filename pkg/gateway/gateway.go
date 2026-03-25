@@ -669,6 +669,7 @@ func (g *Gateway) registerServices() error {
 			g.Config.Sandbox.GetDefaultImage(),
 			agentAPI,
 		)
+		taskFactory.SetSourceWatchFinder(g.BackendRepo)
 
 		// Agent/task/run HTTP APIs (workspace-scoped)
 		agentAPIRoot := g.baseRouteGroup.Group("/workspaces/:workspace_id")

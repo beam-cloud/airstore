@@ -4579,6 +4579,69 @@ func (b *PostgresBackend) UpdateView(ctx context.Context, v *types.View) error {
 	return err
 }
 
+// ---------------------------------------------------------------------------
+// Task source watches
+// ---------------------------------------------------------------------------
+
+func (b *PostgresBackend) UpsertTaskSourceWatches(ctx context.Context, workspaceID uint, taskID string, watches []TaskSourceWatch) error {
+	tx, err := b.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM task_source_watches WHERE task_id = $1`, taskID); err != nil {
+		return fmt.Errorf("delete old watches: %w", err)
+	}
+
+	if len(watches) > 0 {
+		for _, w := range watches {
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO task_source_watches (workspace_id, task_id, integration, correlation_key, reason)
+				VALUES ($1, $2, $3, $4, $5)
+				ON CONFLICT (workspace_id, task_id, integration, correlation_key) DO UPDATE SET reason = EXCLUDED.reason
+			`, workspaceID, taskID, w.Integration, w.CorrelationKey, w.Reason); err != nil {
+				return fmt.Errorf("insert watch: %w", err)
+			}
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (b *PostgresBackend) FindTasksByCorrelationKeys(ctx context.Context, integration string, keys []string) ([]TaskSourceWatchMatch, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	rows, err := b.db.QueryContext(ctx, `
+		SELECT tsw.workspace_id, tsw.task_id, tsw.correlation_key, COALESCE(tsw.reason, '')
+		FROM task_source_watches tsw
+		JOIN agent_task t ON t.id = tsw.task_id
+		WHERE tsw.integration = $1
+		  AND tsw.correlation_key = ANY($2::text[])
+		  AND t.state = 'sleeping'
+	`, integration, pq.Array(keys))
+	if err != nil {
+		return nil, fmt.Errorf("find tasks by correlation keys: %w", err)
+	}
+	defer rows.Close()
+
+	var matches []TaskSourceWatchMatch
+	for rows.Next() {
+		var m TaskSourceWatchMatch
+		if err := rows.Scan(&m.WorkspaceID, &m.TaskID, &m.CorrelationKey, &m.Reason); err != nil {
+			return nil, fmt.Errorf("scan match: %w", err)
+		}
+		matches = append(matches, m)
+	}
+	return matches, rows.Err()
+}
+
+func (b *PostgresBackend) DeleteTaskSourceWatches(ctx context.Context, taskID string) error {
+	_, err := b.db.ExecContext(ctx, `DELETE FROM task_source_watches WHERE task_id = $1`, taskID)
+	return err
+}
+
 func (b *PostgresBackend) DeleteView(ctx context.Context, workspaceID uint, viewID string) error {
 	result, err := b.db.ExecContext(ctx,
 		`DELETE FROM workspace_view WHERE id = $1 AND workspace_id = $2`,

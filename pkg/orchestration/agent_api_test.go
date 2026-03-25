@@ -97,8 +97,9 @@ func TestWorkspaceLiveBatchHidesDraftEmailArtifacts(t *testing.T) {
 
 type cancelTaskBackend struct {
 	repository.BackendRepository
-	task    *types.AgentTask
-	outputs map[string]*types.TaskOutput
+	task             *types.AgentTask
+	outputs          map[string]*types.TaskOutput
+	deleteWatchCalls int
 }
 
 func (b *cancelTaskBackend) GetTask(_ context.Context, _ uint, _ string) (*types.AgentTask, error) {
@@ -134,6 +135,11 @@ func (b *cancelTaskBackend) UpdateTaskOutputStatus(_ context.Context, _ uint, ou
 	if output, ok := b.outputs[outputID]; ok {
 		output.Status = status
 	}
+	return nil
+}
+
+func (b *cancelTaskBackend) DeleteTaskSourceWatches(_ context.Context, _ string) error {
+	b.deleteWatchCalls++
 	return nil
 }
 
@@ -203,9 +209,12 @@ func TestCancelTaskCleansUpSourceWatches(t *testing.T) {
 		t.Fatalf("CancelTask returned error: %v", err)
 	}
 	if len(registrar.calls) != 1 {
-		t.Fatalf("cleanup calls = %d, want 1", len(registrar.calls))
+		t.Fatalf("registrar cleanup calls = %d, want 1", len(registrar.calls))
 	}
 	if registrar.calls[0] == nil || registrar.calls[0].WorkspaceID != task.WorkspaceID || registrar.calls[0].ID != task.ID {
 		t.Fatalf("cleanup called with %#v, want task %q in workspace %d", registrar.calls[0], task.ID, task.WorkspaceID)
+	}
+	if backend.deleteWatchCalls != 1 {
+		t.Fatalf("delete watch calls (correlation index) = %d, want 1", backend.deleteWatchCalls)
 	}
 }

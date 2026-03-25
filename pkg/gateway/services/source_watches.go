@@ -10,7 +10,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/hooks"
 	"github.com/beam-cloud/airstore/pkg/orchestration"
 	"github.com/beam-cloud/airstore/pkg/repository"
@@ -30,8 +29,6 @@ type taskSourceWatchController struct {
 	service *SourceService
 	task    *types.AgentTask
 }
-
-const sourceWatchBaselinePendingKey = "source_watch_baseline_pending"
 
 func (s *SourceService) RegisterTaskSourceWatches(
 	ctx context.Context,
@@ -225,11 +222,6 @@ func (c *taskSourceWatchController) register(
 		return nil, err
 	}
 
-	// Don't bootstrap the baseline inline — let the poller handle it
-	// via the baseline_pending flag in the query spec. This gives the
-	// source API time to reflect any messages the agent just sent
-	// before the SeenTracker baseline is established, preventing the
-	// agent's own sent messages from appearing as "new" items.
 	return &sourceWatchRegistration{
 		Query:   query,
 		Hook:    hook,
@@ -247,7 +239,7 @@ func (c *taskSourceWatchController) upsertQuery(
 	if err != nil {
 		return nil, false, fmt.Errorf("resolve source watch credentials: %w", err)
 	}
-	querySpec, filenameFormat, err := buildSourceWatchQuerySpec(req, credentialMemberID, true)
+	querySpec, filenameFormat, err := buildSourceWatchQuerySpec(req, credentialMemberID)
 	if err != nil {
 		return nil, false, err
 	}
@@ -336,53 +328,6 @@ func (s *SourceService) findHookByPath(ctx context.Context, workspaceID uint, qu
 		}
 	}
 	return nil, nil
-}
-
-func (s *SourceService) seedSourceWatchBaseline(ctx context.Context, workspaceID uint, queryPath string, results []repository.QueryResult) error {
-	ids := make([]string, 0, len(results))
-	for _, result := range results {
-		id := strings.TrimSpace(result.ID)
-		if id == "" {
-			continue
-		}
-		ids = append(ids, id)
-	}
-	seenKey := common.Keys.HookSeen(workspaceID, types.GeneratePathID(hooks.NormalizePath(queryPath)))
-	return s.seenTracker.Commit(ctx, seenKey, ids)
-}
-
-// seedSourceWatchBaselineFromResults updates the SeenTracker for a
-// source watch query without clearing the baseline_pending flag.
-// Used during the grace period to keep the baseline current.
-func (s *SourceService) seedSourceWatchBaselineFromResults(ctx context.Context, query *types.FilesystemQuery, results []repository.QueryResult) error {
-	if query == nil {
-		return nil
-	}
-	return s.seedSourceWatchBaseline(ctx, query.WorkspaceId, query.Path, results)
-}
-
-func (s *SourceService) completePendingSourceWatchBaseline(
-	ctx context.Context,
-	query *types.FilesystemQuery,
-	results []repository.QueryResult,
-) error {
-	if query == nil {
-		return fmt.Errorf("source watch query is required")
-	}
-	if err := s.seedSourceWatchBaseline(ctx, query.WorkspaceId, query.Path, results); err != nil {
-		return fmt.Errorf("seed source watch baseline %s: %w", query.Path, err)
-	}
-	updated, err := setSourceWatchQueryState(query, query.CredentialMemberID, false)
-	if err != nil {
-		return fmt.Errorf("update source watch query state %s: %w", query.Path, err)
-	}
-	if !updated || s == nil || s.fsStore == nil {
-		return nil
-	}
-	if err := s.fsStore.UpdateQuery(ctx, query); err != nil {
-		return fmt.Errorf("persist source watch query state %s: %w", query.Path, err)
-	}
-	return nil
 }
 
 func (s *SourceService) cleanupSourceWatchResources(ctx context.Context, workspaceID uint, hook *types.Hook, resetSeen bool) error {
@@ -566,7 +511,6 @@ func mergeSourceWatchRequestWithFallback(req, fallback *types.SourceWatchRequest
 func buildSourceWatchQuerySpec(
 	req *types.SourceWatchRequest,
 	credentialMemberID *uint,
-	baselinePending bool,
 ) (string, string, error) {
 	req = types.NormalizeSourceWatchRequest(req)
 	if req == nil {
@@ -584,9 +528,6 @@ func buildSourceWatchQuerySpec(
 	}
 	if credentialMemberID != nil {
 		payload[legacyQueryCredentialMemberIDKey] = fmt.Sprintf("%d", *credentialMemberID)
-	}
-	if baselinePending {
-		payload[sourceWatchBaselinePendingKey] = true
 	}
 
 	switch strings.ToLower(req.Integration) {
@@ -626,58 +567,6 @@ func buildSourceWatchQuerySpec(
 		return "", "", fmt.Errorf("marshal source watch query spec: %w", err)
 	}
 	return string(data), filenameFormat, nil
-}
-
-func sourceWatchBaselinePending(query *types.FilesystemQuery) bool {
-	if query == nil || strings.TrimSpace(query.QuerySpec) == "" {
-		return false
-	}
-	var spec struct {
-		BaselinePending bool `json:"source_watch_baseline_pending"`
-	}
-	if err := json.Unmarshal([]byte(query.QuerySpec), &spec); err != nil {
-		return false
-	}
-	return spec.BaselinePending
-}
-
-func setSourceWatchQueryState(
-	query *types.FilesystemQuery,
-	credentialMemberID *uint,
-	baselinePending bool,
-) (bool, error) {
-	if query == nil {
-		return false, nil
-	}
-
-	payload := make(map[string]any)
-	if raw := strings.TrimSpace(query.QuerySpec); raw != "" {
-		if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-			return false, fmt.Errorf("unmarshal source watch query spec: %w", err)
-		}
-	}
-
-	if credentialMemberID != nil {
-		payload[legacyQueryCredentialMemberIDKey] = fmt.Sprintf("%d", *credentialMemberID)
-	} else {
-		delete(payload, legacyQueryCredentialMemberIDKey)
-	}
-	if baselinePending {
-		payload[sourceWatchBaselinePendingKey] = true
-	} else {
-		delete(payload, sourceWatchBaselinePendingKey)
-	}
-
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return false, fmt.Errorf("marshal source watch query spec: %w", err)
-	}
-	nextSpec := string(encoded)
-	if query.QuerySpec == nextSpec {
-		return false, nil
-	}
-	query.QuerySpec = nextSpec
-	return true, nil
 }
 
 func buildSourceWatchBlockerSpec(wakeSignal *types.RunExecutionWakeSignal, registrations []*sourceWatchRegistration) *types.TaskBlockerSpec {
