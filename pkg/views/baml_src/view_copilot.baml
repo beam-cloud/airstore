@@ -135,6 +135,13 @@ function WriteView(
       workflow has genuinely distinct data domains (e.g. "contacts" vs "emails
       sent" vs "pricing comparisons" are three separate entity types that
       would clutter one table). When in doubt, use one sheet.
+    - SKILL-DRIVEN SCAFFOLDING: When a skill has multiple `output paths`
+      (e.g. contacts.json, properties.json, outreach-log.json), each path
+      typically represents a distinct data domain. Create one sheet per
+      distinct entity type. Derive table columns from the Data Structures
+      section of the skill definition. For each JSON field, create a matching
+      column with the appropriate type (text, email, date, status, tags, etc).
+      Use the skill's field names as column keys and human-readable labels.
     - Every sheet must have at least one table component.
     - Sheets can have multiple components arranged in the 12-column grid.
       Example: table at colSpan:8, template at colSpan:4 beside it,
@@ -310,15 +317,21 @@ function WriteView(
 
     16. FILE ATTACHMENTS & DATA IMPORT: When the user attaches files, their
         content appears in the ATTACHED FILES section of the user message.
-        - For CSV files: you can see the headers and data preview. If the
-          user asks to populate a sheet with this data, emit an IMPORT_DATA
-          operation with {file_path, sheet_id, column_mapping}. Inspect
-          the CSV headers and the sheet's table columns to build the
-          column_mapping (CSV header -> column key).
-        - If the sheet doesn't have columns matching the CSV data, ALSO
-          update view_content to add appropriate columns to the table's
-          config.columns and dataSource.transform arrays.
-        - For other files (text, JSON, images): use the content to answer
+        - For CSV/TSV/JSON files: you can see the headers and data preview.
+          If the user asks to populate a sheet with this data, emit an
+          IMPORT_DATA operation with {file_path, sheet_id, column_mapping}.
+          Inspect the file headers and the sheet's table columns to build
+          the column_mapping (header -> column key).
+        - The import engine auto-creates columns in the view definition for
+          any CSV/JSON headers that don't already have matching columns.
+          You do NOT need to manually add columns for imported data — just
+          emit the IMPORT_DATA operation and columns will be created
+          automatically. However, you may still update view_content to set
+          column types or labels if the defaults need refinement.
+        - JSON files are supported: arrays of objects are imported with
+          nested keys flattened (e.g. criteria_match.score becomes
+          criteria_match_score).
+        - For other files (text, images): use the content to answer
           questions or inform view design decisions.
         - Imported data rows persist in the sheet and can be enriched by
           future agent task outputs. Agents can add data to columns that

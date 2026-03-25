@@ -834,6 +834,8 @@ func (r *RuntimeLoops) settleOriginTask(ctx context.Context, runID string, task 
 		return nil
 	}
 
+	parentSourceViewID := strPtrMaybe(stringFromPayload(task.PayloadJSON, "source_view_id"))
+
 	for _, req := range settlement.subtaskRequests {
 		parentID := task.ID
 		label := req.EntityLabel
@@ -846,6 +848,7 @@ func (r *RuntimeLoops) settleOriginTask(ctx context.Context, runID string, task 
 			ParentTaskID:   &parentID,
 			Label:          &label,
 			SpawnedBy:      &spawnedBy,
+			SourceViewID:   parentSourceViewID,
 			DispatchDelay:  time.Duration(req.WakeDelayMinutes) * time.Minute,
 		})
 		if err != nil {
