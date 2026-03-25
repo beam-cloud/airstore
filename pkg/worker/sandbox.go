@@ -244,6 +244,7 @@ func NewSandboxManager(ctx context.Context, cfg Config) (*SandboxManager, error)
 	airRunner := NewAirRunner(AirRunnerOptions{
 		AnthropicAPIKey: cfg.AnthropicAPIKey,
 		CerebrasAPIKey:  cfg.CerebrasAPIKey,
+		KernelAPIKey:    cfg.KernelAPIKey,
 		S2Key:           cfg.S2Token,
 		S2Basin:         cfg.S2Basin,
 	})

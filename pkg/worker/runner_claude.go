@@ -303,7 +303,9 @@ func buildClaudeHookSettings(paths *claudeHookPaths, includeClassify bool) []byt
 }
 
 func (r *ClaudeCodeRunner) injectEnv(env map[string]string) {
-	r.injectAPIKey(env, "ANTHROPIC_API_KEY", r.anthropicAPIKey, true)
+	if r.anthropicAPIKey != "" {
+		env["ANTHROPIC_API_KEY"] = r.anthropicAPIKey
+	}
 	r.injectKernelEnv(env)
 	if strings.TrimSpace(env[claudeConfigDirEnvKey]) == "" {
 		// Keep Claude state directly on the mounted workspace so behavior is
@@ -433,20 +435,9 @@ func (r *ClaudeCodeRunner) injectKernelEnv(env map[string]string) {
 		log.Warn().Msg("kernel API key not configured, browser tool will not work")
 		return
 	}
-	r.injectAPIKey(env, "KERNEL_API_KEY", r.kernelAPIKey, false)
-	if env["AGENT_BROWSER_PROVIDER"] == "" {
-		env["AGENT_BROWSER_PROVIDER"] = "kernel"
-	}
+	setEnvDefault(env, "KERNEL_API_KEY", r.kernelAPIKey)
+	injectKernelBrowserEnv(env)
 	log.Debug().Str("provider", env["AGENT_BROWSER_PROVIDER"]).Msg("kernel browser env injected")
-}
-
-func (r *ClaudeCodeRunner) injectAPIKey(env map[string]string, key, value string, overwrite bool) {
-	if value == "" {
-		return
-	}
-	if overwrite || env[key] == "" {
-		env[key] = value
-	}
 }
 
 func claudeSessionIDFromEnv(env map[string]string) string {
