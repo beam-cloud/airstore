@@ -47,13 +47,13 @@ func nullableStringPtr(s *string) sql.NullString {
 const filesystemQuerySelectColumns = `
 	id, external_id, workspace_id, credential_member_id, system_managed, lifecycle, owner_task_id, owner_run_id,
 	integration, path, name, query_spec, guidance, output_format, file_ext, filename_format, cache_ttl, mode, filter,
-	created_at, updated_at, last_executed
+	created_at, updated_at, last_executed, baseline_item_ids
 `
 
 const filesystemQueryQualifiedSelectColumns = `
 	q.id, q.external_id, q.workspace_id, q.credential_member_id, q.system_managed, q.lifecycle, q.owner_task_id, q.owner_run_id,
 	q.integration, q.path, q.name, q.query_spec, q.guidance, q.output_format, q.file_ext, q.filename_format, q.cache_ttl, q.mode, q.filter,
-	q.created_at, q.updated_at, q.last_executed
+	q.created_at, q.updated_at, q.last_executed, q.baseline_item_ids
 `
 
 type rowScanner interface {
@@ -90,15 +90,18 @@ func scanFilesystemQuery(scanner rowScanner, query *types.FilesystemQuery) error
 	var filterStr sql.NullString
 	var ownerTaskID sql.NullString
 	var ownerRunID sql.NullString
+	var baselineItemIDs pq.StringArray
 	if err := scanner.Scan(
 		&query.Id, &query.ExternalId, &query.WorkspaceId, &query.CredentialMemberID,
 		&query.SystemManaged, &query.Lifecycle, &ownerTaskID, &ownerRunID,
 		&query.Integration, &query.Path, &query.Name, &query.QuerySpec, &query.Guidance,
 		&query.OutputFormat, &query.FileExt, &filenameFormat, &query.CacheTTL,
 		&query.Mode, &filterStr, &query.CreatedAt, &query.UpdatedAt, &lastExecuted,
+		&baselineItemIDs,
 	); err != nil {
 		return err
 	}
+	query.BaselineItemIDs = baselineItemIDs
 	if filenameFormat.Valid {
 		query.FilenameFormat = filenameFormat.String
 	}
@@ -1205,6 +1208,113 @@ func (s *filesystemStore) GetWatchedSourceQueries(ctx context.Context, staleAfte
 		queries = append(queries, q)
 	}
 	return queries, rows.Err()
+}
+
+func (s *filesystemStore) UpdateQueryBaseline(ctx context.Context, queryID uint, ids []string) error {
+	if s.isMemoryMode() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for _, q := range s.memQueries {
+			if q.Id == queryID {
+				q.BaselineItemIDs = append([]string(nil), ids...)
+				return nil
+			}
+		}
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE filesystem_queries SET baseline_item_ids = $1 WHERE id = $2`, pq.Array(ids), queryID)
+	if err != nil {
+		return fmt.Errorf("update query baseline: %w", err)
+	}
+	return nil
+}
+
+func (s *filesystemStore) DeactivateHookAndUpdateBaseline(ctx context.Context, hookID uint, queryID uint, ids []string) error {
+	if s.isMemoryMode() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for _, h := range s.memHooks {
+			if h.Id == hookID {
+				h.Active = false
+				break
+			}
+		}
+		for _, q := range s.memQueries {
+			if q.Id == queryID {
+				q.BaselineItemIDs = append([]string(nil), ids...)
+				break
+			}
+		}
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `UPDATE filesystem_hooks SET active = false, updated_at = NOW() WHERE id = $1`, hookID); err != nil {
+		return fmt.Errorf("deactivate hook: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE filesystem_queries SET baseline_item_ids = $1 WHERE id = $2`, pq.Array(ids), queryID); err != nil {
+		return fmt.Errorf("update baseline: %w", err)
+	}
+	return tx.Commit()
+}
+
+func (s *filesystemStore) GetActiveFollowupHook(ctx context.Context, workspaceID uint, queryPath string) (*types.Hook, error) {
+	if s.isMemoryMode() {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		for _, h := range s.memHooks {
+			if h.WorkspaceId == workspaceID && h.Path == queryPath && h.Active && h.DeliveryMode == types.HookDeliveryModeTaskInput {
+				return h, nil
+			}
+		}
+		return nil, nil
+	}
+
+	h := &types.Hook{}
+	var skillPaths pq.StringArray
+	var eventTypes pq.StringArray
+	var agentID sql.NullString
+	var targetTaskID sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, external_id, workspace_id, path, prompt, skill_path, skill_paths, agent_id, active,
+		       event_types, delivery_mode, target_task_id, system_managed, one_shot,
+		       created_by_member_id, token_id, encrypted_token, created_at, updated_at
+		FROM filesystem_hooks
+		WHERE workspace_id = $1 AND LOWER(path) = LOWER($2) AND active = true AND delivery_mode = 'task_input'
+		LIMIT 1
+	`, workspaceID, queryPath).Scan(
+		&h.Id, &h.ExternalId, &h.WorkspaceId, &h.Path, &h.Prompt, &h.SkillPath, &skillPaths, &agentID,
+		&h.Active, &eventTypes, &h.DeliveryMode, &targetTaskID, &h.SystemManaged, &h.OneShot,
+		&h.CreatedByMemberId, &h.TokenId, &h.EncryptedToken,
+		&h.CreatedAt, &h.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get active followup hook: %w", err)
+	}
+	h.SkillPaths = []string(skillPaths)
+	h.EventTypes = []string(eventTypes)
+	if agentID.Valid {
+		v := strings.TrimSpace(agentID.String)
+		if v != "" {
+			h.AgentId = &v
+		}
+	}
+	if targetTaskID.Valid {
+		v := strings.TrimSpace(targetTaskID.String)
+		if v != "" {
+			h.TargetTaskID = &v
+		}
+	}
+	normalizeHookSkillFields(h)
+	return h, nil
 }
 
 // ===== Hooks =====

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	hookspkg "github.com/beam-cloud/airstore/pkg/hooks"
 	"github.com/beam-cloud/airstore/pkg/repository"
@@ -530,5 +531,209 @@ func TestEmitSourceHookEvents_RemovedItemsEmitFsDelete(t *testing.T) {
 	}
 	if gotCount, _ := emitter.events[0]["removed_count"].(string); gotCount != "2" {
 		t.Fatalf("expected removed_count=2, got %q", gotCount)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Followup direct delivery tests
+// ---------------------------------------------------------------------------
+
+type testTaskWaker struct {
+	wakes []testWake
+	err   error
+}
+
+type testWake struct {
+	WorkspaceID uint
+	TaskID      string
+	Message     string
+}
+
+func (w *testTaskWaker) WakeTask(_ context.Context, workspaceID uint, taskID string, message string) error {
+	w.wakes = append(w.wakes, testWake{WorkspaceID: workspaceID, TaskID: taskID, Message: message})
+	return w.err
+}
+
+func newFollowupTestQuery(baseline []string) *types.FilesystemQuery {
+	taskID := "task-abc"
+	return &types.FilesystemQuery{
+		Id:              1,
+		WorkspaceId:     200,
+		SystemManaged:   true,
+		Lifecycle:       types.FilesystemQueryLifecycleTaskFollowUp,
+		OwnerTaskID:     &taskID,
+		Integration:     "gmail",
+		Path:            "/sources/gmail/__followup__test",
+		BaselineItemIDs: baseline,
+	}
+}
+
+func TestFollowupDirectDelivery_NilBaselineEstablishesFromCurrentResults(t *testing.T) {
+	store := repository.NewMemoryFilesystemStore()
+	query := newFollowupTestQuery(nil)
+	store.CreateQuery(context.Background(), query)
+
+	waker := &testTaskWaker{}
+	svc := &SourceService{fsStore: store, taskWaker: waker}
+
+	results := []repository.QueryResult{{ID: "msg-1"}, {ID: "msg-2"}}
+	svc.handleFollowupDirectDelivery(context.Background(), 200, query, results)
+
+	if len(waker.wakes) != 0 {
+		t.Fatalf("expected no wake on nil baseline (just establishing), got %d", len(waker.wakes))
+	}
+
+	// Verify baseline was set
+	refreshed, _ := store.GetQuery(context.Background(), 200, query.Path)
+	if refreshed == nil || len(refreshed.BaselineItemIDs) != 2 {
+		t.Fatalf("expected baseline with 2 items, got %v", refreshed)
+	}
+}
+
+func TestFollowupDirectDelivery_NewItemsWakeTask(t *testing.T) {
+	store := repository.NewMemoryFilesystemStore()
+	query := newFollowupTestQuery([]string{"msg-1"})
+	created, _ := store.CreateQuery(context.Background(), query)
+
+	targetTaskID := "task-abc"
+	store.CreateHook(context.Background(), &types.Hook{
+		WorkspaceId:  200,
+		Path:         "/sources/gmail/__followup__test",
+		Prompt:       "New reply received",
+		Active:       true,
+		DeliveryMode: types.HookDeliveryModeTaskInput,
+		TargetTaskID: &targetTaskID,
+		OneShot:      true,
+	})
+
+	waker := &testTaskWaker{}
+	svc := &SourceService{fsStore: store, taskWaker: waker}
+
+	results := []repository.QueryResult{{ID: "msg-1"}, {ID: "msg-2"}}
+	created.BaselineItemIDs = query.BaselineItemIDs
+	svc.handleFollowupDirectDelivery(context.Background(), 200, created, results)
+
+	if len(waker.wakes) != 1 {
+		t.Fatalf("expected 1 wake, got %d", len(waker.wakes))
+	}
+	if waker.wakes[0].TaskID != "task-abc" {
+		t.Fatalf("expected task-abc, got %s", waker.wakes[0].TaskID)
+	}
+
+	// OneShot hook should be deactivated
+	hook, _ := store.GetActiveFollowupHook(context.Background(), 200, "/sources/gmail/__followup__test")
+	if hook != nil {
+		t.Fatalf("expected hook to be deactivated after one-shot delivery, but it's still active")
+	}
+}
+
+func TestFollowupDirectDelivery_NoNewItemsNoWake(t *testing.T) {
+	store := repository.NewMemoryFilesystemStore()
+	query := newFollowupTestQuery([]string{"msg-1", "msg-2"})
+	created, _ := store.CreateQuery(context.Background(), query)
+
+	waker := &testTaskWaker{}
+	svc := &SourceService{fsStore: store, taskWaker: waker}
+
+	results := []repository.QueryResult{{ID: "msg-1"}, {ID: "msg-2"}}
+	created.BaselineItemIDs = query.BaselineItemIDs
+	svc.handleFollowupDirectDelivery(context.Background(), 200, created, results)
+
+	if len(waker.wakes) != 0 {
+		t.Fatalf("expected no wake when no new items, got %d", len(waker.wakes))
+	}
+}
+
+func TestFollowupDirectDelivery_WakeFailureLeavesBaselineUnchanged(t *testing.T) {
+	store := repository.NewMemoryFilesystemStore()
+	query := newFollowupTestQuery([]string{"msg-1"})
+	created, _ := store.CreateQuery(context.Background(), query)
+
+	targetTaskID := "task-abc"
+	store.CreateHook(context.Background(), &types.Hook{
+		WorkspaceId:  200,
+		Path:         "/sources/gmail/__followup__test",
+		Prompt:       "New reply",
+		Active:       true,
+		DeliveryMode: types.HookDeliveryModeTaskInput,
+		TargetTaskID: &targetTaskID,
+		OneShot:      true,
+	})
+
+	waker := &testTaskWaker{err: fmt.Errorf("task not found")}
+	svc := &SourceService{fsStore: store, taskWaker: waker}
+
+	results := []repository.QueryResult{{ID: "msg-1"}, {ID: "msg-2"}}
+	created.BaselineItemIDs = query.BaselineItemIDs
+	svc.handleFollowupDirectDelivery(context.Background(), 200, created, results)
+
+	if len(waker.wakes) != 1 {
+		t.Fatalf("expected 1 wake attempt, got %d", len(waker.wakes))
+	}
+
+	// Baseline should NOT have been updated (wake failed)
+	refreshed, _ := store.GetQuery(context.Background(), 200, query.Path)
+	if refreshed != nil && len(refreshed.BaselineItemIDs) != 1 {
+		t.Fatalf("expected baseline unchanged (1 item), got %d items", len(refreshed.BaselineItemIDs))
+	}
+
+	// Hook should still be active
+	hook, _ := store.GetActiveFollowupHook(context.Background(), 200, "/sources/gmail/__followup__test")
+	if hook == nil {
+		t.Fatalf("expected hook to remain active after failed delivery")
+	}
+}
+
+func TestFollowupDirectDelivery_RefreshQueryUsesDirectPath(t *testing.T) {
+	store := repository.NewMemoryFilesystemStore()
+	query := newFollowupTestQuery([]string{"msg-1"})
+	store.CreateQuery(context.Background(), query)
+
+	waker := &testTaskWaker{}
+	_ = &SourceService{
+		fsStore:   store,
+		taskWaker: waker,
+	}
+
+	if !query.IsTaskFollowUp() {
+		t.Fatalf("expected IsTaskFollowUp() = true")
+	}
+}
+
+func TestSeedBaselineFollowupUsesPostgres(t *testing.T) {
+	store := repository.NewMemoryFilesystemStore()
+	taskID := "task-seed"
+	query := &types.FilesystemQuery{
+		WorkspaceId: 300,
+		SystemManaged: true,
+		Lifecycle:   types.FilesystemQueryLifecycleTaskFollowUp,
+		OwnerTaskID: &taskID,
+		Integration: "gmail",
+		Path:        "/sources/gmail/__followup__seed",
+		Name:        "__followup__seed",
+	}
+	created, _ := store.CreateQuery(context.Background(), query)
+
+	// Pre-populate cached results
+	store.StoreQueryResults(context.Background(), 300, "/sources/gmail/__followup__seed", []repository.QueryResult{
+		{ID: "cached-1"}, {ID: "cached-2"},
+	}, 5*time.Minute)
+
+	task := &types.AgentTask{ID: taskID, WorkspaceID: 300}
+	waker := &testTaskWaker{}
+	svc := &SourceService{
+		fsStore:   store,
+		taskWaker: waker,
+	}
+	ctrl := &taskSourceWatchController{service: svc, task: task}
+
+	ctrl.seedBaseline(context.Background(), created)
+
+	refreshed, _ := store.GetQuery(context.Background(), 300, query.Path)
+	if refreshed == nil {
+		t.Fatalf("query not found after seed")
+	}
+	if len(refreshed.BaselineItemIDs) != 2 {
+		t.Fatalf("expected 2 baseline items, got %d", len(refreshed.BaselineItemIDs))
 	}
 }
