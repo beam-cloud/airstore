@@ -51,7 +51,6 @@ type resolvedSheetRow struct {
 	BlockerKind        string
 	BlockerInputKind   string
 	BlockerWaitGroupID string
-	ApprovalSurface    string
 	SourceOutputIDs    string
 	Source             string
 	Cells              map[string]string
@@ -81,7 +80,6 @@ var hiddenResolvedColumns = []hiddenResolvedColumn{
 	{Key: "blocker_kind", Value: func(_ string, row resolvedSheetRow) any { return row.BlockerKind }},
 	{Key: "blocker_input_kind", Value: func(_ string, row resolvedSheetRow) any { return row.BlockerInputKind }},
 	{Key: "blocker_wait_group_id", Value: func(_ string, row resolvedSheetRow) any { return row.BlockerWaitGroupID }},
-	{Key: "approval_surface", Value: func(_ string, row resolvedSheetRow) any { return row.ApprovalSurface }},
 	{Key: "source_output_ids", Value: func(_ string, row resolvedSheetRow) any { return row.SourceOutputIDs }},
 	{Key: "source", Value: func(_ string, row resolvedSheetRow) any { return row.Source }},
 }
@@ -430,6 +428,8 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 			resolvedRows = append(resolvedRows, rows...)
 		}
 	}
+
+	resolvedRows = deduplicateResolvedRows(resolvedRows, taskMeta)
 
 	importRows := r.loadAndMergeImportRows(ctx, viewID, sheet.ID, comp.ID, resolvedRows)
 	resolvedRows = append(resolvedRows, importRows...)
@@ -815,9 +815,33 @@ func materializeTaskGroup(
 		persisted = append(persisted, mappedRowToViewRow(sheetID, componentID, taskID, schemaHash, outputSignature, outputs, row, now))
 	}
 	if len(persisted) == 0 {
+		retained := retainExistingRows(existingRows, componentID, outputSignature, schemaHash)
+		if len(retained) > 0 {
+			return retained
+		}
 		persisted = []ViewRow{fallbackViewRow(sheetID, componentID, taskID, schemaHash, outputSignature, outputs, now)}
 	}
 	return persisted
+}
+
+// retainExistingRows returns stored rows that should be kept when BAML
+// produced zero mapped rows for a task group. This prevents non-deterministic
+// LLM drops from deleting rows that were successfully mapped in a prior call.
+// Only rows whose output signature matches the current outputs are retained —
+// genuinely stale rows (from old output sets) are not carried forward.
+func retainExistingRows(existingRows []ViewRow, componentID, outputSignature, schemaHash string) []ViewRow {
+	var retained []ViewRow
+	for _, existing := range existingRows {
+		if existing.Marker || existing.ComponentID != componentID {
+			continue
+		}
+		if existing.OutputSignature != outputSignature {
+			continue
+		}
+		existing.SchemaHash = schemaHash
+		retained = append(retained, existing)
+	}
+	return retained
 }
 
 func viewRowSemanticKey(row ViewRow) string {
@@ -865,9 +889,6 @@ func groupRowsFresh(rows []ViewRow, componentID, schemaH string, outputIDs []str
 		}
 		if strings.TrimSpace(componentID) != "" && row.ComponentID != componentID {
 			return false, "component_scope_mismatch"
-		}
-		if row.SchemaHash != schemaH {
-			return false, "schema_hash_mismatch"
 		}
 		if !slicesMatch(row.OutputIDs, outputIDs) {
 			return false, "output_ids_mismatch"
@@ -1002,6 +1023,60 @@ func (r *DataResolver) listScopedOutputs(ctx context.Context, workspaceID uint, 
 	return dedupeOutputs(all), nil
 }
 
+// deduplicateResolvedRows removes cross-task duplicates by RowKey.
+// When two rows from different tasks share the same non-empty RowKey,
+// the row with more populated cells wins; ties broken by most recent task.
+func deduplicateResolvedRows(rows []resolvedSheetRow, taskMeta map[string]*types.AgentTask) []resolvedSheetRow {
+	if len(rows) == 0 {
+		return rows
+	}
+	type entry struct {
+		index    int
+		cellCount int
+	}
+	seen := make(map[string]entry, len(rows))
+	for i, row := range rows {
+		key := strings.TrimSpace(row.RowKey)
+		if key == "" || row.Source == "import" {
+			continue
+		}
+		cc := 0
+		for _, v := range row.Cells {
+			if strings.TrimSpace(v) != "" {
+				cc++
+			}
+		}
+		prev, exists := seen[key]
+		if !exists {
+			seen[key] = entry{index: i, cellCount: cc}
+			continue
+		}
+		keepNew := false
+		if cc > prev.cellCount {
+			keepNew = true
+		} else if cc == prev.cellCount {
+			prevTask := taskMeta[rows[prev.index].TaskID]
+			curTask := taskMeta[row.TaskID]
+			if prevTask != nil && curTask != nil && curTask.CreatedAt.After(prevTask.CreatedAt) {
+				keepNew = true
+			}
+		}
+		if keepNew {
+			rows[prev.index].Cells = nil
+			seen[key] = entry{index: i, cellCount: cc}
+		} else {
+			rows[i].Cells = nil
+		}
+	}
+	deduped := make([]resolvedSheetRow, 0, len(rows))
+	for _, row := range rows {
+		if row.Cells != nil || row.Source == "import" {
+			deduped = append(deduped, row)
+		}
+	}
+	return deduped
+}
+
 func dedupeTasks(tasks []*types.AgentTask) []*types.AgentTask {
 	if len(tasks) == 0 {
 		return nil
@@ -1075,34 +1150,12 @@ func (r *DataResolver) fetchOutputsForScope(ctx context.Context, workspaceID uin
 	return filtered, nil
 }
 
-func (r *DataResolver) fetchBlockerOutputsForScope(
-	ctx context.Context,
-	workspaceID uint,
-	ds *types.DataSource,
-	agentIDs []string,
-	selectedOutputs []*types.TaskOutput,
-) ([]*types.TaskOutput, error) {
-	filter := types.AgentTaskListFilter{
-		States: []types.AgentTaskState{types.AgentTaskStateWaiting},
-		Limit:  200,
+func taskBelongsToView(task *types.AgentTask, viewID string) bool {
+	if task == nil || task.PayloadJSON == nil {
+		return false
 	}
-	tasks, err := r.listScopedTasks(ctx, workspaceID, filter, agentIDs)
-	if err != nil || len(tasks) == 0 {
-		return nil, err
-	}
-
-	selectedTaskIDs := taskSetFromOutputs(selectedOutputs)
-	synthetic := make([]*types.TaskOutput, 0, len(tasks))
-	for _, task := range tasks {
-		if task == nil || selectedTaskIDs[strings.TrimSpace(task.ID)] {
-			continue
-		}
-		if output := blockerMappingOutput(task); output != nil {
-			synthetic = append(synthetic, output)
-		}
-	}
-	filtered := dedupeOutputs(filterOutputsForDataSource(synthetic, ds, agentIDs))
-	return filtered, nil
+	v, _ := task.PayloadJSON["source_view_id"].(string)
+	return strings.TrimSpace(v) == viewID
 }
 
 func (r *DataResolver) fetchComponentOutputs(ctx context.Context, workspaceID uint, ds *types.DataSource, viewAgentRefs []string) ([]*types.TaskOutput, error) {
@@ -1136,39 +1189,32 @@ func (r *DataResolver) fetchMappingOutputs(ctx context.Context, workspaceID uint
 	if err != nil {
 		return nil, err
 	}
-	blockerSelectedOutputs, err := r.fetchBlockerOutputsForScope(ctx, workspaceID, ds, agentIDs, realSelectedOutputs)
-	if err != nil {
-		return nil, err
-	}
-	selectedOutputs := dedupeOutputs(append(realSelectedOutputs, blockerSelectedOutputs...))
 
 	log.Info().
 		Uint("workspace_id", workspaceID).
 		Strs("agent_ids", agentIDs).
 		Str("source_view_id", sourceViewID).
 		Int("real_outputs", len(realSelectedOutputs)).
-		Int("blocker_outputs", len(blockerSelectedOutputs)).
-		Int("total_selected", len(selectedOutputs)).
 		Msg("view resolver: fetched mapping outputs")
 
-	if len(selectedOutputs) == 0 || !dataSourceNarrowsTaskSelection(ds) {
-		return selectedOutputs, nil
+	if len(realSelectedOutputs) == 0 || !dataSourceNarrowsTaskSelection(ds) {
+		return realSelectedOutputs, nil
 	}
 
 	if dataSourceTargetsSpecificOutputs(ds) {
-		return selectedOutputs, nil
+		return realSelectedOutputs, nil
 	}
 
 	taskIDs := taskSetFromOutputs(realSelectedOutputs)
 	if len(taskIDs) == 0 {
-		return selectedOutputs, nil
+		return realSelectedOutputs, nil
 	}
 
 	allTaskOutputs, err := r.fetchTaskOutputs(ctx, workspaceID, sortedTaskIDSet(taskIDs), agentIDs)
 	if err != nil {
 		return nil, err
 	}
-	return dedupeOutputs(append(allTaskOutputs, blockerSelectedOutputs...)), nil
+	return dedupeOutputs(allTaskOutputs), nil
 }
 
 // dataSourceTargetsSpecificOutputs returns true when the filter selects a
@@ -1773,11 +1819,6 @@ func enrichRowsWithOutputState(
 			rows[i].BlockerKind = ""
 			rows[i].BlockerInputKind = ""
 			rows[i].BlockerWaitGroupID = ""
-		}
-		if blocker != nil && blocker.ApprovalSurface {
-			rows[i].ApprovalSurface = "true"
-		} else {
-			rows[i].ApprovalSurface = ""
 		}
 	}
 }

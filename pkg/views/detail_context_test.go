@@ -215,9 +215,6 @@ func TestEnrichRowsWithOutputStateUsesCanonicalBoundTaskContext(t *testing.T) {
 	if got, want := rows[0].OutputID, "detail-output"; got != want {
 		t.Fatalf("output id = %q, want %q", got, want)
 	}
-	if got, want := rows[0].ApprovalSurface, "true"; got != want {
-		t.Fatalf("approval surface = %q, want %q", got, want)
-	}
 	if taskMeta[detailTask.ID] == nil {
 		t.Fatal("expected enrichRowsWithOutputState to cache canonical detail task metadata")
 	}

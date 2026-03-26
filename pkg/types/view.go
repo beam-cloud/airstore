@@ -547,7 +547,7 @@ func canonicalViewOutputSchemaColumnKey(value string) string {
 		return ""
 	}
 	switch normalized {
-	case "task_id", "detail_task_id", "row_id", "stable_ref", "sheet_id", "output_id", "output_status", "blocker_output_ids", "blocker_kind", "blocker_input_kind", "blocker_wait_group_id", "approval_surface", "source_output_ids":
+	case "task_id", "detail_task_id", "row_id", "stable_ref", "sheet_id", "output_id", "output_status", "blocker_output_ids", "blocker_kind", "blocker_input_kind", "blocker_wait_group_id", "source_output_ids":
 		return normalized + "_value"
 	default:
 		return normalized

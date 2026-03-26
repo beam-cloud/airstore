@@ -6,7 +6,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/types"
 )
 
-func TestResolveLayoutSuppressesEmailSectionForCurrentApprovalDraft(t *testing.T) {
+func TestResolveLayoutNeverIncludesApprovalSection(t *testing.T) {
 	template := DetailLayoutResponse{
 		Sections: []DetailSectionJSON{
 			{Type: SectionDataSummary, Title: "Details", Emphasis: EmphasisSecondary},
@@ -35,18 +35,15 @@ func TestResolveLayoutSuppressesEmailSectionForCurrentApprovalDraft(t *testing.T
 
 	layout := ResolveProjectedLayout(template, ProjectDetail(task, outputs, nil))
 
-	if !hasSection(layout.Sections, SectionApproval) {
-		t.Fatalf("expected approval section in %#v", layout.Sections)
+	if hasSection(layout.Sections, SectionApproval) {
+		t.Fatalf("approval section should never appear in row detail, got %#v", layout.Sections)
 	}
-	if hasSection(layout.Sections, SectionEmailThread) {
-		t.Fatalf("did not expect email section in %#v", layout.Sections)
-	}
-	if hasAction(layout.Actions, "APPROVE") || hasAction(layout.Actions, "REJECT") {
-		t.Fatalf("approval actions should be rendered in-section, got %#v", layout.Actions)
+	if hasSection(layout.Sections, SectionInputForm) {
+		t.Fatalf("input section should never appear in row detail, got %#v", layout.Sections)
 	}
 }
 
-func TestResolveLayoutKeepsHistoricalEmailSectionAlongsideCurrentApproval(t *testing.T) {
+func TestResolveLayoutKeepsHistoricalEmailSectionWithoutApproval(t *testing.T) {
 	template := DetailLayoutResponse{
 		Sections: []DetailSectionJSON{
 			{Type: SectionDataSummary, Title: "Details", Emphasis: EmphasisSecondary},
@@ -80,8 +77,8 @@ func TestResolveLayoutKeepsHistoricalEmailSectionAlongsideCurrentApproval(t *tes
 
 	layout := ResolveProjectedLayout(template, ProjectDetail(task, outputs, nil))
 
-	if !hasSection(layout.Sections, SectionApproval) {
-		t.Fatalf("expected approval section in %#v", layout.Sections)
+	if hasSection(layout.Sections, SectionApproval) {
+		t.Fatalf("approval section should never appear in row detail, got %#v", layout.Sections)
 	}
 	if !hasSection(layout.Sections, SectionEmailThread) {
 		t.Fatalf("expected historical email section in %#v", layout.Sections)
@@ -127,8 +124,8 @@ func TestProjectDetailScopesOutputsToCurrentSurface(t *testing.T) {
 
 	projection := ProjectDetail(task, outputs, nil)
 
-	if projection.Surface != DetailSurfaceApproval {
-		t.Fatalf("projection surface = %q, want %q", projection.Surface, DetailSurfaceApproval)
+	if projection.Surface != DetailSurfaceConversation {
+		t.Fatalf("projection surface = %q, want %q", projection.Surface, DetailSurfaceConversation)
 	}
 	if got, want := len(projection.Outputs), 2; got != want {
 		t.Fatalf("projection output count = %d, want %d", got, want)
@@ -153,7 +150,7 @@ func TestProjectDetailScopesOutputsToCurrentSurface(t *testing.T) {
 	}
 }
 
-func TestResolveLayoutInjectsInputSectionWithoutTemplateEntry(t *testing.T) {
+func TestResolveLayoutNeverIncludesInputSection(t *testing.T) {
 	template := DetailLayoutResponse{
 		Sections: []DetailSectionJSON{
 			{Type: SectionDataSummary, Title: "Details", Emphasis: EmphasisSecondary},
@@ -179,18 +176,15 @@ func TestResolveLayoutInjectsInputSectionWithoutTemplateEntry(t *testing.T) {
 
 	layout := ResolveProjectedLayout(template, ProjectDetail(task, outputs, nil))
 
-	if !hasSection(layout.Sections, SectionInputForm) {
-		t.Fatalf("expected input section in %#v", layout.Sections)
+	if hasSection(layout.Sections, SectionInputForm) {
+		t.Fatalf("input section should never appear in row detail, got %#v", layout.Sections)
 	}
 	if hasSection(layout.Sections, SectionApproval) {
-		t.Fatalf("did not expect approval section in %#v", layout.Sections)
-	}
-	if got := layout.Sections[0]; got.Type != SectionInputForm || got.Title != "Needs Attention" || got.Emphasis != EmphasisPrimary {
-		t.Fatalf("first section = %#v, want primary needs-attention input section", got)
+		t.Fatalf("approval section should never appear in row detail, got %#v", layout.Sections)
 	}
 }
 
-func TestResolveLayoutPromotesTemplateInputSectionToPrimaryAttention(t *testing.T) {
+func TestResolveLayoutDropsTemplateInputSectionWhenBlockerPresent(t *testing.T) {
 	template := DetailLayoutResponse{
 		Sections: []DetailSectionJSON{
 			{Type: SectionDataSummary, Title: "Email Details", Emphasis: EmphasisSecondary},
@@ -210,18 +204,15 @@ func TestResolveLayoutPromotesTemplateInputSectionToPrimaryAttention(t *testing.
 
 	layout := ResolveProjectedLayout(template, ProjectDetail(task, nil, nil))
 
-	if len(layout.Sections) < 2 {
-		t.Fatalf("expected multiple sections, got %#v", layout.Sections)
+	if hasSection(layout.Sections, SectionInputForm) {
+		t.Fatalf("input section should never appear in row detail, got %#v", layout.Sections)
 	}
-	if got := layout.Sections[0]; got.Type != SectionInputForm || got.Title != "Needs Attention" || got.Emphasis != EmphasisPrimary {
-		t.Fatalf("first section = %#v, want primary needs-attention input section", got)
-	}
-	if got := layout.Sections[1]; got.Type != SectionDataSummary {
-		t.Fatalf("second section = %#v, want details after attention", got)
+	if !hasSection(layout.Sections, SectionDataSummary) {
+		t.Fatalf("expected data summary section in %#v", layout.Sections)
 	}
 }
 
-func TestResolveLayoutPromotesTemplateApprovalSectionToPrimaryAttention(t *testing.T) {
+func TestResolveLayoutDropsTemplateApprovalSectionWhenBlockerPresent(t *testing.T) {
 	template := DetailLayoutResponse{
 		Sections: []DetailSectionJSON{
 			{Type: SectionDataSummary, Title: "Email Details", Emphasis: EmphasisSecondary},
@@ -251,14 +242,14 @@ func TestResolveLayoutPromotesTemplateApprovalSectionToPrimaryAttention(t *testi
 
 	layout := ResolveProjectedLayout(template, ProjectDetail(task, outputs, nil))
 
-	if len(layout.Sections) < 3 {
-		t.Fatalf("expected multiple sections, got %#v", layout.Sections)
+	if hasSection(layout.Sections, SectionApproval) {
+		t.Fatalf("approval section should never appear in row detail, got %#v", layout.Sections)
 	}
-	if got := layout.Sections[0]; got.Type != SectionApproval || got.Title != "Needs Approval" || got.Emphasis != EmphasisPrimary {
-		t.Fatalf("first section = %#v, want primary needs-approval section", got)
+	if !hasSection(layout.Sections, SectionDataSummary) {
+		t.Fatalf("expected data summary section in %#v", layout.Sections)
 	}
-	if got := layout.Sections[1]; got.Type != SectionDataSummary {
-		t.Fatalf("second section = %#v, want details after attention", got)
+	if !hasSection(layout.Sections, SectionEmailThread) {
+		t.Fatalf("expected email thread section in %#v", layout.Sections)
 	}
 }
 
@@ -298,7 +289,7 @@ func TestResolveLayoutDoesNotInferApprovalWithoutExplicitBlocker(t *testing.T) {
 	}
 }
 
-func TestResolveLayoutUsesCurrentTaskBlockerWithoutOutputs(t *testing.T) {
+func TestResolveLayoutOmitsApprovalEvenWithCurrentTaskBlocker(t *testing.T) {
 	template := DetailLayoutResponse{
 		Sections: []DetailSectionJSON{
 			{Type: SectionDataSummary, Title: "Details", Emphasis: EmphasisSecondary},
@@ -315,11 +306,11 @@ func TestResolveLayoutUsesCurrentTaskBlockerWithoutOutputs(t *testing.T) {
 
 	layout := ResolveProjectedLayout(template, ProjectDetail(task, nil, nil))
 
-	if !hasSection(layout.Sections, SectionApproval) {
-		t.Fatalf("expected approval section in %#v", layout.Sections)
+	if hasSection(layout.Sections, SectionApproval) {
+		t.Fatalf("approval section should never appear in row detail, got %#v", layout.Sections)
 	}
 	if hasSection(layout.Sections, SectionInputForm) {
-		t.Fatalf("did not expect input section in %#v", layout.Sections)
+		t.Fatalf("input section should never appear in row detail, got %#v", layout.Sections)
 	}
 }
 
