@@ -208,6 +208,105 @@ func (r *DataResolver) RegenerateRow(ctx context.Context, workspaceID uint, view
 	return fullResult, nil
 }
 
+const runRowsBatchSize = 5
+
+// RunRows runs BAML remapping for a limited set of rows in a sheet.
+// If limit <= 0, all rows are remapped. Rows are processed in batches of 5.
+func (r *DataResolver) RunRows(
+	ctx context.Context,
+	workspaceID uint,
+	viewID string,
+	sheet types.SheetSpec,
+	comp types.ComponentSpec,
+	limit int,
+	opts ResolveOptions,
+) (*types.ResolvedData, error) {
+	if !comp.IsTable() {
+		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}, nil
+	}
+	if r.store == nil || !r.store.Available() {
+		return nil, fmt.Errorf("view row persistence not configured")
+	}
+
+	spec := buildMappingSpec(sheet.Name, comp)
+
+	existingRows, err := r.store.GetRows(ctx, viewID, sheet.ID, comp.ID)
+	if err != nil {
+		return nil, fmt.Errorf("load existing rows: %w", err)
+	}
+
+	targetRows := existingRows
+	if limit > 0 && limit < len(targetRows) {
+		targetRows = targetRows[:limit]
+	}
+
+	taskIDSet := make(map[string]struct{}, len(targetRows))
+	for _, row := range targetRows {
+		if tid := strings.TrimSpace(row.TaskID); tid != "" {
+			taskIDSet[tid] = struct{}{}
+		}
+	}
+	if len(taskIDSet) == 0 {
+		return r.Resolve(ctx, workspaceID, viewID, sheet, comp, ResolveOptions{ViewAgentRefs: opts.ViewAgentRefs})
+	}
+
+	taskIDs := make([]string, 0, len(taskIDSet))
+	for tid := range taskIDSet {
+		taskIDs = append(taskIDs, tid)
+	}
+	sort.Strings(taskIDs)
+
+	agentIDs, _ := r.resolveScopedAgentIDs(ctx, workspaceID, comp.DataSource, opts.ViewAgentRefs)
+	allOutputs, err := r.fetchTaskOutputs(ctx, workspaceID, taskIDs, agentIDs)
+	if err != nil {
+		return nil, fmt.Errorf("fetch task outputs: %w", err)
+	}
+	taskGroups := groupOutputsByTask(allOutputs)
+
+	oldRows, excludedSnapshots := r.loadStoredRowsAndExclusions(ctx, viewID, sheet.ID, comp.ID)
+	rowsByGroup := groupViewRowsByGroup(oldRows)
+
+	batches := splitTaskIDBatches(taskIDs, runRowsBatchSize)
+	var allMappedRows []bamltypes.MappedRow
+
+	for batchIdx, batch := range batches {
+		mappedRows, err := r.mapTaskGroupsWithBAML(ctx, viewID, sheet, comp, spec, batch, taskGroups, rowsByGroup, excludedSnapshots)
+		if err != nil {
+			log.Warn().Err(err).
+				Str("view_id", viewID).
+				Str("sheet_id", sheet.ID).
+				Int("batch", batchIdx+1).
+				Int("total_batches", len(batches)).
+				Msg("RunRows: BAML batch failed")
+			continue
+		}
+		allMappedRows = append(allMappedRows, mappedRows...)
+
+		persistedByGroup := materializeTaskGroups(sheet.ID, comp.ID, spec, batch, taskGroups, rowsByGroup, mappedRows, time.Now())
+		var toUpsert []ViewRow
+		var keepRowIDs []string
+		for _, tid := range batch {
+			rows := persistedByGroup[tid]
+			for _, row := range rows {
+				toUpsert = append(toUpsert, row)
+				keepRowIDs = append(keepRowIDs, row.ID)
+			}
+		}
+		if len(toUpsert) > 0 {
+			if err := r.store.UpsertRows(ctx, viewID, toUpsert); err != nil {
+				log.Error().Err(err).Str("view_id", viewID).Int("batch", batchIdx+1).Msg("RunRows: failed to upsert batch")
+			}
+		}
+		if len(batch) > 0 && len(keepRowIDs) > 0 {
+			if err := r.store.DeleteRowsNotInGroups(ctx, viewID, sheet.ID, comp.ID, batch, keepRowIDs); err != nil {
+				log.Warn().Err(err).Str("view_id", viewID).Int("batch", batchIdx+1).Msg("RunRows: failed to delete stale rows in batch")
+			}
+		}
+	}
+
+	return r.Resolve(ctx, workspaceID, viewID, sheet, comp, ResolveOptions{ViewAgentRefs: opts.ViewAgentRefs})
+}
+
 // ensureSheetMapped uses singleflight to guarantee that concurrent Resolve
 // calls for the same sheet table share a single mapping operation.
 func (r *DataResolver) ensureSheetMapped(ctx context.Context, workspaceID uint, viewID string, sheet types.SheetSpec, comp types.ComponentSpec, opts ResolveOptions) (*viewMappingResult, error) {
@@ -269,32 +368,17 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 	taskGroups := groupOutputsByTask(allOutputs)
 	taskMeta := r.fetchTaskMetadata(ctx, taskIDsFromGroups(taskGroups))
 
-	existingRows, excludedSnapshots := r.loadStoredRowsAndExclusions(ctx, viewID, sheet.ID, comp.ID)
+	existingRows, _ := r.loadStoredRowsAndExclusions(ctx, viewID, sheet.ID, comp.ID)
 	rowsByGroup := groupViewRowsByGroup(existingRows)
 
 	uncachedIDs := make(map[string]bool)
 	uncachedReasonCounts := map[string]int{}
 	var resolvedRows []resolvedSheetRow
-	applyManualEdits := !opts.ForceRefresh
-
-	if opts.ForceRefresh {
-		log.Info().
-			Str("view_id", viewID).
-			Str("sheet_id", sheet.ID).
-			Str("component_id", comp.ID).
-			Str("schema_hash", spec.schemaHash).
-			Int("tasks", len(taskGroups)).
-			Msg("view: force refresh requested")
-	}
+	applyManualEdits := true
 
 	outputSignaturesByTask := make(map[string]string, len(taskGroups))
 	for taskID, outputs := range taskGroups {
 		outputSignaturesByTask[taskID] = outputGroupSignature(outputs)
-		if opts.ForceRefresh {
-			uncachedIDs[taskID] = true
-			uncachedReasonCounts["force_refresh"]++
-			continue
-		}
 
 		taskOIDs := sortedOutputIDs(outputs)
 		storedRows := rowsByGroup[taskID]
@@ -335,100 +419,28 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 	}
 	sort.Strings(uncachedTIDs)
 
-	colKeys := make([]string, 0, len(spec.mappingCols))
-	for _, c := range spec.mappingCols {
-		colKeys = append(colKeys, c.Key)
-	}
 	log.Info().
 		Str("view_id", viewID).
 		Str("sheet_id", sheet.ID).
 		Str("component_id", comp.ID).
 		Str("sheet_name", sheet.Name).
 		Str("schema_hash", spec.schemaHash).
-		Bool("force_refresh", opts.ForceRefresh).
 		Int("tasks", len(taskGroups)).
 		Int("cached", len(taskGroups)-len(uncachedIDs)).
 		Int("uncached", len(uncachedIDs)).
-		Int("total_columns", len(spec.tableCols)).
-		Int("mapping_columns", len(spec.mappingCols)).
-		Strs("column_keys", colKeys).
 		Interface("uncached_reason_counts", uncachedReasonCounts).
-		Msg("view: mapping required")
+		Msg("view: uncached tasks (deterministic path)")
 
-	persistedByGroup := make(map[string][]ViewRow)
-	mappedByGroup := make(map[string][]resolvedSheetRow)
-	mappedRows, err := r.mapTaskGroupsWithBAML(ctx, viewID, sheet, comp, spec, uncachedTIDs, taskGroups, rowsByGroup, excludedSnapshots)
-	mappingFailed := false
-	if err != nil {
-		if opts.ForceRefresh {
-			return nil, fmt.Errorf("force refresh BAML mapping: %w", err)
-		}
-		log.Warn().Err(err).Str("view_id", viewID).Str("sheet_id", sheet.ID).Int("tasks", len(uncachedIDs)).Msg("BAML mapping failed")
-		mappingFailed = true
-		if diagnosticsCache != nil {
-			diagnosticsCache["mapping_failed"] = true
-		}
-	}
-	if !mappingFailed {
-		persistedByGroup = materializeTaskGroups(sheet.ID, comp.ID, spec, uncachedTIDs, taskGroups, rowsByGroup, mappedRows, time.Now())
-		for _, taskID := range uncachedTIDs {
-			mappedByGroup[taskID] = resolvedRowsFromStored(persistedByGroup[taskID], applyManualEdits)
-		}
-	} else {
-		for _, taskID := range uncachedTIDs {
-			if stored := rowsByGroup[taskID]; len(stored) > 0 {
-				mappedByGroup[taskID] = resolvedRowsFromStored(stored, applyManualEdits)
-			}
-		}
-	}
-
-	if !mappingFailed && r.store != nil {
-		var toUpsert []ViewRow
-		var keepRowIDs []string
-		var cleanupGroupIDs []string
-		for _, taskID := range uncachedTIDs {
-			rows := persistedByGroup[taskID]
-			if len(rows) > 0 {
-				for _, row := range rows {
-					toUpsert = append(toUpsert, row)
-					keepRowIDs = append(keepRowIDs, row.ID)
-				}
-				cleanupGroupIDs = append(cleanupGroupIDs, taskID)
-			} else if opts.ForceRefresh {
-				// BAML intentionally omitted this task on force refresh —
-				// delete any old rows for it (no keepRowIDs -> all deleted).
-				cleanupGroupIDs = append(cleanupGroupIDs, taskID)
-			}
-		}
-		persistedOK := true
-		if len(toUpsert) > 0 {
-			if err := r.store.UpsertRows(ctx, viewID, toUpsert); err != nil {
-				persistedOK = false
-				log.Error().Err(err).Str("view_id", viewID).Str("sheet_id", sheet.ID).Int("rows", len(toUpsert)).Msg("failed to persist mapped rows to MongoDB")
-				if opts.ForceRefresh {
-					return nil, fmt.Errorf("persist force refresh rows: %w", err)
-				}
-			}
-		}
-		if persistedOK && len(cleanupGroupIDs) > 0 {
-			if err := r.store.DeleteRowsNotInGroups(ctx, viewID, sheet.ID, comp.ID, cleanupGroupIDs, keepRowIDs); err != nil {
-				log.Error().Err(err).Str("view_id", viewID).Str("sheet_id", sheet.ID).Int("groups", len(cleanupGroupIDs)).Msg("failed to delete stale rows from MongoDB")
-				if opts.ForceRefresh {
-					return nil, fmt.Errorf("delete stale force refresh rows: %w", err)
-				}
-			}
-			if opts.ForceRefresh {
-				if err := r.store.ClearManualCells(ctx, viewID, sheet.ID, comp.ID, keepRowIDs, schemaKeyList(spec.mappingCols)); err != nil {
-					return nil, fmt.Errorf("clear manual cells after force refresh: %w", err)
-				}
-			}
-		}
-	}
-
+	// Deterministic path: uncached tasks are returned as-is from existing cached
+	// rows. The deterministic insertion pipeline writes rows at output creation
+	// time. BAML mapping is only triggered via the explicit RunRows API.
 	for _, taskID := range uncachedTIDs {
-		if rows := mappedByGroup[taskID]; len(rows) > 0 {
-			resolvedRows = append(resolvedRows, rows...)
+		if stored := rowsByGroup[taskID]; len(stored) > 0 {
+			resolvedRows = append(resolvedRows, resolvedRowsFromStored(stored, applyManualEdits)...)
 		}
+	}
+	if diagnosticsCache != nil {
+		diagnosticsCache["deterministic_path"] = true
 	}
 
 	resolvedRows = deduplicateResolvedRows(resolvedRows, taskMeta)

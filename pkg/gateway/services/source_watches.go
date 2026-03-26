@@ -583,10 +583,16 @@ func buildSourceWatchQuerySpec(
 
 	switch strings.ToLower(req.Integration) {
 	case string(types.SourceGmail):
-		payload["gmail_query"] = req.Query
 		if req.ThreadID != "" {
 			payload["thread_id"] = req.ThreadID
+		} else {
+			log.Warn().
+				Str("query", req.Query).
+				Str("entity_key", req.EntityKey).
+				Str("entity_label", req.EntityLabel).
+				Msg("gmail source watch has no thread_id — reply detection will use unreliable text query fallback")
 		}
+		payload["gmail_query"] = req.Query
 		if req.MessageID != "" {
 			payload["message_id"] = req.MessageID
 		}

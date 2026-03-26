@@ -413,7 +413,7 @@ func (*stream) ExtractApprovalSummary(ctx context.Context, assistant_text string
 }
 
 // / Streaming version of ExtractFinalResponseOutput
-func (*stream) ExtractFinalResponseOutput(ctx context.Context, user_message *string, assistant_message string, opts ...CallOptionFunc) (<-chan StreamValue[[]stream_types.ExtractedOutput, []types.ExtractedOutput], error) {
+func (*stream) ExtractFinalResponseOutput(ctx context.Context, user_message *string, assistant_message string, view_columns string, opts ...CallOptionFunc) (<-chan StreamValue[[]stream_types.ExtractedOutput, []types.ExtractedOutput], error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -421,7 +421,7 @@ func (*stream) ExtractFinalResponseOutput(ctx context.Context, user_message *str
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"user_message": user_message, "assistant_message": assistant_message},
+		Kwargs: map[string]any{"user_message": user_message, "assistant_message": assistant_message, "view_columns": view_columns},
 		Env:    getEnvVars(callOpts.env),
 	}
 
@@ -487,7 +487,7 @@ func (*stream) ExtractFinalResponseOutput(ctx context.Context, user_message *str
 }
 
 // / Streaming version of ExtractOutputs
-func (*stream) ExtractOutputs(ctx context.Context, tool_name string, tool_input string, tool_result string, opts ...CallOptionFunc) (<-chan StreamValue[[]stream_types.ExtractedOutput, []types.ExtractedOutput], error) {
+func (*stream) ExtractOutputs(ctx context.Context, tool_name string, tool_input string, tool_result string, view_columns string, opts ...CallOptionFunc) (<-chan StreamValue[[]stream_types.ExtractedOutput, []types.ExtractedOutput], error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -495,7 +495,7 @@ func (*stream) ExtractOutputs(ctx context.Context, tool_name string, tool_input 
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"tool_name": tool_name, "tool_input": tool_input, "tool_result": tool_result},
+		Kwargs: map[string]any{"tool_name": tool_name, "tool_input": tool_input, "tool_result": tool_result, "view_columns": view_columns},
 		Env:    getEnvVars(callOpts.env),
 	}
 

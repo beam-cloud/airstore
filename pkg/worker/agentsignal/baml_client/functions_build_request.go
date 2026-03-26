@@ -255,7 +255,7 @@ func (*build_request) ExtractApprovalSummary(assistant_text string, opts ...Call
 }
 
 // Build HTTP request for ExtractFinalResponseOutput (returns baml.HTTPRequest)
-func (*build_request) ExtractFinalResponseOutput(user_message *string, assistant_message string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
+func (*build_request) ExtractFinalResponseOutput(user_message *string, assistant_message string, view_columns string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -271,7 +271,7 @@ func (*build_request) ExtractFinalResponseOutput(user_message *string, assistant
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"user_message": user_message, "assistant_message": assistant_message, "stream": false},
+		Kwargs: map[string]any{"user_message": user_message, "assistant_message": assistant_message, "view_columns": view_columns, "stream": false},
 		Env:    getEnvVars(callOpts.env),
 	}
 
@@ -301,7 +301,7 @@ func (*build_request) ExtractFinalResponseOutput(user_message *string, assistant
 }
 
 // Build HTTP request for ExtractOutputs (returns baml.HTTPRequest)
-func (*build_request) ExtractOutputs(tool_name string, tool_input string, tool_result string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
+func (*build_request) ExtractOutputs(tool_name string, tool_input string, tool_result string, view_columns string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -317,7 +317,7 @@ func (*build_request) ExtractOutputs(tool_name string, tool_input string, tool_r
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"tool_name": tool_name, "tool_input": tool_input, "tool_result": tool_result, "stream": false},
+		Kwargs: map[string]any{"tool_name": tool_name, "tool_input": tool_input, "tool_result": tool_result, "view_columns": view_columns, "stream": false},
 		Env:    getEnvVars(callOpts.env),
 	}
 

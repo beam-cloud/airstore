@@ -255,7 +255,7 @@ func (*build_request_stream) ExtractApprovalSummary(assistant_text string, opts 
 }
 
 // Build streaming HTTP request for ExtractFinalResponseOutput (returns baml.HTTPRequest)
-func (*build_request_stream) ExtractFinalResponseOutput(user_message *string, assistant_message string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
+func (*build_request_stream) ExtractFinalResponseOutput(user_message *string, assistant_message string, view_columns string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -271,7 +271,7 @@ func (*build_request_stream) ExtractFinalResponseOutput(user_message *string, as
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"user_message": user_message, "assistant_message": assistant_message, "stream": true},
+		Kwargs: map[string]any{"user_message": user_message, "assistant_message": assistant_message, "view_columns": view_columns, "stream": true},
 		Env:    getEnvVars(callOpts.env),
 	}
 
@@ -301,7 +301,7 @@ func (*build_request_stream) ExtractFinalResponseOutput(user_message *string, as
 }
 
 // Build streaming HTTP request for ExtractOutputs (returns baml.HTTPRequest)
-func (*build_request_stream) ExtractOutputs(tool_name string, tool_input string, tool_result string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
+func (*build_request_stream) ExtractOutputs(tool_name string, tool_input string, tool_result string, view_columns string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -317,7 +317,7 @@ func (*build_request_stream) ExtractOutputs(tool_name string, tool_input string,
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"tool_name": tool_name, "tool_input": tool_input, "tool_result": tool_result, "stream": true},
+		Kwargs: map[string]any{"tool_name": tool_name, "tool_input": tool_input, "tool_result": tool_result, "view_columns": view_columns, "stream": true},
 		Env:    getEnvVars(callOpts.env),
 	}
 

@@ -169,6 +169,80 @@ func MapImportColumns(ctx context.Context, sheet_name string, existing_columns [
 	}
 }
 
+func MapOutputToViewRow(ctx context.Context, sheet_name string, table_title string, columns []types.ViewColumn, output_type string, output_title string, output_summary string, output_data string, existing_rows string, opts ...CallOptionFunc) (types.ViewRowMappingResult, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	// Resolve client option to clientRegistry (client takes precedence)
+	if callOpts.client != nil {
+		if callOpts.clientRegistry == nil {
+			callOpts.clientRegistry = baml.NewClientRegistry()
+		}
+		callOpts.clientRegistry.SetPrimaryClient(*callOpts.client)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"sheet_name": sheet_name, "table_title": table_title, "columns": columns, "output_type": output_type, "output_title": output_title, "output_summary": output_summary, "output_data": output_data, "existing_rows": existing_rows},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		panic(err)
+	}
+
+	if callOpts.onTick == nil {
+		result, err := bamlRuntime.CallFunction(ctx, "MapOutputToViewRow", encoded, callOpts.onTick)
+		if err != nil {
+			return types.ViewRowMappingResult{}, err
+		}
+
+		if result.Error != nil {
+			return types.ViewRowMappingResult{}, result.Error
+		}
+
+		casted := (result.Data).(types.ViewRowMappingResult)
+
+		return casted, nil
+	} else {
+		channel, err := bamlRuntime.CallFunctionStream(ctx, "MapOutputToViewRow", encoded, callOpts.onTick)
+		if err != nil {
+			return types.ViewRowMappingResult{}, err
+		}
+
+		for result := range channel {
+			if result.Error != nil {
+				return types.ViewRowMappingResult{}, result.Error
+			}
+
+			if result.HasData {
+				return result.Data.(types.ViewRowMappingResult), nil
+			}
+		}
+
+		return types.ViewRowMappingResult{}, fmt.Errorf("No data returned from stream")
+	}
+}
+
 func MapOutputsToSchema(ctx context.Context, sheet_name string, table_title string, table_type string, columns []types.ColumnSchema, outputs_payload string, existing_rows string, excluded_rows string, opts ...CallOptionFunc) (types.MappedResult, error) {
 
 	var callOpts callOption

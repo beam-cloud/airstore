@@ -437,6 +437,62 @@ func (s *ViewStore) EnrichImportRow(ctx context.Context, viewID string, row View
 	return nil
 }
 
+// MergeCells performs a cell-level merge on an existing row's computed cells.
+// Only non-empty values in newCells are written; empty strings are skipped
+// (meaning "leave the existing value as-is"). The outputID is appended to
+// the row's output tracking arrays.
+func (s *ViewStore) MergeCells(ctx context.Context, viewID, rowID string, newCells map[string]string, outputID string) error {
+	if !s.Available() {
+		return fmt.Errorf("MongoDB not configured")
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+
+	setFields := bson.D{}
+	for k, v := range newCells {
+		if v == "" {
+			continue
+		}
+		fieldPath, err := mongoColumnFieldPath("cells", k)
+		if err != nil {
+			return err
+		}
+		setFields = append(setFields, bson.E{Key: fieldPath, Value: v})
+	}
+	if len(setFields) == 0 {
+		return nil
+	}
+	setFields = append(setFields, bson.E{Key: "updated_at", Value: time.Now()})
+
+	update := bson.D{{Key: "$set", Value: setFields}}
+	if outputID != "" {
+		update = append(update, bson.E{
+			Key: "$addToSet",
+			Value: bson.D{
+				{Key: "output_ids", Value: outputID},
+				{Key: "source_output_ids", Value: outputID},
+			},
+		})
+	}
+
+	res, err := coll.UpdateOne(ctx,
+		bson.D{{Key: "_id", Value: rowID}},
+		update,
+	)
+	if err != nil {
+		return fmt.Errorf("merge cells: %w", err)
+	}
+	if res.MatchedCount == 0 {
+		return ErrViewRowNotFound
+	}
+	log.Info().
+		Str("view_id", viewID).
+		Str("row_id", rowID).
+		Int("cell_updates", len(newCells)).
+		Str("output_id", outputID).
+		Msg("view: merged cells into existing row")
+	return nil
+}
+
 // UpdateCells writes user-edited values into the manual overlay.
 func (s *ViewStore) UpdateCells(ctx context.Context, viewID, sheetID, rowID string, cells map[string]string) error {
 	if !s.Available() {

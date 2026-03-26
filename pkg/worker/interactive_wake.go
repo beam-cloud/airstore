@@ -236,6 +236,7 @@ func normalizeSourceWatchRequests(
 	return normalized
 }
 
+
 func bestMatchingTrackedSourceWatchRequest(
 	req *types.SourceWatchRequest,
 	tracked []*types.SourceWatchRequest,
@@ -423,15 +424,22 @@ func deriveTrackedOutputSourceWatchRequests(
 	}
 	out := make([]*types.SourceWatchRequest, 0, len(summaries))
 	for _, summary := range summaries {
-		threadID := strings.TrimSpace(summary.ThreadID)
-		if threadID == "" {
-			continue
-		}
 		if !strings.EqualFold(strings.TrimSpace(summary.OutputType), types.TaskOutputTypeEmail) &&
 			!strings.Contains(strings.ToLower(strings.TrimSpace(summary.ArtifactKey)), "email") {
 			continue
 		}
+		threadID := strings.TrimSpace(summary.ThreadID)
 		query := buildGmailWatchFallbackQuery(summary)
+		if threadID == "" && query == "" {
+			continue
+		}
+		if threadID == "" {
+			log.Warn().
+				Str("output_id", strings.TrimSpace(summary.OutputID)).
+				Str("entity_key", strings.TrimSpace(summary.EntityKey)).
+				Str("subject", strings.TrimSpace(summary.Subject)).
+				Msg("email tracked output has no thread_id — follow-up watch will rely on text query fallback")
+		}
 		out = append(out, &types.SourceWatchRequest{
 			Integration:        "gmail",
 			Reason:             derefString(fallbackReason),
@@ -455,7 +463,7 @@ func deriveTrackedOutputSourceWatchRequests(
 func buildGmailWatchFallbackQuery(summary trackedOutputSummary) string {
 	parts := make([]string, 0, 3)
 	if recipient := strings.TrimSpace(summary.Recipient); recipient != "" {
-		parts = append(parts, fmt.Sprintf("to:%q", recipient))
+		parts = append(parts, fmt.Sprintf("from:%q", recipient))
 	}
 	if subject := strings.TrimSpace(summary.Subject); subject != "" {
 		parts = append(parts, fmt.Sprintf("subject:%q", subject))

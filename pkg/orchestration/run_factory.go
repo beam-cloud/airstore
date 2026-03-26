@@ -238,6 +238,9 @@ func (f *RunFactory) CreateAttemptExecutionTask(
 	}
 	applyPayloadExecutionMetadata(executionPolicy, payload)
 
+	viewSchemaContext := f.loadViewOutputSchemaContext(ctx, run.WorkspaceID, run.AgentID)
+	applyViewSchemaRuntimeContext(taskEnv, executionPolicy, viewSchemaContext)
+
 	execTask := &types.RunExecution{
 		WorkspaceId:       run.WorkspaceID,
 		MemberToken:       memberToken,
@@ -560,4 +563,27 @@ func (b *ResumeBarrier) tryReconcileStaleSessionLease(ctx context.Context, works
 		return false
 	}
 	return ReconcileStaleSessionLease(ctx, b.backend, b.terminalIO, workspaceID, sessionID, owner)
+}
+
+func (f *RunFactory) loadViewOutputSchemaContext(
+	ctx context.Context,
+	workspaceID uint,
+	agentID *string,
+) []types.ViewOutputSchemaContext {
+	if f == nil || f.backend == nil || agentID == nil || strings.TrimSpace(*agentID) == "" {
+		return nil
+	}
+	contexts, err := types.LoadViewOutputSchemaContexts(ctx, f.backend, workspaceID, strings.TrimSpace(*agentID))
+	if err != nil {
+		log.Warn().
+			Err(err).
+			Uint("workspace_id", workspaceID).
+			Str("agent_id", strings.TrimSpace(*agentID)).
+			Msg("run factory: failed to load view schema context")
+		return nil
+	}
+	if len(contexts) > maxRuntimeViewSchemas {
+		contexts = contexts[:maxRuntimeViewSchemas]
+	}
+	return contexts
 }

@@ -117,6 +117,52 @@ func (*build_request_stream) MapImportColumns(sheet_name string, existing_column
 	return bamlRuntime.BuildRequest(context.Background(), "MapImportColumns", encoded)
 }
 
+// Build streaming HTTP request for MapOutputToViewRow (returns baml.HTTPRequest)
+func (*build_request_stream) MapOutputToViewRow(sheet_name string, table_title string, columns []types.ViewColumn, output_type string, output_title string, output_summary string, output_data string, existing_rows string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	// Resolve client option to clientRegistry (client takes precedence)
+	if callOpts.client != nil {
+		if callOpts.clientRegistry == nil {
+			callOpts.clientRegistry = baml.NewClientRegistry()
+		}
+		callOpts.clientRegistry.SetPrimaryClient(*callOpts.client)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"sheet_name": sheet_name, "table_title": table_title, "columns": columns, "output_type": output_type, "output_title": output_title, "output_summary": output_summary, "output_data": output_data, "existing_rows": existing_rows, "stream": true},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: MapOutputToViewRow: %w", err)
+		panic(wrapped_err)
+	}
+
+	return bamlRuntime.BuildRequest(context.Background(), "MapOutputToViewRow", encoded)
+}
+
 // Build streaming HTTP request for MapOutputsToSchema (returns baml.HTTPRequest)
 func (*build_request_stream) MapOutputsToSchema(sheet_name string, table_title string, table_type string, columns []types.ColumnSchema, outputs_payload string, existing_rows string, excluded_rows string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
 
