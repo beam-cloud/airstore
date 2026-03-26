@@ -15,6 +15,42 @@ package type_builder
 
 import baml "github.com/boundaryml/baml/engine/language_client_go/pkg"
 
+type AffectedRowsResultClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *AffectedRowsResultClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *AffectedRowsResultClassView) PropertyAffected_row_ids() (ClassPropertyView, error) {
+	return t.inner.Property("affected_row_ids")
+}
+
+func (t *AffectedRowsResultClassView) PropertyUnmatched_entities() (ClassPropertyView, error) {
+	return t.inner.Property("unmatched_entities")
+}
+
+func (t *TypeBuilder) AffectedRowsResult() (*AffectedRowsResultClassView, error) {
+	bld, err := t.inner.Class("AffectedRowsResult")
+	if err != nil {
+		return nil, err
+	}
+	return &AffectedRowsResultClassView{inner: bld}, nil
+}
+
+func (t *AffectedRowsResultClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
 type ColumnSchemaClassView struct {
 	inner baml.ClassBuilder
 }
@@ -579,6 +615,42 @@ func (t *OperationClassView) Type() (baml.Type, error) {
 	return t.inner.Type()
 }
 
+type PopulateRowResultClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *PopulateRowResultClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *PopulateRowResultClassView) PropertyCells() (ClassPropertyView, error) {
+	return t.inner.Property("cells")
+}
+
+func (t *PopulateRowResultClassView) PropertyRow_key() (ClassPropertyView, error) {
+	return t.inner.Property("row_key")
+}
+
+func (t *TypeBuilder) PopulateRowResult() (*PopulateRowResultClassView, error) {
+	bld, err := t.inner.Class("PopulateRowResult")
+	if err != nil {
+		return nil, err
+	}
+	return &PopulateRowResultClassView{inner: bld}, nil
+}
+
+func (t *PopulateRowResultClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
 type ViewCellClassView struct {
 	inner baml.ClassBuilder
 }
@@ -704,50 +776,6 @@ func (t *TypeBuilder) ViewDraftResponse() (*ViewDraftResponseClassView, error) {
 }
 
 func (t *ViewDraftResponseClassView) Type() (baml.Type, error) {
-	return t.inner.Type()
-}
-
-type ViewRowMappingResultClassView struct {
-	inner baml.ClassBuilder
-}
-
-func (t *ViewRowMappingResultClassView) ListProperties() ([]ClassPropertyView, error) {
-	result, err := t.inner.ListProperties()
-	if err != nil {
-		return nil, err
-	}
-	builders := make([]ClassPropertyView, len(result))
-	for i, p := range result {
-		builders[i] = p
-	}
-	return builders, nil
-}
-
-func (t *ViewRowMappingResultClassView) PropertyAction() (ClassPropertyView, error) {
-	return t.inner.Property("action")
-}
-
-func (t *ViewRowMappingResultClassView) PropertyTarget_row_id() (ClassPropertyView, error) {
-	return t.inner.Property("target_row_id")
-}
-
-func (t *ViewRowMappingResultClassView) PropertyRow_key() (ClassPropertyView, error) {
-	return t.inner.Property("row_key")
-}
-
-func (t *ViewRowMappingResultClassView) PropertyCells() (ClassPropertyView, error) {
-	return t.inner.Property("cells")
-}
-
-func (t *TypeBuilder) ViewRowMappingResult() (*ViewRowMappingResultClassView, error) {
-	bld, err := t.inner.Class("ViewRowMappingResult")
-	if err != nil {
-		return nil, err
-	}
-	return &ViewRowMappingResultClassView{inner: bld}, nil
-}
-
-func (t *ViewRowMappingResultClassView) Type() (baml.Type, error) {
 	return t.inner.Type()
 }
 

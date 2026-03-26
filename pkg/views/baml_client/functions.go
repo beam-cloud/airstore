@@ -21,6 +21,80 @@ import (
 	baml "github.com/boundaryml/baml/engine/language_client_go/pkg"
 )
 
+func ClassifyAffectedRows(ctx context.Context, columns []types.ViewColumn, output_type string, output_title string, output_summary string, output_data string, existing_rows string, opts ...CallOptionFunc) (types.AffectedRowsResult, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	// Resolve client option to clientRegistry (client takes precedence)
+	if callOpts.client != nil {
+		if callOpts.clientRegistry == nil {
+			callOpts.clientRegistry = baml.NewClientRegistry()
+		}
+		callOpts.clientRegistry.SetPrimaryClient(*callOpts.client)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"columns": columns, "output_type": output_type, "output_title": output_title, "output_summary": output_summary, "output_data": output_data, "existing_rows": existing_rows},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		panic(err)
+	}
+
+	if callOpts.onTick == nil {
+		result, err := bamlRuntime.CallFunction(ctx, "ClassifyAffectedRows", encoded, callOpts.onTick)
+		if err != nil {
+			return types.AffectedRowsResult{}, err
+		}
+
+		if result.Error != nil {
+			return types.AffectedRowsResult{}, result.Error
+		}
+
+		casted := (result.Data).(types.AffectedRowsResult)
+
+		return casted, nil
+	} else {
+		channel, err := bamlRuntime.CallFunctionStream(ctx, "ClassifyAffectedRows", encoded, callOpts.onTick)
+		if err != nil {
+			return types.AffectedRowsResult{}, err
+		}
+
+		for result := range channel {
+			if result.Error != nil {
+				return types.AffectedRowsResult{}, result.Error
+			}
+
+			if result.HasData {
+				return result.Data.(types.AffectedRowsResult), nil
+			}
+		}
+
+		return types.AffectedRowsResult{}, fmt.Errorf("No data returned from stream")
+	}
+}
+
 func ClassifyDetailTemplate(ctx context.Context, table_title string, column_schema string, opts ...CallOptionFunc) (types.DetailLayout, error) {
 
 	var callOpts callOption
@@ -169,80 +243,6 @@ func MapImportColumns(ctx context.Context, sheet_name string, existing_columns [
 	}
 }
 
-func MapOutputToViewRow(ctx context.Context, sheet_name string, table_title string, columns []types.ViewColumn, output_type string, output_title string, output_summary string, output_data string, existing_rows string, opts ...CallOptionFunc) (types.ViewRowMappingResult, error) {
-
-	var callOpts callOption
-	for _, opt := range opts {
-		opt(&callOpts)
-	}
-
-	// Resolve client option to clientRegistry (client takes precedence)
-	if callOpts.client != nil {
-		if callOpts.clientRegistry == nil {
-			callOpts.clientRegistry = baml.NewClientRegistry()
-		}
-		callOpts.clientRegistry.SetPrimaryClient(*callOpts.client)
-	}
-
-	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"sheet_name": sheet_name, "table_title": table_title, "columns": columns, "output_type": output_type, "output_title": output_title, "output_summary": output_summary, "output_data": output_data, "existing_rows": existing_rows},
-		Env:    getEnvVars(callOpts.env),
-	}
-
-	if callOpts.clientRegistry != nil {
-		args.ClientRegistry = callOpts.clientRegistry
-	}
-
-	if callOpts.collectors != nil {
-		args.Collectors = callOpts.collectors
-	}
-
-	if callOpts.typeBuilder != nil {
-		args.TypeBuilder = callOpts.typeBuilder
-	}
-
-	if callOpts.tags != nil {
-		args.Tags = callOpts.tags
-	}
-
-	encoded, err := args.Encode()
-	if err != nil {
-		panic(err)
-	}
-
-	if callOpts.onTick == nil {
-		result, err := bamlRuntime.CallFunction(ctx, "MapOutputToViewRow", encoded, callOpts.onTick)
-		if err != nil {
-			return types.ViewRowMappingResult{}, err
-		}
-
-		if result.Error != nil {
-			return types.ViewRowMappingResult{}, result.Error
-		}
-
-		casted := (result.Data).(types.ViewRowMappingResult)
-
-		return casted, nil
-	} else {
-		channel, err := bamlRuntime.CallFunctionStream(ctx, "MapOutputToViewRow", encoded, callOpts.onTick)
-		if err != nil {
-			return types.ViewRowMappingResult{}, err
-		}
-
-		for result := range channel {
-			if result.Error != nil {
-				return types.ViewRowMappingResult{}, result.Error
-			}
-
-			if result.HasData {
-				return result.Data.(types.ViewRowMappingResult), nil
-			}
-		}
-
-		return types.ViewRowMappingResult{}, fmt.Errorf("No data returned from stream")
-	}
-}
-
 func MapOutputsToSchema(ctx context.Context, sheet_name string, table_title string, table_type string, columns []types.ColumnSchema, outputs_payload string, existing_rows string, excluded_rows string, opts ...CallOptionFunc) (types.MappedResult, error) {
 
 	var callOpts callOption
@@ -388,6 +388,80 @@ func MapViewToWidget(ctx context.Context, sheet_name string, widget_type string,
 		}
 
 		return types.WidgetResult{}, fmt.Errorf("No data returned from stream")
+	}
+}
+
+func PopulateRowCells(ctx context.Context, columns []types.ViewColumn, output_type string, output_title string, output_summary string, output_data string, row_id string, row_cells string, entity_hint string, opts ...CallOptionFunc) (types.PopulateRowResult, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	// Resolve client option to clientRegistry (client takes precedence)
+	if callOpts.client != nil {
+		if callOpts.clientRegistry == nil {
+			callOpts.clientRegistry = baml.NewClientRegistry()
+		}
+		callOpts.clientRegistry.SetPrimaryClient(*callOpts.client)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"columns": columns, "output_type": output_type, "output_title": output_title, "output_summary": output_summary, "output_data": output_data, "row_id": row_id, "row_cells": row_cells, "entity_hint": entity_hint},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		panic(err)
+	}
+
+	if callOpts.onTick == nil {
+		result, err := bamlRuntime.CallFunction(ctx, "PopulateRowCells", encoded, callOpts.onTick)
+		if err != nil {
+			return types.PopulateRowResult{}, err
+		}
+
+		if result.Error != nil {
+			return types.PopulateRowResult{}, result.Error
+		}
+
+		casted := (result.Data).(types.PopulateRowResult)
+
+		return casted, nil
+	} else {
+		channel, err := bamlRuntime.CallFunctionStream(ctx, "PopulateRowCells", encoded, callOpts.onTick)
+		if err != nil {
+			return types.PopulateRowResult{}, err
+		}
+
+		for result := range channel {
+			if result.Error != nil {
+				return types.PopulateRowResult{}, result.Error
+			}
+
+			if result.HasData {
+				return result.Data.(types.PopulateRowResult), nil
+			}
+		}
+
+		return types.PopulateRowResult{}, fmt.Errorf("No data returned from stream")
 	}
 }
 

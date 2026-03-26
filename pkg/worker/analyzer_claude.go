@@ -65,6 +65,15 @@ var readOnlyTools = map[string]bool{
 	"GenerateImage":         true,
 }
 
+// bashNoOutputPrefixes lists command prefixes that should not produce task
+// outputs when invoked via Bash. The view tool writes directly to the view
+// store — creating outputs from those invocations would feed them back into
+// the enrichment pipeline and cause duplicates.
+var bashNoOutputPrefixes = []string{
+	"view ",
+	"/workspace/tools/view ",
+}
+
 func (a *ClaudeCodeAnalyzer) ShouldAnalyze(payload map[string]any) bool {
 	msgType, _ := payload["type"].(string)
 	msg, ok := payload["message"].(map[string]any)
@@ -97,6 +106,9 @@ func (a *ClaudeCodeAnalyzer) ShouldAnalyze(payload map[string]any) bool {
 				if b, err := json.Marshal(inp); err == nil {
 					inputJSON = truncate(string(b), maxAnalyzedToolInputLen)
 				}
+			}
+			if name == "Bash" && isBashNoOutputCommand(bm) {
+				continue
 			}
 			a.mu.Lock()
 			a.toolUses[id] = toolUseEntry{name: name, input: inputJSON}
@@ -167,6 +179,21 @@ func (a *ClaudeCodeAnalyzer) PrepareInput(payload map[string]any) (toolName, too
 	}
 
 	return "", "", "", false
+}
+
+func isBashNoOutputCommand(toolUseBlock map[string]any) bool {
+	inp, ok := toolUseBlock["input"].(map[string]any)
+	if !ok {
+		return false
+	}
+	cmd, _ := inp["command"].(string)
+	cmd = strings.TrimSpace(cmd)
+	for _, prefix := range bashNoOutputPrefixes {
+		if strings.HasPrefix(cmd, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func extractResultContent(block map[string]any) string {

@@ -20,6 +20,7 @@ var airReadOnlyTools = map[string]bool{
 	"ReadFile":  true,
 	"CheckTask": true,
 	"KillTask":  true,
+	"view":      true,
 }
 
 func (a *AirAnalyzer) ShouldAnalyze(payload map[string]any) bool {

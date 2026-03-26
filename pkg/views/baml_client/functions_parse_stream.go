@@ -25,6 +25,53 @@ type parse_stream struct{}
 
 var ParseStream = &parse_stream{}
 
+// / Parse version of ClassifyAffectedRows (Takes in string and returns stream_types.AffectedRowsResult)
+func (*parse_stream) ClassifyAffectedRows(text string, opts ...CallOptionFunc) (stream_types.AffectedRowsResult, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"text": text, "stream": true},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		// This should never happen. if it does, please file an issue at https://github.com/boundaryml/baml/issues
+		// and include the type of the args you're passing in.
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: ClassifyAffectedRows: %w", err)
+		panic(wrapped_err)
+	}
+
+	result, err := bamlRuntime.CallFunctionParse(context.Background(), "ClassifyAffectedRows", encoded)
+	if err != nil {
+		return stream_types.AffectedRowsResult{}, err
+	}
+
+	casted := (result).(stream_types.AffectedRowsResult)
+
+	return casted, nil
+}
+
 // / Parse version of ClassifyDetailTemplate (Takes in string and returns stream_types.DetailLayout)
 func (*parse_stream) ClassifyDetailTemplate(text string, opts ...CallOptionFunc) (stream_types.DetailLayout, error) {
 
@@ -119,53 +166,6 @@ func (*parse_stream) MapImportColumns(text string, opts ...CallOptionFunc) (stre
 	return casted, nil
 }
 
-// / Parse version of MapOutputToViewRow (Takes in string and returns stream_types.ViewRowMappingResult)
-func (*parse_stream) MapOutputToViewRow(text string, opts ...CallOptionFunc) (stream_types.ViewRowMappingResult, error) {
-
-	var callOpts callOption
-	for _, opt := range opts {
-		opt(&callOpts)
-	}
-
-	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"text": text, "stream": true},
-		Env:    getEnvVars(callOpts.env),
-	}
-
-	if callOpts.clientRegistry != nil {
-		args.ClientRegistry = callOpts.clientRegistry
-	}
-
-	if callOpts.collectors != nil {
-		args.Collectors = callOpts.collectors
-	}
-
-	if callOpts.typeBuilder != nil {
-		args.TypeBuilder = callOpts.typeBuilder
-	}
-
-	if callOpts.tags != nil {
-		args.Tags = callOpts.tags
-	}
-
-	encoded, err := args.Encode()
-	if err != nil {
-		// This should never happen. if it does, please file an issue at https://github.com/boundaryml/baml/issues
-		// and include the type of the args you're passing in.
-		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: MapOutputToViewRow: %w", err)
-		panic(wrapped_err)
-	}
-
-	result, err := bamlRuntime.CallFunctionParse(context.Background(), "MapOutputToViewRow", encoded)
-	if err != nil {
-		return stream_types.ViewRowMappingResult{}, err
-	}
-
-	casted := (result).(stream_types.ViewRowMappingResult)
-
-	return casted, nil
-}
-
 // / Parse version of MapOutputsToSchema (Takes in string and returns stream_types.MappedResult)
 func (*parse_stream) MapOutputsToSchema(text string, opts ...CallOptionFunc) (stream_types.MappedResult, error) {
 
@@ -256,6 +256,53 @@ func (*parse_stream) MapViewToWidget(text string, opts ...CallOptionFunc) (strea
 	}
 
 	casted := (result).(stream_types.WidgetResult)
+
+	return casted, nil
+}
+
+// / Parse version of PopulateRowCells (Takes in string and returns stream_types.PopulateRowResult)
+func (*parse_stream) PopulateRowCells(text string, opts ...CallOptionFunc) (stream_types.PopulateRowResult, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"text": text, "stream": true},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		// This should never happen. if it does, please file an issue at https://github.com/boundaryml/baml/issues
+		// and include the type of the args you're passing in.
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: PopulateRowCells: %w", err)
+		panic(wrapped_err)
+	}
+
+	result, err := bamlRuntime.CallFunctionParse(context.Background(), "PopulateRowCells", encoded)
+	if err != nil {
+		return stream_types.PopulateRowResult{}, err
+	}
+
+	casted := (result).(stream_types.PopulateRowResult)
 
 	return casted, nil
 }

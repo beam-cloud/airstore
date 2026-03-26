@@ -25,6 +25,52 @@ type build_request_stream struct{}
 
 var StreamRequest = &build_request_stream{}
 
+// Build streaming HTTP request for ClassifyAffectedRows (returns baml.HTTPRequest)
+func (*build_request_stream) ClassifyAffectedRows(columns []types.ViewColumn, output_type string, output_title string, output_summary string, output_data string, existing_rows string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	// Resolve client option to clientRegistry (client takes precedence)
+	if callOpts.client != nil {
+		if callOpts.clientRegistry == nil {
+			callOpts.clientRegistry = baml.NewClientRegistry()
+		}
+		callOpts.clientRegistry.SetPrimaryClient(*callOpts.client)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"columns": columns, "output_type": output_type, "output_title": output_title, "output_summary": output_summary, "output_data": output_data, "existing_rows": existing_rows, "stream": true},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: ClassifyAffectedRows: %w", err)
+		panic(wrapped_err)
+	}
+
+	return bamlRuntime.BuildRequest(context.Background(), "ClassifyAffectedRows", encoded)
+}
+
 // Build streaming HTTP request for ClassifyDetailTemplate (returns baml.HTTPRequest)
 func (*build_request_stream) ClassifyDetailTemplate(table_title string, column_schema string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
 
@@ -117,52 +163,6 @@ func (*build_request_stream) MapImportColumns(sheet_name string, existing_column
 	return bamlRuntime.BuildRequest(context.Background(), "MapImportColumns", encoded)
 }
 
-// Build streaming HTTP request for MapOutputToViewRow (returns baml.HTTPRequest)
-func (*build_request_stream) MapOutputToViewRow(sheet_name string, table_title string, columns []types.ViewColumn, output_type string, output_title string, output_summary string, output_data string, existing_rows string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
-
-	var callOpts callOption
-	for _, opt := range opts {
-		opt(&callOpts)
-	}
-
-	// Resolve client option to clientRegistry (client takes precedence)
-	if callOpts.client != nil {
-		if callOpts.clientRegistry == nil {
-			callOpts.clientRegistry = baml.NewClientRegistry()
-		}
-		callOpts.clientRegistry.SetPrimaryClient(*callOpts.client)
-	}
-
-	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"sheet_name": sheet_name, "table_title": table_title, "columns": columns, "output_type": output_type, "output_title": output_title, "output_summary": output_summary, "output_data": output_data, "existing_rows": existing_rows, "stream": true},
-		Env:    getEnvVars(callOpts.env),
-	}
-
-	if callOpts.clientRegistry != nil {
-		args.ClientRegistry = callOpts.clientRegistry
-	}
-
-	if callOpts.collectors != nil {
-		args.Collectors = callOpts.collectors
-	}
-
-	if callOpts.typeBuilder != nil {
-		args.TypeBuilder = callOpts.typeBuilder
-	}
-
-	if callOpts.tags != nil {
-		args.Tags = callOpts.tags
-	}
-
-	encoded, err := args.Encode()
-	if err != nil {
-		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: MapOutputToViewRow: %w", err)
-		panic(wrapped_err)
-	}
-
-	return bamlRuntime.BuildRequest(context.Background(), "MapOutputToViewRow", encoded)
-}
-
 // Build streaming HTTP request for MapOutputsToSchema (returns baml.HTTPRequest)
 func (*build_request_stream) MapOutputsToSchema(sheet_name string, table_title string, table_type string, columns []types.ColumnSchema, outputs_payload string, existing_rows string, excluded_rows string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
 
@@ -253,6 +253,52 @@ func (*build_request_stream) MapViewToWidget(sheet_name string, widget_type stri
 	}
 
 	return bamlRuntime.BuildRequest(context.Background(), "MapViewToWidget", encoded)
+}
+
+// Build streaming HTTP request for PopulateRowCells (returns baml.HTTPRequest)
+func (*build_request_stream) PopulateRowCells(columns []types.ViewColumn, output_type string, output_title string, output_summary string, output_data string, row_id string, row_cells string, entity_hint string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	// Resolve client option to clientRegistry (client takes precedence)
+	if callOpts.client != nil {
+		if callOpts.clientRegistry == nil {
+			callOpts.clientRegistry = baml.NewClientRegistry()
+		}
+		callOpts.clientRegistry.SetPrimaryClient(*callOpts.client)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"columns": columns, "output_type": output_type, "output_title": output_title, "output_summary": output_summary, "output_data": output_data, "row_id": row_id, "row_cells": row_cells, "entity_hint": entity_hint, "stream": true},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: PopulateRowCells: %w", err)
+		panic(wrapped_err)
+	}
+
+	return bamlRuntime.BuildRequest(context.Background(), "PopulateRowCells", encoded)
 }
 
 // Build streaming HTTP request for WriteView (returns baml.HTTPRequest)

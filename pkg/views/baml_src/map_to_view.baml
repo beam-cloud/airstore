@@ -9,31 +9,78 @@ class ViewCell {
   value string @description("The value to set. Empty string means leave the existing value as-is.")
 }
 
-class ViewRowMappingResult {
-  action string @description("'enrich' to update an existing row, 'insert' to create a new row")
-  target_row_id string @description("The _id of the existing row to enrich. Empty string for insert.")
-  row_key string @description("Stable key for the row. For inserts, derive from the entity's identity (e.g. 'john-doe-123-main-st'). For enrichments, use the existing row's row_key.")
-  cells ViewCell[] @description("One entry per column. Empty string value means 'leave existing value as-is' (for enrich) or 'no value' (for insert).")
+class AffectedRowsResult {
+  affected_row_ids string[] @description("IDs of existing rows this output is about. Empty if output doesn't match any rows.")
+  unmatched_entities string[] @description("Brief descriptions of entities in the output that don't match any existing row. Each becomes a new row insert. Empty if all entities match existing rows.")
 }
 
-function MapOutputToViewRow(
-  sheet_name: string,
-  table_title: string,
+class PopulateRowResult {
+  cells ViewCell[] @description("One entry per column. Set value for columns with data from the output. Empty string means 'leave existing value'.")
+  row_key string @description("Stable key for the row. For new inserts, derive from entity identity (e.g. 'john-doe-123-main-st'). For existing rows, keep the current row_key.")
+}
+
+function ClassifyAffectedRows(
   columns: ViewColumn[],
   output_type: string,
   output_title: string,
   output_summary: string,
   output_data: string,
   existing_rows: string
-) -> ViewRowMappingResult {
+) -> AffectedRowsResult {
   client FastMappingClient
   prompt #"
-    You are mapping a single task output into a table's column schema. Your job:
-    1. Extract values from the output for every column where data exists.
-    2. Decide whether this output should ENRICH an existing row or INSERT a new one.
+    You are classifying which existing rows in a table are affected by a task output.
+    An output often references MULTIPLE entities — identify ALL of them.
 
-    SHEET: {{ sheet_name }}
-    TABLE: {{ table_title }}
+    COLUMN SCHEMA (for understanding the data):
+    {% for col in columns %}
+    - {{ col.label }} [key={{ col.key }}] ({{ col.type }})
+    {% endfor %}
+
+    OUTPUT:
+    - Type: {{ output_type }}
+    - Title: {{ output_title }}
+    - Summary: {{ output_summary }}
+    - Data:
+    {{ output_data }}
+
+    {% if existing_rows %}
+    EXISTING ROWS (each has _id and identity columns):
+    <existing_rows>
+    {{ existing_rows }}
+    </existing_rows>
+    {% endif %}
+
+    CLASSIFICATION RULES:
+    - Identify ALL entities (people, properties, companies, threads) mentioned in the output.
+    - For each entity, check if it matches an existing row by semantic identity:
+      same person (name OR email), same property (address), same company (name),
+      same email thread (thread_id), etc.
+    - Add matched row IDs to affected_row_ids.
+    - For entities that don't match ANY existing row, add a brief description to
+      unmatched_entities (e.g. "John Doe, john@example.com, 123 Main St").
+    - If the output is about a batch action (e.g. "emailed 5 brokers"), each
+      broker is a separate entity — match each one individually.
+    - Be aggressive about matching: partial name matches, address variations
+      (e.g. "123 Main" vs "123 Main Street") should match.
+
+    {{ ctx.output_format }}
+  "#
+}
+
+function PopulateRowCells(
+  columns: ViewColumn[],
+  output_type: string,
+  output_title: string,
+  output_summary: string,
+  output_data: string,
+  row_id: string,
+  row_cells: string,
+  entity_hint: string
+) -> PopulateRowResult {
+  client FastMappingClient
+  prompt #"
+    You are extracting cell values from a task output for a SINGLE row in a table.
 
     COLUMN SCHEMA:
     {% for col in columns %}
@@ -47,40 +94,37 @@ function MapOutputToViewRow(
     - Data:
     {{ output_data }}
 
-    {% if existing_rows %}
-    EXISTING ROWS in this table (compact JSON — each has _id, row_key, cells):
-    <existing_rows>
-    {{ existing_rows }}
-    </existing_rows>
+    {% if row_id %}
+    TARGET ROW (existing — row_id={{ row_id }}):
+    {{ row_cells }}
+    {% else %}
+    TARGET: NEW ROW (insert)
+    Entity: {{ entity_hint }}
     {% endif %}
 
-    MATCHING RULES — enrich vs insert:
-    - Check if the output describes an entity that already exists in the table.
-      Match by semantic identity: same person (name + email), same property
-      (address), same company, same email thread (thread_id), etc.
-    - If a match is found: set action="enrich" and target_row_id to that row's _id.
-    - If no match: set action="insert" and target_row_id="".
-    - For inserts, generate a stable row_key from the entity's identity
-      (e.g. "john-doe-123-main-st", "thread-abc123"). Use lowercase-dash-case.
-
     CELL VALUE RULES:
+    - Extract values from the output for columns where data is relevant to THIS
+      specific row/entity. The output may reference multiple entities — only
+      extract data for the one matching this row.
     - For EVERY column in the schema, include a ViewCell entry.
-    - Extract aggressively from the output data — search title, summary, and
-      all data fields for values matching each column.
-    - When enriching: set a non-empty value for any column where the output
-      has relevant data. This REPLACES the existing value — use this for
-      status transitions (e.g. "Waiting for Approval" → "Sent"), date updates,
-      and any field that should reflect the latest state.
-    - When enriching: set empty string "" for columns where the output has NO
-      relevant data and you want to preserve the existing value.
-    - When enriching identity fields (name, address, email): preserve the
-      existing value unless the output has a clear correction. Set "" to keep
-      the existing value.
-    - When inserting: set all extractable values; use "" for columns with no data.
-    - For status columns: infer the current status from the output type and
-      context (EMAIL_SENT → "Sent", EMAIL_DRAFT → "Drafted", etc.)
-    - For date columns: use ISO 8601 format (YYYY-MM-DD or full datetime).
+    - When updating existing rows:
+      * Set non-empty value for columns where the output has NEW or UPDATED data
+        for this entity. This REPLACES the existing value.
+      * Use this for status transitions (e.g. "Waiting for Approval" → "Sent"),
+        date updates, and fields reflecting the latest state.
+      * Set empty string "" for columns where the output has NO new data for
+        this entity — this preserves the existing value.
+      * For identity fields (name, address, email): preserve existing values
+        unless the output has a clear correction. Set "" to keep.
+    - When inserting new rows:
+      * Set all extractable values from the output for this entity.
+      * Use "" for columns with no data.
+    - For status columns: infer status from output type and context
+      (EMAIL_SENT → "Sent", EMAIL_DRAFT → "Drafted", etc.)
+    - For date columns: use ISO 8601 format (YYYY-MM-DD).
     - For link columns: extract URLs from data fields, uri, or summary.
+    - For row_key: use existing row_key if updating, or derive from entity
+      identity for new inserts (lowercase-dash-case, e.g. "john-doe-123-main-st").
 
     {{ ctx.output_format }}
   "#
