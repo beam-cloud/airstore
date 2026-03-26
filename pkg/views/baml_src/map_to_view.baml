@@ -57,12 +57,21 @@ function ClassifyAffectedRows(
       same person (name OR email), same property (address), same company (name),
       same email thread (thread_id), etc.
     - Add matched row IDs to affected_row_ids.
-    - For entities that don't match ANY existing row, add a brief description to
-      unmatched_entities (e.g. "John Doe, john@example.com, 123 Main St").
-    - If the output is about a batch action (e.g. "emailed 5 brokers"), each
-      broker is a separate entity — match each one individually.
     - Be aggressive about matching: partial name matches, address variations
       (e.g. "123 Main" vs "123 Main Street") should match.
+    - If the output is about a batch action (e.g. "emailed 5 brokers"), each
+      property/contact is a separate entity — match each one to its row individually.
+
+    UNMATCHED ENTITIES — be very conservative:
+    - Only add to unmatched_entities if an entity is genuinely NEW and not
+      represented by ANY existing row, even partially.
+    - Do NOT add an entity if it is already covered by an affected_row_id.
+      For example, if a broker's name appears in the output and their properties
+      are already matched as affected rows, the broker is NOT an unmatched entity.
+    - Do NOT add email thread IDs, sender names, or metadata as unmatched entities.
+      These are attributes of existing rows, not new entities to insert.
+    - When in doubt, prefer matching to an existing row over creating a new entity.
+    - The ideal case: affected_row_ids covers every entity, unmatched_entities is empty.
 
     {{ ctx.output_format }}
   "#

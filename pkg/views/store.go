@@ -458,7 +458,7 @@ func (s *ViewStore) MergeCells(ctx context.Context, viewID, rowID string, newCel
 		}
 		setFields = append(setFields, bson.E{Key: fieldPath, Value: v})
 	}
-	if len(setFields) == 0 {
+	if len(setFields) == 0 && outputID == "" {
 		return nil
 	}
 	setFields = append(setFields, bson.E{Key: "updated_at", Value: time.Now()})

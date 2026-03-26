@@ -918,9 +918,6 @@ func (s *WorkerService) enrichViewRowsForContext(
 		}
 
 		cells := extractNonEmptyCells(populateResult.Cells)
-		if len(cells) == 0 {
-			continue
-		}
 
 		if err := s.viewStore.MergeCells(ctx, schemaCtx.ViewID, rowID, cells, output.ID); err != nil {
 			log.Warn().Err(err).Str("row_id", rowID).Msg("enrichViewRows: merge cells failed")
@@ -960,6 +957,36 @@ func (s *WorkerService) enrichViewRowsForContext(
 
 		cells := extractNonEmptyCells(populateResult.Cells)
 		if len(cells) == 0 {
+			continue
+		}
+
+		if cellsHaveConcatenatedIdentity(cells, existingRows) {
+			log.Info().
+				Str("task_id", output.TaskID).
+				Str("entity", entityHint).
+				Msg("enrichViewRows: skipping insert — cells contain concatenated identity data")
+			continue
+		}
+
+		if match := findExistingRowByIdentityCells(existingRows, cells); match != nil {
+			if err := s.viewStore.MergeCells(ctx, schemaCtx.ViewID, match.ID, cells, output.ID); err != nil {
+				log.Warn().Err(err).Str("row_id", match.ID).Msg("enrichViewRows: merge into identity-matched row failed")
+				continue
+			}
+			for k, v := range cells {
+				if match.Cells == nil {
+					match.Cells = map[string]string{}
+				}
+				match.Cells[k] = v
+			}
+			log.Info().
+				Str("task_id", output.TaskID).
+				Str("view_id", schemaCtx.ViewID).
+				Str("row_id", match.ID).
+				Str("entity", entityHint).
+				Int("cells", len(cells)).
+				Msg("enrichViewRows: merged into existing row by identity cell match")
+			updated = true
 			continue
 		}
 
@@ -1006,6 +1033,8 @@ func (s *WorkerService) enrichViewRowsForContext(
 			continue
 		}
 
+		existingRows = append(existingRows, row)
+
 		log.Info().
 			Str("task_id", output.TaskID).
 			Str("view_id", schemaCtx.ViewID).
@@ -1017,6 +1046,101 @@ func (s *WorkerService) enrichViewRowsForContext(
 
 	if updated {
 		s.publishTaskUpdate(ctx, output.WorkspaceID, output.TaskID)
+	}
+	return nil
+}
+
+// trivialValues are short or generic strings that should not count as
+// identity overlap when comparing cells between a proposed row and existing rows.
+var trivialValues = map[string]bool{
+	"":      true,
+	"n/a":   true,
+	"new":   true,
+	"none":  true,
+	"true":  true,
+	"false": true,
+	"yes":   true,
+	"no":    true,
+	"sent":  true,
+	"draft": true,
+}
+
+// cellsHaveConcatenatedIdentity detects when a proposed row's cells aggregate
+// data from 2+ existing rows into a single cell value (e.g. multiple addresses
+// or names comma-separated). Schema-agnostic: compares against actual existing
+// row values instead of pattern matching.
+func cellsHaveConcatenatedIdentity(cells map[string]string, existingRows []views.ViewRow) bool {
+	for colKey, pVal := range cells {
+		if len(pVal) < 15 {
+			continue
+		}
+		pNorm := strings.ToLower(pVal)
+		matchedDistinctRows := 0
+		for i := range existingRows {
+			merged := existingRows[i].MergedCells()
+			eVal, ok := merged[colKey]
+			if !ok || len(eVal) < 4 {
+				continue
+			}
+			eNorm := strings.ToLower(strings.TrimSpace(eVal))
+			if trivialValues[eNorm] {
+				continue
+			}
+			if pNorm != eNorm && strings.Contains(pNorm, eNorm) {
+				matchedDistinctRows++
+			}
+		}
+		if matchedDistinctRows >= 2 {
+			return true
+		}
+	}
+	return false
+}
+
+// findExistingRowByCellOverlap finds the best existing row match based on
+// shared cell values across any column. Schema-agnostic — compares all
+// non-trivial cell values on matching column keys.
+func findExistingRowByIdentityCells(existingRows []views.ViewRow, proposedCells map[string]string) *views.ViewRow {
+	var bestRow *views.ViewRow
+	bestScore := 0
+
+	for i := range existingRows {
+		merged := existingRows[i].MergedCells()
+		score := 0
+
+		for colKey, pVal := range proposedCells {
+			if len(pVal) < 3 {
+				continue
+			}
+			eVal, ok := merged[colKey]
+			if !ok || len(eVal) < 3 {
+				continue
+			}
+
+			pNorm := strings.ToLower(strings.TrimSpace(pVal))
+			eNorm := strings.ToLower(strings.TrimSpace(eVal))
+
+			if trivialValues[pNorm] || trivialValues[eNorm] {
+				continue
+			}
+
+			if pNorm == eNorm {
+				score += 2
+			} else if len(eNorm) >= 5 && strings.Contains(pNorm, eNorm) {
+				score++
+			} else if len(pNorm) >= 5 && strings.Contains(eNorm, pNorm) {
+				score++
+			}
+		}
+
+		if score > bestScore {
+			bestScore = score
+			bestRow = &existingRows[i]
+		}
+	}
+
+	if bestScore >= 2 {
+		return bestRow
 	}
 	return nil
 }

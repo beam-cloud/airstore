@@ -1854,7 +1854,68 @@ func dedupeOutputs(all []*types.TaskOutput) []*types.TaskOutput {
 		deduped = append(deduped, o)
 	}
 	sortTaskOutputs(deduped)
+
+	deduped = collapseDraftSentPairs(deduped)
+
 	return deduped
+}
+
+// collapseDraftSentPairs removes draft outputs when a sent version with
+// the same title exists, avoiding showing both "Draft: ..." and "Sent: ..." for
+// the same email.
+func collapseDraftSentPairs(outputs []*types.TaskOutput) []*types.TaskOutput {
+	if len(outputs) < 2 {
+		return outputs
+	}
+
+	sentTitles := make(map[string]bool, len(outputs))
+	for _, o := range outputs {
+		if o.OutputType != types.TaskOutputTypeEmail {
+			continue
+		}
+		title := strings.ToLower(strings.TrimSpace(o.Title))
+		if strings.Contains(title, "draft") {
+			continue
+		}
+		sentTitles[title] = true
+	}
+
+	if len(sentTitles) == 0 {
+		return outputs
+	}
+
+	filtered := make([]*types.TaskOutput, 0, len(outputs))
+	for _, o := range outputs {
+		if o.OutputType == types.TaskOutputTypeEmail {
+			title := strings.ToLower(strings.TrimSpace(o.Title))
+			if isDraftTitle(title) {
+				canonical := stripDraftPrefix(title)
+				if sentTitles[canonical] {
+					continue
+				}
+			}
+		}
+		filtered = append(filtered, o)
+	}
+	return filtered
+}
+
+func isDraftTitle(title string) bool {
+	return strings.HasPrefix(title, "draft:") ||
+		strings.HasPrefix(title, "draft ") ||
+		strings.Contains(title, " draft")
+}
+
+func stripDraftPrefix(title string) string {
+	for _, prefix := range []string{"draft: ", "draft:", "draft "} {
+		if strings.HasPrefix(title, prefix) {
+			return strings.TrimSpace(title[len(prefix):])
+		}
+	}
+	if idx := strings.Index(title, " draft"); idx >= 0 {
+		return strings.TrimSpace(title[:idx] + title[idx+6:])
+	}
+	return title
 }
 
 func (r *DataResolver) fetchBoundTaskContext(ctx context.Context, workspaceID uint, rows []resolvedSheetRow) boundDetailContext {
