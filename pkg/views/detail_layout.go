@@ -82,7 +82,6 @@ type DetailProjection struct {
 
 var (
 	detailSectionConversation = newDetailSection(SectionEmailThread, "Conversation", EmphasisPrimary)
-	detailSectionTaskStatus   = newDetailSection(SectionTaskProgress, "Task Status", EmphasisSecondary)
 	detailSectionOutputs      = newDetailSection(SectionOutputGallery, "Outputs", EmphasisCollapsed)
 	detailSectionSubtasks     = newDetailSection(SectionSubtasks, "Subtasks", EmphasisSecondary)
 )
@@ -240,7 +239,7 @@ func (p DetailProjection) includesSection(sectionType string) bool {
 	case SectionEmailThread:
 		return p.hasConversation()
 	case SectionTaskProgress:
-		return p.HasTask
+		return false
 	case SectionOutputGallery:
 		return p.hasOutputGallery()
 	case SectionSubtasks:
@@ -344,7 +343,6 @@ func InferDetailTemplate(columns []types.ColumnMeta) DetailLayoutResponse {
 	}
 	sections = append(sections,
 		detailSectionDetails(dataEmphasis),
-		detailSectionTaskStatus,
 		detailSectionOutputs,
 		detailSectionSubtasks,
 	)

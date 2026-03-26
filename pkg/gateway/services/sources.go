@@ -42,6 +42,12 @@ type cachedConnSet struct {
 	expiresAt time.Time
 }
 
+// TaskWaker delivers a wake message to a sleeping task. The implementation
+// wraps AgentAPI.SubmitTaskInput with InputKindFreeText.
+type TaskWaker interface {
+	WakeTask(ctx context.Context, workspaceID uint, taskID string, message string) error
+}
+
 // SourceService implements the gRPC SourceService for integration access.
 type SourceService struct {
 	pb.UnimplementedSourceServiceServer
@@ -57,6 +63,7 @@ type SourceService struct {
 	hookStream    common.EventEmitter
 	eventBus      *common.EventBus
 	seenTracker   *hooks.SeenTracker
+	taskWaker     TaskWaker
 
 	// Compression middleware (optional).
 	compressor      compression.ContextCompressor
@@ -79,6 +86,14 @@ func WithEventBus(bus *common.EventBus) SourceServiceOption {
 
 func WithSeenTracker(tracker *hooks.SeenTracker) SourceServiceOption {
 	return func(s *SourceService) { s.seenTracker = tracker }
+}
+
+func WithTaskWaker(waker TaskWaker) SourceServiceOption {
+	return func(s *SourceService) { s.taskWaker = waker }
+}
+
+func (s *SourceService) SetTaskWaker(waker TaskWaker) {
+	s.taskWaker = waker
 }
 
 func WithRecorder(recorder instrumentation.AccessRecorder) SourceServiceOption {

@@ -131,15 +131,15 @@ func (s *SourceService) SyncViewByExternalId(ctx context.Context, externalId str
 	}, nil
 }
 
-// RefreshQuery re-executes a query and emits hook events for new results.
+// RefreshQuery re-executes a query and processes new results.
 // Called by the source poller.
 //
-// Unlike manual sync operations, the poller does NOT pre-invalidate the
-// listing cache. StoreQueryResults atomically replaces the listing via
-// Redis SET, so pre-invalidation would only create an empty window where
-// concurrent readers see no results — causing transient "directory not
-// found" errors in the agent sandbox and triggering the SeenTracker
-// oscillation (empty → items reappear → spurious hook fire).
+// For task_followup queries with a TaskWaker configured, this bypasses the
+// Redis SeenTracker + stream pipeline entirely: it compares results against
+// a durable Postgres baseline and delivers input directly to the sleeping
+// task. This is atomic, retry-safe, and works across replicas.
+//
+// For all other queries, the existing SeenTracker + hook stream path is used.
 func (s *SourceService) RefreshQuery(ctx context.Context, query *types.FilesystemQuery) error {
 	query, err := s.refreshQueryDefinition(ctx, query)
 	if err != nil {
@@ -160,8 +160,95 @@ func (s *SourceService) RefreshQuery(ctx context.Context, query *types.Filesyste
 		return err
 	}
 
+	if query.IsTaskFollowUp() && s.taskWaker != nil {
+		s.handleFollowupDirectDelivery(ctx, pctx.WorkspaceId, query, results)
+		return nil
+	}
+
 	s.emitSourceHookEvents(ctx, pctx.WorkspaceId, query, results)
 	return nil
+}
+
+// handleFollowupDirectDelivery compares current results against the Postgres
+// baseline and, if new items are found, delivers input directly to the target
+// task. On success, baseline and hook are updated atomically in Postgres.
+func (s *SourceService) handleFollowupDirectDelivery(
+	ctx context.Context,
+	workspaceID uint,
+	query *types.FilesystemQuery,
+	results []repository.QueryResult,
+) {
+	currentIDs := make([]string, 0, len(results))
+	for _, r := range results {
+		if id := strings.TrimSpace(r.ID); id != "" {
+			currentIDs = append(currentIDs, id)
+		}
+	}
+
+	if query.BaselineItemIDs == nil {
+		log.Info().Str("path", query.Path).Int("items", len(currentIDs)).
+			Msg("followup: no baseline set, establishing from current results")
+		if err := s.fsStore.UpdateQueryBaseline(ctx, query.Id, currentIDs); err != nil {
+			log.Warn().Err(err).Str("path", query.Path).Msg("followup: failed to set initial baseline")
+		}
+		return
+	}
+
+	baselineSet := make(map[string]struct{}, len(query.BaselineItemIDs))
+	for _, id := range query.BaselineItemIDs {
+		baselineSet[id] = struct{}{}
+	}
+
+	var newIDs []string
+	for _, id := range currentIDs {
+		if _, seen := baselineSet[id]; !seen {
+			newIDs = append(newIDs, id)
+		}
+	}
+
+	if len(newIDs) == 0 {
+		return
+	}
+
+	queryPath := hooks.NormalizePath(query.Path)
+	hook, err := s.fsStore.GetActiveFollowupHook(ctx, workspaceID, queryPath)
+	if err != nil {
+		log.Warn().Err(err).Str("path", queryPath).Msg("followup: failed to look up hook")
+		return
+	}
+	if hook == nil || hook.TargetTaskID == nil {
+		log.Warn().Str("path", queryPath).Msg("followup: no active hook found")
+		return
+	}
+
+	message := fmt.Sprintf("%s\n\nNew items detected: %d", hook.Prompt, len(newIDs))
+
+	log.Info().
+		Str("path", queryPath).Str("task_id", *hook.TargetTaskID).
+		Int("new_items", len(newIDs)).
+		Msg("followup: delivering wake directly to task")
+
+	if err := s.taskWaker.WakeTask(ctx, workspaceID, *hook.TargetTaskID, message); err != nil {
+		log.Warn().Err(err).
+			Str("path", queryPath).Str("task_id", *hook.TargetTaskID).
+			Msg("followup: wake delivery failed, will retry next poll")
+		return
+	}
+
+	if hook.OneShot {
+		if err := s.fsStore.DeactivateHookAndUpdateBaseline(ctx, hook.Id, query.Id, currentIDs); err != nil {
+			log.Warn().Err(err).Str("path", queryPath).Msg("followup: failed to deactivate hook and update baseline")
+		}
+	} else {
+		if err := s.fsStore.UpdateQueryBaseline(ctx, query.Id, currentIDs); err != nil {
+			log.Warn().Err(err).Str("path", queryPath).Msg("followup: failed to update baseline")
+		}
+	}
+
+	log.Info().
+		Str("path", queryPath).Str("task_id", *hook.TargetTaskID).
+		Int("new_items", len(newIDs)).Bool("one_shot", hook.OneShot).
+		Msg("followup: wake delivered successfully")
 }
 
 func (s *SourceService) refreshQueryDefinition(
@@ -340,29 +427,27 @@ func (s *SourceService) emitSourceHookEvents(ctx context.Context, workspaceId ui
 }
 
 // SeedSeenBaseline marks a query path as "initialized" in the SeenTracker
-// with its current results so the first poller run diffs properly instead
-// of treating all existing items as new (the bootstrap-emit path).
+// with the cached results the agent last saw, so the first poller run diffs
+// properly against the agent's perspective instead of a fresh query.
+//
+// Using cached results (not a fresh query) is critical: a fresh query could
+// include items that arrived after the agent's last read but before watch
+// registration, permanently baking them into the baseline so they never
+// trigger a wake.
 func (s *SourceService) SeedSeenBaseline(ctx context.Context, workspaceID uint, query *types.FilesystemQuery) {
 	if s.seenTracker == nil {
 		return
 	}
 
 	queryPath := hooks.NormalizePath(query.Path)
-
-	pctx := &sources.ProviderContext{WorkspaceId: query.WorkspaceId}
-	pctx, connected := s.loadQueryCredentials(ctx, pctx, query)
-	if !connected {
-		log.Warn().Str("path", queryPath).Msg("seed baseline: not connected, skipping")
-		return
-	}
-
-	results, err := s.executeAndCacheQuery(ctx, pctx, query)
-	if err != nil {
-		log.Warn().Err(err).Str("path", queryPath).Msg("seed baseline: query failed, skipping")
-		return
-	}
-
 	seenKey := common.Keys.HookSeen(workspaceID, types.GeneratePathID(queryPath))
+
+	results, err := s.fsStore.GetQueryResults(ctx, workspaceID, queryPath)
+	if err != nil || len(results) == 0 {
+		log.Info().Str("path", queryPath).Msg("seed baseline: no cached results, first poll will establish baseline")
+		return
+	}
+
 	ids := make([]string, 0, len(results))
 	for _, r := range results {
 		if id := strings.TrimSpace(r.ID); id != "" {
@@ -375,7 +460,7 @@ func (s *SourceService) SeedSeenBaseline(ctx context.Context, workspaceID uint, 
 		return
 	}
 	log.Info().Str("path", queryPath).Int("baseline_items", len(ids)).
-		Msg("seeded seen baseline from actual query results")
+		Msg("seeded seen baseline from cached query results")
 }
 
 func hashHookItemIDs(ids []string) string {

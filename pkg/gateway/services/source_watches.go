@@ -65,8 +65,8 @@ func newTaskSourceWatchController(service *SourceService, task *types.AgentTask)
 	if service.registry == nil {
 		return nil, fmt.Errorf("source registry is unavailable")
 	}
-	if service.seenTracker == nil {
-		return nil, fmt.Errorf("seen tracker is unavailable")
+	if service.seenTracker == nil && service.taskWaker == nil {
+		return nil, fmt.Errorf("seen tracker or task waker is required")
 	}
 	if task == nil || task.WorkspaceID == 0 || strings.TrimSpace(task.ID) == "" {
 		return nil, fmt.Errorf("task is required")
@@ -224,7 +224,7 @@ func (c *taskSourceWatchController) register(
 	}
 
 	if createdQuery {
-		c.service.SeedSeenBaseline(ctx, c.task.WorkspaceID, query)
+		c.seedBaseline(ctx, query)
 	}
 
 	return &sourceWatchRegistration{
@@ -233,6 +233,37 @@ func (c *taskSourceWatchController) register(
 		Request: req,
 		Results: nil,
 	}, nil
+}
+
+// seedBaseline sets the Postgres baseline_item_ids for a followup query from
+// cached query results, and also seeds the Redis SeenTracker for backward
+// compatibility with non-followup paths.
+func (c *taskSourceWatchController) seedBaseline(ctx context.Context, query *types.FilesystemQuery) {
+	queryPath := hooks.NormalizePath(query.Path)
+	results, err := c.service.fsStore.GetQueryResults(ctx, c.task.WorkspaceID, queryPath)
+	if err != nil || len(results) == 0 {
+		log.Info().Str("path", queryPath).Msg("seed baseline: no cached results, first poll will establish baseline")
+		return
+	}
+
+	ids := make([]string, 0, len(results))
+	for _, r := range results {
+		if id := strings.TrimSpace(r.ID); id != "" {
+			ids = append(ids, id)
+		}
+	}
+
+	if query.IsTaskFollowUp() {
+		if err := c.service.fsStore.UpdateQueryBaseline(ctx, query.Id, ids); err != nil {
+			log.Warn().Err(err).Str("path", queryPath).Msg("seed baseline: postgres update failed")
+		} else {
+			log.Info().Str("path", queryPath).Int("baseline_items", len(ids)).
+				Msg("seeded postgres baseline from cached query results")
+		}
+		return
+	}
+
+	c.service.SeedSeenBaseline(ctx, c.task.WorkspaceID, query)
 }
 
 func (c *taskSourceWatchController) upsertQuery(

@@ -322,6 +322,8 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 	boundContext := r.fetchBoundTaskContext(ctx, workspaceID, resolvedRows)
 
 	if len(uncachedIDs) == 0 {
+		importRows := r.loadAndMergeImportRows(ctx, viewID, sheet.ID, comp.ID, resolvedRows)
+		resolvedRows = append(resolvedRows, importRows...)
 		enrichRowsWithOutputState(resolvedRows, allOutputs, boundContext, taskMeta)
 		sortResolvedRows(resolvedRows, taskMeta)
 		return &viewMappingResult{Rows: resolvedRows, TaskMeta: taskMeta, Diagnostics: diagnostics}, nil
@@ -493,12 +495,12 @@ func (r *DataResolver) loadAndMergeImportRows(ctx context.Context, viewID, sheet
 	var resolved []resolvedSheetRow
 	for _, row := range importRows {
 		resolved = append(resolved, resolvedSheetRow{
-			TaskID:      row.TaskID,
-			RowID:       row.ID,
-			StableRef:   row.StableRef,
-			RowKey:      row.RowKey,
-			Source:      "import",
-			Cells:       row.MergedCells(),
+			TaskID:    row.TaskID,
+			RowID:     row.ID,
+			StableRef: row.StableRef,
+			RowKey:    row.RowKey,
+			Source:    "import",
+			Cells:     row.MergedCells(),
 		})
 	}
 	return resolved
@@ -1031,7 +1033,7 @@ func deduplicateResolvedRows(rows []resolvedSheetRow, taskMeta map[string]*types
 		return rows
 	}
 	type entry struct {
-		index    int
+		index     int
 		cellCount int
 	}
 	seen := make(map[string]entry, len(rows))
@@ -2652,5 +2654,3 @@ func stripHint(desc string) string {
 	}
 	return desc
 }
-
-

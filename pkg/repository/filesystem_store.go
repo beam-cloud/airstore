@@ -126,6 +126,15 @@ type FilesystemStore interface {
 	// GetWatchedSourceQueries returns stale source queries that have active hooks watching their path.
 	GetWatchedSourceQueries(ctx context.Context, staleAfter time.Duration, limit int) ([]*types.FilesystemQuery, error)
 
+	// UpdateQueryBaseline sets the baseline_item_ids for a query.
+	UpdateQueryBaseline(ctx context.Context, queryID uint, ids []string) error
+
+	// DeactivateHookAndUpdateBaseline atomically deactivates a hook and updates the query baseline.
+	DeactivateHookAndUpdateBaseline(ctx context.Context, hookID uint, queryID uint, ids []string) error
+
+	// GetActiveFollowupHook finds the active task_input hook for a followup query path.
+	GetActiveFollowupHook(ctx context.Context, workspaceID uint, queryPath string) (*types.Hook, error)
+
 	// ===== Hooks =====
 
 	// CreateHook stores a new hook definition.

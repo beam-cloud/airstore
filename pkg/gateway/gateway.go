@@ -624,6 +624,7 @@ func (g *Gateway) registerServices() error {
 		wireSourceWatchRegistrar(orchestratorSvc, sourceService)
 		orchestratorSvc.Start(g.ctx)
 		agentAPI := orchestration.NewAgentAPI(g.BackendRepo, orchestratorSvc)
+		sourceService.SetTaskWaker(newAgentAPITaskWaker(agentAPI))
 
 		// Views API (deferred to here so agentAPI is available for the copilot)
 		var viewStore *views.ViewStore
@@ -749,6 +750,19 @@ func wireSourceWatchRegistrar(target sourceWatchRegistrarTarget, registrar orche
 		return
 	}
 	target.SetSourceWatchRegistrar(registrar)
+}
+
+type agentAPITaskWaker struct {
+	api *orchestration.AgentAPI
+}
+
+func newAgentAPITaskWaker(api *orchestration.AgentAPI) services.TaskWaker {
+	return &agentAPITaskWaker{api: api}
+}
+
+func (w *agentAPITaskWaker) WakeTask(ctx context.Context, workspaceID uint, taskID string, message string) error {
+	_, err := w.api.SubmitTaskInput(ctx, workspaceID, taskID, types.InputKindFreeText, nil, message, "", nil)
+	return err
 }
 
 // Start is the gateway entry point

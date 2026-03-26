@@ -54,6 +54,7 @@ type FilesystemQuery struct {
 	CreatedAt          time.Time                `json:"created_at" db:"created_at"`
 	UpdatedAt          time.Time                `json:"updated_at" db:"updated_at"`
 	LastExecuted       *time.Time               `json:"last_executed,omitempty" db:"last_executed"`
+	BaselineItemIDs    []string                 `json:"baseline_item_ids,omitempty" db:"baseline_item_ids"`
 }
 
 // IsFolder returns true if results materialize as a directory.
