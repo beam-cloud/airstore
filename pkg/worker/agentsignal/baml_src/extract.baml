@@ -68,6 +68,10 @@ function ExtractOutputs(tool_name: string, tool_input: string, tool_result: stri
       comma-separated lists → "tags", counts/quantities → "number"
     - Provide clean human-readable labels (e.g. 'Recipe Name', not 'recipe_name')
     - Skip internal/debug fields, raw HTML, large text blobs, and IDs
+    - EXCEPTION: for EMAIL_SENT and EMAIL_DRAFT, ALWAYS include thread_id,
+      message_id, recipient (to), and subject as data fields when they appear
+      in the tool result. These are correlation IDs required for follow-up
+      monitoring — they are NOT internal/debug fields.
     - For arrays of strings, join values with ", " and set type to "tags"
 
     TAGS — add categorical tags useful for browsing and filtering:
