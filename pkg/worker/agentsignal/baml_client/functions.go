@@ -391,7 +391,7 @@ func ExtractApprovalSummary(ctx context.Context, assistant_text string, opts ...
 	}
 }
 
-func ExtractFinalResponseOutput(ctx context.Context, user_message *string, assistant_message string, opts ...CallOptionFunc) ([]types.ExtractedOutput, error) {
+func ExtractFinalResponseOutput(ctx context.Context, user_message *string, assistant_message string, view_columns string, opts ...CallOptionFunc) ([]types.ExtractedOutput, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -407,7 +407,7 @@ func ExtractFinalResponseOutput(ctx context.Context, user_message *string, assis
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"user_message": user_message, "assistant_message": assistant_message},
+		Kwargs: map[string]any{"user_message": user_message, "assistant_message": assistant_message, "view_columns": view_columns},
 		Env:    getEnvVars(callOpts.env),
 	}
 
@@ -465,7 +465,7 @@ func ExtractFinalResponseOutput(ctx context.Context, user_message *string, assis
 	}
 }
 
-func ExtractOutputs(ctx context.Context, tool_name string, tool_input string, tool_result string, opts ...CallOptionFunc) ([]types.ExtractedOutput, error) {
+func ExtractOutputs(ctx context.Context, tool_name string, tool_input string, tool_result string, view_columns string, opts ...CallOptionFunc) ([]types.ExtractedOutput, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -481,7 +481,7 @@ func ExtractOutputs(ctx context.Context, tool_name string, tool_input string, to
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"tool_name": tool_name, "tool_input": tool_input, "tool_result": tool_result},
+		Kwargs: map[string]any{"tool_name": tool_name, "tool_input": tool_input, "tool_result": tool_result, "view_columns": view_columns},
 		Env:    getEnvVars(callOpts.env),
 	}
 

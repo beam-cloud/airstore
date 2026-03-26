@@ -2226,6 +2226,11 @@ func (s *AgentService) loadViewOutputSchemaContext(
 	agentID *string,
 ) []types.ViewOutputSchemaContext {
 	if s == nil || s.backend == nil || agentID == nil || strings.TrimSpace(*agentID) == "" {
+		log.Warn().
+			Bool("nil_service", s == nil).
+			Bool("nil_backend", s != nil && s.backend == nil).
+			Bool("nil_agent_id", agentID == nil).
+			Msg("loadViewOutputSchemaContext: early exit")
 		return nil
 	}
 	contexts, err := types.LoadViewOutputSchemaContexts(ctx, s.backend, workspaceID, strings.TrimSpace(*agentID))
@@ -2237,6 +2242,11 @@ func (s *AgentService) loadViewOutputSchemaContext(
 			Msg("failed to load dependent views for agent view-schema context")
 		return nil
 	}
+	log.Info().
+		Uint("workspace_id", workspaceID).
+		Str("agent_id", strings.TrimSpace(*agentID)).
+		Int("context_count", len(contexts)).
+		Msg("loadViewOutputSchemaContext: loaded")
 	if len(contexts) > maxRuntimeViewSchemas {
 		contexts = contexts[:maxRuntimeViewSchemas]
 	}
@@ -2248,6 +2258,11 @@ func applyViewSchemaRuntimeContext(
 	executionPolicy map[string]any,
 	contexts []types.ViewOutputSchemaContext,
 ) {
+	log.Info().
+		Int("context_count", len(contexts)).
+		Bool("has_env", env != nil).
+		Bool("has_policy", executionPolicy != nil).
+		Msg("applyViewSchemaRuntimeContext: entry")
 	if len(contexts) == 0 {
 		return
 	}
@@ -2259,6 +2274,14 @@ func applyViewSchemaRuntimeContext(
 		if executionPolicy != nil {
 			if policyValue := types.ViewOutputSchemaPolicyValue(contexts); policyValue != nil {
 				executionPolicy[types.AgentExecutionMetaKeyViewSchema] = policyValue
+				log.Info().
+					Int("contexts", len(contexts)).
+					Str("policy_type", fmt.Sprintf("%T", policyValue)).
+					Msg("applyViewSchemaRuntimeContext: set policy")
+			} else {
+				log.Warn().
+					Int("contexts", len(contexts)).
+					Msg("applyViewSchemaRuntimeContext: ViewOutputSchemaPolicyValue returned nil")
 			}
 		}
 	}

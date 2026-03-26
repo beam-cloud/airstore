@@ -49,6 +49,7 @@ type AnalyzerWriter struct {
 	taskID      string
 	runID       string
 	agentID     string
+	viewSchema  []types.ViewOutputSchemaContext
 	bamlEnv     map[string]string
 	tracker     *taskOutputTracker
 
@@ -82,6 +83,7 @@ func newAnalyzerWriter(
 		taskID:      ids.taskID,
 		runID:       ids.runID,
 		agentID:     ids.agentID,
+		viewSchema:  ids.viewSchema,
 		bamlEnv:     bamlEnv,
 		tracker:     tracker,
 	}
@@ -93,6 +95,7 @@ func (w *AnalyzerWriter) outputIDs() taskOutputIDs {
 		taskID:      w.taskID,
 		runID:       w.runID,
 		agentID:     w.agentID,
+		viewSchema:  w.viewSchema,
 	}
 }
 
@@ -383,8 +386,43 @@ func (w *AnalyzerWriter) callExtractOutputs(job analyzerJob) (outputs []signalty
 	}()
 	return agentsignal.ExtractOutputs(
 		w.ctx, job.toolName, job.toolInput, job.toolResult,
+		w.formatViewColumns(),
 		agentsignal.WithEnv(w.bamlEnv),
 	)
+}
+
+func (w *AnalyzerWriter) formatViewColumns() string {
+	if len(w.viewSchema) == 0 {
+		return ""
+	}
+	type col struct {
+		Key   string `json:"key"`
+		Label string `json:"label"`
+		Type  string `json:"type"`
+	}
+	seen := make(map[string]struct{})
+	var cols []col
+	for _, ctx := range w.viewSchema {
+		for _, c := range ctx.Columns {
+			k := strings.TrimSpace(c.Key)
+			if k == "" {
+				continue
+			}
+			if _, ok := seen[k]; ok {
+				continue
+			}
+			seen[k] = struct{}{}
+			cols = append(cols, col{Key: k, Label: c.Label, Type: c.Type})
+		}
+	}
+	if len(cols) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(cols)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 func derefStr(p *string) string {

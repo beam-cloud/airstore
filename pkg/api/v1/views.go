@@ -51,6 +51,7 @@ func NewViewsGroup(g *echo.Group, backend repository.BackendRepository, copilot 
 		vg.g.POST("/:view_id/sheets/:sheet_id/rows/:row_id/regenerate", vg.RegenerateRow)
 		vg.g.DELETE("/:view_id/sheets/:sheet_id/rows/:row_id", vg.ExcludeRow)
 		vg.g.POST("/:view_id/sheets/:sheet_id/rows/:row_id/restore", vg.RestoreRow)
+		vg.g.POST("/:view_id/sheets/:sheet_id/components/:component_id/run", vg.RunRows)
 	}
 	vg.g.POST("/:view_id/sheets/:sheet_id/import", vg.ImportData)
 	vg.g.GET("/:view_id/rows/:row_id/detail", vg.RowDetail)
@@ -1115,6 +1116,76 @@ func (vg *ViewsGroup) RegenerateRow(c echo.Context) error {
 			Str("task_id", taskID).
 			Msg("failed to regenerate row")
 		return ErrorResponse(c, http.StatusInternalServerError, "failed to regenerate row")
+	}
+
+	return SuccessResponse(c, data)
+}
+
+// ---------------------------------------------------------------------------
+// Tiered row remapping (Run 10 / Run all)
+// ---------------------------------------------------------------------------
+
+type runRowsRequest struct {
+	Limit int `json:"limit"`
+}
+
+func (vg *ViewsGroup) RunRows(c echo.Context) error {
+	if vg.store == nil || !vg.store.Available() {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "view row persistence not configured")
+	}
+	workspaceID, err := vg.workspaceID(c)
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+	}
+
+	ctx := c.Request().Context()
+	viewID := c.Param("view_id")
+	sheetID := c.Param("sheet_id")
+	componentID := c.Param("component_id")
+
+	var body runRowsRequest
+	if err := c.Bind(&body); err != nil {
+		body.Limit = 0
+	}
+
+	v, err := vg.backend.GetView(ctx, workspaceID, viewID)
+	if err != nil {
+		return ErrorResponse(c, http.StatusNotFound, "view not found")
+	}
+
+	var sheet *types.SheetSpec
+	for i := range v.Definition.Sheets {
+		if v.Definition.Sheets[i].ID == sheetID {
+			sheet = &v.Definition.Sheets[i]
+			break
+		}
+	}
+	if sheet == nil {
+		return ErrorResponse(c, http.StatusNotFound, "sheet not found")
+	}
+
+	var comp *types.ComponentSpec
+	for i := range sheet.Components {
+		if sheet.Components[i].ID == componentID && sheet.Components[i].IsTable() {
+			comp = &sheet.Components[i]
+			break
+		}
+	}
+	if comp == nil {
+		return ErrorResponse(c, http.StatusNotFound, "no matching table component")
+	}
+
+	data, err := vg.resolver.RunRows(ctx, workspaceID, viewID, *sheet, *comp, body.Limit, views.ResolveOptions{
+		ViewAgentRefs: v.Definition.Agents,
+	})
+	if err != nil {
+		log.Error().Err(err).
+			Str("view_id", viewID).
+			Str("sheet_id", sheetID).
+			Str("component_id", componentID).
+			Int("limit", body.Limit).
+			Msg("failed to run rows")
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to run rows")
 	}
 
 	return SuccessResponse(c, data)

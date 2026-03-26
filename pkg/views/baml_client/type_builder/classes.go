@@ -579,6 +579,82 @@ func (t *OperationClassView) Type() (baml.Type, error) {
 	return t.inner.Type()
 }
 
+type ViewCellClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *ViewCellClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *ViewCellClassView) PropertyColumn() (ClassPropertyView, error) {
+	return t.inner.Property("column")
+}
+
+func (t *ViewCellClassView) PropertyValue() (ClassPropertyView, error) {
+	return t.inner.Property("value")
+}
+
+func (t *TypeBuilder) ViewCell() (*ViewCellClassView, error) {
+	bld, err := t.inner.Class("ViewCell")
+	if err != nil {
+		return nil, err
+	}
+	return &ViewCellClassView{inner: bld}, nil
+}
+
+func (t *ViewCellClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
+type ViewColumnClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *ViewColumnClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *ViewColumnClassView) PropertyKey() (ClassPropertyView, error) {
+	return t.inner.Property("key")
+}
+
+func (t *ViewColumnClassView) PropertyLabel() (ClassPropertyView, error) {
+	return t.inner.Property("label")
+}
+
+func (t *ViewColumnClassView) PropertyType() (ClassPropertyView, error) {
+	return t.inner.Property("type")
+}
+
+func (t *TypeBuilder) ViewColumn() (*ViewColumnClassView, error) {
+	bld, err := t.inner.Class("ViewColumn")
+	if err != nil {
+		return nil, err
+	}
+	return &ViewColumnClassView{inner: bld}, nil
+}
+
+func (t *ViewColumnClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
 type ViewDraftResponseClassView struct {
 	inner baml.ClassBuilder
 }
@@ -628,6 +704,50 @@ func (t *TypeBuilder) ViewDraftResponse() (*ViewDraftResponseClassView, error) {
 }
 
 func (t *ViewDraftResponseClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
+type ViewRowMappingResultClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *ViewRowMappingResultClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *ViewRowMappingResultClassView) PropertyAction() (ClassPropertyView, error) {
+	return t.inner.Property("action")
+}
+
+func (t *ViewRowMappingResultClassView) PropertyTarget_row_id() (ClassPropertyView, error) {
+	return t.inner.Property("target_row_id")
+}
+
+func (t *ViewRowMappingResultClassView) PropertyRow_key() (ClassPropertyView, error) {
+	return t.inner.Property("row_key")
+}
+
+func (t *ViewRowMappingResultClassView) PropertyCells() (ClassPropertyView, error) {
+	return t.inner.Property("cells")
+}
+
+func (t *TypeBuilder) ViewRowMappingResult() (*ViewRowMappingResultClassView, error) {
+	bld, err := t.inner.Class("ViewRowMappingResult")
+	if err != nil {
+		return nil, err
+	}
+	return &ViewRowMappingResultClassView{inner: bld}, nil
+}
+
+func (t *ViewRowMappingResultClassView) Type() (baml.Type, error) {
 	return t.inner.Type()
 }
 

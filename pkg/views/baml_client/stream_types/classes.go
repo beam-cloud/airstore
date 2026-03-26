@@ -778,6 +778,108 @@ func (c Operation) BamlTypeName() string {
 	return "Operation"
 }
 
+type ViewCell struct {
+	Column *string `json:"column"`
+	Value  *string `json:"value"`
+}
+
+func (c *ViewCell) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_STREAM_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_STREAM_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "ViewCell" {
+		panic(fmt.Sprintf("expected ViewCell, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "column":
+			c.Column = baml.Decode(valueHolder).Interface().(*string)
+
+		case "value":
+			c.Value = baml.Decode(valueHolder).Interface().(*string)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class ViewCell", key))
+
+		}
+	}
+
+}
+
+func (c ViewCell) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["column"] = c.Column
+
+	fields["value"] = c.Value
+
+	return baml.EncodeClass("ViewCell", fields, nil)
+}
+
+func (c ViewCell) BamlTypeName() string {
+	return "ViewCell"
+}
+
+type ViewColumn struct {
+	Key   *string `json:"key"`
+	Label *string `json:"label"`
+	Type  *string `json:"type"`
+}
+
+func (c *ViewColumn) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_STREAM_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_STREAM_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "ViewColumn" {
+		panic(fmt.Sprintf("expected ViewColumn, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "key":
+			c.Key = baml.Decode(valueHolder).Interface().(*string)
+
+		case "label":
+			c.Label = baml.Decode(valueHolder).Interface().(*string)
+
+		case "type":
+			c.Type = baml.Decode(valueHolder).Interface().(*string)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class ViewColumn", key))
+
+		}
+	}
+
+}
+
+func (c ViewColumn) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["key"] = c.Key
+
+	fields["label"] = c.Label
+
+	fields["type"] = c.Type
+
+	return baml.EncodeClass("ViewColumn", fields, nil)
+}
+
+func (c ViewColumn) BamlTypeName() string {
+	return "ViewColumn"
+}
+
 type ViewDraftResponse struct {
 	Update_type       *types.ViewUpdateType `json:"update_type"`
 	Message           *string               `json:"message"`
@@ -848,6 +950,66 @@ func (c ViewDraftResponse) Encode() (*cffi.HostValue, error) {
 
 func (c ViewDraftResponse) BamlTypeName() string {
 	return "ViewDraftResponse"
+}
+
+type ViewRowMappingResult struct {
+	Action        *string    `json:"action"`
+	Target_row_id *string    `json:"target_row_id"`
+	Row_key       *string    `json:"row_key"`
+	Cells         []ViewCell `json:"cells"`
+}
+
+func (c *ViewRowMappingResult) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_STREAM_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_STREAM_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "ViewRowMappingResult" {
+		panic(fmt.Sprintf("expected ViewRowMappingResult, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "action":
+			c.Action = baml.Decode(valueHolder).Interface().(*string)
+
+		case "target_row_id":
+			c.Target_row_id = baml.Decode(valueHolder).Interface().(*string)
+
+		case "row_key":
+			c.Row_key = baml.Decode(valueHolder).Interface().(*string)
+
+		case "cells":
+			c.Cells = baml.Decode(valueHolder).Interface().([]ViewCell)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class ViewRowMappingResult", key))
+
+		}
+	}
+
+}
+
+func (c ViewRowMappingResult) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["action"] = c.Action
+
+	fields["target_row_id"] = c.Target_row_id
+
+	fields["row_key"] = c.Row_key
+
+	fields["cells"] = c.Cells
+
+	return baml.EncodeClass("ViewRowMappingResult", fields, nil)
+}
+
+func (c ViewRowMappingResult) BamlTypeName() string {
+	return "ViewRowMappingResult"
 }
 
 type WidgetResult struct {

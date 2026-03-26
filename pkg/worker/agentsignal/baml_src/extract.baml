@@ -30,7 +30,7 @@ class ExtractedOutput {
   data_fields DataField[] @description("The 5-15 most important fields extracted from the tool result for dashboard display. Empty array if kind is NONE.")
 }
 
-function ExtractOutputs(tool_name: string, tool_input: string, tool_result: string) -> ExtractedOutput[] {
+function ExtractOutputs(tool_name: string, tool_input: string, tool_result: string, view_columns: string) -> ExtractedOutput[] {
   client OutputClassifier
   prompt #"
     An AI agent just executed a tool call. Your job is to determine if the
@@ -62,7 +62,17 @@ function ExtractOutputs(tool_name: string, tool_input: string, tool_result: stri
       file extension. For links, describe the destination.
 
     DATA FIELDS — extract the important fields from the tool result:
-    - Pick the 5-10 most useful fields a user would want to see in a dashboard table
+    {% if view_columns %}
+    VIEW SCHEMA COLUMNS — these are the columns in the user's dashboard view.
+    When extracting data_fields, PREFER these exact keys and labels over
+    inventing your own. For each view column where a value exists in the tool
+    result, include a data_field with that column's key and label. You may also
+    extract additional fields beyond the view columns if they are clearly
+    important (e.g. thread_id, message_id for emails).
+
+    {{ view_columns }}
+    {% endif %}
+    - Pick the 5-15 most useful fields a user would want to see in a dashboard table
     - Assign display types semantically: URLs → "link", emails → "email",
       dates/timestamps → "date", monetary values → "currency", true/false → "boolean",
       comma-separated lists → "tags", counts/quantities → "number"
@@ -127,7 +137,7 @@ function ExtractOutputs(tool_name: string, tool_input: string, tool_result: stri
   "#
 }
 
-function ExtractFinalResponseOutput(user_message: string?, assistant_message: string) -> ExtractedOutput[] {
+function ExtractFinalResponseOutput(user_message: string?, assistant_message: string, view_columns: string) -> ExtractedOutput[] {
   client OutputClassifier
   prompt #"
     An AI agent has finished a task. Decide whether the FINAL ASSISTANT
@@ -165,6 +175,16 @@ function ExtractFinalResponseOutput(user_message: string?, assistant_message: st
     - Extract data_fields from the response content — pick the 5-15 most
       important structured values a user would want in a dashboard table
     - Add categorical tags for browsing/filtering
+
+    {% if view_columns %}
+    VIEW SCHEMA COLUMNS — these are the columns in the user's dashboard view.
+    When extracting data_fields, PREFER these exact keys and labels over
+    inventing your own. For each view column where a value exists in the
+    response, include a data_field with that column's key and label. You may
+    also extract additional fields beyond the view columns if clearly important.
+
+    {{ view_columns }}
+    {% endif %}
 
     If the response should NOT be persisted:
     - Return an empty array

@@ -217,6 +217,7 @@ type ViewOutputSchemaContext struct {
 	ArtifactKey    string                   `json:"artifact_key,omitempty"`
 	OutputType     string                   `json:"output_type,omitempty"`
 	Columns        []ViewOutputSchemaColumn `json:"columns,omitempty"`
+	Transform      []TransformRule          `json:"transform,omitempty"`
 	TransformHints []string                 `json:"transform_hints,omitempty"`
 }
 
@@ -422,6 +423,7 @@ func buildViewOutputSchemaContext(view *View, sheet SheetSpec, component Compone
 	if component.DataSource != nil {
 		context.ArtifactKey = strings.TrimSpace(component.DataSource.ArtifactKey)
 		context.OutputType = strings.TrimSpace(component.DataSource.OutputType)
+		context.Transform = component.DataSource.Transform
 		context.TransformHints = viewOutputSchemaTransformHints(component.DataSource.Transform)
 	}
 	if context.ComponentTitle == "" {

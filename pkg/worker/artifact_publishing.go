@@ -677,7 +677,7 @@ func defaultFinalResponseExtractor(
 		}
 	}()
 	return agentsignal.ExtractFinalResponseOutput(
-		ctx, userMessage, assistantMessage,
+		ctx, userMessage, assistantMessage, "",
 		agentsignal.WithEnv(bamlEnv),
 	)
 }

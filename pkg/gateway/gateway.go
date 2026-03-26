@@ -414,10 +414,16 @@ func (g *Gateway) registerServices() error {
 		}
 	}
 
+	// Create ViewStore early so it's available to both worker service and views API.
+	var workerViewStore *views.ViewStore
+	if g.MongoClient != nil {
+		workerViewStore = views.NewViewStore(g.MongoClient)
+	}
+
 	// Register worker gRPC service (for worker-to-gateway communication)
 	if g.scheduler != nil {
 		taskQueue := repository.NewRedisTaskQueue(g.RedisClient, "default")
-		workerService := services.NewWorkerService(g.scheduler, g.BackendRepo, g.scheduler.WorkerRepo(), taskQueue, g.RedisClient, g.Config.Scheduler)
+		workerService := services.NewWorkerService(g.scheduler, g.BackendRepo, g.scheduler.WorkerRepo(), taskQueue, g.RedisClient, g.Config.Scheduler, workerViewStore)
 		workerService.StartRecoveryLoop(g.ctx)
 		pb.RegisterWorkerServiceServer(g.grpcServer, workerService)
 		log.Info().Msg("worker service registered")
@@ -627,10 +633,7 @@ func (g *Gateway) registerServices() error {
 		sourceService.SetTaskWaker(newAgentAPITaskWaker(agentAPI))
 
 		// Views API (deferred to here so agentAPI is available for the copilot)
-		var viewStore *views.ViewStore
-		if g.MongoClient != nil {
-			viewStore = views.NewViewStore(g.MongoClient)
-		}
+		viewStore := workerViewStore
 		viewCopilot := views.NewCopilot(g.s2Client, g.RedisClient, g.BackendRepo, g.storageClient, agentAPI, viewStore)
 		viewsGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/views")
 		viewsGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))

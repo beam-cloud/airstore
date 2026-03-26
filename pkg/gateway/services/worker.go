@@ -12,6 +12,9 @@ import (
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/scheduler"
 	"github.com/beam-cloud/airstore/pkg/types"
+	"github.com/beam-cloud/airstore/pkg/views"
+	viewbaml "github.com/beam-cloud/airstore/pkg/views/baml_client"
+	viewbamltypes "github.com/beam-cloud/airstore/pkg/views/baml_client/types"
 	pb "github.com/beam-cloud/airstore/proto"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
@@ -28,6 +31,7 @@ type WorkerService struct {
 	redisClient            *common.RedisClient
 	terminalIO             repository.TerminalIORepository
 	lifecycle              *orchestration.TaskLifecycle
+	viewStore              *views.ViewStore
 	claimLeaseTTL          time.Duration
 	unclaimedRunStaleAfter time.Duration
 	recoveryLoopEnabled    bool
@@ -49,6 +53,7 @@ func NewWorkerService(
 	taskQueue repository.TaskQueue,
 	redisClient *common.RedisClient,
 	schedulerConfig types.SchedulerConfig,
+	viewStore *views.ViewStore,
 ) *WorkerService {
 	claimLeaseTTL := schedulerConfig.RunClaimLeaseTTL
 	if claimLeaseTTL <= 0 {
@@ -85,6 +90,7 @@ func NewWorkerService(
 		redisClient:            redisClient,
 		terminalIO:             terminalIO,
 		lifecycle:              orchestration.NewTaskLifecycle(backend, orchStore, terminalIO),
+		viewStore:              viewStore,
 		claimLeaseTTL:          claimLeaseTTL,
 		unclaimedRunStaleAfter: unclaimedRunStaleAfter,
 		recoveryLoopEnabled:    schedulerConfig.RecoveryLoopEnabled,
@@ -766,8 +772,284 @@ func (s *WorkerService) CreateTaskOutput(ctx context.Context, req *pb.CreateTask
 		}
 		return nil, status.Errorf(codes.Internal, "create output: %v", err)
 	}
+
+	go s.enrichViewRows(context.Background(), output)
 	s.publishTaskUpdate(ctx, output.WorkspaceID, output.TaskID)
 	return &pb.CreateTaskOutputResponse{Id: output.ID}, nil
+}
+
+const (
+	enrichViewRowsTimeout     = 15 * time.Second
+	enrichViewRowsMaxExisting = 50
+)
+
+// enrichViewRows runs async BAML mapping on the gateway side after an output
+// is persisted. It loads schema contexts, fetches existing rows from MongoDB,
+// calls MapOutputToViewRow to decide enrich vs insert, then writes the result.
+func (s *WorkerService) enrichViewRows(ctx context.Context, output *types.TaskOutput) {
+	if s.viewStore == nil || !s.viewStore.Available() || s.backend == nil || output == nil {
+		return
+	}
+	if strings.TrimSpace(output.OutputType) == "" {
+		return
+	}
+
+	agentID := ""
+	if output.AgentID != nil {
+		agentID = strings.TrimSpace(*output.AgentID)
+	}
+	if agentID == "" {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, enrichViewRowsTimeout)
+	defer cancel()
+
+	contexts, err := types.LoadViewOutputSchemaContexts(ctx, s.backend, output.WorkspaceID, agentID)
+	if err != nil {
+		log.Warn().Err(err).Str("task_id", output.TaskID).Msg("enrichViewRows: failed to load schema contexts")
+		return
+	}
+	if len(contexts) == 0 {
+		return
+	}
+
+	for _, schemaCtx := range contexts {
+		if err := s.enrichViewRowsForContext(ctx, output, schemaCtx); err != nil {
+			log.Warn().Err(err).
+				Str("task_id", output.TaskID).
+				Str("view_id", schemaCtx.ViewID).
+				Str("sheet_id", schemaCtx.SheetID).
+				Msg("enrichViewRows: failed for context")
+		}
+	}
+}
+
+func (s *WorkerService) enrichViewRowsForContext(
+	ctx context.Context,
+	output *types.TaskOutput,
+	schemaCtx types.ViewOutputSchemaContext,
+) error {
+	if schemaCtx.ViewID == "" || schemaCtx.SheetID == "" || len(schemaCtx.Columns) == 0 {
+		return nil
+	}
+
+	if !outputMatchesSchemaContext(output, schemaCtx) {
+		return nil
+	}
+
+	existingRows, err := s.viewStore.GetRows(ctx, schemaCtx.ViewID, schemaCtx.SheetID, schemaCtx.ComponentID)
+	if err != nil {
+		return fmt.Errorf("load existing rows: %w", err)
+	}
+	if len(existingRows) > enrichViewRowsMaxExisting {
+		existingRows = existingRows[:enrichViewRowsMaxExisting]
+	}
+
+	columns := make([]viewbamltypes.ViewColumn, len(schemaCtx.Columns))
+	for i, c := range schemaCtx.Columns {
+		columns[i] = viewbamltypes.ViewColumn{Key: c.Key, Label: c.Label, Type: c.Type}
+	}
+
+	outputData := serializeOutputForBAML(output)
+	existingRowsJSON := serializeExistingRowsForBAML(existingRows)
+
+	summary := ""
+	if output.Summary != nil {
+		summary = *output.Summary
+	}
+
+	result, err := viewbaml.MapOutputToViewRow(
+		ctx,
+		schemaCtx.SheetName,
+		schemaCtx.ComponentTitle,
+		columns,
+		output.OutputType,
+		output.Title,
+		summary,
+		outputData,
+		existingRowsJSON,
+	)
+	if err != nil {
+		return fmt.Errorf("BAML MapOutputToViewRow: %w", err)
+	}
+
+	cells := make(map[string]string, len(result.Cells))
+	for _, cell := range result.Cells {
+		if cell.Column != "" && cell.Value != "" {
+			cells[cell.Column] = cell.Value
+		}
+	}
+	if len(cells) == 0 {
+		return nil
+	}
+
+	schemaHash := s.computeSchemaHash(ctx, output.WorkspaceID, schemaCtx)
+
+	switch result.Action {
+	case "enrich":
+		if result.Target_row_id == "" {
+			return nil
+		}
+		if err := s.viewStore.MergeCells(ctx, schemaCtx.ViewID, result.Target_row_id, cells, output.ID); err != nil {
+			return fmt.Errorf("merge cells: %w", err)
+		}
+		log.Info().
+			Str("task_id", output.TaskID).
+			Str("view_id", schemaCtx.ViewID).
+			Str("target_row", result.Target_row_id).
+			Int("cells", len(cells)).
+			Msg("enrichViewRows: enriched existing row")
+
+	default:
+		rowKey := result.Row_key
+		if rowKey == "" {
+			rowKey = "task"
+		}
+		rowID := fmt.Sprintf("%s:%s:%s:%s", schemaCtx.SheetID, schemaCtx.ComponentID, output.TaskID, rowKey)
+		row := views.ViewRow{
+			ID:              rowID,
+			SheetID:         schemaCtx.SheetID,
+			ComponentID:     schemaCtx.ComponentID,
+			GroupID:         output.TaskID,
+			TaskID:          output.TaskID,
+			RowKey:          rowKey,
+			SchemaHash:      schemaHash,
+			OutputIDs:       []string{output.ID},
+			OutputSignature: output.ID,
+			SourceOutputIDs: []string{output.ID},
+			Cells:           cells,
+			UpdatedAt:       time.Now(),
+		}
+		if err := s.viewStore.UpsertRows(ctx, schemaCtx.ViewID, []views.ViewRow{row}); err != nil {
+			return fmt.Errorf("insert row: %w", err)
+		}
+		log.Info().
+			Str("task_id", output.TaskID).
+			Str("view_id", schemaCtx.ViewID).
+			Str("row_id", rowID).
+			Int("cells", len(cells)).
+			Msg("enrichViewRows: inserted new row")
+	}
+
+	s.publishTaskUpdate(ctx, output.WorkspaceID, output.TaskID)
+	return nil
+}
+
+func outputMatchesSchemaContext(output *types.TaskOutput, ctx types.ViewOutputSchemaContext) bool {
+	ot := strings.TrimSpace(strings.ToLower(output.OutputType))
+	if ot == "" {
+		return false
+	}
+	if ctx.OutputType != "" && strings.TrimSpace(strings.ToLower(ctx.OutputType)) == ot {
+		return true
+	}
+	ak := ""
+	if output.Metadata != nil {
+		if v, ok := output.Metadata["artifact_key"].(string); ok {
+			ak = strings.TrimSpace(strings.ToLower(v))
+		}
+	}
+	if ctx.ArtifactKey != "" && ak != "" && strings.TrimSpace(strings.ToLower(ctx.ArtifactKey)) == ak {
+		return true
+	}
+	return ctx.OutputType == "" && ctx.ArtifactKey == ""
+}
+
+func serializeOutputForBAML(output *types.TaskOutput) string {
+	compact := map[string]any{
+		"id":          output.ID,
+		"output_type": output.OutputType,
+		"title":       output.Title,
+	}
+	if output.Summary != nil && *output.Summary != "" {
+		compact["summary"] = *output.Summary
+	}
+	if output.URI != nil && *output.URI != "" {
+		compact["uri"] = *output.URI
+	}
+	if len(output.Data) > 0 {
+		compact["data"] = output.Data
+	}
+	if output.Metadata != nil {
+		filtered := make(map[string]any)
+		for k, v := range output.Metadata {
+			if !strings.HasPrefix(k, "_") {
+				filtered[k] = v
+			}
+		}
+		if len(filtered) > 0 {
+			compact["metadata"] = filtered
+		}
+	}
+	b, err := json.Marshal(compact)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
+func serializeExistingRowsForBAML(rows []views.ViewRow) string {
+	if len(rows) == 0 {
+		return ""
+	}
+	type compactRow struct {
+		ID     string            `json:"_id"`
+		RowKey string            `json:"row_key"`
+		Cells  map[string]string `json:"cells"`
+	}
+	compact := make([]compactRow, 0, len(rows))
+	for _, r := range rows {
+		merged := r.MergedCells()
+		nonEmpty := make(map[string]string, len(merged))
+		for k, v := range merged {
+			if v != "" {
+				nonEmpty[k] = v
+			}
+		}
+		if len(nonEmpty) == 0 {
+			continue
+		}
+		compact = append(compact, compactRow{ID: r.ID, RowKey: r.RowKey, Cells: nonEmpty})
+	}
+	if len(compact) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(compact)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+func (s *WorkerService) computeSchemaHash(
+	ctx context.Context,
+	workspaceID uint,
+	schemaCtx types.ViewOutputSchemaContext,
+) string {
+	if s.backend == nil {
+		return ""
+	}
+	view, err := s.backend.GetView(ctx, workspaceID, schemaCtx.ViewID)
+	if err != nil || view == nil {
+		return ""
+	}
+	for _, sheet := range view.Definition.Sheets {
+		if sheet.ID != schemaCtx.SheetID {
+			continue
+		}
+		for _, comp := range sheet.Components {
+			if comp.ID == schemaCtx.ComponentID && comp.IsTable() {
+				return views.MappingSchemaHash(sheet, comp)
+			}
+		}
+		for _, comp := range sheet.Components {
+			if comp.IsTable() {
+				return views.MappingSchemaHash(sheet, comp)
+			}
+		}
+	}
+	return ""
 }
 
 func (s *WorkerService) AppendTaskOutputRows(ctx context.Context, req *pb.AppendTaskOutputRowsRequest) (*pb.AppendTaskOutputRowsResponse, error) {
