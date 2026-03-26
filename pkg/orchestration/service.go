@@ -1509,12 +1509,31 @@ func (s *AgentService) resolveRunAgentConfig(
 		agentConfig = s.agentConfigForRun(ctx, run)
 	}
 	agentConfig = cloneAnyMap(agentConfig)
+	namespaceWorkspaceDirByView(agentConfig, payload)
 	if skills := skillNamesFromConfig(agentConfig); len(skills) > 0 {
 		injectSkillsSection(agentConfig, skills)
 	} else {
 		strengthenSkillDirectives(agentConfig)
 	}
 	return agentConfig
+}
+
+// namespaceWorkspaceDirByView appends the source_view_id to the agent's
+// workspace_dir so each project gets its own isolated subdirectory. Tasks
+// without a source_view_id keep the default path for backward compat.
+func namespaceWorkspaceDirByView(agentConfig, payload map[string]any) {
+	viewID := strings.TrimSpace(stringFromPayload(payload, "source_view_id"))
+	if viewID == "" {
+		return
+	}
+	wd := strings.TrimSpace(stringFromPayload(agentConfig, agentConfigKeyWorkspaceDir))
+	if wd == "" || !strings.HasPrefix(wd, agentDefaultWorkspaceDirPrefix) {
+		return
+	}
+	if strings.Contains(wd, viewID) {
+		return
+	}
+	agentConfig[agentConfigKeyWorkspaceDir] = strings.TrimRight(wd, "/") + "/" + viewID
 }
 
 func skillNamesFromConfig(config map[string]any) []string {

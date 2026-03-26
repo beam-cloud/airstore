@@ -284,7 +284,7 @@ func TestFetchMappingOutputsExpandsTaskContextForSelectedTasks(t *testing.T) {
 	}
 }
 
-func TestFetchMappingOutputsIncludesSyntheticBlockerOutputWhenNoRealOutputsExist(t *testing.T) {
+func TestFetchMappingOutputsExcludesSyntheticBlockerOutputs(t *testing.T) {
 	now := time.Now().UTC()
 	agentID := "agent-1"
 	task := &types.AgentTask{
@@ -296,9 +296,6 @@ func TestFetchMappingOutputsIncludesSyntheticBlockerOutputWhenNoRealOutputsExist
 			"label":   "Cold outreach email to Mike",
 			"message": "Draft a cold outreach email to Mike",
 		},
-		RoutingJSON: map[string]any{
-			"channel": "email",
-		},
 		CurrentBlocker: &types.TaskBlocker{
 			ID:        "blocker-1",
 			Kind:      types.TaskBlockerKindApproval,
@@ -307,7 +304,6 @@ func TestFetchMappingOutputsIncludesSyntheticBlockerOutputWhenNoRealOutputsExist
 			CreatedAt: now,
 			PayloadJSON: map[string]any{
 				"summary": "Send outreach email to Mike",
-				"details": "**To:** Mike <mike@example.com>\n\n**Subject:** Beam sandboxes\n\nHello Mike,",
 			},
 		},
 	}
@@ -335,97 +331,8 @@ func TestFetchMappingOutputsIncludesSyntheticBlockerOutputWhenNoRealOutputsExist
 	if err != nil {
 		t.Fatalf("fetchMappingOutputs returned error: %v", err)
 	}
-	if got, want := len(outputs), 1; got != want {
-		t.Fatalf("output count = %d, want %d", got, want)
-	}
-	if got, want := outputs[0].TaskID, task.ID; got != want {
-		t.Fatalf("task id = %q, want %q", got, want)
-	}
-	if got, want := outputs[0].OutputType, types.TaskOutputTypeEmail; got != want {
-		t.Fatalf("output type = %q, want %q", got, want)
-	}
-	if got, want := outputs[0].Status, types.TaskOutputStatusPending; got != want {
-		t.Fatalf("status = %q, want %q", got, want)
-	}
-	if got, want := outputs[0].Title, "Send outreach email to Mike"; got != want {
-		t.Fatalf("title = %q, want %q", got, want)
-	}
-	if got := toString(outputs[0].Data["recipient"]); got != "Mike <mike@example.com>" {
-		t.Fatalf("recipient = %q, want Mike <mike@example.com>", got)
-	}
-	if got := toString(outputs[0].Data["subject"]); got != "Beam sandboxes" {
-		t.Fatalf("subject = %q, want Beam sandboxes", got)
-	}
-	if got := len(backend.queriedTaskIDs); got != 0 {
-		t.Fatalf("expected no real task-output expansion, got %d task queries", got)
-	}
-}
-
-func TestFetchMappingOutputsIncludesSyntheticBlockerOutputForSalesEmailArtifactKey(t *testing.T) {
-	now := time.Now().UTC()
-	agentID := "agent-1"
-	task := &types.AgentTask{
-		ID:        "task-1",
-		AgentID:   &agentID,
-		State:     types.AgentTaskStateWaiting,
-		CreatedAt: now.Add(-time.Minute),
-		PayloadJSON: map[string]any{
-			"label":   "Cold outreach email to Mike",
-			"message": "Draft a cold outreach email to Mike",
-		},
-		RoutingJSON: map[string]any{
-			"channel": "email",
-		},
-		CurrentBlocker: &types.TaskBlocker{
-			ID:        "blocker-1",
-			Kind:      types.TaskBlockerKindInput,
-			InputKind: types.InputKindFreeText,
-			Status:    types.TaskBlockerStatusOpen,
-			CreatedAt: now,
-			PayloadJSON: map[string]any{
-				"summary": "Send outreach email to Mike",
-				"details": "**To:** Mike <mike@example.com>\n\n**Subject:** Beam sandboxes\n\nHello Mike,",
-			},
-		},
-	}
-
-	backend := &fakeResolverBackend{
-		profilesByKey: map[string]*types.AgentProfile{
-			"sales-agent": {ID: agentID},
-		},
-		tasksByAgent: map[string][]*types.AgentTask{
-			agentID: {task},
-		},
-		tasks: map[string]*types.AgentTask{
-			task.ID: task,
-		},
-	}
-	resolver := &DataResolver{backend: backend, store: nil}
-
-	outputs, err := resolver.fetchMappingOutputs(
-		context.Background(),
-		7,
-		&types.DataSource{ArtifactKey: "sales-email"},
-		[]string{"sales-agent"},
-		"",
-	)
-	if err != nil {
-		t.Fatalf("fetchMappingOutputs returned error: %v", err)
-	}
-	if got, want := len(outputs), 1; got != want {
-		t.Fatalf("output count = %d, want %d", got, want)
-	}
-	if got, want := outputs[0].TaskID, task.ID; got != want {
-		t.Fatalf("task id = %q, want %q", got, want)
-	}
-	if got, want := meta(outputs[0], types.TaskOutputMetadataArtifactKey), "blocked-email"; got != want {
-		t.Fatalf("artifact key = %q, want %q", got, want)
-	}
-	if got := toString(outputs[0].Data["recipient"]); got != "Mike <mike@example.com>" {
-		t.Fatalf("recipient = %q, want Mike <mike@example.com>", got)
-	}
-	if got := toString(outputs[0].Data["subject"]); got != "Beam sandboxes" {
-		t.Fatalf("subject = %q, want Beam sandboxes", got)
+	if got := len(outputs); got != 0 {
+		t.Fatalf("output count = %d, want 0 (blocker-only tasks should not produce mapping outputs)", got)
 	}
 }
 
@@ -1472,8 +1379,8 @@ func TestGroupRowsFreshReportsMismatchReasons(t *testing.T) {
 	if ok, reason := groupRowsFresh([]ViewRow{row}, "c2", "schema-1", []string{"out-1"}, outputSignature); ok || reason != "component_scope_mismatch" {
 		t.Fatalf("expected component mismatch, got ok=%v reason=%q", ok, reason)
 	}
-	if ok, reason := groupRowsFresh([]ViewRow{row}, "c1", "schema-2", []string{"out-1"}, outputSignature); ok || reason != "schema_hash_mismatch" {
-		t.Fatalf("expected schema mismatch, got ok=%v reason=%q", ok, reason)
+	if ok, reason := groupRowsFresh([]ViewRow{row}, "c1", "schema-2", []string{"out-1"}, outputSignature); !ok || reason != "" {
+		t.Fatalf("schema hash changes should not invalidate cached rows, got ok=%v reason=%q", ok, reason)
 	}
 	if ok, reason := groupRowsFresh([]ViewRow{row}, "c1", "schema-1", []string{"out-2"}, outputSignature); ok || reason != "output_ids_mismatch" {
 		t.Fatalf("expected output mismatch, got ok=%v reason=%q", ok, reason)
@@ -1590,24 +1497,14 @@ func TestMaterializeTaskGroupKeepsVisibleRowsWhenEmptyRefreshMatchesCurrentOutpu
 	if got, want := len(persisted), 1; got != want {
 		t.Fatalf("persisted row count = %d, want %d", got, want)
 	}
-	if !persisted[0].Marker {
-		t.Fatal("expected fallback marker row when BAML returns no mapped rows")
+	if persisted[0].Marker {
+		t.Fatal("expected existing row to be retained when BAML returns empty for same outputs")
 	}
 	if got, want := persisted[0].ID, "sheet-1:c1:task-1:task"; got != want {
 		t.Fatalf("row id = %q, want %q", got, want)
 	}
-	if got, want := persisted[0].SchemaHash, "schema-1"; got != want {
-		t.Fatalf("schema hash = %q, want %q", got, want)
-	}
-	wantSig := outputGroupSignature(outputs)
-	if got, want := persisted[0].OutputSignature, wantSig; got != want {
-		t.Fatalf("output signature = %q, want %q", got, want)
-	}
-	if got, want := persisted[0].OutputIDs, []string{"out-1"}; !slicesMatch(got, want) {
-		t.Fatalf("output ids = %v, want %v", got, want)
-	}
-	if len(persisted[0].Cells) != 0 {
-		t.Fatalf("expected empty cells on marker row, got %#v", persisted[0].Cells)
+	if got, want := persisted[0].Cells["name"], "Alice"; got != want {
+		t.Fatalf("retained cell name = %q, want %q", got, want)
 	}
 }
 

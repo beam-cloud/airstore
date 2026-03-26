@@ -742,6 +742,7 @@ func (g *WorkspaceTasksGroup) CreateSchedule(c echo.Context) error {
 		Timezone   string   `json:"timezone"`
 		Prompt     string   `json:"prompt"`
 		SkillPaths []string `json:"skill_paths"`
+		ViewID     string   `json:"view_id"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return ErrorResponse(c, http.StatusBadRequest, "invalid request")
@@ -757,10 +758,15 @@ func (g *WorkspaceTasksGroup) CreateSchedule(c echo.Context) error {
 		return ErrorResponse(c, http.StatusNotFound, "agent not found")
 	}
 
+	var sourceViewID *string
+	if v := strings.TrimSpace(req.ViewID); v != "" {
+		sourceViewID = &v
+	}
+
 	st, err := g.agents.CreateSchedule(
 		ctx, workspaceID, agent.ID, req.CronExpr, req.Timezone, req.Prompt,
 		req.SkillPaths, ptrUint(auth.MemberId(ctx)), ptrUint(auth.TokenId(ctx)), nil,
-		nil,
+		sourceViewID,
 	)
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())

@@ -144,8 +144,9 @@ func (s *CronScheduler) fireSchedule(ctx context.Context, schedule *types.Schedu
 		InputProvenance: &InputProvenance{
 			Source: &source,
 		},
-		Label:     &label,
-		SpawnedBy: &spawnedBy,
+		Label:        &label,
+		SpawnedBy:    &spawnedBy,
+		SourceViewID: schedule.SourceViewID,
 	})
 	if err != nil {
 		if revertErr := s.revertAdvance(ctx, schedule, nextRun); revertErr != nil {
