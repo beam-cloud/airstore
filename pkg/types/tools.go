@@ -15,6 +15,7 @@ const (
 	Linear    IntegrationName = "linear"
 	PostHog     IntegrationName = "posthog"
 	Confluence  IntegrationName = "confluence"
+	Outlook     IntegrationName = "outlook"
 	Web         IntegrationName = "web"
 	Browser     IntegrationName = "browser"
 	ViewTool    IntegrationName = "view"

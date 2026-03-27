@@ -180,6 +180,19 @@ var integrations = map[IntegrationName]IntegrationMeta{
 			CapabilitySourceRead,
 		},
 	},
+	Outlook: {
+		Name:        Outlook,
+		DisplayName: "Outlook",
+		Description: "Email, calendar, and contacts",
+		Icon:        "mail-open",
+		AuthType:    AuthOAuth,
+		Scope:       ScopePersonal,
+		Capabilities: []IntegrationCapability{
+			CapabilitySourceRead,
+			CapabilitySourceWrite,
+		},
+		OAuthWriteScopeHint: []string{"https://graph.microsoft.com/Mail.ReadWrite"},
+	},
 	Web: {
 		Name:        Web,
 		DisplayName: "Web",

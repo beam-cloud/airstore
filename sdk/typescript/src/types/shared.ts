@@ -28,7 +28,8 @@ export type IntegrationType =
   | 'notion'
   | 'linear'
   | 'slack'
-  | 'posthog';
+  | 'posthog'
+  | 'outlook';
 
 /** Workspace member roles. */
 export type MemberRole = 'admin' | 'member' | 'viewer';

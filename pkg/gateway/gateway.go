@@ -158,6 +158,7 @@ func NewGateway() (*Gateway, error) {
 	oauthRegistry.Register(oauth.NewSlackProvider(config.OAuth.Slack, callbackURL))
 	oauthRegistry.Register(oauth.NewLinearProvider(config.OAuth.Linear, callbackURL))
 	oauthRegistry.Register(oauth.NewAtlassianProvider(config.OAuth.Atlassian, callbackURL))
+	oauthRegistry.Register(oauth.NewMicrosoftProvider(config.OAuth.Microsoft, callbackURL))
 
 	// Initialize S2 client for task log streaming if configured
 	var s2Client *common.S2Client
@@ -976,6 +977,7 @@ func (g *Gateway) initSources() {
 	g.sourceRegistry.Register(providers.NewPostHogProvider())
 	g.sourceRegistry.Register(providers.NewWebProvider(g.Config.Sources.Firecrawl.APIKey))
 	g.sourceRegistry.Register(providers.NewConfluenceProvider())
+	g.sourceRegistry.Register(providers.NewOutlookProvider())
 
 	log.Info().Strs("providers", g.sourceRegistry.List()).Msg("source providers registered")
 }
