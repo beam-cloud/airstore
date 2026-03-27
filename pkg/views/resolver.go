@@ -343,7 +343,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 			Bool("has_data_source", comp.DataSource != nil).
 			Msg("view: no task outputs resolved for component — checking for import rows")
 
-		importRows := r.loadAndMergeImportRows(ctx, viewID, sheet.ID, comp.ID, nil)
+		importRows := r.loadAndMergeImportRows(ctx, viewID, sheet.ID, comp.ID, nil, frozenColumnKeys(comp))
 		if len(importRows) > 0 {
 			log.Info().
 				Str("view_id", viewID).
@@ -361,7 +361,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 			Str("sheet_id", sheet.ID).
 			Msg("view: no column schema defined — skipping BAML mapping, returning import rows only")
 
-		importRows := r.loadAndMergeImportRows(ctx, viewID, sheet.ID, comp.ID, nil)
+		importRows := r.loadAndMergeImportRows(ctx, viewID, sheet.ID, comp.ID, nil, frozenColumnKeys(comp))
 		return &viewMappingResult{Rows: importRows, TaskMeta: map[string]*types.AgentTask{}}, nil
 	}
 
@@ -406,7 +406,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 	boundContext := r.fetchBoundTaskContext(ctx, workspaceID, resolvedRows)
 
 	if len(uncachedIDs) == 0 {
-		importRows := r.loadAndMergeImportRows(ctx, viewID, sheet.ID, comp.ID, resolvedRows)
+		importRows := r.loadAndMergeImportRows(ctx, viewID, sheet.ID, comp.ID, resolvedRows, frozenColumnKeys(comp))
 		resolvedRows = append(resolvedRows, importRows...)
 		enrichRowsWithOutputState(resolvedRows, allOutputs, boundContext, taskMeta)
 		sortResolvedRows(resolvedRows, taskMeta)
@@ -443,9 +443,10 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 		diagnosticsCache["deterministic_path"] = true
 	}
 
-	resolvedRows = deduplicateResolvedRows(resolvedRows, taskMeta)
+	frozKeys := frozenColumnKeys(comp)
+	resolvedRows = deduplicateResolvedRows(resolvedRows, taskMeta, frozKeys)
 
-	importRows := r.loadAndMergeImportRows(ctx, viewID, sheet.ID, comp.ID, resolvedRows)
+	importRows := r.loadAndMergeImportRows(ctx, viewID, sheet.ID, comp.ID, resolvedRows, frozKeys)
 	resolvedRows = append(resolvedRows, importRows...)
 
 	boundContext = r.fetchBoundTaskContext(ctx, workspaceID, resolvedRows)
@@ -458,7 +459,8 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 // enrichment from task-mapped rows that matched import row keys, and converts
 // them to resolvedSheetRows. Task-mapped rows that enriched an import row are
 // removed from the resolved set to prevent duplicates.
-func (r *DataResolver) loadAndMergeImportRows(ctx context.Context, viewID, sheetID, componentID string, taskRows []resolvedSheetRow) []resolvedSheetRow {
+// Matching uses RowKey first, then falls back to frozen column identity.
+func (r *DataResolver) loadAndMergeImportRows(ctx context.Context, viewID, sheetID, componentID string, taskRows []resolvedSheetRow, frozenKeys []string) []resolvedSheetRow {
 	if r.store == nil || !r.store.Available() {
 		return nil
 	}
@@ -486,20 +488,54 @@ func (r *DataResolver) loadAndMergeImportRows(ctx context.Context, viewID, sheet
 		importByRowKey[strings.TrimSpace(importRows[i].RowKey)] = &importRows[i]
 	}
 
+	importByFrozenKey := make(map[string]*ViewRow, len(importRows))
+	if len(frozenKeys) > 0 {
+		for i := range importRows {
+			fk := frozenCellKey(importRows[i].MergedCells(), frozenKeys)
+			if fk != "" {
+				importByFrozenKey[fk] = &importRows[i]
+			}
+		}
+	}
+
+	enrichImportRow := func(importRow *ViewRow, taskRow resolvedSheetRow) {
+		for colKey, val := range taskRow.Cells {
+			if val != "" {
+				if importRow.Cells == nil {
+					importRow.Cells = make(map[string]string)
+				}
+				importRow.Cells[colKey] = val
+			}
+		}
+		if taskRow.TaskID != "" {
+			importRow.TaskID = taskRow.TaskID
+		}
+	}
+
+	importByCellValue := buildImportCellIndex(importRows)
+
 	for i, taskRow := range taskRows {
+		if taskRow.Cells == nil {
+			continue
+		}
 		rowKey := strings.TrimSpace(taskRow.RowKey)
-		if importRow, ok := importByRowKey[rowKey]; ok {
-			for colKey, val := range taskRow.Cells {
-				if val != "" {
-					if importRow.Cells == nil {
-						importRow.Cells = make(map[string]string)
-					}
-					importRow.Cells[colKey] = val
+		if importRow, ok := importByRowKey[rowKey]; ok && rowKey != "" {
+			enrichImportRow(importRow, taskRow)
+			taskRows[i].Cells = nil
+			continue
+		}
+		if len(frozenKeys) > 0 {
+			fk := frozenCellKey(taskRow.Cells, frozenKeys)
+			if fk != "" {
+				if importRow, ok := importByFrozenKey[fk]; ok {
+					enrichImportRow(importRow, taskRow)
+					taskRows[i].Cells = nil
+					continue
 				}
 			}
-			if taskRow.TaskID != "" {
-				importRow.TaskID = taskRow.TaskID
-			}
+		}
+		if matched := matchImportRowByCellValues(taskRow.Cells, importByCellValue); matched != nil {
+			enrichImportRow(matched, taskRow)
 			taskRows[i].Cells = nil
 		}
 	}
@@ -1037,10 +1073,12 @@ func (r *DataResolver) listScopedOutputs(ctx context.Context, workspaceID uint, 
 	return dedupeOutputs(all), nil
 }
 
-// deduplicateResolvedRows removes cross-task duplicates by RowKey.
-// When two rows from different tasks share the same non-empty RowKey,
-// the row with more populated cells wins; ties broken by most recent task.
-func deduplicateResolvedRows(rows []resolvedSheetRow, taskMeta map[string]*types.AgentTask) []resolvedSheetRow {
+// deduplicateResolvedRows removes cross-task duplicates.
+// Pass 1: exact RowKey match (original behavior).
+// Pass 2: frozen column identity — rows with identical non-empty values in all
+// frozen columns are considered duplicates even if their RowKey differs.
+// Winner: most populated cells; tie-break: most recent task.
+func deduplicateResolvedRows(rows []resolvedSheetRow, taskMeta map[string]*types.AgentTask, frozenKeys []string) []resolvedSheetRow {
 	if len(rows) == 0 {
 		return rows
 	}
@@ -1048,40 +1086,144 @@ func deduplicateResolvedRows(rows []resolvedSheetRow, taskMeta map[string]*types
 		index     int
 		cellCount int
 	}
-	seen := make(map[string]entry, len(rows))
-	for i, row := range rows {
-		key := strings.TrimSpace(row.RowKey)
-		if key == "" || row.Source == "import" {
-			continue
-		}
+
+	countCells := func(row resolvedSheetRow) int {
 		cc := 0
 		for _, v := range row.Cells {
 			if strings.TrimSpace(v) != "" {
 				cc++
 			}
 		}
-		prev, exists := seen[key]
-		if !exists {
-			seen[key] = entry{index: i, cellCount: cc}
-			continue
-		}
+		return cc
+	}
+
+	pickWinner := func(rows []resolvedSheetRow, prevEntry entry, curIndex int, curCC int) (winnerIdx int, loserIdx int) {
 		keepNew := false
-		if cc > prev.cellCount {
+		if curCC > prevEntry.cellCount {
 			keepNew = true
-		} else if cc == prev.cellCount {
-			prevTask := taskMeta[rows[prev.index].TaskID]
-			curTask := taskMeta[row.TaskID]
+		} else if curCC == prevEntry.cellCount {
+			prevTask := taskMeta[rows[prevEntry.index].TaskID]
+			curTask := taskMeta[rows[curIndex].TaskID]
 			if prevTask != nil && curTask != nil && curTask.CreatedAt.After(prevTask.CreatedAt) {
 				keepNew = true
 			}
 		}
 		if keepNew {
-			rows[prev.index].Cells = nil
+			return curIndex, prevEntry.index
+		}
+		return prevEntry.index, curIndex
+	}
+
+	// Pass 1: exact RowKey dedup
+	seen := make(map[string]entry, len(rows))
+	for i, row := range rows {
+		if row.Cells == nil || row.Source == "import" {
+			continue
+		}
+		key := strings.TrimSpace(row.RowKey)
+		if key == "" {
+			continue
+		}
+		cc := countCells(row)
+		prev, exists := seen[key]
+		if !exists {
 			seen[key] = entry{index: i, cellCount: cc}
-		} else {
-			rows[i].Cells = nil
+			continue
+		}
+		winner, loser := pickWinner(rows, prev, i, cc)
+		mergeCellsInto(rows[winner].Cells, rows[loser].Cells)
+		rows[loser].Cells = nil
+		seen[key] = entry{index: winner, cellCount: countCells(rows[winner])}
+	}
+
+	// Pass 2: frozen column identity dedup
+	if len(frozenKeys) > 0 {
+		frozenSeen := make(map[string]entry, len(rows))
+		for i, row := range rows {
+			if row.Cells == nil || row.Source == "import" {
+				continue
+			}
+			fk := frozenCellKey(row.Cells, frozenKeys)
+			if fk == "" {
+				continue
+			}
+			cc := countCells(row)
+			prev, exists := frozenSeen[fk]
+			if !exists {
+				frozenSeen[fk] = entry{index: i, cellCount: cc}
+				continue
+			}
+			winner, loser := pickWinner(rows, prev, i, cc)
+			mergeCellsInto(rows[winner].Cells, rows[loser].Cells)
+			rows[loser].Cells = nil
+			frozenSeen[fk] = entry{index: winner, cellCount: countCells(rows[winner])}
 		}
 	}
+
+	// Pass 3: cell-value-based dedup — when no frozen keys, deduplicate rows
+	// from different tasks that share ≥2 column values (normalized).
+	if len(frozenKeys) == 0 {
+		type cellKey struct {
+			col string
+			val string
+		}
+		type rowRef struct {
+			index int
+			cells map[cellKey]struct{}
+		}
+		var refs []rowRef
+		for i, row := range rows {
+			if row.Cells == nil || row.Source == "import" {
+				continue
+			}
+			ck := make(map[cellKey]struct{}, len(row.Cells))
+			for k, v := range row.Cells {
+				nv := normalizeToken(v)
+				if nv != "" {
+					ck[cellKey{k, nv}] = struct{}{}
+				}
+			}
+			if len(ck) == 0 {
+				continue
+			}
+			refs = append(refs, rowRef{index: i, cells: ck})
+		}
+		for a := 0; a < len(refs); a++ {
+			if rows[refs[a].index].Cells == nil {
+				continue
+			}
+			for b := a + 1; b < len(refs); b++ {
+				if rows[refs[b].index].Cells == nil {
+					continue
+				}
+				overlap := 0
+				minCells := len(refs[a].cells)
+				if len(refs[b].cells) < minCells {
+					minCells = len(refs[b].cells)
+				}
+				threshold := 2
+				if minCells < threshold {
+					threshold = minCells
+				}
+				for ck := range refs[a].cells {
+					if _, ok := refs[b].cells[ck]; ok {
+						overlap++
+						if overlap >= threshold {
+							break
+						}
+					}
+				}
+				if overlap >= threshold && threshold > 0 {
+					ccA := countCells(rows[refs[a].index])
+					ccB := countCells(rows[refs[b].index])
+					winner, loser := pickWinner(rows, entry{index: refs[a].index, cellCount: ccA}, refs[b].index, ccB)
+					mergeCellsInto(rows[winner].Cells, rows[loser].Cells)
+					rows[loser].Cells = nil
+				}
+			}
+		}
+	}
+
 	deduped := make([]resolvedSheetRow, 0, len(rows))
 	for _, row := range rows {
 		if row.Cells != nil || row.Source == "import" {
@@ -1089,6 +1231,97 @@ func deduplicateResolvedRows(rows []resolvedSheetRow, taskMeta map[string]*types
 		}
 	}
 	return deduped
+}
+
+// frozenCellKey builds a dedup key from the normalized values of frozen columns.
+// Returns "" if no frozen column has a value (cannot deduplicate).
+func frozenCellKey(cells map[string]string, frozenKeys []string) string {
+	hasAny := false
+	var b strings.Builder
+	for i, key := range frozenKeys {
+		val := normalizeToken(cells[key])
+		if val != "" {
+			hasAny = true
+		}
+		if i > 0 {
+			b.WriteByte('\x00')
+		}
+		b.WriteString(val)
+	}
+	if !hasAny {
+		return ""
+	}
+	return b.String()
+}
+
+// mergeCellsInto copies non-empty cells from src into dst without overwriting existing values.
+func mergeCellsInto(dst, src map[string]string) {
+	for k, v := range src {
+		if v != "" && dst[k] == "" {
+			dst[k] = v
+		}
+	}
+}
+
+// importCellIndex maps column_key → normalizedValue → *ViewRow for cell-value-based matching.
+type importCellIndex map[string]map[string]*ViewRow
+
+func buildImportCellIndex(rows []ViewRow) importCellIndex {
+	idx := make(importCellIndex, 20)
+	for i := range rows {
+		for k, v := range rows[i].MergedCells() {
+			nv := normalizeToken(v)
+			if nv == "" {
+				continue
+			}
+			byVal, ok := idx[k]
+			if !ok {
+				byVal = make(map[string]*ViewRow, len(rows))
+				idx[k] = byVal
+			}
+			if _, collision := byVal[nv]; !collision {
+				byVal[nv] = &rows[i]
+			}
+		}
+	}
+	return idx
+}
+
+// matchImportRowByCellValues finds an import row sharing the most normalized
+// cell values with the task row. Requires overlap ≥ min(2, taskNonEmptyCells).
+func matchImportRowByCellValues(taskCells map[string]string, idx importCellIndex) *ViewRow {
+	hits := make(map[*ViewRow]int, 4)
+	nonEmpty := 0
+	for k, v := range taskCells {
+		nv := normalizeToken(v)
+		if nv == "" {
+			continue
+		}
+		nonEmpty++
+		byVal, ok := idx[k]
+		if !ok {
+			continue
+		}
+		if importRow, ok := byVal[nv]; ok {
+			hits[importRow]++
+		}
+	}
+	threshold := 2
+	if nonEmpty < threshold {
+		threshold = nonEmpty
+	}
+	if threshold < 1 {
+		return nil
+	}
+	var best *ViewRow
+	bestCount := 0
+	for row, count := range hits {
+		if count >= threshold && count > bestCount {
+			best = row
+			bestCount = count
+		}
+	}
+	return best
 }
 
 func dedupeTasks(tasks []*types.AgentTask) []*types.AgentTask {
@@ -1621,7 +1854,68 @@ func dedupeOutputs(all []*types.TaskOutput) []*types.TaskOutput {
 		deduped = append(deduped, o)
 	}
 	sortTaskOutputs(deduped)
+
+	deduped = collapseDraftSentPairs(deduped)
+
 	return deduped
+}
+
+// collapseDraftSentPairs removes draft outputs when a sent version with
+// the same title exists, avoiding showing both "Draft: ..." and "Sent: ..." for
+// the same email.
+func collapseDraftSentPairs(outputs []*types.TaskOutput) []*types.TaskOutput {
+	if len(outputs) < 2 {
+		return outputs
+	}
+
+	sentTitles := make(map[string]bool, len(outputs))
+	for _, o := range outputs {
+		if o.OutputType != types.TaskOutputTypeEmail {
+			continue
+		}
+		title := strings.ToLower(strings.TrimSpace(o.Title))
+		if strings.Contains(title, "draft") {
+			continue
+		}
+		sentTitles[title] = true
+	}
+
+	if len(sentTitles) == 0 {
+		return outputs
+	}
+
+	filtered := make([]*types.TaskOutput, 0, len(outputs))
+	for _, o := range outputs {
+		if o.OutputType == types.TaskOutputTypeEmail {
+			title := strings.ToLower(strings.TrimSpace(o.Title))
+			if isDraftTitle(title) {
+				canonical := stripDraftPrefix(title)
+				if sentTitles[canonical] {
+					continue
+				}
+			}
+		}
+		filtered = append(filtered, o)
+	}
+	return filtered
+}
+
+func isDraftTitle(title string) bool {
+	return strings.HasPrefix(title, "draft:") ||
+		strings.HasPrefix(title, "draft ") ||
+		strings.Contains(title, " draft")
+}
+
+func stripDraftPrefix(title string) string {
+	for _, prefix := range []string{"draft: ", "draft:", "draft "} {
+		if strings.HasPrefix(title, prefix) {
+			return strings.TrimSpace(title[len(prefix):])
+		}
+	}
+	if idx := strings.Index(title, " draft"); idx >= 0 {
+		return strings.TrimSpace(title[:idx] + title[idx+6:])
+	}
+	return title
 }
 
 func (r *DataResolver) fetchBoundTaskContext(ctx context.Context, workspaceID uint, rows []resolvedSheetRow) boundDetailContext {
@@ -2595,6 +2889,18 @@ type configColumn struct {
 	Format  string               `json:"format"`
 	Frozen  bool                 `json:"frozen"`
 	Options []types.StatusOption `json:"options"`
+}
+
+func frozenColumnKeys(comp types.ComponentSpec) []string {
+	cols := parseConfigColumns(comp.Config)
+	var keys []string
+	for _, col := range cols {
+		if col.Frozen && col.Key != "" {
+			keys = append(keys, col.Key)
+		}
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func parseConfigColumns(config map[string]any) []configColumn {

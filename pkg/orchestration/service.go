@@ -1776,6 +1776,7 @@ func (s *AgentService) createAttemptExecutionTask(
 	}
 	applyPayloadExecutionMetadata(executionPolicy, payload)
 	applyViewSchemaRuntimeContext(taskEnv, executionPolicy, viewSchemaContext)
+	applySourceViewIDEnv(taskEnv, payload)
 
 	execTask := &types.RunExecution{
 		WorkspaceId:       run.WorkspaceID,
@@ -2251,6 +2252,13 @@ func (s *AgentService) loadViewOutputSchemaContext(
 		contexts = contexts[:maxRuntimeViewSchemas]
 	}
 	return contexts
+}
+
+func applySourceViewIDEnv(env map[string]string, payload map[string]any) {
+	viewID := strings.TrimSpace(stringFromPayload(payload, "source_view_id"))
+	if viewID != "" && env != nil {
+		env["AIRSTORE_SOURCE_VIEW_ID"] = viewID
+	}
 }
 
 func applyViewSchemaRuntimeContext(

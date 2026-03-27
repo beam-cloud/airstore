@@ -981,6 +981,13 @@ func (g *Gateway) initTools() error {
 	clientRegistry.Register(toolclients.NewLinearClient())
 	log.Debug().Msg("oauth source integrations registered (connection-based)")
 
+	// View tool (no auth, uses workspace context from bearer token)
+	if g.MongoClient != nil {
+		viewStore := views.NewViewStore(g.MongoClient)
+		clientRegistry.Register(toolclients.NewViewClient(viewStore, g.BackendRepo))
+		log.Debug().Msg("view tool registered")
+	}
+
 	// Load tool definitions from embedded YAML files
 	// Schemas are matched to clients by name - unmatched schemas are skipped
 	loader := tools.NewLoader(clientRegistry)

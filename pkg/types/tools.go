@@ -17,6 +17,7 @@ const (
 	Confluence  IntegrationName = "confluence"
 	Web         IntegrationName = "web"
 	Browser     IntegrationName = "browser"
+	ViewTool    IntegrationName = "view"
 )
 
 func (n IntegrationName) String() string { return string(n) }

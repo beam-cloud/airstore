@@ -1,0 +1,171 @@
+name: view
+description: Read and update CRM view data (rows, cells) for the current task's source view
+icon: table
+
+commands:
+  list-sheets:
+    description: List all sheets and their table components with IDs, names, and column schemas
+    params:
+      - name: view_id
+        type: string
+        required: true
+        position: 0
+        description: "View ID (from AIRSTORE_SOURCE_VIEW_ID env var)"
+
+  get-schema:
+    description: Get the column schema for a specific table component
+    params:
+      - name: view_id
+        type: string
+        required: true
+        position: 0
+        description: "View ID (from AIRSTORE_SOURCE_VIEW_ID env var)"
+
+      - name: sheet_id
+        type: string
+        required: true
+        position: 1
+        description: "Sheet ID"
+
+      - name: component_id
+        type: string
+        required: true
+        position: 2
+        description: "Component ID"
+
+  list-rows:
+    description: List rows from a view sheet/component, showing only schema-defined columns
+    params:
+      - name: view_id
+        type: string
+        required: true
+        position: 0
+        description: "View ID (from AIRSTORE_SOURCE_VIEW_ID env var)"
+
+      - name: sheet_id
+        type: string
+        required: true
+        position: 1
+        description: "Sheet ID (e.g., 'sheet-1')"
+
+      - name: component_id
+        type: string
+        required: true
+        position: 2
+        description: "Component ID (e.g., 'c1')"
+
+      - name: limit
+        type: int
+        default: 50
+        short: -n
+        flag: --limit
+        description: "Maximum number of rows to return (1-200)"
+
+      - name: offset
+        type: int
+        default: 0
+        flag: --offset
+        description: "Number of rows to skip"
+
+  get-row:
+    description: Get a single row by ID with all schema-defined columns
+    params:
+      - name: view_id
+        type: string
+        required: true
+        position: 0
+        description: "View ID (from AIRSTORE_SOURCE_VIEW_ID env var)"
+
+      - name: row_id
+        type: string
+        required: true
+        position: 1
+        description: "Row ID"
+
+  update-row:
+    description: Update specific cells in an existing row
+    params:
+      - name: view_id
+        type: string
+        required: true
+        position: 0
+        description: "View ID (from AIRSTORE_SOURCE_VIEW_ID env var)"
+
+      - name: row_id
+        type: string
+        required: true
+        position: 1
+        description: "Row ID to update"
+
+      - name: cells
+        type: string
+        required: true
+        position: 2
+        description: "JSON object of column_key:value pairs to set (e.g., '{\"status\":\"sent\",\"last_contact\":\"2026-03-26\"}')"
+
+  add-row:
+    description: Insert a new row into a view sheet/component
+    params:
+      - name: view_id
+        type: string
+        required: true
+        position: 0
+        description: "View ID (from AIRSTORE_SOURCE_VIEW_ID env var)"
+
+      - name: sheet_id
+        type: string
+        required: true
+        position: 1
+        description: "Sheet ID (e.g., 'sheet-1')"
+
+      - name: component_id
+        type: string
+        required: true
+        position: 2
+        description: "Component ID (e.g., 'c1')"
+
+      - name: cells
+        type: string
+        required: true
+        position: 3
+        description: "JSON object of column_key:value pairs (e.g., '{\"property_address\":\"123 Main St\",\"city\":\"Portland\"}')"
+
+  find-rows:
+    description: Search rows where a column contains a value
+    params:
+      - name: view_id
+        type: string
+        required: true
+        position: 0
+        description: "View ID (from AIRSTORE_SOURCE_VIEW_ID env var)"
+
+      - name: column
+        type: string
+        required: true
+        position: 1
+        description: "Column key to search (e.g., 'owner_email', 'property_address')"
+
+      - name: value
+        type: string
+        required: true
+        position: 2
+        description: "Value to search for (case-insensitive substring match)"
+
+      - name: sheet_id
+        type: string
+        short: -s
+        flag: --sheet-id
+        description: "Sheet ID to search within (searches all sheets if omitted)"
+
+      - name: component_id
+        type: string
+        short: -c
+        flag: --component-id
+        description: "Component ID to search within"
+
+      - name: limit
+        type: int
+        default: 20
+        short: -n
+        flag: --limit
+        description: "Maximum number of matching rows to return"

@@ -42,6 +42,80 @@ func (s *StreamValue[TStream, TFinal]) Stream() *TStream {
 	return s.as_stream
 }
 
+// / Streaming version of ClassifyAffectedRows
+func (*stream) ClassifyAffectedRows(ctx context.Context, columns []types.ViewColumn, output_type string, output_title string, output_summary string, output_data string, existing_rows string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.AffectedRowsResult, types.AffectedRowsResult], error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"columns": columns, "output_type": output_type, "output_title": output_title, "output_summary": output_summary, "output_data": output_data, "existing_rows": existing_rows},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		// This should never happen. if it does, please file an issue at https://github.com/boundaryml/baml/issues
+		// and include the type of the args you're passing in.
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: ClassifyAffectedRows: %w", err)
+		panic(wrapped_err)
+	}
+
+	internal_channel, err := bamlRuntime.CallFunctionStream(ctx, "ClassifyAffectedRows", encoded, callOpts.onTick)
+	if err != nil {
+		return nil, err
+	}
+
+	channel := make(chan StreamValue[stream_types.AffectedRowsResult, types.AffectedRowsResult])
+	go func() {
+		for result := range internal_channel {
+			if result.Error != nil {
+				channel <- StreamValue[stream_types.AffectedRowsResult, types.AffectedRowsResult]{
+					IsError: true,
+					Error:   result.Error,
+				}
+				close(channel)
+				return
+			}
+			if result.HasData {
+				data := (result.Data).(types.AffectedRowsResult)
+				channel <- StreamValue[stream_types.AffectedRowsResult, types.AffectedRowsResult]{
+					IsFinal:  true,
+					as_final: &data,
+				}
+			} else {
+				data := (result.StreamData).(stream_types.AffectedRowsResult)
+				channel <- StreamValue[stream_types.AffectedRowsResult, types.AffectedRowsResult]{
+					IsFinal:   false,
+					as_stream: &data,
+				}
+			}
+		}
+
+		// when internal_channel is closed, close the output too
+		close(channel)
+	}()
+	return channel, nil
+}
+
 // / Streaming version of ClassifyDetailTemplate
 func (*stream) ClassifyDetailTemplate(ctx context.Context, table_title string, column_schema string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.DetailLayout, types.DetailLayout], error) {
 
@@ -190,80 +264,6 @@ func (*stream) MapImportColumns(ctx context.Context, sheet_name string, existing
 	return channel, nil
 }
 
-// / Streaming version of MapOutputToViewRow
-func (*stream) MapOutputToViewRow(ctx context.Context, sheet_name string, table_title string, columns []types.ViewColumn, output_type string, output_title string, output_summary string, output_data string, existing_rows string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.ViewRowMappingResult, types.ViewRowMappingResult], error) {
-
-	var callOpts callOption
-	for _, opt := range opts {
-		opt(&callOpts)
-	}
-
-	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"sheet_name": sheet_name, "table_title": table_title, "columns": columns, "output_type": output_type, "output_title": output_title, "output_summary": output_summary, "output_data": output_data, "existing_rows": existing_rows},
-		Env:    getEnvVars(callOpts.env),
-	}
-
-	if callOpts.clientRegistry != nil {
-		args.ClientRegistry = callOpts.clientRegistry
-	}
-
-	if callOpts.collectors != nil {
-		args.Collectors = callOpts.collectors
-	}
-
-	if callOpts.typeBuilder != nil {
-		args.TypeBuilder = callOpts.typeBuilder
-	}
-
-	if callOpts.tags != nil {
-		args.Tags = callOpts.tags
-	}
-
-	encoded, err := args.Encode()
-	if err != nil {
-		// This should never happen. if it does, please file an issue at https://github.com/boundaryml/baml/issues
-		// and include the type of the args you're passing in.
-		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: MapOutputToViewRow: %w", err)
-		panic(wrapped_err)
-	}
-
-	internal_channel, err := bamlRuntime.CallFunctionStream(ctx, "MapOutputToViewRow", encoded, callOpts.onTick)
-	if err != nil {
-		return nil, err
-	}
-
-	channel := make(chan StreamValue[stream_types.ViewRowMappingResult, types.ViewRowMappingResult])
-	go func() {
-		for result := range internal_channel {
-			if result.Error != nil {
-				channel <- StreamValue[stream_types.ViewRowMappingResult, types.ViewRowMappingResult]{
-					IsError: true,
-					Error:   result.Error,
-				}
-				close(channel)
-				return
-			}
-			if result.HasData {
-				data := (result.Data).(types.ViewRowMappingResult)
-				channel <- StreamValue[stream_types.ViewRowMappingResult, types.ViewRowMappingResult]{
-					IsFinal:  true,
-					as_final: &data,
-				}
-			} else {
-				data := (result.StreamData).(stream_types.ViewRowMappingResult)
-				channel <- StreamValue[stream_types.ViewRowMappingResult, types.ViewRowMappingResult]{
-					IsFinal:   false,
-					as_stream: &data,
-				}
-			}
-		}
-
-		// when internal_channel is closed, close the output too
-		close(channel)
-	}()
-	return channel, nil
-}
-
 // / Streaming version of MapOutputsToSchema
 func (*stream) MapOutputsToSchema(ctx context.Context, sheet_name string, table_title string, table_type string, columns []types.ColumnSchema, outputs_payload string, existing_rows string, excluded_rows string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.MappedResult, types.MappedResult], error) {
 
@@ -400,6 +400,80 @@ func (*stream) MapViewToWidget(ctx context.Context, sheet_name string, widget_ty
 			} else {
 				data := (result.StreamData).(stream_types.WidgetResult)
 				channel <- StreamValue[stream_types.WidgetResult, types.WidgetResult]{
+					IsFinal:   false,
+					as_stream: &data,
+				}
+			}
+		}
+
+		// when internal_channel is closed, close the output too
+		close(channel)
+	}()
+	return channel, nil
+}
+
+// / Streaming version of PopulateRowCells
+func (*stream) PopulateRowCells(ctx context.Context, columns []types.ViewColumn, output_type string, output_title string, output_summary string, output_data string, row_id string, row_cells string, entity_hint string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.PopulateRowResult, types.PopulateRowResult], error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"columns": columns, "output_type": output_type, "output_title": output_title, "output_summary": output_summary, "output_data": output_data, "row_id": row_id, "row_cells": row_cells, "entity_hint": entity_hint},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		// This should never happen. if it does, please file an issue at https://github.com/boundaryml/baml/issues
+		// and include the type of the args you're passing in.
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: PopulateRowCells: %w", err)
+		panic(wrapped_err)
+	}
+
+	internal_channel, err := bamlRuntime.CallFunctionStream(ctx, "PopulateRowCells", encoded, callOpts.onTick)
+	if err != nil {
+		return nil, err
+	}
+
+	channel := make(chan StreamValue[stream_types.PopulateRowResult, types.PopulateRowResult])
+	go func() {
+		for result := range internal_channel {
+			if result.Error != nil {
+				channel <- StreamValue[stream_types.PopulateRowResult, types.PopulateRowResult]{
+					IsError: true,
+					Error:   result.Error,
+				}
+				close(channel)
+				return
+			}
+			if result.HasData {
+				data := (result.Data).(types.PopulateRowResult)
+				channel <- StreamValue[stream_types.PopulateRowResult, types.PopulateRowResult]{
+					IsFinal:  true,
+					as_final: &data,
+				}
+			} else {
+				data := (result.StreamData).(stream_types.PopulateRowResult)
+				channel <- StreamValue[stream_types.PopulateRowResult, types.PopulateRowResult]{
 					IsFinal:   false,
 					as_stream: &data,
 				}

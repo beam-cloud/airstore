@@ -1614,7 +1614,7 @@ fi
 `
 
 const (
-	ptyDefaultPATH = "PATH=/home/sandbox/airstore-runners/.venv/bin:/home/sandbox/.npm-global/bin:/home/sandbox/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	ptyDefaultPATH = "PATH=/workspace/tools:/home/sandbox/airstore-runners/.venv/bin:/home/sandbox/.npm-global/bin:/home/sandbox/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 	ptyDefaultCols = "180"
 	ptyDefaultRows = "40"
 )

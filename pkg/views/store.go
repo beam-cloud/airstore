@@ -458,7 +458,7 @@ func (s *ViewStore) MergeCells(ctx context.Context, viewID, rowID string, newCel
 		}
 		setFields = append(setFields, bson.E{Key: fieldPath, Value: v})
 	}
-	if len(setFields) == 0 {
+	if len(setFields) == 0 && outputID == "" {
 		return nil
 	}
 	setFields = append(setFields, bson.E{Key: "updated_at", Value: time.Now()})
@@ -491,6 +491,34 @@ func (s *ViewStore) MergeCells(ctx context.Context, viewID, rowID string, newCel
 		Str("output_id", outputID).
 		Msg("view: merged cells into existing row")
 	return nil
+}
+
+// FindRowByKey looks up a row by its normalized row_key within a specific
+// sheet/component scope. Returns nil if not found.
+func (s *ViewStore) FindRowByKey(ctx context.Context, viewID, sheetID, componentID, rowKey string) (*ViewRow, error) {
+	if !s.Available() || rowKey == "" {
+		return nil, nil
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+	filter := bson.D{
+		{Key: "sheet_id", Value: sheetID},
+		{Key: "component_id", Value: componentID},
+		{Key: "row_key", Value: rowKey},
+	}
+	var row ViewRow
+	err := coll.FindOne(ctx, filter).Decode(&row)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("find row by key: %w", err)
+	}
+	return &row, nil
+}
+
+// NormalizeRowKey normalizes a row key for consistent dedup across tasks.
+func NormalizeRowKey(key string) string {
+	return normalizeToken(key)
 }
 
 // UpdateCells writes user-edited values into the manual overlay.

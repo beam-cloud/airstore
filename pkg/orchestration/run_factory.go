@@ -240,6 +240,7 @@ func (f *RunFactory) CreateAttemptExecutionTask(
 
 	viewSchemaContext := f.loadViewOutputSchemaContext(ctx, run.WorkspaceID, run.AgentID)
 	applyViewSchemaRuntimeContext(taskEnv, executionPolicy, viewSchemaContext)
+	applySourceViewIDEnv(taskEnv, payload)
 
 	execTask := &types.RunExecution{
 		WorkspaceId:       run.WorkspaceID,

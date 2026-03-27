@@ -779,13 +779,14 @@ func (s *WorkerService) CreateTaskOutput(ctx context.Context, req *pb.CreateTask
 }
 
 const (
-	enrichViewRowsTimeout     = 15 * time.Second
-	enrichViewRowsMaxExisting = 50
+	enrichViewRowsTimeout     = 60 * time.Second
+	enrichViewRowsMaxExisting = 200
+	enrichCellValueMaxLen     = 200
 )
 
 // enrichViewRows runs async BAML mapping on the gateway side after an output
-// is persisted. It loads schema contexts, fetches existing rows from MongoDB,
-// calls MapOutputToViewRow to decide enrich vs insert, then writes the result.
+// is persisted. It classifies which rows are affected, then populates cells
+// for each matched row (or inserts new ones for unmatched entities).
 func (s *WorkerService) enrichViewRows(ctx context.Context, output *types.TaskOutput) {
 	if s.viewStore == nil || !s.viewStore.Available() || s.backend == nil || output == nil {
 		return
@@ -842,78 +843,184 @@ func (s *WorkerService) enrichViewRowsForContext(
 	if err != nil {
 		return fmt.Errorf("load existing rows: %w", err)
 	}
+
+	sortRowsByUpdatedDesc(existingRows)
 	if len(existingRows) > enrichViewRowsMaxExisting {
 		existingRows = existingRows[:enrichViewRowsMaxExisting]
 	}
 
+	schemaColumnKeys := schemaCtx.ColumnKeys()
 	columns := make([]viewbamltypes.ViewColumn, len(schemaCtx.Columns))
 	for i, c := range schemaCtx.Columns {
 		columns[i] = viewbamltypes.ViewColumn{Key: c.Key, Label: c.Label, Type: c.Type}
 	}
 
 	outputData := serializeOutputForBAML(output)
-	existingRowsJSON := serializeExistingRowsForBAML(existingRows)
-
 	summary := ""
 	if output.Summary != nil {
 		summary = *output.Summary
 	}
 
-	result, err := viewbaml.MapOutputToViewRow(
+	// Step 1: Classify which rows are affected
+	classifyRowsJSON := serializeRowsForClassification(existingRows, schemaColumnKeys)
+
+	classification, err := viewbaml.ClassifyAffectedRows(
 		ctx,
-		schemaCtx.SheetName,
-		schemaCtx.ComponentTitle,
 		columns,
 		output.OutputType,
 		output.Title,
 		summary,
 		outputData,
-		existingRowsJSON,
+		classifyRowsJSON,
 	)
 	if err != nil {
-		return fmt.Errorf("BAML MapOutputToViewRow: %w", err)
+		return fmt.Errorf("BAML ClassifyAffectedRows: %w", err)
 	}
 
-	cells := make(map[string]string, len(result.Cells))
-	for _, cell := range result.Cells {
-		if cell.Column != "" && cell.Value != "" {
-			cells[cell.Column] = cell.Value
-		}
-	}
-	if len(cells) == 0 {
-		return nil
+	log.Info().
+		Str("task_id", output.TaskID).
+		Str("view_id", schemaCtx.ViewID).
+		Int("matched_rows", len(classification.Affected_row_ids)).
+		Int("unmatched_entities", len(classification.Unmatched_entities)).
+		Msg("enrichViewRows: classification complete")
+
+	rowIndex := make(map[string]*views.ViewRow, len(existingRows))
+	for i := range existingRows {
+		rowIndex[existingRows[i].ID] = &existingRows[i]
 	}
 
 	schemaHash := s.computeSchemaHash(ctx, output.WorkspaceID, schemaCtx)
+	updated := false
 
-	switch result.Action {
-	case "enrich":
-		if result.Target_row_id == "" {
-			return nil
+	// Step 2: Populate cells for each matched row
+	for _, rowID := range classification.Affected_row_ids {
+		row, ok := rowIndex[rowID]
+		if !ok {
+			log.Warn().Str("row_id", rowID).Msg("enrichViewRows: classified row not found")
+			continue
 		}
-		if err := s.viewStore.MergeCells(ctx, schemaCtx.ViewID, result.Target_row_id, cells, output.ID); err != nil {
-			return fmt.Errorf("merge cells: %w", err)
+		rowCellsJSON := serializeRowCellsFiltered(row, schemaColumnKeys)
+
+		populateResult, err := viewbaml.PopulateRowCells(
+			ctx,
+			columns,
+			output.OutputType,
+			output.Title,
+			summary,
+			outputData,
+			rowID,
+			rowCellsJSON,
+			"",
+		)
+		if err != nil {
+			log.Warn().Err(err).Str("row_id", rowID).Msg("enrichViewRows: PopulateRowCells failed")
+			continue
 		}
+
+		cells := extractNonEmptyCells(populateResult.Cells)
+
+		if err := s.viewStore.MergeCells(ctx, schemaCtx.ViewID, rowID, cells, output.ID); err != nil {
+			log.Warn().Err(err).Str("row_id", rowID).Msg("enrichViewRows: merge cells failed")
+			continue
+		}
+
 		log.Info().
 			Str("task_id", output.TaskID).
 			Str("view_id", schemaCtx.ViewID).
-			Str("target_row", result.Target_row_id).
+			Str("row_id", rowID).
 			Int("cells", len(cells)).
 			Msg("enrichViewRows: enriched existing row")
+		updated = true
+	}
 
-	default:
-		rowKey := result.Row_key
+	// Step 3: Insert new rows for unmatched entities
+	for _, entityHint := range classification.Unmatched_entities {
+		if strings.TrimSpace(entityHint) == "" {
+			continue
+		}
+
+		populateResult, err := viewbaml.PopulateRowCells(
+			ctx,
+			columns,
+			output.OutputType,
+			output.Title,
+			summary,
+			outputData,
+			"",
+			"",
+			entityHint,
+		)
+		if err != nil {
+			log.Warn().Err(err).Str("entity", entityHint).Msg("enrichViewRows: PopulateRowCells for insert failed")
+			continue
+		}
+
+		cells := extractNonEmptyCells(populateResult.Cells)
+		if len(cells) == 0 {
+			continue
+		}
+
+		if cellsHaveConcatenatedIdentity(cells, existingRows) {
+			log.Info().
+				Str("task_id", output.TaskID).
+				Str("entity", entityHint).
+				Msg("enrichViewRows: skipping insert — cells contain concatenated identity data")
+			continue
+		}
+
+		if match := findExistingRowByIdentityCells(existingRows, cells); match != nil {
+			if err := s.viewStore.MergeCells(ctx, schemaCtx.ViewID, match.ID, cells, output.ID); err != nil {
+				log.Warn().Err(err).Str("row_id", match.ID).Msg("enrichViewRows: merge into identity-matched row failed")
+				continue
+			}
+			for k, v := range cells {
+				if match.Cells == nil {
+					match.Cells = map[string]string{}
+				}
+				match.Cells[k] = v
+			}
+			log.Info().
+				Str("task_id", output.TaskID).
+				Str("view_id", schemaCtx.ViewID).
+				Str("row_id", match.ID).
+				Str("entity", entityHint).
+				Int("cells", len(cells)).
+				Msg("enrichViewRows: merged into existing row by identity cell match")
+			updated = true
+			continue
+		}
+
+		rowKey := populateResult.Row_key
 		if rowKey == "" {
 			rowKey = "task"
 		}
-		rowID := fmt.Sprintf("%s:%s:%s:%s", schemaCtx.SheetID, schemaCtx.ComponentID, output.TaskID, rowKey)
+		normalizedKey := views.NormalizeRowKey(rowKey)
+
+		existingRow, _ := s.viewStore.FindRowByKey(ctx, schemaCtx.ViewID, schemaCtx.SheetID, schemaCtx.ComponentID, normalizedKey)
+		if existingRow != nil {
+			if err := s.viewStore.MergeCells(ctx, schemaCtx.ViewID, existingRow.ID, cells, output.ID); err != nil {
+				log.Warn().Err(err).Str("row_id", existingRow.ID).Msg("enrichViewRows: merge into existing row by key failed")
+				continue
+			}
+			log.Info().
+				Str("task_id", output.TaskID).
+				Str("view_id", schemaCtx.ViewID).
+				Str("row_id", existingRow.ID).
+				Str("row_key", normalizedKey).
+				Int("cells", len(cells)).
+				Msg("enrichViewRows: merged into existing row found by key")
+			updated = true
+			continue
+		}
+
+		rowID := fmt.Sprintf("%s:%s:%s", schemaCtx.SheetID, schemaCtx.ComponentID, normalizedKey)
 		row := views.ViewRow{
 			ID:              rowID,
 			SheetID:         schemaCtx.SheetID,
 			ComponentID:     schemaCtx.ComponentID,
 			GroupID:         output.TaskID,
 			TaskID:          output.TaskID,
-			RowKey:          rowKey,
+			RowKey:          normalizedKey,
 			SchemaHash:      schemaHash,
 			OutputIDs:       []string{output.ID},
 			OutputSignature: output.ID,
@@ -922,18 +1029,138 @@ func (s *WorkerService) enrichViewRowsForContext(
 			UpdatedAt:       time.Now(),
 		}
 		if err := s.viewStore.UpsertRows(ctx, schemaCtx.ViewID, []views.ViewRow{row}); err != nil {
-			return fmt.Errorf("insert row: %w", err)
+			log.Warn().Err(err).Str("entity", entityHint).Msg("enrichViewRows: insert row failed")
+			continue
 		}
+
+		existingRows = append(existingRows, row)
+
 		log.Info().
 			Str("task_id", output.TaskID).
 			Str("view_id", schemaCtx.ViewID).
 			Str("row_id", rowID).
 			Int("cells", len(cells)).
 			Msg("enrichViewRows: inserted new row")
+		updated = true
 	}
 
-	s.publishTaskUpdate(ctx, output.WorkspaceID, output.TaskID)
+	if updated {
+		s.publishTaskUpdate(ctx, output.WorkspaceID, output.TaskID)
+	}
 	return nil
+}
+
+// trivialValues are short or generic strings that should not count as
+// identity overlap when comparing cells between a proposed row and existing rows.
+var trivialValues = map[string]bool{
+	"":      true,
+	"n/a":   true,
+	"new":   true,
+	"none":  true,
+	"true":  true,
+	"false": true,
+	"yes":   true,
+	"no":    true,
+	"sent":  true,
+	"draft": true,
+}
+
+// cellsHaveConcatenatedIdentity detects when a proposed row's cells aggregate
+// data from 2+ existing rows into a single cell value (e.g. multiple addresses
+// or names comma-separated). Schema-agnostic: compares against actual existing
+// row values instead of pattern matching.
+func cellsHaveConcatenatedIdentity(cells map[string]string, existingRows []views.ViewRow) bool {
+	for colKey, pVal := range cells {
+		if len(pVal) < 15 {
+			continue
+		}
+		pNorm := strings.ToLower(pVal)
+		matchedDistinctRows := 0
+		for i := range existingRows {
+			merged := existingRows[i].MergedCells()
+			eVal, ok := merged[colKey]
+			if !ok || len(eVal) < 4 {
+				continue
+			}
+			eNorm := strings.ToLower(strings.TrimSpace(eVal))
+			if trivialValues[eNorm] {
+				continue
+			}
+			if pNorm != eNorm && strings.Contains(pNorm, eNorm) {
+				matchedDistinctRows++
+			}
+		}
+		if matchedDistinctRows >= 2 {
+			return true
+		}
+	}
+	return false
+}
+
+// findExistingRowByCellOverlap finds the best existing row match based on
+// shared cell values across any column. Schema-agnostic — compares all
+// non-trivial cell values on matching column keys.
+func findExistingRowByIdentityCells(existingRows []views.ViewRow, proposedCells map[string]string) *views.ViewRow {
+	var bestRow *views.ViewRow
+	bestScore := 0
+
+	for i := range existingRows {
+		merged := existingRows[i].MergedCells()
+		score := 0
+
+		for colKey, pVal := range proposedCells {
+			if len(pVal) < 3 {
+				continue
+			}
+			eVal, ok := merged[colKey]
+			if !ok || len(eVal) < 3 {
+				continue
+			}
+
+			pNorm := strings.ToLower(strings.TrimSpace(pVal))
+			eNorm := strings.ToLower(strings.TrimSpace(eVal))
+
+			if trivialValues[pNorm] || trivialValues[eNorm] {
+				continue
+			}
+
+			if pNorm == eNorm {
+				score += 2
+			} else if len(eNorm) >= 5 && strings.Contains(pNorm, eNorm) {
+				score++
+			} else if len(pNorm) >= 5 && strings.Contains(eNorm, pNorm) {
+				score++
+			}
+		}
+
+		if score > bestScore {
+			bestScore = score
+			bestRow = &existingRows[i]
+		}
+	}
+
+	if bestScore >= 2 {
+		return bestRow
+	}
+	return nil
+}
+
+func extractNonEmptyCells(bamlCells []viewbamltypes.ViewCell) map[string]string {
+	cells := make(map[string]string, len(bamlCells))
+	for _, cell := range bamlCells {
+		if cell.Column != "" && cell.Value != "" {
+			cells[cell.Column] = cell.Value
+		}
+	}
+	return cells
+}
+
+func sortRowsByUpdatedDesc(rows []views.ViewRow) {
+	for i := 1; i < len(rows); i++ {
+		for j := i; j > 0 && rows[j].UpdatedAt.After(rows[j-1].UpdatedAt); j-- {
+			rows[j], rows[j-1] = rows[j-1], rows[j]
+		}
+	}
 }
 
 func outputMatchesSchemaContext(output *types.TaskOutput, ctx types.ViewOutputSchemaContext) bool {
@@ -989,28 +1216,42 @@ func serializeOutputForBAML(output *types.TaskOutput) string {
 	return string(b)
 }
 
-func serializeExistingRowsForBAML(rows []views.ViewRow) string {
+// serializeRowsForClassification produces a compact JSON array with only
+// identity-relevant columns (name, email, address, phone, etc.) plus the row
+// ID. This keeps the BAML prompt small so the classifier can handle 200+ rows.
+func serializeRowsForClassification(rows []views.ViewRow, schemaKeys []string) string {
 	if len(rows) == 0 {
 		return ""
 	}
+	schemaSet := make(map[string]struct{}, len(schemaKeys))
+	for _, k := range schemaKeys {
+		schemaSet[k] = struct{}{}
+	}
+
 	type compactRow struct {
-		ID     string            `json:"_id"`
-		RowKey string            `json:"row_key"`
-		Cells  map[string]string `json:"cells"`
+		ID    string            `json:"_id"`
+		Cells map[string]string `json:"cells"`
 	}
 	compact := make([]compactRow, 0, len(rows))
 	for _, r := range rows {
 		merged := r.MergedCells()
-		nonEmpty := make(map[string]string, len(merged))
+		filtered := make(map[string]string)
 		for k, v := range merged {
-			if v != "" {
-				nonEmpty[k] = v
+			if v == "" {
+				continue
 			}
+			if _, inSchema := schemaSet[k]; !inSchema && len(schemaSet) > 0 {
+				continue
+			}
+			if len(v) > enrichCellValueMaxLen {
+				v = v[:enrichCellValueMaxLen] + "..."
+			}
+			filtered[k] = v
 		}
-		if len(nonEmpty) == 0 {
+		if len(filtered) == 0 {
 			continue
 		}
-		compact = append(compact, compactRow{ID: r.ID, RowKey: r.RowKey, Cells: nonEmpty})
+		compact = append(compact, compactRow{ID: r.ID, Cells: filtered})
 	}
 	if len(compact) == 0 {
 		return ""
@@ -1018,6 +1259,37 @@ func serializeExistingRowsForBAML(rows []views.ViewRow) string {
 	b, err := json.Marshal(compact)
 	if err != nil {
 		return ""
+	}
+	return string(b)
+}
+
+// serializeRowCellsFiltered returns a JSON object of a single row's cells,
+// filtered to only schema-defined columns.
+func serializeRowCellsFiltered(row *views.ViewRow, schemaKeys []string) string {
+	if row == nil {
+		return "{}"
+	}
+	schemaSet := make(map[string]struct{}, len(schemaKeys))
+	for _, k := range schemaKeys {
+		schemaSet[k] = struct{}{}
+	}
+	merged := row.MergedCells()
+	filtered := make(map[string]string)
+	for k, v := range merged {
+		if v == "" {
+			continue
+		}
+		if _, inSchema := schemaSet[k]; !inSchema && len(schemaSet) > 0 {
+			continue
+		}
+		if len(v) > enrichCellValueMaxLen {
+			v = v[:enrichCellValueMaxLen] + "..."
+		}
+		filtered[k] = v
+	}
+	b, err := json.Marshal(filtered)
+	if err != nil {
+		return "{}"
 	}
 	return string(b)
 }
