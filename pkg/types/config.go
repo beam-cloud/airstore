@@ -30,6 +30,7 @@ type AppConfig struct {
 	Models      ModelsConfig      `key:"models" json:"models"`           // LLM provider API keys (BAML inference, sandbox tasks)
 	Compression CompressionConfig `key:"compression" json:"compression"` // Context compression middleware
 	Channels    ChannelsConfig    `key:"channels" json:"channels"`       // External channel provider credentials
+	View        ViewConfig        `key:"view" json:"view"`               // View sync thresholds and settings
 }
 
 // ModelsConfig centralises API keys for all LLM providers.
@@ -37,6 +38,7 @@ type AppConfig struct {
 type ModelsConfig struct {
 	Anthropic ModelProviderConfig `key:"anthropic" json:"anthropic"` // Claude models (smart queries, sandbox)
 	Cerebras  ModelProviderConfig `key:"cerebras" json:"cerebras"`   // Cerebras models (distillation)
+	OpenAI    ModelProviderConfig `key:"openai" json:"openai"`       // OpenAI models (embeddings)
 }
 
 // ModelProviderConfig holds credentials for a single LLM provider.
@@ -55,6 +57,11 @@ func (c *AppConfig) KernelAPIKey() string {
 // CerebrasAPIKey returns the Cerebras API key.
 func (c *AppConfig) CerebrasAPIKey() string {
 	return c.Models.Cerebras.APIKey
+}
+
+// OpenAIAPIKey returns the OpenAI API key (used for embeddings).
+func (c *AppConfig) OpenAIAPIKey() string {
+	return c.Models.OpenAI.APIKey
 }
 
 // StreamsConfig configures S2 stream storage for task logs
@@ -204,6 +211,33 @@ type GatewayConfig struct {
 	HTTP            HTTPConfig    `key:"http" json:"http"`
 	ShutdownTimeout time.Duration `key:"shutdownTimeout" json:"shutdown_timeout"`
 	AuthToken       string        `key:"authToken" json:"auth_token"`
+}
+
+type ViewConfig struct {
+	Sync ViewSyncConfig `key:"sync" json:"sync"`
+}
+
+type ViewSyncConfig struct {
+	HighMatchThreshold float64 `key:"highMatchThreshold" json:"high_match_threshold"`
+	ClassifyFloor      float64 `key:"classifyFloor" json:"classify_floor"`
+	VectorLimit        int     `key:"vectorLimit" json:"vector_limit"`
+	MinInsertCells     int     `key:"minInsertCells" json:"min_insert_cells"`
+}
+
+func (c ViewSyncConfig) WithDefaults() ViewSyncConfig {
+	if c.HighMatchThreshold <= 0 {
+		c.HighMatchThreshold = 0.87
+	}
+	if c.ClassifyFloor <= 0 {
+		c.ClassifyFloor = 0.50
+	}
+	if c.VectorLimit <= 0 {
+		c.VectorLimit = 20
+	}
+	if c.MinInsertCells <= 0 {
+		c.MinInsertCells = 3
+	}
+	return c
 }
 
 type GRPCConfig struct {

@@ -39,12 +39,13 @@ type SkillReader interface {
 }
 
 type Engine struct {
-	cache       hookCache
-	creator     TaskCreator
-	backend     repository.BackendRepository
-	store       repository.FilesystemStore
-	skillReader SkillReader
-	debounce    debouncer
+	cache           hookCache
+	creator         TaskCreator
+	backend         repository.BackendRepository
+	store           repository.FilesystemStore
+	skillReader     SkillReader
+	contextEnricher ContextEnricher
+	debounce        debouncer
 }
 
 func NewEngine(store repository.FilesystemStore, creator TaskCreator, backend repository.BackendRepository, skillReader SkillReader) *Engine {
@@ -83,6 +84,10 @@ func (eng *Engine) Handle(id string, data map[string]any) {
 }
 
 func (eng *Engine) InvalidateCache(wsId uint) { eng.cache.invalidate(wsId) }
+
+func (eng *Engine) SetContextEnricher(enricher ContextEnricher) {
+	eng.contextEnricher = enricher
+}
 
 func (eng *Engine) dispatchEvent(
 	eventID string,
@@ -163,28 +168,34 @@ func (eng *Engine) reconcileFilesystemEvent(ctx context.Context, event, path str
 
 // buildPrompt constructs a structured prompt for the Claude Code task.
 //
-// The prompt has three clearly separated sections:
-//  1. Trigger context  – what happened (event type, path, integration, items)
-//  2. Skill references – names + paths to SKILL.md files (not full contents)
-//  3. Task line        – user-provided extra instructions from the hook prompt
+// The prompt has up to four clearly separated sections:
+//  1. Trigger context    – what happened (event type, path, integration, items)
+//  2. Source content      – full message/thread content + attachment paths (if available)
+//  3. Skill references   – names + paths to SKILL.md files (not full contents)
+//  4. Task line           – user-provided extra instructions from the hook prompt
 func (eng *Engine) buildPrompt(ctx context.Context, h *types.Hook, event string, data map[string]any) string {
 	trigger := buildTriggerContext(event, data)
 
-	// --- Section 2: Skill references (if any) ---
+	sourceContent := ""
+	if eng.contextEnricher != nil {
+		if integration := strings.TrimSpace(mapString(data, "integration")); integration != "" {
+			sourceContent = eng.contextEnricher.FetchSourceContent(ctx, h.WorkspaceId, integration, data)
+		}
+	}
+
 	skillPaths := types.NormalizeSkillPaths(h.SkillPaths, h.SkillPath)
 	skillReferences := ""
 	if len(skillPaths) > 0 {
 		skillReferences = buildSkillReferences(ctx, eng.skillReader, h.WorkspaceId, skillPaths)
 	}
 
-	// --- Section 3: User task prompt ---
 	taskLine := ""
 	taskPrompt := strings.TrimSpace(h.Prompt)
 	if taskPrompt != "" {
 		taskLine = "Task: " + taskPrompt
 	}
 
-	return joinPromptSections(trigger, skillReferences, taskLine)
+	return joinPromptSections(trigger, sourceContent, skillReferences, taskLine)
 }
 
 // Start blocks until the engine context is cancelled.

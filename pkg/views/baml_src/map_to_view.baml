@@ -9,6 +9,16 @@ class ViewCell {
   value string @description("The value to set. Empty string means leave the existing value as-is.")
 }
 
+class SearchCriterion {
+  column string @description("Column key to search in")
+  value string @description("Search fragment — a name, address, email, ID, or other identifier. Keep short and specific.")
+}
+
+class RowSearchPlan {
+  criteria SearchCriterion[] @description("Identity values to search for in existing rows. Multiple criteria per entity is fine.")
+  entity_labels string[] @description("Brief label for each distinct top-level entity in the output, e.g. 'Kings County Imperial' or 'Inessa Romano'.")
+}
+
 class AffectedRowsResult {
   affected_row_ids string[] @description("IDs of existing rows this output is about.")
   unmatched_entities string[] @description("Brief label for each genuinely new entity not represented by any existing row. Almost always empty.")
@@ -103,6 +113,43 @@ function PopulateRowCells(
     - Empty string "" → preserve whatever is already stored (use when the output has nothing new).
     - Identity fields (name, address, email): keep existing unless the output corrects them.
     - Dates: ISO 8601 (YYYY-MM-DD). Links: full URL. Status: infer from context.
+
+    {{ ctx.output_format }}
+  "#
+}
+
+function PlanRowSearch(
+  columns: ViewColumn[],
+  output_type: string,
+  output_title: string,
+  output_summary: string,
+  output_data: string
+) -> RowSearchPlan {
+  client FastMappingClient
+  prompt #"
+    Extract search terms to find existing table rows related to a task output.
+
+    SCHEMA:
+    {% for col in columns %}
+    - {{ col.label }} [{{ col.key }}] ({{ col.type }})
+    {% endfor %}
+
+    OUTPUT:
+    Type: {{ output_type }} | Title: {{ output_title }}
+    Summary: {{ output_summary }}
+    Data: {{ output_data }}
+
+    INSTRUCTIONS:
+    1. Identify each distinct top-level entity in the output (person, property,
+       company, product, restaurant — whatever the primary record type is).
+    2. For each entity, extract identity values: name, address, email, phone,
+       URL, ID — whatever uniquely identifies it in the table.
+    3. Map each value to the schema column it belongs in. One entity may have
+       multiple criteria (e.g. name + address).
+    4. Values should be concise search fragments, not full sentences.
+       "708 1st St" not "708 1st St, Napa, CA 94559".
+       "Inessa Romano" not "Broker Inessa Romano".
+    5. Return entity_labels with one brief name per entity.
 
     {{ ctx.output_format }}
   "#

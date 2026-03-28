@@ -30,6 +30,7 @@ type WorkerService struct {
 	terminalIO             repository.TerminalIORepository
 	lifecycle              *orchestration.TaskLifecycle
 	viewStore              *views.ViewStore
+	viewSync               *views.ViewSync
 	claimLeaseTTL          time.Duration
 	unclaimedRunStaleAfter time.Duration
 	recoveryLoopEnabled    bool
@@ -52,6 +53,7 @@ func NewWorkerService(
 	redisClient *common.RedisClient,
 	schedulerConfig types.SchedulerConfig,
 	viewStore *views.ViewStore,
+	viewSync *views.ViewSync,
 ) *WorkerService {
 	claimLeaseTTL := schedulerConfig.RunClaimLeaseTTL
 	if claimLeaseTTL <= 0 {
@@ -89,6 +91,7 @@ func NewWorkerService(
 		terminalIO:             terminalIO,
 		lifecycle:              orchestration.NewTaskLifecycle(backend, orchStore, terminalIO),
 		viewStore:              viewStore,
+		viewSync:               viewSync,
 		claimLeaseTTL:          claimLeaseTTL,
 		unclaimedRunStaleAfter: unclaimedRunStaleAfter,
 		recoveryLoopEnabled:    schedulerConfig.RecoveryLoopEnabled,
@@ -771,7 +774,13 @@ func (s *WorkerService) CreateTaskOutput(ctx context.Context, req *pb.CreateTask
 		return nil, status.Errorf(codes.Internal, "create output: %v", err)
 	}
 
-	go s.enrichViewRows(context.Background(), output)
+	if s.viewSync != nil {
+		if result := s.viewSync.Sync(ctx, output); result != nil && !result.Skipped {
+			if len(result.Updated) > 0 || len(result.Created) > 0 {
+				s.publishTaskUpdate(ctx, output.WorkspaceID, output.TaskID)
+			}
+		}
+	}
 	s.publishTaskUpdate(ctx, output.WorkspaceID, output.TaskID)
 	return &pb.CreateTaskOutputResponse{Id: output.ID}, nil
 }

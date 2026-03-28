@@ -391,6 +391,80 @@ func MapViewToWidget(ctx context.Context, sheet_name string, widget_type string,
 	}
 }
 
+func PlanRowSearch(ctx context.Context, columns []types.ViewColumn, output_type string, output_title string, output_summary string, output_data string, opts ...CallOptionFunc) (types.RowSearchPlan, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	// Resolve client option to clientRegistry (client takes precedence)
+	if callOpts.client != nil {
+		if callOpts.clientRegistry == nil {
+			callOpts.clientRegistry = baml.NewClientRegistry()
+		}
+		callOpts.clientRegistry.SetPrimaryClient(*callOpts.client)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"columns": columns, "output_type": output_type, "output_title": output_title, "output_summary": output_summary, "output_data": output_data},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		panic(err)
+	}
+
+	if callOpts.onTick == nil {
+		result, err := bamlRuntime.CallFunction(ctx, "PlanRowSearch", encoded, callOpts.onTick)
+		if err != nil {
+			return types.RowSearchPlan{}, err
+		}
+
+		if result.Error != nil {
+			return types.RowSearchPlan{}, result.Error
+		}
+
+		casted := (result.Data).(types.RowSearchPlan)
+
+		return casted, nil
+	} else {
+		channel, err := bamlRuntime.CallFunctionStream(ctx, "PlanRowSearch", encoded, callOpts.onTick)
+		if err != nil {
+			return types.RowSearchPlan{}, err
+		}
+
+		for result := range channel {
+			if result.Error != nil {
+				return types.RowSearchPlan{}, result.Error
+			}
+
+			if result.HasData {
+				return result.Data.(types.RowSearchPlan), nil
+			}
+		}
+
+		return types.RowSearchPlan{}, fmt.Errorf("No data returned from stream")
+	}
+}
+
 func PopulateRowCells(ctx context.Context, columns []types.ViewColumn, output_type string, output_title string, output_summary string, output_data string, row_id string, row_cells string, entity_hint string, opts ...CallOptionFunc) (types.PopulateRowResult, error) {
 
 	var callOpts callOption

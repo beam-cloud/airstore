@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"io"
 	"sort"
-	"strings"
-	"time"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/repository"
@@ -351,13 +349,13 @@ func (c *ViewClient) updateRow(ctx context.Context, viewID string, args map[stri
 		return WriteToolError(stdout, "cells object is empty")
 	}
 
-	if err := c.store.MergeCells(ctx, viewID, rowID, cells, ""); err != nil {
+	if err := c.store.UpdateRow(ctx, viewID, rowID, cells, ""); err != nil {
 		return WriteToolError(stdout, fmt.Sprintf("failed to update row: %v", err))
 	}
 
 	return WriteJSON(stdout, map[string]any{
-		"ok":           true,
-		"row_id":       rowID,
+		"ok":            true,
+		"row_id":        rowID,
 		"cells_updated": len(cells),
 	})
 }
@@ -378,62 +376,17 @@ func (c *ViewClient) addRow(ctx context.Context, viewID string, args map[string]
 		return WriteToolError(stdout, "cells object is empty")
 	}
 
-	rowKey := views.NormalizeRowKey(deriveRowKeyFromCells(cells))
-	if rowKey == "" {
-		rowKey = fmt.Sprintf("agent-%d", time.Now().UnixMilli())
-	}
-
-	existing, _ := c.store.FindRowByKey(ctx, viewID, sheetID, componentID, rowKey)
-	if existing != nil {
-		if err := c.store.MergeCells(ctx, viewID, existing.ID, cells, ""); err != nil {
-			return WriteToolError(stdout, fmt.Sprintf("row with key %q already exists, merge failed: %v", rowKey, err))
-		}
-		return WriteJSON(stdout, map[string]any{
-			"ok":           true,
-			"row_id":       existing.ID,
-			"row_key":      rowKey,
-			"merged":       true,
-			"cells_updated": len(cells),
-		})
-	}
-
-	rowID := fmt.Sprintf("%s:%s:%s", sheetID, componentID, rowKey)
-	row := views.ViewRow{
-		ID:          rowID,
-		SheetID:     sheetID,
-		ComponentID: componentID,
-		RowKey:      rowKey,
-		Cells:       cells,
-		UpdatedAt:   time.Now(),
-	}
-	if err := c.store.UpsertRows(ctx, viewID, []views.ViewRow{row}); err != nil {
-		return WriteToolError(stdout, fmt.Sprintf("failed to insert row: %v", err))
+	rowID, created, err := c.store.UpsertRow(ctx, viewID, sheetID, componentID, cells, views.UpsertOpts{})
+	if err != nil {
+		return WriteToolError(stdout, fmt.Sprintf("failed to upsert row: %v", err))
 	}
 
 	return WriteJSON(stdout, map[string]any{
 		"ok":      true,
 		"row_id":  rowID,
-		"row_key": rowKey,
+		"created": created,
 		"cells":   len(cells),
 	})
-}
-
-func deriveRowKeyFromCells(cells map[string]string) string {
-	for _, key := range []string{"property_address", "name", "email", "title", "id"} {
-		if v := strings.TrimSpace(cells[key]); v != "" {
-			return v
-		}
-	}
-	var vals []string
-	for _, v := range cells {
-		if v = strings.TrimSpace(v); v != "" {
-			vals = append(vals, v)
-			if len(vals) >= 2 {
-				break
-			}
-		}
-	}
-	return strings.Join(vals, "-")
 }
 
 func (c *ViewClient) findRows(ctx context.Context, viewID string, workspaceID uint, args map[string]any, stdout io.Writer) error {
@@ -444,33 +397,17 @@ func (c *ViewClient) findRows(ctx context.Context, viewID string, workspaceID ui
 	}
 
 	sheetID := GetStringArg(args, "sheet_id", "")
-	componentID := GetStringArg(args, "component_id", "")
 	limit := GetIntArg(args, "limit", 20)
 	if limit > viewMaxFindLimit {
 		limit = viewMaxFindLimit
 	}
 
-	allRows, err := c.store.GetRows(ctx, viewID, sheetID, componentID)
+	matched, err := c.store.FindRows(ctx, viewID, sheetID, column, value, limit)
 	if err != nil {
-		return WriteToolError(stdout, fmt.Sprintf("failed to load rows: %v", err))
+		return WriteToolError(stdout, fmt.Sprintf("failed to find rows: %v", err))
 	}
 
-	valueLower := strings.ToLower(value)
-	var matched []views.ViewRow
-	for _, row := range allRows {
-		merged := row.MergedCells()
-		cellVal, ok := merged[column]
-		if !ok {
-			continue
-		}
-		if strings.Contains(strings.ToLower(cellVal), valueLower) {
-			matched = append(matched, row)
-			if len(matched) >= limit {
-				break
-			}
-		}
-	}
-
+	componentID := GetStringArg(args, "component_id", "")
 	var schemaCols map[string]string
 	if sheetID != "" && componentID != "" {
 		schemaCols = c.schemaColumns(ctx, workspaceID, viewID, sheetID, componentID)

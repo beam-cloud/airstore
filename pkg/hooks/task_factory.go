@@ -25,8 +25,9 @@ type SourceWatchFinder interface {
 
 // TaskFactory bridges hook events into the agent orchestration pipeline.
 type TaskFactory struct {
-	agents             *orchestration.AgentAPI
-	sourceWatchFinder  SourceWatchFinder
+	agents            *orchestration.AgentAPI
+	sourceWatchFinder SourceWatchFinder
+	contextEnricher   ContextEnricher
 }
 
 func NewTaskFactory(_ repository.BackendRepository, _ repository.TaskQueue, _ string, agents *orchestration.AgentAPI) *TaskFactory {
@@ -36,6 +37,12 @@ func NewTaskFactory(_ repository.BackendRepository, _ repository.TaskQueue, _ st
 func (f *TaskFactory) SetSourceWatchFinder(finder SourceWatchFinder) {
 	if f != nil {
 		f.sourceWatchFinder = finder
+	}
+}
+
+func (f *TaskFactory) SetContextEnricher(enricher ContextEnricher) {
+	if f != nil {
+		f.contextEnricher = enricher
 	}
 }
 
@@ -167,6 +174,14 @@ func (f *TaskFactory) routeToSleepingTasks(ctx context.Context, hook *types.Hook
 		matchedKeys[match.CorrelationKey] = struct{}{}
 
 		wakePrompt := buildSourceWakePrompt(match, integration, newItems)
+		if f.contextEnricher != nil {
+			if content := f.contextEnricher.FetchSourceContent(ctx, match.WorkspaceID, integration, data); content != "" {
+				wakePrompt = wakePrompt + "\n\n" + content
+			}
+			if viewRows := f.contextEnricher.FetchViewRows(ctx, match.WorkspaceID, match.TaskID); viewRows != "" {
+				wakePrompt = wakePrompt + "\n\n" + viewRows
+			}
+		}
 		wakeIdempotency := fmt.Sprintf("source_wake:%s:%s:%s",
 			match.TaskID, match.CorrelationKey, anyToString(data["new_items_hash"]))
 
