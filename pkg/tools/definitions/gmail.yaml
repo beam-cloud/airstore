@@ -1,8 +1,42 @@
 name: gmail
-description: Write operations for Gmail
+description: Read and write operations for Gmail
 icon: mail
 
 commands:
+  search:
+    description: Search Gmail messages using standard Gmail search syntax
+    params:
+      - name: query
+        type: string
+        required: true
+        position: 0
+        description: "Gmail search query (e.g. 'from:someone subject:hello', 'is:unread', 'newer_than:7d')"
+
+      - name: limit
+        type: int
+        default: 10
+        short: -n
+        flag: --limit
+        description: "Maximum number of results (1-50)"
+
+  get-thread:
+    description: Read a full email thread by thread ID
+    params:
+      - name: thread_id
+        type: string
+        required: true
+        position: 0
+        description: "Gmail thread ID"
+
+  get-message:
+    description: Read a single email message by message ID
+    params:
+      - name: message_id
+        type: string
+        required: true
+        position: 0
+        description: "Gmail message ID"
+
   create-draft:
     description: Create a Gmail draft email
     params:

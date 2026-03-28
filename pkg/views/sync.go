@@ -355,9 +355,9 @@ func (vs *ViewSync) upsertRow(
 	return true
 }
 
-// insertRows creates new row(s) from an output. Attempts single-entity
-// insert first; if the result is concatenated, decomposes via PlanRowSearch
-// and inserts one row per entity.
+// insertRows creates new row(s) from an output. Checks for multi-entity
+// content first via PlanRowSearch to avoid silently dropping entities when
+// the LLM cleanly extracts just one from a multi-entity output.
 func (vs *ViewSync) insertRows(
 	ctx context.Context,
 	output *types.TaskOutput,
@@ -373,7 +373,33 @@ func (vs *ViewSync) insertRows(
 		SchemaHash: schemaHash,
 	}
 
-	// Try single-entity insert.
+	// Check for multi-entity content first so we don't lose entities when
+	// PopulateRowCells cleanly picks just one from a batch output.
+	plan, planErr := viewbaml.PlanRowSearch(ctx, cols, output.OutputType, output.Title, summary, data)
+	if planErr == nil && len(plan.Entity_labels) >= 2 {
+		log.Info().
+			Str("task_id", output.TaskID).
+			Int("entities", len(plan.Entity_labels)).
+			Strs("labels", plan.Entity_labels).
+			Msg("viewsync: decomposing multi-entity output")
+
+		var created []string
+		for _, entity := range plan.Entity_labels {
+			rowID, ok, err := vs.tryInsertEntity(ctx, output, sc, cols, data, summary, entity, opts)
+			if err != nil {
+				return created, err
+			}
+			if ok {
+				created = append(created, rowID)
+			}
+		}
+		if len(created) > 0 {
+			return created, nil
+		}
+	}
+
+	// Single-entity path: either PlanRowSearch found only 1 entity, or
+	// decomposition produced nothing usable.
 	rowID, ok, err := vs.tryInsertEntity(ctx, output, sc, cols, data, summary, "", opts)
 	if err != nil {
 		return nil, err
@@ -381,31 +407,7 @@ func (vs *ViewSync) insertRows(
 	if ok {
 		return []string{rowID}, nil
 	}
-
-	// Single insert failed (concatenated or too sparse). Decompose into
-	// individual entities.
-	plan, planErr := viewbaml.PlanRowSearch(ctx, cols, output.OutputType, output.Title, summary, data)
-	if planErr != nil || len(plan.Entity_labels) < 2 {
-		return nil, nil
-	}
-
-	log.Info().
-		Str("task_id", output.TaskID).
-		Int("entities", len(plan.Entity_labels)).
-		Strs("labels", plan.Entity_labels).
-		Msg("viewsync: decomposing multi-entity output")
-
-	var created []string
-	for _, entity := range plan.Entity_labels {
-		rowID, ok, err := vs.tryInsertEntity(ctx, output, sc, cols, data, summary, entity, opts)
-		if err != nil {
-			return created, err
-		}
-		if ok {
-			created = append(created, rowID)
-		}
-	}
-	return created, nil
+	return nil, nil
 }
 
 // tryInsertEntity populates cells for a single entity and inserts it via
