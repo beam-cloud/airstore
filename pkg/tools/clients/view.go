@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"sort"
+	"time"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/beam-cloud/airstore/pkg/views"
+	"github.com/rs/zerolog/log"
 )
 
 const (
@@ -30,10 +33,11 @@ const (
 type ViewClient struct {
 	store   *views.ViewStore
 	backend repository.BackendRepository
+	sync    *views.ViewSync
 }
 
-func NewViewClient(store *views.ViewStore, backend repository.BackendRepository) *ViewClient {
-	return &ViewClient{store: store, backend: backend}
+func NewViewClient(store *views.ViewStore, backend repository.BackendRepository, sync *views.ViewSync) *ViewClient {
+	return &ViewClient{store: store, backend: backend, sync: sync}
 }
 
 func (c *ViewClient) Name() types.IntegrationName {
@@ -69,9 +73,9 @@ func (c *ViewClient) Execute(ctx context.Context, command string, args map[strin
 	case viewCmdGetRow:
 		return c.getRow(ctx, viewID, workspaceID, args, stdout)
 	case viewCmdUpdateRow:
-		return c.updateRow(ctx, viewID, args, stdout)
+		return c.updateRow(ctx, viewID, workspaceID, args, stdout)
 	case viewCmdAddRow:
-		return c.addRow(ctx, viewID, args, stdout)
+		return c.addRow(ctx, viewID, workspaceID, args, stdout)
 	case viewCmdFindRows:
 		return c.findRows(ctx, viewID, workspaceID, args, stdout)
 	default:
@@ -334,7 +338,7 @@ func (c *ViewClient) getRow(ctx context.Context, viewID string, workspaceID uint
 	return c.writeRows(stdout, []views.ViewRow{*row}, schemaCols)
 }
 
-func (c *ViewClient) updateRow(ctx context.Context, viewID string, args map[string]any, stdout io.Writer) error {
+func (c *ViewClient) updateRow(ctx context.Context, viewID string, workspaceID uint, args map[string]any, stdout io.Writer) error {
 	rowID := GetStringArg(args, "row_id", "")
 	cellsJSON := GetStringArg(args, "cells", "")
 	if rowID == "" || cellsJSON == "" {
@@ -353,14 +357,41 @@ func (c *ViewClient) updateRow(ctx context.Context, viewID string, args map[stri
 		return WriteToolError(stdout, fmt.Sprintf("failed to update row: %v", err))
 	}
 
-	return WriteJSON(stdout, map[string]any{
+	resp := map[string]any{
 		"ok":            true,
 		"row_id":        rowID,
 		"cells_updated": len(cells),
-	})
+	}
+
+	// Temporary diagnostic
+	if f, err := os.OpenFile("/tmp/viewsync-debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+		fmt.Fprintf(f, "[%s] updateRow: sync=%v viewID=%s rowID=%s wksp=%d\n",
+			time.Now().Format(time.RFC3339), c.sync != nil, viewID, rowID, workspaceID)
+		f.Close()
+	}
+
+	if c.sync != nil {
+		row, err := c.store.GetRowByID(ctx, viewID, rowID)
+		if err == nil && row != nil {
+			sr := c.sync.SyncToolWrite(ctx, views.ToolWriteInput{
+				ViewID:            viewID,
+				WorkspaceID:       workspaceID,
+				SourceSheetID:     row.SheetID,
+				SourceComponentID: row.ComponentID,
+				Cells:             row.MergedCells(),
+				RowID:             rowID,
+			})
+			if sr != nil {
+				resp["cross_sheet_updated"] = len(sr.Updated)
+				resp["cross_sheet_created"] = len(sr.Created)
+			}
+		}
+	}
+
+	return WriteJSON(stdout, resp)
 }
 
-func (c *ViewClient) addRow(ctx context.Context, viewID string, args map[string]any, stdout io.Writer) error {
+func (c *ViewClient) addRow(ctx context.Context, viewID string, workspaceID uint, args map[string]any, stdout io.Writer) error {
 	sheetID := GetStringArg(args, "sheet_id", "")
 	componentID := GetStringArg(args, "component_id", "")
 	cellsJSON := GetStringArg(args, "cells", "")
@@ -376,17 +407,99 @@ func (c *ViewClient) addRow(ctx context.Context, viewID string, args map[string]
 		return WriteToolError(stdout, "cells object is empty")
 	}
 
-	rowID, created, err := c.store.UpsertRow(ctx, viewID, sheetID, componentID, cells, views.UpsertOpts{})
+	rowID, created, matchedExisting, err := c.smartUpsertRow(ctx, viewID, sheetID, componentID, cells)
 	if err != nil {
 		return WriteToolError(stdout, fmt.Sprintf("failed to upsert row: %v", err))
 	}
 
-	return WriteJSON(stdout, map[string]any{
-		"ok":      true,
-		"row_id":  rowID,
-		"created": created,
-		"cells":   len(cells),
-	})
+	resp := map[string]any{
+		"ok":               true,
+		"row_id":           rowID,
+		"created":          created,
+		"matched_existing": matchedExisting,
+		"cells":            len(cells),
+	}
+
+	if c.sync != nil {
+		sr := c.sync.SyncToolWrite(ctx, views.ToolWriteInput{
+			ViewID:            viewID,
+			WorkspaceID:       workspaceID,
+			SourceSheetID:     sheetID,
+			SourceComponentID: componentID,
+			Cells:             cells,
+			RowID:             rowID,
+		})
+		if sr != nil {
+			resp["cross_sheet_updated"] = len(sr.Updated)
+			resp["cross_sheet_created"] = len(sr.Created)
+		}
+	}
+
+	return WriteJSON(stdout, resp)
+}
+
+// smartUpsertRow uses vector search to find semantically matching rows on the
+// target sheet before inserting. If a high-confidence match is found, the
+// existing row is updated instead of creating a duplicate.
+// Returns (rowID, created, matchedExisting, error).
+func (c *ViewClient) smartUpsertRow(
+	ctx context.Context,
+	viewID, sheetID, componentID string,
+	cells map[string]string,
+) (string, bool, bool, error) {
+	ec := c.store.Embedder()
+	if ec == nil || !ec.Available() {
+		rowID, created, err := c.store.UpsertRow(ctx, viewID, sheetID, componentID, cells, views.UpsertOpts{})
+		return rowID, created, false, err
+	}
+
+	tempRow := &views.ViewRow{Cells: cells}
+	searchText := views.RowSearchText(tempRow)
+	if searchText == "" {
+		rowID, created, err := c.store.UpsertRow(ctx, viewID, sheetID, componentID, cells, views.UpsertOpts{})
+		return rowID, created, false, err
+	}
+
+	_ = c.store.EnsureVectorIndex(ctx, viewID, ec.Dims())
+
+	queryVec, err := ec.EmbedOne(ctx, searchText)
+	if err != nil {
+		log.Debug().Err(err).Msg("view-tool: embed failed, falling back to content-hash upsert")
+		rowID, created, err := c.store.UpsertRow(ctx, viewID, sheetID, componentID, cells, views.UpsertOpts{})
+		return rowID, created, false, err
+	}
+
+	results, err := c.store.VectorSearch(ctx, viewID, sheetID, queryVec, 5)
+	if err != nil {
+		log.Debug().Err(err).Msg("view-tool: vector search failed, falling back")
+		rowID, created, err := c.store.UpsertRow(ctx, viewID, sheetID, componentID, cells, views.UpsertOpts{})
+		return rowID, created, false, err
+	}
+
+	threshold := 0.87
+	if c.sync != nil {
+		threshold = c.sync.HighMatchThreshold()
+	}
+
+	for _, r := range results {
+		if r.Score >= threshold {
+			if err := c.store.UpdateRow(ctx, viewID, r.ID, cells, ""); err != nil {
+				log.Warn().Err(err).Str("row_id", r.ID).Msg("view-tool: merge into matched row failed")
+				continue
+			}
+			log.Info().
+				Str("view_id", viewID).
+				Str("sheet_id", sheetID).
+				Str("row_id", r.ID).
+				Float64("score", r.Score).
+				Int("cells", len(cells)).
+				Msg("view-tool: merged into existing row via vector search")
+			return r.ID, false, true, nil
+		}
+	}
+
+	rowID, created, err := c.store.UpsertRow(ctx, viewID, sheetID, componentID, cells, views.UpsertOpts{})
+	return rowID, created, false, err
 }
 
 func (c *ViewClient) findRows(ctx context.Context, viewID string, workspaceID uint, args map[string]any, stdout io.Writer) error {

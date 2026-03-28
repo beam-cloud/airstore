@@ -341,16 +341,31 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 			Str("component_id", comp.ID).
 			Strs("view_agent_refs", opts.ViewAgentRefs).
 			Bool("has_data_source", comp.DataSource != nil).
-			Msg("view: no task outputs resolved for component — checking for import rows")
+			Msg("view: no task outputs resolved for component — checking for stored rows")
 
-		importRows := r.loadAndMergeImportRows(ctx, viewID, sheet.ID, comp.ID, nil, frozenColumnKeys(comp))
-		if len(importRows) > 0 {
+		storedRows, _ := r.loadStoredRowsAndExclusions(ctx, viewID, sheet.ID, comp.ID)
+		if len(storedRows) > 0 {
+			var resolved []resolvedSheetRow
+			for _, row := range storedRows {
+				src := row.Source
+				if src == "" {
+					src = RowSourceSync
+				}
+				resolved = append(resolved, resolvedSheetRow{
+					TaskID:    row.TaskID,
+					RowID:     row.ID,
+					StableRef: row.StableRef,
+					RowKey:    row.RowKey,
+					Source:    src,
+					Cells:     row.MergedCells(),
+				})
+			}
 			log.Info().
 				Str("view_id", viewID).
 				Str("sheet_id", sheet.ID).
-				Int("import_rows", len(importRows)).
-				Msg("view: returning import rows (no task outputs)")
-			return &viewMappingResult{Rows: importRows, TaskMeta: map[string]*types.AgentTask{}}, nil
+				Int("stored_rows", len(resolved)).
+				Msg("view: returning stored rows (no task outputs)")
+			return &viewMappingResult{Rows: resolved, TaskMeta: map[string]*types.AgentTask{}}, nil
 		}
 		return &viewMappingResult{Rows: nil, TaskMeta: map[string]*types.AgentTask{}}, nil
 	}
@@ -406,6 +421,7 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 	boundContext := r.fetchBoundTaskContext(ctx, workspaceID, resolvedRows)
 
 	if len(uncachedIDs) == 0 {
+		resolvedRows = append(resolvedRows, ungroupedStoredRows(existingRows, taskGroups)...)
 		importRows := r.loadAndMergeImportRows(ctx, viewID, sheet.ID, comp.ID, resolvedRows, frozenColumnKeys(comp))
 		resolvedRows = append(resolvedRows, importRows...)
 		enrichRowsWithOutputState(resolvedRows, allOutputs, boundContext, taskMeta)
@@ -443,6 +459,8 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 		diagnosticsCache["deterministic_path"] = true
 	}
 
+	resolvedRows = append(resolvedRows, ungroupedStoredRows(existingRows, taskGroups)...)
+
 	frozKeys := frozenColumnKeys(comp)
 	resolvedRows = deduplicateResolvedRows(resolvedRows, taskMeta, frozKeys)
 
@@ -465,7 +483,7 @@ func (r *DataResolver) loadAndMergeImportRows(ctx context.Context, viewID, sheet
 		return nil
 	}
 
-	importRows, err := r.store.GetRowsBySource(ctx, viewID, sheetID, componentID, "import")
+	importRows, err := r.store.GetRowsBySource(ctx, viewID, sheetID, componentID, RowSourceImport)
 	if err != nil {
 		log.Warn().Err(err).
 			Str("view_id", viewID).Str("sheet_id", sheetID).Str("component_id", componentID).
@@ -547,7 +565,7 @@ func (r *DataResolver) loadAndMergeImportRows(ctx context.Context, viewID, sheet
 			RowID:     row.ID,
 			StableRef: row.StableRef,
 			RowKey:    row.RowKey,
-			Source:    "import",
+			Source:    RowSourceImport,
 			Cells:     row.MergedCells(),
 		})
 	}
@@ -606,6 +624,35 @@ func groupViewRowsByGroup(rows []ViewRow) map[string][]ViewRow {
 		grouped[groupID] = append(grouped[groupID], row)
 	}
 	return grouped
+}
+
+// ungroupedStoredRows returns stored rows whose group_id doesn't match any
+// task in taskGroups and that aren't import rows (import rows are handled
+// separately by loadAndMergeImportRows). These are typically rows created by
+// cross-sheet sync or the view tool.
+func ungroupedStoredRows(stored []ViewRow, taskGroups map[string][]*types.TaskOutput) []resolvedSheetRow {
+	var result []resolvedSheetRow
+	for _, row := range stored {
+		if row.IsImport() {
+			continue
+		}
+		if _, matched := taskGroups[row.GroupID]; matched {
+			continue
+		}
+		src := row.Source
+		if src == "" {
+			src = RowSourceSync
+		}
+		result = append(result, resolvedSheetRow{
+			TaskID:    row.TaskID,
+			RowID:     row.ID,
+			StableRef: row.StableRef,
+			RowKey:    row.RowKey,
+			Source:    src,
+			Cells:     row.MergedCells(),
+		})
+	}
+	return result
 }
 
 func groupOutputsByTask(outputs []*types.TaskOutput) map[string][]*types.TaskOutput {
@@ -695,7 +742,7 @@ func (r *DataResolver) mapTaskGroupsWithBAML(
 
 	var importRows []ViewRow
 	if r.store != nil && r.store.Available() {
-		importRows, _ = r.store.GetRowsBySource(ctx, viewID, sheet.ID, comp.ID, "import")
+		importRows, _ = r.store.GetRowsBySource(ctx, viewID, sheet.ID, comp.ID, RowSourceImport)
 	}
 
 	var allRows []bamltypes.MappedRow
@@ -1117,7 +1164,7 @@ func deduplicateResolvedRows(rows []resolvedSheetRow, taskMeta map[string]*types
 	// Pass 1: exact RowKey dedup
 	seen := make(map[string]entry, len(rows))
 	for i, row := range rows {
-		if row.Cells == nil || row.Source == "import" {
+		if row.Cells == nil || row.Source == RowSourceImport {
 			continue
 		}
 		key := strings.TrimSpace(row.RowKey)
@@ -1140,7 +1187,7 @@ func deduplicateResolvedRows(rows []resolvedSheetRow, taskMeta map[string]*types
 	if len(frozenKeys) > 0 {
 		frozenSeen := make(map[string]entry, len(rows))
 		for i, row := range rows {
-			if row.Cells == nil || row.Source == "import" {
+			if row.Cells == nil || row.Source == RowSourceImport {
 				continue
 			}
 			fk := frozenCellKey(row.Cells, frozenKeys)
@@ -1161,7 +1208,9 @@ func deduplicateResolvedRows(rows []resolvedSheetRow, taskMeta map[string]*types
 	}
 
 	// Pass 3: cell-value-based dedup — when no frozen keys, deduplicate rows
-	// from different tasks that share ≥2 column values (normalized).
+	// from different tasks that share a majority of column values (normalized).
+	// Threshold scales with the smaller row's populated cell count to avoid
+	// false merges on generic values (e.g. state + status).
 	if len(frozenKeys) == 0 {
 		type cellKey struct {
 			col string
@@ -1173,7 +1222,7 @@ func deduplicateResolvedRows(rows []resolvedSheetRow, taskMeta map[string]*types
 		}
 		var refs []rowRef
 		for i, row := range rows {
-			if row.Cells == nil || row.Source == "import" {
+			if row.Cells == nil || row.Source == RowSourceImport {
 				continue
 			}
 			ck := make(map[cellKey]struct{}, len(row.Cells))
@@ -1196,15 +1245,18 @@ func deduplicateResolvedRows(rows []resolvedSheetRow, taskMeta map[string]*types
 				if rows[refs[b].index].Cells == nil {
 					continue
 				}
-				overlap := 0
 				minCells := len(refs[a].cells)
 				if len(refs[b].cells) < minCells {
 					minCells = len(refs[b].cells)
 				}
-				threshold := 2
-				if minCells < threshold {
-					threshold = minCells
+				threshold := (minCells + 1) / 2
+				if threshold < 3 {
+					threshold = 3
 				}
+				if minCells < threshold {
+					continue
+				}
+				overlap := 0
 				for ck := range refs[a].cells {
 					if _, ok := refs[b].cells[ck]; ok {
 						overlap++
@@ -1213,7 +1265,7 @@ func deduplicateResolvedRows(rows []resolvedSheetRow, taskMeta map[string]*types
 						}
 					}
 				}
-				if overlap >= threshold && threshold > 0 {
+				if overlap >= threshold {
 					ccA := countCells(rows[refs[a].index])
 					ccB := countCells(rows[refs[b].index])
 					winner, loser := pickWinner(rows, entry{index: refs[a].index, cellCount: ccA}, refs[b].index, ccB)
@@ -1226,7 +1278,7 @@ func deduplicateResolvedRows(rows []resolvedSheetRow, taskMeta map[string]*types
 
 	deduped := make([]resolvedSheetRow, 0, len(rows))
 	for _, row := range rows {
-		if row.Cells != nil || row.Source == "import" {
+		if row.Cells != nil || row.Source == RowSourceImport {
 			deduped = append(deduped, row)
 		}
 	}

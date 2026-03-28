@@ -27,26 +27,6 @@ func skipOutput(output *types.TaskOutput) bool {
 	return false
 }
 
-func matchesSchema(output *types.TaskOutput, sc types.ViewOutputSchemaContext) bool {
-	ot := strings.TrimSpace(strings.ToLower(output.OutputType))
-	if ot == "" {
-		return false
-	}
-	if sc.OutputType != "" && strings.TrimSpace(strings.ToLower(sc.OutputType)) == ot {
-		return true
-	}
-	ak := ""
-	if output.Metadata != nil {
-		if v, ok := output.Metadata["artifact_key"].(string); ok {
-			ak = strings.TrimSpace(strings.ToLower(v))
-		}
-	}
-	if sc.ArtifactKey != "" && ak != "" && strings.TrimSpace(strings.ToLower(sc.ArtifactKey)) == ak {
-		return true
-	}
-	return sc.OutputType == "" && sc.ArtifactKey == ""
-}
-
 func bamlColumns(sc types.ViewOutputSchemaContext) []viewbamltypes.ViewColumn {
 	out := make([]viewbamltypes.ViewColumn, len(sc.Columns))
 	for i, c := range sc.Columns {
@@ -65,13 +45,96 @@ func extractCells(baml []viewbamltypes.ViewCell) map[string]string {
 	return out
 }
 
-func isConcatenated(cells map[string]string) bool {
-	for _, v := range cells {
-		if strings.Count(v, ";") >= 2 {
-			return true
+func buildSearchCriteria(plan *viewbamltypes.RowSearchPlan) []SearchCriterion {
+	var criteria []SearchCriterion
+	if plan != nil {
+		for _, c := range plan.Criteria {
+			criteria = append(criteria, SearchCriterion{
+				Column: strings.TrimSpace(c.Column),
+				Value:  strings.TrimSpace(c.Value),
+			})
 		}
 	}
-	return false
+	return dedupeSearchCriteria(criteria)
+}
+
+func entityHints(plan *viewbamltypes.RowSearchPlan, preferred []string) []string {
+	if len(preferred) > 0 {
+		return dedupeStrings(preferred)
+	}
+	if plan == nil {
+		return nil
+	}
+	return dedupeStrings(plan.Entity_labels)
+}
+
+const maxVectorQueries = 6
+
+func vectorQueryTexts(
+	criteria []SearchCriterion,
+	hints []string,
+	outputType, title, summary, data string,
+) []string {
+	queries := []string{OutputSearchText(outputType, title, summary, data)}
+	for _, hint := range hints {
+		queries = append(queries, hint)
+	}
+	for _, c := range criteria {
+		value := strings.TrimSpace(c.Value)
+		if value == "" {
+			continue
+		}
+		if col := strings.TrimSpace(c.Column); col != "" {
+			queries = append(queries, col+": "+value)
+		} else {
+			queries = append(queries, value)
+		}
+	}
+	deduped := dedupeStrings(queries)
+	if len(deduped) > maxVectorQueries {
+		deduped = deduped[:maxVectorQueries]
+	}
+	return deduped
+}
+
+func dedupeSearchCriteria(criteria []SearchCriterion) []SearchCriterion {
+	out := make([]SearchCriterion, 0, len(criteria))
+	seen := map[string]struct{}{}
+	for _, c := range criteria {
+		column := strings.TrimSpace(c.Column)
+		value := strings.TrimSpace(c.Value)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(column) + "|" + NormalizeRowKey(value)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, SearchCriterion{Column: column, Value: value})
+	}
+	return out
+}
+
+func dedupeStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		key := NormalizeRowKey(value)
+		if key == "" {
+			key = strings.ToLower(value)
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func safeDeref(s *string) string {
@@ -144,6 +207,87 @@ func projectCells(merged map[string]string, keys []string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+func buildViewContext(schemas []types.ViewOutputSchemaContext) string {
+	type sheetInfo struct {
+		name string
+		cols []string
+	}
+	seen := make(map[string]*sheetInfo)
+	var order []string
+	viewName := ""
+	for _, sc := range schemas {
+		if viewName == "" && sc.ViewName != "" {
+			viewName = sc.ViewName
+		}
+		if _, ok := seen[sc.SheetID]; ok {
+			continue
+		}
+		var colLabels []string
+		for _, c := range sc.Columns {
+			colLabels = append(colLabels, c.Label)
+		}
+		name := sc.SheetName
+		if name == "" {
+			name = sc.SheetID
+		}
+		seen[sc.SheetID] = &sheetInfo{name: name, cols: colLabels}
+		order = append(order, sc.SheetID)
+	}
+	if len(order) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	if viewName != "" {
+		b.WriteString("View: ")
+		b.WriteString(viewName)
+		b.WriteByte('\n')
+	}
+	b.WriteString("Sheets:\n")
+	for _, id := range order {
+		info := seen[id]
+		b.WriteString("  - ")
+		b.WriteString(info.name)
+		b.WriteString(": [")
+		b.WriteString(strings.Join(info.cols, ", "))
+		b.WriteString("]\n")
+	}
+	return b.String()
+}
+
+func formatCrossSheetContext(rows []ViewRow, schemaKeys map[string][]string, sheetNames map[string]string) string {
+	if len(rows) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("RELATED ROWS FROM OTHER SHEETS IN THIS VIEW:\n")
+	for _, r := range rows {
+		keys := schemaKeys[r.SheetID]
+		c := projectCells(r.MergedCells(), keys)
+		if len(c) == 0 {
+			continue
+		}
+		name := sheetNames[r.SheetID]
+		if name == "" {
+			name = r.SheetID
+		}
+		b.WriteString("[")
+		b.WriteString(name)
+		b.WriteString("] ")
+		first := true
+		for k, v := range c {
+			if !first {
+				b.WriteString(", ")
+			}
+			b.WriteString(k)
+			b.WriteString(": ")
+			b.WriteString(v)
+			first = false
+		}
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 func serializeRows(rows []ViewRow, keys []string) string {

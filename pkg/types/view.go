@@ -337,7 +337,7 @@ func LoadViewOutputSchemaContexts(
 				if !component.IsTable() || !viewOutputSchemaComponentMatchesAgent(view.Definition, component, matchRefs) {
 					continue
 				}
-				if context := buildViewOutputSchemaContext(view, sheet, component); context != nil {
+				if context := BuildViewOutputSchemaContext(view, sheet, component); context != nil {
 					contexts = append(contexts, *context)
 				}
 			}
@@ -406,7 +406,7 @@ func viewOutputSchemaComponentRefs(definition ViewDefinition, component Componen
 	return uniqueTrimmedSchemaStrings(refs)
 }
 
-func buildViewOutputSchemaContext(view *View, sheet SheetSpec, component ComponentSpec) *ViewOutputSchemaContext {
+func BuildViewOutputSchemaContext(view *View, sheet SheetSpec, component ComponentSpec) *ViewOutputSchemaContext {
 	columns := buildViewOutputSchemaColumns(component)
 	if len(columns) == 0 {
 		return nil

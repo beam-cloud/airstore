@@ -2,8 +2,11 @@ package views
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -58,8 +61,13 @@ type ViewRow struct {
 	UpdatedAt       time.Time         `bson:"updated_at"`
 }
 
+const (
+	RowSourceImport = "import"
+	RowSourceSync   = "sync"
+)
+
 func (r *ViewRow) IsImport() bool {
-	return r.Source == "import"
+	return r.Source == RowSourceImport
 }
 
 // ExcludedRowSnapshot is the data we store when a user deletes a row so the
@@ -337,7 +345,7 @@ func (s *ViewStore) DeleteRowsNotInGroups(ctx context.Context, viewID, sheetID, 
 	coll := s.mongo.Collection(s.collectionName(viewID))
 	filter := rowScopeFilter(sheetID, componentID)
 	filter = append(filter, bson.E{Key: "group_id", Value: bson.D{{Key: "$in", Value: groupIDs}}})
-	filter = append(filter, bson.E{Key: "source", Value: bson.D{{Key: "$ne", Value: "import"}}})
+	filter = append(filter, bson.E{Key: "source", Value: bson.D{{Key: "$ne", Value: RowSourceImport}}})
 	if len(keepRowIDs) > 0 {
 		filter = append(filter, bson.E{Key: "_id", Value: bson.D{{Key: "$nin", Value: keepRowIDs}}})
 	}
@@ -401,7 +409,7 @@ func (s *ViewStore) CleanupStaleImportRows(ctx context.Context, viewID, sheetID,
 	coll := s.mongo.Collection(s.collectionName(viewID))
 	filter := rowScopeFilter(sheetID, componentID)
 	filter = append(filter,
-		bson.E{Key: "source", Value: "import"},
+		bson.E{Key: "source", Value: RowSourceImport},
 		bson.E{Key: "_id", Value: bson.D{{Key: "$nin", Value: keepIDs}}},
 	)
 	res, err := coll.DeleteMany(ctx, filter)
@@ -419,7 +427,7 @@ func (s *ViewStore) DeleteImport(ctx context.Context, viewID, sheetID, importID 
 	coll := s.mongo.Collection(s.collectionName(viewID))
 	filter := bson.D{
 		{Key: "sheet_id", Value: sheetID},
-		{Key: "source", Value: "import"},
+		{Key: "source", Value: RowSourceImport},
 		{Key: "import_id", Value: importID},
 	}
 	res, err := coll.DeleteMany(ctx, filter)
@@ -740,19 +748,48 @@ func (s *ViewStore) UpdateRow(ctx context.Context, viewID, rowID string, cells m
 	return nil
 }
 
-// deriveRowKey builds a row key from cell values, schema-agnostic.
-// It concatenates the first two non-empty cell values.
+// deriveRowKey builds a deterministic, schema-agnostic key from the row's
+// non-empty cells. Semantics live in BAML/vector resolution, not in Go field
+// heuristics, so this is intentionally just a canonical content hash.
 func deriveRowKey(cells map[string]string) string {
-	var vals []string
-	for _, v := range cells {
-		if v = strings.TrimSpace(v); v != "" {
-			vals = append(vals, v)
-			if len(vals) >= 2 {
-				break
-			}
+	if len(cells) == 0 {
+		return ""
+	}
+
+	keys := make([]string, 0, len(cells))
+	for k, v := range cells {
+		if strings.TrimSpace(v) != "" {
+			keys = append(keys, k)
 		}
 	}
-	return strings.Join(vals, "-")
+	if len(keys) == 0 {
+		return ""
+	}
+
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		value := canonicalRowKeyValue(cells[key])
+		if value == "" {
+			continue
+		}
+		parts = append(parts, key+"="+value)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+
+	sum := sha256.Sum256([]byte(strings.Join(parts, "|")))
+	return "rk_" + hex.EncodeToString(sum[:16])
+}
+
+func canonicalRowKeyValue(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return ""
+	}
+	return strings.Join(strings.Fields(value), " ")
 }
 
 // FindRowByKey looks up a row by its normalized row_key within a specific
@@ -843,7 +880,7 @@ func (s *ViewStore) ClearManualCells(ctx context.Context, viewID, sheetID, compo
 
 	filter := append(rowScopeFilter(sheetID, componentID),
 		bson.E{Key: "_id", Value: bson.D{{Key: "$in", Value: rowIDs}}},
-		bson.E{Key: "source", Value: bson.D{{Key: "$ne", Value: "import"}}},
+		bson.E{Key: "source", Value: bson.D{{Key: "$ne", Value: RowSourceImport}}},
 	)
 
 	res, err := coll.UpdateMany(ctx,

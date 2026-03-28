@@ -413,7 +413,7 @@ func (*stream) MapViewToWidget(ctx context.Context, sheet_name string, widget_ty
 }
 
 // / Streaming version of PlanRowSearch
-func (*stream) PlanRowSearch(ctx context.Context, columns []types.ViewColumn, output_type string, output_title string, output_summary string, output_data string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.RowSearchPlan, types.RowSearchPlan], error) {
+func (*stream) PlanRowSearch(ctx context.Context, columns []types.ViewColumn, output_type string, output_title string, output_summary string, output_data string, sheet_name string, view_context string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.RowSearchPlan, types.RowSearchPlan], error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -421,7 +421,7 @@ func (*stream) PlanRowSearch(ctx context.Context, columns []types.ViewColumn, ou
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"columns": columns, "output_type": output_type, "output_title": output_title, "output_summary": output_summary, "output_data": output_data},
+		Kwargs: map[string]any{"columns": columns, "output_type": output_type, "output_title": output_title, "output_summary": output_summary, "output_data": output_data, "sheet_name": sheet_name, "view_context": view_context},
 		Env:    getEnvVars(callOpts.env),
 	}
 
@@ -487,7 +487,7 @@ func (*stream) PlanRowSearch(ctx context.Context, columns []types.ViewColumn, ou
 }
 
 // / Streaming version of PopulateRowCells
-func (*stream) PopulateRowCells(ctx context.Context, columns []types.ViewColumn, output_type string, output_title string, output_summary string, output_data string, row_id string, row_cells string, entity_hint string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.PopulateRowResult, types.PopulateRowResult], error) {
+func (*stream) PopulateRowCells(ctx context.Context, columns []types.ViewColumn, output_type string, output_title string, output_summary string, output_data string, row_id string, row_cells string, entity_hint string, sheet_name string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.PopulateRowResult, types.PopulateRowResult], error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -495,7 +495,7 @@ func (*stream) PopulateRowCells(ctx context.Context, columns []types.ViewColumn,
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"columns": columns, "output_type": output_type, "output_title": output_title, "output_summary": output_summary, "output_data": output_data, "row_id": row_id, "row_cells": row_cells, "entity_hint": entity_hint},
+		Kwargs: map[string]any{"columns": columns, "output_type": output_type, "output_title": output_title, "output_summary": output_summary, "output_data": output_data, "row_id": row_id, "row_cells": row_cells, "entity_hint": entity_hint, "sheet_name": sheet_name},
 		Env:    getEnvVars(callOpts.env),
 	}
 

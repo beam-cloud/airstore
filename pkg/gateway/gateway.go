@@ -72,6 +72,7 @@ type Gateway struct {
 	mcpManager     *tools.MCPManager
 
 	viewStore       *views.ViewStore
+	viewSync        *views.ViewSync
 	storageService  *services.StorageService
 	storageClient   *clients.StorageClient
 	oauthStore      *oauth.Store
@@ -420,18 +421,19 @@ func (g *Gateway) registerServices() error {
 		g.viewStore = views.NewViewStore(g.MongoClient, g.Config.OpenAIAPIKey())
 	}
 
+	// Create ViewSync so it's available to both worker service and the view tool.
+	if g.viewStore != nil {
+		g.viewSync = views.NewViewSync(views.ViewSyncOpts{
+			Store:   g.viewStore,
+			Backend: g.BackendRepo,
+			Config:  g.Config.View.Sync,
+		})
+	}
+
 	// Register worker gRPC service (for worker-to-gateway communication)
 	if g.scheduler != nil {
 		taskQueue := repository.NewRedisTaskQueue(g.RedisClient, "default")
-		var viewSync *views.ViewSync
-		if g.viewStore != nil {
-			viewSync = views.NewViewSync(views.ViewSyncOpts{
-				Store:   g.viewStore,
-				Backend: g.BackendRepo,
-				Config:  g.Config.View.Sync,
-			})
-		}
-		workerService := services.NewWorkerService(g.scheduler, g.BackendRepo, g.scheduler.WorkerRepo(), taskQueue, g.RedisClient, g.Config.Scheduler, g.viewStore, viewSync)
+		workerService := services.NewWorkerService(g.scheduler, g.BackendRepo, g.scheduler.WorkerRepo(), taskQueue, g.RedisClient, g.Config.Scheduler, g.viewStore, g.viewSync)
 		workerService.StartRecoveryLoop(g.ctx)
 		pb.RegisterWorkerServiceServer(g.grpcServer, workerService)
 		log.Info().Msg("worker service registered")
@@ -996,7 +998,7 @@ func (g *Gateway) initTools() error {
 
 	// View tool (no auth, uses workspace context from bearer token)
 	if g.viewStore != nil {
-		clientRegistry.Register(toolclients.NewViewClient(g.viewStore, g.BackendRepo))
+		clientRegistry.Register(toolclients.NewViewClient(g.viewStore, g.BackendRepo, g.viewSync))
 		log.Debug().Msg("view tool registered")
 	}
 

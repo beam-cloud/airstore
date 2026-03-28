@@ -391,7 +391,7 @@ func MapViewToWidget(ctx context.Context, sheet_name string, widget_type string,
 	}
 }
 
-func PlanRowSearch(ctx context.Context, columns []types.ViewColumn, output_type string, output_title string, output_summary string, output_data string, opts ...CallOptionFunc) (types.RowSearchPlan, error) {
+func PlanRowSearch(ctx context.Context, columns []types.ViewColumn, output_type string, output_title string, output_summary string, output_data string, sheet_name string, view_context string, opts ...CallOptionFunc) (types.RowSearchPlan, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -407,7 +407,7 @@ func PlanRowSearch(ctx context.Context, columns []types.ViewColumn, output_type 
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"columns": columns, "output_type": output_type, "output_title": output_title, "output_summary": output_summary, "output_data": output_data},
+		Kwargs: map[string]any{"columns": columns, "output_type": output_type, "output_title": output_title, "output_summary": output_summary, "output_data": output_data, "sheet_name": sheet_name, "view_context": view_context},
 		Env:    getEnvVars(callOpts.env),
 	}
 
@@ -465,7 +465,7 @@ func PlanRowSearch(ctx context.Context, columns []types.ViewColumn, output_type 
 	}
 }
 
-func PopulateRowCells(ctx context.Context, columns []types.ViewColumn, output_type string, output_title string, output_summary string, output_data string, row_id string, row_cells string, entity_hint string, opts ...CallOptionFunc) (types.PopulateRowResult, error) {
+func PopulateRowCells(ctx context.Context, columns []types.ViewColumn, output_type string, output_title string, output_summary string, output_data string, row_id string, row_cells string, entity_hint string, sheet_name string, opts ...CallOptionFunc) (types.PopulateRowResult, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -481,7 +481,7 @@ func PopulateRowCells(ctx context.Context, columns []types.ViewColumn, output_ty
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"columns": columns, "output_type": output_type, "output_title": output_title, "output_summary": output_summary, "output_data": output_data, "row_id": row_id, "row_cells": row_cells, "entity_hint": entity_hint},
+		Kwargs: map[string]any{"columns": columns, "output_type": output_type, "output_title": output_title, "output_summary": output_summary, "output_data": output_data, "row_id": row_id, "row_cells": row_cells, "entity_hint": entity_hint, "sheet_name": sheet_name},
 		Env:    getEnvVars(callOpts.env),
 	}
 

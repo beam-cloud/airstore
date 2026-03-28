@@ -256,7 +256,7 @@ func (*build_request) MapViewToWidget(sheet_name string, widget_type string, wid
 }
 
 // Build HTTP request for PlanRowSearch (returns baml.HTTPRequest)
-func (*build_request) PlanRowSearch(columns []types.ViewColumn, output_type string, output_title string, output_summary string, output_data string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
+func (*build_request) PlanRowSearch(columns []types.ViewColumn, output_type string, output_title string, output_summary string, output_data string, sheet_name string, view_context string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -272,7 +272,7 @@ func (*build_request) PlanRowSearch(columns []types.ViewColumn, output_type stri
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"columns": columns, "output_type": output_type, "output_title": output_title, "output_summary": output_summary, "output_data": output_data, "stream": false},
+		Kwargs: map[string]any{"columns": columns, "output_type": output_type, "output_title": output_title, "output_summary": output_summary, "output_data": output_data, "sheet_name": sheet_name, "view_context": view_context, "stream": false},
 		Env:    getEnvVars(callOpts.env),
 	}
 
@@ -302,7 +302,7 @@ func (*build_request) PlanRowSearch(columns []types.ViewColumn, output_type stri
 }
 
 // Build HTTP request for PopulateRowCells (returns baml.HTTPRequest)
-func (*build_request) PopulateRowCells(columns []types.ViewColumn, output_type string, output_title string, output_summary string, output_data string, row_id string, row_cells string, entity_hint string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
+func (*build_request) PopulateRowCells(columns []types.ViewColumn, output_type string, output_title string, output_summary string, output_data string, row_id string, row_cells string, entity_hint string, sheet_name string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -318,7 +318,7 @@ func (*build_request) PopulateRowCells(columns []types.ViewColumn, output_type s
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"columns": columns, "output_type": output_type, "output_title": output_title, "output_summary": output_summary, "output_data": output_data, "row_id": row_id, "row_cells": row_cells, "entity_hint": entity_hint, "stream": false},
+		Kwargs: map[string]any{"columns": columns, "output_type": output_type, "output_title": output_title, "output_summary": output_summary, "output_data": output_data, "row_id": row_id, "row_cells": row_cells, "entity_hint": entity_hint, "sheet_name": sheet_name, "stream": false},
 		Env:    getEnvVars(callOpts.env),
 	}
 
