@@ -1410,6 +1410,29 @@ func (b *PostgresBackend) ListActiveChildTaskIDs(ctx context.Context, parentTask
 	return ids, nil
 }
 
+func (b *PostgresBackend) ListChildTaskIDsByParents(ctx context.Context, parentTaskIDs []string) (map[string]string, error) {
+	if len(parentTaskIDs) == 0 {
+		return nil, nil
+	}
+	rows, err := b.db.QueryContext(ctx, `
+		SELECT id, parent_envelope_id FROM agent_task
+		WHERE parent_envelope_id = ANY($1::uuid[])
+	`, pq.Array(parentTaskIDs))
+	if err != nil {
+		return nil, fmt.Errorf("list child task ids by parents: %w", err)
+	}
+	defer rows.Close()
+	result := make(map[string]string)
+	for rows.Next() {
+		var childID, parentID string
+		if err := rows.Scan(&childID, &parentID); err != nil {
+			return nil, err
+		}
+		result[childID] = parentID
+	}
+	return result, nil
+}
+
 func (b *PostgresBackend) ListSubtasks(ctx context.Context, parentTaskID string) ([]*types.AgentTask, error) {
 	query := agentTaskSelect + `
 		WHERE parent_envelope_id = $1

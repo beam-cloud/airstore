@@ -1025,7 +1025,28 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 	}
 	viewID := c.Param("view_id")
 
-	// Load view rows first to collect task IDs associated with this view.
+	// Load view definition to get schema column order for row labeling.
+	view, err := vg.backend.GetView(ctx, workspaceID, viewID)
+	if err != nil || view == nil {
+		return ErrorResponse(c, http.StatusNotFound, "view not found")
+	}
+	var labelColumnKeys []string
+	for _, sheet := range view.Definition.Sheets {
+		for _, comp := range sheet.Components {
+			if comp.IsTable() {
+				sc := types.BuildViewOutputSchemaContext(view, sheet, comp)
+				if sc != nil {
+					labelColumnKeys = sc.ColumnKeys()
+				}
+				break
+			}
+		}
+		if len(labelColumnKeys) > 0 {
+			break
+		}
+	}
+
+	// Load view rows to collect task IDs associated with this view.
 	taskRowMap := make(map[string]*views.ViewRow)
 	var viewTaskIDs []string
 	if vg.store != nil && vg.store.Available() {
@@ -1045,10 +1066,26 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 		}
 	}
 
+	// Expand viewTaskIDs with subtask IDs so we also catch email outputs
+	// produced by fan-out children whose IDs aren't stored on the view row.
+	// childToParent lets us resolve subtask → parent for row linkage later.
+	childToParent, _ := vg.backend.ListChildTaskIDsByParents(ctx, viewTaskIDs)
+	if len(childToParent) > 0 {
+		seen := make(map[string]bool, len(viewTaskIDs))
+		for _, id := range viewTaskIDs {
+			seen[id] = true
+		}
+		for childID := range childToParent {
+			if !seen[childID] {
+				viewTaskIDs = append(viewTaskIDs, childID)
+				seen[childID] = true
+			}
+		}
+	}
+
 	// Query email outputs using two strategies:
 	//  1. Tasks whose payload has source_view_id matching this view
-	//  2. Tasks referenced by this view's rows (covers tasks created
-	//     before source_view_id was wired or through paths that omit it)
+	//  2. Tasks referenced by this view's rows or their subtasks
 	emailType := types.TaskOutputTypeEmail
 	outputsByID := make(map[string]*types.TaskOutput)
 
@@ -1123,10 +1160,16 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 		}
 	}
 
-	// Associate row data with each thread.
+	// Associate row data with each thread. If the output's task isn't directly
+	// in a view row, resolve through the child→parent chain (subtask emails).
 	threadRows := make(map[string]*views.ViewRow)
 	for taskID, outs := range taskOutputs {
 		row := taskRowMap[taskID]
+		if row == nil {
+			if parentID, ok := childToParent[taskID]; ok {
+				row = taskRowMap[parentID]
+			}
+		}
 		if row == nil {
 			continue
 		}
@@ -1145,7 +1188,7 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 		if row := threadRows[threadKey]; row != nil {
 			mt.RowID = row.ID
 			mt.RowCells = row.MergedCells()
-			mt.RowLabel = inferRowLabel(mt.RowCells)
+			mt.RowLabel = rowLabelFromSchema(mt.RowCells, labelColumnKeys)
 		}
 		result[threadKey] = mt
 	}
@@ -1156,15 +1199,12 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 	})
 }
 
-func inferRowLabel(cells map[string]string) string {
-	for _, key := range []string{"name", "full_name", "company", "email", "title", "label"} {
-		if v := strings.TrimSpace(cells[key]); v != "" {
-			return v
-		}
-	}
-	for _, v := range cells {
-		v = strings.TrimSpace(v)
-		if v != "" && len(v) < 80 {
+// rowLabelFromSchema returns the value of the first schema column that has a
+// non-empty value in cells. The schema column order is the user's chosen
+// identity hierarchy, so this is always the right label regardless of workload.
+func rowLabelFromSchema(cells map[string]string, columnKeys []string) string {
+	for _, key := range columnKeys {
+		if v := strings.TrimSpace(cells[key]); v != "" && len(v) < 120 {
 			return v
 		}
 	}
