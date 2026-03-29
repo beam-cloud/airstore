@@ -92,6 +92,11 @@ func (vs *ViewSync) Sync(ctx context.Context, output *types.TaskOutput) *SyncRes
 		agentID = strings.TrimSpace(*output.AgentID)
 	}
 	if agentID == "" {
+		log.Debug().
+			Str("task_id", output.TaskID).
+			Str("output_type", output.OutputType).
+			Str("title", output.Title).
+			Msg("viewsync: skipped — no agent_id on output")
 		return nil
 	}
 
@@ -114,20 +119,43 @@ func (vs *ViewSync) Sync(ctx context.Context, output *types.TaskOutput) *SyncRes
 		viewSchemas[sc.ViewID] = append(viewSchemas[sc.ViewID], sc)
 	}
 
-	result := &SyncResult{}
+	log.Info().
+		Str("task_id", output.TaskID).
+		Str("output_type", output.OutputType).
+		Str("title", output.Title).
+		Str("agent_id", agentID).
+		Int("schemas", len(schemas)).
+		Int("views", len(viewOrder)).
+		Int("data_keys", len(output.Data)).
+		Msg("viewsync: Sync invoked")
+
+	type viewResult struct {
+		result *SyncResult
+	}
+	ch := make(chan viewResult, len(viewOrder))
 	for _, viewID := range viewOrder {
-		viewCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
-		for _, sc := range viewSchemas[viewID] {
-			if viewCtx.Err() != nil {
-				break
+		go func(vid string) {
+			vr := &SyncResult{}
+			viewCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+			defer cancel()
+			for _, sc := range viewSchemas[vid] {
+				if viewCtx.Err() != nil {
+					break
+				}
+				mu := vs.lockFor(output.TaskID, sc.SheetID)
+				mu.Lock()
+				r := vs.syncSchema(viewCtx, output, sc, viewSchemas[vid])
+				mu.Unlock()
+				vr.merge(r)
 			}
-			mu := vs.lockFor(output.TaskID, sc.SheetID)
-			mu.Lock()
-			r := vs.syncSchema(viewCtx, output, sc, viewSchemas[viewID])
-			mu.Unlock()
-			result.merge(r)
-		}
-		cancel()
+			ch <- viewResult{result: vr}
+		}(viewID)
+	}
+
+	result := &SyncResult{}
+	for range viewOrder {
+		vr := <-ch
+		result.merge(vr.result)
 	}
 	return result
 }
@@ -304,15 +332,6 @@ func (vs *ViewSync) syncVectorPath(
 		log.Warn().Err(planErr).Str("task_id", output.TaskID).Msg("viewsync: PlanRowSearch failed")
 	}
 
-	// Diagnostic: log plan result for tool writes
-	if strings.HasPrefix(output.TaskID, "tool:") {
-		if f, err := os.OpenFile("/tmp/viewsync-debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-			fmt.Fprintf(f, "[%s] PlanRowSearch: task=%s sheet=%s planErr=%v entities=%d criteria=%d\n",
-				time.Now().Format(time.RFC3339), output.TaskID, sc.SheetID, planErr, len(plan.Entity_labels), len(plan.Criteria))
-			f.Close()
-		}
-	}
-
 	criteria := buildSearchCriteria(&plan)
 	hints := entityHints(&plan, nil)
 	queries := vectorQueryTexts(criteria, hints, output.OutputType, output.Title, summary, data)
@@ -359,15 +378,6 @@ func (vs *ViewSync) syncVectorPath(
 	// Gather cross-sheet context via vector search so BAML can enrich the
 	// new row with data from related rows in other sheets (e.g. seed data).
 	crossCtx := vs.crossSheetContext(ctx, sc, ec, queries, allSchemas)
-
-	// Diagnostic: log insert attempt for tool writes
-	if strings.HasPrefix(output.TaskID, "tool:") {
-		if f, err := os.OpenFile("/tmp/viewsync-debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-			fmt.Fprintf(f, "[%s] insertRows: task=%s sheet=%s hints=%d crossCtxLen=%d candidates=%d\n",
-				time.Now().Format(time.RFC3339), output.TaskID, sc.SheetID, len(hints), len(crossCtx), len(candidates))
-			f.Close()
-		}
-	}
 
 	created, err := vs.insertRows(ctx, output, sc, cols, data, summary, &plan, hints, crossCtx, viewCtxStr)
 	if err != nil {

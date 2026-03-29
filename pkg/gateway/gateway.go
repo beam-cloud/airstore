@@ -698,7 +698,7 @@ func (g *Gateway) registerServices() error {
 		apiv1.NewAgentsGroup(agentAPIRoot.Group("/agents"), agentAPI, hooksSvc, emailChannel)
 		apiv1.NewWorkspaceTasksGroup(agentAPIRoot.Group("/tasks"), agentAPI)
 		apiv1.NewWorkspaceOutputsGroup(agentAPIRoot.Group("/outputs"), g.BackendRepo, g.RedisClient)
-		apiv1.NewTaskOutputsGroup(agentAPIRoot.Group("/tasks/:task_id/outputs"), g.BackendRepo, g.RedisClient)
+		apiv1.NewTaskOutputsGroup(agentAPIRoot.Group("/tasks/:task_id/outputs"), g.BackendRepo, g.RedisClient, g.viewSync)
 		apiv1.NewRunsGroup(agentAPIRoot.Group("/runs"), agentAPI)
 		apiv1.NewWorkspaceChannelsGroup(agentAPIRoot.Group("/channels"), channelRegistry, agentAPI, emailChannel)
 
