@@ -352,12 +352,15 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 					src = RowSourceSync
 				}
 				resolved = append(resolved, resolvedSheetRow{
-					TaskID:    row.TaskID,
-					RowID:     row.ID,
-					StableRef: row.StableRef,
-					RowKey:    row.RowKey,
-					Source:    src,
-					Cells:     row.MergedCells(),
+					TaskID:          row.TaskID,
+					DetailTaskID:    row.TaskID,
+					RowID:           row.ID,
+					StableRef:       row.StableRef,
+					RowKey:          row.RowKey,
+					OutputID:        firstSourceOutputID(row.SourceOutputIDs),
+					SourceOutputIDs: strings.Join(row.SourceOutputIDs, ","),
+					Source:          src,
+					Cells:           row.MergedCells(),
 				})
 			}
 			log.Info().
@@ -644,12 +647,15 @@ func ungroupedStoredRows(stored []ViewRow, taskGroups map[string][]*types.TaskOu
 			src = RowSourceSync
 		}
 		result = append(result, resolvedSheetRow{
-			TaskID:    row.TaskID,
-			RowID:     row.ID,
-			StableRef: row.StableRef,
-			RowKey:    row.RowKey,
-			Source:    src,
-			Cells:     row.MergedCells(),
+			TaskID:          row.TaskID,
+			DetailTaskID:    row.TaskID,
+			RowID:           row.ID,
+			StableRef:       row.StableRef,
+			RowKey:          row.RowKey,
+			OutputID:        firstSourceOutputID(row.SourceOutputIDs),
+			SourceOutputIDs: strings.Join(row.SourceOutputIDs, ","),
+			Source:          src,
+			Cells:           row.MergedCells(),
 		})
 	}
 	return result

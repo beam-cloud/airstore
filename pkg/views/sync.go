@@ -99,11 +99,21 @@ func (vs *ViewSync) Sync(ctx context.Context, output *types.TaskOutput) *SyncRes
 		return nil
 	}
 
+	// Scope to the output's source view if known. Check metadata first,
+	// then fall back to the task's payload for source_view_id.
+	targetViewID := outputSourceViewID(output)
+	if targetViewID == "" {
+		targetViewID = vs.taskSourceViewID(ctx, output)
+	}
+
 	// Group schemas by view so each view gets its own timeout budget.
 	viewSchemas := make(map[string][]types.ViewOutputSchemaContext)
 	var viewOrder []string
 	for _, sc := range schemas {
 		if sc.ViewID == "" || sc.SheetID == "" || len(sc.Columns) == 0 {
+			continue
+		}
+		if targetViewID != "" && sc.ViewID != targetViewID {
 			continue
 		}
 		if _, seen := viewSchemas[sc.ViewID]; !seen {
@@ -117,9 +127,9 @@ func (vs *ViewSync) Sync(ctx context.Context, output *types.TaskOutput) *SyncRes
 		Str("output_type", output.OutputType).
 		Str("title", output.Title).
 		Str("agent_id", agentID).
+		Str("target_view", targetViewID).
 		Int("schemas", len(schemas)).
 		Int("views", len(viewOrder)).
-		Int("data_keys", len(output.Data)).
 		Msg("viewsync: Sync invoked")
 
 	ch := make(chan *SyncResult, len(viewOrder))
@@ -761,4 +771,28 @@ func (vs *ViewSync) resolveSchemaHash(
 		}
 	}
 	return ""
+}
+
+func outputSourceViewID(output *types.TaskOutput) string {
+	if output.Metadata == nil {
+		return ""
+	}
+	if v, ok := output.Metadata[types.TaskOutputMetadataViewSchemaViewID]; ok {
+		if s, ok := v.(string); ok {
+			return strings.TrimSpace(s)
+		}
+	}
+	return ""
+}
+
+func (vs *ViewSync) taskSourceViewID(ctx context.Context, output *types.TaskOutput) string {
+	if vs.backend == nil || output.TaskID == "" {
+		return ""
+	}
+	task, err := vs.backend.GetTask(ctx, output.WorkspaceID, output.TaskID)
+	if err != nil || task == nil {
+		return ""
+	}
+	vid, _ := task.PayloadJSON["source_view_id"].(string)
+	return strings.TrimSpace(vid)
 }
