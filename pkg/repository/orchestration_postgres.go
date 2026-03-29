@@ -4253,6 +4253,11 @@ func (b *PostgresBackend) ListWorkspaceTaskOutputs(
 		limit = 60
 	}
 
+	var taskIDsArg any
+	if len(filter.TaskIDs) > 0 {
+		taskIDsArg = pq.Array(filter.TaskIDs)
+	}
+
 	rows, err := b.db.QueryContext(ctx, `
 		SELECT o.id, o.workspace_id, o.task_id, o.run_id, o.agent_id,
 		       COALESCE(ap.name, ''), o.output_type, o.title,
@@ -4269,6 +4274,7 @@ func (b *PostgresBackend) ListWorkspaceTaskOutputs(
 		      SELECT id FROM agent_task
 		      WHERE workspace_id = $1 AND payload_json->>'source_view_id' = $8
 		  ))
+		  AND ($9::uuid[] IS NULL OR o.task_id = ANY($9::uuid[]))
 		ORDER BY o.created_at DESC, o.id DESC
 		LIMIT $6`,
 		workspaceId,
@@ -4279,6 +4285,7 @@ func (b *PostgresBackend) ListWorkspaceTaskOutputs(
 		limit,
 		filter.AgentIDIsNull,
 		nilIfEmpty(filter.SourceViewID),
+		taskIDsArg,
 	)
 	if err != nil {
 		return nil, err

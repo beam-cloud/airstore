@@ -1015,6 +1015,8 @@ type mailboxThread struct {
 	RowCells map[string]string     `json:"row_fields,omitempty"`
 }
 
+const mailboxOutputLimit = 200
+
 func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 	ctx := c.Request().Context()
 	workspaceID, err := vg.workspaceID(c)
@@ -1023,15 +1025,61 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 	}
 	viewID := c.Param("view_id")
 
+	// Load view rows first to collect task IDs associated with this view.
+	taskRowMap := make(map[string]*views.ViewRow)
+	var viewTaskIDs []string
+	if vg.store != nil && vg.store.Available() {
+		allRows, rowErr := vg.store.GetRows(ctx, viewID, "", "")
+		if rowErr == nil {
+			seen := make(map[string]bool)
+			for i := range allRows {
+				r := &allRows[i]
+				if r.TaskID != "" {
+					taskRowMap[r.TaskID] = r
+					if !seen[r.TaskID] {
+						viewTaskIDs = append(viewTaskIDs, r.TaskID)
+						seen[r.TaskID] = true
+					}
+				}
+			}
+		}
+	}
+
+	// Query email outputs using two strategies:
+	//  1. Tasks whose payload has source_view_id matching this view
+	//  2. Tasks referenced by this view's rows (covers tasks created
+	//     before source_view_id was wired or through paths that omit it)
 	emailType := types.TaskOutputTypeEmail
-	outputs, err := vg.backend.ListWorkspaceTaskOutputs(ctx, workspaceID, types.TaskOutputListFilter{
-		OutputType:      &emailType,
-		SourceViewID:    &viewID,
-		ExcludeArchived: true,
-		Limit:           500,
+	outputsByID := make(map[string]*types.TaskOutput)
+
+	byView, err := vg.backend.ListWorkspaceTaskOutputs(ctx, workspaceID, types.TaskOutputListFilter{
+		OutputType:   &emailType,
+		SourceViewID: &viewID,
+		Limit:        mailboxOutputLimit,
 	})
 	if err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, "failed to list email outputs")
+	}
+	for _, o := range byView {
+		outputsByID[o.ID] = o
+	}
+
+	if len(viewTaskIDs) > 0 {
+		byTasks, taskErr := vg.backend.ListWorkspaceTaskOutputs(ctx, workspaceID, types.TaskOutputListFilter{
+			OutputType: &emailType,
+			TaskIDs:    viewTaskIDs,
+			Limit:      mailboxOutputLimit,
+		})
+		if taskErr == nil {
+			for _, o := range byTasks {
+				outputsByID[o.ID] = o
+			}
+		}
+	}
+
+	outputs := make([]*types.TaskOutput, 0, len(outputsByID))
+	for _, o := range outputsByID {
+		outputs = append(outputs, o)
 	}
 
 	if len(outputs) == 0 {
@@ -1061,20 +1109,6 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 		} else {
 			for k, v := range synth {
 				emailThreads[k] = v
-			}
-		}
-	}
-
-	// Build task_id -> row lookup from the view store.
-	taskRowMap := make(map[string]*views.ViewRow)
-	if vg.store != nil && vg.store.Available() {
-		allRows, rowErr := vg.store.GetRows(ctx, viewID, "", "")
-		if rowErr == nil {
-			for i := range allRows {
-				r := &allRows[i]
-				if r.TaskID != "" {
-					taskRowMap[r.TaskID] = r
-				}
 			}
 		}
 	}
