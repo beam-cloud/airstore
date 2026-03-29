@@ -651,6 +651,78 @@ func (t *PopulateRowResultClassView) Type() (baml.Type, error) {
 	return t.inner.Type()
 }
 
+type RowSearchPlanClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *RowSearchPlanClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *RowSearchPlanClassView) PropertyCriteria() (ClassPropertyView, error) {
+	return t.inner.Property("criteria")
+}
+
+func (t *RowSearchPlanClassView) PropertyEntity_labels() (ClassPropertyView, error) {
+	return t.inner.Property("entity_labels")
+}
+
+func (t *TypeBuilder) RowSearchPlan() (*RowSearchPlanClassView, error) {
+	bld, err := t.inner.Class("RowSearchPlan")
+	if err != nil {
+		return nil, err
+	}
+	return &RowSearchPlanClassView{inner: bld}, nil
+}
+
+func (t *RowSearchPlanClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
+type SearchCriterionClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *SearchCriterionClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *SearchCriterionClassView) PropertyColumn() (ClassPropertyView, error) {
+	return t.inner.Property("column")
+}
+
+func (t *SearchCriterionClassView) PropertyValue() (ClassPropertyView, error) {
+	return t.inner.Property("value")
+}
+
+func (t *TypeBuilder) SearchCriterion() (*SearchCriterionClassView, error) {
+	bld, err := t.inner.Class("SearchCriterion")
+	if err != nil {
+		return nil, err
+	}
+	return &SearchCriterionClassView{inner: bld}, nil
+}
+
+func (t *SearchCriterionClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
 type ViewCellClassView struct {
 	inner baml.ClassBuilder
 }

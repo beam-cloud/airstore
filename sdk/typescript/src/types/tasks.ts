@@ -366,6 +366,7 @@ export interface TaskOutputListParams {
   taskId?: string;
   agentId?: string;
   outputType?: OutputType;
+  sourceViewId?: string;
   includeArchived?: boolean;
   limit?: number;
   cursor?: string;

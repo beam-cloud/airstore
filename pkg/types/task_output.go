@@ -60,13 +60,14 @@ type TaskOutput struct {
 }
 
 type TaskOutputListFilter struct {
-	TaskID          *string `json:"task_id,omitempty"`
-	AgentID         *string `json:"agent_id,omitempty"`
-	AgentIDIsNull   bool    `json:"agent_id_is_null,omitempty"`
-	OutputType      *string `json:"output_type,omitempty"`
-	ExcludeArchived bool    `json:"exclude_archived,omitempty"`
-	SourceViewID    *string `json:"source_view_id,omitempty"`
-	Limit           int     `json:"limit,omitempty"`
+	TaskID          *string  `json:"task_id,omitempty"`
+	TaskIDs         []string `json:"task_ids,omitempty"`
+	AgentID         *string  `json:"agent_id,omitempty"`
+	AgentIDIsNull   bool     `json:"agent_id_is_null,omitempty"`
+	OutputType      *string  `json:"output_type,omitempty"`
+	ExcludeArchived bool     `json:"exclude_archived,omitempty"`
+	SourceViewID    *string  `json:"source_view_id,omitempty"`
+	Limit           int      `json:"limit,omitempty"`
 }
 
 type ErrTaskOutputNotFound struct {

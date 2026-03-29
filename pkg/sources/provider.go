@@ -153,6 +153,14 @@ type NativeBrowsable interface {
 	IsNativeBrowsable() bool
 }
 
+// HookEnricher is optionally implemented by providers that can produce rich
+// context when a hook fires for their integration. The returned string is
+// embedded directly in the agent's prompt so it doesn't have to read the
+// filesystem for context. Return "" if there's nothing to enrich.
+type HookEnricher interface {
+	EnrichHookContent(ctx context.Context, pctx *ProviderContext, data map[string]any) string
+}
+
 // Provider defines the interface for source integrations.
 // Each integration (github, gmail, notion, etc.) implements this interface.
 type Provider interface {

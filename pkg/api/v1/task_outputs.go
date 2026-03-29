@@ -8,7 +8,9 @@ import (
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
+	"github.com/beam-cloud/airstore/pkg/views"
 	"github.com/labstack/echo/v4"
+	"github.com/rs/zerolog/log"
 )
 
 const ctxKeyTaskOutput = "task_output"
@@ -17,6 +19,7 @@ type TaskOutputsGroup struct {
 	routerGroup *echo.Group
 	backend     repository.BackendRepository
 	live        *repository.OrchestrationStore
+	viewSync    *views.ViewSync
 }
 
 type WorkspaceOutputsGroup struct {
@@ -50,11 +53,12 @@ func NewWorkspaceOutputsGroup(routerGroup *echo.Group, backend repository.Backen
 	return g
 }
 
-func NewTaskOutputsGroup(routerGroup *echo.Group, backend repository.BackendRepository, redis *common.RedisClient) *TaskOutputsGroup {
+func NewTaskOutputsGroup(routerGroup *echo.Group, backend repository.BackendRepository, redis *common.RedisClient, viewSync *views.ViewSync) *TaskOutputsGroup {
 	g := &TaskOutputsGroup{
 		routerGroup: routerGroup,
 		backend:     backend,
 		live:        repository.NewOrchestrationStore(backend, redis),
+		viewSync:    viewSync,
 	}
 	g.registerRoutes()
 	return g
@@ -118,6 +122,7 @@ func (g *WorkspaceOutputsGroup) ListOutputs(c echo.Context) error {
 		TaskID:          strPtrMaybeQuery(c.QueryParam("task_id")),
 		AgentID:         strPtrMaybeQuery(c.QueryParam("agent_id")),
 		OutputType:      strPtrMaybeQuery(c.QueryParam("output_type")),
+		SourceViewID:    strPtrMaybeQuery(c.QueryParam("source_view_id")),
 		ExcludeArchived: excludeArchived,
 		Limit:           parseLimitParam(c.QueryParam("limit"), 60, 200),
 	})
@@ -241,6 +246,17 @@ func (g *TaskOutputsGroup) CreateOutput(c echo.Context) error {
 		}
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
+
+	if g.viewSync != nil {
+		if result := g.viewSync.Sync(c.Request().Context(), output); result != nil && !result.Skipped {
+			log.Info().
+				Str("task_id", taskID).
+				Int("updated", len(result.Updated)).
+				Int("created", len(result.Created)).
+				Msg("http CreateOutput: viewsync completed")
+		}
+	}
+
 	publishTaskLive(c, g.live, workspaceID, taskID)
 	return c.JSON(http.StatusCreated, output)
 }

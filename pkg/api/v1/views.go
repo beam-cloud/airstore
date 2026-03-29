@@ -26,11 +26,12 @@ type ViewsGroup struct {
 	store    *views.ViewStore
 	resolver *views.DataResolver
 	storage  *clients.StorageClient
+	viewSync *views.ViewSync
 }
 
 const viewRefreshQueryParam = "refresh"
 
-func NewViewsGroup(g *echo.Group, backend repository.BackendRepository, copilot *views.Copilot, store *views.ViewStore, storage *clients.StorageClient) *ViewsGroup {
+func NewViewsGroup(g *echo.Group, backend repository.BackendRepository, copilot *views.Copilot, store *views.ViewStore, storage *clients.StorageClient, viewSync *views.ViewSync) *ViewsGroup {
 	vg := &ViewsGroup{
 		g:        g,
 		backend:  backend,
@@ -38,6 +39,7 @@ func NewViewsGroup(g *echo.Group, backend repository.BackendRepository, copilot 
 		store:    store,
 		resolver: views.NewDataResolver(backend, store),
 		storage:  storage,
+		viewSync: viewSync,
 	}
 	vg.g.GET("", vg.List)
 	vg.g.POST("", vg.Create)
@@ -55,6 +57,7 @@ func NewViewsGroup(g *echo.Group, backend repository.BackendRepository, copilot 
 	}
 	vg.g.POST("/:view_id/sheets/:sheet_id/import", vg.ImportData)
 	vg.g.GET("/:view_id/rows/:row_id/detail", vg.RowDetail)
+	vg.g.GET("/:view_id/mailbox", vg.Mailbox)
 	vg.g.POST("/:view_id/chat", vg.ChatView)
 	vg.g.GET("/:view_id/chat/messages", vg.ChatMessages)
 	return vg
@@ -1002,6 +1005,213 @@ func syntheticEmailThreads(outputs []*types.TaskOutput, existing map[string][]vi
 }
 
 // ---------------------------------------------------------------------------
+// Mailbox — aggregate email threads for a view
+// ---------------------------------------------------------------------------
+
+type mailboxThread struct {
+	Messages []views.ThreadMessage `json:"messages"`
+	RowID    string                `json:"row_id,omitempty"`
+	RowLabel string                `json:"row_label,omitempty"`
+	RowCells map[string]string     `json:"row_fields,omitempty"`
+}
+
+const mailboxOutputLimit = 200
+
+func (vg *ViewsGroup) Mailbox(c echo.Context) error {
+	ctx := c.Request().Context()
+	workspaceID, err := vg.workspaceID(c)
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+	}
+	viewID := c.Param("view_id")
+
+	// Load view definition to get schema column order for row labeling.
+	view, err := vg.backend.GetView(ctx, workspaceID, viewID)
+	if err != nil || view == nil {
+		return ErrorResponse(c, http.StatusNotFound, "view not found")
+	}
+	var labelColumnKeys []string
+	for _, sheet := range view.Definition.Sheets {
+		for _, comp := range sheet.Components {
+			if comp.IsTable() {
+				sc := types.BuildViewOutputSchemaContext(view, sheet, comp)
+				if sc != nil {
+					labelColumnKeys = sc.ColumnKeys()
+				}
+				break
+			}
+		}
+		if len(labelColumnKeys) > 0 {
+			break
+		}
+	}
+
+	// Load view rows to collect task IDs associated with this view.
+	taskRowMap := make(map[string]*views.ViewRow)
+	var viewTaskIDs []string
+	if vg.store != nil && vg.store.Available() {
+		allRows, rowErr := vg.store.GetRows(ctx, viewID, "", "")
+		if rowErr == nil {
+			seen := make(map[string]bool)
+			for i := range allRows {
+				r := &allRows[i]
+				if r.TaskID != "" {
+					taskRowMap[r.TaskID] = r
+					if !seen[r.TaskID] {
+						viewTaskIDs = append(viewTaskIDs, r.TaskID)
+						seen[r.TaskID] = true
+					}
+				}
+			}
+		}
+	}
+
+	// Expand viewTaskIDs with subtask IDs so we also catch email outputs
+	// produced by fan-out children whose IDs aren't stored on the view row.
+	// childToParent lets us resolve subtask → parent for row linkage later.
+	childToParent, _ := vg.backend.ListChildTaskIDsByParents(ctx, viewTaskIDs)
+	if len(childToParent) > 0 {
+		seen := make(map[string]bool, len(viewTaskIDs))
+		for _, id := range viewTaskIDs {
+			seen[id] = true
+		}
+		for childID := range childToParent {
+			if !seen[childID] {
+				viewTaskIDs = append(viewTaskIDs, childID)
+				seen[childID] = true
+			}
+		}
+	}
+
+	// Query email outputs using two strategies:
+	//  1. Tasks whose payload has source_view_id matching this view
+	//  2. Tasks referenced by this view's rows or their subtasks
+	emailType := types.TaskOutputTypeEmail
+	outputsByID := make(map[string]*types.TaskOutput)
+
+	byView, err := vg.backend.ListWorkspaceTaskOutputs(ctx, workspaceID, types.TaskOutputListFilter{
+		OutputType:   &emailType,
+		SourceViewID: &viewID,
+		Limit:        mailboxOutputLimit,
+	})
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to list email outputs")
+	}
+	for _, o := range byView {
+		outputsByID[o.ID] = o
+	}
+
+	if len(viewTaskIDs) > 0 {
+		byTasks, taskErr := vg.backend.ListWorkspaceTaskOutputs(ctx, workspaceID, types.TaskOutputListFilter{
+			OutputType: &emailType,
+			TaskIDs:    viewTaskIDs,
+			Limit:      mailboxOutputLimit,
+		})
+		if taskErr == nil {
+			for _, o := range byTasks {
+				outputsByID[o.ID] = o
+			}
+		}
+	}
+
+	outputs := make([]*types.TaskOutput, 0, len(outputsByID))
+	for _, o := range outputsByID {
+		outputs = append(outputs, o)
+	}
+
+	if len(outputs) == 0 {
+		return SuccessResponse(c, map[string]any{
+			"threads":            map[string]any{},
+			"has_email_activity": false,
+		})
+	}
+
+	// Build task_id -> []*TaskOutput lookup and collect thread IDs.
+	taskOutputs := make(map[string][]*types.TaskOutput)
+	for _, o := range outputs {
+		taskOutputs[o.TaskID] = append(taskOutputs[o.TaskID], o)
+	}
+
+	threadIDs := extractThreadIDs(outputs)
+
+	// Fetch Gmail threads.
+	var emailThreads map[string][]views.ThreadMessage
+	if len(threadIDs) > 0 {
+		fetcher := views.NewEmailThreadFetcher(vg.backend)
+		emailThreads = fetcher.FetchThreads(ctx, workspaceID, threadIDs)
+	}
+	if synth := syntheticEmailThreads(outputs, emailThreads); len(synth) > 0 {
+		if emailThreads == nil {
+			emailThreads = synth
+		} else {
+			for k, v := range synth {
+				emailThreads[k] = v
+			}
+		}
+	}
+
+	// Build output -> threadKey lookup so we can associate row data with threads.
+	outputThreadKey := make(map[string]string)
+	for _, o := range outputs {
+		if tid := emailOutputThreadID(o); tid != "" {
+			outputThreadKey[o.ID] = tid
+		} else {
+			outputThreadKey[o.ID] = "output:" + o.ID
+		}
+	}
+
+	// Associate row data with each thread. If the output's task isn't directly
+	// in a view row, resolve through the child→parent chain (subtask emails).
+	threadRows := make(map[string]*views.ViewRow)
+	for taskID, outs := range taskOutputs {
+		row := taskRowMap[taskID]
+		if row == nil {
+			if parentID, ok := childToParent[taskID]; ok {
+				row = taskRowMap[parentID]
+			}
+		}
+		if row == nil {
+			continue
+		}
+		for _, o := range outs {
+			if tk, ok := outputThreadKey[o.ID]; ok {
+				if threadRows[tk] == nil {
+					threadRows[tk] = row
+				}
+			}
+		}
+	}
+
+	result := make(map[string]mailboxThread, len(emailThreads))
+	for threadKey, messages := range emailThreads {
+		mt := mailboxThread{Messages: messages}
+		if row := threadRows[threadKey]; row != nil {
+			mt.RowID = row.ID
+			mt.RowCells = row.MergedCells()
+			mt.RowLabel = rowLabelFromSchema(mt.RowCells, labelColumnKeys)
+		}
+		result[threadKey] = mt
+	}
+
+	return SuccessResponse(c, map[string]any{
+		"threads":            result,
+		"has_email_activity": len(result) > 0,
+	})
+}
+
+// rowLabelFromSchema returns the value of the first schema column that has a
+// non-empty value in cells. The schema column order is the user's chosen
+// identity hierarchy, so this is always the right label regardless of workload.
+func rowLabelFromSchema(cells map[string]string, columnKeys []string) string {
+	for _, key := range columnKeys {
+		if v := strings.TrimSpace(cells[key]); v != "" && len(v) < 120 {
+			return v
+		}
+	}
+	return ""
+}
+
+// ---------------------------------------------------------------------------
 // Row exclusion (soft-delete)
 // ---------------------------------------------------------------------------
 
@@ -1275,7 +1485,47 @@ func (vg *ViewsGroup) ImportData(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, err.Error())
 	}
 
+	if vg.viewSync != nil && result.RowCount > 0 {
+		go vg.propagateImportRows(viewID, workspaceID, sheetID, comp.ID)
+	}
+
 	return SuccessResponse(c, result)
+}
+
+// propagateImportRows syncs imported rows to other sheets in the view.
+// Runs in a background goroutine so the import response returns immediately.
+func (vg *ViewsGroup) propagateImportRows(viewID string, workspaceID uint, sourceSheetID, sourceComponentID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	rows, err := vg.store.GetRowsBySource(ctx, viewID, sourceSheetID, sourceComponentID, views.RowSourceImport)
+	if err != nil || len(rows) == 0 {
+		return
+	}
+
+	log.Info().Str("view_id", viewID).Int("rows", len(rows)).Msg("import: propagating to other sheets")
+
+	synced := 0
+	for _, row := range rows {
+		if ctx.Err() != nil {
+			break
+		}
+		cells := row.MergedCells()
+		if len(cells) == 0 {
+			continue
+		}
+		vg.viewSync.SyncToolWrite(ctx, views.ToolWriteInput{
+			ViewID:            viewID,
+			WorkspaceID:       workspaceID,
+			SourceSheetID:     sourceSheetID,
+			SourceComponentID: sourceComponentID,
+			Cells:             cells,
+			RowID:             row.ID,
+			ForceInsert:       true,
+		})
+		synced++
+	}
+	log.Info().Str("view_id", viewID).Int("synced", synced).Msg("import: propagation complete")
 }
 
 // ---------------------------------------------------------------------------

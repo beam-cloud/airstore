@@ -412,8 +412,8 @@ func (*stream) MapViewToWidget(ctx context.Context, sheet_name string, widget_ty
 	return channel, nil
 }
 
-// / Streaming version of PopulateRowCells
-func (*stream) PopulateRowCells(ctx context.Context, columns []types.ViewColumn, output_type string, output_title string, output_summary string, output_data string, row_id string, row_cells string, entity_hint string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.PopulateRowResult, types.PopulateRowResult], error) {
+// / Streaming version of PlanRowSearch
+func (*stream) PlanRowSearch(ctx context.Context, columns []types.ViewColumn, output_type string, output_title string, output_summary string, output_data string, sheet_name string, view_context string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.RowSearchPlan, types.RowSearchPlan], error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -421,7 +421,81 @@ func (*stream) PopulateRowCells(ctx context.Context, columns []types.ViewColumn,
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"columns": columns, "output_type": output_type, "output_title": output_title, "output_summary": output_summary, "output_data": output_data, "row_id": row_id, "row_cells": row_cells, "entity_hint": entity_hint},
+		Kwargs: map[string]any{"columns": columns, "output_type": output_type, "output_title": output_title, "output_summary": output_summary, "output_data": output_data, "sheet_name": sheet_name, "view_context": view_context},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		// This should never happen. if it does, please file an issue at https://github.com/boundaryml/baml/issues
+		// and include the type of the args you're passing in.
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: PlanRowSearch: %w", err)
+		panic(wrapped_err)
+	}
+
+	internal_channel, err := bamlRuntime.CallFunctionStream(ctx, "PlanRowSearch", encoded, callOpts.onTick)
+	if err != nil {
+		return nil, err
+	}
+
+	channel := make(chan StreamValue[stream_types.RowSearchPlan, types.RowSearchPlan])
+	go func() {
+		for result := range internal_channel {
+			if result.Error != nil {
+				channel <- StreamValue[stream_types.RowSearchPlan, types.RowSearchPlan]{
+					IsError: true,
+					Error:   result.Error,
+				}
+				close(channel)
+				return
+			}
+			if result.HasData {
+				data := (result.Data).(types.RowSearchPlan)
+				channel <- StreamValue[stream_types.RowSearchPlan, types.RowSearchPlan]{
+					IsFinal:  true,
+					as_final: &data,
+				}
+			} else {
+				data := (result.StreamData).(stream_types.RowSearchPlan)
+				channel <- StreamValue[stream_types.RowSearchPlan, types.RowSearchPlan]{
+					IsFinal:   false,
+					as_stream: &data,
+				}
+			}
+		}
+
+		// when internal_channel is closed, close the output too
+		close(channel)
+	}()
+	return channel, nil
+}
+
+// / Streaming version of PopulateRowCells
+func (*stream) PopulateRowCells(ctx context.Context, columns []types.ViewColumn, output_type string, output_title string, output_summary string, output_data string, row_id string, row_cells string, entity_hint string, sheet_name string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.PopulateRowResult, types.PopulateRowResult], error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"columns": columns, "output_type": output_type, "output_title": output_title, "output_summary": output_summary, "output_data": output_data, "row_id": row_id, "row_cells": row_cells, "entity_hint": entity_hint, "sheet_name": sheet_name},
 		Env:    getEnvVars(callOpts.env),
 	}
 

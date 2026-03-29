@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -2151,3 +2152,130 @@ func (g *GmailProvider) generateCategorySummary(ctx context.Context, pctx *sourc
 		"emails":   emails,
 	})
 }
+
+const hookMaxThreadMessages = 5
+const hookMaxBodyLen = 2000
+
+// EnrichHookContent implements sources.HookEnricher. It fetches full thread
+// content for the thread IDs in data["correlation_keys"] and formats them
+// for direct embedding in a task prompt.
+func (g *GmailProvider) EnrichHookContent(ctx context.Context, pctx *sources.ProviderContext, data map[string]any) string {
+	if err := checkAuth(pctx); err != nil {
+		return ""
+	}
+	token := pctx.Credentials.AccessToken
+
+	ids := splitHookCSV(data["correlation_keys"])
+	if len(ids) == 0 {
+		return ""
+	}
+
+	senderEmail := g.detectSenderEmail(ctx, token)
+
+	var sections []string
+	for _, tid := range ids {
+		s := g.formatThreadForHook(ctx, token, tid, senderEmail)
+		if s != "" {
+			sections = append(sections, s)
+		}
+	}
+	if len(sections) == 0 {
+		return ""
+	}
+	return strings.Join(sections, "\n\n")
+}
+
+func (g *GmailProvider) formatThreadForHook(ctx context.Context, token, threadID, senderEmail string) string {
+	var raw map[string]any
+	if err := g.request(ctx, token, fmt.Sprintf("/users/me/threads/%s?format=full", threadID), &raw); err != nil {
+		log.Warn().Err(err).Str("thread_id", threadID).Msg("hook enrich: failed to fetch thread")
+		return ""
+	}
+	rawMsgs, _ := raw["messages"].([]any)
+	if len(rawMsgs) == 0 {
+		return ""
+	}
+
+	type parsed struct {
+		from, to, subject, date, body string
+		timestamp                     int64
+		outbound                      bool
+	}
+	msgs := make([]parsed, 0, len(rawMsgs))
+	for _, rm := range rawMsgs {
+		m, ok := rm.(map[string]any)
+		if !ok {
+			continue
+		}
+		hdrs := extractHeaders(m)
+		var ts int64
+		if raw, ok := m["internalDate"].(string); ok {
+			fmt.Sscanf(raw, "%d", &ts)
+		}
+		dateStr := hdrs["Date"]
+		if dateStr == "" && ts > 0 {
+			dateStr = time.UnixMilli(ts).UTC().Format(time.RFC3339)
+		}
+		body := g.extractMessageBody(ctx, token, getString(m, "id"), m)
+		if len(body) > hookMaxBodyLen {
+			body = body[:hookMaxBodyLen] + "..."
+		}
+		msgs = append(msgs, parsed{
+			from: hdrs["From"], to: hdrs["To"], subject: hdrs["Subject"],
+			date: dateStr, body: body, timestamp: ts,
+			outbound: senderEmail != "" && strings.Contains(strings.ToLower(hdrs["From"]), senderEmail),
+		})
+	}
+	sort.Slice(msgs, func(i, j int) bool { return msgs[i].timestamp < msgs[j].timestamp })
+
+	start := 0
+	if len(msgs) > hookMaxThreadMessages {
+		start = len(msgs) - hookMaxThreadMessages
+	}
+	visible := msgs[start:]
+
+	var lines []string
+	if start > 0 {
+		lines = append(lines, fmt.Sprintf("_(%d earlier messages omitted)_", start))
+	}
+	for i, m := range visible {
+		tag := ""
+		if i == len(visible)-1 {
+			tag = " **(latest)**"
+		}
+		dir := "From"
+		if m.outbound {
+			dir = "Sent by you"
+		}
+		lines = append(lines, fmt.Sprintf("**[%s] %s: %s -> To: %s**%s\n%s", m.date, dir, m.from, m.to, tag, m.body))
+	}
+
+	subject := msgs[0].subject
+	return fmt.Sprintf("### Email Thread: %s\nThread ID: %s\n\n%s", subject, threadID, strings.Join(lines, "\n\n"))
+}
+
+func (g *GmailProvider) detectSenderEmail(ctx context.Context, token string) string {
+	var profile map[string]any
+	if err := g.request(ctx, token, "/users/me/profile", &profile); err != nil {
+		return ""
+	}
+	email, _ := profile["emailAddress"].(string)
+	return strings.ToLower(email)
+}
+
+func splitHookCSV(v any) []string {
+	s, _ := v.(string)
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+var _ sources.HookEnricher = (*GmailProvider)(nil)

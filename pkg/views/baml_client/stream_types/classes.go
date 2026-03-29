@@ -874,6 +874,102 @@ func (c PopulateRowResult) BamlTypeName() string {
 	return "PopulateRowResult"
 }
 
+type RowSearchPlan struct {
+	Criteria      []SearchCriterion `json:"criteria"`
+	Entity_labels []string          `json:"entity_labels"`
+}
+
+func (c *RowSearchPlan) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_STREAM_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_STREAM_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "RowSearchPlan" {
+		panic(fmt.Sprintf("expected RowSearchPlan, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "criteria":
+			c.Criteria = baml.Decode(valueHolder).Interface().([]SearchCriterion)
+
+		case "entity_labels":
+			c.Entity_labels = baml.Decode(valueHolder).Interface().([]string)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class RowSearchPlan", key))
+
+		}
+	}
+
+}
+
+func (c RowSearchPlan) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["criteria"] = c.Criteria
+
+	fields["entity_labels"] = c.Entity_labels
+
+	return baml.EncodeClass("RowSearchPlan", fields, nil)
+}
+
+func (c RowSearchPlan) BamlTypeName() string {
+	return "RowSearchPlan"
+}
+
+type SearchCriterion struct {
+	Column *string `json:"column"`
+	Value  *string `json:"value"`
+}
+
+func (c *SearchCriterion) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_STREAM_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_STREAM_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "SearchCriterion" {
+		panic(fmt.Sprintf("expected SearchCriterion, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "column":
+			c.Column = baml.Decode(valueHolder).Interface().(*string)
+
+		case "value":
+			c.Value = baml.Decode(valueHolder).Interface().(*string)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class SearchCriterion", key))
+
+		}
+	}
+
+}
+
+func (c SearchCriterion) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["column"] = c.Column
+
+	fields["value"] = c.Value
+
+	return baml.EncodeClass("SearchCriterion", fields, nil)
+}
+
+func (c SearchCriterion) BamlTypeName() string {
+	return "SearchCriterion"
+}
+
 type ViewCell struct {
 	Column *string `json:"column"`
 	Value  *string `json:"value"`

@@ -216,6 +216,7 @@ type BackendRepository interface {
 	UpdateTaskCost(ctx context.Context, taskID string, costUSD float64) error
 	ArchiveTask(ctx context.Context, taskId string) error
 	ListActiveChildTaskIDs(ctx context.Context, parentTaskID string) ([]string, error)
+	ListChildTaskIDsByParents(ctx context.Context, parentTaskIDs []string) (map[string]string, error)
 	ListSubtasks(ctx context.Context, parentTaskID string) ([]*types.AgentTask, error)
 	ListSubtasksByOutputIDs(ctx context.Context, outputIDs []string) ([]*types.AgentTask, error)
 	CreateSpawnBinding(ctx context.Context, taskID, sourceOutputID, entityLabel string) error

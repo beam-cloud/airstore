@@ -370,6 +370,7 @@ function toTaskOutputListQuery(params: TaskOutputListParams | undefined): Record
   if (params.taskId) query['task_id'] = params.taskId;
   if (params.agentId) query['agent_id'] = params.agentId;
   if (params.outputType) query['output_type'] = params.outputType;
+  if (params.sourceViewId) query['source_view_id'] = params.sourceViewId;
   if (params.includeArchived) query['include_archived'] = 'true';
   if (params.limit !== undefined) query['limit'] = String(params.limit);
   if (params.cursor) query['cursor'] = params.cursor;

@@ -129,3 +129,11 @@ tools:
   #       command: npx
   #       args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
   mcp: {}
+
+# View sync — thresholds for automatic output-to-row mapping
+view:
+  sync:
+    highMatchThreshold: 0.87
+    classifyFloor: 0.50
+    vectorLimit: 20
+    minInsertCells: 3

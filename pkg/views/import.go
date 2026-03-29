@@ -89,15 +89,19 @@ func ImportData(ctx context.Context, p ImportParams) (*ImportResult, error) {
 		if len(pinned) == 0 {
 			continue
 		}
+		rowKey := deriveRowKey(pinned)
+		if rowKey == "" {
+			rowKey = "import-" + strconv.Itoa(i)
+		}
 		rows = append(rows, ViewRow{
 			ID:          fmt.Sprintf("%s:%s:import:%d", p.SheetID, p.ComponentID, i),
 			SheetID:     p.SheetID,
 			ComponentID: p.ComponentID,
 			GroupID:     "import:" + importID,
-			RowKey:      "import-" + strconv.Itoa(i),
+			RowKey:      NormalizeRowKey(rowKey),
 			Cells:       map[string]string{},
 			Pinned:      pinned,
-			Source:      "import",
+			Source:      RowSourceImport,
 			ImportID:    importID,
 			UpdatedAt:   now,
 		})

@@ -2,8 +2,11 @@ package views
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -53,11 +56,18 @@ type ViewRow struct {
 	Pinned          map[string]string `bson:"pinned,omitempty"`
 	Source          string            `bson:"source,omitempty"`
 	ImportID        string            `bson:"import_id,omitempty"`
+	SearchText      string            `bson:"search_text,omitempty"`
+	Embedding       []float64         `bson:"embedding,omitempty"`
 	UpdatedAt       time.Time         `bson:"updated_at"`
 }
 
+const (
+	RowSourceImport = "import"
+	RowSourceSync   = "sync"
+)
+
 func (r *ViewRow) IsImport() bool {
-	return r.Source == "import"
+	return r.Source == RowSourceImport
 }
 
 // ExcludedRowSnapshot is the data we store when a user deletes a row so the
@@ -89,11 +99,22 @@ func (r *ViewRow) MergedCells() map[string]string {
 }
 
 type ViewStore struct {
-	mongo *common.MongoClient
+	mongo    *common.MongoClient
+	embedder *EmbeddingClient
 }
 
-func NewViewStore(mongo *common.MongoClient) *ViewStore {
-	return &ViewStore{mongo: mongo}
+func NewViewStore(mongo *common.MongoClient, openAIKey string) *ViewStore {
+	return &ViewStore{
+		mongo:    mongo,
+		embedder: NewEmbeddingClient(openAIKey),
+	}
+}
+
+func (s *ViewStore) Embedder() *EmbeddingClient {
+	if s == nil {
+		return nil
+	}
+	return s.embedder
 }
 
 func (s *ViewStore) collectionName(viewID string) string {
@@ -137,11 +158,9 @@ func (s *ViewStore) GetRows(ctx context.Context, viewID, sheetID, componentID st
 			rows = append(rows, r)
 		}
 	}
-	log.Info().
+	log.Debug().
 		Str("view_id", viewID).
 		Str("sheet_id", sheetID).
-		Str("component_id", componentID).
-		Str("collection", s.collectionName(viewID)).
 		Int("rows", len(rows)).
 		Msg("view: loaded rows")
 	return rows, nil
@@ -185,11 +204,15 @@ func (s *ViewStore) GetRow(ctx context.Context, viewID, sheetID, rowID string) (
 
 // UpsertRows bulk-upserts rows into the view collection.
 // Existing manual edits and excluded flags are preserved — only computed
-// row data is replaced.
+// row data is replaced. Automatically computes embeddings for rows that
+// don't already have them when an embedding client is configured.
 func (s *ViewStore) UpsertRows(ctx context.Context, viewID string, rows []ViewRow) error {
 	if !s.Available() || len(rows) == 0 {
 		return nil
 	}
+
+	s.autoEmbed(ctx, rows)
+
 	coll := s.mongo.Collection(s.collectionName(viewID))
 
 	models := make([]mongo.WriteModel, 0, len(rows))
@@ -221,9 +244,19 @@ func (s *ViewStore) UpsertRows(ctx context.Context, viewID string, rows []ViewRo
 		if len(row.Pinned) > 0 {
 			setFields = append(setFields, bson.E{Key: "pinned", Value: row.Pinned})
 		}
+		if row.SearchText != "" {
+			setFields = append(setFields, bson.E{Key: "search_text", Value: row.SearchText})
+		}
+		if len(row.Embedding) > 0 {
+			setFields = append(setFields, bson.E{Key: "embedding", Value: row.Embedding})
+		}
 
+		stableRef := row.StableRef
+		if stableRef == "" {
+			stableRef = uuid.New().String()
+		}
 		insertOnly := bson.D{
-			{Key: "stable_ref", Value: uuid.New().String()},
+			{Key: "stable_ref", Value: stableRef},
 		}
 		if len(row.Manual) == 0 {
 			insertOnly = append(insertOnly, bson.E{Key: "manual", Value: bson.M{}})
@@ -310,7 +343,7 @@ func (s *ViewStore) DeleteRowsNotInGroups(ctx context.Context, viewID, sheetID, 
 	coll := s.mongo.Collection(s.collectionName(viewID))
 	filter := rowScopeFilter(sheetID, componentID)
 	filter = append(filter, bson.E{Key: "group_id", Value: bson.D{{Key: "$in", Value: groupIDs}}})
-	filter = append(filter, bson.E{Key: "source", Value: bson.D{{Key: "$ne", Value: "import"}}})
+	filter = append(filter, bson.E{Key: "source", Value: bson.D{{Key: "$ne", Value: RowSourceImport}}})
 	if len(keepRowIDs) > 0 {
 		filter = append(filter, bson.E{Key: "_id", Value: bson.D{{Key: "$nin", Value: keepRowIDs}}})
 	}
@@ -374,7 +407,7 @@ func (s *ViewStore) CleanupStaleImportRows(ctx context.Context, viewID, sheetID,
 	coll := s.mongo.Collection(s.collectionName(viewID))
 	filter := rowScopeFilter(sheetID, componentID)
 	filter = append(filter,
-		bson.E{Key: "source", Value: "import"},
+		bson.E{Key: "source", Value: RowSourceImport},
 		bson.E{Key: "_id", Value: bson.D{{Key: "$nin", Value: keepIDs}}},
 	)
 	res, err := coll.DeleteMany(ctx, filter)
@@ -392,7 +425,7 @@ func (s *ViewStore) DeleteImport(ctx context.Context, viewID, sheetID, importID 
 	coll := s.mongo.Collection(s.collectionName(viewID))
 	filter := bson.D{
 		{Key: "sheet_id", Value: sheetID},
-		{Key: "source", Value: "import"},
+		{Key: "source", Value: RowSourceImport},
 		{Key: "import_id", Value: importID},
 	}
 	res, err := coll.DeleteMany(ctx, filter)
@@ -478,19 +511,282 @@ func (s *ViewStore) MergeCells(ctx context.Context, viewID, rowID string, newCel
 		bson.D{{Key: "_id", Value: rowID}},
 		update,
 	)
+	if err != nil && outputID != "" && strings.Contains(err.Error(), "non-array") {
+		// output_ids field was null (e.g. import rows). Initialize it and retry.
+		initArrays := bson.D{
+			{Key: "$set", Value: bson.D{
+				{Key: "output_ids", Value: bson.A{outputID}},
+				{Key: "source_output_ids", Value: bson.A{outputID}},
+			}},
+		}
+		for _, f := range setFields {
+			initArrays[0].Value = append(initArrays[0].Value.(bson.D), f)
+		}
+		res, err = coll.UpdateOne(ctx, bson.D{{Key: "_id", Value: rowID}}, initArrays)
+	}
 	if err != nil {
 		return fmt.Errorf("merge cells: %w", err)
 	}
 	if res.MatchedCount == 0 {
 		return ErrViewRowNotFound
 	}
-	log.Info().
+	log.Debug().
 		Str("view_id", viewID).
 		Str("row_id", rowID).
-		Int("cell_updates", len(newCells)).
-		Str("output_id", outputID).
-		Msg("view: merged cells into existing row")
+		Int("cells", len(newCells)).
+		Msg("view: merged cells")
 	return nil
+}
+
+// ReembedRow fetches the latest state of a row, recomputes its search_text
+// and embedding, and writes them back. Call after MergeCells to keep the
+// vector index current. No-op if the embedder is not configured.
+func (s *ViewStore) ReembedRow(ctx context.Context, viewID, rowID string) {
+	if s.embedder == nil || !s.embedder.Available() || rowID == "" {
+		return
+	}
+	row, err := s.GetRowByID(ctx, viewID, rowID)
+	if err != nil || row == nil {
+		return
+	}
+	searchText := RowSearchText(row)
+	if searchText == "" {
+		return
+	}
+	vec, err := s.embedder.EmbedOne(ctx, searchText)
+	if err != nil {
+		log.Debug().Err(err).Str("row_id", rowID).Msg("reembed: embed failed")
+		return
+	}
+	if err := s.UpdateRowEmbedding(ctx, viewID, rowID, searchText, vec); err != nil {
+		log.Debug().Err(err).Str("row_id", rowID).Msg("reembed: update failed")
+	}
+}
+
+// autoEmbed computes search_text and embedding for rows that don't already
+// have them. Called automatically by UpsertRows.
+func (s *ViewStore) autoEmbed(ctx context.Context, rows []ViewRow) {
+	if s.embedder == nil || !s.embedder.Available() || len(rows) == 0 {
+		return
+	}
+
+	var needIdx []int
+	var texts []string
+	for i := range rows {
+		if len(rows[i].Embedding) > 0 {
+			continue
+		}
+		st := RowSearchText(&rows[i])
+		if st == "" {
+			continue
+		}
+		rows[i].SearchText = st
+		needIdx = append(needIdx, i)
+		texts = append(texts, st)
+	}
+	if len(texts) == 0 {
+		return
+	}
+
+	vecs, err := s.embedder.Embed(ctx, texts)
+	if err != nil {
+		log.Warn().Err(err).Int("rows", len(texts)).Msg("autoEmbed: failed, proceeding without")
+		return
+	}
+	for j, idx := range needIdx {
+		if j < len(vecs) {
+			rows[idx].Embedding = vecs[j]
+		}
+	}
+}
+
+// UpdateRowEmbedding recomputes and stores the search_text and embedding for
+// a single row. Call after MergeCells to keep the vector index current.
+func (s *ViewStore) UpdateRowEmbedding(ctx context.Context, viewID, rowID string, searchText string, embedding []float64) error {
+	if !s.Available() || rowID == "" {
+		return nil
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+
+	setFields := bson.D{
+		{Key: "search_text", Value: searchText},
+		{Key: "embedding", Value: embedding},
+	}
+
+	res, err := coll.UpdateOne(ctx,
+		bson.D{{Key: "_id", Value: rowID}},
+		bson.D{{Key: "$set", Value: setFields}},
+	)
+	if err != nil {
+		return fmt.Errorf("update row embedding: %w", err)
+	}
+	if res.MatchedCount == 0 {
+		return ErrViewRowNotFound
+	}
+	return nil
+}
+
+// FindByStableRef looks up a row by its stable_ref within a sheet scope.
+// Returns nil if not found.
+func (s *ViewStore) FindByStableRef(ctx context.Context, viewID, sheetID, ref string) (*ViewRow, error) {
+	if !s.Available() || ref == "" {
+		return nil, nil
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+	filter := bson.D{
+		{Key: "sheet_id", Value: sheetID},
+		{Key: "stable_ref", Value: ref},
+	}
+	var row ViewRow
+	err := coll.FindOne(ctx, filter).Decode(&row)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("find by stable ref: %w", err)
+	}
+	return &row, nil
+}
+
+// FindRows performs an indexed text search for rows matching a column/value
+// pair within a sheet scope. Uses regex-based SearchRows under the hood.
+func (s *ViewStore) FindRows(ctx context.Context, viewID, sheetID, column, value string, limit int) ([]ViewRow, error) {
+	if !s.Available() || column == "" || value == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	return s.SearchRows(ctx, viewID, sheetID, "", []SearchCriterion{{Column: column, Value: value}}, limit)
+}
+
+// UpsertOpts carries optional metadata for UpsertRow. ViewSync passes these;
+// ViewClient can leave them empty.
+type UpsertOpts struct {
+	TaskID     string
+	GroupID    string
+	OutputID   string
+	SchemaHash string
+	RowKey     string // override auto-derived key
+}
+
+// UpsertRow is the single entry point for creating or merging a row.
+// It derives the row key from cells (schema-agnostic), normalizes it, sets
+// StableRef, checks for an existing row via FindRowByKey / FindByStableRef,
+// and either merges into the existing row or creates a new one.
+// Returns (rowID, created, error).
+func (s *ViewStore) UpsertRow(ctx context.Context, viewID, sheetID, componentID string, cells map[string]string, opts UpsertOpts) (string, bool, error) {
+	if !s.Available() {
+		return "", false, fmt.Errorf("MongoDB not configured")
+	}
+	if len(cells) == 0 {
+		return "", false, fmt.Errorf("cells cannot be empty")
+	}
+
+	rowKey := opts.RowKey
+	if rowKey == "" {
+		rowKey = deriveRowKey(cells)
+	}
+	nk := NormalizeRowKey(rowKey)
+	if nk == "" {
+		nk = fmt.Sprintf("auto-%d", time.Now().UnixMilli())
+	}
+
+	// Try to find an existing row by key or stable ref.
+	existing, _ := s.FindRowByKey(ctx, viewID, sheetID, componentID, nk)
+	if existing == nil {
+		existing, _ = s.FindByStableRef(ctx, viewID, sheetID, nk)
+	}
+
+	if existing != nil {
+		if err := s.MergeCells(ctx, viewID, existing.ID, cells, opts.OutputID); err != nil {
+			return "", false, fmt.Errorf("upsert merge: %w", err)
+		}
+		s.ReembedRow(ctx, viewID, existing.ID)
+		return existing.ID, false, nil
+	}
+
+	rowID := fmt.Sprintf("%s:%s:%s", sheetID, componentID, nk)
+	groupID := opts.GroupID
+	if groupID == "" {
+		groupID = opts.TaskID
+	}
+	row := ViewRow{
+		ID:          rowID,
+		StableRef:   nk,
+		SheetID:     sheetID,
+		ComponentID: componentID,
+		GroupID:     groupID,
+		TaskID:      opts.TaskID,
+		RowKey:      nk,
+		SchemaHash:  opts.SchemaHash,
+		Cells:       cells,
+		UpdatedAt:   time.Now(),
+	}
+	if opts.OutputID != "" {
+		row.OutputIDs = []string{opts.OutputID}
+		row.OutputSignature = opts.OutputID
+		row.SourceOutputIDs = []string{opts.OutputID}
+	}
+
+	if err := s.UpsertRows(ctx, viewID, []ViewRow{row}); err != nil {
+		return "", false, fmt.Errorf("upsert insert: %w", err)
+	}
+	return rowID, true, nil
+}
+
+// UpdateRow merges cells into an existing row and recomputes its embedding.
+// A convenience wrapper around MergeCells + ReembedRow.
+func (s *ViewStore) UpdateRow(ctx context.Context, viewID, rowID string, cells map[string]string, outputID string) error {
+	if err := s.MergeCells(ctx, viewID, rowID, cells, outputID); err != nil {
+		return err
+	}
+	s.ReembedRow(ctx, viewID, rowID)
+	return nil
+}
+
+// deriveRowKey builds a deterministic, schema-agnostic key from the row's
+// non-empty cells. Semantics live in BAML/vector resolution, not in Go field
+// heuristics, so this is intentionally just a canonical content hash.
+func deriveRowKey(cells map[string]string) string {
+	if len(cells) == 0 {
+		return ""
+	}
+
+	keys := make([]string, 0, len(cells))
+	for k, v := range cells {
+		if strings.TrimSpace(v) != "" {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
+		return ""
+	}
+
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		value := canonicalRowKeyValue(cells[key])
+		if value == "" {
+			continue
+		}
+		parts = append(parts, key+"="+value)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+
+	sum := sha256.Sum256([]byte(strings.Join(parts, "|")))
+	return "rk_" + hex.EncodeToString(sum[:16])
+}
+
+func canonicalRowKeyValue(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return ""
+	}
+	return strings.Join(strings.Fields(value), " ")
 }
 
 // FindRowByKey looks up a row by its normalized row_key within a specific
@@ -581,7 +877,7 @@ func (s *ViewStore) ClearManualCells(ctx context.Context, viewID, sheetID, compo
 
 	filter := append(rowScopeFilter(sheetID, componentID),
 		bson.E{Key: "_id", Value: bson.D{{Key: "$in", Value: rowIDs}}},
-		bson.E{Key: "source", Value: bson.D{{Key: "$ne", Value: "import"}}},
+		bson.E{Key: "source", Value: bson.D{{Key: "$ne", Value: RowSourceImport}}},
 	)
 
 	res, err := coll.UpdateMany(ctx,
@@ -796,6 +1092,225 @@ func (s *ViewStore) DeleteSheet(ctx context.Context, viewID, sheetID string) err
 		return fmt.Errorf("delete sheet rows: %w", err)
 	}
 	return nil
+}
+
+// SearchCriterion is a column + value pair for targeted row lookups.
+type SearchCriterion struct {
+	Column string
+	Value  string
+}
+
+// SearchRows finds rows where any cell (cells or pinned) matches one of the
+// search criteria using case-insensitive regex. Returns at most maxResults rows.
+// This enables targeted lookups instead of loading the entire collection.
+func (s *ViewStore) SearchRows(ctx context.Context, viewID, sheetID, componentID string, criteria []SearchCriterion, maxResults int) ([]ViewRow, error) {
+	if !s.Available() || len(criteria) == 0 {
+		return nil, nil
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+
+	orClauses := make([]bson.M, 0, len(criteria)*2)
+	for _, c := range criteria {
+		if c.Column == "" || c.Value == "" {
+			continue
+		}
+		if strings.Contains(c.Column, ".") || strings.Contains(c.Column, "$") {
+			continue
+		}
+		escaped := regexEscape(c.Value)
+		pattern := bson.M{"$regex": escaped, "$options": "i"}
+		orClauses = append(orClauses,
+			bson.M{"cells." + c.Column: pattern},
+			bson.M{"pinned." + c.Column: pattern},
+		)
+	}
+	if len(orClauses) == 0 {
+		return nil, nil
+	}
+
+	filter := bson.M{"$or": orClauses}
+	if sheetID != "" {
+		filter["sheet_id"] = sheetID
+	}
+	if componentID != "" {
+		filter["component_id"] = componentID
+	}
+
+	if maxResults <= 0 {
+		maxResults = 50
+	}
+	opts := options.Find().SetLimit(int64(maxResults))
+	cursor, err := coll.Find(ctx, filter, opts)
+	if err != nil {
+		return nil, fmt.Errorf("search rows: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var rows []ViewRow
+	if err := cursor.All(ctx, &rows); err != nil {
+		return nil, fmt.Errorf("decode search rows: %w", err)
+	}
+
+	log.Debug().
+		Str("view_id", viewID).
+		Int("criteria", len(criteria)).
+		Int("results", len(rows)).
+		Msg("view: search rows")
+	return rows, nil
+}
+
+// regexEscape escapes special regex characters in a string.
+func regexEscape(s string) string {
+	special := `\.+*?^$()[]{}|`
+	var b strings.Builder
+	for _, c := range s {
+		if strings.ContainsRune(special, c) {
+			b.WriteRune('\\')
+		}
+		b.WriteRune(c)
+	}
+	return b.String()
+}
+
+// ---------------------------------------------------------------------------
+// Vector Search (Atlas)
+// ---------------------------------------------------------------------------
+
+const vectorIndexName = "embedding_vector_index"
+
+// EnsureVectorIndex creates the vectorSearch index for a view collection if it
+// doesn't already exist. Safe to call repeatedly — it's a no-op when the index
+// is already present.
+func (s *ViewStore) EnsureVectorIndex(ctx context.Context, viewID string, dims int) error {
+	if !s.Available() {
+		return nil
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+
+	cursor, err := coll.SearchIndexes().List(ctx, options.SearchIndexes().SetName(vectorIndexName))
+	if err == nil {
+		var existing []bson.M
+		if err := cursor.All(ctx, &existing); err == nil && len(existing) > 0 {
+			return nil
+		}
+	}
+
+	definition := bson.D{
+		{Key: "fields", Value: bson.A{
+			bson.D{
+				{Key: "type", Value: "vector"},
+				{Key: "path", Value: "embedding"},
+				{Key: "numDimensions", Value: dims},
+				{Key: "similarity", Value: "cosine"},
+			},
+			bson.D{
+				{Key: "type", Value: "filter"},
+				{Key: "path", Value: "sheet_id"},
+			},
+			bson.D{
+				{Key: "type", Value: "filter"},
+				{Key: "path", Value: "component_id"},
+			},
+		}},
+	}
+
+	opts := options.SearchIndexes().
+		SetName(vectorIndexName).
+		SetType("vectorSearch")
+
+	model := mongo.SearchIndexModel{
+		Definition: definition,
+		Options:    opts,
+	}
+
+	_, err = coll.SearchIndexes().CreateOne(ctx, model)
+	if err != nil {
+		if strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "duplicate") {
+			return nil
+		}
+		return fmt.Errorf("create vector search index: %w", err)
+	}
+
+	log.Info().
+		Str("view_id", viewID).
+		Str("index", vectorIndexName).
+		Int("dims", dims).
+		Msg("view: created vector search index")
+	return nil
+}
+
+// VectorSearchResult wraps a ViewRow with its similarity score.
+type VectorSearchResult struct {
+	ViewRow `bson:",inline"`
+	Score   float64 `bson:"vs_score"`
+}
+
+// VectorSearch runs a $vectorSearch aggregation against the view collection.
+// Returns up to `limit` rows pre-filtered by sheetID, ranked by cosine similarity.
+func (s *ViewStore) VectorSearch(ctx context.Context, viewID, sheetID string, queryEmbedding []float64, limit int) ([]VectorSearchResult, error) {
+	if !s.Available() || len(queryEmbedding) == 0 {
+		return nil, nil
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+
+	if limit <= 0 {
+		limit = 20
+	}
+	numCandidates := limit * 5
+	if numCandidates < 100 {
+		numCandidates = 100
+	}
+
+	vectorSearchStage := bson.D{
+		{Key: "$vectorSearch", Value: bson.D{
+			{Key: "index", Value: vectorIndexName},
+			{Key: "path", Value: "embedding"},
+			{Key: "queryVector", Value: queryEmbedding},
+			{Key: "numCandidates", Value: numCandidates},
+			{Key: "limit", Value: limit},
+		}},
+	}
+
+	if sheetID != "" {
+		vectorSearchStage = bson.D{
+			{Key: "$vectorSearch", Value: bson.D{
+				{Key: "index", Value: vectorIndexName},
+				{Key: "path", Value: "embedding"},
+				{Key: "queryVector", Value: queryEmbedding},
+				{Key: "filter", Value: bson.D{
+					{Key: "sheet_id", Value: sheetID},
+				}},
+				{Key: "numCandidates", Value: numCandidates},
+				{Key: "limit", Value: limit},
+			}},
+		}
+	}
+
+	scoreStage := bson.D{
+		{Key: "$addFields", Value: bson.D{
+			{Key: "vs_score", Value: bson.D{{Key: "$meta", Value: "vectorSearchScore"}}},
+		}},
+	}
+
+	pipeline := mongo.Pipeline{vectorSearchStage, scoreStage}
+
+	cursor, err := coll.Aggregate(ctx, pipeline)
+	if err != nil {
+		return nil, fmt.Errorf("vector search: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var results []VectorSearchResult
+	if err := cursor.All(ctx, &results); err != nil {
+		return nil, fmt.Errorf("decode vector search results: %w", err)
+	}
+
+	log.Debug().
+		Str("view_id", viewID).
+		Int("results", len(results)).
+		Msg("view: vector search")
+
+	return results, nil
 }
 
 // DropView drops the entire MongoDB collection for a view.

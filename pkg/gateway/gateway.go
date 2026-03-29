@@ -71,6 +71,8 @@ type Gateway struct {
 	sourceRegistry *sources.Registry
 	mcpManager     *tools.MCPManager
 
+	viewStore       *views.ViewStore
+	viewSync        *views.ViewSync
 	storageService  *services.StorageService
 	storageClient   *clients.StorageClient
 	oauthStore      *oauth.Store
@@ -415,15 +417,23 @@ func (g *Gateway) registerServices() error {
 	}
 
 	// Create ViewStore early so it's available to both worker service and views API.
-	var workerViewStore *views.ViewStore
 	if g.MongoClient != nil {
-		workerViewStore = views.NewViewStore(g.MongoClient)
+		g.viewStore = views.NewViewStore(g.MongoClient, g.Config.OpenAIAPIKey())
+	}
+
+	// Create ViewSync so it's available to both worker service and the view tool.
+	if g.viewStore != nil {
+		g.viewSync = views.NewViewSync(views.ViewSyncOpts{
+			Store:   g.viewStore,
+			Backend: g.BackendRepo,
+			Config:  g.Config.View.Sync,
+		})
 	}
 
 	// Register worker gRPC service (for worker-to-gateway communication)
 	if g.scheduler != nil {
 		taskQueue := repository.NewRedisTaskQueue(g.RedisClient, "default")
-		workerService := services.NewWorkerService(g.scheduler, g.BackendRepo, g.scheduler.WorkerRepo(), taskQueue, g.RedisClient, g.Config.Scheduler, workerViewStore)
+		workerService := services.NewWorkerService(g.scheduler, g.BackendRepo, g.scheduler.WorkerRepo(), taskQueue, g.RedisClient, g.Config.Scheduler, g.viewStore, g.viewSync)
 		workerService.StartRecoveryLoop(g.ctx)
 		pb.RegisterWorkerServiceServer(g.grpcServer, workerService)
 		log.Info().Msg("worker service registered")
@@ -633,12 +643,11 @@ func (g *Gateway) registerServices() error {
 		sourceService.SetTaskWaker(newAgentAPITaskWaker(agentAPI))
 
 		// Views API (deferred to here so agentAPI is available for the copilot)
-		viewStore := workerViewStore
+		viewStore := g.viewStore
 		viewCopilot := views.NewCopilot(g.s2Client, g.RedisClient, g.BackendRepo, g.storageClient, agentAPI, viewStore)
 		viewsGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/views")
 		viewsGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
-		apiv1.NewViewsGroup(viewsGroup, g.BackendRepo, viewCopilot, viewStore, g.storageClient)
-		log.Info().Msg("views API registered at /api/v1/workspaces/:workspace_id/views")
+		apiv1.NewViewsGroup(viewsGroup, g.BackendRepo, viewCopilot, viewStore, g.storageClient, g.viewSync)
 
 		var mailClient *clients.AgentMailClient
 		if g.Config.Channels.AgentMail.APIKey != "" {
@@ -656,6 +665,7 @@ func (g *Gateway) registerServices() error {
 			} else {
 				log.Warn().Msg("agentmail: no webhookUrl set — inbound emails won't create tasks. Set channels.agentMail.webhookUrl to your public URL (use ngrok for local dev)")
 			}
+
 			log.Info().Msg("agentmail integration enabled")
 		}
 
@@ -678,13 +688,17 @@ func (g *Gateway) registerServices() error {
 		)
 		taskFactory.SetSourceWatchFinder(g.BackendRepo)
 
+		contextEnricher := services.NewSourceContextEnricher(g.sourceRegistry, filesystemStore, viewStore, g.BackendRepo)
+		taskFactory.SetContextEnricher(contextEnricher)
+		sourceService.SetContextEnricher(contextEnricher)
+
 		// Agent/task/run HTTP APIs (workspace-scoped)
 		agentAPIRoot := g.baseRouteGroup.Group("/workspaces/:workspace_id")
 		agentAPIRoot.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
 		apiv1.NewAgentsGroup(agentAPIRoot.Group("/agents"), agentAPI, hooksSvc, emailChannel)
 		apiv1.NewWorkspaceTasksGroup(agentAPIRoot.Group("/tasks"), agentAPI)
 		apiv1.NewWorkspaceOutputsGroup(agentAPIRoot.Group("/outputs"), g.BackendRepo, g.RedisClient)
-		apiv1.NewTaskOutputsGroup(agentAPIRoot.Group("/tasks/:task_id/outputs"), g.BackendRepo, g.RedisClient)
+		apiv1.NewTaskOutputsGroup(agentAPIRoot.Group("/tasks/:task_id/outputs"), g.BackendRepo, g.RedisClient, g.viewSync)
 		apiv1.NewRunsGroup(agentAPIRoot.Group("/runs"), agentAPI)
 		apiv1.NewWorkspaceChannelsGroup(agentAPIRoot.Group("/channels"), channelRegistry, agentAPI, emailChannel)
 
@@ -698,6 +712,7 @@ func (g *Gateway) registerServices() error {
 			skillReader = hooks.NewStorageSkillReader(g.storageClient, g.BackendRepo)
 		}
 		engine := hooks.NewEngine(filesystemStore, taskFactory, g.BackendRepo, skillReader)
+		engine.SetContextEnricher(contextEnricher)
 		go engine.Start(g.ctx)
 
 		if hookStreamConsumer != nil {
@@ -982,9 +997,8 @@ func (g *Gateway) initTools() error {
 	log.Debug().Msg("oauth source integrations registered (connection-based)")
 
 	// View tool (no auth, uses workspace context from bearer token)
-	if g.MongoClient != nil {
-		viewStore := views.NewViewStore(g.MongoClient)
-		clientRegistry.Register(toolclients.NewViewClient(viewStore, g.BackendRepo))
+	if g.viewStore != nil {
+		clientRegistry.Register(toolclients.NewViewClient(g.viewStore, g.BackendRepo, g.viewSync))
 		log.Debug().Msg("view tool registered")
 	}
 

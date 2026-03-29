@@ -62,8 +62,9 @@ type SourceService struct {
 	queryGroup    singleflight.Group // deduplicates synchronous query execution
 	hookStream    common.EventEmitter
 	eventBus      *common.EventBus
-	seenTracker   *hooks.SeenTracker
-	taskWaker     TaskWaker
+	seenTracker     *hooks.SeenTracker
+	taskWaker       TaskWaker
+	contextEnricher hooks.ContextEnricher
 
 	// Compression middleware (optional).
 	compressor      compression.ContextCompressor
@@ -94,6 +95,10 @@ func WithTaskWaker(waker TaskWaker) SourceServiceOption {
 
 func (s *SourceService) SetTaskWaker(waker TaskWaker) {
 	s.taskWaker = waker
+}
+
+func (s *SourceService) SetContextEnricher(enricher hooks.ContextEnricher) {
+	s.contextEnricher = enricher
 }
 
 func WithRecorder(recorder instrumentation.AccessRecorder) SourceServiceOption {

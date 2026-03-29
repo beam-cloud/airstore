@@ -124,7 +124,7 @@ func generateReadmeMarkdown(status SourceStatus) []byte {
 		b.WriteString(fmt.Sprintf("cat sources/%s/<view>/.query.as\n", status.Integration))
 		b.WriteString("```\n\n")
 		b.WriteString("If only `README.md` is present, no source views are configured yet.\n\n")
-		b.WriteString(fmt.Sprintf("> **Tip:** For write actions, use the tool executable at `tools/%s --help`.\n", status.Integration))
+		b.WriteString(fmt.Sprintf("> **Tip:** Use the tool executable for search, read, and write actions: `tools/%s --help`.\n", status.Integration))
 	} else {
 		b.WriteString("## Connect\n\n")
 		b.WriteString("This integration is not connected. To connect, run:\n\n")

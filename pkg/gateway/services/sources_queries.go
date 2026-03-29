@@ -223,6 +223,37 @@ func (s *SourceService) handleFollowupDirectDelivery(
 
 	message := fmt.Sprintf("%s\n\nNew items detected: %d", hook.Prompt, len(newIDs))
 
+	if s.contextEnricher != nil {
+		enrichData := map[string]any{
+			"path":        queryPath,
+			"integration": query.Integration,
+		}
+		newPaths := make([]string, 0, len(newIDs))
+		for _, id := range newIDs {
+			for _, r := range results {
+				if r.ID == id && r.Filename != "" {
+					newPaths = append(newPaths, queryPath+"/"+r.Filename)
+					break
+				}
+			}
+		}
+		if len(newPaths) > 0 {
+			enrichData["new_items"] = strings.Join(newPaths, ", ")
+		}
+		for _, r := range results {
+			if ck := strings.TrimSpace(r.Metadata["thread_id"]); ck != "" {
+				enrichData["correlation_keys"] = ck
+				break
+			}
+		}
+		if content := s.contextEnricher.FetchSourceContent(ctx, workspaceID, query.Integration, enrichData); content != "" {
+			message = message + "\n\n" + content
+		}
+		if viewRows := s.contextEnricher.FetchViewRows(ctx, workspaceID, *hook.TargetTaskID); viewRows != "" {
+			message = message + "\n\n" + viewRows
+		}
+	}
+
 	log.Info().
 		Str("path", queryPath).Str("task_id", *hook.TargetTaskID).
 		Int("new_items", len(newIDs)).
