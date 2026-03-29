@@ -2,6 +2,7 @@ package views
 
 import (
 	"encoding/json"
+	"sort"
 	"strings"
 
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -10,15 +11,17 @@ import (
 
 const cellMaxLen = 200
 
+var skipOutputTypes = map[string]struct{}{
+	"approval": {}, "status": {}, "progress": {}, "log": {}, "system": {},
+}
+
 func skipOutput(output *types.TaskOutput) bool {
 	ot := strings.TrimSpace(strings.ToLower(output.OutputType))
 	if ot == "" {
 		return true
 	}
-	for _, skip := range []string{"approval", "status", "progress", "log", "system"} {
-		if ot == skip {
-			return true
-		}
+	if _, skip := skipOutputTypes[ot]; skip {
+		return true
 	}
 	title := strings.ToLower(output.Title)
 	if strings.Contains(title, "approval required") || strings.Contains(title, "waiting for") {
@@ -275,15 +278,18 @@ func formatCrossSheetContext(rows []ViewRow, schemaKeys map[string][]string, she
 		b.WriteString("[")
 		b.WriteString(name)
 		b.WriteString("] ")
-		first := true
-		for k, v := range c {
-			if !first {
+		ck := make([]string, 0, len(c))
+		for k := range c {
+			ck = append(ck, k)
+		}
+		sort.Strings(ck)
+		for i, k := range ck {
+			if i > 0 {
 				b.WriteString(", ")
 			}
 			b.WriteString(k)
 			b.WriteString(": ")
-			b.WriteString(v)
-			first = false
+			b.WriteString(c[k])
 		}
 		b.WriteByte('\n')
 	}

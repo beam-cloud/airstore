@@ -158,11 +158,9 @@ func (s *ViewStore) GetRows(ctx context.Context, viewID, sheetID, componentID st
 			rows = append(rows, r)
 		}
 	}
-	log.Info().
+	log.Debug().
 		Str("view_id", viewID).
 		Str("sheet_id", sheetID).
-		Str("component_id", componentID).
-		Str("collection", s.collectionName(viewID)).
 		Int("rows", len(rows)).
 		Msg("view: loaded rows")
 	return rows, nil
@@ -532,12 +530,11 @@ func (s *ViewStore) MergeCells(ctx context.Context, viewID, rowID string, newCel
 	if res.MatchedCount == 0 {
 		return ErrViewRowNotFound
 	}
-	log.Info().
+	log.Debug().
 		Str("view_id", viewID).
 		Str("row_id", rowID).
-		Int("cell_updates", len(newCells)).
-		Str("output_id", outputID).
-		Msg("view: merged cells into existing row")
+		Int("cells", len(newCells)).
+		Msg("view: merged cells")
 	return nil
 }
 
@@ -1154,7 +1151,7 @@ func (s *ViewStore) SearchRows(ctx context.Context, viewID, sheetID, componentID
 		return nil, fmt.Errorf("decode search rows: %w", err)
 	}
 
-	log.Info().
+	log.Debug().
 		Str("view_id", viewID).
 		Int("criteria", len(criteria)).
 		Int("results", len(rows)).
@@ -1308,11 +1305,10 @@ func (s *ViewStore) VectorSearch(ctx context.Context, viewID, sheetID string, qu
 		return nil, fmt.Errorf("decode vector search results: %w", err)
 	}
 
-	log.Info().
+	log.Debug().
 		Str("view_id", viewID).
-		Str("sheet_id", sheetID).
 		Int("results", len(results)).
-		Msg("view: vector search complete")
+		Msg("view: vector search")
 
 	return results, nil
 }

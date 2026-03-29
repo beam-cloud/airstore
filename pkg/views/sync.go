@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -70,12 +69,6 @@ func (r *SyncResult) changed() bool {
 	return len(r.Updated) > 0 || len(r.Created) > 0
 }
 
-// ResolvedRow pairs a ViewRow with its match score.
-type ResolvedRow struct {
-	Row   ViewRow
-	Score float64
-}
-
 // Sync is the top-level entry point. It loads all schema contexts for the
 // view and runs syncSchema for every sheet. Vector search + BAML determine
 // relevance per sheet — there is no hardcoded output-type gating.
@@ -129,10 +122,7 @@ func (vs *ViewSync) Sync(ctx context.Context, output *types.TaskOutput) *SyncRes
 		Int("data_keys", len(output.Data)).
 		Msg("viewsync: Sync invoked")
 
-	type viewResult struct {
-		result *SyncResult
-	}
-	ch := make(chan viewResult, len(viewOrder))
+	ch := make(chan *SyncResult, len(viewOrder))
 	for _, viewID := range viewOrder {
 		go func(vid string) {
 			vr := &SyncResult{}
@@ -148,14 +138,13 @@ func (vs *ViewSync) Sync(ctx context.Context, output *types.TaskOutput) *SyncRes
 				mu.Unlock()
 				vr.merge(r)
 			}
-			ch <- viewResult{result: vr}
+			ch <- vr
 		}(viewID)
 	}
 
 	result := &SyncResult{}
 	for range viewOrder {
-		vr := <-ch
-		result.merge(vr.result)
+		result.merge(<-ch)
 	}
 	return result
 }
@@ -228,21 +217,12 @@ func (vs *ViewSync) SyncToolWrite(ctx context.Context, input ToolWriteInput) *Sy
 		Status:      types.TaskOutputStatusActive,
 	}
 
-	log.Info().
+	log.Debug().
 		Str("view_id", input.ViewID).
 		Str("source_sheet", input.SourceSheetID).
 		Str("row_id", input.RowID).
-		Int("target_sheets", len(targetSchemas)).
-		Int("all_schemas", len(allSchemas)).
-		Int("cells", len(input.Cells)).
-		Msg("viewsync-tool: starting cross-sheet propagation")
-
-	// Temporary diagnostic log
-	if f, err := os.OpenFile("/tmp/viewsync-debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-		fmt.Fprintf(f, "[%s] SyncToolWrite: view=%s source=%s row=%s targets=%d cells=%d\n",
-			time.Now().Format(time.RFC3339), input.ViewID, input.SourceSheetID, input.RowID, len(targetSchemas), len(input.Cells))
-		f.Close()
-	}
+		Int("targets", len(targetSchemas)).
+		Msg("viewsync-tool: propagating")
 
 	viewCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
@@ -256,28 +236,8 @@ func (vs *ViewSync) SyncToolWrite(ctx context.Context, input ToolWriteInput) *Sy
 		mu.Lock()
 		r := vs.syncSchema(viewCtx, output, sc, allSchemas)
 		mu.Unlock()
-
-		if f, err := os.OpenFile("/tmp/viewsync-debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-			rUpdated, rCreated := 0, 0
-			if r != nil {
-				rUpdated = len(r.Updated)
-				rCreated = len(r.Created)
-			}
-			fmt.Fprintf(f, "[%s] syncSchema result: sheet=%s updated=%d created=%d cols=%d\n",
-				time.Now().Format(time.RFC3339), sc.SheetID, rUpdated, rCreated, len(sc.Columns))
-			f.Close()
-		}
-
 		result.merge(r)
 	}
-
-	log.Info().
-		Str("view_id", input.ViewID).
-		Str("source_sheet", input.SourceSheetID).
-		Str("row_id", input.RowID).
-		Int("updated", len(result.Updated)).
-		Int("created", len(result.Created)).
-		Msg("viewsync-tool: cross-sheet propagation complete")
 
 	return result
 }
@@ -354,12 +314,9 @@ func (vs *ViewSync) syncVectorPath(
 		}
 	}
 
-	log.Info().
+	log.Debug().
 		Str("task_id", output.TaskID).
-		Str("view_id", sc.ViewID).
 		Str("sheet_id", sc.SheetID).
-		Int("queries", len(queries)).
-		Int("criteria", len(criteria)).
 		Int("total", len(results)).
 		Int("high", highMatches).
 		Int("moderate", moderateCandidates).
@@ -553,9 +510,8 @@ func (vs *ViewSync) classifyCandidateRows(
 		}
 	}
 
-	log.Info().
+	log.Debug().
 		Str("task_id", output.TaskID).
-		Int("candidates", len(candidates)).
 		Int("affected", len(cls.Affected_row_ids)).
 		Int("unmatched", len(cls.Unmatched_entities)).
 		Msg("viewsync: classified")
@@ -643,7 +599,7 @@ func (vs *ViewSync) upsertRow(
 		return false
 	}
 
-	log.Info().
+	log.Debug().
 		Str("task_id", output.TaskID).
 		Str("row_id", row.ID).
 		Int("cells", len(cells)).
@@ -687,13 +643,10 @@ func (vs *ViewSync) insertRows(
 
 	hints := entityHints(plan, preferredHints)
 	if len(hints) > 0 {
-		log.Info().
+		log.Debug().
 			Str("task_id", output.TaskID).
 			Str("sheet_id", sc.SheetID).
-			Str("sheet_name", sc.SheetName).
 			Int("entities", len(hints)).
-			Strs("labels", hints).
-			Bool("has_cross_ctx", crossCtx != "").
 			Msg("viewsync: inserting entity-scoped rows")
 
 		var created []string
@@ -771,13 +724,10 @@ func (vs *ViewSync) tryInsertEntity(
 		return "", false, fmt.Errorf("UpsertRow: %w", err)
 	}
 
-	log.Info().
+	log.Debug().
 		Str("task_id", output.TaskID).
-		Str("sheet_id", sc.SheetID).
 		Str("row_id", rowID).
-		Str("entity", entityHint).
 		Bool("created", created).
-		Int("cells", len(cells)).
 		Msg("viewsync: insert entity")
 
 	return rowID, true, nil

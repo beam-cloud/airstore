@@ -5,9 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"sort"
-	"time"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/repository"
@@ -363,13 +361,6 @@ func (c *ViewClient) updateRow(ctx context.Context, viewID string, workspaceID u
 		"cells_updated": len(cells),
 	}
 
-	// Temporary diagnostic
-	if f, err := os.OpenFile("/tmp/viewsync-debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-		fmt.Fprintf(f, "[%s] updateRow: sync=%v viewID=%s rowID=%s wksp=%d\n",
-			time.Now().Format(time.RFC3339), c.sync != nil, viewID, rowID, workspaceID)
-		f.Close()
-	}
-
 	if c.sync != nil {
 		row, err := c.store.GetRowByID(ctx, viewID, rowID)
 		if err == nil && row != nil {
@@ -487,13 +478,10 @@ func (c *ViewClient) smartUpsertRow(
 				log.Warn().Err(err).Str("row_id", r.ID).Msg("view-tool: merge into matched row failed")
 				continue
 			}
-			log.Info().
-				Str("view_id", viewID).
-				Str("sheet_id", sheetID).
+			log.Debug().
 				Str("row_id", r.ID).
 				Float64("score", r.Score).
-				Int("cells", len(cells)).
-				Msg("view-tool: merged into existing row via vector search")
+				Msg("view-tool: merged into matched row")
 			return r.ID, false, true, nil
 		}
 	}
