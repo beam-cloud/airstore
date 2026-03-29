@@ -122,6 +122,7 @@ func (g *WorkspaceOutputsGroup) ListOutputs(c echo.Context) error {
 		TaskID:          strPtrMaybeQuery(c.QueryParam("task_id")),
 		AgentID:         strPtrMaybeQuery(c.QueryParam("agent_id")),
 		OutputType:      strPtrMaybeQuery(c.QueryParam("output_type")),
+		SourceViewID:    strPtrMaybeQuery(c.QueryParam("source_view_id")),
 		ExcludeArchived: excludeArchived,
 		Limit:           parseLimitParam(c.QueryParam("limit"), 60, 200),
 	})

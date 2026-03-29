@@ -647,8 +647,7 @@ func (g *Gateway) registerServices() error {
 		viewCopilot := views.NewCopilot(g.s2Client, g.RedisClient, g.BackendRepo, g.storageClient, agentAPI, viewStore)
 		viewsGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/views")
 		viewsGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
-		apiv1.NewViewsGroup(viewsGroup, g.BackendRepo, viewCopilot, viewStore, g.storageClient)
-		log.Info().Msg("views API registered at /api/v1/workspaces/:workspace_id/views")
+		apiv1.NewViewsGroup(viewsGroup, g.BackendRepo, viewCopilot, viewStore, g.storageClient, g.viewSync)
 
 		var mailClient *clients.AgentMailClient
 		if g.Config.Channels.AgentMail.APIKey != "" {
@@ -666,6 +665,7 @@ func (g *Gateway) registerServices() error {
 			} else {
 				log.Warn().Msg("agentmail: no webhookUrl set — inbound emails won't create tasks. Set channels.agentMail.webhookUrl to your public URL (use ngrok for local dev)")
 			}
+
 			log.Info().Msg("agentmail integration enabled")
 		}
 

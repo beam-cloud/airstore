@@ -421,16 +421,17 @@ func (r *DataResolver) mapSheet(ctx context.Context, workspaceID uint, viewID st
 	}
 	diagnosticsCache, _ := diagnostics["cache"].(map[string]any)
 
-	boundContext := r.fetchBoundTaskContext(ctx, workspaceID, resolvedRows)
-
 	if len(uncachedIDs) == 0 {
 		resolvedRows = append(resolvedRows, ungroupedStoredRows(existingRows, taskGroups)...)
 		importRows := r.loadAndMergeImportRows(ctx, viewID, sheet.ID, comp.ID, resolvedRows, frozenColumnKeys(comp))
 		resolvedRows = append(resolvedRows, importRows...)
+		boundContext := r.fetchBoundTaskContext(ctx, workspaceID, resolvedRows)
 		enrichRowsWithOutputState(resolvedRows, allOutputs, boundContext, taskMeta)
 		sortResolvedRows(resolvedRows, taskMeta)
 		return &viewMappingResult{Rows: resolvedRows, TaskMeta: taskMeta, Diagnostics: diagnostics}, nil
 	}
+
+	boundContext := r.fetchBoundTaskContext(ctx, workspaceID, resolvedRows)
 
 	uncachedTIDs := make([]string, 0, len(uncachedIDs))
 	for tid := range uncachedIDs {
@@ -564,12 +565,15 @@ func (r *DataResolver) loadAndMergeImportRows(ctx context.Context, viewID, sheet
 	var resolved []resolvedSheetRow
 	for _, row := range importRows {
 		resolved = append(resolved, resolvedSheetRow{
-			TaskID:    row.TaskID,
-			RowID:     row.ID,
-			StableRef: row.StableRef,
-			RowKey:    row.RowKey,
-			Source:    RowSourceImport,
-			Cells:     row.MergedCells(),
+			TaskID:          row.TaskID,
+			DetailTaskID:    row.TaskID,
+			RowID:           row.ID,
+			StableRef:       row.StableRef,
+			RowKey:          row.RowKey,
+			OutputID:        firstSourceOutputID(row.SourceOutputIDs),
+			SourceOutputIDs: strings.Join(row.SourceOutputIDs, ","),
+			Source:          RowSourceImport,
+			Cells:           row.MergedCells(),
 		})
 	}
 	return resolved
@@ -2168,10 +2172,12 @@ func enrichRowsWithOutputState(
 		if blocker != nil && blocker.OutputID != "" {
 			rows[i].OutputID = blocker.OutputID
 			rows[i].OutputStatus = blocker.OutputStatus
-		} else {
+		} else if blocker != nil {
 			rows[i].OutputID = ""
 			rows[i].OutputStatus = ""
 		}
+		// No blocker (completed task): preserve OutputID from source_output_ids
+		// so the frontend can still route to the correct detail view.
 		if blocker != nil && len(blocker.OutputIDs) > 0 {
 			rows[i].BlockerOutputIDs = strings.Join(blocker.OutputIDs, ",")
 		} else {

@@ -168,6 +168,7 @@ type ToolWriteInput struct {
 	SourceComponentID string
 	Cells             map[string]string
 	RowID             string
+	ForceInsert       bool // skip candidate matching, always insert a new row
 }
 
 // SyncToolWrite propagates a view-tool write to all other sheets in the view
@@ -231,6 +232,7 @@ func (vs *ViewSync) SyncToolWrite(ctx context.Context, input ToolWriteInput) *Sy
 		Str("view_id", input.ViewID).
 		Str("source_sheet", input.SourceSheetID).
 		Str("row_id", input.RowID).
+		Bool("force_insert", input.ForceInsert).
 		Int("targets", len(targetSchemas)).
 		Msg("viewsync-tool: propagating")
 
@@ -244,12 +246,53 @@ func (vs *ViewSync) SyncToolWrite(ctx context.Context, input ToolWriteInput) *Sy
 		}
 		mu := vs.lockFor(output.TaskID, sc.SheetID)
 		mu.Lock()
-		r := vs.syncSchema(viewCtx, output, sc, allSchemas)
+		var r *SyncResult
+		if input.ForceInsert {
+			r = vs.syncSchemaInsertOnly(viewCtx, output, sc, allSchemas)
+		} else {
+			r = vs.syncSchema(viewCtx, output, sc, allSchemas)
+		}
 		mu.Unlock()
 		result.merge(r)
 	}
 
 	return result
+}
+
+// syncSchemaInsertOnly always inserts a new row, skipping candidate matching.
+// Used for import propagation where each source row must create a distinct
+// target row.
+func (vs *ViewSync) syncSchemaInsertOnly(
+	ctx context.Context,
+	output *types.TaskOutput,
+	sc types.ViewOutputSchemaContext,
+	allSchemas []types.ViewOutputSchemaContext,
+) *SyncResult {
+	cols := bamlColumns(sc)
+	data := serializeOutput(output)
+	summary := safeDeref(output.Summary)
+	viewCtxStr := buildViewContext(allSchemas)
+
+	ec := vs.store.Embedder()
+
+	var queries []string
+	plan, planErr := viewbaml.PlanRowSearch(ctx, cols, output.OutputType, output.Title, summary, data, sc.SheetName, viewCtxStr)
+	if planErr == nil {
+		criteria := buildSearchCriteria(&plan)
+		hints := entityHints(&plan, nil)
+		queries = vectorQueryTexts(criteria, hints, output.OutputType, output.Title, summary, data)
+	}
+
+	var crossCtx string
+	if ec != nil && ec.Available() && len(queries) > 0 {
+		crossCtx = vs.crossSheetContext(ctx, sc, ec, queries, allSchemas)
+	}
+
+	created, err := vs.insertRows(ctx, output, sc, cols, data, summary, &plan, entityHints(&plan, nil), crossCtx, viewCtxStr)
+	if err != nil {
+		log.Warn().Err(err).Str("task_id", output.TaskID).Msg("viewsync: force-insert failed")
+	}
+	return &SyncResult{Created: created}
 }
 
 // syncSchema handles resolution and upsert/insert for a single sheet.
