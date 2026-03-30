@@ -1201,29 +1201,31 @@ func (m *SandboxManager) ensureContextDirectoryVisible(
 		return fmt.Errorf("gateway address unavailable for workspace directory preparation")
 	}
 
-	client, closeClient, err := newSandboxContextClient(m.gatewayAddr, token)
-	if err != nil {
-		return fmt.Errorf("connect context client: %w", err)
-	}
-	defer closeClient()
-
-	ctx, cancel := context.WithTimeout(m.ctx, 15*time.Second)
-	defer cancel()
-
-	if create {
-		if err := ensureContextPath(ctx, client, storagePath); err != nil {
-			return err
+	return retryOnTransient(m.ctx, func() error {
+		client, closeClient, err := newSandboxContextClient(m.gatewayAddr, token)
+		if err != nil {
+			return fmt.Errorf("connect context client: %w", err)
 		}
-	} else {
-		if err := statContextPath(ctx, client, storagePath); err != nil {
-			return err
-		}
-	}
+		defer closeClient()
 
-	if err := waitForWorkspacePath(hostPath, 2*time.Second); err != nil {
-		return fmt.Errorf("path not visible on mount after context update: %w", err)
-	}
-	return nil
+		ctx, cancel := context.WithTimeout(m.ctx, 15*time.Second)
+		defer cancel()
+
+		if create {
+			if err := ensureContextPath(ctx, client, storagePath); err != nil {
+				return err
+			}
+		} else {
+			if err := statContextPath(ctx, client, storagePath); err != nil {
+				return err
+			}
+		}
+
+		if err := waitForWorkspacePath(hostPath, 2*time.Second); err != nil {
+			return fmt.Errorf("path not visible on mount after context update: %w", err)
+		}
+		return nil
+	})
 }
 
 func ensureContextPath(ctx context.Context, client sandboxContextClient, storagePath string) error {

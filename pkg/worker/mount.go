@@ -27,6 +27,8 @@ const (
 	killWaitTimeout          = 2 * time.Second
 	mountRestartBackoff      = 2 * time.Second
 	maxMountRestarts         = 5
+	maxInitialMountAttempts  = 3
+	initialMountRetryBackoff = 2 * time.Second
 )
 
 // MountConfig configures the mount manager
@@ -275,6 +277,8 @@ func setOOMScoreAdj(pid int) {
 
 // Mount creates a FUSE mount for a task using the given token.
 // Returns the mount path that can be bind-mounted into containers.
+// Retries the initial mount up to maxInitialMountAttempts times to
+// tolerate transient gateway unavailability (e.g. during rollouts).
 func (m *MountManager) Mount(ctx context.Context, taskID, token string) (string, error) {
 	mount, created := m.getOrCreateMount(ctx, taskID)
 	if !created {
@@ -308,27 +312,56 @@ func (m *MountManager) Mount(ctx context.Context, taskID, token string) (string,
 
 	mount.token = token
 
-	if err := m.startMountProcess(mount); err != nil {
-		return "", err
+	var lastErr error
+	for attempt := range maxInitialMountAttempts {
+		if ctx.Err() != nil {
+			if lastErr == nil {
+				lastErr = ctx.Err()
+			}
+			return "", fmt.Errorf("task %s: %w", taskID, lastErr)
+		}
+
+		if err := m.startMountProcess(mount); err != nil {
+			return "", err
+		}
+
+		if err := m.waitMountReady(mount); err != nil {
+			lastErr = err
+
+			if !isMountProcessExitError(err) {
+				return "", fmt.Errorf("task %s: %w", taskID, err)
+			}
+
+			if attempt < maxInitialMountAttempts-1 {
+				log.Warn().Err(err).Str("task_id", taskID).Int("attempt", attempt+1).
+					Msg("initial mount failed (gateway may be rolling out), retrying")
+				exec.Command(fusermountBinary, fusermountUnmountFlag, mount.mountPath).Run()
+				time.Sleep(initialMountRetryBackoff)
+				continue
+			}
+			return "", fmt.Errorf("task %s: %w", taskID, err)
+		}
+
+		makeSharedMount(mount.mountPath)
+		m.markMountReady(mount)
+		cleanupOnError = false
+		go m.watchMount(taskID, mount)
+
+		log.Info().
+			Str("task_id", taskID).
+			Str("mount_path", mount.mountPath).
+			Msg("task mount ready")
+		return mount.mountPath, nil
 	}
+	return "", fmt.Errorf("task %s: %w", taskID, lastErr)
+}
 
-	if err := m.waitMountReady(mount); err != nil {
-		return "", fmt.Errorf("task %s: %w", taskID, err)
-	}
-
-	// Now that the FUSE mount is live, mark it shared so restarts propagate
-	// through rslave bind mounts into the sandbox.
-	makeSharedMount(mount.mountPath)
-
-	m.markMountReady(mount)
-	cleanupOnError = false
-	go m.watchMount(taskID, mount)
-
-	log.Info().
-		Str("task_id", taskID).
-		Str("mount_path", mount.mountPath).
-		Msg("task mount ready")
-	return mount.mountPath, nil
+// isMountProcessExitError returns true when the mount process exited before
+// becoming ready — typically caused by a transient gateway auth failure.
+func isMountProcessExitError(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "mount process exited before") ||
+		strings.Contains(msg, "mount process exited during")
 }
 
 // watchMount monitors a mount process and restarts it if it exits unexpectedly.

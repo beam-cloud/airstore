@@ -39,7 +39,7 @@ type WorkerService struct {
 }
 
 const (
-	defaultRunClaimLeaseTTL       = 45 * time.Second
+	defaultRunClaimLeaseTTL       = 120 * time.Second
 	defaultUnclaimedRunStaleAfter = 2 * time.Minute
 	defaultRecoveryLoopInterval   = 10 * time.Second
 	defaultRecoveryLoopBatchSize  = 50

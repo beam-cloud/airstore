@@ -18,14 +18,10 @@ import (
 	"github.com/beam-cloud/airstore/pkg/runtime"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/rs/zerolog/log"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 const (
-	defaultHeartbeatInterval  = 10 * time.Second
-	setTaskResultMaxAttempts  = 3
-	setTaskResultRetryTimeout = 10 * time.Second
+	defaultHeartbeatInterval = 10 * time.Second
 )
 
 // Worker represents a airstore worker that:
@@ -376,25 +372,20 @@ func (w *Worker) executeTask(task types.RunExecution) {
 		}
 		return
 	}
-	if err := w.gatewayClient.SetTaskStarted(w.ctx, task.ExternalId, attemptID); err != nil {
-		code := status.Code(err)
-		lowerErr := strings.ToLower(err.Error())
-		taskMissing := code == codes.NotFound ||
-			(code == codes.Internal && (strings.Contains(lowerErr, "task not found") || strings.Contains(lowerErr, "run execution not found")))
-		switch {
-		case code == codes.FailedPrecondition, taskMissing:
-			reason := "gateway rejected task start due to terminal run state"
-			if taskMissing {
-				reason = "gateway rejected task start because run execution was not found"
-			}
-			addTaskExecutionContext(log.Info().Err(err), task).Msg(reason)
-			if qErr := w.taskQueue.Fail(w.ctx, task.ExternalId, fmt.Errorf("task start rejected: %w", err)); qErr != nil {
-				addTaskExecutionContext(log.Warn().Err(qErr), task).Msg("failed to mark skipped task as failed in queue")
-			}
-			return
-		default:
-			addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to mark task as started")
+	if err := retryOnTransient(w.ctx, func() error {
+		ctx, cancel := context.WithTimeout(w.ctx, gatewayRetryTimeout)
+		defer cancel()
+		return w.gatewayClient.SetTaskStarted(ctx, task.ExternalId, attemptID)
+	}); err != nil {
+		if isNonRetriableGatewayError(err) {
+			addTaskExecutionContext(log.Info().Err(err), task).Msg("gateway rejected task start")
+		} else {
+			addTaskExecutionContext(log.Error().Err(err), task).Msg("gateway unreachable for task start after retries, requeueing")
 		}
+		if qErr := w.taskQueue.Fail(w.ctx, task.ExternalId, fmt.Errorf("task start failed: %w", err)); qErr != nil {
+			addTaskExecutionContext(log.Warn().Err(qErr), task).Msg("failed to mark task as failed in queue")
+		}
+		return
 	}
 
 	taskCtx, taskCancel := context.WithCancel(w.ctx)
@@ -448,8 +439,8 @@ func (w *Worker) executeTask(task types.RunExecution) {
 // the UI reflects the state change immediately. Returns true if the report
 // succeeded (so finishTask can skip the redundant call).
 func (w *Worker) reportTaskResult(task types.RunExecution, result *types.RunExecutionResult) bool {
-	err := setTaskResultWithRetry(w.ctx, task, result, w.gatewayClient.SetTaskResult, contextSleep)
-	if err != nil && !isNonRetriableSetTaskResultError(err) {
+	err := w.setTaskResultWithRetry(task, result)
+	if err != nil && !isNonRetriableGatewayError(err) {
 		addTaskExecutionContext(log.Warn().Err(err), task).
 			Msg("eager result report failed, finishTask will retry")
 		return false
@@ -472,15 +463,14 @@ func (w *Worker) finishTask(task types.RunExecution, result *types.RunExecutionR
 	}
 
 	if !alreadyReported {
-		reportErr := setTaskResultWithRetry(w.ctx, task, result, w.gatewayClient.SetTaskResult, contextSleep)
-		if reportErr != nil {
-			if isNonRetriableSetTaskResultError(reportErr) {
-				addTaskExecutionContext(log.Warn().Err(reportErr), task).
-					Msg("failed to report result to gateway, not retrying non-retriable error")
-			} else {
-				addTaskExecutionContext(log.Error().Err(reportErr), task).
-					Msg("failed to report result to gateway after retries")
+		if err := w.setTaskResultWithRetry(task, result); err != nil {
+			lvl := log.Error()
+			msg := "failed to report result to gateway after retries"
+			if isNonRetriableGatewayError(err) {
+				lvl = log.Warn()
+				msg = "failed to report result to gateway, not retrying non-retriable error"
 			}
+			addTaskExecutionContext(lvl.Err(err), task).Msg(msg)
 		}
 	}
 
@@ -488,73 +478,17 @@ func (w *Worker) finishTask(task types.RunExecution, result *types.RunExecutionR
 }
 
 // setTaskResultWithRetry reports the task result to the gateway, retrying
-// transient failures with exponential backoff. The caller's context controls
-// the overall lifetime: retries proceed while ctx is active and stop
-// immediately once it is cancelled (e.g. after the shutdown timeout).
-func setTaskResultWithRetry(
-	ctx context.Context,
-	task types.RunExecution,
-	result *types.RunExecutionResult,
-	reportFn func(context.Context, string, string, *types.RunExecutionResult) error,
-	sleepFn func(context.Context, time.Duration),
-) error {
+// transient failures with exponential backoff.
+func (w *Worker) setTaskResultWithRetry(task types.RunExecution, result *types.RunExecutionResult) error {
 	attemptID := ""
 	if task.RunAttemptID != nil {
 		attemptID = *task.RunAttemptID
 	}
-
-	var lastErr error
-	for attempt := range setTaskResultMaxAttempts {
-		if attempt > 0 {
-			sleepFn(ctx, time.Duration(1<<(attempt-1))*time.Second)
-		}
-		if ctx.Err() != nil {
-			if lastErr == nil {
-				lastErr = ctx.Err()
-			}
-			return lastErr
-		}
-
-		attemptCtx, cancel := context.WithTimeout(ctx, setTaskResultRetryTimeout)
-		lastErr = reportFn(attemptCtx, task.ExternalId, attemptID, result)
-		cancel()
-		if lastErr == nil {
-			return nil
-		}
-		if isNonRetriableSetTaskResultError(lastErr) {
-			return lastErr
-		}
-		if attempt < setTaskResultMaxAttempts-1 {
-			addTaskExecutionContext(log.Warn().Err(lastErr).Int("attempt", attempt+1), task).
-				Msg("failed to report result to gateway, retrying")
-		}
-	}
-	return lastErr
-}
-
-func isNonRetriableSetTaskResultError(err error) bool {
-	if err == nil {
-		return false
-	}
-	switch status.Code(err) {
-	case codes.NotFound, codes.FailedPrecondition, codes.InvalidArgument, codes.PermissionDenied, codes.Unauthenticated:
-		return true
-	}
-
-	lower := strings.ToLower(err.Error())
-	return strings.Contains(lower, "task not found") ||
-		strings.Contains(lower, "run execution not found") ||
-		strings.Contains(lower, "already finished")
-}
-
-// contextSleep sleeps for d or until ctx is cancelled, whichever comes first.
-func contextSleep(ctx context.Context, d time.Duration) {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-t.C:
-	case <-ctx.Done():
-	}
+	return retryOnTransient(w.ctx, func() error {
+		ctx, cancel := context.WithTimeout(w.ctx, gatewayRetryTimeout)
+		defer cancel()
+		return w.gatewayClient.SetTaskResult(ctx, task.ExternalId, attemptID, result)
+	})
 }
 
 // register registers the worker with the gateway

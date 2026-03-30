@@ -1146,7 +1146,7 @@ func (b *PostgresBackend) UpdateTaskStateIfCurrentRun(ctx context.Context, updat
 		    wake_count = CASE WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN wake_count ELSE 0 END,
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = $1
-		  AND state NOT IN ('done'::agent_task_state, 'dropped'::agent_task_state, 'cancelled'::agent_task_state)
+		  AND state NOT IN ('done'::agent_task_state, 'cancelled'::agent_task_state)
 	`
 	var args []any
 	if expectedRunID == "" {

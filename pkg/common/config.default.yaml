@@ -92,7 +92,7 @@ scheduler:
   cleanupInterval: 1m
   heartbeatInterval: 10s
   heartbeatTimeout: 30s
-  runClaimLeaseTTL: 45s
+  runClaimLeaseTTL: 120s
   recoveryLoopEnabled: true
   recoveryLoopInterval: 10s
   recoveryLoopBatchSize: 50

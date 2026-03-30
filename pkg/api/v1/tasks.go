@@ -42,6 +42,7 @@ func (g *WorkspaceTasksGroup) registerRoutes() {
 	g.routerGroup.GET("/:task_id/stream", g.StreamTaskEvents)
 	g.routerGroup.POST("/:task_id/input", g.SubmitInput)
 	g.routerGroup.POST("/:task_id/cancel", g.CancelTask)
+	g.routerGroup.POST("/:task_id/retry", g.RetryTask)
 	g.routerGroup.POST("/:task_id/archive", g.ArchiveTask)
 	g.routerGroup.GET("/:task_id/subtasks", g.ListSubtasks)
 
@@ -550,6 +551,27 @@ func (g *WorkspaceTasksGroup) CancelTask(c echo.Context) error {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 	return SuccessResponse(c, map[string]any{"status": "cancelled"})
+}
+
+func (g *WorkspaceTasksGroup) RetryTask(c echo.Context) error {
+	if g.agents == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "task service unavailable")
+	}
+	workspaceID, err := requireWorkspaceID(c)
+	if err != nil {
+		return err
+	}
+	taskID := c.Param("task_id")
+	if err := g.agents.RetryTask(c.Request().Context(), workspaceID, taskID); err != nil {
+		if _, ok := err.(*types.ErrAgentTaskNotFound); ok {
+			return ErrorResponse(c, http.StatusNotFound, "task not found")
+		}
+		if _, ok := err.(*types.ErrTaskNotRetryable); ok {
+			return ErrorResponse(c, http.StatusBadRequest, err.Error())
+		}
+		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
+	}
+	return SuccessResponse(c, map[string]any{"status": "retrying"})
 }
 
 func (g *WorkspaceTasksGroup) ArchiveTask(c echo.Context) error {

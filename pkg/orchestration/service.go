@@ -1187,7 +1187,10 @@ var retryablePatterns = []string{
 	"tls handshake timeout", "service unavailable", "503", "temporary failure", // infra
 	"failed to fetch image", "failed to pull", "failed to prepare rootfs", // image pull
 	"sandbox exited before startup", "failed to start sandbox", // sandbox startup
-	"no conversation found", // claude session not found (stale resume)
+	"no conversation found",       // claude session not found (stale resume)
+	"orphaned run recovered",      // worker recovery after claim lease expiry
+	"invalid token",               // transient auth failure during gateway rollout
+	"mount process exited before", // FUSE mount failure during gateway rollout
 }
 
 func isRetryableError(errText string) bool {
