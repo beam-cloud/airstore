@@ -123,6 +123,14 @@ func (c *OutlookClient) request(ctx context.Context, creds *types.IntegrationCre
 
 // requestURL performs an authenticated GET to an absolute URL (for pagination).
 func (c *OutlookClient) requestURL(ctx context.Context, creds *types.IntegrationCredentials, fullURL string, result any) error {
+	parsed, err := url.Parse(fullURL)
+	if err != nil {
+		return fmt.Errorf("invalid pagination URL: %w", err)
+	}
+	if parsed.Hostname() != "graph.microsoft.com" {
+		return fmt.Errorf("refusing to follow pagination URL to non-Microsoft host: %s", parsed.Hostname())
+	}
+
 	req, err := http.NewRequestWithContext(ctx, "GET", fullURL, nil)
 	if err != nil {
 		return err

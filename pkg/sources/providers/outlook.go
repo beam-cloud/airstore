@@ -458,6 +458,10 @@ func (o *OutlookProvider) readMessages(ctx context.Context, pctx *sources.Provid
 
 const outlookCacheTTL = 10 * time.Minute
 
+func outlookCacheKey(pctx *sources.ProviderContext, category string) string {
+	return fmt.Sprintf("%d:%d:%s", pctx.WorkspaceId, pctx.MemberId, category)
+}
+
 func (o *OutlookProvider) getValidatedCategoryMessages(ctx context.Context, pctx *sources.ProviderContext, category string) ([]outlookMessage, error) {
 	if !isValidOutlookCategory(category) {
 		return nil, sources.ErrNotFound
@@ -466,8 +470,10 @@ func (o *OutlookProvider) getValidatedCategoryMessages(ctx context.Context, pctx
 }
 
 func (o *OutlookProvider) getCategoryMessages(ctx context.Context, pctx *sources.ProviderContext, category string) ([]outlookMessage, error) {
+	key := outlookCacheKey(pctx, category)
+
 	o.cacheMu.RLock()
-	if cached, ok := o.messageCache[category]; ok && time.Since(cached.fetchedAt) < outlookCacheTTL {
+	if cached, ok := o.messageCache[key]; ok && time.Since(cached.fetchedAt) < outlookCacheTTL {
 		o.cacheMu.RUnlock()
 		return cached.messages, nil
 	}
@@ -479,7 +485,7 @@ func (o *OutlookProvider) getCategoryMessages(ctx context.Context, pctx *sources
 	}
 
 	o.cacheMu.Lock()
-	o.messageCache[category] = &outlookCategoryCache{
+	o.messageCache[key] = &outlookCategoryCache{
 		messages:  messages,
 		fetchedAt: time.Now(),
 	}
