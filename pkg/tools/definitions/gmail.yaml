@@ -90,3 +90,9 @@ commands:
         short: -t
         flag: --thread-id
         description: "Optional Gmail thread ID to send within"
+
+      - name: draft_id
+        type: string
+        short: -d
+        flag: --draft-id
+        description: "Optional draft ID to delete after sending (from a previous create-draft)"

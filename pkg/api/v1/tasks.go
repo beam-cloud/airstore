@@ -347,7 +347,8 @@ func (g *WorkspaceTasksGroup) StreamWorkspaceTasks(c echo.Context) error {
 			}
 		case _, ok := <-liveCh:
 			if !ok {
-				return nil
+				liveCh = nil
+				continue
 			}
 			if err := emit(sseEventBatch); err != nil {
 				return nil
@@ -507,7 +508,8 @@ func (g *WorkspaceTasksGroup) streamTaskEventsSSE(c echo.Context) error {
 			}
 		case _, ok := <-taskLiveCh:
 			if !ok {
-				return nil
+				taskLiveCh = nil
+				continue
 			}
 			if err := emitBatch(); err != nil {
 				return nil

@@ -1050,7 +1050,6 @@ func (r *DataResolver) resolveAgentIDsFromRefs(ctx context.Context, workspaceID 
 func baseTaskOutputFilter() types.TaskOutputListFilter {
 	return types.TaskOutputListFilter{
 		ExcludeArchived: false,
-		Limit:           200,
 	}
 }
 

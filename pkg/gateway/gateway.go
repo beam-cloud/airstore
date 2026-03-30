@@ -313,11 +313,11 @@ func (g *Gateway) initGRPC() error {
 		grpc.MaxRecvMsgSize(g.Config.Gateway.GRPC.MaxRecvMsgSize * 1024 * 1024),
 		grpc.MaxSendMsgSize(g.Config.Gateway.GRPC.MaxSendMsgSize * 1024 * 1024),
 		grpc.KeepaliveParams(keepalive.ServerParameters{
-			MaxConnectionIdle:     15 * time.Minute, // close idle connections to reclaim resources
-			MaxConnectionAge:      30 * time.Minute, // force reconnect to rebalance across replicas
-			MaxConnectionAgeGrace: 10 * time.Second, // grace period for in-flight RPCs
-			Time:                  60 * time.Second, // ping idle clients every 60s
-			Timeout:               10 * time.Second, // wait 10s for ping ack
+			MaxConnectionIdle:     2 * time.Hour,    // close idle connections to reclaim resources
+			MaxConnectionAge:      4 * time.Hour,    // force reconnect to rebalance across replicas
+			MaxConnectionAgeGrace: 30 * time.Second, // grace period for in-flight RPCs
+			Time:                  60 * time.Second,  // ping idle clients every 60s
+			Timeout:               10 * time.Second,  // wait 10s for ping ack
 		}),
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
 			MinTime:             30 * time.Second, // minimum time between client pings
