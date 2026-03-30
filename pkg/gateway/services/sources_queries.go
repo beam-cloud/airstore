@@ -240,12 +240,32 @@ func (s *SourceService) handleFollowupDirectDelivery(
 		if len(newPaths) > 0 {
 			enrichData["new_items"] = strings.Join(newPaths, ", ")
 		}
-		for _, r := range results {
-			if ck := strings.TrimSpace(r.Metadata["thread_id"]); ck != "" {
-				enrichData["correlation_keys"] = ck
-				break
+		var threadIDs []string
+		seen := make(map[string]struct{})
+		for _, id := range newIDs {
+			for _, r := range results {
+				if r.ID == id {
+					if ck := strings.TrimSpace(r.Metadata["thread_id"]); ck != "" {
+						if _, dup := seen[ck]; !dup {
+							threadIDs = append(threadIDs, ck)
+							seen[ck] = struct{}{}
+						}
+					}
+					break
+				}
 			}
 		}
+		if len(threadIDs) > 0 {
+			enrichData["correlation_keys"] = strings.Join(threadIDs, ",")
+		}
+
+		if query.Integration == "gmail" && len(threadIDs) > 0 {
+			message += "\n\n## Reply Instructions"
+			for _, tid := range threadIDs {
+				message += fmt.Sprintf("\nGmail Thread ID: %s\nIMPORTANT: When replying to this email, use --thread-id %s to keep the conversation in the same thread.", tid, tid)
+			}
+		}
+
 		if content := s.contextEnricher.FetchSourceContent(ctx, workspaceID, query.Integration, enrichData); content != "" {
 			message = message + "\n\n" + content
 		}

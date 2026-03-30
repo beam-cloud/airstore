@@ -86,6 +86,9 @@ type Gateway struct {
 
 	// Product analytics event recorder
 	eventRecorder instrumentation.EventRecorder
+
+	// gRPC health server for signalling NOT_SERVING before draining
+	grpcHealthServer *health.Server
 }
 
 func NewGateway() (*Gateway, error) {
@@ -327,13 +330,11 @@ func (g *Gateway) initGRPC() error {
 
 	g.grpcServer = grpc.NewServer(serverOptions...)
 
-	// Register health service
+	// Register health service; shutdown is called explicitly in Gateway.shutdown()
+	// before GracefulStop so clients learn the server is going away early.
 	hs := health.NewServer()
 	hs.Resume()
-	go func() {
-		<-g.ctx.Done()
-		hs.Shutdown()
-	}()
+	g.grpcHealthServer = hs
 	grpc_health_v1.RegisterHealthServer(g.grpcServer, hs)
 
 	return nil
@@ -868,6 +869,12 @@ func (g *Gateway) Start() error {
 
 // shutdown gracefully shuts down the gateway
 func (g *Gateway) shutdown() {
+	// Signal NOT_SERVING before draining so gRPC-health-aware clients and
+	// load balancers stop sending new requests to this pod.
+	if g.grpcHealthServer != nil {
+		g.grpcHealthServer.Shutdown()
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), g.Config.Gateway.ShutdownTimeout)
 	defer cancel()
 

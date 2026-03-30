@@ -246,6 +246,13 @@ func buildSourceWakePrompt(match repository.TaskSourceWatchMatch, integration, n
 		b.WriteString(match.Reason)
 		b.WriteString("\n")
 	}
+	if integration == "gmail" && match.CorrelationKey != "" {
+		b.WriteString("Gmail Thread ID: ")
+		b.WriteString(match.CorrelationKey)
+		b.WriteString("\nIMPORTANT: Use --thread-id ")
+		b.WriteString(match.CorrelationKey)
+		b.WriteString(" when replying to keep the conversation in the same thread.\n")
+	}
 	b.WriteString("Resume your task and process the new information.")
 	return b.String()
 }

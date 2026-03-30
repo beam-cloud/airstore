@@ -39,6 +39,8 @@ var validTransitions = map[types.AgentTaskState][]types.AgentTaskState{
 	types.AgentTaskStateRunning:  {types.AgentTaskStateWaiting, types.AgentTaskStateDone, types.AgentTaskStateError, types.AgentTaskStateSleeping, types.AgentTaskStateDropped, types.AgentTaskStateQueued, types.AgentTaskStateCancelled},
 	types.AgentTaskStateWaiting:  {types.AgentTaskStateRunning, types.AgentTaskStateDone, types.AgentTaskStateError, types.AgentTaskStateQueued, types.AgentTaskStateCancelled},
 	types.AgentTaskStateSleeping: {types.AgentTaskStateQueued, types.AgentTaskStateCancelled},
+	types.AgentTaskStateError:    {types.AgentTaskStateQueued, types.AgentTaskStateCancelled},
+	types.AgentTaskStateDropped:  {types.AgentTaskStateQueued, types.AgentTaskStateCancelled},
 }
 
 func isValidTransition(from, to types.AgentTaskState) bool {
@@ -365,6 +367,47 @@ func (lc *TaskLifecycle) Cancel(ctx context.Context, taskID string) error {
 		TaskID: taskID,
 		State:  types.AgentTaskStateCancelled,
 	})
+}
+
+// Retry transitions an error or dropped task back to queued and enqueues
+// a fresh dispatch so the orchestration loop picks it up again.
+func (lc *TaskLifecycle) Retry(ctx context.Context, taskID string) error {
+	if lc == nil || lc.backend == nil {
+		return nil
+	}
+	task, err := lc.backend.GetTaskByID(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if task == nil {
+		return &types.ErrAgentTaskNotFound{ID: taskID}
+	}
+	if task.State != types.AgentTaskStateError && task.State != types.AgentTaskStateDropped {
+		return &types.ErrTaskNotRetryable{ID: taskID, State: task.State}
+	}
+
+	if err := lc.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
+		TaskID: taskID,
+		State:  types.AgentTaskStateQueued,
+	}); err != nil {
+		return fmt.Errorf("transition task to queued: %w", err)
+	}
+
+	dedupeKey := fmt.Sprintf("retry:%s:%d", taskID, time.Now().UnixNano())
+	outboxEvent := &types.OrchestrationOutboxEvent{
+		EventType: types.OrchestrationOutboxEventTypeTaskDispatch,
+		DedupeKey: dedupeKey,
+		PayloadJSON: map[string]any{
+			types.OrchestrationOutboxPayloadTaskID: taskID,
+		},
+	}
+	if err := lc.backend.EnqueueOrchestrationOutboxEvent(ctx, outboxEvent); err != nil {
+		return fmt.Errorf("enqueue retry dispatch: %w", err)
+	}
+
+	log.Info().Str("task_id", taskID).Str("from_state", string(task.State)).Msg("task retried")
+	lc.publishUpdate(ctx, task.WorkspaceID, task.ID)
+	return nil
 }
 
 // Dispatch transitions queued -> running when a run is materialized.

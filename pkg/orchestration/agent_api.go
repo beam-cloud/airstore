@@ -483,6 +483,22 @@ func (a *AgentAPI) CancelTask(ctx context.Context, workspaceID uint, taskID stri
 	return nil
 }
 
+func (a *AgentAPI) RetryTask(ctx context.Context, workspaceID uint, taskID string) error {
+	task, err := a.backend.GetTask(ctx, workspaceID, taskID)
+	if err != nil {
+		return err
+	}
+	if task.State != types.AgentTaskStateError && task.State != types.AgentTaskStateDropped {
+		return &types.ErrTaskNotRetryable{ID: taskID, State: task.State}
+	}
+
+	lifecycle := NewTaskLifecycle(a.backend, nil, nil)
+	if a.runtime != nil {
+		lifecycle = a.runtime.ensureLifecycle()
+	}
+	return lifecycle.Retry(ctx, task.ID)
+}
+
 func (a *AgentAPI) supersedePendingTaskOutputs(ctx context.Context, workspaceID uint, taskID string) error {
 	outputs, err := a.backend.ListTaskOutputs(ctx, workspaceID, taskID)
 	if err != nil {

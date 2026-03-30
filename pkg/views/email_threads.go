@@ -111,6 +111,9 @@ func (f *EmailThreadFetcher) fetchThread(ctx context.Context, token, threadID st
 	}
 
 	senderEmail := f.detectSenderEmail(ctx, token)
+	if senderEmail == "" {
+		log.Warn().Str("thread_id", threadID).Msg("gmail: sender email unknown, using SENT label fallback for outbound detection")
+	}
 
 	messages := make([]ThreadMessage, 0, len(rawMessages))
 	for _, rm := range rawMessages {
@@ -152,6 +155,14 @@ func (f *EmailThreadFetcher) parseThreadMessage(msg map[string]any, threadID, se
 
 	from := headers["From"]
 	isOutbound := senderEmail != "" && containsEmail(from, senderEmail)
+	if !isOutbound && senderEmail == "" {
+		for _, l := range labels {
+			if l == "SENT" {
+				isOutbound = true
+				break
+			}
+		}
+	}
 
 	dateStr := headers["Date"]
 	if dateStr == "" && timestamp > 0 {
@@ -177,6 +188,7 @@ func (f *EmailThreadFetcher) parseThreadMessage(msg map[string]any, threadID, se
 func (f *EmailThreadFetcher) detectSenderEmail(ctx context.Context, token string) string {
 	var profile map[string]any
 	if err := f.gmailGet(ctx, token, "/users/me/profile", &profile); err != nil {
+		log.Warn().Err(err).Msg("gmail: failed to detect sender email from profile, outbound detection will fall back to SENT label")
 		return ""
 	}
 	email, _ := profile["emailAddress"].(string)

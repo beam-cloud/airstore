@@ -1178,6 +1178,15 @@ func (e *ErrTaskNotCancellable) Error() string {
 	return fmt.Sprintf("task %s cannot be cancelled (state: %s)", e.ID, e.State)
 }
 
+type ErrTaskNotRetryable struct {
+	ID    string
+	State AgentTaskState
+}
+
+func (e *ErrTaskNotRetryable) Error() string {
+	return fmt.Sprintf("task %s cannot be retried (state: %s)", e.ID, e.State)
+}
+
 type ErrTaskNotArchivable struct {
 	ID    string
 	State AgentTaskState

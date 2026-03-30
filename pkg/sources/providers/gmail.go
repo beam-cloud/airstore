@@ -2220,10 +2220,21 @@ func (g *GmailProvider) formatThreadForHook(ctx context.Context, token, threadID
 		if len(body) > hookMaxBodyLen {
 			body = body[:hookMaxBodyLen] + "..."
 		}
+		outbound := senderEmail != "" && strings.Contains(strings.ToLower(hdrs["From"]), senderEmail)
+		if !outbound && senderEmail == "" {
+			if rawLabels, ok := m["labelIds"].([]any); ok {
+				for _, l := range rawLabels {
+					if s, _ := l.(string); s == "SENT" {
+						outbound = true
+						break
+					}
+				}
+			}
+		}
 		msgs = append(msgs, parsed{
 			from: hdrs["From"], to: hdrs["To"], subject: hdrs["Subject"],
 			date: dateStr, body: body, timestamp: ts,
-			outbound: senderEmail != "" && strings.Contains(strings.ToLower(hdrs["From"]), senderEmail),
+			outbound: outbound,
 		})
 	}
 	sort.Slice(msgs, func(i, j int) bool { return msgs[i].timestamp < msgs[j].timestamp })
@@ -2257,6 +2268,7 @@ func (g *GmailProvider) formatThreadForHook(ctx context.Context, token, threadID
 func (g *GmailProvider) detectSenderEmail(ctx context.Context, token string) string {
 	var profile map[string]any
 	if err := g.request(ctx, token, "/users/me/profile", &profile); err != nil {
+		log.Warn().Err(err).Msg("gmail: failed to detect sender email from profile, outbound detection will fall back to SENT label")
 		return ""
 	}
 	email, _ := profile["emailAddress"].(string)

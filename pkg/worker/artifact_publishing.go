@@ -483,7 +483,7 @@ func publishOutputCandidate(
 		predecessorID = tracker.PredecessorID(normalized)
 	}
 
-	serverID, err := client.CreateTaskOutput(ctx, req)
+	serverID, err := createTaskOutputWithRetry(ctx, client, req)
 	if err != nil {
 		return "", err
 	}
@@ -512,6 +512,21 @@ func publishOutputCandidate(
 	}
 
 	return serverID, nil
+}
+
+// createTaskOutputWithRetry retries CreateTaskOutput on transient gRPC errors
+// (e.g. during gateway rollouts). The RPC supports idempotent IDs, so retries
+// are safe even if the first request was partially processed.
+func createTaskOutputWithRetry(ctx context.Context, client taskOutputClient, req *pb.CreateTaskOutputRequest) (string, error) {
+	var serverID string
+	err := retryOnTransient(ctx, func() error {
+		id, err := client.CreateTaskOutput(ctx, req)
+		if err == nil {
+			serverID = id
+		}
+		return err
+	})
+	return serverID, err
 }
 
 func enrichOutputCandidateWithViewSchema(
