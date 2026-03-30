@@ -1097,8 +1097,15 @@ func (b *PostgresBackend) UpdateTaskState(ctx context.Context, update types.Task
 		      WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN NULL
 		      ELSE dispatched_at
 		    END,
-		    dropped_reason = CASE WHEN $2::agent_task_state = 'dropped'::agent_task_state THEN $4 ELSE dropped_reason END,
-		    target_run_id = COALESCE($5::uuid, target_run_id),
+		    dropped_reason = CASE
+		      WHEN $2::agent_task_state = 'dropped'::agent_task_state THEN $4
+		      WHEN $2::agent_task_state = 'queued'::agent_task_state THEN NULL
+		      ELSE dropped_reason
+		    END,
+		    target_run_id = CASE
+		      WHEN $2::agent_task_state = 'queued'::agent_task_state THEN $5::uuid
+		      ELSE COALESCE($5::uuid, target_run_id)
+		    END,
 		    current_blocker_id = NULL,
 		    input_kind = NULL,
 		    waiting_summary = NULL,
@@ -1146,7 +1153,7 @@ func (b *PostgresBackend) UpdateTaskStateIfCurrentRun(ctx context.Context, updat
 		    wake_count = CASE WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN wake_count ELSE 0 END,
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = $1
-		  AND state NOT IN ('done'::agent_task_state, 'cancelled'::agent_task_state)
+		  AND state NOT IN ('done'::agent_task_state)
 	`
 	var args []any
 	if expectedRunID == "" {

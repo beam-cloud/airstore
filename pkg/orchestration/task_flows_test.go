@@ -194,11 +194,11 @@ func TestRequeueTaskForResumeDoesNotConsumeInputBeforeCAS(t *testing.T) {
 		},
 	}
 
-	if err := flows.requeueTaskForResume(context.Background(), task, run); err == nil {
-		t.Fatal("expected requeueTaskForResume to fail when compare-and-set misses")
+	if err := flows.requeueTaskForResume(context.Background(), task, run); err != nil {
+		t.Fatalf("unexpected error on CAS miss: %v", err)
 	}
 	if backend.consumeCalls != 0 {
-		t.Fatalf("consume oldest pending input calls = %d, want 0", backend.consumeCalls)
+		t.Fatalf("consume oldest pending input calls = %d, want 0 (CAS miss should not consume)", backend.consumeCalls)
 	}
 	if got := stringFromPayload(task.PayloadJSON, "message"); got != "original prompt" {
 		t.Fatalf("task payload message = %q, want original prompt", got)

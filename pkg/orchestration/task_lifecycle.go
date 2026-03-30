@@ -39,8 +39,9 @@ var validTransitions = map[types.AgentTaskState][]types.AgentTaskState{
 	types.AgentTaskStateRunning:  {types.AgentTaskStateWaiting, types.AgentTaskStateDone, types.AgentTaskStateError, types.AgentTaskStateSleeping, types.AgentTaskStateDropped, types.AgentTaskStateQueued, types.AgentTaskStateCancelled},
 	types.AgentTaskStateWaiting:  {types.AgentTaskStateRunning, types.AgentTaskStateDone, types.AgentTaskStateError, types.AgentTaskStateQueued, types.AgentTaskStateCancelled},
 	types.AgentTaskStateSleeping: {types.AgentTaskStateQueued, types.AgentTaskStateCancelled},
-	types.AgentTaskStateError:    {types.AgentTaskStateQueued, types.AgentTaskStateCancelled},
-	types.AgentTaskStateDropped:  {types.AgentTaskStateQueued, types.AgentTaskStateCancelled},
+	types.AgentTaskStateError:     {types.AgentTaskStateQueued, types.AgentTaskStateCancelled},
+	types.AgentTaskStateDropped:   {types.AgentTaskStateQueued, types.AgentTaskStateCancelled},
+	types.AgentTaskStateCancelled: {types.AgentTaskStateQueued},
 }
 
 func isValidTransition(from, to types.AgentTaskState) bool {
@@ -369,8 +370,8 @@ func (lc *TaskLifecycle) Cancel(ctx context.Context, taskID string) error {
 	})
 }
 
-// Retry transitions an error or dropped task back to queued and enqueues
-// a fresh dispatch so the orchestration loop picks it up again.
+// Retry transitions a stopped task (error, dropped, or cancelled) back to
+// queued and enqueues a fresh dispatch so the orchestration loop picks it up.
 func (lc *TaskLifecycle) Retry(ctx context.Context, taskID string) error {
 	if lc == nil || lc.backend == nil {
 		return nil
@@ -382,7 +383,7 @@ func (lc *TaskLifecycle) Retry(ctx context.Context, taskID string) error {
 	if task == nil {
 		return &types.ErrAgentTaskNotFound{ID: taskID}
 	}
-	if task.State != types.AgentTaskStateError && task.State != types.AgentTaskStateDropped {
+	if !task.State.IsRetryable() {
 		return &types.ErrTaskNotRetryable{ID: taskID, State: task.State}
 	}
 

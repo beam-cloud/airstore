@@ -187,6 +187,10 @@ export interface TaskCancelResponse {
   status: 'cancelled';
 }
 
+export interface TaskRetryResponse {
+  status: 'retrying';
+}
+
 export interface TaskArchiveResponse {
   status: 'archived';
 }

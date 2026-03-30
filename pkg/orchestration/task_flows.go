@@ -272,7 +272,7 @@ func (f *TaskFlows) AcceptTaskInput(
 	f.persistUserInputLog(ctx, task, message)
 
 	if err := f.deliverTaskInput(ctx, task); err != nil {
-		log.Warn().Err(err).Str("task_id", taskID).Msg("task input delivery failed (input is durable, will be claimed on next wake)")
+		log.Warn().Err(err).Str("task_id", taskID).Msg("task input delivery failed (input is durable, will be retried)")
 	}
 
 	f.notifyTaskUpdate(ctx, task.WorkspaceID, task.ID)
@@ -575,6 +575,9 @@ func (f *TaskFlows) deliverTaskInput(ctx context.Context, task *types.AgentTask)
 		return err
 	}
 	if delivery == nil || delivery.run == nil {
+		if task.State.IsRetryable() {
+			return f.wakeStoppedTask(ctx, task)
+		}
 		return nil
 	}
 	if delivery.shouldResume {
@@ -634,7 +637,8 @@ func (f *TaskFlows) requeueTaskForResume(ctx context.Context, task *types.AgentT
 		return err
 	}
 	if !requeued {
-		return fmt.Errorf("task %s is no longer attached to run %s", task.ID, lastRun.ID)
+		log.Debug().Str("task_id", task.ID).Str("run_id", lastRun.ID).Msg("task requeue CAS miss — already requeued or retried by another path")
+		return nil
 	}
 	if consumePendingInput {
 		if _, err := f.backend.ConsumeOldestPendingInput(ctx, task.ID); err != nil {
@@ -644,6 +648,79 @@ func (f *TaskFlows) requeueTaskForResume(ctx context.Context, task *types.AgentT
 	task.PayloadJSON = nextPayload
 	f.notifyTaskUpdate(ctx, task.WorkspaceID, task.ID)
 	return nil
+}
+
+// wakeStoppedTask transitions a stopped task (error, dropped, or cancelled) back
+// to queued and enqueues a dispatch that carries the pending user input as the
+// prompt. This handles the case where target_run_id is nil (dispatch failed
+// before a run was materialized, or the task was cancelled) so
+// deliverTaskInput/requeueTaskForResume can't route to an existing run.
+func (f *TaskFlows) wakeStoppedTask(ctx context.Context, task *types.AgentTask) error {
+	if f.lifecycle == nil {
+		return nil
+	}
+
+	inputMessage := ""
+	consumePendingInput := false
+	if pendingInputs, err := f.backend.ListPendingTaskInputs(ctx, task.ID, 1); err != nil {
+		return err
+	} else if len(pendingInputs) > 0 && pendingInputs[0] != nil {
+		inputMessage = strings.TrimSpace(pendingInputs[0].Message)
+		consumePendingInput = true
+	}
+
+	dispatchPayload := map[string]any{
+		types.OrchestrationOutboxPayloadTaskID: task.ID,
+	}
+	if inputMessage != "" {
+		dispatchPayload[types.OrchestrationOutboxPayloadDispatchPrompt] = inputMessage
+	}
+
+	// If we can find the last run, set up session resume so the agent
+	// continues from where it left off rather than starting fresh.
+	lastRun, _ := f.lastRunForTask(ctx, task)
+	if lastRun != nil {
+		dispatchPayload[types.OrchestrationOutboxPayloadResumeSession] = true
+		dispatchPayload[types.OrchestrationOutboxPayloadResumeExcludeRunID] = lastRun.ID
+		dispatchPayload[types.OrchestrationOutboxPayloadResumeCheckpointRunID] = lastRun.ID
+	}
+
+	if err := f.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
+		TaskID: task.ID,
+		State:  types.AgentTaskStateQueued,
+	}); err != nil {
+		return fmt.Errorf("transition stopped task to queued: %w", err)
+	}
+
+	if consumePendingInput {
+		if _, err := f.backend.ConsumeOldestPendingInput(ctx, task.ID); err != nil {
+			log.Warn().Err(err).Str("task_id", task.ID).Msg("failed to consume pending input after waking stopped task")
+		}
+	}
+
+	dedupeKey := fmt.Sprintf("wake_stopped:%s:%d", task.ID, time.Now().UnixNano())
+	if err := f.backend.EnqueueOrchestrationOutboxEvent(ctx, &types.OrchestrationOutboxEvent{
+		EventType:   types.OrchestrationOutboxEventTypeTaskDispatch,
+		DedupeKey:   dedupeKey,
+		PayloadJSON: dispatchPayload,
+	}); err != nil {
+		return fmt.Errorf("enqueue wake dispatch: %w", err)
+	}
+
+	log.Info().Str("task_id", task.ID).Str("from_state", string(task.State)).Msg("woke stopped task after user input")
+	f.notifyTaskUpdate(ctx, task.WorkspaceID, task.ID)
+	return nil
+}
+
+func (f *TaskFlows) lastRunForTask(ctx context.Context, task *types.AgentTask) (*types.AgentRun, error) {
+	runs, err := f.backend.ListAgentRunsFiltered(ctx, task.WorkspaceID, types.AgentRunListFilter{
+		TaskID: &task.ID,
+		Limit:  1,
+	})
+	if err != nil || len(runs) == 0 || runs[0] == nil {
+		return nil, err
+	}
+	return runs[0], nil
 }
 
 func (f *TaskFlows) resolveTaskInputDelivery(ctx context.Context, task *types.AgentTask) (*taskInputDelivery, error) {

@@ -185,10 +185,11 @@ func TestLoadViewOutputSchemaContextFindsAgentBoundTables(t *testing.T) {
 			},
 		}},
 	}
-	service := &AgentService{backend: backend}
-
 	agentID := "agent-1"
-	contexts := service.loadViewOutputSchemaContext(context.Background(), 7, &agentID)
+	contexts, err := types.LoadViewOutputSchemaContexts(context.Background(), backend, 7, agentID)
+	if err != nil {
+		t.Fatalf("LoadViewOutputSchemaContexts: %v", err)
+	}
 	if got, want := len(contexts), 1; got != want {
 		t.Fatalf("schema context count = %d, want %d", got, want)
 	}
@@ -215,11 +216,7 @@ func TestLoadViewOutputSchemaContextFindsAgentBoundTables(t *testing.T) {
 	}
 }
 
-func TestApplyViewSchemaRuntimeContextAddsEnvPromptAndExecutionMetadata(t *testing.T) {
-	env := map[string]string{
-		"AIRSTORE_AGENT_SYSTEM_PROMPT": "You are a helpful agent.",
-	}
-	executionPolicy := map[string]any{}
+func TestAppendSchemaGuidanceAddsSchemaBlock(t *testing.T) {
 	contexts := []types.ViewOutputSchemaContext{{
 		ViewID:         "view-1",
 		ViewName:       "Sales Dashboard",
@@ -235,28 +232,23 @@ func TestApplyViewSchemaRuntimeContextAddsEnvPromptAndExecutionMetadata(t *testi
 		},
 	}}
 
-	applyViewSchemaRuntimeContext(env, executionPolicy, contexts)
+	prompt := appendSchemaGuidance("You are a helpful agent.", contexts)
 
-	if got := env[agentViewSchemaEnvKey]; got == "" {
-		t.Fatal("expected schema context env to be populated")
+	if !strings.Contains(prompt, runtimeViewSchemaGuidanceHeader) {
+		t.Fatalf("expected schema guidance header in prompt, got:\n%s", prompt)
 	}
-	if !strings.Contains(env["AIRSTORE_AGENT_SYSTEM_PROMPT"], runtimeViewSchemaGuidanceHeader) {
-		t.Fatalf("expected runtime view schema guidance in prompt, got:\n%s", env["AIRSTORE_AGENT_SYSTEM_PROMPT"])
+	if !strings.Contains(prompt, "artifact_key=sales-email") {
+		t.Fatalf("expected artifact key guidance in prompt, got:\n%s", prompt)
 	}
-	if !strings.Contains(env["AIRSTORE_AGENT_SYSTEM_PROMPT"], "artifact_key=sales-email") {
-		t.Fatalf("expected artifact key guidance in prompt, got:\n%s", env["AIRSTORE_AGENT_SYSTEM_PROMPT"])
-	}
-	raw, ok := executionPolicy[types.AgentExecutionMetaKeyViewSchema]
-	if !ok {
-		t.Fatal("expected execution policy view schema context")
-	}
-	body, err := json.Marshal(raw)
+
+	// Verify contexts round-trip through JSON (execution policy path).
+	body, err := json.Marshal(contexts)
 	if err != nil {
-		t.Fatalf("marshal execution policy schema context: %v", err)
+		t.Fatalf("marshal contexts: %v", err)
 	}
 	var decoded []types.ViewOutputSchemaContext
 	if err := json.Unmarshal(body, &decoded); err != nil {
-		t.Fatalf("unmarshal execution policy schema context: %v", err)
+		t.Fatalf("unmarshal contexts: %v", err)
 	}
 	if got, want := len(decoded), 1; got != want {
 		t.Fatalf("decoded schema context count = %d, want %d", got, want)
@@ -862,4 +854,70 @@ func TestAcceptTaskInputSupersedesOnlyCurrentBlockerArtifacts(t *testing.T) {
 
 func stringPtr(value string) *string {
 	return &value
+}
+
+func TestNamespaceWorkspaceDirByViewSetsSharedProjectRoot(t *testing.T) {
+	tests := []struct {
+		name     string
+		config   map[string]any
+		payload  map[string]any
+		expected string
+	}{
+		{
+			name:     "sets shared project dir when view present",
+			config:   map[string]any{agentConfigKeyWorkspaceDir: "/workspace/agents/my-agent"},
+			payload:  map[string]any{"source_view_id": "view-123"},
+			expected: "/workspace/projects/view-123",
+		},
+		{
+			name:     "no-op when no source_view_id",
+			config:   map[string]any{agentConfigKeyWorkspaceDir: "/workspace/agents/my-agent"},
+			payload:  map[string]any{},
+			expected: "/workspace/agents/my-agent",
+		},
+		{
+			name:     "idempotent if already set",
+			config:   map[string]any{agentConfigKeyWorkspaceDir: "/workspace/projects/view-123"},
+			payload:  map[string]any{"source_view_id": "view-123"},
+			expected: "/workspace/projects/view-123",
+		},
+		{
+			name:     "overrides agent dir with project dir",
+			config:   map[string]any{agentConfigKeyWorkspaceDir: "/workspace/agents/other-agent"},
+			payload:  map[string]any{"source_view_id": "view-abc"},
+			expected: "/workspace/projects/view-abc",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			namespaceWorkspaceDirByView(tt.config, tt.payload)
+			got := tt.config[agentConfigKeyWorkspaceDir]
+			if got != tt.expected {
+				t.Fatalf("workspace_dir = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestFormatViewContextRendersEntries(t *testing.T) {
+	entries := []types.ViewContextEntry{
+		{EntryType: types.ViewContextEntryCompaction, Content: "- Always use formal tone"},
+		{EntryType: types.ViewContextEntryFeedback, Content: "Add phone numbers to outreach"},
+	}
+	result := formatViewContext(entries)
+	if !strings.Contains(result, viewContextPromptHeader) {
+		t.Fatalf("expected header in output, got:\n%s", result)
+	}
+	if !strings.Contains(result, "Always use formal tone") {
+		t.Fatalf("expected compaction content, got:\n%s", result)
+	}
+	if !strings.Contains(result, "- Add phone numbers") {
+		t.Fatalf("expected feedback entry, got:\n%s", result)
+	}
+}
+
+func TestFormatViewContextEmptyReturnsEmpty(t *testing.T) {
+	if got := formatViewContext(nil); got != "" {
+		t.Fatalf("expected empty string, got %q", got)
+	}
 }

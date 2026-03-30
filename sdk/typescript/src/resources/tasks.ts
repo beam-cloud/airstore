@@ -3,6 +3,7 @@ import type {
   AgentCommandCreateParams,
   AgentTask,
   TaskCancelResponse,
+  TaskRetryResponse,
   TaskAcceptedResponse,
   TaskArchiveResponse,
   TaskListParams,
@@ -155,6 +156,21 @@ export class Tasks {
     return this.client.request<TaskCancelResponse>(
       'POST',
       `/workspaces/${workspaceId}/tasks/${taskId}/cancel`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Retry a failed or dropped task by re-dispatching it. */
+  async retry(
+    workspaceId: string,
+    taskId: string,
+    options?: RequestOptions,
+  ): Promise<TaskRetryResponse> {
+    return this.client.request<TaskRetryResponse>(
+      'POST',
+      `/workspaces/${workspaceId}/tasks/${taskId}/retry`,
       undefined,
       undefined,
       options,

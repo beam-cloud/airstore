@@ -18,7 +18,8 @@ const (
 
 	agentPayloadKeyAgentConfig = "agent_config"
 
-	agentDefaultWorkspaceDirPrefix = "/workspace/agents/"
+	agentDefaultWorkspaceDirPrefix  = "/workspace/agents/"
+	viewProjectsWorkspaceDirPrefix = "/workspace/projects/"
 )
 
 const runtimeSchedulingGuidanceHeader = "Deferred follow-up scheduling:"
