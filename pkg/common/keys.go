@@ -91,6 +91,9 @@ var (
 	// View publish lock — prevents concurrent cross-pod publishes for the same draft.
 	viewPublishLock = "airstore:view:publish:%s" // draftId
 
+	// Pending tool call — stores deferred write tool calls awaiting user approval.
+	pendingToolCall = "airstore:pending-tool-call:%s" // taskID
+
 	// Compression keys — include strategy so each compressor caches independently
 	fsCompressedPointer = "airstore:compressed:%d:%s:%s:%s" // workspaceId, pathHash, resultId, strategy
 	fsCompressedContent = "airstore:cc:%d:%s:%s:%s"         // workspaceId, pathHash, resultId, strategy
@@ -350,6 +353,12 @@ func (rk *redisKeys) RunInteraction(workspaceId uint, runId string) string {
 
 func (rk *redisKeys) ViewPublishLock(draftID string) string {
 	return fmt.Sprintf(viewPublishLock, draftID)
+}
+
+// --- Pending tool call keys ---
+
+func (rk *redisKeys) PendingToolCall(taskID string) string {
+	return fmt.Sprintf(pendingToolCall, taskID)
 }
 
 // --- Compression keys ---

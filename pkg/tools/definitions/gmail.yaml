@@ -38,6 +38,7 @@ commands:
         description: "Gmail message ID"
 
   create-draft:
+    write: true
     description: Create a Gmail draft email
     params:
       - name: to
@@ -65,6 +66,7 @@ commands:
         description: "Optional Gmail thread ID to draft within"
 
   send-email:
+    write: true
     description: Send a Gmail email immediately. When sending a previously created draft, pass the draft_id to send and clean up the draft properly.
     params:
       - name: to

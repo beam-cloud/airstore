@@ -9,7 +9,6 @@ import (
 	"net/mail"
 	"strings"
 	"sync"
-	"time"
 	"unicode/utf8"
 
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -519,7 +518,7 @@ func publishOutputCandidate(
 // (e.g. during gateway rollouts). The RPC supports idempotent IDs, so retries
 // are safe even if the first request was partially processed.
 func createTaskOutputWithRetry(ctx context.Context, client taskOutputClient, req *pb.CreateTaskOutputRequest) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, outputPublishRetryTimeout)
 	defer cancel()
 	var serverID string
 	err := retryOnTransient(ctx, func() error {

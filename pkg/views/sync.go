@@ -16,6 +16,8 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+const ViewSyncTimeout = 90 * time.Second
+
 type ViewSyncOpts struct {
 	Store   *ViewStore
 	Backend repository.BackendRepository
@@ -136,7 +138,7 @@ func (vs *ViewSync) Sync(ctx context.Context, output *types.TaskOutput) *SyncRes
 	for _, viewID := range viewOrder {
 		go func(vid string) {
 			vr := &SyncResult{}
-			viewCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+			viewCtx, cancel := context.WithTimeout(ctx, ViewSyncTimeout)
 			defer cancel()
 			for _, sc := range viewSchemas[vid] {
 				if viewCtx.Err() != nil {
@@ -236,7 +238,7 @@ func (vs *ViewSync) SyncToolWrite(ctx context.Context, input ToolWriteInput) *Sy
 		Int("targets", len(targetSchemas)).
 		Msg("viewsync-tool: propagating")
 
-	viewCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	viewCtx, cancel := context.WithTimeout(ctx, ViewSyncTimeout)
 	defer cancel()
 
 	result := &SyncResult{}

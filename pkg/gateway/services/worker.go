@@ -779,7 +779,7 @@ func (s *WorkerService) CreateTaskOutput(ctx context.Context, req *pb.CreateTask
 	if s.viewSync != nil {
 		syncOutput := *output
 		go func() {
-			syncCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			syncCtx, cancel := context.WithTimeout(context.Background(), views.ViewSyncTimeout)
 			defer cancel()
 			if result := s.viewSync.Sync(syncCtx, &syncOutput); result != nil && !result.Skipped {
 				if len(result.Updated) > 0 || len(result.Created) > 0 {

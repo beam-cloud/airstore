@@ -30,6 +30,7 @@ commands:
         description: "Maximum number of results (1-100)"
 
   create-page:
+    write: true
     description: Create a new Notion page in workspace, a page, or a database
     params:
       - name: title
@@ -68,6 +69,7 @@ commands:
         description: "Optional first paragraph to add to the new page"
 
   append-paragraph:
+    write: true
     description: Append a paragraph block to a Notion block/page
     params:
       - name: block_id

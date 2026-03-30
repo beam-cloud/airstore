@@ -2,7 +2,6 @@ package orchestration
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -243,7 +242,7 @@ func (f *RunFactory) CreateAttemptExecutionTask(
 	}
 	applyPayloadExecutionMetadata(executionPolicy, payload)
 
-	f.applyViewRuntimeContext(ctx, taskEnv, executionPolicy, run, payload)
+	applyViewRuntimeContext(ctx, f.backend, f.s2, taskEnv, executionPolicy, run, payload)
 
 	execTask := &types.RunExecution{
 		WorkspaceId:       run.WorkspaceID,
@@ -569,89 +568,3 @@ func (b *ResumeBarrier) tryReconcileStaleSessionLease(ctx context.Context, works
 	return ReconcileStaleSessionLease(ctx, b.backend, b.terminalIO, workspaceID, sessionID, owner)
 }
 
-func (f *RunFactory) applyViewRuntimeContext(
-	ctx context.Context,
-	env map[string]string,
-	executionPolicy map[string]any,
-	run *types.AgentRun,
-	payload map[string]any,
-) {
-	viewID := strings.TrimSpace(stringFromPayload(payload, "source_view_id"))
-	if viewID != "" && env != nil {
-		env["AIRSTORE_SOURCE_VIEW_ID"] = viewID
-	}
-
-	if viewID != "" && f.backend != nil && env != nil {
-		if view, err := f.backend.GetView(ctx, run.WorkspaceID, viewID); err == nil && view != nil && view.Definition.Settings != nil {
-			if key := strings.TrimSpace(view.Definition.Settings.ApprovalPolicy); key != "" {
-				env["AIRSTORE_APPROVAL_POLICY"] = key
-			}
-		}
-	}
-
-	if f.backend == nil || run.AgentID == nil || strings.TrimSpace(*run.AgentID) == "" {
-		return
-	}
-	schemas, err := types.LoadViewOutputSchemaContexts(ctx, f.backend, run.WorkspaceID, strings.TrimSpace(*run.AgentID))
-	if err != nil {
-		log.Warn().Err(err).Uint("workspace_id", run.WorkspaceID).Msg("view schema context load failed")
-		return
-	}
-	if len(schemas) > maxRuntimeViewSchemas {
-		schemas = schemas[:maxRuntimeViewSchemas]
-	}
-	if len(schemas) == 0 {
-		return
-	}
-	if encoded, err := json.Marshal(schemas); err == nil && len(encoded) > 0 {
-		if env != nil {
-			env[agentViewSchemaEnvKey] = string(encoded)
-			env["AIRSTORE_AGENT_SYSTEM_PROMPT"] = appendSchemaGuidance(env["AIRSTORE_AGENT_SYSTEM_PROMPT"], schemas)
-		}
-		if executionPolicy != nil {
-			executionPolicy[types.AgentExecutionMetaKeyViewSchema] = schemas
-		}
-	}
-
-	if viewID != "" && f.s2 != nil && f.s2.Enabled() && env != nil {
-		f.injectViewContextStream(ctx, env, viewID)
-	}
-}
-
-func (f *RunFactory) injectViewContextStream(ctx context.Context, env map[string]string, viewID string) {
-	records, err := f.s2.Read(ctx, common.Streams.ViewContext(viewID), 0, 1000)
-	if err != nil || len(records) == 0 {
-		return
-	}
-	var entries []types.ViewContextEntry
-	for _, r := range records {
-		var e types.ViewContextEntry
-		if json.Unmarshal([]byte(r.Body), &e) == nil {
-			e.SeqNum = r.SeqNum
-			entries = append(entries, e)
-		}
-	}
-	lastCompaction := -1
-	for i := len(entries) - 1; i >= 0; i-- {
-		if entries[i].EntryType == types.ViewContextEntryCompaction {
-			lastCompaction = i
-			break
-		}
-	}
-	if lastCompaction >= 0 {
-		entries = entries[lastCompaction:]
-	}
-	if len(entries) == 0 {
-		return
-	}
-	formatted := formatViewContext(entries)
-	if formatted == "" {
-		return
-	}
-	prompt := strings.TrimSpace(env["AIRSTORE_AGENT_SYSTEM_PROMPT"])
-	if prompt == "" {
-		env["AIRSTORE_AGENT_SYSTEM_PROMPT"] = formatted
-	} else {
-		env["AIRSTORE_AGENT_SYSTEM_PROMPT"] = prompt + "\n\n" + formatted
-	}
-}

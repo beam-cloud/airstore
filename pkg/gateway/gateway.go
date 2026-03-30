@@ -455,6 +455,7 @@ func (g *Gateway) registerServices() error {
 		toolService = services.NewToolService(g.toolRegistry)
 	}
 	toolService.SetEventRecorder(g.eventRecorder)
+	toolService.SetRedisClient(g.RedisClient)
 	pb.RegisterToolServiceServer(g.grpcServer, toolService)
 	log.Info().Msg("tools service registered")
 
@@ -639,6 +640,7 @@ func (g *Gateway) registerServices() error {
 			g.Config.Sandbox.GetDefaultImage(),
 		)
 		wireSourceWatchRegistrar(orchestratorSvc, sourceService)
+		orchestratorSvc.SetToolExecutor(toolService)
 		orchestratorSvc.Start(g.ctx)
 		agentAPI := orchestration.NewAgentAPI(g.BackendRepo, orchestratorSvc)
 		sourceService.SetTaskWaker(newAgentAPITaskWaker(agentAPI))

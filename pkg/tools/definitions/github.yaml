@@ -120,6 +120,7 @@ commands:
         description: "Maximum number of files to return (1-100)"
 
   comment-pr:
+    write: true
     description: Add a conversation comment to a pull request
     params:
       - name: owner
@@ -147,6 +148,7 @@ commands:
         description: "Comment body"
 
   review-pr:
+    write: true
     description: Submit a pull request review (comment, approve, or request changes)
     params:
       - name: owner
@@ -187,6 +189,7 @@ commands:
         description: "JSON array of inline diff comments: [{\"path\":\"file.go\",\"line\":10,\"body\":\"Fix this\"}]"
 
   create-pr:
+    write: true
     description: Create a pull request
     params:
       - name: owner
@@ -283,6 +286,7 @@ commands:
         description: "Issue number"
 
   create-issue:
+    write: true
     description: Create a new issue in a repository
     params:
       - name: owner

@@ -42,16 +42,47 @@ type ToolClient interface {
 type Registry struct {
 	mu        sync.RWMutex
 	providers map[string]ToolProvider
+	schemas   map[string]*ToolSchema
 }
 
 func NewRegistry() *Registry {
-	return &Registry{providers: make(map[string]ToolProvider)}
+	return &Registry{
+		providers: make(map[string]ToolProvider),
+		schemas:   make(map[string]*ToolSchema),
+	}
 }
 
 func (r *Registry) Register(p ToolProvider) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.providers[p.Name()] = p
+}
+
+func (r *Registry) RegisterSchema(name string, schema *ToolSchema) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.schemas[name] = schema
+}
+
+// IsValidWriteCommand returns true if the tool+subcommand is marked write in
+// its schema AND the supplied args satisfy all required params. Invalid calls
+// (missing args, --help probes) pass through ungated so the tool returns a
+// proper error and the agent self-corrects.
+func (r *Registry) IsValidWriteCommand(toolName string, args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	r.mu.RLock()
+	schema := r.schemas[toolName]
+	r.mu.RUnlock()
+	if schema == nil {
+		return false
+	}
+	cmd, ok := schema.Commands[args[0]]
+	if !ok || !cmd.Write {
+		return false
+	}
+	return cmd.HasRequiredArgs(args[1:])
 }
 
 func (r *Registry) Get(name string) ToolProvider {

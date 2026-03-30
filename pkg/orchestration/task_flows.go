@@ -2,6 +2,7 @@ package orchestration
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -15,11 +16,17 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// ToolExecutor runs a deferred tool call server-side (after user approval).
+type ToolExecutor interface {
+	ExecuteDeferred(ctx context.Context, workspaceID, memberID uint, toolName string, args []string) (stdout, stderr string, exitCode int, err error)
+}
+
 type TaskFlows struct {
 	backend           repository.BackendRepository
 	terminalIO        repository.TerminalIORepository
 	s2                *common.S2Client
 	lifecycle         *TaskLifecycle
+	toolExecutor      ToolExecutor
 	publishTaskUpdate func(context.Context, uint, string)
 	resolveRunState   func(context.Context, *types.AgentRun) (*types.RunInteraction, error)
 }
@@ -40,6 +47,95 @@ func NewTaskFlows(
 		publishTaskUpdate: publishTaskUpdate,
 		resolveRunState:   resolveRunState,
 	}
+}
+
+// SetToolExecutor enables server-side execution of deferred tool calls on approval.
+func (f *TaskFlows) SetToolExecutor(executor ToolExecutor) {
+	if f != nil {
+		f.toolExecutor = executor
+	}
+}
+
+// maybeExecuteDeferredToolCall checks whether the current blocker holds a
+// deferred tool call (created by the gateway write gate) and handles
+// approval / rejection. For approvals it executes the tool server-side and
+// returns the result. For rejections it returns a clear message telling the
+// agent not to retry. Returns "" for non-tool-call blockers so the normal
+// blocker flow is unaffected.
+func (f *TaskFlows) maybeExecuteDeferredToolCall(
+	ctx context.Context,
+	task *types.AgentTask,
+	action *types.TaskInputAction,
+) string {
+	blocker := task.CurrentBlocker
+	if blocker == nil || blocker.PayloadJSON == nil {
+		return ""
+	}
+	tcRaw, ok := blocker.PayloadJSON["tool_call"]
+	if !ok {
+		return "" // not a tool-call blocker — normal flow handles it
+	}
+
+	tcBytes, err := json.Marshal(tcRaw)
+	if err != nil {
+		return ""
+	}
+	var tc struct {
+		Tool        string   `json:"tool"`
+		Args        []string `json:"args"`
+		WorkspaceID uint     `json:"workspace_id"`
+		MemberID    uint     `json:"member_id"`
+		Summary     string   `json:"summary"`
+	}
+	if json.Unmarshal(tcBytes, &tc) != nil || tc.Tool == "" {
+		return ""
+	}
+
+	summary := tc.Summary
+	if summary == "" {
+		summary = tc.Tool
+	}
+
+	if action == nil || *action == types.TaskInputActionReject {
+		return fmt.Sprintf(
+			"The user rejected your request to %s.\nDo not retry this action. Please revise your approach.",
+			summary,
+		)
+	}
+	if *action != types.TaskInputActionApprove {
+		return ""
+	}
+
+	if f.toolExecutor == nil {
+		return fmt.Sprintf(
+			"The user approved your request to %s, but the server could not execute it. Please retry the tool call directly.",
+			summary,
+		)
+	}
+
+	log.Info().
+		Str("task_id", task.ID).
+		Str("tool", tc.Tool).
+		Msg("executing deferred tool call after approval")
+
+	stdout, stderr, exitCode, execErr := f.toolExecutor.ExecuteDeferred(
+		ctx, tc.WorkspaceID, tc.MemberID, tc.Tool, tc.Args,
+	)
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "The user approved your request to %s. The action has been executed.\n\n", summary)
+	fmt.Fprintf(&b, "Tool: %s\nExit code: %d\n", tc.Tool, exitCode)
+	if out := strings.TrimSpace(stdout); out != "" {
+		fmt.Fprintf(&b, "Output:\n%s\n", out)
+	}
+	if se := strings.TrimSpace(stderr); se != "" {
+		fmt.Fprintf(&b, "Stderr:\n%s\n", se)
+	}
+	if execErr != nil {
+		fmt.Fprintf(&b, "Error: %s\n", execErr.Error())
+	}
+	b.WriteString("\nYou may continue.")
+	return b.String()
 }
 
 type taskInputDelivery struct {
@@ -237,6 +333,14 @@ func (f *TaskFlows) AcceptTaskInput(
 		}
 	}
 	resolution := taskBlockerResolutionForInput(task, kind, action, message, items)
+
+	// For tool-call blockers, execute the deferred tool server-side (on
+	// approve) or build a rejection message. The result replaces the
+	// generic "Approved" / "Rejected" placeholder so the agent gets
+	// concrete context. Non-tool-call blockers are unaffected.
+	if toolCallResult := f.maybeExecuteDeferredToolCall(ctx, task, action); toolCallResult != "" {
+		message = toolCallResult
+	}
 
 	sessionID := ""
 	if task.TargetRunID != nil {

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"time"
 
 	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/repository"
@@ -256,7 +255,7 @@ func (g *TaskOutputsGroup) CreateOutput(c echo.Context) error {
 		vs := g.viewSync
 		live := g.live
 		go func() {
-			syncCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			syncCtx, cancel := context.WithTimeout(context.Background(), views.ViewSyncTimeout)
 			defer cancel()
 			if result := vs.Sync(syncCtx, &syncOutput); result != nil && !result.Skipped {
 				if len(result.Updated) > 0 || len(result.Created) > 0 {

@@ -218,6 +218,15 @@ func (s *AgentService) SetSourceWatchRegistrar(registrar SourceWatchRegistrar) {
 	}
 }
 
+func (s *AgentService) SetToolExecutor(executor ToolExecutor) {
+	if s == nil {
+		return
+	}
+	if s.taskFlows != nil {
+		s.taskFlows.SetToolExecutor(executor)
+	}
+}
+
 func defaultRunInteractionState(run *types.AgentRun) types.RunInteractionState {
 	if run == nil || run.Status.IsTerminal() {
 		return types.RunInteractionStateClosed
@@ -1777,7 +1786,7 @@ func (s *AgentService) createAttemptExecutionTask(
 		executionPolicy[agentConfigKeyModel] = *run.Model
 	}
 	applyPayloadExecutionMetadata(executionPolicy, payload)
-	s.applyViewRuntimeContext(ctx, taskEnv, executionPolicy, run, payload)
+	applyViewRuntimeContext(ctx, s.backend, s.s2, taskEnv, executionPolicy, run, payload)
 
 	execTask := &types.RunExecution{
 		WorkspaceId:       run.WorkspaceID,
@@ -2224,9 +2233,11 @@ const (
 
 // applyViewRuntimeContext is the single entry point for all view-related
 // runtime context injection: source_view_id env, approval policy, schema
-// guidance, and (once wired) the persistent context stream.
-func (s *AgentService) applyViewRuntimeContext(
+// guidance, and the persistent context stream.
+func applyViewRuntimeContext(
 	ctx context.Context,
+	backend repository.BackendRepository,
+	s2 *common.S2Client,
 	env map[string]string,
 	executionPolicy map[string]any,
 	run *types.AgentRun,
@@ -2237,21 +2248,18 @@ func (s *AgentService) applyViewRuntimeContext(
 		env["AIRSTORE_SOURCE_VIEW_ID"] = viewID
 	}
 
-	// Approval policy from view settings — pass the raw key so the worker
-	// can make deterministic gating decisions without an LLM call.
-	if viewID != "" && s.backend != nil && env != nil {
-		if view, err := s.backend.GetView(ctx, run.WorkspaceID, viewID); err == nil && view != nil && view.Definition.Settings != nil {
+	if viewID != "" && backend != nil && env != nil {
+		if view, err := backend.GetView(ctx, run.WorkspaceID, viewID); err == nil && view != nil && view.Definition.Settings != nil {
 			if key := strings.TrimSpace(view.Definition.Settings.ApprovalPolicy); key != "" {
 				env["AIRSTORE_APPROVAL_POLICY"] = key
 			}
 		}
 	}
 
-	// Schema contexts — tells agents about table schemas they should align with.
-	if s.backend == nil || run.AgentID == nil || strings.TrimSpace(*run.AgentID) == "" {
+	if backend == nil || run.AgentID == nil || strings.TrimSpace(*run.AgentID) == "" {
 		return
 	}
-	schemas, err := types.LoadViewOutputSchemaContexts(ctx, s.backend, run.WorkspaceID, strings.TrimSpace(*run.AgentID))
+	schemas, err := types.LoadViewOutputSchemaContexts(ctx, backend, run.WorkspaceID, strings.TrimSpace(*run.AgentID))
 	if err != nil {
 		log.Warn().Err(err).Uint("workspace_id", run.WorkspaceID).Msg("view schema context load failed")
 		return
@@ -2279,15 +2287,13 @@ func (s *AgentService) applyViewRuntimeContext(
 		Int("schemas", len(schemas)).
 		Msg("view runtime context applied")
 
-	// Persistent context stream — inject compacted project context into the
-	// system prompt so agents inherit feedback/knowledge across tasks.
-	if viewID != "" && s.s2 != nil && s.s2.Enabled() && env != nil {
-		s.injectViewContextStream(ctx, env, viewID)
+	if viewID != "" && s2 != nil && s2.Enabled() && env != nil {
+		injectViewContextStream(ctx, s2, env, viewID)
 	}
 }
 
-func (s *AgentService) injectViewContextStream(ctx context.Context, env map[string]string, viewID string) {
-	records, err := s.s2.Read(ctx, common.Streams.ViewContext(viewID), 0, 1000)
+func injectViewContextStream(ctx context.Context, s2 *common.S2Client, env map[string]string, viewID string) {
+	records, err := s2.Read(ctx, common.Streams.ViewContext(viewID), 0, 1000)
 	if err != nil {
 		log.Warn().Err(err).Str("view_id", viewID).Msg("failed to read view context stream")
 		return
@@ -2305,7 +2311,6 @@ func (s *AgentService) injectViewContextStream(ctx context.Context, env map[stri
 		}
 	}
 
-	// Keep only the last compaction + entries after it.
 	lastCompaction := -1
 	for i := len(entries) - 1; i >= 0; i-- {
 		if entries[i].EntryType == types.ViewContextEntryCompaction {

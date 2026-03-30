@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	agentsignal "github.com/beam-cloud/airstore/pkg/worker/agentsignal/baml_client"
@@ -28,6 +29,8 @@ const (
 	sessionLeaseOpTimeout       = 3 * time.Second
 	sessionLeaseRenewGrace      = sessionLeaseTTL - sessionLeaseRenewInterval
 	runInteractionTTL           = 30 * time.Minute
+	outputPipelineDrainTimeout  = 30 * time.Second
+	outputPublishRetryTimeout   = 15 * time.Second
 	subagentPollInterval        = 10 * time.Second
 	subagentMaxWait             = 30 * time.Minute
 	subagentProbeTimeout        = 15 * time.Second
@@ -89,6 +92,48 @@ func waitingBlockerPayload(
 	assistantMessage string,
 ) map[string]any {
 	return types.NewTaskBlockerPayload(inputKind, waitingSummary, assistantMessage).ToMap()
+}
+
+// checkPendingToolCall reads and deletes a pending tool call from Redis.
+// Returns the tool call details as a blocker payload, or nil if none exists.
+func (w *Worker) checkPendingToolCall(ctx context.Context, taskID string) map[string]any {
+	if w.redisClient == nil || taskID == "" {
+		return nil
+	}
+	key := common.Keys.PendingToolCall(taskID)
+	data, err := w.redisClient.Get(ctx, key).Bytes()
+	if err != nil {
+		return nil
+	}
+	w.redisClient.Del(ctx, key)
+
+	var tc struct {
+		Tool    string   `json:"tool"`
+		Args    []string `json:"args"`
+		Summary string   `json:"summary"`
+		Details string   `json:"details"`
+	}
+	if json.Unmarshal(data, &tc) != nil {
+		return nil
+	}
+
+	log.Info().
+		Str("task_id", taskID).
+		Str("tool", tc.Tool).
+		Str("summary", tc.Summary).
+		Msg("pending tool call found, creating approval blocker")
+
+	details := tc.Details
+	if details == "" {
+		details = tc.Summary
+	}
+
+	payload := map[string]any{
+		"summary":   tc.Summary,
+		"details":   details,
+		"tool_call": json.RawMessage(data),
+	}
+	return payload
 }
 
 func buildWaitingBlockerSpec(
@@ -431,7 +476,7 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	// Build the needs-input checker
 	var checkNeedsInput func(string) (bool, types.InputKind, string, string)
 	if needsInputRunner != nil {
-		checkNeedsInput = w.buildNeedsInputChecker(sessionCtx, task, needsInputRunner, needsInputPath, tw, bamlEnv, env["AIRSTORE_APPROVAL_POLICY"])
+		checkNeedsInput = w.buildNeedsInputChecker(sessionCtx, task, needsInputRunner, needsInputPath, tw, bamlEnv)
 	}
 
 	start := time.Now()
@@ -458,7 +503,7 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	}
 
 	mirror.Flush()
-	outputPipeline.WaitTimeout(30 * time.Second)
+	outputPipeline.WaitTimeout(outputPipelineDrainTimeout)
 
 	sessionAssistantMessage := ""
 	if runErr == nil && tw.ringBuf != nil {
@@ -615,9 +660,8 @@ func (w *Worker) buildNeedsInputChecker(
 	ctx context.Context, task types.RunExecution,
 	runner NeedsInputRunner, markerPath string,
 	tw *terminalOutputWriter, bamlEnv map[string]string,
-	approvalPolicy string,
 ) func(string) (bool, types.InputKind, string, string) {
-	return newWorkerSessionRunner(w).buildNeedsInputChecker(ctx, task, runner, markerPath, tw, bamlEnv, approvalPolicy)
+	return newWorkerSessionRunner(w).buildNeedsInputChecker(ctx, task, runner, markerPath, tw, bamlEnv)
 }
 
 type turnInputKindClassifier func(context.Context, string, map[string]string) types.InputKind
@@ -682,7 +726,6 @@ func normalizeTurnBlockerDirective(
 	blocker *TurnBlockerDirective,
 	assistantMessage string,
 	bamlEnv map[string]string,
-	approvalPolicy string,
 ) *TurnBlockerDirective {
 	if blocker == nil {
 		return nil
@@ -703,39 +746,7 @@ func normalizeTurnBlockerDirective(
 		normalized.Summary = strings.TrimSpace(assistantMessage)
 	}
 
-	if approvalPolicy != "" && normalized.InputKind == types.InputKindApproveReject {
-		if approvalPolicyAutoApproves(approvalPolicy, assistantMessage) {
-			log.Info().Str("policy", approvalPolicy).Msg("approval policy: auto-approved, skipping blocker")
-			return nil
-		}
-	}
-
 	return &normalized
-}
-
-// approvalPolicyAutoApproves returns true when the given policy key indicates
-// that the approve_reject blocker should be skipped (auto-approved).
-// This is deterministic — no LLM call — so it is fast and reliable.
-func approvalPolicyAutoApproves(policyKey, assistantMessage string) bool {
-	switch policyKey {
-	case types.ApprovalPolicyAutoApproveAll:
-		return true
-	case types.ApprovalPolicyAutoApproveEmails:
-		lower := strings.ToLower(assistantMessage)
-		emailSignals := []string{
-			"email", "e-mail", "gmail", "mail",
-			"send_email", "send_message", "create_draft",
-			"draft", "outreach", "reply", "forward",
-		}
-		for _, sig := range emailSignals {
-			if strings.Contains(lower, sig) {
-				return true
-			}
-		}
-		return false
-	default:
-		return false
-	}
 }
 
 func turnArtifactAssistantMessage(artifacts []TurnArtifact) string {
@@ -840,7 +851,6 @@ func (r workerSessionRunner) reconcileParsedTurnOutput(
 	tracker *taskOutputTracker,
 	prompt string,
 	bamlEnv map[string]string,
-	approvalPolicy string,
 	result TurnParseResult,
 ) parsedTurnOutcome {
 	outcome := parsedTurnOutcome{assistantMessage: strings.TrimSpace(result.Response)}
@@ -864,7 +874,7 @@ func (r workerSessionRunner) reconcileParsedTurnOutput(
 	)
 
 	if control != nil && control.Blocker != nil {
-		blocker := normalizeTurnBlockerDirective(ctx, control.Blocker, outcome.assistantMessage, bamlEnv, approvalPolicy)
+		blocker := normalizeTurnBlockerDirective(ctx, control.Blocker, outcome.assistantMessage, bamlEnv)
 		outcome.needsInput = blocker != nil
 		if blocker != nil {
 			outcome.inputKind = blocker.InputKind
@@ -1287,7 +1297,6 @@ func (r workerSessionRunner) buildNeedsInputChecker(
 	markerPath string,
 	tw *terminalOutputWriter,
 	bamlEnv map[string]string,
-	approvalPolicy string,
 ) func(string) (bool, types.InputKind, string, string) {
 	return func(currentPrompt string) (bool, types.InputKind, string, string) {
 		msg := runner.ReadLastMessage(markerPath)
@@ -1319,13 +1328,6 @@ func (r workerSessionRunner) buildNeedsInputChecker(
 			ctx, kind, assistantMessage, bamlEnv,
 			classifyNeedsInputKindWithBAML,
 		)
-
-		if kind == types.InputKindApproveReject && approvalPolicy != "" {
-			if approvalPolicyAutoApproves(approvalPolicy, assistantMessage) {
-				log.Info().Str("policy", approvalPolicy).Msg("approval policy: auto-approved via needs-input checker")
-				return false, "", "", ""
-			}
-		}
 
 		var summary string
 		if kind == types.InputKindApproveReject {
@@ -1414,6 +1416,39 @@ func (r workerSessionRunner) runTurnSession(
 			signalActivity(activityCh)
 		}
 
+		// ── Tool-level gate ──────────────────────────────────────────────
+		// If the gateway deferred a write tool call for approval, short-circuit
+		// directly to waiting with a tool_call blocker. This is independent of
+		// the normal BAML classification path.
+		if originTaskID := strings.TrimSpace(sessionEnv[originTaskIDEnvKey]); originTaskID != "" {
+			if tcPayload := r.worker.checkPendingToolCall(ctx, originTaskID); tcPayload != nil {
+				stateBridge.setRunInteractionState(ctx, task, types.RunInteractionStateWaitingForInput)
+				stateBridge.setOriginTaskState(ctx, task, types.TaskLiveUpdate{
+					State: types.AgentTaskStateWaiting,
+					Blocker: &types.TaskBlockerSpec{
+						Kind:        types.TaskBlockerKindForInputKind(types.InputKindApproveReject),
+						InputKind:   types.InputKindApproveReject,
+						PayloadJSON: tcPayload,
+					},
+				})
+				nextPrompt, err := nextFollowupPrompt(ctx, waiter.waitForFollowupInput(ctx, task, DefaultBetweenTurnsTimeout, activityCh))
+				if err != nil {
+					return turnResult, err
+				}
+				if nextPrompt == "" {
+					turnResult.waitingForInput = true
+					turnResult.inputKind = types.InputKindApproveReject
+					return turnResult, nil
+				}
+				prompt = nextPrompt
+				continue
+			}
+		}
+
+		// ── Normal classification ────────────────────────────────────────
+		// BAML / output-parser determines whether the agent needs input
+		// (free_text question, approval request, etc). This path is
+		// completely unchanged — it handles all non-tool-gate blockers.
 		var needsInput bool
 		var inputKind types.InputKind
 		var waitingSummary string
@@ -1425,7 +1460,7 @@ func (r workerSessionRunner) runTurnSession(
 			if err != nil {
 				addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to parse turn output")
 			} else {
-				resolved := r.reconcileParsedTurnOutput(ctx, task, tracker, prompt, bamlEnv, sessionEnv["AIRSTORE_APPROVAL_POLICY"], result)
+				resolved := r.reconcileParsedTurnOutput(ctx, task, tracker, prompt, bamlEnv, result)
 				needsInput = resolved.needsInput
 				inputKind = resolved.inputKind
 				waitingSummary = resolved.waitingSummary

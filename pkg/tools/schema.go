@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -23,6 +24,7 @@ type CommandSchema struct {
 	Params        []*ParamSchema `yaml:"params,omitempty"`
 	OneOfRequired [][]string     `yaml:"one_of_required,omitempty"`
 	Internal      bool           `yaml:"internal,omitempty"`
+	Write         bool           `yaml:"write,omitempty"`
 }
 
 // ParamSchema defines a parameter for a command
@@ -143,6 +145,46 @@ func (c *CommandSchema) ValidateParams() error {
 	}
 
 	return nil
+}
+
+// HasRequiredArgs checks whether the supplied args satisfy every required
+// param in the schema. Positional args are matched by index; flag args are
+// matched by --flag or -short presence. Returns false for incomplete or
+// malformed calls so they can fail through normal tool error handling.
+func (c *CommandSchema) HasRequiredArgs(args []string) bool {
+	// Collect supplied positional values (anything not starting with -)
+	// and supplied flags.
+	var posValues []string
+	flags := make(map[string]bool)
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if strings.HasPrefix(a, "-") {
+			flags[a] = true
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				i++ // skip the flag's value
+			}
+		} else {
+			posValues = append(posValues, a)
+		}
+	}
+
+	// Check every required param is satisfied.
+	for _, p := range c.Params {
+		if !p.Required {
+			continue
+		}
+		if p.Position != nil {
+			idx := *p.Position
+			if idx >= len(posValues) || posValues[idx] == "" {
+				return false
+			}
+		} else if p.Flag != "" {
+			if !flags[p.Flag] && (p.Short == "" || !flags[p.Short]) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // GetPositionalParams returns params sorted by position

@@ -49,30 +49,32 @@ type ViewSettings struct {
 	ApprovalPolicy string `json:"approval_policy,omitempty"`
 }
 
-const (
-	ApprovalPolicyAutoApproveAll    = "auto_approve_all"
-	ApprovalPolicyAutoApproveEmails = "auto_approve_emails"
-)
+// ApprovalPolicy encapsulates a per-view approval policy and provides
+// deterministic methods for deciding whether a blocker should be skipped.
+type ApprovalPolicy struct {
+	Key string
+}
 
-// ApprovalPolicyText expands a preset approval policy key into the text block
-// passed to the ClassifyTurn BAML prompt.
-func ApprovalPolicyText(key string) string {
-	switch key {
-	case ApprovalPolicyAutoApproveAll:
-		return "All outbound actions are pre-approved. The agent may send emails, " +
-			"reply to threads, submit forms, make API calls, publish content, " +
-			"create or modify resources, and execute any other external action " +
-			"without waiting for user approval."
-	case ApprovalPolicyAutoApproveEmails:
-		return "Email operations are pre-approved. The agent may send emails, " +
-			"reply to threads, forward messages, and create or send drafts " +
-			"without waiting for user approval. All other external actions " +
-			"(API calls, publishing, deleting resources, etc.) still require " +
-			"user approval before proceeding."
+func NewApprovalPolicy(key string) ApprovalPolicy {
+	return ApprovalPolicy{Key: strings.TrimSpace(key)}
+}
+
+func (p ApprovalPolicy) IsSet() bool { return p.Key != "" }
+
+// AllowsWrite returns true if the policy permits a write command on the given
+// tool without requiring user approval.
+func (p ApprovalPolicy) AllowsWrite(tool IntegrationName) bool {
+	switch p.Key {
+	case "auto_approve_all":
+		return true
+	case "approve_emails_only":
+		return tool != Gmail
 	default:
-		return ""
+		return false
 	}
 }
+
+func (p ApprovalPolicy) String() string { return p.Key }
 
 // SyncNameDescription keeps the top-level view metadata and definition metadata
 // aligned, preferring explicit top-level values when present.
