@@ -1116,6 +1116,9 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 
 	outputs := make([]*types.TaskOutput, 0, len(outputsByID))
 	for _, o := range outputsByID {
+		if o.IsDraftEmail() {
+			continue
+		}
 		outputs = append(outputs, o)
 	}
 

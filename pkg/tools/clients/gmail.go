@@ -373,22 +373,31 @@ func (g *GmailClient) createDraft(ctx context.Context, token, to, subject, body,
 }
 
 func (g *GmailClient) sendEmail(ctx context.Context, token, to, subject, body, threadID, draftID string) (map[string]any, error) {
-	encoded := base64.RawURLEncoding.EncodeToString([]byte(buildRawEmail(to, subject, body)))
-	payload := map[string]any{
-		"raw": encoded,
+	raw := base64.RawURLEncoding.EncodeToString([]byte(buildRawEmail(to, subject, body)))
+
+	var (
+		endpoint string
+		payload  map[string]any
+	)
+	if draftID != "" {
+		endpoint = "/drafts/send"
+		msg := map[string]any{"raw": raw}
+		if threadID != "" {
+			msg["threadId"] = threadID
+		}
+		payload = map[string]any{"id": draftID, "message": msg}
+	} else {
+		endpoint = "/messages/send"
+		payload = map[string]any{"raw": raw}
+		if threadID != "" {
+			payload["threadId"] = threadID
+		}
 	}
-	if threadID != "" {
-		payload["threadId"] = threadID
-	}
+
 	var result map[string]any
-	if err := g.api.RequestJSON(ctx, token, "POST", "/messages/send", payload, &result); err != nil {
+	if err := g.api.RequestJSON(ctx, token, "POST", endpoint, payload, &result); err != nil {
 		return nil, err
 	}
-
-	if draftID != "" {
-		_ = g.api.RequestJSON(ctx, token, "DELETE", "/drafts/"+draftID, nil, nil)
-	}
-
 	return formatGmailMessageResult(to, subject, result), nil
 }
 

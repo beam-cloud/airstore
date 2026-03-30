@@ -257,6 +257,14 @@ func (o *TaskOutput) IsApprovalArtifact() bool {
 		blocking.ApprovalSurface
 }
 
+func (o *TaskOutput) IsDraftEmail() bool {
+	if o == nil || strings.TrimSpace(o.OutputType) != TaskOutputTypeEmail {
+		return false
+	}
+	return o.DataString("draft_id", "draftId") != "" ||
+		o.MetadataString("draft_id", "draftId") != ""
+}
+
 func (o *TaskOutput) ShouldHideInWorkspace() bool {
 	if o == nil || strings.TrimSpace(o.OutputType) != TaskOutputTypeEmail {
 		return false
@@ -264,8 +272,7 @@ func (o *TaskOutput) ShouldHideInWorkspace() bool {
 	if o.HasApprovalSurface() || o.IsPending() {
 		return true
 	}
-	return o.DataString("draft_id", "draftId") != "" ||
-		o.MetadataString("draft_id", "draftId") != ""
+	return o.IsDraftEmail()
 }
 
 type TaskBlockerPayload struct {

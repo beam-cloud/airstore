@@ -65,7 +65,7 @@ commands:
         description: "Optional Gmail thread ID to draft within"
 
   send-email:
-    description: Send a Gmail email immediately
+    description: Send a Gmail email immediately. When sending a previously created draft, pass the draft_id to send and clean up the draft properly.
     params:
       - name: to
         type: string
