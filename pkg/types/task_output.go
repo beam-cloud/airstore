@@ -261,8 +261,14 @@ func (o *TaskOutput) IsDraftEmail() bool {
 	if o == nil || strings.TrimSpace(o.OutputType) != TaskOutputTypeEmail {
 		return false
 	}
-	return o.DataString("draft_id", "draftId") != "" ||
+	hasDraftID := o.DataString("draft_id", "draftId") != "" ||
 		o.MetadataString("draft_id", "draftId") != ""
+	if !hasDraftID {
+		return false
+	}
+	hasMessageID := o.DataString("message_id", "messageId") != "" ||
+		o.MetadataString("message_id", "messageId") != ""
+	return !hasMessageID
 }
 
 func (o *TaskOutput) ShouldHideInWorkspace() bool {
