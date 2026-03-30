@@ -4272,8 +4272,8 @@ func (b *PostgresBackend) ListWorkspaceTaskOutputs(
 	filter types.TaskOutputListFilter,
 ) ([]*types.TaskOutput, error) {
 	limit := filter.Limit
-	if limit <= 0 || limit > 200 {
-		limit = 60
+	if limit <= 0 {
+		limit = 10000
 	}
 
 	var taskIDsArg any
