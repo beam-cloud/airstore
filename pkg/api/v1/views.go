@@ -1009,10 +1009,12 @@ func syntheticEmailThreads(outputs []*types.TaskOutput, existing map[string][]vi
 // ---------------------------------------------------------------------------
 
 type mailboxThread struct {
-	Messages []views.ThreadMessage `json:"messages"`
-	RowID    string                `json:"row_id,omitempty"`
-	RowLabel string                `json:"row_label,omitempty"`
-	RowCells map[string]string     `json:"row_fields,omitempty"`
+	Messages  []views.ThreadMessage `json:"messages"`
+	RowID     string                `json:"row_id,omitempty"`
+	RowLabel  string                `json:"row_label,omitempty"`
+	RowCells  map[string]string     `json:"row_fields,omitempty"`
+	OutputIDs []string              `json:"output_ids,omitempty"`
+	Archived  bool                  `json:"archived"`
 }
 
 const mailboxOutputLimit = 200
@@ -1185,6 +1187,22 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 		}
 	}
 
+	// Build per-thread output IDs and archived state.
+	threadOutputIDs := make(map[string][]string)
+	threadArchived := make(map[string]bool)
+	for _, o := range outputs {
+		tk, ok := outputThreadKey[o.ID]
+		if !ok {
+			continue
+		}
+		threadOutputIDs[tk] = append(threadOutputIDs[tk], o.ID)
+		if o.ArchivedAt == nil {
+			threadArchived[tk] = false
+		} else if _, exists := threadArchived[tk]; !exists {
+			threadArchived[tk] = true
+		}
+	}
+
 	result := make(map[string]mailboxThread, len(emailThreads))
 	for threadKey, messages := range emailThreads {
 		mt := mailboxThread{Messages: messages}
@@ -1193,6 +1211,8 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 			mt.RowCells = row.MergedCells()
 			mt.RowLabel = rowLabelFromSchema(mt.RowCells, labelColumnKeys)
 		}
+		mt.OutputIDs = threadOutputIDs[threadKey]
+		mt.Archived = threadArchived[threadKey]
 		result[threadKey] = mt
 	}
 

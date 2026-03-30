@@ -9,11 +9,14 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/rs/zerolog/log"
 )
+
+const gmailFetchConcurrency = 10
 
 const gmailAPIBase = "https://gmail.googleapis.com/gmail/v1"
 
@@ -54,17 +57,31 @@ func (f *EmailThreadFetcher) FetchThreads(ctx context.Context, workspaceID uint,
 		return nil
 	}
 
+	var mu sync.Mutex
 	result := make(map[string][]ThreadMessage, len(threadIDs))
+	sem := make(chan struct{}, gmailFetchConcurrency)
+	var wg sync.WaitGroup
+
 	for _, tid := range threadIDs {
-		messages, err := f.fetchThread(ctx, token, tid)
-		if err != nil {
-			log.Warn().Err(err).Str("thread_id", tid).Msg("failed to fetch gmail thread")
-			continue
-		}
-		if len(messages) > 0 {
-			result[tid] = messages
-		}
+		wg.Add(1)
+		go func(tid string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			messages, err := f.fetchThread(ctx, token, tid)
+			if err != nil {
+				log.Warn().Err(err).Str("thread_id", tid).Msg("failed to fetch gmail thread")
+				return
+			}
+			if len(messages) > 0 {
+				mu.Lock()
+				result[tid] = messages
+				mu.Unlock()
+			}
+		}(tid)
 	}
+	wg.Wait()
 	return result
 }
 
