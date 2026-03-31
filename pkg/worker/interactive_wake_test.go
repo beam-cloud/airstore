@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -195,6 +196,160 @@ func TestNormalizeSourceWatchRequestsMergesSameThreadTrackedMessages(t *testing.
 	}
 	if !got[0].IncludeAttachments {
 		t.Fatal("expected merged thread watch to retain attachment reads")
+	}
+}
+
+func TestNormalizeSourceWatchRequestsBackfillsThreadIDFromTrackedOutput(t *testing.T) {
+	reason := "Check for replies to opening offer email"
+	wrongQuery := `subject:"Opening offer email to Oswaldo for RH Loveseat"`
+
+	tracker := trackedEmailOutput(
+		"out-1",
+		"thread-real",
+		"msg-real",
+		"oswaldo@example.com",
+		"Restoration Hardware Loveseat - Interested Buyer",
+	)
+
+	got := normalizeSourceWatchRequests([]signaltypes.SourceWatchRequest{{
+		Integration: string(types.SourceGmail),
+		Reason:      &reason,
+		Query:       &wrongQuery,
+	}}, tracker, &reason)
+	if got == nil || len(got) != 1 {
+		t.Fatalf("normalizeSourceWatchRequests() len = %d, want 1", len(got))
+	}
+	if got[0].ThreadID != "thread-real" {
+		t.Fatalf("thread_id = %q, want %q (backfilled from tracked output)", got[0].ThreadID, "thread-real")
+	}
+	if got[0].Query == wrongQuery {
+		t.Fatalf("query should have been replaced by tracked query, got %q", got[0].Query)
+	}
+	if got[0].SourceOutputID != "out-1" {
+		t.Fatalf("source_output_id = %q, want %q (backfilled from tracked output)", got[0].SourceOutputID, "out-1")
+	}
+	if !got[0].IncludeAttachments {
+		t.Fatal("expected IncludeAttachments=true after backfill set ThreadID on Gmail watch")
+	}
+	if !got[0].IncludeMessageBody {
+		t.Fatal("expected IncludeMessageBody=true after backfill set ThreadID on Gmail watch")
+	}
+}
+
+func TestNormalizeSourceWatchRequestsSkipsBackfillWhenMultipleTrackedOutputs(t *testing.T) {
+	reason := "Check for replies"
+	wrongQuery := `subject:"Opening offer email"`
+
+	tracker := &taskOutputTracker{}
+	rememberTrackedEmailOutput(tracker, "out-1", "thread-1", "msg-1", "alice@example.com", "Subject A")
+	rememberTrackedEmailOutput(tracker, "out-2", "thread-2", "msg-2", "bob@example.com", "Subject B")
+
+	got := normalizeSourceWatchRequests([]signaltypes.SourceWatchRequest{{
+		Integration: string(types.SourceGmail),
+		Reason:      &reason,
+		Query:       &wrongQuery,
+	}}, tracker, &reason)
+	if got == nil || len(got) != 1 {
+		t.Fatalf("normalizeSourceWatchRequests() len = %d, want 1", len(got))
+	}
+	if got[0].ThreadID != "" {
+		t.Fatalf("thread_id = %q, want empty (ambiguous tracked outputs)", got[0].ThreadID)
+	}
+}
+
+func TestNormalizeSourceWatchRequestsSkipsBackfillWhenQueryUnrelated(t *testing.T) {
+	reason := "Check for new messages"
+	unrelatedQuery := `label:inbox is:unread`
+
+	tracker := trackedEmailOutput(
+		"out-1",
+		"thread-real",
+		"msg-real",
+		"alice@example.com",
+		"Restoration Hardware Loveseat - Interested Buyer",
+	)
+
+	got := normalizeSourceWatchRequests([]signaltypes.SourceWatchRequest{{
+		Integration: string(types.SourceGmail),
+		Reason:      &reason,
+		Query:       &unrelatedQuery,
+	}}, tracker, &reason)
+	if got == nil || len(got) != 1 {
+		t.Fatalf("normalizeSourceWatchRequests() len = %d, want 1", len(got))
+	}
+	if got[0].ThreadID != "" {
+		t.Fatalf("thread_id = %q, want empty (unrelated query should skip backfill)", got[0].ThreadID)
+	}
+	if got[0].Query != unrelatedQuery {
+		t.Fatalf("query = %q, want original %q preserved", got[0].Query, unrelatedQuery)
+	}
+	if got[0].SourceOutputID != "" {
+		t.Fatalf("source_output_id = %q, want empty (backfill should be skipped)", got[0].SourceOutputID)
+	}
+}
+
+func TestNormalizeSourceWatchRequestsSkipsBackfillWhenEmailMismatch(t *testing.T) {
+	reason := "Check for replies"
+	mismatchQuery := `from:bob@other.com`
+
+	tracker := trackedEmailOutput(
+		"out-1",
+		"thread-real",
+		"msg-real",
+		"alice@example.com",
+		"Restoration Hardware Loveseat - Interested Buyer",
+	)
+
+	got := normalizeSourceWatchRequests([]signaltypes.SourceWatchRequest{{
+		Integration: string(types.SourceGmail),
+		Reason:      &reason,
+		Query:       &mismatchQuery,
+	}}, tracker, &reason)
+	if got == nil || len(got) != 1 {
+		t.Fatalf("normalizeSourceWatchRequests() len = %d, want 1", len(got))
+	}
+	if got[0].ThreadID != "" {
+		t.Fatalf("thread_id = %q, want empty (email mismatch should skip backfill)", got[0].ThreadID)
+	}
+	if got[0].Query != mismatchQuery {
+		t.Fatalf("query = %q, want original %q preserved", got[0].Query, mismatchQuery)
+	}
+}
+
+func TestFollowUpPlanningMessageAppendsTrackedEmailMetadata(t *testing.T) {
+	tracker := trackedEmailOutput(
+		"out-1",
+		"thread-abc",
+		"msg-xyz",
+		"user@example.com",
+		"Restoration Hardware Loveseat",
+	)
+
+	agentMsg := "I sent the opening offer email. I'll check back for replies."
+	got := followUpPlanningMessage(agentMsg, tracker)
+
+	if !strings.Contains(got, agentMsg) {
+		t.Fatal("expected result to contain the original agent message")
+	}
+	if !strings.Contains(got, "[thread_id=thread-abc]") {
+		t.Fatal("expected result to contain tracked thread_id")
+	}
+	if !strings.Contains(got, "[subject=Restoration Hardware Loveseat]") {
+		t.Fatal("expected result to contain tracked subject")
+	}
+	if !strings.Contains(got, "[recipient=user@example.com]") {
+		t.Fatal("expected result to contain tracked recipient")
+	}
+}
+
+func TestFollowUpPlanningMessageNoSuffixWithoutEmailOutputs(t *testing.T) {
+	tracker := &taskOutputTracker{}
+
+	agentMsg := "I completed the task successfully."
+	got := followUpPlanningMessage(agentMsg, tracker)
+
+	if got != agentMsg {
+		t.Fatalf("expected unmodified message %q, got %q", agentMsg, got)
 	}
 }
 

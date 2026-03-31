@@ -222,6 +222,45 @@ func normalizeSourceWatchRequests(
 		}
 		add(req)
 	}
+	// Backfill: when a classifier watch has no thread_id and fuzzy matching
+	// failed, try to fill from tracked outputs if there is exactly one
+	// unambiguous tracked output for the same integration.
+	for i, req := range normalized {
+		if req.ThreadID != "" {
+			continue
+		}
+		candidates := trackedFallbacksForIntegration(req.Integration, trackedFallbacks)
+		if len(candidates) != 1 {
+			continue
+		}
+		tracked := candidates[0]
+		// Only backfill when the classifier's watch is semantically
+		// related to the tracked output (email or subject overlap).
+		if !trackedSourceWatchBackfillRelevant(req, tracked) {
+			continue
+		}
+		if tracked.ThreadID != "" {
+			normalized[i].ThreadID = tracked.ThreadID
+		}
+		if tracked.MessageID != "" && normalized[i].MessageID == "" {
+			normalized[i].MessageID = tracked.MessageID
+		}
+		if tracked.SourceOutputID != "" && normalized[i].SourceOutputID == "" {
+			normalized[i].SourceOutputID = tracked.SourceOutputID
+		}
+		if tracked.Query != "" {
+			normalized[i].Query = tracked.Query
+		}
+	}
+	// Re-normalize Gmail watches that gained a thread/message ID during
+	// backfill so that attachment and body flags are set correctly.
+	for i, req := range normalized {
+		if strings.EqualFold(req.Integration, string(types.SourceGmail)) &&
+			(req.ThreadID != "" || req.MessageID != "") {
+			normalized[i].IncludeAttachments = true
+			normalized[i].IncludeMessageBody = true
+		}
+	}
 	// Tracked outputs are a fallback when the classifier did not materialize a
 	// concrete watch. Appending them unconditionally can arm unrelated watches
 	// from older draft/sent artifacts in the same task.
@@ -236,6 +275,15 @@ func normalizeSourceWatchRequests(
 	return normalized
 }
 
+func trackedFallbacksForIntegration(integration string, fallbacks []*types.SourceWatchRequest) []*types.SourceWatchRequest {
+	var out []*types.SourceWatchRequest
+	for _, fb := range fallbacks {
+		if strings.EqualFold(strings.TrimSpace(fb.Integration), strings.TrimSpace(integration)) {
+			out = append(out, fb)
+		}
+	}
+	return out
+}
 
 func bestMatchingTrackedSourceWatchRequest(
 	req *types.SourceWatchRequest,
@@ -387,6 +435,65 @@ func trackedSourceWatchSubjectMatches(req, candidate *types.SourceWatchRequest) 
 		}
 	}
 	return false
+}
+
+// trackedSourceWatchBackfillRelevant returns true when the classifier's watch
+// is semantically related to the tracked output — i.e. there is email address
+// or subject-keyword overlap.  Used to guard the integration-only backfill so
+// that unrelated watches are not anchored to the wrong thread.
+func trackedSourceWatchBackfillRelevant(req, tracked *types.SourceWatchRequest) bool {
+	if trackedSourceWatchEmailMatches(req, tracked) {
+		return true
+	}
+	if trackedSourceWatchSubjectMatches(req, tracked) {
+		return true
+	}
+	return trackedSourceWatchKeywordOverlap(req, tracked)
+}
+
+var backfillStopWords = map[string]struct{}{
+	"email": {}, "reply": {}, "subject": {}, "label": {},
+	"inbox": {}, "unread": {}, "from": {}, "sent": {},
+	"draft": {}, "check": {}, "wait": {}, "thread": {},
+	"message": {}, "update": {}, "with": {}, "that": {},
+	"this": {}, "your": {}, "about": {},
+}
+
+func trackedSourceWatchKeywordOverlap(req, tracked *types.SourceWatchRequest) bool {
+	subjectTokens := significantTokens(tracked.EntityLabel)
+	if len(subjectTokens) == 0 {
+		return false
+	}
+	reqTokens := significantTokens(req.Query, req.EntityLabel, req.Reason)
+	if len(reqTokens) == 0 {
+		return false
+	}
+	for tok := range subjectTokens {
+		if _, ok := reqTokens[tok]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func significantTokens(values ...string) map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, v := range values {
+		normalized := normalizeArtifactToken(v)
+		if normalized == "" {
+			continue
+		}
+		for _, tok := range strings.Split(normalized, "-") {
+			if len(tok) < 4 {
+				continue
+			}
+			if _, stop := backfillStopWords[tok]; stop {
+				continue
+			}
+			out[tok] = struct{}{}
+		}
+	}
+	return out
 }
 
 func sourceWatchEmails(values ...string) []string {
@@ -831,6 +938,9 @@ func fanOutPlannerPrompt(wakeSignal *types.RunExecutionWakeSignal, fallback stri
 
 func followUpPlanningMessage(agentMsg string, tracker *taskOutputTracker) string {
 	if trimmed := strings.TrimSpace(agentMsg); trimmed != "" {
+		if suffix := formatTrackedEmailSuffix(tracker); suffix != "" {
+			return trimmed + "\n\n" + suffix
+		}
 		return trimmed
 	}
 	if tracker == nil {
@@ -892,6 +1002,44 @@ func followUpPlanningMessage(agentMsg string, tracker *taskOutputTracker) string
 		lines = append(lines, line)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func formatTrackedEmailSuffix(tracker *taskOutputTracker) string {
+	if tracker == nil {
+		return ""
+	}
+	summaries := tracker.TrackedOutputSummaries()
+	var lines []string
+	for _, summary := range summaries {
+		if !strings.EqualFold(strings.TrimSpace(summary.OutputType), types.TaskOutputTypeEmail) {
+			continue
+		}
+		threadID := strings.TrimSpace(summary.ThreadID)
+		messageID := strings.TrimSpace(summary.MessageID)
+		recipient := strings.TrimSpace(summary.Recipient)
+		subject := strings.TrimSpace(summary.Subject)
+		if threadID == "" && messageID == "" && subject == "" {
+			continue
+		}
+		line := "-"
+		if threadID != "" {
+			line += fmt.Sprintf(" [thread_id=%s]", threadID)
+		}
+		if messageID != "" {
+			line += fmt.Sprintf(" [message_id=%s]", messageID)
+		}
+		if recipient != "" {
+			line += fmt.Sprintf(" [recipient=%s]", recipient)
+		}
+		if subject != "" {
+			line += fmt.Sprintf(" [subject=%s]", subject)
+		}
+		lines = append(lines, line)
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return "Tracked email outputs (use these exact identifiers for source watches):\n" + strings.Join(lines, "\n")
 }
 
 func shouldLogFollowUpDecision(message string) bool {
