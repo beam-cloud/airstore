@@ -1486,6 +1486,19 @@ func (p taskOutputPipeline) Wait() {
 	}
 }
 
+func (p taskOutputPipeline) WaitTimeout(d time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		p.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(d):
+		log.Warn().Dur("timeout", d).Msg("output pipeline drain timed out, proceeding with task result")
+	}
+}
+
 func (m *SandboxManager) taskOutputPipeline(ctx context.Context, task types.RunExecution, promptPlan promptTaskPlan) taskOutputPipeline {
 	tracker := &taskOutputTracker{}
 	outputWriter := newOutputWriter(ctx, m.gatewayClient, task, tracker)

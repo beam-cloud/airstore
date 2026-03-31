@@ -121,6 +121,11 @@ func (StreamNames) ViewDraftIndex(workspaceID string) string {
 	return fmt.Sprintf("view-draft-index.%s", workspaceID)
 }
 
+// ViewContext returns the stream name for a view's persistent context.
+func (StreamNames) ViewContext(viewID string) string {
+	return fmt.Sprintf("view.%s.context", viewID)
+}
+
 // Streams provides access to stream names
 var Streams = StreamNames{}
 

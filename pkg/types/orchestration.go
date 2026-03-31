@@ -185,6 +185,17 @@ func (s AgentTaskState) IsTerminal() bool {
 	}
 }
 
+// IsRetryable returns true for terminal states that can be woken back to
+// queued — everything except done (which represents completed work).
+func (s AgentTaskState) IsRetryable() bool {
+	switch s {
+	case AgentTaskStateError, AgentTaskStateDropped, AgentTaskStateCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
 func TaskTerminalStateForRun(runStatus AgentRunStatus) AgentTaskState {
 	switch runStatus {
 	case AgentRunStatusOK:

@@ -774,14 +774,20 @@ func (s *WorkerService) CreateTaskOutput(ctx context.Context, req *pb.CreateTask
 		return nil, status.Errorf(codes.Internal, "create output: %v", err)
 	}
 
-	if s.viewSync != nil {
-		if result := s.viewSync.Sync(ctx, output); result != nil && !result.Skipped {
-			if len(result.Updated) > 0 || len(result.Created) > 0 {
-				s.publishTaskUpdate(ctx, output.WorkspaceID, output.TaskID)
-			}
-		}
-	}
 	s.publishTaskUpdate(ctx, output.WorkspaceID, output.TaskID)
+
+	if s.viewSync != nil {
+		syncOutput := *output
+		go func() {
+			syncCtx, cancel := context.WithTimeout(context.Background(), views.ViewSyncTimeout)
+			defer cancel()
+			if result := s.viewSync.Sync(syncCtx, &syncOutput); result != nil && !result.Skipped {
+				if len(result.Updated) > 0 || len(result.Created) > 0 {
+					s.publishTaskUpdate(syncCtx, syncOutput.WorkspaceID, syncOutput.TaskID)
+				}
+			}
+		}()
+	}
 	return &pb.CreateTaskOutputResponse{Id: output.ID}, nil
 }
 

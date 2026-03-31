@@ -41,7 +41,40 @@ type ViewDefinition struct {
 	Agents      []string        `json:"agents"`
 	Sheets      []SheetSpec     `json:"sheets"`
 	Actions     []ComponentSpec `json:"actions,omitempty"`
+	Settings    *ViewSettings   `json:"settings,omitempty"`
 }
+
+// ViewSettings holds per-view configuration that controls agent behavior.
+type ViewSettings struct {
+	ApprovalPolicy string `json:"approval_policy,omitempty"`
+}
+
+// ApprovalPolicy encapsulates a per-view approval policy and provides
+// deterministic methods for deciding whether a blocker should be skipped.
+type ApprovalPolicy struct {
+	Key string
+}
+
+func NewApprovalPolicy(key string) ApprovalPolicy {
+	return ApprovalPolicy{Key: strings.TrimSpace(key)}
+}
+
+func (p ApprovalPolicy) IsSet() bool { return p.Key != "" }
+
+// AllowsWrite returns true if the policy permits a write command on the given
+// tool without requiring user approval.
+func (p ApprovalPolicy) AllowsWrite(tool IntegrationName) bool {
+	switch p.Key {
+	case "auto_approve_all":
+		return true
+	case "approve_emails_only":
+		return tool != Gmail
+	default:
+		return false
+	}
+}
+
+func (p ApprovalPolicy) String() string { return p.Key }
 
 // SyncNameDescription keeps the top-level view metadata and definition metadata
 // aligned, preferring explicit top-level values when present.
@@ -200,6 +233,16 @@ type ListItem struct {
 	Detail string `json:"detail,omitempty"`
 }
 
+// ---------------------------------------------------------------------------
+// View output schema — used to tell agents about table schemas they should
+// align their outputs with.
+// ---------------------------------------------------------------------------
+
+const (
+	schemaColumnLimit = 12
+	schemaHintLimit   = 6
+)
+
 type ViewOutputSchemaColumn struct {
 	Key     string         `json:"key"`
 	Label   string         `json:"label,omitempty"`
@@ -221,6 +264,8 @@ type ViewOutputSchemaContext struct {
 	TransformHints []string                 `json:"transform_hints,omitempty"`
 }
 
+// ParseViewOutputSchemaContexts recovers typed schema contexts from a generic
+// value (typically read back from JSON-serialized execution policy).
 func ParseViewOutputSchemaContexts(value any) []ViewOutputSchemaContext {
 	if value == nil {
 		return nil
@@ -236,21 +281,6 @@ func ParseViewOutputSchemaContexts(value any) []ViewOutputSchemaContext {
 	return contexts
 }
 
-func ViewOutputSchemaPolicyValue(contexts []ViewOutputSchemaContext) any {
-	if len(contexts) == 0 {
-		return nil
-	}
-	body, err := json.Marshal(contexts)
-	if err != nil || len(body) == 0 {
-		return nil
-	}
-	var decoded []map[string]any
-	if err := json.Unmarshal(body, &decoded); err != nil || len(decoded) == 0 {
-		return nil
-	}
-	return decoded
-}
-
 func (c ViewOutputSchemaContext) SortKey() string {
 	return strings.TrimSpace(c.ViewID) + "\x00" +
 		strings.TrimSpace(c.SheetID) + "\x00" +
@@ -259,9 +289,9 @@ func (c ViewOutputSchemaContext) SortKey() string {
 
 func (c ViewOutputSchemaContext) MatchLabel() string {
 	parts := make([]string, 0, 3)
-	for _, value := range []string{c.ViewName, c.SheetName, c.ComponentTitle} {
-		if trimmed := strings.TrimSpace(value); trimmed != "" {
-			parts = append(parts, trimmed)
+	for _, v := range []string{c.ViewName, c.SheetName, c.ComponentTitle} {
+		if t := strings.TrimSpace(v); t != "" {
+			parts = append(parts, t)
 		}
 	}
 	return strings.Join(parts, " / ")
@@ -269,9 +299,9 @@ func (c ViewOutputSchemaContext) MatchLabel() string {
 
 func (c ViewOutputSchemaContext) ColumnKeys() []string {
 	keys := make([]string, 0, len(c.Columns))
-	for _, column := range c.Columns {
-		if key := strings.TrimSpace(column.Key); key != "" {
-			keys = append(keys, key)
+	for _, col := range c.Columns {
+		if k := strings.TrimSpace(col.Key); k != "" {
+			keys = append(keys, k)
 		}
 	}
 	return keys
@@ -279,30 +309,30 @@ func (c ViewOutputSchemaContext) ColumnKeys() []string {
 
 func (c ViewOutputSchemaContext) CompactColumns() []map[string]any {
 	out := make([]map[string]any, 0, len(c.Columns))
-	for _, column := range c.Columns {
-		key := strings.TrimSpace(column.Key)
-		if key == "" {
+	for _, col := range c.Columns {
+		k := strings.TrimSpace(col.Key)
+		if k == "" {
 			continue
 		}
-		record := map[string]any{"key": key}
-		if label := strings.TrimSpace(column.Label); label != "" {
-			record["label"] = label
+		rec := map[string]any{"key": k}
+		if l := strings.TrimSpace(col.Label); l != "" {
+			rec["label"] = l
 		}
-		if columnType := strings.TrimSpace(column.Type); columnType != "" {
-			record["type"] = columnType
+		if t := strings.TrimSpace(col.Type); t != "" {
+			rec["type"] = t
 		}
-		if len(column.Options) > 0 {
-			record["options"] = column.Options
+		if len(col.Options) > 0 {
+			rec["options"] = col.Options
 		}
-		out = append(out, record)
+		out = append(out, rec)
 	}
 	return out
 }
 
-const (
-	viewOutputSchemaColumnLimit = 12
-	viewOutputSchemaHintLimit   = 6
-)
+// ---------------------------------------------------------------------------
+// Schema loading — resolves which views reference a given agent and builds
+// the schema contexts for injection into the agent's runtime environment.
+// ---------------------------------------------------------------------------
 
 type ViewOutputSchemaBackend interface {
 	GetAgentProfile(ctx context.Context, workspaceID uint, agentID string) (*AgentProfile, error)
@@ -323,22 +353,22 @@ func LoadViewOutputSchemaContexts(
 	if err != nil {
 		return nil, err
 	}
-	matchRefs := viewOutputSchemaAgentMatchRefs(ctx, backend, workspaceID, agentID)
+	matchRefs := agentMatchRefs(ctx, backend, workspaceID, agentID)
 	if len(matchRefs) == 0 {
 		return nil, nil
 	}
-	contexts := make([]ViewOutputSchemaContext, 0, len(views))
+	var contexts []ViewOutputSchemaContext
 	for _, view := range views {
 		if view == nil {
 			continue
 		}
 		for _, sheet := range view.Definition.Sheets {
-			for _, component := range sheet.Components {
-				if !component.IsTable() || !viewOutputSchemaComponentMatchesAgent(view.Definition, component, matchRefs) {
+			for _, comp := range sheet.Components {
+				if !comp.IsTable() || !view.Definition.ComponentMatchesAgent(comp, matchRefs) {
 					continue
 				}
-				if context := BuildViewOutputSchemaContext(view, sheet, component); context != nil {
-					contexts = append(contexts, *context)
+				if sc := BuildViewOutputSchemaContext(view, sheet, comp); sc != nil {
+					contexts = append(contexts, *sc)
 				}
 			}
 		}
@@ -349,165 +379,154 @@ func LoadViewOutputSchemaContexts(
 	return contexts, nil
 }
 
-func viewOutputSchemaAgentMatchRefs(
-	ctx context.Context,
-	backend ViewOutputSchemaBackend,
-	workspaceID uint,
-	agentID string,
-) map[string]struct{} {
-	refs := map[string]struct{}{}
-	if normalized := normalizeViewOutputSchemaAgentRef(agentID); normalized != "" {
-		refs[normalized] = struct{}{}
-	}
-	profile, err := backend.GetAgentProfile(ctx, workspaceID, agentID)
-	if err != nil || profile == nil {
-		return refs
-	}
-	for _, raw := range []string{profile.ID, profile.AgentKey, profile.Name} {
-		if normalized := normalizeViewOutputSchemaAgentRef(raw); normalized != "" {
-			refs[normalized] = struct{}{}
-		}
-	}
-	return refs
-}
-
-func viewOutputSchemaComponentMatchesAgent(
-	definition ViewDefinition,
-	component ComponentSpec,
-	matchRefs map[string]struct{},
-) bool {
-	for _, ref := range viewOutputSchemaComponentRefs(definition, component) {
-		if _, ok := matchRefs[normalizeViewOutputSchemaAgentRef(ref)]; ok {
+// ComponentMatchesAgent returns true if the component references any of the
+// given agent match refs (case-insensitive).
+func (d ViewDefinition) ComponentMatchesAgent(comp ComponentSpec, refs map[string]struct{}) bool {
+	for _, r := range d.componentAgentRefs(comp) {
+		if _, ok := refs[strings.TrimSpace(strings.ToLower(r))]; ok {
 			return true
 		}
 	}
 	return false
 }
 
-func viewOutputSchemaComponentRefs(definition ViewDefinition, component ComponentSpec) []string {
-	refs := make([]string, 0, len(definition.Agents)+4)
-	if component.DataSource != nil {
-		refs = append(refs, component.DataSource.AgentIDs...)
-		if strings.TrimSpace(component.DataSource.AgentID) != "" {
-			refs = append(refs, component.DataSource.AgentID)
+func (d ViewDefinition) componentAgentRefs(comp ComponentSpec) []string {
+	var refs []string
+	if comp.DataSource != nil {
+		refs = append(refs, comp.DataSource.AgentIDs...)
+		if id := strings.TrimSpace(comp.DataSource.AgentID); id != "" {
+			refs = append(refs, id)
 		}
 	}
-	if component.Config != nil {
-		if ref := stringFromSchemaPayload(component.Config, "agent_id"); ref != "" {
-			refs = append(refs, ref)
+	if comp.Config != nil {
+		if id, _ := comp.Config["agent_id"].(string); strings.TrimSpace(id) != "" {
+			refs = append(refs, id)
 		}
-		if raw, ok := component.Config["agent_ids"]; ok {
-			refs = append(refs, stringSliceFromSchemaValue(raw)...)
+		if raw, ok := comp.Config["agent_ids"]; ok {
+			if body, err := json.Marshal(raw); err == nil {
+				var ids []string
+				if json.Unmarshal(body, &ids) == nil {
+					refs = append(refs, ids...)
+				}
+			}
 		}
 	}
 	if len(refs) == 0 {
-		refs = append(refs, definition.Agents...)
+		refs = append(refs, d.Agents...)
 	}
-	return uniqueTrimmedSchemaStrings(refs)
+	return dedup(refs)
 }
 
-func BuildViewOutputSchemaContext(view *View, sheet SheetSpec, component ComponentSpec) *ViewOutputSchemaContext {
-	columns := buildViewOutputSchemaColumns(component)
+func agentMatchRefs(ctx context.Context, backend ViewOutputSchemaBackend, workspaceID uint, agentID string) map[string]struct{} {
+	refs := map[string]struct{}{}
+	if n := strings.TrimSpace(strings.ToLower(agentID)); n != "" {
+		refs[n] = struct{}{}
+	}
+	profile, err := backend.GetAgentProfile(ctx, workspaceID, agentID)
+	if err != nil || profile == nil {
+		return refs
+	}
+	for _, raw := range []string{profile.ID, profile.AgentKey, profile.Name} {
+		if n := strings.TrimSpace(strings.ToLower(raw)); n != "" {
+			refs[n] = struct{}{}
+		}
+	}
+	return refs
+}
+
+// BuildViewOutputSchemaContext builds a schema context for a single table
+// component. Returns nil if the component has no usable columns.
+func BuildViewOutputSchemaContext(view *View, sheet SheetSpec, comp ComponentSpec) *ViewOutputSchemaContext {
+	columns := comp.SchemaColumns()
 	if len(columns) == 0 {
 		return nil
 	}
-	context := &ViewOutputSchemaContext{
+	sc := &ViewOutputSchemaContext{
 		ViewID:         strings.TrimSpace(view.ID),
 		ViewName:       strings.TrimSpace(view.Name),
 		SheetID:        strings.TrimSpace(sheet.ID),
 		SheetName:      strings.TrimSpace(sheet.Name),
-		ComponentID:    strings.TrimSpace(component.ID),
-		ComponentTitle: strings.TrimSpace(component.Title),
+		ComponentID:    strings.TrimSpace(comp.ID),
+		ComponentTitle: strings.TrimSpace(comp.Title),
 		Columns:        columns,
 	}
-	if component.DataSource != nil {
-		context.ArtifactKey = strings.TrimSpace(component.DataSource.ArtifactKey)
-		context.OutputType = strings.TrimSpace(component.DataSource.OutputType)
-		context.Transform = component.DataSource.Transform
-		context.TransformHints = viewOutputSchemaTransformHints(component.DataSource.Transform)
+	if comp.DataSource != nil {
+		sc.ArtifactKey = strings.TrimSpace(comp.DataSource.ArtifactKey)
+		sc.OutputType = strings.TrimSpace(comp.DataSource.OutputType)
+		sc.Transform = comp.DataSource.Transform
+		sc.TransformHints = transformHints(comp.DataSource.Transform)
 	}
-	if context.ComponentTitle == "" {
-		context.ComponentTitle = context.SheetName
+	if sc.ComponentTitle == "" {
+		sc.ComponentTitle = sc.SheetName
 	}
-	return context
+	return sc
 }
 
-func buildViewOutputSchemaColumns(component ComponentSpec) []ViewOutputSchemaColumn {
+// SchemaColumns derives the output schema columns from the component's
+// data source transforms and config column metadata.
+func (c ComponentSpec) SchemaColumns() []ViewOutputSchemaColumn {
 	configByKey := make(map[string]ColumnMeta)
-	configOrder := make([]string, 0)
-	for _, column := range viewOutputSchemaConfigColumns(component.Config) {
-		key := canonicalViewOutputSchemaColumnKey(column.Key)
+	var configOrder []string
+	for _, col := range configColumns(c.Config) {
+		key := canonicalColumnKey(col.Key)
 		if key == "" {
 			continue
 		}
-		column.Key = key
+		col.Key = key
 		if existing, ok := configByKey[key]; ok {
-			if strings.TrimSpace(existing.Label) == "" && strings.TrimSpace(column.Label) != "" {
-				existing.Label = column.Label
+			if strings.TrimSpace(existing.Label) == "" && strings.TrimSpace(col.Label) != "" {
+				existing.Label = col.Label
 			}
-			if strings.TrimSpace(existing.Type) == "" && strings.TrimSpace(column.Type) != "" {
-				existing.Type = column.Type
+			if strings.TrimSpace(existing.Type) == "" && strings.TrimSpace(col.Type) != "" {
+				existing.Type = col.Type
 			}
-			if len(existing.Options) == 0 && len(column.Options) > 0 {
-				existing.Options = column.Options
+			if len(existing.Options) == 0 && len(col.Options) > 0 {
+				existing.Options = col.Options
 			}
 			configByKey[key] = existing
 			continue
 		}
-		configByKey[key] = column
+		configByKey[key] = col
 		configOrder = append(configOrder, key)
 	}
 
-	columns := make([]ViewOutputSchemaColumn, 0, viewOutputSchemaColumnLimit)
-	seen := make(map[string]struct{}, viewOutputSchemaColumnLimit)
-	if component.DataSource != nil {
-		for _, rule := range component.DataSource.Transform {
-			key := canonicalViewOutputSchemaColumnKey(rule.Column)
-			if key == "" {
-				key = canonicalViewOutputSchemaColumnKey(viewOutputSchemaSourceColumnHint(rule.Source))
-			}
-			if key == "" {
-				continue
-			}
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			cfg := configByKey[key]
-			columns = append(columns, ViewOutputSchemaColumn{
-				Key:   key,
-				Label: firstNonEmptyTrimmedSchemaString(cfg.Label, humanizeViewOutputSchemaColumn(key)),
-				Type: firstNonEmptyTrimmedSchemaString(
-					rule.Type,
-					cfg.Type,
-					inferViewOutputSchemaColumnType(key),
-				),
-				Options: append([]StatusOption(nil), cfg.Options...),
-			})
-			seen[key] = struct{}{}
-			if len(columns) >= viewOutputSchemaColumnLimit {
-				return columns
-			}
-		}
-	}
-	for _, key := range configOrder {
-		if _, ok := seen[key]; ok {
-			continue
+	columns := make([]ViewOutputSchemaColumn, 0, schemaColumnLimit)
+	seen := make(map[string]struct{}, schemaColumnLimit)
+
+	addColumn := func(key string, ruleType string) {
+		if _, ok := seen[key]; ok || key == "" || len(columns) >= schemaColumnLimit {
+			return
 		}
 		cfg := configByKey[key]
 		columns = append(columns, ViewOutputSchemaColumn{
 			Key:     key,
-			Label:   firstNonEmptyTrimmedSchemaString(cfg.Label, humanizeViewOutputSchemaColumn(key)),
-			Type:    firstNonEmptyTrimmedSchemaString(cfg.Type, inferViewOutputSchemaColumnType(key)),
+			Label:   coalesce(cfg.Label, humanizeColumn(key)),
+			Type:    coalesce(ruleType, cfg.Type, inferColumnType(key)),
 			Options: append([]StatusOption(nil), cfg.Options...),
 		})
-		if len(columns) >= viewOutputSchemaColumnLimit {
-			break
+		seen[key] = struct{}{}
+	}
+
+	if c.DataSource != nil {
+		for _, rule := range c.DataSource.Transform {
+			key := canonicalColumnKey(rule.Column)
+			if key == "" {
+				key = canonicalColumnKey(sourceColumnHint(rule.Source))
+			}
+			addColumn(key, rule.Type)
 		}
+	}
+	for _, key := range configOrder {
+		addColumn(key, "")
 	}
 	return columns
 }
 
-func viewOutputSchemaConfigColumns(config map[string]any) []ColumnMeta {
+// ---------------------------------------------------------------------------
+// Private helpers — short names, scoped to this file.
+// ---------------------------------------------------------------------------
+
+func configColumns(config map[string]any) []ColumnMeta {
 	raw, ok := config["columns"]
 	if !ok || raw == nil {
 		return nil
@@ -516,47 +535,52 @@ func viewOutputSchemaConfigColumns(config map[string]any) []ColumnMeta {
 	if err != nil || len(body) == 0 {
 		return nil
 	}
-	var columns []ColumnMeta
-	if err := json.Unmarshal(body, &columns); err != nil {
+	var cols []ColumnMeta
+	if json.Unmarshal(body, &cols) != nil {
 		return nil
 	}
-	return columns
+	return cols
 }
 
-func viewOutputSchemaTransformHints(rules []TransformRule) []string {
-	hints := make([]string, 0, len(rules))
+func transformHints(rules []TransformRule) []string {
+	var hints []string
 	seen := make(map[string]struct{}, len(rules))
 	for _, rule := range rules {
-		hint := strings.TrimSpace(rule.Source)
-		if hint == "" {
+		h := strings.TrimSpace(rule.Source)
+		if h == "" {
 			continue
 		}
-		if _, ok := seen[hint]; ok {
+		if _, ok := seen[h]; ok {
 			continue
 		}
-		seen[hint] = struct{}{}
-		hints = append(hints, hint)
-		if len(hints) >= viewOutputSchemaHintLimit {
+		seen[h] = struct{}{}
+		hints = append(hints, h)
+		if len(hints) >= schemaHintLimit {
 			break
 		}
 	}
 	return hints
 }
 
-func canonicalViewOutputSchemaColumnKey(value string) string {
-	normalized := normalizeViewOutputSchemaColumnKey(value)
-	if normalized == "" {
-		return ""
-	}
-	switch normalized {
-	case "task_id", "detail_task_id", "row_id", "stable_ref", "sheet_id", "output_id", "output_status", "blocker_output_ids", "blocker_kind", "blocker_input_kind", "blocker_wait_group_id", "source_output_ids":
-		return normalized + "_value"
-	default:
-		return normalized
-	}
+var reservedColumnKeys = map[string]struct{}{
+	"task_id": {}, "detail_task_id": {}, "row_id": {}, "stable_ref": {},
+	"sheet_id": {}, "output_id": {}, "output_status": {},
+	"blocker_output_ids": {}, "blocker_kind": {}, "blocker_input_kind": {},
+	"blocker_wait_group_id": {}, "source_output_ids": {},
 }
 
-func normalizeViewOutputSchemaColumnKey(value string) string {
+func canonicalColumnKey(value string) string {
+	n := normalizeColumnKey(value)
+	if n == "" {
+		return ""
+	}
+	if _, reserved := reservedColumnKeys[n]; reserved {
+		return n + "_value"
+	}
+	return n
+}
+
+func normalizeColumnKey(value string) string {
 	value = strings.TrimSpace(strings.ToLower(value))
 	if value == "" {
 		return ""
@@ -564,44 +588,32 @@ func normalizeViewOutputSchemaColumnKey(value string) string {
 	var b strings.Builder
 	lastUnderscore := false
 	for _, r := range value {
-		switch {
-		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
 			b.WriteRune(r)
 			lastUnderscore = false
-		default:
-			if !lastUnderscore {
-				b.WriteByte('_')
-				lastUnderscore = true
-			}
+		} else if !lastUnderscore {
+			b.WriteByte('_')
+			lastUnderscore = true
 		}
 	}
 	return strings.Trim(b.String(), "_")
 }
 
-func normalizeViewOutputSchemaAgentRef(value string) string {
-	return strings.TrimSpace(strings.ToLower(value))
-}
-
-func viewOutputSchemaSourceColumnHint(source string) string {
+func sourceColumnHint(source string) string {
 	source = strings.TrimSpace(strings.Split(source, "|")[0])
 	source = strings.TrimPrefix(strings.TrimPrefix(source, "data."), "metadata.")
 	parts := strings.FieldsFunc(source, func(r rune) bool {
-		switch r {
-		case '.', '[', ']', ' ':
-			return true
-		default:
-			return false
-		}
+		return r == '.' || r == '[' || r == ']' || r == ' '
 	})
 	for i := len(parts) - 1; i >= 0; i-- {
-		if part := strings.TrimSpace(parts[i]); part != "" {
-			return part
+		if p := strings.TrimSpace(parts[i]); p != "" {
+			return p
 		}
 	}
 	return ""
 }
 
-func inferViewOutputSchemaColumnType(key string) string {
+func inferColumnType(key string) string {
 	switch {
 	case strings.HasSuffix(key, "_at"), key == "date", key == "created", key == "updated":
 		return "date"
@@ -616,64 +628,37 @@ func inferViewOutputSchemaColumnType(key string) string {
 	}
 }
 
-func humanizeViewOutputSchemaColumn(key string) string {
+func humanizeColumn(key string) string {
 	parts := strings.Split(strings.TrimSpace(key), "_")
-	for i, part := range parts {
-		if part == "" {
-			continue
+	for i, p := range parts {
+		if p != "" {
+			parts[i] = strings.ToUpper(p[:1]) + p[1:]
 		}
-		parts[i] = strings.ToUpper(part[:1]) + part[1:]
 	}
 	return strings.Join(parts, " ")
 }
 
-func stringSliceFromSchemaValue(value any) []string {
-	body, err := json.Marshal(value)
-	if err != nil || len(body) == 0 {
-		return nil
-	}
-	var values []string
-	if err := json.Unmarshal(body, &values); err != nil {
-		return nil
-	}
-	return uniqueTrimmedSchemaStrings(values)
-}
-
-func stringFromSchemaPayload(payload map[string]any, key string) string {
-	if payload == nil {
-		return ""
-	}
-	value, ok := payload[key]
-	if !ok {
-		return ""
-	}
-	text, ok := value.(string)
-	if !ok {
-		return ""
-	}
-	return strings.TrimSpace(text)
-}
-
-func uniqueTrimmedSchemaStrings(values []string) []string {
-	seen := make(map[string]struct{}, len(values))
-	unique := make([]string, 0, len(values))
-	for _, value := range values {
-		if trimmed := strings.TrimSpace(value); trimmed != "" {
-			if _, ok := seen[trimmed]; ok {
-				continue
-			}
-			seen[trimmed] = struct{}{}
-			unique = append(unique, trimmed)
-		}
-	}
-	return unique
-}
-
-func firstNonEmptyTrimmedSchemaString(values ...string) string {
-	for _, value := range values {
-		if trimmed := strings.TrimSpace(value); trimmed != "" {
-			return trimmed
+// coalesce returns the first non-empty trimmed string.
+func coalesce(values ...string) string {
+	for _, v := range values {
+		if t := strings.TrimSpace(v); t != "" {
+			return t
 		}
 	}
 	return ""
+}
+
+// dedup returns unique non-empty trimmed strings preserving order.
+func dedup(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		if t := strings.TrimSpace(v); t != "" {
+			if _, ok := seen[t]; !ok {
+				seen[t] = struct{}{}
+				out = append(out, t)
+			}
+		}
+	}
+	return out
 }

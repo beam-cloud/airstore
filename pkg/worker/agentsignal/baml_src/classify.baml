@@ -13,7 +13,7 @@ class TurnClassification {
   input_kind InputKind? @description("Only set when outcome is NEEDS_INPUT. Indicates whether the agent needs a simple approve/reject or free-text input.")
 }
 
-function ClassifyTurn(message: string) -> TurnClassification {
+function ClassifyTurn(message: string, approval_policy: string) -> TurnClassification {
   client TurnClassifier
   prompt #"
     An AI agent just completed a turn. Based on its final message, determine:
@@ -144,6 +144,18 @@ function ClassifyTurn(message: string) -> TurnClassification {
       draft the next response for user approval before sending."
     - "Monitoring thread 123 for replies; follow up in 5 minutes if nothing
       changes sooner."
+
+    {% if approval_policy %}
+    APPROVAL POLICY:
+    ---
+    {{ approval_policy }}
+    ---
+    If the policy above indicates that the action the agent is asking about
+    is pre-approved, classify this turn as COMPLETE — the agent should proceed
+    without waiting for user input. The policy takes precedence over the default
+    APPROVE_REJECT classification for covered actions. FREE_TEXT classifications
+    (where the agent genuinely needs information) are not affected by the policy.
+    {% endif %}
 
     Agent's message (last ~4000 chars):
     ---

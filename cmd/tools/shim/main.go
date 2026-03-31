@@ -14,6 +14,7 @@ import (
 	"github.com/beam-cloud/airstore/pkg/types"
 	pb "github.com/beam-cloud/airstore/proto"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 )
 
 const rpcTimeout = 30 * time.Second
@@ -173,6 +174,18 @@ func showHelp(cfg *Config, toolName string) error {
 func executeTool(cfg *Config, toolName string, args []string) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
 	defer cancel()
+
+	md := metadata.Pairs()
+	if v := os.Getenv("AIRSTORE_ORIGIN_TASK_ID"); v != "" {
+		md.Append("x-airstore-task-id", v)
+	}
+	if v := os.Getenv("AIRSTORE_RUN_ID"); v != "" {
+		md.Append("x-airstore-run-id", v)
+	}
+	if v := os.Getenv("AIRSTORE_APPROVAL_POLICY"); v != "" {
+		md.Append("x-airstore-approval-policy", v)
+	}
+	ctx = metadata.NewOutgoingContext(ctx, md)
 
 	conn, err := connect(cfg)
 	if err != nil {

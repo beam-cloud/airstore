@@ -1,6 +1,7 @@
 package apiv1
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -247,17 +248,31 @@ func (g *TaskOutputsGroup) CreateOutput(c echo.Context) error {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 
+	publishTaskLive(c, g.live, workspaceID, taskID)
+
 	if g.viewSync != nil {
-		if result := g.viewSync.Sync(c.Request().Context(), output); result != nil && !result.Skipped {
-			log.Info().
-				Str("task_id", taskID).
-				Int("updated", len(result.Updated)).
-				Int("created", len(result.Created)).
-				Msg("http CreateOutput: viewsync completed")
-		}
+		syncOutput := *output
+		vs := g.viewSync
+		live := g.live
+		go func() {
+			syncCtx, cancel := context.WithTimeout(context.Background(), views.ViewSyncTimeout)
+			defer cancel()
+			if result := vs.Sync(syncCtx, &syncOutput); result != nil && !result.Skipped {
+				if len(result.Updated) > 0 || len(result.Created) > 0 {
+					log.Info().
+						Str("task_id", syncOutput.TaskID).
+						Int("updated", len(result.Updated)).
+						Int("created", len(result.Created)).
+						Msg("http CreateOutput: viewsync completed")
+					if live != nil {
+						_ = live.PublishTaskLive(syncCtx, syncOutput.TaskID)
+						_ = live.PublishWorkspaceLive(syncCtx, syncOutput.WorkspaceID)
+					}
+				}
+			}
+		}()
 	}
 
-	publishTaskLive(c, g.live, workspaceID, taskID)
 	return c.JSON(http.StatusCreated, output)
 }
 

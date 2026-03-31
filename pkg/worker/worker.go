@@ -41,6 +41,7 @@ type Worker struct {
 	cancel          context.CancelFunc
 	taskQueue       repository.TaskQueue
 	terminalIO      repository.TerminalIORepository
+	redisClient     *common.RedisClient
 	sandboxManager  *SandboxManager
 
 	// Concurrency & shutdown
@@ -180,6 +181,7 @@ func NewWorker() (*Worker, error) {
 		cancel:             cancel,
 		taskQueue:          taskQueue,
 		terminalIO:         terminalIO,
+		redisClient:        redisClient,
 		sandboxManager:     sandboxManager,
 		maxConcurrentTasks: maxConcurrentTasks,
 		shutdownTimeout:    shutdownTimeout,

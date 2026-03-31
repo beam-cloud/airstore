@@ -20,26 +20,28 @@ import (
 )
 
 type ViewsGroup struct {
-	g        *echo.Group
-	backend  repository.BackendRepository
-	copilot  *views.Copilot
-	store    *views.ViewStore
-	resolver *views.DataResolver
-	storage  *clients.StorageClient
-	viewSync *views.ViewSync
+	g          *echo.Group
+	backend    repository.BackendRepository
+	copilot    *views.Copilot
+	store      *views.ViewStore
+	resolver   *views.DataResolver
+	storage    *clients.StorageClient
+	viewSync   *views.ViewSync
+	compactor  *views.ContextCompactor
 }
 
 const viewRefreshQueryParam = "refresh"
 
-func NewViewsGroup(g *echo.Group, backend repository.BackendRepository, copilot *views.Copilot, store *views.ViewStore, storage *clients.StorageClient, viewSync *views.ViewSync) *ViewsGroup {
+func NewViewsGroup(g *echo.Group, backend repository.BackendRepository, copilot *views.Copilot, store *views.ViewStore, storage *clients.StorageClient, viewSync *views.ViewSync, compactor *views.ContextCompactor) *ViewsGroup {
 	vg := &ViewsGroup{
-		g:        g,
-		backend:  backend,
-		copilot:  copilot,
-		store:    store,
-		resolver: views.NewDataResolver(backend, store),
-		storage:  storage,
-		viewSync: viewSync,
+		g:         g,
+		backend:   backend,
+		copilot:   copilot,
+		store:     store,
+		resolver:  views.NewDataResolver(backend, store),
+		storage:   storage,
+		viewSync:  viewSync,
+		compactor: compactor,
 	}
 	vg.g.GET("", vg.List)
 	vg.g.POST("", vg.Create)
@@ -60,6 +62,8 @@ func NewViewsGroup(g *echo.Group, backend repository.BackendRepository, copilot 
 	vg.g.GET("/:view_id/mailbox", vg.Mailbox)
 	vg.g.POST("/:view_id/chat", vg.ChatView)
 	vg.g.GET("/:view_id/chat/messages", vg.ChatMessages)
+	vg.g.POST("/:view_id/context", vg.IngestContext)
+	vg.g.GET("/:view_id/context", vg.GetContext)
 	return vg
 }
 
@@ -132,10 +136,10 @@ type columnRename struct {
 }
 
 type updateViewRequest struct {
-	Name          *string               `json:"name,omitempty"`
-	Description   *string               `json:"description,omitempty"`
-	Definition    *types.ViewDefinition `json:"definition,omitempty"`
-	ColumnRenames []columnRename        `json:"column_renames,omitempty"`
+	Name          *string            `json:"name,omitempty"`
+	Description   *string            `json:"description,omitempty"`
+	Definition    json.RawMessage    `json:"definition,omitempty"`
+	ColumnRenames []columnRename     `json:"column_renames,omitempty"`
 }
 
 func (vg *ViewsGroup) Update(c echo.Context) error {
@@ -160,8 +164,11 @@ func (vg *ViewsGroup) Update(c echo.Context) error {
 	if req.Description != nil {
 		v.Description = *req.Description
 	}
-	if req.Definition != nil {
-		v.Definition = *req.Definition
+	hasDefinition := len(req.Definition) > 0 && string(req.Definition) != "null"
+	if hasDefinition {
+		if err := json.Unmarshal(req.Definition, &v.Definition); err != nil {
+			return ErrorResponse(c, http.StatusBadRequest, "invalid definition: "+err.Error())
+		}
 		if req.Name == nil && strings.TrimSpace(v.Definition.Name) != "" {
 			v.Name = v.Definition.Name
 		}
@@ -172,7 +179,7 @@ func (vg *ViewsGroup) Update(c echo.Context) error {
 	if len(req.ColumnRenames) > 0 {
 		applyColumnRenamesToDefinition(&v.Definition, req.ColumnRenames)
 	}
-	if req.Definition != nil || len(req.ColumnRenames) > 0 {
+	if hasDefinition || len(req.ColumnRenames) > 0 {
 		views.NormalizeDefinition(&v.Definition)
 	}
 	v.SyncNameDescription()
@@ -195,7 +202,7 @@ func (vg *ViewsGroup) Update(c echo.Context) error {
 					Msg("failed to rename column in MongoDB view store")
 			}
 		}
-		if req.Definition != nil {
+		if hasDefinition {
 			for _, sheetID := range deletedViewSheets(previousDefinition, v.Definition) {
 				if err := vg.store.DeleteSheet(ctx, v.ID, sheetID); err != nil {
 					log.Warn().Err(err).Str("view_id", v.ID).Str("sheet_id", sheetID).Msg("failed to delete sheet rows from MongoDB view store")
@@ -1887,6 +1894,95 @@ func operationPayloadName(payload string) string {
 		}
 	}
 	return ""
+}
+
+// ---------------------------------------------------------------------------
+// Context stream
+// ---------------------------------------------------------------------------
+
+func (vg *ViewsGroup) IngestContext(c echo.Context) error {
+	workspaceID, err := vg.workspaceID(c)
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+	}
+	viewID := c.Param("view_id")
+	if _, err := vg.backend.GetView(c.Request().Context(), workspaceID, viewID); err != nil {
+		return ErrorResponse(c, http.StatusNotFound, "view not found")
+	}
+	if vg.compactor == nil || !vg.compactor.Available() {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "context stream not available")
+	}
+
+	var req struct {
+		EntryType    string         `json:"entry_type"`
+		Content      string         `json:"content"`
+		SourceTaskID string         `json:"source_task_id,omitempty"`
+		Metadata     map[string]any `json:"metadata,omitempty"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
+	}
+	if strings.TrimSpace(req.Content) == "" {
+		return ErrorResponse(c, http.StatusBadRequest, "content is required")
+	}
+	if req.EntryType == "" {
+		req.EntryType = "note"
+	}
+
+	entry := types.ViewContextEntry{
+		ID:           fmt.Sprintf("ctx-%d", time.Now().UnixNano()),
+		ViewID:       viewID,
+		Timestamp:    time.Now().UnixMilli(),
+		EntryType:    req.EntryType,
+		Content:      strings.TrimSpace(req.Content),
+		SourceTaskID: req.SourceTaskID,
+		Metadata:     req.Metadata,
+	}
+	if err := vg.compactor.AppendEntry(c.Request().Context(), entry); err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to append context entry")
+	}
+
+	// Check if compaction should trigger.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		entries, err := vg.compactor.ReadContext(ctx, viewID)
+		if err != nil {
+			return
+		}
+		if vg.compactor.ShouldCompact(entries) {
+			_ = vg.compactor.Compact(ctx, viewID, entries)
+		}
+	}()
+
+	return c.JSON(http.StatusCreated, entry)
+}
+
+func (vg *ViewsGroup) GetContext(c echo.Context) error {
+	workspaceID, err := vg.workspaceID(c)
+	if err != nil {
+		return ErrorResponse(c, http.StatusBadRequest, err.Error())
+	}
+	viewID := c.Param("view_id")
+	if _, err := vg.backend.GetView(c.Request().Context(), workspaceID, viewID); err != nil {
+		return ErrorResponse(c, http.StatusNotFound, "view not found")
+	}
+	if vg.compactor == nil || !vg.compactor.Available() {
+		return c.JSON(http.StatusOK, map[string]any{"entries": []any{}, "formatted": ""})
+	}
+
+	entries, err := vg.compactor.ReadContext(c.Request().Context(), viewID)
+	if err != nil {
+		return ErrorResponse(c, http.StatusInternalServerError, "failed to read context")
+	}
+	if entries == nil {
+		entries = []types.ViewContextEntry{}
+	}
+
+	return c.JSON(http.StatusOK, map[string]any{
+		"entries":   entries,
+		"formatted": views.FormatForPrompt(entries),
+	})
 }
 
 // ---------------------------------------------------------------------------

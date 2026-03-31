@@ -85,6 +85,7 @@ func NewAgentService(
 		Backend:           backend,
 		TaskQueue:         taskQueue,
 		TerminalIO:        terminalIO,
+		S2:                s2,
 		Lifecycle:         lifecycle,
 		ResumeBarrier:     service.resumeBarrier,
 		DefaultImage:      defaultImage,
@@ -175,6 +176,7 @@ func (s *AgentService) ensureRunFactory() *RunFactory {
 			Backend:           s.backend,
 			TaskQueue:         s.taskQueue,
 			TerminalIO:        s.terminalIO,
+			S2:                s.s2,
 			Lifecycle:         s.ensureLifecycle(),
 			ResumeBarrier:     s.ensureResumeBarrier(),
 			DefaultImage:      s.defaultImage,
@@ -213,6 +215,15 @@ func (s *AgentService) SetSourceWatchRegistrar(registrar SourceWatchRegistrar) {
 	s.sourceWatchRegistrar = registrar
 	if s.runtimeLoops != nil {
 		s.runtimeLoops.SetSourceWatchRegistrar(registrar)
+	}
+}
+
+func (s *AgentService) SetToolExecutor(executor ToolExecutor) {
+	if s == nil {
+		return
+	}
+	if s.taskFlows != nil {
+		s.taskFlows.SetToolExecutor(executor)
 	}
 }
 
@@ -1521,22 +1532,20 @@ func (s *AgentService) resolveRunAgentConfig(
 	return agentConfig
 }
 
-// namespaceWorkspaceDirByView appends the source_view_id to the agent's
-// workspace_dir so each project gets its own isolated subdirectory. Tasks
-// without a source_view_id keep the default path for backward compat.
+// namespaceWorkspaceDirByView sets workspace_dir to a shared project root
+// so all agents in the same view work in a common directory. Tasks without
+// a source_view_id keep the default per-agent path for backward compat.
 func namespaceWorkspaceDirByView(agentConfig, payload map[string]any) {
 	viewID := strings.TrimSpace(stringFromPayload(payload, "source_view_id"))
 	if viewID == "" {
 		return
 	}
+	target := viewProjectsWorkspaceDirPrefix + viewID
 	wd := strings.TrimSpace(stringFromPayload(agentConfig, agentConfigKeyWorkspaceDir))
-	if wd == "" || !strings.HasPrefix(wd, agentDefaultWorkspaceDirPrefix) {
+	if wd == target {
 		return
 	}
-	if strings.Contains(wd, viewID) {
-		return
-	}
-	agentConfig[agentConfigKeyWorkspaceDir] = strings.TrimRight(wd, "/") + "/" + viewID
+	agentConfig[agentConfigKeyWorkspaceDir] = target
 }
 
 func skillNamesFromConfig(config map[string]any) []string {
@@ -1754,7 +1763,6 @@ func (s *AgentService) createAttemptExecutionTask(
 	applyAgentConfigEnv(taskEnv, agentConfig)
 	applyPayloadRuntimeEnv(taskEnv, payload)
 	ensureRuntimeSystemPromptEnv(taskEnv)
-	viewSchemaContext := s.loadViewOutputSchemaContext(ctx, run.WorkspaceID, run.AgentID)
 	retryPolicy := RetryPolicyOrDefault(runPolicy.Retry)
 	executionPolicy := map[string]any{
 		"host":                               run.ExecHost,
@@ -1778,8 +1786,7 @@ func (s *AgentService) createAttemptExecutionTask(
 		executionPolicy[agentConfigKeyModel] = *run.Model
 	}
 	applyPayloadExecutionMetadata(executionPolicy, payload)
-	applyViewSchemaRuntimeContext(taskEnv, executionPolicy, viewSchemaContext)
-	applySourceViewIDEnv(taskEnv, payload)
+	applyViewRuntimeContext(ctx, s.backend, s.s2, taskEnv, executionPolicy, run, payload)
 
 	execTask := &types.RunExecution{
 		WorkspaceId:       run.WorkspaceID,
@@ -2224,114 +2231,191 @@ const (
 	maxRuntimeViewSchemas           = 8
 )
 
-func (s *AgentService) loadViewOutputSchemaContext(
+// applyViewRuntimeContext is the single entry point for all view-related
+// runtime context injection: source_view_id env, approval policy, schema
+// guidance, and the persistent context stream.
+func applyViewRuntimeContext(
 	ctx context.Context,
-	workspaceID uint,
-	agentID *string,
-) []types.ViewOutputSchemaContext {
-	if s == nil || s.backend == nil || agentID == nil || strings.TrimSpace(*agentID) == "" {
-		log.Warn().
-			Bool("nil_service", s == nil).
-			Bool("nil_backend", s != nil && s.backend == nil).
-			Bool("nil_agent_id", agentID == nil).
-			Msg("loadViewOutputSchemaContext: early exit")
-		return nil
-	}
-	contexts, err := types.LoadViewOutputSchemaContexts(ctx, s.backend, workspaceID, strings.TrimSpace(*agentID))
-	if err != nil {
-		log.Warn().
-			Err(err).
-			Uint("workspace_id", workspaceID).
-			Str("agent_id", strings.TrimSpace(*agentID)).
-			Msg("failed to load dependent views for agent view-schema context")
-		return nil
-	}
-	log.Info().
-		Uint("workspace_id", workspaceID).
-		Str("agent_id", strings.TrimSpace(*agentID)).
-		Int("context_count", len(contexts)).
-		Msg("loadViewOutputSchemaContext: loaded")
-	if len(contexts) > maxRuntimeViewSchemas {
-		contexts = contexts[:maxRuntimeViewSchemas]
-	}
-	return contexts
-}
-
-func applySourceViewIDEnv(env map[string]string, payload map[string]any) {
+	backend repository.BackendRepository,
+	s2 *common.S2Client,
+	env map[string]string,
+	executionPolicy map[string]any,
+	run *types.AgentRun,
+	payload map[string]any,
+) {
 	viewID := strings.TrimSpace(stringFromPayload(payload, "source_view_id"))
 	if viewID != "" && env != nil {
 		env["AIRSTORE_SOURCE_VIEW_ID"] = viewID
 	}
-}
 
-func applyViewSchemaRuntimeContext(
-	env map[string]string,
-	executionPolicy map[string]any,
-	contexts []types.ViewOutputSchemaContext,
-) {
-	log.Info().
-		Int("context_count", len(contexts)).
-		Bool("has_env", env != nil).
-		Bool("has_policy", executionPolicy != nil).
-		Msg("applyViewSchemaRuntimeContext: entry")
-	if len(contexts) == 0 {
-		return
-	}
-	if encoded, err := json.Marshal(contexts); err == nil && len(encoded) > 0 {
-		if env != nil {
-			env[agentViewSchemaEnvKey] = string(encoded)
-			env["AIRSTORE_AGENT_SYSTEM_PROMPT"] = ensureRuntimeViewSchemaGuidance(env["AIRSTORE_AGENT_SYSTEM_PROMPT"], contexts)
-		}
-		if executionPolicy != nil {
-			if policyValue := types.ViewOutputSchemaPolicyValue(contexts); policyValue != nil {
-				executionPolicy[types.AgentExecutionMetaKeyViewSchema] = policyValue
-				log.Info().
-					Int("contexts", len(contexts)).
-					Str("policy_type", fmt.Sprintf("%T", policyValue)).
-					Msg("applyViewSchemaRuntimeContext: set policy")
-			} else {
-				log.Warn().
-					Int("contexts", len(contexts)).
-					Msg("applyViewSchemaRuntimeContext: ViewOutputSchemaPolicyValue returned nil")
+	if viewID != "" && backend != nil && env != nil {
+		if view, err := backend.GetView(ctx, run.WorkspaceID, viewID); err == nil && view != nil && view.Definition.Settings != nil {
+			if key := strings.TrimSpace(view.Definition.Settings.ApprovalPolicy); key != "" {
+				env["AIRSTORE_APPROVAL_POLICY"] = key
 			}
 		}
 	}
+
+	if backend == nil || run.AgentID == nil || strings.TrimSpace(*run.AgentID) == "" {
+		return
+	}
+	schemas, err := types.LoadViewOutputSchemaContexts(ctx, backend, run.WorkspaceID, strings.TrimSpace(*run.AgentID))
+	if err != nil {
+		log.Warn().Err(err).Uint("workspace_id", run.WorkspaceID).Msg("view schema context load failed")
+		return
+	}
+	if len(schemas) > maxRuntimeViewSchemas {
+		schemas = schemas[:maxRuntimeViewSchemas]
+	}
+	if len(schemas) == 0 {
+		return
+	}
+
+	if encoded, err := json.Marshal(schemas); err == nil && len(encoded) > 0 {
+		if env != nil {
+			env[agentViewSchemaEnvKey] = string(encoded)
+			env["AIRSTORE_AGENT_SYSTEM_PROMPT"] = appendSchemaGuidance(env["AIRSTORE_AGENT_SYSTEM_PROMPT"], schemas)
+		}
+		if executionPolicy != nil {
+			executionPolicy[types.AgentExecutionMetaKeyViewSchema] = schemas
+		}
+	}
+
+	log.Info().
+		Uint("workspace_id", run.WorkspaceID).
+		Str("view_id", viewID).
+		Int("schemas", len(schemas)).
+		Msg("view runtime context applied")
+
+	if viewID != "" && s2 != nil && s2.Enabled() && env != nil {
+		injectViewContextStream(ctx, s2, env, viewID)
+	}
 }
 
-func ensureRuntimeViewSchemaGuidance(prompt string, contexts []types.ViewOutputSchemaContext) string {
+func injectViewContextStream(ctx context.Context, s2 *common.S2Client, env map[string]string, viewID string) {
+	const pageSize = 1000
+	const maxPages = 50
+	stream := common.Streams.ViewContext(viewID)
+
+	var entries []types.ViewContextEntry
+	seqNum := int64(0)
+	for page := 0; page < maxPages; page++ {
+		records, err := s2.Read(ctx, stream, seqNum, pageSize)
+		if err != nil {
+			log.Warn().Err(err).Str("view_id", viewID).Msg("failed to read view context stream")
+			return
+		}
+		if len(records) == 0 {
+			break
+		}
+		for _, r := range records {
+			var e types.ViewContextEntry
+			if json.Unmarshal([]byte(r.Body), &e) == nil {
+				e.SeqNum = r.SeqNum
+				entries = append(entries, e)
+			}
+			if r.SeqNum >= seqNum {
+				seqNum = r.SeqNum + 1
+			}
+		}
+		if len(records) < pageSize {
+			break
+		}
+	}
+
+	if len(entries) == 0 {
+		return
+	}
+
+	lastCompaction := -1
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].EntryType == types.ViewContextEntryCompaction {
+			lastCompaction = i
+			break
+		}
+	}
+	if lastCompaction >= 0 {
+		entries = entries[lastCompaction:]
+	}
+
+	if len(entries) == 0 {
+		return
+	}
+
+	formatted := formatViewContext(entries)
+	if formatted == "" {
+		return
+	}
+
+	prompt := strings.TrimSpace(env["AIRSTORE_AGENT_SYSTEM_PROMPT"])
+	if prompt == "" {
+		env["AIRSTORE_AGENT_SYSTEM_PROMPT"] = formatted
+	} else {
+		env["AIRSTORE_AGENT_SYSTEM_PROMPT"] = prompt + "\n\n" + formatted
+	}
+	log.Info().Str("view_id", viewID).Int("context_entries", len(entries)).Msg("view context stream injected into prompt")
+}
+
+const viewContextPromptHeader = "Project context (standing instructions from prior work and feedback):"
+
+func formatViewContext(entries []types.ViewContextEntry) string {
+	if len(entries) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(viewContextPromptHeader)
+	b.WriteByte('\n')
+	for _, e := range entries {
+		content := strings.TrimSpace(e.Content)
+		if content == "" {
+			continue
+		}
+		if e.EntryType == types.ViewContextEntryCompaction {
+			b.WriteString(content)
+			b.WriteByte('\n')
+		} else {
+			b.WriteString("- ")
+			b.WriteString(content)
+			b.WriteByte('\n')
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func appendSchemaGuidance(prompt string, contexts []types.ViewOutputSchemaContext) string {
 	prompt = strings.TrimSpace(prompt)
 	if len(contexts) == 0 || strings.Contains(prompt, runtimeViewSchemaGuidanceHeader) {
 		return prompt
 	}
-	var lines []string
-	lines = append(lines, runtimeViewSchemaGuidanceHeader)
-	lines = append(lines, "- These table views actively depend on this agent.")
-	lines = append(lines, "- When you emit durable task outputs that clearly belong to one of them, align the structure with the matching schema, keep output_type accurate, and set artifact_key when the match is obvious.")
-	lines = append(lines, "- Treat this as advisory context. Do not invent uncertain fields just to satisfy a schema.")
-	for _, context := range contexts {
+	lines := []string{
+		runtimeViewSchemaGuidanceHeader,
+		"- These table views actively depend on this agent.",
+		"- When you emit durable task outputs that clearly belong to one of them, align the structure with the matching schema, keep output_type accurate, and set artifact_key when the match is obvious.",
+		"- Treat this as advisory context. Do not invent uncertain fields just to satisfy a schema.",
+	}
+	for _, sc := range contexts {
 		var parts []string
-		if context.ViewName != "" {
-			parts = append(parts, "view="+context.ViewName)
+		if sc.ViewName != "" {
+			parts = append(parts, "view="+sc.ViewName)
 		}
-		if context.SheetName != "" {
-			parts = append(parts, "sheet="+context.SheetName)
+		if sc.SheetName != "" {
+			parts = append(parts, "sheet="+sc.SheetName)
 		}
-		if context.ComponentTitle != "" {
-			parts = append(parts, "table="+context.ComponentTitle)
+		if sc.ComponentTitle != "" {
+			parts = append(parts, "table="+sc.ComponentTitle)
 		}
-		if context.ArtifactKey != "" {
-			parts = append(parts, "artifact_key="+context.ArtifactKey)
+		if sc.ArtifactKey != "" {
+			parts = append(parts, "artifact_key="+sc.ArtifactKey)
 		}
-		if context.OutputType != "" {
-			parts = append(parts, "output_type="+context.OutputType)
+		if sc.OutputType != "" {
+			parts = append(parts, "output_type="+sc.OutputType)
 		}
-		if keys := context.ColumnKeys(); len(keys) > 0 {
+		if keys := sc.ColumnKeys(); len(keys) > 0 {
 			parts = append(parts, "columns="+strings.Join(keys, ", "))
 		}
-		if len(parts) == 0 {
-			continue
+		if len(parts) > 0 {
+			lines = append(lines, "- "+strings.Join(parts, "; "))
 		}
-		lines = append(lines, "- "+strings.Join(parts, "; "))
 	}
 	block := strings.Join(lines, "\n")
 	if prompt == "" {

@@ -4,6 +4,7 @@ icon: slack
 
 commands:
   post-message:
+    write: true
     description: Post a message to a Slack channel
     params:
       - name: channel

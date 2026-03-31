@@ -117,7 +117,7 @@ func (*build_request) ClassifyFollowUp(message string, user_message *string, now
 }
 
 // Build HTTP request for ClassifyTurn (returns baml.HTTPRequest)
-func (*build_request) ClassifyTurn(message string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
+func (*build_request) ClassifyTurn(message string, approval_policy string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -133,7 +133,7 @@ func (*build_request) ClassifyTurn(message string, opts ...CallOptionFunc) (baml
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"message": message, "stream": false},
+		Kwargs: map[string]any{"message": message, "approval_policy": approval_policy, "stream": false},
 		Env:    getEnvVars(callOpts.env),
 	}
 

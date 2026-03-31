@@ -102,12 +102,15 @@ func blockerWaitingSummary(payload map[string]any) *string {
 	if len(payload) == 0 {
 		return nil
 	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return nil
+	if s, ok := payload["summary"].(string); ok && strings.TrimSpace(s) != "" {
+		s = strings.TrimSpace(s)
+		return &s
 	}
-	summary := string(encoded)
-	return &summary
+	if d, ok := payload["details"].(string); ok && strings.TrimSpace(d) != "" {
+		d = strings.TrimSpace(d)
+		return &d
+	}
+	return nil
 }
 
 func normalizeOptionalString(value *string) *string {

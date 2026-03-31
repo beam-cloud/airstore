@@ -183,6 +183,7 @@ func (l *Loader) RegisterProviders(toolsFS embed.FS, dir string, registry *Regis
 
 	for _, p := range providers {
 		registry.Register(p)
+		registry.RegisterSchema(p.Name(), p.schema)
 	}
 
 	return nil

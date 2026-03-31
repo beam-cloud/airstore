@@ -4,6 +4,7 @@ icon: hard-drive
 
 commands:
   create-folder:
+    write: true
     description: Create a new folder in Google Drive
     params:
       - name: name
@@ -19,6 +20,7 @@ commands:
         description: "Optional parent folder ID"
 
   write-file:
+    write: true
     description: Create a new file in Google Drive
     one_of_required:
       - [content, content_base64]
@@ -53,6 +55,7 @@ commands:
         description: "MIME type for file content"
 
   update-file:
+    write: true
     description: Overwrite an existing Google Drive file by ID
     one_of_required:
       - [content, content_base64]

@@ -488,7 +488,7 @@ func (a *AgentAPI) RetryTask(ctx context.Context, workspaceID uint, taskID strin
 	if err != nil {
 		return err
 	}
-	if task.State != types.AgentTaskStateError && task.State != types.AgentTaskStateDropped {
+	if !task.State.IsRetryable() {
 		return &types.ErrTaskNotRetryable{ID: taskID, State: task.State}
 	}
 

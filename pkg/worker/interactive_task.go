@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	agentsignal "github.com/beam-cloud/airstore/pkg/worker/agentsignal/baml_client"
@@ -28,6 +29,8 @@ const (
 	sessionLeaseOpTimeout       = 3 * time.Second
 	sessionLeaseRenewGrace      = sessionLeaseTTL - sessionLeaseRenewInterval
 	runInteractionTTL           = 30 * time.Minute
+	outputPipelineDrainTimeout  = 30 * time.Second
+	outputPublishRetryTimeout   = 15 * time.Second
 	subagentPollInterval        = 10 * time.Second
 	subagentMaxWait             = 30 * time.Minute
 	subagentProbeTimeout        = 15 * time.Second
@@ -89,6 +92,50 @@ func waitingBlockerPayload(
 	assistantMessage string,
 ) map[string]any {
 	return types.NewTaskBlockerPayload(inputKind, waitingSummary, assistantMessage).ToMap()
+}
+
+// checkPendingToolCall reads and deletes a pending tool call from Redis.
+// Returns the tool call details as a blocker payload, or nil if none exists.
+func (w *Worker) checkPendingToolCall(ctx context.Context, taskID string) map[string]any {
+	if w.redisClient == nil || taskID == "" {
+		return nil
+	}
+	key := common.Keys.PendingToolCall(taskID)
+	data, err := w.redisClient.Get(ctx, key).Bytes()
+	if err != nil {
+		return nil
+	}
+
+	var tc struct {
+		Tool    string   `json:"tool"`
+		Args    []string `json:"args"`
+		Summary string   `json:"summary"`
+		Details string   `json:"details"`
+	}
+	if json.Unmarshal(data, &tc) != nil {
+		log.Warn().Str("task_id", taskID).Msg("pending tool call payload is malformed, leaving in Redis for TTL expiry")
+		return nil
+	}
+
+	w.redisClient.Del(ctx, key)
+
+	log.Info().
+		Str("task_id", taskID).
+		Str("tool", tc.Tool).
+		Str("summary", tc.Summary).
+		Msg("pending tool call found, creating approval blocker")
+
+	details := tc.Details
+	if details == "" {
+		details = tc.Summary
+	}
+
+	payload := map[string]any{
+		"summary":   tc.Summary,
+		"details":   details,
+		"tool_call": json.RawMessage(data),
+	}
+	return payload
 }
 
 func buildWaitingBlockerSpec(
@@ -458,7 +505,7 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	}
 
 	mirror.Flush()
-	outputPipeline.Wait()
+	outputPipeline.WaitTimeout(outputPipelineDrainTimeout)
 
 	sessionAssistantMessage := ""
 	if runErr == nil && tw.ringBuf != nil {
@@ -645,7 +692,7 @@ func classifyNeedsInputKindWithBAML(ctx context.Context, assistantMessage string
 	if assistantMessage == "" {
 		return ""
 	}
-	cls, err := agentsignal.ClassifyTurn(ctx, assistantMessage, agentsignal.WithEnv(bamlEnv))
+	cls, err := agentsignal.ClassifyTurn(ctx, assistantMessage, "", agentsignal.WithEnv(bamlEnv))
 	if err != nil || cls.Outcome != signaltypes.TurnOutcomeNEEDS_INPUT || cls.Input_kind == nil {
 		return ""
 	}
@@ -700,6 +747,7 @@ func normalizeTurnBlockerDirective(
 	if normalized.Summary == "" {
 		normalized.Summary = strings.TrimSpace(assistantMessage)
 	}
+
 	return &normalized
 }
 
@@ -1257,7 +1305,7 @@ func (r workerSessionRunner) buildNeedsInputChecker(
 		if msg == "" {
 			return false, "", "", ""
 		}
-		cls, err := agentsignal.ClassifyTurn(ctx, msg, agentsignal.WithEnv(bamlEnv))
+		cls, err := agentsignal.ClassifyTurn(ctx, msg, "", agentsignal.WithEnv(bamlEnv))
 		if err != nil {
 			return false, "", "", ""
 		}
@@ -1370,6 +1418,39 @@ func (r workerSessionRunner) runTurnSession(
 			signalActivity(activityCh)
 		}
 
+		// ── Tool-level gate ──────────────────────────────────────────────
+		// If the gateway deferred a write tool call for approval, short-circuit
+		// directly to waiting with a tool_call blocker. This is independent of
+		// the normal BAML classification path.
+		if originTaskID := strings.TrimSpace(sessionEnv[originTaskIDEnvKey]); originTaskID != "" {
+			if tcPayload := r.worker.checkPendingToolCall(ctx, originTaskID); tcPayload != nil {
+				stateBridge.setRunInteractionState(ctx, task, types.RunInteractionStateWaitingForInput)
+				stateBridge.setOriginTaskState(ctx, task, types.TaskLiveUpdate{
+					State: types.AgentTaskStateWaiting,
+					Blocker: &types.TaskBlockerSpec{
+						Kind:        types.TaskBlockerKindForInputKind(types.InputKindApproveReject),
+						InputKind:   types.InputKindApproveReject,
+						PayloadJSON: tcPayload,
+					},
+				})
+				nextPrompt, err := nextFollowupPrompt(ctx, waiter.waitForFollowupInput(ctx, task, DefaultBetweenTurnsTimeout, activityCh))
+				if err != nil {
+					return turnResult, err
+				}
+				if nextPrompt == "" {
+					turnResult.waitingForInput = true
+					turnResult.inputKind = types.InputKindApproveReject
+					return turnResult, nil
+				}
+				prompt = nextPrompt
+				continue
+			}
+		}
+
+		// ── Normal classification ────────────────────────────────────────
+		// BAML / output-parser determines whether the agent needs input
+		// (free_text question, approval request, etc). This path is
+		// completely unchanged — it handles all non-tool-gate blockers.
 		var needsInput bool
 		var inputKind types.InputKind
 		var waitingSummary string

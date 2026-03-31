@@ -1097,8 +1097,15 @@ func (b *PostgresBackend) UpdateTaskState(ctx context.Context, update types.Task
 		      WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN NULL
 		      ELSE dispatched_at
 		    END,
-		    dropped_reason = CASE WHEN $2::agent_task_state = 'dropped'::agent_task_state THEN $4 ELSE dropped_reason END,
-		    target_run_id = COALESCE($5::uuid, target_run_id),
+		    dropped_reason = CASE
+		      WHEN $2::agent_task_state = 'dropped'::agent_task_state THEN $4
+		      WHEN $2::agent_task_state = 'queued'::agent_task_state THEN NULL
+		      ELSE dropped_reason
+		    END,
+		    target_run_id = CASE
+		      WHEN $2::agent_task_state = 'queued'::agent_task_state THEN $5::uuid
+		      ELSE COALESCE($5::uuid, target_run_id)
+		    END,
 		    current_blocker_id = NULL,
 		    input_kind = NULL,
 		    waiting_summary = NULL,
@@ -1146,7 +1153,7 @@ func (b *PostgresBackend) UpdateTaskStateIfCurrentRun(ctx context.Context, updat
 		    wake_count = CASE WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN wake_count ELSE 0 END,
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = $1
-		  AND state NOT IN ('done'::agent_task_state, 'cancelled'::agent_task_state)
+		  AND state NOT IN ('done'::agent_task_state, 'dropped'::agent_task_state, 'cancelled'::agent_task_state)
 	`
 	var args []any
 	if expectedRunID == "" {
@@ -2642,6 +2649,70 @@ func (b *PostgresBackend) ListStaleUnclaimedAgentRuns(ctx context.Context, cutof
 			return nil, fmt.Errorf("scan stale unclaimed run: %w", err)
 		}
 		out = append(out, run)
+	}
+	return out, rows.Err()
+}
+
+// ListOrphanedRunningTaskRunIDs finds tasks stuck in "running" whose target run
+// is no longer active (terminal or unclaimed). Returns the target_run_id values
+// so the recovery loop can settle them.
+func (b *PostgresBackend) ListOrphanedRunningTaskRunIDs(ctx context.Context, staleCutoff time.Time, limit int) ([]string, error) {
+	limit = normalizeClaimBatchLimit(limit)
+	query := `
+		SELECT t.target_run_id
+		FROM agent_task t
+		JOIN agent_run r ON t.target_run_id = r.id
+		WHERE t.state = 'running'
+		  AND t.target_run_id IS NOT NULL
+		  AND t.updated_at < $1
+		  AND (
+		      r.status NOT IN ('accepted'::agent_run_status, 'running'::agent_run_status)
+		      OR (r.status = 'running'::agent_run_status AND r.claimed_by_worker_id IS NULL AND r.claim_expires_at IS NULL)
+		  )
+		ORDER BY t.updated_at ASC
+		LIMIT $2
+	`
+	rows, err := b.db.QueryContext(ctx, query, staleCutoff, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list orphaned running tasks: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var runID string
+		if err := rows.Scan(&runID); err != nil {
+			return nil, fmt.Errorf("scan orphaned running task run_id: %w", err)
+		}
+		out = append(out, runID)
+	}
+	return out, rows.Err()
+}
+
+func (b *PostgresBackend) ListRunningTasksWithNoRun(ctx context.Context, staleCutoff time.Time, limit int) ([]string, error) {
+	limit = normalizeClaimBatchLimit(limit)
+	query := `
+		SELECT id
+		FROM agent_task
+		WHERE state = 'running'
+		  AND target_run_id IS NULL
+		  AND updated_at < $1
+		ORDER BY updated_at ASC
+		LIMIT $2
+	`
+	rows, err := b.db.QueryContext(ctx, query, staleCutoff, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list running tasks with no run: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var taskID string
+		if err := rows.Scan(&taskID); err != nil {
+			return nil, fmt.Errorf("scan running task with no run: %w", err)
+		}
+		out = append(out, taskID)
 	}
 	return out, rows.Err()
 }

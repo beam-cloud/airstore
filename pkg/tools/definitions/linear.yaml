@@ -7,6 +7,7 @@ commands:
     description: List available Linear teams
 
   create-issue:
+    write: true
     description: Create a new issue in Linear (defaults to first team if not provided)
     params:
       - name: title

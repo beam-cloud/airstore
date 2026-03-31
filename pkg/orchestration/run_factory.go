@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/beam-cloud/airstore/pkg/common"
 	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/rs/zerolog/log"
@@ -15,6 +16,7 @@ type RunFactoryConfig struct {
 	Backend           repository.BackendRepository
 	TaskQueue         repository.TaskQueue
 	TerminalIO        repository.TerminalIORepository
+	S2                *common.S2Client
 	Lifecycle         *TaskLifecycle
 	ResumeBarrier     *ResumeBarrier
 	DefaultImage      string
@@ -25,6 +27,7 @@ type RunFactory struct {
 	backend           repository.BackendRepository
 	taskQueue         repository.TaskQueue
 	terminalIO        repository.TerminalIORepository
+	s2                *common.S2Client
 	lifecycle         *TaskLifecycle
 	resumeBarrier     *ResumeBarrier
 	defaultImage      string
@@ -36,6 +39,7 @@ func NewRunFactory(cfg RunFactoryConfig) *RunFactory {
 		backend:           cfg.Backend,
 		taskQueue:         cfg.TaskQueue,
 		terminalIO:        cfg.TerminalIO,
+		s2:                cfg.S2,
 		lifecycle:         cfg.Lifecycle,
 		resumeBarrier:     cfg.ResumeBarrier,
 		defaultImage:      cfg.DefaultImage,
@@ -238,9 +242,7 @@ func (f *RunFactory) CreateAttemptExecutionTask(
 	}
 	applyPayloadExecutionMetadata(executionPolicy, payload)
 
-	viewSchemaContext := f.loadViewOutputSchemaContext(ctx, run.WorkspaceID, run.AgentID)
-	applyViewSchemaRuntimeContext(taskEnv, executionPolicy, viewSchemaContext)
-	applySourceViewIDEnv(taskEnv, payload)
+	applyViewRuntimeContext(ctx, f.backend, f.s2, taskEnv, executionPolicy, run, payload)
 
 	execTask := &types.RunExecution{
 		WorkspaceId:       run.WorkspaceID,
@@ -566,25 +568,3 @@ func (b *ResumeBarrier) tryReconcileStaleSessionLease(ctx context.Context, works
 	return ReconcileStaleSessionLease(ctx, b.backend, b.terminalIO, workspaceID, sessionID, owner)
 }
 
-func (f *RunFactory) loadViewOutputSchemaContext(
-	ctx context.Context,
-	workspaceID uint,
-	agentID *string,
-) []types.ViewOutputSchemaContext {
-	if f == nil || f.backend == nil || agentID == nil || strings.TrimSpace(*agentID) == "" {
-		return nil
-	}
-	contexts, err := types.LoadViewOutputSchemaContexts(ctx, f.backend, workspaceID, strings.TrimSpace(*agentID))
-	if err != nil {
-		log.Warn().
-			Err(err).
-			Uint("workspace_id", workspaceID).
-			Str("agent_id", strings.TrimSpace(*agentID)).
-			Msg("run factory: failed to load view schema context")
-		return nil
-	}
-	if len(contexts) > maxRuntimeViewSchemas {
-		contexts = contexts[:maxRuntimeViewSchemas]
-	}
-	return contexts
-}

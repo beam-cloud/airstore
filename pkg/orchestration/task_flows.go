@@ -2,6 +2,7 @@ package orchestration
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -15,11 +16,20 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// ToolExecutor runs a deferred tool call server-side (after user approval)
+// and tracks rejections so the write gate can auto-fail retries.
+type ToolExecutor interface {
+	ExecuteDeferred(ctx context.Context, workspaceID, memberID uint, toolName string, args []string) (stdout, stderr string, exitCode int, err error)
+	RecordToolRejection(ctx context.Context, taskID, tool, command string) error
+	GrantWritePreapproval(ctx context.Context, taskID string) error
+}
+
 type TaskFlows struct {
 	backend           repository.BackendRepository
 	terminalIO        repository.TerminalIORepository
 	s2                *common.S2Client
 	lifecycle         *TaskLifecycle
+	toolExecutor      ToolExecutor
 	publishTaskUpdate func(context.Context, uint, string)
 	resolveRunState   func(context.Context, *types.AgentRun) (*types.RunInteraction, error)
 }
@@ -40,6 +50,117 @@ func NewTaskFlows(
 		publishTaskUpdate: publishTaskUpdate,
 		resolveRunState:   resolveRunState,
 	}
+}
+
+// SetToolExecutor enables server-side execution of deferred tool calls on approval.
+func (f *TaskFlows) SetToolExecutor(executor ToolExecutor) {
+	if f != nil {
+		f.toolExecutor = executor
+	}
+}
+
+// maybeExecuteDeferredToolCall checks whether the current blocker holds a
+// deferred tool call (created by the gateway write gate) and handles
+// approval / rejection. For approvals it executes the tool server-side and
+// returns the result. For rejections it returns a clear message telling the
+// agent not to retry. Returns "" for non-tool-call blockers so the normal
+// blocker flow is unaffected.
+//
+// userMessage must be the raw user input BEFORE any defaults are applied.
+// Empty string means the user provided no feedback (plain approve/reject).
+func (f *TaskFlows) maybeExecuteDeferredToolCall(
+	ctx context.Context,
+	task *types.AgentTask,
+	action *types.TaskInputAction,
+	userMessage string,
+) string {
+	blocker := task.CurrentBlocker
+	if blocker == nil || blocker.PayloadJSON == nil {
+		return ""
+	}
+	tcRaw, ok := blocker.PayloadJSON["tool_call"]
+	if !ok {
+		return ""
+	}
+
+	tcBytes, err := json.Marshal(tcRaw)
+	if err != nil {
+		return ""
+	}
+	var tc struct {
+		Tool        string   `json:"tool"`
+		Args        []string `json:"args"`
+		WorkspaceID uint     `json:"workspace_id"`
+		MemberID    uint     `json:"member_id"`
+		Summary     string   `json:"summary"`
+	}
+	if json.Unmarshal(tcBytes, &tc) != nil || tc.Tool == "" {
+		return ""
+	}
+
+	summary := tc.Summary
+	if summary == "" {
+		summary = tc.Tool
+	}
+
+	if action == nil {
+		return ""
+	}
+
+	if *action == types.TaskInputActionReject {
+		hasFeedback := strings.TrimSpace(userMessage) != ""
+		if !hasFeedback {
+			command := ""
+			if len(tc.Args) > 0 {
+				command = tc.Args[0]
+			}
+			if f.toolExecutor != nil && command != "" {
+				_ = f.toolExecutor.RecordToolRejection(ctx, task.ID, tc.Tool, command)
+			}
+			return fmt.Sprintf(
+				"The user rejected your request to %s.\nDo not retry this exact action. Acknowledge the rejection and decide how to proceed.",
+				summary,
+			)
+		}
+		return fmt.Sprintf(
+			"The user rejected your request to %s and provided feedback below. Revise the action based on their feedback and try again.",
+			summary,
+		)
+	}
+	if *action != types.TaskInputActionApprove {
+		return ""
+	}
+
+	if f.toolExecutor == nil {
+		return fmt.Sprintf(
+			"The user approved your request to %s, but the server could not execute it. Please retry the tool call directly.",
+			summary,
+		)
+	}
+
+	log.Info().
+		Str("task_id", task.ID).
+		Str("tool", tc.Tool).
+		Msg("executing deferred tool call after approval")
+
+	stdout, stderr, exitCode, execErr := f.toolExecutor.ExecuteDeferred(
+		ctx, tc.WorkspaceID, tc.MemberID, tc.Tool, tc.Args,
+	)
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "The user approved your request to %s. The action has been executed.\n\n", summary)
+	fmt.Fprintf(&b, "Tool: %s\nExit code: %d\n", tc.Tool, exitCode)
+	if out := strings.TrimSpace(stdout); out != "" {
+		fmt.Fprintf(&b, "Output:\n%s\n", out)
+	}
+	if se := strings.TrimSpace(stderr); se != "" {
+		fmt.Fprintf(&b, "Stderr:\n%s\n", se)
+	}
+	if execErr != nil {
+		fmt.Fprintf(&b, "Error: %s\n", execErr.Error())
+	}
+	b.WriteString("\nYou may continue.")
+	return b.String()
 }
 
 type taskInputDelivery struct {
@@ -206,6 +327,20 @@ func (f *TaskFlows) AcceptTaskInput(
 		}
 	}
 
+	// Handle deferred tool calls BEFORE applying default messages, so we
+	// can distinguish "user typed nothing" from "user provided feedback"
+	// by checking whether message is empty — no string-matching hacks.
+	toolCallResult := f.maybeExecuteDeferredToolCall(ctx, task, action, message)
+	if toolCallResult != "" {
+		if action != nil && *action == types.TaskInputActionReject && strings.TrimSpace(message) != "" {
+			message = toolCallResult + "\n\n" + message
+		} else {
+			message = toolCallResult
+		}
+	} else if action != nil && *action == types.TaskInputActionApprove && f.toolExecutor != nil {
+		_ = f.toolExecutor.GrantWritePreapproval(ctx, task.ID)
+	}
+
 	if strings.TrimSpace(message) == "" && action != nil {
 		switch *action {
 		case types.TaskInputActionApprove:
@@ -272,7 +407,7 @@ func (f *TaskFlows) AcceptTaskInput(
 	f.persistUserInputLog(ctx, task, message)
 
 	if err := f.deliverTaskInput(ctx, task); err != nil {
-		log.Warn().Err(err).Str("task_id", taskID).Msg("task input delivery failed (input is durable, will be claimed on next wake)")
+		log.Warn().Err(err).Str("task_id", taskID).Msg("task input delivery failed (input is durable, will be retried)")
 	}
 
 	f.notifyTaskUpdate(ctx, task.WorkspaceID, task.ID)
@@ -575,6 +710,9 @@ func (f *TaskFlows) deliverTaskInput(ctx context.Context, task *types.AgentTask)
 		return err
 	}
 	if delivery == nil || delivery.run == nil {
+		if task.State.IsRetryable() {
+			return f.wakeStoppedTask(ctx, task)
+		}
 		return nil
 	}
 	if delivery.shouldResume {
@@ -583,12 +721,11 @@ func (f *TaskFlows) deliverTaskInput(ctx context.Context, task *types.AgentTask)
 	if delivery.executionID == "" || f.terminalIO == nil {
 		return nil
 	}
-	if err := f.terminalIO.PublishInputWake(ctx, delivery.executionID); err != nil {
-		return err
-	}
 	if freshRun, err := f.backend.GetAgentRun(ctx, task.WorkspaceID, *task.TargetRunID); err == nil && freshRun.Status.IsTerminal() {
 		return f.requeueTaskForResume(ctx, task, freshRun)
 	}
+	// Commit state to running BEFORE waking the worker so Settle never
+	// races against a stale waiting state.
 	if f.lifecycle != nil {
 		updated, err := f.lifecycle.Resume(ctx, task.ID, *task.TargetRunID)
 		if err != nil {
@@ -603,6 +740,9 @@ func (f *TaskFlows) deliverTaskInput(ctx context.Context, task *types.AgentTask)
 		}
 	}
 	f.notifyTaskUpdate(ctx, task.WorkspaceID, task.ID)
+	if err := f.terminalIO.PublishInputWake(ctx, delivery.executionID); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -634,7 +774,8 @@ func (f *TaskFlows) requeueTaskForResume(ctx context.Context, task *types.AgentT
 		return err
 	}
 	if !requeued {
-		return fmt.Errorf("task %s is no longer attached to run %s", task.ID, lastRun.ID)
+		log.Debug().Str("task_id", task.ID).Str("run_id", lastRun.ID).Msg("task requeue CAS miss — already requeued or retried by another path")
+		return nil
 	}
 	if consumePendingInput {
 		if _, err := f.backend.ConsumeOldestPendingInput(ctx, task.ID); err != nil {
@@ -644,6 +785,76 @@ func (f *TaskFlows) requeueTaskForResume(ctx context.Context, task *types.AgentT
 	task.PayloadJSON = nextPayload
 	f.notifyTaskUpdate(ctx, task.WorkspaceID, task.ID)
 	return nil
+}
+
+// wakeStoppedTask transitions a stopped task (error, dropped, or cancelled) back
+// to queued and enqueues a dispatch that carries the pending user input as the
+// prompt. This handles the case where target_run_id is nil (dispatch failed
+// before a run was materialized, or the task was cancelled) so
+// deliverTaskInput/requeueTaskForResume can't route to an existing run.
+func (f *TaskFlows) wakeStoppedTask(ctx context.Context, task *types.AgentTask) error {
+	if f.lifecycle == nil {
+		return nil
+	}
+
+	inputMessage := ""
+	consumePendingInput := false
+	if pendingInputs, err := f.backend.ListPendingTaskInputs(ctx, task.ID, 1); err != nil {
+		return err
+	} else if len(pendingInputs) > 0 && pendingInputs[0] != nil {
+		inputMessage = strings.TrimSpace(pendingInputs[0].Message)
+		consumePendingInput = true
+	}
+
+	dispatchPayload := map[string]any{
+		types.OrchestrationOutboxPayloadTaskID: task.ID,
+	}
+	if inputMessage != "" {
+		dispatchPayload[types.OrchestrationOutboxPayloadDispatchPrompt] = inputMessage
+	}
+
+	// If we can find the last run, set up session resume so the agent
+	// continues from where it left off rather than starting fresh.
+	lastRun, _ := f.lastRunForTask(ctx, task)
+	if lastRun != nil {
+		dispatchPayload[types.OrchestrationOutboxPayloadResumeSession] = true
+		dispatchPayload[types.OrchestrationOutboxPayloadResumeExcludeRunID] = lastRun.ID
+		dispatchPayload[types.OrchestrationOutboxPayloadResumeCheckpointRunID] = lastRun.ID
+	}
+
+	if err := f.lifecycle.Queue(ctx, task.ID, nil); err != nil {
+		return fmt.Errorf("transition stopped task to queued: %w", err)
+	}
+
+	if consumePendingInput {
+		if _, err := f.backend.ConsumeOldestPendingInput(ctx, task.ID); err != nil {
+			log.Warn().Err(err).Str("task_id", task.ID).Msg("failed to consume pending input after waking stopped task")
+		}
+	}
+
+	dedupeKey := fmt.Sprintf("wake_stopped:%s:%d", task.ID, time.Now().UnixNano())
+	if err := f.backend.EnqueueOrchestrationOutboxEvent(ctx, &types.OrchestrationOutboxEvent{
+		EventType:   types.OrchestrationOutboxEventTypeTaskDispatch,
+		DedupeKey:   dedupeKey,
+		PayloadJSON: dispatchPayload,
+	}); err != nil {
+		return fmt.Errorf("enqueue wake dispatch: %w", err)
+	}
+
+	log.Info().Str("task_id", task.ID).Str("from_state", string(task.State)).Msg("woke stopped task after user input")
+	f.notifyTaskUpdate(ctx, task.WorkspaceID, task.ID)
+	return nil
+}
+
+func (f *TaskFlows) lastRunForTask(ctx context.Context, task *types.AgentTask) (*types.AgentRun, error) {
+	runs, err := f.backend.ListAgentRunsFiltered(ctx, task.WorkspaceID, types.AgentRunListFilter{
+		TaskID: &task.ID,
+		Limit:  1,
+	})
+	if err != nil || len(runs) == 0 || runs[0] == nil {
+		return nil, err
+	}
+	return runs[0], nil
 }
 
 func (f *TaskFlows) resolveTaskInputDelivery(ctx context.Context, task *types.AgentTask) (*taskInputDelivery, error) {

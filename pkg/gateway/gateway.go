@@ -455,6 +455,7 @@ func (g *Gateway) registerServices() error {
 		toolService = services.NewToolService(g.toolRegistry)
 	}
 	toolService.SetEventRecorder(g.eventRecorder)
+	toolService.SetRedisClient(g.RedisClient)
 	pb.RegisterToolServiceServer(g.grpcServer, toolService)
 	log.Info().Msg("tools service registered")
 
@@ -639,6 +640,7 @@ func (g *Gateway) registerServices() error {
 			g.Config.Sandbox.GetDefaultImage(),
 		)
 		wireSourceWatchRegistrar(orchestratorSvc, sourceService)
+		orchestratorSvc.SetToolExecutor(toolService)
 		orchestratorSvc.Start(g.ctx)
 		agentAPI := orchestration.NewAgentAPI(g.BackendRepo, orchestratorSvc)
 		sourceService.SetTaskWaker(newAgentAPITaskWaker(agentAPI))
@@ -648,7 +650,8 @@ func (g *Gateway) registerServices() error {
 		viewCopilot := views.NewCopilot(g.s2Client, g.RedisClient, g.BackendRepo, g.storageClient, agentAPI, viewStore)
 		viewsGroup := g.baseRouteGroup.Group("/workspaces/:workspace_id/views")
 		viewsGroup.Use(apiv1.NewWorkspaceAuthMiddleware(workspaceAuthConfig))
-		apiv1.NewViewsGroup(viewsGroup, g.BackendRepo, viewCopilot, viewStore, g.storageClient, g.viewSync)
+		contextCompactor := views.NewContextCompactor(g.s2Client, g.Config.OpenAIAPIKey())
+		apiv1.NewViewsGroup(viewsGroup, g.BackendRepo, viewCopilot, viewStore, g.storageClient, g.viewSync, contextCompactor)
 
 		var mailClient *clients.AgentMailClient
 		if g.Config.Channels.AgentMail.APIKey != "" {

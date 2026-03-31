@@ -56,66 +56,156 @@ func (s *WorkerService) runRecoveryCycle(ctx context.Context) {
 	}
 	defer func() { _ = lock.Release(lockKey) }()
 
-	seen := map[string]struct{}{}
 	var detected, recovered int
 
-	// 1. Claimed runs whose queue state went terminal
-	if runs, err := s.backend.ListClaimedAgentRuns(ctx, s.recoveryBatchSize); err == nil {
-		for _, run := range runs {
-			if run == nil || run.ID == "" {
-				continue
-			}
-			if _, dup := seen[run.ID]; dup {
-				continue
-			}
-			seen[run.ID] = struct{}{}
-			if d, r := s.processClaimedRun(ctx, run); d {
-				detected++
-				if r { recovered++ }
-			}
-		}
-	}
+	// Each sweep is independent and idempotent. Handlers use CAS-style DB
+	// operations (WHERE status IN ..., etc.) so concurrent/duplicate
+	// processing of the same run is harmless — the second attempt no-ops.
 
-	// 2. Expired claim leases
+	d, r := s.sweepTerminalQueueRuns(ctx)
+	detected += d
+	recovered += r
+
 	now := time.Now()
-	if runs, err := s.backend.ListExpiredClaimedAgentRuns(ctx, now, s.recoveryBatchSize); err == nil {
-		for _, run := range runs {
-			if run == nil || run.ID == "" {
-				continue
-			}
-			if _, dup := seen[run.ID]; dup {
-				continue
-			}
-			seen[run.ID] = struct{}{}
-			if d, r := s.processExpiredClaimRun(ctx, now, run); d {
-				detected++
-				if r { recovered++ }
-			}
-		}
-	}
+	d, r = s.sweepExpiredClaims(ctx, now)
+	detected += d
+	recovered += r
 
-	// 3. Stale unclaimed runs
-	if s.unclaimedRunStaleAfter > 0 {
-		if runs, err := s.backend.ListStaleUnclaimedAgentRuns(ctx, now.Add(-s.unclaimedRunStaleAfter), s.recoveryBatchSize); err == nil {
-			for _, run := range runs {
-				if run == nil || run.ID == "" {
-					continue
-				}
-				if _, dup := seen[run.ID]; dup {
-					continue
-				}
-				seen[run.ID] = struct{}{}
-				if d, r := s.processStaleUnclaimedRun(ctx, run); d {
-					detected++
-					if r { recovered++ }
-				}
-			}
-		}
-	}
+	d, r = s.sweepStaleUnclaimedRuns(ctx, now)
+	detected += d
+	recovered += r
+
+	staleCutoff := now.Add(-(s.claimLeaseTTL + 30*time.Second))
+	d, r = s.sweepOrphanedRunningTasks(ctx, staleCutoff)
+	detected += d
+	recovered += r
+
+	d, r = s.sweepRunningTasksWithNoRun(ctx, staleCutoff)
+	detected += d
+	recovered += r
 
 	if detected > 0 {
 		log.Info().Int("detected", detected).Int("recovered", recovered).Msg("recovery cycle complete")
 	}
+}
+
+// sweepTerminalQueueRuns reconciles runs whose task queue state went terminal
+// but the run DB record is still active (worker finished but result never
+// persisted to Postgres).
+func (s *WorkerService) sweepTerminalQueueRuns(ctx context.Context) (detected, recovered int) {
+	runs, err := s.backend.ListClaimedAgentRuns(ctx, s.recoveryBatchSize)
+	if err != nil {
+		log.Warn().Err(err).Msg("recovery: failed to list claimed runs")
+		return
+	}
+	for _, run := range runs {
+		if run == nil || run.ID == "" {
+			continue
+		}
+		if d, r := s.processClaimedRun(ctx, run); d {
+			detected++
+			if r {
+				recovered++
+			}
+		}
+	}
+	return
+}
+
+// sweepExpiredClaims recovers runs whose worker died (claim lease expired
+// without heartbeat renewal).
+func (s *WorkerService) sweepExpiredClaims(ctx context.Context, now time.Time) (detected, recovered int) {
+	runs, err := s.backend.ListExpiredClaimedAgentRuns(ctx, now, s.recoveryBatchSize)
+	if err != nil {
+		log.Warn().Err(err).Msg("recovery: failed to list expired claimed runs")
+		return
+	}
+	for _, run := range runs {
+		if run == nil || run.ID == "" {
+			continue
+		}
+		if d, r := s.processExpiredClaimRun(ctx, now, run); d {
+			detected++
+			if r {
+				recovered++
+			}
+		}
+	}
+	return
+}
+
+// sweepStaleUnclaimedRuns requeues runs that were never claimed by any worker.
+func (s *WorkerService) sweepStaleUnclaimedRuns(ctx context.Context, now time.Time) (detected, recovered int) {
+	if s.unclaimedRunStaleAfter <= 0 {
+		return
+	}
+	runs, err := s.backend.ListStaleUnclaimedAgentRuns(ctx, now.Add(-s.unclaimedRunStaleAfter), s.recoveryBatchSize)
+	if err != nil {
+		log.Warn().Err(err).Msg("recovery: failed to list stale unclaimed runs")
+		return
+	}
+	for _, run := range runs {
+		if run == nil || run.ID == "" {
+			continue
+		}
+		if d, r := s.processStaleUnclaimedRun(ctx, run); d {
+			detected++
+			if r {
+				recovered++
+			}
+		}
+	}
+	return
+}
+
+// sweepOrphanedRunningTasks catches tasks stuck in "running" whose run is
+// already terminal or unclaimed — e.g. because an earlier run-level recovery
+// succeeded but the task-level Settle failed.
+func (s *WorkerService) sweepOrphanedRunningTasks(ctx context.Context, staleCutoff time.Time) (detected, recovered int) {
+	runIDs, err := s.backend.ListOrphanedRunningTaskRunIDs(ctx, staleCutoff, s.recoveryBatchSize)
+	if err != nil {
+		log.Warn().Err(err).Msg("recovery: failed to list orphaned running tasks")
+		return
+	}
+	for _, runID := range runIDs {
+		if s.settleOrphanedTask(ctx, runID) {
+			detected++
+			recovered++
+		}
+	}
+	return
+}
+
+// sweepRunningTasksWithNoRun moves tasks stuck in "running" with no target run
+// to error. These are orphans that were never assigned a run.
+func (s *WorkerService) sweepRunningTasksWithNoRun(ctx context.Context, staleCutoff time.Time) (detected, recovered int) {
+	taskIDs, err := s.backend.ListRunningTasksWithNoRun(ctx, staleCutoff, s.recoveryBatchSize)
+	if err != nil {
+		log.Warn().Err(err).Msg("recovery: failed to list running tasks with no run")
+		return
+	}
+	for _, taskID := range taskIDs {
+		if s.errorOrphanedTask(ctx, taskID) {
+			detected++
+			recovered++
+		}
+	}
+	return
+}
+
+// settleOrphanedTask attempts to settle a task whose run is terminal but whose
+// task state is still "running". Returns true if the task was transitioned.
+func (s *WorkerService) settleOrphanedTask(ctx context.Context, runID string) bool {
+	if err := s.lifecycle.Settle(ctx, runID, nil); err == nil {
+		log.Info().Str("run_id", runID).Msg("recovery: settled orphaned running task")
+		return true
+	}
+	run, err := s.backend.GetAgentRunByID(ctx, runID)
+	if err != nil || run == nil {
+		return false
+	}
+	s.settleOrphanFallback(ctx, run, "stale running task recovery")
+	return true
 }
 
 // processExpiredClaimRun handles runs whose worker claim lease expired.
@@ -211,7 +301,6 @@ func (s *WorkerService) recoverOrphanedRun(ctx context.Context, run *types.Agent
 	}
 	errorMsg := fmt.Sprintf("orphaned run recovered: %s", reason)
 
-	// Clean up side effects
 	_ = s.backend.ReleaseStaleTaskInputClaims(ctx, run.ID)
 	if s.terminalIO != nil {
 		_ = s.terminalIO.SetRunInteraction(ctx, run.WorkspaceID, run.ID,
@@ -221,7 +310,6 @@ func (s *WorkerService) recoverOrphanedRun(ctx context.Context, run *types.Agent
 		_ = s.taskQueue.Fail(ctx, run.ID, fmt.Errorf("%s", errorMsg))
 	}
 
-	// Mark run terminal
 	if err := s.backend.SetRunExecutionResult(ctx, run.ID, -1, errorMsg); err != nil {
 		var notFound *types.ErrRunExecutionNotFound
 		if !errors.As(err, &notFound) {
@@ -229,7 +317,6 @@ func (s *WorkerService) recoverOrphanedRun(ctx context.Context, run *types.Agent
 		}
 	}
 
-	// Finalize attempt
 	if attempt, _ := s.lookupRunAttemptByExecutionID(ctx, run.ID); attempt != nil && attempt.IsActive() {
 		now := time.Now()
 		st, rs, errStr := types.ClassifyExecutionOutcome(-1, errorMsg)
@@ -239,12 +326,54 @@ func (s *WorkerService) recoverOrphanedRun(ctx context.Context, run *types.Agent
 		_ = s.backend.UpdateAgentRunLifecycle(ctx, attempt.RunID, rs, nil, &now, errStr)
 	}
 
-	// Settle task via central lifecycle
 	if err := s.lifecycle.Settle(ctx, run.ID, nil); err != nil {
-		log.Warn().Err(err).Str("run_id", run.ID).Msg("recovery: settle failed")
+		log.Warn().Err(err).Str("run_id", run.ID).Msg("recovery: settle failed, applying fallback")
+		s.settleOrphanFallback(ctx, run, errorMsg)
 		return true, false
 	}
-	return true, false
+	return true, true
+}
+
+// settleOrphanFallback is a last-resort path when Settle fails after the run
+// has already been marked terminal. Without this, the task stays stuck in
+// "running" forever because the run is no longer visible to the claim-based
+// recovery sweeps.
+func (s *WorkerService) settleOrphanFallback(ctx context.Context, run *types.AgentRun, errorMsg string) {
+	task, err := s.backend.GetTaskByID(ctx, run.OriginTaskID)
+	if err != nil || task == nil || task.State.IsTerminal() {
+		return
+	}
+	if task.State != types.AgentTaskStateRunning && task.State != types.AgentTaskStateWaiting {
+		return
+	}
+	if err := s.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
+		TaskID:      task.ID,
+		State:       types.AgentTaskStateError,
+		TargetRunID: task.TargetRunID,
+	}); err != nil {
+		log.Warn().Err(err).Str("task_id", task.ID).Msg("recovery: fallback task state update failed")
+		return
+	}
+	log.Info().Str("task_id", task.ID).Str("run_id", run.ID).Msg("recovery: fallback moved task to error")
+	s.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
+}
+
+// errorOrphanedTask moves a task with no run from "running" to "error".
+func (s *WorkerService) errorOrphanedTask(ctx context.Context, taskID string) bool {
+	task, err := s.backend.GetTaskByID(ctx, taskID)
+	if err != nil || task == nil || task.State.IsTerminal() || task.State != types.AgentTaskStateRunning {
+		return false
+	}
+	if err := s.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
+		TaskID: task.ID,
+		State:  types.AgentTaskStateError,
+	}); err != nil {
+		log.Warn().Err(err).Str("task_id", taskID).Msg("recovery: failed to error orphaned task with no run")
+		return false
+	}
+	log.Info().Str("task_id", taskID).Msg("recovery: moved orphaned task with no run to error")
+	s.publishTaskUpdate(ctx, task.WorkspaceID, task.ID)
+	return true
 }
 
 func intPtr(v int) *int { return &v }

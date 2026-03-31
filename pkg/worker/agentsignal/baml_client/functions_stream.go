@@ -191,7 +191,7 @@ func (*stream) ClassifyFollowUp(ctx context.Context, message string, user_messag
 }
 
 // / Streaming version of ClassifyTurn
-func (*stream) ClassifyTurn(ctx context.Context, message string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.TurnClassification, types.TurnClassification], error) {
+func (*stream) ClassifyTurn(ctx context.Context, message string, approval_policy string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.TurnClassification, types.TurnClassification], error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -199,7 +199,7 @@ func (*stream) ClassifyTurn(ctx context.Context, message string, opts ...CallOpt
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"message": message},
+		Kwargs: map[string]any{"message": message, "approval_policy": approval_policy},
 		Env:    getEnvVars(callOpts.env),
 	}
 
