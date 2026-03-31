@@ -92,8 +92,9 @@ var (
 	viewPublishLock = "airstore:view:publish:%s" // draftId
 
 	// Pending tool call — stores deferred write tool calls awaiting user approval.
-	pendingToolCall  = "airstore:pending-tool-call:%s"    // taskID
-	toolRejection    = "airstore:tool-rejection:%s:%s:%s" // taskID, tool, command
+	pendingToolCall    = "airstore:pending-tool-call:%s"    // taskID
+	toolRejection      = "airstore:tool-rejection:%s:%s:%s" // taskID, tool, command
+	writePreapproval   = "airstore:write-preapproval:%s"    // taskID
 
 	// Compression keys — include strategy so each compressor caches independently
 	fsCompressedPointer = "airstore:compressed:%d:%s:%s:%s" // workspaceId, pathHash, resultId, strategy
@@ -364,6 +365,10 @@ func (rk *redisKeys) PendingToolCall(taskID string) string {
 
 func (rk *redisKeys) ToolRejection(taskID, tool, command string) string {
 	return fmt.Sprintf(toolRejection, taskID, tool, command)
+}
+
+func (rk *redisKeys) WritePreapproval(taskID string) string {
+	return fmt.Sprintf(writePreapproval, taskID)
 }
 
 // --- Compression keys ---

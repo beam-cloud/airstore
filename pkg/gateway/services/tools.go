@@ -230,7 +230,6 @@ func (s *ToolService) checkWriteGate(ctx context.Context, req *pb.ExecuteToolReq
 
 	// If this tool+command was already rejected for this task, return an
 	// error to the shim instead of creating another approval blocker.
-	// This prevents an infinite approve/reject loop when the agent retries.
 	if len(req.Args) > 0 {
 		rejKey := common.Keys.ToolRejection(taskID, req.Name, req.Args[0])
 		if val, err := s.redisClient.Get(ctx, rejKey).Result(); err == nil && val != "" {
@@ -246,6 +245,18 @@ func (s *ToolService) checkWriteGate(ctx context.Context, req *pb.ExecuteToolReq
 			_ = stream.Send(&pb.ExecuteToolResponse{Done: true, ExitCode: 1})
 			return true, true
 		}
+	}
+
+	// If the user just approved a conversation-level blocker (e.g. "shall I
+	// send?"), a pre-approval flag is set. Consume it and let the write
+	// through — the user already expressed intent.
+	preKey := common.Keys.WritePreapproval(taskID)
+	if val, err := s.redisClient.GetDel(ctx, preKey).Result(); err == nil && val != "" {
+		log.Info().
+			Str("task_id", taskID).
+			Str("tool", req.Name).
+			Msg("write gate: pre-approved by prior user approval, allowing")
+		return false, true
 	}
 
 	workspaceID := auth.WorkspaceId(ctx)
@@ -442,6 +453,7 @@ func (s *ToolService) ExecuteDeferred(ctx context.Context, workspaceID, memberID
 }
 
 const toolRejectionTTL = 10 * time.Minute
+const writePreapprovalTTL = 60 * time.Second
 
 // RecordToolRejection stores a rejection marker in Redis so that if the agent
 // retries the same tool command, checkWriteGate returns an error instead of
@@ -452,6 +464,18 @@ func (s *ToolService) RecordToolRejection(ctx context.Context, taskID, tool, com
 	}
 	key := common.Keys.ToolRejection(taskID, tool, command)
 	return s.redisClient.Set(ctx, key, "rejected", toolRejectionTTL).Err()
+}
+
+// GrantWritePreapproval sets a short-lived flag indicating the user already
+// approved a conversation-level action on this task. The next write-gate call
+// for the same task consumes it and lets the tool through without a second
+// approval prompt.
+func (s *ToolService) GrantWritePreapproval(ctx context.Context, taskID string) error {
+	if s.redisClient == nil || taskID == "" {
+		return nil
+	}
+	key := common.Keys.WritePreapproval(taskID)
+	return s.redisClient.Set(ctx, key, "1", writePreapprovalTTL).Err()
 }
 
 func (s *ToolService) buildExecContext(ctx context.Context, toolName string) *tools.ExecutionContext {

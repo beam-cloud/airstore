@@ -136,10 +136,10 @@ type columnRename struct {
 }
 
 type updateViewRequest struct {
-	Name          *string               `json:"name,omitempty"`
-	Description   *string               `json:"description,omitempty"`
-	Definition    *types.ViewDefinition `json:"definition,omitempty"`
-	ColumnRenames []columnRename        `json:"column_renames,omitempty"`
+	Name          *string            `json:"name,omitempty"`
+	Description   *string            `json:"description,omitempty"`
+	Definition    json.RawMessage    `json:"definition,omitempty"`
+	ColumnRenames []columnRename     `json:"column_renames,omitempty"`
 }
 
 func (vg *ViewsGroup) Update(c echo.Context) error {
@@ -164,8 +164,11 @@ func (vg *ViewsGroup) Update(c echo.Context) error {
 	if req.Description != nil {
 		v.Description = *req.Description
 	}
-	if req.Definition != nil {
-		v.Definition = *req.Definition
+	hasDefinition := len(req.Definition) > 0 && string(req.Definition) != "null"
+	if hasDefinition {
+		if err := json.Unmarshal(req.Definition, &v.Definition); err != nil {
+			return ErrorResponse(c, http.StatusBadRequest, "invalid definition: "+err.Error())
+		}
 		if req.Name == nil && strings.TrimSpace(v.Definition.Name) != "" {
 			v.Name = v.Definition.Name
 		}
@@ -176,7 +179,7 @@ func (vg *ViewsGroup) Update(c echo.Context) error {
 	if len(req.ColumnRenames) > 0 {
 		applyColumnRenamesToDefinition(&v.Definition, req.ColumnRenames)
 	}
-	if req.Definition != nil || len(req.ColumnRenames) > 0 {
+	if hasDefinition || len(req.ColumnRenames) > 0 {
 		views.NormalizeDefinition(&v.Definition)
 	}
 	v.SyncNameDescription()
@@ -199,7 +202,7 @@ func (vg *ViewsGroup) Update(c echo.Context) error {
 					Msg("failed to rename column in MongoDB view store")
 			}
 		}
-		if req.Definition != nil {
+		if hasDefinition {
 			for _, sheetID := range deletedViewSheets(previousDefinition, v.Definition) {
 				if err := vg.store.DeleteSheet(ctx, v.ID, sheetID); err != nil {
 					log.Warn().Err(err).Str("view_id", v.ID).Str("sheet_id", sheetID).Msg("failed to delete sheet rows from MongoDB view store")

@@ -21,6 +21,7 @@ import (
 type ToolExecutor interface {
 	ExecuteDeferred(ctx context.Context, workspaceID, memberID uint, toolName string, args []string) (stdout, stderr string, exitCode int, err error)
 	RecordToolRejection(ctx context.Context, taskID, tool, command string) error
+	GrantWritePreapproval(ctx context.Context, taskID string) error
 }
 
 type TaskFlows struct {
@@ -58,17 +59,15 @@ func (f *TaskFlows) SetToolExecutor(executor ToolExecutor) {
 	}
 }
 
-func isUserProvidedFeedback(msg string) bool {
-	m := strings.TrimSpace(msg)
-	return m != "" && m != "Rejected. Please revise." && m != "Do not send this email."
-}
-
 // maybeExecuteDeferredToolCall checks whether the current blocker holds a
 // deferred tool call (created by the gateway write gate) and handles
 // approval / rejection. For approvals it executes the tool server-side and
 // returns the result. For rejections it returns a clear message telling the
 // agent not to retry. Returns "" for non-tool-call blockers so the normal
 // blocker flow is unaffected.
+//
+// userMessage must be the raw user input BEFORE any defaults are applied.
+// Empty string means the user provided no feedback (plain approve/reject).
 func (f *TaskFlows) maybeExecuteDeferredToolCall(
 	ctx context.Context,
 	task *types.AgentTask,
@@ -81,7 +80,7 @@ func (f *TaskFlows) maybeExecuteDeferredToolCall(
 	}
 	tcRaw, ok := blocker.PayloadJSON["tool_call"]
 	if !ok {
-		return "" // not a tool-call blocker — normal flow handles it
+		return ""
 	}
 
 	tcBytes, err := json.Marshal(tcRaw)
@@ -105,9 +104,8 @@ func (f *TaskFlows) maybeExecuteDeferredToolCall(
 	}
 
 	if action == nil || *action == types.TaskInputActionReject {
-		hasFeedback := isUserProvidedFeedback(userMessage)
+		hasFeedback := strings.TrimSpace(userMessage) != ""
 		if !hasFeedback {
-			// Hard reject — record so checkWriteGate auto-fails identical retries.
 			command := ""
 			if len(tc.Args) > 0 {
 				command = tc.Args[0]
@@ -120,7 +118,6 @@ func (f *TaskFlows) maybeExecuteDeferredToolCall(
 				summary,
 			)
 		}
-		// Reject with feedback — don't block retries; user wants a revised version.
 		return fmt.Sprintf(
 			"The user rejected your request to %s and provided feedback below. Revise the action based on their feedback and try again.",
 			summary,
@@ -326,6 +323,20 @@ func (f *TaskFlows) AcceptTaskInput(
 		}
 	}
 
+	// Handle deferred tool calls BEFORE applying default messages, so we
+	// can distinguish "user typed nothing" from "user provided feedback"
+	// by checking whether message is empty — no string-matching hacks.
+	toolCallResult := f.maybeExecuteDeferredToolCall(ctx, task, action, message)
+	if toolCallResult != "" {
+		if action != nil && *action == types.TaskInputActionReject && strings.TrimSpace(message) != "" {
+			message = toolCallResult + "\n\n" + message
+		} else {
+			message = toolCallResult
+		}
+	} else if action != nil && *action == types.TaskInputActionApprove && f.toolExecutor != nil {
+		_ = f.toolExecutor.GrantWritePreapproval(ctx, task.ID)
+	}
+
 	if strings.TrimSpace(message) == "" && action != nil {
 		switch *action {
 		case types.TaskInputActionApprove:
@@ -357,18 +368,6 @@ func (f *TaskFlows) AcceptTaskInput(
 		}
 	}
 	resolution := taskBlockerResolutionForInput(task, kind, action, message, items)
-
-	// For tool-call blockers, execute the deferred tool server-side (on
-	// approve) or build a rejection message. For approvals the result
-	// replaces the message entirely; for rejections we preserve any user
-	// feedback so the agent can revise.
-	if toolCallResult := f.maybeExecuteDeferredToolCall(ctx, task, action, message); toolCallResult != "" {
-		if action != nil && *action == types.TaskInputActionReject && isUserProvidedFeedback(message) {
-			message = toolCallResult + "\n\n" + message
-		} else {
-			message = toolCallResult
-		}
-	}
 
 	sessionID := ""
 	if task.TargetRunID != nil {
