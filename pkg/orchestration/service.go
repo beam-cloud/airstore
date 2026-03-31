@@ -2293,22 +2293,38 @@ func applyViewRuntimeContext(
 }
 
 func injectViewContextStream(ctx context.Context, s2 *common.S2Client, env map[string]string, viewID string) {
-	records, err := s2.Read(ctx, common.Streams.ViewContext(viewID), 0, 1000)
-	if err != nil {
-		log.Warn().Err(err).Str("view_id", viewID).Msg("failed to read view context stream")
-		return
-	}
-	if len(records) == 0 {
-		return
-	}
+	const pageSize = 1000
+	const maxPages = 50
+	stream := common.Streams.ViewContext(viewID)
 
 	var entries []types.ViewContextEntry
-	for _, r := range records {
-		var e types.ViewContextEntry
-		if json.Unmarshal([]byte(r.Body), &e) == nil {
-			e.SeqNum = r.SeqNum
-			entries = append(entries, e)
+	seqNum := int64(0)
+	for page := 0; page < maxPages; page++ {
+		records, err := s2.Read(ctx, stream, seqNum, pageSize)
+		if err != nil {
+			log.Warn().Err(err).Str("view_id", viewID).Msg("failed to read view context stream")
+			return
 		}
+		if len(records) == 0 {
+			break
+		}
+		for _, r := range records {
+			var e types.ViewContextEntry
+			if json.Unmarshal([]byte(r.Body), &e) == nil {
+				e.SeqNum = r.SeqNum
+				entries = append(entries, e)
+			}
+			if r.SeqNum >= seqNum {
+				seqNum = r.SeqNum + 1
+			}
+		}
+		if len(records) < pageSize {
+			break
+		}
+	}
+
+	if len(entries) == 0 {
+		return
 	}
 
 	lastCompaction := -1

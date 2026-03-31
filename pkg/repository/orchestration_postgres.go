@@ -1153,7 +1153,7 @@ func (b *PostgresBackend) UpdateTaskStateIfCurrentRun(ctx context.Context, updat
 		    wake_count = CASE WHEN $2::agent_task_state = 'sleeping'::agent_task_state THEN wake_count ELSE 0 END,
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = $1
-		  AND state NOT IN ('done'::agent_task_state)
+		  AND state NOT IN ('done'::agent_task_state, 'dropped'::agent_task_state, 'cancelled'::agent_task_state)
 	`
 	var args []any
 	if expectedRunID == "" {
@@ -2667,7 +2667,7 @@ func (b *PostgresBackend) ListOrphanedRunningTaskRunIDs(ctx context.Context, sta
 		  AND t.updated_at < $1
 		  AND (
 		      r.status NOT IN ('accepted'::agent_run_status, 'running'::agent_run_status)
-		      OR (r.claimed_by_worker_id IS NULL AND r.claim_expires_at IS NULL)
+		      OR (r.status = 'running'::agent_run_status AND r.claimed_by_worker_id IS NULL AND r.claim_expires_at IS NULL)
 		  )
 		ORDER BY t.updated_at ASC
 		LIMIT $2

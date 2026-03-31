@@ -103,7 +103,11 @@ func (f *TaskFlows) maybeExecuteDeferredToolCall(
 		summary = tc.Tool
 	}
 
-	if action == nil || *action == types.TaskInputActionReject {
+	if action == nil {
+		return ""
+	}
+
+	if *action == types.TaskInputActionReject {
 		hasFeedback := strings.TrimSpace(userMessage) != ""
 		if !hasFeedback {
 			command := ""
@@ -818,10 +822,7 @@ func (f *TaskFlows) wakeStoppedTask(ctx context.Context, task *types.AgentTask) 
 		dispatchPayload[types.OrchestrationOutboxPayloadResumeCheckpointRunID] = lastRun.ID
 	}
 
-	if err := f.backend.UpdateTaskState(ctx, types.TaskStateUpdate{
-		TaskID: task.ID,
-		State:  types.AgentTaskStateQueued,
-	}); err != nil {
+	if err := f.lifecycle.Queue(ctx, task.ID, nil); err != nil {
 		return fmt.Errorf("transition stopped task to queued: %w", err)
 	}
 

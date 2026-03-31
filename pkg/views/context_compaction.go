@@ -55,17 +55,33 @@ func (cc *ContextCompactor) ReadContext(ctx context.Context, viewID string) ([]t
 	if !cc.Available() {
 		return nil, nil
 	}
-	records, err := cc.s2.Read(ctx, common.Streams.ViewContext(viewID), 0, 1000)
-	if err != nil {
-		return nil, fmt.Errorf("read view context stream: %w", err)
-	}
+
+	const pageSize = 1000
+	const maxPages = 50
+	stream := common.Streams.ViewContext(viewID)
 
 	var entries []types.ViewContextEntry
-	for _, r := range records {
-		var e types.ViewContextEntry
-		if json.Unmarshal([]byte(r.Body), &e) == nil {
-			e.SeqNum = r.SeqNum
-			entries = append(entries, e)
+	seqNum := int64(0)
+	for page := 0; page < maxPages; page++ {
+		records, err := cc.s2.Read(ctx, stream, seqNum, pageSize)
+		if err != nil {
+			return nil, fmt.Errorf("read view context stream: %w", err)
+		}
+		if len(records) == 0 {
+			break
+		}
+		for _, r := range records {
+			var e types.ViewContextEntry
+			if json.Unmarshal([]byte(r.Body), &e) == nil {
+				e.SeqNum = r.SeqNum
+				entries = append(entries, e)
+			}
+			if r.SeqNum >= seqNum {
+				seqNum = r.SeqNum + 1
+			}
+		}
+		if len(records) < pageSize {
+			break
 		}
 	}
 

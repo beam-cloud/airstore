@@ -148,27 +148,13 @@ func (c *CommandSchema) ValidateParams() error {
 }
 
 // HasRequiredArgs checks whether the supplied args satisfy every required
-// param in the schema. Positional args are matched by index; flag args are
-// matched by --flag or -short presence. Returns false for incomplete or
-// malformed calls so they can fail through normal tool error handling.
+// param and one_of_required group in the schema. Positional args are matched
+// by index; flag args are matched by --flag or -short presence. Returns false
+// for incomplete or malformed calls so they can fail through normal tool error
+// handling.
 func (c *CommandSchema) HasRequiredArgs(args []string) bool {
-	// Collect supplied positional values (anything not starting with -)
-	// and supplied flags.
-	var posValues []string
-	flags := make(map[string]bool)
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if strings.HasPrefix(a, "-") {
-			flags[a] = true
-			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				i++ // skip the flag's value
-			}
-		} else {
-			posValues = append(posValues, a)
-		}
-	}
+	posValues, flags := c.classifyArgs(args)
 
-	// Check every required param is satisfied.
 	for _, p := range c.Params {
 		if !p.Required {
 			continue
@@ -184,7 +170,74 @@ func (c *CommandSchema) HasRequiredArgs(args []string) bool {
 			}
 		}
 	}
+
+	for _, group := range c.OneOfRequired {
+		found := 0
+		for _, name := range group {
+			if c.paramPresent(name, posValues, flags) {
+				found++
+			}
+		}
+		if found != 1 {
+			return false
+		}
+	}
+
 	return true
+}
+
+// classifyArgs separates positional values from flag names, handling
+// --flag=value syntax and boolean params (which don't consume the next token).
+func (c *CommandSchema) classifyArgs(args []string) (posValues []string, flags map[string]bool) {
+	boolFlags := make(map[string]bool)
+	for _, p := range c.Params {
+		if p.Type == "bool" {
+			if p.Flag != "" {
+				boolFlags[p.Flag] = true
+			}
+			if p.Short != "" {
+				boolFlags[p.Short] = true
+			}
+		}
+	}
+
+	flags = make(map[string]bool)
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if !strings.HasPrefix(a, "-") {
+			posValues = append(posValues, a)
+			continue
+		}
+		if eqIdx := strings.Index(a, "="); eqIdx > 0 {
+			flags[a[:eqIdx]] = true
+			continue
+		}
+		flags[a] = true
+		if !boolFlags[a] && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			i++
+		}
+	}
+	return
+}
+
+// paramPresent checks whether a named param is satisfied by the parsed args.
+func (c *CommandSchema) paramPresent(name string, posValues []string, flags map[string]bool) bool {
+	for _, p := range c.Params {
+		if p.Name != name {
+			continue
+		}
+		if p.Position != nil {
+			return *p.Position < len(posValues) && posValues[*p.Position] != ""
+		}
+		if p.Flag != "" && flags[p.Flag] {
+			return true
+		}
+		if p.Short != "" && flags[p.Short] {
+			return true
+		}
+		return false
+	}
+	return false
 }
 
 // GetPositionalParams returns params sorted by position

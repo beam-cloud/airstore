@@ -105,7 +105,6 @@ func (w *Worker) checkPendingToolCall(ctx context.Context, taskID string) map[st
 	if err != nil {
 		return nil
 	}
-	w.redisClient.Del(ctx, key)
 
 	var tc struct {
 		Tool    string   `json:"tool"`
@@ -114,8 +113,11 @@ func (w *Worker) checkPendingToolCall(ctx context.Context, taskID string) map[st
 		Details string   `json:"details"`
 	}
 	if json.Unmarshal(data, &tc) != nil {
+		log.Warn().Str("task_id", taskID).Msg("pending tool call payload is malformed, leaving in Redis for TTL expiry")
 		return nil
 	}
+
+	w.redisClient.Del(ctx, key)
 
 	log.Info().
 		Str("task_id", taskID).

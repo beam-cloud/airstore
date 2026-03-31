@@ -262,7 +262,11 @@ func (s *ToolService) checkWriteGate(ctx context.Context, req *pb.ExecuteToolReq
 	workspaceID := auth.WorkspaceId(ctx)
 	memberID := auth.MemberId(ctx)
 
-	summary, details := buildToolCallSummaryAndDetails(req.Name, req.Args)
+	var cmdSchema *tools.CommandSchema
+	if len(req.Args) > 0 {
+		cmdSchema = s.registry.GetCommandSchema(req.Name, req.Args[0])
+	}
+	summary, details := buildToolCallSummaryAndDetails(req.Name, req.Args, cmdSchema)
 
 	pending := PendingToolCall{
 		Tool:        req.Name,
@@ -306,12 +310,12 @@ func (s *ToolService) checkWriteGate(ctx context.Context, req *pb.ExecuteToolReq
 // buildToolCallSummaryAndDetails returns a one-line summary for the blocker
 // title and a rich details string that shows the full content of the action
 // (email body, message text, PR description, etc.).
-func buildToolCallSummaryAndDetails(toolName string, args []string) (summary, details string) {
+func buildToolCallSummaryAndDetails(toolName string, args []string, cmdSchema *tools.CommandSchema) (summary, details string) {
 	if len(args) == 0 {
 		return toolName, ""
 	}
 	subCmd := args[0]
-	positional := extractPositionalArgs(args[1:])
+	positional := extractPositionalArgs(args[1:], cmdSchema)
 
 	switch toolName {
 	case "gmail":
@@ -381,16 +385,37 @@ func buildToolCallSummaryAndDetails(toolName string, args []string) (summary, de
 	return summary, details
 }
 
-// extractPositionalArgs strips flag pairs (--flag value, -f value) and
-// returns only positional arguments in order.
-func extractPositionalArgs(args []string) []string {
+// extractPositionalArgs strips flags and their values, returning only
+// positional arguments. Uses the command schema (when available) to
+// correctly handle boolean flags that don't consume a following token.
+func extractPositionalArgs(args []string, cmdSchema *tools.CommandSchema) []string {
+	boolFlags := make(map[string]bool)
+	if cmdSchema != nil {
+		for _, p := range cmdSchema.Params {
+			if p.Type == "bool" {
+				if p.Flag != "" {
+					boolFlags[p.Flag] = true
+				}
+				if p.Short != "" {
+					boolFlags[p.Short] = true
+				}
+			}
+		}
+	}
+
 	var positional []string
 	for i := 0; i < len(args); i++ {
-		if strings.HasPrefix(args[i], "-") {
-			i++ // skip the flag's value
+		a := args[i]
+		if !strings.HasPrefix(a, "-") {
+			positional = append(positional, a)
 			continue
 		}
-		positional = append(positional, args[i])
+		if strings.Contains(a, "=") {
+			continue
+		}
+		if !boolFlags[a] && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			i++
+		}
 	}
 	return positional
 }

@@ -107,3 +107,14 @@ func (r *Registry) Has(name string) bool {
 	_, ok := r.providers[name]
 	return ok
 }
+
+// GetCommandSchema returns the schema for a specific tool command, or nil.
+func (r *Registry) GetCommandSchema(toolName, command string) *CommandSchema {
+	r.mu.RLock()
+	schema := r.schemas[toolName]
+	r.mu.RUnlock()
+	if schema == nil {
+		return nil
+	}
+	return schema.Commands[command]
+}
