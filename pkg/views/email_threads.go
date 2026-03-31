@@ -132,25 +132,32 @@ func (f *EmailThreadFetcher) fetchThread(ctx context.Context, token, threadID st
 	return stripSupersededDrafts(messages), nil
 }
 
-// stripSupersededDrafts removes draft messages from a thread when the thread
-// also contains non-draft messages. A draft that has been sent gets replaced
-// by a SENT message in the same thread — keeping both is confusing.
+// stripSupersededDrafts removes a draft only when there's a SENT message in
+// the same thread with the same normalized subject and recipient — meaning
+// the draft was actually sent and shouldn't appear alongside its sent twin.
+// Active drafts (no matching SENT counterpart) are preserved.
 func stripSupersededDrafts(messages []ThreadMessage) []ThreadMessage {
-	hasSent := false
+	type key struct{ subject, to string }
+	norm := func(s string) string { return strings.TrimSpace(strings.ToLower(s)) }
+
+	sent := make(map[key]struct{})
 	for _, m := range messages {
-		if !hasLabel(m.Labels, "DRAFT") {
-			hasSent = true
-			break
+		if hasLabel(m.Labels, "SENT") {
+			sent[key{norm(m.Subject), norm(m.To)}] = struct{}{}
 		}
 	}
-	if !hasSent {
+	if len(sent) == 0 {
 		return messages
 	}
+
 	filtered := make([]ThreadMessage, 0, len(messages))
 	for _, m := range messages {
-		if !hasLabel(m.Labels, "DRAFT") {
-			filtered = append(filtered, m)
+		if hasLabel(m.Labels, "DRAFT") {
+			if _, superseded := sent[key{norm(m.Subject), norm(m.To)}]; superseded {
+				continue
+			}
 		}
+		filtered = append(filtered, m)
 	}
 	if len(filtered) == 0 {
 		return messages
