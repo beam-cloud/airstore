@@ -877,6 +877,7 @@ func (vg *ViewsGroup) RowDetail(c echo.Context) error {
 			}
 		}
 	}
+	stripCrossThreadDrafts(emailThreads)
 
 	layout := views.ResolveProjectedLayout(template, projection)
 
@@ -1081,6 +1082,49 @@ type mailboxThread struct {
 
 const mailboxOutputLimit = 200
 
+// stripCrossThreadDrafts removes threads that consist entirely of DRAFT
+// messages when another thread contains a SENT message with the same
+// normalized subject and recipient. This handles the case where the agent
+// creates a draft in one thread and then sends a new email (different
+// thread_id) instead of sending the existing draft.
+func stripCrossThreadDrafts(threads map[string][]views.ThreadMessage) {
+	if len(threads) < 2 {
+		return
+	}
+
+	norm := func(s string) string { return strings.TrimSpace(strings.ToLower(s)) }
+	type key struct{ subject, to string }
+
+	sentKeys := make(map[key]struct{})
+	for _, msgs := range threads {
+		for _, m := range msgs {
+			if views.HasLabel(m.Labels, "SENT") {
+				sentKeys[key{norm(m.Subject), norm(m.To)}] = struct{}{}
+			}
+		}
+	}
+	if len(sentKeys) == 0 {
+		return
+	}
+
+	for tid, msgs := range threads {
+		allDraft := true
+		var draftKey key
+		for _, m := range msgs {
+			if !views.HasLabel(m.Labels, "DRAFT") {
+				allDraft = false
+				break
+			}
+			draftKey = key{norm(m.Subject), norm(m.To)}
+		}
+		if allDraft && len(msgs) > 0 {
+			if _, superseded := sentKeys[draftKey]; superseded {
+				delete(threads, tid)
+			}
+		}
+	}
+}
+
 func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 	ctx := c.Request().Context()
 	workspaceID, err := vg.workspaceID(c)
@@ -1248,6 +1292,10 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 			}
 		}
 	}
+
+	// Cross-thread draft sweep: remove threads consisting solely of drafts
+	// when a SENT message with the same subject+to exists in another thread.
+	stripCrossThreadDrafts(emailThreads)
 
 	// Build output -> threadKey lookup so we can associate row data with threads.
 	outputThreadKey := make(map[string]string)

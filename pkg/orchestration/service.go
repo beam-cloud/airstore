@@ -2392,6 +2392,7 @@ func appendSchemaGuidance(prompt string, contexts []types.ViewOutputSchemaContex
 		"- These table views actively depend on this agent.",
 		"- When you emit durable task outputs that clearly belong to one of them, align the structure with the matching schema, keep output_type accurate, and set artifact_key when the match is obvious.",
 		"- Treat this as advisory context. Do not invent uncertain fields just to satisfy a schema.",
+		"- IMPORTANT: After sending or drafting an email (Gmail send-email or create-draft), update ALL affected CRM rows with the thread_id from the Gmail response using `view update-row`. Store thread_id as a hidden cell alongside visible cells. This links the email thread to the row so users can view it.",
 	}
 	for _, sc := range contexts {
 		var parts []string

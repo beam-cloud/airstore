@@ -24,7 +24,7 @@ const (
 	claudeCheckpointFile    = "session-checkpoint.json"
 	claudeHeartbeatFile     = ".heartbeat"
 	claudeNeedsInputFile    = ".needs_input"
-	claudeHeartbeatFreshFor = 5 * time.Minute
+	claudeHeartbeatFreshFor = 2 * time.Minute
 )
 
 type ClaudeCodeRunnerOptions struct {
