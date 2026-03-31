@@ -478,7 +478,7 @@ func (s *ToolService) ExecuteDeferred(ctx context.Context, workspaceID, memberID
 }
 
 const toolRejectionTTL = 10 * time.Minute
-const writePreapprovalTTL = 60 * time.Second
+const writePreapprovalTTL = 10 * time.Second
 
 // RecordToolRejection stores a rejection marker in Redis so that if the agent
 // retries the same tool command, checkWriteGate returns an error instead of
