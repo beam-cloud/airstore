@@ -107,9 +107,11 @@ func (vg *ViewsGroup) Create(c echo.Context) error {
 		Description: req.Description,
 		Definition:  req.Definition,
 	}
+	ctx := c.Request().Context()
 	views.NormalizeDefinition(&v.Definition)
+	views.PopulateStatusOptions(ctx, &v.Definition)
 	v.SyncNameDescription()
-	if err := vg.backend.CreateView(c.Request().Context(), v); err != nil {
+	if err := vg.backend.CreateView(ctx, v); err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 	return SuccessResponse(c, v)
@@ -181,6 +183,7 @@ func (vg *ViewsGroup) Update(c echo.Context) error {
 	}
 	if hasDefinition || len(req.ColumnRenames) > 0 {
 		views.NormalizeDefinition(&v.Definition)
+		views.PopulateStatusOptions(ctx, &v.Definition)
 	}
 	v.SyncNameDescription()
 	if err := vg.backend.UpdateView(ctx, v); err != nil {
@@ -803,8 +806,22 @@ func (vg *ViewsGroup) RowDetail(c echo.Context) error {
 		},
 	}
 
-	// If no task is associated, return the row data as-is.
+	// If no task is associated, still check for thread_id in row cells.
 	if parentTaskID == "" {
+		if rowCells != nil {
+			if tid := strings.TrimSpace(rowCells["thread_id"]); tid != "" {
+				var threadIDs []string
+				for _, t := range strings.Split(tid, ",") {
+					if t = strings.TrimSpace(t); t != "" {
+						threadIDs = append(threadIDs, t)
+					}
+				}
+				if len(threadIDs) > 0 {
+					fetcher := views.NewEmailThreadFetcher(vg.backend)
+					resp["email_threads"] = fetcher.FetchThreads(ctx, workspaceID, threadIDs)
+				}
+			}
+		}
 		return SuccessResponse(c, resp)
 	}
 
@@ -830,8 +847,24 @@ func (vg *ViewsGroup) RowDetail(c echo.Context) error {
 
 	projection := views.ProjectDetail(detailContext.Task, detailContext.Outputs, detailContext.Subtasks)
 
+	// Primary: thread_id written by the agent onto the row cell
+	var cellThreadIDs []string
+	if rowCells != nil {
+		if tid := strings.TrimSpace(rowCells["thread_id"]); tid != "" {
+			for _, t := range strings.Split(tid, ",") {
+				if t = strings.TrimSpace(t); t != "" {
+					cellThreadIDs = append(cellThreadIDs, t)
+				}
+			}
+		}
+	}
+
 	var emailThreads map[string][]views.ThreadMessage
-	if threadIDs := extractThreadIDs(projection.ThreadOutputs); len(threadIDs) > 0 {
+	threadIDs := cellThreadIDs
+	if len(threadIDs) == 0 {
+		threadIDs = extractThreadIDs(projection.ThreadOutputs)
+	}
+	if len(threadIDs) > 0 {
 		fetcher := views.NewEmailThreadFetcher(vg.backend)
 		emailThreads = fetcher.FetchThreads(ctx, workspaceID, threadIDs)
 	}
@@ -877,8 +910,23 @@ func (vg *ViewsGroup) RowDetail(c echo.Context) error {
 	resp["email_threads"] = emailThreads
 	resp["subtasks"] = subtaskList
 	resp["parent_task_id"] = parentTaskID
+	resp["feedback_counts"] = vg.loadFeedbackCounts(ctx, viewID)
 
 	return SuccessResponse(c, resp)
+}
+
+// loadFeedbackCounts reads the view context stream and returns a map of
+// thread_id to the number of anchored feedback entries. Returns an empty map
+// if the compactor is unavailable.
+func (vg *ViewsGroup) loadFeedbackCounts(ctx context.Context, viewID string) map[string]int {
+	if vg.compactor == nil || !vg.compactor.Available() {
+		return map[string]int{}
+	}
+	entries, err := vg.compactor.ReadContext(ctx, viewID)
+	if err != nil || len(entries) == 0 {
+		return map[string]int{}
+	}
+	return views.FeedbackCountsByThread(entries)
 }
 
 // detailTemplateForRow finds the table component that owns the row and
@@ -923,8 +971,16 @@ func extractThreadIDs(outputs []*types.TaskOutput) []string {
 	return ids
 }
 
+func isEmailOutput(o *types.TaskOutput) bool {
+	if o.OutputType == types.TaskOutputTypeEmail {
+		return true
+	}
+	return metadataString(o.Metadata, "_tool") == "gmail" &&
+		strings.TrimSpace(dataString(o.Data, "thread_id")) != ""
+}
+
 func emailOutputThreadID(o *types.TaskOutput) string {
-	if o == nil || o.OutputType != types.TaskOutputTypeEmail {
+	if o == nil || !isEmailOutput(o) {
 		return ""
 	}
 	tid := strings.TrimSpace(dataString(o.Data, "thread_id"))
@@ -977,7 +1033,7 @@ func syntheticEmailThreads(outputs []*types.TaskOutput, existing map[string][]vi
 		if o.Status == types.TaskOutputStatusPending || o.Status == types.TaskOutputStatusApproved {
 			continue
 		}
-		if threadID := emailOutputThreadID(o); threadID != "" && len(existing[threadID]) > 0 {
+		if threadID := emailOutputThreadID(o); threadID != "" {
 			continue
 		}
 
@@ -1054,15 +1110,17 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 		}
 	}
 
-	// Load view rows to collect task IDs associated with this view.
+	// Load view rows to collect task IDs and row-level thread_ids.
 	taskRowMap := make(map[string]*views.ViewRow)
 	var viewTaskIDs []string
+	var cachedRows []views.ViewRow
 	if vg.store != nil && vg.store.Available() {
 		allRows, rowErr := vg.store.GetRows(ctx, viewID, "", "")
 		if rowErr == nil {
+			cachedRows = allRows
 			seen := make(map[string]bool)
-			for i := range allRows {
-				r := &allRows[i]
+			for i := range cachedRows {
+				r := &cachedRows[i]
 				if r.TaskID != "" {
 					taskRowMap[r.TaskID] = r
 					if !seen[r.TaskID] {
@@ -1124,26 +1182,56 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 
 	outputs := make([]*types.TaskOutput, 0, len(outputsByID))
 	for _, o := range outputsByID {
-		if o.IsDraftEmail() {
-			continue
-		}
 		outputs = append(outputs, o)
 	}
 
-	if len(outputs) == 0 {
-		return SuccessResponse(c, map[string]any{
-			"threads":            map[string]any{},
-			"has_email_activity": false,
-		})
-	}
-
-	// Build task_id -> []*TaskOutput lookup and collect thread IDs.
+	// Build task_id -> []*TaskOutput lookup and collect thread IDs from outputs.
 	taskOutputs := make(map[string][]*types.TaskOutput)
 	for _, o := range outputs {
 		taskOutputs[o.TaskID] = append(taskOutputs[o.TaskID], o)
 	}
 
 	threadIDs := extractThreadIDs(outputs)
+
+	// Also collect thread_ids written directly to row cells (agent-driven
+	// denormalization). This ensures threads appear in the mailbox even when
+	// the BAML classifier didn't create an email output, and provides row
+	// association for threads that came from outputs but lack a task→row link.
+	rowThreadRows := make(map[string]*views.ViewRow)
+	{
+		seen := make(map[string]bool, len(threadIDs))
+		for _, tid := range threadIDs {
+			seen[tid] = true
+		}
+		for i := range cachedRows {
+			r := &cachedRows[i]
+			cells := r.MergedCells()
+			raw := strings.TrimSpace(cells["thread_id"])
+			if raw == "" {
+				continue
+			}
+			for _, tid := range strings.Split(raw, ",") {
+				tid = strings.TrimSpace(tid)
+				if tid == "" {
+					continue
+				}
+				if !seen[tid] {
+					threadIDs = append(threadIDs, tid)
+					seen[tid] = true
+				}
+				if rowThreadRows[tid] == nil {
+					rowThreadRows[tid] = r
+				}
+			}
+		}
+	}
+
+	if len(outputs) == 0 && len(threadIDs) == 0 {
+		return SuccessResponse(c, map[string]any{
+			"threads":            map[string]any{},
+			"has_email_activity": false,
+		})
+	}
 
 	// Fetch Gmail threads.
 	var emailThreads map[string][]views.ThreadMessage
@@ -1203,6 +1291,13 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 		threadOutputIDs[tk] = append(threadOutputIDs[tk], o.ID)
 	}
 
+	// Merge row-cell-sourced thread→row associations into threadRows.
+	for tid, row := range rowThreadRows {
+		if threadRows[tid] == nil {
+			threadRows[tid] = row
+		}
+	}
+
 	result := make(map[string]mailboxThread, len(emailThreads))
 	for threadKey, messages := range emailThreads {
 		mt := mailboxThread{Messages: messages}
@@ -1215,9 +1310,12 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 		result[threadKey] = mt
 	}
 
+	feedbackCounts := vg.loadFeedbackCounts(ctx, viewID)
+
 	return SuccessResponse(c, map[string]any{
 		"threads":            result,
 		"has_email_activity": len(result) > 0,
+		"feedback_counts":    feedbackCounts,
 	})
 }
 
@@ -1977,6 +2075,10 @@ func (vg *ViewsGroup) GetContext(c echo.Context) error {
 	}
 	if entries == nil {
 		entries = []types.ViewContextEntry{}
+	}
+
+	if threadID := c.QueryParam("thread_id"); threadID != "" {
+		entries = views.FilterByThreadID(entries, threadID)
 	}
 
 	return c.JSON(http.StatusOK, map[string]any{

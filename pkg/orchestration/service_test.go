@@ -124,6 +124,15 @@ func (b *viewSchemaBackend) GetAgentProfile(_ context.Context, _ uint, _ string)
 	return b.profile, nil
 }
 
+func (b *viewSchemaBackend) GetView(_ context.Context, _ uint, viewID string) (*types.View, error) {
+	for _, v := range b.views {
+		if v != nil && v.ID == viewID {
+			return v, nil
+		}
+	}
+	return nil, fmt.Errorf("not found")
+}
+
 func (b *viewSchemaBackend) ListViews(_ context.Context, _ uint) ([]*types.View, error) {
 	return b.views, nil
 }

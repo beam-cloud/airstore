@@ -117,6 +117,52 @@ func (*build_request) ClassifyDetailTemplate(table_title string, column_schema s
 	return bamlRuntime.BuildRequest(context.Background(), "ClassifyDetailTemplate", encoded)
 }
 
+// Build HTTP request for GenerateStatusOptions (returns baml.HTTPRequest)
+func (*build_request) GenerateStatusOptions(table_title string, column_key string, column_label string, sibling_columns string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	// Resolve client option to clientRegistry (client takes precedence)
+	if callOpts.client != nil {
+		if callOpts.clientRegistry == nil {
+			callOpts.clientRegistry = baml.NewClientRegistry()
+		}
+		callOpts.clientRegistry.SetPrimaryClient(*callOpts.client)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"table_title": table_title, "column_key": column_key, "column_label": column_label, "sibling_columns": sibling_columns, "stream": false},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: GenerateStatusOptions: %w", err)
+		panic(wrapped_err)
+	}
+
+	return bamlRuntime.BuildRequest(context.Background(), "GenerateStatusOptions", encoded)
+}
+
 // Build HTTP request for MapImportColumns (returns baml.HTTPRequest)
 func (*build_request) MapImportColumns(sheet_name string, existing_columns []types.ColumnSchema, headers []string, data_preview string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
 

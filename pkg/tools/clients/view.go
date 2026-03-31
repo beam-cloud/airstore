@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 
 	"github.com/beam-cloud/airstore/pkg/auth"
 	"github.com/beam-cloud/airstore/pkg/repository"
+	"github.com/beam-cloud/airstore/pkg/tools"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/beam-cloud/airstore/pkg/views"
 	"github.com/rs/zerolog/log"
@@ -55,6 +57,17 @@ func (c *ViewClient) Execute(ctx context.Context, command string, args map[strin
 	viewID := GetStringArg(args, "view_id", "")
 	if viewID == "" {
 		return WriteToolError(stdout, "view_id is required (use $AIRSTORE_SOURCE_VIEW_ID)")
+	}
+
+	if sourceViewID := tools.SourceViewIDFromContext(ctx); sourceViewID != "" && viewID != sourceViewID {
+		log.Warn().
+			Str("requested_view", viewID).
+			Str("source_view", sourceViewID).
+			Msg("view tool: blocked cross-view access")
+		return WriteToolError(stdout, fmt.Sprintf(
+			"access denied: you can only access your assigned view (%s). Use $AIRSTORE_SOURCE_VIEW_ID.",
+			sourceViewID,
+		))
 	}
 
 	if err := c.validateViewAccess(ctx, workspaceID, viewID); err != nil {
@@ -336,6 +349,40 @@ func (c *ViewClient) getRow(ctx context.Context, viewID string, workspaceID uint
 	return c.writeRows(stdout, []views.ViewRow{*row}, schemaCols)
 }
 
+// validateStatusCells checks that any cell whose column is type "status" with
+// defined options only receives one of those option values. Returns a
+// user-friendly error string, or "" if all values are valid.
+func validateStatusCells(cells map[string]string, cols []types.ColumnMeta) string {
+	if len(cols) == 0 {
+		return ""
+	}
+	for _, col := range cols {
+		if col.Type != "status" || len(col.Options) == 0 {
+			continue
+		}
+		val, ok := cells[col.Key]
+		if !ok {
+			continue
+		}
+		normalized := strings.TrimSpace(strings.ToLower(val))
+		found := false
+		allowed := make([]string, 0, len(col.Options))
+		for _, opt := range col.Options {
+			allowed = append(allowed, opt.Value)
+			if strings.ToLower(opt.Value) == normalized {
+				cells[col.Key] = opt.Value
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Sprintf("invalid value %q for status column %q — allowed values: %s",
+				val, col.Key, strings.Join(allowed, ", "))
+		}
+	}
+	return ""
+}
+
 func (c *ViewClient) updateRow(ctx context.Context, viewID string, workspaceID uint, args map[string]any, stdout io.Writer) error {
 	rowID := GetStringArg(args, "row_id", "")
 	cellsJSON := GetStringArg(args, "cells", "")
@@ -349,6 +396,25 @@ func (c *ViewClient) updateRow(ctx context.Context, viewID string, workspaceID u
 	}
 	if len(cells) == 0 {
 		return WriteToolError(stdout, "cells object is empty")
+	}
+
+	// Validate status columns against schema-defined options
+	if row, err := c.store.GetRowByID(ctx, viewID, rowID); err == nil && row != nil && row.SheetID != "" && row.ComponentID != "" {
+		if v, vErr := c.getViewDefinition(ctx, workspaceID, viewID); vErr == nil && v != nil {
+			for _, sheet := range v.Definition.Sheets {
+				if sheet.ID != row.SheetID {
+					continue
+				}
+				for _, comp := range sheet.Components {
+					if comp.ID != row.ComponentID {
+						continue
+					}
+					if msg := validateStatusCells(cells, viewComponentColumnMeta(comp)); msg != "" {
+						return WriteToolError(stdout, msg)
+					}
+				}
+			}
+		}
 	}
 
 	if err := c.store.UpdateRow(ctx, viewID, rowID, cells, ""); err != nil {
@@ -396,6 +462,23 @@ func (c *ViewClient) addRow(ctx context.Context, viewID string, workspaceID uint
 	}
 	if len(cells) == 0 {
 		return WriteToolError(stdout, "cells object is empty")
+	}
+
+	// Validate status columns against schema-defined options
+	if v, vErr := c.getViewDefinition(ctx, workspaceID, viewID); vErr == nil && v != nil {
+		for _, sheet := range v.Definition.Sheets {
+			if sheet.ID != sheetID {
+				continue
+			}
+			for _, comp := range sheet.Components {
+				if comp.ID != componentID {
+					continue
+				}
+				if msg := validateStatusCells(cells, viewComponentColumnMeta(comp)); msg != "" {
+					return WriteToolError(stdout, msg)
+				}
+			}
+		}
 	}
 
 	rowID, created, matchedExisting, err := c.smartUpsertRow(ctx, viewID, sheetID, componentID, cells)

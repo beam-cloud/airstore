@@ -25,6 +25,7 @@ type CommandSchema struct {
 	OneOfRequired [][]string     `yaml:"one_of_required,omitempty"`
 	Internal      bool           `yaml:"internal,omitempty"`
 	Write         bool           `yaml:"write,omitempty"`
+	OutputType    string         `yaml:"output_type,omitempty"`
 }
 
 // ParamSchema defines a parameter for a command

@@ -272,7 +272,14 @@ func (o *TaskOutput) IsDraftEmail() bool {
 }
 
 func (o *TaskOutput) ShouldHideInWorkspace() bool {
-	if o == nil || strings.TrimSpace(o.OutputType) != TaskOutputTypeEmail {
+	if o == nil {
+		return false
+	}
+	role := o.ArtifactRole()
+	if role == TaskOutputArtifactRoleIncidental || role == TaskOutputArtifactRoleSupporting {
+		return true
+	}
+	if strings.TrimSpace(o.OutputType) != TaskOutputTypeEmail {
 		return false
 	}
 	if o.HasApprovalSurface() || o.IsPending() {

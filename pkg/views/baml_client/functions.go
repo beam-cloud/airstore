@@ -169,6 +169,80 @@ func ClassifyDetailTemplate(ctx context.Context, table_title string, column_sche
 	}
 }
 
+func GenerateStatusOptions(ctx context.Context, table_title string, column_key string, column_label string, sibling_columns string, opts ...CallOptionFunc) (types.StatusOptionSet, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	// Resolve client option to clientRegistry (client takes precedence)
+	if callOpts.client != nil {
+		if callOpts.clientRegistry == nil {
+			callOpts.clientRegistry = baml.NewClientRegistry()
+		}
+		callOpts.clientRegistry.SetPrimaryClient(*callOpts.client)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"table_title": table_title, "column_key": column_key, "column_label": column_label, "sibling_columns": sibling_columns},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		panic(err)
+	}
+
+	if callOpts.onTick == nil {
+		result, err := bamlRuntime.CallFunction(ctx, "GenerateStatusOptions", encoded, callOpts.onTick)
+		if err != nil {
+			return types.StatusOptionSet{}, err
+		}
+
+		if result.Error != nil {
+			return types.StatusOptionSet{}, result.Error
+		}
+
+		casted := (result.Data).(types.StatusOptionSet)
+
+		return casted, nil
+	} else {
+		channel, err := bamlRuntime.CallFunctionStream(ctx, "GenerateStatusOptions", encoded, callOpts.onTick)
+		if err != nil {
+			return types.StatusOptionSet{}, err
+		}
+
+		for result := range channel {
+			if result.Error != nil {
+				return types.StatusOptionSet{}, result.Error
+			}
+
+			if result.HasData {
+				return result.Data.(types.StatusOptionSet), nil
+			}
+		}
+
+		return types.StatusOptionSet{}, fmt.Errorf("No data returned from stream")
+	}
+}
+
 func MapImportColumns(ctx context.Context, sheet_name string, existing_columns []types.ColumnSchema, headers []string, data_preview string, opts ...CallOptionFunc) (types.ImportMappingResult, error) {
 
 	var callOpts callOption

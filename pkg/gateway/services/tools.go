@@ -156,14 +156,16 @@ func (s *ToolService) ExecuteTool(req *pb.ExecuteToolRequest, stream pb.ToolServ
 
 	execCtx := s.buildExecContext(ctx, req.Name)
 
+	toolCtx := s.injectSourceViewID(ctx)
+
 	var stdout, stderr bytes.Buffer
 	var err error
 
 	start := time.Now()
 	if execCtx != nil {
-		err = p.ExecuteWithContext(ctx, execCtx, req.Args, &stdout, &stderr)
+		err = p.ExecuteWithContext(toolCtx, execCtx, req.Args, &stdout, &stderr)
 	} else {
-		err = p.Execute(ctx, req.Args, &stdout, &stderr)
+		err = p.Execute(toolCtx, req.Args, &stdout, &stderr)
 	}
 	durationMs := time.Since(start).Milliseconds()
 
@@ -283,6 +285,23 @@ func (s *ToolService) checkWriteGate(ctx context.Context, req *pb.ExecuteToolReq
 	}
 
 	key := common.Keys.PendingToolCall(taskID)
+
+	// Dedup: if there's already a pending tool call for this task, don't
+	// overwrite it — just return the blocking error. This prevents the agent
+	// from creating duplicate blockers by retrying within the same turn.
+	if existing, err := s.redisClient.Get(ctx, key).Result(); err == nil && existing != "" {
+		log.Info().
+			Str("task_id", taskID).
+			Str("tool", req.Name).
+			Msg("write gate: pending tool call already exists, returning error without overwrite")
+		_ = stream.Send(&pb.ExecuteToolResponse{
+			Stream: pb.ExecuteToolResponse_STDERR,
+			Data:   []byte("Error: This action is already pending user approval. Do NOT retry — the task will resume once the user responds.\n"),
+		})
+		_ = stream.Send(&pb.ExecuteToolResponse{Done: true, ExitCode: 1})
+		return true, true
+	}
+
 	if err := s.redisClient.Set(ctx, key, data, pendingToolCallTTL).Err(); err != nil {
 		log.Error().Err(err).Str("task_id", taskID).Msg("write gate: failed to store pending tool call")
 		return false, true
@@ -294,15 +313,11 @@ func (s *ToolService) checkWriteGate(ctx context.Context, req *pb.ExecuteToolReq
 		Str("summary", summary).
 		Msg("write gate: tool call deferred for approval")
 
-	msg := fmt.Sprintf(
-		"This action requires user approval. The task will pause for review.\nAction: %s\n",
-		summary,
-	)
 	_ = stream.Send(&pb.ExecuteToolResponse{
-		Stream: pb.ExecuteToolResponse_STDOUT,
-		Data:   []byte(msg),
+		Stream: pb.ExecuteToolResponse_STDERR,
+		Data:   []byte(fmt.Sprintf("Error: This action requires user approval. Do NOT retry — the task will pause until the user approves or rejects.\nAction: %s\n", summary)),
 	})
-	_ = stream.Send(&pb.ExecuteToolResponse{Done: true, ExitCode: 0})
+	_ = stream.Send(&pb.ExecuteToolResponse{Done: true, ExitCode: 1})
 
 	return true, true
 }
@@ -435,6 +450,17 @@ func metaFirst(md metadata.MD, key string) string {
 	return ""
 }
 
+func (s *ToolService) injectSourceViewID(ctx context.Context) context.Context {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return ctx
+	}
+	if svid := metaFirst(md, "x-airstore-source-view-id"); svid != "" {
+		return tools.ContextWithSourceViewID(ctx, svid)
+	}
+	return ctx
+}
+
 // ExecuteDeferred runs a previously-stored tool call server-side.
 // Used by the orchestration layer after a user approves a deferred write.
 // The context comes from the orchestration layer (not a gRPC handler), so
@@ -478,7 +504,7 @@ func (s *ToolService) ExecuteDeferred(ctx context.Context, workspaceID, memberID
 }
 
 const toolRejectionTTL = 10 * time.Minute
-const writePreapprovalTTL = 10 * time.Second
+const writePreapprovalTTL = 2 * time.Minute
 
 // RecordToolRejection stores a rejection marker in Redis so that if the agent
 // retries the same tool command, checkWriteGate returns an error instead of

@@ -95,17 +95,17 @@ func (vs *ViewSync) Sync(ctx context.Context, output *types.TaskOutput) *SyncRes
 		return nil
 	}
 
-	schemas, err := types.LoadViewOutputSchemaContexts(ctx, vs.backend, output.WorkspaceID, agentID)
-	if err != nil {
-		log.Warn().Err(err).Str("task_id", output.TaskID).Msg("viewsync: load schema contexts failed")
-		return nil
-	}
-
 	// Scope to the output's source view if known. Check metadata first,
 	// then fall back to the task's payload for source_view_id.
 	targetViewID := outputSourceViewID(output)
 	if targetViewID == "" {
 		targetViewID = vs.taskSourceViewID(ctx, output)
+	}
+
+	schemas, err := types.LoadViewOutputSchemaContexts(ctx, vs.backend, output.WorkspaceID, agentID, targetViewID)
+	if err != nil {
+		log.Warn().Err(err).Str("task_id", output.TaskID).Msg("viewsync: load schema contexts failed")
+		return nil
 	}
 
 	// Group schemas by view so each view gets its own timeout budget.

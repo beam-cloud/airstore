@@ -71,6 +71,46 @@ func TestTaskOutputShouldHideInWorkspace(t *testing.T) {
 	}
 }
 
+func TestTaskOutputShouldHideInWorkspaceSupportingRole(t *testing.T) {
+	output := &TaskOutput{
+		OutputType: "json",
+		Status:     TaskOutputStatusActive,
+		Metadata: map[string]any{
+			TaskOutputMetadataArtifactRole: TaskOutputArtifactRoleSupporting,
+			TaskOutputMetadataArtifactKind: "config",
+		},
+	}
+	if !output.ShouldHideInWorkspace() {
+		t.Fatal("expected supporting-role output to be hidden in workspace inbox")
+	}
+}
+
+func TestTaskOutputShouldHideInWorkspaceIncidentalRole(t *testing.T) {
+	output := &TaskOutput{
+		OutputType: "json",
+		Status:     TaskOutputStatusActive,
+		Metadata: map[string]any{
+			TaskOutputMetadataArtifactRole: TaskOutputArtifactRoleIncidental,
+		},
+	}
+	if !output.ShouldHideInWorkspace() {
+		t.Fatal("expected incidental-role output to be hidden in workspace inbox")
+	}
+}
+
+func TestTaskOutputShouldShowInWorkspacePrimaryRole(t *testing.T) {
+	output := &TaskOutput{
+		OutputType: "json",
+		Status:     TaskOutputStatusActive,
+		Metadata: map[string]any{
+			TaskOutputMetadataArtifactRole: TaskOutputArtifactRolePrimary,
+		},
+	}
+	if output.ShouldHideInWorkspace() {
+		t.Fatal("expected primary-role output to be visible in workspace inbox")
+	}
+}
+
 func TestTaskOutputIsApprovalArtifact(t *testing.T) {
 	output := &TaskOutput{
 		Status: TaskOutputStatusPending,

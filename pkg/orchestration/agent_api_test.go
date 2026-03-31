@@ -95,6 +95,55 @@ func TestWorkspaceLiveBatchHidesDraftEmailArtifacts(t *testing.T) {
 	}
 }
 
+func TestWorkspaceLiveBatchHidesSupportingAndIncidentalOutputs(t *testing.T) {
+	backend := &workspaceLiveBackend{
+		outputs: []*types.TaskOutput{
+			{
+				ID:         "out-config-update",
+				OutputType: "json",
+				Status:     types.TaskOutputStatusActive,
+				Metadata: map[string]any{
+					types.TaskOutputMetadataArtifactRole: types.TaskOutputArtifactRoleSupporting,
+					types.TaskOutputMetadataArtifactKind: "config",
+				},
+			},
+			{
+				ID:         "out-incidental",
+				OutputType: "json",
+				Status:     types.TaskOutputStatusActive,
+				Metadata: map[string]any{
+					types.TaskOutputMetadataArtifactRole: types.TaskOutputArtifactRoleIncidental,
+				},
+			},
+			{
+				ID:         "out-primary",
+				OutputType: "json",
+				Status:     types.TaskOutputStatusActive,
+				Metadata: map[string]any{
+					types.TaskOutputMetadataArtifactRole: types.TaskOutputArtifactRolePrimary,
+				},
+			},
+			{
+				ID:         "out-no-role",
+				OutputType: "text",
+				Status:     types.TaskOutputStatusActive,
+			},
+		},
+	}
+	api := NewAgentAPI(backend, nil)
+
+	batch, err := api.WorkspaceLiveBatch(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("WorkspaceLiveBatch returned error: %v", err)
+	}
+	if got := len(batch.Outputs); got != 2 {
+		t.Fatalf("workspace output count = %d, want 2 (primary + no-role)", got)
+	}
+	if batch.Outputs[0].ID != "out-primary" || batch.Outputs[1].ID != "out-no-role" {
+		t.Fatalf("workspace outputs = [%s, %s], want [out-primary, out-no-role]", batch.Outputs[0].ID, batch.Outputs[1].ID)
+	}
+}
+
 type cancelTaskBackend struct {
 	repository.BackendRepository
 	task             *types.AgentTask

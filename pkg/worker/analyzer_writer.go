@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 
 	"github.com/google/uuid"
 
+	"github.com/beam-cloud/airstore/pkg/tools"
 	"github.com/beam-cloud/airstore/pkg/types"
 	agentsignal "github.com/beam-cloud/airstore/pkg/worker/agentsignal/baml_client"
 	signaltypes "github.com/beam-cloud/airstore/pkg/worker/agentsignal/baml_client/types"
@@ -331,6 +333,14 @@ func (w *AnalyzerWriter) createOutputWithBatch(out signaltypes.ExtractedOutput, 
 		c.Metadata[keyBatchID] = batchID
 	}
 
+	if tool, cmd := resolveToolCommand(toolName, toolInput); tool != "" {
+		if ot := tools.CommandOutputType(tool, cmd); ot != "" {
+			c.OutputType = ot
+		} else {
+			c.OutputType = ""
+		}
+	}
+
 	if content := r.content(); content != "" {
 		c.Data[keyContent] = content
 	}
@@ -445,6 +455,50 @@ func isIntermediatePath(path string) bool {
 	return !strings.HasPrefix(strings.ToLower(path), "/workspace/")
 }
 
+// resolveToolCommand maps a tool invocation to its schema-defined tool+command
+// pair. Handles:
+//   - Direct calls: tool="gmail", input="create-draft ..."
+//   - Bash JSON input: tool="Bash", input=`{"command":"gmail create-draft ..."}`
+//   - Path-prefixed: tool="Bash", input=`{"command":"/workspace/tools/gmail create-draft ..."}`
+func resolveToolCommand(toolName, toolInput string) (string, string) {
+	input := toolInput
+	if trimmed := strings.TrimSpace(toolInput); strings.HasPrefix(trimmed, "{") {
+		var obj map[string]any
+		if json.Unmarshal([]byte(trimmed), &obj) == nil {
+			if cmd, ok := obj["command"].(string); ok && cmd != "" {
+				input = cmd
+			} else if args, ok := obj["args"].(string); ok && args != "" {
+				input = args
+			}
+		}
+	}
+
+	parts := strings.Fields(strings.TrimSpace(input))
+	if len(parts) == 0 {
+		return "", ""
+	}
+
+	if tools.HasCommandSchema(toolName, parts[0]) {
+		return toolName, parts[0]
+	}
+
+	// Try with basename stripped (handles /workspace/tools/gmail → gmail)
+	base0 := filepath.Base(parts[0])
+	if base0 != parts[0] && tools.HasCommandSchema(toolName, base0) {
+		return toolName, base0
+	}
+
+	if len(parts) >= 2 {
+		if tools.HasCommandSchema(parts[0], parts[1]) {
+			return parts[0], parts[1]
+		}
+		if tools.HasCommandSchema(base0, parts[1]) {
+			return base0, parts[1]
+		}
+	}
+	return "", ""
+}
+
 func kindToOutputType(kind signaltypes.OutputKind) string {
 	switch kind {
 	case signaltypes.OutputKindFILE_CREATED, signaltypes.OutputKindFILE_MODIFIED:
@@ -514,8 +568,10 @@ func promoteToolResultFields(data map[string]any, parsedResult any) {
 		return
 	}
 	for key, val := range resultMap {
-		if _, exists := data[key]; exists {
-			continue
+		if existing, exists := data[key]; exists {
+			if s, ok := existing.(string); !ok || strings.TrimSpace(s) != "" {
+				continue
+			}
 		}
 		switch v := val.(type) {
 		case string:

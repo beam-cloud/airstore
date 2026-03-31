@@ -2259,7 +2259,7 @@ func applyViewRuntimeContext(
 	if backend == nil || run.AgentID == nil || strings.TrimSpace(*run.AgentID) == "" {
 		return
 	}
-	schemas, err := types.LoadViewOutputSchemaContexts(ctx, backend, run.WorkspaceID, strings.TrimSpace(*run.AgentID))
+	schemas, err := types.LoadViewOutputSchemaContexts(ctx, backend, run.WorkspaceID, strings.TrimSpace(*run.AgentID), viewID)
 	if err != nil {
 		log.Warn().Err(err).Uint("workspace_id", run.WorkspaceID).Msg("view schema context load failed")
 		return

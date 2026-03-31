@@ -185,6 +185,9 @@ func executeTool(cfg *Config, toolName string, args []string) (int, error) {
 	if v := os.Getenv("AIRSTORE_APPROVAL_POLICY"); v != "" {
 		md.Append("x-airstore-approval-policy", v)
 	}
+	if v := os.Getenv("AIRSTORE_SOURCE_VIEW_ID"); v != "" {
+		md.Append("x-airstore-source-view-id", v)
+	}
 	ctx = metadata.NewOutgoingContext(ctx, md)
 
 	conn, err := connect(cfg)

@@ -3,8 +3,12 @@ package tools
 import (
 	"context"
 	"io"
+	"io/fs"
+	"path/filepath"
+	"strings"
 	"sync"
 
+	"github.com/beam-cloud/airstore/pkg/tools/definitions"
 	"github.com/beam-cloud/airstore/pkg/types"
 )
 
@@ -15,6 +19,26 @@ type ExecutionContext struct {
 	MemberId      uint
 	MemberEmail   string
 	Credentials   *types.IntegrationCredentials
+	SourceViewID  string
+}
+
+type sourceViewIDKey struct{}
+
+// ContextWithSourceViewID attaches the source view ID to a context for
+// downstream enforcement by view-scoped tools.
+func ContextWithSourceViewID(ctx context.Context, viewID string) context.Context {
+	if viewID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, sourceViewIDKey{}, viewID)
+}
+
+// SourceViewIDFromContext returns the source view ID constraint, or "".
+func SourceViewIDFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(sourceViewIDKey{}).(string); ok {
+		return v
+	}
+	return ""
 }
 
 // ToolProvider defines the interface for tool implementations
@@ -117,4 +141,71 @@ func (r *Registry) GetCommandSchema(toolName, command string) *CommandSchema {
 		return nil
 	}
 	return schema.Commands[command]
+}
+
+// ---------------------------------------------------------------------------
+// Global output-type lookup from embedded definitions
+// ---------------------------------------------------------------------------
+
+var (
+	outputTypeMap  map[string]map[string]string // toolName -> command -> outputType
+	knownCommands  map[string]map[string]bool   // toolName -> command -> exists
+	schemaLoadOnce sync.Once
+)
+
+func loadSchemaMetadata() {
+	outputTypeMap = make(map[string]map[string]string)
+	knownCommands = make(map[string]map[string]bool)
+	_ = fs.WalkDir(definitions.FS, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		ext := filepath.Ext(path)
+		if ext != ".yaml" && ext != ".yml" {
+			return nil
+		}
+		data, readErr := definitions.FS.ReadFile(path)
+		if readErr != nil {
+			return nil
+		}
+		schema, parseErr := ParseSchema(data)
+		if parseErr != nil {
+			return nil
+		}
+		for cmdName, cmd := range schema.Commands {
+			if knownCommands[schema.Name] == nil {
+				knownCommands[schema.Name] = make(map[string]bool)
+			}
+			knownCommands[schema.Name][cmdName] = true
+			if cmd.OutputType != "" {
+				if outputTypeMap[schema.Name] == nil {
+					outputTypeMap[schema.Name] = make(map[string]string)
+				}
+				outputTypeMap[schema.Name][cmdName] = cmd.OutputType
+			}
+		}
+		return nil
+	})
+}
+
+// CommandOutputType returns the deterministic output type declared in a tool
+// definition, or "" if none is declared. Safe to call from any package; lazily
+// loads and caches the embedded YAML definitions on first call.
+func CommandOutputType(toolName, command string) string {
+	schemaLoadOnce.Do(loadSchemaMetadata)
+	if cmds, ok := outputTypeMap[toolName]; ok {
+		return cmds[strings.TrimSpace(command)]
+	}
+	return ""
+}
+
+// HasCommandSchema returns true if the embedded tool definitions contain a
+// schema for the given tool+command pair. Used to distinguish "no schema at
+// all" from "schema exists but declares no output_type".
+func HasCommandSchema(toolName, command string) bool {
+	schemaLoadOnce.Do(loadSchemaMetadata)
+	if cmds, ok := knownCommands[toolName]; ok {
+		return cmds[strings.TrimSpace(command)]
+	}
+	return false
 }

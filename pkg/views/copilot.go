@@ -439,6 +439,7 @@ func (c *Copilot) PublishView(ctx context.Context, cs *ChatState, workspaceID ui
 	canonicalizeViewAgentRefs(&def, agents, nil)
 	normalizeViewDefinition(&def)
 	classifyDetailTemplates(ctx, &def)
+	PopulateStatusOptions(ctx, &def)
 
 	log.Info().
 		Strs("pre_canon_agents", preCanonAgents).

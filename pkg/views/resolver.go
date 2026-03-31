@@ -534,8 +534,7 @@ func (r *DataResolver) loadAndMergeImportRows(ctx context.Context, viewID, sheet
 		}
 	}
 
-	importByCellValue := buildImportCellIndex(importRows)
-
+	mergedCount := 0
 	for i, taskRow := range taskRows {
 		if taskRow.Cells == nil {
 			continue
@@ -544,6 +543,7 @@ func (r *DataResolver) loadAndMergeImportRows(ctx context.Context, viewID, sheet
 		if importRow, ok := importByRowKey[rowKey]; ok && rowKey != "" {
 			enrichImportRow(importRow, taskRow)
 			taskRows[i].Cells = nil
+			mergedCount++
 			continue
 		}
 		if len(frozenKeys) > 0 {
@@ -552,14 +552,17 @@ func (r *DataResolver) loadAndMergeImportRows(ctx context.Context, viewID, sheet
 				if importRow, ok := importByFrozenKey[fk]; ok {
 					enrichImportRow(importRow, taskRow)
 					taskRows[i].Cells = nil
+					mergedCount++
 					continue
 				}
 			}
 		}
-		if matched := matchImportRowByCellValues(taskRow.Cells, importByCellValue); matched != nil {
-			enrichImportRow(matched, taskRow)
-			taskRows[i].Cells = nil
-		}
+	}
+	if mergedCount > 0 {
+		log.Info().
+			Str("view_id", viewID).Str("sheet_id", sheetID).
+			Int("merged", mergedCount).Int("task_rows", len(taskRows)).Int("import_rows", len(importRows)).
+			Msg("view resolver: merged task rows into import rows")
 	}
 
 	var resolved []resolvedSheetRow
@@ -1322,67 +1325,6 @@ func mergeCellsInto(dst, src map[string]string) {
 			dst[k] = v
 		}
 	}
-}
-
-// importCellIndex maps column_key → normalizedValue → *ViewRow for cell-value-based matching.
-type importCellIndex map[string]map[string]*ViewRow
-
-func buildImportCellIndex(rows []ViewRow) importCellIndex {
-	idx := make(importCellIndex, 20)
-	for i := range rows {
-		for k, v := range rows[i].MergedCells() {
-			nv := normalizeToken(v)
-			if nv == "" {
-				continue
-			}
-			byVal, ok := idx[k]
-			if !ok {
-				byVal = make(map[string]*ViewRow, len(rows))
-				idx[k] = byVal
-			}
-			if _, collision := byVal[nv]; !collision {
-				byVal[nv] = &rows[i]
-			}
-		}
-	}
-	return idx
-}
-
-// matchImportRowByCellValues finds an import row sharing the most normalized
-// cell values with the task row. Requires overlap ≥ min(2, taskNonEmptyCells).
-func matchImportRowByCellValues(taskCells map[string]string, idx importCellIndex) *ViewRow {
-	hits := make(map[*ViewRow]int, 4)
-	nonEmpty := 0
-	for k, v := range taskCells {
-		nv := normalizeToken(v)
-		if nv == "" {
-			continue
-		}
-		nonEmpty++
-		byVal, ok := idx[k]
-		if !ok {
-			continue
-		}
-		if importRow, ok := byVal[nv]; ok {
-			hits[importRow]++
-		}
-	}
-	threshold := 2
-	if nonEmpty < threshold {
-		threshold = nonEmpty
-	}
-	if threshold < 1 {
-		return nil
-	}
-	var best *ViewRow
-	bestCount := 0
-	for row, count := range hits {
-		if count >= threshold && count > bestCount {
-			best = row
-			bestCount = count
-		}
-	}
-	return best
 }
 
 func dedupeTasks(tasks []*types.AgentTask) []*types.AgentTask {

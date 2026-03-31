@@ -133,8 +133,15 @@ func (g *WorkspaceOutputsGroup) ListOutputs(c echo.Context) error {
 	if outputs == nil {
 		outputs = []*types.TaskOutput{}
 	}
+	visible := make([]*types.TaskOutput, 0, len(outputs))
+	for _, o := range outputs {
+		if o != nil && o.ShouldHideInWorkspace() {
+			continue
+		}
+		visible = append(visible, o)
+	}
 	return SuccessResponse(c, map[string]any{
-		"outputs":     outputs,
+		"outputs":     visible,
 		"next_cursor": "",
 		"has_more":    false,
 	})

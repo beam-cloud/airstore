@@ -25,6 +25,31 @@ class DetailLayout {
   sections DetailSection[]  @description("Ordered list of ALL sections that could be relevant for rows in this table. Sections are filtered at render time based on per-row data availability.")
 }
 
+class StatusOptionSet {
+  options string[] @description("3–6 short, lowercase status values forming a natural workflow progression. First value is the initial/default state, last value is terminal/done. Keep to single words or two-word phrases (e.g. 'new', 'in progress', 'sent', 'replied', 'closed').")
+}
+
+function GenerateStatusOptions(
+  table_title: string,
+  column_key: string,
+  column_label: string,
+  sibling_columns: string
+) -> StatusOptionSet {
+  client DetailClassifier
+  prompt #"
+    You are choosing the allowed status values for a status column in a data table.
+    The values should form a natural workflow progression that makes sense for this
+    table's purpose. Return 3–6 short, lowercase values.
+
+    Table: {{ table_title }}
+    Status column key: {{ column_key }}
+    Status column label: {{ column_label }}
+    Other columns in this table: {{ sibling_columns }}
+
+    {{ ctx.output_format }}
+  "#
+}
+
 function ClassifyDetailTemplate(
   table_title: string,
   column_schema: string

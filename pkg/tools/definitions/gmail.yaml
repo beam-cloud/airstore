@@ -66,6 +66,7 @@ commands:
 
   send-email:
     write: true
+    output_type: email
     description: Send a Gmail email immediately. When sending a previously created draft, pass the draft_id to send and clean up the draft properly.
     params:
       - name: to
