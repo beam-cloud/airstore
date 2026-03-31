@@ -331,6 +331,7 @@ func (f *TaskFlows) AcceptTaskInput(
 	// can distinguish "user typed nothing" from "user provided feedback"
 	// by checking whether message is empty — no string-matching hacks.
 	toolCallResult := f.maybeExecuteDeferredToolCall(ctx, task, action, message)
+	grantPreapproval := false
 	if toolCallResult != "" {
 		if action != nil && *action == types.TaskInputActionReject && strings.TrimSpace(message) != "" {
 			message = toolCallResult + "\n\n" + message
@@ -338,7 +339,7 @@ func (f *TaskFlows) AcceptTaskInput(
 			message = toolCallResult
 		}
 	} else if action != nil && *action == types.TaskInputActionApprove && f.toolExecutor != nil {
-		_ = f.toolExecutor.GrantWritePreapproval(ctx, task.ID)
+		grantPreapproval = true
 	}
 
 	if strings.TrimSpace(message) == "" && action != nil {
@@ -402,6 +403,10 @@ func (f *TaskFlows) AcceptTaskInput(
 			task.InputKind = ""
 			task.WaitingSummary = nil
 		}
+	}
+
+	if grantPreapproval {
+		_ = f.toolExecutor.GrantWritePreapproval(ctx, task.ID)
 	}
 
 	f.persistUserInputLog(ctx, task, message)
