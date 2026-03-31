@@ -67,6 +67,8 @@ baml:
 	@goimports -w pkg/worker/agentsignal/baml_client/
 	@baml-cli generate --from pkg/views/baml_src
 	@goimports -w pkg/views/baml_client/
+	@baml-cli generate --from pkg/skills/baml_src
+	@goimports -w pkg/skills/baml_client/
 
 fmt: check-go
 	go fmt ./...
