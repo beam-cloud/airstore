@@ -142,7 +142,7 @@ func stripSupersededDrafts(messages []ThreadMessage) []ThreadMessage {
 
 	sent := make(map[key]struct{})
 	for _, m := range messages {
-		if hasLabel(m.Labels, "SENT") {
+		if HasLabel(m.Labels, "SENT") {
 			sent[key{norm(m.Subject), norm(m.To)}] = struct{}{}
 		}
 	}
@@ -152,7 +152,7 @@ func stripSupersededDrafts(messages []ThreadMessage) []ThreadMessage {
 
 	filtered := make([]ThreadMessage, 0, len(messages))
 	for _, m := range messages {
-		if hasLabel(m.Labels, "DRAFT") {
+		if HasLabel(m.Labels, "DRAFT") {
 			if _, superseded := sent[key{norm(m.Subject), norm(m.To)}]; superseded {
 				continue
 			}
@@ -165,7 +165,8 @@ func stripSupersededDrafts(messages []ThreadMessage) []ThreadMessage {
 	return filtered
 }
 
-func hasLabel(labels []string, target string) bool {
+// HasLabel reports whether the label list contains the given target label.
+func HasLabel(labels []string, target string) bool {
 	for _, l := range labels {
 		if l == target {
 			return true
