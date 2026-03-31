@@ -335,6 +335,8 @@ func (w *AnalyzerWriter) createOutputWithBatch(out signaltypes.ExtractedOutput, 
 	if cmd := firstToken(toolInput); cmd != "" {
 		if ot := tools.CommandOutputType(toolName, cmd); ot != "" {
 			c.OutputType = ot
+		} else if tools.HasCommandSchema(toolName, cmd) {
+			c.OutputType = ""
 		}
 	}
 

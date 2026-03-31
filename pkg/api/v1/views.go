@@ -907,8 +907,23 @@ func (vg *ViewsGroup) RowDetail(c echo.Context) error {
 	resp["email_threads"] = emailThreads
 	resp["subtasks"] = subtaskList
 	resp["parent_task_id"] = parentTaskID
+	resp["feedback_counts"] = vg.loadFeedbackCounts(ctx, viewID)
 
 	return SuccessResponse(c, resp)
+}
+
+// loadFeedbackCounts reads the view context stream and returns a map of
+// thread_id to the number of anchored feedback entries. Returns an empty map
+// if the compactor is unavailable.
+func (vg *ViewsGroup) loadFeedbackCounts(ctx context.Context, viewID string) map[string]int {
+	if vg.compactor == nil || !vg.compactor.Available() {
+		return map[string]int{}
+	}
+	entries, err := vg.compactor.ReadContext(ctx, viewID)
+	if err != nil || len(entries) == 0 {
+		return map[string]int{}
+	}
+	return views.FeedbackCountsByThread(entries)
 }
 
 // detailTemplateForRow finds the table component that owns the row and
@@ -1292,9 +1307,12 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 		result[threadKey] = mt
 	}
 
+	feedbackCounts := vg.loadFeedbackCounts(ctx, viewID)
+
 	return SuccessResponse(c, map[string]any{
 		"threads":            result,
 		"has_email_activity": len(result) > 0,
+		"feedback_counts":    feedbackCounts,
 	})
 }
 
@@ -2054,6 +2072,10 @@ func (vg *ViewsGroup) GetContext(c echo.Context) error {
 	}
 	if entries == nil {
 		entries = []types.ViewContextEntry{}
+	}
+
+	if threadID := c.QueryParam("thread_id"); threadID != "" {
+		entries = views.FilterByThreadID(entries, threadID)
 	}
 
 	return c.JSON(http.StatusOK, map[string]any{

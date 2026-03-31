@@ -138,7 +138,11 @@ func (cc *ContextCompactor) Compact(ctx context.Context, viewID string, entries 
 		if prefix == "" {
 			prefix = "note"
 		}
-		lines = append(lines, fmt.Sprintf("[%s] %s", prefix, e.Content))
+		anchor := ""
+		if ap := formatAnchorPrefix(e); ap != "" {
+			anchor = " " + strings.TrimSpace(ap)
+		}
+		lines = append(lines, fmt.Sprintf("[%s%s] %s", prefix, anchor, e.Content))
 	}
 	userMsg := strings.Join(lines, "\n")
 
@@ -186,11 +190,80 @@ func FormatForPrompt(entries []types.ViewContextEntry) string {
 			b.WriteByte('\n')
 		} else {
 			b.WriteString("- ")
+			if prefix := formatAnchorPrefix(e); prefix != "" {
+				b.WriteString(prefix)
+			}
 			b.WriteString(content)
 			b.WriteByte('\n')
 		}
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// formatAnchorPrefix builds a bracketed label when a context entry is anchored
+// to a specific email thread (or other anchor type in the future).
+func formatAnchorPrefix(e types.ViewContextEntry) string {
+	if len(e.Metadata) == 0 {
+		return ""
+	}
+	anchorType, _ := e.Metadata["anchor_type"].(string)
+	if anchorType != "email" {
+		return ""
+	}
+
+	recipient, _ := e.Metadata["recipient"].(string)
+	subject, _ := e.Metadata["subject"].(string)
+
+	var label string
+	switch e.EntryType {
+	case types.ViewContextEntryFeedback:
+		label = "Feedback on email"
+	case types.ViewContextEntryLink:
+		label = "Link shared on email"
+	default:
+		label = "Note on email"
+	}
+
+	if recipient != "" {
+		label += " to " + recipient
+	}
+	if subject != "" {
+		label += fmt.Sprintf(", re: %q", subject)
+	}
+
+	return "[" + label + "] "
+}
+
+// FilterByThreadID returns entries whose metadata.thread_id matches the given
+// value. Compaction entries are excluded since they are aggregate summaries.
+func FilterByThreadID(entries []types.ViewContextEntry, threadID string) []types.ViewContextEntry {
+	var out []types.ViewContextEntry
+	for _, e := range entries {
+		if e.EntryType == types.ViewContextEntryCompaction {
+			continue
+		}
+		tid, _ := e.Metadata["thread_id"].(string)
+		if tid == threadID {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// FeedbackCountsByThread scans entries and returns a map of thread_id to the
+// number of feedback/link/note entries anchored to that thread.
+func FeedbackCountsByThread(entries []types.ViewContextEntry) map[string]int {
+	counts := make(map[string]int)
+	for _, e := range entries {
+		if e.EntryType == types.ViewContextEntryCompaction {
+			continue
+		}
+		tid, _ := e.Metadata["thread_id"].(string)
+		if tid != "" {
+			counts[tid]++
+		}
+	}
+	return counts
 }
 
 // ---------------------------------------------------------------------------

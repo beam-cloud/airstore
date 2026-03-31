@@ -128,12 +128,14 @@ func (r *Registry) GetCommandSchema(toolName, command string) *CommandSchema {
 // ---------------------------------------------------------------------------
 
 var (
-	outputTypeMap     map[string]map[string]string // toolName -> command -> outputType
-	outputTypeMapOnce sync.Once
+	outputTypeMap  map[string]map[string]string // toolName -> command -> outputType
+	knownCommands  map[string]map[string]bool   // toolName -> command -> exists
+	schemaLoadOnce sync.Once
 )
 
-func loadOutputTypeMap() map[string]map[string]string {
-	m := make(map[string]map[string]string)
+func loadSchemaMetadata() {
+	outputTypeMap = make(map[string]map[string]string)
+	knownCommands = make(map[string]map[string]bool)
 	_ = fs.WalkDir(definitions.FS, ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
@@ -151,25 +153,39 @@ func loadOutputTypeMap() map[string]map[string]string {
 			return nil
 		}
 		for cmdName, cmd := range schema.Commands {
+			if knownCommands[schema.Name] == nil {
+				knownCommands[schema.Name] = make(map[string]bool)
+			}
+			knownCommands[schema.Name][cmdName] = true
 			if cmd.OutputType != "" {
-				if m[schema.Name] == nil {
-					m[schema.Name] = make(map[string]string)
+				if outputTypeMap[schema.Name] == nil {
+					outputTypeMap[schema.Name] = make(map[string]string)
 				}
-				m[schema.Name][cmdName] = cmd.OutputType
+				outputTypeMap[schema.Name][cmdName] = cmd.OutputType
 			}
 		}
 		return nil
 	})
-	return m
 }
 
 // CommandOutputType returns the deterministic output type declared in a tool
 // definition, or "" if none is declared. Safe to call from any package; lazily
 // loads and caches the embedded YAML definitions on first call.
 func CommandOutputType(toolName, command string) string {
-	outputTypeMapOnce.Do(func() { outputTypeMap = loadOutputTypeMap() })
+	schemaLoadOnce.Do(loadSchemaMetadata)
 	if cmds, ok := outputTypeMap[toolName]; ok {
 		return cmds[strings.TrimSpace(command)]
 	}
 	return ""
+}
+
+// HasCommandSchema returns true if the embedded tool definitions contain a
+// schema for the given tool+command pair. Used to distinguish "no schema at
+// all" from "schema exists but declares no output_type".
+func HasCommandSchema(toolName, command string) bool {
+	schemaLoadOnce.Do(loadSchemaMetadata)
+	if cmds, ok := knownCommands[toolName]; ok {
+		return cmds[strings.TrimSpace(command)]
+	}
+	return false
 }
