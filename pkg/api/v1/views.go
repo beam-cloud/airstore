@@ -107,9 +107,11 @@ func (vg *ViewsGroup) Create(c echo.Context) error {
 		Description: req.Description,
 		Definition:  req.Definition,
 	}
+	ctx := c.Request().Context()
 	views.NormalizeDefinition(&v.Definition)
+	views.PopulateStatusOptions(ctx, &v.Definition)
 	v.SyncNameDescription()
-	if err := vg.backend.CreateView(c.Request().Context(), v); err != nil {
+	if err := vg.backend.CreateView(ctx, v); err != nil {
 		return ErrorResponse(c, http.StatusInternalServerError, err.Error())
 	}
 	return SuccessResponse(c, v)
@@ -181,6 +183,7 @@ func (vg *ViewsGroup) Update(c echo.Context) error {
 	}
 	if hasDefinition || len(req.ColumnRenames) > 0 {
 		views.NormalizeDefinition(&v.Definition)
+		views.PopulateStatusOptions(ctx, &v.Definition)
 	}
 	v.SyncNameDescription()
 	if err := vg.backend.UpdateView(ctx, v); err != nil {

@@ -336,6 +336,7 @@ func (c ViewOutputSchemaContext) CompactColumns() []map[string]any {
 
 type ViewOutputSchemaBackend interface {
 	GetAgentProfile(ctx context.Context, workspaceID uint, agentID string) (*AgentProfile, error)
+	GetView(ctx context.Context, workspaceID uint, viewID string) (*View, error)
 	ListViews(ctx context.Context, workspaceID uint) ([]*View, error)
 }
 
@@ -344,21 +345,39 @@ func LoadViewOutputSchemaContexts(
 	backend ViewOutputSchemaBackend,
 	workspaceID uint,
 	agentID string,
+	sourceViewIDs ...string,
 ) ([]ViewOutputSchemaContext, error) {
 	agentID = strings.TrimSpace(agentID)
 	if backend == nil || agentID == "" {
 		return nil, nil
 	}
-	views, err := backend.ListViews(ctx, workspaceID)
-	if err != nil {
-		return nil, err
+
+	// If a source view is specified, only load schemas from that view
+	// to enforce per-view data isolation.
+	var viewList []*View
+	if len(sourceViewIDs) > 0 {
+		svid := strings.TrimSpace(sourceViewIDs[0])
+		if svid != "" {
+			v, err := backend.GetView(ctx, workspaceID, svid)
+			if err == nil && v != nil {
+				viewList = []*View{v}
+			}
+		}
 	}
+	if len(viewList) == 0 {
+		var err error
+		viewList, err = backend.ListViews(ctx, workspaceID)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	matchRefs := agentMatchRefs(ctx, backend, workspaceID, agentID)
 	if len(matchRefs) == 0 {
 		return nil, nil
 	}
 	var contexts []ViewOutputSchemaContext
-	for _, view := range views {
+	for _, view := range viewList {
 		if view == nil {
 			continue
 		}

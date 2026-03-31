@@ -968,6 +968,48 @@ func (c SearchCriterion) BamlTypeName() string {
 	return "SearchCriterion"
 }
 
+type StatusOptionSet struct {
+	Options []string `json:"options"`
+}
+
+func (c *StatusOptionSet) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "StatusOptionSet" {
+		panic(fmt.Sprintf("expected StatusOptionSet, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "options":
+			c.Options = baml.Decode(valueHolder).Interface().([]string)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class StatusOptionSet", key))
+
+		}
+	}
+
+}
+
+func (c StatusOptionSet) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["options"] = c.Options
+
+	return baml.EncodeClass("StatusOptionSet", fields, nil)
+}
+
+func (c StatusOptionSet) BamlTypeName() string {
+	return "StatusOptionSet"
+}
+
 type ViewCell struct {
 	Column string `json:"column"`
 	Value  string `json:"value"`

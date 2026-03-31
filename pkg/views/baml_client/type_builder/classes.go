@@ -723,6 +723,38 @@ func (t *SearchCriterionClassView) Type() (baml.Type, error) {
 	return t.inner.Type()
 }
 
+type StatusOptionSetClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *StatusOptionSetClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *StatusOptionSetClassView) PropertyOptions() (ClassPropertyView, error) {
+	return t.inner.Property("options")
+}
+
+func (t *TypeBuilder) StatusOptionSet() (*StatusOptionSetClassView, error) {
+	bld, err := t.inner.Class("StatusOptionSet")
+	if err != nil {
+		return nil, err
+	}
+	return &StatusOptionSetClassView{inner: bld}, nil
+}
+
+func (t *StatusOptionSetClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
 type ViewCellClassView struct {
 	inner baml.ClassBuilder
 }

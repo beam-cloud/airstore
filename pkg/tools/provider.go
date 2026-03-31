@@ -19,6 +19,26 @@ type ExecutionContext struct {
 	MemberId      uint
 	MemberEmail   string
 	Credentials   *types.IntegrationCredentials
+	SourceViewID  string
+}
+
+type sourceViewIDKey struct{}
+
+// ContextWithSourceViewID attaches the source view ID to a context for
+// downstream enforcement by view-scoped tools.
+func ContextWithSourceViewID(ctx context.Context, viewID string) context.Context {
+	if viewID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, sourceViewIDKey{}, viewID)
+}
+
+// SourceViewIDFromContext returns the source view ID constraint, or "".
+func SourceViewIDFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(sourceViewIDKey{}).(string); ok {
+		return v
+	}
+	return ""
 }
 
 // ToolProvider defines the interface for tool implementations

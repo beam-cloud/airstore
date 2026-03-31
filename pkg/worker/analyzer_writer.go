@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -332,10 +333,10 @@ func (w *AnalyzerWriter) createOutputWithBatch(out signaltypes.ExtractedOutput, 
 		c.Metadata[keyBatchID] = batchID
 	}
 
-	if cmd := firstToken(toolInput); cmd != "" {
-		if ot := tools.CommandOutputType(toolName, cmd); ot != "" {
+	if tool, cmd := resolveToolCommand(toolName, toolInput); tool != "" {
+		if ot := tools.CommandOutputType(tool, cmd); ot != "" {
 			c.OutputType = ot
-		} else if tools.HasCommandSchema(toolName, cmd) {
+		} else {
 			c.OutputType = ""
 		}
 	}
@@ -454,12 +455,48 @@ func isIntermediatePath(path string) bool {
 	return !strings.HasPrefix(strings.ToLower(path), "/workspace/")
 }
 
-func firstToken(s string) string {
-	s = strings.TrimSpace(s)
-	if i := strings.IndexAny(s, " \t\n"); i > 0 {
-		return s[:i]
+// resolveToolCommand maps a tool invocation to its schema-defined tool+command
+// pair. Handles:
+//   - Direct calls: tool="gmail", input="create-draft ..."
+//   - Bash JSON input: tool="Bash", input=`{"command":"gmail create-draft ..."}`
+//   - Path-prefixed: tool="Bash", input=`{"command":"/workspace/tools/gmail create-draft ..."}`
+func resolveToolCommand(toolName, toolInput string) (string, string) {
+	input := toolInput
+	if trimmed := strings.TrimSpace(toolInput); strings.HasPrefix(trimmed, "{") {
+		var obj map[string]any
+		if json.Unmarshal([]byte(trimmed), &obj) == nil {
+			if cmd, ok := obj["command"].(string); ok && cmd != "" {
+				input = cmd
+			} else if args, ok := obj["args"].(string); ok && args != "" {
+				input = args
+			}
+		}
 	}
-	return s
+
+	parts := strings.Fields(strings.TrimSpace(input))
+	if len(parts) == 0 {
+		return "", ""
+	}
+
+	if tools.HasCommandSchema(toolName, parts[0]) {
+		return toolName, parts[0]
+	}
+
+	// Try with basename stripped (handles /workspace/tools/gmail → gmail)
+	base0 := filepath.Base(parts[0])
+	if base0 != parts[0] && tools.HasCommandSchema(toolName, base0) {
+		return toolName, base0
+	}
+
+	if len(parts) >= 2 {
+		if tools.HasCommandSchema(parts[0], parts[1]) {
+			return parts[0], parts[1]
+		}
+		if tools.HasCommandSchema(base0, parts[1]) {
+			return base0, parts[1]
+		}
+	}
+	return "", ""
 }
 
 func kindToOutputType(kind signaltypes.OutputKind) string {

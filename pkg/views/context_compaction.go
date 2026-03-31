@@ -201,7 +201,9 @@ func FormatForPrompt(entries []types.ViewContextEntry) string {
 }
 
 // formatAnchorPrefix builds a bracketed label when a context entry is anchored
-// to a specific email thread (or other anchor type in the future).
+// to a specific email thread (or other anchor type in the future). When thread
+// context is available it is included so agents can see what the feedback
+// refers to.
 func formatAnchorPrefix(e types.ViewContextEntry) string {
 	if len(e.Metadata) == 0 {
 		return ""
@@ -213,6 +215,7 @@ func formatAnchorPrefix(e types.ViewContextEntry) string {
 
 	recipient, _ := e.Metadata["recipient"].(string)
 	subject, _ := e.Metadata["subject"].(string)
+	threadCtx, _ := e.Metadata["thread_context"].(string)
 
 	var label string
 	switch e.EntryType {
@@ -231,7 +234,13 @@ func formatAnchorPrefix(e types.ViewContextEntry) string {
 		label += fmt.Sprintf(", re: %q", subject)
 	}
 
-	return "[" + label + "] "
+	prefix := "[" + label + "] "
+
+	if threadCtx != "" {
+		prefix += "(Thread context: " + threadCtx + ") "
+	}
+
+	return prefix
 }
 
 // FilterByThreadID returns entries whose metadata.thread_id matches the given

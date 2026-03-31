@@ -59,6 +59,8 @@ var typeMap = map[string]reflect.Type{
 	"STREAM_TYPES.RowSearchPlan":       reflect.TypeOf(stream_types.RowSearchPlan{}),
 	"TYPES.SearchCriterion":            reflect.TypeOf(types.SearchCriterion{}),
 	"STREAM_TYPES.SearchCriterion":     reflect.TypeOf(stream_types.SearchCriterion{}),
+	"TYPES.StatusOptionSet":            reflect.TypeOf(types.StatusOptionSet{}),
+	"STREAM_TYPES.StatusOptionSet":     reflect.TypeOf(stream_types.StatusOptionSet{}),
 	"TYPES.ViewCell":                   reflect.TypeOf(types.ViewCell{}),
 	"STREAM_TYPES.ViewCell":            reflect.TypeOf(stream_types.ViewCell{}),
 	"TYPES.ViewColumn":                 reflect.TypeOf(types.ViewColumn{}),

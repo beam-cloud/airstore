@@ -399,6 +399,108 @@ func toDetailLayoutResponse(layout bamltypes.DetailLayout) DetailLayoutResponse 
 }
 
 // ---------------------------------------------------------------------------
+// Status option generation — auto-populates allowed values for status columns.
+// Runs once per schema change during publish, alongside detail template
+// classification.
+// ---------------------------------------------------------------------------
+
+var defaultStatusColors = []string{"gray", "blue", "yellow", "green", "purple", "orange"}
+
+func PopulateStatusOptions(ctx context.Context, def *types.ViewDefinition) {
+	for i := range def.Sheets {
+		for j := range def.Sheets[i].Components {
+			comp := &def.Sheets[i].Components[j]
+			if !comp.IsTable() || comp.Config == nil {
+				continue
+			}
+			cols := ConfigColumnsToMeta(comp.Config)
+			if len(cols) == 0 {
+				continue
+			}
+			changed := false
+			for k := range cols {
+				if cols[k].Type != "status" || len(cols[k].Options) > 0 {
+					continue
+				}
+				opts := generateStatusOptions(ctx, comp.Title, cols[k], cols)
+				if len(opts) > 0 {
+					cols[k].Options = opts
+					changed = true
+				}
+			}
+			if changed {
+				comp.Config["columns"] = columnsMetaToConfig(cols)
+			}
+		}
+	}
+}
+
+func generateStatusOptions(ctx context.Context, tableTitle string, col types.ColumnMeta, allCols []types.ColumnMeta) []types.StatusOption {
+	siblings := make([]string, 0, len(allCols))
+	for _, c := range allCols {
+		if c.Key != col.Key {
+			siblings = append(siblings, fmt.Sprintf("%s (%s)", c.Label, c.Type))
+		}
+	}
+
+	bamlCtx := context.WithValue(ctx, bamlEnvKey{}, map[string]string{
+		"ANTHROPIC_API_KEY": os.Getenv("ANTHROPIC_API_KEY"),
+	})
+	result, err := baml.GenerateStatusOptions(bamlCtx, tableTitle, col.Key, col.Label, strings.Join(siblings, ", "))
+	if err != nil {
+		log.Warn().Err(err).Str("column", col.Key).Msg("BAML GenerateStatusOptions failed, using fallback")
+		return []types.StatusOption{
+			{Value: "new", Color: "gray"},
+			{Value: "in progress", Color: "blue"},
+			{Value: "done", Color: "green"},
+		}
+	}
+
+	options := make([]types.StatusOption, 0, len(result.Options))
+	for i, v := range result.Options {
+		v = strings.TrimSpace(strings.ToLower(v))
+		if v == "" {
+			continue
+		}
+		color := defaultStatusColors[i%len(defaultStatusColors)]
+		options = append(options, types.StatusOption{Value: v, Color: color})
+	}
+	if len(options) == 0 {
+		return []types.StatusOption{
+			{Value: "new", Color: "gray"},
+			{Value: "in progress", Color: "blue"},
+			{Value: "done", Color: "green"},
+		}
+	}
+	return options
+}
+
+func columnsMetaToConfig(cols []types.ColumnMeta) []map[string]any {
+	result := make([]map[string]any, 0, len(cols))
+	for _, c := range cols {
+		m := map[string]any{
+			"key":   c.Key,
+			"label": c.Label,
+			"type":  c.Type,
+		}
+		if c.Format != "" {
+			m["format"] = c.Format
+		}
+		if len(c.Options) > 0 {
+			m["options"] = c.Options
+		}
+		if c.Frozen {
+			m["frozen"] = c.Frozen
+		}
+		if c.Hidden {
+			m["hidden"] = c.Hidden
+		}
+		result = append(result, m)
+	}
+	return result
+}
+
+// ---------------------------------------------------------------------------
 // Config helpers
 // ---------------------------------------------------------------------------
 

@@ -145,6 +145,16 @@ function ClassifyTurn(message: string, approval_policy: string) -> TurnClassific
     - "Monitoring thread 123 for replies; follow up in 5 minutes if nothing
       changes sooner."
 
+    ALWAYS PRE-APPROVED (never classify as APPROVE_REJECT):
+    Internal workspace/CRM/view operations are always pre-approved. This includes
+    adding, updating, or deleting rows in a CRM or view table, reorganizing or
+    cleaning up workspace data, managing internal state, or any action that only
+    affects data WITHIN the workspace (not external systems). If the agent is
+    asking to approve one of these internal operations, classify as COMPLETE.
+    Only EXTERNAL side-effect actions (sending emails, posting to Slack, creating
+    GitHub PRs, publishing documents, submitting forms to third-party services,
+    etc.) should ever be APPROVE_REJECT.
+
     {% if approval_policy %}
     APPROVAL POLICY:
     ---

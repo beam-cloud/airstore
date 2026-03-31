@@ -156,14 +156,16 @@ func (s *ToolService) ExecuteTool(req *pb.ExecuteToolRequest, stream pb.ToolServ
 
 	execCtx := s.buildExecContext(ctx, req.Name)
 
+	toolCtx := s.injectSourceViewID(ctx)
+
 	var stdout, stderr bytes.Buffer
 	var err error
 
 	start := time.Now()
 	if execCtx != nil {
-		err = p.ExecuteWithContext(ctx, execCtx, req.Args, &stdout, &stderr)
+		err = p.ExecuteWithContext(toolCtx, execCtx, req.Args, &stdout, &stderr)
 	} else {
-		err = p.Execute(ctx, req.Args, &stdout, &stderr)
+		err = p.Execute(toolCtx, req.Args, &stdout, &stderr)
 	}
 	durationMs := time.Since(start).Milliseconds()
 
@@ -446,6 +448,17 @@ func metaFirst(md metadata.MD, key string) string {
 		return strings.TrimSpace(vals[0])
 	}
 	return ""
+}
+
+func (s *ToolService) injectSourceViewID(ctx context.Context) context.Context {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return ctx
+	}
+	if svid := metaFirst(md, "x-airstore-source-view-id"); svid != "" {
+		return tools.ContextWithSourceViewID(ctx, svid)
+	}
+	return ctx
 }
 
 // ExecuteDeferred runs a previously-stored tool call server-side.
