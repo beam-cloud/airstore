@@ -151,9 +151,23 @@ func parseCSV(data []byte, delim rune) ([]string, []map[string]string, []string,
 	r.FieldsPerRecord = -1
 	r.Comma = delim
 
-	raw, err := r.Read()
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("read headers: %w", err)
+	var raw []string
+	for {
+		var err error
+		raw, err = r.Read()
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("read headers: %w", err)
+		}
+		hasContent := false
+		for _, f := range raw {
+			if strings.TrimSpace(f) != "" {
+				hasContent = true
+				break
+			}
+		}
+		if hasContent {
+			break
+		}
 	}
 	for i := range raw {
 		raw[i] = strings.TrimSpace(raw[i])
