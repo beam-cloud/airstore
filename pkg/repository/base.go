@@ -266,6 +266,8 @@ type BackendRepository interface {
 	ListClaimedAgentRuns(ctx context.Context, limit int) ([]*types.AgentRun, error)
 	ListExpiredClaimedAgentRuns(ctx context.Context, now time.Time, limit int) ([]*types.AgentRun, error)
 	ListStaleUnclaimedAgentRuns(ctx context.Context, cutoff time.Time, limit int) ([]*types.AgentRun, error)
+	ListOrphanedRunningTaskRunIDs(ctx context.Context, staleCutoff time.Time, limit int) ([]string, error)
+	ListRunningTasksWithNoRun(ctx context.Context, staleCutoff time.Time, limit int) ([]string, error)
 	IncrementAgentRunSnapshotSeq(ctx context.Context, runId string) (int64, error)
 
 	// Run attempts

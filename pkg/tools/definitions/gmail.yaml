@@ -38,7 +38,6 @@ commands:
         description: "Gmail message ID"
 
   create-draft:
-    write: true
     description: Create a Gmail draft email
     params:
       - name: to

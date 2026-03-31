@@ -16,9 +16,11 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// ToolExecutor runs a deferred tool call server-side (after user approval).
+// ToolExecutor runs a deferred tool call server-side (after user approval)
+// and tracks rejections so the write gate can auto-fail retries.
 type ToolExecutor interface {
 	ExecuteDeferred(ctx context.Context, workspaceID, memberID uint, toolName string, args []string) (stdout, stderr string, exitCode int, err error)
+	RecordToolRejection(ctx context.Context, taskID, tool, command string) error
 }
 
 type TaskFlows struct {
@@ -56,6 +58,11 @@ func (f *TaskFlows) SetToolExecutor(executor ToolExecutor) {
 	}
 }
 
+func isUserProvidedFeedback(msg string) bool {
+	m := strings.TrimSpace(msg)
+	return m != "" && m != "Rejected. Please revise." && m != "Do not send this email."
+}
+
 // maybeExecuteDeferredToolCall checks whether the current blocker holds a
 // deferred tool call (created by the gateway write gate) and handles
 // approval / rejection. For approvals it executes the tool server-side and
@@ -66,6 +73,7 @@ func (f *TaskFlows) maybeExecuteDeferredToolCall(
 	ctx context.Context,
 	task *types.AgentTask,
 	action *types.TaskInputAction,
+	userMessage string,
 ) string {
 	blocker := task.CurrentBlocker
 	if blocker == nil || blocker.PayloadJSON == nil {
@@ -97,8 +105,24 @@ func (f *TaskFlows) maybeExecuteDeferredToolCall(
 	}
 
 	if action == nil || *action == types.TaskInputActionReject {
+		hasFeedback := isUserProvidedFeedback(userMessage)
+		if !hasFeedback {
+			// Hard reject — record so checkWriteGate auto-fails identical retries.
+			command := ""
+			if len(tc.Args) > 0 {
+				command = tc.Args[0]
+			}
+			if f.toolExecutor != nil && command != "" {
+				_ = f.toolExecutor.RecordToolRejection(ctx, task.ID, tc.Tool, command)
+			}
+			return fmt.Sprintf(
+				"The user rejected your request to %s.\nDo not retry this exact action. Acknowledge the rejection and decide how to proceed.",
+				summary,
+			)
+		}
+		// Reject with feedback — don't block retries; user wants a revised version.
 		return fmt.Sprintf(
-			"The user rejected your request to %s.\nDo not retry this action. Please revise your approach.",
+			"The user rejected your request to %s and provided feedback below. Revise the action based on their feedback and try again.",
 			summary,
 		)
 	}
@@ -335,11 +359,15 @@ func (f *TaskFlows) AcceptTaskInput(
 	resolution := taskBlockerResolutionForInput(task, kind, action, message, items)
 
 	// For tool-call blockers, execute the deferred tool server-side (on
-	// approve) or build a rejection message. The result replaces the
-	// generic "Approved" / "Rejected" placeholder so the agent gets
-	// concrete context. Non-tool-call blockers are unaffected.
-	if toolCallResult := f.maybeExecuteDeferredToolCall(ctx, task, action); toolCallResult != "" {
-		message = toolCallResult
+	// approve) or build a rejection message. For approvals the result
+	// replaces the message entirely; for rejections we preserve any user
+	// feedback so the agent can revise.
+	if toolCallResult := f.maybeExecuteDeferredToolCall(ctx, task, action, message); toolCallResult != "" {
+		if action != nil && *action == types.TaskInputActionReject && isUserProvidedFeedback(message) {
+			message = toolCallResult + "\n\n" + message
+		} else {
+			message = toolCallResult
+		}
 	}
 
 	sessionID := ""
@@ -690,12 +718,11 @@ func (f *TaskFlows) deliverTaskInput(ctx context.Context, task *types.AgentTask)
 	if delivery.executionID == "" || f.terminalIO == nil {
 		return nil
 	}
-	if err := f.terminalIO.PublishInputWake(ctx, delivery.executionID); err != nil {
-		return err
-	}
 	if freshRun, err := f.backend.GetAgentRun(ctx, task.WorkspaceID, *task.TargetRunID); err == nil && freshRun.Status.IsTerminal() {
 		return f.requeueTaskForResume(ctx, task, freshRun)
 	}
+	// Commit state to running BEFORE waking the worker so Settle never
+	// races against a stale waiting state.
 	if f.lifecycle != nil {
 		updated, err := f.lifecycle.Resume(ctx, task.ID, *task.TargetRunID)
 		if err != nil {
@@ -710,6 +737,9 @@ func (f *TaskFlows) deliverTaskInput(ctx context.Context, task *types.AgentTask)
 		}
 	}
 	f.notifyTaskUpdate(ctx, task.WorkspaceID, task.ID)
+	if err := f.terminalIO.PublishInputWake(ctx, delivery.executionID); err != nil {
+		return err
+	}
 	return nil
 }
 

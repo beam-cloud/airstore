@@ -2653,6 +2653,70 @@ func (b *PostgresBackend) ListStaleUnclaimedAgentRuns(ctx context.Context, cutof
 	return out, rows.Err()
 }
 
+// ListOrphanedRunningTaskRunIDs finds tasks stuck in "running" whose target run
+// is no longer active (terminal or unclaimed). Returns the target_run_id values
+// so the recovery loop can settle them.
+func (b *PostgresBackend) ListOrphanedRunningTaskRunIDs(ctx context.Context, staleCutoff time.Time, limit int) ([]string, error) {
+	limit = normalizeClaimBatchLimit(limit)
+	query := `
+		SELECT t.target_run_id
+		FROM agent_task t
+		JOIN agent_run r ON t.target_run_id = r.id
+		WHERE t.state = 'running'
+		  AND t.target_run_id IS NOT NULL
+		  AND t.updated_at < $1
+		  AND (
+		      r.status NOT IN ('accepted'::agent_run_status, 'running'::agent_run_status)
+		      OR (r.claimed_by_worker_id IS NULL AND r.claim_expires_at IS NULL)
+		  )
+		ORDER BY t.updated_at ASC
+		LIMIT $2
+	`
+	rows, err := b.db.QueryContext(ctx, query, staleCutoff, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list orphaned running tasks: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var runID string
+		if err := rows.Scan(&runID); err != nil {
+			return nil, fmt.Errorf("scan orphaned running task run_id: %w", err)
+		}
+		out = append(out, runID)
+	}
+	return out, rows.Err()
+}
+
+func (b *PostgresBackend) ListRunningTasksWithNoRun(ctx context.Context, staleCutoff time.Time, limit int) ([]string, error) {
+	limit = normalizeClaimBatchLimit(limit)
+	query := `
+		SELECT id
+		FROM agent_task
+		WHERE state = 'running'
+		  AND target_run_id IS NULL
+		  AND updated_at < $1
+		ORDER BY updated_at ASC
+		LIMIT $2
+	`
+	rows, err := b.db.QueryContext(ctx, query, staleCutoff, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list running tasks with no run: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var taskID string
+		if err := rows.Scan(&taskID); err != nil {
+			return nil, fmt.Errorf("scan running task with no run: %w", err)
+		}
+		out = append(out, taskID)
+	}
+	return out, rows.Err()
+}
+
 func (b *PostgresBackend) IncrementAgentRunSnapshotSeq(ctx context.Context, runId string) (int64, error) {
 	var seq int64
 	query := `

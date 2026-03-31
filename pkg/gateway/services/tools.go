@@ -228,6 +228,26 @@ func (s *ToolService) checkWriteGate(ctx context.Context, req *pb.ExecuteToolReq
 		return false, true
 	}
 
+	// If this tool+command was already rejected for this task, return an
+	// error to the shim instead of creating another approval blocker.
+	// This prevents an infinite approve/reject loop when the agent retries.
+	if len(req.Args) > 0 {
+		rejKey := common.Keys.ToolRejection(taskID, req.Name, req.Args[0])
+		if val, err := s.redisClient.Get(ctx, rejKey).Result(); err == nil && val != "" {
+			log.Info().
+				Str("task_id", taskID).
+				Str("tool", req.Name).
+				Str("command", req.Args[0]).
+				Msg("write gate: tool call was previously rejected, auto-failing")
+			_ = stream.Send(&pb.ExecuteToolResponse{
+				Stream: pb.ExecuteToolResponse_STDERR,
+				Data:   []byte("Error: This action was rejected by the user. Do not retry it.\n"),
+			})
+			_ = stream.Send(&pb.ExecuteToolResponse{Done: true, ExitCode: 1})
+			return true, true
+		}
+	}
+
 	workspaceID := auth.WorkspaceId(ctx)
 	memberID := auth.MemberId(ctx)
 
@@ -287,9 +307,6 @@ func buildToolCallSummaryAndDetails(toolName string, args []string) (summary, de
 		// positional: to, subject, body [--thread-id ...] [--draft-id ...]
 		to, subject, body := argAt(positional, 0), argAt(positional, 1), argAt(positional, 2)
 		summary = fmt.Sprintf("Send email to %s — %s", to, subject)
-		if subCmd == "create-draft" {
-			summary = fmt.Sprintf("Create email draft to %s — %s", to, subject)
-		}
 		var b strings.Builder
 		fmt.Fprintf(&b, "**To:** %s\n**Subject:** %s\n\n", to, subject)
 		if body != "" {
@@ -422,6 +439,19 @@ func (s *ToolService) ExecuteDeferred(ctx context.Context, workspaceID, memberID
 		code = 1
 	}
 	return stdoutBuf.String(), stderrBuf.String(), code, err
+}
+
+const toolRejectionTTL = 10 * time.Minute
+
+// RecordToolRejection stores a rejection marker in Redis so that if the agent
+// retries the same tool command, checkWriteGate returns an error instead of
+// creating another approval blocker.
+func (s *ToolService) RecordToolRejection(ctx context.Context, taskID, tool, command string) error {
+	if s.redisClient == nil || taskID == "" || tool == "" || command == "" {
+		return nil
+	}
+	key := common.Keys.ToolRejection(taskID, tool, command)
+	return s.redisClient.Set(ctx, key, "rejected", toolRejectionTTL).Err()
 }
 
 func (s *ToolService) buildExecContext(ctx context.Context, toolName string) *tools.ExecutionContext {
