@@ -178,21 +178,33 @@ func includeDetailOutput(output *types.TaskOutput, blockerOwned bool) bool {
 	if blockerOwned {
 		return true
 	}
-	return output.OutputType != types.TaskOutputTypeEmail
+	return !isEmailLikeOutput(output)
+}
+
+func isEmailLikeOutput(output *types.TaskOutput) bool {
+	if output.OutputType == types.TaskOutputTypeEmail {
+		return true
+	}
+	if output.Metadata == nil {
+		return false
+	}
+	tool, _ := output.Metadata["_tool"].(string)
+	tid, _ := output.Data["thread_id"].(string)
+	return tool == "gmail" && strings.TrimSpace(tid) != ""
 }
 
 func includeThreadOutput(output *types.TaskOutput, blockerOwned bool) bool {
 	if output == nil || blockerOwned || hidesDetailOutput(output.Status) {
 		return false
 	}
-	return output.OutputType == types.TaskOutputTypeEmail
+	return isEmailLikeOutput(output)
 }
 
 func includeGalleryOutput(output *types.TaskOutput, blockerOwned bool) bool {
 	if output == nil || blockerOwned || hidesDetailOutput(output.Status) {
 		return false
 	}
-	return output.OutputType != types.TaskOutputTypeEmail
+	return !isEmailLikeOutput(output)
 }
 
 func hidesDetailOutput(status string) bool {

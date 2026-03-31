@@ -148,7 +148,7 @@ func (f *TaskFlows) maybeExecuteDeferredToolCall(
 	)
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "The user approved your request to %s. The action has been executed.\n\n", summary)
+	fmt.Fprintf(&b, "The user approved your request to %s. The action has ALREADY been executed on the server — do NOT call the same command again.\n\n", summary)
 	fmt.Fprintf(&b, "Tool: %s\nExit code: %d\n", tc.Tool, exitCode)
 	if out := strings.TrimSpace(stdout); out != "" {
 		fmt.Fprintf(&b, "Output:\n%s\n", out)
@@ -159,7 +159,7 @@ func (f *TaskFlows) maybeExecuteDeferredToolCall(
 	if execErr != nil {
 		fmt.Fprintf(&b, "Error: %s\n", execErr.Error())
 	}
-	b.WriteString("\nYou may continue.")
+	b.WriteString("\nProceed with your next steps (e.g. updating rows). Do not retry the above tool call.")
 	return b.String()
 }
 
@@ -337,6 +337,12 @@ func (f *TaskFlows) AcceptTaskInput(
 			message = toolCallResult + "\n\n" + message
 		} else {
 			message = toolCallResult
+		}
+		// Grant pre-approval after executing a deferred tool call so that
+		// if the agent retries the same write (it saw exit code 1 originally),
+		// the retry passes through without creating another blocker.
+		if action != nil && *action == types.TaskInputActionApprove && f.toolExecutor != nil {
+			grantPreapproval = true
 		}
 	} else if action != nil && *action == types.TaskInputActionApprove && f.toolExecutor != nil {
 		grantPreapproval = true

@@ -3,8 +3,12 @@ package tools
 import (
 	"context"
 	"io"
+	"io/fs"
+	"path/filepath"
+	"strings"
 	"sync"
 
+	"github.com/beam-cloud/airstore/pkg/tools/definitions"
 	"github.com/beam-cloud/airstore/pkg/types"
 )
 
@@ -117,4 +121,55 @@ func (r *Registry) GetCommandSchema(toolName, command string) *CommandSchema {
 		return nil
 	}
 	return schema.Commands[command]
+}
+
+// ---------------------------------------------------------------------------
+// Global output-type lookup from embedded definitions
+// ---------------------------------------------------------------------------
+
+var (
+	outputTypeMap     map[string]map[string]string // toolName -> command -> outputType
+	outputTypeMapOnce sync.Once
+)
+
+func loadOutputTypeMap() map[string]map[string]string {
+	m := make(map[string]map[string]string)
+	_ = fs.WalkDir(definitions.FS, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		ext := filepath.Ext(path)
+		if ext != ".yaml" && ext != ".yml" {
+			return nil
+		}
+		data, readErr := definitions.FS.ReadFile(path)
+		if readErr != nil {
+			return nil
+		}
+		schema, parseErr := ParseSchema(data)
+		if parseErr != nil {
+			return nil
+		}
+		for cmdName, cmd := range schema.Commands {
+			if cmd.OutputType != "" {
+				if m[schema.Name] == nil {
+					m[schema.Name] = make(map[string]string)
+				}
+				m[schema.Name][cmdName] = cmd.OutputType
+			}
+		}
+		return nil
+	})
+	return m
+}
+
+// CommandOutputType returns the deterministic output type declared in a tool
+// definition, or "" if none is declared. Safe to call from any package; lazily
+// loads and caches the embedded YAML definitions on first call.
+func CommandOutputType(toolName, command string) string {
+	outputTypeMapOnce.Do(func() { outputTypeMap = loadOutputTypeMap() })
+	if cmds, ok := outputTypeMap[toolName]; ok {
+		return cmds[strings.TrimSpace(command)]
+	}
+	return ""
 }

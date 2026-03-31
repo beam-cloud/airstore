@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/beam-cloud/airstore/pkg/tools"
 	"github.com/beam-cloud/airstore/pkg/types"
 	agentsignal "github.com/beam-cloud/airstore/pkg/worker/agentsignal/baml_client"
 	signaltypes "github.com/beam-cloud/airstore/pkg/worker/agentsignal/baml_client/types"
@@ -331,6 +332,12 @@ func (w *AnalyzerWriter) createOutputWithBatch(out signaltypes.ExtractedOutput, 
 		c.Metadata[keyBatchID] = batchID
 	}
 
+	if cmd := firstToken(toolInput); cmd != "" {
+		if ot := tools.CommandOutputType(toolName, cmd); ot != "" {
+			c.OutputType = ot
+		}
+	}
+
 	if content := r.content(); content != "" {
 		c.Data[keyContent] = content
 	}
@@ -445,6 +452,14 @@ func isIntermediatePath(path string) bool {
 	return !strings.HasPrefix(strings.ToLower(path), "/workspace/")
 }
 
+func firstToken(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexAny(s, " \t\n"); i > 0 {
+		return s[:i]
+	}
+	return s
+}
+
 func kindToOutputType(kind signaltypes.OutputKind) string {
 	switch kind {
 	case signaltypes.OutputKindFILE_CREATED, signaltypes.OutputKindFILE_MODIFIED:
@@ -514,8 +529,10 @@ func promoteToolResultFields(data map[string]any, parsedResult any) {
 		return
 	}
 	for key, val := range resultMap {
-		if _, exists := data[key]; exists {
-			continue
+		if existing, exists := data[key]; exists {
+			if s, ok := existing.(string); !ok || strings.TrimSpace(s) != "" {
+				continue
+			}
 		}
 		switch v := val.(type) {
 		case string:
