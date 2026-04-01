@@ -300,6 +300,9 @@ func (r *DataResolver) RunRows(
 				}
 				toUpsert = append(toUpsert, row)
 				keepRowIDs = append(keepRowIDs, row.ID)
+				if nk := NormalizeRowKey(deriveRowKey(row.Cells)); nk != "" {
+					existingContentIndex[nk] = row.ID
+				}
 			}
 		}
 		if len(toUpsert) > 0 {
