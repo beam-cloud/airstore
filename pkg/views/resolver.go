@@ -265,6 +265,7 @@ func (r *DataResolver) RunRows(
 
 	oldRows, excludedSnapshots := r.loadStoredRowsAndExclusions(ctx, viewID, sheet.ID, comp.ID)
 	rowsByGroup := groupViewRowsByGroup(oldRows)
+	existingContentIndex := buildContentKeyIndex(oldRows)
 
 	batches := splitTaskIDBatches(taskIDs, runRowsBatchSize)
 	var allMappedRows []bamltypes.MappedRow
@@ -288,8 +289,20 @@ func (r *DataResolver) RunRows(
 		for _, tid := range batch {
 			rows := persistedByGroup[tid]
 			for _, row := range rows {
+				if dup := findContentDuplicate(row, existingContentIndex); dup != "" {
+					keepRowIDs = append(keepRowIDs, dup)
+					log.Debug().
+						Str("view_id", viewID).
+						Str("skipped_id", row.ID).
+						Str("existing_id", dup).
+						Msg("RunRows: skipping row — content match exists from agent tool or import")
+					continue
+				}
 				toUpsert = append(toUpsert, row)
 				keepRowIDs = append(keepRowIDs, row.ID)
+				if nk := NormalizeRowKey(deriveRowKey(row.Cells)); nk != "" {
+					existingContentIndex[nk] = row.ID
+				}
 			}
 		}
 		if len(toUpsert) > 0 {
@@ -952,6 +965,45 @@ func retainExistingRows(existingRows []ViewRow, componentID, outputSignature, sc
 		retained = append(retained, existing)
 	}
 	return retained
+}
+
+// buildContentKeyIndex builds a map from content-hash row key to row ID for
+// all existing rows on a sheet. This lets the output pipeline detect rows that
+// were already created by the agent tool (view add-row) or CSV import and
+// avoid creating duplicates with different ID formats.
+func buildContentKeyIndex(rows []ViewRow) map[string]string {
+	idx := make(map[string]string, len(rows))
+	for _, row := range rows {
+		if len(row.Cells) == 0 || row.Marker {
+			continue
+		}
+		key := deriveRowKey(row.Cells)
+		nk := NormalizeRowKey(key)
+		if nk != "" {
+			if _, exists := idx[nk]; !exists {
+				idx[nk] = row.ID
+			}
+		}
+	}
+	return idx
+}
+
+// findContentDuplicate checks whether a materialized row duplicates an existing
+// row (by content hash). Returns the existing row's ID if a duplicate is found
+// with a different ID, or empty string if no conflict.
+func findContentDuplicate(row ViewRow, existingIndex map[string]string) string {
+	if len(row.Cells) == 0 {
+		return ""
+	}
+	key := deriveRowKey(row.Cells)
+	nk := NormalizeRowKey(key)
+	if nk == "" {
+		return ""
+	}
+	if existingID, ok := existingIndex[nk]; ok && existingID != row.ID {
+		return existingID
+	}
+	return ""
 }
 
 func viewRowSemanticKey(row ViewRow) string {

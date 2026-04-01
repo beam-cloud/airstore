@@ -341,7 +341,11 @@ func stripGmailHTML(html string) string {
 }
 
 func (g *GmailClient) createDraft(ctx context.Context, token, to, subject, body, threadID string) (map[string]any, error) {
-	encoded := base64.RawURLEncoding.EncodeToString([]byte(buildRawEmail(to, subject, body)))
+	var inReplyTo string
+	if threadID != "" {
+		inReplyTo = g.fetchLastMessageID(ctx, token, threadID)
+	}
+	encoded := base64.RawURLEncoding.EncodeToString([]byte(buildRawEmail(to, subject, body, inReplyTo)))
 	payload := map[string]any{
 		"message": map[string]any{
 			"raw": encoded,
@@ -373,7 +377,11 @@ func (g *GmailClient) createDraft(ctx context.Context, token, to, subject, body,
 }
 
 func (g *GmailClient) sendEmail(ctx context.Context, token, to, subject, body, threadID, draftID string) (map[string]any, error) {
-	raw := base64.RawURLEncoding.EncodeToString([]byte(buildRawEmail(to, subject, body)))
+	var inReplyTo string
+	if threadID != "" {
+		inReplyTo = g.fetchLastMessageID(ctx, token, threadID)
+	}
+	raw := base64.RawURLEncoding.EncodeToString([]byte(buildRawEmail(to, subject, body, inReplyTo)))
 
 	var (
 		endpoint string
@@ -427,18 +435,62 @@ func formatGmailMessageResult(to, subject string, result map[string]any) map[str
 	return out
 }
 
+// fetchLastMessageID retrieves the RFC 2822 Message-ID header from the last
+// message in a Gmail thread. Required for proper In-Reply-To/References
+// headers when sending a reply.
+func (g *GmailClient) fetchLastMessageID(ctx context.Context, token, threadID string) string {
+	path := fmt.Sprintf("/threads/%s?format=metadata&metadataHeaders=Message-Id", threadID)
+	var raw map[string]any
+	if err := g.api.RequestJSON(ctx, token, "GET", path, nil, &raw); err != nil {
+		return ""
+	}
+	msgs, _ := raw["messages"].([]any)
+	if len(msgs) == 0 {
+		return ""
+	}
+	last, _ := msgs[len(msgs)-1].(map[string]any)
+	if last == nil {
+		return ""
+	}
+	payload, _ := last["payload"].(map[string]any)
+	if payload == nil {
+		return ""
+	}
+	headers, _ := payload["headers"].([]any)
+	for _, h := range headers {
+		hdr, _ := h.(map[string]any)
+		if hdr == nil {
+			continue
+		}
+		name, _ := hdr["name"].(string)
+		if strings.EqualFold(name, "Message-Id") {
+			if val, _ := hdr["value"].(string); val != "" {
+				return val
+			}
+		}
+	}
+	return ""
+}
+
 // --- email construction helpers ---
 
-func buildRawEmail(to, subject, body string) string {
+func buildRawEmail(to, subject, body, inReplyTo string) string {
 	to = sanitizeHeaderValue(to)
 	subject = sanitizeHeaderValue(subject)
 	subject = repairMojibake(subject)
 	subject = subjectNormalizer.Replace(subject)
 	encodedSubject := mime.QEncoding.Encode("utf-8", subject)
+
+	var replyHeaders string
+	if inReplyTo != "" {
+		replyHeaders = fmt.Sprintf("In-Reply-To: %s\r\nReferences: %s\r\n", inReplyTo, inReplyTo)
+	}
+
 	return fmt.Sprintf(
-		"MIME-Version: 1.0\r\nTo: %s\r\nSubject: %s\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s",
+		"MIME-Version: 1.0\r\nTo: %s\r\nSubject: %s\r\n%sContent-Type: text/plain; charset=UTF-8\r\n\r\n%s",
 		to,
 		encodedSubject,
+		replyHeaders,
 		body,
 	)
 }

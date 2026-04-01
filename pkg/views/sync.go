@@ -46,6 +46,13 @@ func (vs *ViewSync) HighMatchThreshold() float64 {
 	return vs.config.HighMatchThreshold
 }
 
+func (vs *ViewSync) ClassifyFloor() float64 {
+	if vs == nil {
+		return 0.50
+	}
+	return vs.config.ClassifyFloor
+}
+
 func (vs *ViewSync) lockFor(taskID, sheetID string) *sync.Mutex {
 	key := taskID + ":" + sheetID
 	actual, _ := vs.locks.LoadOrStore(key, &sync.Mutex{})

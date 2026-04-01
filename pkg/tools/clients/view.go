@@ -556,14 +556,14 @@ func (c *ViewClient) smartUpsertRow(
 		return rowID, created, false, err
 	}
 
-	threshold := 0.87
-	if c.sync != nil {
-		threshold = c.sync.HighMatchThreshold()
+	classifyFloor := 0.50
+	if c.sync != nil && c.sync.ClassifyFloor() > 0 {
+		classifyFloor = c.sync.ClassifyFloor()
 	}
 
 	var candidates []views.VectorSearchResult
 	for _, r := range results {
-		if r.Score >= threshold {
+		if r.Score >= classifyFloor {
 			candidates = append(candidates, r)
 		}
 	}
