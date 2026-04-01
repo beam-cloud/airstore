@@ -739,10 +739,37 @@ func (g *Gateway) registerServices() error {
 		}
 
 		// Source poller: refreshes watched source queries so hooks fire on new results
+		var sourcePoller *hooks.SourcePoller
 		if g.RedisClient != nil {
-			sourcePoller := hooks.NewSourcePoller(filesystemStore, sourceService, g.RedisClient)
+			sourcePoller = hooks.NewSourcePoller(filesystemStore, sourceService, g.RedisClient)
 			go sourcePoller.Start(g.ctx)
 		}
+
+		// Test mode: enable event injection for simulating source events
+		injector := sources.NewMemoryEventInjector()
+		sourceService.SetEventInjector(injector)
+		agentAPIRoot.POST("/debug/inject-source-items", func(c echo.Context) error {
+			var req struct {
+				TaskID string   `json:"task_id"`
+				Items  []string `json:"items"`
+			}
+			if err := c.Bind(&req); err != nil || req.TaskID == "" || len(req.Items) == 0 {
+				return apiv1.ErrorResponse(c, http.StatusBadRequest, "task_id and items required")
+			}
+			items := make([]sources.QueryResult, len(req.Items))
+			for i, id := range req.Items {
+				items[i] = sources.QueryResult{ID: id, Filename: id + ".txt", Metadata: map[string]string{"thread_id": id}}
+			}
+			injector.InjectItems(req.TaskID, items)
+			return apiv1.SuccessResponse(c, map[string]any{"task_id": req.TaskID, "items": len(req.Items)})
+		})
+		agentAPIRoot.POST("/debug/poll-now", func(c echo.Context) error {
+			if sourcePoller == nil {
+				return apiv1.ErrorResponse(c, http.StatusServiceUnavailable, "source poller not available")
+			}
+			sourcePoller.PollNow(c.Request().Context())
+			return apiv1.SuccessResponse(c, nil)
+		})
 
 		// Cron scheduler: fires due scheduled tasks as agent tasks
 		cronScheduler := orchestration.NewCronScheduler(g.BackendRepo, agentAPI)

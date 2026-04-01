@@ -57,6 +57,22 @@ func (p *SourcePoller) Start(ctx context.Context) {
 	}
 }
 
+// PollNow refreshes all watched queries immediately, bypassing stale thresholds
+// and distributed locks. Intended for test mode.
+func (p *SourcePoller) PollNow(ctx context.Context) {
+	queries, err := p.store.GetWatchedSourceQueries(ctx, 0, sourcePollBatch)
+	if err != nil {
+		log.Warn().Err(err).Msg("source poller: poll-now failed to get queries")
+		return
+	}
+	for _, q := range queries {
+		if err := p.refresher.RefreshQuery(ctx, q); err != nil {
+			log.Warn().Err(err).Str("path", q.Path).Msg("source poller: poll-now refresh failed")
+		}
+	}
+	log.Info().Int("queries", len(queries)).Msg("source poller: poll-now complete")
+}
+
 // Poll fetches stale watched queries and refreshes them with distributed locking.
 func (p *SourcePoller) Poll(ctx context.Context) {
 	queries, err := p.store.GetWatchedSourceQueries(ctx, sourcePollStale, sourcePollBatch)

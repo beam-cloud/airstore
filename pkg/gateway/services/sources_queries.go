@@ -544,6 +544,17 @@ func hashHookItemIDs(ids []string) string {
 // ---------------------------------------------------------------------------
 
 func (s *SourceService) executeAndCacheQuery(ctx context.Context, pctx *sources.ProviderContext, query *types.FilesystemQuery) ([]repository.QueryResult, error) {
+	if s.eventInjector != nil && query.IsTaskFollowUp() && query.OwnerTaskID != nil {
+		if injected := s.eventInjector.DrainItems(*query.OwnerTaskID); len(injected) > 0 {
+			results := make([]repository.QueryResult, len(injected))
+			for i, item := range injected {
+				results[i] = repository.QueryResult{ID: item.ID, Filename: item.Filename, Metadata: item.Metadata, Size: item.Size, Mtime: item.Mtime}
+			}
+			log.Info().Str("task_id", *query.OwnerTaskID).Int("items", len(results)).Msg("event injector: returning synthetic results")
+			return results, nil
+		}
+	}
+
 	provider := s.registry.Get(query.Integration)
 	if provider == nil {
 		return nil, fmt.Errorf("provider not found: %s", query.Integration)
@@ -1506,3 +1517,4 @@ func isValidQueryName(name string) bool {
 		!strings.Contains(name, "\\") &&
 		!strings.Contains(name, "..")
 }
+
