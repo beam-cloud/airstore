@@ -165,13 +165,12 @@ func (c *taskSourceWatchController) cleanupPreservingPaths(ctx context.Context, 
 		return fmt.Errorf("list task-owned source watches: %w", err)
 	}
 	for _, query := range taskQueries {
-		resetSeen := true
 		if preservePaths != nil {
 			if _, keep := preservePaths[query.Path]; keep {
-				resetSeen = false
+				continue
 			}
 		}
-		if err := c.cleanupOwnedQuery(ctx, query, resetSeen); err != nil {
+		if err := c.cleanupOwnedQuery(ctx, query, true); err != nil {
 			cleanupErrs = append(cleanupErrs, err.Error())
 		}
 	}
@@ -187,13 +186,12 @@ func (c *taskSourceWatchController) cleanupPreservingPaths(ctx context.Context, 
 		if hook.TargetTaskID == nil || strings.TrimSpace(*hook.TargetTaskID) != strings.TrimSpace(c.task.ID) {
 			continue
 		}
-		resetSeen := true
 		if preservePaths != nil {
 			if _, keep := preservePaths[hook.Path]; keep {
-				resetSeen = false
+				continue
 			}
 		}
-		if err := c.service.cleanupSourceWatchResources(ctx, c.task.WorkspaceID, hook, resetSeen); err != nil {
+		if err := c.service.cleanupSourceWatchResources(ctx, c.task.WorkspaceID, hook, true); err != nil {
 			cleanupErrs = append(cleanupErrs, err.Error())
 		}
 	}
