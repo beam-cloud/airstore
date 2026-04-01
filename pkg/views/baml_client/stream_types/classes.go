@@ -874,6 +874,60 @@ func (c PopulateRowResult) BamlTypeName() string {
 	return "PopulateRowResult"
 }
 
+type RowMatchResult struct {
+	Action        *types.RowMatchAction `json:"action"`
+	Target_row_id *string               `json:"target_row_id"`
+	Reason        *string               `json:"reason"`
+}
+
+func (c *RowMatchResult) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_STREAM_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_STREAM_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "RowMatchResult" {
+		panic(fmt.Sprintf("expected RowMatchResult, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "action":
+			c.Action = baml.Decode(valueHolder).Interface().(*types.RowMatchAction)
+
+		case "target_row_id":
+			c.Target_row_id = baml.Decode(valueHolder).Interface().(*string)
+
+		case "reason":
+			c.Reason = baml.Decode(valueHolder).Interface().(*string)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class RowMatchResult", key))
+
+		}
+	}
+
+}
+
+func (c RowMatchResult) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["action"] = c.Action
+
+	fields["target_row_id"] = c.Target_row_id
+
+	fields["reason"] = c.Reason
+
+	return baml.EncodeClass("RowMatchResult", fields, nil)
+}
+
+func (c RowMatchResult) BamlTypeName() string {
+	return "RowMatchResult"
+}
+
 type RowSearchPlan struct {
 	Criteria      []SearchCriterion `json:"criteria"`
 	Entity_labels []string          `json:"entity_labels"`

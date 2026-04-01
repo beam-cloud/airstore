@@ -87,6 +87,42 @@ func (t *OperationTypeEnumView) Type() (baml.Type, error) {
 	return t.inner.Type()
 }
 
+type RowMatchActionEnumView struct {
+	inner baml.EnumBuilder
+}
+
+func (t *RowMatchActionEnumView) ListValues() ([]EnumValueView, error) {
+	result, err := t.inner.ListValues()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]EnumValueView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *RowMatchActionEnumView) ValueUPDATE_EXISTING() (EnumValueView, error) {
+	return t.inner.Value("UPDATE_EXISTING")
+}
+
+func (t *RowMatchActionEnumView) ValueINSERT_NEW() (EnumValueView, error) {
+	return t.inner.Value("INSERT_NEW")
+}
+
+func (t *TypeBuilder) RowMatchAction() (*RowMatchActionEnumView, error) {
+	bld, err := t.inner.Enum("RowMatchAction")
+	if err != nil {
+		return nil, err
+	}
+	return &RowMatchActionEnumView{inner: bld}, nil
+}
+
+func (t *RowMatchActionEnumView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
 type SectionEmphasisEnumView struct {
 	inner baml.EnumBuilder
 }

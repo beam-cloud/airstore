@@ -190,6 +190,80 @@ func (*stream) ClassifyDetailTemplate(ctx context.Context, table_title string, c
 	return channel, nil
 }
 
+// / Streaming version of ClassifyRowMatch
+func (*stream) ClassifyRowMatch(ctx context.Context, columns []types.ViewColumn, incoming_cells string, candidate_rows string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.RowMatchResult, types.RowMatchResult], error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"columns": columns, "incoming_cells": incoming_cells, "candidate_rows": candidate_rows},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		// This should never happen. if it does, please file an issue at https://github.com/boundaryml/baml/issues
+		// and include the type of the args you're passing in.
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: ClassifyRowMatch: %w", err)
+		panic(wrapped_err)
+	}
+
+	internal_channel, err := bamlRuntime.CallFunctionStream(ctx, "ClassifyRowMatch", encoded, callOpts.onTick)
+	if err != nil {
+		return nil, err
+	}
+
+	channel := make(chan StreamValue[stream_types.RowMatchResult, types.RowMatchResult])
+	go func() {
+		for result := range internal_channel {
+			if result.Error != nil {
+				channel <- StreamValue[stream_types.RowMatchResult, types.RowMatchResult]{
+					IsError: true,
+					Error:   result.Error,
+				}
+				close(channel)
+				return
+			}
+			if result.HasData {
+				data := (result.Data).(types.RowMatchResult)
+				channel <- StreamValue[stream_types.RowMatchResult, types.RowMatchResult]{
+					IsFinal:  true,
+					as_final: &data,
+				}
+			} else {
+				data := (result.StreamData).(stream_types.RowMatchResult)
+				channel <- StreamValue[stream_types.RowMatchResult, types.RowMatchResult]{
+					IsFinal:   false,
+					as_stream: &data,
+				}
+			}
+		}
+
+		// when internal_channel is closed, close the output too
+		close(channel)
+	}()
+	return channel, nil
+}
+
 // / Streaming version of GenerateStatusOptions
 func (*stream) GenerateStatusOptions(ctx context.Context, table_title string, column_key string, column_label string, sibling_columns string, opts ...CallOptionFunc) (<-chan StreamValue[stream_types.StatusOptionSet, types.StatusOptionSet], error) {
 

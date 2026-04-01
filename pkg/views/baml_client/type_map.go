@@ -55,6 +55,8 @@ var typeMap = map[string]reflect.Type{
 	"STREAM_TYPES.Operation":           reflect.TypeOf(stream_types.Operation{}),
 	"TYPES.PopulateRowResult":          reflect.TypeOf(types.PopulateRowResult{}),
 	"STREAM_TYPES.PopulateRowResult":   reflect.TypeOf(stream_types.PopulateRowResult{}),
+	"TYPES.RowMatchResult":             reflect.TypeOf(types.RowMatchResult{}),
+	"STREAM_TYPES.RowMatchResult":      reflect.TypeOf(stream_types.RowMatchResult{}),
 	"TYPES.RowSearchPlan":              reflect.TypeOf(types.RowSearchPlan{}),
 	"STREAM_TYPES.RowSearchPlan":       reflect.TypeOf(stream_types.RowSearchPlan{}),
 	"TYPES.SearchCriterion":            reflect.TypeOf(types.SearchCriterion{}),
@@ -71,6 +73,7 @@ var typeMap = map[string]reflect.Type{
 	"STREAM_TYPES.WidgetResult":        reflect.TypeOf(stream_types.WidgetResult{}),
 
 	"TYPES.OperationType":   reflect.TypeOf(types.OperationType("")),
+	"TYPES.RowMatchAction":  reflect.TypeOf(types.RowMatchAction("")),
 	"TYPES.SectionEmphasis": reflect.TypeOf(types.SectionEmphasis("")),
 	"TYPES.SectionType":     reflect.TypeOf(types.SectionType("")),
 	"TYPES.ViewUpdateType":  reflect.TypeOf(types.ViewUpdateType("")),

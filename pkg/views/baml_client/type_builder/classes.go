@@ -651,6 +651,46 @@ func (t *PopulateRowResultClassView) Type() (baml.Type, error) {
 	return t.inner.Type()
 }
 
+type RowMatchResultClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *RowMatchResultClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *RowMatchResultClassView) PropertyAction() (ClassPropertyView, error) {
+	return t.inner.Property("action")
+}
+
+func (t *RowMatchResultClassView) PropertyTarget_row_id() (ClassPropertyView, error) {
+	return t.inner.Property("target_row_id")
+}
+
+func (t *RowMatchResultClassView) PropertyReason() (ClassPropertyView, error) {
+	return t.inner.Property("reason")
+}
+
+func (t *TypeBuilder) RowMatchResult() (*RowMatchResultClassView, error) {
+	bld, err := t.inner.Class("RowMatchResult")
+	if err != nil {
+		return nil, err
+	}
+	return &RowMatchResultClassView{inner: bld}, nil
+}
+
+func (t *RowMatchResultClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
 type RowSearchPlanClassView struct {
 	inner baml.ClassBuilder
 }
