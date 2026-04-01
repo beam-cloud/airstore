@@ -222,8 +222,8 @@ func TestNormalizeSourceWatchRequestsBackfillsThreadIDFromTrackedOutput(t *testi
 	if got[0].ThreadID != "thread-real" {
 		t.Fatalf("thread_id = %q, want %q (backfilled from tracked output)", got[0].ThreadID, "thread-real")
 	}
-	if got[0].Query == wrongQuery {
-		t.Fatalf("query should have been replaced by tracked query, got %q", got[0].Query)
+	if got[0].Query != wrongQuery {
+		t.Fatalf("classifier query should be preserved when non-empty, got %q", got[0].Query)
 	}
 	if got[0].SourceOutputID != "out-1" {
 		t.Fatalf("source_output_id = %q, want %q (backfilled from tracked output)", got[0].SourceOutputID, "out-1")

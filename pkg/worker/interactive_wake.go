@@ -248,15 +248,12 @@ func normalizeSourceWatchRequests(
 		if tracked.SourceOutputID != "" && normalized[i].SourceOutputID == "" {
 			normalized[i].SourceOutputID = tracked.SourceOutputID
 		}
-		if tracked.Query != "" {
+		if tracked.Query != "" && normalized[i].Query == "" {
 			normalized[i].Query = tracked.Query
 		}
-	}
-	// Re-normalize Gmail watches that gained a thread/message ID during
-	// backfill so that attachment and body flags are set correctly.
-	for i, req := range normalized {
+		// Ensure Gmail watches that gained a thread/message ID include attachments and body.
 		if strings.EqualFold(req.Integration, string(types.SourceGmail)) &&
-			(req.ThreadID != "" || req.MessageID != "") {
+			(normalized[i].ThreadID != "" || normalized[i].MessageID != "") {
 			normalized[i].IncludeAttachments = true
 			normalized[i].IncludeMessageBody = true
 		}
@@ -442,13 +439,9 @@ func trackedSourceWatchSubjectMatches(req, candidate *types.SourceWatchRequest) 
 // or subject-keyword overlap.  Used to guard the integration-only backfill so
 // that unrelated watches are not anchored to the wrong thread.
 func trackedSourceWatchBackfillRelevant(req, tracked *types.SourceWatchRequest) bool {
-	if trackedSourceWatchEmailMatches(req, tracked) {
-		return true
-	}
-	if trackedSourceWatchSubjectMatches(req, tracked) {
-		return true
-	}
-	return trackedSourceWatchKeywordOverlap(req, tracked)
+	return trackedSourceWatchEmailMatches(req, tracked) ||
+		trackedSourceWatchSubjectMatches(req, tracked) ||
+		trackedSourceWatchKeywordOverlap(req, tracked)
 }
 
 var backfillStopWords = map[string]struct{}{
@@ -987,21 +980,36 @@ func followUpPlanningMessage(agentMsg string, tracker *taskOutputTracker) string
 		if title := strings.TrimSpace(summary.Title); title != "" {
 			line += ": " + title
 		}
-		if threadID := strings.TrimSpace(summary.ThreadID); threadID != "" {
-			line += fmt.Sprintf(" [thread_id=%s]", threadID)
+		subject := strings.TrimSpace(summary.Subject)
+		if subject == strings.TrimSpace(summary.Title) {
+			subject = ""
 		}
-		if messageID := strings.TrimSpace(summary.MessageID); messageID != "" {
-			line += fmt.Sprintf(" [message_id=%s]", messageID)
-		}
-		if recipient := strings.TrimSpace(summary.Recipient); recipient != "" {
-			line += fmt.Sprintf(" [recipient=%s]", recipient)
-		}
-		if subject := strings.TrimSpace(summary.Subject); subject != "" && subject != strings.TrimSpace(summary.Title) {
-			line += fmt.Sprintf(" [subject=%s]", subject)
-		}
+		line += formatSourceWatchMetadataTags(
+			strings.TrimSpace(summary.ThreadID),
+			strings.TrimSpace(summary.MessageID),
+			strings.TrimSpace(summary.Recipient),
+			subject,
+		)
 		lines = append(lines, line)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func formatSourceWatchMetadataTags(threadID, messageID, recipient, subject string) string {
+	var s string
+	if threadID != "" {
+		s += fmt.Sprintf(" [thread_id=%s]", threadID)
+	}
+	if messageID != "" {
+		s += fmt.Sprintf(" [message_id=%s]", messageID)
+	}
+	if recipient != "" {
+		s += fmt.Sprintf(" [recipient=%s]", recipient)
+	}
+	if subject != "" {
+		s += fmt.Sprintf(" [subject=%s]", subject)
+	}
+	return s
 }
 
 func formatTrackedEmailSuffix(tracker *taskOutputTracker) string {
@@ -1016,24 +1024,15 @@ func formatTrackedEmailSuffix(tracker *taskOutputTracker) string {
 		}
 		threadID := strings.TrimSpace(summary.ThreadID)
 		messageID := strings.TrimSpace(summary.MessageID)
-		recipient := strings.TrimSpace(summary.Recipient)
 		subject := strings.TrimSpace(summary.Subject)
 		if threadID == "" && messageID == "" && subject == "" {
 			continue
 		}
-		line := "-"
-		if threadID != "" {
-			line += fmt.Sprintf(" [thread_id=%s]", threadID)
-		}
-		if messageID != "" {
-			line += fmt.Sprintf(" [message_id=%s]", messageID)
-		}
-		if recipient != "" {
-			line += fmt.Sprintf(" [recipient=%s]", recipient)
-		}
-		if subject != "" {
-			line += fmt.Sprintf(" [subject=%s]", subject)
-		}
+		line := "-" + formatSourceWatchMetadataTags(
+			threadID, messageID,
+			strings.TrimSpace(summary.Recipient),
+			subject,
+		)
 		lines = append(lines, line)
 	}
 	if len(lines) == 0 {
