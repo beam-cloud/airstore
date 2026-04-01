@@ -748,6 +748,8 @@ func (s *ViewStore) UpdateRow(ctx context.Context, viewID, rowID string, cells m
 // deriveRowKey builds a deterministic, schema-agnostic key from the row's
 // non-empty cells. Semantics live in BAML/vector resolution, not in Go field
 // heuristics, so this is intentionally just a canonical content hash.
+// System/hidden fields (prefixed with _ or named thread_id) are excluded so
+// that adding metadata doesn't change a row's identity key.
 func deriveRowKey(cells map[string]string) string {
 	if len(cells) == 0 {
 		return ""
@@ -755,9 +757,13 @@ func deriveRowKey(cells map[string]string) string {
 
 	keys := make([]string, 0, len(cells))
 	for k, v := range cells {
-		if strings.TrimSpace(v) != "" {
-			keys = append(keys, k)
+		if strings.TrimSpace(v) == "" {
+			continue
 		}
+		if strings.HasPrefix(k, "_") || k == "thread_id" {
+			continue
+		}
+		keys = append(keys, k)
 	}
 	if len(keys) == 0 {
 		return ""

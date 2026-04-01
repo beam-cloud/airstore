@@ -169,7 +169,7 @@ func ClassifyFollowUp(ctx context.Context, message string, user_message *string,
 	}
 }
 
-func ClassifyTurn(ctx context.Context, message string, approval_policy string, opts ...CallOptionFunc) (types.TurnClassification, error) {
+func ClassifyTurn(ctx context.Context, message string, opts ...CallOptionFunc) (types.TurnClassification, error) {
 
 	var callOpts callOption
 	for _, opt := range opts {
@@ -185,7 +185,7 @@ func ClassifyTurn(ctx context.Context, message string, approval_policy string, o
 	}
 
 	args := baml.BamlFunctionArguments{
-		Kwargs: map[string]any{"message": message, "approval_policy": approval_policy},
+		Kwargs: map[string]any{"message": message},
 		Env:    getEnvVars(callOpts.env),
 	}
 

@@ -549,7 +549,7 @@ func (c *ViewClient) smartUpsertRow(
 		return rowID, created, false, err
 	}
 
-	results, err := c.store.VectorSearch(ctx, viewID, sheetID, queryVec, 5)
+	results, err := c.store.VectorSearch(ctx, viewID, sheetID, queryVec, 10)
 	if err != nil {
 		log.Debug().Err(err).Msg("view-tool: vector search failed, falling back")
 		rowID, created, err := c.store.UpsertRow(ctx, viewID, sheetID, componentID, cells, views.UpsertOpts{})
