@@ -489,6 +489,8 @@ func (g *GmailClient) getThreadReplyHeaders(ctx context.Context, token, threadID
 func buildRawEmail(to, subject, body, inReplyTo, references string) string {
 	to = sanitizeHeaderValue(to)
 	subject = sanitizeHeaderValue(subject)
+	inReplyTo = sanitizeHeaderValue(inReplyTo)
+	references = sanitizeHeaderValue(references)
 	subject = repairMojibake(subject)
 	subject = subjectNormalizer.Replace(subject)
 	encodedSubject := mime.QEncoding.Encode("utf-8", subject)
