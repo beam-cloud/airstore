@@ -17,7 +17,8 @@ import (
 
 var googleIntegrationScopes = map[string][]string{
 	"gmail": {
-		"https://www.googleapis.com/auth/gmail.modify",
+		"https://www.googleapis.com/auth/gmail.compose",
+		"https://www.googleapis.com/auth/gmail.readonly",
 	},
 	"gdrive": {
 		"https://www.googleapis.com/auth/drive",

@@ -3,12 +3,19 @@ package types
 import "testing"
 
 func TestDetermineCredentialCapabilities_GmailScopes(t *testing.T) {
-	caps := DetermineCredentialCapabilities(Gmail, []string{"https://www.googleapis.com/auth/gmail.modify"})
+	// New scope: gmail.compose grants write
+	caps := DetermineCredentialCapabilities(Gmail, []string{"https://www.googleapis.com/auth/gmail.compose"})
 	if !ListContainsFold(caps, string(CapabilitySourceRead)) {
 		t.Fatalf("expected source_read capability, got %v", caps)
 	}
 	if !ListContainsFold(caps, string(CapabilitySourceWrite)) {
-		t.Fatalf("expected source_write capability, got %v", caps)
+		t.Fatalf("expected source_write capability for gmail.compose, got %v", caps)
+	}
+
+	// Legacy scope: gmail.modify still grants write
+	legacy := DetermineCredentialCapabilities(Gmail, []string{"https://www.googleapis.com/auth/gmail.modify"})
+	if !ListContainsFold(legacy, string(CapabilitySourceWrite)) {
+		t.Fatalf("expected source_write capability for gmail.modify, got %v", legacy)
 	}
 
 	readOnly := DetermineCredentialCapabilities(Gmail, []string{"https://www.googleapis.com/auth/gmail.readonly"})

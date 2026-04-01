@@ -99,7 +99,10 @@ var integrations = map[IntegrationName]IntegrationMeta{
 			CapabilitySourceRead,
 			CapabilitySourceWrite,
 		},
-		OAuthWriteScopeHint: []string{"https://www.googleapis.com/auth/gmail.modify"},
+		OAuthWriteScopeHint: []string{
+				"https://www.googleapis.com/auth/gmail.compose",
+				"https://www.googleapis.com/auth/gmail.modify",
+			},
 	},
 	Notion: {
 		Name:        Notion,
