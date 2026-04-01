@@ -4747,6 +4747,35 @@ func (b *PostgresBackend) DeleteTaskSourceWatches(ctx context.Context, taskID st
 	return err
 }
 
+func (b *PostgresBackend) HasTaskSourceWatches(ctx context.Context, taskID string) bool {
+	var exists bool
+	err := b.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM task_source_watches WHERE task_id = $1)`,
+		taskID,
+	).Scan(&exists)
+	return err == nil && exists
+}
+
+func (b *PostgresBackend) GetTaskSourceWatches(ctx context.Context, taskID string) ([]TaskSourceWatch, error) {
+	rows, err := b.db.QueryContext(ctx,
+		`SELECT integration, correlation_key, COALESCE(reason, '') FROM task_source_watches WHERE task_id = $1`,
+		taskID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get task source watches: %w", err)
+	}
+	defer rows.Close()
+	var watches []TaskSourceWatch
+	for rows.Next() {
+		var w TaskSourceWatch
+		if err := rows.Scan(&w.Integration, &w.CorrelationKey, &w.Reason); err != nil {
+			return nil, fmt.Errorf("scan task source watch: %w", err)
+		}
+		watches = append(watches, w)
+	}
+	return watches, rows.Err()
+}
+
 func (b *PostgresBackend) DeleteView(ctx context.Context, workspaceID uint, viewID string) error {
 	result, err := b.db.ExecContext(ctx,
 		`DELETE FROM workspace_view WHERE id = $1 AND workspace_id = $2`,

@@ -677,36 +677,39 @@ func (r *RuntimeLoops) applyPostRunSettlement(
 			settlement.waitingForInput = false
 		}
 	}
-	existingWatchesActive := !sourceWatchArmed && !handoffToSubtasks && task != nil &&
-		r.sourceWatchRegistrar != nil &&
-		r.sourceWatchRegistrar.HasTaskSourceWatches(ctx, task)
-
-	if !sourceWatchArmed && !settlement.waitingForInput && !existingWatchesActive {
-		if settlement.wakeSignal != nil {
-			log.Info().Str("run_id", runID).Str("task_id", taskIDOrEmpty(task)).
-				Msg("classifier requested sleep but no source watches materialized; completing instead")
-			settlement.wakeSignal = nil
-		}
-	}
-	if existingWatchesActive && settlement.wakeSignal == nil {
+	// Parent sleeps while subtasks execute; deferred wake checks progress.
+	if handoffToSubtasks {
 		settlement.wakeSignal = &types.RunExecutionWakeSignal{
-			DelayMinutes:   5,
-			Reason:         "Resuming existing source watch monitoring",
-			FollowUpPrompt: "Resume this task, inspect the watched sources for any new updates, and continue the follow-up based on the latest data.",
+			DelayMinutes:   60,
+			Reason:         "Check on subtask progress",
+			FollowUpPrompt: "Check on your subtasks. Report their current status and summarize any progress or replies received.",
 		}
-		log.Info().Str("run_id", runID).Str("task_id", taskIDOrEmpty(task)).
-			Msg("keeping existing source watches alive; task will return to sleeping")
 	}
+
+	// task_source_watches is the single source of truth for active monitors.
+	var persistedWatches []repository.TaskSourceWatch
+	if !sourceWatchArmed && !handoffToSubtasks && task != nil && r.backend != nil {
+		if w, err := r.backend.GetTaskSourceWatches(ctx, task.ID); err == nil {
+			persistedWatches = w
+		}
+	}
+	hasWatches := len(persistedWatches) > 0
+
+	if hasWatches && settlement.wakeSignal == nil {
+		settlement.wakeSignal = sourceWatchWakeSignal(nil, sourceWatchRequestsFromDB(persistedWatches))
+	}
+
 	if err := r.settleOriginTask(ctx, runID, task, settlement); err != nil {
 		return r.handleRunSettlementFailure(ctx, task, runID, fmt.Errorf("settle origin task: %w", err))
 	}
+
 	if handoffToSubtasks {
 		if err := r.cleanupTaskSourceWatches(ctx, task); err != nil {
 			log.Warn().Err(err).Str("run_id", runID).Msg("failed to clean up parent source watches after handoff to subtasks")
 		}
 		return nil
 	}
-	if !sourceWatchArmed && !settlement.waitingForInput && !existingWatchesActive {
+	if !sourceWatchArmed && !hasWatches && !settlement.waitingForInput {
 		if err := r.cleanupTaskSourceWatches(ctx, task); err != nil {
 			log.Warn().Err(err).Str("run_id", runID).Msg("failed to clean up source watches")
 		}
@@ -761,6 +764,23 @@ func correlationKeyForWatch(req *types.SourceWatchRequest) string {
 		return req.EntityKey
 	}
 	return ""
+}
+
+func sourceWatchRequestsFromDB(watches []repository.TaskSourceWatch) []*types.SourceWatchRequest {
+	requests := make([]*types.SourceWatchRequest, 0, len(watches))
+	for _, w := range watches {
+		req := &types.SourceWatchRequest{
+			Integration: w.Integration,
+			Reason:      w.Reason,
+		}
+		if strings.EqualFold(w.Integration, string(types.SourceGmail)) {
+			req.ThreadID = w.CorrelationKey
+		} else {
+			req.EntityKey = w.CorrelationKey
+		}
+		requests = append(requests, req)
+	}
+	return requests
 }
 
 func correlationWatchesFromRequests(requests []*types.SourceWatchRequest) []repository.TaskSourceWatch {

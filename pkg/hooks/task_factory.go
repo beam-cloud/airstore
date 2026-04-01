@@ -28,11 +28,17 @@ type SourceWatchFinder interface {
 	FindTasksByCorrelationKeys(ctx context.Context, integration string, keys []string) ([]repository.TaskSourceWatchMatch, error)
 }
 
+// TaskInputSubmitter delivers input to a task (used to wake sleeping tasks).
+type TaskInputSubmitter interface {
+	SubmitTaskInput(ctx context.Context, workspaceID uint, taskID string, kind types.InputKind, action *types.TaskInputAction, message, idempotencyKey string, items []types.ItemDecision) (*types.AgentTask, error)
+}
+
 // TaskFactory bridges hook events into the agent orchestration pipeline.
 type TaskFactory struct {
-	agents            *orchestration.AgentAPI
-	sourceWatchFinder SourceWatchFinder
-	contextEnricher   ContextEnricher
+	agents              *orchestration.AgentAPI
+	sourceWatchFinder   SourceWatchFinder
+	contextEnricher     ContextEnricher
+	inputSubmitterForTest TaskInputSubmitter
 }
 
 func NewTaskFactory(_ repository.BackendRepository, _ repository.TaskQueue, _ string, agents *orchestration.AgentAPI) *TaskFactory {
@@ -143,8 +149,16 @@ func (f *TaskFactory) spawnTask(
 // source watches matching this event's correlation keys. If matches
 // are found, delivers input to wake those tasks and returns true if
 // ALL keys were matched (meaning no new task spawn is needed).
+func (f *TaskFactory) submitTaskInput() TaskInputSubmitter {
+	if f.inputSubmitterForTest != nil {
+		return f.inputSubmitterForTest
+	}
+	return f.agents
+}
+
 func (f *TaskFactory) routeToSleepingTasks(ctx context.Context, hook *types.Hook, data map[string]any) bool {
-	if f.sourceWatchFinder == nil || f.agents == nil {
+	submitter := f.submitTaskInput()
+	if f.sourceWatchFinder == nil || submitter == nil {
 		return false
 	}
 
@@ -192,7 +206,7 @@ func (f *TaskFactory) routeToSleepingTasks(ctx context.Context, hook *types.Hook
 			sourceWakeInputPrefix,
 			match.TaskID, match.CorrelationKey, anyToString(data["new_items_hash"]))
 
-		_, err := f.agents.SubmitTaskInput(
+		_, err := submitter.SubmitTaskInput(
 			ctx,
 			match.WorkspaceID,
 			match.TaskID,

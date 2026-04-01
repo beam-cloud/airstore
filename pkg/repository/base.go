@@ -315,6 +315,8 @@ type BackendRepository interface {
 	UpsertTaskSourceWatches(ctx context.Context, workspaceID uint, taskID string, watches []TaskSourceWatch) error
 	FindTasksByCorrelationKeys(ctx context.Context, integration string, keys []string) ([]TaskSourceWatchMatch, error)
 	DeleteTaskSourceWatches(ctx context.Context, taskID string) error
+	HasTaskSourceWatches(ctx context.Context, taskID string) bool
+	GetTaskSourceWatches(ctx context.Context, taskID string) ([]TaskSourceWatch, error)
 
 	// Database access
 	DB() *sql.DB

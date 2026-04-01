@@ -739,9 +739,15 @@ func (g *Gateway) registerServices() error {
 		}
 
 		// Source poller: refreshes watched source queries so hooks fire on new results
+		var sourcePoller *hooks.SourcePoller
 		if g.RedisClient != nil {
-			sourcePoller := hooks.NewSourcePoller(filesystemStore, sourceService, g.RedisClient)
+			sourcePoller = hooks.NewSourcePoller(filesystemStore, sourceService, g.RedisClient)
 			go sourcePoller.Start(g.ctx)
+		}
+
+		if g.Config.DebugMode {
+			apiv1.NewDebugGroup(agentAPIRoot.Group("/debug"), sourceService, sourcePoller)
+			log.Info().Msg("debug endpoints registered (debug mode enabled)")
 		}
 
 		// Cron scheduler: fires due scheduled tasks as agent tasks

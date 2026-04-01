@@ -232,3 +232,35 @@ func (r *Registry) Has(name string) bool {
 	_, ok := r.providers[name]
 	return ok
 }
+
+// EventInjector allows injecting synthetic query results for a task,
+// bypassing the real provider. Used in test mode to simulate source events
+// through the real pipeline (poller → refresh → baseline diff → wake).
+type EventInjector interface {
+	InjectItems(taskID string, items []QueryResult)
+	DrainItems(taskID string) []QueryResult
+}
+
+// MemoryEventInjector is an in-memory EventInjector.
+type MemoryEventInjector struct {
+	mu    sync.Mutex
+	items map[string][]QueryResult
+}
+
+func NewMemoryEventInjector() *MemoryEventInjector {
+	return &MemoryEventInjector{items: make(map[string][]QueryResult)}
+}
+
+func (m *MemoryEventInjector) InjectItems(taskID string, items []QueryResult) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.items[taskID] = append(m.items[taskID], items...)
+}
+
+func (m *MemoryEventInjector) DrainItems(taskID string) []QueryResult {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	items := m.items[taskID]
+	delete(m.items, taskID)
+	return items
+}

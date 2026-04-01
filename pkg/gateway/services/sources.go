@@ -65,6 +65,7 @@ type SourceService struct {
 	seenTracker     *hooks.SeenTracker
 	taskWaker       TaskWaker
 	contextEnricher hooks.ContextEnricher
+	eventInjector   sources.EventInjector
 
 	// Compression middleware (optional).
 	compressor      compression.ContextCompressor
@@ -99,6 +100,10 @@ func (s *SourceService) SetTaskWaker(waker TaskWaker) {
 
 func (s *SourceService) SetContextEnricher(enricher hooks.ContextEnricher) {
 	s.contextEnricher = enricher
+}
+
+func (s *SourceService) SetEventInjector(injector sources.EventInjector) {
+	s.eventInjector = injector
 }
 
 func WithRecorder(recorder instrumentation.AccessRecorder) SourceServiceOption {
