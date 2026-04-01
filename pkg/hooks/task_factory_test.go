@@ -1,6 +1,7 @@
 package hooks
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -8,27 +9,48 @@ import (
 	"github.com/beam-cloud/airstore/pkg/types"
 )
 
+// --- mocks for routeToSleepingTasks tests ---
+
+type mockSourceWatchFinder struct {
+	matches []repository.TaskSourceWatchMatch
+}
+
+func (m *mockSourceWatchFinder) FindTasksByCorrelationKeys(_ context.Context, _ string, keys []string) ([]repository.TaskSourceWatchMatch, error) {
+	keySet := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		keySet[strings.TrimSpace(k)] = true
+	}
+	var filtered []repository.TaskSourceWatchMatch
+	for _, match := range m.matches {
+		if keySet[match.CorrelationKey] {
+			filtered = append(filtered, match)
+		}
+	}
+	return filtered, nil
+}
+
+type wakeRecord struct {
+	workspaceID uint
+	taskID      string
+	message     string
+}
+
+type mockInputSubmitter struct {
+	wakes []wakeRecord
+}
+
+func (m *mockInputSubmitter) SubmitTaskInput(_ context.Context, workspaceID uint, taskID string, _ types.InputKind, _ *types.TaskInputAction, message, _ string, _ []types.ItemDecision) (*types.AgentTask, error) {
+	m.wakes = append(m.wakes, wakeRecord{workspaceID: workspaceID, taskID: taskID, message: message})
+	return &types.AgentTask{ID: taskID}, nil
+}
+
+// --- preferSourceWatchMatches tests ---
+
 func TestPreferSourceWatchMatchesPrefersChildTaskForSameCorrelationKey(t *testing.T) {
 	matches := []repository.TaskSourceWatchMatch{
-		{
-			WorkspaceID:    7,
-			TaskID:         "parent-task",
-			CorrelationKey: "thread-123",
-			Reason:         "Aggregate monitoring",
-		},
-		{
-			WorkspaceID:    7,
-			TaskID:         "child-task",
-			CorrelationKey: "thread-123",
-			Reason:         "Watch Luke thread",
-			ParentTaskID:   "parent-task",
-		},
-		{
-			WorkspaceID:    7,
-			TaskID:         "other-thread-task",
-			CorrelationKey: "thread-456",
-			Reason:         "Another thread",
-		},
+		{WorkspaceID: 7, TaskID: "parent-task", CorrelationKey: "thread-123", Reason: "Aggregate monitoring"},
+		{WorkspaceID: 7, TaskID: "child-task", CorrelationKey: "thread-123", Reason: "Watch Luke thread", ParentTaskID: "parent-task"},
+		{WorkspaceID: 7, TaskID: "other-thread-task", CorrelationKey: "thread-456", Reason: "Another thread"},
 	}
 
 	selected := preferSourceWatchMatches(matches)
@@ -38,11 +60,207 @@ func TestPreferSourceWatchMatchesPrefersChildTaskForSameCorrelationKey(t *testin
 	if got, want := selected[0].TaskID, "child-task"; got != want {
 		t.Fatalf("selected task for thread-123 = %q, want %q", got, want)
 	}
-	if got, want := selected[0].CorrelationKey, "thread-123"; got != want {
-		t.Fatalf("selected key = %q, want %q", got, want)
-	}
 	if got, want := selected[1].TaskID, "other-thread-task"; got != want {
 		t.Fatalf("selected task for thread-456 = %q, want %q", got, want)
+	}
+}
+
+func TestPreferSourceWatchMatchesThreeChildrenUniqueKeys(t *testing.T) {
+	matches := []repository.TaskSourceWatchMatch{
+		{WorkspaceID: 7, TaskID: "child-alice", CorrelationKey: "thread-A", ParentTaskID: "parent"},
+		{WorkspaceID: 7, TaskID: "child-bob", CorrelationKey: "thread-B", ParentTaskID: "parent"},
+		{WorkspaceID: 7, TaskID: "child-carol", CorrelationKey: "thread-C", ParentTaskID: "parent"},
+	}
+
+	selected := preferSourceWatchMatches(matches)
+	if got, want := len(selected), 3; got != want {
+		t.Fatalf("selected count = %d, want %d", got, want)
+	}
+	byKey := make(map[string]string)
+	for _, m := range selected {
+		byKey[m.CorrelationKey] = m.TaskID
+	}
+	for _, tc := range []struct{ key, task string }{
+		{"thread-A", "child-alice"},
+		{"thread-B", "child-bob"},
+		{"thread-C", "child-carol"},
+	} {
+		if byKey[tc.key] != tc.task {
+			t.Fatalf("key %q → task %q, want %q", tc.key, byKey[tc.key], tc.task)
+		}
+	}
+}
+
+func TestPreferSourceWatchMatchesParentStaleWatchesChildrenPreferred(t *testing.T) {
+	matches := []repository.TaskSourceWatchMatch{
+		{WorkspaceID: 7, TaskID: "parent", CorrelationKey: "thread-A"},
+		{WorkspaceID: 7, TaskID: "parent", CorrelationKey: "thread-B"},
+		{WorkspaceID: 7, TaskID: "parent", CorrelationKey: "thread-C"},
+		{WorkspaceID: 7, TaskID: "child-alice", CorrelationKey: "thread-A", ParentTaskID: "parent"},
+		{WorkspaceID: 7, TaskID: "child-bob", CorrelationKey: "thread-B", ParentTaskID: "parent"},
+		{WorkspaceID: 7, TaskID: "child-carol", CorrelationKey: "thread-C", ParentTaskID: "parent"},
+	}
+
+	selected := preferSourceWatchMatches(matches)
+	if got, want := len(selected), 3; got != want {
+		t.Fatalf("selected count = %d, want %d", got, want)
+	}
+	for _, m := range selected {
+		if m.TaskID == "parent" {
+			t.Fatalf("parent should never be selected when child exists for key %q", m.CorrelationKey)
+		}
+	}
+}
+
+func TestPreferSourceWatchMatchesSingleKeyOneChild(t *testing.T) {
+	matches := []repository.TaskSourceWatchMatch{
+		{WorkspaceID: 7, TaskID: "parent", CorrelationKey: "thread-A"},
+		{WorkspaceID: 7, TaskID: "child-alice", CorrelationKey: "thread-A", ParentTaskID: "parent"},
+	}
+
+	selected := preferSourceWatchMatches(matches)
+	if got, want := len(selected), 1; got != want {
+		t.Fatalf("selected count = %d, want %d", got, want)
+	}
+	if got, want := selected[0].TaskID, "child-alice"; got != want {
+		t.Fatalf("selected = %q, want %q", got, want)
+	}
+}
+
+// --- routeToSleepingTasks integration tests ---
+
+func TestRouteToSleepingTasksWakesOnlyCorrectChild(t *testing.T) {
+	finder := &mockSourceWatchFinder{
+		matches: []repository.TaskSourceWatchMatch{
+			{WorkspaceID: 7, TaskID: "child-alice", CorrelationKey: "thread-A", ParentTaskID: "parent"},
+			{WorkspaceID: 7, TaskID: "child-bob", CorrelationKey: "thread-B", ParentTaskID: "parent"},
+			{WorkspaceID: 7, TaskID: "child-carol", CorrelationKey: "thread-C", ParentTaskID: "parent"},
+		},
+	}
+	submitter := &mockInputSubmitter{}
+	factory := &TaskFactory{
+		sourceWatchFinder:     finder,
+		inputSubmitterForTest: submitter,
+	}
+
+	hook := &types.Hook{WorkspaceId: 7}
+	data := map[string]any{
+		"integration":      "gmail",
+		"correlation_keys": "thread-B",
+		"new_items":        "New reply from Bob",
+	}
+
+	routed := factory.routeToSleepingTasks(context.Background(), hook, data)
+	if !routed {
+		t.Fatal("routeToSleepingTasks should return true when all keys matched")
+	}
+	if got, want := len(submitter.wakes), 1; got != want {
+		t.Fatalf("wake count = %d, want %d", got, want)
+	}
+	if got, want := submitter.wakes[0].taskID, "child-bob"; got != want {
+		t.Fatalf("woke task = %q, want %q (only Bob's thread replied)", got, want)
+	}
+}
+
+func TestRouteToSleepingTasksChildOverParentWithStaleWatches(t *testing.T) {
+	finder := &mockSourceWatchFinder{
+		matches: []repository.TaskSourceWatchMatch{
+			{WorkspaceID: 7, TaskID: "parent", CorrelationKey: "thread-A"},
+			{WorkspaceID: 7, TaskID: "child-alice", CorrelationKey: "thread-A", ParentTaskID: "parent"},
+		},
+	}
+	submitter := &mockInputSubmitter{}
+	factory := &TaskFactory{
+		sourceWatchFinder:     finder,
+		inputSubmitterForTest: submitter,
+	}
+
+	hook := &types.Hook{WorkspaceId: 7}
+	data := map[string]any{
+		"integration":      "gmail",
+		"correlation_keys": "thread-A",
+		"new_items":        "Reply to Alice thread",
+	}
+
+	routed := factory.routeToSleepingTasks(context.Background(), hook, data)
+	if !routed {
+		t.Fatal("expected all keys matched")
+	}
+	if got, want := len(submitter.wakes), 1; got != want {
+		t.Fatalf("wake count = %d, want %d", got, want)
+	}
+	if submitter.wakes[0].taskID == "parent" {
+		t.Fatal("parent should NOT be woken — child should be preferred")
+	}
+	if got, want := submitter.wakes[0].taskID, "child-alice"; got != want {
+		t.Fatalf("woke = %q, want %q", got, want)
+	}
+}
+
+func TestRouteToSleepingTasksMultiKeyEventWakesSeparateChildren(t *testing.T) {
+	finder := &mockSourceWatchFinder{
+		matches: []repository.TaskSourceWatchMatch{
+			{WorkspaceID: 7, TaskID: "child-alice", CorrelationKey: "thread-A", ParentTaskID: "parent"},
+			{WorkspaceID: 7, TaskID: "child-bob", CorrelationKey: "thread-B", ParentTaskID: "parent"},
+		},
+	}
+	submitter := &mockInputSubmitter{}
+	factory := &TaskFactory{
+		sourceWatchFinder:     finder,
+		inputSubmitterForTest: submitter,
+	}
+
+	hook := &types.Hook{WorkspaceId: 7}
+	data := map[string]any{
+		"integration":      "gmail",
+		"correlation_keys": "thread-A,thread-B",
+		"new_items":        "Replies on both threads",
+	}
+
+	routed := factory.routeToSleepingTasks(context.Background(), hook, data)
+	if !routed {
+		t.Fatal("expected all keys matched")
+	}
+	if got, want := len(submitter.wakes), 2; got != want {
+		t.Fatalf("wake count = %d, want %d", got, want)
+	}
+	wokenTasks := map[string]bool{}
+	for _, w := range submitter.wakes {
+		wokenTasks[w.taskID] = true
+	}
+	if !wokenTasks["child-alice"] {
+		t.Fatal("child-alice should have been woken for thread-A")
+	}
+	if !wokenTasks["child-bob"] {
+		t.Fatal("child-bob should have been woken for thread-B")
+	}
+}
+
+func TestRouteToSleepingTasksUnmatchedKeyReturnsFalse(t *testing.T) {
+	finder := &mockSourceWatchFinder{
+		matches: []repository.TaskSourceWatchMatch{
+			{WorkspaceID: 7, TaskID: "child-alice", CorrelationKey: "thread-A", ParentTaskID: "parent"},
+		},
+	}
+	submitter := &mockInputSubmitter{}
+	factory := &TaskFactory{
+		sourceWatchFinder:     finder,
+		inputSubmitterForTest: submitter,
+	}
+
+	hook := &types.Hook{WorkspaceId: 7}
+	data := map[string]any{
+		"integration":      "gmail",
+		"correlation_keys": "thread-A,thread-UNKNOWN",
+		"new_items":        "Reply",
+	}
+
+	routed := factory.routeToSleepingTasks(context.Background(), hook, data)
+	if routed {
+		t.Fatal("should return false when not all keys are matched (thread-UNKNOWN has no watcher)")
+	}
+	if got := len(submitter.wakes); got != 1 {
+		t.Fatalf("wake count = %d, want 1 (thread-A child should still wake)", got)
 	}
 }
 

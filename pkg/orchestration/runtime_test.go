@@ -26,6 +26,7 @@ type finalizeRunAttemptBackend struct {
 	upsertWatchCalls  int
 	upsertWatchErr    error
 	deleteWatchCalls  int
+	storedWatches     []repository.TaskSourceWatch
 }
 
 func (b *finalizeRunAttemptBackend) GetAgentRunByID(_ context.Context, runID string) (*types.AgentRun, error) {
@@ -139,9 +140,18 @@ func (b *finalizeRunAttemptBackend) SleepTaskWithOutbox(
 	return b.run != nil && b.run.ID == expectedRunID, nil
 }
 
-func (b *finalizeRunAttemptBackend) UpsertTaskSourceWatches(_ context.Context, _ uint, _ string, _ []repository.TaskSourceWatch) error {
+func (b *finalizeRunAttemptBackend) UpsertTaskSourceWatches(_ context.Context, _ uint, _ string, watches []repository.TaskSourceWatch) error {
 	b.upsertWatchCalls++
+	b.storedWatches = append(b.storedWatches[:0], watches...)
 	return b.upsertWatchErr
+}
+
+func (b *finalizeRunAttemptBackend) HasTaskSourceWatches(_ context.Context, _ string) bool {
+	return len(b.storedWatches) > 0 || b.upsertWatchCalls > 0
+}
+
+func (b *finalizeRunAttemptBackend) GetTaskSourceWatches(_ context.Context, _ string) ([]repository.TaskSourceWatch, error) {
+	return b.storedWatches, nil
 }
 
 func (b *finalizeRunAttemptBackend) DeleteTaskSourceWatches(_ context.Context, _ string) error {
@@ -634,8 +644,121 @@ func TestFinalizeRunAttemptCleansUpParentWatchesWhenFanoutHandsOffThread(t *test
 	if got, want := backend.upsertWatchCalls, 0; got != want {
 		t.Fatalf("parent watch upserts = %d, want %d", got, want)
 	}
-	if got, want := backend.sleepCalls, 0; got != want {
+	if got, want := backend.sleepCalls, 1; got != want {
+		t.Fatalf("sleep calls = %d, want %d (parent should sleep after fan-out)", got, want)
+	}
+	if got, want := task.State, types.AgentTaskStateSleeping; got != want {
+		t.Fatalf("parent state = %q, want %q", got, want)
+	}
+}
+
+func TestFinalizeRunAttemptSleepsWhenDBHasActiveWatches(t *testing.T) {
+	runID := "run-has-watches"
+	task := &types.AgentTask{
+		ID:          "task-has-watches",
+		WorkspaceID: 45,
+		State:       types.AgentTaskStateRunning,
+		TargetRunID: &runID,
+	}
+	backend := &finalizeRunAttemptBackend{
+		run: &types.AgentRun{
+			ID:           runID,
+			WorkspaceID:  task.WorkspaceID,
+			OriginTaskID: task.ID,
+			Status:       types.AgentRunStatusRunning,
+		},
+		task:              task,
+		currentRunUpdated: true,
+		storedWatches: []repository.TaskSourceWatch{
+			{Integration: "gmail", CorrelationKey: "thread-abc123", Reason: "Monitor reply from Luke"},
+		},
+	}
+	registrar := &emptyRuntimeSourceWatchRegistrar{}
+	lifecycle := NewTaskLifecycle(backend, nil, nil)
+	lifecycle.SetOutcomeProjector(nil)
+	loops := &RuntimeLoops{
+		backend:              backend,
+		sourceWatchRegistrar: registrar,
+		lifecycle:            lifecycle,
+	}
+	attempt := &types.AgentRunAttempt{
+		ID:     "attempt-has-watches",
+		RunID:  runID,
+		Status: types.AgentAttemptStatusRunning,
+	}
+
+	err := loops.finalizeRunAttempt(context.Background(), attempt, "exec-has-watches", 0, "", nil)
+	if err != nil {
+		t.Fatalf("finalizeRunAttempt returned error: %v", err)
+	}
+	if got, want := backend.sleepCalls, 1; got != want {
 		t.Fatalf("sleep calls = %d, want %d", got, want)
+	}
+	if got, want := task.State, types.AgentTaskStateSleeping; got != want {
+		t.Fatalf("task state = %q, want %q", got, want)
+	}
+	if got, want := registrar.cleanupCalls, 0; got != want {
+		t.Fatalf("cleanup calls = %d, want %d", got, want)
+	}
+	if got, want := backend.deleteWatchCalls, 0; got != want {
+		t.Fatalf("delete watch calls = %d, want %d", got, want)
+	}
+	if backend.sleptWakeReason == "" {
+		t.Fatal("expected non-empty wake reason")
+	}
+	if !strings.Contains(backend.sleptWakeReason, "Luke") {
+		t.Fatalf("wake reason should reference watch entity, got %q", backend.sleptWakeReason)
+	}
+}
+
+func TestFinalizeRunAttemptDBWatchesBuildThreadSpecificPrompt(t *testing.T) {
+	runID := "run-thread-prompt"
+	task := &types.AgentTask{
+		ID:          "task-thread-prompt",
+		WorkspaceID: 50,
+		State:       types.AgentTaskStateRunning,
+		TargetRunID: &runID,
+	}
+	backend := &finalizeRunAttemptBackend{
+		run: &types.AgentRun{
+			ID:           runID,
+			WorkspaceID:  task.WorkspaceID,
+			OriginTaskID: task.ID,
+			Status:       types.AgentRunStatusRunning,
+		},
+		task:              task,
+		currentRunUpdated: true,
+		storedWatches: []repository.TaskSourceWatch{
+			{Integration: "gmail", CorrelationKey: "thread-xyz789", Reason: "Waiting for Alice reply"},
+		},
+	}
+	registrar := &emptyRuntimeSourceWatchRegistrar{}
+	lifecycle := NewTaskLifecycle(backend, nil, nil)
+	lifecycle.SetOutcomeProjector(nil)
+	loops := &RuntimeLoops{
+		backend:              backend,
+		sourceWatchRegistrar: registrar,
+		lifecycle:            lifecycle,
+	}
+	attempt := &types.AgentRunAttempt{
+		ID:     "attempt-thread-prompt",
+		RunID:  runID,
+		Status: types.AgentAttemptStatusRunning,
+	}
+
+	err := loops.finalizeRunAttempt(context.Background(), attempt, "exec-thread-prompt", 0, "", nil)
+	if err != nil {
+		t.Fatalf("finalizeRunAttempt returned error: %v", err)
+	}
+	if got, want := task.State, types.AgentTaskStateSleeping; got != want {
+		t.Fatalf("task state = %q, want %q", got, want)
+	}
+	if task.WakeReason == nil || *task.WakeReason == "" {
+		t.Fatal("expected non-empty wake reason with thread context")
+	}
+	wakeReason := *task.WakeReason
+	if !strings.Contains(wakeReason, "Alice") {
+		t.Fatalf("wake reason should reference entity from watch reason, got %q", wakeReason)
 	}
 }
 
