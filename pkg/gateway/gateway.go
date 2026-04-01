@@ -745,7 +745,10 @@ func (g *Gateway) registerServices() error {
 			go sourcePoller.Start(g.ctx)
 		}
 
-		apiv1.NewDebugGroup(agentAPIRoot.Group("/debug"), sourceService, sourcePoller)
+		if g.Config.DebugMode {
+			apiv1.NewDebugGroup(agentAPIRoot.Group("/debug"), sourceService, sourcePoller)
+			log.Info().Msg("debug endpoints registered (debug mode enabled)")
+		}
 
 		// Cron scheduler: fires due scheduled tasks as agent tasks
 		cronScheduler := orchestration.NewCronScheduler(g.BackendRepo, agentAPI)
