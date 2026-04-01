@@ -201,15 +201,28 @@ func (e *emptyRuntimeSourceWatchRegistrar) HasTaskSourceWatches(context.Context,
 }
 
 type blockerRuntimeSourceWatchRegistrar struct {
-	cleanupCalls int
+	cleanupCalls  int
+	registerCalls []runtimeSourceWatchRegisterCall
+}
+
+type runtimeSourceWatchRegisterCall struct {
+	taskID   string
+	requests []*types.SourceWatchRequest
 }
 
 func (b *blockerRuntimeSourceWatchRegistrar) RegisterTaskSourceWatches(
-	context.Context,
-	*types.AgentTask,
-	*types.RunExecutionWakeSignal,
-	[]*types.SourceWatchRequest,
+	_ context.Context,
+	task *types.AgentTask,
+	_ *types.RunExecutionWakeSignal,
+	requests []*types.SourceWatchRequest,
 ) (*types.TaskBlockerSpec, error) {
+	call := runtimeSourceWatchRegisterCall{
+		requests: append([]*types.SourceWatchRequest(nil), requests...),
+	}
+	if task != nil {
+		call.taskID = task.ID
+	}
+	b.registerCalls = append(b.registerCalls, call)
 	return types.NewSourceWatchBlockerSpec(
 		"Waiting for source updates.",
 		"Waiting for source updates.",
@@ -355,13 +368,16 @@ func TestFinalizeRunAttemptSleepsWhenSourceWatchFollowUpHasWakeSignal(t *testing
 			OriginTaskID: task.ID,
 			Status:       types.AgentRunStatusRunning,
 		},
-		task: task,
+		task:              task,
+		currentRunUpdated: true,
 	}
 	registrar := &blockerRuntimeSourceWatchRegistrar{}
+	lifecycle := NewTaskLifecycle(backend, nil, nil)
+	lifecycle.SetOutcomeProjector(nil)
 	loops := &RuntimeLoops{
 		backend:              backend,
 		sourceWatchRegistrar: registrar,
-		lifecycle:            NewTaskLifecycle(backend, nil, nil),
+		lifecycle:            lifecycle,
 	}
 	attempt := &types.AgentRunAttempt{
 		ID:     "attempt-sleep-source-watch",
@@ -419,13 +435,16 @@ func TestFinalizeRunAttemptSynthesizesWakeForSourceWatchFollowUp(t *testing.T) {
 			OriginTaskID: task.ID,
 			Status:       types.AgentRunStatusRunning,
 		},
-		task: task,
+		task:              task,
+		currentRunUpdated: true,
 	}
 	registrar := &blockerRuntimeSourceWatchRegistrar{}
+	lifecycle := NewTaskLifecycle(backend, nil, nil)
+	lifecycle.SetOutcomeProjector(nil)
 	loops := &RuntimeLoops{
 		backend:              backend,
 		sourceWatchRegistrar: registrar,
-		lifecycle:            NewTaskLifecycle(backend, nil, nil),
+		lifecycle:            lifecycle,
 	}
 	attempt := &types.AgentRunAttempt{
 		ID:     "attempt-synth-source-watch",
@@ -461,6 +480,162 @@ func TestFinalizeRunAttemptSynthesizesWakeForSourceWatchFollowUp(t *testing.T) {
 	}
 	if got, want := backend.deleteWatchCalls, 0; got != want {
 		t.Fatalf("delete watch calls = %d, want %d", got, want)
+	}
+}
+
+func TestFinalizeRunAttemptPreservesWaitingWhenSourceWatchFollowUpAlsoArmed(t *testing.T) {
+	runID := "run-waiting-source-watch"
+	task := &types.AgentTask{
+		ID:          "task-waiting-source-watch",
+		WorkspaceID: 31,
+		State:       types.AgentTaskStateRunning,
+		TargetRunID: &runID,
+	}
+	backend := &finalizeRunAttemptBackend{
+		run: &types.AgentRun{
+			ID:           runID,
+			WorkspaceID:  task.WorkspaceID,
+			OriginTaskID: task.ID,
+			Status:       types.AgentRunStatusRunning,
+		},
+		task:              task,
+		currentRunUpdated: true,
+	}
+	registrar := &blockerRuntimeSourceWatchRegistrar{}
+	lifecycle := NewTaskLifecycle(backend, nil, nil)
+	lifecycle.SetOutcomeProjector(nil)
+	loops := &RuntimeLoops{
+		backend:              backend,
+		sourceWatchRegistrar: registrar,
+		lifecycle:            lifecycle,
+	}
+	attempt := &types.AgentRunAttempt{
+		ID:     "attempt-waiting-source-watch",
+		RunID:  runID,
+		Status: types.AgentAttemptStatusRunning,
+	}
+
+	err := loops.finalizeRunAttempt(context.Background(), attempt, "exec-waiting-source-watch", 0, "", &types.RunExecutionPostRun{
+		WaitingForInput: true,
+		SourceWatchRequests: []*types.SourceWatchRequest{{
+			Integration: string(types.SourceGmail),
+			ThreadID:    "thread-waiting",
+			EntityLabel: "Thread needing approval",
+			Reason:      "Monitor the thread while waiting for approval",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("finalizeRunAttempt returned error: %v", err)
+	}
+	if got, want := task.State, types.AgentTaskStateWaiting; got != want {
+		t.Fatalf("task state = %q, want %q", got, want)
+	}
+	if got, want := backend.sleepCalls, 0; got != want {
+		t.Fatalf("sleep calls = %d, want %d", got, want)
+	}
+	if got, want := backend.upsertWatchCalls, 1; got != want {
+		t.Fatalf("upsert watch calls = %d, want %d", got, want)
+	}
+	if got, want := len(registrar.registerCalls), 1; got != want {
+		t.Fatalf("register calls = %d, want %d", got, want)
+	}
+}
+
+func TestPartitionSourceWatchRequestsForSubtasksMovesMatchedThreadToChild(t *testing.T) {
+	requests := []*types.SourceWatchRequest{
+		{
+			Integration:    string(types.SourceGmail),
+			ThreadID:       "thread-child",
+			EntityLabel:    "Luke Lombardi",
+			SourceOutputID: "out-child",
+		},
+		{
+			Integration: string(types.SourceGmail),
+			ThreadID:    "thread-parent",
+			EntityLabel: "Parent aggregate",
+		},
+	}
+	subtasks := []*types.SubtaskRequest{
+		{
+			SourceOutputID: "out-child",
+			EntityLabel:    "Luke Lombardi",
+			Prompt:         "Follow up with Luke",
+		},
+	}
+
+	assignments, parentRequests := partitionSourceWatchRequestsForSubtasks(requests, subtasks)
+	if got, want := len(assignments[0]), 1; got != want {
+		t.Fatalf("child watch count = %d, want %d", got, want)
+	}
+	if got, want := assignments[0][0].ThreadID, "thread-child"; got != want {
+		t.Fatalf("child thread = %q, want %q", got, want)
+	}
+	if got, want := len(parentRequests), 1; got != want {
+		t.Fatalf("parent watch count = %d, want %d", got, want)
+	}
+	if got, want := parentRequests[0].ThreadID, "thread-parent"; got != want {
+		t.Fatalf("parent thread = %q, want %q", got, want)
+	}
+}
+
+func TestFinalizeRunAttemptCleansUpParentWatchesWhenFanoutHandsOffThread(t *testing.T) {
+	runID := "run-parent-handoff"
+	task := &types.AgentTask{
+		ID:          "task-parent-handoff",
+		WorkspaceID: 41,
+		State:       types.AgentTaskStateRunning,
+		TargetRunID: &runID,
+	}
+	backend := &finalizeRunAttemptBackend{
+		run: &types.AgentRun{
+			ID:           runID,
+			WorkspaceID:  task.WorkspaceID,
+			OriginTaskID: task.ID,
+			Status:       types.AgentRunStatusRunning,
+		},
+		task:              task,
+		currentRunUpdated: true,
+	}
+	registrar := &blockerRuntimeSourceWatchRegistrar{}
+	lifecycle := NewTaskLifecycle(backend, nil, nil)
+	lifecycle.SetOutcomeProjector(nil)
+	loops := &RuntimeLoops{
+		backend:              backend,
+		sourceWatchRegistrar: registrar,
+		lifecycle:            lifecycle,
+	}
+	attempt := &types.AgentRunAttempt{
+		ID:     "attempt-parent-handoff",
+		RunID:  runID,
+		Status: types.AgentAttemptStatusRunning,
+	}
+
+	err := loops.finalizeRunAttempt(context.Background(), attempt, "exec-parent-handoff", 0, "", &types.RunExecutionPostRun{
+		SubtaskRequests: []*types.SubtaskRequest{{
+			SourceOutputID:   "out-child",
+			EntityLabel:      "Luke Lombardi",
+			Prompt:           "Monitor Luke's Gmail thread",
+			WakeDelayMinutes: 60,
+		}},
+		SourceWatchRequests: []*types.SourceWatchRequest{{
+			Integration:    string(types.SourceGmail),
+			ThreadID:       "thread-child",
+			EntityLabel:    "Luke Lombardi",
+			SourceOutputID: "out-child",
+			Reason:         "Monitor Luke's Gmail thread",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("finalizeRunAttempt returned error: %v", err)
+	}
+	if got, want := registrar.cleanupCalls, 1; got != want {
+		t.Fatalf("cleanup calls = %d, want %d", got, want)
+	}
+	if got, want := backend.upsertWatchCalls, 0; got != want {
+		t.Fatalf("parent watch upserts = %d, want %d", got, want)
+	}
+	if got, want := backend.sleepCalls, 0; got != want {
+		t.Fatalf("sleep calls = %d, want %d", got, want)
 	}
 }
 

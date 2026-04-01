@@ -1497,7 +1497,7 @@ func (r workerSessionRunner) runTurnSession(
 						Str("policy", policy.Key).
 						Int("attempt", autoApproveAttempts).
 						Msg("auto-approving BAML-classified approval request per policy")
-					prompt = "Your approval policy auto-approves this action. Proceed immediately — execute the pending action now (send the email, publish the document, etc.). Do not ask for confirmation again."
+					prompt = "Approved. Proceed immediately — execute the pending action now. If you already created a Gmail draft in the previous step, send that existing draft using its draft_id and keep the same thread_id instead of composing a new email. Do not ask for confirmation again."
 					continue
 				}
 				addTaskExecutionContext(log.Warn(), task).

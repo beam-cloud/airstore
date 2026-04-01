@@ -861,6 +861,66 @@ func TestAcceptTaskInputSupersedesOnlyCurrentBlockerArtifacts(t *testing.T) {
 	}
 }
 
+func TestAcceptTaskInputSourceWakeDoesNotSupersedePendingApproval(t *testing.T) {
+	backend := &acceptTaskInputBackend{
+		task: &types.AgentTask{
+			ID:               "task-1",
+			WorkspaceID:      7,
+			State:            types.AgentTaskStateWaiting,
+			InputKind:        types.InputKindApproveReject,
+			CurrentBlockerID: stringPtr("blocker-1"),
+			CurrentBlocker: &types.TaskBlocker{
+				ID:        "blocker-1",
+				Kind:      types.TaskBlockerKindApproval,
+				InputKind: types.InputKindApproveReject,
+				Status:    types.TaskBlockerStatusOpen,
+				OutputIDs: []string{"out-current"},
+			},
+		},
+		outputs: map[string]*types.TaskOutput{
+			"out-current": {
+				ID:        "out-current",
+				TaskID:    "task-1",
+				Title:     "Current approval draft",
+				Status:    types.TaskOutputStatusPending,
+				CreatedAt: time.Unix(20, 0),
+				Metadata: map[string]any{
+					types.TaskOutputMetadataBlockerID:    "blocker-1",
+					types.TaskOutputMetadataBlockingKind: types.TaskOutputBlockingKindApproval,
+					types.TaskOutputMetadataInputKind:    string(types.InputKindApproveReject),
+				},
+			},
+		},
+	}
+	service := &AgentService{backend: backend}
+
+	_, err := service.AcceptTaskInput(
+		context.Background(),
+		7,
+		"task-1",
+		types.InputKindFreeText,
+		nil,
+		"New reply arrived on the watched Gmail thread.",
+		"source_wake:task-1:thread-123:hash-1",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("AcceptTaskInput returned error: %v", err)
+	}
+	if got := backend.outputs["out-current"].Status; got != types.TaskOutputStatusPending {
+		t.Fatalf("current blocker output status = %q, want pending", got)
+	}
+	if backend.resolvedBlocker != nil {
+		t.Fatalf("expected blocker to remain open, got resolution %#v", backend.resolvedBlocker)
+	}
+	if got := len(backend.appendedInputs); got != 1 {
+		t.Fatalf("append count = %d, want 1", got)
+	}
+	if got := backend.appendedInputs[0].Message; got != "New reply arrived on the watched Gmail thread." {
+		t.Fatalf("appended message = %q, want raw source wake message", got)
+	}
+}
+
 func stringPtr(value string) *string {
 	return &value
 }

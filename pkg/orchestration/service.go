@@ -39,11 +39,11 @@ type AgentService struct {
 	resultConsumerID     string
 	instanceController   *ExecutionInstanceController
 	sourceWatchRegistrar SourceWatchRegistrar
-	lifecycle    *TaskLifecycle
-	taskFlows    *TaskFlows
-	resumeBarrier *ResumeBarrier
-	runFactory    *RunFactory
-	runtimeLoops  *RuntimeLoops
+	lifecycle            *TaskLifecycle
+	taskFlows            *TaskFlows
+	resumeBarrier        *ResumeBarrier
+	runFactory           *RunFactory
+	runtimeLoops         *RuntimeLoops
 }
 
 func NewAgentService(
@@ -520,8 +520,9 @@ func shouldSupersedePendingApprovalOutputs(
 	task *types.AgentTask,
 	kind types.InputKind,
 	action *types.TaskInputAction,
+	idempotencyKey string,
 ) bool {
-	if task == nil || action != nil || kind != types.InputKindFreeText {
+	if task == nil || action != nil || kind != types.InputKindFreeText || isAutomatedSourceWakeInput(idempotencyKey) {
 		return false
 	}
 	if task.CurrentBlocker != nil {
@@ -535,8 +536,12 @@ func shouldTreatInputAsApprovalRevision(
 	task *types.AgentTask,
 	kind types.InputKind,
 	action *types.TaskInputAction,
+	idempotencyKey string,
 ) bool {
 	if task == nil {
+		return false
+	}
+	if isAutomatedSourceWakeInput(idempotencyKey) {
 		return false
 	}
 	isApproval := false
@@ -625,7 +630,11 @@ func taskBlockerResolutionForInput(
 	action *types.TaskInputAction,
 	message string,
 	items []types.ItemDecision,
+	idempotencyKey string,
 ) *types.TaskBlockerResolution {
+	if isAutomatedSourceWakeInput(idempotencyKey) {
+		return nil
+	}
 	if task == nil || task.CurrentBlocker == nil || task.CurrentBlocker.Status != types.TaskBlockerStatusOpen {
 		return nil
 	}
@@ -647,6 +656,11 @@ func taskBlockerResolutionForInput(
 		Status:         status,
 		ResolutionJSON: payload,
 	}
+}
+
+func isAutomatedSourceWakeInput(idempotencyKey string) bool {
+	idempotencyKey = strings.TrimSpace(idempotencyKey)
+	return strings.HasPrefix(idempotencyKey, "source_wake:") || strings.HasPrefix(idempotencyKey, "source_watch_hook:")
 }
 
 func (s *AgentService) supersedePendingApprovalOutputs(ctx context.Context, workspaceID uint, task *types.AgentTask) error {

@@ -4715,12 +4715,16 @@ func (b *PostgresBackend) FindTasksByCorrelationKeys(ctx context.Context, integr
 		return nil, nil
 	}
 	rows, err := b.db.QueryContext(ctx, `
-		SELECT tsw.workspace_id, tsw.task_id, tsw.correlation_key, COALESCE(tsw.reason, '')
+		SELECT tsw.workspace_id, tsw.task_id, tsw.correlation_key, COALESCE(tsw.reason, ''), COALESCE(t.parent_task_id, '')
 		FROM task_source_watches tsw
 		JOIN agent_task t ON t.id = tsw.task_id
 		WHERE tsw.integration = $1
 		  AND tsw.correlation_key = ANY($2::text[])
 		  AND t.state = 'sleeping'
+		ORDER BY tsw.correlation_key ASC,
+		         CASE WHEN t.parent_task_id IS NULL THEN 1 ELSE 0 END ASC,
+		         t.created_at DESC,
+		         t.id DESC
 	`, integration, pq.Array(keys))
 	if err != nil {
 		return nil, fmt.Errorf("find tasks by correlation keys: %w", err)
@@ -4730,7 +4734,7 @@ func (b *PostgresBackend) FindTasksByCorrelationKeys(ctx context.Context, integr
 	var matches []TaskSourceWatchMatch
 	for rows.Next() {
 		var m TaskSourceWatchMatch
-		if err := rows.Scan(&m.WorkspaceID, &m.TaskID, &m.CorrelationKey, &m.Reason); err != nil {
+		if err := rows.Scan(&m.WorkspaceID, &m.TaskID, &m.CorrelationKey, &m.Reason, &m.ParentTaskID); err != nil {
 			return nil, fmt.Errorf("scan match: %w", err)
 		}
 		matches = append(matches, m)

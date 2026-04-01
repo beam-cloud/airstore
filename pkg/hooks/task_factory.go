@@ -15,7 +15,12 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-const hookInputSource = "filesystem_hook"
+const (
+	hookInputSource                 = "filesystem_hook"
+	sourceWakeInputPrefix           = "source_wake:"
+	sourceWatchHookInputPrefix      = "source_watch_hook:"
+	systemManagedFollowupPathMarker = "/__followup__"
+)
 
 // SourceWatchFinder looks up sleeping tasks that have registered interest
 // in a particular integration entity via correlation keys (cross-workspace).
@@ -163,6 +168,7 @@ func (f *TaskFactory) routeToSleepingTasks(ctx context.Context, hook *types.Hook
 	if len(matches) == 0 {
 		return false
 	}
+	matches = preferSourceWatchMatches(matches)
 
 	newItems := strings.TrimSpace(anyToString(data["new_items"]))
 	matchedKeys := make(map[string]struct{}, len(matches))
@@ -182,7 +188,8 @@ func (f *TaskFactory) routeToSleepingTasks(ctx context.Context, hook *types.Hook
 				wakePrompt = wakePrompt + "\n\n" + viewRows
 			}
 		}
-		wakeIdempotency := fmt.Sprintf("source_wake:%s:%s:%s",
+		wakeIdempotency := fmt.Sprintf("%s%s:%s:%s",
+			sourceWakeInputPrefix,
 			match.TaskID, match.CorrelationKey, anyToString(data["new_items_hash"]))
 
 		_, err := f.agents.SubmitTaskInput(
@@ -257,6 +264,43 @@ func buildSourceWakePrompt(match repository.TaskSourceWatchMatch, integration, n
 	return b.String()
 }
 
+func preferSourceWatchMatches(matches []repository.TaskSourceWatchMatch) []repository.TaskSourceWatchMatch {
+	if len(matches) <= 1 {
+		return matches
+	}
+	selectedByKey := make(map[string]repository.TaskSourceWatchMatch, len(matches))
+	order := make([]string, 0, len(matches))
+	for _, match := range matches {
+		key := strings.TrimSpace(match.CorrelationKey)
+		if key == "" {
+			continue
+		}
+		existing, exists := selectedByKey[key]
+		if !exists {
+			selectedByKey[key] = match
+			order = append(order, key)
+			continue
+		}
+		if shouldPreferSourceWatchMatch(match, existing) {
+			selectedByKey[key] = match
+		}
+	}
+	selected := make([]repository.TaskSourceWatchMatch, 0, len(order))
+	for _, key := range order {
+		selected = append(selected, selectedByKey[key])
+	}
+	return selected
+}
+
+func shouldPreferSourceWatchMatch(candidate, existing repository.TaskSourceWatchMatch) bool {
+	candidateIsChild := strings.TrimSpace(candidate.ParentTaskID) != ""
+	existingIsChild := strings.TrimSpace(existing.ParentTaskID) != ""
+	if candidateIsChild != existingIsChild {
+		return candidateIsChild
+	}
+	return false
+}
+
 func (f *TaskFactory) deliverTaskInput(
 	ctx context.Context,
 	hook *types.Hook,
@@ -265,6 +309,9 @@ func (f *TaskFactory) deliverTaskInput(
 ) error {
 	if hook.TargetTaskID == nil || strings.TrimSpace(*hook.TargetTaskID) == "" {
 		return fmt.Errorf("hook target_task_id is required for task input delivery")
+	}
+	if isSystemManagedSourceWatchHook(hook) {
+		idempotencyKey = sourceWatchTaskInputIdempotencyKey(idempotencyKey)
 	}
 	_, err := f.agents.SubmitTaskInput(
 		ctx,
@@ -280,6 +327,24 @@ func (f *TaskFactory) deliverTaskInput(
 		return fmt.Errorf("deliver hook task input: %w", err)
 	}
 	return nil
+}
+
+func isSystemManagedSourceWatchHook(hook *types.Hook) bool {
+	if hook == nil || !hook.SystemManaged {
+		return false
+	}
+	return strings.Contains(NormalizePath(hook.Path), systemManagedFollowupPathMarker)
+}
+
+func sourceWatchTaskInputIdempotencyKey(idempotencyKey string) string {
+	idempotencyKey = strings.TrimSpace(idempotencyKey)
+	if idempotencyKey == "" {
+		return sourceWatchHookInputPrefix
+	}
+	if strings.HasPrefix(idempotencyKey, sourceWakeInputPrefix) || strings.HasPrefix(idempotencyKey, sourceWatchHookInputPrefix) {
+		return idempotencyKey
+	}
+	return sourceWatchHookInputPrefix + idempotencyKey
 }
 
 func hookIdempotencyKey(hookExternalID, eventID string, data map[string]any) string {
