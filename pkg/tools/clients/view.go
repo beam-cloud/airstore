@@ -400,20 +400,22 @@ func (c *ViewClient) updateRow(ctx context.Context, viewID string, workspaceID u
 		return WriteToolError(stdout, "cells object is empty")
 	}
 
-	// Validate status columns against schema-defined options
-	if row, err := c.store.GetRowByID(ctx, viewID, rowID); err == nil && row != nil && row.SheetID != "" && row.ComponentID != "" {
-		if v, vErr := c.getViewDefinition(ctx, workspaceID, viewID); vErr == nil && v != nil {
-			for _, sheet := range v.Definition.Sheets {
-				if sheet.ID != row.SheetID {
+	// Validate status columns against schema-defined options.
+	// Try to narrow to the exact component via row lookup; fall back to
+	// validating against ALL components so a transient row-lookup failure
+	// doesn't silently skip validation.
+	if v, vErr := c.getViewDefinition(ctx, workspaceID, viewID); vErr == nil && v != nil {
+		row, rowErr := c.store.GetRowByID(ctx, viewID, rowID)
+		for _, sheet := range v.Definition.Sheets {
+			if rowErr == nil && row != nil && row.SheetID != "" && sheet.ID != row.SheetID {
+				continue
+			}
+			for _, comp := range sheet.Components {
+				if rowErr == nil && row != nil && row.ComponentID != "" && comp.ID != row.ComponentID {
 					continue
 				}
-				for _, comp := range sheet.Components {
-					if comp.ID != row.ComponentID {
-						continue
-					}
-					if msg := validateStatusCells(cells, viewComponentColumnMeta(comp)); msg != "" {
-						return WriteToolError(stdout, msg)
-					}
+				if msg := validateStatusCells(cells, viewComponentColumnMeta(comp)); msg != "" {
+					return WriteToolError(stdout, msg)
 				}
 			}
 		}

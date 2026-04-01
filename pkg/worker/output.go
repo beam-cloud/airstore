@@ -215,8 +215,10 @@ func (w *OutputWriter) Write(p []byte) (int, error) {
 		return len(p), nil
 	}
 	select {
-	case <-w.ctx.Done():
 	case w.events <- evt:
+	case <-w.ctx.Done():
+	default:
+		log.Warn().Str("task", w.taskID).Msg("output event channel full, dropping event")
 	}
 	return len(p), nil
 }

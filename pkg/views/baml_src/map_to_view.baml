@@ -123,7 +123,7 @@ function PopulateRowCells(
     - Non-empty value → set or replace the cell (use for status transitions, new data, corrections).
     - Empty string "" → preserve whatever is already stored (use when the output has nothing new).
     - Identity fields (name, address, email): keep existing unless the output corrects them.
-    - Dates: ISO 8601 (YYYY-MM-DD). Links: full URL. Status: infer from context.
+    - Dates: ISO 8601 (YYYY-MM-DD). Links: full URL. Status: use an existing allowed value from the schema.
     - If TARGET is NEW ROW and entity_hint is empty while the output describes multiple
       top-level entities, DO NOT synthesize a summary/batch row. Return empty strings
       for every cell and an empty row_key instead.
