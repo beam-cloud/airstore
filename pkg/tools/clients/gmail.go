@@ -341,11 +341,11 @@ func stripGmailHTML(html string) string {
 }
 
 func (g *GmailClient) createDraft(ctx context.Context, token, to, subject, body, threadID string) (map[string]any, error) {
-	var inReplyTo string
+	var inReplyTo, refs string
 	if threadID != "" {
-		inReplyTo = g.fetchLastMessageID(ctx, token, threadID)
+		inReplyTo, refs = g.fetchThreadReplyHeaders(ctx, token, threadID)
 	}
-	encoded := base64.RawURLEncoding.EncodeToString([]byte(buildRawEmail(to, subject, body, inReplyTo)))
+	encoded := base64.RawURLEncoding.EncodeToString([]byte(buildRawEmail(to, subject, body, inReplyTo, refs)))
 	payload := map[string]any{
 		"message": map[string]any{
 			"raw": encoded,
@@ -377,11 +377,11 @@ func (g *GmailClient) createDraft(ctx context.Context, token, to, subject, body,
 }
 
 func (g *GmailClient) sendEmail(ctx context.Context, token, to, subject, body, threadID, draftID string) (map[string]any, error) {
-	var inReplyTo string
+	var inReplyTo, refs string
 	if threadID != "" {
-		inReplyTo = g.fetchLastMessageID(ctx, token, threadID)
+		inReplyTo, refs = g.fetchThreadReplyHeaders(ctx, token, threadID)
 	}
-	raw := base64.RawURLEncoding.EncodeToString([]byte(buildRawEmail(to, subject, body, inReplyTo)))
+	raw := base64.RawURLEncoding.EncodeToString([]byte(buildRawEmail(to, subject, body, inReplyTo, refs)))
 
 	var (
 		endpoint string
@@ -435,24 +435,46 @@ func formatGmailMessageResult(to, subject string, result map[string]any) map[str
 	return out
 }
 
-// fetchLastMessageID retrieves the RFC 2822 Message-ID header from the last
-// message in a Gmail thread. Required for proper In-Reply-To/References
-// headers when sending a reply.
-func (g *GmailClient) fetchLastMessageID(ctx context.Context, token, threadID string) string {
-	path := fmt.Sprintf("/threads/%s?format=metadata&metadataHeaders=Message-Id", threadID)
+// fetchThreadReplyHeaders retrieves Message-ID headers from a Gmail thread
+// and returns the In-Reply-To value and the full References chain for RFC 2822
+// compliant threading. Returns the Message-ID of the most recent non-self
+// message for In-Reply-To, and all Message-IDs for References.
+func (g *GmailClient) fetchThreadReplyHeaders(ctx context.Context, token, threadID string) (inReplyTo string, references string) {
+	p := fmt.Sprintf("/threads/%s?format=metadata&metadataHeaders=Message-Id", threadID)
 	var raw map[string]any
-	if err := g.api.RequestJSON(ctx, token, "GET", path, nil, &raw); err != nil {
-		return ""
+	if err := g.api.RequestJSON(ctx, token, "GET", p, nil, &raw); err != nil {
+		return "", ""
 	}
-	msgs, _ := raw["messages"].([]any)
+	return extractReplyHeaders(raw)
+}
+
+func extractReplyHeaders(threadResponse map[string]any) (inReplyTo string, references string) {
+	msgs, _ := threadResponse["messages"].([]any)
 	if len(msgs) == 0 {
-		return ""
+		return "", ""
 	}
-	last, _ := msgs[len(msgs)-1].(map[string]any)
-	if last == nil {
-		return ""
+
+	var allMessageIDs []string
+	for _, m := range msgs {
+		msg, _ := m.(map[string]any)
+		if msg == nil {
+			continue
+		}
+		if mid := extractMessageIDHeader(msg); mid != "" {
+			allMessageIDs = append(allMessageIDs, mid)
+		}
 	}
-	payload, _ := last["payload"].(map[string]any)
+	if len(allMessageIDs) == 0 {
+		return "", ""
+	}
+
+	inReplyTo = allMessageIDs[len(allMessageIDs)-1]
+	references = strings.Join(allMessageIDs, " ")
+	return inReplyTo, references
+}
+
+func extractMessageIDHeader(gmailMsg map[string]any) string {
+	payload, _ := gmailMsg["payload"].(map[string]any)
 	if payload == nil {
 		return ""
 	}
@@ -474,31 +496,47 @@ func (g *GmailClient) fetchLastMessageID(ctx context.Context, token, threadID st
 
 // --- email construction helpers ---
 
-func buildRawEmail(to, subject, body, inReplyTo string) string {
+func buildRawEmail(to, subject, body, inReplyTo, references string) string {
 	to = sanitizeHeaderValue(to)
 	subject = sanitizeHeaderValue(subject)
 	subject = repairMojibake(subject)
 	subject = subjectNormalizer.Replace(subject)
-	encodedSubject := mime.QEncoding.Encode("utf-8", subject)
 
-	var replyHeaders string
-	if inReplyTo != "" {
-		replyHeaders = fmt.Sprintf("In-Reply-To: %s\r\nReferences: %s\r\n", inReplyTo, inReplyTo)
+	var buf strings.Builder
+	buf.WriteString("MIME-Version: 1.0\r\n")
+	buf.WriteString("To: " + to + "\r\n")
+	if !utf8.ValidString(subject) || needsEncoding(subject) {
+		buf.WriteString("Subject: " + mime.QEncoding.Encode("utf-8", subject) + "\r\n")
+	} else {
+		buf.WriteString("Subject: " + subject + "\r\n")
 	}
-
-	return fmt.Sprintf(
-		"MIME-Version: 1.0\r\nTo: %s\r\nSubject: %s\r\n%sContent-Type: text/plain; charset=UTF-8\r\n\r\n%s",
-		to,
-		encodedSubject,
-		replyHeaders,
-		body,
-	)
+	if inReplyTo != "" {
+		buf.WriteString("In-Reply-To: " + inReplyTo + "\r\n")
+		refs := references
+		if refs == "" {
+			refs = inReplyTo
+		}
+		buf.WriteString("References: " + refs + "\r\n")
+	}
+	buf.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
+	buf.WriteString("\r\n")
+	buf.WriteString(body)
+	return buf.String()
 }
 
 func sanitizeHeaderValue(value string) string {
 	value = strings.ReplaceAll(value, "\r", " ")
 	value = strings.ReplaceAll(value, "\n", " ")
 	return strings.TrimSpace(value)
+}
+
+func needsEncoding(s string) bool {
+	for _, r := range s {
+		if r > 126 {
+			return true
+		}
+	}
+	return false
 }
 
 // Normalizes fancy Unicode punctuation to plain ASCII equivalents.
