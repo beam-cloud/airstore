@@ -241,7 +241,7 @@ func TestAppendSchemaGuidanceAddsSchemaBlock(t *testing.T) {
 		},
 	}}
 
-	prompt := appendSchemaGuidance("You are a helpful agent.", contexts)
+	prompt := appendSchemaGuidance("You are a helpful agent.", contexts, "")
 
 	if !strings.Contains(prompt, runtimeViewSchemaGuidanceHeader) {
 		t.Fatalf("expected schema guidance header in prompt, got:\n%s", prompt)

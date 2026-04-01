@@ -351,7 +351,7 @@ func (f *TaskFlows) AcceptTaskInput(
 	if strings.TrimSpace(message) == "" && action != nil {
 		switch *action {
 		case types.TaskInputActionApprove:
-			message = "Approved. Please proceed."
+			message = "Approved. Proceed immediately — execute the pending action now."
 		case types.TaskInputActionReject:
 			message = "Rejected. Please revise."
 		}
@@ -706,11 +706,14 @@ func (f *TaskFlows) processItemDecisions(ctx context.Context, workspaceID uint, 
 			parts = append(parts, lines)
 		}
 	}
+	if len(buckets["Approved"]) > 0 && len(buckets["Rejected"]) == 0 {
+		parts = append(parts, "Proceed immediately — execute the approved action(s) now. Do not re-create or re-describe them.")
+	}
 	if userMessage != "" {
 		parts = append(parts, userMessage)
 	}
 	if len(parts) == 0 {
-		return "Approved. Please proceed.", nil
+		return "Approved. Proceed immediately — execute the pending action now.", nil
 	}
 	return strings.Join(parts, "\n"), nil
 }
