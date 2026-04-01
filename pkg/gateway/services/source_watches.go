@@ -47,6 +47,14 @@ func (s *SourceService) RegisterTaskSourceWatches(
 	return controller.Register(ctx, wakeSignal, requests)
 }
 
+func (s *SourceService) HasTaskSourceWatches(ctx context.Context, task *types.AgentTask) bool {
+	if s == nil || s.fsStore == nil || task == nil || task.WorkspaceID == 0 || strings.TrimSpace(task.ID) == "" {
+		return false
+	}
+	queries, err := s.fsStore.ListTaskOwnedQueries(ctx, task.WorkspaceID, task.ID)
+	return err == nil && len(queries) > 0
+}
+
 func (s *SourceService) CleanupTaskSourceWatches(ctx context.Context, task *types.AgentTask) error {
 	if s == nil || s.fsStore == nil || task == nil || task.WorkspaceID == 0 || strings.TrimSpace(task.ID) == "" {
 		return nil

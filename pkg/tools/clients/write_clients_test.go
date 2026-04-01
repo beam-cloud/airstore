@@ -182,7 +182,7 @@ func TestGmailSendEmailRequiresArguments(t *testing.T) {
 }
 
 func TestBuildRawEmailSanitizesHeaderInjection(t *testing.T) {
-	raw := buildRawEmail("victim@example.com\r\nBcc: attacker@example.com", "hello\r\nX-Test: injected", "body")
+	raw := buildRawEmail("victim@example.com\r\nBcc: attacker@example.com", "hello\r\nX-Test: injected", "body", "", "")
 	if bytes.Contains([]byte(raw), []byte("\r\nBcc:")) {
 		t.Fatalf("expected CRLF header injection to be sanitized, got %q", raw)
 	}

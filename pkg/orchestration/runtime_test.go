@@ -171,6 +171,10 @@ func (f *failingRuntimeSourceWatchRegistrar) CleanupTaskSourceWatches(
 	return nil
 }
 
+func (f *failingRuntimeSourceWatchRegistrar) HasTaskSourceWatches(context.Context, *types.AgentTask) bool {
+	return false
+}
+
 type emptyRuntimeSourceWatchRegistrar struct {
 	cleanupCalls int
 }
@@ -190,6 +194,10 @@ func (e *emptyRuntimeSourceWatchRegistrar) CleanupTaskSourceWatches(
 ) error {
 	e.cleanupCalls++
 	return nil
+}
+
+func (e *emptyRuntimeSourceWatchRegistrar) HasTaskSourceWatches(context.Context, *types.AgentTask) bool {
+	return false
 }
 
 type blockerRuntimeSourceWatchRegistrar struct {
@@ -219,6 +227,10 @@ func (b *blockerRuntimeSourceWatchRegistrar) CleanupTaskSourceWatches(
 ) error {
 	b.cleanupCalls++
 	return nil
+}
+
+func (b *blockerRuntimeSourceWatchRegistrar) HasTaskSourceWatches(context.Context, *types.AgentTask) bool {
+	return true
 }
 
 func TestFinalizeRunAttemptMarksTaskErrorWhenSettlementFails(t *testing.T) {

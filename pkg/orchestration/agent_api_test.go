@@ -205,6 +205,10 @@ func (r *cancelCleanupRegistrar) CleanupTaskSourceWatches(_ context.Context, tas
 	return nil
 }
 
+func (r *cancelCleanupRegistrar) HasTaskSourceWatches(context.Context, *types.AgentTask) bool {
+	return false
+}
+
 func TestCancelTaskSupersedesPendingOutputs(t *testing.T) {
 	task := &types.AgentTask{
 		ID:          "task-1",

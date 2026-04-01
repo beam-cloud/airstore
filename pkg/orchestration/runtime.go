@@ -18,6 +18,7 @@ import (
 type SourceWatchRegistrar interface {
 	RegisterTaskSourceWatches(ctx context.Context, task *types.AgentTask, wakeSignal *types.RunExecutionWakeSignal, requests []*types.SourceWatchRequest) (*types.TaskBlockerSpec, error)
 	CleanupTaskSourceWatches(ctx context.Context, task *types.AgentTask) error
+	HasTaskSourceWatches(ctx context.Context, task *types.AgentTask) bool
 }
 
 type runSettlement struct {
@@ -682,17 +683,30 @@ func (r *RuntimeLoops) applyPostRunSettlement(
 		settlement.blocker = nil
 		settlement.waitingForInput = false
 	}
-	if !sourceWatchArmed && !settlement.waitingForInput {
+	existingWatchesActive := !sourceWatchArmed && task != nil &&
+		r.sourceWatchRegistrar != nil &&
+		r.sourceWatchRegistrar.HasTaskSourceWatches(ctx, task)
+
+	if !sourceWatchArmed && !settlement.waitingForInput && !existingWatchesActive {
 		if settlement.wakeSignal != nil {
 			log.Info().Str("run_id", runID).Str("task_id", taskIDOrEmpty(task)).
 				Msg("classifier requested sleep but no source watches materialized; completing instead")
 			settlement.wakeSignal = nil
 		}
 	}
+	if existingWatchesActive && settlement.wakeSignal == nil {
+		settlement.wakeSignal = &types.RunExecutionWakeSignal{
+			DelayMinutes:   5,
+			Reason:         "Resuming existing source watch monitoring",
+			FollowUpPrompt: "Resume this task, inspect the watched sources for any new updates, and continue the follow-up based on the latest data.",
+		}
+		log.Info().Str("run_id", runID).Str("task_id", taskIDOrEmpty(task)).
+			Msg("keeping existing source watches alive; task will return to sleeping")
+	}
 	if err := r.settleOriginTask(ctx, runID, task, settlement); err != nil {
 		return r.handleRunSettlementFailure(ctx, task, runID, fmt.Errorf("settle origin task: %w", err))
 	}
-	if !sourceWatchArmed && !settlement.waitingForInput {
+	if !sourceWatchArmed && !settlement.waitingForInput && !existingWatchesActive {
 		if err := r.cleanupTaskSourceWatches(ctx, task); err != nil {
 			log.Warn().Err(err).Str("run_id", runID).Msg("failed to clean up source watches")
 		}
