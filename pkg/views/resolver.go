@@ -2187,7 +2187,7 @@ func buildColumnSchemas(comp types.ComponentSpec) []bamltypes.ColumnSchema {
 			schemas = append(schemas, bamltypes.ColumnSchema{
 				Name:        name,
 				Key:         key,
-				Type:        columnTypeForKey(key, col.Type),
+				Type:        schemaColumnType(columnTypeForKey(key, col.Type), col.Options),
 				Description: name,
 			})
 		}
@@ -2230,7 +2230,7 @@ func buildColumnSchemas(comp types.ComponentSpec) []bamltypes.ColumnSchema {
 		schemas = append(schemas, bamltypes.ColumnSchema{
 			Name:        name,
 			Key:         key,
-			Type:        columnTypeForKey(key, cc.Type),
+			Type:        schemaColumnType(columnTypeForKey(key, cc.Type), cc.Options),
 			Description: name,
 		})
 		seen[key] = true
@@ -2874,6 +2874,17 @@ func normalizeColumnType(t string) string {
 	default:
 		return "text"
 	}
+}
+
+func schemaColumnType(colType string, opts []types.StatusOption) string {
+	if colType == "status" && len(opts) > 0 {
+		vals := make([]string, len(opts))
+		for i, o := range opts {
+			vals[i] = o.Value
+		}
+		return "status(" + strings.Join(vals, "|") + ")"
+	}
+	return colType
 }
 
 func columnTypeForKey(key, rawType string) string {

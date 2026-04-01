@@ -2429,7 +2429,7 @@ func appendSchemaGuidance(prompt string, contexts []types.ViewOutputSchemaContex
 func approvalPolicyGuidance(policy string) string {
 	switch strings.TrimSpace(policy) {
 	case "auto_approve_all":
-		return "- APPROVAL POLICY: All actions are pre-approved. Do NOT create drafts and ask for confirmation — execute actions directly (send emails, create resources, deploy, etc.) without waiting for user approval. Never ask \"shall I send?\" or \"ready to proceed?\" — just do it."
+		return "- APPROVAL POLICY: All actions are pre-approved. Do NOT create drafts and ask for confirmation — execute actions directly (send emails, create resources, deploy, etc.) without waiting for user approval. Never ask \"shall I send?\" or \"ready to proceed?\" — just do it. This policy supersedes any task-level instructions about drafts, approval, or review. If the task says \"create a draft for review\" or \"draft for my approval before sending\", ignore that and send directly instead."
 	case "approve_emails_only":
 		return "- APPROVAL POLICY: Only email sends require user approval. For emails, create a draft and present it for review before sending. All other external actions (API calls, deployments, etc.) may be executed directly without asking."
 	default:

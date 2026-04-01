@@ -36,6 +36,7 @@ const (
 	subagentProbeTimeout        = 15 * time.Second
 	terminalRingBufSize         = 256 * 1024
 	approvalMessageExtractLimit = 24000
+	maxAutoApproveAttempts      = 2
 )
 
 // subagentWaitOutcome describes why waitForSubagents returned.
@@ -461,7 +462,7 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 	// Output writers
 	outputPipeline := w.sandboxManager.taskOutputPipeline(sessionCtx, task, promptPlan)
 	mirror := NewTaskStreamOutput(task.ExternalId, "stdout", outputPipeline.writers...)
-	defer outputPipeline.Wait()
+	defer outputPipeline.WaitTimeout(outputPipelineDrainTimeout)
 	defer mirror.Flush()
 	tw := &terminalOutputWriter{
 		ctx: sessionCtx, taskID: task.ExternalId,
@@ -475,10 +476,12 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 		mirror: mirror, ringBuf: newRingBuffer(terminalRingBufSize),
 	}
 
+	approvalPolicy := env[approvalPolicyEnvKey]
+
 	// Build the needs-input checker
 	var checkNeedsInput func(string) (bool, types.InputKind, string, string)
 	if needsInputRunner != nil {
-		checkNeedsInput = w.buildNeedsInputChecker(sessionCtx, task, needsInputRunner, needsInputPath, tw, bamlEnv)
+		checkNeedsInput = w.buildNeedsInputChecker(sessionCtx, task, needsInputRunner, needsInputPath, tw, bamlEnv, approvalPolicy)
 	}
 
 	start := time.Now()
@@ -662,17 +665,19 @@ func (w *Worker) buildNeedsInputChecker(
 	ctx context.Context, task types.RunExecution,
 	runner NeedsInputRunner, markerPath string,
 	tw *terminalOutputWriter, bamlEnv map[string]string,
+	approvalPolicy string,
 ) func(string) (bool, types.InputKind, string, string) {
-	return newWorkerSessionRunner(w).buildNeedsInputChecker(ctx, task, runner, markerPath, tw, bamlEnv)
+	return newWorkerSessionRunner(w).buildNeedsInputChecker(ctx, task, runner, markerPath, tw, bamlEnv, approvalPolicy)
 }
 
-type turnInputKindClassifier func(context.Context, string, map[string]string) types.InputKind
+type turnInputKindClassifier func(context.Context, string, map[string]string, string) types.InputKind
 
 func classifyNeedsInputKindWithFallback(
 	ctx context.Context,
 	current types.InputKind,
 	assistantMessage string,
 	bamlEnv map[string]string,
+	approvalPolicy string,
 	classify turnInputKindClassifier,
 ) types.InputKind {
 	if current == types.InputKindApproveReject {
@@ -681,18 +686,18 @@ func classifyNeedsInputKindWithFallback(
 	if strings.TrimSpace(assistantMessage) == "" || classify == nil {
 		return current
 	}
-	if inferred := classify(ctx, assistantMessage, bamlEnv); inferred != "" {
+	if inferred := classify(ctx, assistantMessage, bamlEnv, approvalPolicy); inferred != "" {
 		return inferred
 	}
 	return current
 }
 
-func classifyNeedsInputKindWithBAML(ctx context.Context, assistantMessage string, bamlEnv map[string]string) types.InputKind {
+func classifyNeedsInputKindWithBAML(ctx context.Context, assistantMessage string, bamlEnv map[string]string, approvalPolicy string) types.InputKind {
 	assistantMessage = strings.TrimSpace(assistantMessage)
 	if assistantMessage == "" {
 		return ""
 	}
-	cls, err := agentsignal.ClassifyTurn(ctx, assistantMessage, "", agentsignal.WithEnv(bamlEnv))
+	cls, err := agentsignal.ClassifyTurn(ctx, assistantMessage, approvalPolicy, agentsignal.WithEnv(bamlEnv))
 	if err != nil || cls.Outcome != signaltypes.TurnOutcomeNEEDS_INPUT || cls.Input_kind == nil {
 		return ""
 	}
@@ -728,6 +733,7 @@ func normalizeTurnBlockerDirective(
 	blocker *TurnBlockerDirective,
 	assistantMessage string,
 	bamlEnv map[string]string,
+	approvalPolicy string,
 ) *TurnBlockerDirective {
 	if blocker == nil {
 		return nil
@@ -739,6 +745,7 @@ func normalizeTurnBlockerDirective(
 		normalized.InputKind,
 		assistantMessage,
 		bamlEnv,
+		approvalPolicy,
 		classifyNeedsInputKindWithBAML,
 	)
 	if normalized.InputKind == "" {
@@ -853,6 +860,7 @@ func (r workerSessionRunner) reconcileParsedTurnOutput(
 	tracker *taskOutputTracker,
 	prompt string,
 	bamlEnv map[string]string,
+	approvalPolicy string,
 	result TurnParseResult,
 ) parsedTurnOutcome {
 	outcome := parsedTurnOutcome{assistantMessage: strings.TrimSpace(result.Response)}
@@ -876,7 +884,7 @@ func (r workerSessionRunner) reconcileParsedTurnOutput(
 	)
 
 	if control != nil && control.Blocker != nil {
-		blocker := normalizeTurnBlockerDirective(ctx, control.Blocker, outcome.assistantMessage, bamlEnv)
+		blocker := normalizeTurnBlockerDirective(ctx, control.Blocker, outcome.assistantMessage, bamlEnv, approvalPolicy)
 		outcome.needsInput = blocker != nil
 		if blocker != nil {
 			outcome.inputKind = blocker.InputKind
@@ -1299,13 +1307,14 @@ func (r workerSessionRunner) buildNeedsInputChecker(
 	markerPath string,
 	tw *terminalOutputWriter,
 	bamlEnv map[string]string,
+	approvalPolicy string,
 ) func(string) (bool, types.InputKind, string, string) {
 	return func(currentPrompt string) (bool, types.InputKind, string, string) {
 		msg := runner.ReadLastMessage(markerPath)
 		if msg == "" {
 			return false, "", "", ""
 		}
-		cls, err := agentsignal.ClassifyTurn(ctx, msg, "", agentsignal.WithEnv(bamlEnv))
+		cls, err := agentsignal.ClassifyTurn(ctx, msg, approvalPolicy, agentsignal.WithEnv(bamlEnv))
 		if err != nil {
 			return false, "", "", ""
 		}
@@ -1327,7 +1336,7 @@ func (r workerSessionRunner) buildNeedsInputChecker(
 		}
 
 		kind = classifyNeedsInputKindWithFallback(
-			ctx, kind, assistantMessage, bamlEnv,
+			ctx, kind, assistantMessage, bamlEnv, approvalPolicy,
 			classifyNeedsInputKindWithBAML,
 		)
 
@@ -1359,7 +1368,9 @@ func (r workerSessionRunner) runTurnSession(
 	}
 	prompt := strings.TrimSpace(task.Prompt)
 	sessionEnv := cloneMap(env)
+	approvalPolicy := sessionEnv[approvalPolicyEnvKey]
 	isFirst := true
+	var autoApproveAttempts int
 
 	outputParser, _ := runner.(OutputParsingRunner)
 	var turnBuf bytes.Buffer
@@ -1462,7 +1473,7 @@ func (r workerSessionRunner) runTurnSession(
 			if err != nil {
 				addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to parse turn output")
 			} else {
-				resolved := r.reconcileParsedTurnOutput(ctx, task, tracker, prompt, bamlEnv, result)
+				resolved := r.reconcileParsedTurnOutput(ctx, task, tracker, prompt, bamlEnv, approvalPolicy, result)
 				needsInput = resolved.needsInput
 				inputKind = resolved.inputKind
 				waitingSummary = resolved.waitingSummary
@@ -1484,17 +1495,23 @@ func (r workerSessionRunner) runTurnSession(
 		}
 
 		// Auto-approve BAML-classified approval gates when the view's
-		// approval policy permits it. The tool-level write gate already
-		// handles per-tool auto-approval via gRPC metadata — this covers
-		// the case where the agent itself asks "shall I send?" in its
-		// response text and BAML classifies it as APPROVE_REJECT.
+		// approval policy permits it. Circuit breaker: after maxAutoApproveAttempts
+		// failed attempts (agent keeps re-asking), stop and fall through to
+		// the waiting state so the user can respond manually.
 		if inputKind == types.InputKindApproveReject {
 			if policy := types.NewApprovalPolicy(sessionEnv[approvalPolicyEnvKey]); policy.Key == "auto_approve_all" {
-				addTaskExecutionContext(log.Info(), task).
-					Str("policy", policy.Key).
-					Msg("auto-approving BAML-classified approval request per policy")
-				prompt = "Your approval policy auto-approves this action. Proceed immediately — execute the pending action now (send the email, publish the document, etc.). Do not ask for confirmation again."
-				continue
+				autoApproveAttempts++
+				if autoApproveAttempts <= maxAutoApproveAttempts {
+					addTaskExecutionContext(log.Info(), task).
+						Str("policy", policy.Key).
+						Int("attempt", autoApproveAttempts).
+						Msg("auto-approving BAML-classified approval request per policy")
+					prompt = "Your approval policy auto-approves this action. Proceed immediately — execute the pending action now (send the email, publish the document, etc.). Do not ask for confirmation again."
+					continue
+				}
+				addTaskExecutionContext(log.Warn(), task).
+					Int("attempts", autoApproveAttempts).
+					Msg("auto-approve circuit breaker tripped, entering waiting state")
 			}
 		}
 
