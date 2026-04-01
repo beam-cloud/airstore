@@ -69,6 +69,10 @@ func (f *fakeSourceWatchRegistrar) CleanupTaskSourceWatches(context.Context, *ty
 	return nil
 }
 
+func (f *fakeSourceWatchRegistrar) HasTaskSourceWatches(context.Context, *types.AgentTask) bool {
+	return false
+}
+
 func TestWireSourceWatchRegistrar(t *testing.T) {
 	target := &fakeSourceWatchRegistrarTarget{}
 	registrar := &fakeSourceWatchRegistrar{}

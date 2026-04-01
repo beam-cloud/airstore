@@ -20,14 +20,14 @@ import (
 )
 
 type ViewsGroup struct {
-	g          *echo.Group
-	backend    repository.BackendRepository
-	copilot    *views.Copilot
-	store      *views.ViewStore
-	resolver   *views.DataResolver
-	storage    *clients.StorageClient
-	viewSync   *views.ViewSync
-	compactor  *views.ContextCompactor
+	g         *echo.Group
+	backend   repository.BackendRepository
+	copilot   *views.Copilot
+	store     *views.ViewStore
+	resolver  *views.DataResolver
+	storage   *clients.StorageClient
+	viewSync  *views.ViewSync
+	compactor *views.ContextCompactor
 }
 
 const viewRefreshQueryParam = "refresh"
@@ -138,10 +138,10 @@ type columnRename struct {
 }
 
 type updateViewRequest struct {
-	Name          *string            `json:"name,omitempty"`
-	Description   *string            `json:"description,omitempty"`
-	Definition    json.RawMessage    `json:"definition,omitempty"`
-	ColumnRenames []columnRename     `json:"column_renames,omitempty"`
+	Name          *string         `json:"name,omitempty"`
+	Description   *string         `json:"description,omitempty"`
+	Definition    json.RawMessage `json:"definition,omitempty"`
+	ColumnRenames []columnRename  `json:"column_renames,omitempty"`
 }
 
 func (vg *ViewsGroup) Update(c echo.Context) error {
@@ -1035,7 +1035,9 @@ func syntheticEmailThreads(outputs []*types.TaskOutput, existing map[string][]vi
 			continue
 		}
 		if threadID := emailOutputThreadID(o); threadID != "" {
-			continue
+			if len(existing[threadID]) > 0 {
+				continue
+			}
 		}
 
 		recipient := dataString(o.Data, "recipient", "recipient_email", "to")
@@ -2010,7 +2012,6 @@ func (vg *ViewsGroup) ChatView(c echo.Context) error {
 
 	return nil
 }
-
 
 // ChatMessages returns the persisted chat history for a view.
 func (vg *ViewsGroup) ChatMessages(c echo.Context) error {

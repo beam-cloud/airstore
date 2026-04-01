@@ -26,6 +26,7 @@ type runSettlement struct {
 	wakeSignal      *types.RunExecutionWakeSignal
 	blocker         *types.TaskBlockerSpec
 	subtaskRequests []*types.SubtaskRequest
+	subtaskWatches  map[int][]*types.SourceWatchRequest
 }
 
 type RuntimeLoops struct {
@@ -648,17 +649,21 @@ func (r *RuntimeLoops) applyPostRunSettlement(
 ) error {
 	postRun = types.NormalizeRunExecutionPostRun(postRun)
 	settlement := r.resolveRunSettlement(postRun)
-	sourceWatchArmed := postRun != nil && len(postRun.SourceWatchRequests) > 0
+	var sourceWatchRequests []*types.SourceWatchRequest
+	if postRun != nil {
+		sourceWatchRequests = postRun.SourceWatchRequests
+	}
+	if len(settlement.subtaskRequests) > 0 && len(sourceWatchRequests) > 0 {
+		settlement.subtaskWatches, sourceWatchRequests = partitionSourceWatchRequestsForSubtasks(sourceWatchRequests, settlement.subtaskRequests)
+	}
+	sourceWatchArmed := len(sourceWatchRequests) > 0
+	handoffToSubtasks := !sourceWatchArmed && len(settlement.subtaskWatches) > 0
 	if sourceWatchArmed {
 		if task == nil {
 			return r.handleRunSettlementFailure(ctx, task, runID, fmt.Errorf("apply source watch follow-up: origin task is required"))
 		}
 
-		// Primary path: create __followup__ queries and task_input hooks via registrar
-		if r.sourceWatchRegistrar == nil {
-			return r.handleRunSettlementFailure(ctx, task, runID, fmt.Errorf("apply source watch follow-up: source watch registrar is unavailable"))
-		}
-		blocker, err := r.sourceWatchRegistrar.RegisterTaskSourceWatches(ctx, task, postRun.WakeSignal, postRun.SourceWatchRequests)
+		blocker, err := r.armTaskSourceWatches(ctx, task, postRun.WakeSignal, sourceWatchRequests)
 		if err != nil {
 			return r.handleRunSettlementFailure(ctx, task, runID, fmt.Errorf("apply source watch follow-up: %w", err))
 		}
@@ -666,24 +671,13 @@ func (r *RuntimeLoops) applyPostRunSettlement(
 			return r.handleRunSettlementFailure(ctx, task, runID, fmt.Errorf("apply source watch follow-up: did not materialize any source views"))
 		}
 
-		// Backup path: write correlation index for cross-workspace routing
-		if r.backend != nil {
-			watches := correlationWatchesFromRequests(postRun.SourceWatchRequests)
-			if len(watches) > 0 {
-				if dbErr := r.backend.UpsertTaskSourceWatches(ctx, task.WorkspaceID, task.ID, watches); dbErr != nil {
-					log.Warn().Err(dbErr).Str("task_id", task.ID).Msg("failed to write correlation index (primary path succeeded)")
-				} else {
-					log.Info().Str("task_id", task.ID).Int("watches", len(watches)).
-						Msg("source watches written to task_source_watches correlation index")
-				}
-			}
+		settlement.wakeSignal = sourceWatchWakeSignal(settlement.wakeSignal, sourceWatchRequests)
+		if !settlement.waitingForInput {
+			settlement.blocker = nil
+			settlement.waitingForInput = false
 		}
-
-		settlement.wakeSignal = sourceWatchWakeSignal(settlement.wakeSignal, postRun.SourceWatchRequests)
-		settlement.blocker = nil
-		settlement.waitingForInput = false
 	}
-	existingWatchesActive := !sourceWatchArmed && task != nil &&
+	existingWatchesActive := !sourceWatchArmed && !handoffToSubtasks && task != nil &&
 		r.sourceWatchRegistrar != nil &&
 		r.sourceWatchRegistrar.HasTaskSourceWatches(ctx, task)
 
@@ -706,12 +700,57 @@ func (r *RuntimeLoops) applyPostRunSettlement(
 	if err := r.settleOriginTask(ctx, runID, task, settlement); err != nil {
 		return r.handleRunSettlementFailure(ctx, task, runID, fmt.Errorf("settle origin task: %w", err))
 	}
+	if handoffToSubtasks {
+		if err := r.cleanupTaskSourceWatches(ctx, task); err != nil {
+			log.Warn().Err(err).Str("run_id", runID).Msg("failed to clean up parent source watches after handoff to subtasks")
+		}
+		return nil
+	}
 	if !sourceWatchArmed && !settlement.waitingForInput && !existingWatchesActive {
 		if err := r.cleanupTaskSourceWatches(ctx, task); err != nil {
 			log.Warn().Err(err).Str("run_id", runID).Msg("failed to clean up source watches")
 		}
 	}
 	return nil
+}
+
+func (r *RuntimeLoops) armTaskSourceWatches(
+	ctx context.Context,
+	task *types.AgentTask,
+	wakeSignal *types.RunExecutionWakeSignal,
+	requests []*types.SourceWatchRequest,
+) (*types.TaskBlockerSpec, error) {
+	if task == nil {
+		return nil, fmt.Errorf("origin task is required")
+	}
+	if len(requests) == 0 {
+		return nil, nil
+	}
+	if r.sourceWatchRegistrar == nil {
+		return nil, fmt.Errorf("source watch registrar is unavailable")
+	}
+
+	blocker, err := r.sourceWatchRegistrar.RegisterTaskSourceWatches(ctx, task, wakeSignal, requests)
+	if err != nil {
+		return nil, err
+	}
+	if blocker == nil {
+		return nil, nil
+	}
+
+	if r.backend != nil {
+		watches := correlationWatchesFromRequests(requests)
+		if len(watches) > 0 {
+			if dbErr := r.backend.UpsertTaskSourceWatches(ctx, task.WorkspaceID, task.ID, watches); dbErr != nil {
+				log.Warn().Err(dbErr).Str("task_id", task.ID).Msg("failed to write correlation index (primary path succeeded)")
+			} else {
+				log.Info().Str("task_id", task.ID).Int("watches", len(watches)).
+					Msg("source watches written to task_source_watches correlation index")
+			}
+		}
+	}
+
+	return blocker, nil
 }
 
 func correlationKeyForWatch(req *types.SourceWatchRequest) string {
@@ -748,6 +787,58 @@ func correlationWatchesFromRequests(requests []*types.SourceWatchRequest) []repo
 		})
 	}
 	return watches
+}
+
+func partitionSourceWatchRequestsForSubtasks(
+	requests []*types.SourceWatchRequest,
+	subtasks []*types.SubtaskRequest,
+) (map[int][]*types.SourceWatchRequest, []*types.SourceWatchRequest) {
+	assignments := make(map[int][]*types.SourceWatchRequest)
+	if len(requests) == 0 || len(subtasks) == 0 {
+		return assignments, requests
+	}
+
+	parentRequests := make([]*types.SourceWatchRequest, 0, len(requests))
+	for _, req := range requests {
+		idx := matchingSubtaskIndexForWatch(req, subtasks)
+		if idx < 0 {
+			parentRequests = append(parentRequests, req)
+			continue
+		}
+		assignments[idx] = append(assignments[idx], req)
+	}
+	return assignments, parentRequests
+}
+
+func matchingSubtaskIndexForWatch(req *types.SourceWatchRequest, subtasks []*types.SubtaskRequest) int {
+	req = types.NormalizeSourceWatchRequest(req)
+	if req == nil {
+		return -1
+	}
+
+	sourceOutputID := strings.TrimSpace(req.SourceOutputID)
+	if sourceOutputID != "" {
+		for idx, subtask := range subtasks {
+			if strings.TrimSpace(subtask.SourceOutputID) == sourceOutputID {
+				return idx
+			}
+		}
+	}
+
+	label := normalizeSubtaskWatchLabel(req.EntityLabel)
+	if label == "" {
+		return -1
+	}
+	for idx, subtask := range subtasks {
+		if normalizeSubtaskWatchLabel(subtask.EntityLabel) == label {
+			return idx
+		}
+	}
+	return -1
+}
+
+func normalizeSubtaskWatchLabel(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
 }
 
 func (r *RuntimeLoops) handleRunSettlementFailure(
@@ -850,7 +941,7 @@ func (r *RuntimeLoops) settleOriginTask(ctx context.Context, runID string, task 
 
 	parentSourceViewID := strPtrMaybe(stringFromPayload(task.PayloadJSON, "source_view_id"))
 
-	for _, req := range settlement.subtaskRequests {
+	for idx, req := range settlement.subtaskRequests {
 		parentID := task.ID
 		label := req.EntityLabel
 		spawnedBy := types.AgentTaskSpawnedByFanOut
@@ -871,6 +962,23 @@ func (r *RuntimeLoops) settleOriginTask(ctx context.Context, runID string, task 
 		}
 		if err := r.backend.CreateSpawnBinding(ctx, child.ID, req.SourceOutputID, label); err != nil {
 			log.Warn().Err(err).Str("child_id", child.ID).Msg("spawn binding failed")
+		}
+		if len(settlement.subtaskWatches[idx]) > 0 {
+			if _, err := r.armTaskSourceWatches(ctx, child, nil, settlement.subtaskWatches[idx]); err != nil {
+				log.Warn().
+					Err(err).
+					Str("parent", task.ID).
+					Str("child", child.ID).
+					Str("entity", label).
+					Msg("failed to transfer source watches to subtask")
+			} else {
+				log.Info().
+					Str("parent", task.ID).
+					Str("child", child.ID).
+					Str("entity", label).
+					Int("watches", len(settlement.subtaskWatches[idx])).
+					Msg("transferred source watches to subtask")
+			}
 		}
 		log.Info().Str("parent", task.ID).Str("child", child.ID).Str("entity", label).Msg("subtask created")
 	}

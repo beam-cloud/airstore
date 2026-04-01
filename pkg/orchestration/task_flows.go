@@ -359,6 +359,9 @@ func (f *TaskFlows) AcceptTaskInput(
 	if strings.TrimSpace(message) == "" {
 		return nil, fmt.Errorf("message is required")
 	}
+	if action != nil && *action == types.TaskInputActionApprove {
+		message = f.rewriteApprovalApproveMessage(ctx, workspaceID, task, message)
+	}
 	if idempotencyKey == "" {
 		idempotencyKey = uuid.NewString()
 	}
@@ -369,16 +372,16 @@ func (f *TaskFlows) AcceptTaskInput(
 			kind = types.InputKindFreeText
 		}
 	}
-	if shouldTreatInputAsApprovalRevision(task, kind, action) {
+	if shouldTreatInputAsApprovalRevision(task, kind, action, idempotencyKey) {
 		message = f.rewriteApprovalRevisionMessage(ctx, workspaceID, task, message)
 	}
 
-	if shouldSupersedePendingApprovalOutputs(task, kind, action) {
+	if shouldSupersedePendingApprovalOutputs(task, kind, action, idempotencyKey) {
 		if err := f.supersedePendingApprovalOutputs(ctx, workspaceID, task); err != nil {
 			return nil, err
 		}
 	}
-	resolution := taskBlockerResolutionForInput(task, kind, action, message, items)
+	resolution := taskBlockerResolutionForInput(task, kind, action, message, items, idempotencyKey)
 
 	sessionID := ""
 	if task.TargetRunID != nil {
@@ -476,6 +479,70 @@ func (f *TaskFlows) rewriteApprovalRevisionMessage(
 		parts = append(parts, "User feedback:\n"+userMessage)
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+func (f *TaskFlows) rewriteApprovalApproveMessage(
+	ctx context.Context,
+	workspaceID uint,
+	task *types.AgentTask,
+	userMessage string,
+) string {
+	userMessage = strings.TrimSpace(userMessage)
+	if f == nil || f.backend == nil || task == nil {
+		return userMessage
+	}
+
+	outputs, err := f.backend.ListTaskOutputs(ctx, workspaceID, task.ID)
+	if err != nil {
+		return userMessage
+	}
+	selected := pendingOutputsForCurrentBlocker(task, outputs)
+	if len(selected) == 0 {
+		return userMessage
+	}
+
+	instructions := make([]string, 0, len(selected))
+	for _, output := range selected {
+		if output == nil || !output.IsDraftEmail() {
+			continue
+		}
+		draftID := strings.TrimSpace(output.DataString("draft_id", "draftId"))
+		threadID := strings.TrimSpace(output.DataString("thread_id", "threadId"))
+		recipient := strings.TrimSpace(output.DataString("to", "recipient", "recipient_email"))
+		subject := strings.TrimSpace(output.DataString("subject"))
+		if draftID == "" {
+			continue
+		}
+		var parts []string
+		parts = append(parts, "Send the existing Gmail draft that was already created")
+		if recipient != "" {
+			parts = append(parts, fmt.Sprintf("to %s", recipient))
+		}
+		if subject != "" {
+			parts = append(parts, fmt.Sprintf("subject %q", subject))
+		}
+		if draftID != "" {
+			parts = append(parts, fmt.Sprintf("(draft_id=%s)", draftID))
+		}
+		if threadID != "" {
+			parts = append(parts, fmt.Sprintf("on thread_id=%s", threadID))
+		}
+		parts = append(parts, "Do not compose a new email or create a fresh thread; send the approved draft instead.")
+		instructions = append(instructions, strings.Join(parts, " "))
+	}
+	if len(instructions) == 0 {
+		return userMessage
+	}
+
+	extra := strings.Join(instructions, "\n")
+	if userMessage == "" {
+		return extra
+	}
+	lower := strings.ToLower(userMessage)
+	if strings.Contains(lower, "draft_id=") || strings.Contains(lower, "existing gmail draft") {
+		return userMessage
+	}
+	return userMessage + "\n\n" + extra
 }
 
 func (f *TaskFlows) AcceptRunInput(

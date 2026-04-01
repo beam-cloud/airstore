@@ -4,8 +4,62 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 )
+
+func TestPreferSourceWatchMatchesPrefersChildTaskForSameCorrelationKey(t *testing.T) {
+	matches := []repository.TaskSourceWatchMatch{
+		{
+			WorkspaceID:    7,
+			TaskID:         "parent-task",
+			CorrelationKey: "thread-123",
+			Reason:         "Aggregate monitoring",
+		},
+		{
+			WorkspaceID:    7,
+			TaskID:         "child-task",
+			CorrelationKey: "thread-123",
+			Reason:         "Watch Luke thread",
+			ParentTaskID:   "parent-task",
+		},
+		{
+			WorkspaceID:    7,
+			TaskID:         "other-thread-task",
+			CorrelationKey: "thread-456",
+			Reason:         "Another thread",
+		},
+	}
+
+	selected := preferSourceWatchMatches(matches)
+	if got, want := len(selected), 2; got != want {
+		t.Fatalf("selected count = %d, want %d", got, want)
+	}
+	if got, want := selected[0].TaskID, "child-task"; got != want {
+		t.Fatalf("selected task for thread-123 = %q, want %q", got, want)
+	}
+	if got, want := selected[0].CorrelationKey, "thread-123"; got != want {
+		t.Fatalf("selected key = %q, want %q", got, want)
+	}
+	if got, want := selected[1].TaskID, "other-thread-task"; got != want {
+		t.Fatalf("selected task for thread-456 = %q, want %q", got, want)
+	}
+}
+
+func TestIsSystemManagedSourceWatchHookRecognizesFollowupHooks(t *testing.T) {
+	targetTaskID := "task-123"
+	hook := &types.Hook{
+		SystemManaged: true,
+		Path:          "/sources/gmail/__followup__task-123__hash",
+		TargetTaskID:  &targetTaskID,
+	}
+	if !isSystemManagedSourceWatchHook(hook) {
+		t.Fatal("expected follow-up hook to be treated as system-managed source watch hook")
+	}
+	if got, want := sourceWatchTaskInputIdempotencyKey("hook:abc"), "source_watch_hook:hook:abc"; got != want {
+		t.Fatalf("source watch idempotency key = %q, want %q", got, want)
+	}
+}
 
 func TestHookIdempotencyKey_SourceCreateStableAcrossEventIDs(t *testing.T) {
 	data := map[string]any{
