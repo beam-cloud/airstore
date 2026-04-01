@@ -1483,6 +1483,21 @@ func (r workerSessionRunner) runTurnSession(
 			return turnResult, nil
 		}
 
+		// Auto-approve BAML-classified approval gates when the view's
+		// approval policy permits it. The tool-level write gate already
+		// handles per-tool auto-approval via gRPC metadata — this covers
+		// the case where the agent itself asks "shall I send?" in its
+		// response text and BAML classifies it as APPROVE_REJECT.
+		if inputKind == types.InputKindApproveReject {
+			if policy := types.NewApprovalPolicy(sessionEnv[approvalPolicyEnvKey]); policy.Key == "auto_approve_all" {
+				addTaskExecutionContext(log.Info(), task).
+					Str("policy", policy.Key).
+					Msg("auto-approving BAML-classified approval request per policy")
+				prompt = "Your approval policy auto-approves this action. Proceed immediately — execute the pending action now (send the email, publish the document, etc.). Do not ask for confirmation again."
+				continue
+			}
+		}
+
 		if inputKind == types.InputKindApproveReject && !turnResult.approvalOutputHandled {
 			blockerOutputIDs, turnResult.approvalOutputHandled = persistApprovalOutputBeforeWaiting(
 				ctx, r.worker.gatewayClient, task, tracker, prompt, approvalAssistantMessage, bamlEnv,

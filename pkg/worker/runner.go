@@ -14,6 +14,7 @@ const (
 	agentSystemPromptEnvKey     = "AIRSTORE_AGENT_SYSTEM_PROMPT"
 	agentSystemPromptModeEnvKey = "AIRSTORE_AGENT_SYSTEM_PROMPT_MODE"
 	agentWorkspaceDirEnvKey     = "AIRSTORE_AGENT_WORKSPACE_DIR"
+	approvalPolicyEnvKey        = "AIRSTORE_APPROVAL_POLICY"
 
 	systemPromptModeReplace = "replace"
 )

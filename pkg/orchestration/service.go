@@ -2274,7 +2274,7 @@ func applyViewRuntimeContext(
 	if encoded, err := json.Marshal(schemas); err == nil && len(encoded) > 0 {
 		if env != nil {
 			env[agentViewSchemaEnvKey] = string(encoded)
-			env["AIRSTORE_AGENT_SYSTEM_PROMPT"] = appendSchemaGuidance(env["AIRSTORE_AGENT_SYSTEM_PROMPT"], schemas)
+			env["AIRSTORE_AGENT_SYSTEM_PROMPT"] = appendSchemaGuidance(env["AIRSTORE_AGENT_SYSTEM_PROMPT"], schemas, env["AIRSTORE_APPROVAL_POLICY"])
 		}
 		if executionPolicy != nil {
 			executionPolicy[types.AgentExecutionMetaKeyViewSchema] = schemas
@@ -2382,7 +2382,7 @@ func formatViewContext(entries []types.ViewContextEntry) string {
 	return strings.TrimSpace(b.String())
 }
 
-func appendSchemaGuidance(prompt string, contexts []types.ViewOutputSchemaContext) string {
+func appendSchemaGuidance(prompt string, contexts []types.ViewOutputSchemaContext, approvalPolicy string) string {
 	prompt = strings.TrimSpace(prompt)
 	if len(contexts) == 0 || strings.Contains(prompt, runtimeViewSchemaGuidanceHeader) {
 		return prompt
@@ -2394,6 +2394,7 @@ func appendSchemaGuidance(prompt string, contexts []types.ViewOutputSchemaContex
 		"- Treat this as advisory context. Do not invent uncertain fields just to satisfy a schema.",
 		"- IMPORTANT: After sending or drafting an email (Gmail send-email or create-draft), update ALL affected CRM rows with the thread_id from the Gmail response using `view update-row`. Store thread_id as a hidden cell alongside visible cells. This links the email thread to the row so users can view it.",
 	}
+	lines = append(lines, approvalPolicyGuidance(approvalPolicy))
 	for _, sc := range contexts {
 		var parts []string
 		if sc.ViewName != "" {
@@ -2423,6 +2424,17 @@ func appendSchemaGuidance(prompt string, contexts []types.ViewOutputSchemaContex
 		return block
 	}
 	return prompt + "\n\n" + block
+}
+
+func approvalPolicyGuidance(policy string) string {
+	switch strings.TrimSpace(policy) {
+	case "auto_approve_all":
+		return "- APPROVAL POLICY: All actions are pre-approved. Do NOT create drafts and ask for confirmation — execute actions directly (send emails, create resources, deploy, etc.) without waiting for user approval. Never ask \"shall I send?\" or \"ready to proceed?\" — just do it."
+	case "approve_emails_only":
+		return "- APPROVAL POLICY: Only email sends require user approval. For emails, create a draft and present it for review before sending. All other external actions (API calls, deployments, etc.) may be executed directly without asking."
+	default:
+		return "- APPROVAL POLICY: External actions (sending emails, creating resources, deploying, etc.) require user approval. Create drafts for emails and present proposed actions for review before executing them."
+	}
 }
 
 func sanitizeEnvSegment(value string) string {
