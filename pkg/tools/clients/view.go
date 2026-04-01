@@ -13,6 +13,8 @@ import (
 	"github.com/beam-cloud/airstore/pkg/tools"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/beam-cloud/airstore/pkg/views"
+	viewbaml "github.com/beam-cloud/airstore/pkg/views/baml_client"
+	viewbamltypes "github.com/beam-cloud/airstore/pkg/views/baml_client/types"
 	"github.com/rs/zerolog/log"
 )
 
@@ -481,7 +483,7 @@ func (c *ViewClient) addRow(ctx context.Context, viewID string, workspaceID uint
 		}
 	}
 
-	rowID, created, matchedExisting, err := c.smartUpsertRow(ctx, viewID, sheetID, componentID, cells)
+	rowID, created, matchedExisting, err := c.smartUpsertRow(ctx, viewID, sheetID, componentID, workspaceID, cells)
 	if err != nil {
 		return WriteToolError(stdout, fmt.Sprintf("failed to upsert row: %v", err))
 	}
@@ -513,12 +515,14 @@ func (c *ViewClient) addRow(ctx context.Context, viewID string, workspaceID uint
 }
 
 // smartUpsertRow uses vector search to find semantically matching rows on the
-// target sheet before inserting. If a high-confidence match is found, the
-// existing row is updated instead of creating a duplicate.
+// target sheet before inserting. If a high-confidence match is found, a BAML
+// classifier verifies entity identity before merging to prevent false matches
+// (e.g. "100 Greene Ave" vs "101 Greene Ave").
 // Returns (rowID, created, matchedExisting, error).
 func (c *ViewClient) smartUpsertRow(
 	ctx context.Context,
 	viewID, sheetID, componentID string,
+	workspaceID uint,
 	cells map[string]string,
 ) (string, bool, bool, error) {
 	ec := c.store.Embedder()
@@ -555,22 +559,118 @@ func (c *ViewClient) smartUpsertRow(
 		threshold = c.sync.HighMatchThreshold()
 	}
 
+	var candidates []views.VectorSearchResult
 	for _, r := range results {
 		if r.Score >= threshold {
-			if err := c.store.UpdateRow(ctx, viewID, r.ID, cells, ""); err != nil {
-				log.Warn().Err(err).Str("row_id", r.ID).Msg("view-tool: merge into matched row failed")
-				continue
+			candidates = append(candidates, r)
+		}
+	}
+
+	if len(candidates) > 0 {
+		targetID := c.classifyRowMatch(ctx, workspaceID, viewID, sheetID, componentID, cells, candidates)
+		if targetID != "" {
+			if err := c.store.UpdateRow(ctx, viewID, targetID, cells, ""); err != nil {
+				log.Warn().Err(err).Str("row_id", targetID).Msg("view-tool: merge into classified match failed")
+			} else {
+				log.Debug().
+					Str("row_id", targetID).
+					Int("candidates", len(candidates)).
+					Msg("view-tool: classifier confirmed match, merged")
+				return targetID, false, true, nil
 			}
+		} else {
 			log.Debug().
-				Str("row_id", r.ID).
-				Float64("score", r.Score).
-				Msg("view-tool: merged into matched row")
-			return r.ID, false, true, nil
+				Int("candidates", len(candidates)).
+				Msg("view-tool: classifier said INSERT_NEW, skipping vector matches")
 		}
 	}
 
 	rowID, created, err := c.store.UpsertRow(ctx, viewID, sheetID, componentID, cells, views.UpsertOpts{})
 	return rowID, created, false, err
+}
+
+// classifyRowMatch calls the BAML ClassifyRowMatch function to verify whether
+// incoming cells actually represent the same entity as vector-matched candidates.
+// Returns the target row ID to update, or empty string for INSERT_NEW.
+func (c *ViewClient) classifyRowMatch(
+	ctx context.Context,
+	workspaceID uint,
+	viewID, sheetID, componentID string,
+	cells map[string]string,
+	candidates []views.VectorSearchResult,
+) string {
+	cols := c.bamlColumns(ctx, workspaceID, viewID, sheetID, componentID)
+
+	incomingJSON, _ := json.Marshal(cells)
+
+	type candidateRow struct {
+		ID    string            `json:"_id"`
+		Score float64           `json:"score"`
+		Cells map[string]string `json:"cells"`
+	}
+	candRows := make([]candidateRow, 0, len(candidates))
+	for _, c := range candidates {
+		candRows = append(candRows, candidateRow{
+			ID:    c.ID,
+			Score: c.Score,
+			Cells: c.ViewRow.MergedCells(),
+		})
+	}
+	candidatesJSON, _ := json.Marshal(candRows)
+
+	result, err := viewbaml.ClassifyRowMatch(ctx, cols, string(incomingJSON), string(candidatesJSON))
+	if err != nil {
+		log.Warn().Err(err).Msg("view-tool: ClassifyRowMatch failed, defaulting to INSERT_NEW")
+		return ""
+	}
+
+	log.Debug().
+		Str("action", string(result.Action)).
+		Str("target", result.Target_row_id).
+		Str("reason", result.Reason).
+		Msg("view-tool: ClassifyRowMatch result")
+
+	if result.Action == viewbamltypes.RowMatchActionUPDATE_EXISTING && result.Target_row_id != "" {
+		return result.Target_row_id
+	}
+	return ""
+}
+
+// bamlColumns loads the column schema for the given component and converts it
+// to the BAML ViewColumn type for use with ClassifyRowMatch.
+func (c *ViewClient) bamlColumns(
+	ctx context.Context,
+	workspaceID uint,
+	viewID, sheetID, componentID string,
+) []viewbamltypes.ViewColumn {
+	if c.backend == nil {
+		return nil
+	}
+	v, err := c.backend.GetView(ctx, workspaceID, viewID)
+	if err != nil || v == nil {
+		return nil
+	}
+	for _, sheet := range v.Definition.Sheets {
+		if sheet.ID != sheetID {
+			continue
+		}
+		for _, comp := range sheet.Components {
+			if comp.ID != componentID {
+				continue
+			}
+			meta := viewComponentColumnMeta(comp)
+			cols := make([]viewbamltypes.ViewColumn, 0, len(meta))
+			for _, m := range meta {
+				cols = append(cols, viewbamltypes.ViewColumn{
+					Key:   m.Key,
+					Label: m.Label,
+					Type:  m.Type,
+				})
+			}
+			return cols
+		}
+	}
+	return nil
 }
 
 func (c *ViewClient) findRows(ctx context.Context, viewID string, workspaceID uint, args map[string]any, stdout io.Writer) error {

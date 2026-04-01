@@ -104,6 +104,71 @@ func (e OperationType) BamlTypeName() string {
 	return "OperationType"
 }
 
+type RowMatchAction string
+
+const (
+	RowMatchActionUPDATE_EXISTING RowMatchAction = "UPDATE_EXISTING"
+	RowMatchActionINSERT_NEW      RowMatchAction = "INSERT_NEW"
+)
+
+// Values returns all allowed values for the RowMatchAction type.
+func (RowMatchAction) Values() []RowMatchAction {
+	return []RowMatchAction{
+		RowMatchActionUPDATE_EXISTING,
+		RowMatchActionINSERT_NEW,
+	}
+}
+
+// IsValid checks whether the given RowMatchAction value is valid.
+func (e RowMatchAction) IsValid() bool {
+
+	for _, v := range e.Values() {
+		if e == v {
+			return true
+		}
+	}
+	return false
+
+}
+
+// MarshalJSON customizes JSON marshaling for RowMatchAction.
+func (e RowMatchAction) MarshalJSON() ([]byte, error) {
+	if !e.IsValid() {
+		return nil, fmt.Errorf("invalid RowMatchAction: %q", e)
+	}
+	return json.Marshal(string(e))
+}
+
+// UnmarshalJSON customizes JSON unmarshaling for RowMatchAction.
+func (e *RowMatchAction) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	*e = RowMatchAction(s)
+	if !e.IsValid() {
+		return fmt.Errorf("invalid RowMatchAction: %q", s)
+	}
+	return nil
+}
+
+func (e *RowMatchAction) Decode(holder *cffi.CFFIValueEnum, typeMap baml.TypeMap) {
+	name := holder.Name
+	if name.Name != "RowMatchAction" || name.Namespace != cffi.CFFITypeNamespace_TYPES {
+		panic(fmt.Sprintf("expected types.RowMatchAction, got %s.%s", string(name.Namespace.String()), string(name.Name)))
+	}
+	value := holder.Value
+	*e = RowMatchAction(value)
+}
+
+func (e RowMatchAction) Encode() (*cffi.HostValue, error) {
+	return baml.EncodeEnum("RowMatchAction", string(e), false)
+}
+
+func (e RowMatchAction) BamlTypeName() string {
+	return "RowMatchAction"
+}
+
 type SectionEmphasis string
 
 const (

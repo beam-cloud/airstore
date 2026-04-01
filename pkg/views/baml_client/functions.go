@@ -169,6 +169,80 @@ func ClassifyDetailTemplate(ctx context.Context, table_title string, column_sche
 	}
 }
 
+func ClassifyRowMatch(ctx context.Context, columns []types.ViewColumn, incoming_cells string, candidate_rows string, opts ...CallOptionFunc) (types.RowMatchResult, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	// Resolve client option to clientRegistry (client takes precedence)
+	if callOpts.client != nil {
+		if callOpts.clientRegistry == nil {
+			callOpts.clientRegistry = baml.NewClientRegistry()
+		}
+		callOpts.clientRegistry.SetPrimaryClient(*callOpts.client)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"columns": columns, "incoming_cells": incoming_cells, "candidate_rows": candidate_rows},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		panic(err)
+	}
+
+	if callOpts.onTick == nil {
+		result, err := bamlRuntime.CallFunction(ctx, "ClassifyRowMatch", encoded, callOpts.onTick)
+		if err != nil {
+			return types.RowMatchResult{}, err
+		}
+
+		if result.Error != nil {
+			return types.RowMatchResult{}, result.Error
+		}
+
+		casted := (result.Data).(types.RowMatchResult)
+
+		return casted, nil
+	} else {
+		channel, err := bamlRuntime.CallFunctionStream(ctx, "ClassifyRowMatch", encoded, callOpts.onTick)
+		if err != nil {
+			return types.RowMatchResult{}, err
+		}
+
+		for result := range channel {
+			if result.Error != nil {
+				return types.RowMatchResult{}, result.Error
+			}
+
+			if result.HasData {
+				return result.Data.(types.RowMatchResult), nil
+			}
+		}
+
+		return types.RowMatchResult{}, fmt.Errorf("No data returned from stream")
+	}
+}
+
 func GenerateStatusOptions(ctx context.Context, table_title string, column_key string, column_label string, sibling_columns string, opts ...CallOptionFunc) (types.StatusOptionSet, error) {
 
 	var callOpts callOption

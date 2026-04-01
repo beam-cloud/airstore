@@ -60,10 +60,14 @@ function ClassifyAffectedRows(
     1. Identify every top-level entity in the output at the SAME granularity as one
        table row (a person, property, company, product, tool, restaurant, etc.).
     2. Match each entity to existing rows by semantic identity — name, email, address,
-       or other unique identifier. Partial/variant matches count ("123 Main" = "123 Main St").
-    3. Only match when the entity and row represent the SAME thing. A running shoe is
+       or other unique identifier. Abbreviation/format variants of the SAME identity match
+       ("123 Main" = "123 Main St", "J. Smith" = "John Smith").
+    3. Different street numbers are DIFFERENT entities even on the same street.
+       "100 Greene Ave" ≠ "101 Greene Ave". "708 1st St" ≠ "710 1st St".
+       Only match when the full unique identifier matches.
+    4. Only match when the entity and row represent the SAME thing. A running shoe is
        not a restaurant; a dev tool is not a person. Different-domain entities are unmatched.
-    4. Add every matched row ID to affected_row_ids. If one output summarizes several
+    5. Add every matched row ID to affected_row_ids. If one output summarizes several
        entities, include all of their matching rows.
 
     UNMATCHED ENTITIES:
@@ -179,6 +183,51 @@ function PlanRowSearch(
     7. Return entity_labels with one canonical row-level identity per entity. Prefer
        literal values already present in the output such as a property address, email,
        person/company name, or record ID.
+
+    {{ ctx.output_format }}
+  "#
+}
+
+enum RowMatchAction {
+  UPDATE_EXISTING @description("The incoming data belongs to this existing row — same entity")
+  INSERT_NEW      @description("The incoming data is a NEW entity — none of the candidates match")
+}
+
+class RowMatchResult {
+  action RowMatchAction
+  target_row_id string @description("Row ID to update. Required when action=UPDATE_EXISTING, empty string for INSERT_NEW.")
+  reason string @description("One-sentence explanation of the decision.")
+}
+
+function ClassifyRowMatch(
+  columns: ViewColumn[],
+  incoming_cells: string,
+  candidate_rows: string
+) -> RowMatchResult {
+  client FastMappingClient
+  prompt #"
+    Decide whether incoming data should UPDATE an existing row or INSERT a new one.
+
+    SCHEMA:
+    {% for col in columns %}
+    - {{ col.label }} [{{ col.key }}] ({{ col.type }})
+    {% endfor %}
+
+    INCOMING DATA (cells the agent wants to add):
+    {{ incoming_cells }}
+
+    CANDIDATE ROWS (existing rows found by similarity search):
+    {{ candidate_rows }}
+
+    RULES:
+    1. Match by unique identity: name, address, email, phone, URL, or ID.
+    2. Different street numbers = DIFFERENT entities.
+       "100 Greene Ave" ≠ "101 Greene Ave". "708 1st St" ≠ "710 1st St".
+    3. Abbreviation/format variants of the SAME identity DO match.
+       "123 Main" = "123 Main St". "J. Smith" = "John Smith".
+    4. If NONE of the candidates represent the same entity, return INSERT_NEW.
+    5. If exactly one candidate matches, return UPDATE_EXISTING with its _id.
+    6. If multiple candidates match (rare), pick the best one.
 
     {{ ctx.output_format }}
   "#
