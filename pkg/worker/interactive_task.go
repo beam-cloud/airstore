@@ -476,12 +476,10 @@ func (w *Worker) runInteractiveSession(ctx context.Context, task types.RunExecut
 		mirror: mirror, ringBuf: newRingBuffer(terminalRingBufSize),
 	}
 
-	approvalPolicy := env[approvalPolicyEnvKey]
-
 	// Build the needs-input checker
 	var checkNeedsInput func(string) (bool, types.InputKind, string, string)
 	if needsInputRunner != nil {
-		checkNeedsInput = w.buildNeedsInputChecker(sessionCtx, task, needsInputRunner, needsInputPath, tw, bamlEnv, approvalPolicy)
+		checkNeedsInput = w.buildNeedsInputChecker(sessionCtx, task, needsInputRunner, needsInputPath, tw, bamlEnv)
 	}
 
 	start := time.Now()
@@ -665,19 +663,17 @@ func (w *Worker) buildNeedsInputChecker(
 	ctx context.Context, task types.RunExecution,
 	runner NeedsInputRunner, markerPath string,
 	tw *terminalOutputWriter, bamlEnv map[string]string,
-	approvalPolicy string,
 ) func(string) (bool, types.InputKind, string, string) {
-	return newWorkerSessionRunner(w).buildNeedsInputChecker(ctx, task, runner, markerPath, tw, bamlEnv, approvalPolicy)
+	return newWorkerSessionRunner(w).buildNeedsInputChecker(ctx, task, runner, markerPath, tw, bamlEnv)
 }
 
-type turnInputKindClassifier func(context.Context, string, map[string]string, string) types.InputKind
+type turnInputKindClassifier func(context.Context, string, map[string]string) types.InputKind
 
 func classifyNeedsInputKindWithFallback(
 	ctx context.Context,
 	current types.InputKind,
 	assistantMessage string,
 	bamlEnv map[string]string,
-	approvalPolicy string,
 	classify turnInputKindClassifier,
 ) types.InputKind {
 	if current == types.InputKindApproveReject {
@@ -686,18 +682,18 @@ func classifyNeedsInputKindWithFallback(
 	if strings.TrimSpace(assistantMessage) == "" || classify == nil {
 		return current
 	}
-	if inferred := classify(ctx, assistantMessage, bamlEnv, approvalPolicy); inferred != "" {
+	if inferred := classify(ctx, assistantMessage, bamlEnv); inferred != "" {
 		return inferred
 	}
 	return current
 }
 
-func classifyNeedsInputKindWithBAML(ctx context.Context, assistantMessage string, bamlEnv map[string]string, approvalPolicy string) types.InputKind {
+func classifyNeedsInputKindWithBAML(ctx context.Context, assistantMessage string, bamlEnv map[string]string) types.InputKind {
 	assistantMessage = strings.TrimSpace(assistantMessage)
 	if assistantMessage == "" {
 		return ""
 	}
-	cls, err := agentsignal.ClassifyTurn(ctx, assistantMessage, approvalPolicy, agentsignal.WithEnv(bamlEnv))
+	cls, err := agentsignal.ClassifyTurn(ctx, assistantMessage, agentsignal.WithEnv(bamlEnv))
 	if err != nil || cls.Outcome != signaltypes.TurnOutcomeNEEDS_INPUT || cls.Input_kind == nil {
 		return ""
 	}
@@ -733,7 +729,6 @@ func normalizeTurnBlockerDirective(
 	blocker *TurnBlockerDirective,
 	assistantMessage string,
 	bamlEnv map[string]string,
-	approvalPolicy string,
 ) *TurnBlockerDirective {
 	if blocker == nil {
 		return nil
@@ -745,7 +740,6 @@ func normalizeTurnBlockerDirective(
 		normalized.InputKind,
 		assistantMessage,
 		bamlEnv,
-		approvalPolicy,
 		classifyNeedsInputKindWithBAML,
 	)
 	if normalized.InputKind == "" {
@@ -860,7 +854,6 @@ func (r workerSessionRunner) reconcileParsedTurnOutput(
 	tracker *taskOutputTracker,
 	prompt string,
 	bamlEnv map[string]string,
-	approvalPolicy string,
 	result TurnParseResult,
 ) parsedTurnOutcome {
 	outcome := parsedTurnOutcome{assistantMessage: strings.TrimSpace(result.Response)}
@@ -884,7 +877,7 @@ func (r workerSessionRunner) reconcileParsedTurnOutput(
 	)
 
 	if control != nil && control.Blocker != nil {
-		blocker := normalizeTurnBlockerDirective(ctx, control.Blocker, outcome.assistantMessage, bamlEnv, approvalPolicy)
+		blocker := normalizeTurnBlockerDirective(ctx, control.Blocker, outcome.assistantMessage, bamlEnv)
 		outcome.needsInput = blocker != nil
 		if blocker != nil {
 			outcome.inputKind = blocker.InputKind
@@ -1307,14 +1300,13 @@ func (r workerSessionRunner) buildNeedsInputChecker(
 	markerPath string,
 	tw *terminalOutputWriter,
 	bamlEnv map[string]string,
-	approvalPolicy string,
 ) func(string) (bool, types.InputKind, string, string) {
 	return func(currentPrompt string) (bool, types.InputKind, string, string) {
 		msg := runner.ReadLastMessage(markerPath)
 		if msg == "" {
 			return false, "", "", ""
 		}
-		cls, err := agentsignal.ClassifyTurn(ctx, msg, approvalPolicy, agentsignal.WithEnv(bamlEnv))
+		cls, err := agentsignal.ClassifyTurn(ctx, msg, agentsignal.WithEnv(bamlEnv))
 		if err != nil {
 			return false, "", "", ""
 		}
@@ -1336,7 +1328,7 @@ func (r workerSessionRunner) buildNeedsInputChecker(
 		}
 
 		kind = classifyNeedsInputKindWithFallback(
-			ctx, kind, assistantMessage, bamlEnv, approvalPolicy,
+			ctx, kind, assistantMessage, bamlEnv,
 			classifyNeedsInputKindWithBAML,
 		)
 
@@ -1368,7 +1360,6 @@ func (r workerSessionRunner) runTurnSession(
 	}
 	prompt := strings.TrimSpace(task.Prompt)
 	sessionEnv := cloneMap(env)
-	approvalPolicy := sessionEnv[approvalPolicyEnvKey]
 	isFirst := true
 	var autoApproveAttempts int
 
@@ -1473,7 +1464,7 @@ func (r workerSessionRunner) runTurnSession(
 			if err != nil {
 				addTaskExecutionContext(log.Warn().Err(err), task).Msg("failed to parse turn output")
 			} else {
-				resolved := r.reconcileParsedTurnOutput(ctx, task, tracker, prompt, bamlEnv, approvalPolicy, result)
+				resolved := r.reconcileParsedTurnOutput(ctx, task, tracker, prompt, bamlEnv, result)
 				needsInput = resolved.needsInput
 				inputKind = resolved.inputKind
 				waitingSummary = resolved.waitingSummary

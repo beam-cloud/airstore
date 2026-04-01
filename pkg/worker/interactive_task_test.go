@@ -286,7 +286,7 @@ func TestSubagentWaitOutcomeStringer(t *testing.T) {
 }
 
 func TestClassifyNeedsInputKindWithFallback_OverridesFreeTextWhenClassifierDetectsApproval(t *testing.T) {
-	classify := func(_ context.Context, _ string, _ map[string]string, _ string) types.InputKind {
+	classify := func(_ context.Context, _ string, _ map[string]string) types.InputKind {
 		return types.InputKindApproveReject
 	}
 
@@ -295,7 +295,6 @@ func TestClassifyNeedsInputKindWithFallback_OverridesFreeTextWhenClassifierDetec
 		types.InputKindFreeText,
 		"Please reply APPROVE to send.",
 		nil,
-		"",
 		classify,
 	)
 	if got != types.InputKindApproveReject {
@@ -304,7 +303,7 @@ func TestClassifyNeedsInputKindWithFallback_OverridesFreeTextWhenClassifierDetec
 }
 
 func TestClassifyNeedsInputKindWithFallback_PreservesCurrentKindWithoutAssistantMessage(t *testing.T) {
-	classify := func(_ context.Context, _ string, _ map[string]string, _ string) types.InputKind {
+	classify := func(_ context.Context, _ string, _ map[string]string) types.InputKind {
 		t.Fatal("classifier should not be called for blank assistant messages")
 		return ""
 	}
@@ -314,7 +313,6 @@ func TestClassifyNeedsInputKindWithFallback_PreservesCurrentKindWithoutAssistant
 		types.InputKindFreeText,
 		"",
 		nil,
-		"",
 		classify,
 	)
 	if got != types.InputKindFreeText {
