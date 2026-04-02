@@ -70,6 +70,8 @@ commands:
     description: >-
       Send an Outlook email. Either compose a new email (requires to, subject, body)
       or send a previously created draft (requires draft_id).
+    one_of_required:
+      - [to, draft_id]
     params:
       - name: to
         type: string
