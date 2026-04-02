@@ -998,10 +998,6 @@ func (g *GmailProvider) readLabels(ctx context.Context, pctx *sources.ProviderCo
 
 const categoryCacheTTL = 10 * time.Minute // Cache Gmail data for 10 minutes
 
-func gmailCacheKey(pctx *sources.ProviderContext, category string) string {
-	return fmt.Sprintf("%d:%d:%s", pctx.WorkspaceId, pctx.MemberId, category)
-}
-
 // getValidatedCategoryMessages validates the category and returns cached/fetched messages
 func (g *GmailProvider) getValidatedCategoryMessages(ctx context.Context, pctx *sources.ProviderContext, category string) ([]gmailMessage, error) {
 	if !isValidCategory(category) {
@@ -1012,17 +1008,15 @@ func (g *GmailProvider) getValidatedCategoryMessages(ctx context.Context, pctx *
 
 func (g *GmailProvider) getCategoryMessages(ctx context.Context, pctx *sources.ProviderContext, category string) ([]gmailMessage, error) {
 	// Check cache
-	key := gmailCacheKey(pctx, category)
-
 	g.cacheMu.RLock()
-	if cached, ok := g.messageCache[key]; ok && time.Since(cached.fetchedAt) < categoryCacheTTL {
+	if cached, ok := g.messageCache[category]; ok && time.Since(cached.fetchedAt) < categoryCacheTTL {
 		g.cacheMu.RUnlock()
 		return cached.messages, nil
 	}
 	g.cacheMu.RUnlock()
 
 	// Trigger background prefetch of all categories (only fetches uncached ones)
-	go g.prefetchAllCategories(pctx)
+	go g.prefetchAllCategories(pctx.Credentials.AccessToken)
 
 	// Fetch the requested category synchronously
 	token := pctx.Credentials.AccessToken
@@ -1033,7 +1027,7 @@ func (g *GmailProvider) getCategoryMessages(ctx context.Context, pctx *sources.P
 
 	// Update cache
 	g.cacheMu.Lock()
-	g.messageCache[key] = &categoryCache{
+	g.messageCache[category] = &categoryCache{
 		messages:  messages,
 		fetchedAt: time.Now(),
 	}
@@ -1043,13 +1037,12 @@ func (g *GmailProvider) getCategoryMessages(ctx context.Context, pctx *sources.P
 }
 
 // prefetchAllCategories fetches all categories in parallel (background)
-func (g *GmailProvider) prefetchAllCategories(pctx *sources.ProviderContext) {
+func (g *GmailProvider) prefetchAllCategories(token string) {
 	var wg sync.WaitGroup
 	for _, cat := range gmailCategories {
 		// Skip if already cached
-		key := gmailCacheKey(pctx, cat)
 		g.cacheMu.RLock()
-		cached, ok := g.messageCache[key]
+		cached, ok := g.messageCache[cat]
 		isFresh := ok && time.Since(cached.fetchedAt) < categoryCacheTTL
 		g.cacheMu.RUnlock()
 
@@ -1058,23 +1051,23 @@ func (g *GmailProvider) prefetchAllCategories(pctx *sources.ProviderContext) {
 		}
 
 		wg.Add(1)
-		go func(category, cacheKey string) {
+		go func(category string) {
 			defer wg.Done()
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
-			messages, err := g.fetchCategoryMessagesWithMeta(ctx, pctx.Credentials.AccessToken, category)
+			messages, err := g.fetchCategoryMessagesWithMeta(ctx, token, category)
 			if err != nil {
 				return // Silently fail background prefetch
 			}
 
 			g.cacheMu.Lock()
-			g.messageCache[cacheKey] = &categoryCache{
+			g.messageCache[category] = &categoryCache{
 				messages:  messages,
 				fetchedAt: time.Now(),
 			}
 			g.cacheMu.Unlock()
-		}(cat, key)
+		}(cat)
 	}
 	wg.Wait()
 }
