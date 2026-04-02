@@ -293,7 +293,7 @@ func (c *OutlookClient) ListMailFolders(ctx context.Context, creds *types.Integr
 // ListAttachments lists attachments for a message (metadata only, no content bytes).
 func (c *OutlookClient) ListAttachments(ctx context.Context, creds *types.IntegrationCredentials, messageID string) ([]OutlookAttachment, error) {
 	params := url.Values{}
-	params.Set("$select", "id,name,contentType,size,isInline")
+	params.Set("$select", "id,name,contentType,size,isInline,@odata.type")
 
 	var resp struct {
 		Value []OutlookAttachment `json:"value"`

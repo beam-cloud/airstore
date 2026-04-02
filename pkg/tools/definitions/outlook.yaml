@@ -67,25 +67,24 @@ commands:
   send-email:
     write: true
     output_type: email
-    description: Send an Outlook email immediately. When sending a previously created draft, pass the draft_id to send it directly.
+    description: >-
+      Send an Outlook email. Either compose a new email (requires to, subject, body)
+      or send a previously created draft (requires draft_id).
     params:
       - name: to
         type: string
-        required: true
-        position: 0
-        description: "Recipient email address"
+        flag: --to
+        description: "Recipient email address (required for new emails)"
 
       - name: subject
         type: string
-        required: true
-        position: 1
-        description: "Email subject"
+        flag: --subject
+        description: "Email subject (required for new emails)"
 
       - name: body
         type: string
-        required: true
-        position: 2
-        description: "Email body text"
+        flag: --body
+        description: "Email body text (required for new emails)"
 
       - name: conversation_id
         type: string
@@ -97,4 +96,4 @@ commands:
         type: string
         short: -d
         flag: --draft-id
-        description: "Optional draft ID to send (from a previous create-draft)"
+        description: "Draft ID to send (from a previous create-draft)"

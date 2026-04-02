@@ -318,6 +318,31 @@ func TestOutlookSendDraft(t *testing.T) {
 	}
 }
 
+func TestOutlookSendDraftOnly(t *testing.T) {
+	server := outlookTestServer(t)
+	defer server.Close()
+
+	client := newTestOutlookToolClient(t, server)
+	var stdout bytes.Buffer
+	err := client.Execute(context.Background(), outlookCmdSendEmail, map[string]any{
+		"draft_id": "draft-001",
+	}, &types.IntegrationCredentials{AccessToken: "token"}, &stdout, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+
+	var out map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+		t.Fatalf("decode output: %v", err)
+	}
+	if got := out["status"]; got != "sent" {
+		t.Errorf("status = %v, want sent", got)
+	}
+	if got := out["message_id"]; got != "draft-001" {
+		t.Errorf("message_id = %v, want draft-001", got)
+	}
+}
+
 func TestOutlookStripHTML(t *testing.T) {
 	html := `<html><body><p>Hello</p><br><div>World</div></body></html>`
 	got := stripOutlookHTML(html)

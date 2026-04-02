@@ -82,20 +82,23 @@ func (o *OutlookToolClient) Execute(ctx context.Context, command string, args ma
 			return o.createDraft(ctx, token, required["to"], required["subject"], required["body"], conversationID)
 		},
 		outlookCmdSendEmail: func(ctx context.Context, token string, args map[string]any) (any, error) {
+			draftID := GetStringArg(args, "draft_id", "")
+			conversationID := GetStringArg(args, "conversation_id", "")
+			if draftID != "" {
+				return o.sendEmail(ctx, token, "", "", "", conversationID, draftID)
+			}
 			required, err := RequireStringArgs(args, "to", "subject", "body")
 			if err != nil {
 				return nil, err
 			}
-			conversationID := GetStringArg(args, "conversation_id", "")
-			draftID := GetStringArg(args, "draft_id", "")
-			return o.sendEmail(ctx, token, required["to"], required["subject"], required["body"], conversationID, draftID)
+			return o.sendEmail(ctx, token, required["to"], required["subject"], required["body"], conversationID, "")
 		},
 	}, stdout)
 }
 
 func (o *OutlookToolClient) search(ctx context.Context, token, query string, limit int) (any, error) {
-	path := fmt.Sprintf("/me/messages?$search=%q&$top=%d&$select=%s",
-		query, limit, url.QueryEscape(outlookSearchSelect))
+	path := fmt.Sprintf("/me/messages?$search=%s&$top=%d&$select=%s",
+		url.QueryEscape(fmt.Sprintf("%q", query)), limit, url.QueryEscape(outlookSearchSelect))
 
 	var resp struct {
 		Value []map[string]any `json:"value"`
@@ -112,7 +115,7 @@ func (o *OutlookToolClient) search(ctx context.Context, token, query string, lim
 }
 
 func (o *OutlookToolClient) getMessage(ctx context.Context, token, messageID string) (any, error) {
-	path := fmt.Sprintf("/me/messages/%s?$select=%s", messageID, url.QueryEscape(outlookFullSelect))
+	path := fmt.Sprintf("/me/messages/%s?$select=%s", url.PathEscape(messageID), url.QueryEscape(outlookFullSelect))
 
 	var msg map[string]any
 	if err := o.api.RequestJSON(ctx, token, "GET", path, nil, &msg); err != nil {
@@ -125,7 +128,8 @@ func (o *OutlookToolClient) getMessage(ctx context.Context, token, messageID str
 }
 
 func (o *OutlookToolClient) getThread(ctx context.Context, token, conversationID string) (any, error) {
-	filter := fmt.Sprintf("conversationId eq '%s'", conversationID)
+	sanitized := strings.ReplaceAll(conversationID, "'", "''")
+	filter := fmt.Sprintf("conversationId eq '%s'", sanitized)
 	path := fmt.Sprintf("/me/messages?$filter=%s&$orderby=%s&$select=%s&$top=50",
 		url.QueryEscape(filter),
 		url.QueryEscape("receivedDateTime asc"),
@@ -203,7 +207,7 @@ func (o *OutlookToolClient) createDraft(ctx context.Context, token, to, subject,
 func (o *OutlookToolClient) sendEmail(ctx context.Context, token, to, subject, body, conversationID, draftID string) (map[string]any, error) {
 	if draftID != "" {
 		// Send existing draft — returns 202 with no body
-		endpoint := fmt.Sprintf("/me/messages/%s/send", draftID)
+		endpoint := fmt.Sprintf("/me/messages/%s/send", url.PathEscape(draftID))
 		if err := o.api.RequestJSON(ctx, token, "POST", endpoint, nil, nil); err != nil {
 			return nil, err
 		}
