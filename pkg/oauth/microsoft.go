@@ -22,6 +22,7 @@ var microsoftEndpoint = oauth2.Endpoint{
 var microsoftIntegrationScopes = map[string][]string{
 	"outlook": {
 		"https://graph.microsoft.com/Mail.ReadWrite",
+		"https://graph.microsoft.com/Mail.Send",
 		"https://graph.microsoft.com/User.Read",
 		"offline_access",
 	},
