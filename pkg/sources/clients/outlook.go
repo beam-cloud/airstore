@@ -127,8 +127,8 @@ func (c *OutlookClient) requestURL(ctx context.Context, creds *types.Integration
 	if err != nil {
 		return fmt.Errorf("invalid pagination URL: %w", err)
 	}
-	if parsed.Hostname() != "graph.microsoft.com" {
-		return fmt.Errorf("refusing to follow pagination URL to non-Microsoft host: %s", parsed.Hostname())
+	if parsed.Scheme != "https" || parsed.Hostname() != "graph.microsoft.com" {
+		return fmt.Errorf("refusing to follow pagination URL to non-Microsoft host: %s", fullURL)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", fullURL, nil)
