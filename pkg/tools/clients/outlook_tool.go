@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"sort"
 	"strings"
 
 	"github.com/beam-cloud/airstore/pkg/types"
@@ -22,7 +23,7 @@ const (
 // outlookSearchSelect is the $select for search/list queries (no body).
 var outlookSearchSelect = strings.Join([]string{
 	"id", "subject", "bodyPreview", "from", "toRecipients",
-	"receivedDateTime", "isRead", "conversationId", "webLink",
+	"receivedDateTime", "isRead", "hasAttachments", "conversationId", "webLink",
 }, ",")
 
 // outlookFullSelect adds body to the select list.
@@ -85,7 +86,15 @@ func (o *OutlookToolClient) Execute(ctx context.Context, command string, args ma
 			draftID := GetStringArg(args, "draft_id", "")
 			conversationID := GetStringArg(args, "conversation_id", "")
 			if draftID != "" {
-				return o.sendEmail(ctx, token, "", "", "", conversationID, draftID)
+				return o.sendEmail(
+					ctx,
+					token,
+					GetStringArg(args, "to", ""),
+					GetStringArg(args, "subject", ""),
+					"",
+					conversationID,
+					draftID,
+				)
 			}
 			required, err := RequireStringArgs(args, "to", "subject", "body")
 			if err != nil {
@@ -130,9 +139,8 @@ func (o *OutlookToolClient) getMessage(ctx context.Context, token, messageID str
 func (o *OutlookToolClient) getThread(ctx context.Context, token, conversationID string) (any, error) {
 	sanitized := strings.ReplaceAll(conversationID, "'", "''")
 	filter := fmt.Sprintf("conversationId eq '%s'", sanitized)
-	path := fmt.Sprintf("/me/messages?$filter=%s&$orderby=%s&$select=%s&$top=50",
+	path := fmt.Sprintf("/me/messages?$filter=%s&$select=%s&$top=100",
 		url.QueryEscape(filter),
-		url.QueryEscape("receivedDateTime asc"),
 		url.QueryEscape(outlookFullSelect))
 
 	var resp struct {
@@ -158,9 +166,15 @@ func (o *OutlookToolClient) getThread(ctx context.Context, token, conversationID
 		}
 		messages = append(messages, msg)
 	}
+	sort.SliceStable(messages, func(i, j int) bool {
+		left, _ := messages[i]["date"].(string)
+		right, _ := messages[j]["date"].(string)
+		return left < right
+	})
 
 	result := map[string]any{
 		"conversation_id": conversationID,
+		"thread_id":       conversationID,
 		"messages":        messages,
 	}
 	if webLink != "" {
@@ -201,7 +215,11 @@ func (o *OutlookToolClient) createDraft(ctx context.Context, token, to, subject,
 		return nil, err
 	}
 
-	return formatOutlookMessageResult(to, subject, result), nil
+	out := formatOutlookMessageResult(to, subject, result)
+	if draftID := getString(result, "id"); draftID != "" {
+		out["draft_id"] = draftID
+	}
+	return out, nil
 }
 
 func (o *OutlookToolClient) sendEmail(ctx context.Context, token, to, subject, body, conversationID, draftID string) (map[string]any, error) {
@@ -219,43 +237,42 @@ func (o *OutlookToolClient) sendEmail(ctx context.Context, token, to, subject, b
 		}
 		if conversationID != "" {
 			out["conversation_id"] = conversationID
+			out["thread_id"] = conversationID
 		}
 		return out, nil
 	}
 
-	// Compose and send new email
-	message := map[string]any{
-		"subject": subject,
-		"body": map[string]any{
-			"contentType": "text",
-			"content":     body,
-		},
-		"toRecipients": []map[string]any{
-			{"emailAddress": map[string]any{"address": to}},
-		},
-	}
-	if conversationID != "" {
-		message["conversationId"] = conversationID
-	}
-	payload := map[string]any{
-		"message":         message,
-		"saveToSentItems": true,
-	}
-
-	// sendMail returns 202 Accepted with no body
-	if err := o.api.RequestJSON(ctx, token, "POST", "/me/sendMail", payload, nil); err != nil {
+	// Create a draft first so we can surface the provider conversation ID.
+	draft, err := o.createDraft(ctx, token, to, subject, body, conversationID)
+	if err != nil {
 		return nil, err
 	}
-
-	out := map[string]any{
-		"to":      to,
-		"subject": subject,
-		"status":  "sent",
+	createdDraftID, _ := draft["draft_id"].(string)
+	if createdDraftID == "" {
+		createdDraftID, _ = draft["message_id"].(string)
 	}
-	if conversationID != "" {
-		out["conversation_id"] = conversationID
+	if createdDraftID == "" {
+		return nil, fmt.Errorf("outlook API: draft create response missing id")
 	}
-	return out, nil
+	createdConversationID, _ := draft["conversation_id"].(string)
+	if createdConversationID == "" {
+		createdConversationID = conversationID
+	}
+	sent, err := o.sendEmail(ctx, token, to, subject, "", createdConversationID, createdDraftID)
+	if err != nil {
+		return nil, err
+	}
+	for _, key := range []string{"message_id", "conversation_id", "thread_id", "url"} {
+		if _, ok := sent[key]; ok {
+			continue
+		}
+		if value, ok := draft[key]; ok {
+			sent[key] = value
+		}
+	}
+	sent["to"] = to
+	sent["subject"] = subject
+	return sent, nil
 }
 
 // formatOutlookMessage extracts a normalized map from a Graph API message response.
@@ -267,6 +284,7 @@ func formatOutlookMessage(msg map[string]any) map[string]any {
 	}
 	if convID := getString(msg, "conversationId"); convID != "" {
 		out["conversation_id"] = convID
+		out["thread_id"] = convID
 	}
 	if subject := getString(msg, "subject"); subject != "" {
 		out["subject"] = subject
@@ -279,6 +297,9 @@ func formatOutlookMessage(msg map[string]any) map[string]any {
 	}
 	if isRead, ok := msg["isRead"].(bool); ok {
 		out["is_read"] = isRead
+	}
+	if hasAttachments, ok := msg["hasAttachments"].(bool); ok {
+		out["has_attachments"] = hasAttachments
 	}
 	if webLink := getString(msg, "webLink"); webLink != "" {
 		out["url"] = webLink
@@ -378,6 +399,7 @@ func formatOutlookMessageResult(to, subject string, result map[string]any) map[s
 	}
 	if convID := getString(result, "conversationId"); convID != "" {
 		out["conversation_id"] = convID
+		out["thread_id"] = convID
 	}
 	if webLink := getString(result, "webLink"); webLink != "" {
 		out["url"] = webLink

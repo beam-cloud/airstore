@@ -1324,6 +1324,7 @@ func formatResultsForEvaluation(results []sources.QueryResult) string {
 func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 	var spec struct {
 		GmailQuery         string   `json:"gmail_query"`
+		OutlookQuery       string   `json:"outlook_query"`
 		GDriveQuery        string   `json:"gdrive_query"`
 		NotionQuery        string   `json:"notion_query"`
 		GitHubQuery        string   `json:"github_query"`
@@ -1366,6 +1367,8 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 	switch types.SourceType(integration) {
 	case types.SourceGmail:
 		query = spec.GmailQuery
+	case types.SourceOutlook:
+		query = spec.OutlookQuery
 	case types.SourceGDrive:
 		query = spec.GDriveQuery
 	case types.SourceNotion:
@@ -1517,4 +1520,3 @@ func isValidQueryName(name string) bool {
 		!strings.Contains(name, "\\") &&
 		!strings.Contains(name, "..")
 }
-

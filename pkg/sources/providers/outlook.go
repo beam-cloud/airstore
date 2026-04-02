@@ -288,6 +288,13 @@ func (o *OutlookProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provid
 		limit = 50
 	}
 
+	if conversationID := strings.TrimSpace(spec.Metadata["thread_id"]); conversationID != "" {
+		return o.executeThreadQuery(ctx, pctx, conversationID, spec)
+	}
+	if messageID := strings.TrimSpace(spec.Metadata["message_id"]); messageID != "" {
+		return o.executeMessageQuery(ctx, pctx, messageID, spec)
+	}
+
 	var list *clients.OutlookMessageList
 	var err error
 
@@ -304,9 +311,61 @@ func (o *OutlookProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provid
 	}
 
 	includeAttachments := spec.Metadata["include_attachments"] == "true"
+	results := o.buildQueryResultsFromMessages(ctx, pctx, spec, list.Messages, includeAttachments, boolMetadataOrDefault(spec.Metadata, "include_message_body", true))
 
-	results := make([]sources.QueryResult, 0, len(list.Messages))
-	for _, msg := range list.Messages {
+	return &sources.QueryResponse{
+		Results:       results,
+		NextPageToken: list.NextPageToken,
+		HasMore:       list.NextPageToken != "",
+	}, nil
+}
+
+func (o *OutlookProvider) executeThreadQuery(ctx context.Context, pctx *sources.ProviderContext, conversationID string, spec sources.QuerySpec) (*sources.QueryResponse, error) {
+	list, err := o.client.ListConversationMessages(ctx, pctx.Credentials, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	results := o.buildQueryResultsFromMessages(
+		ctx,
+		pctx,
+		spec,
+		list.Messages,
+		spec.Metadata["include_attachments"] == "true",
+		boolMetadataOrDefault(spec.Metadata, "include_message_body", true),
+	)
+	return &sources.QueryResponse{Results: results}, nil
+}
+
+func (o *OutlookProvider) executeMessageQuery(ctx context.Context, pctx *sources.ProviderContext, messageID string, spec sources.QuerySpec) (*sources.QueryResponse, error) {
+	msg, err := o.client.GetMessage(ctx, pctx.Credentials, messageID)
+	if err != nil {
+		return nil, err
+	}
+	results := o.buildQueryResultsFromMessages(
+		ctx,
+		pctx,
+		spec,
+		[]clients.OutlookMessage{*msg},
+		spec.Metadata["include_attachments"] == "true",
+		boolMetadataOrDefault(spec.Metadata, "include_message_body", true),
+	)
+	return &sources.QueryResponse{Results: results}, nil
+}
+
+func (o *OutlookProvider) buildQueryResultsFromMessages(
+	ctx context.Context,
+	pctx *sources.ProviderContext,
+	spec sources.QuerySpec,
+	messages []clients.OutlookMessage,
+	includeAttachments bool,
+	includeMessageBody bool,
+) []sources.QueryResult {
+	if !includeAttachments && !includeMessageBody {
+		includeMessageBody = true
+	}
+
+	results := make([]sources.QueryResult, 0, len(messages))
+	for _, msg := range messages {
 		om := convertOutlookMessage(&msg)
 		metadata := map[string]string{
 			"id":      msg.ID,
@@ -315,49 +374,44 @@ func (o *OutlookProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provid
 			"to":      om.To,
 			"subject": om.Subject,
 		}
-		results = append(results, sources.QueryResult{
-			ID:       msg.ID,
-			Filename: o.FormatFilename(spec.FilenameFormat, metadata),
-			Metadata: metadata,
-			Size:     0,
-			Mtime:    om.ReceivedTime.Unix(),
-		})
+		if msg.ConversationID != "" {
+			metadata["thread_id"] = msg.ConversationID
+		}
+		messageFilename := o.FormatFilename(spec.FilenameFormat, metadata)
+		if includeMessageBody {
+			results = append(results, sources.QueryResult{
+				ID:       msg.ID,
+				Filename: messageFilename,
+				Metadata: cloneStringMap(metadata),
+				Size:     0,
+				Mtime:    om.ReceivedTime.Unix(),
+			})
+		}
 
-		if includeAttachments && msg.HasAttachments {
-			atts, err := o.getMessageAttachments(ctx, pctx, msg.ID)
-			if err != nil {
-				continue // skip attachment errors, still return the message
-			}
-			msgFilename := o.FormatFilename(spec.FilenameFormat, metadata)
-			for _, att := range atts {
-				attMetadata := map[string]string{
-					"id":              msg.ID,
-					"date":            om.Date,
-					"from":            om.FromEmail,
-					"to":              om.To,
-					"subject":         om.Subject,
-					"result_type":     "attachment",
-					"attachment_id":   att.ID,
-					"attachment_name": att.Name,
-					"attachment_mime": att.ContentType,
-				}
-				attFilename := buildOutlookAttachmentFilename(msgFilename, att.SafeName)
-				results = append(results, sources.QueryResult{
-					ID:       formatOutlookAttachmentResultID(msg.ID, att.ID),
-					Filename: attFilename,
-					Metadata: attMetadata,
-					Size:     int64(att.Size),
-					Mtime:    om.ReceivedTime.Unix(),
-				})
-			}
+		if !includeAttachments || !msg.HasAttachments {
+			continue
+		}
+
+		atts, err := o.getMessageAttachments(ctx, pctx, msg.ID)
+		if err != nil {
+			continue
+		}
+		for _, att := range atts {
+			attMetadata := cloneStringMap(metadata)
+			attMetadata["result_type"] = "attachment"
+			attMetadata["attachment_id"] = att.ID
+			attMetadata["attachment_name"] = att.Name
+			attMetadata["attachment_mime"] = att.ContentType
+			results = append(results, sources.QueryResult{
+				ID:       formatOutlookAttachmentResultID(msg.ID, att.ID),
+				Filename: buildOutlookAttachmentFilename(messageFilename, att.SafeName),
+				Metadata: attMetadata,
+				Size:     int64(att.Size),
+				Mtime:    om.ReceivedTime.Unix(),
+			})
 		}
 	}
-
-	return &sources.QueryResponse{
-		Results:       results,
-		NextPageToken: list.NextPageToken,
-		HasMore:       list.NextPageToken != "",
-	}, nil
+	return results
 }
 
 // buildOutlookAttachmentFilename creates a filename for an attachment query result.

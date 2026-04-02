@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -252,6 +253,31 @@ func (c *OutlookClient) GetMessage(ctx context.Context, creds *types.Integration
 		return nil, err
 	}
 	return &msg, nil
+}
+
+// ListConversationMessages fetches all messages for a specific Outlook conversation.
+// Microsoft Graph rejects some conversationId filters when combined with $orderby,
+// so we omit server-side ordering and sort client-side by receivedDateTime.
+func (c *OutlookClient) ListConversationMessages(ctx context.Context, creds *types.IntegrationCredentials, conversationID string) (*OutlookMessageList, error) {
+	params := url.Values{}
+	params.Set("$select", messageSelectWithBody)
+	params.Set("$top", "100")
+	sanitized := strings.ReplaceAll(strings.TrimSpace(conversationID), "'", "''")
+	params.Set("$filter", fmt.Sprintf("conversationId eq '%s'", sanitized))
+
+	var resp struct {
+		Value []OutlookMessage `json:"value"`
+	}
+	if err := c.request(ctx, creds, "/me/messages?"+params.Encode(), &resp); err != nil {
+		return nil, err
+	}
+	sort.SliceStable(resp.Value, func(i, j int) bool {
+		return resp.Value[i].ReceivedDateTime < resp.Value[j].ReceivedDateTime
+	})
+
+	return &OutlookMessageList{
+		Messages: resp.Value,
+	}, nil
 }
 
 // SearchMessages searches messages using the $search query parameter.

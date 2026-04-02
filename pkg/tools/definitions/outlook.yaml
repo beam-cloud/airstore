@@ -12,6 +12,11 @@ commands:
         position: 0
         description: "Search query (e.g. 'from:someone subject:hello', 'hasAttachments:true')"
 
+      - name: query
+        type: string
+        flag: --query
+        description: "Search query (alias for the positional query argument)"
+
       - name: limit
         type: int
         default: 10
