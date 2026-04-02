@@ -1,0 +1,100 @@
+name: outlook
+description: Read and write operations for Outlook (Microsoft 365) email
+icon: mail
+
+commands:
+  search:
+    description: Search Outlook emails using Microsoft Graph search syntax
+    params:
+      - name: query
+        type: string
+        required: true
+        position: 0
+        description: "Search query (e.g. 'from:someone subject:hello', 'hasAttachments:true')"
+
+      - name: limit
+        type: int
+        default: 10
+        short: -n
+        flag: --limit
+        description: "Maximum number of results (1-50)"
+
+  get-thread:
+    description: Read a full email conversation by conversation ID
+    params:
+      - name: conversation_id
+        type: string
+        required: true
+        position: 0
+        description: "Outlook conversation ID"
+
+  get-message:
+    description: Read a single email message by message ID
+    params:
+      - name: message_id
+        type: string
+        required: true
+        position: 0
+        description: "Outlook message ID"
+
+  create-draft:
+    description: Create an Outlook draft email
+    params:
+      - name: to
+        type: string
+        required: true
+        position: 0
+        description: "Recipient email address"
+
+      - name: subject
+        type: string
+        required: true
+        position: 1
+        description: "Email subject"
+
+      - name: body
+        type: string
+        required: true
+        position: 2
+        description: "Email body text"
+
+      - name: conversation_id
+        type: string
+        short: -c
+        flag: --conversation-id
+        description: "Optional conversation ID to draft within"
+
+  send-email:
+    write: true
+    output_type: email
+    description: Send an Outlook email immediately. When sending a previously created draft, pass the draft_id to send it directly.
+    params:
+      - name: to
+        type: string
+        required: true
+        position: 0
+        description: "Recipient email address"
+
+      - name: subject
+        type: string
+        required: true
+        position: 1
+        description: "Email subject"
+
+      - name: body
+        type: string
+        required: true
+        position: 2
+        description: "Email body text"
+
+      - name: conversation_id
+        type: string
+        short: -c
+        flag: --conversation-id
+        description: "Optional conversation ID to send within"
+
+      - name: draft_id
+        type: string
+        short: -d
+        flag: --draft-id
+        description: "Optional draft ID to send (from a previous create-draft)"

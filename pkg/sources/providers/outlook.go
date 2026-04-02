@@ -2,6 +2,7 @@ package providers
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -48,10 +49,12 @@ const outlookReadme = `# Outlook Integration
 - By sender: ` + "`ls messages/inbox/`" + ` shows senders
 - By date: Folders sorted as ` + "`YYYY-MM-DD_Subject_id`" + `
 - Full email: ` + "`cat messages/inbox/Sender/2026-01-29_Subject_id/body.txt`" + `
+- Attachments: ` + "`ls messages/inbox/Sender/2026-01-29_Subject_id/attachments/`" + `
 
 ## File Types
-- ` + "`meta.json`" + ` - Email metadata (from, to, subject, date)
+- ` + "`meta.json`" + ` - Email metadata (from, to, subject, date, attachments list)
 - ` + "`body.txt`" + ` - Plain text email body
+- ` + "`attachments/`" + ` - Directory containing downloadable file attachments
 - ` + "`index.json`" + ` - Summary of all emails in a category
 `
 
@@ -63,11 +66,30 @@ type OutlookProvider struct {
 	// Cache for message metadata (keyed by category)
 	cacheMu      sync.RWMutex
 	messageCache map[string]*outlookCategoryCache
+
+	// Cache for attachment metadata (keyed by messageID)
+	attachmentCacheMu sync.RWMutex
+	attachmentCache   map[string]*outlookAttachmentCache
 }
 
 type outlookCategoryCache struct {
 	messages  []outlookMessage
 	fetchedAt time.Time
+}
+
+type outlookAttachmentCache struct {
+	attachments []outlookAttachmentMeta
+	fetchedAt   time.Time
+}
+
+// outlookAttachmentMeta holds parsed attachment data for filesystem display.
+type outlookAttachmentMeta struct {
+	ID          string
+	Name        string
+	ContentType string
+	Size        int
+	IsInline    bool
+	SafeName    string // sanitized filename for filesystem
 }
 
 // outlookMessage holds parsed message data for folder organization
@@ -92,8 +114,9 @@ type outlookMessage struct {
 // NewOutlookProvider creates a new Outlook source provider.
 func NewOutlookProvider() *OutlookProvider {
 	return &OutlookProvider{
-		client:       clients.NewOutlookClient(),
-		messageCache: make(map[string]*outlookCategoryCache),
+		client:          clients.NewOutlookClient(),
+		messageCache:    make(map[string]*outlookCategoryCache),
+		attachmentCache: make(map[string]*outlookAttachmentCache),
 	}
 }
 
@@ -236,6 +259,24 @@ func (o *OutlookProvider) Search(ctx context.Context, pctx *sources.ProviderCont
 // QueryExecutor implementation
 // ============================================================================
 
+const outlookResultAttachPrefix = "att:"
+
+func formatOutlookAttachmentResultID(messageID, attachmentID string) string {
+	return outlookResultAttachPrefix + messageID + ":" + attachmentID
+}
+
+// parseOutlookResultID parses a result ID into message and optional attachment IDs.
+// Formats: "att:msgID:attID" (attachment), "msgID" (message, backward compat).
+func parseOutlookResultID(resultID string) (messageID, attachmentID string, isAttachment bool) {
+	if strings.HasPrefix(resultID, outlookResultAttachPrefix) {
+		rest := resultID[len(outlookResultAttachPrefix):]
+		if idx := strings.Index(rest, ":"); idx > 0 {
+			return rest[:idx], rest[idx+1:], true
+		}
+	}
+	return resultID, "", false
+}
+
 // ExecuteQuery runs a query against the Microsoft Graph Mail API.
 func (o *OutlookProvider) ExecuteQuery(ctx context.Context, pctx *sources.ProviderContext, spec sources.QuerySpec) (*sources.QueryResponse, error) {
 	if err := checkAuth(pctx); err != nil {
@@ -262,6 +303,8 @@ func (o *OutlookProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provid
 		return nil, err
 	}
 
+	includeAttachments := spec.Metadata["include_attachments"] == "true"
+
 	results := make([]sources.QueryResult, 0, len(list.Messages))
 	for _, msg := range list.Messages {
 		om := convertOutlookMessage(&msg)
@@ -279,6 +322,35 @@ func (o *OutlookProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provid
 			Size:     0,
 			Mtime:    om.ReceivedTime.Unix(),
 		})
+
+		if includeAttachments && msg.HasAttachments {
+			atts, err := o.getMessageAttachments(ctx, pctx, msg.ID)
+			if err != nil {
+				continue // skip attachment errors, still return the message
+			}
+			msgFilename := o.FormatFilename(spec.FilenameFormat, metadata)
+			for _, att := range atts {
+				attMetadata := map[string]string{
+					"id":              msg.ID,
+					"date":            om.Date,
+					"from":            om.FromEmail,
+					"to":              om.To,
+					"subject":         om.Subject,
+					"result_type":     "attachment",
+					"attachment_id":   att.ID,
+					"attachment_name": att.Name,
+					"attachment_mime": att.ContentType,
+				}
+				attFilename := buildOutlookAttachmentFilename(msgFilename, att.SafeName)
+				results = append(results, sources.QueryResult{
+					ID:       formatOutlookAttachmentResultID(msg.ID, att.ID),
+					Filename: attFilename,
+					Metadata: attMetadata,
+					Size:     int64(att.Size),
+					Mtime:    om.ReceivedTime.Unix(),
+				})
+			}
+		}
 	}
 
 	return &sources.QueryResponse{
@@ -288,13 +360,25 @@ func (o *OutlookProvider) ExecuteQuery(ctx context.Context, pctx *sources.Provid
 	}, nil
 }
 
-// ReadResult fetches content for a single message by ID.
+// buildOutlookAttachmentFilename creates a filename for an attachment query result.
+func buildOutlookAttachmentFilename(msgFilename, attSafeName string) string {
+	base := strings.TrimSuffix(msgFilename, ".txt")
+	return base + "__att__" + attSafeName
+}
+
+// ReadResult fetches content for a single message or attachment by ID.
+// Attachment IDs use the format "att:messageID:attachmentID".
 func (o *OutlookProvider) ReadResult(ctx context.Context, pctx *sources.ProviderContext, resultID string) ([]byte, error) {
 	if err := checkAuth(pctx); err != nil {
 		return nil, err
 	}
 
-	msg, err := o.client.GetMessage(ctx, pctx.Credentials, resultID)
+	messageID, attachmentID, isAttachment := parseOutlookResultID(resultID)
+	if isAttachment {
+		return o.fetchAttachmentContent(ctx, pctx, messageID, attachmentID)
+	}
+
+	msg, err := o.client.GetMessage(ctx, pctx.Credentials, messageID)
 	if err != nil {
 		return nil, err
 	}
@@ -366,11 +450,38 @@ func (o *OutlookProvider) statMessages(ctx context.Context, pctx *sources.Provid
 		if msg == nil {
 			return nil, sources.ErrNotFound
 		}
+		if file == "attachments" {
+			return sources.DirInfo(), nil
+		}
 		data, err := o.getMessageFileData(ctx, pctx, msg.ID, file)
 		if err != nil {
 			return nil, err
 		}
 		return sources.FileInfoFromBytes(data), nil
+	case 5:
+		if parts[3] != "attachments" {
+			return nil, sources.ErrNotFound
+		}
+		msg, err := o.findMessage(ctx, pctx, parts[0], parts[1], parts[2])
+		if err != nil {
+			return nil, err
+		}
+		if msg == nil {
+			return nil, sources.ErrNotFound
+		}
+		att, err := o.findAttachmentByName(ctx, pctx, msg.ID, parts[4])
+		if err != nil {
+			return nil, err
+		}
+		if att == nil {
+			return nil, sources.ErrNotFound
+		}
+		return &sources.FileInfo{
+			Size:  int64(att.Size),
+			Mode:  sources.ModeFile,
+			Mtime: sources.NowUnix(),
+			IsDir: false,
+		}, nil
 	default:
 		return nil, sources.ErrNotFound
 	}
@@ -411,10 +522,35 @@ func (o *OutlookProvider) readdirMessages(ctx context.Context, pctx *sources.Pro
 		}
 		metaData, _ := o.getMessageFileData(ctx, pctx, msg.ID, "meta.json")
 		bodyData, _ := o.getMessageFileData(ctx, pctx, msg.ID, "body.txt")
-		return []sources.DirEntry{
+		entries := []sources.DirEntry{
 			fileEntry("meta.json", int64(len(metaData))),
 			fileEntry("body.txt", int64(len(bodyData))),
-		}, nil
+		}
+		if msg.HasAttachment {
+			entries = append(entries, dirEntry("attachments"))
+		}
+		return entries, nil
+
+	case 4:
+		if parts[3] != "attachments" {
+			return nil, sources.ErrNotDir
+		}
+		msg, err := o.findMessage(ctx, pctx, parts[0], parts[1], parts[2])
+		if err != nil {
+			return nil, err
+		}
+		if msg == nil {
+			return nil, sources.ErrNotFound
+		}
+		atts, err := o.getMessageAttachments(ctx, pctx, msg.ID)
+		if err != nil {
+			return nil, err
+		}
+		entries := make([]sources.DirEntry, 0, len(atts))
+		for _, att := range atts {
+			entries = append(entries, fileEntry(att.SafeName, int64(att.Size)))
+		}
+		return entries, nil
 
 	default:
 		return nil, sources.ErrNotDir
@@ -435,6 +571,39 @@ func (o *OutlookProvider) readMessages(ctx context.Context, pctx *sources.Provid
 	}
 
 	category, senderFolder, subjectFolder, file := parts[0], parts[1], parts[2], parts[3]
+
+	// Handle attachments directory and files
+	if file == "attachments" {
+		if len(parts) == 4 {
+			return nil, sources.ErrIsDir
+		}
+		if len(parts) == 5 {
+			msg, err := o.findMessage(ctx, pctx, category, senderFolder, subjectFolder)
+			if err != nil {
+				return nil, err
+			}
+			if msg == nil {
+				return nil, sources.ErrNotFound
+			}
+			att, err := o.findAttachmentByName(ctx, pctx, msg.ID, parts[4])
+			if err != nil {
+				return nil, err
+			}
+			if att == nil {
+				return nil, sources.ErrNotFound
+			}
+			data, err := o.fetchAttachmentContent(ctx, pctx, msg.ID, att.ID)
+			if err != nil {
+				return nil, err
+			}
+			return sliceData(data, offset, length), nil
+		}
+		return nil, sources.ErrNotFound
+	}
+
+	if len(parts) > 4 {
+		return nil, sources.ErrNotFound
+	}
 
 	msg, err := o.findMessage(ctx, pctx, category, senderFolder, subjectFolder)
 	if err != nil {
@@ -527,6 +696,92 @@ func (o *OutlookProvider) findMessage(ctx context.Context, pctx *sources.Provide
 	return nil, nil
 }
 
+// getMessageAttachments returns cached attachment metadata for a message, fetching if needed.
+func (o *OutlookProvider) getMessageAttachments(ctx context.Context, pctx *sources.ProviderContext, messageID string) ([]outlookAttachmentMeta, error) {
+	o.attachmentCacheMu.RLock()
+	if cached, ok := o.attachmentCache[messageID]; ok && time.Since(cached.fetchedAt) < outlookCacheTTL {
+		o.attachmentCacheMu.RUnlock()
+		return cached.attachments, nil
+	}
+	o.attachmentCacheMu.RUnlock()
+
+	rawAtts, err := o.client.ListAttachments(ctx, pctx.Credentials, messageID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Filter to file attachments only and build metadata
+	seen := make(map[string]int)
+	atts := make([]outlookAttachmentMeta, 0, len(rawAtts))
+	for _, a := range rawAtts {
+		if a.ODataType != "#microsoft.graph.fileAttachment" {
+			continue
+		}
+		safeName := sources.SanitizeFilename(a.Name)
+		if safeName == "" || safeName == "_unknown_" {
+			safeName = "attachment"
+		}
+		// Deduplicate filenames within this message
+		seen[safeName]++
+		if seen[safeName] > 1 {
+			ext := ""
+			if dot := strings.LastIndex(safeName, "."); dot >= 0 {
+				ext = safeName[dot:]
+				safeName = safeName[:dot]
+			}
+			safeName = fmt.Sprintf("%s_%d%s", safeName, seen[safeName], ext)
+		}
+		atts = append(atts, outlookAttachmentMeta{
+			ID:          a.ID,
+			Name:        a.Name,
+			ContentType: a.ContentType,
+			Size:        a.Size,
+			IsInline:    a.IsInline,
+			SafeName:    safeName,
+		})
+	}
+
+	o.attachmentCacheMu.Lock()
+	o.attachmentCache[messageID] = &outlookAttachmentCache{
+		attachments: atts,
+		fetchedAt:   time.Now(),
+	}
+	o.attachmentCacheMu.Unlock()
+
+	return atts, nil
+}
+
+// findAttachmentByName finds an attachment by its sanitized filename.
+func (o *OutlookProvider) findAttachmentByName(ctx context.Context, pctx *sources.ProviderContext, messageID, safeName string) (*outlookAttachmentMeta, error) {
+	atts, err := o.getMessageAttachments(ctx, pctx, messageID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range atts {
+		if atts[i].SafeName == safeName {
+			return &atts[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// fetchAttachmentContent downloads the raw bytes of an attachment.
+func (o *OutlookProvider) fetchAttachmentContent(ctx context.Context, pctx *sources.ProviderContext, messageID, attachmentID string) ([]byte, error) {
+	att, err := o.client.GetAttachment(ctx, pctx.Credentials, messageID, attachmentID)
+	if err != nil {
+		return nil, err
+	}
+	if att.ContentBytes != "" {
+		data, err := base64.StdEncoding.DecodeString(att.ContentBytes)
+		if err != nil {
+			return nil, fmt.Errorf("decoding attachment %s: %w", attachmentID, err)
+		}
+		return data, nil
+	}
+	// Fallback to /$value endpoint for large attachments
+	return o.client.GetAttachmentContent(ctx, pctx.Credentials, messageID, attachmentID)
+}
+
 // getMessageFileData returns file content for a message (meta.json or body.txt).
 func (o *OutlookProvider) getMessageFileData(ctx context.Context, pctx *sources.ProviderContext, messageID, file string) ([]byte, error) {
 	switch file {
@@ -536,15 +791,15 @@ func (o *OutlookProvider) getMessageFileData(ctx context.Context, pctx *sources.
 			return nil, err
 		}
 		meta := map[string]any{
-			"id":             msg.ID,
-			"subject":        msg.Subject,
-			"from":           msg.SenderString(),
-			"from_email":     msg.SenderEmail(),
-			"received":       msg.ReceivedDateTime,
-			"is_read":        msg.IsRead,
+			"id":              msg.ID,
+			"subject":         msg.Subject,
+			"from":            msg.SenderString(),
+			"from_email":      msg.SenderEmail(),
+			"received":        msg.ReceivedDateTime,
+			"is_read":         msg.IsRead,
 			"has_attachments": msg.HasAttachments,
-			"importance":     msg.Importance,
-			"web_link":       msg.WebLink,
+			"importance":      msg.Importance,
+			"web_link":        msg.WebLink,
 		}
 		if len(msg.ToRecipients) > 0 {
 			to := make([]string, 0, len(msg.ToRecipients))
@@ -559,6 +814,22 @@ func (o *OutlookProvider) getMessageFileData(ctx context.Context, pctx *sources.
 				cc = append(cc, r.EmailAddress.Address)
 			}
 			meta["cc"] = cc
+		}
+		if msg.HasAttachments {
+			atts, err := o.getMessageAttachments(ctx, pctx, messageID)
+			if err == nil && len(atts) > 0 {
+				attList := make([]map[string]any, 0, len(atts))
+				for _, att := range atts {
+					attList = append(attList, map[string]any{
+						"id":           att.ID,
+						"name":         att.Name,
+						"content_type": att.ContentType,
+						"size":         att.Size,
+						"is_inline":    att.IsInline,
+					})
+				}
+				meta["attachments"] = attList
+			}
 		}
 		data, err := json.MarshalIndent(meta, "", "  ")
 		if err != nil {
@@ -668,13 +939,13 @@ func (o *OutlookProvider) generateCategoryIndexJSON(ctx context.Context, pctx *s
 	summaries := make([]map[string]any, 0, len(messages))
 	for _, msg := range messages {
 		summaries = append(summaries, map[string]any{
-			"id":       msg.ID,
-			"from":     msg.From,
-			"subject":  msg.Subject,
-			"date":     msg.Date,
-			"is_read":  msg.IsRead,
-			"flagged":  msg.IsFlagged,
-			"preview":  truncateString(msg.Snippet, 100),
+			"id":      msg.ID,
+			"from":    msg.From,
+			"subject": msg.Subject,
+			"date":    msg.Date,
+			"is_read": msg.IsRead,
+			"flagged": msg.IsFlagged,
+			"preview": truncateString(msg.Snippet, 100),
 		})
 	}
 

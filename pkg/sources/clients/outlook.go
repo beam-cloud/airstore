@@ -33,23 +33,23 @@ func (c *OutlookClient) Integration() types.IntegrationName {
 
 // OutlookMessage represents a mail message from Microsoft Graph.
 type OutlookMessage struct {
-	ID                 string              `json:"id"`
-	Subject            string              `json:"subject"`
-	BodyPreview        string              `json:"bodyPreview"`
-	Body               *OutlookMessageBody `json:"body,omitempty"`
-	From               *OutlookRecipient   `json:"from,omitempty"`
-	ToRecipients       []OutlookRecipient  `json:"toRecipients,omitempty"`
-	CcRecipients       []OutlookRecipient  `json:"ccRecipients,omitempty"`
-	ReceivedDateTime   string              `json:"receivedDateTime"`
-	SentDateTime       string              `json:"sentDateTime,omitempty"`
-	IsRead             bool                `json:"isRead"`
-	IsDraft            bool                `json:"isDraft"`
-	HasAttachments     bool                `json:"hasAttachments"`
-	Importance         string              `json:"importance"`
-	Flag               *OutlookFlag        `json:"flag,omitempty"`
-	ConversationID     string              `json:"conversationId,omitempty"`
-	ParentFolderID     string              `json:"parentFolderId,omitempty"`
-	WebLink            string              `json:"webLink,omitempty"`
+	ID               string              `json:"id"`
+	Subject          string              `json:"subject"`
+	BodyPreview      string              `json:"bodyPreview"`
+	Body             *OutlookMessageBody `json:"body,omitempty"`
+	From             *OutlookRecipient   `json:"from,omitempty"`
+	ToRecipients     []OutlookRecipient  `json:"toRecipients,omitempty"`
+	CcRecipients     []OutlookRecipient  `json:"ccRecipients,omitempty"`
+	ReceivedDateTime string              `json:"receivedDateTime"`
+	SentDateTime     string              `json:"sentDateTime,omitempty"`
+	IsRead           bool                `json:"isRead"`
+	IsDraft          bool                `json:"isDraft"`
+	HasAttachments   bool                `json:"hasAttachments"`
+	Importance       string              `json:"importance"`
+	Flag             *OutlookFlag        `json:"flag,omitempty"`
+	ConversationID   string              `json:"conversationId,omitempty"`
+	ParentFolderID   string              `json:"parentFolderId,omitempty"`
+	WebLink          string              `json:"webLink,omitempty"`
 }
 
 type OutlookMessageBody struct {
@@ -72,11 +72,22 @@ type OutlookFlag struct {
 
 // OutlookMailFolder represents a mail folder from Microsoft Graph.
 type OutlookMailFolder struct {
-	ID               string `json:"id"`
-	DisplayName      string `json:"displayName"`
-	TotalItemCount   int    `json:"totalItemCount"`
-	UnreadItemCount  int    `json:"unreadItemCount"`
-	ParentFolderID   string `json:"parentFolderId,omitempty"`
+	ID              string `json:"id"`
+	DisplayName     string `json:"displayName"`
+	TotalItemCount  int    `json:"totalItemCount"`
+	UnreadItemCount int    `json:"unreadItemCount"`
+	ParentFolderID  string `json:"parentFolderId,omitempty"`
+}
+
+// OutlookAttachment represents a mail attachment from Microsoft Graph.
+type OutlookAttachment struct {
+	ODataType    string `json:"@odata.type"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	ContentType  string `json:"contentType"`
+	Size         int    `json:"size"`
+	IsInline     bool   `json:"isInline"`
+	ContentBytes string `json:"contentBytes,omitempty"` // base64-encoded, present for file attachments
 }
 
 // OutlookMessageList wraps a Graph API list response with pagination.
@@ -151,6 +162,33 @@ func (c *OutlookClient) requestURL(ctx context.Context, creds *types.Integration
 	}
 
 	return json.NewDecoder(resp.Body).Decode(result)
+}
+
+// requestRaw performs an authenticated GET and returns raw bytes (for binary endpoints like /$value).
+func (c *OutlookClient) requestRaw(ctx context.Context, creds *types.IntegrationCredentials, path string) ([]byte, error) {
+	reqURL := graphAPIBase + path
+	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+creds.AccessToken)
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode >= 400 {
+		return nil, graphAPIError(resp.StatusCode, body)
+	}
+
+	return body, nil
 }
 
 // ListMessages lists messages, optionally from a well-known folder.
@@ -250,6 +288,38 @@ func (c *OutlookClient) ListMailFolders(ctx context.Context, creds *types.Integr
 		return nil, err
 	}
 	return resp.Value, nil
+}
+
+// ListAttachments lists attachments for a message (metadata only, no content bytes).
+func (c *OutlookClient) ListAttachments(ctx context.Context, creds *types.IntegrationCredentials, messageID string) ([]OutlookAttachment, error) {
+	params := url.Values{}
+	params.Set("$select", "id,name,contentType,size,isInline")
+
+	var resp struct {
+		Value []OutlookAttachment `json:"value"`
+	}
+	path := fmt.Sprintf("/me/messages/%s/attachments?%s", messageID, params.Encode())
+	if err := c.request(ctx, creds, path, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Value, nil
+}
+
+// GetAttachment fetches a single attachment by ID including content bytes.
+func (c *OutlookClient) GetAttachment(ctx context.Context, creds *types.IntegrationCredentials, messageID, attachmentID string) (*OutlookAttachment, error) {
+	var att OutlookAttachment
+	path := fmt.Sprintf("/me/messages/%s/attachments/%s", messageID, attachmentID)
+	if err := c.request(ctx, creds, path, &att); err != nil {
+		return nil, err
+	}
+	return &att, nil
+}
+
+// GetAttachmentContent fetches raw attachment bytes via the /$value endpoint.
+// This is the fallback for large attachments where contentBytes may be omitted.
+func (c *OutlookClient) GetAttachmentContent(ctx context.Context, creds *types.IntegrationCredentials, messageID, attachmentID string) ([]byte, error) {
+	path := fmt.Sprintf("/me/messages/%s/attachments/%s/$value", messageID, attachmentID)
+	return c.requestRaw(ctx, creds, path)
 }
 
 // SenderString returns a display string for the message sender.
