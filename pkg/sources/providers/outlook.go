@@ -711,7 +711,7 @@ func (o *OutlookProvider) getMessageAttachments(ctx context.Context, pctx *sourc
 	}
 
 	// Filter to file attachments only and build metadata
-	seen := make(map[string]int)
+	seen := make(map[string]bool)
 	atts := make([]outlookAttachmentMeta, 0, len(rawAtts))
 	for _, a := range rawAtts {
 		if a.ODataType != "#microsoft.graph.fileAttachment" {
@@ -722,15 +722,22 @@ func (o *OutlookProvider) getMessageAttachments(ctx context.Context, pctx *sourc
 			safeName = "attachment"
 		}
 		// Deduplicate filenames within this message
-		seen[safeName]++
-		if seen[safeName] > 1 {
+		if seen[safeName] {
 			ext := ""
+			base := safeName
 			if dot := strings.LastIndex(safeName, "."); dot >= 0 {
 				ext = safeName[dot:]
-				safeName = safeName[:dot]
+				base = safeName[:dot]
 			}
-			safeName = fmt.Sprintf("%s_%d%s", safeName, seen[safeName], ext)
+			for i := 2; ; i++ {
+				candidate := fmt.Sprintf("%s_%d%s", base, i, ext)
+				if !seen[candidate] {
+					safeName = candidate
+					break
+				}
+			}
 		}
+		seen[safeName] = true
 		atts = append(atts, outlookAttachmentMeta{
 			ID:          a.ID,
 			Name:        a.Name,
