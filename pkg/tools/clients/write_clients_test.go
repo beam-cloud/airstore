@@ -57,6 +57,16 @@ func TestOAuthWriteClientsRequireConnection(t *testing.T) {
 				}, nil, stdout, &bytes.Buffer{})
 			},
 		},
+		{
+			name: "outlook",
+			execFn: func(stdout *bytes.Buffer) error {
+				return NewOutlookToolClient().Execute(context.Background(), outlookCmdCreateDraft, map[string]any{
+					"to":      "x@example.com",
+					"subject": "hello",
+					"body":    "world",
+				}, nil, stdout, &bytes.Buffer{})
+			},
+		},
 	}
 
 	for _, tc := range tests {

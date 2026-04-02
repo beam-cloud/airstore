@@ -241,6 +241,24 @@ func TestParseQuerySpec_GmailExactWatchMetadata(t *testing.T) {
 	}
 }
 
+func TestParseQuerySpec_OutlookExactWatchMetadata(t *testing.T) {
+	queryJSON := `{"outlook_query":"subject:\"for you\"","thread_id":"conv-123","message_id":"msg-456","include_attachments":true}`
+	spec := parseQuerySpec("outlook", queryJSON)
+
+	if spec.Query != `subject:"for you"` {
+		t.Errorf("Expected Query to be Outlook query, got %q", spec.Query)
+	}
+	if got := spec.Metadata["thread_id"]; got != "conv-123" {
+		t.Errorf("Expected thread_id metadata, got %q", got)
+	}
+	if got := spec.Metadata["message_id"]; got != "msg-456" {
+		t.Errorf("Expected message_id metadata, got %q", got)
+	}
+	if got := spec.Metadata["include_attachments"]; got != "true" {
+		t.Errorf("Expected include_attachments=true metadata, got %q", got)
+	}
+}
+
 func TestParseQuerySpec_GDrive(t *testing.T) {
 	queryJSON := `{"gdrive_query": "mimeType='application/pdf'", "limit": 50}`
 	spec := parseQuerySpec("gdrive", queryJSON)
@@ -704,13 +722,13 @@ func TestSeedBaselineFollowupUsesPostgres(t *testing.T) {
 	store := repository.NewMemoryFilesystemStore()
 	taskID := "task-seed"
 	query := &types.FilesystemQuery{
-		WorkspaceId: 300,
+		WorkspaceId:   300,
 		SystemManaged: true,
-		Lifecycle:   types.FilesystemQueryLifecycleTaskFollowUp,
-		OwnerTaskID: &taskID,
-		Integration: "gmail",
-		Path:        "/sources/gmail/__followup__seed",
-		Name:        "__followup__seed",
+		Lifecycle:     types.FilesystemQueryLifecycleTaskFollowUp,
+		OwnerTaskID:   &taskID,
+		Integration:   "gmail",
+		Path:          "/sources/gmail/__followup__seed",
+		Name:          "__followup__seed",
 	}
 	created, _ := store.CreateQuery(context.Background(), query)
 

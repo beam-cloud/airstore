@@ -328,18 +328,20 @@ func (w *AnalyzerWriter) createOutputWithBatch(out signaltypes.ExtractedOutput, 
 	}
 
 	c := r.candidate(types.TaskOutputArtifactRoleSupporting)
-	c.Metadata[keyTool] = toolName
+	resolvedToolName := toolName
 	if batchID != "" {
 		c.Metadata[keyBatchID] = batchID
 	}
 
 	if tool, cmd := resolveToolCommand(toolName, toolInput); tool != "" {
+		resolvedToolName = tool
 		if ot := tools.CommandOutputType(tool, cmd); ot != "" {
 			c.OutputType = ot
 		} else {
 			c.OutputType = ""
 		}
 	}
+	c.Metadata[keyTool] = resolvedToolName
 
 	if content := r.content(); content != "" {
 		c.Data[keyContent] = content

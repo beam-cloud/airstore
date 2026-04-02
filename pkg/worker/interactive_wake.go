@@ -236,7 +236,6 @@ func normalizeSourceWatchRequests(
 	return normalized
 }
 
-
 func bestMatchingTrackedSourceWatchRequest(
 	req *types.SourceWatchRequest,
 	tracked []*types.SourceWatchRequest,
@@ -428,20 +427,22 @@ func deriveTrackedOutputSourceWatchRequests(
 			!strings.Contains(strings.ToLower(strings.TrimSpace(summary.ArtifactKey)), "email") {
 			continue
 		}
+		integration := normalizeTrackedEmailIntegration(summary.Integration)
 		threadID := strings.TrimSpace(summary.ThreadID)
-		query := buildGmailWatchFallbackQuery(summary)
+		query := buildEmailWatchFallbackQuery(integration, summary)
 		if threadID == "" && query == "" {
 			continue
 		}
 		if threadID == "" {
 			log.Warn().
 				Str("output_id", strings.TrimSpace(summary.OutputID)).
+				Str("integration", integration).
 				Str("entity_key", strings.TrimSpace(summary.EntityKey)).
 				Str("subject", strings.TrimSpace(summary.Subject)).
 				Msg("email tracked output has no thread_id — follow-up watch will rely on text query fallback")
 		}
 		out = append(out, &types.SourceWatchRequest{
-			Integration:        "gmail",
+			Integration:        integration,
 			Reason:             derefString(fallbackReason),
 			Query:              query,
 			EventTypes:         []string{"fs.create"},
@@ -460,7 +461,10 @@ func deriveTrackedOutputSourceWatchRequests(
 	return out
 }
 
-func buildGmailWatchFallbackQuery(summary trackedOutputSummary) string {
+func buildEmailWatchFallbackQuery(integration string, summary trackedOutputSummary) string {
+	if strings.EqualFold(integration, string(types.SourceOutlook)) {
+		return ""
+	}
 	parts := make([]string, 0, 3)
 	if recipient := strings.TrimSpace(summary.Recipient); recipient != "" {
 		parts = append(parts, fmt.Sprintf("from:%q", recipient))
@@ -469,6 +473,17 @@ func buildGmailWatchFallbackQuery(summary trackedOutputSummary) string {
 		parts = append(parts, fmt.Sprintf("subject:%q", subject))
 	}
 	return strings.TrimSpace(strings.Join(parts, " "))
+}
+
+func normalizeTrackedEmailIntegration(integration string) string {
+	switch strings.ToLower(strings.TrimSpace(integration)) {
+	case string(types.SourceOutlook):
+		return string(types.SourceOutlook)
+	case string(types.SourceGmail), "":
+		return string(types.SourceGmail)
+	default:
+		return strings.ToLower(strings.TrimSpace(integration))
+	}
 }
 
 func normalizePlannedSourceWatchRequest(req *types.SourceWatchRequest, fallbackReason *string) *types.SourceWatchRequest {
@@ -480,7 +495,8 @@ func normalizePlannedSourceWatchRequest(req *types.SourceWatchRequest, fallbackR
 		return nil
 	}
 	normalized.Reason = firstNonEmptyTrimmed(normalized.Reason, derefString(fallbackReason))
-	if strings.EqualFold(normalized.Integration, string(types.SourceGmail)) &&
+	if (strings.EqualFold(normalized.Integration, string(types.SourceGmail)) ||
+		strings.EqualFold(normalized.Integration, string(types.SourceOutlook))) &&
 		(normalized.ThreadID != "" || normalized.MessageID != "") {
 		normalized.IncludeAttachments = true
 		normalized.IncludeMessageBody = true
