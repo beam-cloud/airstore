@@ -12,6 +12,7 @@ const (
 	SourceLinear  SourceType = "linear"
 	SourcePostHog    SourceType = "posthog"
 	SourceConfluence SourceType = "confluence"
+	SourceOutlook    SourceType = "outlook"
 	SourceWeb        SourceType = "web"
 )
 
