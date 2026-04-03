@@ -212,7 +212,7 @@ func TestNormalizeSourceWatchRequestsFallsBackToTrackedOutlookOutputs(t *testing
 		},
 		Metadata: map[string]any{
 			types.TaskOutputMetadataArtifactKey: "email-sent",
-			keyTool:                             string(types.Outlook),
+			keyTool:                             string(types.SourceOutlook),
 		},
 	}, "out-1")
 
@@ -246,7 +246,7 @@ func TestNormalizeSourceWatchRequestsDoesNotInventOutlookQueryFallback(t *testin
 		},
 		Metadata: map[string]any{
 			types.TaskOutputMetadataArtifactKey: "email-sent",
-			keyTool:                             string(types.Outlook),
+			keyTool:                             string(types.SourceOutlook),
 		},
 	}, "out-1")
 

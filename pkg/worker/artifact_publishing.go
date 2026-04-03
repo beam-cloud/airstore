@@ -331,7 +331,7 @@ func (c outputCandidate) threadID() string {
 	if threadID != "" {
 		return threadID
 	}
-	if !strings.EqualFold(c.integrationName(), string(types.Outlook)) {
+	if !strings.EqualFold(c.integrationName(), string(types.SourceOutlook)) {
 		return ""
 	}
 	return firstNonEmptyTrimmed(
