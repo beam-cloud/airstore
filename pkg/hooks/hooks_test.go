@@ -108,6 +108,7 @@ func (m *mockBackend) setRetryable(tasks []*types.RunExecution) {
 
 type mockStore struct {
 	repository.FilesystemStore // embed
+	mu                         sync.Mutex
 	hooks                      []*types.Hook
 	updatedHooks               []*types.Hook
 	existingPaths              map[string]bool
@@ -152,6 +153,8 @@ func (m *mockStore) UpdateHook(_ context.Context, hook *types.Hook) error {
 	if hook == nil {
 		return nil
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	copied := *hook
 	m.updatedHooks = append(m.updatedHooks, &copied)
 	for idx, existing := range m.hooks {
@@ -253,13 +256,17 @@ func TestEngine_Submit_TaskInputOneShotDisablesHookAfterFire(t *testing.T) {
 	if creator.count() != 1 {
 		t.Fatalf("expected 1 delivered task input, got %d", creator.count())
 	}
-	if hook.Active {
-		t.Fatal("expected one-shot hook to be deactivated after firing")
+	store.mu.Lock()
+	numUpdated := len(store.updatedHooks)
+	var persistedActive bool
+	if numUpdated > 0 {
+		persistedActive = store.updatedHooks[0].Active
 	}
-	if got := len(store.updatedHooks); got != 1 {
-		t.Fatalf("expected 1 hook update, got %d", got)
+	store.mu.Unlock()
+	if numUpdated != 1 {
+		t.Fatalf("expected 1 hook update, got %d", numUpdated)
 	}
-	if store.updatedHooks[0].Active {
+	if persistedActive {
 		t.Fatal("expected persisted hook update to mark hook inactive")
 	}
 }
