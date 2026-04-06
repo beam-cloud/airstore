@@ -1070,16 +1070,17 @@ func sourceWatchWakeReason(requests []*types.SourceWatchRequest) string {
 func sourceWatchWakePrompt(requests []*types.SourceWatchRequest, reason string) string {
 	labels := make([]string, 0, len(requests))
 	seen := make(map[string]struct{}, len(requests))
-	var gmailThreadReq *types.SourceWatchRequest
+	var exactThreadReq *types.SourceWatchRequest
 	for _, req := range requests {
 		normalized := types.NormalizeSourceWatchRequest(req)
 		if normalized == nil {
 			continue
 		}
-		if gmailThreadReq == nil &&
-			strings.EqualFold(strings.TrimSpace(normalized.Integration), string(types.SourceGmail)) &&
-			strings.TrimSpace(normalized.ThreadID) != "" {
-			gmailThreadReq = normalized
+		if exactThreadReq == nil &&
+			strings.TrimSpace(normalized.ThreadID) != "" &&
+			(strings.EqualFold(strings.TrimSpace(normalized.Integration), string(types.SourceGmail)) ||
+				strings.EqualFold(strings.TrimSpace(normalized.Integration), string(types.SourceOutlook))) {
+			exactThreadReq = normalized
 		}
 		label := firstNonEmptySourceWatchValue(normalized.EntityLabel, normalized.EntityKey)
 		if label == "" {
@@ -1091,16 +1092,28 @@ func sourceWatchWakePrompt(requests []*types.SourceWatchRequest, reason string) 
 		seen[label] = struct{}{}
 		labels = append(labels, label)
 	}
-	if len(requests) == 1 && gmailThreadReq != nil {
-		label := firstNonEmptySourceWatchValue(gmailThreadReq.EntityLabel, gmailThreadReq.EntityKey, "the watched Gmail conversation")
-		threadID := strings.TrimSpace(gmailThreadReq.ThreadID)
-		return fmt.Sprintf(
-			"Resume this task, inspect %s in the exact Gmail thread `%s` for any new messages, and continue the follow-up based on the latest data. If you draft or send a reply, keep it in this same Gmail thread by passing `--thread-id %s` (`thread_id=%s`) to the Gmail tool.",
-			label,
-			threadID,
-			threadID,
-			threadID,
-		)
+	if len(requests) == 1 && exactThreadReq != nil {
+		threadID := strings.TrimSpace(exactThreadReq.ThreadID)
+		switch strings.ToLower(strings.TrimSpace(exactThreadReq.Integration)) {
+		case string(types.SourceGmail):
+			label := firstNonEmptySourceWatchValue(exactThreadReq.EntityLabel, exactThreadReq.EntityKey, "the watched Gmail conversation")
+			return fmt.Sprintf(
+				"Resume this task, inspect %s in the exact Gmail thread `%s` for any new messages, and continue the follow-up based on the latest data. If you draft or send a reply, keep it in this same Gmail thread by passing `--thread-id %s` (`thread_id=%s`) to the Gmail tool.",
+				label,
+				threadID,
+				threadID,
+				threadID,
+			)
+		case string(types.SourceOutlook):
+			label := firstNonEmptySourceWatchValue(exactThreadReq.EntityLabel, exactThreadReq.EntityKey, "the watched Outlook conversation")
+			return fmt.Sprintf(
+				"Resume this task, inspect %s in the exact Outlook conversation `%s` for any new messages or attachments, and continue the follow-up based on the latest data. If you draft or send a reply, keep it in this same Outlook conversation by passing `--conversation-id %s` (`thread_id=%s`) to the Outlook tool.",
+				label,
+				threadID,
+				threadID,
+				threadID,
+			)
+		}
 	}
 	if len(labels) == 1 {
 		return fmt.Sprintf("Resume this task, inspect %s for any new source updates, and continue the follow-up based on the latest data.", labels[0])

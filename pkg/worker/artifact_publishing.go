@@ -79,6 +79,7 @@ type trackedOutputSummary struct {
 	OutputType  string
 	ArtifactKey string
 	Title       string
+	Integration string
 	ThreadID    string
 	MessageID   string
 	Recipient   string
@@ -153,10 +154,8 @@ func (t *taskOutputTracker) RememberWithID(candidate outputCandidate, serverID s
 			OutputType:  strings.TrimSpace(candidate.OutputType),
 			ArtifactKey: candidate.artifactKey(),
 			Title:       strings.TrimSpace(candidate.Title),
-			ThreadID: strings.TrimSpace(firstNonEmptyTrimmed(
-				anyToTrimmedString(candidate.Data["thread_id"]),
-				anyToTrimmedString(candidate.Metadata["thread_id"]),
-			)),
+			Integration: strings.TrimSpace(candidate.integrationName()),
+			ThreadID:    strings.TrimSpace(candidate.threadID()),
 			MessageID: strings.TrimSpace(firstNonEmptyTrimmed(
 				anyToTrimmedString(candidate.Data["message_id"]),
 				anyToTrimmedString(candidate.Metadata["message_id"]),
@@ -236,10 +235,7 @@ func (c outputCandidate) identityKey() string {
 	title := normalizeArtifactToken(c.Title)
 	path := firstNonEmptyTrimmed(c.Path, anyToTrimmedString(c.Data[keyPath]))
 	uri := strings.ToLower(firstNonEmptyTrimmed(c.URI, anyToTrimmedString(c.Data[keyURI]), anyToTrimmedString(c.Metadata[keyDeeplink])))
-	threadID := normalizeArtifactToken(firstNonEmptyTrimmed(
-		anyToTrimmedString(c.Data["thread_id"]),
-		anyToTrimmedString(c.Metadata["thread_id"]),
-	))
+	threadID := normalizeArtifactToken(c.threadID())
 	recipient := normalizeArtifactToken(firstNonEmptyTrimmed(
 		anyToTrimmedString(c.Data["recipient"]),
 		anyToTrimmedString(c.Data["to"]),
@@ -280,10 +276,7 @@ func (c outputCandidate) fanOutEntityKey() string {
 	outputType := normalizeArtifactToken(c.OutputType)
 
 	if kind == normalizeArtifactToken(types.TaskOutputTypeEmail) || outputType == normalizeArtifactToken(types.TaskOutputTypeEmail) {
-		threadID := normalizeFanOutEntityValue(firstNonEmptyTrimmed(
-			anyToTrimmedString(c.Data["thread_id"]),
-			anyToTrimmedString(c.Metadata["thread_id"]),
-		))
+		threadID := normalizeFanOutEntityValue(c.threadID())
 		if threadID != "" {
 			return "email-thread:" + threadID
 		}
@@ -320,6 +313,33 @@ func (c outputCandidate) fanOutEntityKey() string {
 	}
 
 	return ""
+}
+
+func (c outputCandidate) integrationName() string {
+	return firstNonEmptyTrimmed(
+		anyToTrimmedString(c.Metadata[keyTool]),
+		anyToTrimmedString(c.Data["integration"]),
+		anyToTrimmedString(c.Metadata["integration"]),
+	)
+}
+
+func (c outputCandidate) threadID() string {
+	threadID := firstNonEmptyTrimmed(
+		anyToTrimmedString(c.Data["thread_id"]),
+		anyToTrimmedString(c.Metadata["thread_id"]),
+	)
+	if threadID != "" {
+		return threadID
+	}
+	if !strings.EqualFold(c.integrationName(), string(types.SourceOutlook)) {
+		return ""
+	}
+	return firstNonEmptyTrimmed(
+		anyToTrimmedString(c.Data["conversation_id"]),
+		anyToTrimmedString(c.Data["conversationId"]),
+		anyToTrimmedString(c.Metadata["conversation_id"]),
+		anyToTrimmedString(c.Metadata["conversationId"]),
+	)
 }
 
 func (c outputCandidate) artifactKey() string {

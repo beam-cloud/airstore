@@ -417,6 +417,7 @@ type IntegrationOAuth struct {
 	Slack     ProviderOAuthCredentials `key:"slack" json:"slack"`
 	Linear    ProviderOAuthCredentials `key:"linear" json:"linear"`
 	Atlassian ProviderOAuthCredentials `key:"atlassian" json:"atlassian"`
+	Microsoft ProviderOAuthCredentials `key:"microsoft" json:"microsoft"`
 }
 
 // ProviderOAuthCredentials contains client credentials for an OAuth provider.

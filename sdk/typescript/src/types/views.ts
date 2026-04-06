@@ -16,6 +16,7 @@ export type Integration =
   | 'slack'
   | 'linear'
   | 'posthog'
+  | 'outlook'
   | 'web';
 
 // Gmail
@@ -78,7 +79,7 @@ export const PostHogResourceTypes = [
 export const WebModes = ['map', 'search'] as const;
 
 export const Integrations = [
-  'gmail', 'github', 'gdrive', 'notion', 'slack', 'linear', 'posthog', 'web',
+  'gmail', 'github', 'gdrive', 'notion', 'slack', 'linear', 'posthog', 'outlook', 'web',
 ] as const;
 
 // ── Per-integration filter types ──────────────────────────────────────────────
@@ -142,6 +143,18 @@ export interface PostHogFilter {
   project_id?: number;
 }
 
+export interface OutlookFilter {
+  from?: string;
+  to?: string;
+  subject?: string;
+  folder?: string;
+  newer_than?: string;
+  older_than?: string;
+  has_attachment?: boolean;
+  is_unread?: boolean;
+  is_flagged?: boolean;
+}
+
 export interface WebFilter {
   mode?: WebMode;
   url?: string;
@@ -162,6 +175,7 @@ export type ViewFilter =
   | ({ integration: 'slack' } & SlackFilter)
   | ({ integration: 'linear' } & LinearFilter)
   | ({ integration: 'posthog' } & PostHogFilter)
+  | ({ integration: 'outlook' } & OutlookFilter)
   | ({ integration: 'web' } & WebFilter);
 
 // ── View CRUD types ──────────────────────────────────────────────────────────

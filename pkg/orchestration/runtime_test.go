@@ -776,6 +776,20 @@ func TestSourceWatchWakePromptPinsGmailThreadForReplies(t *testing.T) {
 	}
 }
 
+func TestSourceWatchWakePromptPinsOutlookConversationForReplies(t *testing.T) {
+	prompt := sourceWatchWakePrompt([]*types.SourceWatchRequest{{
+		Integration: string(types.SourceOutlook),
+		ThreadID:    "conv-123",
+		EntityLabel: "Reply from cooper@beam.cloud to Outlook haiku",
+	}}, "")
+	if !strings.Contains(prompt, "exact Outlook conversation `conv-123`") {
+		t.Fatalf("prompt missing exact Outlook conversation guidance: %q", prompt)
+	}
+	if !strings.Contains(prompt, "--conversation-id conv-123") {
+		t.Fatalf("prompt missing Outlook conversation-id guidance: %q", prompt)
+	}
+}
+
 func TestFinalizeRunAttemptForcesTaskErrorWhenCurrentRunUpdateMisses(t *testing.T) {
 	runID := "run-2"
 	task := &types.AgentTask{

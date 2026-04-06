@@ -605,6 +605,17 @@ func buildSourceWatchQuerySpec(
 		payload["include_attachments"] = req.IncludeAttachments
 		payload["include_inline"] = req.IncludeInline
 		payload["include_message_body"] = req.IncludeMessageBody || (!req.IncludeAttachments && !req.IncludeInline)
+	case string(types.SourceOutlook):
+		if req.ThreadID != "" {
+			payload["thread_id"] = req.ThreadID
+		}
+		if req.MessageID != "" {
+			payload["message_id"] = req.MessageID
+		}
+		payload["outlook_query"] = req.Query
+		payload["include_attachments"] = req.IncludeAttachments
+		payload["include_inline"] = req.IncludeInline
+		payload["include_message_body"] = req.IncludeMessageBody || (!req.IncludeAttachments && !req.IncludeInline)
 	case string(types.SourceGDrive):
 		payload["gdrive_query"] = req.Query
 	case string(types.SourceNotion):

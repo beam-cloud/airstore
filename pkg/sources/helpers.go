@@ -37,6 +37,7 @@ var oauthIntegrations = map[string]bool{
 	"slack":      true,
 	"linear":     true,
 	"confluence": true,
+	"outlook":    true,
 }
 
 // GenerateSourceReadme creates the README.md content for an integration

@@ -117,6 +117,8 @@ func DefaultFilenameFormat(integration string) string {
 		return "{id}.json"
 	case "confluence":
 		return "{space}_{title}_{id}.md"
+	case "outlook":
+		return "{date}_{from}_{subject}_{id}.txt"
 	case "web":
 		return "{title}_{id}.md"
 	default:

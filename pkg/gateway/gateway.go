@@ -158,6 +158,7 @@ func NewGateway() (*Gateway, error) {
 	oauthRegistry.Register(oauth.NewSlackProvider(config.OAuth.Slack, callbackURL))
 	oauthRegistry.Register(oauth.NewLinearProvider(config.OAuth.Linear, callbackURL))
 	oauthRegistry.Register(oauth.NewAtlassianProvider(config.OAuth.Atlassian, callbackURL))
+	oauthRegistry.Register(oauth.NewMicrosoftProvider(config.OAuth.Microsoft, callbackURL))
 
 	// Initialize S2 client for task log streaming if configured
 	var s2Client *common.S2Client
@@ -319,8 +320,8 @@ func (g *Gateway) initGRPC() error {
 			MaxConnectionIdle:     2 * time.Hour,    // close idle connections to reclaim resources
 			MaxConnectionAge:      4 * time.Hour,    // force reconnect to rebalance across replicas
 			MaxConnectionAgeGrace: 30 * time.Second, // grace period for in-flight RPCs
-			Time:                  60 * time.Second,  // ping idle clients every 60s
-			Timeout:               10 * time.Second,  // wait 10s for ping ack
+			Time:                  60 * time.Second, // ping idle clients every 60s
+			Timeout:               10 * time.Second, // wait 10s for ping ack
 		}),
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
 			MinTime:             30 * time.Second, // minimum time between client pings
@@ -976,6 +977,7 @@ func (g *Gateway) initSources() {
 	g.sourceRegistry.Register(providers.NewPostHogProvider())
 	g.sourceRegistry.Register(providers.NewWebProvider(g.Config.Sources.Firecrawl.APIKey))
 	g.sourceRegistry.Register(providers.NewConfluenceProvider())
+	g.sourceRegistry.Register(providers.NewOutlookProvider())
 
 	log.Info().Strs("providers", g.sourceRegistry.List()).Msg("source providers registered")
 }
@@ -1010,6 +1012,7 @@ func (g *Gateway) initTools() error {
 	clientRegistry.Register(toolclients.NewSlackClient())
 	clientRegistry.Register(toolclients.NewNotionClient())
 	clientRegistry.Register(toolclients.NewLinearClient())
+	clientRegistry.Register(toolclients.NewOutlookToolClient())
 	log.Debug().Msg("oauth source integrations registered (connection-based)")
 
 	// View tool (no auth, uses workspace context from bearer token)

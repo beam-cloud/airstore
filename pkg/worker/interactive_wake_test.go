@@ -198,6 +198,64 @@ func TestNormalizeSourceWatchRequestsMergesSameThreadTrackedMessages(t *testing.
 	}
 }
 
+func TestNormalizeSourceWatchRequestsFallsBackToTrackedOutlookOutputs(t *testing.T) {
+	reason := "Check for a reply in the Outlook thread."
+	tracker := &taskOutputTracker{}
+	tracker.RememberWithID(outputCandidate{
+		OutputType: types.TaskOutputTypeEmail,
+		Title:      "for you",
+		Data: map[string]any{
+			"conversation_id": "conv-001",
+			"message_id":      "msg-001",
+			"recipient":       "cooper@beam.cloud",
+			"subject":         "for you",
+		},
+		Metadata: map[string]any{
+			types.TaskOutputMetadataArtifactKey: "email-sent",
+			keyTool:                             string(types.SourceOutlook),
+		},
+	}, "out-1")
+
+	got := normalizeSourceWatchRequests(nil, tracker, &reason)
+	if got == nil || len(got) != 1 {
+		t.Fatalf("normalizeSourceWatchRequests() len = %d, want 1", len(got))
+	}
+	if got[0].Integration != string(types.SourceOutlook) {
+		t.Fatalf("integration = %q, want %q", got[0].Integration, types.SourceOutlook)
+	}
+	if got[0].ThreadID != "conv-001" {
+		t.Fatalf("thread_id = %q, want conv-001", got[0].ThreadID)
+	}
+	if got[0].MessageID != "msg-001" {
+		t.Fatalf("message_id = %q, want msg-001", got[0].MessageID)
+	}
+	if got[0].Query != "" {
+		t.Fatalf("query = %q, want empty exact-thread Outlook watch", got[0].Query)
+	}
+}
+
+func TestNormalizeSourceWatchRequestsDoesNotInventOutlookQueryFallback(t *testing.T) {
+	reason := "Check for a reply in the Outlook thread."
+	tracker := &taskOutputTracker{}
+	tracker.RememberWithID(outputCandidate{
+		OutputType: types.TaskOutputTypeEmail,
+		Title:      "for you",
+		Data: map[string]any{
+			"recipient": "cooper@beam.cloud",
+			"subject":   "for you",
+		},
+		Metadata: map[string]any{
+			types.TaskOutputMetadataArtifactKey: "email-sent",
+			keyTool:                             string(types.SourceOutlook),
+		},
+	}, "out-1")
+
+	got := normalizeSourceWatchRequests(nil, tracker, &reason)
+	if got != nil {
+		t.Fatalf("normalizeSourceWatchRequests() = %#v, want nil without Outlook thread_id", got)
+	}
+}
+
 func trackedEmailOutput(
 	outputID, threadID, messageID, recipient, subject string,
 ) *taskOutputTracker {
