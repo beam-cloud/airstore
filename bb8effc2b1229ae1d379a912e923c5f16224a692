@@ -1,0 +1,23 @@
+pkg/views/email_threads.go
+  878e6bd86f16494f 456,658-664,666,668-675
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.5",
+  "base_commit_sha": "bb8effc2b1229ae1d379a912e923c5f16224a692",
+  "prompts": {
+    "878e6bd86f16494f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a2f7a16b-37fc-47a8-83fc-9e37cf48f100",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Cooper",
+      "messages": [],
+      "total_additions": 17,
+      "total_deletions": 2,
+      "accepted_lines": 17,
+      "overriden_lines": 0
+    }
+  }
+}
