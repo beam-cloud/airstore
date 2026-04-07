@@ -1061,7 +1061,7 @@ func threadRefsFromCellValue(raw, integration string) []views.EmailThreadRef {
 }
 
 func threadRefKey(ref views.EmailThreadRef) string {
-	return normalizeEmailIntegration(ref.Integration) + ":" + strings.TrimSpace(ref.ID)
+	return ref.Key()
 }
 
 func normalizeEmailIntegration(value string) string {
@@ -1100,10 +1100,6 @@ func filterEmailOutputsByIntegration(outputs []*types.TaskOutput, integration st
 		}
 	}
 	return filtered
-}
-
-func emailOutputThreadID(o *types.TaskOutput) string {
-	return strings.TrimSpace(emailOutputThreadRef(o).ID)
 }
 
 func emailIntegrationFromURL(raw string) string {
@@ -1176,8 +1172,8 @@ func syntheticEmailThreads(outputs []*types.TaskOutput, existing map[string][]vi
 		if o.Status == types.TaskOutputStatusPending || o.Status == types.TaskOutputStatusApproved {
 			continue
 		}
-		if threadID := emailOutputThreadID(o); threadID != "" {
-			if len(existing[threadID]) > 0 {
+		if ref := emailOutputThreadRef(o); ref.ID != "" {
+			if len(existing[ref.Key()]) > 0 {
 				continue
 			}
 		}
@@ -1413,8 +1409,8 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 					threadRefs = append(threadRefs, ref)
 					seen[key] = true
 				}
-				if rowThreadRows[ref.ID] == nil {
-					rowThreadRows[ref.ID] = r
+				if rowThreadRows[ref.Key()] == nil {
+					rowThreadRows[ref.Key()] = r
 				}
 			}
 		}
@@ -1450,8 +1446,8 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 	// Build output -> threadKey lookup so we can associate row data with threads.
 	outputThreadKey := make(map[string]string)
 	for _, o := range outputs {
-		if tid := emailOutputThreadID(o); tid != "" {
-			outputThreadKey[o.ID] = tid
+		if ref := emailOutputThreadRef(o); ref.ID != "" {
+			outputThreadKey[o.ID] = ref.Key()
 		} else {
 			outputThreadKey[o.ID] = "output:" + o.ID
 		}

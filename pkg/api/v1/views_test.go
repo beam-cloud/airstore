@@ -306,7 +306,7 @@ func TestSyntheticEmailThreadsSkipsOutputsWhenRealThreadExists(t *testing.T) {
 		},
 	}
 	existing := map[string][]views.ThreadMessage{
-		"thread-1": {{
+		"gmail:thread-1": {{
 			ID:       "gmail-msg-1",
 			ThreadID: "thread-1",
 			Subject:  "A faster way to spin up dev environments",

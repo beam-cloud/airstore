@@ -45,6 +45,12 @@ type EmailThreadRef struct {
 	Integration string
 }
 
+// Key returns a provider-qualified key suitable for use as a map key.
+// It distinguishes threads with the same raw ID across different providers.
+func (r EmailThreadRef) Key() string {
+	return r.Integration + ":" + r.ID
+}
+
 type EmailThreadFetcher struct {
 	backend    repository.BackendRepository
 	httpClient *http.Client
@@ -123,7 +129,7 @@ func (f *EmailThreadFetcher) FetchThreads(ctx context.Context, workspaceID uint,
 			}
 			if len(messages) > 0 {
 				mu.Lock()
-				result[ref.ID] = messages
+				result[ref.Key()] = messages
 				mu.Unlock()
 			}
 		}(ref)
@@ -140,13 +146,13 @@ func normalizeThreadRefs(refs []EmailThreadRef) []EmailThreadRef {
 		if id == "" {
 			continue
 		}
-		integration := normalizeThreadIntegration(ref.Integration)
-		key := integration + ":" + id
+		normalized := EmailThreadRef{ID: id, Integration: normalizeThreadIntegration(ref.Integration)}
+		key := normalized.Key()
 		if _, ok := seen[key]; ok {
 			continue
 		}
 		seen[key] = struct{}{}
-		out = append(out, EmailThreadRef{ID: id, Integration: integration})
+		out = append(out, normalized)
 	}
 	return out
 }
