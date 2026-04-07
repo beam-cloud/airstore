@@ -310,23 +310,14 @@ func (c *ViewClient) listRows(ctx context.Context, viewID string, workspaceID ui
 	}
 	offset := GetIntArg(args, "offset", 0)
 
-	rows, err := c.store.GetRows(ctx, viewID, sheetID, componentID)
+	rows, total, err := c.store.GetRowsPage(ctx, viewID, sheetID, componentID, offset, limit)
 	if err != nil {
 		return WriteToolError(stdout, fmt.Sprintf("failed to load rows: %v", err))
 	}
 
 	schemaCols := c.schemaColumns(ctx, workspaceID, viewID, sheetID, componentID)
 
-	if offset > 0 && offset < len(rows) {
-		rows = rows[offset:]
-	} else if offset >= len(rows) {
-		rows = nil
-	}
-	if len(rows) > limit {
-		rows = rows[:limit]
-	}
-
-	return c.writeRows(stdout, rows, schemaCols)
+	return c.writeRowsWithTotal(stdout, rows, schemaCols, total, offset)
 }
 
 func (c *ViewClient) getRow(ctx context.Context, viewID string, workspaceID uint, args map[string]any, stdout io.Writer) error {
@@ -723,6 +714,32 @@ func (c *ViewClient) writeRows(stdout io.Writer, rows []views.ViewRow, schemaCol
 	return WriteJSON(stdout, map[string]any{
 		"total": len(out),
 		"rows":  out,
+	})
+}
+
+func (c *ViewClient) writeRowsWithTotal(stdout io.Writer, rows []views.ViewRow, schemaCols map[string]string, total, offset int) error {
+	type outputRow struct {
+		ID     string            `json:"row_id"`
+		RowKey string            `json:"row_key,omitempty"`
+		Cells  map[string]string `json:"cells"`
+	}
+
+	out := make([]outputRow, 0, len(rows))
+	for _, row := range rows {
+		merged := row.MergedCells()
+		filtered := filterCells(merged, schemaCols)
+		out = append(out, outputRow{
+			ID:     row.ID,
+			RowKey: row.RowKey,
+			Cells:  filtered,
+		})
+	}
+
+	return WriteJSON(stdout, map[string]any{
+		"total":    total,
+		"offset":   offset,
+		"returned": len(out),
+		"rows":     out,
 	})
 }
 
