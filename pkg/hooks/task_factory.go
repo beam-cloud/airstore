@@ -198,7 +198,7 @@ func (f *TaskFactory) routeToSleepingTasks(ctx context.Context, hook *types.Hook
 			if content := f.contextEnricher.FetchSourceContent(ctx, match.WorkspaceID, integration, data); content != "" {
 				wakePrompt = wakePrompt + "\n\n" + content
 			}
-			if viewRows := f.contextEnricher.FetchViewRows(ctx, match.WorkspaceID, match.TaskID); viewRows != "" {
+			if viewRows := f.contextEnricher.FetchViewRows(ctx, match.WorkspaceID, match.TaskID, wakePrompt); viewRows != "" {
 				wakePrompt = wakePrompt + "\n\n" + viewRows
 			}
 		}

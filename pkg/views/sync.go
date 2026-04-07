@@ -18,6 +18,11 @@ import (
 
 const ViewSyncTimeout = 90 * time.Second
 
+// minColumnOverlap is the minimum number of shared column keys between a
+// source and target sheet for cross-sheet sync to proceed. Prevents updates
+// from being inserted into unrelated sheets (e.g. outreach → laundromats).
+const minColumnOverlap = 2
+
 type ViewSyncOpts struct {
 	Store   *ViewStore
 	Backend repository.BackendRepository
@@ -115,7 +120,32 @@ func (vs *ViewSync) Sync(ctx context.Context, output *types.TaskOutput) *SyncRes
 		return nil
 	}
 
-	// Group schemas by view so each view gets its own timeout budget.
+	// Identify the source sheet from output metadata so we can filter
+	// target sheets by column overlap (same logic as SyncToolWrite).
+	sourceSheetID := ""
+	if output.Metadata != nil {
+		if v, ok := output.Metadata[types.TaskOutputMetadataViewSchemaSheetID]; ok {
+			if s, ok := v.(string); ok {
+				sourceSheetID = strings.TrimSpace(s)
+			}
+		}
+	}
+
+	// Build a column-key set for the source sheet.
+	var sourceKeys map[string]struct{}
+	if sourceSheetID != "" {
+		for _, sc := range schemas {
+			if sc.SheetID == sourceSheetID {
+				sourceKeys = make(map[string]struct{}, len(sc.Columns))
+				for _, k := range sc.ColumnKeys() {
+					sourceKeys[k] = struct{}{}
+				}
+				break
+			}
+		}
+	}
+
+	// Group schemas by view, filtering out sheets with low column overlap.
 	viewSchemas := make(map[string][]types.ViewOutputSchemaContext)
 	var viewOrder []string
 	for _, sc := range schemas {
@@ -124,6 +154,22 @@ func (vs *ViewSync) Sync(ctx context.Context, output *types.TaskOutput) *SyncRes
 		}
 		if targetViewID != "" && sc.ViewID != targetViewID {
 			continue
+		}
+		if sourceKeys != nil && sc.SheetID != sourceSheetID {
+			overlap := 0
+			for _, k := range sc.ColumnKeys() {
+				if _, ok := sourceKeys[k]; ok {
+					overlap++
+				}
+			}
+			if overlap < minColumnOverlap {
+				log.Debug().
+					Str("view_id", sc.ViewID).
+					Str("sheet", sc.SheetName).
+					Int("overlap", overlap).
+					Msg("viewsync: skipping sheet with low column overlap")
+				continue
+			}
 		}
 		if _, seen := viewSchemas[sc.ViewID]; !seen {
 			viewOrder = append(viewOrder, sc.ViewID)
@@ -197,8 +243,9 @@ func (vs *ViewSync) SyncToolWrite(ctx context.Context, input ToolWriteInput) *Sy
 		return nil
 	}
 
+	var sourceSchema *types.ViewOutputSchemaContext
 	var allSchemas []types.ViewOutputSchemaContext
-	var targetSchemas []types.ViewOutputSchemaContext
+	var candidateSchemas []types.ViewOutputSchemaContext
 	for _, sheet := range view.Definition.Sheets {
 		for _, comp := range sheet.Components {
 			if !comp.IsTable() {
@@ -209,11 +256,44 @@ func (vs *ViewSync) SyncToolWrite(ctx context.Context, input ToolWriteInput) *Sy
 				continue
 			}
 			allSchemas = append(allSchemas, *sc)
-			if sheet.ID != input.SourceSheetID || comp.ID != input.SourceComponentID {
-				targetSchemas = append(targetSchemas, *sc)
+			if sheet.ID == input.SourceSheetID && comp.ID == input.SourceComponentID {
+				sourceSchema = sc
+			} else {
+				candidateSchemas = append(candidateSchemas, *sc)
 			}
 		}
 	}
+
+	// Filter targets to only sheets with meaningful column overlap with the
+	// source. Without this, updates to one sheet get inserted as new rows in
+	// unrelated sheets (e.g. outreach properties → laundromat venues).
+	var targetSchemas []types.ViewOutputSchemaContext
+	if sourceSchema != nil {
+		sourceKeys := make(map[string]struct{}, len(sourceSchema.Columns))
+		for _, k := range sourceSchema.ColumnKeys() {
+			sourceKeys[k] = struct{}{}
+		}
+		for _, sc := range candidateSchemas {
+			overlap := 0
+			for _, k := range sc.ColumnKeys() {
+				if _, ok := sourceKeys[k]; ok {
+					overlap++
+				}
+			}
+			if overlap >= minColumnOverlap {
+				targetSchemas = append(targetSchemas, sc)
+			} else {
+				log.Debug().
+					Str("view_id", input.ViewID).
+					Str("sheet", sc.SheetName).
+					Int("overlap", overlap).
+					Msg("viewsync-tool: skipping sheet with low column overlap")
+			}
+		}
+	} else {
+		targetSchemas = candidateSchemas
+	}
+
 	if len(targetSchemas) == 0 {
 		log.Debug().Str("view_id", input.ViewID).Int("all_schemas", len(allSchemas)).Msg("viewsync-tool: no target sheets")
 		return &SyncResult{Skipped: true}

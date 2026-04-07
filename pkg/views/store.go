@@ -454,12 +454,24 @@ func (s *ViewStore) EmbedRowsAsync(viewID string) {
 			batch := needEmbed[i:end]
 			s.autoEmbed(ctx, batch)
 
-			// Persist the embeddings
-			if err := s.upsertRowsBulk(ctx, viewID, batch); err != nil {
+			updates := make([]EmbeddingUpdate, 0, len(batch))
+			for _, r := range batch {
+				if len(r.Embedding) > 0 {
+					updates = append(updates, EmbeddingUpdate{
+						RowID:      r.ID,
+						SearchText: r.SearchText,
+						Embedding:  r.Embedding,
+					})
+				}
+			}
+			if len(updates) == 0 {
+				continue
+			}
+			if err := s.BulkUpdateEmbeddings(ctx, viewID, updates); err != nil {
 				log.Warn().Err(err).Str("view_id", viewID).Int("batch", i/batchSize).Msg("async embed: failed to persist batch")
 				continue
 			}
-			embedded += len(batch)
+			embedded += len(updates)
 			log.Info().Str("view_id", viewID).Int("embedded", embedded).Int("total", len(needEmbed)).Msg("async embed: progress")
 		}
 		log.Info().Str("view_id", viewID).Int("embedded", embedded).Msg("async embed: complete")
@@ -880,6 +892,40 @@ func (s *ViewStore) UpdateRowEmbedding(ctx context.Context, viewID, rowID string
 	}
 	if res.MatchedCount == 0 {
 		return ErrViewRowNotFound
+	}
+	return nil
+}
+
+// EmbeddingUpdate holds the fields needed to persist an embedding without
+// touching any other row data (avoids overwriting concurrent cell updates).
+type EmbeddingUpdate struct {
+	RowID      string
+	SearchText string
+	Embedding  []float64
+}
+
+// BulkUpdateEmbeddings writes search_text and embedding for many rows in a
+// single bulk operation. Only those two fields are $set — cells, pinned, manual
+// etc. are untouched, eliminating the read-modify-write race in EmbedRowsAsync.
+func (s *ViewStore) BulkUpdateEmbeddings(ctx context.Context, viewID string, updates []EmbeddingUpdate) error {
+	if !s.Available() || len(updates) == 0 {
+		return nil
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+
+	models := make([]mongo.WriteModel, 0, len(updates))
+	for _, u := range updates {
+		models = append(models, mongo.NewUpdateOneModel().
+			SetFilter(bson.D{{Key: "_id", Value: u.RowID}}).
+			SetUpdate(bson.D{{Key: "$set", Value: bson.D{
+				{Key: "search_text", Value: u.SearchText},
+				{Key: "embedding", Value: u.Embedding},
+			}}}))
+	}
+
+	_, err := coll.BulkWrite(ctx, models)
+	if err != nil {
+		return fmt.Errorf("bulk update embeddings: %w", err)
 	}
 	return nil
 }
