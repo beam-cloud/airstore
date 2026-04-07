@@ -453,7 +453,7 @@ func (f *EmailThreadFetcher) parseOutlookThreadMessage(
 		Body:       extractOutlookThreadBody(msg.Body, msg.BodyPreview),
 		Snippet:    strings.TrimSpace(msg.BodyPreview),
 		Date:       dateStr,
-		Timestamp:  receivedAt.UnixMilli(),
+		Timestamp:  outlookTimestamp(receivedAt),
 		IsOutbound: isOutbound || msg.IsDraft,
 		Labels:     labels,
 		Deeplink:   strings.TrimSpace(msg.WebLink),
@@ -655,9 +655,24 @@ func extractOutlookThreadBody(body *sourceclients.OutlookMessageBody, preview st
 	return strings.TrimSpace(content)
 }
 
+func outlookTimestamp(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UnixMilli()
+}
+
 func stripOutlookHTML(html string) string {
+	lower := strings.ToLower(html)
 	for _, tag := range []string{"<br>", "<br/>", "<br />", "</p>", "</div>", "</li>"} {
-		html = strings.ReplaceAll(html, tag, "\n")
+		for {
+			idx := strings.Index(lower, tag)
+			if idx == -1 {
+				break
+			}
+			html = html[:idx] + "\n" + html[idx+len(tag):]
+			lower = lower[:idx] + "\n" + lower[idx+len(tag):]
+		}
 	}
 
 	var b strings.Builder
