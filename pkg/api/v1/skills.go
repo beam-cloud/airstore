@@ -35,6 +35,7 @@ func NewSkillsGroup(g *echo.Group, backend repository.BackendRepository, storage
 	sg.g.GET("/drafts/:draft_id", sg.GetDraft)
 	sg.g.POST("/drafts/:draft_id/chat", sg.ChatDraft)
 	sg.g.POST("/drafts/:draft_id/install", sg.InstallDraft)
+	sg.g.DELETE("/drafts/:draft_id", sg.DeleteDraft)
 	return sg
 }
 
@@ -502,6 +503,21 @@ func (sg *SkillsGroup) InstallDraft(c echo.Context) error {
 		Description: manifest.Description,
 		Path:        skills.NameToPath(manifest.Name),
 	})
+}
+
+// DeleteDraft removes a draft session and marks it as installed in the index.
+func (sg *SkillsGroup) DeleteDraft(c echo.Context) error {
+	if sg.copilot == nil {
+		return ErrorResponse(c, http.StatusServiceUnavailable, "skill copilot not configured")
+	}
+
+	draftID := c.Param("draft_id")
+	workspaceID := c.Param("workspace_id")
+
+	deleteDraftSession(draftID)
+	_ = sg.copilot.IndexDraftInstalled(c.Request().Context(), workspaceID, draftID, "")
+
+	return SuccessResponse(c, map[string]bool{"deleted": true})
 }
 
 // ---------------------------------------------------------------------------
