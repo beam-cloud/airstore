@@ -1098,7 +1098,7 @@ type mailboxThread struct {
 	OutputIDs []string              `json:"output_ids,omitempty"`
 }
 
-const mailboxOutputLimit = 200
+const mailboxOutputLimit = 500
 
 // stripCrossThreadDrafts removes threads that consist entirely of DRAFT
 // messages when another thread contains a SENT message with the same
@@ -1213,9 +1213,10 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 		}
 	}
 
-	// Query email outputs using two strategies:
+	// Query email outputs using three strategies to ensure completeness:
 	//  1. Tasks whose payload has source_view_id matching this view
 	//  2. Tasks referenced by this view's rows or their subtasks
+	//  3. Tasks from agents explicitly assigned to this view
 	emailType := types.TaskOutputTypeEmail
 	outputsByID := make(map[string]*types.TaskOutput)
 
@@ -1239,6 +1240,23 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 		})
 		if taskErr == nil {
 			for _, o := range byTasks {
+				outputsByID[o.ID] = o
+			}
+		}
+	}
+
+	// Strategy 3: query by each agent assigned to this view. Catches emails
+	// from tasks dispatched outside the copilot (scheduled tasks, API calls)
+	// that didn't set source_view_id but used one of the view's agents.
+	for _, agentRef := range view.Definition.Agents {
+		agentID := agentRef
+		byAgent, agentErr := vg.backend.ListWorkspaceTaskOutputs(ctx, workspaceID, types.TaskOutputListFilter{
+			OutputType: &emailType,
+			AgentID:    &agentID,
+			Limit:      mailboxOutputLimit,
+		})
+		if agentErr == nil {
+			for _, o := range byAgent {
 				outputsByID[o.ID] = o
 			}
 		}

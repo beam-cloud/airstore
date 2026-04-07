@@ -318,7 +318,18 @@ func (s *ViewStore) GetRowsForMailbox(ctx context.Context, viewID string) ([]Vie
 		return nil, nil
 	}
 	coll := s.mongo.Collection(s.collectionName(viewID))
-	filter := bson.D{{Key: "_id", Value: bson.D{{Key: "$not", Value: bson.D{{Key: "$regex", Value: "^__"}}}}}}
+
+	// Only fetch rows that are relevant to the mailbox: rows with a task_id
+	// (for task→output association) or a thread_id cell (for direct thread
+	// discovery). This avoids loading the entire collection for large views.
+	filter := bson.D{
+		{Key: "_id", Value: bson.D{{Key: "$not", Value: bson.D{{Key: "$regex", Value: "^__"}}}}},
+		{Key: "$or", Value: bson.A{
+			bson.D{{Key: "task_id", Value: bson.D{{Key: "$exists", Value: true}, {Key: "$ne", Value: ""}}}},
+			bson.D{{Key: "cells.thread_id", Value: bson.D{{Key: "$exists", Value: true}, {Key: "$ne", Value: ""}}}},
+			bson.D{{Key: "agent_cells.thread_id", Value: bson.D{{Key: "$exists", Value: true}, {Key: "$ne", Value: ""}}}},
+		}},
+	}
 
 	opts := options.Find().SetProjection(bson.D{
 		{Key: "embedding", Value: 0},
