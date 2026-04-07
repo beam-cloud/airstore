@@ -596,7 +596,7 @@ func (c *Copilot) GenerateStream(
 	}
 
 	workspaceCtx := c.BuildWorkspaceContext(ctx, workspaceID)
-	viewData := c.BuildViewDataContext(ctx, viewID, cs.ViewContent)
+	viewData := c.BuildViewDataContext(ctx, viewID, cs.ViewContent, promptMessage)
 	activeTasks := c.BuildActiveTasksContext(ctx, workspaceID, cs.ViewContent, cs.PublishedViewID)
 
 	ch, err := baml.Stream.WriteView(ctx, promptMessage, history, cs.ViewContent, workspaceCtx, ComponentRegistryDoc, viewData, activeTasks)
@@ -978,9 +978,11 @@ func writeColdStartGuidance(sb *strings.Builder) {
 	sb.WriteString("- Keep column definitions semantic and minimal (3-5 columns)\n")
 }
 
-// BuildViewDataContext loads row data from MongoDB for a published view and
-// formats it as a readable text table that can be injected into the BAML prompt.
-func (c *Copilot) BuildViewDataContext(ctx context.Context, viewID string, viewContent string) string {
+// BuildViewDataContext loads relevant row data from MongoDB for a published view
+// using vector search keyed on the user's message, and formats it as a readable
+// text table for the BAML prompt. Falls back to recent rows if vector search
+// is unavailable.
+func (c *Copilot) BuildViewDataContext(ctx context.Context, viewID string, viewContent string, userMessage string) string {
 	if c.store == nil || !c.store.Available() || viewID == "" || viewContent == "" {
 		return ""
 	}
@@ -990,8 +992,20 @@ func (c *Copilot) BuildViewDataContext(ctx context.Context, viewID string, viewC
 		return ""
 	}
 
-	const maxRowsPerSheet = 100
-	const maxTotalChars = 50000
+	const vectorResultsPerSheet = 15
+	const fallbackRowsPerSheet = 20
+	const maxTotalChars = 20000
+
+	embedder := c.store.Embedder()
+	var queryVec []float64
+	if embedder != nil && embedder.Available() && strings.TrimSpace(userMessage) != "" {
+		vec, err := embedder.EmbedOne(ctx, userMessage)
+		if err != nil {
+			log.Debug().Err(err).Msg("copilot: failed to embed user message for context, using fallback")
+		} else {
+			queryVec = vec
+		}
+	}
 
 	var sb strings.Builder
 	totalRows := 0
@@ -1008,17 +1022,41 @@ func (c *Copilot) BuildViewDataContext(ctx context.Context, viewID string, viewC
 			continue
 		}
 
-		rows, err := c.store.GetRows(ctx, viewID, sheet.ID, tableComp.ID)
-		if err != nil || len(rows) == 0 {
-			continue
-		}
-
 		columns := extractColumnKeys(tableComp)
 		if len(columns) == 0 {
 			continue
 		}
 
-		fmt.Fprintf(&sb, "\n── Sheet: %s (%d rows) ──\n", sheet.Name, len(rows))
+		var rows []ViewRow
+		var sheetTotal int
+		if queryVec != nil {
+			results, err := c.store.VectorSearch(ctx, viewID, sheet.ID, queryVec, vectorResultsPerSheet)
+			if err != nil {
+				log.Debug().Err(err).Str("sheet_id", sheet.ID).Msg("copilot: vector search failed, using fallback")
+			} else {
+				for _, r := range results {
+					rows = append(rows, r.ViewRow)
+				}
+			}
+		}
+		if len(rows) == 0 {
+			page, total, err := c.store.GetRowsPage(ctx, viewID, sheet.ID, tableComp.ID, 0, fallbackRowsPerSheet)
+			if err != nil || len(page) == 0 {
+				continue
+			}
+			rows = page
+			sheetTotal = total
+		} else {
+			_, total, _ := c.store.GetRowsPage(ctx, viewID, sheet.ID, tableComp.ID, 0, 1)
+			sheetTotal = total
+		}
+
+		method := "recent"
+		if queryVec != nil && len(rows) > 0 {
+			method = "relevant"
+		}
+
+		fmt.Fprintf(&sb, "\n── Sheet: %s (%d total rows, showing %d %s) ──\n", sheet.Name, sheetTotal, len(rows), method)
 
 		sb.WriteString("# | ")
 		for _, col := range columns {
@@ -1032,11 +1070,7 @@ func (c *Copilot) BuildViewDataContext(ctx context.Context, viewID string, viewC
 		}
 		sb.WriteString("\n")
 
-		limit := len(rows)
-		if limit > maxRowsPerSheet {
-			limit = maxRowsPerSheet
-		}
-		for _, row := range rows[:limit] {
+		for _, row := range rows {
 			fmt.Fprintf(&sb, "row:%s:%s | ", row.SheetID, row.ID)
 			cells := row.MergedCells()
 			for _, col := range columns {
@@ -1050,8 +1084,8 @@ func (c *Copilot) BuildViewDataContext(ctx context.Context, viewID string, viewC
 			sb.WriteString("\n")
 			totalRows++
 		}
-		if len(rows) > limit {
-			fmt.Fprintf(&sb, "... and %d more rows\n", len(rows)-limit)
+		if sheetTotal > len(rows) {
+			fmt.Fprintf(&sb, "... and %d more rows (use search to find specific data)\n", sheetTotal-len(rows))
 		}
 
 		if sb.Len() > maxTotalChars {

@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/clients"
@@ -304,6 +306,9 @@ func (vg *ViewsGroup) ResolveData(c echo.Context) error {
 		ForceRefresh:  queryBool(c.QueryParam(viewRefreshQueryParam)),
 		ViewAgentRefs: v.Definition.Agents,
 		SourceViewID:  v.ID,
+		Offset:        queryInt(c.QueryParam("offset"), 0),
+		Limit:         queryInt(c.QueryParam("limit"), 0),
+		Search:        c.QueryParam("search"),
 	})
 	if err != nil {
 		log.Error().Err(err).Str("view_id", v.ID).Str("sheet_id", sheetID).Str("component", componentID).Msg("data resolve failed")
@@ -375,6 +380,17 @@ func queryBool(value string) bool {
 	default:
 		return false
 	}
+}
+
+func queryInt(value string, defaultVal int) int {
+	if value == "" {
+		return defaultVal
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil {
+		return defaultVal
+	}
+	return n
 }
 
 type deletedSheetColumn struct {
@@ -1157,11 +1173,13 @@ func (vg *ViewsGroup) Mailbox(c echo.Context) error {
 	}
 
 	// Load view rows to collect task IDs and row-level thread_ids.
+	// We need full cell data here because the mailbox reads thread_id from
+	// cells and uses MergedCells for row labels in the response.
 	taskRowMap := make(map[string]*views.ViewRow)
 	var viewTaskIDs []string
 	var cachedRows []views.ViewRow
 	if vg.store != nil && vg.store.Available() {
-		allRows, rowErr := vg.store.GetRows(ctx, viewID, "", "")
+		allRows, rowErr := vg.store.GetRowsForMailbox(ctx, viewID)
 		if rowErr == nil {
 			cachedRows = allRows
 			seen := make(map[string]bool)
@@ -1664,8 +1682,9 @@ func (vg *ViewsGroup) ImportData(c echo.Context) error {
 
 // propagateImportRows syncs imported rows to other sheets in the view.
 // Runs in a background goroutine so the import response returns immediately.
+// Uses parallel workers to handle large imports within the timeout.
 func (vg *ViewsGroup) propagateImportRows(viewID string, workspaceID uint, sourceSheetID, sourceComponentID string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	rows, err := vg.store.GetRowsBySource(ctx, viewID, sourceSheetID, sourceComponentID, views.RowSourceImport)
@@ -1675,27 +1694,47 @@ func (vg *ViewsGroup) propagateImportRows(viewID string, workspaceID uint, sourc
 
 	log.Info().Str("view_id", viewID).Int("rows", len(rows)).Msg("import: propagating to other sheets")
 
-	synced := 0
+	const propagateWorkers = 10
+	work := make(chan views.ViewRow, propagateWorkers*2)
+	var wg sync.WaitGroup
+	var syncedCount int64
+
+	for w := 0; w < propagateWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for row := range work {
+				if ctx.Err() != nil {
+					return
+				}
+				cells := row.MergedCells()
+				if len(cells) == 0 {
+					continue
+				}
+				vg.viewSync.SyncToolWrite(ctx, views.ToolWriteInput{
+					ViewID:            viewID,
+					WorkspaceID:       workspaceID,
+					SourceSheetID:     sourceSheetID,
+					SourceComponentID: sourceComponentID,
+					Cells:             cells,
+					RowID:             row.ID,
+					ForceInsert:       true,
+				})
+				atomic.AddInt64(&syncedCount, 1)
+			}
+		}()
+	}
+
 	for _, row := range rows {
 		if ctx.Err() != nil {
 			break
 		}
-		cells := row.MergedCells()
-		if len(cells) == 0 {
-			continue
-		}
-		vg.viewSync.SyncToolWrite(ctx, views.ToolWriteInput{
-			ViewID:            viewID,
-			WorkspaceID:       workspaceID,
-			SourceSheetID:     sourceSheetID,
-			SourceComponentID: sourceComponentID,
-			Cells:             cells,
-			RowID:             row.ID,
-			ForceInsert:       true,
-		})
-		synced++
+		work <- row
 	}
-	log.Info().Str("view_id", viewID).Int("synced", synced).Msg("import: propagation complete")
+	close(work)
+	wg.Wait()
+
+	log.Info().Str("view_id", viewID).Int64("synced", syncedCount).Int("total", len(rows)).Msg("import: propagation complete")
 }
 
 // ---------------------------------------------------------------------------

@@ -93,6 +93,9 @@ type ResolveOptions struct {
 	ForceRefresh  bool
 	ViewAgentRefs []string
 	SourceViewID  string
+	Offset        int
+	Limit         int
+	Search        string // free-text filter applied before pagination
 }
 
 type mappingSpec struct {
@@ -138,6 +141,15 @@ func (r *DataResolver) Resolve(ctx context.Context, workspaceID uint, viewID str
 	if !comp.IsTable() {
 		return &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}, nil
 	}
+
+	// Fast path: if pagination is requested, try to serve import-only views
+	// directly from MongoDB without loading all rows into memory.
+	if opts.Limit > 0 && r.store != nil && r.store.Available() {
+		if data, ok := r.resolveImportFastPath(ctx, viewID, sheet, comp, opts); ok {
+			return data, nil
+		}
+	}
+
 	result, err := r.ensureSheetMapped(ctx, workspaceID, viewID, sheet, comp, opts)
 	if err != nil {
 		return nil, err
@@ -147,11 +159,78 @@ func (r *DataResolver) Resolve(ctx context.Context, workspaceID uint, viewID str
 	}
 
 	rows := result.Rows
-	data := assembleTable(sheet.ID, comp, rows, result.TaskMeta)
+	data := assembleTable(sheet.ID, comp, rows, result.TaskMeta, opts.Search, opts.Offset, opts.Limit)
 	if data != nil && len(result.Diagnostics) > 0 {
 		data.Diagnostics = result.Diagnostics
 	}
 	return data, nil
+}
+
+// resolveImportFastPath checks if all stored rows are import-sourced with
+// pre-populated cells, and if so serves the page directly from MongoDB.
+// Returns (nil, false) to fall through to the full mapping path.
+func (r *DataResolver) resolveImportFastPath(ctx context.Context, viewID string, sheet types.SheetSpec, comp types.ComponentSpec, opts ResolveOptions) (*types.ResolvedData, bool) {
+	var rows []ViewRow
+	var total int
+	var err error
+
+	hasSearch := strings.TrimSpace(opts.Search) != ""
+	if hasSearch {
+		rows, total, err = r.store.SearchRowsText(ctx, viewID, sheet.ID, comp.ID, opts.Search, opts.Offset, opts.Limit)
+	} else {
+		rows, total, err = r.store.GetRowsPage(ctx, viewID, sheet.ID, comp.ID, opts.Offset, opts.Limit)
+	}
+	if err != nil {
+		return nil, false
+	}
+	// When a search is active and returns 0 results, return empty data
+	// immediately instead of falling through to ensureSheetMapped which
+	// would load all rows into memory.
+	if total == 0 && hasSearch {
+		data := assembleTable(sheet.ID, comp, nil, nil, "", 0, 0)
+		if data == nil {
+			data = &types.ResolvedData{Columns: []string{}, Rows: [][]any{}, Status: types.ResolvedDataStatusOK}
+		}
+		data.Total = 0
+		return data, true
+	}
+	if total == 0 {
+		return nil, false
+	}
+
+	// Check if ALL rows in this page have pre-populated cells (import rows).
+	// If any need BAML mapping, fall through to the full path.
+	for _, row := range rows {
+		if len(row.MergedCells()) == 0 {
+			return nil, false
+		}
+	}
+
+	var resolved []resolvedSheetRow
+	for _, row := range rows {
+		src := row.Source
+		if src == "" {
+			src = RowSourceSync
+		}
+		resolved = append(resolved, resolvedSheetRow{
+			TaskID:          row.TaskID,
+			DetailTaskID:    row.TaskID,
+			RowID:           row.ID,
+			StableRef:       row.StableRef,
+			RowKey:          row.RowKey,
+			OutputID:        firstSourceOutputID(row.SourceOutputIDs),
+			SourceOutputIDs: strings.Join(row.SourceOutputIDs, ","),
+			Source:          src,
+			Cells:           row.MergedCells(),
+		})
+	}
+
+	// assembleTable with no search/pagination since we already did it at the DB level
+	data := assembleTable(sheet.ID, comp, resolved, map[string]*types.AgentTask{}, "", 0, 0)
+	if data != nil {
+		data.Total = total
+	}
+	return data, true
 }
 
 // RegenerateRow re-maps a single task's outputs through BAML for one sheet,
@@ -1710,7 +1789,7 @@ func filterOutputsForDataSource(outputs []*types.TaskOutput, ds *types.DataSourc
 // Component assembly
 // ---------------------------------------------------------------------------
 
-func assembleTable(sheetID string, comp types.ComponentSpec, mappedRows []resolvedSheetRow, taskMeta map[string]*types.AgentTask) *types.ResolvedData {
+func assembleTable(sheetID string, comp types.ComponentSpec, mappedRows []resolvedSheetRow, taskMeta map[string]*types.AgentTask, search string, offset, limit int) *types.ResolvedData {
 	tableCols := buildColumnSchemas(comp)
 	if len(tableCols) == 0 {
 		tableCols = discoverColumnsFromRows(mappedRows)
@@ -1730,6 +1809,8 @@ func assembleTable(sheetID string, comp types.ComponentSpec, mappedRows []resolv
 		colNames[hiddenStart+i] = hidden.Key
 		meta[hiddenStart+i] = types.ColumnMeta{Key: hidden.Key, Type: "text", Hidden: true}
 	}
+
+	searchLower := strings.ToLower(strings.TrimSpace(search))
 
 	var rows [][]any
 	for _, mapped := range mappedRows {
@@ -1751,21 +1832,50 @@ func assembleTable(sheetID string, comp types.ComponentSpec, mappedRows []resolv
 		for i, hidden := range hiddenResolvedColumns {
 			row[hiddenStart+i] = hidden.Value(sheetID, mapped)
 		}
-		if hasValue {
-			rows = append(rows, row)
+		if !hasValue {
+			continue
 		}
+		if searchLower != "" && !rowMatchesSearch(row, tableCols, searchLower) {
+			continue
+		}
+		rows = append(rows, row)
 	}
 
-	if len(rows) == 0 {
-		return &types.ResolvedData{Columns: colNames, ColumnMeta: meta, Rows: [][]any{}, Status: types.ResolvedDataStatusEmpty}
+	total := len(rows)
+	if total == 0 {
+		return &types.ResolvedData{Columns: colNames, ColumnMeta: meta, Rows: [][]any{}, Total: 0, Status: types.ResolvedDataStatusEmpty}
 	}
+
+	if limit > 0 {
+		if offset > total {
+			offset = total
+		}
+		end := offset + limit
+		if end > total {
+			end = total
+		}
+		rows = rows[offset:end]
+	}
+
 	return &types.ResolvedData{
 		Columns:    colNames,
 		ColumnMeta: meta,
 		Rows:       rows,
-		Total:      len(rows),
+		Total:      total,
 		Status:     types.ResolvedDataStatusOK,
 	}
+}
+
+func rowMatchesSearch(row []any, cols []bamltypes.ColumnSchema, searchLower string) bool {
+	for i := range cols {
+		if i >= len(row) || row[i] == nil {
+			continue
+		}
+		if s, ok := row[i].(string); ok && strings.Contains(strings.ToLower(s), searchLower) {
+			return true
+		}
+	}
+	return false
 }
 
 // discoverColumnsFromRows derives column schemas from the cell keys present
