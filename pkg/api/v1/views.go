@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/beam-cloud/airstore/pkg/clients"
@@ -1691,68 +1690,7 @@ func (vg *ViewsGroup) ImportData(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, err.Error())
 	}
 
-	if vg.viewSync != nil && result.RowCount > 0 {
-		go vg.propagateImportRows(viewID, workspaceID, sheetID, comp.ID)
-	}
-
 	return SuccessResponse(c, result)
-}
-
-// propagateImportRows syncs imported rows to other sheets in the view.
-// Runs in a background goroutine so the import response returns immediately.
-// Uses parallel workers to handle large imports within the timeout.
-func (vg *ViewsGroup) propagateImportRows(viewID string, workspaceID uint, sourceSheetID, sourceComponentID string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-
-	rows, err := vg.store.GetRowsBySource(ctx, viewID, sourceSheetID, sourceComponentID, views.RowSourceImport)
-	if err != nil || len(rows) == 0 {
-		return
-	}
-
-	log.Info().Str("view_id", viewID).Int("rows", len(rows)).Msg("import: propagating to other sheets")
-
-	const propagateWorkers = 10
-	work := make(chan views.ViewRow, propagateWorkers*2)
-	var wg sync.WaitGroup
-	var syncedCount int64
-
-	for w := 0; w < propagateWorkers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for row := range work {
-				if ctx.Err() != nil {
-					return
-				}
-				cells := row.MergedCells()
-				if len(cells) == 0 {
-					continue
-				}
-				vg.viewSync.SyncToolWrite(ctx, views.ToolWriteInput{
-					ViewID:            viewID,
-					WorkspaceID:       workspaceID,
-					SourceSheetID:     sourceSheetID,
-					SourceComponentID: sourceComponentID,
-					Cells:             cells,
-					RowID:             row.ID,
-					ForceInsert:       true,
-				})
-				atomic.AddInt64(&syncedCount, 1)
-			}
-		}()
-	}
-
-	for _, row := range rows {
-		if ctx.Err() != nil {
-			break
-		}
-		work <- row
-	}
-	close(work)
-	wg.Wait()
-
-	log.Info().Str("view_id", viewID).Int64("synced", syncedCount).Int("total", len(rows)).Msg("import: propagation complete")
 }
 
 // ---------------------------------------------------------------------------
