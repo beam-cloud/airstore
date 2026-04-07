@@ -102,12 +102,24 @@ func TestBuildRawEmail_WithReplyHeaders(t *testing.T) {
 	if !strings.Contains(raw, "Subject: Re: TikTok Partnership\r\n") {
 		t.Errorf("subject should be plain text (not Q-encoded) for ASCII:\n%s", raw)
 	}
+	if !strings.Contains(raw, "Content-Type: text/html; charset=UTF-8\r\n") {
+		t.Errorf("expected text/html content type in:\n%s", raw)
+	}
+	if !strings.Contains(raw, "Hello!") || !strings.Contains(raw, "<p ") {
+		t.Errorf("body should be HTML-wrapped in:\n%s", raw)
+	}
+	if !strings.Contains(raw, "<meta name=\"viewport\"") {
+		t.Errorf("missing viewport meta for mobile:\n%s", raw)
+	}
 }
 
 func TestBuildRawEmail_NoReplyHeaders(t *testing.T) {
 	raw := buildRawEmail("to@test.com", "Hello", "Body", "", "")
 	if strings.Contains(raw, "In-Reply-To") || strings.Contains(raw, "References") {
 		t.Errorf("should not have reply headers for new message:\n%s", raw)
+	}
+	if !strings.Contains(raw, "Content-Type: text/html; charset=UTF-8\r\n") {
+		t.Errorf("expected text/html content type in:\n%s", raw)
 	}
 }
 
@@ -295,4 +307,84 @@ func TestGmailSendDraftInThread(t *testing.T) {
 	if got := out["thread_id"]; got != "thread-123" {
 		t.Errorf("output thread_id = %v, want thread-123", got)
 	}
+}
+
+func TestPlainToHTML(t *testing.T) {
+	mustContain := func(t *testing.T, got string, substrs ...string) {
+		t.Helper()
+		for _, s := range substrs {
+			if !strings.Contains(got, s) {
+				t.Errorf("missing %q in:\n%s", s, got)
+			}
+		}
+	}
+	mustNotContain := func(t *testing.T, got string, substrs ...string) {
+		t.Helper()
+		for _, s := range substrs {
+			if strings.Contains(got, s) {
+				t.Errorf("should not contain %q in:\n%s", s, got)
+			}
+		}
+	}
+
+	t.Run("html document structure", func(t *testing.T) {
+		got := plainToHTML("Hello")
+		mustContain(t, got,
+			"<!DOCTYPE html>",
+			`<meta name="viewport"`,
+			`font-family:`,
+			"</body></html>",
+		)
+	})
+
+	t.Run("single paragraph", func(t *testing.T) {
+		got := plainToHTML("Hello world")
+		mustContain(t, got, ">Hello world</p>")
+	})
+
+	t.Run("hard wraps collapsed", func(t *testing.T) {
+		got := plainToHTML("I am working on behalf of an experienced\nlaundromat operator who is\nlooking to open a new location.")
+		mustContain(t, got, "I am working on behalf of an experienced laundromat operator who is looking to open a new location.")
+		mustNotContain(t, got, "experienced\n")
+	})
+
+	t.Run("multiple paragraphs", func(t *testing.T) {
+		got := plainToHTML("Hi Ryan,\n\nI am working on behalf of an experienced\nlaundromat operator.\n\nThank you,\nEli")
+		mustContain(t, got,
+			">Hi Ryan,</p>",
+			">I am working on behalf of an experienced laundromat operator.</p>",
+			">Thank you, Eli</p>",
+		)
+	})
+
+	t.Run("crlf normalized", func(t *testing.T) {
+		got := plainToHTML("First paragraph.\r\n\r\nSecond paragraph.")
+		mustContain(t, got, ">First paragraph.</p>", ">Second paragraph.</p>")
+	})
+
+	t.Run("html escaped", func(t *testing.T) {
+		got := plainToHTML("Price is <$100 & that's a deal")
+		mustContain(t, got, "&lt;$100", "&amp;")
+		mustNotContain(t, got, "<$100")
+	})
+
+	t.Run("empty lines ignored", func(t *testing.T) {
+		got := plainToHTML("\n\nHello\n\n\n\nWorld\n\n")
+		mustContain(t, got, ">Hello</p>", ">World</p>")
+	})
+
+	t.Run("urls auto-linked", func(t *testing.T) {
+		got := plainToHTML("Check out https://example.com/page for details.")
+		mustContain(t, got, `<a href="https://example.com/page"`, ">https://example.com/page</a>")
+	})
+
+	t.Run("bullet list", func(t *testing.T) {
+		got := plainToHTML("Here are the options:\n\n- Option A\n- Option B\n- Option C")
+		mustContain(t, got, "<ul", "<li", ">Option A</li>", ">Option B</li>", ">Option C</li>")
+	})
+
+	t.Run("numbered list", func(t *testing.T) {
+		got := plainToHTML("Steps:\n\n1. First step\n2. Second step\n3. Third step")
+		mustContain(t, got, "<ul", "<li", ">First step</li>", ">Second step</li>")
+	})
 }

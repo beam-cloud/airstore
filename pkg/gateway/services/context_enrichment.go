@@ -84,7 +84,7 @@ func (e *sourceContextEnricher) providerEnrich(ctx context.Context, workspaceID 
 	return enricher.EnrichHookContent(ctx, pctx, data)
 }
 
-func (e *sourceContextEnricher) FetchViewRows(ctx context.Context, workspaceID uint, taskID string) string {
+func (e *sourceContextEnricher) FetchViewRows(ctx context.Context, workspaceID uint, taskID string, queryHint string) string {
 	taskID = strings.TrimSpace(taskID)
 	if e.backend == nil || e.viewStore == nil || !e.viewStore.Available() || taskID == "" || workspaceID == 0 {
 		return ""
@@ -99,7 +99,36 @@ func (e *sourceContextEnricher) FetchViewRows(ctx context.Context, workspaceID u
 		return ""
 	}
 
-	rows, err := e.viewStore.GetRows(ctx, viewID, "", "")
+	queryHint = strings.TrimSpace(queryHint)
+
+	if ec := e.viewStore.Embedder(); ec != nil && ec.Available() && queryHint != "" {
+		vec, err := ec.EmbedOne(ctx, queryHint)
+		if err == nil && len(vec) > 0 {
+			results, err := e.viewStore.VectorSearch(ctx, viewID, "", vec, maxViewRows)
+			if err == nil && len(results) > 0 {
+				rows := make([]views.ViewRow, 0, len(results))
+				for _, r := range results {
+					rows = append(rows, r.ViewRow)
+				}
+				return formatViewRows(rows)
+			}
+		}
+	}
+
+	// Fallback: scope to the first sheet instead of loading all rows unfiltered.
+	view, err := e.backend.GetView(ctx, workspaceID, viewID)
+	if err != nil || view == nil || len(view.Definition.Sheets) == 0 {
+		return ""
+	}
+	firstSheet := view.Definition.Sheets[0]
+	var componentID string
+	for _, comp := range firstSheet.Components {
+		if comp.Type == "table" {
+			componentID = comp.ID
+			break
+		}
+	}
+	rows, _, err := e.viewStore.GetRowsPage(ctx, viewID, firstSheet.ID, componentID, 0, maxViewRows)
 	if err != nil {
 		log.Warn().Err(err).Str("view_id", viewID).Msg("context enrichment: failed to fetch view rows")
 		return ""

@@ -1007,8 +1007,23 @@ func (c *Copilot) BuildViewDataContext(ctx context.Context, viewID string, viewC
 		}
 	}
 
+	numTableSheets := 0
+	for _, sheet := range def.Sheets {
+		for _, comp := range sheet.Components {
+			if comp.Type == "table" {
+				numTableSheets++
+				break
+			}
+		}
+	}
+	if numTableSheets == 0 {
+		return ""
+	}
+	perSheetBudget := maxTotalChars / numTableSheets
+
 	var sb strings.Builder
 	totalRows := 0
+	sheetIdx := 0
 
 	for _, sheet := range def.Sheets {
 		var tableComp *types.ComponentSpec
@@ -1042,6 +1057,7 @@ func (c *Copilot) BuildViewDataContext(ctx context.Context, viewID string, viewC
 		if len(rows) == 0 {
 			page, total, err := c.store.GetRowsPage(ctx, viewID, sheet.ID, tableComp.ID, 0, fallbackRowsPerSheet)
 			if err != nil || len(page) == 0 {
+				sheetIdx++
 				continue
 			}
 			rows = page
@@ -1056,6 +1072,7 @@ func (c *Copilot) BuildViewDataContext(ctx context.Context, viewID string, viewC
 			method = "relevant"
 		}
 
+		sheetStart := sb.Len()
 		fmt.Fprintf(&sb, "\n── Sheet: %s (%d total rows, showing %d %s) ──\n", sheet.Name, sheetTotal, len(rows), method)
 
 		sb.WriteString("# | ")
@@ -1070,6 +1087,7 @@ func (c *Copilot) BuildViewDataContext(ctx context.Context, viewID string, viewC
 		}
 		sb.WriteString("\n")
 
+		budgetCeiling := sheetStart + perSheetBudget
 		for _, row := range rows {
 			fmt.Fprintf(&sb, "row:%s:%s | ", row.SheetID, row.ID)
 			cells := row.MergedCells()
@@ -1083,15 +1101,20 @@ func (c *Copilot) BuildViewDataContext(ctx context.Context, viewID string, viewC
 			}
 			sb.WriteString("\n")
 			totalRows++
+
+			if sb.Len() > budgetCeiling {
+				remaining := len(rows) - totalRows
+				if remaining > 0 {
+					fmt.Fprintf(&sb, "... and %d more rows (budget limit for this sheet)\n", remaining)
+				}
+				break
+			}
 		}
 		if sheetTotal > len(rows) {
 			fmt.Fprintf(&sb, "... and %d more rows (use search to find specific data)\n", sheetTotal-len(rows))
 		}
 
-		if sb.Len() > maxTotalChars {
-			sb.WriteString("\n(data truncated for context limit)\n")
-			break
-		}
+		sheetIdx++
 	}
 
 	if totalRows == 0 {

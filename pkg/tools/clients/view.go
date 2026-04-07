@@ -425,18 +425,15 @@ func (c *ViewClient) updateRow(ctx context.Context, viewID string, workspaceID u
 	if c.sync != nil {
 		row, err := c.store.GetRowByID(ctx, viewID, rowID)
 		if err == nil && row != nil {
-			sr := c.sync.SyncToolWrite(ctx, views.ToolWriteInput{
+			input := views.ToolWriteInput{
 				ViewID:            viewID,
 				WorkspaceID:       workspaceID,
 				SourceSheetID:     row.SheetID,
 				SourceComponentID: row.ComponentID,
 				Cells:             row.MergedCells(),
 				RowID:             rowID,
-			})
-			if sr != nil {
-				resp["cross_sheet_updated"] = len(sr.Updated)
-				resp["cross_sheet_created"] = len(sr.Created)
 			}
+			go c.sync.SyncToolWrite(context.Background(), input)
 		}
 	}
 
@@ -490,18 +487,15 @@ func (c *ViewClient) addRow(ctx context.Context, viewID string, workspaceID uint
 	}
 
 	if c.sync != nil {
-		sr := c.sync.SyncToolWrite(ctx, views.ToolWriteInput{
+		input := views.ToolWriteInput{
 			ViewID:            viewID,
 			WorkspaceID:       workspaceID,
 			SourceSheetID:     sheetID,
 			SourceComponentID: componentID,
 			Cells:             cells,
 			RowID:             rowID,
-		})
-		if sr != nil {
-			resp["cross_sheet_updated"] = len(sr.Updated)
-			resp["cross_sheet_created"] = len(sr.Created)
 		}
+		go c.sync.SyncToolWrite(context.Background(), input)
 	}
 
 	return WriteJSON(stdout, resp)
