@@ -596,7 +596,7 @@ func (c *Copilot) GenerateStream(
 	}
 
 	workspaceCtx := c.BuildWorkspaceContext(ctx, workspaceID)
-	viewData := c.BuildViewDataContext(ctx, viewID, cs.ViewContent, promptMessage)
+	viewData := c.BuildViewDataContext(ctx, viewID, cs.ViewContent, userMessage)
 	activeTasks := c.BuildActiveTasksContext(ctx, workspaceID, cs.ViewContent, cs.PublishedViewID)
 
 	ch, err := baml.Stream.WriteView(ctx, promptMessage, history, cs.ViewContent, workspaceCtx, ComponentRegistryDoc, viewData, activeTasks)

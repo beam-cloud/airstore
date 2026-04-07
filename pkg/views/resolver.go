@@ -1847,6 +1847,9 @@ func assembleTable(sheetID string, comp types.ComponentSpec, mappedRows []resolv
 	}
 
 	if limit > 0 {
+		if offset < 0 {
+			offset = 0
+		}
 		if offset > total {
 			offset = total
 		}
