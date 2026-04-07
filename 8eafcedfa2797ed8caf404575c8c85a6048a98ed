@@ -1,0 +1,27 @@
+pkg/api/v1/views.go
+  1cb37d7fbf0541fd 1064,1175-1176,1412-1413,1449-1450
+pkg/api/v1/views_test.go
+  1cb37d7fbf0541fd 309
+pkg/views/email_threads.go
+  1cb37d7fbf0541fd 48-53,132,149-150,155
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.8",
+  "base_commit_sha": "8eafcedfa2797ed8caf404575c8c85a6048a98ed",
+  "prompts": {
+    "1cb37d7fbf0541fd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0cdb66d7-c17d-48d2-a149-dd90cc26ae9b",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Cooper <cooper@beam.cloud>",
+      "messages": [],
+      "total_additions": 18,
+      "total_deletions": 16,
+      "accepted_lines": 18,
+      "overriden_lines": 0
+    }
+  }
+}
