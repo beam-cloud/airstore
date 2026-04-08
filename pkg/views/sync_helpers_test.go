@@ -3,6 +3,7 @@ package views
 import (
 	"testing"
 
+	"github.com/beam-cloud/airstore/pkg/types"
 	viewbamltypes "github.com/beam-cloud/airstore/pkg/views/baml_client/types"
 )
 
@@ -80,5 +81,65 @@ func TestDeriveRowKeyIsDeterministicAndOrderIndependent(t *testing.T) {
 	}
 	if a == c {
 		t.Fatalf("expected different content to produce different row keys")
+	}
+}
+
+func TestSkipOutputSkipsApprovalBackedEmailDrafts(t *testing.T) {
+	output := &types.TaskOutput{
+		OutputType: "email",
+		Title:      "Draft Email - 925 3rd St",
+		Metadata: map[string]any{
+			types.TaskOutputMetadataBlockingKind: "approval",
+			types.TaskOutputMetadataArtifactKind: "email-draft",
+		},
+	}
+	if !skipOutput(output) {
+		t.Fatalf("expected draft approval email output to be skipped")
+	}
+}
+
+func TestOutputAllowsInsertDisablesEmailArtifacts(t *testing.T) {
+	cases := []struct {
+		name   string
+		output *types.TaskOutput
+		want   bool
+	}{
+		{
+			name: "sent email output is update-only",
+			output: &types.TaskOutput{
+				OutputType: "email",
+				Metadata: map[string]any{
+					types.TaskOutputMetadataArtifactKind: "email",
+				},
+			},
+			want: false,
+		},
+		{
+			name: "email-like artifact kind is update-only",
+			output: &types.TaskOutput{
+				OutputType: "json",
+				Metadata: map[string]any{
+					types.TaskOutputMetadataArtifactKind: "email-thread",
+				},
+			},
+			want: false,
+		},
+		{
+			name: "row-centric json output may insert",
+			output: &types.TaskOutput{
+				OutputType: "json",
+				Metadata: map[string]any{
+					types.TaskOutputMetadataArtifactKind: "crm-update",
+				},
+			},
+			want: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := outputAllowsInsert(tc.output); got != tc.want {
+				t.Fatalf("outputAllowsInsert() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

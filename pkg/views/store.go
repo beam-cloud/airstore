@@ -224,12 +224,27 @@ func (s *ViewStore) SearchRowsText(ctx context.Context, viewID, sheetID, compone
 	}
 	coll := s.mongo.Collection(s.collectionName(viewID))
 
-	escaped := regexEscape(strings.TrimSpace(query))
-	pattern := bson.M{"$regex": escaped, "$options": "i"}
+	// Split query into meaningful words and require ALL to appear in
+	// search_text. Stop words and very short tokens are filtered so that
+	// queries like "email about 201 3rd St" work (only "201", "3rd", "St"
+	// are required).
+	words := strings.Fields(strings.TrimSpace(query))
+	var andClauses bson.A
+	for _, w := range words {
+		if len(w) < 2 || searchStopWords[strings.ToLower(w)] {
+			continue
+		}
+		andClauses = append(andClauses, bson.M{
+			"search_text": bson.M{"$regex": regexEscape(w), "$options": "i"},
+		})
+	}
+	if len(andClauses) == 0 {
+		return nil, 0, nil
+	}
 
 	filter := bson.D{
 		{Key: "_id", Value: bson.D{{Key: "$not", Value: bson.D{{Key: "$regex", Value: "^__"}}}}},
-		{Key: "search_text", Value: pattern},
+		{Key: "$and", Value: andClauses},
 	}
 	if strings.TrimSpace(sheetID) != "" {
 		filter = append(filter, bson.E{Key: "sheet_id", Value: sheetID})
@@ -1049,11 +1064,13 @@ func (s *ViewStore) UpdateRow(ctx context.Context, viewID, rowID string, cells m
 	return nil
 }
 
-// deriveRowKey builds a deterministic, schema-agnostic key from the row's
-// non-empty cells. Semantics live in BAML/vector resolution, not in Go field
-// heuristics, so this is intentionally just a canonical content hash.
-// System/hidden fields (prefixed with _ or named thread_id) are excluded so
-// that adding metadata doesn't change a row's identity key.
+// maxRowKeyCells caps how many cells contribute to the row key hash.
+// Using only the first N alphabetically sorted cells makes the key stable when
+// new columns are added later (e.g., enrichment adds zip+rent to an existing
+// address row). The real dedup intelligence lives in ClassifyRowMatch/vector
+// search; this is the last-resort deterministic fallback.
+const maxRowKeyCells = 4
+
 func deriveRowKey(cells map[string]string) string {
 	if len(cells) == 0 {
 		return ""
@@ -1074,6 +1091,9 @@ func deriveRowKey(cells map[string]string) string {
 	}
 
 	sort.Strings(keys)
+	if len(keys) > maxRowKeyCells {
+		keys = keys[:maxRowKeyCells]
+	}
 
 	parts := make([]string, 0, len(keys))
 	for _, key := range keys {
@@ -1429,6 +1449,65 @@ type SearchCriterion struct {
 	Value  string
 }
 
+// SearchRowsAnd finds rows where ALL criteria match (AND logic). Each
+// criterion checks cells.column OR pinned.column. This is used for identity-
+// based dedup where we need precise matches (e.g. same address AND city).
+func (s *ViewStore) SearchRowsAnd(ctx context.Context, viewID, sheetID, componentID string, criteria []SearchCriterion, maxResults int) ([]ViewRow, error) {
+	if !s.Available() || len(criteria) == 0 {
+		return nil, nil
+	}
+	coll := s.mongo.Collection(s.collectionName(viewID))
+
+	andClauses := make(bson.A, 0, len(criteria))
+	for _, c := range criteria {
+		if c.Column == "" || c.Value == "" {
+			continue
+		}
+		if strings.Contains(c.Column, ".") || strings.Contains(c.Column, "$") {
+			continue
+		}
+		escaped := regexEscape(c.Value)
+		pattern := bson.M{"$regex": escaped, "$options": "i"}
+		andClauses = append(andClauses, bson.M{"$or": bson.A{
+			bson.M{"cells." + c.Column: pattern},
+			bson.M{"pinned." + c.Column: pattern},
+		}})
+	}
+	if len(andClauses) == 0 {
+		return nil, nil
+	}
+
+	filter := bson.M{"$and": andClauses}
+	if sheetID != "" {
+		filter["sheet_id"] = sheetID
+	}
+	if componentID != "" {
+		filter["component_id"] = componentID
+	}
+
+	if maxResults <= 0 {
+		maxResults = 50
+	}
+	opts := options.Find().SetLimit(int64(maxResults))
+	cursor, err := coll.Find(ctx, filter, opts)
+	if err != nil {
+		return nil, fmt.Errorf("search rows and: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var rows []ViewRow
+	if err := cursor.All(ctx, &rows); err != nil {
+		return nil, fmt.Errorf("decode search rows and: %w", err)
+	}
+
+	log.Debug().
+		Str("view_id", viewID).
+		Int("criteria", len(criteria)).
+		Int("results", len(rows)).
+		Msg("view: search rows (AND)")
+	return rows, nil
+}
+
 // SearchRows finds rows where any cell (cells or pinned) matches one of the
 // search criteria using case-insensitive regex. Returns at most maxResults rows.
 // This enables targeted lookups instead of loading the entire collection.
@@ -1488,7 +1567,21 @@ func (s *ViewStore) SearchRows(ctx context.Context, viewID, sheetID, componentID
 	return rows, nil
 }
 
-// regexEscape escapes special regex characters in a string.
+var searchStopWords = map[string]bool{
+	"a": true, "an": true, "the": true, "is": true, "at": true,
+	"in": true, "on": true, "of": true, "to": true, "for": true,
+	"by": true, "or": true, "and": true, "but": true, "not": true,
+	"with": true, "from": true, "about": true, "into": true,
+	"this": true, "that": true, "it": true, "its": true,
+	"was": true, "were": true, "are": true, "been": true,
+	"has": true, "had": true, "have": true, "will": true,
+	"can": true, "may": true, "do": true, "does": true, "did": true,
+	"email": true, "sent": true, "inquiry": true, "regarding": true,
+	"property": true, "space": true, "commercial": true, "retail": true,
+	"lease": true, "rental": true, "available": true, "listing": true,
+	"outreach": true, "update": true, "status": true,
+}
+
 func regexEscape(s string) string {
 	special := `\.+*?^$()[]{}|`
 	var b strings.Builder
