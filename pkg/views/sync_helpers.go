@@ -27,7 +27,49 @@ func skipOutput(output *types.TaskOutput) bool {
 	if strings.Contains(title, "approval required") || strings.Contains(title, "waiting for") {
 		return true
 	}
+	// Draft/approval artifacts are presentation-layer outputs. Syncing them into
+	// CRM tables creates duplicate synthetic rows like "Draft Email -> property".
+	if output != nil && output.Metadata != nil {
+		if blocking := metadataString(output.Metadata, types.TaskOutputMetadataBlockingKind); blocking == types.TaskOutputBlockingKindApproval {
+			return true
+		}
+		if artifactKind := strings.ToLower(metadataString(output.Metadata, types.TaskOutputMetadataArtifactKind)); artifactKind == "email-draft" {
+			return true
+		}
+	}
 	return false
+}
+
+// outputAllowsInsert controls whether a task output is allowed to CREATE new
+// rows via ViewSync. Action artifacts like sent emails may update an existing
+// row, but they should never synthesize a new CRM record from prose.
+func outputAllowsInsert(output *types.TaskOutput) bool {
+	if output == nil {
+		return false
+	}
+	ot := strings.TrimSpace(strings.ToLower(output.OutputType))
+	if ot == types.TaskOutputTypeEmail {
+		return false
+	}
+	if output.Metadata != nil {
+		artifactKind := strings.ToLower(metadataString(output.Metadata, types.TaskOutputMetadataArtifactKind))
+		if strings.Contains(artifactKind, "email") {
+			return false
+		}
+	}
+	return true
+}
+
+func metadataString(metadata map[string]any, key string) string {
+	if metadata == nil {
+		return ""
+	}
+	switch v := metadata[key].(type) {
+	case string:
+		return strings.TrimSpace(v)
+	default:
+		return ""
+	}
 }
 
 func bamlColumns(sc types.ViewOutputSchemaContext) []viewbamltypes.ViewColumn {
@@ -98,6 +140,47 @@ func vectorQueryTexts(
 		deduped = deduped[:maxVectorQueries]
 	}
 	return deduped
+}
+
+// outputDataKeys extracts data field names from a task output that may
+// correspond to view column keys. Checks output.Data (map keys) and
+// output.Metadata for common view column references.
+func outputDataKeys(output *types.TaskOutput) map[string]struct{} {
+	keys := make(map[string]struct{})
+	if output == nil {
+		return keys
+	}
+	for k := range output.Data {
+		if !strings.HasPrefix(k, "_") {
+			keys[k] = struct{}{}
+		}
+	}
+	if output.Metadata != nil {
+		for k := range output.Metadata {
+			if !strings.HasPrefix(k, "_") {
+				keys[k] = struct{}{}
+			}
+		}
+	}
+	return keys
+}
+
+// hintToSearchCriteria turns an entity hint (e.g. "201 3rd St") into column-
+// based search criteria by searching identity columns (text, email, etc.).
+func hintToSearchCriteria(hint string, cols []viewbamltypes.ViewColumn) []SearchCriterion {
+	hint = strings.TrimSpace(hint)
+	if hint == "" || len(hint) < 3 {
+		return nil
+	}
+	var criteria []SearchCriterion
+	for _, col := range cols {
+		t := strings.ToLower(col.Type)
+		if t == "boolean" || t == "tags" {
+			continue
+		}
+		criteria = append(criteria, SearchCriterion{Column: col.Key, Value: hint})
+	}
+	return criteria
 }
 
 func dedupeSearchCriteria(criteria []SearchCriterion) []SearchCriterion {

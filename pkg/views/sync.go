@@ -145,6 +145,42 @@ func (vs *ViewSync) Sync(ctx context.Context, output *types.TaskOutput) *SyncRes
 		}
 	}
 
+	// When no source sheet is identified from metadata, infer it by finding
+	// the sheet with the most column overlap with the output's data keys.
+	// This prevents email/json outputs from being synced to unrelated sheets
+	// when the source sheet metadata is missing.
+	if sourceKeys == nil && len(schemas) > 1 {
+		dataKeys := outputDataKeys(output)
+		if len(dataKeys) > 0 {
+			bestOverlap := 0
+			bestSheet := ""
+			for _, sc := range schemas {
+				overlap := 0
+				for _, k := range sc.ColumnKeys() {
+					if _, ok := dataKeys[k]; ok {
+						overlap++
+					}
+				}
+				if overlap > bestOverlap {
+					bestOverlap = overlap
+					bestSheet = sc.SheetID
+					sourceKeys = make(map[string]struct{}, len(sc.Columns))
+					for _, k := range sc.ColumnKeys() {
+						sourceKeys[k] = struct{}{}
+					}
+					sourceSheetID = sc.SheetID
+				}
+			}
+			if bestSheet != "" {
+				log.Debug().
+					Str("task_id", output.TaskID).
+					Str("inferred_sheet", bestSheet).
+					Int("overlap", bestOverlap).
+					Msg("viewsync: inferred source sheet from output data keys")
+			}
+		}
+	}
+
 	// Group schemas by view, filtering out sheets with low column overlap.
 	viewSchemas := make(map[string][]types.ViewOutputSchemaContext)
 	var viewOrder []string
@@ -187,6 +223,12 @@ func (vs *ViewSync) Sync(ctx context.Context, output *types.TaskOutput) *SyncRes
 		Int("views", len(viewOrder)).
 		Msg("viewsync: Sync invoked")
 
+	// Creating new rows from freeform task outputs is only safe when we know the
+	// source sheet AND the output is row-creation-friendly. Email artifacts, for
+	// example, may update an existing row but should never synthesize a new CRM
+	// record from prose.
+	insertAllowed := sourceSheetID != "" && outputAllowsInsert(output)
+
 	ch := make(chan *SyncResult, len(viewOrder))
 	for _, viewID := range viewOrder {
 		go func(vid string) {
@@ -199,7 +241,7 @@ func (vs *ViewSync) Sync(ctx context.Context, output *types.TaskOutput) *SyncRes
 				}
 				mu := vs.lockFor(output.TaskID, sc.SheetID)
 				mu.Lock()
-				r := vs.syncSchema(viewCtx, output, sc, viewSchemas[vid])
+				r := vs.syncSchema(viewCtx, output, sc, viewSchemas[vid], insertAllowed)
 				mu.Unlock()
 				vr.merge(r)
 			}
@@ -339,7 +381,7 @@ func (vs *ViewSync) SyncToolWrite(ctx context.Context, input ToolWriteInput) *Sy
 		if input.ForceInsert {
 			r = vs.syncSchemaInsertOnly(viewCtx, output, sc, allSchemas)
 		} else {
-			r = vs.syncSchema(viewCtx, output, sc, allSchemas)
+			r = vs.syncSchema(viewCtx, output, sc, allSchemas, true)
 		}
 		mu.Unlock()
 		result.merge(r)
@@ -387,11 +429,13 @@ func (vs *ViewSync) syncSchemaInsertOnly(
 // syncSchema handles resolution and upsert/insert for a single sheet.
 // allSchemas is the full set of schema contexts across the view, used to
 // gather cross-sheet context when inserting into a sheet that has no data yet.
+// insertAllowed controls whether new rows can be created (false = update-only).
 func (vs *ViewSync) syncSchema(
 	ctx context.Context,
 	output *types.TaskOutput,
 	sc types.ViewOutputSchemaContext,
 	allSchemas []types.ViewOutputSchemaContext,
+	insertAllowed bool,
 ) *SyncResult {
 	cols := bamlColumns(sc)
 	keys := sc.ColumnKeys()
@@ -402,9 +446,9 @@ func (vs *ViewSync) syncSchema(
 	ec := vs.store.Embedder()
 
 	if ec != nil && ec.Available() {
-		return vs.syncVectorPath(ctx, output, sc, cols, keys, data, summary, ec, allSchemas, viewCtxStr)
+		return vs.syncVectorPath(ctx, output, sc, cols, keys, data, summary, ec, allSchemas, viewCtxStr, insertAllowed)
 	}
-	return vs.syncFallbackPath(ctx, output, sc, cols, keys, data, summary, viewCtxStr)
+	return vs.syncFallbackPath(ctx, output, sc, cols, keys, data, summary, viewCtxStr, insertAllowed)
 }
 
 // syncVectorPath uses embedding-based resolution: vector search partitioned
@@ -422,6 +466,7 @@ func (vs *ViewSync) syncVectorPath(
 	ec *EmbeddingClient,
 	allSchemas []types.ViewOutputSchemaContext,
 	viewCtxStr string,
+	insertAllowed bool,
 ) *SyncResult {
 	result := &SyncResult{}
 
@@ -440,7 +485,7 @@ func (vs *ViewSync) syncVectorPath(
 	results, err := vs.vectorCandidates(ctx, sc, ec, queries)
 	if err != nil {
 		log.Warn().Err(err).Str("task_id", output.TaskID).Msg("viewsync: search failed, falling back")
-		return vs.syncFallbackPath(ctx, output, sc, cols, keys, data, summary, viewCtxStr)
+		return vs.syncFallbackPath(ctx, output, sc, cols, keys, data, summary, viewCtxStr, insertAllowed)
 	}
 
 	var candidates []ViewRow
@@ -464,6 +509,51 @@ func (vs *ViewSync) syncVectorPath(
 		Int("moderate", moderateCandidates).
 		Msg("viewsync: scored")
 
+	// Text search fallback: when vector search returned no candidates (e.g.
+	// embeddings not yet computed after a large import), try column-level text
+	// search using PlanRowSearch criteria before deciding to insert. Uses
+	// criteria first, then entity hints as a secondary search.
+	if len(candidates) == 0 {
+		candidateByID := make(map[string]ViewRow)
+
+		if len(criteria) > 0 {
+			if textRows, err := vs.store.SearchRows(ctx, sc.ViewID, sc.SheetID, sc.ComponentID, criteria, 20); err == nil {
+				for _, row := range textRows {
+					candidateByID[row.ID] = row
+				}
+			}
+		}
+
+		// Entity hints (e.g. "201 3rd St") searched across identity columns.
+		if len(candidateByID) == 0 {
+			for _, hint := range hints {
+				hint = strings.TrimSpace(hint)
+				if hint == "" || len(hint) < 3 {
+					continue
+				}
+				hintCriteria := hintToSearchCriteria(hint, cols)
+				if len(hintCriteria) > 0 {
+					if hintRows, err := vs.store.SearchRows(ctx, sc.ViewID, sc.SheetID, sc.ComponentID, hintCriteria, 10); err == nil {
+						for _, row := range hintRows {
+							candidateByID[row.ID] = row
+						}
+					}
+				}
+			}
+		}
+
+		if len(candidateByID) > 0 {
+			for _, row := range candidateByID {
+				candidates = append(candidates, row)
+			}
+			log.Debug().
+				Str("task_id", output.TaskID).
+				Str("sheet_id", sc.SheetID).
+				Int("text_hits", len(candidates)).
+				Msg("viewsync: vector empty, text search found candidates")
+		}
+	}
+
 	if len(candidates) > 0 {
 		updated, unmatched := vs.classifyCandidateRows(ctx, output, sc, cols, keys, data, summary, candidates, viewCtxStr)
 		result.Updated = append(result.Updated, updated...)
@@ -473,9 +563,15 @@ func (vs *ViewSync) syncVectorPath(
 		hints = entityHints(&plan, unmatched)
 	}
 
+	if !insertAllowed {
+		log.Debug().
+			Str("task_id", output.TaskID).
+			Str("sheet_id", sc.SheetID).
+			Msg("viewsync: no match found but insert disabled (source sheet unknown)")
+		return result
+	}
+
 	// Path C: no existing rows matched in this sheet -> insert new row(s).
-	// Gather cross-sheet context via vector search so BAML can enrich the
-	// new row with data from related rows in other sheets (e.g. seed data).
 	crossCtx := vs.crossSheetContext(ctx, sc, ec, queries, allSchemas)
 
 	created, err := vs.insertRows(ctx, output, sc, cols, data, summary, &plan, hints, crossCtx, viewCtxStr)
@@ -671,6 +767,7 @@ func (vs *ViewSync) syncFallbackPath(
 	keys []string,
 	data, summary string,
 	viewCtxStr string,
+	insertAllowed bool,
 ) *SyncResult {
 	result := &SyncResult{}
 
@@ -690,6 +787,13 @@ func (vs *ViewSync) syncFallbackPath(
 	}
 
 	if len(candidates) == 0 {
+		if !insertAllowed {
+			log.Debug().
+				Str("task_id", output.TaskID).
+				Str("sheet_id", sc.SheetID).
+				Msg("viewsync: fallback no match, insert disabled")
+			return result
+		}
 		created, err := vs.insertRows(ctx, output, sc, cols, data, summary, &plan, nil, "", viewCtxStr)
 		if err != nil {
 			log.Warn().Err(err).Str("task_id", output.TaskID).Msg("viewsync: insert failed")
@@ -701,7 +805,7 @@ func (vs *ViewSync) syncFallbackPath(
 	updated, unmatched := vs.classifyCandidateRows(ctx, output, sc, cols, keys, data, summary, candidates, viewCtxStr)
 	result.Updated = append(result.Updated, updated...)
 
-	if !result.changed() {
+	if !result.changed() && insertAllowed {
 		created, err := vs.insertRows(ctx, output, sc, cols, data, summary, &plan, unmatched, "", viewCtxStr)
 		if err != nil {
 			log.Warn().Err(err).Str("task_id", output.TaskID).Msg("viewsync: insert failed")

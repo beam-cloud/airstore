@@ -4,11 +4,9 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"html"
 	"io"
 	"mime"
 	"net/url"
-	"regexp"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -520,88 +518,26 @@ func buildRawEmail(to, subject, body, inReplyTo, references string) string {
 		}
 		buf.WriteString("References: " + refs + "\r\n")
 	}
-	buf.WriteString("Content-Type: text/html; charset=UTF-8\r\n")
+	buf.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
 	buf.WriteString("\r\n")
-	buf.WriteString(plainToHTML(body))
+	buf.WriteString(unwrapBody(body))
 	return buf.String()
 }
 
-var urlRe = regexp.MustCompile(`https?://[^\s<>"'` + "`" + `\x00-\x1f]+`)
-var listLineRe = regexp.MustCompile(`^[\-\*•]\s+`)
-var orderedLineRe = regexp.MustCompile(`^\d+[\.\)]\s+`)
-
-const emailHTMLPrefix = `<!DOCTYPE html><html><head><meta charset="UTF-8">` +
-	`<meta name="viewport" content="width=device-width,initial-scale=1.0">` +
-	`</head><body style="margin:0;padding:16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:15px;line-height:1.5;color:#1a1a1a;">`
-const emailHTMLSuffix = `</body></html>`
-
-func plainToHTML(text string) string {
+// unwrapBody collapses hard line wraps within paragraphs so the email client
+// does its own word wrapping. Double newlines (paragraph breaks) are preserved.
+func unwrapBody(text string) string {
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	blocks := strings.Split(text, "\n\n")
-
-	var sb strings.Builder
-	sb.WriteString(emailHTMLPrefix)
-
-	for _, block := range blocks {
-		block = strings.TrimSpace(block)
-		if block == "" {
+	var parts []string
+	for _, b := range blocks {
+		b = strings.TrimSpace(b)
+		if b == "" {
 			continue
 		}
-
-		lines := strings.Split(block, "\n")
-
-		if isListBlock(lines) {
-			sb.WriteString(renderList(lines))
-			continue
-		}
-
-		merged := strings.Join(strings.Fields(block), " ")
-		sb.WriteString(`<p style="margin:0 0 12px 0;">`)
-		sb.WriteString(autoLink(html.EscapeString(merged)))
-		sb.WriteString("</p>")
+		parts = append(parts, strings.Join(strings.Fields(b), " "))
 	}
-
-	sb.WriteString(emailHTMLSuffix)
-	return sb.String()
-}
-
-func isListBlock(lines []string) bool {
-	listLines := 0
-	for _, l := range lines {
-		l = strings.TrimSpace(l)
-		if l == "" {
-			continue
-		}
-		if listLineRe.MatchString(l) || orderedLineRe.MatchString(l) {
-			listLines++
-		}
-	}
-	return listLines >= 2
-}
-
-func renderList(lines []string) string {
-	var sb strings.Builder
-	sb.WriteString(`<ul style="margin:0 0 12px 0;padding-left:24px;">`)
-	for _, l := range lines {
-		l = strings.TrimSpace(l)
-		if l == "" {
-			continue
-		}
-		l = listLineRe.ReplaceAllString(l, "")
-		l = orderedLineRe.ReplaceAllString(l, "")
-		l = strings.TrimSpace(l)
-		sb.WriteString(`<li style="margin-bottom:4px;">`)
-		sb.WriteString(autoLink(html.EscapeString(l)))
-		sb.WriteString("</li>")
-	}
-	sb.WriteString("</ul>")
-	return sb.String()
-}
-
-func autoLink(escaped string) string {
-	return urlRe.ReplaceAllStringFunc(escaped, func(u string) string {
-		return `<a href="` + u + `" style="color:#1a73e8;">` + u + `</a>`
-	})
+	return strings.Join(parts, "\n\n")
 }
 
 func sanitizeHeaderValue(value string) string {
