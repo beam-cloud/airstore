@@ -27,7 +27,6 @@ var slackIntegrationScopes = map[string][]string{
 		"users:read",
 		"users:read.email",
 		"chat:write",
-		"chat:write.public",
 	},
 }
 
