@@ -143,7 +143,7 @@ var integrations = map[IntegrationName]IntegrationMeta{
 			CapabilitySourceRead,
 			CapabilitySourceWrite,
 		},
-		OAuthWriteScopeHint: []string{"chat:write", "chat:write.public"},
+		OAuthWriteScopeHint: []string{"chat:write"},
 	},
 	Linear: {
 		Name:        Linear,
