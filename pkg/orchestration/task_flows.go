@@ -19,7 +19,7 @@ import (
 // ToolExecutor runs a deferred tool call server-side (after user approval)
 // and tracks rejections so the write gate can auto-fail retries.
 type ToolExecutor interface {
-	ExecuteDeferred(ctx context.Context, workspaceID, memberID uint, toolName string, args []string) (stdout, stderr string, exitCode int, err error)
+	ExecuteDeferred(ctx context.Context, req types.DeferredToolExecutionRequest) (stdout, stderr string, exitCode int, err error)
 	RecordToolRejection(ctx context.Context, taskID, tool, command string) error
 	GrantWritePreapproval(ctx context.Context, taskID string) error
 }
@@ -143,9 +143,13 @@ func (f *TaskFlows) maybeExecuteDeferredToolCall(
 		Str("tool", tc.Tool).
 		Msg("executing deferred tool call after approval")
 
-	stdout, stderr, exitCode, execErr := f.toolExecutor.ExecuteDeferred(
-		ctx, tc.WorkspaceID, tc.MemberID, tc.Tool, tc.Args,
-	)
+	stdout, stderr, exitCode, execErr := f.toolExecutor.ExecuteDeferred(ctx, types.DeferredToolExecutionRequest{
+		Task:        task,
+		WorkspaceID: tc.WorkspaceID,
+		MemberID:    tc.MemberID,
+		ToolName:    tc.Tool,
+		Args:        tc.Args,
+	})
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "The user approved your request to %s. The action has ALREADY been executed on the server — do NOT call the same command again.\n\n", summary)

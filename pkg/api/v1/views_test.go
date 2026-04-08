@@ -1,11 +1,17 @@
 package apiv1
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/beam-cloud/airstore/pkg/repository"
 	"github.com/beam-cloud/airstore/pkg/types"
 	"github.com/beam-cloud/airstore/pkg/views"
+	"github.com/labstack/echo/v4"
 )
 
 func TestApplyColumnRenamesToDefinitionUpdatesSchemaHintsAndRelations(t *testing.T) {
@@ -335,12 +341,267 @@ func TestSyntheticEmailThreadsFallsBackWhenNoRealThreadExists(t *testing.T) {
 	}
 
 	got := syntheticEmailThreads(outputs, nil)
-	thread := got["output:out-1"]
+	thread := got["gmail:thread-1"]
 	if len(thread) != 1 {
 		t.Fatalf("expected one synthetic thread message, got %#v", got)
 	}
-	if thread[0].ThreadID != "output:out-1" {
-		t.Fatalf("thread id = %q, want output:out-1", thread[0].ThreadID)
+	if thread[0].ThreadID != "thread-1" {
+		t.Fatalf("thread id = %q, want thread-1", thread[0].ThreadID)
+	}
+}
+
+type mailboxTestBackend struct {
+	repository.BackendRepository
+	workspace *types.Workspace
+	view      *types.View
+	outputs   []*types.TaskOutput
+}
+
+func (b *mailboxTestBackend) GetWorkspaceByExternalId(context.Context, string) (*types.Workspace, error) {
+	return b.workspace, nil
+}
+
+func (b *mailboxTestBackend) GetView(context.Context, uint, string) (*types.View, error) {
+	return b.view, nil
+}
+
+func (b *mailboxTestBackend) GetConnection(context.Context, uint, uint, string) (*types.IntegrationConnection, error) {
+	return nil, errors.New("connection not configured")
+}
+
+func (b *mailboxTestBackend) ListWorkspaceTaskOutputs(_ context.Context, _ uint, filter types.TaskOutputListFilter) ([]*types.TaskOutput, error) {
+	var result []*types.TaskOutput
+	for _, output := range b.outputs {
+		if output == nil {
+			continue
+		}
+		if filter.OutputType != nil && output.OutputType != *filter.OutputType {
+			continue
+		}
+		if filter.SourceViewID != nil && *filter.SourceViewID != "" {
+			result = append(result, output)
+			continue
+		}
+		if len(filter.TaskIDs) > 0 {
+			for _, taskID := range filter.TaskIDs {
+				if output.TaskID == taskID {
+					result = append(result, output)
+					break
+				}
+			}
+		}
+	}
+	return result, nil
+}
+
+func (b *mailboxTestBackend) ListChildTaskIDsByParents(context.Context, []string) (map[string]string, error) {
+	return nil, nil
+}
+
+func mailboxResponseData(t *testing.T, vg *ViewsGroup, backend *mailboxTestBackend) struct {
+	Threads          map[string]mailboxThread `json:"threads"`
+	HasEmailActivity bool                     `json:"has_email_activity"`
+} {
+	t.Helper()
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/workspaces/ws-1/views/view-1/mailbox?integration=all", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("workspace_id", "view_id")
+	c.SetParamValues("ws-1", "view-1")
+
+	if err := vg.Mailbox(c); err != nil {
+		t.Fatalf("Mailbox returned error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want 200", rec.Code)
+	}
+
+	var resp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Threads          map[string]mailboxThread `json:"threads"`
+			HasEmailActivity bool                     `json:"has_email_activity"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode mailbox response: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("expected success response, got %s", rec.Body.String())
+	}
+	return resp.Data
+}
+
+func TestMailboxReturnsProviderQualifiedThreadRefsForDeferredGmailOutput(t *testing.T) {
+	backend := &mailboxTestBackend{
+		workspace: &types.Workspace{Id: 7},
+		view:      &types.View{Definition: types.ViewDefinition{}},
+		outputs: []*types.TaskOutput{{
+			ID:         "out-1",
+			TaskID:     "task-1",
+			OutputType: types.TaskOutputTypeEmail,
+			Status:     types.TaskOutputStatusActive,
+			Data: map[string]any{
+				"thread_id": "thread-123",
+				"to":        "luke@example.com",
+				"subject":   "Beam sandboxes",
+				"status":    "sent",
+			},
+			Metadata: map[string]any{
+				"integration": "gmail",
+				"_tool":       "gmail",
+			},
+		}},
+	}
+	vg := &ViewsGroup{backend: backend}
+
+	data := mailboxResponseData(t, vg, backend)
+
+	if !data.HasEmailActivity {
+		t.Fatal("expected mailbox email activity")
+	}
+	thread, ok := data.Threads["gmail:thread-123"]
+	if !ok {
+		t.Fatalf("expected gmail provider-qualified thread key, got %#v", data.Threads)
+	}
+	if got := thread.Messages[0].ThreadID; got != "thread-123" {
+		t.Fatalf("thread id = %q, want thread-123", got)
+	}
+}
+
+func TestMailboxReturnsProviderQualifiedThreadRefsForDeferredOutlookOutput(t *testing.T) {
+	backend := &mailboxTestBackend{
+		workspace: &types.Workspace{Id: 7},
+		view:      &types.View{Definition: types.ViewDefinition{}},
+		outputs: []*types.TaskOutput{{
+			ID:         "out-1",
+			TaskID:     "task-1",
+			OutputType: types.TaskOutputTypeEmail,
+			Status:     types.TaskOutputStatusActive,
+			Data: map[string]any{
+				"conversation_id": "conv-123",
+				"thread_id":       "conv-123",
+				"to":              "luke@example.com",
+				"subject":         "Beam sandboxes",
+				"status":          "sent",
+			},
+			Metadata: map[string]any{
+				"integration": "outlook",
+				"_tool":       "outlook",
+			},
+		}},
+	}
+	vg := &ViewsGroup{backend: backend}
+
+	data := mailboxResponseData(t, vg, backend)
+
+	if _, ok := data.Threads["outlook:conv-123"]; !ok {
+		t.Fatalf("expected outlook provider-qualified thread key, got %#v", data.Threads)
+	}
+}
+
+func TestMailboxUsesRealDeferredToolOutputAfterApproval(t *testing.T) {
+	backend := &mailboxTestBackend{
+		workspace: &types.Workspace{Id: 7},
+		view:      &types.View{Definition: types.ViewDefinition{}},
+		outputs: []*types.TaskOutput{{
+			ID:         "draft-1",
+			TaskID:     "task-1",
+			OutputType: types.TaskOutputTypeEmail,
+			Status:     types.TaskOutputStatusPending,
+			Data: map[string]any{
+				"to":      "luke@example.com",
+				"subject": "Beam sandboxes",
+				"content": "Draft body",
+			},
+			Metadata: map[string]any{
+				types.TaskOutputMetadataApprovalUI: true,
+			},
+		}},
+	}
+	vg := &ViewsGroup{backend: backend}
+
+	before := mailboxResponseData(t, vg, backend)
+	if before.HasEmailActivity {
+		t.Fatalf("expected no mailbox activity before approval, got %#v", before.Threads)
+	}
+
+	backend.outputs = append(backend.outputs, &types.TaskOutput{
+		ID:         "sent-1",
+		TaskID:     "task-1",
+		OutputType: types.TaskOutputTypeEmail,
+		Status:     types.TaskOutputStatusActive,
+		Data: map[string]any{
+			"thread_id":  "thread-123",
+			"message_id": "msg-123",
+			"to":         "luke@example.com",
+			"subject":    "Beam sandboxes",
+			"status":     "sent",
+		},
+		Metadata: map[string]any{
+			"integration": "gmail",
+			"_tool":       "gmail",
+		},
+	})
+
+	after := mailboxResponseData(t, vg, backend)
+	if !after.HasEmailActivity {
+		t.Fatal("expected mailbox activity after deferred send output persisted")
+	}
+	if _, ok := after.Threads["gmail:thread-123"]; !ok {
+		t.Fatalf("expected persisted provider thread after approval, got %#v", after.Threads)
+	}
+}
+
+func TestMailboxTreatsApprovalDraftAsSecondaryWhenSentOutputExists(t *testing.T) {
+	backend := &mailboxTestBackend{
+		workspace: &types.Workspace{Id: 7},
+		view:      &types.View{Definition: types.ViewDefinition{}},
+		outputs: []*types.TaskOutput{
+			{
+				ID:         "draft-1",
+				TaskID:     "task-1",
+				OutputType: types.TaskOutputTypeEmail,
+				Status:     types.TaskOutputStatusActive,
+				Data: map[string]any{
+					"to":      "luke@example.com",
+					"subject": "Beam sandboxes",
+					"content": "Draft body",
+				},
+				Metadata: map[string]any{
+					types.TaskOutputMetadataApprovalUI: true,
+				},
+			},
+			{
+				ID:         "sent-1",
+				TaskID:     "task-1",
+				OutputType: types.TaskOutputTypeEmail,
+				Status:     types.TaskOutputStatusActive,
+				Data: map[string]any{
+					"thread_id":  "thread-123",
+					"message_id": "msg-123",
+					"to":         "luke@example.com",
+					"subject":    "Beam sandboxes",
+					"status":     "sent",
+				},
+				Metadata: map[string]any{
+					"integration": "gmail",
+					"_tool":       "gmail",
+				},
+			},
+		},
+	}
+	vg := &ViewsGroup{backend: backend}
+
+	data := mailboxResponseData(t, vg, backend)
+
+	if got := len(data.Threads); got != 1 {
+		t.Fatalf("thread count = %d, want 1 with sent output preferred", got)
+	}
+	if _, ok := data.Threads["gmail:thread-123"]; !ok {
+		t.Fatalf("expected gmail provider thread key, got %#v", data.Threads)
 	}
 }
 

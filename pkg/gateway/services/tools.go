@@ -466,7 +466,12 @@ func (s *ToolService) injectSourceViewID(ctx context.Context) context.Context {
 // The context comes from the orchestration layer (not a gRPC handler), so
 // we build the execution context from the stored workspace/member IDs
 // rather than relying on auth middleware.
-func (s *ToolService) ExecuteDeferred(ctx context.Context, workspaceID, memberID uint, toolName string, args []string) (stdout, stderr string, exitCode int, err error) {
+func (s *ToolService) ExecuteDeferred(ctx context.Context, req types.DeferredToolExecutionRequest) (stdout, stderr string, exitCode int, err error) {
+	workspaceID := req.EffectiveWorkspaceID()
+	memberID := req.MemberID
+	toolName := strings.TrimSpace(req.ToolName)
+	args := append([]string(nil), req.Args...)
+
 	// Inject a synthetic AuthInfo so resolver lookups and credential
 	// fetches work — the context comes from orchestration, not a gRPC handler.
 	ctx = auth.WithAuthInfo(ctx, &types.AuthInfo{
@@ -500,7 +505,237 @@ func (s *ToolService) ExecuteDeferred(ctx context.Context, workspaceID, memberID
 	if err != nil {
 		code = 1
 	}
+	if persistErr := s.persistDeferredToolOutput(ctx, req, stdoutBuf.Bytes(), code, err); persistErr != nil {
+		log.Warn().
+			Err(persistErr).
+			Str("tool", toolName).
+			Str("task_id", taskIDOrEmpty(req.Task)).
+			Msg("failed to persist deferred tool output")
+		if stderrBuf.Len() > 0 && !bytes.HasSuffix(stderrBuf.Bytes(), []byte("\n")) {
+			_, _ = stderrBuf.WriteString("\n")
+		}
+		_, _ = stderrBuf.WriteString("Warning: failed to persist task output: " + persistErr.Error())
+	}
 	return stdoutBuf.String(), stderrBuf.String(), code, err
+}
+
+func (s *ToolService) persistDeferredToolOutput(
+	ctx context.Context,
+	req types.DeferredToolExecutionRequest,
+	stdout []byte,
+	exitCode int,
+	execErr error,
+) error {
+	if s == nil || s.backend == nil || execErr != nil || exitCode != 0 || req.Task == nil || len(req.Args) == 0 {
+		return nil
+	}
+
+	command := strings.TrimSpace(req.Args[0])
+	outputType := strings.TrimSpace(s.deferredOutputType(req.ToolName, command))
+	if outputType == "" {
+		return nil
+	}
+
+	payload := bytes.TrimSpace(stdout)
+	if len(payload) == 0 {
+		return nil
+	}
+
+	var decoded any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		return nil
+	}
+
+	output, err := s.buildDeferredTaskOutput(req, command, outputType, decoded)
+	if err != nil || output == nil {
+		return err
+	}
+	return s.backend.CreateTaskOutput(ctx, output)
+}
+
+func (s *ToolService) deferredOutputType(toolName, command string) string {
+	toolName = strings.TrimSpace(toolName)
+	command = strings.TrimSpace(command)
+	if toolName == "" || command == "" {
+		return ""
+	}
+	if s != nil && s.registry != nil {
+		if schema := s.registry.GetCommandSchema(toolName, command); schema != nil {
+			return strings.TrimSpace(schema.OutputType)
+		}
+	}
+	return strings.TrimSpace(tools.CommandOutputType(toolName, command))
+}
+
+func (s *ToolService) buildDeferredTaskOutput(
+	req types.DeferredToolExecutionRequest,
+	command, outputType string,
+	decoded any,
+) (*types.TaskOutput, error) {
+	task := req.Task
+	if task == nil {
+		return nil, nil
+	}
+
+	data, ok := decoded.(map[string]any)
+	if !ok {
+		data = map[string]any{"result": decoded}
+	}
+
+	output := &types.TaskOutput{
+		WorkspaceID: req.EffectiveWorkspaceID(),
+		TaskID:      task.ID,
+		OutputType:  outputType,
+		Data:        cloneJSONMap(data),
+		Metadata: map[string]any{
+			"_tool":       strings.TrimSpace(req.ToolName),
+			"integration": strings.TrimSpace(req.ToolName),
+		},
+		Status: types.TaskOutputStatusActive,
+	}
+	if task.TargetRunID != nil && strings.TrimSpace(*task.TargetRunID) != "" {
+		output.RunID = task.TargetRunID
+	}
+	if task.AgentID != nil && strings.TrimSpace(*task.AgentID) != "" {
+		output.AgentID = task.AgentID
+	}
+
+	if blockerID := strings.TrimSpace(taskBlockerID(task)); blockerID != "" {
+		rawID := fmt.Sprintf("deferred-tool:%s:%s:%s", blockerID, strings.TrimSpace(req.ToolName), command)
+		output.ID = scopedIdempotentTaskOutputID(uint32(output.WorkspaceID), output.TaskID, rawID)
+	}
+
+	switch outputType {
+	case types.TaskOutputTypeEmail:
+		normalizeDeferredEmailData(output.Data, command)
+		output.Title = deferredEmailTitle(output.Data)
+		if summary := deferredEmailSummary(output.Data); summary != "" {
+			output.Summary = &summary
+		}
+		if deeplink := deferredOutputLink(output.Data); deeplink != "" {
+			output.URI = &deeplink
+			output.Metadata["deeplink"] = deeplink
+		}
+	default:
+		output.Title = deferredOutputTitle(outputType, req.ToolName, command)
+	}
+
+	if strings.TrimSpace(output.Title) == "" {
+		output.Title = deferredOutputTitle(outputType, req.ToolName, command)
+	}
+	return output, nil
+}
+
+func cloneJSONMap(src map[string]any) map[string]any {
+	if len(src) == 0 {
+		return map[string]any{}
+	}
+	dst := make(map[string]any, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func normalizeDeferredEmailData(data map[string]any, command string) {
+	if data == nil {
+		return
+	}
+	if threadID := mapString(data, "thread_id"); threadID == "" {
+		if conversationID := mapString(data, "conversation_id"); conversationID != "" {
+			data["thread_id"] = conversationID
+		}
+	}
+	if strings.TrimSpace(mapString(data, "status")) == "" && strings.EqualFold(strings.TrimSpace(command), "send-email") {
+		data["status"] = "sent"
+	}
+	if deeplink := deferredOutputLink(data); deeplink != "" && strings.TrimSpace(mapString(data, "uri")) == "" {
+		data["uri"] = deeplink
+	}
+}
+
+func deferredOutputTitle(outputType, toolName, command string) string {
+	command = strings.TrimSpace(command)
+	switch {
+	case outputType == "":
+		return "Tool output"
+	case command == "":
+		return strings.Title(strings.TrimSpace(outputType))
+	default:
+		return fmt.Sprintf("%s: %s %s", strings.Title(strings.TrimSpace(outputType)), strings.TrimSpace(toolName), command)
+	}
+}
+
+func deferredEmailTitle(data map[string]any) string {
+	status := strings.ToLower(strings.TrimSpace(mapString(data, "status")))
+	subject := strings.TrimSpace(mapString(data, "subject"))
+
+	prefix := "Email"
+	switch status {
+	case "draft":
+		prefix = "Draft"
+	case "sent":
+		prefix = "Sent"
+	}
+
+	if subject != "" {
+		return prefix + ": " + subject
+	}
+	if prefix == "Email" {
+		return "Email"
+	}
+	return prefix + " email"
+}
+
+func deferredEmailSummary(data map[string]any) string {
+	status := strings.ToLower(strings.TrimSpace(mapString(data, "status")))
+	recipient := strings.TrimSpace(mapString(data, "to", "recipient", "recipient_email"))
+	switch status {
+	case "draft":
+		if recipient != "" {
+			return fmt.Sprintf("Draft email for %s.", recipient)
+		}
+		return "Draft email."
+	default:
+		if recipient != "" {
+			return fmt.Sprintf("Sent email to %s.", recipient)
+		}
+		return "Sent email."
+	}
+}
+
+func deferredOutputLink(data map[string]any) string {
+	return strings.TrimSpace(mapString(data, "uri", "url", "email_link"))
+}
+
+func mapString(data map[string]any, keys ...string) string {
+	for _, key := range keys {
+		raw, ok := data[key]
+		if !ok {
+			continue
+		}
+		switch value := raw.(type) {
+		case string:
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
+}
+
+func taskBlockerID(task *types.AgentTask) string {
+	if task == nil || task.CurrentBlockerID == nil {
+		return ""
+	}
+	return strings.TrimSpace(*task.CurrentBlockerID)
+}
+
+func taskIDOrEmpty(task *types.AgentTask) string {
+	if task == nil {
+		return ""
+	}
+	return strings.TrimSpace(task.ID)
 }
 
 const toolRejectionTTL = 10 * time.Minute
