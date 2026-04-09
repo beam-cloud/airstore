@@ -1149,6 +1149,8 @@ func (s *SourceService) inferQuerySpec(ctx context.Context, integration, name, g
 		result, err = baml.InferGitHubQuery(ctx, name, guidancePtr)
 	case types.SourceSlack:
 		result, err = baml.InferSlackQuery(ctx, name, guidancePtr)
+	case types.SourceTeams:
+		result, err = baml.InferTeamsQuery(ctx, name, guidancePtr)
 	case types.SourceLinear:
 		result, err = baml.InferLinearQuery(ctx, name, guidancePtr)
 	case types.SourcePostHog:
@@ -1329,6 +1331,7 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 		NotionQuery        string   `json:"notion_query"`
 		GitHubQuery        string   `json:"github_query"`
 		SlackQuery         string   `json:"slack_query"`
+		TeamsQuery         string   `json:"teams_query"`
 		LinearQuery        string   `json:"linear_query"`
 		PostHogQuery       string   `json:"posthog_query"`
 		ConfluenceQuery    string   `json:"cql_query"`
@@ -1377,6 +1380,8 @@ func parseQuerySpec(integration, querySpec string) sources.QuerySpec {
 		query = spec.GitHubQuery
 	case types.SourceSlack:
 		query = spec.SlackQuery
+	case types.SourceTeams:
+		query = spec.TeamsQuery
 	case types.SourceLinear:
 		query = spec.LinearQuery
 	case types.SourcePostHog:

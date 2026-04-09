@@ -584,6 +584,60 @@ func (c SlackQueryResult) BamlTypeName() string {
 	return "SlackQueryResult"
 }
 
+type TeamsQueryResult struct {
+	Teams_query     string `json:"teams_query"`
+	Limit           int64  `json:"limit"`
+	Filename_format string `json:"filename_format"`
+}
+
+func (c *TeamsQueryResult) Decode(holder *cffi.CFFIValueClass, typeMap baml.TypeMap) {
+	typeName := holder.Name
+	if typeName.Namespace != cffi.CFFITypeNamespace_TYPES {
+		panic(fmt.Sprintf("expected cffi.CFFITypeNamespace_TYPES, got %s", string(typeName.Namespace.String())))
+	}
+	if typeName.Name != "TeamsQueryResult" {
+		panic(fmt.Sprintf("expected TeamsQueryResult, got %s", typeName.Name))
+	}
+
+	for _, field := range holder.Fields {
+		key := field.Key
+		valueHolder := field.Value
+		switch key {
+
+		case "teams_query":
+			c.Teams_query = baml.Decode(valueHolder).Interface().(string)
+
+		case "limit":
+			c.Limit = baml.Decode(valueHolder).Int()
+
+		case "filename_format":
+			c.Filename_format = baml.Decode(valueHolder).Interface().(string)
+
+		default:
+
+			panic(fmt.Sprintf("unexpected field: %s in class TeamsQueryResult", key))
+
+		}
+	}
+
+}
+
+func (c TeamsQueryResult) Encode() (*cffi.HostValue, error) {
+	fields := map[string]any{}
+
+	fields["teams_query"] = c.Teams_query
+
+	fields["limit"] = c.Limit
+
+	fields["filename_format"] = c.Filename_format
+
+	return baml.EncodeClass("TeamsQueryResult", fields, nil)
+}
+
+func (c TeamsQueryResult) BamlTypeName() string {
+	return "TeamsQueryResult"
+}
+
 type WebQueryResult struct {
 	Web_mode        string   `json:"web_mode"`
 	Web_query       string   `json:"web_query"`

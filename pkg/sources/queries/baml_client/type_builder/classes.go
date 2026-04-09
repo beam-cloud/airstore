@@ -431,6 +431,46 @@ func (t *SlackQueryResultClassView) Type() (baml.Type, error) {
 	return t.inner.Type()
 }
 
+type TeamsQueryResultClassView struct {
+	inner baml.ClassBuilder
+}
+
+func (t *TeamsQueryResultClassView) ListProperties() ([]ClassPropertyView, error) {
+	result, err := t.inner.ListProperties()
+	if err != nil {
+		return nil, err
+	}
+	builders := make([]ClassPropertyView, len(result))
+	for i, p := range result {
+		builders[i] = p
+	}
+	return builders, nil
+}
+
+func (t *TeamsQueryResultClassView) PropertyTeams_query() (ClassPropertyView, error) {
+	return t.inner.Property("teams_query")
+}
+
+func (t *TeamsQueryResultClassView) PropertyLimit() (ClassPropertyView, error) {
+	return t.inner.Property("limit")
+}
+
+func (t *TeamsQueryResultClassView) PropertyFilename_format() (ClassPropertyView, error) {
+	return t.inner.Property("filename_format")
+}
+
+func (t *TypeBuilder) TeamsQueryResult() (*TeamsQueryResultClassView, error) {
+	bld, err := t.inner.Class("TeamsQueryResult")
+	if err != nil {
+		return nil, err
+	}
+	return &TeamsQueryResultClassView{inner: bld}, nil
+}
+
+func (t *TeamsQueryResultClassView) Type() (baml.Type, error) {
+	return t.inner.Type()
+}
+
 type WebQueryResultClassView struct {
 	inner baml.ClassBuilder
 }

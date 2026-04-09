@@ -26,6 +26,16 @@ var microsoftIntegrationScopes = map[string][]string{
 		"https://graph.microsoft.com/User.Read",
 		"offline_access",
 	},
+	"teams": {
+		"https://graph.microsoft.com/Team.ReadBasic.All",
+		"https://graph.microsoft.com/Channel.ReadBasic.All",
+		"https://graph.microsoft.com/ChannelMessage.Read.All",
+		"https://graph.microsoft.com/Chat.Read",
+		"https://graph.microsoft.com/ChannelMessage.Send",
+		"https://graph.microsoft.com/Chat.ReadWrite",
+		"https://graph.microsoft.com/User.Read",
+		"offline_access",
+	},
 }
 
 // MicrosoftProvider handles Microsoft OAuth 2.0 operations.

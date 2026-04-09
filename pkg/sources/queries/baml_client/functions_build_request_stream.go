@@ -438,6 +438,52 @@ func (*build_request_stream) InferSlackQuery(name string, guidance *string, opts
 	return bamlRuntime.BuildRequest(context.Background(), "InferSlackQuery", encoded)
 }
 
+// Build streaming HTTP request for InferTeamsQuery (returns baml.HTTPRequest)
+func (*build_request_stream) InferTeamsQuery(name string, guidance *string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
+
+	var callOpts callOption
+	for _, opt := range opts {
+		opt(&callOpts)
+	}
+
+	// Resolve client option to clientRegistry (client takes precedence)
+	if callOpts.client != nil {
+		if callOpts.clientRegistry == nil {
+			callOpts.clientRegistry = baml.NewClientRegistry()
+		}
+		callOpts.clientRegistry.SetPrimaryClient(*callOpts.client)
+	}
+
+	args := baml.BamlFunctionArguments{
+		Kwargs: map[string]any{"name": name, "guidance": guidance, "stream": true},
+		Env:    getEnvVars(callOpts.env),
+	}
+
+	if callOpts.clientRegistry != nil {
+		args.ClientRegistry = callOpts.clientRegistry
+	}
+
+	if callOpts.collectors != nil {
+		args.Collectors = callOpts.collectors
+	}
+
+	if callOpts.typeBuilder != nil {
+		args.TypeBuilder = callOpts.typeBuilder
+	}
+
+	if callOpts.tags != nil {
+		args.Tags = callOpts.tags
+	}
+
+	encoded, err := args.Encode()
+	if err != nil {
+		wrapped_err := fmt.Errorf("BAML INTERNAL ERROR: InferTeamsQuery: %w", err)
+		panic(wrapped_err)
+	}
+
+	return bamlRuntime.BuildRequest(context.Background(), "InferTeamsQuery", encoded)
+}
+
 // Build streaming HTTP request for InferWebQuery (returns baml.HTTPRequest)
 func (*build_request_stream) InferWebQuery(name string, guidance *string, opts ...CallOptionFunc) (baml.HTTPRequest, error) {
 

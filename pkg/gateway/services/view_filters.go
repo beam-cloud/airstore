@@ -60,6 +60,14 @@ type SlackFilter struct {
 	HasReaction *bool  `json:"has_reaction"`
 }
 
+type TeamsFilter struct {
+	Team    string `json:"team"`
+	Channel string `json:"channel"`
+	From    string `json:"from"`
+	After   string `json:"after"`
+	Before  string `json:"before"`
+}
+
 type LinearFilter struct {
 	Type     string `json:"type"`
 	Team     string `json:"team"`
@@ -109,6 +117,8 @@ func buildQuerySpecFromFilter(integration string, filter json.RawMessage, limit 
 		return buildNotionFilter(filter, limit)
 	case types.SourceSlack:
 		return buildSlackFilter(filter, limit)
+	case types.SourceTeams:
+		return buildTeamsFilter(filter, limit)
 	case types.SourceLinear:
 		return buildLinearFilter(filter, limit)
 	case types.SourcePostHog:
@@ -294,6 +304,29 @@ func buildSlackFilter(raw json.RawMessage, limit int) (string, error) {
 		parts = append(parts, "has:reaction")
 	}
 	return marshalSpec(newSpec("slack", strings.Join(parts, " "), limit))
+}
+
+func buildTeamsFilter(raw json.RawMessage, limit int) (string, error) {
+	var f TeamsFilter
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return "", err
+	}
+	var parts []string
+	if f.Team != "" && f.Channel != "" {
+		parts = append(parts, "in:"+f.Team+"/"+f.Channel)
+	} else if f.Team != "" {
+		parts = append(parts, "in:"+f.Team)
+	}
+	if f.From != "" {
+		parts = append(parts, "from:"+f.From)
+	}
+	if f.After != "" {
+		parts = append(parts, "sent:>"+f.After)
+	}
+	if f.Before != "" {
+		parts = append(parts, "sent:<"+f.Before)
+	}
+	return marshalSpec(newSpec("teams", strings.Join(parts, " "), limit))
 }
 
 func buildLinearFilter(raw json.RawMessage, limit int) (string, error) {
