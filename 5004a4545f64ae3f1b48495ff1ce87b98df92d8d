@@ -1,0 +1,96 @@
+pkg/sources/providers/teams.go
+  8a216f042a4c54f6 349,351,357
+  e7130186ecb079b8 694-695,697-698,701-720,723-732,735-738,740-743,746
+pkg/gateway/services/view_filters.go
+  e7130186ecb079b8 316,318
+pkg/tools/clients/teams.go
+  dd1d7418d0a1399e 79-81,84-86,89-90,92-99,102-121
+pkg/sources/providers/teams_test.go
+  8a216f042a4c54f6 60-62,70,75-76,84,124,182
+  e7130186ecb079b8 290-304
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.6",
+  "base_commit_sha": "5004a4545f64ae3f1b48495ff1ce87b98df92d8d",
+  "prompts": {
+    "6e4e3e362401fa91": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019d6e37-21a7-7450-ab67-ace779e44315",
+        "model": "gpt-5.4"
+      },
+      "human_author": "Cooper",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    },
+    "7f781b1fa068ebc3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019d7489-f40d-79b3-ac24-e187c16c9787",
+        "model": "unknown"
+      },
+      "human_author": "Cooper",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "8a216f042a4c54f6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2f00cd15-7077-48a0-90fd-c141daa868da",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Cooper",
+      "messages": [],
+      "total_additions": 12,
+      "total_deletions": 12,
+      "accepted_lines": 12,
+      "overriden_lines": 0
+    },
+    "c98959dd3de0b8bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8ed32444-64af-4312-b790-7e0adfe153ea",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Cooper",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    },
+    "dd1d7418d0a1399e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f33adb3f-daaa-4aa6-b6c4-c80bee3a071a",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Cooper",
+      "messages": [],
+      "total_additions": 36,
+      "total_deletions": 37,
+      "accepted_lines": 36,
+      "overriden_lines": 0
+    },
+    "e7130186ecb079b8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "654863d0-0475-452b-899c-0f5c8e1fe9d0",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Cooper",
+      "messages": [],
+      "total_additions": 68,
+      "total_deletions": 24,
+      "accepted_lines": 62,
+      "overriden_lines": 0
+    }
+  }
+}
