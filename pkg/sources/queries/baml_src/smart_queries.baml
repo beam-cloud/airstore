@@ -35,6 +35,12 @@ class SlackQueryResult {
   filename_format string @description("Template for result filenames. Use {id}, {channel}, {user}, {date}, {text}. Example: {date}_{channel}_{user}_{id}.txt")
 }
 
+class TeamsQueryResult {
+  teams_query string @description("Microsoft Teams search query using KQL syntax")
+  limit int @description("Max results to return (default: 50)")
+  filename_format string @description("Template for result filenames. Use {id}, {team}, {channel}, {user}, {date}, {text}. Example: {date}_{team}_{channel}_{user}_{id}.txt")
+}
+
 class LinearQueryResult {
   linear_query string @description("Linear issue filter query using Linear's filter syntax")
   search_type string @description("Type of search: 'issues' or 'projects'. Default: 'issues'")
@@ -441,6 +447,64 @@ function InferSlackQuery(name: string, guidance: string?) -> SlackQueryResult {
     Additional guidance from user: {{ guidance }}
     {% endif %}
     
+    {{ ctx.output_format }}
+  "#
+}
+
+// -----------------------------------------------------------------------------
+// Teams Query Inference
+// -----------------------------------------------------------------------------
+
+function InferTeamsQuery(name: string, guidance: string?) -> TeamsQueryResult {
+  client AnthropicClient
+  prompt #"
+    Convert a folder/file name into a Microsoft Teams message search query.
+
+    Teams search uses KQL (Keyword Query Language) syntax via Microsoft Graph.
+    The query should find relevant messages across teams and channels.
+
+    TEAMS SEARCH PATTERNS:
+    - in:TeamName/ChannelName - messages in a specific channel
+    - from:username - messages from a specific user
+    - Plain text keywords for content search
+    - sent:>YYYY-MM-DD - messages after a date
+    - sent:<YYYY-MM-DD - messages before a date
+
+    QUERY STRATEGY:
+    1. For channel-specific queries → use in:team/channel
+    2. For user-specific queries → use from:user
+    3. For topic searches → use keywords directly
+    4. For time-based queries → use sent:> and sent:<
+    5. Combine with spaces (implicit AND) or OR
+
+    DEFAULTS:
+    - limit: 50
+    - filename_format: {date}_{team}_{channel}_{user}_{id}.txt
+
+    Query examples:
+    - "engineering-updates" → in:Engineering/General OR engineering updates
+    - "team-announcements" → announcement OR "important update"
+    - "from-manager" → from:manager
+    - "design-feedback" → design feedback OR design review
+    - "standup-notes" → standup OR "daily standup" OR scrum
+    - "recent-links" → http OR https sent:>2026-01-01
+    - "action-items" → "action item" OR TODO OR "follow up"
+    - "customer-issues" → customer issue OR bug OR complaint
+    - "onboarding" → onboarding OR "new hire" OR welcome
+    - "decisions" → decision OR decided OR "we will" OR approved
+
+    Filename format: Choose a format that makes sense for the query intent.
+    Available placeholders: {id}, {team}, {channel}, {user}, {date}, {text}
+    - For channel messages: {date}_{team}_{channel}_{user}_{id}.txt
+    - For user messages: {date}_{user}_{team}_{channel}_{id}.txt
+    - Default: {date}_{team}_{channel}_{user}_{id}.txt
+
+    Folder/file name: {{ name }}
+    {% if guidance %}
+
+    Additional guidance from user: {{ guidance }}
+    {% endif %}
+
     {{ ctx.output_format }}
   "#
 }
@@ -889,6 +953,30 @@ test TestSlackStandups {
 
 test TestSlackDecisions {
   functions [InferSlackQuery]
+  args {
+    name "team-decisions"
+    guidance "important decisions made by the team"
+  }
+}
+
+test TestTeamsEngineering {
+  functions [InferTeamsQuery]
+  args {
+    name "engineering-updates"
+    guidance null
+  }
+}
+
+test TestTeamsStandups {
+  functions [InferTeamsQuery]
+  args {
+    name "standup-notes"
+    guidance null
+  }
+}
+
+test TestTeamsDecisions {
+  functions [InferTeamsQuery]
   args {
     name "team-decisions"
     guidance "important decisions made by the team"

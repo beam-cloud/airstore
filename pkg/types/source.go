@@ -9,6 +9,7 @@ const (
 	SourceNotion  SourceType = "notion"
 	SourceGDrive  SourceType = "gdrive"
 	SourceSlack   SourceType = "slack"
+	SourceTeams      SourceType = "teams"
 	SourceLinear  SourceType = "linear"
 	SourcePostHog    SourceType = "posthog"
 	SourceConfluence SourceType = "confluence"

@@ -1,0 +1,26 @@
+name: teams
+description: Post messages to Microsoft Teams channels
+icon: messages-square
+
+commands:
+  post-message:
+    write: true
+    description: Post a message to a Teams channel
+    params:
+      - name: team
+        type: string
+        required: true
+        position: 0
+        description: "Team name or ID"
+
+      - name: channel
+        type: string
+        required: true
+        position: 1
+        description: "Channel name or ID"
+
+      - name: text
+        type: string
+        required: true
+        position: 2
+        description: "Message text"

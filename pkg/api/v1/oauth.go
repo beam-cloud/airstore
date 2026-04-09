@@ -20,7 +20,6 @@ const (
 	errMsgSessionInvalid = "Invalid or expired OAuth session. This usually means the callback URL doesn't match the server that created the session (e.g. session created on localhost but callback went to production)."
 	errMsgProviderConfig = "This OAuth provider is not configured on the server. Check that the provider credentials are set in the gateway config."
 	errMsgNoAuthCode     = "The OAuth provider did not return an authorization code. This can happen if you denied the request or the provider encountered an error."
-	errMsgTokenExchange  = "Failed to exchange the authorization code for access tokens. The provider may have rejected the request — check that the OAuth client ID and secret are correct."
 	errMsgSaveConnection = "OAuth succeeded but we couldn't save the connection to the database. Please try again."
 )
 
@@ -61,6 +60,10 @@ type CreateSessionRequest struct {
 type CreateSessionResponse struct {
 	SessionID    string `json:"session_id"`
 	AuthorizeURL string `json:"authorize_url"`
+}
+
+type userFacingOAuthErrorClassifier interface {
+	UserFacingError(integrationType, raw string) string
 }
 
 // CreateSession creates a new OAuth session and returns the authorization URL.
@@ -182,6 +185,7 @@ func (og *OAuthGroup) Callback(c echo.Context) error {
 	state := c.QueryParam("state")
 	code := c.QueryParam("code")
 	errParam := c.QueryParam("error")
+	errDescription := c.QueryParam("error_description")
 
 	session, err := og.store.GetByState(state)
 	if err != nil {
@@ -210,8 +214,19 @@ func (og *OAuthGroup) Callback(c echo.Context) error {
 	}
 
 	if errParam != "" {
-		og.store.Fail(session.ID, provider.Name()+": "+errParam)
-		return returnToOrError(fmt.Sprintf("%s authorization failed: %s", provider.Name(), errParam))
+		rawError := fmt.Sprintf("%s: %s", provider.Name(), errParam)
+		if errDescription != "" {
+			rawError = rawError + ": " + errDescription
+		}
+		userFacingError := classifyOAuthError(provider, session.IntegrationType, rawError)
+		og.store.Fail(session.ID, userFacingError)
+		log.Warn().
+			Str("session_id", session.ID).
+			Str("provider", provider.Name()).
+			Str("integration", session.IntegrationType).
+			Str("raw_error", rawError).
+			Msg("oauth authorization failed")
+		return returnToOrError(userFacingError)
 	}
 
 	if code == "" {
@@ -221,9 +236,10 @@ func (og *OAuthGroup) Callback(c echo.Context) error {
 
 	creds, err := provider.Exchange(c.Request().Context(), code, session.IntegrationType)
 	if err != nil {
-		og.store.Fail(session.ID, err.Error())
+		userFacingError := classifyOAuthError(provider, session.IntegrationType, err.Error())
+		og.store.Fail(session.ID, userFacingError)
 		log.Error().Err(err).Str("session_id", session.ID).Str("provider", provider.Name()).Msg("oauth token exchange failed")
-		return returnToOrError(errMsgTokenExchange)
+		return returnToOrError(userFacingError)
 	}
 	var scopes []string
 	if creds != nil && creds.Extra != nil {
@@ -271,4 +287,19 @@ func (og *OAuthGroup) Callback(c echo.Context) error {
 	}
 
 	return renderSuccessPage(c, session.IntegrationType)
+}
+
+func classifyOAuthError(provider oauth.Provider, integrationType, raw string) string {
+	if raw == "" {
+		return raw
+	}
+	classifier, ok := provider.(userFacingOAuthErrorClassifier)
+	if !ok {
+		return raw
+	}
+	userFacing := strings.TrimSpace(classifier.UserFacingError(integrationType, raw))
+	if userFacing == "" {
+		return raw
+	}
+	return userFacing
 }
