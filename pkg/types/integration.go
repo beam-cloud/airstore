@@ -191,7 +191,7 @@ var integrations = map[IntegrationName]IntegrationMeta{
 			CapabilitySourceRead,
 			CapabilitySourceWrite,
 		},
-		OAuthWriteScopeHint: []string{"ChannelMessage.Send", "Chat.ReadWrite"},
+		OAuthWriteScopeHint: []string{"https://graph.microsoft.com/ChannelMessage.Send", "https://graph.microsoft.com/Chat.ReadWrite"},
 	},
 	Outlook: {
 		Name:        Outlook,

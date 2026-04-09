@@ -19,6 +19,17 @@ var microsoftEndpoint = oauth2.Endpoint{
 	TokenURL: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
 }
 
+var microsoftTeamsScopes = []string{
+	"https://graph.microsoft.com/Team.ReadBasic.All",
+	"https://graph.microsoft.com/Channel.ReadBasic.All",
+	"https://graph.microsoft.com/ChannelMessage.Read.All",
+	"https://graph.microsoft.com/Chat.Read",
+	"https://graph.microsoft.com/ChannelMessage.Send",
+	"https://graph.microsoft.com/Chat.ReadWrite",
+	"https://graph.microsoft.com/User.Read",
+	"offline_access",
+}
+
 var microsoftIntegrationScopes = map[string][]string{
 	"outlook": {
 		"https://graph.microsoft.com/Mail.ReadWrite",
@@ -26,17 +37,10 @@ var microsoftIntegrationScopes = map[string][]string{
 		"https://graph.microsoft.com/User.Read",
 		"offline_access",
 	},
-	"teams": {
-		"https://graph.microsoft.com/Team.ReadBasic.All",
-		"https://graph.microsoft.com/Channel.ReadBasic.All",
-		"https://graph.microsoft.com/ChannelMessage.Read.All",
-		"https://graph.microsoft.com/Chat.Read",
-		"https://graph.microsoft.com/ChannelMessage.Send",
-		"https://graph.microsoft.com/Chat.ReadWrite",
-		"https://graph.microsoft.com/User.Read",
-		"offline_access",
-	},
+	"teams": microsoftTeamsScopes,
 }
+
+const teamsAdminConsentMessage = "Teams requires tenant admin consent for one or more requested Microsoft permissions. After an admin grants consent, reconnect the Teams integration. If this workspace was already connected before the permission change, disconnect it first."
 
 // MicrosoftProvider handles Microsoft OAuth 2.0 operations.
 type MicrosoftProvider struct {
@@ -74,9 +78,9 @@ func (m *MicrosoftProvider) Integrations() []string {
 }
 
 func (m *MicrosoftProvider) AuthorizeURL(state, integrationType string) (string, error) {
-	scopes, ok := microsoftIntegrationScopes[integrationType]
-	if !ok {
-		return "", fmt.Errorf("unsupported integration: %s", integrationType)
+	scopes, err := microsoftScopesForIntegration(integrationType)
+	if err != nil {
+		return "", err
 	}
 
 	cfg := m.oauthConfig(scopes)
@@ -88,9 +92,9 @@ func (m *MicrosoftProvider) AuthorizeURL(state, integrationType string) (string,
 }
 
 func (m *MicrosoftProvider) Exchange(ctx context.Context, code, integrationType string) (*types.IntegrationCredentials, error) {
-	scopes, ok := microsoftIntegrationScopes[integrationType]
-	if !ok {
-		return nil, fmt.Errorf("unsupported integration: %s", integrationType)
+	scopes, err := microsoftScopesForIntegration(integrationType)
+	if err != nil {
+		return nil, err
 	}
 
 	cfg := m.oauthConfig(scopes)
@@ -184,4 +188,31 @@ func (m *MicrosoftProvider) oauthConfig(scopes []string) *oauth2.Config {
 		Scopes:       scopes,
 		Endpoint:     microsoftEndpoint,
 	}
+}
+
+func (m *MicrosoftProvider) UserFacingError(integrationType, raw string) string {
+	if !microsoftConsentErrorRequiresAdminConsent(integrationType, raw) {
+		return raw
+	}
+	return teamsAdminConsentMessage
+}
+
+func microsoftScopesForIntegration(integrationType string) ([]string, error) {
+	scopes, ok := microsoftIntegrationScopes[integrationType]
+	if !ok {
+		return nil, fmt.Errorf("unsupported integration: %s", integrationType)
+	}
+	return append([]string(nil), scopes...), nil
+}
+
+func microsoftConsentErrorRequiresAdminConsent(integrationType, raw string) bool {
+	if integrationType != "teams" {
+		return false
+	}
+	lower := strings.ToLower(raw)
+	return strings.Contains(lower, "aadsts65001") ||
+		strings.Contains(lower, "consent_required") ||
+		strings.Contains(lower, "need admin approval") ||
+		strings.Contains(lower, "admin consent") ||
+		strings.Contains(lower, "has not consented")
 }
