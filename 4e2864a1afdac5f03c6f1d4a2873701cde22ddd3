@@ -1,0 +1,69 @@
+pkg/gateway/services/sources_queries.go
+  375ba9d004370652 1152-1153,1334,1383-1384
+pkg/sources/provider.go
+  375ba9d004370652 114-115
+pkg/sources/providers/teams.go
+  375ba9d004370652 1-796
+pkg/tools/clients/teams.go
+  375ba9d004370652 1-123
+pkg/types/source.go
+  375ba9d004370652 12
+pkg/sources/queries/baml_src/smart_queries.baml
+  375ba9d004370652 38-43,455-511,962-985
+pkg/sources/providers/teams_test.go
+  375ba9d004370652 1-305
+pkg/gateway/services/view_filters.go
+  375ba9d004370652 63-70,120-121,309-331
+pkg/gateway/gateway.go
+  375ba9d004370652 976,1014
+pkg/oauth/microsoft.go
+  375ba9d004370652 29-38
+pkg/tools/definitions/teams.yaml
+  375ba9d004370652 1-26
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.6",
+  "base_commit_sha": "4e2864a1afdac5f03c6f1d4a2873701cde22ddd3",
+  "prompts": {
+    "375ba9d004370652": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4bc8d139-6b9e-4e6c-8a76-4667671a6b04",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Cooper",
+      "messages": [],
+      "total_additions": 1395,
+      "total_deletions": 4,
+      "accepted_lines": 1391,
+      "overriden_lines": 0
+    },
+    "6e4e3e362401fa91": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019d6e37-21a7-7450-ab67-ace779e44315",
+        "model": "gpt-5.4"
+      },
+      "human_author": "Cooper",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    },
+    "c98959dd3de0b8bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8ed32444-64af-4312-b790-7e0adfe153ea",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Cooper",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    }
+  }
+}
