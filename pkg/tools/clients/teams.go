@@ -76,48 +76,47 @@ func (t *TeamsClient) postMessage(ctx context.Context, token, team, channel, tex
 }
 
 func (t *TeamsClient) resolveIDs(ctx context.Context, token, teamName, channelName string) (string, string, error) {
-	// List joined teams
-	var teamsResult struct {
-		Value []struct {
-			ID          string `json:"id"`
-			DisplayName string `json:"displayName"`
-		} `json:"value"`
-	}
-	if err := t.api.RequestJSON(ctx, token, "GET", "/me/joinedTeams", nil, &teamsResult); err != nil {
-		return "", "", fmt.Errorf("list teams: %w", err)
+	teamID, err := t.findByName(ctx, token, "/me/joinedTeams", teamName)
+	if err != nil {
+		return "", "", fmt.Errorf("team %w", err)
 	}
 
-	var teamID string
-	for _, tm := range teamsResult.Value {
-		if equalFoldTeams(tm.DisplayName, teamName) || tm.ID == teamName {
-			teamID = tm.ID
-			break
-		}
-	}
-	if teamID == "" {
-		return "", "", fmt.Errorf("team not found: %s", teamName)
+	channelID, err := t.findByName(ctx, token, fmt.Sprintf("/teams/%s/channels", teamID), channelName)
+	if err != nil {
+		return "", "", fmt.Errorf("channel %w", err)
 	}
 
-	// List channels in team
-	var channelsResult struct {
-		Value []struct {
-			ID          string `json:"id"`
-			DisplayName string `json:"displayName"`
-		} `json:"value"`
-	}
-	path := fmt.Sprintf("/teams/%s/channels", teamID)
-	if err := t.api.RequestJSON(ctx, token, "GET", path, nil, &channelsResult); err != nil {
-		return "", "", fmt.Errorf("list channels: %w", err)
-	}
-
-	for _, ch := range channelsResult.Value {
-		if equalFoldTeams(ch.DisplayName, channelName) || ch.ID == channelName {
-			return teamID, ch.ID, nil
-		}
-	}
-	return "", "", fmt.Errorf("channel not found: %s in team %s", channelName, teamName)
+	return teamID, channelID, nil
 }
 
-func equalFoldTeams(a, b string) bool {
-	return strings.EqualFold(a, b)
+type graphListEntry struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"displayName"`
+}
+
+type graphListPage struct {
+	Value    []graphListEntry `json:"value"`
+	NextLink string           `json:"@odata.nextLink"`
+}
+
+// findByName pages through a Graph API list endpoint until it finds an entry
+// matching name (case-insensitive) or ID, or exhausts all pages.
+func (t *TeamsClient) findByName(ctx context.Context, token, path, name string) (string, error) {
+	const maxPages = 10
+	for i := 0; i < maxPages; i++ {
+		var page graphListPage
+		if err := t.api.RequestJSON(ctx, token, "GET", path, nil, &page); err != nil {
+			return "", err
+		}
+		for _, entry := range page.Value {
+			if strings.EqualFold(entry.DisplayName, name) || entry.ID == name {
+				return entry.ID, nil
+			}
+		}
+		if page.NextLink == "" {
+			break
+		}
+		path = page.NextLink
+	}
+	return "", fmt.Errorf("not found: %s", name)
 }

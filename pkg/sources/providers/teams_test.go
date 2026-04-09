@@ -57,9 +57,9 @@ func newTeamsProviderWithMockAPI(t *testing.T, handler func(method, path string)
 }
 
 func TestTeamsResultIDRoundTrip(t *testing.T) {
-	// 3-part: top-level message
-	id := buildTeamsResultID("msg-123", "team-abc", "channel-def", "")
-	if id != "msg-123:team-abc:channel-def" {
+	// 3-part: top-level message (channel ID contains colons, like real MS Teams)
+	id := buildTeamsResultID("1616990032035", "a8274cb0-e3a1-4d5f-b8c2-abc123def456", "19:abc123@thread.tacv2", "")
+	if id != "1616990032035||a8274cb0-e3a1-4d5f-b8c2-abc123def456||19:abc123@thread.tacv2" {
 		t.Fatalf("unexpected 3-part id: %q", id)
 	}
 
@@ -67,13 +67,13 @@ func TestTeamsResultIDRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse failed: %v", err)
 	}
-	if messageID != "msg-123" || teamID != "team-abc" || channelID != "channel-def" || replyToID != "" {
+	if messageID != "1616990032035" || teamID != "a8274cb0-e3a1-4d5f-b8c2-abc123def456" || channelID != "19:abc123@thread.tacv2" || replyToID != "" {
 		t.Fatalf("unexpected parse result: msg=%q team=%q channel=%q reply=%q", messageID, teamID, channelID, replyToID)
 	}
 
 	// 4-part: reply
-	id4 := buildTeamsResultID("reply-456", "team-abc", "channel-def", "msg-123")
-	if id4 != "reply-456:team-abc:channel-def:msg-123" {
+	id4 := buildTeamsResultID("1616990099000", "a8274cb0-e3a1-4d5f-b8c2-abc123def456", "19:abc123@thread.tacv2", "1616990032035")
+	if id4 != "1616990099000||a8274cb0-e3a1-4d5f-b8c2-abc123def456||19:abc123@thread.tacv2||1616990032035" {
 		t.Fatalf("unexpected 4-part id: %q", id4)
 	}
 
@@ -81,7 +81,7 @@ func TestTeamsResultIDRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse failed: %v", err)
 	}
-	if messageID != "reply-456" || teamID != "team-abc" || channelID != "channel-def" || replyToID != "msg-123" {
+	if messageID != "1616990099000" || teamID != "a8274cb0-e3a1-4d5f-b8c2-abc123def456" || channelID != "19:abc123@thread.tacv2" || replyToID != "1616990032035" {
 		t.Fatalf("unexpected parse: msg=%q team=%q channel=%q reply=%q", messageID, teamID, channelID, replyToID)
 	}
 }
@@ -121,7 +121,7 @@ func TestTeamsProviderReadResult_ChannelMessage(t *testing.T) {
 		Credentials: &types.IntegrationCredentials{AccessToken: "test-token"},
 	}
 
-	content, err := p.ReadResult(context.Background(), pctx, messageID+":"+teamID+":"+channelID)
+	content, err := p.ReadResult(context.Background(), pctx, buildTeamsResultID(messageID, teamID, channelID, ""))
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -179,7 +179,7 @@ func TestTeamsProviderReadResult_ThreadReply(t *testing.T) {
 		Credentials: &types.IntegrationCredentials{AccessToken: "test-token"},
 	}
 
-	content, err := p.ReadResult(context.Background(), pctx, messageID+":"+teamID+":"+channelID)
+	content, err := p.ReadResult(context.Background(), pctx, buildTeamsResultID(messageID, teamID, channelID, ""))
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -286,6 +286,21 @@ func TestTeamsProviderParseChannelQuery(t *testing.T) {
 	_, _, ok = parseTeamsChannelQuery("in:Engineering")
 	if ok {
 		t.Fatal("expected ok=false for team-only query")
+	}
+
+	// Quoted value with spaces
+	team, channel, ok = parseTeamsChannelQuery(`in:"Engineering Team/General Discussion"`)
+	if !ok {
+		t.Fatal("expected ok=true for quoted value with spaces")
+	}
+	if team != "Engineering Team" || channel != "General Discussion" {
+		t.Fatalf("expected Engineering Team/General Discussion, got %s/%s", team, channel)
+	}
+
+	// Quoted value with trailing text should fail
+	_, _, ok = parseTeamsChannelQuery(`in:"Engineering Team/General Discussion" hello`)
+	if ok {
+		t.Fatal("expected ok=false for quoted value with trailing text")
 	}
 }
 

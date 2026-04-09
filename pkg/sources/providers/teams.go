@@ -346,15 +346,15 @@ func (t *TeamsProvider) FormatFilename(format string, metadata map[string]string
 // ============================================================================
 
 func buildTeamsResultID(messageID, teamID, channelID, replyToID string) string {
-	resultID := messageID + ":" + teamID + ":" + channelID
+	resultID := messageID + "||" + teamID + "||" + channelID
 	if replyToID != "" {
-		return resultID + ":" + replyToID
+		return resultID + "||" + replyToID
 	}
 	return resultID
 }
 
 func parseTeamsResultID(resultID string) (messageID, teamID, channelID, replyToID string, err error) {
-	parts := strings.SplitN(resultID, ":", 4)
+	parts := strings.SplitN(resultID, "||", 4)
 	if len(parts) < 3 {
 		return "", "", "", "", fmt.Errorf("invalid result ID format: expected at least 3 parts")
 	}
@@ -691,30 +691,59 @@ func (t *TeamsProvider) graphRequestURL(ctx context.Context, token, method, reqU
 // ============================================================================
 
 // parseTeamsChannelQuery detects if a query is a pure channel query like "in:TeamName/ChannelName"
+// Handles quoted values for names with spaces, e.g. in:"Engineering Team/General Discussion"
+// Returns false if the query contains any additional text terms (not a pure channel query).
 func parseTeamsChannelQuery(query string) (teamName, channelName string, ok bool) {
-	tokens := strings.Fields(strings.TrimSpace(query))
-	if len(tokens) == 0 {
+	query = strings.TrimSpace(query)
+	if query == "" {
 		return "", "", false
 	}
-	for _, token := range tokens {
-		lower := strings.ToLower(token)
-		if strings.HasPrefix(lower, "in:") {
-			value := token[len("in:"):]
-			value = strings.TrimPrefix(value, "#")
-			parts := strings.SplitN(value, "/", 2)
-			if len(parts) == 2 {
-				teamName = parts[0]
-				channelName = parts[1]
-			}
-		} else {
-			// Unrecognized token is a text search term — fall back to search
+
+	lower := strings.ToLower(query)
+	idx := strings.Index(lower, "in:")
+	if idx == -1 {
+		return "", "", false
+	}
+
+	// Anything before "in:" is an extra term — not a pure channel query
+	if strings.TrimSpace(query[:idx]) != "" {
+		return "", "", false
+	}
+
+	rest := query[idx+len("in:"):]
+
+	var value string
+	var consumed int
+	// Handle quoted value: in:"Team Name/Channel Name"
+	if strings.HasPrefix(rest, `"`) {
+		end := strings.Index(rest[1:], `"`)
+		if end == -1 {
 			return "", "", false
 		}
+		value = rest[1 : end+1]
+		consumed = end + 2 // opening quote + content + closing quote
+	} else {
+		// Unquoted: take until next space
+		if spaceIdx := strings.IndexByte(rest, ' '); spaceIdx != -1 {
+			value = rest[:spaceIdx]
+			consumed = spaceIdx
+		} else {
+			value = rest
+			consumed = len(rest)
+		}
 	}
-	if teamName == "" || channelName == "" {
+
+	// Anything after the in: value is an extra term — not a pure channel query
+	if strings.TrimSpace(rest[consumed:]) != "" {
 		return "", "", false
 	}
-	return teamName, channelName, true
+
+	value = strings.TrimPrefix(value, "#")
+	parts := strings.SplitN(value, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
 }
 
 // ============================================================================

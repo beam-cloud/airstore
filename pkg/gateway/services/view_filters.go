@@ -313,9 +313,9 @@ func buildTeamsFilter(raw json.RawMessage, limit int) (string, error) {
 	}
 	var parts []string
 	if f.Team != "" && f.Channel != "" {
-		parts = append(parts, "in:"+f.Team+"/"+f.Channel)
+		parts = append(parts, "in:"+quoteIfNeeded(f.Team+"/"+f.Channel))
 	} else if f.Team != "" {
-		parts = append(parts, "in:"+f.Team)
+		parts = append(parts, "in:"+quoteIfNeeded(f.Team))
 	}
 	if f.From != "" {
 		parts = append(parts, "from:"+f.From)
