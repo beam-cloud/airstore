@@ -1,0 +1,63 @@
+pkg/types/integration.go
+  cdd59b08873c6341 209-220
+pkg/tools/definitions/agentmail.yaml
+  cdd59b08873c6341 1-102
+pkg/gateway/gateway.go
+  cdd59b08873c6341 982-990,1025-1035
+pkg/sources/providers/agentmail.go
+  cdd59b08873c6341 1-594
+pkg/types/source.go
+  cdd59b08873c6341 16
+pkg/tools/clients/agentmail.go
+  cdd59b08873c6341 1-160
+pkg/types/tools.go
+  cdd59b08873c6341 20
+pkg/clients/agentmail.go
+  cdd59b08873c6341 100-122,147-209
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.6",
+  "base_commit_sha": "fc6aeb215530ad0a93a2d0e59111d1c3574a08c6",
+  "prompts": {
+    "6e4e3e362401fa91": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019d6e37-21a7-7450-ab67-ace779e44315",
+        "model": "gpt-5.4"
+      },
+      "human_author": "Cooper",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    },
+    "c98959dd3de0b8bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8ed32444-64af-4312-b790-7e0adfe153ea",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Cooper",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    },
+    "cdd59b08873c6341": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7429d707-6363-4d1b-aa01-a9db1008f480",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Cooper",
+      "messages": [],
+      "total_additions": 976,
+      "total_deletions": 0,
+      "accepted_lines": 976,
+      "overriden_lines": 0
+    }
+  }
+}
