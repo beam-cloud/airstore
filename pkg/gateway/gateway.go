@@ -979,6 +979,15 @@ func (g *Gateway) initSources() {
 	g.sourceRegistry.Register(providers.NewConfluenceProvider())
 	g.sourceRegistry.Register(providers.NewOutlookProvider())
 
+	if g.Config.Channels.AgentMail.APIKey != "" {
+		amClient := clients.NewAgentMailClient(clients.AgentMailConfig{
+			APIKey:  g.Config.Channels.AgentMail.APIKey,
+			BaseURL: g.Config.Channels.AgentMail.BaseURL,
+			Domain:  g.Config.Channels.AgentMail.Domain,
+		})
+		g.sourceRegistry.Register(providers.NewAgentMailProvider(amClient))
+	}
+
 	log.Info().Strs("providers", g.sourceRegistry.List()).Msg("source providers registered")
 }
 
@@ -1013,6 +1022,17 @@ func (g *Gateway) initTools() error {
 	clientRegistry.Register(toolclients.NewNotionClient())
 	clientRegistry.Register(toolclients.NewLinearClient())
 	clientRegistry.Register(toolclients.NewOutlookToolClient())
+
+	if g.Config.Channels.AgentMail.APIKey != "" {
+		amClient := clients.NewAgentMailClient(clients.AgentMailConfig{
+			APIKey:  g.Config.Channels.AgentMail.APIKey,
+			BaseURL: g.Config.Channels.AgentMail.BaseURL,
+			Domain:  g.Config.Channels.AgentMail.Domain,
+		})
+		clientRegistry.Register(toolclients.NewAgentMailToolClient(amClient))
+		log.Debug().Msg("agentmail tool integration enabled")
+	}
+
 	log.Debug().Msg("oauth source integrations registered (connection-based)")
 
 	// View tool (no auth, uses workspace context from bearer token)

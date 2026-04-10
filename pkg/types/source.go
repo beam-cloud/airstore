@@ -13,6 +13,7 @@ const (
 	SourcePostHog    SourceType = "posthog"
 	SourceConfluence SourceType = "confluence"
 	SourceOutlook    SourceType = "outlook"
+	SourceAgentMail  SourceType = "agentmail"
 	SourceWeb        SourceType = "web"
 )
 

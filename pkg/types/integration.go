@@ -206,6 +206,18 @@ var integrations = map[IntegrationName]IntegrationMeta{
 		},
 		OAuthWriteScopeHint: []string{"https://graph.microsoft.com/Mail.ReadWrite"},
 	},
+	AgentMail: {
+		Name:        AgentMail,
+		DisplayName: "AgentMail",
+		Description: "AI-native email for agents",
+		Icon:        "mail",
+		AuthType:    AuthNone,
+		Scope:       ScopeShared,
+		Capabilities: []IntegrationCapability{
+			CapabilitySourceRead,
+			CapabilitySourceWrite,
+		},
+	},
 	Web: {
 		Name:        Web,
 		DisplayName: "Web",
