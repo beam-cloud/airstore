@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -148,7 +149,7 @@ func (c *AgentMailClient) RegisterWebhook(ctx context.Context, url string) error
 func (c *AgentMailClient) ListInboxes(ctx context.Context, limit int, pageToken string) ([]AgentMailInbox, string, error) {
 	q := fmt.Sprintf("/inboxes?limit=%d", limit)
 	if pageToken != "" {
-		q += "&page_token=" + pageToken
+		q += "&page_token=" + url.QueryEscape(pageToken)
 	}
 	var resp agentMailListResponse[AgentMailInbox]
 	if err := c.do(ctx, http.MethodGet, q, nil, &resp); err != nil {
@@ -161,7 +162,7 @@ func (c *AgentMailClient) ListInboxes(ctx context.Context, limit int, pageToken 
 func (c *AgentMailClient) ListMessages(ctx context.Context, inboxID string, limit int, pageToken string) ([]AgentMailMessage, string, error) {
 	q := fmt.Sprintf("/inboxes/%s/messages?limit=%d", inboxID, limit)
 	if pageToken != "" {
-		q += "&page_token=" + pageToken
+		q += "&page_token=" + url.QueryEscape(pageToken)
 	}
 	var resp agentMailListResponse[AgentMailMessage]
 	if err := c.do(ctx, http.MethodGet, q, nil, &resp); err != nil {
@@ -183,7 +184,7 @@ func (c *AgentMailClient) GetMessage(ctx context.Context, inboxID, messageID str
 func (c *AgentMailClient) ListThreads(ctx context.Context, inboxID string, limit int, pageToken string) ([]AgentMailThread, string, error) {
 	q := fmt.Sprintf("/inboxes/%s/threads?limit=%d", inboxID, limit)
 	if pageToken != "" {
-		q += "&page_token=" + pageToken
+		q += "&page_token=" + url.QueryEscape(pageToken)
 	}
 	var resp agentMailListResponse[AgentMailThread]
 	if err := c.do(ctx, http.MethodGet, q, nil, &resp); err != nil {
