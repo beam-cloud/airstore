@@ -102,7 +102,7 @@ type AgentMailMessage struct {
 	MessageID string   `json:"message_id"`
 	InboxID   string   `json:"inbox_id"`
 	ThreadID  string   `json:"thread_id"`
-	From      []string `json:"from_"`
+	From      string   `json:"from"`
 	To        []string `json:"to"`
 	ReplyTo   []string `json:"reply_to"`
 	Subject   string   `json:"subject"`
@@ -128,7 +128,7 @@ type SendMessageParams struct {
 }
 
 func (c *AgentMailClient) SendMessage(ctx context.Context, inboxID string, params SendMessageParams) error {
-	return c.do(ctx, http.MethodPost, "/inboxes/"+inboxID+"/messages", params, nil)
+	return c.do(ctx, http.MethodPost, "/inboxes/"+inboxID+"/messages/send", params, nil)
 }
 
 // RegisterWebhook idempotently registers a webhook for message.received events.

@@ -243,6 +243,7 @@ func (f *RunFactory) CreateAttemptExecutionTask(
 	applyPayloadExecutionMetadata(executionPolicy, payload)
 
 	applyViewRuntimeContext(ctx, f.backend, f.s2, taskEnv, executionPolicy, run, payload)
+	applyAgentMailRuntimeContext(ctx, f.backend, taskEnv, run)
 
 	execTask := &types.RunExecution{
 		WorkspaceId:       run.WorkspaceID,
@@ -567,4 +568,3 @@ func (b *ResumeBarrier) tryReconcileStaleSessionLease(ctx context.Context, works
 	}
 	return ReconcileStaleSessionLease(ctx, b.backend, b.terminalIO, workspaceID, sessionID, owner)
 }
-

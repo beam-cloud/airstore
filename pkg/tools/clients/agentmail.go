@@ -88,10 +88,7 @@ func (a *AgentMailToolClient) listMessages(ctx context.Context, args map[string]
 
 	results := make([]msgSummary, 0, len(msgs))
 	for _, m := range msgs {
-		from := ""
-		if len(m.From) > 0 {
-			from = m.From[0]
-		}
+		from := m.From
 		preview := m.Text
 		if len(preview) > 200 {
 			preview = preview[:200] + "..."

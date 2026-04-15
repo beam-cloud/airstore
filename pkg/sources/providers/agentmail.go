@@ -463,10 +463,7 @@ func (a *AgentMailProvider) getCachedMessages(ctx context.Context, inboxID strin
 
 	msgs := make([]amMessage, 0, len(apiMsgs))
 	for _, m := range apiMsgs {
-		from := ""
-		if len(m.From) > 0 {
-			from = m.From[0]
-		}
+		from := m.From
 		to := ""
 		if len(m.To) > 0 {
 			to = m.To[0]
@@ -537,10 +534,7 @@ func (a *AgentMailProvider) renderThreadMeta(thread *clients.AgentMailThread) []
 func (a *AgentMailProvider) renderThreadMessages(thread *clients.AgentMailThread) []byte {
 	var sb strings.Builder
 	for i, m := range thread.Messages {
-		from := ""
-		if len(m.From) > 0 {
-			from = m.From[0]
-		}
+		from := m.From
 		if i > 0 {
 			sb.WriteString("\n---\n\n")
 		}

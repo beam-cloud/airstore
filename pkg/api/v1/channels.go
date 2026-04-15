@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/mail"
 	"strings"
 
 	"github.com/beam-cloud/airstore/pkg/channels"
@@ -348,6 +349,18 @@ type inboundMessage struct {
 	channelType channels.ChannelType
 }
 
+func newInboundRoutingContext(channelType channels.ChannelType, from, to string) *orchestration.RoutingContext {
+	chStr := string(channelType)
+	routing := &orchestration.RoutingContext{Channel: &chStr}
+	if trimmedTo := strings.TrimSpace(to); trimmedTo != "" {
+		routing.To = &trimmedTo
+	}
+	if trimmedFrom := strings.TrimSpace(from); trimmedFrom != "" {
+		routing.ReplyTo = &trimmedFrom
+	}
+	return routing
+}
+
 // --- AgentMail webhook ---
 
 type agentMailWebhookRequest struct {
@@ -357,7 +370,7 @@ type agentMailWebhookRequest struct {
 }
 
 type agentMailMessageObj struct {
-	From    []string `json:"from_"`
+	From    string   `json:"from"`
 	To      []string `json:"to"`
 	ReplyTo []string `json:"reply_to"`
 	Subject string   `json:"subject"`
@@ -373,6 +386,7 @@ func (g *InboundChannelsGroup) InboundEmail(c echo.Context) error {
 
 	var req agentMailWebhookRequest
 	if err := c.Bind(&req); err != nil {
+		log.Error().Err(err).Str("content_type", c.Request().Header.Get("Content-Type")).Msg("agentmail webhook: bind failed")
 		return ErrorResponse(c, http.StatusBadRequest, "invalid request body")
 	}
 	if req.EventType != "message.received" {
@@ -382,10 +396,8 @@ func (g *InboundChannelsGroup) InboundEmail(c echo.Context) error {
 		return ErrorResponse(c, http.StatusBadRequest, "no recipient address")
 	}
 
-	from := ""
-	if len(req.Message.From) > 0 {
-		from = strings.TrimSpace(req.Message.From[0])
-	}
+	from := extractEmailAddress(req.Message.From)
+	to := extractEmailAddress(req.Message.To[0])
 	subject := strings.TrimSpace(req.Message.Subject)
 	body := strings.TrimSpace(req.Message.Text)
 	if body == "" {
@@ -393,10 +405,20 @@ func (g *InboundChannelsGroup) InboundEmail(c echo.Context) error {
 	}
 
 	msg := inboundMessage{
-		from: from, to: strings.TrimSpace(req.Message.To[0]),
+		from: from, to: to,
 		subject: subject, body: body, channelType: channels.ChannelTypeEmail,
 	}
 	return g.processInbound(c, ec, msg)
+}
+
+// extractEmailAddress parses an RFC 5322 address like "Display Name <user@example.com>"
+// and returns just the email part. Falls back to the trimmed input on parse failure.
+func extractEmailAddress(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if addr, err := mail.ParseAddress(raw); err == nil {
+		return addr.Address
+	}
+	return raw
 }
 
 // --- Twilio webhook ---
@@ -480,11 +502,7 @@ func (g *InboundChannelsGroup) processInbound(c echo.Context, ch channels.Inboun
 	if label == "" {
 		label = fmt.Sprintf("%s from %s", msg.channelType, msg.from)
 	}
-	chStr := string(msg.channelType)
-	routing := &orchestration.RoutingContext{Channel: &chStr}
-	if msg.from != "" {
-		routing.ReplyTo = &msg.from
-	}
+	routing := newInboundRoutingContext(msg.channelType, msg.from, msg.to)
 	taskResult, err := ch.SendToAgent(ctx, workspaceID, agentID, channels.Message{
 		Message: msg.body, Label: &label, Routing: routing,
 	})
@@ -503,7 +521,7 @@ func (g *InboundChannelsGroup) handleProcessedResult(
 	r *inbound.Result, isWorkspaceLevel bool,
 ) error {
 	ctx := c.Request().Context()
-	chStr := string(msg.channelType)
+	routing := newInboundRoutingContext(msg.channelType, msg.from, msg.to)
 
 	streamID := agentID
 	if isWorkspaceLevel {
@@ -527,11 +545,6 @@ func (g *InboundChannelsGroup) handleProcessedResult(
 
 	var createdTasks []map[string]any
 	for _, task := range r.Tasks {
-		routing := &orchestration.RoutingContext{Channel: &chStr}
-		if msg.from != "" {
-			routing.ReplyTo = &msg.from
-		}
-
 		targetAgentID := agentID
 		if isWorkspaceLevel && task.Agent_id != nil && *task.Agent_id != "" {
 			targetAgentID = *task.Agent_id
