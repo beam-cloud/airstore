@@ -352,6 +352,11 @@ func (r *WorkspaceToolResolver) globalToolCapabilityEnabled(ctx context.Context,
 	if !types.SupportsSourceWrite(integration) {
 		return true
 	}
+	// Server-level integrations (AuthNone) don't use per-user connections.
+	// They're enabled as long as the tool client is registered (checked at startup).
+	if !types.RequiresAuth(integration) {
+		return true
+	}
 	if workspaceId == 0 || r.backend == nil {
 		return false
 	}

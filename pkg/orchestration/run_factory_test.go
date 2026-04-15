@@ -40,6 +40,10 @@ func (b *attemptProvisionBackend) BindAttemptExecutionTask(_ context.Context, _,
 	return nil
 }
 
+func (b *attemptProvisionBackend) ListChannelBindings(_ context.Context, _ uint, _ *string) ([]*types.ChannelBinding, error) {
+	return nil, nil
+}
+
 func (b *attemptProvisionBackend) UpdateAgentRunAttemptResult(
 	_ context.Context,
 	_ string,

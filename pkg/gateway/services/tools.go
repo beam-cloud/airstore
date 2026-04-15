@@ -344,6 +344,30 @@ func buildToolCallSummaryAndDetails(toolName string, args []string, cmdSchema *t
 		}
 		details = b.String()
 
+	case "agentmail":
+		switch subCmd {
+		case "send":
+			from, to, subject, body := argAt(positional, 0), argAt(positional, 1), argAt(positional, 2), argAt(positional, 3)
+			summary = fmt.Sprintf("Send email from %s to %s — %s", from, to, subject)
+			var b strings.Builder
+			fmt.Fprintf(&b, "**From:** %s\n**To:** %s\n**Subject:** %s\n\n", from, to, subject)
+			if body != "" {
+				b.WriteString(body)
+			}
+			details = b.String()
+		case "reply":
+			from, messageID, body := argAt(positional, 0), argAt(positional, 1), argAt(positional, 2)
+			summary = fmt.Sprintf("Reply from %s to message %s", from, messageID)
+			var b strings.Builder
+			fmt.Fprintf(&b, "**From:** %s\n**Message ID:** %s\n\n", from, messageID)
+			if body != "" {
+				b.WriteString(body)
+			}
+			details = b.String()
+		default:
+			summary = fmt.Sprintf("agentmail %s", subCmd)
+		}
+
 	case "slack":
 		// positional: channel, text
 		channel, text := argAt(positional, 0), argAt(positional, 1)

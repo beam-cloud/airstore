@@ -1,0 +1,102 @@
+name: agentmail
+description: Read and send emails via AgentMail
+icon: mail
+
+commands:
+  list-messages:
+    description: List recent messages in an AgentMail inbox
+    params:
+      - name: inbox_id
+        type: string
+        required: true
+        position: 0
+        description: "Inbox email address"
+
+      - name: limit
+        type: int
+        default: 20
+        short: -n
+        flag: --limit
+        description: "Maximum number of results (1-50)"
+
+  get-message:
+    description: Read a single email message by message ID
+    params:
+      - name: inbox_id
+        type: string
+        required: true
+        position: 0
+        description: "Inbox email address"
+
+      - name: message_id
+        type: string
+        required: true
+        position: 1
+        description: "Message ID"
+
+  get-thread:
+    description: Read a full email thread by thread ID
+    params:
+      - name: inbox_id
+        type: string
+        required: true
+        position: 0
+        description: "Inbox email address"
+
+      - name: thread_id
+        type: string
+        required: true
+        position: 1
+        description: "Thread ID"
+
+  send:
+    write: true
+    output_type: email
+    description: Send an email from an AgentMail inbox
+    params:
+      - name: inbox_id
+        type: string
+        required: true
+        position: 0
+        description: "Inbox email address to send from"
+
+      - name: to
+        type: string
+        required: true
+        position: 1
+        description: "Recipient email address"
+
+      - name: subject
+        type: string
+        required: true
+        position: 2
+        description: "Email subject"
+
+      - name: body
+        type: string
+        required: true
+        position: 3
+        description: "Email body text"
+
+  reply:
+    write: true
+    output_type: email
+    description: Reply to an existing email message
+    params:
+      - name: inbox_id
+        type: string
+        required: true
+        position: 0
+        description: "Inbox email address"
+
+      - name: message_id
+        type: string
+        required: true
+        position: 1
+        description: "Message ID to reply to"
+
+      - name: body
+        type: string
+        required: true
+        position: 2
+        description: "Reply body text"

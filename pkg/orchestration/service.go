@@ -1801,6 +1801,7 @@ func (s *AgentService) createAttemptExecutionTask(
 	}
 	applyPayloadExecutionMetadata(executionPolicy, payload)
 	applyViewRuntimeContext(ctx, s.backend, s.s2, taskEnv, executionPolicy, run, payload)
+	applyAgentMailRuntimeContext(ctx, s.backend, taskEnv, run)
 
 	execTask := &types.RunExecution{
 		WorkspaceId:       run.WorkspaceID,

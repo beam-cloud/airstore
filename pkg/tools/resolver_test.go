@@ -93,6 +93,33 @@ func TestWorkspaceToolResolver_GlobalToolGatedByCapability(t *testing.T) {
 	}
 }
 
+func TestWorkspaceToolResolver_AuthNoneToolEnabled(t *testing.T) {
+	registry := NewRegistry()
+	registry.Register(&noopProvider{name: "agentmail"})
+
+	// No connections — AgentMail uses server-level auth, not per-user OAuth.
+	backend := &resolverTestBackend{
+		settings: types.NewWorkspaceToolSettings(1),
+	}
+	resolver := NewWorkspaceToolResolver(registry, backend)
+
+	list, err := resolver.List(resolverAuthCtx())
+	if err != nil {
+		t.Fatalf("resolver list: %v", err)
+	}
+	if len(list) != 1 || !list[0].Enabled {
+		t.Fatalf("expected agentmail tool to be enabled (AuthNone), got %#v", list)
+	}
+
+	provider, err := resolver.Get(resolverAuthCtx(), "agentmail")
+	if err != nil {
+		t.Fatalf("resolver get: %v", err)
+	}
+	if provider == nil {
+		t.Fatalf("expected provider for agentmail — AuthNone tools should not require a connection")
+	}
+}
+
 func TestWorkspaceToolResolver_GlobalToolDisabledWithoutCapability(t *testing.T) {
 	registry := NewRegistry()
 	registry.Register(&noopProvider{name: "github"})

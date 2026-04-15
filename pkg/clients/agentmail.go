@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -97,6 +98,29 @@ func (c *AgentMailClient) DeleteInbox(ctx context.Context, inboxID string) error
 	return c.do(ctx, http.MethodDelete, "/inboxes/"+inboxID, nil, nil)
 }
 
+type AgentMailMessage struct {
+	MessageID string   `json:"message_id"`
+	InboxID   string   `json:"inbox_id"`
+	ThreadID  string   `json:"thread_id"`
+	From      string   `json:"from"`
+	To        []string `json:"to"`
+	ReplyTo   []string `json:"reply_to"`
+	Subject   string   `json:"subject"`
+	Text      string   `json:"text"`
+	HTML      string   `json:"html"`
+	CreatedAt string   `json:"created_at"`
+}
+
+type AgentMailThread struct {
+	ThreadID string             `json:"thread_id"`
+	Messages []AgentMailMessage `json:"messages"`
+}
+
+type agentMailListResponse[T any] struct {
+	Items     []T    `json:"items"`
+	NextToken string `json:"next_token"`
+}
+
 type SendMessageParams struct {
 	To      string `json:"to"`
 	Subject string `json:"subject"`
@@ -104,7 +128,7 @@ type SendMessageParams struct {
 }
 
 func (c *AgentMailClient) SendMessage(ctx context.Context, inboxID string, params SendMessageParams) error {
-	return c.do(ctx, http.MethodPost, "/inboxes/"+inboxID+"/messages", params, nil)
+	return c.do(ctx, http.MethodPost, "/inboxes/"+inboxID+"/messages/send", params, nil)
 }
 
 // RegisterWebhook idempotently registers a webhook for message.received events.
@@ -119,6 +143,69 @@ func (c *AgentMailClient) RegisterWebhook(ctx context.Context, url string) error
 		return nil // idempotent
 	}
 	return err
+}
+
+// ListInboxes returns all inboxes for the authenticated account.
+func (c *AgentMailClient) ListInboxes(ctx context.Context, limit int, pageToken string) ([]AgentMailInbox, string, error) {
+	q := fmt.Sprintf("/inboxes?limit=%d", limit)
+	if pageToken != "" {
+		q += "&page_token=" + url.QueryEscape(pageToken)
+	}
+	var resp agentMailListResponse[AgentMailInbox]
+	if err := c.do(ctx, http.MethodGet, q, nil, &resp); err != nil {
+		return nil, "", fmt.Errorf("list inboxes: %w", err)
+	}
+	return resp.Items, resp.NextToken, nil
+}
+
+// ListMessages returns messages in an inbox, newest first.
+func (c *AgentMailClient) ListMessages(ctx context.Context, inboxID string, limit int, pageToken string) ([]AgentMailMessage, string, error) {
+	q := fmt.Sprintf("/inboxes/%s/messages?limit=%d", inboxID, limit)
+	if pageToken != "" {
+		q += "&page_token=" + url.QueryEscape(pageToken)
+	}
+	var resp agentMailListResponse[AgentMailMessage]
+	if err := c.do(ctx, http.MethodGet, q, nil, &resp); err != nil {
+		return nil, "", fmt.Errorf("list messages: %w", err)
+	}
+	return resp.Items, resp.NextToken, nil
+}
+
+// GetMessage returns a single message by ID.
+func (c *AgentMailClient) GetMessage(ctx context.Context, inboxID, messageID string) (*AgentMailMessage, error) {
+	var msg AgentMailMessage
+	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/inboxes/%s/messages/%s", inboxID, messageID), nil, &msg); err != nil {
+		return nil, fmt.Errorf("get message: %w", err)
+	}
+	return &msg, nil
+}
+
+// ListThreads returns threads in an inbox.
+func (c *AgentMailClient) ListThreads(ctx context.Context, inboxID string, limit int, pageToken string) ([]AgentMailThread, string, error) {
+	q := fmt.Sprintf("/inboxes/%s/threads?limit=%d", inboxID, limit)
+	if pageToken != "" {
+		q += "&page_token=" + url.QueryEscape(pageToken)
+	}
+	var resp agentMailListResponse[AgentMailThread]
+	if err := c.do(ctx, http.MethodGet, q, nil, &resp); err != nil {
+		return nil, "", fmt.Errorf("list threads: %w", err)
+	}
+	return resp.Items, resp.NextToken, nil
+}
+
+// GetThread returns a thread with all its messages.
+func (c *AgentMailClient) GetThread(ctx context.Context, inboxID, threadID string) (*AgentMailThread, error) {
+	var thread AgentMailThread
+	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/inboxes/%s/threads/%s", inboxID, threadID), nil, &thread); err != nil {
+		return nil, fmt.Errorf("get thread: %w", err)
+	}
+	return &thread, nil
+}
+
+// ReplyToMessage sends a reply to a specific message.
+func (c *AgentMailClient) ReplyToMessage(ctx context.Context, inboxID, messageID, text string) error {
+	body := map[string]string{"text": text}
+	return c.do(ctx, http.MethodPost, fmt.Sprintf("/inboxes/%s/messages/%s/reply", inboxID, messageID), body, nil)
 }
 
 func (c *AgentMailClient) do(ctx context.Context, method, path string, body any, dest any) error {
